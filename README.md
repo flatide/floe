@@ -174,11 +174,21 @@ pip download klayout numpy -d wheels/ \
     --platform manylinux2014_x86_64 --only-binary=:all: \
     --python-version 311        # 예: 타겟이 python3.11
 
-# 2) 폐쇄망 호스트에서
-pip install --no-index --find-links wheels/ klayout numpy
-# flatoas/ 디렉토리 복사 후: python3 -m flatoas ...
-# GUI 확인: python3 -c 'import gi; gi.require_version("Gtk", "3.0")'
+# 2) 폐쇄망 호스트에서 - 반드시 시스템 PyGObject가 보이는 파이썬으로
+python3 -c 'import gi; gi.require_version("Gtk", "3.0")'   # GUI 사전 확인
+python3 -m venv --system-site-packages .venv               # gi가 보이게
+.venv/bin/pip install --no-index --find-links wheels/ klayout numpy
+# flatoas/ 디렉토리 복사 후: .venv/bin/python -m flatoas ...
 ```
+
+**주의 — PyGObject/pycairo를 pip으로 설치하지 말 것.** pip은 meson 소스
+빌드를 시도하고 폐쇄망에는 pkg-config/cairo-devel이 없어
+`Dependency lookup for cairo ... failed` 로 실패한다. PyGObject는 OS RPM
+(`python3-gobject`, GNOME 호스트 기본 탑재)을 쓰고, venv는
+`--system-site-packages` 로 만들어 그것을 보이게 하는 것이 정답이다
+(pycairo는 아예 불필요 - flatoas는 cairo를 쓰지 않는다). venv를 SCL/conda
+등 다른 파이썬으로 만들면 시스템 gi와 맞지 않으니 위 사전 확인이 성공한
+바로 그 python3를 사용할 것.
 
 - CLI 전용(`index/info/render/clip`)이면 GTK 없이도 동작한다.
 - 원격에서는 Exceed TurboX/XQuartz 등 X 서버로 `fo view` 실행 (flateyes와
