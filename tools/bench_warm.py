@@ -20,7 +20,7 @@ PY = sys.executable
 
 def run(args):
     t0 = time.perf_counter()
-    r = subprocess.run([PY, "-m", "oastray"] + args, cwd=ROOT,
+    r = subprocess.run([PY, "-m", "floe"] + args, cwd=ROOT,
                        capture_output=True, text=True)
     dt = time.perf_counter() - t0
     if r.returncode != 0:

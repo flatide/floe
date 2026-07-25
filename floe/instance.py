@@ -17,7 +17,7 @@ import socket
 import sys
 import tempfile
 
-APP = "oastray"
+APP = "floe"
 
 
 def display_key():

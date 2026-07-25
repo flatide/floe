@@ -313,7 +313,7 @@ def main():
     ly = db.Layout()
     ly.dbu = DBU
     L = make_layers(ly)
-    top = ly.create_cell("OASTRAY_TESTCHIP")
+    top = ly.create_cell("FLOE_TESTCHIP")
     rng = np.random.default_rng(args.seed)
 
     top.shapes(L["BOUNDARY"]).insert(db.Box(0, 0, die, die))
@@ -398,7 +398,7 @@ def main():
         "die_bbox_nm": [0, 0, die, die],
         "grid": grid,
         "block_size_nm": block,
-        "top_cell": "OASTRAY_TESTCHIP",
+        "top_cell": "FLOE_TESTCHIP",
         "layers": [{"layer": l, "datatype": d, "name": n} for l, d, n in LAYERS],
         "layer_stored_shape_counts": layer_counts,
         "blocks": manifest_blocks,

@@ -281,7 +281,7 @@ def load_region(cache, x0, y0, x1, y1, log=None, max_tiles=None,
         lo.set_layer_map(lm, False)
     ly = db.Layout()
     ly.dbu = cache.meta["dbu"]
-    top = ly.create_cell("OT_REGION")
+    top = ly.create_cell("FLOE_REGION")
     n = 0
     t0 = time.perf_counter()
     for r, c in tiles:
