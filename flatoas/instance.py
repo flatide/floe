@@ -17,7 +17,7 @@ import socket
 import sys
 import tempfile
 
-APP = "zenoas"
+APP = "flatoas"
 
 
 def display_key():

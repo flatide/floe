@@ -68,7 +68,7 @@ def _svc_clip(cache, job, res):
         x0, y0, x1, y1 = job["bbox"]
         ly, top, _ = cache_mod.load_region(cache, x0, y0, x1, y1)
         ci = ly.clip(top.cell_index(), db.Box(x0, y0, x1, y1))
-        ly.cell(ci).name = "ZN_CLIP"
+        ly.cell(ci).name = "FO_CLIP"
         opt = cache_mod.save_opts()
         opt.add_cell(ci)
         if job.get("layers"):
@@ -225,7 +225,7 @@ def _render_service(src, req, res):
     except Exception as e:
         res.put({"kind": "error", "msg": f"render service init failed: {e}"})
         return
-    tmp = os.path.join(tempfile.gettempdir(), f"zn_gui_{os.getpid()}.png")
+    tmp = os.path.join(tempfile.gettempdir(), f"fo_gui_{os.getpid()}.png")
     try:
         while True:
             job = req.get()
@@ -340,7 +340,7 @@ class Viewer:
         side = tk.Frame(root, bg=PANEL_BG, width=210)
         side.pack(side="left", fill="y")
         side.pack_propagate(False)
-        tk.Label(side, text="zenoas", fg=ACCENT, bg=PANEL_BG,
+        tk.Label(side, text="flatoas", fg=ACCENT, bg=PANEL_BG,
                  font=("TkDefaultFont", 13, "bold")).pack(anchor="w",
                                                           padx=10, pady=(8, 0))
         self._src_label = tk.Label(side, text="", fg="#777777", bg=PANEL_BG)
@@ -453,7 +453,7 @@ class Viewer:
         self._sel_text = ""
         self._pick_px = None
         src = self.meta["src"]
-        self.root.title(f"zenoas - {os.path.basename(src['path'])}")
+        self.root.title(f"flatoas - {os.path.basename(src['path'])}")
         self._src_label.config(
             text=f"{src['size'] / 1e9:.2f} GB · grid "
                  f"{self.meta['grid']['nx']}x{self.meta['grid']['ny']}")
@@ -489,7 +489,7 @@ class Viewer:
             return None  # same file: just present the window
         c = cache_mod.Cache(path)
         if not c.exists():
-            return f"ERR no index for {path}; run: zenoas index {path}"
+            return f"ERR no index for {path}; run: flatoas index {path}"
         c.load()
         self._apply_cache(c)
         return None
@@ -1194,7 +1194,7 @@ class Viewer:
         um = [round(v * self.dbu, 1) for v in bbox]
         out = filedialog.asksaveasfilename(
             defaultextension=".oas",
-            initialfile=f"zn_clip_{um[0]}_{um[1]}_{um[2]}_{um[3]}um.oas",
+            initialfile=f"fo_clip_{um[0]}_{um[1]}_{um[2]}_{um[3]}um.oas",
             filetypes=[("OASIS", "*.oas"), ("all", "*")])
         if not out:
             return
@@ -1225,7 +1225,7 @@ def run_viewer(cache, server_sock=None):
     try:
         root = tk.Tk()
     except tk.TclError as exc:
-        sys.stderr.write("zenoas: cannot open display %s "
+        sys.stderr.write("flatoas: cannot open display %s "
                          "(X session not reachable: %s)\n"
                          % (os.environ.get("DISPLAY", ""), exc))
         raise SystemExit(3)

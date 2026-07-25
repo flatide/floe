@@ -1,4 +1,4 @@
-"""zenoas command line interface."""
+"""flatoas command line interface."""
 
 import argparse
 import functools
@@ -11,7 +11,7 @@ print = functools.partial(print, flush=True)
 
 from . import __version__
 
-# NOTE: klayout / zenoas.cache are imported inside the commands that need
+# NOTE: klayout / flatoas.cache are imported inside the commands that need
 # them - `view` must be able to forward to a running instance without
 # paying the klayout import cost (see instance.py)
 
@@ -34,13 +34,13 @@ def open_cache(src, auto_index, args):
     c = cache_mod.Cache(src)
     if not c.exists():
         if not auto_index:
-            raise SystemExit(f"no cache for {src}; run: zenoas index {src}")
-        print(f"[zn] no cache yet - building index first (one-time)...")
+            raise SystemExit(f"no cache for {src}; run: flatoas index {src}")
+        print(f"[fo] no cache yet - building index first (one-time)...")
         cache_mod.build_index(src)
     c.load()
     if c.is_stale():
-        print("[zn][warn] source file changed since indexing - "
-              "cache may be outdated; run 'zenoas index --force' to rebuild",
+        print("[fo][warn] source file changed since indexing - "
+              "cache may be outdated; run 'flatoas index --force' to rebuild",
               file=sys.stderr)
     return c
 
@@ -51,7 +51,7 @@ def cmd_index(args):
     if c.exists() and not args.force:
         c.load()
         if not c.is_stale():
-            print(f"[zn] cache up to date: {c.dir} (use --force to rebuild)")
+            print(f"[fo] cache up to date: {c.dir} (use --force to rebuild)")
             return
     cache_mod.build_index(args.src, tile_bytes=args.tile_mb * 1e6,
                           overview_px=args.overview_px,
@@ -100,7 +100,7 @@ def cmd_render(args):
     depth = None if args.depth is None or args.depth >= 999 else args.depth
     r.render_png(args.out, x0, y0, x1, y1, w, h, visible=layers,
                  depth=depth)
-    print(f"[zn] rendered {args.out} ({w}x{h}) "
+    print(f"[fo] rendered {args.out} ({w}x{h}) "
           f"in {time.perf_counter() - t0:.2f}s ({ntiles} tiles)")
 
 
@@ -111,7 +111,7 @@ def cmd_clip(args):
     if args.exact:
         # slow path: parse the original file for boundary-exact geometry
         src_ly = db.Layout()
-        print("[zn] --exact: full read of source (slow)...")
+        print("[fo] --exact: full read of source (slow)...")
         src_ly.read(args.src)
         top = cache_mod.pick_top_cell(src_ly, print)
         dbu = src_ly.dbu
@@ -150,15 +150,15 @@ def cmd_clip(args):
                 opt.add_layer(li, db.LayerInfo())
     ly.write(args.out, opt)
     sz = os.path.getsize(args.out)
-    print(f"[zn] clip saved: {args.out} ({sz / 1e6:.2f} MB) "
+    print(f"[fo] clip saved: {args.out} ({sz / 1e6:.2f} MB) "
           f"in {time.perf_counter() - t0:.2f}s")
 
 
 def _cache_ready(src):
     """Lightweight cache check without importing klayout (kept in sync
-    with cache.Cache: <src>.zncache/meta.json + size/mtime fingerprint)."""
+    with cache.Cache: <src>.focache/meta.json + size/mtime fingerprint)."""
     try:
-        with open(src + ".zncache/meta.json") as f:
+        with open(src + ".focache/meta.json") as f:
             meta = json.load(f)
         st = os.stat(src)
         return (st.st_size == meta["src"]["size"]
@@ -170,14 +170,14 @@ def _cache_ready(src):
 def cmd_view(args):
     src = os.path.abspath(args.src)
     if not os.path.isfile(src):
-        raise SystemExit(f"zenoas: no such file: {src}")
+        raise SystemExit(f"flatoas: no such file: {src}")
 
     server = None
     if not args.multi:  # flateyes-style single instance per (uid, DISPLAY)
         from . import instance
         display = instance.display_key()
         if display is None:
-            print("zenoas: DISPLAY is not set", file=sys.stderr)
+            print("flatoas: DISPLAY is not set", file=sys.stderr)
             raise SystemExit(1)
         # the receiving instance must be able to load the cache, and index
         # progress belongs in this terminal, not inside the GUI process
@@ -193,7 +193,7 @@ def cmd_view(args):
                 break
             time.sleep(0.2)
         if server is None:
-            print("zenoas: could not create or reach the instance socket",
+            print("flatoas: could not create or reach the instance socket",
                   file=sys.stderr)
             raise SystemExit(1)
         if not addr.startswith("\0"):
@@ -207,7 +207,7 @@ def cmd_view(args):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(
-        prog="zenoas",
+        prog="flatoas",
         description="fast viewer/clipper for large OASIS files "
                     "(spatial tile cache)")
     ap.add_argument("--version", action="version", version=__version__)
@@ -246,7 +246,7 @@ def main(argv=None):
     p.add_argument("--bbox", required=True, help="X0,Y0,X1,Y1 in um")
     p.add_argument("--layers", default=None)
     p.add_argument("--out", default="clip.oas")
-    p.add_argument("--cell-name", default="ZN_CLIP")
+    p.add_argument("--cell-name", default="FO_CLIP")
     p.add_argument("--exact", action="store_true",
                    help="clip from the original file (slow, boundary-exact)")
     p.add_argument("--max-tiles", type=int, default=256)
