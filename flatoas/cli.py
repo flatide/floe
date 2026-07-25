@@ -201,7 +201,17 @@ def cmd_view(args):
             atexit.register(lambda: os.path.exists(addr) and os.unlink(addr))
 
     c = open_cache(src, auto_index=args.auto_index, args=args)
-    from .gui import run_viewer
+    try:
+        from .gui import run_viewer
+    except ImportError as exc:
+        if "tkinter" not in str(exc):
+            raise
+        print("flatoas: this Python has no tkinter (needed for the GUI).\n"
+              "  RHEL/CentOS/Rocky : sudo dnf install python3-tkinter\n"
+              "  Debian/Ubuntu     : sudo apt install python3-tk\n"
+              "CLI commands (index/info/render/clip) work without it.",
+              file=sys.stderr)
+        raise SystemExit(1)
     run_viewer(c, server)
 
 
