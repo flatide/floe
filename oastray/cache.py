@@ -1,6 +1,6 @@
 """Spatial tile cache for large OASIS files.
 
-`build_index` scans the source file once and produces `<src>.otcache/`:
+`build_index` scans the source file once and produces `<src>.ice/`:
 
     meta.json           source fingerprint, grid geometry, layer table, stats
     tiles/t_<r>_<c>.oas one OASIS per grid tile (all layers, absolute coords,
@@ -29,7 +29,7 @@ GRID_MIN, GRID_MAX = 4, 96
 
 
 def cache_dir_for(src):
-    return os.path.abspath(src) + ".otcache"
+    return os.path.abspath(src) + ".ice"
 
 
 def layer_color(i):
@@ -58,7 +58,7 @@ def pick_top_cell(ly, log=None):
 
 
 class Cache:
-    """Read-side accessor for a built .otcache directory."""
+    """Read-side accessor for a built .ice directory."""
 
     def __init__(self, src):
         self.src = os.path.abspath(src)

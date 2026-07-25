@@ -156,9 +156,9 @@ def cmd_clip(args):
 
 def _cache_ready(src):
     """Lightweight cache check without importing klayout (kept in sync
-    with cache.Cache: <src>.otcache/meta.json + size/mtime fingerprint)."""
+    with cache.Cache: <src>.ice/meta.json + size/mtime fingerprint)."""
     try:
-        with open(src + ".otcache/meta.json") as f:
+        with open(src + ".ice/meta.json") as f:
             meta = json.load(f)
         st = os.stat(src)
         return (st.st_size == meta["src"]["size"]

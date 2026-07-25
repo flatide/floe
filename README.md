@@ -60,7 +60,7 @@ oastray는 **최초 1회 인덱싱**으로 이 비용을 지불하고, 이후 �
 ```sh
 alias ot=".venv/bin/python -m oastray"
 
-ot index data/testchip_1g5.oas          # 1회: <src>.otcache/ 생성
+ot index data/testchip_1g5.oas          # 1회: <src>.ice/ 생성
 ot info  data/testchip_1g5.oas          # 레이어/그리드/통계 요약
 ot view  data/testchip_1g5.oas          # 네이티브 데스크톱 뷰어 (기본)
 ot render data/testchip_1g5.oas --bbox 5000,5000,5200,5200 \
@@ -195,10 +195,10 @@ python3 -m venv --system-site-packages .venv               # gi가 보이게
   동일한 접속 형태). macOS 개발 환경은 brew `pygobject3 gtk+3`로 동일 코드
   실행.
 
-### .otcache 구조와 설계 노트
+### .ice 구조와 설계 노트
 
 ```
-<src>.otcache/
+<src>.ice/
   meta.json      원본 지문(size/mtime), 그리드, 레이어 테이블(+색), 통계
   tiles/t_r_c.oas  타일별 OASIS (절대좌표 유지, 전 레이어, 경계에서 절단)
   overview/*.png   레이어별 full-die 렌더 (줌아웃용)
@@ -218,7 +218,7 @@ python3 -m venv --system-site-packages .venv               # gi가 보이게
 ## 로드맵
 
 1. ✅ 테스트용 대용량 OASIS 생성기 (`tools/gen_test_oasis.py`)
-2. ✅ 공간 인덱스(.otcache) + CLI (index/info/render/clip)
+2. ✅ 공간 인덱스(.ice) + CLI (index/info/render/clip)
 3. ✅ 네이티브 뷰어 (view): 영역 줌/팬/레이어 토글/depth/clip 저장
 4. Calibre DRC RDB 파서/조회 (KLayout `rdb` 모듈) + 에러 영역 자동 clip/뷰
 5. 대용량 스케일링: 인덱싱 시 레이어 그룹별 다중 패스(RAM 상한), 타일 병렬 빌드

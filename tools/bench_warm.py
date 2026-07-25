@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Warm-query benchmark: otcache-based render/clip vs cold full-load baseline.
+"""Warm-query benchmark: ice-cache-based render/clip vs cold full-load baseline.
 
 Uses the generator manifest as ground truth (markers must survive the
 cache -> clip round trip).
