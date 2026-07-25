@@ -6,7 +6,7 @@ running window over a unix socket and exit immediately. Different DISPLAY
 values get independent windows, so many user displays on one Linux host
 coexist. `--multi` opts out.
 
-stdlib only - the forward path must never import tkinter or klayout, so
+stdlib only - the forward path must never import GTK or klayout, so
 repeat invocations stay fast.
 """
 

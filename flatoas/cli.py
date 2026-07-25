@@ -201,17 +201,8 @@ def cmd_view(args):
             atexit.register(lambda: os.path.exists(addr) and os.unlink(addr))
 
     c = open_cache(src, auto_index=args.auto_index, args=args)
-    try:
-        from .gui import run_viewer
-    except ImportError as exc:
-        if "tkinter" not in str(exc):
-            raise
-        print("flatoas: this Python has no tkinter (needed for the GUI).\n"
-              "  RHEL/CentOS/Rocky : sudo dnf install python3-tkinter\n"
-              "  Debian/Ubuntu     : sudo apt install python3-tk\n"
-              "CLI commands (index/info/render/clip) work without it.",
-              file=sys.stderr)
-        raise SystemExit(1)
+    # PyGObject/GTK3 problems are reported inside import_gtk (exit 3)
+    from .gui import run_viewer
     run_viewer(c, server)
 
 
@@ -263,7 +254,7 @@ def main(argv=None):
     p.add_argument("--auto-index", action="store_true", default=True)
     p.set_defaults(fn=cmd_clip)
 
-    p = sub.add_parser("view", help="native desktop viewer (tkinter); "
+    p = sub.add_parser("view", help="native desktop viewer (GTK3); "
                                     "one instance per (uid, DISPLAY) - "
                                     "later calls forward the path to it")
     p.add_argument("src")

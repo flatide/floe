@@ -108,7 +108,7 @@ flatoas는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델�
 
 - **(uid, DISPLAY)당 뷰어 창 1개.** 첫 실행이 창을 열고, 같은 DISPLAY에서의
   이후 `fo view 다른파일.oas` 는 실행 중인 창에 경로를 넘기고 즉시 종료한다
-  (exit 0, ~0.1초 — forward 경로는 klayout/tkinter를 import하지 않음).
+  (exit 0, ~0.1초 — forward 경로는 klayout/GTK를 import하지 않음).
   기존 창이 해당 파일로 전환되고 앞으로 올라온다.
 - **DISPLAY 값이 다르면 독립 창** — 한 리눅스 호스트에서
   `DISPLAY=:1 fo view a.oas` 처럼 여러 사용자 DISPLAY로 각각 실행 가능.
@@ -121,31 +121,38 @@ flatoas는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델�
 - 전달 대상 파일의 인덱스가 없으면 **forward 전에 이 터미널에서** 먼저
   인덱싱한다 (GUI 프로세스가 몇 분씩 멈추는 것 방지).
 
-### 네이티브 뷰어 (`fo view`)와 툴킷 선택
+### 네이티브 뷰어 (`fo view`) — GTK3/PyGObject (flateyes와 동일 제약)
 
-GUI는 **tkinter** 기반이다. 선택 이유 (GTK 대비):
+GUI는 **GTK3/PyGObject** 셸이다. flateyes와 같은 폐쇄망 호스트
+(RHEL 계열 GNOME, 아무것도 설치 불가, PyGObject/GTK3만 스톡)를 그대로
+따른다:
 
-- CPython 표준 라이브러리라 폐쇄망에서 OS 패키지 하나로 끝
-  (RHEL: `python3-tkinter`, Debian: `python3-tk`) — PyGObject/GTK 버전 매칭,
-  gobject-introspection 의존성 사슬이 없음.
-- 무거운 geometry 렌더링은 어차피 klayout C++ 엔진(`klayout.lay` 헤드리스)이
-  **별도 렌더 프로세스**에서 PNG 프레임으로 수행. GUI는 비트맵 표시 + 마우스
-  이벤트만 담당하므로 툴킷 성능이 병목이 아님 (UI 응답성은 레이아웃 크기와 무관).
-  스레드가 아닌 프로세스인 이유: klayout 렌더 루프가 GIL을 잡고 있어 스레드로는
-  긴 렌더 동안 메인 루프가 얼어붙는다 (spawn 방식이므로 `__main__` 가드 필수).
-- 렌더 요청(줌/팬/레이어/depth 변경)이 제출되면 하단 상태바 우측에
-  "rendering…" 인디케이터가 즉시 표시되고, 1.5초를 넘기면 경과 초가 붙는다.
-  렌더 중에도 팬/줌 가능하며, 밀린 요청은 최신 것만 처리된다.
-- 뷰어 코어(`viewport.py`의 타일 모자이크, `render.py`)는 툴킷 독립적 —
-  GTK/Qt 셸이 필요해지면 `gui.py`(~400줄)만 교체하면 된다.
-- 키: `f` fit, `+`/`-`(`=`) 줌. 단축키 외 조작은 마우스.
+- **pycairo 없음**: GTK draw 시그널을 쓰지 않는다. 프레임·오버뷰·러버밴드·
+  측정선·스냅 마커·선택 하이라이트 전부 **GdkPixbuf 합성**(`fill_rect` =
+  subpixbuf.fill, 대각선은 점묘)으로 하나의 pixbuf에 그려 `Gtk.Image` 한 장으로
+  표시하고, 텍스트(측정 라벨)는 `Gtk.Overlay` 위 `Gtk.Label`을 margin으로
+  배치한다 (flateyes와 동일 기법).
+- GTK import는 lazy(`import_gtk`) — 모듈 import는 GTK 없이도 되고(헤드리스
+  테스트), PyGObject 부재/디스플레이 접속 불가는 **exit 3** + 명확한 메시지.
+- 무거운 geometry 렌더링은 klayout C++ 엔진(`klayout.lay` 헤드리스)이
+  **별도 렌더 프로세스**(`service.py`)에서 PNG 프레임으로 수행. GUI는 pixbuf
+  표시 + 이벤트만 담당한다. 스레드가 아닌 프로세스인 이유: klayout 렌더 루프가
+  GIL을 잡아 스레드로는 긴 렌더 동안 메인 루프가 얼어붙는다
+  (spawn 방식이므로 `__main__` 가드 필수).
+- 렌더 요청(줌/팬/레이어/depth 변경) 제출 시 하단 상태바 우측에 "rendering…"
+  인디케이터가 즉시 표시되고, 1.5초를 넘기면 경과 초가 붙는다. 렌더 중에도
+  팬/줌 가능하며, 밀린 요청은 최신 것만 처리된다.
+- 인스턴스 소켓은 `GLib.io_add_watch`로, 결과 큐는 `GLib.timeout_add`(25ms)로
+  서비스한다. UI 라벨은 English only (XQuartz 한글 글리프 부재 — flateyes 규칙).
+- 키: `f` fit, `+`/`-`(`=`) 줌, `r` ruler, `m` 스냅, `0`-`9`/`a` depth,
+  `Esc` 단계 해제.
 
 ### depth (계층 표시 깊이)
 
 Calibre DESIGNrev의 depth와 동일한 개념. 0 = 설계 top 셀의 shape만 표시
 (하위 셀은 외곽 프레임 + 셀 이름), N = N 단계 아래까지 전개, 999 = 전체.
 KLayout `LayoutView.max_hier_levels`로 구현하며, 타일 모자이크가 만드는
-내부 2단계(TV_MOSAIC→TILE)는 오프셋으로 숨겨서 사용자에게는 원본 설계
+내부 2단계(FO_MOSAIC→TILE)는 오프셋으로 숨겨서 사용자에게는 원본 설계
 계층 기준으로 보인다. GUI "depth" 버튼 → 다이얼로그(프리셋 0/1/2/3/full +
 스핀박스, 비모달이라 열어둔 채 실시간 조정), `render --depth` 지원.
 **단축키 (Calibre와 동일): 숫자 `0`~`9` = 해당 depth, `a` = 전체(full).**
@@ -157,7 +164,9 @@ KLayout `LayoutView.max_hier_levels`로 구현하며, 타일 모자이크가 만
 
 ## 폐쇄망 리눅스 배포
 
-flatoas는 순수 파이썬 (의존성: `klayout`, `numpy` pip 휠 + tkinter).
+flatoas는 순수 파이썬. 의존성: `klayout`, `numpy` pip 휠 + GUI는
+PyGObject/GTK3 (**RHEL 계열 GNOME 호스트에 기본 탑재** — flateyes와 동일하게
+추가 설치 없음).
 
 ```sh
 # 1) 인터넷 PC에서 휠 수집 (타겟 파이썬 버전에 맞춰)
@@ -166,13 +175,15 @@ pip download klayout numpy -d wheels/ \
     --python-version 311        # 예: 타겟이 python3.11
 
 # 2) 폐쇄망 호스트에서
-sudo dnf install python3-tkinter          # 내부 미러 RPM (GUI 사용 시)
 pip install --no-index --find-links wheels/ klayout numpy
 # flatoas/ 디렉토리 복사 후: python3 -m flatoas ...
+# GUI 확인: python3 -c 'import gi; gi.require_version("Gtk", "3.0")'
 ```
 
-- CLI 전용(`index/info/render/clip`)이면 tkinter 없이도 동작한다.
-- 원격 서버에서는 X11 포워딩(`ssh -X`)으로 `fo view`를 실행할 수 있다.
+- CLI 전용(`index/info/render/clip`)이면 GTK 없이도 동작한다.
+- 원격에서는 Exceed TurboX/XQuartz 등 X 서버로 `fo view` 실행 (flateyes와
+  동일한 접속 형태). macOS 개발 환경은 brew `pygobject3 gtk+3`로 동일 코드
+  실행.
 
 ### .focache 구조와 설계 노트
 
