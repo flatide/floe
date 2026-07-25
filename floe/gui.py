@@ -787,6 +787,15 @@ class Viewer:
         return True
 
     def _on_scroll(self, _w, ev):
+        # some X setups (libinput button-scroll, Exceed pointer emulation)
+        # synthesize wheel events while a button is held down - that must
+        # never zoom in the middle of a pan or a rubber-band drag
+        if self._drag is not None or self._zoomdrag is not None:
+            return True
+        if ev.state & (Gdk.ModifierType.BUTTON1_MASK |
+                       Gdk.ModifierType.BUTTON2_MASK |
+                       Gdk.ModifierType.BUTTON3_MASK):
+            return True
         delta = 0.0
         if ev.direction == Gdk.ScrollDirection.UP:
             delta = 1.0
