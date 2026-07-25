@@ -195,10 +195,24 @@ class Viewer:
         main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         hbox.pack_start(main, True, True, 0)
         self.overlay = Gtk.Overlay()
+        # the image lives in a ScrolledWindow so the window can shrink:
+        # a bare Gtk.Image's minimum size is its pixbuf, and since we
+        # render pixbufs at allocation size that would ratchet the window
+        # ever larger (flateyes uses the same containment)
+        self.scroller = Gtk.ScrolledWindow()
+        try:
+            self.scroller.set_policy(Gtk.PolicyType.EXTERNAL,
+                                     Gtk.PolicyType.EXTERNAL)
+        except AttributeError:  # GTK < 3.16
+            self.scroller.set_policy(Gtk.PolicyType.NEVER,
+                                     Gtk.PolicyType.NEVER)
         self.ebox = Gtk.EventBox()
         self.image = Gtk.Image()
+        self.image.set_halign(Gtk.Align.START)
+        self.image.set_valign(Gtk.Align.START)
         self.ebox.add(self.image)
-        self.overlay.add(self.ebox)
+        self.scroller.add(self.ebox)
+        self.overlay.add(self.scroller)
         main.pack_start(self.overlay, True, True, 0)
 
         sbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
@@ -220,7 +234,8 @@ class Viewer:
         self.ebox.connect("button-release-event", self._on_release)
         self.ebox.connect("motion-notify-event", self._on_motion)
         self.ebox.connect("scroll-event", self._on_scroll)
-        self.ebox.connect("size-allocate", self._on_allocate)
+        self._alloc_size = None
+        self.scroller.connect("size-allocate", self._on_allocate)
         self.ebox.connect("realize", lambda w: self._set_cursor("crosshair"))
 
         if server_sock is not None:
@@ -337,7 +352,7 @@ class Viewer:
 
     # ---- geometry ----------------------------------------------------------
     def _viewport_size(self):
-        alloc = self.ebox.get_allocation()
+        alloc = self.scroller.get_allocation()
         w = alloc.width if alloc.width >= 50 else 1200
         h = alloc.height if alloc.height >= 50 else 800
         return w, h
@@ -602,6 +617,14 @@ class Viewer:
         self.redraw()
 
     def _on_allocate(self, _w, alloc):
+        # GTK emits size-allocate on every set_from_pixbuf; reacting to
+        # all of them would loop redraw -> allocate -> redraw forever
+        # (visible as an endlessly re-submitted render). Only a real
+        # size change matters.
+        size = (alloc.width, alloc.height)
+        if size == self._alloc_size:
+            return
+        self._alloc_size = size
         if not self._did_fit and alloc.width > 50:
             self._did_fit = True
             self.fit()
