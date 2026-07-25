@@ -143,23 +143,38 @@ def _svc_pick(cache, mosaic, job, res):
     res.put(out)
 
 
-def _svc_render(cache, mosaic, renderer, tmp, job, res):
+def _svc_render(cache, mosaic, renderer, skel_renderer, tmp, job, res):
     t0 = time.perf_counter()
     x0, y0, x1, y1 = job["bbox"]
+    scope = job.get("scope", "live")
     try:
-        tiles = cache.tiles_for_bbox(x0, y0, x1, y1)
-        if len(tiles) > MAX_LIVE_TILES:
-            res.put({"kind": "error",
-                     "msg": f"{len(tiles)} tiles > live limit"})
-            return
-        if mosaic.ensure(tiles):
-            renderer.refresh()
-        renderer.render_png(tmp, x0, y0, x1, y1, job["w"], job["h"],
-                            visible=job["visible"], depth=job.get("depth"))
+        if scope == "skel":
+            if skel_renderer is None:
+                res.put({"kind": "error", "msg": "no skeleton in cache "
+                         "(run: floe index --skeleton-only)"})
+                return
+            vis = job["visible"]
+            if vis is not None:  # cell outlines stay visible regardless
+                vis = list(map(tuple, vis)) + [(255, 0)]
+            skel_renderer.render_png(tmp, x0, y0, x1, y1,
+                                     job["w"], job["h"], visible=vis)
+            tiles_n = 0
+        else:
+            tiles = cache.tiles_for_bbox(x0, y0, x1, y1)
+            if len(tiles) > MAX_LIVE_TILES:
+                res.put({"kind": "error",
+                         "msg": f"{len(tiles)} tiles > live limit"})
+                return
+            if mosaic.ensure(tiles):
+                renderer.refresh()
+            renderer.render_png(tmp, x0, y0, x1, y1, job["w"], job["h"],
+                                visible=job["visible"],
+                                depth=job.get("depth"))
+            tiles_n = len(tiles)
         with open(tmp, "rb") as f:
             png = f.read()
         res.put({"kind": "frame", "png": png, "bbox": job["bbox"],
-                 "gen": job["gen"], "tiles": len(tiles),
+                 "gen": job["gen"], "tiles": tiles_n, "scope": scope,
                  "ms": round((time.perf_counter() - t0) * 1000)})
     except Exception as e:  # keep the service alive
         res.put({"kind": "error", "msg": str(e)})
@@ -204,6 +219,22 @@ def _render_service(src, req, res):
     except Exception as e:
         res.put({"kind": "error", "msg": f"render service init failed: {e}"})
         return
+    skel_renderer = None
+    sk = cache.meta.get("skeleton")
+    if sk:
+        skel_path = os.path.join(cache.dir, sk["file"])
+        if os.path.isfile(skel_path):
+            try:
+                skel_ly = db.Layout()
+                skel_ly.read(skel_path)
+                colors2 = dict(colors)
+                colors2[(255, 0)] = "#93a4ad"
+                skel_renderer = Renderer(skel_ly, skel_ly.top_cell(),
+                                         colors2, hier_offset=1,
+                                         show_texts=True,
+                                         hollow=((255, 0),))
+            except Exception:
+                skel_renderer = None
     tmp = os.path.join(tempfile.gettempdir(), f"floe_gui_{os.getpid()}.png")
     try:
         while True:
@@ -231,7 +262,8 @@ def _render_service(src, req, res):
                 _svc_pick(cache, mosaic, picks[-1], res)
             renders = [j for j in jobs if j["kind"] == "render"]
             if renders:
-                _svc_render(cache, mosaic, renderer, tmp, renders[-1], res)
+                _svc_render(cache, mosaic, renderer, skel_renderer, tmp,
+                            renders[-1], res)
     except (KeyboardInterrupt, EOFError, OSError):
         return  # parent went away or interrupted: exit quietly
 

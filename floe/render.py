@@ -30,10 +30,13 @@ class Renderer:
     demand); call refresh() afterwards so new cells/layers are picked up.
     """
 
-    def __init__(self, layout, top_cell, colors=None, hier_offset=0):
+    def __init__(self, layout, top_cell, colors=None, hier_offset=0,
+                 show_texts=False, hollow=()):
         """hier_offset: artificial hierarchy levels above the design top
         (the tile mosaic adds 2: FLOE_MOSAIC -> TILE_r_c -> design cells);
-        user-facing depth values are shifted by this amount."""
+        user-facing depth values are shifted by this amount.
+        show_texts: draw text shapes (skeleton view: cell names, labels).
+        hollow: (layer, datatype) keys drawn as outlines only."""
         _require_lay()
         self.lv = klay.LayoutView()
         for k, v in _VIEW_CONFIG.items():
@@ -41,9 +44,15 @@ class Renderer:
                 self.lv.set_config(k, v)
             except Exception:
                 pass
+        if show_texts:
+            try:
+                self.lv.set_config("text-visible", "true")
+            except Exception:
+                pass
         self.layout = layout
         self.top = top_cell
         self.colors = colors or {}  # (layer, datatype) -> "#rrggbb"
+        self.hollow = set(hollow)
         self.hier_offset = hier_offset
         self.lv.show_layout(layout, False)
         self.refresh()
@@ -59,6 +68,8 @@ class Renderer:
                 col = int(hexcol.lstrip("#"), 16)
                 lp.fill_color = col
                 lp.frame_color = col
+            if key in self.hollow:
+                lp.dither_pattern = 1  # hollow: outline only
         self.lv.max_hier()
 
     def set_visible(self, visible):

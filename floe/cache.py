@@ -258,6 +258,109 @@ def compact_instances(ly, min_group=500, log=None):
                 f"{len(rebuilt)} instances")
 
 
+def _skel_harvest(ly, lmap, stop_cell, cell, trans, min_feat, big, n, cap,
+                  depth):
+    """Copy large stored shapes of big cells (depth-limited) into the
+    skeleton, transformed to top coordinates."""
+    for li in ly.layer_indexes():
+        shapes = cell.shapes(li)
+        if shapes.size() == 0 or shapes.size() > 60_000:
+            continue  # fill containers hold millions; skip wholesale
+        dst = stop_cell.shapes(lmap[li])
+        for sh in shapes.each():
+            if n >= cap:
+                return n
+            if sh.is_text():
+                continue
+            b = sh.bbox()
+            if b.width() >= min_feat or b.height() >= min_feat:
+                poly = sh.polygon
+                if poly is not None:
+                    dst.insert(poly.transformed(trans))
+                    n += 1
+    if depth <= 1:
+        return n
+    for inst in cell.each_inst():
+        if n >= cap:
+            break
+        gb = inst.bbox()
+        if gb.width() < big and gb.height() < big:
+            continue
+        n = _skel_harvest(ly, lmap, stop_cell, ly.cell(inst.cell_index),
+                          trans * inst.trans, min_feat, big, n, cap,
+                          depth - 1)
+    return n
+
+
+def build_skeleton(ly, top, texts, out_path, log=print):
+    """Structural far-zoom model, written as a tiny skeleton.oas.
+
+    Contents: large top-level shapes, outline boxes + names of first-level
+    cells (synthetic layer 255/0 OUTLINE), large shapes stored in big
+    level-1/2 cells (power straps, long routes, seal ring), and every
+    text label. Small enough for the render service to load whole at
+    startup, so far-zoom views render live and crisp at any scale -
+    which a fixed-resolution overview PNG cannot do.
+    """
+    bbox = top.bbox()
+    min_feat = max(1, max(bbox.width(), bbox.height()) // 500)
+    big = min_feat * 4
+    skel = db.Layout()
+    skel.dbu = ly.dbu
+    stop_cell = skel.create_cell("SKEL_TOP")
+    outline_li = skel.layer(db.LayerInfo(255, 0, "OUTLINE"))
+    lmap = {li: skel.layer(ly.get_info(li)) for li in ly.layer_indexes()}
+    cap = 300_000
+    n = 0
+    for li in ly.layer_indexes():
+        dst = stop_cell.shapes(lmap[li])
+        for sh in top.shapes(li).each():
+            if sh.is_text():
+                continue
+            b = sh.bbox()
+            if b.width() >= min_feat or b.height() >= min_feat:
+                poly = sh.polygon
+                if poly is not None:
+                    dst.insert(poly)
+                    n += 1
+    for inst in top.each_inst():
+        if n >= cap:
+            log(f"[index] skeleton capped at {cap} shapes")
+            break
+        gb = inst.bbox()
+        if gb.width() < big and gb.height() < big:
+            continue
+        child = ly.cell(inst.cell_index)
+        stop_cell.shapes(outline_li).insert(gb)
+        c = gb.center()
+        stop_cell.shapes(outline_li).insert(
+            db.Text(child.name, db.Trans(db.Vector(c.x, c.y))))
+        n = _skel_harvest(ly, lmap, stop_cell, child, inst.trans,
+                          min_feat, big, n, cap, 2)
+    for li, text in texts:
+        stop_cell.shapes(lmap[li]).insert(text)
+    skel.write(out_path, save_opts())
+    return {"file": os.path.basename(out_path), "shapes": n}
+
+
+def add_skeleton(cache, log=print):
+    """Upgrade an existing cache in place (one source read, no re-tiling):
+    floe index --skeleton-only."""
+    t0 = time.perf_counter()
+    meta = cache.meta or cache.load()
+    log(f"[index] reading {cache.src} for skeleton...")
+    ly = db.Layout()
+    ly.read(cache.src)
+    top = pick_top_cell(ly, log)
+    texts = collect_texts(ly, top.cell_index())
+    out = os.path.join(cache.dir, "skeleton.oas")
+    meta["skeleton"] = build_skeleton(ly, top, texts, out, log)
+    with open(cache.meta_path, "w") as f:
+        json.dump(meta, f, indent=1)
+    log(f"[index] skeleton added: {meta['skeleton']['shapes']} shapes "
+        f"({time.perf_counter() - t0:.0f}s)")
+
+
 def load_region(cache, x0, y0, x1, y1, log=None, max_tiles=None,
                 layers=None):
     """Load tiles intersecting bbox (dbu) into a fresh mosaic Layout.
@@ -346,15 +449,14 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, overview_px=1600,
     # --- texts: clip_into drops them, so bucket them per tile up front ---
     top_ci = top.cell_index()
     t0 = time.perf_counter()
+    all_texts = collect_texts(ly, top_ci)
     tile_texts = {}
-    n_texts = 0
-    for li, text in collect_texts(ly, top_ci):
+    for li, text in all_texts:
         p = text.trans.disp
         c = min(n - 1, max(0, (p.x - bbox.left) // tile_w))
         r = min(n - 1, max(0, (p.y - bbox.bottom) // tile_h))
         tile_texts.setdefault((r, c), []).append((li, text))
-        n_texts += 1
-    log(f"[index] {n_texts} texts collected "
+    log(f"[index] {len(all_texts)} texts collected "
         f"({time.perf_counter() - t0:.1f}s)")
 
     # --- tiles ---
@@ -392,6 +494,13 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, overview_px=1600,
     t_tiles = time.perf_counter() - t0
     log(f"[index] {n_files} tile files in {t_tiles:.0f}s")
 
+    # --- skeleton (far-zoom structural model) ---
+    t0 = time.perf_counter()
+    skel_meta = build_skeleton(ly, top, all_texts,
+                               os.path.join(cdir, "skeleton.oas"), log)
+    log(f"[index] skeleton: {skel_meta['shapes']} shapes "
+        f"({time.perf_counter() - t0:.1f}s)")
+
     # collect meta fields BEFORE overview rendering: show_layout() hands
     # layout ownership to the LayoutView, which destroys it on teardown
     meta = {
@@ -403,6 +512,7 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, overview_px=1600,
         "grid": grid,
         "layers": layers,
         "overview": None,
+        "skeleton": skel_meta,
         "stats": {"read_s": round(t_read, 1), "tiles_s": round(t_tiles, 1),
                   "overview_s": 0.0, "total_s": 0.0,
                   "cells": ly.cells(), "tile_files": n_files},

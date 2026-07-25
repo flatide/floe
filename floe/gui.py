@@ -119,7 +119,9 @@ class Viewer:
         self.spp = 1.0              # dbu per screen pixel
         self.visible = set()
         self.gen = 0
-        self.last_frame = None      # (pixbuf, bbox, dbu_per_px)
+        self.last_frame = None      # (pixbuf, bbox, dbu_per_px, key)
+        self._job_keys = {}         # gen -> render key of submitted job
+        self._pending_scope = "live"
         self._ov_pixbufs = {}
         self._drag = None
         self._zoomdrag = None       # rubber-band anchor (view px)
@@ -258,6 +260,7 @@ class Viewer:
         self.visible = {(l["layer"], l["datatype"])
                         for l in self.meta["layers"]}
         self.last_frame = None
+        self._job_keys.clear()
         self._ov_pixbufs = {}
         self._clear_pending()
         self.rulers = []
@@ -381,24 +384,40 @@ class Viewer:
         return None
 
     # ---- display composition (no cairo: pixbuf ops only) -------------------
+    def _render_key(self, scope):
+        """Identity of a frame: what state it was rendered for. The
+        skeleton view is depth-independent."""
+        return (scope, tuple(sorted(self.visible)),
+                self._depth() if scope == "live" else None)
+
+    def _frame_compatible(self, frame):
+        """A stale frame stays displayable across pans and (rescaled)
+        moderate zooms; layer or depth changes invalidate it."""
+        key = frame[3]
+        if key is None:
+            return False
+        if key[1] != tuple(sorted(self.visible)):
+            return False
+        if key[0] == "live" and key[2] != self._depth():
+            return False
+        return 0.2 < frame[2] / self.spp < 5.0
+
     def _display(self):
         w, h = self._viewport_size()
         disp = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, False, 8, w, h)
         disp.fill(BLACK)
         bbox = self.view_bbox()
-        span = self.tiles_spanned(bbox)
-        live = 0 < span <= MAX_LIVE_TILES and bool(self.visible)
-        drew = False
-        if live and self.last_frame is not None:
-            pix, fb, fspp = self.last_frame
-            if 0.2 < fspp / self.spp < 5.0:
-                self._composite_world(disp, pix, fb, bbox)
-                drew = True
-        if not drew and self.visible:
+        if self.visible:
+            # overview PNG as the base: newly exposed areas show coarse
+            # content instead of black until a fresh frame lands
             src = self._ov_pixbuf()
             if src is not None:
-                ob = self.meta["overview"]["bbox"]
-                self._composite_world(disp, src, ob, bbox)
+                self._composite_world(disp, src,
+                                      self.meta["overview"]["bbox"], bbox)
+        if self.last_frame is not None and \
+                self._frame_compatible(self.last_frame):
+            self._composite_world(disp, self.last_frame[0],
+                                  self.last_frame[1], bbox)
         self._draw_overlays(disp, bbox)
         self.image.set_from_pixbuf(disp)
         self._update_labels(bbox)
@@ -506,33 +525,93 @@ class Viewer:
             lbl.hide()
 
     # ---- drawing / rendering ------------------------------------------------
+    @staticmethod
+    def _expand(bbox, m):
+        w = bbox[2] - bbox[0]
+        h = bbox[3] - bbox[1]
+        return (bbox[0] - m * w, bbox[1] - m * h,
+                bbox[2] + m * w, bbox[3] + m * h)
+
+    def _covered(self, bbox, scope):
+        """True when the current frame still serves this view: same
+        render state AND the viewport sits inside the frame with some
+        comfort left, so no re-render is needed (Calibre-style margin
+        panning)."""
+        lf = self.last_frame
+        if lf is None or lf[3] != self._render_key(scope):
+            return False
+        if abs(lf[2] - self.spp) > 1e-9 * self.spp:
+            return False  # zoom changed: frame is scaled preview only
+        fb = lf[1]
+        vw, vh = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        pad_x = min(0.1 * vw, 0.25 * max(0.0, (fb[2] - fb[0]) - vw))
+        pad_y = min(0.1 * vh, 0.25 * max(0.0, (fb[3] - fb[1]) - vh))
+        return (fb[0] <= bbox[0] - pad_x and fb[1] <= bbox[1] - pad_y and
+                fb[2] >= bbox[2] + pad_x and fb[3] >= bbox[3] + pad_y)
+
     def redraw(self, immediate=False):
         bbox = self.view_bbox()
         span = self.tiles_spanned(bbox)
         live = 0 < span <= MAX_LIVE_TILES and bool(self.visible)
+        scope = "live" if live else "skel"
         self._display()
-        if not live:
+        if not self.visible:
+            if self._debounce is not None:
+                GLib.source_remove(self._debounce)
+                self._debounce = None
+            self._clear_pending()
+            self._set_status(bbox, "no layers visible")
+            return
+        if scope == "skel" and not self.meta.get("skeleton"):
+            # cache without a skeleton: static overview only (upgrade
+            # with: floe index --skeleton-only)
             if self._debounce is not None:
                 GLib.source_remove(self._debounce)
                 self._debounce = None
             self._clear_pending()
             self._set_status(bbox, "overview (%d tiles spanned)" % span)
             return
+        mode = "live (%d tiles)" % span if scope == "live" \
+            else "far view (skeleton)"
+        if self._covered(bbox, scope):
+            if self._debounce is not None:
+                GLib.source_remove(self._debounce)
+                self._debounce = None
+            self._set_status(bbox, mode)
+            return
         if self._debounce is not None:
             GLib.source_remove(self._debounce)
+        self._pending_scope = scope
         self._debounce = GLib.timeout_add(
             1 if immediate else DEBOUNCE_MS, self._submit_render)
-        self._set_status(bbox, "live (%d tiles)" % span)
+        self._set_status(bbox, mode)
 
     def _submit_render(self):
         self._debounce = None
+        scope = self._pending_scope
         bbox = self.view_bbox()
         w, h = self._viewport_size()
+        # overdraw margin: pans inside it are served from the frame with
+        # no re-render at all; renders re-center in the background
+        m = 0.5
+        while m > 0 and (w * (1 + 2 * m) > 4096 or
+                         h * (1 + 2 * m) > 4096):
+            m /= 2
+        if scope == "live":
+            while m > 0 and self.tiles_spanned(
+                    self._expand(bbox, m)) > MAX_LIVE_TILES:
+                m = 0 if m <= 0.13 else m / 2
+        eb = self._expand(bbox, m)
         self.gen += 1
+        self._job_keys[self.gen] = self._render_key(scope)
+        for g in [g for g in self._job_keys if g < self.gen - 8]:
+            del self._job_keys[g]
         self.worker.submit({
-            "kind": "render", "gen": self.gen,
-            "bbox": tuple(int(round(v)) for v in bbox),
-            "w": w, "h": h, "depth": self._depth(),
+            "kind": "render", "gen": self.gen, "scope": scope,
+            "bbox": tuple(int(round(v)) for v in eb),
+            "w": int(round(w * (1 + 2 * m))),
+            "h": int(round(h * (1 + 2 * m))),
+            "depth": self._depth() if scope == "live" else None,
             "visible": self._layers_arg()})
         self._pending = self.gen
         self._pending_t0 = time.perf_counter()
@@ -575,11 +654,15 @@ class Viewer:
                         pix = loader.get_pixbuf()
                         fb = res["bbox"]
                         fspp = (fb[2] - fb[0]) / max(1, pix.get_width())
-                        self.last_frame = (pix, fb, fspp)
+                        key = self._job_keys.pop(res["gen"], None)
+                        self.last_frame = (pix, fb, fspp, key)
                         self._display()
-                        self._set_status(self.view_bbox(),
-                                         "live (%d tiles, %d ms)"
-                                         % (res["tiles"], res["ms"]))
+                        if res.get("scope") == "skel":
+                            mode = "far view (skeleton, %d ms)" % res["ms"]
+                        else:
+                            mode = "live (%d tiles, %d ms)" \
+                                % (res["tiles"], res["ms"])
+                        self._set_status(self.view_bbox(), mode)
                 elif kind == "snap":
                     if res["seq"] == self._snap_seq \
                             and self.mode == "ruler":

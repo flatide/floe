@@ -47,6 +47,14 @@ def open_cache(src, auto_index, args):
 
 def cmd_index(args):
     from . import cache as cache_mod
+    if args.skeleton_only:
+        c = cache_mod.Cache(args.src)
+        if not c.exists():
+            raise SystemExit("floe: no cache to upgrade; run a full "
+                             "'floe index' first")
+        c.load()
+        cache_mod.add_skeleton(c)
+        return
     c = cache_mod.Cache(args.src)
     if c.exists() and not args.force:
         c.load()
@@ -221,6 +229,9 @@ def main(argv=None):
                    help="target tile file size in MB (default 6)")
     p.add_argument("--overview-px", type=int, default=1600)
     p.add_argument("--no-overview", action="store_true")
+    p.add_argument("--skeleton-only", action="store_true",
+                   help="add the far-zoom skeleton to an existing cache "
+                        "(one source read, no re-tiling)")
     p.set_defaults(fn=cmd_index)
 
     p = sub.add_parser("info", help="show cache/layout summary")
