@@ -1,4 +1,4 @@
-# flatoas
+# oastray
 
 대용량 OASIS 설계 파일을 빠르게 조회/클립하는 경량 유틸리티.
 
@@ -29,7 +29,7 @@ python3 -m venv .venv
 
 생성되는 레이아웃 구조:
 
-- `FLATOAS_TESTCHIP` (top) → 6×6 블록 그리드 (블록 1.5mm, die ~10.1mm)
+- `OASTRAY_TESTCHIP` (top) → 6×6 블록 그리드 (블록 1.5mm, die ~10.1mm)
 - 로직 블록: 스탠다드셀 라이브러리 12종 인스턴스 row 배치 + M2~M6 랜덤 라우팅/비아
 - SRAM 블록 2개 (모서리): 1024×2048 비트셀 정규 어레이 (OASIS repetition 압축 테스트용)
 - **더미 메탈필** (M1~M6, datatype 1): 랜덤 사각형 — 파일 용량의 대부분을 차지
@@ -51,21 +51,21 @@ python3 -m venv .venv
 | 5/1, 7/1, 9/1, 11/1, 13/1, 15/1 | M*_FILL | 더미필 (용량 대부분) |
 | 63/63 | MARKER | 검증용 마커/라벨 |
 
-## flatoas 사용법
+## oastray 사용법
 
 OASIS에는 공간 인덱스가 없어 어떤 조회든 파일 전체 파싱이 필요하다.
-flatoas는 **최초 1회 인덱싱**으로 이 비용을 지불하고, 이후 모든 조회는
+oastray는 **최초 1회 인덱싱**으로 이 비용을 지불하고, 이후 모든 조회는
 관심 영역과 교차하는 타일만 로딩해 ms~초 단위로 응답한다.
 
 ```sh
-alias fo=".venv/bin/python -m flatoas"
+alias ot=".venv/bin/python -m oastray"
 
-fo index data/testchip_1g5.oas          # 1회: <src>.focache/ 생성
-fo info  data/testchip_1g5.oas          # 레이어/그리드/통계 요약
-fo view  data/testchip_1g5.oas          # 네이티브 데스크톱 뷰어 (기본)
-fo render data/testchip_1g5.oas --bbox 5000,5000,5200,5200 \
+ot index data/testchip_1g5.oas          # 1회: <src>.otcache/ 생성
+ot info  data/testchip_1g5.oas          # 레이어/그리드/통계 요약
+ot view  data/testchip_1g5.oas          # 네이티브 데스크톱 뷰어 (기본)
+ot render data/testchip_1g5.oas --bbox 5000,5000,5200,5200 \
           --layers M2,M3,VIA2 --out view.png
-fo clip  data/testchip_1g5.oas --bbox 5000,5000,5100,5100 --out region.oas
+ot clip  data/testchip_1g5.oas --bbox 5000,5000,5100,5100 --out region.oas
 ```
 
 - `--bbox`는 µm 단위 `X0,Y0,X1,Y1`. `--layers`는 이름 또는 `layer/datatype` 목록.
@@ -104,16 +104,16 @@ fo clip  data/testchip_1g5.oas --bbox 5000,5000,5100,5100 --out region.oas
 
 ### 단일 인스턴스 동작 (flateyes와 동일)
 
-flatoas는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델을 그대로 따른다:
+oastray는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델을 그대로 따른다:
 
 - **(uid, DISPLAY)당 뷰어 창 1개.** 첫 실행이 창을 열고, 같은 DISPLAY에서의
-  이후 `fo view 다른파일.oas` 는 실행 중인 창에 경로를 넘기고 즉시 종료한다
+  이후 `ot view 다른파일.oas` 는 실행 중인 창에 경로를 넘기고 즉시 종료한다
   (exit 0, ~0.1초 — forward 경로는 klayout/GTK를 import하지 않음).
   기존 창이 해당 파일로 전환되고 앞으로 올라온다.
 - **DISPLAY 값이 다르면 독립 창** — 한 리눅스 호스트에서
-  `DISPLAY=:1 fo view a.oas` 처럼 여러 사용자 DISPLAY로 각각 실행 가능.
+  `DISPLAY=:1 ot view a.oas` 처럼 여러 사용자 DISPLAY로 각각 실행 가능.
 - `--multi`: 단일 인스턴스를 끄고 항상 독립 창을 연다 (소켓 미사용).
-- 소켓: 리눅스는 abstract namespace(`\0flatoas-<uid>-<display>`, stale 불가),
+- 소켓: 리눅스는 abstract namespace(`\0oastray-<uid>-<display>`, stale 불가),
   그 외는 파일 소켓(+probe 후 unlink로 stale 처리). macOS 개발 환경은
   DISPLAY 없이 'aqua' 키로 동일하게 동작.
 - 종료 코드: 0 = 정상/전달됨, 1 = DISPLAY 미설정·소켓 실패,
@@ -121,7 +121,7 @@ flatoas는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델�
 - 전달 대상 파일의 인덱스가 없으면 **forward 전에 이 터미널에서** 먼저
   인덱싱한다 (GUI 프로세스가 몇 분씩 멈추는 것 방지).
 
-### 네이티브 뷰어 (`fo view`) — GTK3/PyGObject (flateyes와 동일 제약)
+### 네이티브 뷰어 (`ot view`) — GTK3/PyGObject (flateyes와 동일 제약)
 
 GUI는 **GTK3/PyGObject** 셸이다. flateyes와 같은 폐쇄망 호스트
 (RHEL 계열 GNOME, 아무것도 설치 불가, PyGObject/GTK3만 스톡)를 그대로
@@ -152,7 +152,7 @@ GUI는 **GTK3/PyGObject** 셸이다. flateyes와 같은 폐쇄망 호스트
 Calibre DESIGNrev의 depth와 동일한 개념. 0 = 설계 top 셀의 shape만 표시
 (하위 셀은 외곽 프레임 + 셀 이름), N = N 단계 아래까지 전개, 999 = 전체.
 KLayout `LayoutView.max_hier_levels`로 구현하며, 타일 모자이크가 만드는
-내부 2단계(FO_MOSAIC→TILE)는 오프셋으로 숨겨서 사용자에게는 원본 설계
+내부 2단계(OT_MOSAIC→TILE)는 오프셋으로 숨겨서 사용자에게는 원본 설계
 계층 기준으로 보인다. GUI "depth" 버튼 → 다이얼로그(프리셋 0/1/2/3/full +
 스핀박스, 비모달이라 열어둔 채 실시간 조정), `render --depth` 지원.
 **단축키 (Calibre와 동일): 숫자 `0`~`9` = 해당 depth, `a` = 전체(full).**
@@ -164,7 +164,7 @@ KLayout `LayoutView.max_hier_levels`로 구현하며, 타일 모자이크가 만
 
 ## 폐쇄망 리눅스 배포
 
-flatoas는 순수 파이썬. 의존성: `klayout`, `numpy` pip 휠 + GUI는
+oastray는 순수 파이썬. 의존성: `klayout`, `numpy` pip 휠 + GUI는
 PyGObject/GTK3 (**RHEL 계열 GNOME 호스트에 기본 탑재** — flateyes와 동일하게
 추가 설치 없음).
 
@@ -178,7 +178,7 @@ pip download klayout numpy -d wheels/ \
 python3 -c 'import gi; gi.require_version("Gtk", "3.0")'   # GUI 사전 확인
 python3 -m venv --system-site-packages .venv               # gi가 보이게
 .venv/bin/pip install --no-index --find-links wheels/ klayout numpy
-# flatoas/ 디렉토리 복사 후: .venv/bin/python -m flatoas ...
+# oastray/ 디렉토리 복사 후: .venv/bin/python -m oastray ...
 ```
 
 **주의 — PyGObject/pycairo를 pip으로 설치하지 말 것.** pip은 meson 소스
@@ -186,19 +186,19 @@ python3 -m venv --system-site-packages .venv               # gi가 보이게
 `Dependency lookup for cairo ... failed` 로 실패한다. PyGObject는 OS RPM
 (`python3-gobject`, GNOME 호스트 기본 탑재)을 쓰고, venv는
 `--system-site-packages` 로 만들어 그것을 보이게 하는 것이 정답이다
-(pycairo는 아예 불필요 - flatoas는 cairo를 쓰지 않는다). venv를 SCL/conda
+(pycairo는 아예 불필요 - oastray는 cairo를 쓰지 않는다). venv를 SCL/conda
 등 다른 파이썬으로 만들면 시스템 gi와 맞지 않으니 위 사전 확인이 성공한
 바로 그 python3를 사용할 것.
 
 - CLI 전용(`index/info/render/clip`)이면 GTK 없이도 동작한다.
-- 원격에서는 Exceed TurboX/XQuartz 등 X 서버로 `fo view` 실행 (flateyes와
+- 원격에서는 Exceed TurboX/XQuartz 등 X 서버로 `ot view` 실행 (flateyes와
   동일한 접속 형태). macOS 개발 환경은 brew `pygobject3 gtk+3`로 동일 코드
   실행.
 
-### .focache 구조와 설계 노트
+### .otcache 구조와 설계 노트
 
 ```
-<src>.focache/
+<src>.otcache/
   meta.json      원본 지문(size/mtime), 그리드, 레이어 테이블(+색), 통계
   tiles/t_r_c.oas  타일별 OASIS (절대좌표 유지, 전 레이어, 경계에서 절단)
   overview/*.png   레이어별 full-die 렌더 (줌아웃용)
@@ -218,7 +218,7 @@ python3 -m venv --system-site-packages .venv               # gi가 보이게
 ## 로드맵
 
 1. ✅ 테스트용 대용량 OASIS 생성기 (`tools/gen_test_oasis.py`)
-2. ✅ 공간 인덱스(.focache) + CLI (index/info/render/clip)
+2. ✅ 공간 인덱스(.otcache) + CLI (index/info/render/clip)
 3. ✅ 네이티브 뷰어 (view): 영역 줌/팬/레이어 토글/depth/clip 저장
 4. Calibre DRC RDB 파서/조회 (KLayout `rdb` 모듈) + 에러 영역 자동 clip/뷰
 5. 대용량 스케일링: 인덱싱 시 레이어 그룹별 다중 패스(RAM 상한), 타일 병렬 빌드

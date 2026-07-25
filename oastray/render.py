@@ -32,7 +32,7 @@ class Renderer:
 
     def __init__(self, layout, top_cell, colors=None, hier_offset=0):
         """hier_offset: artificial hierarchy levels above the design top
-        (the tile mosaic adds 2: FO_MOSAIC -> TILE_r_c -> design cells);
+        (the tile mosaic adds 2: OT_MOSAIC -> TILE_r_c -> design cells);
         user-facing depth values are shifted by this amount."""
         _require_lay()
         self.lv = klay.LayoutView()

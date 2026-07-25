@@ -171,7 +171,7 @@ def _svc_clip(cache, job, res):
         x0, y0, x1, y1 = job["bbox"]
         ly, top, _ = cache_mod.load_region(cache, x0, y0, x1, y1)
         ci = ly.clip(top.cell_index(), db.Box(x0, y0, x1, y1))
-        ly.cell(ci).name = "FO_CLIP"
+        ly.cell(ci).name = "OT_CLIP"
         opt = cache_mod.save_opts()
         opt.add_cell(ci)
         if job.get("layers"):
@@ -204,7 +204,7 @@ def _render_service(src, req, res):
     except Exception as e:
         res.put({"kind": "error", "msg": f"render service init failed: {e}"})
         return
-    tmp = os.path.join(tempfile.gettempdir(), f"fo_gui_{os.getpid()}.png")
+    tmp = os.path.join(tempfile.gettempdir(), f"ot_gui_{os.getpid()}.png")
     try:
         while True:
             job = req.get()

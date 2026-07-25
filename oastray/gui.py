@@ -24,7 +24,7 @@ from .viewport import MAX_LIVE_TILES
 
 Gtk = Gdk = GdkPixbuf = GLib = None
 
-APP = "flatoas"
+APP = "oastray"
 POLL_MS = 25
 DEBOUNCE_MS = 120
 
@@ -1000,7 +1000,7 @@ class Viewer:
         dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
                         "Save", Gtk.ResponseType.OK)
         dlg.set_do_overwrite_confirmation(True)
-        dlg.set_current_name("fo_clip_%s_%s_%s_%sum.oas"
+        dlg.set_current_name("ot_clip_%s_%s_%s_%sum.oas"
                              % (um[0], um[1], um[2], um[3]))
         out = dlg.get_filename() if dlg.run() == Gtk.ResponseType.OK \
             else None

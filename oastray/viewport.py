@@ -19,7 +19,7 @@ class Mosaic:
         self.cache = cache
         self.ly = db.Layout()
         self.ly.dbu = cache.meta["dbu"]
-        self.top = self.ly.create_cell("FO_MOSAIC")
+        self.top = self.ly.create_cell("OT_MOSAIC")
         self.loaded = {}  # (r, c) -> cell_index or None (empty tile)
 
     def ensure(self, tiles):
