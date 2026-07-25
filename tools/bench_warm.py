@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Warm-query benchmark: tvcache-based render/clip vs cold full-load baseline.
+"""Warm-query benchmark: zncache-based render/clip vs cold full-load baseline.
 
 Uses the generator manifest as ground truth (markers must survive the
 cache -> clip round trip).
@@ -20,7 +20,7 @@ PY = sys.executable
 
 def run(args):
     t0 = time.perf_counter()
-    r = subprocess.run([PY, "-m", "tideview"] + args, cwd=ROOT,
+    r = subprocess.run([PY, "-m", "zenoas"] + args, cwd=ROOT,
                        capture_output=True, text=True)
     dt = time.perf_counter() - t0
     if r.returncode != 0:

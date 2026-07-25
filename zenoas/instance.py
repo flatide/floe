@@ -17,7 +17,7 @@ import socket
 import sys
 import tempfile
 
-APP = "tideview"
+APP = "zenoas"
 
 
 def display_key():

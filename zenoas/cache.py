@@ -1,6 +1,6 @@
 """Spatial tile cache for large OASIS files.
 
-`build_index` scans the source file once and produces `<src>.tvcache/`:
+`build_index` scans the source file once and produces `<src>.zncache/`:
 
     meta.json           source fingerprint, grid geometry, layer table, stats
     tiles/t_<r>_<c>.oas one OASIS per grid tile (all layers, absolute coords,
@@ -29,7 +29,7 @@ GRID_MIN, GRID_MAX = 4, 96
 
 
 def cache_dir_for(src):
-    return os.path.abspath(src) + ".tvcache"
+    return os.path.abspath(src) + ".zncache"
 
 
 def layer_color(i):
@@ -58,7 +58,7 @@ def pick_top_cell(ly, log=None):
 
 
 class Cache:
-    """Read-side accessor for a built .tvcache directory."""
+    """Read-side accessor for a built .zncache directory."""
 
     def __init__(self, src):
         self.src = os.path.abspath(src)
@@ -281,7 +281,7 @@ def load_region(cache, x0, y0, x1, y1, log=None, max_tiles=None,
         lo.set_layer_map(lm, False)
     ly = db.Layout()
     ly.dbu = cache.meta["dbu"]
-    top = ly.create_cell("TV_REGION")
+    top = ly.create_cell("ZN_REGION")
     n = 0
     t0 = time.perf_counter()
     for r, c in tiles:
