@@ -4,7 +4,7 @@ Same hard environment constraints as flateyes (the sibling image viewer):
 targets are closed-network RHEL-family hosts where only PyGObject/GTK3 is
 stock and NOTHING can be installed. In particular there is NO pycairo, so
 the GTK "draw" signal is unusable: every frame is composed into a
-GdkPixbuf (klayout render frames, overview crops, rubber band, rulers,
+GdkPixbuf (klayout render frames, rubber band, rulers,
 snap marker, selection outline) and shown by one Gtk.Image; text labels
 are Gtk.Label widgets positioned with margins inside a Gtk.Overlay.
 
@@ -35,6 +35,13 @@ RULER_CORE = 0xFFE97AFF
 SNAP_VERTEX = 0x66FFCCFF
 SNAP_EDGE = 0x66CCFFFF
 SEL_CORE = 0xFFFFFFFF
+
+MINIMAP_PX = 110           # longest edge of the minimap (view px)
+MINIMAP_MARGIN = 12
+MINIMAP_DOT_MIN = 6        # view box smaller than this becomes a dot
+MINIMAP_BG = 0x141414FF
+MINIMAP_EDGE = 0x666666FF
+MINIMAP_VIEW = 0x8ECDF5FF
 
 
 def import_gtk():
@@ -112,6 +119,14 @@ def rect_outline(buf, x0, y0, x1, y1, casing, core):
         stamp_segment(buf, a, b, casing, core)
 
 
+def frame_rect(buf, x0, y0, w, h, color):
+    """1-px rectangle border (rect_outline is too heavy for the minimap)."""
+    fill_rect(buf, x0, y0, w, 1, color)
+    fill_rect(buf, x0, y0 + h - 1, w, 1, color)
+    fill_rect(buf, x0, y0, 1, h, color)
+    fill_rect(buf, x0 + w - 1, y0, 1, h, color)
+
+
 class Viewer:
     def __init__(self, cache, server_sock=None, show=True):
         self.server_sock = server_sock
@@ -122,7 +137,6 @@ class Viewer:
         self.last_frame = None      # (pixbuf, bbox, dbu_per_px, key)
         self._job_keys = {}         # gen -> render key of submitted job
         self._pending_scope = "live"
-        self._ov_pixbufs = {}
         self._drag = None
         self._zoomdrag = None       # rubber-band anchor (view px)
         self._band_cur = None
@@ -261,7 +275,6 @@ class Viewer:
                         for l in self.meta["layers"]}
         self.last_frame = None
         self._job_keys.clear()
-        self._ov_pixbufs = {}
         self._clear_pending()
         self.rulers = []
         self._ruler_start = None
@@ -407,13 +420,6 @@ class Viewer:
         disp = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, False, 8, w, h)
         disp.fill(BLACK)
         bbox = self.view_bbox()
-        if self.visible:
-            # overview PNG as the base: newly exposed areas show coarse
-            # content instead of black until a fresh frame lands
-            src = self._ov_pixbuf()
-            if src is not None:
-                self._composite_world(disp, src,
-                                      self.meta["overview"]["bbox"], bbox)
         if self.last_frame is not None and \
                 self._frame_compatible(self.last_frame):
             self._composite_world(disp, self.last_frame[0],
@@ -443,24 +449,6 @@ class Viewer:
             else GdkPixbuf.InterpType.NEAREST
         src.composite(disp, dx0, dy0, dx1 - dx0, dy1 - dy0,
                       off_x, off_y, scale, scale, interp, 255)
-
-    def _ov_pixbuf(self):
-        ov = self.meta.get("overview")
-        if not ov:
-            return None
-        if len(self.visible) == 1:
-            l, d = next(iter(self.visible))
-            key = "%d/%d" % (l, d)
-        else:
-            key = "__all__"
-        if key not in self._ov_pixbufs:
-            fname = ov["files"].get(key) or ov["files"].get("__all__")
-            try:
-                self._ov_pixbufs[key] = GdkPixbuf.Pixbuf.new_from_file(
-                    os.path.join(self.cache.dir, "overview", fname))
-            except Exception:
-                self._ov_pixbufs[key] = None
-        return self._ov_pixbufs[key] or self._ov_pixbufs.get("__all__")
 
     def _draw_overlays(self, disp, bbox):
         def sx(v):
@@ -495,6 +483,46 @@ class Viewer:
             x1, y1 = self._band_cur
             color = BAND_IN if x1 >= x0 else BAND_OUT
             rect_outline(disp, x0, y0, x1, y1, BLACK, color)
+        self._draw_minimap(disp, bbox)
+
+    def _draw_minimap(self, disp, bbox):
+        """Die outline in the bottom-right corner with the current view
+        marked: a box while it is still readable, a dot once the zoom
+        makes the box degenerate."""
+        bb = self.meta["bbox"]
+        bw, bh = bb[2] - bb[0], bb[3] - bb[1]
+        if bw <= 0 or bh <= 0:
+            return
+        scale = MINIMAP_PX / max(bw, bh)
+        mw, mh = max(2, round(bw * scale)), max(2, round(bh * scale))
+        x0 = disp.get_width() - MINIMAP_MARGIN - mw
+        y0 = disp.get_height() - MINIMAP_MARGIN - mh
+        if x0 < 0 or y0 < 0:
+            return  # viewport too small for a minimap
+        fill_rect(disp, x0, y0, mw, mh, MINIMAP_BG)
+        frame_rect(disp, x0, y0, mw, mh, MINIMAP_EDGE)
+
+        def mx(v):
+            return x0 + (v - bb[0]) * scale
+
+        def my(v):
+            return y0 + (bb[3] - v) * scale
+
+        vw = (bbox[2] - bbox[0]) * scale
+        vh = (bbox[3] - bbox[1]) * scale
+        if vw >= MINIMAP_DOT_MIN and vh >= MINIMAP_DOT_MIN:
+            # the fit view overshoots the die by its margin: clip the
+            # view box to the minimap
+            rx0 = max(x0, mx(bbox[0]))
+            ry0 = max(y0, my(bbox[3]))
+            rx1 = min(x0 + mw - 1, mx(bbox[2]))
+            ry1 = min(y0 + mh - 1, my(bbox[1]))
+            frame_rect(disp, rx0, ry0, max(2, round(rx1 - rx0 + 1)),
+                       max(2, round(ry1 - ry0 + 1)), MINIMAP_VIEW)
+        else:
+            px, py = mx(self.cx), my(self.cy)
+            fill_rect(disp, px - 3, py - 3, 7, 7, BLACK)
+            fill_rect(disp, px - 2, py - 2, 5, 5, MINIMAP_VIEW)
 
     def _update_labels(self, bbox):
         """Ruler distance labels: a pool of Gtk.Labels on the overlay."""
@@ -550,6 +578,7 @@ class Viewer:
                 fb[2] >= bbox[2] + pad_x and fb[3] >= bbox[3] + pad_y)
 
     def redraw(self, immediate=False):
+        self._clamp_view()
         bbox = self.view_bbox()
         span = self.tiles_spanned(bbox)
         live = 0 < span <= MAX_LIVE_TILES and bool(self.visible)
@@ -561,15 +590,6 @@ class Viewer:
                 self._debounce = None
             self._clear_pending()
             self._set_status(bbox, "no layers visible")
-            return
-        if scope == "skel" and not self.meta.get("skeleton"):
-            # cache without a skeleton: static overview only (upgrade
-            # with: floe index --skeleton-only)
-            if self._debounce is not None:
-                GLib.source_remove(self._debounce)
-                self._debounce = None
-            self._clear_pending()
-            self._set_status(bbox, "overview (%d tiles spanned)" % span)
             return
         mode = "live (%d tiles)" % span if scope == "live" \
             else "far view (skeleton)"
@@ -693,11 +713,32 @@ class Viewer:
     # ---- interaction --------------------------------------------------------
     def fit(self):
         bb = self.meta["bbox"]
-        w, h = self._viewport_size()
         self.cx = (bb[0] + bb[2]) / 2
         self.cy = (bb[1] + bb[3]) / 2
-        self.spp = max((bb[2] - bb[0]) / w, (bb[3] - bb[1]) / h) * 1.05
+        self.spp = self._fit_spp()
         self.redraw()
+
+    def _fit_spp(self):
+        bb = self.meta["bbox"]
+        w, h = self._viewport_size()
+        return max((bb[2] - bb[0]) / w, (bb[3] - bb[1]) / h) * 1.05
+
+    def _clamp_view(self):
+        """Zooms and pans never leave the die: spp is capped at the
+        fit-view scale and the viewport stays inside the die bbox
+        (centered on an axis the viewport is wider than)."""
+        bb = self.meta["bbox"]
+        self.spp = min(self.spp, self._fit_spp())
+        w, h = self._viewport_size()
+        hx, hy = w / 2 * self.spp, h / 2 * self.spp
+        if 2 * hx >= bb[2] - bb[0]:
+            self.cx = (bb[0] + bb[2]) / 2
+        else:
+            self.cx = min(max(self.cx, bb[0] + hx), bb[2] - hx)
+        if 2 * hy >= bb[3] - bb[1]:
+            self.cy = (bb[1] + bb[3]) / 2
+        else:
+            self.cy = min(max(self.cy, bb[1] + hy), bb[3] - hy)
 
     def _on_allocate(self, _w, alloc):
         # GTK emits size-allocate on every set_from_pixbuf; reacting to
@@ -903,7 +944,7 @@ class Viewer:
         note = Gtk.Label()
         note.set_markup(
             "<small>cells beyond the limit are drawn as outline frames"
-            "\nwith names (live mode only; the far-zoom overview stays"
+            "\nwith names (live mode only; the far-zoom skeleton stays"
             "\nfull depth) - keys: 0-9 = depth, a = full</small>")
         note.set_xalign(0.0)
         box.pack_start(note, False, False, 0)
