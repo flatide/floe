@@ -61,9 +61,7 @@ def cmd_index(args):
         if not c.is_stale():
             print(f"[floe] cache up to date: {c.dir} (use --force to rebuild)")
             return
-    cache_mod.build_index(args.src, tile_bytes=args.tile_mb * 1e6,
-                          overview_px=args.overview_px,
-                          overview=not args.no_overview)
+    cache_mod.build_index(args.src, tile_bytes=args.tile_mb * 1e6)
 
 
 def cmd_info(args):
@@ -81,8 +79,7 @@ def cmd_info(args):
           f"({m['stats']['tile_files']} non-empty), "
           f"tile {g['tile_w'] * dbu:.0f}x{g['tile_h'] * dbu:.0f} um")
     print(f"index time : {m['stats']['total_s']}s "
-          f"(read {m['stats']['read_s']}s, tiles {m['stats']['tiles_s']}s, "
-          f"overview {m['stats']['overview_s']}s)")
+          f"(read {m['stats']['read_s']}s, tiles {m['stats']['tiles_s']}s)")
     print(f"{'layer':>8}  {'name':<12} {'stored shapes':>14}")
     for l in m["layers"]:
         print(f"{l['layer']:>5}/{l['datatype']:<2} {l['name']:<12} "
@@ -227,8 +224,6 @@ def main(argv=None):
     p.add_argument("--force", action="store_true")
     p.add_argument("--tile-mb", type=float, default=6.0,
                    help="target tile file size in MB (default 6)")
-    p.add_argument("--overview-px", type=int, default=1600)
-    p.add_argument("--no-overview", action="store_true")
     p.add_argument("--skeleton-only", action="store_true",
                    help="add the far-zoom skeleton to an existing cache "
                         "(one source read, no re-tiling)")

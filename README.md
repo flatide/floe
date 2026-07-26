@@ -211,7 +211,6 @@ python3 -m venv --system-site-packages .venv               # gi가 보이게
   meta.json      원본 지문(size/mtime), 그리드, 레이어 테이블(+색), 통계
   tiles/t_r_c.oas  타일별 OASIS (절대좌표 유지, 전 레이어, 경계에서 절단)
   skeleton.oas   줌아웃용 구조 모델 (블록 아웃라인 255/0 + 대형 도형 + 라벨)
-  overview/*.png   레이어별 full-die 렌더 (프레임 도착 전 placeholder)
 ```
 
 - **geometry는 타일 경계에서 잘린다** — 뷰어/영역분석 용도로는 무해하나

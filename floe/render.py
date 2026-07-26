@@ -1,7 +1,5 @@
 """Headless PNG rendering via klayout.lay (no display required)."""
 
-import os
-
 import klayout.db as db
 
 try:
@@ -106,34 +104,3 @@ class Renderer:
             self.lv.set_config(k, v)
         except Exception:
             pass
-
-
-def render_overviews(layout, top_cell, layers, out_dir, px, log=None):
-    """Render one full-die PNG per layer plus a combined one.
-
-    `layers` is the meta.json layer table (dicts with layer/datatype/name/
-    color). Returns the overview section for meta.json.
-    """
-    _require_lay()
-    colors = {(l["layer"], l["datatype"]): l["color"] for l in layers}
-    r = Renderer(layout, top_cell, colors)
-    bbox = top_cell.bbox()
-    # keep aspect ratio, longest edge = px
-    if bbox.width() >= bbox.height():
-        w, h = px, max(1, round(px * bbox.height() / bbox.width()))
-    else:
-        w, h = max(1, round(px * bbox.width() / bbox.height())), px
-
-    files = {}
-    args = (bbox.left, bbox.bottom, bbox.right, bbox.top, w, h)
-    r.render_png(os.path.join(out_dir, "all.png"), *args, visible=None)
-    files["__all__"] = "all.png"
-    for l in layers:
-        key = (l["layer"], l["datatype"])
-        fname = f"l{l['layer']}_d{l['datatype']}.png"
-        r.render_png(os.path.join(out_dir, fname), *args, visible=[key])
-        files[f"{l['layer']}/{l['datatype']}"] = fname
-        if log:
-            log(f"[index] overview {l['name']} done")
-    return {"px": [w, h], "bbox": [bbox.left, bbox.bottom, bbox.right,
-                                   bbox.top], "files": files}

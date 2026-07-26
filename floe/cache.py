@@ -5,7 +5,7 @@
     meta.json           source fingerprint, grid geometry, layer table, stats
     tiles/t_<r>_<c>.oas one OASIS per grid tile (all layers, absolute coords,
                         geometry cut at tile borders); empty tiles have no file
-    overview/*.png      per-layer full-die renders for far-zoom display
+    skeleton.oas        structural far-zoom model (see build_skeleton)
 
 Subsequent viewer/clip operations load only the tiles intersecting the region
 of interest, so they run in milliseconds-to-seconds instead of re-parsing the
@@ -299,8 +299,7 @@ def build_skeleton(ly, top, texts, out_path, log=print):
     cells (synthetic layer 255/0 OUTLINE), large shapes stored in big
     level-1/2 cells (power straps, long routes, seal ring), and every
     text label. Small enough for the render service to load whole at
-    startup, so far-zoom views render live and crisp at any scale -
-    which a fixed-resolution overview PNG cannot do.
+    startup, so far-zoom views render live and crisp at any scale.
     """
     bbox = top.bbox()
     min_feat = max(1, max(bbox.width(), bbox.height()) // 500)
@@ -406,15 +405,12 @@ def load_region(cache, x0, y0, x1, y1, log=None, max_tiles=None,
     return ly, top, n
 
 
-def build_index(src, tile_bytes=TILE_TARGET_BYTES, overview_px=1600,
-                overview=True, log=print):
+def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print):
     """Scan the source file once and build the tile cache."""
     t_all = time.perf_counter()
     src = os.path.abspath(src)
     cdir = cache_dir_for(src)
     os.makedirs(os.path.join(cdir, "tiles"), exist_ok=True)
-    if overview:
-        os.makedirs(os.path.join(cdir, "overview"), exist_ok=True)
 
     st = os.stat(src)
     log(f"[index] reading {src} ({st.st_size / 1e9:.2f} GB)...")
@@ -501,8 +497,6 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, overview_px=1600,
     log(f"[index] skeleton: {skel_meta['shapes']} shapes "
         f"({time.perf_counter() - t0:.1f}s)")
 
-    # collect meta fields BEFORE overview rendering: show_layout() hands
-    # layout ownership to the LayoutView, which destroys it on teardown
     meta = {
         "version": CACHE_VERSION,
         "src": {"path": src, "size": st.st_size, "mtime": int(st.st_mtime)},
@@ -511,22 +505,11 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, overview_px=1600,
         "bbox": [bbox.left, bbox.bottom, bbox.right, bbox.top],
         "grid": grid,
         "layers": layers,
-        "overview": None,
         "skeleton": skel_meta,
         "stats": {"read_s": round(t_read, 1), "tiles_s": round(t_tiles, 1),
-                  "overview_s": 0.0, "total_s": 0.0,
+                  "total_s": 0.0,
                   "cells": ly.cells(), "tile_files": n_files},
     }
-
-    if overview:
-        from . import render as render_mod
-        t0 = time.perf_counter()
-        meta["overview"] = render_mod.render_overviews(
-            ly, top, layers, os.path.join(cdir, "overview"),
-            overview_px, log=log)
-        t_ov = time.perf_counter() - t0
-        meta["stats"]["overview_s"] = round(t_ov, 1)
-        log(f"[index] overviews in {t_ov:.0f}s")
 
     meta["stats"]["total_s"] = round(time.perf_counter() - t_all, 1)
     with open(os.path.join(cdir, "meta.json"), "w") as f:
