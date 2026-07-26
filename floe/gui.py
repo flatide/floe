@@ -1144,13 +1144,38 @@ class Viewer:
         self.dstatus.set_text(self._depth_label())
         self.redraw(immediate=True)
 
+    def _dialog_setup(self, dlg):
+        """Shared chrome for the tool dialogs (depth, goto): transient and
+        modal (macOS quartz denies a non-modal secondary window keyboard
+        focus, so its keys leaked to the main window), centered on the
+        parent, non-resizable."""
+        dlg.set_transient_for(self.window)
+        dlg.set_modal(True)
+        dlg.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
+        dlg.set_resizable(False)
+
+    def _dialog_show(self, dlg, focus):
+        """show + present, then grab `focus` exactly once the window is
+        mapped. A grab before that is lost on quartz; re-grabbing on every
+        later map would reselect the field and trap focus there (digits
+        replace instead of append, Tab stops working)."""
+        def _grab(*_a):
+            if getattr(dlg, "_focused", False):
+                return False
+            dlg._focused = True
+            focus.grab_focus()
+            return False
+        dlg.connect("map-event", _grab)
+        dlg.show_all()
+        dlg.present()
+        GLib.idle_add(_grab)
+
     def _depth_dialog(self):
         if self._ddlg is not None:
             self._ddlg.present()
             return
         dlg = Gtk.Window(title="hierarchy depth")
-        dlg.set_transient_for(self.window)
-        dlg.set_resizable(False)
+        self._dialog_setup(dlg)
         self._ddlg = dlg
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         box.set_margin_top(10)
@@ -1167,6 +1192,7 @@ class Viewer:
         spin.set_value(self.depth_value)
         spin.connect("value-changed",
                      lambda s: self._set_depth(int(s.get_value())))
+        spin.connect("activate", lambda *_: dlg.destroy())  # Enter = ok
         dlg._spin = spin
         row.pack_start(spin, False, False, 0)
         for preset in (0, 1, 2, 3, 999):
@@ -1185,9 +1211,10 @@ class Viewer:
             "\n0-9 = depth, a = auto</small>")
         note.set_xalign(0.0)
         box.pack_start(note, False, False, 0)
-        close = Gtk.Button(label="close")
-        close.connect("clicked", lambda *_: dlg.destroy())
-        box.pack_start(close, False, False, 0)
+        # depth applies live (spin/presets); ok just closes
+        ok = Gtk.Button(label="ok")
+        ok.connect("clicked", lambda *_: dlg.destroy())
+        box.pack_start(ok, False, False, 0)
 
         def on_dialog_key(_w, ev):
             # Esc closes even when the focus sits in the spinbox, whose
@@ -1205,7 +1232,7 @@ class Viewer:
             # closes, leaving every key command dead until a click
             self.window.present()
         dlg.connect("destroy", _gone)
-        dlg.show_all()
+        self._dialog_show(dlg, spin)
 
     # ---- goto (Calibre-style jump to coordinates) ---------------------------
     GOTO_HINT = ("um coordinates. window = view width after the jump"
@@ -1217,8 +1244,7 @@ class Viewer:
             self._gdlg.present()
             return
         dlg = Gtk.Window(title="goto position")
-        dlg.set_transient_for(self.window)
-        dlg.set_resizable(False)
+        self._dialog_setup(dlg)
         self._gdlg = dlg
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         box.set_margin_top(10)
@@ -1248,9 +1274,9 @@ class Viewer:
         box.pack_start(note, False, False, 0)
         brow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         box.pack_start(brow, False, False, 0)
-        go = Gtk.Button(label="go")
-        go.connect("clicked", lambda *_: self._goto_apply())
-        brow.pack_start(go, True, True, 0)
+        ok = Gtk.Button(label="ok")
+        ok.connect("clicked", lambda *_: self._goto_apply())
+        brow.pack_start(ok, True, True, 0)
         close = Gtk.Button(label="close")
         close.connect("clicked", lambda *_: dlg.destroy())
         brow.pack_start(close, True, True, 0)
@@ -1266,27 +1292,7 @@ class Viewer:
             self._gdlg = None
             self.window.present()
         dlg.connect("destroy", _gone)
-
-        # macOS quartz does not give a non-modal secondary window keyboard
-        # focus, so its keys leaked to the main window (depth shortcut) and
-        # the x field was not editable. Modal makes the dialog the key
-        # window.
-        dlg.set_modal(True)
-
-        def _focus_x(*_a):
-            # A grab before the window is mapped is lost on quartz, so grab
-            # once it is up. Exactly once: re-grabbing on every later map
-            # (e.g. after present) reselects x and traps focus there -
-            # digits would replace instead of append and Tab would stop.
-            if getattr(dlg, "_focused", False):
-                return False
-            dlg._focused = True
-            entries[0].grab_focus()  # selects the prefill for overtyping
-            return False
-        dlg.connect("map-event", _focus_x)
-        dlg.show_all()
-        dlg.present()
-        GLib.idle_add(_focus_x)
+        self._dialog_show(dlg, entries[0])
 
     def _goto_apply(self):
         """Jump to the entered position: values fill x, y, window in
@@ -1310,8 +1316,8 @@ class Viewer:
             dlg._note.set_markup("<small>need both x and y - %s</small>"
                                  % self.GOTO_HINT)
             return
-        dlg._note.set_markup("<small>%s</small>" % self.GOTO_HINT)
         self.goto(vals[0], vals[1], vals[2] if len(vals) > 2 else None)
+        dlg.destroy()  # ok / Enter applied successfully: close
 
     def goto(self, x_um, y_um, window_um=None):
         """Center the view on (x, y) um with an X marker; window is the

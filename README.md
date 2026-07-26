@@ -153,9 +153,10 @@ floe clip  data/testchip_1g5.oas --bbox 5000,5000,5100,5100 --out region.oas
 
 ### Goto (좌표 이동, Calibre 방식)
 
-- `g` → goto 다이얼로그 (비모달, Esc 닫기). **x / y / window** 를 um 단위로
-  입력하고 Enter 또는 go — 해당 좌표로 이동하고 그 지점에 **X 마커**가
-  표시된다 (렌더 도착 전에도 고정 프레임 위에 유지). `Esc` 로 마커 삭제.
+- `g` → goto 다이얼로그 (모달, 부모 창 중앙). **x / y / window** 를 um 단위로
+  입력하고 Enter 또는 ok — 해당 좌표로 이동하고 다이얼로그는 닫힌다. 그
+  지점에 **X 마커**가 표시된다 (렌더 도착 전에도 고정 프레임 위에 유지).
+  `Esc`(또는 close)로 적용 없이 닫고, 뷰의 `Esc` 로 마커 삭제.
 - x/y는 현재 화면 중심으로 프리필. DRC 리포트의 `"x, y"` 쌍을 한 필드에
   통째로 붙여넣어도 된다 — 값은 x, y, window 순으로 채워지고, 쌍을
   붙여넣으면 남아 있는 y 프리필은 무시된다.
@@ -218,8 +219,9 @@ Calibre DESIGNrev의 depth와 동일한 개념. 0 = 설계 top 셀의 shape만 �
 (하위 셀은 외곽 프레임 + 셀 이름), N = N 단계 아래까지 전개, 999 = 전체.
 KLayout `LayoutView.max_hier_levels`로 구현하며, 타일 모자이크가 만드는
 내부 2단계(FLOE_MOSAIC→TILE)는 오프셋으로 숨겨서 사용자에게는 원본 설계
-계층 기준으로 보인다. `d` 키 → 다이얼로그(프리셋 0/1/2/3/full/auto +
-스핀박스, 비모달이라 열어둔 채 실시간 조정), `render --depth` 지원.
+계층 기준으로 보인다. `d` 키 → 다이얼로그(모달, 부모 창 중앙; 프리셋
+0/1/2/3/full/auto + 스핀박스로 실시간 조정, ok/Enter/Esc 로 닫기),
+`render --depth` 지원.
 현재 depth는 하단 상태바 우측에 항상 표시된다 (`depth: auto(2)` 형태).
 **단축키: `d` = 다이얼로그 (Calibre와 동일), 숫자 `0`~`9` = 해당 depth,
 `a` = auto 복귀.** full은 다이얼로그의 full 프리셋/스핀박스(999)로 지정.
