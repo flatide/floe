@@ -1162,6 +1162,35 @@ class Viewer:
                     pass  # backend without WM-function support: harmless
         dlg.connect("realize", _restrict)
 
+    def _center_on_parent(self, dlg):
+        """Center the dialog on the main window. GTK's CENTER_ON_PARENT
+        leans on the WM and miscomputes on some of them - X11 via XQuartz
+        pins the dialog to the top (only horizontally centered) because it
+        positions before the height is known. Instead move() explicitly
+        from the parent geometry and the dialog's own size, at realize
+        (before map, so the WM honors it as it did the GTK centering) and
+        again on map as a correction."""
+        dlg.set_position(Gtk.WindowPosition.NONE)
+
+        def _place(*_a):
+            par = self.window
+            if not (par.get_realized() and dlg.get_realized()):
+                return False
+            pw, ph = par.get_size()
+            px, py = par.get_position()
+            req = dlg.get_preferred_size()[1]     # natural GtkRequisition
+            dw = dlg.get_allocated_width()
+            dh = dlg.get_allocated_height()
+            if dw <= 1:                           # not allocated yet
+                dw = req.width
+            if dh <= 1:
+                dh = req.height
+            dlg.move(px + max(0, (pw - dw) // 2),
+                     py + max(0, (ph - dh) // 2))
+            return False
+        dlg.connect("realize", _place)
+        dlg.connect("map", _place)
+
     def _dialog_setup(self, dlg):
         """Shared chrome for the tool dialogs (depth, goto): transient and
         modal (macOS quartz denies a non-modal secondary window keyboard
@@ -1169,7 +1198,7 @@ class Viewer:
         parent, non-resizable, close button only."""
         dlg.set_transient_for(self.window)
         dlg.set_modal(True)
-        dlg.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
+        self._center_on_parent(dlg)
         dlg.set_resizable(False)
         self._only_close_button(dlg)
 
@@ -1535,6 +1564,7 @@ class Viewer:
         dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
                         "Save", Gtk.ResponseType.OK)
         self._only_close_button(dlg)
+        self._center_on_parent(dlg)
         dlg.set_do_overwrite_confirmation(True)
         dlg.set_current_name("floe_clip_%s_%s_%s_%sum.oas"
                              % (um[0], um[1], um[2], um[3]))
@@ -1560,7 +1590,7 @@ class Viewer:
             message_type=Gtk.MessageType.QUESTION,
             buttons=Gtk.ButtonsType.YES_NO,
             text="Quit floe?")
-        dlg.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
+        self._center_on_parent(dlg)
         self._only_close_button(dlg)
         dlg.set_default_response(Gtk.ResponseType.NO)
         self._grab_focus_once(
