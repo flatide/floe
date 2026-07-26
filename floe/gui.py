@@ -1173,21 +1173,29 @@ class Viewer:
         dlg.set_resizable(False)
         self._only_close_button(dlg)
 
-    def _dialog_show(self, dlg, focus):
-        """show + present, then grab `focus` exactly once the window is
-        mapped. A grab before that is lost on quartz; re-grabbing on every
-        later map would reselect the field and trap focus there (digits
-        replace instead of append, Tab stops working)."""
+    def _grab_focus_once(self, dlg, target):
+        """Present `dlg` and grab keyboard focus on `target` exactly once
+        it is mapped. quartz does not focus a freshly shown dialog - even
+        a modal one - until then; one-shot so a later map does not re-grab
+        (which would reselect an entry and trap focus there). `target` is a
+        widget or a zero-arg callable returning one (deferred so a run()
+        dialog's response buttons, built lazily, resolve after show)."""
         def _grab(*_a):
             if getattr(dlg, "_focused", False):
                 return False
             dlg._focused = True
-            focus.grab_focus()
+            dlg.present()
+            w = target() if callable(target) else target
+            if w is not None:
+                w.grab_focus()
             return False
         dlg.connect("map-event", _grab)
-        dlg.show_all()
-        dlg.present()
         GLib.idle_add(_grab)
+
+    def _dialog_show(self, dlg, focus):
+        """Grab focus once mapped, then show. See _grab_focus_once."""
+        self._grab_focus_once(dlg, focus)
+        dlg.show_all()
 
     def _depth_dialog(self):
         if self._ddlg is not None:
@@ -1555,6 +1563,8 @@ class Viewer:
         dlg.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
         self._only_close_button(dlg)
         dlg.set_default_response(Gtk.ResponseType.NO)
+        self._grab_focus_once(
+            dlg, lambda: dlg.get_widget_for_response(Gtk.ResponseType.NO))
         resp = dlg.run()
         dlg.destroy()
         # quartz fails to refocus the parent when a transient closes,
