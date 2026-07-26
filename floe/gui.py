@@ -996,7 +996,7 @@ class Viewer:
         elif name == "d":
             self._depth_dialog()
         elif name == "a":
-            self._set_depth(999)
+            self._set_depth_auto()
         elif len(name) == 1 and name.isdigit():
             self._set_depth(int(name))
         elif name.startswith("KP_") and name[3:].isdigit():
@@ -1137,7 +1137,7 @@ class Viewer:
             "\ncount stays interactive (index density table); explicit"
             "\nvalues override it. cells beyond the limit are drawn as"
             "\noutline frames with names - keys: d = this dialog,"
-            "\n0-9 = depth, a = full</small>")
+            "\n0-9 = depth, a = auto</small>")
         note.set_xalign(0.0)
         box.pack_start(note, False, False, 0)
         close = Gtk.Button(label="close")
