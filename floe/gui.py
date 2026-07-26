@@ -1267,17 +1267,26 @@ class Viewer:
             self.window.present()
         dlg.connect("destroy", _gone)
 
+        # macOS quartz does not give a non-modal secondary window keyboard
+        # focus, so its keys leaked to the main window (depth shortcut) and
+        # the x field was not editable. Modal makes the dialog the key
+        # window.
+        dlg.set_modal(True)
+
         def _focus_x(*_a):
-            # grab_focus right after show_all is lost on macOS quartz (the
-            # window is not keyboard-focused yet); present + focus once the
-            # dialog is actually mapped so the x field is editable and its
-            # prefill selected for overtyping.
-            dlg.present()
-            entries[0].grab_focus()
+            # A grab before the window is mapped is lost on quartz, so grab
+            # once it is up. Exactly once: re-grabbing on every later map
+            # (e.g. after present) reselects x and traps focus there -
+            # digits would replace instead of append and Tab would stop.
+            if getattr(dlg, "_focused", False):
+                return False
+            dlg._focused = True
+            entries[0].grab_focus()  # selects the prefill for overtyping
             return False
-        dlg.connect("map-event", lambda *_a: _focus_x())
+        dlg.connect("map-event", _focus_x)
         dlg.show_all()
-        _focus_x()
+        dlg.present()
+        GLib.idle_add(_focus_x)
 
     def _goto_apply(self):
         """Jump to the entered position: values fill x, y, window in
