@@ -1146,15 +1146,32 @@ class Viewer:
         self.dstatus.set_text(self._depth_label())
         self.redraw(immediate=True)
 
+    def _only_close_button(self, dlg):
+        """Leave only the window-close button in the title bar - no
+        minimize/maximize. The GdkWindow functions drive the macOS
+        traffic-light buttons; restrict them once the window realizes."""
+        dlg.set_type_hint(Gdk.WindowTypeHint.DIALOG)
+
+        def _restrict(_w):
+            win = dlg.get_window()
+            if win is not None:
+                try:
+                    win.set_functions(
+                        Gdk.WMFunction.CLOSE | Gdk.WMFunction.MOVE)
+                except Exception:
+                    pass  # backend without WM-function support: harmless
+        dlg.connect("realize", _restrict)
+
     def _dialog_setup(self, dlg):
         """Shared chrome for the tool dialogs (depth, goto): transient and
         modal (macOS quartz denies a non-modal secondary window keyboard
         focus, so its keys leaked to the main window), centered on the
-        parent, non-resizable."""
+        parent, non-resizable, close button only."""
         dlg.set_transient_for(self.window)
         dlg.set_modal(True)
         dlg.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
         dlg.set_resizable(False)
+        self._only_close_button(dlg)
 
     def _dialog_show(self, dlg, focus):
         """show + present, then grab `focus` exactly once the window is
@@ -1509,6 +1526,7 @@ class Viewer:
                                     action=Gtk.FileChooserAction.SAVE)
         dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
                         "Save", Gtk.ResponseType.OK)
+        self._only_close_button(dlg)
         dlg.set_do_overwrite_confirmation(True)
         dlg.set_current_name("floe_clip_%s_%s_%s_%sum.oas"
                              % (um[0], um[1], um[2], um[3]))
@@ -1535,6 +1553,7 @@ class Viewer:
             buttons=Gtk.ButtonsType.YES_NO,
             text="Quit floe?")
         dlg.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
+        self._only_close_button(dlg)
         dlg.set_default_response(Gtk.ResponseType.NO)
         resp = dlg.run()
         dlg.destroy()
