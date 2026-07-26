@@ -35,6 +35,7 @@ RULER_CORE = 0xFFE97AFF
 SNAP_VERTEX = 0x66FFCCFF
 SNAP_EDGE = 0x66CCFFFF
 SEL_CORE = 0xFFFFFFFF
+GOTO_MARK = 0xFF66D9FF
 
 AUTO_DEPTH_BUDGET = 120_000   # est. shapes auto depth allows on screen
 MIN_SPP = 0.01     # max zoom-in: 1 px = 0.01 dbu; keeps render bboxes
@@ -206,6 +207,8 @@ class Viewer:
         self._pending_t0 = 0.0
         self._pending_timer = None
         self._ddlg = None
+        self._gdlg = None
+        self.goto_mark = None       # world point of the last goto (X marker)
         self._labels = []           # Gtk.Label pool for ruler distances
 
         self.window = Gtk.Window(title=APP)
@@ -328,6 +331,7 @@ class Viewer:
         self.selection = None
         self._sel_text = ""
         self._pick_px = None
+        self.goto_mark = None
         src = self.meta["src"]
         self.window.set_title(
             "%s - %s" % (APP, os.path.basename(src["path"])))
@@ -539,6 +543,14 @@ class Viewer:
             rect_outline(disp, mx - 5, my - 5, mx + 5, my + 5, None, color)
             fill_rect(disp, mx - 9, my, 19, 1, color)
             fill_rect(disp, mx, my - 9, 1, 19, color)
+        if self.goto_mark is not None:
+            gx, gy = sx(self.goto_mark[0]), sy(self.goto_mark[1])
+            if -12 <= gx <= disp.get_width() + 12 and \
+                    -12 <= gy <= disp.get_height() + 12:
+                stamp_segment(disp, (gx - 10, gy - 10), (gx + 10, gy + 10),
+                              BLACK, GOTO_MARK)
+                stamp_segment(disp, (gx - 10, gy + 10), (gx + 10, gy - 10),
+                              BLACK, GOTO_MARK)
         if self._zoomdrag is not None and self._band_cur is not None:
             x0, y0 = self._zoomdrag
             x1, y1 = self._band_cur
@@ -995,6 +1007,8 @@ class Viewer:
             self._esc()
         elif name == "d":
             self._depth_dialog()
+        elif name == "g":
+            self._goto_dialog()
         elif name == "a":
             self._set_depth_auto()
         elif len(name) == 1 and name.isdigit():
@@ -1162,6 +1176,98 @@ class Viewer:
         dlg.connect("destroy", _gone)
         dlg.show_all()
 
+    # ---- goto (Calibre-style jump to coordinates) ---------------------------
+    GOTO_HINT = ("um coordinates. window = view width after the jump"
+                 "\n(blank = keep zoom). a pasted \"x, y\" pair in one"
+                 "\nfield works too. Esc clears the X marker.")
+
+    def _goto_dialog(self):
+        if self._gdlg is not None:
+            self._gdlg.present()
+            return
+        dlg = Gtk.Window(title="goto position")
+        dlg.set_transient_for(self.window)
+        dlg.set_resizable(False)
+        self._gdlg = dlg
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_margin_top(10)
+        box.set_margin_bottom(10)
+        box.set_margin_start(14)
+        box.set_margin_end(14)
+        dlg.add(box)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        box.pack_start(row, False, False, 0)
+        entries = []
+        for label, chars, text in (
+                ("x", 11, "%.3f" % (self.cx * self.dbu)),
+                ("y", 11, "%.3f" % (self.cy * self.dbu)),
+                ("window", 8, "")):
+            row.pack_start(Gtk.Label(label=label), False, False, 0)
+            e = Gtk.Entry()
+            e.set_width_chars(chars)
+            e.set_text(text)
+            e.connect("activate", lambda *_: self._goto_apply())
+            row.pack_start(e, False, False, 0)
+            entries.append(e)
+        dlg._entries = entries
+        note = Gtk.Label()
+        note.set_markup("<small>%s</small>" % self.GOTO_HINT)
+        note.set_xalign(0.0)
+        dlg._note = note
+        box.pack_start(note, False, False, 0)
+        brow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        box.pack_start(brow, False, False, 0)
+        go = Gtk.Button(label="go")
+        go.connect("clicked", lambda *_: self._goto_apply())
+        brow.pack_start(go, True, True, 0)
+        close = Gtk.Button(label="close")
+        close.connect("clicked", lambda *_: dlg.destroy())
+        brow.pack_start(close, True, True, 0)
+
+        def on_dialog_key(_w, ev):
+            if Gdk.keyval_name(ev.keyval) == "Escape":
+                dlg.destroy()
+                return True
+            return False
+        dlg.connect("key-press-event", on_dialog_key)
+
+        def _gone(*_a):
+            self._gdlg = None
+            self.window.present()
+        dlg.connect("destroy", _gone)
+        dlg.show_all()
+        entries[0].grab_focus()
+
+    def _goto_apply(self):
+        """Jump to the entered position: values fill x, y, window in
+        order, so a DRC-report "x, y" pair pasted into any one field
+        spreads across both coordinates."""
+        dlg = self._gdlg
+        if dlg is None:
+            return
+        try:
+            part = [[float(t) for t in
+                     e.get_text().replace(",", " ").split()]
+                    for e in dlg._entries]
+        except ValueError:
+            dlg._note.set_markup("<small>not a number - %s</small>"
+                                 % self.GOTO_HINT)
+            return
+        if len(part[0]) >= 2:
+            part[1] = []  # pair pasted into x: the y field is stale
+        vals = part[0] + part[1] + part[2]
+        if len(vals) < 2:
+            dlg._note.set_markup("<small>need both x and y - %s</small>"
+                                 % self.GOTO_HINT)
+            return
+        dlg._note.set_markup("<small>%s</small>" % self.GOTO_HINT)
+        self.goto_mark = (vals[0] / self.dbu, vals[1] / self.dbu)
+        self.cx, self.cy = self.goto_mark
+        if len(vals) > 2 and vals[2] > 0:
+            w, _h = self._viewport_size()
+            self.spp = (vals[2] / self.dbu) / w
+        self.redraw(immediate=True)
+
     # ---- ruler / snap / pick -----------------------------------------------
     def _update_cursor(self, ev):
         bbox = self.view_bbox()
@@ -1215,7 +1321,7 @@ class Viewer:
 
     def _esc(self):
         """Step out flateyes-style: pending point -> selection -> ruler
-        mode -> finished rulers."""
+        mode -> finished rulers -> goto marker."""
         if self._ruler_start is not None:
             self._ruler_start = None
         elif self.selection is not None:
@@ -1226,6 +1332,8 @@ class Viewer:
             self._snap_res = None
         elif self.rulers:
             self.rulers = []
+        elif self.goto_mark is not None:
+            self.goto_mark = None
         self._display()
 
     def _cursor_snapped(self):

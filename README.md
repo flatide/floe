@@ -123,7 +123,7 @@ floe clip  data/testchip_1g5.oas --bbox 5000,5000,5100,5100 --out region.oas
   엣지 위 최근접점. 커서 주변 스냅 위치가 십자 마커로 미리 표시된다
   (꼭짓점=녹색, 엣지=파랑). 확대(live) 상태에서 동작.
 - 측정 중 상태바에 실시간 길이/dx/dy 표시. `Esc` 는 단계적으로 해제:
-  진행 중 점 → 선택 → 측정 모드 → 확정된 측정선 전체 삭제.
+  진행 중 점 → 선택 → 측정 모드 → 확정된 측정선 → goto 마커.
 
 ### Object picking (Calibre 방식)
 
@@ -148,6 +148,17 @@ floe clip  data/testchip_1g5.oas --bbox 5000,5000,5100,5100 --out region.oas
   마진 확장 프레임은 뒤에서 조용히 갈아끼운다 (새 요청이 오면 생략).
 - 구버전 캐시에는 `floe index --skeleton-only` 로 skeleton만 추가할 수
   있다 (원본 1회 읽기, 재타일링 없음).
+
+### Goto (좌표 이동, Calibre 방식)
+
+- `g` → goto 다이얼로그 (비모달, Esc 닫기). **x / y / window** 를 um 단위로
+  입력하고 Enter 또는 go — 해당 좌표로 이동하고 그 지점에 **X 마커**가
+  표시된다 (렌더 도착 전에도 고정 프레임 위에 유지). `Esc` 로 마커 삭제.
+- x/y는 현재 화면 중심으로 프리필. DRC 리포트의 `"x, y"` 쌍을 한 필드에
+  통째로 붙여넣어도 된다 — 값은 x, y, window 순으로 채워지고, 쌍을
+  붙여넣으면 남아 있는 y 프리필은 무시된다.
+- **window** = 이동 후 뷰 폭(um). 비우면 현재 배율 유지. die 밖 좌표는
+  뷰가 경계에 클램프되지만 마커는 요청한 지점에 남는다.
 
 ### 단일 인스턴스 동작 (flateyes와 동일)
 
@@ -192,7 +203,7 @@ GUI는 **GTK3/PyGObject** 셸이다. flateyes와 같은 폐쇄망 호스트
 - 인스턴스 소켓은 `GLib.io_add_watch`로, 결과 큐는 `GLib.timeout_add`(25ms)로
   서비스한다. UI 라벨은 English only (XQuartz 한글 글리프 부재 — flateyes 규칙).
 - 키: `f` fit, `+`/`-`(`=`) 줌, `r` ruler, `m` 스냅, `d` depth 다이얼로그,
-  `0`-`9` depth, `a` depth auto, `Esc` 단계 해제.
+  `g` goto 다이얼로그, `0`-`9` depth, `a` depth auto, `Esc` 단계 해제.
 
 ### depth (계층 표시 깊이)
 
@@ -290,4 +301,5 @@ python3 -m venv --system-site-packages .venv               # gi가 보이게
 3. ✅ 네이티브 뷰어 (view): 영역 줌/팬/레이어 토글/depth/clip 저장
 4. Calibre DRC RDB 파서/조회 (KLayout `rdb` 모듈) + 에러 영역 자동 clip/뷰
 5. 대용량 스케일링: 인덱싱 시 레이어 그룹별 다중 패스(RAM 상한), 타일 병렬 빌드
-6. 뷰어 개선: 중간 줌 레벨 피라미드, 좌표 이동/검색, 마커 점프
+6. 뷰어 개선: 중간 줌 레벨 피라미드, 셀/텍스트 검색, 마커 점프
+   (좌표 이동(goto)은 ✅)
