@@ -12,12 +12,47 @@
 
 ## 환경 설정
 
+엔진은 KLayout pip 모듈(`klayout.db`/`klayout.lay` 헤드리스), GUI 셸은
+시스템 PyGObject/GTK3. **`gi`(PyGObject)는 pip으로 설치하지 않는다** —
+OS 패키지로 설치하고, venv를 그 gi가 보이는 파이썬으로
+`--system-site-packages` 옵션과 함께 만든다. CLI 전용
+(`index/info/render/clip`)이면 GTK 없이 klayout+numpy만으로 동작한다.
+
+Python 3.14 + klayout 0.30.9 확인됨.
+
+### macOS (개발/테스트)
+
 ```sh
-python3 -m venv .venv
+brew install pygobject3 gtk+3 librsvg adwaita-icon-theme
+
+# pygobject3의 gi가 어느 brew 파이썬 버전에 들어갔는지 확인 (예: python3.14)
+ls /opt/homebrew/lib | grep python
+
+# 반드시 그 버전의 Homebrew 파이썬으로 venv 생성
+/opt/homebrew/bin/python3.14 -m venv --system-site-packages .venv
+.venv/bin/pip install klayout numpy
+.venv/bin/python -c "import gi; gi.require_version('Gtk', '3.0'); print(gi.__file__)"
+```
+
+- Xcode CLT의 `/usr/bin/python3`, python.org 설치본, pyenv 등 다른 파이썬으로
+  venv를 만들면 `--system-site-packages`여도 brew의 gi가 보이지 않아
+  `No module named 'gi'` 가 난다. venv의 `pyvenv.cfg`에서
+  `home = /opt/homebrew/opt/python@3.XX/bin` 인지 확인할 것.
+- Intel 맥은 Homebrew 경로가 `/opt/homebrew` 대신 `/usr/local`.
+- `librsvg`가 없으면 GTK 심볼릭 아이콘(check-symbolic.svg) 로드 경고가 뜬다.
+
+### Linux (인터넷 가능 호스트)
+
+```sh
+# PyGObject/GTK3는 OS 패키지로 (RHEL 계열 GNOME 데스크톱엔 기본 탑재)
+sudo dnf install python3-gobject gtk3      # Debian/Ubuntu: python3-gi gir1.2-gtk-3.0
+
+python3 -c 'import gi; gi.require_version("Gtk", "3.0")'   # 사전 확인
+python3 -m venv --system-site-packages .venv
 .venv/bin/pip install klayout numpy
 ```
 
-- KLayout pip 모듈(GUI 없는 `klayout.db`)을 엔진으로 사용. Python 3.14 + klayout 0.30.9 확인됨.
+폐쇄망 호스트는 아래 [폐쇄망 리눅스 배포](#폐쇄망-리눅스-배포) 절차를 따른다.
 
 ## 테스트 데이터 생성
 
@@ -103,12 +138,14 @@ floe clip  data/testchip_1g5.oas --bbox 5000,5000,5100,5100 --out region.oas
   배선/스트랩, 라벨만 담은 수 MB짜리 구조 모델)을 라이브 렌더링해 어떤
   배율에서도 선명한 플로어플랜을 보여주고, 확대하면 뷰포트와 교차하는
   타일만 lazy 로딩해 실시간 렌더링한다 (LRU 캐시로 메모리 상한 유지 →
-  원본 크기와 무관하게 동작). 오버뷰 PNG는 프레임 도착 전의 바탕
-  placeholder로만 쓰인다.
+  원본 크기와 무관하게 동작). 새 프레임 도착 전에는 이전 프레임이
+  원래 배율 그대로 고정 표시된다.
 - **마진 렌더링**: 프레임을 뷰포트보다 각 방향 50% 넓게 렌더해 두므로
   (Calibre 방식), 마진 안에서의 팬은 재렌더 없이 즉시 표시되고 경계에
   가까워지면 백그라운드로 재중심 렌더가 돈다. 배율·depth·레이어가 그대로면
-  같은 화면을 다시 그리지 않는다.
+  같은 화면을 다시 그리지 않는다. 첫 방문 영역에서 마진이 미로딩 타일을
+  크게 늘리면 **2단계 렌더**: 뷰 영역만 먼저 렌더해 즉시 표시하고,
+  마진 확장 프레임은 뒤에서 조용히 갈아끼운다 (새 요청이 오면 생략).
 - 구버전 캐시에는 `floe index --skeleton-only` 로 skeleton만 추가할 수
   있다 (원본 1회 읽기, 재타일링 없음).
 
@@ -217,8 +254,7 @@ python3 -m venv --system-site-packages .venv               # gi가 보이게
 
 - CLI 전용(`index/info/render/clip`)이면 GTK 없이도 동작한다.
 - 원격에서는 Exceed TurboX/XQuartz 등 X 서버로 `floe view` 실행 (flateyes와
-  동일한 접속 형태). macOS 개발 환경은 brew `pygobject3 gtk+3`로 동일 코드
-  실행.
+  동일한 접속 형태). macOS 개발 환경 설정은 위 [환경 설정](#환경-설정) 참고.
 
 ### .ice 구조와 설계 노트
 

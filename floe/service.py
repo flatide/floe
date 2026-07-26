@@ -144,10 +144,11 @@ def _svc_pick(cache, mosaic, job, res):
 
 
 def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
-                res):
+                req, res):
     t0 = time.perf_counter()
     x0, y0, x1, y1 = job["bbox"]
     scope = job.get("scope", "live")
+    bg = False
     try:
         if scope == "skel":
             if skel_renderer is None:
@@ -186,6 +187,34 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
                 use_mosaic, use_renderer = lod[0], lod[1]
             else:
                 use_mosaic, use_renderer = mosaic, renderer
+            view = job.get("view")
+            if use_mosaic is mosaic and view is not None:
+                # two-phase margin render: when the overdraw margin
+                # multiplies the first-visit tile parse, serve the view
+                # region first and upgrade to the full margin silently
+                vx0, vy0, vx1, vy1 = view
+                vtiles = cache.tiles_for_bbox(vx0, vy0, vx1, vy1)
+                fresh = sum(1 for rc in tiles if rc not in mosaic.loaded)
+                vfresh = sum(1 for rc in vtiles
+                             if rc not in mosaic.loaded)
+                if fresh - vfresh >= 4 and x1 > x0 and y1 > y0:
+                    if mosaic.ensure(vtiles):
+                        renderer.refresh()
+                    vw = max(1, round(job["w"] * (vx1 - vx0) / (x1 - x0)))
+                    vh = max(1, round(job["h"] * (vy1 - vy0) / (y1 - y0)))
+                    renderer.render_png(tmp, vx0, vy0, vx1, vy1, vw, vh,
+                                        visible=job["visible"],
+                                        depth=depth)
+                    with open(tmp, "rb") as f:
+                        png = f.read()
+                    res.put({"kind": "frame", "png": png,
+                             "bbox": (vx0, vy0, vx1, vy1),
+                             "gen": job["gen"], "tiles": len(vtiles),
+                             "scope": scope, "ms": round(
+                                 (time.perf_counter() - t0) * 1000)})
+                    if not req.empty():
+                        return  # newer work queued: skip the margin
+                    bg = True   # margin upgrade: no status churn
             if use_mosaic.ensure(tiles):
                 use_renderer.refresh()
             use_renderer.render_png(tmp, x0, y0, x1, y1,
@@ -196,6 +225,7 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
             png = f.read()
         res.put({"kind": "frame", "png": png, "bbox": job["bbox"],
                  "gen": job["gen"], "tiles": tiles_n, "scope": scope,
+                 "bg": bg,
                  "ms": round((time.perf_counter() - t0) * 1000)})
     except Exception as e:  # keep the service alive
         res.put({"kind": "error", "msg": str(e)})
@@ -299,7 +329,7 @@ def _render_service(src, req, res):
             renders = [j for j in jobs if j["kind"] == "render"]
             if renders:
                 _svc_render(cache, mosaic, renderer, lod, skel_renderer,
-                            tmp, renders[-1], res)
+                            tmp, renders[-1], req, res)
     except (KeyboardInterrupt, EOFError, OSError):
         return  # parent went away or interrupted: exit quietly
 

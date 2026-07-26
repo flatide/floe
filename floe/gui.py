@@ -699,6 +699,7 @@ class Viewer:
         self.worker.submit({
             "kind": "render", "gen": self.gen, "scope": scope,
             "bbox": tuple(int(round(v)) for v in eb),
+            "view": tuple(int(round(v)) for v in bbox),
             "w": int(round(w * (1 + 2 * m))),
             "h": int(round(h * (1 + 2 * m))),
             "depth": depth,
@@ -747,12 +748,14 @@ class Viewer:
                         pix = loader.get_pixbuf()
                         fb = res["bbox"]
                         fspp = (fb[2] - fb[0]) / max(1, pix.get_width())
-                        key = self._job_keys.pop(res["gen"], None)
-                        used = self._job_depth.pop(res["gen"], None)
-                        self._depth_used = used
-                        self.dstatus.set_text(self._depth_label())
+                        key = self._job_keys.get(res["gen"])
+                        used = self._job_depth.get(res["gen"])
                         self.last_frame = (pix, fb, fspp, key)
                         self._display()
+                        if res.get("bg"):
+                            continue  # silent margin upgrade
+                        self._depth_used = used
+                        self.dstatus.set_text(self._depth_label())
                         if res.get("scope") == "skel":
                             mode = "far view (%s, %d ms)" % (
                                 "outline" if used == 0 else "skeleton",
