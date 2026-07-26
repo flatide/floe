@@ -13,10 +13,14 @@ EVICT_ABOVE = 128       # keep at most this many tiles in the mosaic
 
 
 class Mosaic:
-    """A Layout that accumulates cache tiles on demand with LRU eviction."""
+    """A Layout that accumulates cache tiles on demand with LRU eviction.
 
-    def __init__(self, cache):
+    path_fn picks the tile file per (r, c); default full tiles, pass
+    cache.lod_tile_path for the depth-limited companion tiles."""
+
+    def __init__(self, cache, path_fn=None):
         self.cache = cache
+        self.path_fn = path_fn or cache.tile_path
         self.ly = db.Layout()
         self.ly.dbu = cache.meta["dbu"]
         self.top = self.ly.create_cell("FLOE_MOSAIC")
@@ -30,7 +34,7 @@ class Mosaic:
                 self.loaded[rc] = self.loaded.pop(rc)  # LRU bump
                 continue
             r, c = rc
-            path = self.cache.tile_path(r, c)
+            path = self.path_fn(r, c)
             if not os.path.isfile(path):
                 self.loaded[rc] = None
                 continue

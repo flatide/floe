@@ -39,8 +39,8 @@ def open_cache(src, auto_index, args):
         cache_mod.build_index(src)
     c.load()
     if c.is_stale():
-        print("[floe][warn] source file changed since indexing - "
-              "cache may be outdated; run 'floe index --force' to rebuild",
+        print("[floe][warn] cache is outdated (source changed or cache "
+              "format bumped); run 'floe index' to rebuild",
               file=sys.stderr)
     return c
 

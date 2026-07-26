@@ -2,9 +2,11 @@
 
 `build_index` scans the source file once and produces `<src>.ice/`:
 
-    meta.json           source fingerprint, grid geometry, layer table, stats
+    meta.json           source fingerprint, grid geometry, layer table,
+                        per-tile depth-density table, stats
     tiles/t_<r>_<c>.oas one OASIS per grid tile (all layers, absolute coords,
                         geometry cut at tile borders); empty tiles have no file
+    tiles_lod/...       depth-limited companion tiles (see _tile_lod)
     skeleton.oas        structural far-zoom model (see build_skeleton)
 
 Subsequent viewer/clip operations load only the tiles intersecting the region
@@ -23,7 +25,7 @@ print = functools.partial(print, flush=True)
 
 import klayout.db as db
 
-CACHE_VERSION = 1
+CACHE_VERSION = 7
 TILE_TARGET_BYTES = 6_000_000
 GRID_MIN, GRID_MAX = 4, 96
 
@@ -78,6 +80,8 @@ class Cache:
         return self.meta
 
     def is_stale(self):
+        if self.meta.get("version") != CACHE_VERSION:
+            return True
         st = os.stat(self.src)
         srcinfo = self.meta["src"]
         return (st.st_size != srcinfo["size"]
@@ -85,6 +89,9 @@ class Cache:
 
     def tile_path(self, r, c):
         return os.path.join(self.dir, "tiles", f"t_{r}_{c}.oas")
+
+    def lod_tile_path(self, r, c):
+        return os.path.join(self.dir, "tiles_lod", f"t_{r}_{c}.oas")
 
     def tiles_for_bbox(self, x0, y0, x1, y1):
         """Grid tiles (r, c) intersecting bbox in dbu, clamped to the grid."""
@@ -258,15 +265,17 @@ def compact_instances(ly, min_group=500, log=None):
                 f"{len(rebuilt)} instances")
 
 
-def _skel_harvest(ly, lmap, stop_cell, cell, trans, min_feat, big, n, cap,
-                  depth):
-    """Copy large stored shapes of big cells (depth-limited) into the
-    skeleton, transformed to top coordinates."""
+def _skel_harvest(ly, dmaps, stop_cell, cell, trans, min_feat, big, n,
+                  cap, level):
+    """Copy large stored shapes of big cells into the skeleton,
+    transformed to top coordinates, onto the twin layer of the level
+    the shape lives at (so the far view can honor depth 1 vs 2)."""
+    dmap = dmaps[level]
     for li in ly.layer_indexes():
         shapes = cell.shapes(li)
         if shapes.size() == 0 or shapes.size() > 60_000:
             continue  # fill containers hold millions; skip wholesale
-        dst = stop_cell.shapes(lmap[li])
+        dst = stop_cell.shapes(dmap[li])
         for sh in shapes.each():
             if n >= cap:
                 return n
@@ -278,7 +287,7 @@ def _skel_harvest(ly, lmap, stop_cell, cell, trans, min_feat, big, n, cap,
                 if poly is not None:
                     dst.insert(poly.transformed(trans))
                     n += 1
-    if depth <= 1:
+    if level >= max(dmaps):
         return n
     for inst in cell.each_inst():
         if n >= cap:
@@ -286,20 +295,31 @@ def _skel_harvest(ly, lmap, stop_cell, cell, trans, min_feat, big, n, cap,
         gb = inst.bbox()
         if gb.width() < big and gb.height() < big:
             continue
-        n = _skel_harvest(ly, lmap, stop_cell, ly.cell(inst.cell_index),
+        n = _skel_harvest(ly, dmaps, stop_cell, ly.cell(inst.cell_index),
                           trans * inst.trans, min_feat, big, n, cap,
-                          depth - 1)
+                          level + 1)
     return n
+
+
+SKEL_DETAIL_DT = 30000  # datatype offset per level of detail twin layers
+SKEL_DETAIL_LEVELS = 2  # harvest big shapes from cells this deep
 
 
 def build_skeleton(ly, top, texts, out_path, log=print):
     """Structural far-zoom model, written as a tiny skeleton.oas.
 
-    Contents: large top-level shapes, outline boxes + names of first-level
-    cells (synthetic layer 255/0 OUTLINE), large shapes stored in big
-    level-1/2 cells (power straps, long routes, seal ring), and every
-    text label. Small enough for the render service to load whole at
-    startup, so far-zoom views render live and crisp at any scale.
+    The depth-0 content of the far view (large top-level shapes,
+    outline boxes + names of first-level cells on the synthetic layer
+    255/0 OUTLINE) sits on the design layers; large shapes stored in
+    big level-k cells (power straps, long routes, seal ring; k <=
+    SKEL_DETAIL_LEVELS) sit on per-level twin layers (datatype + k *
+    SKEL_DETAIL_DT), text labels on the level-1 twin. The render
+    service turns level-k twins visible only for far views at depth >=
+    k, so the far view honors depth 0/1/2 consistently with the live
+    render. A layer split, not a cell split: klayout labels cells cut
+    by a hierarchy limit, which would stamp a bogus name across the
+    die. Small enough for the render service to load whole at startup,
+    so far-zoom views render live and crisp at any scale.
     """
     bbox = top.bbox()
     min_feat = max(1, max(bbox.width(), bbox.height()) // 500)
@@ -308,7 +328,14 @@ def build_skeleton(ly, top, texts, out_path, log=print):
     skel.dbu = ly.dbu
     stop_cell = skel.create_cell("SKEL_TOP")
     outline_li = skel.layer(db.LayerInfo(255, 0, "OUTLINE"))
-    lmap = {li: skel.layer(ly.get_info(li)) for li in ly.layer_indexes()}
+    lmap = {}
+    dmaps = {k: {} for k in range(1, SKEL_DETAIL_LEVELS + 1)}
+    for li in ly.layer_indexes():
+        info = ly.get_info(li)
+        lmap[li] = skel.layer(info)
+        for k in dmaps:
+            dmaps[k][li] = skel.layer(db.LayerInfo(
+                info.layer, info.datatype + k * SKEL_DETAIL_DT))
     cap = 300_000
     n = 0
     for li in ly.layer_indexes():
@@ -334,10 +361,10 @@ def build_skeleton(ly, top, texts, out_path, log=print):
         c = gb.center()
         stop_cell.shapes(outline_li).insert(
             db.Text(child.name, db.Trans(db.Vector(c.x, c.y))))
-        n = _skel_harvest(ly, lmap, stop_cell, child, inst.trans,
-                          min_feat, big, n, cap, 2)
+        n = _skel_harvest(ly, dmaps, stop_cell, child, inst.trans,
+                          min_feat, big, n, cap, 1)
     for li, text in texts:
-        stop_cell.shapes(lmap[li]).insert(text)
+        stop_cell.shapes(dmaps[1][li]).insert(text)
     skel.write(out_path, save_opts())
     return {"file": os.path.basename(out_path), "shapes": n}
 
@@ -405,12 +432,117 @@ def load_region(cache, x0, y0, x1, y1, log=None, max_tiles=None,
     return ly, top, n
 
 
+LOD_SHAPE_CAP = 50_000  # per-tile shape budget of the LOD companion
+
+
+def _tile_lod(tgt, top_ci, out_path, cap=LOD_SHAPE_CAP):
+    """Depth-limited companion tile, cut adaptively: whole hierarchy
+    levels are kept while the running distinct-cell shape total stays
+    under cap; the cells of the first level beyond become ghosts (bbox
+    on the synthetic layer 254/0, so depth-cut renders still draw the
+    correct outline frame + name) and deeper cells are dropped.
+    Kilobytes where the full tile is megabytes - shallow-depth renders
+    load these instead. Built by dup + prune, so no per-shape Python
+    loop. Returns the deepest depth the file serves, or None when the
+    whole tree fits under cap (then no file is written and the full
+    tile doubles as its own LOD)."""
+    lod = tgt.dup()
+    lvl = {top_ci: 0}
+    levels = [[top_ci]]
+    while True:
+        nxt = []
+        for ci in levels[-1]:
+            for inst in lod.cell(ci).each_inst():
+                ch = inst.cell_index
+                if ch not in lvl:
+                    lvl[ch] = len(levels)
+                    nxt.append(ch)
+        if not nxt:
+            break
+        levels.append(nxt)
+    lis = list(lod.layer_indexes())
+
+    def count(cells):
+        return sum(lod.cell(ci).shapes(li).size()
+                   for ci in cells for li in lis)
+
+    cut = 0
+    cum = count(levels[0])
+    while cut + 1 < len(levels):
+        cum += count(levels[cut + 1])
+        if cum > cap:
+            break
+        cut += 1
+    if cut + 1 >= len(levels):
+        return None  # whole tree fits: the full tile is small already
+    ghost_li = lod.layer(db.LayerInfo(254, 0, "GHOST"))
+    for ci in levels[cut + 1]:
+        c = lod.cell(ci)
+        b = c.bbox()
+        c.clear()
+        if not b.empty():
+            c.shapes(ghost_li).insert(b)
+    doomed = [ci for ci, l in lvl.items() if l > cut + 1]
+    if doomed:
+        lod.delete_cells(doomed)
+    lod.write(out_path, save_opts())
+    return cut
+
+
+DENSITY_LEVELS = 12     # depth levels recorded in the per-tile density table
+
+
+def _tile_density(ly, top_ci, max_levels=DENSITY_LEVELS):
+    """Density table for one tile: cumulative shape counts per hierarchy
+    level below the tile top, per layer ({"5/1": [n_depth0, ...]}), plus
+    "cells" = instance count entering each level. Level k equals the
+    viewer's depth k; content deeper than max_levels folds into the last
+    shape entry, so it always holds the tile's full total. The viewer
+    picks its auto depth from this table without loading any tile: the
+    cost of depth d is shapes down to d plus one outline frame per cell
+    at level d+1 ("cells" catches the bitcell-array trap where a mid
+    depth draws millions of frames)."""
+    keys = {li: f"{ly.get_info(li).layer}/{ly.get_info(li).datatype}"
+            for li in ly.layer_indexes()}
+    total = dict.fromkeys(keys.values(), 0)
+    counts = {key: [] for key in keys.values()}
+    cells = []
+    level, depth = {top_ci: 1}, 0
+    while level:
+        if depth <= max_levels:
+            cells.append(sum(level.values()))
+        nxt = {}
+        for ci, mult in level.items():
+            cell = ly.cell(ci)
+            for li, key in keys.items():
+                n = cell.shapes(li).size()
+                if n:
+                    total[key] += n * mult
+            for inst in cell.each_inst():
+                nxt[inst.cell_index] = nxt.get(inst.cell_index, 0) \
+                    + inst.size() * mult
+        if depth < max_levels:
+            for key in counts:
+                counts[key].append(total[key])
+        level, depth = nxt, depth + 1
+    for key, arr in counts.items():
+        arr[-1] = total[key]
+    out = {key: arr for key, arr in counts.items() if arr[-1]}
+    if out:
+        out["cells"] = cells
+    return out
+
+
 def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print):
     """Scan the source file once and build the tile cache."""
     t_all = time.perf_counter()
     src = os.path.abspath(src)
     cdir = cache_dir_for(src)
-    os.makedirs(os.path.join(cdir, "tiles"), exist_ok=True)
+    for sub in ("tiles", "tiles_lod"):  # drop stale files of prior builds
+        d = os.path.join(cdir, sub)
+        os.makedirs(d, exist_ok=True)
+        for f in os.listdir(d):
+            os.remove(os.path.join(d, f))
 
     st = os.stat(src)
     log(f"[index] reading {src} ({st.st_size / 1e9:.2f} GB)...")
@@ -458,6 +590,8 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print):
     # --- tiles ---
     t0 = time.perf_counter()
     n_files = 0
+    density_tiles = {}
+    lod_tiles = {}
     opts = save_opts()
     for r in range(n):
         for c in range(n):
@@ -485,6 +619,13 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print):
             compact_instances(tgt)
             tgt.write(path, opts)
             n_files += 1
+            lod_d = _tile_lod(tgt, ci, os.path.join(cdir, "tiles_lod",
+                                                    f"t_{r}_{c}.oas"))
+            if lod_d is not None:
+                lod_tiles[f"{r},{c}"] = lod_d
+            d = _tile_density(tgt, ci)
+            if d:
+                density_tiles[f"{r},{c}"] = d
         log(f"[index] tiles row {r + 1}/{n} "
             f"({time.perf_counter() - t0:.0f}s)")
     t_tiles = time.perf_counter() - t0
@@ -505,6 +646,8 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print):
         "bbox": [bbox.left, bbox.bottom, bbox.right, bbox.top],
         "grid": grid,
         "layers": layers,
+        "density": {"levels": DENSITY_LEVELS, "tiles": density_tiles},
+        "lod": {"cap": LOD_SHAPE_CAP, "tiles": lod_tiles},
         "skeleton": skel_meta,
         "stats": {"read_s": round(t_read, 1), "tiles_s": round(t_tiles, 1),
                   "total_s": 0.0,

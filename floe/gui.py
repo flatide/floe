@@ -36,6 +36,10 @@ SNAP_VERTEX = 0x66FFCCFF
 SNAP_EDGE = 0x66CCFFFF
 SEL_CORE = 0xFFFFFFFF
 
+AUTO_DEPTH_BUDGET = 120_000   # est. shapes auto depth allows on screen
+MIN_SPP = 0.01     # max zoom-in: 1 px = 0.01 dbu; keeps render bboxes
+                   # from collapsing to zero width after int rounding
+
 MINIMAP_PX = 110           # longest edge of the minimap (view px)
 MINIMAP_MARGIN = 12
 MINIMAP_DOT_MIN = 6        # view box smaller than this becomes a dot
@@ -113,6 +117,39 @@ def stamp_segment(buf, a, b, casing, core):
             fill_rect(buf, x - 1, y - 1, 2, 2, core)
 
 
+def fill_triangle(buf, p0, p1, p2, color):
+    """Solid triangle via 1-px horizontal scanline fills."""
+    pts = (p0, p1, p2)
+    y0 = int(math.floor(min(p[1] for p in pts)))
+    y1 = int(math.ceil(max(p[1] for p in pts)))
+    for y in range(y0, y1 + 1):
+        yc = y + 0.5
+        xs = []
+        for a, b in ((p0, p1), (p1, p2), (p2, p0)):
+            if (a[1] <= yc) != (b[1] <= yc):
+                t = (yc - a[1]) / (b[1] - a[1])
+                xs.append(a[0] + t * (b[0] - a[0]))
+        if len(xs) >= 2:
+            fill_rect(buf, min(xs), y, max(xs) - min(xs) + 1, 1, color)
+
+
+def stamp_arrow(buf, tip, ang, casing, core, size=11, half=4):
+    """Solid triangular arrowhead (the original tkinter-viewer look):
+    tip at the given point, pointing along ang (screen radians)."""
+    ux, uy = math.cos(ang), math.sin(ang)
+    px, py = -uy, ux
+
+    def tri(tx, ty, sz, hf):
+        bx, by = tx - sz * ux, ty - sz * uy
+        return ((tx, ty), (bx + hf * px, by + hf * py),
+                (bx - hf * px, by - hf * py))
+
+    if casing is not None:
+        fill_triangle(buf, *tri(tip[0] + 2 * ux, tip[1] + 2 * uy,
+                                size + 4, half + 1.5), casing)
+    fill_triangle(buf, *tri(tip[0], tip[1], size, half), core)
+
+
 def rect_outline(buf, x0, y0, x1, y1, casing, core):
     for a, b in (((x0, y0), (x1, y0)), ((x0, y1), (x1, y1)),
                  ((x0, y0), (x0, y1)), ((x1, y0), (x1, y1))):
@@ -135,7 +172,9 @@ class Viewer:
         self.visible = set()
         self.gen = 0
         self.last_frame = None      # (pixbuf, bbox, dbu_per_px, key)
+        self._frame_anchor = None   # view center the frame was shown at
         self._job_keys = {}         # gen -> render key of submitted job
+        self._job_depth = {}        # gen -> depth the job rendered at
         self._pending_scope = "live"
         self._drag = None
         self._zoomdrag = None       # rubber-band anchor (view px)
@@ -145,6 +184,8 @@ class Viewer:
         self.worker = None
         self._layer_checks = {}
         self.depth_value = 999
+        self.depth_auto = True      # density-based depth until set explicitly
+        self._depth_used = "?"      # depth of the last frame ("?" = none yet)
         self._quitting = False
         # ruler / snap / pick state
         self.mode = "normal"
@@ -195,9 +236,6 @@ class Viewer:
         scroller.add(self._layers_box)
         side.pack_start(scroller, True, True, 4)
 
-        self._depth_btn = Gtk.Button(label="depth: full")
-        self._depth_btn.connect("clicked", lambda *_: self._depth_dialog())
-        side.pack_start(self._depth_btn, False, False, 2)
         brow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
         side.pack_start(brow, False, False, 4)
         for text, cb in (("all", self._all_layers),
@@ -237,8 +275,14 @@ class Viewer:
         self.status.set_margin_start(8)
         self.rstatus = Gtk.Label(label="")
         self.rstatus.set_margin_end(10)
+        self.dstatus = Gtk.Label(label="depth: auto")
+        self.dstatus.set_margin_end(14)
+        self.vstatus = Gtk.Label(label="")
+        self.vstatus.set_margin_end(14)
         sbar.pack_start(self.status, True, True, 0)
         sbar.pack_end(self.rstatus, False, False, 0)
+        sbar.pack_end(self.dstatus, False, False, 0)
+        sbar.pack_end(self.vstatus, False, False, 0)
         main.pack_start(sbar, False, False, 2)
 
         self.ebox.add_events(
@@ -274,6 +318,8 @@ class Viewer:
         self.visible = {(l["layer"], l["datatype"])
                         for l in self.meta["layers"]}
         self.last_frame = None
+        self._frame_anchor = None
+        self._depth_used = "?"
         self._job_keys.clear()
         self._clear_pending()
         self.rulers = []
@@ -398,22 +444,18 @@ class Viewer:
 
     # ---- display composition (no cairo: pixbuf ops only) -------------------
     def _render_key(self, scope):
-        """Identity of a frame: what state it was rendered for. The
-        skeleton view is depth-independent."""
-        return (scope, tuple(sorted(self.visible)),
-                self._depth() if scope == "live" else None)
+        """Identity of a frame: what state it was rendered for.
+        Auto-depth frames share one identity so they stay reusable
+        while the chosen depth varies per view."""
+        return (scope, tuple(sorted(self.visible)), self._depth_key())
 
     def _frame_compatible(self, frame):
-        """A stale frame stays displayable across pans and (rescaled)
-        moderate zooms; layer or depth changes invalidate it."""
-        key = frame[3]
-        if key is None:
-            return False
-        if key[1] != tuple(sorted(self.visible)):
-            return False
-        if key[0] == "live" and key[2] != self._depth():
-            return False
-        return 0.2 < frame[2] / self.spp < 5.0
+        """A stale frame stays displayable rescaled until the fresh
+        frame lands - across pans, zooms of any ratio, layer and depth
+        changes alike (briefly stale content beats a black flash).
+        Only an empty layer set blanks the screen (and a degenerate
+        frame - zero-width bbox - is never displayable)."""
+        return frame[3] is not None and frame[2] > 0 and bool(self.visible)
 
     def _display(self):
         w, h = self._viewport_size()
@@ -422,22 +464,41 @@ class Viewer:
         bbox = self.view_bbox()
         if self.last_frame is not None and \
                 self._frame_compatible(self.last_frame):
-            self._composite_world(disp, self.last_frame[0],
-                                  self.last_frame[1], bbox)
-        self._draw_overlays(disp, bbox)
+            # the stale frame is never rescaled (a blurry zoomed base
+            # reads as a glitch): it stays frozen at its own resolution
+            # until the fresh frame lands. While the scale matches, the
+            # anchor tracks the center so pans move 1:1; once a zoom
+            # changes the scale the anchor stays put - zoom-at-cursor
+            # center compensation must not slide the frozen image.
+            frame, fb, fspp, _key = self.last_frame
+            if self._frame_anchor is None or \
+                    abs(self.spp / fspp - 1.0) < 0.001:
+                self._frame_anchor = (self.cx, self.cy)
+            ax, ay = self._frame_anchor
+            vb = (ax - w / 2 * fspp, ay - h / 2 * fspp,
+                  ax + w / 2 * fspp, ay + h / 2 * fspp)
+            self._composite_world(disp, frame, fb, vb, fspp)
+            # world-anchored overlays (rulers, selection, snap) stay
+            # glued to the frozen base and jump together with it when
+            # the fresh frame lands; the minimap keeps the real view
+            obox, ospp = vb, fspp
+        else:
+            obox, ospp = bbox, self.spp
+        self._draw_overlays(disp, obox, ospp, bbox)
         self.image.set_from_pixbuf(disp)
-        self._update_labels(bbox)
+        self._update_labels(obox, ospp)
 
-    def _composite_world(self, disp, src, src_bbox, bbox):
+    def _composite_world(self, disp, src, src_bbox, bbox, spp=None):
+        spp = spp or self.spp
         sw = src.get_width()
         if sw < 1 or src_bbox[2] <= src_bbox[0]:
             return
         sppd = sw / (src_bbox[2] - src_bbox[0])   # src px per dbu
-        scale = (1.0 / self.spp) / sppd           # view px per src px
+        scale = (1.0 / spp) / sppd                # view px per src px
         if scale <= 0:
             return
-        off_x = (src_bbox[0] - bbox[0]) / self.spp
-        off_y = (bbox[3] - src_bbox[3]) / self.spp
+        off_x = (src_bbox[0] - bbox[0]) / spp
+        off_y = (bbox[3] - src_bbox[3]) / spp
         dx0 = max(0, int(math.floor(off_x)))
         dy0 = max(0, int(math.floor(off_y)))
         dx1 = min(disp.get_width(), int(math.ceil(off_x + sw * scale)))
@@ -450,12 +511,12 @@ class Viewer:
         src.composite(disp, dx0, dy0, dx1 - dx0, dy1 - dy0,
                       off_x, off_y, scale, scale, interp, 255)
 
-    def _draw_overlays(self, disp, bbox):
+    def _draw_overlays(self, disp, obox, ospp, bbox):
         def sx(v):
-            return (v - bbox[0]) / self.spp
+            return (v - obox[0]) / ospp
 
         def sy(v):
-            return (bbox[3] - v) / self.spp
+            return (obox[3] - v) / ospp
 
         if self.selection and self.selection.get("points"):
             pts = [(sx(x), sy(y)) for x, y in self.selection["points"]]
@@ -467,9 +528,9 @@ class Viewer:
         for x0, y0, x1, y1 in segs:
             a, b = (sx(x0), sy(y0)), (sx(x1), sy(y1))
             stamp_segment(disp, a, b, BLACK, RULER_CORE)
-            for x, y in (a, b):  # end markers
-                fill_rect(disp, x - 3, y - 3, 7, 7, BLACK)
-                fill_rect(disp, x - 2, y - 2, 5, 5, RULER_CORE)
+            ang = math.atan2(b[1] - a[1], b[0] - a[0])
+            stamp_arrow(disp, b, ang, BLACK, RULER_CORE)      # outward
+            stamp_arrow(disp, a, ang + math.pi, BLACK, RULER_CORE)
         if self.mode == "ruler" and self.snap_on and self._snap_res \
                 and self._snap_res.get("found"):
             mx, my = sx(self._snap_res["x"]), sy(self._snap_res["y"])
@@ -524,7 +585,7 @@ class Viewer:
             fill_rect(disp, px - 3, py - 3, 7, 7, BLACK)
             fill_rect(disp, px - 2, py - 2, 5, 5, MINIMAP_VIEW)
 
-    def _update_labels(self, bbox):
+    def _update_labels(self, obox, ospp):
         """Ruler distance labels: a pool of Gtk.Labels on the overlay."""
         needed = []
         segs = list(self.rulers)
@@ -532,8 +593,8 @@ class Viewer:
             segs.append((*self._ruler_start, *self._ruler_end_preview()))
         for x0, y0, x1, y1 in segs:
             d_um = math.hypot(x1 - x0, y1 - y0) * self.dbu
-            mx = ((x0 + x1) / 2 - bbox[0]) / self.spp
-            my = (bbox[3] - (y0 + y1) / 2) / self.spp
+            mx = ((x0 + x1) / 2 - obox[0]) / ospp
+            my = (obox[3] - (y0 + y1) / 2) / ospp
             needed.append((mx + 8, my - 22, "%.4f um" % d_um))
         while len(self._labels) < len(needed):
             lbl = Gtk.Label()
@@ -622,20 +683,30 @@ class Viewer:
                     self._expand(bbox, m)) > MAX_LIVE_TILES:
                 m = 0 if m <= 0.13 else m / 2
         eb = self._expand(bbox, m)
+        if scope == "live":
+            depth = self._auto_depth(eb) if self.depth_auto \
+                else self._depth()
+        elif self.depth_auto:
+            depth = 0     # far view default: block-outline (depth 0)
+        else:
+            depth = self._depth()  # far view honors explicit depth 0/1/2
         self.gen += 1
         self._job_keys[self.gen] = self._render_key(scope)
+        self._job_depth[self.gen] = depth
         for g in [g for g in self._job_keys if g < self.gen - 8]:
             del self._job_keys[g]
+            self._job_depth.pop(g, None)
         self.worker.submit({
             "kind": "render", "gen": self.gen, "scope": scope,
             "bbox": tuple(int(round(v)) for v in eb),
             "w": int(round(w * (1 + 2 * m))),
             "h": int(round(h * (1 + 2 * m))),
-            "depth": self._depth() if scope == "live" else None,
+            "depth": depth,
             "visible": self._layers_arg()})
         self._pending = self.gen
         self._pending_t0 = time.perf_counter()
         self.rstatus.set_text("rendering…")
+        self._set_cursor("wait")  # mouse input is ignored until the frame
         if self._pending_timer is None:
             self._pending_timer = GLib.timeout_add(400, self._pending_tick)
         return False  # one-shot timeout
@@ -656,6 +727,7 @@ class Viewer:
             GLib.source_remove(self._pending_timer)
             self._pending_timer = None
         self.rstatus.set_text("")
+        self._set_cursor("move" if self._drag is not None else "crosshair")
 
     def _poll(self):
         if self._quitting:
@@ -667,6 +739,7 @@ class Viewer:
                 if kind == "frame":
                     if res["gen"] == self._pending:
                         self._clear_pending()
+                        self.rstatus.set_text("rendering done.")
                     if res["gen"] == self.gen:
                         loader = GdkPixbuf.PixbufLoader.new_with_type("png")
                         loader.write(res["png"])
@@ -675,13 +748,19 @@ class Viewer:
                         fb = res["bbox"]
                         fspp = (fb[2] - fb[0]) / max(1, pix.get_width())
                         key = self._job_keys.pop(res["gen"], None)
+                        used = self._job_depth.pop(res["gen"], None)
+                        self._depth_used = used
+                        self.dstatus.set_text(self._depth_label())
                         self.last_frame = (pix, fb, fspp, key)
                         self._display()
                         if res.get("scope") == "skel":
-                            mode = "far view (skeleton, %d ms)" % res["ms"]
+                            mode = "far view (%s, %d ms)" % (
+                                "outline" if used == 0 else "skeleton",
+                                res["ms"])
                         else:
-                            mode = "live (%d tiles, %d ms)" \
-                                % (res["tiles"], res["ms"])
+                            mode = "live (%d tiles, %d ms%s)" \
+                                % (res["tiles"], res["ms"],
+                                   self._depth_note(used))
                         self._set_status(self.view_bbox(), mode)
                 elif kind == "snap":
                     if res["seq"] == self._snap_seq \
@@ -707,8 +786,8 @@ class Viewer:
     def _set_status(self, bbox, mode):
         w_um = (bbox[2] - bbox[0]) * self.dbu
         h_um = (bbox[3] - bbox[1]) * self.dbu
-        self.status.set_text("view %.1f x %.1f um   |   %s"
-                             % (w_um, h_um, mode))
+        self.vstatus.set_text("view %.1f x %.1f um" % (w_um, h_um))
+        self.status.set_text(mode)
 
     # ---- interaction --------------------------------------------------------
     def fit(self):
@@ -728,7 +807,7 @@ class Viewer:
         fit-view scale and the viewport stays inside the die bbox
         (centered on an axis the viewport is wider than)."""
         bb = self.meta["bbox"]
-        self.spp = min(self.spp, self._fit_spp())
+        self.spp = min(max(self.spp, MIN_SPP), self._fit_spp())
         w, h = self._viewport_size()
         hx, hy = w / 2 * self.spp, h / 2 * self.spp
         if 2 * hx >= bb[2] - bb[0]:
@@ -765,6 +844,8 @@ class Viewer:
                 pass
 
     def _on_press(self, _w, ev):
+        if self._pending is not None:
+            return True  # render in flight: mouse input waits
         if ev.button == 1:
             if self.mode == "ruler":
                 self._ruler_free = bool(ev.state &
@@ -810,6 +891,8 @@ class Viewer:
 
     def _on_motion(self, _w, ev):
         self._update_cursor(ev)
+        if self._pending is not None:
+            return True  # render in flight: mouse input waits
         if self._drag is not None and ev.state & (
                 Gdk.ModifierType.BUTTON2_MASK |
                 Gdk.ModifierType.BUTTON3_MASK):
@@ -828,6 +911,8 @@ class Viewer:
         return True
 
     def _on_scroll(self, _w, ev):
+        if self._pending is not None:
+            return True  # render in flight: mouse input waits
         # some X setups (libinput button-scroll, Exceed pointer emulation)
         # synthesize wheel events while a button is held down - that must
         # never zoom in the middle of a pan or a rubber-band drag
@@ -865,11 +950,34 @@ class Viewer:
         self.redraw()
 
     # ---- keys ----------------------------------------------------------------
+    def _command_key(self, ev):
+        """Key name for shortcut matching. When a non-Latin layout owns
+        the keyboard (e.g. the OS IME in hangul mode) the keyval is a
+        jamo and "d"/"f"/... would go dead - re-translate the hardware
+        keycode against the keymap's groups and take the first Latin
+        result (flateyes' command_key). Special keys (Escape, arrows:
+        no unicode) keep their name as is."""
+        name = Gdk.keyval_name(ev.keyval) or ""
+        uni = Gdk.keyval_to_unicode(ev.keyval)
+        if not uni or uni < 0x80:
+            return name  # ASCII or a special key: usable as is
+        try:
+            keymap = Gdk.Keymap.get_for_display(self.window.get_display())
+            shift = ev.state & Gdk.ModifierType.SHIFT_MASK
+            for group in range(4):
+                res = keymap.translate_keyboard_state(
+                    ev.hardware_keycode, shift, group)
+                if res[0] and 0 < Gdk.keyval_to_unicode(res[1]) < 0x80:
+                    return Gdk.keyval_name(res[1])
+        except (AttributeError, TypeError):
+            pass  # keymap API surprises: fall back to the raw name
+        return name
+
     def _on_key(self, _w, ev):
         focus = self.window.get_focus()
         if isinstance(focus, Gtk.Entry):
             return False  # typing in the depth spinbox etc.
-        name = Gdk.keyval_name(ev.keyval) or ""
+        name = self._command_key(ev)
         if name == "f":
             self.fit()
         elif name in ("plus", "equal", "KP_Add"):
@@ -882,6 +990,8 @@ class Viewer:
             self._toggle_snap()
         elif name == "Escape":
             self._esc()
+        elif name == "d":
+            self._depth_dialog()
         elif name == "a":
             self._set_depth(999)
         elif len(name) == 1 and name.isdigit():
@@ -897,7 +1007,79 @@ class Viewer:
         d = self.depth_value
         return None if d >= 999 else max(0, d)
 
+    def _depth_key(self):
+        """Render-key component: one identity for the whole auto mode."""
+        return "auto" if self.depth_auto else self._depth()
+
+    def _depth_note(self, used):
+        """Status-line suffix naming the depth a frame rendered at."""
+        if self.depth_auto:
+            return ", depth auto(%s)" % ("full" if used is None else used)
+        return "" if used is None else ", depth %d" % used
+
+    def _depth_label(self):
+        if not self.depth_auto:
+            d = self._depth()
+            return "depth: full" if d is None else "depth: %d" % d
+        if self._depth_used == "?":
+            return "depth: auto"
+        return "depth: auto(%s)" % ("full" if self._depth_used is None
+                                    else self._depth_used)
+
+    def _auto_depth(self, bbox):
+        """Deepest depth whose estimated draw cost stays under
+        AUTO_DEPTH_BUDGET, from the index-time density table (per-tile
+        counts scaled by view overlap). Cost of depth d = shapes down
+        to d + one outline frame per cell at level d+1, so a mid depth
+        that would stroke millions of array-cell frames is skipped.
+        None = no table or the full hierarchy fits."""
+        dens = self.meta.get("density")
+        if not dens or not self.visible:
+            return None
+        tiles = dens.get("tiles", {})
+        g = self.meta["grid"]
+        vis = ["%d/%d" % key for key in self.visible]
+        levels = max(1, dens.get("levels", 1))
+        est = [0.0] * levels
+        frames = [0.0] * (levels + 1)
+        area = float(g["tile_w"]) * g["tile_h"]
+        for r, c in self.cache.tiles_for_bbox(*[int(v) for v in bbox]):
+            t = tiles.get("%d,%d" % (r, c))
+            if not t:
+                continue
+            tx0 = g["x0"] + c * g["tile_w"]
+            ty0 = g["y0"] + r * g["tile_h"]
+            frac = (max(0.0, min(bbox[2], tx0 + g["tile_w"])
+                        - max(bbox[0], tx0))
+                    * max(0.0, min(bbox[3], ty0 + g["tile_h"])
+                          - max(bbox[1], ty0)) / area)
+            if frac <= 0:
+                continue
+            for lv, n in enumerate(t.get("cells", ())):
+                if lv <= levels:
+                    frames[lv] += n * frac
+            for lkey in vis:
+                arr = t.get(lkey)
+                if not arr:
+                    continue
+                for lv in range(levels):
+                    est[lv] += arr[min(lv, len(arr) - 1)] * frac
+        total = est[-1]
+        if total <= AUTO_DEPTH_BUDGET:
+            return None
+        best = None
+        for lv in range(levels):
+            if est[lv] + frames[lv + 1] <= AUTO_DEPTH_BUDGET:
+                best = lv
+        if best is not None:
+            return best
+        # nothing fits the budget: least-bad choice (a full render at
+        # least draws no frames)
+        lv = min(range(levels), key=lambda i: est[i] + frames[i + 1])
+        return None if total <= est[lv] + frames[lv + 1] else lv
+
     def _set_depth(self, n):
+        self.depth_auto = False
         self.depth_value = max(0, min(999, int(n)))
         if self._ddlg is not None:
             spin = getattr(self._ddlg, "_spin", None)
@@ -906,10 +1088,12 @@ class Viewer:
                 spin.set_value(self.depth_value)
         self._on_depth()
 
+    def _set_depth_auto(self):
+        self.depth_auto = True
+        self._on_depth()
+
     def _on_depth(self):
-        d = self._depth()
-        self._depth_btn.set_label(
-            "depth: full" if d is None else "depth: %d" % d)
+        self.dstatus.set_text(self._depth_label())
         self.redraw(immediate=True)
 
     def _depth_dialog(self):
@@ -941,19 +1125,37 @@ class Viewer:
             b = Gtk.Button(label="full" if preset == 999 else str(preset))
             b.connect("clicked", lambda _w, p=preset: self._set_depth(p))
             row.pack_start(b, False, False, 0)
+        b = Gtk.Button(label="auto")
+        b.connect("clicked", lambda *_: self._set_depth_auto())
+        row.pack_start(b, False, False, 0)
         note = Gtk.Label()
         note.set_markup(
-            "<small>cells beyond the limit are drawn as outline frames"
-            "\nwith names (live mode only; the far-zoom skeleton stays"
-            "\nfull depth) - keys: 0-9 = depth, a = full</small>")
+            "<small>auto picks the deepest level whose estimated shape"
+            "\ncount stays interactive (index density table); explicit"
+            "\nvalues override it. cells beyond the limit are drawn as"
+            "\noutline frames with names - keys: d = this dialog,"
+            "\n0-9 = depth, a = full</small>")
         note.set_xalign(0.0)
         box.pack_start(note, False, False, 0)
         close = Gtk.Button(label="close")
         close.connect("clicked", lambda *_: dlg.destroy())
         box.pack_start(close, False, False, 0)
 
+        def on_dialog_key(_w, ev):
+            # Esc closes even when the focus sits in the spinbox, whose
+            # input method would swallow the key first (flateyes trick)
+            if Gdk.keyval_name(ev.keyval) == "Escape":
+                dlg.destroy()
+                return True
+            return False
+        dlg.connect("key-press-event", on_dialog_key)
+
         def _gone(*_a):
             self._ddlg = None
+            # hand the keyboard back: some backends (macOS quartz
+            # notably) fail to refocus the parent when a transient
+            # closes, leaving every key command dead until a click
+            self.window.present()
         dlg.connect("destroy", _gone)
         dlg.show_all()
 
@@ -1042,6 +1244,7 @@ class Viewer:
     def _ruler_click(self, ev):
         self._update_cursor(ev)
         if self._ruler_start is None:
+            self.rulers = []  # single ruler: starting a new one clears it
             self._ruler_start = self._cursor_snapped()
         else:
             x0, y0 = self._ruler_start

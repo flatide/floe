@@ -143,7 +143,8 @@ def _svc_pick(cache, mosaic, job, res):
     res.put(out)
 
 
-def _svc_render(cache, mosaic, renderer, skel_renderer, tmp, job, res):
+def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
+                res):
     t0 = time.perf_counter()
     x0, y0, x1, y1 = job["bbox"]
     scope = job.get("scope", "live")
@@ -154,8 +155,18 @@ def _svc_render(cache, mosaic, renderer, skel_renderer, tmp, job, res):
                          "(run: floe index --skeleton-only)"})
                 return
             vis = job["visible"]
-            if vis is not None:  # cell outlines stay visible regardless
-                vis = list(map(tuple, vis)) + [(255, 0)]
+            if vis is None:
+                vis = [(l["layer"], l["datatype"])
+                       for l in cache.meta["layers"]]
+            else:
+                vis = [tuple(v) for v in vis]
+            # level-k detail twins (straps, labels) show at depth >= k
+            d = job.get("depth")
+            kmax = cache_mod.SKEL_DETAIL_LEVELS if d is None \
+                else max(0, min(cache_mod.SKEL_DETAIL_LEVELS, d))
+            vis += [(l, dt + k * cache_mod.SKEL_DETAIL_DT)
+                    for k in range(1, kmax + 1) for l, dt in vis]
+            vis += [(255, 0)]          # cell outlines stay visible
             skel_renderer.render_png(tmp, x0, y0, x1, y1,
                                      job["w"], job["h"], visible=vis)
             tiles_n = 0
@@ -165,11 +176,21 @@ def _svc_render(cache, mosaic, renderer, skel_renderer, tmp, job, res):
                 res.put({"kind": "error",
                          "msg": f"{len(tiles)} tiles > live limit"})
                 return
-            if mosaic.ensure(tiles):
-                renderer.refresh()
-            renderer.render_png(tmp, x0, y0, x1, y1, job["w"], job["h"],
-                                visible=job["visible"],
-                                depth=job.get("depth"))
+            depth = job.get("depth")
+            if lod is not None and depth is not None and \
+                    all(lod[2].get("%d,%d" % rc, 99) >= depth
+                        for rc in tiles):
+                # shallow depth: the tiny LOD tiles carry everything
+                # this render can show - skip the full-tile parse
+                # (tiles absent from the map fit whole under the cap)
+                use_mosaic, use_renderer = lod[0], lod[1]
+            else:
+                use_mosaic, use_renderer = mosaic, renderer
+            if use_mosaic.ensure(tiles):
+                use_renderer.refresh()
+            use_renderer.render_png(tmp, x0, y0, x1, y1,
+                                    job["w"], job["h"],
+                                    visible=job["visible"], depth=depth)
             tiles_n = len(tiles)
         with open(tmp, "rb") as f:
             png = f.read()
@@ -216,6 +237,17 @@ def _render_service(src, req, res):
         colors = {(l["layer"], l["datatype"]): l["color"]
                   for l in cache.meta["layers"]}
         renderer = Renderer(mosaic.ly, mosaic.top, colors, hier_offset=2)
+        lod = None
+        if cache.meta.get("lod"):
+            def _lod_path(r, c):
+                # tiles small enough to need no LOD double as their own
+                p = cache.lod_tile_path(r, c)
+                return p if os.path.isfile(p) else cache.tile_path(r, c)
+            lod_mosaic = Mosaic(cache, _lod_path)
+            lod = (lod_mosaic,
+                   Renderer(lod_mosaic.ly, lod_mosaic.top, colors,
+                            hier_offset=2),
+                   cache.meta["lod"]["tiles"])
     except Exception as e:
         res.put({"kind": "error", "msg": f"render service init failed: {e}"})
         return
@@ -228,6 +260,10 @@ def _render_service(src, req, res):
                 skel_ly = db.Layout()
                 skel_ly.read(skel_path)
                 colors2 = dict(colors)
+                for k in range(1, cache_mod.SKEL_DETAIL_LEVELS + 1):
+                    colors2.update(  # detail twins keep the layer color
+                        {(l, d + k * cache_mod.SKEL_DETAIL_DT): col
+                         for (l, d), col in colors.items()})
                 colors2[(255, 0)] = "#93a4ad"
                 skel_renderer = Renderer(skel_ly, skel_ly.top_cell(),
                                          colors2, hier_offset=1,
@@ -262,8 +298,8 @@ def _render_service(src, req, res):
                 _svc_pick(cache, mosaic, picks[-1], res)
             renders = [j for j in jobs if j["kind"] == "render"]
             if renders:
-                _svc_render(cache, mosaic, renderer, skel_renderer, tmp,
-                            renders[-1], res)
+                _svc_render(cache, mosaic, renderer, lod, skel_renderer,
+                            tmp, renders[-1], res)
     except (KeyboardInterrupt, EOFError, OSError):
         return  # parent went away or interrupted: exit quietly
 
