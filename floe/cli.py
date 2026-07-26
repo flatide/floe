@@ -49,7 +49,7 @@ def open_cache(src, auto_index, args):
         if not auto_index:
             raise SystemExit(f"no cache for {src}; run: floe index {src}")
         print(f"[floe] no cache yet - building index first (one-time)...")
-        cache_mod.build_index(src)
+        cache_mod.build_index(src, jobs=getattr(args, "jobs", None))
     c.load()
     if c.is_stale():
         print("[floe][warn] cache is outdated (source changed or cache "
@@ -74,7 +74,8 @@ def cmd_index(args):
         if not c.is_stale():
             print(f"[floe] cache up to date: {c.dir} (use --force to rebuild)")
             return
-    cache_mod.build_index(args.src, tile_bytes=args.tile_mb * 1e6)
+    cache_mod.build_index(args.src, tile_bytes=args.tile_mb * 1e6,
+                          jobs=args.jobs)
 
 
 def cmd_info(args):
@@ -245,6 +246,10 @@ def main(argv=None):
     p.add_argument("--skeleton-only", action="store_true",
                    help="add the far-zoom skeleton to an existing cache "
                         "(one source read, no re-tiling)")
+    p.add_argument("--jobs", type=int, default=None, metavar="N",
+                   help="fork workers for the tiling phase (default: all "
+                        "cores; 1 = sequential). Workers share the loaded "
+                        "layout copy-on-write, so memory stays ~flat.")
     p.set_defaults(fn=cmd_index)
 
     p = sub.add_parser("info", help="show cache/layout summary")

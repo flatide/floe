@@ -95,7 +95,8 @@ floe는 **최초 1회 인덱싱**으로 이 비용을 지불하고, 이후 모�
 ```sh
 alias floe=".venv/bin/python -m floe"
 
-floe index data/testchip_1g5.oas          # 1회: <src>.ice/ 생성
+floe index data/testchip_1g5.oas          # 1회: <src>.ice/ 생성 (전 코어 사용)
+floe index data/testchip_1g5.oas --jobs 1 # 병렬 끄기 (기본: 코어 수만큼 fork)
 floe info  data/testchip_1g5.oas          # 레이어/그리드/통계 요약
 floe view  data/testchip_1g5.oas          # 네이티브 데스크톱 뷰어 (기본)
 floe view  data/testchip_1g5.oas --goto 5240,5260,50   # 시작 위치+뷰 폭(um)
@@ -299,6 +300,14 @@ python3 -m venv --system-site-packages .venv               # gi가 보이게
   → 타일 로딩 50배 가속).
 - `clip_into` 사용 시 타겟 레이아웃에 레이어를 미리 생성해야 한다.
   안 그러면 anonymous 레이어로 복사되어 OASIS writer가 통째로 버린다.
+- **타일 빌드는 fork 병렬** (`--jobs`, 기본 = 코어 수). klayout 바인딩은
+  C++ 실행 중 GIL을 잡고 있어 파이썬 스레드로는 병렬화가 안 된다(실측
+  1.0배). 대신 소스 read 후 fork하면 로드된 레이아웃이 copy-on-write로
+  공유되어 재읽기·메모리 증가 없이 워커들이 타일을 나눠 만든다. 결과는
+  순차 빌드와 바이트 단위로 동일 (fork 없는 플랫폼은 순차 폴백).
+- **메모리**: 로드된 레이아웃 RSS ≈ 파일 크기의 ~3.6배 (1.5GB → 5.4GB
+  실측). 15GB급 파일은 호스트 RAM ~55GB 이상 필요 — 부족하면 스왑으로
+  인덱싱이 수 배 느려진다. 뷰어는 타일만 로딩하므로 영향 없음.
 
 ## 로드맵
 
@@ -306,6 +315,7 @@ python3 -m venv --system-site-packages .venv               # gi가 보이게
 2. ✅ 공간 인덱스(.ice) + CLI (index/info/render/clip)
 3. ✅ 네이티브 뷰어 (view): 영역 줌/팬/레이어 토글/depth/clip 저장
 4. Calibre DRC RDB 파서/조회 (KLayout `rdb` 모듈) + 에러 영역 자동 clip/뷰
-5. 대용량 스케일링: 인덱싱 시 레이어 그룹별 다중 패스(RAM 상한), 타일 병렬 빌드
+5. 대용량 스케일링: 인덱싱 시 레이어 그룹별 다중 패스(RAM 상한)
+   (타일 병렬 빌드는 ✅ `--jobs`)
 6. 뷰어 개선: 중간 줌 레벨 피라미드, 셀/텍스트 검색, 마커 점프
    (좌표 이동(goto)은 ✅)

@@ -18,6 +18,7 @@ import colorsys
 import functools
 import json
 import math
+import multiprocessing
 import os
 import time
 
@@ -533,8 +534,50 @@ def _tile_density(ly, top_ci, max_levels=DENSITY_LEVELS):
     return out
 
 
-def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print):
-    """Scan the source file once and build the tile cache."""
+# Tile-build context inherited by fork workers. klayout holds the GIL
+# during C++ calls, so threads cannot parallelize tiling; fork workers
+# share the loaded source layout copy-on-write instead (no re-read, no
+# extra resident memory per worker).
+_TILE_CTX = None
+
+
+def _build_one_tile(rc):
+    """Build tile (r, c) from _TILE_CTX. Runs in a fork worker (or
+    inline for jobs=1). Returns (r, c, wrote, lod_depth, density)."""
+    ly, top_ci, bbox, grid, cdir, tile_texts, opts = _TILE_CTX
+    r, c = rc
+    x0 = bbox.left + c * grid["tile_w"]
+    y0 = bbox.bottom + r * grid["tile_h"]
+    box = db.Box(x0, y0, min(x0 + grid["tile_w"], bbox.right),
+                 min(y0 + grid["tile_h"], bbox.top))
+    tgt = db.Layout()
+    tgt.dbu = ly.dbu
+    # pre-create layers with source infos at identical indexes:
+    # clip_into copies shapes onto anonymous layers otherwise, and
+    # the OASIS writer silently drops layers without layer/datatype
+    for li in ly.layer_indexes():
+        tgt.insert_layer_at(li, ly.get_info(li))
+    ci = ly.clip_into(top_ci, tgt, box)
+    cell = tgt.cell(ci)
+    texts = tile_texts.get((r, c), ())
+    if cell.bbox().empty() and not texts:
+        return r, c, False, None, None
+    cell.name = f"TILE_{r}_{c}"
+    _strip_texts(tgt)
+    for li, text in texts:
+        cell.shapes(li).insert(text)
+    compact_instances(tgt)
+    tgt.write(os.path.join(cdir, "tiles", f"t_{r}_{c}.oas"), opts)
+    lod_d = _tile_lod(tgt, ci, os.path.join(cdir, "tiles_lod",
+                                            f"t_{r}_{c}.oas"))
+    return r, c, True, lod_d, _tile_density(tgt, ci) or None
+
+
+def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None):
+    """Scan the source file once and build the tile cache.
+
+    jobs: fork workers for the tiling phase (None = all cores;
+    1 = sequential; platforms without fork fall back to sequential)."""
     t_all = time.perf_counter()
     src = os.path.abspath(src)
     cdir = cache_dir_for(src)
@@ -590,44 +633,48 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print):
     # --- tiles ---
     t0 = time.perf_counter()
     n_files = 0
+    done = 0
     density_tiles = {}
     lod_tiles = {}
-    opts = save_opts()
-    for r in range(n):
-        for c in range(n):
-            x0 = bbox.left + c * tile_w
-            y0 = bbox.bottom + r * tile_h
-            box = db.Box(x0, y0, min(x0 + tile_w, bbox.right),
-                         min(y0 + tile_h, bbox.top))
-            path = os.path.join(cdir, "tiles", f"t_{r}_{c}.oas")
-            tgt = db.Layout()
-            tgt.dbu = ly.dbu
-            # pre-create layers with source infos at identical indexes:
-            # clip_into copies shapes onto anonymous layers otherwise, and
-            # the OASIS writer silently drops layers without layer/datatype
-            for li in ly.layer_indexes():
-                tgt.insert_layer_at(li, ly.get_info(li))
-            ci = ly.clip_into(top_ci, tgt, box)
-            cell = tgt.cell(ci)
-            texts = tile_texts.get((r, c), ())
-            if cell.bbox().empty() and not texts:
-                continue
-            cell.name = f"TILE_{r}_{c}"
-            _strip_texts(tgt)
-            for li, text in texts:
-                cell.shapes(li).insert(text)
-            compact_instances(tgt)
-            tgt.write(path, opts)
+    coords = [(r, c) for r in range(n) for c in range(n)]
+    step = max(1, len(coords) // 10)
+
+    def take(r, c, wrote, lod_d, dens):
+        nonlocal n_files, done
+        done += 1
+        if wrote:
             n_files += 1
-            lod_d = _tile_lod(tgt, ci, os.path.join(cdir, "tiles_lod",
-                                                    f"t_{r}_{c}.oas"))
-            if lod_d is not None:
-                lod_tiles[f"{r},{c}"] = lod_d
-            d = _tile_density(tgt, ci)
-            if d:
-                density_tiles[f"{r},{c}"] = d
-        log(f"[index] tiles row {r + 1}/{n} "
-            f"({time.perf_counter() - t0:.0f}s)")
+        if lod_d is not None:
+            lod_tiles[f"{r},{c}"] = lod_d
+        if dens:
+            density_tiles[f"{r},{c}"] = dens
+        if done % step == 0 or done == len(coords):
+            log(f"[index] tiles {done}/{len(coords)} "
+                f"({time.perf_counter() - t0:.0f}s)")
+
+    if jobs is None:
+        jobs = os.cpu_count() or 1
+    jobs = max(1, min(jobs, len(coords)))
+    ctx = None
+    if jobs > 1:
+        try:
+            ctx = multiprocessing.get_context("fork")
+        except ValueError:
+            log("[index][warn] no fork on this platform - tiling "
+                "sequentially")
+    global _TILE_CTX
+    _TILE_CTX = (ly, top_ci, bbox, grid, cdir, tile_texts, save_opts())
+    try:
+        if ctx is not None:
+            log(f"[index] tiling with {jobs} fork workers...")
+            with ctx.Pool(jobs) as pool:
+                for res in pool.imap_unordered(_build_one_tile, coords):
+                    take(*res)
+        else:
+            for rc in coords:
+                take(*_build_one_tile(rc))
+    finally:
+        _TILE_CTX = None
     t_tiles = time.perf_counter() - t0
     log(f"[index] {n_files} tile files in {t_tiles:.0f}s")
 
