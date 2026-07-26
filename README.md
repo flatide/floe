@@ -274,6 +274,39 @@ python3 -m venv --system-site-packages .venv               # gi가 보이게
 - 원격에서는 Exceed TurboX/XQuartz 등 X 서버로 `floe view` 실행 (flateyes와
   동일한 접속 형태). macOS 개발 환경 설정은 위 [환경 설정](#환경-설정) 참고.
 
+### 대안: venv 통째 복사 (호스트에서 pip 실행이 어려울 때)
+
+호스트에서 `pip install`조차 어려우면(정책·권한) venv를 빌드 머신에서
+완성해 통째로 복사한다. venv는 공식적으로 재배치 가능하지 않지만,
+아래 조건을 지키면 실전에서 문제없이 동작한다:
+
+```sh
+# 1) 빌드 머신: 운영과 같은 RHEL major·x86_64·같은 python3 마이너 버전
+#    (운영과 같은 RHEL 컨테이너/VM 권장). venv는 호스트에 놓일
+#    "최종 절대 경로"에서 만든다 - 스크립트 shebang에 이 경로가 박힌다.
+python3 -m venv --system-site-packages /opt/floe/venv
+/opt/floe/venv/bin/pip install klayout numpy
+cp -r floe /opt/floe/
+tar -C / -czf floe-venv.tar.gz opt/floe
+
+# 2) 폐쇄망 호스트: 같은 경로에 풀고 검증
+tar -C / -xzf floe-venv.tar.gz
+/opt/floe/venv/bin/python -c "import klayout.db, numpy, gi"  # 한 줄 검증
+alias floe="/opt/floe/venv/bin/python -m floe"
+```
+
+- **같은 베이스 파이썬이 호스트에 있어야 한다**: venv는 표준 라이브러리를
+  담지 않고 `pyvenv.cfg`의 `home=` 경로에 있는 python3를 쓴다. 빌드
+  머신과 호스트가 같은 python3 RPM(모듈 스트림)이어야 함.
+- **실행은 항상 `venv/bin/python -m floe` 형태로.** `venv/bin/pip` 등
+  스크립트는 shebang에 빌드 경로가 박혀 있어 경로가 다르면
+  "bad interpreter"로 죽는다 (`python -m` 은 shebang을 안 탐).
+  부득이 다른 경로에 풀었다면 python 실행은 되지만 스크립트류는 못 쓴다.
+- **gi/GTK는 venv에 실려 가지 않는다**: PyGObject는 시스템
+  site-packages(`python3-gobject` RPM)에서 오므로 호스트 쪽 RPM은 여전히
+  필요하다 (GNOME 호스트 기본 탑재). klayout·numpy는 manylinux 휠이라
+  .so가 자체 완결적이어서 복사에 안전하다.
+
 ### .ice 구조와 설계 노트
 
 ```
