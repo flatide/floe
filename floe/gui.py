@@ -1515,6 +1515,7 @@ class Viewer:
         out = dlg.get_filename() if dlg.run() == Gtk.ResponseType.OK \
             else None
         dlg.destroy()
+        self.window.present()  # quartz: refocus parent after the dialog
         if not out:
             return
         self.worker.submit({"kind": "clip",
@@ -1537,6 +1538,9 @@ class Viewer:
         dlg.set_default_response(Gtk.ResponseType.NO)
         resp = dlg.run()
         dlg.destroy()
+        # quartz fails to refocus the parent when a transient closes,
+        # leaving key commands dead until a click (same as _gone)
+        self.window.present()
         if resp == Gtk.ResponseType.YES:
             self._quit()
 
