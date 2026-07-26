@@ -1013,6 +1013,13 @@ class Viewer:
         return name
 
     def _on_key(self, _w, ev):
+        if self._gdlg is not None:
+            # the goto dialog owns keyboard input, but some backends
+            # (macOS quartz) still deliver its keys to the main window
+            # too. The Entry guard below only checks the *main* window's
+            # focus, so a coordinate typed into the dialog would walk the
+            # depth shortcut (e.g. "5240" -> depth 5,2,4,0). Yield to it.
+            return False
         focus = self.window.get_focus()
         if isinstance(focus, Gtk.Entry):
             return False  # typing in the depth spinbox etc.
