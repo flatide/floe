@@ -211,7 +211,8 @@ GUI는 **GTK3/PyGObject** 셸이다. flateyes와 같은 폐쇄망 호스트
 - 인스턴스 소켓은 `GLib.io_add_watch`로, 결과 큐는 `GLib.timeout_add`(25ms)로
   서비스한다. UI 라벨은 English only (XQuartz 한글 글리프 부재 — flateyes 규칙).
 - 키: `f` fit, `+`/`-`(`=`) 줌, `r` ruler, `m` 스냅, `d` depth 다이얼로그,
-  `g` goto 다이얼로그, `0`-`9` depth, `a` depth auto, `Esc` 단계 해제.
+  `g` goto 다이얼로그, `0`-`9` depth, `a` depth auto, `Esc` 단계 해제,
+  `q` 종료 (확인 다이얼로그).
 
 ### depth (계층 표시 깊이)
 

@@ -1042,6 +1042,8 @@ class Viewer:
             self._goto_dialog()
         elif name == "a":
             self._set_depth_auto()
+        elif name == "q":
+            self._confirm_quit()
         elif len(name) == 1 and name.isdigit():
             self._set_depth(int(name))
         elif name.startswith("KP_") and name[3:].isdigit():
@@ -1521,6 +1523,23 @@ class Viewer:
         self._set_status(bbox, "clipping…")
 
     # ---- shutdown -------------------------------------------------------------
+    def _confirm_quit(self):
+        """Ask before quitting (q key). Modal, centered on the parent;
+        default is No so a stray Enter does not exit."""
+        if self._quitting:
+            return
+        dlg = Gtk.MessageDialog(
+            transient_for=self.window, modal=True,
+            message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.YES_NO,
+            text="Quit floe?")
+        dlg.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
+        dlg.set_default_response(Gtk.ResponseType.NO)
+        resp = dlg.run()
+        dlg.destroy()
+        if resp == Gtk.ResponseType.YES:
+            self._quit()
+
     def _quit(self):
         if self._quitting:
             return
