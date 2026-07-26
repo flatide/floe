@@ -315,7 +315,9 @@ python3 -m venv --system-site-packages .venv               # gi가 보이게
 2. ✅ 공간 인덱스(.ice) + CLI (index/info/render/clip)
 3. ✅ 네이티브 뷰어 (view): 영역 줌/팬/레이어 토글/depth/clip 저장
 4. Calibre DRC RDB 파서/조회 (KLayout `rdb` 모듈) + 에러 영역 자동 clip/뷰
-5. 대용량 스케일링: 인덱싱 시 레이어 그룹별 다중 패스(RAM 상한)
-   (타일 병렬 빌드는 ✅ `--jobs`)
+5. ~~대용량 스케일링: 인덱싱 시 레이어 그룹별 다중 패스(RAM 상한)~~
+   — 운영 호스트 RAM이 1.5TB라 불필요 판정 (2026-07-28; 로드 RSS는
+   파일 크기의 ~3.6배 → 100GB급 파일까지도 여유). 단일 패스가 더
+   빠르므로 하지 않는다. 타일 병렬 빌드는 ✅ `--jobs`
 6. 뷰어 개선: 중간 줌 레벨 피라미드, 셀/텍스트 검색, 마커 점프
    (좌표 이동(goto)은 ✅)
