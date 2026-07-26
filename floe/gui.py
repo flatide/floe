@@ -166,10 +166,11 @@ def frame_rect(buf, x0, y0, w, h, color):
 
 
 class Viewer:
-    def __init__(self, cache, server_sock=None, show=True):
+    def __init__(self, cache, server_sock=None, show=True, goto=None):
         self.server_sock = server_sock
         self.cx = self.cy = 0
         self.spp = 1.0              # dbu per screen pixel
+        self._start_goto = goto     # [x_um, y_um(, window_um)] from the CLI
         self.visible = set()
         self.gen = 0
         self.last_frame = None      # (pixbuf, bbox, dbu_per_px, key)
@@ -393,7 +394,8 @@ class Viewer:
                     break
                 data += chunk
             line = data.decode("utf-8", "replace").strip()
-            path = line.split("\t")[0].strip()
+            fields = line.split("\t")
+            path = fields[0].strip()
             if not path:
                 error = "ERR empty request"
             else:
@@ -406,10 +408,27 @@ class Viewer:
             except OSError:
                 pass
             if not error:
+                self._forwarded_goto(fields[1:])
                 self._present()
         finally:
             conn.close()
         return True
+
+    def _forwarded_goto(self, fields):
+        """Apply a 'goto=X,Y[,W]' option (um) from a forwarded request.
+        The sender already validated it, so parse leniently."""
+        for f in fields:
+            if not f.startswith("goto="):
+                continue
+            try:
+                vals = [float(t) for t in
+                        f[len("goto="):].replace(",", " ").split()]
+            except ValueError:
+                return
+            if len(vals) >= 2:
+                self.goto(vals[0], vals[1],
+                          vals[2] if len(vals) > 2 else None)
+            return
 
     def _present(self):
         self.window.deiconify()
@@ -845,7 +864,12 @@ class Viewer:
         self._alloc_size = size
         if not self._did_fit and alloc.width > 50:
             self._did_fit = True
-            self.fit()
+            if self._start_goto is not None:
+                self.spp = self._fit_spp()  # zoom baseline if no window given
+                self.goto(*self._start_goto)
+                self._start_goto = None
+            else:
+                self.fit()
         else:
             self.redraw()
 
@@ -1261,11 +1285,16 @@ class Viewer:
                                  % self.GOTO_HINT)
             return
         dlg._note.set_markup("<small>%s</small>" % self.GOTO_HINT)
-        self.goto_mark = (vals[0] / self.dbu, vals[1] / self.dbu)
+        self.goto(vals[0], vals[1], vals[2] if len(vals) > 2 else None)
+
+    def goto(self, x_um, y_um, window_um=None):
+        """Center the view on (x, y) um with an X marker; window is the
+        resulting view width in um (None/0 = keep the current zoom)."""
+        self.goto_mark = (x_um / self.dbu, y_um / self.dbu)
         self.cx, self.cy = self.goto_mark
-        if len(vals) > 2 and vals[2] > 0:
+        if window_um and window_um > 0:
             w, _h = self._viewport_size()
-            self.spp = (vals[2] / self.dbu) / w
+            self.spp = (window_um / self.dbu) / w
         self.redraw(immediate=True)
 
     # ---- ruler / snap / pick -----------------------------------------------
@@ -1475,9 +1504,9 @@ class Viewer:
             Gtk.main_quit()
 
 
-def run_viewer(cache, server_sock=None):
+def run_viewer(cache, server_sock=None, goto=None):
     import_gtk()
-    viewer = Viewer(cache, server_sock)
+    viewer = Viewer(cache, server_sock, goto=goto)
     try:
         import signal as _signal
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, _signal.SIGINT,

@@ -98,6 +98,7 @@ alias floe=".venv/bin/python -m floe"
 floe index data/testchip_1g5.oas          # 1회: <src>.ice/ 생성
 floe info  data/testchip_1g5.oas          # 레이어/그리드/통계 요약
 floe view  data/testchip_1g5.oas          # 네이티브 데스크톱 뷰어 (기본)
+floe view  data/testchip_1g5.oas --goto 5240,5260,50   # 시작 위치+뷰 폭(um)
 floe render data/testchip_1g5.oas --bbox 5000,5000,5200,5200 \
           --layers M2,M3,VIA2 --out view.png
 floe clip  data/testchip_1g5.oas --bbox 5000,5000,5100,5100 --out region.oas
@@ -159,6 +160,10 @@ floe clip  data/testchip_1g5.oas --bbox 5000,5000,5100,5100 --out region.oas
   붙여넣으면 남아 있는 y 프리필은 무시된다.
 - **window** = 이동 후 뷰 폭(um). 비우면 현재 배율 유지. die 밖 좌표는
   뷰가 경계에 클램프되지만 마커는 요청한 지점에 남는다.
+- **CLI**: `floe view <src> --goto X,Y[,W]` (um) — 시작과 동시에 해당
+  위치를 보여준다 (W 생략 시 fit 배율). 이미 창이 떠 있으면 forward 되어
+  실행 중인 창이 그 위치로 점프한다. DRC 리포트 좌표를 셸에서 바로
+  넘길 때 사용.
 
 ### 단일 인스턴스 동작 (flateyes와 동일)
 
@@ -167,7 +172,8 @@ floe는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델을 
 - **(uid, DISPLAY)당 뷰어 창 1개.** 첫 실행이 창을 열고, 같은 DISPLAY에서의
   이후 `floe view 다른파일.oas` 는 실행 중인 창에 경로를 넘기고 즉시 종료한다
   (exit 0, ~0.1초 — forward 경로는 klayout/GTK를 import하지 않음).
-  기존 창이 해당 파일로 전환되고 앞으로 올라온다.
+  기존 창이 해당 파일로 전환되고 앞으로 올라온다. `--goto` 옵션도 함께
+  전달된다 (`경로\tgoto=X,Y[,W]` 요청 라인).
 - **DISPLAY 값이 다르면 독립 창** — 한 리눅스 호스트에서
   `DISPLAY=:1 floe view a.oas` 처럼 여러 사용자 DISPLAY로 각각 실행 가능.
 - `--multi`: 단일 인스턴스를 끄고 항상 독립 창을 연다 (소켓 미사용).

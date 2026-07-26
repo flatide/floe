@@ -16,6 +16,19 @@ from . import __version__
 # paying the klayout import cost (see instance.py)
 
 
+def parse_goto(s):
+    """--goto X,Y[,WINDOW] in um -> [x, y] or [x, y, window]."""
+    try:
+        vals = [float(t) for t in s.replace(",", " ").split()]
+    except ValueError:
+        vals = []
+    if len(vals) not in (2, 3):
+        raise SystemExit(f"invalid --goto {s!r}, expected X,Y[,WINDOW] in um")
+    if len(vals) == 3 and vals[2] <= 0:
+        raise SystemExit("--goto WINDOW must be > 0 (um)")
+    return vals
+
+
 def parse_bbox_um(s, dbu):
     try:
         x0, y0, x1, y1 = (float(v) for v in s.split(","))
@@ -176,6 +189,7 @@ def cmd_view(args):
     src = os.path.abspath(args.src)
     if not os.path.isfile(src):
         raise SystemExit(f"floe: no such file: {src}")
+    goto = parse_goto(args.goto) if args.goto else None
 
     server = None
     if not args.multi:  # flateyes-style single instance per (uid, DISPLAY)
@@ -189,8 +203,12 @@ def cmd_view(args):
         if not _cache_ready(src):
             open_cache(src, auto_index=True, args=args)
         addr = instance.socket_address(display)
+        request = src
+        if goto is not None:
+            # repr() round-trips floats exactly, unlike %g
+            request += "\tgoto=" + ",".join(repr(v) for v in goto)
         for _ in range(5):
-            code = instance.try_forward(addr, src)
+            code = instance.try_forward(addr, request)
             if code is not None:
                 raise SystemExit(code)
             server = instance.try_bind(addr)
@@ -208,7 +226,7 @@ def cmd_view(args):
     c = open_cache(src, auto_index=args.auto_index, args=args)
     # PyGObject/GTK3 problems are reported inside import_gtk (exit 3)
     from .gui import run_viewer
-    run_viewer(c, server)
+    run_viewer(c, server, goto=goto)
 
 
 def main(argv=None):
@@ -267,6 +285,10 @@ def main(argv=None):
     p.add_argument("--multi", action="store_true",
                    help="always open an independent window (skip the "
                         "single-instance socket)")
+    p.add_argument("--goto", default=None, metavar="X,Y[,W]",
+                   help="start centered on X,Y (um) with an X marker; "
+                        "W = view width in um (omitted = fit view). "
+                        "Forwarded to a running instance too.")
     p.add_argument("--auto-index", action="store_true", default=True)
     p.set_defaults(fn=cmd_view)
 
