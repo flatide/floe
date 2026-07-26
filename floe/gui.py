@@ -1266,8 +1266,18 @@ class Viewer:
             self._gdlg = None
             self.window.present()
         dlg.connect("destroy", _gone)
+
+        def _focus_x(*_a):
+            # grab_focus right after show_all is lost on macOS quartz (the
+            # window is not keyboard-focused yet); present + focus once the
+            # dialog is actually mapped so the x field is editable and its
+            # prefill selected for overtyping.
+            dlg.present()
+            entries[0].grab_focus()
+            return False
+        dlg.connect("map-event", lambda *_a: _focus_x())
         dlg.show_all()
-        entries[0].grab_focus()
+        _focus_x()
 
     def _goto_apply(self):
         """Jump to the entered position: values fill x, y, window in
