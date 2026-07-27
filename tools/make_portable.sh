@@ -140,7 +140,8 @@ must = ["lib/libgtk-3.so.0", "lib/girepository-1.0/Gtk-3.0.typelib",
         "lib/python%s/site-packages/gi/__init__.py" % pyver,
         "lib/python%s/site-packages/floe/cli.py" % pyver,
         "lib/python%s/site-packages/klayout" % pyver,
-        "share/glib-2.0/schemas"]
+        "share/glib-2.0/schemas",
+        "fonts"]  # bundled sans fallback (fonts.conf lists it first)
 missing = [m for m in must if not os.path.exists(os.path.join(root, m))]
 for m in missing:
     print("MISSING", m)
@@ -228,7 +229,8 @@ CACHE=\$(mktemp)
 LD_LIBRARY_PATH="\$RT/lib" GDK_PIXBUF_MODULEDIR="\$LOADERS" \\
     "\$RT/bin/gdk-pixbuf-query-loaders" > "\$CACHE" 2>/dev/null || true
 GI_TYPELIB_PATH="\$RT/lib/girepository-1.0" LD_LIBRARY_PATH="\$RT/lib" \\
-GDK_PIXBUF_MODULE_FILE="\$CACHE" PYTHONHOME="\$RT" PYTHONNOUSERSITE=1 \\
+GDK_PIXBUF_MODULE_FILE="\$CACHE" FONTCONFIG_FILE="\$HERE/fonts.conf" \\
+PYTHONHOME="\$RT" PYTHONNOUSERSITE=1 \\
 "\$RT/bin/python3" - <<'PY'
 import sys
 print("python:       %s OK" % sys.version.split()[0])
