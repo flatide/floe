@@ -277,20 +277,25 @@ python-build-standalone CPython에 tkinter+Tcl/Tk가 이미 내장**되어 있�
 거기에 klayout/numpy/pillow 휠과 floe 소스만 넣어 tar하면 끝이다 (GTK처럼
 gdk-pixbuf 로더·gir 타입립·아이콘 테마를 싸갈 필요가 없다).
 
-인터넷(또는 미러) 되는 **타깃과 같은 아키텍처의 Linux** 빌드 머신에서
-(여기도 root 불필요):
+스크립트는 **실행하는 그 플랫폼용** 번들을 만든다(pip이 그 플랫폼 휠을
+깔기 때문) — 잠긴 Linux 호스트용은 **Linux**에서, macOS용(예: 시스템 Tk
+8.5로 회색 화면 나는 맥 구제)은 **Mac**에서 돌린다. OS·아키텍처(arm64→
+aarch64, apple-darwin/unknown-linux-gnu)는 자동 감지된다. 인터넷(또는
+미러)만 되면 되고 root는 불필요:
 
 ```sh
-tools/build_portable.sh                 # -> floe-portable-x86_64.tar.gz
+tools/build_portable.sh                 # -> floe-portable-<os>-<arch>.tar.gz
 # 폐쇄망 미러만 되는 빌드 머신이면 휠을 미리 받아두고:
 WHEELS=./wheels PBS_TARBALL=./cpython-...-install_only.tar.gz \
     tools/build_portable.sh
 ```
 
-폐쇄망 호스트에서는 **풀고 실행만** (설치·권한 전부 불필요):
+타깃에서는 **풀고 실행만** (설치·권한 전부 불필요; macOS는 Gatekeeper
+격리 해제 한 줄 추가):
 
 ```sh
-tar xzf floe-portable-x86_64.tar.gz
+tar xzf floe-portable-<os>-<arch>.tar.gz
+# macOS만: xattr -dr com.apple.quarantine python
 ./python/bin/python -m floe view data/chip.oas
 ```
 

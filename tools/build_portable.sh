@@ -10,8 +10,10 @@
 #     tar xzf floe-portable-<arch>.tar.gz
 #     ./python/bin/python -m floe view data/chip.oas
 #
-# Run THIS script on an internet- (or mirror-) capable Linux machine of
-# the SAME arch as the target. It does not need root either.
+# Run THIS script on an internet- (or mirror-) capable machine of the
+# SAME OS+arch as the target (it builds a bundle for the platform it runs
+# on): a Linux box for the locked Linux hosts, or a Mac for a Mac bundle.
+# It does not need root.
 #
 # By default this uses the LATEST CPython (auto-resolved from the newest
 # python-build-standalone release for this arch) and the LATEST
@@ -30,8 +32,22 @@ set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 FLOE_SRC="${FLOE_SRC:-$here/../floe}"
-ARCH="${ARCH:-$(uname -m)-unknown-linux-gnu}"
-OUT="${OUT:-floe-portable-$(uname -m).tar.gz}"
+
+# The bundle is for the platform this script RUNS ON (pip installs this
+# platform's wheels): Linux here -> a Linux bundle for the locked hosts,
+# macOS here -> a macOS bundle (e.g. to fix a Mac stuck on the deprecated
+# system Tk 8.5). python-build-standalone uses aarch64 (not arm64) and
+# -apple-darwin / -unknown-linux-gnu triples.
+detect_triple() {
+    local m; m="$(uname -m)"
+    case "$m" in arm64 | aarch64) m=aarch64 ;; x86_64 | amd64) m=x86_64 ;; esac
+    case "$(uname -s)" in
+        Darwin) echo "$m-apple-darwin" ;;
+        *)      echo "$m-unknown-linux-gnu" ;;
+    esac
+}
+ARCH="${ARCH:-$(detect_triple)}"
+OUT="${OUT:-floe-portable-$(uname -s | tr 'A-Z' 'a-z')-$(uname -m).tar.gz}"
 API_URL="https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest"
 
 fetch() {  # fetch $1 -> stdout
@@ -112,4 +128,8 @@ echo
 echo "[portable] wrote $OUT ($(du -h "$OUT" | cut -f1))"
 echo "[portable] on the target host:"
 echo "    tar xzf $(basename "$OUT")"
+if [ "$(uname -s)" = "Darwin" ]; then
+    # Gatekeeper quarantines downloaded/extracted binaries on macOS
+    echo "    xattr -dr com.apple.quarantine python   # clear Gatekeeper"
+fi
 echo "    ./python/bin/python -m floe view <file.oas>"
