@@ -59,6 +59,9 @@ def import_tk():
     contract cli.py relies on)."""
     global tk, ttk, filedialog, messagebox, Image, ImageTk
     global RS_BILINEAR, RS_NEAREST
+    # suppress Apple's generic "system Tk is deprecated" notice - we emit a
+    # clearer, floe-specific one below when the version is actually too old
+    os.environ.setdefault("TK_SILENCE_DEPRECATION", "1")
     try:
         import tkinter as _tk
         from tkinter import ttk as _ttk, filedialog as _fd, messagebox as _mb
@@ -79,6 +82,16 @@ def import_tk():
     Image, ImageTk = _Image, _ImageTk
     rs = getattr(Image, "Resampling", Image)
     RS_BILINEAR, RS_NEAREST = rs.BILINEAR, rs.NEAREST
+    # macOS ships a deprecated Tk 8.5 (with /usr/bin/python3 etc.) that does
+    # not render the canvas - the window comes up grey with nothing drawn.
+    # Warn loudly with the fix instead of leaving a silent grey screen.
+    if tk.TkVersion < 8.6:
+        sys.stderr.write(
+            "%s: Tk %s is too old and will not draw the layout (a grey "
+            "window with nothing rendered - this is macOS's deprecated "
+            "system Tk 8.5).\n  Use a Python with Tk 8.6+: Homebrew "
+            "`python-tk`, python.org Python, or the floe-portable bundle.\n"
+            % (APP, tk.TkVersion))
 
 
 class Viewer:

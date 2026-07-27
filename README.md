@@ -36,6 +36,13 @@ python3 -m venv .venv                       # --system-site-packages 불필요
     파이썬이면 `conda install tk`.
   - **Debian/Ubuntu**: `sudo apt install python3-tk`.
   - **macOS**: Homebrew `python-tk`, 또는 python.org 설치본(Tk 포함)을 사용.
+- **macOS 주의 — 시스템 Tk 8.5 금지**: `/usr/bin/python3` 등 애플 시스템
+  파이썬은 **deprecated Tk 8.5**를 쓰는데, 이건 Canvas를 렌더하지 못해
+  **창이 회색으로 뜨고 아무것도 안 그려진다** ("system Tk is deprecated"
+  경고가 같이 뜬다). **Tk 8.6+** 파이썬을 써야 한다 — Homebrew `python-tk`,
+  python.org 설치본, 또는 floe-portable 번들. 확인:
+  `<파이썬> -c "import tkinter; print(tkinter.TkVersion)"` → 8.6 이상이어야
+  한다 (floe는 8.6 미만이면 실행 시 명확한 경고를 출력한다).
 - pygobject/gtk/cairo/librsvg 관련 설치는 더 이상 필요 없다.
 
 폐쇄망 호스트는 아래 [폐쇄망 리눅스 배포](#폐쇄망-리눅스-배포) 절차를 따른다.
