@@ -286,9 +286,10 @@ PyGObject + GTK3 (conda-forge, 재배치 가능) + klayout + numpy + floe가
 디스플레이와 시스템 폰트뿐).
 
 flateyes와 달리 floe는 **klayout/numpy가 PyPI 휠**이라 런타임의 pip으로
-설치해야 하므로, 번들은 **x86_64 Linux 빌드 머신**에서 만든다 (glibc
-2.17 상한 → RHEL7+ 호환). `tools/make_portable.sh`가 flateyes의 레시피를
-그대로 따른다:
+설치해야 하므로, 번들은 **x86_64 Linux 빌드 머신**에서 만든다. 그 휠들이
+**glibc 2.27+**를 요구하므로 타깃은 **RHEL8+**여야 한다 (RHEL7은 klayout
+휠 자체가 안 돌아 불가). 빌드 시 verify가 실제 glibc floor를 출력한다.
+`tools/make_portable.sh`가 flateyes의 레시피를 그대로 따른다:
 
 ```sh
 tools/make_portable.sh                     # -> floe-portable-<ver>-<date>.tar.gz

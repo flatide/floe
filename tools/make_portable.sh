@@ -10,14 +10,20 @@
 #
 # The bundle holds python + PyGObject + GTK3 (conda-forge) + klayout +
 # numpy + the floe package, plus a launcher that builds the machine-local
-# GTK caches on first run. Target: x86_64 Linux, glibc 2.17+ (RHEL7+).
+# GTK caches on first run. Target: x86_64 Linux, glibc 2.27+ (RHEL8+)
+# - the klayout/numpy wheels need it; the verify prints the exact floor.
 set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)          # floe repo root
 OUT_DIR=${1:-$REPO}
 WORK=${FLOE_PORTABLE_WORK:-${TMPDIR:-/tmp}/floe-portable-build}
 PY_SPEC=${PY_SPEC:-python=3.11}                 # conda-forge python line
-GLIBC_CEILING=${GLIBC_CEILING:-17}              # max GLIBC_2.x for RHEL7
+# Two glibc knobs (flateyes conflated them): conda GTK can target an old
+# baseline for broad compat, but floe's klayout/numpy PyPI wheels require
+# glibc >= 2.27 (RHEL8+), so the verify ceiling must allow that - RHEL7
+# cannot run floe regardless. The real floor is the max found, printed.
+CONDA_GLIBC=${CONDA_GLIBC:-2.17}                # conda solver target
+GLIBC_CEILING=${GLIBC_CEILING:-28}              # verify guard (RHEL8=2.28)
 WHEELS=${WHEELS:-}                              # local wheel dir (closed net)
 VERSION=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "$REPO/floe/__init__.py")
 STAMP=$(date +%Y%m%d)
@@ -39,9 +45,10 @@ curl -fsSL -o micromamba \
 chmod +x micromamba
 
 # -- 2. resolve the GTK3 + python runtime (conda-forge) ------------------
-# CONDA_OVERRIDE_GLIBC keeps the solver at the RHEL7 baseline. A bundled
-# font gives GTK a guaranteed sans-serif.
-CONDA_OVERRIDE_GLIBC=2.${GLIBC_CEILING} ./micromamba create -y \
+# CONDA_OVERRIDE_GLIBC keeps the GTK solver at a broadly-compatible
+# baseline (the effective floor is raised by the pip wheels anyway). A
+# bundled font gives GTK a guaranteed sans-serif.
+CONDA_OVERRIDE_GLIBC=$CONDA_GLIBC ./micromamba create -y \
     -r "$WORK/mmroot" -p "$WORK/runtime" --platform linux-64 \
     -c conda-forge "$PY_SPEC" pygobject gtk3 font-ttf-dejavu-sans-mono \
     || true   # post-link failures still exit nonzero on some versions
@@ -92,12 +99,17 @@ for f in *; do
 done
 cd "$WORK"
 
-# -- 6. verify: arch, glibc ceiling, key files + runtime imports --------
-python3 - "$WORK/runtime" "$GLIBC_CEILING" "$PYVER" <<'PY'
+# -- 6. verify: arch, glibc floor <= ceiling, key files -----------------
+# The real host requirement is the MAX GLIBC_2.x any bundled ELF needs
+# (dominated by klayout/numpy wheels ~2.27); ceiling only guards against
+# accidentally-newer deps. The floor is written to $WORK/floor.txt so the
+# launcher/README can state the true "glibc >= 2.x" the target must meet.
+python3 - "$WORK/runtime" "$GLIBC_CEILING" "$PYVER" "$WORK/floor.txt" <<'PY'
 import os, re, struct, sys
-root, ceiling, pyver = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+root, ceiling, pyver, floorf = sys.argv[1], int(sys.argv[2]), \
+    sys.argv[3], sys.argv[4]
 pat = re.compile(rb"GLIBC_2\.(\d+)")
-bad, elves = [], 0
+bad, elves, floor = [], 0, 0
 for dp, _, names in os.walk(root):
     for n in names:
         p = os.path.join(dp, n)
@@ -113,10 +125,13 @@ for dp, _, names in os.walk(root):
                 vs = [int(m.group(1)) for m in pat.finditer(f.read())]
         except OSError:
             continue
-        if vs and max(vs) > ceiling:
-            bad.append(("GLIBC_2.%d" % max(vs), p))
+        if vs:
+            floor = max(floor, max(vs))
+            if max(vs) > ceiling:
+                bad.append(("GLIBC_2.%d" % max(vs), p))
+open(floorf, "w").write("2.%d" % floor)
 for why, p in bad:
-    print("FAIL", why, os.path.relpath(p, root))
+    print("FAIL", why, "(> ceiling 2.%d)" % ceiling, os.path.relpath(p, root))
 must = ["lib/libgtk-3.so.0", "lib/girepository-1.0/Gtk-3.0.typelib",
         "lib/python%s/site-packages/gi/__init__.py" % pyver,
         "lib/python%s/site-packages/floe/cli.py" % pyver,
@@ -127,8 +142,11 @@ for m in missing:
     print("MISSING", m)
 if bad or missing:
     sys.exit(1)
-print("verified: %d ELF files, all x86_64, glibc <= 2.%d" % (elves, ceiling))
+print("verified: %d ELF files, all x86_64, needs glibc >= 2.%d "
+      "(ceiling 2.%d)" % (elves, floor, ceiling))
 PY
+FLOOR="$(cat "$WORK/floor.txt" 2>/dev/null || echo 2.28)"
+echo "== bundle runs on glibc >= $FLOOR"
 
 # -- 7. assemble the bundle ---------------------------------------------
 B="$WORK/floe-portable"
@@ -180,7 +198,7 @@ cat > "$B/selfcheck" <<EOF
 HERE=\$(CDPATH= cd -- "\$(dirname -- "\$0")" && pwd)
 RT="\$HERE/runtime"
 echo "host glibc:   \$(ldd --version 2>/dev/null | head -1)"
-echo "arch:         \$(uname -m)   (needs x86_64, glibc >= 2.${GLIBC_CEILING})"
+echo "arch:         \$(uname -m)   (needs x86_64, glibc >= ${FLOOR})"
 GI_TYPELIB_PATH="\$RT/lib/girepository-1.0" LD_LIBRARY_PATH="\$RT/lib" \\
 PYTHONHOME="\$RT" PYTHONNOUSERSITE=1 "\$RT/bin/python3" - <<'PY'
 import sys
@@ -220,7 +238,7 @@ PyGObject(python3-gobject)가 없는 호스트에서 floe를 실행하기 위한
 안에 들어 있으며 시스템에는 아무것도 설치·변경하지 않는다. 시스템에서
 쓰는 것은 X 디스플레이와 (있다면) 시스템 폰트뿐.
 
-요구: x86_64 리눅스, glibc 2.${GLIBC_CEILING}+ (RHEL7+), X 디스플레이.
+요구: x86_64 리눅스, glibc ${FLOOR}+ (RHEL8+; klayout/numpy 휠 요구), X 디스플레이.
 
 설치/실행:
     tar xzf ${NAME}.tar.gz -C /opt        # 위치 자유
@@ -235,7 +253,7 @@ floe 코드 업데이트: 새 floe/ 패키지를
 에 덮어쓰면 된다. 런타임은 재사용.
 
 문제 해결:
-- "GLIBC_x.xx not found": 호스트 glibc가 2.${GLIBC_CEILING} 미만 → 사용 불가 (selfcheck 확인)
+- "GLIBC_x.xx not found": 호스트 glibc가 ${FLOOR} 미만 → 사용 불가 (selfcheck 확인)
 - 코드 3 종료: DISPLAY 미설정/접속 불가
 - 창은 뜨는데 회색/렌더 오류: ~/.cache/floe-rt 삭제 후 재실행 (캐시 재생성)
 EOF
