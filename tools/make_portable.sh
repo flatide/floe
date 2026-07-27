@@ -206,20 +206,34 @@ cat > "$B/selfcheck" <<EOF
 # Verifies the portable stack on THIS host without opening a window.
 HERE=\$(CDPATH= cd -- "\$(dirname -- "\$0")" && pwd)
 RT="\$HERE/runtime"
+LOADERS="\$RT/lib/gdk-pixbuf-2.0/2.10.0/loaders"
 echo "host glibc:   \$(ldd --version 2>/dev/null | head -1)"
 echo "arch:         \$(uname -m)   (needs x86_64, glibc >= ${FLOOR})"
+# build the pixbuf loader cache exactly as the launcher does, so the png
+# decoder used for render frames is exercised (a broken cache = black view)
+CACHE=\$(mktemp)
+LD_LIBRARY_PATH="\$RT/lib" GDK_PIXBUF_MODULEDIR="\$LOADERS" \\
+    "\$RT/bin/gdk-pixbuf-query-loaders" > "\$CACHE" 2>/dev/null || true
 GI_TYPELIB_PATH="\$RT/lib/girepository-1.0" LD_LIBRARY_PATH="\$RT/lib" \\
-PYTHONHOME="\$RT" PYTHONNOUSERSITE=1 "\$RT/bin/python3" - <<'PY'
+GDK_PIXBUF_MODULE_FILE="\$CACHE" PYTHONHOME="\$RT" PYTHONNOUSERSITE=1 \\
+"\$RT/bin/python3" - <<'PY'
 import sys
 print("python:       %s OK" % sys.version.split()[0])
 import gi; gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Gdk, GdkPixbuf, GLib
 print("pygobject:    OK  (GTK %d.%d)" % (Gtk.MAJOR_VERSION, Gtk.MINOR_VERSION))
+fmts = {f.get_name() for f in GdkPixbuf.Pixbuf.get_formats()}
+png = "png OK" if "png" in fmts else "png MISSING (render frames -> black!)"
+svg = "svg OK" if "svg" in fmts else "svg MISSING (checkbox icons)"
+print("pixbuf:       %s, %s" % (png, svg))
+if "png" not in fmts:
+    sys.exit(2)
 import klayout.db, klayout.lay, numpy
 print("klayout:      %s OK" % klayout.__version__)
 print("numpy:        %s OK" % numpy.__version__)
 import floe; print("floe:         %s OK" % floe.__version__)
 PY
+rm -f "\$CACHE"
 echo "display:      DISPLAY=\${DISPLAY:-<unset>}  (open test: ./floe view <file.oas>)"
 EOF
 
