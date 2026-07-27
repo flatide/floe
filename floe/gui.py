@@ -1,19 +1,17 @@
-"""Native viewer - Tkinter shell.
+"""Native viewer - GTK3/PyGObject shell.
 
-Ported from GTK3/PyGObject to Tkinter. The viewer now depends only on the
-stdlib's tkinter plus Pillow, both pip-installable, which removes the
-system-PyGObject / Python-version-match pain on closed-network hosts
-(gi is a C extension tied to the OS Python; tkinter ships with the
-interpreter). The render service (klayout) is unchanged and still runs in
-a separate process returning PNG frames; here they are decoded with
-Pillow and drawn - together with every overlay - on a Tk Canvas as native
-items (no cairo, no pixbuf stamping).
+Same hard environment constraints as flateyes (the sibling image viewer):
+targets are closed-network RHEL-family hosts where only PyGObject/GTK3 is
+stock and NOTHING can be installed. In particular there is NO pycairo, so
+the GTK "draw" signal is unusable: every frame is composed into a
+GdkPixbuf (klayout render frames, rubber band, rulers,
+snap marker, selection outline) and shown by one Gtk.Image; text labels
+are Gtk.Label widgets positioned with margins inside a Gtk.Overlay.
 
-Tk/PIL imports are lazy (import_tk), so importing this module works
-headless and the spawned render process never touches the GUI toolkit.
+GTK imports are lazy (import_gtk), so importing this module works
+headless and the spawned render process never touches GTK.
 """
 
-import io
 import math
 import os
 import queue
@@ -24,22 +22,20 @@ from . import cache as cache_mod
 from .service import RenderWorker
 from .viewport import MAX_LIVE_TILES
 
-tk = ttk = filedialog = messagebox = Image = ImageTk = None
-RS_BILINEAR = RS_NEAREST = None
+Gtk = Gdk = GdkPixbuf = GLib = None
 
 APP = "floe"
 POLL_MS = 25
 DEBOUNCE_MS = 120
 
-BLACK = "#000000"
-BAND_IN = "#8ecdf5"        # forward drag: zoom in
-BAND_OUT = "#f5b62e"       # backward drag: zoom out
-RULER_CORE = "#ffe97a"
-SNAP_VERTEX = "#66ffcc"
-SNAP_EDGE = "#66ccff"
-SEL_CORE = "#ffffff"
-GOTO_MARK = "#ff66d9"
-LABEL_BG = "#101010"
+BLACK = 0x000000FF
+BAND_IN = 0x8ECDF5FF       # forward drag: zoom in
+BAND_OUT = 0xF5B62EFF      # backward drag: zoom out
+RULER_CORE = 0xFFE97AFF
+SNAP_VERTEX = 0x66FFCCFF
+SNAP_EDGE = 0x66CCFFFF
+SEL_CORE = 0xFFFFFFFF
+GOTO_MARK = 0xFF66D9FF
 
 AUTO_DEPTH_BUDGET = 120_000   # est. shapes auto depth allows on screen
 MIN_SPP = 0.01     # max zoom-in: 1 px = 0.01 dbu; keeps render bboxes
@@ -48,65 +44,136 @@ MIN_SPP = 0.01     # max zoom-in: 1 px = 0.01 dbu; keeps render bboxes
 MINIMAP_PX = 110           # longest edge of the minimap (view px)
 MINIMAP_MARGIN = 12
 MINIMAP_DOT_MIN = 6        # view box smaller than this becomes a dot
-MINIMAP_BG = "#141414"
-MINIMAP_EDGE = "#666666"
-MINIMAP_VIEW = "#8ecdf5"
+MINIMAP_BG = 0x141414FF
+MINIMAP_EDGE = 0x666666FF
+MINIMAP_VIEW = 0x8ECDF5FF
 
 
-def import_tk():
-    """Lazy Tkinter/Pillow import: exit 3 with a clear message when either
-    is missing or the display is unreachable (mirrors the old import_gtk
-    contract cli.py relies on)."""
-    global tk, ttk, filedialog, messagebox, Image, ImageTk
-    global RS_BILINEAR, RS_NEAREST
-    # suppress Apple's generic "system Tk is deprecated" notice - we emit a
-    # clearer, floe-specific one below when the version is actually too old
-    os.environ.setdefault("TK_SILENCE_DEPRECATION", "1")
+def import_gtk():
+    """flateyes-style lazy GTK import: exit 3 with a clear message when
+    PyGObject is missing or the display is unreachable."""
+    global Gtk, Gdk, GdkPixbuf, GLib
     try:
-        import tkinter as _tk
-        from tkinter import ttk as _ttk, filedialog as _fd, messagebox as _mb
-    except ImportError as exc:
+        import gi
+        import warnings
+        warnings.simplefilter("ignore", getattr(
+            gi, "PyGIDeprecationWarning", DeprecationWarning))
+        gi.require_version("Gtk", "3.0")
+        gi.require_version("GdkPixbuf", "2.0")
+        from gi.repository import Gtk as _Gtk, Gdk as _Gdk, \
+            GdkPixbuf as _GdkPixbuf, GLib as _GLib
+    except (ImportError, ValueError) as exc:
         sys.stderr.write(
-            "%s: tkinter is required to open a window (%s)\n"
-            "  it ships with CPython built against Tcl/Tk; verify with:\n"
-            "  python3 -c 'import tkinter; tkinter.Tk()'\n" % (APP, exc))
+            "%s: PyGObject/GTK3 is required to open a window (%s)\n"
+            "  verify with: python3 -c 'import gi; "
+            "gi.require_version(\"Gtk\", \"3.0\")'\n" % (APP, exc))
         sys.exit(3)
-    try:
-        from PIL import Image as _Image, ImageTk as _ImageTk
-    except ImportError as exc:
+    Gtk, Gdk, GdkPixbuf, GLib = _Gtk, _Gdk, _GdkPixbuf, _GLib
+    ok = Gtk.init_check(sys.argv)
+    if isinstance(ok, tuple):
+        ok = ok[0]
+    if not ok:
         sys.stderr.write(
-            "%s: Pillow is required to display render frames (%s)\n"
-            "  install with: pip install pillow\n" % (APP, exc))
+            "%s: cannot open display %s (X session not reachable)\n"
+            % (APP, os.environ.get("DISPLAY", "")))
         sys.exit(3)
-    tk, ttk, filedialog, messagebox = _tk, _ttk, _fd, _mb
-    Image, ImageTk = _Image, _ImageTk
-    rs = getattr(Image, "Resampling", Image)
-    RS_BILINEAR, RS_NEAREST = rs.BILINEAR, rs.NEAREST
-    # macOS ships a deprecated Tk 8.5 (with /usr/bin/python3 etc.) that does
-    # not render the canvas - the window comes up grey with nothing drawn.
-    # Warn loudly with the fix instead of leaving a silent grey screen.
-    if tk.TkVersion < 8.6:
-        sys.stderr.write(
-            "%s: Tk %s is too old and will not draw the layout (a grey "
-            "window with nothing rendered - this is macOS's deprecated "
-            "system Tk 8.5).\n  Use a Python with Tk 8.6+: Homebrew "
-            "`python-tk`, python.org Python, or the floe-portable bundle.\n"
-            % (APP, tk.TkVersion))
+
+
+def fill_rect(buf, x, y, w, h, rgba):
+    """Clipped rectangle fill via a shared-pixels subpixbuf (flateyes
+    pattern - the only way to draw without cairo)."""
+    x, y, w, h = int(round(x)), int(round(y)), int(round(w)), int(round(h))
+    if x < 0:
+        w += x
+        x = 0
+    if y < 0:
+        h += y
+        y = 0
+    w = min(w, buf.get_width() - x)
+    h = min(h, buf.get_height() - y)
+    if w > 0 and h > 0:
+        buf.new_subpixbuf(x, y, w, h).fill(rgba)
+
+
+def stamp_segment(buf, a, b, casing, core):
+    """Line segment: flat rects for H/V, 3x3/2x2 dabs for free angles."""
+    ax, ay = a
+    bx, by = b
+    if round(ay) == round(by):    # horizontal
+        if casing is not None:
+            fill_rect(buf, min(ax, bx), ay - 2, abs(bx - ax) + 1, 5, casing)
+        fill_rect(buf, min(ax, bx), ay - 1, abs(bx - ax) + 1, 2, core)
+    elif round(ax) == round(bx):  # vertical
+        if casing is not None:
+            fill_rect(buf, ax - 2, min(ay, by), 5, abs(by - ay) + 1, casing)
+        fill_rect(buf, ax - 1, min(ay, by), 2, abs(by - ay) + 1, core)
+    else:
+        steps = min(int(max(abs(bx - ax), abs(by - ay))) + 1, 8000)
+        pts = [(ax + (bx - ax) * i / steps, ay + (by - ay) * i / steps)
+               for i in range(steps + 1)]
+        if casing is not None:
+            for x, y in pts:
+                fill_rect(buf, x - 1, y - 1, 3, 3, casing)
+        for x, y in pts:
+            fill_rect(buf, x - 1, y - 1, 2, 2, core)
+
+
+def fill_triangle(buf, p0, p1, p2, color):
+    """Solid triangle via 1-px horizontal scanline fills."""
+    pts = (p0, p1, p2)
+    y0 = int(math.floor(min(p[1] for p in pts)))
+    y1 = int(math.ceil(max(p[1] for p in pts)))
+    for y in range(y0, y1 + 1):
+        yc = y + 0.5
+        xs = []
+        for a, b in ((p0, p1), (p1, p2), (p2, p0)):
+            if (a[1] <= yc) != (b[1] <= yc):
+                t = (yc - a[1]) / (b[1] - a[1])
+                xs.append(a[0] + t * (b[0] - a[0]))
+        if len(xs) >= 2:
+            fill_rect(buf, min(xs), y, max(xs) - min(xs) + 1, 1, color)
+
+
+def stamp_arrow(buf, tip, ang, casing, core, size=11, half=4):
+    """Solid triangular arrowhead (the original tkinter-viewer look):
+    tip at the given point, pointing along ang (screen radians)."""
+    ux, uy = math.cos(ang), math.sin(ang)
+    px, py = -uy, ux
+
+    def tri(tx, ty, sz, hf):
+        bx, by = tx - sz * ux, ty - sz * uy
+        return ((tx, ty), (bx + hf * px, by + hf * py),
+                (bx - hf * px, by - hf * py))
+
+    if casing is not None:
+        fill_triangle(buf, *tri(tip[0] + 2 * ux, tip[1] + 2 * uy,
+                                size + 4, half + 1.5), casing)
+    fill_triangle(buf, *tri(tip[0], tip[1], size, half), core)
+
+
+def rect_outline(buf, x0, y0, x1, y1, casing, core):
+    for a, b in (((x0, y0), (x1, y0)), ((x0, y1), (x1, y1)),
+                 ((x0, y0), (x0, y1)), ((x1, y0), (x1, y1))):
+        stamp_segment(buf, a, b, casing, core)
+
+
+def frame_rect(buf, x0, y0, w, h, color):
+    """1-px rectangle border (rect_outline is too heavy for the minimap)."""
+    fill_rect(buf, x0, y0, w, 1, color)
+    fill_rect(buf, x0, y0 + h - 1, w, 1, color)
+    fill_rect(buf, x0, y0, 1, h, color)
+    fill_rect(buf, x0 + w - 1, y0, 1, h, color)
 
 
 class Viewer:
     def __init__(self, cache, server_sock=None, show=True, goto=None):
         self.server_sock = server_sock
-        if server_sock is not None:
-            server_sock.setblocking(False)
         self.cx = self.cy = 0
         self.spp = 1.0              # dbu per screen pixel
         self._start_goto = goto     # [x_um, y_um(, window_um)] from the CLI
         self.visible = set()
         self.gen = 0
-        self.last_frame = None      # (PIL.Image, bbox, dbu_per_px, key)
-        self._frame_photo = None    # ImageTk of the full current frame
-        self._preview_photo = None  # ImageTk of a cropped/scaled preview
+        self.last_frame = None      # (pixbuf, bbox, dbu_per_px, key)
         self._frame_anchor = None   # view center the frame was shown at
         self._job_keys = {}         # gen -> render key of submitted job
         self._job_depth = {}        # gen -> depth the job rendered at
@@ -117,7 +184,7 @@ class Viewer:
         self._debounce = None
         self._did_fit = False
         self.worker = None
-        self._layer_vars = {}
+        self._layer_checks = {}
         self.depth_value = 999
         self.depth_auto = True      # density-based depth until set explicitly
         self._depth_used = "?"      # depth of the last frame ("?" = none yet)
@@ -143,91 +210,106 @@ class Viewer:
         self._ddlg = None
         self._gdlg = None
         self.goto_mark = None       # world point of the last goto (X marker)
-        self._alloc_size = None
+        self._labels = []           # Gtk.Label pool for ruler distances
 
-        try:
-            self.window = tk.Tk()
-        except tk.TclError as exc:
-            sys.stderr.write("%s: cannot open display (%s)\n" % (APP, exc))
-            sys.exit(3)
-        self.window.title(APP)
-        self.window.geometry("1280x860")
-        self.window.protocol("WM_DELETE_WINDOW", self._quit)
-        self.window.bind("<Key>", self._on_key)
-        self._smallfont = ("TkDefaultFont", 9)
+        self.window = Gtk.Window(title=APP)
+        self.window.set_default_size(1280, 860)
+        self.window.connect("delete-event", lambda *_: self._quit())
+        self.window.connect("key-press-event", self._on_key)
 
-        # left panel: title, source, scrollable layer list, buttons
-        side = tk.Frame(self.window, width=210)
-        side.pack(side="left", fill="y")
-        side.pack_propagate(False)
-        tk.Label(side, text=APP, font=("TkDefaultFont", 12, "bold"),
-                 anchor="w").pack(fill="x", padx=10, pady=(8, 0))
-        self._src_label = tk.Label(side, text="", anchor="w", justify="left")
-        self._src_label.pack(fill="x", padx=10)
+        hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        self.window.add(hbox)
 
-        lwrap = tk.Frame(side)
-        lwrap.pack(side="top", fill="both", expand=True, pady=4)
-        self._lcanvas = tk.Canvas(lwrap, highlightthickness=0, width=196)
-        lscroll = ttk.Scrollbar(lwrap, orient="vertical",
-                                command=self._lcanvas.yview)
-        self._lcanvas.configure(yscrollcommand=lscroll.set)
-        lscroll.pack(side="right", fill="y")
-        self._lcanvas.pack(side="left", fill="both", expand=True)
-        self._layers_frame = tk.Frame(self._lcanvas)
-        self._lcanvas.create_window((0, 0), window=self._layers_frame,
-                                    anchor="nw")
-        self._layers_frame.bind(
-            "<Configure>",
-            lambda e: self._lcanvas.configure(
-                scrollregion=self._lcanvas.bbox("all")))
-        for w in (self._lcanvas, self._layers_frame):
-            w.bind("<MouseWheel>", self._layer_scroll)
-            w.bind("<Button-4>", lambda e: self._lcanvas.yview_scroll(-1, "units"))
-            w.bind("<Button-5>", lambda e: self._lcanvas.yview_scroll(1, "units"))
+        side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        side.set_size_request(210, -1)
+        hbox.pack_start(side, False, False, 0)
+        title = Gtk.Label()
+        title.set_markup("<b>%s</b>" % APP)
+        title.set_xalign(0.0)
+        title.set_margin_start(10)
+        title.set_margin_top(8)
+        side.pack_start(title, False, False, 0)
+        self._src_label = Gtk.Label(label="")
+        self._src_label.set_xalign(0.0)
+        self._src_label.set_margin_start(10)
+        side.pack_start(self._src_label, False, False, 0)
 
-        brow = tk.Frame(side)
-        brow.pack(side="bottom", fill="x", pady=4)
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self._layers_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        scroller.add(self._layers_box)
+        side.pack_start(scroller, True, True, 4)
+
+        brow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        side.pack_start(brow, False, False, 4)
         for text, cb in (("all", self._all_layers),
                          ("none", self._no_layers),
-                         ("fit", self.fit),
+                         ("fit", lambda: self.fit()),
                          ("clip…", self._clip_dialog)):
-            tk.Button(brow, text=text, command=cb).pack(
-                side="left", expand=True, fill="x")
+            b = Gtk.Button(label=text)
+            b.connect("clicked", lambda _w, f=cb: f())
+            brow.pack_start(b, True, True, 0)
 
-        # main area: canvas (frame + overlays) and a status bar
-        main = tk.Frame(self.window)
-        main.pack(side="right", fill="both", expand=True)
-        self.canvas = tk.Canvas(main, bg=BLACK, highlightthickness=0)
-        self.canvas.pack(side="top", fill="both", expand=True)
-        sbar = tk.Frame(main)
-        sbar.pack(side="bottom", fill="x")
-        self.status = tk.Label(sbar, text="", anchor="w")
-        self.status.pack(side="left", fill="x", expand=True, padx=8)
-        self.vstatus = tk.Label(sbar, text="", anchor="e")
-        self.vstatus.pack(side="right", padx=(0, 14))
-        self.dstatus = tk.Label(sbar, text="depth: auto", anchor="e")
-        self.dstatus.pack(side="right", padx=(0, 14))
-        self.rstatus = tk.Label(sbar, text="", anchor="e")
-        self.rstatus.pack(side="right", padx=(0, 10))
+        main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        hbox.pack_start(main, True, True, 0)
+        self.overlay = Gtk.Overlay()
+        # the image lives in a ScrolledWindow so the window can shrink:
+        # a bare Gtk.Image's minimum size is its pixbuf, and since we
+        # render pixbufs at allocation size that would ratchet the window
+        # ever larger (flateyes uses the same containment)
+        self.scroller = Gtk.ScrolledWindow()
+        try:
+            self.scroller.set_policy(Gtk.PolicyType.EXTERNAL,
+                                     Gtk.PolicyType.EXTERNAL)
+        except AttributeError:  # GTK < 3.16
+            self.scroller.set_policy(Gtk.PolicyType.NEVER,
+                                     Gtk.PolicyType.NEVER)
+        self.ebox = Gtk.EventBox()
+        self.image = Gtk.Image()
+        self.image.set_halign(Gtk.Align.START)
+        self.image.set_valign(Gtk.Align.START)
+        self.ebox.add(self.image)
+        self.scroller.add(self.ebox)
+        self.overlay.add(self.scroller)
+        main.pack_start(self.overlay, True, True, 0)
 
-        self.canvas.bind("<Configure>", self._on_configure)
-        self.canvas.bind("<ButtonPress-1>", self._b1_press)
-        self.canvas.bind("<B1-Motion>", self._b1_motion)
-        self.canvas.bind("<ButtonRelease-1>", self._b1_release)
-        for b in (2, 3):
-            self.canvas.bind("<ButtonPress-%d>" % b, self._pan_press)
-            self.canvas.bind("<B%d-Motion>" % b, self._pan_motion)
-            self.canvas.bind("<ButtonRelease-%d>" % b, self._pan_release)
-        self.canvas.bind("<Motion>", self._hover_motion)
-        self.canvas.bind("<MouseWheel>", self._on_wheel)
-        self.canvas.bind("<Button-4>", lambda e: self._on_wheel(e, "up"))
-        self.canvas.bind("<Button-5>", lambda e: self._on_wheel(e, "down"))
-        self.canvas.configure(cursor="crosshair")
+        sbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        self.status = Gtk.Label(label="")
+        self.status.set_xalign(0.0)
+        self.status.set_margin_start(8)
+        self.rstatus = Gtk.Label(label="")
+        self.rstatus.set_margin_end(10)
+        self.dstatus = Gtk.Label(label="depth: auto")
+        self.dstatus.set_margin_end(14)
+        self.vstatus = Gtk.Label(label="")
+        self.vstatus.set_margin_end(14)
+        sbar.pack_start(self.status, True, True, 0)
+        sbar.pack_end(self.rstatus, False, False, 0)
+        sbar.pack_end(self.dstatus, False, False, 0)
+        sbar.pack_end(self.vstatus, False, False, 0)
+        main.pack_start(sbar, False, False, 2)
 
-        self.window.after(POLL_MS, self._poll)
+        self.ebox.add_events(
+            Gdk.EventMask.BUTTON_PRESS_MASK |
+            Gdk.EventMask.BUTTON_RELEASE_MASK |
+            Gdk.EventMask.POINTER_MOTION_MASK |
+            Gdk.EventMask.SCROLL_MASK | Gdk.EventMask.SMOOTH_SCROLL_MASK)
+        self.ebox.connect("button-press-event", self._on_press)
+        self.ebox.connect("button-release-event", self._on_release)
+        self.ebox.connect("motion-notify-event", self._on_motion)
+        self.ebox.connect("scroll-event", self._on_scroll)
+        self._alloc_size = None
+        self.scroller.connect("size-allocate", self._on_allocate)
+        self.ebox.connect("realize", lambda w: self._set_cursor("crosshair"))
+
+        if server_sock is not None:
+            GLib.io_add_watch(server_sock.fileno(), GLib.IO_IN,
+                              self._on_incoming)
+        GLib.timeout_add(POLL_MS, self._poll)
+
         self._apply_cache(cache)
-        if not show:
-            self.window.withdraw()
+        if show:
+            self.window.show_all()
 
     # ---- cache binding / instance requests --------------------------------
     def _apply_cache(self, cache):
@@ -240,7 +322,6 @@ class Viewer:
         self.visible = {(l["layer"], l["datatype"])
                         for l in self.meta["layers"]}
         self.last_frame = None
-        self._frame_photo = None
         self._frame_anchor = None
         self._depth_used = "?"
         self._job_keys.clear()
@@ -253,11 +334,12 @@ class Viewer:
         self._pick_px = None
         self.goto_mark = None
         src = self.meta["src"]
-        self.window.title("%s - %s" % (APP, os.path.basename(src["path"])))
-        self._src_label.config(
-            text="%.2f GB · grid %dx%d" % (src["size"] / 1e9,
-                                           self.meta["grid"]["nx"],
-                                           self.meta["grid"]["ny"]))
+        self.window.set_title(
+            "%s - %s" % (APP, os.path.basename(src["path"])))
+        self._src_label.set_text(
+            "%.2f GB · grid %dx%d" % (src["size"] / 1e9,
+                                      self.meta["grid"]["nx"],
+                                      self.meta["grid"]["ny"]))
         self._build_layer_panel()
         if self.worker is not None:
             self.worker.stop()
@@ -267,29 +349,23 @@ class Viewer:
             self.fit()
 
     def _build_layer_panel(self):
-        for child in self._layers_frame.winfo_children():
-            child.destroy()
-        self._layer_vars = {}
+        for child in self._layers_box.get_children():
+            self._layers_box.remove(child)
+        self._layer_checks = {}
         for l in self.meta["layers"]:
             key = (l["layer"], l["datatype"])
-            row = tk.Frame(self._layers_frame)
-            row.pack(fill="x", anchor="w")
-            var = tk.BooleanVar(value=True)
-            cb = tk.Checkbutton(row, variable=var,
-                                command=lambda k=key: self._on_layer_toggled(k))
-            cb.pack(side="left")
-            tk.Label(row, text="%s  %d/%d" % (l["name"], key[0], key[1]),
-                     fg=l["color"], anchor="w").pack(side="left", fill="x")
-            for w in (row, cb):
-                w.bind("<MouseWheel>", self._layer_scroll)
-                w.bind("<Button-4>",
-                       lambda e: self._lcanvas.yview_scroll(-1, "units"))
-                w.bind("<Button-5>",
-                       lambda e: self._lcanvas.yview_scroll(1, "units"))
-            self._layer_vars[key] = var
-
-    def _layer_scroll(self, event):
-        self._lcanvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+            cb = Gtk.CheckButton()
+            lbl = Gtk.Label()
+            lbl.set_markup('<span foreground="%s">%s  %d/%d</span>'
+                           % (l["color"], GLib.markup_escape_text(l["name"]),
+                              key[0], key[1]))
+            lbl.set_xalign(0.0)
+            cb.add(lbl)
+            cb.set_active(True)
+            cb.connect("toggled", self._on_layer_toggled, key)
+            self._layers_box.pack_start(cb, False, False, 0)
+            self._layer_checks[key] = cb
+        self._layers_box.show_all()
 
     def open_file(self, path):
         """Open another OASIS file (instance-forwarded request)."""
@@ -304,43 +380,39 @@ class Viewer:
         self._apply_cache(c)
         return None
 
-    def _poll_socket(self):
-        """Non-blocking accept for the single-instance forward socket
-        (replaces GLib.io_add_watch; polled from the render loop)."""
-        if self.server_sock is None:
-            return
-        while True:
-            try:
-                conn, _ = self.server_sock.accept()
-            except (BlockingIOError, OSError):
-                return
-            conn.settimeout(2.0)
-            try:
-                data = b""
-                while b"\n" not in data and len(data) < 65536:
-                    chunk = conn.recv(4096)
-                    if not chunk:
-                        break
-                    data += chunk
-                line = data.decode("utf-8", "replace").strip()
-                fields = line.split("\t")
-                path = fields[0].strip()
-                if not path:
-                    error = "ERR empty request"
-                else:
-                    try:
-                        error = self.open_file(path)
-                    except Exception as exc:
-                        error = "ERR %s" % exc
+    def _on_incoming(self, _source, _cond):
+        try:
+            conn, _ = self.server_sock.accept()
+        except OSError:
+            return True
+        conn.settimeout(2.0)
+        try:
+            data = b""
+            while b"\n" not in data and len(data) < 65536:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+            line = data.decode("utf-8", "replace").strip()
+            fields = line.split("\t")
+            path = fields[0].strip()
+            if not path:
+                error = "ERR empty request"
+            else:
                 try:
-                    conn.sendall((error or "OK").encode("utf-8") + b"\n")
-                except OSError:
-                    pass
-                if not error:
-                    self._forwarded_goto(fields[1:])
-                    self._present()
-            finally:
-                conn.close()
+                    error = self.open_file(path)
+                except Exception as exc:
+                    error = "ERR %s" % exc
+            try:
+                conn.sendall((error or "OK").encode("utf-8") + b"\n")
+            except OSError:
+                pass
+            if not error:
+                self._forwarded_goto(fields[1:])
+                self._present()
+        finally:
+            conn.close()
+        return True
 
     def _forwarded_goto(self, fields):
         """Apply a 'goto=X,Y[,W]' option (um) from a forwarded request.
@@ -360,17 +432,15 @@ class Viewer:
 
     def _present(self):
         self.window.deiconify()
-        self.window.lift()
-        try:
-            self.window.focus_force()
-        except tk.TclError:
-            pass
+        self.window.present()
+        self.window.set_urgency_hint(True)
 
     # ---- geometry ----------------------------------------------------------
     def _viewport_size(self):
-        w = self.canvas.winfo_width()
-        h = self.canvas.winfo_height()
-        return (w if w >= 50 else 1200, h if h >= 50 else 800)
+        alloc = self.scroller.get_allocation()
+        w = alloc.width if alloc.width >= 50 else 1200
+        h = alloc.height if alloc.height >= 50 else 800
+        return w, h
 
     def view_bbox(self):
         w, h = self._viewport_size()
@@ -391,11 +461,11 @@ class Viewer:
         return sorted(self.visible)
 
     def _layers_arg(self):
-        if len(self.visible) != len(self._layer_vars):
+        if len(self.visible) != len(self._layer_checks):
             return self._visible_list()
         return None
 
-    # ---- display composition (Canvas: image item + overlay items) ---------
+    # ---- display composition (no cairo: pixbuf ops only) -------------------
     def _render_key(self, scope):
         """Identity of a frame: what state it was rendered for.
         Auto-depth frames share one identity so they stay reusable
@@ -411,35 +481,39 @@ class Viewer:
         return frame[3] is not None and frame[2] > 0 and bool(self.visible)
 
     def _display(self):
-        self.canvas.delete("frame")
-        self.canvas.delete("ov")
+        w, h = self._viewport_size()
+        disp = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, False, 8, w, h)
+        disp.fill(BLACK)
         bbox = self.view_bbox()
         if self.last_frame is not None and \
                 self._frame_compatible(self.last_frame):
-            # the stale frame is never rescaled blurily as a base: it stays
-            # frozen at its own resolution until the fresh frame lands.
-            # While the scale matches, the anchor tracks the center so pans
-            # move 1:1; once a zoom changes the scale the anchor stays put.
-            img, fb, fspp, _key = self.last_frame
-            w, h = self._viewport_size()
+            # the stale frame is never rescaled (a blurry zoomed base
+            # reads as a glitch): it stays frozen at its own resolution
+            # until the fresh frame lands. While the scale matches, the
+            # anchor tracks the center so pans move 1:1; once a zoom
+            # changes the scale the anchor stays put - zoom-at-cursor
+            # center compensation must not slide the frozen image.
+            frame, fb, fspp, _key = self.last_frame
             if self._frame_anchor is None or \
                     abs(self.spp / fspp - 1.0) < 0.001:
                 self._frame_anchor = (self.cx, self.cy)
             ax, ay = self._frame_anchor
             vb = (ax - w / 2 * fspp, ay - h / 2 * fspp,
                   ax + w / 2 * fspp, ay + h / 2 * fspp)
-            self._place_frame(img, fb, vb, fspp)
+            self._composite_world(disp, frame, fb, vb, fspp)
+            # world-anchored overlays (rulers, selection, snap) stay
+            # glued to the frozen base and jump together with it when
+            # the fresh frame lands; the minimap keeps the real view
             obox, ospp = vb, fspp
         else:
             obox, ospp = bbox, self.spp
-        self._draw_overlays(obox, ospp, bbox)
+        self._draw_overlays(disp, obox, ospp, bbox)
+        self.image.set_from_pixbuf(disp)
+        self._update_labels(obox, ospp)
 
-    def _place_frame(self, src, src_bbox, bbox, spp):
-        """Put the (frozen or fresh) frame on the canvas: reposition the
-        cached full photo for a pure pan, else crop the visible region and
-        resize it for a zoom preview (never materializes a huge image)."""
-        W, H = self._viewport_size()
-        sw, sh = src.size
+    def _composite_world(self, disp, src, src_bbox, bbox, spp=None):
+        spp = spp or self.spp
+        sw = src.get_width()
         if sw < 1 or src_bbox[2] <= src_bbox[0]:
             return
         sppd = sw / (src_bbox[2] - src_bbox[0])   # src px per dbu
@@ -448,32 +522,19 @@ class Viewer:
             return
         off_x = (src_bbox[0] - bbox[0]) / spp
         off_y = (bbox[3] - src_bbox[3]) / spp
-        if abs(scale - 1.0) < 1e-3 and self._frame_photo is not None:
-            self.canvas.create_image(int(round(off_x)), int(round(off_y)),
-                                     anchor="nw", image=self._frame_photo,
-                                     tags="frame")
+        dx0 = max(0, int(math.floor(off_x)))
+        dy0 = max(0, int(math.floor(off_y)))
+        dx1 = min(disp.get_width(), int(math.ceil(off_x + sw * scale)))
+        dy1 = min(disp.get_height(),
+                  int(math.ceil(off_y + src.get_height() * scale)))
+        if dx1 <= dx0 or dy1 <= dy0:
             return
-        vx0, vy0 = max(0.0, off_x), max(0.0, off_y)
-        vx1 = min(W, off_x + sw * scale)
-        vy1 = min(H, off_y + sh * scale)
-        if vx1 <= vx0 or vy1 <= vy0:
-            return
-        sx0, sy0 = (vx0 - off_x) / scale, (vy0 - off_y) / scale
-        sx1, sy1 = (vx1 - off_x) / scale, (vy1 - off_y) / scale
-        crop = src.crop((int(math.floor(sx0)), int(math.floor(sy0)),
-                         int(math.ceil(sx1)), int(math.ceil(sy1))))
-        tw, th = max(1, int(round(vx1 - vx0))), max(1, int(round(vy1 - vy0)))
-        if crop.size != (tw, th):
-            crop = crop.resize((tw, th),
-                               RS_BILINEAR if scale < 1 else RS_NEAREST)
-        self._preview_photo = ImageTk.PhotoImage(crop)
-        self.canvas.create_image(int(round(vx0)), int(round(vy0)),
-                                 anchor="nw", image=self._preview_photo,
-                                 tags="frame")
+        interp = GdkPixbuf.InterpType.BILINEAR if scale < 1 \
+            else GdkPixbuf.InterpType.NEAREST
+        src.composite(disp, dx0, dy0, dx1 - dx0, dy1 - dy0,
+                      off_x, off_y, scale, scale, interp, 255)
 
-    def _draw_overlays(self, obox, ospp, bbox):
-        c = self.canvas
-
+    def _draw_overlays(self, disp, obox, ospp, bbox):
         def sx(v):
             return (v - obox[0]) / ospp
 
@@ -481,73 +542,57 @@ class Viewer:
             return (obox[3] - v) / ospp
 
         if self.selection and self.selection.get("points"):
-            flat = [co for x, y in self.selection["points"]
-                    for co in (sx(x), sy(y))]
-            if len(flat) >= 6:
-                c.create_polygon(*flat, outline=SEL_CORE, fill="",
-                                 width=2, tags="ov")
+            pts = [(sx(x), sy(y)) for x, y in self.selection["points"]]
+            for a, b in zip(pts, pts[1:] + pts[:1]):
+                stamp_segment(disp, a, b, BLACK, SEL_CORE)
         segs = list(self.rulers)
         if self.mode == "ruler" and self._ruler_start is not None:
             segs.append((*self._ruler_start, *self._ruler_end_preview()))
         for x0, y0, x1, y1 in segs:
-            ax, ay, bx, by = sx(x0), sy(y0), sx(x1), sy(y1)
-            c.create_line(ax, ay, bx, by, fill=RULER_CORE, width=2,
-                          arrow="both", arrowshape=(12, 14, 4), tags="ov")
-            d_um = math.hypot(x1 - x0, y1 - y0) * self.dbu
-            self._label((ax + bx) / 2 + 8, (ay + by) / 2 - 16,
-                        "%.4f um" % d_um)
+            a, b = (sx(x0), sy(y0)), (sx(x1), sy(y1))
+            stamp_segment(disp, a, b, BLACK, RULER_CORE)
+            ang = math.atan2(b[1] - a[1], b[0] - a[0])
+            stamp_arrow(disp, b, ang, BLACK, RULER_CORE)      # outward
+            stamp_arrow(disp, a, ang + math.pi, BLACK, RULER_CORE)
         if self.mode == "ruler" and self.snap_on and self._snap_res \
                 and self._snap_res.get("found"):
             mx, my = sx(self._snap_res["x"]), sy(self._snap_res["y"])
             color = SNAP_VERTEX if self._snap_res["snap"] == "vertex" \
                 else SNAP_EDGE
-            c.create_rectangle(mx - 5, my - 5, mx + 5, my + 5,
-                               outline=color, tags="ov")
-            c.create_line(mx - 9, my, mx + 9, my, fill=color, tags="ov")
-            c.create_line(mx, my - 9, mx, my + 9, fill=color, tags="ov")
+            rect_outline(disp, mx - 5, my - 5, mx + 5, my + 5, None, color)
+            fill_rect(disp, mx - 9, my, 19, 1, color)
+            fill_rect(disp, mx, my - 9, 1, 19, color)
         if self.goto_mark is not None:
             gx, gy = sx(self.goto_mark[0]), sy(self.goto_mark[1])
-            W, H = self._viewport_size()
-            if -12 <= gx <= W + 12 and -12 <= gy <= H + 12:
-                c.create_line(gx - 10, gy - 10, gx + 10, gy + 10,
-                              fill=GOTO_MARK, width=2, tags="ov")
-                c.create_line(gx - 10, gy + 10, gx + 10, gy - 10,
-                              fill=GOTO_MARK, width=2, tags="ov")
+            if -12 <= gx <= disp.get_width() + 12 and \
+                    -12 <= gy <= disp.get_height() + 12:
+                stamp_segment(disp, (gx - 10, gy - 10), (gx + 10, gy + 10),
+                              BLACK, GOTO_MARK)
+                stamp_segment(disp, (gx - 10, gy + 10), (gx + 10, gy - 10),
+                              BLACK, GOTO_MARK)
         if self._zoomdrag is not None and self._band_cur is not None:
             x0, y0 = self._zoomdrag
             x1, y1 = self._band_cur
             color = BAND_IN if x1 >= x0 else BAND_OUT
-            c.create_rectangle(x0, y0, x1, y1, outline=color, tags="ov")
-        self._draw_minimap(bbox)
+            rect_outline(disp, x0, y0, x1, y1, BLACK, color)
+        self._draw_minimap(disp, bbox)
 
-    def _label(self, x, y, text):
-        c = self.canvas
-        t = c.create_text(x + 4, y + 2, text=text, anchor="nw",
-                          fill=RULER_CORE, font=self._smallfont, tags="ov")
-        bb = c.bbox(t)
-        if bb:
-            r = c.create_rectangle(bb[0] - 2, bb[1] - 1, bb[2] + 2, bb[3] + 1,
-                                   fill=LABEL_BG, outline="", tags="ov")
-            c.tag_lower(r, t)
-
-    def _draw_minimap(self, bbox):
+    def _draw_minimap(self, disp, bbox):
         """Die outline in the bottom-right corner with the current view
         marked: a box while it is still readable, a dot once the zoom
         makes the box degenerate."""
-        c = self.canvas
-        W, H = self._viewport_size()
         bb = self.meta["bbox"]
         bw, bh = bb[2] - bb[0], bb[3] - bb[1]
         if bw <= 0 or bh <= 0:
             return
         scale = MINIMAP_PX / max(bw, bh)
         mw, mh = max(2, round(bw * scale)), max(2, round(bh * scale))
-        x0 = W - MINIMAP_MARGIN - mw
-        y0 = H - MINIMAP_MARGIN - mh
+        x0 = disp.get_width() - MINIMAP_MARGIN - mw
+        y0 = disp.get_height() - MINIMAP_MARGIN - mh
         if x0 < 0 or y0 < 0:
             return  # viewport too small for a minimap
-        c.create_rectangle(x0, y0, x0 + mw, y0 + mh, fill=MINIMAP_BG,
-                           outline=MINIMAP_EDGE, tags="ov")
+        fill_rect(disp, x0, y0, mw, mh, MINIMAP_BG)
+        frame_rect(disp, x0, y0, mw, mh, MINIMAP_EDGE)
 
         def mx(v):
             return x0 + (v - bb[0]) * scale
@@ -558,16 +603,46 @@ class Viewer:
         vw = (bbox[2] - bbox[0]) * scale
         vh = (bbox[3] - bbox[1]) * scale
         if vw >= MINIMAP_DOT_MIN and vh >= MINIMAP_DOT_MIN:
+            # the fit view overshoots the die by its margin: clip the
+            # view box to the minimap
             rx0 = max(x0, mx(bbox[0]))
             ry0 = max(y0, my(bbox[3]))
-            rx1 = min(x0 + mw, mx(bbox[2]))
-            ry1 = min(y0 + mh, my(bbox[1]))
-            c.create_rectangle(rx0, ry0, rx1, ry1, outline=MINIMAP_VIEW,
-                               tags="ov")
+            rx1 = min(x0 + mw - 1, mx(bbox[2]))
+            ry1 = min(y0 + mh - 1, my(bbox[1]))
+            frame_rect(disp, rx0, ry0, max(2, round(rx1 - rx0 + 1)),
+                       max(2, round(ry1 - ry0 + 1)), MINIMAP_VIEW)
         else:
             px, py = mx(self.cx), my(self.cy)
-            c.create_rectangle(px - 3, py - 3, px + 3, py + 3,
-                               fill=MINIMAP_VIEW, outline=BLACK, tags="ov")
+            fill_rect(disp, px - 3, py - 3, 7, 7, BLACK)
+            fill_rect(disp, px - 2, py - 2, 5, 5, MINIMAP_VIEW)
+
+    def _update_labels(self, obox, ospp):
+        """Ruler distance labels: a pool of Gtk.Labels on the overlay."""
+        needed = []
+        segs = list(self.rulers)
+        if self.mode == "ruler" and self._ruler_start is not None:
+            segs.append((*self._ruler_start, *self._ruler_end_preview()))
+        for x0, y0, x1, y1 in segs:
+            d_um = math.hypot(x1 - x0, y1 - y0) * self.dbu
+            mx = ((x0 + x1) / 2 - obox[0]) / ospp
+            my = (obox[3] - (y0 + y1) / 2) / ospp
+            needed.append((mx + 8, my - 22, "%.4f um" % d_um))
+        while len(self._labels) < len(needed):
+            lbl = Gtk.Label()
+            lbl.set_halign(Gtk.Align.START)
+            lbl.set_valign(Gtk.Align.START)
+            self.overlay.add_overlay(lbl)
+            self._labels.append(lbl)
+        w, h = self._viewport_size()
+        for lbl, (x, y, text) in zip(self._labels, needed):
+            lbl.set_markup('<span background="#101010" foreground='
+                           '"#ffe97a"> %s </span>'
+                           % GLib.markup_escape_text(text))
+            lbl.set_margin_start(int(max(0, min(x, w - 90))))
+            lbl.set_margin_top(int(max(0, min(y, h - 20))))
+            lbl.show()
+        for lbl in self._labels[len(needed):]:
+            lbl.hide()
 
     # ---- drawing / rendering ------------------------------------------------
     @staticmethod
@@ -602,19 +677,24 @@ class Viewer:
         scope = "live" if live else "skel"
         self._display()
         if not self.visible:
-            self._after_cancel("_debounce")
+            if self._debounce is not None:
+                GLib.source_remove(self._debounce)
+                self._debounce = None
             self._clear_pending()
             self._set_status(bbox, "no layers visible")
             return
         mode = "live (%d tiles)" % span if scope == "live" \
             else "far view (skeleton)"
         if self._covered(bbox, scope):
-            self._after_cancel("_debounce")
+            if self._debounce is not None:
+                GLib.source_remove(self._debounce)
+                self._debounce = None
             self._set_status(bbox, mode)
             return
-        self._after_cancel("_debounce")
+        if self._debounce is not None:
+            GLib.source_remove(self._debounce)
         self._pending_scope = scope
-        self._debounce = self.window.after(
+        self._debounce = GLib.timeout_add(
             1 if immediate else DEBOUNCE_MS, self._submit_render)
         self._set_status(bbox, mode)
 
@@ -657,40 +737,33 @@ class Viewer:
             "visible": self._layers_arg()})
         self._pending = self.gen
         self._pending_t0 = time.perf_counter()
-        self.rstatus.config(text="rendering…")
+        self.rstatus.set_text("rendering…")
         self._set_cursor("wait")  # mouse input is ignored until the frame
         if self._pending_timer is None:
-            self._pending_timer = self.window.after(400, self._pending_tick)
+            self._pending_timer = GLib.timeout_add(400, self._pending_tick)
+        return False  # one-shot timeout
 
     def _pending_tick(self):
         if self._pending is None:
             self._pending_timer = None
-            self.rstatus.config(text="")
-            return
+            self.rstatus.set_text("")
+            return False
         el = time.perf_counter() - self._pending_t0
-        self.rstatus.config(text="rendering…" if el < 1.5
-                            else "rendering… %.0fs" % el)
-        self._pending_timer = self.window.after(400, self._pending_tick)
+        self.rstatus.set_text("rendering…" if el < 1.5
+                              else "rendering… %.0fs" % el)
+        return True
 
     def _clear_pending(self):
         self._pending = None
-        self._after_cancel("_pending_timer")
-        self.rstatus.config(text="")
+        if self._pending_timer is not None:
+            GLib.source_remove(self._pending_timer)
+            self._pending_timer = None
+        self.rstatus.set_text("")
         self._set_cursor("move" if self._drag is not None else "crosshair")
-
-    def _after_cancel(self, attr):
-        tid = getattr(self, attr, None)
-        if tid is not None:
-            try:
-                self.window.after_cancel(tid)
-            except Exception:
-                pass
-            setattr(self, attr, None)
 
     def _poll(self):
         if self._quitting:
-            return
-        self._poll_socket()
+            return False
         try:
             while True:
                 res = self.worker.res.get_nowait()
@@ -698,23 +771,22 @@ class Viewer:
                 if kind == "frame":
                     if res["gen"] == self._pending:
                         self._clear_pending()
-                        self.rstatus.config(text="rendering done.")
+                        self.rstatus.set_text("rendering done.")
                     if res["gen"] == self.gen:
-                        img = Image.open(io.BytesIO(res["png"]))
-                        img.load()
-                        if img.mode not in ("RGB", "RGBA"):
-                            img = img.convert("RGB")
+                        loader = GdkPixbuf.PixbufLoader.new_with_type("png")
+                        loader.write(res["png"])
+                        loader.close()
+                        pix = loader.get_pixbuf()
                         fb = res["bbox"]
-                        fspp = (fb[2] - fb[0]) / max(1, img.width)
+                        fspp = (fb[2] - fb[0]) / max(1, pix.get_width())
                         key = self._job_keys.get(res["gen"])
                         used = self._job_depth.get(res["gen"])
-                        self.last_frame = (img, fb, fspp, key)
-                        self._frame_photo = ImageTk.PhotoImage(img)
+                        self.last_frame = (pix, fb, fspp, key)
                         self._display()
                         if res.get("bg"):
                             continue  # silent margin upgrade
                         self._depth_used = used
-                        self.dstatus.config(text=self._depth_label())
+                        self.dstatus.set_text(self._depth_label())
                         if res.get("scope") == "skel":
                             mode = "far view (%s, %d ms)" % (
                                 "outline" if used == 0 else "skeleton",
@@ -743,13 +815,13 @@ class Viewer:
                                      "error: %s" % res.get("msg"))
         except queue.Empty:
             pass
-        self.window.after(POLL_MS, self._poll)
+        return True
 
     def _set_status(self, bbox, mode):
         w_um = (bbox[2] - bbox[0]) * self.dbu
         h_um = (bbox[3] - bbox[1]) * self.dbu
-        self.vstatus.config(text="view %.1f x %.1f um" % (w_um, h_um))
-        self.status.config(text=mode)
+        self.vstatus.set_text("view %.1f x %.1f um" % (w_um, h_um))
+        self.status.set_text(mode)
 
     # ---- interaction --------------------------------------------------------
     def fit(self):
@@ -781,14 +853,16 @@ class Viewer:
         else:
             self.cy = min(max(self.cy, bb[1] + hy), bb[3] - hy)
 
-    def _on_configure(self, event):
-        # Canvas resized: first real size fits (or applies a startup goto);
-        # later size changes just redraw.
-        size = (event.width, event.height)
+    def _on_allocate(self, _w, alloc):
+        # GTK emits size-allocate on every set_from_pixbuf; reacting to
+        # all of them would loop redraw -> allocate -> redraw forever
+        # (visible as an endlessly re-submitted render). Only a real
+        # size change matters.
+        size = (alloc.width, alloc.height)
         if size == self._alloc_size:
             return
         self._alloc_size = size
-        if not self._did_fit and event.width > 50:
+        if not self._did_fit and alloc.width > 50:
             self._did_fit = True
             if self._start_goto is not None:
                 self.spp = self._fit_spp()  # zoom baseline if no window given
@@ -800,95 +874,105 @@ class Viewer:
             self.redraw()
 
     def _set_cursor(self, name):
-        try:
-            self.canvas.configure(
-                cursor={"wait": "watch", "move": "fleur"}.get(
-                    name, "crosshair"))
-        except tk.TclError:
-            pass
+        win = self.ebox.get_window()
+        if win is not None:
+            try:
+                win.set_cursor(Gdk.Cursor.new_from_name(
+                    win.get_display(), name))
+            except Exception:
+                pass
 
-    def _b1_press(self, event):
-        self.canvas.focus_set()
+    def _on_press(self, _w, ev):
         if self._pending is not None:
-            return
-        if self.mode == "ruler":
-            self._ruler_free = bool(event.state & 0x0001)  # Shift
-            self._ruler_click(event)
-            return
-        self._zoomdrag = (event.x, event.y)
-        self._band_cur = None
+            return True  # render in flight: mouse input waits
+        if ev.button == 1:
+            if self.mode == "ruler":
+                self._ruler_free = bool(ev.state &
+                                        Gdk.ModifierType.SHIFT_MASK)
+                self._ruler_click(ev)
+                return True
+            self._zoomdrag = (ev.x, ev.y)
+            self._band_cur = None
+        elif ev.button in (2, 3):
+            self._drag = (ev.x, ev.y)
+            self._set_cursor("move")
+        return True
 
-    def _b1_motion(self, event):
-        self._update_cursor(event)
-        if self._pending is not None:
-            return
-        if self._zoomdrag is not None:
-            self._band_cur = (event.x, event.y)
-            self._display()
-
-    def _b1_release(self, event):
-        if self._zoomdrag is None:
-            return
+    def _on_release(self, _w, ev):
+        if ev.button in (2, 3):
+            self._drag = None
+            self._set_cursor("crosshair")
+            return True
+        if ev.button != 1 or self._zoomdrag is None:
+            return True
         x0, y0 = self._zoomdrag
         self._zoomdrag = None
         self._band_cur = None
-        dx, dy = abs(event.x - x0), abs(event.y - y0)
+        dx, dy = abs(ev.x - x0), abs(ev.y - y0)
         if dx < 5 or dy < 5:
             self._display()          # erase the band
-            self._pick_click(event)  # a click, not a box
-            return
+            self._pick_click(ev)     # a click, not a box
+            return True
         bbox = self.view_bbox()
-        lx0 = bbox[0] + min(x0, event.x) * self.spp
-        lx1 = bbox[0] + max(x0, event.x) * self.spp
-        ly0 = bbox[3] - max(y0, event.y) * self.spp
-        ly1 = bbox[3] - min(y0, event.y) * self.spp
+        lx0 = bbox[0] + min(x0, ev.x) * self.spp
+        lx1 = bbox[0] + max(x0, ev.x) * self.spp
+        ly0 = bbox[3] - max(y0, ev.y) * self.spp
+        ly1 = bbox[3] - min(y0, ev.y) * self.spp
         w, h = self._viewport_size()
         self.cx = (lx0 + lx1) / 2
         self.cy = (ly0 + ly1) / 2
-        if event.x >= x0:  # forward: the box fills the viewport
+        if ev.x >= x0:  # forward: the box fills the viewport
             self.spp = max((lx1 - lx0) / w, (ly1 - ly0) / h)
-        else:              # backward: zoom out by the viewport/box ratio
+        else:           # backward: zoom out by the viewport/box ratio
             self.spp *= max(w / dx, h / dy)
         self.redraw()
+        return True
 
-    def _pan_press(self, event):
+    def _on_motion(self, _w, ev):
+        self._update_cursor(ev)
         if self._pending is not None:
-            return
-        self._drag = (event.x, event.y)
-        self._set_cursor("move")
+            return True  # render in flight: mouse input waits
+        if self._drag is not None and ev.state & (
+                Gdk.ModifierType.BUTTON2_MASK |
+                Gdk.ModifierType.BUTTON3_MASK):
+            ddx, ddy = ev.x - self._drag[0], ev.y - self._drag[1]
+            self._drag = (ev.x, ev.y)
+            self.cx -= ddx * self.spp
+            self.cy += ddy * self.spp
+            self.redraw()
+            return True
+        if self._zoomdrag is not None and \
+                ev.state & Gdk.ModifierType.BUTTON1_MASK:
+            self._band_cur = (ev.x, ev.y)
+            self._display()
+            return True
+        self._hover(ev)
+        return True
 
-    def _pan_motion(self, event):
-        self._update_cursor(event)
-        if self._pending is not None or self._drag is None:
-            return
-        ddx, ddy = event.x - self._drag[0], event.y - self._drag[1]
-        self._drag = (event.x, event.y)
-        self.cx -= ddx * self.spp
-        self.cy += ddy * self.spp
-        self.redraw()
-
-    def _pan_release(self, event):
-        self._drag = None
-        self._set_cursor("crosshair")
-
-    def _hover_motion(self, event):
-        self._update_cursor(event)
+    def _on_scroll(self, _w, ev):
         if self._pending is not None:
-            return
-        self._hover(event)
-
-    def _on_wheel(self, event, direction=None):
-        if self._pending is not None:
-            return
-        # a wheel event while a button is held (some X setups synthesize
-        # them during a drag) must never zoom mid-pan/mid-band
+            return True  # render in flight: mouse input waits
+        # some X setups (libinput button-scroll, Exceed pointer emulation)
+        # synthesize wheel events while a button is held down - that must
+        # never zoom in the middle of a pan or a rubber-band drag
         if self._drag is not None or self._zoomdrag is not None:
-            return
-        if direction is not None:
-            delta = 1.0 if direction == "up" else -1.0
-        else:
-            delta = 1.0 if event.delta > 0 else -1.0
-        self._zoom_at(event.x, event.y, 0.9 ** delta)
+            return True
+        if ev.state & (Gdk.ModifierType.BUTTON1_MASK |
+                       Gdk.ModifierType.BUTTON2_MASK |
+                       Gdk.ModifierType.BUTTON3_MASK):
+            return True
+        delta = 0.0
+        if ev.direction == Gdk.ScrollDirection.UP:
+            delta = 1.0
+        elif ev.direction == Gdk.ScrollDirection.DOWN:
+            delta = -1.0
+        elif ev.direction == Gdk.ScrollDirection.SMOOTH:
+            ok, _dx, dy = ev.get_scroll_deltas()
+            if ok:
+                delta = max(-3.0, min(3.0, -dy))
+        if delta:
+            self._zoom_at(ev.x, ev.y, 0.9 ** delta)
+        return True
 
     def _zoom_at(self, x, y, factor):
         bbox = self.view_bbox()
@@ -905,13 +989,41 @@ class Viewer:
         self.redraw()
 
     # ---- keys ----------------------------------------------------------------
-    def _on_key(self, event):
-        if self._gdlg is not None or self._ddlg is not None:
-            return  # a modal tool dialog owns the keyboard
-        focus = self.window.focus_get()
-        if isinstance(focus, (tk.Entry, tk.Spinbox)):
-            return
-        name = event.keysym
+    def _command_key(self, ev):
+        """Key name for shortcut matching. When a non-Latin layout owns
+        the keyboard (e.g. the OS IME in hangul mode) the keyval is a
+        jamo and "d"/"f"/... would go dead - re-translate the hardware
+        keycode against the keymap's groups and take the first Latin
+        result (flateyes' command_key). Special keys (Escape, arrows:
+        no unicode) keep their name as is."""
+        name = Gdk.keyval_name(ev.keyval) or ""
+        uni = Gdk.keyval_to_unicode(ev.keyval)
+        if not uni or uni < 0x80:
+            return name  # ASCII or a special key: usable as is
+        try:
+            keymap = Gdk.Keymap.get_for_display(self.window.get_display())
+            shift = ev.state & Gdk.ModifierType.SHIFT_MASK
+            for group in range(4):
+                res = keymap.translate_keyboard_state(
+                    ev.hardware_keycode, shift, group)
+                if res[0] and 0 < Gdk.keyval_to_unicode(res[1]) < 0x80:
+                    return Gdk.keyval_name(res[1])
+        except (AttributeError, TypeError):
+            pass  # keymap API surprises: fall back to the raw name
+        return name
+
+    def _on_key(self, _w, ev):
+        if self._gdlg is not None:
+            # the goto dialog owns keyboard input, but some backends
+            # (macOS quartz) still deliver its keys to the main window
+            # too. The Entry guard below only checks the *main* window's
+            # focus, so a coordinate typed into the dialog would walk the
+            # depth shortcut (e.g. "5240" -> depth 5,2,4,0). Yield to it.
+            return False
+        focus = self.window.get_focus()
+        if isinstance(focus, Gtk.Entry):
+            return False  # typing in the depth spinbox etc.
+        name = self._command_key(ev)
         if name == "f":
             self.fit()
         elif name in ("plus", "equal", "KP_Add"):
@@ -936,6 +1048,9 @@ class Viewer:
             self._set_depth(int(name))
         elif name.startswith("KP_") and name[3:].isdigit():
             self._set_depth(int(name[3:]))
+        else:
+            return False
+        return True
 
     # ---- depth -----------------------------------------------------------------
     def _depth(self):
@@ -1017,9 +1132,10 @@ class Viewer:
         self.depth_auto = False
         self.depth_value = max(0, min(999, int(n)))
         if self._ddlg is not None:
-            var = getattr(self._ddlg, "_spinvar", None)
-            if var is not None and var.get() != str(self.depth_value):
-                var.set(str(self.depth_value))
+            spin = getattr(self._ddlg, "_spin", None)
+            if spin is not None and \
+                    int(spin.get_value()) != self.depth_value:
+                spin.set_value(self.depth_value)
         self._on_depth()
 
     def _set_depth_auto(self):
@@ -1027,132 +1143,212 @@ class Viewer:
         self._on_depth()
 
     def _on_depth(self):
-        self.dstatus.config(text=self._depth_label())
+        self.dstatus.set_text(self._depth_label())
         self.redraw(immediate=True)
 
-    # ---- dialogs ---------------------------------------------------------------
-    def _center_dialog(self, dlg):
-        """Center the dialog on the main window (parent geometry + the
-        dialog's own requested size)."""
-        dlg.update_idletasks()
-        pw, ph = self.window.winfo_width(), self.window.winfo_height()
-        px, py = self.window.winfo_rootx(), self.window.winfo_rooty()
-        dw, dh = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
-        dlg.geometry("+%d+%d" % (px + max(0, (pw - dw) // 2),
-                                 py + max(0, (ph - dh) // 2)))
+    def _only_close_button(self, dlg):
+        """Leave only the window-close button in the title bar - no
+        minimize/maximize. The GdkWindow functions drive the macOS
+        traffic-light buttons; restrict them once the window realizes."""
+        dlg.set_type_hint(Gdk.WindowTypeHint.DIALOG)
+
+        def _restrict(_w):
+            win = dlg.get_window()
+            if win is not None:
+                try:
+                    win.set_functions(
+                        Gdk.WMFunction.CLOSE | Gdk.WMFunction.MOVE)
+                except Exception:
+                    pass  # backend without WM-function support: harmless
+        dlg.connect("realize", _restrict)
+
+    def _center_on_parent(self, dlg):
+        """Center the dialog on the main window. GTK's CENTER_ON_PARENT
+        leans on the WM and miscomputes on some of them - X11 via XQuartz
+        pins the dialog to the top (only horizontally centered) because it
+        positions before the height is known. Instead move() explicitly
+        from the parent geometry and the dialog's own size, at realize
+        (before map, so the WM honors it as it did the GTK centering) and
+        again on map as a correction."""
+        dlg.set_position(Gtk.WindowPosition.NONE)
+
+        def _place(*_a):
+            par = self.window
+            if not (par.get_realized() and dlg.get_realized()):
+                return False
+            pw, ph = par.get_size()
+            px, py = par.get_position()
+            req = dlg.get_preferred_size()[1]     # natural GtkRequisition
+            dw = dlg.get_allocated_width()
+            dh = dlg.get_allocated_height()
+            if dw <= 1:                           # not allocated yet
+                dw = req.width
+            if dh <= 1:
+                dh = req.height
+            dlg.move(px + max(0, (pw - dw) // 2),
+                     py + max(0, (ph - dh) // 2))
+            return False
+        dlg.connect("realize", _place)
+        dlg.connect("map", _place)
+
+    def _dialog_setup(self, dlg):
+        """Shared chrome for the tool dialogs (depth, goto): transient and
+        modal (macOS quartz denies a non-modal secondary window keyboard
+        focus, so its keys leaked to the main window), centered on the
+        parent, non-resizable, close button only."""
+        dlg.set_transient_for(self.window)
+        dlg.set_modal(True)
+        self._center_on_parent(dlg)
+        dlg.set_resizable(False)
+        self._only_close_button(dlg)
+
+    def _grab_focus_once(self, dlg, target):
+        """Present `dlg` and grab keyboard focus on `target` exactly once
+        it is mapped. quartz does not focus a freshly shown dialog - even
+        a modal one - until then; one-shot so a later map does not re-grab
+        (which would reselect an entry and trap focus there). `target` is a
+        widget or a zero-arg callable returning one (deferred so a run()
+        dialog's response buttons, built lazily, resolve after show)."""
+        def _grab(*_a):
+            if getattr(dlg, "_focused", False):
+                return False
+            dlg._focused = True
+            dlg.present()
+            w = target() if callable(target) else target
+            if w is not None:
+                w.grab_focus()
+            return False
+        dlg.connect("map-event", _grab)
+        GLib.idle_add(_grab)
+
+    def _dialog_show(self, dlg, focus):
+        """Grab focus once mapped, then show. See _grab_focus_once."""
+        self._grab_focus_once(dlg, focus)
+        dlg.show_all()
 
     def _depth_dialog(self):
         if self._ddlg is not None:
-            self._ddlg.lift()
+            self._ddlg.present()
             return
-        dlg = tk.Toplevel(self.window)
-        dlg.title("hierarchy depth")
-        dlg.transient(self.window)
-        dlg.resizable(False, False)
+        dlg = Gtk.Window(title="hierarchy depth")
+        self._dialog_setup(dlg)
         self._ddlg = dlg
-        tk.Label(dlg, text="hierarchy depth (0 = top only, 999 = full)"
-                 ).pack(anchor="w", padx=14, pady=(10, 2))
-        row = tk.Frame(dlg)
-        row.pack(anchor="w", padx=14)
-        var = tk.StringVar(value=str(self.depth_value))
-        dlg._spinvar = var
-        spin = tk.Spinbox(row, from_=0, to=999, width=5, textvariable=var,
-                          command=lambda: self._spin_depth(var))
-        spin.pack(side="left")
-        spin.bind("<Return>", lambda e: self._close_depth())
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_margin_top(10)
+        box.set_margin_bottom(10)
+        box.set_margin_start(14)
+        box.set_margin_end(14)
+        dlg.add(box)
+        box.pack_start(Gtk.Label(
+            label="hierarchy depth (0 = top only, 999 = full)"),
+            False, False, 0)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        box.pack_start(row, False, False, 0)
+        spin = Gtk.SpinButton.new_with_range(0, 999, 1)
+        spin.set_value(self.depth_value)
+        spin.connect("value-changed",
+                     lambda s: self._set_depth(int(s.get_value())))
+        spin.connect("activate", lambda *_: dlg.destroy())  # Enter = ok
+        dlg._spin = spin
+        row.pack_start(spin, False, False, 0)
         for preset in (0, 1, 2, 3, 999):
-            tk.Button(row, text="full" if preset == 999 else str(preset),
-                      width=3,
-                      command=lambda p=preset: self._set_depth(p)).pack(
-                          side="left", padx=1)
-        tk.Button(row, text="auto",
-                  command=self._set_depth_auto).pack(side="left", padx=1)
-        tk.Label(dlg, justify="left", font=self._smallfont,
-                 text="auto picks the deepest level whose estimated shape\n"
-                      "count stays interactive (index density table); "
-                      "explicit\nvalues override it. cells beyond the limit "
-                      "are drawn as\noutline frames with names - keys: "
-                      "d = this dialog,\n0-9 = depth, a = auto").pack(
-                          anchor="w", padx=14, pady=4)
-        tk.Button(dlg, text="ok", command=self._close_depth).pack(pady=(0, 8))
-        dlg.protocol("WM_DELETE_WINDOW", self._close_depth)
-        dlg.bind("<Escape>", lambda e: self._close_depth())
-        self._center_dialog(dlg)
-        dlg.grab_set()
-        spin.focus_set()
+            b = Gtk.Button(label="full" if preset == 999 else str(preset))
+            b.connect("clicked", lambda _w, p=preset: self._set_depth(p))
+            row.pack_start(b, False, False, 0)
+        b = Gtk.Button(label="auto")
+        b.connect("clicked", lambda *_: self._set_depth_auto())
+        row.pack_start(b, False, False, 0)
+        note = Gtk.Label()
+        note.set_markup(
+            "<small>auto picks the deepest level whose estimated shape"
+            "\ncount stays interactive (index density table); explicit"
+            "\nvalues override it. cells beyond the limit are drawn as"
+            "\noutline frames with names - keys: d = this dialog,"
+            "\n0-9 = depth, a = auto</small>")
+        note.set_xalign(0.0)
+        box.pack_start(note, False, False, 0)
+        # depth applies live (spin/presets); ok just closes
+        ok = Gtk.Button(label="ok")
+        ok.connect("clicked", lambda *_: dlg.destroy())
+        box.pack_start(ok, False, False, 0)
 
-    def _spin_depth(self, var):
-        try:
-            self._set_depth(int(var.get()))
-        except ValueError:
-            pass
+        def on_dialog_key(_w, ev):
+            # Esc closes even when the focus sits in the spinbox, whose
+            # input method would swallow the key first (flateyes trick)
+            if Gdk.keyval_name(ev.keyval) == "Escape":
+                dlg.destroy()
+                return True
+            return False
+        dlg.connect("key-press-event", on_dialog_key)
 
-    def _close_depth(self):
-        dlg = self._ddlg
-        if dlg is None:
-            return
-        try:
-            self._spin_depth(dlg._spinvar)  # commit a typed value
-        except Exception:
-            pass
-        self._ddlg = None
-        dlg.grab_release()
-        dlg.destroy()
-        self._present()
+        def _gone(*_a):
+            self._ddlg = None
+            # hand the keyboard back: some backends (macOS quartz
+            # notably) fail to refocus the parent when a transient
+            # closes, leaving every key command dead until a click
+            self.window.present()
+        dlg.connect("destroy", _gone)
+        self._dialog_show(dlg, spin)
 
     # ---- goto (Calibre-style jump to coordinates) ---------------------------
-    GOTO_HINT = ("um coordinates. window = view width after the jump\n"
-                 "(blank = keep zoom). a pasted \"x, y\" pair in one\n"
-                 "field works too. Esc clears the X marker.")
+    GOTO_HINT = ("um coordinates. window = view width after the jump"
+                 "\n(blank = keep zoom). a pasted \"x, y\" pair in one"
+                 "\nfield works too. Esc clears the X marker.")
 
     def _goto_dialog(self):
         if self._gdlg is not None:
-            self._gdlg.lift()
+            self._gdlg.present()
             return
-        dlg = tk.Toplevel(self.window)
-        dlg.title("goto position")
-        dlg.transient(self.window)
-        dlg.resizable(False, False)
+        dlg = Gtk.Window(title="goto position")
+        self._dialog_setup(dlg)
         self._gdlg = dlg
-        row = tk.Frame(dlg)
-        row.pack(anchor="w", padx=14, pady=(10, 2))
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_margin_top(10)
+        box.set_margin_bottom(10)
+        box.set_margin_start(14)
+        box.set_margin_end(14)
+        dlg.add(box)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        box.pack_start(row, False, False, 0)
         entries = []
-        for label, width, text in (
-                ("x", 12, "%.3f" % (self.cx * self.dbu)),
-                ("y", 12, "%.3f" % (self.cy * self.dbu)),
-                ("window", 9, "")):
-            tk.Label(row, text=label).pack(side="left")
-            e = tk.Entry(row, width=width)
-            e.insert(0, text)
-            e.bind("<Return>", lambda ev: self._goto_apply())
-            e.pack(side="left", padx=(0, 4))
+        for label, chars, text in (
+                ("x", 11, "%.3f" % (self.cx * self.dbu)),
+                ("y", 11, "%.3f" % (self.cy * self.dbu)),
+                ("window", 8, "")):
+            row.pack_start(Gtk.Label(label=label), False, False, 0)
+            e = Gtk.Entry()
+            e.set_width_chars(chars)
+            e.set_text(text)
+            e.connect("activate", lambda *_: self._goto_apply())
+            row.pack_start(e, False, False, 0)
             entries.append(e)
         dlg._entries = entries
-        note = tk.Label(dlg, justify="left", font=self._smallfont,
-                        text=self.GOTO_HINT)
-        note.pack(anchor="w", padx=14)
+        note = Gtk.Label()
+        note.set_markup("<small>%s</small>" % self.GOTO_HINT)
+        note.set_xalign(0.0)
         dlg._note = note
-        brow = tk.Frame(dlg)
-        brow.pack(fill="x", padx=14, pady=8)
-        tk.Button(brow, text="ok", command=self._goto_apply).pack(
-            side="left", expand=True, fill="x")
-        tk.Button(brow, text="close", command=self._close_goto).pack(
-            side="left", expand=True, fill="x")
-        dlg.protocol("WM_DELETE_WINDOW", self._close_goto)
-        dlg.bind("<Escape>", lambda e: self._close_goto())
-        self._center_dialog(dlg)
-        dlg.grab_set()
-        entries[0].focus_set()
-        entries[0].select_range(0, "end")
+        box.pack_start(note, False, False, 0)
+        brow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        box.pack_start(brow, False, False, 0)
+        ok = Gtk.Button(label="ok")
+        ok.connect("clicked", lambda *_: self._goto_apply())
+        brow.pack_start(ok, True, True, 0)
+        close = Gtk.Button(label="close")
+        close.connect("clicked", lambda *_: dlg.destroy())
+        brow.pack_start(close, True, True, 0)
 
-    def _close_goto(self):
-        dlg = self._gdlg
-        if dlg is None:
-            return
-        self._gdlg = None
-        dlg.grab_release()
-        dlg.destroy()
-        self._present()
+        def on_dialog_key(_w, ev):
+            if Gdk.keyval_name(ev.keyval) == "Escape":
+                dlg.destroy()
+                return True
+            return False
+        dlg.connect("key-press-event", on_dialog_key)
+
+        def _gone(*_a):
+            self._gdlg = None
+            self.window.present()
+        dlg.connect("destroy", _gone)
+        self._dialog_show(dlg, entries[0])
 
     def _goto_apply(self):
         """Jump to the entered position: values fill x, y, window in
@@ -1163,19 +1359,21 @@ class Viewer:
             return
         try:
             part = [[float(t) for t in
-                     e.get().replace(",", " ").split()]
+                     e.get_text().replace(",", " ").split()]
                     for e in dlg._entries]
         except ValueError:
-            dlg._note.config(text="not a number\n" + self.GOTO_HINT)
+            dlg._note.set_markup("<small>not a number - %s</small>"
+                                 % self.GOTO_HINT)
             return
         if len(part[0]) >= 2:
             part[1] = []  # pair pasted into x: the y field is stale
         vals = part[0] + part[1] + part[2]
         if len(vals) < 2:
-            dlg._note.config(text="need both x and y\n" + self.GOTO_HINT)
+            dlg._note.set_markup("<small>need both x and y - %s</small>"
+                                 % self.GOTO_HINT)
             return
         self.goto(vals[0], vals[1], vals[2] if len(vals) > 2 else None)
-        self._close_goto()  # ok / Enter applied successfully: close
+        dlg.destroy()  # ok / Enter applied successfully: close
 
     def goto(self, x_um, y_um, window_um=None):
         """Center the view on (x, y) um with an X marker; window is the
@@ -1188,16 +1386,17 @@ class Viewer:
         self.redraw(immediate=True)
 
     # ---- ruler / snap / pick -----------------------------------------------
-    def _update_cursor(self, event):
+    def _update_cursor(self, ev):
         bbox = self.view_bbox()
-        self._cursor = (bbox[0] + event.x * self.spp,
-                        bbox[3] - event.y * self.spp)
+        self._cursor = (bbox[0] + ev.x * self.spp,
+                        bbox[3] - ev.y * self.spp)
 
-    def _hover(self, event):
+    def _hover(self, ev):
         x, y = self._cursor
         parts = ["x %.3f  y %.3f um" % (x * self.dbu, y * self.dbu)]
         if self.mode == "ruler":
-            self._ruler_free = bool(event.state & 0x0001)  # Shift
+            self._ruler_free = bool(ev.state &
+                                    Gdk.ModifierType.SHIFT_MASK)
             self._request_snap()
             if self._ruler_start is not None:
                 x1, y1 = self._ruler_end_preview()
@@ -1212,7 +1411,7 @@ class Viewer:
             self._display()
         elif self._sel_text:
             parts.append(self._sel_text)
-        self.status.config(text="   |   ".join(parts))
+        self.status.set_text("   |   ".join(parts))
 
     def _toggle_ruler(self):
         if self.mode == "ruler":
@@ -1270,8 +1469,8 @@ class Viewer:
                 x1 = x0
         return x1, y1
 
-    def _ruler_click(self, event):
-        self._update_cursor(event)
+    def _ruler_click(self, ev):
+        self._update_cursor(ev)
         if self._ruler_start is None:
             self.rulers = []  # single ruler: starting a new one clears it
             self._ruler_start = self._cursor_snapped()
@@ -1300,8 +1499,8 @@ class Viewer:
             "x": int(x), "y": int(y), "r": r,
             "layers": self._layers_arg()})
 
-    def _pick_click(self, event):
-        self._update_cursor(event)
+    def _pick_click(self, ev):
+        self._update_cursor(ev)
         x, y = self._cursor
         tol = 8 * self.spp  # same-spot test in world coords: pan-proof
         if self._pick_px is not None and \
@@ -1341,35 +1540,38 @@ class Viewer:
         self._display()
 
     # ---- layers / clip -------------------------------------------------------
-    def _on_layer_toggled(self, key):
-        if self._layer_vars[key].get():
+    def _on_layer_toggled(self, cb, key):
+        if cb.get_active():
             self.visible.add(key)
         else:
             self.visible.discard(key)
         self.redraw(immediate=True)
 
     def _all_layers(self):
-        for key, var in self._layer_vars.items():
-            var.set(True)
-            self.visible.add(key)
-        self.redraw(immediate=True)
+        for cb in self._layer_checks.values():
+            cb.set_active(True)
 
     def _no_layers(self):
-        for var in self._layer_vars.values():
-            var.set(False)
-        self.visible.clear()
-        self.redraw(immediate=True)
+        for cb in self._layer_checks.values():
+            cb.set_active(False)
 
     def _clip_dialog(self):
         bbox = self.view_bbox()
         um = [round(v * self.dbu, 1) for v in bbox]
-        out = filedialog.asksaveasfilename(
-            parent=self.window, title="save clip as OASIS",
-            defaultextension=".oas",
-            filetypes=[("OASIS", "*.oas"), ("all files", "*")],
-            initialfile="floe_clip_%s_%s_%s_%sum.oas"
-                        % (um[0], um[1], um[2], um[3]))
-        self._present()
+        dlg = Gtk.FileChooserDialog(title="save clip as OASIS",
+                                    parent=self.window,
+                                    action=Gtk.FileChooserAction.SAVE)
+        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                        "Save", Gtk.ResponseType.OK)
+        self._only_close_button(dlg)
+        self._center_on_parent(dlg)
+        dlg.set_do_overwrite_confirmation(True)
+        dlg.set_current_name("floe_clip_%s_%s_%s_%sum.oas"
+                             % (um[0], um[1], um[2], um[3]))
+        out = dlg.get_filename() if dlg.run() == Gtk.ResponseType.OK \
+            else None
+        dlg.destroy()
+        self.window.present()  # quartz: refocus parent after the dialog
         if not out:
             return
         self.worker.submit({"kind": "clip",
@@ -1379,14 +1581,27 @@ class Viewer:
 
     # ---- shutdown -------------------------------------------------------------
     def _confirm_quit(self):
-        """Ask before quitting (q key)."""
+        """Ask before quitting (q key). Modal, centered on the parent;
+        default is No so a stray Enter does not exit."""
         if self._quitting:
             return
-        if messagebox.askyesno(APP, "Quit floe?", default="no",
-                               parent=self.window):
+        dlg = Gtk.MessageDialog(
+            transient_for=self.window, modal=True,
+            message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.YES_NO,
+            text="Quit floe?")
+        self._center_on_parent(dlg)
+        self._only_close_button(dlg)
+        dlg.set_default_response(Gtk.ResponseType.NO)
+        self._grab_focus_once(
+            dlg, lambda: dlg.get_widget_for_response(Gtk.ResponseType.NO))
+        resp = dlg.run()
+        dlg.destroy()
+        # quartz fails to refocus the parent when a transient closes,
+        # leaving key commands dead until a click (same as _gone)
+        self.window.present()
+        if resp == Gtk.ResponseType.YES:
             self._quit()
-        else:
-            self._present()
 
     def _quit(self):
         if self._quitting:
@@ -1399,22 +1614,22 @@ class Viewer:
                 pass
         if self.worker is not None:
             self.worker.stop()
-        try:
-            self.window.quit()
-            self.window.destroy()
-        except Exception:
-            pass
+        if Gtk.main_level() > 0:
+            Gtk.main_quit()
 
 
 def run_viewer(cache, server_sock=None, goto=None):
-    import_tk()
+    import_gtk()
     viewer = Viewer(cache, server_sock, goto=goto)
     try:
         import signal as _signal
-        _signal.signal(_signal.SIGINT, lambda *_: viewer._quit())
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, _signal.SIGINT,
+                             lambda *_: (viewer._quit(), False)[1])
     except Exception:
         pass
     try:
-        viewer.window.mainloop()
+        Gtk.main()
     except KeyboardInterrupt:
+        pass
+    finally:
         viewer._quit()
