@@ -261,6 +261,36 @@ python3 -m venv .venv                                       # 옵션 불필요
 - 원격에서는 Exceed TurboX/XQuartz 등 X 서버로 `floe view` 실행 (flateyes와
   동일한 접속 형태). macOS 개발 환경 설정은 위 [환경 설정](#환경-설정) 참고.
 
+### floe-portable: 완전 자립 번들 (권한 없는 호스트용)
+
+호스트에 **root도, apt/dnf도, 시스템 파이썬 손댈 권한도 없고** tkinter마저
+없는 경우 — 예전 flateyes-portable처럼 필요한 걸 전부 싸서 가져간다.
+Tkinter로 이식한 덕에 이게 간단하다: **재배치 가능한
+python-build-standalone CPython에 tkinter+Tcl/Tk가 이미 내장**되어 있어,
+거기에 klayout/numpy/pillow 휠과 floe 소스만 넣어 tar하면 끝이다 (GTK처럼
+gdk-pixbuf 로더·gir 타입립·아이콘 테마를 싸갈 필요가 없다).
+
+인터넷(또는 미러) 되는 **타깃과 같은 아키텍처의 Linux** 빌드 머신에서
+(여기도 root 불필요):
+
+```sh
+tools/build_portable.sh                 # -> floe-portable-x86_64.tar.gz
+# 폐쇄망 미러만 되는 빌드 머신이면 휠을 미리 받아두고:
+WHEELS=./wheels PBS_TARBALL=./cpython-...-install_only.tar.gz \
+    tools/build_portable.sh
+```
+
+폐쇄망 호스트에서는 **풀고 실행만** (설치·권한 전부 불필요):
+
+```sh
+tar xzf floe-portable-x86_64.tar.gz
+./python/bin/python -m floe view data/chip.oas
+```
+
+파이썬·tkinter·Tcl/Tk·klayout·numpy·pillow·floe가 전부 그 디렉터리 안에
+있어 시스템과 완전히 격리된다. X 서버 접속만 기존처럼 필요하다. 세부
+옵션(파이썬 버전, `PBS_TARBALL`/`WHEELS`/`ARCH`)은 스크립트 헤더 주석 참고.
+
 ### 대안: venv 통째 복사 (호스트에서 pip 실행이 어려울 때)
 
 호스트에서 `pip install`조차 어려우면(정책·권한) venv를 빌드 머신에서
