@@ -39,17 +39,20 @@ fetch() {  # fetch $1 -> stdout
     else wget -qO- "$1"; fi
 }
 
-resolve_latest() {  # newest install_only tarball URL for ARCH (+ PBS_PY)
+resolve_latest() {  # newest FINAL-release install_only tarball for ARCH (+PBS_PY)
+    # GitHub encodes the version '+' as %2B in browser_download_url, and
+    # the match requires a numeric x.y.z right before it so prereleases
+    # (e.g. 3.15.0b4) are skipped.
     local urls
-    urls="$(fetch "$API_URL" \
-        | grep -oE 'https://[^"]*-'"$ARCH"'-install_only\.tar\.gz')" || return 1
+    urls="$(fetch "$API_URL" | grep -oE \
+        'https://[^"]*/cpython-[0-9]+\.[0-9]+\.[0-9]+(%2B|\+)[0-9]+-'"$ARCH"'-install_only\.tar\.gz')" \
+        || return 1
     if [ -n "${PBS_PY:-}" ]; then
         urls="$(printf '%s\n' "$urls" \
-            | grep -E "/cpython-${PBS_PY//./\\.}(\.[0-9]+)?\+")"
+            | grep -E "/cpython-${PBS_PY//./\\.}(\.[0-9]+)*(%2B|\+)")" || return 1
     fi
-    # sort by the embedded x.y.z version, take the newest
     printf '%s\n' "$urls" \
-        | sed -E 's#.*/cpython-([0-9]+\.[0-9]+\.[0-9]+)\+.*#\1 &#' \
+        | sed -E 's#.*/cpython-([0-9]+\.[0-9]+\.[0-9]+)(%2B|\+).*#\1 &#' \
         | sort -V | tail -1 | cut -d' ' -f2-
 }
 
@@ -63,9 +66,11 @@ if [ -n "${PBS_TARBALL:-}" ] && [ -f "$PBS_TARBALL" ]; then
     echo "[portable] using local $PBS_TARBALL"
     cp "$PBS_TARBALL" "$tb"
 else
-    url="${PBS_TARBALL:-$(resolve_latest)}"
+    url="${PBS_TARBALL:-$(resolve_latest || true)}"
     [ -n "$url" ] || { echo "could not resolve a python-build-standalone \
-tarball for $ARCH (set PBS_TARBALL to a local file/url)"; exit 1; }
+tarball for $ARCH / PBS_PY=${PBS_PY:-<newest>} (no GitHub access, or that \
+line has only a prerelease - lower PBS_PY, or set PBS_TARBALL to a local \
+file/url)"; exit 1; }
     echo "[portable] downloading $url"
     fetch "$url" > "$tb"
 fi
