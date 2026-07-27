@@ -13,44 +13,30 @@
 ## 환경 설정
 
 엔진은 KLayout pip 모듈(`klayout.db`/`klayout.lay` 헤드리스), GUI 셸은
-시스템 PyGObject/GTK3. **`gi`(PyGObject)는 pip으로 설치하지 않는다** —
-OS 패키지로 설치하고, venv를 그 gi가 보이는 파이썬으로
-`--system-site-packages` 옵션과 함께 만든다. CLI 전용
-(`index/info/render/clip`)이면 GTK 없이 klayout+numpy만으로 동작한다.
+**Tkinter + Pillow**. 의존성이 전부 pip 휠(`klayout`, `numpy`, `pillow`) +
+파이썬에 딸려오는 `tkinter` 하나로 정리되어, 시스템 PyGObject를 파이썬
+버전에 맞춰 얹어야 했던 이전(gi) 방식의 폐쇄망 골칫거리가 사라졌다.
+`tkinter`는 인터프리터에 함께 빌드되므로 버전 불일치가 원리적으로 없다
+(그 파이썬에 tkinter가 있으면 그건 그 버전용). CLI 전용
+(`index/info/render/clip`)이면 GUI 없이 klayout+numpy만으로 동작한다.
 
-Python 3.14 + klayout 0.30.9 확인됨.
+Python 3.14 + klayout 0.30.9 + Tk 9.0 확인됨.
 
-### macOS (개발/테스트)
-
-```sh
-brew install pygobject3 gtk+3 librsvg adwaita-icon-theme
-
-# pygobject3의 gi가 어느 brew 파이썬 버전에 들어갔는지 확인 (예: python3.14)
-ls /opt/homebrew/lib | grep python
-
-# 반드시 그 버전의 Homebrew 파이썬으로 venv 생성
-/opt/homebrew/bin/python3.14 -m venv --system-site-packages .venv
-.venv/bin/pip install klayout numpy
-.venv/bin/python -c "import gi; gi.require_version('Gtk', '3.0'); print(gi.__file__)"
-```
-
-- Xcode CLT의 `/usr/bin/python3`, python.org 설치본, pyenv 등 다른 파이썬으로
-  venv를 만들면 `--system-site-packages`여도 brew의 gi가 보이지 않아
-  `No module named 'gi'` 가 난다. venv의 `pyvenv.cfg`에서
-  `home = /opt/homebrew/opt/python@3.XX/bin` 인지 확인할 것.
-- Intel 맥은 Homebrew 경로가 `/opt/homebrew` 대신 `/usr/local`.
-- `librsvg`가 없으면 GTK 심볼릭 아이콘(check-symbolic.svg) 로드 경고가 뜬다.
-
-### Linux (인터넷 가능 호스트)
+### 공통 (macOS / Linux)
 
 ```sh
-# PyGObject/GTK3는 OS 패키지로 (RHEL 계열 GNOME 데스크톱엔 기본 탑재)
-sudo dnf install python3-gobject gtk3      # Debian/Ubuntu: python3-gi gir1.2-gtk-3.0
-
-python3 -c 'import gi; gi.require_version("Gtk", "3.0")'   # 사전 확인
-python3 -m venv --system-site-packages .venv
-.venv/bin/pip install klayout numpy
+python3 -m venv .venv                       # --system-site-packages 불필요
+.venv/bin/pip install klayout numpy pillow
+.venv/bin/python -c "import tkinter; tkinter.Tk(); print('tk', tkinter.TkVersion)"
 ```
+
+- `import tkinter`가 실패하면 그 파이썬이 Tcl/Tk 없이 빌드된 것이다.
+  - **RHEL/Fedora**: `sudo dnf install python3-tkinter` (시스템 파이썬용).
+    독립 빌드/SCL 파이썬이면 그 파이썬을 Tk와 함께 빌드하거나, conda
+    파이썬이면 `conda install tk`.
+  - **Debian/Ubuntu**: `sudo apt install python3-tk`.
+  - **macOS**: Homebrew `python-tk`, 또는 python.org 설치본(Tk 포함)을 사용.
+- pygobject/gtk/cairo/librsvg 관련 설치는 더 이상 필요 없다.
 
 폐쇄망 호스트는 아래 [폐쇄망 리눅스 배포](#폐쇄망-리눅스-배포) 절차를 따른다.
 
@@ -173,7 +159,7 @@ floe는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델을 
 
 - **(uid, DISPLAY)당 뷰어 창 1개.** 첫 실행이 창을 열고, 같은 DISPLAY에서의
   이후 `floe view 다른파일.oas` 는 실행 중인 창에 경로를 넘기고 즉시 종료한다
-  (exit 0, ~0.1초 — forward 경로는 klayout/GTK를 import하지 않음).
+  (exit 0, ~0.1초 — forward 경로는 klayout/GUI를 import하지 않음).
   기존 창이 해당 파일로 전환되고 앞으로 올라온다. `--goto` 옵션도 함께
   전달된다 (`경로\tgoto=X,Y[,W]` 요청 라인).
 - **DISPLAY 값이 다르면 독립 창** — 한 리눅스 호스트에서
@@ -187,29 +173,31 @@ floe는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델을 
 - 전달 대상 파일의 인덱스가 없으면 **forward 전에 이 터미널에서** 먼저
   인덱싱한다 (GUI 프로세스가 몇 분씩 멈추는 것 방지).
 
-### 네이티브 뷰어 (`floe view`) — GTK3/PyGObject (flateyes와 동일 제약)
+### 네이티브 뷰어 (`floe view`) — Tkinter + Pillow
 
-GUI는 **GTK3/PyGObject** 셸이다. flateyes와 같은 폐쇄망 호스트
-(RHEL 계열 GNOME, 아무것도 설치 불가, PyGObject/GTK3만 스톡)를 그대로
-따른다:
+GUI는 **Tkinter** 셸이다 (이전 GTK3/PyGObject에서 이식). 폐쇄망 호스트에
+`tkinter`(파이썬에 딸려옴)와 Pillow(pip 휠)만 있으면 되어, 시스템
+PyGObject를 파이썬 버전에 맞춰야 하던 문제가 없어졌다:
 
-- **pycairo 없음**: GTK draw 시그널을 쓰지 않는다. 프레임·오버뷰·러버밴드·
-  측정선·스냅 마커·선택 하이라이트 전부 **GdkPixbuf 합성**(`fill_rect` =
-  subpixbuf.fill, 대각선은 점묘)으로 하나의 pixbuf에 그려 `Gtk.Image` 한 장으로
-  표시하고, 텍스트(측정 라벨)는 `Gtk.Overlay` 위 `Gtk.Label`을 margin으로
-  배치한다 (flateyes와 동일 기법).
-- GTK import는 lazy(`import_gtk`) — 모듈 import는 GTK 없이도 되고(헤드리스
-  테스트), PyGObject 부재/디스플레이 접속 불가는 **exit 3** + 명확한 메시지.
+- **하나의 `Canvas`에 그린다**: klayout이 만든 PNG 프레임을 Pillow로 디코드해
+  캔버스 이미지 아이템으로 깔고, 오버레이(러버밴드·측정선·화살표·스냅 마커·
+  선택 외곽선·goto X마커·미니맵·측정 라벨)는 전부 **네이티브 캔버스 아이템**
+  (line/rectangle/polygon/text)으로 위에 얹는다. 픽셀을 직접 찍던 이전
+  방식보다 깔끔하고 안티에일리어싱도 된다. 줌 프리뷰(프레임 도착 전 임시
+  스케일)만 Pillow로 리사이즈한다.
+- Tk/Pillow import는 lazy(`import_tk`) — 모듈 import는 GUI 없이도 되고(헤드리스
+  테스트), tkinter/Pillow 부재·디스플레이 접속 불가는 **exit 3** + 명확한 메시지.
 - 무거운 geometry 렌더링은 klayout C++ 엔진(`klayout.lay` 헤드리스)이
-  **별도 렌더 프로세스**(`service.py`)에서 PNG 프레임으로 수행. GUI는 pixbuf
-  표시 + 이벤트만 담당한다. 스레드가 아닌 프로세스인 이유: klayout 렌더 루프가
-  GIL을 잡아 스레드로는 긴 렌더 동안 메인 루프가 얼어붙는다
-  (spawn 방식이므로 `__main__` 가드 필수).
+  **별도 렌더 프로세스**(`service.py`)에서 PNG 프레임으로 수행한다 — 툴킷과
+  무관하게 이 인터페이스는 그대로다. GUI는 프레임 표시 + 이벤트만 담당한다.
+  스레드가 아닌 프로세스인 이유: klayout 렌더 루프가 GIL을 잡아 스레드로는
+  긴 렌더 동안 메인 루프가 얼어붙는다 (spawn 방식이므로 `__main__` 가드 필수).
 - 렌더 요청(줌/팬/레이어/depth 변경) 제출 시 하단 상태바 우측에 "rendering…"
   인디케이터가 즉시 표시되고, 1.5초를 넘기면 경과 초가 붙는다. 렌더 중에도
   팬/줌 가능하며, 밀린 요청은 최신 것만 처리된다.
-- 인스턴스 소켓은 `GLib.io_add_watch`로, 결과 큐는 `GLib.timeout_add`(25ms)로
-  서비스한다. UI 라벨은 English only (XQuartz 한글 글리프 부재 — flateyes 규칙).
+- 인스턴스 소켓과 결과 큐 모두 `root.after`(25ms) 루프에서 논블로킹으로
+  서비스한다. 다이얼로그는 `grab_set` 모달 + 부모 창 중앙. UI 라벨은
+  English only (X서버 한글 글리프 부재 — flateyes 규칙).
 - 키: `f` fit, `+`/`-`(`=`) 줌, `r` ruler, `m` 스냅, `d` depth 다이얼로그,
   `g` goto 다이얼로그, `0`-`9` depth, `a` depth auto, `Esc` 단계 해제,
   `q` 종료 (확인 다이얼로그).
@@ -247,33 +235,29 @@ KLayout `LayoutView.max_hier_levels`로 구현하며, 타일 모자이크가 만
 
 ## 폐쇄망 리눅스 배포
 
-floe는 순수 파이썬. 의존성: `klayout`, `numpy` pip 휠 + GUI는
-PyGObject/GTK3 (**RHEL 계열 GNOME 호스트에 기본 탑재** — flateyes와 동일하게
-추가 설치 없음).
+floe는 순수 파이썬. 의존성이 전부 pip 휠(`klayout`, `numpy`, `pillow`) +
+파이썬에 딸려오는 `tkinter`로 정리되어, 이전 PyGObject 방식보다 배포가
+훨씬 단순하다 (시스템 RPM·버전 매칭 불필요).
 
 ```sh
 # 1) 인터넷 PC에서 휠 수집 (타겟 파이썬 버전에 맞춰)
-pip download klayout numpy -d wheels/ \
+pip download klayout numpy pillow -d wheels/ \
     --platform manylinux2014_x86_64 --only-binary=:all: \
     --python-version 311        # 예: 타겟이 python3.11
 
-# 2) 폐쇄망 호스트에서 - 반드시 시스템 PyGObject가 보이는 파이썬으로
-python3 -c 'import gi; gi.require_version("Gtk", "3.0")'   # GUI 사전 확인
-python3 -m venv --system-site-packages .venv               # gi가 보이게
-.venv/bin/pip install --no-index --find-links wheels/ klayout numpy
+# 2) 폐쇄망 호스트에서
+python3 -c 'import tkinter; tkinter.Tk()'                   # GUI 사전 확인
+python3 -m venv .venv                                       # 옵션 불필요
+.venv/bin/pip install --no-index --find-links wheels/ klayout numpy pillow
 # floe/ 디렉토리 복사 후: .venv/bin/python -m floe ...
 ```
 
-**주의 — PyGObject/pycairo를 pip으로 설치하지 말 것.** pip은 meson 소스
-빌드를 시도하고 폐쇄망에는 pkg-config/cairo-devel이 없어
-`Dependency lookup for cairo ... failed` 로 실패한다. PyGObject는 OS RPM
-(`python3-gobject`, GNOME 호스트 기본 탑재)을 쓰고, venv는
-`--system-site-packages` 로 만들어 그것을 보이게 하는 것이 정답이다
-(pycairo는 아예 불필요 - floe는 cairo를 쓰지 않는다). venv를 SCL/conda
-등 다른 파이썬으로 만들면 시스템 gi와 맞지 않으니 위 사전 확인이 성공한
-바로 그 python3를 사용할 것.
-
-- CLI 전용(`index/info/render/clip`)이면 GTK 없이도 동작한다.
+- **`tkinter`는 파이썬에 함께 빌드된다** — pip으로 설치하지 않는다. 위 사전
+  확인(`import tkinter; Tk()`)이 실패하면 그 파이썬이 Tcl/Tk 없이 빌드된
+  것이니 `python3-tkinter` RPM을 깔거나(시스템 파이썬용) 그 파이썬을 Tk와
+  함께 다시 빌드/교체해야 한다. gi처럼 "버전 다른 RPM" 문제는 없다.
+- Pillow는 manylinux 휠이라 `.so`가 자체 완결적이어서 복사에 안전하다.
+- CLI 전용(`index/info/render/clip`)이면 GUI(tkinter/Pillow) 없이도 동작한다.
 - 원격에서는 Exceed TurboX/XQuartz 등 X 서버로 `floe view` 실행 (flateyes와
   동일한 접속 형태). macOS 개발 환경 설정은 위 [환경 설정](#환경-설정) 참고.
 
@@ -287,28 +271,28 @@ python3 -m venv --system-site-packages .venv               # gi가 보이게
 # 1) 빌드 머신: 운영과 같은 RHEL major·x86_64·같은 python3 마이너 버전
 #    (운영과 같은 RHEL 컨테이너/VM 권장). venv는 호스트에 놓일
 #    "최종 절대 경로"에서 만든다 - 스크립트 shebang에 이 경로가 박힌다.
-python3 -m venv --system-site-packages /opt/floe/venv
-/opt/floe/venv/bin/pip install klayout numpy
+python3 -m venv /opt/floe/venv
+/opt/floe/venv/bin/pip install klayout numpy pillow
 cp -r floe /opt/floe/
 tar -C / -czf floe-venv.tar.gz opt/floe
 
 # 2) 폐쇄망 호스트: 같은 경로에 풀고 검증
 tar -C / -xzf floe-venv.tar.gz
-/opt/floe/venv/bin/python -c "import klayout.db, numpy, gi"  # 한 줄 검증
+/opt/floe/venv/bin/python -c "import klayout.db, numpy, tkinter, PIL"  # 검증
 alias floe="/opt/floe/venv/bin/python -m floe"
 ```
 
 - **같은 베이스 파이썬이 호스트에 있어야 한다**: venv는 표준 라이브러리를
   담지 않고 `pyvenv.cfg`의 `home=` 경로에 있는 python3를 쓴다. 빌드
-  머신과 호스트가 같은 python3 RPM(모듈 스트림)이어야 함.
+  머신과 호스트가 같은 python3 RPM(모듈 스트림)이어야 함. **그 파이썬은
+  Tk와 함께 빌드되어 있어야 한다**(`import tkinter` 성공) — tkinter는
+  venv가 아니라 베이스 파이썬 쪽에 있다.
 - **실행은 항상 `venv/bin/python -m floe` 형태로.** `venv/bin/pip` 등
   스크립트는 shebang에 빌드 경로가 박혀 있어 경로가 다르면
   "bad interpreter"로 죽는다 (`python -m` 은 shebang을 안 탐).
   부득이 다른 경로에 풀었다면 python 실행은 되지만 스크립트류는 못 쓴다.
-- **gi/GTK는 venv에 실려 가지 않는다**: PyGObject는 시스템
-  site-packages(`python3-gobject` RPM)에서 오므로 호스트 쪽 RPM은 여전히
-  필요하다 (GNOME 호스트 기본 탑재). klayout·numpy는 manylinux 휠이라
-  .so가 자체 완결적이어서 복사에 안전하다.
+- klayout·numpy·pillow는 manylinux 휠이라 `.so`가 자체 완결적이어서
+  venv 복사에 안전하다.
 
 ### .ice 구조와 설계 노트
 
