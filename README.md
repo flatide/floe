@@ -288,8 +288,14 @@ tar xzf floe-portable-x86_64.tar.gz
 ```
 
 파이썬·tkinter·Tcl/Tk·klayout·numpy·pillow·floe가 전부 그 디렉터리 안에
-있어 시스템과 완전히 격리된다. X 서버 접속만 기존처럼 필요하다. 세부
-옵션(파이썬 버전, `PBS_TARBALL`/`WHEELS`/`ARCH`)은 스크립트 헤더 주석 참고.
+있어 시스템과 완전히 격리된다. X 서버 접속만 기존처럼 필요하다.
+
+기본으로 **최신 CPython**(python-build-standalone 최신 릴리스에서 arch에
+맞는 가장 높은 버전을 자동 선택)과 **최신 klayout/numpy/pillow**(버전 고정
+없는 pip)를 쓴다. 특정 파이썬 라인은 `PBS_PY=3.13`처럼, 오프라인 빌드
+머신은 `PBS_TARBALL`(로컬 tarball)+`WHEELS`(로컬 휠 디렉터리)로 지정한다
+— 자세한 건 스크립트 헤더 주석 참고. (klayout이 그 파이썬용 휠을 제공해야
+하므로, 너무 최신이라 휠이 없으면 `PBS_PY`를 한 단계 낮춘다.)
 
 ### 대안: venv 통째 복사 (호스트에서 pip 실행이 어려울 때)
 
