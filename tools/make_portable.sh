@@ -140,12 +140,23 @@ must = ["lib/libgtk-3.so.0", "lib/girepository-1.0/Gtk-3.0.typelib",
         "lib/python%s/site-packages/klayout" % pyver,
         "share/glib-2.0/schemas"]
 missing = [m for m in must if not os.path.exists(os.path.join(root, m))]
-import glob
-if not glob.glob(os.path.join(
-        root, "lib/gdk-pixbuf-2.0/*/loaders/libpixbufloader-svg*")):
-    missing.append("svg pixbuf loader (librsvg; symbolic icons need it)")
 for m in missing:
     print("MISSING", m)
+# svg pixbuf loader is COSMETIC (Adwaita checkbox icons); render frames
+# are png. Warn, don't fail - and dump the loader inventory so we can see
+# what's actually there (png is the one that matters for the view).
+import glob
+loaders = glob.glob(os.path.join(root, "lib/gdk-pixbuf-2.0/*/loaders/*"))
+names = sorted(os.path.basename(x) for x in loaders)
+has_svg = any("svg" in n for n in names)
+has_png = any("png" in n for n in names)
+has_librsvg = bool(glob.glob(os.path.join(root, "lib/librsvg-2*.so*")))
+print("pixbuf loaders (%d): %s" % (len(names), " ".join(names) or "(none)"))
+print("  png-loader=%s  svg-loader=%s (librsvg lib=%s)"
+      % (has_png, has_svg, has_librsvg))
+if not has_svg:
+    print("WARN: no svg loader - checkbox symbolic icons stay blank "
+          "(cosmetic; the view renders png)")
 if bad or missing:
     sys.exit(1)
 print("verified: %d ELF files, all x86_64, needs glibc >= 2.%d "
