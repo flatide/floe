@@ -18,11 +18,13 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)          # floe repo root
 OUT_DIR=${1:-$REPO}
 WORK=${FLOE_PORTABLE_WORK:-${TMPDIR:-/tmp}/floe-portable-build}
 PY_SPEC=${PY_SPEC:-python=3.11}                 # conda-forge python line
-# Two glibc knobs (flateyes conflated them): conda GTK can target an old
-# baseline for broad compat, but floe's klayout/numpy PyPI wheels require
-# glibc >= 2.27 (RHEL8+), so the verify ceiling must allow that - RHEL7
-# cannot run floe regardless. The real floor is the max found, printed.
-CONDA_GLIBC=${CONDA_GLIBC:-2.17}                # conda solver target
+# Two glibc knobs (flateyes conflated them): floe's klayout/numpy PyPI
+# wheels require glibc >= 2.27 (RHEL8+) - RHEL7 cannot run floe
+# regardless - so there is no point starving the conda solver at 2.17;
+# a 2.17 cap can even exclude newer builds (librsvg etc). The verify
+# ceiling guards against accidentally-newer deps; the real floor is the
+# max found across all ELFs, printed and baked into selfcheck/README.
+CONDA_GLIBC=${CONDA_GLIBC:-2.27}                # conda solver target
 GLIBC_CEILING=${GLIBC_CEILING:-28}              # verify guard (RHEL8=2.28)
 WHEELS=${WHEELS:-}                              # local wheel dir (closed net)
 VERSION=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "$REPO/floe/__init__.py")

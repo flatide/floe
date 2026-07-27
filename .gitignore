@@ -5,3 +5,4 @@ __pycache__/
 .DS_Store
 *.oas
 *.oas.ice/
+floe-portable-*.tar.gz

@@ -381,6 +381,8 @@ class Viewer:
         return None
 
     def _on_incoming(self, _source, _cond):
+        # like _poll: any exception here would make GLib drop the watch,
+        # silently killing single-instance forwarding for the session
         try:
             conn, _ = self.server_sock.accept()
         except OSError:
@@ -410,6 +412,9 @@ class Viewer:
             if not error:
                 self._forwarded_goto(fields[1:])
                 self._present()
+        except Exception:
+            import traceback
+            traceback.print_exc()
         finally:
             conn.close()
         return True
@@ -767,55 +772,72 @@ class Viewer:
         try:
             while True:
                 res = self.worker.res.get_nowait()
-                kind = res.get("kind")
-                if kind == "frame":
-                    if res["gen"] == self._pending:
-                        self._clear_pending()
-                        self.rstatus.set_text("rendering done.")
-                    if res["gen"] == self.gen:
-                        loader = GdkPixbuf.PixbufLoader.new_with_type("png")
-                        loader.write(res["png"])
-                        loader.close()
-                        pix = loader.get_pixbuf()
-                        fb = res["bbox"]
-                        fspp = (fb[2] - fb[0]) / max(1, pix.get_width())
-                        key = self._job_keys.get(res["gen"])
-                        used = self._job_depth.get(res["gen"])
-                        self.last_frame = (pix, fb, fspp, key)
-                        self._display()
-                        if res.get("bg"):
-                            continue  # silent margin upgrade
-                        self._depth_used = used
-                        self.dstatus.set_text(self._depth_label())
-                        if res.get("scope") == "skel":
-                            mode = "far view (%s, %d ms)" % (
-                                "outline" if used == 0 else "skeleton",
-                                res["ms"])
-                        else:
-                            mode = "live (%d tiles, %d ms%s)" \
-                                % (res["tiles"], res["ms"],
-                                   self._depth_note(used))
-                        self._set_status(self.view_bbox(), mode)
-                elif kind == "snap":
-                    if res["seq"] == self._snap_seq \
-                            and self.mode == "ruler":
-                        self._snap_res = res if res.get("found") else None
-                        self._display()
-                elif kind == "pick":
-                    if res["seq"] == self._pick_seq:
-                        self._on_pick_result(res)
-                elif kind == "clip":
-                    self._set_status(self.view_bbox(),
-                                     "clip saved: %s (%.2f MB, %d ms)"
-                                     % (res["path"], res["size_mb"],
-                                        res["ms"]))
-                elif kind == "error":
+                try:
+                    self._handle_result(res)
+                except Exception as exc:
+                    # One bad result must never kill this callback: GLib
+                    # removes a raising timeout source, which would freeze
+                    # the viewer on a stale (usually black) frame with no
+                    # error anywhere but the terminal. Keep polling and put
+                    # the failure where the user looks - the status bar.
+                    import traceback
+                    traceback.print_exc()
                     self._clear_pending()
-                    self._set_status(self.view_bbox(),
-                                     "error: %s" % res.get("msg"))
+                    self._set_status(
+                        self.view_bbox(),
+                        "error: %s result failed: %s (see terminal)"
+                        % (res.get("kind"), exc))
         except queue.Empty:
             pass
         return True
+
+    def _handle_result(self, res):
+        kind = res.get("kind")
+        if kind == "frame":
+            if res["gen"] == self._pending:
+                self._clear_pending()
+                self.rstatus.set_text("rendering done.")
+            if res["gen"] == self.gen:
+                loader = GdkPixbuf.PixbufLoader.new_with_type("png")
+                loader.write(res["png"])
+                loader.close()
+                pix = loader.get_pixbuf()
+                fb = res["bbox"]
+                fspp = (fb[2] - fb[0]) / max(1, pix.get_width())
+                key = self._job_keys.get(res["gen"])
+                used = self._job_depth.get(res["gen"])
+                self.last_frame = (pix, fb, fspp, key)
+                self._display()
+                if res.get("bg"):
+                    return  # silent margin upgrade
+                self._depth_used = used
+                self.dstatus.set_text(self._depth_label())
+                if res.get("scope") == "skel":
+                    mode = "far view (%s, %d ms)" % (
+                        "outline" if used == 0 else "skeleton",
+                        res["ms"])
+                else:
+                    mode = "live (%d tiles, %d ms%s)" \
+                        % (res["tiles"], res["ms"],
+                           self._depth_note(used))
+                self._set_status(self.view_bbox(), mode)
+        elif kind == "snap":
+            if res["seq"] == self._snap_seq \
+                    and self.mode == "ruler":
+                self._snap_res = res if res.get("found") else None
+                self._display()
+        elif kind == "pick":
+            if res["seq"] == self._pick_seq:
+                self._on_pick_result(res)
+        elif kind == "clip":
+            self._set_status(self.view_bbox(),
+                             "clip saved: %s (%.2f MB, %d ms)"
+                             % (res["path"], res["size_mb"],
+                                res["ms"]))
+        elif kind == "error":
+            self._clear_pending()
+            self._set_status(self.view_bbox(),
+                             "error: %s" % res.get("msg"))
 
     def _set_status(self, bbox, mode):
         w_um = (bbox[2] - bbox[0]) * self.dbu
