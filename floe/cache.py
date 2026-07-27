@@ -567,14 +567,16 @@ _TILE_CTX = None
 
 
 def _build_one_tile(rc):
-    """Build tile (r, c) from _TILE_CTX. Runs in a fork worker (or
-    inline for jobs=1). Returns (r, c, wrote, lod_depth, density)."""
+    """Build tile (r, c) from _TILE_CTX. Runs in a fork worker (or inline
+    for jobs=1). Returns (r, c, wrote, lod_depth, density, step_times)."""
     ly, top_ci, bbox, grid, cdir, tile_texts, opts = _TILE_CTX
     r, c = rc
     x0 = bbox.left + c * grid["tile_w"]
     y0 = bbox.bottom + r * grid["tile_h"]
     box = db.Box(x0, y0, min(x0 + grid["tile_w"], bbox.right),
                  min(y0 + grid["tile_h"], bbox.top))
+    tm = {}
+    t = time.perf_counter()
     tgt = db.Layout()
     tgt.dbu = ly.dbu
     # pre-create layers with source infos at identical indexes:
@@ -583,19 +585,31 @@ def _build_one_tile(rc):
     for li in ly.layer_indexes():
         tgt.insert_layer_at(li, ly.get_info(li))
     ci = ly.clip_into(top_ci, tgt, box)
+    tm["clip"] = time.perf_counter() - t
     cell = tgt.cell(ci)
     texts = tile_texts.get((r, c), ())
     if cell.bbox().empty() and not texts:
-        return r, c, False, None, None
+        return r, c, False, None, None, tm
     cell.name = f"TILE_{r}_{c}"
+    t = time.perf_counter()
     _strip_texts(tgt)
     for li, text in texts:
         cell.shapes(li).insert(text)
+    tm["strip"] = time.perf_counter() - t
+    t = time.perf_counter()
     compact_instances(tgt)
+    tm["compact"] = time.perf_counter() - t
+    t = time.perf_counter()
     tgt.write(os.path.join(cdir, "tiles", f"t_{r}_{c}.oas"), opts)
+    tm["write"] = time.perf_counter() - t
+    t = time.perf_counter()
     lod_d = _tile_lod(tgt, ci, os.path.join(cdir, "tiles_lod",
                                             f"t_{r}_{c}.oas"))
-    return r, c, True, lod_d, _tile_density(tgt, ci) or None
+    tm["lod"] = time.perf_counter() - t
+    t = time.perf_counter()
+    dens = _tile_density(tgt, ci) or None
+    tm["density"] = time.perf_counter() - t
+    return r, c, True, lod_d, dens, tm
 
 
 def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None):
@@ -661,10 +675,16 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None):
     done = 0
     density_tiles = {}
     lod_tiles = {}
+    step_tot = {}
     coords = [(r, c) for r in range(n) for c in range(n)]
     step = max(1, len(coords) // 10)
 
-    def take(r, c, wrote, lod_d, dens):
+    def _breakdown():
+        # cumulative per-step wall time; with fork workers these overlap,
+        # so they sum above real elapsed - read as relative weights
+        return " ".join("%s %.0fs" % kv for kv in sorted(step_tot.items()))
+
+    def take(r, c, wrote, lod_d, dens, tm=None):
         nonlocal n_files, done
         done += 1
         if wrote:
@@ -673,9 +693,12 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None):
             lod_tiles[f"{r},{c}"] = lod_d
         if dens:
             density_tiles[f"{r},{c}"] = dens
+        if tm:
+            for k, v in tm.items():
+                step_tot[k] = step_tot.get(k, 0.0) + v
         if done % step == 0 or done == len(coords):
             log(f"[index] tiles {done}/{len(coords)} "
-                f"({time.perf_counter() - t0:.0f}s)")
+                f"({time.perf_counter() - t0:.0f}s; {_breakdown()})")
 
     if jobs is None:
         jobs = os.cpu_count() or 1
@@ -701,7 +724,7 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None):
     finally:
         _TILE_CTX = None
     t_tiles = time.perf_counter() - t0
-    log(f"[index] {n_files} tile files in {t_tiles:.0f}s")
+    log(f"[index] {n_files} tile files in {t_tiles:.0f}s ({_breakdown()})")
 
     # --- skeleton (far-zoom structural model) ---
     t0 = time.perf_counter()
