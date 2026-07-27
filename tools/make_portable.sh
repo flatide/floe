@@ -46,11 +46,13 @@ chmod +x micromamba
 
 # -- 2. resolve the GTK3 + python runtime (conda-forge) ------------------
 # CONDA_OVERRIDE_GLIBC keeps the GTK solver at a broadly-compatible
-# baseline (the effective floor is raised by the pip wheels anyway). A
-# bundled font gives GTK a guaranteed sans-serif.
+# baseline (the effective floor is raised by the pip wheels anyway).
+# librsvg = the SVG gdk-pixbuf loader Adwaita's symbolic icons (checkbox
+# check-symbolic.svg etc.) need; a bundled font gives GTK a sans-serif.
 CONDA_OVERRIDE_GLIBC=$CONDA_GLIBC ./micromamba create -y \
     -r "$WORK/mmroot" -p "$WORK/runtime" --platform linux-64 \
-    -c conda-forge "$PY_SPEC" pygobject gtk3 font-ttf-dejavu-sans-mono \
+    -c conda-forge "$PY_SPEC" pygobject gtk3 librsvg \
+    font-ttf-dejavu-sans-mono \
     || true   # post-link failures still exit nonzero on some versions
 PYBIN="$(ls "$WORK"/runtime/bin/python3.[0-9]* 2>/dev/null | head -1)"
 [ -x "$PYBIN" ] || { echo "runtime extraction failed"; exit 1; }
@@ -138,6 +140,10 @@ must = ["lib/libgtk-3.so.0", "lib/girepository-1.0/Gtk-3.0.typelib",
         "lib/python%s/site-packages/klayout" % pyver,
         "share/glib-2.0/schemas"]
 missing = [m for m in must if not os.path.exists(os.path.join(root, m))]
+import glob
+if not glob.glob(os.path.join(
+        root, "lib/gdk-pixbuf-2.0/*/loaders/libpixbufloader-svg*")):
+    missing.append("svg pixbuf loader (librsvg; symbolic icons need it)")
 for m in missing:
     print("MISSING", m)
 if bad or missing:
@@ -172,6 +178,8 @@ if [ ! -f "\$CACHE/schemas/gschemas.compiled" ] \\
 fi
 if [ ! -f "\$CACHE/pixbuf-loaders.cache" ] \\
    || [ "\$RT/lib/gdk-pixbuf-2.0/2.10.0/loaders" -nt "\$CACHE/pixbuf-loaders.cache" ]; then
+    # LD_LIBRARY_PATH so query-loaders can dlopen the svg loader's deps
+    LD_LIBRARY_PATH="\$RT/lib" \\
     GDK_PIXBUF_MODULEDIR="\$RT/lib/gdk-pixbuf-2.0/2.10.0/loaders" \\
         "\$RT/bin/gdk-pixbuf-query-loaders" \\
         > "\$CACHE/pixbuf-loaders.cache" 2>/dev/null || true
@@ -184,11 +192,12 @@ XDG_DATA_DIRS="\$RT/share:/usr/local/share:/usr/share"
 FONTCONFIG_FILE="\$HERE/fonts.conf"
 LD_LIBRARY_PATH="\$RT/lib\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
 GDK_BACKEND=x11
+NO_AT_BRIDGE=1                 # silence the at-spi accessibility bridge noise
 PYTHONHOME="\$RT"
 PYTHONNOUSERSITE=1
 export GDK_PIXBUF_MODULE_FILE GI_TYPELIB_PATH GSETTINGS_SCHEMA_DIR \\
     XDG_DATA_DIRS FONTCONFIG_FILE LD_LIBRARY_PATH GDK_BACKEND \\
-    PYTHONHOME PYTHONNOUSERSITE
+    NO_AT_BRIDGE PYTHONHOME PYTHONNOUSERSITE
 exec "\$RT/bin/python3" -m floe "\$@"
 EOF
 
