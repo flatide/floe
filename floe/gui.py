@@ -514,8 +514,18 @@ class Viewer:
             obox, ospp = bbox, self.spp
         self._draw_overlays(disp, obox, ospp, bbox)
         if os.environ.get("FLOE_DUMP"):
-            # diagnosis: exactly what is handed to the screen widget
+            # diagnosis: exactly what is handed to the screen widget, plus
+            # whether the widget itself is sized/mapped (a 0-sized or
+            # unmapped Gtk.Image displays nothing without any error)
             disp.savev("/tmp/floe_disp.png", "png", [], [])
+            ia = self.image.get_allocation()
+            sys.stderr.write(
+                "[dump] disp %dx%d | image alloc %dx%d at (%d,%d) "
+                "mapped=%s visible=%s | ebox mapped=%s\n"
+                % (disp.get_width(), disp.get_height(),
+                   ia.width, ia.height, ia.x, ia.y,
+                   self.image.get_mapped(), self.image.get_visible(),
+                   self.ebox.get_mapped()))
         self.image.set_from_pixbuf(disp)
         self._update_labels(obox, ospp)
 
