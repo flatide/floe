@@ -52,15 +52,11 @@ chmod +x micromamba
 # librsvg = the SVG gdk-pixbuf loader Adwaita's symbolic icons (checkbox
 # check-symbolic.svg etc.) need; a bundled font gives GTK a sans-serif.
 #
-# GTK_PINS: the 2026-07 conda-forge snapshot produced a runtime whose
-# Gtk.Image/pixbuf path renders BLACK on X11 (text fine, every image
-# black - even file-loaded ones in a minimal test), while the flateyes
-# bundle solved on 2026-07-21 works on the same display. gtk3/cairo/
-# glib/gdk-pixbuf turned out IDENTICAL between the two bundles, so the
-# regression sits below them - pixman (cairo's pixel compositor, the
-# classic source of images-black-on-some-CPUs regressions) is the prime
-# suspect. Pin the proven set read off the flateyes runtime's .so names.
-GTK_PINS=${GTK_PINS:-"glib=2.88 cairo=1.18.4 gdk-pixbuf=2.44 pixman=0.46.4"}
+# (The "images render black" saga was NOT a conda version regression -
+# the broken and working bundles had byte-identical lib versions. The
+# real culprit was XQuartz's XRender; see the CAIRO_DEBUG fallback the
+# launcher sets. GTK_PINS stays as an escape hatch, empty by default.)
+GTK_PINS=${GTK_PINS:-}
 # shellcheck disable=SC2086  # GTK_PINS is a word list on purpose
 CONDA_OVERRIDE_GLIBC=$CONDA_GLIBC ./micromamba create -y \
     -r "$WORK/mmroot" -p "$WORK/runtime" --platform linux-64 \
@@ -226,6 +222,15 @@ PYTHONNOUSERSITE=1
 export GDK_PIXBUF_MODULE_FILE GI_TYPELIB_PATH GSETTINGS_SCHEMA_DIR \\
     XDG_DATA_DIRS FONTCONFIG_FILE LD_LIBRARY_PATH GDK_BACKEND \\
     NO_AT_BRIDGE PYTHONHOME PYTHONNOUSERSITE
+# XQuartz's XRender implementation composites images to BLACK while text
+# renders (worse after any window grow); forcing cairo's core-protocol
+# fallback displays correctly at every size. Costs a slightly slower
+# frame push - fine for floe's one-image-per-render UI. Set FLOE_XRENDER=1
+# to keep XRender (e.g. on Exceed TurboX where it works).
+if [ -z "\${FLOE_XRENDER:-}" ]; then
+    CAIRO_DEBUG=xrender-version=-1
+    export CAIRO_DEBUG
+fi
 exec "\$RT/bin/python3" -m floe "\$@"
 EOF
 
