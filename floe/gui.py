@@ -166,43 +166,63 @@ def frame_rect(buf, x0, y0, w, h, color):
 
 
 class LayerRow(object):
-    """One clickable layer name row. A visible layer is plain colored
-    text; a hidden layer keeps its place with a strikethrough. The
-    one-char monospace marker keeps every name left-aligned: '+' =
-    group parent (its click toggles every datatype of the layer),
-    ' ' = plain layer or group child."""
+    """One layer row: [marker][name]. Double-clicking the name toggles
+    visibility (hidden = strikethrough, place and color kept). The
+    fixed-width marker column keeps every name left-aligned and doubles
+    as the expand control on group parents: '+' collapsed / '-'
+    expanded (single click), ' ' for childless layers and children."""
 
-    def __init__(self, l, marker, tooltip, on_toggle):
+    def __init__(self, l, marker, tooltip, on_toggle, on_expand=None):
         self.key = (l["layer"], l["datatype"])
         self._text = "%s  %d/%d" % (l["name"], self.key[0], self.key[1])
         self._color = l["color"]
         self._marker = marker
         self._on_toggle = on_toggle
+        self._on_expand = on_expand
         self._active = True
+        self._mlbl = Gtk.Label()
+        self._mlbl.set_xalign(0.0)
+        self._mlbl.set_width_chars(2)
+        mbox = Gtk.EventBox()
+        mbox.add(self._mlbl)
+        if on_expand is not None:
+            mbox.connect("button-press-event", self._on_marker_click)
         self._lbl = Gtk.Label()
         self._lbl.set_xalign(0.0)
         # long layer names must not widen the panel and squeeze the
         # view: ellipsize and show the full name as a tooltip
         self._lbl.set_ellipsize(Pango.EllipsizeMode.END)
         self._lbl.set_max_width_chars(1)
-        self.widget = Gtk.EventBox()
-        self.widget.add(self._lbl)
+        nbox = Gtk.EventBox()
+        nbox.add(self._lbl)
+        nbox.connect("button-press-event", self._on_name_click)
+        self.widget = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        self.widget.pack_start(mbox, False, False, 0)
+        self.widget.pack_start(nbox, True, True, 0)
         self.widget.set_tooltip_text(tooltip)
-        self.widget.connect("button-press-event", self._on_click)
         self._paint()
 
     def _paint(self):
+        self._mlbl.set_markup('<span face="monospace">%s</span>'
+                              % GLib.markup_escape_text(self._marker))
         self._lbl.set_markup(
-            '<span face="monospace">%s</span>'
             '<span foreground="%s"%s>%s</span>'
-            % (self._marker, self._color,
+            % (self._color,
                "" if self._active else ' strikethrough="true"',
                GLib.markup_escape_text(self._text)))
 
-    def _on_click(self, _w, event):
-        # plain left presses only: a double click must stay two toggles
-        # (GTK delivers an extra 2BUTTON_PRESS on top of the two presses)
+    def set_marker(self, marker):
+        self._marker = marker
+        self._paint()
+
+    def _on_marker_click(self, _w, event):
         if event.type != Gdk.EventType.BUTTON_PRESS or event.button != 1:
+            return False
+        self._on_expand(self)
+        return True
+
+    def _on_name_click(self, _w, event):
+        if event.type != Gdk.EventType._2BUTTON_PRESS or event.button != 1:
             return False
         self.set_active(not self._active)
         return True
@@ -414,20 +434,24 @@ class Viewer:
     def _build_layer_panel(self):
         """Layers grouped by layer number, drawn as a flat text list:
         '+M1' = group parent (lowest datatype of a multi-datatype
-        layer; its click toggles the whole group), the remaining
-        datatypes listed right below it, ' M2' = layer without
-        children. All names left-aligned; hidden = strikethrough."""
+        layer); its '+' expands/collapses the remaining datatypes
+        below it (collapsed by default), double-clicking any name
+        toggles visibility, and toggling a parent drags every child
+        datatype with it. All names left-aligned via the marker
+        column; hidden = strikethrough."""
         for child in self._layers_box.get_children():
             self._layers_box.remove(child)
         self._layer_rows = {}
         self._layer_groups = {}     # parent key -> [child keys]
+        self._layer_expanded = set()  # parent keys currently expanded
         self._layers_batch = False
         groups = {}
         for l in self.meta["layers"]:
             groups.setdefault(l["layer"], []).append(l)
 
-        def add_row(l, marker, tooltip):
-            row = LayerRow(l, marker, tooltip, self._on_layer_toggled)
+        def add_row(l, marker, tooltip, on_expand=None):
+            row = LayerRow(l, marker, tooltip, self._on_layer_toggled,
+                           on_expand)
             self._layers_box.pack_start(row.widget, False, False, 0)
             self._layer_rows[row.key] = row
             return row.key
@@ -435,20 +459,44 @@ class Viewer:
         for lnum, ls in groups.items():
             if len(ls) == 1:
                 l = ls[0]
-                add_row(l, " ",
-                        "%s  %d/%d" % (l["name"], lnum, l["datatype"]))
+                add_row(l, " ", "%s  %d/%d\ndouble-click: show/hide"
+                        % (l["name"], lnum, l["datatype"]))
                 continue
             ls = sorted(ls, key=lambda e: e["datatype"])
             head, rest = ls[0], ls[1:]
             pkey = add_row(
                 head, "+",
-                "%s  %d/%d\nclick: toggles all %d datatypes of layer %d"
-                % (head["name"], lnum, head["datatype"], len(ls), lnum))
+                "%s  %d/%d\n+/-: expand/collapse %d more datatypes\n"
+                "double-click: show/hide layer %d group"
+                % (head["name"], lnum, head["datatype"], len(rest), lnum),
+                self._on_group_expand)
             self._layer_groups[pkey] = [
-                add_row(l, " ",
-                        "%s  %d/%d" % (l["name"], lnum, l["datatype"]))
+                add_row(l, " ", "%s  %d/%d\ndouble-click: show/hide"
+                        % (l["name"], lnum, l["datatype"]))
                 for l in rest]
         self._layers_box.show_all()
+        # children start collapsed; no_show_all keeps later show_all
+        # calls (window level) from revealing them
+        for ckeys in self._layer_groups.values():
+            for k in ckeys:
+                w = self._layer_rows[k].widget
+                w.set_no_show_all(True)
+                w.hide()
+
+    def _on_group_expand(self, row):
+        """'+'/'-' marker click on a group parent."""
+        expand = row.key not in self._layer_expanded
+        if expand:
+            self._layer_expanded.add(row.key)
+        else:
+            self._layer_expanded.discard(row.key)
+        row.set_marker("-" if expand else "+")
+        for k in self._layer_groups[row.key]:
+            w = self._layer_rows[k].widget
+            if expand:
+                w.show()
+            else:
+                w.hide()
 
     def open_file(self, path):
         """Open another OASIS file (instance-forwarded request)."""
