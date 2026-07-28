@@ -513,6 +513,9 @@ class Viewer:
         else:
             obox, ospp = bbox, self.spp
         self._draw_overlays(disp, obox, ospp, bbox)
+        if os.environ.get("FLOE_DUMP"):
+            # diagnosis: exactly what is handed to the screen widget
+            disp.savev("/tmp/floe_disp.png", "png", [], [])
         self.image.set_from_pixbuf(disp)
         self._update_labels(obox, ospp)
 
@@ -814,6 +817,9 @@ class Viewer:
                 loader.write(res["png"])
                 loader.close()
                 pix = loader.get_pixbuf()
+                if os.environ.get("FLOE_DUMP"):
+                    # diagnosis: the frame as received from the service
+                    pix.savev("/tmp/floe_frame.png", "png", [], [])
                 fb = res["bbox"]
                 fspp = (fb[2] - fb[0]) / max(1, pix.get_width())
                 key = self._job_keys.get(res["gen"])
