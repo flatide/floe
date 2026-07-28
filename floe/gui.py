@@ -22,7 +22,7 @@ from . import cache as cache_mod
 from .service import RenderWorker
 from .viewport import MAX_LIVE_TILES
 
-Gtk = Gdk = GdkPixbuf = GLib = None
+Gtk = Gdk = GdkPixbuf = GLib = Pango = None
 
 APP = "floe"
 POLL_MS = 25
@@ -52,7 +52,7 @@ MINIMAP_VIEW = 0x8ECDF5FF
 def import_gtk():
     """flateyes-style lazy GTK import: exit 3 with a clear message when
     PyGObject is missing or the display is unreachable."""
-    global Gtk, Gdk, GdkPixbuf, GLib
+    global Gtk, Gdk, GdkPixbuf, GLib, Pango
     try:
         import gi
         import warnings
@@ -61,14 +61,15 @@ def import_gtk():
         gi.require_version("Gtk", "3.0")
         gi.require_version("GdkPixbuf", "2.0")
         from gi.repository import Gtk as _Gtk, Gdk as _Gdk, \
-            GdkPixbuf as _GdkPixbuf, GLib as _GLib
+            GdkPixbuf as _GdkPixbuf, GLib as _GLib, Pango as _Pango
     except (ImportError, ValueError) as exc:
         sys.stderr.write(
             "%s: PyGObject/GTK3 is required to open a window (%s)\n"
             "  verify with: python3 -c 'import gi; "
             "gi.require_version(\"Gtk\", \"3.0\")'\n" % (APP, exc))
         sys.exit(3)
-    Gtk, Gdk, GdkPixbuf, GLib = _Gtk, _Gdk, _GdkPixbuf, _GLib
+    Gtk, Gdk, GdkPixbuf, GLib, Pango = \
+        _Gtk, _Gdk, _GdkPixbuf, _GLib, _Pango
     ok = Gtk.init_check(sys.argv)
     if isinstance(ok, tuple):
         ok = ok[0]
@@ -361,6 +362,14 @@ class Viewer:
                            % (l["color"], GLib.markup_escape_text(l["name"]),
                               key[0], key[1]))
             lbl.set_xalign(0.0)
+            # long layer names must not widen the panel and squeeze the
+            # view: ellipsize and show the full name as a tooltip
+            lbl.set_ellipsize(Pango.EllipsizeMode.END)
+            # natural width 1 char: the label takes whatever width the
+            # fixed panel allocates and ellipsizes into it, so the panel
+            # never grows with the name
+            lbl.set_max_width_chars(1)
+            cb.set_tooltip_text("%s  %d/%d" % (l["name"], key[0], key[1]))
             cb.add(lbl)
             cb.set_active(True)
             cb.connect("toggled", self._on_layer_toggled, key)
