@@ -256,20 +256,20 @@ class Viewer:
         # the image lives in a ScrolledWindow so the window can shrink:
         # a bare Gtk.Image's minimum size is its pixbuf, and since we
         # render pixbufs at allocation size that would ratchet the window
-        # ever larger (flateyes uses the same containment)
+        # ever larger. EXACTLY flateyes' proven containment - AUTOMATIC
+        # policy, image directly in the scroller, events on the scroller.
+        # The earlier EXTERNAL policy + EventBox variant laid out fine but
+        # displayed BLACK on remote X11 (conda GTK bundle over SSH
+        # forwarding) while flateyes on the same display worked; the
+        # EventBox's own X window / EXTERNAL viewport stacking never
+        # brought the drawn pixels to the screen there.
         self.scroller = Gtk.ScrolledWindow()
-        try:
-            self.scroller.set_policy(Gtk.PolicyType.EXTERNAL,
-                                     Gtk.PolicyType.EXTERNAL)
-        except AttributeError:  # GTK < 3.16
-            self.scroller.set_policy(Gtk.PolicyType.NEVER,
-                                     Gtk.PolicyType.NEVER)
-        self.ebox = Gtk.EventBox()
+        self.scroller.set_policy(Gtk.PolicyType.AUTOMATIC,
+                                 Gtk.PolicyType.AUTOMATIC)
         self.image = Gtk.Image()
         self.image.set_halign(Gtk.Align.START)
         self.image.set_valign(Gtk.Align.START)
-        self.ebox.add(self.image)
-        self.scroller.add(self.ebox)
+        self.scroller.add(self.image)
         self.overlay.add(self.scroller)
         main.pack_start(self.overlay, True, True, 0)
 
@@ -289,18 +289,19 @@ class Viewer:
         sbar.pack_end(self.vstatus, False, False, 0)
         main.pack_start(sbar, False, False, 2)
 
-        self.ebox.add_events(
+        self.scroller.add_events(
             Gdk.EventMask.BUTTON_PRESS_MASK |
             Gdk.EventMask.BUTTON_RELEASE_MASK |
             Gdk.EventMask.POINTER_MOTION_MASK |
             Gdk.EventMask.SCROLL_MASK | Gdk.EventMask.SMOOTH_SCROLL_MASK)
-        self.ebox.connect("button-press-event", self._on_press)
-        self.ebox.connect("button-release-event", self._on_release)
-        self.ebox.connect("motion-notify-event", self._on_motion)
-        self.ebox.connect("scroll-event", self._on_scroll)
+        self.scroller.connect("button-press-event", self._on_press)
+        self.scroller.connect("button-release-event", self._on_release)
+        self.scroller.connect("motion-notify-event", self._on_motion)
+        self.scroller.connect("scroll-event", self._on_scroll)
         self._alloc_size = None
         self.scroller.connect("size-allocate", self._on_allocate)
-        self.ebox.connect("realize", lambda w: self._set_cursor("crosshair"))
+        self.scroller.connect("realize",
+                              lambda w: self._set_cursor("crosshair"))
 
         if server_sock is not None:
             GLib.io_add_watch(server_sock.fileno(), GLib.IO_IN,
@@ -521,11 +522,10 @@ class Viewer:
             ia = self.image.get_allocation()
             sys.stderr.write(
                 "[dump] disp %dx%d | image alloc %dx%d at (%d,%d) "
-                "mapped=%s visible=%s | ebox mapped=%s\n"
+                "mapped=%s visible=%s\n"
                 % (disp.get_width(), disp.get_height(),
                    ia.width, ia.height, ia.x, ia.y,
-                   self.image.get_mapped(), self.image.get_visible(),
-                   self.ebox.get_mapped()))
+                   self.image.get_mapped(), self.image.get_visible()))
         self.image.set_from_pixbuf(disp)
         self._update_labels(obox, ospp)
 
@@ -924,7 +924,7 @@ class Viewer:
             self.redraw()
 
     def _set_cursor(self, name):
-        win = self.ebox.get_window()
+        win = self.scroller.get_window()  # flateyes' set_viewport_cursor
         if win is not None:
             try:
                 win.set_cursor(Gdk.Cursor.new_from_name(
