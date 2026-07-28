@@ -61,7 +61,7 @@ GTK_PINS=${GTK_PINS:-}
 CONDA_OVERRIDE_GLIBC=$CONDA_GLIBC ./micromamba create -y \
     -r "$WORK/mmroot" -p "$WORK/runtime" --platform linux-64 \
     -c conda-forge "$PY_SPEC" pygobject gtk3 librsvg \
-    font-ttf-dejavu-sans-mono $GTK_PINS \
+    font-ttf-ubuntu font-ttf-dejavu-sans-mono $GTK_PINS \
     || true   # post-link failures still exit nonzero on some versions
 echo "== core rendering libs in the runtime:"
 ls "$WORK"/runtime/lib 2>/dev/null | grep -E \
@@ -213,6 +213,7 @@ GDK_PIXBUF_MODULE_FILE="\$CACHE/pixbuf-loaders.cache"
 GI_TYPELIB_PATH="\$RT/lib/girepository-1.0"
 GSETTINGS_SCHEMA_DIR="\$CACHE/schemas"
 XDG_DATA_DIRS="\$RT/share:/usr/local/share:/usr/share"
+XDG_CONFIG_DIRS="\$HERE/etc:/etc/xdg"   # gtk-3.0/settings.ini (font, dpi)
 FONTCONFIG_FILE="\$HERE/fonts.conf"
 LD_LIBRARY_PATH="\$RT/lib\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
 GDK_BACKEND=x11
@@ -220,8 +221,8 @@ NO_AT_BRIDGE=1                 # silence the at-spi accessibility bridge noise
 PYTHONHOME="\$RT"
 PYTHONNOUSERSITE=1
 export GDK_PIXBUF_MODULE_FILE GI_TYPELIB_PATH GSETTINGS_SCHEMA_DIR \\
-    XDG_DATA_DIRS FONTCONFIG_FILE LD_LIBRARY_PATH GDK_BACKEND \\
-    NO_AT_BRIDGE PYTHONHOME PYTHONNOUSERSITE
+    XDG_DATA_DIRS XDG_CONFIG_DIRS FONTCONFIG_FILE LD_LIBRARY_PATH \\
+    GDK_BACKEND NO_AT_BRIDGE PYTHONHOME PYTHONNOUSERSITE
 # XQuartz's XRender implementation composites images to BLACK while text
 # renders (worse after any window grow); forcing cairo's core-protocol
 # fallback displays correctly at every size. Costs a slightly slower
@@ -274,17 +275,59 @@ EOF
 cat > "$B/fonts.conf" <<'EOF'
 <?xml version="1.0"?>
 <!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<!-- floe portable: FONTCONFIG_FILE points here, which REPLACES the
+     system /etc/fonts rules entirely - so this file must supply the
+     generic-family aliases and rendering defaults itself. Bundled fonts
+     first (Ubuntu = proportional UI face, DejaVu Sans Mono), then every
+     common system location so Korean glyphs come from the host. -->
 <fontconfig>
   <dir prefix="relative">runtime/fonts</dir>
   <dir>/usr/share/fonts</dir>
   <dir>/usr/share/X11/fonts</dir>
   <dir>/usr/local/share/fonts</dir>
+  <dir prefix="xdg">fonts</dir>
+  <dir>~/.fonts</dir>
   <cachedir>~/.cache/floe-rt/fontcache</cachedir>
-  <match target="pattern">
-    <test qual="any" name="family"><string>sans-serif</string></test>
-    <edit name="family" mode="prepend" binding="weak"><string>DejaVu Sans</string></edit>
+  <alias>
+    <family>sans-serif</family>
+    <prefer>
+      <family>Ubuntu</family><family>DejaVu Sans</family>
+      <family>Liberation Sans</family><family>Noto Sans</family>
+    </prefer>
+  </alias>
+  <alias>
+    <family>serif</family>
+    <prefer>
+      <family>DejaVu Serif</family><family>Liberation Serif</family>
+      <family>Noto Serif</family>
+    </prefer>
+  </alias>
+  <alias>
+    <family>monospace</family>
+    <prefer>
+      <family>Ubuntu Mono</family><family>DejaVu Sans Mono</family>
+      <family>Liberation Mono</family>
+    </prefer>
+  </alias>
+  <match target="font">
+    <edit name="antialias" mode="assign"><bool>true</bool></edit>
+    <edit name="hinting" mode="assign"><bool>true</bool></edit>
+    <edit name="hintstyle" mode="assign"><const>hintslight</const></edit>
+    <edit name="rgba" mode="assign"><const>none</const></edit>
   </match>
 </fontconfig>
+EOF
+
+# GTK settings: a deterministic UI font + normalized 96dpi Xft so remote
+# X servers (XQuartz etc.) don't produce oddly sized/shaped text.
+mkdir -p "$B/etc/gtk-3.0"
+cat > "$B/etc/gtk-3.0/settings.ini" <<'EOF'
+[Settings]
+gtk-font-name = Ubuntu 10
+gtk-xft-antialias = 1
+gtk-xft-hinting = 1
+gtk-xft-hintstyle = hintslight
+gtk-xft-dpi = 98304
 EOF
 
 cat > "$B/README-PORTABLE.txt" <<EOF
