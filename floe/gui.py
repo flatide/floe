@@ -37,7 +37,6 @@ SNAP_EDGE = 0x66CCFFFF
 SEL_CORE = 0xFFFFFFFF
 GOTO_MARK = 0xFF66D9FF
 
-AUTO_DEPTH_BUDGET = 120_000   # est. shapes auto depth allows on screen
 MIN_SPP = 0.01     # max zoom-in: 1 px = 0.01 dbu; keeps render bboxes
                    # from collapsing to zero width after int rounding
 
@@ -186,9 +185,11 @@ class Viewer:
         self._did_fit = False
         self.worker = None
         self._layer_checks = {}
-        self.depth_value = 999
-        self.depth_auto = True      # density-based depth until set explicitly
+        self.depth_value = 999      # 999 = full hierarchy
         self._depth_used = "?"      # depth of the last frame ("?" = none yet)
+        # detail cut: shapes below this many screen px are dropped from
+        # live renders (size-banded caches only; 0 = off)
+        self.cut_px = float(os.environ.get("FLOE_CUT_PX", "2"))
         self._quitting = False
         # ruler / snap / pick state
         self.mode = "normal"
@@ -210,6 +211,7 @@ class Viewer:
         self._pending_timer = None
         self._ddlg = None
         self._gdlg = None
+        self._cdlg = None
         self.goto_mark = None       # world point of the last goto (X marker)
         self._labels = []           # Gtk.Label pool for ruler distances
 
@@ -285,7 +287,7 @@ class Viewer:
         self.status.set_max_width_chars(1)
         self.rstatus = Gtk.Label(label="")
         self.rstatus.set_margin_end(10)
-        self.dstatus = Gtk.Label(label="depth: auto")
+        self.dstatus = Gtk.Label(label="depth: full")
         self.dstatus.set_margin_end(14)
         self.vstatus = Gtk.Label(label="")
         self.vstatus.set_margin_end(14)
@@ -355,32 +357,106 @@ class Viewer:
         if self._did_fit:
             self.fit()
 
+    def _layer_check(self, l):
+        """One ellipsized, tooltipped check row for a layer entry."""
+        key = (l["layer"], l["datatype"])
+        cb = Gtk.CheckButton()
+        lbl = Gtk.Label()
+        lbl.set_markup('<span foreground="%s">%s  %d/%d</span>'
+                       % (l["color"], GLib.markup_escape_text(l["name"]),
+                          key[0], key[1]))
+        lbl.set_xalign(0.0)
+        # long layer names must not widen the panel and squeeze the
+        # view: ellipsize and show the full name as a tooltip
+        lbl.set_ellipsize(Pango.EllipsizeMode.END)
+        # natural width 1 char: the label takes whatever width the
+        # fixed panel allocates and ellipsizes into it, so the panel
+        # never grows with the name
+        lbl.set_max_width_chars(1)
+        cb.set_tooltip_text("%s  %d/%d" % (l["name"], key[0], key[1]))
+        cb.add(lbl)
+        cb.set_active(True)
+        cb.connect("toggled", self._on_layer_toggled, key)
+        return key, cb
+
     def _build_layer_panel(self):
+        """Layers grouped by layer number: multi-datatype groups get a
+        tri-state parent check that toggles every child datatype, with
+        the children behind an expander."""
         for child in self._layers_box.get_children():
             self._layers_box.remove(child)
         self._layer_checks = {}
+        self._layer_groups = {}     # group id -> (parent_cb, [keys])
+        self._layers_batch = False
+        groups = {}
         for l in self.meta["layers"]:
-            key = (l["layer"], l["datatype"])
-            cb = Gtk.CheckButton()
-            lbl = Gtk.Label()
-            lbl.set_markup('<span foreground="%s">%s  %d/%d</span>'
-                           % (l["color"], GLib.markup_escape_text(l["name"]),
-                              key[0], key[1]))
-            lbl.set_xalign(0.0)
-            # long layer names must not widen the panel and squeeze the
-            # view: ellipsize and show the full name as a tooltip
-            lbl.set_ellipsize(Pango.EllipsizeMode.END)
-            # natural width 1 char: the label takes whatever width the
-            # fixed panel allocates and ellipsizes into it, so the panel
-            # never grows with the name
-            lbl.set_max_width_chars(1)
-            cb.set_tooltip_text("%s  %d/%d" % (l["name"], key[0], key[1]))
-            cb.add(lbl)
-            cb.set_active(True)
-            cb.connect("toggled", self._on_layer_toggled, key)
-            self._layers_box.pack_start(cb, False, False, 0)
-            self._layer_checks[key] = cb
+            groups.setdefault(l["layer"], []).append(l)
+        for lnum, ls in groups.items():
+            if len(ls) == 1:
+                key, cb = self._layer_check(ls[0])
+                self._layers_box.pack_start(cb, False, False, 0)
+                self._layer_checks[key] = cb
+                continue
+            # parent = the common name prefix of the children (M5 for
+            # M5/M5_FILL), else the layer number
+            names = [l["name"] for l in ls]
+            pfx = os.path.commonprefix(names).rstrip("_/ ") or str(lnum)
+            pcb = Gtk.CheckButton()
+            plbl = Gtk.Label()
+            plbl.set_markup("<b>%s</b>  (%d)"
+                            % (GLib.markup_escape_text(pfx), len(ls)))
+            plbl.set_xalign(0.0)
+            plbl.set_ellipsize(Pango.EllipsizeMode.END)
+            plbl.set_max_width_chars(1)
+            pcb.add(plbl)
+            pcb.set_active(True)
+            pcb.set_tooltip_text("layer %d: %s" % (lnum, ", ".join(names)))
+            keys = []
+            child_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+            child_box.set_margin_start(18)
+            for l in ls:
+                key, cb = self._layer_check(l)
+                child_box.pack_start(cb, False, False, 0)
+                self._layer_checks[key] = cb
+                keys.append(key)
+            gid = lnum
+            self._layer_groups[gid] = (pcb, keys)
+            pcb.connect("toggled", self._on_group_toggled, gid)
+            exp = Gtk.Expander()
+            exp.set_label_widget(pcb)
+            exp.add(child_box)
+            self._layers_box.pack_start(exp, False, False, 0)
         self._layers_box.show_all()
+
+    def _on_group_toggled(self, pcb, gid):
+        if self._layers_batch:
+            return
+        _, keys = self._layer_groups[gid]
+        on = pcb.get_active()
+        pcb.set_inconsistent(False)
+        self._layers_batch = True
+        try:
+            for key in keys:
+                # set_active fires _on_layer_toggled, which keeps
+                # self.visible in sync even while batched
+                self._layer_checks[key].set_active(on)
+        finally:
+            self._layers_batch = False
+        self.redraw(immediate=True)
+
+    def _sync_group_check(self, key):
+        """Reflect a child toggle in its group parent (tri-state)."""
+        for gid, (pcb, keys) in self._layer_groups.items():
+            if key not in keys:
+                continue
+            on = sum(1 for k in keys if k in self.visible)
+            self._layers_batch = True
+            try:
+                pcb.set_inconsistent(0 < on < len(keys))
+                pcb.set_active(on == len(keys))
+            finally:
+                self._layers_batch = False
+            return
 
     def open_file(self, path):
         """Open another OASIS file (instance-forwarded request)."""
@@ -487,10 +563,9 @@ class Viewer:
 
     # ---- display composition (no cairo: pixbuf ops only) -------------------
     def _render_key(self, scope):
-        """Identity of a frame: what state it was rendered for.
-        Auto-depth frames share one identity so they stay reusable
-        while the chosen depth varies per view."""
-        return (scope, tuple(sorted(self.visible)), self._depth_key())
+        """Identity of a frame: what state it was rendered for."""
+        return (scope, tuple(sorted(self.visible)), self._depth_key(),
+                self.cut_px)
 
     def _frame_compatible(self, frame):
         """A stale frame stays displayable rescaled until the fresh
@@ -755,15 +830,7 @@ class Viewer:
                     self._expand(bbox, m)) > MAX_LIVE_TILES:
                 m = 0 if m <= 0.13 else m / 2
         eb = self._expand(bbox, m)
-        if scope == "live":
-            depth = self._auto_depth(eb) if self.depth_auto \
-                else self._depth()
-            if self.depth_auto:
-                depth = self._clamp_auto_to_lod(eb, depth)
-        elif self.depth_auto:
-            depth = 0     # far view default: block-outline (depth 0)
-        else:
-            depth = self._depth()  # far view honors explicit depth 0/1/2
+        depth = self._depth()
         self.gen += 1
         self._job_keys[self.gen] = self._render_key(scope)
         self._job_depth[self.gen] = depth
@@ -778,6 +845,7 @@ class Viewer:
             "w": int(round(w * (1 + 2 * m))),
             "h": int(round(h * (1 + 2 * m))),
             "depth": depth,
+            "cut_px": self.cut_px,
             "visible": self._layers_arg()})
         self._pending = self.gen
         self._preview_gen = None   # stop a stale preview ticker
@@ -1187,8 +1255,8 @@ class Viewer:
             self._depth_dialog()
         elif name == "g":
             self._goto_dialog()
-        elif name == "a":
-            self._set_depth_auto()
+        elif name == "c":
+            self._cut_dialog()
         elif name == "q":
             self._confirm_quit()
         elif len(name) == 1 and name.isdigit():
@@ -1205,106 +1273,22 @@ class Viewer:
         return None if d >= 999 else max(0, d)
 
     def _depth_key(self):
-        """Render-key component: one identity for the whole auto mode."""
-        return "auto" if self.depth_auto else self._depth()
+        """Render-key component of the frame identity."""
+        return self._depth()
 
     def _depth_note(self, used):
         """Status-line suffix naming the depth a frame rendered at."""
-        if self.depth_auto:
-            return ", depth auto(%s)" % ("full" if used is None else used)
         return "" if used is None else ", depth %d" % used
 
     def _depth_label(self):
-        if not self.depth_auto:
-            d = self._depth()
-            return "depth: full" if d is None else "depth: %d" % d
-        if self._depth_used == "?":
-            return "depth: auto"
-        return "depth: auto(%s)" % ("full" if self._depth_used is None
-                                    else self._depth_used)
-
-    def _auto_depth(self, bbox):
-        """Deepest depth whose estimated draw cost stays under
-        AUTO_DEPTH_BUDGET, from the index-time density table (per-tile
-        counts scaled by view overlap). Cost of depth d = shapes down
-        to d + one outline frame per cell at level d+1, so a mid depth
-        that would stroke millions of array-cell frames is skipped.
-        None = no table or the full hierarchy fits."""
+        d = self._depth()
+        lbl = "depth: full" if d is None else "depth: %d" % d
         if self.meta.get("bands"):
-            # size-banded cache: subpixel shapes are cut per view, so a
-            # full-depth draw is already bounded - no depth throttling
-            return None
-        dens = self.meta.get("density")
-        if not dens or not self.visible:
-            return None
-        tiles = dens.get("tiles", {})
-        g = self.meta["grid"]
-        vis = ["%d/%d" % key for key in self.visible]
-        levels = max(1, dens.get("levels", 1))
-        est = [0.0] * levels
-        frames = [0.0] * (levels + 1)
-        area = float(g["tile_w"]) * g["tile_h"]
-        for r, c in self.cache.tiles_for_bbox(*[int(v) for v in bbox]):
-            t = tiles.get("%d,%d" % (r, c))
-            if not t:
-                continue
-            tx0 = g["x0"] + c * g["tile_w"]
-            ty0 = g["y0"] + r * g["tile_h"]
-            frac = (max(0.0, min(bbox[2], tx0 + g["tile_w"])
-                        - max(bbox[0], tx0))
-                    * max(0.0, min(bbox[3], ty0 + g["tile_h"])
-                          - max(bbox[1], ty0)) / area)
-            if frac <= 0:
-                continue
-            for lv, n in enumerate(t.get("cells", ())):
-                if lv <= levels:
-                    frames[lv] += n * frac
-            for lkey in vis:
-                arr = t.get(lkey)
-                if not arr:
-                    continue
-                for lv in range(levels):
-                    est[lv] += arr[min(lv, len(arr) - 1)] * frac
-        total = est[-1]
-        if total <= AUTO_DEPTH_BUDGET:
-            return None
-        best = None
-        for lv in range(levels):
-            if est[lv] + frames[lv + 1] <= AUTO_DEPTH_BUDGET:
-                best = lv
-        if best is not None:
-            return best
-        # nothing fits the budget: least-bad choice (a full render at
-        # least draws no frames)
-        lv = min(range(levels), key=lambda i: est[i] + frames[i + 1])
-        return None if total <= est[lv] + frames[lv + 1] else lv
-
-    def _clamp_auto_to_lod(self, bbox, depth):
-        """Auto depth only budgets DRAW cost, but with few layers visible
-        the estimate shrinks and auto picks full - which forces fat
-        first-visit tile parses (~5s/tile even in viewer mode; observed
-        "30s load + 2.5s draw" on zoom-out). On wide views (> 2 tiles)
-        clamp the auto choice to the depth the LOD tiles can serve, so
-        the render takes the instant LOD path; deep detail is subpixel
-        out there anyway. Narrow views and explicit depths keep the full
-        parse (with the LOD preview covering the wait)."""
-        if self.meta.get("bands"):
-            return depth  # size bands already bound wide-view cost
-        lodmap = (self.meta.get("lod") or {}).get("tiles")
-        if not lodmap:
-            return depth
-        tiles = self.cache.tiles_for_bbox(*[int(v) for v in bbox])
-        if len(tiles) <= 2:
-            return depth
-        cuts = [lodmap["%d,%d" % rc] for rc in tiles
-                if "%d,%d" % rc in lodmap]
-        if not cuts:
-            return depth
-        cut = min(cuts)
-        return cut if depth is None else min(depth, cut)
+            lbl += " · cut: %s" % ("off" if self.cut_px <= 0
+                                   else "%gpx" % self.cut_px)
+        return lbl
 
     def _set_depth(self, n):
-        self.depth_auto = False
         self.depth_value = max(0, min(999, int(n)))
         if self._ddlg is not None:
             spin = getattr(self._ddlg, "_spin", None)
@@ -1313,9 +1297,9 @@ class Viewer:
                 spin.set_value(self.depth_value)
         self._on_depth()
 
-    def _set_depth_auto(self):
-        self.depth_auto = True
-        self._on_depth()
+    def _set_cut(self, px):
+        self.cut_px = max(0.0, float(px))
+        self._on_depth()  # same refresh: status label + re-render
 
     def _on_depth(self):
         self.dstatus.set_text(self._depth_label())
@@ -1430,16 +1414,10 @@ class Viewer:
             b = Gtk.Button(label="full" if preset == 999 else str(preset))
             b.connect("clicked", lambda _w, p=preset: self._set_depth(p))
             row.pack_start(b, False, False, 0)
-        b = Gtk.Button(label="auto")
-        b.connect("clicked", lambda *_: self._set_depth_auto())
-        row.pack_start(b, False, False, 0)
         note = Gtk.Label()
         note.set_markup(
-            "<small>auto picks the deepest level whose estimated shape"
-            "\ncount stays interactive (index density table); explicit"
-            "\nvalues override it. cells beyond the limit are drawn as"
-            "\noutline frames with names - keys: d = this dialog,"
-            "\n0-9 = depth, a = auto</small>")
+            "<small>cells beyond the limit are drawn as outline frames"
+            "\nwith names - keys: d = this dialog, 0-9 = depth</small>")
         note.set_xalign(0.0)
         box.pack_start(note, False, False, 0)
         # depth applies live (spin/presets); ok just closes
@@ -1461,6 +1439,73 @@ class Viewer:
             # hand the keyboard back: some backends (macOS quartz
             # notably) fail to refocus the parent when a transient
             # closes, leaving every key command dead until a click
+            self.window.present()
+        dlg.connect("destroy", _gone)
+        self._dialog_show(dlg, spin)
+
+    def _cut_dialog(self):
+        """Runtime control of the size-band detail cut (screen px)."""
+        if not self.meta.get("bands"):
+            self._set_status(self.view_bbox(),
+                             "no size bands in this cache - reindex "
+                             "with the current floe to enable the cut")
+            return
+        if self._cdlg is not None:
+            self._cdlg.present()
+            return
+        dlg = Gtk.Window(title="detail cut")
+        self._dialog_setup(dlg)
+        self._cdlg = dlg
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_margin_top(10)
+        box.set_margin_bottom(10)
+        box.set_margin_start(14)
+        box.set_margin_end(14)
+        dlg.add(box)
+        box.pack_start(Gtk.Label(
+            label="hide shapes smaller than N screen px (0 = off)"),
+            False, False, 0)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        box.pack_start(row, False, False, 0)
+        spin = Gtk.SpinButton.new_with_range(0, 16, 0.5)
+        spin.set_digits(1)
+        spin.set_value(self.cut_px)
+        spin.connect("value-changed",
+                     lambda s: self._set_cut(s.get_value()))
+        spin.connect("activate", lambda *_: dlg.destroy())  # Enter = ok
+        dlg._spin = spin
+        row.pack_start(spin, False, False, 0)
+        for preset in (0, 1, 2, 4):
+            b = Gtk.Button(label="off" if preset == 0 else "%dpx" % preset)
+
+            def _apply(_w, p=preset):
+                self._set_cut(p)
+                s = getattr(self._cdlg, "_spin", None)
+                if s is not None and s.get_value() != p:
+                    s.set_value(p)
+            b.connect("clicked", _apply)
+            row.pack_start(b, False, False, 0)
+        note = Gtk.Label()
+        note.set_markup(
+            "<small>whole size bands below the cut are neither loaded"
+            "\nnor drawn on wide views; snap/pick/clip stay exact."
+            "\nthe status line shows the active cut (cut&lt;0.35um)."
+            "\nkeys: c = this dialog</small>")
+        note.set_xalign(0.0)
+        box.pack_start(note, False, False, 0)
+        ok = Gtk.Button(label="ok")
+        ok.connect("clicked", lambda *_: dlg.destroy())
+        box.pack_start(ok, False, False, 0)
+
+        def on_dialog_key(_w, ev):
+            if Gdk.keyval_name(ev.keyval) == "Escape":
+                dlg.destroy()
+                return True
+            return False
+        dlg.connect("key-press-event", on_dialog_key)
+
+        def _gone(*_a):
+            self._cdlg = None
             self.window.present()
         dlg.connect("destroy", _gone)
         self._dialog_show(dlg, spin)
@@ -1722,15 +1767,28 @@ class Viewer:
             self.visible.add(key)
         else:
             self.visible.discard(key)
+        if self._layers_batch:
+            return  # group/all/none toggle: one redraw at the end
+        self._sync_group_check(key)
+        self.redraw(immediate=True)
+
+    def _set_all_layers(self, on):
+        self._layers_batch = True
+        try:
+            for cb in self._layer_checks.values():
+                cb.set_active(on)
+            for pcb, _keys in self._layer_groups.values():
+                pcb.set_inconsistent(False)
+                pcb.set_active(on)
+        finally:
+            self._layers_batch = False
         self.redraw(immediate=True)
 
     def _all_layers(self):
-        for cb in self._layer_checks.values():
-            cb.set_active(True)
+        self._set_all_layers(True)
 
     def _no_layers(self):
-        for cb in self._layer_checks.values():
-            cb.set_active(False)
+        self._set_all_layers(False)
 
     def _clip_dialog(self):
         bbox = self.view_bbox()

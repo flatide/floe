@@ -36,6 +36,7 @@ import klayout.db as db
 CACHE_VERSION = 8
 TILE_TARGET_BYTES = 6_000_000
 GRID_MIN, GRID_MAX = 4, 96
+INDEX_HEARTBEAT_S = 60   # progress line at least this often while tiling
 # size-band edges in um (ascending): 4 bands, band 0 = shapes with
 # max(bbox w, h) >= 2um ... band 3 = < 0.125um
 BAND_THRESHOLDS_UM = (0.125, 0.5, 2.0)
@@ -1001,8 +1002,24 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
         if ctx is not None:
             log(f"[index] tiling with {jobs} fork workers...")
             with ctx.Pool(jobs) as pool:
-                for res in pool.imap_unordered(_build_one_tile, coords):
+                it = pool.imap_unordered(_build_one_tile, coords)
+                left = len(coords)
+                while left:
+                    try:
+                        res = it.next(timeout=INDEX_HEARTBEAT_S)
+                    except multiprocessing.TimeoutError:
+                        # heavy tiles can run many minutes: keep proving
+                        # liveness instead of going silent between tiles
+                        bd = _breakdown()
+                        log(f"[index] tiles {done}/{len(coords)} done, "
+                            f"{min(jobs, left)} workers busy "
+                            f"({time.perf_counter() - t0:.0f}s"
+                            + (f"; {bd}" if bd else "") + ")")
+                        continue
+                    except StopIteration:
+                        break
                     take(*res)
+                    left -= 1
         else:
             for rc in coords:
                 take(*_build_one_tile(rc))

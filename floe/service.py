@@ -29,16 +29,18 @@ _PICK_CAP = 64    # max candidates per pick query
 CUT_PX = float(os.environ.get("FLOE_CUT_PX", "2"))
 
 
-def _bands_for_view(cache, x0, x1, w):
+def _bands_for_view(cache, x0, x1, w, cut_px=None):
     """(needed band indexes, cut size in dbu) for a view of w pixels
     across x1-x0 dbu; (None, None) on legacy caches. A band is needed
-    when its largest shapes would reach CUT_PX pixels."""
+    when its largest shapes would reach the cut size in pixels
+    (cut_px, falling back to the FLOE_CUT_PX default; 0 = no cut)."""
     b = cache.meta.get("bands")
     if not b:
         return None, None
+    cp = CUT_PX if cut_px is None else max(0.0, float(cut_px))
     th_dbu = [t / cache.meta["dbu"] for t in b["thresholds_um"]]
     nb = len(th_dbu) + 1
-    cutoff = CUT_PX * (x1 - x0) / max(1, w)
+    cutoff = cp * (x1 - x0) / max(1, w)
     need = tuple(k for k in range(nb)
                  if k == 0 or th_dbu[nb - 1 - k] > cutoff)
     return need, cutoff
@@ -227,7 +229,8 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
                          "msg": f"{len(tiles)} tiles > live limit"})
                 return
             depth = job.get("depth")
-            need, cut_dbu = _bands_for_view(cache, x0, x1, job["w"])
+            need, cut_dbu = _bands_for_view(cache, x0, x1, job["w"],
+                                            job.get("cut_px"))
             cut_um = (round(cut_dbu * cache.meta["dbu"], 3)
                       if need is not None and len(need) < mosaic.bands
                       else None)
