@@ -712,6 +712,15 @@ class Viewer:
             return
         mode = "live (%d tiles)" % span if scope == "live" \
             else "far view (skeleton)"
+        if self._drag is not None:
+            # mid-pan: track visually with the frozen frame only; the
+            # render fires once on button release (a brief motion pause
+            # used to let the debounce submit mid-drag)
+            if self._debounce is not None:
+                GLib.source_remove(self._debounce)
+                self._debounce = None
+            self._set_status(bbox, mode)
+            return
         if self._covered(bbox, scope):
             if self._debounce is not None:
                 GLib.source_remove(self._debounce)
@@ -1026,8 +1035,11 @@ class Viewer:
 
     def _on_release(self, _w, ev):
         if ev.button in (2, 3):
+            panned = self._drag is not None
             self._drag = None
             self._set_cursor("crosshair")
+            if panned:
+                self.redraw()   # pan ended: render the final position
             return True
         if ev.button != 1 or self._zoomdrag is None:
             return True
