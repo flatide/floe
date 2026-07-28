@@ -77,6 +77,15 @@ class Renderer:
             lp.visible = (vis is None
                           or (lp.source_layer, lp.source_datatype) in vis)
 
+    def set_cell_visibility(self, show, hide):
+        """Cell indexes to show/hide; a hidden cell's whole subtree is
+        skipped at draw time (this is how size bands beyond the current
+        zoom's cut are excluded without touching the layout)."""
+        for ci in hide:
+            self.lv.hide_cell(ci, 0)
+        for ci in show:
+            self.lv.show_cell(ci, 0)
+
     def render_png(self, out_path, x0, y0, x1, y1, w, h, visible=None,
                    depth=None):
         """Render bbox given in dbu to a PNG file of w x h pixels.

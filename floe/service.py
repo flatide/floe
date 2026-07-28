@@ -9,6 +9,7 @@ large cell array) would freeze the GUI main loop for its whole duration.
 import multiprocessing as mp
 import os
 import queue
+import re
 import signal
 import tempfile
 import time
@@ -21,6 +22,45 @@ from .viewport import Mosaic, MAX_LIVE_TILES
 
 _SNAP_CAP = 400   # max shapes examined per snap query
 _PICK_CAP = 64    # max candidates per pick query
+
+# shapes smaller than this many screen pixels are cut from live renders
+# (their whole size band is neither loaded nor drawn); snap/pick/clip
+# always use every band, so measurements stay exact
+CUT_PX = float(os.environ.get("FLOE_CUT_PX", "2"))
+
+
+def _bands_for_view(cache, x0, x1, w):
+    """(needed band indexes, cut size in dbu) for a view of w pixels
+    across x1-x0 dbu; (None, None) on legacy caches. A band is needed
+    when its largest shapes would reach CUT_PX pixels."""
+    b = cache.meta.get("bands")
+    if not b:
+        return None, None
+    th_dbu = [t / cache.meta["dbu"] for t in b["thresholds_um"]]
+    nb = len(th_dbu) + 1
+    cutoff = CUT_PX * (x1 - x0) / max(1, w)
+    need = tuple(k for k in range(nb)
+                 if k == 0 or th_dbu[nb - 1 - k] > cutoff)
+    return need, cutoff
+
+
+def _apply_bands(mosaic, renderer, need):
+    """Show loaded band cells in `need`, hide the rest (a hidden cell's
+    subtree costs nothing at draw time)."""
+    if mosaic.bands == 1 or need is None:
+        return
+    show, hide = [], []
+    for key, ci in mosaic.loaded.items():
+        if ci is not None:
+            (show if key[2] in need else hide).append(ci)
+    renderer.set_cell_visibility(show, hide)
+
+
+def _strip_band(name):
+    """User-facing cell name: drop size-band markers (__b<k> suffix or
+    TILE_r_c_b<k>) and klayout's $n rename counters after them."""
+    name = re.sub(r"__b\d+(\$\d+)?$", "", name)
+    return re.sub(r"^(TILE_\d+_\d+)_b\d+(\$\d+)?$", r"\1", name)
 
 
 def _iter_global_polys(mosaic, layers_sel, box):
@@ -136,7 +176,7 @@ def _svc_pick(cache, mosaic, job, res):
         out.update(found=True, count=len(cands), index=i,
                    layer=info.layer, datatype=info.datatype,
                    lname=info.name or f"{info.layer}/{info.datatype}",
-                   cell=cell, area=area,
+                   cell=_strip_band(cell), area=area,
                    bbox=[bb.left, bb.bottom, bb.right, bb.top], points=pts)
     except Exception as e:
         out["err"] = str(e)
@@ -150,6 +190,7 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
     scope = job.get("scope", "live")
     bg = False
     t_load = t_draw = 0.0
+    cut_kv = {}
     # how long the job waited behind earlier service work (same host,
     # wall clocks comparable); shown in the status line as "+N wait"
     wait_ms = round((time.time() - job.get("t_sub", time.time())) * 1000)
@@ -186,6 +227,11 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
                          "msg": f"{len(tiles)} tiles > live limit"})
                 return
             depth = job.get("depth")
+            need, cut_dbu = _bands_for_view(cache, x0, x1, job["w"])
+            cut_um = (round(cut_dbu * cache.meta["dbu"], 3)
+                      if need is not None and len(need) < mosaic.bands
+                      else None)
+            cut_kv = {"cut_um": cut_um} if cut_um else {}
             if lod is not None and depth is not None and \
                     all(lod[2].get("%d,%d" % rc, 99) >= depth
                         for rc in tiles):
@@ -202,7 +248,8 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
                 # from the tiny LOD tiles first; content beyond a tile's
                 # LOD cut is simply absent until the full frame lands.
                 fresh_fat = [rc for rc in tiles
-                             if rc not in mosaic.loaded
+                             if any(key not in mosaic.loaded for key in
+                                    mosaic.keys_for([rc], need))
                              and "%d,%d" % rc in lod[2]]
                 if fresh_fat:
                     pv = job.get("view") or (x0, y0, x1, y1)
@@ -232,12 +279,13 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
                 # region first and upgrade to the full margin silently
                 vx0, vy0, vx1, vy1 = view
                 vtiles = cache.tiles_for_bbox(vx0, vy0, vx1, vy1)
-                fresh = sum(1 for rc in tiles if rc not in mosaic.loaded)
-                vfresh = sum(1 for rc in vtiles
-                             if rc not in mosaic.loaded)
+                fresh = sum(1 for key in mosaic.keys_for(tiles, need)
+                            if key not in mosaic.loaded)
+                vfresh = sum(1 for key in mosaic.keys_for(vtiles, need)
+                             if key not in mosaic.loaded)
                 if fresh - vfresh >= 4 and x1 > x0 and y1 > y0:
                     tl = time.perf_counter()
-                    if mosaic.ensure(vtiles, stop=newer):
+                    if mosaic.ensure(vtiles, stop=newer, bands=need):
                         renderer.refresh()
                     t_load += time.perf_counter() - tl
                     if newer():
@@ -245,6 +293,7 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
                     vw = max(1, round(job["w"] * (vx1 - vx0) / (x1 - x0)))
                     vh = max(1, round(job["h"] * (vy1 - vy0) / (y1 - y0)))
                     td = time.perf_counter()
+                    _apply_bands(mosaic, renderer, need)
                     renderer.render_png(tmp, vx0, vy0, vx1, vy1, vw, vh,
                                         visible=job["visible"],
                                         depth=depth)
@@ -257,19 +306,21 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
                              "scope": scope,
                              "load_ms": round(t_load * 1000),
                              "draw_ms": round(t_draw * 1000),
-                             "wait_ms": wait_ms,
+                             "wait_ms": wait_ms, **cut_kv,
                              "ms": round(
                                  (time.perf_counter() - t0) * 1000)})
                     if not req.empty():
                         return  # newer work queued: skip the margin
                     bg = True   # margin upgrade: no status churn
             tl = time.perf_counter()
-            if use_mosaic.ensure(tiles, stop=newer):
+            if use_mosaic.ensure(tiles, stop=newer, bands=need):
                 use_renderer.refresh()
             t_load += time.perf_counter() - tl
             if newer():
                 return  # superseded mid-load: drop this job
             td = time.perf_counter()
+            if use_mosaic is mosaic:
+                _apply_bands(mosaic, renderer, need)
             use_renderer.render_png(tmp, x0, y0, x1, y1,
                                     job["w"], job["h"],
                                     visible=job["visible"], depth=depth)
@@ -282,7 +333,7 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
                  "bg": bg,
                  "load_ms": round(t_load * 1000),
                  "draw_ms": round(t_draw * 1000),
-                 "wait_ms": wait_ms,
+                 "wait_ms": wait_ms, **cut_kv,
                  "ms": round((time.perf_counter() - t0) * 1000)})
     except Exception as e:  # keep the service alive
         res.put({"kind": "error", "msg": str(e)})

@@ -4,8 +4,15 @@
 
     meta.json           source fingerprint, grid geometry, layer table,
                         per-tile depth-density table, stats
-    tiles/t_<r>_<c>.oas one OASIS per grid tile (all layers, absolute coords,
-                        geometry cut at tile borders); empty tiles have no file
+    tiles_b<k>/t_<r>_<c>.oas
+                        per grid tile, one OASIS per SIZE BAND k (all
+                        layers, absolute coords, geometry cut at tile
+                        borders): band 0 holds the largest shapes, the
+                        last band the smallest (see _tile_bands). A
+                        render loads only the bands whose shapes reach
+                        ~FLOE_CUT_PX pixels at the current zoom, so
+                        wide views neither parse nor draw subpixel fill
+                        arrays. Empty bands/tiles have no file.
     tiles_lod/...       depth-limited companion tiles (see _tile_lod)
     skeleton.oas        structural far-zoom model (see build_skeleton)
 
@@ -26,9 +33,12 @@ print = functools.partial(print, flush=True)
 
 import klayout.db as db
 
-CACHE_VERSION = 7
+CACHE_VERSION = 8
 TILE_TARGET_BYTES = 6_000_000
 GRID_MIN, GRID_MAX = 4, 96
+# size-band edges in um (ascending): 4 bands, band 0 = shapes with
+# max(bbox w, h) >= 2um ... band 3 = < 0.125um
+BAND_THRESHOLDS_UM = (0.125, 0.5, 2.0)
 
 
 def cache_dir_for(src):
@@ -113,6 +123,14 @@ class Cache:
 
     def tile_path(self, r, c):
         return os.path.join(self.dir, "tiles", f"t_{r}_{c}.oas")
+
+    def band_tile_path(self, r, c, k):
+        return os.path.join(self.dir, f"tiles_b{k}", f"t_{r}_{c}.oas")
+
+    def n_bands(self):
+        """Size bands per tile; 1 for legacy (unbanded) caches."""
+        b = (self.meta or {}).get("bands")
+        return len(b["thresholds_um"]) + 1 if b else 1
 
     def lod_tile_path(self, r, c):
         return os.path.join(self.dir, "tiles_lod", f"t_{r}_{c}.oas")
@@ -462,19 +480,27 @@ def load_region(cache, x0, y0, x1, y1, log=None, max_tiles=None,
     top = ly.create_cell("FLOE_REGION")
     n = 0
     t0 = time.perf_counter()
+    banded = bool(cache.meta.get("bands"))
     for r, c in tiles:
-        p = cache.tile_path(r, c)
-        if not os.path.isfile(p):
-            continue  # empty tile
-        if lo is not None:
-            ly.read(p, lo)
+        if banded:  # every band together = the exact tile content
+            parts = [(cache.band_tile_path(r, c, k), f"TILE_{r}_{c}_b{k}")
+                     for k in range(cache.n_bands())]
         else:
-            ly.read(p)
-        cell = ly.cell(f"TILE_{r}_{c}")
-        if cell is None:
-            continue
-        top.insert(db.CellInstArray(cell.cell_index(), db.Trans()))
-        n += 1
+            parts = [(cache.tile_path(r, c), f"TILE_{r}_{c}")]
+        got = False
+        for p, cellname in parts:
+            if not os.path.isfile(p):
+                continue  # empty tile/band
+            if lo is not None:
+                ly.read(p, lo)
+            else:
+                ly.read(p)
+            cell = ly.cell(cellname)
+            if cell is None:
+                continue
+            top.insert(db.CellInstArray(cell.cell_index(), db.Trans()))
+            got = True
+        n += got
     if log:
         log(f"[view] loaded {n}/{len(tiles)} tiles "
             f"in {time.perf_counter() - t0:.2f}s")
@@ -484,7 +510,7 @@ def load_region(cache, x0, y0, x1, y1, log=None, max_tiles=None,
 LOD_SHAPE_CAP = 50_000  # per-tile shape budget of the LOD companion
 
 
-def _tile_lod(tgt, top_ci, out_path, cap=LOD_SHAPE_CAP):
+def _tile_lod(tgt, top_ci, out_path, cap=LOD_SHAPE_CAP, always=False):
     """Depth-limited companion tile, cut adaptively: whole hierarchy
     levels are kept while the running distinct-cell shape total stays
     under cap; the cells of the first level beyond become ghosts (bbox
@@ -494,7 +520,8 @@ def _tile_lod(tgt, top_ci, out_path, cap=LOD_SHAPE_CAP):
     load these instead. Built by dup + prune, so no per-shape Python
     loop. Returns the deepest depth the file serves, or None when the
     whole tree fits under cap (then no file is written and the full
-    tile doubles as its own LOD)."""
+    tile doubles as its own LOD). always: write the file even then (a
+    banded cache has no single full-tile file to fall back on)."""
     lod = tgt.dup()
     lvl = {top_ci: 0}
     levels = [[top_ci]]
@@ -523,7 +550,9 @@ def _tile_lod(tgt, top_ci, out_path, cap=LOD_SHAPE_CAP):
             break
         cut += 1
     if cut + 1 >= len(levels):
-        return None  # whole tree fits: the full tile is small already
+        if always:  # whole tree fits under cap: LOD = the full tile
+            lod.write(out_path, save_opts())
+        return None
     ghost_li = lod.layer(db.LayerInfo(254, 0, "GHOST"))
     for ci in levels[cut + 1]:
         c = lod.cell(ci)
@@ -536,6 +565,84 @@ def _tile_lod(tgt, top_ci, out_path, cap=LOD_SHAPE_CAP):
         lod.delete_cells(doomed)
     lod.write(out_path, save_opts())
     return cut
+
+
+def _tile_bands(tgt, cdir, r, c, th_dbu, opts):
+    """Partition the tile into len(th_dbu)+1 SIZE-BAND files.
+
+    Band k holds shapes whose max(bbox w, h) falls in
+    [edge[n-1-k], edge[n-k]) - band 0 the largest, the last band the
+    smallest. The cell tree and instances are mirrored into every band
+    (cell names get a __b<k> suffix so the mosaic's multi-read cannot
+    merge different bands' same-named cells), so depth semantics are
+    identical per band and the union of all bands is the exact tile.
+    Shapes move through db.Region (C++ bulk): boxes/paths come back as
+    polygons - geometry identical, OASIS repetition compression
+    unaffected (measured); texts ride in band 0. Bands with no shapes
+    write no file. Returns per-band shape counts."""
+    nb = len(th_dbu) + 1
+    edges = [0] + list(th_dbu) + [None]
+    top_name = f"TILE_{r}_{c}"
+    blys, cmap = [], []
+    for k in range(nb):
+        b = db.Layout()
+        b.dbu = tgt.dbu
+        for li in tgt.layer_indexes():
+            b.insert_layer_at(li, tgt.get_info(li))
+        blys.append(b)
+        cmap.append({})
+    for cell in tgt.each_cell():
+        for k in range(nb):
+            nm = (f"{top_name}_b{k}" if cell.name == top_name
+                  else f"{cell.name}__b{k}")
+            cmap[k][cell.cell_index()] = blys[k].create_cell(nm).cell_index()
+    for cell in tgt.each_cell():
+        ci = cell.cell_index()
+        for inst in cell.each_inst():
+            ia = inst.cell_inst
+            for k in range(nb):
+                ba = ia.dup()
+                ba.cell_index = cmap[k][ia.cell_index]
+                blys[k].cell(cmap[k][ci]).insert(ba)
+        for li in tgt.layer_indexes():
+            sh = cell.shapes(li)
+            if sh.size() == 0:
+                continue
+            reg = db.Region()
+            reg.merged_semantics = False
+            reg.insert(sh)
+            for k in range(nb):
+                lo, hi = edges[nb - 1 - k], edges[nb - k]
+                part = reg.with_bbox_max(lo, hi, False)
+                if part.count():
+                    blys[k].cell(cmap[k][ci]).shapes(li).insert(part)
+            for s in sh.each(db.Shapes.STexts):
+                blys[0].cell(cmap[0][ci]).shapes(li).insert(s.text)
+    counts = []
+    for k in range(nb):
+        bly = blys[k]
+        # drop cells whose subtree holds no shapes in this band: their
+        # duplicated instance records would otherwise bloat every band
+        # file (~+35% on std-cell-heavy layouts, measured)
+        lis = list(bly.layer_indexes())
+        has = {}
+        for ci in bly.each_cell_bottom_up():
+            cell = bly.cell(ci)
+            has[ci] = (any(cell.shapes(li).size() for li in lis)
+                       or any(has.get(inst.cell_index, False)
+                              for inst in cell.each_inst()))
+        top_ci = cmap[k][tgt.cell(top_name).cell_index()]
+        doomed = [ci for ci, h in has.items() if not h and ci != top_ci]
+        if doomed:
+            bly.delete_cells(doomed)
+        n = sum(cc.shapes(li).size() for cc in bly.each_cell()
+                for li in lis)
+        counts.append(n)
+        if n:
+            bly.write(
+                os.path.join(cdir, f"tiles_b{k}", f"t_{r}_{c}.oas"), opts)
+        bly._destroy()
+    return counts
 
 
 DENSITY_LEVELS = 12     # depth levels recorded in the per-tile density table
@@ -588,8 +695,17 @@ def _sample_tile(cache, rc, shape_cap=2000):
     vertex counts. Numbers only - no geometry leaves this function."""
     r, c = (int(v) for v in rc.split(","))
     ly = db.Layout(False)  # read-only: viewer mode
-    ly.read(cache.tile_path(r, c))
-    top = ly.cell(f"TILE_{r}_{c}") or pick_top_cell(ly)
+    if cache.meta.get("bands"):
+        got = False
+        for k in range(cache.n_bands()):
+            p = cache.band_tile_path(r, c, k)
+            if os.path.isfile(p):
+                ly.read(p)
+                got = True
+        if not got:
+            raise RuntimeError(f"tile {rc}: no band files")
+    else:
+        ly.read(cache.tile_path(r, c))
     singles = arrays = elems = 0
     top_arrays = []
     for cell in ly.each_cell():
@@ -661,11 +777,20 @@ def profile_cache(cache, sample_tiles=4, anon=False, log=print):
               for l in meta["layers"]]
     tile_sizes = {}
     lod_sizes = {}
+    banded = bool(meta.get("bands"))
     for r in range(g["ny"]):
         for c in range(g["nx"]):
-            p = cache.tile_path(r, c)
-            if os.path.isfile(p):
-                tile_sizes[f"{r},{c}"] = os.path.getsize(p)
+            if banded:  # per-tile total across the size-band files
+                sz = sum(os.path.getsize(p) for p in
+                         (cache.band_tile_path(r, c, k)
+                          for k in range(cache.n_bands()))
+                         if os.path.isfile(p))
+                if sz:
+                    tile_sizes[f"{r},{c}"] = sz
+            else:
+                p = cache.tile_path(r, c)
+                if os.path.isfile(p):
+                    tile_sizes[f"{r},{c}"] = os.path.getsize(p)
             p = cache.lod_tile_path(r, c)
             if os.path.isfile(p):
                 lod_sizes[f"{r},{c}"] = os.path.getsize(p)
@@ -714,7 +839,7 @@ _TILE_CTX = None
 def _build_one_tile(rc):
     """Build tile (r, c) from _TILE_CTX. Runs in a fork worker (or inline
     for jobs=1). Returns (r, c, wrote, lod_depth, density, step_times)."""
-    ly, top_ci, bbox, grid, cdir, tile_texts, opts = _TILE_CTX
+    ly, top_ci, bbox, grid, cdir, tile_texts, opts, bands_dbu = _TILE_CTX
     r, c = rc
     x0 = bbox.left + c * grid["tile_w"]
     y0 = bbox.bottom + r * grid["tile_h"]
@@ -745,11 +870,15 @@ def _build_one_tile(rc):
     compact_instances(tgt)
     tm["compact"] = time.perf_counter() - t
     t = time.perf_counter()
-    tgt.write(os.path.join(cdir, "tiles", f"t_{r}_{c}.oas"), opts)
+    if bands_dbu:
+        _tile_bands(tgt, cdir, r, c, bands_dbu, opts)
+    else:
+        tgt.write(os.path.join(cdir, "tiles", f"t_{r}_{c}.oas"), opts)
     tm["write"] = time.perf_counter() - t
     t = time.perf_counter()
     lod_d = _tile_lod(tgt, ci, os.path.join(cdir, "tiles_lod",
-                                            f"t_{r}_{c}.oas"))
+                                            f"t_{r}_{c}.oas"),
+                      always=bool(bands_dbu))
     tm["lod"] = time.perf_counter() - t
     t = time.perf_counter()
     dens = _tile_density(tgt, ci) or None
@@ -757,15 +886,24 @@ def _build_one_tile(rc):
     return r, c, True, lod_d, dens, tm
 
 
-def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None):
+def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
+                bands=BAND_THRESHOLDS_UM):
     """Scan the source file once and build the tile cache.
 
     jobs: fork workers for the tiling phase (None = all cores;
-    1 = sequential; platforms without fork fall back to sequential)."""
+    1 = sequential; platforms without fork fall back to sequential).
+    bands: ascending size-band edges in um (see _tile_bands), or None
+    for a legacy single-file-per-tile cache."""
     t_all = time.perf_counter()
     src = os.path.abspath(src)
     cdir = cache_dir_for(src)
-    for sub in ("tiles", "tiles_lod"):  # drop stale files of prior builds
+    n_bands = len(bands) + 1 if bands else 0
+    subs = ([f"tiles_b{k}" for k in range(n_bands)] if bands
+            else ["tiles"]) + ["tiles_lod"]
+    stale = [d for d in ("tiles", "tiles_lod", "tiles_b0", "tiles_b1",
+                         "tiles_b2", "tiles_b3", "tiles_b4", "tiles_b5")
+             if os.path.isdir(os.path.join(cdir, d))]
+    for sub in sorted(set(subs) | set(stale)):  # drop prior builds' files
         d = os.path.join(cdir, sub)
         os.makedirs(d, exist_ok=True)
         for f in os.listdir(d):
@@ -855,8 +993,10 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None):
         except ValueError:
             log("[index][warn] no fork on this platform - tiling "
                 "sequentially")
+    bands_dbu = [int(round(um / ly.dbu)) for um in bands] if bands else None
     global _TILE_CTX
-    _TILE_CTX = (ly, top_ci, bbox, grid, cdir, tile_texts, save_opts())
+    _TILE_CTX = (ly, top_ci, bbox, grid, cdir, tile_texts, save_opts(),
+                 bands_dbu)
     try:
         if ctx is not None:
             log(f"[index] tiling with {jobs} fork workers...")
@@ -888,6 +1028,7 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None):
         "layers": layers,
         "density": {"levels": DENSITY_LEVELS, "tiles": density_tiles},
         "lod": {"cap": LOD_SHAPE_CAP, "tiles": lod_tiles},
+        **({"bands": {"thresholds_um": list(bands)}} if bands else {}),
         "skeleton": skel_meta,
         "stats": {"read_s": round(t_read, 1), "tiles_s": round(t_tiles, 1),
                   "total_s": 0.0,

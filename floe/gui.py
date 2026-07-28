@@ -935,9 +935,12 @@ class Viewer:
                             % (res["load_ms"], res["draw_ms"])
                         if res.get("wait_ms", 0) > 200:
                             split += " + %d wait" % res["wait_ms"]
-                    mode = "live (%d tiles, %d ms%s%s)" \
+                    cut = ""
+                    if res.get("cut_um"):
+                        cut = ", cut<%.3gum" % res["cut_um"]
+                    mode = "live (%d tiles, %d ms%s%s%s)" \
                         % (res["tiles"], res["ms"], split,
-                           self._depth_note(used))
+                           self._depth_note(used), cut)
                 self._set_status(self.view_bbox(), mode)
         elif kind == "snap":
             if res["seq"] == self._snap_seq \
@@ -1227,6 +1230,10 @@ class Viewer:
         to d + one outline frame per cell at level d+1, so a mid depth
         that would stroke millions of array-cell frames is skipped.
         None = no table or the full hierarchy fits."""
+        if self.meta.get("bands"):
+            # size-banded cache: subpixel shapes are cut per view, so a
+            # full-depth draw is already bounded - no depth throttling
+            return None
         dens = self.meta.get("density")
         if not dens or not self.visible:
             return None
@@ -1281,6 +1288,8 @@ class Viewer:
         the render takes the instant LOD path; deep detail is subpixel
         out there anyway. Narrow views and explicit depths keep the full
         parse (with the LOD preview covering the wait)."""
+        if self.meta.get("bands"):
+            return depth  # size bands already bound wide-view cost
         lodmap = (self.meta.get("lod") or {}).get("tiles")
         if not lodmap:
             return depth

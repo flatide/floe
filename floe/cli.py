@@ -74,8 +74,10 @@ def cmd_index(args):
         if not c.is_stale():
             print(f"[floe] cache up to date: {c.dir} (use --force to rebuild)")
             return
+    bands = (None if args.bands.strip().lower() in ("none", "0", "")
+             else tuple(sorted(float(t) for t in args.bands.split(","))))
     cache_mod.build_index(args.src, tile_bytes=args.tile_mb * 1e6,
-                          jobs=args.jobs)
+                          jobs=args.jobs, bands=bands)
 
 
 def cmd_info(args):
@@ -101,6 +103,20 @@ def cmd_info(args):
         shapes / max(1, m["src"]["size"]),
         ", forced by FLOE_LAYOUT_MODE"
         if os.environ.get("FLOE_LAYOUT_MODE") else ""))
+    if m.get("bands"):
+        th = m["bands"]["thresholds_um"]
+        n = len(th)
+        edges = [f">={th[-1]}um" if k == 0 else
+                 f"<{th[0]}um" if k == n else
+                 f"{th[n - 1 - k]}-{th[n - k]}um" for k in range(n + 1)]
+        parts = []
+        for k in range(n + 1):
+            d = os.path.join(c.dir, f"tiles_b{k}")
+            files = os.listdir(d) if os.path.isdir(d) else []
+            sz = sum(os.path.getsize(os.path.join(d, f)) for f in files)
+            parts.append(f"b{k}({edges[k]}): {len(files)} files "
+                         f"{sz / 1e6:.1f}MB")
+        print("bands      : " + "  ".join(parts))
     print(f"{'layer':>8}  {'name':<12} {'stored shapes':>14}")
     for l in m["layers"]:
         print(f"{l['layer']:>5}/{l['datatype']:<2} {l['name']:<12} "
@@ -241,9 +257,11 @@ def cmd_probe(args):
         if res.get("kind") == "frame":
             png = res.get("png", b"")
             ok = png[:4] == b"\x89PNG"
+            cut = (f", cut<{res['cut_um']}um" if res.get("cut_um")
+                   else "")
             print(f"[probe] {label}: frame OK  {len(png):,} bytes png "
                   f"(magic {'OK' if ok else 'BAD'}), "
-                  f"{res.get('ms')} ms, tiles {res.get('tiles')}")
+                  f"{res.get('ms')} ms, tiles {res.get('tiles')}{cut}")
             failed = failed or not ok
         else:
             print(f"[probe] {label}: {res}")
@@ -403,6 +421,11 @@ def main(argv=None):
                    help="fork workers for the tiling phase (default: all "
                         "cores; 1 = sequential). Workers share the loaded "
                         "layout copy-on-write, so memory stays ~flat.")
+    p.add_argument("--bands", default="0.125,0.5,2",
+                   help="size-band edges in um (ascending); shapes are "
+                        "split per band so wide views skip subpixel "
+                        "content entirely. 'none' = legacy single-file "
+                        "tiles (default: 0.125,0.5,2)")
     p.set_defaults(fn=cmd_index)
 
     p = sub.add_parser("info", help="show cache/layout summary")
