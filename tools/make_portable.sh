@@ -51,11 +51,23 @@ chmod +x micromamba
 # baseline (the effective floor is raised by the pip wheels anyway).
 # librsvg = the SVG gdk-pixbuf loader Adwaita's symbolic icons (checkbox
 # check-symbolic.svg etc.) need; a bundled font gives GTK a sans-serif.
+#
+# GTK_PINS: the 2026-07 conda-forge snapshot produced a runtime whose
+# Gtk.Image/pixbuf path renders BLACK on X11 (text fine, every image
+# black - even file-loaded ones in a minimal test), while the flateyes
+# bundle solved on 2026-07-21 works on the same display. Pin the core
+# rendering libs to that proven set (versions read off the flateyes
+# runtime's .so names: cairo 1.18.4, glib 2.88, gdk-pixbuf 2.44).
+GTK_PINS=${GTK_PINS:-"glib=2.88 cairo=1.18.4 gdk-pixbuf=2.44"}
+# shellcheck disable=SC2086  # GTK_PINS is a word list on purpose
 CONDA_OVERRIDE_GLIBC=$CONDA_GLIBC ./micromamba create -y \
     -r "$WORK/mmroot" -p "$WORK/runtime" --platform linux-64 \
     -c conda-forge "$PY_SPEC" pygobject gtk3 librsvg \
-    font-ttf-dejavu-sans-mono \
+    font-ttf-dejavu-sans-mono $GTK_PINS \
     || true   # post-link failures still exit nonzero on some versions
+echo "== core rendering libs in the runtime:"
+ls "$WORK"/runtime/lib 2>/dev/null | grep -E \
+    "^(libgtk-3|libcairo|libgdk_pixbuf-2.0|libglib-2.0|libpango-1.0)\.so\.[0-9.]+$"
 PYBIN="$(ls "$WORK"/runtime/bin/python3.[0-9]* 2>/dev/null | head -1)"
 [ -x "$PYBIN" ] || { echo "runtime extraction failed"; exit 1; }
 PYVER="$("$PYBIN" -c 'import sys;print("%d.%d"%sys.version_info[:2])')"
