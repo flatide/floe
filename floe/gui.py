@@ -317,6 +317,14 @@ class Viewer:
         scroller.add(self._layers_box)
         side.pack_start(scroller, True, True, 4)
 
+        trow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        side.pack_start(trow, False, False, 0)
+        for text, cb in (("expand all", self._expand_all),
+                         ("collapse all", self._collapse_all)):
+            b = Gtk.Button(label=text)
+            b.connect("clicked", lambda _w, f=cb: f())
+            trow.pack_start(b, True, True, 0)
+
         brow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
         side.pack_start(brow, False, False, 4)
         for text, cb in (("all", self._all_layers),
@@ -497,6 +505,14 @@ class Viewer:
                 w.show()
             else:
                 w.hide()
+
+    def _expand_all(self, expand=True):
+        for pkey in self._layer_groups:
+            if (pkey in self._layer_expanded) != expand:
+                self._on_group_expand(self._layer_rows[pkey])
+
+    def _collapse_all(self):
+        self._expand_all(False)
 
     def open_file(self, path):
         """Open another OASIS file (instance-forwarded request)."""
