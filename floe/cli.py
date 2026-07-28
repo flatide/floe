@@ -240,6 +240,66 @@ def cmd_probe(args):
           "display-side problem")
 
 
+def cmd_gtktest(args):
+    """Minimal pixbuf-display matrix for diagnosing a black view.
+    Three panels: (a) pixbuf loaded from a PNG file, (b) pixbuf
+    synthesized in memory the way the viewer composes frames,
+    (c) the synthesized pixbuf inside the viewer's Overlay/ScrolledWindow
+    containment. Report which panels show content."""
+    from . import gui as g
+    g.import_gtk()
+    Gtk, GdkPixbuf = g.Gtk, g.GdkPixbuf
+    print("[gtktest] GTK %d.%d.%d" % (Gtk.MAJOR_VERSION, Gtk.MINOR_VERSION,
+                                      Gtk.MICRO_VERSION))
+
+    def synth():
+        pb = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, False, 8,
+                                  360, 160)
+        pb.fill(0x000000FF)
+        for i, col in enumerate((0xFF3333FF, 0x33FF33FF, 0x3333FFFF,
+                                 0xFFFF33FF)):
+            g.fill_rect(pb, 20 + i * 85, 30, 70, 100, col)
+        return pb
+
+    win = Gtk.Window(title="floe gtktest")
+    win.connect("delete-event", Gtk.main_quit)
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+    win.add(box)
+    box.pack_start(Gtk.Label(label="(text) if you can read this, "
+                             "widget/text rendering works"),
+                   False, False, 4)
+
+    def panel(title, widget):
+        box.pack_start(Gtk.Label(label=title), False, False, 0)
+        box.pack_start(widget, False, False, 0)
+
+    if args.png and os.path.isfile(args.png):
+        img_a = Gtk.Image()
+        img_a.set_from_pixbuf(
+            GdkPixbuf.Pixbuf.new_from_file(args.png)
+            .scale_simple(360, 160, GdkPixbuf.InterpType.BILINEAR))
+        panel("(a) pixbuf loaded from file:", img_a)
+    img_b = Gtk.Image()
+    img_b.set_from_pixbuf(synth())
+    panel("(b) pixbuf synthesized in memory (4 color bars):", img_b)
+    overlay = Gtk.Overlay()
+    sc = Gtk.ScrolledWindow()
+    sc.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+    img_c = Gtk.Image()
+    img_c.set_halign(Gtk.Align.START)
+    img_c.set_valign(Gtk.Align.START)
+    img_c.set_from_pixbuf(synth())
+    sc.add(img_c)
+    overlay.add(sc)
+    overlay.set_size_request(380, 170)
+    panel("(c) same bars inside Overlay+ScrolledWindow (viewer's tree):",
+          overlay)
+    win.show_all()
+    print("[gtktest] window up - report which of (a)/(b)/(c) show "
+          "content; close the window to exit")
+    Gtk.main()
+
+
 def cmd_view(args):
     src = os.path.abspath(args.src)
     if not os.path.isfile(src):
@@ -342,6 +402,12 @@ def main(argv=None):
                                      "diagnoses a black viewer")
     p.add_argument("src")
     p.set_defaults(fn=cmd_probe)
+
+    p = sub.add_parser("gtktest", help="minimal pixbuf display test "
+                                       "(diagnoses a black view)")
+    p.add_argument("png", nargs="?", default=None,
+                   help="optional PNG to show as the from-file panel")
+    p.set_defaults(fn=cmd_gtktest)
 
     p = sub.add_parser("view", help="native desktop viewer (GTK3); "
                                     "one instance per (uid, DISPLAY) - "
