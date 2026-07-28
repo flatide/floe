@@ -769,6 +769,18 @@ class Viewer:
     def _poll(self):
         if self._quitting:
             return False
+        # watchdog: a render-service child that died (spawn failure,
+        # crash, OOM kill) would otherwise leave a silent black view
+        # with "rendering…" forever
+        w = self.worker
+        if w is not None and not w.alive() \
+                and not getattr(w, "_died_reported", False):
+            w._died_reported = True
+            self._clear_pending()
+            self._set_status(
+                self.view_bbox(),
+                "error: render service died (exit %s) - see terminal; "
+                "restart the viewer" % w.exitcode())
         try:
             while True:
                 res = self.worker.res.get_nowait()

@@ -348,6 +348,12 @@ class RenderWorker:
     def start(self):
         self._proc.start()
 
+    def alive(self):
+        return self._proc.is_alive()
+
+    def exitcode(self):
+        return self._proc.exitcode
+
     def submit(self, job):
         self.req.put(job)
 

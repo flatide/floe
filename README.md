@@ -310,7 +310,15 @@ conda-forge가 GTK 스택 전체를 재배치 가능하게 묶어주므로 (GIR 
 gdk-pixbuf 로더·스키마·폰트 포함) gi를 시스템에 얹을 필요가 없다. 런처가
 첫 실행 시 호스트별 캐시(GSettings 스키마, pixbuf 로더 목록)를 자동
 생성한다. floe 코드만 갱신하려면 새 `floe/` 패키지를 번들의
-`runtime/lib/python*/site-packages/floe`에 덮어쓰면 된다.
+`runtime/lib/python*/site-packages/floe`에 덮어쓰면 된다 (재빌드 불필요).
+
+**뷰어 문제 진단 순서** (창이 검게 나오는 등):
+1. `selfcheck` — 스택(gi/GTK/pixbuf/klayout) 검증, 창 없이.
+2. `floe render <src> --bbox ... --out t.png` — 캐시·렌더 엔진 검증, GUI 없이.
+3. `floe probe <src>` — **뷰어의 렌더 서비스 경로**(spawn 자식 + 큐 + 프레임)
+   를 GUI 없이 그대로 실행. 여기가 실패하면 뷰어는 검게 뜬다; 통과하면
+   디스플레이 쪽 문제다. 뷰어 자체도 서비스가 죽으면 상태바에
+   "error: render service died"를 표시한다 (워치독).
 
 ### 대안: venv 통째 복사 (호스트에서 pip 실행이 어려울 때)
 

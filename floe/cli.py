@@ -186,6 +186,60 @@ def _cache_ready(src):
         return False
 
 
+def cmd_probe(args):
+    """End-to-end test of the GUI's render path WITHOUT a GUI: spawn the
+    render service exactly like the viewer does and pull real frames over
+    the queues. Isolates 'viewer shows black' to either the service side
+    (this fails too) or the display side (this passes)."""
+    import queue as _queue
+    c = open_cache(args.src, auto_index=False, args=args)
+    from .service import RenderWorker
+    w = RenderWorker(c)
+    w.start()
+    print(f"[probe] service spawned (pid {w._proc.pid})")
+    bb = c.meta["bbox"]
+    g = c.meta["grid"]
+    cx, cy = (bb[0] + bb[2]) // 2, (bb[1] + bb[3]) // 2
+    hw, hh = g["tile_w"] // 2, g["tile_h"] // 2
+    jobs = [("skeleton (fit view)",
+             {"kind": "render", "gen": 1, "scope": "skel",
+              "bbox": tuple(bb), "view": None,
+              "w": 600, "h": 600, "depth": 0, "visible": None}),
+            ("live (1-tile region at center)",
+             {"kind": "render", "gen": 2, "scope": "live",
+              "bbox": (cx - hw, cy - hh, cx + hw, cy + hh), "view": None,
+              "w": 600, "h": 600, "depth": None, "visible": None})]
+    failed = False
+    for label, job in jobs:  # sequentially: the service coalesces renders
+        w.submit(job)
+        try:
+            res = w.res.get(timeout=180)
+        except _queue.Empty:
+            print(f"[probe] {label}: TIMEOUT after 180s "
+                  f"(service alive: {w._proc.is_alive()})")
+            failed = True
+            break
+        if res.get("kind") == "frame":
+            png = res.get("png", b"")
+            ok = png[:4] == b"\x89PNG"
+            print(f"[probe] {label}: frame OK  {len(png):,} bytes png "
+                  f"(magic {'OK' if ok else 'BAD'}), "
+                  f"{res.get('ms')} ms, tiles {res.get('tiles')}")
+            failed = failed or not ok
+        else:
+            print(f"[probe] {label}: {res}")
+            failed = True
+    alive = w._proc.is_alive()
+    w.stop()
+    print(f"[probe] service alive at end: {alive}")
+    if failed or not alive:
+        print("[probe] FAILED - the GUI's render path is broken on this "
+              "host (the viewer would show a black view)")
+        raise SystemExit(1)
+    print("[probe] OK - service+queues work; a black viewer would be a "
+          "display-side problem")
+
+
 def cmd_view(args):
     src = os.path.abspath(args.src)
     if not os.path.isfile(src):
@@ -282,6 +336,12 @@ def main(argv=None):
     p.add_argument("--max-tiles", type=int, default=256)
     p.add_argument("--auto-index", action="store_true", default=True)
     p.set_defaults(fn=cmd_clip)
+
+    p = sub.add_parser("probe", help="test the viewer's render service "
+                                     "headlessly (spawn + queues + frames); "
+                                     "diagnoses a black viewer")
+    p.add_argument("src")
+    p.set_defaults(fn=cmd_probe)
 
     p = sub.add_parser("view", help="native desktop viewer (GTK3); "
                                     "one instance per (uid, DISPLAY) - "
