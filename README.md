@@ -76,6 +76,27 @@ python3 -m venv --system-site-packages .venv
 생성 파라미터: `--target-gb`(목표 크기, 실측 bytes/shape로 캘리브레이션),
 `--seed`, `--grid`(블록 그리드), `--jobs`(병렬 워커 수).
 
+### 반복(repetition) 폭발 스트레스 파일 — 운영 호스트 로딩 병리 재현
+
+운영 파일의 병리(작은 파일 → editable 읽기에서 수억 shape로 구체화)를
+재현하는 합성 파일. 파일 크기와 펼침 크기를 독립적으로 지정한다.
+
+```sh
+# 파일 ~30MB, editable 읽기 시 ~15GB (도형당 ~46B 기준 약 3.5억 개)
+.venv/bin/python tools/gen_stress.py data/stress30.oas --file-mb 30 --expand-gb 15
+
+# 1/10 축소판으로 빠른 확인
+.venv/bin/python tools/gen_stress.py midi.oas --scale 0.1
+```
+
+- `--file-mb`: 진짜 난수 이산 사각형(개당 ~9B, deflate 무력화)으로 파일 부피 구성
+- `--expand-gb`: atom 그리드 flatten → OASIS writer가 repetition 레코드로
+  압축 → editable 읽기에서 전부 구체화(개당 ~46B RAM)
+- 생성 자체는 블록별 임시 파일 + viewer 모드 병합이라 RAM ~2GB로 동작
+- 결과 파일은 shapes/byte가 높아 floe가 자동으로 viewer 모드를 선택함.
+  병리 자체를 보려면 `FLOE_LAYOUT_MODE=editable`로 강제.
+  `floe index`는 현재 소스를 editable로 읽으므로 인덱싱에는 펼침 RAM이 필요.
+
 ## 레이어 맵
 
 | GDS layer/dt | 이름 | 비고 |
