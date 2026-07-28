@@ -165,6 +165,60 @@ def frame_rect(buf, x0, y0, w, h, color):
     fill_rect(buf, x0 + w - 1, y0, 1, h, color)
 
 
+class LayerRow(object):
+    """One clickable layer name row. A visible layer is plain colored
+    text; a hidden layer keeps its place with a strikethrough. The
+    one-char monospace marker keeps every name left-aligned: '+' =
+    group parent (its click toggles every datatype of the layer),
+    ' ' = plain layer or group child."""
+
+    def __init__(self, l, marker, tooltip, on_toggle):
+        self.key = (l["layer"], l["datatype"])
+        self._text = "%s  %d/%d" % (l["name"], self.key[0], self.key[1])
+        self._color = l["color"]
+        self._marker = marker
+        self._on_toggle = on_toggle
+        self._active = True
+        self._lbl = Gtk.Label()
+        self._lbl.set_xalign(0.0)
+        # long layer names must not widen the panel and squeeze the
+        # view: ellipsize and show the full name as a tooltip
+        self._lbl.set_ellipsize(Pango.EllipsizeMode.END)
+        self._lbl.set_max_width_chars(1)
+        self.widget = Gtk.EventBox()
+        self.widget.add(self._lbl)
+        self.widget.set_tooltip_text(tooltip)
+        self.widget.connect("button-press-event", self._on_click)
+        self._paint()
+
+    def _paint(self):
+        self._lbl.set_markup(
+            '<span face="monospace">%s</span>'
+            '<span foreground="%s"%s>%s</span>'
+            % (self._marker, self._color,
+               "" if self._active else ' strikethrough="true"',
+               GLib.markup_escape_text(self._text)))
+
+    def _on_click(self, _w, event):
+        # plain left presses only: a double click must stay two toggles
+        # (GTK delivers an extra 2BUTTON_PRESS on top of the two presses)
+        if event.type != Gdk.EventType.BUTTON_PRESS or event.button != 1:
+            return False
+        self.set_active(not self._active)
+        return True
+
+    def get_active(self):
+        return self._active
+
+    def set_active(self, on):
+        on = bool(on)
+        if on == self._active:
+            return
+        self._active = on
+        self._paint()
+        self._on_toggle(self, self.key)
+
+
 class Viewer:
     def __init__(self, cache, server_sock=None, show=True, goto=None):
         self.server_sock = server_sock
@@ -184,7 +238,7 @@ class Viewer:
         self._debounce = None
         self._did_fit = False
         self.worker = None
-        self._layer_checks = {}
+        self._layer_rows = {}
         self.depth_value = 999      # 999 = full hierarchy
         self._depth_used = "?"      # depth of the last frame ("?" = none yet)
         # detail cut: shapes below this many screen px are dropped from
@@ -357,106 +411,44 @@ class Viewer:
         if self._did_fit:
             self.fit()
 
-    def _layer_check(self, l):
-        """One ellipsized, tooltipped check row for a layer entry."""
-        key = (l["layer"], l["datatype"])
-        cb = Gtk.CheckButton()
-        lbl = Gtk.Label()
-        lbl.set_markup('<span foreground="%s">%s  %d/%d</span>'
-                       % (l["color"], GLib.markup_escape_text(l["name"]),
-                          key[0], key[1]))
-        lbl.set_xalign(0.0)
-        # long layer names must not widen the panel and squeeze the
-        # view: ellipsize and show the full name as a tooltip
-        lbl.set_ellipsize(Pango.EllipsizeMode.END)
-        # natural width 1 char: the label takes whatever width the
-        # fixed panel allocates and ellipsizes into it, so the panel
-        # never grows with the name
-        lbl.set_max_width_chars(1)
-        cb.set_tooltip_text("%s  %d/%d" % (l["name"], key[0], key[1]))
-        cb.add(lbl)
-        cb.set_active(True)
-        cb.connect("toggled", self._on_layer_toggled, key)
-        return key, cb
-
     def _build_layer_panel(self):
-        """Layers grouped by layer number: multi-datatype groups get a
-        tri-state parent check that toggles every child datatype, with
-        the children behind an expander."""
+        """Layers grouped by layer number, drawn as a flat text list:
+        '+M1' = group parent (lowest datatype of a multi-datatype
+        layer; its click toggles the whole group), the remaining
+        datatypes listed right below it, ' M2' = layer without
+        children. All names left-aligned; hidden = strikethrough."""
         for child in self._layers_box.get_children():
             self._layers_box.remove(child)
-        self._layer_checks = {}
-        self._layer_groups = {}     # group id -> (parent_cb, [keys])
+        self._layer_rows = {}
+        self._layer_groups = {}     # parent key -> [child keys]
         self._layers_batch = False
         groups = {}
         for l in self.meta["layers"]:
             groups.setdefault(l["layer"], []).append(l)
+
+        def add_row(l, marker, tooltip):
+            row = LayerRow(l, marker, tooltip, self._on_layer_toggled)
+            self._layers_box.pack_start(row.widget, False, False, 0)
+            self._layer_rows[row.key] = row
+            return row.key
+
         for lnum, ls in groups.items():
             if len(ls) == 1:
-                key, cb = self._layer_check(ls[0])
-                self._layers_box.pack_start(cb, False, False, 0)
-                self._layer_checks[key] = cb
+                l = ls[0]
+                add_row(l, " ",
+                        "%s  %d/%d" % (l["name"], lnum, l["datatype"]))
                 continue
-            # parent = the common name prefix of the children (M5 for
-            # M5/M5_FILL), else the layer number
-            names = [l["name"] for l in ls]
-            pfx = os.path.commonprefix(names).rstrip("_/ ") or str(lnum)
-            pcb = Gtk.CheckButton()
-            plbl = Gtk.Label()
-            plbl.set_markup("<b>%s</b>  (%d)"
-                            % (GLib.markup_escape_text(pfx), len(ls)))
-            plbl.set_xalign(0.0)
-            plbl.set_ellipsize(Pango.EllipsizeMode.END)
-            plbl.set_max_width_chars(1)
-            pcb.add(plbl)
-            pcb.set_active(True)
-            pcb.set_tooltip_text("layer %d: %s" % (lnum, ", ".join(names)))
-            keys = []
-            child_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-            child_box.set_margin_start(18)
-            for l in ls:
-                key, cb = self._layer_check(l)
-                child_box.pack_start(cb, False, False, 0)
-                self._layer_checks[key] = cb
-                keys.append(key)
-            gid = lnum
-            self._layer_groups[gid] = (pcb, keys)
-            pcb.connect("toggled", self._on_group_toggled, gid)
-            exp = Gtk.Expander()
-            exp.set_label_widget(pcb)
-            exp.add(child_box)
-            self._layers_box.pack_start(exp, False, False, 0)
+            ls = sorted(ls, key=lambda e: e["datatype"])
+            head, rest = ls[0], ls[1:]
+            pkey = add_row(
+                head, "+",
+                "%s  %d/%d\nclick: toggles all %d datatypes of layer %d"
+                % (head["name"], lnum, head["datatype"], len(ls), lnum))
+            self._layer_groups[pkey] = [
+                add_row(l, " ",
+                        "%s  %d/%d" % (l["name"], lnum, l["datatype"]))
+                for l in rest]
         self._layers_box.show_all()
-
-    def _on_group_toggled(self, pcb, gid):
-        if self._layers_batch:
-            return
-        _, keys = self._layer_groups[gid]
-        on = pcb.get_active()
-        pcb.set_inconsistent(False)
-        self._layers_batch = True
-        try:
-            for key in keys:
-                # set_active fires _on_layer_toggled, which keeps
-                # self.visible in sync even while batched
-                self._layer_checks[key].set_active(on)
-        finally:
-            self._layers_batch = False
-        self.redraw(immediate=True)
-
-    def _sync_group_check(self, key):
-        """Reflect a child toggle in its group parent (tri-state)."""
-        for gid, (pcb, keys) in self._layer_groups.items():
-            if key not in keys:
-                continue
-            on = sum(1 for k in keys if k in self.visible)
-            self._layers_batch = True
-            try:
-                pcb.set_inconsistent(0 < on < len(keys))
-                pcb.set_active(on == len(keys))
-            finally:
-                self._layers_batch = False
-            return
 
     def open_file(self, path):
         """Open another OASIS file (instance-forwarded request)."""
@@ -557,7 +549,7 @@ class Viewer:
         return sorted(self.visible)
 
     def _layers_arg(self):
-        if len(self.visible) != len(self._layer_checks):
+        if len(self.visible) != len(self._layer_rows):
             return self._visible_list()
         return None
 
@@ -1762,24 +1754,32 @@ class Viewer:
         self._display()
 
     # ---- layers / clip -------------------------------------------------------
-    def _on_layer_toggled(self, cb, key):
-        if cb.get_active():
+    def _on_layer_toggled(self, row, key):
+        if row.get_active():
             self.visible.add(key)
         else:
             self.visible.discard(key)
         if self._layers_batch:
             return  # group/all/none toggle: one redraw at the end
-        self._sync_group_check(key)
+        kids = self._layer_groups.get(key)
+        if kids:
+            # '+' parent: drag every datatype of the layer with it
+            on = row.get_active()
+            self._layers_batch = True
+            try:
+                for k in kids:
+                    # set_active fires _on_layer_toggled, which keeps
+                    # self.visible in sync even while batched
+                    self._layer_rows[k].set_active(on)
+            finally:
+                self._layers_batch = False
         self.redraw(immediate=True)
 
     def _set_all_layers(self, on):
         self._layers_batch = True
         try:
-            for cb in self._layer_checks.values():
-                cb.set_active(on)
-            for pcb, _keys in self._layer_groups.values():
-                pcb.set_inconsistent(False)
-                pcb.set_active(on)
+            for row in self._layer_rows.values():
+                row.set_active(on)
         finally:
             self._layers_batch = False
         self.redraw(immediate=True)
