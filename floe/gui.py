@@ -744,6 +744,8 @@ class Viewer:
         if scope == "live":
             depth = self._auto_depth(eb) if self.depth_auto \
                 else self._depth()
+            if self.depth_auto:
+                depth = self._clamp_auto_to_lod(eb, depth)
         elif self.depth_auto:
             depth = 0     # far view default: block-outline (depth 0)
         else:
@@ -764,6 +766,7 @@ class Viewer:
             "depth": depth,
             "visible": self._layers_arg()})
         self._pending = self.gen
+        self._preview_gen = None   # stop a stale preview ticker
         self._pending_t0 = time.perf_counter()
         self.rstatus.set_text("rendering…")
         self._set_cursor("wait")  # mouse input is ignored until the frame
@@ -779,6 +782,17 @@ class Viewer:
         el = time.perf_counter() - self._pending_t0
         self.rstatus.set_text("rendering…" if el < 1.5
                               else "rendering… %.0fs" % el)
+        return True
+
+    def _preview_tick(self, gen):
+        """Elapsed-time ticker while the fat parse behind a preview runs
+        (without it the preview read as "done" and the eventual real
+        frame surprised the user)."""
+        if getattr(self, "_preview_gen", None) != gen:
+            return False  # real frame landed or a newer render started
+        self.rstatus.set_text(
+            "preview - loading tiles… %.0fs"
+            % (time.perf_counter() - self._preview_t0))
         return True
 
     def _clear_pending(self):
@@ -880,6 +894,9 @@ class Viewer:
                     if res["gen"] == self._pending:
                         self._clear_pending()
                         self._preview_gen = res["gen"]
+                        self._preview_t0 = time.perf_counter()
+                        GLib.timeout_add(500, self._preview_tick,
+                                         res["gen"])
                     self.rstatus.set_text("preview - loading tiles…")
                     return
                 if res["gen"] == getattr(self, "_preview_gen", None):
@@ -1236,6 +1253,28 @@ class Viewer:
         # least draws no frames)
         lv = min(range(levels), key=lambda i: est[i] + frames[i + 1])
         return None if total <= est[lv] + frames[lv + 1] else lv
+
+    def _clamp_auto_to_lod(self, bbox, depth):
+        """Auto depth only budgets DRAW cost, but with few layers visible
+        the estimate shrinks and auto picks full - which forces fat
+        first-visit tile parses (~5s/tile even in viewer mode; observed
+        "30s load + 2.5s draw" on zoom-out). On wide views (> 2 tiles)
+        clamp the auto choice to the depth the LOD tiles can serve, so
+        the render takes the instant LOD path; deep detail is subpixel
+        out there anyway. Narrow views and explicit depths keep the full
+        parse (with the LOD preview covering the wait)."""
+        lodmap = (self.meta.get("lod") or {}).get("tiles")
+        if not lodmap:
+            return depth
+        tiles = self.cache.tiles_for_bbox(*[int(v) for v in bbox])
+        if len(tiles) <= 2:
+            return depth
+        cuts = [lodmap["%d,%d" % rc] for rc in tiles
+                if "%d,%d" % rc in lodmap]
+        if not cuts:
+            return depth
+        cut = min(cuts)
+        return cut if depth is None else min(depth, cut)
 
     def _set_depth(self, n):
         self.depth_auto = False
