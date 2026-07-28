@@ -55,10 +55,12 @@ chmod +x micromamba
 # GTK_PINS: the 2026-07 conda-forge snapshot produced a runtime whose
 # Gtk.Image/pixbuf path renders BLACK on X11 (text fine, every image
 # black - even file-loaded ones in a minimal test), while the flateyes
-# bundle solved on 2026-07-21 works on the same display. Pin the core
-# rendering libs to that proven set (versions read off the flateyes
-# runtime's .so names: cairo 1.18.4, glib 2.88, gdk-pixbuf 2.44).
-GTK_PINS=${GTK_PINS:-"glib=2.88 cairo=1.18.4 gdk-pixbuf=2.44"}
+# bundle solved on 2026-07-21 works on the same display. gtk3/cairo/
+# glib/gdk-pixbuf turned out IDENTICAL between the two bundles, so the
+# regression sits below them - pixman (cairo's pixel compositor, the
+# classic source of images-black-on-some-CPUs regressions) is the prime
+# suspect. Pin the proven set read off the flateyes runtime's .so names.
+GTK_PINS=${GTK_PINS:-"glib=2.88 cairo=1.18.4 gdk-pixbuf=2.44 pixman=0.46.4"}
 # shellcheck disable=SC2086  # GTK_PINS is a word list on purpose
 CONDA_OVERRIDE_GLIBC=$CONDA_GLIBC ./micromamba create -y \
     -r "$WORK/mmroot" -p "$WORK/runtime" --platform linux-64 \
@@ -67,7 +69,7 @@ CONDA_OVERRIDE_GLIBC=$CONDA_GLIBC ./micromamba create -y \
     || true   # post-link failures still exit nonzero on some versions
 echo "== core rendering libs in the runtime:"
 ls "$WORK"/runtime/lib 2>/dev/null | grep -E \
-    "^(libgtk-3|libcairo|libgdk_pixbuf-2.0|libglib-2.0|libpango-1.0)\.so\.[0-9.]+$"
+    "^(libgtk-3|libcairo|libgdk_pixbuf-2.0|libglib-2.0|libpango-1.0|libpixman-1|libX11|libXrender|libxcb)\.so\.[0-9.]+$"
 PYBIN="$(ls "$WORK"/runtime/bin/python3.[0-9]* 2>/dev/null | head -1)"
 [ -x "$PYBIN" ] || { echo "runtime extraction failed"; exit 1; }
 PYVER="$("$PYBIN" -c 'import sys;print("%d.%d"%sys.version_info[:2])')"
