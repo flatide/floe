@@ -187,6 +187,36 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
                 use_mosaic, use_renderer = lod[0], lod[1]
             else:
                 use_mosaic, use_renderer = mosaic, renderer
+            if use_mosaic is mosaic and lod is not None:
+                # progressive depth: parsing a fat first-visit tile can
+                # take tens of seconds (array-heavy designs materialize
+                # ~10^8 shapes per tile), so serve an instant preview
+                # from the tiny LOD tiles first; content beyond a tile's
+                # LOD cut is simply absent until the full frame lands.
+                fresh_fat = [rc for rc in tiles
+                             if rc not in mosaic.loaded
+                             and "%d,%d" % rc in lod[2]]
+                if fresh_fat:
+                    pv = job.get("view") or (x0, y0, x1, y1)
+                    ptiles = cache.tiles_for_bbox(*pv)
+                    if lod[0].ensure(ptiles):
+                        lod[1].refresh()
+                    pw = max(1, round(job["w"] * (pv[2] - pv[0])
+                                      / max(1, x1 - x0)))
+                    ph = max(1, round(job["h"] * (pv[3] - pv[1])
+                                      / max(1, y1 - y0)))
+                    lod[1].render_png(tmp, pv[0], pv[1], pv[2], pv[3],
+                                      pw, ph, visible=job["visible"],
+                                      depth=depth)
+                    with open(tmp, "rb") as f:
+                        png = f.read()
+                    res.put({"kind": "frame", "png": png, "bbox": pv,
+                             "gen": job["gen"], "tiles": len(ptiles),
+                             "scope": scope, "preview": True,
+                             "ms": round((time.perf_counter() - t0)
+                                         * 1000)})
+                    if not req.empty():
+                        return  # newer work queued: skip the fat load
             view = job.get("view")
             if use_mosaic is mosaic and view is not None:
                 # two-phase margin render: when the overdraw margin

@@ -849,7 +849,8 @@ class Viewer:
     def _handle_result(self, res):
         kind = res.get("kind")
         if kind == "frame":
-            if res["gen"] == self._pending:
+            preview = bool(res.get("preview"))
+            if res["gen"] == self._pending and not preview:
                 self._clear_pending()
                 self.rstatus.set_text("rendering done.")
             if res["gen"] == self.gen:
@@ -864,6 +865,16 @@ class Viewer:
                 fspp = (fb[2] - fb[0]) / max(1, pix.get_width())
                 key = self._job_keys.get(res["gen"])
                 used = self._job_depth.get(res["gen"])
+                if preview:
+                    # LOD preview while fat full tiles parse: show it,
+                    # but keep the pending indicator ticking. The
+                    # sentinel key displays (non-None) yet never matches
+                    # a render key, so _covered() keeps re-rendering
+                    # until the real frame (same gen) replaces this.
+                    self.last_frame = (pix, fb, fspp, "preview")
+                    self._display()
+                    self.rstatus.set_text("preview - loading tiles…")
+                    return
                 self.last_frame = (pix, fb, fspp, key)
                 self._display()
                 if res.get("bg"):

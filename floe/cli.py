@@ -212,9 +212,21 @@ def cmd_probe(args):
     failed = False
     for label, job in jobs:  # sequentially: the service coalesces renders
         w.submit(job)
-        try:
-            res = w.res.get(timeout=180)
-        except _queue.Empty:
+        while True:
+            try:
+                res = w.res.get(timeout=180)
+            except _queue.Empty:
+                res = None
+                break
+            if res.get("kind") == "frame" and (res.get("preview")
+                                               or res.get("bg")):
+                sub = "preview" if res.get("preview") else "margin"
+                print(f"[probe] {label}: {sub} frame "
+                      f"{len(res.get('png', b'')):,} bytes, "
+                      f"{res.get('ms')} ms")
+                continue
+            break
+        if res is None:
             print(f"[probe] {label}: TIMEOUT after 180s "
                   f"(service alive: {w._proc.is_alive()})")
             failed = True
