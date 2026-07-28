@@ -34,10 +34,15 @@ class Mosaic:
         self.top = self.ly.create_cell("FLOE_MOSAIC")
         self.loaded = {}  # (r, c) -> cell_index or None (empty tile)
 
-    def ensure(self, tiles):
-        """Load missing tiles; returns True if the layout changed."""
+    def ensure(self, tiles, stop=None):
+        """Load missing tiles; returns True if the layout changed.
+        stop: optional callable checked between tile loads - loading a
+        fat tile can take seconds, and newer work (a pan) must not wait
+        for the rest; progress made so far is kept."""
         changed = False
         for rc in tiles:
+            if stop is not None and stop():
+                return changed
             if rc in self.loaded:
                 self.loaded[rc] = self.loaded.pop(rc)  # LRU bump
                 continue

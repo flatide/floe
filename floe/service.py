@@ -144,12 +144,19 @@ def _svc_pick(cache, mosaic, job, res):
 
 
 def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
-                req, res):
+                req, res, latest=None):
     t0 = time.perf_counter()
     x0, y0, x1, y1 = job["bbox"]
     scope = job.get("scope", "live")
     bg = False
     t_load = t_draw = 0.0
+    # how long the job waited behind earlier service work (same host,
+    # wall clocks comparable); shown in the status line as "+N wait"
+    wait_ms = round((time.time() - job.get("t_sub", time.time())) * 1000)
+    # a newer render was submitted: this job is stale - abort fat work
+    # and just drop it (the GUI ignores frames of superseded gens anyway)
+    newer = (lambda: latest.value > job["gen"]) if latest is not None \
+        else (lambda: False)
     try:
         if scope == "skel":
             if skel_renderer is None:
@@ -216,8 +223,8 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
                              "scope": scope, "preview": True,
                              "ms": round((time.perf_counter() - t0)
                                          * 1000)})
-                    if not req.empty():
-                        return  # newer work queued: skip the fat load
+                    if newer():
+                        return  # superseded: the newer job renders next
             view = job.get("view")
             if use_mosaic is mosaic and view is not None:
                 # two-phase margin render: when the overdraw margin
@@ -230,9 +237,11 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
                              if rc not in mosaic.loaded)
                 if fresh - vfresh >= 4 and x1 > x0 and y1 > y0:
                     tl = time.perf_counter()
-                    if mosaic.ensure(vtiles):
+                    if mosaic.ensure(vtiles, stop=newer):
                         renderer.refresh()
                     t_load += time.perf_counter() - tl
+                    if newer():
+                        return  # superseded mid-load: drop this job
                     vw = max(1, round(job["w"] * (vx1 - vx0) / (x1 - x0)))
                     vh = max(1, round(job["h"] * (vy1 - vy0) / (y1 - y0)))
                     td = time.perf_counter()
@@ -248,15 +257,18 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
                              "scope": scope,
                              "load_ms": round(t_load * 1000),
                              "draw_ms": round(t_draw * 1000),
+                             "wait_ms": wait_ms,
                              "ms": round(
                                  (time.perf_counter() - t0) * 1000)})
                     if not req.empty():
                         return  # newer work queued: skip the margin
                     bg = True   # margin upgrade: no status churn
             tl = time.perf_counter()
-            if use_mosaic.ensure(tiles):
+            if use_mosaic.ensure(tiles, stop=newer):
                 use_renderer.refresh()
             t_load += time.perf_counter() - tl
+            if newer():
+                return  # superseded mid-load: drop this job
             td = time.perf_counter()
             use_renderer.render_png(tmp, x0, y0, x1, y1,
                                     job["w"], job["h"],
@@ -270,6 +282,7 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
                  "bg": bg,
                  "load_ms": round(t_load * 1000),
                  "draw_ms": round(t_draw * 1000),
+                 "wait_ms": wait_ms,
                  "ms": round((time.perf_counter() - t0) * 1000)})
     except Exception as e:  # keep the service alive
         res.put({"kind": "error", "msg": str(e)})
@@ -299,7 +312,7 @@ def _svc_clip(cache, job, res):
         res.put({"kind": "error", "msg": f"clip failed: {e}"})
 
 
-def _render_service(src, req, res):
+def _render_service(src, req, res, latest=None):
     """Entry point of the render process (see RenderWorker)."""
     # terminal Ctrl-C delivers SIGINT to the whole process group; shutdown
     # is coordinated by the parent (None sentinel / terminate), so ignore it
@@ -371,9 +384,10 @@ def _render_service(src, req, res):
             if picks:
                 _svc_pick(cache, mosaic, picks[-1], res)
             renders = [j for j in jobs if j["kind"] == "render"]
-            if renders:
+            if renders:  # newest by gen: requeued aborted jobs must lose
                 _svc_render(cache, mosaic, renderer, lod, skel_renderer,
-                            tmp, renders[-1], req, res)
+                            tmp, max(renders, key=lambda j: j["gen"]),
+                            req, res, latest)
     except (KeyboardInterrupt, EOFError, OSError):
         return  # parent went away or interrupted: exit quietly
 
@@ -385,8 +399,12 @@ class RenderWorker:
         ctx = mp.get_context("spawn")  # fork would clone GUI/klayout state
         self.req = ctx.Queue()
         self.res = ctx.Queue()
+        # newest render gen submitted; lets the service abort a fat tile
+        # load the moment the user has moved on (queues can't be peeked)
+        self.latest = ctx.Value("i", 0)
         self._proc = ctx.Process(target=_render_service,
-                                 args=(cache.src, self.req, self.res),
+                                 args=(cache.src, self.req, self.res,
+                                       self.latest),
                                  daemon=True)
 
     def start(self):
@@ -399,6 +417,8 @@ class RenderWorker:
         return self._proc.exitcode
 
     def submit(self, job):
+        if job.get("kind") == "render" and "gen" in job:
+            self.latest.value = max(self.latest.value, job["gen"])
         self.req.put(job)
 
     def stop(self):

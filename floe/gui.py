@@ -756,6 +756,7 @@ class Viewer:
             self._job_depth.pop(g, None)
         self.worker.submit({
             "kind": "render", "gen": self.gen, "scope": scope,
+            "t_sub": time.time(),
             "bbox": tuple(int(round(v)) for v in eb),
             "view": tuple(int(round(v)) for v in bbox),
             "w": int(round(w * (1 + 2 * m))),
@@ -901,6 +902,8 @@ class Viewer:
                     if res.get("load_ms") is not None:
                         split = " = %d load + %d draw" \
                             % (res["load_ms"], res["draw_ms"])
+                        if res.get("wait_ms", 0) > 200:
+                            split += " + %d wait" % res["wait_ms"]
                     mode = "live (%d tiles, %d ms%s%s)" \
                         % (res["tiles"], res["ms"], split,
                            self._depth_note(used))
