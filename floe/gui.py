@@ -814,6 +814,16 @@ class Viewer:
                         % (res.get("kind"), exc))
         except queue.Empty:
             pass
+        # push buffered X output to the server: with cairo's core-protocol
+        # fallback (CAIRO_DEBUG=xrender-version=-1, the XQuartz black-image
+        # workaround) drawn updates otherwise sit in Xlib's output buffer
+        # until some input event flushes them - the viewer looked frozen at
+        # "rendering…" until the mouse moved. A flush with an empty buffer
+        # is free, so doing it every poll tick is harmless everywhere.
+        try:
+            Gdk.Display.get_default().flush()
+        except Exception:
+            pass
         return True
 
     def _handle_result(self, res):
