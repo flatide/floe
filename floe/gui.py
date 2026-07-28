@@ -278,6 +278,11 @@ class Viewer:
         self.status = Gtk.Label(label="")
         self.status.set_xalign(0.0)
         self.status.set_margin_start(8)
+        # long texts (selection info with long cell names) must not widen
+        # the window: ellipsize into the allocated width, full text in the
+        # tooltip (same treatment as the layer panel labels)
+        self.status.set_ellipsize(Pango.EllipsizeMode.END)
+        self.status.set_max_width_chars(1)
         self.rstatus = Gtk.Label(label="")
         self.rstatus.set_margin_end(10)
         self.dstatus = Gtk.Label(label="depth: auto")
@@ -957,6 +962,7 @@ class Viewer:
         h_um = (bbox[3] - bbox[1]) * self.dbu
         self.vstatus.set_text("view %.1f x %.1f um" % (w_um, h_um))
         self.status.set_text(mode)
+        self.status.set_tooltip_text(mode)
 
     # ---- interaction --------------------------------------------------------
     def fit(self):
@@ -1571,7 +1577,9 @@ class Viewer:
             self._display()
         elif self._sel_text:
             parts.append(self._sel_text)
-        self.status.set_text("   |   ".join(parts))
+        text = "   |   ".join(parts)
+        self.status.set_text(text)
+        self.status.set_tooltip_text(text)
 
     def _toggle_ruler(self):
         if self.mode == "ruler":
