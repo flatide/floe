@@ -51,6 +51,22 @@ def save_opts():
     return opt
 
 
+def viewer_mode_preferred(meta):
+    """Pick the Layout mode for READING this cache's data.
+
+    Repetition-heavy sources (bitcell/fill arrays) materialize far more
+    shapes than file bytes; klayout's viewer (non-editable) mode keeps
+    them as compact shape arrays, collapsing tile loads from ~44s to ms
+    (measured). Flat sources read ~3x SLOWER in viewer mode though, so
+    choose by stored-shapes-per-byte: testchip-class flat data ~0.15/B,
+    array-monster data ~13/B - threshold 1.0."""
+    try:
+        shapes = sum(l["stored_shapes"] for l in meta["layers"])
+        return shapes / max(1, meta["src"]["size"]) > 1.0
+    except (KeyError, TypeError):
+        return False
+
+
 def pick_top_cell(ly, log=None):
     tops = ly.top_cells()
     if len(tops) > 1:
@@ -401,7 +417,7 @@ def add_skeleton(cache, log=print):
     t0 = time.perf_counter()
     meta = cache.meta or cache.load()
     log(f"[index] reading {cache.src} for skeleton...")
-    ly = db.Layout()
+    ly = db.Layout(not viewer_mode_preferred(meta))
     ly.read(cache.src)
     top = pick_top_cell(ly, log)
     texts = collect_texts(ly, top.cell_index())
@@ -434,7 +450,7 @@ def load_region(cache, x0, y0, x1, y1, log=None, max_tiles=None,
             lm.map(db.LayerInfo(l, d), i)
         lo = db.LoadLayoutOptions()
         lo.set_layer_map(lm, False)
-    ly = db.Layout()
+    ly = db.Layout(not viewer_mode_preferred(cache.meta))
     ly.dbu = cache.meta["dbu"]
     top = ly.create_cell("FLOE_REGION")
     n = 0
@@ -564,7 +580,7 @@ def _sample_tile(cache, rc, shape_cap=2000):
     arrays), per-level cell counts, per-layer shape-type mix with polygon
     vertex counts. Numbers only - no geometry leaves this function."""
     r, c = (int(v) for v in rc.split(","))
-    ly = db.Layout()
+    ly = db.Layout(False)  # read-only: viewer mode
     ly.read(cache.tile_path(r, c))
     top = ly.cell(f"TILE_{r}_{c}") or pick_top_cell(ly)
     singles = arrays = elems = 0

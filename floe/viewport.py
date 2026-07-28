@@ -8,6 +8,8 @@ import os
 
 import klayout.db as db
 
+from .cache import viewer_mode_preferred
+
 MAX_LIVE_TILES = 32     # a render request may touch at most this many tiles
 EVICT_ABOVE = 128       # keep at most this many tiles in the mosaic
 
@@ -21,7 +23,13 @@ class Mosaic:
     def __init__(self, cache, path_fn=None):
         self.cache = cache
         self.path_fn = path_fn or cache.tile_path
-        self.ly = db.Layout()
+        # array-heavy caches read in viewer (non-editable) mode:
+        # klayout keeps repetitions as compact shape arrays instead of
+        # materializing every member - tile loads collapse from tens of
+        # seconds to ms and klayout.lay renders arrays natively. Flat
+        # caches stay editable (viewer-mode reads are ~3x slower there);
+        # see cache.viewer_mode_preferred.
+        self.ly = db.Layout(not viewer_mode_preferred(cache.meta))
         self.ly.dbu = cache.meta["dbu"]
         self.top = self.ly.create_cell("FLOE_MOSAIC")
         self.loaded = {}  # (r, c) -> cell_index or None (empty tile)

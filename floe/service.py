@@ -317,7 +317,7 @@ def _render_service(src, req, res):
         skel_path = os.path.join(cache.dir, sk["file"])
         if os.path.isfile(skel_path):
             try:
-                skel_ly = db.Layout()
+                skel_ly = db.Layout(False)  # read-only: viewer mode
                 skel_ly.read(skel_path)
                 colors2 = dict(colors)
                 for k in range(1, cache_mod.SKEL_DETAIL_LEVELS + 1):

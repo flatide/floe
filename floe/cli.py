@@ -129,7 +129,7 @@ def cmd_clip(args):
     t0 = time.perf_counter()
     if args.exact:
         # slow path: parse the original file for boundary-exact geometry
-        src_ly = db.Layout()
+        src_ly = db.Layout(False)  # read-only: viewer mode
         print("[floe] --exact: full read of source (slow)...")
         src_ly.read(args.src)
         top = cache_mod.pick_top_cell(src_ly, print)
