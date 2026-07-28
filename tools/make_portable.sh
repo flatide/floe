@@ -224,11 +224,12 @@ export GDK_PIXBUF_MODULE_FILE GI_TYPELIB_PATH GSETTINGS_SCHEMA_DIR \\
     XDG_DATA_DIRS XDG_CONFIG_DIRS FONTCONFIG_FILE LD_LIBRARY_PATH \\
     GDK_BACKEND NO_AT_BRIDGE PYTHONHOME PYTHONNOUSERSITE
 # XQuartz's XRender implementation composites images to BLACK while text
-# renders (worse after any window grow); forcing cairo's core-protocol
-# fallback displays correctly at every size. Costs a slightly slower
-# frame push - fine for floe's one-image-per-render UI. Set FLOE_XRENDER=1
-# to keep XRender (e.g. on Exceed TurboX where it works).
-if [ -z "\${FLOE_XRENDER:-}" ]; then
+# renders. Set FLOE_XQUARTZ=1 when viewing through XQuartz to force
+# cairo's core-protocol fallback: images then render at every size, at
+# the cost of slower frame pushes and a residual quirk (screen updates
+# may wait for the next input event). The DEFAULT is normal XRender -
+# correct and fast on real X servers (Exceed TurboX, Linux desktops).
+if [ -n "\${FLOE_XQUARTZ:-}" ]; then
     CAIRO_DEBUG=xrender-version=-1
     export CAIRO_DEBUG
 fi
