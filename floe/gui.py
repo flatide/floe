@@ -793,16 +793,27 @@ class Viewer:
             return False
         # watchdog: a render-service child that died (spawn failure,
         # crash, OOM kill) would otherwise leave a silent black view
-        # with "rendering…" forever
-        w = self.worker
-        if w is not None and not w.alive() \
-                and not getattr(w, "_died_reported", False):
-            w._died_reported = True
-            self._clear_pending()
-            self._set_status(
-                self.view_bbox(),
-                "error: render service died (exit %s) - see terminal; "
-                "restart the viewer" % w.exitcode())
+        # with "rendering…" forever. Guarded like everything else in this
+        # callback - an exception here (seen live: a bundle running a new
+        # gui.py against a stale service.py without alive()) would make
+        # GLib drop the poll source and silently freeze the viewer.
+        try:
+            w = self.worker
+            if w is not None and not w.alive() \
+                    and not getattr(w, "_died_reported", False):
+                w._died_reported = True
+                self._clear_pending()
+                self._set_status(
+                    self.view_bbox(),
+                    "error: render service died (exit %s) - see terminal; "
+                    "restart the viewer" % w.exitcode())
+        except Exception as exc:
+            if not getattr(self, "_watchdog_warned", False):
+                self._watchdog_warned = True
+                sys.stderr.write(
+                    "floe: watchdog check failed (%s) - mixed floe "
+                    "versions in the bundle? overwrite the WHOLE floe/ "
+                    "package, not single files\n" % exc)
         try:
             while True:
                 res = self.worker.res.get_nowait()
