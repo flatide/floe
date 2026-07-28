@@ -240,6 +240,26 @@ def cmd_probe(args):
           "display-side problem")
 
 
+def cmd_profile(args):
+    """Emit a structure-only profile (counts/sizes/grid, no geometry) of
+    an indexed layout, for synthesizing a render-performance lookalike
+    outside the closed network (tools/gen_from_profile.py)."""
+    from . import cache as cache_mod
+    c = open_cache(args.src, auto_index=False, args=args)
+    prof = cache_mod.profile_cache(c, sample_tiles=args.sample_tiles,
+                                   anon=args.anon,
+                                   log=lambda *a: print(*a,
+                                                        file=sys.stderr))
+    text = json.dumps(prof, separators=(",", ":"))
+    if args.out:
+        with open(args.out, "w") as f:
+            f.write(text)
+        print(f"[profile] wrote {args.out} ({len(text) / 1e3:.0f} KB, "
+              f"{len(prof['samples'])} sampled tiles)")
+    else:
+        print(text)
+
+
 def cmd_gtktest(args):
     """Minimal pixbuf-display matrix for diagnosing a black view.
     Three panels: (a) pixbuf loaded from a PNG file, (b) pixbuf
@@ -402,6 +422,19 @@ def main(argv=None):
                                      "diagnoses a black viewer")
     p.add_argument("src")
     p.set_defaults(fn=cmd_probe)
+
+    p = sub.add_parser("profile", help="emit a structure-only profile "
+                                       "(counts/sizes only, no geometry) "
+                                       "for building a lookalike sample")
+    p.add_argument("src")
+    p.add_argument("--out", default=None, help="write JSON here "
+                                               "(default: stdout)")
+    p.add_argument("--sample-tiles", type=int, default=4,
+                   help="tile files to census for instance/shape-type "
+                        "stats (default 4; 0 = meta only)")
+    p.add_argument("--anon", action="store_true",
+                   help="replace layer names with L<num>_<dt>")
+    p.set_defaults(fn=cmd_profile)
 
     p = sub.add_parser("gtktest", help="minimal pixbuf display test "
                                        "(diagnoses a black view)")

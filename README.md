@@ -106,6 +106,15 @@ floe clip  data/testchip_1g5.oas --bbox 5000,5000,5100,5100 --out region.oas
 ```
 
 - `--bbox`는 µm 단위 `X0,Y0,X1,Y1`. `--layers`는 이름 또는 `layer/datatype` 목록.
+- **폐쇄망 성능 재현** (`profile` + `tools/gen_from_profile.py`): 원본
+  OAS를 반출할 수 없을 때, 폐쇄망에서 `floe profile chip.oas --out
+  prof.json` 으로 **구조 프로파일**(타일·레이어·depth별 도형 수, 계층/
+  어레이 통계, 파일 크기 — 좌표·지오메트리 없음, `--anon`이면 레이어
+  이름도 익명화)을 뽑아 나온 JSON만 갖고 나온다. 외부에서
+  `python tools/gen_from_profile.py prof.json --out sample.oas` 로
+  렌더 성능이 유사한 가짜 레이아웃을 합성해 인덱싱·뷰어 벤치마크를
+  재현한다 (`--scale 0.1` = 축소판). auto depth 선택과 타일 로딩·렌더
+  비용을 결정하는 density 테이블을 그대로 복제하는 방식.
 - `clip --exact`: 원본 파일을 다시 파싱하는 느린 경로 (타일 경계에서 잘리지 않은
   원본 geometry가 필요할 때).
 - 네이티브 뷰어 조작 (Calibre DESIGNrev 방식):

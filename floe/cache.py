@@ -559,6 +559,128 @@ def _tile_density(ly, top_ci, max_levels=DENSITY_LEVELS):
     return out
 
 
+def _sample_tile(cache, rc, shape_cap=2000):
+    """Structure census of one tile file: instance stats (singles vs
+    arrays), per-level cell counts, per-layer shape-type mix with polygon
+    vertex counts. Numbers only - no geometry leaves this function."""
+    r, c = (int(v) for v in rc.split(","))
+    ly = db.Layout()
+    ly.read(cache.tile_path(r, c))
+    top = ly.cell(f"TILE_{r}_{c}") or pick_top_cell(ly)
+    singles = arrays = elems = 0
+    top_arrays = []
+    for cell in ly.each_cell():
+        for inst in cell.each_inst():
+            ia = inst.cell_inst
+            if ia.na > 1 or ia.nb > 1:
+                arrays += 1
+                elems += ia.na * ia.nb
+                top_arrays.append(ia.na * ia.nb)
+            else:
+                singles += 1
+    top_arrays = sorted(top_arrays, reverse=True)[:5]
+    mix = {}
+    for li in ly.layer_indexes():
+        info = ly.get_info(li)
+        key = f"{info.layer}/{info.datatype}"
+        n_box = n_poly = n_path = n_text = 0
+        pts = []
+        seen = 0
+        for cell in ly.each_cell():
+            shapes = cell.shapes(li)
+            if shapes.size() == 0:
+                continue
+            for sh in shapes.each():
+                if sh.is_box():
+                    n_box += 1
+                elif sh.is_text():
+                    n_text += 1
+                elif sh.is_path():
+                    n_path += 1
+                else:
+                    n_poly += 1
+                    poly = sh.polygon
+                    if poly is not None:
+                        pts.append(poly.num_points_hull())
+                seen += 1
+                if seen >= shape_cap:
+                    break
+            if seen >= shape_cap:
+                break
+        tot = n_box + n_poly + n_path + n_text
+        if tot:
+            pts.sort()
+            mix[key] = {
+                "box": round(n_box / tot, 3),
+                "polygon": round(n_poly / tot, 3),
+                "path": round(n_path / tot, 3),
+                "text": round(n_text / tot, 3),
+                "poly_pts_p50": pts[len(pts) // 2] if pts else 4,
+                "poly_pts_max": pts[-1] if pts else 4,
+            }
+    return {"rc": rc, "cells": ly.cells(),
+            "insts": {"singles": singles, "arrays": arrays,
+                      "array_elems": elems, "largest_arrays": top_arrays},
+            "shape_mix": mix}
+
+
+def profile_cache(cache, sample_tiles=4, anon=False, log=print):
+    """Structure-only profile of an indexed layout: everything
+    tools/gen_from_profile.py needs to synthesize a render-performance
+    lookalike, and nothing else - counts, sizes and grid numbers, no
+    geometry or coordinates; --anon also drops the layer names."""
+    meta = cache.meta
+    g = meta["grid"]
+    layers = [{"layer": l["layer"], "datatype": l["datatype"],
+               "name": ("L%d_%d" % (l["layer"], l["datatype"])) if anon
+                       else l["name"],
+               "stored_shapes": l["stored_shapes"]}
+              for l in meta["layers"]]
+    tile_sizes = {}
+    lod_sizes = {}
+    for r in range(g["ny"]):
+        for c in range(g["nx"]):
+            p = cache.tile_path(r, c)
+            if os.path.isfile(p):
+                tile_sizes[f"{r},{c}"] = os.path.getsize(p)
+            p = cache.lod_tile_path(r, c)
+            if os.path.isfile(p):
+                lod_sizes[f"{r},{c}"] = os.path.getsize(p)
+    dens = (meta.get("density") or {}).get("tiles", {})
+
+    def tile_total(rc):
+        t = dens.get(rc) or {}
+        return sum(arr[-1] for k, arr in t.items() if k != "cells")
+
+    ranked = sorted(tile_sizes, key=tile_total, reverse=True)
+    picks = []
+    if ranked and sample_tiles > 0:
+        idx = sorted({0, len(ranked) // 4, len(ranked) // 2,
+                      len(ranked) - 1})
+        picks = [ranked[i] for i in idx][:sample_tiles]
+    samples = []
+    for rc in picks:
+        log(f"[profile] sampling tile {rc}...")
+        try:
+            samples.append(_sample_tile(cache, rc))
+        except Exception as e:
+            log(f"[profile][warn] sample {rc} failed: {e}")
+    return {
+        "profile_version": 1,
+        "dbu": meta["dbu"],
+        "bbox": meta["bbox"],
+        "grid": g,
+        "layers": layers,
+        "density": meta.get("density"),
+        "lod": meta.get("lod"),
+        "skeleton": {"shapes": (meta.get("skeleton") or {}).get("shapes")},
+        "stats": meta.get("stats"),
+        "tile_sizes": tile_sizes,
+        "lod_sizes": lod_sizes,
+        "samples": samples,
+    }
+
+
 # Tile-build context inherited by fork workers. klayout holds the GIL
 # during C++ calls, so threads cannot parallelize tiling; fork workers
 # share the loaded source layout copy-on-write instead (no re-read, no
