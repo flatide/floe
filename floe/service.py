@@ -235,15 +235,20 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
                     t_load += time.perf_counter() - tl
                     vw = max(1, round(job["w"] * (vx1 - vx0) / (x1 - x0)))
                     vh = max(1, round(job["h"] * (vy1 - vy0) / (y1 - y0)))
+                    td = time.perf_counter()
                     renderer.render_png(tmp, vx0, vy0, vx1, vy1, vw, vh,
                                         visible=job["visible"],
                                         depth=depth)
+                    t_draw = time.perf_counter() - td
                     with open(tmp, "rb") as f:
                         png = f.read()
                     res.put({"kind": "frame", "png": png,
                              "bbox": (vx0, vy0, vx1, vy1),
                              "gen": job["gen"], "tiles": len(vtiles),
-                             "scope": scope, "ms": round(
+                             "scope": scope,
+                             "load_ms": round(t_load * 1000),
+                             "draw_ms": round(t_draw * 1000),
+                             "ms": round(
                                  (time.perf_counter() - t0) * 1000)})
                     if not req.empty():
                         return  # newer work queued: skip the margin
