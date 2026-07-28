@@ -59,7 +59,14 @@ def viewer_mode_preferred(meta):
     them as compact shape arrays, collapsing tile loads from ~44s to ms
     (measured). Flat sources read ~3x SLOWER in viewer mode though, so
     choose by stored-shapes-per-byte: testchip-class flat data ~0.15/B,
-    array-monster data ~13/B - threshold 1.0."""
+    array-monster data ~13/B - threshold 1.0.
+
+    FLOE_LAYOUT_MODE=viewer|editable overrides the heuristic (testing)."""
+    mode = os.environ.get("FLOE_LAYOUT_MODE", "").lower()
+    if mode.startswith("view"):
+        return True
+    if mode.startswith("edit"):
+        return False
     try:
         shapes = sum(l["stored_shapes"] for l in meta["layers"])
         return shapes / max(1, meta["src"]["size"]) > 1.0

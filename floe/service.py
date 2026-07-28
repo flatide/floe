@@ -149,6 +149,7 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
     x0, y0, x1, y1 = job["bbox"]
     scope = job.get("scope", "live")
     bg = False
+    t_load = t_draw = 0.0
     try:
         if scope == "skel":
             if skel_renderer is None:
@@ -228,8 +229,10 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
                 vfresh = sum(1 for rc in vtiles
                              if rc not in mosaic.loaded)
                 if fresh - vfresh >= 4 and x1 > x0 and y1 > y0:
+                    tl = time.perf_counter()
                     if mosaic.ensure(vtiles):
                         renderer.refresh()
+                    t_load += time.perf_counter() - tl
                     vw = max(1, round(job["w"] * (vx1 - vx0) / (x1 - x0)))
                     vh = max(1, round(job["h"] * (vy1 - vy0) / (y1 - y0)))
                     renderer.render_png(tmp, vx0, vy0, vx1, vy1, vw, vh,
@@ -245,17 +248,23 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
                     if not req.empty():
                         return  # newer work queued: skip the margin
                     bg = True   # margin upgrade: no status churn
+            tl = time.perf_counter()
             if use_mosaic.ensure(tiles):
                 use_renderer.refresh()
+            t_load += time.perf_counter() - tl
+            td = time.perf_counter()
             use_renderer.render_png(tmp, x0, y0, x1, y1,
                                     job["w"], job["h"],
                                     visible=job["visible"], depth=depth)
+            t_draw = time.perf_counter() - td
             tiles_n = len(tiles)
         with open(tmp, "rb") as f:
             png = f.read()
         res.put({"kind": "frame", "png": png, "bbox": job["bbox"],
                  "gen": job["gen"], "tiles": tiles_n, "scope": scope,
                  "bg": bg,
+                 "load_ms": round(t_load * 1000),
+                 "draw_ms": round(t_draw * 1000),
                  "ms": round((time.perf_counter() - t0) * 1000)})
     except Exception as e:  # keep the service alive
         res.put({"kind": "error", "msg": str(e)})

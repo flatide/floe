@@ -897,8 +897,12 @@ class Viewer:
                         "outline" if used == 0 else "skeleton",
                         res["ms"])
                 else:
-                    mode = "live (%d tiles, %d ms%s)" \
-                        % (res["tiles"], res["ms"],
+                    split = ""
+                    if res.get("load_ms") is not None:
+                        split = " = %d load + %d draw" \
+                            % (res["load_ms"], res["draw_ms"])
+                    mode = "live (%d tiles, %d ms%s%s)" \
+                        % (res["tiles"], res["ms"], split,
                            self._depth_note(used))
                 self._set_status(self.view_bbox(), mode)
         elif kind == "snap":

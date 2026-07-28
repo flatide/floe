@@ -79,6 +79,7 @@ def cmd_index(args):
 
 
 def cmd_info(args):
+    from . import cache as cache_mod
     c = open_cache(args.src, auto_index=False, args=args)
     m = c.meta
     dbu = m["dbu"]
@@ -94,6 +95,12 @@ def cmd_info(args):
           f"tile {g['tile_w'] * dbu:.0f}x{g['tile_h'] * dbu:.0f} um")
     print(f"index time : {m['stats']['total_s']}s "
           f"(read {m['stats']['read_s']}s, tiles {m['stats']['tiles_s']}s)")
+    shapes = sum(l["stored_shapes"] for l in m["layers"])
+    print(f"read mode  : %s (%.2f shapes/byte%s)" % (
+        "viewer" if cache_mod.viewer_mode_preferred(m) else "editable",
+        shapes / max(1, m["src"]["size"]),
+        ", forced by FLOE_LAYOUT_MODE"
+        if os.environ.get("FLOE_LAYOUT_MODE") else ""))
     print(f"{'layer':>8}  {'name':<12} {'stored shapes':>14}")
     for l in m["layers"]:
         print(f"{l['layer']:>5}/{l['datatype']:<2} {l['name']:<12} "
