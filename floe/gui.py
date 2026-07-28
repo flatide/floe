@@ -866,15 +866,26 @@ class Viewer:
                 key = self._job_keys.get(res["gen"])
                 used = self._job_depth.get(res["gen"])
                 if preview:
-                    # LOD preview while fat full tiles parse: show it,
-                    # but keep the pending indicator ticking. The
+                    # LOD preview while fat full tiles parse. The
                     # sentinel key displays (non-None) yet never matches
                     # a render key, so _covered() keeps re-rendering
                     # until the real frame (same gen) replaces this.
+                    # Crucially UNBLOCK input: mouse handlers gate on
+                    # _pending, and a fat parse can run for minutes - the
+                    # user must be able to pan/zoom away (the service
+                    # skips the stale fat load when newer work queues).
                     self.last_frame = (pix, fb, fspp, "preview")
                     self._display()
+                    if res["gen"] == self._pending:
+                        self._clear_pending()
+                        self._preview_gen = res["gen"]
                     self.rstatus.set_text("preview - loading tiles…")
                     return
+                if res["gen"] == getattr(self, "_preview_gen", None):
+                    # the fat parse behind an input-unblocking preview
+                    # finished: close out its status line
+                    self._preview_gen = None
+                    self.rstatus.set_text("rendering done.")
                 self.last_frame = (pix, fb, fspp, key)
                 self._display()
                 if res.get("bg"):
