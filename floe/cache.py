@@ -63,17 +63,41 @@ def _rss_gb(pid):
         return None
 
 
-def _read_monitor(pid, interval):
-    """Child process: heartbeat while the parent sits in the C++ read
-    (which holds the GIL, so an in-process thread would starve)."""
+def _read_monitor(pid, interval, label):
+    """Child process: heartbeat while the parent sits in a long C++
+    call (which holds the GIL, so an in-process thread would starve)."""
     t0 = time.time()
     while True:
         time.sleep(interval)
         rss = _rss_gb(pid)
         if rss is None:
             return
-        print("[index] reading... %.1f GB RSS (%.0fs)"
-              % (rss, time.time() - t0), flush=True)
+        print("[index] %s... %.1f GB RSS (%.0fs)"
+              % (label, rss, time.time() - t0), flush=True)
+
+
+class _phase_monitor:
+    """Forked RSS/liveness heartbeat around a GIL-holding phase."""
+
+    def __init__(self, label):
+        self.label = label
+        self.proc = None
+
+    def __enter__(self):
+        try:
+            self.proc = multiprocessing.get_context("fork").Process(
+                target=_read_monitor,
+                args=(os.getpid(), INDEX_HEARTBEAT_S, self.label),
+                daemon=True)
+            self.proc.start()
+        except Exception:
+            self.proc = None
+        return self
+
+    def __exit__(self, *_exc):
+        if self.proc is not None:
+            self.proc.terminate()
+        return False
 
 
 def layer_color(i):
@@ -199,24 +223,41 @@ class Cache:
         return out
 
 
-def _text_layers(ly):
-    """Layer indexes that hold at least one text, found by scanning stored
-    shapes only (Shapes.each(STexts) is type-indexed, so this skips
-    polygon/box shapes and stays cheap even on dense fill layers)."""
-    out = []
-    for li in ly.layer_indexes():
-        for cell in ly.each_cell():
-            hit = False
+def _scan_layers(ly, log=None):
+    """One pass over every cell: per-layer stored shape counts AND the
+    set of text-bearing layers (Shapes.each(STexts) is type-indexed, so
+    the text probe skips polygon/box shapes even on dense fill layers).
+    Both consumers used to run their own cells x layers sweep - on
+    million-cell production files each sweep is minutes of silent
+    Python looping, so they are merged and given a heartbeat."""
+    lis = ly.layer_indexes()
+    counts = {li: 0 for li in lis}
+    text_layers = []
+    remaining = set(lis)
+    n_cells = ly.cells()
+    t0 = last = time.perf_counter()
+    for i, cell in enumerate(ly.each_cell()):
+        for li in lis:
+            counts[li] += cell.shapes(li).size()
+        for li in list(remaining):
             for _ in cell.shapes(li).each(db.Shapes.STexts):
-                hit = True
+                remaining.discard(li)
+                text_layers.append(li)
                 break
-            if hit:
-                out.append(li)
-                break
-    return out
+        if log is not None and \
+                time.perf_counter() - last >= INDEX_HEARTBEAT_S:
+            last = time.perf_counter()
+            log(f"[index] scanning layers... cell {i + 1:,}/{n_cells:,} "
+                f"({last - t0:.0f}s)")
+    return counts, sorted(text_layers)
 
 
-def collect_texts(ly, top_ci):
+def _text_layers(ly):
+    """Layer indexes that hold at least one text (see _scan_layers)."""
+    return _scan_layers(ly)[1]
+
+
+def collect_texts(ly, top_ci, text_layers=None, log=None):
     """Gather all text objects (any depth) with top-level coordinates.
 
     Tiles get texts re-injected with half-open tile assignment so each text
@@ -229,15 +270,21 @@ def collect_texts(ly, top_ci):
     restricting the iterator to the text layers prunes those subtrees
     entirely (~2600x faster, identical output).
     """
-    layers = _text_layers(ly)
+    layers = _text_layers(ly) if text_layers is None else text_layers
     if not layers:
         return []
     out = []
+    t0 = last = time.perf_counter()
     it = db.RecursiveShapeIterator(ly, ly.cell(top_ci), layers)
     it.shape_flags = db.Shapes.STexts
     while not it.at_end():
         out.append((it.layer(), it.shape().text.transformed(it.trans())))
         it.next()
+        if log is not None and len(out) % 50_000 == 0 and \
+                time.perf_counter() - last >= INDEX_HEARTBEAT_S:
+            last = time.perf_counter()
+            log(f"[index] collecting texts... {len(out):,} found "
+                f"({last - t0:.0f}s)")
     return out
 
 
@@ -490,7 +537,8 @@ def add_skeleton(cache, log=print):
     ly = db.Layout(not viewer_mode_preferred(meta))
     ly.read(cache.src)
     top = pick_top_cell(ly, log)
-    texts = collect_texts(ly, top.cell_index())
+    with _phase_monitor("collecting texts"):
+        texts = collect_texts(ly, top.cell_index(), log=log)
     out = os.path.join(cache.dir, "skeleton.oas")
     meta["skeleton"] = build_skeleton(ly, top, texts, out, log)
     with open(cache.meta_path, "w") as f:
@@ -967,20 +1015,9 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
     log(f"[index] reading {src} ({st.st_size / 1e9:.2f} GB, "
         f"{'editable' if editable else 'viewer'} mode)...")
     t0 = time.perf_counter()
-    mon = None
-    try:
-        mon = multiprocessing.get_context("fork").Process(
-            target=_read_monitor,
-            args=(os.getpid(), INDEX_HEARTBEAT_S), daemon=True)
-        mon.start()
-    except Exception:
-        mon = None
-    ly = db.Layout(editable)
-    try:
+    with _phase_monitor("reading"):
+        ly = db.Layout(editable)
         ly.read(src)
-    finally:
-        if mon is not None:
-            mon.terminate()
     t_read = time.perf_counter() - t0
     rss = _rss_gb(os.getpid())
     log(f"[index] read done in {t_read:.0f}s "
@@ -1000,18 +1037,23 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
     log(f"[index] grid {n}x{n}, tile {tile_w / 1000:.0f} x "
         f"{tile_h / 1000:.0f} um")
 
+    t0 = time.perf_counter()
+    counts, text_layer_lis = _scan_layers(ly, log)
     layers = []
     for i, li in enumerate(ly.layer_indexes()):
         info = ly.get_info(li)
-        count = sum(cell.shapes(li).size() for cell in ly.each_cell())
         layers.append({"layer": info.layer, "datatype": info.datatype,
                        "name": info.name or f"{info.layer}/{info.datatype}",
-                       "color": layer_color(i), "stored_shapes": count})
+                       "color": layer_color(i),
+                       "stored_shapes": counts[li]})
+    log(f"[index] layer scan done ({time.perf_counter() - t0:.1f}s, "
+        f"{len(text_layer_lis)} text layers)")
 
     # --- texts: clip_into drops them, so bucket them per tile up front ---
     top_ci = top.cell_index()
     t0 = time.perf_counter()
-    all_texts = collect_texts(ly, top_ci)
+    with _phase_monitor("collecting texts"):
+        all_texts = collect_texts(ly, top_ci, text_layer_lis, log)
     tile_texts = {}
     for li, text in all_texts:
         p = text.trans.disp

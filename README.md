@@ -136,6 +136,9 @@ floe clip  data/testchip_1g5.oas --bbox 5000,5000,5100,5100 --out region.oas
   이전 동작 복원 가능 (flat 소스는 editable read가 ~3배 빠름).
   read 중에는 1분마다 `[index] reading... N GB RSS (Ss)` 하트비트가
   나온다 (별도 프로세스라 C++ read가 GIL을 잡고 있어도 동작).
+  read 이후의 무음 구간도 진행이 보인다: 레이어 카운트와 텍스트 레이어
+  탐지는 셀 단일 스캔으로 합쳐져 `scanning layers... cell N/M`,
+  텍스트 수집은 `collecting texts... N found` + RSS 하트비트를 낸다.
 - **폐쇄망 성능 재현** (`profile` + `tools/gen_from_profile.py`): 원본
   OAS를 반출할 수 없을 때, 폐쇄망에서 `floe profile chip.oas --out
   prof.json` 으로 **구조 프로파일**(타일·레이어·depth별 도형 수, 계층/
