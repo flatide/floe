@@ -60,13 +60,16 @@ def open_cache(src, auto_index, args):
 
 def cmd_index(args):
     from . import cache as cache_mod
-    if args.skeleton_only:
+    if args.skeleton_only or args.texts_only:
         c = cache_mod.Cache(args.src)
         if not c.exists():
             raise SystemExit("floe: no cache to upgrade; run a full "
                              "'floe index' first")
         c.load()
-        cache_mod.add_skeleton(c)
+        if args.texts_only:
+            cache_mod.rebuild_texts(c)
+        else:
+            cache_mod.add_skeleton(c)
         return
     c = cache_mod.Cache(args.src)
     if c.exists() and not args.force:
@@ -444,6 +447,11 @@ def main(argv=None):
     p.add_argument("--skeleton-only", action="store_true",
                    help="add the far-zoom skeleton to an existing cache "
                         "(one source read, no re-tiling)")
+    p.add_argument("--texts-only", action="store_true",
+                   help="refresh texts of an existing banded cache "
+                        "(one source read + b0 rewrite, no re-tiling); "
+                        "combine with FLOE_TEXT_CAP to recover a "
+                        "dropped label layer cheaply")
     p.add_argument("--jobs", type=int, default=None, metavar="N",
                    help="fork workers for the tiling phase (default: all "
                         "cores; 1 = sequential). Workers share the loaded "

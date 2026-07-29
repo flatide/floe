@@ -293,29 +293,45 @@ def collect_texts(ly, top_ci, text_layers=None, log=None, cap=None):
     out = []
     dropped = []
     t0 = last = time.perf_counter()
+    # phase 1: count-only pass per layer (nothing stored), so every
+    # over-budget layer is known and reported up front - the abort
+    # after cap+1 texts costs seconds even on a billion-text layer
+    keep = []
     for li in layers:
+        if cap is None:
+            keep.append(li)
+            continue
         it = db.RecursiveShapeIterator(ly, ly.cell(top_ci), [li])
         it.shape_flags = db.Shapes.STexts
-        acc = []
+        cnt = 0
         while not it.at_end():
-            acc.append((li, it.shape().text.transformed(it.trans())))
-            if cap is not None and len(acc) > cap:
+            cnt += 1
+            if cnt > cap:
                 break
             it.next()
-            if log is not None and len(acc) % 50_000 == 0 and \
-                    time.perf_counter() - last >= INDEX_HEARTBEAT_S:
-                last = time.perf_counter()
-                log(f"[index] collecting texts... {len(out) + len(acc):,}"
-                    f" found ({last - t0:.0f}s)")
-        if cap is not None and len(acc) > cap:
+        if cnt > cap:
             info = ly.get_info(li)
             if log is not None:
                 log(f"[index] layer {info.layer}/{info.datatype} has "
                     f">{cap:,} texts (per-shape markers?) - dropped "
-                    f"from the cache (FLOE_TEXT_CAP=0 keeps all)")
+                    f"from the cache. Recover later without "
+                    f"re-tiling: FLOE_TEXT_CAP=<n> floe index "
+                    f"--texts-only")
             dropped.append(li)
         else:
-            out.extend(acc)
+            keep.append(li)
+    # phase 2: collect the kept layers in full
+    for li in keep:
+        it = db.RecursiveShapeIterator(ly, ly.cell(top_ci), [li])
+        it.shape_flags = db.Shapes.STexts
+        while not it.at_end():
+            out.append((li, it.shape().text.transformed(it.trans())))
+            it.next()
+            if log is not None and len(out) % 50_000 == 0 and \
+                    time.perf_counter() - last >= INDEX_HEARTBEAT_S:
+                last = time.perf_counter()
+                log(f"[index] collecting texts... {len(out):,} found "
+                    f"({last - t0:.0f}s)")
     return out, dropped
 
 
@@ -576,6 +592,98 @@ def add_skeleton(cache, log=print):
         json.dump(meta, f, indent=1)
     log(f"[index] skeleton added: {meta['skeleton']['shapes']} shapes "
         f"({time.perf_counter() - t0:.0f}s)")
+
+
+def rebuild_texts(cache, log=print):
+    """Refresh the texts of an existing banded cache in place - one
+    source read plus a rewrite of the small b0 tile files, NO
+    re-tiling (floe index --texts-only). This is the cheap recovery
+    path when a needed label layer turned out to be over the text
+    budget: raise FLOE_TEXT_CAP (or set 0) and rerun this instead of
+    a full reindex. Also rebuilds the skeleton (it carries the same
+    labels)."""
+    t_all = time.perf_counter()
+    meta = cache.meta or cache.load()
+    if not meta.get("bands"):
+        raise SystemExit("floe: --texts-only supports banded caches "
+                         "(this cache is legacy single-file tiles; "
+                         "reindex instead)")
+    log(f"[index] reading {cache.src} for texts...")
+    with _phase_monitor("reading"):
+        ly = db.Layout(not viewer_mode_preferred(meta))
+        ly.read(cache.src)
+    top = pick_top_cell(ly, log)
+    with _phase_monitor("collecting texts"):
+        texts, dropped = collect_texts(ly, top.cell_index(), log=log)
+    g = meta["grid"]
+    tile_texts = {}
+    for li, text in texts:
+        p = text.trans.disp
+        c = min(g["nx"] - 1, max(0, (p.x - g["x0"]) // g["tile_w"]))
+        r = min(g["ny"] - 1, max(0, (p.y - g["y0"]) // g["tile_h"]))
+        tile_texts.setdefault((int(r), int(c)), []).append((li, text))
+    # rewrite b0: strip old texts everywhere, inject the new curated
+    # set into each tile's top cell (create b0 files for tiles that
+    # had no b0 shapes but now carry texts)
+    b0dir = os.path.join(cache.dir, "tiles_b0")
+    touched = created = 0
+    all_rc = {(r, c) for r in range(g["ny"]) for c in range(g["nx"])}
+    for r, c in sorted(all_rc):
+        path = os.path.join(b0dir, f"t_{r}_{c}.oas")
+        new = tile_texts.get((r, c), ())
+        exists = os.path.isfile(path)
+        if not exists and not new:
+            continue
+        top_name = f"TILE_{r}_{c}_b0"
+        if exists:
+            bly = db.Layout(True)   # editable: text strip needs erase
+            bly.read(path)
+            had = any(True for cc in bly.each_cell()
+                      for li in bly.layer_indexes()
+                      for _ in cc.shapes(li).each(db.Shapes.STexts))
+            if not had and not new:
+                bly._destroy()
+                continue        # nothing to strip, nothing to add
+            _strip_texts(bly)
+            cell = bly.cell(top_name)
+            if cell is None:
+                continue
+        else:
+            bly = db.Layout(True)
+            bly.dbu = meta["dbu"]
+            cell = bly.create_cell(top_name)
+            created += 1
+        # source layer indexes do not survive a file round-trip:
+        # map by layer/datatype (created on demand for fresh files)
+        lmap = {}
+        for li, text in new:
+            bl = lmap.get(li)
+            if bl is None:
+                info = ly.get_info(li)
+                bl = bly.layer(db.LayerInfo(info.layer, info.datatype))
+                lmap[li] = bl
+            cell.shapes(bl).insert(text)
+        has_any = any(cc.shapes(li).size()
+                      for cc in bly.each_cell()
+                      for li in bly.layer_indexes())
+        if has_any:
+            bly.write(path, save_opts())
+            touched += 1
+        elif exists:
+            os.remove(path)   # only stale texts lived here
+        bly._destroy()
+    meta.pop("texts_dropped", None)
+    if dropped:
+        meta["texts_dropped"] = [
+            {"layer": ly.get_info(li).layer,
+             "datatype": ly.get_info(li).datatype} for li in dropped]
+    meta["skeleton"] = build_skeleton(
+        ly, top, texts, os.path.join(cache.dir, "skeleton.oas"), log)
+    with open(cache.meta_path, "w") as f:
+        json.dump(meta, f, indent=1)
+    log(f"[index] texts refreshed: {len(texts)} texts into {touched} "
+        f"b0 tiles ({created} created), skeleton rebuilt "
+        f"({time.perf_counter() - t_all:.0f}s)")
 
 
 def load_region(cache, x0, y0, x1, y1, log=None, max_tiles=None,
