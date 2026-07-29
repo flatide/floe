@@ -127,6 +127,15 @@ floe clip  data/testchip_1g5.oas --bbox 5000,5000,5100,5100 --out region.oas
 ```
 
 - `--bbox`는 µm 단위 `X0,Y0,X1,Y1`. `--layers`는 이름 또는 `layer/datatype` 목록.
+- **인덱스 read는 기본 viewer 모드** (v0.4.3): klayout editable 모드는
+  반복(repetition) 배열을 읽으면서 멤버 전부를 개별 객체로 펼친다
+  (~46B/멤버 — 운영 호스트에서 9.83GB 파일이 **400GB RSS**까지 관측).
+  viewer 모드는 배열을 압축 상태로 유지해 stress30 실측 기준 read
+  **27배 빠르고 RSS 3.9배 절약**, `clip_into` 결과·밴드 파일 내용·렌더
+  픽셀 완전 동일 검증. `--read-mode editable`(또는 `FLOE_INDEX_READ`)로
+  이전 동작 복원 가능 (flat 소스는 editable read가 ~3배 빠름).
+  read 중에는 1분마다 `[index] reading... N GB RSS (Ss)` 하트비트가
+  나온다 (별도 프로세스라 C++ read가 GIL을 잡고 있어도 동작).
 - **폐쇄망 성능 재현** (`profile` + `tools/gen_from_profile.py`): 원본
   OAS를 반출할 수 없을 때, 폐쇄망에서 `floe profile chip.oas --out
   prof.json` 으로 **구조 프로파일**(타일·레이어·depth별 도형 수, 계층/
@@ -534,7 +543,10 @@ alias floe="/opt/floe/venv/bin/python -m floe"
    출력으로 호스트 검증, 에러 영역 자동 clip
 5. ~~대용량 스케일링: 인덱싱 시 레이어 그룹별 다중 패스(RAM 상한)~~
    — 운영 호스트 RAM이 1.5TB라 불필요 판정 (2026-07-28; 로드 RSS는
-   파일 크기의 ~3.6배 → 100GB급 파일까지도 여유). 단일 패스가 더
-   빠르므로 하지 않는다. 타일 병렬 빌드는 ✅ `--jobs`
+   파일 크기의 ~3.6배 → 100GB급 파일까지도 여유). 단, 이 ~3.6배는
+   flat 소스 기준 — 어레이 중심 소스는 editable read가 40배까지
+   폭발해(9.83GB → 400GB 관측) v0.4.3부터 인덱스 read 기본을 viewer
+   모드로 변경 (위 인덱스 노트). 다중 패스는 여전히 불필요.
+   단일 패스가 더 빠르므로 하지 않는다. 타일 병렬 빌드는 ✅ `--jobs`
 6. 뷰어 개선: 중간 줌 레벨 피라미드, 셀/텍스트 검색, 마커 점프
    (좌표 이동(goto)은 ✅)

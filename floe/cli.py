@@ -77,7 +77,8 @@ def cmd_index(args):
     bands = (None if args.bands.strip().lower() in ("none", "0", "")
              else tuple(sorted(float(t) for t in args.bands.split(","))))
     cache_mod.build_index(args.src, tile_bytes=args.tile_mb * 1e6,
-                          jobs=args.jobs, bands=bands)
+                          jobs=args.jobs, bands=bands,
+                          read_mode=args.read_mode)
 
 
 def cmd_info(args):
@@ -447,6 +448,13 @@ def main(argv=None):
                         "split per band so wide views skip subpixel "
                         "content entirely. 'none' = legacy single-file "
                         "tiles (default: 0.125,0.5,2)")
+    p.add_argument("--read-mode", default=None,
+                   choices=("viewer", "editable"),
+                   help="source read mode (default viewer, or "
+                        "FLOE_INDEX_READ env): viewer keeps repetition "
+                        "arrays compact - editable materializes every "
+                        "member (~46 B each; a 10 GB array-heavy file "
+                        "was observed at 400 GB RSS)")
     p.set_defaults(fn=cmd_index)
 
     p = sub.add_parser("info", help="show cache/layout summary")

@@ -46,6 +46,36 @@ def cache_dir_for(src):
     return os.path.abspath(src) + ".ice"
 
 
+def _rss_gb(pid):
+    """Resident set size of a process in GB (Linux /proc, ps fallback)."""
+    try:
+        with open("/proc/%d/status" % pid) as f:
+            for ln in f:
+                if ln.startswith("VmRSS:"):
+                    return int(ln.split()[1]) / 1e6   # kB -> GB
+    except OSError:
+        pass
+    try:
+        import subprocess
+        out = subprocess.check_output(["ps", "-o", "rss=", "-p", str(pid)])
+        return int(out.split()[0]) / 1e6
+    except Exception:
+        return None
+
+
+def _read_monitor(pid, interval):
+    """Child process: heartbeat while the parent sits in the C++ read
+    (which holds the GIL, so an in-process thread would starve)."""
+    t0 = time.time()
+    while True:
+        time.sleep(interval)
+        rss = _rss_gb(pid)
+        if rss is None:
+            return
+        print("[index] reading... %.1f GB RSS (%.0fs)"
+              % (rss, time.time() - t0), flush=True)
+
+
 def layer_color(i):
     """Distinct, stable per-layer color (golden-angle hue rotation)."""
     h = (i * 137.508) % 360.0 / 360.0
@@ -360,12 +390,18 @@ def _skel_harvest(ly, dmaps, stop_cell, cell, trans, min_feat, big, n,
     for inst in cell.each_inst():
         if n >= cap:
             break
-        gb = inst.bbox()
-        if gb.width() < big and gb.height() < big:
+        child = ly.cell(inst.cell_index)
+        cb = child.bbox()
+        if cb.width() < big and cb.height() < big:
             continue
-        n = _skel_harvest(ly, dmaps, stop_cell, ly.cell(inst.cell_index),
-                          trans * inst.trans, min_feat, big, n, cap,
-                          level + 1)
+        # viewer-mode reads keep instance arrays compact: one Instance
+        # may be a whole array, so walk every member placement
+        for t in inst.cell_inst.each_trans():
+            if n >= cap:
+                break
+            n = _skel_harvest(ly, dmaps, stop_cell, child,
+                              trans * t, min_feat, big, n, cap,
+                              level + 1)
     return n
 
 
@@ -421,16 +457,24 @@ def build_skeleton(ly, top, texts, out_path, log=print):
         if n >= cap:
             log(f"[index] skeleton capped at {cap} shapes")
             break
-        gb = inst.bbox()
-        if gb.width() < big and gb.height() < big:
-            continue
         child = ly.cell(inst.cell_index)
-        stop_cell.shapes(outline_li).insert(gb)
-        c = gb.center()
-        stop_cell.shapes(outline_li).insert(
-            db.Text(child.name, db.Trans(db.Vector(c.x, c.y))))
-        n = _skel_harvest(ly, dmaps, stop_cell, child, inst.trans,
-                          min_feat, big, n, cap, 1)
+        cb = child.bbox()
+        if cb.width() < big and cb.height() < big:
+            continue
+        # per member placement: a viewer-mode read keeps instance
+        # arrays compact, and the array-wide bbox would paint one
+        # die-sized outline instead of one box per block
+        for t in inst.cell_inst.each_trans():
+            if n >= cap:
+                log(f"[index] skeleton capped at {cap} shapes")
+                break
+            gb = cb.transformed(t)
+            stop_cell.shapes(outline_li).insert(gb)
+            c = gb.center()
+            stop_cell.shapes(outline_li).insert(
+                db.Text(child.name, db.Trans(db.Vector(c.x, c.y))))
+            n = _skel_harvest(ly, dmaps, stop_cell, child, t,
+                              min_feat, big, n, cap, 1)
     for li, text in texts:
         stop_cell.shapes(dmaps[1][li]).insert(text)
     skel.write(out_path, save_opts())
@@ -888,13 +932,19 @@ def _build_one_tile(rc):
 
 
 def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
-                bands=BAND_THRESHOLDS_UM):
+                bands=BAND_THRESHOLDS_UM, read_mode=None):
     """Scan the source file once and build the tile cache.
 
     jobs: fork workers for the tiling phase (None = all cores;
     1 = sequential; platforms without fork fall back to sequential).
     bands: ascending size-band edges in um (see _tile_bands), or None
-    for a legacy single-file-per-tile cache."""
+    for a legacy single-file-per-tile cache.
+    read_mode: 'viewer' (default; also FLOE_INDEX_READ env) keeps
+    repetitions as compact shape arrays while reading the source -
+    array-heavy production files otherwise materialize every member in
+    editable mode (~46 B each: a 10 GB file was observed at 400 GB
+    RSS). 'editable' restores the old behavior (flat sources read
+    ~3x faster there)."""
     t_all = time.perf_counter()
     src = os.path.abspath(src)
     cdir = cache_dir_for(src)
@@ -910,14 +960,32 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
         for f in os.listdir(d):
             os.remove(os.path.join(d, f))
 
+    mode = (read_mode or os.environ.get("FLOE_INDEX_READ")
+            or "viewer").lower()
+    editable = mode.startswith("edit")
     st = os.stat(src)
-    log(f"[index] reading {src} ({st.st_size / 1e9:.2f} GB)...")
+    log(f"[index] reading {src} ({st.st_size / 1e9:.2f} GB, "
+        f"{'editable' if editable else 'viewer'} mode)...")
     t0 = time.perf_counter()
-    ly = db.Layout()
-    ly.read(src)
+    mon = None
+    try:
+        mon = multiprocessing.get_context("fork").Process(
+            target=_read_monitor,
+            args=(os.getpid(), INDEX_HEARTBEAT_S), daemon=True)
+        mon.start()
+    except Exception:
+        mon = None
+    ly = db.Layout(editable)
+    try:
+        ly.read(src)
+    finally:
+        if mon is not None:
+            mon.terminate()
     t_read = time.perf_counter() - t0
+    rss = _rss_gb(os.getpid())
     log(f"[index] read done in {t_read:.0f}s "
-        f"({ly.cells()} cells, {len(ly.layer_indexes())} layers)")
+        f"({ly.cells()} cells, {len(ly.layer_indexes())} layers"
+        + (f", {rss:.1f} GB RSS" if rss else "") + ")")
 
     top = pick_top_cell(ly, log)
     bbox = top.bbox()
@@ -1048,6 +1116,7 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
         **({"bands": {"thresholds_um": list(bands)}} if bands else {}),
         "skeleton": skel_meta,
         "stats": {"read_s": round(t_read, 1), "tiles_s": round(t_tiles, 1),
+                  "read_mode": "editable" if editable else "viewer",
                   "total_s": 0.0,
                   "cells": ly.cells(), "tile_files": n_files},
     }
