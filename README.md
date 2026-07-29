@@ -197,6 +197,32 @@ floe clip  data/testchip_1g5.oas --bbox 5000,5000,5100,5100 --out region.oas
   실행 중인 창이 그 위치로 점프한다. DRC 리포트 좌표를 셸에서 바로
   넘길 때 사용.
 
+### DRC 결과 브라우저 (Calibre RVE 방식)
+
+Calibre가 `DRC RESULTS DATABASE "out.db" ASCII`로 쓰는 **ASCII 결과
+데이터베이스(.db)** 를 읽어 룰별 에러 목록을 보여주고 클릭으로 점프한다.
+
+- `e` → **DRC results** 창 (비모달 — 열어둔 채 뷰 조작 가능).
+  `open .db…` 로 파일 선택, 또는 시작 시 `floe view <src> --drc out.db`.
+- 트리: 룰 체크(이름 + 룰 텍스트 + 에러 수) → 에러(#번호, poly/edge,
+  중심 좌표). 룰 행 더블클릭 = 펼침/접힘, **에러 행 더블클릭 = 점프**.
+- 점프: 에러 bbox 중심으로 이동, 뷰 폭 = 에러 크기의 8배(최소 2µm).
+  에러 도형이 **빨간 외곽선**으로 표시된다 (poly = 닫힌 폴리곤,
+  edge = 선분 + 끝점 표시). `Esc` 로 마커 삭제.
+- **`n` / `p`** = 다음/이전 에러로 순차 이동 (창의 prev/next 버튼과 동일,
+  전체 에러를 룰 순서로 순회하며 트리 선택도 따라온다).
+- 파서(`floe/drc.py`)는 순수 파이썬으로 포맷 오차에 관대하다: CRLF/빈 줄
+  무시, 선언 카운트는 참고만, 모르는 레코드 문자는 건너뜀, 잘린 파일은
+  파싱된 부분까지 사용. 포맷: `p <n> <꼭짓점수>` + 줄당 `x y`,
+  `e <n> <엣지수>` + 줄당 `x1 y1 x2 y2` (정수, um = 값/precision).
+- **CLI**: `floe drc out.db [--list]` — 룰별 요약(–list 시 에러 좌표까지).
+  GUI 없이 호스트에서 db 파일 sanity 확인용.
+- **테스트 db 생성**: `python tools/gen_drc_db.py <layout.oas> out.db
+  --checks 4 --per 6 --seed 7` — 레이아웃 bbox 안에 합성 에러를 배치하고
+  ground truth를 `out.db.manifest.json` 으로 남긴다. 생성 포맷은
+  klayout 자체 Calibre ASCII 리더(`klayout.rdb`)가 그대로 읽는 것으로
+  교차검증했다 (아이템/카테고리 수 일치).
+
 ### 단일 인스턴스 동작 (flateyes와 동일)
 
 floe는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델을 그대로 따른다:
@@ -241,8 +267,9 @@ GUI는 **GTK3/PyGObject** 셸이다. flateyes와 같은 폐쇄망 호스트
 - 인스턴스 소켓은 `GLib.io_add_watch`로, 결과 큐는 `GLib.timeout_add`(25ms)로
   서비스한다. UI 라벨은 English only (XQuartz 한글 글리프 부재 — flateyes 규칙).
 - 키: `f` fit, `+`/`-`(`=`) 줌, `r` ruler, `m` 스냅, `d` depth 다이얼로그,
-  `g` goto 다이얼로그, `c` detail cut 다이얼로그, `0`-`9` depth,
-  `Esc` 단계 해제, `q` 종료 (확인 다이얼로그).
+  `g` goto 다이얼로그, `c` detail cut 다이얼로그, `e` DRC 브라우저,
+  `n`/`p` 다음/이전 DRC 에러, `0`-`9` depth, `Esc` 단계 해제,
+  `q` 종료 (확인 다이얼로그).
 - 레이어 패널은 텍스트 목록이다 (체크박스 없음): 이름 **더블클릭**으로
   온/오프하며 꺼진 레이어는 **취소선**으로 표시된다. layer 번호로
   그룹핑되며, 같은 번호에 datatype이 여럿이면 (`11/0 M1`, `11/1 M1.1`)
@@ -486,7 +513,10 @@ alias floe="/opt/floe/venv/bin/python -m floe"
 1. ✅ 테스트용 대용량 OASIS 생성기 (`tools/gen_test_oasis.py`)
 2. ✅ 공간 인덱스(.ice) + CLI (index/info/render/clip)
 3. ✅ 네이티브 뷰어 (view): 영역 줌/팬/레이어 토글/depth/clip 저장
-4. Calibre DRC RDB 파서/조회 (KLayout `rdb` 모듈) + 에러 영역 자동 clip/뷰
+4. Calibre DRC 결과(.db) 파서/조회 + 에러 점프: ✅ 1차 (ASCII db 파서
+   `floe/drc.py`, `e` 브라우저 + `n`/`p` 점프, `floe drc`, 합성 db 생성기
+   `tools/gen_drc_db.py`; klayout.rdb 교차검증). 남은 것: 실제 Calibre
+   출력으로 호스트 검증, 에러 영역 자동 clip
 5. ~~대용량 스케일링: 인덱싱 시 레이어 그룹별 다중 패스(RAM 상한)~~
    — 운영 호스트 RAM이 1.5TB라 불필요 판정 (2026-07-28; 로드 RSS는
    파일 크기의 ~3.6배 → 100GB급 파일까지도 여유). 단일 패스가 더

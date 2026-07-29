@@ -297,6 +297,24 @@ def cmd_profile(args):
         print(text)
 
 
+def cmd_drc(args):
+    """Summarize a Calibre ASCII DRC results database."""
+    from . import drc as drc_mod
+    d = drc_mod.load_db(args.db)
+    print(f"{d.path}: cell {d.cell}, precision {d.precision:g}")
+    print(f"{len(d.checks)} checks, {d.total} errors")
+    for c in d.checks:
+        desc = c.desc.split("\n")[0] if c.desc else ""
+        print(" %-28s %6d  %s" % (c.name, len(c.errors), desc))
+        if args.list:
+            for e in c.errors:
+                x, y = e.center()
+                b = e.bbox()
+                print("   #%-5d %-4s (%.3f, %.3f) um  %.3f x %.3f"
+                      % (e.num, "poly" if e.kind == "p" else "edge",
+                         x, y, b[2] - b[0], b[3] - b[1]))
+
+
 def cmd_gtktest(args):
     """Minimal pixbuf-display matrix for diagnosing a black view.
     Three panels: (a) pixbuf loaded from a PNG file, (b) pixbuf
@@ -398,7 +416,7 @@ def cmd_view(args):
     c = open_cache(src, auto_index=args.auto_index, args=args)
     # PyGObject/GTK3 problems are reported inside import_gtk (exit 3)
     from .gui import run_viewer
-    run_viewer(c, server, goto=goto)
+    run_viewer(c, server, goto=goto, drc=args.drc)
 
 
 def main(argv=None):
@@ -478,6 +496,13 @@ def main(argv=None):
                    help="replace layer names with L<num>_<dt>")
     p.set_defaults(fn=cmd_profile)
 
+    p = sub.add_parser("drc", help="summarize a Calibre ASCII DRC "
+                                   "results database (.db)")
+    p.add_argument("db")
+    p.add_argument("--list", action="store_true",
+                   help="also list every error (center + size, um)")
+    p.set_defaults(fn=cmd_drc)
+
     p = sub.add_parser("gtktest", help="minimal pixbuf display test "
                                        "(diagnoses a black view)")
     p.add_argument("png", nargs="?", default=None,
@@ -495,6 +520,9 @@ def main(argv=None):
                    help="start centered on X,Y (um) with an X marker; "
                         "W = view width in um (omitted = fit view). "
                         "Forwarded to a running instance too.")
+    p.add_argument("--drc", default=None, metavar="FILE.db",
+                   help="preload a Calibre ASCII DRC results db and "
+                        "open the error browser (new instance only)")
     p.add_argument("--auto-index", action="store_true", default=True)
     p.set_defaults(fn=cmd_view)
 

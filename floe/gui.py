@@ -36,6 +36,9 @@ SNAP_VERTEX = 0x66FFCCFF
 SNAP_EDGE = 0x66CCFFFF
 SEL_CORE = 0xFFFFFFFF
 GOTO_MARK = 0xFF66D9FF
+DRC_MARK = 0xFF5252FF      # DRC violation outline
+
+DRC_LIST_MAX = 2000        # tree rows per check (prev/next reaches all)
 
 MIN_SPP = 0.01     # max zoom-in: 1 px = 0.01 dbu; keeps render bboxes
                    # from collapsing to zero width after int rounding
@@ -287,6 +290,14 @@ class Viewer:
         self._gdlg = None
         self._cdlg = None
         self.goto_mark = None       # world point of the last goto (X marker)
+        # DRC results browser ('e' key)
+        self._drc = None            # drc.DrcDb
+        self._drcwin = None
+        self.drc_mark = None        # {"kind": 'p'|'e', "pts": [(dbu)]}
+        self._drc_flat = []         # [(check idx, err idx)] for prev/next
+        self._drc_ord = {}          # (ci, ei) -> flat position
+        self._drc_pos = -1
+        self._drc_paths = {}        # (ci, ei) -> tree path string
         self._labels = []           # Gtk.Label pool for ruler distances
 
         self.window = Gtk.Window(title=APP)
@@ -424,6 +435,15 @@ class Viewer:
         self._sel_text = ""
         self._pick_px = None
         self.goto_mark = None
+        # a loaded DRC db belongs to the previous layout
+        self.drc_mark = None
+        self._drc = None
+        self._drc_flat = []
+        self._drc_ord = {}
+        self._drc_pos = -1
+        self._drc_paths = {}
+        if self._drcwin is not None:
+            self._drcwin.destroy()
         src = self.meta["src"]
         self.window.set_title(
             "%s - %s" % (APP, os.path.basename(src["path"])))
@@ -733,6 +753,19 @@ class Viewer:
                               BLACK, GOTO_MARK)
                 stamp_segment(disp, (gx - 10, gy + 10), (gx + 10, gy - 10),
                               BLACK, GOTO_MARK)
+        if self.drc_mark is not None:
+            pts = [(sx(x), sy(y)) for x, y in self.drc_mark["pts"]]
+            if self.drc_mark["kind"] == "p":
+                for a, b in zip(pts, pts[1:] + pts[:1]):
+                    stamp_segment(disp, a, b, BLACK, DRC_MARK)
+            else:
+                # edge records: consecutive point pairs are segments
+                for j in range(0, len(pts) - 1, 2):
+                    a, b = pts[j], pts[j + 1]
+                    stamp_segment(disp, a, b, BLACK, DRC_MARK)
+                    for px, py in (a, b):
+                        rect_outline(disp, px - 3, py - 3, px + 3,
+                                     py + 3, None, DRC_MARK)
         if self._zoomdrag is not None and self._band_cur is not None:
             x0, y0 = self._zoomdrag
             x1, y1 = self._band_cur
@@ -1313,6 +1346,12 @@ class Viewer:
             self._goto_dialog()
         elif name == "c":
             self._cut_dialog()
+        elif name == "e":
+            self._drc_window()
+        elif name == "n":
+            self._drc_step(1)
+        elif name == "p":
+            self._drc_step(-1)
         elif name == "q":
             self._confirm_quit()
         elif len(name) == 1 and name.isdigit():
@@ -1661,6 +1700,189 @@ class Viewer:
             self.spp = (window_um / self.dbu) / w
         self.redraw(immediate=True)
 
+    # ---- DRC results browser -------------------------------------------------
+    def _drc_window(self):
+        """'e': non-modal DRC error browser (Calibre-RVE style)."""
+        if self._drcwin is not None:
+            self._drcwin.present()
+            return
+        win = Gtk.Window(title="DRC results")
+        win.set_transient_for(self.window)
+        win.set_default_size(430, 520)
+        win.connect("destroy", self._on_drc_destroy)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        win.add(box)
+        top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        box.pack_start(top, False, False, 2)
+        b = Gtk.Button(label="open .db…")
+        b.connect("clicked", lambda *_: self._drc_open_dialog())
+        top.pack_start(b, False, False, 2)
+        info = Gtk.Label(label="no results database loaded")
+        info.set_xalign(0.0)
+        info.set_ellipsize(Pango.EllipsizeMode.START)
+        top.pack_start(info, True, True, 2)
+        win._info = info
+        # columns: text, position, check index, error index
+        # (error index -1 = check row, -2 = "... more" stub)
+        store = Gtk.TreeStore(str, str, int, int)
+        tree = Gtk.TreeView(model=store)
+        for j, (t, expand) in enumerate((("rule / error", True),
+                                         ("count / position", False))):
+            col = Gtk.TreeViewColumn(t, Gtk.CellRendererText(), text=j)
+            col.set_expand(expand)
+            tree.append_column(col)
+        tree.set_tooltip_column(0)
+        tree.connect("row-activated", self._on_drc_row)
+        sc = Gtk.ScrolledWindow()
+        sc.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        sc.add(tree)
+        box.pack_start(sc, True, True, 0)
+        nav = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        box.pack_start(nav, False, False, 2)
+        for text, d in (("< prev (p)", -1), ("next (n) >", 1)):
+            nb = Gtk.Button(label=text)
+            nb.connect("clicked", lambda _w, dd=d: self._drc_step(dd))
+            nav.pack_start(nb, True, True, 2)
+        hint = Gtk.Label()
+        hint.set_markup("<small>double-click an error to jump - "
+                        "Esc clears the marker</small>")
+        box.pack_start(hint, False, False, 0)
+        win._store, win._tree = store, tree
+        self._drcwin = win
+        win.show_all()
+        if self._drc is not None:
+            self._drc_fill()
+
+    def _on_drc_destroy(self, _w):
+        self._drcwin = None
+
+    def _drc_open_dialog(self):
+        dlg = Gtk.FileChooserDialog(title="open DRC results (.db)",
+                                    parent=self._drcwin or self.window,
+                                    action=Gtk.FileChooserAction.OPEN)
+        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                        "Open", Gtk.ResponseType.OK)
+        dlg.set_current_folder(
+            os.path.dirname(self.meta["src"]["path"]))
+        for name, pats in (("DRC results (*.db, *.results)",
+                            ("*.db", "*.results")),
+                           ("all files", ("*",))):
+            ff = Gtk.FileFilter()
+            ff.set_name(name)
+            for p in pats:
+                ff.add_pattern(p)
+            dlg.add_filter(ff)
+        if dlg.run() == Gtk.ResponseType.OK:
+            path = dlg.get_filename()
+            dlg.destroy()
+            self.load_drc(path)
+        else:
+            dlg.destroy()
+
+    def load_drc(self, path):
+        """Parse a Calibre ASCII DRC db and populate the browser."""
+        from . import drc as drc_mod
+        try:
+            db = drc_mod.load_db(path)
+        except Exception as exc:
+            msg = "DRC load failed: %s" % exc
+            if self._drcwin is not None:
+                self._drcwin._info.set_text(msg)
+            self._set_status(self.view_bbox(), msg)
+            return False
+        self._drc = db
+        self._drc_flat = [(ci, ei)
+                          for ci, c in enumerate(db.checks)
+                          for ei in range(len(c.errors))]
+        self._drc_ord = {k: n for n, k in enumerate(self._drc_flat)}
+        self._drc_pos = -1
+        self.drc_mark = None
+        if self._drcwin is not None:
+            self._drc_fill()
+        self._set_status(self.view_bbox(),
+                         "DRC %s: %d checks, %d errors (n/p = step)"
+                         % (os.path.basename(path), len(db.checks),
+                            db.total))
+        return True
+
+    def _drc_fill(self):
+        win, db = self._drcwin, self._drc
+        store = win._store
+        store.clear()
+        self._drc_paths = {}
+        for ci, c in enumerate(db.checks):
+            head = c.name
+            if c.desc:
+                head += "\n" + c.desc.split("\n")[0]
+            pit = store.append(None, [head, "%d" % len(c.errors),
+                                      ci, -1])
+            for ei, e in enumerate(c.errors[:DRC_LIST_MAX]):
+                x, y = e.center()
+                it = store.append(
+                    pit, ["#%d  %s" % (e.num,
+                                       "poly" if e.kind == "p"
+                                       else "edge"),
+                          "(%.3f, %.3f)" % (x, y), ci, ei])
+                self._drc_paths[(ci, ei)] = str(store.get_path(it))
+            if len(c.errors) > DRC_LIST_MAX:
+                store.append(pit, ["… %d more (use prev/next)"
+                                   % (len(c.errors) - DRC_LIST_MAX),
+                                   "", ci, -2])
+        win._info.set_text("%s — cell %s · %d checks · %d errors"
+                           % (os.path.basename(db.path), db.cell,
+                              len(db.checks), db.total))
+
+    def _on_drc_row(self, tree, path, _col):
+        store = tree.get_model()
+        it = store.get_iter(path)
+        ci, ei = store.get_value(it, 2), store.get_value(it, 3)
+        if ei < 0:  # check row: toggle its children
+            if tree.row_expanded(path):
+                tree.collapse_row(path)
+            else:
+                tree.expand_row(path, False)
+            return
+        self._drc_jump(ci, ei)
+
+    def _drc_jump(self, ci, ei):
+        db = self._drc
+        check = db.checks[ci]
+        e = check.errors[ei]
+        self._drc_pos = self._drc_ord.get((ci, ei), -1)
+        b = e.bbox()
+        w_um, h_um = b[2] - b[0], b[3] - b[1]
+        cx, cy = e.center()
+        self.goto(cx, cy, max(max(w_um, h_um) * 8.0, 2.0))
+        self.goto_mark = None  # the violation outline is the marker
+        self.drc_mark = {"kind": e.kind,
+                         "pts": [(x / self.dbu, y / self.dbu)
+                                 for x, y in e.pts]}
+        self._set_status(
+            self.view_bbox(),
+            "DRC %s #%d/%d · %s · %.3f x %.3f um at (%.3f, %.3f)"
+            % (check.name, e.num, len(check.errors),
+               "poly" if e.kind == "p" else "edge",
+               w_um, h_um, cx, cy))
+        self._display()
+
+    def _drc_step(self, delta):
+        """n/p keys and the prev/next buttons walk every error."""
+        if not self._drc_flat:
+            return
+        if self._drc_pos < 0:
+            pos = 0 if delta > 0 else len(self._drc_flat) - 1
+        else:
+            pos = (self._drc_pos + delta) % len(self._drc_flat)
+        ci, ei = self._drc_flat[pos]
+        self._drc_jump(ci, ei)
+        win = self._drcwin
+        ps = self._drc_paths.get((ci, ei))
+        if win is not None and ps is not None:
+            path = Gtk.TreePath.new_from_string(ps)
+            win._tree.expand_to_path(path)
+            win._tree.set_cursor(path, None, False)
+            win._tree.scroll_to_cell(path, None, False, 0.0, 0.0)
+
     # ---- ruler / snap / pick -----------------------------------------------
     def _update_cursor(self, ev):
         bbox = self.view_bbox()
@@ -1727,6 +1949,8 @@ class Viewer:
             self._snap_res = None
         elif self.rulers:
             self.rulers = []
+        elif self.drc_mark is not None:
+            self.drc_mark = None
         elif self.goto_mark is not None:
             self.goto_mark = None
         self._display()
@@ -1917,9 +2141,12 @@ class Viewer:
             Gtk.main_quit()
 
 
-def run_viewer(cache, server_sock=None, goto=None):
+def run_viewer(cache, server_sock=None, goto=None, drc=None):
     import_gtk()
     viewer = Viewer(cache, server_sock, goto=goto)
+    if drc:
+        if viewer.load_drc(os.path.abspath(drc)):
+            viewer._drc_window()
     try:
         import signal as _signal
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, _signal.SIGINT,
