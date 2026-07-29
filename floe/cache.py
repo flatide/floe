@@ -249,6 +249,13 @@ class Cache:
     def band_tile_path(self, r, c, k):
         return os.path.join(self.dir, f"tiles_b{k}", f"t_{r}_{c}.oas")
 
+    def merge_tile_path(self, r, c, k):
+        """Merged twin of band k: the band's geometry fused into a few
+        coarse polygons (see _merge_band). Shown instead of the raw
+        band when the cut drops it; may not exist (sparse band, legacy
+        cache)."""
+        return os.path.join(self.dir, f"tiles_m{k}", f"t_{r}_{c}.oas")
+
     def n_bands(self):
         """Size bands per tile; 1 for legacy (unbanded) caches."""
         b = (self.meta or {}).get("bands")
@@ -809,6 +816,92 @@ def rebuild_texts(cache, log=print, text_cap=None, text_tile_cap=None,
     log(f"[index] texts refreshed ({time.perf_counter() - t_all:.0f}s)")
 
 
+_MERGE_CTX = None
+
+
+def _merge_one_tile(rc):
+    """Build the merged twins of one tile from its existing band files
+    (fork worker; no source layout involved)."""
+    cdir, th_dbu, opts = _MERGE_CTX
+    r, c = rc
+    nb = len(th_dbu) + 1
+    edges = [0] + list(th_dbu) + [None]
+    made = 0
+    for k in range(1, nb):
+        path = os.path.join(cdir, f"tiles_b{k}", f"t_{r}_{c}.oas")
+        if not os.path.isfile(path):
+            continue
+        bly = db.Layout(False)   # viewer read: arrays stay compact
+        bly.read(path)
+        btop = bly.cell(f"TILE_{r}_{c}_b{k}")
+        if btop is not None:
+            made += bool(_merge_band(
+                bly, btop, r, c, k, edges[nb - k],
+                os.path.join(cdir, f"tiles_m{k}", f"t_{r}_{c}.oas"),
+                opts))
+        bly._destroy()
+    return made
+
+
+def rebuild_merge(cache, log=print, jobs=None):
+    """Add merged twins to an existing banded cache in place (floe
+    index --merge-only): band files are read back tile by tile, no
+    source read, no re-tiling. Workers are plain forks (the per-band
+    Region is the only real memory)."""
+    t0 = time.perf_counter()
+    meta = cache.meta or cache.load()
+    if not meta.get("bands"):
+        raise SystemExit("floe: --merge-only needs a banded cache "
+                         "(this cache is legacy single-file tiles; "
+                         "reindex instead)")
+    th_dbu = [t / meta["dbu"] for t in meta["bands"]["thresholds_um"]]
+    nb = len(th_dbu) + 1
+    for k in range(1, nb):
+        d = os.path.join(cache.dir, f"tiles_m{k}")
+        os.makedirs(d, exist_ok=True)
+        for f in os.listdir(d):
+            os.remove(os.path.join(d, f))
+    g = meta["grid"]
+    coords = [(r, c) for r in range(g["ny"]) for c in range(g["nx"])]
+    global _MERGE_CTX
+    _MERGE_CTX = (cache.dir, th_dbu, save_opts())
+    if jobs is None:
+        jobs = os.cpu_count() or 1
+    jobs = max(1, min(jobs, len(coords)))
+    made = done = 0
+    step = max(1, len(coords) // 10)
+
+    def note():
+        if done % step == 0 or done == len(coords):
+            log(f"[index] merge twins {done}/{len(coords)} tiles "
+                f"({time.perf_counter() - t0:.0f}s)")
+    try:
+        ctx = None
+        if jobs > 1:
+            try:
+                ctx = multiprocessing.get_context("fork")
+            except ValueError:
+                pass
+        if ctx is not None:
+            with ctx.Pool(jobs, maxtasksperchild=1) as pool:
+                for m in pool.imap_unordered(_merge_one_tile, coords):
+                    made += m
+                    done += 1
+                    note()
+        else:
+            for rc in coords:
+                made += _merge_one_tile(rc)
+                done += 1
+                note()
+    finally:
+        _MERGE_CTX = None
+    meta["bands"]["merge"] = {"close_frac": MERGE_CLOSE_FRAC}
+    with open(cache.meta_path, "w") as f:
+        json.dump(meta, f, indent=1)
+    log(f"[index] merged twins added: {made} band files "
+        f"({time.perf_counter() - t0:.0f}s)")
+
+
 def load_region(cache, x0, y0, x1, y1, log=None, max_tiles=None,
                 layers=None):
     """Load tiles intersecting bbox (dbu) into a fresh mosaic Layout.
@@ -923,7 +1016,123 @@ def _tile_lod(tgt, top_ci, out_path, cap=LOD_SHAPE_CAP, always=False):
     return cut
 
 
-def _tile_bands(tgt, cdir, r, c, th_dbu, opts):
+# merged-twin knobs: closing distance = frac x band upper edge (fuses
+# gaps the twin's display scales cannot resolve anyway); a tile-layer
+# still holding more polygons than the cap after closing is sparse
+# scatter - a twin would not pay, skip it (the raw band stays available)
+MERGE_CLOSE_FRAC = 0.5
+MERGE_POLY_CAP = 4096
+# bands up to this many members build their twin from exact geometry;
+# above it the envelope walk below stands in (expanding hundreds of
+# millions of fill members just to fuse them again measured 9x total
+# index time - the exact thing the band partitioner avoids)
+MERGE_EXPAND_CAP = 500_000
+_CONT_FAN = 4096        # own-container members worth expanding
+_INST_FAN = 64          # instance-array members worth placing singly
+
+
+def _twin_boxes(bly, btop):
+    """{layer_index: [Box, ...]} coarse coverage of a band layout in
+    tile coordinates, WITHOUT expanding shape or instance arrays:
+    small containers contribute member bboxes, huge ones (fill fields)
+    their subtree envelope, and big instance arrays one per-layer
+    array bbox (cached in C++). Dense content - the only content that
+    needs a twin - is envelope-faithful; sparse scatter overstates,
+    which the polygon cap downstream already treats as 'no twin'."""
+    lis = bly.layer_indexes()
+    memo = {}
+
+    def walk(ci):
+        out = memo.get(ci)
+        if out is not None:
+            return out
+        cell = bly.cell(ci)
+        out = {}
+        for li in lis:
+            sh = cell.shapes(li)
+            n = sh.size()
+            if not n:
+                continue
+            if n > _CONT_FAN:
+                b = cell.bbox_per_layer(li)
+                if not b.empty():
+                    out.setdefault(li, []).append(b)
+            else:
+                dst = out.setdefault(li, [])
+                for s in sh.each():
+                    dst.append(s.bbox())
+        for inst in cell.each_inst():
+            ia = inst.cell_inst
+            child = walk(ia.cell_index)
+            if not child:
+                continue
+            if ia.size() > _INST_FAN:
+                for li in child:
+                    b = ia.bbox(bly, li)
+                    if not b.empty():
+                        out.setdefault(li, []).append(b)
+            else:
+                for t in ia.each_trans():
+                    for li, boxes in child.items():
+                        dst = out.setdefault(li, [])
+                        for b in boxes:
+                            dst.append(b.transformed(t))
+        for dst in out.values():
+            if len(dst) > 4 * MERGE_POLY_CAP:
+                env = db.Box()      # runaway scatter: collapse early
+                for b in dst:
+                    env += b
+                dst[:] = [env]
+        memo[ci] = out
+        return out
+
+    return walk(btop.cell_index())
+
+
+def _merge_band(bly, btop, r, c, k, upper_dbu, out_path, opts,
+                members=None):
+    """Write the merged twin of one band: geometry (exact when small,
+    envelope-walked when huge - see _twin_boxes) with gaps below
+    MERGE_CLOSE_FRAC x band-upper-edge closed (sized +d/-d fuses fill
+    fields into slabs - klayout merge alone only joins TOUCHING
+    polygons, and dummy fill never touches), staircase vertices
+    smoothed away. The twin substitutes the raw band on views where
+    the cut would hide it: same layers, few big polygons, so layer
+    colors/toggles keep working (no prerendering). Returns polygons
+    written (0 = no file)."""
+    if members is None:
+        members = sum(cell.shapes(li).size() for cell in bly.each_cell()
+                      for li in bly.layer_indexes())
+    d = max(1, int(upper_dbu * MERGE_CLOSE_FRAC))
+    boxes = (None if members <= MERGE_EXPAND_CAP
+             else _twin_boxes(bly, btop))
+    mly = db.Layout(True)
+    mly.dbu = bly.dbu
+    mc = mly.create_cell(f"TILE_{r}_{c}_m{k}")
+    total = 0
+    for li in bly.layer_indexes():
+        if boxes is None:
+            reg = db.Region(bly.begin_shapes(btop, li))
+        else:
+            reg = db.Region()
+            for b in boxes.get(li, ()):
+                reg.insert(b)
+        if reg.is_empty():
+            continue
+        reg = reg.sized(d).sized(-d)            # closing
+        reg = reg.smoothed(max(1, d // 4))      # sub-quarter-px at use
+        n = reg.count()
+        if not n or n > MERGE_POLY_CAP:
+            continue
+        mc.shapes(mly.layer(bly.get_info(li))).insert(reg)
+        total += n
+    if total:
+        mly.write(out_path, opts)
+    mly._destroy()
+    return total
+
+
+def _tile_bands(tgt, cdir, r, c, th_dbu, opts, merge=True):
     """Partition the tile into len(th_dbu)+1 SIZE-BAND files.
 
     Band k holds shapes whose max(bbox w, h) falls in
@@ -1066,6 +1275,7 @@ def _tile_bands(tgt, cdir, r, c, th_dbu, opts):
                 if np_:
                     put(k, ci, li, part, np_)
     counts = []
+    t_merge = 0.0
     for k in range(nb):
         bly = blys[k]
         # drop cells whose subtree holds no shapes in this band: their
@@ -1086,8 +1296,15 @@ def _tile_bands(tgt, cdir, r, c, th_dbu, opts):
         if bcount[k]:
             bly.write(
                 os.path.join(cdir, f"tiles_b{k}", f"t_{r}_{c}.oas"), opts)
+            if merge and k >= 1:    # band 0 is never cut - no twin
+                t = time.perf_counter()
+                _merge_band(bly, bly.cell(btop), r, c, k, edges[nb - k],
+                            os.path.join(cdir, f"tiles_m{k}",
+                                         f"t_{r}_{c}.oas"), opts,
+                            members=bcount[k])
+                t_merge += time.perf_counter() - t
         bly._destroy()
-    return counts
+    return counts, t_merge
 
 
 DENSITY_LEVELS = 12     # depth levels recorded in the per-tile density table
@@ -1284,7 +1501,8 @@ _TILE_CTX = None
 def _build_one_tile(rc):
     """Build tile (r, c) from _TILE_CTX. Runs in a fork worker (or inline
     for jobs=1). Returns (r, c, wrote, lod_depth, density, step_times)."""
-    ly, top_ci, bbox, grid, cdir, opts, bands_dbu, tile_editable = _TILE_CTX
+    (ly, top_ci, bbox, grid, cdir, opts, bands_dbu, tile_editable,
+     merge) = _TILE_CTX
     r, c = rc
     x0 = bbox.left + c * grid["tile_w"]
     y0 = bbox.bottom + r * grid["tile_h"]
@@ -1321,10 +1539,14 @@ def _build_one_tile(rc):
     tm["compact"] = time.perf_counter() - t
     t = time.perf_counter()
     if bands_dbu:
-        _tile_bands(tgt, cdir, r, c, bands_dbu, opts)
+        _counts, t_merge = _tile_bands(tgt, cdir, r, c, bands_dbu, opts,
+                                       merge=merge)
+        if t_merge:
+            tm["merge"] = t_merge
     else:
+        t_merge = 0.0
         tgt.write(os.path.join(cdir, "tiles", f"t_{r}_{c}.oas"), opts)
-    tm["write"] = time.perf_counter() - t
+    tm["write"] = time.perf_counter() - t - t_merge
     t = time.perf_counter()
     lod_d = _tile_lod(tgt, ci, os.path.join(cdir, "tiles_lod",
                                             f"t_{r}_{c}.oas"),
@@ -1339,7 +1561,8 @@ def _build_one_tile(rc):
 def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
                 bands=BAND_THRESHOLDS_UM, read_mode=None, gov=True,
                 mem_gb=None, mem_floor_gb=None, tile_tgt=None,
-                text_cap=None, text_tile_cap=None, skel_texts=None):
+                text_cap=None, text_tile_cap=None, skel_texts=None,
+                merge=True):
     """Scan the source file once and build the tile cache.
 
     jobs: max fork workers for the tiling phase (None = all cores;
@@ -1362,8 +1585,12 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
     n_bands = len(bands) + 1 if bands else 0
     subs = ([f"tiles_b{k}" for k in range(n_bands)] if bands
             else ["tiles"]) + ["tiles_lod"]
+    if bands and merge:
+        subs += [f"tiles_m{k}" for k in range(1, n_bands)]
     stale = [d for d in ("tiles", "tiles_lod", "tiles_b0", "tiles_b1",
-                         "tiles_b2", "tiles_b3", "tiles_b4", "tiles_b5")
+                         "tiles_b2", "tiles_b3", "tiles_b4", "tiles_b5",
+                         "tiles_m1", "tiles_m2", "tiles_m3", "tiles_m4",
+                         "tiles_m5")
              if os.path.isdir(os.path.join(cdir, d))]
     for sub in sorted(set(subs) | set(stale)):  # drop prior builds' files
         d = os.path.join(cdir, sub)
@@ -1466,7 +1693,8 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
     bands_dbu = [int(round(um / ly.dbu)) for um in bands] if bands else None
     global _TILE_CTX
     _TILE_CTX = (ly, top_ci, bbox, grid, cdir, save_opts(),
-                 bands_dbu, (tile_tgt or "").lower().startswith("edit"))
+                 bands_dbu, (tile_tgt or "").lower().startswith("edit"),
+                 bool(merge))
     total_gb = _total_ram_gb()
     try:
         if ctx is not None and gov and total_gb:
@@ -1608,7 +1836,9 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
         "layers": layers,
         "density": {"levels": DENSITY_LEVELS, "tiles": density_tiles},
         "lod": {"cap": LOD_SHAPE_CAP, "tiles": lod_tiles},
-        **({"bands": {"thresholds_um": list(bands)}} if bands else {}),
+        **({"bands": {"thresholds_um": list(bands),
+                      **({"merge": {"close_frac": MERGE_CLOSE_FRAC}}
+                         if merge else {})}} if bands else {}),
         **({"texts_thinned": [
             {"layer": ly.get_info(li).layer,
              "datatype": ly.get_info(li).datatype}

@@ -68,28 +68,38 @@ class Mosaic:
             memo[ci] = n
         return n
 
-    def keys_for(self, tiles, bands=None):
+    def keys_for(self, tiles, bands=None, merged=None):
         """Load keys for `tiles`: all bands by default (exact content -
-        snap/pick/clip), or only the given band indexes (renders)."""
+        snap/pick/clip), or only the given band indexes (renders).
+        merged: band indexes whose MERGED TWIN to load instead of the
+        raw band - the coarse stand-in a render shows for bands the
+        cut drops (never part of snap/pick/clip)."""
         if self.bands == 1:
             return list(tiles)
         ks = range(self.bands) if bands is None else bands
-        return [(r, c, k) for (r, c) in tiles for k in ks]
+        keys = [(r, c, k) for (r, c) in tiles for k in ks]
+        if merged:
+            keys += [(r, c, k, "m") for (r, c) in tiles for k in merged]
+        return keys
 
     def _band_file(self, key):
         if self.bands == 1:
             return self.path_fn(*key), f"TILE_{key[0]}_{key[1]}"
+        if len(key) == 4:   # merged twin of band k
+            r, c, k, _ = key
+            return (self.cache.merge_tile_path(r, c, k),
+                    f"TILE_{r}_{c}_m{k}")
         r, c, k = key
         return (self.cache.band_tile_path(r, c, k),
                 f"TILE_{r}_{c}_b{k}")
 
-    def ensure(self, tiles, stop=None, bands=None):
+    def ensure(self, tiles, stop=None, bands=None, merged=None):
         """Load missing tiles; returns True if the layout changed.
         stop: optional callable checked between tile loads - loading a
         fat tile can take seconds, and newer work (a pan) must not wait
         for the rest; progress made so far is kept."""
         changed = False
-        keys = self.keys_for(tiles, bands)
+        keys = self.keys_for(tiles, bands, merged)
         for key in keys:
             if stop is not None and stop():
                 return changed

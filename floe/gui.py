@@ -19,7 +19,7 @@ import sys
 import time
 
 from . import cache as cache_mod
-from .service import RenderWorker
+from .service import RenderWorker, CUT_LEVEL_PX
 from .viewport import MAX_LIVE_TILES
 
 Gtk = Gdk = GdkPixbuf = GLib = Pango = None
@@ -255,7 +255,7 @@ class LayerRow(object):
 
 class Viewer:
     def __init__(self, cache, server_sock=None, show=True, goto=None,
-                 cut_px=None, dump=False):
+                 cut_level=None, dump=False):
         self.server_sock = server_sock
         self.cx = self.cy = 0
         self.spp = 1.0              # dbu per screen pixel
@@ -276,10 +276,15 @@ class Viewer:
         self._layer_rows = {}
         self.depth_value = 999      # 999 = full hierarchy
         self._depth_used = "?"      # depth of the last frame ("?" = none yet)
-        # detail cut: shapes below this many screen px are dropped from
-        # live renders (size-banded caches only; 0 = off); --cut-px
-        # sets the start value, the `c` dialog changes it at runtime
-        self.cut_px = 2.0 if cut_px is None else max(0.0, float(cut_px))
+        # detail cut LEVEL: 0 = off, higher = more aggressive. Users
+        # only ever see the level; the screen-px threshold behind each
+        # level (CUT_LEVEL_PX) is an implementation detail that may be
+        # retuned later without changing what "L1" means. --cut-level
+        # sets the start value, the `c` dialog changes it at runtime.
+        self.cut_level = (1 if cut_level is None else
+                          max(0, min(len(CUT_LEVEL_PX) - 1,
+                                     int(cut_level))))
+        self.cut_px = CUT_LEVEL_PX[self.cut_level]
         self.dump = bool(dump)      # --dump: save debug frame dumps
         self._quitting = False
         # ruler / snap / pick state
@@ -1396,8 +1401,8 @@ class Viewer:
         d = self._depth()
         lbl = "depth: full" if d is None else "depth: %d" % d
         if self.meta.get("bands"):
-            lbl += " · cut: %s" % ("off" if self.cut_px <= 0
-                                   else "%gpx" % self.cut_px)
+            lbl += " · cut: %s" % ("off" if self.cut_level <= 0
+                                   else "L%d" % self.cut_level)
         return lbl
 
     def _set_depth(self, n):
@@ -1409,8 +1414,9 @@ class Viewer:
                 spin.set_value(self.depth_value)
         self._on_depth()
 
-    def _set_cut(self, px):
-        self.cut_px = max(0.0, float(px))
+    def _set_cut_level(self, n):
+        self.cut_level = max(0, min(len(CUT_LEVEL_PX) - 1, int(n)))
+        self.cut_px = CUT_LEVEL_PX[self.cut_level]
         self._on_depth()  # same refresh: status label + re-render
 
     def _on_depth(self):
@@ -1575,33 +1581,32 @@ class Viewer:
         box.set_margin_end(14)
         dlg.add(box)
         box.pack_start(Gtk.Label(
-            label="hide shapes smaller than N screen px (0 = off)"),
+            label="detail cut level (higher = lighter wide views)"),
             False, False, 0)
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         box.pack_start(row, False, False, 0)
-        spin = Gtk.SpinButton.new_with_range(0, 16, 0.5)
-        spin.set_digits(1)
-        spin.set_value(self.cut_px)
-        spin.connect("value-changed",
-                     lambda s: self._set_cut(s.get_value()))
-        spin.connect("activate", lambda *_: dlg.destroy())  # Enter = ok
-        dlg._spin = spin
-        row.pack_start(spin, False, False, 0)
-        for preset in (0, 1, 2, 4):
-            b = Gtk.Button(label="off" if preset == 0 else "%dpx" % preset)
+        btns = []
+        for lvl in range(len(CUT_LEVEL_PX)):
+            b = Gtk.ToggleButton(label="off" if lvl == 0 else "L%d" % lvl)
+            b.set_active(lvl == self.cut_level)
 
-            def _apply(_w, p=preset):
-                self._set_cut(p)
-                s = getattr(self._cdlg, "_spin", None)
-                if s is not None and s.get_value() != p:
-                    s.set_value(p)
-            b.connect("clicked", _apply)
+            def _apply(w, n=lvl):
+                if not w.get_active():   # ignore the untoggle event
+                    return
+                for i, other in enumerate(btns):
+                    if i != n and other.get_active():
+                        other.set_active(False)
+                self._set_cut_level(n)
+            b.connect("toggled", _apply)
+            btns.append(b)
             row.pack_start(b, False, False, 0)
         note = Gtk.Label()
         note.set_markup(
-            "<small>whole size bands below the cut are neither loaded"
-            "\nnor drawn on wide views; snap/pick/clip stay exact."
-            "\nthe status line shows the active cut (cut&lt;0.35um)."
+            "<small>each level hides finer detail from live renders;"
+            "\nareas below the cut draw as merged outlines instead"
+            "\n(when the cache carries them - floe index --merge-only"
+            "\nupgrades old caches). snap/pick/clip stay exact."
+            "\nthe status line shows the physical cut (cut&lt;0.35um)."
             "\nkeys: c = this dialog</small>")
         note.set_xalign(0.0)
         box.pack_start(note, False, False, 0)
@@ -1620,7 +1625,7 @@ class Viewer:
             self._cdlg = None
             self.window.present()
         dlg.connect("destroy", _gone)
-        self._dialog_show(dlg, spin)
+        self._dialog_show(dlg, btns[self.cut_level])
 
     # ---- goto (Calibre-style jump to coordinates) ---------------------------
     GOTO_HINT = ("um coordinates. window = view width after the jump"
@@ -2159,9 +2164,9 @@ class Viewer:
 
 
 def run_viewer(cache, server_sock=None, goto=None, drc=None,
-               cut_px=None, dump=False):
+               cut_level=None, dump=False):
     import_gtk()
-    viewer = Viewer(cache, server_sock, goto=goto, cut_px=cut_px,
+    viewer = Viewer(cache, server_sock, goto=goto, cut_level=cut_level,
                     dump=dump)
     if drc:
         if viewer.load_drc(os.path.abspath(drc)):

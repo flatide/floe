@@ -65,13 +65,15 @@ def cmd_index(args):
     from . import cache as cache_mod
     caps = dict(text_cap=args.text_cap, text_tile_cap=args.text_tile_cap,
                 skel_texts=args.skel_texts)
-    if args.skeleton_only or args.texts_only:
+    if args.skeleton_only or args.texts_only or args.merge_only:
         c = cache_mod.Cache(args.src)
         if not c.exists():
             raise SystemExit("floe: no cache to upgrade; run a full "
                              "'floe index' first")
         c.load()
-        if args.texts_only:
+        if args.merge_only:
+            cache_mod.rebuild_merge(c, jobs=args.jobs)
+        elif args.texts_only:
             cache_mod.rebuild_texts(c, **caps)
         else:
             cache_mod.add_skeleton(c, **caps)
@@ -89,7 +91,8 @@ def cmd_index(args):
                           read_mode=args.read_mode,
                           gov=not args.no_gov, mem_gb=args.mem,
                           mem_floor_gb=args.mem_floor,
-                          tile_tgt=args.tile_tgt, **caps)
+                          tile_tgt=args.tile_tgt,
+                          merge=not args.no_merge, **caps)
 
 
 def cmd_info(args):
@@ -134,6 +137,18 @@ def cmd_info(args):
             parts.append(f"b{k}({edges[k]}): {len(files)} files "
                          f"{sz / 1e6:.1f}MB")
         print("bands      : " + "  ".join(parts))
+        mparts = []
+        for k in range(1, n + 1):
+            d = os.path.join(c.dir, f"tiles_m{k}")
+            files = os.listdir(d) if os.path.isdir(d) else []
+            if files:
+                sz = sum(os.path.getsize(os.path.join(d, f))
+                         for f in files)
+                mparts.append(f"m{k}: {len(files)} files "
+                              f"{sz / 1e6:.1f}MB")
+        print("merged     : " + ("  ".join(mparts) if mparts else
+                                 "none (floe index --merge-only adds "
+                                 "cut stand-ins)"))
     print(f"{'layer':>8}  {'name':<12} {'stored shapes':>14}")
     for l in m["layers"]:
         print(f"{l['layer']:>5}/{l['datatype']:<2} {l['name']:<12} "
@@ -437,7 +452,7 @@ def cmd_view(args):
     # PyGObject/GTK3 problems are reported inside import_gtk (exit 3)
     from .gui import run_viewer
     run_viewer(c, server, goto=goto, drc=args.drc,
-               cut_px=args.cut_px, dump=args.dump)
+               cut_level=args.cut_level, dump=args.dump)
 
 
 def main(argv=None):
@@ -462,6 +477,15 @@ def main(argv=None):
                         "texts and rebuild the skeleton labels "
                         "(--text-cap / --text-tile-cap / --skel-texts "
                         "adjust the label budgets)")
+    p.add_argument("--merge-only", action="store_true",
+                   help="add merged twins to an existing banded cache "
+                        "without re-tiling (reads the band files back; "
+                        "no source read). Twins stand in for bands the "
+                        "viewer's cut drops")
+    p.add_argument("--no-merge", action="store_true",
+                   help="skip building merged twins during a full "
+                        "index (cut-dropped bands disappear instead "
+                        "of drawing as coarse outlines)")
     p.add_argument("--jobs", type=int, default=None, metavar="N",
                    help="max fork workers for the tiling phase (default: "
                         "all cores; 1 = sequential). A memory governor "
@@ -597,10 +621,14 @@ def main(argv=None):
                    help="preload a Calibre ASCII DRC results db and "
                         "open the error browser (new instance only)")
     p.add_argument("--auto-index", action="store_true", default=True)
-    p.add_argument("--cut-px", type=float, default=None, metavar="PX",
-                   help="starting detail cut: shapes below PX screen "
-                        "pixels are skipped in live renders (default 2; "
-                        "0 = off; the `c` dialog changes it at runtime)")
+    p.add_argument("--cut-level", type=int, default=None, metavar="N",
+                   choices=(0, 1, 2, 3),
+                   help="starting detail cut level: 0 = off, 1 = "
+                        "default, higher = lighter wide views (finer "
+                        "detail drawn as merged outlines when the "
+                        "cache carries them). The `c` dialog changes "
+                        "it at runtime; the px thresholds behind the "
+                        "levels are internal and may be retuned")
     p.add_argument("--layout-mode", default=None,
                    choices=("viewer", "editable"),
                    help="tile read mode (default: per-cache heuristic, "

@@ -24,10 +24,14 @@ _SNAP_CAP = 400   # max shapes examined per snap query
 _PICK_CAP = 64    # max candidates per pick query
 
 # shapes smaller than this many screen pixels are cut from live renders
-# (their whole size band is neither loaded nor drawn); snap/pick/clip
-# always use every band, so measurements stay exact. The viewer's
-# --cut-px / `c` dialog override per job.
-CUT_PX = 2.0
+# (their whole size band is neither loaded nor drawn - a merged twin
+# stands in when the cache has one); snap/pick/clip always use every
+# band, so measurements stay exact. Users pick a CUT LEVEL (the `c`
+# dialog / view --cut-level); the px value behind each level is an
+# implementation detail that may be retuned without changing what
+# "level 1" means to a user. CUT_PX = the level-1 default.
+CUT_LEVEL_PX = (0.0, 2.0, 4.0, 8.0)
+CUT_PX = CUT_LEVEL_PX[1]
 
 
 def _bands_for_view(cache, x0, x1, w, cut_px=None):
@@ -49,21 +53,31 @@ def _bands_for_view(cache, x0, x1, w, cut_px=None):
 
 def _apply_bands(mosaic, renderer, need):
     """Show loaded band cells in `need`, hide the rest (a hidden cell's
-    subtree costs nothing at draw time)."""
+    subtree costs nothing at draw time). A band the cut drops shows its
+    merged twin instead when one is loaded - coarse slabs in the layer's
+    live color, so the cut no longer blanks fill fields."""
     if mosaic.bands == 1 or need is None:
         return
     show, hide = [], []
     for key, ci in mosaic.loaded.items():
-        if ci is not None:
-            (show if key[2] in need else hide).append(ci)
+        if ci is None:
+            continue
+        if len(key) == 4:   # merged twin: visible exactly when its
+            on = key[2] not in need   # raw band is cut
+        else:
+            on = key[2] in need
+        (show if on else hide).append(ci)
     renderer.set_cell_visibility(show, hide)
+
+
+_TWIN_RE = re.compile(r"^TILE_\d+_\d+_m\d+")
 
 
 def _strip_band(name):
     """User-facing cell name: drop the mosaic's tile-isolation tag
     (@t<key>), size-band markers (__b<k> suffix or TILE_r_c_b<k>) and
     klayout's $n rename counters after them."""
-    name = re.sub(r"@t[\d_]+$", "", name)
+    name = re.sub(r"@t[\d_m]+$", "", name)
     name = re.sub(r"__b\d+(\$\d+)?$", "", name)
     return re.sub(r"^(TILE_\d+_\d+)_b\d+(\$\d+)?$", r"\1", name)
 
@@ -80,6 +94,11 @@ def _iter_global_polys(mosaic, layers_sel, box):
             continue
         it = ly.begin_shapes_touching(top_ci, li, box)
         while not it.at_end():
+            if _TWIN_RE.match(it.cell().name):
+                # merged twins are draw-only stand-ins: their fused
+                # slabs must never win a snap/pick over real geometry
+                it.next()
+                continue
             sh = it.shape()
             if sh.is_text():
                 t = sh.text.transformed(it.trans())
@@ -199,6 +218,8 @@ def _drawn_estimate(cache, mosaic, tiles, need, x0, y0, x1, y1):
     tw, th = g["tile_w"], g["tile_h"]
     if not tw or not th:
         return None
+    twin = ([k for k in range(mosaic.bands) if k not in need]
+            if need is not None else None)
     total = 0.0
     for (r, c) in tiles:
         tx0 = g["x0"] + c * tw
@@ -208,7 +229,7 @@ def _drawn_estimate(cache, mosaic, tiles, need, x0, y0, x1, y1):
         if ox <= 0 or oy <= 0:
             continue
         frac = (ox * oy) / float(tw * th)
-        for key in mosaic.keys_for([(r, c)], need):
+        for key in mosaic.keys_for([(r, c)], need, twin):
             n = mosaic.counts.get(key)
             if n:
                 total += n * frac
@@ -265,6 +286,11 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
                       if need is not None and len(need) < mosaic.bands
                       else None)
             cut_kv = {"cut_um": cut_um} if cut_um else {}
+            # bands the cut drops render as their merged twins (coarse
+            # slab stand-ins); missing twin files load as None once
+            twin = (tuple(k for k in range(mosaic.bands)
+                          if k not in need)
+                    if need is not None else None)
             if lod is not None and depth is not None and \
                     all(lod[2].get("%d,%d" % rc, 99) >= depth
                         for rc in tiles):
@@ -318,7 +344,8 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
                              if key not in mosaic.loaded)
                 if fresh - vfresh >= 4 and x1 > x0 and y1 > y0:
                     tl = time.perf_counter()
-                    if mosaic.ensure(vtiles, stop=newer, bands=need):
+                    if mosaic.ensure(vtiles, stop=newer, bands=need,
+                                     merged=twin):
                         renderer.refresh()
                     t_load += time.perf_counter() - tl
                     if newer():
@@ -348,7 +375,9 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
                         return  # newer work queued: skip the margin
                     bg = True   # margin upgrade: no status churn
             tl = time.perf_counter()
-            if use_mosaic.ensure(tiles, stop=newer, bands=need):
+            if use_mosaic.ensure(tiles, stop=newer, bands=need,
+                                 merged=twin if use_mosaic is mosaic
+                                 else None):
                 use_renderer.refresh()
             t_load += time.perf_counter() - tl
             if newer():
