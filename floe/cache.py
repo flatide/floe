@@ -10,7 +10,7 @@
                         borders): band 0 holds the largest shapes, the
                         last band the smallest (see _tile_bands). A
                         render loads only the bands whose shapes reach
-                        ~FLOE_CUT_PX pixels at the current zoom, so
+                        ~cut_px pixels (default 2) at the current zoom, so
                         wide views neither parse nor draw subpixel fill
                         arrays. Empty bands/tiles have no file.
     tiles_lod/...       depth-limited companion tiles (see _tile_lod)
@@ -59,6 +59,73 @@ def _rss_gb(pid):
         import subprocess
         out = subprocess.check_output(["ps", "-o", "rss=", "-p", str(pid)])
         return int(out.split()[0]) / 1e6
+    except Exception:
+        return None
+
+
+def _rss_many_gb(pids):
+    """{pid: RSS GB} for several processes (cheap /proc reads on Linux,
+    one batched ps on Darwin)."""
+    out = {}
+    if not pids:
+        return out
+    if os.path.isdir("/proc"):
+        for pid in pids:
+            r = _rss_gb(pid)
+            if r is not None:
+                out[pid] = r
+        return out
+    try:
+        import subprocess
+        txt = subprocess.run(
+            ["ps", "-o", "pid=,rss=", "-p",
+             ",".join(str(p) for p in pids)],
+            capture_output=True).stdout
+        for ln in txt.decode().splitlines():
+            f = ln.split()
+            if len(f) == 2:
+                out[int(f[0])] = int(f[1]) / 1e6
+    except Exception:
+        pass
+    return out
+
+
+def _total_ram_gb():
+    """Physical RAM in GB (POSIX sysconf; Darwin sysctl fallback)."""
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 1e9
+    except (AttributeError, ValueError, OSError):
+        pass
+    try:
+        import subprocess
+        return int(subprocess.check_output(
+            ["sysctl", "-n", "hw.memsize"])) / 1e9
+    except Exception:
+        return None
+
+
+def _avail_ram_gb():
+    """Memory the system can hand out without swapping, in GB (Linux
+    MemAvailable; Darwin vm_stat free+inactive+speculative+purgeable)."""
+    try:
+        with open("/proc/meminfo") as f:
+            for ln in f:
+                if ln.startswith("MemAvailable:"):
+                    return int(ln.split()[1]) / 1e6   # kB -> GB
+    except OSError:
+        pass
+    try:
+        import subprocess
+        out = subprocess.check_output(["vm_stat"]).decode()
+        page, pages = 4096, 0
+        for ln in out.splitlines():
+            if "page size of" in ln:
+                page = int(ln.split("page size of")[1].split()[0])
+            for key in ("Pages free:", "Pages inactive:",
+                        "Pages speculative:", "Pages purgeable:"):
+                if ln.startswith(key):
+                    pages += int(ln.split(":")[1].strip().rstrip("."))
+        return pages * page / 1e9
     except Exception:
         return None
 
@@ -116,7 +183,7 @@ def save_opts():
     return opt
 
 
-def viewer_mode_preferred(meta):
+def viewer_mode_preferred(meta, mode=None):
     """Pick the Layout mode for READING this cache's data.
 
     Repetition-heavy sources (bitcell/fill arrays) materialize far more
@@ -126,8 +193,8 @@ def viewer_mode_preferred(meta):
     choose by stored-shapes-per-byte: testchip-class flat data ~0.15/B,
     array-monster data ~13/B - threshold 1.0.
 
-    FLOE_LAYOUT_MODE=viewer|editable overrides the heuristic (testing)."""
-    mode = os.environ.get("FLOE_LAYOUT_MODE", "").lower()
+    mode='viewer'|'editable' (--layout-mode) overrides the heuristic."""
+    mode = (mode or "").lower()
     if mode.startswith("view"):
         return True
     if mode.startswith("edit"):
@@ -277,31 +344,25 @@ def collect_texts(ly, top_ci, text_layers=None, log=None, cap=None,
     entirely (~2600x faster, identical output).
 
     Layers under the per-layer budget (default TEXT_LAYER_CAP,
-    FLOE_TEXT_CAP overrides, 0 = unlimited) are collected in full - a
+    --text-cap overrides, 0 = unlimited) are collected in full - a
     count-only pass classifies every layer up front, aborting at
     budget+1 so even a billion-text layer costs seconds. Over-budget
     layers - production files carry per-shape marker texts in the
     BILLIONS (a host chip hit 1.7e9 texts / 754 GB RSS) - are NOT
     dropped: they are collected per tile through bbox-restricted
     queries capped at tile_cap texts each (default TEXT_TILE_CAP,
-    FLOE_TEXT_TILE_CAP overrides), so coverage degrades spatially
+    --text-tile-cap overrides), so coverage degrades spatially
     uniformly, near-zoom picking keeps working everywhere, and total
     work is bounded by tiles x tile_cap instead of the text count.
     No human decision needed; the thinning is logged and recorded in
     meta. tile_cap 0 disables thinning (over-budget layers dropped
     whole, the pre-0.5.3 behavior); grid None likewise."""
     if cap is None:
-        try:
-            cap = int(os.environ.get("FLOE_TEXT_CAP", ""))
-        except ValueError:
-            cap = TEXT_LAYER_CAP
+        cap = TEXT_LAYER_CAP
     if cap <= 0:
         cap = None
     if tile_cap is None:
-        try:
-            tile_cap = int(os.environ.get("FLOE_TEXT_TILE_CAP", ""))
-        except ValueError:
-            tile_cap = TEXT_TILE_CAP
+        tile_cap = TEXT_TILE_CAP
     layers = _text_layers(ly) if text_layers is None else text_layers
     top = ly.cell(top_ci)
     out = []
@@ -583,10 +644,10 @@ def _skel_harvest(ly, dmaps, stop_cell, cell, trans, min_feat, big, n,
 
 SKEL_DETAIL_DT = 30000  # datatype offset per level of detail twin layers
 SKEL_DETAIL_LEVELS = 2  # harvest big shapes from cells this deep
-SKEL_TEXT_CAP = 50_000  # total label texts kept (FLOE_SKEL_TEXTS)
+SKEL_TEXT_CAP = 50_000  # total label texts kept (--skel-texts)
 
 
-def build_skeleton(ly, top, texts, out_path, log=print):
+def build_skeleton(ly, top, texts, out_path, log=print, skel_texts=None):
     """Structural far-zoom model, written as a tiny skeleton.oas.
 
     The depth-0 content of the far view (large top-level shapes,
@@ -655,10 +716,7 @@ def build_skeleton(ly, top, texts, out_path, log=print):
     # label texts (level-1 twin): the skeleton renders live at every
     # far scale, so bound the total label count - a uniform stride
     # over the (already per-tile-thinned) collection keeps the spread
-    try:
-        tcap = int(os.environ.get("FLOE_SKEL_TEXTS", ""))
-    except ValueError:
-        tcap = SKEL_TEXT_CAP
+    tcap = SKEL_TEXT_CAP if skel_texts is None else skel_texts
     if tcap > 0 and len(texts) > tcap:
         step = len(texts) / tcap
         texts = [texts[int(i * step)] for i in range(tcap)]
@@ -670,7 +728,8 @@ def build_skeleton(ly, top, texts, out_path, log=print):
             "texts": len(texts)}
 
 
-def add_skeleton(cache, log=print):
+def add_skeleton(cache, log=print, text_cap=None, text_tile_cap=None,
+                 skel_texts=None):
     """Upgrade an existing cache in place (one source read, no re-tiling):
     floe index --skeleton-only."""
     t0 = time.perf_counter()
@@ -682,9 +741,11 @@ def add_skeleton(cache, log=print):
     top = pick_top_cell(ly, log)
     with _phase_monitor("collecting texts"):
         texts, thinned = collect_texts(ly, top.cell_index(), log=log,
-                                       grid=meta["grid"])
+                                       cap=text_cap, grid=meta["grid"],
+                                       tile_cap=text_tile_cap)
     out = os.path.join(cache.dir, "skeleton.oas")
-    meta["skeleton"] = build_skeleton(ly, top, texts, out, log)
+    meta["skeleton"] = build_skeleton(ly, top, texts, out, log,
+                                      skel_texts=skel_texts)
     meta.pop("texts_dropped", None)
     meta.pop("texts_thinned", None)
     if thinned:
@@ -698,13 +759,14 @@ def add_skeleton(cache, log=print):
         f"({time.perf_counter() - t0:.0f}s)")
 
 
-def rebuild_texts(cache, log=print):
+def rebuild_texts(cache, log=print, text_cap=None, text_tile_cap=None,
+                  skel_texts=None):
     """Refresh the text handling of an existing banded cache in place
     (floe index --texts-only), NO re-tiling: strips any texts still
     living in the b0 tiles (pre-0.5.4 caches carried them - texts now
     exist only as far-view skeleton labels) and rebuilds the skeleton
-    with a fresh bounded collection. Combine with FLOE_TEXT_CAP /
-    FLOE_TEXT_TILE_CAP / FLOE_SKEL_TEXTS to change label budgets."""
+    with a fresh bounded collection. Combine with --text-cap /
+    --text-tile-cap / --skel-texts to change label budgets."""
     t_all = time.perf_counter()
     meta = cache.meta or cache.load()
     if not meta.get("bands"):
@@ -742,7 +804,8 @@ def rebuild_texts(cache, log=print):
         log(f"[index] b0 texts stripped: {stripped} tiles rewritten, "
             f"{removed} text-only tiles removed")
     # skeleton rebuild carries the fresh labels + meta update
-    add_skeleton(cache, log)
+    add_skeleton(cache, log, text_cap=text_cap,
+                 text_tile_cap=text_tile_cap, skel_texts=skel_texts)
     log(f"[index] texts refreshed ({time.perf_counter() - t_all:.0f}s)")
 
 
@@ -767,7 +830,8 @@ def load_region(cache, x0, y0, x1, y1, log=None, max_tiles=None,
             lm.map(db.LayerInfo(l, d), i)
         lo = db.LoadLayoutOptions()
         lo.set_layer_map(lm, False)
-    ly = db.Layout(not viewer_mode_preferred(cache.meta))
+    ly = db.Layout(not viewer_mode_preferred(
+        cache.meta, getattr(cache, "layout_mode", None)))
     ly.dbu = cache.meta["dbu"]
     top = ly.create_cell("FLOE_REGION")
     n = 0
@@ -1220,7 +1284,7 @@ _TILE_CTX = None
 def _build_one_tile(rc):
     """Build tile (r, c) from _TILE_CTX. Runs in a fork worker (or inline
     for jobs=1). Returns (r, c, wrote, lod_depth, density, step_times)."""
-    ly, top_ci, bbox, grid, cdir, opts, bands_dbu = _TILE_CTX
+    ly, top_ci, bbox, grid, cdir, opts, bands_dbu, tile_editable = _TILE_CTX
     r, c = rc
     x0 = bbox.left + c * grid["tile_w"]
     y0 = bbox.bottom + r * grid["tile_h"]
@@ -1232,11 +1296,9 @@ def _build_one_tile(rc):
     # sources is ~100x faster (stress30: 20.9s -> 0.2s) and the clip
     # stays compact instead of materializing every member. The legacy
     # path keeps editable (its single write carries texts and needs
-    # _strip_texts' erase). FLOE_TILE_TGT=editable restores the old
+    # _strip_texts' erase). --tile-tgt editable restores the old
     # behavior for on-host comparison.
-    editable_tgt = (not bands_dbu or os.environ.get(
-        "FLOE_TILE_TGT", "").lower().startswith("edit"))
-    tgt = db.Layout(editable_tgt)
+    tgt = db.Layout(not bands_dbu or tile_editable)
     tgt.dbu = ly.dbu
     # pre-create layers with source infos at identical indexes:
     # clip_into copies shapes onto anonymous layers otherwise, and
@@ -1275,19 +1337,25 @@ def _build_one_tile(rc):
 
 
 def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
-                bands=BAND_THRESHOLDS_UM, read_mode=None):
+                bands=BAND_THRESHOLDS_UM, read_mode=None, gov=True,
+                mem_gb=None, mem_floor_gb=None, tile_tgt=None,
+                text_cap=None, text_tile_cap=None, skel_texts=None):
     """Scan the source file once and build the tile cache.
 
-    jobs: fork workers for the tiling phase (None = all cores;
+    jobs: max fork workers for the tiling phase (None = all cores;
     1 = sequential; platforms without fork fall back to sequential).
     bands: ascending size-band edges in um (see _tile_bands), or None
     for a legacy single-file-per-tile cache.
-    read_mode: 'viewer' (default; also FLOE_INDEX_READ env) keeps
-    repetitions as compact shape arrays while reading the source -
-    array-heavy production files otherwise materialize every member in
-    editable mode (~46 B each: a 10 GB file was observed at 400 GB
-    RSS). 'editable' restores the old behavior (flat sources read
-    ~3x faster there)."""
+    read_mode: 'viewer' (default) keeps repetitions as compact shape
+    arrays while reading the source - array-heavy production files
+    otherwise materialize every member in editable mode (~46 B each:
+    a 10 GB file was observed at 400 GB RSS). 'editable' restores the
+    old behavior (flat sources read ~3x faster there).
+    gov/mem_gb/mem_floor_gb: the tiling memory governor (see the
+    tiling section below); mem_gb caps the whole run (--mem).
+    tile_tgt: 'editable' rebuilds tile clips the pre-0.5.0 way.
+    text_cap/text_tile_cap/skel_texts: skeleton label budgets
+    (see collect_texts / build_skeleton)."""
     t_all = time.perf_counter()
     src = os.path.abspath(src)
     cdir = cache_dir_for(src)
@@ -1303,8 +1371,7 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
         for f in os.listdir(d):
             os.remove(os.path.join(d, f))
 
-    mode = (read_mode or os.environ.get("FLOE_INDEX_READ")
-            or "viewer").lower()
+    mode = (read_mode or "viewer").lower()
     editable = mode.startswith("edit")
     st = os.stat(src)
     log(f"[index] reading {src} ({st.st_size / 1e9:.2f} GB, "
@@ -1350,7 +1417,8 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
     with _phase_monitor("collecting texts"):
         all_texts, thinned_lis = collect_texts(ly, top_ci,
                                                text_layer_lis, log,
-                                               grid=grid)
+                                               cap=text_cap, grid=grid,
+                                               tile_cap=text_tile_cap)
     log(f"[index] {len(all_texts)} texts collected for skeleton "
         f"labels ({time.perf_counter() - t0:.1f}s)")
 
@@ -1398,9 +1466,102 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
     bands_dbu = [int(round(um / ly.dbu)) for um in bands] if bands else None
     global _TILE_CTX
     _TILE_CTX = (ly, top_ci, bbox, grid, cdir, save_opts(),
-                 bands_dbu)
+                 bands_dbu, (tile_tgt or "").lower().startswith("edit"))
+    total_gb = _total_ram_gb()
     try:
-        if ctx is not None:
+        if ctx is not None and gov and total_gb:
+            # Memory governor: worker count follows measured demand, not
+            # just core count (a 16 GB laptop OOMed at cpu_count workers
+            # x 4-8 GB/tile on adversarial content). One central tile
+            # runs solo first to gauge per-worker private memory; then
+            # concurrency is re-derived every poll from what the system
+            # can still hand out, and the estimate keeps learning from
+            # live worker RSS in case denser tiles exceed the probe.
+            floor_gb = mem_floor_gb or max(2.0, 0.05 * total_gb)
+            parent_gb = _rss_gb(os.getpid()) or 0.0
+            est_gb = 0.5      # per-worker private demand, learned live
+            pending = list(coords)
+            probe_rc = (n // 2, n // 2)   # central tile: usually densest
+            pending.remove(probe_rc)
+            pending.insert(0, probe_rc)
+            log(f"[index] tiling with up to {jobs} fork workers "
+                f"(memory-governed; {total_gb:.0f} GB RAM"
+                + (f", --mem cap {mem_gb:g} GB" if mem_gb else "")
+                + f", probing tile {probe_rc[0]},{probe_rc[1]} solo)...")
+            if mem_gb and mem_gb <= parent_gb + 1.0:
+                log(f"[index][warn] --mem {mem_gb:g} GB leaves <1 GB "
+                    f"over the loaded source ({parent_gb:.1f} GB RSS); "
+                    f"tiling will run 1 worker at a time")
+            inflight = {}     # AsyncResult -> (r, c)
+            probing = True
+            allowed = last_allowed = 1
+            avail = None
+            t_beat = time.perf_counter()
+            t_note = 0.0
+            # maxtasksperchild=1: a tile's memory really returns to the
+            # OS when it finishes (long-lived workers sit at their worst
+            # tile's RSS forever), and each respawn re-shares the parent
+            # image copy-on-write
+            with ctx.Pool(jobs, maxtasksperchild=1) as pool:
+                while pending or inflight:
+                    # private demand ~= child RSS minus the COW-shared
+                    # parent image (idle fresh workers read as ~0)
+                    kids = _rss_many_gb(
+                        [p.pid for p in multiprocessing.active_children()])
+                    priv = sum(max(0.0, r - parent_gb)
+                               for r in kids.values())
+                    for r in kids.values():
+                        est_gb = max(est_gb, r - parent_gb)
+                    avail = _avail_ram_gb()
+                    if probing:
+                        allowed = 1
+                    elif avail is None:
+                        allowed = jobs
+                    else:
+                        # what the pie (still free + already claimed by
+                        # workers) buys at est GB per worker, with slack
+                        # for tiles denser than anything seen yet
+                        budget = avail + priv - floor_gb
+                        if mem_gb:
+                            # --mem: hard ceiling for the whole run =
+                            # loaded source + all worker private memory
+                            budget = min(budget, mem_gb - parent_gb)
+                        allowed = max(1, min(jobs,
+                                             int(budget / (est_gb * 1.25))))
+                    if (not probing and allowed != last_allowed
+                            and allowed < jobs and pending
+                            and time.perf_counter() - t_note >= 10.0):
+                        t_note = time.perf_counter()
+                        log(f"[index] governor: {allowed} workers "
+                            f"(~{est_gb:.1f} GB/worker, "
+                            f"{avail:.1f} GB free)")
+                    last_allowed = allowed
+                    while pending and len(inflight) < allowed:
+                        rc = pending.pop(0)
+                        inflight[pool.apply_async(
+                            _build_one_tile, (rc,))] = rc
+                    done_now = [ar for ar in inflight if ar.ready()]
+                    for ar in done_now:
+                        res = ar.get()
+                        del inflight[ar]
+                        take(*res)
+                        probing = False
+                    now = time.perf_counter()
+                    if done_now:
+                        t_beat = now
+                    elif now - t_beat >= INDEX_HEARTBEAT_S:
+                        t_beat = now
+                        bd = _breakdown()
+                        log(f"[index] tiles {done}/{len(coords)} done, "
+                            f"{len(inflight)} workers busy "
+                            f"(~{est_gb:.1f} GB/worker"
+                            + (f", {avail:.1f} GB free"
+                               if avail is not None else "")
+                            + f"; {now - t0:.0f}s"
+                            + (f"; {bd}" if bd else "") + ")")
+                    if not done_now:
+                        time.sleep(0.5)
+        elif ctx is not None:
             log(f"[index] tiling with {jobs} fork workers...")
             with ctx.Pool(jobs) as pool:
                 it = pool.imap_unordered(_build_one_tile, coords)
@@ -1432,7 +1593,8 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
     # --- skeleton (far-zoom structural model) ---
     t0 = time.perf_counter()
     skel_meta = build_skeleton(ly, top, all_texts,
-                               os.path.join(cdir, "skeleton.oas"), log)
+                               os.path.join(cdir, "skeleton.oas"), log,
+                               skel_texts=skel_texts)
     log(f"[index] skeleton: {skel_meta['shapes']} shapes "
         f"({time.perf_counter() - t0:.1f}s)")
 

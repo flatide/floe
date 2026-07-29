@@ -25,15 +25,16 @@ _PICK_CAP = 64    # max candidates per pick query
 
 # shapes smaller than this many screen pixels are cut from live renders
 # (their whole size band is neither loaded nor drawn); snap/pick/clip
-# always use every band, so measurements stay exact
-CUT_PX = float(os.environ.get("FLOE_CUT_PX", "2"))
+# always use every band, so measurements stay exact. The viewer's
+# --cut-px / `c` dialog override per job.
+CUT_PX = 2.0
 
 
 def _bands_for_view(cache, x0, x1, w, cut_px=None):
     """(needed band indexes, cut size in dbu) for a view of w pixels
     across x1-x0 dbu; (None, None) on legacy caches. A band is needed
     when its largest shapes would reach the cut size in pixels
-    (cut_px, falling back to the FLOE_CUT_PX default; 0 = no cut)."""
+    (cut_px, falling back to the CUT_PX default; 0 = no cut)."""
     b = cache.meta.get("bands")
     if not b:
         return None, None

@@ -94,8 +94,9 @@ python3 -m venv --system-site-packages .venv
   압축 → editable 읽기에서 전부 구체화(개당 ~46B RAM)
 - 생성 자체는 블록별 임시 파일 + viewer 모드 병합이라 RAM ~2GB로 동작
 - 결과 파일은 shapes/byte가 높아 floe가 자동으로 viewer 모드를 선택함.
-  병리 자체를 보려면 `FLOE_LAYOUT_MODE=editable`로 강제.
-  `floe index`는 현재 소스를 editable로 읽으므로 인덱싱에는 펼침 RAM이 필요.
+  병리 자체를 보려면 `--layout-mode editable`로 강제.
+  (`floe index`도 v0.4.3부터 기본 viewer read — `--read-mode editable`이
+  펼침 RAM을 요구하는 옛 경로.)
 
 ## 레이어 맵
 
@@ -132,8 +133,8 @@ floe clip  data/testchip_1g5.oas --bbox 5000,5000,5100,5100 --out region.oas
   (~46B/멤버 — 운영 호스트에서 9.83GB 파일이 **400GB RSS**까지 관측).
   viewer 모드는 배열을 압축 상태로 유지해 stress30 실측 기준 read
   **27배 빠르고 RSS 3.9배 절약**, `clip_into` 결과·밴드 파일 내용·렌더
-  픽셀 완전 동일 검증. `--read-mode editable`(또는 `FLOE_INDEX_READ`)로
-  이전 동작 복원 가능 (flat 소스는 editable read가 ~3배 빠름).
+  픽셀 완전 동일 검증. `--read-mode editable`로 이전 동작 복원 가능
+  (flat 소스는 editable read가 ~3배 빠름).
   read 중에는 1분마다 `[index] reading... N GB RSS (Ss)` 하트비트가
   나온다 (별도 프로세스라 C++ read가 GIL을 잡고 있어도 동작).
   read 이후의 무음 구간도 진행이 보인다: 레이어 카운트와 텍스트 레이어
@@ -148,19 +149,19 @@ floe clip  data/testchip_1g5.oas --bbox 5000,5000,5100,5100 --out region.oas
   `clip --exact`).
 - **수집은 무인·유계** (v0.5.3): 양산 파일은 도형마다 붙는 마커
   텍스트가 수십억 개일 수 있다 (호스트 실측 17억 개/754GB RSS).
-  카운트 전용 패스가 레이어별 예산(기본 100만, `FLOE_TEXT_CAP`,
+  카운트 전용 패스가 레이어별 예산(기본 100만, `--text-cap`,
   0=무제한)을 판정하고, 초과 레이어는 타일별 bbox 질의로 최대
-  N개(기본 1만, `FLOE_TEXT_TILE_CAP`)씩 **공간 균일하게** 표본화한다 —
+  N개(기본 1만, `--text-tile-cap`)씩 **공간 균일하게** 표본화한다 —
   작업량이 텍스트 수와 무관하게 유계라 17억짜리 레이어도 몇 분에
   끝나고, 사람 판단이 필요 없다. 스켈레톤에 넣는 라벨 총량은
-  `FLOE_SKEL_TEXTS`(기본 5만)로 다시 한 번 균일 표본화된다.
+  `--skel-texts`(기본 5만)로 다시 한 번 균일 표본화된다.
   솎임은 로그 + meta(`texts_thinned`) + `floe info`에 표시.
 - **텍스트 정책 변경은 재인덱싱 없이**: `floe index <src> --texts-only`
   — 구버전 캐시의 b0 잔존 텍스트 제거 + 스켈레톤 라벨 재생성만 수행
-  (b1~b3 무변경). 캡 env와 조합해 수십 분짜리 조정으로 끝난다.
+  (b1~b3 무변경). 캡 옵션과 조합해 수십 분짜리 조정으로 끝난다.
 - **밴드 파티션 v2** (v0.5.0): 타일 클립도 viewer 모드로 수행 —
   어레이 소스의 `clip_into`가 ~100배 빨라진다 (stress30 실측 20.9→0.2s;
-  `FLOE_TILE_TGT=editable`로 이전 동작 복원). 셀×레이어 컨테이너마다
+  `--tile-tgt editable`로 이전 동작 복원). 셀×레이어 컨테이너마다
   최대 256멤버를 샘플해 **단일 크기(uniform) 컨테이너**(필/어레이 —
   실제 양산 데이터의 대부분)를 µs에 판별하고, uniform이면 Region 전개
   없이 `Shapes.insert(Shapes)` 레코드째 복사한다 (배열은 배열로, 박스는
@@ -383,8 +384,8 @@ klayout은 서브픽셀 도형도 전부 순회하며 그리므로(멤버당 비
   로드하고, 이미 로드된 미세 밴드는 klayout hidden-cell로 드로우에서
   제외한다. 컷이 발동하면 상태줄에 `cut<0.35um` 형태로 표시.
 - **런타임 조절**: `c` 키 → detail cut 다이얼로그 (off/1/2/4px 프리셋 +
-  0.5px 단위 스핀, 실시간 적용; off = 항상 전체 밴드). 시작 기본값은
-  `FLOE_CUT_PX` 환경변수(기본 2). 현재 값은 상태바 우측
+  0.5px 단위 스핀, 실시간 적용; off = 항상 전체 밴드). 시작값은
+  `view --cut-px`(기본 2). 현재 값은 상태바 우측
   `depth: full · cut: 2px`에 상시 표시.
 - 효과 (midi 스트레스 캐시, 16타일 full depth 광역 뷰):
   **5,082ms → 17ms** (draw 4,528→16ms). 근접 줌은 전 밴드 로드 = 기존과
@@ -559,14 +560,28 @@ alias floe="/opt/floe/venv/bin/python -m floe"
   → 타일 로딩 50배 가속).
 - `clip_into` 사용 시 타겟 레이아웃에 레이어를 미리 생성해야 한다.
   안 그러면 anonymous 레이어로 복사되어 OASIS writer가 통째로 버린다.
-- **타일 빌드는 fork 병렬** (`--jobs`, 기본 = 코어 수). klayout 바인딩은
-  C++ 실행 중 GIL을 잡고 있어 파이썬 스레드로는 병렬화가 안 된다(실측
-  1.0배). 대신 소스 read 후 fork하면 로드된 레이아웃이 copy-on-write로
-  공유되어 재읽기·메모리 증가 없이 워커들이 타일을 나눠 만든다. 결과는
-  순차 빌드와 바이트 단위로 동일 (fork 없는 플랫폼은 순차 폴백).
+- **타일 빌드는 fork 병렬** (`--jobs`, 기본 = 코어 수 상한). klayout
+  바인딩은 C++ 실행 중 GIL을 잡고 있어 파이썬 스레드로는 병렬화가 안
+  된다(실측 1.0배). 대신 소스 read 후 fork하면 로드된 레이아웃이
+  copy-on-write로 공유되어 재읽기 없이 워커들이 타일을 나눠 만든다.
+  결과는 순차 빌드와 바이트 단위로 동일 (fork 없는 플랫폼은 순차 폴백).
+- **메모리 거버너 (v0.5.5)**: 워커별 타일 빌드 메모리(Region 전개 등)는
+  COW와 무관한 사유 메모리라, 코어 수만큼 워커를 띄우면 작은 기계에서
+  OOM이 난다(16GB 맥 + stress30: 10워커 × 4~8GB 실측). 인덱서는 중앙
+  타일 1개를 단독 실행해 워커당 실수요를 측정한 뒤, `허용 워커 수 =
+  (가용 RAM + 워커 사유분 − 바닥 여유) / (추정 × 1.25)`를 0.5초마다
+  재계산해 디스패치를 조인다. 추정치는 라이브 워커 RSS로 계속 상향
+  학습(프로브보다 무거운 타일 대비). 워커는 타일 1개마다 재fork되어
+  (`maxtasksperchild=1`) 끝난 타일의 메모리가 OS로 실제 반환된다.
+  로그: `governor: N workers (~X GB/worker, Y GB free)`. `--jobs`는
+  상한으로 유지되고, `--mem GB`가 실행 전체(로드된 소스 + 워커)의
+  메모리 상한 — 다른 프로그램·사용자 몫을 남겨야 하는 공유 호스트용.
+  `--no-gov`가 예전 동작(무조건 N워커), `--mem-floor GB`가 시스템
+  가용 메모리 바닥 여유(기본 max(2, RAM의 5%)).
 - **메모리**: 로드된 레이아웃 RSS ≈ 파일 크기의 ~3.6배 (1.5GB → 5.4GB
-  실측). 15GB급 파일은 호스트 RAM ~55GB 이상 필요 — 부족하면 스왑으로
-  인덱싱이 수 배 느려진다. 뷰어는 타일만 로딩하므로 영향 없음.
+  실측, flat 기준 — viewer read는 어레이 소스에서 그보다 훨씬 작음).
+  부족하면 거버너가 워커를 줄여 완주는 하지만 그만큼 느려진다. 뷰어는
+  타일만 로딩하므로 영향 없음.
 
 ## 로드맵
 

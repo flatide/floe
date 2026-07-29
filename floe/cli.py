@@ -45,6 +45,9 @@ def parse_bbox_um(s, dbu):
 def open_cache(src, auto_index, args):
     from . import cache as cache_mod
     c = cache_mod.Cache(src)
+    # --layout-mode viewer|editable overrides the per-cache read-mode
+    # heuristic everywhere this cache handle is used
+    c.layout_mode = getattr(args, "layout_mode", None)
     if not c.exists():
         if not auto_index:
             raise SystemExit(f"no cache for {src}; run: floe index {src}")
@@ -60,6 +63,8 @@ def open_cache(src, auto_index, args):
 
 def cmd_index(args):
     from . import cache as cache_mod
+    caps = dict(text_cap=args.text_cap, text_tile_cap=args.text_tile_cap,
+                skel_texts=args.skel_texts)
     if args.skeleton_only or args.texts_only:
         c = cache_mod.Cache(args.src)
         if not c.exists():
@@ -67,9 +72,9 @@ def cmd_index(args):
                              "'floe index' first")
         c.load()
         if args.texts_only:
-            cache_mod.rebuild_texts(c)
+            cache_mod.rebuild_texts(c, **caps)
         else:
-            cache_mod.add_skeleton(c)
+            cache_mod.add_skeleton(c, **caps)
         return
     c = cache_mod.Cache(args.src)
     if c.exists() and not args.force:
@@ -81,7 +86,10 @@ def cmd_index(args):
              else tuple(sorted(float(t) for t in args.bands.split(","))))
     cache_mod.build_index(args.src, tile_bytes=args.tile_mb * 1e6,
                           jobs=args.jobs, bands=bands,
-                          read_mode=args.read_mode)
+                          read_mode=args.read_mode,
+                          gov=not args.no_gov, mem_gb=args.mem,
+                          mem_floor_gb=args.mem_floor,
+                          tile_tgt=args.tile_tgt, **caps)
 
 
 def cmd_info(args):
@@ -102,18 +110,16 @@ def cmd_info(args):
     print(f"index time : {m['stats']['total_s']}s "
           f"(read {m['stats']['read_s']}s, tiles {m['stats']['tiles_s']}s)")
     shapes = sum(l["stored_shapes"] for l in m["layers"])
-    print(f"read mode  : %s (%.2f shapes/byte%s)" % (
-        "viewer" if cache_mod.viewer_mode_preferred(m) else "editable",
-        shapes / max(1, m["src"]["size"]),
-        ", forced by FLOE_LAYOUT_MODE"
-        if os.environ.get("FLOE_LAYOUT_MODE") else ""))
+    print(f"read mode  : %s (%.2f shapes/byte; --layout-mode overrides)"
+          % ("viewer" if cache_mod.viewer_mode_preferred(m)
+             else "editable", shapes / max(1, m["src"]["size"])))
     tinfo = m.get("texts_thinned") or m.get("texts_dropped")
     if tinfo:
         kind = "thinned" if m.get("texts_thinned") else "dropped"
         print(f"texts      : {kind} layers "
               + ", ".join(f"{t['layer']}/{t['datatype']}" for t in tinfo)
               + "  (over per-layer cap; kept per-tile - "
-                "FLOE_TEXT_CAP / FLOE_TEXT_TILE_CAP adjust)")
+                "--text-cap / --text-tile-cap adjust)")
     if m.get("bands"):
         th = m["bands"]["thresholds_um"]
         n = len(th)
@@ -430,7 +436,8 @@ def cmd_view(args):
     c = open_cache(src, auto_index=args.auto_index, args=args)
     # PyGObject/GTK3 problems are reported inside import_gtk (exit 3)
     from .gui import run_viewer
-    run_viewer(c, server, goto=goto, drc=args.drc)
+    run_viewer(c, server, goto=goto, drc=args.drc,
+               cut_px=args.cut_px, dump=args.dump)
 
 
 def main(argv=None):
@@ -453,12 +460,42 @@ def main(argv=None):
                    help="refresh text handling of an existing banded "
                         "cache without re-tiling: strip pre-0.5.4 b0 "
                         "texts and rebuild the skeleton labels "
-                        "(FLOE_TEXT_CAP / FLOE_TEXT_TILE_CAP / "
-                        "FLOE_SKEL_TEXTS adjust the label budgets)")
+                        "(--text-cap / --text-tile-cap / --skel-texts "
+                        "adjust the label budgets)")
     p.add_argument("--jobs", type=int, default=None, metavar="N",
-                   help="fork workers for the tiling phase (default: all "
-                        "cores; 1 = sequential). Workers share the loaded "
-                        "layout copy-on-write, so memory stays ~flat.")
+                   help="max fork workers for the tiling phase (default: "
+                        "all cores; 1 = sequential). A memory governor "
+                        "probes one tile solo, then keeps only as many "
+                        "workers busy as free RAM affords (see --mem / "
+                        "--mem-floor / --no-gov).")
+    p.add_argument("--mem", type=float, default=None, metavar="GB",
+                   help="memory ceiling for this index run: loaded "
+                        "source + tile workers stay under it. Use when "
+                        "other programs (or users) need their share of "
+                        "RAM. Default: bounded only by free RAM")
+    p.add_argument("--mem-floor", type=float, default=None, metavar="GB",
+                   help="free-RAM reserve the governor never dips into "
+                        "(default: max(2, 5%% of RAM))")
+    p.add_argument("--no-gov", action="store_true",
+                   help="disable the memory governor and always run "
+                        "--jobs workers (pre-0.5.5 behavior; can OOM "
+                        "on small machines)")
+    p.add_argument("--text-cap", type=int, default=None, metavar="N",
+                   help="per-layer text budget when collecting skeleton "
+                        "labels (default 1,000,000; layers over it are "
+                        "thinned per tile; 0 = unlimited)")
+    p.add_argument("--text-tile-cap", type=int, default=None, metavar="N",
+                   help="per-tile text sample kept for over-budget "
+                        "layers (default 10,000; 0 = drop those layers "
+                        "whole)")
+    p.add_argument("--skel-texts", type=int, default=None, metavar="N",
+                   help="total far-view skeleton labels kept (default "
+                        "50,000; 0 = unlimited)")
+    p.add_argument("--tile-tgt", default=None,
+                   choices=("viewer", "editable"),
+                   help="layout mode for tile clip targets (default "
+                        "viewer; editable = pre-0.5.0 path, for "
+                        "comparison runs)")
     p.add_argument("--bands", default="0.125,0.5,2",
                    help="size-band edges in um (ascending); shapes are "
                         "split per band so wide views skip subpixel "
@@ -466,11 +503,10 @@ def main(argv=None):
                         "tiles (default: 0.125,0.5,2)")
     p.add_argument("--read-mode", default=None,
                    choices=("viewer", "editable"),
-                   help="source read mode (default viewer, or "
-                        "FLOE_INDEX_READ env): viewer keeps repetition "
-                        "arrays compact - editable materializes every "
-                        "member (~46 B each; a 10 GB array-heavy file "
-                        "was observed at 400 GB RSS)")
+                   help="source read mode (default viewer): viewer keeps "
+                        "repetition arrays compact - editable "
+                        "materializes every member (~46 B each; a 10 GB "
+                        "array-heavy file was observed at 400 GB RSS)")
     p.set_defaults(fn=cmd_index)
 
     p = sub.add_parser("info", help="show cache/layout summary")
@@ -490,6 +526,10 @@ def main(argv=None):
                    help="hierarchy depth (0=top only, 999/omit=full)")
     p.add_argument("--max-tiles", type=int, default=64)
     p.add_argument("--auto-index", action="store_true", default=True)
+    p.add_argument("--layout-mode", default=None,
+                   choices=("viewer", "editable"),
+                   help="tile read mode (default: per-cache heuristic, "
+                        "see 'floe info')")
     p.set_defaults(fn=cmd_render)
 
     p = sub.add_parser("clip", help="save a region as a new OASIS file")
@@ -502,12 +542,18 @@ def main(argv=None):
                    help="clip from the original file (slow, boundary-exact)")
     p.add_argument("--max-tiles", type=int, default=256)
     p.add_argument("--auto-index", action="store_true", default=True)
+    p.add_argument("--layout-mode", default=None,
+                   choices=("viewer", "editable"),
+                   help="tile read mode (default: per-cache heuristic)")
     p.set_defaults(fn=cmd_clip)
 
     p = sub.add_parser("probe", help="test the viewer's render service "
                                      "headlessly (spawn + queues + frames); "
                                      "diagnoses a black viewer")
     p.add_argument("src")
+    p.add_argument("--layout-mode", default=None,
+                   choices=("viewer", "editable"),
+                   help="tile read mode (default: per-cache heuristic)")
     p.set_defaults(fn=cmd_probe)
 
     p = sub.add_parser("profile", help="emit a structure-only profile "
@@ -551,6 +597,17 @@ def main(argv=None):
                    help="preload a Calibre ASCII DRC results db and "
                         "open the error browser (new instance only)")
     p.add_argument("--auto-index", action="store_true", default=True)
+    p.add_argument("--cut-px", type=float, default=None, metavar="PX",
+                   help="starting detail cut: shapes below PX screen "
+                        "pixels are skipped in live renders (default 2; "
+                        "0 = off; the `c` dialog changes it at runtime)")
+    p.add_argument("--layout-mode", default=None,
+                   choices=("viewer", "editable"),
+                   help="tile read mode (default: per-cache heuristic, "
+                        "see 'floe info'; new instance only)")
+    p.add_argument("--dump", action="store_true",
+                   help="save display-path debug dumps to /tmp/floe_*.png "
+                        "(XQuartz black-view diagnosis; new instance only)")
     p.set_defaults(fn=cmd_view)
 
     args = ap.parse_args(argv)

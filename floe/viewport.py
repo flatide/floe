@@ -35,7 +35,8 @@ class Mosaic:
         # seconds to ms and klayout.lay renders arrays natively. Flat
         # caches stay editable (viewer-mode reads are ~3x slower there);
         # see cache.viewer_mode_preferred.
-        self.ly = db.Layout(not viewer_mode_preferred(cache.meta))
+        self.ly = db.Layout(not viewer_mode_preferred(
+            cache.meta, getattr(cache, "layout_mode", None)))
         self.ly.dbu = cache.meta["dbu"]
         # pre-create layers in meta order: layer indexes (= draw order
         # and default stipple assignment) must not depend on which tile

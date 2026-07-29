@@ -22,9 +22,10 @@ Reading the result:
   viewer mode   - instant, tiny RAM (what floe picks via its
                   shapes-per-byte heuristic)
   editable mode - materializes everything: ~46 B/shape, minutes on old
-                  hosts (FLOE_LAYOUT_MODE=editable to force in floe;
-                  note `floe index` always reads the source in editable
-                  mode today, so indexing needs the full expansion RAM)
+                  hosts (--layout-mode editable to force in floe;
+                  `floe index` reads the source in viewer mode by
+                  default since 0.4.3 - --read-mode editable restores
+                  the full-expansion behavior)
 """
 import argparse
 import os
@@ -174,9 +175,9 @@ def main():
     print("[gen] editable read needs ~%.1f GB RAM (%.0f B/shape); "
           "viewer read is instant" % (stored * RAM_B / 2 ** 30, RAM_B))
     print("[gen] %.1f shapes/byte -> floe picks viewer mode; force the "
-          "pathology with FLOE_LAYOUT_MODE=editable" % (stored / sz))
-    print("[gen] NOTE: floe index reads the source in editable mode - "
-          "budget the RAM above")
+          "pathology with --layout-mode editable" % (stored / sz))
+    print("[gen] NOTE: floe index reads the source in viewer mode by "
+          "default (--read-mode editable needs the RAM above)")
     print("[gen] done in %.0fs" % (time.perf_counter() - t0))
 
 

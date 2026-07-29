@@ -254,7 +254,8 @@ class LayerRow(object):
 
 
 class Viewer:
-    def __init__(self, cache, server_sock=None, show=True, goto=None):
+    def __init__(self, cache, server_sock=None, show=True, goto=None,
+                 cut_px=None, dump=False):
         self.server_sock = server_sock
         self.cx = self.cy = 0
         self.spp = 1.0              # dbu per screen pixel
@@ -276,8 +277,10 @@ class Viewer:
         self.depth_value = 999      # 999 = full hierarchy
         self._depth_used = "?"      # depth of the last frame ("?" = none yet)
         # detail cut: shapes below this many screen px are dropped from
-        # live renders (size-banded caches only; 0 = off)
-        self.cut_px = float(os.environ.get("FLOE_CUT_PX", "2"))
+        # live renders (size-banded caches only; 0 = off); --cut-px
+        # sets the start value, the `c` dialog changes it at runtime
+        self.cut_px = 2.0 if cut_px is None else max(0.0, float(cut_px))
+        self.dump = bool(dump)      # --dump: save debug frame dumps
         self._quitting = False
         # ruler / snap / pick state
         self.mode = "normal"
@@ -690,7 +693,7 @@ class Viewer:
         else:
             obox, ospp = bbox, self.spp
         self._draw_overlays(disp, obox, ospp, bbox)
-        if os.environ.get("FLOE_DUMP"):
+        if self.dump:
             # diagnosis: exactly what is handed to the screen widget, plus
             # whether the widget itself is sized/mapped (a 0-sized or
             # unmapped Gtk.Image displays nothing without any error)
@@ -1055,7 +1058,7 @@ class Viewer:
                 loader.write(res["png"])
                 loader.close()
                 pix = loader.get_pixbuf()
-                if os.environ.get("FLOE_DUMP"):
+                if self.dump:
                     # diagnosis: the frame as received from the service
                     pix.savev("/tmp/floe_frame.png", "png", [], [])
                 fb = res["bbox"]
@@ -2155,9 +2158,11 @@ class Viewer:
             Gtk.main_quit()
 
 
-def run_viewer(cache, server_sock=None, goto=None, drc=None):
+def run_viewer(cache, server_sock=None, goto=None, drc=None,
+               cut_px=None, dump=False):
     import_gtk()
-    viewer = Viewer(cache, server_sock, goto=goto)
+    viewer = Viewer(cache, server_sock, goto=goto, cut_px=cut_px,
+                    dump=dump)
     if drc:
         if viewer.load_drc(os.path.abspath(drc)):
             viewer._drc_window()
