@@ -669,16 +669,78 @@ def _tile_bands(tgt, cdir, r, c, th_dbu, opts):
     (cell names get a __b<k> suffix so the mosaic's multi-read cannot
     merge different bands' same-named cells), so depth semantics are
     identical per band and the union of all bands is the exact tile.
-    Shapes move through db.Region (C++ bulk): boxes/paths come back as
-    polygons - geometry identical, OASIS repetition compression
-    unaffected (measured); texts ride in band 0. Bands with no shapes
-    write no file. Returns per-band shape counts."""
+
+    Uniform containers - fill/array cells, the bulk of production
+    content - are detected by testing whether the first member's band
+    holds every member; if so the whole container is copied with
+    Shapes.insert(Shapes), which preserves records (shape arrays stay
+    arrays, boxes stay boxes): no expansion into the band layout, no
+    polygon conversion, near-zero time and memory. Mixed containers
+    fall back to db.Region bbox filters (those come back as polygons -
+    geometry identical, measured). Texts ride in band 0, copied from
+    the tile top cell only (the curated exactly-once per-tile set;
+    clip_into drops all source texts). Bands with no shapes write no
+    file. Returns per-band shape counts."""
     nb = len(th_dbu) + 1
     edges = [0] + list(th_dbu) + [None]
+
+    def band_of(w, h):
+        s = w if w >= h else h
+        for k in range(nb - 1, 0, -1):
+            if s < edges[nb - k]:
+                return k
+        return 0
+
     top_name = f"TILE_{r}_{c}"
+    top_ci = tgt.cell(top_name).cell_index()
+
+    # ---- pass 1: probe every container ------------------------------
+    # sampled uniformity: fill/array containers hold one size class,
+    # and a mixed container almost surely reveals itself within the
+    # first few members (microseconds per container). The probe also
+    # decides the band-layout mode below: uniform-dominant tiles get
+    # viewer-mode band layouts, where the wholesale record copies
+    # stay compact (arrays stay arrays - half the RAM, measured);
+    # mixed-dominant tiles get editable ones, because accumulating
+    # millions of flat Region polygons in viewer containers measured
+    # ~45% more RAM and ~20% more time on an adversarial tile.
+    probes = {}                 # (ci, li) -> (k0 or None, complete)
+    uni_members = mix_members = 0
+    for cell in tgt.each_cell():
+        ci = cell.cell_index()
+        for li in tgt.layer_indexes():
+            sh = cell.shapes(li)
+            n = sh.size()
+            if n == 0:
+                continue
+            has_text = False
+            for _ in sh.each(db.Shapes.STexts):
+                has_text = True
+                break
+            k0 = None
+            seen = 0
+            if not has_text:
+                for s in sh.each():
+                    b = s.bbox()
+                    kk = band_of(b.width(), b.height())
+                    if k0 is None:
+                        k0 = kk
+                    elif kk != k0:
+                        k0 = None
+                        break
+                    seen += 1
+                    if seen >= 256:
+                        break
+            probes[(ci, li)] = (k0, k0 is not None and seen >= n)
+            if k0 is not None:
+                uni_members += n
+            else:
+                mix_members += n
+    band_viewer = uni_members >= mix_members
+
     blys, cmap = [], []
     for k in range(nb):
-        b = db.Layout()
+        b = db.Layout(not band_viewer)
         b.dbu = tgt.dbu
         for li in tgt.layer_indexes():
             b.insert_layer_at(li, tgt.get_info(li))
@@ -689,6 +751,19 @@ def _tile_bands(tgt, cdir, r, c, th_dbu, opts):
             nm = (f"{top_name}_b{k}" if cell.name == top_name
                   else f"{cell.name}__b{k}")
             cmap[k][cell.cell_index()] = blys[k].create_cell(nm).cell_index()
+    # member counts per band, and which band cells got shapes: tracked
+    # while partitioning, because Shapes.size() on freshly filled
+    # viewer-mode containers re-runs their update pass per call
+    # (a plain per-band size() sweep measured 3.3s/tile)
+    bcount = [0] * nb
+    filled = [set() for _ in range(nb)]
+
+    def put(k, ci_, li_, obj, members):
+        blys[k].cell(cmap[k][ci_]).shapes(li_).insert(obj)
+        bcount[k] += members
+        filled[k].add(cmap[k][ci_])
+
+    # ---- pass 2: partition -------------------------------------------
     for cell in tgt.each_cell():
         ci = cell.cell_index()
         for inst in cell.each_inst():
@@ -699,39 +774,58 @@ def _tile_bands(tgt, cdir, r, c, th_dbu, opts):
                 blys[k].cell(cmap[k][ci]).insert(ba)
         for li in tgt.layer_indexes():
             sh = cell.shapes(li)
-            if sh.size() == 0:
+            n = sh.size()
+            if n == 0:
+                continue
+            k0, complete = probes[(ci, li)]
+            if complete:
+                # the probe covered every member: uniform proven
+                put(k0, ci, li, sh, n)
                 continue
             reg = db.Region()
             reg.merged_semantics = False
-            reg.insert(sh)
-            for k in range(nb):
+            reg.insert(sh)          # texts are excluded by Region
+            rest = range(nb)
+            if k0 is not None:
+                # sample says uniform: one confirming filter pass
+                lo, hi = edges[nb - 1 - k0], edges[nb - k0]
+                p0 = reg.with_bbox_max(lo, hi, False)
+                c0 = p0.count()
+                if c0 == n:
+                    put(k0, ci, li, sh, n)
+                    continue
+                if c0:
+                    put(k0, ci, li, p0, c0)
+                rest = [k for k in range(nb) if k != k0]
+            for k in rest:
                 lo, hi = edges[nb - 1 - k], edges[nb - k]
                 part = reg.with_bbox_max(lo, hi, False)
-                if part.count():
-                    blys[k].cell(cmap[k][ci]).shapes(li).insert(part)
-            for s in sh.each(db.Shapes.STexts):
-                blys[0].cell(cmap[0][ci]).shapes(li).insert(s.text)
+                np_ = part.count()
+                if np_:
+                    put(k, ci, li, part, np_)
+        if ci == top_ci:
+            for li in tgt.layer_indexes():
+                for s in cell.shapes(li).each(db.Shapes.STexts):
+                    put(0, ci, li, s.text, 1)
     counts = []
     for k in range(nb):
         bly = blys[k]
         # drop cells whose subtree holds no shapes in this band: their
         # duplicated instance records would otherwise bloat every band
-        # file (~+35% on std-cell-heavy layouts, measured)
-        lis = list(bly.layer_indexes())
+        # file (~+35% on std-cell-heavy layouts, measured). Uses the
+        # filled-cell sets tracked during partitioning - no size()
+        # sweeps over the band layouts.
         has = {}
-        for ci in bly.each_cell_bottom_up():
-            cell = bly.cell(ci)
-            has[ci] = (any(cell.shapes(li).size() for li in lis)
-                       or any(has.get(inst.cell_index, False)
-                              for inst in cell.each_inst()))
-        top_ci = cmap[k][tgt.cell(top_name).cell_index()]
-        doomed = [ci for ci, h in has.items() if not h and ci != top_ci]
+        for bci in bly.each_cell_bottom_up():
+            has[bci] = (bci in filled[k]
+                        or any(has.get(inst.cell_index, False)
+                               for inst in bly.cell(bci).each_inst()))
+        btop = cmap[k][top_ci]
+        doomed = [bci for bci, h in has.items() if not h and bci != btop]
         if doomed:
             bly.delete_cells(doomed)
-        n = sum(cc.shapes(li).size() for cc in bly.each_cell()
-                for li in lis)
-        counts.append(n)
-        if n:
+        counts.append(bcount[k])
+        if bcount[k]:
             bly.write(
                 os.path.join(cdir, f"tiles_b{k}", f"t_{r}_{c}.oas"), opts)
         bly._destroy()
@@ -940,7 +1034,15 @@ def _build_one_tile(rc):
                  min(y0 + grid["tile_h"], bbox.top))
     tm = {}
     t = time.perf_counter()
-    tgt = db.Layout()
+    # banded tiles build in viewer mode: clip_into of array-heavy
+    # sources is ~100x faster (stress30: 20.9s -> 0.2s) and the clip
+    # stays compact instead of materializing every member. The legacy
+    # path keeps editable (its single write carries texts and needs
+    # _strip_texts' erase). FLOE_TILE_TGT=editable restores the old
+    # behavior for on-host comparison.
+    editable_tgt = (not bands_dbu or os.environ.get(
+        "FLOE_TILE_TGT", "").lower().startswith("edit"))
+    tgt = db.Layout(editable_tgt)
     tgt.dbu = ly.dbu
     # pre-create layers with source infos at identical indexes:
     # clip_into copies shapes onto anonymous layers otherwise, and
@@ -955,7 +1057,10 @@ def _build_one_tile(rc):
         return r, c, False, None, None, tm
     cell.name = f"TILE_{r}_{c}"
     t = time.perf_counter()
-    _strip_texts(tgt)
+    if tgt.is_editable():
+        # clip_into drops texts already; erase is editable-only, and
+        # the banded path takes texts from the tile top cell only
+        _strip_texts(tgt)
     for li, text in texts:
         cell.shapes(li).insert(text)
     tm["strip"] = time.perf_counter() - t

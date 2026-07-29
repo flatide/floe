@@ -139,6 +139,19 @@ floe clip  data/testchip_1g5.oas --bbox 5000,5000,5100,5100 --out region.oas
   read 이후의 무음 구간도 진행이 보인다: 레이어 카운트와 텍스트 레이어
   탐지는 셀 단일 스캔으로 합쳐져 `scanning layers... cell N/M`,
   텍스트 수집은 `collecting texts... N found` + RSS 하트비트를 낸다.
+- **밴드 파티션 v2** (v0.5.0): 타일 클립도 viewer 모드로 수행 —
+  어레이 소스의 `clip_into`가 ~100배 빨라진다 (stress30 실측 20.9→0.2s;
+  `FLOE_TILE_TGT=editable`로 이전 동작 복원). 셀×레이어 컨테이너마다
+  최대 256멤버를 샘플해 **단일 크기(uniform) 컨테이너**(필/어레이 —
+  실제 양산 데이터의 대부분)를 µs에 판별하고, uniform이면 Region 전개
+  없이 `Shapes.insert(Shapes)` 레코드째 복사한다 (배열은 배열로, 박스는
+  박스로 보존 — 시간·메모리 거의 0, 균일 필 벤치 RAM 절반). 혼합
+  컨테이너만 기존 Region bbox 필터 경로(폴리곤 변환, 지오메트리 동일)를
+  탄다. uniform 멤버가 다수면 밴드 레이아웃도 viewer 모드로 만들어
+  레코드 보존을 유지하고, 혼합 다수면 editable로 만들어 flat 폴리곤
+  누적 페널티(적대적 타일 실측 RAM +45%)를 피한다 (타일별 자동 선택).
+  산출물은 검증 완료: midi 80/80 밴드·LOD 파일 지오메트리 완전 일치,
+  전체 배터리(픽셀/XOR/snap/pick/clip) 통과. 캐시 포맷 불변.
 - **폐쇄망 성능 재현** (`profile` + `tools/gen_from_profile.py`): 원본
   OAS를 반출할 수 없을 때, 폐쇄망에서 `floe profile chip.oas --out
   prof.json` 으로 **구조 프로파일**(타일·레이어·depth별 도형 수, 계층/
