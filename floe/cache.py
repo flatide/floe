@@ -257,16 +257,18 @@ def _text_layers(ly):
     return _scan_layers(ly)[1]
 
 
-TEXT_LAYER_CAP = 1_000_000   # per-layer text budget (FLOE_TEXT_CAP)
+TEXT_LAYER_CAP = 1_000_000   # per-layer full-collection budget
+TEXT_TILE_CAP = 10_000       # per-tile budget for over-budget layers
 
 
-def collect_texts(ly, top_ci, text_layers=None, log=None, cap=None):
+def collect_texts(ly, top_ci, text_layers=None, log=None, cap=None,
+                  grid=None, tile_cap=None):
     """Gather text objects (any depth) with top-level coordinates.
 
     Tiles get texts re-injected with half-open tile assignment so each text
     lands in exactly one tile (clip duplicates edge-coincident texts into
     every adjacent tile). Returns ([(layer_index, db.Text in top coords)],
-    [layer_index dropped]).
+    [layer_index thinned/dropped]).
 
     Only text-bearing layers are expanded. A plain all-layers recursive
     pass expands every SRAM/fill array to reach a handful of labels
@@ -274,14 +276,20 @@ def collect_texts(ly, top_ci, text_layers=None, log=None, cap=None):
     restricting the iterator to the text layers prunes those subtrees
     entirely (~2600x faster, identical output).
 
-    Layers are collected one at a time against a per-layer budget
-    (default TEXT_LAYER_CAP, FLOE_TEXT_CAP overrides, 0 = unlimited):
-    production files can carry per-shape marker texts in the BILLIONS
-    (a host chip hit 1.7e9 texts / 754 GB RSS collecting them all),
-    which are useless as viewer labels. An over-budget layer is
-    dropped WHOLE - a truncated collection would keep only the
-    traversal's corner of the die - its traversal aborts immediately,
-    and the drop is logged and recorded in meta."""
+    Layers under the per-layer budget (default TEXT_LAYER_CAP,
+    FLOE_TEXT_CAP overrides, 0 = unlimited) are collected in full - a
+    count-only pass classifies every layer up front, aborting at
+    budget+1 so even a billion-text layer costs seconds. Over-budget
+    layers - production files carry per-shape marker texts in the
+    BILLIONS (a host chip hit 1.7e9 texts / 754 GB RSS) - are NOT
+    dropped: they are collected per tile through bbox-restricted
+    queries capped at tile_cap texts each (default TEXT_TILE_CAP,
+    FLOE_TEXT_TILE_CAP overrides), so coverage degrades spatially
+    uniformly, near-zoom picking keeps working everywhere, and total
+    work is bounded by tiles x tile_cap instead of the text count.
+    No human decision needed; the thinning is logged and recorded in
+    meta. tile_cap 0 disables thinning (over-budget layers dropped
+    whole, the pre-0.5.3 behavior); grid None likewise."""
     if cap is None:
         try:
             cap = int(os.environ.get("FLOE_TEXT_CAP", ""))
@@ -289,19 +297,25 @@ def collect_texts(ly, top_ci, text_layers=None, log=None, cap=None):
             cap = TEXT_LAYER_CAP
     if cap <= 0:
         cap = None
+    if tile_cap is None:
+        try:
+            tile_cap = int(os.environ.get("FLOE_TEXT_TILE_CAP", ""))
+        except ValueError:
+            tile_cap = TEXT_TILE_CAP
     layers = _text_layers(ly) if text_layers is None else text_layers
+    top = ly.cell(top_ci)
     out = []
-    dropped = []
+    thinned = []
     t0 = last = time.perf_counter()
-    # phase 1: count-only pass per layer (nothing stored), so every
-    # over-budget layer is known and reported up front - the abort
-    # after cap+1 texts costs seconds even on a billion-text layer
+    # count-only classification pass (nothing stored): every
+    # over-budget layer is known and reported before collection starts
     keep = []
+    heavy = []
     for li in layers:
         if cap is None:
             keep.append(li)
             continue
-        it = db.RecursiveShapeIterator(ly, ly.cell(top_ci), [li])
+        it = db.RecursiveShapeIterator(ly, top, [li])
         it.shape_flags = db.Shapes.STexts
         cnt = 0
         while not it.at_end():
@@ -311,18 +325,23 @@ def collect_texts(ly, top_ci, text_layers=None, log=None, cap=None):
             it.next()
         if cnt > cap:
             info = ly.get_info(li)
-            if log is not None:
+            thinned.append(li)
+            if grid is not None and tile_cap > 0:
+                heavy.append(li)
+                if log is not None:
+                    log(f"[index] layer {info.layer}/{info.datatype} "
+                        f"has >{cap:,} texts (per-shape markers?) - "
+                        f"keeping up to {tile_cap:,} per tile, "
+                        f"spatially uniform")
+            elif log is not None:
                 log(f"[index] layer {info.layer}/{info.datatype} has "
-                    f">{cap:,} texts (per-shape markers?) - dropped "
-                    f"from the cache. Recover later without "
-                    f"re-tiling: FLOE_TEXT_CAP=<n> floe index "
-                    f"--texts-only")
-            dropped.append(li)
+                    f">{cap:,} texts - dropped (no tile grid / "
+                    f"thinning disabled)")
         else:
             keep.append(li)
-    # phase 2: collect the kept layers in full
+    # full collection for the light layers
     for li in keep:
-        it = db.RecursiveShapeIterator(ly, ly.cell(top_ci), [li])
+        it = db.RecursiveShapeIterator(ly, top, [li])
         it.shape_flags = db.Shapes.STexts
         while not it.at_end():
             out.append((li, it.shape().text.transformed(it.trans())))
@@ -332,7 +351,39 @@ def collect_texts(ly, top_ci, text_layers=None, log=None, cap=None):
                 last = time.perf_counter()
                 log(f"[index] collecting texts... {len(out):,} found "
                     f"({last - t0:.0f}s)")
-    return out, dropped
+    # per-tile capped collection for the heavy layers: each tile's
+    # bbox-restricted query aborts at tile_cap, so the whole layer
+    # costs O(tiles x tile_cap) no matter how many texts it holds
+    for li in heavy:
+        nkept = 0
+        for r in range(grid["ny"]):
+            for c in range(grid["nx"]):
+                tx0 = grid["x0"] + c * grid["tile_w"]
+                ty0 = grid["y0"] + r * grid["tile_h"]
+                box = db.Box(tx0, ty0, tx0 + grid["tile_w"],
+                             ty0 + grid["tile_h"])
+                it = db.RecursiveShapeIterator(ly, top, [li], box)
+                it.shape_flags = db.Shapes.STexts
+                got = 0
+                while not it.at_end() and got < tile_cap:
+                    text = it.shape().text.transformed(it.trans())
+                    p = text.trans.disp
+                    # half-open ownership: boundary texts show up in
+                    # both neighbours' queries - keep exactly one copy
+                    oc = min(grid["nx"] - 1,
+                             max(0, (p.x - grid["x0"]) // grid["tile_w"]))
+                    orr = min(grid["ny"] - 1,
+                              max(0, (p.y - grid["y0"]) // grid["tile_h"]))
+                    if (orr, oc) == (r, c):
+                        out.append((li, text))
+                        got += 1
+                    it.next()
+                nkept += got
+        if log is not None:
+            info = ly.get_info(li)
+            log(f"[index] layer {info.layer}/{info.datatype}: kept "
+                f"{nkept:,} texts ({time.perf_counter() - t0:.0f}s)")
+    return out, thinned
 
 
 def _const_pitch_runs(vals):
@@ -390,13 +441,44 @@ def _find_grids(pts):
 
 
 def _strip_texts(ly):
-    """Remove all text shapes (tiles get exactly-once texts injected)."""
+    """Remove all text shapes (tiles get exactly-once texts injected).
+
+    Works in viewer mode too, where per-shape erase is forbidden:
+    text-only containers (the normal case - marker/label layers) are
+    clear()ed wholesale, mixed containers are rebuilt from their
+    geometry via a Region. clip_into DOES carry source texts into the
+    tile (measured - the old assumption that it drops them was wrong),
+    so skipping this would leak boundary-duplicated / unthinned texts
+    into band 0."""
+    geo_mask = db.Shapes.SAll & ~db.Shapes.STexts
+    editable = ly.is_editable()
     for cell in ly.each_cell():
         for li in ly.layer_indexes():
             shapes = cell.shapes(li)
-            victims = [s for s in shapes.each(db.Shapes.STexts)]
-            for s in victims:
-                shapes.erase(s)
+            has_text = False
+            for _ in shapes.each(db.Shapes.STexts):
+                has_text = True
+                break
+            if not has_text:
+                continue
+            if editable:
+                victims = [s for s in shapes.each(db.Shapes.STexts)]
+                for s in victims:
+                    shapes.erase(s)
+                continue
+            mixed = False
+            for _ in shapes.each(geo_mask):
+                mixed = True
+                break
+            if not mixed:
+                shapes.clear()
+                continue
+            reg = db.Region()
+            reg.merged_semantics = False
+            reg.insert(shapes)      # Region excludes texts
+            reg = reg.dup()         # detach before the clear
+            shapes.clear()
+            shapes.insert(reg)
 
 
 def compact_instances(ly, min_group=500, log=None):
@@ -585,7 +667,8 @@ def add_skeleton(cache, log=print):
     ly.read(cache.src)
     top = pick_top_cell(ly, log)
     with _phase_monitor("collecting texts"):
-        texts, _dropped = collect_texts(ly, top.cell_index(), log=log)
+        texts, _thinned = collect_texts(ly, top.cell_index(), log=log,
+                                        grid=meta["grid"])
     out = os.path.join(cache.dir, "skeleton.oas")
     meta["skeleton"] = build_skeleton(ly, top, texts, out, log)
     with open(cache.meta_path, "w") as f:
@@ -613,9 +696,10 @@ def rebuild_texts(cache, log=print):
         ly = db.Layout(not viewer_mode_preferred(meta))
         ly.read(cache.src)
     top = pick_top_cell(ly, log)
-    with _phase_monitor("collecting texts"):
-        texts, dropped = collect_texts(ly, top.cell_index(), log=log)
     g = meta["grid"]
+    with _phase_monitor("collecting texts"):
+        texts, thinned = collect_texts(ly, top.cell_index(), log=log,
+                                       grid=g)
     tile_texts = {}
     for li, text in texts:
         p = text.trans.disp
@@ -673,10 +757,11 @@ def rebuild_texts(cache, log=print):
             os.remove(path)   # only stale texts lived here
         bly._destroy()
     meta.pop("texts_dropped", None)
-    if dropped:
-        meta["texts_dropped"] = [
+    meta.pop("texts_thinned", None)
+    if thinned:
+        meta["texts_thinned"] = [
             {"layer": ly.get_info(li).layer,
-             "datatype": ly.get_info(li).datatype} for li in dropped]
+             "datatype": ly.get_info(li).datatype} for li in thinned]
     meta["skeleton"] = build_skeleton(
         ly, top, texts, os.path.join(cache.dir, "skeleton.oas"), log)
     with open(cache.meta_path, "w") as f:
@@ -1196,10 +1281,7 @@ def _build_one_tile(rc):
         return r, c, False, None, None, tm
     cell.name = f"TILE_{r}_{c}"
     t = time.perf_counter()
-    if tgt.is_editable():
-        # clip_into drops texts already; erase is editable-only, and
-        # the banded path takes texts from the tile top cell only
-        _strip_texts(tgt)
+    _strip_texts(tgt)   # clip_into carries source texts (viewer-safe)
     for li, text in texts:
         cell.shapes(li).insert(text)
     tm["strip"] = time.perf_counter() - t
@@ -1297,8 +1379,9 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
     top_ci = top.cell_index()
     t0 = time.perf_counter()
     with _phase_monitor("collecting texts"):
-        all_texts, dropped_lis = collect_texts(ly, top_ci,
-                                               text_layer_lis, log)
+        all_texts, thinned_lis = collect_texts(ly, top_ci,
+                                               text_layer_lis, log,
+                                               grid=grid)
     tile_texts = {}
     for li, text in all_texts:
         p = text.trans.disp
@@ -1401,10 +1484,10 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
         "density": {"levels": DENSITY_LEVELS, "tiles": density_tiles},
         "lod": {"cap": LOD_SHAPE_CAP, "tiles": lod_tiles},
         **({"bands": {"thresholds_um": list(bands)}} if bands else {}),
-        **({"texts_dropped": [
+        **({"texts_thinned": [
             {"layer": ly.get_info(li).layer,
              "datatype": ly.get_info(li).datatype}
-            for li in dropped_lis]} if dropped_lis else {}),
+            for li in thinned_lis]} if thinned_lis else {}),
         "skeleton": skel_meta,
         "stats": {"read_s": round(t_read, 1), "tiles_s": round(t_tiles, 1),
                   "read_mode": "editable" if editable else "viewer",
