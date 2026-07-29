@@ -583,6 +583,7 @@ def _skel_harvest(ly, dmaps, stop_cell, cell, trans, min_feat, big, n,
 
 SKEL_DETAIL_DT = 30000  # datatype offset per level of detail twin layers
 SKEL_DETAIL_LEVELS = 2  # harvest big shapes from cells this deep
+SKEL_TEXT_CAP = 50_000  # total label texts kept (FLOE_SKEL_TEXTS)
 
 
 def build_skeleton(ly, top, texts, out_path, log=print):
@@ -651,10 +652,22 @@ def build_skeleton(ly, top, texts, out_path, log=print):
                 db.Text(child.name, db.Trans(db.Vector(c.x, c.y))))
             n = _skel_harvest(ly, dmaps, stop_cell, child, t,
                               min_feat, big, n, cap, 1)
+    # label texts (level-1 twin): the skeleton renders live at every
+    # far scale, so bound the total label count - a uniform stride
+    # over the (already per-tile-thinned) collection keeps the spread
+    try:
+        tcap = int(os.environ.get("FLOE_SKEL_TEXTS", ""))
+    except ValueError:
+        tcap = SKEL_TEXT_CAP
+    if tcap > 0 and len(texts) > tcap:
+        step = len(texts) / tcap
+        texts = [texts[int(i * step)] for i in range(tcap)]
+        log(f"[index] skeleton labels sampled down to {tcap:,}")
     for li, text in texts:
         stop_cell.shapes(dmaps[1][li]).insert(text)
     skel.write(out_path, save_opts())
-    return {"file": os.path.basename(out_path), "shapes": n}
+    return {"file": os.path.basename(out_path), "shapes": n,
+            "texts": len(texts)}
 
 
 def add_skeleton(cache, log=print):
@@ -663,112 +676,74 @@ def add_skeleton(cache, log=print):
     t0 = time.perf_counter()
     meta = cache.meta or cache.load()
     log(f"[index] reading {cache.src} for skeleton...")
-    ly = db.Layout(not viewer_mode_preferred(meta))
-    ly.read(cache.src)
-    top = pick_top_cell(ly, log)
-    with _phase_monitor("collecting texts"):
-        texts, _thinned = collect_texts(ly, top.cell_index(), log=log,
-                                        grid=meta["grid"])
-    out = os.path.join(cache.dir, "skeleton.oas")
-    meta["skeleton"] = build_skeleton(ly, top, texts, out, log)
-    with open(cache.meta_path, "w") as f:
-        json.dump(meta, f, indent=1)
-    log(f"[index] skeleton added: {meta['skeleton']['shapes']} shapes "
-        f"({time.perf_counter() - t0:.0f}s)")
-
-
-def rebuild_texts(cache, log=print):
-    """Refresh the texts of an existing banded cache in place - one
-    source read plus a rewrite of the small b0 tile files, NO
-    re-tiling (floe index --texts-only). This is the cheap recovery
-    path when a needed label layer turned out to be over the text
-    budget: raise FLOE_TEXT_CAP (or set 0) and rerun this instead of
-    a full reindex. Also rebuilds the skeleton (it carries the same
-    labels)."""
-    t_all = time.perf_counter()
-    meta = cache.meta or cache.load()
-    if not meta.get("bands"):
-        raise SystemExit("floe: --texts-only supports banded caches "
-                         "(this cache is legacy single-file tiles; "
-                         "reindex instead)")
-    log(f"[index] reading {cache.src} for texts...")
     with _phase_monitor("reading"):
         ly = db.Layout(not viewer_mode_preferred(meta))
         ly.read(cache.src)
     top = pick_top_cell(ly, log)
-    g = meta["grid"]
     with _phase_monitor("collecting texts"):
         texts, thinned = collect_texts(ly, top.cell_index(), log=log,
-                                       grid=g)
-    tile_texts = {}
-    for li, text in texts:
-        p = text.trans.disp
-        c = min(g["nx"] - 1, max(0, (p.x - g["x0"]) // g["tile_w"]))
-        r = min(g["ny"] - 1, max(0, (p.y - g["y0"]) // g["tile_h"]))
-        tile_texts.setdefault((int(r), int(c)), []).append((li, text))
-    # rewrite b0: strip old texts everywhere, inject the new curated
-    # set into each tile's top cell (create b0 files for tiles that
-    # had no b0 shapes but now carry texts)
-    b0dir = os.path.join(cache.dir, "tiles_b0")
-    touched = created = 0
-    all_rc = {(r, c) for r in range(g["ny"]) for c in range(g["nx"])}
-    for r, c in sorted(all_rc):
-        path = os.path.join(b0dir, f"t_{r}_{c}.oas")
-        new = tile_texts.get((r, c), ())
-        exists = os.path.isfile(path)
-        if not exists and not new:
-            continue
-        top_name = f"TILE_{r}_{c}_b0"
-        if exists:
-            bly = db.Layout(True)   # editable: text strip needs erase
-            bly.read(path)
-            had = any(True for cc in bly.each_cell()
-                      for li in bly.layer_indexes()
-                      for _ in cc.shapes(li).each(db.Shapes.STexts))
-            if not had and not new:
-                bly._destroy()
-                continue        # nothing to strip, nothing to add
-            _strip_texts(bly)
-            cell = bly.cell(top_name)
-            if cell is None:
-                continue
-        else:
-            bly = db.Layout(True)
-            bly.dbu = meta["dbu"]
-            cell = bly.create_cell(top_name)
-            created += 1
-        # source layer indexes do not survive a file round-trip:
-        # map by layer/datatype (created on demand for fresh files)
-        lmap = {}
-        for li, text in new:
-            bl = lmap.get(li)
-            if bl is None:
-                info = ly.get_info(li)
-                bl = bly.layer(db.LayerInfo(info.layer, info.datatype))
-                lmap[li] = bl
-            cell.shapes(bl).insert(text)
-        has_any = any(cc.shapes(li).size()
-                      for cc in bly.each_cell()
-                      for li in bly.layer_indexes())
-        if has_any:
-            bly.write(path, save_opts())
-            touched += 1
-        elif exists:
-            os.remove(path)   # only stale texts lived here
-        bly._destroy()
+                                       grid=meta["grid"])
+    out = os.path.join(cache.dir, "skeleton.oas")
+    meta["skeleton"] = build_skeleton(ly, top, texts, out, log)
     meta.pop("texts_dropped", None)
     meta.pop("texts_thinned", None)
     if thinned:
         meta["texts_thinned"] = [
             {"layer": ly.get_info(li).layer,
              "datatype": ly.get_info(li).datatype} for li in thinned]
-    meta["skeleton"] = build_skeleton(
-        ly, top, texts, os.path.join(cache.dir, "skeleton.oas"), log)
     with open(cache.meta_path, "w") as f:
         json.dump(meta, f, indent=1)
-    log(f"[index] texts refreshed: {len(texts)} texts into {touched} "
-        f"b0 tiles ({created} created), skeleton rebuilt "
-        f"({time.perf_counter() - t_all:.0f}s)")
+    log(f"[index] skeleton added: {meta['skeleton']['shapes']} shapes, "
+        f"{meta['skeleton'].get('texts', 0)} labels "
+        f"({time.perf_counter() - t0:.0f}s)")
+
+
+def rebuild_texts(cache, log=print):
+    """Refresh the text handling of an existing banded cache in place
+    (floe index --texts-only), NO re-tiling: strips any texts still
+    living in the b0 tiles (pre-0.5.4 caches carried them - texts now
+    exist only as far-view skeleton labels) and rebuilds the skeleton
+    with a fresh bounded collection. Combine with FLOE_TEXT_CAP /
+    FLOE_TEXT_TILE_CAP / FLOE_SKEL_TEXTS to change label budgets."""
+    t_all = time.perf_counter()
+    meta = cache.meta or cache.load()
+    if not meta.get("bands"):
+        raise SystemExit("floe: --texts-only supports banded caches "
+                         "(this cache is legacy single-file tiles; "
+                         "reindex instead)")
+    g = meta["grid"]
+    b0dir = os.path.join(cache.dir, "tiles_b0")
+    stripped = removed = 0
+    for r in range(g["ny"]):
+        for c in range(g["nx"]):
+            path = os.path.join(b0dir, f"t_{r}_{c}.oas")
+            if not os.path.isfile(path):
+                continue
+            bly = db.Layout(True)   # editable: text strip needs erase
+            bly.read(path)
+            had = any(True for cc in bly.each_cell()
+                      for li in bly.layer_indexes()
+                      for _ in cc.shapes(li).each(db.Shapes.STexts))
+            if not had:
+                bly._destroy()
+                continue
+            _strip_texts(bly)
+            has_any = any(cc.shapes(li).size()
+                          for cc in bly.each_cell()
+                          for li in bly.layer_indexes())
+            if has_any:
+                bly.write(path, save_opts())
+                stripped += 1
+            else:
+                os.remove(path)   # only texts lived here
+                removed += 1
+            bly._destroy()
+    if stripped or removed:
+        log(f"[index] b0 texts stripped: {stripped} tiles rewritten, "
+            f"{removed} text-only tiles removed")
+    # skeleton rebuild carries the fresh labels + meta update
+    add_skeleton(cache, log)
+    log(f"[index] texts refreshed ({time.perf_counter() - t_all:.0f}s)")
 
 
 def load_region(cache, x0, y0, x1, y1, log=None, max_tiles=None,
@@ -901,10 +876,9 @@ def _tile_bands(tgt, cdir, r, c, th_dbu, opts):
     arrays, boxes stay boxes): no expansion into the band layout, no
     polygon conversion, near-zero time and memory. Mixed containers
     fall back to db.Region bbox filters (those come back as polygons -
-    geometry identical, measured). Texts ride in band 0, copied from
-    the tile top cell only (the curated exactly-once per-tile set;
-    clip_into drops all source texts). Bands with no shapes write no
-    file. Returns per-band shape counts."""
+    geometry identical, measured). Tiles carry NO texts (the caller
+    strips them; the far-view skeleton is the only text consumer).
+    Bands with no shapes write no file. Returns per-band counts."""
     nb = len(th_dbu) + 1
     edges = [0] + list(th_dbu) + [None]
 
@@ -1027,10 +1001,6 @@ def _tile_bands(tgt, cdir, r, c, th_dbu, opts):
                 np_ = part.count()
                 if np_:
                     put(k, ci, li, part, np_)
-        if ci == top_ci:
-            for li in tgt.layer_indexes():
-                for s in cell.shapes(li).each(db.Shapes.STexts):
-                    put(0, ci, li, s.text, 1)
     counts = []
     for k in range(nb):
         bly = blys[k]
@@ -1250,7 +1220,7 @@ _TILE_CTX = None
 def _build_one_tile(rc):
     """Build tile (r, c) from _TILE_CTX. Runs in a fork worker (or inline
     for jobs=1). Returns (r, c, wrote, lod_depth, density, step_times)."""
-    ly, top_ci, bbox, grid, cdir, tile_texts, opts, bands_dbu = _TILE_CTX
+    ly, top_ci, bbox, grid, cdir, opts, bands_dbu = _TILE_CTX
     r, c = rc
     x0 = bbox.left + c * grid["tile_w"]
     y0 = bbox.bottom + r * grid["tile_h"]
@@ -1276,14 +1246,13 @@ def _build_one_tile(rc):
     ci = ly.clip_into(top_ci, tgt, box)
     tm["clip"] = time.perf_counter() - t
     cell = tgt.cell(ci)
-    texts = tile_texts.get((r, c), ())
-    if cell.bbox().empty() and not texts:
+    if cell.bbox().empty():
         return r, c, False, None, None, tm
     cell.name = f"TILE_{r}_{c}"
     t = time.perf_counter()
-    _strip_texts(tgt)   # clip_into carries source texts (viewer-safe)
-    for li, text in texts:
-        cell.shapes(li).insert(text)
+    # texts live only in the skeleton (far-view labels): strip what
+    # clip_into carried so tiles stay text-free (viewer-safe)
+    _strip_texts(tgt)
     tm["strip"] = time.perf_counter() - t
     t = time.perf_counter()
     compact_instances(tgt)
@@ -1375,21 +1344,15 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
     log(f"[index] layer scan done ({time.perf_counter() - t0:.1f}s, "
         f"{len(text_layer_lis)} text layers)")
 
-    # --- texts: clip_into drops them, so bucket them per tile up front ---
+    # --- texts: far-view skeleton labels only (tiles stay text-free) ---
     top_ci = top.cell_index()
     t0 = time.perf_counter()
     with _phase_monitor("collecting texts"):
         all_texts, thinned_lis = collect_texts(ly, top_ci,
                                                text_layer_lis, log,
                                                grid=grid)
-    tile_texts = {}
-    for li, text in all_texts:
-        p = text.trans.disp
-        c = min(n - 1, max(0, (p.x - bbox.left) // tile_w))
-        r = min(n - 1, max(0, (p.y - bbox.bottom) // tile_h))
-        tile_texts.setdefault((r, c), []).append((li, text))
-    log(f"[index] {len(all_texts)} texts collected "
-        f"({time.perf_counter() - t0:.1f}s)")
+    log(f"[index] {len(all_texts)} texts collected for skeleton "
+        f"labels ({time.perf_counter() - t0:.1f}s)")
 
     # --- tiles ---
     t0 = time.perf_counter()
@@ -1434,7 +1397,7 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
                 "sequentially")
     bands_dbu = [int(round(um / ly.dbu)) for um in bands] if bands else None
     global _TILE_CTX
-    _TILE_CTX = (ly, top_ci, bbox, grid, cdir, tile_texts, save_opts(),
+    _TILE_CTX = (ly, top_ci, bbox, grid, cdir, save_opts(),
                  bands_dbu)
     try:
         if ctx is not None:

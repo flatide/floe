@@ -450,10 +450,11 @@ def main(argv=None):
                    help="add the far-zoom skeleton to an existing cache "
                         "(one source read, no re-tiling)")
     p.add_argument("--texts-only", action="store_true",
-                   help="refresh texts of an existing banded cache "
-                        "(one source read + b0 rewrite, no re-tiling); "
-                        "combine with FLOE_TEXT_CAP to recover a "
-                        "dropped label layer cheaply")
+                   help="refresh text handling of an existing banded "
+                        "cache without re-tiling: strip pre-0.5.4 b0 "
+                        "texts and rebuild the skeleton labels "
+                        "(FLOE_TEXT_CAP / FLOE_TEXT_TILE_CAP / "
+                        "FLOE_SKEL_TEXTS adjust the label budgets)")
     p.add_argument("--jobs", type=int, default=None, metavar="N",
                    help="fork workers for the tiling phase (default: all "
                         "cores; 1 = sequential). Workers share the loaded "
