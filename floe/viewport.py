@@ -45,6 +45,8 @@ class Mosaic:
         self.top = self.ly.create_cell("FLOE_MOSAIC")
         # (r, c[, k]) -> cell_index or None (empty tile/band)
         self.loaded = {}
+        # live cell indexes, used to spot what each read() created
+        self._known = {self.top.cell_index()}
 
     def keys_for(self, tiles, bands=None):
         """Load keys for `tiles`: all bands by default (exact content -
@@ -80,15 +82,31 @@ class Mosaic:
                 continue
             self.ly.read(path)
             cell = self.ly.cell(cellname)
+            # Isolate this tile's cells: tag every cell the read
+            # created with a tile-unique suffix so a later read can
+            # NEVER merge into them. klayout merges same-named cells
+            # across reads, which (a) instanced a cell spanning k
+            # tiles k times at the same spot - k x draw cost - and
+            # (b) let evict/re-read cycles re-merge shapes that
+            # prune_cell had left behind in shared cells, growing the
+            # mosaic without bound over a session.
+            tag = "@t" + "_".join(str(v) for v in key)
+            for c in self.ly.each_cell():
+                ci = c.cell_index()
+                if ci in self._known:
+                    continue
+                self._known.add(ci)
+                c.name = c.name + tag
             if cell is None:
                 self.loaded[key] = None
                 continue
             self.top.insert(db.CellInstArray(cell.cell_index(), db.Trans()))
             self.loaded[key] = cell.cell_index()
             changed = True
-        # LRU eviction; prune_cell spares subcells still shared with
-        # other loaded tiles (multi-read merges same-named cells)
+        # LRU eviction; with tile-isolated cells prune_cell removes
+        # exactly the victim's subtree
         active = set(keys)
+        evicted = False
         while len(self.loaded) > EVICT_ABOVE:
             victim = next((k for k in self.loaded if k not in active), None)
             if victim is None:
@@ -96,5 +114,9 @@ class Mosaic:
             ci = self.loaded.pop(victim)
             if ci is not None:
                 self.ly.prune_cell(ci, -1)
-                changed = True
+                changed = evicted = True
+        if evicted:
+            # klayout may reuse freed cell indexes; rebuild the
+            # known-index set so reused indexes are seen as new
+            self._known = {c.cell_index() for c in self.ly.each_cell()}
         return changed

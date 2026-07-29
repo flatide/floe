@@ -59,8 +59,10 @@ def _apply_bands(mosaic, renderer, need):
 
 
 def _strip_band(name):
-    """User-facing cell name: drop size-band markers (__b<k> suffix or
-    TILE_r_c_b<k>) and klayout's $n rename counters after them."""
+    """User-facing cell name: drop the mosaic's tile-isolation tag
+    (@t<key>), size-band markers (__b<k> suffix or TILE_r_c_b<k>) and
+    klayout's $n rename counters after them."""
+    name = re.sub(r"@t[\d_]+$", "", name)
     name = re.sub(r"__b\d+(\$\d+)?$", "", name)
     return re.sub(r"^(TILE_\d+_\d+)_b\d+(\$\d+)?$", r"\1", name)
 
