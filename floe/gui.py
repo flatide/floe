@@ -160,6 +160,17 @@ def rect_outline(buf, x0, y0, x1, y1, casing, core):
         stamp_segment(buf, a, b, casing, core)
 
 
+def fmt_count(n):
+    """Human shape count: 950 / 12k / 3.4M / 1.2G."""
+    if n >= 1e9:
+        return "%.1fG" % (n / 1e9)
+    if n >= 1e6:
+        return "%.1fM" % (n / 1e6)
+    if n >= 10e3:
+        return "%.0fk" % (n / 1e3)
+    return str(int(n))
+
+
 def frame_rect(buf, x0, y0, w, h, color):
     """1-px rectangle border (rect_outline is too heavy for the minimap)."""
     fill_rect(buf, x0, y0, w, 1, color)
@@ -1095,9 +1106,12 @@ class Viewer:
                     cut = ""
                     if res.get("cut_um"):
                         cut = ", cut<%.3gum" % res["cut_um"]
-                    mode = "live (%d tiles, %d ms%s%s%s)" \
+                    drawn = ""
+                    if res.get("drawn") is not None:
+                        drawn = ", ~%s drawn" % fmt_count(res["drawn"])
+                    mode = "live (%d tiles, %d ms%s%s%s%s)" \
                         % (res["tiles"], res["ms"], split,
-                           self._depth_note(used), cut)
+                           self._depth_note(used), cut, drawn)
                 self._set_status(self.view_bbox(), mode)
         elif kind == "snap":
             if res["seq"] == self._snap_seq \

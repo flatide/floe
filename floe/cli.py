@@ -259,9 +259,12 @@ def cmd_probe(args):
             ok = png[:4] == b"\x89PNG"
             cut = (f", cut<{res['cut_um']}um" if res.get("cut_um")
                    else "")
+            drawn = ("" if res.get("drawn") is None
+                     else f", ~{res['drawn']:,} drawn")
             print(f"[probe] {label}: frame OK  {len(png):,} bytes png "
                   f"(magic {'OK' if ok else 'BAD'}), "
-                  f"{res.get('ms')} ms, tiles {res.get('tiles')}{cut}")
+                  f"{res.get('ms')} ms, tiles {res.get('tiles')}"
+                  f"{cut}{drawn}")
             failed = failed or not ok
         else:
             print(f"[probe] {label}: {res}")

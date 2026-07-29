@@ -45,8 +45,27 @@ class Mosaic:
         self.top = self.ly.create_cell("FLOE_MOSAIC")
         # (r, c[, k]) -> cell_index or None (empty tile/band)
         self.loaded = {}
+        # (r, c[, k]) -> estimated draw members of that subtree,
+        # cached at load time (status line "~N drawn")
+        self.counts = {}
         # live cell indexes, used to spot what each read() created
         self._known = {self.top.cell_index()}
+
+    def _members(self, cell, memo):
+        """Estimated draw members of a cell subtree: stored shape
+        counts (klayout's Shapes.size() counts array members) times
+        instance multiplicity. O(cells + instances) - cheap next to
+        the file parse that just happened."""
+        ci = cell.cell_index()
+        n = memo.get(ci)
+        if n is None:
+            n = sum(cell.shapes(li).size()
+                    for li in self.ly.layer_indexes())
+            for inst in cell.each_inst():
+                n += inst.size() * self._members(
+                    self.ly.cell(inst.cell_index), memo)
+            memo[ci] = n
+        return n
 
     def keys_for(self, tiles, bands=None):
         """Load keys for `tiles`: all bands by default (exact content -
@@ -102,6 +121,7 @@ class Mosaic:
                 continue
             self.top.insert(db.CellInstArray(cell.cell_index(), db.Trans()))
             self.loaded[key] = cell.cell_index()
+            self.counts[key] = self._members(cell, {})
             changed = True
         # LRU eviction; with tile-isolated cells prune_cell removes
         # exactly the victim's subtree
@@ -112,6 +132,7 @@ class Mosaic:
             if victim is None:
                 break
             ci = self.loaded.pop(victim)
+            self.counts.pop(victim, None)
             if ci is not None:
                 self.ly.prune_cell(ci, -1)
                 changed = evicted = True

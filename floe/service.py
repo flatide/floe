@@ -187,6 +187,33 @@ def _svc_pick(cache, mosaic, job, res):
     res.put(out)
 
 
+def _drawn_estimate(cache, mosaic, tiles, need, x0, y0, x1, y1):
+    """~ members inside the rendered bbox: per tile-band counts cached
+    at load time, scaled by each tile's overlap fraction with the
+    view (klayout culls off-view content at cell/array granularity, so
+    the whole-tile count would overstate near zooms)."""
+    if not mosaic.counts:
+        return None
+    g = cache.meta["grid"]
+    tw, th = g["tile_w"], g["tile_h"]
+    if not tw or not th:
+        return None
+    total = 0.0
+    for (r, c) in tiles:
+        tx0 = g["x0"] + c * tw
+        ty0 = g["y0"] + r * th
+        ox = max(0, min(x1, tx0 + tw) - max(x0, tx0))
+        oy = max(0, min(y1, ty0 + th) - max(y0, ty0))
+        if ox <= 0 or oy <= 0:
+            continue
+        frac = (ox * oy) / float(tw * th)
+        for key in mosaic.keys_for([(r, c)], need):
+            n = mosaic.counts.get(key)
+            if n:
+                total += n * frac
+    return int(total)
+
+
 def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
                 req, res, latest=None):
     t0 = time.perf_counter()
@@ -305,10 +332,12 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
                     t_draw = time.perf_counter() - td
                     with open(tmp, "rb") as f:
                         png = f.read()
+                    drawn = _drawn_estimate(cache, mosaic, vtiles, need,
+                                            vx0, vy0, vx1, vy1)
                     res.put({"kind": "frame", "png": png,
                              "bbox": (vx0, vy0, vx1, vy1),
                              "gen": job["gen"], "tiles": len(vtiles),
-                             "scope": scope,
+                             "scope": scope, "drawn": drawn,
                              "load_ms": round(t_load * 1000),
                              "draw_ms": round(t_draw * 1000),
                              "wait_ms": wait_ms, **cut_kv,
@@ -331,15 +360,22 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
                                     visible=job["visible"], depth=depth)
             t_draw = time.perf_counter() - td
             tiles_n = len(tiles)
+            drawn = _drawn_estimate(
+                cache, use_mosaic, tiles,
+                need if use_mosaic is mosaic else None,
+                x0, y0, x1, y1)
         with open(tmp, "rb") as f:
             png = f.read()
-        res.put({"kind": "frame", "png": png, "bbox": job["bbox"],
-                 "gen": job["gen"], "tiles": tiles_n, "scope": scope,
-                 "bg": bg,
-                 "load_ms": round(t_load * 1000),
-                 "draw_ms": round(t_draw * 1000),
-                 "wait_ms": wait_ms, **cut_kv,
-                 "ms": round((time.perf_counter() - t0) * 1000)})
+        out = {"kind": "frame", "png": png, "bbox": job["bbox"],
+               "gen": job["gen"], "tiles": tiles_n, "scope": scope,
+               "bg": bg,
+               "load_ms": round(t_load * 1000),
+               "draw_ms": round(t_draw * 1000),
+               "wait_ms": wait_ms, **cut_kv,
+               "ms": round((time.perf_counter() - t0) * 1000)}
+        if scope != "skel" and drawn is not None:
+            out["drawn"] = drawn
+        res.put(out)
     except Exception as e:  # keep the service alive
         res.put({"kind": "error", "msg": str(e)})
 
