@@ -257,35 +257,66 @@ def _text_layers(ly):
     return _scan_layers(ly)[1]
 
 
-def collect_texts(ly, top_ci, text_layers=None, log=None):
-    """Gather all text objects (any depth) with top-level coordinates.
+TEXT_LAYER_CAP = 1_000_000   # per-layer text budget (FLOE_TEXT_CAP)
+
+
+def collect_texts(ly, top_ci, text_layers=None, log=None, cap=None):
+    """Gather text objects (any depth) with top-level coordinates.
 
     Tiles get texts re-injected with half-open tile assignment so each text
     lands in exactly one tile (clip duplicates edge-coincident texts into
-    every adjacent tile). Returns [(layer_index, db.Text in top coords)].
+    every adjacent tile). Returns ([(layer_index, db.Text in top coords)],
+    [layer_index dropped]).
 
     Only text-bearing layers are expanded. A plain all-layers recursive
     pass expands every SRAM/fill array to reach a handful of labels
     (measured 10s for 6 texts, 724s for 1.4M on an array-heavy file);
     restricting the iterator to the text layers prunes those subtrees
     entirely (~2600x faster, identical output).
-    """
+
+    Layers are collected one at a time against a per-layer budget
+    (default TEXT_LAYER_CAP, FLOE_TEXT_CAP overrides, 0 = unlimited):
+    production files can carry per-shape marker texts in the BILLIONS
+    (a host chip hit 1.7e9 texts / 754 GB RSS collecting them all),
+    which are useless as viewer labels. An over-budget layer is
+    dropped WHOLE - a truncated collection would keep only the
+    traversal's corner of the die - its traversal aborts immediately,
+    and the drop is logged and recorded in meta."""
+    if cap is None:
+        try:
+            cap = int(os.environ.get("FLOE_TEXT_CAP", ""))
+        except ValueError:
+            cap = TEXT_LAYER_CAP
+    if cap <= 0:
+        cap = None
     layers = _text_layers(ly) if text_layers is None else text_layers
-    if not layers:
-        return []
     out = []
+    dropped = []
     t0 = last = time.perf_counter()
-    it = db.RecursiveShapeIterator(ly, ly.cell(top_ci), layers)
-    it.shape_flags = db.Shapes.STexts
-    while not it.at_end():
-        out.append((it.layer(), it.shape().text.transformed(it.trans())))
-        it.next()
-        if log is not None and len(out) % 50_000 == 0 and \
-                time.perf_counter() - last >= INDEX_HEARTBEAT_S:
-            last = time.perf_counter()
-            log(f"[index] collecting texts... {len(out):,} found "
-                f"({last - t0:.0f}s)")
-    return out
+    for li in layers:
+        it = db.RecursiveShapeIterator(ly, ly.cell(top_ci), [li])
+        it.shape_flags = db.Shapes.STexts
+        acc = []
+        while not it.at_end():
+            acc.append((li, it.shape().text.transformed(it.trans())))
+            if cap is not None and len(acc) > cap:
+                break
+            it.next()
+            if log is not None and len(acc) % 50_000 == 0 and \
+                    time.perf_counter() - last >= INDEX_HEARTBEAT_S:
+                last = time.perf_counter()
+                log(f"[index] collecting texts... {len(out) + len(acc):,}"
+                    f" found ({last - t0:.0f}s)")
+        if cap is not None and len(acc) > cap:
+            info = ly.get_info(li)
+            if log is not None:
+                log(f"[index] layer {info.layer}/{info.datatype} has "
+                    f">{cap:,} texts (per-shape markers?) - dropped "
+                    f"from the cache (FLOE_TEXT_CAP=0 keeps all)")
+            dropped.append(li)
+        else:
+            out.extend(acc)
+    return out, dropped
 
 
 def _const_pitch_runs(vals):
@@ -538,7 +569,7 @@ def add_skeleton(cache, log=print):
     ly.read(cache.src)
     top = pick_top_cell(ly, log)
     with _phase_monitor("collecting texts"):
-        texts = collect_texts(ly, top.cell_index(), log=log)
+        texts, _dropped = collect_texts(ly, top.cell_index(), log=log)
     out = os.path.join(cache.dir, "skeleton.oas")
     meta["skeleton"] = build_skeleton(ly, top, texts, out, log)
     with open(cache.meta_path, "w") as f:
@@ -1158,7 +1189,8 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
     top_ci = top.cell_index()
     t0 = time.perf_counter()
     with _phase_monitor("collecting texts"):
-        all_texts = collect_texts(ly, top_ci, text_layer_lis, log)
+        all_texts, dropped_lis = collect_texts(ly, top_ci,
+                                               text_layer_lis, log)
     tile_texts = {}
     for li, text in all_texts:
         p = text.trans.disp
@@ -1261,6 +1293,10 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
         "density": {"levels": DENSITY_LEVELS, "tiles": density_tiles},
         "lod": {"cap": LOD_SHAPE_CAP, "tiles": lod_tiles},
         **({"bands": {"thresholds_um": list(bands)}} if bands else {}),
+        **({"texts_dropped": [
+            {"layer": ly.get_info(li).layer,
+             "datatype": ly.get_info(li).datatype}
+            for li in dropped_lis]} if dropped_lis else {}),
         "skeleton": skel_meta,
         "stats": {"read_s": round(t_read, 1), "tiles_s": round(t_tiles, 1),
                   "read_mode": "editable" if editable else "viewer",

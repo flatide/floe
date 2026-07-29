@@ -139,6 +139,13 @@ floe clip  data/testchip_1g5.oas --bbox 5000,5000,5100,5100 --out region.oas
   read 이후의 무음 구간도 진행이 보인다: 레이어 카운트와 텍스트 레이어
   탐지는 셀 단일 스캔으로 합쳐져 `scanning layers... cell N/M`,
   텍스트 수집은 `collecting texts... N found` + RSS 하트비트를 낸다.
+- **텍스트 레이어 예산** (v0.5.1): 텍스트 수집이 레이어 단위로 돌며
+  레이어당 기본 100만 개 예산을 넘으면 그 레이어를 **통째로 드롭**하고
+  즉시 순회를 중단한다 (양산 파일은 도형마다 붙는 마커 텍스트가 수십억
+  개일 수 있음 — 호스트 실측 17억 개/754GB RSS로 수집 불능; 일부만
+  남기면 순회 순서상 die 한쪽 구석만 남아 더 나쁨). 드롭은 로그 +
+  meta(`texts_dropped`) + `floe info`에 표시된다. `FLOE_TEXT_CAP`으로
+  예산 조절, `0`이면 무제한(이전 동작).
 - **밴드 파티션 v2** (v0.5.0): 타일 클립도 viewer 모드로 수행 —
   어레이 소스의 `clip_into`가 ~100배 빨라진다 (stress30 실측 20.9→0.2s;
   `FLOE_TILE_TGT=editable`로 이전 동작 복원). 셀×레이어 컨테이너마다

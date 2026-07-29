@@ -104,6 +104,11 @@ def cmd_info(args):
         shapes / max(1, m["src"]["size"]),
         ", forced by FLOE_LAYOUT_MODE"
         if os.environ.get("FLOE_LAYOUT_MODE") else ""))
+    if m.get("texts_dropped"):
+        print("texts      : dropped layers "
+              + ", ".join(f"{t['layer']}/{t['datatype']}"
+                          for t in m["texts_dropped"])
+              + "  (over per-layer cap; FLOE_TEXT_CAP=0 keeps all)")
     if m.get("bands"):
         th = m["bands"]["thresholds_um"]
         n = len(th)
