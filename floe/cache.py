@@ -189,7 +189,10 @@ def save_opts():
     opt = db.SaveLayoutOptions()
     opt.format = "OASIS"
     opt.oasis_write_cblocks = True
-    opt.oasis_compression_level = 2
+    # level 1 finds the same repetitions as 2 on band-file content but
+    # writes in half the time (measured: 0.59s vs 1.18s for identical
+    # 0.3 MB output on a 4M-box spray; midi cache size within noise)
+    opt.oasis_compression_level = 1
     opt.write_context_info = False
     return opt
 
