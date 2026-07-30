@@ -74,9 +74,9 @@ def cmd_index(args):
         if args.merge_only:
             cache_mod.rebuild_merge(c, jobs=args.jobs)
         elif args.texts_only:
-            cache_mod.rebuild_texts(c, **caps)
+            cache_mod.rebuild_texts(c, jobs=args.jobs, **caps)
         else:
-            cache_mod.add_skeleton(c, **caps)
+            cache_mod.add_skeleton(c, jobs=args.jobs, **caps)
         return
     c = cache_mod.Cache(args.src)
     if c.exists() and not args.force:

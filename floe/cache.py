@@ -337,7 +337,7 @@ TEXT_TILE_CAP = 10_000       # per-tile budget for over-budget layers
 
 
 def collect_texts(ly, top_ci, text_layers=None, log=None, cap=None,
-                  grid=None, tile_cap=None, budget=None):
+                  grid=None, tile_cap=None, budget=None, jobs=None):
     """Gather text objects (any depth) with top-level coordinates.
 
     Returns ([(layer_index, db.Text in top coords)],
@@ -362,13 +362,15 @@ def collect_texts(ly, top_ci, text_layers=None, log=None, cap=None,
     collected in full - a count-only pass classifies every layer up
     front, aborting at budget+1 so even a billion-text layer costs
     seconds (a host chip hit 1.7e9 texts / 754 GB RSS before this
-    existed). Over-budget layers are NOT dropped: per-tile
-    bbox-restricted queries abort at the tile cap, so coverage
-    degrades spatially uniformly and total work is bounded by
-    tiles x tile_cap instead of the text count. No human decision
-    needed; the thinning is logged and recorded in meta. tile_cap 0
-    disables thinning (over-budget layers dropped whole, the
-    pre-0.5.3 behavior); grid None likewise."""
+    existed). Over-budget layers are NOT dropped: bbox-restricted
+    region queries (<=16x16 over the die) abort at the region cap, so
+    coverage degrades spatially uniformly and total work is bounded
+    regardless of the text count. Counting and collection fan out to
+    fork workers sharing the loaded layout copy-on-write (jobs; klayout
+    holds the GIL, threads cannot do this). No human decision needed;
+    the thinning is logged and recorded in meta. tile_cap 0 disables
+    thinning (over-budget layers dropped whole, the pre-0.5.3
+    behavior); grid None likewise."""
     layers = _text_layers(ly) if text_layers is None else text_layers
     if budget and budget > 0 and layers:
         slice_ = max(1, (budget * 4) // len(layers))
@@ -387,87 +389,152 @@ def collect_texts(ly, top_ci, text_layers=None, log=None, cap=None,
         cap = None
     if tile_cap is None:
         tile_cap = TEXT_TILE_CAP
-    top = ly.cell(top_ci)
-    out = []
+    t0 = time.perf_counter()
+    # region grid for heavy-layer thinning: per-TILE queries (1,600 on
+    # the host chip) cost ~0.15s each just in hierarchy descent, and a
+    # region where fewer than tile_cap texts exist walks its whole
+    # subtree before giving up - a full text phase measured 3,583s.
+    # Coarser regions (<=16x16) cut the query count ~6x while keeping
+    # the spatial spread the skeleton labels need.
+    rg = None
+    if grid is not None:
+        nrx = max(1, min(16, grid["nx"]))
+        nry = max(1, min(16, grid["ny"]))
+        rg = {"x0": grid["x0"], "y0": grid["y0"], "nx": nrx, "ny": nry,
+              "w": -(-(grid["nx"] * grid["tile_w"]) // nrx),
+              "h": -(-(grid["ny"] * grid["tile_h"]) // nry)}
+        rcap = max(1, (tile_cap * grid["nx"] * grid["ny"])
+                   // (nrx * nry))
+    global _TEXT_CTX
+    _TEXT_CTX = (ly, top_ci, rg)
+    pool = None
+    if (jobs is None or jobs > 1) and len(layers) > 1:
+        try:
+            ctx = multiprocessing.get_context("fork")
+            pool = ctx.Pool(min(jobs or os.cpu_count() or 1,
+                                len(layers)))
+        except ValueError:
+            pool = None    # no fork: sequential fallback below
+    pmap = pool.imap_unordered if pool is not None else map
     thinned = []
-    t0 = last = time.perf_counter()
-    # count-only classification pass (nothing stored): every
-    # over-budget layer is known and reported before collection starts
-    keep = []
-    heavy = []
-    for li in layers:
+    tuples = []
+    try:
+        # count-only classification pass (nothing stored): every
+        # over-budget layer is known and reported before collection
+        keep, heavy = [], []
         if cap is None:
-            keep.append(li)
-            continue
-        it = db.RecursiveShapeIterator(ly, top, [li])
-        it.shape_flags = db.Shapes.STexts
-        cnt = 0
-        while not it.at_end():
-            cnt += 1
-            if cnt > cap:
-                break
-            it.next()
-        if cnt > cap:
-            info = ly.get_info(li)
-            thinned.append(li)
-            if grid is not None and tile_cap > 0:
-                heavy.append(li)
-                if log is not None:
-                    log(f"[index] layer {info.layer}/{info.datatype} "
-                        f"has >{cap:,} texts (per-shape markers?) - "
-                        f"keeping up to {tile_cap:,} per tile, "
-                        f"spatially uniform")
-            elif log is not None:
-                log(f"[index] layer {info.layer}/{info.datatype} has "
-                    f">{cap:,} texts - dropped (no tile grid / "
-                    f"thinning disabled)")
+            keep = list(layers)
         else:
-            keep.append(li)
-    # full collection for the light layers
-    for li in keep:
-        it = db.RecursiveShapeIterator(ly, top, [li])
-        it.shape_flags = db.Shapes.STexts
-        while not it.at_end():
-            out.append((li, it.shape().text.transformed(it.trans())))
-            it.next()
-            if log is not None and len(out) % 50_000 == 0 and \
+            for li, cnt in pmap(_text_count_one,
+                                [(li, cap) for li in layers]):
+                info = ly.get_info(li)
+                if cnt <= cap:
+                    keep.append(li)
+                    continue
+                thinned.append(li)
+                if rg is not None and tile_cap > 0:
+                    heavy.append(li)
+                    log and log(
+                        f"[index] texts: layer {info.layer}"
+                        f"/{info.datatype} over {cap:,} - keeping up "
+                        f"to {rcap:,} per region, spatially uniform")
+                else:
+                    log and log(
+                        f"[index] texts: layer {info.layer}"
+                        f"/{info.datatype} over {cap:,} - dropped "
+                        f"(no grid / thinning disabled)")
+        # collection: whole light layers + per-region heavy slices run
+        # as one task pool (fork workers share the layout COW; results
+        # travel as plain tuples - db.Text does not pickle)
+        units = [("full", li) for li in keep]
+        if heavy:
+            units += [("region", li, ri, rj, rcap) for li in heavy
+                      for ri in range(rg["ny"]) for rj in range(rg["nx"])]
+        done = 0
+        last = time.perf_counter()
+        per_layer = {}
+        for res in pmap(_text_unit_one, units):
+            tuples.extend(res)
+            done += 1
+            for li, _s, _x, _y in res:
+                per_layer[li] = per_layer.get(li, 0) + 1
+            if log is not None and \
                     time.perf_counter() - last >= INDEX_HEARTBEAT_S:
                 last = time.perf_counter()
-                log(f"[index] collecting texts... {len(out):,} found "
-                    f"({last - t0:.0f}s)")
-    # per-tile capped collection for the heavy layers: each tile's
-    # bbox-restricted query aborts at tile_cap, so the whole layer
-    # costs O(tiles x tile_cap) no matter how many texts it holds
-    for li in heavy:
-        nkept = 0
-        for r in range(grid["ny"]):
-            for c in range(grid["nx"]):
-                tx0 = grid["x0"] + c * grid["tile_w"]
-                ty0 = grid["y0"] + r * grid["tile_h"]
-                box = db.Box(tx0, ty0, tx0 + grid["tile_w"],
-                             ty0 + grid["tile_h"])
-                it = db.RecursiveShapeIterator(ly, top, [li], box)
-                it.shape_flags = db.Shapes.STexts
-                got = 0
-                while not it.at_end() and got < tile_cap:
-                    text = it.shape().text.transformed(it.trans())
-                    p = text.trans.disp
-                    # half-open ownership: boundary texts show up in
-                    # both neighbours' queries - keep exactly one copy
-                    oc = min(grid["nx"] - 1,
-                             max(0, (p.x - grid["x0"]) // grid["tile_w"]))
-                    orr = min(grid["ny"] - 1,
-                              max(0, (p.y - grid["y0"]) // grid["tile_h"]))
-                    if (orr, oc) == (r, c):
-                        out.append((li, text))
-                        got += 1
-                    it.next()
-                nkept += got
-        if log is not None:
+                log(f"[index] collecting texts... {len(tuples):,} kept, "
+                    f"{done}/{len(units)} units ({last - t0:.0f}s)")
+    finally:
+        if pool is not None:
+            pool.terminate()
+            pool.join()
+        _TEXT_CTX = None
+    if log is not None:
+        for i, li in enumerate(heavy):
             info = ly.get_info(li)
-            log(f"[index] layer {info.layer}/{info.datatype}: kept "
-                f"{nkept:,} texts ({time.perf_counter() - t0:.0f}s)")
+            log(f"[index] texts ({i + 1}/{len(heavy)} thinned): layer "
+                f"{info.layer}/{info.datatype} kept "
+                f"{per_layer.get(li, 0):,}")
+    # deterministic output regardless of worker completion order (the
+    # skeleton's stride sample must not differ between rebuilds); the
+    # per-layer spatial sort also keeps the stride spread
+    tuples.sort(key=lambda t: (t[0], t[2], t[3], t[1]))
+    out = [(li, db.Text(s, db.Trans(db.Vector(x, y))))
+           for li, s, x, y in tuples]
     return out, thinned
+
+
+_TEXT_CTX = None    # (layout, top cell index, region grid) for forks
+
+
+def _text_count_one(args):
+    """Count texts on one layer, aborting at cap+1 (fork worker)."""
+    li, cap = args
+    ly, top_ci, _rg = _TEXT_CTX
+    it = db.RecursiveShapeIterator(ly, ly.cell(top_ci), [li])
+    it.shape_flags = db.Shapes.STexts
+    cnt = 0
+    while not it.at_end():
+        cnt += 1
+        if cnt > cap:
+            break
+        it.next()
+    return li, cnt
+
+
+def _text_unit_one(unit):
+    """One collection task (fork worker): a whole under-budget layer,
+    or one region slice of an over-budget layer. Returns plain
+    (layer_index, string, x, y) tuples."""
+    ly, top_ci, rg = _TEXT_CTX
+    top = ly.cell(top_ci)
+    out = []
+    if unit[0] == "full":
+        li = unit[1]
+        it = db.RecursiveShapeIterator(ly, top, [li])
+        it.shape_flags = db.Shapes.STexts
+        while not it.at_end():
+            t = it.shape().text.transformed(it.trans())
+            p = t.trans.disp
+            out.append((li, t.string, p.x, p.y))
+            it.next()
+        return out
+    _kind, li, ri, rj, rcap = unit
+    x0 = rg["x0"] + rj * rg["w"]
+    y0 = rg["y0"] + ri * rg["h"]
+    box = db.Box(x0, y0, x0 + rg["w"], y0 + rg["h"])
+    it = db.RecursiveShapeIterator(ly, top, [li], box)
+    it.shape_flags = db.Shapes.STexts
+    while not it.at_end() and len(out) < rcap:
+        t = it.shape().text.transformed(it.trans())
+        p = t.trans.disp
+        # half-open ownership: boundary texts show up in both
+        # neighbours' queries - keep exactly one copy
+        oj = min(rg["nx"] - 1, max(0, (p.x - rg["x0"]) // rg["w"]))
+        oi = min(rg["ny"] - 1, max(0, (p.y - rg["y0"]) // rg["h"]))
+        if (oi, oj) == (ri, rj):
+            out.append((li, t.string, p.x, p.y))
+        it.next()
+    return out
 
 
 def _const_pitch_runs(vals):
@@ -752,7 +819,7 @@ def build_skeleton(ly, top, texts, out_path, log=print, skel_texts=None):
 
 
 def add_skeleton(cache, log=print, text_cap=None, text_tile_cap=None,
-                 skel_texts=None):
+                 skel_texts=None, jobs=None):
     """Upgrade an existing cache in place (one source read, no re-tiling):
     floe index --skeleton-only."""
     t0 = time.perf_counter()
@@ -766,7 +833,8 @@ def add_skeleton(cache, log=print, text_cap=None, text_tile_cap=None,
         texts, thinned = collect_texts(
             ly, top.cell_index(), log=log, cap=text_cap,
             grid=meta["grid"], tile_cap=text_tile_cap,
-            budget=SKEL_TEXT_CAP if skel_texts is None else skel_texts)
+            budget=SKEL_TEXT_CAP if skel_texts is None else skel_texts,
+            jobs=jobs)
     out = os.path.join(cache.dir, "skeleton.oas")
     meta["skeleton"] = build_skeleton(ly, top, texts, out, log,
                                       skel_texts=skel_texts)
@@ -784,7 +852,7 @@ def add_skeleton(cache, log=print, text_cap=None, text_tile_cap=None,
 
 
 def rebuild_texts(cache, log=print, text_cap=None, text_tile_cap=None,
-                  skel_texts=None):
+                  skel_texts=None, jobs=None):
     """Refresh the text handling of an existing banded cache in place
     (floe index --texts-only), NO re-tiling: strips any texts still
     living in the b0 tiles (pre-0.5.4 caches carried them - texts now
@@ -829,7 +897,8 @@ def rebuild_texts(cache, log=print, text_cap=None, text_tile_cap=None,
             f"{removed} text-only tiles removed")
     # skeleton rebuild carries the fresh labels + meta update
     add_skeleton(cache, log, text_cap=text_cap,
-                 text_tile_cap=text_tile_cap, skel_texts=skel_texts)
+                 text_tile_cap=text_tile_cap, skel_texts=skel_texts,
+                 jobs=jobs)
     log(f"[index] texts refreshed ({time.perf_counter() - t_all:.0f}s)")
 
 
@@ -1662,7 +1731,8 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
         all_texts, thinned_lis = collect_texts(
             ly, top_ci, text_layer_lis, log, cap=text_cap, grid=grid,
             tile_cap=text_tile_cap,
-            budget=SKEL_TEXT_CAP if skel_texts is None else skel_texts)
+            budget=SKEL_TEXT_CAP if skel_texts is None else skel_texts,
+            jobs=jobs)
     log(f"[index] {len(all_texts)} texts collected for skeleton "
         f"labels ({time.perf_counter() - t0:.1f}s)")
 
