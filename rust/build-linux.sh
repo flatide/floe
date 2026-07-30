@@ -15,7 +15,11 @@
 set -e
 cd "$(dirname "$0")"
 PATH="$HOME/.cargo/bin:$PATH"
-rustup target add x86_64-unknown-linux-musl >/dev/null
+# rustup manages the musl std on online machines; an offline
+# standalone-tarball toolchain (BUILD.md) has it preinstalled
+if command -v rustup >/dev/null 2>&1; then
+    rustup target add x86_64-unknown-linux-musl >/dev/null
+fi
 cargo build --release --target x86_64-unknown-linux-musl
 mkdir -p dist
 cp target/x86_64-unknown-linux-musl/release/floe-index \

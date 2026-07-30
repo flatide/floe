@@ -5,3 +5,12 @@
 [target.x86_64-unknown-linux-musl]
 linker = "rust-lld"
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# Dependencies are vendored into rust/vendor/ (1.2 MB, 6 pure-Rust
+# crates): builds never touch crates.io - only rustup needs internet,
+# and a standalone toolchain tarball covers even that (see BUILD.md).
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"
