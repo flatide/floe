@@ -1968,9 +1968,12 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
                         take(*res)
                         probing = False
                     now = time.perf_counter()
-                    if done_now:
-                        t_beat = now
-                    elif now - t_beat >= INDEX_HEARTBEAT_S:
+                    # unconditional periodic heartbeat: it used to be
+                    # suppressed whenever completions kept arriving, so
+                    # a HEALTHY 40-worker run went silent for minutes
+                    # between the 10%-step progress lines and looked
+                    # stalled (host report)
+                    if now - t_beat >= INDEX_HEARTBEAT_S:
                         t_beat = now
                         bd = _breakdown()
                         log(f"[index] tiles {done}/{len(coords)} done, "
@@ -1987,22 +1990,30 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
             with ctx.Pool(jobs) as pool:
                 it = pool.imap_unordered(_build_one_tile, coords)
                 left = len(coords)
+                t_beat = time.perf_counter()
+
+                def beat():
+                    bd = _breakdown()
+                    log(f"[index] tiles {done}/{len(coords)} done, "
+                        f"{min(jobs, left)} workers busy "
+                        f"({time.perf_counter() - t0:.0f}s"
+                        + (f"; {bd}" if bd else "") + ")")
                 while left:
                     try:
                         res = it.next(timeout=INDEX_HEARTBEAT_S)
                     except multiprocessing.TimeoutError:
                         # heavy tiles can run many minutes: keep proving
                         # liveness instead of going silent between tiles
-                        bd = _breakdown()
-                        log(f"[index] tiles {done}/{len(coords)} done, "
-                            f"{min(jobs, left)} workers busy "
-                            f"({time.perf_counter() - t0:.0f}s"
-                            + (f"; {bd}" if bd else "") + ")")
+                        t_beat = time.perf_counter()
+                        beat()
                         continue
                     except StopIteration:
                         break
                     take(*res)
                     left -= 1
+                    if time.perf_counter() - t_beat >= INDEX_HEARTBEAT_S:
+                        t_beat = time.perf_counter()
+                        beat()
         else:
             for rc in coords:
                 take(*_build_one_tile(rc))
