@@ -614,33 +614,41 @@ def _strip_texts(ly, layers=None):
     geo_mask = db.Shapes.SAll & ~db.Shapes.STexts
     editable = ly.is_editable()
     lis = ly.layer_indexes() if layers is None else layers
-    for cell in ly.each_cell():
-        for li in lis:
-            shapes = cell.shapes(li)
-            has_text = False
-            for _ in shapes.each(db.Shapes.STexts):
-                has_text = True
-                break
-            if not has_text:
-                continue
-            if editable:
-                victims = [s for s in shapes.each(db.Shapes.STexts)]
-                for s in victims:
-                    shapes.erase(s)
-                continue
-            mixed = False
-            for _ in shapes.each(geo_mask):
-                mixed = True
-                break
-            if not mixed:
+    # start/end_changes batches klayout's internal updates: without it
+    # every per-container modification re-triggers them and the sweep
+    # goes quadratic-ish - an 80k-container marker repro measured 264s
+    # bare vs 0.1s batched (the host source strip sat >20 min)
+    ly.start_changes()
+    try:
+        for cell in ly.each_cell():
+            for li in lis:
+                shapes = cell.shapes(li)
+                has_text = False
+                for _ in shapes.each(db.Shapes.STexts):
+                    has_text = True
+                    break
+                if not has_text:
+                    continue
+                if editable:
+                    victims = [s for s in shapes.each(db.Shapes.STexts)]
+                    for s in victims:
+                        shapes.erase(s)
+                    continue
+                mixed = False
+                for _ in shapes.each(geo_mask):
+                    mixed = True
+                    break
+                if not mixed:
+                    shapes.clear()
+                    continue
+                reg = db.Region()
+                reg.merged_semantics = False
+                reg.insert(shapes)      # Region excludes texts
+                reg = reg.dup()         # detach before the clear
                 shapes.clear()
-                continue
-            reg = db.Region()
-            reg.merged_semantics = False
-            reg.insert(shapes)      # Region excludes texts
-            reg = reg.dup()         # detach before the clear
-            shapes.clear()
-            shapes.insert(reg)
+                shapes.insert(reg)
+    finally:
+        ly.end_changes()
 
 
 def compact_instances(ly, min_group=500, log=None):
@@ -653,6 +661,17 @@ def compact_instances(ly, min_group=500, log=None):
     true regular arrays fixes both (regular arrays survive the roundtrip).
     """
     import numpy as np
+    # batch klayout's internal updates across the per-cell instance
+    # rewrites (same modification-storm as _strip_texts: measured
+    # 2,640x there)
+    ly.start_changes()
+    try:
+        _compact_instances_inner(ly, min_group, log, np)
+    finally:
+        ly.end_changes()
+
+
+def _compact_instances_inner(ly, min_group, log, np):
     for cell in ly.each_cell():
         n_inst = cell.child_instances()
         if n_inst < min_group:
