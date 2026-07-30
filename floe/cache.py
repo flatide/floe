@@ -1165,6 +1165,12 @@ def _tile_lod(tgt, top_ci, out_path, cap=LOD_SHAPE_CAP, always=False,
 # scatter - a twin would not pay, skip it (the raw band stays available)
 MERGE_CLOSE_FRAC = 0.5
 MERGE_POLY_CAP = 4096
+# bands under this many members get no twin at all: drawing the raw
+# band takes single-digit ms at that size, so a coarse stand-in buys
+# nothing, and every skipped band saves its whole walk/close cost
+# (merge still measured 45% of host tile time after the layer
+# restriction - sparse tile-bands paying full freight is the suspect)
+TWIN_MIN_MEMBERS = 50_000
 # bands up to this many members build their twin from exact geometry;
 # above it the envelope walk below stands in (expanding hundreds of
 # millions of fill members just to fuse them again measured 9x total
@@ -1174,7 +1180,7 @@ _CONT_FAN = 4096        # own-container members worth expanding
 _INST_FAN = 64          # instance-array members worth placing singly
 
 
-def _twin_boxes(bly, btop, lis=None):
+def _twin_boxes(bly, btop, lis=None, own_cells=None):
     """{layer_index: [Box, ...]} coarse coverage of a band layout in
     tile coordinates, WITHOUT expanding shape or instance arrays:
     small containers contribute member bboxes, huge ones (fill fields)
@@ -1183,7 +1189,11 @@ def _twin_boxes(bly, btop, lis=None):
     needs a twin - is envelope-faithful; sparse scatter overstates,
     which the polygon cap downstream already treats as 'no twin'.
     lis: restrict to these layer indexes (a 449-layer host chip paid
-    449 probes per cell for the ~dozens of layers a band holds)."""
+    449 probes per cell for the ~dozens of layers a band holds).
+    own_cells: cell indexes known to hold shapes in this band (the
+    partitioner's filled set) - other cells skip the container probes
+    entirely (their sweep found nothing by construction) and only
+    contribute their instance placements."""
     if lis is None:
         lis = bly.layer_indexes()
     memo = {}
@@ -1194,7 +1204,8 @@ def _twin_boxes(bly, btop, lis=None):
             return out
         cell = bly.cell(ci)
         out = {}
-        for li in lis:
+        for li in (lis if own_cells is None or ci in own_cells
+                   else ()):
             sh = cell.shapes(li)
             n = sh.size()
             if not n:
@@ -1236,7 +1247,7 @@ def _twin_boxes(bly, btop, lis=None):
 
 
 def _merge_band(bly, btop, r, c, k, upper_dbu, out_path, opts,
-                members=None, lis=None):
+                members=None, lis=None, own_cells=None):
     """Write the merged twin of one band: geometry (exact when small,
     envelope-walked when huge - see _twin_boxes) with gaps below
     MERGE_CLOSE_FRAC x band-upper-edge closed (sized +d/-d fuses fill
@@ -1251,9 +1262,11 @@ def _merge_band(bly, btop, r, c, k, upper_dbu, out_path, opts,
     if members is None:
         members = sum(cell.shapes(li).size() for cell in bly.each_cell()
                       for li in lis)
+    if members < TWIN_MIN_MEMBERS:
+        return 0    # raw band draws in ms at this size: no twin needed
     d = max(1, int(upper_dbu * MERGE_CLOSE_FRAC))
     boxes = (None if members <= MERGE_EXPAND_CAP
-             else _twin_boxes(bly, btop, lis))
+             else _twin_boxes(bly, btop, lis, own_cells))
     mly = db.Layout(True)
     mly.dbu = bly.dbu
     mc = mly.create_cell(f"TILE_{r}_{c}_m{k}")
@@ -1454,7 +1467,8 @@ def _tile_bands(tgt, cdir, r, c, th_dbu, opts, merge=True, lis=None):
                             os.path.join(cdir, f"tiles_m{k}",
                                          f"t_{r}_{c}.oas"), opts,
                             members=bcount[k],
-                            lis=sorted(flayers[k]))
+                            lis=sorted(flayers[k]),
+                            own_cells=filled[k])
                 t_merge += time.perf_counter() - t
         bly._destroy()
     return counts, t_merge
