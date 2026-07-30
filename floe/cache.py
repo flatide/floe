@@ -1443,7 +1443,7 @@ def _tile_bands(tgt, cdir, r, c, th_dbu, opts, merge=True, lis=None):
                 if np_:
                     put(k, ci, li, part, np_)
     counts = []
-    t_merge = 0.0
+    t_merge = t_fwrite = 0.0
     for k in range(nb):
         bly = blys[k]
         # drop cells whose subtree holds no shapes in this band: their
@@ -1462,8 +1462,10 @@ def _tile_bands(tgt, cdir, r, c, th_dbu, opts, merge=True, lis=None):
             bly.delete_cells(doomed)
         counts.append(bcount[k])
         if bcount[k]:
+            t = time.perf_counter()
             bly.write(
                 os.path.join(cdir, f"tiles_b{k}", f"t_{r}_{c}.oas"), opts)
+            t_fwrite += time.perf_counter() - t
             if merge and k >= 1:    # band 0 is never cut - no twin
                 t = time.perf_counter()
                 _merge_band(bly, bly.cell(btop), r, c, k, edges[nb - k],
@@ -1474,7 +1476,7 @@ def _tile_bands(tgt, cdir, r, c, th_dbu, opts, merge=True, lis=None):
                             own_cells=filled[k])
                 t_merge += time.perf_counter() - t
         bly._destroy()
-    return counts, t_merge
+    return counts, t_merge, t_fwrite
 
 
 DENSITY_LEVELS = 12     # depth levels recorded in the per-tile density table
@@ -1718,14 +1720,18 @@ def _build_one_tile(rc):
                    if not cell.bbox_per_layer(li).empty()]
     t = time.perf_counter()
     if bands_dbu:
-        _counts, t_merge = _tile_bands(tgt, cdir, r, c, bands_dbu, opts,
-                                       merge=merge, lis=content_lis)
+        # split the old catch-all "write" number: "part" = probing +
+        # partitioning + pruning, "write" = the OASIS file writes
+        _counts, t_merge, t_fw = _tile_bands(tgt, cdir, r, c, bands_dbu,
+                                             opts, merge=merge,
+                                             lis=content_lis)
         if t_merge:
             tm["merge"] = t_merge
+        tm["part"] = time.perf_counter() - t - t_merge - t_fw
+        tm["write"] = t_fw
     else:
-        t_merge = 0.0
         tgt.write(os.path.join(cdir, "tiles", f"t_{r}_{c}.oas"), opts)
-    tm["write"] = time.perf_counter() - t - t_merge
+        tm["write"] = time.perf_counter() - t
     t = time.perf_counter()
     lod_d = _tile_lod(tgt, ci, os.path.join(cdir, "tiles_lod",
                                             f"t_{r}_{c}.oas"),
