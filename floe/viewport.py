@@ -68,6 +68,18 @@ class Mosaic:
         # live cell indexes, used to spot what each read() created
         self._known = {self.top.cell_index()}
 
+    def apply_visibility(self, visible):
+        """Rebuild the top cell's instance list to exactly the loaded
+        keys in `visible` (None = all). Cells left out are simply not
+        part of the drawn tree - unlike LayoutView.hide_cell, which
+        paints every hidden cell as a white bbox frame (measured: the
+        band cut used to leave white tile-boundary lines on wide
+        views). clear_insts + insert are viewer-mode-safe."""
+        self.top.clear_insts()
+        for key, ci in self.loaded.items():
+            if ci is not None and (visible is None or key in visible):
+                self.top.insert(db.CellInstArray(ci, db.Trans()))
+
     def _members(self, cell, memo):
         """Estimated draw members of a cell subtree: stored shape
         counts (klayout's Shapes.size() counts array members) times

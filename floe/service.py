@@ -33,6 +33,13 @@ _PICK_CAP = 64    # max candidates per pick query
 CUT_LEVEL_PX = (0.0, 2.0, 4.0, 8.0)
 CUT_PX = CUT_LEVEL_PX[1]
 
+# first-visit renders turn progressive when at least this many band-file
+# bytes still need parsing (~0.5s at the measured ~18 MB/s parse rate):
+# coarse bands + twins paint a near-complete frame first, fine bands
+# sharpen it as they parse. Below the threshold a single pass is quicker
+# than the extra intermediate draws.
+PROGRESSIVE_MIN_BYTES = 8_000_000
+
 
 def _bands_for_view(cache, x0, x1, w, cut_px=None):
     """(needed band indexes, cut size in dbu) for a view of w pixels
@@ -51,23 +58,27 @@ def _bands_for_view(cache, x0, x1, w, cut_px=None):
     return need, cutoff
 
 
-def _apply_bands(mosaic, renderer, need):
-    """Show loaded band cells in `need`, hide the rest (a hidden cell's
-    subtree costs nothing at draw time). A band the cut drops shows its
-    merged twin instead when one is loaded - coarse slabs in the layer's
-    live color, so the cut no longer blanks fill fields."""
-    if mosaic.bands == 1 or need is None:
+def _apply_band_sets(mosaic, renderer, raw, twins):
+    """Show loaded RAW band cells for bands in `raw`, merged-twin cells
+    for bands in `twins`, drop everything else from the drawn tree.
+    (Rebuilding the mosaic top's instance list replaced hide_cell,
+    which painted every hidden cell as a white bbox frame - visible as
+    white tile-boundary lines on cut views.)"""
+    if mosaic.bands == 1:
         return
-    show, hide = [], []
-    for key, ci in mosaic.loaded.items():
-        if ci is None:
-            continue
-        if len(key) == 4:   # merged twin: visible exactly when its
-            on = key[2] not in need   # raw band is cut
-        else:
-            on = key[2] in need
-        (show if on else hide).append(ci)
-    renderer.set_cell_visibility(show, hide)
+    mosaic.apply_visibility(
+        {key for key, ci in mosaic.loaded.items() if ci is not None
+         and key[2] in (twins if len(key) == 4 else raw)})
+
+
+def _apply_bands(mosaic, renderer, need):
+    """Steady-state visibility: raw cells for the needed bands, merged
+    twins standing in for the bands the cut drops - coarse slabs in
+    the layer's live colors, so the cut no longer blanks fill fields."""
+    if need is None:
+        return
+    _apply_band_sets(mosaic, renderer, set(need),
+                     set(range(mosaic.bands)) - set(need))
 
 
 _TWIN_RE = re.compile(r"^TILE_\d+_\d+_m\d+")
@@ -122,6 +133,7 @@ def _svc_snap(cache, mosaic, job, res):
         box = db.Box(px - r, py - r, px + r, py + r)
         mosaic.ensure(cache.tiles_for_bbox(box.left, box.bottom,
                                            box.right, box.top))
+        mosaic.apply_visibility(None)   # measure against every band
         sel = set(map(tuple, job["layers"])) if job.get("layers") else None
         r2 = float(r) * r
         best_v = best_e = None
@@ -171,6 +183,7 @@ def _svc_pick(cache, mosaic, job, res):
         box = db.Box(px - r, py - r, px + r, py + r)
         mosaic.ensure(cache.tiles_for_bbox(box.left, box.bottom,
                                            box.right, box.top))
+        mosaic.apply_visibility(None)   # measure against every band
         sel = set(map(tuple, job["layers"])) if job.get("layers") else None
         p = db.Point(px, py)
         ly = mosaic.ly
@@ -331,6 +344,57 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
                                          * 1000)})
                     if newer():
                         return  # superseded: the newer job renders next
+            if use_mosaic is mosaic and need is not None \
+                    and len(need) > 1:
+                # progressive band frames (Calibre-style build-up):
+                # coarse bands paint a near-complete first frame in the
+                # time their small files parse - twins stand in for the
+                # bands still pending - and each finer band re-renders
+                # the view as its files land. Every step is a full
+                # klayout pass over what is shown, so layer draw order
+                # stays exact in every frame. Only first visits with
+                # enough unparsed bytes bother (the intermediate draws
+                # are not free).
+                order = sorted(need)
+                pending_bytes = 0
+                for k in order[1:]:
+                    for (r, c) in tiles:
+                        if (r, c, k) not in mosaic.loaded:
+                            try:
+                                pending_bytes += os.path.getsize(
+                                    cache.band_tile_path(r, c, k))
+                            except OSError:
+                                pass
+                if pending_bytes > PROGRESSIVE_MIN_BYTES:
+                    for i, k in enumerate(order[:-1]):
+                        pend = order[i + 1:]
+                        tl = time.perf_counter()
+                        ch = mosaic.ensure(
+                            tiles, stop=newer, bands=(k,),
+                            merged=tuple(pend) + tuple(twin or ()))
+                        t_load += time.perf_counter() - tl
+                        if newer():
+                            return
+                        if ch:
+                            renderer.refresh()
+                        _apply_band_sets(
+                            mosaic, renderer, set(order[:i + 1]),
+                            set(pend) | set(twin or ()))
+                        renderer.set_abstract(job.get("abstract"))
+                        renderer.render_png(tmp, x0, y0, x1, y1,
+                                            job["w"], job["h"],
+                                            visible=job["visible"],
+                                            depth=depth)
+                        with open(tmp, "rb") as f:
+                            png = f.read()
+                        res.put({"kind": "frame", "png": png,
+                                 "bbox": job["bbox"], "gen": job["gen"],
+                                 "tiles": len(tiles), "scope": scope,
+                                 "preview": True, **cut_kv,
+                                 "ms": round((time.perf_counter() - t0)
+                                             * 1000)})
+                        if newer():
+                            return
             view = job.get("view")
             if use_mosaic is mosaic and view is not None:
                 # two-phase margin render: when the overdraw margin
