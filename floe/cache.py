@@ -597,8 +597,8 @@ def _find_grids(pts):
     return arrays, leftovers
 
 
-def _strip_texts(ly):
-    """Remove all text shapes (tiles get exactly-once texts injected).
+def _strip_texts(ly, layers=None):
+    """Remove all text shapes (texts live only in the skeleton).
 
     Works in viewer mode too, where per-shape erase is forbidden:
     text-only containers (the normal case - marker/label layers) are
@@ -606,11 +606,16 @@ def _strip_texts(ly):
     geometry via a Region. clip_into DOES carry source texts into the
     tile (measured - the old assumption that it drops them was wrong),
     so skipping this would leak boundary-duplicated / unthinned texts
-    into band 0."""
+    into band 0. `layers` restricts the sweep to known text-bearing
+    layer indexes: the indexer strips the loaded SOURCE once right
+    after label collection - a marker chip (1.7e9 texts) used to
+    re-copy millions of texts into every tile clip and re-strip them
+    1,600 times over."""
     geo_mask = db.Shapes.SAll & ~db.Shapes.STexts
     editable = ly.is_editable()
+    lis = ly.layer_indexes() if layers is None else layers
     for cell in ly.each_cell():
-        for li in ly.layer_indexes():
+        for li in lis:
             shapes = cell.shapes(li)
             has_text = False
             for _ in shapes.each(db.Shapes.STexts):
@@ -1594,7 +1599,7 @@ def _build_one_tile(rc):
     """Build tile (r, c) from _TILE_CTX. Runs in a fork worker (or inline
     for jobs=1). Returns (r, c, wrote, lod_depth, density, step_times)."""
     (ly, top_ci, bbox, grid, cdir, opts, bands_dbu, tile_editable,
-     merge) = _TILE_CTX
+     merge, text_lis) = _TILE_CTX
     r, c = rc
     x0 = bbox.left + c * grid["tile_w"]
     y0 = bbox.bottom + r * grid["tile_h"]
@@ -1622,9 +1627,10 @@ def _build_one_tile(rc):
         return r, c, False, None, None, tm
     cell.name = f"TILE_{r}_{c}"
     t = time.perf_counter()
-    # texts live only in the skeleton (far-view labels): strip what
-    # clip_into carried so tiles stay text-free (viewer-safe)
-    _strip_texts(tgt)
+    # texts live only in the skeleton (far-view labels): the source is
+    # stripped once before tiling, this per-tile pass (restricted to
+    # the known text layers) is a cheap safety net
+    _strip_texts(tgt, text_lis)
     tm["strip"] = time.perf_counter() - t
     t = time.perf_counter()
     compact_instances(tgt)
@@ -1742,6 +1748,19 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
     log(f"[index] {len(all_texts)} texts collected for skeleton "
         f"labels ({time.perf_counter() - t0:.1f}s)")
 
+    # strip texts from the loaded source ONCE, before tiling: every
+    # tile clip used to copy its region's share of the source texts
+    # (millions per dense tile on marker chips) just for the per-tile
+    # strip to remove them again - 1,600 times over. The per-tile
+    # strip stays as a cheap no-op safety net. Restricted to the
+    # text-bearing layers found by the scan.
+    if text_layer_lis:
+        t0 = time.perf_counter()
+        with _phase_monitor("stripping texts"):
+            _strip_texts(ly, text_layer_lis)
+        log(f"[index] source texts stripped "
+            f"({time.perf_counter() - t0:.1f}s)")
+
     # --- tiles ---
     t0 = time.perf_counter()
     n_files = 0
@@ -1787,7 +1806,7 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
     global _TILE_CTX
     _TILE_CTX = (ly, top_ci, bbox, grid, cdir, save_opts(),
                  bands_dbu, (tile_tgt or "").lower().startswith("edit"),
-                 bool(merge))
+                 bool(merge), text_layer_lis)
     total_gb = _total_ram_gb()
     try:
         if ctx is not None and gov and total_gb:
