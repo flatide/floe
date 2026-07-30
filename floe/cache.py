@@ -336,13 +336,20 @@ TEXT_TILE_CAP = 10_000       # per-tile budget for over-budget layers
 
 
 def collect_texts(ly, top_ci, text_layers=None, log=None, cap=None,
-                  grid=None, tile_cap=None):
+                  grid=None, tile_cap=None, budget=None):
     """Gather text objects (any depth) with top-level coordinates.
 
-    Tiles get texts re-injected with half-open tile assignment so each text
-    lands in exactly one tile (clip duplicates edge-coincident texts into
-    every adjacent tile). Returns ([(layer_index, db.Text in top coords)],
-    [layer_index thinned/dropped]).
+    Returns ([(layer_index, db.Text in top coords)],
+    [layer_index thinned/dropped]). The ONLY consumer is the far-view
+    skeleton's label set (texts live nowhere else since 0.5.4), so
+    `budget` - the skeleton label cap - sizes the whole collection:
+    with a budget of B, each text layer gets a 4xB/n_layers slice
+    (oversampled so the final uniform stride still has spatial
+    spread) and over-budget layers keep slice/n_tiles texts per tile.
+    Without the budget the old fixed caps applied and a 1,600-tile
+    host chip measured 16M texts KEPT per marker layer (~10 GB and
+    ~5 min each, 20 layers) only to be sampled down to 50k at the
+    end. Explicit --text-cap / --text-tile-cap still win.
 
     Only text-bearing layers are expanded. A plain all-layers recursive
     pass expands every SRAM/fill array to reach a handful of labels
@@ -350,27 +357,35 @@ def collect_texts(ly, top_ci, text_layers=None, log=None, cap=None,
     restricting the iterator to the text layers prunes those subtrees
     entirely (~2600x faster, identical output).
 
-    Layers under the per-layer budget (default TEXT_LAYER_CAP,
-    --text-cap overrides, 0 = unlimited) are collected in full - a
-    count-only pass classifies every layer up front, aborting at
-    budget+1 so even a billion-text layer costs seconds. Over-budget
-    layers - production files carry per-shape marker texts in the
-    BILLIONS (a host chip hit 1.7e9 texts / 754 GB RSS) - are NOT
-    dropped: they are collected per tile through bbox-restricted
-    queries capped at tile_cap texts each (default TEXT_TILE_CAP,
-    --text-tile-cap overrides), so coverage degrades spatially
-    uniformly, near-zoom picking keeps working everywhere, and total
-    work is bounded by tiles x tile_cap instead of the text count.
-    No human decision needed; the thinning is logged and recorded in
-    meta. tile_cap 0 disables thinning (over-budget layers dropped
-    whole, the pre-0.5.3 behavior); grid None likewise."""
+    Layers under the per-layer budget (--text-cap, 0 = unlimited) are
+    collected in full - a count-only pass classifies every layer up
+    front, aborting at budget+1 so even a billion-text layer costs
+    seconds (a host chip hit 1.7e9 texts / 754 GB RSS before this
+    existed). Over-budget layers are NOT dropped: per-tile
+    bbox-restricted queries abort at the tile cap, so coverage
+    degrades spatially uniformly and total work is bounded by
+    tiles x tile_cap instead of the text count. No human decision
+    needed; the thinning is logged and recorded in meta. tile_cap 0
+    disables thinning (over-budget layers dropped whole, the
+    pre-0.5.3 behavior); grid None likewise."""
+    layers = _text_layers(ly) if text_layers is None else text_layers
+    if budget and budget > 0 and layers:
+        slice_ = max(1, (budget * 4) // len(layers))
+        if cap is None:
+            cap = slice_
+        if tile_cap is None and grid is not None:
+            tile_cap = max(1, slice_ // (grid["nx"] * grid["ny"]))
+        if log is not None:
+            log(f"[index] text budget: {budget:,} labels -> "
+                f"{cap:,}/layer" + (f", {tile_cap:,}/tile for "
+                                    f"over-budget layers"
+                                    if tile_cap is not None else ""))
     if cap is None:
         cap = TEXT_LAYER_CAP
     if cap <= 0:
         cap = None
     if tile_cap is None:
         tile_cap = TEXT_TILE_CAP
-    layers = _text_layers(ly) if text_layers is None else text_layers
     top = ly.cell(top_ci)
     out = []
     thinned = []
@@ -747,9 +762,10 @@ def add_skeleton(cache, log=print, text_cap=None, text_tile_cap=None,
         ly.read(cache.src)
     top = pick_top_cell(ly, log)
     with _phase_monitor("collecting texts"):
-        texts, thinned = collect_texts(ly, top.cell_index(), log=log,
-                                       cap=text_cap, grid=meta["grid"],
-                                       tile_cap=text_tile_cap)
+        texts, thinned = collect_texts(
+            ly, top.cell_index(), log=log, cap=text_cap,
+            grid=meta["grid"], tile_cap=text_tile_cap,
+            budget=SKEL_TEXT_CAP if skel_texts is None else skel_texts)
     out = os.path.join(cache.dir, "skeleton.oas")
     meta["skeleton"] = build_skeleton(ly, top, texts, out, log,
                                       skel_texts=skel_texts)
@@ -1642,10 +1658,10 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
     top_ci = top.cell_index()
     t0 = time.perf_counter()
     with _phase_monitor("collecting texts"):
-        all_texts, thinned_lis = collect_texts(ly, top_ci,
-                                               text_layer_lis, log,
-                                               cap=text_cap, grid=grid,
-                                               tile_cap=text_tile_cap)
+        all_texts, thinned_lis = collect_texts(
+            ly, top_ci, text_layer_lis, log, cap=text_cap, grid=grid,
+            tile_cap=text_tile_cap,
+            budget=SKEL_TEXT_CAP if skel_texts is None else skel_texts)
     log(f"[index] {len(all_texts)} texts collected for skeleton "
         f"labels ({time.perf_counter() - t0:.1f}s)")
 
