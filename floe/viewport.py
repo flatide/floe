@@ -14,6 +14,21 @@ MAX_LIVE_TILES = 32     # a render request may touch at most this many tiles
 EVICT_ABOVE = 128       # keep at most this many loaded entries in the mosaic
 
 
+def live_caps(meta):
+    """(max live tiles, LRU evict-above) scaled to the cache's tile
+    size. The base constants are tuned for the 6 MB --tile-mb default;
+    a finer grid means proportionally lighter tiles, so a view may
+    span proportionally more of them for the same load/draw/memory
+    budget (capped at 8x so a sparse file cannot unbound the caps)."""
+    try:
+        g = meta["grid"]
+        avg = meta["src"]["size"] / max(1, g["nx"] * g["ny"])
+        f = max(1, min(8, round(6e6 / max(1.0, avg))))
+    except (KeyError, TypeError):
+        f = 1
+    return MAX_LIVE_TILES * f, EVICT_ABOVE * f
+
+
 class Mosaic:
     """A Layout that accumulates cache tiles on demand with LRU eviction.
 
@@ -44,6 +59,7 @@ class Mosaic:
         for l in cache.meta["layers"]:
             self.ly.layer(db.LayerInfo(l["layer"], l["datatype"]))
         self.top = self.ly.create_cell("FLOE_MOSAIC")
+        self.evict_above = live_caps(cache.meta)[1]
         # (r, c[, k]) -> cell_index or None (empty tile/band)
         self.loaded = {}
         # (r, c[, k]) -> estimated draw members of that subtree,
@@ -138,7 +154,7 @@ class Mosaic:
         # exactly the victim's subtree
         active = set(keys)
         evicted = False
-        while len(self.loaded) > EVICT_ABOVE:
+        while len(self.loaded) > self.evict_above:
             victim = next((k for k in self.loaded if k not in active), None)
             if victim is None:
                 break

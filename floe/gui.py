@@ -20,7 +20,7 @@ import time
 
 from . import cache as cache_mod
 from .service import RenderWorker, CUT_LEVEL_PX
-from .viewport import MAX_LIVE_TILES
+from .viewport import live_caps
 
 Gtk = Gdk = GdkPixbuf = GLib = Pango = None
 
@@ -292,6 +292,9 @@ class Viewer:
                           max(0, min(len(CUT_LEVEL_PX) - 1,
                                      int(cut_level))))
         self.cut_px = CUT_LEVEL_PX[self.cut_level]
+        # live-render span budget, scaled to the cache's tile size
+        # (finer --tile-mb grids allow proportionally more tiles)
+        self._live_cap = live_caps(cache.meta)[0]
         self.dump = bool(dump)      # --dump: save debug frame dumps
         self._quitting = False
         # ruler / snap / pick state
@@ -888,7 +891,7 @@ class Viewer:
         self._clamp_view()
         bbox = self.view_bbox()
         span = self.tiles_spanned(bbox)
-        live = 0 < span <= MAX_LIVE_TILES and bool(self.visible)
+        live = 0 < span <= self._live_cap and bool(self.visible)
         scope = "live" if live else "skel"
         self._display()
         if not self.visible:

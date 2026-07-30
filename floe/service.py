@@ -18,7 +18,7 @@ import klayout.db as db
 
 from . import cache as cache_mod
 from .render import Renderer
-from .viewport import Mosaic, MAX_LIVE_TILES
+from .viewport import Mosaic, live_caps
 
 _SNAP_CAP = 400   # max shapes examined per snap query
 _PICK_CAP = 64    # max candidates per pick query
@@ -275,7 +275,7 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
             tiles_n = 0
         else:
             tiles = cache.tiles_for_bbox(x0, y0, x1, y1)
-            if len(tiles) > MAX_LIVE_TILES:
+            if len(tiles) > live_caps(cache.meta)[0]:
                 res.put({"kind": "error",
                          "msg": f"{len(tiles)} tiles > live limit"})
                 return
