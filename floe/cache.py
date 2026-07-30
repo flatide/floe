@@ -36,7 +36,13 @@ import klayout.db as db
 CACHE_VERSION = 8
 TILE_TARGET_BYTES = 6_000_000
 GRID_MIN, GRID_MAX = 4, 96
-INDEX_HEARTBEAT_S = 60   # progress line at least this often while tiling
+INDEX_HEARTBEAT_S = 60
+# governor's per-worker memory assumption before any tile has finished:
+# the highest per-worker peak measured on production content (150 MB
+# chip, editable-era partitioning). Deliberately conservative - a big
+# host starts budget/12 workers immediately instead of one solo probe,
+# a 16 GB laptop still starts just one
+MEM_PRIOR_GB = 12.0   # progress line at least this often while tiling
 # size-band edges in um (ascending): 4 bands, band 0 = shapes with
 # max(bbox w, h) >= 2um ... band 3 = < 0.125um
 BAND_THRESHOLDS_UM = (0.125, 0.5, 2.0)
@@ -1787,11 +1793,14 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
         if ctx is not None and gov and total_gb:
             # Memory governor: worker count follows measured demand, not
             # just core count (a 16 GB laptop OOMed at cpu_count workers
-            # x 4-8 GB/tile on adversarial content). One central tile
-            # runs solo first to gauge per-worker private memory; then
-            # concurrency is re-derived every poll from what the system
-            # can still hand out, and the estimate keeps learning from
-            # live worker RSS in case denser tiles exceed the probe.
+            # x 4-8 GB/tile on adversarial content). Until the first
+            # tile completes, per-worker demand is assumed to be
+            # MEM_PRIOR_GB and the budget runs as many workers as that
+            # buys - the probe used to run SOLO, which left a 96-core
+            # host idle for the ~20 min its densest (central, queued
+            # first) tile took. After the first completion the live
+            # estimate takes over and keeps learning from worker RSS
+            # in case denser tiles exceed it.
             floor_gb = mem_floor_gb or max(2.0, 0.05 * total_gb)
             parent_gb = _rss_gb(os.getpid()) or 0.0
             est_gb = 0.5      # per-worker private demand, learned live
@@ -1802,7 +1811,8 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
             log(f"[index] tiling with up to {jobs} fork workers "
                 f"(memory-governed; {total_gb:.0f} GB RAM"
                 + (f", --mem cap {mem_gb:g} GB" if mem_gb else "")
-                + f", probing tile {probe_rc[0]},{probe_rc[1]} solo)...")
+                + f"; assuming {MEM_PRIOR_GB:g} GB/worker until the "
+                f"first tile lands)...")
             if mem_gb and mem_gb <= parent_gb + 1.0:
                 log(f"[index][warn] --mem {mem_gb:g} GB leaves <1 GB "
                     f"over the loaded source ({parent_gb:.1f} GB RSS); "
@@ -1828,21 +1838,27 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
                     for r in kids.values():
                         est_gb = max(est_gb, r - parent_gb)
                     avail = _avail_ram_gb()
-                    if probing:
-                        allowed = 1
-                    elif avail is None:
-                        allowed = jobs
+                    if avail is None:
+                        allowed = 1 if probing else jobs
                     else:
                         # what the pie (still free + already claimed by
                         # workers) buys at est GB per worker, with slack
-                        # for tiles denser than anything seen yet
+                        # for tiles denser than anything seen yet. While
+                        # no tile has completed, the conservative prior
+                        # bounds the fleet instead of a solo probe (the
+                        # live samples still tighten it if they exceed
+                        # the prior; a burst can still overshoot if real
+                        # demand tops the prior after dispatch - the
+                        # 1.25 slack and the floor absorb that)
                         budget = avail + priv - floor_gb
                         if mem_gb:
                             # --mem: hard ceiling for the whole run =
                             # loaded source + all worker private memory
                             budget = min(budget, mem_gb - parent_gb)
+                        est_eff = (max(est_gb, MEM_PRIOR_GB) if probing
+                                   else est_gb)
                         allowed = max(1, min(jobs,
-                                             int(budget / (est_gb * 1.25))))
+                                             int(budget / (est_eff * 1.25))))
                     if (not probing and allowed != last_allowed
                             and allowed < jobs and pending
                             and time.perf_counter() - t_note >= 10.0):
