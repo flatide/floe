@@ -1,0 +1,7 @@
+# Cross-build for the closed-network Linux hosts: fully static musl
+# binary (no glibc version coupling), linked with rustc's bundled
+# rust-lld so no external C toolchain is needed - the dependency tree
+# is pure Rust (flate2 uses the miniz_oxide backend).
+[target.x86_64-unknown-linux-musl]
+linker = "rust-lld"
+rustflags = ["-C", "target-feature=+crt-static"]
