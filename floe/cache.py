@@ -1296,7 +1296,7 @@ def _merge_band(bly, btop, r, c, k, upper_dbu, out_path, opts,
     return total
 
 
-def _tile_bands(tgt, cdir, r, c, th_dbu, opts, merge=True, lis=None):
+def _tile_bands(tgt, cdir, r, c, th_dbu, opts, lis=None):
     """Partition the tile into len(th_dbu)+1 SIZE-BAND files.
 
     Band k holds shapes whose max(bbox w, h) falls in
@@ -1394,13 +1394,11 @@ def _tile_bands(tgt, cdir, r, c, th_dbu, opts, merge=True, lis=None):
     # (a plain per-band size() sweep measured 3.3s/tile)
     bcount = [0] * nb
     filled = [set() for _ in range(nb)]
-    flayers = [set() for _ in range(nb)]   # layers with content per band
 
     def put(k, ci_, li_, obj, members):
         blys[k].cell(cmap[k][ci_]).shapes(li_).insert(obj)
         bcount[k] += members
         filled[k].add(cmap[k][ci_])
-        flayers[k].add(li_)
 
     # ---- pass 2: partition -------------------------------------------
     for cell in tgt.each_cell():
@@ -1443,7 +1441,7 @@ def _tile_bands(tgt, cdir, r, c, th_dbu, opts, merge=True, lis=None):
                 if np_:
                     put(k, ci, li, part, np_)
     counts = []
-    t_merge = t_fwrite = 0.0
+    t_fwrite = 0.0
     for k in range(nb):
         bly = blys[k]
         # drop cells whose subtree holds no shapes in this band: their
@@ -1466,17 +1464,14 @@ def _tile_bands(tgt, cdir, r, c, th_dbu, opts, merge=True, lis=None):
             bly.write(
                 os.path.join(cdir, f"tiles_b{k}", f"t_{r}_{c}.oas"), opts)
             t_fwrite += time.perf_counter() - t
-            if merge and k >= 1:    # band 0 is never cut - no twin
-                t = time.perf_counter()
-                _merge_band(bly, bly.cell(btop), r, c, k, edges[nb - k],
-                            os.path.join(cdir, f"tiles_m{k}",
-                                         f"t_{r}_{c}.oas"), opts,
-                            members=bcount[k],
-                            lis=sorted(flayers[k]),
-                            own_cells=filled[k])
-                t_merge += time.perf_counter() - t
         bly._destroy()
-    return counts, t_merge, t_fwrite
+    # merged twins are NOT built here: the post-tiling pass
+    # (rebuild_merge, --merge / --merge-only) reads the written band
+    # files back instead - they are the minimized artifact (content
+    # layers only, writer-compacted), and the pass needs no source
+    # layout in RAM, so its workers are nearly free while tile
+    # workers competed with the loaded source for the memory budget
+    return counts, t_fwrite
 
 
 DENSITY_LEVELS = 12     # depth levels recorded in the per-tile density table
@@ -1676,7 +1671,7 @@ def _build_one_tile(rc):
     """Build tile (r, c) from _TILE_CTX. Runs in a fork worker (or inline
     for jobs=1). Returns (r, c, wrote, lod_depth, density, step_times)."""
     (ly, top_ci, bbox, grid, cdir, opts, bands_dbu, tile_editable,
-     merge, text_lis) = _TILE_CTX
+     text_lis) = _TILE_CTX
     r, c = rc
     x0 = bbox.left + c * grid["tile_w"]
     y0 = bbox.bottom + r * grid["tile_h"]
@@ -1722,12 +1717,9 @@ def _build_one_tile(rc):
     if bands_dbu:
         # split the old catch-all "write" number: "part" = probing +
         # partitioning + pruning, "write" = the OASIS file writes
-        _counts, t_merge, t_fw = _tile_bands(tgt, cdir, r, c, bands_dbu,
-                                             opts, merge=merge,
-                                             lis=content_lis)
-        if t_merge:
-            tm["merge"] = t_merge
-        tm["part"] = time.perf_counter() - t - t_merge - t_fw
+        _counts, t_fw = _tile_bands(tgt, cdir, r, c, bands_dbu,
+                                    opts, lis=content_lis)
+        tm["part"] = time.perf_counter() - t - t_fw
         tm["write"] = t_fw
     else:
         tgt.write(os.path.join(cdir, "tiles", f"t_{r}_{c}.oas"), opts)
@@ -1796,8 +1788,6 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
             resume_done = {}
     subs = ([f"tiles_b{k}" for k in range(n_bands)] if bands
             else ["tiles"]) + ["tiles_lod"]
-    if bands and merge:
-        subs += [f"tiles_m{k}" for k in range(1, n_bands)]
     if resume_done:
         log(f"[index] resuming: {len(resume_done)} tiles already "
             f"built by a previous run (--force rebuilds from scratch)")
@@ -1941,7 +1931,7 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
     global _TILE_CTX
     _TILE_CTX = (ly, top_ci, bbox, grid, cdir, save_opts(),
                  bands_dbu, (tile_tgt or "").lower().startswith("edit"),
-                 bool(merge), text_layer_lis)
+                 text_layer_lis)
     total_gb = _total_ram_gb()
     try:
         if ctx is not None and gov and total_gb:
@@ -2162,5 +2152,12 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
         os.remove(jpath)   # complete: the resume journal is done
     except OSError:
         pass
+    if merge and bands:
+        # twins build as a POST-pass over the written band files: no
+        # source layout in RAM, so it parallelizes freely (--merge-only
+        # runs the same pass on an existing cache at any time)
+        c = Cache(src)
+        c.load()
+        rebuild_merge(c, log=log, jobs=jobs)
     log(f"[index] done in {time.perf_counter() - t_all:.0f}s -> {cdir}")
     return meta
