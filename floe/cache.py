@@ -29,6 +29,11 @@ import multiprocessing
 import os
 import time
 
+# progress lines must reach the user even under `> log` / `| tee`:
+# block-buffered stdout sat on 60s heartbeats for 20+ minutes and a
+# healthy (or killed!) run looked silently hung
+print = functools.partial(print, flush=True)
+
 print = functools.partial(print, flush=True)
 
 import klayout.db as db
