@@ -16,6 +16,9 @@
 use std::collections::HashMap;
 use std::io::Read;
 
+pub mod doc;
+pub mod write;
+
 #[derive(Debug)]
 pub enum OasisError {
     Io(std::io::Error),
@@ -37,15 +40,15 @@ impl From<std::io::Error> for OasisError {
     }
 }
 
-type Result<T> = std::result::Result<T, OasisError>;
+pub(crate) type Result<T> = std::result::Result<T, OasisError>;
 
-fn err<T>(pos: usize, msg: &str) -> Result<T> {
+pub(crate) fn err<T>(pos: usize, msg: &str) -> Result<T> {
     Err(OasisError::Format(format!("@{}: {}", pos, msg)))
 }
 
 // ---------------------------------------------------------------- cursor
 
-struct Cur<'a> {
+pub(crate) struct Cur<'a> {
     data: &'a [u8],
     pos: usize,
     /// byte offset of `data[0]` in the physical file (for messages)
@@ -53,19 +56,19 @@ struct Cur<'a> {
 }
 
 impl<'a> Cur<'a> {
-    fn new(data: &'a [u8], base: usize) -> Self {
+    pub(crate) fn new(data: &'a [u8], base: usize) -> Self {
         Cur { data, pos: 0, base }
     }
 
-    fn at_end(&self) -> bool {
+    pub(crate) fn at_end(&self) -> bool {
         self.pos >= self.data.len()
     }
 
-    fn here(&self) -> usize {
+    pub(crate) fn here(&self) -> usize {
         self.base + self.pos
     }
 
-    fn byte(&mut self) -> Result<u8> {
+    pub(crate) fn byte(&mut self) -> Result<u8> {
         match self.data.get(self.pos) {
             Some(b) => {
                 self.pos += 1;
@@ -75,7 +78,7 @@ impl<'a> Cur<'a> {
         }
     }
 
-    fn bytes(&mut self, n: usize) -> Result<&'a [u8]> {
+    pub(crate) fn bytes(&mut self, n: usize) -> Result<&'a [u8]> {
         if self.pos + n > self.data.len() {
             return err(self.here(), "unexpected end of stream (bytes)");
         }
@@ -85,7 +88,7 @@ impl<'a> Cur<'a> {
     }
 
     /// base-128 varint, 7 bits per byte, LSB group first
-    fn uint(&mut self) -> Result<u64> {
+    pub(crate) fn uint(&mut self) -> Result<u64> {
         let mut v: u64 = 0;
         let mut shift = 0u32;
         loop {
@@ -102,13 +105,13 @@ impl<'a> Cur<'a> {
     }
 
     /// sign-magnitude: LSB of the assembled varint is the sign
-    fn sint(&mut self) -> Result<i64> {
+    pub(crate) fn sint(&mut self) -> Result<i64> {
         let u = self.uint()?;
         let mag = (u >> 1) as i64;
         Ok(if u & 1 == 1 { -mag } else { mag })
     }
 
-    fn real(&mut self) -> Result<f64> {
+    pub(crate) fn real(&mut self) -> Result<f64> {
         let t = self.uint()?;
         Ok(match t {
             0 => self.uint()? as f64,
@@ -131,13 +134,13 @@ impl<'a> Cur<'a> {
         })
     }
 
-    fn string(&mut self) -> Result<&'a [u8]> {
+    pub(crate) fn string(&mut self) -> Result<&'a [u8]> {
         let n = self.uint()? as usize;
         self.bytes(n)
     }
 
     /// g-delta: single-form octangular or two-form general
-    fn g_delta(&mut self) -> Result<(i64, i64)> {
+    pub(crate) fn g_delta(&mut self) -> Result<(i64, i64)> {
         let g = self.uint()?;
         if g & 1 == 0 {
             let dir = (g >> 1) & 7;
@@ -314,6 +317,8 @@ pub struct ScanStats {
     pub cblocks: u64,
     pub cblock_bytes_inflated: u64,
     pub records: u64,
+    /// record-id -> count (which OASIS constructs a file actually uses)
+    pub record_ids: HashMap<u64, u64>,
     /// (layer, datatype) -> geometry record/member counts
     pub shapes: HashMap<(u64, u64), LayerStat>,
     /// (textlayer, texttype) -> text record/member counts
@@ -419,6 +424,7 @@ fn record(
         return Ok(Rec::End); // END: not counted (parallel workers
     }                        // never see it - keep both paths equal)
     st.records += 1;
+    *st.record_ids.entry(id).or_default() += 1;
     match id {
         0 => {} // PAD
         1 => {
@@ -846,6 +852,9 @@ fn merge(into: &mut ScanStats, other: ScanStats) {
         let e = into.texts.entry(k).or_default();
         e.records += v.records;
         e.members += v.members;
+    }
+    for (k, v) in other.record_ids {
+        *into.record_ids.entry(k).or_default() += v;
     }
 }
 

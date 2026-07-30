@@ -38,6 +38,7 @@ name = "floe-index"
 version = "0.1.0"
 dependencies = [
  "floe-oasis",
+ "floe-tiler",
 ]
 
 [[package]]
