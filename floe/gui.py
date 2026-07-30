@@ -867,13 +867,6 @@ class Viewer:
             lbl.hide()
 
     # ---- drawing / rendering ------------------------------------------------
-    @staticmethod
-    def _expand(bbox, m):
-        w = bbox[2] - bbox[0]
-        h = bbox[3] - bbox[1]
-        return (bbox[0] - m * w, bbox[1] - m * h,
-                bbox[2] + m * w, bbox[3] + m * h)
-
     def _covered(self, bbox, scope):
         """True when the current frame still serves this view: same
         render state AND the viewport sits inside the frame with some
@@ -934,17 +927,12 @@ class Viewer:
         scope = self._pending_scope
         bbox = self.view_bbox()
         w, h = self._viewport_size()
-        # overdraw margin: pans inside it are served from the frame with
-        # no re-render at all; renders re-center in the background
-        m = 0.5
-        while m > 0 and (w * (1 + 2 * m) > 4096 or
-                         h * (1 + 2 * m) > 4096):
-            m /= 2
-        if scope == "live":
-            while m > 0 and self.tiles_spanned(
-                    self._expand(bbox, m)) > MAX_LIVE_TILES:
-                m = 0 if m <= 0.13 else m / 2
-        eb = self._expand(bbox, m)
+        # render exactly the viewport. The old 50%-per-side overdraw
+        # margin was meant to serve small pans straight from the frame,
+        # but in practice any pan re-renders anyway - the margin only
+        # multiplied every frame's pixels (4x) and the tiles/content
+        # drawn (user call, 2026-07-31)
+        eb = bbox
         depth = self._depth()
         self.gen += 1
         self._job_keys[self.gen] = self._render_key(scope)
