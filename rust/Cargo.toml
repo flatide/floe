@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["oasis", "tiler", "cli"]
+
+[workspace.package]
+edition = "2021"
+license = "LicenseRef-Flatide-Proprietary"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

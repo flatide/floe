@@ -1,0 +1,9 @@
+[package]
+name = "floe-tiler"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Band-partitioning tiler over floe-oasis records (spike S2 placeholder)"
+
+[dependencies]
+floe-oasis = { path = "../oasis" }
