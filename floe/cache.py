@@ -265,12 +265,13 @@ class Cache:
         return os.path.join(self.dir, "tiles_lod", f"t_{r}_{c}.oas")
 
     def tiles_for_bbox(self, x0, y0, x1, y1):
-        """Grid tiles (r, c) intersecting bbox in dbu, clamped to the grid."""
+        """Grid tiles (r, c) intersecting bbox in dbu (ints or floats -
+        deep-zoom render requests stay float), clamped to the grid."""
         g = self.meta["grid"]
-        c0 = max(0, (x0 - g["x0"]) // g["tile_w"])
-        c1 = min(g["nx"] - 1, (x1 - 1 - g["x0"]) // g["tile_w"])
-        r0 = max(0, (y0 - g["y0"]) // g["tile_h"])
-        r1 = min(g["ny"] - 1, (y1 - 1 - g["y0"]) // g["tile_h"])
+        c0 = max(0, int((x0 - g["x0"]) // g["tile_w"]))
+        c1 = min(g["nx"] - 1, int((x1 - 1 - g["x0"]) // g["tile_w"]))
+        r0 = max(0, int((y0 - g["y0"]) // g["tile_h"]))
+        r1 = min(g["ny"] - 1, int((y1 - 1 - g["y0"]) // g["tile_h"]))
         if c1 < c0 or r1 < r0:
             return []
         return [(r, c) for r in range(r0, r1 + 1) for c in range(c0, c1 + 1)]

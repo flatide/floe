@@ -940,13 +940,17 @@ class Viewer:
         for g in [g for g in self._job_keys if g < self.gen - 8]:
             del self._job_keys[g]
             self._job_depth.pop(g, None)
+        # bboxes stay FLOAT dbu end to end: at deep zoom one dbu spans
+        # ~100 screen px (spp bottoms out at 0.01), so int-rounding the
+        # request skewed the frame's effective scale by whole percents -
+        # the anchor logic then treated every frame as a zoom mismatch
+        # and pans stopped tracking (the "weird panning at 0.01um" bug)
         self.worker.submit({
             "kind": "render", "gen": self.gen, "scope": scope,
             "t_sub": time.time(),
-            "bbox": tuple(int(round(v)) for v in eb),
-            "view": tuple(int(round(v)) for v in bbox),
-            "w": int(round(w * (1 + 2 * m))),
-            "h": int(round(h * (1 + 2 * m))),
+            "bbox": tuple(float(v) for v in eb),
+            "view": tuple(float(v) for v in bbox),
+            "w": int(w), "h": int(h),
             "depth": depth,
             "cut_px": self.cut_px,
             "abstract": self.abstract,
@@ -1138,7 +1142,11 @@ class Viewer:
     def _set_status(self, bbox, mode):
         w_um = (bbox[2] - bbox[0]) * self.dbu
         h_um = (bbox[3] - bbox[1]) * self.dbu
-        self.vstatus.set_text("view %.1f x %.1f um" % (w_um, h_um))
+        # CD-zoom views are far below 0.1um: fixed %.1f showed them all
+        # as "0.0 x 0.0"
+        fmt = lambda v: ("%.4f" if v < 0.1 else
+                         "%.3f" if v < 1 else "%.1f") % v
+        self.vstatus.set_text("view %s x %s um" % (fmt(w_um), fmt(h_um)))
         self.status.set_text(mode)
         self.status.set_tooltip_text(mode)
 
