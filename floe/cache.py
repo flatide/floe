@@ -1083,18 +1083,21 @@ def _tile_lod(tgt, top_ci, out_path, cap=LOD_SHAPE_CAP, always=False,
     on the synthetic layer 254/0, so depth-cut renders still draw the
     correct outline frame + name) and deeper cells are dropped.
     Kilobytes where the full tile is megabytes - shallow-depth renders
-    load these instead. Built by dup + prune, so no per-shape Python
-    loop. Returns the deepest depth the file serves, or None when the
-    whole tree fits under cap (then no file is written and the full
-    tile doubles as its own LOD). always: write the file even then (a
-    banded cache has no single full-tile file to fall back on)."""
-    lod = tgt.dup()
+    load these instead. Built by copying only the KEPT levels into a
+    fresh layout (wholesale Shapes.insert(Shapes), records preserved)
+    - the old dup-then-prune cloned the tile's ENTIRE content just to
+    throw the deep levels away, and the deep levels are exactly where
+    the shapes live (lod was 25% of host tile time). Returns the
+    deepest depth the file serves, or None when the whole tree fits
+    under cap (then no file is written and the full tile doubles as
+    its own LOD). always: write the file even then (a banded cache
+    has no single full-tile file to fall back on)."""
     lvl = {top_ci: 0}
     levels = [[top_ci]]
     while True:
         nxt = []
         for ci in levels[-1]:
-            for inst in lod.cell(ci).each_inst():
+            for inst in tgt.cell(ci).each_inst():
                 ch = inst.cell_index
                 if ch not in lvl:
                     lvl[ch] = len(levels)
@@ -1103,10 +1106,10 @@ def _tile_lod(tgt, top_ci, out_path, cap=LOD_SHAPE_CAP, always=False,
             break
         levels.append(nxt)
     if lis is None:
-        lis = list(lod.layer_indexes())
+        lis = list(tgt.layer_indexes())
 
     def count(cells):
-        return sum(lod.cell(ci).shapes(li).size()
+        return sum(tgt.cell(ci).shapes(li).size()
                    for ci in cells for li in lis)
 
     cut = 0
@@ -1118,25 +1121,36 @@ def _tile_lod(tgt, top_ci, out_path, cap=LOD_SHAPE_CAP, always=False,
         cut += 1
     if cut + 1 >= len(levels):
         if always:  # whole tree fits under cap: LOD = the full tile
-            lod.write(out_path, save_opts())
+            tgt.write(out_path, save_opts())
         return None
+    lod = db.Layout(True)
+    lod.dbu = tgt.dbu
+    for li in tgt.layer_indexes():
+        lod.insert_layer_at(li, tgt.get_info(li))
     ghost_li = lod.layer(db.LayerInfo(254, 0, "GHOST"))
-    # batch the per-cell ghosting mutations (update-storm class, see
-    # _strip_texts)
-    lod.start_changes()
-    try:
-        for ci in levels[cut + 1]:
-            c = lod.cell(ci)
-            b = c.bbox()
-            c.clear()
-            if not b.empty():
-                c.shapes(ghost_li).insert(b)
-    finally:
-        lod.end_changes()
-    doomed = [ci for ci, l in lvl.items() if l > cut + 1]
-    if doomed:
-        lod.delete_cells(doomed)
+    kept = [ci for lev in levels[:cut + 1] for ci in lev]
+    ghosts = levels[cut + 1]
+    cmap = {ci: lod.create_cell(tgt.cell(ci).name).cell_index()
+            for ci in kept + ghosts}
+    for ci in kept:
+        src = tgt.cell(ci)
+        dst = lod.cell(cmap[ci])
+        for li in lis:
+            sh = src.shapes(li)
+            if sh.size():
+                dst.shapes(li).insert(sh)
+        for inst in src.each_inst():
+            tci = cmap.get(inst.cell_index)
+            if tci is not None:   # deeper-than-ghost children drop
+                ia = inst.cell_inst.dup()
+                ia.cell_index = tci
+                dst.insert(ia)
+    for ci in ghosts:   # frame + name only, like the old clear()ed cells
+        b = tgt.cell(ci).bbox()
+        if not b.empty():
+            lod.cell(cmap[ci]).shapes(ghost_li).insert(b)
     lod.write(out_path, save_opts())
+    lod._destroy()
     return cut
 
 
@@ -1444,7 +1458,7 @@ def _tile_bands(tgt, cdir, r, c, th_dbu, opts, merge=True, lis=None):
 DENSITY_LEVELS = 12     # depth levels recorded in the per-tile density table
 
 
-def _tile_density(ly, top_ci, max_levels=DENSITY_LEVELS):
+def _tile_density(ly, top_ci, max_levels=DENSITY_LEVELS, lis=None):
     """Density table for one tile: cumulative shape counts per hierarchy
     level below the tile top, per layer ({"5/1": [n_depth0, ...]}), plus
     "cells" = instance count entering each level. Level k equals the
@@ -1454,8 +1468,10 @@ def _tile_density(ly, top_ci, max_levels=DENSITY_LEVELS):
     cost of depth d is shapes down to d plus one outline frame per cell
     at level d+1 ("cells" catches the bitcell-array trap where a mid
     depth draws millions of frames)."""
+    # empty layers are dropped from the table anyway, so restricting
+    # to the tile's content layers changes nothing but the sweep cost
     keys = {li: f"{ly.get_info(li).layer}/{ly.get_info(li).datatype}"
-            for li in ly.layer_indexes()}
+            for li in (ly.layer_indexes() if lis is None else lis)}
     total = dict.fromkeys(keys.values(), 0)
     counts = {key: [] for key in keys.values()}
     cells = []
@@ -1694,7 +1710,7 @@ def _build_one_tile(rc):
                       always=bool(bands_dbu), lis=content_lis)
     tm["lod"] = time.perf_counter() - t
     t = time.perf_counter()
-    dens = _tile_density(tgt, ci) or None
+    dens = _tile_density(tgt, ci, lis=content_lis) or None
     tm["density"] = time.perf_counter() - t
     return r, c, True, lod_d, dens, tm
 
