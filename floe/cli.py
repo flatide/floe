@@ -92,7 +92,8 @@ def cmd_index(args):
                           gov=not args.no_gov, mem_gb=args.mem,
                           mem_floor_gb=args.mem_floor,
                           tile_tgt=args.tile_tgt,
-                          merge=not args.no_merge, **caps)
+                          merge=not args.no_merge, force=args.force,
+                          **caps)
 
 
 def cmd_info(args):
@@ -468,7 +469,10 @@ def main(argv=None):
 
     p = sub.add_parser("index", help="build the spatial tile cache (one-time)")
     p.add_argument("src")
-    p.add_argument("--force", action="store_true")
+    p.add_argument("--force", action="store_true",
+                   help="rebuild from scratch, ignoring both an "
+                        "up-to-date cache and a resumable progress "
+                        "journal from an interrupted run")
     p.add_argument("--tile-mb", type=float, default=6.0,
                    help="target tile file size in MB (default 6)")
     p.add_argument("--skeleton-only", action="store_true",

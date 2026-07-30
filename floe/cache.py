@@ -1719,7 +1719,7 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
                 bands=BAND_THRESHOLDS_UM, read_mode=None, gov=True,
                 mem_gb=None, mem_floor_gb=None, tile_tgt=None,
                 text_cap=None, text_tile_cap=None, skel_texts=None,
-                merge=True):
+                merge=True, force=False):
     """Scan the source file once and build the tile cache.
 
     jobs: max fork workers for the tiling phase (None = all cores;
@@ -1735,29 +1735,63 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
     tiling section below); mem_gb caps the whole run (--mem).
     tile_tgt: 'editable' rebuilds tile clips the pre-0.5.0 way.
     text_cap/text_tile_cap/skel_texts: skeleton label budgets
-    (see collect_texts / build_skeleton)."""
+    (see collect_texts / build_skeleton).
+
+    A progress journal (<cache>/progress.jsonl) records every finished
+    tile; when a run dies mid-tiling (host OOM-kill, an admin sweeping
+    a shared machine, ...) the next identical invocation RESUMES,
+    skipping the recorded tiles. Tile builds are deterministic and
+    file-overwriting, so half-written tiles from the crash are simply
+    rebuilt. force=True (or any change of source/version/options)
+    rebuilds from scratch."""
     t_all = time.perf_counter()
     src = os.path.abspath(src)
     cdir = cache_dir_for(src)
+    st = os.stat(src)
     n_bands = len(bands) + 1 if bands else 0
+    from . import __version__
+    jmeta = {"kind": "header", "size": st.st_size,
+             "mtime": int(st.st_mtime), "version": __version__,
+             "tile_bytes": tile_bytes,
+             "bands": list(bands) if bands else None,
+             "merge": bool(merge), "tile_tgt": tile_tgt or "",
+             "read_mode": (read_mode or "viewer")}
+    jpath = os.path.join(cdir, "progress.jsonl")
+    resume_done = {}
+    if not force and os.path.isfile(jpath):
+        try:
+            with open(jpath) as f:
+                lines = [json.loads(ln) for ln in f if ln.strip()]
+            if lines and lines[0] == jmeta:
+                resume_done = {(e["r"], e["c"]): e for e in lines[1:]}
+        except (ValueError, KeyError):
+            resume_done = {}
     subs = ([f"tiles_b{k}" for k in range(n_bands)] if bands
             else ["tiles"]) + ["tiles_lod"]
     if bands and merge:
         subs += [f"tiles_m{k}" for k in range(1, n_bands)]
-    stale = [d for d in ("tiles", "tiles_lod", "tiles_b0", "tiles_b1",
-                         "tiles_b2", "tiles_b3", "tiles_b4", "tiles_b5",
-                         "tiles_m1", "tiles_m2", "tiles_m3", "tiles_m4",
-                         "tiles_m5")
-             if os.path.isdir(os.path.join(cdir, d))]
-    for sub in sorted(set(subs) | set(stale)):  # drop prior builds' files
-        d = os.path.join(cdir, sub)
-        os.makedirs(d, exist_ok=True)
-        for f in os.listdir(d):
-            os.remove(os.path.join(d, f))
+    if resume_done:
+        log(f"[index] resuming: {len(resume_done)} tiles already "
+            f"built by a previous run (--force rebuilds from scratch)")
+        for sub in subs:
+            os.makedirs(os.path.join(cdir, sub), exist_ok=True)
+    else:
+        stale = [d for d in ("tiles", "tiles_lod", "tiles_b0",
+                             "tiles_b1", "tiles_b2", "tiles_b3",
+                             "tiles_b4", "tiles_b5", "tiles_m1",
+                             "tiles_m2", "tiles_m3", "tiles_m4",
+                             "tiles_m5")
+                 if os.path.isdir(os.path.join(cdir, d))]
+        for sub in sorted(set(subs) | set(stale)):  # drop prior builds
+            d = os.path.join(cdir, sub)
+            os.makedirs(d, exist_ok=True)
+            for f in os.listdir(d):
+                os.remove(os.path.join(d, f))
+        with open(jpath, "w") as f:
+            f.write(json.dumps(jmeta) + "\n")
 
     mode = (read_mode or "viewer").lower()
     editable = mode.startswith("edit")
-    st = os.stat(src)
     log(f"[index] reading {src} ({st.st_size / 1e9:.2f} GB, "
         f"{'editable' if editable else 'viewer'} mode)...")
     t0 = time.perf_counter()
@@ -1835,7 +1869,7 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
         # so they sum above real elapsed - read as relative weights
         return " ".join("%s %.0fs" % kv for kv in sorted(step_tot.items()))
 
-    def take(r, c, wrote, lod_d, dens, tm=None):
+    def record(r, c, wrote, lod_d, dens, tm):
         nonlocal n_files, done
         done += 1
         if wrote:
@@ -1847,13 +1881,27 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
         if tm:
             for k, v in tm.items():
                 step_tot[k] = step_tot.get(k, 0.0) + v
+
+    def take(r, c, wrote, lod_d, dens, tm=None):
+        record(r, c, wrote, lod_d, dens, tm)
+        jf.write(json.dumps({"r": r, "c": c, "wrote": wrote,
+                             "lod": lod_d, "dens": dens, "tm": tm})
+                 + "\n")
+        jf.flush()
         if done % step == 0 or done == len(coords):
             log(f"[index] tiles {done}/{len(coords)} "
                 f"({time.perf_counter() - t0:.0f}s; {_breakdown()})")
 
+    # seed the prior run's finished tiles, then work only the rest
+    for e in resume_done.values():
+        record(e["r"], e["c"], e["wrote"], e["lod"], e["dens"],
+               e.get("tm"))
+    work = [rc for rc in coords if rc not in resume_done]
+    jf = open(jpath, "a")
+
     if jobs is None:
         jobs = os.cpu_count() or 1
-    jobs = max(1, min(jobs, len(coords)))
+    jobs = max(1, min(jobs, max(1, len(work))))
     ctx = None
     if jobs > 1:
         try:
@@ -1882,10 +1930,13 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
             floor_gb = mem_floor_gb or max(2.0, 0.05 * total_gb)
             parent_gb = _rss_gb(os.getpid()) or 0.0
             est_gb = 0.5      # per-worker private demand, learned live
-            pending = list(coords)
+            pending = list(work)
             probe_rc = (n // 2, n // 2)   # central tile: usually densest
-            pending.remove(probe_rc)
-            pending.insert(0, probe_rc)
+            if probe_rc in resume_done and pending:
+                probe_rc = pending[0]
+            if probe_rc in pending:
+                pending.remove(probe_rc)
+                pending.insert(0, probe_rc)
             log(f"[index] tiling with up to {jobs} fork workers "
                 f"(memory-governed; {total_gb:.0f} GB RAM"
                 + (f", --mem cap {mem_gb:g} GB" if mem_gb else "")
@@ -1899,7 +1950,7 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
             probing = True
             allowed = last_allowed = 1
             avail = None
-            t_beat = time.perf_counter()
+            t_beat = t_last_done = time.perf_counter()
             t_note = 0.0
             # maxtasksperchild=1: a tile's memory really returns to the
             # OS when it finishes (long-lived workers sit at their worst
@@ -1912,10 +1963,13 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
                     kids = _rss_many_gb(
                         [p.pid for p in multiprocessing.active_children()])
                     priv = cur = 0.0
+                    busy = 0
                     for r in kids.values():
                         d = r - parent_gb
                         if d > 0:
                             priv += d
+                        if d > 0.3:
+                            busy += 1
                         if d > cur:
                             cur = d
                     # the estimate follows the CURRENT fleet with a slow
@@ -1968,6 +2022,24 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
                         take(*res)
                         probing = False
                     now = time.perf_counter()
+                    if done_now:
+                        t_last_done = now
+                    elif (inflight and busy == 0
+                          and now - t_last_done > 180):
+                        # every in-flight worker vanished (an admin
+                        # sweeping the shared host, an OOM kill...):
+                        # their AsyncResults would never complete and
+                        # the run would hang. The pool respawns fresh
+                        # workers on its own; re-dispatch the lost
+                        # tiles - builds are deterministic overwrites,
+                        # so redoing one is always safe.
+                        log(f"[index][warn] {len(inflight)} in-flight "
+                            f"tiles lost their workers (killed "
+                            f"externally?) - re-dispatching")
+                        for rc in inflight.values():
+                            pending.insert(0, rc)
+                        inflight.clear()
+                        t_last_done = now
                     # unconditional periodic heartbeat: it used to be
                     # suppressed whenever completions kept arriving, so
                     # a HEALTHY 40-worker run went silent for minutes
@@ -1988,8 +2060,8 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
         elif ctx is not None:
             log(f"[index] tiling with {jobs} fork workers...")
             with ctx.Pool(jobs) as pool:
-                it = pool.imap_unordered(_build_one_tile, coords)
-                left = len(coords)
+                it = pool.imap_unordered(_build_one_tile, work)
+                left = len(work)
                 t_beat = time.perf_counter()
 
                 def beat():
@@ -2015,10 +2087,11 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
                         t_beat = time.perf_counter()
                         beat()
         else:
-            for rc in coords:
+            for rc in work:
                 take(*_build_one_tile(rc))
     finally:
         _TILE_CTX = None
+        jf.close()
     t_tiles = time.perf_counter() - t0
     log(f"[index] {n_files} tile files in {t_tiles:.0f}s ({_breakdown()})")
 
@@ -2057,5 +2130,9 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
     meta["stats"]["total_s"] = round(time.perf_counter() - t_all, 1)
     with open(os.path.join(cdir, "meta.json"), "w") as f:
         json.dump(meta, f, indent=1)
+    try:
+        os.remove(jpath)   # complete: the resume journal is done
+    except OSError:
+        pass
     log(f"[index] done in {time.perf_counter() - t_all:.0f}s -> {cdir}")
     return meta
