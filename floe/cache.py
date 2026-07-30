@@ -1075,7 +1075,8 @@ def load_region(cache, x0, y0, x1, y1, log=None, max_tiles=None,
 LOD_SHAPE_CAP = 50_000  # per-tile shape budget of the LOD companion
 
 
-def _tile_lod(tgt, top_ci, out_path, cap=LOD_SHAPE_CAP, always=False):
+def _tile_lod(tgt, top_ci, out_path, cap=LOD_SHAPE_CAP, always=False,
+              lis=None):
     """Depth-limited companion tile, cut adaptively: whole hierarchy
     levels are kept while the running distinct-cell shape total stays
     under cap; the cells of the first level beyond become ghosts (bbox
@@ -1101,7 +1102,8 @@ def _tile_lod(tgt, top_ci, out_path, cap=LOD_SHAPE_CAP, always=False):
         if not nxt:
             break
         levels.append(nxt)
-    lis = list(lod.layer_indexes())
+    if lis is None:
+        lis = list(lod.layer_indexes())
 
     def count(cells):
         return sum(lod.cell(ci).shapes(li).size()
@@ -1119,12 +1121,18 @@ def _tile_lod(tgt, top_ci, out_path, cap=LOD_SHAPE_CAP, always=False):
             lod.write(out_path, save_opts())
         return None
     ghost_li = lod.layer(db.LayerInfo(254, 0, "GHOST"))
-    for ci in levels[cut + 1]:
-        c = lod.cell(ci)
-        b = c.bbox()
-        c.clear()
-        if not b.empty():
-            c.shapes(ghost_li).insert(b)
+    # batch the per-cell ghosting mutations (update-storm class, see
+    # _strip_texts)
+    lod.start_changes()
+    try:
+        for ci in levels[cut + 1]:
+            c = lod.cell(ci)
+            b = c.bbox()
+            c.clear()
+            if not b.empty():
+                c.shapes(ghost_li).insert(b)
+    finally:
+        lod.end_changes()
     doomed = [ci for ci, l in lvl.items() if l > cut + 1]
     if doomed:
         lod.delete_cells(doomed)
@@ -1147,15 +1155,18 @@ _CONT_FAN = 4096        # own-container members worth expanding
 _INST_FAN = 64          # instance-array members worth placing singly
 
 
-def _twin_boxes(bly, btop):
+def _twin_boxes(bly, btop, lis=None):
     """{layer_index: [Box, ...]} coarse coverage of a band layout in
     tile coordinates, WITHOUT expanding shape or instance arrays:
     small containers contribute member bboxes, huge ones (fill fields)
     their subtree envelope, and big instance arrays one per-layer
     array bbox (cached in C++). Dense content - the only content that
     needs a twin - is envelope-faithful; sparse scatter overstates,
-    which the polygon cap downstream already treats as 'no twin'."""
-    lis = bly.layer_indexes()
+    which the polygon cap downstream already treats as 'no twin'.
+    lis: restrict to these layer indexes (a 449-layer host chip paid
+    449 probes per cell for the ~dozens of layers a band holds)."""
+    if lis is None:
+        lis = bly.layer_indexes()
     memo = {}
 
     def walk(ci):
@@ -1206,7 +1217,7 @@ def _twin_boxes(bly, btop):
 
 
 def _merge_band(bly, btop, r, c, k, upper_dbu, out_path, opts,
-                members=None):
+                members=None, lis=None):
     """Write the merged twin of one band: geometry (exact when small,
     envelope-walked when huge - see _twin_boxes) with gaps below
     MERGE_CLOSE_FRAC x band-upper-edge closed (sized +d/-d fuses fill
@@ -1216,17 +1227,19 @@ def _merge_band(bly, btop, r, c, k, upper_dbu, out_path, opts,
     the cut would hide it: same layers, few big polygons, so layer
     colors/toggles keep working (no prerendering). Returns polygons
     written (0 = no file)."""
+    if lis is None:
+        lis = bly.layer_indexes()
     if members is None:
         members = sum(cell.shapes(li).size() for cell in bly.each_cell()
-                      for li in bly.layer_indexes())
+                      for li in lis)
     d = max(1, int(upper_dbu * MERGE_CLOSE_FRAC))
     boxes = (None if members <= MERGE_EXPAND_CAP
-             else _twin_boxes(bly, btop))
+             else _twin_boxes(bly, btop, lis))
     mly = db.Layout(True)
     mly.dbu = bly.dbu
     mc = mly.create_cell(f"TILE_{r}_{c}_m{k}")
     total = 0
-    for li in bly.layer_indexes():
+    for li in lis:
         if boxes is None:
             reg = db.Region(bly.begin_shapes(btop, li))
         else:
@@ -1248,7 +1261,7 @@ def _merge_band(bly, btop, r, c, k, upper_dbu, out_path, opts,
     return total
 
 
-def _tile_bands(tgt, cdir, r, c, th_dbu, opts, merge=True):
+def _tile_bands(tgt, cdir, r, c, th_dbu, opts, merge=True, lis=None):
     """Partition the tile into len(th_dbu)+1 SIZE-BAND files.
 
     Band k holds shapes whose max(bbox w, h) falls in
@@ -1280,6 +1293,8 @@ def _tile_bands(tgt, cdir, r, c, th_dbu, opts, merge=True):
 
     top_name = f"TILE_{r}_{c}"
     top_ci = tgt.cell(top_name).cell_index()
+    if lis is None:
+        lis = tgt.layer_indexes()
 
     # ---- pass 1: probe every container ------------------------------
     # sampled uniformity: fill/array containers hold one size class,
@@ -1295,7 +1310,7 @@ def _tile_bands(tgt, cdir, r, c, th_dbu, opts, merge=True):
     uni_members = mix_members = 0
     for cell in tgt.each_cell():
         ci = cell.cell_index()
-        for li in tgt.layer_indexes():
+        for li in lis:
             sh = cell.shapes(li)
             n = sh.size()
             if n == 0:
@@ -1344,11 +1359,13 @@ def _tile_bands(tgt, cdir, r, c, th_dbu, opts, merge=True):
     # (a plain per-band size() sweep measured 3.3s/tile)
     bcount = [0] * nb
     filled = [set() for _ in range(nb)]
+    flayers = [set() for _ in range(nb)]   # layers with content per band
 
     def put(k, ci_, li_, obj, members):
         blys[k].cell(cmap[k][ci_]).shapes(li_).insert(obj)
         bcount[k] += members
         filled[k].add(cmap[k][ci_])
+        flayers[k].add(li_)
 
     # ---- pass 2: partition -------------------------------------------
     for cell in tgt.each_cell():
@@ -1359,7 +1376,7 @@ def _tile_bands(tgt, cdir, r, c, th_dbu, opts, merge=True):
                 ba = ia.dup()
                 ba.cell_index = cmap[k][ia.cell_index]
                 blys[k].cell(cmap[k][ci]).insert(ba)
-        for li in tgt.layer_indexes():
+        for li in lis:
             sh = cell.shapes(li)
             n = sh.size()
             if n == 0:
@@ -1417,7 +1434,8 @@ def _tile_bands(tgt, cdir, r, c, th_dbu, opts, merge=True):
                 _merge_band(bly, bly.cell(btop), r, c, k, edges[nb - k],
                             os.path.join(cdir, f"tiles_m{k}",
                                          f"t_{r}_{c}.oas"), opts,
-                            members=bcount[k])
+                            members=bcount[k],
+                            lis=sorted(flayers[k]))
                 t_merge += time.perf_counter() - t
         bly._destroy()
     return counts, t_merge
@@ -1654,10 +1672,16 @@ def _build_one_tile(rc):
     t = time.perf_counter()
     compact_instances(tgt)
     tm["compact"] = time.perf_counter() - t
+    # layers with content in THIS tile (bbox_per_layer is a cached
+    # subtree bbox, O(1) each): every per-cell x per-layer sweep below
+    # walks these ~dozens instead of the full layer table (449 on the
+    # host chip - the band/merge/lod probes dominated tile time)
+    content_lis = [li for li in tgt.layer_indexes()
+                   if not cell.bbox_per_layer(li).empty()]
     t = time.perf_counter()
     if bands_dbu:
         _counts, t_merge = _tile_bands(tgt, cdir, r, c, bands_dbu, opts,
-                                       merge=merge)
+                                       merge=merge, lis=content_lis)
         if t_merge:
             tm["merge"] = t_merge
     else:
@@ -1667,7 +1691,7 @@ def _build_one_tile(rc):
     t = time.perf_counter()
     lod_d = _tile_lod(tgt, ci, os.path.join(cdir, "tiles_lod",
                                             f"t_{r}_{c}.oas"),
-                      always=bool(bands_dbu))
+                      always=bool(bands_dbu), lis=content_lis)
     tm["lod"] = time.perf_counter() - t
     t = time.perf_counter()
     dens = _tile_density(tgt, ci) or None
