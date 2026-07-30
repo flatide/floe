@@ -1895,10 +1895,22 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
                     # parent image (idle fresh workers read as ~0)
                     kids = _rss_many_gb(
                         [p.pid for p in multiprocessing.active_children()])
-                    priv = sum(max(0.0, r - parent_gb)
-                               for r in kids.values())
+                    priv = cur = 0.0
                     for r in kids.values():
-                        est_gb = max(est_gb, r - parent_gb)
+                        d = r - parent_gb
+                        if d > 0:
+                            priv += d
+                        if d > cur:
+                            cur = d
+                    # the estimate follows the CURRENT fleet with a slow
+                    # decay (half-life ~3 min at the 0.5s poll): a
+                    # lifetime max let one 42 GB outlier tile throttle
+                    # the whole run to ~8 workers forever
+                    # (host-observed; workers reset per tile via
+                    # maxtasksperchild, so live samples reflect what
+                    # tiles need NOW). `avail` still reacts to real
+                    # pressure regardless of the estimate.
+                    est_gb = max(cur, est_gb * 0.998, 0.5)
                     avail = _avail_ram_gb()
                     if avail is None:
                         allowed = 1 if probing else jobs
