@@ -255,7 +255,7 @@ class LayerRow(object):
 
 class Viewer:
     def __init__(self, cache, server_sock=None, show=True, goto=None,
-                 cut_level=None, dump=False):
+                 cut_level=None, dump=False, depth=None):
         self.server_sock = server_sock
         self.cx = self.cy = 0
         self.spp = 1.0              # dbu per screen pixel
@@ -274,7 +274,14 @@ class Viewer:
         self._did_fit = False
         self.worker = None
         self._layer_rows = {}
-        self.depth_value = 999      # 999 = full hierarchy
+        # start depth: a plain open shows hierarchy level 1 (fast first
+        # paint on huge chips - the industry default), a --goto jump is
+        # an inspection: full depth unless --depth says otherwise.
+        # 999 = full; runtime digits/`d` dialog change it as before.
+        if depth is None:
+            depth = 999 if goto is not None else 1
+        self.depth_value = max(0, min(999, int(depth)))
+        self.abstract = False       # `a` key: klayout abstract mode
         self._depth_used = "?"      # depth of the last frame ("?" = none yet)
         # detail cut LEVEL: 0 = off, higher = more aggressive. Users
         # only ever see the level; the screen-px threshold behind each
@@ -954,6 +961,7 @@ class Viewer:
             "h": int(round(h * (1 + 2 * m))),
             "depth": depth,
             "cut_px": self.cut_px,
+            "abstract": self.abstract,
             "visible": self._layers_arg()})
         self._pending = self.gen
         self._preview_gen = None   # stop a stale preview ticker
@@ -1368,6 +1376,8 @@ class Viewer:
             self._goto_dialog()
         elif name == "c":
             self._cut_dialog()
+        elif name == "a":
+            self._toggle_abstract()
         elif name == "e":
             self._drc_window()
         elif name == "n":
@@ -1403,6 +1413,8 @@ class Viewer:
         if self.meta.get("bands"):
             lbl += " · cut: %s" % ("off" if self.cut_level <= 0
                                    else "L%d" % self.cut_level)
+        if self.abstract:
+            lbl += " · abstract"
         return lbl
 
     def _set_depth(self, n):
@@ -1418,6 +1430,13 @@ class Viewer:
         self.cut_level = max(0, min(len(CUT_LEVEL_PX) - 1, int(n)))
         self.cut_px = CUT_LEVEL_PX[self.cut_level]
         self._on_depth()  # same refresh: status label + re-render
+
+    def _toggle_abstract(self):
+        # klayout abstract mode: sub-10px cells draw as empty frames -
+        # a lossy navigation accelerator (wide views 25x, measured);
+        # turn it off before reading fine content
+        self.abstract = not self.abstract
+        self._on_depth()
 
     def _on_depth(self):
         self.dstatus.set_text(self._depth_label())
@@ -2164,10 +2183,10 @@ class Viewer:
 
 
 def run_viewer(cache, server_sock=None, goto=None, drc=None,
-               cut_level=None, dump=False):
+               cut_level=None, dump=False, depth=None):
     import_gtk()
     viewer = Viewer(cache, server_sock, goto=goto, cut_level=cut_level,
-                    dump=dump)
+                    dump=dump, depth=depth)
     if drc:
         if viewer.load_drc(os.path.abspath(drc)):
             viewer._drc_window()

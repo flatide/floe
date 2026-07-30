@@ -354,6 +354,7 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
                     vh = max(1, round(job["h"] * (vy1 - vy0) / (y1 - y0)))
                     td = time.perf_counter()
                     _apply_bands(mosaic, renderer, need)
+                    renderer.set_abstract(job.get("abstract"))
                     renderer.render_png(tmp, vx0, vy0, vx1, vy1, vw, vh,
                                         visible=job["visible"],
                                         depth=depth)
@@ -385,6 +386,7 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
             td = time.perf_counter()
             if use_mosaic is mosaic:
                 _apply_bands(mosaic, renderer, need)
+            use_renderer.set_abstract(job.get("abstract"))
             use_renderer.render_png(tmp, x0, y0, x1, y1,
                                     job["w"], job["h"],
                                     visible=job["visible"], depth=depth)

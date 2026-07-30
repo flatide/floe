@@ -86,6 +86,20 @@ class Renderer:
         for ci in show:
             self.lv.show_cell(ci, 0)
 
+    _abstract = False
+
+    def set_abstract(self, on, width=10.0):
+        """klayout abstract mode: cells whose on-screen image is below
+        `width` px draw as empty frames instead of content - a lossy
+        navigation mode (measured 25x on a heavy wide view), toggled
+        live from the GUI ('a' key), so it is per-render job state."""
+        on = bool(on)
+        if on == self._abstract:
+            return
+        self._abstract = on
+        self._config("abstract-mode-width", "%g" % width)
+        self._config("abstract-mode-enabled", "true" if on else "false")
+
     def render_png(self, out_path, x0, y0, x1, y1, w, h, visible=None,
                    depth=None):
         """Render bbox given in dbu to a PNG file of w x h pixels.

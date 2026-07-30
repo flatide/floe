@@ -451,8 +451,11 @@ def cmd_view(args):
     c = open_cache(src, auto_index=args.auto_index, args=args)
     # PyGObject/GTK3 problems are reported inside import_gtk (exit 3)
     from .gui import run_viewer
+    depth = args.depth
+    if depth is None and (goto is not None or args.drc):
+        depth = 999   # jumping somewhere = inspecting: full depth
     run_viewer(c, server, goto=goto, drc=args.drc,
-               cut_level=args.cut_level, dump=args.dump)
+               cut_level=args.cut_level, dump=args.dump, depth=depth)
 
 
 def main(argv=None):
@@ -629,6 +632,12 @@ def main(argv=None):
                         "cache carries them). The `c` dialog changes "
                         "it at runtime; the px thresholds behind the "
                         "levels are internal and may be retuned")
+    p.add_argument("--depth", type=int, default=None, metavar="N",
+                   help="starting hierarchy depth (999 = full). "
+                        "Default: 1 for a plain open - the fast, "
+                        "industry-standard first paint - and full "
+                        "when --goto jumps to an inspection point. "
+                        "Digits / the `d` dialog change it at runtime")
     p.add_argument("--layout-mode", default=None,
                    choices=("viewer", "editable"),
                    help="tile read mode (default: per-cache heuristic, "
