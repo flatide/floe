@@ -1747,7 +1747,7 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
                 bands=BAND_THRESHOLDS_UM, read_mode=None, gov=True,
                 mem_gb=None, mem_floor_gb=None, tile_tgt=None,
                 text_cap=None, text_tile_cap=None, skel_texts=None,
-                merge=True, force=False):
+                merge=False, force=False):
     """Scan the source file once and build the tile cache.
 
     jobs: max fork workers for the tiling phase (None = all cores;

@@ -92,7 +92,7 @@ def cmd_index(args):
                           gov=not args.no_gov, mem_gb=args.mem,
                           mem_floor_gb=args.mem_floor,
                           tile_tgt=args.tile_tgt,
-                          merge=not args.no_merge, force=args.force,
+                          merge=args.merge, force=args.force,
                           **caps)
 
 
@@ -489,10 +489,12 @@ def main(argv=None):
                         "without re-tiling (reads the band files back; "
                         "no source read). Twins stand in for bands the "
                         "viewer's cut drops")
-    p.add_argument("--no-merge", action="store_true",
-                   help="skip building merged twins during a full "
-                        "index (cut-dropped bands disappear instead "
-                        "of drawing as coarse outlines)")
+    p.add_argument("--merge", action="store_true",
+                   help="also build merged twins during the full index "
+                        "(default: off - shelved until indexing itself "
+                        "is validated; add them any time later with "
+                        "--merge-only, no re-tiling. Without twins, "
+                        "bands the viewer's cut drops simply disappear)")
     p.add_argument("--jobs", type=int, default=None, metavar="N",
                    help="max fork workers for the tiling phase (default: "
                         "all cores; 1 = sequential). A memory governor "
