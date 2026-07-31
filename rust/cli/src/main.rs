@@ -165,52 +165,109 @@ fn tile_cmd(args: &[String]) {
         }
     };
     let t_parse = t1.elapsed().as_secs_f64();
-    let t2 = Instant::now();
-    let tiler = floe_tiler::Tiler::new(grid, edges);
-    let out = match tiler.run(&doc) {
-        Ok(o) => o,
-        Err(e) => {
-            eprintln!("tile {}: {}", src, e);
-            std::process::exit(1);
-        }
-    };
-    let t_tile = t2.elapsed().as_secs_f64();
-    let t3 = Instant::now();
-    let nb = 4usize;
-    for k in 0..nb {
+    let nbands = edges.len() + 1;
+    for k in 0..nbands {
         std::fs::create_dir_all(format!("{}/tiles_b{}", outdir, k))
             .expect("mkdir");
     }
+    // hierarchy-preserving path: per tile a variant tree, mirrored
+    // into every band (klayout-parity naming: NAME[$v]__b<k>)
+    let hier = floe_tiler::hier::HierTiler::new(&doc, grid, edges);
     let mut files = 0u64;
-    let mut keys: Vec<_> = out.buckets.keys().cloned().collect();
-    keys.sort();
-    for key in keys {
-        let (r, c, k) = key;
-        let b = out.buckets.get(&key).unwrap();
-        let mut rects = b.rects.clone();
-        let mut polys = b.polys.clone();
-        let name = format!("TILE_{}_{}_b{}", r, c, k);
-        let bytes = floe_oasis::write::write_cell(
-            &name, doc.unit, &mut rects, &mut polys,
-        )
-        .expect("serialize");
-        std::fs::write(
-            format!("{}/tiles_b{}/t_{}_{}.oas", outdir, k, r, c),
-            bytes,
-        )
-        .expect("write tile");
-        files += 1;
+    let mut members = 0u64;
+    let mut t_tile = 0.0f64;
+    let mut t_write = 0.0f64;
+    for r in 0..grid.ny {
+        for c in 0..grid.nx {
+            let tt = Instant::now();
+            let tree = match hier.build_tile(r, c) {
+                Ok(Some(t)) => t,
+                Ok(None) => {
+                    t_tile += tt.elapsed().as_secs_f64();
+                    continue;
+                }
+                Err(e) => {
+                    eprintln!("tile {},{}: {}", r, c, e);
+                    std::process::exit(1);
+                }
+            };
+            t_tile += tt.elapsed().as_secs_f64();
+            members += tree.members;
+            let tw = Instant::now();
+            let base: Vec<String> = tree
+                .cells
+                .iter()
+                .enumerate()
+                .map(|(i, vc)| {
+                    if i == tree.root {
+                        String::new()
+                    } else if vc.ord == 0 {
+                        doc.cells[vc.design].name.clone()
+                    } else {
+                        format!("{}${}", doc.cells[vc.design].name, vc.ord)
+                    }
+                })
+                .collect();
+            for k in 0..nbands {
+                if !tree.reach[k][tree.root] {
+                    continue;
+                }
+                let bname: Vec<String> = (0..tree.cells.len())
+                    .map(|i| {
+                        if i == tree.root {
+                            format!("TILE_{}_{}_b{}", r, c, k)
+                        } else {
+                            format!("{}__b{}", base[i], k)
+                        }
+                    })
+                    .collect();
+                let wcells: Vec<floe_oasis::write::WCell> = tree
+                    .cells
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| tree.reach[k][*i])
+                    .map(|(i, vc)| floe_oasis::write::WCell {
+                        name: bname[i].clone(),
+                        rects: &vc.bands[k].rects,
+                        polys: &vc.bands[k].polys,
+                        places: vc
+                            .places
+                            .iter()
+                            .filter(|p| tree.reach[k][p.var])
+                            .map(|p| {
+                                (
+                                    bname[p.var].as_str(),
+                                    p.x,
+                                    p.y,
+                                    p.rot,
+                                    p.flip,
+                                    &p.rep,
+                                )
+                            })
+                            .collect(),
+                    })
+                    .collect();
+                let bytes =
+                    floe_oasis::write::write_tree(&wcells, doc.unit)
+                        .expect("serialize");
+                std::fs::write(
+                    format!("{}/tiles_b{}/t_{}_{}.oas", outdir, k, r, c),
+                    bytes,
+                )
+                .expect("write tile");
+                files += 1;
+            }
+            t_write += tw.elapsed().as_secs_f64();
+        }
     }
-    let t_write = t3.elapsed().as_secs_f64();
     println!(
-        "{{\n  \"cells\": {},\n  \"contexts\": {},\n  \
-         \"texts_dropped\": {},\n  \"band_files\": {},\n  \
+        "{{\n  \"cells\": {},\n  \"members\": {},\n  \
+         \"band_files\": {},\n  \
          \"read_s\": {:.3},\n  \"parse_s\": {:.3},\n  \
          \"tile_s\": {:.3},\n  \"write_s\": {:.3},\n  \
          \"total_s\": {:.3}\n}}",
         doc.cells.len(),
-        out.contexts,
-        out.texts_dropped,
+        members,
         files,
         t_read,
         t_parse,

@@ -191,3 +191,120 @@ pub fn write_cell(
     w.uint(0);
     Ok(w.out)
 }
+
+// ------------------------------------------------------------ tree files
+
+/// One cell of a hierarchical band file.
+pub struct WCell<'a> {
+    pub name: String,
+    pub rects: &'a [RectRec],
+    pub polys: &'a [PolyRec],
+    /// (target cell name, x, y, rot, flip, rep)
+    pub places: Vec<(&'a str, i64, i64, u8, bool, &'a Rep)>,
+}
+
+/// Serialize a multi-cell band file (hierarchy preserved). Cell
+/// bodies are emitted in the given order; OASIS placements reference
+/// cells by name, so definition order is free.
+pub fn write_tree(cells: &[WCell], unit: f64) -> Result<Vec<u8>> {
+    let mut w = W::new();
+    w.out.extend_from_slice(MAGIC);
+    w.uint(1);
+    w.string(b"1.0");
+    w.real_f64(unit);
+    w.uint(0);
+    for _ in 0..12 {
+        w.uint(0);
+    }
+    for cell in cells {
+        w.uint(14); // CELL by name
+        w.string(cell.name.as_bytes());
+        let mut modal: Option<(u32, u32)> = None;
+        let mut rects = cell.rects.to_vec();
+        let mut polys = cell.polys.to_vec();
+        rects.sort_by_key(|r| (r.layer, r.dt));
+        polys.sort_by_key(|p| (p.layer, p.dt));
+        for r in &rects {
+            w.uint(20);
+            let same = modal == Some((r.layer, r.dt));
+            let has_rep = !matches!(r.rep, Rep::One);
+            let mut info: u8 = 0x40 | 0x20 | 0x10 | 0x08;
+            if !same {
+                info |= 0x03;
+            }
+            if has_rep {
+                info |= 0x04;
+            }
+            w.byte(info);
+            if !same {
+                w.uint(r.layer as u64);
+                w.uint(r.dt as u64);
+                modal = Some((r.layer, r.dt));
+            }
+            w.uint(r.w as u64);
+            w.uint(r.h as u64);
+            w.sint(r.x);
+            w.sint(r.y);
+            if has_rep {
+                w.rep(&r.rep);
+            }
+        }
+        for p in &polys {
+            w.uint(21);
+            let same = modal == Some((p.layer, p.dt));
+            let has_rep = !matches!(p.rep, Rep::One);
+            let mut info: u8 = 0x20 | 0x10 | 0x08;
+            if !same {
+                info |= 0x03;
+            }
+            if has_rep {
+                info |= 0x04;
+            }
+            w.byte(info);
+            if !same {
+                w.uint(p.layer as u64);
+                w.uint(p.dt as u64);
+                modal = Some((p.layer, p.dt));
+            }
+            let (ax, ay) = p.pts[0];
+            w.uint(4);
+            w.uint(p.pts.len() as u64 - 1);
+            let mut prev = (ax, ay);
+            for &(x, y) in &p.pts[1..] {
+                w.g_delta(x - prev.0, y - prev.1);
+                prev = (x, y);
+            }
+            w.sint(ax);
+            w.sint(ay);
+            if has_rep {
+                w.rep(&p.rep);
+            }
+        }
+        for (tname, x, y, rot, flip, rep) in &cell.places {
+            // PLACEMENT id 17, info CNXYRAAF: C=1 (explicit ref),
+            // N=0 (by name), X, Y, rot in AA, flip in F
+            w.uint(17);
+            let has_rep = !matches!(rep, Rep::One);
+            let mut info: u8 = 0x80 | 0x20 | 0x10;
+            if has_rep {
+                info |= 0x08;
+            }
+            info |= (rot & 3) << 1;
+            if *flip {
+                info |= 0x01;
+            }
+            w.byte(info);
+            w.string(tname.as_bytes());
+            w.sint(*x);
+            w.sint(*y);
+            if has_rep {
+                w.rep(rep);
+            }
+        }
+    }
+    w.uint(2);
+    w.uint(252);
+    w.out.extend_from_slice(&[0u8; 252]);
+    w.uint(0);
+    Ok(w.out)
+}

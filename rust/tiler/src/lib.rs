@@ -15,6 +15,8 @@
 use floe_oasis::doc::{Doc, PolyRec, RectRec, Rep};
 use std::collections::HashMap;
 
+pub mod hier;
+
 // ------------------------------------------------------------ transform
 
 /// Orthogonal transform: p -> M*p + t, M entries in {-1,0,1}.
@@ -72,6 +74,16 @@ impl Xf {
             self.m[0][0] * x + self.m[0][1] * y,
             self.m[1][0] * x + self.m[1][1] * y,
         )
+    }
+
+    /// orthonormal +-1 matrix: inverse = transpose, t' = -M^T t
+    pub fn invert(&self) -> Xf {
+        let mt = [[self.m[0][0], self.m[1][0]], [self.m[0][1], self.m[1][1]]];
+        let t = (
+            -(mt[0][0] * self.t.0 + mt[0][1] * self.t.1),
+            -(mt[1][0] * self.t.0 + mt[1][1] * self.t.1),
+        );
+        Xf { m: mt, t }
     }
 }
 
@@ -472,7 +484,7 @@ impl Tiler {
     }
 }
 
-fn piece_bbox(piece: &Piece) -> (i64, i64) {
+pub fn piece_bbox(piece: &Piece) -> (i64, i64) {
     match piece {
         Piece::Rect(_, _, w, h) => (*w, *h),
         Piece::Poly(pts) => {
@@ -548,7 +560,7 @@ fn fold_reps(own: Rep, ctx: &[Rep]) -> Result<(Rep, Vec<(i64, i64)>), String> {
     Ok((keep, outer))
 }
 
-fn xf_rep(rep: &Rep, xf: &Xf) -> Rep {
+pub fn xf_rep(rep: &Rep, xf: &Xf) -> Rep {
     match rep {
         Rep::One => Rep::One,
         Rep::Grid { na, nb, va, vb } => Rep::Grid {
@@ -563,7 +575,7 @@ fn xf_rep(rep: &Rep, xf: &Xf) -> Rep {
     }
 }
 
-fn rep_offsets(rep: &Rep) -> Vec<(i64, i64)> {
+pub fn rep_offsets(rep: &Rep) -> Vec<(i64, i64)> {
     match rep {
         Rep::One => vec![(0, 0)],
         Rep::Grid { na, nb, va, vb } => {
@@ -579,13 +591,13 @@ fn rep_offsets(rep: &Rep) -> Vec<(i64, i64)> {
     }
 }
 
-fn is_axis(va: &(i64, i64), vb: &(i64, i64)) -> bool {
+pub fn is_axis(va: &(i64, i64), vb: &(i64, i64)) -> bool {
     (va.1 == 0 && vb.0 == 0) || (va.0 == 0 && vb.1 == 0)
 }
 
 /// normalize an axis grid to positive x-step (va) / y-step (vb);
 /// returns (na, nb, anchor_shift_x, anchor_shift_y, dx, dy)
-fn norm_grid(
+pub fn norm_grid(
     na: i64,
     nb: i64,
     va: (i64, i64),
@@ -612,21 +624,21 @@ fn norm_grid(
 }
 
 /// tiles [lo..hi] overlapped by span [s0, s1) (clamped to the grid)
-fn tile_range(s0: i64, s1: i64, g0: i64, step: i64, n: i64) -> (i64, i64) {
+pub fn tile_range(s0: i64, s1: i64, g0: i64, step: i64, n: i64) -> (i64, i64) {
     let lo = ((s0 - g0).div_euclid(step)).clamp(0, n - 1);
     let hi = ((s1 - 1 - g0).div_euclid(step)).clamp(0, n - 1);
     (lo, hi)
 }
 
 /// member indexes whose [b0+i*d, b1+i*d] fits inside [t0, t1]
-fn full_range(b0: i64, b1: i64, d: i64, n: i64, t0: i64, t1: i64) -> (i64, i64) {
+pub fn full_range(b0: i64, b1: i64, d: i64, n: i64, t0: i64, t1: i64) -> (i64, i64) {
     let lo = div_ceil(t0 - b0, d).max(0);
     let hi = div_floor(t1 - b1, d).min(n - 1);
     (lo, hi)
 }
 
 /// member indexes overlapping (t0, t1) at all
-fn overlap_range(
+pub fn overlap_range(
     b0: i64,
     b1: i64,
     d: i64,
@@ -639,17 +651,17 @@ fn overlap_range(
     (lo, hi)
 }
 
-fn div_ceil(a: i64, b: i64) -> i64 {
+pub fn div_ceil(a: i64, b: i64) -> i64 {
     (a + b - 1).div_euclid(b)
 }
 
-fn div_floor(a: i64, b: i64) -> i64 {
+pub fn div_floor(a: i64, b: i64) -> i64 {
     a.div_euclid(b)
 }
 
 // ------------------------------------------------------------- clipping
 
-fn clip_box(
+pub fn clip_box(
     x0: i64,
     y0: i64,
     x1: i64,
@@ -662,7 +674,7 @@ fn clip_box(
 /// Sutherland-Hodgman against the axis-aligned tile box. Non-convex
 /// subjects may come back with degenerate bridge edges; those are
 /// area-neutral and the merged-Region XOR validation referees.
-fn clip_poly(pts: &[(i64, i64)], t: (i64, i64, i64, i64)) -> Vec<(i64, i64)> {
+pub fn clip_poly(pts: &[(i64, i64)], t: (i64, i64, i64, i64)) -> Vec<(i64, i64)> {
     let mut cur: Vec<(i64, i64)> = pts.to_vec();
     for edge in 0..4 {
         if cur.is_empty() {

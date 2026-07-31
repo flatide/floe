@@ -34,6 +34,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "floe-dbg"
+version = "0.1.0"
+dependencies = [
+ "floe-oasis",
+ "floe-tiler",
+]
+
+[[package]]
 name = "floe-index"
 version = "0.1.0"
 dependencies = [
