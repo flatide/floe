@@ -24,7 +24,7 @@ fn main() {
              floe-index tile <file.oas> <outdir> \
              --grid x0,y0,tw,th,nx,ny --edges e0,e1,e2\n       \
              floe-index index <file.oas> [outdir] \
-             [--tile-bytes N] [--bands um,um,um]"
+             [--jobs N] [--tile-bytes N] [--bands um,um,um]"
         );
         std::process::exit(2);
     }
@@ -501,9 +501,14 @@ fn index_cmd(args: &[String]) {
     let mut outdir: Option<String> = None;
     let mut tile_bytes = TILE_TARGET_BYTES;
     let mut bands_um: Vec<f64> = BANDS_UM.to_vec();
+    let mut jobs: Option<usize> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--jobs" => {
+                jobs = Some(args[i + 1].parse().expect("jobs"));
+                i += 2;
+            }
             "--tile-bytes" => {
                 tile_bytes = args[i + 1].parse().expect("tile bytes");
                 i += 2;
@@ -548,8 +553,13 @@ fn index_cmd(args: &[String]) {
         .expect("mtime");
     let t_read = t_all.elapsed().as_secs_f64();
 
+    let jobs = jobs.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+    });
     let t1 = Instant::now();
-    let doc = match floe_oasis::doc::parse_doc(&data) {
+    let doc = match floe_oasis::doc::parse_doc_parallel(&data, jobs) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("parse {}: {}", src, e);
@@ -596,62 +606,125 @@ fn index_cmd(args: &[String]) {
 
     let hier =
         floe_tiler::hier::HierTiler::new(&doc, grid, edges.clone());
-    let mut files = 0u64;
-    let mut tiles_written = 0u64;
-    let mut members = 0u64;
-    let mut lod_json: Vec<String> = Vec::new();
-    let mut dens_json: Vec<String> = Vec::new();
+    // tiles are independent (build + band files + lod + density per
+    // tile): scoped threads pull coordinates off a shared counter;
+    // results merge and sort by (r, c) so every output byte is
+    // identical to the sequential build
+    struct TRes {
+        r: i64,
+        c: i64,
+        members: u64,
+        files: u64,
+        lod: Option<usize>,
+        dens: Option<String>,
+    }
+    let coords: Vec<(i64, i64)> = (0..grid.ny)
+        .flat_map(|r| (0..grid.nx).map(move |c| (r, c)))
+        .collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
     let t2 = Instant::now();
-    for r in 0..grid.ny {
-        for c in 0..grid.nx {
-            let tree = match hier.build_tile(r, c) {
-                Ok(Some(t)) => t,
-                Ok(None) => continue,
+    let mut all: Vec<TRes> = Vec::new();
+    std::thread::scope(|sc| {
+        let mut hs = Vec::new();
+        for _ in 0..jobs.max(1) {
+            let hier = &hier;
+            let doc = &doc;
+            let outdir: &str = &outdir;
+            let next = &next;
+            let coords = &coords;
+            hs.push(sc.spawn(move || -> Result<Vec<TRes>, String> {
+                let mut out = Vec::new();
+                loop {
+                    let i = next.fetch_add(
+                        1,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    if i >= coords.len() {
+                        break;
+                    }
+                    let (r, c) = coords[i];
+                    let tree = match hier.build_tile(r, c) {
+                        Ok(Some(t)) => t,
+                        Ok(None) => continue,
+                        Err(e) => {
+                            return Err(format!(
+                                "tile {},{}: {}",
+                                r, c, e
+                            ))
+                        }
+                    };
+                    let files = write_band_files(
+                        doc, &tree, outdir, r, c, nbands,
+                    );
+                    let lod = write_lod_file(
+                        doc, &tree, outdir, r, c, LOD_SHAPE_CAP,
+                    );
+                    let dens = tree.density(DENSITY_LEVELS).map(
+                        |(arrs, cells)| {
+                            let mut parts: Vec<String> = arrs
+                                .iter()
+                                .map(|((l, d), arr)| {
+                                    format!(
+                                        "\"{}/{}\": [{}]",
+                                        l,
+                                        d,
+                                        arr.iter()
+                                            .map(|v| v.to_string())
+                                            .collect::<Vec<_>>()
+                                            .join(", ")
+                                    )
+                                })
+                                .collect();
+                            parts.push(format!(
+                                "\"cells\": [{}]",
+                                cells
+                                    .iter()
+                                    .map(|v| v.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ));
+                            format!(
+                                "\"{},{}\": {{{}}}",
+                                r,
+                                c,
+                                parts.join(", ")
+                            )
+                        },
+                    );
+                    out.push(TRes {
+                        r,
+                        c,
+                        members: tree.members,
+                        files,
+                        lod,
+                        dens,
+                    });
+                }
+                Ok(out)
+            }));
+        }
+        for h in hs {
+            match h.join().expect("tile worker panicked") {
+                Ok(v) => all.extend(v),
                 Err(e) => {
-                    eprintln!("tile {},{}: {}", r, c, e);
+                    eprintln!("{}", e);
                     std::process::exit(1);
                 }
-            };
-            members += tree.members;
-            tiles_written += 1;
-            files += write_band_files(&doc, &tree, &outdir, r, c, nbands);
-            if let Some(d) =
-                write_lod_file(&doc, &tree, &outdir, r, c, LOD_SHAPE_CAP)
-            {
-                lod_json.push(format!("\"{},{}\": {}", r, c, d));
-            }
-            if let Some((arrs, cells)) = tree.density(DENSITY_LEVELS) {
-                let mut parts: Vec<String> = arrs
-                    .iter()
-                    .map(|((l, d), arr)| {
-                        format!(
-                            "\"{}/{}\": [{}]",
-                            l,
-                            d,
-                            arr.iter()
-                                .map(|v| v.to_string())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )
-                    })
-                    .collect();
-                parts.push(format!(
-                    "\"cells\": [{}]",
-                    cells
-                        .iter()
-                        .map(|v| v.to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-                dens_json.push(format!(
-                    "\"{},{}\": {{{}}}",
-                    r,
-                    c,
-                    parts.join(", ")
-                ));
             }
         }
-    }
+    });
+    all.sort_by_key(|t| (t.r, t.c));
+    let files: u64 = all.iter().map(|t| t.files).sum();
+    let tiles_written = all.len() as u64;
+    let members: u64 = all.iter().map(|t| t.members).sum();
+    let lod_json: Vec<String> = all
+        .iter()
+        .filter_map(|t| {
+            t.lod.map(|d| format!("\"{},{}\": {}", t.r, t.c, d))
+        })
+        .collect();
+    let dens_json: Vec<String> =
+        all.iter().filter_map(|t| t.dens.clone()).collect();
     let t_tiles = t2.elapsed().as_secs_f64();
 
     // --- skeleton + full-text sidecar ---

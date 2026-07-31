@@ -5,7 +5,7 @@
 //! reads the plain stream fine and compression is a later knob.
 
 use crate::doc::{PolyRec, RectRec, Rep, TextRec};
-use crate::Result;
+use crate::{OasisError, Result};
 
 pub struct W {
     pub out: Vec<u8>,
@@ -221,13 +221,18 @@ pub fn write_tree(cells: &[WCell], unit: f64) -> Result<Vec<u8>> {
     for cell in cells {
         w.uint(14); // CELL by name
         w.string(cell.name.as_bytes());
+        // body into a scratch buffer, then a CBLOCK when it pays:
+        // klayout-parity save (oasis_write_cblocks) at deflate
+        // level 1 - the python side measured level 1 == level 2
+        // output on band content at half the write CPU
+        let mut b = W::new();
         let mut modal: Option<(u32, u32)> = None;
         let mut rects = cell.rects.to_vec();
         let mut polys = cell.polys.to_vec();
         rects.sort_by_key(|r| (r.layer, r.dt));
         polys.sort_by_key(|p| (p.layer, p.dt));
         for r in &rects {
-            w.uint(20);
+            b.uint(20);
             let same = modal == Some((r.layer, r.dt));
             let has_rep = !matches!(r.rep, Rep::One);
             let mut info: u8 = 0x40 | 0x20 | 0x10 | 0x08;
@@ -237,22 +242,22 @@ pub fn write_tree(cells: &[WCell], unit: f64) -> Result<Vec<u8>> {
             if has_rep {
                 info |= 0x04;
             }
-            w.byte(info);
+            b.byte(info);
             if !same {
-                w.uint(r.layer as u64);
-                w.uint(r.dt as u64);
+                b.uint(r.layer as u64);
+                b.uint(r.dt as u64);
                 modal = Some((r.layer, r.dt));
             }
-            w.uint(r.w as u64);
-            w.uint(r.h as u64);
-            w.sint(r.x);
-            w.sint(r.y);
+            b.uint(r.w as u64);
+            b.uint(r.h as u64);
+            b.sint(r.x);
+            b.sint(r.y);
             if has_rep {
-                w.rep(&r.rep);
+                b.rep(&r.rep);
             }
         }
         for p in &polys {
-            w.uint(21);
+            b.uint(21);
             let same = modal == Some((p.layer, p.dt));
             let has_rep = !matches!(p.rep, Rep::One);
             let mut info: u8 = 0x20 | 0x10 | 0x08;
@@ -262,50 +267,50 @@ pub fn write_tree(cells: &[WCell], unit: f64) -> Result<Vec<u8>> {
             if has_rep {
                 info |= 0x04;
             }
-            w.byte(info);
+            b.byte(info);
             if !same {
-                w.uint(p.layer as u64);
-                w.uint(p.dt as u64);
+                b.uint(p.layer as u64);
+                b.uint(p.dt as u64);
                 modal = Some((p.layer, p.dt));
             }
             let (ax, ay) = p.pts[0];
-            w.uint(4);
-            w.uint(p.pts.len() as u64 - 1);
+            b.uint(4);
+            b.uint(p.pts.len() as u64 - 1);
             let mut prev = (ax, ay);
             for &(x, y) in &p.pts[1..] {
-                w.g_delta(x - prev.0, y - prev.1);
+                b.g_delta(x - prev.0, y - prev.1);
                 prev = (x, y);
             }
-            w.sint(ax);
-            w.sint(ay);
+            b.sint(ax);
+            b.sint(ay);
             if has_rep {
-                w.rep(&p.rep);
+                b.rep(&p.rep);
             }
         }
         for t in cell.texts {
             // TEXT id 19, info 0CNXYRTL: C=1 explicit string (N=0
             // inline a-string), X, Y, T=texttype, L=textlayer;
             // no modality - label volume is skeleton-bounded
-            w.uint(19);
+            b.uint(19);
             let has_rep = !matches!(t.rep, Rep::One);
             let mut info: u8 = 0x40 | 0x10 | 0x08 | 0x02 | 0x01;
             if has_rep {
                 info |= 0x04;
             }
-            w.byte(info);
-            w.string(t.s.as_bytes());
-            w.uint(t.layer as u64);
-            w.uint(t.dt as u64);
-            w.sint(t.x);
-            w.sint(t.y);
+            b.byte(info);
+            b.string(t.s.as_bytes());
+            b.uint(t.layer as u64);
+            b.uint(t.dt as u64);
+            b.sint(t.x);
+            b.sint(t.y);
             if has_rep {
-                w.rep(&t.rep);
+                b.rep(&t.rep);
             }
         }
         for (tname, x, y, rot, flip, rep) in &cell.places {
             // PLACEMENT id 17, info CNXYRAAF: C=1 (explicit ref),
             // N=0 (by name), X, Y, rot in AA, flip in F
-            w.uint(17);
+            b.uint(17);
             let has_rep = !matches!(rep, Rep::One);
             let mut info: u8 = 0x80 | 0x20 | 0x10;
             if has_rep {
@@ -315,13 +320,29 @@ pub fn write_tree(cells: &[WCell], unit: f64) -> Result<Vec<u8>> {
             if *flip {
                 info |= 0x01;
             }
-            w.byte(info);
-            w.string(tname.as_bytes());
-            w.sint(*x);
-            w.sint(*y);
+            b.byte(info);
+            b.string(tname.as_bytes());
+            b.sint(*x);
+            b.sint(*y);
             if has_rep {
-                w.rep(rep);
+                b.rep(rep);
             }
+        }
+        if b.out.len() >= 64 {
+            let mut enc = flate2::write::DeflateEncoder::new(
+                Vec::new(),
+                flate2::Compression::new(1),
+            );
+            std::io::Write::write_all(&mut enc, &b.out)
+                .map_err(OasisError::Io)?;
+            let comp = enc.finish().map_err(OasisError::Io)?;
+            w.uint(34); // CBLOCK, comp-type 0 (DEFLATE)
+            w.uint(0);
+            w.uint(b.out.len() as u64);
+            w.uint(comp.len() as u64);
+            w.out.extend_from_slice(&comp);
+        } else {
+            w.out.extend_from_slice(&b.out);
         }
     }
     w.uint(2);

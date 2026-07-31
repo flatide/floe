@@ -858,6 +858,55 @@ fn merge(into: &mut ScanStats, other: ScanStats) {
     }
 }
 
+/// Skim pass shared by the parallel scan and the parallel doc parse:
+/// CELL record offsets (CBLOCK bodies skipped, not inflated) plus,
+/// per cut, how many IMPLICIT name-table records (CELLNAME id 3,
+/// TEXTSTRING id 5) precede it - chunk parsers seed their implicit
+/// refnum counters from that prefix so global numbering survives the
+/// split. Assumes name tables sit outside CBLOCKs (klayout does).
+/// Returns (head_end, [(cut_offset, cellname_base, textstring_base)],
+/// end_offset).
+pub(crate) fn cell_cuts(
+    body: &[u8],
+    file_off: usize,
+) -> Result<(usize, Vec<(usize, u64, u64)>, usize)> {
+    let mut c = Cur::new(body, file_off);
+    let mut st = ScanStats::default(); // discarded
+    let mut modal = Modal::default();
+    let mut head_end = None;
+    let mut cuts: Vec<(usize, u64, u64)> = Vec::new();
+    let (mut n3, mut n5) = (0u64, 0u64);
+    loop {
+        if c.at_end() {
+            return err(c.here(), "stream ended without END record");
+        }
+        let at = c.pos;
+        let id = {
+            let mut pc = Cur::new(&body[at..], 0);
+            pc.uint()?
+        };
+        match record(&mut c, &mut modal, &mut st, false)? {
+            Rec::Cell => {
+                if head_end.is_none() {
+                    head_end = Some(at);
+                }
+                cuts.push((at, n3, n5));
+            }
+            Rec::End => {
+                let end_at = at;
+                return Ok((head_end.unwrap_or(end_at), cuts, end_at));
+            }
+            Rec::Normal => {
+                if id == 3 {
+                    n3 += 1;
+                } else if id == 5 {
+                    n5 += 1;
+                }
+            }
+        }
+    }
+}
+
 /// Parallel scan: a cheap skim pass (CBLOCK bodies skipped, not
 /// inflated) splits the stream at CELL boundaries - modal state resets
 /// there, so each contiguous cell-group parses independently. Workers

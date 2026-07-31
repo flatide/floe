@@ -756,19 +756,14 @@ fn parse_records(
 
 const MAGIC: &[u8] = b"%SEMI-OASIS\r\n";
 
-pub fn parse_doc(data: &[u8]) -> Result<Doc> {
-    if data.len() < MAGIC.len() || &data[..MAGIC.len()] != MAGIC {
-        return err(0, "not an OASIS file");
-    }
-    let mut c = Cur::new(&data[MAGIC.len()..], MAGIC.len());
-    let mut m = Modal::default();
-    let mut b = Builder {
+fn new_builder(implicit_ref: u64, implicit_tref: u64) -> Builder {
+    Builder {
         cells: Vec::new(),
         by_name: HashMap::new(),
         refnames: HashMap::new(),
-        implicit_ref: 0,
+        implicit_ref,
         textstrings: HashMap::new(),
-        implicit_tref: 0,
+        implicit_tref,
         cur: None,
         pending: Vec::new(),
         pending_texts: Vec::new(),
@@ -776,8 +771,139 @@ pub fn parse_doc(data: &[u8]) -> Result<Doc> {
         layer_seen: HashMap::new(),
         layer_names: HashMap::new(),
         unit: 0.0,
-    };
-    parse_records(&mut c, &mut m, &mut b, 0)?;
+    }
+}
+
+/// placeholder "\u{1}ref{n}" -> table name once the global tables are
+/// assembled (unresolvable ones stay for the finish pass to report)
+fn resolve_ref_name(refnames: &HashMap<u64, String>, name: String) -> String {
+    name.strip_prefix('\u{1}')
+        .and_then(|s| s.strip_prefix("ref"))
+        .and_then(|s| s.parse::<u64>().ok())
+        .and_then(|r| refnames.get(&r).cloned())
+        .unwrap_or(name)
+}
+
+/// Fold one chunk builder's CELLS into the global builder (tables
+/// must already be union-merged so placeholder names resolve here -
+/// otherwise a by-ref cell in one chunk and its by-name definition in
+/// another would materialize twice).
+fn merge_cells(g: &mut Builder, o: Builder) {
+    let mut map = Vec::with_capacity(o.cells.len());
+    let mut place_base = Vec::with_capacity(o.cells.len());
+    let mut text_base = Vec::with_capacity(o.cells.len());
+    for cell in o.cells {
+        let name = resolve_ref_name(&g.refnames, cell.name);
+        let gi = g.cell_index(&name);
+        map.push(gi);
+        place_base.push(g.cells[gi].places.len());
+        text_base.push(g.cells[gi].texts.len());
+        g.cells[gi].rects.extend(cell.rects);
+        g.cells[gi].polys.extend(cell.polys);
+        g.cells[gi].places.extend(cell.places);
+        g.cells[gi].texts.extend(cell.texts);
+    }
+    for (ci, slot, tgt) in o.pending {
+        g.pending.push((map[ci], place_base[ci] + slot, tgt));
+    }
+    for (ci, slot, r) in o.pending_texts {
+        g.pending_texts.push((map[ci], text_base[ci] + slot, r));
+    }
+}
+
+pub fn parse_doc(data: &[u8]) -> Result<Doc> {
+    parse_doc_parallel(data, 1)
+}
+
+/// Doc parse over `jobs` threads: the cell_cuts skim splits the
+/// stream at CELL boundaries (modal state resets there), workers
+/// parse contiguous cell groups into private builders, and the merge
+/// unions the name tables first so cross-chunk by-ref cells land in
+/// the same Cell entry. Output is byte-identical to the sequential
+/// parse: chunk results merge in file order.
+pub fn parse_doc_parallel(data: &[u8], jobs: usize) -> Result<Doc> {
+    if data.len() < MAGIC.len() || &data[..MAGIC.len()] != MAGIC {
+        return err(0, "not an OASIS file");
+    }
+    let body = &data[MAGIC.len()..];
+    if jobs <= 1 {
+        let mut c = Cur::new(body, MAGIC.len());
+        let mut m = Modal::default();
+        let mut b = new_builder(0, 0);
+        parse_records(&mut c, &mut m, &mut b, 0)?;
+        return finish(b);
+    }
+    let (head_end, cuts, end_at) = crate::cell_cuts(body, MAGIC.len())?;
+    let mut b = new_builder(0, 0);
+    {
+        let mut hc = Cur::new(&body[..head_end], MAGIC.len());
+        let mut hm = Modal::default();
+        parse_records(&mut hc, &mut hm, &mut b, 1)?;
+    }
+    let n_units = cuts.len();
+    if n_units == 0 {
+        return finish(b);
+    }
+    let per = n_units.div_ceil(jobs).max(1);
+    let groups: Vec<((usize, u64, u64), usize)> = (0..n_units)
+        .step_by(per)
+        .map(|i| {
+            let end = if i + per < n_units {
+                cuts[i + per].0
+            } else {
+                end_at
+            };
+            (cuts[i], end)
+        })
+        .collect();
+    let chunks: Vec<Result<Builder>> = std::thread::scope(|s| {
+        let handles: Vec<_> = groups
+            .iter()
+            .map(|&((start, n3, n5), end)| {
+                s.spawn(move || {
+                    let mut c = Cur::new(
+                        &body[start..end],
+                        MAGIC.len() + start,
+                    );
+                    let mut m = Modal::default();
+                    let mut cb = new_builder(n3, n5);
+                    // depth 1: chunk streams end without END records
+                    parse_records(&mut c, &mut m, &mut cb, 1)?;
+                    Ok(cb)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("parse worker panicked"))
+            .collect()
+    });
+    let mut builders = Vec::with_capacity(chunks.len());
+    for r in chunks {
+        builders.push(r?);
+    }
+    // tables first (any chunk may hold them), then cells in file order
+    for cb in &mut builders {
+        for (r, n) in std::mem::take(&mut cb.refnames) {
+            b.refnames.entry(r).or_insert(n);
+        }
+        for (r, s) in std::mem::take(&mut cb.textstrings) {
+            b.textstrings.entry(r).or_insert(s);
+        }
+        for &(l, d) in std::mem::take(&mut cb.layer_order).iter() {
+            b.reg_layer(l, d);
+        }
+        for (k, v) in std::mem::take(&mut cb.layer_names) {
+            b.layer_names.entry(k).or_insert(v);
+        }
+    }
+    for cb in builders {
+        merge_cells(&mut b, cb);
+    }
+    finish(b)
+}
+
+fn finish(mut b: Builder) -> Result<Doc> {
     // late name tables: rename placeholder cells created from refnums
     let ref_cells: Vec<(usize, String)> = b
         .cells
