@@ -169,8 +169,35 @@ def main():
     if len(py["layers"]) != len(rs["layers"]):
         fail(bad, "META layers: %d vs %d entries"
              % (len(py["layers"]), len(rs["layers"])))
+    recount = None
     for a, b in zip(py["layers"], rs["layers"]):
-        if a != b:
+        if a == b:
+            continue
+        akey = {k: v for k, v in a.items() if k != "stored_shapes"}
+        bkey = {k: v for k, v in b.items() if k != "stored_shapes"}
+        if akey == bkey:
+            # klayout Shapes.size() does not expand TEXT arrays (a
+            # 12-member text repetition counts 1) and is off-by-one
+            # on irregular shape arrays; the rust count is the each()
+            # truth - recount the source to confirm
+            if recount is None:
+                recount = {}
+                ly = db.Layout(False)
+                ly.read(src)
+                for li in ly.layer_indexes():
+                    info = ly.get_info(li)
+                    n = sum(sum(1 for _ in cell.shapes(li).each())
+                            for cell in ly.each_cell())
+                    recount[(info.layer, info.datatype)] = n
+                ly._destroy()
+            truth = recount.get((a["layer"], a["datatype"]))
+            if truth == b["stored_shapes"]:
+                continue
+            fail(bad, "META layer %d/%d stored_shapes: py=%s rust=%s "
+                 "each()=%s" % (a["layer"], a["datatype"],
+                                a["stored_shapes"], b["stored_shapes"],
+                                truth))
+        else:
             fail(bad, "META layer: py=%r rust=%r" % (a, b))
     if py["lod"] != rs["lod"]:
         fail(bad, "META lod: py=%r rust=%r" % (py["lod"], rs["lod"]))

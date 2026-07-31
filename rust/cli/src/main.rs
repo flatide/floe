@@ -280,6 +280,7 @@ fn write_band_files(
                 name: bname[i].clone(),
                 rects: &vc.bands[k].rects,
                 polys: &vc.bands[k].polys,
+                texts: &[],
                 places: vc
                     .places
                     .iter()
@@ -372,6 +373,7 @@ fn write_lod_file(
             name: names[*i].clone(),
             rects,
             polys,
+            texts: &[],
             places: tree.cells[*i]
                 .places
                 .iter()
@@ -387,6 +389,7 @@ fn write_lod_file(
             name: names[*i].clone(),
             rects,
             polys: &empty_polys,
+            texts: &[],
             places: Vec::new(),
         });
     }
@@ -453,6 +456,44 @@ fn layer_color(i: usize) -> String {
         (g * 255.0) as u8,
         (b * 255.0) as u8
     )
+}
+
+fn tsv_esc(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// repetition factors of a sidecar entry: g:na,nb,vax,vay,vbx,vby or
+/// p:x y x y ... - ';'-joined, offsets already in top frame
+fn fmt_factors(factors: &[floe_oasis::doc::Rep]) -> String {
+    use floe_oasis::doc::Rep;
+    factors
+        .iter()
+        .map(|f| match f {
+            Rep::One => "1".to_string(),
+            Rep::Grid { na, nb, va, vb } => format!(
+                "g:{},{},{},{},{},{}",
+                na, nb, va.0, va.1, vb.0, vb.1
+            ),
+            Rep::Pts(p) => format!(
+                "p:{}",
+                p.iter()
+                    .map(|(x, y)| format!("{} {}", x, y))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+        })
+        .collect::<Vec<_>>()
+        .join(";")
 }
 
 fn index_cmd(args: &[String]) {
@@ -613,6 +654,64 @@ fn index_cmd(args: &[String]) {
     }
     let t_tiles = t2.elapsed().as_secs_f64();
 
+    // --- skeleton + full-text sidecar ---
+    let t3 = Instant::now();
+    let entries = floe_tiler::skel::collect_all_texts(&doc);
+    let sk = floe_tiler::skel::build_skeleton(
+        &doc,
+        &entries,
+        floe_tiler::skel::SKEL_TEXT_CAP,
+    );
+    let skcell = floe_oasis::write::WCell {
+        name: "SKEL_TOP".to_string(),
+        rects: &sk.rects,
+        polys: &sk.polys,
+        texts: &sk.texts,
+        places: Vec::new(),
+    };
+    let bytes = floe_oasis::write::write_tree(&[skcell], doc.unit)
+        .expect("serialize skeleton");
+    std::fs::write(format!("{}/skeleton.oas", outdir), bytes)
+        .expect("write skeleton");
+    let mut sidecar: Vec<&floe_tiler::skel::TextEntry> =
+        entries.iter().collect();
+    sidecar.sort_by(|a, b| {
+        (a.layer, a.dt, &a.s, a.x, a.y)
+            .cmp(&(b.layer, b.dt, &b.s, b.x, b.y))
+    });
+    let mut tsv = String::new();
+    let mut side_members = 0u64;
+    for e in &sidecar {
+        side_members += e.members();
+        tsv.push_str(&format!(
+            "{}/{}\t{}\t{}\t{}\t{}\n",
+            e.layer,
+            e.dt,
+            e.x,
+            e.y,
+            fmt_factors(&e.factors),
+            tsv_esc(&e.s)
+        ));
+    }
+    std::fs::write(format!("{}/texts.tsv", outdir), tsv)
+        .expect("write sidecar");
+    let t_skel = t3.elapsed().as_secs_f64();
+    let thinned_json = if sk.thinned.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\"texts_thinned\": [{}],\n",
+            sk.thinned
+                .iter()
+                .map(|(l, d)| format!(
+                    "{{\"layer\": {}, \"datatype\": {}}}",
+                    l, d
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+
     // per-layer stored member counts (shapes + texts, no instance
     // multiplicity) - klayout Shapes.size() over every cell
     let mut stored: std::collections::HashMap<(u32, u32), u64> =
@@ -672,8 +771,13 @@ fn index_cmd(args: &[String]) {
          \"density\": {{\"levels\": {}, \"tiles\": {{{}}}}},\n\
          \"lod\": {{\"cap\": {}, \"tiles\": {{{}}}}},\n\
          \"bands\": {{\"thresholds_um\": [{}]}},\n\
+         {}\"skeleton\": {{\"file\": \"skeleton.oas\", \
+         \"shapes\": {}, \"texts\": {}}},\n\
+         \"texts_sidecar\": {{\"file\": \"texts.tsv\", \
+         \"entries\": {}, \"members\": {}}},\n\
          \"stats\": {{\"read_s\": {:.1}, \"parse_s\": {:.1}, \
-         \"tiles_s\": {:.1}, \"read_mode\": \"rust\", \
+         \"tiles_s\": {:.1}, \"skel_s\": {:.1}, \
+         \"read_mode\": \"rust\", \
          \"total_s\": {:.1}, \"cells\": {}, \"tile_files\": {}}}\n\
          }}\n",
         CACHE_VERSION,
@@ -698,9 +802,15 @@ fn index_cmd(args: &[String]) {
         LOD_SHAPE_CAP,
         lod_json.join(", "),
         bands_json,
+        thinned_json,
+        sk.shapes,
+        sk.labels,
+        sidecar.len(),
+        side_members,
         t_read + t_parse,
         t_parse,
         t_tiles,
+        t_skel,
         t_all.elapsed().as_secs_f64(),
         doc.cells.len(),
         tiles_written,
@@ -712,7 +822,8 @@ fn index_cmd(args: &[String]) {
          \"band_files\": {},\n  \"tiles\": {},\n  \
          \"grid\": \"{}x{}\",\n  \
          \"read_s\": {:.3},\n  \"parse_s\": {:.3},\n  \
-         \"tiles_s\": {:.3},\n  \"total_s\": {:.3}\n}}",
+         \"tiles_s\": {:.3},\n  \"skel_s\": {:.3},\n  \
+         \"total_s\": {:.3}\n}}",
         doc.cells.len(),
         members,
         files,
@@ -722,6 +833,7 @@ fn index_cmd(args: &[String]) {
         t_read,
         t_parse,
         t_tiles,
+        t_skel,
         t_all.elapsed().as_secs_f64()
     );
 }

@@ -46,7 +46,10 @@ def main(out):
             sh.insert(db.Box(x, y, x + 300, y + 300))   # 0.3um -> b2
     leaf1.shapes(L[3]).insert(db.Box(0, 0, 18_000, 3_000))  # 18um -> b0
 
-    # LEAF2: sparse scatter + triangles (non-manhattan)
+    # LEAF2: sparse scatter + triangles (non-manhattan) + deep texts
+    # (they ride MID's rotated/mirrored placements and TOP's MID
+    # array, so label transforms and the sidecar path walk get
+    # non-trivial coverage)
     leaf2 = ly.create_cell("LEAF2")
     for _ in range(50):
         x = rng.randrange(0, 15_000)
@@ -60,6 +63,10 @@ def main(out):
         tri = db.Polygon([db.Point(x, y), db.Point(x + s, y),
                           db.Point(x, y + s)])
         leaf2.shapes(L[5]).insert(tri)
+    LM_ = db.LayerInfo(63, 63, "MARKER")
+    for i in range(5):
+        leaf2.shapes(ly.layer(LM_)).insert(db.Text(
+            "PIN_%d" % i, db.Trans(db.Vector(1_000 + i * 2_800, 700))))
 
     # MID: LEAF1 3x3 array + rotated/mirrored LEAF2 + own L-shape (b1)
     mid = ly.create_cell("MID")
@@ -130,6 +137,13 @@ def main(out):
     for i, (x, y) in enumerate(((50_000, 50_000), (200_000, 200_000),
                                 (350_000, 350_000))):
         shm.insert(db.Text("BLOCK_%d" % i, db.Trans(db.Vector(x, y))))
+    # a regular text grid the OASIS writer folds into one repetition
+    # record - exercises symbolic text reps in the scan, the sidecar
+    # factors and the label expansion
+    for i in range(4):
+        for j in range(3):
+            shm.insert(db.Text("TREP", db.Trans(db.Vector(
+                20_000 + i * 7_000, 300_000 + j * 6_000))))
 
     opt = db.SaveLayoutOptions()
     opt.format = "OASIS"

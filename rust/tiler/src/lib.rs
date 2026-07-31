@@ -16,6 +16,7 @@ use floe_oasis::doc::{Doc, PolyRec, RectRec, Rep};
 use std::collections::HashMap;
 
 pub mod hier;
+pub mod skel;
 
 // ------------------------------------------------------------ transform
 

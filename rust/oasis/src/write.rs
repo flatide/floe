@@ -4,7 +4,7 @@
 //! sorted by layer pair). No CBLOCK yet - correctness first; klayout
 //! reads the plain stream fine and compression is a later knob.
 
-use crate::doc::{PolyRec, RectRec, Rep};
+use crate::doc::{PolyRec, RectRec, Rep, TextRec};
 use crate::Result;
 
 pub struct W {
@@ -199,6 +199,8 @@ pub struct WCell<'a> {
     pub name: String,
     pub rects: &'a [RectRec],
     pub polys: &'a [PolyRec],
+    /// labels (skeleton only - band tiles stay text-free)
+    pub texts: &'a [TextRec],
     /// (target cell name, x, y, rot, flip, rep)
     pub places: Vec<(&'a str, i64, i64, u8, bool, &'a Rep)>,
 }
@@ -278,6 +280,26 @@ pub fn write_tree(cells: &[WCell], unit: f64) -> Result<Vec<u8>> {
             w.sint(ay);
             if has_rep {
                 w.rep(&p.rep);
+            }
+        }
+        for t in cell.texts {
+            // TEXT id 19, info 0CNXYRTL: C=1 explicit string (N=0
+            // inline a-string), X, Y, T=texttype, L=textlayer;
+            // no modality - label volume is skeleton-bounded
+            w.uint(19);
+            let has_rep = !matches!(t.rep, Rep::One);
+            let mut info: u8 = 0x40 | 0x10 | 0x08 | 0x02 | 0x01;
+            if has_rep {
+                info |= 0x04;
+            }
+            w.byte(info);
+            w.string(t.s.as_bytes());
+            w.uint(t.layer as u64);
+            w.uint(t.dt as u64);
+            w.sint(t.x);
+            w.sint(t.y);
+            if has_rep {
+                w.rep(&t.rep);
             }
         }
         for (tname, x, y, rot, flip, rep) in &cell.places {
