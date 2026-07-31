@@ -108,6 +108,16 @@ fn main() {
     ));
     let mut rids: Vec<_> = st.record_ids.iter().collect();
     rids.sort_by_key(|(k, _)| **k);
+    let mut rts: Vec<_> = st.rep_types.iter().collect();
+    rts.sort_by_key(|(k, _)| **k);
+    out.push_str("  \"rep_types\": {");
+    for (i, (k, v)) in rts.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&format!("\"{}\": {}", k, v));
+    }
+    out.push_str("},\n");
     out.push_str("  \"record_ids\": {");
     for (i, (k, v)) in rids.iter().enumerate() {
         if i > 0 {

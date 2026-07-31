@@ -173,8 +173,13 @@ pub struct Repetition {
     pub members: u64,
 }
 
-fn read_repetition(c: &mut Cur, modal: &mut Option<Repetition>) -> Result<Repetition> {
+fn read_repetition(
+    c: &mut Cur,
+    modal: &mut Option<Repetition>,
+    st: &mut ScanStats,
+) -> Result<Repetition> {
     let t = c.uint()?;
+    *st.rep_types.entry(t).or_default() += 1;
     let rep = match t {
         0 => match modal {
             Some(r) => *r,
@@ -323,6 +328,10 @@ pub struct ScanStats {
     pub shapes: HashMap<(u64, u64), LayerStat>,
     /// (textlayer, texttype) -> text record/member counts
     pub texts: HashMap<(u64, u64), LayerStat>,
+    /// repetition-type byte -> count (0 = modal reuse; 1-3/8-9 grids,
+    /// 4-7/10-11 point lists) - tells whether a file's density is
+    /// grid-encoded or explicit
+    pub rep_types: HashMap<u64, u64>,
     pub unit: f64,
 }
 
@@ -355,10 +364,11 @@ impl ScanStats {
 fn rep_members(
     c: &mut Cur,
     modal: &mut Modal,
+    st: &mut ScanStats,
     has_rep: bool,
 ) -> Result<u64> {
     if has_rep {
-        Ok(read_repetition(c, &mut modal.repetition)?.members)
+        Ok(read_repetition(c, &mut modal.repetition, st)?.members)
     } else {
         Ok(1)
     }
@@ -503,7 +513,7 @@ fn record(
             if ybit {
                 c.sint()?;
             }
-            let members = rep_members(c, modal, rbit)?;
+            let members = rep_members(c, modal, st, rbit)?;
             st.placements += 1;
             st.placement_members += members;
         }
@@ -533,7 +543,7 @@ fn record(
             if ybit {
                 c.sint()?;
             }
-            let members = rep_members(c, modal, rbit)?;
+            let members = rep_members(c, modal, st, rbit)?;
             st.text(modal, c, members)?;
         }
         20 => {
@@ -565,7 +575,7 @@ fn record(
             if ybit {
                 c.sint()?;
             }
-            let members = rep_members(c, modal, rbit)?;
+            let members = rep_members(c, modal, st, rbit)?;
             st.shape(modal, c, members)?;
         }
         21 => {
@@ -590,7 +600,7 @@ fn record(
             if ybit {
                 c.sint()?;
             }
-            let members = rep_members(c, modal, rbit)?;
+            let members = rep_members(c, modal, st, rbit)?;
             st.shape(modal, c, members)?;
         }
         22 => {
@@ -629,7 +639,7 @@ fn record(
             if ybit {
                 c.sint()?;
             }
-            let members = rep_members(c, modal, rbit)?;
+            let members = rep_members(c, modal, st, rbit)?;
             st.shape(modal, c, members)?;
         }
         23 | 24 | 25 => {
@@ -663,7 +673,7 @@ fn record(
             if ybit {
                 c.sint()?;
             }
-            let members = rep_members(c, modal, rbit)?;
+            let members = rep_members(c, modal, st, rbit)?;
             st.shape(modal, c, members)?;
         }
         26 => {
@@ -695,7 +705,7 @@ fn record(
             if ybit {
                 c.sint()?;
             }
-            let members = rep_members(c, modal, rbit)?;
+            let members = rep_members(c, modal, st, rbit)?;
             st.shape(modal, c, members)?;
         }
         27 => {
@@ -720,7 +730,7 @@ fn record(
             if ybit {
                 c.sint()?;
             }
-            let members = rep_members(c, modal, rbit)?;
+            let members = rep_members(c, modal, st, rbit)?;
             st.shape(modal, c, members)?;
         }
         28 => {
@@ -780,7 +790,7 @@ fn record(
             if ybit {
                 c.sint()?;
             }
-            let members = rep_members(c, modal, rbit)?;
+            let members = rep_members(c, modal, st, rbit)?;
             st.shape(modal, c, members)?;
         }
         34 => {
@@ -855,6 +865,9 @@ fn merge(into: &mut ScanStats, other: ScanStats) {
     }
     for (k, v) in other.record_ids {
         *into.record_ids.entry(k).or_default() += v;
+    }
+    for (k, v) in other.rep_types {
+        *into.rep_types.entry(k).or_default() += v;
     }
 }
 

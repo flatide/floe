@@ -849,97 +849,199 @@ fn parse_records(
     Ok(true)
 }
 
-/// Pts repetitions that are really regular grids (a common
-/// Calibre-ism: full grids written as OASIS point-list repetitions)
-/// convert to Grid form: the tiler then splits them ARITHMETICALLY
-/// per tile instead of walking every member per window, and the
-/// written subsets stay symbolic. Exact whole-set check only; any
-/// irregularity keeps the original point list. A 9.8 GB chip's
-/// finest band weighed 140 GB at ~1.9 B/member - the deflated cost
-/// of explicit offsets - before this.
-fn pts_to_grid(pts: &[(i64, i64)]) -> Option<Rep> {
-    let n = pts.len();
-    if n < 8 {
-        return None;
-    }
-    let mut v = pts.to_vec();
-    v.sort_unstable_by_key(|&(x, y)| (y, x));
-    // row structure: uniform row length, x-pitch, y-pitch, x-offset
-    let x0 = v[0].0;
-    let y0 = v[0].1;
-    let mut cols = 0usize;
-    while cols < n && v[cols].1 == y0 {
-        cols += 1;
-    }
-    if cols < 2 || n % cols != 0 {
-        return None;
-    }
-    let rows = n / cols;
-    if rows < 2 {
-        return None;
-    }
-    let dx = v[1].0 - v[0].0;
-    if dx <= 0 {
-        return None;
-    }
-    let dy = v[cols].1 - y0;
-    if dy <= 0 {
-        return None;
-    }
-    for r in 0..rows {
-        let base = r * cols;
-        if v[base].0 != x0 || v[base].1 != y0 + r as i64 * dy {
-            return None;
+/// Constant-pitch runs of a sorted int slice: (start, pitch, count).
+/// Unlike the python original this PARTITIONS (no shared endpoints -
+/// duplicated members would inflate the validated member counts).
+fn const_pitch_runs(vals: &[i64]) -> Vec<(i64, i64, usize)> {
+    let n = vals.len();
+    let mut runs = Vec::new();
+    let mut i = 0usize;
+    while i < n {
+        if i == n - 1 {
+            runs.push((vals[i], 0, 1));
+            break;
         }
-        for c in 1..cols {
-            let p = v[base + c];
-            if p.0 != x0 + c as i64 * dx || p.1 != v[base].1 {
-                return None;
-            }
+        let pitch = vals[i + 1] - vals[i];
+        if pitch == 0 {
+            runs.push((vals[i], 0, 1));
+            i += 1;
+            continue;
         }
+        let mut j = i + 1;
+        while j < n - 1 && vals[j + 1] - vals[j] == pitch {
+            j += 1;
+        }
+        runs.push((vals[i], pitch, j - i + 1));
+        i = j + 1;
     }
-    // rebase so the (0,0) member of the grid is the record anchor
-    // (pts lists always contain (0,0); a sorted grid starting off
-    // (0,0) would shift the geometry, so require the corner there)
-    if x0 != 0 || y0 != 0 {
-        return None;
-    }
-    Some(Rep::Grid {
-        na: cols as u64,
-        nb: rows as u64,
-        va: (dx, 0),
-        vb: (0, dy),
-    })
+    runs
 }
 
-fn normalize_reps(doc: &mut Doc) {
-    let mut fixed = 0u64;
-    for cell in &mut doc.cells {
-        let mut fix = |rep: &mut Rep| {
-            if let Rep::Pts(p) = rep {
-                if let Some(g) = pts_to_grid(p) {
-                    *rep = g;
-                    fixed += 1;
-                }
+/// Decompose a point set into maximal regular sub-grids + leftovers
+/// (the python indexer's _find_grids, made exact). Real fill/via
+/// point lists are grids WITH HOLES - an exact whole-set matcher
+/// never fires on them, and a 9.8 GB chip kept its 140 GB of
+/// explicit offsets that way. Column signature grouping: per x, the
+/// constant-pitch y-runs; columns sharing (y0, pitch, count) at a
+/// constant x-pitch fuse into arrays.
+/// Returns None when nothing usefully gridded.
+#[allow(clippy::type_complexity)]
+fn find_grids(
+    pts: &[(i64, i64)],
+) -> Option<(Vec<(i64, i64, i64, u64, i64, u64)>, Vec<(i64, i64)>)> {
+    let mut v = pts.to_vec();
+    v.sort_unstable();
+    let mut col_sigs: HashMap<(i64, i64, usize), Vec<i64>> =
+        HashMap::new();
+    let mut leftovers: Vec<(i64, i64)> = Vec::new();
+    let mut i = 0usize;
+    while i < v.len() {
+        let x = v[i].0;
+        let mut j = i;
+        while j < v.len() && v[j].0 == x {
+            j += 1;
+        }
+        let ys: Vec<i64> = v[i..j].iter().map(|p| p.1).collect();
+        for (y0, pitch, cnt) in const_pitch_runs(&ys) {
+            if cnt == 1 {
+                leftovers.push((x, y0));
+            } else {
+                col_sigs.entry((y0, pitch, cnt)).or_default().push(x);
             }
-        };
-        for r in &mut cell.rects {
-            fix(&mut r.rep);
         }
-        for p in &mut cell.polys {
-            fix(&mut p.rep);
-        }
-        for pa in &mut cell.paths {
-            fix(&mut pa.rep);
-        }
-        for t in &mut cell.texts {
-            fix(&mut t.rep);
-        }
-        for pl in &mut cell.places {
-            fix(&mut pl.rep);
+        i = j;
+    }
+    let mut arrays: Vec<(i64, i64, i64, u64, i64, u64)> = Vec::new();
+    let mut sigs: Vec<((i64, i64, usize), Vec<i64>)> =
+        col_sigs.into_iter().collect();
+    sigs.sort_unstable_by_key(|(k, _)| *k);
+    for ((y0, dy, ny), mut xs) in sigs {
+        xs.sort_unstable();
+        for (x0, dx, nx) in const_pitch_runs(&xs) {
+            // tiny fragments cost more as records than as points
+            if nx * ny < 8 {
+                for k in 0..nx as i64 {
+                    for m in 0..ny as i64 {
+                        leftovers.push((x0 + k * dx, y0 + m * dy));
+                    }
+                }
+            } else {
+                arrays.push((x0, y0, dx, nx as u64, dy, ny as u64));
+            }
         }
     }
-    let _ = fixed;
+    if arrays.is_empty() {
+        return None;
+    }
+    leftovers.sort_unstable();
+    Some((arrays, leftovers))
+}
+
+fn grid_rep(dx: i64, nx: u64, dy: i64, ny: u64) -> Rep {
+    if nx == 1 {
+        // degenerate column: 1-D vertical grid (zero pitch on a used
+        // axis would divide by zero in the tiler's splitter)
+        Rep::Grid { na: ny, nb: 1, va: (0, dy), vb: (0, 0) }
+    } else {
+        Rep::Grid { na: nx, nb: ny, va: (dx, 0), vb: (0, dy) }
+    }
+}
+
+/// Split records with big point-list repetitions into gridded parts
+/// plus a leftover point list. Coverage and member counts are
+/// invariant; the tiler then splits the grids ARITHMETICALLY per
+/// tile and only the true leftovers stay explicit.
+fn normalize_cell(cell: &mut Cell) {
+    macro_rules! norm {
+        ($vec:expr, $shift:expr) => {{
+            let old = std::mem::take(&mut $vec);
+            for rec in old {
+                let decomp = match &rec.rep {
+                    Rep::Pts(p) if p.len() >= 16 => find_grids(p),
+                    _ => None,
+                };
+                match decomp {
+                    None => $vec.push(rec),
+                    Some((arrays, leftovers)) => {
+                        for (x0, y0, dx, nx, dy, ny) in arrays {
+                            let mut nr = rec.clone();
+                            $shift(&mut nr, x0, y0);
+                            nr.rep = grid_rep(dx, nx, dy, ny);
+                            $vec.push(nr);
+                        }
+                        match leftovers.len() {
+                            0 => {}
+                            1 => {
+                                let mut nr = rec.clone();
+                                $shift(
+                                    &mut nr,
+                                    leftovers[0].0,
+                                    leftovers[0].1,
+                                );
+                                nr.rep = Rep::One;
+                                $vec.push(nr);
+                            }
+                            _ => {
+                                let (bx, by) = leftovers[0];
+                                let mut nr = rec.clone();
+                                $shift(&mut nr, bx, by);
+                                nr.rep = Rep::Pts(
+                                    leftovers
+                                        .iter()
+                                        .map(|&(x, y)| (x - bx, y - by))
+                                        .collect(),
+                                );
+                                $vec.push(nr);
+                            }
+                        }
+                    }
+                }
+            }
+        }};
+    }
+    norm!(cell.rects, |r: &mut RectRec, dx: i64, dy: i64| {
+        r.x += dx;
+        r.y += dy;
+    });
+    norm!(cell.polys, |r: &mut PolyRec, dx: i64, dy: i64| {
+        for p in &mut r.pts {
+            p.0 += dx;
+            p.1 += dy;
+        }
+    });
+    norm!(cell.paths, |r: &mut PathRec, dx: i64, dy: i64| {
+        for p in &mut r.pts {
+            p.0 += dx;
+            p.1 += dy;
+        }
+    });
+    norm!(cell.texts, |r: &mut TextRec, dx: i64, dy: i64| {
+        r.x += dx;
+        r.y += dy;
+    });
+    norm!(cell.places, |r: &mut PlaceRec, dx: i64, dy: i64| {
+        r.x += dx;
+        r.y += dy;
+    });
+}
+
+fn normalize_reps(doc: &mut Doc, jobs: usize) {
+    if jobs <= 1 || doc.cells.len() < 2 {
+        for cell in &mut doc.cells {
+            normalize_cell(cell);
+        }
+        return;
+    }
+    let chunk = doc.cells.len().div_ceil(jobs);
+    std::thread::scope(|s| {
+        for part in doc.cells.chunks_mut(chunk) {
+            s.spawn(move || {
+                for cell in part {
+                    normalize_cell(cell);
+                }
+            });
+        }
+    });
 }
 
 const MAGIC: &[u8] = b"%SEMI-OASIS\r\n";
@@ -1020,7 +1122,7 @@ pub fn parse_doc_parallel(data: &[u8], jobs: usize) -> Result<Doc> {
         let mut m = Modal::default();
         let mut b = new_builder(0, 0);
         parse_records(&mut c, &mut m, &mut b, 0)?;
-        return finish(b);
+        return finish(b, 1);
     }
     let (head_end, cuts, end_at) = crate::cell_cuts(body, MAGIC.len())?;
     let mut b = new_builder(0, 0);
@@ -1031,7 +1133,7 @@ pub fn parse_doc_parallel(data: &[u8], jobs: usize) -> Result<Doc> {
     }
     let n_units = cuts.len();
     if n_units == 0 {
-        return finish(b);
+        return finish(b, jobs);
     }
     let per = n_units.div_ceil(jobs).max(1);
     let groups: Vec<((usize, u64, u64), usize)> = (0..n_units)
@@ -1089,12 +1191,12 @@ pub fn parse_doc_parallel(data: &[u8], jobs: usize) -> Result<Doc> {
     for cb in builders {
         merge_cells(&mut b, cb);
     }
-    finish(b)
+    finish(b, jobs)
 }
 
-fn finish(b: Builder) -> Result<Doc> {
+fn finish(b: Builder, jobs: usize) -> Result<Doc> {
     let mut doc = finish_inner(b)?;
-    normalize_reps(&mut doc);
+    normalize_reps(&mut doc, jobs);
     Ok(doc)
 }
 
