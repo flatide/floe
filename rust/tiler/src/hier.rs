@@ -759,6 +759,14 @@ fn route_members(
                     "non-axis repetition with {} members", n
                 ));
             }
+            // members fully inside the window stay ONE record with a
+            // subset point-list repetition - dense irregular arrays
+            // (Calibre-style via/fill) otherwise exploded into an
+            // individual record per member per tile (a 150 MB chip
+            // measured 3.9e9 routed members that way); klayout's own
+            // clip keeps irregular arrays too. Straddling members
+            // still clip individually.
+            let mut inside: Vec<(i64, i64)> = Vec::new();
             for (ox, oy) in rep_offsets(rep) {
                 let m = (b.0 + ox, b.1 + oy, b.2 + ox, b.3 + oy);
                 if m.0 >= win.2 || m.2 <= win.0 || m.1 >= win.3
@@ -766,9 +774,30 @@ fn route_members(
                 {
                     continue;
                 }
-                let inside = m.0 >= win.0 && m.1 >= win.1
-                    && m.2 <= win.2 && m.3 <= win.3;
-                single!(ox, oy, inside);
+                if m.0 >= win.0 && m.1 >= win.1
+                    && m.2 <= win.2 && m.3 <= win.3
+                {
+                    inside.push((ox, oy));
+                } else {
+                    single!(ox, oy, false);
+                }
+            }
+            match inside.len() {
+                0 => {}
+                1 => single!(inside[0].0, inside[0].1, true),
+                _ => {
+                    // rebase: Pts offsets are anchored at (0,0)
+                    let (bx, by) = inside[0];
+                    let pts: Vec<(i64, i64)> = inside
+                        .iter()
+                        .map(|&(x, y)| (x - bx, y - by))
+                        .collect();
+                    acts.push(Act::Block {
+                        ox: bx,
+                        oy: by,
+                        rep: Rep::Pts(pts),
+                    });
+                }
             }
             Ok(acts)
         }
