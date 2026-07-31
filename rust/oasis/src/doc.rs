@@ -71,6 +71,20 @@ pub struct PlaceRec {
 }
 
 #[derive(Clone, Debug)]
+pub struct PathRec {
+    pub layer: u32,
+    pub dt: u32,
+    /// absolute spine vertices in cell coordinates
+    pub pts: Vec<(i64, i64)>,
+    /// half-width
+    pub hw: i64,
+    /// start/end extensions (resolved values, may be negative)
+    pub es: i64,
+    pub ee: i64,
+    pub rep: Rep,
+}
+
+#[derive(Clone, Debug)]
 pub struct TextRec {
     pub layer: u32,
     pub dt: u32,
@@ -85,6 +99,7 @@ pub struct Cell {
     pub name: String,
     pub rects: Vec<RectRec>,
     pub polys: Vec<PolyRec>,
+    pub paths: Vec<PathRec>,
     pub places: Vec<PlaceRec>,
     /// kept whole (tiles stay text-free; the skeleton/sidecar builds
     /// draw from here) - text points also count into the layout bbox
@@ -124,6 +139,10 @@ struct Modal {
     geo_w: Option<i64>,
     geo_h: Option<i64>,
     poly_pts: Option<Vec<(i64, i64)>>, // deltas from anchor
+    path_pts: Option<Vec<(i64, i64)>>, // separate modal per spec
+    path_hw: Option<i64>,
+    path_es: Option<i64>,
+    path_ee: Option<i64>,
     place_cell: Option<PlaceTarget>,
     text_string: Option<TextTarget>,
 }
@@ -220,9 +239,10 @@ fn read_rep(c: &mut Cur, modal: &mut Option<Rep>) -> Result<Rep> {
     Ok(rep)
 }
 
-/// point list -> vertex deltas from the anchor (implicit closing
-/// vertex for the manhattan types included)
-fn read_points(c: &mut Cur) -> Result<Vec<(i64, i64)>> {
+/// point list -> vertex deltas from the anchor. `closed`: polygon
+/// semantics (implicit closing vertex for the manhattan types);
+/// path point lists are open chains.
+fn read_points(c: &mut Cur, closed: bool) -> Result<Vec<(i64, i64)>> {
     let t = c.uint()?;
     let n = c.uint()? as usize;
     let mut pts: Vec<(i64, i64)> = Vec::with_capacity(n + 2);
@@ -242,7 +262,7 @@ fn read_points(c: &mut Cur) -> Result<Vec<(i64, i64)>> {
                 pts.push((x, y));
             }
             // close manhattan-ly: one implicit vertex on the pending axis
-            if x != 0 || y != 0 {
+            if closed && (x != 0 || y != 0) {
                 let u = if horiz { (0, y) } else { (x, 0) };
                 if u != (x, y) && u != (0, 0) {
                     pts.push(u);
@@ -635,7 +655,7 @@ fn parse_records(
                     m.datatype = Some(c.uint()?);
                 }
                 if info & 0x20 != 0 {
-                    m.poly_pts = Some(read_points(c)?);
+                    m.poly_pts = Some(read_points(c, true)?);
                 }
                 if info & 0x10 != 0 {
                     coord(c, &mut m.geo_x, m.relative)?;
@@ -663,7 +683,82 @@ fn parse_records(
                     .collect();
                 b.cells[cur].polys.push(PolyRec { layer: l, dt: d, pts, rep });
             }
-            22 => return err(c.here(), "PATH: out of spike scope"),
+            22 => {
+                // PATH: EWPXYRDL
+                let info = c.byte()?;
+                let cur = match b.cur {
+                    Some(i) => i,
+                    None => return err(c.here(), "shape outside cell"),
+                };
+                if info & 0x01 != 0 {
+                    m.layer = Some(c.uint()?);
+                }
+                if info & 0x02 != 0 {
+                    m.datatype = Some(c.uint()?);
+                }
+                if info & 0x40 != 0 {
+                    m.path_hw = Some(c.uint()? as i64);
+                }
+                let hw = m.path_hw
+                    .ok_or_else(|| OasisError::Format("no halfwidth".into()))?;
+                if info & 0x80 != 0 {
+                    let scheme = c.uint()?;
+                    m.path_es = Some(match (scheme >> 2) & 3 {
+                        0 => m.path_es.ok_or_else(|| OasisError::Format(
+                            "start ext reuse before first".into()))?,
+                        1 => 0,
+                        2 => hw,
+                        _ => c.sint()?,
+                    });
+                    m.path_ee = Some(match scheme & 3 {
+                        0 => m.path_ee.ok_or_else(|| OasisError::Format(
+                            "end ext reuse before first".into()))?,
+                        1 => 0,
+                        2 => hw,
+                        _ => c.sint()?,
+                    });
+                }
+                let es = m.path_es.ok_or_else(
+                    || OasisError::Format("no start extension".into()))?;
+                let ee = m.path_ee.ok_or_else(
+                    || OasisError::Format("no end extension".into()))?;
+                if info & 0x20 != 0 {
+                    m.path_pts = Some(read_points(c, false)?);
+                }
+                if info & 0x10 != 0 {
+                    coord(c, &mut m.geo_x, m.relative)?;
+                }
+                if info & 0x08 != 0 {
+                    coord(c, &mut m.geo_y, m.relative)?;
+                }
+                let rep = if info & 0x04 != 0 {
+                    read_rep(c, &mut m.rep)?
+                } else {
+                    Rep::One
+                };
+                let (l, d) = match (m.layer, m.datatype) {
+                    (Some(l), Some(d)) => (l as u32, d as u32),
+                    _ => return err(c.here(), "path before layer modal"),
+                };
+                b.reg_layer(l, d);
+                let deltas = match &m.path_pts {
+                    Some(p) => p,
+                    None => return err(c.here(), "path without points"),
+                };
+                let pts = deltas
+                    .iter()
+                    .map(|(dx, dy)| (m.geo_x + dx, m.geo_y + dy))
+                    .collect();
+                b.cells[cur].paths.push(PathRec {
+                    layer: l,
+                    dt: d,
+                    pts,
+                    hw,
+                    es,
+                    ee,
+                    rep,
+                });
+            }
             23..=26 => return err(c.here(), "TRAPEZOID: out of spike scope"),
             27 => return err(c.here(), "CIRCLE: out of spike scope"),
             28 => {
@@ -800,6 +895,7 @@ fn merge_cells(g: &mut Builder, o: Builder) {
         text_base.push(g.cells[gi].texts.len());
         g.cells[gi].rects.extend(cell.rects);
         g.cells[gi].polys.extend(cell.polys);
+        g.cells[gi].paths.extend(cell.paths);
         g.cells[gi].places.extend(cell.places);
         g.cells[gi].texts.extend(cell.texts);
     }

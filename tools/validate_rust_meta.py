@@ -228,9 +228,12 @@ def main():
                      % (rc, len(diffs), diffs[0],
                         (oracle or {}).get(diffs[0]),
                         (got or {}).get(diffs[0])))
-            # directional cross-check vs the klayout meta: same layer
-            # set, same depth structure, klayout counts never below
-            # rust (its clip approximation only ever ADDS members)
+            # structural cross-check vs the klayout meta: same layer
+            # sets and depth lengths. Magnitudes are NOT compared -
+            # klayout's numbers are fuzzy in BOTH directions (clip
+            # duplicates boundary sub-arrays: py above; Shapes.size()
+            # counts text/path arrays as 1: py below). The exact gate
+            # is the band-file oracle above.
             if (pyd is None) != (got is None):
                 fail(bad, "DENSITY %s: py=%s rust=%s"
                      % (rc, pyd is not None, got is not None))
@@ -240,11 +243,10 @@ def main():
                          "rust=%s" % (rc, sorted(pyd), sorted(got)))
                 else:
                     for key in pyd:
-                        a, b = pyd[key], got[key]
-                        if len(a) != len(b) or any(
-                                x < y for x, y in zip(a, b)):
-                            fail(bad, "DENSITY %s %s: py=%s below "
-                                 "rust=%s" % (rc, key, a, b))
+                        if len(pyd[key]) != len(got[key]):
+                            fail(bad, "DENSITY %s %s: depth %d vs %d"
+                                 % (rc, key, len(pyd[key]),
+                                    len(got[key])))
             kp = os.path.join(icedir, "tiles_lod",
                               "t_%d_%d.oas" % (r, c))
             rp = os.path.join(outdir, "tiles_lod",

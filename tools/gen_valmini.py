@@ -45,6 +45,12 @@ def main(out):
             x, y = i * 600, j * 600
             sh.insert(db.Box(x, y, x + 300, y + 300))   # 0.3um -> b2
     leaf1.shapes(L[3]).insert(db.Box(0, 0, 18_000, 3_000))  # 18um -> b0
+    # three identical paths at a regular pitch: the OASIS writer folds
+    # them into one PATH record with a repetition
+    for k in range(3):
+        leaf1.shapes(L[3]).insert(db.Path(
+            [db.Point(500, 4_000 + k * 1_200),
+             db.Point(9_500, 4_000 + k * 1_200)], 400))
 
     # LEAF2: sparse scatter + triangles (non-manhattan) + deep texts
     # (they ride MID's rotated/mirrored placements and TOP's MID
@@ -67,6 +73,13 @@ def main(out):
     for i in range(5):
         leaf2.shapes(ly.layer(LM_)).insert(db.Text(
             "PIN_%d" % i, db.Trans(db.Vector(1_000 + i * 2_800, 700))))
+    # a route-like manhattan path with asymmetric extensions: it rides
+    # every rotated/mirrored MID placement, and instances near tile
+    # lines exercise the straddling-path polygonize+clip route
+    leaf2.shapes(L[6]).insert(db.Path(
+        [db.Point(500, 12_000), db.Point(9_000, 12_000),
+         db.Point(9_000, 6_000), db.Point(14_000, 6_000)],
+        600, 150, 350))
 
     # MID: LEAF1 3x3 array + rotated/mirrored LEAF2 + own L-shape (b1)
     mid = ly.create_cell("MID")
@@ -111,6 +124,16 @@ def main(out):
     top.insert(db.CellInstArray(
         mega.cell_index(), db.Trans(db.Vector(1_100, 1_300)),
         db.Vector(260, 0), db.Vector(0, 260), 1_500, 1_500))
+    # paths at TOP: a wide manhattan bus with extensions crossing the
+    # first vertical tile line (klayout polygonizes the straddling
+    # piece - the rust side must match that outline exactly), plus a
+    # fully-interior 45-degree path (kept as a PATH record end to end;
+    # its conservative rust bbox must stay clear of tile lines)
+    top.shapes(L[7]).insert(db.Path(
+        [db.Point(80_000, 60_000), db.Point(160_000, 60_000),
+         db.Point(160_000, 95_000)], 1_600, 400, 800))
+    top.shapes(L[7]).insert(db.Path(
+        [db.Point(30_000, 12_000), db.Point(38_000, 20_000)], 500))
     # DEEP chain: TOP -> DEEPA -> DEEPB where DEEPB holds a 500x500
     # fine spray (0.06um at 0.3um pitch, 150um square) straddling the
     # inner tile cross. The four central tiles blow past the LOD cap

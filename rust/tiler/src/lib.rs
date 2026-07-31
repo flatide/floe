@@ -178,6 +178,12 @@ impl Tiler {
                 ));
             }
             let cell = &doc.cells[ci];
+            if !cell.paths.is_empty() {
+                return Err(
+                    "flat spike tiler: PATH records unsupported \
+                     (production path = hier)".into(),
+                );
+            }
             out.texts_dropped += cell
                 .texts
                 .iter()
@@ -563,6 +569,124 @@ fn fold_reps(own: Rep, ctx: &[Rep]) -> Result<(Rep, Vec<(i64, i64)>), String> {
         outer = nxt;
     }
     Ok((keep, outer))
+}
+
+/// Exact outline polygon of a MANHATTAN path (klayout Path.polygon
+/// parity: square miter joins - corner point v + (nA+nB)*hw on each
+/// side - and flush ends after applying the extensions). None when a
+/// segment is non-manhattan or the spine degenerates (single point,
+/// U-turn join); callers fall back or error there.
+pub fn path_outline(
+    pts: &[(i64, i64)],
+    hw: i64,
+    es: i64,
+    ee: i64,
+) -> Option<Vec<(i64, i64)>> {
+    // dedupe + merge colinear runs so every join is a 90-degree turn
+    let mut sp: Vec<(i64, i64)> = Vec::with_capacity(pts.len());
+    for &q in pts {
+        if sp.last() == Some(&q) {
+            continue;
+        }
+        if sp.len() >= 2 {
+            let a = sp[sp.len() - 2];
+            let b = sp[sp.len() - 1];
+            let d1 = ((b.0 - a.0).signum(), (b.1 - a.1).signum());
+            let d2 = ((q.0 - b.0).signum(), (q.1 - b.1).signum());
+            if d1 == d2 {
+                sp.pop();
+            }
+        }
+        sp.push(q);
+    }
+    if sp.len() < 2 {
+        return None;
+    }
+    let mut dirs: Vec<(i64, i64)> = Vec::with_capacity(sp.len() - 1);
+    for w in sp.windows(2) {
+        let (dx, dy) = (w[1].0 - w[0].0, w[1].1 - w[0].1);
+        if dx != 0 && dy != 0 {
+            return None; // non-manhattan
+        }
+        dirs.push((dx.signum(), dy.signum()));
+    }
+    for w in dirs.windows(2) {
+        if w[0].0 == -w[1].0 && w[0].1 == -w[1].1 {
+            return None; // U-turn join: miter undefined
+        }
+    }
+    let last = sp.len() - 1;
+    sp[0] = (sp[0].0 - dirs[0].0 * es, sp[0].1 - dirs[0].1 * es);
+    sp[last] = (
+        sp[last].0 + dirs[last - 1].0 * ee,
+        sp[last].1 + dirs[last - 1].1 * ee,
+    );
+    let n = |d: (i64, i64)| (-d.1, d.0); // left normal
+    let mut left: Vec<(i64, i64)> = Vec::with_capacity(sp.len() * 2);
+    let mut right: Vec<(i64, i64)> = Vec::with_capacity(sp.len());
+    let n0 = n(dirs[0]);
+    left.push((sp[0].0 + n0.0 * hw, sp[0].1 + n0.1 * hw));
+    right.push((sp[0].0 - n0.0 * hw, sp[0].1 - n0.1 * hw));
+    for i in 1..last {
+        let na = n(dirs[i - 1]);
+        let nb = n(dirs[i]);
+        let m = (na.0 + nb.0, na.1 + nb.1);
+        left.push((sp[i].0 + m.0 * hw, sp[i].1 + m.1 * hw));
+        right.push((sp[i].0 - m.0 * hw, sp[i].1 - m.1 * hw));
+    }
+    let nl = n(dirs[last - 1]);
+    left.push((sp[last].0 + nl.0 * hw, sp[last].1 + nl.1 * hw));
+    right.push((sp[last].0 - nl.0 * hw, sp[last].1 - nl.1 * hw));
+    right.reverse();
+    left.extend(right);
+    Some(left)
+}
+
+/// path bbox: exact (outline) for manhattan spines, conservative
+/// (extended vertices grown by hw on both axes) otherwise
+pub fn path_bbox(
+    pts: &[(i64, i64)],
+    hw: i64,
+    es: i64,
+    ee: i64,
+) -> (i64, i64, i64, i64) {
+    if let Some(o) = path_outline(pts, hw, es, ee) {
+        let (mut x0, mut y0, mut x1, mut y1) =
+            (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+        for &(x, y) in &o {
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x);
+            y1 = y1.max(y);
+        }
+        return (x0, y0, x1, y1);
+    }
+    let (mut x0, mut y0, mut x1, mut y1) =
+        (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+    let last = pts.len() - 1;
+    for (i, &(px, py)) in pts.iter().enumerate() {
+        let (mut ex, mut ey) = (px, py);
+        if i == 0 && pts.len() > 1 {
+            let d = ((pts[1].0 - px).signum(), (pts[1].1 - py).signum());
+            ex -= d.0 * es;
+            ey -= d.1 * es;
+        }
+        if i == last && pts.len() > 1 {
+            let d = (
+                (px - pts[last - 1].0).signum(),
+                (py - pts[last - 1].1).signum(),
+            );
+            ex += d.0 * ee;
+            ey += d.1 * ee;
+        }
+        for &(vx, vy) in &[(px, py), (ex, ey)] {
+            x0 = x0.min(vx - hw);
+            y0 = y0.min(vy - hw);
+            x1 = x1.max(vx + hw);
+            y1 = y1.max(vy + hw);
+        }
+    }
+    (x0, y0, x1, y1)
 }
 
 pub fn xf_rep(rep: &Rep, xf: &Xf) -> Rep {

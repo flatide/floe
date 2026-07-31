@@ -280,6 +280,7 @@ fn write_band_files(
                 name: bname[i].clone(),
                 rects: &vc.bands[k].rects,
                 polys: &vc.bands[k].polys,
+                paths: &vc.bands[k].paths,
                 texts: &[],
                 places: vc
                     .places
@@ -316,7 +317,7 @@ fn write_lod_file(
     c: i64,
     cap: u64,
 ) -> Option<usize> {
-    use floe_oasis::doc::{PolyRec, RectRec, Rep};
+    use floe_oasis::doc::{PathRec, PolyRec, RectRec, Rep};
     let base = base_names(doc, tree);
     let name_of = |i: usize| -> String {
         if i == tree.root {
@@ -331,19 +332,23 @@ fn write_lod_file(
         None => ((0..tree.cells.len()).collect(), Vec::new()),
     };
     // owned merged content first (WCell borrows slices)
-    let merged: Vec<(usize, Vec<RectRec>, Vec<PolyRec>)> = included
-        .iter()
-        .map(|&i| {
-            let vc = &tree.cells[i];
-            let mut rects = Vec::new();
-            let mut polys = Vec::new();
-            for band in &vc.bands {
-                rects.extend(band.rects.iter().cloned());
-                polys.extend(band.polys.iter().cloned());
-            }
-            (i, rects, polys)
-        })
-        .collect();
+    #[allow(clippy::type_complexity)]
+    let merged: Vec<(usize, Vec<RectRec>, Vec<PolyRec>, Vec<PathRec>)> =
+        included
+            .iter()
+            .map(|&i| {
+                let vc = &tree.cells[i];
+                let mut rects = Vec::new();
+                let mut polys = Vec::new();
+                let mut paths = Vec::new();
+                for band in &vc.bands {
+                    rects.extend(band.rects.iter().cloned());
+                    polys.extend(band.polys.iter().cloned());
+                    paths.extend(band.paths.iter().cloned());
+                }
+                (i, rects, polys, paths)
+            })
+            .collect();
     let ghost_rects: Vec<(usize, Vec<RectRec>)> = if ghosts.is_empty() {
         Vec::new()
     } else {
@@ -368,11 +373,12 @@ fn write_lod_file(
         (0..tree.cells.len()).map(name_of).collect();
     let empty_polys: Vec<PolyRec> = Vec::new();
     let mut wcells: Vec<floe_oasis::write::WCell> = Vec::new();
-    for (i, rects, polys) in &merged {
+    for (i, rects, polys, paths) in &merged {
         wcells.push(floe_oasis::write::WCell {
             name: names[*i].clone(),
             rects,
             polys,
+            paths,
             texts: &[],
             places: tree.cells[*i]
                 .places
@@ -389,6 +395,7 @@ fn write_lod_file(
             name: names[*i].clone(),
             rects,
             polys: &empty_polys,
+            paths: &[],
             texts: &[],
             places: Vec::new(),
         });
@@ -739,6 +746,7 @@ fn index_cmd(args: &[String]) {
         name: "SKEL_TOP".to_string(),
         rects: &sk.rects,
         polys: &sk.polys,
+        paths: &sk.paths,
         texts: &sk.texts,
         places: Vec::new(),
     };
@@ -797,6 +805,10 @@ fn index_cmd(args: &[String]) {
         for p in &cell.polys {
             *stored.entry((p.layer, p.dt)).or_default() +=
                 p.rep.members();
+        }
+        for pa in &cell.paths {
+            *stored.entry((pa.layer, pa.dt)).or_default() +=
+                pa.rep.members();
         }
         for t in &cell.texts {
             *stored.entry((t.layer, t.dt)).or_default() +=

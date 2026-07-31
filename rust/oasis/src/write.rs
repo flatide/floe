@@ -4,7 +4,7 @@
 //! sorted by layer pair). No CBLOCK yet - correctness first; klayout
 //! reads the plain stream fine and compression is a later knob.
 
-use crate::doc::{PolyRec, RectRec, Rep, TextRec};
+use crate::doc::{PathRec, PolyRec, RectRec, Rep, TextRec};
 use crate::{OasisError, Result};
 
 pub struct W {
@@ -199,6 +199,7 @@ pub struct WCell<'a> {
     pub name: String,
     pub rects: &'a [RectRec],
     pub polys: &'a [PolyRec],
+    pub paths: &'a [PathRec],
     /// labels (skeleton only - band tiles stay text-free)
     pub texts: &'a [TextRec],
     /// (target cell name, x, y, rot, flip, rep)
@@ -285,6 +286,38 @@ pub fn write_tree(cells: &[WCell], unit: f64) -> Result<Vec<u8>> {
             b.sint(ay);
             if has_rep {
                 b.rep(&p.rep);
+            }
+        }
+        for pa in cell.paths {
+            // PATH id 22, info EWPXYRDL - everything explicit (E:
+            // scheme 3/3, W, P, X, Y, L, D), so no modal coupling
+            // with the sorted rect/poly stream above
+            b.uint(22);
+            let has_rep = !matches!(pa.rep, Rep::One);
+            let mut info: u8 =
+                0x80 | 0x40 | 0x20 | 0x10 | 0x08 | 0x02 | 0x01;
+            if has_rep {
+                info |= 0x04;
+            }
+            b.byte(info);
+            b.uint(pa.layer as u64);
+            b.uint(pa.dt as u64);
+            b.uint(pa.hw as u64);
+            b.uint(0b1111); // start & end: explicit values follow
+            b.sint(pa.es);
+            b.sint(pa.ee);
+            let (ax, ay) = pa.pts[0];
+            b.uint(4); // point list: g-deltas, open chain
+            b.uint(pa.pts.len() as u64 - 1);
+            let mut prev = (ax, ay);
+            for &(x, y) in &pa.pts[1..] {
+                b.g_delta(x - prev.0, y - prev.1);
+                prev = (x, y);
+            }
+            b.sint(ax);
+            b.sint(ay);
+            if has_rep {
+                b.rep(&pa.rep);
             }
         }
         for t in cell.texts {

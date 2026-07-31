@@ -16,8 +16,8 @@
 //! sidecar keeps the lot for search.
 
 use crate::hier::cell_bboxes;
-use crate::{rep_offsets, xf_rep, Xf};
-use floe_oasis::doc::{Doc, PolyRec, RectRec, Rep, TextRec};
+use crate::{path_bbox, rep_offsets, xf_rep, Xf};
+use floe_oasis::doc::{Doc, PathRec, PolyRec, RectRec, Rep, TextRec};
 use std::collections::HashMap;
 
 pub const SKEL_DETAIL_DT: u32 = 30_000;
@@ -29,6 +29,7 @@ const SKEL_CONTAINER_SKIP: u64 = 60_000;
 pub struct Skeleton {
     pub rects: Vec<RectRec>,
     pub polys: Vec<PolyRec>,
+    pub paths: Vec<PathRec>,
     pub texts: Vec<TextRec>,
     /// harvested shape members (meta skeleton.shapes)
     pub shapes: u64,
@@ -91,6 +92,20 @@ fn xf_poly(p: &PolyRec, xf: &Xf, dt: u32) -> PolyRec {
     }
 }
 
+fn xf_path(p: &PathRec, xf: &Xf, dt: u32) -> PathRec {
+    // orthogonal transform: half-width and the along-spine
+    // extensions are invariant, the spine and rep offsets rotate
+    PathRec {
+        layer: p.layer,
+        dt,
+        pts: p.pts.iter().map(|&(x, y)| xf.apply(x, y)).collect(),
+        hw: p.hw,
+        es: p.es,
+        ee: p.ee,
+        rep: xf_rep(&p.rep, xf),
+    }
+}
+
 /// klayout Box.center(): C++ integer division, truncation toward 0
 fn half(a: i64, b: i64) -> i64 {
     (a + b) / 2
@@ -108,6 +123,10 @@ fn container_sizes(doc: &Doc) -> Vec<HashMap<(u32, u32), u64>> {
             }
             for p in &c.polys {
                 *m.entry((p.layer, p.dt)).or_default() += p.rep.members();
+            }
+            for pa in &c.paths {
+                *m.entry((pa.layer, pa.dt)).or_default() +=
+                    pa.rep.members();
             }
             for t in &c.texts {
                 *m.entry((t.layer, t.dt)).or_default() += t.rep.members();
@@ -155,6 +174,19 @@ fn harvest(
         if w >= min_feat || h >= min_feat {
             sk.polys.push(xf_poly(p, xf, p.dt + dtoff));
             n += p.rep.members();
+        }
+    }
+    for pa in &cell.paths {
+        if csize[ci][&(pa.layer, pa.dt)] > SKEL_CONTAINER_SKIP {
+            continue;
+        }
+        if n >= SKEL_SHAPE_CAP {
+            return n;
+        }
+        let bb = path_bbox(&pa.pts, pa.hw, pa.es, pa.ee);
+        if bb.2 - bb.0 >= min_feat || bb.3 - bb.1 >= min_feat {
+            sk.paths.push(xf_path(pa, xf, pa.dt + dtoff));
+            n += pa.rep.members();
         }
     }
     if level >= SKEL_DETAIL_LEVELS {
@@ -381,6 +413,7 @@ pub fn build_skeleton(
     let mut sk = Skeleton {
         rects: Vec::new(),
         polys: Vec::new(),
+        paths: Vec::new(),
         texts: Vec::new(),
         shapes: 0,
         labels: 0,
@@ -399,6 +432,13 @@ pub fn build_skeleton(
         if w >= min_feat || h >= min_feat {
             sk.polys.push(p.clone());
             n += p.rep.members();
+        }
+    }
+    for pa in &topc.paths {
+        let bb = path_bbox(&pa.pts, pa.hw, pa.es, pa.ee);
+        if bb.2 - bb.0 >= min_feat || bb.3 - bb.1 >= min_feat {
+            sk.paths.push(pa.clone());
+            n += pa.rep.members();
         }
     }
     'insts: for pl in &topc.places {

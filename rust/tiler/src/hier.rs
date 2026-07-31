@@ -15,9 +15,9 @@
 
 use crate::{
     clip_box, clip_poly, div_ceil, div_floor, is_axis, norm_grid,
-    rep_offsets, xf_rep, Grid, Xf,
+    path_bbox, path_outline, rep_offsets, xf_rep, Grid, Xf,
 };
-use floe_oasis::doc::{Doc, PolyRec, RectRec, Rep};
+use floe_oasis::doc::{Doc, PathRec, PolyRec, RectRec, Rep};
 use std::collections::HashMap;
 
 const OUTER_CAP: u64 = 4_000_000;
@@ -85,6 +85,12 @@ fn cell_bboxes_opt(doc: &Doc, with_texts: bool) -> Vec<Option<Win>> {
             grow(x0 + ex.0.min(0), y0 + ey.0.min(0),
                  x1 + ex.1.max(0), y1 + ey.1.max(0));
         }
+        for pa in &cell.paths {
+            let b = path_bbox(&pa.pts, pa.hw, pa.es, pa.ee);
+            let (ex, ey) = rep_extent(&pa.rep);
+            grow(b.0 + ex.0.min(0), b.1 + ey.0.min(0),
+                 b.2 + ex.1.max(0), b.3 + ey.1.max(0));
+        }
         if with_texts {
             for t in &cell.texts {
                 let (ex, ey) = rep_extent(&t.rep);
@@ -149,6 +155,7 @@ fn rep_extent(rep: &Rep) -> ((i64, i64), (i64, i64)) {
 pub struct BandContent {
     pub rects: Vec<RectRec>,
     pub polys: Vec<PolyRec>,
+    pub paths: Vec<PathRec>,
 }
 
 pub struct VPlace {
@@ -200,6 +207,10 @@ impl TileTree {
                     for p in &band.polys {
                         *m.entry((p.layer, p.dt)).or_default() +=
                             p.rep.members();
+                    }
+                    for pa in &band.paths {
+                        *m.entry((pa.layer, pa.dt)).or_default() +=
+                            pa.rep.members();
                     }
                 }
                 m
@@ -271,6 +282,12 @@ impl TileTree {
                     let (ex, ey) = rep_extent(&p.rep);
                     grow(x0 + ex.0.min(0), y0 + ey.0.min(0),
                          x1 + ex.1.max(0), y1 + ey.1.max(0));
+                }
+                for pa in &band.paths {
+                    let b = path_bbox(&pa.pts, pa.hw, pa.es, pa.ee);
+                    let (ex, ey) = rep_extent(&pa.rep);
+                    grow(b.0 + ex.0.min(0), b.1 + ey.0.min(0),
+                         b.2 + ex.1.max(0), b.3 + ey.1.max(0));
                 }
             }
             for p in &vc.places {
@@ -456,7 +473,8 @@ impl<'a> HierTiler<'a> {
             for i in 0..n {
                 let vc = &tb_.cells[i];
                 let mut has = !vc.bands[k].rects.is_empty()
-                    || !vc.bands[k].polys.is_empty();
+                    || !vc.bands[k].polys.is_empty()
+                    || !vc.bands[k].paths.is_empty();
                 if !has {
                     for p in &vc.places {
                         if reach[k][p.var] {
@@ -517,6 +535,11 @@ impl<'a> TileBuild<'a> {
         }
         for rec in &cell.polys {
             members += route_poly_window(
+                self.t, rec, win, full, &mut bands,
+            )?;
+        }
+        for rec in &cell.paths {
+            members += route_path_window(
                 self.t, rec, win, full, &mut bands,
             )?;
         }
@@ -592,7 +615,11 @@ impl<'a> TileBuild<'a> {
             }
         }
         let any = places.iter().len() > 0
-            || bands.iter().any(|b| !b.rects.is_empty() || !b.polys.is_empty());
+            || bands.iter().any(|b| {
+                !b.rects.is_empty()
+                    || !b.polys.is_empty()
+                    || !b.paths.is_empty()
+            });
         let out = if any {
             let ord = if full {
                 0
@@ -846,6 +873,93 @@ fn route_poly_window(
                         .iter()
                         .map(|&(x, y)| (x + ox, y + oy))
                         .collect(),
+                    rep: sub,
+                });
+            }
+        }
+    }
+    Ok(members)
+}
+
+fn route_path_window(
+    t: &HierTiler,
+    rec: &PathRec,
+    win: Win,
+    win_is_full: bool,
+    bands: &mut [BandContent],
+) -> Result<u64, String> {
+    let b = path_bbox(&rec.pts, rec.hw, rec.es, rec.ee);
+    let mut members = 0u64;
+    for act in route_members(win, win_is_full, b, &rec.rep)? {
+        match act {
+            Act::Single { ox, oy, inside: true } => {
+                // klayout keeps a fully-covered path AS a path
+                let k = t.band_of(b.2 - b.0, b.3 - b.1);
+                bands[k].paths.push(PathRec {
+                    layer: rec.layer,
+                    dt: rec.dt,
+                    pts: rec
+                        .pts
+                        .iter()
+                        .map(|&(x, y)| (x + ox, y + oy))
+                        .collect(),
+                    hw: rec.hw,
+                    es: rec.es,
+                    ee: rec.ee,
+                    rep: Rep::One,
+                });
+                members += 1;
+            }
+            Act::Single { ox, oy, inside: false } => {
+                // klayout polygonizes a straddling path (measured:
+                // square-join outline, then the window clip)
+                let outline = path_outline(
+                    &rec.pts, rec.hw, rec.es, rec.ee,
+                )
+                .ok_or_else(|| {
+                    format!(
+                        "non-manhattan path on layer {}/{} clipped                          at a tile boundary: not supported yet",
+                        rec.layer, rec.dt
+                    )
+                })?;
+                let moved: Vec<(i64, i64)> = outline
+                    .iter()
+                    .map(|&(x, y)| (x + ox, y + oy))
+                    .collect();
+                let clipped = clip_poly(&moved, win);
+                if clipped.len() >= 3 {
+                    let (mut a0, mut b0, mut a1, mut b1) =
+                        (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+                    for &(x, y) in &clipped {
+                        a0 = a0.min(x);
+                        b0 = b0.min(y);
+                        a1 = a1.max(x);
+                        b1 = b1.max(y);
+                    }
+                    let k = t.band_of(a1 - a0, b1 - b0);
+                    bands[k].polys.push(PolyRec {
+                        layer: rec.layer,
+                        dt: rec.dt,
+                        pts: clipped,
+                        rep: Rep::One,
+                    });
+                    members += 1;
+                }
+            }
+            Act::Block { ox, oy, rep: sub } => {
+                let k = t.band_of(b.2 - b.0, b.3 - b.1);
+                members += sub.members();
+                bands[k].paths.push(PathRec {
+                    layer: rec.layer,
+                    dt: rec.dt,
+                    pts: rec
+                        .pts
+                        .iter()
+                        .map(|&(x, y)| (x + ox, y + oy))
+                        .collect(),
+                    hw: rec.hw,
+                    es: rec.es,
+                    ee: rec.ee,
                     rep: sub,
                 });
             }
