@@ -19,8 +19,30 @@ mod tcache;
 #[global_allocator]
 static ALLOC: tcache::TCache = tcache::TCache;
 
+fn version() -> String {
+    format!(
+        "floe-index {} {} ({})",
+        env!("CARGO_PKG_VERSION"),
+        env!("FLOE_GIT"),
+        if cfg!(target_env = "musl") {
+            "musl-static"
+        } else if cfg!(target_os = "linux") {
+            "gnu"
+        } else {
+            "native"
+        }
+    )
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.len() >= 2 && (args[1] == "--version" || args[1] == "-V") {
+        println!("{}", version());
+        return;
+    }
+    // every run states which build it is - multiple binaries
+    // circulate on the closed-network hosts
+    eprintln!("[{}]", version());
     if args.len() >= 3 && args[1] == "tile" {
         return tile_cmd(&args[2..]);
     }
