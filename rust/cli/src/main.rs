@@ -550,6 +550,7 @@ fn index_cmd(args: &[String]) {
     };
 
     let t_all = Instant::now();
+    eprintln!("[index] reading {}...", src);
     let data = std::fs::read(&src).expect("read src");
     let size = data.len() as u64;
     let mtime = std::fs::metadata(&src)
@@ -559,6 +560,11 @@ fn index_cmd(args: &[String]) {
         .map(|d| d.as_secs())
         .expect("mtime");
     let t_read = t_all.elapsed().as_secs_f64();
+    eprintln!(
+        "[index] read {:.2} GB in {:.1}s",
+        size as f64 / 1e9,
+        t_read
+    );
 
     let jobs = jobs.unwrap_or_else(|| {
         std::thread::available_parallelism()
@@ -574,6 +580,12 @@ fn index_cmd(args: &[String]) {
         }
     };
     let t_parse = t1.elapsed().as_secs_f64();
+    eprintln!(
+        "[index] parsed {} cells in {:.1}s ({} threads)",
+        doc.cells.len(),
+        t_parse,
+        jobs
+    );
     let dbu = 1.0 / doc.unit;
 
     // meta bbox and grid derive from the PRE-strip layout: klayout's
@@ -599,6 +611,13 @@ fn index_cmd(args: &[String]) {
         nx: n,
         ny: n,
     };
+    eprintln!(
+        "[index] grid {}x{}, tile {:.0} x {:.0} um",
+        grid.nx,
+        grid.ny,
+        grid.tw as f64 * dbu,
+        grid.th as f64 * dbu
+    );
     let edges: Vec<i64> = bands_um
         .iter()
         .map(|um| (um / dbu).round() as i64)
@@ -629,6 +648,8 @@ fn index_cmd(args: &[String]) {
         .flat_map(|r| (0..grid.nx).map(move |c| (r, c)))
         .collect();
     let next = std::sync::atomic::AtomicUsize::new(0);
+    let done = std::sync::atomic::AtomicUsize::new(0);
+    let beat_ms = std::sync::atomic::AtomicU64::new(0);
     let t2 = Instant::now();
     let mut all: Vec<TRes> = Vec::new();
     std::thread::scope(|sc| {
@@ -638,18 +659,36 @@ fn index_cmd(args: &[String]) {
             let doc = &doc;
             let outdir: &str = &outdir;
             let next = &next;
+            let done = &done;
+            let beat_ms = &beat_ms;
             let coords = &coords;
             hs.push(sc.spawn(move || -> Result<Vec<TRes>, String> {
+                use std::sync::atomic::Ordering::Relaxed;
                 let mut out = Vec::new();
                 loop {
-                    let i = next.fetch_add(
-                        1,
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
+                    let i = next.fetch_add(1, Relaxed);
                     if i >= coords.len() {
                         break;
                     }
                     let (r, c) = coords[i];
+                    // liveness: whichever worker crosses the 5s line
+                    // first prints one progress heartbeat (stderr -
+                    // stdout stays the machine-readable summary)
+                    let d = done.fetch_add(1, Relaxed) + 1;
+                    let el = t2.elapsed().as_millis() as u64;
+                    let last = beat_ms.load(Relaxed);
+                    if el.saturating_sub(last) >= 5_000
+                        && beat_ms
+                            .compare_exchange(last, el, Relaxed, Relaxed)
+                            .is_ok()
+                    {
+                        eprintln!(
+                            "[index] tiles {}/{} ({}s)",
+                            d,
+                            coords.len(),
+                            el / 1000
+                        );
+                    }
                     let tree = match hier.build_tile(r, c) {
                         Ok(Some(t)) => t,
                         Ok(None) => continue,
@@ -733,6 +772,13 @@ fn index_cmd(args: &[String]) {
     let dens_json: Vec<String> =
         all.iter().filter_map(|t| t.dens.clone()).collect();
     let t_tiles = t2.elapsed().as_secs_f64();
+    eprintln!(
+        "[index] {} band files ({} tiles) in {:.1}s; skeleton + \
+         text sidecar...",
+        files,
+        tiles_written,
+        t_tiles
+    );
 
     // --- skeleton + full-text sidecar ---
     let t3 = Instant::now();
@@ -777,6 +823,14 @@ fn index_cmd(args: &[String]) {
     std::fs::write(format!("{}/texts.tsv", outdir), tsv)
         .expect("write sidecar");
     let t_skel = t3.elapsed().as_secs_f64();
+    eprintln!(
+        "[index] skeleton {} shapes + {} labels, sidecar {} entries \
+         ({:.1}s)",
+        sk.shapes,
+        sk.labels,
+        sidecar.len(),
+        t_skel
+    );
     let thinned_json = if sk.thinned.is_empty() {
         String::new()
     } else {
@@ -902,6 +956,11 @@ fn index_cmd(args: &[String]) {
     );
     std::fs::write(format!("{}/meta.json", outdir), meta)
         .expect("write meta");
+    eprintln!(
+        "[index] done in {:.1}s -> {}",
+        t_all.elapsed().as_secs_f64(),
+        outdir
+    );
     println!(
         "{{\n  \"cells\": {},\n  \"members\": {},\n  \
          \"band_files\": {},\n  \"tiles\": {},\n  \
