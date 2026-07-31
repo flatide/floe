@@ -22,12 +22,14 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
-const NCLASS: usize = 9; // 16, 32, ... 4096
-const MAX_SMALL: usize = 4096;
+const NCLASS: usize = 12; // 16, 32, ... 32768
+const MAX_SMALL: usize = 32_768;
 const MAX_ALIGN: usize = 16;
 /// retained-bytes bound per class per thread (steady state reuse
-/// needs far less; this only caps the high-water mark)
-const CAP_BYTES: usize = 2 << 20;
+/// needs far less; this only caps the high-water mark). 12 classes
+/// x 4 MB = <=48 MB per thread worst case - vector growth up to
+/// 32 KB stays off the libc lock, which musl holds globally.
+const CAP_BYTES: usize = 4 << 20;
 
 #[inline]
 fn class_of(size: usize) -> usize {
