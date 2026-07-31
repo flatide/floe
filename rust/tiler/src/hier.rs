@@ -139,12 +139,17 @@ fn rep_extent(rep: &Rep) -> ((i64, i64), (i64, i64)) {
             )
         }
         Rep::Pts(p) => {
-            let xs: Vec<i64> = p.iter().map(|v| v.0).collect();
-            let ys: Vec<i64> = p.iter().map(|v| v.1).collect();
-            (
-                (*xs.iter().min().unwrap(), *xs.iter().max().unwrap()),
-                (*ys.iter().min().unwrap(), *ys.iter().max().unwrap()),
-            )
+            // single allocation-free pass: the routing pre-cull calls
+            // this per (record, window)
+            let (mut x0, mut x1, mut y0, mut y1) =
+                (i64::MAX, i64::MIN, i64::MAX, i64::MIN);
+            for &(x, y) in p {
+                x0 = x0.min(x);
+                x1 = x1.max(x);
+                y0 = y0.min(y);
+                y1 = y1.max(y);
+            }
+            ((x0, x1), (y0, y1))
         }
     }
 }
@@ -682,6 +687,29 @@ fn route_members(
                 return Ok(acts);
             }
         }
+    }
+    // fast reject on the whole-repetition extent: a flat dense file
+    // routes EVERY record against EVERY tile window, and without
+    // this the Pts / non-axis branches expanded their member lists
+    // (with allocations) for the 24 of 25 windows they never touch
+    {
+        let (ex, ey) = rep_extent(rep);
+        if b.0 + ex.0 >= win.2
+            || b.2 + ex.1 <= win.0
+            || b.1 + ey.0 >= win.3
+            || b.3 + ey.1 <= win.1
+        {
+            return Ok(acts);
+        }
+    }
+    if matches!(rep, Rep::One) {
+        // allocation-free single-member path (the bulk of flat files)
+        let inside = b.0 >= win.0
+            && b.1 >= win.1
+            && b.2 <= win.2
+            && b.3 <= win.3;
+        single!(0, 0, inside);
+        return Ok(acts);
     }
     match rep {
         Rep::Grid { na, nb, va, vb }

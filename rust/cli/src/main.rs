@@ -648,19 +648,52 @@ fn index_cmd(args: &[String]) {
         .flat_map(|r| (0..grid.nx).map(move |c| (r, c)))
         .collect();
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let done = std::sync::atomic::AtomicUsize::new(0);
-    let beat_ms = std::sync::atomic::AtomicU64::new(0);
+    let finished = std::sync::atomic::AtomicUsize::new(0);
+    // few tiles = long tiles: per-tile completion lines are the
+    // useful signal there and stay quiet on fine grids
+    let per_tile_log = coords.len() <= 64;
     let t2 = Instant::now();
     let mut all: Vec<TRes> = Vec::new();
     std::thread::scope(|sc| {
+        // liveness monitor: heartbeats must not depend on tiles
+        // COMPLETING (a 24-worker run on 25 heavy tiles once went
+        // silent for its whole tiling phase)
+        {
+            let finished = &finished;
+            let next = &next;
+            let total = coords.len();
+            sc.spawn(move || {
+                use std::sync::atomic::Ordering::Relaxed;
+                let mut last = Instant::now();
+                loop {
+                    std::thread::sleep(
+                        std::time::Duration::from_millis(200),
+                    );
+                    let f = finished.load(Relaxed);
+                    if f >= total {
+                        return;
+                    }
+                    if last.elapsed().as_secs_f64() >= 5.0 {
+                        last = Instant::now();
+                        let s = next.load(Relaxed).min(total);
+                        eprintln!(
+                            "[index] tiles {} done, {} building / {}                              ({}s)",
+                            f,
+                            s - f,
+                            total,
+                            t2.elapsed().as_secs()
+                        );
+                    }
+                }
+            });
+        }
         let mut hs = Vec::new();
         for _ in 0..jobs.max(1) {
             let hier = &hier;
             let doc = &doc;
             let outdir: &str = &outdir;
             let next = &next;
-            let done = &done;
-            let beat_ms = &beat_ms;
+            let finished = &finished;
             let coords = &coords;
             hs.push(sc.spawn(move || -> Result<Vec<TRes>, String> {
                 use std::sync::atomic::Ordering::Relaxed;
@@ -671,27 +704,13 @@ fn index_cmd(args: &[String]) {
                         break;
                     }
                     let (r, c) = coords[i];
-                    // liveness: whichever worker crosses the 5s line
-                    // first prints one progress heartbeat (stderr -
-                    // stdout stays the machine-readable summary)
-                    let d = done.fetch_add(1, Relaxed) + 1;
-                    let el = t2.elapsed().as_millis() as u64;
-                    let last = beat_ms.load(Relaxed);
-                    if el.saturating_sub(last) >= 5_000
-                        && beat_ms
-                            .compare_exchange(last, el, Relaxed, Relaxed)
-                            .is_ok()
-                    {
-                        eprintln!(
-                            "[index] tiles {}/{} ({}s)",
-                            d,
-                            coords.len(),
-                            el / 1000
-                        );
-                    }
+                    let tt = Instant::now();
                     let tree = match hier.build_tile(r, c) {
                         Ok(Some(t)) => t,
-                        Ok(None) => continue,
+                        Ok(None) => {
+                            finished.fetch_add(1, Relaxed);
+                            continue;
+                        }
                         Err(e) => {
                             return Err(format!(
                                 "tile {},{}: {}",
@@ -745,6 +764,16 @@ fn index_cmd(args: &[String]) {
                         lod,
                         dens,
                     });
+                    finished.fetch_add(1, Relaxed);
+                    if per_tile_log {
+                        eprintln!(
+                            "[index] tile {},{}: {} members ({:.1}s)",
+                            r,
+                            c,
+                            tree.members,
+                            tt.elapsed().as_secs_f64()
+                        );
+                    }
                 }
                 Ok(out)
             }));
