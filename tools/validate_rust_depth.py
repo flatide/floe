@@ -44,6 +44,9 @@ def level_counts(path):
             if ch not in level:
                 level[ch] = lv + 1
                 order.append(ch)
+    # drop pya refs before _destroy (lingering destructors touch
+    # freed layout memory - flaky segfaults)
+    cell = inst = None
     ly._destroy()
     return out, max(level.values())
 

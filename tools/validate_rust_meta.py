@@ -99,6 +99,10 @@ def density_from_bands(bdir, r, c, nb, max_levels):
                 cur = ed.get(ek)
                 if cur is None or n > cur[2]:
                     ed[ek] = [child, members, n]
+        # pya objects must not outlive _destroy(): a lingering
+        # CellInstArray destructor touches freed layout memory
+        # (observed as a flaky segfault in this very loop)
+        cell = inst = ia = None
         ly._destroy()
     if not found:
         return None

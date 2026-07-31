@@ -56,6 +56,10 @@ def skel_content(path):
                         texts[key + (t.string, p.x, p.y)] += 1
         if not reg.is_empty():
             regs[key] = reg
+    # drop pya refs (Shapes iterators, Text objects) before the
+    # caller destroys the layout - lingering destructors touch
+    # freed layout memory
+    sh = t = cell = top = tops = None
     return regs, texts, ly
 
 
