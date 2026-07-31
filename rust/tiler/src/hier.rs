@@ -616,6 +616,29 @@ impl<'a> TileBuild<'a> {
                             });
                         }
                     }
+                    Act::Strip { ox, oy, rep: sub } => {
+                        // boundary run: every member is fully inside
+                        // along the run axis, so all canonical
+                        // windows coincide - ONE clipped variant,
+                        // ONE placement with the run repetition
+                        let shifted = (
+                            win.0 - ox,
+                            win.1 - oy,
+                            win.2 - ox,
+                            win.3 - oy,
+                        );
+                        let wc = inv_window(&xf, shifted);
+                        if let Some(v) = self.variant(pl.cell, wc)? {
+                            places.push(VPlace {
+                                var: v,
+                                x: pl.x + ox,
+                                y: pl.y + oy,
+                                rot: pl.rot,
+                                flip: pl.flip,
+                                rep: sub,
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -660,6 +683,14 @@ pub enum Act {
     Single { ox: i64, oy: i64, inside: bool },
     /// interior sub-grid keeping a repetition record
     Block { ox: i64, oy: i64, rep: Rep },
+    /// boundary run whose members all clip IDENTICALLY modulo the
+    /// rep offsets (a column crossing a vertical tile line is fully
+    /// contained in y, so every member's clip is the first one's,
+    /// shifted): clip the base member once, then replicate. This is
+    /// what keeps die-spanning fine-pitch arrays from materializing
+    /// per boundary member (a 9.8 GB chip measured 140 GB of b3
+    /// tiles that way).
+    Strip { ox: i64, oy: i64, rep: Rep },
 }
 
 /// Plan a repetition's members against one window.
@@ -721,7 +752,8 @@ fn route_members(
                 full_range(b.0 + ax0, b.2 + ax0, dx, na, win.0, win.2);
             let (fj0, fj1) =
                 full_range(b.1 + ay0, b.3 + ay0, dy, nb, win.1, win.3);
-            if fi0 <= fi1 && fj0 <= fj1 {
+            let (fi_ok, fj_ok) = (fi0 <= fi1, fj0 <= fj1);
+            if fi_ok && fj_ok {
                 let sub = if fi0 == fi1 && fj0 == fj1 {
                     Rep::One
                 } else {
@@ -742,12 +774,60 @@ fn route_members(
                 overlap_range(b.0 + ax0, b.2 + ax0, dx, na, win.0, win.2);
             let (oj0, oj1) =
                 overlap_range(b.1 + ay0, b.3 + ay0, dy, nb, win.1, win.3);
+            let mut strip = |ox: i64, oy: i64, n: i64, v: (i64, i64),
+                             acts: &mut Vec<Act>| {
+                if n == 1 {
+                    acts.push(Act::Single { ox, oy, inside: false });
+                } else {
+                    acts.push(Act::Strip {
+                        ox,
+                        oy,
+                        rep: Rep::Grid {
+                            na: n as u64,
+                            nb: 1,
+                            va: v,
+                            vb: (0, 0),
+                        },
+                    });
+                }
+            };
             for i in oi0..=oi1 {
+                let i_full = fi_ok && i >= fi0 && i <= fi1;
+                // boundary column, members fully contained in y:
+                // identical clips shifted by dy
+                if fj_ok && !i_full {
+                    strip(
+                        ax0 + i * dx,
+                        ay0 + fj0 * dy,
+                        fj1 - fj0 + 1,
+                        (0, dy),
+                        &mut acts,
+                    );
+                }
+                // corners: neither axis fully contained
                 for j in oj0..=oj1 {
-                    if i >= fi0 && i <= fi1 && j >= fj0 && j <= fj1 {
+                    if fj_ok && j >= fj0 && j <= fj1 {
                         continue;
                     }
+                    if i_full {
+                        continue; // handled by the row strips below
+                    }
                     single!(ax0 + i * dx, ay0 + j * dy, false);
+                }
+            }
+            // boundary rows, members fully contained in x
+            if fi_ok {
+                for j in oj0..=oj1 {
+                    if fj_ok && j >= fj0 && j <= fj1 {
+                        continue;
+                    }
+                    strip(
+                        ax0 + fi0 * dx,
+                        ay0 + j * dy,
+                        fi1 - fi0 + 1,
+                        (dx, 0),
+                        &mut acts,
+                    );
                 }
             }
             Ok(acts)
@@ -856,6 +936,28 @@ fn route_rect_window(
                     ..*rec
                 });
             }
+            Act::Strip { ox, oy, rep: sub } => {
+                // all strip members clip identically modulo offsets
+                let (cx0, cy0, cx1, cy1) = clip_box(
+                    b.0 + ox,
+                    b.1 + oy,
+                    b.2 + ox,
+                    b.3 + oy,
+                    win,
+                );
+                if cx1 > cx0 && cy1 > cy0 {
+                    let k = t.band_of(cx1 - cx0, cy1 - cy0);
+                    members += sub.members();
+                    bands[k].rects.push(RectRec {
+                        x: cx0,
+                        y: cy0,
+                        w: cx1 - cx0,
+                        h: cy1 - cy0,
+                        rep: sub,
+                        ..*rec
+                    });
+                }
+            }
         }
     }
     Ok(members)
@@ -932,6 +1034,32 @@ fn route_poly_window(
                         .collect(),
                     rep: sub,
                 });
+            }
+            Act::Strip { ox, oy, rep: sub } => {
+                let moved: Vec<(i64, i64)> = rec
+                    .pts
+                    .iter()
+                    .map(|&(x, y)| (x + ox, y + oy))
+                    .collect();
+                let clipped = clip_poly(&moved, win);
+                if clipped.len() >= 3 {
+                    let (mut a0, mut b0, mut a1, mut b1) =
+                        (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+                    for &(x, y) in &clipped {
+                        a0 = a0.min(x);
+                        b0 = b0.min(y);
+                        a1 = a1.max(x);
+                        b1 = b1.max(y);
+                    }
+                    let k = t.band_of(a1 - a0, b1 - b0);
+                    members += sub.members();
+                    bands[k].polys.push(PolyRec {
+                        layer: rec.layer,
+                        dt: rec.dt,
+                        pts: clipped,
+                        rep: sub,
+                    });
+                }
             }
         }
     }
@@ -1019,6 +1147,41 @@ fn route_path_window(
                     ee: rec.ee,
                     rep: sub,
                 });
+            }
+            Act::Strip { ox, oy, rep: sub } => {
+                let outline = path_outline(
+                    &rec.pts, rec.hw, rec.es, rec.ee,
+                )
+                .ok_or_else(|| {
+                    format!(
+                        "non-manhattan path on layer {}/{} clipped \
+                         at a tile boundary: not supported yet",
+                        rec.layer, rec.dt
+                    )
+                })?;
+                let moved: Vec<(i64, i64)> = outline
+                    .iter()
+                    .map(|&(x, y)| (x + ox, y + oy))
+                    .collect();
+                let clipped = clip_poly(&moved, win);
+                if clipped.len() >= 3 {
+                    let (mut a0, mut b0, mut a1, mut b1) =
+                        (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+                    for &(x, y) in &clipped {
+                        a0 = a0.min(x);
+                        b0 = b0.min(y);
+                        a1 = a1.max(x);
+                        b1 = b1.max(y);
+                    }
+                    let k = t.band_of(a1 - a0, b1 - b0);
+                    members += sub.members();
+                    bands[k].polys.push(PolyRec {
+                        layer: rec.layer,
+                        dt: rec.dt,
+                        pts: clipped,
+                        rep: sub,
+                    });
+                }
             }
         }
     }

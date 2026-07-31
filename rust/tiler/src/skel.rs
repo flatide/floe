@@ -106,6 +106,25 @@ fn xf_path(p: &PathRec, xf: &Xf, dt: u32) -> PathRec {
     }
 }
 
+/// first k members of a repetition (rep_offsets order) - the
+/// skeleton cap used to be enforced at record granularity, and one
+/// die-wide repetition blew straight through it (a 9.8 GB chip
+/// reported 8.49M skeleton shapes against the 300k budget)
+fn take_members(rep: &Rep, k: u64) -> Rep {
+    if k >= rep.members() {
+        return rep.clone();
+    }
+    if k <= 1 {
+        return Rep::One;
+    }
+    Rep::Pts(
+        rep_offsets(rep)
+            .into_iter()
+            .take(k as usize)
+            .collect(),
+    )
+}
+
 /// klayout Box.center(): C++ integer division, truncation toward 0
 fn half(a: i64, b: i64) -> i64 {
     (a + b) / 2
@@ -159,8 +178,11 @@ fn harvest(
             return n;
         }
         if r.w >= min_feat || r.h >= min_feat {
-            sk.rects.push(xf_rect(r, xf, r.dt + dtoff));
-            n += r.rep.members();
+            let take = (SKEL_SHAPE_CAP - n).min(r.rep.members());
+            let mut t = xf_rect(r, xf, r.dt + dtoff);
+            t.rep = xf_rep(&take_members(&r.rep, take), xf);
+            sk.rects.push(t);
+            n += take;
         }
     }
     for p in &cell.polys {
@@ -172,8 +194,11 @@ fn harvest(
         }
         let (w, h) = poly_wh(p);
         if w >= min_feat || h >= min_feat {
-            sk.polys.push(xf_poly(p, xf, p.dt + dtoff));
-            n += p.rep.members();
+            let take = (SKEL_SHAPE_CAP - n).min(p.rep.members());
+            let mut t = xf_poly(p, xf, p.dt + dtoff);
+            t.rep = xf_rep(&take_members(&p.rep, take), xf);
+            sk.polys.push(t);
+            n += take;
         }
     }
     for pa in &cell.paths {
@@ -185,8 +210,11 @@ fn harvest(
         }
         let bb = path_bbox(&pa.pts, pa.hw, pa.es, pa.ee);
         if bb.2 - bb.0 >= min_feat || bb.3 - bb.1 >= min_feat {
-            sk.paths.push(xf_path(pa, xf, pa.dt + dtoff));
-            n += pa.rep.members();
+            let take = (SKEL_SHAPE_CAP - n).min(pa.rep.members());
+            let mut t = xf_path(pa, xf, pa.dt + dtoff);
+            t.rep = xf_rep(&take_members(&pa.rep, take), xf);
+            sk.paths.push(t);
+            n += take;
         }
     }
     if level >= SKEL_DETAIL_LEVELS {
@@ -422,23 +450,41 @@ pub fn build_skeleton(
     let mut n = 0u64;
     let topc = &doc.cells[doc.top];
     for r in &topc.rects {
+        if n >= SKEL_SHAPE_CAP {
+            break;
+        }
         if r.w >= min_feat || r.h >= min_feat {
-            sk.rects.push(r.clone());
-            n += r.rep.members();
+            let take = (SKEL_SHAPE_CAP - n).min(r.rep.members());
+            let mut t = r.clone();
+            t.rep = take_members(&r.rep, take);
+            sk.rects.push(t);
+            n += take;
         }
     }
     for p in &topc.polys {
+        if n >= SKEL_SHAPE_CAP {
+            break;
+        }
         let (w, h) = poly_wh(p);
         if w >= min_feat || h >= min_feat {
-            sk.polys.push(p.clone());
-            n += p.rep.members();
+            let take = (SKEL_SHAPE_CAP - n).min(p.rep.members());
+            let mut t = p.clone();
+            t.rep = take_members(&p.rep, take);
+            sk.polys.push(t);
+            n += take;
         }
     }
     for pa in &topc.paths {
+        if n >= SKEL_SHAPE_CAP {
+            break;
+        }
         let bb = path_bbox(&pa.pts, pa.hw, pa.es, pa.ee);
         if bb.2 - bb.0 >= min_feat || bb.3 - bb.1 >= min_feat {
-            sk.paths.push(pa.clone());
-            n += pa.rep.members();
+            let take = (SKEL_SHAPE_CAP - n).min(pa.rep.members());
+            let mut t = pa.clone();
+            t.rep = take_members(&pa.rep, take);
+            sk.paths.push(t);
+            n += take;
         }
     }
     'insts: for pl in &topc.places {

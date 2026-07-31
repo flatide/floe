@@ -849,6 +849,99 @@ fn parse_records(
     Ok(true)
 }
 
+/// Pts repetitions that are really regular grids (a common
+/// Calibre-ism: full grids written as OASIS point-list repetitions)
+/// convert to Grid form: the tiler then splits them ARITHMETICALLY
+/// per tile instead of walking every member per window, and the
+/// written subsets stay symbolic. Exact whole-set check only; any
+/// irregularity keeps the original point list. A 9.8 GB chip's
+/// finest band weighed 140 GB at ~1.9 B/member - the deflated cost
+/// of explicit offsets - before this.
+fn pts_to_grid(pts: &[(i64, i64)]) -> Option<Rep> {
+    let n = pts.len();
+    if n < 8 {
+        return None;
+    }
+    let mut v = pts.to_vec();
+    v.sort_unstable_by_key(|&(x, y)| (y, x));
+    // row structure: uniform row length, x-pitch, y-pitch, x-offset
+    let x0 = v[0].0;
+    let y0 = v[0].1;
+    let mut cols = 0usize;
+    while cols < n && v[cols].1 == y0 {
+        cols += 1;
+    }
+    if cols < 2 || n % cols != 0 {
+        return None;
+    }
+    let rows = n / cols;
+    if rows < 2 {
+        return None;
+    }
+    let dx = v[1].0 - v[0].0;
+    if dx <= 0 {
+        return None;
+    }
+    let dy = v[cols].1 - y0;
+    if dy <= 0 {
+        return None;
+    }
+    for r in 0..rows {
+        let base = r * cols;
+        if v[base].0 != x0 || v[base].1 != y0 + r as i64 * dy {
+            return None;
+        }
+        for c in 1..cols {
+            let p = v[base + c];
+            if p.0 != x0 + c as i64 * dx || p.1 != v[base].1 {
+                return None;
+            }
+        }
+    }
+    // rebase so the (0,0) member of the grid is the record anchor
+    // (pts lists always contain (0,0); a sorted grid starting off
+    // (0,0) would shift the geometry, so require the corner there)
+    if x0 != 0 || y0 != 0 {
+        return None;
+    }
+    Some(Rep::Grid {
+        na: cols as u64,
+        nb: rows as u64,
+        va: (dx, 0),
+        vb: (0, dy),
+    })
+}
+
+fn normalize_reps(doc: &mut Doc) {
+    let mut fixed = 0u64;
+    for cell in &mut doc.cells {
+        let mut fix = |rep: &mut Rep| {
+            if let Rep::Pts(p) = rep {
+                if let Some(g) = pts_to_grid(p) {
+                    *rep = g;
+                    fixed += 1;
+                }
+            }
+        };
+        for r in &mut cell.rects {
+            fix(&mut r.rep);
+        }
+        for p in &mut cell.polys {
+            fix(&mut p.rep);
+        }
+        for pa in &mut cell.paths {
+            fix(&mut pa.rep);
+        }
+        for t in &mut cell.texts {
+            fix(&mut t.rep);
+        }
+        for pl in &mut cell.places {
+            fix(&mut pl.rep);
+        }
+    }
+    let _ = fixed;
+}
+
 const MAGIC: &[u8] = b"%SEMI-OASIS\r\n";
 
 fn new_builder(implicit_ref: u64, implicit_tref: u64) -> Builder {
@@ -999,7 +1092,13 @@ pub fn parse_doc_parallel(data: &[u8], jobs: usize) -> Result<Doc> {
     finish(b)
 }
 
-fn finish(mut b: Builder) -> Result<Doc> {
+fn finish(b: Builder) -> Result<Doc> {
+    let mut doc = finish_inner(b)?;
+    normalize_reps(&mut doc);
+    Ok(doc)
+}
+
+fn finish_inner(mut b: Builder) -> Result<Doc> {
     // late name tables: rename placeholder cells created from refnums
     let ref_cells: Vec<(usize, String)> = b
         .cells
