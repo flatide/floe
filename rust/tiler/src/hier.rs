@@ -249,10 +249,19 @@ impl<'a> TileBuild<'a> {
         if bb.0 >= win.2 || bb.2 <= win.0 || bb.1 >= win.3 || bb.3 <= win.1 {
             return Ok(None); // fully outside
         }
-        // full containment -> canonical full-definition window
-        let full = bb.0 >= win.0 && bb.1 >= win.1 && bb.2 <= win.2
-            && bb.3 <= win.3;
-        let key = if full { (ci, bb) } else { (ci, win) };
+        // canonicalize on win INTERSECT bbox: windows that differ only
+        // outside the cell's extent clip identically, and klayout
+        // shares those variants - without this, equivalent variants
+        // duplicate and depth-level member counts run 2-3x high
+        // (caught by the valmini level validation)
+        let win = (
+            win.0.max(bb.0),
+            win.1.max(bb.1),
+            win.2.min(bb.2),
+            win.3.min(bb.3),
+        );
+        let full = win == bb;
+        let key = (ci, win);
         if let Some(&v) = self.memo.get(&key) {
             return Ok(v);
         }
