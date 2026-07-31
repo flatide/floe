@@ -29,7 +29,7 @@ def main(out):
     ly = db.Layout(True)
     ly.dbu = 0.001
 
-    L = {i: ly.layer(db.LayerInfo(i, 0)) for i in range(1, 8)}
+    L = {i: ly.layer(db.LayerInfo(i, 0)) for i in range(1, 9)}
     LM = ly.layer(db.LayerInfo(63, 63, "MARKER"))
 
     # LEAF1: dense fine grid (b3) + medium grid (b2) + b0 bar
@@ -94,6 +94,16 @@ def main(out):
         y = rng.randrange(0, 396_000)
         s = rng.choice((60, 200, 700, 1_800, 4_000, 12_000))
         sh.insert(db.Box(x, y, x + s, y + s))
+    # stress30's signature, shrunk: ONE huge fill array spanning the
+    # whole die (every tile line straddled) - a single record whose
+    # sub-grid split arithmetic must be exact at the million-member
+    # scale. Written via a 1-shape cell in a big CellInstArray so the
+    # OASIS writer emits it as one compact repetition.
+    mega = ly.create_cell("MEGAFILL")
+    mega.shapes(L[8]).insert(db.Box(0, 0, 60, 60))      # 0.06um -> b3
+    top.insert(db.CellInstArray(
+        mega.cell_index(), db.Trans(db.Vector(1_100, 1_300)),
+        db.Vector(260, 0), db.Vector(0, 260), 1_500, 1_500))
     shm = top.shapes(LM)
     for i in range(500):
         x = rng.randrange(0, 399_000)

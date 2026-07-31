@@ -15,7 +15,12 @@ SRC=${1:-}
 if [ -z "$SRC" ]; then
     SRC=${TMPDIR:-/tmp}/floe-valmini/valmini.oas
     mkdir -p "$(dirname "$SRC")"
-    [ -f "$SRC" ] || .venv/bin/python tools/gen_valmini.py "$SRC"
+    # regenerate when the generator changed (asset evolves with the
+    # milestones: new record kinds get added here first)
+    if [ ! -f "$SRC" ] || [ tools/gen_valmini.py -nt "$SRC" ]; then
+        rm -rf "$SRC" "$SRC.ice" "${SRC%.oas}_rust.ice"
+        .venv/bin/python tools/gen_valmini.py "$SRC"
+    fi
     [ -f "$SRC.ice/meta.json" ] || \
         PYTHONPATH=. .venv/bin/python -m floe index "$SRC" >/dev/null
 fi
