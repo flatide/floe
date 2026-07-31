@@ -23,7 +23,7 @@ fn main() {
             "usage: floe-index scan <file.oas> [jobs]\n       \
              floe-index tile <file.oas> <outdir> \
              --grid x0,y0,tw,th,nx,ny --edges e0,e1,e2\n       \
-             floe-index index <file.oas> [outdir] \
+             floe-index index <file.oas> [outdir] [--mem GB] \
              [--jobs N] [--tile-bytes N] [--bands um,um,um]"
         );
         std::process::exit(2);
@@ -465,6 +465,36 @@ fn layer_color(i: usize) -> String {
     )
 }
 
+/// /proc metrics (Linux); None elsewhere - the governor is inert
+/// on platforms without them
+fn proc_kv_gb(path: &str, key: &str) -> Option<f64> {
+    let s = std::fs::read_to_string(path).ok()?;
+    for line in s.lines() {
+        if let Some(rest) = line.strip_prefix(key) {
+            let kb: f64 = rest
+                .trim()
+                .trim_end_matches("kB")
+                .trim()
+                .parse()
+                .ok()?;
+            return Some(kb / 1e6);
+        }
+    }
+    None
+}
+
+fn mem_available_gb() -> Option<f64> {
+    proc_kv_gb("/proc/meminfo", "MemAvailable:")
+}
+
+fn mem_total_gb() -> Option<f64> {
+    proc_kv_gb("/proc/meminfo", "MemTotal:")
+}
+
+fn own_rss_gb() -> Option<f64> {
+    proc_kv_gb("/proc/self/status", "VmRSS:")
+}
+
 fn tsv_esc(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
@@ -509,11 +539,22 @@ fn index_cmd(args: &[String]) {
     let mut tile_bytes = TILE_TARGET_BYTES;
     let mut bands_um: Vec<f64> = BANDS_UM.to_vec();
     let mut jobs: Option<usize> = None;
+    let mut mem_cap: Option<f64> = None;
+    let mut mem_floor: Option<f64> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--jobs" => {
                 jobs = Some(args[i + 1].parse().expect("jobs"));
+                i += 2;
+            }
+            "--mem" => {
+                mem_cap = Some(args[i + 1].parse().expect("mem GB"));
+                i += 2;
+            }
+            "--mem-floor" => {
+                mem_floor =
+                    Some(args[i + 1].parse().expect("mem floor GB"));
                 i += 2;
             }
             "--tile-bytes" => {
@@ -647,8 +688,28 @@ fn index_cmd(args: &[String]) {
     let coords: Vec<(i64, i64)> = (0..grid.ny)
         .flat_map(|r| (0..grid.nx).map(move |c| (r, c)))
         .collect();
+    // memory governor: concurrent heavy tiles once swamped a host
+    // (24 workers made zero progress while 4 sailed - swap storm,
+    // the same failure the python indexer's governor was built for).
+    // Workers pause BEFORE building another tile while the box's
+    // MemAvailable sits under the floor or our own RSS tops --mem;
+    // at least one builder always runs.
+    let floor_gb: f64 = mem_floor.unwrap_or_else(|| {
+        mem_total_gb().map(|t| (0.05 * t).max(4.0)).unwrap_or(0.0)
+    });
+    if mem_available_gb().is_some() {
+        eprintln!(
+            "[index] governor: floor {:.1} GB free{}",
+            floor_gb,
+            mem_cap
+                .map(|c| format!(", --mem cap {:.0} GB", c))
+                .unwrap_or_default()
+        );
+    }
     let next = std::sync::atomic::AtomicUsize::new(0);
     let finished = std::sync::atomic::AtomicUsize::new(0);
+    let active = std::sync::atomic::AtomicUsize::new(0);
+    let waiting = std::sync::atomic::AtomicUsize::new(0);
     // few tiles = long tiles: per-tile completion lines are the
     // useful signal there and stay quiet on fine grids
     let per_tile_log = coords.len() <= 64;
@@ -661,6 +722,7 @@ fn index_cmd(args: &[String]) {
         {
             let finished = &finished;
             let next = &next;
+            let waiting = &waiting;
             let total = coords.len();
             sc.spawn(move || {
                 use std::sync::atomic::Ordering::Relaxed;
@@ -676,10 +738,17 @@ fn index_cmd(args: &[String]) {
                     if last.elapsed().as_secs_f64() >= 5.0 {
                         last = Instant::now();
                         let s = next.load(Relaxed).min(total);
+                        let w = waiting.load(Relaxed);
+                        let wtxt = if w > 0 {
+                            format!(", {} waiting (mem)", w)
+                        } else {
+                            String::new()
+                        };
                         eprintln!(
-                            "[index] tiles {} done, {} building / {}                              ({}s)",
+                            "[index] tiles {} done, {} building{} / {} ({}s)",
                             f,
-                            s - f,
+                            s - f - w,
+                            wtxt,
                             total,
                             t2.elapsed().as_secs()
                         );
@@ -694,6 +763,8 @@ fn index_cmd(args: &[String]) {
             let outdir: &str = &outdir;
             let next = &next;
             let finished = &finished;
+            let active = &active;
+            let waiting = &waiting;
             let coords = &coords;
             hs.push(sc.spawn(move || -> Result<Vec<TRes>, String> {
                 use std::sync::atomic::Ordering::Relaxed;
@@ -704,10 +775,44 @@ fn index_cmd(args: &[String]) {
                         break;
                     }
                     let (r, c) = coords[i];
+                    let mut waited = false;
+                    loop {
+                        if active.load(Relaxed) == 0 {
+                            break; // someone must always run
+                        }
+                        let mut hold = false;
+                        if let Some(av) = mem_available_gb() {
+                            if av < floor_gb {
+                                hold = true;
+                            }
+                        }
+                        if let (Some(cap), Some(rss)) =
+                            (mem_cap, own_rss_gb())
+                        {
+                            if rss > cap {
+                                hold = true;
+                            }
+                        }
+                        if !hold {
+                            break;
+                        }
+                        if !waited {
+                            waited = true;
+                            waiting.fetch_add(1, Relaxed);
+                        }
+                        std::thread::sleep(
+                            std::time::Duration::from_millis(300),
+                        );
+                    }
+                    if waited {
+                        waiting.fetch_sub(1, Relaxed);
+                    }
+                    active.fetch_add(1, Relaxed);
                     let tt = Instant::now();
                     let tree = match hier.build_tile(r, c) {
                         Ok(Some(t)) => t,
                         Ok(None) => {
+                            active.fetch_sub(1, Relaxed);
                             finished.fetch_add(1, Relaxed);
                             continue;
                         }
@@ -764,6 +869,7 @@ fn index_cmd(args: &[String]) {
                         lod,
                         dens,
                     });
+                    active.fetch_sub(1, Relaxed);
                     finished.fetch_add(1, Relaxed);
                     if per_tile_log {
                         eprintln!(

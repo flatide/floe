@@ -228,11 +228,14 @@ pub fn write_tree(cells: &[WCell], unit: f64) -> Result<Vec<u8>> {
         // output on band content at half the write CPU
         let mut b = W::new();
         let mut modal: Option<(u32, u32)> = None;
-        let mut rects = cell.rects.to_vec();
-        let mut polys = cell.polys.to_vec();
-        rects.sort_by_key(|r| (r.layer, r.dt));
-        polys.sort_by_key(|p| (p.layer, p.dt));
-        for r in &rects {
+        // stable index sort: same emission order as sorting clones,
+        // without deep-copying every record (pts Vecs included)
+        let mut ridx: Vec<usize> = (0..cell.rects.len()).collect();
+        ridx.sort_by_key(|&i| (cell.rects[i].layer, cell.rects[i].dt));
+        let mut pidx: Vec<usize> = (0..cell.polys.len()).collect();
+        pidx.sort_by_key(|&i| (cell.polys[i].layer, cell.polys[i].dt));
+        for &ri in &ridx {
+            let r = &cell.rects[ri];
             b.uint(20);
             let same = modal == Some((r.layer, r.dt));
             let has_rep = !matches!(r.rep, Rep::One);
@@ -257,7 +260,8 @@ pub fn write_tree(cells: &[WCell], unit: f64) -> Result<Vec<u8>> {
                 b.rep(&r.rep);
             }
         }
-        for p in &polys {
+        for &pi in &pidx {
+            let p = &cell.polys[pi];
             b.uint(21);
             let same = modal == Some((p.layer, p.dt));
             let has_rep = !matches!(p.rep, Rep::One);
