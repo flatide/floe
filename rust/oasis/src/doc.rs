@@ -14,7 +14,7 @@ use std::io::Read;
 
 /// Repetition, normalized to two forms that cover all 12 OASIS types
 /// without expansion beyond what the file itself spells out.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Rep {
     One,
     /// na x nb members at va/vb steps (axis vectors, dbu)

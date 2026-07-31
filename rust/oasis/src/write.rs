@@ -222,134 +222,270 @@ pub fn write_tree(cells: &[WCell], unit: f64) -> Result<Vec<u8>> {
     for cell in cells {
         w.uint(14); // CELL by name
         w.string(cell.name.as_bytes());
-        // body into a scratch buffer, then a CBLOCK when it pays:
-        // klayout-parity save (oasis_write_cblocks) at deflate
-        // level 1 - the python side measured level 1 == level 2
-        // output on band content at half the write CPU
+        // body into a scratch buffer, then a CBLOCK when it pays.
+        // Emission is MODAL like klayout's writer: XYRELATIVE with
+        // records sorted by (layer, dt, y, x) so coordinates become
+        // tiny deltas, W/H/layer reused via modal variables, and
+        // identical repetitions re-referenced as type 0. A 9.8 GB
+        // chip holds ~8.5e9 small grid records; explicit emission
+        // cost ~16 B/record after deflate against the source's
+        // ~1.2 B/record and produced a 175 GB cache.
         let mut b = W::new();
-        let mut modal: Option<(u32, u32)> = None;
-        // stable index sort: same emission order as sorting clones,
-        // without deep-copying every record (pts Vecs included)
+        b.uint(16); // XYRELATIVE
+        let mut m_ld: Option<(u32, u32)> = None;
+        let mut m_w: Option<i64> = None;
+        let mut m_h: Option<i64> = None;
+        let (mut m_x, mut m_y) = (0i64, 0i64); // geometry modal
+        let mut m_rep: Option<&Rep> = None;
+        let mut m_hw: Option<i64> = None;
         let mut ridx: Vec<usize> = (0..cell.rects.len()).collect();
-        ridx.sort_by_key(|&i| (cell.rects[i].layer, cell.rects[i].dt));
+        ridx.sort_by_key(|&i| {
+            let r = &cell.rects[i];
+            (r.layer, r.dt, r.y, r.x)
+        });
         let mut pidx: Vec<usize> = (0..cell.polys.len()).collect();
-        pidx.sort_by_key(|&i| (cell.polys[i].layer, cell.polys[i].dt));
+        pidx.sort_by_key(|&i| {
+            let p = &cell.polys[i];
+            (p.layer, p.dt, p.pts[0].1, p.pts[0].0)
+        });
         for &ri in &ridx {
             let r = &cell.rects[ri];
             b.uint(20);
-            let same = modal == Some((r.layer, r.dt));
+            let same_ld = m_ld == Some((r.layer, r.dt));
+            let sq = r.w == r.h;
+            let wbit = m_w != Some(r.w);
+            let hbit = !sq && m_h != Some(r.h);
+            let (dx, dy) = (r.x - m_x, r.y - m_y);
             let has_rep = !matches!(r.rep, Rep::One);
-            let mut info: u8 = 0x40 | 0x20 | 0x10 | 0x08;
-            if !same {
-                info |= 0x03;
+            let reuse = has_rep && m_rep == Some(&r.rep);
+            let mut info: u8 = 0;
+            if sq {
+                info |= 0x80;
+            }
+            if wbit {
+                info |= 0x40;
+            }
+            if hbit {
+                info |= 0x20;
+            }
+            if dx != 0 {
+                info |= 0x10;
+            }
+            if dy != 0 {
+                info |= 0x08;
             }
             if has_rep {
                 info |= 0x04;
             }
+            if !same_ld {
+                info |= 0x03;
+            }
             b.byte(info);
-            if !same {
+            if !same_ld {
                 b.uint(r.layer as u64);
                 b.uint(r.dt as u64);
-                modal = Some((r.layer, r.dt));
+                m_ld = Some((r.layer, r.dt));
             }
-            b.uint(r.w as u64);
-            b.uint(r.h as u64);
-            b.sint(r.x);
-            b.sint(r.y);
+            if wbit {
+                b.uint(r.w as u64);
+            }
+            if hbit {
+                b.uint(r.h as u64);
+            }
+            m_w = Some(r.w);
+            m_h = Some(r.h);
+            if dx != 0 {
+                b.sint(dx);
+            }
+            if dy != 0 {
+                b.sint(dy);
+            }
+            m_x = r.x;
+            m_y = r.y;
             if has_rep {
-                b.rep(&r.rep);
+                if reuse {
+                    b.uint(0);
+                } else {
+                    b.rep(&r.rep);
+                    m_rep = Some(&r.rep);
+                }
             }
         }
         for &pi in &pidx {
             let p = &cell.polys[pi];
             b.uint(21);
-            let same = modal == Some((p.layer, p.dt));
+            let same_ld = m_ld == Some((p.layer, p.dt));
+            let (ax, ay) = p.pts[0];
+            let (dx, dy) = (ax - m_x, ay - m_y);
             let has_rep = !matches!(p.rep, Rep::One);
-            let mut info: u8 = 0x20 | 0x10 | 0x08;
-            if !same {
-                info |= 0x03;
+            let reuse = has_rep && m_rep == Some(&p.rep);
+            let mut info: u8 = 0x20;
+            if dx != 0 {
+                info |= 0x10;
+            }
+            if dy != 0 {
+                info |= 0x08;
             }
             if has_rep {
                 info |= 0x04;
             }
+            if !same_ld {
+                info |= 0x03;
+            }
             b.byte(info);
-            if !same {
+            if !same_ld {
                 b.uint(p.layer as u64);
                 b.uint(p.dt as u64);
-                modal = Some((p.layer, p.dt));
+                m_ld = Some((p.layer, p.dt));
             }
-            let (ax, ay) = p.pts[0];
-            b.uint(4);
+            b.uint(4); // point list: g-deltas
             b.uint(p.pts.len() as u64 - 1);
             let mut prev = (ax, ay);
             for &(x, y) in &p.pts[1..] {
                 b.g_delta(x - prev.0, y - prev.1);
                 prev = (x, y);
             }
-            b.sint(ax);
-            b.sint(ay);
+            if dx != 0 {
+                b.sint(dx);
+            }
+            if dy != 0 {
+                b.sint(dy);
+            }
+            m_x = ax;
+            m_y = ay;
             if has_rep {
-                b.rep(&p.rep);
+                if reuse {
+                    b.uint(0);
+                } else {
+                    b.rep(&p.rep);
+                    m_rep = Some(&p.rep);
+                }
             }
         }
         for pa in cell.paths {
-            // PATH id 22, info EWPXYRDL - everything explicit (E:
-            // scheme 3/3, W, P, X, Y, L, D), so no modal coupling
-            // with the sorted rect/poly stream above
+            // PATH id 22 - extension scheme kept explicit (3/3),
+            // halfwidth and coordinates modal
             b.uint(22);
+            let same_ld = m_ld == Some((pa.layer, pa.dt));
+            let (ax, ay) = pa.pts[0];
+            let (dx, dy) = (ax - m_x, ay - m_y);
+            let wbit = m_hw != Some(pa.hw);
             let has_rep = !matches!(pa.rep, Rep::One);
-            let mut info: u8 =
-                0x80 | 0x40 | 0x20 | 0x10 | 0x08 | 0x02 | 0x01;
+            let reuse = has_rep && m_rep == Some(&pa.rep);
+            let mut info: u8 = 0x80 | 0x20;
+            if wbit {
+                info |= 0x40;
+            }
+            if dx != 0 {
+                info |= 0x10;
+            }
+            if dy != 0 {
+                info |= 0x08;
+            }
             if has_rep {
                 info |= 0x04;
             }
+            if !same_ld {
+                info |= 0x03;
+            }
             b.byte(info);
-            b.uint(pa.layer as u64);
-            b.uint(pa.dt as u64);
-            b.uint(pa.hw as u64);
+            if !same_ld {
+                b.uint(pa.layer as u64);
+                b.uint(pa.dt as u64);
+                m_ld = Some((pa.layer, pa.dt));
+            }
+            if wbit {
+                b.uint(pa.hw as u64);
+                m_hw = Some(pa.hw);
+            }
             b.uint(0b1111); // start & end: explicit values follow
             b.sint(pa.es);
             b.sint(pa.ee);
-            let (ax, ay) = pa.pts[0];
-            b.uint(4); // point list: g-deltas, open chain
+            b.uint(4);
             b.uint(pa.pts.len() as u64 - 1);
             let mut prev = (ax, ay);
             for &(x, y) in &pa.pts[1..] {
                 b.g_delta(x - prev.0, y - prev.1);
                 prev = (x, y);
             }
-            b.sint(ax);
-            b.sint(ay);
+            if dx != 0 {
+                b.sint(dx);
+            }
+            if dy != 0 {
+                b.sint(dy);
+            }
+            m_x = ax;
+            m_y = ay;
             if has_rep {
-                b.rep(&pa.rep);
+                if reuse {
+                    b.uint(0);
+                } else {
+                    b.rep(&pa.rep);
+                    m_rep = Some(&pa.rep);
+                }
             }
         }
+        let (mut t_x, mut t_y) = (0i64, 0i64); // text modal
+        let mut t_ld: Option<(u32, u32)> = None;
         for t in cell.texts {
-            // TEXT id 19, info 0CNXYRTL: C=1 explicit string (N=0
-            // inline a-string), X, Y, T=texttype, L=textlayer;
-            // no modality - label volume is skeleton-bounded
+            // TEXT id 19: explicit inline string, modal layer/coords
             b.uint(19);
+            let same_ld = t_ld == Some((t.layer, t.dt));
+            let (dx, dy) = (t.x - t_x, t.y - t_y);
             let has_rep = !matches!(t.rep, Rep::One);
-            let mut info: u8 = 0x40 | 0x10 | 0x08 | 0x02 | 0x01;
+            let reuse = has_rep && m_rep == Some(&t.rep);
+            let mut info: u8 = 0x40;
+            if dx != 0 {
+                info |= 0x10;
+            }
+            if dy != 0 {
+                info |= 0x08;
+            }
             if has_rep {
                 info |= 0x04;
             }
+            if !same_ld {
+                info |= 0x03;
+            }
             b.byte(info);
             b.string(t.s.as_bytes());
-            b.uint(t.layer as u64);
-            b.uint(t.dt as u64);
-            b.sint(t.x);
-            b.sint(t.y);
+            if !same_ld {
+                b.uint(t.layer as u64);
+                b.uint(t.dt as u64);
+                t_ld = Some((t.layer, t.dt));
+            }
+            if dx != 0 {
+                b.sint(dx);
+            }
+            if dy != 0 {
+                b.sint(dy);
+            }
+            t_x = t.x;
+            t_y = t.y;
             if has_rep {
-                b.rep(&t.rep);
+                if reuse {
+                    b.uint(0);
+                } else {
+                    b.rep(&t.rep);
+                    m_rep = Some(&t.rep);
+                }
             }
         }
+        let (mut p_x, mut p_y) = (0i64, 0i64); // placement modal
         for (tname, x, y, rot, flip, rep) in &cell.places {
             // PLACEMENT id 17, info CNXYRAAF: C=1 (explicit ref),
-            // N=0 (by name), X, Y, rot in AA, flip in F
+            // N=0 (by name), modal coords, modal repetition
             b.uint(17);
+            let (dx, dy) = (*x - p_x, *y - p_y);
             let has_rep = !matches!(rep, Rep::One);
-            let mut info: u8 = 0x80 | 0x20 | 0x10;
+            let reuse = has_rep && m_rep == Some(*rep);
+            let mut info: u8 = 0x80;
+            if dx != 0 {
+                info |= 0x20;
+            }
+            if dy != 0 {
+                info |= 0x10;
+            }
             if has_rep {
                 info |= 0x08;
             }
@@ -359,10 +495,21 @@ pub fn write_tree(cells: &[WCell], unit: f64) -> Result<Vec<u8>> {
             }
             b.byte(info);
             b.string(tname.as_bytes());
-            b.sint(*x);
-            b.sint(*y);
+            if dx != 0 {
+                b.sint(dx);
+            }
+            if dy != 0 {
+                b.sint(dy);
+            }
+            p_x = *x;
+            p_y = *y;
             if has_rep {
-                b.rep(rep);
+                if reuse {
+                    b.uint(0);
+                } else {
+                    b.rep(rep);
+                    m_rep = Some(rep);
+                }
             }
         }
         if b.out.len() >= 64 {
