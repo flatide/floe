@@ -10,6 +10,15 @@
 
 use std::time::Instant;
 
+mod tcache;
+
+// musl's global-lock malloc serialized every worker (MAIN09: flat
+// ~190s from 1 to 24 threads; glibc 60s); the thread cache removes
+// the lock from the hot path on every libc, so it is on everywhere
+// and the whole validation suite exercises it on every run
+#[global_allocator]
+static ALLOC: tcache::TCache = tcache::TCache;
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 3 && args[1] == "tile" {
