@@ -26,11 +26,25 @@ type Win = (i64, i64, i64, i64); // x0, y0, x1, y1 (closed-open)
 
 // ------------------------------------------------------------ cell bbox
 
-/// local-frame bbox per design cell, content + descendants + reps
+/// local-frame bbox per design cell, content + descendants + reps.
+/// Excludes texts: tiling windows mirror klayout clip AFTER the
+/// source text strip.
 pub fn cell_bboxes(doc: &Doc) -> Vec<Option<Win>> {
+    cell_bboxes_opt(doc, false)
+}
+
+/// like cell_bboxes but with text anchor points included (klayout's
+/// cell bbox counts texts as point boxes; the meta bbox and the grid
+/// derive from the PRE-strip layout, so they need this variant)
+pub fn cell_bboxes_full(doc: &Doc) -> Vec<Option<Win>> {
+    cell_bboxes_opt(doc, true)
+}
+
+fn cell_bboxes_opt(doc: &Doc, with_texts: bool) -> Vec<Option<Win>> {
     fn walk(
         doc: &Doc,
         ci: usize,
+        with_texts: bool,
         memo: &mut Vec<Option<Option<Win>>>,
     ) -> Option<Win> {
         if let Some(b) = memo[ci] {
@@ -71,10 +85,17 @@ pub fn cell_bboxes(doc: &Doc) -> Vec<Option<Win>> {
             grow(x0 + ex.0.min(0), y0 + ey.0.min(0),
                  x1 + ex.1.max(0), y1 + ey.1.max(0));
         }
+        if with_texts {
+            for t in &cell.texts {
+                let (ex, ey) = rep_extent(&t.rep);
+                grow(t.x + ex.0.min(0), t.y + ey.0.min(0),
+                     t.x + ex.1.max(0), t.y + ey.1.max(0));
+            }
+        }
         // avoid double-borrowing memo during child recursion
         let places = cell.places.clone();
         for pl in &places {
-            if let Some(cb) = walk(doc, pl.cell, memo) {
+            if let Some(cb) = walk(doc, pl.cell, with_texts, memo) {
                 let xf = Xf::place(pl.x, pl.y, pl.rot, pl.flip);
                 let (a, bb) = (xf.apply(cb.0, cb.1), xf.apply(cb.2, cb.3));
                 let (mut x0, mut x1) = (a.0.min(bb.0), a.0.max(bb.0));
@@ -93,7 +114,7 @@ pub fn cell_bboxes(doc: &Doc) -> Vec<Option<Win>> {
     }
     let mut memo = vec![None; doc.cells.len()];
     for ci in 0..doc.cells.len() {
-        walk(doc, ci, &mut memo);
+        walk(doc, ci, with_texts, &mut memo);
     }
     memo.into_iter().map(|m| m.unwrap()).collect()
 }
@@ -153,6 +174,223 @@ pub struct TileTree {
     /// reach[band][vcell] = subtree holds band content
     pub reach: Vec<Vec<bool>>,
     pub members: u64,
+}
+
+/// LOD whole-level cut: keep levels 0..=depth, ghost level depth+1.
+pub struct LodCut {
+    pub depth: usize,
+    pub kept: Vec<usize>,
+    pub ghosts: Vec<usize>,
+}
+
+impl TileTree {
+    /// per-vcell stored member counts per (layer, dt), all bands
+    /// together - klayout Shapes.size() counts array members, so this
+    /// is the count the LOD cap and the density table are defined on
+    pub fn cell_layer_members(&self) -> Vec<HashMap<(u32, u32), u64>> {
+        self.cells
+            .iter()
+            .map(|vc| {
+                let mut m: HashMap<(u32, u32), u64> = HashMap::new();
+                for band in &vc.bands {
+                    for r in &band.rects {
+                        *m.entry((r.layer, r.dt)).or_default() +=
+                            r.rep.members();
+                    }
+                    for p in &band.polys {
+                        *m.entry((p.layer, p.dt)).or_default() +=
+                            p.rep.members();
+                    }
+                }
+                m
+            })
+            .collect()
+    }
+
+    /// distinct vcells by first-seen BFS level from the root - the
+    /// level walk _tile_lod cuts on (variants sit at design depth)
+    pub fn levels(&self) -> Vec<Vec<usize>> {
+        let mut lvl = vec![usize::MAX; self.cells.len()];
+        lvl[self.root] = 0;
+        let mut levels = vec![vec![self.root]];
+        loop {
+            let mut nxt = Vec::new();
+            for &i in levels.last().unwrap() {
+                for p in &self.cells[i].places {
+                    if lvl[p.var] == usize::MAX {
+                        lvl[p.var] = levels.len();
+                        nxt.push(p.var);
+                    }
+                }
+            }
+            if nxt.is_empty() {
+                return levels;
+            }
+            levels.push(nxt);
+        }
+    }
+
+    /// subtree bbox per vcell in its own frame (own content, placed
+    /// children, repetition extents) - the GHOST outline klayout gets
+    /// from Cell.bbox(). Forward pass: vcells are created children
+    /// first, so child indexes are smaller than the parent's.
+    pub fn subtree_bboxes(&self) -> Vec<Win> {
+        let mut out: Vec<Win> = Vec::with_capacity(self.cells.len());
+        for vc in &self.cells {
+            let mut b: Option<Win> = None;
+            let mut grow = |x0: i64, y0: i64, x1: i64, y1: i64| {
+                b = Some(match b {
+                    None => (x0, y0, x1, y1),
+                    Some(o) => (
+                        o.0.min(x0),
+                        o.1.min(y0),
+                        o.2.max(x1),
+                        o.3.max(y1),
+                    ),
+                });
+            };
+            for band in &vc.bands {
+                for r in &band.rects {
+                    let (ex, ey) = rep_extent(&r.rep);
+                    grow(
+                        r.x + ex.0.min(0),
+                        r.y + ey.0.min(0),
+                        r.x + r.w + ex.1.max(0),
+                        r.y + r.h + ey.1.max(0),
+                    );
+                }
+                for p in &band.polys {
+                    let (mut x0, mut y0, mut x1, mut y1) =
+                        (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+                    for &(x, y) in &p.pts {
+                        x0 = x0.min(x);
+                        y0 = y0.min(y);
+                        x1 = x1.max(x);
+                        y1 = y1.max(y);
+                    }
+                    let (ex, ey) = rep_extent(&p.rep);
+                    grow(x0 + ex.0.min(0), y0 + ey.0.min(0),
+                         x1 + ex.1.max(0), y1 + ey.1.max(0));
+                }
+            }
+            for p in &vc.places {
+                let cb = out[p.var]; // child index < parent index
+                let xf = Xf::place(p.x, p.y, p.rot, p.flip);
+                let (a, b2) = (xf.apply(cb.0, cb.1), xf.apply(cb.2, cb.3));
+                let (mut x0, mut x1) = (a.0.min(b2.0), a.0.max(b2.0));
+                let (mut y0, mut y1) = (a.1.min(b2.1), a.1.max(b2.1));
+                let (ex, ey) = rep_extent(&p.rep); // offsets: parent frame
+                x0 += ex.0.min(0);
+                x1 += ex.1.max(0);
+                y0 += ey.0.min(0);
+                y1 += ey.1.max(0);
+                grow(x0, y0, x1, y1);
+            }
+            // a vcell only exists with content or a content-bearing child
+            out.push(b.expect("vcell without any extent"));
+        }
+        out
+    }
+
+    /// per-tile density table, mirroring cache._tile_density: walk
+    /// level-synchronously with instance multiplicity (a cell placed
+    /// at two depths counts at both, like the Python BFS); per layer
+    /// the CUMULATIVE member count through each depth, the last entry
+    /// folding everything deeper; "cells" = instances entering each
+    /// level. Returns (per-layer arrays sorted by key, cells) or None
+    /// when the tile has no shapes at all.
+    pub fn density(
+        &self,
+        max_levels: usize,
+    ) -> Option<(Vec<((u32, u32), Vec<u64>)>, Vec<u64>)> {
+        let per_cell = self.cell_layer_members();
+        let keys: Vec<(u32, u32)> = {
+            let mut s: Vec<(u32, u32)> = per_cell
+                .iter()
+                .flat_map(|m| m.keys().copied())
+                .collect();
+            s.sort_unstable();
+            s.dedup();
+            s
+        };
+        let mut totals: HashMap<(u32, u32), u64> =
+            keys.iter().map(|&k| (k, 0)).collect();
+        let mut arrs: HashMap<(u32, u32), Vec<u64>> =
+            keys.iter().map(|&k| (k, Vec::new())).collect();
+        let mut cells_arr: Vec<u64> = Vec::new();
+        let mut level: HashMap<usize, u64> = HashMap::new();
+        level.insert(self.root, 1);
+        let mut depth = 0usize;
+        while !level.is_empty() {
+            if depth <= max_levels {
+                cells_arr.push(level.values().sum());
+            }
+            let mut nxt: HashMap<usize, u64> = HashMap::new();
+            for (&i, &mult) in &level {
+                for (k, n) in &per_cell[i] {
+                    *totals.get_mut(k).unwrap() += n * mult;
+                }
+                for p in &self.cells[i].places {
+                    *nxt.entry(p.var).or_default() +=
+                        p.rep.members() * mult;
+                }
+            }
+            if depth < max_levels {
+                for k in &keys {
+                    arrs.get_mut(k).unwrap().push(totals[k]);
+                }
+            }
+            level = nxt;
+            depth += 1;
+        }
+        let mut out: Vec<((u32, u32), Vec<u64>)> = Vec::new();
+        for k in keys {
+            let mut arr = arrs.remove(&k).unwrap();
+            if let Some(last) = arr.last_mut() {
+                *last = totals[&k];
+            }
+            if totals[&k] > 0 {
+                out.push((k, arr));
+            }
+        }
+        if out.is_empty() {
+            None
+        } else {
+            Some((out, cells_arr))
+        }
+    }
+
+    /// whole-level LOD cut under a stored-member cap, mirroring
+    /// cache._tile_lod: keep levels while the running DISTINCT-cell
+    /// member total stays <= cap. None = everything fits (the full
+    /// tile doubles as its own LOD).
+    pub fn lod_cut(&self, cap: u64) -> Option<LodCut> {
+        let per_cell = self.cell_layer_members();
+        let totals: Vec<u64> = per_cell
+            .iter()
+            .map(|m| m.values().sum::<u64>())
+            .collect();
+        let levels = self.levels();
+        let count =
+            |lv: &[usize]| lv.iter().map(|&i| totals[i]).sum::<u64>();
+        let mut cut = 0usize;
+        let mut cum = count(&levels[0]);
+        while cut + 1 < levels.len() {
+            cum += count(&levels[cut + 1]);
+            if cum > cap {
+                break;
+            }
+            cut += 1;
+        }
+        if cut + 1 >= levels.len() {
+            return None;
+        }
+        Some(LodCut {
+            depth: cut,
+            kept: levels[..=cut].concat(),
+            ghosts: levels[cut + 1].clone(),
+        })
+    }
 }
 
 pub struct HierTiler<'a> {

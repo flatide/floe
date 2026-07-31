@@ -177,7 +177,11 @@ impl Tiler {
                 ));
             }
             let cell = &doc.cells[ci];
-            out.texts_dropped += cell.texts;
+            out.texts_dropped += cell
+                .texts
+                .iter()
+                .map(|t| t.rep.members())
+                .sum::<u64>();
             for r in &cell.rects {
                 self.emit_rect(r, &xf, &ctx, &mut out)?;
             }

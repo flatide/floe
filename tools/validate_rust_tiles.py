@@ -1,7 +1,7 @@
-"""Spike S2 validation: the Rust band partitioner vs the klayout-built
-cache. Runs `floe-index tile` with the grid/bands of an EXISTING .ice
-(so the geometry comparison is apples to apples), then for every
-(tile, band) present on either side:
+"""Band-file validation: the Rust indexer vs the klayout-built cache.
+Runs the full `floe-index index` build (its own grid choice must land
+on the same grid as the Python cache - validate_rust_meta.py checks
+that explicitly), then for every (tile, band) present on either side:
 
   - flatten both files to one Region per (layer, datatype)
   - XOR under merged semantics must be EMPTY (coverage-identical)
@@ -16,6 +16,7 @@ usage: python tools/validate_rust_tiles.py <src.oas> [outdir]
 import functools
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -50,26 +51,20 @@ def main():
     outdir = sys.argv[2] if len(sys.argv) > 2 else src + ".rustice"
     meta = json.load(open(src + ".ice/meta.json"))
     g = meta["grid"]
-    dbu = meta["dbu"]
-    edges = [int(round(um / dbu))
-             for um in meta["bands"]["thresholds_um"]]
-    grid_arg = "%d,%d,%d,%d,%d,%d" % (
-        g["x0"], g["y0"], g["tile_w"], g["tile_h"], g["nx"], g["ny"])
-    t0 = time.perf_counter()
-    r = subprocess.run(
-        [RUST, "tile", src, outdir, "--grid", grid_arg,
-         "--edges", ",".join(map(str, edges))],
-        capture_output=True, text=True)
+    if os.path.isdir(outdir):   # stale grids leave orphan tiles
+        shutil.rmtree(outdir)
+    r = subprocess.run([RUST, "index", src, outdir],
+                       capture_output=True, text=True)
     if r.returncode != 0:
-        print("rust tile FAILED:", r.stderr.strip())
+        print("rust index FAILED:", r.stderr.strip())
         sys.exit(1)
     stats = json.loads(r.stdout)
-    print("rust tile: %s files in %.1fs (parse %.1fs tile %.1fs "
-          "write %.1fs)" % (stats["band_files"], stats["total_s"],
-                            stats["parse_s"], stats["tile_s"],
-                            stats["write_s"]))
+    print("rust index: %s band files, grid %s in %.1fs (parse %.1fs "
+          "tiles %.1fs)" % (stats["band_files"], stats["grid"],
+                            stats["total_s"], stats["parse_s"],
+                            stats["tiles_s"]))
 
-    nb = len(edges) + 1
+    nb = len(meta["bands"]["thresholds_um"]) + 1
     bad = checked = skipped = 0
     t0 = time.perf_counter()
     for rr in range(g["ny"]):

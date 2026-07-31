@@ -70,19 +70,38 @@ pub struct PlaceRec {
     pub rep: Rep,
 }
 
+#[derive(Clone, Debug)]
+pub struct TextRec {
+    pub layer: u32,
+    pub dt: u32,
+    pub x: i64,
+    pub y: i64,
+    pub rep: Rep,
+    pub s: String,
+}
+
 #[derive(Default)]
 pub struct Cell {
     pub name: String,
     pub rects: Vec<RectRec>,
     pub polys: Vec<PolyRec>,
     pub places: Vec<PlaceRec>,
-    pub texts: u64, // stripped by design; counted for reporting
+    /// kept whole (tiles stay text-free; the skeleton/sidecar builds
+    /// draw from here) - text points also count into the layout bbox
+    pub texts: Vec<TextRec>,
 }
 
 pub struct Doc {
     pub unit: f64, // grid steps per micron (dbu = 1/unit um)
     pub cells: Vec<Cell>,
     pub top: usize,
+    /// (layer, datatype) pairs in file-appearance order (LAYERNAME
+    /// tables count as an appearance) - klayout's layer_indexes()
+    /// enumerates in this order, and the meta layer list / palette
+    /// assignment must match it
+    pub layer_order: Vec<(u32, u32)>,
+    /// names from LAYERNAME records with exact-value intervals
+    pub layer_names: HashMap<(u32, u32), String>,
 }
 
 // ------------------------------------------------------------ modal set
@@ -106,12 +125,19 @@ struct Modal {
     geo_h: Option<i64>,
     poly_pts: Option<Vec<(i64, i64)>>, // deltas from anchor
     place_cell: Option<PlaceTarget>,
+    text_string: Option<TextTarget>,
 }
 
 #[derive(Clone)]
 enum PlaceTarget {
     Ref(u64),
     Name(String),
+}
+
+#[derive(Clone)]
+enum TextTarget {
+    Ref(u64),
+    Str(String),
 }
 
 fn read_rep(c: &mut Cur, modal: &mut Option<Rep>) -> Result<Rep> {
@@ -295,9 +321,16 @@ struct Builder {
     by_name: HashMap<String, usize>,
     refnames: HashMap<u64, String>,
     implicit_ref: u64,
+    textstrings: HashMap<u64, String>,
+    implicit_tref: u64,
     cur: Option<usize>,
     // placements recorded with unresolved targets, fixed up at the end
     pending: Vec<(usize, usize, PlaceTarget)>,
+    // texts whose string is a TEXTSTRING refnum (table may come later)
+    pending_texts: Vec<(usize, usize, u64)>,
+    layer_order: Vec<(u32, u32)>,
+    layer_seen: HashMap<(u32, u32), ()>,
+    layer_names: HashMap<(u32, u32), String>,
     unit: f64,
 }
 
@@ -310,6 +343,12 @@ impl Builder {
         self.cells.push(Cell { name: name.to_string(), ..Cell::default() });
         self.by_name.insert(name.to_string(), i);
         i
+    }
+
+    fn reg_layer(&mut self, l: u32, d: u32) {
+        if self.layer_seen.insert((l, d), ()).is_none() {
+            self.layer_order.push((l, d));
+        }
     }
 }
 
@@ -354,10 +393,14 @@ fn parse_records(
                 b.refnames.insert(r, name);
             }
             5 | 6 => {
-                c.string()?;
-                if id == 6 {
-                    c.uint()?;
-                }
+                let sb = c.string()?.to_vec();
+                let s = utf8(c, &sb)?;
+                let r = if id == 6 { c.uint()? } else {
+                    let r = b.implicit_tref;
+                    b.implicit_tref += 1;
+                    r
+                };
+                b.textstrings.insert(r, s);
             }
             7 | 8 | 9 | 10 => {
                 c.string()?;
@@ -366,19 +409,33 @@ fn parse_records(
                 }
             }
             11 | 12 => {
-                c.string()?;
-                for _ in 0..2 {
+                // LAYERNAME: register exact (layer, datatype) pairs in
+                // appearance order + remember the name (klayout's
+                // layer table starts with these)
+                let sb = c.string()?.to_vec();
+                let name = utf8(c, &sb)?;
+                let mut exact: [Option<u64>; 2] = [None, None];
+                for e in &mut exact {
                     match c.uint()? {
                         0 => {}
-                        1 | 2 | 3 => {
+                        1 | 2 => {
                             c.uint()?;
                         }
+                        3 => *e = Some(c.uint()?),
                         4 => {
-                            c.uint()?;
-                            c.uint()?;
+                            let a = c.uint()?;
+                            let bb = c.uint()?;
+                            if a == bb {
+                                *e = Some(a);
+                            }
                         }
                         _ => return err(c.here(), "bad interval"),
                     }
+                }
+                if let (Some(l), Some(d)) = (exact[0], exact[1]) {
+                    let key = (l as u32, d as u32);
+                    b.reg_layer(key.0, key.1);
+                    b.layer_names.entry(key).or_insert(name);
                 }
             }
             13 | 14 => {
@@ -454,11 +511,14 @@ fn parse_records(
                     None => return err(c.here(), "text outside cell"),
                 };
                 if info & 0x40 != 0 {
-                    if info & 0x20 != 0 {
-                        c.uint()?;
+                    m.text_string = Some(if info & 0x20 != 0 {
+                        TextTarget::Ref(c.uint()?)
                     } else {
-                        c.string()?;
-                    }
+                        TextTarget::Str({
+                            let sb = c.string()?.to_vec();
+                            utf8(c, &sb)?
+                        })
+                    });
                 }
                 if info & 0x01 != 0 {
                     m.textlayer = Some(c.uint()?);
@@ -477,7 +537,37 @@ fn parse_records(
                 } else {
                     Rep::One
                 };
-                b.cells[cur].texts += rep.members();
+                let (l, d) = match (m.textlayer, m.texttype) {
+                    (Some(l), Some(d)) => (l as u32, d as u32),
+                    _ => return err(c.here(), "text before layer modal"),
+                };
+                b.reg_layer(l, d);
+                let s = match &m.text_string {
+                    Some(TextTarget::Str(s)) => s.clone(),
+                    Some(TextTarget::Ref(r)) => {
+                        match b.textstrings.get(r) {
+                            Some(s) => s.clone(),
+                            None => {
+                                // string table may come later
+                                b.pending_texts.push((
+                                    cur,
+                                    b.cells[cur].texts.len(),
+                                    *r,
+                                ));
+                                String::new()
+                            }
+                        }
+                    }
+                    None => return err(c.here(), "text without string"),
+                };
+                b.cells[cur].texts.push(TextRec {
+                    layer: l,
+                    dt: d,
+                    x: m.tx_x,
+                    y: m.tx_y,
+                    rep,
+                    s,
+                });
             }
             20 => {
                 let info = c.byte()?;
@@ -521,6 +611,7 @@ fn parse_records(
                     (Some(l), Some(d)) => (l as u32, d as u32),
                     _ => return err(c.here(), "rect before layer modal"),
                 };
+                b.reg_layer(l, d);
                 b.cells[cur].rects.push(RectRec {
                     layer: l,
                     dt: d,
@@ -561,6 +652,7 @@ fn parse_records(
                     (Some(l), Some(d)) => (l as u32, d as u32),
                     _ => return err(c.here(), "poly before layer modal"),
                 };
+                b.reg_layer(l, d);
                 let deltas = match &m.poly_pts {
                     Some(p) => p,
                     None => return err(c.here(), "poly without points"),
@@ -675,8 +767,14 @@ pub fn parse_doc(data: &[u8]) -> Result<Doc> {
         by_name: HashMap::new(),
         refnames: HashMap::new(),
         implicit_ref: 0,
+        textstrings: HashMap::new(),
+        implicit_tref: 0,
         cur: None,
         pending: Vec::new(),
+        pending_texts: Vec::new(),
+        layer_order: Vec::new(),
+        layer_seen: HashMap::new(),
+        layer_names: HashMap::new(),
         unit: 0.0,
     };
     parse_records(&mut c, &mut m, &mut b, 0)?;
@@ -697,6 +795,13 @@ pub fn parse_doc(data: &[u8]) -> Result<Doc> {
         b.by_name.remove(&b.cells[i].name);
         b.cells[i].name = name.clone();
         b.by_name.insert(name, i);
+    }
+    // late TEXTSTRING table: fill in referenced strings
+    for (cell, slot, r) in std::mem::take(&mut b.pending_texts) {
+        match b.textstrings.get(&r) {
+            Some(s) => b.cells[cell].texts[slot].s = s.clone(),
+            None => return err(0, "unresolved textstring ref"),
+        }
     }
     // resolve placements
     let pending = std::mem::take(&mut b.pending);
@@ -725,5 +830,11 @@ pub fn parse_doc(data: &[u8]) -> Result<Doc> {
     if tops.len() != 1 {
         return err(0, &format!("{} top cells (spike expects 1)", tops.len()));
     }
-    Ok(Doc { unit: b.unit, cells: b.cells, top: tops[0] })
+    Ok(Doc {
+        unit: b.unit,
+        cells: b.cells,
+        top: tops[0],
+        layer_order: b.layer_order,
+        layer_names: b.layer_names,
+    })
 }

@@ -104,6 +104,24 @@ def main(out):
     top.insert(db.CellInstArray(
         mega.cell_index(), db.Trans(db.Vector(1_100, 1_300)),
         db.Vector(260, 0), db.Vector(0, 260), 1_500, 1_500))
+    # DEEP chain: TOP -> DEEPA -> DEEPB where DEEPB holds a 500x500
+    # fine spray (0.06um at 0.3um pitch, 150um square) straddling the
+    # inner tile cross. The four central tiles blow past the LOD cap
+    # (50k stored shapes) at level 2, so tiles_lod exercises the
+    # depth-cut + GHOST-bbox path; the other tiles stay under the cap
+    # and validate the full-copy path.
+    deepb = ly.create_cell("DEEPB")
+    sh = deepb.shapes(L[8])
+    for i in range(500):
+        for j in range(500):
+            x, y = i * 300, j * 300
+            sh.insert(db.Box(x, y, x + 60, y + 60))     # 0.06um -> b3
+    deepa = ly.create_cell("DEEPA")
+    deepa.shapes(L[6]).insert(db.Box(-500, -500, 500, 500))
+    deepa.insert(db.CellInstArray(
+        deepb.cell_index(), db.Trans(db.Vector(0, 0))))
+    top.insert(db.CellInstArray(
+        deepa.cell_index(), db.Trans(db.Vector(130_000, 130_000))))
     shm = top.shapes(LM)
     for i in range(500):
         x = rng.randrange(0, 399_000)
