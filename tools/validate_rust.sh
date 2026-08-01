@@ -37,4 +37,5 @@ VOUT="${SRC%.oas}_rust.floe"
 rm -rf "$VOUT"
 rust/target/release/floe-index vfs "$SRC" "$VOUT" >/dev/null 2>&1
 .venv/bin/python tools/validate_vfs.py "$SRC" "$VOUT"
+.venv/bin/python tools/validate_vfs_render.py "$SRC" "$VOUT"
 echo "RUST VALIDATION: ALL OK ($SRC)"
