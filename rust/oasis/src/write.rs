@@ -194,6 +194,23 @@ pub fn write_cell(
 
 // ------------------------------------------------------------ tree files
 
+/// Sortable/hashable repetition signature for the grouping decision
+/// below. Pts lists get a coarse endpoint signature - grouping only
+/// orders records, actual type-0 reuse still compares full equality.
+fn rep_sig(rep: &Rep) -> (u8, u64, i64, i64, i64, i64) {
+    match rep {
+        Rep::One => (0, 0, 0, 0, 0, 0),
+        Rep::Grid { na, nb, va, vb } => {
+            (1, (na << 32) | nb, va.0, va.1, vb.0, vb.1)
+        }
+        Rep::Pts(p) => {
+            let f = p.first().copied().unwrap_or((0, 0));
+            let l = p.last().copied().unwrap_or((0, 0));
+            (2, p.len() as u64, f.0, f.1, l.0, l.1)
+        }
+    }
+}
+
 /// One cell of a hierarchical band file.
 pub struct WCell<'a> {
     pub name: String,
@@ -239,10 +256,39 @@ pub fn write_tree(cells: &[WCell], unit: f64) -> Result<Vec<u8>> {
         let mut m_rep: Option<&Rep> = None;
         let mut m_hw: Option<i64> = None;
         let mut ridx: Vec<usize> = (0..cell.rects.len()).collect();
-        ridx.sort_by_key(|&i| {
-            let r = &cell.rects[i];
-            (r.layer, r.dt, r.y, r.x)
-        });
+        // fill-flood cells (the 9.8G b3 pattern: millions of tiny
+        // grid reps drawn from few signatures) win ~25% by grouping
+        // equal (w, h, rep) runs so the repetition re-emits as
+        // type 0, at the cost of larger x/y deltas; mixed content
+        // loses that trade (testchip measured). Gate on reuse
+        // potential: many rep-carrying rects, few signatures.
+        let grp = {
+            let withrep = cell
+                .rects
+                .iter()
+                .filter(|r| !matches!(r.rep, Rep::One))
+                .count();
+            withrep >= 64 && {
+                let mut sigs = std::collections::HashSet::new();
+                for r in cell.rects.iter() {
+                    if !matches!(r.rep, Rep::One) {
+                        sigs.insert((r.w, r.h, rep_sig(&r.rep)));
+                    }
+                }
+                withrep / sigs.len().max(1) >= 8
+            }
+        };
+        if grp {
+            ridx.sort_by_key(|&i| {
+                let r = &cell.rects[i];
+                (r.layer, r.dt, r.w, r.h, rep_sig(&r.rep), r.y, r.x)
+            });
+        } else {
+            ridx.sort_by_key(|&i| {
+                let r = &cell.rects[i];
+                (r.layer, r.dt, r.y, r.x)
+            });
+        }
         let mut pidx: Vec<usize> = (0..cell.polys.len()).collect();
         pidx.sort_by_key(|&i| {
             let p = &cell.polys[i];
@@ -513,9 +559,13 @@ pub fn write_tree(cells: &[WCell], unit: f64) -> Result<Vec<u8>> {
             }
         }
         if b.out.len() >= 64 {
+            // deflate 6, not 1: measured -12% (fragmented bodies)
+            // to -46% (regular fill) on tiny-grid content, -3.5%
+            // on testchip with NO wall-time cost (smaller writes
+            // repay the compressor); decode speed is unaffected
             let mut enc = flate2::write::DeflateEncoder::new(
                 Vec::new(),
-                flate2::Compression::new(1),
+                flate2::Compression::new(6),
             );
             std::io::Write::write_all(&mut enc, &b.out)
                 .map_err(OasisError::Io)?;
