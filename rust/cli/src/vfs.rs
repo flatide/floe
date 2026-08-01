@@ -82,10 +82,178 @@ pub fn vfs_cmd(args: &[String]) {
     );
     std::fs::create_dir_all(&outdir).expect("mkdir outdir");
     build(&doc, size, mtime, &outdir);
+    emit_viewer_side(&doc, &src, size, mtime, &outdir);
     eprintln!(
         "[vfs] done in {:.1}s -> {}",
         t0.elapsed().as_secs_f64(),
         outdir
+    );
+}
+
+/// skeleton.oas + texts.tsv + meta.json: the viewer-facing trio the
+/// .ice used to carry - far view, text search, and the meta fields
+/// the GUI reads (dbu/bbox/grid/layers+color/src). grid is synthetic
+/// here (no tiles in the VFS cache): it only feeds the viewer's
+/// live-vs-skel span heuristic and stays on the .ice formula.
+fn emit_viewer_side(
+    doc: &Doc,
+    src: &str,
+    size: u64,
+    mtime: u64,
+    outdir: &str,
+) {
+    let t0 = std::time::Instant::now();
+    let entries = floe_tiler::skel::collect_all_texts(doc);
+    let sk = floe_tiler::skel::build_skeleton(
+        doc,
+        &entries,
+        floe_tiler::skel::SKEL_TEXT_CAP,
+    );
+    let skcell = WCell {
+        name: "SKEL_TOP".to_string(),
+        rects: &sk.rects,
+        polys: &sk.polys,
+        paths: &sk.paths,
+        texts: &sk.texts,
+        places: Vec::new(),
+    };
+    let bytes =
+        write_tree(&[skcell], doc.unit).expect("skeleton bytes");
+    std::fs::write(format!("{}/skeleton.oas", outdir), bytes)
+        .expect("write skeleton");
+    let mut sidecar: Vec<&floe_tiler::skel::TextEntry> =
+        entries.iter().collect();
+    sidecar.sort_by(|a, b| {
+        (a.layer, a.dt, &a.s, a.x, a.y)
+            .cmp(&(b.layer, b.dt, &b.s, b.x, b.y))
+    });
+    let mut tsv = String::new();
+    let mut side_members = 0u64;
+    for e in &sidecar {
+        side_members += e.members();
+        tsv.push_str(&format!(
+            "{}/{}\t{}\t{}\t{}\t{}\n",
+            e.layer,
+            e.dt,
+            e.x,
+            e.y,
+            crate::fmt_factors(&e.factors),
+            crate::tsv_esc(&e.s)
+        ));
+    }
+    std::fs::write(format!("{}/texts.tsv", outdir), tsv)
+        .expect("write sidecar");
+
+    // meta.json (VFS flavor)
+    let rbb = cell_bboxes_full(doc);
+    let bbox = rbb[doc.top].unwrap_or((0, 0, 0, 0));
+    let dbu = 1.0 / doc.unit;
+    let n = {
+        let t = (size as f64 / 6.0e6).sqrt().round_ties_even()
+            as i64;
+        t.clamp(4, 96)
+    };
+    let tw = ((bbox.2 - bbox.0) as f64 / n as f64).ceil() as i64;
+    let th = ((bbox.3 - bbox.1) as f64 / n as f64).ceil() as i64;
+    let mut stored: std::collections::HashMap<(u32, u32), u64> =
+        std::collections::HashMap::new();
+    for cell in &doc.cells {
+        for r in &cell.rects {
+            *stored.entry((r.layer, r.dt)).or_default() +=
+                r.rep.members();
+        }
+        for p in &cell.polys {
+            *stored.entry((p.layer, p.dt)).or_default() +=
+                p.rep.members();
+        }
+        for pa in &cell.paths {
+            *stored.entry((pa.layer, pa.dt)).or_default() +=
+                pa.rep.members();
+        }
+        for t in &cell.texts {
+            *stored.entry((t.layer, t.dt)).or_default() +=
+                t.rep.members();
+        }
+    }
+    let layers_json: Vec<String> = doc
+        .layer_order
+        .iter()
+        .enumerate()
+        .map(|(i, &(l, d))| {
+            let name = doc
+                .layer_names
+                .get(&(l, d))
+                .cloned()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| format!("{}/{}", l, d));
+            format!(
+                "{{\"layer\": {}, \"datatype\": {}, \"name\": \
+                 \"{}\", \"color\": \"{}\", \"stored_shapes\": {}}}",
+                l,
+                d,
+                crate::jesc(&name),
+                crate::layer_color(i),
+                stored.get(&(l, d)).copied().unwrap_or(0)
+            )
+        })
+        .collect();
+    let abs_src = if std::path::Path::new(src).is_absolute() {
+        src.to_string()
+    } else {
+        std::env::current_dir()
+            .expect("cwd")
+            .join(src)
+            .to_string_lossy()
+            .into_owned()
+    };
+    let meta = format!(
+        "{{\n\
+         \"version\": {},\n\
+         \"vfs\": 1,\n\
+         \"src\": {{\"path\": \"{}\", \"size\": {}, \
+         \"mtime\": {}}},\n\
+         \"dbu\": {},\n\
+         \"top_cell\": \"{}\",\n\
+         \"bbox\": [{}, {}, {}, {}],\n\
+         \"grid\": {{\"nx\": {}, \"ny\": {}, \"x0\": {}, \
+         \"y0\": {}, \"tile_w\": {}, \"tile_h\": {}}},\n\
+         \"layers\": [\n{}\n],\n\
+         \"skeleton\": {{\"file\": \"skeleton.oas\", \
+         \"shapes\": {}, \"texts\": {}}},\n\
+         \"texts_sidecar\": {{\"file\": \"texts.tsv\", \
+         \"entries\": {}, \"members\": {}}}\n\
+         }}\n",
+        crate::CACHE_VERSION,
+        crate::jesc(&abs_src),
+        size,
+        mtime,
+        dbu,
+        crate::jesc(&doc.cells[doc.top].name),
+        bbox.0,
+        bbox.1,
+        bbox.2,
+        bbox.3,
+        n,
+        n,
+        bbox.0,
+        bbox.1,
+        tw,
+        th,
+        layers_json.join(",\n"),
+        sk.shapes,
+        sk.labels,
+        sidecar.len(),
+        side_members,
+    );
+    std::fs::write(format!("{}/meta.json", outdir), meta)
+        .expect("write meta");
+    eprintln!(
+        "[vfs] skeleton {} shapes + {} labels, sidecar {} entries, \
+         meta ({:.1}s)",
+        sk.shapes,
+        sk.labels,
+        sidecar.len(),
+        t0.elapsed().as_secs_f64()
     );
 }
 
@@ -826,6 +994,7 @@ fn serve_one(
     let mut depth = u32::MAX;
     let mut layers: Option<Vec<String>> = None;
     let mut out: Option<String> = None;
+    let mut probe = false;
     for tok in line.split_whitespace() {
         let (k, val) = tok
             .split_once('=')
@@ -861,6 +1030,7 @@ fn serve_one(
                 }
             }
             "out" => out = Some(val.to_string()),
+            "mode" => probe = val == "probe",
             _ => return Err(format!("unknown key {}", k)),
         }
     }
@@ -869,7 +1039,17 @@ fn serve_one(
     let t0 = std::time::Instant::now();
     let req = make_req(v, view, px, cut, depth, layers.as_deref());
     let plan = v.plan(&req);
-    let upd = sess.apply(v, &plan, gen);
+    // probe = session-less exact query (pick/snap/clip): the delta
+    // carries EVERY planned page, the working set is untouched
+    let upd = if probe {
+        floe_vfs::Update {
+            new: plan.pages.clone(),
+            evict: Vec::new(),
+            mats: plan.mats.clone(),
+        }
+    } else {
+        sess.apply(v, &plan, gen)
+    };
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
     let delta_path = if upd.new.is_empty() {
         "-".to_string()

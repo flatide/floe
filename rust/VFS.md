@@ -130,6 +130,30 @@ projected 크기 < cut_px면 서브트리 통째 컬 → 인스턴스 BVH로 자
   (셀×레이어) 합 == 소스 scan 합 (무클립이라 정확 일치)
 - G6 rbbox/카운트 klayout 대조 (기존 검증 방법론)
 
+## V2 뷰어 통합 (진행 중)
+
+vfsd 프로토콜(라인 kv): 요청 `gen= view=x0,y0,x1,y1(um) px= cut=
+depth=full|N layers=all|a/b,.. out=` → 응답 `gen= pages= new=
+evict=이름,.. delta=경로|- placements=경로(tsv) bytes= plan_ms=
+resident_mb=`. `mode=probe`(예정) = 세션 무관 정밀(cut=0) 델타 —
+픽/스냅/클립용.
+
+뷰어 교체 지점 (조사 결과, 파일:라인은 2026-08-01 기준):
+- Cache.load(cache.py:247): .floe/meta.json(빌더가 신설 생성) 분기
+- Mosaic.ensure/_band_file(viewport.py:124/113): vfsd 델타
+  multi-read + 배치 목록 기반 WS_TOP 재구성으로 대체 (@t 태그 불필요
+  — 페이지 셀명 전역 유일; 트윈/밴드 키 소멸)
+- _svc_render의 밴드 선택/트윈/점진 단계(service.py:296-397):
+  vfsd가 대체 — newer()/latest 중단·코얼레싱은 유지
+- load_region(cache.py:1029)/snap/pick(service.py:126/176):
+  mode=probe 정밀 델타로
+- 스켈레톤 far view(scope="skel" 분기): 그대로 — .floe에도
+  skeleton.oas/texts.tsv를 빌더가 생성
+- 뷰어가 요구하는 meta 필드: dbu, bbox, grid(합성 — live/skel 분기
+  휴리스틱용), layers+color, src{size,mtime}, skeleton, vfs:1
+- vfsd 스폰: RenderWorker/_render_service(service.py:583/503)의
+  spawn 패턴에 subprocess.Popen 파이프로 편입
+
 ## V1에서 하지 않는 것
 
 스트리밍 인덱서(in-memory Doc 유지, D3), proxy/coverage, VFS
