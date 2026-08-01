@@ -32,4 +32,9 @@ OUT="${SRC%.oas}_rust.ice"
 .venv/bin/python tools/validate_rust_depth.py "$SRC" "$OUT"
 .venv/bin/python tools/validate_rust_meta.py "$SRC" "$OUT"
 .venv/bin/python tools/validate_rust_skel.py "$SRC" "$OUT"
+# VFS V1 (rust/VFS.md): build .floe and run the G5/G6 gates
+VOUT="${SRC%.oas}_rust.floe"
+rm -rf "$VOUT"
+rust/target/release/floe-index vfs "$SRC" "$VOUT" >/dev/null 2>&1
+.venv/bin/python tools/validate_vfs.py "$SRC" "$VOUT"
 echo "RUST VALIDATION: ALL OK ($SRC)"
