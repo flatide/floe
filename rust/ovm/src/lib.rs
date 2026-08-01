@@ -165,6 +165,7 @@ impl Builder {
         p16(out, 0);
         p64(out, recs);
         p64(out, mems);
+        assert_eq!(out.len() % LAYER_LEN, 0, "layer stride");
         self.n_layers += 1;
     }
 
@@ -219,6 +220,7 @@ impl Builder {
         pi64(out, va.1);
         pi64(out, vb.0);
         pi64(out, vb.1);
+        assert_eq!(out.len() % PLACE_LEN, 0, "place stride");
         self.n_places += 1;
         idx
     }
@@ -237,6 +239,7 @@ impl Builder {
         p32(out, first);
         p16(out, count);
         p16(out, leaf as u16);
+        assert_eq!(out.len() % BVH_LEN, 0, "bvh stride");
         self.n_bvh += 1;
         idx
     }
@@ -282,7 +285,7 @@ impl Builder {
         p64(out, members);
         p32(out, max_w);
         p32(out, max_h);
-        p32(out, 0);
+        assert_eq!(out.len() % PAGE_LEN, 0, "page stride");
         self.n_pages += 1;
     }
 
@@ -319,6 +322,7 @@ impl Builder {
         p32(out, lmask_direct);
         p32(out, lmask_rec);
         p64(out, rec_members);
+        assert_eq!(out.len() % CELL_LEN, 0, "cell stride");
         self.n_cells += 1;
     }
 
@@ -670,6 +674,7 @@ mod tests {
         let bb = BBox { x0: 0, y0: 0, x1: 100, y1: 50 };
         let n0 = b.bvh_node(&bb, p0 as u32, 2, true);
         b.page(1, 0, 0, &bb, 128, 10, 20, 3, 9, 60, 60);
+        b.page(1, 7, 1, &bb, 138, 11, 21, 4, 8, 61, 62);
         b.cell("LEAF", 0, &bb, &bb, 0, 0, 0, 0, 0, 0, m0, m1, 9);
         b.cell("TOP", 1, &bb, &bb, p0 as u32, 2, 0, 1, n0, 1, m0, m1, 18);
         let bytes = b.finish();
@@ -692,6 +697,12 @@ mod tests {
         assert!(n.leaf && n.count == 2);
         let pg = v.page(0);
         assert_eq!((pg.records, pg.members, pg.max_w), (3, 9, 60));
+        let pg1 = v.page(1);
+        assert_eq!(
+            (pg1.layer_idx, pg1.seq, pg1.file_off, pg1.records,
+             pg1.members, pg1.max_w, pg1.max_h),
+            (7, 1, 138, 4, 8, 61, 62)
+        );
         assert!(masks_intersect(v.bitset(c.lmask_direct), &[0b10, 0]));
     }
 }

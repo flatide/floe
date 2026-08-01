@@ -46,6 +46,7 @@ name = "floe-index"
 version = "0.2.2"
 dependencies = [
  "floe-oasis",
+ "floe-ovm",
  "floe-tiler",
 ]
 

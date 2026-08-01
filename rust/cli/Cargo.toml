@@ -8,3 +8,4 @@ description = "floe native indexer CLI (spike: scan/inventory)"
 [dependencies]
 floe-oasis = { path = "../oasis" }
 floe-tiler = { path = "../tiler" }
+floe-ovm = { path = "../ovm" }

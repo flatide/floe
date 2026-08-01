@@ -126,7 +126,7 @@ fn cell_bboxes_opt(doc: &Doc, with_texts: bool) -> Vec<Option<Win>> {
 }
 
 /// min/max offset extents of a repetition: ((min_x, max_x), (min_y, max_y))
-fn rep_extent(rep: &Rep) -> ((i64, i64), (i64, i64)) {
+pub fn rep_extent(rep: &Rep) -> ((i64, i64), (i64, i64)) {
     match rep {
         Rep::One => ((0, 0), (0, 0)),
         Rep::Grid { na, nb, va, vb } => {
