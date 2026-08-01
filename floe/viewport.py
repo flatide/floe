@@ -50,18 +50,26 @@ class VfsMosaic:
         self.cells = {}  # page cell name -> cell index
         self.design = {}  # page cell name -> design cell name
         self.frame_ci = None  # ephemeral cut-frame cell
+        self.label_ci = None  # ephemeral live-label cell
+        self._lgen = 0
 
-    def apply(self, delta_path, mats, evict, frames_path=None):
-        """Read new pages, drop evicted ones and the previous frame
-        cell, read the current frames, then rebuild the top's
-        instances to exactly the plan. True = layout changed."""
+    def apply(self, delta_path, mats, evict, frames_path=None,
+              labels=None):
+        """Read new pages, drop evicted ones and the previous frame/
+        label cells, read the current frames, build the current
+        labels, then rebuild the top's instances to exactly the plan.
+        labels: list of (layer, dt, x, y, string) to draw this view
+        (skeleton labels filtered/decluttered by the caller). True =
+        layout changed."""
         changed = False
-        # cut frames are per-view: drop the previous set first so no
-        # stale index survives into the eviction remap below
-        if self.frame_ci is not None:
-            self.ly.prune_cell(self.frame_ci, -1)
-            self.frame_ci = None
-            changed = True
+        # frames and labels are per-view: drop the previous ones first
+        # so no stale index survives into the eviction remap below
+        for attr in ("frame_ci", "label_ci"):
+            ci = getattr(self, attr)
+            if ci is not None:
+                self.ly.prune_cell(ci, -1)
+                setattr(self, attr, None)
+                changed = True
         if delta_path:
             self.ly.read(delta_path)
             for c in self.ly.each_cell():
@@ -86,6 +94,15 @@ class VfsMosaic:
                 if c.name.startswith("FRAMES_"):
                     self.frame_ci = c.cell_index()
             changed = True
+        if labels:
+            self._lgen += 1
+            lc = self.ly.create_cell("LABELS_%d" % self._lgen)
+            self.label_ci = lc.cell_index()
+            for (l, d, x, y, s) in labels:
+                li = self.ly.layer(db.LayerInfo(l, d))
+                lc.shapes(li).insert(
+                    db.Text(s, db.Trans(db.Vector(int(x), int(y)))))
+            changed = True
         self.top.clear_insts()
         for m in mats:
             nm, x, y, rot, flip, na, nb, va, vb, design = m
@@ -100,9 +117,9 @@ class VfsMosaic:
                     db.Vector(vb[0], vb[1]), na, nb))
             else:
                 self.top.insert(db.CellInstArray(ci, tr))
-        if self.frame_ci is not None:
-            self.top.insert(db.CellInstArray(
-                self.frame_ci, db.Trans()))
+        for ci in (self.frame_ci, self.label_ci):
+            if ci is not None:
+                self.top.insert(db.CellInstArray(ci, db.Trans()))
         return changed
 
 

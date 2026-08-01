@@ -48,6 +48,11 @@ PROGRESSIVE_MIN_BYTES = 8_000_000
 # skeleton). Tunable.
 LABEL_VIEW_BUDGET = 400
 
+# live-view label declutter: at most one label per this many screen
+# pixels (keeps labels non-overlapping as you zoom), capped at
+# LABEL_VIEW_BUDGET per frame
+LABEL_CELL_PX = 48
+
 
 def _bands_for_view(cache, x0, x1, w, cut_px=None):
     """(needed band indexes, cut size in dbu) for a view of w pixels
@@ -118,9 +123,11 @@ def _iter_global_polys(mosaic, layers_sel, box):
         it = ly.begin_shapes_touching(top_ci, li, box)
         while not it.at_end():
             cn = it.cell().name
-            if _TWIN_RE.match(cn) or cn.startswith("FRAMES"):
-                # merged twins / VFS cut-frames are draw-only stand-ins:
-                # their slabs must never win a snap/pick over real geometry
+            if _TWIN_RE.match(cn) or cn.startswith("FRAMES") \
+                    or cn.startswith("LABELS"):
+                # merged twins / VFS cut-frames / live labels are
+                # draw-only stand-ins: never win a snap/pick over
+                # real geometry
                 it.next()
                 continue
             sh = it.shape()
@@ -295,6 +302,64 @@ def _drawn_estimate(cache, mosaic, tiles, need, x0, y0, x1, y1):
             if n:
                 total += n * frac
     return int(total)
+
+
+def _load_skel_labels(skel_renderer):
+    """Skeleton labels for live-view reuse: (design_layer, dt, x, y,
+    string). Block names ride on (255,0); budget labels sit on the
+    level-1 twin (d + SKEL_DETAIL_DT) - map them back to the design
+    layer so they draw in that layer's color. The skeleton is a flat
+    cell, so this is a one-time scan of its text shapes."""
+    out = []
+    if skel_renderer is None:
+        return out
+    ly = skel_renderer.layout
+    top = skel_renderer.top
+    for li in ly.layer_indexes():
+        info = ly.get_info(li)
+        l, d = info.layer, info.datatype
+        if (l, d) == (255, 0):
+            dl, dd = 255, 0
+        elif cache_mod.SKEL_DETAIL_DT <= d < 2 * cache_mod.SKEL_DETAIL_DT:
+            dl, dd = l, d - cache_mod.SKEL_DETAIL_DT
+        else:
+            continue  # strap polygons / design geometry: no labels
+        for sh in top.shapes(li).each():
+            if sh.is_text():
+                t = sh.text
+                out.append((dl, dd, t.trans.disp.x,
+                            t.trans.disp.y, t.string))
+    return out
+
+
+def _view_labels(cache, x0, y0, x1, y1, w, h, visible):
+    """Skeleton labels inside the view, decluttered to one per
+    LABEL_CELL_PX screen cell (Calibre-style: non-overlapping,
+    appear as you zoom), capped at LABEL_VIEW_BUDGET. Respects the
+    visible-layer set (block names always allowed)."""
+    src = getattr(cache, "_live_labels", None)
+    if not src:
+        return []
+    vis = None if visible is None else {tuple(v) for v in visible}
+    sx = w / max(1e-9, x1 - x0)
+    sy = h / max(1e-9, y1 - y0)
+    seen = set()
+    out = []
+    for (l, d, x, y, s) in src:
+        if x < x0 or x > x1 or y < y0 or y > y1:
+            continue
+        if vis is not None and (l, d) != (255, 0) \
+                and (l, d) not in vis:
+            continue
+        key = (int((x - x0) * sx) // LABEL_CELL_PX,
+               int((y - y0) * sy) // LABEL_CELL_PX)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((l, d, x, y, s))
+        if len(out) >= LABEL_VIEW_BUDGET:
+            break
+    return out
 
 
 def _skel_text_fits(skel_renderer, x0, y0, x1, y1):
@@ -574,13 +639,20 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, res, newer,
                                  cut_px, layers, job.get("depth"))
     if newer():
         return
-    if mosaic.apply(r["delta"], r["mats"], r["evict"], r["frames"]):
+    # live-view labels: reuse the skeleton's (already-loaded) labels,
+    # filtered to the view and decluttered - so labels appear as you
+    # zoom in, Calibre-style, without any text in the pages
+    labels = _view_labels(cache, x0, y0, x1, y1, job["w"],
+                          job["h"], job["visible"])
+    if mosaic.apply(r["delta"], r["mats"], r["evict"], r["frames"],
+                    labels):
         renderer.refresh()
     t_load = time.perf_counter() - tl
     if newer():
         return
     td = time.perf_counter()
     renderer.set_abstract(job.get("abstract"))
+    renderer.set_text_visible(bool(labels))
     # the cut-frame outline layer is structural: always drawn, even
     # when the user has narrowed the visible-layer set
     vis_r = (None if job["visible"] is None
@@ -692,6 +764,10 @@ def _render_service(src, req, res, latest=None):
                                          hollow=((255, 0),))
             except Exception:
                 skel_renderer = None
+    # VFS live view reuses the skeleton's labels (already loaded, <=
+    # 50k budget) - no page text, no build/size cost; see _view_labels
+    if cache.meta.get("vfs"):
+        cache._live_labels = _load_skel_labels(skel_renderer)
     tmp = os.path.join(tempfile.gettempdir(), f"floe_gui_{os.getpid()}.png")
     try:
         while True:
