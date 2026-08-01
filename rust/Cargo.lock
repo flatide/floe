@@ -43,11 +43,12 @@ dependencies = [
 
 [[package]]
 name = "floe-index"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "floe-oasis",
  "floe-ovm",
  "floe-tiler",
+ "floe-vfs",
 ]
 
 [[package]]
@@ -69,6 +70,15 @@ name = "floe-tiler"
 version = "0.1.0"
 dependencies = [
  "floe-oasis",
+]
+
+[[package]]
+name = "floe-vfs"
+version = "0.1.0"
+dependencies = [
+ "floe-oasis",
+ "floe-ovm",
+ "floe-tiler",
 ]
 
 [[package]]

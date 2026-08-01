@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["oasis", "tiler", "ovm", "cli", "dbg"]
+members = ["oasis", "tiler", "ovm", "vfs", "cli", "dbg"]
 
 [workspace.package]
 edition = "2021"

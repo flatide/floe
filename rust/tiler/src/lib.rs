@@ -77,6 +77,21 @@ impl Xf {
         )
     }
 
+    /// back to place() parameters: (x, y, rot, flip). M = R(rot)*F,
+    /// so col0 = R*(1,0) names the rotation and det = +-1 the flip.
+    pub fn decompose(&self) -> (i64, i64, u8, bool) {
+        let rot = match (self.m[0][0], self.m[1][0]) {
+            (1, 0) => 0,
+            (0, 1) => 1,
+            (-1, 0) => 2,
+            (0, -1) => 3,
+            c => panic!("non-orthogonal Xf column {:?}", c),
+        };
+        let det = self.m[0][0] * self.m[1][1]
+            - self.m[0][1] * self.m[1][0];
+        (self.t.0, self.t.1, rot, det < 0)
+    }
+
     /// orthonormal +-1 matrix: inverse = transpose, t' = -M^T t
     pub fn invert(&self) -> Xf {
         let mt = [[self.m[0][0], self.m[1][0]], [self.m[0][1], self.m[1][1]]];

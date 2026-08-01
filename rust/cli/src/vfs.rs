@@ -12,7 +12,7 @@
 
 use floe_oasis::doc::{Doc, PathRec, PolyRec, RectRec, Rep};
 use floe_oasis::write::{write_tree, WCell};
-use floe_ovm::{BBox, Builder, Ovm};
+use floe_ovm::{BBox, Builder};
 use floe_tiler::hier::{cell_bboxes_full, rep_extent};
 use floe_tiler::{path_bbox, xf_rep, Xf};
 use std::io::Write;
@@ -565,8 +565,10 @@ fn emit_pages(
             _ => paths.push(cell.paths[r.idx as usize].clone()),
         }
     }
+    // unique per-page cell name: the working-set delta splices page
+    // bodies verbatim into one file, so names must never collide
     let wc = WCell {
-        name: "P".to_string(),
+        name: floe_ovm::page_cell_name(ci as u32, li, *seq),
         rects: &rects,
         polys: &polys,
         paths: &paths,
@@ -613,13 +615,17 @@ fn fmt_size(bytes: u64) -> String {
 
 // ------------------------------------------------------------- plan
 
-pub fn plan_cmd(args: &[String]) {
+fn parse_common(
+    args: &[String],
+) -> (String, Option<(f64, f64, f64, f64)>, f64, f64, u32,
+      Option<Vec<String>>, Vec<(String, String)>) {
     let mut dir: Option<String> = None;
-    let mut view: Option<(f64, f64, f64, f64)> = None;
+    let mut view = None;
     let mut px_per_um = 5.0f64;
     let mut cut_px = 2.0f64;
     let mut depth = u32::MAX;
     let mut layers: Option<Vec<String>> = None;
+    let mut rest: Vec<(String, String)> = Vec::new();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -641,7 +647,11 @@ pub fn plan_cmd(args: &[String]) {
                 i += 2;
             }
             "--depth" => {
-                depth = args[i + 1].parse().expect("depth");
+                depth = if args[i + 1] == "full" {
+                    u32::MAX
+                } else {
+                    args[i + 1].parse().expect("depth")
+                };
                 i += 2;
             }
             "--layers" => {
@@ -653,6 +663,13 @@ pub fn plan_cmd(args: &[String]) {
                 );
                 i += 2;
             }
+            a if a.starts_with("--") => {
+                rest.push((
+                    a.to_string(),
+                    args.get(i + 1).cloned().unwrap_or_default(),
+                ));
+                i += 2;
+            }
             a => {
                 if dir.is_none() {
                     dir = Some(a.to_string());
@@ -661,77 +678,73 @@ pub fn plan_cmd(args: &[String]) {
             }
         }
     }
-    let dir = dir.expect("ovm dir");
-    let v = Ovm::open(&format!("{}/design.ovm", dir))
-        .expect("open ovm");
-    let view = view.expect("--view required");
-    // um -> dbu
-    let s = v.unit;
-    let vb = BBox {
-        x0: (view.0 * s) as i64,
-        y0: (view.1 * s) as i64,
-        x1: (view.2 * s) as i64,
-        y1: (view.3 * s) as i64,
-    };
-    // visible layer bitset
-    let mut vis = vec![0u8; v.bs_width];
-    match &layers {
-        None => vis.iter_mut().for_each(|b| *b = 0xff),
-        Some(list) => {
-            for spec in list {
-                let mut hit = false;
-                for li in 0..v.n_layers {
-                    let lr = v.layer(li);
-                    let byname = lr.name == *spec;
-                    let bypair = format!("{}/{}", lr.layer, lr.dt)
-                        == *spec;
-                    if byname || bypair {
-                        floe_ovm::bit_set(&mut vis, li as usize);
-                        hit = true;
-                    }
-                }
-                assert!(hit, "layer {:?} not found", spec);
-            }
-        }
-    }
-    // cut threshold in dbu: features smaller than cut_px never
-    // reach a pixel at this scale
-    let cut_dbu = (cut_px / px_per_um * s) as i64;
+    (dir.expect("ovm dir"), view, px_per_um, cut_px, depth,
+     layers, rest)
+}
 
-    let t0 = std::time::Instant::now();
-    let mut st = PlanStats::default();
-    let mut pages: std::collections::HashSet<u32> =
-        std::collections::HashSet::new();
-    descend(
-        &v, v.top, &Xf::identity(), &vb, &vis, cut_dbu, depth, 0,
-        &mut pages, &mut st,
+fn make_req(
+    v: &floe_vfs::Vfs,
+    view: (f64, f64, f64, f64),
+    px_per_um: f64,
+    cut_px: f64,
+    depth: u32,
+    layers: Option<&[String]>,
+) -> floe_vfs::ViewReq {
+    let s = v.ovm.unit;
+    floe_vfs::ViewReq {
+        view: BBox {
+            x0: (view.0 * s) as i64,
+            y0: (view.1 * s) as i64,
+            x1: (view.2 * s) as i64,
+            y1: (view.3 * s) as i64,
+        },
+        cut_dbu: (cut_px / px_per_um * s) as i64,
+        vis: v.layer_mask(layers).expect("layers"),
+        depth,
+    }
+}
+
+pub fn plan_cmd(args: &[String]) {
+    let (dir, view, px, cut, depth, layers, _) =
+        parse_common(args);
+    let v = floe_vfs::Vfs::open(&dir).expect("open vfs");
+    let req = make_req(
+        &v,
+        view.expect("--view required"),
+        px,
+        cut,
+        depth,
+        layers.as_deref(),
     );
-    let mut cbytes = 0u64;
-    let mut ubytes = 0u64;
-    let mut records = 0u64;
-    let mut members = 0u64;
-    for &pi in &pages {
-        let p = v.page(pi);
+    let t0 = std::time::Instant::now();
+    let plan = v.plan(&req);
+    let (mut cbytes, mut ubytes) = (0u64, 0u64);
+    let (mut records, mut members) = (0u64, 0u64);
+    for &pi in &plan.pages {
+        let p = v.ovm.page(pi);
         cbytes += p.csize as u64;
         ubytes += p.usize_ as u64;
         records += p.records as u64;
         members += p.members;
     }
+    let st = &plan.stats;
     println!(
         "{{\n  \"pages\": {},\n  \"page_reads\": {},\n  \
          \"compressed_bytes\": {},\n  \"encoded_bytes\": {},\n  \
          \"records\": {},\n  \"members\": {},\n  \
+         \"placements\": {},\n  \
          \"visited_cells\": {},\n  \"visited_bvh\": {},\n  \
          \"culled_subtrees_size\": {},\n  \
          \"culled_subtrees_layer\": {},\n  \
          \"culled_pages_size\": {},\n  \"materializations\": {},\n  \
          \"plan_ms\": {:.2}\n}}",
-        pages.len(),
+        plan.pages.len(),
         st.page_reads,
         cbytes,
         ubytes,
         records,
         members,
+        plan.mats.len(),
         st.visited_cells,
         st.visited_bvh,
         st.cull_size,
@@ -742,247 +755,167 @@ pub fn plan_cmd(args: &[String]) {
     );
 }
 
-#[derive(Default)]
-struct PlanStats {
-    visited_cells: u64,
-    visited_bvh: u64,
-    cull_size: u64,
-    cull_layer: u64,
-    cull_page_size: u64,
-    page_reads: u64,
-    materializations: u64,
+// ------------------------------------------------------------- vfsd
+
+/// stdio daemon for the viewer render service. Line protocol:
+///   gen=1 view=x0,y0,x1,y1 px=5 cut=2 depth=full \
+///     layers=11/0,12/0 out=/tmp/dir
+/// response:
+///   gen=1 pages=N new=N evict=name,.. delta=path placements=path \
+///     bytes=N plan_ms=F resident_mb=F
+/// "quit" or EOF ends the loop. Delta/placement files land under
+/// out= and are the viewer's to delete after applying.
+pub fn vfsd_cmd(args: &[String]) {
+    let mut dir: Option<String> = None;
+    let mut budget_mb: u64 = 1024;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--budget-mb" => {
+                budget_mb = args[i + 1].parse().expect("budget");
+                i += 2;
+            }
+            a => {
+                if dir.is_none() {
+                    dir = Some(a.to_string());
+                }
+                i += 1;
+            }
+        }
+    }
+    let dir = dir.expect("ovm dir");
+    let v = floe_vfs::Vfs::open(&dir).expect("open vfs");
+    let mut sess = floe_vfs::Session::new(budget_mb << 20);
+    eprintln!(
+        "[vfsd] {} ({} cells, {} pages), budget {} MB",
+        dir, v.ovm.n_cells, v.ovm.n_pages, budget_mb
+    );
+    let stdin = std::io::stdin();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        use std::io::BufRead;
+        if stdin.lock().read_line(&mut line).unwrap_or(0) == 0 {
+            return;
+        }
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line == "quit" {
+            return;
+        }
+        match serve_one(&v, &mut sess, line) {
+            Ok(resp) => println!("{}", resp),
+            Err(e) => println!("error={}", e.replace(' ', "_")),
+        }
+        use std::io::Write as _;
+        std::io::stdout().flush().ok();
+    }
 }
 
-/// transform a cell-local bbox to parent frame
-fn xf_bbox(xf: &Xf, b: &BBox) -> BBox {
-    let a = xf.apply(b.x0, b.y0);
-    let c = xf.apply(b.x1, b.y1);
-    BBox {
-        x0: a.0.min(c.0),
-        y0: a.1.min(c.1),
-        x1: a.0.max(c.0),
-        y1: a.1.max(c.1),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn descend(
-    v: &Ovm,
-    ci: u32,
-    xf: &Xf, // cell -> world
-    view: &BBox,
-    vis: &[u8],
-    cut_dbu: i64,
-    depth_limit: u32,
-    depth: u32,
-    pages: &mut std::collections::HashSet<u32>,
-    st: &mut PlanStats,
-) {
-    let cell = v.cell(ci);
-    st.visited_cells += 1;
-    // recursive layer mask
-    if !floe_ovm::masks_intersect(v.bitset(cell.lmask_rec), vis) {
-        st.cull_layer += 1;
-        return;
-    }
-    // subtree world bbox vs view
-    let wb = xf_bbox(xf, &cell.rbbox);
-    if !wb.intersects(view) {
-        return;
-    }
-    // whole subtree below cut size -> proxy territory (V3); the
-    // plan counts it culled
-    if (wb.x1 - wb.x0) < cut_dbu && (wb.y1 - wb.y0) < cut_dbu {
-        st.cull_size += 1;
-        return;
-    }
-    st.materializations += 1;
-    // pages of this cell: local-frame view test
-    let inv = xf.invert();
-    let lview = xf_bbox(&inv, view);
-    for pi in cell.page_start..cell.page_start + cell.page_count {
-        let p = v.page(pi);
-        st.page_reads += 1;
-        if !floe_ovm::bit_test(vis, p.layer_idx as usize) {
-            continue;
-        }
-        if !p.bbox.intersects(&lview) {
-            continue;
-        }
-        if (p.max_w as i64) < cut_dbu && (p.max_h as i64) < cut_dbu
-        {
-            st.cull_page_size += 1;
-            continue;
-        }
-        pages.insert(pi);
-    }
-    if depth >= depth_limit {
-        return;
-    }
-    // children via the instance BVH
-    if cell.bvh_count == 0 {
-        return;
-    }
-    let mut stack = vec![cell.bvh_start];
-    while let Some(ni) = stack.pop() {
-        let node = v.bvh(ni);
-        st.visited_bvh += 1;
-        if !node.bbox.intersects(&lview) {
-            continue;
-        }
-        if !node.leaf {
-            for k in 0..node.count as u32 {
-                stack.push(node.first + k);
+fn serve_one(
+    v: &floe_vfs::Vfs,
+    sess: &mut floe_vfs::Session,
+    line: &str,
+) -> Result<String, String> {
+    let mut gen = 0u64;
+    let mut view: Option<(f64, f64, f64, f64)> = None;
+    let mut px = 5.0f64;
+    let mut cut = 2.0f64;
+    let mut depth = u32::MAX;
+    let mut layers: Option<Vec<String>> = None;
+    let mut out: Option<String> = None;
+    for tok in line.split_whitespace() {
+        let (k, val) = tok
+            .split_once('=')
+            .ok_or_else(|| format!("bad token {}", tok))?;
+        match k {
+            "gen" => gen = val.parse().map_err(|_| "gen")?,
+            "view" => {
+                let p: Vec<f64> = val
+                    .split(',')
+                    .map(|s| s.parse().unwrap_or(f64::NAN))
+                    .collect();
+                if p.len() != 4 || p.iter().any(|x| x.is_nan()) {
+                    return Err("view".into());
+                }
+                view = Some((p[0], p[1], p[2], p[3]));
             }
-            continue;
-        }
-        for k in 0..node.count as u64 {
-            let pl = v.place(node.first as u64 + k);
-            // offset-invariant culls BEFORE member enumeration: a
-            // child too small on screen (or with no visible layer)
-            // is too small at EVERY member offset - never expand
-            // (valmini: 2.25M member visits -> 1 cull without this)
-            let child = v.cell(pl.child);
-            if !floe_ovm::masks_intersect(
-                v.bitset(child.lmask_rec),
-                vis,
-            ) {
-                st.cull_layer += 1;
-                continue;
-            }
-            let base = xf.compose(&Xf::place(
-                pl.x, pl.y, pl.rot, pl.flip,
-            ));
-            let cwb = xf_bbox(&base, &child.rbbox);
-            if !cwb.is_empty()
-                && (cwb.x1 - cwb.x0) < cut_dbu
-                && (cwb.y1 - cwb.y0) < cut_dbu
-            {
-                st.cull_size += 1;
-                continue;
-            }
-            match &pl.rep {
-                Rep::One => descend(
-                    v, pl.child, &base, view, vis, cut_dbu,
-                    depth_limit, depth + 1, pages, st,
-                ),
-                rep => {
-                    // visible member range only - offsets are in
-                    // the PARENT frame (xf_rep at build kept them
-                    // cell-local; transform per member)
-                    for (ox, oy) in visible_offsets(
-                        v, xf, &pl, rep, view,
-                    ) {
-                        let m = xf.compose(&Xf::place(
-                            pl.x + ox,
-                            pl.y + oy,
-                            pl.rot,
-                            pl.flip,
-                        ));
-                        descend(
-                            v, pl.child, &m, view, vis, cut_dbu,
-                            depth_limit, depth + 1, pages, st,
-                        );
-                    }
+            "px" => px = val.parse().map_err(|_| "px")?,
+            "cut" => cut = val.parse().map_err(|_| "cut")?,
+            "depth" => {
+                depth = if val == "full" {
+                    u32::MAX
+                } else {
+                    val.parse().map_err(|_| "depth")?
                 }
             }
-        }
-    }
-}
-
-/// offsets of rep members whose child bbox can intersect the view
-/// (arithmetic range for grids, filtered scan for point lists -
-/// never expands blind)
-fn visible_offsets(
-    v: &Ovm,
-    xf: &Xf,
-    pl: &floe_ovm::PlaceV,
-    rep: &Rep,
-    view: &BBox,
-) -> Vec<(i64, i64)> {
-    let cb = v.cell(pl.child).rbbox;
-    let xfc = xf.compose(&Xf::place(pl.x, pl.y, pl.rot, pl.flip));
-    let wb = xf_bbox(&xfc, &cb);
-    if wb.is_empty() {
-        return Vec::new();
-    }
-    // slack in parent-frame units around the base placement
-    let sx0 = view.x0 - wb.x1;
-    let sx1 = view.x1 - wb.x0;
-    let sy0 = view.y0 - wb.y1;
-    let sy1 = view.y1 - wb.y0;
-    // offsets are applied in the parent frame BEFORE xf; transform
-    // slack back into parent frame via xf alone
-    let inv = xf.invert();
-    let a = inv.apply_vec(sx0, sy0);
-    let c = inv.apply_vec(sx1, sy1);
-    let (ox0, ox1) = (a.0.min(c.0), a.0.max(c.0));
-    let (oy0, oy1) = (a.1.min(c.1), a.1.max(c.1));
-    let mut out = Vec::new();
-    match rep {
-        Rep::One => out.push((0, 0)),
-        Rep::Grid { na, nb, va, vb } => {
-            for j in 0..*nb as i64 {
-                let bx = j * vb.0;
-                let by = j * vb.1;
-                // solve i range for va stepping (axis or oblique)
-                for i in grid_axis_range(
-                    *na as i64, va.0, ox0 - bx, ox1 - bx,
-                )
-                .intersect(grid_axis_range(
-                    *na as i64, va.1, oy0 - by, oy1 - by,
-                ))
-                .iter()
-                {
-                    out.push((i * va.0 + bx, i * va.1 + by));
+            "layers" => {
+                if val != "all" && !val.is_empty() {
+                    layers = Some(
+                        val.split(',')
+                            .map(|s| s.to_string())
+                            .collect(),
+                    );
                 }
             }
-        }
-        Rep::Pts(p) => {
-            for &(x, y) in p {
-                if x >= ox0 && x <= ox1 && y >= oy0 && y <= oy1 {
-                    out.push((x, y));
-                }
-            }
+            "out" => out = Some(val.to_string()),
+            _ => return Err(format!("unknown key {}", k)),
         }
     }
-    out
-}
-
-#[derive(Clone, Copy)]
-struct IRange {
-    lo: i64,
-    hi: i64, // inclusive; empty when lo > hi
-}
-
-impl IRange {
-    fn intersect(self, o: IRange) -> IRange {
-        IRange { lo: self.lo.max(o.lo), hi: self.hi.min(o.hi) }
-    }
-    fn iter(self) -> impl Iterator<Item = i64> {
-        self.lo..=self.hi
-    }
-}
-
-/// i in [0, n) with lo <= i*step <= hi (step may be 0 or negative)
-fn grid_axis_range(n: i64, step: i64, lo: i64, hi: i64) -> IRange {
-    if step == 0 {
-        return if lo <= 0 && 0 <= hi {
-            IRange { lo: 0, hi: n - 1 }
-        } else {
-            IRange { lo: 1, hi: 0 }
-        };
-    }
-    let (a, b) = if step > 0 {
-        (
-            floe_tiler::div_ceil(lo, step),
-            floe_tiler::div_floor(hi, step),
-        )
+    let view = view.ok_or("view required")?;
+    let out = out.ok_or("out required")?;
+    let t0 = std::time::Instant::now();
+    let req = make_req(v, view, px, cut, depth, layers.as_deref());
+    let plan = v.plan(&req);
+    let upd = sess.apply(v, &plan, gen);
+    std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+    let delta_path = if upd.new.is_empty() {
+        "-".to_string()
     } else {
-        (
-            floe_tiler::div_ceil(hi, step),
-            floe_tiler::div_floor(lo, step),
-        )
+        let bytes = v.delta(&upd.new)?;
+        let p = format!("{}/delta_{}.oas", out, gen);
+        std::fs::write(&p, &bytes).map_err(|e| e.to_string())?;
+        p
     };
-    IRange { lo: a.max(0), hi: b.min(n - 1) }
+    let mats_path = format!("{}/mats_{}.tsv", out, gen);
+    {
+        let mut w = String::new();
+        for m in &upd.mats {
+            w.push_str(&format!(
+                "{}\t{}\t{}\t{}\t{}\n",
+                v.page_name(m.page),
+                m.x,
+                m.y,
+                m.rot,
+                m.flip as u8
+            ));
+        }
+        std::fs::write(&mats_path, w)
+            .map_err(|e| e.to_string())?;
+    }
+    let evict: Vec<String> =
+        upd.evict.iter().map(|&pi| v.page_name(pi)).collect();
+    let mut bytes = 0u64;
+    for &pi in &plan.pages {
+        bytes += v.ovm.page(pi).csize as u64;
+    }
+    Ok(format!(
+        "gen={} pages={} new={} evict={} delta={} placements={} \
+         bytes={} plan_ms={:.2} resident_mb={:.1}",
+        gen,
+        plan.pages.len(),
+        upd.new.len(),
+        if evict.is_empty() {
+            "-".to_string()
+        } else {
+            evict.join(",")
+        },
+        delta_path,
+        mats_path,
+        bytes,
+        t0.elapsed().as_secs_f64() * 1e3,
+        sess.resident_bytes() as f64 / (1 << 20) as f64
+    ))
 }

@@ -74,6 +74,9 @@ fn main() {
     if args.len() >= 3 && args[1] == "plan" {
         return vfs::plan_cmd(&args[2..]);
     }
+    if args.len() >= 3 && args[1] == "vfsd" {
+        return vfs::vfsd_cmd(&args[2..]);
+    }
     if args.len() < 3 || args[1] != "scan" {
         eprintln!(
             "usage: floe-index scan <file.oas> [jobs]\n       \

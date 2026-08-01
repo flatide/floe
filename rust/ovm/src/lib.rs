@@ -638,6 +638,12 @@ impl Ovm {
     }
 }
 
+/// page payload cell name - the builder and every consumer (delta
+/// splicer, viewer eviction) must agree on it
+pub fn page_cell_name(cell: u32, layer_idx: u32, seq: u16) -> String {
+    format!("P{}_{}_{}", cell, layer_idx, seq)
+}
+
 pub fn bit_test(bits: &[u8], i: usize) -> bool {
     bits[i / 8] & (1 << (i % 8)) != 0
 }

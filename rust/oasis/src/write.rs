@@ -192,6 +192,48 @@ pub fn write_cell(
     Ok(w.out)
 }
 
+// ---------------------------------------------------------- splicing
+
+/// write_tree envelope geometry: MAGIC(13) + START(uint 1 +
+/// "1.0"(4) + real(9) + 13 zero uints) = 40 bytes, END = fixed 256.
+pub const TREE_HEADER_LEN: usize = 40;
+pub const TREE_END_LEN: usize = 256;
+
+/// cell-body byte range of a write_tree output (everything between
+/// the envelope): the input to splice_tree
+pub fn tree_body(bytes: &[u8]) -> &[u8] {
+    assert!(
+        bytes.len() >= TREE_HEADER_LEN + TREE_END_LEN
+            && (bytes[TREE_HEADER_LEN] == 13
+                || bytes[TREE_HEADER_LEN] == 14),
+        "not a write_tree file"
+    );
+    &bytes[TREE_HEADER_LEN..bytes.len() - TREE_END_LEN]
+}
+
+/// Assemble one OASIS file from pre-encoded cell bodies (write_tree
+/// outputs sliced with tree_body) - no inflate, no re-encode: the
+/// working-set delta path splices page payload bytes verbatim.
+pub fn splice_tree(unit: f64, bodies: &[&[u8]]) -> Vec<u8> {
+    let mut w = W::new();
+    w.out.extend_from_slice(MAGIC);
+    w.uint(1);
+    w.string(b"1.0");
+    w.real_f64(unit);
+    for _ in 0..13 {
+        w.uint(0);
+    }
+    debug_assert_eq!(w.out.len(), TREE_HEADER_LEN);
+    for b in bodies {
+        w.out.extend_from_slice(b);
+    }
+    w.uint(2);
+    w.uint(252);
+    w.out.extend_from_slice(&[0u8; 252]);
+    w.uint(0);
+    w.out
+}
+
 // ------------------------------------------------------------ tree files
 
 /// Sortable/hashable repetition signature for the grouping decision

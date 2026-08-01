@@ -1,0 +1,540 @@
+//! VFS runtime (rust/VFS.md, V2): plan a viewport against design.ovm
+//! without touching geometry, keep a working-set session, and build
+//! delta OASIS files by splicing page payload bytes verbatim.
+
+use floe_oasis::write::{splice_tree, tree_body};
+use floe_ovm::{BBox, Ovm, PlaceV};
+use floe_oasis::doc::Rep;
+use floe_tiler::Xf;
+use std::collections::{HashMap, HashSet};
+use std::io::{Read, Seek, SeekFrom};
+
+pub struct Vfs {
+    pub ovm: Ovm,
+    ovp_path: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct ViewReq {
+    /// dbu, closed box
+    pub view: BBox,
+    /// features (and subtrees) smaller than this are culled
+    pub cut_dbu: i64,
+    /// visible-layer bitset (ovm layer order, bs_width bytes)
+    pub vis: Vec<u8>,
+    /// semantic depth limit (u32::MAX = full)
+    pub depth: u32,
+}
+
+/// one placement of a page cell in the working-set top
+#[derive(Clone, Copy, Debug)]
+pub struct Mat {
+    pub page: u32,
+    pub x: i64,
+    pub y: i64,
+    pub rot: u8,
+    pub flip: bool,
+}
+
+#[derive(Default, Debug)]
+pub struct PlanStats {
+    pub visited_cells: u64,
+    pub visited_bvh: u64,
+    pub cull_size: u64,
+    pub cull_layer: u64,
+    pub cull_page_size: u64,
+    pub page_reads: u64,
+    pub materializations: u64,
+}
+
+pub struct Plan {
+    pub pages: Vec<u32>, // sorted unique
+    pub mats: Vec<Mat>,
+    pub stats: PlanStats,
+}
+
+impl Vfs {
+    pub fn open(dir: &str) -> Result<Vfs, String> {
+        let ovm = Ovm::open(&format!("{}/design.ovm", dir))?;
+        Ok(Vfs { ovm, ovp_path: format!("{}/design.ovp", dir) })
+    }
+
+    pub fn page_name(&self, pi: u32) -> String {
+        let p = self.ovm.page(pi);
+        floe_ovm::page_cell_name(p.cell, p.layer_idx, p.seq)
+    }
+
+    /// visible-layer bitset from "l/d" or name specs (None = all)
+    pub fn layer_mask(
+        &self,
+        specs: Option<&[String]>,
+    ) -> Result<Vec<u8>, String> {
+        let mut vis = vec![0u8; self.ovm.bs_width];
+        match specs {
+            None => vis.iter_mut().for_each(|b| *b = 0xff),
+            Some(list) => {
+                for spec in list {
+                    let mut hit = false;
+                    for li in 0..self.ovm.n_layers {
+                        let lr = self.ovm.layer(li);
+                        if lr.name == *spec
+                            || format!("{}/{}", lr.layer, lr.dt)
+                                == *spec
+                        {
+                            floe_ovm::bit_set(
+                                &mut vis,
+                                li as usize,
+                            );
+                            hit = true;
+                        }
+                    }
+                    if !hit {
+                        return Err(format!(
+                            "layer {:?} not found",
+                            spec
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(vis)
+    }
+
+    pub fn plan(&self, req: &ViewReq) -> Plan {
+        let mut st = PlanStats::default();
+        let mut pages = HashSet::new();
+        let mut mats = Vec::new();
+        self.descend(
+            self.ovm.top,
+            &Xf::identity(),
+            req,
+            0,
+            &mut pages,
+            &mut mats,
+            &mut st,
+        );
+        let mut pv: Vec<u32> = pages.into_iter().collect();
+        pv.sort_unstable();
+        Plan { pages: pv, mats, stats: st }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn descend(
+        &self,
+        ci: u32,
+        xf: &Xf,
+        req: &ViewReq,
+        depth: u32,
+        pages: &mut HashSet<u32>,
+        mats: &mut Vec<Mat>,
+        st: &mut PlanStats,
+    ) {
+        let v = &self.ovm;
+        let cell = v.cell(ci);
+        st.visited_cells += 1;
+        if !floe_ovm::masks_intersect(
+            v.bitset(cell.lmask_rec),
+            &req.vis,
+        ) {
+            st.cull_layer += 1;
+            return;
+        }
+        let wb = xf_bbox(xf, &cell.rbbox);
+        if !wb.intersects(&req.view) {
+            return;
+        }
+        if (wb.x1 - wb.x0) < req.cut_dbu
+            && (wb.y1 - wb.y0) < req.cut_dbu
+        {
+            st.cull_size += 1;
+            return;
+        }
+        st.materializations += 1;
+        let inv = xf.invert();
+        let lview = xf_bbox(&inv, &req.view);
+        let (px, py, prot, pflip) = xf.decompose();
+        for pi in cell.page_start..cell.page_start + cell.page_count
+        {
+            let p = v.page(pi);
+            st.page_reads += 1;
+            if !floe_ovm::bit_test(&req.vis, p.layer_idx as usize) {
+                continue;
+            }
+            if !p.bbox.intersects(&lview) {
+                continue;
+            }
+            if (p.max_w as i64) < req.cut_dbu
+                && (p.max_h as i64) < req.cut_dbu
+            {
+                st.cull_page_size += 1;
+                continue;
+            }
+            pages.insert(pi);
+            mats.push(Mat {
+                page: pi,
+                x: px,
+                y: py,
+                rot: prot,
+                flip: pflip,
+            });
+        }
+        if depth >= req.depth || cell.bvh_count == 0 {
+            return;
+        }
+        let mut stack = vec![cell.bvh_start];
+        while let Some(ni) = stack.pop() {
+            let node = v.bvh(ni);
+            st.visited_bvh += 1;
+            if !node.bbox.intersects(&lview) {
+                continue;
+            }
+            if !node.leaf {
+                for k in 0..node.count as u32 {
+                    stack.push(node.first + k);
+                }
+                continue;
+            }
+            for k in 0..node.count as u64 {
+                let pl = v.place(node.first as u64 + k);
+                // offset-invariant culls BEFORE member enumeration
+                let child = v.cell(pl.child);
+                if !floe_ovm::masks_intersect(
+                    v.bitset(child.lmask_rec),
+                    &req.vis,
+                ) {
+                    st.cull_layer += 1;
+                    continue;
+                }
+                let base = xf.compose(&Xf::place(
+                    pl.x, pl.y, pl.rot, pl.flip,
+                ));
+                let cwb = xf_bbox(&base, &child.rbbox);
+                if !cwb.is_empty()
+                    && (cwb.x1 - cwb.x0) < req.cut_dbu
+                    && (cwb.y1 - cwb.y0) < req.cut_dbu
+                {
+                    st.cull_size += 1;
+                    continue;
+                }
+                match &pl.rep {
+                    Rep::One => self.descend(
+                        pl.child,
+                        &base,
+                        req,
+                        depth + 1,
+                        pages,
+                        mats,
+                        st,
+                    ),
+                    rep => {
+                        for (ox, oy) in self.visible_offsets(
+                            xf, &pl, rep, &req.view,
+                        ) {
+                            let m = xf.compose(&Xf::place(
+                                pl.x + ox,
+                                pl.y + oy,
+                                pl.rot,
+                                pl.flip,
+                            ));
+                            self.descend(
+                                pl.child,
+                                &m,
+                                req,
+                                depth + 1,
+                                pages,
+                                mats,
+                                st,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// rep member offsets whose child bbox can reach the view
+    fn visible_offsets(
+        &self,
+        xf: &Xf,
+        pl: &PlaceV,
+        rep: &Rep,
+        view: &BBox,
+    ) -> Vec<(i64, i64)> {
+        let cb = self.ovm.cell(pl.child).rbbox;
+        let xfc =
+            xf.compose(&Xf::place(pl.x, pl.y, pl.rot, pl.flip));
+        let wb = xf_bbox(&xfc, &cb);
+        if wb.is_empty() {
+            return Vec::new();
+        }
+        let sx0 = view.x0 - wb.x1;
+        let sx1 = view.x1 - wb.x0;
+        let sy0 = view.y0 - wb.y1;
+        let sy1 = view.y1 - wb.y0;
+        let inv = xf.invert();
+        let a = inv.apply_vec(sx0, sy0);
+        let c = inv.apply_vec(sx1, sy1);
+        let (ox0, ox1) = (a.0.min(c.0), a.0.max(c.0));
+        let (oy0, oy1) = (a.1.min(c.1), a.1.max(c.1));
+        let mut out = Vec::new();
+        match rep {
+            Rep::One => out.push((0, 0)),
+            Rep::Grid { na, nb, va, vb } => {
+                for j in 0..*nb as i64 {
+                    let bx = j * vb.0;
+                    let by = j * vb.1;
+                    for i in axis_range(
+                        *na as i64,
+                        va.0,
+                        ox0 - bx,
+                        ox1 - bx,
+                    )
+                    .intersect(axis_range(
+                        *na as i64,
+                        va.1,
+                        oy0 - by,
+                        oy1 - by,
+                    ))
+                    .iter()
+                    {
+                        out.push((
+                            i * va.0 + bx,
+                            i * va.1 + by,
+                        ));
+                    }
+                }
+            }
+            Rep::Pts(p) => {
+                for &(x, y) in p {
+                    if x >= ox0
+                        && x <= ox1
+                        && y >= oy0
+                        && y <= oy1
+                    {
+                        out.push((x, y));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// splice the given pages' payload bodies into one OASIS file
+    pub fn delta(&self, pages: &[u32]) -> Result<Vec<u8>, String> {
+        let mut f = std::fs::File::open(&self.ovp_path)
+            .map_err(|e| format!("{}: {}", self.ovp_path, e))?;
+        let mut payloads: Vec<Vec<u8>> =
+            Vec::with_capacity(pages.len());
+        // read in file order for sequential IO
+        let mut order: Vec<u32> = pages.to_vec();
+        order.sort_unstable_by_key(|&pi| {
+            self.ovm.page(pi).file_off
+        });
+        for &pi in &order {
+            let p = self.ovm.page(pi);
+            let mut buf = vec![0u8; p.csize as usize];
+            f.seek(SeekFrom::Start(p.file_off))
+                .map_err(|e| e.to_string())?;
+            f.read_exact(&mut buf).map_err(|e| e.to_string())?;
+            payloads.push(buf);
+        }
+        let bodies: Vec<&[u8]> =
+            payloads.iter().map(|p| tree_body(p)).collect();
+        Ok(splice_tree(self.ovm.unit, &bodies))
+    }
+}
+
+fn xf_bbox(xf: &Xf, b: &BBox) -> BBox {
+    if b.is_empty() {
+        return *b;
+    }
+    let a = xf.apply(b.x0, b.y0);
+    let c = xf.apply(b.x1, b.y1);
+    BBox {
+        x0: a.0.min(c.0),
+        y0: a.1.min(c.1),
+        x1: a.0.max(c.0),
+        y1: a.1.max(c.1),
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct IRange {
+    pub lo: i64,
+    pub hi: i64,
+}
+
+impl IRange {
+    pub fn intersect(self, o: IRange) -> IRange {
+        IRange { lo: self.lo.max(o.lo), hi: self.hi.min(o.hi) }
+    }
+    pub fn iter(self) -> impl Iterator<Item = i64> {
+        self.lo..=self.hi
+    }
+}
+
+/// i in [0, n) with lo <= i*step <= hi
+pub fn axis_range(n: i64, step: i64, lo: i64, hi: i64) -> IRange {
+    if step == 0 {
+        return if lo <= 0 && 0 <= hi {
+            IRange { lo: 0, hi: n - 1 }
+        } else {
+            IRange { lo: 1, hi: 0 }
+        };
+    }
+    let (a, b) = if step > 0 {
+        (
+            floe_tiler::div_ceil(lo, step),
+            floe_tiler::div_floor(hi, step),
+        )
+    } else {
+        (
+            floe_tiler::div_ceil(hi, step),
+            floe_tiler::div_floor(lo, step),
+        )
+    };
+    IRange { lo: a.max(0), hi: b.min(n - 1) }
+}
+
+// ------------------------------------------------------- session
+
+/// Working-set bookkeeping: which page cells live in the viewer's
+/// layout, LRU-evicted against a decoded-bytes budget. The viewer
+/// applies `Update` verbatim: read the delta (new pages), drop the
+/// evicted page cells, rebuild the top placements.
+pub struct Session {
+    resident: HashMap<u32, u64>, // page -> last-used generation
+    bytes: HashMap<u32, u64>,
+    resident_bytes: u64,
+    pub budget_bytes: u64,
+}
+
+pub struct Update {
+    pub new: Vec<u32>,
+    pub evict: Vec<u32>,
+    pub mats: Vec<Mat>,
+}
+
+impl Session {
+    pub fn new(budget_bytes: u64) -> Session {
+        Session {
+            resident: HashMap::new(),
+            bytes: HashMap::new(),
+            resident_bytes: 0,
+            budget_bytes,
+        }
+    }
+
+    pub fn apply(
+        &mut self,
+        vfs: &Vfs,
+        plan: &Plan,
+        gen: u64,
+    ) -> Update {
+        let mut new = Vec::new();
+        for &pi in &plan.pages {
+            match self.resident.entry(pi) {
+                std::collections::hash_map::Entry::Occupied(
+                    mut e,
+                ) => {
+                    *e.get_mut() = gen;
+                }
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(gen);
+                    let b =
+                        vfs.ovm.page(pi).usize_ as u64;
+                    self.bytes.insert(pi, b);
+                    self.resident_bytes += b;
+                    new.push(pi);
+                }
+            }
+        }
+        // evict LRU pages not in this plan while over budget
+        let mut evict = Vec::new();
+        if self.resident_bytes > self.budget_bytes {
+            let current: HashSet<u32> =
+                plan.pages.iter().copied().collect();
+            let mut cand: Vec<(u64, u32)> = self
+                .resident
+                .iter()
+                .filter(|(pi, _)| !current.contains(pi))
+                .map(|(&pi, &g)| (g, pi))
+                .collect();
+            cand.sort_unstable();
+            for (_, pi) in cand {
+                if self.resident_bytes <= self.budget_bytes {
+                    break;
+                }
+                self.resident.remove(&pi);
+                let b = self.bytes.remove(&pi).unwrap_or(0);
+                self.resident_bytes -= b;
+                evict.push(pi);
+            }
+        }
+        Update { new, evict, mats: plan.mats.clone() }
+    }
+
+    pub fn resident_bytes(&self) -> u64 {
+        self.resident_bytes
+    }
+    pub fn resident_pages(&self) -> usize {
+        self.resident.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use floe_oasis::write::{write_tree, WCell};
+
+    #[test]
+    fn splice_roundtrip() {
+        let r = floe_oasis::doc::RectRec {
+            layer: 1,
+            dt: 0,
+            x: 10,
+            y: 20,
+            w: 5,
+            h: 5,
+            rep: Rep::One,
+        };
+        let a = write_tree(
+            &[WCell {
+                name: "A".into(),
+                rects: std::slice::from_ref(&r),
+                polys: &[],
+                paths: &[],
+                texts: &[],
+                places: Vec::new(),
+            }],
+            1000.0,
+        )
+        .unwrap();
+        let b = write_tree(
+            &[WCell {
+                name: "B".into(),
+                rects: std::slice::from_ref(&r),
+                polys: &[],
+                paths: &[],
+                texts: &[],
+                places: Vec::new(),
+            }],
+            1000.0,
+        )
+        .unwrap();
+        let spliced = splice_tree(
+            1000.0,
+            &[tree_body(&a), tree_body(&b)],
+        );
+        let doc = floe_oasis::doc::parse_doc(&spliced);
+        // two tops -> finish() rejects; parse must fail cleanly OR
+        // we check at record level via scan
+        assert!(doc.is_err());
+        let st =
+            floe_oasis::scan_parallel(&spliced, 1).unwrap();
+        assert_eq!(st.cells, 2);
+        let total: u64 =
+            st.shapes.values().map(|s| s.records).sum();
+        assert_eq!(total, 2);
+    }
+}
