@@ -557,6 +557,14 @@ fn peak_rss_gb() -> Option<f64> {
     proc_kv_gb("/proc/self/status", "VmHWM:")
 }
 
+/// ", rss X GB" suffix for phase-boundary log lines (empty off-Linux)
+/// - attributes the peak (VmHWM) to a phase without host-side polling
+fn rss_note() -> String {
+    own_rss_gb()
+        .map(|g| format!(", rss {:.1} GB", g))
+        .unwrap_or_default()
+}
+
 /// du -h style: binary units, one decimal below 10
 fn fmt_size(bytes: u64) -> String {
     let mut v = bytes as f64;
@@ -717,11 +725,12 @@ fn index_cmd(args: &[String]) {
     let t_parse = t1.elapsed().as_secs_f64();
     eprintln!(
         "[index] parsed {} cells in {:.1}s ({} threads, \
-         grid-normalize {:.1}s)",
+         grid-normalize {:.1}s{})",
         doc.cells.len(),
         t_parse,
         jobs,
-        doc.norm_s
+        doc.norm_s,
+        rss_note()
     );
     let dbu = 1.0 / doc.unit;
 
@@ -1009,11 +1018,12 @@ fn index_cmd(args: &[String]) {
         all.iter().filter_map(|t| t.dens.clone()).collect();
     let t_tiles = t2.elapsed().as_secs_f64();
     eprintln!(
-        "[index] {} band files ({} tiles) in {:.1}s; skeleton + \
+        "[index] {} band files ({} tiles) in {:.1}s{}; skeleton + \
          text sidecar...",
         files,
         tiles_written,
-        t_tiles
+        t_tiles,
+        rss_note()
     );
 
     // --- skeleton + full-text sidecar ---
@@ -1061,11 +1071,12 @@ fn index_cmd(args: &[String]) {
     let t_skel = t3.elapsed().as_secs_f64();
     eprintln!(
         "[index] skeleton {} shapes + {} labels, sidecar {} entries \
-         ({:.1}s)",
+         ({:.1}s{})",
         sk.shapes,
         sk.labels,
         sidecar.len(),
-        t_skel
+        t_skel,
+        rss_note()
     );
     let thinned_json = if sk.thinned.is_empty() {
         String::new()
