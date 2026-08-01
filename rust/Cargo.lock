@@ -57,6 +57,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "floe-ovm"
+version = "0.1.0"
+dependencies = [
+ "floe-oasis",
+]
+
+[[package]]
 name = "floe-tiler"
 version = "0.1.0"
 dependencies = [
