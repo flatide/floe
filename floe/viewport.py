@@ -88,13 +88,18 @@ class VfsMosaic:
             changed = True
         self.top.clear_insts()
         for m in mats:
-            nm, x, y, rot, flip = m[:5]
-            if len(m) > 5:
-                self.design[nm] = m[5]
+            nm, x, y, rot, flip, na, nb, va, vb, design = m
+            self.design[nm] = design
             ci = self.cells.get(nm)
-            if ci is not None:
+            if ci is None:
+                continue
+            tr = db.Trans(rot, flip, db.Vector(x, y))
+            if na > 1 or nb > 1:
                 self.top.insert(db.CellInstArray(
-                    ci, db.Trans(rot, flip, db.Vector(x, y))))
+                    ci, tr, db.Vector(va[0], va[1]),
+                    db.Vector(vb[0], vb[1]), na, nb))
+            else:
+                self.top.insert(db.CellInstArray(ci, tr))
         if self.frame_ci is not None:
             self.top.insert(db.CellInstArray(
                 self.frame_ci, db.Trans()))

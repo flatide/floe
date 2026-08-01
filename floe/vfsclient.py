@@ -89,13 +89,19 @@ class VfsClient:
         if mp and mp != "-" and os.path.isfile(mp):
             with open(mp) as f:
                 for ln in f:
-                    parts = ln.rstrip("\n").split("\t")
-                    if len(parts) >= 5:
-                        mats.append((parts[0], int(parts[1]),
-                                     int(parts[2]), int(parts[3]),
-                                     parts[4] == "1",
-                                     parts[5] if len(parts) > 5
-                                     else parts[0]))
+                    p = ln.rstrip("\n").split("\t")
+                    if len(p) >= 12:
+                        # name x y rot flip na nb vax vay vbx vby design
+                        mats.append((
+                            p[0], int(p[1]), int(p[2]), int(p[3]),
+                            p[4] == "1", int(p[5]), int(p[6]),
+                            (int(p[7]), int(p[8])),
+                            (int(p[9]), int(p[10])), p[11]))
+                    elif len(p) >= 5:  # legacy single-placement rows
+                        mats.append((
+                            p[0], int(p[1]), int(p[2]), int(p[3]),
+                            p[4] == "1", 1, 1, (0, 0), (0, 0),
+                            p[5] if len(p) > 5 else p[0]))
             self._last_files.append(mp)
         if out["delta"]:
             self._last_files.append(out["delta"])

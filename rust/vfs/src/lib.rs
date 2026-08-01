@@ -31,7 +31,10 @@ pub struct ViewReq {
     pub depth: u32,
 }
 
-/// one placement of a page cell in the working-set top
+/// one placement of a page cell in the working-set top. na/nb/va/vb
+/// carry a regular array so a cell array (SRAM bitcells, fill) stays
+/// ONE placement instead of exploding into a Mat per member; single
+/// placement = na=nb=1. Vectors are in WORLD coords.
 #[derive(Clone, Copy, Debug)]
 pub struct Mat {
     pub page: u32,
@@ -39,6 +42,26 @@ pub struct Mat {
     pub y: i64,
     pub rot: u8,
     pub flip: bool,
+    pub na: u32,
+    pub nb: u32,
+    pub va: (i64, i64),
+    pub vb: (i64, i64),
+}
+
+impl Mat {
+    fn single(page: u32, x: i64, y: i64, rot: u8, flip: bool) -> Mat {
+        Mat {
+            page,
+            x,
+            y,
+            rot,
+            flip,
+            na: 1,
+            nb: 1,
+            va: (0, 0),
+            vb: (0, 0),
+        }
+    }
 }
 
 #[derive(Default, Debug)]
@@ -182,13 +205,7 @@ impl Vfs {
                 continue;
             }
             pages.insert(pi);
-            mats.push(Mat {
-                page: pi,
-                x: px,
-                y: py,
-                rot: prot,
-                flip: pflip,
-            });
+            mats.push(Mat::single(pi, px, py, prot, pflip));
         }
         if depth >= req.depth || cell.bvh_count == 0 {
             return;
@@ -248,7 +265,37 @@ impl Vfs {
                         frames,
                         st,
                     ),
+                    Rep::Grid { na, nb, va, vb } => {
+                        // preserve the array: descend the child ONCE
+                        // (as if the whole cell were in view - klayout
+                        // culls off-screen members at draw) and stamp
+                        // the array rep onto the pages it produced, so
+                        // a 2M-member SRAM array stays a handful of
+                        // CellInstArray placements, not 2M Mats.
+                        let start = mats.len();
+                        let mut r2 = req.clone();
+                        r2.view = cwb;
+                        self.descend(
+                            pl.child,
+                            &base,
+                            &r2,
+                            depth + 1,
+                            pages,
+                            mats,
+                            frames,
+                            st,
+                        );
+                        let wva = xf.apply_vec(va.0, va.1);
+                        let wvb = xf.apply_vec(vb.0, vb.1);
+                        fold_array(
+                            mats, start, *na as u32, *nb as u32,
+                            wva, wvb,
+                        );
+                    }
                     rep => {
+                        // irregular (point-list) rep: member count is
+                        // bounded by the source list, so per-member
+                        // expansion stays small
                         for (ox, oy) in self.visible_offsets(
                             xf, &pl, rep, &req.view,
                         ) {
@@ -364,6 +411,43 @@ impl Vfs {
         let bodies: Vec<&[u8]> =
             payloads.iter().map(|p| tree_body(p)).collect();
         Ok(splice_tree(self.ovm.unit, &bodies))
+    }
+}
+
+/// stamp a regular array (na x nb, world vectors wva/wvb) onto the
+/// Mats added since `start`. Single Mats take the rep directly; a Mat
+/// that already carries a rep (nested array) can't hold two, so its
+/// outer members are materialized (bounded - nesting is shallow and
+/// each level's count is modest).
+fn fold_array(
+    mats: &mut Vec<Mat>,
+    start: usize,
+    na: u32,
+    nb: u32,
+    wva: (i64, i64),
+    wvb: (i64, i64),
+) {
+    let end = mats.len();
+    for i in start..end {
+        if mats[i].na == 1 && mats[i].nb == 1 {
+            mats[i].na = na;
+            mats[i].nb = nb;
+            mats[i].va = wva;
+            mats[i].vb = wvb;
+        } else {
+            let m = mats[i]; // keeps its inner rep; (0,0) stays here
+            for jj in 0..nb as i64 {
+                for ii in 0..na as i64 {
+                    if ii == 0 && jj == 0 {
+                        continue;
+                    }
+                    let mut c = m;
+                    c.x += ii * wva.0 + jj * wvb.0;
+                    c.y += ii * wva.1 + jj * wvb.1;
+                    mats.push(c);
+                }
+            }
+        }
     }
 }
 

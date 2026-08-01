@@ -1120,17 +1120,24 @@ fn serve_one(
     {
         let mut w = String::new();
         for m in &upd.mats {
-            // 6th column: design cell name (pick/status display -
-            // page cells are an implementation detail)
+            // columns: page-cell name, x, y, rot, flip, array rep
+            // (na nb vax vay vbx vby), design cell name (last, for
+            // pick/status - page cells are an implementation detail)
             let dname =
                 v.ovm.cell(v.ovm.page(m.page).cell).name;
             w.push_str(&format!(
-                "{}\t{}\t{}\t{}\t{}\t{}\n",
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                 v.page_name(m.page),
                 m.x,
                 m.y,
                 m.rot,
                 m.flip as u8,
+                m.na,
+                m.nb,
+                m.va.0,
+                m.va.1,
+                m.vb.0,
+                m.vb.1,
                 dname
             ));
         }
