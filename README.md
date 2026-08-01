@@ -119,6 +119,8 @@ alias floe=".venv/bin/python -m floe"
 
 floe index data/testchip_1g5.oas          # 1회: <src>.ice/ 생성 (전 코어 사용)
 floe index data/testchip_1g5.oas --jobs 1 # 병렬 끄기 (기본: 코어 수만큼 fork)
+# 대용량 실칩 인덱싱은 Rust 인덱서 권장 - 아래 [Rust 인덱서] 섹션
+# (python 인덱서는 동결 상태, 같은 .ice를 훨씬 빠르게 만든다)
 floe info  data/testchip_1g5.oas          # 레이어/그리드/통계 요약
 floe view  data/testchip_1g5.oas          # 네이티브 데스크톱 뷰어 (기본)
 floe view  data/testchip_1g5.oas --goto 5240,5260,50   # 시작 위치+뷰 폭(um)
@@ -452,7 +454,8 @@ klayout은 서브픽셀 도형도 전부 순회하며 그리므로(멤버당 비
 
 floe는 순수 파이썬. 의존성: `klayout`, `numpy` pip 휠 + GUI는
 PyGObject/GTK3 (**RHEL 계열 GNOME 호스트에 기본 탑재** — flateyes와 동일하게
-추가 설치 없음).
+추가 설치 없음). 인덱싱만이라면 Rust 바이너리 한 개 반입이 가장 단순하다
+(아래 [Rust 인덱서](#rust-인덱서-floe-index) 섹션).
 
 ```sh
 # 1) 인터넷 PC에서 휠 수집 (타겟 파이썬 버전에 맞춰)
@@ -648,6 +651,69 @@ alias floe="/opt/floe/venv/bin/python -m floe"
   무시하고 전체 재빌드. 타일링 중 워커 전원이 외부에서 죽으면(3분간
   busy 0) 잃어버린 타일을 자동 재디스패치한다.
 
+## Rust 인덱서 (floe-index)
+
+`rust/` 워크스페이스의 네이티브 인덱서. **Python `floe index`를 대체**하며
+(python 인덱서는 동결 — 버그 수정 없음), 동일 포맷의 `.ice` 캐시(밴드
+타일 b0~b3 + tiles_lod + density + meta.json + skeleton.oas + texts.tsv
+사이드카)를 만들고 뷰어가 그대로 연다 (호환 확인 완료).
+
+- **순수 Rust, klayout 무관** — floe-oasis(파서/라이터), floe-tiler,
+  floe-index CLI. 의존 크레이트는 `vendor/` 동봉이라 빌드 중 crates.io
+  접속이 없고 C 툴체인도 불필요하다.
+- **성능**: MAIN09(150MB, 25타일) 실측 **60초** (glibc, `--jobs 12`).
+  파스·타일링 모두 병렬. 권장 jobs는 **12~16** — 테스트 서버 실측에서
+  12가 24보다 빨랐다 (메모리 대역폭 무릎).
+- **캐시 크기**: klayout급 모달 인코딩 (XYRELATIVE, 레코드 정렬로 델타
+  생략, W/H·halfwidth·repetition 모달 재사용) + CBLOCK 압축.
+
+### 사용법
+
+```sh
+floe-index index chip.oas --jobs 12          # outdir 생략 = <src>.ice
+floe-index index chip.oas out.ice --mem 200 --mem-floor 8   # 공유 호스트
+floe-index scan chip.oas 16                  # JSON 인벤토리 (진단용)
+floe-index --version
+```
+
+- `--jobs N` 워커 수, `--tile-bytes N` 타일 목표 크기,
+  `--bands um,um,um` 크기 밴드 문턱 (기본 0.125,0.5,2 — python과 동일).
+- **메모리 거버너**: `--mem GB` = 프로세스 RSS 상한, `--mem-floor GB` =
+  시스템 가용 메모리 바닥 여유 (기본 max(4GB, RAM 5%)). 한도에 닿으면
+  새 타일 착수를 보류하되 최소 1워커는 항상 진행하고, 하트비트에
+  `K waiting (mem)`으로 표시된다. /proc 기반이라 리눅스 전용
+  (macOS에서는 비활성).
+- **진행 로그**: 시작 시 버전 스탬프 `[floe-index 0.1.0 <git> (gnu)]`
+  (반입 바이너리가 여럿 돌아다니므로 어떤 빌드인지 매 실행 명시),
+  5초마다 `tiles N done, M building / total (Ns)` 하트비트, 타일이
+  64개 이하면 타일별 완료 라인(멤버 수·소요 시간)도 나온다.
+- `scan`은 셀/레이어별 레코드·멤버 수, 텍스트, placement, repetition
+  타입 히스토그램(`rep_types`)을 JSON으로 출력한다 — 파일 구성 진단용
+  (175GB 캐시 사건의 원인 확정도 이 히스토그램으로 했다).
+
+### 빌드와 배포
+
+```sh
+# macOS/개발 (Apple Silicon 포함 - 네이티브 빌드, 특별 절차 없음)
+cd rust && cargo build --release      # -> target/release/floe-index
+
+# 리눅스 서버 반입용 (상세·오프라인 툴체인은 rust/BUILD.md)
+sh rust/build-linux.sh
+#  -> dist/floe-index-linux-gnu     glibc 동적 - 권장 (병렬 인덱싱 ~40%
+#                                   빠름; 타깃 glibc >= 빌드 머신이면 OK)
+#  -> dist/floe-index-linux-x86_64  musl 완전 정적 - 어떤 x86_64 리눅스든
+#                                   실행되는 이식성 폴백 (+ .sha256)
+```
+
+- 배포는 **바이너리 한 개 반입 + `chmod +x`** 로 끝난다 (venv/휠 불필요).
+- musl 정적 빌드에는 musl malloc의 전역 락(전 스레드 수가 ~190초로
+  수렴하는 병목)을 우회하는 스레드 캐시 allocator가 내장된다. glibc/
+  macOS 빌드는 순수 시스템 allocator를 쓴다 (자체 per-thread 캐시 보유).
+- **검증**: `sh tools/validate_rust.sh` (~20초) — scan 카운트, 밴드 파일
+  지오메트리 XOR, depth별 멤버 수, meta/density(밴드 파일 기반 정밀
+  오라클), skeleton/사이드카를 klayout 빌드 캐시와 대조하는 5단계
+  스위트. rust 쪽 커밋 전 필수.
+
 ## 로드맵
 
 1. ✅ 테스트용 대용량 OASIS 생성기 (`tools/gen_test_oasis.py`)
@@ -669,7 +735,12 @@ alias floe="/opt/floe/venv/bin/python -m floe"
    레이어 색 실시간 변경과 충돌해 탈락)
 7. 렌더링 취소 키: 긴 드로우를 중단하고 이전 프레임 유지 (사용자
    결정 2026-07-30: 최적화가 충분히 된 뒤 최후 수단으로 구현)
-8. **Calibre 팔레트 임포트** (사용자 결정 2026-08-02, 안정화 후):
+8. **Rust 인덱서** (`rust/`, 위 [Rust 인덱서] 섹션): python 인덱서
+   대체. 캐시 완전성 ✅ 스켈레톤+사이드카 ✅ 병렬화+CBLOCK ✅ PATH ✅
+   모달 인코딩 ✅ — 5단계 검증 스위트 통과, 뷰어 호환 확인. 남은 것:
+   9.8G 실칩 모달 라이터 재측정(서버), 사이드카 스트리밍 쓰기+진행
+   하트비트, 컷오버 전 대형 자산 일회 게이트 후 python 인덱서 은퇴.
+9. **Calibre 팔레트 임포트** (사용자 결정 2026-08-02, 안정화 후):
    실무자 전원이 Calibre 사용자이므로 뷰어 경험을 동일하게 —
    Calibre layer properties(색·채움 패턴·선 스타일)를 읽어 floe
    레이어 속성으로 매핑. 치밀한 채움 팔레트에서는 페인터 순서가
