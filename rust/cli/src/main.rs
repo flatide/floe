@@ -708,10 +708,12 @@ fn index_cmd(args: &[String]) {
     };
     let t_parse = t1.elapsed().as_secs_f64();
     eprintln!(
-        "[index] parsed {} cells in {:.1}s ({} threads)",
+        "[index] parsed {} cells in {:.1}s ({} threads, \
+         grid-normalize {:.1}s)",
         doc.cells.len(),
         t_parse,
-        jobs
+        jobs,
+        doc.norm_s
     );
     let dbu = 1.0 / doc.unit;
 

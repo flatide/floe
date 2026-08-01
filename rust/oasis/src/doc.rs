@@ -115,6 +115,9 @@ pub struct Doc {
     /// enumerates in this order, and the meta layer list / palette
     /// assignment must match it
     pub layer_order: Vec<(u32, u32)>,
+    /// seconds spent in the grid-normalize pass (parse-phase
+    /// attribution for the CLI log)
+    pub norm_s: f64,
     /// names from LAYERNAME records with exact-value intervals
     pub layer_names: HashMap<(u32, u32), String>,
 }
@@ -891,9 +894,13 @@ fn find_grids(
 ) -> Option<(Vec<(i64, i64, i64, u64, i64, u64)>, Vec<(i64, i64)>)> {
     let mut v = pts.to_vec();
     v.sort_unstable();
-    let mut col_sigs: HashMap<(i64, i64, usize), Vec<i64>> =
-        HashMap::new();
+    // ((y0, pitch, cnt), x) collected flat and sorted replaces the
+    // per-signature hash map of x-vectors: the pass runs over every
+    // stored point list of a chip, so per-column allocations dominated
+    // (real 150 MB chip: this whole pass tripled the parse phase)
+    let mut sigs: Vec<((i64, i64, usize), i64)> = Vec::new();
     let mut leftovers: Vec<(i64, i64)> = Vec::new();
+    let mut ys: Vec<i64> = Vec::new();
     let mut i = 0usize;
     while i < v.len() {
         let x = v[i].0;
@@ -901,28 +908,39 @@ fn find_grids(
         while j < v.len() && v[j].0 == x {
             j += 1;
         }
-        let ys: Vec<i64> = v[i..j].iter().map(|p| p.1).collect();
+        ys.clear();
+        ys.extend(v[i..j].iter().map(|p| p.1));
         for (y0, pitch, cnt) in const_pitch_runs(&ys) {
             if cnt == 1 {
                 leftovers.push((x, y0));
             } else {
-                col_sigs.entry((y0, pitch, cnt)).or_default().push(x);
+                sigs.push(((y0, pitch, cnt), x));
             }
         }
         i = j;
     }
+    if sigs.is_empty() {
+        return None; // no runnable column anywhere
+    }
+    sigs.sort_unstable();
     let mut arrays: Vec<(i64, i64, i64, u64, i64, u64)> = Vec::new();
-    let mut sigs: Vec<((i64, i64, usize), Vec<i64>)> =
-        col_sigs.into_iter().collect();
-    sigs.sort_unstable_by_key(|(k, _)| *k);
-    for ((y0, dy, ny), mut xs) in sigs {
-        xs.sort_unstable();
+    let mut xs: Vec<i64> = Vec::new();
+    let mut k = 0usize;
+    while k < sigs.len() {
+        let (y0, dy, ny) = sigs[k].0;
+        xs.clear();
+        let mut m = k;
+        while m < sigs.len() && sigs[m].0 == sigs[k].0 {
+            xs.push(sigs[m].1);
+            m += 1;
+        }
+        k = m;
         for (x0, dx, nx) in const_pitch_runs(&xs) {
             // tiny fragments cost more as records than as points
             if nx * ny < 8 {
-                for k in 0..nx as i64 {
-                    for m in 0..ny as i64 {
-                        leftovers.push((x0 + k * dx, y0 + m * dy));
+                for a in 0..nx as i64 {
+                    for b in 0..ny as i64 {
+                        leftovers.push((x0 + a * dx, y0 + b * dy));
                     }
                 }
             } else {
@@ -947,17 +965,27 @@ fn grid_rep(dx: i64, nx: u64, dy: i64, ny: u64) -> Rep {
     }
 }
 
+type GridDecomp =
+    Option<(Vec<(i64, i64, i64, u64, i64, u64)>, Vec<(i64, i64)>)>;
+
 /// Split records with big point-list repetitions into gridded parts
 /// plus a leftover point list. Coverage and member counts are
 /// invariant; the tiler then splits the grids ARITHMETICALLY per
-/// tile and only the true leftovers stay explicit.
-fn normalize_cell(cell: &mut Cell) {
+/// tile and only the true leftovers stay explicit. `res` feeds the
+/// precomputed find_grids result for every candidate rep in walk
+/// order (rects, polys, paths, texts, places).
+fn normalize_cell(
+    cell: &mut Cell,
+    res: &mut impl Iterator<Item = GridDecomp>,
+) {
     macro_rules! norm {
         ($vec:expr, $shift:expr) => {{
             let old = std::mem::take(&mut $vec);
             for rec in old {
                 let decomp = match &rec.rep {
-                    Rep::Pts(p) if p.len() >= 16 => find_grids(p),
+                    Rep::Pts(p) if p.len() >= 16 => {
+                        res.next().expect("normalize task list out of sync")
+                    }
                     _ => None,
                 };
                 match decomp {
@@ -1025,23 +1053,64 @@ fn normalize_cell(cell: &mut Cell) {
     });
 }
 
+/// Candidate reps of one cell in normalize_cell's walk order.
+fn pts_candidates(cell: &Cell) -> impl Iterator<Item = &Vec<(i64, i64)>> {
+    cell.rects
+        .iter()
+        .map(|r| &r.rep)
+        .chain(cell.polys.iter().map(|r| &r.rep))
+        .chain(cell.paths.iter().map(|r| &r.rep))
+        .chain(cell.texts.iter().map(|r| &r.rep))
+        .chain(cell.places.iter().map(|r| &r.rep))
+        .filter_map(|rep| match rep {
+            Rep::Pts(p) if p.len() >= 16 => Some(p),
+            _ => None,
+        })
+}
+
 fn normalize_reps(doc: &mut Doc, jobs: usize) {
-    if jobs <= 1 || doc.cells.len() < 2 {
-        for cell in &mut doc.cells {
-            normalize_cell(cell);
+    // find_grids is a pure function of the point list and the work
+    // clusters in a handful of fill cells, so cell-chunk scheduling
+    // starved most threads (real 150 MB chip: parse 24s -> 68s at 12
+    // jobs). Phase 1 evaluates every candidate rep off a flat task
+    // list at RECORD granularity; phase 2 rebuilds the record
+    // vectors sequentially in walk order - output is byte-identical
+    // to the sequential build at any thread count.
+    let cand: Vec<&Vec<(i64, i64)>> =
+        doc.cells.iter().flat_map(pts_candidates).collect();
+    let mut results: Vec<std::sync::OnceLock<GridDecomp>> = Vec::new();
+    results.resize_with(cand.len(), std::sync::OnceLock::new);
+    if jobs <= 1 || cand.len() < 2 {
+        for (p, r) in cand.iter().zip(results.iter_mut()) {
+            let _ = r.set(find_grids(p));
         }
-        return;
+    } else {
+        // per-record atomic pull: a handful of giant reps parallelize
+        // as well as millions of small ones
+        let ctr = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|s| {
+            for _ in 0..jobs {
+                s.spawn(|| loop {
+                    let i = ctr.fetch_add(
+                        1,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    if i >= cand.len() {
+                        break;
+                    }
+                    let _ = results[i].set(find_grids(cand[i]));
+                });
+            }
+        });
     }
-    let chunk = doc.cells.len().div_ceil(jobs);
-    std::thread::scope(|s| {
-        for part in doc.cells.chunks_mut(chunk) {
-            s.spawn(move || {
-                for cell in part {
-                    normalize_cell(cell);
-                }
-            });
-        }
-    });
+    drop(cand);
+    let mut res = results
+        .into_iter()
+        .map(|c| c.into_inner().expect("normalize slot unset"));
+    for cell in &mut doc.cells {
+        normalize_cell(cell, &mut res);
+    }
+    debug_assert!(res.next().is_none());
 }
 
 const MAGIC: &[u8] = b"%SEMI-OASIS\r\n";
@@ -1196,7 +1265,9 @@ pub fn parse_doc_parallel(data: &[u8], jobs: usize) -> Result<Doc> {
 
 fn finish(b: Builder, jobs: usize) -> Result<Doc> {
     let mut doc = finish_inner(b)?;
+    let t = std::time::Instant::now();
     normalize_reps(&mut doc, jobs);
+    doc.norm_s = t.elapsed().as_secs_f64();
     Ok(doc)
 }
 
@@ -1259,5 +1330,6 @@ fn finish_inner(mut b: Builder) -> Result<Doc> {
         top: tops[0],
         layer_order: b.layer_order,
         layer_names: b.layer_names,
+        norm_s: 0.0,
     })
 }
