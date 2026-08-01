@@ -80,6 +80,10 @@ class VfsClient:
             raise RuntimeError(f"vfsd: {out['error']}")
         delta = out.get("delta", "-")
         out["delta"] = None if delta == "-" else delta
+        fr = out.get("frames", "-")
+        out["frames"] = None if fr in ("-", "") else fr
+        if out["frames"]:
+            self._last_files.append(out["frames"])
         mats = []
         mp = out.get("placements")
         if mp and mp != "-" and os.path.isfile(mp):
@@ -98,7 +102,7 @@ class VfsClient:
         out["mats"] = mats
         ev = out.get("evict", "-")
         out["evict"] = [] if ev in ("-", "") else ev.split(",")
-        for k in ("pages", "new", "bytes", "members"):
+        for k in ("pages", "new", "bytes", "members", "nframes"):
             if k in out:
                 try:
                     out[k] = int(out[k])

@@ -21,6 +21,11 @@ const PAGE_TARGET_BYTES: usize = 1 << 20; // pre-encode estimate
 const PAGE_MIN_RECORDS: usize = 64;
 const BVH_LEAF: usize = 8;
 
+// cut-frame outline layer (shared with the skeleton's cell-outline
+// convention; drawn hollow by the viewer)
+const FRAME_LAYER: u32 = 255;
+const FRAME_DT: u32 = 0;
+
 // ------------------------------------------------------------ build
 
 pub fn vfs_cmd(args: &[String]) {
@@ -904,7 +909,8 @@ pub fn plan_cmd(args: &[String]) {
          \"visited_cells\": {},\n  \"visited_bvh\": {},\n  \
          \"culled_subtrees_size\": {},\n  \
          \"culled_subtrees_layer\": {},\n  \
-         \"culled_pages_size\": {},\n  \"materializations\": {},\n  \
+         \"culled_pages_size\": {},\n  \"frames\": {},\n  \
+         \"materializations\": {},\n  \
          \"plan_ms\": {:.2}\n}}",
         plan.pages.len(),
         st.page_reads,
@@ -918,6 +924,7 @@ pub fn plan_cmd(args: &[String]) {
         st.cull_size,
         st.cull_layer,
         st.cull_page_size,
+        plan.frames.len(),
         st.materializations,
         t0.elapsed().as_secs_f64() * 1e3
     );
@@ -1080,6 +1087,39 @@ fn serve_one(
         std::fs::write(&mats_path, w)
             .map_err(|e| e.to_string())?;
     }
+    // frames: ephemeral per-view outlines for cut-dropped subtrees,
+    // always regenerated (never part of the working set)
+    let frames_path = if plan.frames.is_empty() {
+        "-".to_string()
+    } else {
+        use floe_oasis::doc::RectRec;
+        let rects: Vec<RectRec> = plan
+            .frames
+            .iter()
+            .map(|b| RectRec {
+                layer: FRAME_LAYER,
+                dt: FRAME_DT,
+                x: b.x0,
+                y: b.y0,
+                w: (b.x1 - b.x0).max(1),
+                h: (b.y1 - b.y0).max(1),
+                rep: floe_oasis::doc::Rep::One,
+            })
+            .collect();
+        let wc = WCell {
+            name: format!("FRAMES_{}", gen),
+            rects: &rects,
+            polys: &[],
+            paths: &[],
+            texts: &[],
+            places: Vec::new(),
+        };
+        let bytes =
+            write_tree(&[wc], v.ovm.unit).map_err(|e| e.to_string())?;
+        let p = format!("{}/frames_{}.oas", out, gen);
+        std::fs::write(&p, &bytes).map_err(|e| e.to_string())?;
+        p
+    };
     let evict: Vec<String> =
         upd.evict.iter().map(|&pi| v.page_name(pi)).collect();
     let mut bytes = 0u64;
@@ -1091,7 +1131,8 @@ fn serve_one(
     }
     Ok(format!(
         "gen={} pages={} new={} evict={} delta={} placements={} \
-         bytes={} members={} plan_ms={:.2} resident_mb={:.1}",
+         frames={} nframes={} bytes={} members={} plan_ms={:.2} \
+         resident_mb={:.1}",
         gen,
         plan.pages.len(),
         upd.new.len(),
@@ -1102,6 +1143,8 @@ fn serve_one(
         },
         delta_path,
         mats_path,
+        frames_path,
+        plan.frames.len(),
         bytes,
         members,
         t0.elapsed().as_secs_f64() * 1e3,

@@ -5,7 +5,12 @@
 use floe_oasis::write::{splice_tree, tree_body};
 use floe_ovm::{BBox, Ovm, PlaceV};
 use floe_oasis::doc::Rep;
+use floe_tiler::hier::rep_extent;
 use floe_tiler::Xf;
+
+/// cap on cut-frame rectangles per view (pathological arrays of
+/// below-cut cells would otherwise flood the delta)
+const FRAME_CAP: usize = 200_000;
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
 
@@ -50,6 +55,10 @@ pub struct PlanStats {
 pub struct Plan {
     pub pages: Vec<u32>, // sorted unique
     pub mats: Vec<Mat>,
+    /// world-frame bboxes of subtrees the size cut dropped: drawn as
+    /// hollow outlines so a cut wide view keeps its floorplan instead
+    /// of blanking (the coarse-LOD stand-in until V3 coverage)
+    pub frames: Vec<BBox>,
     pub stats: PlanStats,
 }
 
@@ -104,6 +113,7 @@ impl Vfs {
         let mut st = PlanStats::default();
         let mut pages = HashSet::new();
         let mut mats = Vec::new();
+        let mut frames = Vec::new();
         self.descend(
             self.ovm.top,
             &Xf::identity(),
@@ -111,11 +121,12 @@ impl Vfs {
             0,
             &mut pages,
             &mut mats,
+            &mut frames,
             &mut st,
         );
         let mut pv: Vec<u32> = pages.into_iter().collect();
         pv.sort_unstable();
-        Plan { pages: pv, mats, stats: st }
+        Plan { pages: pv, mats, frames, stats: st }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -127,6 +138,7 @@ impl Vfs {
         depth: u32,
         pages: &mut HashSet<u32>,
         mats: &mut Vec<Mat>,
+        frames: &mut Vec<BBox>,
         st: &mut PlanStats,
     ) {
         let v = &self.ovm;
@@ -209,11 +221,20 @@ impl Vfs {
                     pl.x, pl.y, pl.rot, pl.flip,
                 ));
                 let cwb = xf_bbox(&base, &child.rbbox);
+                // size is offset-invariant: a below-cut child is
+                // below cut at every rep member. Frame it (a whole
+                // array = one footprint outline) and skip descent.
                 if !cwb.is_empty()
                     && (cwb.x1 - cwb.x0) < req.cut_dbu
                     && (cwb.y1 - cwb.y0) < req.cut_dbu
                 {
                     st.cull_size += 1;
+                    if frames.len() < FRAME_CAP {
+                        frames.push(match &pl.rep {
+                            Rep::One => cwb,
+                            rep => rep_footprint(xf, &cwb, rep),
+                        });
+                    }
                     continue;
                 }
                 match &pl.rep {
@@ -224,6 +245,7 @@ impl Vfs {
                         depth + 1,
                         pages,
                         mats,
+                        frames,
                         st,
                     ),
                     rep => {
@@ -243,6 +265,7 @@ impl Vfs {
                                 depth + 1,
                                 pages,
                                 mats,
+                                frames,
                                 st,
                             );
                         }
@@ -341,6 +364,32 @@ impl Vfs {
         let bodies: Vec<&[u8]> =
             payloads.iter().map(|p| tree_body(p)).collect();
         Ok(splice_tree(self.ovm.unit, &bodies))
+    }
+}
+
+/// world footprint of a whole repetition whose offset-0 member has
+/// world bbox `base_wb`: offsets translate in the parent frame, so
+/// their world span is xf.apply_vec of the local offset extent.
+fn rep_footprint(xf: &Xf, base_wb: &BBox, rep: &Rep) -> BBox {
+    let ((ox0, ox1), (oy0, oy1)) = rep_extent(rep);
+    let mut wx0 = i64::MAX;
+    let mut wx1 = i64::MIN;
+    let mut wy0 = i64::MAX;
+    let mut wy1 = i64::MIN;
+    for &(ox, oy) in
+        &[(ox0, oy0), (ox1, oy0), (ox0, oy1), (ox1, oy1)]
+    {
+        let (dx, dy) = xf.apply_vec(ox, oy);
+        wx0 = wx0.min(dx);
+        wx1 = wx1.max(dx);
+        wy0 = wy0.min(dy);
+        wy1 = wy1.max(dy);
+    }
+    BBox {
+        x0: base_wb.x0 + wx0,
+        y0: base_wb.y0 + wy0,
+        x1: base_wb.x1 + wx1,
+        y1: base_wb.y1 + wy1,
     }
 }
 

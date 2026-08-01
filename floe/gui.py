@@ -1580,8 +1580,11 @@ class Viewer:
         self._dialog_show(dlg, spin)
 
     def _cut_dialog(self):
-        """Runtime control of the size-band detail cut (screen px)."""
-        if not self.meta.get("bands"):
+        """Runtime control of the detail cut (screen px). Size-banded
+        .ice caches and VFS caches both support it (VFS applies the
+        cut in the daemon's page plan, showing cut-dropped subtrees as
+        outline frames)."""
+        if not self.meta.get("bands") and not self.meta.get("vfs"):
             self._set_status(self.view_bbox(),
                              "no size bands in this cache - reindex "
                              "with the current floe to enable the cut")

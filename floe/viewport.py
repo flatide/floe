@@ -36,19 +36,32 @@ class VfsMosaic:
     names are globally unique, so reads never merge (no @t tags) and
     eviction prunes exactly one page subtree by name."""
 
+    # cut-frame outline layer (matches vfsd FRAME_LAYER/DT and the
+    # skeleton cell-outline convention); drawn hollow
+    FRAME_LAYER = (255, 0)
+
     def __init__(self, cache):
         self.ly = db.Layout(False)  # pages keep arrays compact
         self.ly.dbu = cache.meta["dbu"]
         for l in cache.meta["layers"]:
             self.ly.layer(db.LayerInfo(l["layer"], l["datatype"]))
+        self.ly.layer(db.LayerInfo(*self.FRAME_LAYER))
         self.top = self.ly.create_cell("FLOE_WS")
         self.cells = {}  # page cell name -> cell index
         self.design = {}  # page cell name -> design cell name
+        self.frame_ci = None  # ephemeral cut-frame cell
 
-    def apply(self, delta_path, mats, evict):
-        """Read new pages, drop evicted ones, rebuild the top's
+    def apply(self, delta_path, mats, evict, frames_path=None):
+        """Read new pages, drop evicted ones and the previous frame
+        cell, read the current frames, then rebuild the top's
         instances to exactly the plan. True = layout changed."""
         changed = False
+        # cut frames are per-view: drop the previous set first so no
+        # stale index survives into the eviction remap below
+        if self.frame_ci is not None:
+            self.ly.prune_cell(self.frame_ci, -1)
+            self.frame_ci = None
+            changed = True
         if delta_path:
             self.ly.read(delta_path)
             for c in self.ly.each_cell():
@@ -67,6 +80,12 @@ class VfsMosaic:
             self.cells = {c.name: c.cell_index()
                           for c in self.ly.each_cell()
                           if c.name in keep}
+        if frames_path:
+            self.ly.read(frames_path)
+            for c in self.ly.each_cell():
+                if c.name.startswith("FRAMES_"):
+                    self.frame_ci = c.cell_index()
+            changed = True
         self.top.clear_insts()
         for m in mats:
             nm, x, y, rot, flip = m[:5]
@@ -76,6 +95,9 @@ class VfsMosaic:
             if ci is not None:
                 self.top.insert(db.CellInstArray(
                     ci, db.Trans(rot, flip, db.Vector(x, y))))
+        if self.frame_ci is not None:
+            self.top.insert(db.CellInstArray(
+                self.frame_ci, db.Trans()))
         return changed
 
 

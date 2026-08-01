@@ -524,15 +524,19 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, res, newer,
                                  cut_px, layers, job.get("depth"))
     if newer():
         return
-    if mosaic.apply(r["delta"], r["mats"], r["evict"]):
+    if mosaic.apply(r["delta"], r["mats"], r["evict"], r["frames"]):
         renderer.refresh()
     t_load = time.perf_counter() - tl
     if newer():
         return
     td = time.perf_counter()
     renderer.set_abstract(job.get("abstract"))
+    # the cut-frame outline layer is structural: always drawn, even
+    # when the user has narrowed the visible-layer set
+    vis_r = (None if job["visible"] is None
+             else list(job["visible"]) + [VfsMosaic.FRAME_LAYER])
     renderer.render_png(tmp, x0, y0, x1, y1, job["w"], job["h"],
-                        visible=job["visible"], depth=None)
+                        visible=vis_r, depth=None)
     t_draw = time.perf_counter() - td
     with open(tmp, "rb") as f:
         png = f.read()
@@ -594,8 +598,11 @@ def _render_service(src, req, res, latest=None):
             from .vfsclient import VfsClient
             cache.vfs_client = VfsClient(cache.dir)
             mosaic = VfsMosaic(cache)
-            renderer = Renderer(mosaic.ly, mosaic.top, colors,
-                                hier_offset=0)
+            fcolors = dict(colors)
+            fcolors[VfsMosaic.FRAME_LAYER] = "#93a4ad"
+            renderer = Renderer(mosaic.ly, mosaic.top, fcolors,
+                                hier_offset=0,
+                                hollow=(VfsMosaic.FRAME_LAYER,))
             lod = None
         else:
             mosaic = Mosaic(cache)
