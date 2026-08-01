@@ -545,6 +545,42 @@ fn own_rss_gb() -> Option<f64> {
     proc_kv_gb("/proc/self/status", "VmRSS:")
 }
 
+fn peak_rss_gb() -> Option<f64> {
+    proc_kv_gb("/proc/self/status", "VmHWM:")
+}
+
+/// du -h style: binary units, one decimal below 10
+fn fmt_size(bytes: u64) -> String {
+    let mut v = bytes as f64;
+    for unit in ["B", "K", "M", "G", "T"] {
+        if v < 1024.0 || unit == "T" {
+            return if v < 10.0 && unit != "B" {
+                format!("{:.1}{}", v, unit)
+            } else {
+                format!("{:.0}{}", v, unit)
+            };
+        }
+        v /= 1024.0;
+    }
+    unreachable!()
+}
+
+/// (total bytes, file count) of the files directly inside dir
+fn dir_bytes(dir: &str) -> (u64, u64) {
+    let (mut bytes, mut n) = (0u64, 0u64);
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            if let Ok(md) = e.metadata() {
+                if md.is_file() {
+                    bytes += md.len();
+                    n += 1;
+                }
+            }
+        }
+    }
+    (bytes, n)
+}
+
 fn tsv_esc(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
@@ -760,6 +796,9 @@ fn index_cmd(args: &[String]) {
     let finished = std::sync::atomic::AtomicUsize::new(0);
     let active = std::sync::atomic::AtomicUsize::new(0);
     let waiting = std::sync::atomic::AtomicUsize::new(0);
+    // cumulative wait episodes for the end-of-run summary (the
+    // gauge above is the live count shown in heartbeats)
+    let mem_waits = std::sync::atomic::AtomicUsize::new(0);
     // few tiles = long tiles: per-tile completion lines are the
     // useful signal there and stay quiet on fine grids
     let per_tile_log = coords.len() <= 64;
@@ -815,6 +854,7 @@ fn index_cmd(args: &[String]) {
             let finished = &finished;
             let active = &active;
             let waiting = &waiting;
+            let mem_waits = &mem_waits;
             let coords = &coords;
             hs.push(sc.spawn(move || -> Result<Vec<TRes>, String> {
                 use std::sync::atomic::Ordering::Relaxed;
@@ -849,6 +889,7 @@ fn index_cmd(args: &[String]) {
                         if !waited {
                             waited = true;
                             waiting.fetch_add(1, Relaxed);
+                            mem_waits.fetch_add(1, Relaxed);
                         }
                         std::thread::sleep(
                             std::time::Duration::from_millis(300),
@@ -1141,6 +1182,50 @@ fn index_cmd(args: &[String]) {
     );
     std::fs::write(format!("{}/meta.json", outdir), meta)
         .expect("write meta");
+
+    // end-of-run cache summary: the closed-network hosts otherwise
+    // need a manual du sweep to report the numbers back
+    let mut rows: Vec<(String, u64, u64)> = (0..nbands)
+        .map(|k| format!("tiles_b{}", k))
+        .chain(std::iter::once("tiles_lod".to_string()))
+        .map(|d| {
+            let (b, n) = dir_bytes(&format!("{}/{}", outdir, d));
+            (d, b, n)
+        })
+        .collect();
+    for f in ["skeleton.oas", "texts.tsv", "meta.json"] {
+        let b = std::fs::metadata(format!("{}/{}", outdir, f))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        rows.push((f.to_string(), b, 0));
+    }
+    let cache_bytes: u64 = rows.iter().map(|r| r.1).sum();
+    eprintln!(
+        "[index] cache {} (src {}, {:.2}x)",
+        fmt_size(cache_bytes),
+        fmt_size(size),
+        cache_bytes as f64 / size.max(1) as f64
+    );
+    for (name, b, n) in &rows {
+        if *n > 0 {
+            eprintln!(
+                "[index]   {:<12} {:>6}  {} files",
+                name,
+                fmt_size(*b),
+                n
+            );
+        } else if !name.starts_with("tiles_") {
+            eprintln!("[index]   {:<12} {:>6}", name, fmt_size(*b));
+        } // band dirs that stayed empty are omitted
+    }
+    let waits =
+        mem_waits.load(std::sync::atomic::Ordering::Relaxed);
+    if let Some(hwm) = peak_rss_gb() {
+        eprintln!(
+            "[index] peak rss {:.1} GB, mem waits {}",
+            hwm, waits
+        );
+    }
     eprintln!(
         "[index] done in {:.1}s -> {}",
         t_all.elapsed().as_secs_f64(),
@@ -1150,6 +1235,7 @@ fn index_cmd(args: &[String]) {
         "{{\n  \"cells\": {},\n  \"members\": {},\n  \
          \"band_files\": {},\n  \"tiles\": {},\n  \
          \"grid\": \"{}x{}\",\n  \
+         \"src_bytes\": {},\n  \"cache_bytes\": {},\n  \
          \"read_s\": {:.3},\n  \"parse_s\": {:.3},\n  \
          \"tiles_s\": {:.3},\n  \"skel_s\": {:.3},\n  \
          \"total_s\": {:.3}\n}}",
@@ -1159,6 +1245,8 @@ fn index_cmd(args: &[String]) {
         tiles_written,
         grid.nx,
         grid.ny,
+        size,
+        cache_bytes,
         t_read,
         t_parse,
         t_tiles,

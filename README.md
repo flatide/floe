@@ -687,6 +687,11 @@ floe-index --version
   (반입 바이너리가 여럿 돌아다니므로 어떤 빌드인지 매 실행 명시),
   5초마다 `tiles N done, M building / total (Ns)` 하트비트, 타일이
   64개 이하면 타일별 완료 라인(멤버 수·소요 시간)도 나온다.
+- **종료 요약**: 끝나면 캐시 크기 요약이 자동 출력된다 — 밴드별
+  (`tiles_b0..b3`, `tiles_lod`) 크기·파일 수, skeleton/texts.tsv/
+  meta.json 크기, 합계와 원본 대비 배율, 피크 RSS(`VmHWM`)와 거버너
+  대기 횟수(리눅스). `du` 스윕 없이 이 블록만 옮겨 적으면 된다.
+  stdout JSON에도 `src_bytes`/`cache_bytes`가 들어간다.
 - `scan`은 셀/레이어별 레코드·멤버 수, 텍스트, placement, repetition
   타입 히스토그램(`rep_types`)을 JSON으로 출력한다 — 파일 구성 진단용
   (175GB 캐시 사건의 원인 확정도 이 히스토그램으로 했다).
