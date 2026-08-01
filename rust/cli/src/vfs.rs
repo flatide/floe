@@ -86,7 +86,7 @@ pub fn vfs_cmd(args: &[String]) {
         doc.norm_s
     );
     std::fs::create_dir_all(&outdir).expect("mkdir outdir");
-    build(&doc, size, mtime, &outdir);
+    build(&doc, size, mtime, &outdir, jobs);
     emit_viewer_side(&doc, &src, size, mtime, &outdir);
     eprintln!(
         "[vfs] done in {:.1}s -> {}",
@@ -270,6 +270,7 @@ fn win_to_bbox(w: Option<(i64, i64, i64, i64)>) -> BBox {
 }
 
 /// per-record page item: kind 0 rect / 1 poly / 2 path
+#[derive(Clone)]
 struct PRec {
     kind: u8,
     idx: u32,
@@ -288,7 +289,100 @@ fn rep_est(rep: &Rep) -> u32 {
     }
 }
 
-fn build(doc: &Doc, size: u64, mtime: u64, outdir: &str) {
+/// one page's work: which records, and the metadata the split
+/// already computed. Payload encoding (write_tree + deflate, the
+/// build's hot cost) is deferred so it can run in parallel.
+struct PageJob {
+    ci: usize,
+    li: u32,
+    seq: u16,
+    recs: Vec<PRec>,
+    bbox: BBox,
+    members: u64,
+    max_w: i64,
+    max_h: i64,
+}
+
+/// spatial-split a layer's records into page groups (same policy as
+/// the old emit_pages, but produces jobs instead of writing bytes)
+fn split_pages(
+    ci: usize,
+    li: u32,
+    recs: &mut [PRec],
+    seq: &mut u16,
+    out: &mut Vec<PageJob>,
+) {
+    let bytes: u64 = recs.iter().map(|r| r.bytes as u64).sum();
+    if bytes > PAGE_TARGET_BYTES as u64
+        && recs.len() > PAGE_MIN_RECORDS
+    {
+        let mut bb = BBox::EMPTY;
+        for r in recs.iter() {
+            bb.grow(&r.bbox);
+        }
+        let mid = recs.len() / 2;
+        if bb.x1 - bb.x0 >= bb.y1 - bb.y0 {
+            recs.select_nth_unstable_by_key(mid, |r| {
+                r.bbox.x0 + r.bbox.x1
+            });
+        } else {
+            recs.select_nth_unstable_by_key(mid, |r| {
+                r.bbox.y0 + r.bbox.y1
+            });
+        }
+        let (a, c) = recs.split_at_mut(mid);
+        split_pages(ci, li, a, seq, out);
+        split_pages(ci, li, c, seq, out);
+        return;
+    }
+    let mut bb = BBox::EMPTY;
+    let mut members = 0u64;
+    let (mut max_w, mut max_h) = (0i64, 0i64);
+    for r in recs.iter() {
+        bb.grow(&r.bbox);
+        members += r.members;
+        max_w = max_w.max(r.w);
+        max_h = max_h.max(r.h);
+    }
+    out.push(PageJob {
+        ci,
+        li,
+        seq: *seq,
+        recs: recs.to_vec(),
+        bbox: bb,
+        members,
+        max_w,
+        max_h,
+    });
+    *seq = seq.checked_add(1).expect("page seq overflow");
+}
+
+/// encode one page job to its OASIS payload (parallel-safe: reads
+/// doc immutably, allocates only its own buffers)
+fn encode_job(doc: &Doc, job: &PageJob) -> Vec<u8> {
+    let cell = &doc.cells[job.ci];
+    let mut rects: Vec<RectRec> = Vec::new();
+    let mut polys: Vec<PolyRec> = Vec::new();
+    let mut paths: Vec<PathRec> = Vec::new();
+    for r in &job.recs {
+        match r.kind {
+            0 => rects.push(cell.rects[r.idx as usize].clone()),
+            1 => polys.push(cell.polys[r.idx as usize].clone()),
+            _ => paths.push(cell.paths[r.idx as usize].clone()),
+        }
+    }
+    let wc = WCell {
+        name: floe_ovm::page_cell_name(job.ci as u32, job.li, job.seq),
+        rects: &rects,
+        polys: &polys,
+        paths: &paths,
+        texts: &[],
+        places: Vec::new(),
+    };
+    write_tree(&[wc], doc.unit).expect("page payload")
+}
+
+fn build(doc: &Doc, size: u64, mtime: u64, outdir: &str, jobs: usize) {
     let t0 = std::time::Instant::now();
     let n = doc.cells.len();
     let rbb = cell_bboxes_full(doc);
@@ -450,13 +544,9 @@ fn build(doc: &Doc, size: u64, mtime: u64, outdir: &str) {
         b.layer(l, d, &nm, lrecs[i], lmems[i]);
     }
 
-    let ovp_path = format!("{}/design.ovp", outdir);
-    let mut ovp = std::io::BufWriter::new(
-        std::fs::File::create(&ovp_path).expect("create ovp"),
-    );
-    let mut ovp_off = 0u64;
-    let mut pages_total = 0u64;
-    let mut pages_bytes = 0u64;
+    // page jobs accumulate across the cell loop (splitting only);
+    // payloads encode in parallel afterwards
+    let mut jobs_list: Vec<PageJob> = Vec::new();
 
     for ci in 0..n {
         let cell = &doc.cells[ci];
@@ -523,8 +613,11 @@ fn build(doc: &Doc, size: u64, mtime: u64, outdir: &str) {
             (base, nodes.len() as u32)
         };
 
-        // ---- pages per layer, in layer order
-        let page_start = b.n_pages();
+        // ---- pages per layer, in layer order. Split into jobs now
+        // (cheap); payloads encode in parallel after the cell loop.
+        // Page index == job index (phase 3 appends in job order), so
+        // page_start is the job count seen so far.
+        let page_start = jobs_list.len() as u32;
         let mut per_layer: Vec<Vec<PRec>> =
             (0..nl).map(|_| Vec::new()).collect();
         for (idx, r) in cell.rects.iter().enumerate() {
@@ -590,14 +683,10 @@ fn build(doc: &Doc, size: u64, mtime: u64, outdir: &str) {
                 continue;
             }
             let mut seq = 0u16;
-            let total = recs.len();
-            emit_pages(
-                doc, ci, li as u32, &mut recs[..], total, &mut seq,
-                &mut b, &mut ovp, &mut ovp_off, &mut pages_total,
-                &mut pages_bytes,
-            );
+            split_pages(ci, li as u32, &mut recs[..], &mut seq,
+                        &mut jobs_list);
         }
-        let page_count = b.n_pages() - page_start;
+        let page_count = jobs_list.len() as u32 - page_start;
 
         let mask_d = b.bitset(&dmask[ci]);
         let mask_r = b.bitset(&rmask[ci]);
@@ -616,6 +705,62 @@ fn build(doc: &Doc, size: u64, mtime: u64, outdir: &str) {
             mask_r,
             rmembers[ci],
         );
+    }
+
+    // phase 2: encode page payloads in parallel (write_tree +
+    // deflate-6 is the build's hot cost; jobs are independent)
+    let mut payloads: Vec<Vec<u8>> = Vec::new();
+    payloads.resize_with(jobs_list.len(), Vec::new);
+    if jobs > 1 && jobs_list.len() > 1 {
+        // disjoint chunks_mut slices = safe parallel fill; pages are
+        // ~uniform (1 MB target) so static chunking balances well
+        let chunk = jobs_list.len().div_ceil(jobs).max(1);
+        std::thread::scope(|s| {
+            for (jc, pc) in jobs_list
+                .chunks(chunk)
+                .zip(payloads.chunks_mut(chunk))
+            {
+                s.spawn(move || {
+                    for (job, slot) in jc.iter().zip(pc.iter_mut())
+                    {
+                        *slot = encode_job(doc, job);
+                    }
+                });
+            }
+        });
+    } else {
+        for (i, job) in jobs_list.iter().enumerate() {
+            payloads[i] = encode_job(doc, job);
+        }
+    }
+
+    // phase 3: write payloads sequentially (assigns ovp offsets) and
+    // append page records in job order (page index == job index)
+    let ovp_path = format!("{}/design.ovp", outdir);
+    let mut ovp = std::io::BufWriter::new(
+        std::fs::File::create(&ovp_path).expect("create ovp"),
+    );
+    let mut ovp_off = 0u64;
+    let mut pages_bytes = 0u64;
+    let pages_total = jobs_list.len() as u64;
+    for (job, payload) in jobs_list.iter().zip(&payloads) {
+        std::io::Write::write_all(&mut ovp, payload)
+            .expect("write ovp");
+        b.page(
+            job.ci as u32,
+            job.li,
+            job.seq,
+            &job.bbox,
+            ovp_off,
+            payload.len() as u32,
+            payload.len() as u32,
+            job.recs.len() as u32,
+            job.members,
+            job.max_w.clamp(0, u32::MAX as i64) as u32,
+            job.max_h.clamp(0, u32::MAX as i64) as u32,
+        );
+        ovp_off += payload.len() as u64;
+        pages_bytes += payload.len() as u64;
     }
     ovp.flush().expect("flush ovp");
     let ovm_bytes = b.finish();
@@ -674,101 +819,6 @@ fn split_bvh(
     let (a, c) = items.split_at_mut(mid);
     split_bvh(nodes, a, lo, l);
     split_bvh(nodes, c, lo + mid, l + 1);
-}
-
-#[allow(clippy::too_many_arguments)]
-fn emit_pages(
-    doc: &Doc,
-    ci: usize,
-    li: u32,
-    recs: &mut [PRec],
-    total: usize,
-    seq: &mut u16,
-    b: &mut Builder,
-    ovp: &mut std::io::BufWriter<std::fs::File>,
-    ovp_off: &mut u64,
-    pages_total: &mut u64,
-    pages_bytes: &mut u64,
-) {
-    let bytes: u64 = recs.iter().map(|r| r.bytes as u64).sum();
-    if bytes > PAGE_TARGET_BYTES as u64
-        && recs.len() > PAGE_MIN_RECORDS
-    {
-        let mut bb = BBox::EMPTY;
-        for r in recs.iter() {
-            bb.grow(&r.bbox);
-        }
-        let mid = recs.len() / 2;
-        if bb.x1 - bb.x0 >= bb.y1 - bb.y0 {
-            recs.select_nth_unstable_by_key(mid, |r| {
-                r.bbox.x0 + r.bbox.x1
-            });
-        } else {
-            recs.select_nth_unstable_by_key(mid, |r| {
-                r.bbox.y0 + r.bbox.y1
-            });
-        }
-        let (a, c) = recs.split_at_mut(mid);
-        emit_pages(
-            doc, ci, li, a, total, seq, b, ovp, ovp_off,
-            pages_total, pages_bytes,
-        );
-        emit_pages(
-            doc, ci, li, c, total, seq, b, ovp, ovp_off,
-            pages_total, pages_bytes,
-        );
-        return;
-    }
-    // assemble the page payload: single-cell OASIS via write_tree
-    let cell = &doc.cells[ci];
-    let mut rects: Vec<RectRec> = Vec::new();
-    let mut polys: Vec<PolyRec> = Vec::new();
-    let mut paths: Vec<PathRec> = Vec::new();
-    let mut bb = BBox::EMPTY;
-    let mut members = 0u64;
-    let (mut max_w, mut max_h) = (0i64, 0i64);
-    for r in recs.iter() {
-        bb.grow(&r.bbox);
-        members += r.members;
-        max_w = max_w.max(r.w);
-        max_h = max_h.max(r.h);
-        match r.kind {
-            0 => rects.push(cell.rects[r.idx as usize].clone()),
-            1 => polys.push(cell.polys[r.idx as usize].clone()),
-            _ => paths.push(cell.paths[r.idx as usize].clone()),
-        }
-    }
-    // unique per-page cell name: the working-set delta splices page
-    // bodies verbatim into one file, so names must never collide
-    let wc = WCell {
-        name: floe_ovm::page_cell_name(ci as u32, li, *seq),
-        rects: &rects,
-        polys: &polys,
-        paths: &paths,
-        texts: &[],
-        places: Vec::new(),
-    };
-    let payload =
-        write_tree(&[wc], doc.unit).expect("page payload");
-    ovp.write_all(&payload).expect("write ovp");
-    b.page(
-        ci as u32,
-        li,
-        *seq,
-        &bb,
-        *ovp_off,
-        payload.len() as u32,
-        payload.len() as u32,
-        recs.len() as u32,
-        members,
-        max_w.clamp(0, u32::MAX as i64) as u32,
-        max_h.clamp(0, u32::MAX as i64) as u32,
-    );
-    *ovp_off += payload.len() as u64;
-    *pages_total += 1;
-    *pages_bytes += payload.len() as u64;
-    *seq = seq.checked_add(1).expect("page seq overflow");
-    let _ = total;
 }
 
 fn fmt_size(bytes: u64) -> String {
