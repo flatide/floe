@@ -54,7 +54,13 @@ BAND_THRESHOLDS_UM = (0.125, 0.5, 2.0)
 
 
 def cache_dir_for(src):
-    return os.path.abspath(src) + ".ice"
+    """Cache directory for a source: the VFS cache (<src>.floe, built
+    by `floe-index vfs`) wins when present, else the classic .ice."""
+    base = os.path.abspath(src)
+    floe = base + ".floe"
+    if os.path.isfile(os.path.join(floe, "meta.json")):
+        return floe
+    return base + ".ice"
 
 
 def _rss_gb(pid):

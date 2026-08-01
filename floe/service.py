@@ -18,7 +18,7 @@ import klayout.db as db
 
 from . import cache as cache_mod
 from .render import Renderer
-from .viewport import Mosaic, live_caps
+from .viewport import Mosaic, VfsMosaic, live_caps
 
 _SNAP_CAP = 400   # max shapes examined per snap query
 _PICK_CAP = 64    # max candidates per pick query
@@ -123,6 +123,32 @@ def _iter_global_polys(mosaic, layers_sel, box):
             it.next()
 
 
+def _probe_layout(cache, box, layers):
+    """VFS caches: an exact (cut=0, session-less) throwaway working
+    set for a small query box - the pick/snap/clip counterpart of
+    'load every band'."""
+    dbu = cache.meta["dbu"]
+    r = cache.vfs_client.request(
+        0,
+        (box.left * dbu, box.bottom * dbu,
+         box.right * dbu, box.top * dbu),
+        1.0, 0.0, layers, None, probe=True)
+    m = VfsMosaic(cache)
+    m.apply(r["delta"], r["mats"], [])
+    return m
+
+
+def _exact_source(cache, mosaic, box, layers):
+    """The layout to measure against: probe working set (VFS) or the
+    tile mosaic with every band loaded (.ice)."""
+    if getattr(cache, "vfs_client", None):
+        return _probe_layout(cache, box, layers)
+    mosaic.ensure(cache.tiles_for_bbox(box.left, box.bottom,
+                                       box.right, box.top))
+    mosaic.apply_visibility(None)   # measure against every band
+    return mosaic
+
+
 def _svc_snap(cache, mosaic, job, res):
     """Vector snap: nearest vertex within radius wins, else the nearest
     point on an edge."""
@@ -131,10 +157,9 @@ def _svc_snap(cache, mosaic, job, res):
     try:
         px, py, r = job["x"], job["y"], max(1, job["r"])
         box = db.Box(px - r, py - r, px + r, py + r)
-        mosaic.ensure(cache.tiles_for_bbox(box.left, box.bottom,
-                                           box.right, box.top))
-        mosaic.apply_visibility(None)   # measure against every band
         sel = set(map(tuple, job["layers"])) if job.get("layers") else None
+        mosaic = _exact_source(cache, mosaic, box,
+                               sorted(sel) if sel else None)
         r2 = float(r) * r
         best_v = best_e = None
         n = 0
@@ -181,10 +206,9 @@ def _svc_pick(cache, mosaic, job, res):
     try:
         px, py, r = job["x"], job["y"], max(1, job["r"])
         box = db.Box(px - r, py - r, px + r, py + r)
-        mosaic.ensure(cache.tiles_for_bbox(box.left, box.bottom,
-                                           box.right, box.top))
-        mosaic.apply_visibility(None)   # measure against every band
         sel = set(map(tuple, job["layers"])) if job.get("layers") else None
+        mosaic = _exact_source(cache, mosaic, box,
+                               sorted(sel) if sel else None)
         p = db.Point(px, py)
         ly = mosaic.ly
         cands = []
@@ -210,10 +234,12 @@ def _svc_pick(cache, mosaic, job, res):
         else:
             bb = db.Box(tpos[0] - 1, tpos[1] - 1, tpos[0] + 1, tpos[1] + 1)
             pts = []
+        cname = getattr(mosaic, "design", {}).get(cell) \
+            or _strip_band(cell)
         out.update(found=True, count=len(cands), index=i,
                    layer=info.layer, datatype=info.datatype,
                    lname=info.name or f"{info.layer}/{info.datatype}",
-                   cell=_strip_band(cell), area=area,
+                   cell=cname, area=area,
                    bbox=[bb.left, bb.bottom, bb.right, bb.top], points=pts)
     except Exception as e:
         out["err"] = str(e)
@@ -286,6 +312,9 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
             skel_renderer.render_png(tmp, x0, y0, x1, y1,
                                      job["w"], job["h"], visible=vis)
             tiles_n = 0
+        elif getattr(cache, "vfs_client", None):
+            return _svc_render_vfs(cache, mosaic, renderer, tmp,
+                                   job, res, newer, wait_ms, t0)
         else:
             tiles = cache.tiles_for_bbox(x0, y0, x1, y1)
             if len(tiles) > live_caps(cache.meta)[0]:
@@ -476,11 +505,62 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
         res.put({"kind": "error", "msg": str(e)})
 
 
+def _svc_render_vfs(cache, mosaic, renderer, tmp, job, res, newer,
+                    wait_ms, t0):
+    """VFS render: one vfsd round-trip plans the viewport, the delta
+    file carries only the pages the working set lacks, and klayout
+    draws the rebuilt FLOE_WS. Depth semantics live in the plan (the
+    daemon stops descending), so klayout renders at full hierarchy."""
+    x0, y0, x1, y1 = job["bbox"]
+    dbu = cache.meta["dbu"]
+    view_um = (x0 * dbu, y0 * dbu, x1 * dbu, y1 * dbu)
+    px_per_um = job["w"] / max(1e-9, (x1 - x0) * dbu)
+    cut_px = job.get("cut_px")
+    cut_px = CUT_PX if cut_px is None else max(0.0, float(cut_px))
+    vis = job["visible"]
+    layers = [tuple(v) for v in vis] if vis is not None else None
+    tl = time.perf_counter()
+    r = cache.vfs_client.request(job["gen"], view_um, px_per_um,
+                                 cut_px, layers, job.get("depth"))
+    if newer():
+        return
+    if mosaic.apply(r["delta"], r["mats"], r["evict"]):
+        renderer.refresh()
+    t_load = time.perf_counter() - tl
+    if newer():
+        return
+    td = time.perf_counter()
+    renderer.set_abstract(job.get("abstract"))
+    renderer.render_png(tmp, x0, y0, x1, y1, job["w"], job["h"],
+                        visible=job["visible"], depth=None)
+    t_draw = time.perf_counter() - td
+    with open(tmp, "rb") as f:
+        png = f.read()
+    out = {"kind": "frame", "png": png, "bbox": job["bbox"],
+           "gen": job["gen"], "tiles": r.get("pages", 0),
+           "scope": "live", "bg": False,
+           "load_ms": round(t_load * 1000),
+           "draw_ms": round(t_draw * 1000), "wait_ms": wait_ms,
+           "ms": round((time.perf_counter() - t0) * 1000)}
+    if cut_px:
+        out["cut_um"] = round(cut_px / max(1e-9, px_per_um), 3)
+    if isinstance(r.get("members"), int):
+        out["drawn"] = r["members"]
+    res.put(out)
+
+
 def _svc_clip(cache, job, res):
     t0 = time.perf_counter()
     try:
         x0, y0, x1, y1 = job["bbox"]
-        ly, top, _ = cache_mod.load_region(cache, x0, y0, x1, y1)
+        if getattr(cache, "vfs_client", None):
+            m = _probe_layout(
+                cache, db.Box(int(x0), int(y0), int(x1), int(y1)),
+                [tuple(l) for l in job["layers"]]
+                if job.get("layers") else None)
+            ly, top = m.ly, m.top
+        else:
+            ly, top, _ = cache_mod.load_region(cache, x0, y0, x1, y1)
         ci = ly.clip(top.cell_index(), db.Box(x0, y0, x1, y1))
         ly.cell(ci).name = "FLOE_CLIP"
         opt = cache_mod.save_opts()
@@ -508,12 +588,21 @@ def _render_service(src, req, res, latest=None):
     try:
         cache = cache_mod.Cache(src)
         cache.load()
-        mosaic = Mosaic(cache)
         colors = {(l["layer"], l["datatype"]): l["color"]
                   for l in cache.meta["layers"]}
-        renderer = Renderer(mosaic.ly, mosaic.top, colors, hier_offset=2)
-        lod = None
-        if cache.meta.get("lod"):
+        if cache.meta.get("vfs"):
+            from .vfsclient import VfsClient
+            cache.vfs_client = VfsClient(cache.dir)
+            mosaic = VfsMosaic(cache)
+            renderer = Renderer(mosaic.ly, mosaic.top, colors,
+                                hier_offset=0)
+            lod = None
+        else:
+            mosaic = Mosaic(cache)
+            renderer = Renderer(mosaic.ly, mosaic.top, colors,
+                                hier_offset=2)
+            lod = None
+        if not cache.meta.get("vfs") and cache.meta.get("lod"):
             def _lod_path(r, c):
                 # tiles small enough to need no LOD double as their own
                 p = cache.lod_tile_path(r, c)
@@ -578,6 +667,10 @@ def _render_service(src, req, res, latest=None):
                             req, res, latest)
     except (KeyboardInterrupt, EOFError, OSError):
         return  # parent went away or interrupted: exit quietly
+    finally:
+        vc = getattr(cache, "vfs_client", None)
+        if vc is not None:
+            vc.stop()
 
 
 class RenderWorker:

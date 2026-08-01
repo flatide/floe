@@ -1063,13 +1063,18 @@ fn serve_one(
     {
         let mut w = String::new();
         for m in &upd.mats {
+            // 6th column: design cell name (pick/status display -
+            // page cells are an implementation detail)
+            let dname =
+                v.ovm.cell(v.ovm.page(m.page).cell).name;
             w.push_str(&format!(
-                "{}\t{}\t{}\t{}\t{}\n",
+                "{}\t{}\t{}\t{}\t{}\t{}\n",
                 v.page_name(m.page),
                 m.x,
                 m.y,
                 m.rot,
-                m.flip as u8
+                m.flip as u8,
+                dname
             ));
         }
         std::fs::write(&mats_path, w)
@@ -1078,12 +1083,15 @@ fn serve_one(
     let evict: Vec<String> =
         upd.evict.iter().map(|&pi| v.page_name(pi)).collect();
     let mut bytes = 0u64;
+    let mut members = 0u64;
     for &pi in &plan.pages {
-        bytes += v.ovm.page(pi).csize as u64;
+        let p = v.ovm.page(pi);
+        bytes += p.csize as u64;
+        members += p.members;
     }
     Ok(format!(
         "gen={} pages={} new={} evict={} delta={} placements={} \
-         bytes={} plan_ms={:.2} resident_mb={:.1}",
+         bytes={} members={} plan_ms={:.2} resident_mb={:.1}",
         gen,
         plan.pages.len(),
         upd.new.len(),
@@ -1095,6 +1103,7 @@ fn serve_one(
         delta_path,
         mats_path,
         bytes,
+        members,
         t0.elapsed().as_secs_f64() * 1e3,
         sess.resident_bytes() as f64 / (1 << 20) as f64
     ))

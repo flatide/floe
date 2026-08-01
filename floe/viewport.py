@@ -29,6 +29,56 @@ def live_caps(meta):
     return MAX_LIVE_TILES * f, EVICT_ABOVE * f
 
 
+class VfsMosaic:
+    """Working-set layout fed by vfsd deltas (VFS caches): page
+    cells arrive pre-spliced in one delta file per view, the top's
+    instance list mirrors the daemon's placement plan. Page cell
+    names are globally unique, so reads never merge (no @t tags) and
+    eviction prunes exactly one page subtree by name."""
+
+    def __init__(self, cache):
+        self.ly = db.Layout(False)  # pages keep arrays compact
+        self.ly.dbu = cache.meta["dbu"]
+        for l in cache.meta["layers"]:
+            self.ly.layer(db.LayerInfo(l["layer"], l["datatype"]))
+        self.top = self.ly.create_cell("FLOE_WS")
+        self.cells = {}  # page cell name -> cell index
+        self.design = {}  # page cell name -> design cell name
+
+    def apply(self, delta_path, mats, evict):
+        """Read new pages, drop evicted ones, rebuild the top's
+        instances to exactly the plan. True = layout changed."""
+        changed = False
+        if delta_path:
+            self.ly.read(delta_path)
+            for c in self.ly.each_cell():
+                nm = c.name
+                if nm.startswith("P") and nm not in self.cells:
+                    self.cells[nm] = c.cell_index()
+            changed = True
+        for nm in evict:
+            ci = self.cells.pop(nm, None)
+            if ci is not None:
+                self.ly.prune_cell(ci, -1)
+                changed = True
+        if evict:
+            # klayout may reuse freed indexes: remap survivors
+            keep = set(self.cells)
+            self.cells = {c.name: c.cell_index()
+                          for c in self.ly.each_cell()
+                          if c.name in keep}
+        self.top.clear_insts()
+        for m in mats:
+            nm, x, y, rot, flip = m[:5]
+            if len(m) > 5:
+                self.design[nm] = m[5]
+            ci = self.cells.get(nm)
+            if ci is not None:
+                self.top.insert(db.CellInstArray(
+                    ci, db.Trans(rot, flip, db.Vector(x, y))))
+        return changed
+
+
 class Mosaic:
     """A Layout that accumulates cache tiles on demand with LRU eviction.
 
