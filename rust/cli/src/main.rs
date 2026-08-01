@@ -10,12 +10,15 @@
 
 use std::time::Instant;
 
+#[cfg(target_env = "musl")]
 mod tcache;
 
 // musl's global-lock malloc serialized every worker (MAIN09: flat
-// ~190s from 1 to 24 threads; glibc 60s); the thread cache removes
-// the lock from the hot path on every libc, so it is on everywhere
-// and the whole validation suite exercises it on every run
+// ~190s from 1 to 24 threads; glibc 60s), so the thread cache fronts
+// it on the musl static build only. glibc and macOS have per-thread
+// caches of their own, and the class rounding (power-of-two classes)
+// plus retained free lists only inflate RSS there.
+#[cfg(target_env = "musl")]
 #[global_allocator]
 static ALLOC: tcache::TCache = tcache::TCache;
 
