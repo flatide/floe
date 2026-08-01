@@ -108,14 +108,19 @@ def _iter_global_polys(mosaic, layers_sel, box):
     top_ci = mosaic.top.cell_index()
     for li in ly.layer_indexes():
         info = ly.get_info(li)
+        # the frame/outline layer (255/0) is a draw-only overview aid
+        # (cut-frame outlines, skeleton cell boxes) - never pickable
+        if (info.layer, info.datatype) == (255, 0):
+            continue
         if layers_sel is not None and \
                 (info.layer, info.datatype) not in layers_sel:
             continue
         it = ly.begin_shapes_touching(top_ci, li, box)
         while not it.at_end():
-            if _TWIN_RE.match(it.cell().name):
-                # merged twins are draw-only stand-ins: their fused
-                # slabs must never win a snap/pick over real geometry
+            cn = it.cell().name
+            if _TWIN_RE.match(cn) or cn.startswith("FRAMES"):
+                # merged twins / VFS cut-frames are draw-only stand-ins:
+                # their slabs must never win a snap/pick over real geometry
                 it.next()
                 continue
             sh = it.shape()
@@ -147,10 +152,19 @@ def _probe_layout(cache, box, layers):
 
 
 def _exact_source(cache, mosaic, box, layers):
-    """The layout to measure against: probe working set (VFS) or the
-    tile mosaic with every band loaded (.ice)."""
+    """The layout to measure against for pick/snap.
+
+    VFS: reuse the RENDER working set - the last render already loaded
+    every page for the current view, and pick/snap happen inside it,
+    so querying that layout costs only the spatial iterate (~ms)
+    instead of rebuilding a fresh probe (~2s: a tiny cursor box pulls
+    the whole cell-local pages covering it, millions of members). The
+    semantics become "pick what you see", which matches the cut level
+    (a probe is still used for clip, which needs an arbitrary bbox).
+
+    .ice: load the box's tiles and show every band (exact geometry)."""
     if getattr(cache, "vfs_client", None):
-        return _probe_layout(cache, box, layers)
+        return mosaic
     mosaic.ensure(cache.tiles_for_bbox(box.left, box.bottom,
                                        box.right, box.top))
     mosaic.apply_visibility(None)   # measure against every band
