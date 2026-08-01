@@ -40,13 +40,13 @@ CUT_PX = CUT_LEVEL_PX[1]
 # than the extra intermediate draws.
 PROGRESSIVE_MIN_BYTES = 8_000_000
 
-# Calibre-style label gate: skeleton text (block names + budget
-# labels) is drawn only when the view spans at most this fraction of
-# the die in either axis. At full-die overview labels would overlap
-# into a screen-covering wall; below the fraction the viewport holds
-# few enough to read. Tunable; the level idea (px behind it) may be
-# retuned without changing the behavior.
-LABEL_ZOOM_FRAC = 0.12
+# Calibre-style label declutter: skeleton text (block names + budget
+# labels) is drawn only when few enough of it falls in the view to
+# read - so a sparse chip always shows its labels, and a label-dense
+# chip shows them only as you zoom in and the viewport holds fewer.
+# The count is measured per frame (capped, cheap on the small
+# skeleton). Tunable.
+LABEL_VIEW_BUDGET = 400
 
 
 def _bands_for_view(cache, x0, x1, w, cut_px=None):
@@ -297,6 +297,25 @@ def _drawn_estimate(cache, mosaic, tiles, need, x0, y0, x1, y1):
     return int(total)
 
 
+def _skel_text_fits(skel_renderer, x0, y0, x1, y1):
+    """True if the skeleton's texts inside the view are few enough to
+    read (<= LABEL_VIEW_BUDGET). Counts text shapes touching the view
+    box, capped so a label-dense overview stops early. The skeleton
+    is one flat cell, so this is a bounded per-layer scan."""
+    ly = skel_renderer.layout
+    top = skel_renderer.top
+    box = db.Box(int(x0), int(y0), int(x1), int(y1))
+    n = 0
+    for li in ly.layer_indexes():
+        it = top.shapes(li).each_touching(box)
+        for sh in it:
+            if sh.is_text():
+                n += 1
+                if n > LABEL_VIEW_BUDGET:
+                    return False
+    return True
+
+
 def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
                 req, res, latest=None):
     t0 = time.perf_counter()
@@ -331,20 +350,15 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
             vis += [(l, dt + k * cache_mod.SKEL_DETAIL_DT)
                     for k in range(1, kmax + 1) for l, dt in vis]
             vis += [(255, 0)]          # cell outlines stay visible
-            # Calibre-style label zoom gate: at a wide overview the
-            # skeleton's labels (block names + budget labels, up to
-            # 50k) would tile into a wall covering the die. Draw text
-            # only once the view is zoomed to a fraction of the die;
-            # outline boxes and straps (polygons) always show. Labels
-            # thin naturally as you zoom (the viewport covers less).
-            bb = cache.meta.get("bbox")
-            show_text = True
-            if bb:
-                die_w = max(1, bb[2] - bb[0])
-                die_h = max(1, bb[3] - bb[1])
-                frac = max((x1 - x0) / die_w, (y1 - y0) / die_h)
-                show_text = frac <= LABEL_ZOOM_FRAC
-            skel_renderer.set_text_visible(show_text)
+            # Calibre-style label declutter: count the skeleton texts
+            # inside the view (capped) and draw text only if few
+            # enough to read. A sparse chip (a few dozen block names)
+            # always shows them; a label-dense chip's overview would
+            # overflow the budget - text stays off until you zoom in
+            # far enough that the viewport holds fewer than the
+            # budget. Outline boxes and straps (polygons) always show.
+            skel_renderer.set_text_visible(_skel_text_fits(
+                skel_renderer, x0, y0, x1, y1))
             skel_renderer.render_png(tmp, x0, y0, x1, y1,
                                      job["w"], job["h"], visible=vis)
             tiles_n = 0
