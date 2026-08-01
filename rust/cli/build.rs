@@ -22,5 +22,21 @@ fn main() {
         hash,
         if dirty { "+" } else { "" }
     );
+    // on a branch, HEAD's content ("ref: refs/heads/main") never
+    // changes - the commit lands in the ref file, so watch that too
+    // (only if it exists: a missing watched path makes cargo rerun
+    // the script on every build)
     println!("cargo:rerun-if-changed=../../.git/HEAD");
+    if let Ok(head) = std::fs::read_to_string("../../.git/HEAD") {
+        if let Some(r) = head.strip_prefix("ref: ") {
+            let p = format!("../../.git/{}", r.trim());
+            if std::path::Path::new(&p).is_file() {
+                println!("cargo:rerun-if-changed={}", p);
+            }
+        }
+    }
+    let packed = "../../.git/packed-refs";
+    if std::path::Path::new(packed).is_file() {
+        println!("cargo:rerun-if-changed={}", packed);
+    }
 }

@@ -10,7 +10,7 @@
 //! the system allocator removes the lock from the hot path entirely,
 //! on every libc.
 //!
-//! Design: size classes 16..4096 (power of two), align <= 16.
+//! Design: size classes 16..32768 (power of two), align <= 16.
 //! alloc: pop the thread-local list, else System with the CLASS
 //! layout. dealloc: push to the thread-local list up to a per-class
 //! byte cap, else System. Every small block is created and released

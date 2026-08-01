@@ -22,6 +22,12 @@ mod tcache;
 #[global_allocator]
 static ALLOC: tcache::TCache = tcache::TCache;
 
+// elsewhere the platform malloc is the whole point - pin it
+// explicitly (the unadorned default is unspecified per the docs)
+#[cfg(not(target_env = "musl"))]
+#[global_allocator]
+static ALLOC: std::alloc::System = std::alloc::System;
+
 fn version() -> String {
     format!(
         "floe-index {} {} ({})",
