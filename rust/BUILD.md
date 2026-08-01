@@ -36,20 +36,17 @@ sh build-linux.sh
 
 ## B. 완전 오프라인 서버 (소스 zip 반입 빌드)
 
-소스는 GitHub zip으로 반입한다. **zip에는 `.git`이 없으므로 반드시
-`FLOE_SRC_REV`로 커밋을 넘겨서 빌드할 것** — 안 넘기면 스탬프가
-`unknown`이 되고, (구버전 build.rs는 압축 푼 위치를 감싼 무관한
-저장소의 HEAD를 찍는 사고도 있었다: 어느 이력에도 없는 해시가 나오면
-이 경우다.)
-
-```sh
-# 인터넷 PC에서: zip + 커밋 확인
-curl -LO https://github.com/flatide/floe/archive/refs/heads/main.zip
-unzip -z main.zip     # 아카이브 코멘트 = 커밋 SHA (메모해서 같이 반입)
-```
+소스는 GitHub zip으로 반입한다 (브라우저 Download ZIP이면 충분).
+**패키지 버전이 rust/ 를 건드리는 푸시마다 올라가므로**, zip에
+`.git`이 없어도 `--version`/시작 스탬프의 버전 번호만으로 어떤
+반입분인지 식별된다 — 스탬프는 `[floe-index 0.2.0 (gnu)]` 형태
+(git 해시는 알 수 있을 때만 덧붙는다). 커밋 해시까지 박고 싶으면
+빌드 때 `FLOE_SRC_REV=<sha>`를 넘긴다 (선택). 참고: 구버전
+build.rs는 압축 푼 위치를 감싼 무관한 저장소의 HEAD를 찍는 사고가
+있었다 — 어느 이력에도 없는 해시가 나오면 이 경우다.
 
 zip 안의 `dist/`에는 빌드된 바이너리도 들어 있다 — `--version`
-스탬프를 확인하고, 소스 커밋과 다르면 아래처럼 다시 빌드한다.
+버전을 확인하고, 소스 버전과 다르면 아래처럼 다시 빌드한다.
 
 인터넷 되는 아무 곳에서 standalone 툴체인 두 개를 받아 반입한다
 (버전은 개발기와 맞춘 1.97.1 기준, 다른 stable도 무방):
@@ -71,8 +68,8 @@ tar xf rust-std-1.97.1-x86_64-unknown-linux-musl.tar.xz
 export PATH="$HOME/rusttc/bin:$PATH"
 
 cd floe-main/rust        # zip 최상위 디렉토리 이름 기준
-FLOE_SRC_REV=<커밋SHA> sh build-linux.sh   # vendor/ 동봉, 네트워크 불필요
-./dist/floe-index-linux-gnu --version      # 스탬프 = 넘긴 SHA 확인
+sh build-linux.sh        # vendor/ 동봉, 네트워크 불필요
+./dist/floe-index-linux-gnu --version    # 버전 번호로 반입분 확인
 ```
 
 gnu 툴체인 tarball에 gnu용 std가 들어 있어 두 산출물 모두 오프라인
@@ -89,6 +86,6 @@ sha256sum -c dist/floe-index-linux-x86_64.sha256
 ```
 
 반입한 바이너리가 어떤 빌드인지는 실행 시 첫 줄 스탬프로 확인한다:
-`[floe-index 0.1.0 <git> (gnu)]` / `(musl-static)`. gnu 바이너리가
+`[floe-index <버전> [<git>] (gnu)]` / `(musl-static)`. gnu 바이너리가
 타깃에서 `GLIBC_x.xx not found`로 죽으면 glibc가 빌드 머신보다
 오래된 것 — 정적 폴백을 쓴다.

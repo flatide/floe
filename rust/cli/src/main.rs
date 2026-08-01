@@ -29,10 +29,18 @@ static ALLOC: tcache::TCache = tcache::TCache;
 static ALLOC: std::alloc::System = std::alloc::System;
 
 fn version() -> String {
+    // the package version is bumped on EVERY push that touches
+    // rust/, so it identifies a zip-carried build by itself; the git
+    // hash is extra precision when the tree knows it
+    let git = env!("FLOE_GIT");
     format!(
-        "floe-index {} {} ({})",
+        "floe-index {}{} ({})",
         env!("CARGO_PKG_VERSION"),
-        env!("FLOE_GIT"),
+        if git == "unknown" {
+            String::new()
+        } else {
+            format!(" {}", git)
+        },
         if cfg!(target_env = "musl") {
             "musl-static"
         } else if cfg!(target_os = "linux") {
