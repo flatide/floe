@@ -42,6 +42,7 @@ class Renderer:
                 self.lv.set_config(k, v)
             except Exception:
                 pass
+        self._text_visible = bool(show_texts)
         if show_texts:
             try:
                 self.lv.set_config("text-visible", "true")
@@ -76,6 +77,19 @@ class Renderer:
         for lp in self.lv.each_layer():
             lp.visible = (vis is None
                           or (lp.source_layer, lp.source_datatype) in vis)
+
+    def set_text_visible(self, on):
+        """Toggle text drawing (Calibre-style zoom gating of labels:
+        an overview must not paint every label into a wall; texts
+        appear only once zoomed in). Idempotent."""
+        on = bool(on)
+        if on == self._text_visible:
+            return
+        self._text_visible = on
+        try:
+            self.lv.set_config("text-visible", "true" if on else "false")
+        except Exception:
+            pass
 
     def set_cell_visibility(self, show, hide):
         """Cell indexes to show/hide; a hidden cell's whole subtree is

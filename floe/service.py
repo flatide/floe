@@ -40,6 +40,14 @@ CUT_PX = CUT_LEVEL_PX[1]
 # than the extra intermediate draws.
 PROGRESSIVE_MIN_BYTES = 8_000_000
 
+# Calibre-style label gate: skeleton text (block names + budget
+# labels) is drawn only when the view spans at most this fraction of
+# the die in either axis. At full-die overview labels would overlap
+# into a screen-covering wall; below the fraction the viewport holds
+# few enough to read. Tunable; the level idea (px behind it) may be
+# retuned without changing the behavior.
+LABEL_ZOOM_FRAC = 0.12
+
 
 def _bands_for_view(cache, x0, x1, w, cut_px=None):
     """(needed band indexes, cut size in dbu) for a view of w pixels
@@ -309,6 +317,20 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
             vis += [(l, dt + k * cache_mod.SKEL_DETAIL_DT)
                     for k in range(1, kmax + 1) for l, dt in vis]
             vis += [(255, 0)]          # cell outlines stay visible
+            # Calibre-style label zoom gate: at a wide overview the
+            # skeleton's labels (block names + budget labels, up to
+            # 50k) would tile into a wall covering the die. Draw text
+            # only once the view is zoomed to a fraction of the die;
+            # outline boxes and straps (polygons) always show. Labels
+            # thin naturally as you zoom (the viewport covers less).
+            bb = cache.meta.get("bbox")
+            show_text = True
+            if bb:
+                die_w = max(1, bb[2] - bb[0])
+                die_h = max(1, bb[3] - bb[1])
+                frac = max((x1 - x0) / die_w, (y1 - y0) / die_h)
+                show_text = frac <= LABEL_ZOOM_FRAC
+            skel_renderer.set_text_visible(show_text)
             skel_renderer.render_png(tmp, x0, y0, x1, y1,
                                      job["w"], job["h"], visible=vis)
             tiles_n = 0
