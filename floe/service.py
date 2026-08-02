@@ -53,11 +53,15 @@ LABEL_VIEW_BUDGET = 400
 # LABEL_VIEW_BUDGET per frame
 LABEL_CELL_PX = 48
 
-# coverage handoff: composite the density bitplanes only when a
-# finest coverage texel projects to at most this many screen pixels
-# (zoomed out enough that the cut is dropping small features); deeper
-# than that the real geometry carries the frame
-COV_MAX_TEXEL_PX = 64.0
+# coverage handoff: composite the density bitplanes once a finest
+# coverage texel projects to at most this many screen pixels. Set
+# generously so coverage turns on slightly BEFORE the cut starts
+# dropping small features - otherwise a wide window (more pixels for
+# the same um view) leaves a zoom band where the shapes are already
+# cut but coverage has not kicked in yet (a blank gap). composite()
+# only fills black pixels, so turning it on early is harmless while
+# real geometry is still present.
+COV_MAX_TEXEL_PX = 160.0
 
 
 def _bands_for_view(cache, x0, x1, w, cut_px=None):
