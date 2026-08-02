@@ -426,10 +426,188 @@ fn encode_job(doc: &Doc, job: &PageJob) -> Vec<u8> {
     write_tree(&[wc], doc.unit).expect("page payload")
 }
 
+/// resident set size for the build heartbeat (Linux /proc; "?"
+/// elsewhere) so a long silent stage on a big chip shows RSS growth.
+fn rss() -> String {
+    #[cfg(target_os = "linux")]
+    if let Ok(s) = std::fs::read_to_string("/proc/self/statm") {
+        if let Some(p) = s.split_whitespace().nth(1) {
+            if let Ok(pages) = p.parse::<u64>() {
+                return fmt_size(pages * 4096);
+            }
+        }
+    }
+    String::from("?")
+}
+
+/// reverse-topological (children-before-parents) cell order so the
+/// recursive fold converges in ONE pass instead of the old O(depth)
+/// fixpoint. Iterative post-order DFS; back-edges (only in a
+/// malformed cyclic hierarchy) are skipped, never looped.
+fn topo_order(doc: &Doc) -> Vec<usize> {
+    let n = doc.cells.len();
+    let mut order = Vec::with_capacity(n);
+    let mut state = vec![0u8; n]; // 0 unvisited, 1 on-stack, 2 done
+    let mut stack: Vec<(usize, usize)> = Vec::new();
+    for start in 0..n {
+        if state[start] != 0 {
+            continue;
+        }
+        state[start] = 1;
+        stack.push((start, 0));
+        while let Some(&(ci, k)) = stack.last() {
+            if k < doc.cells[ci].places.len() {
+                stack.last_mut().unwrap().1 = k + 1;
+                let c = doc.cells[ci].places[k].cell;
+                if state[c] == 0 {
+                    state[c] = 1;
+                    stack.push((c, 0));
+                }
+            } else {
+                order.push(ci);
+                state[ci] = 2;
+                stack.pop();
+            }
+        }
+    }
+    order
+}
+
+/// per-cell plan produced in PARALLEL (the CPU-heavy work: instance
+/// BVH + per-layer page splitting). The Builder appends these
+/// serially in cell order afterwards, so `first`/base offsets are
+/// fixed up then and the .ovm/.ovp stay byte-identical to the
+/// single-threaded build at any thread count.
+struct CellPlan {
+    place_order: Vec<u32>,            // local place idx, leaf order
+    bvh: Vec<(BBox, u32, u16, bool)>, // `first` is cell-local
+    pages: Vec<PageJob>,
+}
+
+fn build_cell_plan(
+    doc: &Doc,
+    ci: usize,
+    rbb: &[Option<(i64, i64, i64, i64)>],
+    lidx: &std::collections::HashMap<(u32, u32), usize>,
+    nl: usize,
+) -> CellPlan {
+    let cell = &doc.cells[ci];
+    // ---- placements + instance BVH (leaf order = emit order)
+    let mut items: Vec<(BBox, usize)> = cell
+        .places
+        .iter()
+        .enumerate()
+        .map(|(pi, pl)| {
+            let cb = win_to_bbox(rbb[pl.cell]);
+            let bb = if cb.is_empty() {
+                BBox { x0: pl.x, y0: pl.y, x1: pl.x, y1: pl.y }
+            } else {
+                let xf = Xf::place(pl.x, pl.y, pl.rot, pl.flip);
+                let a = xf.apply(cb.x0, cb.y0);
+                let c = xf.apply(cb.x1, cb.y1);
+                let g = xf_rep(&pl.rep, &Xf::identity());
+                let (ex, ey) = rep_extent(&g);
+                BBox {
+                    x0: a.0.min(c.0) + ex.0.min(0),
+                    y0: a.1.min(c.1) + ey.0.min(0),
+                    x1: a.0.max(c.0) + ex.1.max(0),
+                    y1: a.1.max(c.1) + ey.1.max(0),
+                }
+            };
+            (bb, pi)
+        })
+        .collect();
+    let (place_order, bvh) = if items.is_empty() {
+        (Vec::new(), Vec::new())
+    } else {
+        let mut nodes: Vec<(BBox, u32, u16, bool)> = Vec::new();
+        nodes.push((BBox::EMPTY, 0, 0, false));
+        split_bvh(&mut nodes, &mut items, 0, 0);
+        let place_order =
+            items.iter().map(|&(_, pi)| pi as u32).collect();
+        (place_order, nodes)
+    };
+    // ---- pages per layer, in layer order
+    let mut per_layer: Vec<Vec<PRec>> =
+        (0..nl).map(|_| Vec::new()).collect();
+    for (idx, r) in cell.rects.iter().enumerate() {
+        let li = lidx[&(r.layer, r.dt)];
+        let (ex, ey) = rep_extent(&r.rep);
+        per_layer[li].push(PRec {
+            kind: 0,
+            idx: idx as u32,
+            bbox: BBox {
+                x0: r.x + ex.0.min(0),
+                y0: r.y + ey.0.min(0),
+                x1: r.x + r.w + ex.1.max(0),
+                y1: r.y + r.h + ey.1.max(0),
+            },
+            bytes: 16 + rep_est(&r.rep),
+            members: r.rep.members(),
+            w: r.w,
+            h: r.h,
+        });
+    }
+    for (idx, p) in cell.polys.iter().enumerate() {
+        let li = lidx[&(p.layer, p.dt)];
+        let bb = pts_bbox(&p.pts);
+        let (ex, ey) = rep_extent(&p.rep);
+        per_layer[li].push(PRec {
+            kind: 1,
+            idx: idx as u32,
+            bbox: BBox {
+                x0: bb.x0 + ex.0.min(0),
+                y0: bb.y0 + ey.0.min(0),
+                x1: bb.x1 + ex.1.max(0),
+                y1: bb.y1 + ey.1.max(0),
+            },
+            bytes: 8 + 3 * p.pts.len() as u32 + rep_est(&p.rep),
+            members: p.rep.members(),
+            w: bb.x1 - bb.x0,
+            h: bb.y1 - bb.y0,
+        });
+    }
+    for (idx, pa) in cell.paths.iter().enumerate() {
+        let li = lidx[&(pa.layer, pa.dt)];
+        let b4 = path_bbox(&pa.pts, pa.hw, pa.es, pa.ee);
+        let (ex, ey) = rep_extent(&pa.rep);
+        per_layer[li].push(PRec {
+            kind: 2,
+            idx: idx as u32,
+            bbox: BBox {
+                x0: b4.0 + ex.0.min(0),
+                y0: b4.1 + ey.0.min(0),
+                x1: b4.2 + ex.1.max(0),
+                y1: b4.3 + ey.1.max(0),
+            },
+            bytes: 14 + 3 * pa.pts.len() as u32 + rep_est(&pa.rep),
+            members: pa.rep.members(),
+            w: b4.2 - b4.0,
+            h: b4.3 - b4.1,
+        });
+    }
+    let mut pages: Vec<PageJob> = Vec::new();
+    for (li, mut recs) in per_layer.into_iter().enumerate() {
+        if recs.is_empty() {
+            continue;
+        }
+        let mut seq = 0u16;
+        split_pages(ci, li as u32, &mut recs[..], &mut seq, &mut pages);
+    }
+    CellPlan { place_order, bvh, pages }
+}
+
 fn build(doc: &Doc, size: u64, mtime: u64, outdir: &str, jobs: usize) {
     let t0 = std::time::Instant::now();
     let n = doc.cells.len();
+    eprintln!("[vfs] build: recursive bbox ({} cells)...", n);
+    let tbb = std::time::Instant::now();
     let rbb = cell_bboxes_full(doc);
+    eprintln!(
+        "[vfs] build: recursive bbox {:.1}s (rss {})",
+        tbb.elapsed().as_secs_f64(),
+        rss()
+    );
     let nl = doc.layer_order.len();
     let lidx: std::collections::HashMap<(u32, u32), usize> = doc
         .layer_order
@@ -438,142 +616,184 @@ fn build(doc: &Doc, size: u64, mtime: u64, outdir: &str, jobs: usize) {
         .map(|(i, &k)| (k, i))
         .collect();
 
-    // fixpoint passes over the DAG: heights, recursive members,
-    // masks (children are not guaranteed to precede parents)
+    // ---- direct (own-record) masks/members/bbox per cell AND the
+    // per-layer geometry totals in ONE parallel record pass (both
+    // were separate single-threaded O(records) sweeps). Texts count
+    // into masks/bboxes but not into members or the paged totals.
     let bw = nl.div_ceil(8).max(1);
-    let mut dmask = vec![vec![0u8; bw]; n];
-    let mut dmembers = vec![0u64; n];
-    let mut dbox = vec![BBox::EMPTY; n];
-    for (ci, cell) in doc.cells.iter().enumerate() {
-        let mut grow = |b: &mut BBox,
-                        li: usize,
-                        bb: BBox,
-                        mems: u64,
-                        mask: &mut [u8]| {
-            floe_ovm::bit_set(mask, li);
-            b.grow(&bb);
-            dmembers[ci] += mems;
-        };
-        for r in &cell.rects {
-            let li = lidx[&(r.layer, r.dt)];
-            let (ex, ey) = rep_extent(&r.rep);
-            grow(
-                &mut dbox[ci],
-                li,
-                BBox {
-                    x0: r.x + ex.0.min(0),
-                    y0: r.y + ey.0.min(0),
-                    x1: r.x + r.w + ex.1.max(0),
-                    y1: r.y + r.h + ey.1.max(0),
-                },
-                r.rep.members(),
-                &mut dmask[ci],
-            );
-        }
-        for p in &cell.polys {
-            let li = lidx[&(p.layer, p.dt)];
-            let bb = pts_bbox(&p.pts);
-            let (ex, ey) = rep_extent(&p.rep);
-            grow(
-                &mut dbox[ci],
-                li,
-                BBox {
-                    x0: bb.x0 + ex.0.min(0),
-                    y0: bb.y0 + ey.0.min(0),
-                    x1: bb.x1 + ex.1.max(0),
-                    y1: bb.y1 + ey.1.max(0),
-                },
-                p.rep.members(),
-                &mut dmask[ci],
-            );
-        }
-        for pa in &cell.paths {
-            let li = lidx[&(pa.layer, pa.dt)];
-            let b4 = path_bbox(&pa.pts, pa.hw, pa.es, pa.ee);
-            let (ex, ey) = rep_extent(&pa.rep);
-            grow(
-                &mut dbox[ci],
-                li,
-                BBox {
-                    x0: b4.0 + ex.0.min(0),
-                    y0: b4.1 + ey.0.min(0),
-                    x1: b4.2 + ex.1.max(0),
-                    y1: b4.3 + ey.1.max(0),
-                },
-                pa.rep.members(),
-                &mut dmask[ci],
-            );
-        }
-        for t in &cell.texts {
-            // anchors count into bboxes/masks (render culling must
-            // not drop label-only subtrees) but not into members
-            let li = lidx[&(t.layer, t.dt)];
-            let (ex, ey) = rep_extent(&t.rep);
-            floe_ovm::bit_set(&mut dmask[ci], li);
-            dbox[ci].grow(&BBox {
-                x0: t.x + ex.0.min(0),
-                y0: t.y + ey.0.min(0),
-                x1: t.x + ex.1.max(0),
-                y1: t.y + ey.1.max(0),
-            });
-        }
-    }
-    let mut rmask = dmask.clone();
-    let mut rmembers = dmembers.clone();
-    let mut height = vec![0u16; n];
-    loop {
-        let mut changed = false;
-        for ci in 0..n {
-            let mut hm = 0u16;
-            let mut mm = dmembers[ci];
-            let mut mask = dmask[ci].clone();
-            for pl in &doc.cells[ci].places {
-                hm = hm.max(height[pl.cell] + 1);
-                mm = mm.saturating_add(
-                    rmembers[pl.cell]
-                        .saturating_mul(pl.rep.members()),
-                );
-                for (a, b) in
-                    mask.iter_mut().zip(&rmask[pl.cell])
-                {
-                    *a |= *b;
-                }
-            }
-            if hm != height[ci]
-                || mm != rmembers[ci]
-                || mask != rmask[ci]
+    let dslots: Vec<std::sync::OnceLock<(Vec<u8>, u64, BBox)>> =
+        (0..n).map(|_| std::sync::OnceLock::new()).collect();
+    let (lrecs, lmems) = {
+        let td = std::time::Instant::now();
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let done = std::sync::atomic::AtomicUsize::new(0);
+        let nthreads = jobs.max(1).min(n.max(1));
+        let parts: Vec<(Vec<u64>, Vec<u64>)> = std::thread::scope(|s| {
             {
-                height[ci] = hm;
-                rmembers[ci] = mm;
-                rmask[ci] = mask;
-                changed = true;
+                let done = &done;
+                s.spawn(move || {
+                    use std::sync::atomic::Ordering::Relaxed;
+                    let mut last = td;
+                    loop {
+                        std::thread::sleep(
+                            std::time::Duration::from_millis(200),
+                        );
+                        if done.load(Relaxed) >= n {
+                            return;
+                        }
+                        if last.elapsed().as_secs_f64() >= 5.0 {
+                            last = std::time::Instant::now();
+                            eprintln!(
+                                "[vfs] build: direct masks {}/{} \
+                                 ({}s, rss {})",
+                                done.load(Relaxed),
+                                n,
+                                td.elapsed().as_secs(),
+                                rss()
+                            );
+                        }
+                    }
+                });
+            }
+            let dslots = &dslots;
+            let next = &next;
+            let done = &done;
+            let lidx = &lidx;
+            (0..nthreads)
+                .map(|_| {
+                    s.spawn(move || {
+                        use std::sync::atomic::Ordering::Relaxed;
+                        let mut lr = vec![0u64; nl];
+                        let mut lm = vec![0u64; nl];
+                        loop {
+                            let ci = next.fetch_add(1, Relaxed);
+                            if ci >= n {
+                                break;
+                            }
+                            let cell = &doc.cells[ci];
+                            let mut mask = vec![0u8; bw];
+                            let mut mems = 0u64;
+                            let mut bx = BBox::EMPTY;
+                            for r in &cell.rects {
+                                let li = lidx[&(r.layer, r.dt)];
+                                let (ex, ey) = rep_extent(&r.rep);
+                                floe_ovm::bit_set(&mut mask, li);
+                                bx.grow(&BBox {
+                                    x0: r.x + ex.0.min(0),
+                                    y0: r.y + ey.0.min(0),
+                                    x1: r.x + r.w + ex.1.max(0),
+                                    y1: r.y + r.h + ey.1.max(0),
+                                });
+                                let m = r.rep.members();
+                                mems += m;
+                                lr[li] += 1;
+                                lm[li] += m;
+                            }
+                            for p in &cell.polys {
+                                let li = lidx[&(p.layer, p.dt)];
+                                let bb = pts_bbox(&p.pts);
+                                let (ex, ey) = rep_extent(&p.rep);
+                                floe_ovm::bit_set(&mut mask, li);
+                                bx.grow(&BBox {
+                                    x0: bb.x0 + ex.0.min(0),
+                                    y0: bb.y0 + ey.0.min(0),
+                                    x1: bb.x1 + ex.1.max(0),
+                                    y1: bb.y1 + ey.1.max(0),
+                                });
+                                let m = p.rep.members();
+                                mems += m;
+                                lr[li] += 1;
+                                lm[li] += m;
+                            }
+                            for pa in &cell.paths {
+                                let li = lidx[&(pa.layer, pa.dt)];
+                                let b4 = path_bbox(
+                                    &pa.pts, pa.hw, pa.es, pa.ee,
+                                );
+                                let (ex, ey) = rep_extent(&pa.rep);
+                                floe_ovm::bit_set(&mut mask, li);
+                                bx.grow(&BBox {
+                                    x0: b4.0 + ex.0.min(0),
+                                    y0: b4.1 + ey.0.min(0),
+                                    x1: b4.2 + ex.1.max(0),
+                                    y1: b4.3 + ey.1.max(0),
+                                });
+                                let m = pa.rep.members();
+                                mems += m;
+                                lr[li] += 1;
+                                lm[li] += m;
+                            }
+                            for t in &cell.texts {
+                                // anchors count into bboxes/masks
+                                // (render culling must not drop
+                                // label-only subtrees) but not members
+                                let li = lidx[&(t.layer, t.dt)];
+                                let (ex, ey) = rep_extent(&t.rep);
+                                floe_ovm::bit_set(&mut mask, li);
+                                bx.grow(&BBox {
+                                    x0: t.x + ex.0.min(0),
+                                    y0: t.y + ey.0.min(0),
+                                    x1: t.x + ex.1.max(0),
+                                    y1: t.y + ey.1.max(0),
+                                });
+                            }
+                            let _ = dslots[ci].set((mask, mems, bx));
+                            done.fetch_add(1, Relaxed);
+                        }
+                        (lr, lm)
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|h| h.join().expect("direct worker"))
+                .collect()
+        });
+        let mut lrecs = vec![0u64; nl];
+        let mut lmems = vec![0u64; nl];
+        for (lr, lm) in parts {
+            for i in 0..nl {
+                lrecs[i] += lr[i];
+                lmems[i] += lm[i];
             }
         }
-        if !changed {
-            break;
-        }
+        (lrecs, lmems)
+    };
+    let mut dmask: Vec<Vec<u8>> = Vec::with_capacity(n);
+    let mut dmembers: Vec<u64> = Vec::with_capacity(n);
+    let mut dbox: Vec<BBox> = Vec::with_capacity(n);
+    for slot in dslots {
+        let (m, mm, bx) =
+            slot.into_inner().expect("direct slot unset");
+        dmask.push(m);
+        dmembers.push(mm);
+        dbox.push(bx);
     }
 
-    // per-layer geometry totals (texts excluded - they are not
-    // paged; G5 compares page sums against these)
-    let mut lrecs = vec![0u64; nl];
-    let mut lmems = vec![0u64; nl];
-    for cell in &doc.cells {
-        for r in &cell.rects {
-            let li = lidx[&(r.layer, r.dt)];
-            lrecs[li] += 1;
-            lmems[li] += r.rep.members();
+    // ---- recursive fold in ONE topological pass (children before
+    // parents), replacing the old O(depth) fixpoint: height,
+    // recursive members, recursive layer mask. Result is identical to
+    // the fixpoint's converged values.
+    let topo = topo_order(doc);
+    let mut height = vec![0u16; n];
+    let mut rmembers = vec![0u64; n];
+    let mut rmask: Vec<Vec<u8>> = vec![Vec::new(); n];
+    for &ci in &topo {
+        let mut hm = 0u16;
+        let mut mm = dmembers[ci];
+        let mut mask = dmask[ci].clone();
+        for pl in &doc.cells[ci].places {
+            let c = pl.cell;
+            hm = hm.max(height[c] + 1);
+            mm = mm.saturating_add(
+                rmembers[c].saturating_mul(pl.rep.members()),
+            );
+            for (a, b) in mask.iter_mut().zip(&rmask[c]) {
+                *a |= *b;
+            }
         }
-        for p in &cell.polys {
-            let li = lidx[&(p.layer, p.dt)];
-            lrecs[li] += 1;
-            lmems[li] += p.rep.members();
-        }
-        for pa in &cell.paths {
-            let li = lidx[&(pa.layer, pa.dt)];
-            lrecs[li] += 1;
-            lmems[li] += pa.rep.members();
-        }
+        height[ci] = hm;
+        rmembers[ci] = mm;
+        rmask[ci] = mask;
     }
 
     let mut b = Builder::new(doc.unit, size, mtime, nl);
@@ -588,65 +808,96 @@ fn build(doc: &Doc, size: u64, mtime: u64, outdir: &str, jobs: usize) {
         b.layer(l, d, &nm, lrecs[i], lmems[i]);
     }
 
-    // page jobs accumulate across the cell loop (splitting only);
-    // payloads encode in parallel afterwards
-    let mut jobs_list: Vec<PageJob> = Vec::new();
+    // ---- per-cell plans (instance BVH + page splitting) computed in
+    // PARALLEL; the heavy per-record work leaves 31 cores idle when
+    // serial. build_cell_plan is a pure fn of (doc, rbb, lidx), so
+    // work-steal cells across threads into per-cell slots.
+    let pslots: Vec<std::sync::OnceLock<CellPlan>> =
+        (0..n).map(|_| std::sync::OnceLock::new()).collect();
+    {
+        let tp = std::time::Instant::now();
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let done = std::sync::atomic::AtomicUsize::new(0);
+        let nthreads = jobs.max(1).min(n.max(1));
+        std::thread::scope(|s| {
+            {
+                let done = &done;
+                s.spawn(move || {
+                    use std::sync::atomic::Ordering::Relaxed;
+                    let mut last = tp;
+                    loop {
+                        std::thread::sleep(
+                            std::time::Duration::from_millis(200),
+                        );
+                        if done.load(Relaxed) >= n {
+                            return;
+                        }
+                        if last.elapsed().as_secs_f64() >= 5.0 {
+                            last = std::time::Instant::now();
+                            eprintln!(
+                                "[vfs] build: cell plans {}/{} \
+                                 ({}s, rss {})",
+                                done.load(Relaxed),
+                                n,
+                                tp.elapsed().as_secs(),
+                                rss()
+                            );
+                        }
+                    }
+                });
+            }
+            let pslots = &pslots;
+            let next = &next;
+            let done = &done;
+            let rbb = &rbb;
+            let lidx = &lidx;
+            for _ in 0..nthreads {
+                s.spawn(move || {
+                    use std::sync::atomic::Ordering::Relaxed;
+                    loop {
+                        let ci = next.fetch_add(1, Relaxed);
+                        if ci >= n {
+                            break;
+                        }
+                        let plan =
+                            build_cell_plan(doc, ci, rbb, lidx, nl);
+                        let _ = pslots[ci].set(plan);
+                        done.fetch_add(1, Relaxed);
+                    }
+                });
+            }
+        });
+    }
 
-    for ci in 0..n {
+    // ---- append plans serially in cell order (memcpy-bound): places
+    // in leaf order, BVH nodes with the two bases fixed up, pages,
+    // deduped bitsets, then the cell record. Same order as the old
+    // single-threaded loop, so the .ovm/.ovp are byte-identical.
+    let mut jobs_list: Vec<PageJob> = Vec::new();
+    for (ci, slot) in pslots.into_iter().enumerate() {
+        let CellPlan { place_order, bvh, mut pages } =
+            slot.into_inner().expect("cell plan unset");
         let cell = &doc.cells[ci];
-        // ---- placements + instance BVH (leaf order = emit order)
         let place_base = b.n_places();
-        assert!(place_base + (cell.places.len() as u64) < u32::MAX as u64);
-        let mut items: Vec<(BBox, usize)> = cell
-            .places
-            .iter()
-            .enumerate()
-            .map(|(pi, pl)| {
-                let cb = win_to_bbox(rbb[pl.cell]);
-                let bb = if cb.is_empty() {
-                    BBox {
-                        x0: pl.x,
-                        y0: pl.y,
-                        x1: pl.x,
-                        y1: pl.y,
-                    }
-                } else {
-                    let xf =
-                        Xf::place(pl.x, pl.y, pl.rot, pl.flip);
-                    let a = xf.apply(cb.x0, cb.y0);
-                    let c = xf.apply(cb.x1, cb.y1);
-                    let g = xf_rep(&pl.rep, &Xf::identity());
-                    let (ex, ey) = rep_extent(&g);
-                    BBox {
-                        x0: a.0.min(c.0) + ex.0.min(0),
-                        y0: a.1.min(c.1) + ey.0.min(0),
-                        x1: a.0.max(c.0) + ex.1.max(0),
-                        y1: a.1.max(c.1) + ey.1.max(0),
-                    }
-                };
-                (bb, pi)
-            })
-            .collect();
-        let (bvh_start, bvh_count) = if items.is_empty() {
+        assert!(
+            place_base + (cell.places.len() as u64) < u32::MAX as u64
+        );
+        for &pi in &place_order {
+            let pl = &cell.places[pi as usize];
+            b.place(
+                pl.cell as u32,
+                pl.x,
+                pl.y,
+                pl.rot,
+                pl.flip as bool,
+                &pl.rep,
+            );
+        }
+        let (bvh_start, bvh_count) = if bvh.is_empty() {
             (0, 0)
         } else {
-            let mut nodes: Vec<(BBox, u32, u16, bool)> = Vec::new();
-            nodes.push((BBox::EMPTY, 0, 0, false));
-            split_bvh(&mut nodes, &mut items, 0, 0);
             let base = b.n_bvh();
-            // emit places in reordered (leaf) order
-            for &(_, pi) in items.iter() {
-                let pl = &cell.places[pi];
-                b.place(
-                    pl.cell as u32,
-                    pl.x,
-                    pl.y,
-                    pl.rot,
-                    pl.flip as bool,
-                    &pl.rep,
-                );
-            }
-            for &(bb, first, count, leaf) in &nodes {
+            for &(bb, first, count, leaf) in &bvh {
                 let f = if leaf {
                     place_base as u32 + first
                 } else {
@@ -654,83 +905,12 @@ fn build(doc: &Doc, size: u64, mtime: u64, outdir: &str, jobs: usize) {
                 };
                 b.bvh_node(&bb, f, count, leaf);
             }
-            (base, nodes.len() as u32)
+            (base, bvh.len() as u32)
         };
-
-        // ---- pages per layer, in layer order. Split into jobs now
-        // (cheap); payloads encode in parallel after the cell loop.
-        // Page index == job index (phase 3 appends in job order), so
-        // page_start is the job count seen so far.
+        // page index == job index; phase 3 appends in job order
         let page_start = jobs_list.len() as u32;
-        let mut per_layer: Vec<Vec<PRec>> =
-            (0..nl).map(|_| Vec::new()).collect();
-        for (idx, r) in cell.rects.iter().enumerate() {
-            let li = lidx[&(r.layer, r.dt)];
-            let (ex, ey) = rep_extent(&r.rep);
-            per_layer[li].push(PRec {
-                kind: 0,
-                idx: idx as u32,
-                bbox: BBox {
-                    x0: r.x + ex.0.min(0),
-                    y0: r.y + ey.0.min(0),
-                    x1: r.x + r.w + ex.1.max(0),
-                    y1: r.y + r.h + ey.1.max(0),
-                },
-                bytes: 16 + rep_est(&r.rep),
-                members: r.rep.members(),
-                w: r.w,
-                h: r.h,
-            });
-        }
-        for (idx, p) in cell.polys.iter().enumerate() {
-            let li = lidx[&(p.layer, p.dt)];
-            let bb = pts_bbox(&p.pts);
-            let (ex, ey) = rep_extent(&p.rep);
-            per_layer[li].push(PRec {
-                kind: 1,
-                idx: idx as u32,
-                bbox: BBox {
-                    x0: bb.x0 + ex.0.min(0),
-                    y0: bb.y0 + ey.0.min(0),
-                    x1: bb.x1 + ex.1.max(0),
-                    y1: bb.y1 + ey.1.max(0),
-                },
-                bytes: 8 + 3 * p.pts.len() as u32 + rep_est(&p.rep),
-                members: p.rep.members(),
-                w: bb.x1 - bb.x0,
-                h: bb.y1 - bb.y0,
-            });
-        }
-        for (idx, pa) in cell.paths.iter().enumerate() {
-            let li = lidx[&(pa.layer, pa.dt)];
-            let b4 = path_bbox(&pa.pts, pa.hw, pa.es, pa.ee);
-            let (ex, ey) = rep_extent(&pa.rep);
-            per_layer[li].push(PRec {
-                kind: 2,
-                idx: idx as u32,
-                bbox: BBox {
-                    x0: b4.0 + ex.0.min(0),
-                    y0: b4.1 + ey.0.min(0),
-                    x1: b4.2 + ex.1.max(0),
-                    y1: b4.3 + ey.1.max(0),
-                },
-                bytes: 14
-                    + 3 * pa.pts.len() as u32
-                    + rep_est(&pa.rep),
-                members: pa.rep.members(),
-                w: b4.2 - b4.0,
-                h: b4.3 - b4.1,
-            });
-        }
-        for (li, mut recs) in per_layer.into_iter().enumerate() {
-            if recs.is_empty() {
-                continue;
-            }
-            let mut seq = 0u16;
-            split_pages(ci, li as u32, &mut recs[..], &mut seq,
-                        &mut jobs_list);
-        }
-        let page_count = jobs_list.len() as u32 - page_start;
+        let page_count = pages.len() as u32;
+        jobs_list.append(&mut pages);
 
         let mask_d = b.bitset(&dmask[ci]);
         let mask_r = b.bitset(&rmask[ci]);
@@ -755,19 +935,51 @@ fn build(doc: &Doc, size: u64, mtime: u64, outdir: &str, jobs: usize) {
     // deflate-6 is the build's hot cost; jobs are independent)
     let mut payloads: Vec<Vec<u8>> = Vec::new();
     payloads.resize_with(jobs_list.len(), Vec::new);
-    if jobs > 1 && jobs_list.len() > 1 {
+    let ptotal = jobs_list.len();
+    if jobs > 1 && ptotal > 1 {
         // disjoint chunks_mut slices = safe parallel fill; pages are
         // ~uniform (1 MB target) so static chunking balances well
-        let chunk = jobs_list.len().div_ceil(jobs).max(1);
+        let te = std::time::Instant::now();
+        let done = std::sync::atomic::AtomicUsize::new(0);
+        let chunk = ptotal.div_ceil(jobs).max(1);
         std::thread::scope(|s| {
+            {
+                let done = &done;
+                s.spawn(move || {
+                    use std::sync::atomic::Ordering::Relaxed;
+                    let mut last = te;
+                    loop {
+                        std::thread::sleep(
+                            std::time::Duration::from_millis(200),
+                        );
+                        if done.load(Relaxed) >= ptotal {
+                            return;
+                        }
+                        if last.elapsed().as_secs_f64() >= 5.0 {
+                            last = std::time::Instant::now();
+                            eprintln!(
+                                "[vfs] build: encoding pages {}/{} \
+                                 ({}s, rss {})",
+                                done.load(Relaxed),
+                                ptotal,
+                                te.elapsed().as_secs(),
+                                rss()
+                            );
+                        }
+                    }
+                });
+            }
+            let done = &done;
             for (jc, pc) in jobs_list
                 .chunks(chunk)
                 .zip(payloads.chunks_mut(chunk))
             {
                 s.spawn(move || {
+                    use std::sync::atomic::Ordering::Relaxed;
                     for (job, slot) in jc.iter().zip(pc.iter_mut())
                     {
                         *slot = encode_job(doc, job);
+                        done.fetch_add(1, Relaxed);
                     }
                 });
             }
