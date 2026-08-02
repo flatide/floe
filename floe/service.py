@@ -9,7 +9,6 @@ large cell array) would freeze the GUI main loop for its whole duration.
 import multiprocessing as mp
 import os
 import queue
-import re
 import signal
 import tempfile
 import time
@@ -18,27 +17,16 @@ import klayout.db as db
 
 from . import cache as cache_mod
 from .render import Renderer
-from .viewport import Mosaic, VfsMosaic, live_caps
+from .viewport import VfsMosaic
 
 _SNAP_CAP = 400   # max shapes examined per snap query
 _PICK_CAP = 64    # max candidates per pick query
 
-# shapes smaller than this many screen pixels are cut from live renders
-# (their whole size band is neither loaded nor drawn - a merged twin
-# stands in when the cache has one); snap/pick/clip always use every
-# band, so measurements stay exact. Users pick a CUT LEVEL (the `c`
-# dialog / view --cut-level); the px value behind each level is an
-# implementation detail that may be retuned without changing what
-# "level 1" means to a user. CUT_PX = the level-1 default.
+# the viewer cut LEVEL (the `c` dialog / view --cut-level); the px
+# value behind each level is an implementation detail. Level 0 = off
+# (draw all), higher = coarser wide views. CUT_PX = the level-1 px.
 CUT_LEVEL_PX = (0.0, 2.0, 4.0, 8.0)
 CUT_PX = CUT_LEVEL_PX[1]
-
-# first-visit renders turn progressive when at least this many band-file
-# bytes still need parsing (~0.5s at the measured ~18 MB/s parse rate):
-# coarse bands + twins paint a near-complete frame first, fine bands
-# sharpen it as they parse. Below the threshold a single pass is quicker
-# than the extra intermediate draws.
-PROGRESSIVE_MIN_BYTES = 8_000_000
 
 # Calibre-style label declutter: skeleton text (block names + budget
 # labels) is drawn only when few enough of it falls in the view to
@@ -64,58 +52,6 @@ LABEL_CELL_PX = 48
 COV_MAX_TEXEL_PX = 160.0
 
 
-def _bands_for_view(cache, x0, x1, w, cut_px=None):
-    """(needed band indexes, cut size in dbu) for a view of w pixels
-    across x1-x0 dbu; (None, None) on legacy caches. A band is needed
-    when its largest shapes would reach the cut size in pixels
-    (cut_px, falling back to the CUT_PX default; 0 = no cut)."""
-    b = cache.meta.get("bands")
-    if not b:
-        return None, None
-    cp = CUT_PX if cut_px is None else max(0.0, float(cut_px))
-    th_dbu = [t / cache.meta["dbu"] for t in b["thresholds_um"]]
-    nb = len(th_dbu) + 1
-    cutoff = cp * (x1 - x0) / max(1, w)
-    need = tuple(k for k in range(nb)
-                 if k == 0 or th_dbu[nb - 1 - k] > cutoff)
-    return need, cutoff
-
-
-def _apply_band_sets(mosaic, renderer, raw, twins):
-    """Show loaded RAW band cells for bands in `raw`, merged-twin cells
-    for bands in `twins`, drop everything else from the drawn tree.
-    (Rebuilding the mosaic top's instance list replaced hide_cell,
-    which painted every hidden cell as a white bbox frame - visible as
-    white tile-boundary lines on cut views.)"""
-    if mosaic.bands == 1:
-        return
-    mosaic.apply_visibility(
-        {key for key, ci in mosaic.loaded.items() if ci is not None
-         and key[2] in (twins if len(key) == 4 else raw)})
-
-
-def _apply_bands(mosaic, renderer, need):
-    """Steady-state visibility: raw cells for the needed bands, merged
-    twins standing in for the bands the cut drops - coarse slabs in
-    the layer's live colors, so the cut no longer blanks fill fields."""
-    if need is None:
-        return
-    _apply_band_sets(mosaic, renderer, set(need),
-                     set(range(mosaic.bands)) - set(need))
-
-
-_TWIN_RE = re.compile(r"^TILE_\d+_\d+_m\d+")
-
-
-def _strip_band(name):
-    """User-facing cell name: drop the mosaic's tile-isolation tag
-    (@t<key>), size-band markers (__b<k> suffix or TILE_r_c_b<k>) and
-    klayout's $n rename counters after them."""
-    name = re.sub(r"@t[\d_m]+$", "", name)
-    name = re.sub(r"__b\d+(\$\d+)?$", "", name)
-    return re.sub(r"^(TILE_\d+_\d+)_b\d+(\$\d+)?$", r"\1", name)
-
-
 def _iter_global_polys(mosaic, layers_sel, box):
     """Yield (polygon|None, text_pos|None, layer_index, cell_name) for
     shapes touching box, in top-level (global) coordinates."""
@@ -133,11 +69,9 @@ def _iter_global_polys(mosaic, layers_sel, box):
         it = ly.begin_shapes_touching(top_ci, li, box)
         while not it.at_end():
             cn = it.cell().name
-            if _TWIN_RE.match(cn) or cn.startswith("FRAMES") \
-                    or cn.startswith("LABELS"):
-                # merged twins / VFS cut-frames / live labels are
-                # draw-only stand-ins: never win a snap/pick over
-                # real geometry
+            if cn.startswith("FRAMES") or cn.startswith("LABELS"):
+                # VFS cut-frames / live labels are draw-only stand-ins:
+                # never win a snap/pick over real geometry
                 it.next()
                 continue
             sh = it.shape()
@@ -168,26 +102,6 @@ def _probe_layout(cache, box, layers):
     return m
 
 
-def _exact_source(cache, mosaic, box, layers):
-    """The layout to measure against for pick/snap.
-
-    VFS: reuse the RENDER working set - the last render already loaded
-    every page for the current view, and pick/snap happen inside it,
-    so querying that layout costs only the spatial iterate (~ms)
-    instead of rebuilding a fresh probe (~2s: a tiny cursor box pulls
-    the whole cell-local pages covering it, millions of members). The
-    semantics become "pick what you see", which matches the cut level
-    (a probe is still used for clip, which needs an arbitrary bbox).
-
-    .ice: load the box's tiles and show every band (exact geometry)."""
-    if getattr(cache, "vfs_client", None):
-        return mosaic
-    mosaic.ensure(cache.tiles_for_bbox(box.left, box.bottom,
-                                       box.right, box.top))
-    mosaic.apply_visibility(None)   # measure against every band
-    return mosaic
-
-
 def _svc_snap(cache, mosaic, job, res):
     """Vector snap: nearest vertex within radius wins, else the nearest
     point on an edge."""
@@ -197,8 +111,7 @@ def _svc_snap(cache, mosaic, job, res):
         px, py, r = job["x"], job["y"], max(1, job["r"])
         box = db.Box(px - r, py - r, px + r, py + r)
         sel = set(map(tuple, job["layers"])) if job.get("layers") else None
-        mosaic = _exact_source(cache, mosaic, box,
-                               sorted(sel) if sel else None)
+        # query the render working set (pick/snap = "what you see")
         r2 = float(r) * r
         best_v = best_e = None
         n = 0
@@ -246,8 +159,7 @@ def _svc_pick(cache, mosaic, job, res):
         px, py, r = job["x"], job["y"], max(1, job["r"])
         box = db.Box(px - r, py - r, px + r, py + r)
         sel = set(map(tuple, job["layers"])) if job.get("layers") else None
-        mosaic = _exact_source(cache, mosaic, box,
-                               sorted(sel) if sel else None)
+        # query the render working set (pick = "what you see")
         p = db.Point(px, py)
         ly = mosaic.ly
         cands = []
@@ -273,8 +185,7 @@ def _svc_pick(cache, mosaic, job, res):
         else:
             bb = db.Box(tpos[0] - 1, tpos[1] - 1, tpos[0] + 1, tpos[1] + 1)
             pts = []
-        cname = getattr(mosaic, "design", {}).get(cell) \
-            or _strip_band(cell)
+        cname = getattr(mosaic, "design", {}).get(cell, cell)
         out.update(found=True, count=len(cands), index=i,
                    layer=info.layer, datatype=info.datatype,
                    lname=info.name or f"{info.layer}/{info.datatype}",
@@ -283,35 +194,6 @@ def _svc_pick(cache, mosaic, job, res):
     except Exception as e:
         out["err"] = str(e)
     res.put(out)
-
-
-def _drawn_estimate(cache, mosaic, tiles, need, x0, y0, x1, y1):
-    """~ members inside the rendered bbox: per tile-band counts cached
-    at load time, scaled by each tile's overlap fraction with the
-    view (klayout culls off-view content at cell/array granularity, so
-    the whole-tile count would overstate near zooms)."""
-    if not mosaic.counts:
-        return None
-    g = cache.meta["grid"]
-    tw, th = g["tile_w"], g["tile_h"]
-    if not tw or not th:
-        return None
-    twin = ([k for k in range(mosaic.bands) if k not in need]
-            if need is not None else None)
-    total = 0.0
-    for (r, c) in tiles:
-        tx0 = g["x0"] + c * tw
-        ty0 = g["y0"] + r * th
-        ox = max(0, min(x1, tx0 + tw) - max(x0, tx0))
-        oy = max(0, min(y1, ty0 + th) - max(y0, ty0))
-        if ox <= 0 or oy <= 0:
-            continue
-        frac = (ox * oy) / float(tw * th)
-        for key in mosaic.keys_for([(r, c)], need, twin):
-            n = mosaic.counts.get(key)
-            if n:
-                total += n * frac
-    return int(total)
 
 
 def _load_skel_labels(skel_renderer):
@@ -441,179 +323,9 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
             return _svc_render_vfs(cache, mosaic, renderer, tmp,
                                    job, res, newer, wait_ms, t0)
         else:
-            tiles = cache.tiles_for_bbox(x0, y0, x1, y1)
-            if len(tiles) > live_caps(cache.meta)[0]:
-                res.put({"kind": "error",
-                         "msg": f"{len(tiles)} tiles > live limit"})
-                return
-            depth = job.get("depth")
-            need, cut_dbu = _bands_for_view(cache, x0, x1, job["w"],
-                                            job.get("cut_px"))
-            cut_um = (round(cut_dbu * cache.meta["dbu"], 3)
-                      if need is not None and len(need) < mosaic.bands
-                      else None)
-            cut_kv = {"cut_um": cut_um} if cut_um else {}
-            # bands the cut drops render as their merged twins (coarse
-            # slab stand-ins); missing twin files load as None once
-            twin = (tuple(k for k in range(mosaic.bands)
-                          if k not in need)
-                    if need is not None else None)
-            if lod is not None and depth is not None and \
-                    all(lod[2].get("%d,%d" % rc, 99) >= depth
-                        for rc in tiles):
-                # shallow depth: the tiny LOD tiles carry everything
-                # this render can show - skip the full-tile parse
-                # (tiles absent from the map fit whole under the cap)
-                use_mosaic, use_renderer = lod[0], lod[1]
-            else:
-                use_mosaic, use_renderer = mosaic, renderer
-            if use_mosaic is mosaic and lod is not None:
-                # progressive depth: parsing a fat first-visit tile can
-                # take tens of seconds (array-heavy designs materialize
-                # ~10^8 shapes per tile), so serve an instant preview
-                # from the tiny LOD tiles first; content beyond a tile's
-                # LOD cut is simply absent until the full frame lands.
-                fresh_fat = [rc for rc in tiles
-                             if any(key not in mosaic.loaded for key in
-                                    mosaic.keys_for([rc], need))
-                             and "%d,%d" % rc in lod[2]]
-                if fresh_fat:
-                    pv = job.get("view") or (x0, y0, x1, y1)
-                    ptiles = cache.tiles_for_bbox(*pv)
-                    if lod[0].ensure(ptiles):
-                        lod[1].refresh()
-                    pw = max(1, round(job["w"] * (pv[2] - pv[0])
-                                      / max(1, x1 - x0)))
-                    ph = max(1, round(job["h"] * (pv[3] - pv[1])
-                                      / max(1, y1 - y0)))
-                    lod[1].render_png(tmp, pv[0], pv[1], pv[2], pv[3],
-                                      pw, ph, visible=job["visible"],
-                                      depth=depth)
-                    with open(tmp, "rb") as f:
-                        png = f.read()
-                    res.put({"kind": "frame", "png": png, "bbox": pv,
-                             "gen": job["gen"], "tiles": len(ptiles),
-                             "scope": scope, "preview": True,
-                             "ms": round((time.perf_counter() - t0)
-                                         * 1000)})
-                    if newer():
-                        return  # superseded: the newer job renders next
-            if use_mosaic is mosaic and need is not None \
-                    and len(need) > 1:
-                # progressive band frames (Calibre-style build-up):
-                # coarse bands paint a near-complete first frame in the
-                # time their small files parse - twins stand in for the
-                # bands still pending - and each finer band re-renders
-                # the view as its files land. Every step is a full
-                # klayout pass over what is shown, so layer draw order
-                # stays exact in every frame. Only first visits with
-                # enough unparsed bytes bother (the intermediate draws
-                # are not free).
-                order = sorted(need)
-                pending_bytes = 0
-                for k in order[1:]:
-                    for (r, c) in tiles:
-                        if (r, c, k) not in mosaic.loaded:
-                            try:
-                                pending_bytes += os.path.getsize(
-                                    cache.band_tile_path(r, c, k))
-                            except OSError:
-                                pass
-                if pending_bytes > PROGRESSIVE_MIN_BYTES:
-                    for i, k in enumerate(order[:-1]):
-                        pend = order[i + 1:]
-                        tl = time.perf_counter()
-                        ch = mosaic.ensure(
-                            tiles, stop=newer, bands=(k,),
-                            merged=tuple(pend) + tuple(twin or ()))
-                        t_load += time.perf_counter() - tl
-                        if newer():
-                            return
-                        if ch:
-                            renderer.refresh()
-                        _apply_band_sets(
-                            mosaic, renderer, set(order[:i + 1]),
-                            set(pend) | set(twin or ()))
-                        renderer.set_abstract(job.get("abstract"))
-                        renderer.render_png(tmp, x0, y0, x1, y1,
-                                            job["w"], job["h"],
-                                            visible=job["visible"],
-                                            depth=depth)
-                        with open(tmp, "rb") as f:
-                            png = f.read()
-                        res.put({"kind": "frame", "png": png,
-                                 "bbox": job["bbox"], "gen": job["gen"],
-                                 "tiles": len(tiles), "scope": scope,
-                                 "preview": True, **cut_kv,
-                                 "ms": round((time.perf_counter() - t0)
-                                             * 1000)})
-                        if newer():
-                            return
-            view = job.get("view")
-            if use_mosaic is mosaic and view is not None:
-                # two-phase margin render: when the overdraw margin
-                # multiplies the first-visit tile parse, serve the view
-                # region first and upgrade to the full margin silently
-                vx0, vy0, vx1, vy1 = view
-                vtiles = cache.tiles_for_bbox(vx0, vy0, vx1, vy1)
-                fresh = sum(1 for key in mosaic.keys_for(tiles, need)
-                            if key not in mosaic.loaded)
-                vfresh = sum(1 for key in mosaic.keys_for(vtiles, need)
-                             if key not in mosaic.loaded)
-                if fresh - vfresh >= 4 and x1 > x0 and y1 > y0:
-                    tl = time.perf_counter()
-                    if mosaic.ensure(vtiles, stop=newer, bands=need,
-                                     merged=twin):
-                        renderer.refresh()
-                    t_load += time.perf_counter() - tl
-                    if newer():
-                        return  # superseded mid-load: drop this job
-                    vw = max(1, round(job["w"] * (vx1 - vx0) / (x1 - x0)))
-                    vh = max(1, round(job["h"] * (vy1 - vy0) / (y1 - y0)))
-                    td = time.perf_counter()
-                    _apply_bands(mosaic, renderer, need)
-                    renderer.set_abstract(job.get("abstract"))
-                    renderer.render_png(tmp, vx0, vy0, vx1, vy1, vw, vh,
-                                        visible=job["visible"],
-                                        depth=depth)
-                    t_draw = time.perf_counter() - td
-                    with open(tmp, "rb") as f:
-                        png = f.read()
-                    drawn = _drawn_estimate(cache, mosaic, vtiles, need,
-                                            vx0, vy0, vx1, vy1)
-                    res.put({"kind": "frame", "png": png,
-                             "bbox": (vx0, vy0, vx1, vy1),
-                             "gen": job["gen"], "tiles": len(vtiles),
-                             "scope": scope, "drawn": drawn,
-                             "load_ms": round(t_load * 1000),
-                             "draw_ms": round(t_draw * 1000),
-                             "wait_ms": wait_ms, **cut_kv,
-                             "ms": round(
-                                 (time.perf_counter() - t0) * 1000)})
-                    if not req.empty():
-                        return  # newer work queued: skip the margin
-                    bg = True   # margin upgrade: no status churn
-            tl = time.perf_counter()
-            if use_mosaic.ensure(tiles, stop=newer, bands=need,
-                                 merged=twin if use_mosaic is mosaic
-                                 else None):
-                use_renderer.refresh()
-            t_load += time.perf_counter() - tl
-            if newer():
-                return  # superseded mid-load: drop this job
-            td = time.perf_counter()
-            if use_mosaic is mosaic:
-                _apply_bands(mosaic, renderer, need)
-            use_renderer.set_abstract(job.get("abstract"))
-            use_renderer.render_png(tmp, x0, y0, x1, y1,
-                                    job["w"], job["h"],
-                                    visible=job["visible"], depth=depth)
-            t_draw = time.perf_counter() - td
-            tiles_n = len(tiles)
-            drawn = _drawn_estimate(
-                cache, use_mosaic, tiles,
-                need if use_mosaic is mosaic else None,
-                x0, y0, x1, y1)
+            res.put({"kind": "error", "msg": "viewer is "
+                     "VFS-only; run floe-index vfs"})
+            return
         with open(tmp, "rb") as f:
             png = f.read()
         out = {"kind": "frame", "png": png, "bbox": job["bbox"],
@@ -718,14 +430,11 @@ def _svc_clip(cache, job, res):
     t0 = time.perf_counter()
     try:
         x0, y0, x1, y1 = job["bbox"]
-        if getattr(cache, "vfs_client", None):
-            m = _probe_layout(
-                cache, db.Box(int(x0), int(y0), int(x1), int(y1)),
-                [tuple(l) for l in job["layers"]]
-                if job.get("layers") else None)
-            ly, top = m.ly, m.top
-        else:
-            ly, top, _ = cache_mod.load_region(cache, x0, y0, x1, y1)
+        m = _probe_layout(
+            cache, db.Box(int(x0), int(y0), int(x1), int(y1)),
+            [tuple(l) for l in job["layers"]]
+            if job.get("layers") else None)
+        ly, top = m.ly, m.top
         ci = ly.clip(top.cell_index(), db.Box(x0, y0, x1, y1))
         ly.cell(ci).name = "FLOE_CLIP"
         opt = cache_mod.save_opts()
@@ -755,31 +464,20 @@ def _render_service(src, req, res, latest=None):
         cache.load()
         colors = {(l["layer"], l["datatype"]): l["color"]
                   for l in cache.meta["layers"]}
-        if cache.meta.get("vfs"):
-            from .vfsclient import VfsClient
-            cache.vfs_client = VfsClient(cache.dir)
-            mosaic = VfsMosaic(cache)
-            fcolors = dict(colors)
-            fcolors[VfsMosaic.FRAME_LAYER] = "#93a4ad"
-            renderer = Renderer(mosaic.ly, mosaic.top, fcolors,
-                                hier_offset=0,
-                                hollow=(VfsMosaic.FRAME_LAYER,))
-            lod = None
-        else:
-            mosaic = Mosaic(cache)
-            renderer = Renderer(mosaic.ly, mosaic.top, colors,
-                                hier_offset=2)
-            lod = None
-        if not cache.meta.get("vfs") and cache.meta.get("lod"):
-            def _lod_path(r, c):
-                # tiles small enough to need no LOD double as their own
-                p = cache.lod_tile_path(r, c)
-                return p if os.path.isfile(p) else cache.tile_path(r, c)
-            lod_mosaic = Mosaic(cache, _lod_path)
-            lod = (lod_mosaic,
-                   Renderer(lod_mosaic.ly, lod_mosaic.top, colors,
-                            hier_offset=2),
-                   cache.meta["lod"]["tiles"])
+        # viewer is VFS-only
+        if not cache.meta.get("vfs"):
+            res.put({"kind": "error", "msg": "not a VFS cache; "
+                     "run: floe-index vfs <file.oas>"})
+            return
+        from .vfsclient import VfsClient
+        cache.vfs_client = VfsClient(cache.dir)
+        mosaic = VfsMosaic(cache)
+        fcolors = dict(colors)
+        fcolors[VfsMosaic.FRAME_LAYER] = "#93a4ad"
+        renderer = Renderer(mosaic.ly, mosaic.top, fcolors,
+                            hier_offset=0,
+                            hollow=(VfsMosaic.FRAME_LAYER,))
+        lod = None
     except Exception as e:
         res.put({"kind": "error", "msg": f"render service init failed: {e}"})
         return

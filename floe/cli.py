@@ -42,23 +42,38 @@ def parse_bbox_um(s, dbu):
     return a, c, b, d
 
 
-def open_cache(src, auto_index, args):
+def open_cache(src, args):
+    # the viewer is VFS-only: it opens <src>.floe (built by
+    # `floe-index vfs`) and never auto-builds a cache.
     from . import cache as cache_mod
     c = cache_mod.Cache(src)
-    # --layout-mode viewer|editable overrides the per-cache read-mode
-    # heuristic everywhere this cache handle is used
     c.layout_mode = getattr(args, "layout_mode", None)
     if not c.exists():
-        if not auto_index:
-            raise SystemExit(f"no cache for {src}; run: floe index {src}")
-        print(f"[floe] no cache yet - building index first (one-time)...")
-        cache_mod.build_index(src, jobs=getattr(args, "jobs", None))
+        raise SystemExit(
+            f"no VFS cache for {src}; run: floe-index vfs {src}")
     c.load()
+    if not c.meta.get("vfs"):
+        raise SystemExit(
+            f"{c.dir} is not a VFS cache; rebuild: floe-index vfs {src}")
     if c.is_stale():
-        print("[floe][warn] cache is outdated (source changed or cache "
-              "format bumped); run 'floe index' to rebuild",
-              file=sys.stderr)
+        print("[floe][warn] cache is outdated (source changed); "
+              "rebuild: floe-index vfs", file=sys.stderr)
     return c
+
+
+def _vfs_region(c, x0, y0, x1, y1, layers):
+    """An exact (cut=0) working-set layout for a bbox via a vfsd probe -
+    the CLI counterpart of the viewer's render working set. Returns
+    (layout, top_cell, VfsClient); stop the client when done."""
+    from .vfsclient import VfsClient
+    from .viewport import VfsMosaic
+    dbu = c.meta["dbu"]
+    vc = VfsClient(c.dir)
+    r = vc.request(0, (x0 * dbu, y0 * dbu, x1 * dbu, y1 * dbu),
+                   1.0, 0.0, layers, None, probe=True)
+    m = VfsMosaic(c)
+    m.apply(r["delta"], r["mats"], [])
+    return m.ly, m.top, vc
 
 
 def cmd_index(args):
@@ -97,59 +112,38 @@ def cmd_index(args):
 
 
 def cmd_info(args):
-    from . import cache as cache_mod
-    c = open_cache(args.src, auto_index=False, args=args)
+    c = open_cache(args.src, args=args)
     m = c.meta
     dbu = m["dbu"]
     bb = m["bbox"]
+
+    def _du(path):
+        tot = 0
+        for root, _dirs, files in os.walk(path):
+            for f in files:
+                try:
+                    tot += os.path.getsize(os.path.join(root, f))
+                except OSError:
+                    pass
+        return tot
+
     print(f"source     : {m['src']['path']} "
           f"({m['src']['size'] / 1e9:.2f} GB)")
-    print(f"top cell   : {m['top_cell']}   cells: {m['stats']['cells']}")
+    print(f"top cell   : {m['top_cell']}")
     print(f"bbox       : ({bb[0] * dbu:.1f}, {bb[1] * dbu:.1f}) - "
           f"({bb[2] * dbu:.1f}, {bb[3] * dbu:.1f}) um")
-    g = m["grid"]
-    print(f"grid       : {g['nx']}x{g['ny']} tiles "
-          f"({m['stats']['tile_files']} non-empty), "
-          f"tile {g['tile_w'] * dbu:.0f}x{g['tile_h'] * dbu:.0f} um")
-    print(f"index time : {m['stats']['total_s']}s "
-          f"(read {m['stats']['read_s']}s, tiles {m['stats']['tiles_s']}s)")
-    shapes = sum(l["stored_shapes"] for l in m["layers"])
-    print(f"read mode  : %s (%.2f shapes/byte; --layout-mode overrides)"
-          % ("viewer" if cache_mod.viewer_mode_preferred(m)
-             else "editable", shapes / max(1, m["src"]["size"])))
-    tinfo = m.get("texts_thinned") or m.get("texts_dropped")
-    if tinfo:
-        kind = "thinned" if m.get("texts_thinned") else "dropped"
-        print(f"texts      : {kind} layers "
-              + ", ".join(f"{t['layer']}/{t['datatype']}" for t in tinfo)
-              + "  (over per-layer cap; kept per-tile - "
-                "--text-cap / --text-tile-cap adjust)")
-    if m.get("bands"):
-        th = m["bands"]["thresholds_um"]
-        n = len(th)
-        edges = [f">={th[-1]}um" if k == 0 else
-                 f"<{th[0]}um" if k == n else
-                 f"{th[n - 1 - k]}-{th[n - k]}um" for k in range(n + 1)]
-        parts = []
-        for k in range(n + 1):
-            d = os.path.join(c.dir, f"tiles_b{k}")
-            files = os.listdir(d) if os.path.isdir(d) else []
-            sz = sum(os.path.getsize(os.path.join(d, f)) for f in files)
-            parts.append(f"b{k}({edges[k]}): {len(files)} files "
-                         f"{sz / 1e6:.1f}MB")
-        print("bands      : " + "  ".join(parts))
-        mparts = []
-        for k in range(1, n + 1):
-            d = os.path.join(c.dir, f"tiles_m{k}")
-            files = os.listdir(d) if os.path.isdir(d) else []
-            if files:
-                sz = sum(os.path.getsize(os.path.join(d, f))
-                         for f in files)
-                mparts.append(f"m{k}: {len(files)} files "
-                              f"{sz / 1e6:.1f}MB")
-        print("merged     : " + ("  ".join(mparts) if mparts else
-                                 "none (floe index --merge-only adds "
-                                 "cut stand-ins)"))
+    print(f"cache      : {c.dir}  ({_du(c.dir) / 1e6:.1f} MB, VFS v"
+          f"{m.get('vfs')})")
+    for part in ("design.ovm", "design.ovp", "design.ovc"):
+        p = os.path.join(c.dir, part)
+        if os.path.exists(p):
+            print(f"  {part:<11}: {os.path.getsize(p) / 1e6:.1f} MB")
+        elif part == "design.ovc":
+            print("  design.ovc : (none; add: floe-index vfs "
+                  "--coverage-only)")
+    sk = m.get("skeleton") or {}
+    print(f"skeleton   : {sk.get('shapes', 0):,} shapes, "
+          f"{sk.get('texts', 0):,} texts")
     print(f"{'layer':>8}  {'name':<12} {'stored shapes':>14}")
     for l in m["layers"]:
         print(f"{l['layer']:>5}/{l['datatype']:<2} {l['name']:<12} "
@@ -157,26 +151,27 @@ def cmd_info(args):
 
 
 def cmd_render(args):
-    from . import cache as cache_mod
-    c = open_cache(args.src, auto_index=args.auto_index, args=args)
+    c = open_cache(args.src, args=args)
     dbu = c.meta["dbu"]
     x0, y0, x1, y1 = parse_bbox_um(args.bbox, dbu)
     layers = c.resolve_layers(args.layers)
     t0 = time.perf_counter()
-    ly, top, ntiles = cache_mod.load_region(
-        c, x0, y0, x1, y1, log=print, max_tiles=args.max_tiles,
-        layers=layers)
-    from .render import Renderer
-    colors = {(l["layer"], l["datatype"]): l["color"]
-              for l in c.meta["layers"]}
-    r = Renderer(ly, top, colors, hier_offset=2)
-    w = args.px
-    h = max(1, round(w * (y1 - y0) / (x1 - x0)))
-    depth = None if args.depth is None or args.depth >= 999 else args.depth
-    r.render_png(args.out, x0, y0, x1, y1, w, h, visible=layers,
-                 depth=depth)
+    ly, top, vc = _vfs_region(c, x0, y0, x1, y1, layers)
+    try:
+        from .render import Renderer
+        colors = {(l["layer"], l["datatype"]): l["color"]
+                  for l in c.meta["layers"]}
+        r = Renderer(ly, top, colors, hier_offset=0)
+        w = args.px
+        h = max(1, round(w * (y1 - y0) / (x1 - x0)))
+        depth = (None if args.depth is None or args.depth >= 999
+                 else args.depth)
+        r.render_png(args.out, x0, y0, x1, y1, w, h, visible=layers,
+                     depth=depth)
+    finally:
+        vc.stop()
     print(f"[floe] rendered {args.out} ({w}x{h}) "
-          f"in {time.perf_counter() - t0:.2f}s ({ntiles} tiles)")
+          f"in {time.perf_counter() - t0:.2f}s")
 
 
 def cmd_clip(args):
@@ -194,14 +189,13 @@ def cmd_clip(args):
         ci = src_ly.clip(top.cell_index(), db.Box(x0, y0, x1, y1))
         ly, clip_ci = src_ly, ci
         meta_layers = None
+        vc = None
     else:
-        c = open_cache(args.src, auto_index=args.auto_index, args=args)
+        c = open_cache(args.src, args=args)
         dbu = c.meta["dbu"]
         x0, y0, x1, y1 = parse_bbox_um(args.bbox, dbu)
         sel = c.resolve_layers(args.layers) if args.layers else None
-        ly, top, ntiles = cache_mod.load_region(
-            c, x0, y0, x1, y1, log=print, max_tiles=args.max_tiles,
-            layers=sel)
+        ly, top, vc = _vfs_region(c, x0, y0, x1, y1, sel)
         clip_ci = ly.clip(top.cell_index(), db.Box(x0, y0, x1, y1))
         meta_layers = c.meta["layers"]
 
@@ -224,19 +218,22 @@ def cmd_clip(args):
             if (info.layer, info.datatype) in layers:
                 opt.add_layer(li, db.LayerInfo())
     ly.write(args.out, opt)
+    if vc is not None:
+        vc.stop()
     sz = os.path.getsize(args.out)
     print(f"[floe] clip saved: {args.out} ({sz / 1e6:.2f} MB) "
           f"in {time.perf_counter() - t0:.2f}s")
 
 
 def _cache_ready(src):
-    """Lightweight cache check without importing klayout (kept in sync
-    with cache.Cache: <src>.ice/meta.json + size/mtime fingerprint)."""
+    """Lightweight cache check without importing klayout: a VFS
+    cache at <src>.floe with a matching source fingerprint."""
     try:
-        with open(src + ".ice/meta.json") as f:
+        with open(src + ".floe/meta.json") as f:
             meta = json.load(f)
         st = os.stat(src)
-        return (st.st_size == meta["src"]["size"]
+        return (bool(meta.get("vfs"))
+                and st.st_size == meta["src"]["size"]
                 and int(st.st_mtime) == meta["src"]["mtime"])
     except (OSError, ValueError, KeyError):
         return False
@@ -248,7 +245,7 @@ def cmd_probe(args):
     the queues. Isolates 'viewer shows black' to either the service side
     (this fails too) or the display side (this passes)."""
     import queue as _queue
-    c = open_cache(args.src, auto_index=False, args=args)
+    c = open_cache(args.src, args=args)
     from .service import RenderWorker
     w = RenderWorker(c)
     w.start()
@@ -316,9 +313,15 @@ def cmd_probe(args):
 def cmd_profile(args):
     """Emit a structure-only profile (counts/sizes/grid, no geometry) of
     an indexed layout, for synthesizing a render-performance lookalike
-    outside the closed network (tools/gen_from_profile.py)."""
+    outside the closed network (tools/gen_from_profile.py). This is a
+    dev tool paired with the retained .ice indexer (the rust-validation
+    oracle), so it reads a tile cache directly rather than a VFS one."""
     from . import cache as cache_mod
-    c = open_cache(args.src, auto_index=False, args=args)
+    c = cache_mod.Cache(args.src)
+    if not c.exists():
+        raise SystemExit(f"no cache for {args.src}; run: floe index "
+                         f"{args.src}")
+    c.load()
     prof = cache_mod.profile_cache(c, sample_tiles=args.sample_tiles,
                                    anon=args.anon,
                                    log=lambda *a: print(*a,
@@ -424,10 +427,12 @@ def cmd_view(args):
         if display is None:
             print("floe: DISPLAY is not set", file=sys.stderr)
             raise SystemExit(1)
-        # the receiving instance must be able to load the cache, and index
-        # progress belongs in this terminal, not inside the GUI process
+        # the viewer is VFS-only and never builds a cache: fail here, in
+        # this terminal, rather than forwarding an unopenable file to the
+        # GUI instance
         if not _cache_ready(src):
-            open_cache(src, auto_index=True, args=args)
+            raise SystemExit(f"no VFS cache for {src}; "
+                             f"run: floe-index vfs {src}")
         addr = instance.socket_address(display)
         request = src
         if goto is not None:
@@ -449,7 +454,7 @@ def cmd_view(args):
             import atexit
             atexit.register(lambda: os.path.exists(addr) and os.unlink(addr))
 
-    c = open_cache(src, auto_index=args.auto_index, args=args)
+    c = open_cache(src, args=args)
     # PyGObject/GTK3 problems are reported inside import_gtk (exit 3)
     from .gui import run_viewer
     depth = args.depth
@@ -547,8 +552,6 @@ def main(argv=None):
     p.add_argument("src")
     p.set_defaults(fn=cmd_info)
 
-    common = dict(auto_index=True)
-
     p = sub.add_parser("render", help="render a region to PNG")
     p.add_argument("src")
     p.add_argument("--bbox", required=True, help="X0,Y0,X1,Y1 in um")
@@ -558,12 +561,6 @@ def main(argv=None):
     p.add_argument("--out", default="view.png")
     p.add_argument("--depth", type=int, default=None,
                    help="hierarchy depth (0=top only, 999/omit=full)")
-    p.add_argument("--max-tiles", type=int, default=64)
-    p.add_argument("--auto-index", action="store_true", default=True)
-    p.add_argument("--layout-mode", default=None,
-                   choices=("viewer", "editable"),
-                   help="tile read mode (default: per-cache heuristic, "
-                        "see 'floe info')")
     p.set_defaults(fn=cmd_render)
 
     p = sub.add_parser("clip", help="save a region as a new OASIS file")
@@ -574,11 +571,6 @@ def main(argv=None):
     p.add_argument("--cell-name", default="FLOE_CLIP")
     p.add_argument("--exact", action="store_true",
                    help="clip from the original file (slow, boundary-exact)")
-    p.add_argument("--max-tiles", type=int, default=256)
-    p.add_argument("--auto-index", action="store_true", default=True)
-    p.add_argument("--layout-mode", default=None,
-                   choices=("viewer", "editable"),
-                   help="tile read mode (default: per-cache heuristic)")
     p.set_defaults(fn=cmd_clip)
 
     p = sub.add_parser("probe", help="test the viewer's render service "
@@ -630,7 +622,6 @@ def main(argv=None):
     p.add_argument("--drc", default=None, metavar="FILE.db",
                    help="preload a Calibre ASCII DRC results db and "
                         "open the error browser (new instance only)")
-    p.add_argument("--auto-index", action="store_true", default=True)
     p.add_argument("--cut-level", type=int, default=None, metavar="N",
                    choices=(0, 1, 2, 3),
                    help="starting detail cut level: 0 = off, 1 = "
