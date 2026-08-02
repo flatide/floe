@@ -269,7 +269,19 @@ pub struct WCell<'a> {
 /// bodies are emitted in the given order; OASIS placements reference
 /// cells by name, so definition order is free.
 pub fn write_tree(cells: &[WCell], unit: f64) -> Result<Vec<u8>> {
+    Ok(write_tree_sized(cells, unit)?.0)
+}
+
+/// write_tree plus the total UNCOMPRESSED cell-body byte count -
+/// the decoded parse cost a reader will pay, which CBLOCK hides
+/// from the file size (page usize_ records this, and the streaming
+/// budget is measured in it).
+pub fn write_tree_sized(
+    cells: &[WCell],
+    unit: f64,
+) -> Result<(Vec<u8>, u64)> {
     let mut w = W::new();
+    let mut raw = 0u64;
     w.out.extend_from_slice(MAGIC);
     w.uint(1);
     w.string(b"1.0");
@@ -600,6 +612,7 @@ pub fn write_tree(cells: &[WCell], unit: f64) -> Result<Vec<u8>> {
                 }
             }
         }
+        raw += b.out.len() as u64;
         if b.out.len() >= 64 {
             // deflate 6, not 1: measured -12% (fragmented bodies)
             // to -46% (regular fill) on tiny-grid content, -3.5%
@@ -625,5 +638,5 @@ pub fn write_tree(cells: &[WCell], unit: f64) -> Result<Vec<u8>> {
     w.uint(252);
     w.out.extend_from_slice(&[0u8; 252]);
     w.uint(0);
-    Ok(w.out)
+    Ok((w.out, raw))
 }

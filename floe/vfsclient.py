@@ -54,7 +54,7 @@ class VfsClient:
 
     def request(self, gen, view_um, px_per_um, cut_px, layers=None,
                 depth=None, probe=False, hier=False, ack=0,
-                reset=False):
+                reset=False, stream_kb=None):
         """One plan/materialize round-trip. view_um = (x0,y0,x1,y1)
         in um; layers = [(l,d), ...] or None (=all); depth None =
         full. Returns the parsed response dict with 'mats' (list of
@@ -87,6 +87,10 @@ class VfsClient:
                 line += f" mode=hier ack={ack}"
                 if reset:
                     line += " reset=1"
+                if stream_kb is not None:
+                    # per-request budget override: the service adapts
+                    # it to its measured parse speed
+                    line += f" stream={int(stream_kb)}"
         elif probe:
             line += " mode=probe"
         self.proc.stdin.write(line + "\n")

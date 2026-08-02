@@ -90,6 +90,10 @@ class VfsMosaic:
         self.req_gen = 0      # daemon-gen counter (monotonic)
         self.applied_gen = 0  # last gen fully applied (the ack)
         self.need_reset = False
+        # adaptive streaming budget (KB of decoded payload per
+        # round): the service re-tunes it toward ~0.35s parse per
+        # round from measured apply times
+        self.stream_kb = 24576
         # gate-only hook (par.7 fault injection): apply_hier raises
         # at step N once, exercising the reset_all recovery path
         self._fault_step = None

@@ -110,6 +110,13 @@ pub struct HierPlan {
     pub wcells: Vec<WsCell>,
     /// union of wcell pages, sorted unique
     pub pages: Vec<u32>,
+    /// streaming priority aligned with `pages`: squared distance
+    /// from the page bbox to the nearest localview-box CENTER of a
+    /// WC that selected it, in that WC's LOCAL frame (0 = the
+    /// screen-center ray hits the page; min across shared uses).
+    /// Page bboxes are cell-local, so only a local-frame metric
+    /// orders "center first" correctly under placement/rotation.
+    pub page_prio: Vec<u64>,
     pub stats: HierStats,
 }
 
@@ -340,6 +347,7 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
         heap: BinaryHeap::new(),
         out: BTreeMap::new(),
         pages_all: BTreeSet::new(),
+        prio: HashMap::new(),
         st: HierStats::default(),
         pts_budget: opts.pts_enum_budget,
         frames_total: 0,
@@ -368,12 +376,33 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
     st.wc_cells = h.out.len() as u64;
     st.wc_variants =
         h.out.keys().filter(|&&(_, r)| r != REM_FULL).count() as u64;
+    let pages: Vec<u32> = h.pages_all.into_iter().collect();
+    let page_prio: Vec<u64> = pages
+        .iter()
+        .map(|pi| {
+            h.prio
+                .get(pi)
+                .map(|&d| d.min(u64::MAX as u128) as u64)
+                .unwrap_or(u64::MAX)
+        })
+        .collect();
     HierPlan {
         top: (top_ci, r0),
         wcells: h.out.into_values().collect(),
-        pages: h.pages_all.into_iter().collect(),
+        pages,
+        page_prio,
         stats: st,
     }
+}
+
+/// squared distance from the center of `b` to the box `p`
+/// (0 when the center lies inside)
+fn dist2_center_to_box(b: &BBox, p: &BBox) -> u128 {
+    let cx = (b.x0 as i128 + b.x1 as i128) / 2;
+    let cy = (b.y0 as i128 + b.y1 as i128) / 2;
+    let dx = (p.x0 as i128 - cx).max(cx - p.x1 as i128).max(0);
+    let dy = (p.y0 as i128 - cy).max(cy - p.y1 as i128).max(0);
+    (dx * dx + dy * dy) as u128
 }
 
 struct Hier<'a> {
@@ -388,6 +417,8 @@ struct Hier<'a> {
     heap: BinaryHeap<Reverse<(u32, u32, u32)>>,
     out: BTreeMap<WsKey, WsCell>,
     pages_all: BTreeSet<u32>,
+    /// page -> min squared center distance (streaming priority)
+    prio: HashMap<u32, u128>,
     st: HierStats,
     pts_budget: u64,
     frames_total: usize,
@@ -464,6 +495,18 @@ impl<'a> Hier<'a> {
                     self.walk_pbvh(pr.pbvh_root, b, &mut psel);
                 }
             }
+        }
+        for &pi in &psel {
+            let pb = self.v.page(pi).bbox;
+            let d = boxes
+                .iter()
+                .map(|b| dist2_center_to_box(b, &pb))
+                .min()
+                .unwrap_or(u128::MAX);
+            self.prio
+                .entry(pi)
+                .and_modify(|e| *e = (*e).min(d))
+                .or_insert(d);
         }
         self.pages_all.extend(psel.iter().copied());
         wc.pages = psel.into_iter().collect();
@@ -913,6 +956,7 @@ impl crate::Vfs {
         plan: &HierPlan,
         new_pages: &[u32],
         gen: u64,
+        avail: Option<&std::collections::HashSet<u32>>,
     ) -> Result<Vec<u8>, String> {
         use floe_oasis::doc::RectRec;
         use floe_oasis::write::{
@@ -945,6 +989,16 @@ impl crate::Vfs {
                 let mut places =
                     Vec::with_capacity(w.pages.len() + w.insts.len());
                 for &pi in &w.pages {
+                    // streaming (par.5 M3.5): a partial delta must
+                    // only reference MATERIALIZED pages - a name
+                    // with no definition anywhere would make
+                    // klayout mint an empty ghost cell that nothing
+                    // ever evicts (review finding)
+                    if let Some(a) = avail {
+                        if !a.contains(&pi) {
+                            continue;
+                        }
+                    }
                     places.push((
                         self.page_name(pi),
                         0,
@@ -1992,6 +2046,53 @@ mod tests {
     // ---------------------------------------------- delta (par.3.2)
 
     #[test]
+    fn page_prio_is_local_frame() {
+        // CHILD sits at (100k,100k): its page bbox is CELL-LOCAL
+        // (0..100), so a world-center metric would call it "far"
+        // even when it fills the screen center (review finding).
+        // The planner must price it through the WC's LOCAL view.
+        let v = fixture(
+            &[
+                FCell {
+                    name: "C",
+                    pages: vec![(bx(0, 0, 100, 100), 100, 100)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "T",
+                    pages: vec![(bx(0, 0, 80, 80), 80, 80)],
+                    places: vec![(
+                        0,
+                        100_000,
+                        100_000,
+                        0,
+                        false,
+                        Rep::One,
+                    )],
+                },
+            ],
+            1,
+        );
+        // wide view covering both pages; the child's LOCAL view box
+        // covers its whole page (center inside -> prio 0) while the
+        // top's own page sits ~50k off the top-frame view center
+        let req =
+            rq(bx(-10, -10, 100_140, 100_140), 0, u32::MAX);
+        let plan = plan_hier(&v, &req, &HierOpts::default());
+        assert_eq!(plan.pages, vec![0, 1]);
+        // child page: the local view box covers it -> center inside
+        // -> prio 0; top's own page is far from the view center
+        assert_eq!(plan.page_prio[0], 0, "{:?}", plan.page_prio);
+        assert!(plan.page_prio[1] > 0, "{:?}", plan.page_prio);
+        // narrow view exactly on the child: still prio 0
+        let req2 =
+            rq(bx(99_990, 99_990, 100_110, 100_110), 0, u32::MAX);
+        let plan2 = plan_hier(&v, &req2, &HierOpts::default());
+        assert_eq!(plan2.pages, vec![0]);
+        assert_eq!(plan2.page_prio, vec![0]);
+    }
+
+    #[test]
     fn delta_hier_roundtrip_full() {
         use floe_oasis::doc::{parse_doc, RectRec};
         use floe_oasis::write::{write_tree, WCell};
@@ -2104,11 +2205,11 @@ mod tests {
             plan_hier(&vfs.ovm, &req, &HierOpts::default());
         assert_eq!(plan.pages, vec![0, 1]);
         let delta =
-            vfs.delta_hier(&plan, &plan.pages, 3).unwrap();
+            vfs.delta_hier(&plan, &plan.pages, 3, None).unwrap();
         // deterministic emission
         assert_eq!(
             delta,
-            vfs.delta_hier(&plan, &plan.pages, 3).unwrap()
+            vfs.delta_hier(&plan, &plan.pages, 3, None).unwrap()
         );
         let doc = parse_doc(&delta).unwrap();
         // single-top OASIS: the gen's top WC
@@ -2141,7 +2242,7 @@ mod tests {
         // incremental delta: no page bodies, resident refs stay
         // undefined (parse_doc materializes them as empty cells,
         // klayout binds them by name - M0)
-        let inc = vfs.delta_hier(&plan, &[], 4).unwrap();
+        let inc = vfs.delta_hier(&plan, &[], 4, None).unwrap();
         let doc2 = parse_doc(&inc).unwrap();
         assert_eq!(doc2.cells[doc2.top].name, "W4_F_1");
         let ghost = doc2
@@ -2191,7 +2292,7 @@ mod tests {
             &HierOpts::default(),
         );
         let vfs = crate::Vfs { ovm: v, ovp_path: String::new() };
-        let delta = vfs.delta_hier(&plan, &[], 9).unwrap();
+        let delta = vfs.delta_hier(&plan, &[], 9, None).unwrap();
         let doc = parse_doc(&delta).unwrap();
         let top = &doc.cells[doc.top];
         assert_eq!(top.name, "W9_F_1");
@@ -2212,7 +2313,7 @@ mod tests {
             &HierOpts::default(),
         );
         let vfs2 = crate::Vfs { ovm: v2, ovp_path: String::new() };
-        let delta2 = vfs2.delta_hier(&plan2, &[], 11).unwrap();
+        let delta2 = vfs2.delta_hier(&plan2, &[], 11, None).unwrap();
         let doc2 = parse_doc(&delta2).unwrap();
         let t2 = &doc2.cells[doc2.top];
         let pl = t2

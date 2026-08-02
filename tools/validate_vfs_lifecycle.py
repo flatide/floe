@@ -100,6 +100,14 @@ def check_ledger(tag, mosaic):
         c = mosaic.ly.cell(nm)
         chk(c is not None and c.cell_index() == ci,
             "%s registry entry %s stale" % (tag, nm))
+    # no ghost pages, ever: every P cell in the layout must carry
+    # shapes (a partial delta may only reference MATERIALIZED pages
+    # - review finding)
+    for c in mosaic.ly.each_cell():
+        if c.name.startswith("P") and c.name[1].isdigit():
+            nsh = sum(c.shapes(li).size()
+                      for li in mosaic.ly.layer_indexes())
+            chk(nsh > 0, "%s ghost page cell %s" % (tag, c.name))
 
 
 class Sess:
@@ -241,7 +249,9 @@ def main():
 
     # ---- L6: budgeted streaming (progressive first paint)
     view = (bx0, by0, bx0 + w // 2, by0 + h // 2)
-    s = Sess(cache)  # cold reference: unbudgeted new count
+    # cold reference MUST disable streaming outright (stream_kb=0),
+    # not lean on the daemon default fitting the fixture (review)
+    s = Sess(cache, stream_kb=0)
     try:
         r = s.request(view)
         cold_new = int(r["new"])
@@ -265,6 +275,16 @@ def main():
             chk(rounds < 500, "L6 no convergence")
             s.apply(r)
             new_total += int(r["new"])
+            if rounds == 1:
+                # a partial delta must not mint deferred ghost
+                # cells: exactly the sent pages exist, all filled
+                pcells = [c.name for c in s.m.ly.each_cell()
+                          if c.name.startswith("P")
+                          and c.name[1].isdigit()]
+                chk(len(pcells) == int(r["new"]),
+                    "L6 round1 P cells %d != new %s"
+                    % (len(pcells), r["new"]))
+                check_ledger("L6 round1", s.m)
             if r.get("partial") != "1":
                 break
             r = s.request(view)
@@ -273,6 +293,27 @@ def main():
             "L6 streamed %d != cold %d" % (new_total, cold_new))
         xor_view("L6 final", sregs, s.m, view)
         check_ledger("L6", s.m)
+        # wander away MID-refinement, come back: no ghosts at any
+        # stop, both views XOR clean when completed
+        vB = (bx1 - w // 3, by1 - h // 3, bx1, by1)
+        rp = s.request(view)  # partial round on A (fresh pages? may
+        s.apply(rp)           # be complete now; either way apply)
+        r = s.request(vB)
+        while True:
+            s.apply(r)
+            check_ledger("L6 wander B", s.m)
+            if r.get("partial") != "1":
+                break
+            r = s.request(vB)
+        xor_view("L6 wander B", sregs, s.m, vB)
+        r = s.request(view)
+        while True:
+            s.apply(r)
+            if r.get("partial") != "1":
+                break
+            r = s.request(view)
+        xor_view("L6 wander back", sregs, s.m, view)
+        check_ledger("L6 wander back", s.m)
     finally:
         s.stop()
     sly._destroy()

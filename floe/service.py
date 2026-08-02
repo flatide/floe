@@ -327,7 +327,8 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
             tiles_n = 0
         elif getattr(cache, "vfs_client", None):
             return _svc_render_vfs(cache, mosaic, renderer, tmp,
-                                   job, res, newer, wait_ms, t0)
+                                   job, req, res, newer, wait_ms,
+                                   t0)
         else:
             res.put({"kind": "error", "msg": "viewer is "
                      "VFS-only; run floe-index vfs"})
@@ -348,8 +349,8 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
         res.put({"kind": "error", "msg": str(e)})
 
 
-def _svc_render_vfs(cache, mosaic, renderer, tmp, job, res, newer,
-                    wait_ms, t0):
+def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
+                    newer, wait_ms, t0):
     """VFS render: one vfsd round-trip plans the viewport, the delta
     file carries only the pages the working set lacks, and klayout
     draws the rebuilt FLOE_WS. Depth semantics live in the plan (the
@@ -369,9 +370,13 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, res, newer,
     labels = _view_labels(cache, x0, y0, x1, y1, job["w"],
                           job["h"], job["visible"])
 
+    draw_total = [0.0]
+
     def emit(r, t_load):
         """draw the current working set (+coverage fill) and push
-        one frame - the hier streaming path emits one per round"""
+        one frame - the hier streaming path emits one per round;
+        load/draw times are CUMULATIVE so the settled status line
+        adds up to the wall time"""
         td = time.perf_counter()
         renderer.set_abstract(job.get("abstract"))
         renderer.set_text_visible(bool(labels))
@@ -381,7 +386,7 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, res, newer,
                  else list(job["visible"]) + [VfsMosaic.FRAME_LAYER])
         renderer.render_png(tmp, x0, y0, x1, y1, job["w"], job["h"],
                             visible=vis_r, depth=None)
-        t_draw = time.perf_counter() - td
+        draw_total[0] += time.perf_counter() - td
         # coverage fill: where the cut dropped real shapes, tint the
         # density bitplanes with the live palette into blank pixels
         # (Calibre-style density; display-only). Only when the cut
@@ -416,8 +421,12 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, res, newer,
                "gen": job["gen"], "tiles": r.get("pages", 0),
                "scope": "live", "bg": False,
                "load_ms": round(t_load * 1000),
-               "draw_ms": round(t_draw * 1000), "wait_ms": wait_ms,
+               "draw_ms": round(draw_total[0] * 1000),
+               "wait_ms": wait_ms,
                "ms": round((time.perf_counter() - t0) * 1000)}
+        if r.get("partial") == "1":
+            # refinement in flight: how many pages are still coming
+            out["refining"] = int(r.get("deferred", 0) or 0)
         if cut_px:
             out["cut_um"] = round(cut_px / max(1e-9, px_per_um), 3)
         if isinstance(r.get("members"), int):
@@ -455,7 +464,8 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, res, newer,
         r = cache.vfs_client.request(
             mosaic.req_gen, view_um, px_per_um, cut_px, layers,
             job.get("depth"), hier=True, ack=mosaic.applied_gen,
-            reset=mosaic.need_reset)
+            reset=mosaic.need_reset,
+            stream_kb=mosaic.stream_kb)
         mosaic.need_reset = False
         # names= arrives ONCE per daemon run and is view-
         # independent: consume it BEFORE the stale check, or a
@@ -487,12 +497,46 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, res, newer,
                                         gen=mosaic.req_gen)
         if changed:
             renderer.refresh()
-        load_total += time.perf_counter() - tl
+        t_round = time.perf_counter() - tl
+        load_total += t_round
+        # adapt the round budget toward ~0.35s of parse per round -
+        # decoded bytes only approximate klayout's cost, and fill
+        # distributions vary chip to chip (review finding)
+        if int(r.get("new", 0) or 0) > 0 and t_round > 0.02:
+            ideal = mosaic.stream_kb * 0.35 / t_round
+            mosaic.stream_kb = int(
+                max(2048, min(131072,
+                              (mosaic.stream_kb + ideal) / 2)))
         if newer():
             return
         emit(r, load_total)
         if r.get("partial") != "1" or newer():
             return
+        # a refinement can run for seconds: serve interactive
+        # queries between rounds (renders self-supersede via
+        # `latest`; snap/pick answer against the partial mosaic -
+        # WYSIWYG, they see exactly what is on screen)
+        try:
+            while True:
+                j = req.get_nowait()
+                if j is None:
+                    req.put(None)  # shutdown: propagate, stop
+                    return
+                k = j.get("kind")
+                if k == "clip":
+                    _svc_clip(cache, j, res)
+                elif k == "snap":
+                    _svc_snap(cache, mosaic, j, res)
+                elif k == "pick":
+                    _svc_pick(cache, mosaic, j, res)
+                else:
+                    # render job: put it back - `latest` was bumped
+                    # at submit, so the next newer() check ends this
+                    # refinement and the outer loop picks it up
+                    req.put(j)
+                    break
+        except queue.Empty:
+            pass
 
 
 def _svc_clip(cache, job, res):

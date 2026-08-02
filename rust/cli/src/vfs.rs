@@ -482,7 +482,7 @@ fn split_pages(
 
 /// encode one page job to its OASIS payload (parallel-safe: reads
 /// doc immutably, allocates only its own buffers)
-fn encode_job(doc: &Doc, job: &PageJob) -> Vec<u8> {
+fn encode_job(doc: &Doc, job: &PageJob) -> (Vec<u8>, u64) {
     let cell = &doc.cells[job.ci];
     let mut rects: Vec<RectRec> = Vec::new();
     let mut polys: Vec<PolyRec> = Vec::new();
@@ -502,7 +502,8 @@ fn encode_job(doc: &Doc, job: &PageJob) -> Vec<u8> {
         texts: &[],
         places: Vec::new(),
     };
-    write_tree(&[wc], doc.unit).expect("page payload")
+    floe_oasis::write::write_tree_sized(&[wc], doc.unit)
+        .expect("page payload")
 }
 
 /// resident set size for the build heartbeat (Linux /proc; "?"
@@ -1206,8 +1207,8 @@ fn build(
 
     // phase 2: encode page payloads in parallel (write_tree +
     // deflate-6 is the build's hot cost; jobs are independent)
-    let mut payloads: Vec<Vec<u8>> = Vec::new();
-    payloads.resize_with(jobs_list.len(), Vec::new);
+    let mut payloads: Vec<(Vec<u8>, u64)> = Vec::new();
+    payloads.resize_with(jobs_list.len(), Default::default);
     let ptotal = jobs_list.len();
     if jobs > 1 && ptotal > 1 {
         // disjoint chunks_mut slices = safe parallel fill; pages are
@@ -1272,7 +1273,7 @@ fn build(
     let mut ovp_off = 0u64;
     let mut pages_bytes = 0u64;
     let pages_total = jobs_list.len() as u64;
-    for (job, payload) in jobs_list.iter().zip(&payloads) {
+    for (job, (payload, raw)) in jobs_list.iter().zip(&payloads) {
         std::io::Write::write_all(&mut ovp, payload)
             .expect("write ovp");
         b.page(
@@ -1282,7 +1283,7 @@ fn build(
             &job.bbox,
             ovp_off,
             payload.len() as u64,
-            payload.len() as u64,
+            *raw,
             job.recs.len() as u64,
             job.members,
             job.max_w.max(0) as u64,
@@ -1689,6 +1690,7 @@ fn serve_one(d: &mut Daemon, line: &str) -> Result<String, String> {
     let mut mode = String::new();
     let mut ack = 0u64;
     let mut reset = false;
+    let mut stream_kb: Option<u64> = None;
     for tok in line.split_whitespace() {
         let (k, val) = tok
             .split_once('=')
@@ -1727,6 +1729,10 @@ fn serve_one(d: &mut Daemon, line: &str) -> Result<String, String> {
             "mode" => mode = val.to_string(),
             "ack" => ack = val.parse().map_err(|_| "ack")?,
             "reset" => reset = val == "1",
+            "stream" => {
+                stream_kb =
+                    Some(val.parse().map_err(|_| "stream")?)
+            }
             _ => return Err(format!("unknown key {}", k)),
         }
     }
@@ -1748,7 +1754,9 @@ fn serve_one(d: &mut Daemon, line: &str) -> Result<String, String> {
     let req =
         make_req(d.v, view, px, cut, depth, layers.as_deref());
     if hier_mode {
-        return serve_hier(d, &req, gen, ack, reset, probe, &out);
+        return serve_hier(
+            d, &req, gen, ack, reset, probe, stream_kb, &out,
+        );
     }
     let v = d.v;
     let sess = &mut d.flat;
@@ -1871,6 +1879,7 @@ fn serve_one(d: &mut Daemon, line: &str) -> Result<String, String> {
 /// reset) FIRST, then plan, then record this response as the new
 /// pending txn. The response carries the WC top name and, once per
 /// daemon run, the ci->design-name table.
+#[allow(clippy::too_many_arguments)]
 fn serve_hier(
     d: &mut Daemon,
     req: &floe_vfs::ViewReq,
@@ -1878,6 +1887,7 @@ fn serve_hier(
     ack: u64,
     reset: bool,
     probe: bool,
+    stream_kb: Option<u64>,
     out: &str,
 ) -> Result<String, String> {
     let v = d.v;
@@ -1898,20 +1908,42 @@ fn serve_hier(
             ..Default::default()
         }
     } else {
-        let c = &req.view;
+        // per-request override (the client adapts the budget to its
+        // measured parse speed); absent = daemon flag default
+        let budget = stream_kb
+            .map(|kb| kb << 10)
+            .unwrap_or(d.stream_budget);
         d.hier.apply(
             &v.ovm,
             &plan.pages,
+            &plan.page_prio,
             gen,
-            d.stream_budget,
-            ((c.x0 + c.x1) / 2, (c.y0 + c.y1) / 2),
+            budget,
         )?
     };
     std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
     let (delta_path, top) = if plan.wcells.is_empty() {
         ("-".to_string(), "-".to_string())
     } else {
-        let bytes = v.delta_hier(&plan, &upd.new, gen)?;
+        // partial deltas reference only MATERIALIZED pages:
+        // committed-in-ledger + this round's new (a reference with
+        // no definition anywhere would mint an unevictable empty
+        // ghost cell in the viewer)
+        let avail: Option<std::collections::HashSet<u32>> =
+            if upd.partial {
+                let mut a: std::collections::HashSet<u32> =
+                    upd.new.iter().copied().collect();
+                for &pi in &plan.pages {
+                    if !probe && d.hier.is_committed(pi) {
+                        a.insert(pi);
+                    }
+                }
+                Some(a)
+            } else {
+                None
+            };
+        let bytes =
+            v.delta_hier(&plan, &upd.new, gen, avail.as_ref())?;
         let p = format!("{}/delta_{}.oas", out, gen);
         std::fs::write(&p, &bytes).map_err(|e| e.to_string())?;
         (p, floe_vfs::hier::ws_name(gen, plan.top))

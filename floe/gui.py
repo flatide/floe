@@ -1061,8 +1061,14 @@ class Viewer:
         if kind == "frame":
             preview = bool(res.get("preview"))
             if res["gen"] == self._pending and not preview:
-                self._clear_pending()
-                self.rstatus.set_text("rendering done.")
+                if res.get("refining"):
+                    # streamed first paint: content is on screen but
+                    # more pages are still coming (VFS_HIER M3.5)
+                    self.rstatus.set_text(
+                        "refining %d pages..." % res["refining"])
+                else:
+                    self._clear_pending()
+                    self.rstatus.set_text("rendering done.")
             if res["gen"] == self.gen:
                 loader = GdkPixbuf.PixbufLoader.new_with_type("png")
                 loader.write(res["png"])
@@ -1122,9 +1128,12 @@ class Viewer:
                     drawn = ""
                     if res.get("drawn") is not None:
                         drawn = ", ~%s drawn" % fmt_count(res["drawn"])
-                    mode = "live (%d tiles, %d ms%s%s%s%s)" \
+                    refin = ""
+                    if res.get("refining"):
+                        refin = ", refining %d" % res["refining"]
+                    mode = "live (%d tiles, %d ms%s%s%s%s%s)" \
                         % (res["tiles"], res["ms"], split,
-                           self._depth_note(used), cut, drawn)
+                           self._depth_note(used), cut, drawn, refin)
                 # also to stdout: the status bar is overwritten by
                 # cursor coords on mouse-move, so the perf line would
                 # otherwise vanish before it can be read

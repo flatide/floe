@@ -757,20 +757,22 @@ impl HierSession {
     /// plan bookkeeping: compute new/evict against committed state,
     /// record as pending. `gen` must be strictly monotonic.
     ///
-    /// stream_budget (compressed bytes, 0 = unlimited) caps how much
-    /// NEW payload one response carries - the progressive first
-    /// paint: the client parses ~budget bytes, acks, re-requests the
-    /// same view, and `plan - committed` naturally shrinks until the
-    /// response stops saying partial. Priority = squared distance of
-    /// the page bbox center to `view_center` (near-center content
-    /// lands first), ties by page index - deterministic.
+    /// stream_budget (DECODED bytes - page usize_, the parse cost
+    /// the client actually pays; 0 = unlimited) caps how much NEW
+    /// payload one response carries - the progressive first paint:
+    /// the client parses ~budget bytes, acks, re-requests the same
+    /// view, and `plan - committed` naturally shrinks until the
+    /// response stops saying partial. `prio` is the planner's
+    /// per-page priority aligned with `plan_pages` (local-frame
+    /// center distance, HierPlan::page_prio); ties break on page
+    /// index - deterministic.
     pub fn apply(
         &mut self,
         ovm: &Ovm,
         plan_pages: &[u32],
+        prio: &[u64],
         gen: u64,
         stream_budget: u64,
-        view_center: (i64, i64),
     ) -> Result<HierUpdate, String> {
         if gen <= self.last_gen {
             return Err(format!(
@@ -782,14 +784,15 @@ impl HierSession {
             return Err("pending txn unresolved (no ack)".into());
         }
         self.last_gen = gen;
-        let mut cand: Vec<(u32, u64, u64)> = Vec::new(); // pi,usize,csize
+        let mut cand: Vec<(u64, u32, u64)> = Vec::new(); // prio,pi,usize
         let mut touch = Vec::new();
-        for &pi in plan_pages {
+        for (k, &pi) in plan_pages.iter().enumerate() {
             if self.committed.contains_key(&pi) {
                 touch.push(pi);
             } else {
                 let p = ovm.page(pi);
-                cand.push((pi, p.usize_ as u64, p.csize as u64));
+                let pr = prio.get(k).copied().unwrap_or(u64::MAX);
+                cand.push((pr, pi, p.usize_ as u64));
             }
         }
         let mut partial = false;
@@ -797,25 +800,17 @@ impl HierSession {
         if stream_budget > 0 {
             let total: u64 = cand.iter().map(|c| c.2).sum();
             if total > stream_budget {
-                let d2 = |pi: u32| -> u128 {
-                    let b = ovm.page(pi).bbox;
-                    let cx = (b.x0 as i128 + b.x1 as i128) / 2;
-                    let cy = (b.y0 as i128 + b.y1 as i128) / 2;
-                    let dx = cx - view_center.0 as i128;
-                    let dy = cy - view_center.1 as i128;
-                    (dx * dx + dy * dy) as u128
-                };
-                cand.sort_by_key(|&(pi, _, _)| (d2(pi), pi));
+                cand.sort_unstable();
                 // strict prefix: priority order is also load order;
                 // the first page always ships (progress guarantee)
                 let mut cut = cand.len();
-                let mut csum = 0u64;
+                let mut usum = 0u64;
                 for (i, c) in cand.iter().enumerate() {
-                    if i > 0 && csum + c.2 > stream_budget {
+                    if i > 0 && usum + c.2 > stream_budget {
                         cut = i;
                         break;
                     }
-                    csum += c.2;
+                    usum += c.2;
                 }
                 deferred = (cand.len() - cut) as u64;
                 partial = deferred > 0;
@@ -824,7 +819,7 @@ impl HierSession {
         }
         let mut new: Vec<(u32, u64)> = Vec::new();
         let mut new_bytes = 0u64;
-        for (pi, ub, _) in cand {
+        for (_, pi, ub) in cand {
             new.push((pi, ub));
             new_bytes += ub;
         }
@@ -882,6 +877,9 @@ impl HierSession {
         self.bytes.len()
     }
 
+    pub fn is_committed(&self, pi: u32) -> bool {
+        self.committed.contains_key(&pi)
+    }
     pub fn committed_bytes(&self) -> u64 {
         self.committed_bytes
     }
@@ -952,7 +950,7 @@ mod tests {
         let ovm = sess_ovm(&[10, 10, 10]);
         let mut s = HierSession::new(1 << 30);
         // gen1 pending, then commit via ack
-        let u = s.apply(&ovm, &[0, 1], 1, 0, (0, 0)).unwrap();
+        let u = s.apply(&ovm, &[0, 1], &[0; 2], 1, 0).unwrap();
         assert_eq!(u.new, vec![0, 1]);
         assert_eq!(u.committed_bytes, 0);
         assert_eq!(u.pending_new_bytes, 20);
@@ -962,14 +960,14 @@ mod tests {
         // stale drop: gen2 response never applied (ack stays 1) -
         // the ledger must forget it and RESEND the pages (the flat
         // path's permanent-blank bug, par.3.7 regression gate)
-        let u2 = s.apply(&ovm, &[0, 1, 2], 2, 0, (0, 0)).unwrap();
+        let u2 = s.apply(&ovm, &[0, 1, 2], &[0; 3], 2, 0).unwrap();
         assert_eq!(u2.new, vec![2]);
         s.resolve_ack(1).unwrap(); // rollback gen2
         assert_eq!(s.committed_bytes(), 20);
         // rollback leaves NO metadata residue (pending is a pure
         // diff - review finding: bytes entries once accumulated)
         assert_eq!(s.bytes_entries(), 2);
-        let u3 = s.apply(&ovm, &[0, 1, 2], 3, 0, (0, 0)).unwrap();
+        let u3 = s.apply(&ovm, &[0, 1, 2], &[0; 3], 3, 0).unwrap();
         assert_eq!(u3.new, vec![2], "dropped page must re-send");
         s.resolve_ack(3).unwrap();
         assert_eq!(s.committed_bytes(), 30);
@@ -983,23 +981,23 @@ mod tests {
     fn hier_session_protocol_errors() {
         let ovm = sess_ovm(&[10, 10]);
         let mut s = HierSession::new(1 << 30);
-        s.apply(&ovm, &[0], 1, 0, (0, 0)).unwrap();
+        s.apply(&ovm, &[0], &[0; 1], 1, 0).unwrap();
         // ack from the future: error, pending survives
         assert!(s.resolve_ack(2).is_err());
         assert!(s.has_pending());
         s.resolve_ack(1).unwrap();
         // plan without resolving is impossible in the serve order,
         // but the guard must hold
-        s.apply(&ovm, &[1], 2, 0, (0, 0)).unwrap();
-        assert!(s.apply(&ovm, &[1], 3, 0, (0, 0)).is_err());
+        s.apply(&ovm, &[1], &[0; 1], 2, 0).unwrap();
+        assert!(s.apply(&ovm, &[1], &[0; 1], 3, 0).is_err());
         s.resolve_ack(2).unwrap();
         // non-monotonic gen
-        assert!(s.apply(&ovm, &[1], 2, 0, (0, 0)).is_err());
+        assert!(s.apply(&ovm, &[1], &[0; 1], 2, 0).is_err());
         // reset wipes the ledger but keeps gen monotonicity
         s.reset();
         assert_eq!(s.committed_bytes(), 0);
-        assert!(s.apply(&ovm, &[0], 2, 0, (0, 0)).is_err(), "gen reuse");
-        let u = s.apply(&ovm, &[0, 1], 9, 0, (0, 0)).unwrap();
+        assert!(s.apply(&ovm, &[0], &[0; 1], 2, 0).is_err(), "gen reuse");
+        let u = s.apply(&ovm, &[0, 1], &[0; 2], 9, 0).unwrap();
         assert_eq!(u.new, vec![0, 1], "reset resends all");
     }
 
@@ -1009,9 +1007,9 @@ mod tests {
         // layout ever holds 120 (projected rule, par.3.7)
         let ovm = sess_ovm(&[90, 30, 10, 10]);
         let mut s = HierSession::new(100);
-        s.apply(&ovm, &[0], 1, 0, (0, 0)).unwrap();
+        s.apply(&ovm, &[0], &[0; 1], 1, 0).unwrap();
         s.resolve_ack(1).unwrap();
-        let u = s.apply(&ovm, &[1], 2, 0, (0, 0)).unwrap();
+        let u = s.apply(&ovm, &[1], &[0; 1], 2, 0).unwrap();
         assert_eq!(u.new, vec![1]);
         assert_eq!(u.evict, vec![0]);
         assert_eq!(u.pending_evict_bytes, 90);
@@ -1023,70 +1021,72 @@ mod tests {
         // save a page from eviction
         let ovm = sess_ovm(&[10, 10, 10]);
         let mut s = HierSession::new(25);
-        s.apply(&ovm, &[0, 1], 1, 0, (0, 0)).unwrap();
+        s.apply(&ovm, &[0, 1], &[0; 2], 1, 0).unwrap();
         s.resolve_ack(1).unwrap();
         // gen2 touches p0 (plan [0]) but the client drops it
-        s.apply(&ovm, &[0], 2, 0, (0, 0)).unwrap();
+        s.apply(&ovm, &[0], &[0; 1], 2, 0).unwrap();
         s.resolve_ack(1).unwrap(); // rollback: touch undone
         // gen3 brings p2: 20 + 10 > 25 -> evict ONE, LRU order;
         // with the touch rolled back p0 and p1 tie on gen1 and the
         // deterministic (gen, page) order evicts p0
-        let u = s.apply(&ovm, &[2], 3, 0, (0, 0)).unwrap();
+        let u = s.apply(&ovm, &[2], &[0; 1], 3, 0).unwrap();
         assert_eq!(u.evict, vec![0]);
         s.resolve_ack(3).unwrap();
         // same sequence but gen2 COMMITTED: p0 was touched (gen2),
         // so p1 is the LRU victim
         let ovm2 = sess_ovm(&[10, 10, 10]);
         let mut s2 = HierSession::new(25);
-        s2.apply(&ovm2, &[0, 1], 1, 0, (0, 0)).unwrap();
+        s2.apply(&ovm2, &[0, 1], &[0; 2], 1, 0).unwrap();
         s2.resolve_ack(1).unwrap();
-        s2.apply(&ovm2, &[0], 2, 0, (0, 0)).unwrap();
+        s2.apply(&ovm2, &[0], &[0; 1], 2, 0).unwrap();
         s2.resolve_ack(2).unwrap(); // commit: touch applied
-        let u2 = s2.apply(&ovm2, &[2], 3, 0, (0, 0)).unwrap();
+        let u2 = s2.apply(&ovm2, &[2], &[0; 1], 3, 0).unwrap();
         assert_eq!(u2.evict, vec![1]);
     }
 
     #[test]
     fn hier_session_stream_budget() {
-        // pages of 10 csize at x = 0/1000/2000; center near x=2000
-        // -> strict priority prefix per round, natural convergence
+        // planner priorities: page2 is the screen center (prio 0),
+        // then page1, then page0 -> strict prefix per round,
+        // natural convergence. Budget is DECODED bytes (usize_).
         let ovm = sess_ovm(&[10, 10, 10]);
+        let prio = &[9u64, 4, 0];
         let mut s = HierSession::new(1 << 30);
-        let center = (2005, 5);
-        let u = s.apply(&ovm, &[0, 1, 2], 1, 10, center).unwrap();
-        assert_eq!(u.new, vec![2], "closest first");
+        let u = s.apply(&ovm, &[0, 1, 2], prio, 1, 10).unwrap();
+        assert_eq!(u.new, vec![2], "smallest prio first");
         assert!(u.partial);
         assert_eq!(u.deferred, 2);
         s.resolve_ack(1).unwrap();
-        let u = s.apply(&ovm, &[0, 1, 2], 2, 10, center).unwrap();
+        let u = s.apply(&ovm, &[0, 1, 2], prio, 2, 10).unwrap();
         assert_eq!(u.new, vec![1]);
         assert!(u.partial);
         s.resolve_ack(2).unwrap();
-        let u = s.apply(&ovm, &[0, 1, 2], 3, 10, center).unwrap();
+        let u = s.apply(&ovm, &[0, 1, 2], prio, 3, 10).unwrap();
         assert_eq!(u.new, vec![0]);
         assert!(!u.partial);
         assert_eq!(u.deferred, 0);
         s.resolve_ack(3).unwrap();
         assert_eq!(s.committed_bytes(), 30);
+        assert!(s.is_committed(2) && s.is_committed(0));
         // a dropped partial round re-sends the SAME chunk (rollback
         // + deterministic priority)
         let ovm = sess_ovm(&[10, 10, 10]);
         let mut s = HierSession::new(1 << 30);
-        let u = s.apply(&ovm, &[0, 1, 2], 1, 10, center).unwrap();
+        let u = s.apply(&ovm, &[0, 1, 2], prio, 1, 10).unwrap();
         assert_eq!(u.new, vec![2]);
         s.resolve_ack(0).unwrap(); // stale drop
-        let u = s.apply(&ovm, &[0, 1, 2], 2, 10, center).unwrap();
+        let u = s.apply(&ovm, &[0, 1, 2], prio, 2, 10).unwrap();
         assert_eq!(u.new, vec![2], "rollback then same chunk");
         // oversized single page still ships (progress guarantee)
         let ovm = sess_ovm(&[100, 10]);
         let mut s = HierSession::new(1 << 30);
-        let u = s.apply(&ovm, &[0, 1], 1, 10, (5, 5)).unwrap();
+        let u = s.apply(&ovm, &[0, 1], &[0, 5], 1, 10).unwrap();
         assert_eq!(u.new, vec![0], "first page always ships");
         assert!(u.partial);
         // budget 0 = unlimited (probe / default-off)
         let ovm = sess_ovm(&[10, 10, 10]);
         let mut s = HierSession::new(1 << 30);
-        let u = s.apply(&ovm, &[0, 1, 2], 1, 0, center).unwrap();
+        let u = s.apply(&ovm, &[0, 1, 2], prio, 1, 0).unwrap();
         assert_eq!(u.new.len(), 3);
         assert!(!u.partial);
     }
