@@ -1061,13 +1061,22 @@ class Viewer:
         if kind == "frame":
             preview = bool(res.get("preview"))
             if res["gen"] == self._pending and not preview:
+                # FIRST frame of this gen: content is on screen, so
+                # UNBLOCK input immediately (mouse handlers gate on
+                # _pending) - a streamed refinement keeps painting
+                # behind it, and any interaction simply supersedes
+                # the job (the service aborts between rounds and the
+                # daemon rolls back the un-acked round, par.3.7)
+                self._clear_pending()
+                if not res.get("refining"):
+                    self.rstatus.set_text("rendering done.")
+            if res["gen"] == self.gen and not preview:
                 if res.get("refining"):
-                    # streamed first paint: content is on screen but
-                    # more pages are still coming (VFS_HIER M3.5)
+                    self._refining = True
                     self.rstatus.set_text(
                         "refining %d pages..." % res["refining"])
-                else:
-                    self._clear_pending()
+                elif getattr(self, "_refining", False):
+                    self._refining = False
                     self.rstatus.set_text("rendering done.")
             if res["gen"] == self.gen:
                 loader = GdkPixbuf.PixbufLoader.new_with_type("png")
@@ -1136,11 +1145,14 @@ class Viewer:
                            self._depth_note(used), cut, drawn, refin)
                 # also to stdout: the status bar is overwritten by
                 # cursor coords on mouse-move, so the perf line would
-                # otherwise vanish before it can be read
-                b = self.view_bbox()
-                print("%s  view %.1f x %.1f um"
-                      % (mode, (b[2] - b[0]) * self.dbu,
-                         (b[3] - b[1]) * self.dbu), flush=True)
+                # otherwise vanish before it can be read (only the
+                # SETTLED frame prints - refining rounds would spam a
+                # line every ~0.4s)
+                if not res.get("refining"):
+                    b = self.view_bbox()
+                    print("%s  view %.1f x %.1f um"
+                          % (mode, (b[2] - b[0]) * self.dbu,
+                             (b[3] - b[1]) * self.dbu), flush=True)
                 self._set_status(self.view_bbox(), mode)
         elif kind == "snap":
             if res["seq"] == self._snap_seq \
