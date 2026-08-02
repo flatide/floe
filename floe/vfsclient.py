@@ -35,13 +35,20 @@ def find_binary():
 
 
 class VfsClient:
-    def __init__(self, floe_dir, budget_mb=1024, binary=None):
+    def __init__(self, floe_dir, budget_mb=1024, binary=None,
+                 stream_kb=None):
+        """stream_kb: per-response cap on new hier payload (the
+        progressive first paint); None = daemon default (24576),
+        0 disables streaming."""
         self.dir = floe_dir
         self.tmp = tempfile.mkdtemp(prefix="floe_vfs_")
         self._last_files = []
+        args = [binary or find_binary(), "vfsd", floe_dir,
+                "--budget-mb", str(budget_mb)]
+        if stream_kb is not None:
+            args += ["--stream-kb", str(stream_kb)]
         self.proc = subprocess.Popen(
-            [binary or find_binary(), "vfsd", floe_dir,
-             "--budget-mb", str(budget_mb)],
+            args,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, text=True, bufsize=1)
 

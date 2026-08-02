@@ -45,4 +45,5 @@ FLOE_VFS_MODE=flat \
 .venv/bin/python tools/validate_vfs_coverage.py "$SRC" "$VOUT"
 .venv/bin/python tools/validate_vfs_hier.py "$SRC" "$VOUT"
 .venv/bin/python tools/validate_vfs_lifecycle.py "$SRC" "$VOUT"
+.venv/bin/python tools/validate_vfs_marker.py "$SRC"
 echo "RUST VALIDATION: ALL OK ($SRC)"

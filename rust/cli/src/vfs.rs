@@ -85,6 +85,38 @@ pub fn vfs_cmd(args: &[String]) {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let t1 = std::time::Instant::now();
+    // parse heartbeat: a 9.8G parse is minutes of silence otherwise
+    // (the build stages tick already; the parser is opaque, so tick
+    // elapsed+rss from outside). All progress goes to stderr - the
+    // protocol/plan output owns stdout.
+    let parsing = std::sync::Arc::new(
+        std::sync::atomic::AtomicBool::new(true),
+    );
+    {
+        let parsing = parsing.clone();
+        std::thread::spawn(move || {
+            use std::sync::atomic::Ordering::Relaxed;
+            let t = std::time::Instant::now();
+            let mut last = 0u64;
+            loop {
+                std::thread::sleep(
+                    std::time::Duration::from_millis(200),
+                );
+                if !parsing.load(Relaxed) {
+                    return;
+                }
+                let e = t.elapsed().as_secs();
+                if e >= last + 5 {
+                    last = e;
+                    eprintln!(
+                        "[vfs] parsing... ({}s, rss {})",
+                        e,
+                        rss()
+                    );
+                }
+            }
+        });
+    }
     let doc = match floe_oasis::doc::parse_doc_parallel(&data, jobs) {
         Ok(d) => d,
         Err(e) => {
@@ -92,6 +124,7 @@ pub fn vfs_cmd(args: &[String]) {
             std::process::exit(1);
         }
     };
+    parsing.store(false, std::sync::atomic::Ordering::Relaxed);
     drop(data);
     eprintln!(
         "[vfs] parsed {} cells in {:.1}s ({} threads, \
@@ -122,6 +155,9 @@ pub fn vfs_cmd(args: &[String]) {
         // write everything, write the marker LAST - an interrupted
         // build reads as "no cache" (marker gone) or "corrupt cache"
         // (marker partial), never as a valid cache.
+        // FLOE_KILL_AT: gate-only hook forcing death at the three
+        // interrupt points (tools/validate_vfs_marker.py).
+        let kill_at = std::env::var("FLOE_KILL_AT").ok();
         for f in [
             "design.ovm",
             "design.ovp",
@@ -132,10 +168,27 @@ pub fn vfs_cmd(args: &[String]) {
         ] {
             let _ = std::fs::remove_file(format!("{}/{}", outdir, f));
         }
+        if kill_at.as_deref() == Some("marker-deleted") {
+            eprintln!("[vfs] FLOE_KILL_AT=marker-deleted");
+            std::process::exit(9);
+        }
         let ovm_bytes = build(&doc, size, mtime, &outdir, jobs);
+        if kill_at.as_deref() == Some("ovp-written") {
+            eprintln!("[vfs] FLOE_KILL_AT=ovp-written");
+            std::process::exit(9);
+        }
         emit_viewer_side(&doc, &src, size, mtime, &outdir);
         if coverage {
             write_coverage(&doc, &outdir, jobs);
+        }
+        if kill_at.as_deref() == Some("ovm-partial") {
+            std::fs::write(
+                format!("{}/design.ovm", outdir),
+                &ovm_bytes[..ovm_bytes.len() / 2],
+            )
+            .expect("write partial ovm");
+            eprintln!("[vfs] FLOE_KILL_AT=ovm-partial");
+            std::process::exit(9);
         }
         std::fs::write(format!("{}/design.ovm", outdir), &ovm_bytes)
             .expect("write ovm");
@@ -961,7 +1014,7 @@ fn build(
     }
 
     let mut b = Builder::new(doc.unit, size, mtime, nl);
-    b.top = doc.top as u32;
+    b.top = narrow_u32(doc.top as u64, "top cell index");
     for (i, &(l, d)) in doc.layer_order.iter().enumerate() {
         let nm = doc
             .layer_names
@@ -1082,11 +1135,11 @@ fn build(
                 let f = if leaf {
                     narrow_u32(place_base + first as u64, "place index")
                 } else {
-                    base + first
+                    narrow_u32(base as u64 + first as u64, "bvh index")
                 };
                 b.bvh_node(&bb, f, count, leaf);
             }
-            (base, bvh.len() as u32)
+            (base, narrow_u32(bvh.len() as u64, "cell bvh count"))
         };
         // page index == job index; phase 3 appends in job order
         let page_base = jobs_list.len() as u64;
@@ -1101,7 +1154,10 @@ fn build(
             let f = if leaf {
                 narrow_u32(page_base + first as u64, "page index")
             } else {
-                pb_base + first
+                narrow_u32(
+                    pb_base as u64 + first as u64,
+                    "pbvh index",
+                )
             };
             b.pbvh_node(&bb, f, count, leaf, mw, mh);
         }
@@ -1110,7 +1166,7 @@ fn build(
             let r = if root == PBVH_NONE {
                 PBVH_NONE
             } else {
-                pb_base + root
+                narrow_u32(pb_base as u64 + root as u64, "pbvh index")
             };
             b.prange(
                 li,
@@ -1544,11 +1600,19 @@ pub fn plan_cmd(args: &[String]) {
 pub fn vfsd_cmd(args: &[String]) {
     let mut dir: Option<String> = None;
     let mut budget_mb: u64 = 1024;
+    // progressive first paint: cap the NEW payload per response so
+    // the client renders in ~1s rounds instead of one long parse
+    // (VFS_HIER.md par.5 M3.5). 0 disables.
+    let mut stream_kb: u64 = 24576;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--budget-mb" => {
                 budget_mb = args[i + 1].parse().expect("budget");
+                i += 2;
+            }
+            "--stream-kb" => {
+                stream_kb = args[i + 1].parse().expect("stream");
                 i += 2;
             }
             a => {
@@ -1570,6 +1634,7 @@ pub fn vfsd_cmd(args: &[String]) {
         hier: floe_vfs::HierSession::new(budget_mb << 20),
         names_sent: false,
         mode_lock: None,
+        stream_budget: stream_kb << 10,
     };
     eprintln!(
         "[vfsd] {} ({} cells, {} pages), budget {} MB",
@@ -1609,6 +1674,8 @@ struct Daemon<'a> {
     hier: floe_vfs::HierSession,
     names_sent: bool,
     mode_lock: Option<bool>, // true = hier
+    /// per-response cap on new payload bytes (0 = off)
+    stream_budget: u64,
 }
 
 fn serve_one(d: &mut Daemon, line: &str) -> Result<String, String> {
@@ -1831,7 +1898,14 @@ fn serve_hier(
             ..Default::default()
         }
     } else {
-        d.hier.apply(&v.ovm, &plan.pages, gen)?
+        let c = &req.view;
+        d.hier.apply(
+            &v.ovm,
+            &plan.pages,
+            gen,
+            d.stream_budget,
+            ((c.x0 + c.x1) / 2, (c.y0 + c.y1) / 2),
+        )?
     };
     std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
     let (delta_path, top) = if plan.wcells.is_empty() {
@@ -1873,7 +1947,7 @@ fn serve_hier(
     Ok(format!(
         "gen={} pages={} new={} evict={} delta={} top={} names={} \
          bytes={} members={} plan_ms={:.2} wc_cells={} \
-         inst_edges={} frame_rects={} \
+         inst_edges={} frame_rects={} partial={} deferred={} \
          resident_committed_mb={:.1} resident_projected_mb={:.1} \
          pending_new_mb={:.1} pending_evict_mb={:.1}",
         gen,
@@ -1893,6 +1967,8 @@ fn serve_hier(
         st.wc_cells,
         st.inst_edges,
         st.frame_rects,
+        upd.partial as u8,
+        upd.deferred,
         mb(upd.committed_bytes),
         mb(upd.projected_bytes),
         mb(upd.pending_new_bytes),

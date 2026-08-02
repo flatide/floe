@@ -72,6 +72,14 @@ pub fn narrow_u16(v: u64, field: &str) -> u16 {
     })
 }
 
+/// checked record-counter increment (u32 wrap would silently corrupt
+/// section indexes long before memory gave out)
+fn bump(c: &mut u32, what: &str) {
+    *c = c
+        .checked_add(1)
+        .unwrap_or_else(|| panic!("limit exceeded: {} count", what));
+}
+
 // ------------------------------------------------------------ encode
 
 fn p16(out: &mut Vec<u8>, v: u16) {
@@ -298,7 +306,7 @@ impl Builder {
         p64(out, recs);
         p64(out, mems);
         assert_eq!(out.len() % LAYER_LEN, 0, "layer stride");
-        self.n_layers += 1;
+        bump(&mut self.n_layers, "layer");
     }
 
     /// dedup pool index of a layer bitset (bs_width bytes)
@@ -307,7 +315,10 @@ impl Builder {
         if let Some(&i) = self.bs_map.get(bits) {
             return i;
         }
-        let i = (self.bitsets.len() / self.bs_width) as u32;
+        let i = narrow_u32(
+            (self.bitsets.len() / self.bs_width) as u64,
+            "bitset count",
+        );
         self.bitsets.extend_from_slice(bits);
         self.bs_map.insert(bits.to_vec(), i);
         i
@@ -440,7 +451,7 @@ impl Builder {
         p16(out, count);
         p16(out, leaf as u16);
         assert_eq!(out.len() % BVH_LEN, 0, "bvh stride");
-        self.n_bvh += 1;
+        bump(&mut self.n_bvh, "bvh");
         idx
     }
 
@@ -466,7 +477,7 @@ impl Builder {
         p64(out, max_w);
         p64(out, max_h);
         assert_eq!(out.len() % PBVH_LEN, 0, "pbvh stride");
-        self.n_pbvh += 1;
+        bump(&mut self.n_pbvh, "pbvh");
         idx
     }
 
@@ -485,7 +496,7 @@ impl Builder {
         p32(out, page_count);
         p32(out, pbvh_root);
         assert_eq!(out.len() % PRANGE_LEN, 0, "prange stride");
-        self.n_pranges += 1;
+        bump(&mut self.n_pranges, "prange");
         idx
     }
 
@@ -537,7 +548,7 @@ impl Builder {
         p64(out, max_w);
         p64(out, max_h);
         assert_eq!(out.len() % PAGE_LEN, 0, "page stride");
-        self.n_pages += 1;
+        bump(&mut self.n_pages, "page");
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -581,7 +592,7 @@ impl Builder {
         p32(out, prange_start);
         p32(out, prange_count);
         assert_eq!(out.len() % CELL_LEN, 0, "cell stride");
-        self.n_cells += 1;
+        bump(&mut self.n_cells, "cell");
     }
 
     /// ovp_len: byte length of the design.ovp this ovm commits - the
@@ -605,7 +616,7 @@ impl Builder {
         );
         out.extend_from_slice(MAGIC);
         p32(&mut out, VERSION);
-        p32(&mut out, self.bs_width as u32);
+        p32(&mut out, narrow_u32(self.bs_width as u64, "bitset width"));
         out.extend_from_slice(&self.unit.to_le_bytes());
         p64(&mut out, self.src_size);
         p64(&mut out, self.src_mtime);
@@ -886,9 +897,14 @@ impl Ovm {
         }
         let pool_len = secs[SEC_PLACES].1 - places_need;
         // bs_width guards the modulo below - a zeroed header must not
-        // become a divide-by-zero panic
+        // become a divide-by-zero panic - and must actually hold
+        // n_layers bits (a lying header would make every bitset test
+        // an out-of-bounds panic later)
         if bs_width == 0 {
             return Err(corrupt("bitset width 0"));
+        }
+        if (bs_width as u64) * 8 < n_layers as u64 {
+            return Err(corrupt("bitset width vs layer count"));
         }
         if secs[SEC_BITSETS].1 % bs_width as u64 != 0 {
             return Err(corrupt("bitset section stride"));
@@ -897,9 +913,17 @@ impl Ovm {
         if n_cells > 0 && top >= n_cells {
             return Err(corrupt("top cell index"));
         }
+        // layers: name ranges
+        let lb = sec(SEC_LAYERS);
+        let sb_len = secs[SEC_STRINGS].1;
+        for i in 0..n_layers as usize {
+            let b = &lb[i * LAYER_LEN..];
+            if g32(b, 8) as u64 + g16(b, 12) as u64 > sb_len {
+                return Err(corrupt(format!("layer {} name range", i)));
+            }
+        }
         // cells: every range and name checked once at open
         let cb = sec(SEC_CELLS);
-        let sb_len = secs[SEC_STRINGS].1;
         for i in 0..n_cells as usize {
             let b = &cb[i * CELL_LEN..];
             let no = g32(b, 0) as u64;
@@ -984,10 +1008,18 @@ impl Ovm {
                 return Err(corrupt(format!("bvh node {} range", i)));
             }
         }
-        // pranges: page run + optional pbvh root
+        // pranges: layer + page run + optional pbvh root (the
+        // planner indexes the vis bitset with layer_idx unchecked -
+        // a corrupt value must die HERE, not as a panic there)
         let prb = sec(SEC_PRANGES);
         for i in 0..n_pranges as usize {
             let b = &prb[i * PRANGE_LEN..];
+            if g32(b, 0) >= n_layers {
+                return Err(corrupt(format!(
+                    "prange {} layer index",
+                    i
+                )));
+            }
             if g32(b, 4) as u64 + g32(b, 8) as u64 > n_pages as u64 {
                 return Err(corrupt(format!("prange {} page range", i)));
             }
@@ -1009,10 +1041,17 @@ impl Ovm {
                 return Err(corrupt(format!("pbvh node {} range", i)));
             }
         }
-        // pages: payload spans must sit inside the committed ovp
+        // pages: owner/layer indexes + payload spans inside the
+        // committed ovp
         let pgb = sec(SEC_PAGEDIR);
         for i in 0..n_pages as usize {
             let b = &pgb[i * PAGE_LEN..];
+            if g32(b, 0) >= n_cells {
+                return Err(corrupt(format!("page {} cell index", i)));
+            }
+            if g32(b, 4) >= n_layers {
+                return Err(corrupt(format!("page {} layer index", i)));
+            }
             let end = g64(b, 48)
                 .checked_add(g32(b, 56) as u64)
                 .ok_or_else(|| corrupt(format!("page {} span wraps", i)))?;
@@ -1273,7 +1312,7 @@ mod tests {
         let bb = BBox { x0: 0, y0: 0, x1: 100, y1: 50 };
         let n0 = b.bvh_node(&bb, p0 as u32, 2, true);
         b.page(1, 0, 0, &bb, 128, 10, 20, 3, 9, 60, 60);
-        b.page(1, 7, 70000, &bb, 138, 11, 21, 4, 8, 61, 1 << 40);
+        b.page(1, 0, 70000, &bb, 138, 11, 21, 4, 8, 61, 1 << 40);
         let pv0 = b.pbvh_node(&bb, 0, 2, true, 61, 1 << 40);
         let pr0 = b.prange(0, 0, 2, pv0);
         b.cell("LEAF", 0, 1, &bb, &bb, 0, 0, 0, 0, 0, 0, 0, 0, m0, m1, 9);
@@ -1351,7 +1390,7 @@ mod tests {
         let pg1 = v.page(1);
         assert_eq!(
             (pg1.layer_idx, pg1.seq, pg1.file_off, pg1.max_h),
-            (7, 70000, 138, 1 << 40)
+            (0, 70000, 138, 1 << 40)
         );
         let pr = v.prange(0);
         assert_eq!(
@@ -1435,11 +1474,34 @@ mod tests {
         // page span beyond committed ovp_len
         let mut b = Builder::new(1000.0, 0, 0, 1);
         b.top = 0;
+        b.layer(1, 0, "L", 0, 0);
         let m = b.bitset(&[0]);
         let bb = BBox { x0: 0, y0: 0, x1: 1, y1: 1 };
         b.page(0, 0, 0, &bb, 100, 50, 50, 1, 1, 1, 1);
         b.cell("A", 0, 0, &bb, &bb, 0, 0, 0, 1, 0, 0, 0, 0, m, m, 1);
         let e = err_of(Ovm::from_bytes(b.finish(120)));
         assert!(e.contains("beyond ovp_len"), "{}", e);
+        // corrupt page/prange layer or cell indexes must be an open
+        // error, never a later planner panic (review finding)
+        let sec_off = |bytes: &[u8], sec: usize| {
+            u64::from_le_bytes(
+                bytes[88 + sec * 16..96 + sec * 16].try_into().unwrap(),
+            ) as usize
+        };
+        let mut bytes = build_sample();
+        let po = sec_off(&bytes, 6); // pagedir
+        bytes[po + 4..po + 8].copy_from_slice(&999u32.to_le_bytes());
+        let e = err_of(Ovm::from_bytes(bytes));
+        assert!(e.contains("page 0 layer index"), "{}", e);
+        let mut bytes = build_sample();
+        let po = sec_off(&bytes, 6);
+        bytes[po..po + 4].copy_from_slice(&999u32.to_le_bytes());
+        let e = err_of(Ovm::from_bytes(bytes));
+        assert!(e.contains("page 0 cell index"), "{}", e);
+        let mut bytes = build_sample();
+        let ro = sec_off(&bytes, 7); // pranges
+        bytes[ro..ro + 4].copy_from_slice(&999u32.to_le_bytes());
+        let e = err_of(Ovm::from_bytes(bytes));
+        assert!(e.contains("prange 0 layer index"), "{}", e);
     }
 }

@@ -8,10 +8,19 @@ vfsd sessions exactly like the render service does.
   L2  stale drop: a response that is never applied (ack withheld) is
       rolled back; the next gen re-sends its pages - XOR green, no
       permanent blanks (the flat path's latent bug)
-  L3  partial-apply fault: apply raises mid-way -> reset_all() +
-      reset=1 replay on a fresh gen -> XOR green
+  L3  partial-apply faults at EVERY apply step (par.3.7 (1)-(4):
+      read / link / delete-prev / evict, via the viewport fault
+      hook, plus a real bad-top link failure) -> reset_all() +
+      reset=1 replay on a fresh gen -> XOR green each time
   L4  eviction (budget-mb 0): pages evicted between gens and
       re-fetched on return - XOR green, no dangling registry entries
+  L5  a DROPPED first response must not lose the names= table (it is
+      sent once per daemon run; the client loads it before the stale
+      check) - design-name resolution still works afterwards
+  L6  budgeted streaming (--stream-kb): rounds converge, their new
+      pages sum to exactly the unbudgeted cold set, the final view
+      XORs clean, and a dropped partial round rolls back and re-sends
+      the same chunk
 
 usage: python tools/validate_vfs_lifecycle.py <src.oas> <floe_dir>
 """
@@ -96,27 +105,32 @@ def check_ledger(tag, mosaic):
 class Sess:
     """the render service's hier round, distilled"""
 
-    def __init__(self, cache, budget_mb=1024):
-        self.client = VfsClient(cache.dir, budget_mb=budget_mb)
+    def __init__(self, cache, budget_mb=1024, stream_kb=None):
+        self.client = VfsClient(cache.dir, budget_mb=budget_mb,
+                                stream_kb=stream_kb)
         self.m = VfsMosaic(cache)
         self.dbu = cache.meta["dbu"]
 
     def request(self, view, reset=False):
         self.m.req_gen += 1
         x0, y0, x1, y1 = view
-        return self.client.request(
+        r = self.client.request(
             self.m.req_gen,
             (x0 * self.dbu, y0 * self.dbu,
              x1 * self.dbu, y1 * self.dbu),
             1.0, 0.0, None, None, hier=True,
             ack=0 if reset else self.m.applied_gen, reset=reset)
-
-    def apply(self, r):
+        # mirror the service: names= is view-independent and sent
+        # once per run, so it is consumed at REQUEST time - even a
+        # response the caller then drops must not lose it
         if r["names"]:
             names_path = r["names"]
             self.m.load_names(names_path)
             chk(not os.path.exists(names_path),
                 "names file not deleted after load")
+        return r
+
+    def apply(self, r):
         return self.m.apply_hier(r["delta"], r["top"], r["evict"],
                                  gen=self.m.req_gen)
 
@@ -156,7 +170,26 @@ def main():
         xor_view("L2 resend", sregs, s.m, vA)
         check_ledger("L2", s.m)
 
-        # ---- L3: partial-apply fault -> reset recovery
+        # ---- L3: partial-apply faults at EVERY step (1)-(4) via the
+        # viewport hook, plus a genuine bad-top link failure - each
+        # one recovers through reset_all + reset=1 replay
+        for step in (1, 2, 3, 4):
+            r = s.request(vB)
+            s.m._fault_step = step
+            try:
+                s.apply(r)
+                chk(False, "L3 step %d did not raise" % step)
+            except RuntimeError:
+                pass
+            s.m.reset_all()
+            chk(s.m.need_reset, "L3 step %d need_reset" % step)
+            s.round(vB, reset=True)
+            s.m.need_reset = False
+            xor_view("L3 step%d" % step, sregs, s.m, vB)
+            check_ledger("L3 step%d" % step, s.m)
+            # alternate views so consecutive rounds have real churn
+            s.round(vA)
+            xor_view("L3 step%d churn" % step, sregs, s.m, vA)
         r = s.request(vB)
         try:
             # corrupt the top name: read+clear_insts happen, link
@@ -175,6 +208,21 @@ def main():
     finally:
         s.stop()
 
+    # ---- L5: dropped FIRST response keeps the names table
+    s = Sess(cache)
+    try:
+        vA = (bx0, by0, bx0 + w // 3, by0 + h // 3)
+        _dropped = s.request(vA)  # noqa: F841 - never applied
+        chk(len(s.m.names) > 0, "L5 names lost on dropped first")
+        s.round(vA)  # rollback + resend
+        xor_view("L5", sregs, s.m, vA)
+        page = next(iter(s.m.cells), None)
+        chk(page is not None
+            and s.m.design.get(page) is not None,
+            "L5 design name unresolved for %s" % page)
+    finally:
+        s.stop()
+
     # ---- L4: eviction churn under a zero budget
     s = Sess(cache, budget_mb=0)
     try:
@@ -190,9 +238,46 @@ def main():
         chk(evicted > 0, "L4 zero budget never evicted")
     finally:
         s.stop()
+
+    # ---- L6: budgeted streaming (progressive first paint)
+    view = (bx0, by0, bx0 + w // 2, by0 + h // 2)
+    s = Sess(cache)  # cold reference: unbudgeted new count
+    try:
+        r = s.request(view)
+        cold_new = int(r["new"])
+        chk(r.get("partial", "0") != "1", "L6 unbudgeted partial")
+    finally:
+        s.stop()
+    s = Sess(cache, stream_kb=4)
+    try:
+        # drop the FIRST partial round: rollback must re-send the
+        # same chunk (deterministic priority)
+        r1 = s.request(view)
+        first_new = r1["new"]
+        chk(r1.get("partial") == "1", "L6 4KB budget not partial")
+        r2 = s.request(view)  # ack still 0 -> r1 rolled back
+        chk(r2["new"] == first_new,
+            "L6 resend %s != %s" % (r2["new"], first_new))
+        rounds, new_total = 0, 0
+        r = r2
+        while True:
+            rounds += 1
+            chk(rounds < 500, "L6 no convergence")
+            s.apply(r)
+            new_total += int(r["new"])
+            if r.get("partial") != "1":
+                break
+            r = s.request(view)
+        chk(rounds >= 2, "L6 single round despite budget")
+        chk(new_total == cold_new,
+            "L6 streamed %d != cold %d" % (new_total, cold_new))
+        xor_view("L6 final", sregs, s.m, view)
+        check_ledger("L6", s.m)
+    finally:
+        s.stop()
     sly._destroy()
 
-    print("vfs-lifecycle-checked L1-L4, failures: %d" % len(bad))
+    print("vfs-lifecycle-checked L1-L6, failures: %d" % len(bad))
     sys.exit(1 if bad else 0)
 
 

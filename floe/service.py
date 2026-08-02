@@ -363,10 +363,93 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, res, newer,
     vis = job["visible"]
     layers = [tuple(v) for v in vis] if vis is not None else None
     hier = getattr(cache, "_hier", True)
-    tl = time.perf_counter()
-    if hier:
-        # dedicated monotonic daemon-gen: GUI job gens coalesce/skip,
-        # the par.3.7 transaction wants strict increase, and a failed
+    # live-view labels: reuse the skeleton's (already-loaded) labels,
+    # filtered to the view and decluttered - so labels appear as you
+    # zoom in, Calibre-style, without any text in the pages
+    labels = _view_labels(cache, x0, y0, x1, y1, job["w"],
+                          job["h"], job["visible"])
+
+    def emit(r, t_load):
+        """draw the current working set (+coverage fill) and push
+        one frame - the hier streaming path emits one per round"""
+        td = time.perf_counter()
+        renderer.set_abstract(job.get("abstract"))
+        renderer.set_text_visible(bool(labels))
+        # the cut-frame outline layer is structural: always drawn,
+        # even when the user has narrowed the visible-layer set
+        vis_r = (None if job["visible"] is None
+                 else list(job["visible"]) + [VfsMosaic.FRAME_LAYER])
+        renderer.render_png(tmp, x0, y0, x1, y1, job["w"], job["h"],
+                            visible=vis_r, depth=None)
+        t_draw = time.perf_counter() - td
+        # coverage fill: where the cut dropped real shapes, tint the
+        # density bitplanes with the live palette into blank pixels
+        # (Calibre-style density; display-only). Only when the cut
+        # is active - full detail has the real geometry already.
+        cov = getattr(cache, "_coverage", None)
+        # handoff: composite only once zoomed out enough that a
+        # finest coverage texel is <= COV_MAX_TEXEL_PX on screen -
+        # exactly where the cut starts dropping small features
+        tex0_px = (cov.tex0[0] * job["w"] / max(1e-9, x1 - x0)
+                   if cov is not None else 1e9)
+        if cov is not None and job.get("coverage", True) \
+                and cut_px > 0 and tex0_px <= COV_MAX_TEXEL_PX:
+            try:
+                from .coverage import composite as _cov_composite
+                vis_set = (None if job["visible"] is None
+                           else {tuple(v) for v in job["visible"]})
+                rgb, any_cov = cov.view_rgb(
+                    x0, y0, x1, y1, job["w"], job["h"], vis_set,
+                    cache._cov_colors)
+                if any_cov:
+                    png = _cov_composite(tmp, rgb)
+                else:
+                    with open(tmp, "rb") as f:
+                        png = f.read()
+            except Exception:
+                with open(tmp, "rb") as f:
+                    png = f.read()
+        else:
+            with open(tmp, "rb") as f:
+                png = f.read()
+        out = {"kind": "frame", "png": png, "bbox": job["bbox"],
+               "gen": job["gen"], "tiles": r.get("pages", 0),
+               "scope": "live", "bg": False,
+               "load_ms": round(t_load * 1000),
+               "draw_ms": round(t_draw * 1000), "wait_ms": wait_ms,
+               "ms": round((time.perf_counter() - t0) * 1000)}
+        if cut_px:
+            out["cut_um"] = round(cut_px / max(1e-9, px_per_um), 3)
+        if isinstance(r.get("members"), int):
+            out["drawn"] = r["members"]
+        res.put(out)
+
+    if not hier:
+        tl = time.perf_counter()
+        r = cache.vfs_client.request(job["gen"], view_um, px_per_um,
+                                     cut_px, layers,
+                                     job.get("depth"))
+        if newer():
+            return
+        if mosaic.apply(r["delta"], r["mats"], r["evict"],
+                        r["frames"], labels):
+            renderer.refresh()
+        t_load = time.perf_counter() - tl
+        if newer():
+            return
+        emit(r, t_load)
+        return
+
+    # hier: budgeted streaming rounds (VFS_HIER.md par.5 M3.5). Each
+    # response carries up to --stream-kb of new pages, center first;
+    # a frame goes out per round, so the first paint lands in ~1s
+    # and the rest fills in behind it. Aborting anywhere on a stale
+    # job withholds the ack = daemon rollback (par.3.7).
+    load_total = 0.0
+    while True:
+        tl = time.perf_counter()
+        # dedicated monotonic daemon-gen: GUI job gens coalesce/
+        # skip, the transaction wants strict increase, and a failed
         # gen is never reused
         mosaic.req_gen += 1
         r = cache.vfs_client.request(
@@ -374,22 +457,13 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, res, newer,
             job.get("depth"), hier=True, ack=mosaic.applied_gen,
             reset=mosaic.need_reset)
         mosaic.need_reset = False
-    else:
-        r = cache.vfs_client.request(job["gen"], view_um, px_per_um,
-                                     cut_px, layers,
-                                     job.get("depth"))
-    if newer():
-        # stale frame: skip the apply entirely - the withheld ack IS
-        # the daemon's rollback signal (par.3.7), no blanks later
-        return
-    # live-view labels: reuse the skeleton's (already-loaded) labels,
-    # filtered to the view and decluttered - so labels appear as you
-    # zoom in, Calibre-style, without any text in the pages
-    labels = _view_labels(cache, x0, y0, x1, y1, job["w"],
-                          job["h"], job["visible"])
-    if hier:
+        # names= arrives ONCE per daemon run and is view-
+        # independent: consume it BEFORE the stale check, or a
+        # stale first frame would lose the pick-name table
         if r["names"]:
             mosaic.load_names(r["names"])
+        if newer():
+            return
         try:
             changed = mosaic.apply_hier(r["delta"], r["top"],
                                         r["evict"], labels,
@@ -413,64 +487,12 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, res, newer,
                                         gen=mosaic.req_gen)
         if changed:
             renderer.refresh()
-    elif mosaic.apply(r["delta"], r["mats"], r["evict"],
-                      r["frames"], labels):
-        renderer.refresh()
-    t_load = time.perf_counter() - tl
-    if newer():
-        return
-    td = time.perf_counter()
-    renderer.set_abstract(job.get("abstract"))
-    renderer.set_text_visible(bool(labels))
-    # the cut-frame outline layer is structural: always drawn, even
-    # when the user has narrowed the visible-layer set
-    vis_r = (None if job["visible"] is None
-             else list(job["visible"]) + [VfsMosaic.FRAME_LAYER])
-    renderer.render_png(tmp, x0, y0, x1, y1, job["w"], job["h"],
-                        visible=vis_r, depth=None)
-    t_draw = time.perf_counter() - td
-    # coverage fill: where the cut dropped real shapes, tint the
-    # density bitplanes with the live palette into the blank pixels
-    # (Calibre-style density; display-only). Only when the cut is
-    # active - a full-detail view has the real geometry already.
-    cov = getattr(cache, "_coverage", None)
-    # handoff: composite only once zoomed out enough that a finest
-    # coverage texel is <= COV_MAX_TEXEL_PX on screen - that is
-    # exactly where the cut starts dropping small features and real
-    # geometry thins out; deeper in, the real shapes carry the view
-    tex0_px = (cov.tex0[0] * job["w"] / max(1e-9, x1 - x0)
-               if cov is not None else 1e9)
-    if cov is not None and job.get("coverage", True) and cut_px > 0 \
-            and tex0_px <= COV_MAX_TEXEL_PX:
-        try:
-            from .coverage import composite as _cov_composite
-            vis_set = (None if job["visible"] is None
-                       else {tuple(v) for v in job["visible"]})
-            rgb, any_cov = cov.view_rgb(
-                x0, y0, x1, y1, job["w"], job["h"], vis_set,
-                cache._cov_colors)
-            if any_cov:
-                png = _cov_composite(tmp, rgb)
-            else:
-                with open(tmp, "rb") as f:
-                    png = f.read()
-        except Exception:
-            with open(tmp, "rb") as f:
-                png = f.read()
-    else:
-        with open(tmp, "rb") as f:
-            png = f.read()
-    out = {"kind": "frame", "png": png, "bbox": job["bbox"],
-           "gen": job["gen"], "tiles": r.get("pages", 0),
-           "scope": "live", "bg": False,
-           "load_ms": round(t_load * 1000),
-           "draw_ms": round(t_draw * 1000), "wait_ms": wait_ms,
-           "ms": round((time.perf_counter() - t0) * 1000)}
-    if cut_px:
-        out["cut_um"] = round(cut_px / max(1e-9, px_per_um), 3)
-    if isinstance(r.get("members"), int):
-        out["drawn"] = r["members"]
-    res.put(out)
+        load_total += time.perf_counter() - tl
+        if newer():
+            return
+        emit(r, load_total)
+        if r.get("partial") != "1" or newer():
+            return
 
 
 def _svc_clip(cache, job, res):

@@ -1,11 +1,12 @@
 # floe VFS 아키텍처 (V4: 계층 보존 워킹셋)
 
-2026-08-02 결정, rev 15 (rev 2 = 코드 대조 검토, rev 3/5/6/7/8/11
+2026-08-02 결정, rev 16 (rev 2 = 코드 대조 검토, rev 3/5/6/7/8/11
 = 외부 검토, rev 4 = 포맷-유지 원칙 폐기, rev 9/10 = **캐시 무결성
 단순화·책임 분리 지시**, rev 12 = **M0 실증**, rev 13/14/15 =
-**M1/M2/M3 구현 완료** — 변경 요지 §0). 상태: **M0~M3 완료, 뷰어
-기본 = hier**(`FLOE_VFS_MODE=flat`으로 A/B) — **다음 = M4 실측
-A/B(MAIN09 등 사무실 자산)**(결과: §5 M0~M3). 배경: MAIN09(150M급)
+**M1/M2/M3 구현 완료**, rev 16 = **M2/M3 외부 검토 반영(0.6.1)** —
+변경 요지 §0). 상태: **M0~M3 완료, 뷰어 기본 = hier**
+(`FLOE_VFS_MODE=flat`으로 A/B) — **다음 = M4 실측 A/B(MAIN09 등
+사무실 자산)**(결과: §5 M0~M3). 배경: MAIN09(150M급)
 실측에서 **뷰어 깊은 줌이
 줌인할수록 느려지는** 병리 확인. 원인은 개별 증상이 아니라 하나의
 근본 구조 — **워킹셋을 평탄화(flatten)해서 klayout에 넘긴다**는 것.
@@ -167,6 +168,61 @@ rev 10 (지시: **인덱서/뷰어 책임 분리** + 이전 검토 잔여 1건):
   usize/u64 → u32/u16 narrowing(na/nb, Pts count, page/place/BVH
   start·count, payload size 등)은 checked — silent truncation
   금지, 초과는 "limit exceeded: <필드>" 빌드 에러.
+
+rev 17 (M3.5 점진 첫 페인트 + M4 규정 + M7 예약 — 2026-08-03,
+0.6.2):
+- **첫-방문 병목 실측 분해**(testchip 198×156µm·cut L1·189페이지·
+  124MB·19.2M members): vfsd(플랜+ovp+스플라이스+델타 기록)
+  **0.04s**, klayout `ly.read` **6.4s**, 나머지 0 — 병목은 오직
+  klayout 단일-스레드 파싱(≈19MB/s). 데몬 병렬화 여지 없음,
+  `Layout.read` 분할 병렬 불가.
+- **M3.5 점진 로딩**: `HierSession.apply`에 라운드당 신규 payload
+  **csize 예산**(vfsd `--stream-kb`, 기본 24576=24MB; 0=off) +
+  **뷰-중심 거리 우선순위**(엄격 프리픽스, tie=페이지 인덱스,
+  최소 1페이지 진행 보장). 응답 `partial=`/`deferred=`(§3.5).
+  뷰어는 라운드마다 apply+렌더+프레임 송출 후 같은 뷰 재요청 —
+  나머지 상태 없이 `plan − committed`가 자연 수렴. 중도 이탈은
+  기존 stale 규약(ack 미전송=롤백) 그대로. probe/flat 무예산.
+  실측: 위 뷰 **첫 페인트 6.4s → 1.08s**(41페이지 중심부), 6라운드
+  총 7.2s(+12%는 화면 뒤 진행).
+- **M4 규정 추가**(§5): M4는 "대표 표본"이 아니라 **알려진 최악
+  사례 회귀 + 기본값 결정** — 자산별 역할, LOD 판정 기준, "기본값
+  ≠ 한계"(튜너블은 노브 유지), 상태줄/지표 운영 루프 명문화.
+- **M7 예약**(§5): LOD 페이지 — M5 이후, M4 판정 기준 충족 시만
+  착수(v2에 lod/codec 예약돼 포맷 부채 0).
+- 게이트: 세션 유닛(우선순위/부분 커밋/드롭 후 동일 청크 재전송/
+  진행 보장/예산 0), lifecycle **L6**(4KB 예산 수렴·합집합=콜드
+  new·중도 드롭 롤백·최종 XOR) 스위트 편입.
+
+rev 16 (M2/M3 외부 검토 반영 — 2026-08-03, 0.6.1; 6건 중 5건 실결함
+확인·수정, 검증 공백 게이트화):
+- **① names= stale 유실(높음)**: 첫 hier 응답이 stale이면 런당
+  1회뿐인 이름 테이블을 영구 유실 — service가 **stale 판정 전에
+  names를 소비**하도록 이동(테이블은 뷰-무관). 게이트 L5.
+- **② HierSession bytes 잔여(중간)**: new 페이지 크기를 plan 시점에
+  장부에 기록 → 롤백이 못 지움 — **커밋 시점 기록**으로 이동
+  (pending이 (page,bytes) 쌍을 나름; pending = 순수 diff 회복).
+  회귀 assert 추가.
+- **③ 손상 캐시 플래너 panic(중간)**: page/prange의 layer_idx·
+  page.cell 미검증 — 오픈 검증에 추가(+`bs_width×8 ≥ n_layers`,
+  layer name 경계). corrupt 유닛 3종 추가 — 손상은 항상 "corrupt
+  cache; rebuild".
+- **④ unchecked narrowing 잔존(중간)**: bitset count·bs_width·
+  doc.top·bvh len/인덱스 합·pbvh 인덱스 합·**Builder 카운터 6종**
+  (checked `bump`) 전부 checked로.
+- **⑤ sparse Pts 프레임 재재료화(중간)**: below-cut sparse Pts는
+  전 오프셋을 매 플랜 복사 — **count > PTS_FULL_REP도 footprint
+  1박스로 강등**(§2.1 융합 규칙에 크기 상한 추가). 9,000점 유닛.
+- **⑥ heartbeat(낮음)**: (a) stderr 출력은 **의도된 설계** —
+  stdout은 vfsd 프로토콜/plan JSON 채널이라 모든 진행 로그는
+  stderr(여기 명문화). (b) parse 단계 무소식은 실공백 — **parse
+  heartbeat**(5s, elapsed+rss) 추가.
+- **검증 공백 게이트화**: lifecycle L3를 apply **①~④ 전 단계**
+  주입으로 확장(뷰어 gate-훅 `_fault_step`) + L5(names stale),
+  `validate_vfs_marker.py` 신설 — `FLOE_KILL_AT` 훅으로 3지점
+  **실제 강제 종료** 후 no-cache/corrupt 확인 + 재빌드 복구,
+  스위트 편입. narrowing 경계는 구성 가능한 것만 유닛(카운터
+  오버플로 등 실물 불가 경계는 checked 코드로 보장).
 
 rev 15 (M3 구현 완료 — 2026-08-03, 파이썬 뷰어; 지시로 **기본 모드
 = hier**):
@@ -654,7 +710,9 @@ mats-TSV 12열(design명)은 placements가 아니라 **pick이 소비**한다
   기동/첫 응답에 `names=` 1회(§3.4). `pages/new/evict/bytes/members/
   plan_ms`는 유지, `resident_mb`는 `resident_committed_mb/
   resident_projected_mb/pending_new_mb/pending_evict_mb`로 대체
-  (§3.7).
+  (§3.7). **`partial=0|1`/`deferred=N`**(M3.5 점진 로딩 — 이번
+  응답이 `--stream-kb` 예산에 걸렸는지와 이월 페이지 수; partial=1
+  이면 클라이언트는 apply·ack 후 같은 뷰를 재요청).
 - probe 모드(pick/snap/clip의 `_probe_layout`, cli `_vfs_region`)도
   같은 델타 포맷을 그대로 탄다(세션-무관이라 ack 불필요) — 별도
   구현 없음, 검증만(§7 clip XOR).
@@ -997,8 +1055,32 @@ gen 2: 데몬 "이미 resident" → 바디 재전송 안 함
      양 모드, lifecycle L1~L4(팬 XOR·WC 잔존 0·stale 재전송·부분
      실패 복구·evict churn), `floe probe` 실서비스 — 전부 green,
      스위트 편입.
+3.5. **M3.5 — 점진 첫 페인트 (구현 완료 2026-08-03, 0.6.2)**:
+   첫-방문 병목은 klayout 단일-스레드 파싱뿐임을 실측(§0 rev 17)
+   — 총량 대신 체감을 쪼갠다. 데몬이 라운드당 `--stream-kb`(기본
+   24MB)만큼만 신규 페이지를 **뷰 중심 거리순**으로 싣고
+   `partial=1`로 응답, 뷰어는 라운드마다 렌더+프레임 송출 후 재요청
+   (ack 트랜잭션 위 정상 사이클 — 중도 이탈=롤백, 상태 추가 0).
+   testchip 189페이지/124MB 뷰: 첫 페인트 1.08s, 6라운드 총 7.2s.
 4. **M4 — 검증**: §7 게이트 전부 + MAIN09 실측(inst_edges/pages/
    load_ms 자릿수 감소 확인) + flat vs 계층 A/B 수치.
+   - **성격 규정**: M4는 "수많은 실칩의 대표 표본"이 아니라
+     **알려진 최악 사례 회귀 + 기본값 결정**이다. 정확성·상한은
+     구조(가시 서브트리 비례, 무누락 폴백, 예산 바운드, checked
+     하드 에러)가 보증하고, 실측은 상수만 정한다 — 틀린 상수는
+     느려질 뿐 깨지지 않는다.
+   - **자산별 역할**: MAIN09 = 중첩-배열 딥줌 회귀(원병리),
+     testchip_1g5 = Pts·mid-zoom 밀집 + 점진 로딩 체감, 240G =
+     빌드 스케일, 9.8G b3 = fill 홍수, valmini = 합성 게이트.
+   - **측정 항목**: 대역별(wide/mid/deep) cold 분해(델타 MB·
+     ly.read s·첫 페인트·완성 시간)·RSS·K=4 vs K=1, flat 대조.
+   - **LOD 판정 기준**: 점진 로딩 상태에서 mid-zoom cold **완성**
+     시간이 실칩 기준 3~5s 초과가 상습이면 M7 착수, 아니면 보류.
+   - **기본값 ≠ 한계**: M4가 정하는 것은 `--stream-kb`·K·PTS 임계
+     등의 **기본값**이며 전부 노브로 남긴다(현장 이탈 사례는 플래그
+     조정). 미지의 칩은 상태줄 한 줄(tiles/load/draw/cut/members)
+     + §3.5 지표로 회수해 다음 fixture로 삼는다 — M4는 이 운영
+     루프의 시작점이지 종점이 아니다.
 5. **M5 — 통합·폐기**: coverage/skeleton 라벨 재확인(§4), flat 경로
    + mats-TSV + frames 파일 + `mode=` 스위치 제거. (여기의 "버전
    범프"는 push 관례에 따른 **CLI/크레이트 릴리스 버전** — 캐시
@@ -1006,6 +1088,13 @@ gen 2: 데몬 "이미 resident" → 바디 재전송 안 함
 6. **M6 — 증분(팬 최적화, 후속)**: WC를 gen-ephemeral에서 "상주 +
    localview 차분 갱신"으로 승격. 팬은 작은 델타, 줌은 부분 재구성.
    (M1~M5 동안은 프레임당 WC 재구성 — 깊은 줌은 바운드되어 싸다.)
+7. **M7 — LOD 페이지 (예약; M5 이후, M4 판정 기준 충족 시만)**:
+   페이지 레코드의 `lod`/`codec` 예약 바이트를 사용한 간략화 LOD
+   변종 — 남은 병목(파싱량 ∝ 델타 바이트)의 근본 개선. 착수 전
+   결정 필요 사항: 간략화 방식(밴드식 데시메이션/fill 병합), LOD
+   선택 규칙(줌 대역), 캐시 증분 비용, 손실-렌더 검증 기준(XOR
+   게이트의 LOD-인지화). coverage(광역)와 점진 로딩(체감)이 이미
+   흡수한 몫을 제외한 잔여 가치를 M4 수치로 판정한다.
 
 ---
 

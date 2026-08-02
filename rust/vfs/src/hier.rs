@@ -610,11 +610,17 @@ impl<'a> Hier<'a> {
                             self.v.pts_ref(pli).expect("pts kind");
                         let ext = pr.extent();
                         let fp = grow_by_offsets(&b0, &ext);
-                        // mean member spacing from extent density
+                        // fuse when members would blur together
+                        // (mean spacing from extent density) OR when
+                        // the list is simply huge - a sparse
+                        // million-point frame would re-materialize
+                        // O(count) offsets per plan (review finding)
                         let area = (ext.x1 - ext.x0).max(1) as u128
                             * (ext.y1 - ext.y0).max(1) as u128;
                         let c2 = fuse_pitch as u128;
-                        if pr.count as u128 * c2 * c2 > area {
+                        if pr.count as u128 * c2 * c2 > area
+                            || pr.count > self.opts.pts_full_rep
+                        {
                             (fp, Rep::One, fp)
                         } else {
                             let mut pts = Vec::with_capacity(
@@ -1842,6 +1848,54 @@ mod tests {
         assert!(matches!(frep, Rep::One), "{:?}", frep);
         // footprint spans the whole array, not one member
         assert_eq!(*fb, bx(0, 0, 15 * 199 + 5, 5));
+    }
+
+    #[test]
+    fn below_cut_huge_sparse_pts_frame_fuses() {
+        // sparse (members far apart) but HUGE: per-member frame
+        // would re-materialize O(count) offsets every plan - the
+        // count cap degrades it to one footprint box
+        let n = 9000usize;
+        let offs: Vec<(i64, i64)> = (0..n as i64)
+            .map(|i| (i % 100 * 1_000_000, i / 100 * 1_000_000))
+            .collect();
+        let v = fixture(
+            &[
+                FCell {
+                    name: "S",
+                    pages: vec![(bx(0, 0, 5, 5), 5, 5)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "T",
+                    pages: vec![(
+                        bx(0, 0, 99_000_010, 100),
+                        99_000_010,
+                        100,
+                    )],
+                    places: vec![(
+                        0,
+                        0,
+                        0,
+                        0,
+                        false,
+                        Rep::Pts(offs),
+                    )],
+                },
+            ],
+            1,
+        );
+        let plan = plan_hier(
+            &v,
+            &rq(bx(0, 0, 99_000_010, 200), 10, u32::MAX),
+            &HierOpts::default(),
+        );
+        let t = plan.wcells.iter().find(|w| w.key.0 == 1).unwrap();
+        assert_eq!(t.frames.len(), 1);
+        assert!(matches!(t.frames[0].1, Rep::One));
+        // spacing 1mm >> 2*cut, so ONLY the count cap explains the
+        // fuse (9000 > pts_full_rep 8192)
+        assert!(9000 > HierOpts::default().pts_full_rep);
     }
 
     #[test]

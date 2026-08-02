@@ -90,6 +90,9 @@ class VfsMosaic:
         self.req_gen = 0      # daemon-gen counter (monotonic)
         self.applied_gen = 0  # last gen fully applied (the ack)
         self.need_reset = False
+        # gate-only hook (par.7 fault injection): apply_hier raises
+        # at step N once, exercising the reset_all recovery path
+        self._fault_step = None
 
     def apply(self, delta_path, mats, evict, frames_path=None,
               labels=None):
@@ -189,6 +192,12 @@ class VfsMosaic:
         after this returns (step (5)); on a stale frame it never
         calls this, which IS the rollback signal. True = changed."""
         changed = False
+
+        def _fault(step):
+            if self._fault_step == step:
+                self._fault_step = None
+                raise RuntimeError("injected fault at step %d" % step)
+
         if self.label_ci is not None:
             self.ly.prune_cell(self.label_ci, -1)
             self.label_ci = None
@@ -196,6 +205,7 @@ class VfsMosaic:
         prev_wc = self._wc_cells
         gen_prefix = (top_name.split("_", 1)[0] + "_"
                       if top_name else None)
+        _fault(1)
         if delta_path:
             self.ly.read(delta_path)
             changed = True
@@ -207,6 +217,7 @@ class VfsMosaic:
                     self.cells[nm] = c.cell_index()
                 elif nm.startswith(gen_prefix):
                     wc_now.append(nm)
+        _fault(2)
         self.top.clear_insts()
         if top_name:
             tc = self.ly.cell(top_name)
@@ -227,6 +238,7 @@ class VfsMosaic:
             self.top.insert(
                 db.CellInstArray(self.label_ci, db.Trans()))
             changed = True
+        _fault(3)
         if prev_wc:
             idxs = [self.ly.cell(nm).cell_index() for nm in prev_wc
                     if self.ly.cell(nm) is not None]
@@ -234,6 +246,7 @@ class VfsMosaic:
                 self.ly.delete_cells(idxs)
                 changed = True
         self._wc_cells = wc_now
+        _fault(4)
         for nm in evict:
             ci = self.cells.pop(nm, None)
             if ci is not None:
