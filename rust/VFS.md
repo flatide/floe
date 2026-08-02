@@ -154,6 +154,36 @@ resident_mb=`. `mode=probe`(예정) = 세션 무관 정밀(cut=0) 델타 —
 - vfsd 스폰: RenderWorker/_render_service(service.py:583/503)의
   spawn 패턴에 subprocess.Popen 파이프로 편입
 
+## V3b 커버리지 비트플레인 (Calibre식 밀도, 효율형)
+
+동기: cut/평면-필은 줌아웃 시 서브픽셀 도형을 드롭하는데 셀 계층이
+없어 프레임도 못 서고 → 빈 영역(stress30 실측: cut L1에서 600µm+
+뷰가 drawn=1). Calibre는 실제 지오메트리를 레이어별 래스터화해
+서브픽셀도 픽셀에 커버리지를 누적(밀도 블록)하고 그 래스터를
+타일 캐시. floe 효율형 = **레이어별 커버리지 비트플레인 + 팔레트
+합성**(상용 조사 격차 1순위):
+- 저장 = RGBA 아님, 8비트 **점유율/밀도**만 → 렌더 시 레이어 색·on/off
+  런타임 변경에 재생성 불필요.
+- 렌더 = O(픽셀): 커버리지 타일을 numpy로 업샘플·틴트·alpha-over
+  (서비스가 PNG 프레임에 합성, GTK 셸 무변경, GPU 불필요).
+- 인덱스 = 펼치지 않음: 반복을 해석적으로(bbox×fill 비율) 래스터,
+  셀 recursive 면적을 bottom-up 계산, 텍셀 컷오프까지만 하강하고
+  그 아래·배열은 균일 밀도로 splat → O(records+texels), flatten 없음.
+
+포맷 design.ovc(패킹): header(magic FLOEOVC1, dbu, die bbox,
+base_res, n_levels, n_layers) + 레이어표 + (level,layer) 비어있지
+않은 평면만 sparse 저장(8비트, level별 res 반감 미맵).
+
+**표시 전용**: pick/snap/측정은 계속 exact 페이지. 핸드오프(커버리지
+광역 ↔ 실제 페이지 근접)는 배율 히스테리시스.
+
+마일스톤:
+- V3b.1 커버리지 생성 + .ovc 포맷/리더 (해석적, per-layer 미맵,
+  sparse). 검증: 레이어별 총 커버 면적 vs klayout.
+- V3b.2 vfsd가 뷰포트+레이어+LOD로 커버리지 타일 서브.
+- V3b.3 서비스가 프레임에 numpy 합성(팔레트), 핸드오프 게이트.
+- V3b.4 튜닝(레이어그룹/캐시)·성능·스위트 게이트.
+
 ## V1에서 하지 않는 것
 
 스트리밍 인덱서(in-memory Doc 유지, D3), proxy/coverage, VFS

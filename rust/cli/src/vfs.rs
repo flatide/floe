@@ -88,6 +88,19 @@ pub fn vfs_cmd(args: &[String]) {
     std::fs::create_dir_all(&outdir).expect("mkdir outdir");
     build(&doc, size, mtime, &outdir, jobs);
     emit_viewer_side(&doc, &src, size, mtime, &outdir);
+    {
+        // coverage bitplanes (V3b): density overview for cut/wide views
+        let tc = std::time::Instant::now();
+        let ovc =
+            floe_vfs::coverage::write_ovc(&doc, &doc.layer_order);
+        std::fs::write(format!("{}/design.ovc", outdir), &ovc)
+            .expect("write ovc");
+        eprintln!(
+            "[vfs] coverage {} ({:.1}s)",
+            fmt_size(ovc.len() as u64),
+            tc.elapsed().as_secs_f64()
+        );
+    }
     eprintln!(
         "[vfs] done in {:.1}s -> {}",
         t0.elapsed().as_secs_f64(),

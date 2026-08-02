@@ -2,6 +2,8 @@
 //! without touching geometry, keep a working-set session, and build
 //! delta OASIS files by splicing page payload bytes verbatim.
 
+pub mod coverage;
+
 use floe_oasis::write::{splice_tree, tree_body};
 use floe_ovm::{BBox, Ovm, PlaceV};
 use floe_oasis::doc::Rep;
