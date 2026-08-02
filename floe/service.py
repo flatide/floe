@@ -53,6 +53,12 @@ LABEL_VIEW_BUDGET = 400
 # LABEL_VIEW_BUDGET per frame
 LABEL_CELL_PX = 48
 
+# coverage handoff: composite the density bitplanes only when a
+# finest coverage texel projects to at most this many screen pixels
+# (zoomed out enough that the cut is dropping small features); deeper
+# than that the real geometry carries the frame
+COV_MAX_TEXEL_PX = 64.0
+
 
 def _bands_for_view(cache, x0, x1, w, cut_px=None):
     """(needed band indexes, cut size in dbu) for a view of w pixels
@@ -660,8 +666,36 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, res, newer,
     renderer.render_png(tmp, x0, y0, x1, y1, job["w"], job["h"],
                         visible=vis_r, depth=None)
     t_draw = time.perf_counter() - td
-    with open(tmp, "rb") as f:
-        png = f.read()
+    # coverage fill: where the cut dropped real shapes, tint the
+    # density bitplanes with the live palette into the blank pixels
+    # (Calibre-style density; display-only). Only when the cut is
+    # active - a full-detail view has the real geometry already.
+    cov = getattr(cache, "_coverage", None)
+    # handoff: composite only once zoomed out enough that a finest
+    # coverage texel is <= COV_MAX_TEXEL_PX on screen - that is
+    # exactly where the cut starts dropping small features and real
+    # geometry thins out; deeper in, the real shapes carry the view
+    tex0_px = (cov.tex0[0] * job["w"] / max(1e-9, x1 - x0)
+               if cov is not None else 1e9)
+    if cov is not None and cut_px > 0 and tex0_px <= COV_MAX_TEXEL_PX:
+        try:
+            from .coverage import composite as _cov_composite
+            vis_set = (None if job["visible"] is None
+                       else {tuple(v) for v in job["visible"]})
+            rgb, any_cov = cov.view_rgb(
+                x0, y0, x1, y1, job["w"], job["h"], vis_set,
+                cache._cov_colors)
+            if any_cov:
+                png = _cov_composite(tmp, rgb)
+            else:
+                with open(tmp, "rb") as f:
+                    png = f.read()
+        except Exception:
+            with open(tmp, "rb") as f:
+                png = f.read()
+    else:
+        with open(tmp, "rb") as f:
+            png = f.read()
     out = {"kind": "frame", "png": png, "bbox": job["bbox"],
            "gen": job["gen"], "tiles": r.get("pages", 0),
            "scope": "live", "bg": False,
@@ -768,6 +802,18 @@ def _render_service(src, req, res, latest=None):
     # 50k budget) - no page text, no build/size cost; see _view_labels
     if cache.meta.get("vfs"):
         cache._live_labels = _load_skel_labels(skel_renderer)
+        # coverage bitplanes (density overview for cut/wide views)
+        cache._coverage = None
+        covp = os.path.join(cache.dir, "design.ovc")
+        cache._cov_colors = {
+            (l["layer"], l["datatype"]): l["color"]
+            for l in cache.meta["layers"]}
+        if os.path.isfile(covp):
+            try:
+                from .coverage import Coverage
+                cache._coverage = Coverage(covp)
+            except Exception:
+                cache._coverage = None
     tmp = os.path.join(tempfile.gettempdir(), f"floe_gui_{os.getpid()}.png")
     try:
         while True:

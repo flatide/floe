@@ -462,7 +462,7 @@ pub fn write_ovc(
             put32(&mut dir, p.len() as u32);
         }
     }
-    let n_entries = dir.len() / 19; // 1+4+2+2+8+4
+    let n_entries = dir.len() / 21; // 1+4+2+2+8+4
     put32(&mut out, n_entries as u32);
     let body_off = out.len() as u64 + dir.len() as u64 + 8;
     out.extend_from_slice(&body_off.to_le_bytes());
