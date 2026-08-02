@@ -1,0 +1,942 @@
+# floe VFS 아키텍처 (V4: 계층 보존 워킹셋)
+
+2026-08-02 결정, rev 11 (rev 2 = 코드 대조 검토, rev 3/5/6/7/8/11
+= 외부 검토, rev 4 = 포맷-유지 원칙 폐기, rev 9/10 = **캐시 무결성
+단순화·책임 분리 지시** 반영 — 변경 요지 §0). 상태: **아키텍처
+승인, 구현 명세 v11** — M0 실증(바인딩 + Pts 재료화)으로 검증 후
+동결. 배경: MAIN09(150M급) 실측에서 **뷰어 깊은 줌이
+줌인할수록 느려지는** 병리 확인. 원인은 개별 증상이 아니라 하나의
+근본 구조 — **워킹셋을 평탄화(flatten)해서 klayout에 넘긴다**는 것.
+이 문서는 그 평탄화를 걷어내고, VFS/BVH를 정확히 활용해 klayout에
+**계층 그대로** 붙이는 방향을 정의한다. 선행 문서: `VFS.md`(V1~V3),
+세션 메모리 [[vfs-rewrite-direction]], [[vfs-build-perf]].
+
+---
+
+## 0. 개정 요지
+
+rev 2 (코드 대조 검토):
+- 리스크 2건 해소·삭제: authored+스플라이스 **모달 정합**은 구조적
+  보장(§3.2), **cut 에지-단위 갈림**은 존재 불가(셀 단위 속성, §2.4).
+- 클립영역 전파: 워크리스트 수렴 → **topo-rank 1패스**(§2.3).
+- **klayout read 이름-바인딩**(§3.3)을 M0 스파이크로 승격(M2 게이트).
+  WC는 상주가 아니라 **gen-ephemeral**(§3.1), eviction은 페이지 단위.
+- pick의 design-이름 의존 대책(§3.4), frames 이행(§3.2), 프로토콜/
+  지표 명세(§3.5), valmini 게이트 교정(§7).
+
+rev 3 (외부 검토):
+- depth: min-path-depth(의미 변경) 철회 → **WC variant
+  `WsKey=(ci, remaining_depth)`**로 현행 의미 정확 유지(§2.5).
+- skew Grid **닫힌형 수식 명문화**: 역행렬 4-코너 + det=0 분기 +
+  i128, ⊖ 표기를 ⊕(−·)로 교정(§2.3).
+- **page BVH를 M1 범위로**(§2.2).
+- topo 전제 교정: back-edge "skip"은 보장이 아님 — **빌드에서 사이클
+  명시 검출·거부**를 전제로 추가(§2.3).
+- WC 이름 숫자화 `W<gen>_<r>_<ci>`(공백/유니코드 배제), 이전 gen 일괄
+  `delete_cells`(§3.1). pick은 P-이름의 ci + **ci→design명 테이블
+  1회 전달**(§3.4). M0 폴백의 전송 포맷(hier.tsv) 명세(§3.3).
+- 검증 게이트 7건 추가(§7).
+
+rev 4 (지시: **포맷-유지 원칙 없음, 최대/최선의 결과 목표**):
+- rev 3에서 포맷 안정성 때문에 타협했던 3건을 **빌드-시 `.ovm v2`**로
+  승격(§3.6): page BVH는 runtime lazy → **packed 섹션**(§2.2), topo
+  rank는 기동 시 계산 → **셀 레코드 필드**(§2.3), 그리고
+  [[vfs-build-perf]]의 이연 지뢰 **`seq: u16` → u32**(65535 페이지
+  panic)를 같은 범프에 흡수.
+- 확인된 사실: `.ovm`엔 이미 MAGIC+VERSION 게이트가 있고(에러 명확),
+  **`height`는 v1부터 셀 레코드에 존재** → depth sentinel 접기는 셀
+  단위로 즉시 가능(§2.5). **python은 .ovm을 파싱하지 않아**(경로
+  참조뿐) 범프 영향 범위는 rust `floe-ovm` 크레이트 하나. `.ovp`/
+  `.ovc`는 불변.
+- localview **K-box를 M1 기본 탑재**로 격상(계측-후-적용 → 기본 K=4,
+  A/B에서 K=1 대조)(§2.3, §6-2).
+
+rev 5 (외부 검토 2차 — 구현 명세 확정):
+- **Rep::Pts 경로 명세**(§2.3): 임계 이하 열거 / 초과 시 보수적
+  전체-extent 폴백, 방출은 항상 rep 1개. hier.tsv 폴백에 rep 열 +
+  pts pool 추가(§3.3).
+- **세션 트랜잭션 신설**(§3.7): 응답-시점 resident 등록 + 클라이언트
+  stale drop 조합의 **영구 공백 버그**(현행 flat 경로에도 잠복)를
+  ack-gen 2단계 커밋으로 해소.
+- **page BVH 강화**(§2.2): 레이어는 리프 필터 → **(cell,layer)별
+  루트**(page-range 테이블), 노드에 subtree max_w/max_h 집계(리프
+  이전 cut 컬링), 리프 = 페이지 디렉터리 연속 구간(빌드 시 run 내
+  재배열). 계측 분리.
+- **`.ovm` v2 wire 스키마 동결**(§3.6): 헤더 216B/9섹션, cell 128B·
+  page 88B(오프셋표), prange 16B·pbvh 48B 신설, height **u32** +
+  checked 깊이 오버플로 에러. 사실 정정: `tools/validate_vfs.py`가
+  .ovm을 직접 파싱 → v2 갱신 범위에 포함(런타임 python은 비파싱).
+- K-box는 **box별 질의 후 dedup**(중간 단일-bbox 병합 금지), 병합
+  함수·tie-break 결정성 고정(§2.3). i128은 checked + 보수 폴백.
+- M5 "버전 범프"는 CLI/크레이트 릴리스 범프로 명확화(캐시 포맷은
+  M1에서 v2)(§5).
+
+rev 6 (외부 검토 3차 — Pts 총비용 / cut 포화 / 장애 복구):
+- **Pts 재설계**(§2.3): "폴백 = 비용 0"이 현 구조에선 거짓
+  (place()가 pool을 매번 Vec 복사, rep_extent 전 점 순회; 실측
+  testchip_1g5 = Pts 410개·오프셋 147만·최대 3,823 → 임계 4096이면
+  전부 열거 경로). v2 pts pool에 **extent+chunk 인덱스**를 굽고
+  zero-copy 접근자 추가, 방출은 **가시-부분집합 Pts**(klayout의
+  type-10 전개 리스크를 임계로 바운드), 요청당 PTS_ENUM_BUDGET.
+  M0에 **10만/100만-점 Pts 재료화 실증** 추가.
+- **max_w/max_h u32 → u64**(§3.6): 빌더가 u32::MAX로 포화시키고
+  (vfs.rs:1015) planner가 일반값으로 비교 → 극단 dbu/거대 지오메트리
+  에서 오컷 가능. 페이지 96B/pbvh 56B로 재배치.
+- **ACK 상태기계 완성 + 장애 복구**(§3.7): 초기값/중복/역행 규칙,
+  resident_mb 의미, apply 부분 실패 시 **모자이크 전체 재생성 +
+  `reset=`**(부분 적용 레이아웃으로 다음 gen 진행 금지),
+  fault-injection 게이트.
+- **빌드 atomic publish**(§3.6): 현행은 design.ovp를 제자리
+  truncate 후 기록(vfs.rs:995) — 중단 시 구 ovm + 파괴된 ovp.
+  tmp 파일 + fsync + rename(ovm이 커밋 마커) + 헤더에 ovp_len
+  기록·오픈 시 정합 검증.
+
+rev 7 (외부 검토 4차 — Pts rebase / 진짜 atomic publish):
+- **Pts 부분집합 rebase 필수**(§2.3): `Rep::Pts` 불변조건 = 첫
+  오프셋 (0,0)(doc.rs:28), writer는 첫 점을 기록하지 않음
+  (write.rs:98) — 부분집합을 그대로 방출하면 **오배치**. 0/1/≥2
+  케이스 규칙 + 원본-index dedup(좌표 dedup 금지 — 중복 좌표
+  멤버는 별개) 명세. 선례: tiler hier.rs:869.
+- **O_vis 사다리**(§2.3): "기여는 항상 extent" 철회 — 대형 Pts
+  extent 일률 사용은 옛 `view=cwb` 병리의 재현. extent는 1차 교차
+  판정 전용, 기여 bbox는 선택 결과 기준.
+- **chunk는 Morton 재배열**(§2.3): 원본 순서 256개 묶음은 공간이
+  섞인 파일에서 모든 chunk bbox ≈ extent가 되는 함정.
+- **versioned OVP publish**(§3.6): rev 6 방식(ovp 먼저 rename)은
+  "감지"일 뿐 — rename 사이 중단 시 구 캐시까지 파괴되고, ovp_len
+  동일 크기 오조합은 통과. v2는 `design-<build_id>.ovp` + ovm에
+  build_id 기록, **ovm rename이 유일한 커밋** → 언제 죽어도 구 또는
+  신 캐시 하나는 항상 유효. 커밋 후 구 ovp GC + 디렉터리 fsync.
+- **projected 예산**(§3.7): eviction 판단은 committed가 아니라
+  committed+이번 플랜 new 기준(v1 동작 계승 명시), LRU touch도
+  pending(롤백 가능). reset 후 실패 gen 재사용 금지.
+- 오픈 검증을 섹션 유형별로 정정(고정 stride vs 가변), 페이지별
+  checked `file_off+csize ≤ ovp_len`, zero-copy = borrowed bytes의
+  LE 이터레이터(캐스트 금지)(§3.6). M0 Pts 케이스에 경계값
+  1/2/1024/1025 + 좁은-뷰 부분집합 추가(§5).
+
+rev 8 (외부 검토 5차 — Morton/GC/검증 범위 정합):
+- **멤버 identity = Morton pool slot**(§2.3): rev 7의 "원본 index
+  dedup"은 Morton 재배열 후 wire에 index가 없어 구현 불가 — slot
+  index가 identity(동일 좌표 별개 slot 유지, 방출 순서 = pool
+  순서). 정렬 tie-break의 "원본 index"는 빌드-시 규칙으로만 존속.
+- **GC와 실행-중 viewer**(§3.6): `Vfs::delta`가 요청마다 ovp를
+  reopen(lib.rs:394) → 커밋 직후 구 ovp GC가 구 viewer를 깨뜨림.
+  `Vfs::open`이 핸들을 1회 열어 보존 + `read_at`, unlink-후에도
+  열린 핸들 유효, GC 실패는 다음 빌드로 이월. 디렉터리 fsync는
+  **2회**(ovp 이름 내구화 → 커밋 내구화).
+- **M0 교정**: 1-점 type-10은 스펙상 불가(writer가 `len−2` 기록,
+  write.rs:98) — 입력 2/1024/1025/10만/100만 × **선택 결과
+  0/1/≥2** 매트릭스로 재구성. 소형 Pts도 O_vis는 정확 스캔(extent
+  금지 — 두 점짜리도 extent면 부풀림)(§2.3).
+- **build_id 검증 범위 정정**(§3.6/§7): ID는 파일명에만 있으므로
+  "수동 내용 교체 검출" 게이트 삭제(정상 퍼블리시의 세대 혼합
+  방지가 목적). build_id는 `create_new`로 충돌 검출·재생성.
+- **영향 범위 추가**(§3.6): ovp **파일명** 변경은 python에도 미침
+  — floe/cli.py:137(info), tools/validate_vfs.py:75. ".ovp 불변"
+  → "payload 바이트 포맷 불변, 파일명/발견 경로 변경"으로 교정.
+- **바이트 동일성 정책**(§7): build_id 때문에 독립 빌드 간 ovm
+  바이트가 달라짐 — ovp는 그대로, ovm은 build_id를 0으로 정규화
+  후 비교, Morton/page/pbvh 순서의 jobs-불변 게이트.
+
+rev 9 (지시: **캐시 무결성 단순화 — 운영 원칙으로 대체**):
+- 운영 원칙 3조 채택(§3.6): ① 원본 변경 = 캐시 삭제 후 재빌드,
+  ② 뷰어가 보는 동안 원본 수정/삭제 금지, ③ 그래도 어긋나면
+  운영으로 해결(삭제·재빌드).
+- 이에 따라 rev 7/8의 **versioned OVP·build_id·GC·이중 디렉터리
+  fsync·오픈 핸들 보존 전부 철회** — 그 장치들은 "사용 중 재빌드"
+  를 코드로 감당하려던 것인데 ②가 시나리오 자체를 금지한다.
+- 남기는 최소 장치(§3.6): **ovm-마지막 커밋**(빌드 시작 시 ovm
+  삭제 → ovp 기록 → ovm 기록; 중단 = "no cache" 명확 에러, 조용한
+  혼합 없음) + 오픈 구조 검증 + `ovp_len` 단일 정합 체크. 파일명은
+  `design.ovp` 유지(파일명 변경에 따른 cli.py/validate_vfs.py 갱신
+  불필요). ovm이 다시 결정적이 되어 **바이트 동일성 게이트도 정규화
+  없이 원복**(§7).
+
+rev 10 (지시: **인덱서/뷰어 책임 분리** + 이전 검토 잔여 1건):
+- 인덱싱은 **제한된 경로(시스템)를 통해서만** 실행 — 시작 시 캐시
+  전체 삭제(최소한 마커), 종료 시 **마커 생성**(= design.ovm).
+  **인덱서는 동시 빌드 등 경합에 책임지지 않는다**(직렬화는 호출
+  경로의 책임)(§3.6).
+- 뷰어는 **인덱싱하지 않는다**(0.4.6부터 이미 그렇다) — 원본과
+  캐시가 정상 생성되었는지 **확인만** 한다(마커 존재 + 오픈 구조
+  검증 + ovp_len)(§3.6).
+- **checked 변환 규칙**(§3.6, 외부 검토 잔여): 빌드의 모든
+  usize/u64 → u32/u16 narrowing(na/nb, Pts count, page/place/BVH
+  start·count, payload size 등)은 checked — silent truncation
+  금지, 초과는 "limit exceeded: <필드>" 빌드 에러.
+
+rev 11 (검토 소항목 3건):
+- 오픈 검증에서 `len % bs_width` **이전에 `bs_width > 0` 선검증**
+  (corrupt 캐시가 0-나눗셈 panic이 되지 않게)(§3.6).
+- checked 규칙을 **헤더 총계·섹션 off/len 산술에도 명시 적용**
+  (v1의 `off+len > data.len()`은 u64 wrap 가능 — checked_add/
+  checked_mul)(§3.6).
+- **Morton 키 알고리즘 고정**(§2.3): extent min 기준 unsigned 변환
+  (i128 경유) + u64×2 → u128 비트 인터리브, 동률은 정렬-전 index —
+  jobs/플랫폼 무관 결정성.
+
+---
+
+## 1. 문제: 평탄화가 klayout의 스케일링을 버린다
+
+9.8G / 150M급 OASIS가 애초에 klayout에서 열리는 이유는 klayout이
+**계층적으로** 그리기 때문이다: 셀을 1회 그리고, 인스턴스/배열로
+재사용하고, 뷰에 클립한다. 현재 VFS 뷰어 경로는 `plan/descend`가
+계층을 걷으며 `(page, placement)` 쌍의 **평탄 리스트**를 만들어
+단일 `FLOE_WS` 밑에 월드좌표로 전부 붙인다. 이 평탄화가 klayout의
+계층 재사용을 통째로 버린다.
+
+### 1.1 실측 (MAIN09, 뷰 0.7×0.6um, cut_um≈0.001, `floe-index plan`)
+
+| 지표 | 값 | 해석 |
+|---|---|---|
+| placements | **6,343,345** | 워킹셋 배치 630만 → klayout 인스턴스 삽입이 load 50s |
+| members | 1,712,332,519 | 17억 (draw 추정) |
+| visited_cells | 521,187 | 0.7um 뷰가 52만 셀 방문 = **뷰 무시** |
+| pages | 6,111 (17.6MB) | 유니크 페이지 |
+| culled_subtrees_size / pages_size | 0 / 0 | 이 컷에선 컬링 전무 |
+| plan_ms | 259 | 플랜 자체는 빠름 → 병목은 klayout load |
+
+뷰어 상태줄(동일 병리):
+```
+live (752 tiles, 801ms=318 load+483 draw, cut<0.148um, ~348.7M) view 75.3x62.0um
+live (839 tiles, 29563ms=29250+313, cut<0.0414um, ~677.9M)      view 7.4x6.1um
+live (1790 tiles, 50559ms=50204+354, cut<0.001um, ~1.2G)        view 0.7x0.6um
+```
+줌인(뷰↓)인데 tiles·load·drawn이 **증가**한다. load 50s에는 vfsd의
+6.3M행 TSV 기록/파싱과 파이썬 6.3M회 CellInstArray 삽입이 다 포함.
+
+### 1.2 두 증상, 한 뿌리
+
+- **뷰 확장** (`lib.rs descend`, Grid arm `r2.view = cwb`): 배열
+  자식으로 내려갈 때 뷰를 배열 footprint 전체로 확장 → 배열 밑에서는
+  사용자의 좁은 뷰가 무시됨. 줌인으로 size-cut이 멈추면(cut_um→0)
+  배열 콘텐츠가 통째로 materialize (visited_cells 52만).
+- **`fold_array` 중첩 평탄화** (`lib.rs` 424-453): 자식이 이미 rep를
+  가진(배열의 배열) 경우 바깥 배열을 na×nb **개별 Mat로 전개**
+  (placements 630만). 코드 주석의 "중첩은 얕고 개수는 적다" 가정이
+  MAIN09에서 깨졌다.
+
+둘 다 "평탄 모델은 배열/계층을 표현할 수 없다"의 증상이다. 증상별
+패치(가시 멤버만 전개 등)로는 근본이 남는다.
+
+---
+
+## 2. 이상적 설계: 계층 보존 워킹셋
+
+**원칙:** 워킹셋 = 소스 계층의 **가지치기된 복사본**. VFS는 BVH로
+"이 뷰에 필요한 셀/인스턴스/페이지"만 고르고, klayout에 **그 계층을
+그대로** 넘긴다. klayout이 인스턴스 변환 누적·배열·뷰 클립을 native로
+처리한다. 평탄화·per-member 전개·뷰 확장 전부 사라진다.
+
+### 2.1 워킹셋 레이아웃 구조 (1-레벨 → 다중 레벨)
+
+현재: `FLOE_WS` → 페이지 셀(월드좌표로 직접, 배열 rep는 Mat에).
+목표:
+```
+FLOE_WS
+  └─ WC(top)                          (top 소스 셀의 워킹셋 셀, 1회 배치)
+       ├─ 페이지 셀 (top 자기 지오메트리, localview 교차 & cut 이상만)
+       ├─ CellInstArray → WC(childA)   (로컬 xf; 배열이면 na,nb,va,vb 보존)
+       ├─ CellInstArray → WC(childB)   (중첩 배열이면 WC(childB) 내부에 또 배열)
+       └─ 프레임 rect (cut 미만 자식; 배열이면 rect+rep로 배열 보존)
+```
+- 워킹셋 셀의 키는 **`WsKey = (ci, remaining_depth)`**(§2.5). full
+  depth(뷰어 검사 모드 기본)에서는 remaining_depth가 단일 sentinel
+  이라 **셀당 WC 1개** — dedup은 이 키 기준이다. C가 여러 경로/
+  변환으로 쓰여도 (같은 키면) 셀은 한 번 로드, 인스턴스가 변환을
+  나른다(klayout 방식).
+- **WC는 상주 객체가 아니다**: 내용이 `localview`의 함수라 프레임마다
+  달라진다. 세션에 상주하는 것은 페이지(바이트)뿐이고, WC 셀은 기존
+  `FRAMES_{gen}`/`LABELS_{gen}`과 같은 **프레임-ephemeral**(§3.1).
+- `WC(C, r)` 내용:
+  - **페이지**: C 자기 지오메트리 페이지 중 localview에 닿고
+    `max_w/max_h ≥ cut`인 것만 (identity 인스턴스). 페이지 셀은
+    variant 간 **공유**된다(같은 P-이름을 여러 WC가 참조).
+  - **자식 인스턴스** (r>0일 때): 서브트리가 뷰에 닿고 cut 이상인
+    자식으로 가는 `CellInstArray` → `WC(child, r-1)`. **배열은
+    배열로 보존**(na,nb,va,vb), **중첩 배열은 중첩 그대로** — 전개
+    없음.
+  - **프레임**: cut 미만 자식의 외곽선 rect, **WC 로컬 좌표**. 배열
+    밑 below-cut 자식은 rect에 rep를 실어 klayout이 배열로 처리 —
+    현행 `rep_footprint`의 "배열 전체 1박스"에서 멤버별 아웃라인으로
+    의미가 바뀐다(더 정확). FRAME_CAP(200K)은 플랜 총량 상한으로
+    유지하되 WC 단위 dedup 덕에 자연 감소. depth 경계(r=0)의 자식은
+    현행대로 프레임 없이 생략(§2.5).
+
+### 2.2 BVH 정확 활용 (인스턴스 + 페이지)
+
+- **인스턴스 컬링**: 셀마다 인스턴스 BVH를 localview로 프루닝 — 뷰에
+  닿는 인스턴스만 방문(공간 컬링의 본래 목적). 현행 descend도 BVH를
+  걷지만 flat mat 생성용이라 뷰 확장으로 무력화됨.
+- **페이지 컬링**: 페이지는 빌드 때 1MB 목표(`PAGE_TARGET_BYTES`)로
+  공간 분할되어 있으나, 이는 분할기일 뿐 **질의 인덱스가 아니다** —
+  현행 코드는 materialize된 셀의 페이지 전체를 선형 순회한다
+  (lib.rs:193). fill-heavy 톱셀(수십만 페이지)에서 프레임마다
+  반복되면 병목이므로 **page BVH를 M1 범위에 포함**한다:
+  - **빌드-시 packed 구축**(`.ovm v2`, §3.6), 레이어를 구조로 분리:
+    페이지는 셀 안에서 (layer, seq)로 연속 저장되므로 **(cell,layer)
+    별 page-range 레코드**(→ §3.6)를 두고, 그 run마다 페이지 BVH
+    루트를 단다. 레이어 컬링은 range 테이블에서 루트째 skip —
+    리프 비트 필터가 아니라서 다층 중첩 셀에서 단일-레이어 뷰가
+    전 노드를 방문하는 병리가 없다.
+  - **노드 집계**: bbox + **subtree max_w/max_h** — broad view의
+    페이지 cut(`max_w/max_h < cut`)을 리프 이전에 서브트리째 컬링.
+  - **리프 = 페이지 디렉터리의 연속 구간**(first/count는 디렉터리
+    인덱스): 빌드가 각 (cell,layer) run **안에서** 페이지를 BVH 리프
+    순서로 재배열한다(seq는 이름/식별자일 뿐 저장 순서 아님; delta는
+    file_off 정렬 IO라 무관). 별도 page-index 간접 배열 불필요.
+  - `page_count ≤ 임계(예: 8)`인 run은 루트 없이 선형 순회
+    (pbvh_root = NONE).
+  - 계측(§3.5): `culled_page_layer_roots`(레이어로 skip한 run),
+    `culled_page_bvh_bbox`, `culled_page_bvh_cut`(집계로 자른
+    서브트리), `visited_page_bvh`, `page_candidates`.
+
+### 2.3 클립영역 전파 (뷰 확장·fold 평탄화를 대체)
+
+각 워킹셋 노드의 로컬 프레임에서 "뷰가 닿는 영역" `localview`를
+top-down 전파한다 (키는 WsKey, §2.5):
+
+- `localview(top) = view` (top-local = world).
+- 인스턴스 C→child (로컬 변환 T, `Rep::One`):
+  `localview(child) ∪= T⁻¹(localview(C)) ∩ child.rbbox`.
+- **배열** (`Rep::Grid{na,nb,va,vb}`): 멤버 열거 없이 닫힌형.
+  멤버 오프셋 `o = i·va + j·vb`는 부모 프레임의 순수 병진이므로,
+  1. **가시 오프셋 영역**: `R = localview(C) ⊕ (−B₀)`
+     (⊕ = Minkowski 합; B₀ = offset-0 멤버의 부모-프레임 bbox.
+     멤버 m 가시 ⟺ `(B₀+o_m) ∩ lv ≠ ∅` ⟺ `o_m ∈ R`).
+  2. **가시 인덱스 범위**: `det([va vb]) ≠ 0`이면 R의 네 꼭짓점을
+     2×2 역행렬로 인덱스 공간에 투영, 보수적 정수 bbox
+     `(i_min..i_max)×(j_min..j_max)`를 만들고 `[0,na)×[0,nb)`로
+     clamp. `det == 0`(nb=1의 vb=(0,0), 또는 공선 벡터)이면 1D 축
+     투영(성분별 구간 나눗셈 교집합) 또는 보수적 full-range.
+     곱셈·행렬식은 **i128 checked** 연산, 나눗셈은 `div_floor`/
+     `div_ceil` 명시 사용(음수 벡터 포함). 오버플로 시 에러가 아니라
+     **보수적 full-range 폴백**(누락 금지 — 과다 포함은 안전).
+  3. **자식 localview 기여**: 가시 인덱스 bbox의 4-코너로 가시
+     오프셋 bbox `O_vis`를 만들고
+     `localview(child) ∪= T₀⁻¹(localview(C) ⊕ (−O_vis)) ∩ rbbox`.
+  인스턴스는 **CellInstArray 1개**(full na×nb) — 오프스크린 멤버는
+  klayout이 클립. **중첩 배열**은 `WC(child)`가 내부에 자기 배열
+  인스턴스를 가지므로 자연히 중첩 — 전개 0. 전 단계 배열당 O(1),
+  플래너 시간은 멤버 수와 무관해야 한다(§7 게이트).
+  - 주의: 기존 `visible_offsets`의 Grid 분기(lib.rs:354-378)는
+    descend가 호출하지 않는 **데드코드**이고 `for j in 0..nb` 전 열
+    순회(O(nb))라 재사용 금지. 위 닫힌형으로 새로 쓰고 브루트포스
+    대조 유닛테스트를 붙인다(§7).
+- **불규칙 rep** (`Rep::Pts`): 현 구조로는 어떤 경로도 싸지 않다 —
+  `Ovm::place()`가 pool을 **매번 Vec으로 복사**(lib.rs:579-589)하고
+  `rep_extent`도 Pts는 전 점 순회이며, 실측(testchip_1g5)은
+  placement 697 중 Pts 410, 오프셋 합계 147만/최대 3,823이라
+  per-rep 임계만으로는 요청 총비용이 안 잡힌다. v2에서 구조로 해결:
+  - **pool 엔트리에 extent + chunk 인덱스 굽기**(§3.6): extent
+    4×i64와 256-오프셋 chunk별 bbox를 빌드가 미리 계산. 빌드는
+    오프셋을 **Morton 순서로 재배열**한 뒤 256개씩 chunk로
+    묶는다. 키 알고리즘 고정(jobs/플랫폼 무관 결정성):
+    `zx = u64(x − extent.min_x)`, `zy = u64(y − extent.min_y)`
+    (뺄셈은 i128 경유 — i64 범위 차는 u64에 항상 들어감),
+    `key = interleave(zx, zy) → u128`(x = 짝수 비트, y = 홀수
+    비트), 정렬 키 = `(key, 정렬-전 index)`. 정수 연산만 사용.
+    이렇게 하는 이유: 원본 순서 그대로 묶으면 공간이 섞인
+    파일에서 모든 chunk bbox가 extent에 수렴해 좁은 뷰도 전
+    chunk를 스캔하게 된다. rep는 멤버 "집합"이 의미라(§7 멤버-수
+    대조) 재배열은 rebase만 정확하면 안전.
+  - **zero-copy 접근자**: 플래너는 `place()`의 Vec 복사 대신 pool
+    의 borrowed byte slice를 **LE 이터레이터로 디코드**해 읽는다
+    (`&[(i64,i64)]` 캐스트 금지 — 정렬/엔디언).
+  - **방출 사다리**(klayout이 type-10을 개별 인스턴스로 전개할
+    가능성 — M0 실증 항목 — 을 임계로 바운드):
+    `|pts| ≤ 1024` → full rep 1개. 초과 → **가시-부분집합 Pts**:
+    chunk bbox ∩ R인 chunk만 스캔해 `o ∈ R` 멤버 선택. 요청당
+    `PTS_ENUM_BUDGET`(예: 20만 점, per-point 테스트 CPU 캡) 소진
+    시 → chunk-단위 통짜 포함(초과포함 ≤ 256×chunk 수로 유계).
+    최후 폴백 full rep + 경고 계측. 어느 단도 멤버 누락은 없다
+    (부분집합은 항상 `⊇ 가시`). 방출량의 하한은 진짜 가시 멤버
+    수 — 그건 flat도 마찬가지였고, 사다리는 그 위의 초과분만
+    바운드한다.
+  - **부분집합 rebase (정확성 필수)**: `Rep::Pts`의 불변조건은
+    **첫 오프셋 (0,0)**(doc.rs:28)이고 writer는 첫 점을 기록하지
+    않는다(write.rs:98). 선택된 오프셋 `[p0, p1, ...]`은 —
+    0개: placement 생략 / 1개: `Rep::One` + 원점을 p0만큼 이동 /
+    ≥2개: 원점 += p0, rep = `[0, p1−p0, p2−p0, ...]`.
+    선례: tiler의 동일 구현(hier.rs:869 "rebase: Pts offsets are
+    anchored at (0,0)"). **멤버 identity = pool slot index**(Morton
+    재배열 후 원본 index는 wire에 없다): K-box 여러 개의 선택
+    합집합은 slot index로 dedup, 방출 순서 = pool(Morton) 순서.
+    좌표값 dedup은 금지 — 동일 좌표의 별개 slot은 별개 멤버(합법,
+    멤버-수 검증의 대상)다. rep는 멤버 multiset이 의미라 이걸로
+    정확성이 유지된다.
+  - **O_vis(자식 localview 기여) 사다리**: extent를 일률 사용하면
+    대형 Pts에서 자식 localview가 셀 전체로 부풀어 옛 `view=cwb`
+    병리가 재현된다. extent는 **1차 교차 판정 전용**이고 기여는
+    선택 결과의 bbox로 —
+    **소형(≤1024)**: 방출은 full rep여도 기여는 **정확 스캔**한
+    가시-선택 bbox(두 점짜리 대각 Pts도 extent를 쓰면 부푼다) /
+    선택 성공: 선택 오프셋들의 bbox / chunk-통짜: 포함 chunk
+    bbox들의 합 / full 폴백만: extent. (방출과 기여가 같은 스캔을
+    공유 — 인덱스가 placement 방출뿐 아니라 하위 WC 페이지 선택도
+    실제로 줄인다.)
+  - 계측(§3.5): `pts_offsets_scanned` / `pts_selected` /
+    `pts_offsets_emitted` / `pts_bytes_emitted` +
+    `pts_enumerated`/`pts_fallback`(사다리 단별).
+- **스케줄링 = topo-rank 1패스 (fixpoint 없음)**: 소스 계층이
+  DAG라는 전제 하에, **빌드가 전역 topo rank를 계산해 `.ovm v2` 셀
+  레코드에 굽고**(§3.6 — 기동 시 O(places) 패스 불필요), 플랜마다
+  rank-순 min-heap 스윕 — 노드를 pop하는 시점에는 모든 부모의
+  기여가 끝나 있으므로 localview 확정 → cut/layer 판정 → BVH 프루닝
+  → 자식 기여 push. WsKey당 정확히 1회 확장, 수렴·재방문 계측
+  불필요, 비용 O(가시 서브트리 × log). (variant 키의 rank는 ci의
+  rank를 그대로 쓰면 된다 — 부모 셀의 rank가 항상 낮으므로.)
+  - **DAG 전제는 빌드가 보장한다**: 현행 `topo_order`는 back-edge를
+    조용히 건너뛸 뿐(cli/src/vfs.rs:443) 거부하지 않는다. v2
+    빌드에서 rank 부여가 곧 검증이 된다 — **rank를 못 받는 셀 =
+    사이클 → 하드 에러**(스펙상 OASIS 계층은 비순환; 깨진 파일은
+    인덱싱 단계에서 거부). vfsd는 .ovm의 rank/DAG를 신뢰한다.
+- 다경로 누적: localview는 **box K개(기본 4)의 집합**으로 유지.
+  - **질의는 box별**: 인스턴스 BVH·page BVH·Grid/Pts 가시범위를
+    각 box로 따로 질의한 뒤 결과를 dedup(페이지 set, 자식 기여는
+    box 단위로 자식의 K-box 집합에 추가). 중간에 단일 bbox로 합치면
+    K-box의 이점이 사라지므로 **금지**.
+  - **병합 결정성**: K 초과 시 "낭비 최소" 쌍 병합 —
+    `area(bbox(a∪b)) − area(a) − area(b)`가 최소인 쌍, 동률이면
+    (x0, y0, 생성순) 사전순 tie-break. 같은 요청은 항상 같은 플랜을
+    내야 한다(§7 결정성 게이트).
+  - K=1이면 단순 bbox 합집합으로 퇴화(A/B 대조용). 상한 = rbbox.
+    이산 병리 근거는 §6-2.
+- **변형(variant, 기하학적) 재료화 불필요**: 회전/미러는 인스턴스
+  변환으로 klayout이 처리. `.ice`의 variant 방식보다 단순.
+
+근거(정확성): 페이지/멤버 B가 필요 ⟺ 어떤 보이는 멤버 o에 대해
+`base(B) + o ∈ view`. 오프스크린은 klayout이 클립하므로 localview
+합집합에 대해 셀을 1회 구성하면 누락 없음. 합집합·보수 bbox의 과다
+포함은 "진짜 지오메트리를 더 싣는 것"이라 오류가 아니라 비용이다.
+
+### 2.4 cut은 셀 단위 속성 (에지 단위 아님)
+
+파서가 magnification/임의각 placement를 거부하므로(doc.rs:528) 변환은
+quarter-turn+flip뿐이다. 인스턴스의 world 크기는 w/h 스왑까지 셀
+고유이고, cut 판정 `(w<cut)&&(h<cut)`은 스왑 불변 → **above/below-cut
+은 (cut이 주어지면) 셀 단위로 1회 분류**된다. 인스턴스별로 갈리는
+경우는 구조적으로 불가능. below-cut 셀은 WC를 만들지 않고, 부모가
+프레임 rect(+rep)만 방출한다.
+
+### 2.5 depth 의미론: remaining-depth WC variant
+
+depth는 실기능이다: gui 첫 페인트가 depth=1(gui.py:277-283),
+스핀박스/단축키 존재. 현행 의미론(plan-side, descend의
+`depth >= req.depth` 중단): 경로 깊이 p의 셀은 **잔여 예산
+`r = d − p`**를 갖고, r=0이면 자기 페이지만, r>0이면 자식도 —
+즉 절단은 **경로별**이다.
+
+공유 WC 하나로는 경로별 절단이 불가능하므로(같은 셀이 r=0과 r=2로
+동시 도달), **WC를 `WsKey = (ci, remaining_depth)`로 variant화**한다:
+
+- `WC(C, r)`: 페이지(항상) + r>0이면 자식 인스턴스 →
+  `WC(child, r−1)`. 페이지 셀은 variant 간 공유(지오메트리 복제 0,
+  배열 전개 0) — 늘어나는 것은 경량 WC 정의뿐.
+- **full depth는 단일 sentinel variant**(r=∞): 뷰어 검사 모드
+  기본값에서는 셀당 WC 1개로 rev 2와 동일, 오버헤드 0.
+- **variant 정규화**: `r ≥ height(ci)`이면 절단할 것이 없으므로
+  sentinel(F)로 접는다 — `height`는 **v1 셀 레코드에 이미 존재**
+  (CellV.height, 빌드 topo fold가 계산). 이 정규화로 유한 d에서도
+  깊은 서브트리 밖의 variant 증식이 구조적으로 잘린다.
+- 유한 d에서 variant 수는 셀당 최대 `min(d+1, height 분포)`(첫
+  페인트 d=1이면 ≤2). localview는 WsKey별로 누적한다.
+- min-path-depth 방식(rev 2)은 다경로 셀에서 사용자가 지정한 depth
+  보다 깊은 디테일을 보여주는 **의미 변경**이라 철회.
+- depth 경계(r=0)에서 생략되는 자식은 현행처럼 아웃라인 없이
+  사라진다(개선하려면 후속에서 klayout식 경계 박스 — 범위 밖).
+
+### 2.6 결과
+
+- **inst_edges**(구 placements) = 가시 서브트리의 인스턴스-에지 수
+  (수백), 배열 멤버 수(630만)가 아님.
+- **pages** = 뷰 교차분만(수백).
+- 깊은 줌(거대 중첩 배열 포함) = WC 셀 몇 개 + CellInstArray 에지
+  몇 개 + 페이지 몇 개 → **load 50s → 1초 미만** 목표 (6.3M행 TSV와
+  6.3M회 파이썬 삽입도 함께 소멸).
+- **9.8G 스케일**: klayout 자신의 계층 스케일링을 그대로 쓰므로,
+  소스가 klayout에서 열리는 한 워킹셋도 열린다.
+
+---
+
+## 3. 델타 / 프로토콜: OASIS 계층 하나로 통합
+
+현행: 델타 = 페이지 셀만 스플라이스한 OASIS + 배치(mats) TSV +
+frames OASIS 별도. 목표: **WC 계층 전체를 OASIS 하나로** 방출.
+
+### 3.1 WC 수명·이름 (gen-ephemeral)
+
+- 페이지 `P<ci>_<li>_<seq>`(현행, 빌드 때 .ovp에 구움). WC는
+  **`W<gen>_<r>_<ci>`** (r = remaining_depth, full은 `F`) — 순수
+  숫자/고정 문자만. design명은 이름에 **넣지 않는다**: 공백이 있으면
+  `top=W...` 공백 구분 라인 프로토콜이 깨지고, 유니코드/특수문자
+  위생 문제도 생긴다(design명 전달은 §3.4의 테이블로).
+- WC는 매 프레임 새 gen 이름으로 방출하는 ephemeral 셀. 이름 충돌이
+  원천적으로 없으므로 klayout read의 셀 병합/재정의 의미론에 기대지
+  않는다(현행 "이름 유일 → read 무병합" 전제(viewport.py 주석)를
+  그대로 계승).
+- apply는 이전 gen의 WC 셀들을 **`delete_cells`(일괄, shallow)**로
+  제거 — 개별 delete_cell 반복의 cell-index 재배치 비용 회피.
+  주의: viewport.py의 기존 `prune_cell(ci, -1)` 패턴을 WC에 쓰면 그
+  gen 트리만 참조하던 **상주 페이지까지 삭제**된다 — 반드시 shallow.
+- eviction은 현행대로 **페이지 단위**(Session bytes 예산, evict
+  이름 목록). WC는 evict 대상이 아니다. (Session은 plan에 없는
+  페이지만 evict하므로 현재 gen WC가 evict된 페이지를 참조하는 일은
+  구조상 없다 — §7에서 게이트로 확인.) 신규/evict의 장부 반영은
+  **ack-gen 트랜잭션**(§3.7)을 따른다 — stale drop이 레이아웃
+  장부를 오염시키지 않는다.
+- top WC 1개를 `FLOE_WS`에 배치(응답의 `top=` 필드, §3.5).
+
+### 3.2 델타 구성 (authored + 스플라이스 혼합)
+
+- 신규 페이지: `.ovp` 바디 **바이트 스플라이스**(현행 `splice_tree`,
+  무해제).
+- WC 셀: authored로 방출 — 자기 페이지 identity 인스턴스 + 자식 WC
+  `CellInstArray` + 프레임 rect(+rep). `WCell.places`가
+  (name,x,y,rot,flip,**rep**)를 이미 지원(write.rs:265,562-602)하므로
+  writer 확장 불필요; `write_tree(&wcells)` → `tree_body` → 페이지
+  바디들과 같은 splice에 합류.
+- **frames**: 별도 `frames_{gen}.oas` 폐기, WC 내부 지오메트리로
+  흡수. FRAME_LAYER(255/0) hollow 렌더 규약은 유지.
+- **모달 정합은 구조적으로 보장**(리스크 아님): `tree_body`가 바디
+  첫 레코드=CELL(13/14)을 assert하고, OASIS 모달 변수는 셀마다
+  리셋되며, write_tree는 셀마다 XYRELATIVE를 재선언한다. 혼합
+  라운드트립 테스트로 못박기만 한다(§7).
+- 부수 이득: top이 WC(top) 하나가 되므로 델타가 **정규 단일-top
+  OASIS** — `parse_doc` 가능(현행 multi-top splice는 불가) → 테스트
+  용이.
+
+### 3.3 상주 페이지 참조 바인딩 (성립 전제, 최대 리스크)
+
+WC의 PLACEMENT는 델타 파일 안에 정의가 없는 **상주 페이지 이름**을
+참조한다. klayout `Layout.read`가 이 참조를 기존 셀에 이름으로
+바인딩해 줘야 §3 전체가 성립한다. 현행 코드는 "이름 충돌 없음" 전제
+위에 있어 이 동작을 검증한 적이 없다 → **M0 스파이크로 최우선 확증**
+(§5).
+
+실패 시 폴백: 페이지 스플라이스는 그대로 두고 **WC 구성만 pya API
+로**(프레임당 에지 수백이라 저렴; 사실상 mats-TSV의 계층형 후계).
+폴백의 전송 포맷도 지금 명세한다 — `hier_{gen}.tsv`, 행 단위:
+```
+parent_ws  child_kind  child_id  x  y  rot  flip  rep
+```
+`parent_ws` = WC 이름, `child_kind` = `page|wc|frame`, `child_id` =
+P-이름 / WC 이름 / FRAME_LAYER rect(rect는 x,y에 코너, rep 열의
+`r:w:h` 확장 사용). **rep 열**(Pts 표현 가능해야 함 — na/nb만으로는
+불가): `-`(단일) | `g:na:nb:vax:vay:vbx:vby`(Grid) |
+`p:<row>`(Pts — 동반 `pts_{gen}.tsv`의 행 참조, 행 = `x,y` 쌍
+공백-구분 목록). 어느 쪽이든 §2의 플랜 산출물은 동일하다.
+
+### 3.4 pick의 design 이름 (ci→이름 테이블)
+
+mats-TSV 12열(design명)은 placements가 아니라 **pick이 소비**한다
+(service.py `mosaic.design`). TSV 폐기 후에는:
+
+- pick은 셰이프가 담긴 페이지 셀 이름 `P<ci>_<li>_<seq>`에서 **ci를
+  파싱**하고, **ci→design명 테이블**로 이름을 얻는다. parent-WC
+  역추적은 쓰지 않는다(페이지가 여러 depth variant WC에 공유되면
+  모호하고, 공백/유니코드 이름 문제도 재발).
+- 테이블은 vfsd가 기동(또는 첫 요청) 시 `names=<path>` TSV
+  (`ci \t design명`)로 **1회 전달**. **수명 규칙**: 클라이언트는
+  수신 즉시 전체를 메모리에 로드하고 파일을 지운다(이후 재전송
+  없음 — 재요청 키도 없음). design명의 공백/유니코드는 TSV 값
+  위치라 안전.
+
+### 3.5 프로토콜 / 지표
+
+- 요청: `mode=hier|flat` 스위치 추가 (A/B; M5에서 flat 제거와 함께
+  삭제), **`ack=<gen>`**(마지막으로 apply 완료한 gen — 세션
+  트랜잭션의 커밋 신호, §3.7), **`reset=1`**(장부 전체 초기화 —
+  apply 부분 실패 복구, §3.7).
+- 응답: `placements=`(TSV 경로)·`frames=`/`nframes=` 폐기,
+  `top=W<gen>_<r>_<ci>` 추가(숫자 이름이라 공백-구분 프로토콜 안전),
+  기동/첫 응답에 `names=` 1회(§3.4). `pages/new/evict/bytes/members/
+  plan_ms`는 유지, `resident_mb`는 `resident_committed_mb/
+  resident_projected_mb/pending_new_mb/pending_evict_mb`로 대체
+  (§3.7).
+- probe 모드(pick/snap/clip의 `_probe_layout`, cli `_vfs_region`)도
+  같은 델타 포맷을 그대로 탄다(세션-무관이라 ack 불필요) — 별도
+  구현 없음, 검증만(§7 clip XOR).
+- `plan` 스텁 지표 추가: `wc_cells`(variant 포함), `wc_variants`
+  (유한 depth에서만 >0), `inst_edges`, `frame_rects`,
+  `culled_page_layer_roots`, `culled_page_bvh_bbox`,
+  `culled_page_bvh_cut`, `visited_page_bvh`, `page_candidates`,
+  `pts_enumerated`, `pts_fallback`, `pts_offsets_scanned`,
+  `pts_selected`, `pts_offsets_emitted`, `pts_bytes_emitted`.
+  기존 `placements`(=mats.len())·`members`는 의미가 변하므로 A/B
+  비교표에는 **rev별 정의를 병기**한다(§7).
+- 캐시 포맷은 **`.ovm` v2로 범프**(§3.6). `.ovp`/`.ovc`/meta.json은
+  불변.
+
+### 3.6 `.ovm` v2 — wire 스키마 동결
+
+포맷-유지 원칙은 없다(2026-08-02 지시). rev 3에서 호환성 때문에
+runtime으로 미뤘던 것을 빌드 시점에 굽는다. 아래가 **구현 기준
+스키마**다(리틀엔디언, 오프셋 = 레코드 시작 기준 바이트).
+
+- **버전 게이트**: MAGIC `FLOEOVM1` 유지, `version(u32 @8) = 2`.
+  리더 게이트는 기존(`from_bytes`의 "ovm version N" 에러) — 문구에
+  "run: floe-index vfs <src> (rebuild)"를 붙인다. 구 바이너리+새
+  캐시 / 새 바이너리+구 캐시 모두 명확히 거부. **전방 호환 없음**:
+  version ≠ 2는 무조건 거부(폐쇄 생태계, 재빌드가 정답).
+- **헤더 232B** = 고정부 88B(v1 필드 배치 유지: magic 0, version 8,
+  bs_width 12, unit 16, src_size 24, src_mtime 32, top 40,
+  n_layers 44, n_cells 48, n_pages 52, n_places 56, n_bvh 64,
+  reserved 68, **ovp_len u64 @72**(정합 검증용), reserved u64 @80)
+  + 섹션 테이블 **9개** × (off u64, len u64) @88. 섹션 순서:
+  0 strings, 1 layers, 2 cells, 3 places(+pts pool tail),
+  4 bitsets, 5 inst-bvh, 6 pagedir, **7 pranges, 8 pbvh**(신설).
+  신설 섹션의 레코드 수는 `len / stride`로 유도.
+- **셀 레코드 128B** (v1 112B에서 재배치):
+
+  | off | 필드 | | off | 필드 |
+  |---|---|---|---|---|
+  | 0 | name_off u32 | | 80 | place_start u32 |
+  | 4 | name_len u16 | | 84 | place_count u32 |
+  | 6 | reserved u16 | | 88 | page_start u32 |
+  | 8 | **height u32** | | 92 | page_count u32 |
+  | 12 | **topo_rank u32** | | 96 | bvh_start u32 |
+  | 16 | dbbox 4×i64 | | 100 | bvh_count u32 |
+  | 48 | rbbox 4×i64 | | 104 | lmask_direct u32 |
+  | | | | 108 | lmask_rec u32 |
+  | | | | 112 | rec_members u64 |
+  | | | | 120 | **prange_start u32** |
+  | | | | 124 | **prange_count u32** |
+
+  `height`는 u16 → **u32**(remaining_depth/topo_rank와 일관). 빌드의
+  `height[c] + 1`은 현재 unchecked u16(cli/src/vfs.rs:777) —
+  **checked add + "hierarchy depth overflow" 명시 에러**로.
+  `topo_rank` 부여 실패 = 사이클 → 빌드 하드 에러(§2.3).
+- **페이지 레코드 96B** (max_w/max_h **u64** 승격으로 stride 변경):
+  0 cell u32, 4 layer_idx u32, **8 seq u32**(v1 u16@8), 12 lod u8,
+  13 codec u8, 14 reserved u16, 16 bbox 4×i64, 48 file_off u64,
+  56 csize u32, 60 usize u32, 64 records u32, 68 reserved u32,
+  72 members u64, **80 max_w u64, 88 max_h u64**.
+  - seq u32는 [[vfs-build-perf]]의 이연 지뢰("(cell,layer) 65535
+    페이지 초과 시 panic") 흡수. `page_cell_name`은 문자열이라 기존
+    값 범위에서 이름 불변.
+  - max u64는 포화 오컷 제거: 현행 빌더는 `clamp(0, u32::MAX)`
+    (vfs.rs:1015)로 저장하고 planner가 일반값으로 비교 → 포화
+    상황(극단 dbu·거대 지오메트리)에서 `max < cut` 오판으로 진짜
+    페이지를 잘라낼 수 있다. v2는 clamp 제거, u64 그대로 저장,
+    planner는 u64로 비교. (pbvh 집계도 동일 — 아래.)
+- **prange 레코드 16B**(섹션 7, §2.2의 (cell,layer) run):
+  0 layer_idx u32, 4 page_lo u32, 8 page_count u32,
+  12 pbvh_root u32(`0xFFFF_FFFF` = 루트 없음 → 선형 순회).
+  셀의 run들은 `cell.prange_start .. +prange_count`로 연속.
+- **pbvh 노드 56B**(섹션 8):
+  0 bbox 4×i64(32B), 32 first u32, 36 count u16,
+  38 leaf u8, 39 reserved u8, **40 max_w u64, 48 max_h u64**
+  (서브트리 집계 — u64, 페이지 레코드와 동일 사유). **리프의
+  first/count = 페이지 디렉터리 인덱스 연속 구간**(빌드가
+  (cell,layer) run 안에서 페이지를 리프 순서로 재배열 — §2.2);
+  내부 노드의 first/count = 자식 노드 구간(인스턴스 BVH와 동일
+  규약).
+- **pts pool 엔트리 v2**(places 섹션 tail, §2.3의 구조 해결):
+  `extent 4×i64(32B) | n_chunks u32 | reserved u32 |
+  chunk bbox 4×i64 × n_chunks | 오프셋 (i64,i64) × count`.
+  chunk = 256 오프셋, 오프셋은 **Morton 순 재배열**(§2.3 — 동률
+  tie-break는 빌드-시 정렬에서만 원본 index 사용, 결정적). 저장
+  후 **멤버 identity = slot index**(§2.3) — 원본 index는 wire에
+  남기지 않는다(+4B/점의 공간 낭비, 용도 없음). place 레코드
+  (kind=2, stride 불변)는 현행대로
+  `na=count, va.0=pool off`가 이 엔트리를 가리킨다. 리더는
+  `pts_extent(i)`/`pts_chunk(i,k)`/`pts_slice(i,range)` **zero-copy
+  접근자**(borrowed bytes + LE 이터레이터, 캐스트 금지)를 제공
+  (현행 place()의 Vec 복사 경로는 플래너에서 사용 금지).
+- **캐시 무결성 = 운영 원칙 + 마커 규약**(2026-08-02 단순화·책임
+  분리 지시). 운영 원칙 3조:
+  1. 원본 파일이 변경되면 **캐시를 삭제하고 재빌드**한다.
+  2. 캐시가 있고 뷰어가 보는 동안 **원본 수정/삭제 금지**(따라서
+     "사용 중 재빌드" 시나리오는 정책 밖 — versioned OVP·GC·오픈
+     핸들 보존 같은 코드 장치 불필요).
+  3. 그래도 파일↔캐시 동기가 어긋나면 **운영으로 해결**(삭제·
+     재빌드) — 코드는 어긋남을 명확한 에러로 보여주기만 한다.
+  **책임 분리** — 인덱싱은 제한된 경로(시스템)를 통해서만 실행되고,
+  역할은 이렇게 나뉜다:
+  - **인덱서**: 시작 시 캐시 산출물 **전체 삭제**(최소한 마커 =
+    `design.ovm`은 반드시 삭제) → 산출물 기록(`design.ovp` 등,
+    파일명 현행 유지) → 종료 시 **마커 생성**(design.ovm을
+    마지막에 기록 = 커밋, `ovp_len`@72 포함). **동시 빌드·경합에
+    대한 책임은 없다** — 같은 캐시를 두 인덱서가 동시에 빌드하지
+    않는 것은 호출 경로(시스템)의 책임이다.
+  - **뷰어**: 인덱싱하지 않는다(0.4.6부터 — 캐시 없으면 "no VFS
+    cache; run: floe-index vfs" 에러). 하는 일은 **정상 생성 확인
+    뿐**: 마커 존재 + 버전/오픈 구조 검증 + `ovp_len` 정합. 실패는
+    "no cache" 또는 "corrupt cache; rebuild".
+  어느 지점에서 인덱서가 중단돼도: 마커 없음 → "no cache" / 마커
+  부분 기록 → 구조 검증 실패 → "corrupt cache" — **중단된 빌드가
+  유효한 캐시처럼 보이는 경우는 없다**. 전원 장애 등 극단 케이스의
+  잔여 위험은 운영 원칙 3이 커버한다(fsync 강화·버전드 파일명은
+  도입하지 않는다).
+- **checked 변환 규칙**(빌드 전 구간): usize/u64/i64 → u32/u16
+  narrowing은 전부 checked — `na`/`nb`, Pts count, page/place/bvh/
+  prange의 start·count, 페이지 payload size(csize/usize), name
+  off/len, seq 등. 초과 시 silent truncation이 아니라 **"limit
+  exceeded: <필드>" 빌드 하드 에러**(리더 측 u64 산술은 §의 오픈
+  검증처럼 checked). 근거: 현행 빌드에 `payload.len() as u32`,
+  `jobs_list.len() as u32` 류의 무검사 캐스트가 산재 — 대형
+  파일에서 조용한 잘림 가능.
+- **오픈 검증**(v2 리더) — 섹션 유형별로:
+  - 고정 stride 섹션(layers/cells/inst-bvh/pagedir/pranges/pbvh):
+    길이 나누어떨어짐 + 레코드 수 정합.
+  - places: `len ≥ n_places × PLACE_LEN`(잔여 = 가변 pts pool),
+    pts pool off/count·chunk 수 경계.
+  - bitsets: **`bs_width > 0` 선검증** 후 `len % bs_width == 0`
+    (corrupt 헤더의 0-나눗셈 panic 방지). strings: 가변(오프셋
+    경계만).
+  - 인덱스 경계: top < n_cells, cell의 place/page/bvh/prange 구간,
+    prange의 page 구간·pbvh_root, pbvh first/count(리프=페이지·
+    내부=노드).
+  - 페이지별 **checked** `file_off + csize ≤ ovp_len`(오버플로
+    포함).
+  - **헤더/섹션 산술도 checked**: 섹션 `off + len ≤ 파일 크기`
+    (v1은 무검사 u64 덧셈이라 wrap 가능), `count × stride ≤ 섹션
+    len` — 전부 checked_add/checked_mul.
+  실패는 전부 "corrupt cache; rebuild" 에러.
+- **reserved 규칙**: 쓰기는 0, 읽기는 무시. 향후 확장은 version
+  범프로만(필드 재해석 금지).
+- **영향 범위(정정)**: `.ovm` 파서는 rust `floe-ovm` 크레이트 +
+  **`tools/validate_vfs.py`**(read_ovm이 version/스트라이드를 직접
+  파싱 — v2로 갱신, M1 범위). 런타임 python 패키지는 .ovm을
+  파싱하지 않는다(경로 참조뿐). `.ovp`(페이지 페이로드)·`.ovc`·
+  meta.json 불변.
+- **마이그레이션** = 캐시 재빌드 1회. 폐쇄망 절차는 원래 "새 바이너리
+  반입 + 현장 인덱싱"이므로 추가 절차 없음(240G급 실측: parse 279s +
+  병렬 build, 하트비트 있음 — [[vfs-build-perf]]).
+- 검증: v1↔v2는 바이트 비교가 불가하므로 **의미 동등**으로 —
+  validate_rust.sh 전체 스위트(scan/tiles/depth/meta/skel + vfs
+  render XOR + coverage)를 v2 재빌드로 통과시키는 것을 게이트로.
+
+### 3.7 세션 트랜잭션 (ack-gen 2단계 커밋)
+
+**현행 잠복 버그**(flat 경로에도 이미 존재): 데몬은 응답을 만드는
+순간 페이지를 resident로 등록하고(`Session::apply`, lib.rs:563-),
+python은 요청이 stale이면 델타를 **적용하지 않고 버린다**
+(service.py:362 `if newer(): return`). 그 결과 —
+```
+gen 1: 데몬 resident 등록 → 클라이언트 stale drop (레이아웃 미적용)
+gen 2: 데몬 "이미 resident" → 바디 재전송 안 함
+       → 레이아웃에 없는 페이지 셀 참조 = 조용한 지오메트리 공백
+```
+페이지는 예산 압박으로 evict될 때까지 재전송되지 않으므로 공백이
+**영구**다. V4(WC가 이름으로 참조)에서는 ghost 셀로 더 표나게
+깨진다. 해소:
+
+- **2단계 커밋**: 응답의 `new`/`evict`는 **pending(gen)**으로만
+  기록. 다음 요청의 `ack=<gen>`(§3.5)이 커밋 신호다 —
+  `ack == pending.gen`이면 pending을 resident에 커밋,
+  `ack < pending.gen`이면 **롤백**(new는 resident 취소 → 다음 플랜
+  에서 다시 new로, evict는 resident 복원 → 레이아웃과 일치 유지).
+  요청은 직렬이므로 pending은 항상 최대 1개.
+- **상태기계 규칙**(모호 케이스 고정):
+  - 최초 요청은 `ack=0`(gen은 1부터; 0 = "적용한 것 없음").
+  - pending 없음 + ack 수신 = **no-op**(멱등 — 커밋 직후 재전송
+    허용).
+  - `ack > pending.gen` 또는 요청 `gen`의 역행/중복 = **프로토콜
+    에러**(`error=` 응답; 클라이언트는 아래 복구 절차로).
+  - **예산 판정은 projected 기준**: 요청 처리 순서가 "ack 해소 →
+    플랜"이므로 플랜 시점의 pending은 이번 응답분뿐이다. eviction
+    선택은 `projected = committed + 이번 new − 이번 evict`가 예산
+    이하가 될 때까지(committed만 보면 예: committed 90MB/예산
+    100MB/new 30MB에서 evict 없이 실레이아웃 120MB가 된다 —
+    v1 apply의 "삽입 후 초과분 evict" 동작을 2단계에서도 계승).
+    **LRU last-used 갱신도 pending** — 롤백 시 touch까지 되돌린다.
+  - 보고 지표: `resident_committed_mb`, `resident_projected_mb`,
+    `pending_new_mb`, `pending_evict_mb`(§3.5 응답 필드 —
+    `resident_mb` 단일 필드 대체).
+- **decoded 캐시와 layout-resident의 분리**: 델타 파일 생성(디스크
+  IO)은 롤백과 무관 — 데몬은 같은 페이지를 다시 잘라 보내면 된다
+  (페이지는 불변). 트랜잭션 대상은 "레이아웃에 무엇이 있는가"라는
+  장부뿐이다.
+- **apply 순서**(M3, 클라이언트): ① 새 델타 read → ② 새 top WC를
+  FLOE_WS에 연결 → ③ 이전 gen WC들 shallow `delete_cells` →
+  ④ evict 페이지 prune → ⑤ 다음 요청에 `ack=<gen>`. stale 판정 시
+  ①~⑤ 전부 생략(레이아웃 불변, ack 미전송 → 데몬 롤백).
+- **apply 부분 실패 복구**: ①~④는 원자적이지 않다 — 중간 예외 시
+  레이아웃은 이미 부분 변경이라 "ack 안 보내고 데몬만 롤백"으로는
+  불일치가 남는다. 규칙: **부분 적용된 레이아웃으로 다음 gen을
+  진행하지 않는다** — 예외 즉시 (a) VfsMosaic 레이아웃 폐기·전체
+  재생성, (b) 다음 요청에 **`reset=1`**(§3.5) — 데몬은 pending 폐기
+  + resident 장부 전체 초기화(다음 플랜은 전 페이지 new), (c) 이후
+  정상 사이클 재개. **실패한 gen 번호는 재사용하지 않는다** —
+  reset 요청부터 새(더 큰) gen으로 계속(단조 증가 불변 유지).
+  페이지는 불변이라 재전송이 곧 복구다. fault-injection으로 ①~④
+  각 단계 실패를 게이트(§7).
+- probe 모드는 세션-무관(fresh layout)이라 트랜잭션 밖.
+
+---
+
+## 4. 정확성: cut / coverage / labels
+
+- **cut(디테일 컷)**: **셀 단위** 분류(§2.4). below-cut 셀은 WC 없이
+  부모의 프레임 rect(+rep)로 대체.
+- **페이지 컷**: `max_w/max_h < cut` 페이지 skip, coverage가 채움
+  (현행).
+- **coverage 합성**: 서비스 측 numpy 팔레트 합성(현행 유지). 핸드오프
+  게이트 동일.
+- **skeleton 라벨**: 라이브 뷰 라벨은 skeleton에서 재사용·declutter
+  (현행 유지). WC 계층과 독립(FLOE_WS 밑 별도 라벨 셀). 페이지는
+  text-free 유지.
+
+---
+
+## 5. 마일스톤
+
+0. **M0 — klayout 실증 스파이크** (M1과 병행, **M2 진입 게이트**):
+   - 바인딩: editable=False Layout에서 (a) 파일-미정의 상주 셀 이름
+     참조가 기존 셀에 바인딩되는지, (b) shallow `delete_cells`가
+     자식(페이지)을 남기는지, (c) 여러 gen 연속 read/delete 후
+     누수·잔존이 없는지 확증. 실패 시 §3.3 폴백(hier.tsv)으로 M2를
+     재설계.
+   - **Pts 재료화**(§2.3 방출 사다리의 임계 튜닝 입력): 입력
+     type-10 크기 **2 / 1024 / 1025 / 10만 / 100만**(1-점 type-10
+     은 스펙상 불가 — writer가 `len−2`를 기록, write.rs:98) ×
+     viewport **선택 결과 0 / 1 / ≥2** 매트릭스. 선택 1개는
+     `Rep::One` + 원점 이동으로 방출되는지, ≥2는 rebase(원점 이동
+     + [0, pᵢ−p0])의 위치 정확성을 XOR로 확인. `Layout.read`
+     시간/RSS, `each_inst()` 인스턴스 레코드 수(전개 여부 확정),
+     draw 시간, pya 폴백의 확장량 측정. klayout이 전개한다면 full
+     rep 임계(1024)를 낮추거나 가시-부분집합을 소형 Pts까지 확대.
+1. **M1 — `.ovm` v2 + 계층 플랜**:
+   - v2(§3.6): 빌드에 topo_rank(사이클 = 하드 에러)·height u32
+     checked·prange/pbvh 섹션·seq u32·max u64(clamp 제거)·pts pool
+     extent/Morton-chunk·**마커 규약**(시작 시 전체 삭제, ovm-
+     마지막 커밋)·**checked 변환 전면 적용**(silent truncation
+     제거), 리더 필드 확장 + zero-copy pts 접근자 + 섹션-유형별
+     오픈 검증, `tools/validate_vfs.py` v2 갱신(stride/필드 —
+     파일명은 불변), validate_rust.sh 스위트 v2 재빌드 통과.
+   - 플랜: `floe_vfs::plan/descend`를 flat `(pages, mats)` →
+     **WC 계층** 산출로 재작성. 산출물: `Vec<WsCell{ key: (ci, r),
+     pages:Vec<u32>, insts:Vec<WsInst{ child_key, local_xf, rep }>,
+     frames:Vec<(BBox, Rep)> }>`. 내용: rank 1패스 전파 + K-box
+     localview + skew-Grid 닫힌형 + Pts 임계/폴백(§2.3), 셀 단위
+     cut 분류(§2.4), depth variant + height 접기(§2.5), 인스턴스/
+     페이지 BVH 프루닝(§2.2). **flat 경로는 mode 플래그로 병존**
+     (A/B).
+2. **M2 — 계층 델타 + 트랜잭션**: WC 계층을 OASIS 하나로(§3.2).
+   `placements=`/`frames=` 폐기, `top=`/`names=`/`ack=` 추가(§3.5),
+   `Session` 2단계 커밋(pending/commit/rollback, §3.7).
+3. **M3 — 계층 apply**: `VfsMosaic`에 gen-ephemeral WC 수명(§3.1:
+   `delete_cells` 일괄 shallow, 페이지 잔존/evict 유지, cell-index
+   remap 계승) + §3.7 apply 순서(①~⑤, stale 시 전부 생략 + ack
+   미전송) + pick의 ci→이름 테이블(§3.4).
+4. **M4 — 검증**: §7 게이트 전부 + MAIN09 실측(inst_edges/pages/
+   load_ms 자릿수 감소 확인) + flat vs 계층 A/B 수치.
+5. **M5 — 통합·폐기**: coverage/skeleton 라벨 재확인(§4), flat 경로
+   + mats-TSV + frames 파일 + `mode=` 스위치 제거. (여기의 "버전
+   범프"는 push 관례에 따른 **CLI/크레이트 릴리스 버전** — 캐시
+   포맷은 M1에서 이미 v2로 끝났고 M5는 포맷을 건드리지 않는다.)
+6. **M6 — 증분(팬 최적화, 후속)**: WC를 gen-ephemeral에서 "상주 +
+   localview 차분 갱신"으로 승격. 팬은 작은 델타, 줌은 부분 재구성.
+   (M1~M5 동안은 프레임당 WC 재구성 — 깊은 줌은 바운드되어 싸다.)
+
+---
+
+## 6. 리스크 / 미해결
+
+1. **klayout read 이름-바인딩**(§3.3) — 최대 리스크. M0로 전진 배치,
+   폴백(hier.tsv + pya API) 포맷까지 명세됨.
+2. **localview 합집합의 이산 병리**: 같은 셀이 화면 안 멀리 떨어진
+   두 곳에 보이면 단일-bbox 합집합은 그 사이 전부를 덮어, 중간
+   줌에서 페이지 과다 로드가 flat(경로별 정확한 lview)보다 나빠질
+   수 있다. 대응: **K-box localview를 M1 기본 탑재**(K=4, §2.3) —
+   잔여 리스크는 K 초과 병합 시의 과다 포함 정도로, M4 중간-줌
+   A/B(K=1 대조)로 계측.
+3. **부분 배열 정확성**: skew-Grid 역행렬/가시범위의 오프바이원 =
+   배열 멤버 **누락**(정확성 회귀). §7의 브루트포스 유닛테스트 +
+   배열 관통 소형 뷰 XOR 필수.
+4. **depth variant 증식**: 유한 d에서 셀당 최대 d+1개 — 실사용 d는
+   작고(첫 페인트 1), **`r ≥ height(ci)` → sentinel 접기**(§2.5,
+   height는 v1 필드)로 깊은 서브트리 밖 증식이 구조적으로 잘린다.
+5. **v2 마이그레이션**: 기존 `.floe` 캐시 전부 재빌드 필요(1회).
+   버전 게이트 에러는 명확하지만, 사무실 대형 자산은 재빌드 시간
+   (parse 279s + build)을 계획에 반영해야 한다.
+6. **klayout의 type-10 Pts 전개(미실증)**: 전개한다면 대형 Pts full
+   rep는 read/RSS/draw 폭증 — 방출 사다리(§2.3)가 임계로 바운드하고
+   M0 실증이 임계를 튜닝한다. 전개하지 않는다면 사다리는 그대로
+   두되 임계를 올려 단순화 여지.
+7. (해소 — 기록만) 모달 정합 → 구조 보장(§3.2). cut 에지-단위 →
+   셀 단위 속성(§2.4). 전파 수렴·9.8G plan 시간 → rank 1패스 +
+   빌드 사이클 거부(§2.3). min-depth 의미 변경 → depth variant로
+   철회(§2.5). 포맷-유지 타협(runtime BVH·기동 시 rank 계산·seq
+   u16) → `.ovm` v2로 승격(§3.6). **stale-drop 영구 공백**(현행
+   flat 경로에도 잠복하던 실버그) → ack-gen 트랜잭션(§3.7).
+   max_w/max_h u32 포화 오컷 → u64(§3.6). 빌드 중단 시 캐시 파괴
+   (제자리 truncate) → **ovm-마지막 커밋 + 운영 원칙**(rev 9에서
+   versioned OVP 철회, §3.6). Pts 부분집합 오배치 위험 → rebase
+   규칙 + slot dedup(§2.3). 대형 Pts extent 일률 기여의 view=cwb
+   재현 위험 → O_vis 사다리(§2.3). 사용-중 재빌드/원본 변경 동기화
+   → 운영 원칙 3조(§3.6).
+
+---
+
+## 7. 검증 게이트
+
+- **유닛(신규)**:
+  - skew-Grid 가시 인덱스/닫힌형 기여 vs **브루트포스 대조** 프로퍼티
+    테스트 — 경계 ±1, 음수 벡터, `det=0`(nb=1·공선), 큰 좌표
+    (i128 오버플로 경로), na 또는 nb=1. (현재 vfs 크레이트
+    유닛테스트는 splice_roundtrip 1개뿐.)
+  - authored WC + 스플라이스 혼합 델타 라운드트립(parse_doc +
+    klayout 로드).
+  - **depth fixture**: 같은 셀이 서로 다른 경로 깊이로 도달하는
+    구성에서 d별 스냅샷 = 현행 flat plan-side 절단과 일치.
+  - 같은 페이지가 여러 WC variant에서 참조되는 케이스.
+  - **Pts**: 방출 사다리 4단(full rep / 가시-부분집합 /
+    chunk-통짜 / 예산 초과 full 폴백) 전부에서 멤버 누락 0
+    (브루트포스 대조), 상위 단은 과다 포함만 함을 확인. **rebase
+    위치 정확성**(0/1/≥2 케이스, 원점 이동 + [0, pᵢ−p0]) XOR.
+    **slot-index dedup**(§2.3): 동일 좌표의 별개 slot 멤버가 K-box
+    합집합 후에도 보존(멤버-수 대조 = validate_vfs G5와 동일 기준). **O_vis
+    사다리**: 선택 bbox ⊆ 포함-chunk bbox 합 ⊆ extent 관계와 각
+    단이 실제로 그 단의 bbox를 쓰는지 확인. extent/chunk 인덱스 vs
+    전 점 스캔 대조. PTS_ENUM_BUDGET 소진 경로 강제 통과.
+  - **결정성**: 동일 요청 2회 → 플랜/델타 산출 바이트 동일(K-box
+    병합 tie-break 포함, §2.3).
+- **수명주기**: 여러 gen 연속 apply 후 이전 WC 셀 잔존 0; 페이지
+  eviction 후 현재 WC에 dangling 참조 없음(§3.1 구조 보장의 실측
+  확인); **stale drop 케이스** — 응답 생성 후 apply 없이 취소(ack
+  미전송) → 데몬 롤백 → 다음 프레임에서 해당 페이지 재전송, 공백
+  0 (§3.7; 현행 잠복 버그의 회귀 테스트); **fault-injection** —
+  apply ①~④ 각 단계에 예외 주입 → 모자이크 재생성 + `reset=1` →
+  다음 프레임 정상 렌더(공백 0, §3.7 복구 절차).
+- **마커 규약**(§3.6): 빌드를 마커 삭제 후 / ovp 기록 중 / 마커
+  기록 중 각 지점에서 강제 종료 → 오픈이 항상 "no cache"(마커
+  없음) 또는 "corrupt cache; rebuild"(마커 부분 기록 = 구조 검증
+  실패) — **중단된 빌드가 유효한 캐시로 보이는 경우 없음**. (동시
+  빌드·사용-중 재빌드·전원 장애는 운영/호출-경로 책임 — 게이트
+  없음.)
+- **checked 변환**(§3.6): Builder 단위 테스트로 각 narrowing
+  경계에 초과값 주입(u32 count 초과, payload > u32 등 실물로 못
+  만드는 경계 포함) → "limit exceeded: <필드>" 에러 확인 — silent
+  truncation 경로 0. (seq u16 초과 → u32는 §3.6에서 흡수됨;
+  스트레스 케이스는 기존 65535-페이지 게이트 유지.)
+- **바이트 동일성(0.4.7 게이트 계승)**: 같은 입력에서 `--jobs`
+  무관 동일 출력 — ovp/ovm 모두 **바이트 그대로 비교**(rev 9에서
+  build_id 철회로 정규화 불필요). Morton/페이지 재배열/pbvh 노드
+  순서가 jobs 수와 무관하게 결정적임을 이 게이트가 함께 증명.
+- **valmini XOR**: 중첩 배열 케이스는 **이미 있음**(TOP→MID 배열→
+  LEAF1 3×3이 fold_array 전개 경로를 통과) — 보강할 것은 **뷰**다:
+  `validate_vfs_render.py`에 배열 내부를 가로지르는 소형 깊은-줌 뷰,
+  배열 경계 걸침 뷰 추가(현행 whole/quarter/corner-half는 부분-배열
+  을 못 잡음). 필요 시 큰 na·nb 케이스 추가.
+- **스케일 불변**: Grid na·nb를 크게 키워도(멤버 수 ↑) planner
+  시간이 멤버 수와 무관함을 계측(§2.3 닫힌형의 회귀 방지).
+- **pick**: 공백·유니코드 design명 셀에서 ci→이름 테이블 경유 표시
+  확인(§3.4).
+- **M0 게이트**: §3.3 바인딩 + shallow `delete_cells` + 다중 gen
+  누수 확증 스파이크.
+- **v2 포맷 게이트**(§3.6): v2 재빌드로 validate_rust.sh 전체
+  스위트 통과(v1↔v2 의미 동등). 구 바이너리+새 캐시 / 새 바이너리+
+  구 캐시 교차 실행 시 버전 에러 문구(재빌드 안내) 확인. 합성
+  스트레스로 (cell,layer) 페이지 65535 초과 케이스의 seq u32 경로
+  확인.
+- **A/B(실자산)**: MAIN09 등에서 flat vs 계층 —
+  pages/inst_edges/plan_ms/load_ms/draw_ms + page_candidates,
+  그리고 K-box K=4 vs K=1(중간 줌 페이지 수). 지표 의미 변경(§3.5)
+  을 표에 병기해 사과-사과 비교 유지.
+- flat 경로 유지 기간: 계층이 valmini XOR green + MAIN09 자릿수 개선
+  확인까지. 이후 M5에서 제거.
