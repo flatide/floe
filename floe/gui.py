@@ -1125,6 +1125,13 @@ class Viewer:
                     mode = "live (%d tiles, %d ms%s%s%s%s)" \
                         % (res["tiles"], res["ms"], split,
                            self._depth_note(used), cut, drawn)
+                # also to stdout: the status bar is overwritten by
+                # cursor coords on mouse-move, so the perf line would
+                # otherwise vanish before it can be read
+                b = self.view_bbox()
+                print("%s  view %.1f x %.1f um"
+                      % (mode, (b[2] - b[0]) * self.dbu,
+                         (b[3] - b[1]) * self.dbu), flush=True)
                 self._set_status(self.view_bbox(), mode)
         elif kind == "snap":
             if res["seq"] == self._snap_seq \
