@@ -92,13 +92,19 @@ def _probe_layout(cache, box, layers):
     set for a small query box - the pick/snap/clip counterpart of
     'load every band'."""
     dbu = cache.meta["dbu"]
-    r = cache.vfs_client.request(
-        0,
-        (box.left * dbu, box.bottom * dbu,
-         box.right * dbu, box.top * dbu),
-        1.0, 0.0, layers, None, probe=True)
+    view = (box.left * dbu, box.bottom * dbu,
+            box.right * dbu, box.top * dbu)
     m = VfsMosaic(cache)
-    m.apply(r["delta"], r["mats"], [])
+    if getattr(cache, "_hier", True):
+        r = cache.vfs_client.request(0, view, 1.0, 0.0, layers,
+                                     None, probe=True, hier=True)
+        if r["names"]:
+            m.load_names(r["names"])
+        m.apply_hier(r["delta"], r["top"], [])
+    else:
+        r = cache.vfs_client.request(0, view, 1.0, 0.0, layers,
+                                     None, probe=True)
+        m.apply(r["delta"], r["mats"], [])
     return m
 
 
@@ -356,18 +362,59 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, res, newer,
     cut_px = CUT_PX if cut_px is None else max(0.0, float(cut_px))
     vis = job["visible"]
     layers = [tuple(v) for v in vis] if vis is not None else None
+    hier = getattr(cache, "_hier", True)
     tl = time.perf_counter()
-    r = cache.vfs_client.request(job["gen"], view_um, px_per_um,
-                                 cut_px, layers, job.get("depth"))
+    if hier:
+        # dedicated monotonic daemon-gen: GUI job gens coalesce/skip,
+        # the par.3.7 transaction wants strict increase, and a failed
+        # gen is never reused
+        mosaic.req_gen += 1
+        r = cache.vfs_client.request(
+            mosaic.req_gen, view_um, px_per_um, cut_px, layers,
+            job.get("depth"), hier=True, ack=mosaic.applied_gen,
+            reset=mosaic.need_reset)
+        mosaic.need_reset = False
+    else:
+        r = cache.vfs_client.request(job["gen"], view_um, px_per_um,
+                                     cut_px, layers,
+                                     job.get("depth"))
     if newer():
+        # stale frame: skip the apply entirely - the withheld ack IS
+        # the daemon's rollback signal (par.3.7), no blanks later
         return
     # live-view labels: reuse the skeleton's (already-loaded) labels,
     # filtered to the view and decluttered - so labels appear as you
     # zoom in, Calibre-style, without any text in the pages
     labels = _view_labels(cache, x0, y0, x1, y1, job["w"],
                           job["h"], job["visible"])
-    if mosaic.apply(r["delta"], r["mats"], r["evict"], r["frames"],
-                    labels):
+    if hier:
+        if r["names"]:
+            mosaic.load_names(r["names"])
+        try:
+            changed = mosaic.apply_hier(r["delta"], r["top"],
+                                        r["evict"], labels,
+                                        gen=mosaic.req_gen)
+        except Exception:
+            # partial apply must not carry into the next gen
+            # (par.3.7): rebuild the mosaic in place, then replay
+            # this view once on a fresh gen with reset=1
+            mosaic.reset_all()
+            renderer.top = mosaic.top
+            renderer.refresh()
+            mosaic.req_gen += 1
+            r = cache.vfs_client.request(
+                mosaic.req_gen, view_um, px_per_um, cut_px, layers,
+                job.get("depth"), hier=True, ack=0, reset=True)
+            mosaic.need_reset = False
+            if r["names"]:
+                mosaic.load_names(r["names"])
+            changed = mosaic.apply_hier(r["delta"], r["top"],
+                                        r["evict"], labels,
+                                        gen=mosaic.req_gen)
+        if changed:
+            renderer.refresh()
+    elif mosaic.apply(r["delta"], r["mats"], r["evict"],
+                      r["frames"], labels):
         renderer.refresh()
     t_load = time.perf_counter() - tl
     if newer():
@@ -471,6 +518,11 @@ def _render_service(src, req, res, latest=None):
             return
         from .vfsclient import VfsClient
         cache.vfs_client = VfsClient(cache.dir)
+        # V4 hierarchy-preserving working set is the default;
+        # FLOE_VFS_MODE=flat keeps the legacy flat path for A/B
+        # (retired in M5, rust/VFS_HIER.md par.5)
+        cache._hier = os.environ.get("FLOE_VFS_MODE",
+                                     "hier") != "flat"
         mosaic = VfsMosaic(cache)
         fcolors = dict(colors)
         fcolors[VfsMosaic.FRAME_LAYER] = "#93a4ad"

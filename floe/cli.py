@@ -69,10 +69,17 @@ def _vfs_region(c, x0, y0, x1, y1, layers):
     from .viewport import VfsMosaic
     dbu = c.meta["dbu"]
     vc = VfsClient(c.dir)
-    r = vc.request(0, (x0 * dbu, y0 * dbu, x1 * dbu, y1 * dbu),
-                   1.0, 0.0, layers, None, probe=True)
+    view = (x0 * dbu, y0 * dbu, x1 * dbu, y1 * dbu)
     m = VfsMosaic(c)
-    m.apply(r["delta"], r["mats"], [])
+    if os.environ.get("FLOE_VFS_MODE", "hier") != "flat":
+        r = vc.request(0, view, 1.0, 0.0, layers, None,
+                       probe=True, hier=True)
+        if r["names"]:
+            m.load_names(r["names"])
+        m.apply_hier(r["delta"], r["top"], [])
+    else:
+        r = vc.request(0, view, 1.0, 0.0, layers, None, probe=True)
+        m.apply(r["delta"], r["mats"], [])
     return m.ly, m.top, vc
 
 

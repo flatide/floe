@@ -46,12 +46,20 @@ class VfsClient:
             stderr=subprocess.DEVNULL, text=True, bufsize=1)
 
     def request(self, gen, view_um, px_per_um, cut_px, layers=None,
-                depth=None, probe=False):
+                depth=None, probe=False, hier=False, ack=0,
+                reset=False):
         """One plan/materialize round-trip. view_um = (x0,y0,x1,y1)
         in um; layers = [(l,d), ...] or None (=all); depth None =
         full. Returns the parsed response dict with 'mats' (list of
         (cellname, x, y, rot, flip)) and 'delta' (path or None);
-        response files are deleted on the NEXT request."""
+        response files are deleted on the NEXT request.
+
+        hier=True speaks the V4 protocol (rust/VFS_HIER.md par.3.5):
+        the delta carries the whole working-set hierarchy, the
+        response adds 'top' (gen top WC name) and 'names' (ci->name
+        table path, once per daemon run); ack/reset drive the
+        par.3.7 session transaction. probe+hier = mode=hier_probe
+        (session-less)."""
         for p in self._last_files:
             try:
                 os.unlink(p)
@@ -65,7 +73,14 @@ class VfsClient:
                 f"{view_um[2]},{view_um[3]} px={px_per_um} "
                 f"cut={cut_px} depth={dspec} layers={lspec} "
                 f"out={self.tmp}")
-        if probe:
+        if hier:
+            if probe:
+                line += " mode=hier_probe"
+            else:
+                line += f" mode=hier ack={ack}"
+                if reset:
+                    line += " reset=1"
+        elif probe:
             line += " mode=probe"
         self.proc.stdin.write(line + "\n")
         self.proc.stdin.flush()
@@ -80,6 +95,10 @@ class VfsClient:
             raise RuntimeError(f"vfsd: {out['error']}")
         delta = out.get("delta", "-")
         out["delta"] = None if delta == "-" else delta
+        top = out.get("top", "-")
+        out["top"] = None if top in ("-", "") else top
+        nm = out.get("names", "-")
+        out["names"] = None if nm in ("-", "") else nm
         fr = out.get("frames", "-")
         out["frames"] = None if fr in ("-", "") else fr
         if out["frames"]:

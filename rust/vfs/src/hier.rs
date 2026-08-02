@@ -564,17 +564,16 @@ impl<'a> Hier<'a> {
         if cw < self.cut && ch < self.cut {
             self.st.cull_size += 1;
             if self.frames_total < self.opts.frame_cap {
-                // outline instead of content; visible-footprint test
-                // via the rep extent (zero-copy for pts)
-                let (rep, fp) = match h.kind {
-                    0 => (Rep::One, b0),
+                // outline instead of content. Per-member outlines
+                // (rect+rep) are the accurate form, but below a
+                // ~2-cut member pitch they fuse into a solid wash
+                // that BURIES real geometry - degrade those to the
+                // whole-rep footprint box (flat parity). Footprint
+                // test via the rep extent (zero-copy for pts).
+                let fuse_pitch = 2 * self.cut.max(1);
+                let (rect, rep, fp) = match h.kind {
+                    0 => (b0, Rep::One, b0),
                     1 => {
-                        let rep = Rep::Grid {
-                            na: h.na as u64,
-                            nb: h.nb as u64,
-                            va: h.va,
-                            vb: h.vb,
-                        };
                         let ov = grid_ovis(
                             0,
                             h.na as i64 - 1,
@@ -583,22 +582,53 @@ impl<'a> Hier<'a> {
                             h.va,
                             h.vb,
                         );
-                        (rep, grow_by_offsets(&b0, &ov))
+                        let fp = grow_by_offsets(&b0, &ov);
+                        let pv = |v: (i64, i64)| {
+                            v.0.unsigned_abs().max(v.1.unsigned_abs())
+                        };
+                        let mut pitch = u64::MAX;
+                        if h.na > 1 {
+                            pitch = pitch.min(pv(h.va));
+                        }
+                        if h.nb > 1 {
+                            pitch = pitch.min(pv(h.vb));
+                        }
+                        if pitch != u64::MAX && pitch < fuse_pitch {
+                            (fp, Rep::One, fp)
+                        } else {
+                            let rep = Rep::Grid {
+                                na: h.na as u64,
+                                nb: h.nb as u64,
+                                va: h.va,
+                                vb: h.vb,
+                            };
+                            (b0, rep, fp)
+                        }
                     }
                     _ => {
                         let pr =
                             self.v.pts_ref(pli).expect("pts kind");
-                        let fp = grow_by_offsets(&b0, &pr.extent());
-                        let mut pts =
-                            Vec::with_capacity(pr.count as usize);
-                        for s in 0..pr.count {
-                            pts.push(pr.pt(s));
+                        let ext = pr.extent();
+                        let fp = grow_by_offsets(&b0, &ext);
+                        // mean member spacing from extent density
+                        let area = (ext.x1 - ext.x0).max(1) as u128
+                            * (ext.y1 - ext.y0).max(1) as u128;
+                        let c2 = fuse_pitch as u128;
+                        if pr.count as u128 * c2 * c2 > area {
+                            (fp, Rep::One, fp)
+                        } else {
+                            let mut pts = Vec::with_capacity(
+                                pr.count as usize,
+                            );
+                            for s in 0..pr.count {
+                                pts.push(pr.pt(s));
+                            }
+                            (b0, Rep::Pts(pts), fp)
                         }
-                        (Rep::Pts(pts), fp)
                     }
                 };
                 if boxes.iter().any(|b| fp.intersects(b)) {
-                    wc.frames.push((b0, rep));
+                    wc.frames.push((rect, rep));
                     self.frames_total += 1;
                     self.st.frame_rects += 1;
                 }
@@ -843,10 +873,120 @@ fn grow_by_offsets(base: &BBox, off: &BBox) -> BBox {
     }
 }
 
+/// cut-frame outline layer (drawn hollow by the viewer; shared with
+/// the skeleton's cell-outline convention)
+pub const FRAME_LAYER: u32 = 255;
+pub const FRAME_DT: u32 = 0;
+
+/// gen-ephemeral working-set cell name `W<gen>_<r>_<ci>`, r = "F"
+/// for the full-depth sentinel (par.3.1): digits/fixed chars only -
+/// design names travel once via the names= table, never in cell
+/// names (whitespace/unicode hygiene).
+pub fn ws_name(gen: u64, key: WsKey) -> String {
+    if key.1 == REM_FULL {
+        format!("W{}_F_{}", gen, key.0)
+    } else {
+        format!("W{}_{}_{}", gen, key.1, key.0)
+    }
+}
+
 impl crate::Vfs {
     /// V4 hierarchy-preserving plan (default knobs)
     pub fn plan_hier(&self, req: &ViewReq) -> HierPlan {
         plan_hier(&self.ovm, req, &HierOpts::default())
+    }
+
+    /// hier delta (par.3.2): ONE OASIS = new pages spliced verbatim
+    /// + authored working-set cells (identity page instances, child
+    /// CellInstArray edges, frame rects on FRAME_LAYER). Resident
+    /// pages are referenced by name with no definition in the file
+    /// (M0-verified klayout name binding). The gen's top WC is the
+    /// file's single top, so the delta stays parse_doc-able.
+    pub fn delta_hier(
+        &self,
+        plan: &HierPlan,
+        new_pages: &[u32],
+        gen: u64,
+    ) -> Result<Vec<u8>, String> {
+        use floe_oasis::doc::RectRec;
+        use floe_oasis::write::{
+            splice_tree, tree_body, write_tree, WCell,
+        };
+        let payloads = self.read_page_payloads(new_pages)?;
+        // owned storage first - WCell borrows names/rects/reps
+        struct Pre {
+            name: String,
+            rects: Vec<RectRec>,
+            places: Vec<(String, i64, i64, u8, bool, Rep)>,
+        }
+        let pre: Vec<Pre> = plan
+            .wcells
+            .iter()
+            .map(|w| {
+                let rects: Vec<RectRec> = w
+                    .frames
+                    .iter()
+                    .map(|(b, rep)| RectRec {
+                        layer: FRAME_LAYER,
+                        dt: FRAME_DT,
+                        x: b.x0,
+                        y: b.y0,
+                        w: (b.x1 - b.x0).max(1),
+                        h: (b.y1 - b.y0).max(1),
+                        rep: rep.clone(),
+                    })
+                    .collect();
+                let mut places =
+                    Vec::with_capacity(w.pages.len() + w.insts.len());
+                for &pi in &w.pages {
+                    places.push((
+                        self.page_name(pi),
+                        0,
+                        0,
+                        0u8,
+                        false,
+                        Rep::One,
+                    ));
+                }
+                for i in &w.insts {
+                    places.push((
+                        ws_name(gen, i.child),
+                        i.x,
+                        i.y,
+                        i.rot,
+                        i.flip,
+                        i.rep.clone(),
+                    ));
+                }
+                Pre { name: ws_name(gen, w.key), rects, places }
+            })
+            .collect();
+        let wcells: Vec<WCell> = pre
+            .iter()
+            .map(|p| WCell {
+                name: p.name.clone(),
+                rects: &p.rects,
+                polys: &[],
+                paths: &[],
+                texts: &[],
+                places: p
+                    .places
+                    .iter()
+                    .map(|(n, x, y, r, f, rep)| {
+                        (n.as_str(), *x, *y, *r, *f, rep)
+                    })
+                    .collect(),
+            })
+            .collect();
+        let mut bodies: Vec<&[u8]> =
+            payloads.iter().map(|p| tree_body(p)).collect();
+        let authored;
+        if !wcells.is_empty() {
+            authored = write_tree(&wcells, self.ovm.unit)
+                .map_err(|e| e.to_string())?;
+            bodies.push(tree_body(&authored));
+        }
+        Ok(splice_tree(self.ovm.unit, &bodies))
     }
 }
 
@@ -1660,6 +1800,51 @@ mod tests {
     }
 
     #[test]
+    fn below_cut_dense_frames_fuse_to_footprint() {
+        // sub-pixel pitch (15 < 2*cut=20): per-member outlines
+        // would fuse into a solid wash burying real geometry -
+        // the frame degrades to ONE footprint box (flat parity)
+        let v = fixture(
+            &[
+                FCell {
+                    name: "S",
+                    pages: vec![(bx(0, 0, 5, 5), 5, 5)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "T",
+                    pages: vec![(bx(0, 0, 4000, 100), 4000, 100)],
+                    places: vec![(
+                        0,
+                        0,
+                        0,
+                        0,
+                        false,
+                        Rep::Grid {
+                            na: 200,
+                            nb: 1,
+                            va: (15, 0),
+                            vb: (0, 0),
+                        },
+                    )],
+                },
+            ],
+            1,
+        );
+        let plan = check(
+            &v,
+            &rq(bx(0, 0, 4000, 100), 10, u32::MAX),
+            true,
+        );
+        let t = plan.wcells.iter().find(|w| w.key.0 == 1).unwrap();
+        assert_eq!(t.frames.len(), 1);
+        let (fb, frep) = &t.frames[0];
+        assert!(matches!(frep, Rep::One), "{:?}", frep);
+        // footprint spans the whole array, not one member
+        assert_eq!(*fb, bx(0, 0, 15 * 199 + 5, 5));
+    }
+
+    #[test]
     fn pbvh_equals_linear() {
         // 20 pages in a row; one ovm linear, one with a hand-built
         // 3-node page BVH - identical selections, tree stats move
@@ -1748,6 +1933,253 @@ mod tests {
         let c = plan_hier(&tree, &req, &HierOpts::default());
         assert!(c.stats.culled_page_bvh_cut > 0);
         assert!(c.pages.is_empty());
+    }
+
+    // ---------------------------------------------- delta (par.3.2)
+
+    #[test]
+    fn delta_hier_roundtrip_full() {
+        use floe_oasis::doc::{parse_doc, RectRec};
+        use floe_oasis::write::{write_tree, WCell};
+        let mk_page = |name: &str, w: i64| {
+            let r = RectRec {
+                layer: 1,
+                dt: 0,
+                x: 0,
+                y: 0,
+                w,
+                h: 20,
+                rep: Rep::One,
+            };
+            write_tree(
+                &[WCell {
+                    name: name.into(),
+                    rects: std::slice::from_ref(&r),
+                    polys: &[],
+                    paths: &[],
+                    texts: &[],
+                    places: vec![],
+                }],
+                1000.0,
+            )
+            .unwrap()
+        };
+        let p0 = mk_page("P0_0_0", 100);
+        let p1 = mk_page("P1_0_0", 500);
+        let mut ovp = p0.clone();
+        ovp.extend_from_slice(&p1);
+        let dir = std::env::temp_dir()
+            .join(format!("floe_m2_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ovp_path = dir.join("design.ovp");
+        std::fs::write(&ovp_path, &ovp).unwrap();
+        // matching metadata: LEAF(page P0_0_0) under TOP(page
+        // P1_0_0) via a 2x1 grid at (0,100)
+        let mut b = Builder::new(1000.0, 0, 0, 1);
+        b.top = 1;
+        b.layer(1, 0, "L1", 0, 0);
+        let m = b.bitset(&[1]);
+        let leafbb = bx(0, 0, 100, 20);
+        b.page(
+            0,
+            0,
+            0,
+            &leafbb,
+            0,
+            p0.len() as u64,
+            p0.len() as u64,
+            1,
+            1,
+            100,
+            20,
+        );
+        b.page(
+            1,
+            0,
+            0,
+            &bx(0, 0, 500, 20),
+            p0.len() as u64,
+            p1.len() as u64,
+            p1.len() as u64,
+            1,
+            1,
+            500,
+            20,
+        );
+        let pl = b.place(
+            0,
+            0,
+            100,
+            0,
+            false,
+            &Rep::Grid { na: 2, nb: 1, va: (200, 0), vb: (0, 0) },
+        );
+        let n0 =
+            b.bvh_node(&bx(0, 100, 300, 120), pl as u32, 1, true);
+        let pr0 = b.prange(0, 0, 1, PBVH_NONE);
+        b.cell(
+            "LEAF", 0, 1, &leafbb, &leafbb, 0, 0, 0, 1, 0, 0, pr0,
+            1, m, m, 1,
+        );
+        let pr1 = b.prange(0, 1, 1, PBVH_NONE);
+        b.cell(
+            "TOPC",
+            1,
+            0,
+            &bx(0, 0, 500, 120),
+            &bx(0, 0, 500, 120),
+            0,
+            1,
+            1,
+            1,
+            n0,
+            1,
+            pr1,
+            1,
+            m,
+            m,
+            1,
+        );
+        let ovm = Ovm::from_bytes(b.finish(ovp.len() as u64)).unwrap();
+        let vfs = crate::Vfs {
+            ovm,
+            ovp_path: ovp_path.to_string_lossy().into_owned(),
+        };
+        let req = rq(bx(-10, -10, 600, 200), 0, u32::MAX);
+        let plan =
+            plan_hier(&vfs.ovm, &req, &HierOpts::default());
+        assert_eq!(plan.pages, vec![0, 1]);
+        let delta =
+            vfs.delta_hier(&plan, &plan.pages, 3).unwrap();
+        // deterministic emission
+        assert_eq!(
+            delta,
+            vfs.delta_hier(&plan, &plan.pages, 3).unwrap()
+        );
+        let doc = parse_doc(&delta).unwrap();
+        // single-top OASIS: the gen's top WC
+        assert_eq!(doc.cells[doc.top].name, "W3_F_1");
+        let mut names: Vec<&str> =
+            doc.cells.iter().map(|c| c.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            vec!["P0_0_0", "P1_0_0", "W3_F_0", "W3_F_1"]
+        );
+        let topc = &doc.cells[doc.top];
+        assert_eq!(topc.places.len(), 2);
+        // identity page instance first, then the child WC edge with
+        // the array preserved
+        assert_eq!(doc.cells[topc.places[0].cell].name, "P1_0_0");
+        assert!(matches!(topc.places[0].rep, Rep::One));
+        let wleaf = &doc.cells[topc.places[1].cell];
+        assert_eq!(wleaf.name, "W3_F_0");
+        assert!(matches!(
+            topc.places[1].rep,
+            Rep::Grid { na: 2, nb: 1, .. }
+        ));
+        assert_eq!((topc.places[1].x, topc.places[1].y), (0, 100));
+        assert_eq!(wleaf.places.len(), 1);
+        assert_eq!(
+            doc.cells[wleaf.places[0].cell].name,
+            "P0_0_0"
+        );
+        // incremental delta: no page bodies, resident refs stay
+        // undefined (parse_doc materializes them as empty cells,
+        // klayout binds them by name - M0)
+        let inc = vfs.delta_hier(&plan, &[], 4).unwrap();
+        let doc2 = parse_doc(&inc).unwrap();
+        assert_eq!(doc2.cells[doc2.top].name, "W4_F_1");
+        let ghost = doc2
+            .cells
+            .iter()
+            .find(|c| c.name == "P0_0_0")
+            .unwrap();
+        assert!(ghost.rects.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delta_hier_frames_and_pts_authored() {
+        use floe_oasis::doc::parse_doc;
+        // frames: below-cut grid child -> WC rect on 255/0 with the
+        // rep preserved (authored-only delta, new_pages = [])
+        let v = fixture(
+            &[
+                FCell {
+                    name: "S",
+                    pages: vec![(bx(0, 0, 5, 5), 5, 5)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "T",
+                    pages: vec![(bx(0, 0, 4000, 100), 4000, 100)],
+                    places: vec![(
+                        0,
+                        0,
+                        0,
+                        0,
+                        false,
+                        Rep::Grid {
+                            na: 4,
+                            nb: 1,
+                            va: (1000, 0),
+                            vb: (0, 0),
+                        },
+                    )],
+                },
+            ],
+            1,
+        );
+        let plan = plan_hier(
+            &v,
+            &rq(bx(0, 0, 4000, 100), 10, u32::MAX),
+            &HierOpts::default(),
+        );
+        let vfs = crate::Vfs { ovm: v, ovp_path: String::new() };
+        let delta = vfs.delta_hier(&plan, &[], 9).unwrap();
+        let doc = parse_doc(&delta).unwrap();
+        let top = &doc.cells[doc.top];
+        assert_eq!(top.name, "W9_F_1");
+        assert_eq!(top.rects.len(), 1);
+        let fr = &top.rects[0];
+        assert_eq!((fr.layer, fr.dt), (FRAME_LAYER, FRAME_DT));
+        assert!(matches!(fr.rep, Rep::Grid { na: 4, .. }));
+        // referenced page is a ghost (undefined) cell here
+        assert!(doc
+            .cells
+            .iter()
+            .any(|c| c.name == "P1_0_0" && c.rects.is_empty()));
+        // pts: rebased subset survives the writer/parser round trip
+        let (v2, offs) = pts_small();
+        let plan2 = plan_hier(
+            &v2,
+            &rq(bx(10_090, 3_190, 10_120, 3_220), 0, u32::MAX),
+            &HierOpts::default(),
+        );
+        let vfs2 = crate::Vfs { ovm: v2, ovp_path: String::new() };
+        let delta2 = vfs2.delta_hier(&plan2, &[], 11).unwrap();
+        let doc2 = parse_doc(&delta2).unwrap();
+        let t2 = &doc2.cells[doc2.top];
+        let pl = t2
+            .places
+            .iter()
+            .find(|p| doc2.cells[p.cell].name.starts_with("W11_"))
+            .unwrap();
+        let mut got: Vec<(i64, i64)> = match &pl.rep {
+            Rep::Pts(p) => {
+                assert_eq!(p[0], (0, 0), "rebased anchor");
+                p.iter().map(|&(x, y)| (pl.x + x, pl.y + y)).collect()
+            }
+            r => panic!("expected pts, got {:?}", r),
+        };
+        got.sort_unstable();
+        let mut want: Vec<(i64, i64)> = offs
+            .iter()
+            .map(|&(x, y)| (100 + x, 200 + y))
+            .collect();
+        want.sort_unstable();
+        assert_eq!(got, want);
     }
 
     #[test]

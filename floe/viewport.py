@@ -6,11 +6,36 @@ FLOE_WS layout fed by vfsd deltas (see VfsMosaic); the old .ice tile
 mosaic was removed.
 """
 
+import os
+
 import klayout.db as db
 
 
 MAX_LIVE_TILES = 32     # a render request may touch at most this many tiles
 EVICT_ABOVE = 128       # keep at most this many loaded entries in the mosaic
+
+
+class _WsNames:
+    """design-name resolver for the hier working set: page cells are
+    P<ci>_<li>_<seq>, working-set cells W<gen>_<r>_<ci> - both carry
+    the source cell index; the names= table (sent once per daemon
+    run) carries the name. Drop-in for the flat path's dict via
+    .get()."""
+
+    def __init__(self, names):
+        self.names = names  # ci -> design cell name (shared dict)
+
+    def get(self, cell, default=None):
+        try:
+            if cell.startswith("P"):
+                return self.names.get(
+                    int(cell[1:].split("_", 1)[0]), default)
+            if cell.startswith("W"):
+                return self.names.get(
+                    int(cell.rsplit("_", 1)[1]), default)
+        except (ValueError, IndexError):
+            pass
+        return default
 
 
 def live_caps(meta):
@@ -40,10 +65,13 @@ class VfsMosaic:
     FRAME_LAYER = (255, 0)
 
     def __init__(self, cache):
+        self._dbu = cache.meta["dbu"]
+        self._layer_keys = [(l["layer"], l["datatype"])
+                            for l in cache.meta["layers"]]
         self.ly = db.Layout(False)  # pages keep arrays compact
-        self.ly.dbu = cache.meta["dbu"]
-        for l in cache.meta["layers"]:
-            self.ly.layer(db.LayerInfo(l["layer"], l["datatype"]))
+        self.ly.dbu = self._dbu
+        for (l, d) in self._layer_keys:
+            self.ly.layer(db.LayerInfo(l, d))
         self.ly.layer(db.LayerInfo(*self.FRAME_LAYER))
         self.top = self.ly.create_cell("FLOE_WS")
         self.cells = {}  # page cell name -> cell index
@@ -51,6 +79,17 @@ class VfsMosaic:
         self.frame_ci = None  # ephemeral cut-frame cell
         self.label_ci = None  # ephemeral live-label cell
         self._lgen = 0
+        # ---- hier session state (VFS_HIER.md par.3.1/3.7). The
+        # ci->name table is daemon-run-wide and sent exactly once,
+        # so it lives on the CACHE and is shared by every mosaic
+        # (render working set + probe layouts).
+        if not hasattr(cache, "_vfs_names"):
+            cache._vfs_names = {}
+        self.names = cache._vfs_names
+        self._wc_cells = []   # current gen's WC cell names
+        self.req_gen = 0      # daemon-gen counter (monotonic)
+        self.applied_gen = 0  # last gen fully applied (the ack)
+        self.need_reset = False
 
     def apply(self, delta_path, mats, evict, frames_path=None,
               labels=None):
@@ -120,4 +159,119 @@ class VfsMosaic:
             if ci is not None:
                 self.top.insert(db.CellInstArray(ci, db.Trans()))
         return changed
+
+    # ------------------------------------------------ hier (V4)
+
+    def load_names(self, path):
+        """ci -> design-name table (names=, once per daemon run):
+        load into the cache-shared dict and delete the file - the
+        par.3.4 contract has no re-request key."""
+        try:
+            with open(path) as f:
+                for ln in f:
+                    ci, _, nm = ln.rstrip("\n").partition("\t")
+                    self.names[int(ci)] = nm
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        self.design = _WsNames(self.names)
+
+    def apply_hier(self, delta_path, top_name, evict, labels=None,
+                   gen=None):
+        """Hier apply, par.3.7 steps (1)-(4): (1) read the delta (new
+        pages + this gen's WC cells; resident page refs bind by name)
+        (2) link the gen top (+labels) under FLOE_WS (3) batch-
+        SHALLOW-delete the previous gen's WC cells - prune_cell would
+        take resident pages down with them (4) prune evicted pages
+        and remap surviving indexes. The caller sends ack=gen only
+        after this returns (step (5)); on a stale frame it never
+        calls this, which IS the rollback signal. True = changed."""
+        changed = False
+        if self.label_ci is not None:
+            self.ly.prune_cell(self.label_ci, -1)
+            self.label_ci = None
+            changed = True
+        prev_wc = self._wc_cells
+        gen_prefix = (top_name.split("_", 1)[0] + "_"
+                      if top_name else None)
+        if delta_path:
+            self.ly.read(delta_path)
+            changed = True
+        wc_now = []
+        if gen_prefix:
+            for c in self.ly.each_cell():
+                nm = c.name
+                if nm.startswith("P") and nm not in self.cells:
+                    self.cells[nm] = c.cell_index()
+                elif nm.startswith(gen_prefix):
+                    wc_now.append(nm)
+        self.top.clear_insts()
+        if top_name:
+            tc = self.ly.cell(top_name)
+            if tc is None:
+                raise RuntimeError(
+                    "hier delta top %s missing" % top_name)
+            self.top.insert(
+                db.CellInstArray(tc.cell_index(), db.Trans()))
+            changed = True
+        if labels:
+            self._lgen += 1
+            lc = self.ly.create_cell("LABELS_%d" % self._lgen)
+            self.label_ci = lc.cell_index()
+            for (l, d, x, y, s) in labels:
+                li = self.ly.layer(db.LayerInfo(l, d))
+                lc.shapes(li).insert(
+                    db.Text(s, db.Trans(db.Vector(int(x), int(y)))))
+            self.top.insert(
+                db.CellInstArray(self.label_ci, db.Trans()))
+            changed = True
+        if prev_wc:
+            idxs = [self.ly.cell(nm).cell_index() for nm in prev_wc
+                    if self.ly.cell(nm) is not None]
+            if idxs:
+                self.ly.delete_cells(idxs)
+                changed = True
+        self._wc_cells = wc_now
+        for nm in evict:
+            ci = self.cells.pop(nm, None)
+            if ci is not None:
+                self.ly.prune_cell(ci, -1)
+                changed = True
+        if evict or prev_wc:
+            # klayout may reuse freed indexes: remap survivors (and
+            # the label cell) by name
+            keep = set(self.cells)
+            self.cells = {c.name: c.cell_index()
+                          for c in self.ly.each_cell()
+                          if c.name in keep}
+            if self.label_ci is not None:
+                lc = self.ly.cell("LABELS_%d" % self._lgen)
+                self.label_ci = (None if lc is None
+                                 else lc.cell_index())
+        if not isinstance(self.design, _WsNames):
+            self.design = _WsNames(self.names)
+        if gen is not None:
+            self.applied_gen = gen
+        return changed
+
+    def reset_all(self):
+        """Partial-apply recovery (par.3.7): a layout that failed
+        mid-apply must not carry into the next gen. Wipe and rebuild
+        IN PLACE - same Layout object, so the renderer's
+        show_layout binding survives; the caller re-points
+        renderer.top and refreshes, and sends reset=1 next."""
+        self.ly.clear()
+        self.ly.dbu = self._dbu
+        for (l, d) in self._layer_keys:
+            self.ly.layer(db.LayerInfo(l, d))
+        self.ly.layer(db.LayerInfo(*self.FRAME_LAYER))
+        self.top = self.ly.create_cell("FLOE_WS")
+        self.cells = {}
+        self._wc_cells = []
+        self.frame_ci = None
+        self.label_ci = None
+        self.applied_gen = 0
+        self.need_reset = True
 

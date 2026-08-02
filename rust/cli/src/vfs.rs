@@ -1564,7 +1564,13 @@ pub fn vfsd_cmd(args: &[String]) {
         eprintln!("{}", e);
         std::process::exit(1);
     });
-    let mut sess = floe_vfs::Session::new(budget_mb << 20);
+    let mut d = Daemon {
+        v: &v,
+        flat: floe_vfs::Session::new(budget_mb << 20),
+        hier: floe_vfs::HierSession::new(budget_mb << 20),
+        names_sent: false,
+        mode_lock: None,
+    };
     eprintln!(
         "[vfsd] {} ({} cells, {} pages), budget {} MB",
         dir, v.ovm.n_cells, v.ovm.n_pages, budget_mb
@@ -1584,7 +1590,7 @@ pub fn vfsd_cmd(args: &[String]) {
         if line == "quit" {
             return;
         }
-        match serve_one(&v, &mut sess, line) {
+        match serve_one(&mut d, line) {
             Ok(resp) => println!("{}", resp),
             Err(e) => println!("error={}", e.replace(' ', "_")),
         }
@@ -1593,11 +1599,19 @@ pub fn vfsd_cmd(args: &[String]) {
     }
 }
 
-fn serve_one(
-    v: &floe_vfs::Vfs,
-    sess: &mut floe_vfs::Session,
-    line: &str,
-) -> Result<String, String> {
+/// one daemon run's state: the legacy flat session and the hier
+/// 2-phase session coexist for the M1-M4 A/B window, but a run
+/// locks to whichever session-mode speaks first (mixing would split
+/// the residency ledger across formats)
+struct Daemon<'a> {
+    v: &'a floe_vfs::Vfs,
+    flat: floe_vfs::Session,
+    hier: floe_vfs::HierSession,
+    names_sent: bool,
+    mode_lock: Option<bool>, // true = hier
+}
+
+fn serve_one(d: &mut Daemon, line: &str) -> Result<String, String> {
     let mut gen = 0u64;
     let mut view: Option<(f64, f64, f64, f64)> = None;
     let mut px = 5.0f64;
@@ -1605,7 +1619,9 @@ fn serve_one(
     let mut depth = u32::MAX;
     let mut layers: Option<Vec<String>> = None;
     let mut out: Option<String> = None;
-    let mut probe = false;
+    let mut mode = String::new();
+    let mut ack = 0u64;
+    let mut reset = false;
     for tok in line.split_whitespace() {
         let (k, val) = tok
             .split_once('=')
@@ -1641,14 +1657,35 @@ fn serve_one(
                 }
             }
             "out" => out = Some(val.to_string()),
-            "mode" => probe = val == "probe",
+            "mode" => mode = val.to_string(),
+            "ack" => ack = val.parse().map_err(|_| "ack")?,
+            "reset" => reset = val == "1",
             _ => return Err(format!("unknown key {}", k)),
+        }
+    }
+    let hier_mode = mode == "hier" || mode == "hier_probe";
+    let probe = mode == "probe" || mode == "hier_probe";
+    if !probe {
+        // session requests lock the run's format; probes are
+        // session-less and free to mix
+        match d.mode_lock {
+            None => d.mode_lock = Some(hier_mode),
+            Some(m) if m != hier_mode => {
+                return Err("mode_switch".into())
+            }
+            _ => {}
         }
     }
     let view = view.ok_or("view required")?;
     let out = out.ok_or("out required")?;
+    let req =
+        make_req(d.v, view, px, cut, depth, layers.as_deref());
+    if hier_mode {
+        return serve_hier(d, &req, gen, ack, reset, probe, &out);
+    }
+    let v = d.v;
+    let sess = &mut d.flat;
     let t0 = std::time::Instant::now();
-    let req = make_req(v, view, px, cut, depth, layers.as_deref());
     let plan = v.plan(&req);
     // probe = session-less exact query (pick/snap/clip): the delta
     // carries EVERY planned page, the working set is untouched
@@ -1760,5 +1797,105 @@ fn serve_one(
         members,
         t0.elapsed().as_secs_f64() * 1e3,
         sess.resident_bytes() as f64 / (1 << 20) as f64
+    ))
+}
+
+/// hier-mode request (VFS_HIER.md par.3.5/3.7): resolve the ack (or
+/// reset) FIRST, then plan, then record this response as the new
+/// pending txn. The response carries the WC top name and, once per
+/// daemon run, the ci->design-name table.
+fn serve_hier(
+    d: &mut Daemon,
+    req: &floe_vfs::ViewReq,
+    gen: u64,
+    ack: u64,
+    reset: bool,
+    probe: bool,
+    out: &str,
+) -> Result<String, String> {
+    let v = d.v;
+    let t0 = std::time::Instant::now();
+    if !probe {
+        if reset {
+            d.hier.reset();
+        } else {
+            d.hier.resolve_ack(ack)?;
+        }
+    }
+    let plan = v.plan_hier(req);
+    let upd = if probe {
+        // session-less exact query: the delta carries EVERY planned
+        // page, the working-set ledger is untouched
+        floe_vfs::HierUpdate {
+            new: plan.pages.clone(),
+            ..Default::default()
+        }
+    } else {
+        d.hier.apply(&v.ovm, &plan.pages, gen)?
+    };
+    std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
+    let (delta_path, top) = if plan.wcells.is_empty() {
+        ("-".to_string(), "-".to_string())
+    } else {
+        let bytes = v.delta_hier(&plan, &upd.new, gen)?;
+        let p = format!("{}/delta_{}.oas", out, gen);
+        std::fs::write(&p, &bytes).map_err(|e| e.to_string())?;
+        (p, floe_vfs::hier::ws_name(gen, plan.top))
+    };
+    // ci -> design-name table, once per daemon run (par.3.4); the
+    // client loads it into memory and deletes the file
+    let names_path = if d.names_sent {
+        "-".to_string()
+    } else {
+        let mut w = String::new();
+        for ci in 0..v.ovm.n_cells {
+            w.push_str(&format!(
+                "{}\t{}\n",
+                ci,
+                v.ovm.cell(ci).name
+            ));
+        }
+        let p = format!("{}/names_{}.tsv", out, gen);
+        std::fs::write(&p, w).map_err(|e| e.to_string())?;
+        d.names_sent = true;
+        p
+    };
+    let evict: Vec<String> =
+        upd.evict.iter().map(|&pi| v.page_name(pi)).collect();
+    let (mut bytes, mut members) = (0u64, 0u64);
+    for &pi in &plan.pages {
+        let p = v.ovm.page(pi);
+        bytes += p.csize as u64;
+        members += p.members;
+    }
+    let mb = |x: u64| x as f64 / (1 << 20) as f64;
+    let st = &plan.stats;
+    Ok(format!(
+        "gen={} pages={} new={} evict={} delta={} top={} names={} \
+         bytes={} members={} plan_ms={:.2} wc_cells={} \
+         inst_edges={} frame_rects={} \
+         resident_committed_mb={:.1} resident_projected_mb={:.1} \
+         pending_new_mb={:.1} pending_evict_mb={:.1}",
+        gen,
+        plan.pages.len(),
+        upd.new.len(),
+        if evict.is_empty() {
+            "-".to_string()
+        } else {
+            evict.join(",")
+        },
+        delta_path,
+        top,
+        names_path,
+        bytes,
+        members,
+        t0.elapsed().as_secs_f64() * 1e3,
+        st.wc_cells,
+        st.inst_edges,
+        st.frame_rects,
+        mb(upd.committed_bytes),
+        mb(upd.projected_bytes),
+        mb(upd.pending_new_bytes),
+        mb(upd.pending_evict_bytes),
     ))
 }

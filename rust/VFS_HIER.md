@@ -1,11 +1,12 @@
 # floe VFS 아키텍처 (V4: 계층 보존 워킹셋)
 
-2026-08-02 결정, rev 13 (rev 2 = 코드 대조 검토, rev 3/5/6/7/8/11
+2026-08-02 결정, rev 15 (rev 2 = 코드 대조 검토, rev 3/5/6/7/8/11
 = 외부 검토, rev 4 = 포맷-유지 원칙 폐기, rev 9/10 = **캐시 무결성
-단순화·책임 분리 지시**, rev 12 = **M0 실증 결과**, rev 13 = **M1
-구현 완료** 반영 — 변경 요지 §0). 상태: **M0·M1 완료(0.5.0) —
-M2(계층 델타 + 트랜잭션) 착수 가능**(M0 결과표 §5 M0, M1 결과 §5
-M1). 배경: MAIN09(150M급) 실측에서 **뷰어 깊은 줌이
+단순화·책임 분리 지시**, rev 12 = **M0 실증**, rev 13/14/15 =
+**M1/M2/M3 구현 완료** — 변경 요지 §0). 상태: **M0~M3 완료, 뷰어
+기본 = hier**(`FLOE_VFS_MODE=flat`으로 A/B) — **다음 = M4 실측
+A/B(MAIN09 등 사무실 자산)**(결과: §5 M0~M3). 배경: MAIN09(150M급)
+실측에서 **뷰어 깊은 줌이
 줌인할수록 느려지는** 병리 확인. 원인은 개별 증상이 아니라 하나의
 근본 구조 — **워킹셋을 평탄화(flatten)해서 klayout에 넘긴다**는 것.
 이 문서는 그 평탄화를 걷어내고, VFS/BVH를 정확히 활용해 klayout에
@@ -167,6 +168,53 @@ rev 10 (지시: **인덱서/뷰어 책임 분리** + 이전 검토 잔여 1건):
   start·count, payload size 등)은 checked — silent truncation
   금지, 초과는 "limit exceeded: <필드>" 빌드 에러.
 
+rev 15 (M3 구현 완료 — 2026-08-03, 파이썬 뷰어; 지시로 **기본 모드
+= hier**):
+- **뷰어 hier apply**(§3.7 ①~⑤): `VfsMosaic.apply_hier`(델타 read →
+  W-top 연결 → 이전 gen WC 일괄 shallow `delete_cells` → evict
+  prune + 인덱스 remap), stale 프레임은 apply 생략 = **ack 미전송이
+  곧 롤백 신호**(service의 기존 `if newer(): return`이 규약이 됨),
+  부분 실패는 `reset_all()`(Layout 제자리 재구성 — 렌더러 바인딩
+  유지) + `reset=1` 재요청 1회. 데몬-gen은 GUI gen과 분리된 전용
+  단조 카운터(`req_gen` — 실패 gen 재사용 금지 충족).
+- **pick ci→이름**(§3.4): `names=` 1회 로드(캐시 공유 dict, 파일
+  즉시 삭제) + `_WsNames` 리졸버(P/W 이름에서 ci 파싱) — service
+  의 `mosaic.design.get()` 호출부 무수정 드롭인. probe(pick/snap/
+  clip/cli region)는 `mode=hier_probe`.
+- **프레임 융합 규칙 추가**(§2.1 — M3 실측이 잡은 시각 회귀):
+  below-cut 배열의 멤버별 아웃라인은 피치 < 2×cut에서 서로 융합해
+  **실지오메트리를 덮는 단색 워시**가 됨(발견: probe 프레임 전면
+  #93a4ad). 멤버 피치(Grid) 또는 extent 밀도(Pts)가 2×cut 미만이면
+  **footprint 1박스(Rep::One)로 강등** — 분해 가능하면 기존대로
+  멤버별. 수정 후 hier/flat 서비스 렌더 **PNG 바이트 동일** 확인.
+- **게이트**: validate_vfs_render **6뷰**(배열 관통 마이크로 뷰 +
+  경계 스트립 추가) × flat/hier 2회, `validate_vfs_lifecycle.py`
+  신설 **L1~L4**(10-gen 팬 XOR+WC 잔존 0 / stale-drop 재전송 /
+  부분실패→reset 복구 / 예산 0 evict churn) — 전부 스위트 편입.
+  `floe probe`(실서비스) hier/flat 프레임 동일.
+
+rev 14 (M2 구현 완료 — 2026-08-02, floe-index 0.6.0):
+- **계층 델타**(§3.2): `Vfs::delta_hier` — 신규 페이지 스플라이스 +
+  authored WC(`W<gen>_<r>_<ci>`, 페이지 identity + 자식
+  CellInstArray + 프레임 rect(+rep) 255/0) 단일 OASIS, gen top WC가
+  단일 top(parse_doc 게이트 통과, 증분 델타는 ovp 무-IO).
+- **HierSession 2단계 커밋**(§3.7): pending = committed 대비 **순수
+  diff**(적용은 커밋 시점에만) — 롤백 = diff 폐기라 undo 불필요,
+  의미는 명세와 동일(new 취소/evict 복원/LRU touch 원복). ack
+  상태기계(커밋/롤백/중복 no-op/미래 ack·gen 비단조 에러·에러 시
+  pending 보존), projected 예산, reset(장부 초기화, gen 단조 유지).
+- **vfsd**(§3.5): `mode=hier|hier_probe` + `ack=`/`reset=` 파싱,
+  응답에 `top=`/`names=`(런당 1회, hier_probe 포함 첫 응답)/상주
+  4지표/`wc_cells= inst_edges= frame_rects=`, hier에서
+  `placements=/frames=` 미생성. 세션-모드는 런당 잠금
+  (`error=mode_switch`), probe는 자유. flat 경로 무변경.
+- **게이트**: 트랜잭션 유닛 3종(commit/stale-drop 재전송/프로토콜
+  에러/projected/LRU-touch 롤백), delta 라운드트립 2종(full/증분·
+  프레임·rebased Pts·결정성), `tools/validate_vfs_hier.py` H1~H5
+  (실데몬: gen1 apply → 증분 이름-바인딩+shallow delete → stale
+  롤백 재전송 → dup-gen 에러/reset 복구 → **hier_probe cut=0 델타
+  = 소스 지오메트리 XOR 일치**) — validate_rust.sh에 편입.
+
 rev 13 (M1 구현 완료 — 2026-08-02, floe-index 0.5.0):
 - `.ovm` v2 + 계층 플래너 + `plan --mode hier|flat` 구현·게이트
   통과 — 결과·구현 노트는 §5 M1 결과 블록. flat 경로는 스펙대로
@@ -292,7 +340,11 @@ FLOE_WS
   - **프레임**: cut 미만 자식의 외곽선 rect, **WC 로컬 좌표**. 배열
     밑 below-cut 자식은 rect에 rep를 실어 klayout이 배열로 처리 —
     현행 `rep_footprint`의 "배열 전체 1박스"에서 멤버별 아웃라인으로
-    의미가 바뀐다(더 정확). FRAME_CAP(200K)은 플랜 총량 상한으로
+    의미가 바뀐다(더 정확). **단, 융합 규칙**(M3 실측): 멤버 피치
+    (Grid 벡터) 또는 extent 밀도(Pts)가 **2×cut 미만**이면 멤버
+    아웃라인들이 화면에서 융합해 실지오메트리를 덮는 단색 워시가
+    되므로 **footprint 1박스(Rep::One)로 강등**한다(flat 동등).
+    FRAME_CAP(200K)은 플랜 총량 상한으로
     유지하되 WC 단위 dedup 덕에 자연 감소. depth 경계(r=0)의 자식은
     현행대로 프레임 없이 생략(§2.5).
 
@@ -921,10 +973,30 @@ gen 2: 데몬 "이미 resident" → 바디 재전송 안 함
 2. **M2 — 계층 델타 + 트랜잭션**: WC 계층을 OASIS 하나로(§3.2).
    `placements=`/`frames=` 폐기, `top=`/`names=`/`ack=` 추가(§3.5),
    `Session` 2단계 커밋(pending/commit/rollback, §3.7).
+   - **결과 (구현 완료 2026-08-02, 0.6.0)**: `delta_hier`(단일-top,
+     authored+스플라이스, 증분 ovp 무-IO), `HierSession`(pending =
+     순수 diff — 롤백 = 폐기), vfsd `mode=hier|hier_probe` +
+     `ack=/reset=/names=` + 상주 4지표 + 세션-모드 잠금. 게이트:
+     트랜잭션 유닛 3(스테일-드롭 재전송 회귀 포함), 델타 라운드트립
+     2(parse_doc 단일-top·프레임 rep·rebased Pts·바이트 결정성),
+     `validate_vfs_hier.py` **H1~H5 실데몬**(증분 이름-바인딩 +
+     shallow delete, 롤백 재전송, dup-gen/reset, **probe cut=0 =
+     소스 XOR 일치**) — validate_rust.sh 편입. flat/파이썬 무변경.
 3. **M3 — 계층 apply**: `VfsMosaic`에 gen-ephemeral WC 수명(§3.1:
    `delete_cells` 일괄 shallow, 페이지 잔존/evict 유지, cell-index
    remap 계승) + §3.7 apply 순서(①~⑤, stale 시 전부 생략 + ack
    미전송) + pick의 ci→이름 테이블(§3.4).
+   - **결과 (구현 완료 2026-08-03, 기본 모드 = hier)**:
+     `apply_hier`/`load_names`/`_WsNames`/`reset_all`(viewport.py),
+     vfsclient `hier/ack/reset` + `top=/names=` 파싱, service hier
+     분기(전용 `req_gen`, stale=ack 미전송, 예외→reset 재요청 1회),
+     probe/clip/cli region은 `hier_probe`. `FLOE_VFS_MODE=flat`로
+     A/B(M5에서 제거). §2.1 **프레임 융합 규칙**은 이 단계 실측이
+     추가(전면 워시 회귀 → footprint 강등, 수정 후 hier/flat 서비스
+     렌더 PNG 바이트 동일). 게이트: render 6뷰(관통 뷰 2종 추가) ×
+     양 모드, lifecycle L1~L4(팬 XOR·WC 잔존 0·stale 재전송·부분
+     실패 복구·evict churn), `floe probe` 실서비스 — 전부 green,
+     스위트 편입.
 4. **M4 — 검증**: §7 게이트 전부 + MAIN09 실측(inst_edges/pages/
    load_ms 자릿수 감소 확인) + flat vs 계층 A/B 수치.
 5. **M5 — 통합·폐기**: coverage/skeleton 라벨 재확인(§4), flat 경로
