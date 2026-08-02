@@ -323,6 +323,18 @@ impl Coverage {
         }
     }
 
+    /// a single (Rep::One) record spanning most of the die is a
+    /// structural boundary / seal ring, not fill density - it would
+    /// wash the whole overview one color. Skip it (fill ARRAYS that
+    /// cover the die are Rep::Grid with many members, and are kept).
+    fn is_boundary(&self, rep: &Rep, wb: &BBox) -> bool {
+        matches!(rep, Rep::One)
+            && (wb.x1 - wb.x0) as f64
+                >= 0.6 * (self.die.x1 - self.die.x0) as f64
+            && (wb.y1 - wb.y0) as f64
+                >= 0.6 * (self.die.y1 - self.die.y0) as f64
+    }
+
     /// direct (own-layer) records of a cell into their world bboxes
     fn splat_direct(&mut self, ctx: &SplatCtx, ci: usize, xf: &Xf) {
         let cell = &ctx.doc.cells[ci];
@@ -337,6 +349,9 @@ impl Coverage {
                 r.y + r.h + ey.1.max(0),
             );
             let wb = Coverage::world_bbox(xf, lb);
+            if self.is_boundary(&r.rep, &wb) {
+                continue;
+            }
             let a = (wb.x1 - wb.x0).max(1) as f64
                 * (wb.y1 - wb.y0).max(1) as f64;
             let area = (r.w * r.h) as f64 * r.rep.members() as f64;
@@ -355,6 +370,9 @@ impl Coverage {
             let lb = (lb.0 + ex.0.min(0), lb.1 + ey.0.min(0),
                       lb.2 + ex.1.max(0), lb.3 + ey.1.max(0));
             let wb = Coverage::world_bbox(xf, lb);
+            if self.is_boundary(&p.rep, &wb) {
+                continue;
+            }
             let a = (wb.x1 - wb.x0).max(1) as f64
                 * (wb.y1 - wb.y0).max(1) as f64;
             let area = poly_area(&p.pts) * p.rep.members() as f64;

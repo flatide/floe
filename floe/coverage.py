@@ -13,6 +13,11 @@ import numpy as np
 
 _HDR = "<8sId4qIIII"  # magic, ver, dbu, die x4, res_x, res_y, nlv, nl
 
+# density -> visible brightness gamma. Fill areal density is ~1-6%;
+# gamma 0.35 lifts 1% to ~19% and 6% to ~35% brightness so sparse
+# fill shows as a readable density block instead of near-black.
+COV_GAMMA = 0.35
+
 
 class Coverage:
     def __init__(self, path):
@@ -97,11 +102,18 @@ class Coverage:
                 continue
             cx = np.clip(cx, 0, pw - 1)
             cy = np.clip(cy, 0, ph - 1)
-            dens = arr[np.ix_(cy, cx)].astype(np.uint16)  # [h,w]
+            dens = arr[np.ix_(cy, cx)].astype(np.float32)  # 0..255
             dens[~iny, :] = 0
             dens[:, ~inx] = 0
             if not dens.any():
                 continue
+            # perceptual boost: real fill is areally sparse (a field
+            # of sub-um atoms is only ~1-6% covered), so raw density
+            # renders near-black. Gamma-lift so any real coverage
+            # reads as a visible density block (Calibre shows presence,
+            # not true areal fraction), while empty texels stay 0.
+            dens = (np.power(dens / 255.0, COV_GAMMA) * 255.0
+                    ).astype(np.uint16)
             c = int(hexcol.lstrip("#"), 16)
             r, g, b = (c >> 16) & 255, (c >> 8) & 255, c & 255
             # tint by density; max-accumulate (painter/screen union)
