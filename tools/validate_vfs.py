@@ -24,19 +24,23 @@ import klayout.db as db
 
 print = functools.partial(print, flush=True)
 
-PAGE_LEN = 88
-CELL_LEN = 112
+# .ovm wire v2 (rust/VFS_HIER.md par.3.6): header 232B with
+# ovp_len@72 + 9 sections@88, cell 128B (height/topo_rank; rbbox@48),
+# page 96B (seq u32@8, max_w/max_h u64@80/88)
+PAGE_LEN = 96
+CELL_LEN = 128
 
 
 def read_ovm(path):
     d = open(path, "rb").read()
     assert d[:8] == b"FLOEOVM1", "magic"
     ver = struct.unpack_from("<I", d, 8)[0]
-    assert ver == 1, ver
+    assert ver == 2, ver
     top, n_layers, n_cells, n_pages = struct.unpack_from(
         "<IIII", d, 40)
-    secs = [struct.unpack_from("<QQ", d, 72 + 16 * i)
-            for i in range(7)]
+    ovp_len = struct.unpack_from("<Q", d, 72)[0]
+    secs = [struct.unpack_from("<QQ", d, 88 + 16 * i)
+            for i in range(9)]
     names = d[secs[0][0]:secs[0][0] + secs[0][1]]
     layers = []
     for i in range(n_layers):
@@ -48,17 +52,17 @@ def read_ovm(path):
     for i in range(n_cells):
         o = secs[2][0] + CELL_LEN * i
         no, nl = struct.unpack_from("<IH", d, o)
-        rbbox = struct.unpack_from("<4q", d, o + 40)
+        rbbox = struct.unpack_from("<4q", d, o + 48)
         cells.append((names[no:no + nl].decode(), rbbox))
     pages = []
     for i in range(n_pages):
         o = secs[6][0] + PAGE_LEN * i
-        cell, li, seq = struct.unpack_from("<IIH", d, o)
+        cell, li, seq = struct.unpack_from("<III", d, o)
         off, csz, usz, recs = struct.unpack_from("<QIII", d, o + 48)
         mems = struct.unpack_from("<Q", d, o + 72)[0]
         pages.append((cell, li, seq, off, csz, recs, mems))
     return {"top": top, "layers": layers, "cells": cells,
-            "pages": pages}
+            "pages": pages, "ovp_len": ovp_len}
 
 
 def main():
@@ -74,6 +78,9 @@ def main():
 
     ovm = read_ovm(outdir + "/design.ovm")
     ovp = open(outdir + "/design.ovp", "rb").read()
+    if ovm["ovp_len"] != len(ovp):
+        fail("ovp_len header=%d file=%d"
+             % (ovm["ovp_len"], len(ovp)))
     lmap = ovm["layers"]
 
     # source truth: members per layer via klayout each() (expands

@@ -12,7 +12,7 @@
 
 use floe_oasis::doc::{Doc, PathRec, PolyRec, RectRec, Rep};
 use floe_oasis::write::{write_tree, WCell};
-use floe_ovm::{BBox, Builder};
+use floe_ovm::{narrow_u32, BBox, Builder, PBVH_NONE};
 use floe_tiler::hier::{cell_bboxes_full, rep_extent};
 use floe_tiler::{path_bbox, xf_rep, Xf};
 use std::io::Write;
@@ -20,6 +20,9 @@ use std::io::Write;
 const PAGE_TARGET_BYTES: usize = 1 << 20; // pre-encode estimate
 const PAGE_MIN_RECORDS: usize = 64;
 const BVH_LEAF: usize = 8;
+/// pages per page-BVH leaf, and the run size at or below which a
+/// (cell,layer) run gets no BVH at all (linear scan, root = NONE)
+const PBVH_LEAF: usize = 8;
 
 // cut-frame outline layer (shared with the skeleton's cell-outline
 // convention; drawn hollow by the viewer)
@@ -100,8 +103,8 @@ pub fn vfs_cmd(args: &[String]) {
     );
     std::fs::create_dir_all(&outdir).expect("mkdir outdir");
     if coverage_only {
-        // add design.ovc to an existing cache (no re-tiling): the
-        // pages/skeleton/meta stay as they are
+        // add design.ovc to an existing cache (additive op, outside
+        // the marker protocol): pages/skeleton/meta stay as they are
         if !std::path::Path::new(&format!("{}/design.ovm", outdir))
             .exists()
         {
@@ -112,30 +115,53 @@ pub fn vfs_cmd(args: &[String]) {
             );
             std::process::exit(1);
         }
+        write_coverage(&doc, &outdir, jobs);
     } else {
-        build(&doc, size, mtime, &outdir, jobs);
+        // marker protocol (VFS_HIER.md par.3.6): design.ovm is the
+        // commit marker. Kill it FIRST, delete the other outputs,
+        // write everything, write the marker LAST - an interrupted
+        // build reads as "no cache" (marker gone) or "corrupt cache"
+        // (marker partial), never as a valid cache.
+        for f in [
+            "design.ovm",
+            "design.ovp",
+            "design.ovc",
+            "skeleton.oas",
+            "texts.tsv",
+            "meta.json",
+        ] {
+            let _ = std::fs::remove_file(format!("{}/{}", outdir, f));
+        }
+        let ovm_bytes = build(&doc, size, mtime, &outdir, jobs);
         emit_viewer_side(&doc, &src, size, mtime, &outdir);
-    }
-    if coverage || coverage_only {
-        // coverage bitplanes (V3b): optional density overview
-        let tc = std::time::Instant::now();
-        let ovc = floe_vfs::coverage::write_ovc(
-            &doc,
-            &doc.layer_order,
-            jobs,
-        );
-        std::fs::write(format!("{}/design.ovc", outdir), &ovc)
-            .expect("write ovc");
+        if coverage {
+            write_coverage(&doc, &outdir, jobs);
+        }
+        std::fs::write(format!("{}/design.ovm", outdir), &ovm_bytes)
+            .expect("write ovm");
         eprintln!(
-            "[vfs] coverage {} ({:.1}s)",
-            fmt_size(ovc.len() as u64),
-            tc.elapsed().as_secs_f64()
+            "[vfs] commit design.ovm ({})",
+            fmt_size(ovm_bytes.len() as u64)
         );
     }
     eprintln!(
         "[vfs] done in {:.1}s -> {}",
         t0.elapsed().as_secs_f64(),
         outdir
+    );
+}
+
+/// coverage bitplanes (V3b): optional density overview
+fn write_coverage(doc: &Doc, outdir: &str, jobs: usize) {
+    let tc = std::time::Instant::now();
+    let ovc =
+        floe_vfs::coverage::write_ovc(doc, &doc.layer_order, jobs);
+    std::fs::write(format!("{}/design.ovc", outdir), &ovc)
+        .expect("write ovc");
+    eprintln!(
+        "[vfs] coverage {} ({:.1}s)",
+        fmt_size(ovc.len() as u64),
+        tc.elapsed().as_secs_f64()
     );
 }
 
@@ -339,7 +365,7 @@ fn rep_est(rep: &Rep) -> u32 {
 struct PageJob {
     ci: usize,
     li: u32,
-    seq: u16,
+    seq: u32,
     recs: Vec<PRec>,
     bbox: BBox,
     members: u64,
@@ -353,7 +379,7 @@ fn split_pages(
     ci: usize,
     li: u32,
     recs: &mut [PRec],
-    seq: &mut u16,
+    seq: &mut u32,
     out: &mut Vec<PageJob>,
 ) {
     let bytes: u64 = recs.iter().map(|r| r.bytes as u64).sum();
@@ -442,8 +468,10 @@ fn rss() -> String {
 
 /// reverse-topological (children-before-parents) cell order so the
 /// recursive fold converges in ONE pass instead of the old O(depth)
-/// fixpoint. Iterative post-order DFS; back-edges (only in a
-/// malformed cyclic hierarchy) are skipped, never looped.
+/// fixpoint. Iterative post-order DFS. A back-edge (cyclic
+/// hierarchy - invalid OASIS) is a HARD build error: the planner's
+/// rank sweep and the fold both assume a DAG, and rank assignment
+/// here is what guarantees it (VFS_HIER.md par.2.3).
 fn topo_order(doc: &Doc) -> Vec<usize> {
     let n = doc.cells.len();
     let mut order = Vec::with_capacity(n);
@@ -462,6 +490,13 @@ fn topo_order(doc: &Doc) -> Vec<usize> {
                 if state[c] == 0 {
                     state[c] = 1;
                     stack.push((c, 0));
+                } else if state[c] == 1 {
+                    panic!(
+                        "cycle in hierarchy involving cell '{}' - \
+                         invalid OASIS (placement graph must be \
+                         acyclic); indexing refused",
+                        doc.cells[c].name
+                    );
                 }
             } else {
                 order.push(ci);
@@ -474,14 +509,66 @@ fn topo_order(doc: &Doc) -> Vec<usize> {
 }
 
 /// per-cell plan produced in PARALLEL (the CPU-heavy work: instance
-/// BVH + per-layer page splitting). The Builder appends these
-/// serially in cell order afterwards, so `first`/base offsets are
-/// fixed up then and the .ovm/.ovp stay byte-identical to the
-/// single-threaded build at any thread count.
+/// BVH + per-layer page splitting + page BVH + pts Morton prep).
+/// The Builder appends these serially in cell order afterwards, so
+/// `first`/base offsets are fixed up then and the .ovm/.ovp stay
+/// byte-identical to the single-threaded build at any thread count.
 struct CellPlan {
     place_order: Vec<u32>,            // local place idx, leaf order
     bvh: Vec<(BBox, u32, u16, bool)>, // `first` is cell-local
+    /// pages across this cell's (layer) runs, each run already in
+    /// its page-BVH leaf order (seq is a name, not a position)
     pages: Vec<PageJob>,
+    /// (layer_idx, page_lo, page_count, pbvh_root) - page_lo and
+    /// root are cell-local (root PBVH_NONE = linear run)
+    pranges: Vec<(u32, u32, u32, u32)>,
+    /// (bbox, first, count, leaf, max_w, max_h) - leaf `first` is a
+    /// cell-local page index, inner `first` a cell-local node index
+    pbvh: Vec<(BBox, u32, u16, bool, u64, u64)>,
+    /// per local place idx: Morton-prepared pts (Rep::Pts only)
+    pts_prep: Vec<Option<floe_ovm::PtsPrepared>>,
+}
+
+/// binary BVH over one (cell,layer) page run with subtree max_w/
+/// max_h aggregates (pre-leaf cut culling). Same reorder trick as
+/// split_bvh: items end up in leaf-concatenated order.
+fn split_pbvh(
+    nodes: &mut Vec<(BBox, u32, u16, bool, u64, u64)>,
+    items: &mut [(BBox, u64, u64, usize)],
+    lo: usize,
+    slot: usize,
+) {
+    let mut bb = BBox::EMPTY;
+    let (mut mw, mut mh) = (0u64, 0u64);
+    for (ib, w, h, _) in items.iter() {
+        bb.grow(ib);
+        mw = mw.max(*w);
+        mh = mh.max(*h);
+    }
+    if items.len() <= PBVH_LEAF {
+        nodes[slot] =
+            (bb, lo as u32, items.len() as u16, true, mw, mh);
+        return;
+    }
+    let wx = bb.x1 - bb.x0;
+    let wy = bb.y1 - bb.y0;
+    let mid = items.len() / 2;
+    if wx >= wy {
+        items.select_nth_unstable_by_key(mid, |(b, _, _, _)| {
+            b.x0 + b.x1
+        });
+    } else {
+        items.select_nth_unstable_by_key(mid, |(b, _, _, _)| {
+            b.y0 + b.y1
+        });
+    }
+    let l = nodes.len();
+    nodes.push((BBox::EMPTY, 0, 0, false, 0, 0));
+    nodes.push((BBox::EMPTY, 0, 0, false, 0, 0));
+    nodes[slot] = (bb, l as u32, 2, false, mw, mh);
+    let (a, c) = items.split_at_mut(mid);
+    split_pbvh(nodes, a, lo, l);
+    split_pbvh(nodes, c, lo + mid, l + 1);
 }
 
 fn build_cell_plan(
@@ -587,17 +674,83 @@ fn build_cell_plan(
         });
     }
     let mut pages: Vec<PageJob> = Vec::new();
+    let mut pranges: Vec<(u32, u32, u32, u32)> = Vec::new();
+    let mut pbvh: Vec<(BBox, u32, u16, bool, u64, u64)> = Vec::new();
     for (li, mut recs) in per_layer.into_iter().enumerate() {
         if recs.is_empty() {
             continue;
         }
-        let mut seq = 0u16;
-        split_pages(ci, li as u32, &mut recs[..], &mut seq, &mut pages);
+        let mut seq = 0u32;
+        let mut run: Vec<PageJob> = Vec::new();
+        split_pages(ci, li as u32, &mut recs[..], &mut seq, &mut run);
+        let run_lo = narrow_u32(pages.len() as u64, "cell page count");
+        let run_count = narrow_u32(run.len() as u64, "run page count");
+        if run.len() <= PBVH_LEAF {
+            // short run: linear scan beats a tree
+            pranges.push((li as u32, run_lo, run_count, PBVH_NONE));
+            pages.append(&mut run);
+        } else {
+            let mut items: Vec<(BBox, u64, u64, usize)> = run
+                .iter()
+                .enumerate()
+                .map(|(k, j)| {
+                    (
+                        j.bbox,
+                        j.max_w.max(0) as u64,
+                        j.max_h.max(0) as u64,
+                        k,
+                    )
+                })
+                .collect();
+            let root_local =
+                narrow_u32(pbvh.len() as u64, "cell pbvh count");
+            let base = pbvh.len();
+            pbvh.push((BBox::EMPTY, 0, 0, false, 0, 0));
+            {
+                // split fills nodes with run-relative leaf ranges;
+                // shift both leaf-first (page) and inner-first
+                // (node) to cell-local bases afterwards
+                let mut nodes: Vec<(BBox, u32, u16, bool, u64, u64)> =
+                    vec![(BBox::EMPTY, 0, 0, false, 0, 0)];
+                split_pbvh(&mut nodes, &mut items, 0, 0);
+                pbvh.truncate(base);
+                for (bb, first, count, leaf, mw, mh) in nodes {
+                    let f = if leaf {
+                        run_lo + first
+                    } else {
+                        root_local + first
+                    };
+                    pbvh.push((bb, f, count, leaf, mw, mh));
+                }
+            }
+            // append the run's jobs in leaf order (items order
+            // after the split IS the directory order)
+            let mut slots: Vec<Option<PageJob>> =
+                run.into_iter().map(Some).collect();
+            for &(_, _, _, k) in &items {
+                pages.push(slots[k].take().expect("pbvh perm"));
+            }
+            pranges.push((li as u32, run_lo, run_count, root_local));
+        }
     }
-    CellPlan { place_order, bvh, pages }
+    let pts_prep: Vec<Option<floe_ovm::PtsPrepared>> = cell
+        .places
+        .iter()
+        .map(|pl| match &pl.rep {
+            Rep::Pts(p) => Some(floe_ovm::prepare_pts(p)),
+            _ => None,
+        })
+        .collect();
+    CellPlan { place_order, bvh, pages, pranges, pbvh, pts_prep }
 }
 
-fn build(doc: &Doc, size: u64, mtime: u64, outdir: &str, jobs: usize) {
+fn build(
+    doc: &Doc,
+    size: u64,
+    mtime: u64,
+    outdir: &str,
+    jobs: usize,
+) -> Vec<u8> {
     let t0 = std::time::Instant::now();
     let n = doc.cells.len();
     eprintln!("[vfs] build: recursive bbox ({} cells)...", n);
@@ -774,16 +927,27 @@ fn build(doc: &Doc, size: u64, mtime: u64, outdir: &str, jobs: usize) {
     // recursive members, recursive layer mask. Result is identical to
     // the fixpoint's converged values.
     let topo = topo_order(doc);
-    let mut height = vec![0u16; n];
+    // topo rank: parents-before-children (reverse post-order) for
+    // the planner's min-heap sweep (VFS_HIER.md par.2.3) - every
+    // edge gets parent.rank < child.rank, and rank assignment
+    // covering all cells IS the DAG guarantee (cycles panicked in
+    // topo_order).
+    let mut rank = vec![0u32; n];
+    for (i, &ci) in topo.iter().rev().enumerate() {
+        rank[ci] = narrow_u32(i as u64, "topo rank");
+    }
+    let mut height = vec![0u32; n];
     let mut rmembers = vec![0u64; n];
     let mut rmask: Vec<Vec<u8>> = vec![Vec::new(); n];
     for &ci in &topo {
-        let mut hm = 0u16;
+        let mut hm = 0u32;
         let mut mm = dmembers[ci];
         let mut mask = dmask[ci].clone();
         for pl in &doc.cells[ci].places {
             let c = pl.cell;
-            hm = hm.max(height[c] + 1);
+            hm = hm.max(height[c].checked_add(1).unwrap_or_else(
+                || panic!("limit exceeded: hierarchy depth"),
+            ));
             mm = mm.saturating_add(
                 rmembers[c].saturating_mul(pl.rep.members()),
             );
@@ -875,23 +1039,40 @@ fn build(doc: &Doc, size: u64, mtime: u64, outdir: &str, jobs: usize) {
     // single-threaded loop, so the .ovm/.ovp are byte-identical.
     let mut jobs_list: Vec<PageJob> = Vec::new();
     for (ci, slot) in pslots.into_iter().enumerate() {
-        let CellPlan { place_order, bvh, mut pages } =
-            slot.into_inner().expect("cell plan unset");
+        let CellPlan {
+            place_order,
+            bvh,
+            mut pages,
+            pranges,
+            pbvh,
+            pts_prep,
+        } = slot.into_inner().expect("cell plan unset");
         let cell = &doc.cells[ci];
         let place_base = b.n_places();
-        assert!(
-            place_base + (cell.places.len() as u64) < u32::MAX as u64
-        );
         for &pi in &place_order {
             let pl = &cell.places[pi as usize];
-            b.place(
-                pl.cell as u32,
-                pl.x,
-                pl.y,
-                pl.rot,
-                pl.flip as bool,
-                &pl.rep,
-            );
+            match &pts_prep[pi as usize] {
+                Some(prep) => {
+                    b.place_pts(
+                        pl.cell as u32,
+                        pl.x,
+                        pl.y,
+                        pl.rot,
+                        pl.flip,
+                        prep,
+                    );
+                }
+                None => {
+                    b.place(
+                        pl.cell as u32,
+                        pl.x,
+                        pl.y,
+                        pl.rot,
+                        pl.flip,
+                        &pl.rep,
+                    );
+                }
+            }
         }
         let (bvh_start, bvh_count) = if bvh.is_empty() {
             (0, 0)
@@ -899,7 +1080,7 @@ fn build(doc: &Doc, size: u64, mtime: u64, outdir: &str, jobs: usize) {
             let base = b.n_bvh();
             for &(bb, first, count, leaf) in &bvh {
                 let f = if leaf {
-                    place_base as u32 + first
+                    narrow_u32(place_base + first as u64, "place index")
                 } else {
                     base + first
                 };
@@ -908,8 +1089,38 @@ fn build(doc: &Doc, size: u64, mtime: u64, outdir: &str, jobs: usize) {
             (base, bvh.len() as u32)
         };
         // page index == job index; phase 3 appends in job order
-        let page_start = jobs_list.len() as u32;
-        let page_count = pages.len() as u32;
+        let page_base = jobs_list.len() as u64;
+        let page_start = narrow_u32(page_base, "page count");
+        let page_count =
+            narrow_u32(pages.len() as u64, "cell page count");
+        // page BVH nodes + (cell,layer) runs: cell-local firsts
+        // shift to the global bases here (same fixup pattern as the
+        // instance BVH)
+        let pb_base = b.n_pbvh();
+        for &(bb, first, count, leaf, mw, mh) in &pbvh {
+            let f = if leaf {
+                narrow_u32(page_base + first as u64, "page index")
+            } else {
+                pb_base + first
+            };
+            b.pbvh_node(&bb, f, count, leaf, mw, mh);
+        }
+        let pr_start = b.n_pranges();
+        for &(li, lo, cnt, root) in &pranges {
+            let r = if root == PBVH_NONE {
+                PBVH_NONE
+            } else {
+                pb_base + root
+            };
+            b.prange(
+                li,
+                narrow_u32(page_base + lo as u64, "page index"),
+                cnt,
+                r,
+            );
+        }
+        let pr_count =
+            narrow_u32(pranges.len() as u64, "prange count");
         jobs_list.append(&mut pages);
 
         let mask_d = b.bitset(&dmask[ci]);
@@ -917,14 +1128,20 @@ fn build(doc: &Doc, size: u64, mtime: u64, outdir: &str, jobs: usize) {
         b.cell(
             &cell.name,
             height[ci],
+            rank[ci],
             &dbox[ci],
             &win_to_bbox(rbb[ci]),
-            place_base as u32,
-            cell.places.len() as u32,
+            narrow_u32(place_base, "place count"),
+            narrow_u32(
+                cell.places.len() as u64,
+                "cell place count",
+            ),
             page_start,
             page_count,
             bvh_start,
             bvh_count,
+            pr_start,
+            pr_count,
             mask_d,
             mask_r,
             rmembers[ci],
@@ -1003,25 +1220,26 @@ fn build(doc: &Doc, size: u64, mtime: u64, outdir: &str, jobs: usize) {
         std::io::Write::write_all(&mut ovp, payload)
             .expect("write ovp");
         b.page(
-            job.ci as u32,
+            narrow_u32(job.ci as u64, "cell index"),
             job.li,
             job.seq,
             &job.bbox,
             ovp_off,
-            payload.len() as u32,
-            payload.len() as u32,
-            job.recs.len() as u32,
+            payload.len() as u64,
+            payload.len() as u64,
+            job.recs.len() as u64,
             job.members,
-            job.max_w.clamp(0, u32::MAX as i64) as u32,
-            job.max_h.clamp(0, u32::MAX as i64) as u32,
+            job.max_w.max(0) as u64,
+            job.max_h.max(0) as u64,
         );
         ovp_off += payload.len() as u64;
         pages_bytes += payload.len() as u64;
     }
     ovp.flush().expect("flush ovp");
-    let ovm_bytes = b.finish();
-    let ovm_path = format!("{}/design.ovm", outdir);
-    std::fs::write(&ovm_path, &ovm_bytes).expect("write ovm");
+    // the caller writes design.ovm LAST (commit marker, after the
+    // viewer-side files); ovp_len rides in the header so open can
+    // verify the ovm/ovp pair
+    let ovm_bytes = b.finish(ovp_off);
     eprintln!(
         "[vfs] {} pages ({}) + ovm {} in {:.1}s",
         pages_total,
@@ -1029,6 +1247,7 @@ fn build(doc: &Doc, size: u64, mtime: u64, outdir: &str, jobs: usize) {
         fmt_size(ovm_bytes.len() as u64),
         t0.elapsed().as_secs_f64()
     );
+    ovm_bytes
 }
 
 fn pts_bbox(pts: &[(i64, i64)]) -> BBox {
@@ -1184,9 +1403,19 @@ fn make_req(
 }
 
 pub fn plan_cmd(args: &[String]) {
-    let (dir, view, px, cut, depth, layers, _) =
+    let (dir, view, px, cut, depth, layers, rest) =
         parse_common(args);
-    let v = floe_vfs::Vfs::open(&dir).expect("open vfs");
+    // --mode hier|flat: A/B switch (VFS_HIER.md par.3.5); flat
+    // stays the default until M5 retires it
+    let mode = rest
+        .iter()
+        .find(|(k, _)| k == "--mode")
+        .map(|(_, v)| v.as_str())
+        .unwrap_or("flat");
+    let v = floe_vfs::Vfs::open(&dir).unwrap_or_else(|e| {
+        eprintln!("{}", e);
+        std::process::exit(1);
+    });
     let req = make_req(
         &v,
         view.expect("--view required"),
@@ -1195,6 +1424,72 @@ pub fn plan_cmd(args: &[String]) {
         depth,
         layers.as_deref(),
     );
+    if mode == "hier" {
+        let t0 = std::time::Instant::now();
+        let plan = v.plan_hier(&req);
+        let ms = t0.elapsed().as_secs_f64() * 1e3;
+        let (mut cbytes, mut ubytes) = (0u64, 0u64);
+        let (mut records, mut members) = (0u64, 0u64);
+        for &pi in &plan.pages {
+            let p = v.ovm.page(pi);
+            cbytes += p.csize as u64;
+            ubytes += p.usize_ as u64;
+            records += p.records as u64;
+            members += p.members;
+        }
+        let st = &plan.stats;
+        println!(
+            "{{\n  \"mode\": \"hier\",\n  \"pages\": {},\n  \
+             \"compressed_bytes\": {},\n  \"encoded_bytes\": {},\n  \
+             \"records\": {},\n  \"members\": {},\n  \
+             \"wc_cells\": {},\n  \"wc_variants\": {},\n  \
+             \"inst_edges\": {},\n  \"frame_rects\": {},\n  \
+             \"visited_bvh\": {},\n  \
+             \"culled_subtrees_size\": {},\n  \
+             \"culled_subtrees_layer\": {},\n  \
+             \"culled_pages_size\": {},\n  \
+             \"culled_page_layer_roots\": {},\n  \
+             \"culled_page_bvh_bbox\": {},\n  \
+             \"culled_page_bvh_cut\": {},\n  \
+             \"visited_page_bvh\": {},\n  \
+             \"page_candidates\": {},\n  \
+             \"pts_enumerated\": {},\n  \"pts_fallback\": {},\n  \
+             \"pts_offsets_scanned\": {},\n  \
+             \"pts_selected\": {},\n  \
+             \"pts_offsets_emitted\": {},\n  \
+             \"pts_bytes_emitted\": {},\n  \
+             \"grid_fallback_full\": {},\n  \
+             \"kbox_merges\": {},\n  \"plan_ms\": {:.2}\n}}",
+            plan.pages.len(),
+            cbytes,
+            ubytes,
+            records,
+            members,
+            st.wc_cells,
+            st.wc_variants,
+            st.inst_edges,
+            st.frame_rects,
+            st.visited_bvh,
+            st.cull_size,
+            st.cull_layer,
+            st.cull_page_size,
+            st.culled_page_layer_roots,
+            st.culled_page_bvh_bbox,
+            st.culled_page_bvh_cut,
+            st.visited_page_bvh,
+            st.page_candidates,
+            st.pts_enumerated,
+            st.pts_fallback,
+            st.pts_offsets_scanned,
+            st.pts_selected,
+            st.pts_offsets_emitted,
+            st.pts_bytes_emitted,
+            st.grid_fallback_full,
+            st.kbox_merges,
+            ms
+        );
+        return;
+    }
     let t0 = std::time::Instant::now();
     let plan = v.plan(&req);
     let (mut cbytes, mut ubytes) = (0u64, 0u64);
@@ -1265,7 +1560,10 @@ pub fn vfsd_cmd(args: &[String]) {
         }
     }
     let dir = dir.expect("ovm dir");
-    let v = floe_vfs::Vfs::open(&dir).expect("open vfs");
+    let v = floe_vfs::Vfs::open(&dir).unwrap_or_else(|e| {
+        eprintln!("{}", e);
+        std::process::exit(1);
+    });
     let mut sess = floe_vfs::Session::new(budget_mb << 20);
     eprintln!(
         "[vfsd] {} ({} cells, {} pages), budget {} MB",

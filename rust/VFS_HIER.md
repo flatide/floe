@@ -1,10 +1,11 @@
 # floe VFS 아키텍처 (V4: 계층 보존 워킹셋)
 
-2026-08-02 결정, rev 11 (rev 2 = 코드 대조 검토, rev 3/5/6/7/8/11
+2026-08-02 결정, rev 13 (rev 2 = 코드 대조 검토, rev 3/5/6/7/8/11
 = 외부 검토, rev 4 = 포맷-유지 원칙 폐기, rev 9/10 = **캐시 무결성
-단순화·책임 분리 지시** 반영 — 변경 요지 §0). 상태: **아키텍처
-승인, 구현 명세 v11** — M0 실증(바인딩 + Pts 재료화)으로 검증 후
-동결. 배경: MAIN09(150M급) 실측에서 **뷰어 깊은 줌이
+단순화·책임 분리 지시**, rev 12 = **M0 실증 결과**, rev 13 = **M1
+구현 완료** 반영 — 변경 요지 §0). 상태: **M0·M1 완료(0.5.0) —
+M2(계층 델타 + 트랜잭션) 착수 가능**(M0 결과표 §5 M0, M1 결과 §5
+M1). 배경: MAIN09(150M급) 실측에서 **뷰어 깊은 줌이
 줌인할수록 느려지는** 병리 확인. 원인은 개별 증상이 아니라 하나의
 근본 구조 — **워킹셋을 평탄화(flatten)해서 klayout에 넘긴다**는 것.
 이 문서는 그 평탄화를 걷어내고, VFS/BVH를 정확히 활용해 klayout에
@@ -165,6 +166,36 @@ rev 10 (지시: **인덱서/뷰어 책임 분리** + 이전 검토 잔여 1건):
   usize/u64 → u32/u16 narrowing(na/nb, Pts count, page/place/BVH
   start·count, payload size 등)은 checked — silent truncation
   금지, 초과는 "limit exceeded: <필드>" 빌드 에러.
+
+rev 13 (M1 구현 완료 — 2026-08-02, floe-index 0.5.0):
+- `.ovm` v2 + 계층 플래너 + `plan --mode hier|flat` 구현·게이트
+  통과 — 결과·구현 노트는 §5 M1 결과 블록. flat 경로는 스펙대로
+  병존(vfsd/뷰어는 M1에서 무변경 — 라이브 경로 영향 0).
+- 스펙 대비 편차(전부 안전 방향): 프레임은 rep-extent footprint가
+  localview에 닿을 때만 방출(스펙은 무조건 — 뷰-무관 프레임 억제
+  강화), det=0 비정규 2-D Grid는 보수 full-range(허용), 빌더
+  narrowing은 "limit exceeded: <필드>" 하드 에러(패닉) 방식.
+
+rev 12 (M0 실증 완료 — 2026-08-02, klayout 0.30.9/pip, macOS):
+- **바인딩 GREEN**(§3.3/§5): 옵션 없는 `Layout.read`가 파일-미정의
+  상주 셀 참조를 기존 셀에 정확히 바인딩 — 30 gen 연속: 충돌 변형/
+  유령 잔존 0, 지오메트리 XOR 0(회전·Grid·Pts rep 경유 포함),
+  shallow `delete_cells` 후 페이지 전원 생존(고아 포함), RSS 평탄.
+  hier.tsv 폴백은 **불사용 판정**(명세는 §3.3에 보험으로 보존).
+  관찰: 리더가 미정의 참조당 임시 셀을 만들고 병합-해제해 **cell
+  index 슬롯만 단조 증가**(`Layout::cells()` = 슬롯 수, 라이브 수는
+  `each_cell` — §3.1 구현 노트).
+- **Pts 비전개 확정**(§2.3/§6-6): klayout은 type-10을 iterated
+  array로 유지 — 1M 점: 레코드 1, read 0.146s(≈0.15µs/점), RSS
+  ≈26B/점, **좁은-뷰 draw는 N 무관 0.008s 상수**(뷰 클립 동작).
+  사다리의 근거를 "전개 방지" → **델타 바이트·스캔 CPU 바운드**로
+  교정, full-rep 임계 1024 → **8192 기본**(≈50KB wire;
+  testchip_1g5 최대 3,823이 전부 무스캔 경로에 들어옴; M4 A/B
+  확정). 리베이스 XOR(선택 0/1/≥2 × 5크기) 전부 green — §2.3
+  rebase 규칙 실증. pya 폴백 단가: 개별 삽입 ~55만/s, 1M 점
+  1.8s+47MB(네이티브 read 대비 12×) — §1.1 flat load 병목과 정합.
+- 스파이크 재현: `rust/oasis/examples/m0_gen.rs`(생성기),
+  `tools/m0/*.py`(스파이크), 산출물 `data/m0/` — 결과표 §5 M0.
 
 rev 11 (검토 소항목 3건):
 - 오픈 검증에서 `len % bs_width` **이전에 `bs_width > 0` 선검증**
@@ -345,9 +376,14 @@ top-down 전파한다 (키는 WsKey, §2.5):
   - **zero-copy 접근자**: 플래너는 `place()`의 Vec 복사 대신 pool
     의 borrowed byte slice를 **LE 이터레이터로 디코드**해 읽는다
     (`&[(i64,i64)]` 캐스트 금지 — 정렬/엔디언).
-  - **방출 사다리**(klayout이 type-10을 개별 인스턴스로 전개할
-    가능성 — M0 실증 항목 — 을 임계로 바운드):
-    `|pts| ≤ 1024` → full rep 1개. 초과 → **가시-부분집합 Pts**:
+  - **방출 사다리**(M0 실증 완료: klayout은 type-10을 전개하지
+    않고 iterated array로 유지 — 1M 점 = 레코드 1, 좁은-뷰 draw
+    N 무관 상수(§5 M0). 임계가 바운드하는 것은 전개가 아니라
+    **델타 바이트와 스캔 CPU**다):
+    `|pts| ≤ PTS_FULL_REP`(기본 **8192** — M0로 1024에서 상향:
+    full rep ≈6.1B/점 wire·0.15µs/점 read라 8192 ≈ 50KB/1.2ms,
+    testchip_1g5 최대 3,823 → 실자산 전부 무스캔 경로; M4 A/B로
+    최종 확정) → full rep 1개. 초과 → **가시-부분집합 Pts**:
     chunk bbox ∩ R인 chunk만 스캔해 `o ∈ R` 멤버 선택. 요청당
     `PTS_ENUM_BUDGET`(예: 20만 점, per-point 테스트 CPU 캡) 소진
     시 → chunk-단위 통짜 포함(초과포함 ≤ 256×chunk 수로 유계).
@@ -481,6 +517,12 @@ frames OASIS 별도. 목표: **WC 계층 전체를 OASIS 하나로** 방출.
   제거 — 개별 delete_cell 반복의 cell-index 재배치 비용 회피.
   주의: viewport.py의 기존 `prune_cell(ci, -1)` 패턴을 WC에 쓰면 그
   gen 트리만 참조하던 **상주 페이지까지 삭제**된다 — 반드시 shallow.
+- 구현 노트(M0 관찰): klayout 리더는 델타의 미정의 참조마다 임시
+  셀을 만들고 이름 병합 후 해제한다 — **cell index 슬롯**이 gen마다
+  (정의 셀 + 미정의 참조 이름 수)만큼 단조 증가하고 재사용되지
+  않는다. `Layout::cells()`는 슬롯 수라 라이브 수는 `each_cell`로
+  세야 한다(뷰포트의 이름-기반 레지스트리는 무영향). 30 gen 실측
+  RSS 평탄 — 세션 수명 기준 무해, 지표로만 관찰.
 - eviction은 현행대로 **페이지 단위**(Session bytes 예산, evict
   이름 목록). WC는 evict 대상이 아니다. (Session은 plan에 없는
   페이지만 evict하므로 현재 gen WC가 evict된 페이지를 참조하는 일은
@@ -512,11 +554,16 @@ frames OASIS 별도. 목표: **WC 계층 전체를 OASIS 하나로** 방출.
 
 WC의 PLACEMENT는 델타 파일 안에 정의가 없는 **상주 페이지 이름**을
 참조한다. klayout `Layout.read`가 이 참조를 기존 셀에 이름으로
-바인딩해 줘야 §3 전체가 성립한다. 현행 코드는 "이름 충돌 없음" 전제
-위에 있어 이 동작을 검증한 적이 없다 → **M0 스파이크로 최우선 확증**
-(§5).
+바인딩해 줘야 §3 전체가 성립한다. **M0 확증 완료(GREEN)**: klayout
+0.30.9, 옵션 없는 plain read로 30 gen 연속 — 충돌 변형(`$`)/유령
+잔존 0, 지오메트리 XOR 0(회전·Grid·Pts rep 경유 포함), shallow
+`delete_cells` 후 페이지 전원 생존(그 gen만 참조하던 고아 포함),
+RSS 평탄. 절차·수치는 §5 M0. (관찰: 미정의 참조는 임시 셀 생성→
+이름 병합→해제로 처리되어 cell index 슬롯만 남는다 — §3.1 구현
+노트.)
 
-실패 시 폴백: 페이지 스플라이스는 그대로 두고 **WC 구성만 pya API
+폴백(**불사용 판정** — 다른 klayout 계열 대비 보험으로 명세만
+보존): 페이지 스플라이스는 그대로 두고 **WC 구성만 pya API
 로**(프레임당 에지 수백이라 저렴; 사실상 mats-TSV의 계층형 후계).
 폴백의 전송 포맷도 지금 명세한다 — `hier_{gen}.tsv`, 행 단위:
 ```
@@ -800,6 +847,41 @@ gen 2: 데몬 "이미 resident" → 바디 재전송 안 함
      시간/RSS, `each_inst()` 인스턴스 레코드 수(전개 여부 확정),
      draw 시간, pya 폴백의 확장량 측정. klayout이 전개한다면 full
      rep 임계(1024)를 낮추거나 가시-부분집합을 소형 Pts까지 확대.
+   - **결과 (완료 2026-08-02, klayout 0.30.9/pip, macOS)** — 재현:
+     `cargo build --release -p floe-oasis --example m0_gen`,
+     `m0_gen pts data/m0` / `m0_gen gens data/m0 30`, 이후
+     `tools/m0/binding_spike.py data/m0` /
+     `tools/m0/pts_case.py data/m0 <N>` /
+     `tools/m0/pts_fallback.py <k>` (.venv python).
+     - **바인딩 GREEN**: plain read(LoadLayoutOptions 불요), 30 gen
+       — 변형/유령 0, 지오메트리 XOR 0(rot·Grid·Pts rep 경유 포함),
+       shallow delete 후 페이지 전원 생존(고아 포함), live-cell
+       장부 일치, RSS 61.1→61.3MB 평탄. 이 규모에서 read
+       0.1~0.5ms, `delete_cells` 0.01~0.03ms. cell index 슬롯 단조
+       증가 관찰(§3.1 구현 노트). hier.tsv 폴백 불사용 판정.
+     - **Pts 재료화** (전 케이스 리베이스 XOR green, 비전개 확정):
+
+       | 입력 N | read s | ΔRSS MB | inst 레코드 | draw wide / narrow s |
+       |---|---|---|---|---|
+       | 2 | ~0 | ~0 | 1 | .008 / .008 |
+       | 1,024 | ~0 | ~0 | 1 | .006 / .007 |
+       | 1,025 | ~0 | ~0 | 1 | .006 / .007 |
+       | 100,000 | .014 | 3.2 | 1 | .031 / .008 |
+       | 1,000,000 | .146 | 25.3 | 1 | .078 / **.008** |
+
+       좁은-뷰 draw가 N 무관 상수 = klayout이 iterated array를 뷰
+       클립. per-점 단가: read ≈0.15µs, RSS ≈26B, wire ≈6.1B
+       (deflate 후). 선택 0/1/≥2 리베이스(§2.3)가 모든 크기에서
+       full 파일 지오메트리와 XOR 일치 — `Rep::One`+원점 이동(1개),
+       원점+=p0/[0,pᵢ−p0](≥2), 생략(0개) 모두 실증. pya 폴백(개별
+       삽입): ~55만 인스턴스/s, 100만 = 1.8s + 47MB — 네이티브
+       read 대비 12×/1.9×(flat 경로 6.3M 삽입 ≈ 11.5s와 정합,
+       §1.1 load 병목의 정량 재확인).
+     - **판정**: M2 진입 게이트 통과. full-rep 임계 1024 →
+       **8192**(§2.3), 사다리 구조는 유지(바운드 대상 = 델타
+       바이트·스캔 CPU), hier.tsv 폴백 dormant. 주의: 실측은 pip
+       klayout 0.30.9 — 배포 번들(conda-forge) 계열은 M4 스위트가
+       재확인.
 1. **M1 — `.ovm` v2 + 계층 플랜**:
    - v2(§3.6): 빌드에 topo_rank(사이클 = 하드 에러)·height u32
      checked·prange/pbvh 섹션·seq u32·max u64(clamp 제거)·pts pool
@@ -816,6 +898,26 @@ gen 2: 데몬 "이미 resident" → 바디 재전송 안 함
      cut 분류(§2.4), depth variant + height 접기(§2.5), 인스턴스/
      페이지 BVH 프루닝(§2.2). **flat 경로는 mode 플래그로 병존**
      (A/B).
+   - **결과 (구현 완료 2026-08-02, 0.5.0)**: floe-ovm v2(빌더/
+     리더/섹션-유형별 오픈 검증/zero-copy pts 접근자/checked
+     narrow), 빌드(topo_rank + 사이클 하드 에러, height u32
+     checked, prange + pbvh(리프 ≤8, run 내 리프-순 재배열), Pts
+     Morton 전처리(병렬 단계), seq u32, max u64 clamp 제거, 마커
+     규약, checked 전면), 계층 플래너 `rust/vfs/src/hier.rs`
+     (rank min-heap 1패스·K-box·Grid 닫힌형·Pts 사다리·depth
+     variant/height 접기·프레임 rect+rep), `plan --mode hier|flat`,
+     `tools/validate_vfs.py` v2(+`ovp_len` 정합 게이트),
+     `Vfs::open`의 ovm↔ovp 쌍 검증. **게이트**: 유닛 15종
+     (브루트포스 참조 플래너 무누락/동일성, Grid 닫힌형 프로퍼티
+     (음수 벡터·det=0·±1 타이트), Pts rebase 0/1/≥2·slot dedup·
+     예산 폴백 무누락, pbvh=linear 동일성, K-merge 결정성, depth
+     fixture, 회전/미러) green, `--jobs` 1 vs 8 **ovp/ovm 바이트
+     동일**, 마커 3상태(no cache / corrupt / pair mismatch) + 구
+     버전 문구, validate_rust.sh 전체 스위트 v2 통과. **valmini
+     A/B**: 동일 페이지 집합 뷰에서 placements 54→11·27→9·78→12
+     (inst_edges), **배열-관통 좁은 뷰는 flat 6페이지/26배치 →
+     hier 1페이지/2에지**(`view=cwb` 병리 소거 실증). MAIN09 실측
+     A/B는 M4(사무실 자산).
 2. **M2 — 계층 델타 + 트랜잭션**: WC 계층을 OASIS 하나로(§3.2).
    `placements=`/`frames=` 폐기, `top=`/`names=`/`ack=` 추가(§3.5),
    `Session` 2단계 커밋(pending/commit/rollback, §3.7).
@@ -837,8 +939,9 @@ gen 2: 데몬 "이미 resident" → 바디 재전송 안 함
 
 ## 6. 리스크 / 미해결
 
-1. **klayout read 이름-바인딩**(§3.3) — 최대 리스크. M0로 전진 배치,
-   폴백(hier.tsv + pya API) 포맷까지 명세됨.
+1. (해소 — M0 GREEN) **klayout read 이름-바인딩**(§3.3): 옵션 없는
+   plain read로 확증(klayout 0.30.9, 30 gen 누수 0, §5 M0 결과).
+   폴백(hier.tsv + pya API)은 불사용 — 명세만 §3.3에 보존.
 2. **localview 합집합의 이산 병리**: 같은 셀이 화면 안 멀리 떨어진
    두 곳에 보이면 단일-bbox 합집합은 그 사이 전부를 덮어, 중간
    줌에서 페이지 과다 로드가 flat(경로별 정확한 lview)보다 나빠질
@@ -854,10 +957,10 @@ gen 2: 데몬 "이미 resident" → 바디 재전송 안 함
 5. **v2 마이그레이션**: 기존 `.floe` 캐시 전부 재빌드 필요(1회).
    버전 게이트 에러는 명확하지만, 사무실 대형 자산은 재빌드 시간
    (parse 279s + build)을 계획에 반영해야 한다.
-6. **klayout의 type-10 Pts 전개(미실증)**: 전개한다면 대형 Pts full
-   rep는 read/RSS/draw 폭증 — 방출 사다리(§2.3)가 임계로 바운드하고
-   M0 실증이 임계를 튜닝한다. 전개하지 않는다면 사다리는 그대로
-   두되 임계를 올려 단순화 여지.
+6. (해소 — M0) **klayout의 type-10 Pts 전개**: 전개하지 않음을 실증
+   — 1M 점 = 레코드 1, read 0.146s, RSS +25MB, 좁은-뷰 draw N 무관
+   상수(§5 M0). 사다리는 델타 바이트·스캔 CPU 바운드로 존속,
+   full-rep 임계는 8192로 상향(§2.3, M4 A/B 확정).
 7. (해소 — 기록만) 모달 정합 → 구조 보장(§3.2). cut 에지-단위 →
    셀 단위 속성(§2.4). 전파 수렴·9.8G plan 시간 → rank 1패스 +
    빌드 사이클 거부(§2.3). min-depth 의미 변경 → depth variant로
@@ -928,7 +1031,7 @@ gen 2: 데몬 "이미 resident" → 바디 재전송 안 함
 - **pick**: 공백·유니코드 design명 셀에서 ci→이름 테이블 경유 표시
   확인(§3.4).
 - **M0 게이트**: §3.3 바인딩 + shallow `delete_cells` + 다중 gen
-  누수 확증 스파이크.
+  누수 확증 스파이크 — **완료(GREEN)**, 결과표 §5 M0.
 - **v2 포맷 게이트**(§3.6): v2 재빌드로 validate_rust.sh 전체
   스위트 통과(v1↔v2 의미 동등). 구 바이너리+새 캐시 / 새 바이너리+
   구 캐시 교차 실행 시 버전 에러 문구(재빌드 안내) 확인. 합성

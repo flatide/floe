@@ -3,6 +3,7 @@
 //! delta OASIS files by splicing page payload bytes verbatim.
 
 pub mod coverage;
+pub mod hier;
 
 use floe_oasis::write::{splice_tree, tree_body};
 use floe_ovm::{BBox, Ovm, PlaceV};
@@ -90,7 +91,22 @@ pub struct Plan {
 impl Vfs {
     pub fn open(dir: &str) -> Result<Vfs, String> {
         let ovm = Ovm::open(&format!("{}/design.ovm", dir))?;
-        Ok(Vfs { ovm, ovp_path: format!("{}/design.ovp", dir) })
+        // viewer-side verification (VFS_HIER.md par.3.6): the marker
+        // (design.ovm, structurally validated by from_bytes) commits
+        // a specific ovp byte length - a mismatched pair is a broken
+        // build or a mixed cache, never something to read through
+        let ovp_path = format!("{}/design.ovp", dir);
+        let ovp_size = std::fs::metadata(&ovp_path)
+            .map_err(|e| format!("{}: {}", ovp_path, e))?
+            .len();
+        if ovp_size != ovm.ovp_len {
+            return Err(format!(
+                "corrupt cache; rebuild: design.ovp is {} bytes but \
+                 design.ovm committed {}",
+                ovp_size, ovm.ovp_len
+            ));
+        }
+        Ok(Vfs { ovm, ovp_path })
     }
 
     pub fn page_name(&self, pi: u32) -> String {
@@ -200,8 +216,8 @@ impl Vfs {
             if !p.bbox.intersects(&lview) {
                 continue;
             }
-            if (p.max_w as i64) < req.cut_dbu
-                && (p.max_h as i64) < req.cut_dbu
+            if p.max_w < req.cut_dbu.max(0) as u64
+                && p.max_h < req.cut_dbu.max(0) as u64
             {
                 st.cull_page_size += 1;
                 continue;
@@ -479,7 +495,7 @@ fn rep_footprint(xf: &Xf, base_wb: &BBox, rep: &Rep) -> BBox {
     }
 }
 
-fn xf_bbox(xf: &Xf, b: &BBox) -> BBox {
+pub(crate) fn xf_bbox(xf: &Xf, b: &BBox) -> BBox {
     if b.is_empty() {
         return *b;
     }
