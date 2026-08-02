@@ -282,6 +282,7 @@ class Viewer:
             depth = 999 if goto is not None else 1
         self.depth_value = max(0, min(999, int(depth)))
         self.abstract = False       # `a` key: klayout abstract mode
+        self.coverage_on = True     # `v` key: density coverage fill (VFS)
         self._depth_used = "?"      # depth of the last frame ("?" = none yet)
         # detail cut LEVEL: 0 = off, higher = more aggressive. Users
         # only ever see the level; the screen-px threshold behind each
@@ -957,6 +958,7 @@ class Viewer:
             "depth": depth,
             "cut_px": self.cut_px,
             "abstract": self.abstract,
+            "coverage": self.coverage_on,
             "visible": self._layers_arg()})
         self._pending = self.gen
         self._preview_gen = None   # stop a stale preview ticker
@@ -1377,6 +1379,8 @@ class Viewer:
             self._cut_dialog()
         elif name == "a":
             self._toggle_abstract()
+        elif name == "v":
+            self._toggle_coverage()
         elif name == "e":
             self._drc_window()
         elif name == "n":
@@ -1409,9 +1413,14 @@ class Viewer:
     def _depth_label(self):
         d = self._depth()
         lbl = "depth: full" if d is None else "depth: %d" % d
-        if self.meta.get("bands"):
+        if self.meta.get("bands") or self.meta.get("vfs"):
             lbl += " · cut: %s" % ("off" if self.cut_level <= 0
                                    else "L%d" % self.cut_level)
+        # coverage is a VFS-only density fill; show its state (and
+        # only when a cut is active - it does nothing at cut off)
+        if self.meta.get("vfs") and self.cut_level > 0 \
+                and not self.coverage_on:
+            lbl += " · cov: off"
         if self.abstract:
             lbl += " · abstract"
         return lbl
@@ -1435,6 +1444,13 @@ class Viewer:
         # a lossy navigation accelerator (wide views 25x, measured);
         # turn it off before reading fine content
         self.abstract = not self.abstract
+        self._on_depth()
+
+    def _toggle_coverage(self):
+        # `v`: density-coverage fill at cut/wide views (VFS caches).
+        # Off = the cut just drops small features (they vanish) with
+        # no density stand-in - useful to see exactly what is real.
+        self.coverage_on = not self.coverage_on
         self._on_depth()
 
     def _on_depth(self):

@@ -681,7 +681,8 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, res, newer,
     # geometry thins out; deeper in, the real shapes carry the view
     tex0_px = (cov.tex0[0] * job["w"] / max(1e-9, x1 - x0)
                if cov is not None else 1e9)
-    if cov is not None and cut_px > 0 and tex0_px <= COV_MAX_TEXEL_PX:
+    if cov is not None and job.get("coverage", True) and cut_px > 0 \
+            and tex0_px <= COV_MAX_TEXEL_PX:
         try:
             from .coverage import composite as _cov_composite
             vis_set = (None if job["visible"] is None

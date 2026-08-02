@@ -326,9 +326,11 @@ GUI는 **GTK3/PyGObject** 셸이다. flateyes와 같은 폐쇄망 호스트
 - 인스턴스 소켓은 `GLib.io_add_watch`로, 결과 큐는 `GLib.timeout_add`(25ms)로
   서비스한다. UI 라벨은 English only (XQuartz 한글 글리프 부재 — flateyes 규칙).
 - 키: `f` fit, `+`/`-`(`=`) 줌, `r` ruler, `m` 스냅, `d` depth 다이얼로그,
-  `g` goto 다이얼로그, `c` detail cut 다이얼로그, `e` DRC 브라우저,
+  `g` goto 다이얼로그, `c` detail cut 다이얼로그, `a` abstract 모드,
+  `v` coverage 밀도 채움 토글(VFS), `e` DRC 브라우저,
   `n`/`p` 다음/이전 DRC 에러, `0`-`9` depth, `Esc` 단계 해제,
-  `q` 종료 (확인 다이얼로그).
+  `q` 종료 (확인 다이얼로그). cut/coverage 상태는 하단 상태바 우측
+  (`cut: L1 · cov: off` 등).
 - 레이어 패널은 텍스트 목록이다 (체크박스 없음): 이름 **더블클릭**으로
   온/오프하며 꺼진 레이어는 **취소선**으로 표시된다. layer 번호로
   그룹핑되며, 같은 번호에 datatype이 여럿이면 (`11/0 M1`, `11/1 M1.1`)
