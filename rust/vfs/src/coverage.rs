@@ -110,7 +110,11 @@ pub struct Coverage {
 
 impl Coverage {
     /// world -> finest texel scale
-    fn build(doc: &Doc, layer_order: &[(u32, u32)]) -> Coverage {
+    fn build(
+        doc: &Doc,
+        layer_order: &[(u32, u32)],
+        jobs: usize,
+    ) -> Coverage {
         let nl = layer_order.len();
         let lidx: std::collections::HashMap<(u32, u32), usize> =
             layer_order
@@ -142,7 +146,7 @@ impl Coverage {
             die,
             planes,
         };
-        let mut ctx = SplatCtx {
+        let ctx = SplatCtx {
             doc,
             lidx: &lidx,
             bboxes: &bboxes,
@@ -150,7 +154,83 @@ impl Coverage {
             texw,
             texh,
         };
-        cov.splat_cell(&mut ctx, doc.top, &Xf::identity());
+        // the top cell's direct records (usually few) on the main
+        // thread, then its placements (the bulk - blocks, fill) split
+        // across workers, each into its own accumulator, then summed.
+        // Independent subtrees -> deterministic sum, order-invariant.
+        cov.splat_direct(&ctx, doc.top, &Xf::identity());
+        let places = &doc.cells[doc.top].places;
+        let total = places.len();
+        let done = std::sync::atomic::AtomicUsize::new(0);
+        let id = Xf::identity();
+        let nthreads = jobs.max(1).min(8);
+        if nthreads <= 1 || total < 2 {
+            for pl in places {
+                cov.splat_place(&ctx, pl, &id);
+            }
+        } else {
+            let t0 = std::time::Instant::now();
+            let next = std::sync::atomic::AtomicUsize::new(0);
+            let parts: Vec<Coverage> = std::thread::scope(|s| {
+                // heartbeat: coverage splat can run for minutes on a
+                // big chip; report progress so it never looks hung
+                {
+                    let done = &done;
+                    s.spawn(move || {
+                        use std::sync::atomic::Ordering::Relaxed;
+                        let mut last = t0;
+                        loop {
+                            std::thread::sleep(
+                                std::time::Duration::from_millis(200),
+                            );
+                            if done.load(Relaxed) >= total {
+                                return;
+                            }
+                            if last.elapsed().as_secs_f64() >= 5.0 {
+                                last = std::time::Instant::now();
+                                eprintln!(
+                                    "[vfs] coverage {}/{} subtrees \
+                                     ({}s)",
+                                    done.load(Relaxed),
+                                    total,
+                                    t0.elapsed().as_secs()
+                                );
+                            }
+                        }
+                    });
+                }
+                let handles: Vec<_> = (0..nthreads)
+                    .map(|_| {
+                        let ctx = &ctx;
+                        let next = &next;
+                        let done = &done;
+                        let base = cov.empty_like();
+                        s.spawn(move || {
+                            use std::sync::atomic::Ordering::Relaxed;
+                            let mut w = base;
+                            loop {
+                                let i = next.fetch_add(1, Relaxed);
+                                if i >= total {
+                                    break;
+                                }
+                                w.splat_place(
+                                    ctx, &places[i], &id,
+                                );
+                                done.fetch_add(1, Relaxed);
+                            }
+                            w
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| h.join().expect("coverage worker"))
+                    .collect()
+            });
+            for p in &parts {
+                cov.merge(p);
+            }
+        }
         cov
     }
 
@@ -236,9 +316,17 @@ impl Coverage {
     }
 
     fn splat_cell(&mut self, ctx: &SplatCtx, ci: usize, xf: &Xf) {
+        self.splat_direct(ctx, ci, xf);
+        let places = ctx.doc.cells[ci].places.clone();
+        for pl in &places {
+            self.splat_place(ctx, pl, xf);
+        }
+    }
+
+    /// direct (own-layer) records of a cell into their world bboxes
+    fn splat_direct(&mut self, ctx: &SplatCtx, ci: usize, xf: &Xf) {
         let cell = &ctx.doc.cells[ci];
         let (texw, texh) = (ctx.texw, ctx.texh);
-        // direct records: exact density into their world bbox
         for r in &cell.rects {
             let l = ctx.lidx[&(r.layer, r.dt)];
             let (ex, ey) = rep_extent(&r.rep);
@@ -285,39 +373,73 @@ impl Coverage {
                 * pa.rep.members() as f64;
             self.splat_rect(l, &wb, (area / a) as f32, texw, texh);
         }
-        // children
-        let places = cell.places.clone();
-        for pl in &places {
-            let cb = match ctx.bboxes[pl.cell] {
-                Some(b) => b,
-                None => continue,
-            };
-            match &pl.rep {
-                Rep::One => {
-                    let base = xf.compose(&Xf::place(
-                        pl.x, pl.y, pl.rot, pl.flip,
-                    ));
-                    let wb = Coverage::world_bbox(&base, cb);
-                    if self.small(&wb, texw, texh) {
-                        self.splat_uniform_cell(ctx, pl.cell, &wb, 1.0);
-                    } else {
-                        self.splat_cell(ctx, pl.cell, &base);
-                    }
+    }
+
+    /// one placement: descend (One, big enough) or fold to uniform
+    /// density (array, or a subtree below texel granularity)
+    fn splat_place(
+        &mut self,
+        ctx: &SplatCtx,
+        pl: &floe_oasis::doc::PlaceRec,
+        xf: &Xf,
+    ) {
+        let (texw, texh) = (ctx.texw, ctx.texh);
+        let cb = match ctx.bboxes[pl.cell] {
+            Some(b) => b,
+            None => return,
+        };
+        match &pl.rep {
+            Rep::One => {
+                let base =
+                    xf.compose(&Xf::place(pl.x, pl.y, pl.rot, pl.flip));
+                let wb = Coverage::world_bbox(&base, cb);
+                if self.small(&wb, texw, texh) {
+                    self.splat_uniform_cell(ctx, pl.cell, &wb, 1.0);
+                } else {
+                    self.splat_cell(ctx, pl.cell, &base);
                 }
-                rep => {
-                    // whole array footprint in world; fold to uniform
-                    // density = members * recursive area / footprint
-                    // (no per-member expansion)
-                    let base = Xf::place(pl.x, pl.y, pl.rot, pl.flip);
-                    let cw =
-                        Coverage::world_bbox(&xf.compose(&base), cb);
-                    let (rx, ry) = rep_extent(rep);
-                    let wb = grow_rep(xf, &cw, &rx, &ry);
-                    let members = rep.members() as f64;
-                    self.splat_uniform_cell(
-                        ctx, pl.cell, &wb, members,
-                    );
-                }
+            }
+            rep => {
+                // whole array footprint in world; fold to uniform
+                // density = members * recursive area / footprint
+                let base = Xf::place(pl.x, pl.y, pl.rot, pl.flip);
+                let cw =
+                    Coverage::world_bbox(&xf.compose(&base), cb);
+                let (rx, ry) = rep_extent(rep);
+                let wb = grow_rep(xf, &cw, &rx, &ry);
+                let members = rep.members() as f64;
+                self.splat_uniform_cell(ctx, pl.cell, &wb, members);
+            }
+        }
+    }
+
+    /// empty clone (same grid, no accumulated density) for a worker
+    fn empty_like(&self) -> Coverage {
+        let mut planes: Vec<Vec<f32>> = Vec::new();
+        planes.resize_with(self.n_layers, Vec::new);
+        Coverage {
+            res_x: self.res_x,
+            res_y: self.res_y,
+            n_layers: self.n_layers,
+            die: self.die,
+            planes,
+        }
+    }
+
+    /// sum another worker's planes into this one
+    fn merge(&mut self, other: &Coverage) {
+        for l in 0..self.n_layers {
+            if other.planes[l].is_empty() {
+                continue;
+            }
+            if self.planes[l].is_empty() {
+                self.planes[l] =
+                    vec![0.0; (self.res_x * self.res_y) as usize];
+            }
+            for (a, b) in
+                self.planes[l].iter_mut().zip(&other.planes[l])
+            {
+                *a += *b;
             }
         }
     }
@@ -364,8 +486,9 @@ fn grow_rep(
 pub fn write_ovc(
     doc: &Doc,
     layer_order: &[(u32, u32)],
+    jobs: usize,
 ) -> Vec<u8> {
-    let cov = Coverage::build(doc, layer_order);
+    let cov = Coverage::build(doc, layer_order, jobs);
     let nl = cov.n_layers;
     // build mip levels (halving) down to <=8 on the longer axis
     let mut levels: Vec<(u32, u32, Vec<Vec<u8>>)> = Vec::new();

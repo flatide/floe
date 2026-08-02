@@ -91,8 +91,11 @@ pub fn vfs_cmd(args: &[String]) {
     {
         // coverage bitplanes (V3b): density overview for cut/wide views
         let tc = std::time::Instant::now();
-        let ovc =
-            floe_vfs::coverage::write_ovc(&doc, &doc.layer_order);
+        let ovc = floe_vfs::coverage::write_ovc(
+            &doc,
+            &doc.layer_order,
+            jobs,
+        );
         std::fs::write(format!("{}/design.ovc", outdir), &ovc)
             .expect("write ovc");
         eprintln!(
