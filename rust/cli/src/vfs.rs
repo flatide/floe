@@ -32,12 +32,25 @@ pub fn vfs_cmd(args: &[String]) {
     let mut src: Option<String> = None;
     let mut outdir: Option<String> = None;
     let mut jobs: Option<usize> = None;
+    // coverage bitplanes are optional: off by default (extra build
+    // time, and the viewer defaults to coverage off), --coverage to
+    // include, --coverage-only to add design.ovc to an existing cache
+    let mut coverage = false;
+    let mut coverage_only = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--jobs" => {
                 jobs = Some(args[i + 1].parse().expect("jobs"));
                 i += 2;
+            }
+            "--coverage" => {
+                coverage = true;
+                i += 1;
+            }
+            "--coverage-only" => {
+                coverage_only = true;
+                i += 1;
             }
             a => {
                 if src.is_none() {
@@ -86,10 +99,25 @@ pub fn vfs_cmd(args: &[String]) {
         doc.norm_s
     );
     std::fs::create_dir_all(&outdir).expect("mkdir outdir");
-    build(&doc, size, mtime, &outdir, jobs);
-    emit_viewer_side(&doc, &src, size, mtime, &outdir);
-    {
-        // coverage bitplanes (V3b): density overview for cut/wide views
+    if coverage_only {
+        // add design.ovc to an existing cache (no re-tiling): the
+        // pages/skeleton/meta stay as they are
+        if !std::path::Path::new(&format!("{}/design.ovm", outdir))
+            .exists()
+        {
+            eprintln!(
+                "--coverage-only: {}/design.ovm not found (build \
+                 the cache first)",
+                outdir
+            );
+            std::process::exit(1);
+        }
+    } else {
+        build(&doc, size, mtime, &outdir, jobs);
+        emit_viewer_side(&doc, &src, size, mtime, &outdir);
+    }
+    if coverage || coverage_only {
+        // coverage bitplanes (V3b): optional density overview
         let tc = std::time::Instant::now();
         let ovc = floe_vfs::coverage::write_ovc(
             &doc,

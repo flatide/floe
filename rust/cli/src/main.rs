@@ -84,7 +84,8 @@ fn main() {
              --grid x0,y0,tw,th,nx,ny --edges e0,e1,e2\n       \
              floe-index index <file.oas> [outdir] [--mem GB] \
              [--jobs N] [--tile-bytes N] [--bands um,um,um]\n       \
-             floe-index vfs <file.oas> [outdir] [--jobs N]\n       \
+             floe-index vfs <file.oas> [outdir] [--jobs N] \
+             [--coverage | --coverage-only]\n       \
              floe-index plan <outdir> --view x0,y0,x1,y1 \
              [--px-per-um N] [--cut-px N] [--layers a/b,..] \
              [--depth N]"

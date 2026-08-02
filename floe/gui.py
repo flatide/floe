@@ -282,7 +282,7 @@ class Viewer:
             depth = 999 if goto is not None else 1
         self.depth_value = max(0, min(999, int(depth)))
         self.abstract = False       # `a` key: klayout abstract mode
-        self.coverage_on = True     # `v` key: density coverage fill (VFS)
+        self.coverage_on = False    # `v` key: density coverage fill (VFS)
         self._depth_used = "?"      # depth of the last frame ("?" = none yet)
         # detail cut LEVEL: 0 = off, higher = more aggressive. Users
         # only ever see the level; the screen-px threshold behind each
@@ -1423,11 +1423,11 @@ class Viewer:
         if self.meta.get("bands") or self.meta.get("vfs"):
             lbl += " · cut: %s" % ("off" if self.cut_level <= 0
                                    else "L%d" % self.cut_level)
-        # coverage is a VFS-only density fill; show its state (and
-        # only when a cut is active - it does nothing at cut off)
+        # coverage is a VFS-only density fill, off by default and
+        # opt-in via `v`; show it only when the user turned it on
         if self.meta.get("vfs") and self.cut_level > 0 \
-                and not self.coverage_on:
-            lbl += " · cov: off"
+                and self.coverage_on:
+            lbl += " · cov"
         if self.abstract:
             lbl += " · abstract"
         return lbl
