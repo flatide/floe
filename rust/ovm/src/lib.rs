@@ -46,6 +46,10 @@ pub const LOD_EXACT: u8 = 0;
 pub const LOD_MERGED: u8 = 1;
 /// "no LOD variant" sentinel for the exact page's lod_page link
 pub const LOD_PAGE_NONE: u32 = u32::MAX;
+/// LOD coverage grid resolution per axis (property of the v4
+/// MERGED payloads; the planner's fidelity precondition - one
+/// grid cell at or below one screen pixel - derives from it)
+pub const LOD_GRID: i64 = 128;
 /// codec 0 = plain OASIS single-cell file (CBLOCK inside)
 pub const CODEC_OASIS: u8 = 0;
 
@@ -1124,6 +1128,8 @@ impl Ovm {
         // pages: owner/layer indexes + payload spans inside the
         // committed ovp
         let pgb = sec(SEC_PAGEDIR);
+        let mut lod_claim =
+            vec![0u8; (n_pages as usize).div_ceil(8)];
         for i in 0..n_pages as usize {
             let b = &pgb[i * PAGE_LEN..];
             if g32(b, 0) >= n_cells {
@@ -1141,8 +1147,24 @@ impl Ovm {
                     i, end, ovp_len
                 )));
             }
-            // exact -> LOD link: in bounds, target IS a LOD page of
-            // the same (cell, layer); LOD pages don't chain
+            // lod byte and codec must be KNOWN values - anything
+            // else is a corrupt or future cache, not a silent
+            // fallthrough (review finding)
+            if b[12] != LOD_EXACT && b[12] != LOD_MERGED {
+                return Err(corrupt(format!(
+                    "page {} lod byte {}",
+                    i, b[12]
+                )));
+            }
+            if b[13] != CODEC_OASIS {
+                return Err(corrupt(format!(
+                    "page {} codec {}",
+                    i, b[13]
+                )));
+            }
+            // exact -> LOD link: in bounds, target is EXACTLY a
+            // MERGED page of the same (cell, layer, seq), claimed
+            // by only ONE exact page; LOD pages don't chain
             let lp = g32(b, 68);
             if b[12] != LOD_EXACT && lp != LOD_PAGE_NONE {
                 return Err(corrupt(format!("page {} lod chain", i)));
@@ -1155,15 +1177,25 @@ impl Ovm {
                     )));
                 }
                 let t = &pgb[lp as usize * PAGE_LEN..];
-                if t[12] == LOD_EXACT
+                if t[12] != LOD_MERGED
                     || g32(t, 0) != g32(b, 0)
                     || g32(t, 4) != g32(b, 4)
+                    || g32(t, 8) != g32(b, 8)
                 {
                     return Err(corrupt(format!(
                         "page {} lod link target {}",
                         i, lp
                     )));
                 }
+                let slot = &mut lod_claim[lp as usize >> 3];
+                let bit = 1u8 << (lp as usize & 7);
+                if *slot & bit != 0 {
+                    return Err(corrupt(format!(
+                        "lod page {} claimed twice",
+                        lp
+                    )));
+                }
+                *slot |= bit;
             }
         }
         Ok(Ovm {
@@ -1576,6 +1608,58 @@ mod tests {
 
     #[test]
     fn corrupt_gates() {
+        // lod link hardening (review round): bad lod byte, link
+        // to a non-MERGED page, seq mismatch, double claim
+        {
+            let mut b = Builder::new(1000.0, 0, 0, 1);
+            b.top = 0;
+            b.layer(1, 0, "L", 2, 2);
+            let m = b.bitset(&[1]);
+            let pb = BBox { x0: 0, y0: 0, x1: 10, y1: 10 };
+            b.page(0, 0, 0, &pb, 0, 0, 0, 1, 1, 1, 1, LOD_EXACT, 2);
+            // seq 0 like page 0 (names are a build concern, not
+            // an ovm invariant) so a retargeted link reaches the
+            // double-claim check instead of the seq gate
+            b.page(0, 0, 0, &pb, 0, 0, 0, 1, 1, 1, 1, LOD_EXACT,
+                   LOD_PAGE_NONE);
+            b.page(0, 0, 0, &pb, 0, 0, 0, 1, 1, 1, 1, LOD_MERGED,
+                   LOD_PAGE_NONE);
+            let pr = b.prange(0, 0, 2, PBVH_NONE);
+            b.cell("T", 0, 0, &pb, &pb, 0, 0, 0, 3, 0, 0, pr, 1,
+                   m, m, 2);
+            let good = b.finish(0);
+            assert!(Ovm::from_bytes(good.clone()).is_ok());
+            let pg0 = u64::from_le_bytes(
+                good[88 + 16 * SEC_PAGEDIR
+                    ..96 + 16 * SEC_PAGEDIR]
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
+            // (a) bad lod byte
+            let mut c = good.clone();
+            c[pg0 + PAGE_LEN + 12] = 7;
+            let e = err_of(Ovm::from_bytes(c));
+            assert!(e.contains("lod byte"), "{}", e);
+            // (b) exact linking to an EXACT page
+            let mut c = good.clone();
+            c[pg0 + 68..pg0 + 72]
+                .copy_from_slice(&1u32.to_le_bytes());
+            let e = err_of(Ovm::from_bytes(c));
+            assert!(e.contains("lod link target"), "{}", e);
+            // (c) two exacts claiming one LOD
+            let mut c = good.clone();
+            c[pg0 + PAGE_LEN + 68..pg0 + PAGE_LEN + 72]
+                .copy_from_slice(&2u32.to_le_bytes());
+            let e = err_of(Ovm::from_bytes(c));
+            assert!(e.contains("claimed twice"), "{}", e);
+            // (d) seq mismatch: retarget the MERGED page's seq
+            let mut c = good.clone();
+            c[pg0 + 2 * PAGE_LEN + 8..pg0 + 2 * PAGE_LEN + 12]
+                .copy_from_slice(&9u32.to_le_bytes());
+            let e = err_of(Ovm::from_bytes(c));
+            assert!(e.contains("lod link target"), "{}", e);
+        }
+
         // version gate
         let mut bytes = build_sample();
         bytes[8] = 1;

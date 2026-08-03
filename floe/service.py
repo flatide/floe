@@ -211,6 +211,25 @@ def _svc_pick(cache, mosaic, job, res):
     res.put(out)
 
 
+def _tsv_unesc(s):
+    """reverse of the writer's tsv_esc: backslash, tab, newline"""
+    if "\\" not in s:
+        return s
+    out = []
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if c == "\\" and i + 1 < len(s):
+            n = s[i + 1]
+            out.append({"t": "\t", "n": "\n",
+                        "\\": "\\"}.get(n, n))
+            i += 2
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
 def _load_sidecar_labels(cache):
     """Display labels from the build's labels.tsv (skeleton retired,
     VFS_HIER.md rev 24): block names of big first-level cells ride
@@ -231,7 +250,7 @@ def _load_sidecar_labels(cache):
             l, _, d = p[0].partition("/")
             try:
                 out.append((int(l), int(d), int(p[1]), int(p[2]),
-                            p[3]))
+                            _tsv_unesc(p[3])))
             except ValueError:
                 continue
     return out

@@ -226,6 +226,9 @@ pub fn vfs_cmd(args: &[String]) {
             "design.ovp",
             "design.ovc",
             "labels.tsv",
+            // legacy (pre-0.10) viewer file: scrub on rebuild so a
+            // re-index actually reclaims the skeleton's bytes
+            "skeleton.oas",
             "texts.tsv",
             "meta.json",
         ] {
@@ -560,6 +563,7 @@ struct SplitStats {
     oversize_pages: u64,
     depth_capped: u64,
     lod_pages: u64,
+    lod_grid_verbatim: u64,
 }
 
 /// hard recursion cap (records above it emit as-is + stat)
@@ -1377,13 +1381,60 @@ fn split_pbvh(
 
 /// M7 LOD trigger: pages this dense get a merged-coverage variant
 const LOD_MIN_MEMBERS: u64 = 4096;
-/// coverage grid resolution (per axis) - at the zoom band where a
-/// variant activates, one cell is at or below one screen pixel
-const LOD_GRID: i64 = 128;
+use floe_ovm::LOD_GRID;
 /// records whose SHAPE spans at least this many grid cells in BOTH
 /// axes pass through verbatim (individually visible blobs keep
 /// their exact outline; only sub-cell "dust" is fused)
 const LOD_PASS_CELLS: i64 = 4;
+/// per-record member cap for LOD enumeration of SKEW grids -
+/// orthogonal grids mark analytically at any count, but a skew
+/// mega-grid (tiny OASIS bytes, 10^12 members) must never loop
+/// (review finding); above the cap it passes through verbatim
+const LOD_ENUM_CAP: u64 = 1 << 16;
+
+/// cells [0,g) touched on one axis by the intervals
+/// [lo + m*step, hi + m*step], m in [0,n) - per-cell existence
+/// test, O(g) for ANY n (the analytic replacement for member
+/// loops on orthogonal grids)
+fn lod_axis_cells(
+    lo: i64,
+    hi: i64,
+    step: i64,
+    n: i64,
+    b0: i64,
+    bext: i64,
+    g: i64,
+) -> Vec<bool> {
+    let mut out = vec![false; g as usize];
+    if n <= 0 || bext <= 0 {
+        return out;
+    }
+    let cell = |k: i64| -> i64 {
+        b0 + (k as i128 * bext as i128 / g as i128) as i64
+    };
+    for k in 0..g {
+        let (c0, c1) = (cell(k), cell(k + 1));
+        let ok = if step == 0 {
+            hi >= c0 && lo <= c1
+        } else {
+            // lo + m*step <= c1  AND  hi + m*step >= c0
+            let (mlo, mhi) = if step > 0 {
+                (
+                    floe_tiler::div_ceil(c0 - hi, step),
+                    floe_tiler::div_floor(c1 - lo, step),
+                )
+            } else {
+                (
+                    floe_tiler::div_ceil(c1 - lo, step),
+                    floe_tiler::div_floor(c0 - hi, step),
+                )
+            };
+            mlo.max(0) <= mhi.min(n - 1)
+        };
+        out[k as usize] = ok;
+    }
+    out
+}
 
 /// build the merged-coverage LOD variant of one page: mark every
 /// small member's footprint on a LOD_GRID^2 bitmap over the page
@@ -1397,6 +1448,7 @@ fn gen_lod_job(
     cell: &floe_oasis::doc::Cell,
     arena: &Arena,
     exact: &PageJob,
+    st: &mut SplitStats,
 ) -> Option<PageJob> {
     let bb = exact.bbox;
     let (bw, bh) = (bb.x1 - bb.x0, bb.y1 - bb.y0);
@@ -1424,7 +1476,17 @@ fn gen_lod_job(
         // stay exact
         let cw = (sw as i128 * g as i128 / bw.max(1) as i128) as i64;
         let ch = (sh as i128 * g as i128 / bh.max(1) as i128) as i64;
-        if cw >= LOD_PASS_CELLS && ch >= LOD_PASS_CELLS {
+        // rects: bbox IS the geometry, so bbox marking is exact and
+        // only big-in-both-axes blobs need to stay verbatim.
+        // polys/paths: bbox marking is only within the <=1-cell
+        // overcoverage contract while the whole bbox fits ONE cell
+        // (review finding: a 3-cell concave outline would smear) -
+        // anything larger rides verbatim.
+        let verbatim = match r.kind {
+            0 => cw >= LOD_PASS_CELLS && ch >= LOD_PASS_CELLS,
+            _ => cw > 1 || ch > 1,
+        };
+        if verbatim {
             pass_members += r.members;
             pass.push(r.clone());
             continue;
@@ -1454,35 +1516,90 @@ fn gen_lod_job(
                     mark(ox, oy);
                 }
             }
-            (Frag::Grid { i0, i1, j0, j1 }, rep) => {
-                let (va, vb) = match rep {
-                    Rep::Grid { va, vb, .. } => (*va, *vb),
-                    _ => unreachable!("grid frag on non-grid"),
+            (frag, Rep::Grid { na, nb, va, vb }) => {
+                let (va, vb) = (*va, *vb);
+                let (i0, i1, j0, j1) = match frag {
+                    Frag::Grid { i0, i1, j0, j1 } => {
+                        (i0 as i64, i1 as i64, j0 as i64, j1 as i64)
+                    }
+                    _ => (0, *na as i64, 0, *nb as i64),
                 };
-                for i in i0 as i64..i1 as i64 {
-                    for j in j0 as i64..j1 as i64 {
-                        mark(
-                            i * va.0 + j * vb.0,
-                            i * va.1 + j * vb.1,
-                        );
+                let (ni, nj) = (i1 - i0, j1 - j0);
+                let ortho = (va.1 == 0 && vb.0 == 0)
+                    || (va.0 == 0 && vb.1 == 0);
+                if ortho {
+                    // analytic cell coverage: O(grid) for ANY
+                    // member count (review finding: a 10^6 x 10^6
+                    // grid record is bytes-tiny and stays in one
+                    // page, but a member loop would be 10^12)
+                    let (bx0, by0) =
+                        (i0 * va.0 + j0 * vb.0, i0 * va.1 + j0 * vb.1);
+                    let (xs_step, xs_n, ys_step, ys_n) =
+                        if va.1 == 0 && vb.0 == 0 {
+                            (va.0, ni, vb.1, nj)
+                        } else {
+                            (vb.0, nj, va.1, ni)
+                        };
+                    let xs = lod_axis_cells(
+                        sb.x0 + bx0,
+                        sb.x1 + bx0,
+                        xs_step,
+                        xs_n,
+                        bb.x0,
+                        bw,
+                        g,
+                    );
+                    let ys = lod_axis_cells(
+                        sb.y0 + by0,
+                        sb.y1 + by0,
+                        ys_step,
+                        ys_n,
+                        bb.y0,
+                        bh,
+                        g,
+                    );
+                    let mut rowmask =
+                        vec![0u64; words_per_row];
+                    for (x, &on) in xs.iter().enumerate() {
+                        if on {
+                            rowmask[x >> 6] |= 1u64 << (x & 63);
+                        }
+                    }
+                    for (y, &on) in ys.iter().enumerate() {
+                        if on {
+                            let row = y * words_per_row;
+                            for w in 0..words_per_row {
+                                bits[row + w] |= rowmask[w];
+                            }
+                        }
+                    }
+                } else if (ni as u64 * nj as u64) > LOD_ENUM_CAP {
+                    // skew mega-grid: never loop it - the record
+                    // rides verbatim (exactness kept; counted so
+                    // the cap is never silent)
+                    st.lod_grid_verbatim += 1;
+                    pass_members += r.members;
+                    pass.push(r.clone());
+                    continue;
+                } else {
+                    for i in i0..i1 {
+                        for j in j0..j1 {
+                            mark(
+                                i * va.0 + j * vb.0,
+                                i * va.1 + j * vb.1,
+                            );
+                        }
                     }
                 }
             }
             (Frag::Whole, Rep::One) => mark(0, 0),
-            (Frag::Whole, Rep::Grid { na, nb, va, vb }) => {
-                for i in 0..*na as i64 {
-                    for j in 0..*nb as i64 {
-                        mark(
-                            i * va.0 + j * vb.0,
-                            i * va.1 + j * vb.1,
-                        );
-                    }
-                }
-            }
             (Frag::Whole, Rep::Pts(pl)) => {
                 for &(ox, oy) in pl.iter() {
                     mark(ox, oy);
                 }
+            }
+            (Frag::Grid { .. }, _) => {
+                unreachable!("grid frag on non-grid")
             }
         }
     }
@@ -1767,8 +1884,13 @@ fn build_cell_plan(
         if pages[k].members < LOD_MIN_MEMBERS {
             continue;
         }
-        if let Some(job) = gen_lod_job(doc, cell, &arena, &pages[k])
-        {
+        if let Some(job) = gen_lod_job(
+            doc,
+            cell,
+            &arena,
+            &pages[k],
+            &mut split_stats,
+        ) {
             pages[k].lod_page = narrow_u32(
                 pages.len() as u64,
                 "cell page count",
@@ -2168,6 +2290,10 @@ fn build(
                 .lod_pages
                 .checked_add(split_stats.lod_pages)
                 .expect("limit exceeded: lod page count");
+            split_total.lod_grid_verbatim = split_total
+                .lod_grid_verbatim
+                .checked_add(split_stats.lod_grid_verbatim)
+                .expect("limit exceeded: lod verbatim count");
             let cell = &doc.cells[ci];
             let place_base = b.n_places();
             for &pi in &place_order {
@@ -2353,11 +2479,13 @@ fn build(
     {
         eprintln!(
             "[vfs] build: rep-split {} fragments, {} oversize \
-             pages, {} depth-capped, {} lod variants",
+             pages, {} depth-capped, {} lod variants \
+             ({} skew grids verbatim)",
             split_total.fragments,
             split_total.oversize_pages,
             split_total.depth_capped,
-            split_total.lod_pages
+            split_total.lod_pages,
+            split_total.lod_grid_verbatim
         );
     }
 
@@ -3570,6 +3698,76 @@ mod split_tests {
             checked += 1;
         }
         assert!(checked >= 1, "no LOD pages generated");
+    }
+
+    /// orthogonal grids mark ANALYTICALLY (no member loop): the
+    /// coverage contract must hold against the brute expansion
+    #[test]
+    fn lod_grid_analytic_superset() {
+        let doc = mini_doc(vec![RectRec {
+            layer: 1,
+            dt: 0,
+            x: 500,
+            y: 700,
+            w: 120,
+            h: 90,
+            rep: Rep::Grid {
+                na: 400,
+                nb: 400,
+                va: (2400, 0),
+                vb: (0, 2300),
+            },
+        }]);
+        let plan = plan_of(&doc);
+        let k = (0..plan.pages.len())
+            .find(|&k| {
+                plan.pages[k].lod_page != floe_ovm::LOD_PAGE_NONE
+            })
+            .expect("no lod page for a 160k-member grid");
+        let e = &plan.pages[k];
+        let bb = e.bbox;
+        let eb = raster(&page_mems(&doc, &plan, k), &bb);
+        let lb = raster(
+            &page_mems(&doc, &plan, e.lod_page as usize),
+            &bb,
+        );
+        for i in 0..eb.len() {
+            assert!(!eb[i] || lb[i], "hole at cell {}", i);
+        }
+        let ok = dilate(&eb);
+        for i in 0..lb.len() {
+            assert!(!lb[i] || ok[i], "overcover at cell {}", i);
+        }
+    }
+
+    /// a skew grid past the enumeration cap must never loop: it
+    /// rides the LOD payload verbatim, rep intact
+    #[test]
+    fn lod_skew_mega_grid_rides_verbatim() {
+        let doc = mini_doc(vec![RectRec {
+            layer: 1,
+            dt: 0,
+            x: 0,
+            y: 0,
+            w: 80,
+            h: 60,
+            rep: Rep::Grid {
+                na: 300,
+                nb: 300,
+                va: (2900, 1150),
+                vb: (-600, 2800),
+            },
+        }]);
+        let plan = plan_of(&doc);
+        assert!(plan.split_stats.lod_grid_verbatim >= 1);
+        let k = (0..plan.pages.len())
+            .find(|&k| {
+                plan.pages[k].lod_page != floe_ovm::LOD_PAGE_NONE
+            })
+            .expect("no lod page");
+        let li = plan.pages[k].lod_page as usize;
+        let mems = page_mems(&doc, &plan, li);
+        assert_eq!(mems.len(), 90_000, "rep not kept verbatim");
     }
 
     /// sparse pages stay LOD-free (trigger threshold)

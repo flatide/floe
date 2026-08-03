@@ -508,14 +508,17 @@ impl<'a> Hier<'a> {
                 }
             }
         }
-        // M7 density gate: a page whose visible part is so dense
-        // that members outnumber its screen pixels several-fold
-        // swaps for its merged LOD variant. Sub-pixel gaps are
-        // already beyond what the raster shows at that band; the
-        // exact page returns automatically on zoom-in. px2 sums
-        // the (possibly overlapping) box intersections, which can
-        // only OVERSTATE the visible area - the bias runs toward
-        // exact.
+        // M7 density gate, two conditions on WHOLE-page metrics
+        // (review finding: comparing whole-page members against
+        // the px^2 of a partial intersection made LOD fire MORE as
+        // you zoomed IN - the exact inversion of the contract):
+        //  (a) fidelity precondition: one LOD grid cell must be at
+        //      or below ONE SCREEN PIXEL in both axes, i.e. the
+        //      page spans <= LOD_GRID px - merged cells can never
+        //      appear as visible blocks;
+        //  (b) worth: members must outnumber the page's own screen
+        //      pixels lod_k-fold. Zooming in grows the page's
+        //      on-screen size, fails (a), and exact returns.
         let mut sel: BTreeSet<u32> = BTreeSet::new();
         for &pi in &psel {
             let p = self.v.page(pi);
@@ -524,18 +527,16 @@ impl<'a> Hier<'a> {
                 && self.px_per_dbu > 0.0
                 && p.lod_page != floe_ovm::LOD_PAGE_NONE
             {
-                let mut px2 = 0f64;
-                for b in &boxes {
-                    let ix = (p.bbox.x1.min(b.x1)
-                        - p.bbox.x0.max(b.x0))
-                        .max(0) as f64;
-                    let iy = (p.bbox.y1.min(b.y1)
-                        - p.bbox.y0.max(b.y0))
-                        .max(0) as f64;
-                    px2 += ix * self.px_per_dbu
-                        * (iy * self.px_per_dbu);
-                }
-                if p.members as f64 > self.lod_k * px2.max(1.0) {
+                let pw = (p.bbox.x1 - p.bbox.x0).max(0) as f64
+                    * self.px_per_dbu;
+                let ph = (p.bbox.y1 - p.bbox.y0).max(0) as f64
+                    * self.px_per_dbu;
+                let g = floe_ovm::LOD_GRID as f64;
+                if pw <= g
+                    && ph <= g
+                    && p.members as f64
+                        > self.lod_k * (pw * ph).max(1.0)
+                {
                     eff = p.lod_page;
                     self.st.lod_swapped += 1;
                 }
@@ -556,9 +557,9 @@ impl<'a> Hier<'a> {
         }
         self.pages_all.extend(sel.iter().copied());
         wc.pages = sel.into_iter().collect();
-        // ---- children (r = 0 truncates: pages only, no frames -
-        // flat parity, par.2.5)
-        if r != 0 && cell.bvh_count != 0 {
+        // ---- children (r = 0: depth exhausted - children render
+        // as outline frames; own pages above carry the geometry)
+        if cell.bvh_count != 0 {
             // Inline triage during the walk (field fix, 9.8G class:
             // 184M placements). Collecting every visible instance
             // into a set BEFORE cut classification made a wide view
@@ -599,7 +600,13 @@ impl<'a> Hier<'a> {
                         }
                         let cw = (rb.x1 - rb.x0).max(0) as u64;
                         let chh = (rb.y1 - rb.y0).max(0) as u64;
-                        if cw < cut && chh < cut {
+                        // r == 0: depth is exhausted - EVERY child
+                        // renders as an outline frame, not just the
+                        // below-cut ones (review finding: a pure-
+                        // hierarchy top opened at the depth-0
+                        // default as a black screen; "top geometry
+                        // + outlines" now means what it says)
+                        if r == 0 || (cw < cut && chh < cut) {
                             // below-cut: frame inline, never enters
                             // a candidate set. Once the frame cap
                             // is hit we stop deduping too - the set
@@ -1217,6 +1224,18 @@ mod tests {
         let p2 =
             plan_hier(&ovm, &rq_px(pb, 0, u32::MAX, 1.0), &o);
         assert_eq!(p2.pages, vec![0], "{:?}", p2.pages);
+        // deep zoom into a CORNER SLICE of the dense page: the old
+        // gate compared whole-page members against the tiny
+        // intersection's pixels and swapped to LOD exactly when
+        // zoomed in (review finding) - grid cells would be ~780 px
+        // blocks. Whole-page + fidelity precondition keeps exact.
+        let p2b = plan_hier(
+            &ovm,
+            &rq_px(bx(0, 0, 100, 100), 0, u32::MAX, 1.0),
+            &o,
+        );
+        assert_eq!(p2b.pages, vec![0], "{:?}", p2b.pages);
+        assert_eq!(p2b.stats.lod_swapped, 0);
         // probe (px 0): exact by construction
         let p3 =
             plan_hier(&ovm, &rq_px(pb, 0, u32::MAX, 0.0), &o);
@@ -1230,6 +1249,40 @@ mod tests {
             &off,
         );
         assert_eq!(p4.pages, vec![0]);
+    }
+
+    /// depth 0 on a pure-hierarchy top must NOT be empty: every
+    /// direct child renders as an outline frame (review finding -
+    /// the depth-0 open default was a black screen when the top
+    /// had no geometry of its own)
+    #[test]
+    fn depth_zero_emits_child_frames() {
+        let v = fixture(
+            &[
+                FCell {
+                    name: "CHILD",
+                    pages: vec![(bx(0, 0, 1000, 1000), 500, 500)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "T",
+                    pages: vec![],
+                    places: vec![
+                        (0, 0, 0, 0, false, Rep::One),
+                        (0, 5000, 0, 0, false, Rep::One),
+                    ],
+                },
+            ],
+            1,
+        );
+        let req = rq(bx(-100, -100, 10_000, 10_000), 0, 0);
+        let plan = plan_hier(&v, &req, &HierOpts::default());
+        assert!(plan.pages.is_empty(), "{:?}", plan.pages);
+        assert!(
+            plan.stats.frame_rects >= 2,
+            "no frames at depth 0: {}",
+            plan.stats.frame_rects
+        );
     }
 
     fn rq(view: BBox, cut: i64, depth: u32) -> ViewReq {
