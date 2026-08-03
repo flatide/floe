@@ -807,7 +807,7 @@ impl<'a> PtsRef<'a> {
 }
 
 pub struct Ovm {
-    pub data: Vec<u8>,
+    pub data: Backing,
     pub unit: f64,
     pub src_size: u64,
     pub src_mtime: u64,
@@ -828,8 +828,55 @@ fn corrupt(msg: impl std::fmt::Display) -> String {
     format!("corrupt cache; rebuild: {}", msg)
 }
 
+/// reader byte source: an owned buffer (builder output, tests) or a
+/// read-only file mapping (`Ovm::open`). The mapping makes open()
+/// touch only what validation and the planner actually read - on a
+/// 25 GB metadata asset the old whole-file read was the daemon's
+/// startup cost. Safe against rebuilds by the marker protocol:
+/// caches are replaced by DELETE + recreate (new inode), never
+/// truncated in place, so a live mapping stays valid.
+pub enum Backing {
+    Vec(Vec<u8>),
+    Map(memmap2::Mmap),
+}
+
+impl std::ops::Deref for Backing {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            Backing::Vec(v) => v,
+            Backing::Map(m) => m,
+        }
+    }
+}
+
 impl Ovm {
+    /// full-strength open from an owned buffer: DEEP validation
+    /// (per-record places / pts pool / instance-BVH bounds). Unit
+    /// tests and gate fixtures come through here.
     pub fn from_bytes(data: Vec<u8>) -> Result<Ovm, String> {
+        Ovm::validate(Backing::Vec(data), true)
+    }
+
+    /// production open: read-only mmap + SHALLOW validation - the
+    /// header, section bounds and the small tables (layers, cells,
+    /// pages, pranges, page-BVH) keep their full checks ("corrupt
+    /// cache; rebuild" class), but the per-record sweeps over
+    /// places / pts pool / instance BVH are skipped: they would
+    /// fault in the whole multi-GB section and defeat the mapping.
+    /// The marker protocol guarantees build completeness (par.3.6);
+    /// deep-section damage beyond that is a builder bug, which the
+    /// build gates own. Trade-off: reading such damage panics via
+    /// accessor asserts instead of failing open cleanly.
+    pub fn open(path: &str) -> Result<Ovm, String> {
+        let f = std::fs::File::open(path)
+            .map_err(|e| format!("open {}: {}", path, e))?;
+        let map = unsafe { memmap2::Mmap::map(&f) }
+            .map_err(|e| format!("mmap {}: {}", path, e))?;
+        Ovm::validate(Backing::Map(map), false)
+    }
+
+    fn validate(data: Backing, deep: bool) -> Result<Ovm, String> {
         if data.len() < HEADER_LEN || &data[..8] != MAGIC {
             return Err("not an ovm file".into());
         }
@@ -954,64 +1001,67 @@ impl Ovm {
                 return Err(corrupt(format!("cell {} bitset index", i)));
             }
         }
-        // places: child index, rep kind, pts pool entry bounds
-        let pb = sec(SEC_PLACES);
-        for i in 0..n_places as usize {
-            let b = &pb[i * PLACE_LEN..];
-            if g32(b, 0) >= n_cells {
-                return Err(corrupt(format!("place {} child", i)));
+        if deep {
+            // places: child index, rep kind, pts pool entry bounds
+            let pb = sec(SEC_PLACES);
+            for i in 0..n_places as usize {
+                let b = &pb[i * PLACE_LEN..];
+                if g32(b, 0) >= n_cells {
+                    return Err(corrupt(format!("place {} child", i)));
+                }
+                let kind = b[6];
+                if kind > 2 {
+                    return Err(corrupt(format!("place {} rep kind", i)));
+                }
+                if kind == 2 {
+                    let off = gi64(b, 32);
+                    let count = g32(b, 24) as u64;
+                    if off < 0 {
+                        return Err(corrupt(format!("place {} pts offset", i)));
+                    }
+                    let off = off as u64;
+                    if off + 40 > pool_len {
+                        return Err(corrupt(format!("place {} pts entry", i)));
+                    }
+                    let nch =
+                        g32(&pb[places_need as usize + off as usize..], 32)
+                            as u64;
+                    let need = 40u64
+                        .checked_add(nch.checked_mul(32).ok_or_else(
+                            || corrupt("pts chunk count wraps"),
+                        )?)
+                        .and_then(|v| {
+                            v.checked_add(count.checked_mul(16)?)
+                        })
+                        .ok_or_else(|| corrupt("pts entry wraps"))?;
+                    if off + need > pool_len {
+                        return Err(corrupt(format!(
+                            "place {} pts entry range",
+                            i
+                        )));
+                    }
+                    if nch != count.div_ceil(PTS_CHUNK as u64) {
+                        return Err(corrupt(format!(
+                            "place {} pts chunk count",
+                            i
+                        )));
+                    }
+                }
             }
-            let kind = b[6];
-            if kind > 2 {
-                return Err(corrupt(format!("place {} rep kind", i)));
-            }
-            if kind == 2 {
-                let off = gi64(b, 32);
-                let count = g32(b, 24) as u64;
-                if off < 0 {
-                    return Err(corrupt(format!("place {} pts offset", i)));
-                }
-                let off = off as u64;
-                if off + 40 > pool_len {
-                    return Err(corrupt(format!("place {} pts entry", i)));
-                }
-                let nch =
-                    g32(&pb[places_need as usize + off as usize..], 32)
-                        as u64;
-                let need = 40u64
-                    .checked_add(nch.checked_mul(32).ok_or_else(
-                        || corrupt("pts chunk count wraps"),
-                    )?)
-                    .and_then(|v| {
-                        v.checked_add(count.checked_mul(16)?)
-                    })
-                    .ok_or_else(|| corrupt("pts entry wraps"))?;
-                if off + need > pool_len {
-                    return Err(corrupt(format!(
-                        "place {} pts entry range",
-                        i
-                    )));
-                }
-                if nch != count.div_ceil(PTS_CHUNK as u64) {
-                    return Err(corrupt(format!(
-                        "place {} pts chunk count",
-                        i
-                    )));
+            // instance BVH: leaf ranges into places, inner into nodes
+            let nb = sec(SEC_BVH);
+            for i in 0..n_bvh as usize {
+                let b = &nb[i * BVH_LEN..];
+                let first = g32(b, 32) as u64;
+                let count = g16(b, 36) as u64;
+                let leaf = g16(b, 38) != 0;
+                let lim = if leaf { n_places } else { n_bvh as u64 };
+                if first + count > lim {
+                    return Err(corrupt(format!("bvh node {} range", i)));
                 }
             }
         }
-        // instance BVH: leaf ranges into places, inner into nodes
-        let nb = sec(SEC_BVH);
-        for i in 0..n_bvh as usize {
-            let b = &nb[i * BVH_LEN..];
-            let first = g32(b, 32) as u64;
-            let count = g16(b, 36) as u64;
-            let leaf = g16(b, 38) != 0;
-            let lim = if leaf { n_places } else { n_bvh as u64 };
-            if first + count > lim {
-                return Err(corrupt(format!("bvh node {} range", i)));
-            }
-        }
+
         // pranges: layer + page run + optional pbvh root (the
         // planner indexes the vis bitset with layer_idx unchecked -
         // a corrupt value must die HERE, not as a panic there)
@@ -1083,12 +1133,6 @@ impl Ovm {
             secs,
             data,
         })
-    }
-
-    pub fn open(path: &str) -> Result<Ovm, String> {
-        let data = std::fs::read(path)
-            .map_err(|e| format!("read {}: {}", path, e))?;
-        Ovm::from_bytes(data)
     }
 
     fn sec(&self, i: usize) -> &[u8] {

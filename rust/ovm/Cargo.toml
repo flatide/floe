@@ -7,3 +7,4 @@ description = "floe VFS metadata format (.ovm): packed LE sections, builder + bo
 
 [dependencies]
 floe-oasis = { path = "../oasis" }
+memmap2 = "0.9"

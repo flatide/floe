@@ -5,8 +5,8 @@
 단순화·책임 분리 지시**, rev 12 = **M0 실증**, rev 13~18 =
 **M1/M2/M3/M3.5 구현 + 외부 검토 2회 반영(0.6.3)**, rev 19 =
 **M4 실측 완료 + 스케일 결함 4건 수정(0.6.4→0.7.0, ovm v3)** —
-변경 요지 §0). 상태: **M0~M5 완료 — 뷰어·데몬은 hier 단일
-경로**(rev 20에서 flat 폐기) — **다음 = ovm mmap → M7 설계**
+변경 요지 §0). 상태: **M0~M5 완료 + ovm mmap 오픈(rev 21)** —
+뷰어·데몬은 hier 단일 경로 — **다음 = M7 밀도 LOD 설계**
 (M4 결과: §0 rev 19). 배경: MAIN09(150M급)
 실측에서 **뷰어 깊은 줌이
 줌인할수록 느려지는** 병리 확인. 원인은 개별 증상이 아니라 하나의
@@ -169,6 +169,27 @@ rev 10 (지시: **인덱서/뷰어 책임 분리** + 이전 검토 잔여 1건):
   usize/u64 → u32/u16 narrowing(na/nb, Pts count, page/place/BVH
   start·count, payload size 등)은 checked — silent truncation
   금지, 초과는 "limit exceeded: <필드>" 빌드 에러.
+
+rev 21 (ovm mmap 오픈 — 2026-08-03, 0.8.1; M4 후속 1순위):
+
+- **`Ovm::open` = read-only mmap** (memmap2+libc 벤더 추가, 닫힌망
+  빌드 경로 유지): 9.8G 자산의 ovm 25G를 데몬 기동 시 전체 read
+  하던 비용이 사라지고, 터치한 페이지만 상주(OS 페이지캐시 공유).
+  실측: testchip 점 플랜 최대 RSS 2.5MB (ovm 24.5MB).
+- **검증 2단화**: open(mmap) = shallow — 헤더·버전·섹션 경계와
+  소형 테이블(layers/cells/pages/pranges/pbvh)의 "corrupt cache;
+  rebuild" 검증 전부 유지. **places·pts pool·inst-BVH 전수
+  루프는 open에서 제외**(남기면 다중 GB 섹션이 통째로 폴트-인 —
+  mmap 무의미). `from_bytes`(Vec 경로) = deep 유지: 유닛·게이트
+  픽스처는 종전 강도 그대로. 근거 = rev 9 운영 원칙(마커
+  프로토콜이 빌드 완결성 보증; 그 너머의 심층 손상 = 빌더 버그 =
+  빌드 게이트 소관). 트레이드: 심층 손상 데이터를 읽으면 데몬이
+  clean error 대신 접근자 assert panic.
+- **매핑 수명 안전성**: 재빌드는 마커 규약상 삭제→재생성(새
+  inode)이라 라이브 매핑은 구 inode에 유효; in-place truncate
+  경로 없음 → SIGBUS 시나리오 없음.
+- 캐시 포맷 불변(ovm v3, 재인덱싱 불필요). 스위트 전체 green
+  (모든 게이트가 mmap 오픈 경유).
 
 rev 20 (M5 통합·폐기 완료 — 2026-08-03, 0.8.0):
 
