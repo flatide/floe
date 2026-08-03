@@ -41,6 +41,10 @@ LABEL_VIEW_BUDGET = 400
 # LABEL_VIEW_BUDGET per frame
 LABEL_CELL_PX = 48
 
+# a streamed view completes within this many rounds: the last one
+# requests an unlimited round and takes the whole remainder
+_MAX_STREAM_ROUNDS = 8
+
 # streaming round target: the adaptive budget aims each refinement
 # round at ~this much parse time. Smaller = smoother/more responsive
 # refinement, larger = chunkier visible stages (0.6.2 behaved like
@@ -464,8 +468,18 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
     # a frame goes out per round, so the first paint lands in ~1s
     # and the rest fills in behind it. Aborting anywhere on a stale
     # job withholds the ack = daemon rollback (par.3.7).
+    #
+    # Round cap: every round pays a FIXED cost (re-plan of the whole
+    # view, WC re-author + re-parse, apply) independent of payload.
+    # On tiny-page assets (9.8G field case: 8KB average pages) the
+    # adaptive budget once shrank to its floor and shredded one view
+    # into hundreds of such rounds. The LAST allowed round therefore
+    # requests stream=0 and swallows the whole remainder.
     load_total = 0.0
+    rounds = 0
     while True:
+        rounds += 1
+        final_round = rounds >= _MAX_STREAM_ROUNDS
         tl = time.perf_counter()
         # dedicated monotonic daemon-gen: GUI job gens coalesce/
         # skip, the transaction wants strict increase, and a failed
@@ -475,7 +489,7 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
             mosaic.req_gen, view_um, px_per_um, cut_px, layers,
             job.get("depth"), hier=True, ack=mosaic.applied_gen,
             reset=mosaic.need_reset,
-            stream_kb=mosaic.stream_kb)
+            stream_kb=0 if final_round else mosaic.stream_kb)
         mosaic.need_reset = False
         # names= arrives ONCE per daemon run and is view-
         # independent: consume it BEFORE the stale check, or a
@@ -509,10 +523,11 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
             renderer.refresh()
         if os.environ.get("FLOE_DEBUG"):
             import sys as _sys
-            print("[svc] gen=%s job=%s new=%s partial=%s "
-                  "newer=%s kb=%s" %
-                  (mosaic.req_gen, job["gen"], r.get("new"),
-                   r.get("partial"), newer(), mosaic.stream_kb),
+            print("[svc] gen=%s job=%s pages=%s new=%s partial=%s "
+                  "plan_ms=%s newer=%s kb=%s" %
+                  (mosaic.req_gen, job["gen"], r.get("pages"),
+                   r.get("new"), r.get("partial"),
+                   r.get("plan_ms"), newer(), mosaic.stream_kb),
                   file=_sys.stderr, flush=True)
         t_round = time.perf_counter() - tl
         load_total += t_round
@@ -530,7 +545,9 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
                 r.get("pending_new_mb", 0) or 0) * 1024
         except (TypeError, ValueError):
             shipped_kb = 0.0
-        if t_round > 0.02 and shipped_kb >= 0.5 * mosaic.stream_kb:
+        if not getattr(mosaic, "stream_pinned", False) \
+                and t_round > 0.02 \
+                and shipped_kb >= 0.5 * mosaic.stream_kb:
             ideal = mosaic.stream_kb * _STREAM_TARGET_S / t_round
             mosaic.stream_kb = int(
                 max(2048, min(32768,

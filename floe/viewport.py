@@ -91,9 +91,12 @@ class VfsMosaic:
         self.applied_gen = 0  # last gen fully applied (the ack)
         self.need_reset = False
         # adaptive streaming budget (KB of decoded payload per
-        # round): the service re-tunes it toward ~0.35s parse per
-        # round from measured apply times
-        self.stream_kb = 24576
+        # round): the service re-tunes it toward the round target
+        # from measured apply times. FLOE_STREAM_KB pins it (no
+        # adaptation); 0 disables streaming (single-shot loads).
+        env_kb = os.environ.get("FLOE_STREAM_KB")
+        self.stream_kb = int(env_kb) if env_kb else 24576
+        self.stream_pinned = env_kb is not None
         # gate-only hook (par.7 fault injection): apply_hier raises
         # at step N once, exercising the reset_all recovery path
         self._fault_step = None
