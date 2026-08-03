@@ -41,6 +41,16 @@ LABEL_VIEW_BUDGET = 400
 # LABEL_VIEW_BUDGET per frame
 LABEL_CELL_PX = 48
 
+# streaming round target: the adaptive budget aims each refinement
+# round at ~this much parse time. Smaller = smoother/more responsive
+# refinement, larger = chunkier visible stages (0.6.2 behaved like
+# ~1300). Env-tunable for field taste; clamped 100..2000 ms.
+try:
+    _STREAM_TARGET_S = max(0.1, min(2.0, float(
+        os.environ.get("FLOE_STREAM_TARGET_MS", "500")) / 1000.0))
+except ValueError:
+    _STREAM_TARGET_S = 0.5
+
 # coverage handoff: composite the density bitplanes once a finest
 # coverage texel projects to at most this many screen pixels. Set
 # generously so coverage turns on slightly BEFORE the cut starts
@@ -497,15 +507,33 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
                                         gen=mosaic.req_gen)
         if changed:
             renderer.refresh()
+        if os.environ.get("FLOE_DEBUG"):
+            import sys as _sys
+            print("[svc] gen=%s job=%s new=%s partial=%s "
+                  "newer=%s kb=%s" %
+                  (mosaic.req_gen, job["gen"], r.get("new"),
+                   r.get("partial"), newer(), mosaic.stream_kb),
+                  file=_sys.stderr, flush=True)
         t_round = time.perf_counter() - tl
         load_total += t_round
         # adapt the round budget toward ~0.35s of parse per round -
         # decoded bytes only approximate klayout's cost, and fill
-        # distributions vary chip to chip (review finding)
-        if int(r.get("new", 0) or 0) > 0 and t_round > 0.02:
-            ideal = mosaic.stream_kb * 0.35 / t_round
+        # distributions vary chip to chip (review finding). ONLY a
+        # round that actually shipped a meaningful chunk (>= half
+        # the budget) is a valid speed sample: extrapolating from a
+        # tiny warm round once inflated the budget past the whole
+        # heavy view, which collapsed streaming into one long round
+        # and killed the visible staging (field report). The 32MB
+        # ceiling keeps a 100MB-class view at 3+ visible stages.
+        try:
+            shipped_kb = float(
+                r.get("pending_new_mb", 0) or 0) * 1024
+        except (TypeError, ValueError):
+            shipped_kb = 0.0
+        if t_round > 0.02 and shipped_kb >= 0.5 * mosaic.stream_kb:
+            ideal = mosaic.stream_kb * _STREAM_TARGET_S / t_round
             mosaic.stream_kb = int(
-                max(2048, min(131072,
+                max(2048, min(32768,
                               (mosaic.stream_kb + ideal) / 2)))
         if newer():
             return
