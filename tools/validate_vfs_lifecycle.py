@@ -126,8 +126,7 @@ class Sess:
             self.m.req_gen,
             (x0 * self.dbu, y0 * self.dbu,
              x1 * self.dbu, y1 * self.dbu),
-            1.0, 0.0, None, None, hier=True,
-            ack=0 if reset else self.m.applied_gen, reset=reset)
+            1.0, 0.0, None, None, ack=0 if reset else self.m.applied_gen, reset=reset)
         # mirror the service: names= is view-independent and sent
         # once per run, so it is consumed at REQUEST time - even a
         # response the caller then drops must not lose it

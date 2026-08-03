@@ -64,9 +64,6 @@ def vfs_regions(mosaic):
 
 def main():
     src, floe_dir = sys.argv[1], sys.argv[2]
-    # FLOE_VFS_MODE=flat runs the legacy flat probe; default = hier
-    # (V4, rust/VFS_HIER.md) - the suite runs both until M5
-    hier = os.environ.get("FLOE_VFS_MODE", "hier") != "flat"
     # load meta straight from the given floe dir (it may not sit next
     # to the source, so cache_dir_for would miss it)
     cache = cm.Cache(src)
@@ -98,14 +95,11 @@ def main():
         for vi, (x0, y0, x1, y1) in enumerate(views):
             r = client.request(
                 0, (x0 * dbu, y0 * dbu, x1 * dbu, y1 * dbu),
-                1.0, 0.0, None, None, probe=True, hier=hier)
+                1.0, 0.0, None, None, probe=True)
             mosaic = VfsMosaic(cache)
-            if hier:
-                if r["names"]:
-                    mosaic.load_names(r["names"])
-                mosaic.apply_hier(r["delta"], r["top"], [])
-            else:
-                mosaic.apply(r["delta"], r["mats"], [], r["frames"])
+            if r["names"]:
+                mosaic.load_names(r["names"])
+            mosaic.apply_hier(r["delta"], r["top"], [])
             vregs = vfs_regions(mosaic)
             clip = db.Region(db.Box(x0, y0, x1, y1))
             keys = set(sregs) | set(vregs)
@@ -122,9 +116,8 @@ def main():
     finally:
         client.stop()
     sly._destroy()
-    print("vfs-render-checked %d views x %d layers (%s), "
-          "failures: %d" % (len(views), len(sregs),
-                            "hier" if hier else "flat", len(bad)))
+    print("vfs-render-checked %d views x %d layers (hier), "
+          "failures: %d" % (len(views), len(sregs), len(bad)))
     sys.exit(1 if bad else 0)
 
 

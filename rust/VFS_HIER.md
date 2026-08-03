@@ -5,9 +5,9 @@
 단순화·책임 분리 지시**, rev 12 = **M0 실증**, rev 13~18 =
 **M1/M2/M3/M3.5 구현 + 외부 검토 2회 반영(0.6.3)**, rev 19 =
 **M4 실측 완료 + 스케일 결함 4건 수정(0.6.4→0.7.0, ovm v3)** —
-변경 요지 §0). 상태: **M0~M4 완료, 뷰어 기본 = hier**
-(`FLOE_VFS_MODE=flat`으로 A/B) — **다음 = M5(flat 제거) → ovm
-mmap → M7 설계**(결과: §0 rev 19). 배경: MAIN09(150M급)
+변경 요지 §0). 상태: **M0~M5 완료 — 뷰어·데몬은 hier 단일
+경로**(rev 20에서 flat 폐기) — **다음 = ovm mmap → M7 설계**
+(M4 결과: §0 rev 19). 배경: MAIN09(150M급)
 실측에서 **뷰어 깊은 줌이
 줌인할수록 느려지는** 병리 확인. 원인은 개별 증상이 아니라 하나의
 근본 구조 — **워킹셋을 평탄화(flatten)해서 klayout에 넘긴다**는 것.
@@ -169,6 +169,32 @@ rev 10 (지시: **인덱서/뷰어 책임 분리** + 이전 검토 잔여 1건):
   usize/u64 → u32/u16 narrowing(na/nb, Pts count, page/place/BVH
   start·count, payload size 등)은 checked — silent truncation
   금지, 초과는 "limit exceeded: <필드>" 빌드 에러.
+
+rev 20 (M5 통합·폐기 완료 — 2026-08-03, 0.8.0):
+
+- **flat 경로 전면 제거** (캐시 포맷 불변 — ovm v3 유지, 재인덱싱
+  불필요; 뷰어·데몬 동시 배포라 프로토콜 단절은 원자적):
+  - rust/vfs: flat 플래너(`plan`/`Plan`/`Mat`/`PlanStats`)·flat
+    `Session`/`Update`·`Vfs::delta`(flat 전용 스플라이스)·
+    `fold_array`/`rep_footprint`/`IRange`/`axis_range` 제거.
+    hier가 쓰는 `ViewReq`/`layer_mask`/`read_page_payloads`/
+    `delta_hier`는 유지.
+  - vfsd: `mode=` 잠금(`mode_lock`)·flat 세션 제거 — 모든 요청이
+    V4(hier)로 서빙되고, `mode=`는 세션리스 probe 표시로만 남음
+    (`probe`/`hier_probe` 동의어). `mats_<gen>.tsv`·
+    `frames_<gen>.oas` 부수 파일 생성 제거(컷 프레임은 M1부터
+    델타 내장 FRAME_LAYER 사각형).
+  - `plan` CLI: hier 출력 단일화(`--mode`는 스크립트 호환으로
+    수용·무시).
+  - 뷰어: `FLOE_VFS_MODE` 제거, `VfsMosaic.apply`(flat)·
+    `frame_ci`·mats/frames 응답 파싱 제거, `vfsclient.request`의
+    `hier=` 파라미터 제거(항상 V4).
+  - 게이트: render 검증 hier 단일화(flat 패스 라인 삭제),
+    lifecycle의 `hier=True` 인자 정리. §4 재확인 = coverage/skel/
+    render 게이트 green으로 갈음.
+- 스위트 green(31 rust 유닛 + G5/G6 + render 6뷰 + H1-H5 +
+  L1-L6 + marker + S1-S4) + testchip 서비스 스모크(렌더 프레임 +
+  pick 프로브, hier names 해석 확인).
 
 rev 19 (M4 실측 완료 — 2026-08-03, 9.8G b3/사무실 호스트,
 0.6.4→**0.7.0 (ovm v3)**):
@@ -1214,6 +1240,7 @@ gen 2: 데몬 "이미 resident" → 바디 재전송 안 함
    + mats-TSV + frames 파일 + `mode=` 스위치 제거. (여기의 "버전
    범프"는 push 관례에 따른 **CLI/크레이트 릴리스 버전** — 캐시
    포맷은 M1에서 이미 v2로 끝났고 M5는 포맷을 건드리지 않는다.)
+   (**완료 — 0.8.0, §0 rev 20**.)
 6. **M6 — 증분(팬 최적화, 후속)**: WC를 gen-ephemeral에서 "상주 +
    localview 차분 갱신"으로 승격. 팬은 작은 델타, 줌은 부분 재구성.
    (M1~M5 동안은 프레임당 WC 재구성 — 깊은 줌은 바운드되어 싸다.)

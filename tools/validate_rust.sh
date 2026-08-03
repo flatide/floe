@@ -38,9 +38,6 @@ rm -rf "$VOUT"
 rust/target/release/floe-index vfs "$SRC" "$VOUT" --coverage \
     >/dev/null 2>&1
 .venv/bin/python tools/validate_vfs.py "$SRC" "$VOUT"
-# render parity in BOTH working-set modes until M5 retires flat
-FLOE_VFS_MODE=flat \
-    .venv/bin/python tools/validate_vfs_render.py "$SRC" "$VOUT"
 .venv/bin/python tools/validate_vfs_render.py "$SRC" "$VOUT"
 .venv/bin/python tools/validate_vfs_coverage.py "$SRC" "$VOUT"
 .venv/bin/python tools/validate_vfs_hier.py "$SRC" "$VOUT"

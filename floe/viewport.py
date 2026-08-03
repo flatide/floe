@@ -75,8 +75,7 @@ class VfsMosaic:
         self.ly.layer(db.LayerInfo(*self.FRAME_LAYER))
         self.top = self.ly.create_cell("FLOE_WS")
         self.cells = {}  # page cell name -> cell index
-        self.design = {}  # page cell name -> design cell name
-        self.frame_ci = None  # ephemeral cut-frame cell
+        self.design = {}  # ci -> design cell name (_WsNames)
         self.label_ci = None  # ephemeral live-label cell
         self._lgen = 0
         # ---- hier session state (VFS_HIER.md par.3.1/3.7). The
@@ -100,75 +99,6 @@ class VfsMosaic:
         # gate-only hook (par.7 fault injection): apply_hier raises
         # at step N once, exercising the reset_all recovery path
         self._fault_step = None
-
-    def apply(self, delta_path, mats, evict, frames_path=None,
-              labels=None):
-        """Read new pages, drop evicted ones and the previous frame/
-        label cells, read the current frames, build the current
-        labels, then rebuild the top's instances to exactly the plan.
-        labels: list of (layer, dt, x, y, string) to draw this view
-        (skeleton labels filtered/decluttered by the caller). True =
-        layout changed."""
-        changed = False
-        # frames and labels are per-view: drop the previous ones first
-        # so no stale index survives into the eviction remap below
-        for attr in ("frame_ci", "label_ci"):
-            ci = getattr(self, attr)
-            if ci is not None:
-                self.ly.prune_cell(ci, -1)
-                setattr(self, attr, None)
-                changed = True
-        if delta_path:
-            self.ly.read(delta_path)
-            for c in self.ly.each_cell():
-                nm = c.name
-                if nm.startswith("P") and nm not in self.cells:
-                    self.cells[nm] = c.cell_index()
-            changed = True
-        for nm in evict:
-            ci = self.cells.pop(nm, None)
-            if ci is not None:
-                self.ly.prune_cell(ci, -1)
-                changed = True
-        if evict:
-            # klayout may reuse freed indexes: remap survivors
-            keep = set(self.cells)
-            self.cells = {c.name: c.cell_index()
-                          for c in self.ly.each_cell()
-                          if c.name in keep}
-        if frames_path:
-            self.ly.read(frames_path)
-            for c in self.ly.each_cell():
-                if c.name.startswith("FRAMES_"):
-                    self.frame_ci = c.cell_index()
-            changed = True
-        if labels:
-            self._lgen += 1
-            lc = self.ly.create_cell("LABELS_%d" % self._lgen)
-            self.label_ci = lc.cell_index()
-            for (l, d, x, y, s) in labels:
-                li = self.ly.layer(db.LayerInfo(l, d))
-                lc.shapes(li).insert(
-                    db.Text(s, db.Trans(db.Vector(int(x), int(y)))))
-            changed = True
-        self.top.clear_insts()
-        for m in mats:
-            nm, x, y, rot, flip, na, nb, va, vb, design = m
-            self.design[nm] = design
-            ci = self.cells.get(nm)
-            if ci is None:
-                continue
-            tr = db.Trans(rot, flip, db.Vector(x, y))
-            if na > 1 or nb > 1:
-                self.top.insert(db.CellInstArray(
-                    ci, tr, db.Vector(va[0], va[1]),
-                    db.Vector(vb[0], vb[1]), na, nb))
-            else:
-                self.top.insert(db.CellInstArray(ci, tr))
-        for ci in (self.frame_ci, self.label_ci):
-            if ci is not None:
-                self.top.insert(db.CellInstArray(ci, db.Trans()))
-        return changed
 
     # ------------------------------------------------ hier (V4)
 
@@ -290,7 +220,6 @@ class VfsMosaic:
         self.top = self.ly.create_cell("FLOE_WS")
         self.cells = {}
         self._wc_cells = []
-        self.frame_ci = None
         self.label_ci = None
         self.applied_gen = 0
         self.need_reset = True

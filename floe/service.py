@@ -109,16 +109,11 @@ def _probe_layout(cache, box, layers):
     view = (box.left * dbu, box.bottom * dbu,
             box.right * dbu, box.top * dbu)
     m = VfsMosaic(cache)
-    if getattr(cache, "_hier", True):
-        r = cache.vfs_client.request(0, view, 1.0, 0.0, layers,
-                                     None, probe=True, hier=True)
-        if r["names"]:
-            m.load_names(r["names"])
-        m.apply_hier(r["delta"], r["top"], [])
-    else:
-        r = cache.vfs_client.request(0, view, 1.0, 0.0, layers,
-                                     None, probe=True)
-        m.apply(r["delta"], r["mats"], [])
+    r = cache.vfs_client.request(0, view, 1.0, 0.0, layers,
+                                 None, probe=True)
+    if r["names"]:
+        m.load_names(r["names"])
+    m.apply_hier(r["delta"], r["top"], [])
     return m
 
 
@@ -377,7 +372,6 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
     cut_px = CUT_PX if cut_px is None else max(0.0, float(cut_px))
     vis = job["visible"]
     layers = [tuple(v) for v in vis] if vis is not None else None
-    hier = getattr(cache, "_hier", True)
     # live-view labels: reuse the skeleton's (already-loaded) labels,
     # filtered to the view and decluttered - so labels appear as you
     # zoom in, Calibre-style, without any text in the pages
@@ -447,22 +441,6 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
             out["drawn"] = r["members"]
         res.put(out)
 
-    if not hier:
-        tl = time.perf_counter()
-        r = cache.vfs_client.request(job["gen"], view_um, px_per_um,
-                                     cut_px, layers,
-                                     job.get("depth"))
-        if newer():
-            return
-        if mosaic.apply(r["delta"], r["mats"], r["evict"],
-                        r["frames"], labels):
-            renderer.refresh()
-        t_load = time.perf_counter() - tl
-        if newer():
-            return
-        emit(r, t_load)
-        return
-
     # hier: budgeted streaming rounds (VFS_HIER.md par.5 M3.5). Each
     # response carries up to --stream-kb of new pages, center first;
     # a frame goes out per round, so the first paint lands in ~1s
@@ -487,7 +465,7 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
         mosaic.req_gen += 1
         r = cache.vfs_client.request(
             mosaic.req_gen, view_um, px_per_um, cut_px, layers,
-            job.get("depth"), hier=True, ack=mosaic.applied_gen,
+            job.get("depth"), ack=mosaic.applied_gen,
             reset=mosaic.need_reset,
             stream_kb=0 if final_round else mosaic.stream_kb)
         mosaic.need_reset = False
@@ -512,7 +490,7 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
             mosaic.req_gen += 1
             r = cache.vfs_client.request(
                 mosaic.req_gen, view_um, px_per_um, cut_px, layers,
-                job.get("depth"), hier=True, ack=0, reset=True)
+                job.get("depth"), ack=0, reset=True)
             mosaic.need_reset = False
             if r["names"]:
                 mosaic.load_names(r["names"])
@@ -629,11 +607,6 @@ def _render_service(src, req, res, latest=None):
             return
         from .vfsclient import VfsClient
         cache.vfs_client = VfsClient(cache.dir)
-        # V4 hierarchy-preserving working set is the default;
-        # FLOE_VFS_MODE=flat keeps the legacy flat path for A/B
-        # (retired in M5, rust/VFS_HIER.md par.5)
-        cache._hier = os.environ.get("FLOE_VFS_MODE",
-                                     "hier") != "flat"
         mosaic = VfsMosaic(cache)
         fcolors = dict(colors)
         fcolors[VfsMosaic.FRAME_LAYER] = "#93a4ad"

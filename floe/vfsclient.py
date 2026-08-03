@@ -53,20 +53,17 @@ class VfsClient:
             stderr=subprocess.DEVNULL, text=True, bufsize=1)
 
     def request(self, gen, view_um, px_per_um, cut_px, layers=None,
-                depth=None, probe=False, hier=False, ack=0,
+                depth=None, probe=False, ack=0,
                 reset=False, stream_kb=None):
-        """One plan/materialize round-trip. view_um = (x0,y0,x1,y1)
-        in um; layers = [(l,d), ...] or None (=all); depth None =
-        full. Returns the parsed response dict with 'mats' (list of
-        (cellname, x, y, rot, flip)) and 'delta' (path or None);
-        response files are deleted on the NEXT request.
-
-        hier=True speaks the V4 protocol (rust/VFS_HIER.md par.3.5):
-        the delta carries the whole working-set hierarchy, the
-        response adds 'top' (gen top WC name) and 'names' (ci->name
-        table path, once per daemon run); ack/reset drive the
-        par.3.7 session transaction. probe+hier = mode=hier_probe
-        (session-less)."""
+        """One plan/materialize round-trip on the V4 hier protocol
+        (rust/VFS_HIER.md par.3.5; flat retired in M5). view_um =
+        (x0,y0,x1,y1) in um; layers = [(l,d), ...] or None (=all);
+        depth None = full. The delta carries the whole working-set
+        hierarchy; the response adds 'top' (gen top WC name) and
+        'names' (ci->name table path, once per daemon run);
+        ack/reset drive the par.3.7 session transaction; probe =
+        session-less exact query. Response files are deleted on
+        the NEXT request."""
         for p in self._last_files:
             try:
                 os.unlink(p)
@@ -80,19 +77,16 @@ class VfsClient:
                 f"{view_um[2]},{view_um[3]} px={px_per_um} "
                 f"cut={cut_px} depth={dspec} layers={lspec} "
                 f"out={self.tmp}")
-        if hier:
-            if probe:
-                line += " mode=hier_probe"
-            else:
-                line += f" mode=hier ack={ack}"
-                if reset:
-                    line += " reset=1"
-                if stream_kb is not None:
-                    # per-request budget override: the service adapts
-                    # it to its measured parse speed
-                    line += f" stream={int(stream_kb)}"
-        elif probe:
+        if probe:
             line += " mode=probe"
+        else:
+            line += f" ack={ack}"
+            if reset:
+                line += " reset=1"
+            if stream_kb is not None:
+                # per-request budget override: the service adapts
+                # it to its measured parse speed
+                line += f" stream={int(stream_kb)}"
         self.proc.stdin.write(line + "\n")
         self.proc.stdin.flush()
         resp = self.proc.stdout.readline()
@@ -110,35 +104,11 @@ class VfsClient:
         out["top"] = None if top in ("-", "") else top
         nm = out.get("names", "-")
         out["names"] = None if nm in ("-", "") else nm
-        fr = out.get("frames", "-")
-        out["frames"] = None if fr in ("-", "") else fr
-        if out["frames"]:
-            self._last_files.append(out["frames"])
-        mats = []
-        mp = out.get("placements")
-        if mp and mp != "-" and os.path.isfile(mp):
-            with open(mp) as f:
-                for ln in f:
-                    p = ln.rstrip("\n").split("\t")
-                    if len(p) >= 12:
-                        # name x y rot flip na nb vax vay vbx vby design
-                        mats.append((
-                            p[0], int(p[1]), int(p[2]), int(p[3]),
-                            p[4] == "1", int(p[5]), int(p[6]),
-                            (int(p[7]), int(p[8])),
-                            (int(p[9]), int(p[10])), p[11]))
-                    elif len(p) >= 5:  # legacy single-placement rows
-                        mats.append((
-                            p[0], int(p[1]), int(p[2]), int(p[3]),
-                            p[4] == "1", 1, 1, (0, 0), (0, 0),
-                            p[5] if len(p) > 5 else p[0]))
-            self._last_files.append(mp)
         if out["delta"]:
             self._last_files.append(out["delta"])
-        out["mats"] = mats
         ev = out.get("evict", "-")
         out["evict"] = [] if ev in ("-", "") else ev.split(",")
-        for k in ("pages", "new", "bytes", "members", "nframes"):
+        for k in ("pages", "new", "bytes", "members"):
             if k in out:
                 try:
                     out[k] = int(out[k])

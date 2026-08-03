@@ -23,10 +23,6 @@ const BVH_LEAF: usize = 8;
 /// (cell,layer) run gets no BVH at all (linear scan, root = NONE)
 const PBVH_LEAF: usize = 8;
 
-// cut-frame outline layer (shared with the skeleton's cell-outline
-// convention; drawn hollow by the viewer)
-const FRAME_LAYER: u32 = 255;
-const FRAME_DT: u32 = 0;
 
 // ------------------------------------------------------------ build
 
@@ -2148,13 +2144,8 @@ fn inspect_plan(
 pub fn plan_cmd(args: &[String]) {
     let (dir, view, px, cut, depth, layers, rest) =
         parse_common(args);
-    // --mode hier|flat: A/B switch (VFS_HIER.md par.3.5); flat
-    // stays the default until M5 retires it
-    let mode = rest
-        .iter()
-        .find(|(k, _)| k == "--mode")
-        .map(|(_, v)| v.as_str())
-        .unwrap_or("flat");
+    // M5: hier is the only planner; --mode is accepted and
+    // ignored for script compatibility
     let v = floe_vfs::Vfs::open(&dir).unwrap_or_else(|e| {
         eprintln!("{}", e);
         std::process::exit(1);
@@ -2167,7 +2158,7 @@ pub fn plan_cmd(args: &[String]) {
         depth,
         layers.as_deref(),
     );
-    if mode == "hier" {
+    {
         let t0 = std::time::Instant::now();
         let plan = v.plan_hier(&req);
         let ms = t0.elapsed().as_secs_f64() * 1e3;
@@ -2236,46 +2227,8 @@ pub fn plan_cmd(args: &[String]) {
         }
         return;
     }
-    let t0 = std::time::Instant::now();
-    let plan = v.plan(&req);
-    let (mut cbytes, mut ubytes) = (0u64, 0u64);
-    let (mut records, mut members) = (0u64, 0u64);
-    for &pi in &plan.pages {
-        let p = v.ovm.page(pi);
-        cbytes += p.csize as u64;
-        ubytes += p.usize_ as u64;
-        records += p.records as u64;
-        members += p.members;
-    }
-    let st = &plan.stats;
-    println!(
-        "{{\n  \"pages\": {},\n  \"page_reads\": {},\n  \
-         \"compressed_bytes\": {},\n  \"encoded_bytes\": {},\n  \
-         \"records\": {},\n  \"members\": {},\n  \
-         \"placements\": {},\n  \
-         \"visited_cells\": {},\n  \"visited_bvh\": {},\n  \
-         \"culled_subtrees_size\": {},\n  \
-         \"culled_subtrees_layer\": {},\n  \
-         \"culled_pages_size\": {},\n  \"frames\": {},\n  \
-         \"materializations\": {},\n  \
-         \"plan_ms\": {:.2}\n}}",
-        plan.pages.len(),
-        st.page_reads,
-        cbytes,
-        ubytes,
-        records,
-        members,
-        plan.mats.len(),
-        st.visited_cells,
-        st.visited_bvh,
-        st.cull_size,
-        st.cull_layer,
-        st.cull_page_size,
-        plan.frames.len(),
-        st.materializations,
-        t0.elapsed().as_secs_f64() * 1e3
-    );
 }
+
 
 // ------------------------------------------------------------- vfsd
 
@@ -2320,10 +2273,8 @@ pub fn vfsd_cmd(args: &[String]) {
     });
     let mut d = Daemon {
         v: &v,
-        flat: floe_vfs::Session::new(budget_mb << 20),
         hier: floe_vfs::HierSession::new(budget_mb << 20),
         names_sent: false,
-        mode_lock: None,
         stream_budget: stream_kb << 10,
     };
     eprintln!(
@@ -2360,10 +2311,8 @@ pub fn vfsd_cmd(args: &[String]) {
 /// the residency ledger across formats)
 struct Daemon<'a> {
     v: &'a floe_vfs::Vfs,
-    flat: floe_vfs::Session,
     hier: floe_vfs::HierSession,
     names_sent: bool,
-    mode_lock: Option<bool>, // true = hier
     /// per-response cap on new payload bytes (0 = off)
     stream_budget: u64,
 }
@@ -2425,143 +2374,14 @@ fn serve_one(d: &mut Daemon, line: &str) -> Result<String, String> {
             _ => return Err(format!("unknown key {}", k)),
         }
     }
-    let hier_mode = mode == "hier" || mode == "hier_probe";
+    // M5: the daemon speaks V4 (hier) only; `mode=` survives
+    // solely to mark session-less probes (pick/snap/clip)
     let probe = mode == "probe" || mode == "hier_probe";
-    if !probe {
-        // session requests lock the run's format; probes are
-        // session-less and free to mix
-        match d.mode_lock {
-            None => d.mode_lock = Some(hier_mode),
-            Some(m) if m != hier_mode => {
-                return Err("mode_switch".into())
-            }
-            _ => {}
-        }
-    }
     let view = view.ok_or("view required")?;
     let out = out.ok_or("out required")?;
     let req =
         make_req(d.v, view, px, cut, depth, layers.as_deref());
-    if hier_mode {
-        return serve_hier(
-            d, &req, gen, ack, reset, probe, stream_kb, &out,
-        );
-    }
-    let v = d.v;
-    let sess = &mut d.flat;
-    let t0 = std::time::Instant::now();
-    let plan = v.plan(&req);
-    // probe = session-less exact query (pick/snap/clip): the delta
-    // carries EVERY planned page, the working set is untouched
-    let upd = if probe {
-        floe_vfs::Update {
-            new: plan.pages.clone(),
-            evict: Vec::new(),
-            mats: plan.mats.clone(),
-        }
-    } else {
-        sess.apply(v, &plan, gen)
-    };
-    std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
-    let delta_path = if upd.new.is_empty() {
-        "-".to_string()
-    } else {
-        let bytes = v.delta(&upd.new)?;
-        let p = format!("{}/delta_{}.oas", out, gen);
-        std::fs::write(&p, &bytes).map_err(|e| e.to_string())?;
-        p
-    };
-    let mats_path = format!("{}/mats_{}.tsv", out, gen);
-    {
-        let mut w = String::new();
-        for m in &upd.mats {
-            // columns: page-cell name, x, y, rot, flip, array rep
-            // (na nb vax vay vbx vby), design cell name (last, for
-            // pick/status - page cells are an implementation detail)
-            let dname =
-                v.ovm.cell(v.ovm.page(m.page).cell).name;
-            w.push_str(&format!(
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
-                v.page_name(m.page),
-                m.x,
-                m.y,
-                m.rot,
-                m.flip as u8,
-                m.na,
-                m.nb,
-                m.va.0,
-                m.va.1,
-                m.vb.0,
-                m.vb.1,
-                dname
-            ));
-        }
-        std::fs::write(&mats_path, w)
-            .map_err(|e| e.to_string())?;
-    }
-    // frames: ephemeral per-view outlines for cut-dropped subtrees,
-    // always regenerated (never part of the working set)
-    let frames_path = if plan.frames.is_empty() {
-        "-".to_string()
-    } else {
-        use floe_oasis::doc::RectRec;
-        let rects: Vec<RectRec> = plan
-            .frames
-            .iter()
-            .map(|b| RectRec {
-                layer: FRAME_LAYER,
-                dt: FRAME_DT,
-                x: b.x0,
-                y: b.y0,
-                w: (b.x1 - b.x0).max(1),
-                h: (b.y1 - b.y0).max(1),
-                rep: floe_oasis::doc::Rep::One,
-            })
-            .collect();
-        let wc = WCell {
-            name: format!("FRAMES_{}", gen),
-            rects: &rects,
-            polys: &[],
-            paths: &[],
-            texts: &[],
-            places: Vec::new(),
-        };
-        let bytes =
-            write_tree(&[wc], v.ovm.unit).map_err(|e| e.to_string())?;
-        let p = format!("{}/frames_{}.oas", out, gen);
-        std::fs::write(&p, &bytes).map_err(|e| e.to_string())?;
-        p
-    };
-    let evict: Vec<String> =
-        upd.evict.iter().map(|&pi| v.page_name(pi)).collect();
-    let mut bytes = 0u64;
-    let mut members = 0u64;
-    for &pi in &plan.pages {
-        let p = v.ovm.page(pi);
-        bytes += p.csize as u64;
-        members += p.members;
-    }
-    Ok(format!(
-        "gen={} pages={} new={} evict={} delta={} placements={} \
-         frames={} nframes={} bytes={} members={} plan_ms={:.2} \
-         resident_mb={:.1}",
-        gen,
-        plan.pages.len(),
-        upd.new.len(),
-        if evict.is_empty() {
-            "-".to_string()
-        } else {
-            evict.join(",")
-        },
-        delta_path,
-        mats_path,
-        frames_path,
-        plan.frames.len(),
-        bytes,
-        members,
-        t0.elapsed().as_secs_f64() * 1e3,
-        sess.resident_bytes() as f64 / (1 << 20) as f64
-    ))
+    serve_hier(d, &req, gen, ack, reset, probe, stream_kb, &out)
 }
 
 /// hier-mode request (VFS_HIER.md par.3.5/3.7): resolve the ack (or
