@@ -26,6 +26,9 @@ pub struct ViewReq {
     pub vis: Vec<u8>,
     /// semantic depth limit (u32::MAX = full)
     pub depth: u32,
+    /// screen scale (pixels per dbu) for the M7 LOD density rule;
+    /// 0.0 disables the rule (probes, kill switch)
+    pub px_per_dbu: f64,
 }
 
 /// one placement of a page cell in the working-set top. na/nb/va/vb
@@ -54,7 +57,14 @@ impl Vfs {
 
     pub fn page_name(&self, pi: u32) -> String {
         let p = self.ovm.page(pi);
-        floe_ovm::page_cell_name(p.cell, p.layer_idx, p.seq)
+        if p.lod == floe_ovm::LOD_EXACT {
+            floe_ovm::page_cell_name(p.cell, p.layer_idx, p.seq)
+        } else {
+            // the variant's payload cell carries the "q" name; WC
+            // references and evict lists must match it or klayout
+            // materializes an EMPTY exact-named ghost on read
+            floe_ovm::lod_cell_name(p.cell, p.layer_idx, p.seq)
+        }
     }
 
     /// visible-layer bitset from "l/d" or name specs (None = all)

@@ -141,6 +141,22 @@ def main():
     if full["pages"] != n_pages - n_lod:
         fail("S5 plan selects %d pages but exact pages are %d"
              % (full["pages"], n_pages - n_lod))
+    # M7-B: the density gate swaps dense pages at wide zoom, and
+    # --lod 0 (or a probe) must render exact
+    # px 0.1/um puts the whole die on ~100 px: quadrant pages hold
+    # ~250k members vs ~2.5k px^2 -> far past the k=4 gate
+    wide = plan(out, (0, 0, 1000, 1000), 0.1, depth=0, cut=0.0)
+    if wide.get("lod_pages", 0) < 1:
+        fail("S5 density gate never fired on a rep-flood asset")
+    r = subprocess.run(
+        [FI, "plan", out, "--mode", "hier",
+         "--view", "0,0,1000,1000", "--px-per-um", "0.1",
+         "--cut-px", "0", "--depth", "0", "--lod", "0"],
+        capture_output=True, check=True)
+    exact = json.loads(r.stdout)
+    if exact.get("lod_pages", 0) != 0:
+        fail("S5 --lod 0 still swapped %d pages"
+             % exact["lod_pages"])
 
     # S4: thread-count determinism
     out1 = os.path.join(work, "repfloor_j1.floe")

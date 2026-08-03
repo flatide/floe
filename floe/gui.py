@@ -1140,9 +1140,13 @@ class Viewer:
                     refin = ""
                     if res.get("refining"):
                         refin = ", refining %d" % res["refining"]
-                    mode = "live (%d tiles, %d ms%s%s%s%s%s)" \
+                    lod = ""
+                    if res.get("lod"):
+                        lod = ", lod %d" % res["lod"]
+                    mode = "live (%d tiles, %d ms%s%s%s%s%s%s)" \
                         % (res["tiles"], res["ms"], split,
-                           self._depth_note(used), cut, drawn, refin)
+                           self._depth_note(used), cut, drawn,
+                           refin, lod)
                 # also to stdout: the status bar is overwritten by
                 # cursor coords on mouse-move, so the perf line would
                 # otherwise vanish before it can be read (only the

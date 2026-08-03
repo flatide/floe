@@ -108,7 +108,7 @@ class VfsClient:
             self._last_files.append(out["delta"])
         ev = out.get("evict", "-")
         out["evict"] = [] if ev in ("-", "") else ev.split(",")
-        for k in ("pages", "new", "bytes", "members"):
+        for k in ("pages", "new", "bytes", "members", "lod"):
             if k in out:
                 try:
                     out[k] = int(out[k])

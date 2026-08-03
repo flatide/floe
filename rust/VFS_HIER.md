@@ -5,8 +5,8 @@
 단순화·책임 분리 지시**, rev 12 = **M0 실증**, rev 13~18 =
 **M1/M2/M3/M3.5 구현 + 외부 검토 2회 반영(0.6.3)**, rev 19 =
 **M4 실측 완료 + 스케일 결함 4건 수정(0.6.4→0.7.0, ovm v3)** —
-변경 요지 §0). 상태: **M0~M5 + mmap(rev 21) + M7-A LOD 빌드
-(rev 22, ovm v4)** — **다음 = M7-B 플래너 밀도 선택**
+변경 요지 §0). 상태: **M0~M5 + mmap + M7-A/B (rev 22/23, ovm
+v4, LOD 밀도 선택 라이브)** — **다음 = M7-C 사무실 실측**
 (M4 결과: §0 rev 19). 배경: MAIN09(150M급)
 실측에서 **뷰어 깊은 줌이
 줌인할수록 느려지는** 병리 확인. 원인은 개별 증상이 아니라 하나의
@@ -169,6 +169,31 @@ rev 10 (지시: **인덱서/뷰어 책임 분리** + 이전 검토 잔여 1건):
   usize/u64 → u32/u16 narrowing(na/nb, Pts count, page/place/BVH
   start·count, payload size 등)은 checked — silent truncation
   금지, 초과는 "limit exceeded: <필드>" 빌드 에러.
+
+rev 23 (M7-B 플래너 밀도 선택 — 2026-08-03, 0.9.1):
+
+- **밀도 게이트**: `ViewReq.px_per_dbu` 추가(px= 와이어 플럼빙).
+  페이지 선택 후처리에서 `members > lod_k × 화면 px²`(가시 교차
+  면적 합 기준 — 겹침은 면적을 과대평가해 **exact 쪽으로 편향**)
+  이면 LOD 변종 인덱스로 스왑. lod_k 기본 4.0(HierOpts),
+  히스테리시스는 M7-C 실측에서 플래핑 관찰 시 추가.
+- **계측 = exact by construction**: probe 요청(pick/snap/clip)은
+  데몬에서 px_per_dbu=0으로 강제 — 밀도 게이트 자체가 실행되지
+  않음. `FLOE_LOD=0` = 전역 킬스위치(데몬 env), plan CLI는
+  `--lod 0`. 렌더 XOR 게이트는 probe 경유라 exact 그대로.
+- **이름 계약 수정**: `Vfs::page_name`이 LOD 페이지에 "…q" 명을
+  반환 — WC 참조·evict 명이 payload 셀명과 일치해야 하며,
+  불일치 시 klayout이 빈 exact-명 유령 셀을 만들고 다음 gen의
+  exact 로드가 "$1" 리네임으로 밀려 레이어가 통째로 소실되는
+  것을 L7 개발 중 실증(수정 완료).
+- **전달 경로**: 응답 `lod=N` → 서비스 → 상태줄 ", lod N"(현재
+  프레임이 표시 근사임을 상시 노출).
+- **게이트**: 플래너 유닛(줌아웃=스왑/줌인=exact/probe=exact/
+  킬스위치), **L7 신설** = 변종 사이클(광역 lod 발화 → 동일 뷰
+  fine-px에서 exact 복귀 + XOR 0 + 원장 무결) — L1~L6은
+  FLOE_LOD=0으로 실행(수명주기 계약은 변종 선택과 직교), S5에
+  밀도 발화 + `--lod 0` 무발화 게이트 추가. 스위트 전체 green +
+  testchip 서비스 스모크.
 
 rev 22 (M7-A LOD 페이지 빌드 — 2026-08-03, 0.9.0, **ovm v4 =
 재인덱싱 필요**):

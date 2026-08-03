@@ -2515,6 +2515,7 @@ fn make_req(
         cut_dbu: (cut_px / px_per_um * s) as i64,
         vis: v.layer_mask(layers).expect("layers"),
         depth,
+        px_per_dbu: px_per_um / s,
     }
 }
 
@@ -2700,7 +2701,7 @@ pub fn plan_cmd(args: &[String]) {
         eprintln!("{}", e);
         std::process::exit(1);
     });
-    let req = make_req(
+    let mut req = make_req(
         &v,
         view.expect("--view required"),
         px,
@@ -2708,6 +2709,10 @@ pub fn plan_cmd(args: &[String]) {
         depth,
         layers.as_deref(),
     );
+    // --lod 0 renders the plan exact (M7 kill-switch parity)
+    if rest.iter().any(|(k, val)| k == "--lod" && val == "0") {
+        req.px_per_dbu = 0.0;
+    }
     {
         let t0 = std::time::Instant::now();
         let plan = v.plan_hier(&req);
@@ -2743,7 +2748,8 @@ pub fn plan_cmd(args: &[String]) {
              \"pts_offsets_emitted\": {},\n  \
              \"pts_bytes_emitted\": {},\n  \
              \"grid_fallback_full\": {},\n  \
-             \"kbox_merges\": {},\n  \"plan_ms\": {:.2}\n}}",
+             \"kbox_merges\": {},\n  \"lod_pages\": {},\n  \
+             \"plan_ms\": {:.2}\n}}",
             plan.pages.len(),
             cbytes,
             ubytes,
@@ -2770,6 +2776,7 @@ pub fn plan_cmd(args: &[String]) {
             st.pts_bytes_emitted,
             st.grid_fallback_full,
             st.kbox_merges,
+            st.lod_swapped,
             ms
         );
         if rest.iter().any(|(k, _)| k == "--inspect") {
@@ -2824,6 +2831,8 @@ pub fn vfsd_cmd(args: &[String]) {
     let mut d = Daemon {
         v: &v,
         hier: floe_vfs::HierSession::new(budget_mb << 20),
+        lod_off: std::env::var("FLOE_LOD").ok().as_deref()
+            == Some("0"),
         names_sent: false,
         stream_budget: stream_kb << 10,
     };
@@ -2865,6 +2874,8 @@ struct Daemon<'a> {
     names_sent: bool,
     /// per-response cap on new payload bytes (0 = off)
     stream_budget: u64,
+    /// FLOE_LOD=0 kill switch: every request renders exact
+    lod_off: bool,
 }
 
 fn serve_one(d: &mut Daemon, line: &str) -> Result<String, String> {
@@ -2929,8 +2940,13 @@ fn serve_one(d: &mut Daemon, line: &str) -> Result<String, String> {
     let probe = mode == "probe" || mode == "hier_probe";
     let view = view.ok_or("view required")?;
     let out = out.ok_or("out required")?;
-    let req =
+    let mut req =
         make_req(d.v, view, px, cut, depth, layers.as_deref());
+    // measurement paths are EXACT by construction: probes never
+    // take the LOD density gate; FLOE_LOD=0 disables it globally
+    if probe || d.lod_off {
+        req.px_per_dbu = 0.0;
+    }
     serve_hier(d, &req, gen, ack, reset, probe, stream_kb, &out)
 }
 
@@ -3039,7 +3055,8 @@ fn serve_hier(
         "gen={} pages={} new={} evict={} delta={} top={} names={} \
          bytes={} members={} plan_ms={:.2} wc_cells={} \
          inst_edges={} frame_rects={} partial={} deferred={} \
-         resident_committed_mb={:.1} resident_projected_mb={:.1} \
+         lod={} resident_committed_mb={:.1} \
+         resident_projected_mb={:.1} \
          pending_new_mb={:.1} pending_evict_mb={:.1}",
         gen,
         plan.pages.len(),
@@ -3060,6 +3077,7 @@ fn serve_hier(
         st.frame_rects,
         upd.partial as u8,
         upd.deferred,
+        st.lod_swapped,
         mb(upd.committed_bytes),
         mb(upd.projected_bytes),
         mb(upd.pending_new_bytes),

@@ -40,6 +40,11 @@ pub struct HierOpts {
     pub pts_enum_budget: u64,
     /// plan-wide cap on emitted frame rects (flat parity)
     pub frame_cap: usize,
+    /// M7 LOD density gate: swap a page for its merged variant
+    /// when members > lod_k * on-screen px^2 of its visible part.
+    /// 0.0 disables (and req.px_per_dbu == 0.0 always disables -
+    /// probes are exact by construction).
+    pub lod_k: f64,
 }
 
 impl Default for HierOpts {
@@ -49,7 +54,8 @@ impl Default for HierOpts {
             pts_full_rep: 8192,
             pts_enum_budget: 200_000,
             frame_cap: 200_000,
-        }
+            lod_k: 4.0,
+                }
     }
 }
 
@@ -101,6 +107,8 @@ pub struct HierStats {
     pub pts_bytes_emitted: u64,
     pub grid_fallback_full: u64,
     pub kbox_merges: u64,
+    /// pages swapped for their LOD variant by the density gate
+    pub lod_swapped: u64,
 }
 
 #[derive(Debug, PartialEq)]
@@ -350,6 +358,8 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
         prio: HashMap::new(),
         st: HierStats::default(),
         pts_budget: opts.pts_enum_budget,
+        px_per_dbu: req.px_per_dbu,
+        lod_k: opts.lod_k,
         frames_total: 0,
     };
     let top_ci = v.top;
@@ -422,6 +432,8 @@ struct Hier<'a> {
     st: HierStats,
     pts_budget: u64,
     frames_total: usize,
+    px_per_dbu: f64,
+    lod_k: f64,
 }
 
 impl<'a> Hier<'a> {
@@ -496,7 +508,41 @@ impl<'a> Hier<'a> {
                 }
             }
         }
+        // M7 density gate: a page whose visible part is so dense
+        // that members outnumber its screen pixels several-fold
+        // swaps for its merged LOD variant. Sub-pixel gaps are
+        // already beyond what the raster shows at that band; the
+        // exact page returns automatically on zoom-in. px2 sums
+        // the (possibly overlapping) box intersections, which can
+        // only OVERSTATE the visible area - the bias runs toward
+        // exact.
+        let mut sel: BTreeSet<u32> = BTreeSet::new();
         for &pi in &psel {
+            let p = self.v.page(pi);
+            let mut eff = pi;
+            if self.lod_k > 0.0
+                && self.px_per_dbu > 0.0
+                && p.lod_page != floe_ovm::LOD_PAGE_NONE
+            {
+                let mut px2 = 0f64;
+                for b in &boxes {
+                    let ix = (p.bbox.x1.min(b.x1)
+                        - p.bbox.x0.max(b.x0))
+                        .max(0) as f64;
+                    let iy = (p.bbox.y1.min(b.y1)
+                        - p.bbox.y0.max(b.y0))
+                        .max(0) as f64;
+                    px2 += ix * self.px_per_dbu
+                        * (iy * self.px_per_dbu);
+                }
+                if p.members as f64 > self.lod_k * px2.max(1.0) {
+                    eff = p.lod_page;
+                    self.st.lod_swapped += 1;
+                }
+            }
+            sel.insert(eff);
+        }
+        for &pi in &sel {
             let pb = self.v.page(pi).bbox;
             let d = boxes
                 .iter()
@@ -508,8 +554,8 @@ impl<'a> Hier<'a> {
                 .and_modify(|e| *e = (*e).min(d))
                 .or_insert(d);
         }
-        self.pages_all.extend(psel.iter().copied());
-        wc.pages = psel.into_iter().collect();
+        self.pages_all.extend(sel.iter().copied());
+        wc.pages = sel.into_iter().collect();
         // ---- children (r = 0 truncates: pages only, no frames -
         // flat parity, par.2.5)
         if r != 0 && cell.bvh_count != 0 {
@@ -1118,8 +1164,82 @@ mod tests {
         BBox { x0, y0, x1, y1 }
     }
 
+    fn rq_px(
+        view: BBox,
+        cut: i64,
+        depth: u32,
+        px_per_dbu: f64,
+    ) -> ViewReq {
+        ViewReq {
+            view,
+            cut_dbu: cut,
+            vis: vec![0xff],
+            depth,
+            px_per_dbu,
+        }
+    }
+
+    /// M7 density gate: a dense page swaps for its LOD twin only
+    /// when members outnumber its on-screen pixels by k; probes
+    /// (px_per_dbu = 0) and zoom-ins stay exact
+    #[test]
+    fn lod_density_gate_swaps_and_reverts() {
+        let mut b = Builder::new(1000.0, 0, 0, 1);
+        b.top = 0;
+        b.layer(1, 0, "L1", 1, 1_000_000);
+        let m = b.bitset(&[1]);
+        let pb = bx(0, 0, 100_000, 100_000);
+        b.page(
+            0, 0, 0, &pb, 0, 0, 0, 1, 1_000_000, 50, 50,
+            floe_ovm::LOD_EXACT, 1,
+        );
+        b.page(
+            0, 0, 0, &pb, 0, 0, 0, 1, 4_000, 1000, 1000,
+            floe_ovm::LOD_MERGED, floe_ovm::LOD_PAGE_NONE,
+        );
+        let pr = b.prange(0, 0, 1, PBVH_NONE);
+        b.cell(
+            "T", 0, 0, &pb, &pb, 0, 0, 0, 2, 0, 0, pr, 1, m, m,
+            1_000_000,
+        );
+        let ovm = Ovm::from_bytes(b.finish(0)).unwrap();
+        let o = HierOpts::default();
+        // zoomed OUT: page is ~100 px on screen -> 10^4 px^2,
+        // members 10^6 > 4*10^4 -> LOD
+        let p1 = plan_hier(
+            &ovm,
+            &rq_px(pb, 0, u32::MAX, 0.001),
+            &o,
+        );
+        assert_eq!(p1.pages, vec![1], "{:?}", p1.pages);
+        assert_eq!(p1.stats.lod_swapped, 1);
+        // zoomed IN: 10^10 px^2 -> exact
+        let p2 =
+            plan_hier(&ovm, &rq_px(pb, 0, u32::MAX, 1.0), &o);
+        assert_eq!(p2.pages, vec![0], "{:?}", p2.pages);
+        // probe (px 0): exact by construction
+        let p3 =
+            plan_hier(&ovm, &rq_px(pb, 0, u32::MAX, 0.0), &o);
+        assert_eq!(p3.pages, vec![0]);
+        // kill switch (lod_k 0): exact
+        let mut off = HierOpts::default();
+        off.lod_k = 0.0;
+        let p4 = plan_hier(
+            &ovm,
+            &rq_px(pb, 0, u32::MAX, 0.001),
+            &off,
+        );
+        assert_eq!(p4.pages, vec![0]);
+    }
+
     fn rq(view: BBox, cut: i64, depth: u32) -> ViewReq {
-        ViewReq { view, cut_dbu: cut, vis: vec![0xff], depth }
+        ViewReq {
+            view,
+            cut_dbu: cut,
+            vis: vec![0xff],
+            depth,
+            px_per_dbu: 0.0,
+        }
     }
 
     // ---- fixture: cells listed CHILDREN-FIRST (index order is a
@@ -1610,6 +1730,7 @@ mod tests {
             cut_dbu: 0,
             vis: vec![0xff],
             depth: u32::MAX,
+            px_per_dbu: 0.0,
         };
         // brute equality needs the corner windows, not the whole
         // spanning box - use two-box behavior via narrow checks

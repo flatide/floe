@@ -17,6 +17,9 @@ vfsd sessions exactly like the render service does.
   L5  a DROPPED first response must not lose the names= table (it is
       sent once per daemon run; the client loads it before the stale
       check) - design-name resolution still works afterwards
+  L7  LOD variant cycle (M7-B): wide view swaps dense pages for
+      merged coverage, the same view at a fine px scale reverts to
+      exact and XORs clean
   L6  budgeted streaming (--stream-kb): rounds converge, their new
       pages sum to exactly the unbudgeted cold set, the final view
       XORs clean, and a dropped partial round rolls back and re-sends
@@ -119,14 +122,14 @@ class Sess:
         self.m = VfsMosaic(cache)
         self.dbu = cache.meta["dbu"]
 
-    def request(self, view, reset=False):
+    def request(self, view, reset=False, px=1.0):
         self.m.req_gen += 1
         x0, y0, x1, y1 = view
         r = self.client.request(
             self.m.req_gen,
             (x0 * self.dbu, y0 * self.dbu,
              x1 * self.dbu, y1 * self.dbu),
-            1.0, 0.0, None, None, ack=0 if reset else self.m.applied_gen, reset=reset)
+            px, 0.0, None, None, ack=0 if reset else self.m.applied_gen, reset=reset)
         # mirror the service: names= is view-independent and sent
         # once per run, so it is consumed at REQUEST time - even a
         # response the caller then drops must not lose it
@@ -150,6 +153,10 @@ class Sess:
 
 def main():
     src, floe_dir = sys.argv[1], sys.argv[2]
+    # L1-L6 assert EXACT XOR equality - the lifecycle contract is
+    # orthogonal to the M7 variant choice, so their daemons run
+    # with the LOD kill switch; L7 below owns the variant cycle
+    os.environ["FLOE_LOD"] = "0"
     cache = cm.Cache(src)
     cache.dir = floe_dir
     cache.meta = json.load(open(os.path.join(floe_dir,
@@ -315,9 +322,34 @@ def main():
         check_ledger("L6 wander back", s.m)
     finally:
         s.stop()
+    # ---- L7: LOD variant cycle (M7-B). Wide + tiny px scale
+    # fires the density gate (delta ships "...q" coverage cells);
+    # the SAME view at a fine px scale must come back exact and
+    # XOR clean - the in-place variant upgrade is the transition
+    # the session must survive.
+    os.environ.pop("FLOE_LOD", None)
+    s = Sess(cache)
+    try:
+        full = (bx0, by0, bx1, by1)
+        r = s.request(full, px=0.01)
+        chk(int(r.get("lod", 0) or 0) >= 1,
+            "L7 density gate never fired (lod=%s)" % r.get("lod"))
+        s.apply(r)
+        qres = [nm for nm in s.m.cells if nm.endswith("q")]
+        chk(len(qres) >= 1, "L7 no lod page cells resident")
+        check_ledger("L7 lod", s.m)
+        r2 = s.request(full, px=100.0)
+        chk(int(r2.get("lod", 0) or 0) == 0,
+            "L7 fine-px round still lod=%s" % r2.get("lod"))
+        s.apply(r2)
+        xor_view("L7 exact-after-lod", sregs, s.m, full)
+        check_ledger("L7 exact", s.m)
+    finally:
+        s.stop()
+
     sly._destroy()
 
-    print("vfs-lifecycle-checked L1-L6, failures: %d" % len(bad))
+    print("vfs-lifecycle-checked L1-L7, failures: %d" % len(bad))
     sys.exit(1 if bad else 0)
 
 

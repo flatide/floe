@@ -439,6 +439,11 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
             out["cut_um"] = round(cut_px / max(1e-9, px_per_um), 3)
         if isinstance(r.get("members"), int):
             out["drawn"] = r["members"]
+        if r.get("lod"):
+            # pages served as merged-coverage variants this gen
+            # (M7): surfaced so the user always knows the current
+            # frame is a display approximation
+            out["lod"] = r["lod"]
         res.put(out)
 
     # hier: budgeted streaming rounds (VFS_HIER.md par.5 M3.5). Each
