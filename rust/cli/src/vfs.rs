@@ -17,7 +17,8 @@ use floe_tiler::hier::{cell_bboxes_full, rep_extent};
 use floe_tiler::{path_bbox, xf_rep, Xf};
 use std::io::Write;
 
-const PAGE_TARGET_BYTES: usize = 1 << 20; // pre-encode estimate
+const DEFAULT_PAGE_TARGET_MB: u64 = 1;
+const MIB: u64 = 1 << 20;
 /// Encoded payloads are retained for at most one ordered batch. The old
 /// implementation encoded every page before writing design.ovp, so peak RSS
 /// included the complete payload file (tens of GB on the 9.8G asset).
@@ -41,6 +42,7 @@ pub fn vfs_cmd(args: &[String]) {
     let mut jobs: Option<usize> = None;
     let mut encode_batch: Option<usize> = None;
     let mut plan_batch: Option<usize> = None;
+    let mut page_target_mb: Option<u64> = None;
     // coverage bitplanes are optional: off by default (extra build
     // time, and the viewer defaults to coverage off), --coverage to
     // include, --coverage-only to add design.ovc to an existing cache
@@ -69,6 +71,14 @@ pub fn vfs_cmd(args: &[String]) {
                         .expect("plan batch")
                         .max(1),
                 );
+                i += 2;
+            }
+            "--page-target-mb" => {
+                let mb = args[i + 1]
+                    .parse::<u64>()
+                    .expect("page target MB");
+                assert!(mb > 0, "page target MB must be positive");
+                page_target_mb = Some(mb);
                 i += 2;
             }
             "--coverage" => {
@@ -103,6 +113,11 @@ pub fn vfs_cmd(args: &[String]) {
     });
     let plan_batch =
         plan_batch.unwrap_or_else(|| jobs.max(1).min(PLAN_BATCH_MAX));
+    let page_target_mb =
+        page_target_mb.unwrap_or(DEFAULT_PAGE_TARGET_MB);
+    let page_target_bytes = page_target_mb
+        .checked_mul(MIB)
+        .expect("limit exceeded: page target bytes");
     let t0 = std::time::Instant::now();
     eprintln!("[vfs] reading {}...", src);
     let data = std::fs::read(&src).expect("read src");
@@ -228,6 +243,7 @@ pub fn vfs_cmd(args: &[String]) {
             jobs,
             encode_batch,
             plan_batch,
+            page_target_bytes,
         );
         if kill_at.as_deref() == Some("ovp-written") {
             eprintln!("[vfs] FLOE_KILL_AT=ovp-written");
@@ -827,6 +843,7 @@ fn split_pages(
     seq: &mut u32,
     out: &mut Vec<PageJob>,
     st: &mut SplitStats,
+    page_target_bytes: u64,
     depth: u32,
 ) {
     let bytes: u64 = recs.iter().map(|r| r.bytes as u64).sum();
@@ -836,7 +853,7 @@ fn split_pages(
     // rep can fragment.
     let splittable = recs.len() >= 2
         || recs.iter().any(|r| can_frag(cell, r));
-    if bytes <= PAGE_TARGET_BYTES as u64 || !splittable {
+    if bytes <= page_target_bytes || !splittable {
         emit_page(ci, li, recs, seq, out);
         return;
     }
@@ -899,7 +916,7 @@ fn split_pages(
     let mut acc: Vec<PRec> = Vec::new();
     let mut acc_bytes = 0u64;
     for r in wide {
-        if acc_bytes + r.bytes as u64 > PAGE_TARGET_BYTES as u64
+        if acc_bytes + r.bytes as u64 > page_target_bytes
             && !acc.is_empty()
         {
             st.oversize_pages += 1;
@@ -923,8 +940,30 @@ fn split_pages(
         emit_page(ci, li, lv, seq, out);
         return;
     }
-    split_pages(cell, arena, ci, li, lv, seq, out, st, depth + 1);
-    split_pages(cell, arena, ci, li, rv, seq, out, st, depth + 1);
+    split_pages(
+        cell,
+        arena,
+        ci,
+        li,
+        lv,
+        seq,
+        out,
+        st,
+        page_target_bytes,
+        depth + 1,
+    );
+    split_pages(
+        cell,
+        arena,
+        ci,
+        li,
+        rv,
+        seq,
+        out,
+        st,
+        page_target_bytes,
+        depth + 1,
+    );
 }
 
 /// materialized fragment repetition: base shift + subset rep. Pts
@@ -1308,6 +1347,7 @@ fn build_cell_plan(
     rbb: &[Option<(i64, i64, i64, i64)>],
     lidx: &std::collections::HashMap<(u32, u32), usize>,
     nl: usize,
+    page_target_bytes: u64,
 ) -> CellPlan {
     let cell = &doc.cells[ci];
     // ---- placements + instance BVH (leaf order = emit order)
@@ -1427,6 +1467,7 @@ fn build_cell_plan(
             &mut seq,
             &mut run,
             &mut split_stats,
+            page_target_bytes,
             0,
         );
         let run_lo = narrow_u32(pages.len() as u64, "cell page count");
@@ -1507,6 +1548,7 @@ fn build(
     jobs: usize,
     encode_batch: usize,
     plan_batch: usize,
+    page_target_bytes: u64,
 ) -> (Vec<u8>, Vec<Option<(i64, i64, i64, i64)>>, Vec<u64>) {
     let t0 = std::time::Instant::now();
     let n = doc.cells.len();
@@ -1789,11 +1831,12 @@ fn build(
     };
     eprintln!(
         "[vfs] build: bounded pipeline {} cells ({} workers, \
-         plan batch {}, encode batch {})...",
+         plan batch {}, encode batch {}, page target {} MiB)...",
         n,
         jobs.max(1),
         plan_batch,
-        encode_batch.max(1)
+        encode_batch.max(1),
+        page_target_bytes / MIB
     );
     let mut plan_elapsed = std::time::Duration::ZERO;
     let mut encode_elapsed = std::time::Duration::ZERO;
@@ -1820,7 +1863,14 @@ fn build(
                         return;
                     }
                     let ci = cell_base + local;
-                    let plan = build_cell_plan(doc, ci, rbb, lidx, nl);
+                    let plan = build_cell_plan(
+                        doc,
+                        ci,
+                        rbb,
+                        lidx,
+                        nl,
+                        page_target_bytes,
+                    );
                     let _ = pslots[local].set(plan);
                 });
             }
@@ -2815,7 +2865,7 @@ mod split_tests {
                 .enumerate()
                 .map(|(i, &k)| (k, i))
                 .collect();
-        build_cell_plan(doc, 0, &rbb, &lidx, 1)
+        build_cell_plan(doc, 0, &rbb, &lidx, 1, MIB)
     }
 
     /// expand every member of a cell's records into

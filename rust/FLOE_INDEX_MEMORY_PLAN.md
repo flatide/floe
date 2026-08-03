@@ -27,6 +27,11 @@ default (16) to recover planning throughput. `--encode-batch` bounds completed
 payloads, not the number of workers; 32 is a conservative starting point for
 16 workers and nominal 1 MiB pages.
 
+`--page-target-mb N` changes the decoded page-size estimate used by spatial
+partitioning. Its default remains 1 MiB. Larger values reduce indexing work
+and page count but can increase off-viewport geometry per selected page, so
+they are an explicit field-measurement knob rather than an automatic default.
+
 ## 1. Field baseline and objective
 
 The 9.8 GB production OASIS run establishes the current live-set shape:
