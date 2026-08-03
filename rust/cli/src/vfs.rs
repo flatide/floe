@@ -549,6 +549,7 @@ struct SplitStats {
     fragments: u64,
     oversize_pages: u64,
     depth_capped: u64,
+    lod_pages: u64,
 }
 
 /// hard recursion cap (records above it emit as-is + stat)
@@ -796,6 +797,16 @@ struct PageJob {
     members: u64,
     max_w: i64,
     max_h: i64,
+    /// LOD_EXACT or LOD_MERGED (M7 coverage variant)
+    lod: u8,
+    /// exact page -> its LOD twin. Cell-local page index at plan
+    /// time; the append loop rebases it to the global page index
+    /// (same fixup pattern as pranges/pbvh).
+    lod_page: u32,
+    /// LOD jobs only: grid-merged coverage rectangles (small
+    /// members fused; `recs` then holds the verbatim passthrough
+    /// records)
+    lod_rects: Vec<RectRec>,
 }
 
 fn emit_page(
@@ -823,6 +834,9 @@ fn emit_page(
         members,
         max_w,
         max_h,
+        lod: floe_ovm::LOD_EXACT,
+        lod_page: floe_ovm::LOD_PAGE_NONE,
+        lod_rects: Vec::new(),
     });
     *seq = seq.checked_add(1).expect("page seq overflow");
 }
@@ -1072,8 +1086,16 @@ fn encode_job(
             }
         }
     }
+    for lr in &job.lod_rects {
+        rects.push(lr.clone());
+    }
+    let name = if job.lod == floe_ovm::LOD_EXACT {
+        floe_ovm::page_cell_name(job.ci as u32, job.li, job.seq)
+    } else {
+        floe_ovm::lod_cell_name(job.ci as u32, job.li, job.seq)
+    };
     let wc = WCell {
-        name: floe_ovm::page_cell_name(job.ci as u32, job.li, job.seq),
+        name,
         rects: &rects,
         polys: &polys,
         paths: &paths,
@@ -1103,10 +1125,12 @@ fn write_encoded_page(
         *ovp_off,
         payload.len() as u64,
         raw,
-        job.recs.len() as u64,
+        (job.recs.len() + job.lod_rects.len()) as u64,
         job.members,
         job.max_w.max(0) as u64,
         job.max_h.max(0) as u64,
+        job.lod,
+        job.lod_page,
     );
     *ovp_off = ovp_off
         .checked_add(payload.len() as u64)
@@ -1341,6 +1365,210 @@ fn split_pbvh(
     split_pbvh(nodes, c, lo + mid, l + 1);
 }
 
+/// M7 LOD trigger: pages this dense get a merged-coverage variant
+const LOD_MIN_MEMBERS: u64 = 4096;
+/// coverage grid resolution (per axis) - at the zoom band where a
+/// variant activates, one cell is at or below one screen pixel
+const LOD_GRID: i64 = 128;
+/// records whose SHAPE spans at least this many grid cells in BOTH
+/// axes pass through verbatim (individually visible blobs keep
+/// their exact outline; only sub-cell "dust" is fused)
+const LOD_PASS_CELLS: i64 = 4;
+
+/// build the merged-coverage LOD variant of one page: mark every
+/// small member's footprint on a LOD_GRID^2 bitmap over the page
+/// bbox, fuse the covered cells into maximal-run rectangles (RLE
+/// rows + vertical join), keep large records verbatim. Conservative
+/// by construction: coverage is a superset of the exact page's,
+/// overcoverage bounded by one grid cell. Returns None when the
+/// page has no fusable content.
+fn gen_lod_job(
+    doc: &Doc,
+    cell: &floe_oasis::doc::Cell,
+    arena: &Arena,
+    exact: &PageJob,
+) -> Option<PageJob> {
+    let bb = exact.bbox;
+    let (bw, bh) = (bb.x1 - bb.x0, bb.y1 - bb.y0);
+    if bw <= 0 || bh <= 0 {
+        return None;
+    }
+    let g = LOD_GRID;
+    let words_per_row = (g as usize).div_ceil(64);
+    let mut bits = vec![0u64; g as usize * words_per_row];
+    let mut pass: Vec<PRec> = Vec::new();
+    let (mut pass_members, mut fused_any) = (0u64, false);
+    // cell index of a coordinate (clamped); cells are half-open
+    let gx_of = |x: i64| -> i64 {
+        (((x - bb.x0) as i128 * g as i128) / bw as i128)
+            .clamp(0, (g - 1) as i128) as i64
+    };
+    let gy_of = |y: i64| -> i64 {
+        (((y - bb.y0) as i128 * g as i128) / bh as i128)
+            .clamp(0, (g - 1) as i128) as i64
+    };
+    for r in &exact.recs {
+        let sb = rec_shape_box(cell, r);
+        let (sw, sh) = (sb.x1 - sb.x0, sb.y1 - sb.y0);
+        // shape extent in cells (ceil): big-in-both-axes records
+        // stay exact
+        let cw = (sw as i128 * g as i128 / bw.max(1) as i128) as i64;
+        let ch = (sh as i128 * g as i128 / bh.max(1) as i128) as i64;
+        if cw >= LOD_PASS_CELLS && ch >= LOD_PASS_CELLS {
+            pass_members += r.members;
+            pass.push(r.clone());
+            continue;
+        }
+        fused_any = true;
+        let mut mark = |ox: i64, oy: i64| {
+            let (x0, x1) = (gx_of(sb.x0 + ox), gx_of(sb.x1 + ox));
+            let (y0, y1) = (gy_of(sb.y0 + oy), gy_of(sb.y1 + oy));
+            for y in y0..=y1 {
+                let row = y as usize * words_per_row;
+                for x in x0..=x1 {
+                    bits[row + (x as usize >> 6)] |=
+                        1u64 << (x as usize & 63);
+                }
+            }
+        };
+        match (r.frag, rec_rep(cell, r)) {
+            (Frag::Pts { arena: a, lo, hi }, rep) => {
+                let src = match rep {
+                    Rep::Pts(pl) => pl,
+                    _ => unreachable!("pts frag on non-pts"),
+                };
+                for &slot in &arena[a as usize].order
+                    [lo as usize..hi as usize]
+                {
+                    let (ox, oy) = src[slot as usize];
+                    mark(ox, oy);
+                }
+            }
+            (Frag::Grid { i0, i1, j0, j1 }, rep) => {
+                let (va, vb) = match rep {
+                    Rep::Grid { va, vb, .. } => (*va, *vb),
+                    _ => unreachable!("grid frag on non-grid"),
+                };
+                for i in i0 as i64..i1 as i64 {
+                    for j in j0 as i64..j1 as i64 {
+                        mark(
+                            i * va.0 + j * vb.0,
+                            i * va.1 + j * vb.1,
+                        );
+                    }
+                }
+            }
+            (Frag::Whole, Rep::One) => mark(0, 0),
+            (Frag::Whole, Rep::Grid { na, nb, va, vb }) => {
+                for i in 0..*na as i64 {
+                    for j in 0..*nb as i64 {
+                        mark(
+                            i * va.0 + j * vb.0,
+                            i * va.1 + j * vb.1,
+                        );
+                    }
+                }
+            }
+            (Frag::Whole, Rep::Pts(pl)) => {
+                for &(ox, oy) in pl.iter() {
+                    mark(ox, oy);
+                }
+            }
+        }
+    }
+    if !fused_any {
+        return None; // everything is large: the exact page IS the LOD
+    }
+    // fuse: rows into runs, identical-span runs into taller rects.
+    // Cell boundaries come from the SAME integer division both ways
+    // so adjacent rects share edges exactly (no cracks).
+    let (l, d) = doc.layer_order[exact.li as usize];
+    let cx = |gx: i64| bb.x0 + (gx as i128 * bw as i128 / g as i128) as i64;
+    let cy = |gy: i64| bb.y0 + (gy as i128 * bh as i128 / g as i128) as i64;
+    let mut rects: Vec<RectRec> = Vec::new();
+    // open runs from the previous row: (x0, x1, y_start)
+    let mut open: Vec<(i64, i64, i64)> = Vec::new();
+    for y in 0..=g {
+        let mut runs: Vec<(i64, i64)> = Vec::new();
+        if y < g {
+            let row = y as usize * words_per_row;
+            let mut x = 0i64;
+            while x < g {
+                let w = bits[row + (x as usize >> 6)];
+                if w & (1u64 << (x as usize & 63)) == 0 {
+                    x += 1;
+                    continue;
+                }
+                let start = x;
+                while x < g {
+                    let w = bits[row + (x as usize >> 6)];
+                    if w & (1u64 << (x as usize & 63)) == 0 {
+                        break;
+                    }
+                    x += 1;
+                }
+                runs.push((start, x));
+            }
+        }
+        let mut next_open: Vec<(i64, i64, i64)> = Vec::new();
+        for &(x0, x1) in &runs {
+            match open.iter().position(|&(ox0, ox1, _)| {
+                ox0 == x0 && ox1 == x1
+            }) {
+                Some(k) => next_open.push(open.swap_remove(k)),
+                None => next_open.push((x0, x1, y)),
+            }
+        }
+        for &(x0, x1, ys) in &open {
+            let (wx0, wx1) = (cx(x0), cx(x1));
+            let (wy0, wy1) = (cy(ys), cy(y));
+            rects.push(RectRec {
+                layer: l,
+                dt: d,
+                x: wx0,
+                y: wy0,
+                w: (wx1 - wx0).max(1),
+                h: (wy1 - wy0).max(1),
+                rep: Rep::One,
+            });
+        }
+        open = next_open;
+    }
+    if rects.is_empty() && pass.is_empty() {
+        return None;
+    }
+    let mut lbb = BBox::EMPTY;
+    let (mut max_w, mut max_h) = (0i64, 0i64);
+    for rc in &rects {
+        lbb.grow(&BBox {
+            x0: rc.x,
+            y0: rc.y,
+            x1: rc.x + rc.w,
+            y1: rc.y + rc.h,
+        });
+        max_w = max_w.max(rc.w);
+        max_h = max_h.max(rc.h);
+    }
+    for r in &pass {
+        lbb.grow(&r.bbox);
+        max_w = max_w.max(r.w);
+        max_h = max_h.max(r.h);
+    }
+    Some(PageJob {
+        ci: exact.ci,
+        li: exact.li,
+        seq: exact.seq,
+        members: pass_members + rects.len() as u64,
+        recs: pass,
+        bbox: lbb,
+        max_w,
+        max_h,
+        lod: floe_ovm::LOD_MERGED,
+        lod_page: floe_ovm::LOD_PAGE_NONE,
+        lod_rects: rects,
+    })
+}
+
 fn build_cell_plan(
     doc: &Doc,
     ci: usize,
@@ -1518,6 +1746,25 @@ fn build_cell_plan(
                 pages.push(slots[k].take().expect("pbvh perm"));
             }
             pranges.push((li as u32, run_lo, run_count, root_local));
+        }
+    }
+    // M7: LOD variants ride at the tail of the cell's page list -
+    // pranges/pbvh reference only the exact runs before them, and
+    // the exact->LOD link is rebased to global indices by the
+    // append loop
+    let n_exact = pages.len();
+    for k in 0..n_exact {
+        if pages[k].members < LOD_MIN_MEMBERS {
+            continue;
+        }
+        if let Some(job) = gen_lod_job(doc, cell, &arena, &pages[k])
+        {
+            pages[k].lod_page = narrow_u32(
+                pages.len() as u64,
+                "cell page count",
+            );
+            split_stats.lod_pages += 1;
+            pages.push(job);
         }
     }
     let pts_prep: Vec<Option<floe_ovm::PtsPrepared>> = cell
@@ -1907,6 +2154,10 @@ fn build(
                 .depth_capped
                 .checked_add(split_stats.depth_capped)
                 .expect("limit exceeded: depth-capped count");
+            split_total.lod_pages = split_total
+                .lod_pages
+                .checked_add(split_stats.lod_pages)
+                .expect("limit exceeded: lod page count");
             let cell = &doc.cells[ci];
             let place_base = b.n_places();
             for &pi in &place_order {
@@ -1992,7 +2243,18 @@ fn build(
             }
             let pr_count =
                 narrow_u32(pranges.len() as u64, "prange count");
-            for job in &pages {
+            for job in pages.iter_mut() {
+                if job.lod_page != floe_ovm::LOD_PAGE_NONE {
+                    job.lod_page = narrow_u32(
+                        page_base + job.lod_page as u64,
+                        "page index",
+                    );
+                }
+                if job.lod != floe_ovm::LOD_EXACT {
+                    // LOD variants are derived data: the layer
+                    // table (and the G5 gates) count exact only
+                    continue;
+                }
                 let count = &mut lrecs_stored[job.li as usize];
                 *count = count
                     .checked_add(job.recs.len() as u64)
@@ -2077,13 +2339,15 @@ fn build(
     if split_total.fragments > 0
         || split_total.oversize_pages > 0
         || split_total.depth_capped > 0
+        || split_total.lod_pages > 0
     {
         eprintln!(
             "[vfs] build: rep-split {} fragments, {} oversize \
-             pages, {} depth-capped",
+             pages, {} depth-capped, {} lod variants",
             split_total.fragments,
             split_total.oversize_pages,
-            split_total.depth_capped
+            split_total.depth_capped,
+            split_total.lod_pages
         );
     }
 
@@ -2928,7 +3192,13 @@ mod split_tests {
     /// member bbox must lie inside its page's bbox
     fn roundtrip(doc: &Doc, plan: &CellPlan) -> Vec<Mem> {
         let mut got: Vec<Mem> = Vec::new();
-        for job in &plan.pages {
+        // conservation is an EXACT-page contract; LOD variants are
+        // derived coverage and are gated separately below
+        for job in plan
+            .pages
+            .iter()
+            .filter(|j| j.lod == floe_ovm::LOD_EXACT)
+        {
             let (payload, _raw) =
                 encode_job(doc, job, &plan.arena);
             // page payloads are complete OASIS files (CBLOCKs
@@ -2975,14 +3245,23 @@ mod split_tests {
         ]);
         let plan = assert_conserved(&doc);
         assert!(plan.pages.len() >= 2, "{}", plan.pages.len());
-        let members: u64 =
-            plan.pages.iter().map(|j| j.members).sum();
+        let members: u64 = plan
+            .pages
+            .iter()
+            .filter(|j| j.lod == floe_ovm::LOD_EXACT)
+            .map(|j| j.members)
+            .sum();
         assert_eq!(members, 600_000);
         // page bboxes must stay near-disjoint: total covered area
         // <= 2x die area (the broken build had every page at ~90%
-        // of the die: 4 pages summed to ~3.6x)
+        // of the die: 4 pages summed to ~3.6x). LOD variants are
+        // derived coverage, not part of the partition.
         let mut area = 0i128;
-        for j in &plan.pages {
+        for j in plan
+            .pages
+            .iter()
+            .filter(|j| j.lod == floe_ovm::LOD_EXACT)
+        {
             area += (j.bbox.x1 - j.bbox.x0) as i128
                 * (j.bbox.y1 - j.bbox.y0) as i128;
         }
@@ -3022,7 +3301,11 @@ mod split_tests {
         let plan = assert_conserved(&doc);
         assert!(plan.pages.len() >= 2);
         let mut area = 0i128;
-        for j in &plan.pages {
+        for j in plan
+            .pages
+            .iter()
+            .filter(|j| j.lod == floe_ovm::LOD_EXACT)
+        {
             area += (j.bbox.x1 - j.bbox.x0) as i128
                 * (j.bbox.y1 - j.bbox.y0) as i128;
         }
@@ -3130,9 +3413,15 @@ mod split_tests {
         let doc = mini_doc(recs);
         let plan = assert_conserved(&doc);
         assert!(plan.split_stats.oversize_pages >= 1);
-        // pages NOT containing a spine must stay narrow
+        // pages NOT containing a spine must stay narrow (LOD
+        // variants of spine-bearing pages fuse the spine into
+        // coverage, so the exact partition is what's gated)
         let mut tight = 0;
-        for j in &plan.pages {
+        for j in plan
+            .pages
+            .iter()
+            .filter(|j| j.lod == floe_ovm::LOD_EXACT)
+        {
             let has_spine =
                 j.recs.iter().any(|r| r.w == DIE);
             if !has_spine {
@@ -3145,6 +3434,162 @@ mod split_tests {
             }
         }
         assert!(tight >= 2, "no local pages left");
+    }
+
+    /// rasterize members onto the LOD grid of `bb` with the SAME
+    /// inclusive cell mapping the generator uses
+    fn raster(mems: &[Mem], bb: &BBox) -> Vec<bool> {
+        let g = LOD_GRID;
+        let (bw, bh) = (bb.x1 - bb.x0, bb.y1 - bb.y0);
+        let gx = |x: i64| -> i64 {
+            (((x - bb.x0) as i128 * g as i128) / bw as i128)
+                .clamp(0, (g - 1) as i128) as i64
+        };
+        let gy = |y: i64| -> i64 {
+            (((y - bb.y0) as i128 * g as i128) / bh as i128)
+                .clamp(0, (g - 1) as i128) as i64
+        };
+        let mut bits = vec![false; (g * g) as usize];
+        for m in mems {
+            for y in gy(m.4)..=gy(m.6) {
+                for x in gx(m.3)..=gx(m.5) {
+                    bits[(y * g + x) as usize] = true;
+                }
+            }
+        }
+        bits
+    }
+
+    fn dilate(bits: &[bool]) -> Vec<bool> {
+        let g = LOD_GRID;
+        let mut out = bits.to_vec();
+        for y in 0..g {
+            for x in 0..g {
+                if !bits[(y * g + x) as usize] {
+                    continue;
+                }
+                for (dx, dy) in
+                    [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)]
+                {
+                    let (nx, ny) = (x + dx, y + dy);
+                    if nx >= 0 && nx < g && ny >= 0 && ny < g {
+                        out[(ny * g + nx) as usize] = true;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn page_mems(
+        doc: &Doc,
+        plan: &CellPlan,
+        k: usize,
+    ) -> Vec<Mem> {
+        let (payload, _raw) =
+            encode_job(doc, &plan.pages[k], &plan.arena);
+        let pd = floe_oasis::doc::parse_doc(&payload)
+            .expect("page parse");
+        expand_cell(&pd.cells[0])
+    }
+
+    /// M7 contract: the LOD variant's coverage is a SUPERSET of
+    /// the exact page's at grid resolution, and overcoverage is
+    /// bounded by one cell of dilation. Links must point at a
+    /// MERGED page of the same (layer, seq).
+    #[test]
+    fn lod_coverage_superset_and_bounded() {
+        const DIE: i64 = 1_000_000;
+        let doc = mini_doc(vec![
+            pts_rec(7, 200_000, DIE, 100),
+            pts_rec(99, 200_000, DIE, 150),
+        ]);
+        let plan = plan_of(&doc);
+        let mut checked = 0;
+        for k in 0..plan.pages.len() {
+            let e = &plan.pages[k];
+            if e.lod != floe_ovm::LOD_EXACT
+                || e.lod_page == floe_ovm::LOD_PAGE_NONE
+            {
+                continue;
+            }
+            let l = &plan.pages[e.lod_page as usize];
+            assert_eq!(l.lod, floe_ovm::LOD_MERGED);
+            assert_eq!((l.li, l.seq), (e.li, e.seq));
+            let bb = e.bbox;
+            let eb = raster(&page_mems(&doc, &plan, k), &bb);
+            let lb = raster(
+                &page_mems(&doc, &plan, e.lod_page as usize),
+                &bb,
+            );
+            for i in 0..eb.len() {
+                assert!(
+                    !eb[i] || lb[i],
+                    "LOD hole at cell {} of page {}",
+                    i,
+                    k
+                );
+            }
+            let ok = dilate(&eb);
+            for i in 0..lb.len() {
+                assert!(
+                    !lb[i] || ok[i],
+                    "LOD overcover beyond 1 cell at {} of page {}",
+                    i,
+                    k
+                );
+            }
+            checked += 1;
+        }
+        assert!(checked >= 1, "no LOD pages generated");
+    }
+
+    /// sparse pages stay LOD-free (trigger threshold)
+    #[test]
+    fn lod_trigger_skips_sparse() {
+        const DIE: i64 = 1_000_000;
+        let doc = mini_doc(vec![pts_rec(3, 1000, DIE, 90)]);
+        let plan = plan_of(&doc);
+        assert!(plan
+            .pages
+            .iter()
+            .all(|j| j.lod == floe_ovm::LOD_EXACT
+                && j.lod_page == floe_ovm::LOD_PAGE_NONE));
+    }
+
+    /// records large in BOTH axes ride the LOD payload verbatim -
+    /// their exact outlines survive; only sub-cell dust is fused
+    #[test]
+    fn lod_passthrough_keeps_large_records() {
+        const DIE: i64 = 1_000_000;
+        let mut recs = vec![pts_rec(7, 200_000, DIE, 100)];
+        // a big block: DIE/8 x DIE/8 >> 4 cells at G=128
+        recs.push(RectRec {
+            layer: 1,
+            dt: 0,
+            x: DIE / 3,
+            y: DIE / 3,
+            w: DIE / 8,
+            h: DIE / 8,
+            rep: Rep::One,
+        });
+        let doc = mini_doc(recs);
+        let plan = plan_of(&doc);
+        let mut found = false;
+        for k in 0..plan.pages.len() {
+            let e = &plan.pages[k];
+            if e.lod_page == floe_ovm::LOD_PAGE_NONE {
+                continue;
+            }
+            let mems =
+                page_mems(&doc, &plan, e.lod_page as usize);
+            if mems.iter().any(|m| {
+                m.5 - m.3 == DIE / 8 && m.6 - m.4 == DIE / 8
+            }) {
+                found = true;
+            }
+        }
+        assert!(found, "big record not passed through verbatim");
     }
 
     /// plane ownership is explicit: member center*2 < plane2 goes

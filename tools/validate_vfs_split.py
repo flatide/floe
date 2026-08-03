@@ -10,6 +10,9 @@ honest pages.
       recount + layer sums (validate_vfs.py reused - this is the
       end-to-end proof that fragment REBASE re-encodes correctly)
   S4  determinism: --jobs 1 and --jobs 4 builds are byte-identical
+  S5  LOD variants (M7): dense layers grow lod pages; the planner
+      never selects them (pranges cover exact pages only); their
+      payloads pass the same klayout recount via S3
 
 Usage: validate_vfs_split.py [workdir]  (default $TMPDIR/floe-valsplit)
 """
@@ -122,6 +125,23 @@ def main():
         sys.stderr.write(r.stderr.decode())
         fail("S3 validate_vfs.py failed on rep-split asset")
 
+    # S5: LOD variants exist for the dense layer and stay out of
+    # every plan (until M7-B the planner is exact-only; after M7-B
+    # exact stays the default and LOD needs the density trigger)
+    import struct
+    d = open(os.path.join(out, "design.ovm"), "rb").read()
+    secs = [struct.unpack_from("<QQ", d, 88 + 16 * i)
+            for i in range(9)]
+    po, pl = secs[6]
+    n_pages = pl // 96
+    n_lod = sum(1 for i in range(n_pages)
+                if d[po + 96 * i + 12] != 0)
+    if n_lod < 1:
+        fail("S5 no lod pages on a rep-flood asset")
+    if full["pages"] != n_pages - n_lod:
+        fail("S5 plan selects %d pages but exact pages are %d"
+             % (full["pages"], n_pages - n_lod))
+
     # S4: thread-count determinism
     out1 = os.path.join(work, "repfloor_j1.floe")
     shutil.rmtree(out1, ignore_errors=True)
@@ -134,7 +154,7 @@ def main():
             fail("S4 %s differs between --jobs 4 and --jobs 1" % f)
     shutil.rmtree(out1, ignore_errors=True)
 
-    print("vfs-split-checked S1-S4, failures: %d" % len(bad))
+    print("vfs-split-checked S1-S5, failures: %d" % len(bad))
     sys.exit(1 if bad else 0)
 
 

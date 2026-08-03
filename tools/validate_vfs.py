@@ -35,7 +35,7 @@ def read_ovm(path):
     d = open(path, "rb").read()
     assert d[:8] == b"FLOEOVM1", "magic"
     ver = struct.unpack_from("<I", d, 8)[0]
-    assert ver == 3, ver  # v3: rep-split page partitioning
+    assert ver == 4, ver  # v4: LOD page variants (M7)
     top, n_layers, n_cells, n_pages = struct.unpack_from(
         "<IIII", d, 40)
     ovp_len = struct.unpack_from("<Q", d, 72)[0]
@@ -58,9 +58,10 @@ def read_ovm(path):
     for i in range(n_pages):
         o = secs[6][0] + PAGE_LEN * i
         cell, li, seq = struct.unpack_from("<III", d, o)
+        lod = d[o + 12]
         off, csz, usz, recs = struct.unpack_from("<QIII", d, o + 48)
         mems = struct.unpack_from("<Q", d, o + 72)[0]
-        pages.append((cell, li, seq, off, csz, recs, mems))
+        pages.append((cell, li, seq, off, csz, recs, mems, lod))
     return {"top": top, "layers": layers, "cells": cells,
             "pages": pages, "ovp_len": ovp_len}
 
@@ -122,7 +123,8 @@ def main():
     sum_recs = {}
     sum_mems = {}
     checked = 0
-    for (ci, lidx, seq, off, csz, recs, mems) in ovm["pages"]:
+    n_lod = 0
+    for (ci, lidx, seq, off, csz, recs, mems, lod) in ovm["pages"]:
         key = (lmap[lidx][0], lmap[lidx][1])
         pl = db.Layout(False)
         with tempfile.NamedTemporaryFile(suffix=".oas") as f:
@@ -143,9 +145,15 @@ def main():
         pl._destroy()
         if got_m != mems:
             fail("G5a page c=%d li=%d seq=%d members klayout=%d "
-                 "dir=%d" % (ci, lidx, seq, got_m, mems))
-        sum_recs[key] = sum_recs.get(key, 0) + recs
-        sum_mems[key] = sum_mems.get(key, 0) + mems
+                 "dir=%d lod=%d" % (ci, lidx, seq, got_m, mems, lod))
+        if lod:
+            # LOD variants are derived coverage (M7): payload must
+            # parse and match its directory counts (above), but the
+            # layer conservation sums are an EXACT-page contract
+            n_lod += 1
+        else:
+            sum_recs[key] = sum_recs.get(key, 0) + recs
+            sum_mems[key] = sum_mems.get(key, 0) + mems
         checked += 1
 
     # G5b/G5c: per-layer sums vs table vs truth
@@ -168,8 +176,8 @@ def main():
             fail("G5c layer %s table records=%d < scan=%d"
                  % (key, lr, truth_recs.get(key, 0)))
 
-    print("vfs-checked %d pages, %d layers, top rbbox, "
-          "failures: %d" % (checked, len(lmap), len(bad)))
+    print("vfs-checked %d pages (%d lod), %d layers, top rbbox, "
+          "failures: %d" % (checked, n_lod, len(lmap), len(bad)))
     sys.exit(1 if bad else 0)
 
 

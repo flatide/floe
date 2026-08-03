@@ -5,8 +5,8 @@
 단순화·책임 분리 지시**, rev 12 = **M0 실증**, rev 13~18 =
 **M1/M2/M3/M3.5 구현 + 외부 검토 2회 반영(0.6.3)**, rev 19 =
 **M4 실측 완료 + 스케일 결함 4건 수정(0.6.4→0.7.0, ovm v3)** —
-변경 요지 §0). 상태: **M0~M5 완료 + ovm mmap 오픈(rev 21)** —
-뷰어·데몬은 hier 단일 경로 — **다음 = M7 밀도 LOD 설계**
+변경 요지 §0). 상태: **M0~M5 + mmap(rev 21) + M7-A LOD 빌드
+(rev 22, ovm v4)** — **다음 = M7-B 플래너 밀도 선택**
 (M4 결과: §0 rev 19). 배경: MAIN09(150M급)
 실측에서 **뷰어 깊은 줌이
 줌인할수록 느려지는** 병리 확인. 원인은 개별 증상이 아니라 하나의
@@ -169,6 +169,34 @@ rev 10 (지시: **인덱서/뷰어 책임 분리** + 이전 검토 잔여 1건):
   usize/u64 → u32/u16 narrowing(na/nb, Pts count, page/place/BVH
   start·count, payload size 등)은 checked — silent truncation
   금지, 초과는 "limit exceeded: <필드>" 빌드 에러.
+
+rev 22 (M7-A LOD 페이지 빌드 — 2026-08-03, 0.9.0, **ovm v4 =
+재인덱싱 필요**):
+
+- **밀도 기반 LOD 변종 생성**: members ≥ 4096인 페이지에
+  coverage-grid 박스 융합 변종(LOD_MERGED)을 빌드 시 1회 생성.
+  방식 = 페이지 bbox 위 128² 격자에 소형 member 풋프린트를 워드-OR
+  마킹 → 행 RLE + 수직 결합으로 사각형 융합. **양 축 ≥4셀 레코드는
+  verbatim 통과**(개별 가시 블롭은 exact 윤곽 유지, 서브셀 먼지만
+  융합). 보수적 계약: 커버리지 ⊇ exact, 과잉 ≤ 1셀 — 유닛으로
+  강제(상위집합 + 1셀 팽창 상한).
+- **포맷 v4**: 페이지 lod 바이트 활성(LOD_MERGED=1) + @68 패드가
+  exact→LOD 링크(lod_page, LOD_PAGE_NONE 센티널)로. 링크 검증
+  (경계·타깃 lod·동일 cell/layer·체인 금지)은 open(shallow)에
+  포함. LOD 셀명 = exact명 + "q" 접미(P 접두 유지 — 뷰어의 수집/
+  축출/이름해석 경로 무변경으로 통과).
+- **플래너는 아직 exact 전용**(M7-B에서 밀도 선택): pranges가
+  exact 런만 커버하므로 구조적으로 배제됨 — S5 게이트가 "플랜
+  페이지수 == exact 페이지수"로 고정.
+- **파생 데이터 회계**: 레이어 테이블·G5 보존 합산은 exact만
+  (검증기 lod-skip); LOD 페이지 자체는 G5a klayout 재계수를 동일
+  통과(payload 파싱·자기 계수 일치).
+- 실측(testchip 1.5G): lod 5,184개, **ovp +1.1%(+18MB), ovm
+  +0.5MB**, 빌드 52.8s(0.8.2 파이프라인 위, LOD 비용 노이즈 수준).
+  repfloor 합성: 5 exact 전부 변종 생성, 스위트 전체 green.
+- 주의: 0.8.2 리팩터 후 rep-split fragments 카운터가 크게 찍힘
+  (testchip 1.63억) — 파티션·바이트·게이트는 정상이라 통계 계수
+  방식 문제로 보이며 encode-batch 검토(M7 후) 항목에 포함.
 
 rev 21 (ovm mmap 오픈 — 2026-08-03, 0.8.1; M4 후속 1순위):
 

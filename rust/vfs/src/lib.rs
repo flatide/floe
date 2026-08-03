@@ -407,7 +407,7 @@ mod tests {
                 x1: k as i64 * 1000 + 10,
                 y1: 10,
             };
-            b.page(0, 0, k as u32, &pb, 0, u, u, 1, 1, 10, 10);
+            b.page(0, 0, k as u32, &pb, 0, u, u, 1, 1, 10, 10, floe_ovm::LOD_EXACT, floe_ovm::LOD_PAGE_NONE);
         }
         let pr = b.prange(
             0,

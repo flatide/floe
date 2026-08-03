@@ -1201,7 +1201,8 @@ mod tests {
             {
                 b.page(
                     ci as u32, 0, k as u32, pb, 0, 0, 0, 1, 1, *mw,
-                    *mh,
+                    *mh, floe_ovm::LOD_EXACT,
+                    floe_ovm::LOD_PAGE_NONE,
                 );
             }
             let page_count = b.n_pages() - page_start;
@@ -2080,6 +2081,8 @@ mod tests {
                     1,
                     90,
                     50,
+                    floe_ovm::LOD_EXACT,
+                    floe_ovm::LOD_PAGE_NONE,
                 );
             }
             let root = if with_tree {
@@ -2252,6 +2255,8 @@ mod tests {
             1,
             100,
             20,
+            floe_ovm::LOD_EXACT,
+            floe_ovm::LOD_PAGE_NONE,
         );
         b.page(
             1,
@@ -2265,6 +2270,8 @@ mod tests {
             1,
             500,
             20,
+            floe_ovm::LOD_EXACT,
+            floe_ovm::LOD_PAGE_NONE,
         );
         let pl = b.place(
             0,

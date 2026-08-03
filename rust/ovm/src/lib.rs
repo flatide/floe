@@ -25,8 +25,11 @@ pub const MAGIC: &[u8; 8] = b"FLOEOVM1";
 /// v3: same wire layout as v2, but page PARTITIONING changed
 /// (repetition fragmentation + oversize isolation) - v2 caches
 /// have semantically wrong page bboxes (die-wide on rep-heavy
-/// layers), so the version gate forces a rebuild.
-pub const VERSION: u32 = 3;
+/// layers), so the version gate forced a rebuild.
+/// v4: LOD page variants (M7, VFS_HIER.md par.5) - the page lod
+/// byte goes live (LOD_MERGED) and the pad at offset 68 becomes
+/// the exact->LOD page link.
+pub const VERSION: u32 = 4;
 
 pub const HEADER_LEN: usize = 232;
 pub const LAYER_LEN: usize = 32;
@@ -38,6 +41,11 @@ pub const PRANGE_LEN: usize = 16;
 pub const PBVH_LEN: usize = 56;
 
 pub const LOD_EXACT: u8 = 0;
+/// merged coverage variant (M7): small members of the exact twin
+/// fused into grid-aligned rectangles, large records verbatim
+pub const LOD_MERGED: u8 = 1;
+/// "no LOD variant" sentinel for the exact page's lod_page link
+pub const LOD_PAGE_NONE: u32 = u32::MAX;
 /// codec 0 = plain OASIS single-cell file (CBLOCK inside)
 pub const CODEC_OASIS: u8 = 0;
 
@@ -534,12 +542,14 @@ impl Builder {
         members: u64,
         max_w: u64,
         max_h: u64,
+        lod: u8,
+        lod_page: u32,
     ) {
         let out = &mut self.pages;
         p32(out, cell);
         p32(out, layer_idx);
         p32(out, seq);
-        out.push(LOD_EXACT);
+        out.push(lod);
         out.push(CODEC_OASIS);
         p16(out, 0);
         pbox(out, bbox);
@@ -547,7 +557,7 @@ impl Builder {
         p32(out, narrow_u32(csize, "page csize"));
         p32(out, narrow_u32(usize_, "page usize"));
         p32(out, narrow_u32(records, "page records"));
-        p32(out, 0);
+        p32(out, lod_page);
         p64(out, members);
         p64(out, max_w);
         p64(out, max_h);
@@ -768,6 +778,9 @@ pub struct PageV {
     pub csize: u32,
     pub usize_: u32,
     pub records: u32,
+    /// exact page -> its LOD variant page index (LOD_PAGE_NONE if
+    /// the page has no variant; always NONE on LOD pages)
+    pub lod_page: u32,
     pub members: u64,
     pub max_w: u64,
     pub max_h: u64,
@@ -1128,6 +1141,30 @@ impl Ovm {
                     i, end, ovp_len
                 )));
             }
+            // exact -> LOD link: in bounds, target IS a LOD page of
+            // the same (cell, layer); LOD pages don't chain
+            let lp = g32(b, 68);
+            if b[12] != LOD_EXACT && lp != LOD_PAGE_NONE {
+                return Err(corrupt(format!("page {} lod chain", i)));
+            }
+            if lp != LOD_PAGE_NONE {
+                if lp >= n_pages {
+                    return Err(corrupt(format!(
+                        "page {} lod link {}",
+                        i, lp
+                    )));
+                }
+                let t = &pgb[lp as usize * PAGE_LEN..];
+                if t[12] == LOD_EXACT
+                    || g32(t, 0) != g32(b, 0)
+                    || g32(t, 4) != g32(b, 4)
+                {
+                    return Err(corrupt(format!(
+                        "page {} lod link target {}",
+                        i, lp
+                    )));
+                }
+            }
         }
         Ok(Ovm {
             unit: f64::from_le_bytes(data[16..24].try_into().unwrap()),
@@ -1301,6 +1338,7 @@ impl Ovm {
             csize: g32(b, 56),
             usize_: g32(b, 60),
             records: g32(b, 64),
+            lod_page: g32(b, 68),
             members: g64(b, 72),
             max_w: g64(b, 80),
             max_h: g64(b, 88),
@@ -1340,6 +1378,14 @@ impl Ovm {
 
 /// page payload cell name - the builder and every consumer (delta
 /// splicer, viewer eviction) must agree on it
+/// LOD variant page cell name: the exact page's name + "q". The
+/// "P" prefix is load-bearing - the viewer collects/evicts page
+/// cells by that prefix and resolves the design name from the ci
+/// that follows it, so LOD pages ride the same paths untouched.
+pub fn lod_cell_name(cell: u32, layer_idx: u32, seq: u32) -> String {
+    format!("P{}_{}_{}q", cell, layer_idx, seq)
+}
+
 pub fn page_cell_name(cell: u32, layer_idx: u32, seq: u32) -> String {
     format!("P{}_{}_{}", cell, layer_idx, seq)
 }
@@ -1385,8 +1431,8 @@ mod tests {
         );
         let bb = BBox { x0: 0, y0: 0, x1: 100, y1: 50 };
         let n0 = b.bvh_node(&bb, p0 as u32, 2, true);
-        b.page(1, 0, 0, &bb, 128, 10, 20, 3, 9, 60, 60);
-        b.page(1, 0, 70000, &bb, 138, 11, 21, 4, 8, 61, 1 << 40);
+        b.page(1, 0, 0, &bb, 128, 10, 20, 3, 9, 60, 60, LOD_EXACT, LOD_PAGE_NONE);
+        b.page(1, 0, 70000, &bb, 138, 11, 21, 4, 8, 61, 1 << 40, LOD_EXACT, LOD_PAGE_NONE);
         let pv0 = b.pbvh_node(&bb, 0, 2, true, 61, 1 << 40);
         let pr0 = b.prange(0, 0, 2, pv0);
         b.cell("LEAF", 0, 1, &bb, &bb, 0, 0, 0, 0, 0, 0, 0, 0, m0, m1, 9);
@@ -1551,7 +1597,7 @@ mod tests {
         b.layer(1, 0, "L", 0, 0);
         let m = b.bitset(&[0]);
         let bb = BBox { x0: 0, y0: 0, x1: 1, y1: 1 };
-        b.page(0, 0, 0, &bb, 100, 50, 50, 1, 1, 1, 1);
+        b.page(0, 0, 0, &bb, 100, 50, 50, 1, 1, 1, 1, LOD_EXACT, LOD_PAGE_NONE);
         b.cell("A", 0, 0, &bb, &bb, 0, 0, 0, 1, 0, 0, 0, 0, m, m, 1);
         let e = err_of(Ovm::from_bytes(b.finish(120)));
         assert!(e.contains("beyond ovp_len"), "{}", e);
