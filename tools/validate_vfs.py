@@ -35,7 +35,7 @@ def read_ovm(path):
     d = open(path, "rb").read()
     assert d[:8] == b"FLOEOVM1", "magic"
     ver = struct.unpack_from("<I", d, 8)[0]
-    assert ver == 2, ver
+    assert ver == 3, ver  # v3: rep-split page partitioning
     top, n_layers, n_cells, n_pages = struct.unpack_from(
         "<IIII", d, 40)
     ovp_len = struct.unpack_from("<Q", d, 72)[0]
@@ -161,8 +161,11 @@ def main():
         if sum_recs.get(key, 0) != lr:
             fail("G5c layer %s records pages=%d table=%d"
                  % (key, sum_recs.get(key, 0), lr))
-        if lr != truth_recs.get(key, 0):
-            fail("G5c layer %s table records=%d scan=%d"
+        # fragmentation (v3 rep split) may STORE more records than
+        # the source spells out - members conservation above stays
+        # exact; records are a lower-bounded >= check
+        if lr < truth_recs.get(key, 0):
+            fail("G5c layer %s table records=%d < scan=%d"
                  % (key, lr, truth_recs.get(key, 0)))
 
     print("vfs-checked %d pages, %d layers, top rbbox, "

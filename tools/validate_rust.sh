@@ -46,4 +46,7 @@ FLOE_VFS_MODE=flat \
 .venv/bin/python tools/validate_vfs_hier.py "$SRC" "$VOUT"
 .venv/bin/python tools/validate_vfs_lifecycle.py "$SRC" "$VOUT"
 .venv/bin/python tools/validate_vfs_marker.py "$SRC"
+# rep-split page honesty (ovm v3): floor collapse + fragment
+# conservation on a synthetic rep-flood asset
+.venv/bin/python tools/validate_vfs_split.py
 echo "RUST VALIDATION: ALL OK ($SRC)"

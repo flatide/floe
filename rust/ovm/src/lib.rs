@@ -22,7 +22,11 @@
 use floe_oasis::doc::Rep;
 
 pub const MAGIC: &[u8; 8] = b"FLOEOVM1";
-pub const VERSION: u32 = 2;
+/// v3: same wire layout as v2, but page PARTITIONING changed
+/// (repetition fragmentation + oversize isolation) - v2 caches
+/// have semantically wrong page bboxes (die-wide on rep-heavy
+/// layers), so the version gate forces a rebuild.
+pub const VERSION: u32 = 3;
 
 pub const HEADER_LEN: usize = 232;
 pub const LAYER_LEN: usize = 32;

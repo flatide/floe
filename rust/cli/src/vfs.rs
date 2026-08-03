@@ -18,7 +18,6 @@ use floe_tiler::{path_bbox, xf_rep, Xf};
 use std::io::Write;
 
 const PAGE_TARGET_BYTES: usize = 1 << 20; // pre-encode estimate
-const PAGE_MIN_RECORDS: usize = 64;
 const BVH_LEAF: usize = 8;
 /// pages per page-BVH leaf, and the run size at or below which a
 /// (cell,layer) run gets no BVH at all (linear scan, root = NONE)
@@ -437,18 +436,253 @@ fn win_to_bbox(w: Option<(i64, i64, i64, i64)>) -> BBox {
 struct PRec {
     kind: u8,
     idx: u32,
-    bbox: BBox, // incl rep extent (page bbox / spatial split)
+    bbox: BBox, // rep-subset extent (page bbox / spatial split)
     bytes: u32, // pre-encode estimate
     members: u64,
     w: i64, // single-feature dims (cut criterion, rep excluded)
     h: i64,
+    frag: Frag,
+}
+
+/// which subset of the source record's repetition this PRec covers.
+/// Fragmentation is what keeps page bboxes honest on rep-heavy
+/// layers: a fill record repeated across the whole die otherwise
+/// drags its page's bbox out to die width, and once every page of
+/// the layer holds one such record the planner (correctly) selects
+/// them ALL for any viewport - the 9.8G field floor: a point view
+/// at depth 0 pulled 2151 pages / ~100 s of parse.
+#[derive(Clone, Copy)]
+enum Frag {
+    Whole,
+    /// [lo,hi) into Arena[arena] offsets (reordered in place while
+    /// splitting; sibling ranges are disjoint by construction)
+    Pts { arena: u32, lo: u32, hi: u32 },
+    /// index sub-rectangle [i0,i1) x [j0,j1) of a Grid rep
+    Grid { i0: u64, i1: u64, j0: u64, j1: u64 },
+}
+
+/// per-cell scratch for fragmented Pts reps: (shape box at the rep
+/// origin, member offsets - full list copied ONCE on first split)
+type Arena = Vec<(BBox, Vec<(i64, i64)>)>;
+
+#[derive(Default, Clone, Copy)]
+struct SplitStats {
+    fragments: u64,
+    oversize_pages: u64,
+    depth_capped: u64,
+}
+
+/// hard recursion cap (records above it emit as-is + stat)
+const SPLIT_MAX_DEPTH: u32 = 64;
+
+fn rep_est_n(n: u64) -> u32 {
+    (4u64.saturating_mul(n)).min(u32::MAX as u64) as u32
 }
 
 fn rep_est(rep: &Rep) -> u32 {
     match rep {
         Rep::One => 0,
         Rep::Grid { .. } => 10,
-        Rep::Pts(p) => 4 * p.len() as u32,
+        Rep::Pts(p) => rep_est_n(p.len() as u64),
+    }
+}
+
+fn rec_rep<'a>(cell: &'a floe_oasis::doc::Cell, r: &PRec) -> &'a Rep {
+    match r.kind {
+        0 => &cell.rects[r.idx as usize].rep,
+        1 => &cell.polys[r.idx as usize].rep,
+        _ => &cell.paths[r.idx as usize].rep,
+    }
+}
+
+/// shape bbox at the rep origin (rep extent excluded)
+fn rec_shape_box(cell: &floe_oasis::doc::Cell, r: &PRec) -> BBox {
+    match r.kind {
+        0 => {
+            let x = &cell.rects[r.idx as usize];
+            BBox { x0: x.x, y0: x.y, x1: x.x + x.w, y1: x.y + x.h }
+        }
+        1 => pts_bbox(&cell.polys[r.idx as usize].pts),
+        _ => {
+            let pa = &cell.paths[r.idx as usize];
+            let b = path_bbox(&pa.pts, pa.hw, pa.es, pa.ee);
+            BBox { x0: b.0, y0: b.1, x1: b.2, y1: b.3 }
+        }
+    }
+}
+
+fn axis_c2(b: &BBox, ax: u8) -> i64 {
+    if ax == 0 { b.x0 + b.x1 } else { b.y0 + b.y1 }
+}
+
+fn axis_lo(b: &BBox, ax: u8) -> i64 {
+    if ax == 0 { b.x0 } else { b.y0 }
+}
+
+fn axis_hi(b: &BBox, ax: u8) -> i64 {
+    if ax == 0 { b.x1 } else { b.y1 }
+}
+
+/// world bbox of a grid index sub-rectangle: the lattice offset is
+/// linear in (i,j), so min/max are attained at the four corners -
+/// valid for skew vectors too
+fn grid_frag_bbox(
+    sb: &BBox,
+    va: (i64, i64),
+    vb: (i64, i64),
+    i0: u64,
+    i1: u64,
+    j0: u64,
+    j1: u64,
+) -> BBox {
+    let (i0, im) = (i0 as i64, (i1 - 1) as i64);
+    let (j0, jm) = (j0 as i64, (j1 - 1) as i64);
+    let mut bb = BBox::EMPTY;
+    for &(i, j) in &[(i0, j0), (im, j0), (i0, jm), (im, jm)] {
+        let ox = i * va.0 + j * vb.0;
+        let oy = i * va.1 + j * vb.1;
+        bb.grow(&BBox {
+            x0: sb.x0 + ox,
+            y0: sb.y0 + oy,
+            x1: sb.x1 + ox,
+            y1: sb.y1 + oy,
+        });
+    }
+    bb
+}
+
+fn pts_range_bbox(sb: &BBox, pts: &[(i64, i64)]) -> BBox {
+    let mut bb = BBox::EMPTY;
+    for &(ox, oy) in pts {
+        bb.grow(&BBox {
+            x0: sb.x0 + ox,
+            y0: sb.y0 + oy,
+            x1: sb.x1 + ox,
+            y1: sb.y1 + oy,
+        });
+    }
+    bb
+}
+
+fn can_frag(cell: &floe_oasis::doc::Cell, r: &PRec) -> bool {
+    r.members >= 2
+        && matches!(rec_rep(cell, r), Rep::Grid { .. } | Rep::Pts(_))
+}
+
+/// split r's repetition members along `ax` at `plane2` (doubled
+/// world coordinate). OWNERSHIP: member center*2 < plane2 -> left,
+/// >= plane2 -> right (duplicates each classified individually, so
+/// multiset counts are conserved). Returns None when the record
+/// cannot usefully split - Rep::One, a coincident pile (one side
+/// would be empty), or a grid orthogonal to the axis - and the
+/// caller keeps it whole on its center's side.
+fn frag_split(
+    cell: &floe_oasis::doc::Cell,
+    arena: &mut Arena,
+    r: &PRec,
+    ax: u8,
+    plane2: i64,
+) -> Option<(PRec, PRec)> {
+    let child = |bbox: BBox, members: u64, bytes: u32, frag: Frag| {
+        PRec { bbox, bytes, members, frag, ..*r }
+    };
+    match (r.frag, rec_rep(cell, r)) {
+        (Frag::Grid { .. }, Rep::Grid { na: _, nb: _, va, vb })
+        | (Frag::Whole, Rep::Grid { na: _, nb: _, va, vb }) => {
+            let (va, vb) = (*va, *vb);
+            let (i0, i1, j0, j1) = match r.frag {
+                Frag::Grid { i0, i1, j0, j1 } => (i0, i1, j0, j1),
+                _ => match rec_rep(cell, r) {
+                    Rep::Grid { na, nb, .. } => (0, *na, 0, *nb),
+                    _ => unreachable!(),
+                },
+            };
+            // pick the lattice dimension with the larger extent
+            // contribution along ax (u128: |v|*(n-1) can pass i64)
+            let cai = (if ax == 0 { va.0 } else { va.1 })
+                .unsigned_abs() as u128
+                * (i1 - i0 - 1) as u128;
+            let caj = (if ax == 0 { vb.0 } else { vb.1 })
+                .unsigned_abs() as u128
+                * (j1 - j0 - 1) as u128;
+            if cai == 0 && caj == 0 {
+                return None; // orthogonal: no reduction along ax
+            }
+            let sb = rec_shape_box(cell, r);
+            let split_i = (cai >= caj && i1 - i0 >= 2)
+                || j1 - j0 < 2;
+            let (l, rt) = if split_i {
+                if i1 - i0 < 2 {
+                    return None;
+                }
+                let m = (i0 + i1) / 2;
+                ((i0, m, j0, j1), (m, i1, j0, j1))
+            } else {
+                let m = (j0 + j1) / 2;
+                ((i0, i1, j0, m), (i0, i1, m, j1))
+            };
+            let base = r.bytes.saturating_sub(10);
+            let mk = |(a, b, c, d): (u64, u64, u64, u64)| {
+                child(
+                    grid_frag_bbox(&sb, va, vb, a, b, c, d),
+                    (b - a) * (d - c),
+                    base.saturating_add(10),
+                    Frag::Grid { i0: a, i1: b, j0: c, j1: d },
+                )
+            };
+            Some((mk(l), mk(rt)))
+        }
+        (Frag::Pts { .. }, _) | (Frag::Whole, Rep::Pts(_)) => {
+            let (a, lo, hi) = match r.frag {
+                Frag::Pts { arena, lo, hi } => {
+                    (arena as usize, lo as usize, hi as usize)
+                }
+                _ => {
+                    let pts = match rec_rep(cell, r) {
+                        Rep::Pts(p) => p,
+                        _ => unreachable!(),
+                    };
+                    let sb = rec_shape_box(cell, r);
+                    arena.push((sb, pts.clone()));
+                    (arena.len() - 1, 0, pts.len())
+                }
+            };
+            let (sb, all) = {
+                let e = &mut arena[a];
+                (e.0, &mut e.1)
+            };
+            let sc2 = axis_c2(&sb, ax);
+            let off_ax =
+                |p: (i64, i64)| if ax == 0 { p.0 } else { p.1 };
+            let mut m = lo;
+            for k in lo..hi {
+                if 2 * off_ax(all[k]) + sc2 < plane2 {
+                    all.swap(k, m);
+                    m += 1;
+                }
+            }
+            if m == lo || m == hi {
+                return None; // coincident pile: one side empty
+            }
+            let base =
+                r.bytes.saturating_sub(rep_est_n(r.members));
+            let bl = pts_range_bbox(&sb, &all[lo..m]);
+            let br = pts_range_bbox(&sb, &all[m..hi]);
+            let mk = |bb: BBox, s: usize, e: usize| {
+                child(
+                    bb,
+                    (e - s) as u64,
+                    base.saturating_add(rep_est_n((e - s) as u64)),
+                    Frag::Pts {
+                        arena: a as u32,
+                        lo: s as u32,
+                        hi: e as u32,
+                    },
+                )
+            };
+            Some((mk(bl, lo, m), mk(br, m, hi)))
+        }
+        _ => None,
     }
 }
 
@@ -466,38 +700,13 @@ struct PageJob {
     max_h: i64,
 }
 
-/// spatial-split a layer's records into page groups (same policy as
-/// the old emit_pages, but produces jobs instead of writing bytes)
-fn split_pages(
+fn emit_page(
     ci: usize,
     li: u32,
-    recs: &mut [PRec],
+    recs: Vec<PRec>,
     seq: &mut u32,
     out: &mut Vec<PageJob>,
 ) {
-    let bytes: u64 = recs.iter().map(|r| r.bytes as u64).sum();
-    if bytes > PAGE_TARGET_BYTES as u64
-        && recs.len() > PAGE_MIN_RECORDS
-    {
-        let mut bb = BBox::EMPTY;
-        for r in recs.iter() {
-            bb.grow(&r.bbox);
-        }
-        let mid = recs.len() / 2;
-        if bb.x1 - bb.x0 >= bb.y1 - bb.y0 {
-            recs.select_nth_unstable_by_key(mid, |r| {
-                r.bbox.x0 + r.bbox.x1
-            });
-        } else {
-            recs.select_nth_unstable_by_key(mid, |r| {
-                r.bbox.y0 + r.bbox.y1
-            });
-        }
-        let (a, c) = recs.split_at_mut(mid);
-        split_pages(ci, li, a, seq, out);
-        split_pages(ci, li, c, seq, out);
-        return;
-    }
     let mut bb = BBox::EMPTY;
     let mut members = 0u64;
     let (mut max_w, mut max_h) = (0i64, 0i64);
@@ -511,7 +720,7 @@ fn split_pages(
         ci,
         li,
         seq: *seq,
-        recs: recs.to_vec(),
+        recs,
         bbox: bb,
         members,
         max_w,
@@ -520,18 +729,218 @@ fn split_pages(
     *seq = seq.checked_add(1).expect("page seq overflow");
 }
 
+/// spatial-split a layer's records into page groups. Straddling
+/// Grid/Pts records are FRAGMENTED at the split plane (par. Frag)
+/// instead of dragging a whole-die bbox onto one side; a single
+/// over-target rep record splits even alone (the old
+/// recs.len()>MIN gate left one huge Pts record as one page).
+/// Ownership at the plane: center*2 < plane2 -> left, else right.
+#[allow(clippy::too_many_arguments)]
+fn split_pages(
+    cell: &floe_oasis::doc::Cell,
+    arena: &mut Arena,
+    ci: usize,
+    li: u32,
+    recs: Vec<PRec>,
+    seq: &mut u32,
+    out: &mut Vec<PageJob>,
+    st: &mut SplitStats,
+    depth: u32,
+) {
+    let bytes: u64 = recs.iter().map(|r| r.bytes as u64).sum();
+    // the split gate is BYTES, not record count - with repetitions
+    // a handful of records can be gigabytes, and page decode cost
+    // is what the viewer pays. A lone record still splits when its
+    // rep can fragment.
+    let splittable = recs.len() >= 2
+        || recs.iter().any(|r| can_frag(cell, r));
+    if bytes <= PAGE_TARGET_BYTES as u64 || !splittable {
+        emit_page(ci, li, recs, seq, out);
+        return;
+    }
+    if depth >= SPLIT_MAX_DEPTH {
+        st.depth_capped += 1;
+        emit_page(ci, li, recs, seq, out);
+        return;
+    }
+    let mut bb = BBox::EMPTY;
+    for r in recs.iter() {
+        bb.grow(&r.bbox);
+    }
+    let ax: u8 = if bb.x1 - bb.x0 >= bb.y1 - bb.y0 { 0 } else { 1 };
+    let mut recs = recs;
+    let mid = recs.len() / 2;
+    recs.select_nth_unstable_by_key(mid, |r| axis_c2(&r.bbox, ax));
+    let plane2 = axis_c2(&recs[mid].bbox, ax);
+    let node_ext = axis_hi(&bb, ax) - axis_lo(&bb, ax);
+    let mut lv: Vec<PRec> = Vec::with_capacity(mid + 1);
+    let mut rv: Vec<PRec> = Vec::with_capacity(recs.len() - mid);
+    let mut wide: Vec<PRec> = Vec::new();
+    for r in recs {
+        let crosses = axis_lo(&r.bbox, ax) * 2 < plane2
+            && axis_hi(&r.bbox, ax) * 2 > plane2;
+        if crosses {
+            // EVERY crossing rep fragments - a byte floor here let
+            // 24-byte two-member scatter records (klayout folding
+            // leftovers) stay whole and drag quadrant pages back
+            // out to die width. The cost is one duplicated base
+            // header per split; the alternative is a poisoned page
+            // bbox.
+            if let Some((a, b)) =
+                frag_split(cell, arena, &r, ax, plane2)
+            {
+                st.fragments += 1;
+                lv.push(a);
+                rv.push(b);
+                continue;
+            }
+            // unsplittable crosser (Rep::One, coincident pile,
+            // axis-orthogonal grid): if it spans most of this
+            // node, QUARANTINE it into an oversize page at this
+            // level - center-assigning it would poison a child's
+            // bbox at every scale (die rings, long spines).
+            // Smaller crossers stay: the slack they add is
+            // bounded by half the node extent.
+            let ext = axis_hi(&r.bbox, ax) - axis_lo(&r.bbox, ax);
+            if ext * 2 > node_ext {
+                wide.push(r);
+                continue;
+            }
+        }
+        if axis_c2(&r.bbox, ax) < plane2 {
+            lv.push(r);
+        } else {
+            rv.push(r);
+        }
+    }
+    // oversize pages emit at this node, packed by bytes
+    let mut acc: Vec<PRec> = Vec::new();
+    let mut acc_bytes = 0u64;
+    for r in wide {
+        if acc_bytes + r.bytes as u64 > PAGE_TARGET_BYTES as u64
+            && !acc.is_empty()
+        {
+            st.oversize_pages += 1;
+            emit_page(ci, li, std::mem::take(&mut acc), seq, out);
+            acc_bytes = 0;
+        }
+        acc_bytes += r.bytes as u64;
+        acc.push(r);
+    }
+    if !acc.is_empty() {
+        st.oversize_pages += 1;
+        emit_page(ci, li, acc, seq, out);
+    }
+    if lv.is_empty() && rv.is_empty() {
+        return;
+    }
+    if lv.is_empty() || rv.is_empty() {
+        // nothing separable at this plane (coincident pile):
+        // over-target but spatially irreducible - emit as-is
+        lv.extend(rv);
+        emit_page(ci, li, lv, seq, out);
+        return;
+    }
+    split_pages(cell, arena, ci, li, lv, seq, out, st, depth + 1);
+    split_pages(cell, arena, ci, li, rv, seq, out, st, depth + 1);
+}
+
+/// materialized fragment repetition: base shift + subset rep. Pts
+/// subsets REBASE - the first offset must be (0,0) (doc.rs Rep::Pts
+/// invariant, and write.rs emits successive g-deltas from it); a
+/// 1-member subset collapses to Rep::One. Grid subsets shift the
+/// base to the (i0,j0) lattice corner; a collapsed i-dimension
+/// swaps the vectors so `na >= 2` holds (the writer's nb==1 arms
+/// encode na-2 as a uint).
+fn frag_rep(
+    rep: &Rep,
+    frag: &Frag,
+    arena: &Arena,
+) -> Option<((i64, i64), Rep)> {
+    match *frag {
+        Frag::Whole => None,
+        Frag::Pts { arena: a, lo, hi } => {
+            let pts = &arena[a as usize].1[lo as usize..hi as usize];
+            let (bx, by) = pts[0];
+            if pts.len() == 1 {
+                return Some(((bx, by), Rep::One));
+            }
+            let sub: Vec<(i64, i64)> = pts
+                .iter()
+                .map(|&(x, y)| (x - bx, y - by))
+                .collect();
+            Some(((bx, by), Rep::Pts(sub)))
+        }
+        Frag::Grid { i0, i1, j0, j1 } => {
+            let (va, vb) = match rep {
+                Rep::Grid { va, vb, .. } => (*va, *vb),
+                _ => unreachable!("grid frag on non-grid"),
+            };
+            let dx = i0 as i64 * va.0 + j0 as i64 * vb.0;
+            let dy = i0 as i64 * va.1 + j0 as i64 * vb.1;
+            let (ni, nj) = (i1 - i0, j1 - j0);
+            let rep = if ni == 1 && nj == 1 {
+                Rep::One
+            } else if ni == 1 {
+                Rep::Grid { na: nj, nb: 1, va: vb, vb: va }
+            } else {
+                Rep::Grid { na: ni, nb: nj, va, vb }
+            };
+            Some(((dx, dy), rep))
+        }
+    }
+}
+
 /// encode one page job to its OASIS payload (parallel-safe: reads
 /// doc immutably, allocates only its own buffers)
-fn encode_job(doc: &Doc, job: &PageJob) -> (Vec<u8>, u64) {
+fn encode_job(
+    doc: &Doc,
+    job: &PageJob,
+    arena: &Arena,
+) -> (Vec<u8>, u64) {
     let cell = &doc.cells[job.ci];
     let mut rects: Vec<RectRec> = Vec::new();
     let mut polys: Vec<PolyRec> = Vec::new();
     let mut paths: Vec<PathRec> = Vec::new();
     for r in &job.recs {
         match r.kind {
-            0 => rects.push(cell.rects[r.idx as usize].clone()),
-            1 => polys.push(cell.polys[r.idx as usize].clone()),
-            _ => paths.push(cell.paths[r.idx as usize].clone()),
+            0 => {
+                let mut x = cell.rects[r.idx as usize].clone();
+                if let Some(((dx, dy), rep)) =
+                    frag_rep(&x.rep, &r.frag, arena)
+                {
+                    x.x += dx;
+                    x.y += dy;
+                    x.rep = rep;
+                }
+                rects.push(x);
+            }
+            1 => {
+                let mut po = cell.polys[r.idx as usize].clone();
+                if let Some(((dx, dy), rep)) =
+                    frag_rep(&po.rep, &r.frag, arena)
+                {
+                    for q in po.pts.iter_mut() {
+                        q.0 += dx;
+                        q.1 += dy;
+                    }
+                    po.rep = rep;
+                }
+                polys.push(po);
+            }
+            _ => {
+                let mut pa = cell.paths[r.idx as usize].clone();
+                if let Some(((dx, dy), rep)) =
+                    frag_rep(&pa.rep, &r.frag, arena)
+                {
+                    for q in pa.pts.iter_mut() {
+                        q.0 += dx;
+                        q.1 += dy;
+                    }
+                    pa.rep = rep;
+                }
+                paths.push(pa);
+            }
         }
     }
     let wc = WCell {
@@ -621,6 +1030,9 @@ struct CellPlan {
     pbvh: Vec<(BBox, u32, u16, bool, u64, u64)>,
     /// per local place idx: Morton-prepared pts (Rep::Pts only)
     pts_prep: Vec<Option<floe_ovm::PtsPrepared>>,
+    /// fragmented-Pts offset scratch shared by this cell's jobs
+    arena: std::sync::Arc<Arena>,
+    split_stats: SplitStats,
 }
 
 /// binary BVH over one (cell,layer) page run with subtree max_w/
@@ -727,6 +1139,7 @@ fn build_cell_plan(
             members: r.rep.members(),
             w: r.w,
             h: r.h,
+            frag: Frag::Whole,
         });
     }
     for (idx, p) in cell.polys.iter().enumerate() {
@@ -746,6 +1159,7 @@ fn build_cell_plan(
             members: p.rep.members(),
             w: bb.x1 - bb.x0,
             h: bb.y1 - bb.y0,
+            frag: Frag::Whole,
         });
     }
     for (idx, pa) in cell.paths.iter().enumerate() {
@@ -765,18 +1179,31 @@ fn build_cell_plan(
             members: pa.rep.members(),
             w: b4.2 - b4.0,
             h: b4.3 - b4.1,
+            frag: Frag::Whole,
         });
     }
     let mut pages: Vec<PageJob> = Vec::new();
     let mut pranges: Vec<(u32, u32, u32, u32)> = Vec::new();
     let mut pbvh: Vec<(BBox, u32, u16, bool, u64, u64)> = Vec::new();
-    for (li, mut recs) in per_layer.into_iter().enumerate() {
+    let mut arena: Arena = Vec::new();
+    let mut split_stats = SplitStats::default();
+    for (li, recs) in per_layer.into_iter().enumerate() {
         if recs.is_empty() {
             continue;
         }
         let mut seq = 0u32;
         let mut run: Vec<PageJob> = Vec::new();
-        split_pages(ci, li as u32, &mut recs[..], &mut seq, &mut run);
+        split_pages(
+            cell,
+            &mut arena,
+            ci,
+            li as u32,
+            recs,
+            &mut seq,
+            &mut run,
+            &mut split_stats,
+            0,
+        );
         let run_lo = narrow_u32(pages.len() as u64, "cell page count");
         let run_count = narrow_u32(run.len() as u64, "run page count");
         if run.len() <= PBVH_LEAF {
@@ -835,7 +1262,16 @@ fn build_cell_plan(
             _ => None,
         })
         .collect();
-    CellPlan { place_order, bvh, pages, pranges, pbvh, pts_prep }
+    CellPlan {
+        place_order,
+        bvh,
+        pages,
+        pranges,
+        pbvh,
+        pts_prep,
+        arena: std::sync::Arc::new(arena),
+        split_stats,
+    }
 }
 
 fn build(
@@ -1056,15 +1492,12 @@ fn build(
 
     let mut b = Builder::new(doc.unit, size, mtime, nl);
     b.top = narrow_u32(doc.top as u64, "top cell index");
-    for (i, &(l, d)) in doc.layer_order.iter().enumerate() {
-        let nm = doc
-            .layer_names
-            .get(&(l, d))
-            .cloned()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| format!("{}/{}", l, d));
-        b.layer(l, d, &nm, lrecs[i], lmems[i]);
-    }
+    // layer table records are STORED records (post-fragmentation),
+    // so they are summed from the page jobs after the split - see
+    // below; only source-count lrecs would disagree with the page
+    // directory whenever reps fragmented. (lrecs stays as the
+    // scan-parity lower bound: stored >= source.)
+    let _ = &lrecs;
 
     // ---- per-cell plans (instance BVH + page splitting) computed in
     // PARALLEL; the heavy per-record work leaves 31 cores idle when
@@ -1132,6 +1565,9 @@ fn build(
     // deduped bitsets, then the cell record. Same order as the old
     // single-threaded loop, so the .ovm/.ovp are byte-identical.
     let mut jobs_list: Vec<PageJob> = Vec::new();
+    let mut arenas_by_cell: Vec<std::sync::Arc<Arena>> =
+        Vec::with_capacity(n);
+    let mut split_total = SplitStats::default();
     for (ci, slot) in pslots.into_iter().enumerate() {
         let CellPlan {
             place_order,
@@ -1140,7 +1576,13 @@ fn build(
             pranges,
             pbvh,
             pts_prep,
+            arena,
+            split_stats,
         } = slot.into_inner().expect("cell plan unset");
+        arenas_by_cell.push(arena);
+        split_total.fragments += split_stats.fragments;
+        split_total.oversize_pages += split_stats.oversize_pages;
+        split_total.depth_capped += split_stats.depth_capped;
         let cell = &doc.cells[ci];
         let place_base = b.n_places();
         for &pi in &place_order {
@@ -1245,6 +1687,34 @@ fn build(
         );
     }
 
+    let mut lrecs_stored = vec![0u64; nl];
+    for job in &jobs_list {
+        lrecs_stored[job.li as usize] += job.recs.len() as u64;
+    }
+    for (i, &(l, d)) in doc.layer_order.iter().enumerate() {
+        debug_assert!(lrecs_stored[i] >= lrecs[i]);
+        let nm = doc
+            .layer_names
+            .get(&(l, d))
+            .cloned()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("{}/{}", l, d));
+        b.layer(l, d, &nm, lrecs_stored[i], lmems[i]);
+    }
+
+    if split_total.fragments > 0
+        || split_total.oversize_pages > 0
+        || split_total.depth_capped > 0
+    {
+        eprintln!(
+            "[vfs] build: rep-split {} fragments, {} oversize \
+             pages, {} depth-capped",
+            split_total.fragments,
+            split_total.oversize_pages,
+            split_total.depth_capped
+        );
+    }
+
     // phase 2: encode page payloads in parallel (write_tree +
     // deflate-6 is the build's hot cost; jobs are independent)
     let mut payloads: Vec<(Vec<u8>, u64)> = Vec::new();
@@ -1284,6 +1754,7 @@ fn build(
                 });
             }
             let done = &done;
+            let arenas = &arenas_by_cell;
             for (jc, pc) in jobs_list
                 .chunks(chunk)
                 .zip(payloads.chunks_mut(chunk))
@@ -1292,7 +1763,8 @@ fn build(
                     use std::sync::atomic::Ordering::Relaxed;
                     for (job, slot) in jc.iter().zip(pc.iter_mut())
                     {
-                        *slot = encode_job(doc, job);
+                        *slot =
+                            encode_job(doc, job, &arenas[job.ci]);
                         done.fetch_add(1, Relaxed);
                     }
                 });
@@ -1300,7 +1772,8 @@ fn build(
         });
     } else {
         for (i, job) in jobs_list.iter().enumerate() {
-            payloads[i] = encode_job(doc, job);
+            payloads[i] =
+                encode_job(doc, job, &arenas_by_cell[job.ci]);
         }
     }
 
@@ -1499,6 +1972,179 @@ fn make_req(
     }
 }
 
+/// --inspect: decode a sample of the selected pages and report
+/// WHERE the bytes come from - wide pages (bbox >= half the owning
+/// cell's extent), rep-type record/member breakdown, and for pages
+/// of the TOP cell (identity frame) the fraction of members whose
+/// bbox actually intersects the viewport. This is the field probe
+/// that separates "planner over-selects" from "page bboxes are
+/// honest but the geometry really is everywhere" (9.8G floor).
+fn inspect_plan(
+    dir: &str,
+    v: &floe_vfs::Vfs,
+    req: &floe_vfs::ViewReq,
+    plan: &floe_vfs::hier::HierPlan,
+    rest: &[(String, String)],
+) {
+    use std::io::{Read, Seek, SeekFrom};
+    let cap: usize = rest
+        .iter()
+        .find(|(k, _)| k == "--inspect-pages")
+        .and_then(|(_, val)| val.parse().ok())
+        .unwrap_or(64);
+    let top_ci = plan.top.0;
+    let (mut wide_pages, mut wide_members) = (0u64, 0u64);
+    for &pi in &plan.pages {
+        let p = v.ovm.page(pi);
+        let cb = v.ovm.cell_rbbox(p.cell);
+        let (cw, ch) = (cb.x1 - cb.x0, cb.y1 - cb.y0);
+        let (pw, ph) =
+            (p.bbox.x1 - p.bbox.x0, p.bbox.y1 - p.bbox.y0);
+        if (cw > 0 && pw * 4 >= cw * 3)
+            || (ch > 0 && ph * 4 >= ch * 3)
+        {
+            wide_pages += 1;
+            wide_members += p.members;
+        }
+    }
+    let step = plan.pages.len().div_ceil(cap.max(1)).max(1);
+    let ovp = format!("{}/design.ovp", dir);
+    let mut f = std::fs::File::open(&ovp).expect("open ovp");
+    let (mut n_one, mut n_grid, mut n_pts) = (0u64, 0u64, 0u64);
+    let (mut sampled, mut sampled_top) = (0u64, 0u64);
+    let (mut mem_total, mut mem_top, mut mem_vis) =
+        (0u64, 0u64, 0u64);
+    let vis_of = |b: &BBox, rep: &Rep, view: &BBox| -> (u64, u64) {
+        let mut t = 0u64;
+        let mut vis = 0u64;
+        let mut tally = |ox: i64, oy: i64| {
+            t += 1;
+            let m = BBox {
+                x0: b.x0 + ox,
+                y0: b.y0 + oy,
+                x1: b.x1 + ox,
+                y1: b.y1 + oy,
+            };
+            if m.intersects(view) {
+                vis += 1;
+            }
+        };
+        match rep {
+            Rep::One => tally(0, 0),
+            Rep::Grid { na, nb, va, vb } => {
+                for i in 0..*na as i64 {
+                    for j in 0..*nb as i64 {
+                        tally(
+                            i * va.0 + j * vb.0,
+                            i * va.1 + j * vb.1,
+                        );
+                    }
+                }
+            }
+            Rep::Pts(pl) => {
+                for &(x, y) in pl {
+                    tally(x, y);
+                }
+            }
+        }
+        (t, vis)
+    };
+    for (i, &pi) in plan.pages.iter().enumerate() {
+        if i % step != 0 {
+            continue;
+        }
+        let p = v.ovm.page(pi);
+        let mut buf = vec![0u8; p.csize as usize];
+        f.seek(SeekFrom::Start(p.file_off)).expect("seek ovp");
+        f.read_exact(&mut buf).expect("read ovp");
+        let pd = floe_oasis::doc::parse_doc(&buf)
+            .expect("page payload parse");
+        sampled += 1;
+        let is_top = p.cell == top_ci;
+        if is_top {
+            sampled_top += 1;
+        }
+        let c = &pd.cells[0];
+        for r in &c.rects {
+            match r.rep {
+                Rep::One => n_one += 1,
+                Rep::Grid { .. } => n_grid += 1,
+                Rep::Pts(_) => n_pts += 1,
+            }
+            let b = BBox {
+                x0: r.x,
+                y0: r.y,
+                x1: r.x + r.w,
+                y1: r.y + r.h,
+            };
+            let (t, vis) = vis_of(&b, &r.rep, &req.view);
+            mem_total += t;
+            if is_top {
+                mem_top += t;
+                mem_vis += vis;
+            }
+        }
+        for po in &c.polys {
+            match po.rep {
+                Rep::One => n_one += 1,
+                Rep::Grid { .. } => n_grid += 1,
+                Rep::Pts(_) => n_pts += 1,
+            }
+            let b = pts_bbox(&po.pts);
+            let (t, vis) = vis_of(&b, &po.rep, &req.view);
+            mem_total += t;
+            if is_top {
+                mem_top += t;
+                mem_vis += vis;
+            }
+        }
+        for pa in &c.paths {
+            match pa.rep {
+                Rep::One => n_one += 1,
+                Rep::Grid { .. } => n_grid += 1,
+                Rep::Pts(_) => n_pts += 1,
+            }
+            let b4 = path_bbox(&pa.pts, pa.hw, pa.es, pa.ee);
+            let b = BBox { x0: b4.0, y0: b4.1, x1: b4.2, y1: b4.3 };
+            let (t, vis) = vis_of(&b, &pa.rep, &req.view);
+            mem_total += t;
+            if is_top {
+                mem_top += t;
+                mem_vis += vis;
+            }
+        }
+    }
+    println!(
+        "{{\n  \"inspect\": {{\n    \"selected_pages\": {},\n    \
+         \"cell_wide_pages\": {},\n    \
+         \"cell_wide_members\": {},\n    \
+         \"sampled_pages\": {},\n    \
+         \"sampled_top_pages\": {},\n    \
+         \"rep_records\": {{\"one\": {}, \"grid\": {}, \
+         \"pts\": {}}},\n    \
+         \"sampled_members\": {},\n    \
+         \"sampled_top_members\": {},\n    \
+         \"sampled_top_visible\": {},\n    \
+         \"top_visible_ratio\": {:.6}\n  }}\n}}",
+        plan.pages.len(),
+        wide_pages,
+        wide_members,
+        sampled,
+        sampled_top,
+        n_one,
+        n_grid,
+        n_pts,
+        mem_total,
+        mem_top,
+        mem_vis,
+        if mem_top > 0 {
+            mem_vis as f64 / mem_top as f64
+        } else {
+            0.0
+        }
+    );
+}
+
 pub fn plan_cmd(args: &[String]) {
     let (dir, view, px, cut, depth, layers, rest) =
         parse_common(args);
@@ -1585,6 +2231,9 @@ pub fn plan_cmd(args: &[String]) {
             st.kbox_merges,
             ms
         );
+        if rest.iter().any(|(k, _)| k == "--inspect") {
+            inspect_plan(&dir, &v, &req, &plan, &rest);
+        }
         return;
     }
     let t0 = std::time::Instant::now();
@@ -2046,4 +2695,396 @@ fn serve_hier(
         mb(upd.pending_new_bytes),
         mb(upd.pending_evict_bytes),
     ))
+}
+
+#[cfg(test)]
+mod split_tests {
+    use super::*;
+
+    /// deterministic LCG so tests need no rand crate
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self, m: i64) -> i64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((self.0 >> 33) as i64).rem_euclid(m)
+        }
+    }
+
+    fn pts_rec(
+        seed: u64,
+        n: usize,
+        die: i64,
+        w: i64,
+    ) -> RectRec {
+        let mut g = Lcg(seed);
+        let mut pos: Vec<(i64, i64)> =
+            (0..n).map(|_| (g.next(die), g.next(die))).collect();
+        let first = pos[0];
+        for p in pos.iter_mut() {
+            *p = (p.0 - first.0, p.1 - first.1);
+        }
+        RectRec {
+            layer: 1,
+            dt: 0,
+            x: first.0,
+            y: first.1,
+            w,
+            h: w,
+            rep: Rep::Pts(pos),
+        }
+    }
+
+    fn mini_doc(rects: Vec<RectRec>) -> Doc {
+        let mut c = floe_oasis::doc::Cell::default();
+        c.name = String::from("T");
+        c.rects = rects;
+        Doc {
+            unit: 1000.0,
+            cells: vec![c],
+            top: 0,
+            layer_order: vec![(1, 0)],
+            norm_s: 0.0,
+            layer_names: Default::default(),
+        }
+    }
+
+    fn plan_of(doc: &Doc) -> CellPlan {
+        let rbb = cell_bboxes_full(doc);
+        let lidx: std::collections::HashMap<(u32, u32), usize> =
+            doc.layer_order
+                .iter()
+                .enumerate()
+                .map(|(i, &k)| (k, i))
+                .collect();
+        build_cell_plan(doc, 0, &rbb, &lidx, 1)
+    }
+
+    /// expand every member of a cell's records into
+    /// (layer, dt, kind, bbox) tuples - the conservation oracle
+    fn expand_cell(c: &floe_oasis::doc::Cell) -> Vec<Mem> {
+        let mut v: Vec<Mem> = Vec::new();
+        for r in &c.rects {
+            let b = BBox {
+                x0: r.x,
+                y0: r.y,
+                x1: r.x + r.w,
+                y1: r.y + r.h,
+            };
+            expand_rep(&r.rep, |ox, oy| {
+                v.push((r.layer, r.dt, 0, b.x0 + ox, b.y0 + oy,
+                        b.x1 + ox, b.y1 + oy));
+            });
+        }
+        for p in &c.polys {
+            let b = pts_bbox(&p.pts);
+            expand_rep(&p.rep, |ox, oy| {
+                v.push((p.layer, p.dt, 1, b.x0 + ox, b.y0 + oy,
+                        b.x1 + ox, b.y1 + oy));
+            });
+        }
+        for pa in &c.paths {
+            let b4 = path_bbox(&pa.pts, pa.hw, pa.es, pa.ee);
+            expand_rep(&pa.rep, |ox, oy| {
+                v.push((pa.layer, pa.dt, 2, b4.0 + ox, b4.1 + oy,
+                        b4.2 + ox, b4.3 + oy));
+            });
+        }
+        v.sort_unstable();
+        v
+    }
+
+    type Mem = (u32, u32, u8, i64, i64, i64, i64);
+
+    fn expand_rep(rep: &Rep, mut f: impl FnMut(i64, i64)) {
+        match rep {
+            Rep::One => f(0, 0),
+            Rep::Grid { na, nb, va, vb } => {
+                for i in 0..*na as i64 {
+                    for j in 0..*nb as i64 {
+                        f(i * va.0 + j * vb.0, i * va.1 + j * vb.1);
+                    }
+                }
+            }
+            Rep::Pts(p) => {
+                for &(x, y) in p {
+                    f(x, y);
+                }
+            }
+        }
+    }
+
+    /// encode every page of the plan, parse it back, expand - the
+    /// multiset must equal the source cell's expansion EXACTLY
+    /// (duplicate offsets preserved with their counts), and every
+    /// member bbox must lie inside its page's bbox
+    fn roundtrip(doc: &Doc, plan: &CellPlan) -> Vec<Mem> {
+        let mut got: Vec<Mem> = Vec::new();
+        for job in &plan.pages {
+            let (payload, _raw) =
+                encode_job(doc, job, &plan.arena);
+            // page payloads are complete OASIS files (CBLOCKs
+            // inflate inside the parser)
+            let pd = floe_oasis::doc::parse_doc(&payload)
+                .expect("page parse");
+            assert_eq!(pd.cells.len(), 1);
+            let mems = expand_cell(&pd.cells[0]);
+            for m in &mems {
+                assert!(
+                    m.3 >= job.bbox.x0
+                        && m.4 >= job.bbox.y0
+                        && m.5 <= job.bbox.x1
+                        && m.6 <= job.bbox.y1,
+                    "member outside page bbox: {:?} vs {:?}",
+                    m,
+                    job.bbox
+                );
+            }
+            got.extend(mems);
+        }
+        got.sort_unstable();
+        got
+    }
+
+    fn assert_conserved(doc: &Doc) -> CellPlan {
+        let plan = plan_of(doc);
+        let want = expand_cell(&doc.cells[0]);
+        let got = roundtrip(doc, &plan);
+        assert_eq!(want.len(), got.len(), "member count");
+        assert_eq!(want, got, "member multiset");
+        plan
+    }
+
+    /// die-wide scattered Pts reps MUST split into spatially tight
+    /// pages - the 9.8G floor regression (a point view selected
+    /// every page of the layer)
+    #[test]
+    fn scattered_pts_pages_are_local() {
+        const DIE: i64 = 1_000_000;
+        let doc = mini_doc(vec![
+            pts_rec(7, 300_000, DIE, 100),
+            pts_rec(99, 300_000, DIE, 150),
+        ]);
+        let plan = assert_conserved(&doc);
+        assert!(plan.pages.len() >= 2, "{}", plan.pages.len());
+        let members: u64 =
+            plan.pages.iter().map(|j| j.members).sum();
+        assert_eq!(members, 600_000);
+        // page bboxes must stay near-disjoint: total covered area
+        // <= 2x die area (the broken build had every page at ~90%
+        // of the die: 4 pages summed to ~3.6x)
+        let mut area = 0i128;
+        for j in &plan.pages {
+            area += (j.bbox.x1 - j.bbox.x0) as i128
+                * (j.bbox.y1 - j.bbox.y0) as i128;
+        }
+        assert!(
+            area <= 2 * (DIE as i128) * (DIE as i128),
+            "pages cover {}x die area",
+            area / ((DIE as i128) * (DIE as i128))
+        );
+    }
+
+    /// klayout folding leftovers: tiny 2-member records whose two
+    /// points sit on opposite die sides. A byte floor once exempted
+    /// them from fragmentation and every quadrant page bbox grew
+    /// back to ~die width (repfloor field repro)
+    #[test]
+    fn small_wide_pairs_still_fragment() {
+        const DIE: i64 = 1_000_000;
+        let mut recs = vec![
+            pts_rec(7, 200_000, DIE, 100),
+            pts_rec(99, 200_000, DIE, 150),
+        ];
+        let mut g = Lcg(1234);
+        for _ in 0..500 {
+            let (x0, y) = (g.next(DIE / 4), g.next(DIE));
+            let x1 = DIE * 3 / 4 + g.next(DIE / 4);
+            recs.push(RectRec {
+                layer: 1,
+                dt: 0,
+                x: x0,
+                y,
+                w: 120,
+                h: 120,
+                rep: Rep::Pts(vec![(0, 0), (x1 - x0, 0)]),
+            });
+        }
+        let doc = mini_doc(recs);
+        let plan = assert_conserved(&doc);
+        assert!(plan.pages.len() >= 2);
+        let mut area = 0i128;
+        for j in &plan.pages {
+            area += (j.bbox.x1 - j.bbox.x0) as i128
+                * (j.bbox.y1 - j.bbox.y0) as i128;
+        }
+        assert!(
+            area <= 2 * (DIE as i128) * (DIE as i128),
+            "wide pairs poisoned pages: {}x die",
+            area / ((DIE as i128) * (DIE as i128))
+        );
+    }
+
+    /// duplicate offsets (counted!), negative coordinates
+    #[test]
+    fn conservation_dup_offsets_negative_coords() {
+        const DIE: i64 = 1_000_000;
+        let mut pts = vec![(0, 0), (0, 0), (0, 0)]; // dup at base
+        let mut g = Lcg(5);
+        for _ in 0..150_000 {
+            let x = g.next(DIE) - DIE / 2; // negative half-plane
+            let y = g.next(DIE) - DIE / 2;
+            pts.push((x, y));
+            if pts.len() % 1000 == 0 {
+                pts.push((x, y)); // scattered duplicates
+            }
+        }
+        let doc = mini_doc(vec![
+            RectRec {
+                layer: 1,
+                dt: 0,
+                x: -DIE / 3,
+                y: -DIE / 3,
+                w: 80,
+                h: 90,
+                rep: Rep::Pts(pts),
+            },
+            pts_rec(42, 150_000, DIE, 100),
+        ]);
+        assert_conserved(&doc);
+    }
+
+    /// grids: axis-aligned, negative vector, skew - fragmented at
+    /// index boundaries, conserved through encode->parse (the
+    /// writer's na>=2 normalization would panic or corrupt here)
+    #[test]
+    fn conservation_grids_axis_neg_skew() {
+        const DIE: i64 = 1_000_000;
+        let g = |va: (i64, i64), vb: (i64, i64), na, nb, x, y| {
+            RectRec {
+                layer: 1,
+                dt: 0,
+                x,
+                y,
+                w: 70,
+                h: 60,
+                rep: Rep::Grid { na, nb, va, vb },
+            }
+        };
+        let doc = mini_doc(vec![
+            // dense axis grid spanning the die
+            g((1000, 0), (0, 1000), 900, 900, 0, 0),
+            // negative vector grid
+            g((-800, 0), (0, -700), 500, 400, DIE - 10, DIE - 10),
+            // skew grid
+            g((900, 350), (-200, 800), 600, 500, DIE / 2, 0),
+            // 1-column grid (nb collapse exercised on split)
+            g((0, 2000), (1, 0), 400, 1, DIE / 3, 0),
+            // anchor so the layer has a non-grid too
+            pts_rec(3, 200_000, DIE, 50),
+        ]);
+        assert_conserved(&doc);
+    }
+
+    /// a SINGLE over-target Pts record must split by itself (the
+    /// old recs.len()>64 gate left it as one whole-die page)
+    #[test]
+    fn single_huge_pts_splits_alone() {
+        const DIE: i64 = 1_000_000;
+        let doc = mini_doc(vec![pts_rec(11, 400_000, DIE, 90)]);
+        let plan = assert_conserved(&doc);
+        assert!(
+            plan.pages.len() >= 2,
+            "single huge rep stayed one page"
+        );
+    }
+
+    /// unsplittable wide Rep::One records (die ring / spine) are
+    /// quarantined into oversize pages; LOCAL pages stay tight
+    #[test]
+    fn wide_one_quarantined_local_pages_tight() {
+        const DIE: i64 = 1_000_000;
+        let mut recs = vec![
+            pts_rec(7, 300_000, DIE, 100),
+            pts_rec(15, 300_000, DIE, 100),
+        ];
+        for k in 0..40i64 {
+            recs.push(RectRec {
+                layer: 1,
+                dt: 0,
+                x: 0,
+                y: k * 20_000,
+                w: DIE, // full-die spine
+                h: 50,
+                rep: Rep::One,
+            });
+        }
+        let doc = mini_doc(recs);
+        let plan = assert_conserved(&doc);
+        assert!(plan.split_stats.oversize_pages >= 1);
+        // pages NOT containing a spine must stay narrow
+        let mut tight = 0;
+        for j in &plan.pages {
+            let has_spine =
+                j.recs.iter().any(|r| r.w == DIE);
+            if !has_spine {
+                assert!(
+                    j.bbox.x1 - j.bbox.x0 <= DIE * 7 / 10,
+                    "local page polluted to {}",
+                    j.bbox.x1 - j.bbox.x0
+                );
+                tight += 1;
+            }
+        }
+        assert!(tight >= 2, "no local pages left");
+    }
+
+    /// plane ownership is explicit: member center*2 < plane2 goes
+    /// left, >= plane2 goes right (points exactly ON the plane are
+    /// right-owned)
+    #[test]
+    fn plane_ownership_boundary() {
+        let mut c = floe_oasis::doc::Cell::default();
+        c.name = String::from("T");
+        c.rects = vec![RectRec {
+            layer: 1,
+            dt: 0,
+            x: 0,
+            y: 0,
+            w: 10,
+            h: 10,
+            rep: Rep::Pts(vec![
+                (0, 0),
+                (495, 0), // center*2 = 1000 == plane2 -> RIGHT
+                (494, 0), // center*2 = 998 < plane2 -> LEFT
+                (1000, 0),
+            ]),
+        }];
+        let doc = mini_doc(c.rects.clone());
+        let r = PRec {
+            kind: 0,
+            idx: 0,
+            bbox: BBox { x0: 0, y0: 0, x1: 1010, y1: 10 },
+            bytes: 32,
+            members: 4,
+            w: 10,
+            h: 10,
+            frag: Frag::Whole,
+        };
+        let mut arena: Arena = Vec::new();
+        let (a, b) = frag_split(
+            &doc.cells[0],
+            &mut arena,
+            &r,
+            0,
+            1000, // plane2 (doubled): plane at x-center 500
+        )
+        .expect("splittable");
+        assert_eq!(a.members, 2, "left: (0,0) and (494,0)");
+        assert_eq!(b.members, 2, "right: (495,0) and (1000,0)");
+        assert!(a.bbox.x1 <= 504 + 10);
+        assert!(b.bbox.x0 >= 495);
+    }
 }
