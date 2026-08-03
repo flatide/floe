@@ -5,8 +5,8 @@
 단순화·책임 분리 지시**, rev 12 = **M0 실증**, rev 13~18 =
 **M1/M2/M3/M3.5 구현 + 외부 검토 2회 반영(0.6.3)**, rev 19 =
 **M4 실측 완료 + 스케일 결함 4건 수정(0.6.4→0.7.0, ovm v3)** —
-변경 요지 §0). 상태: **M0~M5 + mmap + M7-A/B (rev 22/23, ovm
-v4, LOD 밀도 선택 라이브)** — **다음 = M7-C 사무실 실측**
+변경 요지 §0). 상태: **M0~M5 + mmap + M7-A/B + 스켈레톤 폐기
+(rev 24, 0.10.0)** — **다음 = M7-C 사무실 실측(fit-뷰 콜드 포함)**
 (M4 결과: §0 rev 19). 배경: MAIN09(150M급)
 실측에서 **뷰어 깊은 줌이
 줌인할수록 느려지는** 병리 확인. 원인은 개별 증상이 아니라 하나의
@@ -169,6 +169,32 @@ rev 10 (지시: **인덱서/뷰어 책임 분리** + 이전 검토 잔여 1건):
   usize/u64 → u32/u16 narrowing(na/nb, Pts count, page/place/BVH
   start·count, payload size 등)은 checked — silent truncation
   금지, 초과는 "limit exceeded: <필드>" 빌드 에러.
+
+rev 24 (스켈레톤 폐기 + 오픈 depth 0 — 2026-08-04, 0.10.0):
+
+- **VFS 캐시에서 skeleton.oas 폐기**: 광역 뷰는 워킹셋 + coverage
+  + LOD 변종이 전담(뷰어 skel 모드·skel 렌더러·`_skel_text_fits`
+  제거, gui는 항상 live). 남는 역할은 **라벨뿐** — 빌드가
+  `labels.tsv`(display-ready 행: 큰 1단계 셀 블록명 255/0 +
+  예산 라벨은 설계 레이어 그대로)를 방출하고 뷰어는 이를 로드해
+  기존 `_view_labels` declutter로 그림. detail-twin dt 매핑 제거.
+  meta `skeleton` 키 → `labels` 키. 마커 정리 목록에 labels.tsv.
+- **`floe_tiler::skel`은 축소 존치**: `label_rows()`(지오메트리
+  없는 블록명+선정) 추가; build_skeleton 본체는 레거시 .ice
+  경로(main.rs `index`)가 계속 사용 — 그 게이트
+  (validate_rust_skel)는 무변경. validate_vfs.py에 labels 게이트
+  추가(메타 계수 일치 + 예산 행 ⊆ 사이드카 문자열; valmini 802행
+  = .ice 스켈레톤 게이트의 802 튜플과 동수 = 선정 로직 이관 검증).
+- 구 캐시(스켈레톤 있음)는 그대로 열리며 라벨만 비어 있음 —
+  재인덱싱 시 labels.tsv 생성. 인덱싱 시간: 텍스트 수집 1패스는
+  동일, 스켈레톤 지오메트리 빌드+인코딩이 사라져 emit 단계가
+  단축(testchip 0.3s; 9.8G에서 수 초~수십 초 절감 예상).
+- **뷰어 오픈 디폴트 depth = 0**(top 지오메트리 + 아웃라인 +
+  coverage): 어떤 칩에서도 가장 빠른 정직한 첫 화면. --goto는
+  종전대로 full.
+- 리스크(명시): 광역 성능 폴백이 사라졌으므로 9.8G fit-뷰 콜드가
+  live+LOD로 수 초 내인지 M7-C에서 확인 — 느리면 lod_k/트리거를
+  광역 쪽으로 조정.
 
 rev 23 (M7-B 플래너 밀도 선택 — 2026-08-03, 0.9.1):
 

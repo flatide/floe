@@ -11,7 +11,7 @@
 //! member sums must equal the source's geometry scan.
 
 use floe_oasis::doc::{Doc, PathRec, PolyRec, RectRec, Rep};
-use floe_oasis::write::{write_tree, WCell};
+use floe_oasis::write::WCell;
 use floe_ovm::{narrow_u32, BBox, Builder, PBVH_NONE};
 use floe_tiler::hier::{cell_bboxes_full, rep_extent};
 use floe_tiler::{path_bbox, xf_rep, Xf};
@@ -225,7 +225,7 @@ pub fn vfs_cmd(args: &[String]) {
             "design.ovm",
             "design.ovp",
             "design.ovc",
-            "skeleton.oas",
+            "labels.tsv",
             "texts.tsv",
             "meta.json",
         ] {
@@ -291,11 +291,12 @@ fn write_coverage(doc: &Doc, outdir: &str, jobs: usize) {
     );
 }
 
-/// skeleton.oas + texts.tsv + meta.json: the viewer-facing trio the
-/// .ice used to carry - far view, text search, and the meta fields
-/// the GUI reads (dbu/bbox/grid/layers+color/src). grid is synthetic
-/// here (no tiles in the VFS cache): it only feeds the viewer's
-/// live-vs-skel span heuristic and stays on the .ice formula.
+/// labels.tsv + texts.tsv + meta.json: the viewer-facing files -
+/// display labels (block names + budget selection), text search,
+/// and the meta fields the GUI reads (dbu/bbox/grid/layers+color/
+/// src). The far-view skeleton is retired (rev 24): wide views are
+/// served by the working set + coverage + LOD variants. grid stays
+/// synthetic on the .ice formula (legacy meta shape).
 fn emit_viewer_side(
     doc: &Doc,
     src: &str,
@@ -346,24 +347,33 @@ fn emit_viewer_side(
         *stage.lock().unwrap() = s;
     };
     let entries = floe_tiler::skel::collect_all_texts(doc);
-    set_stage("building skeleton");
-    let sk = floe_tiler::skel::build_skeleton(
+    // skeleton retired (rev 24): the wide view is served by the
+    // working set + coverage + LOD variants; only its LABEL role
+    // survives, as display-ready sidecar rows (block names of big
+    // first-level cells + the budgeted label selection)
+    set_stage("collecting labels");
+    let lrows = floe_tiler::skel::label_rows(
         doc,
         &entries,
         floe_tiler::skel::SKEL_TEXT_CAP,
     );
-    let skcell = WCell {
-        name: "SKEL_TOP".to_string(),
-        rects: &sk.rects,
-        polys: &sk.polys,
-        paths: &sk.paths,
-        texts: &sk.texts,
-        places: Vec::new(),
-    };
-    let bytes =
-        write_tree(&[skcell], doc.unit).expect("skeleton bytes");
-    std::fs::write(format!("{}/skeleton.oas", outdir), bytes)
-        .expect("write skeleton");
+    let mut ltsv = String::new();
+    let mut n_blocks = 0u64;
+    for (l, d, x, y, name) in &lrows {
+        if *l == 255 && *d == 0 {
+            n_blocks += 1;
+        }
+        ltsv.push_str(&format!(
+            "{}/{}\t{}\t{}\t{}\n",
+            l,
+            d,
+            x,
+            y,
+            crate::tsv_esc(name)
+        ));
+    }
+    std::fs::write(format!("{}/labels.tsv", outdir), ltsv)
+        .expect("write labels");
     let mut sidecar: Vec<&floe_tiler::skel::TextEntry> =
         entries.iter().collect();
     sidecar.sort_by(|a, b| {
@@ -456,8 +466,8 @@ fn emit_viewer_side(
          \"grid\": {{\"nx\": {}, \"ny\": {}, \"x0\": {}, \
          \"y0\": {}, \"tile_w\": {}, \"tile_h\": {}}},\n\
          \"layers\": [\n{}\n],\n\
-         \"skeleton\": {{\"file\": \"skeleton.oas\", \
-         \"shapes\": {}, \"texts\": {}}},\n\
+         \"labels\": {{\"file\": \"labels.tsv\", \
+         \"blocks\": {}, \"rows\": {}}},\n\
          \"texts_sidecar\": {{\"file\": \"texts.tsv\", \
          \"entries\": {}, \"members\": {}}}\n\
          }}\n",
@@ -478,8 +488,8 @@ fn emit_viewer_side(
         tw,
         th,
         layers_json.join(",\n"),
-        sk.shapes,
-        sk.labels,
+        n_blocks,
+        lrows.len(),
         sidecar.len(),
         side_members,
     );
@@ -487,10 +497,10 @@ fn emit_viewer_side(
         .expect("write meta");
     hb_on.store(false, std::sync::atomic::Ordering::Relaxed);
     eprintln!(
-        "[vfs] skeleton {} shapes + {} labels, sidecar {} entries, \
+        "[vfs] labels {} rows ({} blocks), sidecar {} entries, \
          meta ({:.1}s)",
-        sk.shapes,
-        sk.labels,
+        lrows.len(),
+        n_blocks,
         sidecar.len(),
         t0.elapsed().as_secs_f64()
     );

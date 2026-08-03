@@ -278,8 +278,10 @@ class Viewer:
         # paint on huge chips - the industry default), a --goto jump is
         # an inspection: full depth unless --depth says otherwise.
         # 999 = full; runtime digits/`d` dialog change it as before.
+        # Open default is depth 0 (top geometry + outlines +
+        # coverage): the fastest truthful first view on any chip.
         if depth is None:
-            depth = 999 if goto is not None else 1
+            depth = 999 if goto is not None else 0
         self.depth_value = max(0, min(999, int(depth)))
         self.abstract = False       # `a` key: klayout abstract mode
         self.coverage_on = False    # `v` key: density coverage fill (VFS)
@@ -892,8 +894,9 @@ class Viewer:
         self._clamp_view()
         bbox = self.view_bbox()
         span = self.tiles_spanned(bbox)
-        live = 0 < span <= self._live_cap and bool(self.visible)
-        scope = "live" if live else "skel"
+        # skeleton retired (rev 24): every view renders live - wide
+        # views are carried by coverage + LOD variants
+        scope = "live"
         self._display()
         if not self.visible:
             if self._debounce is not None:
@@ -902,8 +905,7 @@ class Viewer:
             self._clear_pending()
             self._set_status(bbox, "no layers visible")
             return
-        mode = "live (%d tiles)" % span if scope == "live" \
-            else "far view (skeleton)"
+        mode = "live (%d tiles)" % span
         if self._drag is not None:
             # mid-pan: track visually with the frozen frame only; the
             # render fires once on button release (a brief motion pause
@@ -1120,11 +1122,7 @@ class Viewer:
                     return  # silent margin upgrade
                 self._depth_used = used
                 self.dstatus.set_text(self._depth_label())
-                if res.get("scope") == "skel":
-                    mode = "far view (%s, %d ms)" % (
-                        "outline" if used == 0 else "skeleton",
-                        res["ms"])
-                else:
+                if True:
                     split = ""
                     if res.get("load_ms") is not None:
                         split = " = %d load + %d draw" \

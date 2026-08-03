@@ -176,8 +176,42 @@ def main():
             fail("G5c layer %s table records=%d < scan=%d"
                  % (key, lr, truth_recs.get(key, 0)))
 
-    print("vfs-checked %d pages (%d lod), %d layers, top rbbox, "
-          "failures: %d" % (checked, n_lod, len(lmap), len(bad)))
+    # labels.tsv (skeleton retired, rev 24): meta counts match the
+    # file; budget rows (design layers) must name strings that the
+    # full-text sidecar also carries
+    with open(os.path.join(outdir, "meta.json")) as f:
+        vmeta = json.load(f)
+    lm = vmeta.get("labels") or {}
+    lpath = os.path.join(outdir, lm.get("file", "labels.tsv"))
+    n_rows = n_blocks = 0
+    side_strings = set()
+    with open(os.path.join(outdir, "texts.tsv")) as f:
+        for ln in f:
+            parts = ln.rstrip("\n").split("\t")
+            if len(parts) >= 5:
+                side_strings.add(parts[4])
+    if not os.path.isfile(lpath):
+        fail("labels.tsv missing")
+    else:
+        with open(lpath) as f:
+            for ln in f:
+                parts = ln.rstrip("\n").split("\t")
+                if len(parts) < 4:
+                    continue
+                n_rows += 1
+                if parts[0] == "255/0":
+                    n_blocks += 1
+                elif parts[3] not in side_strings:
+                    fail("label %r not in sidecar" % parts[3])
+        if n_rows != lm.get("rows", -1):
+            fail("labels rows=%d meta=%s" % (n_rows, lm.get("rows")))
+        if n_blocks != lm.get("blocks", -1):
+            fail("labels blocks=%d meta=%s"
+                 % (n_blocks, lm.get("blocks")))
+
+    print("vfs-checked %d pages (%d lod), %d layers, %d labels "
+          "(%d blocks), top rbbox, failures: %d"
+          % (checked, n_lod, len(lmap), n_rows, n_blocks, len(bad)))
     sys.exit(1 if bad else 0)
 
 

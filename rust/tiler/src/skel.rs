@@ -428,6 +428,62 @@ fn select_labels(
 }
 
 /// Build the skeleton content (single SKEL_TOP cell worth of records).
+/// viewer label rows for the VFS cache (skeleton retired there,
+/// rev 24): the block-name synthesis of build_skeleton WITHOUT any
+/// geometry - outline names of big first-level cells on 255/0 at
+/// their placed bbox centers, plus the budget label selection on
+/// the DESIGN layer (the viewer no longer maps twin datatypes
+/// back). (layer, dt, x, y, string) rows, display-ready.
+pub fn label_rows(
+    doc: &Doc,
+    entries: &[TextEntry],
+    budget: u64,
+) -> Vec<(u32, u32, i64, i64, String)> {
+    let bbs = cell_bboxes(doc);
+    let mut out: Vec<(u32, u32, i64, i64, String)> = Vec::new();
+    if let Some(bb) = bbs[doc.top] {
+        let min_feat =
+            ((bb.2 - bb.0).max(bb.3 - bb.1) / 500).max(1);
+        let big = min_feat * 4;
+        let topc = &doc.cells[doc.top];
+        let mut n = 0u64;
+        'insts: for pl in &topc.places {
+            if n >= SKEL_SHAPE_CAP {
+                break;
+            }
+            let cb = match bbs[pl.cell] {
+                Some(b) => b,
+                None => continue,
+            };
+            if cb.2 - cb.0 < big && cb.3 - cb.1 < big {
+                continue;
+            }
+            for (ox, oy) in rep_offsets(&pl.rep) {
+                if n >= SKEL_SHAPE_CAP {
+                    break 'insts;
+                }
+                let xf =
+                    Xf::place(pl.x + ox, pl.y + oy, pl.rot, pl.flip);
+                let a = xf.apply(cb.0, cb.1);
+                let b2 = xf.apply(cb.2, cb.3);
+                out.push((
+                    255,
+                    0,
+                    half(a.0.min(b2.0), a.0.max(b2.0)),
+                    half(a.1.min(b2.1), a.1.max(b2.1)),
+                    doc.cells[pl.cell].name.clone(),
+                ));
+                n += 1;
+            }
+        }
+    }
+    let (labels, _thinned) = select_labels(doc, entries, budget);
+    for ((l, d), _pos, s, x, y) in labels {
+        out.push((l, d, x, y, s));
+    }
+    out
+}
+
 pub fn build_skeleton(
     doc: &Doc,
     entries: &[TextEntry],

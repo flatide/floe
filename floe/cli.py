@@ -256,8 +256,8 @@ def cmd_probe(args):
     g = c.meta["grid"]
     cx, cy = (bb[0] + bb[2]) // 2, (bb[1] + bb[3]) // 2
     hw, hh = g["tile_w"] // 2, g["tile_h"] // 2
-    jobs = [("skeleton (fit view)",
-             {"kind": "render", "gen": 1, "scope": "skel",
+    jobs = [("fit view (live, depth 0)",
+             {"kind": "render", "gen": 1, "scope": "live",
               "bbox": tuple(bb), "view": None,
               "w": 600, "h": 600, "depth": 0, "visible": None}),
             ("live (1-tile region at center)",

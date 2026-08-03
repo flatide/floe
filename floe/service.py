@@ -28,12 +28,12 @@ _PICK_CAP = 64    # max candidates per pick query
 CUT_LEVEL_PX = (0.0, 2.0, 4.0, 8.0)
 CUT_PX = CUT_LEVEL_PX[1]
 
-# Calibre-style label declutter: skeleton text (block names + budget
+# Calibre-style label declutter: label rows (block names + budget
 # labels) is drawn only when few enough of it falls in the view to
 # read - so a sparse chip always shows its labels, and a label-dense
 # chip shows them only as you zoom in and the viewport holds fewer.
 # The count is measured per frame (capped, cheap on the small
-# skeleton). Tunable.
+# sidecar). Tunable.
 LABEL_VIEW_BUDGET = 400
 
 # live-view label declutter: at most one label per this many screen
@@ -211,31 +211,29 @@ def _svc_pick(cache, mosaic, job, res):
     res.put(out)
 
 
-def _load_skel_labels(skel_renderer):
-    """Skeleton labels for live-view reuse: (design_layer, dt, x, y,
-    string). Block names ride on (255,0); budget labels sit on the
-    level-1 twin (d + SKEL_DETAIL_DT) - map them back to the design
-    layer so they draw in that layer's color. The skeleton is a flat
-    cell, so this is a one-time scan of its text shapes."""
+def _load_sidecar_labels(cache):
+    """Display labels from the build's labels.tsv (skeleton retired,
+    VFS_HIER.md rev 24): block names of big first-level cells ride
+    on (255,0), budget labels sit on their DESIGN layer - rows are
+    display-ready (layer, dt, x, y, string). Old caches without the
+    file simply show no labels until re-indexed."""
     out = []
-    if skel_renderer is None:
+    path = os.path.join(cache.dir,
+                        (cache.meta.get("labels") or {})
+                        .get("file", "labels.tsv"))
+    if not os.path.isfile(path):
         return out
-    ly = skel_renderer.layout
-    top = skel_renderer.top
-    for li in ly.layer_indexes():
-        info = ly.get_info(li)
-        l, d = info.layer, info.datatype
-        if (l, d) == (255, 0):
-            dl, dd = 255, 0
-        elif cache_mod.SKEL_DETAIL_DT <= d < 2 * cache_mod.SKEL_DETAIL_DT:
-            dl, dd = l, d - cache_mod.SKEL_DETAIL_DT
-        else:
-            continue  # strap polygons / design geometry: no labels
-        for sh in top.shapes(li).each():
-            if sh.is_text():
-                t = sh.text
-                out.append((dl, dd, t.trans.disp.x,
-                            t.trans.disp.y, t.string))
+    with open(path) as f:
+        for ln in f:
+            p = ln.rstrip("\n").split("\t")
+            if len(p) < 4:
+                continue
+            l, _, d = p[0].partition("/")
+            try:
+                out.append((int(l), int(d), int(p[1]), int(p[2]),
+                            p[3]))
+            except ValueError:
+                continue
     return out
 
 
@@ -269,26 +267,7 @@ def _view_labels(cache, x0, y0, x1, y1, w, h, visible):
     return out
 
 
-def _skel_text_fits(skel_renderer, x0, y0, x1, y1):
-    """True if the skeleton's texts inside the view are few enough to
-    read (<= LABEL_VIEW_BUDGET). Counts text shapes touching the view
-    box, capped so a label-dense overview stops early. The skeleton
-    is one flat cell, so this is a bounded per-layer scan."""
-    ly = skel_renderer.layout
-    top = skel_renderer.top
-    box = db.Box(int(x0), int(y0), int(x1), int(y1))
-    n = 0
-    for li in ly.layer_indexes():
-        it = top.shapes(li).each_touching(box)
-        for sh in it:
-            if sh.is_text():
-                n += 1
-                if n > LABEL_VIEW_BUDGET:
-                    return False
-    return True
-
-
-def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
+def _svc_render(cache, mosaic, renderer, lod, tmp, job,
                 req, res, latest=None):
     t0 = time.perf_counter()
     x0, y0, x1, y1 = job["bbox"]
@@ -304,37 +283,7 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
     newer = (lambda: latest.value > job["gen"]) if latest is not None \
         else (lambda: False)
     try:
-        if scope == "skel":
-            if skel_renderer is None:
-                res.put({"kind": "error", "msg": "no skeleton in cache "
-                         "(run: floe index --skeleton-only)"})
-                return
-            vis = job["visible"]
-            if vis is None:
-                vis = [(l["layer"], l["datatype"])
-                       for l in cache.meta["layers"]]
-            else:
-                vis = [tuple(v) for v in vis]
-            # level-k detail twins (straps, labels) show at depth >= k
-            d = job.get("depth")
-            kmax = cache_mod.SKEL_DETAIL_LEVELS if d is None \
-                else max(0, min(cache_mod.SKEL_DETAIL_LEVELS, d))
-            vis += [(l, dt + k * cache_mod.SKEL_DETAIL_DT)
-                    for k in range(1, kmax + 1) for l, dt in vis]
-            vis += [(255, 0)]          # cell outlines stay visible
-            # Calibre-style label declutter: count the skeleton texts
-            # inside the view (capped) and draw text only if few
-            # enough to read. A sparse chip (a few dozen block names)
-            # always shows them; a label-dense chip's overview would
-            # overflow the budget - text stays off until you zoom in
-            # far enough that the viewport holds fewer than the
-            # budget. Outline boxes and straps (polygons) always show.
-            skel_renderer.set_text_visible(_skel_text_fits(
-                skel_renderer, x0, y0, x1, y1))
-            skel_renderer.render_png(tmp, x0, y0, x1, y1,
-                                     job["w"], job["h"], visible=vis)
-            tiles_n = 0
-        elif getattr(cache, "vfs_client", None):
+        if getattr(cache, "vfs_client", None):
             return _svc_render_vfs(cache, mosaic, renderer, tmp,
                                    job, req, res, newer, wait_ms,
                                    t0)
@@ -351,7 +300,7 @@ def _svc_render(cache, mosaic, renderer, lod, skel_renderer, tmp, job,
                "draw_ms": round(t_draw * 1000),
                "wait_ms": wait_ms, **cut_kv,
                "ms": round((time.perf_counter() - t0) * 1000)}
-        if scope != "skel" and drawn is not None:
+        if drawn is not None:
             out["drawn"] = drawn
         res.put(out)
     except Exception as e:  # keep the service alive
@@ -372,7 +321,7 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
     cut_px = CUT_PX if cut_px is None else max(0.0, float(cut_px))
     vis = job["visible"]
     layers = [tuple(v) for v in vis] if vis is not None else None
-    # live-view labels: reuse the skeleton's (already-loaded) labels,
+    # live-view labels: the sidecar's label rows,
     # filtered to the view and decluttered - so labels appear as you
     # zoom in, Calibre-style, without any text in the pages
     labels = _view_labels(cache, x0, y0, x1, y1, job["w"],
@@ -622,30 +571,10 @@ def _render_service(src, req, res, latest=None):
     except Exception as e:
         res.put({"kind": "error", "msg": f"render service init failed: {e}"})
         return
-    skel_renderer = None
-    sk = cache.meta.get("skeleton")
-    if sk:
-        skel_path = os.path.join(cache.dir, sk["file"])
-        if os.path.isfile(skel_path):
-            try:
-                skel_ly = db.Layout(False)  # read-only: viewer mode
-                skel_ly.read(skel_path)
-                colors2 = dict(colors)
-                for k in range(1, cache_mod.SKEL_DETAIL_LEVELS + 1):
-                    colors2.update(  # detail twins keep the layer color
-                        {(l, d + k * cache_mod.SKEL_DETAIL_DT): col
-                         for (l, d), col in colors.items()})
-                colors2[(255, 0)] = "#93a4ad"
-                skel_renderer = Renderer(skel_ly, skel_ly.top_cell(),
-                                         colors2, hier_offset=1,
-                                         show_texts=True,
-                                         hollow=((255, 0),))
-            except Exception:
-                skel_renderer = None
-    # VFS live view reuses the skeleton's labels (already loaded, <=
-    # 50k budget) - no page text, no build/size cost; see _view_labels
+    # VFS live-view labels come from the build's labels.tsv
+    # (block names + budget selection); see _view_labels
     if cache.meta.get("vfs"):
-        cache._live_labels = _load_skel_labels(skel_renderer)
+        cache._live_labels = _load_sidecar_labels(cache)
         # coverage bitplanes (density overview for cut/wide views)
         cache._coverage = None
         covp = os.path.join(cache.dir, "design.ovc")
@@ -685,7 +614,7 @@ def _render_service(src, req, res, latest=None):
                 _svc_pick(cache, mosaic, picks[-1], res)
             renders = [j for j in jobs if j["kind"] == "render"]
             if renders:  # newest by gen: requeued aborted jobs must lose
-                _svc_render(cache, mosaic, renderer, lod, skel_renderer,
+                _svc_render(cache, mosaic, renderer, lod,
                             tmp, max(renders, key=lambda j: j["gen"]),
                             req, res, latest)
     except (KeyboardInterrupt, EOFError, OSError):
