@@ -17,7 +17,7 @@ use floe_oasis::doc::Rep;
 use floe_ovm::{bit_test, masks_intersect, BBox, Ovm, PBVH_NONE};
 use floe_tiler::Xf;
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet};
 
 /// remaining-depth sentinel: no depth truncation below this WC
 pub const REM_FULL: u32 = u32::MAX;
@@ -513,7 +513,17 @@ impl<'a> Hier<'a> {
         // ---- children (r = 0 truncates: pages only, no frames -
         // flat parity, par.2.5)
         if r != 0 && cell.bvh_count != 0 {
-            let mut cand: BTreeSet<u64> = BTreeSet::new();
+            // Inline triage during the walk (field fix, 9.8G class:
+            // 184M placements). Collecting every visible instance
+            // into a set BEFORE cut classification made a wide view
+            // O(visible instances) in MEMORY - tens of millions of
+            // entries - before a single frame emitted. Below-cut
+            // children now resolve inline with no-alloc accessors;
+            // only ABOVE-cut edges (few, bounded by real content)
+            // are gathered for the multi-box contribution pass.
+            let cut = self.cut;
+            let mut edges: BTreeSet<u64> = BTreeSet::new();
+            let mut framed: HashSet<u64> = HashSet::new();
             for b in &boxes {
                 let mut stack = vec![cell.bvh_start];
                 while let Some(ni) = stack.pop() {
@@ -522,18 +532,58 @@ impl<'a> Hier<'a> {
                     if !node.bbox.intersects(b) {
                         continue;
                     }
-                    if node.leaf {
-                        for k in 0..node.count as u64 {
-                            cand.insert(node.first as u64 + k);
-                        }
-                    } else {
+                    if !node.leaf {
                         for k in 0..node.count as u32 {
                             stack.push(node.first + k);
                         }
+                        continue;
+                    }
+                    for k in 0..node.count as u64 {
+                        let pli = node.first as u64 + k;
+                        if edges.contains(&pli)
+                            || framed.contains(&pli)
+                        {
+                            continue;
+                        }
+                        let h = self.v.place_head(pli);
+                        let rb = self.v.cell_rbbox(h.child);
+                        if rb.is_empty() {
+                            framed.insert(pli);
+                            continue;
+                        }
+                        let cw = (rb.x1 - rb.x0).max(0) as u64;
+                        let chh = (rb.y1 - rb.y0).max(0) as u64;
+                        if cw < cut && chh < cut {
+                            // below-cut: frame inline, never enters
+                            // a candidate set. Once the frame cap
+                            // is hit we stop deduping too - the set
+                            // must not grow with the visit count.
+                            self.st.cull_size += 1;
+                            if self.frames_total
+                                < self.opts.frame_cap
+                            {
+                                framed.insert(pli);
+                                self.frame_below_cut(
+                                    &mut wc, pli, &h, &rb, &boxes,
+                                );
+                            }
+                            continue;
+                        }
+                        if !masks_intersect(
+                            self.v.bitset(
+                                self.v.cell_lmask_rec(h.child),
+                            ),
+                            &self.req.vis,
+                        ) {
+                            self.st.cull_layer += 1;
+                            framed.insert(pli);
+                            continue;
+                        }
+                        edges.insert(pli);
                     }
                 }
             }
-            for pli in cand {
+            for pli in edges {
                 self.place_edge(&mut wc, r, pli, &boxes);
             }
         }
@@ -578,6 +628,86 @@ impl<'a> Hier<'a> {
         }
     }
 
+    /// below-cut child -> outline frame. Per-member outlines
+    /// (rect+rep) are the accurate form, but below a ~2-cut member
+    /// pitch they fuse into a solid wash that BURIES real geometry,
+    /// and huge sparse pts lists would re-materialize O(count)
+    /// offsets per plan - both degrade to the whole-rep footprint
+    /// box (flat parity). Footprint visibility test via the rep
+    /// extent (zero-copy for pts).
+    fn frame_below_cut(
+        &mut self,
+        wc: &mut WsCell,
+        pli: u64,
+        h: &floe_ovm::PlaceHead,
+        rb: &BBox,
+        boxes: &[BBox],
+    ) {
+        let t0 = Xf::place(h.x, h.y, h.rot, h.flip);
+        let b0 = xf_bbox(&t0, rb);
+        let fuse_pitch = 2 * self.cut.max(1);
+        let (rect, rep, fp) = match h.kind {
+            0 => (b0, Rep::One, b0),
+            1 => {
+                let ov = grid_ovis(
+                    0,
+                    h.na as i64 - 1,
+                    0,
+                    h.nb as i64 - 1,
+                    h.va,
+                    h.vb,
+                );
+                let fp = grow_by_offsets(&b0, &ov);
+                let pv = |v: (i64, i64)| {
+                    v.0.unsigned_abs().max(v.1.unsigned_abs())
+                };
+                let mut pitch = u64::MAX;
+                if h.na > 1 {
+                    pitch = pitch.min(pv(h.va));
+                }
+                if h.nb > 1 {
+                    pitch = pitch.min(pv(h.vb));
+                }
+                if pitch != u64::MAX && pitch < fuse_pitch {
+                    (fp, Rep::One, fp)
+                } else {
+                    let rep = Rep::Grid {
+                        na: h.na as u64,
+                        nb: h.nb as u64,
+                        va: h.va,
+                        vb: h.vb,
+                    };
+                    (b0, rep, fp)
+                }
+            }
+            _ => {
+                let pr = self.v.pts_ref(pli).expect("pts kind");
+                let ext = pr.extent();
+                let fp = grow_by_offsets(&b0, &ext);
+                let area = (ext.x1 - ext.x0).max(1) as u128
+                    * (ext.y1 - ext.y0).max(1) as u128;
+                let c2 = fuse_pitch as u128;
+                if pr.count as u128 * c2 * c2 > area
+                    || pr.count > self.opts.pts_full_rep
+                {
+                    (fp, Rep::One, fp)
+                } else {
+                    let mut pts =
+                        Vec::with_capacity(pr.count as usize);
+                    for s in 0..pr.count {
+                        pts.push(pr.pt(s));
+                    }
+                    (b0, Rep::Pts(pts), fp)
+                }
+            }
+        };
+        if boxes.iter().any(|b| fp.intersects(b)) {
+            wc.frames.push((rect, rep));
+            self.frames_total += 1;
+            self.st.frame_rects += 1;
+        }
+    }
+
     fn place_edge(
         &mut self,
         wc: &mut WsCell,
@@ -601,86 +731,16 @@ impl<'a> Hier<'a> {
         let b0 = xf_bbox(&t0, &child.rbbox);
         // cell-level cut (par.2.4): local dims, swap-invariant under
         // quarter turns, so above/below-cut is a property of the
-        // CELL, never of the member
+        // CELL, never of the member. (The BVH walk triages most
+        // below-cut placements inline before this fn is reached.)
         let cw = (child.rbbox.x1 - child.rbbox.x0).max(0) as u64;
         let ch = (child.rbbox.y1 - child.rbbox.y0).max(0) as u64;
         if cw < self.cut && ch < self.cut {
             self.st.cull_size += 1;
             if self.frames_total < self.opts.frame_cap {
-                // outline instead of content. Per-member outlines
-                // (rect+rep) are the accurate form, but below a
-                // ~2-cut member pitch they fuse into a solid wash
-                // that BURIES real geometry - degrade those to the
-                // whole-rep footprint box (flat parity). Footprint
-                // test via the rep extent (zero-copy for pts).
-                let fuse_pitch = 2 * self.cut.max(1);
-                let (rect, rep, fp) = match h.kind {
-                    0 => (b0, Rep::One, b0),
-                    1 => {
-                        let ov = grid_ovis(
-                            0,
-                            h.na as i64 - 1,
-                            0,
-                            h.nb as i64 - 1,
-                            h.va,
-                            h.vb,
-                        );
-                        let fp = grow_by_offsets(&b0, &ov);
-                        let pv = |v: (i64, i64)| {
-                            v.0.unsigned_abs().max(v.1.unsigned_abs())
-                        };
-                        let mut pitch = u64::MAX;
-                        if h.na > 1 {
-                            pitch = pitch.min(pv(h.va));
-                        }
-                        if h.nb > 1 {
-                            pitch = pitch.min(pv(h.vb));
-                        }
-                        if pitch != u64::MAX && pitch < fuse_pitch {
-                            (fp, Rep::One, fp)
-                        } else {
-                            let rep = Rep::Grid {
-                                na: h.na as u64,
-                                nb: h.nb as u64,
-                                va: h.va,
-                                vb: h.vb,
-                            };
-                            (b0, rep, fp)
-                        }
-                    }
-                    _ => {
-                        let pr =
-                            self.v.pts_ref(pli).expect("pts kind");
-                        let ext = pr.extent();
-                        let fp = grow_by_offsets(&b0, &ext);
-                        // fuse when members would blur together
-                        // (mean spacing from extent density) OR when
-                        // the list is simply huge - a sparse
-                        // million-point frame would re-materialize
-                        // O(count) offsets per plan (review finding)
-                        let area = (ext.x1 - ext.x0).max(1) as u128
-                            * (ext.y1 - ext.y0).max(1) as u128;
-                        let c2 = fuse_pitch as u128;
-                        if pr.count as u128 * c2 * c2 > area
-                            || pr.count > self.opts.pts_full_rep
-                        {
-                            (fp, Rep::One, fp)
-                        } else {
-                            let mut pts = Vec::with_capacity(
-                                pr.count as usize,
-                            );
-                            for s in 0..pr.count {
-                                pts.push(pr.pt(s));
-                            }
-                            (b0, Rep::Pts(pts), fp)
-                        }
-                    }
-                };
-                if boxes.iter().any(|b| fp.intersects(b)) {
-                    wc.frames.push((rect, rep));
-                    self.frames_total += 1;
-                    self.st.frame_rects += 1;
-                }
+                self.frame_below_cut(
+                    wc, pli, &h, &child.rbbox, boxes,
+                );
             }
             return;
         }

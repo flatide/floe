@@ -1133,6 +1133,19 @@ impl Ovm {
         }
     }
 
+    /// no-alloc cell fields for the planner's hot triage path
+    /// (Ovm::cell materializes the name String - 50M-instance walks
+    /// must not allocate per visit)
+    pub fn cell_rbbox(&self, i: u32) -> BBox {
+        assert!(i < self.n_cells, "cell index");
+        gbox(&self.sec(SEC_CELLS)[i as usize * CELL_LEN..], 48)
+    }
+
+    pub fn cell_lmask_rec(&self, i: u32) -> u32 {
+        assert!(i < self.n_cells, "cell index");
+        g32(&self.sec(SEC_CELLS)[i as usize * CELL_LEN..], 108)
+    }
+
     pub fn place(&self, i: u64) -> PlaceV {
         assert!(i < self.n_places, "place index");
         let sec = self.sec(SEC_PLACES);
