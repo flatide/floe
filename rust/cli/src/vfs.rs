@@ -172,12 +172,14 @@ pub fn vfs_cmd(args: &[String]) {
             eprintln!("[vfs] FLOE_KILL_AT=marker-deleted");
             std::process::exit(9);
         }
-        let ovm_bytes = build(&doc, size, mtime, &outdir, jobs);
+        let (ovm_bytes, rbb, lmems) =
+            build(&doc, size, mtime, &outdir, jobs);
         if kill_at.as_deref() == Some("ovp-written") {
             eprintln!("[vfs] FLOE_KILL_AT=ovp-written");
             std::process::exit(9);
         }
-        emit_viewer_side(&doc, &src, size, mtime, &outdir);
+        emit_viewer_side(&doc, &src, size, mtime, &outdir, &rbb,
+                         &lmems);
         if coverage {
             write_coverage(&doc, &outdir, jobs);
         }
@@ -229,9 +231,51 @@ fn emit_viewer_side(
     size: u64,
     mtime: u64,
     outdir: &str,
+    rbb: &[Option<(i64, i64, i64, i64)>],
+    lmems: &[u64],
 ) {
     let t0 = std::time::Instant::now();
+    // staged heartbeat: these are serial passes and on a 9.8G-class
+    // chip each takes minutes - silence here read as a hang (field
+    // report during M4)
+    let stage = std::sync::Arc::new(std::sync::Mutex::new(
+        "collecting texts",
+    ));
+    let hb_on = std::sync::Arc::new(
+        std::sync::atomic::AtomicBool::new(true),
+    );
+    {
+        let stage = stage.clone();
+        let hb_on = hb_on.clone();
+        std::thread::spawn(move || {
+            use std::sync::atomic::Ordering::Relaxed;
+            let t = std::time::Instant::now();
+            let mut last = 0u64;
+            loop {
+                std::thread::sleep(
+                    std::time::Duration::from_millis(200),
+                );
+                if !hb_on.load(Relaxed) {
+                    return;
+                }
+                let e = t.elapsed().as_secs();
+                if e >= last + 5 {
+                    last = e;
+                    eprintln!(
+                        "[vfs] viewer-side: {}... ({}s, rss {})",
+                        *stage.lock().unwrap(),
+                        e,
+                        rss()
+                    );
+                }
+            }
+        });
+    }
+    let set_stage = |s: &'static str| {
+        *stage.lock().unwrap() = s;
+    };
     let entries = floe_tiler::skel::collect_all_texts(doc);
+    set_stage("building skeleton");
     let sk = floe_tiler::skel::build_skeleton(
         doc,
         &entries,
@@ -272,8 +316,10 @@ fn emit_viewer_side(
     std::fs::write(format!("{}/texts.tsv", outdir), tsv)
         .expect("write sidecar");
 
-    // meta.json (VFS flavor)
-    let rbb = cell_bboxes_full(doc);
+    // meta.json (VFS flavor). rbb comes from the build (the
+    // recursive-bbox pass ran there once already - re-walking every
+    // record serially here doubled the silent tail on big chips)
+    set_stage("meta");
     let bbox = rbb[doc.top].unwrap_or((0, 0, 0, 0));
     let dbu = 1.0 / doc.unit;
     let n = {
@@ -285,19 +331,12 @@ fn emit_viewer_side(
     let th = ((bbox.3 - bbox.1) as f64 / n as f64).ceil() as i64;
     let mut stored: std::collections::HashMap<(u32, u32), u64> =
         std::collections::HashMap::new();
+    for (i, &(l, d)) in doc.layer_order.iter().enumerate() {
+        if lmems[i] > 0 {
+            stored.insert((l, d), lmems[i]);
+        }
+    }
     for cell in &doc.cells {
-        for r in &cell.rects {
-            *stored.entry((r.layer, r.dt)).or_default() +=
-                r.rep.members();
-        }
-        for p in &cell.polys {
-            *stored.entry((p.layer, p.dt)).or_default() +=
-                p.rep.members();
-        }
-        for pa in &cell.paths {
-            *stored.entry((pa.layer, pa.dt)).or_default() +=
-                pa.rep.members();
-        }
         for t in &cell.texts {
             *stored.entry((t.layer, t.dt)).or_default() +=
                 t.rep.members();
@@ -375,6 +414,7 @@ fn emit_viewer_side(
     );
     std::fs::write(format!("{}/meta.json", outdir), meta)
         .expect("write meta");
+    hb_on.store(false, std::sync::atomic::Ordering::Relaxed);
     eprintln!(
         "[vfs] skeleton {} shapes + {} labels, sidecar {} entries, \
          meta ({:.1}s)",
@@ -804,7 +844,7 @@ fn build(
     mtime: u64,
     outdir: &str,
     jobs: usize,
-) -> Vec<u8> {
+) -> (Vec<u8>, Vec<Option<(i64, i64, i64, i64)>>, Vec<u64>) {
     let t0 = std::time::Instant::now();
     let n = doc.cells.len();
     eprintln!("[vfs] build: recursive bbox ({} cells)...", n);
@@ -1304,7 +1344,7 @@ fn build(
         fmt_size(ovm_bytes.len() as u64),
         t0.elapsed().as_secs_f64()
     );
-    ovm_bytes
+    (ovm_bytes, rbb, lmems)
 }
 
 fn pts_bbox(pts: &[(i64, i64)]) -> BBox {
