@@ -85,6 +85,7 @@ fn main() {
              floe-index index <file.oas> [outdir] [--mem GB] \
              [--jobs N] [--tile-bytes N] [--bands um,um,um]\n       \
              floe-index vfs <file.oas> [outdir] [--jobs N] \
+             [--plan-batch N] [--encode-batch N] \
              [--coverage | --coverage-only]\n       \
              floe-index plan <outdir> --view x0,y0,x1,y1 \
              [--px-per-um N] [--cut-px N] [--layers a/b,..] \

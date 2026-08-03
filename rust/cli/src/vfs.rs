@@ -18,6 +18,15 @@ use floe_tiler::{path_bbox, xf_rep, Xf};
 use std::io::Write;
 
 const PAGE_TARGET_BYTES: usize = 1 << 20; // pre-encode estimate
+/// Encoded payloads are retained for at most one ordered batch. The old
+/// implementation encoded every page before writing design.ovp, so peak RSS
+/// included the complete payload file (tens of GB on the 9.8G asset).
+const ENCODE_BATCH_PER_JOB: usize = 2;
+const ENCODE_BATCH_MAX: usize = 256;
+/// Completed CellPlans retain fragment arenas and Morton-prepared placement
+/// points. Bound the default independently from CPU count; `--plan-batch`
+/// remains available for hosts that deliberately trade RAM for throughput.
+const PLAN_BATCH_MAX: usize = 16;
 const BVH_LEAF: usize = 8;
 /// pages per page-BVH leaf, and the run size at or below which a
 /// (cell,layer) run gets no BVH at all (linear scan, root = NONE)
@@ -30,6 +39,8 @@ pub fn vfs_cmd(args: &[String]) {
     let mut src: Option<String> = None;
     let mut outdir: Option<String> = None;
     let mut jobs: Option<usize> = None;
+    let mut encode_batch: Option<usize> = None;
+    let mut plan_batch: Option<usize> = None;
     // coverage bitplanes are optional: off by default (extra build
     // time, and the viewer defaults to coverage off), --coverage to
     // include, --coverage-only to add design.ovc to an existing cache
@@ -40,6 +51,24 @@ pub fn vfs_cmd(args: &[String]) {
         match args[i].as_str() {
             "--jobs" => {
                 jobs = Some(args[i + 1].parse().expect("jobs"));
+                i += 2;
+            }
+            "--encode-batch" => {
+                encode_batch = Some(
+                    args[i + 1]
+                        .parse::<usize>()
+                        .expect("encode batch")
+                        .max(1),
+                );
+                i += 2;
+            }
+            "--plan-batch" => {
+                plan_batch = Some(
+                    args[i + 1]
+                        .parse::<usize>()
+                        .expect("plan batch")
+                        .max(1),
+                );
                 i += 2;
             }
             "--coverage" => {
@@ -67,6 +96,13 @@ pub fn vfs_cmd(args: &[String]) {
             .map(|n| n.get())
             .unwrap_or(4)
     });
+    let encode_batch = encode_batch.unwrap_or_else(|| {
+        jobs.max(1)
+            .saturating_mul(ENCODE_BATCH_PER_JOB)
+            .min(ENCODE_BATCH_MAX)
+    });
+    let plan_batch =
+        plan_batch.unwrap_or_else(|| jobs.max(1).min(PLAN_BATCH_MAX));
     let t0 = std::time::Instant::now();
     eprintln!("[vfs] reading {}...", src);
     let data = std::fs::read(&src).expect("read src");
@@ -112,7 +148,18 @@ pub fn vfs_cmd(args: &[String]) {
             }
         });
     }
-    let doc = match floe_oasis::doc::parse_doc_parallel(&data, jobs) {
+    let doc = match floe_oasis::doc::parse_doc_parallel_phased(
+        &data,
+        jobs,
+        |_| {
+            eprintln!(
+                "[vfs] syntax parsed in {:.1}s (source still resident, \
+                 rss {})",
+                t1.elapsed().as_secs_f64(),
+                rss()
+            );
+        },
+    ) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("parse {}: {}", src, e);
@@ -120,14 +167,20 @@ pub fn vfs_cmd(args: &[String]) {
         }
     };
     parsing.store(false, std::sync::atomic::Ordering::Relaxed);
+    eprintln!(
+        "[vfs] repetition normalization complete in {:.1}s \
+         (rss {})",
+        doc.norm_s,
+        rss()
+    );
     drop(data);
     eprintln!(
-        "[vfs] parsed {} cells in {:.1}s ({} threads, \
-         grid-normalize {:.1}s)",
+        "[vfs] parsed {} cells in {:.1}s ({} threads, source released, \
+         rss {})",
         doc.cells.len(),
         t1.elapsed().as_secs_f64(),
         jobs,
-        doc.norm_s
+        rss()
     );
     std::fs::create_dir_all(&outdir).expect("mkdir outdir");
     if coverage_only {
@@ -167,8 +220,15 @@ pub fn vfs_cmd(args: &[String]) {
             eprintln!("[vfs] FLOE_KILL_AT=marker-deleted");
             std::process::exit(9);
         }
-        let (ovm_bytes, rbb, lmems) =
-            build(&doc, size, mtime, &outdir, jobs);
+        let (ovm_bytes, rbb, lmems) = build(
+            &doc,
+            size,
+            mtime,
+            &outdir,
+            jobs,
+            encode_batch,
+            plan_batch,
+        );
         if kill_at.as_deref() == Some("ovp-written") {
             eprintln!("[vfs] FLOE_KILL_AT=ovp-written");
             std::process::exit(9);
@@ -457,9 +517,16 @@ enum Frag {
     Grid { i0: u64, i1: u64, j0: u64, j1: u64 },
 }
 
-/// per-cell scratch for fragmented Pts reps: (shape box at the rep
-/// origin, member offsets - full list copied ONCE on first split)
-type Arena = Vec<(BBox, Vec<(i64, i64)>)>;
+/// Per-record scratch for fragmented Pts reps. The source offsets stay in the
+/// parsed Doc; only a u32 permutation is partitioned in place. The former
+/// coordinate copy cost 16 bytes/member and was retained for every planned
+/// cell, while this costs 4 bytes/member and is released after one cell batch.
+struct PtsArena {
+    shape_box: BBox,
+    order: Vec<u32>,
+}
+
+type Arena = Vec<PtsArena>;
 
 #[derive(Default, Clone, Copy)]
 struct SplitStats {
@@ -547,9 +614,14 @@ fn grid_frag_bbox(
     bb
 }
 
-fn pts_range_bbox(sb: &BBox, pts: &[(i64, i64)]) -> BBox {
+fn pts_order_bbox(
+    sb: &BBox,
+    pts: &[(i64, i64)],
+    order: &[u32],
+) -> BBox {
     let mut bb = BBox::EMPTY;
-    for &(ox, oy) in pts {
+    for &i in order {
+        let (ox, oy) = pts[i as usize];
         bb.grow(&BBox {
             x0: sb.x0 + ox,
             y0: sb.y0 + oy,
@@ -639,21 +711,32 @@ fn frag_split(
                         _ => unreachable!(),
                     };
                     let sb = rec_shape_box(cell, r);
-                    arena.push((sb, pts.clone()));
+                    let count = narrow_u32(
+                        pts.len() as u64,
+                        "fragment pts count",
+                    );
+                    arena.push(PtsArena {
+                        shape_box: sb,
+                        order: (0..count).collect(),
+                    });
                     (arena.len() - 1, 0, pts.len())
                 }
             };
-            let (sb, all) = {
+            let pts = match rec_rep(cell, r) {
+                Rep::Pts(p) => p,
+                _ => unreachable!(),
+            };
+            let (sb, order) = {
                 let e = &mut arena[a];
-                (e.0, &mut e.1)
+                (e.shape_box, &mut e.order)
             };
             let sc2 = axis_c2(&sb, ax);
             let off_ax =
                 |p: (i64, i64)| if ax == 0 { p.0 } else { p.1 };
             let mut m = lo;
             for k in lo..hi {
-                if 2 * off_ax(all[k]) + sc2 < plane2 {
-                    all.swap(k, m);
+                if 2 * off_ax(pts[order[k] as usize]) + sc2 < plane2 {
+                    order.swap(k, m);
                     m += 1;
                 }
             }
@@ -662,17 +745,20 @@ fn frag_split(
             }
             let base =
                 r.bytes.saturating_sub(rep_est_n(r.members));
-            let bl = pts_range_bbox(&sb, &all[lo..m]);
-            let br = pts_range_bbox(&sb, &all[m..hi]);
+            let bl = pts_order_bbox(&sb, pts, &order[lo..m]);
+            let br = pts_order_bbox(&sb, pts, &order[m..hi]);
             let mk = |bb: BBox, s: usize, e: usize| {
                 child(
                     bb,
                     (e - s) as u64,
                     base.saturating_add(rep_est_n((e - s) as u64)),
                     Frag::Pts {
-                        arena: a as u32,
-                        lo: s as u32,
-                        hi: e as u32,
+                        arena: narrow_u32(
+                            a as u64,
+                            "fragment arena index",
+                        ),
+                        lo: narrow_u32(s as u64, "fragment pts index"),
+                        hi: narrow_u32(e as u64, "fragment pts index"),
                     },
                 )
             };
@@ -856,16 +942,24 @@ fn frag_rep(
     match *frag {
         Frag::Whole => None,
         Frag::Pts { arena: a, lo, hi } => {
-            let pts = &arena[a as usize].1[lo as usize..hi as usize];
-            let (bx, by) = pts[0];
-            if pts.len() == 1 {
+            let src = match rep {
+                Rep::Pts(p) => p,
+                _ => unreachable!("pts frag on non-pts"),
+            };
+            let order = &arena[a as usize].order
+                [lo as usize..hi as usize];
+            let (bx, by) = src[order[0] as usize];
+            if order.len() == 1 {
                 return Some(((bx, by), Rep::One));
             }
-            let sub: Vec<(i64, i64)> = pts
+            let sub: Vec<(i64, i64)> = order
                 .iter()
-                .map(|&(x, y)| (x - bx, y - by))
+                .map(|&i| {
+                    let (x, y) = src[i as usize];
+                    (x - bx, y - by)
+                })
                 .collect();
-            Some(((bx, by), Rep::Pts(sub)))
+            Some(((bx, by), Rep::Pts(sub.into())))
         }
         Frag::Grid { i0, i1, j0, j1 } => {
             let (va, vb) = match rep {
@@ -949,6 +1043,141 @@ fn encode_job(
     };
     floe_oasis::write::write_tree_sized(&[wc], doc.unit)
         .expect("page payload")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_encoded_page(
+    b: &mut Builder,
+    ovp: &mut std::io::BufWriter<std::fs::File>,
+    job: &PageJob,
+    payload: &[u8],
+    raw: u64,
+    ovp_off: &mut u64,
+    pages_bytes: &mut u64,
+) {
+    std::io::Write::write_all(ovp, payload).expect("write ovp");
+    b.page(
+        narrow_u32(job.ci as u64, "cell index"),
+        job.li,
+        job.seq,
+        &job.bbox,
+        *ovp_off,
+        payload.len() as u64,
+        raw,
+        job.recs.len() as u64,
+        job.members,
+        job.max_w.max(0) as u64,
+        job.max_h.max(0) as u64,
+    );
+    *ovp_off = ovp_off
+        .checked_add(payload.len() as u64)
+        .expect("limit exceeded: ovp bytes");
+    *pages_bytes = pages_bytes
+        .checked_add(payload.len() as u64)
+        .expect("limit exceeded: page payload bytes");
+}
+
+/// Encode and commit one consecutive cell-plan batch. `page_jobs` is already
+/// in global page order; result slots restore that order after parallel work.
+/// The task/result channels and the result vector together own at most one
+/// batch of payloads, independent of the complete design page count.
+#[allow(clippy::too_many_arguments)]
+fn encode_write_pages(
+    doc: &Doc,
+    page_jobs: &[PageJob],
+    arenas: &[std::sync::Arc<Arena>],
+    arena_cell_base: usize,
+    workers: usize,
+    batch_limit: usize,
+    b: &mut Builder,
+    ovp: &mut std::io::BufWriter<std::fs::File>,
+    ovp_off: &mut u64,
+    pages_bytes: &mut u64,
+    encoded_done: &std::sync::atomic::AtomicUsize,
+) {
+    let ptotal = page_jobs.len();
+    if ptotal == 0 {
+        return;
+    }
+    let arena_for = |job: &PageJob| -> &Arena {
+        let ai = job
+            .ci
+            .checked_sub(arena_cell_base)
+            .expect("page cell before arena batch");
+        arenas.get(ai).expect("page cell after arena batch")
+    };
+    if workers <= 1 || ptotal == 1 {
+        for job in page_jobs {
+            let (payload, raw) = encode_job(doc, job, arena_for(job));
+            write_encoded_page(
+                b,
+                ovp,
+                job,
+                &payload,
+                raw,
+                ovp_off,
+                pages_bytes,
+            );
+            encoded_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        return;
+    }
+
+    let result_batch = batch_limit.max(1).min(ptotal);
+    std::thread::scope(|s| {
+        let (task_tx, task_rx) =
+            std::sync::mpsc::sync_channel::<usize>(result_batch);
+        let task_rx = std::sync::Arc::new(std::sync::Mutex::new(task_rx));
+        let (result_tx, result_rx) = std::sync::mpsc::sync_channel::<
+            (usize, Vec<u8>, u64),
+        >(result_batch);
+        for _ in 0..workers.min(ptotal) {
+            let task_rx = task_rx.clone();
+            let result_tx = result_tx.clone();
+            let arena_for = &arena_for;
+            s.spawn(move || loop {
+                let i = match task_rx.lock().unwrap().recv() {
+                    Ok(i) => i,
+                    Err(_) => return,
+                };
+                let job = &page_jobs[i];
+                let (payload, raw) = encode_job(doc, job, arena_for(job));
+                if result_tx.send((i, payload, raw)).is_err() {
+                    return;
+                }
+            });
+        }
+        drop(result_tx);
+        for base in (0..ptotal).step_by(result_batch) {
+            let end = (base + result_batch).min(ptotal);
+            for i in base..end {
+                task_tx.send(i).expect("encode task worker");
+            }
+            let mut results: Vec<Option<(Vec<u8>, u64)>> =
+                (base..end).map(|_| None).collect();
+            for _ in base..end {
+                let (i, payload, raw) =
+                    result_rx.recv().expect("encode result worker");
+                assert!(i >= base && i < end, "encode result outside batch");
+                results[i - base] = Some((payload, raw));
+            }
+            for (i, slot) in (base..end).zip(results) {
+                let (payload, raw) = slot.expect("encode result slot");
+                write_encoded_page(
+                    b,
+                    ovp,
+                    &page_jobs[i],
+                    &payload,
+                    raw,
+                    ovp_off,
+                    pages_bytes,
+                );
+                encoded_done
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        drop(task_tx);
+    });
 }
 
 /// resident set size for the build heartbeat (Linux /proc; "?"
@@ -1276,6 +1505,8 @@ fn build(
     mtime: u64,
     outdir: &str,
     jobs: usize,
+    encode_batch: usize,
+    plan_batch: usize,
 ) -> (Vec<u8>, Vec<Option<(i64, i64, i64, i64)>>, Vec<u64>) {
     let t0 = std::time::Instant::now();
     let n = doc.cells.len();
@@ -1495,198 +1726,293 @@ fn build(
     // scan-parity lower bound: stored >= source.)
     let _ = &lrecs;
 
-    // ---- per-cell plans (instance BVH + page splitting) computed in
-    // PARALLEL; the heavy per-record work leaves 31 cores idle when
-    // serial. build_cell_plan is a pure fn of (doc, rbb, lidx), so
-    // work-steal cells across threads into per-cell slots.
-    let pslots: Vec<std::sync::OnceLock<CellPlan>> =
-        (0..n).map(|_| std::sync::OnceLock::new()).collect();
-    {
-        let tp = std::time::Instant::now();
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        let done = std::sync::atomic::AtomicUsize::new(0);
-        let nthreads = jobs.max(1).min(n.max(1));
-        std::thread::scope(|s| {
-            {
-                let done = &done;
-                s.spawn(move || {
-                    use std::sync::atomic::Ordering::Relaxed;
-                    let mut last = tp;
-                    loop {
-                        std::thread::sleep(
-                            std::time::Duration::from_millis(200),
-                        );
-                        if done.load(Relaxed) >= n {
-                            return;
-                        }
-                        if last.elapsed().as_secs_f64() >= 5.0 {
-                            last = std::time::Instant::now();
-                            eprintln!(
-                                "[vfs] build: cell plans {}/{} \
-                                 ({}s, rss {})",
-                                done.load(Relaxed),
-                                n,
-                                tp.elapsed().as_secs(),
-                                rss()
-                            );
-                        }
-                    }
-                });
+    // ---- bounded cell-plan + page-encode pipeline. The old phase barrier
+    // retained every CellPlan, fragmented-Pts Arena and prepared placement
+    // list before the first page was encoded (443 GB on the 9.8G asset).
+    // Consecutive batches preserve cell/page order but release all batch
+    // scratch immediately after its pages reach design.ovp.
+    let plan_batch = plan_batch.max(1).min(n.max(1));
+    let encode_workers = jobs.max(1);
+    let ovp_path = format!("{}/design.ovp", outdir);
+    let mut ovp = std::io::BufWriter::new(
+        std::fs::File::create(&ovp_path).expect("create ovp"),
+    );
+    let mut ovp_off = 0u64;
+    let mut pages_bytes = 0u64;
+    let mut pages_total = 0usize;
+    let mut lrecs_stored = vec![0u64; nl];
+    let mut split_total = SplitStats::default();
+    let planned_cells = std::sync::Arc::new(
+        std::sync::atomic::AtomicUsize::new(0),
+    );
+    let planned_pages = std::sync::Arc::new(
+        std::sync::atomic::AtomicUsize::new(0),
+    );
+    let encoded_pages = std::sync::Arc::new(
+        std::sync::atomic::AtomicUsize::new(0),
+    );
+    let pipeline_on = std::sync::Arc::new(
+        std::sync::atomic::AtomicBool::new(true),
+    );
+    let pipeline_start = std::time::Instant::now();
+    let heartbeat = {
+        let planned_cells = planned_cells.clone();
+        let planned_pages = planned_pages.clone();
+        let encoded_pages = encoded_pages.clone();
+        let pipeline_on = pipeline_on.clone();
+        std::thread::spawn(move || {
+            use std::sync::atomic::Ordering::Relaxed;
+            let mut last = 0u64;
+            loop {
+                std::thread::sleep(
+                    std::time::Duration::from_millis(200),
+                );
+                if !pipeline_on.load(Relaxed) {
+                    return;
+                }
+                let elapsed = pipeline_start.elapsed().as_secs();
+                if elapsed >= last + 5 {
+                    last = elapsed;
+                    eprintln!(
+                        "[vfs] build: pipeline cells {}/{} pages \
+                         planned={} encoded={} ({}s, rss {})",
+                        planned_cells.load(Relaxed),
+                        n,
+                        planned_pages.load(Relaxed),
+                        encoded_pages.load(Relaxed),
+                        elapsed,
+                        rss()
+                    );
+                }
             }
-            let pslots = &pslots;
-            let next = &next;
-            let done = &done;
-            let rbb = &rbb;
-            let lidx = &lidx;
+        })
+    };
+    eprintln!(
+        "[vfs] build: bounded pipeline {} cells ({} workers, \
+         plan batch {}, encode batch {})...",
+        n,
+        jobs.max(1),
+        plan_batch,
+        encode_batch.max(1)
+    );
+    let mut plan_elapsed = std::time::Duration::ZERO;
+    let mut encode_elapsed = std::time::Duration::ZERO;
+    for cell_base in (0..n).step_by(plan_batch) {
+        let cell_end = (cell_base + plan_batch).min(n);
+        let batch_len = cell_end - cell_base;
+        let tp = std::time::Instant::now();
+        let pslots: Vec<std::sync::OnceLock<CellPlan>> =
+            (0..batch_len).map(|_| std::sync::OnceLock::new()).collect();
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|s| {
+            let nthreads = jobs.max(1).min(batch_len);
             for _ in 0..nthreads {
-                s.spawn(move || {
-                    use std::sync::atomic::Ordering::Relaxed;
-                    loop {
-                        let ci = next.fetch_add(1, Relaxed);
-                        if ci >= n {
-                            break;
-                        }
-                        let plan =
-                            build_cell_plan(doc, ci, rbb, lidx, nl);
-                        let _ = pslots[ci].set(plan);
-                        done.fetch_add(1, Relaxed);
+                let pslots = &pslots;
+                let next = &next;
+                let rbb = &rbb;
+                let lidx = &lidx;
+                s.spawn(move || loop {
+                    let local = next.fetch_add(
+                        1,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    if local >= batch_len {
+                        return;
                     }
+                    let ci = cell_base + local;
+                    let plan = build_cell_plan(doc, ci, rbb, lidx, nl);
+                    let _ = pslots[local].set(plan);
                 });
             }
         });
-    }
+        plan_elapsed += tp.elapsed();
 
-    // ---- append plans serially in cell order (memcpy-bound): places
-    // in leaf order, BVH nodes with the two bases fixed up, pages,
-    // deduped bitsets, then the cell record. Same order as the old
-    // single-threaded loop, so the .ovm/.ovp are byte-identical.
-    let mut jobs_list: Vec<PageJob> = Vec::new();
-    let mut arenas_by_cell: Vec<std::sync::Arc<Arena>> =
-        Vec::with_capacity(n);
-    let mut split_total = SplitStats::default();
-    for (ci, slot) in pslots.into_iter().enumerate() {
-        let CellPlan {
-            place_order,
-            bvh,
-            mut pages,
-            pranges,
-            pbvh,
-            pts_prep,
-            arena,
-            split_stats,
-        } = slot.into_inner().expect("cell plan unset");
-        arenas_by_cell.push(arena);
-        split_total.fragments += split_stats.fragments;
-        split_total.oversize_pages += split_stats.oversize_pages;
-        split_total.depth_capped += split_stats.depth_capped;
-        let cell = &doc.cells[ci];
-        let place_base = b.n_places();
-        for &pi in &place_order {
-            let pl = &cell.places[pi as usize];
-            match &pts_prep[pi as usize] {
-                Some(prep) => {
-                    b.place_pts(
-                        pl.cell as u32,
-                        pl.x,
-                        pl.y,
-                        pl.rot,
-                        pl.flip,
-                        prep,
-                    );
-                }
-                None => {
-                    b.place(
-                        pl.cell as u32,
-                        pl.x,
-                        pl.y,
-                        pl.rot,
-                        pl.flip,
-                        &pl.rep,
-                    );
+        // Append metadata in cell order and retain only this batch's page jobs
+        // and fragment arenas for the immediately following encode pass.
+        let mut batch_jobs: Vec<PageJob> = Vec::new();
+        let mut batch_arenas: Vec<std::sync::Arc<Arena>> =
+            Vec::with_capacity(batch_len);
+        for (local, slot) in pslots.into_iter().enumerate() {
+            let ci = cell_base + local;
+            let CellPlan {
+                place_order,
+                bvh,
+                mut pages,
+                pranges,
+                pbvh,
+                pts_prep,
+                arena,
+                split_stats,
+            } = slot.into_inner().expect("cell plan unset");
+            batch_arenas.push(arena);
+            split_total.fragments = split_total
+                .fragments
+                .checked_add(split_stats.fragments)
+                .expect("limit exceeded: fragment count");
+            split_total.oversize_pages = split_total
+                .oversize_pages
+                .checked_add(split_stats.oversize_pages)
+                .expect("limit exceeded: oversize page count");
+            split_total.depth_capped = split_total
+                .depth_capped
+                .checked_add(split_stats.depth_capped)
+                .expect("limit exceeded: depth-capped count");
+            let cell = &doc.cells[ci];
+            let place_base = b.n_places();
+            for &pi in &place_order {
+                let pl = &cell.places[pi as usize];
+                match &pts_prep[pi as usize] {
+                    Some(prep) => {
+                        b.place_pts(
+                            pl.cell as u32,
+                            pl.x,
+                            pl.y,
+                            pl.rot,
+                            pl.flip,
+                            prep,
+                        );
+                    }
+                    None => {
+                        b.place(
+                            pl.cell as u32,
+                            pl.x,
+                            pl.y,
+                            pl.rot,
+                            pl.flip,
+                            &pl.rep,
+                        );
+                    }
                 }
             }
-        }
-        let (bvh_start, bvh_count) = if bvh.is_empty() {
-            (0, 0)
-        } else {
-            let base = b.n_bvh();
-            for &(bb, first, count, leaf) in &bvh {
-                let f = if leaf {
-                    narrow_u32(place_base + first as u64, "place index")
-                } else {
-                    narrow_u32(base as u64 + first as u64, "bvh index")
-                };
-                b.bvh_node(&bb, f, count, leaf);
-            }
-            (base, narrow_u32(bvh.len() as u64, "cell bvh count"))
-        };
-        // page index == job index; phase 3 appends in job order
-        let page_base = jobs_list.len() as u64;
-        let page_start = narrow_u32(page_base, "page count");
-        let page_count =
-            narrow_u32(pages.len() as u64, "cell page count");
-        // page BVH nodes + (cell,layer) runs: cell-local firsts
-        // shift to the global bases here (same fixup pattern as the
-        // instance BVH)
-        let pb_base = b.n_pbvh();
-        for &(bb, first, count, leaf, mw, mh) in &pbvh {
-            let f = if leaf {
-                narrow_u32(page_base + first as u64, "page index")
+            let (bvh_start, bvh_count) = if bvh.is_empty() {
+                (0, 0)
             } else {
-                narrow_u32(
-                    pb_base as u64 + first as u64,
-                    "pbvh index",
+                let base = b.n_bvh();
+                for &(bb, first, count, leaf) in &bvh {
+                    let f = if leaf {
+                        narrow_u32(
+                            place_base + first as u64,
+                            "place index",
+                        )
+                    } else {
+                        narrow_u32(
+                            base as u64 + first as u64,
+                            "bvh index",
+                        )
+                    };
+                    b.bvh_node(&bb, f, count, leaf);
+                }
+                (
+                    base,
+                    narrow_u32(bvh.len() as u64, "cell bvh count"),
                 )
             };
-            b.pbvh_node(&bb, f, count, leaf, mw, mh);
-        }
-        let pr_start = b.n_pranges();
-        for &(li, lo, cnt, root) in &pranges {
-            let r = if root == PBVH_NONE {
-                PBVH_NONE
-            } else {
-                narrow_u32(pb_base as u64 + root as u64, "pbvh index")
-            };
-            b.prange(
-                li,
-                narrow_u32(page_base + lo as u64, "page index"),
-                cnt,
-                r,
+            let page_base = pages_total as u64;
+            let page_start = narrow_u32(page_base, "page count");
+            let page_count =
+                narrow_u32(pages.len() as u64, "cell page count");
+            let pb_base = b.n_pbvh();
+            for &(bb, first, count, leaf, mw, mh) in &pbvh {
+                let f = if leaf {
+                    narrow_u32(page_base + first as u64, "page index")
+                } else {
+                    narrow_u32(
+                        pb_base as u64 + first as u64,
+                        "pbvh index",
+                    )
+                };
+                b.pbvh_node(&bb, f, count, leaf, mw, mh);
+            }
+            let pr_start = b.n_pranges();
+            for &(li, lo, cnt, root) in &pranges {
+                let root = if root == PBVH_NONE {
+                    PBVH_NONE
+                } else {
+                    narrow_u32(
+                        pb_base as u64 + root as u64,
+                        "pbvh index",
+                    )
+                };
+                b.prange(
+                    li,
+                    narrow_u32(page_base + lo as u64, "page index"),
+                    cnt,
+                    root,
+                );
+            }
+            let pr_count =
+                narrow_u32(pranges.len() as u64, "prange count");
+            for job in &pages {
+                let count = &mut lrecs_stored[job.li as usize];
+                *count = count
+                    .checked_add(job.recs.len() as u64)
+                    .expect("limit exceeded: stored layer records");
+            }
+            pages_total = pages_total
+                .checked_add(pages.len())
+                .expect("limit exceeded: page count");
+            batch_jobs.append(&mut pages);
+
+            let mask_d = b.bitset(&dmask[ci]);
+            let mask_r = b.bitset(&rmask[ci]);
+            b.cell(
+                &cell.name,
+                height[ci],
+                rank[ci],
+                &dbox[ci],
+                &win_to_bbox(rbb[ci]),
+                narrow_u32(place_base, "place count"),
+                narrow_u32(
+                    cell.places.len() as u64,
+                    "cell place count",
+                ),
+                page_start,
+                page_count,
+                bvh_start,
+                bvh_count,
+                pr_start,
+                pr_count,
+                mask_d,
+                mask_r,
+                rmembers[ci],
             );
         }
-        let pr_count =
-            narrow_u32(pranges.len() as u64, "prange count");
-        jobs_list.append(&mut pages);
-
-        let mask_d = b.bitset(&dmask[ci]);
-        let mask_r = b.bitset(&rmask[ci]);
-        b.cell(
-            &cell.name,
-            height[ci],
-            rank[ci],
-            &dbox[ci],
-            &win_to_bbox(rbb[ci]),
-            narrow_u32(place_base, "place count"),
-            narrow_u32(
-                cell.places.len() as u64,
-                "cell place count",
-            ),
-            page_start,
-            page_count,
-            bvh_start,
-            bvh_count,
-            pr_start,
-            pr_count,
-            mask_d,
-            mask_r,
-            rmembers[ci],
+        planned_cells.store(
+            cell_end,
+            std::sync::atomic::Ordering::Relaxed,
         );
+        planned_pages.store(
+            pages_total,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        let te = std::time::Instant::now();
+        encode_write_pages(
+            doc,
+            &batch_jobs,
+            &batch_arenas,
+            cell_base,
+            encode_workers,
+            encode_batch,
+            &mut b,
+            &mut ovp,
+            &mut ovp_off,
+            &mut pages_bytes,
+            &encoded_pages,
+        );
+        encode_elapsed += te.elapsed();
+        debug_assert_eq!(b.n_pages() as usize, pages_total);
+        // batch_jobs, batch_arenas and every PtsPrepared drop here.
     }
+    pipeline_on.store(false, std::sync::atomic::Ordering::Relaxed);
+    heartbeat.join().expect("pipeline heartbeat");
+    eprintln!(
+        "[vfs] build: pipeline complete (plan {:.1}s, encode {:.1}s, \
+         rss {})",
+        plan_elapsed.as_secs_f64(),
+        encode_elapsed.as_secs_f64(),
+        rss()
+    );
 
-    let mut lrecs_stored = vec![0u64; nl];
-    for job in &jobs_list {
-        lrecs_stored[job.li as usize] += job.recs.len() as u64;
-    }
     for (i, &(l, d)) in doc.layer_order.iter().enumerate() {
         debug_assert!(lrecs_stored[i] >= lrecs[i]);
         let nm = doc
@@ -1711,96 +2037,6 @@ fn build(
         );
     }
 
-    // phase 2: encode page payloads in parallel (write_tree +
-    // deflate-6 is the build's hot cost; jobs are independent)
-    let mut payloads: Vec<(Vec<u8>, u64)> = Vec::new();
-    payloads.resize_with(jobs_list.len(), Default::default);
-    let ptotal = jobs_list.len();
-    if jobs > 1 && ptotal > 1 {
-        // disjoint chunks_mut slices = safe parallel fill; pages are
-        // ~uniform (1 MB target) so static chunking balances well
-        let te = std::time::Instant::now();
-        let done = std::sync::atomic::AtomicUsize::new(0);
-        let chunk = ptotal.div_ceil(jobs).max(1);
-        std::thread::scope(|s| {
-            {
-                let done = &done;
-                s.spawn(move || {
-                    use std::sync::atomic::Ordering::Relaxed;
-                    let mut last = te;
-                    loop {
-                        std::thread::sleep(
-                            std::time::Duration::from_millis(200),
-                        );
-                        if done.load(Relaxed) >= ptotal {
-                            return;
-                        }
-                        if last.elapsed().as_secs_f64() >= 5.0 {
-                            last = std::time::Instant::now();
-                            eprintln!(
-                                "[vfs] build: encoding pages {}/{} \
-                                 ({}s, rss {})",
-                                done.load(Relaxed),
-                                ptotal,
-                                te.elapsed().as_secs(),
-                                rss()
-                            );
-                        }
-                    }
-                });
-            }
-            let done = &done;
-            let arenas = &arenas_by_cell;
-            for (jc, pc) in jobs_list
-                .chunks(chunk)
-                .zip(payloads.chunks_mut(chunk))
-            {
-                s.spawn(move || {
-                    use std::sync::atomic::Ordering::Relaxed;
-                    for (job, slot) in jc.iter().zip(pc.iter_mut())
-                    {
-                        *slot =
-                            encode_job(doc, job, &arenas[job.ci]);
-                        done.fetch_add(1, Relaxed);
-                    }
-                });
-            }
-        });
-    } else {
-        for (i, job) in jobs_list.iter().enumerate() {
-            payloads[i] =
-                encode_job(doc, job, &arenas_by_cell[job.ci]);
-        }
-    }
-
-    // phase 3: write payloads sequentially (assigns ovp offsets) and
-    // append page records in job order (page index == job index)
-    let ovp_path = format!("{}/design.ovp", outdir);
-    let mut ovp = std::io::BufWriter::new(
-        std::fs::File::create(&ovp_path).expect("create ovp"),
-    );
-    let mut ovp_off = 0u64;
-    let mut pages_bytes = 0u64;
-    let pages_total = jobs_list.len() as u64;
-    for (job, (payload, raw)) in jobs_list.iter().zip(&payloads) {
-        std::io::Write::write_all(&mut ovp, payload)
-            .expect("write ovp");
-        b.page(
-            narrow_u32(job.ci as u64, "cell index"),
-            job.li,
-            job.seq,
-            &job.bbox,
-            ovp_off,
-            payload.len() as u64,
-            *raw,
-            job.recs.len() as u64,
-            job.members,
-            job.max_w.max(0) as u64,
-            job.max_h.max(0) as u64,
-        );
-        ovp_off += payload.len() as u64;
-        pages_bytes += payload.len() as u64;
-    }
     ovp.flush().expect("flush ovp");
     // the caller writes design.ovm LAST (commit marker, after the
     // viewer-side files); ovp_len rides in the header so open can
@@ -2038,7 +2274,7 @@ fn inspect_plan(
                 }
             }
             Rep::Pts(pl) => {
-                for &(x, y) in pl {
+                for &(x, y) in pl.iter() {
                     tally(x, y);
                 }
             }
@@ -2553,7 +2789,7 @@ mod split_tests {
             y: first.1,
             w,
             h: w,
-            rep: Rep::Pts(pos),
+            rep: Rep::Pts(pos.into()),
         }
     }
 
@@ -2629,7 +2865,7 @@ mod split_tests {
                 }
             }
             Rep::Pts(p) => {
-                for &(x, y) in p {
+                for &(x, y) in p.iter() {
                     f(x, y);
                 }
             }
@@ -2729,7 +2965,7 @@ mod split_tests {
                 y,
                 w: 120,
                 h: 120,
-                rep: Rep::Pts(vec![(0, 0), (x1 - x0, 0)]),
+                rep: Rep::Pts(vec![(0, 0), (x1 - x0, 0)].into()),
             });
         }
         let doc = mini_doc(recs);
@@ -2769,7 +3005,7 @@ mod split_tests {
                 y: -DIE / 3,
                 w: 80,
                 h: 90,
-                rep: Rep::Pts(pts),
+                rep: Rep::Pts(pts.into()),
             },
             pts_rec(42, 150_000, DIE, 100),
         ]);
@@ -2880,7 +3116,7 @@ mod split_tests {
                 (495, 0), // center*2 = 1000 == plane2 -> RIGHT
                 (494, 0), // center*2 = 998 < plane2 -> LEFT
                 (1000, 0),
-            ]),
+            ].into()),
         }];
         let doc = mini_doc(c.rects.clone());
         let r = PRec {

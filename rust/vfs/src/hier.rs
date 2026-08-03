@@ -697,7 +697,7 @@ impl<'a> Hier<'a> {
                     for s in 0..pr.count {
                         pts.push(pr.pt(s));
                     }
-                    (b0, Rep::Pts(pts), fp)
+                    (b0, Rep::Pts(pts.into()), fp)
                 }
             }
         };
@@ -941,7 +941,7 @@ impl<'a> Hier<'a> {
                         let (ox, oy) = pr.pt(s);
                         pts.push((sub(ox, ox0), sub(oy, oy0)));
                     }
-                    (ox0, oy0, Rep::Pts(pts))
+                    (ox0, oy0, Rep::Pts(pts.into()))
                 };
                 self.st.pts_offsets_emitted += emit.len() as u64;
                 self.st.pts_bytes_emitted += 16 * emit.len() as u64;
@@ -1301,7 +1301,7 @@ mod tests {
                         }
                         o
                     }
-                    Rep::Pts(p) => p.clone(),
+                    Rep::Pts(p) => p.to_vec(),
                 };
                 let cr =
                     if r == REM_FULL { REM_FULL } else { r - 1 };
@@ -1651,7 +1651,7 @@ mod tests {
                         200,
                         0,
                         false,
-                        Rep::Pts(offs.clone()),
+                        Rep::Pts(offs.clone().into()),
                     )],
                 },
             ],
@@ -1672,7 +1672,7 @@ mod tests {
                 match &i.rep {
                     Rep::One => out.push((i.x, i.y)),
                     Rep::Pts(p) => {
-                        for (ox, oy) in p {
+                        for &(ox, oy) in p.iter() {
                             out.push((i.x + ox, i.y + oy));
                         }
                     }
@@ -1747,7 +1747,7 @@ mod tests {
                         0,
                         0,
                         false,
-                        Rep::Pts(offs.clone()),
+                        Rep::Pts(offs.clone().into()),
                     )],
                 },
             ],
@@ -1788,7 +1788,7 @@ mod tests {
                             (0, 0),
                             (500_000, 0),
                             (1_000_000, 0),
-                        ]),
+                        ].into()),
                     )],
                 },
             ],
@@ -2038,7 +2038,7 @@ mod tests {
                         0,
                         0,
                         false,
-                        Rep::Pts(offs),
+                        Rep::Pts(offs.into()),
                     )],
                 },
             ],

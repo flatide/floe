@@ -731,7 +731,7 @@ pub fn rep_offsets(rep: &Rep) -> Vec<(i64, i64)> {
             }
             v
         }
-        Rep::Pts(p) => p.clone(),
+        Rep::Pts(p) => p.to_vec(),
     }
 }
 

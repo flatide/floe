@@ -9,6 +9,7 @@
 use crate::{err, Cur, OasisError, Result};
 use std::collections::HashMap;
 use std::io::Read;
+use std::sync::Arc;
 
 // ------------------------------------------------------------- records
 
@@ -25,7 +26,9 @@ pub enum Rep {
         vb: (i64, i64),
     },
     /// explicit member offsets, (0,0) first (spelled out in the file)
-    Pts(Vec<(i64, i64)>),
+    /// Shared because OASIS modal repetition reuse is common in fill data.
+    /// Cloning a record must not clone an arbitrarily large offset vector.
+    Pts(Arc<[(i64, i64)]>),
 }
 
 impl Rep {
@@ -196,7 +199,7 @@ fn read_rep(c: &mut Cur, modal: &mut Option<Rep>) -> Result<Rep> {
                 x += c.uint()? as i64 * g;
                 pts.push((x, 0));
             }
-            Rep::Pts(pts)
+            Rep::Pts(pts.into())
         }
         6 | 7 => {
             let yd = c.uint()?;
@@ -208,7 +211,7 @@ fn read_rep(c: &mut Cur, modal: &mut Option<Rep>) -> Result<Rep> {
                 y += c.uint()? as i64 * g;
                 pts.push((0, y));
             }
-            Rep::Pts(pts)
+            Rep::Pts(pts.into())
         }
         8 => {
             let nd = c.uint()?;
@@ -234,7 +237,7 @@ fn read_rep(c: &mut Cur, modal: &mut Option<Rep>) -> Result<Rep> {
                 y += dy * g;
                 pts.push((x, y));
             }
-            Rep::Pts(pts)
+            Rep::Pts(pts.into())
         }
         _ => return err(c.here(), "bad repetition type"),
     };
@@ -968,6 +971,12 @@ fn grid_rep(dx: i64, nx: u64, dy: i64, ny: u64) -> Rep {
 type GridDecomp =
     Option<(Vec<(i64, i64, i64, u64, i64, u64)>, Vec<(i64, i64)>)>;
 
+/// Keep normalization results for only a small consecutive cell window while
+/// still exposing enough record-level tasks to the worker pool. A one-cell
+/// window starves designs with one expensive repetition per cell; an all-chip
+/// window caused the production parse peak.
+const NORMALIZE_CELL_BATCH_MAX: usize = 8;
+
 /// Split records with big point-list repetitions into gridded parts
 /// plus a leftover point list. Coverage and member counts are
 /// invariant; the tiler then splits the grids ARITHMETICALLY per
@@ -976,22 +985,25 @@ type GridDecomp =
 /// order (rects, polys, paths, texts, places).
 fn normalize_cell(
     cell: &mut Cell,
-    res: &mut impl Iterator<Item = GridDecomp>,
+    res: &mut impl Iterator<Item = Arc<GridDecomp>>,
 ) {
     macro_rules! norm {
         ($vec:expr, $shift:expr) => {{
             let old = std::mem::take(&mut $vec);
             for rec in old {
-                let decomp = match &rec.rep {
-                    Rep::Pts(p) if p.len() >= 16 => {
-                        res.next().expect("normalize task list out of sync")
-                    }
-                    _ => None,
+                let decomp = if matches!(
+                    &rec.rep,
+                    Rep::Pts(p) if p.len() >= 16
+                ) {
+                    res.next().expect("normalize task list out of sync")
+                } else {
+                    $vec.push(rec);
+                    continue;
                 };
-                match decomp {
+                match decomp.as_ref() {
                     None => $vec.push(rec),
                     Some((arrays, leftovers)) => {
-                        for (x0, y0, dx, nx, dy, ny) in arrays {
+                        for &(x0, y0, dx, nx, dy, ny) in arrays {
                             let mut nr = rec.clone();
                             $shift(&mut nr, x0, y0);
                             nr.rep = grid_rep(dx, nx, dy, ny);
@@ -1017,7 +1029,8 @@ fn normalize_cell(
                                     leftovers
                                         .iter()
                                         .map(|&(x, y)| (x - bx, y - by))
-                                        .collect(),
+                                        .collect::<Vec<_>>()
+                                        .into(),
                                 );
                                 $vec.push(nr);
                             }
@@ -1054,7 +1067,9 @@ fn normalize_cell(
 }
 
 /// Candidate reps of one cell in normalize_cell's walk order.
-fn pts_candidates(cell: &Cell) -> impl Iterator<Item = &Vec<(i64, i64)>> {
+fn pts_candidates(
+    cell: &Cell,
+) -> impl Iterator<Item = &Arc<[(i64, i64)]>> {
     cell.rects
         .iter()
         .map(|r| &r.rep)
@@ -1069,48 +1084,84 @@ fn pts_candidates(cell: &Cell) -> impl Iterator<Item = &Vec<(i64, i64)>> {
 }
 
 fn normalize_reps(doc: &mut Doc, jobs: usize) {
-    // find_grids is a pure function of the point list and the work
-    // clusters in a handful of fill cells, so cell-chunk scheduling
-    // starved most threads (real 150 MB chip: parse 24s -> 68s at 12
-    // jobs). Phase 1 evaluates every candidate rep off a flat task
-    // list at RECORD granularity; phase 2 rebuilds the record
-    // vectors sequentially in walk order - output is byte-identical
-    // to the sequential build at any thread count.
-    let cand: Vec<&Vec<(i64, i64)>> =
-        doc.cells.iter().flat_map(pts_candidates).collect();
-    let mut results: Vec<std::sync::OnceLock<GridDecomp>> = Vec::new();
-    results.resize_with(cand.len(), std::sync::OnceLock::new);
-    if jobs <= 1 || cand.len() < 2 {
-        for (p, r) in cand.iter().zip(results.iter_mut()) {
-            let _ = r.set(find_grids(p));
-        }
-    } else {
-        // per-record atomic pull: a handful of giant reps parallelize
-        // as well as millions of small ones
-        let ctr = std::sync::atomic::AtomicUsize::new(0);
-        std::thread::scope(|s| {
-            for _ in 0..jobs {
-                s.spawn(|| loop {
-                    let i = ctr.fetch_add(
-                        1,
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
-                    if i >= cand.len() {
-                        break;
+    // Evaluate at record granularity for load balance, but retain results for
+    // only one bounded cell window. The old chip-wide task/result arrays kept
+    // every grid and leftover list next to the still-unmodified Doc until the
+    // final apply pass. Cell order and candidate walk order are unchanged, so
+    // output stays byte-identical at every worker count.
+    for cells in doc.cells.chunks_mut(NORMALIZE_CELL_BATCH_MAX) {
+        // Modal repetition reuse gives many records the same Arc. Normalize
+        // that point set once, then share the immutable decomposition across
+        // all records that reference it. This prevents N workers from sorting
+        // N copies of the same die-wide fill repetition simultaneously.
+        let mut unique: Vec<&[(i64, i64)]> = Vec::new();
+        let mut unique_by_ptr: HashMap<(usize, usize), usize> =
+            HashMap::new();
+        let mut candidate_unique_by_cell: Vec<Vec<usize>> =
+            Vec::with_capacity(cells.len());
+        for cell in cells.iter() {
+            let mut candidate_unique = Vec::new();
+            for p in pts_candidates(cell) {
+                let key = (p.as_ptr() as usize, p.len());
+                let ui = match unique_by_ptr.get(&key) {
+                    Some(&ui) => ui,
+                    None => {
+                        let ui = unique.len();
+                        unique.push(p.as_ref());
+                        unique_by_ptr.insert(key, ui);
+                        ui
                     }
-                    let _ = results[i].set(find_grids(cand[i]));
-                });
+                };
+                candidate_unique.push(ui);
             }
-        });
+            candidate_unique_by_cell.push(candidate_unique);
+        }
+        if unique.is_empty() {
+            continue;
+        }
+        let mut results: Vec<std::sync::OnceLock<GridDecomp>> = Vec::new();
+        results.resize_with(unique.len(), std::sync::OnceLock::new);
+        if jobs <= 1 || unique.len() < 2 {
+            for (p, r) in unique.iter().zip(results.iter_mut()) {
+                let _ = r.set(find_grids(p));
+            }
+        } else {
+            let ctr = std::sync::atomic::AtomicUsize::new(0);
+            std::thread::scope(|s| {
+                for _ in 0..jobs.min(unique.len()) {
+                    let unique = &unique;
+                    let results = &results;
+                    let ctr = &ctr;
+                    s.spawn(move || loop {
+                        let i = ctr.fetch_add(
+                            1,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                        if i >= unique.len() {
+                            return;
+                        }
+                        let _ = results[i].set(find_grids(unique[i]));
+                    });
+                }
+            });
+        }
+        drop(unique);
+        let results: Vec<Arc<GridDecomp>> = results
+            .into_iter()
+            .map(|c| {
+                Arc::new(c.into_inner().expect("normalize slot unset"))
+            })
+            .collect();
+        for (cell, candidate_unique) in
+            cells.iter_mut().zip(candidate_unique_by_cell)
+        {
+            let mut res = candidate_unique
+                .into_iter()
+                .map(|ui| Arc::clone(&results[ui]));
+            normalize_cell(cell, &mut res);
+            debug_assert!(res.next().is_none());
+        }
     }
-    drop(cand);
-    let mut res = results
-        .into_iter()
-        .map(|c| c.into_inner().expect("normalize slot unset"));
-    for cell in &mut doc.cells {
-        normalize_cell(cell, &mut res);
-    }
-    debug_assert!(res.next().is_none());
 }
 
 const MAGIC: &[u8] = b"%SEMI-OASIS\r\n";
@@ -1175,13 +1226,33 @@ pub fn parse_doc(data: &[u8]) -> Result<Doc> {
     parse_doc_parallel(data, 1)
 }
 
+pub fn parse_doc_parallel(data: &[u8], jobs: usize) -> Result<Doc> {
+    parse_doc_parallel_phased(data, jobs, |_| {})
+}
+
+/// Parse with a hook between syntax materialization and repetition
+/// normalization. The indexer uses it for an exact RSS boundary; keeping the
+/// hook in the parser avoids labeling normalize scratch as syntax-parse RAM.
+pub fn parse_doc_parallel_phased(
+    data: &[u8],
+    jobs: usize,
+    syntax_done: impl FnOnce(&Doc),
+) -> Result<Doc> {
+    let mut doc = parse_doc_syntax(data, jobs)?;
+    syntax_done(&doc);
+    let t = std::time::Instant::now();
+    normalize_reps(&mut doc, jobs);
+    doc.norm_s = t.elapsed().as_secs_f64();
+    Ok(doc)
+}
+
 /// Doc parse over `jobs` threads: the cell_cuts skim splits the
 /// stream at CELL boundaries (modal state resets there), workers
 /// parse contiguous cell groups into private builders, and the merge
 /// unions the name tables first so cross-chunk by-ref cells land in
 /// the same Cell entry. Output is byte-identical to the sequential
 /// parse: chunk results merge in file order.
-pub fn parse_doc_parallel(data: &[u8], jobs: usize) -> Result<Doc> {
+fn parse_doc_syntax(data: &[u8], jobs: usize) -> Result<Doc> {
     if data.len() < MAGIC.len() || &data[..MAGIC.len()] != MAGIC {
         return err(0, "not an OASIS file");
     }
@@ -1191,7 +1262,7 @@ pub fn parse_doc_parallel(data: &[u8], jobs: usize) -> Result<Doc> {
         let mut m = Modal::default();
         let mut b = new_builder(0, 0);
         parse_records(&mut c, &mut m, &mut b, 0)?;
-        return finish(b, 1);
+        return finish_inner(b);
     }
     let (head_end, cuts, end_at) = crate::cell_cuts(body, MAGIC.len())?;
     let mut b = new_builder(0, 0);
@@ -1202,7 +1273,7 @@ pub fn parse_doc_parallel(data: &[u8], jobs: usize) -> Result<Doc> {
     }
     let n_units = cuts.len();
     if n_units == 0 {
-        return finish(b, jobs);
+        return finish_inner(b);
     }
     let per = n_units.div_ceil(jobs).max(1);
     let groups: Vec<((usize, u64, u64), usize)> = (0..n_units)
@@ -1260,15 +1331,7 @@ pub fn parse_doc_parallel(data: &[u8], jobs: usize) -> Result<Doc> {
     for cb in builders {
         merge_cells(&mut b, cb);
     }
-    finish(b, jobs)
-}
-
-fn finish(b: Builder, jobs: usize) -> Result<Doc> {
-    let mut doc = finish_inner(b)?;
-    let t = std::time::Instant::now();
-    normalize_reps(&mut doc, jobs);
-    doc.norm_s = t.elapsed().as_secs_f64();
-    Ok(doc)
+    finish_inner(b)
 }
 
 fn finish_inner(mut b: Builder) -> Result<Doc> {
@@ -1332,4 +1395,28 @@ fn finish_inner(mut b: Builder) -> Result<Doc> {
         layer_names: b.layer_names,
         norm_s: 0.0,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn modal_pts_reuse_shares_the_offset_storage() {
+        // type 4, xd=0, one delta=7 -> [(0,0), (7,0)]
+        let mut modal = None;
+        let first = read_rep(&mut Cur::new(&[4, 0, 7], 0), &mut modal)
+            .expect("first repetition");
+        // type 0 reuses the modal value. This must be an Arc clone, not a
+        // point-by-point allocation proportional to the repetition size.
+        let reused = read_rep(&mut Cur::new(&[0], 0), &mut modal)
+            .expect("modal repetition");
+        match (&first, &reused) {
+            (Rep::Pts(a), Rep::Pts(b)) => {
+                assert!(Arc::ptr_eq(a, b));
+                assert_eq!(a.as_ref(), &[(0, 0), (7, 0)]);
+            }
+            _ => panic!("expected explicit point repetitions"),
+        }
+    }
 }

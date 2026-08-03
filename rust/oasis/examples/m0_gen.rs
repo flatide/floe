@@ -82,7 +82,7 @@ fn gen_pts(outdir: &Path) {
         let pts = make_pts(n);
         let full_name = format!("pts_full_{}.oas", n);
         {
-            let rep = Rep::Pts(pts.clone());
+            let rep = Rep::Pts(pts.clone().into());
             let cells = vec![
                 WCell {
                     name: "CHIP".into(),
@@ -235,7 +235,7 @@ fn gen_gens(outdir: &Path, ngens: u32) {
             va: (400, 0),
             vb: (0, 400),
         };
-        let pts = Rep::Pts(vec![(0, 0), (2000, 50), (2100, 700)]);
+        let pts = Rep::Pts(vec![(0, 0), (2000, 50), (2100, 700)].into());
         let one = Rep::One;
         // W{g}_F_1: identity page + shared page + Grid array page +
         // Pts page + frame rect

@@ -143,7 +143,7 @@ pub fn rep_extent(rep: &Rep) -> ((i64, i64), (i64, i64)) {
             // this per (record, window)
             let (mut x0, mut x1, mut y0, mut y1) =
                 (i64::MAX, i64::MIN, i64::MAX, i64::MIN);
-            for &(x, y) in p {
+            for &(x, y) in p.iter() {
                 x0 = x0.min(x);
                 x1 = x1.max(x);
                 y0 = y0.min(y);
@@ -875,7 +875,7 @@ fn route_members(
                     acts.push(Act::Block {
                         ox: bx,
                         oy: by,
-                        rep: Rep::Pts(pts),
+                        rep: Rep::Pts(pts.into()),
                     });
                 }
             }

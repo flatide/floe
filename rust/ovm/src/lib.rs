@@ -601,22 +601,35 @@ impl Builder {
 
     /// ovp_len: byte length of the design.ovp this ovm commits - the
     /// reader (and the viewer's Vfs::open) verifies the pair.
-    pub fn finish(mut self, ovp_len: u64) -> Vec<u8> {
-        // pts pool rides at the tail of the places section
-        self.places.extend_from_slice(&self.pts_pool);
-        let secs: [&[u8]; N_SECTIONS] = [
-            &self.names,
-            &self.layers,
-            &self.cells,
-            &self.places,
-            &self.bitsets,
-            &self.bvh,
-            &self.pages,
-            &self.pranges,
-            &self.pbvh,
+    pub fn finish(self, ovp_len: u64) -> Vec<u8> {
+        // The pts pool is logically the tail of the places section. Append
+        // both source buffers directly to the final output instead of first
+        // cloning the complete pool into `places`; on fill-heavy designs that
+        // intermediate copy is one of the largest metadata live sets.
+        let places_len = self
+            .places
+            .len()
+            .checked_add(self.pts_pool.len())
+            .expect("limit exceeded: places section bytes");
+        let sec_lens = [
+            self.names.len(),
+            self.layers.len(),
+            self.cells.len(),
+            places_len,
+            self.bitsets.len(),
+            self.bvh.len(),
+            self.pages.len(),
+            self.pranges.len(),
+            self.pbvh.len(),
         ];
+        let body_len = sec_lens
+            .iter()
+            .try_fold(0usize, |n, &len| n.checked_add(len))
+            .expect("limit exceeded: ovm bytes");
         let mut out = Vec::with_capacity(
-            HEADER_LEN + secs.iter().map(|s| s.len()).sum::<usize>(),
+            HEADER_LEN
+                .checked_add(body_len)
+                .expect("limit exceeded: ovm bytes"),
         );
         out.extend_from_slice(MAGIC);
         p32(&mut out, VERSION);
@@ -634,25 +647,25 @@ impl Builder {
         p64(&mut out, ovp_len);
         p64(&mut out, 0);
         let mut off = HEADER_LEN as u64;
-        for s in secs {
+        for len in sec_lens {
             p64(&mut out, off);
-            p64(&mut out, s.len() as u64);
-            off += s.len() as u64;
+            p64(&mut out, len as u64);
+            off = off
+                .checked_add(len as u64)
+                .expect("limit exceeded: ovm bytes");
         }
         assert_eq!(out.len(), HEADER_LEN, "header layout");
-        for s in [
-            &self.names,
-            &self.layers,
-            &self.cells,
-            &self.places,
-            &self.bitsets,
-            &self.bvh,
-            &self.pages,
-            &self.pranges,
-            &self.pbvh,
-        ] {
-            out.extend_from_slice(s);
-        }
+        out.extend_from_slice(&self.names);
+        out.extend_from_slice(&self.layers);
+        out.extend_from_slice(&self.cells);
+        out.extend_from_slice(&self.places);
+        out.extend_from_slice(&self.pts_pool);
+        out.extend_from_slice(&self.bitsets);
+        out.extend_from_slice(&self.bvh);
+        out.extend_from_slice(&self.pages);
+        out.extend_from_slice(&self.pranges);
+        out.extend_from_slice(&self.pbvh);
+        debug_assert_eq!(out.len(), HEADER_LEN + body_len);
         out
     }
 }
@@ -1212,7 +1225,7 @@ impl Ovm {
                 for k in 0..na {
                     pts.push(r.pt(k));
                 }
-                Rep::Pts(pts)
+                Rep::Pts(pts.into())
             }
             k => panic!("ovm: rep kind {}", k),
         };
@@ -1368,7 +1381,7 @@ mod tests {
             2,
             0,
             false,
-            &Rep::Pts(vec![(0, 0), (9, 9), (9, 9), (-4, 2)]),
+            &Rep::Pts(vec![(0, 0), (9, 9), (9, 9), (-4, 2)].into()),
         );
         let bb = BBox { x0: 0, y0: 0, x1: 100, y1: 50 };
         let n0 = b.bvh_node(&bb, p0 as u32, 2, true);
@@ -1420,7 +1433,7 @@ mod tests {
         let pl2 = v.place(1);
         match &pl2.rep {
             Rep::Pts(p) => {
-                let mut got = p.clone();
+                let mut got = p.to_vec();
                 got.sort_unstable();
                 assert_eq!(
                     got,
