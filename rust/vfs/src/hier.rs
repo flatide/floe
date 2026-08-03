@@ -842,7 +842,6 @@ impl<'a> Hier<'a> {
                 // rung only ever over-includes.
                 let mut sel: BTreeSet<u32> = BTreeSet::new();
                 let mut contribs: Vec<BBox> = Vec::new();
-                let mut ext_fallback = false;
                 for b in boxes {
                     let rbox = minkowski_neg(b, &b0);
                     if !ext.intersects(&rbox) {
@@ -850,23 +849,23 @@ impl<'a> Hier<'a> {
                     }
                     let mut ovis = BBox::EMPTY;
                     if count <= self.opts.pts_full_rep {
-                        // small rep: exact-scan O_vis (extent would
-                        // bloat even a 2-point diagonal)
-                        if self.pts_budget >= count as u64 {
-                            self.pts_budget -= count as u64;
-                            self.st.pts_offsets_scanned +=
-                                count as u64;
-                            for s in 0..count {
-                                let (ox, oy) = pr.pt(s);
-                                if rbox.contains_pt(ox, oy) {
-                                    sel.insert(s);
-                                    ovis.grow(&pt_box(ox, oy));
-                                }
+                        // small rep: ALWAYS exact-scan, never against
+                        // the budget - 8192xK point tests are
+                        // microseconds, and the old budget-dry
+                        // fallback (O_vis = extent) let ONE drained
+                        // request balloon every later child localview
+                        // to its whole cell: the view=cwb pathology
+                        // reborn through pts (9.8G field case, depth
+                        // 9 at a 0.1um view: 29k pages / 2.3G
+                        // members). The enum budget bounds the BIG
+                        // scans below.
+                        self.st.pts_offsets_scanned += count as u64;
+                        for s in 0..count {
+                            let (ox, oy) = pr.pt(s);
+                            if rbox.contains_pt(ox, oy) {
+                                sel.insert(s);
+                                ovis.grow(&pt_box(ox, oy));
                             }
-                        } else {
-                            self.st.pts_fallback += 1;
-                            ext_fallback = true;
-                            ovis = ext;
                         }
                     } else {
                         for k in 0..pr.n_chunks {
@@ -913,12 +912,11 @@ impl<'a> Hier<'a> {
                 for c in contribs {
                     self.contribute(ckey, c);
                 }
-                // emission: small (or extent-fallback) -> ALL slots;
-                // big -> selected subset. Both REBASE (par.2.3): the
-                // pool is Morton-ordered, so even "full" re-anchors
-                // on its first slot.
+                // emission: small -> ALL slots (full rep); big ->
+                // selected subset. Both REBASE (par.2.3): the pool
+                // is Morton-ordered, so even "full" re-anchors on
+                // its first slot.
                 let emit: Vec<u32> = if count <= self.opts.pts_full_rep
-                    || ext_fallback
                 {
                     (0..count).collect()
                 } else {
@@ -1756,6 +1754,53 @@ mod tests {
             1,
         );
         (v, offs)
+    }
+
+    #[test]
+    fn pts_small_ignores_budget_no_extent_cascade() {
+        // MID is a big cell with a page FAR from the view; TOP
+        // places MID via a small pts rep whose extent spans the
+        // whole die. With a drained budget the old fallback set
+        // O_vis = extent, ballooning MID's localview to its whole
+        // rbbox and pulling the far page in - the view=cwb
+        // pathology through pts (9.8G depth-9 field case). Small
+        // reps now always exact-scan: the far page must stay out.
+        let v = fixture(
+            &[
+                FCell {
+                    name: "MID",
+                    pages: vec![
+                        (bx(0, 0, 100, 100), 100, 100),
+                        (bx(900_000, 0, 900_100, 100), 100, 100),
+                    ],
+                    places: vec![],
+                },
+                FCell {
+                    name: "T",
+                    pages: vec![],
+                    places: vec![(
+                        0,
+                        0,
+                        0,
+                        0,
+                        false,
+                        Rep::Pts(vec![
+                            (0, 0),
+                            (500_000, 0),
+                            (1_000_000, 0),
+                        ]),
+                    )],
+                },
+            ],
+            1,
+        );
+        let mut o = HierOpts::default();
+        o.pts_enum_budget = 0; // drained from the start
+        let req = rq(bx(-10, -10, 150, 150), 0, u32::MAX);
+        let plan = plan_hier(&v, &req, &o);
+        // only the near page of the offset-(0,0) member is visible
+        assert_eq!(plan.pages, vec![0], "{:?}", plan.pages);
+        assert!(hier_pages(&plan).is_superset(&brute(&v, &req)));
     }
 
     #[test]
