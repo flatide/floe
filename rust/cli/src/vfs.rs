@@ -302,12 +302,14 @@ fn write_coverage(doc: &Doc, outdir: &str, jobs: usize) {
     );
 }
 
-/// labels.tsv + texts.tsv + meta.json: the viewer-facing files -
-/// display labels (block names + budget selection), text search,
-/// and the meta fields the GUI reads (dbu/bbox/grid/layers+color/
-/// src). The far-view skeleton is retired (rev 24): wide views are
-/// served by the working set + coverage + LOD variants. grid stays
-/// synthetic on the .ice formula (legacy meta shape).
+/// meta.json: the viewer-facing summary (dbu/bbox/grid/layers+
+/// color/src + text index tallies). The far-view skeleton is
+/// retired (rev 24) and the text sidecars are too (T4,
+/// VFS_TEXT_PLAN.md): labels are request-scoped daemon responses
+/// from the v5 text index - nothing here walks the hierarchy, so
+/// this stage no longer scales with path expansion (the old
+/// collect_all_texts residency, par.6 risk 0, is GONE). grid
+/// stays synthetic on the .ice formula (legacy meta shape).
 #[allow(clippy::too_many_arguments)]
 fn emit_viewer_side(
     doc: &Doc,
@@ -320,147 +322,6 @@ fn emit_viewer_side(
     tstats: &TextIndexStats,
 ) {
     let t0 = std::time::Instant::now();
-    // staged heartbeat: these are serial passes and on a 9.8G-class
-    // chip each takes minutes - silence here read as a hang (field
-    // report during M4)
-    let stage = std::sync::Arc::new(std::sync::Mutex::new(
-        "collecting texts",
-    ));
-    let hb_on = std::sync::Arc::new(
-        std::sync::atomic::AtomicBool::new(true),
-    );
-    {
-        let stage = stage.clone();
-        let hb_on = hb_on.clone();
-        std::thread::spawn(move || {
-            use std::sync::atomic::Ordering::Relaxed;
-            let t = std::time::Instant::now();
-            let mut last = 0u64;
-            loop {
-                std::thread::sleep(
-                    std::time::Duration::from_millis(200),
-                );
-                if !hb_on.load(Relaxed) {
-                    return;
-                }
-                let e = t.elapsed().as_secs();
-                if e >= last + 5 {
-                    last = e;
-                    eprintln!(
-                        "[vfs] viewer-side: {}... ({}s, rss {})",
-                        *stage.lock().unwrap(),
-                        e,
-                        rss()
-                    );
-                }
-            }
-        });
-    }
-    let set_stage = |s: &'static str| {
-        *stage.lock().unwrap() = s;
-    };
-    let entries = floe_tiler::skel::collect_all_texts(doc);
-    // per-stage RSS/count telemetry (review round): text paths can
-    // outnumber source texts on heavily reused cells, and the
-    // viewer-side RSS story must be measurable per stage on the
-    // big assets. If these numbers blow up in the field, the
-    // follow-up is an external sort spool + streamed TSV writes.
-    eprintln!(
-        "[vfs] viewer-side: {} text entries (rss {})",
-        entries.len(),
-        rss()
-    );
-    // skeleton retired (rev 24): the wide view is served by the
-    // working set + coverage + LOD variants; only its LABEL role
-    // survives, as display-ready sidecar rows (block names of big
-    // first-level cells + the budgeted label selection)
-    set_stage("collecting labels");
-    let lrows = floe_tiler::skel::label_rows(
-        doc,
-        &entries,
-        floe_tiler::skel::SKEL_TEXT_CAP,
-    );
-    let mut ltsv = String::new();
-    let mut n_blocks = 0u64;
-    for row in &lrows {
-        // block-name rows carry the "blk" sentinel - an explicit
-        // row KIND, not a layer number, so no design layer value
-        // can ever be mistaken for one (review round 3)
-        if row.block {
-            n_blocks += 1;
-            ltsv.push_str(&format!(
-                "blk\t{}\t{}\t{}\n",
-                row.x,
-                row.y,
-                crate::tsv_esc(&row.s)
-            ));
-        } else {
-            ltsv.push_str(&format!(
-                "{}/{}\t{}\t{}\t{}\n",
-                row.layer,
-                row.dt,
-                row.x,
-                row.y,
-                crate::tsv_esc(&row.s)
-            ));
-        }
-    }
-    std::fs::write(format!("{}/labels.tsv", outdir), ltsv)
-        .expect("write labels");
-    eprintln!(
-        "[vfs] viewer-side: {} label rows (rss {})",
-        lrows.len(),
-        rss()
-    );
-    let mut sidecar: Vec<&floe_tiler::skel::TextEntry> =
-        entries.iter().collect();
-    sidecar.sort_by(|a, b| {
-        (a.layer, a.dt, &a.s, a.x, a.y)
-            .cmp(&(b.layer, b.dt, &b.s, b.x, b.y))
-    });
-    // stream the sidecar row by row: the old full-String build
-    // held a second copy of every text alongside `entries` at the
-    // RSS peak (review round 3). The path-expansion residency of
-    // collect_all_texts itself REMAINS a known risk, tracked in
-    // par.6 and judged by the per-stage telemetry on the big
-    // assets; the follow-up there is an external sort spool.
-    let mut side_members = 0u64;
-    let mut side_bytes = 0u64;
-    {
-        let mut w = std::io::BufWriter::new(
-            std::fs::File::create(format!(
-                "{}/texts.tsv",
-                outdir
-            ))
-            .expect("create sidecar"),
-        );
-        for e in &sidecar {
-            side_members += e.members();
-            let row = format!(
-                "{}/{}\t{}\t{}\t{}\t{}\n",
-                e.layer,
-                e.dt,
-                e.x,
-                e.y,
-                crate::fmt_factors(&e.factors),
-                crate::tsv_esc(&e.s)
-            );
-            side_bytes += row.len() as u64;
-            std::io::Write::write_all(&mut w, row.as_bytes())
-                .expect("write sidecar");
-        }
-        std::io::Write::flush(&mut w).expect("flush sidecar");
-    }
-    eprintln!(
-        "[vfs] viewer-side: sidecar {:.1} MB streamed (rss {})",
-        side_bytes as f64 / 1e6,
-        rss()
-    );
-
-    // meta.json (VFS flavor). rbb comes from the build (the
-    // recursive-bbox pass ran there once already - re-walking every
-    // record serially here doubled the silent tail on big chips)
-    set_stage("meta");
     let bbox = rbb[doc.top].unwrap_or((0, 0, 0, 0));
     let dbu = 1.0 / doc.unit;
     let n = {
@@ -528,11 +389,7 @@ fn emit_viewer_side(
          \"layers\": [\n{}\n],\n\
          \"texts\": {{\"records\": {}, \"members\": {}, \
          \"cells\": {}, \"grid_reps\": {}, \"pts_reps\": {}, \
-         \"ovt_bytes\": {}}},\n\
-         \"labels\": {{\"file\": \"labels.tsv\", \
-         \"blocks\": {}, \"rows\": {}}},\n\
-         \"texts_sidecar\": {{\"file\": \"texts.tsv\", \
-         \"entries\": {}, \"members\": {}}}\n\
+         \"ovt_bytes\": {}}}\n\
          }}\n",
         crate::CACHE_VERSION,
         crate::jesc(&abs_src),
@@ -557,21 +414,13 @@ fn emit_viewer_side(
         tstats.grid_reps,
         tstats.pts_reps,
         tstats.string_bytes + tstats.pts_bytes,
-        n_blocks,
-        lrows.len(),
-        sidecar.len(),
-        side_members,
     );
     std::fs::write(format!("{}/meta.json", outdir), meta)
         .expect("write meta");
-    hb_on.store(false, std::sync::atomic::Ordering::Relaxed);
     eprintln!(
-        "[vfs] labels {} rows ({} blocks), sidecar {} entries, \
-         meta ({:.1}s)",
-        lrows.len(),
-        n_blocks,
-        sidecar.len(),
-        t0.elapsed().as_secs_f64()
+        "[vfs] meta ({:.1}s, rss {})",
+        t0.elapsed().as_secs_f64(),
+        rss()
     );
 }
 

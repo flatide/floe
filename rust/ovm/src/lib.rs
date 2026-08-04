@@ -2290,7 +2290,7 @@ mod tests {
             pb.y1 += 1;
             b.text(0, 0, 1, 1, 0, 2, rp, &pb, 2);
             let r0 = b.tbvh_node(&one, t0, 1, true);
-            let r1 = b.tbvh_node(&gb, t0 + 1, 2, true);
+            let _r1 = b.tbvh_node(&gb, t0 + 1, 2, true);
             let mut ub = one;
             ub.grow(&gb);
             ub.grow(&pb);

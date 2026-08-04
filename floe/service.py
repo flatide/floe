@@ -28,19 +28,6 @@ _PICK_CAP = 64    # max candidates per pick query
 CUT_LEVEL_PX = (0.0, 2.0, 4.0, 8.0)
 CUT_PX = CUT_LEVEL_PX[1]
 
-# Calibre-style label declutter: label rows (block names + budget
-# labels) is drawn only when few enough of it falls in the view to
-# read - so a sparse chip always shows its labels, and a label-dense
-# chip shows them only as you zoom in and the viewport holds fewer.
-# The count is measured per frame (capped, cheap on the small
-# sidecar). Tunable.
-LABEL_VIEW_BUDGET = 400
-
-# live-view label declutter: at most one label per this many screen
-# pixels (keeps labels non-overlapping as you zoom), capped at
-# LABEL_VIEW_BUDGET per frame
-LABEL_CELL_PX = 48
-
 # a streamed view completes within this many rounds: the last one
 # requests an unlimited round and takes the whole remainder
 _MAX_STREAM_ROUNDS = 8
@@ -230,41 +217,6 @@ def _tsv_unesc(s):
     return "".join(out)
 
 
-def _load_sidecar_labels(cache):
-    """Display labels from the build's labels.tsv (skeleton retired,
-    VFS_HIER.md rev 24): block-name rows carry the "blk" sentinel
-    and map onto the RUNTIME frame layer; budget labels sit on
-    their DESIGN layer. Rows are display-ready (layer, dt, x, y,
-    string). Old caches without the file simply show no labels
-    until re-indexed."""
-    out = []
-    path = os.path.join(cache.dir,
-                        (cache.meta.get("labels") or {})
-                        .get("file", "labels.tsv"))
-    if not os.path.isfile(path):
-        return out
-    fl, fd = frame_layer(cache.meta)
-    with open(path) as f:
-        for ln in f:
-            p = ln.rstrip("\n").split("\t")
-            if len(p) < 4:
-                continue
-            if p[0] == "blk":
-                l, d = fl, fd
-            else:
-                ls, _, ds = p[0].partition("/")
-                try:
-                    l, d = int(ls), int(ds)
-                except ValueError:
-                    continue
-            try:
-                out.append((l, d, int(p[1]), int(p[2]),
-                            _tsv_unesc(p[3])))
-            except ValueError:
-                continue
-    return out
-
-
 def _labels_from(path, cache):
     """rows of the daemon's per-gen label file (v5, kind-explicit):
     txt rows land on their design layer, blk rows on the runtime
@@ -294,37 +246,6 @@ def _labels_from(path, cache):
                             _tsv_unesc(p[4])))
             except ValueError:
                 continue
-    return out
-
-
-def _view_labels(cache, x0, y0, x1, y1, w, h, visible):
-    """Skeleton labels inside the view, decluttered to one per
-    LABEL_CELL_PX screen cell (Calibre-style: non-overlapping,
-    appear as you zoom), capped at LABEL_VIEW_BUDGET. Respects the
-    visible-layer set (block names always allowed)."""
-    src = getattr(cache, "_live_labels", None)
-    if not src:
-        return []
-    vis = None if visible is None else {tuple(v) for v in visible}
-    sx = w / max(1e-9, x1 - x0)
-    sy = h / max(1e-9, y1 - y0)
-    frame_key = tuple(frame_layer(cache.meta))
-    seen = set()
-    out = []
-    for (l, d, x, y, s) in src:
-        if x < x0 or x > x1 or y < y0 or y > y1:
-            continue
-        if vis is not None and (l, d) != frame_key \
-                and (l, d) not in vis:
-            continue
-        key = (int((x - x0) * sx) // LABEL_CELL_PX,
-               int((y - y0) * sy) // LABEL_CELL_PX)
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append((l, d, x, y, s))
-        if len(out) >= LABEL_VIEW_BUDGET:
-            break
     return out
 
 
@@ -385,15 +306,8 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
     # live-view labels (v5): the DAEMON selects them per request
     # (viewport + depth + visible layers + screen scale) and ships
     # a small per-gen file with round 1; later refinement rounds
-    # send nolabels=1 and re-apply the same parsed rows.
-    # FLOE_LABELS=sidecar keeps the old labels.tsv path for A/B
-    # during the transition (removed with T4).
-    sidecar_mode = os.environ.get("FLOE_LABELS") == "sidecar"
-    if sidecar_mode:
-        labels = _view_labels(cache, x0, y0, x1, y1, job["w"],
-                              job["h"], job["visible"])
-    else:
-        labels = None
+    # send nolabels=1 and re-apply the same parsed rows
+    labels = None
 
     draw_total = [0.0]
 
@@ -485,7 +399,7 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
         # skip, the transaction wants strict increase, and a failed
         # gen is never reused
         mosaic.req_gen += 1
-        want = labels is None and not sidecar_mode
+        want = labels is None
         r = cache.vfs_client.request(
             mosaic.req_gen, view_um, px_per_um, cut_px, layers,
             job.get("depth"), ack=mosaic.applied_gen,
@@ -644,12 +558,8 @@ def _render_service(src, req, res, latest=None):
     except Exception as e:
         res.put({"kind": "error", "msg": f"render service init failed: {e}"})
         return
-    # VFS live-view labels are request-scoped daemon responses
-    # (v5); the legacy labels.tsv path survives only behind the
-    # FLOE_LABELS=sidecar A/B flag until T4
+    # VFS live-view labels are request-scoped daemon responses (v5)
     if cache.meta.get("vfs"):
-        if os.environ.get("FLOE_LABELS") == "sidecar":
-            cache._live_labels = _load_sidecar_labels(cache)
         # coverage bitplanes (density overview for cut/wide views)
         cache._coverage = None
         covp = os.path.join(cache.dir, "design.ovc")

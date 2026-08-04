@@ -170,6 +170,63 @@ rev 10 (지시: **인덱서/뷰어 책임 분리** + 이전 검토 잔여 1건):
   start·count, payload size 등)은 checked — silent truncation
   금지, 초과는 "limit exceeded: <필드>" 빌드 에러.
 
+rev 28 (T1~T4 cell-local Text VFS — 2026-08-04, 0.11.0, **ovm v5 =
+재인덱싱 필요**; 계획 = rust/VFS_TEXT_PLAN.md, 4 커밋):
+
+- **T1 (포맷/빌드)**: ovm v5 — 신규 5섹션
+  TEXTS(80B)/TRANGES(16B)/TBVH(40B)/TREPS(64B)/TCHUNKS(32B), 셀
+  레코드 144B(trange 범위 + **재귀 텍스트-레이어 마스크
+  tmask_rec** — 텍스트 없는 서브트리 가지치기용), 헤더 @80 =
+  ovt_len. **design.ovt** 신규: 문자열 원문 + Morton 정렬 텍스트
+  Pts 풀(청크 bbox는 TCHUNKS), 빌드 중 BufWriter 스트리밍.
+  텍스트 인덱싱은 **셀-로컬만 읽음**(계층 미순회) — 비용/메모리가
+  소스 레코드 수에 비례, 경로 전개 없음. run 내 순서 = bbox 중심
+  Morton 프리소트(+seq 타이) → BVH 중앙 분할 저장 순서(결정적,
+  jobs 무관 바이트 동일). 오픈 검증 2단: shallow = 테이블
+  구조(run/root/rep 서술자/ovt 스팬/청크 수), deep(from_bytes) =
+  레코드 스윕 + **정확-1회 소유권**(텍스트·trange claim) + TBVH
+  공유/사이클 DFS — places/inst-BVH와 동일한 mmap-지연 절충(§3.6
+  기존 원칙). Vfs::open은 ovp_len처럼 **ovt_len 쌍 검증** + ovt
+  mmap. 마커: design.ovt 스크럽 목록 추가, FLOE_KILL_AT=
+  ovt-written 킬포인트(마커 매트릭스 4점).
+- **T2 (라벨 플래너)**: rust/vfs/text.rs — 기하 플래너와 동일
+  규칙(vis 레이어·semantic depth·셀 컷)의 결정적 워크가 전체
+  변환을 추적, 후보 = 뷰포트 안 앵커의 (경로, 멤버) 정확 집합
+  (declutter 전, 오라클 게이트 대상). Grid 닫힌형 인덱스 사각 +
+  Pts Morton 청크 사다리 재사용. 멤버/후보 예산은 truncated
+  플래그(표시 전용 열화, 조용한 생략 아님). declutter =
+  월드-고정 cell_px(48px) bin당 1승자, 우선순위 blk > txt >
+  레이어 순 > 안정 해시, 예산 400. **블록명은 런타임 합성**
+  (r==0 depth 경계의 자식 프레임에서 셀명+배치 bbox 중심,
+  화면크기 게이트 96px) — BLOCK_ROW/센티널/저장 라벨 전면 폐기.
+  probe(px=0)는 구조적으로 라벨 없음.
+- **T3 (프로토콜/뷰어)**: vfsd 응답 `labels=<gen별 tsv> nlabels=N
+  text_plan_ms=F` — kind 명시 행(`txt\t<l>/<d>\t…` /
+  `blk\t-\t…`), 뷰-generation 자산(클라이언트가 다음 요청에서
+  파일 삭제; stale이면 미적용 폐기). 리파인 라운드는
+  `nolabels=1`로 재계산 생략, 뷰어는 라운드1 파싱 행을 재적용.
+  `FLOE_LABELS=0` = 데몬 킬스위치. **FLOE_LOD=0이 라벨까지 끄지
+  않도록 label_px 분리**. blk 행은 뷰어 frame_layer로 매핑.
+- **T4 (컷오버)**: emit_viewer_side에서 collect_all_texts 호출·
+  labels.tsv·texts.tsv 생성 제거(스크럽 목록에는 유지 — 구 캐시
+  청소), skel::label_rows/LabelRow/for_each_offset_capped 삭제
+  (.ice 경로의 collect_all_texts/build_skeleton은 동결 유지),
+  뷰어 _load_sidecar_labels/_view_labels/_live_labels 삭제. meta
+  = "texts" 집계(records/members/cells/reps/ovt_bytes)로 교체.
+  **§6 잔여 위험 0(경로 전개 상주) 해소** — 그 코드 경로 자체가
+  VFS 빌드에서 사라짐.
+- 게이트: ovm 텍스트 라운드트립+corrupt 6종, 플래너 유닛 4종
+  (브루트포스 오라클 XOR: 회전/미러/배열/Pts 중복/depth/vis/cut,
+  declutter 결정성/부분집합/예산, 예산 고갈 truncated), 신규
+  tools/validate_vfs_text.py **X1~X6**(klayout 오라클 XOR
+  full/depth0/vis 슬라이스, declutter, ovt 절단 corrupt, jobs
+  바이트 동일(ovm+ovt), 데몬 라벨 수명), validate_vfs.py = v5
+  구조 + 사이드카 부재 + meta 텍스트 합계 klayout 대조, 마커
+  4점, 전체 스위트 + 서비스 스모크 green. 계획 대비 명시 편차:
+  (a) 오픈 딥 검증은 from_bytes 전용(mmap 지연 원칙 유지), (b)
+  publish는 기존 마커 규약 유지(.tmp 체인 미도입 — 동일 보장),
+  (c) 라벨 행은 layer_idx 대신 l/d 표기(자기서술적).
+
 rev 27 (외부 검토 3차 반영 — 2026-08-04, 0.10.3; 2건):
 
 - **(높음) 사이드카 메모리 — 부분 수정 + 잔여 위험 등재**: 전체
@@ -1427,13 +1484,14 @@ gen 2: 데몬 "이미 resident" → 바디 재전송 안 함
 
 ## 6. 리스크 / 미해결
 
-0. (**잔여 위험 — rev 27**) **뷰어측 텍스트 수집의 경로 전개
-   상주**: collect_all_texts는 텍스트 보유 셀까지의 모든 배치
-   경로를 TextEntry로 전개·상주시킨다(반복은 symbolic이나 경로
-   수는 재사용 심한 칩에서 소스보다 커질 수 있음). TSV는 rev
-   27부터 스트리밍이지만 entries 자체는 남는다. **판정 = 9.8G
-   재인덱싱 로그의 "viewer-side: N text entries (rss …)" 계측** —
-   과도하면 외부 정렬 스풀 + 수집 스트리밍으로 전환한다.
+0. (해소 — rev 28, T4) **뷰어측 텍스트 수집의 경로 전개 상주**:
+   collect_all_texts 기반 사이드카가 VFS 빌드에서 통째로
+   제거되었다 — 텍스트는 셀-로컬로 1회만 인덱싱(ovm v5 +
+   design.ovt)되고 라벨은 요청 시 플래너가 뽑는다. 빌드 텍스트
+   단계의 비용/메모리는 이제 **소스 레코드 수에 비례**하며 경로
+   전개 자체가 존재하지 않는다(9.8G 재인덱싱의 "[vfs] build:
+   text index …" 라인으로 실측 확인 예정). 원 계획이던 외부 정렬
+   스풀은 불필요해져 철회.
 
 1. (해소 — M0 GREEN) **klayout read 이름-바인딩**(§3.3): 옵션 없는
    plain read로 확증(klayout 0.30.9, 30 gen 누수 0, §5 M0 결과).

@@ -177,42 +177,40 @@ def main():
             fail("G5c layer %s table records=%d < scan=%d"
                  % (key, lr, truth_recs.get(key, 0)))
 
-    # labels.tsv (skeleton retired, rev 24): meta counts match the
-    # file; budget rows (design layers) must name strings that the
-    # full-text sidecar also carries
+    # v5 text index (T4, VFS_TEXT_PLAN.md): the sidecars are GONE -
+    # labels are request-scoped daemon responses; meta carries the
+    # text-index tallies and design.ovt holds strings/pts pools
     with open(os.path.join(outdir, "meta.json")) as f:
         vmeta = json.load(f)
-    lm = vmeta.get("labels") or {}
-    lpath = os.path.join(outdir, lm.get("file", "labels.tsv"))
-    n_rows = n_blocks = 0
-    side_strings = set()
-    with open(os.path.join(outdir, "texts.tsv")) as f:
-        for ln in f:
-            parts = ln.rstrip("\n").split("\t")
-            if len(parts) >= 5:
-                side_strings.add(parts[4])
-    if not os.path.isfile(lpath):
-        fail("labels.tsv missing")
-    else:
-        with open(lpath) as f:
-            for ln in f:
-                parts = ln.rstrip("\n").split("\t")
-                if len(parts) < 4:
-                    continue
-                n_rows += 1
-                if parts[0] == "blk":
-                    n_blocks += 1
-                elif parts[3] not in side_strings:
-                    fail("label %r not in sidecar" % parts[3])
-        if n_rows != lm.get("rows", -1):
-            fail("labels rows=%d meta=%s" % (n_rows, lm.get("rows")))
-        if n_blocks != lm.get("blocks", -1):
-            fail("labels blocks=%d meta=%s"
-                 % (n_blocks, lm.get("blocks")))
+    for legacy in ("labels.tsv", "texts.tsv", "skeleton.oas"):
+        if os.path.isfile(os.path.join(outdir, legacy)):
+            fail("legacy sidecar %s still produced" % legacy)
+    tm = vmeta.get("texts") or {}
+    # klayout text truth: expanded members per layer
+    ly2 = db.Layout(False)
+    ly2.read(src)
+    want_texts = 0
+    for li in ly2.layer_indexes():
+        for cell in ly2.each_cell():
+            for s in cell.shapes(li).each():
+                if s.is_text():
+                    want_texts += 1
+    ly2._destroy()
+    if tm.get("members", -1) != want_texts:
+        fail("meta texts members=%s klayout=%d"
+             % (tm.get("members"), want_texts))
+    ovt_path = os.path.join(outdir, "design.ovt")
+    ovt_size = os.path.getsize(ovt_path) \
+        if os.path.isfile(ovt_path) else 0
+    ovm_ovt_len = struct.unpack_from(
+        "<Q", open(outdir + "/design.ovm", "rb").read(88), 80)[0]
+    if ovt_size != ovm_ovt_len:
+        fail("ovt_len header=%d file=%d" % (ovm_ovt_len, ovt_size))
 
-    print("vfs-checked %d pages (%d lod), %d layers, %d labels "
-          "(%d blocks), top rbbox, failures: %d"
-          % (checked, n_lod, len(lmap), n_rows, n_blocks, len(bad)))
+    print("vfs-checked %d pages (%d lod), %d layers, %d text "
+          "members indexed, top rbbox, failures: %d"
+          % (checked, n_lod, len(lmap), tm.get("members", 0),
+             len(bad)))
     sys.exit(1 if bad else 0)
 
 
