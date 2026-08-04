@@ -54,7 +54,7 @@ class VfsClient:
 
     def request(self, gen, view_um, px_per_um, cut_px, layers=None,
                 depth=None, probe=False, ack=0,
-                reset=False, stream_kb=None):
+                reset=False, stream_kb=None, want_labels=True):
         """One plan/materialize round-trip on the V4 hier protocol
         (rust/VFS_HIER.md par.3.5; flat retired in M5). view_um =
         (x0,y0,x1,y1) in um; layers = [(l,d), ...] or None (=all);
@@ -87,6 +87,9 @@ class VfsClient:
                 # per-request budget override: the service adapts
                 # it to its measured parse speed
                 line += f" stream={int(stream_kb)}"
+            if not want_labels:
+                # refinement rounds: labels came with round 1
+                line += " nolabels=1"
         self.proc.stdin.write(line + "\n")
         self.proc.stdin.flush()
         resp = self.proc.stdout.readline()
@@ -106,9 +109,16 @@ class VfsClient:
         out["names"] = None if nm in ("-", "") else nm
         if out["delta"]:
             self._last_files.append(out["delta"])
+        # per-gen label file (v5): request-scoped like the delta -
+        # read it this round, deleted on the NEXT request
+        lb = out.get("labels", "-")
+        out["labels"] = None if lb in ("-", "") else lb
+        if out["labels"]:
+            self._last_files.append(out["labels"])
         ev = out.get("evict", "-")
         out["evict"] = [] if ev in ("-", "") else ev.split(",")
-        for k in ("pages", "new", "bytes", "members", "lod"):
+        for k in ("pages", "new", "bytes", "members", "lod",
+                  "nlabels"):
             if k in out:
                 try:
                     out[k] = int(out[k])
