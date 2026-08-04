@@ -163,7 +163,7 @@ def main():
     shutil.rmtree(out1, ignore_errors=True)
     subprocess.run([FI, "vfs", src, out1, "--jobs", "1"],
                    capture_output=True, check=True)
-    for f in ("design.ovm", "design.ovp"):
+    for f in ("design.ovm", "design.ovp", "design.ovt"):
         a = open(os.path.join(out, f), "rb").read()
         b = open(os.path.join(out1, f), "rb").read()
         if a != b:

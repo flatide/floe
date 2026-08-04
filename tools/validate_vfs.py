@@ -24,23 +24,24 @@ import klayout.db as db
 
 print = functools.partial(print, flush=True)
 
-# .ovm wire v2 (rust/VFS_HIER.md par.3.6): header 232B with
-# ovp_len@72 + 9 sections@88, cell 128B (height/topo_rank; rbbox@48),
+# .ovm wire v5 (rust/VFS_HIER.md par.3.6 + VFS_TEXT_PLAN.md):
+# header 312B with ovp_len@72, ovt_len@80 + 14 sections@88, cell
+# 144B (height/topo_rank; rbbox@48; trange range@128, tmask@136),
 # page 96B (seq u32@8, max_w/max_h u64@80/88)
 PAGE_LEN = 96
-CELL_LEN = 128
+CELL_LEN = 144
 
 
 def read_ovm(path):
     d = open(path, "rb").read()
     assert d[:8] == b"FLOEOVM1", "magic"
     ver = struct.unpack_from("<I", d, 8)[0]
-    assert ver == 4, ver  # v4: LOD page variants (M7)
+    assert ver == 5, ver  # v5: cell-local text index
     top, n_layers, n_cells, n_pages = struct.unpack_from(
         "<IIII", d, 40)
     ovp_len = struct.unpack_from("<Q", d, 72)[0]
     secs = [struct.unpack_from("<QQ", d, 88 + 16 * i)
-            for i in range(9)]
+            for i in range(14)]
     names = d[secs[0][0]:secs[0][0] + secs[0][1]]
     layers = []
     for i in range(n_layers):

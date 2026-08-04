@@ -1239,9 +1239,9 @@ mod tests {
         let pr = b.prange(0, 0, 1, PBVH_NONE);
         b.cell(
             "T", 0, 0, &pb, &pb, 0, 0, 0, 2, 0, 0, pr, 1, m, m,
-            1_000_000,
+            1_000_000, 0, 0, m,
         );
-        let ovm = Ovm::from_bytes(b.finish(0)).unwrap();
+        let ovm = Ovm::from_bytes(b.finish(0, 0)).unwrap();
         let o = HierOpts::default();
         // zoomed OUT: page is ~100 px on screen -> 10^4 px^2,
         // members 10^6 > 4*10^4 -> LOD
@@ -1292,9 +1292,9 @@ mod tests {
             let pr = b.prange(0, 0, 1, PBVH_NONE);
             b.cell(
                 "S", 0, 0, &tb, &tb, 0, 0, 0, 2, 0, 0, pr, 1, m,
-                m, 1_000_000,
+                m, 1_000_000, 0, 0, m,
             );
-            let ovm2 = Ovm::from_bytes(b.finish(0)).unwrap();
+            let ovm2 = Ovm::from_bytes(b.finish(0, 0)).unwrap();
             let ps = plan_hier(
                 &ovm2,
                 &rq_px(tb, 0, u32::MAX, 4.0),
@@ -1325,8 +1325,9 @@ mod tests {
         b.layer(u32::MAX - 1, 0, "C", 0, 0);
         let m = b.bitset(&[1]);
         let pb = bx(0, 0, 10, 10);
-        b.cell("T", 0, 0, &pb, &pb, 0, 0, 0, 0, 0, 0, 0, 0, m, m, 0);
-        let ovm = Ovm::from_bytes(b.finish(0)).unwrap();
+        b.cell("T", 0, 0, &pb, &pb, 0, 0, 0, 0, 0, 0, 0, 0, m, m, 0,
+               0, 0, m);
+        let ovm = Ovm::from_bytes(b.finish(0, 0)).unwrap();
         let (fl, _) = frame_layer(&ovm);
         for li in 0..ovm.n_layers {
             assert_ne!(fl, ovm.layer(li).layer);
@@ -1486,9 +1487,12 @@ mod tests {
                 m1,
                 m1,
                 1,
+                0,
+                0,
+                m1,
             );
         }
-        Ovm::from_bytes(b.finish(0)).unwrap()
+        Ovm::from_bytes(b.finish(0, 0)).unwrap()
     }
 
     // ---- brute reference: every rep member expanded, exact
@@ -2380,8 +2384,11 @@ mod tests {
                 m1,
                 m1,
                 1,
+                0,
+                0,
+                m1,
             );
-            Ovm::from_bytes(b.finish(0)).unwrap()
+            Ovm::from_bytes(b.finish(0, 0)).unwrap()
         };
         let lin = mk(false);
         let tree = mk(true);
@@ -2542,7 +2549,7 @@ mod tests {
         let pr0 = b.prange(0, 0, 1, PBVH_NONE);
         b.cell(
             "LEAF", 0, 1, &leafbb, &leafbb, 0, 0, 0, 1, 0, 0, pr0,
-            1, m, m, 1,
+            1, m, m, 1, 0, 0, m,
         );
         let pr1 = b.prange(0, 1, 1, PBVH_NONE);
         b.cell(
@@ -2562,11 +2569,15 @@ mod tests {
             m,
             m,
             1,
+            0,
+            0,
+            m,
         );
-        let ovm = Ovm::from_bytes(b.finish(ovp.len() as u64)).unwrap();
+        let ovm = Ovm::from_bytes(b.finish(ovp.len() as u64, 0)).unwrap();
         let vfs = crate::Vfs {
             ovm,
             ovp_path: ovp_path.to_string_lossy().into_owned(),
+            ovt: floe_ovm::Backing::Vec(Vec::new()),
         };
         let req = rq(bx(-10, -10, 600, 200), 0, u32::MAX);
         let plan =
@@ -2659,7 +2670,11 @@ mod tests {
             &rq(bx(0, 0, 4000, 100), 10, u32::MAX),
             &HierOpts::default(),
         );
-        let vfs = crate::Vfs { ovm: v, ovp_path: String::new() };
+        let vfs = crate::Vfs {
+            ovm: v,
+            ovp_path: String::new(),
+            ovt: floe_ovm::Backing::Vec(Vec::new()),
+        };
         let delta = vfs.delta_hier(&plan, &[], 9, None).unwrap();
         let doc = parse_doc(&delta).unwrap();
         let top = &doc.cells[doc.top];
@@ -2684,7 +2699,11 @@ mod tests {
             &rq(bx(10_090, 3_190, 10_120, 3_220), 0, u32::MAX),
             &HierOpts::default(),
         );
-        let vfs2 = crate::Vfs { ovm: v2, ovp_path: String::new() };
+        let vfs2 = crate::Vfs {
+            ovm: v2,
+            ovp_path: String::new(),
+            ovt: floe_ovm::Backing::Vec(Vec::new()),
+        };
         let delta2 = vfs2.delta_hier(&plan2, &[], 11, None).unwrap();
         let doc2 = parse_doc(&delta2).unwrap();
         let t2 = &doc2.cells[doc2.top];

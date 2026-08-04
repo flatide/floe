@@ -32,6 +32,8 @@ const BVH_LEAF: usize = 8;
 /// pages per page-BVH leaf, and the run size at or below which a
 /// (cell,layer) run gets no BVH at all (linear scan, root = NONE)
 const PBVH_LEAF: usize = 8;
+/// texts per text-BVH leaf / linear-scan threshold (v5 text index)
+const TBVH_LEAF: usize = 8;
 
 
 // ------------------------------------------------------------ build
@@ -224,6 +226,7 @@ pub fn vfs_cmd(args: &[String]) {
         for f in [
             "design.ovm",
             "design.ovp",
+            "design.ovt",
             "design.ovc",
             "labels.tsv",
             // legacy (pre-0.10) viewer file: scrub on rebuild so a
@@ -238,7 +241,7 @@ pub fn vfs_cmd(args: &[String]) {
             eprintln!("[vfs] FLOE_KILL_AT=marker-deleted");
             std::process::exit(9);
         }
-        let (ovm_bytes, rbb, lmems) = build(
+        let (ovm_bytes, rbb, lmems, tstats) = build(
             &doc,
             size,
             mtime,
@@ -252,8 +255,13 @@ pub fn vfs_cmd(args: &[String]) {
             eprintln!("[vfs] FLOE_KILL_AT=ovp-written");
             std::process::exit(9);
         }
+        // both payload files (ovp + ovt) exist, marker still absent
+        if kill_at.as_deref() == Some("ovt-written") {
+            eprintln!("[vfs] FLOE_KILL_AT=ovt-written");
+            std::process::exit(9);
+        }
         emit_viewer_side(&doc, &src, size, mtime, &outdir, &rbb,
-                         &lmems);
+                         &lmems, &tstats);
         if coverage {
             write_coverage(&doc, &outdir, jobs);
         }
@@ -300,6 +308,7 @@ fn write_coverage(doc: &Doc, outdir: &str, jobs: usize) {
 /// src). The far-view skeleton is retired (rev 24): wide views are
 /// served by the working set + coverage + LOD variants. grid stays
 /// synthetic on the .ice formula (legacy meta shape).
+#[allow(clippy::too_many_arguments)]
 fn emit_viewer_side(
     doc: &Doc,
     src: &str,
@@ -308,6 +317,7 @@ fn emit_viewer_side(
     outdir: &str,
     rbb: &[Option<(i64, i64, i64, i64)>],
     lmems: &[u64],
+    tstats: &TextIndexStats,
 ) {
     let t0 = std::time::Instant::now();
     // staged heartbeat: these are serial passes and on a 9.8G-class
@@ -516,6 +526,9 @@ fn emit_viewer_side(
          \"grid\": {{\"nx\": {}, \"ny\": {}, \"x0\": {}, \
          \"y0\": {}, \"tile_w\": {}, \"tile_h\": {}}},\n\
          \"layers\": [\n{}\n],\n\
+         \"texts\": {{\"records\": {}, \"members\": {}, \
+         \"cells\": {}, \"grid_reps\": {}, \"pts_reps\": {}, \
+         \"ovt_bytes\": {}}},\n\
          \"labels\": {{\"file\": \"labels.tsv\", \
          \"blocks\": {}, \"rows\": {}}},\n\
          \"texts_sidecar\": {{\"file\": \"texts.tsv\", \
@@ -538,6 +551,12 @@ fn emit_viewer_side(
         tw,
         th,
         layers_json.join(",\n"),
+        tstats.records,
+        tstats.members,
+        tstats.cells,
+        tstats.grid_reps,
+        tstats.pts_reps,
+        tstats.string_bytes + tstats.pts_bytes,
         n_blocks,
         lrows.len(),
         sidecar.len(),
@@ -1966,6 +1985,264 @@ fn build_cell_plan(
     }
 }
 
+/// v5 text-index build tallies (heartbeat summary + meta.json)
+#[derive(Default)]
+struct TextIndexStats {
+    records: u64,
+    members: u64,
+    cells: u64,
+    grid_reps: u64,
+    pts_reps: u64,
+    string_bytes: u64,
+    pts_bytes: u64,
+}
+
+/// local text-BVH split (median partition, same shape as
+/// split_pbvh): nodes hold RUN-LOCAL first for leaves; the caller
+/// rebases onto the emitted text order, which FOLLOWS the final
+/// item order here - leaves are contiguous by construction
+fn split_tbvh(
+    nodes: &mut Vec<(BBox, u32, u16, bool)>,
+    items: &mut [(BBox, u32)],
+    lo: usize,
+    slot: usize,
+) {
+    let mut bb = BBox::EMPTY;
+    for (ib, _) in items.iter() {
+        bb.grow(ib);
+    }
+    if items.len() <= TBVH_LEAF {
+        nodes[slot] = (bb, lo as u32, items.len() as u16, true);
+        return;
+    }
+    let wx = bb.x1 - bb.x0;
+    let wy = bb.y1 - bb.y0;
+    let mid = items.len() / 2;
+    if wx >= wy {
+        items.select_nth_unstable_by_key(mid, |(b, _)| b.x0 + b.x1);
+    } else {
+        items.select_nth_unstable_by_key(mid, |(b, _)| b.y0 + b.y1);
+    }
+    let l = nodes.len();
+    nodes.push((BBox::EMPTY, 0, 0, false));
+    nodes.push((BBox::EMPTY, 0, 0, false));
+    nodes[slot] = (bb, l as u32, 2, false);
+    let (a, c) = items.split_at_mut(mid);
+    split_tbvh(nodes, a, lo, l);
+    split_tbvh(nodes, c, lo + mid, l + 1);
+}
+
+/// cell-local text index of ONE cell (VFS_TEXT_PLAN.md par.3):
+/// only doc.cells[ci].texts is read - no hierarchy walk, so build
+/// cost/memory scale with SOURCE text records, never with path
+/// expansion. Strings and Morton-ordered pts pools stream to the
+/// design.ovt writer; fixed records go to the ovm builder. Runs
+/// are per (cell, layer_idx); in-run order is a Morton pre-sort
+/// (source_seq tie-break) refined by the deterministic BVH median
+/// partition, so jobs count never changes a byte. Returns the
+/// cell's (trange_start, trange_count).
+fn build_cell_texts(
+    doc: &Doc,
+    ci: usize,
+    lidx: &std::collections::HashMap<(u32, u32), usize>,
+    b: &mut Builder,
+    ovt: &mut std::io::BufWriter<std::fs::File>,
+    ovt_off: &mut u64,
+    st: &mut TextIndexStats,
+) -> (u32, u32) {
+    let cell = &doc.cells[ci];
+    let tr_start = b.n_tranges();
+    if cell.texts.is_empty() {
+        return (tr_start, 0);
+    }
+    st.cells += 1;
+    let mut groups: std::collections::BTreeMap<u32, Vec<u32>> =
+        std::collections::BTreeMap::new();
+    for (ti, t) in cell.texts.iter().enumerate() {
+        let li = narrow_u32(
+            lidx[&(t.layer, t.dt)] as u64,
+            "text layer index",
+        );
+        groups
+            .entry(li)
+            .or_default()
+            .push(narrow_u32(ti as u64, "cell text count"));
+    }
+    struct TRec {
+        bbox: BBox,
+        rep: u32,
+        soff: u64,
+        slen: u32,
+        seq: u32,
+        x: i64,
+        y: i64,
+    }
+    for (li, idxs) in groups {
+        // encode strings/reps in SOURCE order (that is the ovt
+        // byte layout), then order the run records spatially
+        let mut recs: Vec<TRec> = Vec::with_capacity(idxs.len());
+        for &ti in &idxs {
+            let t = &cell.texts[ti as usize];
+            st.records += 1;
+            st.members += t.rep.members();
+            let soff = *ovt_off;
+            ovt.write_all(t.s.as_bytes()).expect("write ovt");
+            *ovt_off += t.s.len() as u64;
+            st.string_bytes += t.s.len() as u64;
+            let slen =
+                narrow_u32(t.s.len() as u64, "text string length");
+            let rep = match &t.rep {
+                Rep::One => floe_ovm::TREP_NONE,
+                Rep::Grid { na, nb, va, vb } => {
+                    st.grid_reps += 1;
+                    b.trep_grid(
+                        narrow_u32(*na, "text rep na"),
+                        narrow_u32(*nb, "text rep nb"),
+                        *va,
+                        *vb,
+                    )
+                }
+                Rep::Pts(p) => {
+                    st.pts_reps += 1;
+                    let prep = floe_ovm::prepare_pts(p);
+                    let pts_off = *ovt_off;
+                    for &(px, py) in &prep.pts {
+                        ovt.write_all(&px.to_le_bytes())
+                            .expect("write ovt");
+                        ovt.write_all(&py.to_le_bytes())
+                            .expect("write ovt");
+                    }
+                    *ovt_off += prep.pts.len() as u64 * 16;
+                    st.pts_bytes += prep.pts.len() as u64 * 16;
+                    let chunk_lo = b.n_tchunks();
+                    for c in &prep.chunks {
+                        b.tchunk(c);
+                    }
+                    b.trep_pts(
+                        narrow_u32(
+                            prep.pts.len() as u64,
+                            "text pts count",
+                        ),
+                        pts_off,
+                        chunk_lo,
+                        narrow_u32(
+                            prep.chunks.len() as u64,
+                            "text pts chunks",
+                        ),
+                    )
+                }
+            };
+            let (ex, ey) = rep_extent(&t.rep);
+            recs.push(TRec {
+                bbox: BBox {
+                    x0: t.x + ex.0.min(0),
+                    y0: t.y + ey.0.min(0),
+                    x1: t.x + ex.1.max(0),
+                    y1: t.y + ey.1.max(0),
+                },
+                rep,
+                soff,
+                slen,
+                seq: ti,
+                x: t.x,
+                y: t.y,
+            });
+        }
+        // Morton pre-sort over bbox centers, source_seq tie-break
+        let centers: Vec<(i64, i64)> = recs
+            .iter()
+            .map(|r| {
+                (
+                    ((r.bbox.x0 as i128 + r.bbox.x1 as i128) / 2)
+                        as i64,
+                    ((r.bbox.y0 as i128 + r.bbox.y1 as i128) / 2)
+                        as i64,
+                )
+            })
+            .collect();
+        let (mut minx, mut miny) = (i64::MAX, i64::MAX);
+        for &(cx, cy) in &centers {
+            minx = minx.min(cx);
+            miny = miny.min(cy);
+        }
+        let mut order: Vec<u32> = (0..recs.len() as u32).collect();
+        order.sort_by_key(|&i| {
+            (
+                floe_ovm::morton_key(
+                    centers[i as usize].0,
+                    centers[i as usize].1,
+                    minx,
+                    miny,
+                ),
+                recs[i as usize].seq,
+            )
+        });
+        let text_lo = b.n_texts();
+        let count =
+            narrow_u32(recs.len() as u64, "trange text count");
+        let root = if recs.len() <= TBVH_LEAF {
+            for &i in &order {
+                let r = &recs[i as usize];
+                b.text(
+                    narrow_u32(ci as u64, "cell index"),
+                    li,
+                    r.x,
+                    r.y,
+                    r.soff,
+                    r.slen,
+                    r.rep,
+                    &r.bbox,
+                    r.seq,
+                );
+            }
+            floe_ovm::TBVH_NONE
+        } else {
+            // BVH partition decides the storage order (leaves are
+            // contiguous item ranges); emit texts in that order
+            let mut items: Vec<(BBox, u32)> = order
+                .iter()
+                .map(|&i| (recs[i as usize].bbox, i))
+                .collect();
+            let mut nodes: Vec<(BBox, u32, u16, bool)> =
+                vec![(BBox::EMPTY, 0, 0, false)];
+            split_tbvh(&mut nodes, &mut items, 0, 0);
+            for &(_, i) in &items {
+                let r = &recs[i as usize];
+                b.text(
+                    narrow_u32(ci as u64, "cell index"),
+                    li,
+                    r.x,
+                    r.y,
+                    r.soff,
+                    r.slen,
+                    r.rep,
+                    &r.bbox,
+                    r.seq,
+                );
+            }
+            let base = b.n_tbvh();
+            for &(bbb, first, cnt, leaf) in &nodes {
+                let f = if leaf {
+                    narrow_u32(
+                        text_lo as u64 + first as u64,
+                        "text index",
+                    )
+                } else {
+                    narrow_u32(
+                        base as u64 + first as u64,
+                        "tbvh index",
+                    )
+                };
+                b.tbvh_node(&bbb, f, cnt, leaf);
+            }
+            base
+        };
+        b.trange(li, text_lo, count, root);
+    }
+    (tr_start, b.n_tranges() - tr_start)
+}
+
+#[allow(clippy::type_complexity)]
 fn build(
     doc: &Doc,
     size: u64,
@@ -1975,7 +2252,12 @@ fn build(
     encode_batch: usize,
     plan_batch: usize,
     page_target_bytes: u64,
-) -> (Vec<u8>, Vec<Option<(i64, i64, i64, i64)>>, Vec<u64>) {
+) -> (
+    Vec<u8>,
+    Vec<Option<(i64, i64, i64, i64)>>,
+    Vec<u64>,
+    TextIndexStats,
+) {
     let t0 = std::time::Instant::now();
     let n = doc.cells.len();
     eprintln!("[vfs] build: recursive bbox ({} cells)...", n);
@@ -1999,8 +2281,9 @@ fn build(
     // were separate single-threaded O(records) sweeps). Texts count
     // into masks/bboxes but not into members or the paged totals.
     let bw = nl.div_ceil(8).max(1);
-    let dslots: Vec<std::sync::OnceLock<(Vec<u8>, u64, BBox)>> =
-        (0..n).map(|_| std::sync::OnceLock::new()).collect();
+    let dslots: Vec<
+        std::sync::OnceLock<(Vec<u8>, Vec<u8>, u64, BBox)>,
+    > = (0..n).map(|_| std::sync::OnceLock::new()).collect();
     let (lrecs, lmems) = {
         let td = std::time::Instant::now();
         let next = std::sync::atomic::AtomicUsize::new(0);
@@ -2050,6 +2333,7 @@ fn build(
                             }
                             let cell = &doc.cells[ci];
                             let mut mask = vec![0u8; bw];
+                            let mut tmask = vec![0u8; bw];
                             let mut mems = 0u64;
                             let mut bx = BBox::EMPTY;
                             for r in &cell.rects {
@@ -2108,6 +2392,10 @@ fn build(
                                 let li = lidx[&(t.layer, t.dt)];
                                 let (ex, ey) = rep_extent(&t.rep);
                                 floe_ovm::bit_set(&mut mask, li);
+                                // text-only mask (v5): the label
+                                // walk prunes text-free subtrees
+                                // with its recursive fold
+                                floe_ovm::bit_set(&mut tmask, li);
                                 bx.grow(&BBox {
                                     x0: t.x + ex.0.min(0),
                                     y0: t.y + ey.0.min(0),
@@ -2115,7 +2403,8 @@ fn build(
                                     y1: t.y + ey.1.max(0),
                                 });
                             }
-                            let _ = dslots[ci].set((mask, mems, bx));
+                            let _ = dslots[ci]
+                                .set((mask, tmask, mems, bx));
                             done.fetch_add(1, Relaxed);
                         }
                         (lr, lm)
@@ -2137,12 +2426,14 @@ fn build(
         (lrecs, lmems)
     };
     let mut dmask: Vec<Vec<u8>> = Vec::with_capacity(n);
+    let mut dtmask: Vec<Vec<u8>> = Vec::with_capacity(n);
     let mut dmembers: Vec<u64> = Vec::with_capacity(n);
     let mut dbox: Vec<BBox> = Vec::with_capacity(n);
     for slot in dslots {
-        let (m, mm, bx) =
+        let (m, tm, mm, bx) =
             slot.into_inner().expect("direct slot unset");
         dmask.push(m);
+        dtmask.push(tm);
         dmembers.push(mm);
         dbox.push(bx);
     }
@@ -2164,10 +2455,12 @@ fn build(
     let mut height = vec![0u32; n];
     let mut rmembers = vec![0u64; n];
     let mut rmask: Vec<Vec<u8>> = vec![Vec::new(); n];
+    let mut rtmask: Vec<Vec<u8>> = vec![Vec::new(); n];
     for &ci in &topo {
         let mut hm = 0u32;
         let mut mm = dmembers[ci];
         let mut mask = dmask[ci].clone();
+        let mut tmask = dtmask[ci].clone();
         for pl in &doc.cells[ci].places {
             let c = pl.cell;
             hm = hm.max(height[c].checked_add(1).unwrap_or_else(
@@ -2179,10 +2472,14 @@ fn build(
             for (a, b) in mask.iter_mut().zip(&rmask[c]) {
                 *a |= *b;
             }
+            for (a, b) in tmask.iter_mut().zip(&rtmask[c]) {
+                *a |= *b;
+            }
         }
         height[ci] = hm;
         rmembers[ci] = mm;
         rmask[ci] = mask;
+        rtmask[ci] = tmask;
     }
 
     let mut b = Builder::new(doc.unit, size, mtime, nl);
@@ -2206,6 +2503,15 @@ fn build(
         std::fs::File::create(&ovp_path).expect("create ovp"),
     );
     let mut ovp_off = 0u64;
+    // design.ovt (v5): text strings + pts pools stream here - the
+    // text pass runs serially in cell order inside the batch loop
+    // (cheap, source-local), so bytes are jobs-independent
+    let ovt_path = format!("{}/design.ovt", outdir);
+    let mut ovt = std::io::BufWriter::new(
+        std::fs::File::create(&ovt_path).expect("create ovt"),
+    );
+    let mut ovt_off = 0u64;
+    let mut tstats = TextIndexStats::default();
     let mut pages_bytes = 0u64;
     let mut pages_total = 0usize;
     let mut lrecs_stored = vec![0u64; nl];
@@ -2448,8 +2754,13 @@ fn build(
                 .expect("limit exceeded: page count");
             batch_jobs.append(&mut pages);
 
+            let (tr_start, tr_count) = build_cell_texts(
+                doc, ci, &lidx, &mut b, &mut ovt, &mut ovt_off,
+                &mut tstats,
+            );
             let mask_d = b.bitset(&dmask[ci]);
             let mask_r = b.bitset(&rmask[ci]);
+            let mask_t = b.bitset(&rtmask[ci]);
             b.cell(
                 &cell.name,
                 height[ci],
@@ -2470,6 +2781,9 @@ fn build(
                 mask_d,
                 mask_r,
                 rmembers[ci],
+                tr_start,
+                tr_count,
+                mask_t,
             );
         }
         planned_cells.store(
@@ -2537,10 +2851,24 @@ fn build(
     }
 
     ovp.flush().expect("flush ovp");
+    ovt.flush().expect("flush ovt");
+    eprintln!(
+        "[vfs] build: text index {} records ({} members) in {} \
+         cells, {} grid / {} pts reps, strings {:.1} MB + pts \
+         {:.1} MB -> design.ovt (rss {})",
+        tstats.records,
+        tstats.members,
+        tstats.cells,
+        tstats.grid_reps,
+        tstats.pts_reps,
+        tstats.string_bytes as f64 / 1e6,
+        tstats.pts_bytes as f64 / 1e6,
+        rss()
+    );
     // the caller writes design.ovm LAST (commit marker, after the
-    // viewer-side files); ovp_len rides in the header so open can
-    // verify the ovm/ovp pair
-    let ovm_bytes = b.finish(ovp_off);
+    // viewer-side files); ovp_len/ovt_len ride in the header so
+    // open can verify both cache pairs
+    let ovm_bytes = b.finish(ovp_off, ovt_off);
     eprintln!(
         "[vfs] {} pages ({}) + ovm {} in {:.1}s",
         pages_total,
@@ -2548,7 +2876,7 @@ fn build(
         fmt_size(ovm_bytes.len() as u64),
         t0.elapsed().as_secs_f64()
     );
-    (ovm_bytes, rbb, lmems)
+    (ovm_bytes, rbb, lmems, tstats)
 }
 
 fn pts_bbox(pts: &[(i64, i64)]) -> BBox {

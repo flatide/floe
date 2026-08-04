@@ -7,6 +7,7 @@ like a valid cache. A final clean rebuild proves recovery.
 
   marker-deleted : killed right after the marker (design.ovm) died
   ovp-written    : killed after design.ovp, before the marker
+  ovt-written    : killed after design.ovp+design.ovt, before it
   ovm-partial    : killed mid-marker-write (half the ovm bytes)
 
 usage: python tools/validate_vfs_marker.py <src.oas> [bin]
@@ -60,6 +61,7 @@ def main():
     for kill, want in [
         ("marker-deleted", ("No such file", "no cache")),
         ("ovp-written", ("No such file", "no cache")),
+        ("ovt-written", ("No such file", "no cache")),
         ("ovm-partial", ("corrupt cache", "not an ovm")),
     ]:
         r = build(kill)
@@ -75,7 +77,7 @@ def main():
     chk(open_err() == "", "rebuilt cache does not open")
 
     shutil.rmtree(os.path.dirname(out), ignore_errors=True)
-    print("vfs-marker-checked 3 kill points + rebuild, failures: %d"
+    print("vfs-marker-checked 4 kill points + rebuild, failures: %d"
           % len(bad))
     sys.exit(1 if bad else 0)
 

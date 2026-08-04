@@ -14,6 +14,10 @@ use std::io::{Read, Seek, SeekFrom};
 pub struct Vfs {
     pub ovm: Ovm,
     ovp_path: String,
+    /// design.ovt (v5): text strings + Morton-ordered text pts
+    /// pools, read-only mapped - the label planner borrows slices,
+    /// only SELECTED labels ever materialize a String
+    ovt: floe_ovm::Backing,
 }
 
 #[derive(Clone, Debug)]
@@ -52,7 +56,31 @@ impl Vfs {
                 ovp_size, ovm.ovp_len
             ));
         }
-        Ok(Vfs { ovm, ovp_path })
+        // design.ovt is the same pair contract as design.ovp: the
+        // marker commits an exact byte length (a no-text cache
+        // commits 0 and the file may be absent)
+        let ovt_path = format!("{}/design.ovt", dir);
+        let ovt_size = std::fs::metadata(&ovt_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        if ovt_size != ovm.ovt_len {
+            return Err(format!(
+                "corrupt cache; rebuild: design.ovt is {} bytes but \
+                 design.ovm committed {}",
+                ovt_size, ovm.ovt_len
+            ));
+        }
+        let ovt = if ovm.ovt_len == 0 {
+            floe_ovm::Backing::Vec(Vec::new())
+        } else {
+            floe_ovm::map_file(&ovt_path)?
+        };
+        Ok(Vfs { ovm, ovp_path, ovt })
+    }
+
+    /// design.ovt bytes (text strings + pts pools)
+    pub fn ovt(&self) -> &[u8] {
+        &self.ovt
     }
 
     pub fn page_name(&self, pi: u32) -> String {
@@ -442,8 +470,11 @@ mod tests {
             m,
             m,
             1,
+            0,
+            0,
+            m,
         );
-        Ovm::from_bytes(b.finish(1 << 20)).unwrap()
+        Ovm::from_bytes(b.finish(1 << 20, 0)).unwrap()
     }
 
     #[test]
