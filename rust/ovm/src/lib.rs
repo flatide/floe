@@ -827,7 +827,7 @@ impl Builder {
     /// ovp_len / ovt_len: byte lengths of the design.ovp/design.ovt
     /// this ovm commits - the reader (and the viewer's Vfs::open)
     /// verifies both pairs.
-    pub fn finish(self, ovp_len: u64, ovt_len: u64) -> Vec<u8> {
+    pub fn finish(mut self, ovp_len: u64, ovt_len: u64) -> Vec<u8> {
         // The pts pool is logically the tail of the places section. Append
         // both source buffers directly to the final output instead of first
         // cloning the complete pool into `places`; on fill-heavy designs that
@@ -886,21 +886,32 @@ impl Builder {
                 .expect("limit exceeded: ovm bytes");
         }
         assert_eq!(out.len(), HEADER_LEN, "header layout");
-        out.extend_from_slice(&self.names);
-        out.extend_from_slice(&self.layers);
-        out.extend_from_slice(&self.cells);
-        out.extend_from_slice(&self.places);
-        out.extend_from_slice(&self.pts_pool);
-        out.extend_from_slice(&self.bitsets);
-        out.extend_from_slice(&self.bvh);
-        out.extend_from_slice(&self.pages);
-        out.extend_from_slice(&self.pranges);
-        out.extend_from_slice(&self.pbvh);
-        out.extend_from_slice(&self.texts);
-        out.extend_from_slice(&self.tranges);
-        out.extend_from_slice(&self.tbvh);
-        out.extend_from_slice(&self.treps);
-        out.extend_from_slice(&self.tchunks);
+        // Release each source section immediately after copying it.
+        // Previously every Builder Vec remained allocated until the
+        // complete final OVM copy existed, making finish() approach a
+        // 2x metadata peak. Vec::with_capacity reserves address space;
+        // pages become resident only as these sequential writes land.
+        macro_rules! append_release {
+            ($field:ident) => {{
+                out.extend_from_slice(&self.$field);
+                self.$field = Vec::new();
+            }};
+        }
+        append_release!(names);
+        append_release!(layers);
+        append_release!(cells);
+        append_release!(places);
+        append_release!(pts_pool);
+        append_release!(bitsets);
+        append_release!(bvh);
+        append_release!(pages);
+        append_release!(pranges);
+        append_release!(pbvh);
+        append_release!(texts);
+        append_release!(tranges);
+        append_release!(tbvh);
+        append_release!(treps);
+        append_release!(tchunks);
         debug_assert_eq!(out.len(), HEADER_LEN + body_len);
         out
     }
@@ -1444,103 +1455,126 @@ impl Ovm {
                 return Err(corrupt(format!("pbvh node {} range", i)));
             }
         }
-        // text tables (v5), small-table structural checks: run
-        // ranges, BVH node ranges, rep descriptors. Like pranges/
-        // pbvh these stay in the SHALLOW tier; the per-record text
-        // sweep is deep-only (multi-million-record sections must
-        // not fault in whole at mmap open - same trade-off as
-        // places/instance-BVH).
-        let trb = sec(SEC_TRANGES);
-        for i in 0..n_tranges as usize {
-            let b = &trb[i * TRANGE_LEN..];
-            if g32(b, 0) >= n_layers {
-                return Err(corrupt(format!(
-                    "trange {} layer index",
-                    i
-                )));
-            }
-            if g32(b, 4) as u64 + g32(b, 8) as u64 > n_texts as u64 {
-                return Err(corrupt(format!(
-                    "trange {} text range",
-                    i
-                )));
-            }
-            let root = g32(b, 12);
-            if root != TBVH_NONE && root >= n_tbvh {
-                return Err(corrupt(format!(
-                    "trange {} tbvh root",
-                    i
-                )));
-            }
-        }
-        let tvb = sec(SEC_TBVH);
-        for i in 0..n_tbvh as usize {
-            let b = &tvb[i * TBVH_LEN..];
-            let first = g32(b, 32) as u64;
-            let count = g16(b, 36) as u64;
-            let leaf = g16(b, 38) != 0;
-            let lim =
-                if leaf { n_texts as u64 } else { n_tbvh as u64 };
-            if first + count > lim {
-                return Err(corrupt(format!(
-                    "tbvh node {} range",
-                    i
-                )));
-            }
-        }
-        let tpb = sec(SEC_TREPS);
-        for i in 0..n_treps as usize {
-            let b = &tpb[i * TREP_LEN..];
-            let na = g32(b, 4) as u64;
-            let nb = g32(b, 8) as u64;
-            match b[0] {
-                1 => {
-                    if na == 0 || nb == 0 {
-                        return Err(corrupt(format!(
-                            "trep {} grid dims",
-                            i
-                        )));
-                    }
-                }
-                2 => {
-                    if na == 0 {
-                        return Err(corrupt(format!(
-                            "trep {} pts count",
-                            i
-                        )));
-                    }
-                    let clo = g32(b, 12) as u64;
-                    let ccnt = g32(b, 56) as u64;
-                    if clo + ccnt > n_tchunks as u64 {
-                        return Err(corrupt(format!(
-                            "trep {} chunk range",
-                            i
-                        )));
-                    }
-                    if ccnt != na.div_ceil(PTS_CHUNK as u64) {
-                        return Err(corrupt(format!(
-                            "trep {} chunk count",
-                            i
-                        )));
-                    }
-                    let need = na
-                        .checked_mul(16)
-                        .and_then(|v| v.checked_add(g64(b, 48)))
-                        .ok_or_else(|| {
-                            corrupt(format!("trep {} pts wraps", i))
-                        })?;
-                    if need > ovt_len {
-                        return Err(corrupt(format!(
-                            "trep {} pts beyond ovt_len",
-                            i
-                        )));
-                    }
-                }
-                k => {
+        // Potentially one-per-text tables stay out of the mmap-open
+        // sweep. Their section strides/counts were checked above;
+        // full range/kind/bbox validation belongs to from_bytes() and
+        // offline gates, otherwise a repetition-heavy text index is
+        // faulted into RSS before the first viewport.
+        if deep {
+            let trb = sec(SEC_TRANGES);
+            for i in 0..n_tranges as usize {
+                let b = &trb[i * TRANGE_LEN..];
+                if g32(b, 0) >= n_layers {
                     return Err(corrupt(format!(
-                        "trep {} kind {}",
-                        i, k
-                    )))
+                        "trange {} layer index",
+                        i
+                    )));
+                }
+                if g32(b, 4) as u64 + g32(b, 8) as u64
+                    > n_texts as u64
+                {
+                    return Err(corrupt(format!(
+                        "trange {} text range",
+                        i
+                    )));
+                }
+                let root = g32(b, 12);
+                if root != TBVH_NONE && root >= n_tbvh {
+                    return Err(corrupt(format!(
+                        "trange {} tbvh root",
+                        i
+                    )));
+                }
+            }
+            let tvb = sec(SEC_TBVH);
+            for i in 0..n_tbvh as usize {
+                let b = &tvb[i * TBVH_LEN..];
+                let bb = gbox(b, 0);
+                if bb.x1 < bb.x0 || bb.y1 < bb.y0 {
+                    return Err(corrupt(format!(
+                        "tbvh node {} bbox inverted",
+                        i
+                    )));
+                }
+                let first = g32(b, 32) as u64;
+                let count = g16(b, 36) as u64;
+                let leaf = g16(b, 38) != 0;
+                let lim = if leaf {
+                    n_texts as u64
+                } else {
+                    n_tbvh as u64
+                };
+                if first + count > lim {
+                    return Err(corrupt(format!(
+                        "tbvh node {} range",
+                        i
+                    )));
+                }
+            }
+            let tpb = sec(SEC_TREPS);
+            for i in 0..n_treps as usize {
+                let b = &tpb[i * TREP_LEN..];
+                let na = g32(b, 4) as u64;
+                let nb = g32(b, 8) as u64;
+                match b[0] {
+                    1 => {
+                        if na == 0 || nb == 0 {
+                            return Err(corrupt(format!(
+                                "trep {} grid dims",
+                                i
+                            )));
+                        }
+                    }
+                    2 => {
+                        if na == 0 {
+                            return Err(corrupt(format!(
+                                "trep {} pts count",
+                                i
+                            )));
+                        }
+                        let clo = g32(b, 12) as u64;
+                        let ccnt = g32(b, 56) as u64;
+                        if clo + ccnt > n_tchunks as u64 {
+                            return Err(corrupt(format!(
+                                "trep {} chunk range",
+                                i
+                            )));
+                        }
+                        if ccnt != na.div_ceil(PTS_CHUNK as u64) {
+                            return Err(corrupt(format!(
+                                "trep {} chunk count",
+                                i
+                            )));
+                        }
+                        let need = na
+                            .checked_mul(16)
+                            .and_then(|v| v.checked_add(g64(b, 48)))
+                            .ok_or_else(|| {
+                                corrupt(format!("trep {} pts wraps", i))
+                            })?;
+                        if need > ovt_len {
+                            return Err(corrupt(format!(
+                                "trep {} pts beyond ovt_len",
+                                i
+                            )));
+                        }
+                    }
+                    k => {
+                        return Err(corrupt(format!(
+                            "trep {} kind {}",
+                            i, k
+                        )))
+                    }
+                }
+            }
+            let tcb = sec(SEC_TCHUNKS);
+            for i in 0..n_tchunks as usize {
+                let bb = gbox(&tcb[i * TCHUNK_LEN..], 0);
+                if bb.x1 < bb.x0 || bb.y1 < bb.y0 {
+                    return Err(corrupt(format!(
+                        "tchunk {} bbox inverted",
+                        i
+                    )));
                 }
             }
         }
@@ -1656,9 +1690,17 @@ impl Ovm {
         }
 
         if deep {
+            let contains_box = |outer: &BBox, inner: &BBox| {
+                outer.x0 <= inner.x0
+                    && outer.y0 <= inner.y0
+                    && inner.x1 <= outer.x1
+                    && inner.y1 <= outer.y1
+            };
             // texts: per-record sweep (owner indexes, ovt string
             // spans, rep index, bbox sanity)
             let txb = sec(SEC_TEXTS);
+            let tpb = sec(SEC_TREPS);
+            let tcb = sec(SEC_TCHUNKS);
             for i in 0..n_texts as usize {
                 let b = &txb[i * TEXT_LEN..];
                 if g32(b, 0) >= n_cells {
@@ -1697,6 +1739,101 @@ impl Ovm {
                         "text {} bbox inverted",
                         i
                     )));
+                }
+                let (x, y) = (gi64(b, 8), gi64(b, 16));
+                let anchor = BBox { x0: x, y0: y, x1: x, y1: y };
+                if !contains_box(&bb, &anchor) {
+                    return Err(corrupt(format!(
+                        "text {} bbox misses anchor",
+                        i
+                    )));
+                }
+                if rep != TREP_NONE {
+                    let rb = &tpb[rep as usize * TREP_LEN..];
+                    match rb[0] {
+                        1 => {
+                            let na = g32(rb, 4) as i128;
+                            let nb = g32(rb, 8) as i128;
+                            let va = (gi64(rb, 16), gi64(rb, 24));
+                            let vb = (gi64(rb, 32), gi64(rb, 40));
+                            for &(ii, jj) in &[
+                                (0, 0),
+                                (na - 1, 0),
+                                (0, nb - 1),
+                                (na - 1, nb - 1),
+                            ] {
+                                let px = x as i128
+                                    + ii * va.0 as i128
+                                    + jj * vb.0 as i128;
+                                let py = y as i128
+                                    + ii * va.1 as i128
+                                    + jj * vb.1 as i128;
+                                let (Ok(px), Ok(py)) =
+                                    (i64::try_from(px), i64::try_from(py))
+                                else {
+                                    return Err(corrupt(format!(
+                                        "text {} grid bbox overflow",
+                                        i
+                                    )));
+                                };
+                                let p = BBox {
+                                    x0: px,
+                                    y0: py,
+                                    x1: px,
+                                    y1: py,
+                                };
+                                if !contains_box(&bb, &p) {
+                                    return Err(corrupt(format!(
+                                        "text {} bbox misses grid",
+                                        i
+                                    )));
+                                }
+                            }
+                        }
+                        2 => {
+                            let lo = g32(rb, 12);
+                            let cnt = g32(rb, 56);
+                            for k in 0..cnt {
+                                let cb = gbox(
+                                    &tcb[(lo + k) as usize * TCHUNK_LEN..],
+                                    0,
+                                );
+                                let translated = BBox {
+                                    x0: x.checked_add(cb.x0).ok_or_else(|| {
+                                        corrupt(format!(
+                                            "text {} pts bbox overflow",
+                                            i
+                                        ))
+                                    })?,
+                                    y0: y.checked_add(cb.y0).ok_or_else(|| {
+                                        corrupt(format!(
+                                            "text {} pts bbox overflow",
+                                            i
+                                        ))
+                                    })?,
+                                    x1: x.checked_add(cb.x1).ok_or_else(|| {
+                                        corrupt(format!(
+                                            "text {} pts bbox overflow",
+                                            i
+                                        ))
+                                    })?,
+                                    y1: y.checked_add(cb.y1).ok_or_else(|| {
+                                        corrupt(format!(
+                                            "text {} pts bbox overflow",
+                                            i
+                                        ))
+                                    })?,
+                                };
+                                if !contains_box(&bb, &translated) {
+                                    return Err(corrupt(format!(
+                                        "text {} bbox misses pts chunk {}",
+                                        i, k
+                                    )));
+                                }
+                            }
+                        }
+                        _ => unreachable!("trep kind checked above"),
+                    }
                 }
             }
             // trange ownership: every text belongs to EXACTLY one
@@ -1764,6 +1901,7 @@ impl Ovm {
                         }
                         node_claim[ni as usize] = true;
                         let nb = &tvb[ni as usize * TBVH_LEN..];
+                        let nbb = gbox(nb, 0);
                         let first = g32(nb, 32);
                         let count = g16(nb, 36) as u32;
                         if g16(nb, 38) != 0 {
@@ -1776,9 +1914,32 @@ impl Ovm {
                                     ni, tri
                                 )));
                             }
+                            for ti in first..first + count {
+                                let tbb = gbox(
+                                    &txb[ti as usize * TEXT_LEN..],
+                                    40,
+                                );
+                                if !contains_box(&nbb, &tbb) {
+                                    return Err(corrupt(format!(
+                                        "tbvh node {} bbox misses text {}",
+                                        ni, ti
+                                    )));
+                                }
+                            }
                         } else {
                             for k2 in 0..count {
-                                stack.push(first + k2);
+                                let child = first + k2;
+                                let cbb = gbox(
+                                    &tvb[child as usize * TBVH_LEN..],
+                                    0,
+                                );
+                                if !contains_box(&nbb, &cbb) {
+                                    return Err(corrupt(format!(
+                                        "tbvh node {} bbox misses child {}",
+                                        ni, child
+                                    )));
+                                }
+                                stack.push(child);
                             }
                         }
                     }
@@ -2290,7 +2451,9 @@ mod tests {
             pb.y1 += 1;
             b.text(0, 0, 1, 1, 0, 2, rp, &pb, 2);
             let r0 = b.tbvh_node(&one, t0, 1, true);
-            let _r1 = b.tbvh_node(&gb, t0 + 1, 2, true);
+            let mut right = gb;
+            right.grow(&pb);
+            let _r1 = b.tbvh_node(&right, t0 + 1, 2, true);
             let mut ub = one;
             ub.grow(&gb);
             ub.grow(&pb);
@@ -2363,7 +2526,7 @@ mod tests {
                 bytes[88 + s * 16..96 + s * 16].try_into().unwrap(),
             ) as usize
         };
-        // (a) trange layer index out of range (shallow tier)
+        // (a) trange layer index out of range (deep tier)
         let mut c = good.clone();
         let o = sec_off(&c, SEC_TRANGES);
         c[o..o + 4].copy_from_slice(&99u32.to_le_bytes());
@@ -2404,6 +2567,20 @@ mod tests {
             "{}",
             e
         );
+        // (g) a structurally valid but too-small node bbox would
+        // silently cull labels unless the deep gate checks soundness
+        let mut c = good.clone();
+        let o = sec_off(&c, SEC_TBVH) + root_i * TBVH_LEN;
+        c[o + 16..o + 24].copy_from_slice(&0i64.to_le_bytes());
+        let e = err_of(Ovm::from_bytes(c));
+        assert!(e.contains("bbox misses child"), "{}", e);
+        // (h) chunk bbox inversion must not reach the planner
+        let mut c = good.clone();
+        let o = sec_off(&c, SEC_TCHUNKS);
+        c[o..o + 8].copy_from_slice(&10i64.to_le_bytes());
+        c[o + 16..o + 24].copy_from_slice(&0i64.to_le_bytes());
+        let e = err_of(Ovm::from_bytes(c));
+        assert!(e.contains("tchunk 0 bbox inverted"), "{}", e);
     }
 
     #[test]

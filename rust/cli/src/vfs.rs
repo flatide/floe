@@ -1904,7 +1904,10 @@ fn build_cell_texts(
     if cell.texts.is_empty() {
         return (tr_start, 0);
     }
-    st.cells += 1;
+    st.cells = st
+        .cells
+        .checked_add(1)
+        .expect("limit exceeded: text-bearing cells");
     let mut groups: std::collections::BTreeMap<u32, Vec<u32>> =
         std::collections::BTreeMap::new();
     for (ti, t) in cell.texts.iter().enumerate() {
@@ -1932,18 +1935,32 @@ fn build_cell_texts(
         let mut recs: Vec<TRec> = Vec::with_capacity(idxs.len());
         for &ti in &idxs {
             let t = &cell.texts[ti as usize];
-            st.records += 1;
-            st.members += t.rep.members();
+            st.records = st
+                .records
+                .checked_add(1)
+                .expect("limit exceeded: text records");
+            st.members = st
+                .members
+                .checked_add(t.rep.members())
+                .expect("limit exceeded: text members");
             let soff = *ovt_off;
             ovt.write_all(t.s.as_bytes()).expect("write ovt");
-            *ovt_off += t.s.len() as u64;
-            st.string_bytes += t.s.len() as u64;
+            *ovt_off = ovt_off
+                .checked_add(t.s.len() as u64)
+                .expect("limit exceeded: design.ovt bytes");
+            st.string_bytes = st
+                .string_bytes
+                .checked_add(t.s.len() as u64)
+                .expect("limit exceeded: text string bytes");
             let slen =
                 narrow_u32(t.s.len() as u64, "text string length");
             let rep = match &t.rep {
                 Rep::One => floe_ovm::TREP_NONE,
                 Rep::Grid { na, nb, va, vb } => {
-                    st.grid_reps += 1;
+                    st.grid_reps = st
+                        .grid_reps
+                        .checked_add(1)
+                        .expect("limit exceeded: text grid reps");
                     b.trep_grid(
                         narrow_u32(*na, "text rep na"),
                         narrow_u32(*nb, "text rep nb"),
@@ -1952,7 +1969,10 @@ fn build_cell_texts(
                     )
                 }
                 Rep::Pts(p) => {
-                    st.pts_reps += 1;
+                    st.pts_reps = st
+                        .pts_reps
+                        .checked_add(1)
+                        .expect("limit exceeded: text pts reps");
                     let prep = floe_ovm::prepare_pts(p);
                     let pts_off = *ovt_off;
                     for &(px, py) in &prep.pts {
@@ -1961,8 +1981,16 @@ fn build_cell_texts(
                         ovt.write_all(&py.to_le_bytes())
                             .expect("write ovt");
                     }
-                    *ovt_off += prep.pts.len() as u64 * 16;
-                    st.pts_bytes += prep.pts.len() as u64 * 16;
+                    let pts_bytes = (prep.pts.len() as u64)
+                        .checked_mul(16)
+                        .expect("limit exceeded: text pts bytes");
+                    *ovt_off = ovt_off
+                        .checked_add(pts_bytes)
+                        .expect("limit exceeded: design.ovt bytes");
+                    st.pts_bytes = st
+                        .pts_bytes
+                        .checked_add(pts_bytes)
+                        .expect("limit exceeded: text pts bytes");
                     let chunk_lo = b.n_tchunks();
                     for c in &prep.chunks {
                         b.tchunk(c);
@@ -1982,12 +2010,16 @@ fn build_cell_texts(
                 }
             };
             let (ex, ey) = rep_extent(&t.rep);
+            let add = |a: i64, b: i64, field: &str| {
+                a.checked_add(b)
+                    .unwrap_or_else(|| panic!("limit exceeded: {}", field))
+            };
             recs.push(TRec {
                 bbox: BBox {
-                    x0: t.x + ex.0.min(0),
-                    y0: t.y + ey.0.min(0),
-                    x1: t.x + ex.1.max(0),
-                    y1: t.y + ey.1.max(0),
+                    x0: add(t.x, ex.0.min(0), "text bbox x0"),
+                    y0: add(t.y, ey.0.min(0), "text bbox y0"),
+                    x1: add(t.x, ex.1.max(0), "text bbox x1"),
+                    y1: add(t.y, ey.1.max(0), "text bbox y1"),
                 },
                 rep,
                 soff,
@@ -1998,31 +2030,25 @@ fn build_cell_texts(
             });
         }
         // Morton pre-sort over bbox centers, source_seq tie-break
-        let centers: Vec<(i64, i64)> = recs
-            .iter()
-            .map(|r| {
-                (
-                    ((r.bbox.x0 as i128 + r.bbox.x1 as i128) / 2)
-                        as i64,
-                    ((r.bbox.y0 as i128 + r.bbox.y1 as i128) / 2)
-                        as i64,
-                )
-            })
-            .collect();
+        let center = |r: &TRec| {
+            (
+                ((r.bbox.x0 as i128 + r.bbox.x1 as i128) / 2)
+                    as i64,
+                ((r.bbox.y0 as i128 + r.bbox.y1 as i128) / 2)
+                    as i64,
+            )
+        };
         let (mut minx, mut miny) = (i64::MAX, i64::MAX);
-        for &(cx, cy) in &centers {
+        for r in &recs {
+            let (cx, cy) = center(r);
             minx = minx.min(cx);
             miny = miny.min(cy);
         }
         let mut order: Vec<u32> = (0..recs.len() as u32).collect();
         order.sort_by_key(|&i| {
+            let (cx, cy) = center(&recs[i as usize]);
             (
-                floe_ovm::morton_key(
-                    centers[i as usize].0,
-                    centers[i as usize].1,
-                    minx,
-                    miny,
-                ),
+                floe_ovm::morton_key(cx, cy, minx, miny),
                 recs[i as usize].seq,
             )
         });
@@ -3474,8 +3500,13 @@ fn serve_hier(
     // small per-gen TSV, kind-explicit rows (txt = design layer,
     // blk = runtime annotation). View-generation asset: the client
     // applies it with the same gen's delta or drops both.
-    let (labels_path, nlabels, text_ms) = if label_px <= 0.0 {
-        ("-".to_string(), 0usize, 0.0)
+    let (labels_path, nlabels, text_ms, text_stats) = if label_px <= 0.0 {
+        (
+            "-".to_string(),
+            0usize,
+            0.0,
+            floe_vfs::text::TextStats::default(),
+        )
     } else {
         let tl = std::time::Instant::now();
         let mut lreq = req.clone();
@@ -3483,7 +3514,7 @@ fn serve_hier(
         let lp = v.plan_labels(&lreq)?;
         let ms = tl.elapsed().as_secs_f64() * 1e3;
         if lp.rows.is_empty() {
-            ("-".to_string(), 0, ms)
+            ("-".to_string(), 0, ms, lp.stats)
         } else {
             let mut wbuf = String::new();
             for r in &lp.rows {
@@ -3508,7 +3539,7 @@ fn serve_hier(
             let p = format!("{}/labels_{}.tsv", out, gen);
             std::fs::write(&p, wbuf)
                 .map_err(|e| e.to_string())?;
-            (p, lp.rows.len(), ms)
+            (p, lp.rows.len(), ms, lp.stats)
         }
     };
     let (mut bytes, mut members) = (0u64, 0u64);
@@ -3524,6 +3555,9 @@ fn serve_hier(
          bytes={} members={} plan_ms={:.2} wc_cells={} \
          inst_edges={} frame_rects={} partial={} deferred={} \
          lod={} labels={} nlabels={} text_plan_ms={:.2} \
+         labels_truncated={} text_bvh_nodes={} \
+         text_place_bvh_nodes={} text_place_records={} \
+         text_members_tested={} text_members_visible={} \
          resident_committed_mb={:.1} \
          resident_projected_mb={:.1} \
          pending_new_mb={:.1} pending_evict_mb={:.1}",
@@ -3550,6 +3584,12 @@ fn serve_hier(
         labels_path,
         nlabels,
         text_ms,
+        text_stats.truncated as u8,
+        text_stats.tbvh_nodes,
+        text_stats.place_bvh_nodes,
+        text_stats.place_records_scanned,
+        text_stats.members_tested,
+        text_stats.members_visible,
         mb(upd.committed_bytes),
         mb(upd.projected_bytes),
         mb(upd.pending_new_bytes),

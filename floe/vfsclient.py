@@ -118,10 +118,18 @@ class VfsClient:
         ev = out.get("evict", "-")
         out["evict"] = [] if ev in ("-", "") else ev.split(",")
         for k in ("pages", "new", "bytes", "members", "lod",
-                  "nlabels"):
+                  "nlabels", "labels_truncated", "text_bvh_nodes",
+                  "text_place_bvh_nodes", "text_place_records",
+                  "text_members_tested", "text_members_visible"):
             if k in out:
                 try:
                     out[k] = int(out[k])
+                except ValueError:
+                    pass
+        for k in ("plan_ms", "text_plan_ms"):
+            if k in out:
+                try:
+                    out[k] = float(out[k])
                 except ValueError:
                     pass
         return out

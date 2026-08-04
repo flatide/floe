@@ -1163,10 +1163,17 @@ class Viewer:
                     lod = ""
                     if res.get("lod"):
                         lod = ", lod %d" % res["lod"]
-                    mode = "live (%d tiles, %d ms%s%s%s%s%s%s)" \
+                    text = ""
+                    if res.get("text_plan_ms") is not None:
+                        text = ", text %.1fms/%s places" % (
+                            res["text_plan_ms"],
+                            fmt_count(res.get("text_place_records", 0)))
+                    if res.get("labels_truncated"):
+                        text += ", labels partial"
+                    mode = "live (%d tiles, %d ms%s%s%s%s%s%s%s)" \
                         % (res["tiles"], res["ms"], split,
                            self._depth_note(used), cut, drawn,
-                           refin, lod)
+                           refin, lod, text)
                 # also to stdout: the status bar is overwritten by
                 # cursor coords on mouse-move, so the perf line would
                 # otherwise vanish before it can be read (only the

@@ -327,6 +327,15 @@ def main():
     p = start()
     r1 = ask(p, "gen=1 view=0,0,20,20 px=100 cut=0 depth=full "
                 "layers=all out=%s ack=0" % tmp)
+    metrics = ("labels_truncated", "text_bvh_nodes",
+               "text_place_bvh_nodes", "text_place_records",
+               "text_members_tested", "text_members_visible",
+               "text_plan_ms")
+    missing = [k for k in metrics if k not in r1]
+    if missing:
+        fail("X6 live response missing metrics: %s" % ",".join(missing))
+    if int(r1.get("labels_truncated", 1)) != 0:
+        fail("X6 ordinary fixture unexpectedly truncated labels")
     if r1.get("labels", "-") == "-" or int(r1.get("nlabels", 0)) < 1:
         fail("X6 no labels in live response: %r" % r1)
     else:

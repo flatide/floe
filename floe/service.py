@@ -375,6 +375,12 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
             # (M7): surfaced so the user always knows the current
             # frame is a display approximation
             out["lod"] = r["lod"]
+        if isinstance(r.get("text_plan_ms"), (int, float)):
+            out["text_plan_ms"] = r["text_plan_ms"]
+        if r.get("labels_truncated"):
+            out["labels_truncated"] = True
+        if isinstance(r.get("text_place_records"), int):
+            out["text_place_records"] = r["text_place_records"]
         res.put(out)
 
     # hier: budgeted streaming rounds (VFS_HIER.md par.5 M3.5). Each
@@ -443,10 +449,14 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
         if os.environ.get("FLOE_DEBUG"):
             import sys as _sys
             print("[svc] gen=%s job=%s pages=%s new=%s partial=%s "
-                  "plan_ms=%s newer=%s kb=%s" %
+                  "plan_ms=%s text_ms=%s text_places=%s "
+                  "labels_truncated=%s newer=%s kb=%s" %
                   (mosaic.req_gen, job["gen"], r.get("pages"),
                    r.get("new"), r.get("partial"),
-                   r.get("plan_ms"), newer(), mosaic.stream_kb),
+                   r.get("plan_ms"), r.get("text_plan_ms"),
+                   r.get("text_place_records"),
+                   r.get("labels_truncated"), newer(),
+                   mosaic.stream_kb),
                   file=_sys.stderr, flush=True)
         t_round = time.perf_counter() - tl
         load_total += t_round

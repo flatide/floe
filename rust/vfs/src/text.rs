@@ -76,6 +76,11 @@ pub struct LabelRow {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TextStats {
     pub tbvh_nodes: u64,
+    /// instance-BVH nodes visited while locating child placements
+    pub place_bvh_nodes: u64,
+    /// placement records reaching the text/block triage; unlike the
+    /// old linear walk this is bounded by intersecting BVH leaves
+    pub place_records_scanned: u64,
     pub records_candidate: u64,
     pub rep_chunks_scanned: u64,
     pub members_tested: u64,
@@ -396,6 +401,174 @@ impl<'a> LWalk<'a> {
             r
         }
     }
+
+    /// Process one placement record selected by the instance BVH.
+    /// The BVH removes off-viewport records before this point; the
+    /// child's recursive text mask then removes text-free subtrees
+    /// before any repetition member is enumerated.
+    fn one_place(
+        &mut self,
+        r: u32,
+        xf: &Xf,
+        clip: &BBox,
+        pli: u64,
+        block_min_dbu: f64,
+        stack: &mut Vec<(u32, u32, Xf, BBox)>,
+    ) {
+        self.st.place_records_scanned += 1;
+        let h = self.v.place_head(pli);
+        let rb = self.v.cell_rbbox(h.child);
+        if rb.is_empty() {
+            return;
+        }
+        let cw = (rb.x1 - rb.x0).max(0) as u64;
+        let chh = (rb.y1 - rb.y0).max(0) as u64;
+        let below_cut = cw < self.cut && chh < self.cut;
+        let t0 = Xf::place(h.x, h.y, h.rot, h.flip);
+        let b0 = xf_bbox(&t0, &rb);
+        // Depth boundary: geometry renders the child as a frame, so
+        // synthesize its name when the frame is large enough to read.
+        let block = r == 0
+            && !below_cut
+            && ((b0.x1 - b0.x0).max(0) as f64 >= block_min_dbu
+                || (b0.y1 - b0.y0).max(0) as f64 >= block_min_dbu);
+        let descend = r != 0
+            && !below_cut
+            && masks_intersect(
+                self.v.bitset(self.v.cell_tmask_rec(h.child)),
+                &self.req.vis,
+            );
+        if !block && !descend {
+            return;
+        }
+        let child_r = if r == REM_FULL {
+            REM_FULL
+        } else if r > 0 {
+            self.norm_r(h.child, r - 1)
+        } else {
+            0
+        };
+        let mut handle = |w: &mut LWalk, ox: i64, oy: i64| {
+            if w.member_budget == 0 {
+                w.st.truncated = true;
+                w.done = true;
+                return;
+            }
+            w.member_budget -= 1;
+            w.st.place_members_enumerated += 1;
+            let mb = BBox {
+                x0: b0.x0.saturating_add(ox),
+                y0: b0.y0.saturating_add(oy),
+                x1: b0.x1.saturating_add(ox),
+                y1: b0.y1.saturating_add(oy),
+            };
+            if !mb.intersects(clip) {
+                return;
+            }
+            if block {
+                w.st.blocks_visible += 1;
+                let cx =
+                    ((mb.x0 as i128 + mb.x1 as i128) / 2) as i64;
+                let cy =
+                    ((mb.y0 as i128 + mb.y1 as i128) / 2) as i64;
+                let (gx, gy) = xf.apply(cx, cy);
+                w.add(Cand {
+                    block: true,
+                    layer_pos: 0,
+                    hash: fnv(&[gx as u64, gy as u64, h.child as u64]),
+                    x: gx,
+                    y: gy,
+                    src: Src::Cell(h.child),
+                });
+                return;
+            }
+            let tm = Xf::place(
+                h.x.saturating_add(ox),
+                h.y.saturating_add(oy),
+                h.rot,
+                h.flip,
+            );
+            let cclip = xf_bbox(&tm.invert(), clip).intersect(&rb);
+            if !cclip.is_empty() {
+                stack.push((
+                    h.child,
+                    child_r,
+                    xf.compose(&tm),
+                    cclip,
+                ));
+            }
+        };
+        match h.kind {
+            0 => handle(self, 0, 0),
+            1 => {
+                let mk = BBox {
+                    x0: clip.x0.saturating_sub(b0.x1),
+                    y0: clip.y0.saturating_sub(b0.y1),
+                    x1: clip.x1.saturating_sub(b0.x0),
+                    y1: clip.y1.saturating_sub(b0.y0),
+                };
+                match grid_ranges(
+                    h.na as i64,
+                    h.nb as i64,
+                    h.va,
+                    h.vb,
+                    &mk,
+                ) {
+                    GridVis::Empty => {}
+                    GridVis::Range { i0, i1, j0, j1 } => {
+                        'g: for j in j0..=j1 {
+                            for i in i0..=i1 {
+                                let ox = i as i128 * h.va.0 as i128
+                                    + j as i128 * h.vb.0 as i128;
+                                let oy = i as i128 * h.va.1 as i128
+                                    + j as i128 * h.vb.1 as i128;
+                                let (Ok(ox), Ok(oy)) =
+                                    (i64::try_from(ox), i64::try_from(oy))
+                                else {
+                                    continue;
+                                };
+                                handle(self, ox, oy);
+                                if self.done {
+                                    break 'g;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {
+                let Some(pr) = self.v.pts_ref(pli) else {
+                    return;
+                };
+                let mk = BBox {
+                    x0: clip.x0.saturating_sub(b0.x1),
+                    y0: clip.y0.saturating_sub(b0.y1),
+                    x1: clip.x1.saturating_sub(b0.x0),
+                    y1: clip.y1.saturating_sub(b0.y0),
+                };
+                if !pr.extent().intersects(&mk) {
+                    return;
+                }
+                'p: for k in 0..pr.n_chunks {
+                    let cb = pr.chunk_bbox(k);
+                    self.st.rep_chunks_scanned += 1;
+                    if !cb.intersects(&mk) {
+                        continue;
+                    }
+                    let (lo, hi) = pr.chunk_range(k);
+                    for s in lo..hi {
+                        let (ox, oy) = pr.pt(s);
+                        if mk.contains_pt(ox, oy) {
+                            handle(self, ox, oy);
+                            if self.done {
+                                break 'p;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl crate::Vfs {
@@ -471,189 +644,70 @@ pub fn plan_labels(
         if w.done {
             break;
         }
+        // A full-depth text walk has no block boundary to synthesize.
+        // If the recursive text mask misses, prune the whole cell -
+        // especially the top, which has no parent edge to perform this
+        // check for it.
+        if r == REM_FULL
+            && !masks_intersect(
+                v.bitset(v.cell_tmask_rec(ci)),
+                &req.vis,
+            )
+        {
+            continue;
+        }
         w.own_texts(ci, &xf, &clip);
         if w.done {
             break;
         }
         let cell = v.cell(ci);
-        for pli in cell.place_start as u64
-            ..cell.place_start as u64 + cell.place_count as u64
-        {
-            if w.done {
-                break;
-            }
-            let h = v.place_head(pli);
-            let rb = v.cell_rbbox(h.child);
-            if rb.is_empty() {
-                continue;
-            }
-            let cw = (rb.x1 - rb.x0).max(0) as u64;
-            let chh = (rb.y1 - rb.y0).max(0) as u64;
-            let below_cut = cw < w.cut && chh < w.cut;
-            let t0 = Xf::place(h.x, h.y, h.rot, h.flip);
-            let b0 = xf_bbox(&t0, &rb);
-            // depth boundary: the child renders as an outline
-            // frame - synthesize its NAME as a block candidate
-            // when it is big enough on screen to read (par.4.3)
-            let block = r == 0
-                && !below_cut
-                && ((b0.x1 - b0.x0).max(0) as f64
-                    >= block_min_dbu
-                    || (b0.y1 - b0.y0).max(0) as f64
-                        >= block_min_dbu);
-            let descend = r != 0
-                && !below_cut
-                && masks_intersect(
-                    v.bitset(v.cell_tmask_rec(h.child)),
-                    &req.vis,
+        if cell.bvh_count == 0 {
+            for pli in cell.place_start as u64
+                ..cell.place_start as u64 + cell.place_count as u64
+            {
+                w.one_place(
+                    r,
+                    &xf,
+                    &clip,
+                    pli,
+                    block_min_dbu,
+                    &mut stack,
                 );
-            if !block && !descend {
-                continue;
+                if w.done {
+                    break;
+                }
             }
-            let child_r = if r == REM_FULL {
-                REM_FULL
-            } else if r > 0 {
-                w.norm_r(h.child, r - 1)
-            } else {
-                0
-            };
-            let rbox = offset_box(&clip, 0, 0); // clip in parent frame
-            let mut handle =
-                |w: &mut LWalk, ox: i64, oy: i64| {
-                    if w.member_budget == 0 {
-                        w.st.truncated = true;
-                        w.done = true;
-                        return;
-                    }
-                    w.member_budget -= 1;
-                    w.st.place_members_enumerated += 1;
-                    let mb = BBox {
-                        x0: b0.x0.saturating_add(ox),
-                        y0: b0.y0.saturating_add(oy),
-                        x1: b0.x1.saturating_add(ox),
-                        y1: b0.y1.saturating_add(oy),
-                    };
-                    if !mb.intersects(&clip) {
-                        return;
-                    }
-                    if block {
-                        w.st.blocks_visible += 1;
-                        let cx = ((mb.x0 as i128 + mb.x1 as i128)
-                            / 2)
-                            as i64;
-                        let cy = ((mb.y0 as i128 + mb.y1 as i128)
-                            / 2)
-                            as i64;
-                        let (gx, gy) = xf.apply(cx, cy);
-                        w.add(Cand {
-                            block: true,
-                            layer_pos: 0,
-                            hash: fnv(&[
-                                gx as u64,
-                                gy as u64,
-                                h.child as u64,
-                            ]),
-                            x: gx,
-                            y: gy,
-                            src: Src::Cell(h.child),
-                        });
-                        return;
-                    }
-                    let tm = Xf::place(
-                        h.x.saturating_add(ox),
-                        h.y.saturating_add(oy),
-                        h.rot,
-                        h.flip,
-                    );
-                    let cclip = xf_bbox(&tm.invert(), &clip)
-                        .intersect(&rb);
-                    if !cclip.is_empty() {
-                        stack.push((
-                            h.child,
-                            child_r,
-                            xf.compose(&tm),
-                            cclip,
-                        ));
-                    }
-                };
-            let _ = &rbox;
-            match h.kind {
-                0 => handle(&mut w, 0, 0),
-                1 => {
-                    // offsets whose translate of b0 still meets
-                    // clip: closed-form index rectangle over the
-                    // Minkowski box, per-member exact test in
-                    // handle()
-                    let mk = BBox {
-                        x0: clip.x0.saturating_sub(b0.x1),
-                        y0: clip.y0.saturating_sub(b0.y1),
-                        x1: clip.x1.saturating_sub(b0.x0),
-                        y1: clip.y1.saturating_sub(b0.y0),
-                    };
-                    match grid_ranges(
-                        h.na as i64,
-                        h.nb as i64,
-                        h.va,
-                        h.vb,
-                        &mk,
-                    ) {
-                        GridVis::Empty => {}
-                        GridVis::Range { i0, i1, j0, j1 } => {
-                            'g: for j in j0..=j1 {
-                                for i in i0..=i1 {
-                                    let ox = i as i128
-                                        * h.va.0 as i128
-                                        + j as i128
-                                            * h.vb.0 as i128;
-                                    let oy = i as i128
-                                        * h.va.1 as i128
-                                        + j as i128
-                                            * h.vb.1 as i128;
-                                    let (Ok(ox), Ok(oy)) = (
-                                        i64::try_from(ox),
-                                        i64::try_from(oy),
-                                    ) else {
-                                        continue;
-                                    };
-                                    handle(&mut w, ox, oy);
-                                    if w.done {
-                                        break 'g;
-                                    }
-                                }
-                            }
+        } else {
+            let mut nodes = vec![cell.bvh_start];
+            while let Some(ni) = nodes.pop() {
+                let n = v.bvh(ni);
+                w.st.place_bvh_nodes += 1;
+                if !n.bbox.intersects(&clip) {
+                    continue;
+                }
+                if n.leaf {
+                    for k in 0..n.count as u64 {
+                        w.one_place(
+                            r,
+                            &xf,
+                            &clip,
+                            n.first as u64 + k,
+                            block_min_dbu,
+                            &mut stack,
+                        );
+                        if w.done {
+                            break;
                         }
+                    }
+                } else {
+                    // Push right-to-left so the lower node index is
+                    // processed first; selection stays byte-stable.
+                    for k in (0..n.count as u32).rev() {
+                        nodes.push(n.first + k);
                     }
                 }
-                _ => {
-                    let Some(pr) = v.pts_ref(pli) else {
-                        continue;
-                    };
-                    let mk = BBox {
-                        x0: clip.x0.saturating_sub(b0.x1),
-                        y0: clip.y0.saturating_sub(b0.y1),
-                        x1: clip.x1.saturating_sub(b0.x0),
-                        y1: clip.y1.saturating_sub(b0.y0),
-                    };
-                    if !pr.extent().intersects(&mk) {
-                        continue;
-                    }
-                    'p: for k in 0..pr.n_chunks {
-                        let cb = pr.chunk_bbox(k);
-                        w.st.rep_chunks_scanned += 1;
-                        if !cb.intersects(&mk) {
-                            continue;
-                        }
-                        let (lo, hi) = pr.chunk_range(k);
-                        for s in lo..hi {
-                            let (ox, oy) = pr.pt(s);
-                            if mk.contains_pt(ox, oy) {
-                                handle(&mut w, ox, oy);
-                                if w.done {
-                                    break 'p;
-                                }
-                            }
-                        }
-                    }
+                if w.done {
+                    break;
                 }
             }
         }
@@ -1096,5 +1150,64 @@ mod tests {
         o.member_budget = 8;
         let lp = plan_labels(&v, &ovt, &req, &o).unwrap();
         assert!(lp.stats.truncated);
+    }
+
+    /// A narrow text view must not scan unrelated placement leaves.
+    /// This is the local version of the field failure: a parent holds
+    /// a small text branch plus many far-away fill placements.
+    #[test]
+    fn placement_bvh_prunes_text_free_fill_leaves() {
+        let ovt = b"PIN".to_vec();
+        let mut b = Builder::new(1000.0, 0, 0, 1);
+        b.layer(7, 0, "TXT", 0, 0);
+        let none = b.bitset(&[0]);
+        let txt = b.bitset(&[1]);
+
+        // ci 0: the only text-bearing leaf
+        let tr0 = b.n_tranges();
+        let ti = b.n_texts();
+        let pin = bx(0, 0, 0, 0);
+        b.text(0, 0, 0, 0, 0, 3, TREP_NONE, &pin, 0);
+        b.trange(0, ti, 1, TBVH_NONE);
+        let child_bb = bx(0, 0, 10, 10);
+        b.cell(
+            "TXT_CELL", 0, 2, &child_bb, &child_bb, 0, 0, 0, 0, 0, 0,
+            0, 0, txt, txt, 0, tr0, 1, txt,
+        );
+
+        // ci 1: geometry/fill-only leaf
+        b.cell(
+            "FILL", 0, 1, &child_bb, &child_bb, 0, 0, 0, 0, 0, 0, 0,
+            0, none, none, 0, 0, 0, none,
+        );
+
+        // ci 2: one nearby text edge, eight far fill edges. The two
+        // BVH leaves are disjoint, so the narrow view reaches only
+        // the first placement record.
+        let ps = b.n_places();
+        b.place(0, 0, 0, 0, false, &Rep::One);
+        for k in 0..8 {
+            b.place(1, 10_000 + k * 1_000, 0, 0, false, &Rep::One);
+        }
+        let near = bx(0, 0, 10, 10);
+        let far = bx(10_000, 0, 17_010, 10);
+        let all = bx(0, 0, 17_010, 10);
+        let root = b.bvh_node(&all, 1, 2, false);
+        b.bvh_node(&near, ps as u32, 1, true);
+        b.bvh_node(&far, ps as u32 + 1, 8, true);
+        b.cell(
+            "TOP", 1, 0, &all, &all, ps as u32, 9, 0, 0, root, 3, 0,
+            0, txt, txt, 0, b.n_tranges(), 0, txt,
+        );
+        b.top = 2;
+        let v = Ovm::from_bytes(b.finish(0, ovt.len() as u64)).unwrap();
+        let req = rq(bx(-10, -10, 100, 100), 0, u32::MAX, 1.0);
+        let mut opts = LabelOpts::default();
+        opts.raw = true;
+        let lp = plan_labels(&v, &ovt, &req, &opts).unwrap();
+        assert_eq!(lp.rows.len(), 1);
+        assert_eq!(lp.rows[0].s, "PIN");
+        assert_eq!(lp.stats.place_records_scanned, 1);
+        assert_eq!(lp.stats.place_bvh_nodes, 3);
     }
 }
