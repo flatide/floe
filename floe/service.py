@@ -17,7 +17,7 @@ import klayout.db as db
 
 from . import cache as cache_mod
 from .render import Renderer
-from .viewport import VfsMosaic
+from .viewport import VfsMosaic, frame_layer
 
 _SNAP_CAP = 400   # max shapes examined per snap query
 _PICK_CAP = 64    # max candidates per pick query
@@ -73,9 +73,9 @@ def _iter_global_polys(mosaic, layers_sel, box):
     top_ci = mosaic.top.cell_index()
     for li in ly.layer_indexes():
         info = ly.get_info(li)
-        # the frame/outline layer (255/0) is a draw-only overview aid
-        # (cut-frame outlines, skeleton cell boxes) - never pickable
-        if (info.layer, info.datatype) == (255, 0):
+        # the frame/outline layer is a draw-only overview aid
+        # (cut-frame outlines, block labels) - never pickable
+        if (info.layer, info.datatype) == tuple(mosaic.FRAME_LAYER):
             continue
         if layers_sel is not None and \
                 (info.layer, info.datatype) not in layers_sel:
@@ -221,7 +221,7 @@ def _tsv_unesc(s):
         c = s[i]
         if c == "\\" and i + 1 < len(s):
             n = s[i + 1]
-            out.append({"t": "\t", "n": "\n",
+            out.append({"t": "\t", "n": "\n", "r": "\r",
                         "\\": "\\"}.get(n, n))
             i += 2
         else:
@@ -232,24 +232,33 @@ def _tsv_unesc(s):
 
 def _load_sidecar_labels(cache):
     """Display labels from the build's labels.tsv (skeleton retired,
-    VFS_HIER.md rev 24): block names of big first-level cells ride
-    on (255,0), budget labels sit on their DESIGN layer - rows are
-    display-ready (layer, dt, x, y, string). Old caches without the
-    file simply show no labels until re-indexed."""
+    VFS_HIER.md rev 24): block-name rows carry the "blk" sentinel
+    and map onto the RUNTIME frame layer; budget labels sit on
+    their DESIGN layer. Rows are display-ready (layer, dt, x, y,
+    string). Old caches without the file simply show no labels
+    until re-indexed."""
     out = []
     path = os.path.join(cache.dir,
                         (cache.meta.get("labels") or {})
                         .get("file", "labels.tsv"))
     if not os.path.isfile(path):
         return out
+    fl, fd = frame_layer(cache.meta)
     with open(path) as f:
         for ln in f:
             p = ln.rstrip("\n").split("\t")
             if len(p) < 4:
                 continue
-            l, _, d = p[0].partition("/")
+            if p[0] == "blk":
+                l, d = fl, fd
+            else:
+                ls, _, ds = p[0].partition("/")
+                try:
+                    l, d = int(ls), int(ds)
+                except ValueError:
+                    continue
             try:
-                out.append((int(l), int(d), int(p[1]), int(p[2]),
+                out.append((l, d, int(p[1]), int(p[2]),
                             _tsv_unesc(p[3])))
             except ValueError:
                 continue
@@ -267,12 +276,13 @@ def _view_labels(cache, x0, y0, x1, y1, w, h, visible):
     vis = None if visible is None else {tuple(v) for v in visible}
     sx = w / max(1e-9, x1 - x0)
     sy = h / max(1e-9, y1 - y0)
+    frame_key = tuple(frame_layer(cache.meta))
     seen = set()
     out = []
     for (l, d, x, y, s) in src:
         if x < x0 or x > x1 or y < y0 or y > y1:
             continue
-        if vis is not None and (l, d) != (255, 0) \
+        if vis is not None and (l, d) != frame_key \
                 and (l, d) not in vis:
             continue
         key = (int((x - x0) * sx) // LABEL_CELL_PX,
@@ -359,7 +369,7 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
         # the cut-frame outline layer is structural: always drawn,
         # even when the user has narrowed the visible-layer set
         vis_r = (None if job["visible"] is None
-                 else list(job["visible"]) + [VfsMosaic.FRAME_LAYER])
+                 else list(job["visible"]) + [mosaic.FRAME_LAYER])
         renderer.render_png(tmp, x0, y0, x1, y1, job["w"], job["h"],
                             visible=vis_r, depth=None)
         draw_total[0] += time.perf_counter() - td
@@ -582,10 +592,10 @@ def _render_service(src, req, res, latest=None):
         cache.vfs_client = VfsClient(cache.dir)
         mosaic = VfsMosaic(cache)
         fcolors = dict(colors)
-        fcolors[VfsMosaic.FRAME_LAYER] = "#93a4ad"
+        fcolors[mosaic.FRAME_LAYER] = "#93a4ad"
         renderer = Renderer(mosaic.ly, mosaic.top, fcolors,
                             hier_offset=0,
-                            hollow=(VfsMosaic.FRAME_LAYER,))
+                            hollow=(mosaic.FRAME_LAYER,))
         lod = None
     except Exception as e:
         res.put({"kind": "error", "msg": f"render service init failed: {e}"})

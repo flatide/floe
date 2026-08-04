@@ -1198,6 +1198,43 @@ impl Ovm {
                 *slot |= bit;
             }
         }
+        // cross-table ownership (review round): every prange run
+        // must hold EXACT pages of its own (cell, layer). Corrupt
+        // metadata pointing a run into another cell's pages or at
+        // LOD variants would otherwise open fine and draw the
+        // wrong geometry (or hand a probe a merged variant).
+        {
+            let cb = sec(SEC_CELLS);
+            let prb = sec(SEC_PRANGES);
+            let pgb = sec(SEC_PAGEDIR);
+            for ci in 0..n_cells as usize {
+                let c = &cb[ci * CELL_LEN..];
+                let (ps, pc) = (g32(c, 120), g32(c, 124));
+                for k in 0..pc {
+                    let pr = &prb[(ps + k) as usize
+                        * PRANGE_LEN..];
+                    let pl = g32(pr, 0);
+                    let (lo, cnt) = (g32(pr, 4), g32(pr, 8));
+                    for pi in lo..lo.saturating_add(cnt) {
+                        let pg =
+                            &pgb[pi as usize * PAGE_LEN..];
+                        if g32(pg, 0) != ci as u32
+                            || g32(pg, 4) != pl
+                            || pg[12] != LOD_EXACT
+                        {
+                            return Err(corrupt(format!(
+                                "cell {} prange {} page {} \
+                                 ownership",
+                                ci,
+                                ps + k,
+                                pi
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(Ovm {
             unit: f64::from_le_bytes(data[16..24].try_into().unwrap()),
             src_size: g64(&data, 24),
@@ -1652,6 +1689,18 @@ mod tests {
                 .copy_from_slice(&2u32.to_le_bytes());
             let e = err_of(Ovm::from_bytes(c));
             assert!(e.contains("claimed twice"), "{}", e);
+            // (e) prange run extended to swallow the MERGED
+            // page: cross-table ownership must reject it
+            let mut c = good.clone();
+            let pr0 = u64::from_le_bytes(
+                c[88 + 16 * SEC_PRANGES..96 + 16 * SEC_PRANGES]
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
+            c[pr0 + 8..pr0 + 12]
+                .copy_from_slice(&3u32.to_le_bytes());
+            let e = err_of(Ovm::from_bytes(c));
+            assert!(e.contains("ownership"), "{}", e);
             // (d) seq mismatch: retarget the MERGED page's seq
             let mut c = good.clone();
             c[pg0 + 2 * PAGE_LEN + 8..pg0 + 2 * PAGE_LEN + 12]

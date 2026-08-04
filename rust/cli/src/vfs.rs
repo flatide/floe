@@ -350,6 +350,16 @@ fn emit_viewer_side(
         *stage.lock().unwrap() = s;
     };
     let entries = floe_tiler::skel::collect_all_texts(doc);
+    // per-stage RSS/count telemetry (review round): text paths can
+    // outnumber source texts on heavily reused cells, and the
+    // viewer-side RSS story must be measurable per stage on the
+    // big assets. If these numbers blow up in the field, the
+    // follow-up is an external sort spool + streamed TSV writes.
+    eprintln!(
+        "[vfs] viewer-side: {} text entries (rss {})",
+        entries.len(),
+        rss()
+    );
     // skeleton retired (rev 24): the wide view is served by the
     // working set + coverage + LOD variants; only its LABEL role
     // survives, as display-ready sidecar rows (block names of big
@@ -363,20 +373,36 @@ fn emit_viewer_side(
     let mut ltsv = String::new();
     let mut n_blocks = 0u64;
     for (l, d, x, y, name) in &lrows {
-        if *l == 255 && *d == 0 {
+        // block-name rows carry the "blk" sentinel, not a layer
+        // number: the viewer maps them onto its RUNTIME frame
+        // layer (one past the highest design layer - a real
+        // design may legitimately use 255/0, review finding)
+        if *l == floe_tiler::skel::BLOCK_ROW {
             n_blocks += 1;
+            ltsv.push_str(&format!(
+                "blk\t{}\t{}\t{}\n",
+                x,
+                y,
+                crate::tsv_esc(name)
+            ));
+        } else {
+            ltsv.push_str(&format!(
+                "{}/{}\t{}\t{}\t{}\n",
+                l,
+                d,
+                x,
+                y,
+                crate::tsv_esc(name)
+            ));
         }
-        ltsv.push_str(&format!(
-            "{}/{}\t{}\t{}\t{}\n",
-            l,
-            d,
-            x,
-            y,
-            crate::tsv_esc(name)
-        ));
     }
     std::fs::write(format!("{}/labels.tsv", outdir), ltsv)
         .expect("write labels");
+    eprintln!(
+        "[vfs] viewer-side: {} label rows (rss {})",
+        lrows.len(),
+        rss()
+    );
     let mut sidecar: Vec<&floe_tiler::skel::TextEntry> =
         entries.iter().collect();
     sidecar.sort_by(|a, b| {
@@ -397,6 +423,11 @@ fn emit_viewer_side(
             crate::tsv_esc(&e.s)
         ));
     }
+    eprintln!(
+        "[vfs] viewer-side: sidecar string {:.1} MB (rss {})",
+        tsv.len() as f64 / 1e6,
+        rss()
+    );
     std::fs::write(format!("{}/texts.tsv", outdir), tsv)
         .expect("write sidecar");
 

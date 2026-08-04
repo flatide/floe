@@ -38,6 +38,16 @@ class _WsNames:
         return default
 
 
+def frame_layer(meta):
+    """runtime frame/outline layer: max design layer + 1, dt 0 -
+    MUST match the daemon's floe_vfs frame_layer() rule (both sides
+    derive it from the same layer list)"""
+    fl = 0
+    for l in meta.get("layers", []):
+        fl = max(fl, int(l["layer"]) + 1)
+    return (max(fl, 1), 0)
+
+
 def live_caps(meta):
     """(max live tiles, LRU evict-above) scaled to the cache's tile
     size. The base constants are tuned for the 6 MB --tile-mb default;
@@ -60,14 +70,15 @@ class VfsMosaic:
     names are globally unique, so reads never merge (no @t tags) and
     eviction prunes exactly one page subtree by name."""
 
-    # cut-frame outline layer (matches vfsd FRAME_LAYER/DT and the
-    # skeleton cell-outline convention); drawn hollow
-    FRAME_LAYER = (255, 0)
-
     def __init__(self, cache):
         self._dbu = cache.meta["dbu"]
         self._layer_keys = [(l["layer"], l["datatype"])
                             for l in cache.meta["layers"]]
+        # cut-frame outline layer, drawn hollow: one past the
+        # highest DESIGN layer (same rule as the daemon's
+        # frame_layer()) so it can never collide with real content
+        # - (255,0) exists in real designs (review finding)
+        self.FRAME_LAYER = frame_layer(cache.meta)
         self.ly = db.Layout(False)  # pages keep arrays compact
         self.ly.dbu = self._dbu
         for (l, d) in self._layer_keys:

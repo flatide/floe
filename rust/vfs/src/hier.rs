@@ -527,13 +527,26 @@ impl<'a> Hier<'a> {
                 && self.px_per_dbu > 0.0
                 && p.lod_page != floe_ovm::LOD_PAGE_NONE
             {
-                let pw = (p.bbox.x1 - p.bbox.x0).max(0) as f64
+                let (ew, eh) = (
+                    (p.bbox.x1 - p.bbox.x0).max(0),
+                    (p.bbox.y1 - p.bbox.y0).max(0),
+                );
+                let g = floe_ovm::LOD_GRID;
+                // fidelity is judged on the REAL emitted cell size:
+                // a merged rect is never thinner than 1 DBU, so on
+                // tiny pages ceil(extent/grid) collapses to 1 DBU
+                // and px_per_dbu > 1 must keep exact (review
+                // finding - the page<=128px form missed this)
+                let cw = ((ew + g - 1) / g).max(1) as f64
                     * self.px_per_dbu;
-                let ph = (p.bbox.y1 - p.bbox.y0).max(0) as f64
+                let ch = ((eh + g - 1) / g).max(1) as f64
                     * self.px_per_dbu;
-                let g = floe_ovm::LOD_GRID as f64;
-                if pw <= g
-                    && ph <= g
+                let (pw, ph) = (
+                    ew as f64 * self.px_per_dbu,
+                    eh as f64 * self.px_per_dbu,
+                );
+                if cw <= 1.0
+                    && ch <= 1.0
                     && p.members as f64
                         > self.lod_k * (pw * ph).max(1.0)
                 {
@@ -1035,8 +1048,17 @@ fn grow_by_offsets(base: &BBox, off: &BBox) -> BBox {
 
 /// cut-frame outline layer (drawn hollow by the viewer; shared with
 /// the skeleton's cell-outline convention)
-pub const FRAME_LAYER: u32 = 255;
-pub const FRAME_DT: u32 = 0;
+/// runtime frame/outline layer: one past the highest DESIGN layer
+/// number, dt 0 - never collides with real content (review
+/// finding: (255,0) exists in real designs). The viewer derives
+/// the same value from meta's layer list.
+pub fn frame_layer(v: &Ovm) -> (u32, u32) {
+    let mut fl = 0u32;
+    for li in 0..v.n_layers {
+        fl = fl.max(v.layer(li).layer.saturating_add(1));
+    }
+    (fl.max(1), 0)
+}
 
 /// gen-ephemeral working-set cell name `W<gen>_<r>_<ci>`, r = "F"
 /// for the full-depth sentinel (par.3.1): digits/fixed chars only -
@@ -1074,6 +1096,7 @@ impl crate::Vfs {
             splice_tree, tree_body, write_tree, WCell,
         };
         let payloads = self.read_page_payloads(new_pages)?;
+        let (frame_fl, frame_fd) = frame_layer(&self.ovm);
         // owned storage first - WCell borrows names/rects/reps
         struct Pre {
             name: String,
@@ -1088,8 +1111,8 @@ impl crate::Vfs {
                     .frames
                     .iter()
                     .map(|(b, rep)| RectRec {
-                        layer: FRAME_LAYER,
-                        dt: FRAME_DT,
+                        layer: frame_fl,
+                        dt: frame_fd,
                         x: b.x0,
                         y: b.y0,
                         w: (b.x1 - b.x0).max(1),
@@ -1240,6 +1263,37 @@ mod tests {
         let p3 =
             plan_hier(&ovm, &rq_px(pb, 0, u32::MAX, 0.0), &o);
         assert_eq!(p3.pages, vec![0]);
+        // tiny-DBU dense page at px_per_dbu > 1: the emitted
+        // cells are 1 DBU = several px - fidelity gate keeps exact
+        // even though the page spans < 128 px (review finding)
+        {
+            let mut b = Builder::new(1000.0, 0, 0, 1);
+            b.top = 0;
+            b.layer(1, 0, "L1", 1, 1_000_000);
+            let m = b.bitset(&[1]);
+            let tb = bx(0, 0, 20, 20);
+            b.page(
+                0, 0, 0, &tb, 0, 0, 0, 1, 1_000_000, 1, 1,
+                floe_ovm::LOD_EXACT, 1,
+            );
+            b.page(
+                0, 0, 0, &tb, 0, 0, 0, 1, 100, 20, 20,
+                floe_ovm::LOD_MERGED, floe_ovm::LOD_PAGE_NONE,
+            );
+            let pr = b.prange(0, 0, 1, PBVH_NONE);
+            b.cell(
+                "S", 0, 0, &tb, &tb, 0, 0, 0, 2, 0, 0, pr, 1, m,
+                m, 1_000_000,
+            );
+            let ovm2 = Ovm::from_bytes(b.finish(0)).unwrap();
+            let ps = plan_hier(
+                &ovm2,
+                &rq_px(tb, 0, u32::MAX, 4.0),
+                &HierOpts::default(),
+            );
+            assert_eq!(ps.pages, vec![0], "{:?}", ps.pages);
+            assert_eq!(ps.stats.lod_swapped, 0);
+        }
         // kill switch (lod_k 0): exact
         let mut off = HierOpts::default();
         off.lod_k = 0.0;
@@ -2584,7 +2638,11 @@ mod tests {
         assert_eq!(top.name, "W9_F_1");
         assert_eq!(top.rects.len(), 1);
         let fr = &top.rects[0];
-        assert_eq!((fr.layer, fr.dt), (FRAME_LAYER, FRAME_DT));
+        assert_eq!(
+            (fr.layer, fr.dt),
+            frame_layer(&vfs.ovm),
+            "frame rect must ride the runtime frame layer"
+        );
         assert!(matches!(fr.rep, Rep::Grid { na: 4, .. }));
         // referenced page is a ghost (undefined) cell here
         assert!(doc

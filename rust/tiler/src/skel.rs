@@ -434,6 +434,51 @@ fn select_labels(
 /// their placed bbox centers, plus the budget label selection on
 /// the DESIGN layer (the viewer no longer maps twin datatypes
 /// back). (layer, dt, x, y, string) rows, display-ready.
+/// labels.tsv block-name rows carry this pseudo-layer instead of a
+/// real number: (255,0) exists in real designs (review finding),
+/// so the viewer maps block rows onto its RUNTIME frame layer
+pub const BLOCK_ROW: u32 = u32::MAX;
+
+/// up to `cap` member offsets WITHOUT materializing the
+/// repetition (review finding: rep_offsets builds the full na*nb
+/// Vec, so one big-cell placement with a 10^8-member rep
+/// allocated GBs before any cap check). Returns how many were
+/// visited.
+fn for_each_offset_capped(
+    rep: &Rep,
+    cap: u64,
+    mut f: impl FnMut(i64, i64),
+) -> u64 {
+    if cap == 0 {
+        return 0;
+    }
+    let mut seen = 0u64;
+    match rep {
+        Rep::One => {
+            f(0, 0);
+            seen = 1;
+        }
+        Rep::Grid { na, nb, va, vb } => {
+            'outer: for i in 0..*na as i64 {
+                for j in 0..*nb as i64 {
+                    if seen >= cap {
+                        break 'outer;
+                    }
+                    f(i * va.0 + j * vb.0, i * va.1 + j * vb.1);
+                    seen += 1;
+                }
+            }
+        }
+        Rep::Pts(p) => {
+            for &(x, y) in p.iter().take(cap as usize) {
+                f(x, y);
+                seen += 1;
+            }
+        }
+    }
+    seen
+}
+
 pub fn label_rows(
     doc: &Doc,
     entries: &[TextEntry],
@@ -458,22 +503,29 @@ pub fn label_rows(
             if cb.2 - cb.0 < big && cb.3 - cb.1 < big {
                 continue;
             }
-            for (ox, oy) in rep_offsets(&pl.rep) {
-                if n >= SKEL_SHAPE_CAP {
-                    break 'insts;
-                }
-                let xf =
-                    Xf::place(pl.x + ox, pl.y + oy, pl.rot, pl.flip);
-                let a = xf.apply(cb.0, cb.1);
-                let b2 = xf.apply(cb.2, cb.3);
-                out.push((
-                    255,
-                    0,
-                    half(a.0.min(b2.0), a.0.max(b2.0)),
-                    half(a.1.min(b2.1), a.1.max(b2.1)),
-                    doc.cells[pl.cell].name.clone(),
-                ));
-                n += 1;
+            n += for_each_offset_capped(
+                &pl.rep,
+                SKEL_SHAPE_CAP - n,
+                |ox, oy| {
+                    let xf = Xf::place(
+                        pl.x + ox,
+                        pl.y + oy,
+                        pl.rot,
+                        pl.flip,
+                    );
+                    let a = xf.apply(cb.0, cb.1);
+                    let b2 = xf.apply(cb.2, cb.3);
+                    out.push((
+                        BLOCK_ROW,
+                        0,
+                        half(a.0.min(b2.0), a.0.max(b2.0)),
+                        half(a.1.min(b2.1), a.1.max(b2.1)),
+                        doc.cells[pl.cell].name.clone(),
+                    ));
+                },
+            );
+            if n >= SKEL_SHAPE_CAP {
+                break 'insts;
             }
         }
     }

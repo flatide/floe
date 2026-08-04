@@ -199,7 +199,7 @@ def main():
                 if len(parts) < 4:
                     continue
                 n_rows += 1
-                if parts[0] == "255/0":
+                if parts[0] == "blk":
                     n_blocks += 1
                 elif parts[3] not in side_strings:
                     fail("label %r not in sidecar" % parts[3])

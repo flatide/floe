@@ -634,9 +634,10 @@ def main(argv=None):
                         "levels are internal and may be retuned")
     p.add_argument("--depth", type=int, default=None, metavar="N",
                    help="starting hierarchy depth (999 = full). "
-                        "Default: 1 for a plain open - the fast, "
-                        "industry-standard first paint - and full "
-                        "when --goto jumps to an inspection point. "
+                        "Default: 0 for a plain open - top geometry "
+                        "plus child outline frames, the fastest "
+                        "truthful first paint - and full when "
+                        "--goto jumps to an inspection point. "
                         "Digits / the `d` dialog change it at runtime")
     p.add_argument("--layout-mode", default=None,
                    choices=("viewer", "editable"),

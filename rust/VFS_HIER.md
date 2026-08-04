@@ -170,6 +170,35 @@ rev 10 (지시: **인덱서/뷰어 책임 분리** + 이전 검토 잔여 1건):
   start·count, payload size 등)은 checked — silent truncation
   금지, 초과는 "limit exceeded: <필드>" 빌드 에러.
 
+rev 26 (외부 검토 2차 반영 — 2026-08-04, 0.10.2; 7건 확인·수정):
+
+- **(높음) 라벨 rep 전개**: label_rows(와 take_members 경유 포함)가
+  cap 검사 전에 rep_offsets로 na×nb 전체 Vec을 물질화 — 대형
+  블록 배열에서 GB 할당. 수정 = **지연 캡 열거자**
+  (for_each_offset_capped; 물질화 0).
+- **(높음) 뷰어측 텍스트 RSS 무한**: collect_all_texts는 경로
+  전개형이라 재사용 심한 칩에서 소스보다 커질 수 있음. 수정 =
+  **단계별 계측**(entries 수/labels 행/사이드카 문자열 MB + rss를
+  빌드 로그로) — 9.8G 수치가 커지면 후속 = 외부 정렬 스풀 +
+  스트리밍 TSV(백로그로 명시).
+- **(중간) 소형 DBU 페이지의 1px 충실도**: 방출 rect 최소 폭 1
+  DBU라 px_per_dbu>1이면 128px 조건으로도 블록이 보임. 수정 =
+  게이트가 **실제 방출 셀 폭 max(1, ceil(extent/G))×px ≤ 1px**을
+  판정(양 축). tiny-DBU 유닛 추가.
+- **(중간) 255/0 실설계 충돌**: 프레임 레이어 = **런타임 산출:
+  최대 설계 레이어 + 1, dt 0** (데몬 frame_layer(ovm) ↔ 뷰어
+  frame_layer(meta) 동일 규칙 — 캐시 저장 불필요, 델타 프레임은
+  런타임 생성물). labels.tsv 블록 행은 레이어 번호 대신 **"blk"
+  센티널**로 기록(뷰어가 런타임 프레임 레이어에 매핑; 구 캐시의
+  255/0 행은 일반 행으로 강등 — 재인덱싱 시 해소). pick/snap
+  제외·hollow·색상 전부 동적 값 사용.
+- **(중간) prange 교차-소유권 검증**: 셀별 prange 런의 모든
+  페이지가 (해당 cell, 해당 layer, LOD_EXACT)인지 open에서 검사 —
+  손상 런이 다른 셀/LOD 페이지를 가리키면 조용히 오표시되던 구멍.
+  부정 픽스처(런이 MERGED를 삼킴) 추가.
+- **(낮음) \r unescape 누락** 수정, **(낮음) depth 기본값 문서**
+  (cli --depth 도움말, README) 0으로 갱신.
+
 rev 25 (M7/스켈레톤 외부 검토 반영 — 2026-08-04, 0.10.1; 7건
 전부 실결함/공백으로 확인·수정):
 
