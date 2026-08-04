@@ -372,27 +372,26 @@ fn emit_viewer_side(
     );
     let mut ltsv = String::new();
     let mut n_blocks = 0u64;
-    for (l, d, x, y, name) in &lrows {
-        // block-name rows carry the "blk" sentinel, not a layer
-        // number: the viewer maps them onto its RUNTIME frame
-        // layer (one past the highest design layer - a real
-        // design may legitimately use 255/0, review finding)
-        if *l == floe_tiler::skel::BLOCK_ROW {
+    for row in &lrows {
+        // block-name rows carry the "blk" sentinel - an explicit
+        // row KIND, not a layer number, so no design layer value
+        // can ever be mistaken for one (review round 3)
+        if row.block {
             n_blocks += 1;
             ltsv.push_str(&format!(
                 "blk\t{}\t{}\t{}\n",
-                x,
-                y,
-                crate::tsv_esc(name)
+                row.x,
+                row.y,
+                crate::tsv_esc(&row.s)
             ));
         } else {
             ltsv.push_str(&format!(
                 "{}/{}\t{}\t{}\t{}\n",
-                l,
-                d,
-                x,
-                y,
-                crate::tsv_esc(name)
+                row.layer,
+                row.dt,
+                row.x,
+                row.y,
+                crate::tsv_esc(&row.s)
             ));
         }
     }
@@ -409,27 +408,44 @@ fn emit_viewer_side(
         (a.layer, a.dt, &a.s, a.x, a.y)
             .cmp(&(b.layer, b.dt, &b.s, b.x, b.y))
     });
-    let mut tsv = String::new();
+    // stream the sidecar row by row: the old full-String build
+    // held a second copy of every text alongside `entries` at the
+    // RSS peak (review round 3). The path-expansion residency of
+    // collect_all_texts itself REMAINS a known risk, tracked in
+    // par.6 and judged by the per-stage telemetry on the big
+    // assets; the follow-up there is an external sort spool.
     let mut side_members = 0u64;
-    for e in &sidecar {
-        side_members += e.members();
-        tsv.push_str(&format!(
-            "{}/{}\t{}\t{}\t{}\t{}\n",
-            e.layer,
-            e.dt,
-            e.x,
-            e.y,
-            crate::fmt_factors(&e.factors),
-            crate::tsv_esc(&e.s)
-        ));
+    let mut side_bytes = 0u64;
+    {
+        let mut w = std::io::BufWriter::new(
+            std::fs::File::create(format!(
+                "{}/texts.tsv",
+                outdir
+            ))
+            .expect("create sidecar"),
+        );
+        for e in &sidecar {
+            side_members += e.members();
+            let row = format!(
+                "{}/{}\t{}\t{}\t{}\t{}\n",
+                e.layer,
+                e.dt,
+                e.x,
+                e.y,
+                crate::fmt_factors(&e.factors),
+                crate::tsv_esc(&e.s)
+            );
+            side_bytes += row.len() as u64;
+            std::io::Write::write_all(&mut w, row.as_bytes())
+                .expect("write sidecar");
+        }
+        std::io::Write::flush(&mut w).expect("flush sidecar");
     }
     eprintln!(
-        "[vfs] viewer-side: sidecar string {:.1} MB (rss {})",
-        tsv.len() as f64 / 1e6,
+        "[vfs] viewer-side: sidecar {:.1} MB streamed (rss {})",
+        side_bytes as f64 / 1e6,
         rss()
     );
-    std::fs::write(format!("{}/texts.tsv", outdir), tsv)
-        .expect("write sidecar");
 
     // meta.json (VFS flavor). rbb comes from the build (the
     // recursive-bbox pass ran there once already - re-walking every

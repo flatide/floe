@@ -434,10 +434,19 @@ fn select_labels(
 /// their placed bbox centers, plus the budget label selection on
 /// the DESIGN layer (the viewer no longer maps twin datatypes
 /// back). (layer, dt, x, y, string) rows, display-ready.
-/// labels.tsv block-name rows carry this pseudo-layer instead of a
-/// real number: (255,0) exists in real designs (review finding),
-/// so the viewer maps block rows onto its RUNTIME frame layer
-pub const BLOCK_ROW: u32 = u32::MAX;
+/// one display-label row: block-name rows carry an explicit KIND
+/// instead of any pseudo-layer number (review round 3: u32::MAX is
+/// a legal design layer, so no sentinel value can be
+/// collision-free); the viewer maps block rows onto its runtime
+/// frame layer
+pub struct LabelRow {
+    pub block: bool,
+    pub layer: u32,
+    pub dt: u32,
+    pub x: i64,
+    pub y: i64,
+    pub s: String,
+}
 
 /// up to `cap` member offsets WITHOUT materializing the
 /// repetition (review finding: rep_offsets builds the full na*nb
@@ -483,9 +492,9 @@ pub fn label_rows(
     doc: &Doc,
     entries: &[TextEntry],
     budget: u64,
-) -> Vec<(u32, u32, i64, i64, String)> {
+) -> Vec<LabelRow> {
     let bbs = cell_bboxes(doc);
-    let mut out: Vec<(u32, u32, i64, i64, String)> = Vec::new();
+    let mut out: Vec<LabelRow> = Vec::new();
     if let Some(bb) = bbs[doc.top] {
         let min_feat =
             ((bb.2 - bb.0).max(bb.3 - bb.1) / 500).max(1);
@@ -515,13 +524,14 @@ pub fn label_rows(
                     );
                     let a = xf.apply(cb.0, cb.1);
                     let b2 = xf.apply(cb.2, cb.3);
-                    out.push((
-                        BLOCK_ROW,
-                        0,
-                        half(a.0.min(b2.0), a.0.max(b2.0)),
-                        half(a.1.min(b2.1), a.1.max(b2.1)),
-                        doc.cells[pl.cell].name.clone(),
-                    ));
+                    out.push(LabelRow {
+                        block: true,
+                        layer: 0,
+                        dt: 0,
+                        x: half(a.0.min(b2.0), a.0.max(b2.0)),
+                        y: half(a.1.min(b2.1), a.1.max(b2.1)),
+                        s: doc.cells[pl.cell].name.clone(),
+                    });
                 },
             );
             if n >= SKEL_SHAPE_CAP {
@@ -531,7 +541,14 @@ pub fn label_rows(
     }
     let (labels, _thinned) = select_labels(doc, entries, budget);
     for ((l, d), _pos, s, x, y) in labels {
-        out.push((l, d, x, y, s));
+        out.push(LabelRow {
+            block: false,
+            layer: l,
+            dt: d,
+            x,
+            y,
+            s,
+        });
     }
     out
 }

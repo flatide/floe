@@ -1048,16 +1048,25 @@ fn grow_by_offsets(base: &BBox, off: &BBox) -> BBox {
 
 /// cut-frame outline layer (drawn hollow by the viewer; shared with
 /// the skeleton's cell-outline convention)
-/// runtime frame/outline layer: one past the highest DESIGN layer
-/// number, dt 0 - never collides with real content (review
-/// finding: (255,0) exists in real designs). The viewer derives
-/// the same value from meta's layer list.
+/// runtime frame/outline layer, dt 0: one past the highest DESIGN
+/// layer number, stepping DOWN to the nearest unused number when
+/// that saturates (u32::MAX is a legal design layer - review
+/// round 3), so the result never collides with real content for
+/// any layer set. The viewer derives the same value from meta's
+/// layer list with the IDENTICAL rule.
 pub fn frame_layer(v: &Ovm) -> (u32, u32) {
-    let mut fl = 0u32;
-    for li in 0..v.n_layers {
-        fl = fl.max(v.layer(li).layer.saturating_add(1));
+    let used: HashSet<u32> =
+        (0..v.n_layers).map(|li| v.layer(li).layer).collect();
+    let mut fl = used
+        .iter()
+        .max()
+        .map_or(1, |m| m.saturating_add(1))
+        .max(1);
+    while used.contains(&fl) {
+        fl -= 1; // only reachable when max == u32::MAX; the used
+                 // set is finite, so an unused number exists below
     }
-    (fl.max(1), 0)
+    (fl, 0)
 }
 
 /// gen-ephemeral working-set cell name `W<gen>_<r>_<ci>`, r = "F"
@@ -1303,6 +1312,25 @@ mod tests {
             &off,
         );
         assert_eq!(p4.pages, vec![0]);
+    }
+
+    /// frame layer stays collision-free even when u32::MAX is a
+    /// real design layer (review round 3)
+    #[test]
+    fn frame_layer_never_collides() {
+        let mut b = Builder::new(1000.0, 0, 0, 3);
+        b.top = 0;
+        b.layer(5, 0, "A", 0, 0);
+        b.layer(u32::MAX, 0, "B", 0, 0);
+        b.layer(u32::MAX - 1, 0, "C", 0, 0);
+        let m = b.bitset(&[1]);
+        let pb = bx(0, 0, 10, 10);
+        b.cell("T", 0, 0, &pb, &pb, 0, 0, 0, 0, 0, 0, 0, 0, m, m, 0);
+        let ovm = Ovm::from_bytes(b.finish(0)).unwrap();
+        let (fl, _) = frame_layer(&ovm);
+        for li in 0..ovm.n_layers {
+            assert_ne!(fl, ovm.layer(li).layer);
+        }
     }
 
     /// depth 0 on a pure-hierarchy top must NOT be empty: every

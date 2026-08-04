@@ -170,6 +170,21 @@ rev 10 (지시: **인덱서/뷰어 책임 분리** + 이전 검토 잔여 1건):
   start·count, payload size 등)은 checked — silent truncation
   금지, 초과는 "limit exceeded: <필드>" 빌드 에러.
 
+rev 27 (외부 검토 3차 반영 — 2026-08-04, 0.10.3; 2건):
+
+- **(높음) 사이드카 메모리 — 부분 수정 + 잔여 위험 등재**: 전체
+  TSV String 빌드를 **BufWriter 행 스트리밍**으로 교체(피크에서
+  텍스트 전체 사본 1개 제거). 그러나 **collect_all_texts의 경로
+  전개 상주(entries)는 미해결 잔여 위험** — §6에 등재, 판정
+  기준 = 9.8G 재인덱싱의 단계별 계측(entries 수·rss). 초과 시
+  후속 = 외부 정렬 스풀 + 스트리밍 수집.
+- **(낮음) frame layer u32::MAX 경계 + 센티널 모호성**: ①
+  frame_layer를 "max+1 포화, 충돌 시 미사용 번호로 하향" 규칙으로
+  — 임의 레이어 집합에서 충돌 불가, rust/python 동일 구현(경계
+  유닛 추가). ② labels.tsv 블록 행은 pseudo-layer(u32::MAX) 대신
+  **명시적 row kind**(LabelRow.block → "blk")로 — 어떤 실제
+  레이어 번호와도 혼동 불가.
+
 rev 26 (외부 검토 2차 반영 — 2026-08-04, 0.10.2; 7건 확인·수정):
 
 - **(높음) 라벨 rep 전개**: label_rows(와 take_members 경유 포함)가
@@ -1411,6 +1426,14 @@ gen 2: 데몬 "이미 resident" → 바디 재전송 안 함
 ---
 
 ## 6. 리스크 / 미해결
+
+0. (**잔여 위험 — rev 27**) **뷰어측 텍스트 수집의 경로 전개
+   상주**: collect_all_texts는 텍스트 보유 셀까지의 모든 배치
+   경로를 TextEntry로 전개·상주시킨다(반복은 symbolic이나 경로
+   수는 재사용 심한 칩에서 소스보다 커질 수 있음). TSV는 rev
+   27부터 스트리밍이지만 entries 자체는 남는다. **판정 = 9.8G
+   재인덱싱 로그의 "viewer-side: N text entries (rss …)" 계측** —
+   과도하면 외부 정렬 스풀 + 수집 스트리밍으로 전환한다.
 
 1. (해소 — M0 GREEN) **klayout read 이름-바인딩**(§3.3): 옵션 없는
    plain read로 확증(klayout 0.30.9, 30 gen 누수 0, §5 M0 결과).

@@ -39,13 +39,16 @@ class _WsNames:
 
 
 def frame_layer(meta):
-    """runtime frame/outline layer: max design layer + 1, dt 0 -
-    MUST match the daemon's floe_vfs frame_layer() rule (both sides
-    derive it from the same layer list)"""
-    fl = 0
-    for l in meta.get("layers", []):
-        fl = max(fl, int(l["layer"]) + 1)
-    return (max(fl, 1), 0)
+    """runtime frame/outline layer, dt 0: max design layer + 1,
+    saturated at u32::MAX and stepping DOWN to the nearest unused
+    number on collision - MUST match the daemon's floe_vfs
+    frame_layer() rule exactly (both derive it from the same layer
+    list; u32::MAX is a legal design layer)"""
+    used = {int(l["layer"]) for l in meta.get("layers", [])}
+    fl = max(min(max(used) + 1, 0xFFFFFFFF) if used else 1, 1)
+    while fl in used:
+        fl -= 1
+    return (fl, 0)
 
 
 def live_caps(meta):
