@@ -5,7 +5,8 @@
 //! remaining-depth) and emits a pruned COPY of the source hierarchy:
 //! working-set cells holding page selections, child instance edges
 //! (arrays preserved as arrays, nested arrays intact - zero
-//! expansion), and frame rects (+rep) for below-cut children. The
+//! expansion), and frame rects (+rep) at explicit depth boundaries.
+//! Size-cut children are omitted until layer-aware proxies exist. The
 //! flat plan/descend path stays alongside for A/B until M5.
 //!
 //! Correctness rule everywhere: over-inclusion is cost, omission is
@@ -79,8 +80,8 @@ pub struct WsCell {
     /// page directory indexes, sorted unique
     pub pages: Vec<u32>,
     pub insts: Vec<WsInst>,
-    /// below-cut child outlines: offset-0 member bbox in WC-local
-    /// coords + the placement rep (arrays outline per member)
+    /// depth-boundary child outlines: offset-0 member bbox in
+    /// WC-local coords + the placement rep (arrays outline per member)
     pub frames: Vec<(BBox, Rep)>,
 }
 
@@ -608,33 +609,16 @@ impl<'a> Hier<'a> {
                         let h = self.v.place_head(pli);
                         let rb = self.v.cell_rbbox(h.child);
                         if rb.is_empty() {
-                            framed.insert(pli);
                             continue;
                         }
                         let cw = (rb.x1 - rb.x0).max(0) as u64;
                         let chh = (rb.y1 - rb.y0).max(0) as u64;
-                        // r == 0: depth is exhausted - EVERY child
-                        // renders as an outline frame, not just the
-                        // below-cut ones (review finding: a pure-
-                        // hierarchy top opened at the depth-0
-                        // default as a black screen; "top geometry
-                        // + outlines" now means what it says)
-                        if r == 0 || (cw < cut && chh < cut) {
-                            // below-cut: frame inline, never enters
-                            // a candidate set. Once the frame cap
-                            // is hit we stop deduping too - the set
-                            // must not grow with the visit count.
-                            self.st.cull_size += 1;
-                            if self.frames_total
-                                < self.opts.frame_cap
-                            {
-                                framed.insert(pli);
-                                self.frame_below_cut(
-                                    &mut wc, pli, &h, &rb, &boxes,
-                                );
-                            }
-                            continue;
-                        }
+                        // Frames are display proxies, so they must
+                        // obey the same visible-layer contract as a
+                        // real child edge. The old ordering framed
+                        // first and tested lmask_rec only afterwards;
+                        // a one-layer view therefore showed outlines
+                        // for unrelated fill/routing subtrees.
                         if !masks_intersect(
                             self.v.bitset(
                                 self.v.cell_lmask_rec(h.child),
@@ -642,7 +626,35 @@ impl<'a> Hier<'a> {
                             &self.req.vis,
                         ) {
                             self.st.cull_layer += 1;
-                            framed.insert(pli);
+                            continue;
+                        }
+                        // r == 0: depth is exhausted - EVERY child
+                        // on a visible layer renders as an outline
+                        // frame (review finding: a pure-
+                        // hierarchy top opened at the depth-0
+                        // default as a black screen; "top geometry
+                        // + outlines" now means what it says)
+                        if r == 0 {
+                            if self.frames_total
+                                < self.opts.frame_cap
+                            {
+                                framed.insert(pli);
+                                self.frame_depth_boundary(
+                                    &mut wc, pli, &h, &rb, &boxes,
+                                );
+                            }
+                            continue;
+                        }
+                        // A size cut is a detail omission, not a
+                        // hierarchy-depth boundary. cell_rbbox is an
+                        // all-layer recursive box; drawing it as a
+                        // visible-layer proxy produced unrelated,
+                        // die-spanning gray lines and repeated-array
+                        // stripes. Until a per-(cell,layer) proxy is
+                        // available, omit the below-cut child instead
+                        // of displaying false geometry.
+                        if cw < cut && chh < cut {
+                            self.st.cull_size += 1;
                             continue;
                         }
                         edges.insert(pli);
@@ -694,14 +706,13 @@ impl<'a> Hier<'a> {
         }
     }
 
-    /// below-cut child -> outline frame. Per-member outlines
-    /// (rect+rep) are the accurate form, but below a ~2-cut member
-    /// pitch they fuse into a solid wash that BURIES real geometry,
-    /// and huge sparse pts lists would re-materialize O(count)
-    /// offsets per plan - both degrade to the whole-rep footprint
-    /// box (flat parity). Footprint visibility test via the rep
-    /// extent (zero-copy for pts).
-    fn frame_below_cut(
+    /// Explicit hierarchy-depth boundary -> outline frame. Per-member
+    /// outlines (rect+rep) are the accurate form, but below a ~2-cut
+    /// member pitch they fuse into a solid wash, and huge sparse pts
+    /// lists would re-materialize O(count) offsets per plan. Both
+    /// degrade to the whole-rep footprint box. Footprint visibility
+    /// test uses the repetition extent (zero-copy for pts).
+    fn frame_depth_boundary(
         &mut self,
         wc: &mut WsCell,
         pli: u64,
@@ -803,11 +814,6 @@ impl<'a> Hier<'a> {
         let ch = (child.rbbox.y1 - child.rbbox.y0).max(0) as u64;
         if cw < self.cut && ch < self.cut {
             self.st.cull_size += 1;
-            if self.frames_total < self.opts.frame_cap {
-                self.frame_below_cut(
-                    wc, pli, &h, &child.rbbox, boxes,
-                );
-            }
             return;
         }
         let child_r = if r == REM_FULL {
@@ -1366,6 +1372,89 @@ mod tests {
             "no frames at depth 0: {}",
             plan.stats.frame_rects
         );
+    }
+
+    /// Size cut is an omission contract. An all-layer recursive bbox
+    /// is not a truthful proxy for the selected layer, so full-depth
+    /// planning must not emit FRAME_LAYER geometry for it.
+    #[test]
+    fn below_cut_child_emits_no_false_frame() {
+        let v = fixture(
+            &[
+                FCell {
+                    name: "SMALL",
+                    pages: vec![(bx(0, 0, 5, 5), 5, 5)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "TOP",
+                    pages: vec![(bx(0, 0, 4000, 100), 4000, 100)],
+                    places: vec![(0, 100, 0, 0, false, Rep::One)],
+                },
+            ],
+            1,
+        );
+        let plan = plan_hier(
+            &v,
+            &rq(bx(0, 0, 4000, 100), 10, u32::MAX),
+            &HierOpts::default(),
+        );
+        assert_eq!(plan.stats.frame_rects, 0);
+        assert!(!plan.wcells.iter().any(|w| w.key.0 == 0));
+        assert!(plan.pages.iter().all(|&pi| v.page(pi).cell != 0));
+    }
+
+    /// A depth-boundary outline is structural but still belongs to
+    /// the visible-layer selection. Previously the frame branch ran
+    /// before lmask_rec and leaked unrelated children into a
+    /// single-layer view.
+    #[test]
+    fn depth_frame_obeys_visible_layer_mask() {
+        let mut b = Builder::new(1000.0, 0, 0, 2);
+        b.top = 1;
+        b.layer(1, 0, "CHILD_ONLY", 0, 0);
+        b.layer(2, 0, "TOP_ONLY", 0, 0);
+        let m0 = b.bitset(&[0b01]);
+        let m1 = b.bitset(&[0b10]);
+        let both = b.bitset(&[0b11]);
+
+        let child_bb = bx(0, 0, 100, 100);
+        b.page(
+            0, 0, 0, &child_bb, 0, 0, 0, 1, 1, 100, 100,
+            floe_ovm::LOD_EXACT, floe_ovm::LOD_PAGE_NONE,
+        );
+        let child_pr = b.prange(0, 0, 1, PBVH_NONE);
+        b.cell(
+            "CHILD", 0, 1, &child_bb, &child_bb, 0, 0, 0, 1, 0, 0,
+            child_pr, 1, m0, m0, 1, 0, 0, m0,
+        );
+
+        let place_start = b.n_places() as u32;
+        b.place(0, 1000, 0, 0, false, &Rep::One);
+        let placed = bx(1000, 0, 1100, 100);
+        let bvh = b.bvh_node(&placed, place_start, 1, true);
+        let top_own = bx(0, 0, 10, 10);
+        b.page(
+            1, 1, 0, &top_own, 0, 0, 0, 1, 1, 10, 10,
+            floe_ovm::LOD_EXACT, floe_ovm::LOD_PAGE_NONE,
+        );
+        let top_pr = b.prange(1, 1, 1, PBVH_NONE);
+        let top_bb = bx(0, 0, 1100, 100);
+        b.cell(
+            "TOP", 1, 0, &top_own, &top_bb, place_start, 1, 1, 1,
+            bvh, 1, top_pr, 1, m1, both, 2, 0, 0, both,
+        );
+        let v = Ovm::from_bytes(b.finish(0, 0)).unwrap();
+        let req = ViewReq {
+            view: bx(0, 0, 1200, 200),
+            cut_dbu: 0,
+            vis: vec![0b10],
+            depth: 0,
+            px_per_dbu: 0.0,
+        };
+        let plan = plan_hier(&v, &req, &HierOpts::default());
+        assert_eq!(plan.pages, vec![1]);
+        assert_eq!(plan.stats.frame_rects, 0);
     }
 
     fn rq(view: BBox, cut: i64, depth: u32) -> ViewReq {
@@ -2165,7 +2254,7 @@ mod tests {
     }
 
     #[test]
-    fn below_cut_frames_keep_rep() {
+    fn depth_boundary_frames_keep_rep() {
         let v = fixture(
             &[
                 FCell {
@@ -2193,7 +2282,7 @@ mod tests {
             ],
             1,
         );
-        let plan = check(&v, &rq(bx(0, 0, 4000, 100), 10, u32::MAX), true);
+        let plan = check(&v, &rq(bx(0, 0, 4000, 100), 10, 0), true);
         let t = plan.wcells.iter().find(|w| w.key.0 == 1).unwrap();
         assert_eq!(t.frames.len(), 1);
         let (fb, frep) = &t.frames[0];
@@ -2207,7 +2296,7 @@ mod tests {
         // (footprint test is per whole-rep extent)
         let plan2 = plan_hier(
             &v,
-            &rq(bx(2_900, 0, 3_100, 90), 10, u32::MAX),
+            &rq(bx(2_900, 0, 3_100, 90), 10, 0),
             &HierOpts::default(),
         );
         let t2 =
@@ -2215,7 +2304,7 @@ mod tests {
         assert_eq!(t2.frames.len(), 1);
         let plan3 = plan_hier(
             &v,
-            &rq(bx(4_500, 0, 4_800, 90), 10, u32::MAX),
+            &rq(bx(4_500, 0, 4_800, 90), 10, 0),
             &HierOpts::default(),
         );
         if let Some(t3) =
@@ -2226,7 +2315,7 @@ mod tests {
     }
 
     #[test]
-    fn below_cut_dense_frames_fuse_to_footprint() {
+    fn depth_boundary_dense_frames_fuse_to_footprint() {
         // sub-pixel pitch (15 < 2*cut=20): per-member outlines
         // would fuse into a solid wash burying real geometry -
         // the frame degrades to ONE footprint box (flat parity)
@@ -2259,7 +2348,7 @@ mod tests {
         );
         let plan = check(
             &v,
-            &rq(bx(0, 0, 4000, 100), 10, u32::MAX),
+            &rq(bx(0, 0, 4000, 100), 10, 0),
             true,
         );
         let t = plan.wcells.iter().find(|w| w.key.0 == 1).unwrap();
@@ -2271,7 +2360,7 @@ mod tests {
     }
 
     #[test]
-    fn below_cut_huge_sparse_pts_frame_fuses() {
+    fn depth_boundary_huge_sparse_pts_frame_fuses() {
         // sparse (members far apart) but HUGE: per-member frame
         // would re-materialize O(count) offsets every plan - the
         // count cap degrades it to one footprint box
@@ -2307,7 +2396,7 @@ mod tests {
         );
         let plan = plan_hier(
             &v,
-            &rq(bx(0, 0, 99_000_010, 200), 10, u32::MAX),
+            &rq(bx(0, 0, 99_000_010, 200), 10, 0),
             &HierOpts::default(),
         );
         let t = plan.wcells.iter().find(|w| w.key.0 == 1).unwrap();
@@ -2636,8 +2725,9 @@ mod tests {
     #[test]
     fn delta_hier_frames_and_pts_authored() {
         use floe_oasis::doc::parse_doc;
-        // frames: below-cut grid child -> WC rect on 255/0 with the
-        // rep preserved (authored-only delta, new_pages = [])
+        // frames: explicit depth-boundary grid child -> WC rect on
+        // the runtime frame layer with the rep preserved
+        // (authored-only delta, new_pages = [])
         let v = fixture(
             &[
                 FCell {
@@ -2667,7 +2757,7 @@ mod tests {
         );
         let plan = plan_hier(
             &v,
-            &rq(bx(0, 0, 4000, 100), 10, u32::MAX),
+            &rq(bx(0, 0, 4000, 100), 10, 0),
             &HierOpts::default(),
         );
         let vfs = crate::Vfs {
@@ -2678,7 +2768,7 @@ mod tests {
         let delta = vfs.delta_hier(&plan, &[], 9, None).unwrap();
         let doc = parse_doc(&delta).unwrap();
         let top = &doc.cells[doc.top];
-        assert_eq!(top.name, "W9_F_1");
+        assert_eq!(top.name, "W9_0_1");
         assert_eq!(top.rects.len(), 1);
         let fr = &top.rects[0];
         assert_eq!(

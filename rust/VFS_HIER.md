@@ -624,6 +624,9 @@ rev 15 (M3 구현 완료 — 2026-08-03, 파이썬 뷰어; 지시로 **기본 �
   #93a4ad). 멤버 피치(Grid) 또는 extent 밀도(Pts)가 2×cut 미만이면
   **footprint 1박스(Rep::One)로 강등** — 분해 가능하면 기존대로
   멤버별. 수정 후 hier/flat 서비스 렌더 **PNG 바이트 동일** 확인.
+  이후 실칩에서 all-layer rbbox가 visible-layer와 무관한 stripe를
+  만드는 것이 확인되어, 이 규칙은 현재 depth-boundary frame에만
+  적용되고 size-cut frame은 표시하지 않는다.
 - **게이트**: validate_vfs_render **6뷰**(배열 관통 마이크로 뷰 +
   경계 스트립 추가) × flat/hier 2회, `validate_vfs_lifecycle.py`
   신설 **L1~L4**(10-gen 팬 XOR+WC 잔존 0 / stale-drop 재전송 /
@@ -774,16 +777,18 @@ FLOE_WS
     자식으로 가는 `CellInstArray` → `WC(child, r-1)`. **배열은
     배열로 보존**(na,nb,va,vb), **중첩 배열은 중첩 그대로** — 전개
     없음.
-  - **프레임**: cut 미만 자식의 외곽선 rect, **WC 로컬 좌표**. 배열
-    밑 below-cut 자식은 rect에 rep를 실어 klayout이 배열로 처리 —
-    현행 `rep_footprint`의 "배열 전체 1박스"에서 멤버별 아웃라인으로
-    의미가 바뀐다(더 정확). **단, 융합 규칙**(M3 실측): 멤버 피치
+  - **프레임**: 사용자가 지정한 depth 경계 자식의 외곽선 rect,
+    **WC 로컬 좌표**. visible `lmask_rec`을 먼저 통과한 자식만 만들며,
+    배열 rect에는 rep를 실어 klayout이 배열로 처리한다. **융합 규칙**:
+    멤버 피치
     (Grid 벡터) 또는 extent 밀도(Pts)가 **2×cut 미만**이면 멤버
     아웃라인들이 화면에서 융합해 실지오메트리를 덮는 단색 워시가
     되므로 **footprint 1박스(Rep::One)로 강등**한다(flat 동등).
     FRAME_CAP(200K)은 플랜 총량 상한으로
-    유지하되 WC 단위 dedup 덕에 자연 감소. depth 경계(r=0)의 자식은
-    현행대로 프레임 없이 생략(§2.5).
+    유지하되 WC 단위 dedup 덕에 자연 감소. size-cut 자식은 all-layer
+    recursive bbox가 선택 레이어의 올바른 proxy가 아니므로 프레임 없이
+    생략한다. per-(cell,layer) proxy가 도입되기 전에는 false geometry를
+    표시하지 않는 것이 정확성 계약이다.
 
 ### 2.2 BVH 정확 활용 (인스턴스 + 페이지)
 
@@ -1309,8 +1314,9 @@ gen 2: 데몬 "이미 resident" → 바디 재전송 안 함
 
 ## 4. 정확성: cut / coverage / labels
 
-- **cut(디테일 컷)**: **셀 단위** 분류(§2.4). below-cut 셀은 WC 없이
-  부모의 프레임 rect(+rep)로 대체.
+- **cut(디테일 컷)**: **셀 단위** 분류(§2.4). below-cut 셀은 WC와
+  FRAME_LAYER proxy 없이 생략한다. all-layer `rbbox`를 단일 visible-layer
+  proxy로 사용하면 무관한 다이 폭 outline/배열 stripe가 생기기 때문이다.
 - **페이지 컷**: `max_w/max_h < cut` 페이지 skip, coverage가 채움
   (현행).
 - **coverage 합성**: 서비스 측 numpy 팔레트 합성(현행 유지). 핸드오프

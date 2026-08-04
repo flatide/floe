@@ -403,7 +403,8 @@ class Viewer:
         self._lod_button = Gtk.ToggleButton()
         self._lod_button.set_active(self.lod_on)
         self._lod_button.set_tooltip_text(
-            "Use merged LOD pages for live rendering (shortcut: l)")
+            "Toggle live approximations: merged LOD pages and "
+            "cut proxy frames (shortcut: l)")
         self._lod_button.connect("toggled", self._on_lod_toggled)
         side.pack_start(self._lod_button, False, False, 2)
         self._update_lod_button()
@@ -712,7 +713,17 @@ class Viewer:
     def _render_key(self, scope):
         """Identity of a frame: what state it was rendered for."""
         return (scope, tuple(sorted(self.visible)), self._depth_key(),
-                self.cut_px, self.lod_on)
+                self._effective_cut_px(), self.lod_on)
+
+    def _effective_cut_px(self):
+        """LOD off is the exact-display master switch.
+
+        The gray lines users identify as LOD are FRAME_LAYER proxies
+        emitted by the screen-space cut, not merged LOD page payloads.
+        Preserve the selected cut level while LOD is off so enabling it
+        again restores the previous navigation setting.
+        """
+        return self.cut_px if self.lod_on else 0.0
 
     def _frame_compatible(self, frame):
         """A stale frame stays displayable rescaled until the fresh
@@ -997,7 +1008,7 @@ class Viewer:
             "view": tuple(float(v) for v in bbox),
             "w": int(w), "h": int(h),
             "depth": depth,
-            "cut_px": self.cut_px,
+            "cut_px": self._effective_cut_px(),
             "lod": self.lod_on,
             "abstract": self.abstract,
             "coverage": self.coverage_on,
@@ -1493,12 +1504,14 @@ class Viewer:
         d = self._depth()
         lbl = "depth: full" if d is None else "depth: %d" % d
         if self.meta.get("bands") or self.meta.get("vfs"):
-            lbl += " · cut: %s" % ("off" if self.cut_level <= 0
-                                   else "L%d" % self.cut_level)
+            cut_on = self.cut_level > 0 \
+                and (not self.meta.get("vfs") or self.lod_on)
+            lbl += " · cut: %s" % (
+                "L%d" % self.cut_level if cut_on else "off")
         # coverage is a VFS-only density fill, off by default and
         # opt-in via `v`; show it only when the user turned it on
-        if self.meta.get("vfs") and self.cut_level > 0 \
-                and self.coverage_on:
+        if self.meta.get("vfs") and self.lod_on \
+                and self.cut_level > 0 and self.coverage_on:
             lbl += " · cov"
         if self.meta.get("vfs"):
             lbl += " · lod:%s" % ("on" if self.lod_on else "off")
