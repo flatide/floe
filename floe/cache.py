@@ -184,11 +184,23 @@ class _phase_monitor:
         return False
 
 
-def layer_color(i):
-    """Distinct, stable per-layer color (golden-angle hue rotation)."""
-    h = (i * 137.508) % 360.0 / 360.0
+def layer_color(layer):
+    """Stable color keyed by OASIS layer number, not datatype."""
+    h = (int(layer) * 137.508) % 360.0 / 360.0
     r, g, b = colorsys.hsv_to_rgb(h, 0.75, 1.0)
     return "#%02x%02x%02x" % (int(r * 255), int(g * 255), int(b * 255))
+
+
+def normalize_layer_colors(meta):
+    """Apply the layer-number palette to new and existing caches.
+
+    Older metadata assigned colors by (layer, datatype) row order, so
+    e.g. 15/0 and 15/192 appeared unrelated. Keep metadata compatible
+    and normalize in memory; no cache rebuild is required.
+    """
+    for entry in (meta or {}).get("layers", []):
+        entry["color"] = layer_color(entry["layer"])
+    return meta
 
 
 def save_opts():
@@ -253,7 +265,7 @@ class Cache:
     def load(self):
         with open(self.meta_path) as f:
             self.meta = json.load(f)
-        return self.meta
+        return normalize_layer_colors(self.meta)
 
     def is_stale(self):
         if self.meta.get("version") != CACHE_VERSION:
@@ -1844,11 +1856,11 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
     t0 = time.perf_counter()
     counts, text_layer_lis = _scan_layers(ly, log)
     layers = []
-    for i, li in enumerate(ly.layer_indexes()):
+    for li in ly.layer_indexes():
         info = ly.get_info(li)
         layers.append({"layer": info.layer, "datatype": info.datatype,
                        "name": info.name or f"{info.layer}/{info.datatype}",
-                       "color": layer_color(i),
+                       "color": layer_color(info.layer),
                        "stored_shapes": counts[li]})
     log(f"[index] layer scan done ({time.perf_counter() - t0:.1f}s, "
         f"{len(text_layer_lis)} text layers)")

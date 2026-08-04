@@ -514,11 +514,11 @@ fn jesc(s: &str) -> String {
     out
 }
 
-/// colorsys.hsv_to_rgb + int(x*255) truncation, bit-for-bit - the
-/// palette must match the Python indexer's so the same layout gets
-/// the same colors from either builder
-fn layer_color(i: usize) -> String {
-    let h = ((i as f64) * 137.508) % 360.0 / 360.0;
+/// colorsys.hsv_to_rgb + int(x*255) truncation, bit-for-bit. Key the
+/// palette by the OASIS layer number so every datatype of one layer
+/// shares a color and independent caches agree.
+fn layer_color(layer: usize) -> String {
+    let h = ((layer as f64) * 137.508) % 360.0 / 360.0;
     let (s, v) = (0.75f64, 1.0f64);
     let i6 = (h * 6.0) as i64;
     let f = h * 6.0 - i6 as f64;
@@ -1137,8 +1137,7 @@ fn index_cmd(args: &[String]) {
     let layers_json: Vec<String> = doc
         .layer_order
         .iter()
-        .enumerate()
-        .map(|(i, &(l, d))| {
+        .map(|&(l, d)| {
             let name = doc
                 .layer_names
                 .get(&(l, d))
@@ -1151,7 +1150,7 @@ fn index_cmd(args: &[String]) {
                 l,
                 d,
                 jesc(&name),
-                layer_color(i),
+                layer_color(l as usize),
                 stored.get(&(l, d)).copied().unwrap_or(0)
             )
         })

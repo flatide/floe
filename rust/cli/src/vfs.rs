@@ -347,8 +347,7 @@ fn emit_viewer_side(
     let layers_json: Vec<String> = doc
         .layer_order
         .iter()
-        .enumerate()
-        .map(|(i, &(l, d))| {
+        .map(|&(l, d)| {
             let name = doc
                 .layer_names
                 .get(&(l, d))
@@ -361,7 +360,7 @@ fn emit_viewer_side(
                 l,
                 d,
                 crate::jesc(&name),
-                crate::layer_color(i),
+                crate::layer_color(l as usize),
                 stored.get(&(l, d)).copied().unwrap_or(0)
             )
         })
