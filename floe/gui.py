@@ -27,6 +27,8 @@ Gtk = Gdk = GdkPixbuf = GLib = Pango = None
 APP = "floe"
 POLL_MS = 25
 DEBOUNCE_MS = 120
+DEFAULT_CUT_LEVEL = 2
+DEFAULT_LOD = False
 
 BLACK = 0x000000FF
 BAND_IN = 0x8ECDF5FF       # forward drag: zoom in
@@ -295,15 +297,18 @@ class Viewer:
         self.coverage_on = False    # `v` key: density coverage fill (VFS)
         # Per-view LOD switch. FLOE_LOD=0 remains the process-wide
         # startup kill switch, while this can change live requests.
+        # Default off: cut is the baseline accelerator; merged page
+        # substitution is an independent opt-in approximation.
         self._lod_forced_off = os.environ.get("FLOE_LOD") == "0"
-        self.lod_on = not self._lod_forced_off
+        self.lod_on = DEFAULT_LOD
         self._depth_used = "?"      # depth of the last frame ("?" = none yet)
+        self.max_depth = None        # learned from the VFS daemon
         # detail cut LEVEL: 0 = off, higher = more aggressive. Users
         # only ever see the level; the screen-px threshold behind each
         # level (CUT_LEVEL_PX) is an implementation detail that may be
         # retuned later without changing what "L1" means. --cut-level
         # sets the start value, the `c` dialog changes it at runtime.
-        self.cut_level = (1 if cut_level is None else
+        self.cut_level = (DEFAULT_CUT_LEVEL if cut_level is None else
                           max(0, min(len(CUT_LEVEL_PX) - 1,
                                      int(cut_level))))
         self.cut_px = CUT_LEVEL_PX[self.cut_level]
@@ -403,8 +408,8 @@ class Viewer:
         self._lod_button = Gtk.ToggleButton()
         self._lod_button.set_active(self.lod_on)
         self._lod_button.set_tooltip_text(
-            "Toggle live approximations: merged LOD pages and "
-            "cut proxy frames (shortcut: l)")
+            "Toggle merged LOD pages. Detail cut and hierarchy "
+            "outlines are independent (shortcut: l)")
         self._lod_button.connect("toggled", self._on_lod_toggled)
         side.pack_start(self._lod_button, False, False, 2)
         self._update_lod_button()
@@ -432,7 +437,13 @@ class Viewer:
         self.overlay.add(self.scroller)
         main.pack_start(self.overlay, True, True, 0)
 
-        sbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        # Two-tier status area. Upper: cursor/interaction plus persistent
+        # view/depth/cut/cov/lod state. Lower: retained render/performance
+        # plus live rendering/refinement progress. Mouse motion only
+        # replaces the upper-left text, never the lower render details.
+        sbars = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        livebar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        infobar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         self.status = Gtk.Label(label="")
         self.status.set_xalign(0.0)
         self.status.set_margin_start(8)
@@ -443,15 +454,23 @@ class Viewer:
         self.status.set_max_width_chars(1)
         self.rstatus = Gtk.Label(label="")
         self.rstatus.set_margin_end(10)
+        self.pstatus = Gtk.Label(label="")
+        self.pstatus.set_xalign(0.0)
+        self.pstatus.set_margin_start(8)
+        self.pstatus.set_ellipsize(Pango.EllipsizeMode.END)
+        self.pstatus.set_max_width_chars(1)
         self.dstatus = Gtk.Label(label="depth: full")
         self.dstatus.set_margin_end(14)
         self.vstatus = Gtk.Label(label="")
         self.vstatus.set_margin_end(14)
-        sbar.pack_start(self.status, True, True, 0)
-        sbar.pack_end(self.rstatus, False, False, 0)
-        sbar.pack_end(self.dstatus, False, False, 0)
-        sbar.pack_end(self.vstatus, False, False, 0)
-        main.pack_start(sbar, False, False, 2)
+        livebar.pack_start(self.status, True, True, 0)
+        livebar.pack_end(self.dstatus, False, False, 0)
+        livebar.pack_end(self.vstatus, False, False, 0)
+        infobar.pack_start(self.pstatus, True, True, 0)
+        infobar.pack_end(self.rstatus, False, False, 0)
+        sbars.pack_start(livebar, False, False, 0)
+        sbars.pack_start(infobar, False, False, 0)
+        main.pack_start(sbars, False, False, 2)
 
         self.scroller.add_events(
             Gdk.EventMask.BUTTON_PRESS_MASK |
@@ -716,22 +735,21 @@ class Viewer:
                 self._effective_cut_px(), self.lod_on)
 
     def _effective_cut_px(self):
-        """LOD off is the exact-display master switch.
+        """Screen-space detail cut is independent of merged LOD."""
+        return self.cut_px
 
-        The gray lines users identify as LOD are FRAME_LAYER proxies
-        emitted by the screen-space cut, not merged LOD page payloads.
-        Preserve the selected cut level while LOD is off so enabling it
-        again restores the previous navigation setting.
-        """
-        return self.cut_px if self.lod_on else 0.0
+    def _structure_visible(self):
+        """A finite VFS depth has a hierarchy frontier of its own."""
+        return bool(self.meta.get("vfs") and self._depth() is not None)
 
     def _frame_compatible(self, frame):
         """A stale frame stays displayable rescaled until the fresh
         frame lands - across pans, zooms of any ratio, layer and depth
         changes alike (briefly stale content beats a black flash).
-        Only an empty layer set blanks the screen (and a degenerate
-        frame - zero-width bbox - is never displayable)."""
-        return frame[3] is not None and frame[2] > 0 and bool(self.visible)
+        A finite-depth hierarchy frame remains useful with every design
+        layer hidden (and a degenerate frame is never displayable)."""
+        return (frame[3] is not None and frame[2] > 0 and
+                (bool(self.visible) or self._structure_visible()))
 
     def _display(self):
         w, h = self._viewport_size()
@@ -948,14 +966,15 @@ class Viewer:
         # views are carried by coverage + LOD variants
         scope = "live"
         self._display()
-        if not self.visible:
+        if not self.visible and not self._structure_visible():
             if self._debounce is not None:
                 GLib.source_remove(self._debounce)
                 self._debounce = None
             self._clear_pending()
             self._set_status(bbox, "no layers visible")
             return
-        mode = "live (%d tiles)" % span
+        mode = ("hierarchy depth %d" % self._depth()
+                if not self.visible else "live (%d tiles)" % span)
         if self._drag is not None:
             # mid-pan: track visually with the frozen frame only; the
             # render fires once on button release (a brief motion pause
@@ -1066,8 +1085,7 @@ class Viewer:
                     and not getattr(w, "_died_reported", False):
                 w._died_reported = True
                 self._clear_pending()
-                self._set_status(
-                    self.view_bbox(),
+                self._set_live_status(
                     "error: render service died (exit %s) - see terminal; "
                     "restart the viewer" % w.exitcode())
         except Exception as exc:
@@ -1091,8 +1109,7 @@ class Viewer:
                     import traceback
                     traceback.print_exc()
                     self._clear_pending()
-                    self._set_status(
-                        self.view_bbox(),
+                    self._set_live_status(
                         "error: %s result failed: %s (see terminal)"
                         % (res.get("kind"), exc))
         except queue.Empty:
@@ -1143,6 +1160,8 @@ class Viewer:
                 fspp = (fb[2] - fb[0]) / max(1, pix.get_width())
                 key = self._job_keys.get(res["gen"])
                 used = self._job_depth.get(res["gen"])
+                if isinstance(res.get("max_depth"), int):
+                    self.max_depth = max(0, res["max_depth"])
                 if preview:
                     # LOD preview while fat full tiles parse. The
                     # sentinel key displays (non-None) yet never matches
@@ -1203,11 +1222,9 @@ class Viewer:
                         % (res["tiles"], res["ms"], split,
                            self._depth_note(used), cut, drawn,
                            refin, lod, text)
-                # also to stdout: the status bar is overwritten by
-                # cursor coords on mouse-move, so the perf line would
-                # otherwise vanish before it can be read (only the
-                # SETTLED frame prints - refining rounds would spam a
-                # line every ~0.4s)
+                # Also keep a terminal performance log (only the settled
+                # frame prints; refining rounds would spam every ~0.4s).
+                # The same line now remains in the persistent lower bar.
                 if not res.get("refining"):
                     b = self.view_bbox()
                     print("%s  view %.1f x %.1f um"
@@ -1223,14 +1240,12 @@ class Viewer:
             if res["seq"] == self._pick_seq:
                 self._on_pick_result(res)
         elif kind == "clip":
-            self._set_status(self.view_bbox(),
-                             "clip saved: %s (%.2f MB, %d ms)"
-                             % (res["path"], res["size_mb"],
-                                res["ms"]))
+            self._set_live_status(
+                "clip saved: %s (%.2f MB, %d ms)"
+                % (res["path"], res["size_mb"], res["ms"]))
         elif kind == "error":
             self._clear_pending()
-            self._set_status(self.view_bbox(),
-                             "error: %s" % res.get("msg"))
+            self._set_live_status("error: %s" % res.get("msg"))
 
     def _set_status(self, bbox, mode):
         w_um = (bbox[2] - bbox[0]) * self.dbu
@@ -1240,8 +1255,13 @@ class Viewer:
         fmt = lambda v: ("%.4f" if v < 0.1 else
                          "%.3f" if v < 1 else "%.1f") % v
         self.vstatus.set_text("view %s x %s um" % (fmt(w_um), fmt(h_um)))
-        self.status.set_text(mode)
-        self.status.set_tooltip_text(mode)
+        self.pstatus.set_text(mode)
+        self.pstatus.set_tooltip_text(mode)
+
+    def _set_live_status(self, text):
+        """Upper-row message; cursor motion may replace it."""
+        self.status.set_text(text)
+        self.status.set_tooltip_text(text)
 
     # ---- interaction --------------------------------------------------------
     def fit(self):
@@ -1502,18 +1522,17 @@ class Viewer:
 
     def _depth_label(self):
         d = self._depth()
-        lbl = "depth: full" if d is None else "depth: %d" % d
+        current = "full" if d is None else str(d)
+        maximum = ("?" if self.max_depth is None
+                   else str(self.max_depth))
+        lbl = "depth: %s/%s" % (current, maximum)
         if self.meta.get("bands") or self.meta.get("vfs"):
-            cut_on = self.cut_level > 0 \
-                and (not self.meta.get("vfs") or self.lod_on)
+            cut_on = self.cut_level > 0
             lbl += " · cut: %s" % (
                 "L%d" % self.cut_level if cut_on else "off")
-        # coverage is a VFS-only density fill, off by default and
-        # opt-in via `v`; show it only when the user turned it on
-        if self.meta.get("vfs") and self.lod_on \
-                and self.cut_level > 0 and self.coverage_on:
-            lbl += " · cov"
         if self.meta.get("vfs"):
+            lbl += " · cov:%s" % (
+                "on" if self.coverage_on else "off")
             lbl += " · lod:%s" % ("on" if self.lod_on else "off")
         if self.abstract:
             lbl += " · abstract"
@@ -1952,7 +1971,7 @@ class Viewer:
             msg = "DRC load failed: %s" % exc
             if self._drcwin is not None:
                 self._drcwin._info.set_text(msg)
-            self._set_status(self.view_bbox(), msg)
+            self._set_live_status(msg)
             return False
         self._drc = db
         self._drc_flat = [(ci, ei)
@@ -1963,10 +1982,9 @@ class Viewer:
         self.drc_mark = None
         if self._drcwin is not None:
             self._drc_fill()
-        self._set_status(self.view_bbox(),
-                         "DRC %s: %d checks, %d errors (n/p = step)"
-                         % (os.path.basename(path), len(db.checks),
-                            db.total))
+        self._set_live_status(
+            "DRC %s: %d checks, %d errors (n/p = step)"
+            % (os.path.basename(path), len(db.checks), db.total))
         return True
 
     def _drc_fill(self):
@@ -2021,8 +2039,7 @@ class Viewer:
         self.drc_mark = {"kind": e.kind,
                          "pts": [(x / self.dbu, y / self.dbu)
                                  for x, y in e.pts]}
-        self._set_status(
-            self.view_bbox(),
+        self._set_live_status(
             "DRC %s #%d/%d · %s · %.3f x %.3f um at (%.3f, %.3f)"
             % (check.name, e.num, len(check.errors),
                "poly" if e.kind == "p" else "edge",
@@ -2074,30 +2091,28 @@ class Viewer:
         elif self._sel_text:
             parts.append(self._sel_text)
         text = "   |   ".join(parts)
-        self.status.set_text(text)
-        self.status.set_tooltip_text(text)
+        self._set_live_status(text)
 
     def _toggle_ruler(self):
         if self.mode == "ruler":
             self.mode = "normal"
             self._ruler_start = None
             self._snap_res = None
-            self._set_status(self.view_bbox(), "ruler off")
+            self._set_live_status("ruler off")
         else:
             self.mode = "ruler"
-            self._set_status(self.view_bbox(),
-                             "ruler: click two points (Shift=free angle, "
-                             "m=snap %s, Esc=done)"
-                             % ("on" if self.snap_on else "off"))
+            self._set_live_status(
+                "ruler: click two points (Shift=free angle, "
+                "m=snap %s, Esc=done)"
+                % ("on" if self.snap_on else "off"))
         self._display()
 
     def _toggle_snap(self):
         self.snap_on = not self.snap_on
         if not self.snap_on:
             self._snap_res = None
-        self._set_status(self.view_bbox(),
-                         "vector snap %s"
-                         % ("on" if self.snap_on else "off"))
+        self._set_live_status(
+            "vector snap %s" % ("on" if self.snap_on else "off"))
         self._display()
 
     def _esc(self):
@@ -2178,7 +2193,7 @@ class Viewer:
         self._pick_px = (x, y)
         r = max(1, int(3 * self.spp))
         if self.tiles_spanned((x - r, y - r, x + r, y + r)) > 4:
-            self._set_status(self.view_bbox(), "zoom in to pick objects")
+            self._set_live_status("zoom in to pick objects")
             return
         self._pick_seq += 1
         self.worker.submit({
@@ -2190,7 +2205,7 @@ class Viewer:
         if not res.get("found"):
             self.selection = None
             self._sel_text = ""
-            self._set_status(self.view_bbox(), "no object here")
+            self._set_live_status("no object here")
         else:
             self.selection = res
             bb = res["bbox"]
@@ -2202,7 +2217,7 @@ class Viewer:
                                  res["datatype"], res["cell"], w, h,
                                  bb[0] * self.dbu, bb[1] * self.dbu,
                                  res["index"] + 1, res["count"]))
-            self._set_status(self.view_bbox(), self._sel_text)
+            self._set_live_status(self._sel_text)
         self._display()
 
     # ---- layers / clip -------------------------------------------------------
@@ -2264,7 +2279,7 @@ class Viewer:
         self.worker.submit({"kind": "clip",
                             "bbox": tuple(int(round(v)) for v in bbox),
                             "layers": self._layers_arg(), "out": out})
-        self._set_status(bbox, "clipping…")
+        self._set_live_status("clipping…")
 
     # ---- shutdown -------------------------------------------------------------
     def _confirm_quit(self):

@@ -11,6 +11,11 @@ _VIEW_CONFIG = {
     "background-color": "#000000",
     "grid-visible": "false",
     "text-visible": "false",
+    # Headless save_image must never replace a label by its one-pixel
+    # anchor. Labels are request-capped, so real glyph rendering is
+    # bounded and is the only representation we want.
+    "text-lazy-rendering": "false",
+    "text-point-mode": "false",
     "cell-box-visible": "false",
 }
 
@@ -46,6 +51,10 @@ class Renderer:
         if show_texts:
             try:
                 self.lv.set_config("text-visible", "true")
+                # LayoutView's lazy text path substitutes a one-pixel
+                # anchor in headless save_image output. Live labels are
+                # capped, so render their real glyphs instead.
+                self.lv.set_config("text-lazy-rendering", "false")
             except Exception:
                 pass
         self.layout = layout
@@ -60,6 +69,7 @@ class Renderer:
         cv = self.lv.cellview(0)
         cv.cell = self.top
         self.lv.add_missing_layers()
+        self._place_hollow_underlays_first()
         for lp in self.lv.each_layer():
             key = (lp.source_layer, lp.source_datatype)
             hexcol = self.colors.get(key)
@@ -70,6 +80,43 @@ class Renderer:
             if key in self.hollow:
                 lp.dither_pattern = 1  # hollow: outline only
         self.lv.max_hier()
+
+    def _place_hollow_underlays_first(self):
+        """Keep structural outline layers behind design geometry.
+
+        LayoutView.add_missing_layers sorts new properties by source
+        layer number, regardless of the order in which layers were created
+        in Layout. The runtime FRAME_LAYER is deliberately above the
+        largest design layer number, so that default sorting puts its gray
+        outlines at the very top of the image. Rebuild the flat property
+        list only when that sorting has placed a hollow underlay after a
+        normal layer. KLayout paints later property entries over earlier
+        ones, hence hollow entries must come first.
+        """
+        nodes = list(self.lv.each_layer())
+        seen_design = False
+        misplaced = False
+        for node in nodes:
+            key = (node.source_layer, node.source_datatype)
+            if key in self.hollow:
+                misplaced |= seen_design
+            else:
+                seen_design = True
+        if not misplaced:
+            return
+
+        # Duplicate before clear_layers(): node refs belong to the list
+        # that is about to be destroyed. Preserve the relative ordering
+        # within the underlay and design groups.
+        ordered = [node.dup() for node in nodes
+                   if (node.source_layer,
+                       node.source_datatype) in self.hollow]
+        ordered.extend(
+            node.dup() for node in nodes
+            if (node.source_layer, node.source_datatype) not in self.hollow)
+        self.lv.clear_layers()
+        for node in ordered:
+            self.lv.insert_layer(self.lv.end_layers(), node)
 
     def set_visible(self, visible):
         """visible: None (all) or iterable of (layer, datatype)."""
@@ -88,6 +135,8 @@ class Renderer:
         self._text_visible = on
         try:
             self.lv.set_config("text-visible", "true" if on else "false")
+            if on:
+                self.lv.set_config("text-lazy-rendering", "false")
         except Exception:
             pass
 

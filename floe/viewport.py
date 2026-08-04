@@ -77,16 +77,19 @@ class VfsMosaic:
         self._dbu = cache.meta["dbu"]
         self._layer_keys = [(l["layer"], l["datatype"])
                             for l in cache.meta["layers"]]
-        # cut-frame outline layer, drawn hollow: one past the
+        # hierarchy-frontier outline layer, drawn hollow: one past the
         # highest DESIGN layer (same rule as the daemon's
         # frame_layer()) so it can never collide with real content
         # - (255,0) exists in real designs (review finding)
         self.FRAME_LAYER = frame_layer(cache.meta)
         self.ly = db.Layout(False)  # pages keep arrays compact
         self.ly.dbu = self._dbu
+        # Keep the Layout index deterministic with the structural frontier
+        # first. KLayout's LayoutView later re-sorts properties by source
+        # number, so Renderer also pins this layer to the paint-stack bottom.
+        self.ly.layer(db.LayerInfo(*self.FRAME_LAYER))
         for (l, d) in self._layer_keys:
             self.ly.layer(db.LayerInfo(l, d))
-        self.ly.layer(db.LayerInfo(*self.FRAME_LAYER))
         self.top = self.ly.create_cell("FLOE_WS")
         self.cells = {}  # page cell name -> cell index
         self.design = {}  # ci -> design cell name (_WsNames)
@@ -182,10 +185,14 @@ class VfsMosaic:
             self._lgen += 1
             lc = self.ly.create_cell("LABELS_%d" % self._lgen)
             self.label_ci = lc.cell_index()
-            for (l, d, x, y, s) in labels:
+            for (l, d, x, y, s, rot, centered) in labels:
                 li = self.ly.layer(db.LayerInfo(l, d))
-                lc.shapes(li).insert(
-                    db.Text(s, db.Trans(db.Vector(int(x), int(y)))))
+                text = db.Text(
+                    s, db.Trans(int(rot) & 3, False, int(x), int(y)))
+                if centered:
+                    text.halign = db.Text.HAlignCenter
+                    text.valign = db.Text.VAlignCenter
+                lc.shapes(li).insert(text)
             self.top.insert(
                 db.CellInstArray(self.label_ci, db.Trans()))
             changed = True
@@ -228,13 +235,12 @@ class VfsMosaic:
         renderer.top and refreshes, and sends reset=1 next."""
         self.ly.clear()
         self.ly.dbu = self._dbu
+        self.ly.layer(db.LayerInfo(*self.FRAME_LAYER))
         for (l, d) in self._layer_keys:
             self.ly.layer(db.LayerInfo(l, d))
-        self.ly.layer(db.LayerInfo(*self.FRAME_LAYER))
         self.top = self.ly.create_cell("FLOE_WS")
         self.cells = {}
         self._wc_cells = []
         self.label_ci = None
         self.applied_gen = 0
         self.need_reset = True
-

@@ -323,6 +323,10 @@ GUI는 **GTK3/PyGObject** 셸이다. flateyes와 같은 폐쇄망 호스트
 - 렌더 요청(줌/팬/레이어/depth 변경) 제출 시 하단 상태바 우측에 "rendering…"
   인디케이터가 즉시 표시되고, 1.5초를 넘기면 경과 초가 붙는다. 렌더 중에도
   팬/줌 가능하며, 밀린 요청은 최신 것만 처리된다.
+- 상태 영역은 2단이다. 윗단에는 커서 좌표, ruler/selection/DRC/clip 메시지와
+  view 크기, depth/cut/coverage/LOD 상태를 표시한다. 아랫단에는 마지막 렌더
+  성능과 `rendering…`/refinement 진행을 표시하므로 마우스 이동으로 렌더
+  정보가 사라지지 않는다.
 - 인스턴스 소켓은 `GLib.io_add_watch`로, 결과 큐는 `GLib.timeout_add`(25ms)로
   서비스한다. UI 라벨은 English only (XQuartz 한글 글리프 부재 — flateyes 규칙).
 - 키: `f` fit, `+`/`-`(`=`) 줌, `r` ruler, `m` 스냅, `d` depth 다이얼로그,
@@ -417,11 +421,13 @@ klayout은 서브픽셀 도형도 전부 순회하며 그리므로(멤버당 비
   로드된 미세 밴드는 klayout hidden-cell로 드로우에서 제외한다.
   컷이 발동하면 상태줄에 `cut<0.35um` 형태로 표시.
 - **컷 레벨** (v0.6.0): 사용자에게 노출되는 단위는 픽셀이 아니라
-  **레벨**이다 — off(0) / L1(기본) / L2 / L3, 높을수록 광역 뷰가
+  **레벨**이다 — off(0) / L1 / L2(기본) / L3, 높을수록 광역 뷰가
   가벼워진다. 레벨 뒤의 화면-px 문턱값(현재 2/4/8px)은 구현 세부라
   나중에 조정돼도 "L1"의 의미는 유지된다. `c` 키 다이얼로그로 실시간
-  변경, 시작값은 `view --cut-level`(기본 1). 상태바 우측에
-  `depth: full · cut: L1` 상시 표시.
+  변경, 시작값은 `view --cut-level`(기본 2). 상태바 우측에
+  `depth: full · cut: L2 · cov:off · lod:off`처럼 각 상태를 상시 표시.
+  VFS의 LOD는 기본 off이며 merged page 선택만 제어한다. cut과
+  coverage는 LOD 상태와 독립적으로 동작한다.
 - **병합 트윈 (merged twin)** (v0.6.0): 컷으로 빠지는 밴드는 화면에서
   사라지는 대신 **병합 트윈**으로 그려진다 — 인덱싱 때 밴드별 지오메트리를
   flatten하고 닫힘(closing: `sized(+d)→merged→sized(−d)`, d = 밴드

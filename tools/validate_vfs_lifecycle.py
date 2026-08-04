@@ -24,6 +24,8 @@ vfsd sessions exactly like the render service does.
       pages sum to exactly the unbudgeted cold set, the final view
       XORs clean, and a dropped partial round rolls back and re-sends
       the same chunk
+  L8  layers=none selects no design pages but finite depth still emits
+      and applies a nonempty structural FRAME_LAYER underlay
 
 usage: python tools/validate_vfs_lifecycle.py <src.oas> <floe_dir>
 """
@@ -38,6 +40,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
 from floe.vfsclient import VfsClient           # noqa: E402
 from floe.viewport import VfsMosaic            # noqa: E402
+from floe.service import _labels_from           # noqa: E402
+from floe.render import Renderer                # noqa: E402
 from floe import cache as cm                   # noqa: E402
 
 print = functools.partial(print, flush=True)
@@ -113,6 +117,25 @@ def check_ledger(tag, mosaic):
             chk(nsh > 0, "%s ghost page cell %s" % (tag, c.name))
 
 
+def check_render_stack(cache):
+    """FRAME_LAYER must be first in LayoutView's actual paint stack.
+
+    Checking Layout's numeric layer index is insufficient: KLayout's
+    add_missing_layers() sorts view properties by source layer number and
+    can put the runtime (max+1) frame above every design layer.
+    """
+    mosaic = VfsMosaic(cache)
+    renderer = Renderer(mosaic.ly, mosaic.top,
+                        hollow=(mosaic.FRAME_LAYER,))
+    keys = [(lp.source_layer, lp.source_datatype)
+            for lp in renderer.lv.each_layer()]
+    fi = keys.index(mosaic.FRAME_LAYER)
+    chk(all(fi < keys.index(key) for key in mosaic._layer_keys),
+        "FRAME_LAYER must paint below every design layer")
+    # LayoutView owns the shown Layout and releases it with the view.
+    renderer.lv._destroy()
+
+
 class Sess:
     """the render service's hier round, distilled"""
 
@@ -120,16 +143,23 @@ class Sess:
         self.client = VfsClient(cache.dir, budget_mb=budget_mb,
                                 stream_kb=stream_kb)
         self.m = VfsMosaic(cache)
+        frame_li = self.m.ly.layer(
+            db.LayerInfo(*self.m.FRAME_LAYER))
+        design_lis = [self.m.ly.layer(db.LayerInfo(*key))
+                      for key in self.m._layer_keys]
+        chk(all(frame_li < li for li in design_lis),
+            "FRAME_LAYER must be registered below every design layer")
         self.dbu = cache.meta["dbu"]
 
-    def request(self, view, reset=False, px=1.0, lod=True):
+    def request(self, view, reset=False, px=1.0, lod=True,
+                layers=None, depth=None, cut=0.0):
         self.m.req_gen += 1
         x0, y0, x1, y1 = view
         r = self.client.request(
             self.m.req_gen,
             (x0 * self.dbu, y0 * self.dbu,
              x1 * self.dbu, y1 * self.dbu),
-            px, 0.0, None, None,
+            px, cut, layers, depth,
             ack=0 if reset else self.m.applied_gen,
             reset=reset, lod=lod)
         # mirror the service: names= is view-independent and sent
@@ -142,9 +172,9 @@ class Sess:
                 "names file not deleted after load")
         return r
 
-    def apply(self, r):
+    def apply(self, r, labels=None):
         return self.m.apply_hier(r["delta"], r["top"], r["evict"],
-                                 gen=self.m.req_gen)
+                                 labels, gen=self.m.req_gen)
 
     def round(self, view, reset=False):
         self.apply(self.request(view, reset))
@@ -163,6 +193,7 @@ def main():
     cache.dir = floe_dir
     cache.meta = json.load(open(os.path.join(floe_dir,
                                              "meta.json")))
+    check_render_stack(cache)
     sregs, (bx0, by0, bx1, by1), sly = source_regions(src)
     w, h = bx1 - bx0, by1 - by0
 
@@ -221,6 +252,37 @@ def main():
         s.m.need_reset = False
         xor_view("L3 recovered", sregs, s.m, vB)
         check_ledger("L3", s.m)
+    finally:
+        s.stop()
+
+    # ---- L8: layers=none is a real empty mask, while a finite depth
+    # still emits the structural hierarchy frontier.
+    s = Sess(cache, stream_kb=0)
+    try:
+        full = (bx0, by0, bx1, by1)
+        r = s.request(full, px=10.0, layers=[], depth=0,
+                      cut=10_000.0)
+        chk(int(r.get("max_depth", -1)) >= 0,
+            "L8 daemon omitted max_depth")
+        chk(int(r.get("pages", -1)) == 0,
+            "L8 layers=none selected design pages")
+        chk(int(r.get("frame_rects", 0)) > 0,
+            "L8 finite depth lost hierarchy frontier")
+        labels = _labels_from(r.get("labels"), cache)
+        blocks = [row for row in labels if row[6]]
+        chk(blocks and all(row[5] in (0, 1) for row in blocks),
+            "L8 block label orientation metadata missing")
+        s.apply(r, labels)
+        frame_li = s.m.ly.layer(db.LayerInfo(*s.m.FRAME_LAYER))
+        it = s.m.top.begin_shapes_rec(frame_li)
+        chk(not it.at_end(), "L8 FRAME_LAYER is empty after apply")
+        lc = s.m.ly.cell(s.m.label_ci) if s.m.label_ci is not None else None
+        centered = [] if lc is None else [
+            sh.text.halign == db.Text.HAlignCenter
+            and sh.text.valign == db.Text.VAlignCenter
+            for sh in lc.shapes(frame_li).each() if sh.is_text()]
+        chk(centered and all(centered),
+            "L8 block labels are not center-aligned")
     finally:
         s.stop()
 
@@ -362,7 +424,7 @@ def main():
 
     sly._destroy()
 
-    print("vfs-lifecycle-checked L1-L7, failures: %d" % len(bad))
+    print("vfs-lifecycle-checked L1-L8, failures: %d" % len(bad))
     sys.exit(1 if bad else 0)
 
 

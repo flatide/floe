@@ -194,11 +194,13 @@ rev 28 (T1~T4 cell-local Text VFS — 2026-08-04, 0.11.0, **ovm v5 =
   변환을 추적, 후보 = 뷰포트 안 앵커의 (경로, 멤버) 정확 집합
   (declutter 전, 오라클 게이트 대상). Grid 닫힌형 인덱스 사각 +
   Pts Morton 청크 사다리 재사용. 멤버/후보 예산은 truncated
-  플래그(표시 전용 열화, 조용한 생략 아님). declutter =
+  플래그(표시 전용 열화, 조용한 생략 아님). 최초 declutter =
   월드-고정 cell_px(48px) bin당 1승자, 우선순위 blk > txt >
-  레이어 순 > 안정 해시, 예산 400. **블록명은 런타임 합성**
-  (r==0 depth 경계의 자식 프레임에서 셀명+배치 bbox 중심,
-  화면크기 게이트 96px) — BLOCK_ROW/센티널/저장 라벨 전면 폐기.
+  레이어 순 > 안정 해시, 예산 400(블록명은 rev 29에서 bin 제외,
+  총 예산 4096으로 교정). **블록명은 런타임 합성**
+  (r==0 depth 경계의 자식 프레임에서 셀명+배치 bbox 중심;
+  초기 96px gate는 rev 29에서 실제 원문/`...` fit 판정으로 교체)
+  — BLOCK_ROW/센티널/저장 라벨 전면 폐기.
   probe(px=0)는 구조적으로 라벨 없음.
 - **T3 (프로토콜/뷰어)**: vfsd 응답 `labels=<gen별 tsv> nlabels=N
   text_plan_ms=F` — kind 명시 행(`txt\t<l>/<d>\t…` /
@@ -226,6 +228,41 @@ rev 28 (T1~T4 cell-local Text VFS — 2026-08-04, 0.11.0, **ovm v5 =
   (a) 오픈 딥 검증은 from_bytes 전용(mmap 지연 원칙 유지), (b)
   publish는 기존 마커 규약 유지(.tmp 체인 미도입 — 동일 보장),
   (c) 라벨 행은 layer_idx 대신 l/d 표기(자기서술적).
+
+rev 29 (Calibre식 hierarchy frontier — 2026-08-04):
+
+- **표시 계약**: 유한 depth `d`는 실제 설계 레이어와 별개인 구조
+  frontier 하나만 표시한다. 경로 깊이 `d`에 있는 각 셀의 직계 자식
+  bbox와 읽을 수 있는 셀명이 대상이며, depth 0/1/2/... 결과는
+  누적하지 않는다. 요청 깊이가 top height 이상으로 접히거나 full이면
+  frontier가 없으므로 FRAME_LAYER와 블록명도 없다.
+- frontier는 visible layer, geometry cut, merged LOD 선택과 무관하다.
+  따라서 모든 설계 레이어를 꺼도 보이며 `layers=none`은 `all`과
+  구별한다. 반대로 실제 페이지/텍스트는 계속 visible layer를
+  정확히 따른다. size-cut된 셀의 all-layer rbbox를 대체 형상으로
+  그리는 동작은 금지 상태를 유지한다.
+- **합성/순서**: 반복 frontier는 화면상 2px 미만 피치 또는 기존
+  재료화 상한에서만 footprint로 융합한다(cut 값과 무관). FRAME_LAYER
+  는 KLayout 레이어 순서에서 먼저 등록해 모든 실제 설계 레이어의
+  아래(underlay)에 그린다. pick/snap 대상에서는 계속 제외한다. 블록명은
+  bbox 중앙 정렬, 세로 bbox는 90도 회전한다. 고정 화면 폰트의 가용
+  폭을 넘으면 원문 일부를 남기지 않고 ASCII `...`만 표시하며,
+  `...`도 못 들어가면 생략한다. 블록명은 자체 frontier bbox가 있으므로
+  48px generic text bin 경쟁에서 제외한다. 총 표시 예산은 4096이며,
+  초과 시 조용히 버리지 않고 `labels partial`로 알린다. KLayout
+  headless 렌더에서는 1픽셀 anchor로 대체되지 않도록 label 표시 중
+  `text-lazy-rendering=false`, `text-point-mode=false`를 전역 기본으로
+  사용한다.
+- **KLayout 고유 표시 제약**: `text-lazy-rendering=false`로 실제
+  글리프를 그려도 `db.Text`는 정렬 기준점(origin)에 별도 1픽셀 anchor를
+  함께 그린다. `...`에서는 가운데 점 위쪽, 일반 문자열에서는 중심
+  부근의 1픽셀 돌기로 보일 수 있다. `markers-visible` 및
+  `text-point-mode` 설정으로 제거되지 않는다. 이는 현재 KLayout text
+  renderer의 고유 동작으로 기록하고 우회 raster 합성은 도입하지
+  않는다.
+- **운영 기본값/독립 토글**: viewer 시작 cut은 L2, merged LOD는 off다.
+  LOD 토글은 page variant 선택만 바꾸며 `cut_px`와 coverage를 변경하지
+  않는다. 따라서 `lod:off · cut:L2`가 정상 기본 상태다.
 
 rev 27 (외부 검토 3차 반영 — 2026-08-04, 0.10.3; 2건):
 
@@ -948,8 +985,10 @@ top-down 전파한다 (키는 WsKey, §2.5):
 quarter-turn+flip뿐이다. 인스턴스의 world 크기는 w/h 스왑까지 셀
 고유이고, cut 판정 `(w<cut)&&(h<cut)`은 스왑 불변 → **above/below-cut
 은 (cut이 주어지면) 셀 단위로 1회 분류**된다. 인스턴스별로 갈리는
-경우는 구조적으로 불가능. below-cut 셀은 WC를 만들지 않고, 부모가
-프레임 rect(+rep)만 방출한다.
+경우는 구조적으로 불가능. full-depth geometry walk의 below-cut 셀은
+WC를 만들지 않는다. all-layer recursive bbox는 선택 레이어의 정직한
+대체 형상이 아니므로 size-cut 프레임도 방출하지 않는다. 단, 유한
+depth의 구조 frontier를 찾는 walk는 cut과 별개다(§2.5).
 
 ### 2.5 depth 의미론: remaining-depth WC variant
 
@@ -975,8 +1014,20 @@ depth는 실기능이다: gui 첫 페인트가 depth=1(gui.py:277-283),
   페인트 d=1이면 ≤2). localview는 WsKey별로 누적한다.
 - min-path-depth 방식(rev 2)은 다경로 셀에서 사용자가 지정한 depth
   보다 깊은 디테일을 보여주는 **의미 변경**이라 철회.
-- depth 경계(r=0)에서 생략되는 자식은 현행처럼 아웃라인 없이
-  사라진다(개선하려면 후속에서 klayout식 경계 박스 — 범위 밖).
+- **비누적 frontier**: 유한 depth에서만 r=0 셀의 직계 자식을
+  FRAME_LAYER의 hollow bbox(+rep)로 그린다. r>0/다른 depth의 bbox를
+  함께 쌓지 않는다. full sentinel 또는 `r >= height(ci)` 정규화로
+  full에 접힌 경로에는 frontier가 없다. 따라서 마지막 깊이/full은
+  구조선이 없는 것이 정상이다.
+- frontier walk와 합성 블록명은 visible layer 및 geometry cut을
+  무시한다. 실제 페이지/설계 텍스트만 visible layer와 cut을 따른다.
+  이 분리 덕분에 `layers=none`도 Calibre식 구조 탐색 뷰가 된다.
+- FRAME_LAYER는 KLayout LayoutView의 실제 paint stack에서 모든 설계
+  레이어보다 먼저 오는 underlay이며, pick/snap/clip의 설계 형상으로
+  취급하지 않는다. Layout 등록 순서만으로는 부족하다. LayoutView가
+  source layer 번호로 재정렬하므로 layer-properties 순서를 명시적으로
+  고정한다. 반복 bbox는 화면
+  피치 2px 미만 또는 재료화 상한일 때만 footprint로 융합한다.
 
 ### 2.6 결과
 
@@ -1087,6 +1138,9 @@ mats-TSV 12열(design명)은 placements가 아니라 **pick이 소비**한다
 
 ### 3.5 프로토콜 / 지표
 
+- 요청의 layer 문법은 `layers=all|none|a/b,...`이다. `none`은 빈
+  설계 레이어 마스크이며 `all`로 승격하지 않는다. 유한 depth에서는
+  geometry가 0개여도 hierarchy frontier/블록명을 요청할 수 있다.
 - 요청: `mode=hier|flat` 스위치 추가 (A/B; M5에서 flat 제거와 함께
   삭제), **`ack=<gen>`**(마지막으로 apply 완료한 gen — 세션
   트랜잭션의 커밋 신호, §3.7), **`reset=1`**(장부 전체 초기화 —

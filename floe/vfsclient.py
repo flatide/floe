@@ -72,8 +72,10 @@ class VfsClient:
             except OSError:
                 pass
         self._last_files = []
-        lspec = "all" if layers is None else ",".join(
-            f"{l}/{d}" for (l, d) in layers) or "all"
+        # None and [] are deliberately distinct: an empty design-layer
+        # selection still requests finite-depth hierarchy frontiers.
+        lspec = ("all" if layers is None else
+                 ",".join(f"{l}/{d}" for (l, d) in layers) or "none")
         dspec = "full" if depth is None else str(max(0, int(depth)))
         line = (f"gen={gen} view={view_um[0]},{view_um[1]},"
                 f"{view_um[2]},{view_um[3]} px={px_per_um} "
@@ -120,6 +122,7 @@ class VfsClient:
         ev = out.get("evict", "-")
         out["evict"] = [] if ev in ("-", "") else ev.split(",")
         for k in ("pages", "new", "bytes", "members", "lod",
+                  "max_depth",
                   "nlabels", "labels_truncated", "text_bvh_nodes",
                   "text_place_bvh_nodes", "text_place_records",
                   "text_members_tested", "text_members_visible"):

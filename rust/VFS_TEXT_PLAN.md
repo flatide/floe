@@ -276,6 +276,13 @@ text-member)`다. 좌표가 같다는 이유로 source member를 정확성 단�
   viewport origin이 아니라 world DBU의 screen-scale grid에 고정한다.
 - 후보/선택/예산 탈락 수를 각각 계측한다.
 
+구현 후 실칩 교정: block-name은 이미 자기 frontier bbox 안에서
+fit/회전/말줄임 판정을 받으므로 generic user-text의 48px anchor bin에
+다시 넣지 않는다. 그렇지 않으면 공간이 충분한 이웃 박스명이 같은
+bin에서 임의 경쟁해 사라진다. block 후보는 별도로 보존한 뒤 user-text
+후보와 결정적으로 합치며 총 표시 예산은 4096이다. 예산 탈락은
+`truncated`로 보고한다.
+
 ### 4.3 Block name
 
 큰 1단계 cell의 block-name row는 저장하지 않는다. Planner가 cut frame

@@ -626,10 +626,10 @@ def main(argv=None):
                         "open the error browser (new instance only)")
     p.add_argument("--cut-level", type=int, default=None, metavar="N",
                    choices=(0, 1, 2, 3),
-                   help="starting detail cut level: 0 = off, 1 = "
+                   help="starting detail cut level: 0 = off, 2 = "
                         "default, higher = lighter wide views (finer "
-                        "detail drawn as merged outlines when the "
-                        "cache carries them). The `c` dialog changes "
+                        "detail omitted below the cut; coverage is an "
+                        "independent viewer toggle). The `c` dialog changes "
                         "it at runtime; the px thresholds behind the "
                         "levels are internal and may be retuned")
     p.add_argument("--depth", type=int, default=None, metavar="N",

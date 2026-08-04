@@ -40,8 +40,12 @@ pub struct LabelOpts {
     pub member_budget: u64,
     /// cap on retained candidates/bins (memory guard; truncated)
     pub cand_cap: usize,
-    /// min on-screen size (px, either axis) for a block label
-    pub block_min_px: f64,
+    /// conservative fixed-screen-font metrics used to fit block names
+    pub block_char_px: f64,
+    pub block_line_px: f64,
+    /// dots need far less vertical ink than a full text line
+    pub block_dots_px: f64,
+    pub block_pad_px: f64,
     /// gate mode: exact candidate dump - no bins, no size gate,
     /// no view budget (oracle XOR comparisons)
     pub raw: bool,
@@ -51,10 +55,13 @@ impl Default for LabelOpts {
     fn default() -> LabelOpts {
         LabelOpts {
             cell_px: 48.0,
-            view_budget: 400,
+            view_budget: 4096,
             member_budget: 200_000,
             cand_cap: 65_536,
-            block_min_px: 96.0,
+            block_char_px: 8.0,
+            block_line_px: 14.0,
+            block_dots_px: 3.0,
+            block_pad_px: 4.0,
             raw: false,
         }
     }
@@ -70,6 +77,8 @@ pub struct LabelRow {
     pub dt: u32,
     pub x: i64,
     pub y: i64,
+    /// quarter turns for synthesized block names (0 or 1)
+    pub rot: u8,
     pub s: String,
 }
 
@@ -116,6 +125,9 @@ struct Cand {
     hash: u64,
     x: i64,
     y: i64,
+    rot: u8,
+    /// synthesized block name was replaced wholesale by "..."
+    ellipsis: bool,
     src: Src,
 }
 
@@ -149,6 +161,23 @@ fn fnv(vals: &[u64]) -> u64 {
     h
 }
 
+/// None = omit, Some(false) = full name, Some(true) = "..." only.
+fn fit_block_name(
+    name: &str,
+    max_chars: u32,
+    full_height_fits: bool,
+    dots_height_fits: bool,
+) -> Option<bool> {
+    let n = name.chars().count();
+    if full_height_fits && n <= max_chars as usize {
+        return Some(false);
+    }
+    if max_chars < 3 || !dots_height_fits {
+        return None;
+    }
+    Some(true)
+}
+
 /// clip translated into a rep's offset space: offset o is a hit
 /// iff anchor+o is in clip, i.e. o in clip-(ax,ay) (saturating -
 /// widening only over-includes and the per-member point test is
@@ -170,6 +199,9 @@ struct LWalk<'a> {
     cut: u64,
     bin: i64,
     member_budget: u64,
+    /// Block labels already own a frontier bbox. They must not compete
+    /// in the generic anchor bin with neighboring boxes.
+    blocks: Vec<Cand>,
     bins: HashMap<(i64, i64), Cand>,
     raw_out: Vec<Cand>,
     st: TextStats,
@@ -181,6 +213,16 @@ impl<'a> LWalk<'a> {
         if self.opts.raw {
             self.raw_out.push(c);
             if self.raw_out.len() >= self.opts.cand_cap {
+                self.st.truncated = true;
+                self.done = true;
+            }
+            return;
+        }
+        if c.block {
+            self.blocks.push(c);
+            if self.blocks.len() + self.bins.len()
+                >= self.opts.cand_cap
+            {
                 self.st.truncated = true;
                 self.done = true;
             }
@@ -227,6 +269,8 @@ impl<'a> LWalk<'a> {
             ]),
             x: gx,
             y: gy,
+            rot: 0,
+            ellipsis: false,
             src: Src::Ovt(soff, slen),
         });
     }
@@ -412,7 +456,6 @@ impl<'a> LWalk<'a> {
         xf: &Xf,
         clip: &BBox,
         pli: u64,
-        block_min_dbu: f64,
         stack: &mut Vec<(u32, u32, Xf, BBox)>,
     ) {
         self.st.place_records_scanned += 1;
@@ -426,18 +469,42 @@ impl<'a> LWalk<'a> {
         let below_cut = cw < self.cut && chh < self.cut;
         let t0 = Xf::place(h.x, h.y, h.rot, h.flip);
         let b0 = xf_bbox(&t0, &rb);
-        // Depth boundary: geometry renders the child as a frame, so
-        // synthesize its name when the frame is large enough to read.
-        let block = r == 0
-            && !below_cut
-            && ((b0.x1 - b0.x0).max(0) as f64 >= block_min_dbu
-                || (b0.y1 - b0.y0).max(0) as f64 >= block_min_dbu);
+        // Depth boundary: admit a block candidate exactly when either
+        // its full name or "..." can fit. The former 96px gate ran
+        // before this decision and made the ellipsis path unreachable
+        // for the small boxes it was intended to represent.
+        let block = if r == 0 {
+            let gb = xf_bbox(xf, &b0);
+            let gw = (gb.x1 - gb.x0).max(0) as f64
+                * self.req.px_per_dbu;
+            let gh = (gb.y1 - gb.y0).max(0) as f64
+                * self.req.px_per_dbu;
+            let (along, cross) = if gh > gw { (gh, gw) } else { (gw, gh) };
+            let usable = (along - 2.0 * self.opts.block_pad_px).max(0.0);
+            let max_chars =
+                (usable / self.opts.block_char_px).floor() as u32;
+            fit_block_name(
+                &self.v.cell(h.child).name,
+                max_chars,
+                cross >= self.opts.block_line_px,
+                cross >= self.opts.block_dots_px,
+            )
+            .is_some()
+        } else {
+            false
+        };
+        // Finite depth walks structure to synthesize boundary names,
+        // independent of text layers and geometry cut. Full depth has no
+        // block frontier and retains the recursive text-mask/cut pruning.
         let descend = r != 0
-            && !below_cut
-            && masks_intersect(
-                self.v.bitset(self.v.cell_tmask_rec(h.child)),
-                &self.req.vis,
-            );
+            && (r != REM_FULL
+                || (!below_cut
+                    && masks_intersect(
+                        self.v.bitset(
+                            self.v.cell_tmask_rec(h.child),
+                        ),
+                        &self.req.vis,
+                    )));
         if !block && !descend {
             return;
         }
@@ -466,18 +533,43 @@ impl<'a> LWalk<'a> {
                 return;
             }
             if block {
+                let gb = xf_bbox(xf, &mb);
+                let gw = (gb.x1 - gb.x0).max(0) as f64
+                    * w.req.px_per_dbu;
+                let gh = (gb.y1 - gb.y0).max(0) as f64
+                    * w.req.px_per_dbu;
+                let (rot, along, cross) = if gh > gw {
+                    (1, gh, gw)
+                } else {
+                    (0, gw, gh)
+                };
+                let usable = (along - 2.0 * w.opts.block_pad_px)
+                    .max(0.0);
+                let max_chars =
+                    (usable / w.opts.block_char_px).floor() as u32;
+                // Full text and dots have separate short-axis gates:
+                // long, thin circuit blocks often cannot hold a full
+                // line but can still show the three low-ink dots.
+                let ellipsis = match fit_block_name(
+                    &w.v.cell(h.child).name,
+                    max_chars,
+                    cross >= w.opts.block_line_px,
+                    cross >= w.opts.block_dots_px,
+                ) {
+                    Some(v) => v,
+                    None => return,
+                };
                 w.st.blocks_visible += 1;
-                let cx =
-                    ((mb.x0 as i128 + mb.x1 as i128) / 2) as i64;
-                let cy =
-                    ((mb.y0 as i128 + mb.y1 as i128) / 2) as i64;
-                let (gx, gy) = xf.apply(cx, cy);
+                let gx = ((gb.x0 as i128 + gb.x1 as i128) / 2) as i64;
+                let gy = ((gb.y0 as i128 + gb.y1 as i128) / 2) as i64;
                 w.add(Cand {
                     block: true,
                     layer_pos: 0,
                     hash: fnv(&[gx as u64, gy as u64, h.child as u64]),
                     x: gx,
                     y: gy,
+                    rot,
+                    ellipsis,
                     src: Src::Cell(h.child),
                 });
                 return;
@@ -616,19 +708,12 @@ pub fn plan_labels(
         cut: req.cut_dbu.max(0) as u64,
         bin,
         member_budget: opts.member_budget,
+        blocks: Vec::new(),
         bins: HashMap::new(),
         raw_out: Vec::new(),
         st: TextStats::default(),
         done: false,
     };
-    // block gate in DBU (either placed axis): raw mode has no px,
-    // so no block synthesis there unless px is supplied
-    let block_min_dbu = if px > 0.0 {
-        (opts.block_min_px / px).max(1.0)
-    } else {
-        f64::INFINITY
-    };
-
     let top = v.top;
     let tc = v.cell(top);
     let r0 = w.norm_r(
@@ -670,7 +755,6 @@ pub fn plan_labels(
                     &xf,
                     &clip,
                     pli,
-                    block_min_dbu,
                     &mut stack,
                 );
                 if w.done {
@@ -692,7 +776,6 @@ pub fn plan_labels(
                             &xf,
                             &clip,
                             n.first as u64 + k,
-                            block_min_dbu,
                             &mut stack,
                         );
                         if w.done {
@@ -721,17 +804,21 @@ pub fn plan_labels(
         c.sort_by_key(|c| c.prio());
         c
     } else {
-        let mut c: Vec<Cand> = w.bins.into_values().collect();
+        let mut c = w.blocks;
+        c.extend(w.bins.into_values());
         c.sort_by_key(|c| c.prio());
         st.budget_dropped =
             c.len().saturating_sub(opts.view_budget) as u64;
+        if st.budget_dropped > 0 {
+            st.truncated = true;
+        }
         c.truncate(opts.view_budget);
         c
     };
     st.selected = cands.len() as u64;
     let mut rows = Vec::with_capacity(cands.len());
     for c in cands {
-        let (layer, dt, s) = match c.src {
+        let (layer, dt, mut s) = match c.src {
             Src::Ovt(off, len) => {
                 let lr = v.layer(c.layer_pos);
                 let end = (off + len as u64) as usize;
@@ -753,12 +840,16 @@ pub fn plan_labels(
             }
             Src::Cell(ci) => (0, 0, v.cell(ci).name),
         };
+        if c.block && c.ellipsis {
+            s = "...".to_string();
+        }
         rows.push(LabelRow {
             block: matches!(c.src, Src::Cell(_)),
             layer,
             dt,
             x: c.x,
             y: c.y,
+            rot: c.rot,
             s,
         });
     }
@@ -1132,12 +1223,78 @@ mod tests {
             lp.rows
         );
         assert!(lp.stats.blocks_visible >= 3, "{:?}", lp.stats);
+        assert!(blocks.iter().any(|r| r.rot == 0), "{:?}", blocks);
+        assert!(blocks.iter().any(|r| r.rot == 1), "{:?}", blocks);
         // zoomed way out: SUB is 0.4 px -> gate silences blocks
         let req2 = rq(bx(-400, 0, 6000, 6000), 0, 0, 0.001);
         let lp2 =
             plan_labels(&v, &ovt, &req2, &LabelOpts::default())
                 .unwrap();
         assert!(lp2.rows.iter().all(|r| !r.block), "{:?}", lp2.rows);
+
+        // Structural names follow the hierarchy frontier, not design
+        // text visibility or the geometry size cut.
+        let mut structural = rq(
+            bx(-400, 0, 6000, 6000),
+            10_000,
+            0,
+            1.0,
+        );
+        structural.vis.fill(0);
+        let lp3 = plan_labels(
+            &v,
+            &ovt,
+            &structural,
+            &LabelOpts::default(),
+        )
+        .unwrap();
+        assert!(lp3.rows.iter().all(|r| r.block), "{:?}", lp3.rows);
+        assert!(lp3.rows.iter().any(|r| r.s == "SUB"));
+
+        // Reproduce a long/thin screen box: full line height fails,
+        // but the dots-height gate passes, so the emitted row must be
+        // literal "..." rather than disappearing.
+        let mut thin = LabelOpts::default();
+        thin.block_line_px = 1000.0;
+        thin.block_dots_px = 1.0;
+        let lp4 = plan_labels(&v, &ovt, &req, &thin).unwrap();
+        let thin_blocks: Vec<&LabelRow> =
+            lp4.rows.iter().filter(|r| r.block).collect();
+        assert!(!thin_blocks.is_empty());
+        assert!(thin_blocks.iter().all(|r| r.s == "..."));
+
+        // 40px-long SUB is below the retired 96px coarse gate but
+        // still has room for three dots, so it must now produce rows.
+        let small_req = rq(bx(-400, 0, 6000, 6000), 0, 0, 0.1);
+        let small = plan_labels(&v, &ovt, &small_req, &thin).unwrap();
+        let small_blocks: Vec<&LabelRow> =
+            small.rows.iter().filter(|r| r.block).collect();
+        assert!(!small_blocks.is_empty());
+        assert!(small_blocks.iter().all(|r| r.s == "..."));
+
+        // Even one enormous generic declutter bin must retain every
+        // independently fitting block name (up to the explicit budget).
+        thin.cell_px = 1_000_000.0;
+        let lp4b = plan_labels(&v, &ovt, &req, &thin).unwrap();
+        let nblocks = lp4b.rows.iter().filter(|r| r.block).count();
+        assert_eq!(nblocks as u64, lp4b.stats.blocks_visible);
+
+        thin.block_dots_px = 1000.0;
+        let lp5 = plan_labels(&v, &ovt, &req, &thin).unwrap();
+        assert!(lp5.rows.iter().all(|r| !r.block));
+    }
+
+    #[test]
+    fn block_name_fit_ellipsis_and_omit() {
+        assert_eq!(fit_block_name("ABC", 3, true, true), Some(false));
+        assert_eq!(fit_block_name("ABCDEFGHI", 6, true, true), Some(true));
+        assert_eq!(fit_block_name("ABCDEFGHI", 3, true, true), Some(true));
+        assert_eq!(fit_block_name("ABCDEFGHI", 2, true, true), None);
+        // A thin box falls back to dots instead of disappearing.
+        assert_eq!(fit_block_name("ABC", 3, false, true), Some(true));
+        assert_eq!(fit_block_name("ABC", 3, false, false), None);
+        // Fit counts Unicode scalars, never UTF-8 bytes.
+        assert_eq!(fit_block_name("가나다라마바사", 5, true, true), Some(true));
     }
 
     /// member budget exhaustion flags truncated instead of

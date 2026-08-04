@@ -147,8 +147,9 @@ def plan_labels(outdir, view, mode, depth="full", px=5.0,
             rows.append(("txt", int(l), int(dd), int(p[2]),
                          int(p[3]), unesc(p[4])))
         elif p[0] == "blk":
+            text_col = 5 if len(p) >= 6 else 4
             rows.append(("blk", -1, -1, int(p[2]), int(p[3]),
-                         unesc(p[4])))
+                         unesc(p[text_col])))
     return rows
 
 

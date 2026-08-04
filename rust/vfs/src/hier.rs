@@ -372,9 +372,13 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
         let tc = v.cell(top_ci);
         let w = (tc.rbbox.x1 - tc.rbbox.x0).max(0) as u64;
         let hh = (tc.rbbox.y1 - tc.rbbox.y0).max(0) as u64;
-        if masks_intersect(v.bitset(tc.lmask_rec), &req.vis)
+        // A finite, non-folded depth has a structural frontier even
+        // when no design layer is selected. Full depth (including a
+        // finite depth folded past the cell height) remains geometry-only.
+        if (r0 != REM_FULL
+            || masks_intersect(v.bitset(tc.lmask_rec), &req.vis))
             && !tc.rbbox.is_empty()
-            && !(w < h.cut && hh < h.cut)
+            && (r0 != REM_FULL || !(w < h.cut && hh < h.cut))
         {
             let seed = req.view.intersect(&tc.rbbox);
             h.contribute((top_ci, r0), seed);
@@ -613,23 +617,9 @@ impl<'a> Hier<'a> {
                         }
                         let cw = (rb.x1 - rb.x0).max(0) as u64;
                         let chh = (rb.y1 - rb.y0).max(0) as u64;
-                        // Frames are display proxies, so they must
-                        // obey the same visible-layer contract as a
-                        // real child edge. The old ordering framed
-                        // first and tested lmask_rec only afterwards;
-                        // a one-layer view therefore showed outlines
-                        // for unrelated fill/routing subtrees.
-                        if !masks_intersect(
-                            self.v.bitset(
-                                self.v.cell_lmask_rec(h.child),
-                            ),
-                            &self.req.vis,
-                        ) {
-                            self.st.cull_layer += 1;
-                            continue;
-                        }
                         // r == 0: depth is exhausted - EVERY child
-                        // on a visible layer renders as an outline
+                        // renders as a structural outline, independent
+                        // of design-layer visibility and size cut.
                         // frame (review finding: a pure-
                         // hierarchy top opened at the depth-0
                         // default as a black screen; "top geometry
@@ -643,6 +633,22 @@ impl<'a> Hier<'a> {
                                     &mut wc, pli, &h, &rb, &boxes,
                                 );
                             }
+                            continue;
+                        }
+                        // A finite remaining depth walks structure to
+                        // the requested frontier. Only full-depth
+                        // geometry traversal obeys layer and cut culls.
+                        if r != REM_FULL {
+                            edges.insert(pli);
+                            continue;
+                        }
+                        if !masks_intersect(
+                            self.v.bitset(
+                                self.v.cell_lmask_rec(h.child),
+                            ),
+                            &self.req.vis,
+                        ) {
+                            self.st.cull_layer += 1;
                             continue;
                         }
                         // A size cut is a detail omission, not a
@@ -707,7 +713,7 @@ impl<'a> Hier<'a> {
     }
 
     /// Explicit hierarchy-depth boundary -> outline frame. Per-member
-    /// outlines (rect+rep) are the accurate form, but below a ~2-cut
+    /// outlines (rect+rep) are the accurate form, but below ~2 pixels
     /// member pitch they fuse into a solid wash, and huge sparse pts
     /// lists would re-materialize O(count) offsets per plan. Both
     /// degrade to the whole-rep footprint box. Footprint visibility
@@ -722,7 +728,14 @@ impl<'a> Hier<'a> {
     ) {
         let t0 = Xf::place(h.x, h.y, h.rot, h.flip);
         let b0 = xf_bbox(&t0, rb);
-        let fuse_pitch = 2 * self.cut.max(1);
+        // Frontier appearance must not change when the geometry cut or
+        // LOD toggle changes. Fuse only repetitions whose pitch is below
+        // two screen pixels (or 1 DBU when no screen scale is supplied).
+        let fuse_pitch = if self.px_per_dbu > 0.0 {
+            (2.0 / self.px_per_dbu).ceil().max(1.0) as u64
+        } else {
+            1
+        };
         let (rect, rep, fp) = match h.kind {
             0 => (b0, Rep::One, b0),
             1 => {
@@ -794,10 +807,13 @@ impl<'a> Hier<'a> {
     ) {
         let h = self.v.place_head(pli);
         let child = self.v.cell(h.child);
-        if !masks_intersect(
-            self.v.bitset(child.lmask_rec),
-            &self.req.vis,
-        ) {
+        let structural = r != REM_FULL;
+        if !structural
+            && !masks_intersect(
+                self.v.bitset(child.lmask_rec),
+                &self.req.vis,
+            )
+        {
             self.st.cull_layer += 1;
             return;
         }
@@ -812,7 +828,7 @@ impl<'a> Hier<'a> {
         // below-cut placements inline before this fn is reached.)
         let cw = (child.rbbox.x1 - child.rbbox.x0).max(0) as u64;
         let ch = (child.rbbox.y1 - child.rbbox.y0).max(0) as u64;
-        if cw < self.cut && ch < self.cut {
+        if !structural && cw < self.cut && ch < self.cut {
             self.st.cull_size += 1;
             return;
         }
@@ -1052,9 +1068,8 @@ fn grow_by_offsets(base: &BBox, off: &BBox) -> BBox {
     }
 }
 
-/// cut-frame outline layer (drawn hollow by the viewer; shared with
-/// the skeleton's cell-outline convention)
-/// runtime frame/outline layer, dt 0: one past the highest DESIGN
+/// hierarchy-frontier outline layer (drawn hollow by the viewer).
+/// Runtime frame/outline layer, dt 0: one past the highest DESIGN
 /// layer number, stepping DOWN to the nearest unused number when
 /// that saturates (u32::MAX is a legal design layer - review
 /// round 3), so the result never collides with real content for
@@ -1404,12 +1419,11 @@ mod tests {
         assert!(plan.pages.iter().all(|&pi| v.page(pi).cell != 0));
     }
 
-    /// A depth-boundary outline is structural but still belongs to
-    /// the visible-layer selection. Previously the frame branch ran
-    /// before lmask_rec and leaked unrelated children into a
-    /// single-layer view.
+    /// A depth-boundary outline is structural and deliberately does
+    /// not belong to the visible-layer selection. Design pages remain
+    /// filtered while the same frontier survives layers=none.
     #[test]
-    fn depth_frame_obeys_visible_layer_mask() {
+    fn depth_frame_ignores_visible_layer_mask() {
         let mut b = Builder::new(1000.0, 0, 0, 2);
         b.top = 1;
         b.layer(1, 0, "CHILD_ONLY", 0, 0);
@@ -1454,7 +1468,59 @@ mod tests {
         };
         let plan = plan_hier(&v, &req, &HierOpts::default());
         assert_eq!(plan.pages, vec![1]);
-        assert_eq!(plan.stats.frame_rects, 0);
+        assert_eq!(plan.stats.frame_rects, 1);
+
+        let none = ViewReq {
+            vis: vec![0],
+            ..req
+        };
+        let structural = plan_hier(&v, &none, &HierOpts::default());
+        assert!(structural.pages.is_empty());
+        assert_eq!(structural.stats.frame_rects, 1);
+    }
+
+    /// Each finite depth exposes only its own frontier. Once the
+    /// requested depth reaches the top height, normalization folds to
+    /// full and the structural overlay disappears.
+    #[test]
+    fn depth_frontiers_are_distinct_non_cumulative() {
+        let v = fixture(
+            &[
+                FCell {
+                    name: "LEAF",
+                    pages: vec![(bx(0, 0, 20, 20), 20, 20)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "MID",
+                    pages: vec![],
+                    places: vec![(0, 100, 0, 0, false, Rep::One)],
+                },
+                FCell {
+                    name: "TOP",
+                    pages: vec![],
+                    places: vec![(1, 1000, 0, 0, false, Rep::One)],
+                },
+            ],
+            2,
+        );
+        let view = bx(0, 0, 2000, 200);
+        let p0 = plan_hier(&v, &rq(view, 0, 0), &HierOpts::default());
+        assert_eq!(p0.stats.frame_rects, 1);
+        assert!(p0.wcells.iter().any(|w| w.key == (2, 0)
+            && w.frames.len() == 1));
+        assert!(!p0.wcells.iter().any(|w| w.key.0 == 1));
+
+        let p1 = plan_hier(&v, &rq(view, 0, 1), &HierOpts::default());
+        assert_eq!(p1.stats.frame_rects, 1);
+        assert!(p1.wcells.iter().any(|w| w.key == (1, 0)
+            && w.frames.len() == 1));
+        assert!(p1.wcells.iter().any(|w| w.key.0 == 2
+            && w.frames.is_empty()));
+
+        let p2 = plan_hier(&v, &rq(view, 0, 2), &HierOpts::default());
+        assert_eq!(p2.top, (2, REM_FULL));
+        assert_eq!(p2.stats.frame_rects, 0);
     }
 
     fn rq(view: BBox, cut: i64, depth: u32) -> ViewReq {
@@ -2316,7 +2382,7 @@ mod tests {
 
     #[test]
     fn depth_boundary_dense_frames_fuse_to_footprint() {
-        // sub-pixel pitch (15 < 2*cut=20): per-member outlines
+        // sub-pixel pitch (15 DBU at 0.1 px/DBU < 2px): outlines
         // would fuse into a solid wash burying real geometry -
         // the frame degrades to ONE footprint box (flat parity)
         let v = fixture(
@@ -2348,7 +2414,7 @@ mod tests {
         );
         let plan = check(
             &v,
-            &rq(bx(0, 0, 4000, 100), 10, 0),
+            &rq_px(bx(0, 0, 4000, 100), 10, 0, 0.1),
             true,
         );
         let t = plan.wcells.iter().find(|w| w.key.0 == 1).unwrap();

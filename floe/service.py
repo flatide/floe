@@ -60,8 +60,8 @@ def _iter_global_polys(mosaic, layers_sel, box):
     top_ci = mosaic.top.cell_index()
     for li in ly.layer_indexes():
         info = ly.get_info(li)
-        # the frame/outline layer is a draw-only overview aid
-        # (cut-frame outlines, block labels) - never pickable
+        # the hierarchy-frontier layer is a draw-only navigation aid
+        # (depth outlines and block labels) - never pickable
         if (info.layer, info.datatype) == tuple(mosaic.FRAME_LAYER):
             continue
         if layers_sel is not None and \
@@ -71,7 +71,7 @@ def _iter_global_polys(mosaic, layers_sel, box):
         while not it.at_end():
             cn = it.cell().name
             if cn.startswith("FRAMES") or cn.startswith("LABELS"):
-                # VFS cut-frames / live labels are draw-only stand-ins:
+                # VFS hierarchy frames/live labels are draw-only aids:
                 # never win a snap/pick over real geometry
                 it.next()
                 continue
@@ -233,17 +233,31 @@ def _labels_from(path, cache):
                 continue
             if p[0] == "blk":
                 l, d = fl, fd
+                if len(p) >= 6:
+                    try:
+                        rot = int(p[4])
+                    except ValueError:
+                        continue
+                    text_col = 5
+                else:
+                    # Old daemon row: center it, but no orientation
+                    # metadata was available.
+                    rot = 0
+                    text_col = 4
             elif p[0] == "txt":
                 ls, _, ds = p[1].partition("/")
                 try:
                     l, d = int(ls), int(ds)
                 except ValueError:
                     continue
+                rot = 0
+                text_col = 4
             else:
                 continue
             try:
                 out.append((l, d, int(p[2]), int(p[3]),
-                            _tsv_unesc(p[4])))
+                            _tsv_unesc(p[text_col]), rot,
+                            p[0] == "blk"))
             except ValueError:
                 continue
     return out
@@ -319,7 +333,7 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
         td = time.perf_counter()
         renderer.set_abstract(job.get("abstract"))
         renderer.set_text_visible(bool(labels))
-        # the cut-frame outline layer is structural: always drawn,
+        # the hierarchy-frontier layer is structural: always drawn,
         # even when the user has narrowed the visible-layer set
         vis_r = (None if job["visible"] is None
                  else list(job["visible"]) + [mosaic.FRAME_LAYER])
@@ -363,6 +377,8 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
                "draw_ms": round(draw_total[0] * 1000),
                "wait_ms": wait_ms,
                "ms": round((time.perf_counter() - t0) * 1000)}
+        if isinstance(r.get("max_depth"), int):
+            out["max_depth"] = r["max_depth"]
         if r.get("partial") == "1":
             # refinement in flight: how many pages are still coming
             out["refining"] = int(r.get("deferred", 0) or 0)

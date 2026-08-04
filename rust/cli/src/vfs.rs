@@ -3123,9 +3123,10 @@ pub fn plan_cmd(args: &[String]) {
         for r in &lp.rows {
             if r.block {
                 println!(
-                    "blk\t-\t{}\t{}\t{}",
+                    "blk\t-\t{}\t{}\t{}\t{}",
                     r.x,
                     r.y,
+                    r.rot,
                     crate::tsv_esc(&r.s)
                 );
             } else {
@@ -3228,7 +3229,7 @@ pub fn plan_cmd(args: &[String]) {
 
 /// stdio daemon for the viewer render service. Line protocol:
 ///   gen=1 view=x0,y0,x1,y1 px=5 cut=2 depth=full lod=1 \
-///     layers=11/0,12/0 out=/tmp/dir
+///     layers=all|none|11/0,12/0 out=/tmp/dir
 /// response:
 ///   gen=1 pages=N new=N evict=name,.. delta=path placements=path \
 ///     bytes=N plan_ms=F resident_mb=F
@@ -3359,7 +3360,9 @@ fn serve_one(d: &mut Daemon, line: &str) -> Result<String, String> {
                 }
             }
             "layers" => {
-                if val != "all" && !val.is_empty() {
+                if val == "none" {
+                    layers = Some(Vec::new());
+                } else if val != "all" && !val.is_empty() {
                     layers = Some(
                         val.split(',')
                             .map(|s| s.to_string())
@@ -3527,9 +3530,10 @@ fn serve_hier(
             for r in &lp.rows {
                 if r.block {
                     wbuf.push_str(&format!(
-                        "blk\t-\t{}\t{}\t{}\n",
+                        "blk\t-\t{}\t{}\t{}\t{}\n",
                         r.x,
                         r.y,
+                        r.rot,
                         crate::tsv_esc(&r.s)
                     ));
                 } else {
@@ -3559,6 +3563,7 @@ fn serve_hier(
     let st = &plan.stats;
     Ok(format!(
         "gen={} pages={} new={} evict={} delta={} top={} names={} \
+         max_depth={} \
          bytes={} members={} plan_ms={:.2} wc_cells={} \
          inst_edges={} frame_rects={} partial={} deferred={} \
          lod={} labels={} nlabels={} text_plan_ms={:.2} \
@@ -3579,6 +3584,11 @@ fn serve_hier(
         delta_path,
         top,
         names_path,
+        if v.ovm.n_cells == 0 {
+            0
+        } else {
+            v.ovm.cell(v.ovm.top).height
+        },
         bytes,
         members,
         t0.elapsed().as_secs_f64() * 1e3,
