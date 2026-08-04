@@ -4,6 +4,7 @@
 
 pub mod coverage;
 pub mod hier;
+pub mod text;
 
 use floe_ovm::{BBox, Ovm};
 use floe_tiler::Xf;

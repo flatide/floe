@@ -3226,6 +3226,56 @@ pub fn plan_cmd(args: &[String]) {
     if rest.iter().any(|(k, val)| k == "--lod" && val == "0") {
         req.px_per_dbu = 0.0;
     }
+    // --labels raw|sel (T2 gate interface): dump the label
+    // planner's rows instead of the geometry JSON. raw = exact
+    // pre-declutter candidates (oracle XOR); sel = the budgeted
+    // screen-space selection the viewer would show.
+    if let Some((_, mode)) =
+        rest.iter().find(|(k, _)| k == "--labels")
+    {
+        let mut o = floe_vfs::text::LabelOpts::default();
+        if mode == "raw" {
+            o.raw = true;
+            o.cand_cap = usize::MAX;
+            o.member_budget = u64::MAX;
+        }
+        let t0 = std::time::Instant::now();
+        let lp = v
+            .plan_labels_with(&req, &o)
+            .unwrap_or_else(|e| {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            });
+        for r in &lp.rows {
+            if r.block {
+                println!(
+                    "blk\t-\t{}\t{}\t{}",
+                    r.x,
+                    r.y,
+                    crate::tsv_esc(&r.s)
+                );
+            } else {
+                println!(
+                    "txt\t{}/{}\t{}\t{}\t{}",
+                    r.layer,
+                    r.dt,
+                    r.x,
+                    r.y,
+                    crate::tsv_esc(&r.s)
+                );
+            }
+        }
+        eprintln!(
+            "[plan] labels {} rows ({} candidate records, {} \
+             members visible, truncated={}) in {:.2}ms",
+            lp.rows.len(),
+            lp.stats.records_candidate,
+            lp.stats.members_visible,
+            lp.stats.truncated,
+            t0.elapsed().as_secs_f64() * 1e3
+        );
+        return;
+    }
     {
         let t0 = std::time::Instant::now();
         let plan = v.plan_hier(&req);
@@ -3346,6 +3396,8 @@ pub fn vfsd_cmd(args: &[String]) {
         hier: floe_vfs::HierSession::new(budget_mb << 20),
         lod_off: std::env::var("FLOE_LOD").ok().as_deref()
             == Some("0"),
+        labels_off: std::env::var("FLOE_LABELS").ok().as_deref()
+            == Some("0"),
         names_sent: false,
         stream_budget: stream_kb << 10,
     };
@@ -3389,6 +3441,8 @@ struct Daemon<'a> {
     stream_budget: u64,
     /// FLOE_LOD=0 kill switch: every request renders exact
     lod_off: bool,
+    /// FLOE_LABELS=0 kill switch: responses carry no labels
+    labels_off: bool,
 }
 
 fn serve_one(d: &mut Daemon, line: &str) -> Result<String, String> {
@@ -3403,6 +3457,7 @@ fn serve_one(d: &mut Daemon, line: &str) -> Result<String, String> {
     let mut ack = 0u64;
     let mut reset = false;
     let mut stream_kb: Option<u64> = None;
+    let mut nolabels = false;
     for tok in line.split_whitespace() {
         let (k, val) = tok
             .split_once('=')
@@ -3445,6 +3500,9 @@ fn serve_one(d: &mut Daemon, line: &str) -> Result<String, String> {
                 stream_kb =
                     Some(val.parse().map_err(|_| "stream")?)
             }
+            // refinement rounds of one view: labels were already
+            // delivered with the first round, skip the re-plan
+            "nolabels" => nolabels = val == "1",
             _ => return Err(format!("unknown key {}", k)),
         }
     }
@@ -3456,11 +3514,17 @@ fn serve_one(d: &mut Daemon, line: &str) -> Result<String, String> {
     let mut req =
         make_req(d.v, view, px, cut, depth, layers.as_deref());
     // measurement paths are EXACT by construction: probes never
-    // take the LOD density gate; FLOE_LOD=0 disables it globally
+    // take the LOD density gate; FLOE_LOD=0 disables it globally.
+    // The ORIGINAL screen scale still drives the label planner
+    // (bins/size gates) - the LOD kill switch must not also kill
+    // labels - so it rides separately.
+    let label_px = if probe { 0.0 } else { req.px_per_dbu };
     if probe || d.lod_off {
         req.px_per_dbu = 0.0;
     }
-    serve_hier(d, &req, gen, ack, reset, probe, stream_kb, &out)
+    let label_px = if nolabels || d.labels_off { 0.0 } else { label_px };
+    serve_hier(d, &req, gen, ack, reset, probe, stream_kb,
+               label_px, &out)
 }
 
 /// hier-mode request (VFS_HIER.md par.3.5/3.7): resolve the ack (or
@@ -3476,6 +3540,7 @@ fn serve_hier(
     reset: bool,
     probe: bool,
     stream_kb: Option<u64>,
+    label_px: f64,
     out: &str,
 ) -> Result<String, String> {
     let v = d.v;
@@ -3556,6 +3621,47 @@ fn serve_hier(
     };
     let evict: Vec<String> =
         upd.evict.iter().map(|&pi| v.page_name(pi)).collect();
+    // request-scoped labels (v5, VFS_TEXT_PLAN.md par.5.2): a
+    // small per-gen TSV, kind-explicit rows (txt = design layer,
+    // blk = runtime annotation). View-generation asset: the client
+    // applies it with the same gen's delta or drops both.
+    let (labels_path, nlabels, text_ms) = if label_px <= 0.0 {
+        ("-".to_string(), 0usize, 0.0)
+    } else {
+        let tl = std::time::Instant::now();
+        let mut lreq = req.clone();
+        lreq.px_per_dbu = label_px;
+        let lp = v.plan_labels(&lreq)?;
+        let ms = tl.elapsed().as_secs_f64() * 1e3;
+        if lp.rows.is_empty() {
+            ("-".to_string(), 0, ms)
+        } else {
+            let mut wbuf = String::new();
+            for r in &lp.rows {
+                if r.block {
+                    wbuf.push_str(&format!(
+                        "blk\t-\t{}\t{}\t{}\n",
+                        r.x,
+                        r.y,
+                        crate::tsv_esc(&r.s)
+                    ));
+                } else {
+                    wbuf.push_str(&format!(
+                        "txt\t{}/{}\t{}\t{}\t{}\n",
+                        r.layer,
+                        r.dt,
+                        r.x,
+                        r.y,
+                        crate::tsv_esc(&r.s)
+                    ));
+                }
+            }
+            let p = format!("{}/labels_{}.tsv", out, gen);
+            std::fs::write(&p, wbuf)
+                .map_err(|e| e.to_string())?;
+            (p, lp.rows.len(), ms)
+        }
+    };
     let (mut bytes, mut members) = (0u64, 0u64);
     for &pi in &plan.pages {
         let p = v.ovm.page(pi);
@@ -3568,7 +3674,8 @@ fn serve_hier(
         "gen={} pages={} new={} evict={} delta={} top={} names={} \
          bytes={} members={} plan_ms={:.2} wc_cells={} \
          inst_edges={} frame_rects={} partial={} deferred={} \
-         lod={} resident_committed_mb={:.1} \
+         lod={} labels={} nlabels={} text_plan_ms={:.2} \
+         resident_committed_mb={:.1} \
          resident_projected_mb={:.1} \
          pending_new_mb={:.1} pending_evict_mb={:.1}",
         gen,
@@ -3591,6 +3698,9 @@ fn serve_hier(
         upd.partial as u8,
         upd.deferred,
         st.lod_swapped,
+        labels_path,
+        nlabels,
+        text_ms,
         mb(upd.committed_bytes),
         mb(upd.projected_bytes),
         mb(upd.pending_new_bytes),

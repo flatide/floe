@@ -46,4 +46,7 @@ rust/target/release/floe-index vfs "$SRC" "$VOUT" --coverage \
 # rep-split page honesty (ovm v3): floor collapse + fragment
 # conservation on a synthetic rep-flood asset
 .venv/bin/python tools/validate_vfs_split.py
+# v5 text index: oracle XOR, declutter, corrupt, determinism,
+# daemon label lifecycle
+.venv/bin/python tools/validate_vfs_text.py
 echo "RUST VALIDATION: ALL OK ($SRC)"
