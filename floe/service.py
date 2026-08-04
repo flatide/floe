@@ -411,7 +411,7 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
             job.get("depth"), ack=mosaic.applied_gen,
             reset=mosaic.need_reset,
             stream_kb=0 if final_round else mosaic.stream_kb,
-            want_labels=want)
+            want_labels=want, lod=job.get("lod", True))
         mosaic.need_reset = False
         # names= arrives ONCE per daemon run and is view-
         # independent: consume it BEFORE the stale check, or a
@@ -437,7 +437,7 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
             r = cache.vfs_client.request(
                 mosaic.req_gen, view_um, px_per_um, cut_px, layers,
                 job.get("depth"), ack=0, reset=True,
-                want_labels=False)
+                want_labels=False, lod=job.get("lod", True))
             mosaic.need_reset = False
             if r["names"]:
                 mosaic.load_names(r["names"])

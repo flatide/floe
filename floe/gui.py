@@ -293,6 +293,10 @@ class Viewer:
         self.depth_value = max(0, min(999, int(depth)))
         self.abstract = False       # `a` key: klayout abstract mode
         self.coverage_on = False    # `v` key: density coverage fill (VFS)
+        # Per-view LOD switch. FLOE_LOD=0 remains the process-wide
+        # startup kill switch, while this can change live requests.
+        self._lod_forced_off = os.environ.get("FLOE_LOD") == "0"
+        self.lod_on = not self._lod_forced_off
         self._depth_used = "?"      # depth of the last frame ("?" = none yet)
         # detail cut LEVEL: 0 = off, higher = more aggressive. Users
         # only ever see the level; the screen-px threshold behind each
@@ -395,6 +399,14 @@ class Viewer:
             b = Gtk.Button(label=text)
             b.connect("clicked", lambda _w, f=cb: f())
             brow.pack_start(b, True, True, 0)
+
+        self._lod_button = Gtk.ToggleButton()
+        self._lod_button.set_active(self.lod_on)
+        self._lod_button.set_tooltip_text(
+            "Use merged LOD pages for live rendering (shortcut: l)")
+        self._lod_button.connect("toggled", self._on_lod_toggled)
+        side.pack_start(self._lod_button, False, False, 2)
+        self._update_lod_button()
 
         main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         hbox.pack_start(main, True, True, 0)
@@ -502,6 +514,11 @@ class Viewer:
                                       self.meta["grid"]["nx"],
                                       self.meta["grid"]["ny"]))
         self._build_layer_panel()
+        self._lod_button.set_sensitive(
+            bool(self.meta.get("vfs")) and not self._lod_forced_off)
+        if self._lod_forced_off:
+            self._lod_button.set_tooltip_text(
+                "LOD is disabled by FLOE_LOD=0")
         if self.worker is not None:
             self.worker.stop()
         self.worker = RenderWorker(cache)
@@ -695,7 +712,7 @@ class Viewer:
     def _render_key(self, scope):
         """Identity of a frame: what state it was rendered for."""
         return (scope, tuple(sorted(self.visible)), self._depth_key(),
-                self.cut_px)
+                self.cut_px, self.lod_on)
 
     def _frame_compatible(self, frame):
         """A stale frame stays displayable rescaled until the fresh
@@ -981,6 +998,7 @@ class Viewer:
             "w": int(w), "h": int(h),
             "depth": depth,
             "cut_px": self.cut_px,
+            "lod": self.lod_on,
             "abstract": self.abstract,
             "coverage": self.coverage_on,
             "visible": self._layers_arg()})
@@ -1440,6 +1458,8 @@ class Viewer:
             self._toggle_abstract()
         elif name == "v":
             self._toggle_coverage()
+        elif name == "l":
+            self._set_lod(not self.lod_on)
         elif name == "e":
             self._drc_window()
         elif name == "n":
@@ -1480,6 +1500,8 @@ class Viewer:
         if self.meta.get("vfs") and self.cut_level > 0 \
                 and self.coverage_on:
             lbl += " · cov"
+        if self.meta.get("vfs"):
+            lbl += " · lod:%s" % ("on" if self.lod_on else "off")
         if self.abstract:
             lbl += " · abstract"
         return lbl
@@ -1511,6 +1533,23 @@ class Viewer:
         # no density stand-in - useful to see exactly what is real.
         self.coverage_on = not self.coverage_on
         self._on_depth()
+
+    def _update_lod_button(self):
+        self._lod_button.set_label(
+            "LOD on" if self.lod_on else "LOD off")
+
+    def _on_lod_toggled(self, button):
+        self._set_lod(button.get_active())
+
+    def _set_lod(self, enabled):
+        enabled = bool(enabled) and not self._lod_forced_off
+        changed = enabled != self.lod_on
+        self.lod_on = enabled
+        if self._lod_button.get_active() != enabled:
+            self._lod_button.set_active(enabled)
+        self._update_lod_button()
+        if changed:
+            self._on_depth()
 
     def _on_depth(self):
         self.dstatus.set_text(self._depth_label())

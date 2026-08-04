@@ -18,8 +18,8 @@ vfsd sessions exactly like the render service does.
       sent once per daemon run; the client loads it before the stale
       check) - design-name resolution still works afterwards
   L7  LOD variant cycle (M7-B): wide view swaps dense pages for
-      merged coverage, the same view at a fine px scale reverts to
-      exact and XORs clean
+      merged coverage, per-request lod=0 reverts the same view to
+      exact, lod=1 restores it, and a fine px scale is exact
   L6  budgeted streaming (--stream-kb): rounds converge, their new
       pages sum to exactly the unbudgeted cold set, the final view
       XORs clean, and a dropped partial round rolls back and re-sends
@@ -122,14 +122,16 @@ class Sess:
         self.m = VfsMosaic(cache)
         self.dbu = cache.meta["dbu"]
 
-    def request(self, view, reset=False, px=1.0):
+    def request(self, view, reset=False, px=1.0, lod=True):
         self.m.req_gen += 1
         x0, y0, x1, y1 = view
         r = self.client.request(
             self.m.req_gen,
             (x0 * self.dbu, y0 * self.dbu,
              x1 * self.dbu, y1 * self.dbu),
-            px, 0.0, None, None, ack=0 if reset else self.m.applied_gen, reset=reset)
+            px, 0.0, None, None,
+            ack=0 if reset else self.m.applied_gen,
+            reset=reset, lod=lod)
         # mirror the service: names= is view-independent and sent
         # once per run, so it is consumed at REQUEST time - even a
         # response the caller then drops must not lose it
@@ -338,6 +340,17 @@ def main():
         qres = [nm for nm in s.m.cells if nm.endswith("q")]
         chk(len(qres) >= 1, "L7 no lod page cells resident")
         check_ledger("L7 lod", s.m)
+        r_off = s.request(full, px=0.01, lod=False)
+        chk(int(r_off.get("lod", 0) or 0) == 0,
+            "L7 per-request lod=0 still lod=%s" % r_off.get("lod"))
+        s.apply(r_off)
+        xor_view("L7 request-off", sregs, s.m, full)
+        check_ledger("L7 request-off", s.m)
+        r_on = s.request(full, px=0.01, lod=True)
+        chk(int(r_on.get("lod", 0) or 0) >= 1,
+            "L7 per-request lod=1 did not restore LOD")
+        s.apply(r_on)
+        check_ledger("L7 request-on", s.m)
         r2 = s.request(full, px=100.0)
         chk(int(r2.get("lod", 0) or 0) == 0,
             "L7 fine-px round still lod=%s" % r2.get("lod"))

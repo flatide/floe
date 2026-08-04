@@ -3228,7 +3228,7 @@ pub fn plan_cmd(args: &[String]) {
 // ------------------------------------------------------------- vfsd
 
 /// stdio daemon for the viewer render service. Line protocol:
-///   gen=1 view=x0,y0,x1,y1 px=5 cut=2 depth=full \
+///   gen=1 view=x0,y0,x1,y1 px=5 cut=2 depth=full lod=1 \
 ///     layers=11/0,12/0 out=/tmp/dir
 /// response:
 ///   gen=1 pages=N new=N evict=name,.. delta=path placements=path \
@@ -3333,6 +3333,7 @@ fn serve_one(d: &mut Daemon, line: &str) -> Result<String, String> {
     let mut reset = false;
     let mut stream_kb: Option<u64> = None;
     let mut nolabels = false;
+    let mut lod = true;
     for tok in line.split_whitespace() {
         let (k, val) = tok
             .split_once('=')
@@ -3378,6 +3379,13 @@ fn serve_one(d: &mut Daemon, line: &str) -> Result<String, String> {
             // refinement rounds of one view: labels were already
             // delivered with the first round, skip the re-plan
             "nolabels" => nolabels = val == "1",
+            "lod" => {
+                lod = match val {
+                    "0" => false,
+                    "1" => true,
+                    _ => return Err("lod".into()),
+                }
+            }
             _ => return Err(format!("unknown key {}", k)),
         }
     }
@@ -3394,7 +3402,7 @@ fn serve_one(d: &mut Daemon, line: &str) -> Result<String, String> {
     // (bins/size gates) - the LOD kill switch must not also kill
     // labels - so it rides separately.
     let label_px = if probe { 0.0 } else { req.px_per_dbu };
-    if probe || d.lod_off {
+    if probe || d.lod_off || !lod {
         req.px_per_dbu = 0.0;
     }
     let label_px = if nolabels || d.labels_off { 0.0 } else { label_px };
