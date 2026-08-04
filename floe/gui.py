@@ -188,7 +188,10 @@ class LayerRow(object):
 
     def __init__(self, l, marker, tooltip, on_toggle, on_expand=None):
         self.key = (l["layer"], l["datatype"])
-        self._text = "%s  %d/%d" % (l["name"], self.key[0], self.key[1])
+        # Calibre-style row: "127.1  <swatch>  NAME" - number first,
+        # a color marker, then the name in plain white on black
+        self._num = "%d.%d" % (self.key[0], self.key[1])
+        self._name = l["name"]
         self._color = l["color"]
         self._marker = marker
         self._on_toggle = on_toggle
@@ -217,13 +220,18 @@ class LayerRow(object):
         self._paint()
 
     def _paint(self):
-        self._mlbl.set_markup('<span face="monospace">%s</span>'
-                              % GLib.markup_escape_text(self._marker))
+        self._mlbl.set_markup(
+            '<span face="monospace" foreground="#ffffff">%s</span>'
+            % GLib.markup_escape_text(self._marker))
+        fg = "#ffffff" if self._active else "#777777"
+        strike = "" if self._active else ' strikethrough="true"'
         self._lbl.set_markup(
+            '<span face="monospace" foreground="%s"%s>%s</span> '
+            '<span foreground="%s">■</span> '
             '<span foreground="%s"%s>%s</span>'
-            % (self._color,
-               "" if self._active else ' strikethrough="true"',
-               GLib.markup_escape_text(self._text)))
+            % (fg, strike, GLib.markup_escape_text(self._num),
+               self._color,
+               fg, strike, GLib.markup_escape_text(self._name)))
 
     def set_marker(self, marker):
         self._marker = marker
@@ -355,8 +363,18 @@ class Viewer:
         side.pack_start(self._src_label, False, False, 0)
 
         scroller = Gtk.ScrolledWindow()
+        # Calibre-style layer panel: black background, white text
+        css = Gtk.CssProvider()
+        css.load_from_data(
+            b".floe-layers, .floe-layers * "
+            b"{ background-color: #000000; }")
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(), css,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        scroller.get_style_context().add_class("floe-layers")
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         self._layers_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self._layers_box.get_style_context().add_class("floe-layers")
         scroller.add(self._layers_box)
         side.pack_start(scroller, True, True, 4)
 
@@ -492,7 +510,9 @@ class Viewer:
             self.fit()
 
     def _build_layer_panel(self):
-        """Layers grouped by layer number, drawn as a flat text list:
+        """Calibre-style panel: black background, rows of
+        "<num>.<dt> <color-marker> NAME" in white, layer numbers
+        ascending. Layers grouped by layer number:
         '+M1' = group parent (lowest datatype of a multi-datatype
         layer); its '+' expands/collapses the remaining datatypes
         below it (collapsed by default), double-clicking any name
@@ -516,23 +536,25 @@ class Viewer:
             self._layer_rows[row.key] = row
             return row.key
 
-        for lnum, ls in groups.items():
+        # Calibre ordering: layer numbers ascend down the panel
+        for lnum in sorted(groups):
+            ls = groups[lnum]
             if len(ls) == 1:
                 l = ls[0]
-                add_row(l, " ", "%s  %d/%d\ndouble-click: show/hide"
-                        % (l["name"], lnum, l["datatype"]))
+                add_row(l, " ", "%d.%d  %s\ndouble-click: show/hide"
+                        % (lnum, l["datatype"], l["name"]))
                 continue
             ls = sorted(ls, key=lambda e: e["datatype"])
             head, rest = ls[0], ls[1:]
             pkey = add_row(
                 head, "+",
-                "%s  %d/%d\n+/-: expand/collapse %d more datatypes\n"
+                "%d.%d  %s\n+/-: expand/collapse %d more datatypes\n"
                 "double-click: show/hide layer %d group"
-                % (head["name"], lnum, head["datatype"], len(rest), lnum),
+                % (lnum, head["datatype"], head["name"], len(rest), lnum),
                 self._on_group_expand)
             self._layer_groups[pkey] = [
-                add_row(l, " ", "%s  %d/%d\ndouble-click: show/hide"
-                        % (l["name"], lnum, l["datatype"]))
+                add_row(l, " ", "%d.%d  %s\ndouble-click: show/hide"
+                        % (lnum, l["datatype"], l["name"]))
                 for l in rest]
         self._layers_box.show_all()
         # children start collapsed; no_show_all keeps later show_all
