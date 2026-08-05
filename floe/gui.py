@@ -407,14 +407,17 @@ class Viewer:
         self._drag = None
         self._drag_origin = None
         self._drag_moved = False
+        self._drag_btn = None       # button that started the pan
         self._zoomdrag = None       # rubber-band anchor (view px)
         self._band_cur = None
+        self._band_ext = None       # (min x, max x) of the band drag
         self._debounce = None
         self._did_fit = False
         self.worker = None
         self._layer_rows = {}
         self._selected_layers = set()
         self._layer_select_anchor = None
+        self._pick_expanded = None  # group auto-expanded for a pick
         self._layer_order = []
         self._layer_menu = None
         # start depth: a plain open shows hierarchy level 1 (fast first
@@ -617,6 +620,13 @@ class Viewer:
         self.scroller.connect("button-release-event", self._on_release)
         self.scroller.connect("motion-notify-event", self._on_motion)
         self.scroller.connect("scroll-event", self._on_scroll)
+        # a modal dialog (or a broken pointer grab) swallows the button
+        # release: without these, _drag survives forever and freezes
+        # wheel zoom + render submission until the next canvas click
+        self.scroller.connect("grab-broken-event",
+                              lambda *_a: self._end_gesture())
+        self.window.connect("focus-out-event",
+                            lambda *_a: self._end_gesture() or False)
         self._alloc_size = None
         self.scroller.connect("size-allocate", self._on_allocate)
         self.scroller.connect("realize",
@@ -1492,9 +1502,42 @@ class Viewer:
             except Exception:
                 pass
 
+    def _end_gesture(self):
+        """Abandon any in-flight pan/band gesture and restore the idle
+        cursor. Needed when the button release can never reach us: a
+        modal dialog opened mid-drag takes the GTK grab (its window
+        receives the release), leaving _drag set forever - wheel zoom
+        dead and every redraw debounce cancelled by the mid-pan branch.
+        Wired to the toplevel's focus-out and the canvas grab-broken."""
+        if self._drag is None and self._zoomdrag is None:
+            return
+        band = self._band_cur is not None
+        self._drag = None
+        self._drag_origin = None
+        self._drag_moved = False
+        self._drag_btn = None
+        self._zoomdrag = None
+        self._band_cur = None
+        self._band_ext = None
+        self._set_cursor("crosshair")
+        if band:
+            self._display()  # erase the rubber band
+
+    def _drag_threshold(self, ox, oy, x, y):
+        """Click-vs-drag via GTK's gtk-dnd-drag-threshold (8px default,
+        setting-driven): the old hardcoded 3px misread jittery remote-X
+        pointers (Exceed/XQuartz/VNC) as pans, silently eating picks."""
+        return self.scroller.drag_check_threshold(
+            int(ox), int(oy), int(x), int(y))
+
     def _on_press(self, _w, ev):
         if self._pending is not None:
             return True  # render in flight: mouse input waits
+        if self._drag is not None or self._zoomdrag is not None:
+            # one gesture at a time: a second button pressed mid-pan
+            # must not clobber the drag state (spurious pick on
+            # release) or arm an invisible rubber band (chord zoom)
+            return True
         if ev.button == 1:
             if self.mode == "ruler":
                 self._ruler_free = bool(ev.state &
@@ -1505,24 +1548,30 @@ class Viewer:
             self._drag = (ev.x, ev.y)
             self._drag_origin = self._drag
             self._drag_moved = False
+            self._drag_btn = 1
             self._set_cursor("move")
         elif ev.button == 2:
             self._drag = (ev.x, ev.y)
             self._drag_origin = self._drag
             self._drag_moved = False
+            self._drag_btn = 2
             self._set_cursor("move")
         elif ev.button == 3:
             self._zoomdrag = (ev.x, ev.y)
             self._band_cur = None
+            self._band_ext = (ev.x, ev.x)
         return True
 
     def _on_release(self, _w, ev):
         if ev.button in (1, 2):
+            if self._drag is not None and ev.button != self._drag_btn:
+                return True  # not the button that started the pan
             was_drag = self._drag is not None
             panned = was_drag and self._drag_moved
             self._drag = None
             self._drag_origin = None
             self._drag_moved = False
+            self._drag_btn = None
             self._set_cursor("crosshair")
             if panned:
                 self.redraw()   # pan ended: render the final position
@@ -1537,11 +1586,23 @@ class Viewer:
         if ev.button != 3 or self._zoomdrag is None:
             return True
         x0, y0 = self._zoomdrag
+        bmin, bmax = self._band_ext or (x0, x0)
         self._zoomdrag = None
         self._band_cur = None
-        dx, dy = abs(ev.x - x0), abs(ev.y - y0)
-        if dx < 5 or dy < 5:
-            self._display()          # erase the band; right click is inert
+        self._band_ext = None
+        # Direction from the DOMINANT excursion of the whole gesture,
+        # not the release-point sign: a zoom-out drag that wobbles back
+        # past the anchor used to fit the residual sliver box to the
+        # viewport - a runaway ~100x zoom-in.
+        forward = (bmax - x0) >= (x0 - bmin)
+        dx = (ev.x - x0) if forward else (x0 - ev.x)
+        dy = abs(ev.y - y0)
+        if dx < 5 and dy < 5:
+            # a plain right click stays inert; a visibly drawn band
+            # that collapsed must not vanish without a word
+            if max(bmax - x0, x0 - bmin) >= 5:
+                self._set_live_status("zoom band cancelled")
+            self._display()
             return True
         bbox = self.view_bbox()
         lx0 = bbox[0] + min(x0, ev.x) * self.spp
@@ -1551,23 +1612,47 @@ class Viewer:
         w, h = self._viewport_size()
         self.cx = (lx0 + lx1) / 2
         self.cy = (ly0 + ly1) / 2
-        if ev.x >= x0:  # forward: the box fills the viewport
-            self.spp = max((lx1 - lx0) / w, (ly1 - ly0) / h)
-        else:           # backward: zoom out by the viewport/box ratio
-            self.spp *= max(w / dx, h / dy)
+        # Only the axes the user actually spanned take part in the
+        # fit: a long, thin band (routine on wires) zooms by its long
+        # axis instead of dying silently or exploding on the sliver.
+        if forward:  # the box fills the viewport
+            scale = [s for s, d in (((lx1 - lx0) / w, dx),
+                                    ((ly1 - ly0) / h, dy)) if d >= 5]
+            self.spp = max(scale)
+        else:        # zoom out by the viewport/box ratio
+            fac = [f for f, d in ((w / max(dx, 1.0), dx),
+                                  (h / max(dy, 1.0), dy)) if d >= 5]
+            self.spp *= max(fac)
         self.redraw()
         return True
 
     def _on_motion(self, _w, ev):
         self._update_cursor(ev)
         if self._pending is not None:
-            return True  # render in flight: mouse input waits
+            # render in flight: the VIEW must not move, but gesture
+            # classification has to continue - otherwise a drag done
+            # while pending never sets _drag_moved and the release
+            # fires a spurious pick; tracking the anchor also stops
+            # the view from jumping once the render clears
+            if self._drag is not None and ev.state & (
+                    Gdk.ModifierType.BUTTON1_MASK |
+                    Gdk.ModifierType.BUTTON2_MASK):
+                if not self._drag_moved \
+                        and self._drag_origin is not None:
+                    ox, oy = self._drag_origin
+                    if self._drag_threshold(ox, oy, ev.x, ev.y):
+                        self._drag_moved = True
+                self._drag = (ev.x, ev.y)
+            elif self._zoomdrag is not None and \
+                    ev.state & Gdk.ModifierType.BUTTON3_MASK:
+                self._track_band(ev)
+            return True
         if self._drag is not None and ev.state & (
                 Gdk.ModifierType.BUTTON1_MASK |
                 Gdk.ModifierType.BUTTON2_MASK):
             if not self._drag_moved and self._drag_origin is not None:
                 ox, oy = self._drag_origin
-                if abs(ev.x - ox) < 3 and abs(ev.y - oy) < 3:
+                if not self._drag_threshold(ox, oy, ev.x, ev.y):
                     return True
                 self._drag_moved = True
             ddx, ddy = ev.x - self._drag[0], ev.y - self._drag[1]
@@ -1578,11 +1663,16 @@ class Viewer:
             return True
         if self._zoomdrag is not None and \
                 ev.state & Gdk.ModifierType.BUTTON3_MASK:
-            self._band_cur = (ev.x, ev.y)
+            self._track_band(ev)
             self._display()
             return True
         self._hover(ev)
         return True
+
+    def _track_band(self, ev):
+        self._band_cur = (ev.x, ev.y)
+        bmin, bmax = self._band_ext or (ev.x, ev.x)
+        self._band_ext = (min(bmin, ev.x), max(bmax, ev.x))
 
     def _on_scroll(self, _w, ev):
         if self._pending is not None:
@@ -2406,7 +2496,15 @@ class Viewer:
         self._pick_px = (x, y)
         r = max(1, int(3 * self.spp))
         if self.tiles_spanned((x - r, y - r, x + r, y + r)) > 4:
-            self._set_live_status("zoom in to pick objects")
+            # too wide to pick - but a click must still honor the
+            # documented deselect contract instead of leaving the
+            # old selection (and its row highlight) stuck on screen
+            if self.selection is not None:
+                self._clear_selection()
+                self._set_live_status("selection cleared")
+                self._display()
+            else:
+                self._set_live_status("zoom in to pick objects")
             return
         self._pick_seq += 1
         self.worker.submit({
@@ -2436,26 +2534,54 @@ class Viewer:
     def _clear_selection(self):
         self.selection = None
         self._sel_text = ""
+        # a pick may still be in flight: without this, its late
+        # result resurrects the selection the user just dismissed
+        # (Esc / row hide), re-expanding and re-scrolling the panel
+        self._pick_seq += 1
         self._set_picked_layer(None)
 
     def _set_picked_layer(self, key):
         """Highlight and reveal the layer of the picked polygon."""
         for row_key, row in self._layer_rows.items():
             row.set_picked(row_key == key)
+        # a group WE expanded for a previous pick collapses back once
+        # it is no longer needed - auto-expansion must not silently
+        # flip the parent row's double-click semantics forever
+        keep = None
+        if key is not None and key in self._layer_rows:
+            for parent, children in self._layer_groups.items():
+                if key in children:
+                    keep = parent
+                    break
+        auto = getattr(self, "_pick_expanded", None)
+        if auto is not None and auto != keep \
+                and auto in self._layer_expanded \
+                and auto in self._layer_rows:
+            self._on_group_expand(self._layer_rows[auto])
+        if auto != keep:
+            self._pick_expanded = None
         if key is None or key not in self._layer_rows:
             return
-        for parent, children in self._layer_groups.items():
-            if key in children and parent not in self._layer_expanded:
-                self._on_group_expand(self._layer_rows[parent])
-                break
+        if keep is not None and keep not in self._layer_expanded:
+            self._on_group_expand(self._layer_rows[keep])
+            self._pick_expanded = keep
         # Showing a collapsed child is laid out on the next GTK cycle.
         GLib.idle_add(self._scroll_to_layer_row, key)
 
-    def _scroll_to_layer_row(self, key):
+    def _scroll_to_layer_row(self, key, retried=False):
         row = self._layer_rows.get(key)
         if row is None or not row.widget.get_visible():
             return False
         alloc = row.widget.get_allocation()
+        if alloc.height <= 1 and not retried:
+            # just-shown row not laid out yet (frame-clock throttling
+            # can defer allocation past a default-priority idle):
+            # clamping to (-1, 0) would yank the panel to the top
+            GLib.idle_add(self._scroll_to_layer_row, key, True,
+                          priority=GLib.PRIORITY_LOW)
+            return False
+        if alloc.height <= 1:
+            return False
         adj = self._layers_scroller.get_vadjustment()
         adj.clamp_page(alloc.y, alloc.y + alloc.height)
         return False
