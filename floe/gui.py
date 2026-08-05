@@ -44,6 +44,7 @@ DRC_LIST_MAX = 2000        # tree rows per check (prev/next reaches all)
 
 MIN_SPP = 0.01     # max zoom-in: 1 px = 0.01 dbu; keeps render bboxes
                    # from collapsing to zero width after int rounding
+WHEEL_ZOOM_STEP = 0.96  # at most 4% per wheel event (was 10%)
 
 MINIMAP_PX = 110           # longest edge of the minimap (view px)
 MINIMAP_MARGIN = 12
@@ -182,23 +183,34 @@ def frame_rect(buf, x0, y0, w, h, color):
 
 
 class LayerRow(object):
-    """One layer row: [marker][name]. Double-clicking the name toggles
-    visibility (hidden = strikethrough, place and color kept). The
-    fixed-width marker column keeps every name left-aligned and doubles
-    as the expand control on group parents: '+' collapsed / '-'
-    expanded (single click), ' ' for childless layers and children."""
+    """One layer row: [marker][layer.datatype][swatch][name].
 
-    def __init__(self, l, marker, tooltip, on_toggle, on_expand=None):
+    Double-clicking the row toggles
+    visibility (hidden = strikethrough, place and color kept). The
+    fixed-width marker and layer/datatype columns keep every color swatch
+    aligned and the marker doubles as the expand control on group parents:
+    '+' collapsed / '-' expanded (single click), ' ' for childless layers
+    and children."""
+
+    def __init__(self, l, marker, num_width, tooltip, on_toggle,
+                 on_expand=None):
         self.key = (l["layer"], l["datatype"])
         # Calibre-style row: "127.1  <swatch>  NAME" - number first,
         # a color marker, then the name in plain white on black
-        self._num = "%d.%d" % (self.key[0], self.key[1])
+        raw_num = "%d.%d" % (self.key[0], self.key[1])
+        # width_chars is measured using the label's base font, before the
+        # Pango "large" span below is applied. The one row that actually
+        # consumes num_width (e.g. 63.63) would therefore grow beyond all
+        # shorter rows. Render exactly num_width monospace glyph cells in
+        # every row instead; Pango preserves the trailing spaces.
+        self._num = raw_num.ljust(num_width)
         self._name = l["name"]
         self._color = l["color"]
         self._marker = marker
         self._on_toggle = on_toggle
         self._on_expand = on_expand
         self._active = True
+        self._picked = False
         self._mlbl = Gtk.Label()
         self._mlbl.set_xalign(0.0)
         self._mlbl.set_width_chars(2)
@@ -206,14 +218,23 @@ class LayerRow(object):
         mbox.add(self._mlbl)
         if on_expand is not None:
             mbox.connect("button-press-event", self._on_marker_click)
+        self._nlbl = Gtk.Label()
+        self._nlbl.set_xalign(0.0)
+        self._clbl = Gtk.Label()
+        self._clbl.set_xalign(0.5)
+        self._clbl.set_width_chars(2)
         self._lbl = Gtk.Label()
         self._lbl.set_xalign(0.0)
         # long layer names must not widen the panel and squeeze the
         # view: ellipsize and show the full name as a tooltip
         self._lbl.set_ellipsize(Pango.EllipsizeMode.END)
         self._lbl.set_max_width_chars(1)
+        content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        content.pack_start(self._nlbl, False, False, 0)
+        content.pack_start(self._clbl, False, False, 0)
+        content.pack_start(self._lbl, True, True, 0)
         nbox = Gtk.EventBox()
-        nbox.add(self._lbl)
+        nbox.add(content)
         nbox.connect("button-press-event", self._on_name_click)
         self.widget = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         self.widget.pack_start(mbox, False, False, 0)
@@ -222,21 +243,37 @@ class LayerRow(object):
         self._paint()
 
     def _paint(self):
+        fg = ("#fff2a8" if self._picked else
+              "#ffffff" if self._active else "#777777")
         self._mlbl.set_markup(
-            '<span face="monospace" foreground="#ffffff">%s</span>'
-            % GLib.markup_escape_text(self._marker))
-        fg = "#ffffff" if self._active else "#777777"
+            '<span face="monospace" size="large" '
+            'foreground="%s">%s</span>'
+            % (fg, GLib.markup_escape_text(self._marker)))
         strike = "" if self._active else ' strikethrough="true"'
+        self._nlbl.set_markup(
+            '<span face="monospace" size="large" '
+            'foreground="%s"%s>%s</span>'
+            % (fg, strike, GLib.markup_escape_text(self._num)))
+        self._clbl.set_markup(
+            '<span size="large" foreground="%s">■</span>' % self._color)
         self._lbl.set_markup(
-            '<span face="monospace" foreground="%s"%s>%s</span> '
-            '<span foreground="%s">■</span> '
-            '<span foreground="%s"%s>%s</span>'
-            % (fg, strike, GLib.markup_escape_text(self._num),
-               self._color,
-               fg, strike, GLib.markup_escape_text(self._name)))
+            '<span size="large" foreground="%s"%s>%s</span>'
+            % (fg, strike, GLib.markup_escape_text(self._name)))
 
     def set_marker(self, marker):
         self._marker = marker
+        self._paint()
+
+    def set_picked(self, on):
+        on = bool(on)
+        if on == self._picked:
+            return
+        self._picked = on
+        context = self.widget.get_style_context()
+        if on:
+            context.add_class("floe-layer-picked")
+        else:
+            context.remove_class("floe-layer-picked")
         self._paint()
 
     def _on_marker_click(self, _w, event):
@@ -278,6 +315,8 @@ class Viewer:
         self._job_depth = {}        # gen -> depth the job rendered at
         self._pending_scope = "live"
         self._drag = None
+        self._drag_origin = None
+        self._drag_moved = False
         self._zoomdrag = None       # rubber-band anchor (view px)
         self._band_cur = None
         self._debounce = None
@@ -376,12 +415,15 @@ class Viewer:
         css = Gtk.CssProvider()
         css.load_from_data(
             b".floe-layers, .floe-layers * "
-            b"{ background-color: #000000; }")
+            b"{ background-color: #000000; } "
+            b".floe-layer-picked, .floe-layer-picked * "
+            b"{ background-color: #31566d; }")
         Gtk.StyleContext.add_provider_for_screen(
             Gdk.Screen.get_default(), css,
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         scroller.get_style_context().add_class("floe-layers")
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self._layers_scroller = scroller
         self._layers_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self._layers_box.get_style_context().add_class("floe-layers")
         scroller.add(self._layers_box)
@@ -565,10 +607,13 @@ class Viewer:
         groups = {}
         for l in self.meta["layers"]:
             groups.setdefault(l["layer"], []).append(l)
+        num_width = max(
+            (len("%d.%d" % (l["layer"], l["datatype"]))
+             for l in self.meta["layers"]), default=1)
 
         def add_row(l, marker, tooltip, on_expand=None):
-            row = LayerRow(l, marker, tooltip, self._on_layer_toggled,
-                           on_expand)
+            row = LayerRow(l, marker, num_width, tooltip,
+                           self._on_layer_toggled, on_expand)
             self._layers_box.pack_start(row.widget, False, False, 0)
             self._layer_rows[row.key] = row
             return row.key
@@ -1331,30 +1376,43 @@ class Viewer:
                                         Gdk.ModifierType.SHIFT_MASK)
                 self._ruler_click(ev)
                 return True
+            self._drag = (ev.x, ev.y)
+            self._drag_origin = self._drag
+            self._drag_moved = False
+            self._set_cursor("move")
+        elif ev.button == 2:
+            self._drag = (ev.x, ev.y)
+            self._drag_origin = self._drag
+            self._drag_moved = False
+            self._set_cursor("move")
+        elif ev.button == 3:
             self._zoomdrag = (ev.x, ev.y)
             self._band_cur = None
-        elif ev.button in (2, 3):
-            self._drag = (ev.x, ev.y)
-            self._set_cursor("move")
         return True
 
     def _on_release(self, _w, ev):
-        if ev.button in (2, 3):
-            panned = self._drag is not None
+        if ev.button in (1, 2):
+            was_drag = self._drag is not None
+            panned = was_drag and self._drag_moved
             self._drag = None
+            self._drag_origin = None
+            self._drag_moved = False
             self._set_cursor("crosshair")
             if panned:
                 self.redraw()   # pan ended: render the final position
+            elif was_drag and ev.button == 1:
+                # Preserve object selection as a left click, while a
+                # left-button movement is exclusively a pan gesture.
+                self._pick_click(ev)
             return True
-        if ev.button != 1 or self._zoomdrag is None:
+        if ev.button != 3 or self._zoomdrag is None:
             return True
         x0, y0 = self._zoomdrag
         self._zoomdrag = None
         self._band_cur = None
         dx, dy = abs(ev.x - x0), abs(ev.y - y0)
         if dx < 5 or dy < 5:
-            self._display()          # erase the band
-            self._pick_click(ev)     # a click, not a box
+            self._display()          # erase the band; right click is inert
             return True
         bbox = self.view_bbox()
         lx0 = bbox[0] + min(x0, ev.x) * self.spp
@@ -1376,8 +1434,13 @@ class Viewer:
         if self._pending is not None:
             return True  # render in flight: mouse input waits
         if self._drag is not None and ev.state & (
-                Gdk.ModifierType.BUTTON2_MASK |
-                Gdk.ModifierType.BUTTON3_MASK):
+                Gdk.ModifierType.BUTTON1_MASK |
+                Gdk.ModifierType.BUTTON2_MASK):
+            if not self._drag_moved and self._drag_origin is not None:
+                ox, oy = self._drag_origin
+                if abs(ev.x - ox) < 3 and abs(ev.y - oy) < 3:
+                    return True
+                self._drag_moved = True
             ddx, ddy = ev.x - self._drag[0], ev.y - self._drag[1]
             self._drag = (ev.x, ev.y)
             self.cx -= ddx * self.spp
@@ -1385,7 +1448,7 @@ class Viewer:
             self.redraw()
             return True
         if self._zoomdrag is not None and \
-                ev.state & Gdk.ModifierType.BUTTON1_MASK:
+                ev.state & Gdk.ModifierType.BUTTON3_MASK:
             self._band_cur = (ev.x, ev.y)
             self._display()
             return True
@@ -1412,9 +1475,11 @@ class Viewer:
         elif ev.direction == Gdk.ScrollDirection.SMOOTH:
             ok, _dx, dy = ev.get_scroll_deltas()
             if ok:
-                delta = max(-3.0, min(3.0, -dy))
+                # Trackpads can report a large accumulated delta in one
+                # event. Never turn that into a multi-step zoom jump.
+                delta = max(-1.0, min(1.0, -dy))
         if delta:
-            self._zoom_at(ev.x, ev.y, 0.9 ** delta)
+            self._zoom_at(ev.x, ev.y, WHEEL_ZOOM_STEP ** delta)
         return True
 
     def _zoom_at(self, x, y, factor):
@@ -2121,8 +2186,7 @@ class Viewer:
         if self._ruler_start is not None:
             self._ruler_start = None
         elif self.selection is not None:
-            self.selection = None
-            self._sel_text = ""
+            self._clear_selection()
         elif self.mode == "ruler":
             self.mode = "normal"
             self._snap_res = None
@@ -2203,11 +2267,11 @@ class Viewer:
 
     def _on_pick_result(self, res):
         if not res.get("found"):
-            self.selection = None
-            self._sel_text = ""
+            self._clear_selection()
             self._set_live_status("no object here")
         else:
             self.selection = res
+            self._set_picked_layer((res["layer"], res["datatype"]))
             bb = res["bbox"]
             w = (bb[2] - bb[0]) * self.dbu
             h = (bb[3] - bb[1]) * self.dbu
@@ -2220,17 +2284,50 @@ class Viewer:
             self._set_live_status(self._sel_text)
         self._display()
 
+    def _clear_selection(self):
+        self.selection = None
+        self._sel_text = ""
+        self._set_picked_layer(None)
+
+    def _set_picked_layer(self, key):
+        """Highlight and reveal the layer of the picked polygon."""
+        for row_key, row in self._layer_rows.items():
+            row.set_picked(row_key == key)
+        if key is None or key not in self._layer_rows:
+            return
+        for parent, children in self._layer_groups.items():
+            if key in children and parent not in self._layer_expanded:
+                self._on_group_expand(self._layer_rows[parent])
+                break
+        # Showing a collapsed child is laid out on the next GTK cycle.
+        GLib.idle_add(self._scroll_to_layer_row, key)
+
+    def _scroll_to_layer_row(self, key):
+        row = self._layer_rows.get(key)
+        if row is None or not row.widget.get_visible():
+            return False
+        alloc = row.widget.get_allocation()
+        adj = self._layers_scroller.get_vadjustment()
+        adj.clamp_page(alloc.y, alloc.y + alloc.height)
+        return False
+
     # ---- layers / clip -------------------------------------------------------
     def _on_layer_toggled(self, row, key):
         if row.get_active():
             self.visible.add(key)
         else:
             self.visible.discard(key)
+            if self.selection is not None and \
+                    (self.selection.get("layer"),
+                     self.selection.get("datatype")) == key:
+                self._clear_selection()
         if self._layers_batch:
             return  # group/all/none toggle: one redraw at the end
         kids = self._layer_groups.get(key)
-        if kids:
-            # '+' parent: drag every datatype of the layer with it
+        if kids and key not in self._layer_expanded:
+            # A collapsed group acts as one row, so its parent drags every
+            # datatype with it. Once expanded, every visible row (including
+            # the parent datatype) toggles independently.
             on = row.get_active()
             self._layers_batch = True
             try:

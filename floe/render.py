@@ -19,6 +19,11 @@ _VIEW_CONFIG = {
     "cell-box-visible": "false",
 }
 
+# Calibre-style screen-space fill: one colored pixel in each 2x2 block.
+# Keeping the other three pixels transparent preserves lower-layer detail
+# without a second outline pass over the full working set.
+_DESIGN_DOT_STIPPLE = "*.\n.."
+
 
 def _require_lay():
     if klay is None:
@@ -63,6 +68,8 @@ class Renderer:
         self.hollow = set(hollow)
         self.hier_offset = hier_offset
         self.lv.show_layout(layout, False)
+        self._design_dot_pattern = self.lv.add_stipple(
+            "floe-calibre-dot", _DESIGN_DOT_STIPPLE)
         self.refresh()
 
     def refresh(self):
@@ -79,6 +86,13 @@ class Renderer:
                 lp.frame_color = col
             if key in self.hollow:
                 lp.dither_pattern = 1  # hollow: outline only
+            else:
+                # Single-pass Calibre-style rendering: sparse screen-space
+                # dots let lower layers remain visible, while the polygon's
+                # continuous 1px frame uses the exact same layer color.
+                lp.dither_pattern = self._design_dot_pattern
+                lp.transparent = True
+                lp.width = 1
         self.lv.max_hier()
 
     def _place_hollow_underlays_first(self):
