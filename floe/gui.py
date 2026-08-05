@@ -54,6 +54,8 @@ MINIMAP_DOT_MIN = 6        # view box smaller than this becomes a dot
 MINIMAP_BG = 0x141414FF
 MINIMAP_EDGE = 0x666666FF
 MINIMAP_VIEW = 0x8ECDF5FF
+MINIMAP_FRONT = 0x46565FFF  # depth-frontier outlines: dim slate,
+                            # well under the view box brightness
 
 # Layer/datatype is operationally capped at 999.999. The number column is
 # independent of the current design's actual maximum, so changing files or
@@ -419,6 +421,8 @@ class Viewer:
         self._selected_layers = set()
         self._layer_select_anchor = None
         self._pick_expanded = None  # group auto-expanded for a pick
+        self._frontier_depths = []  # baked minimap frontier (meta)
+        self._minimap_bases = {}    # depth -> rendered base pixbuf
         self._layer_order = []
         self._layer_menu = None
         # start depth: a plain open shows hierarchy level 1 (fast first
@@ -653,6 +657,11 @@ class Viewer:
         self.cy = (bb[1] + bb[3]) / 2
         self.visible = {(l["layer"], l["datatype"])
                         for l in self.meta["layers"]}
+        # baked minimap frontier (per-depth structural boxes, v0.11.2
+        # caches; absent key = plain minimap) + per-depth base cache
+        self._frontier_depths = (self.meta.get("frontier")
+                                 or {}).get("depths") or []
+        self._minimap_bases = {}
         self.last_frame = None
         self._frame_anchor = None
         self._depth_used = "?"
@@ -1048,22 +1057,73 @@ class Viewer:
             color = BAND_IN if x1 >= x0 else BAND_OUT
             rect_outline(disp, x0, y0, x1, y1, BLACK, color)
 
-    def _update_minimap(self, bbox):
-        """Draw the die overview below the layer list."""
-        disp = GdkPixbuf.Pixbuf.new(
-            GdkPixbuf.Colorspace.RGB, False, 8, MINIMAP_PX, MINIMAP_PX)
-        disp.fill(BLACK)
+    def _minimap_geom(self):
+        """(scale, panel x0, panel y0, die px w, die px h) or None."""
         bb = self.meta["bbox"]
         bw, bh = bb[2] - bb[0], bb[3] - bb[1]
         if bw <= 0 or bh <= 0:
-            self._minimap_image.set_from_pixbuf(disp)
-            return
+            return None
         scale = MINIMAP_PX / max(bw, bh)
         mw, mh = max(2, round(bw * scale)), max(2, round(bh * scale))
-        x0 = (MINIMAP_PX - mw) // 2
-        y0 = (MINIMAP_PX - mh) // 2
-        fill_rect(disp, x0, y0, mw, mh, MINIMAP_BG)
-        frame_rect(disp, x0, y0, mw, mh, MINIMAP_EDGE)
+        return (scale, (MINIMAP_PX - mw) // 2,
+                (MINIMAP_PX - mh) // 2, mw, mh)
+
+    def _minimap_frontier_depth(self):
+        """Bucket the minimap mirrors: the CURRENT semantic depth.
+        None = no frontier layer (full depth, beyond the baked/
+        folded range, frames toggled off, or an old cache)."""
+        if not getattr(self, "_frontier_depths", None) \
+                or not self.frames_on:
+            return None
+        d = self.depth_value
+        if d >= 999 or d >= len(self._frontier_depths):
+            return None
+        return d
+
+    def _minimap_base(self, d):
+        """Die background + the depth-d frontier boxes, rendered once
+        per depth and cached: the minimap is stamped on every frame,
+        and re-drawing up to a thousand boxes in python per display
+        would drag pan/refine (the view box rides on a copy())."""
+        base = self._minimap_bases.get(d)
+        if base is not None:
+            return base
+        disp = GdkPixbuf.Pixbuf.new(
+            GdkPixbuf.Colorspace.RGB, False, 8, MINIMAP_PX, MINIMAP_PX)
+        disp.fill(BLACK)
+        geom = self._minimap_geom()
+        if geom is not None:
+            scale, x0, y0, mw, mh = geom
+            bb = self.meta["bbox"]
+            fill_rect(disp, x0, y0, mw, mh, MINIMAP_BG)
+            frame_rect(disp, x0, y0, mw, mh, MINIMAP_EDGE)
+            if d is not None:
+                for fx0, fy0, fx1, fy1 in self._frontier_depths[d]:
+                    w = (fx1 - fx0) * scale
+                    h = (fy1 - fy0) * scale
+                    if w < 2 and h < 2:
+                        continue  # sub-pixel dust stays off the map
+                    frame_rect(disp,
+                               x0 + (fx0 - bb[0]) * scale,
+                               y0 + (bb[3] - fy1) * scale,
+                               max(1, round(w)), max(1, round(h)),
+                               MINIMAP_FRONT)
+        self._minimap_bases[d] = disp
+        return disp
+
+    def _update_minimap(self, bbox):
+        """Draw the die overview below the layer list: the cached
+        per-depth base (die + structural frontier, depth-synced with
+        the frame layer) plus the live view box."""
+        geom = self._minimap_geom()
+        disp = self._minimap_base(
+            None if geom is None else self._minimap_frontier_depth())
+        disp = disp.copy()
+        if geom is None:
+            self._minimap_image.set_from_pixbuf(disp)
+            return
+        scale, x0, y0, mw, mh = geom
+        bb = self.meta["bbox"]
 
         def mx(v):
             return x0 + (v - bb[0]) * scale

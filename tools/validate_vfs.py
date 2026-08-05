@@ -207,6 +207,68 @@ def main():
     if ovt_size != ovm_ovt_len:
         fail("ovt_len header=%d file=%d" % (ovm_ovt_len, ovt_size))
 
+    # minimap frontier (rev 30): per-depth structural boxes vs a
+    # klayout oracle - depth 0 exact (top member expansion), depth 1
+    # spot (two-level expansion); min filter and cap respected
+    fr = vmeta.get("frontier") or {}
+    fmin = fr.get("min", 0)
+    keep = fr.get("keep", 0)
+    depths = fr.get("depths")
+    if fmin < 1 or keep < 1 or not isinstance(depths, list):
+        fail("frontier meta missing/malformed: %r" % (fr,))
+        depths = []
+    ly3 = db.Layout(False)
+    ly3.read(src)
+    die = ly3.top_cell().bbox()
+
+    def expand(cell):
+        """placed member boxes of cell's direct children (all)"""
+        out = []
+        for inst in cell.each_inst():
+            cb = inst.cell.bbox()
+            for tr in inst.cell_inst.each_trans():
+                out.append(cb.transformed(tr))
+            # complex transforms (magnification) don't occur in the
+            # gate assets; each_trans covers rot/mirror arrays
+        return out
+
+    for d, boxes in enumerate(depths):
+        if len(boxes) > keep:
+            fail("frontier depth %d has %d > keep %d"
+                 % (d, len(boxes), keep))
+        for b in boxes:
+            if max(b[2] - b[0], b[3] - b[1]) < fmin:
+                fail("frontier depth %d box under min: %r" % (d, b))
+            if b[0] < die.left or b[1] < die.bottom \
+                    or b[2] > die.right or b[3] > die.top:
+                fail("frontier depth %d box outside die: %r" % (d, b))
+    trunc = fr.get("truncated") or []
+    for d, want_boxes in ((0, None), (1, None)):
+        if d >= len(depths) or (d < len(trunc) and trunc[d]) \
+                or len(depths[d]) >= keep:
+            continue
+        if d == 0:
+            oracle_boxes = expand(ly3.top_cell())
+        else:
+            oracle_boxes = []
+            for inst in ly3.top_cell().each_inst():
+                sub = expand(inst.cell)
+                for tr in inst.cell_inst.each_trans():
+                    oracle_boxes.extend(
+                        b.transformed(tr) for b in sub)
+        want = sorted(
+            (b.left, b.bottom, b.right, b.top)
+            for b in oracle_boxes
+            if max(b.width(), b.height()) >= fmin)
+        got = sorted(tuple(b) for b in depths[d])
+        if got != want:
+            fail("frontier depth %d: %d boxes vs oracle %d "
+                 "(miss %s / extra %s)"
+                 % (d, len(got), len(want),
+                    [t for t in want if t not in got][:2],
+                    [t for t in got if t not in want][:2]))
+    ly3._destroy()
+
     print("vfs-checked %d pages (%d lod), %d layers, %d text "
           "members indexed, top rbbox, failures: %d"
           % (checked, n_lod, len(lmap), tm.get("members", 0),

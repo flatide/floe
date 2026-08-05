@@ -302,7 +302,8 @@ def main():
     shutil.rmtree(out1, ignore_errors=True)
     subprocess.run([FI, "vfs", src, out1, "--jobs", "1"],
                    capture_output=True, check=True)
-    for f in ("design.ovm", "design.ovt", "design.ovp"):
+    for f in ("design.ovm", "design.ovt", "design.ovp",
+              "meta.json"):
         if open(os.path.join(out, f), "rb").read() != \
            open(os.path.join(out1, f), "rb").read():
             fail("X5 %s differs between --jobs 4 and 1" % f)

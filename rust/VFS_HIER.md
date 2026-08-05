@@ -170,6 +170,33 @@ rev 10 (지시: **인덱서/뷰어 책임 분리** + 이전 검토 잔여 1건):
   start·count, payload size 등)은 checked — silent truncation
   금지, 초과는 "limit exceeded: <필드>" 빌드 에러.
 
+rev 30 (미니맵 depth-frontier 굽기 — 2026-08-06, 0.11.2):
+
+- **meta.json `frontier`**: depth별 구조 frontier 박스를 빌드가 굽는다
+  — 버킷 d = 경로깊이 d+1 배치 멤버의 top 좌표 bbox = 화면의 요청깊이
+  d 프레임 집합. 플래너의 `r ≥ height` 접힘은 버킷 깊이까지 실존하는
+  경로를 자를 수 없으므로(경로가 닿으면 height ≥ 잔여) 접힘 로직 없이
+  **단일 DFS**로 전 depth를 동시에 굽는다; 깊은 빈 버킷의 부재가 곧
+  "frontier 없음"(full/접힘) 신호다.
+- **한도 3중**: ① min = die 최장변/512 — 자식 셀 자체가 sub-min이면
+  멤버 열거 없이 O(1) 스킵(placed 박스 최장변은 회전 불변; 필 팜이
+  스캔 예산을 먹기 전에 죽는다), 통과 못한 멤버는 방출도 하강도 없음
+  (자손 박스는 항상 더 작음 = 경로 전개 가드) ② depth당 열거 예산
+  65,536, 초과는 truncated 플래그(결정적 프리픽스) ③ 저장은 **면적
+  내림차순 1,024개/depth**(미니맵 과밀 방지; 동률은 좌표 타이브레이크,
+  jobs 무관 바이트 동일 — X5가 meta.json 비교로 고정).
+- 뷰어: 미니맵 = die 베이스 + 현재 depth 버킷의 hollow 박스(depth별
+  1회 렌더 캐시, 매 표시는 copy+뷰박스 스탬프 — 기존 매 프레임 전체
+  재그리기도 이걸로 대체), frontier는 frames 토글과 연동, full/범위
+  밖 depth·구 캐시는 박스 없음. 2px 미만 박스는 표시 생략.
+- 게이트: validate_vfs.py에 klayout 오라클 — depth 0 정확 XOR(top
+  멤버 전개), depth 1 정확 XOR(2단 전개; 캡 미달·비절단일 때만),
+  min/캡/다이 내부 검사. valmini: depth0 12박스(구 스켈레톤 12
+  blocks와 일치), depth1 155박스.
+- 주의: frontier 박스는 화면 프레임의 **부분집합**(min 필터) —
+  서브픽셀 박스는 미니맵에 어차피 안 보인다. 구 캐시는 키 부재로
+  미니맵만 종전 모습(재인덱싱 시 표시).
+
 rev 28 (T1~T4 cell-local Text VFS — 2026-08-04, 0.11.0, **ovm v5 =
 재인덱싱 필요**; 계획 = rust/VFS_TEXT_PLAN.md, 4 커밋):
 

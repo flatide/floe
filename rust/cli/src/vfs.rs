@@ -308,13 +308,181 @@ fn write_coverage(doc: &Doc, outdir: &str, jobs: usize) {
     );
 }
 
+/// minimap frontier bake (rev 30): boxes must stay readable on a
+/// ~180 px minimap, so anything under die/512 is skipped - and
+/// because a child's placed box is contained in its parent's, the
+/// whole subtree prunes with it (the path-expansion guard)
+const FRONTIER_MIN_DIV: i64 = 512;
+/// stored boxes per depth, biggest-first (the "must not look
+/// busy" cap - large structures win, dust loses)
+const FRONTIER_KEEP: usize = 1024;
+/// per-depth member enumeration budget; exhaustion flags the
+/// depth truncated (deterministic prefix, DFS order)
+const FRONTIER_SCAN: u64 = 65_536;
+/// depth buckets beyond this are meaningless on a minimap
+const FRONTIER_DEPTH_CAP: usize = 32;
+
+/// up to `cap` member offsets WITHOUT materializing the repetition
+/// (rep_offsets builds the full na*nb Vec); returns visited count
+fn frontier_offsets(
+    rep: &Rep,
+    cap: u64,
+    f: &mut impl FnMut(i64, i64),
+) -> u64 {
+    if cap == 0 {
+        return 0;
+    }
+    let mut seen = 0u64;
+    match rep {
+        Rep::One => {
+            f(0, 0);
+            seen = 1;
+        }
+        Rep::Grid { na, nb, va, vb } => {
+            'outer: for j in 0..*nb as i64 {
+                for i in 0..*na as i64 {
+                    if seen >= cap {
+                        break 'outer;
+                    }
+                    f(i * va.0 + j * vb.0, i * va.1 + j * vb.1);
+                    seen += 1;
+                }
+            }
+        }
+        Rep::Pts(p) => {
+            for &(x, y) in p.iter().take(cap as usize) {
+                f(x, y);
+                seen += 1;
+            }
+        }
+    }
+    seen
+}
+
+/// per-depth structural-frontier boxes for the minimap, as the
+/// meta.json "frontier" object. Bucket d holds the placed bboxes of
+/// path-depth d+1 members - exactly the planner's request-depth-d
+/// frame set (the planner's r>=height fold never cuts a path that
+/// actually reaches the bucket's depth, so no fold logic is needed;
+/// empty deep buckets ARE the folded/absent frontier). One DFS,
+/// min-size subtree pruning, biggest-first per-depth cap.
+fn frontier_json(
+    doc: &Doc,
+    rbb: &[Option<(i64, i64, i64, i64)>],
+) -> String {
+    let die = rbb[doc.top].unwrap_or((0, 0, 0, 0));
+    let min_dim =
+        ((die.2 - die.0).max(die.3 - die.1) / FRONTIER_MIN_DIV)
+            .max(1);
+    let mut buckets: Vec<Vec<(i128, [i64; 4])>> = Vec::new();
+    let mut scanned: Vec<u64> = Vec::new();
+    let mut truncated: Vec<bool> = Vec::new();
+    let mut stack: Vec<(usize, usize, Xf)> =
+        vec![(doc.top, 0, Xf::identity())];
+    while let Some((ci, k, xf)) = stack.pop() {
+        if k >= FRONTIER_DEPTH_CAP {
+            continue;
+        }
+        while buckets.len() <= k {
+            buckets.push(Vec::new());
+            scanned.push(0);
+            truncated.push(false);
+        }
+        for pl in &doc.cells[ci].places {
+            let cb = match rbb[pl.cell] {
+                Some(b) => b,
+                None => continue,
+            };
+            // a placed box's max dimension is rotation-invariant, so
+            // a sub-min CHILD disqualifies every member without
+            // enumerating one - fill farms must not eat the scan
+            // budget before the real blocks are reached
+            if (cb.2 - cb.0).max(cb.3 - cb.1) < min_dim {
+                continue;
+            }
+            if scanned[k] >= FRONTIER_SCAN {
+                truncated[k] = true;
+                break;
+            }
+            let budget = FRONTIER_SCAN - scanned[k];
+            let seen = frontier_offsets(
+                &pl.rep,
+                budget,
+                &mut |ox, oy| {
+                    let m = xf.compose(&Xf::place(
+                        pl.x + ox,
+                        pl.y + oy,
+                        pl.rot,
+                        pl.flip,
+                    ));
+                    let a = m.apply(cb.0, cb.1);
+                    let b2 = m.apply(cb.2, cb.3);
+                    let bx = [
+                        a.0.min(b2.0),
+                        a.1.min(b2.1),
+                        a.0.max(b2.0),
+                        a.1.max(b2.1),
+                    ];
+                    let (w, h) = (bx[2] - bx[0], bx[3] - bx[1]);
+                    if w.max(h) < min_dim {
+                        // descendants are strictly contained:
+                        // prune the whole member subtree
+                        return;
+                    }
+                    buckets[k].push((w as i128 * h as i128, bx));
+                    stack.push((pl.cell, k + 1, m));
+                },
+            );
+            scanned[k] += seen;
+            if seen < pl.rep.members() {
+                truncated[k] = true; // budget cut this rep short
+            }
+        }
+    }
+    // biggest-first per depth, deterministic ties, trailing empties
+    // dropped (their absence IS the "no frontier here" signal)
+    for b in buckets.iter_mut() {
+        b.sort_by_key(|&(area, bx)| (std::cmp::Reverse(area), bx));
+        b.truncate(FRONTIER_KEEP);
+    }
+    while buckets.last().is_some_and(|b| b.is_empty()) {
+        buckets.pop();
+        truncated.pop();
+    }
+    let depths: Vec<String> = buckets
+        .iter()
+        .map(|b| {
+            let rows: Vec<String> = b
+                .iter()
+                .map(|(_, x)| {
+                    format!("[{},{},{},{}]", x[0], x[1], x[2], x[3])
+                })
+                .collect();
+            format!("[{}]", rows.join(","))
+        })
+        .collect();
+    let trunc: Vec<&str> = truncated
+        .iter()
+        .map(|&t| if t { "true" } else { "false" })
+        .collect();
+    format!(
+        "{{\"min\": {}, \"keep\": {}, \"truncated\": [{}], \
+         \"depths\": [{}]}}",
+        min_dim,
+        FRONTIER_KEEP,
+        trunc.join(","),
+        depths.join(",")
+    )
+}
+
 /// meta.json: the viewer-facing summary (dbu/bbox/grid/layers+
 /// color/src + text index tallies). The far-view skeleton is
 /// retired (rev 24) and the text sidecars are too (T4,
 /// VFS_TEXT_PLAN.md): labels are request-scoped daemon responses
 /// from the v5 text index - nothing here walks the hierarchy, so
 /// this stage no longer scales with path expansion (the old
-/// collect_all_texts residency, par.6 risk 0, is GONE). grid
+/// collect_all_texts residency, par.6 risk 0, is GONE; the minimap
+/// frontier walk is min-size-pruned and budget-capped). grid
 /// stays synthetic on the .ice formula (legacy meta shape).
 #[allow(clippy::too_many_arguments)]
 fn emit_viewer_side(
@@ -394,7 +562,8 @@ fn emit_viewer_side(
          \"layers\": [\n{}\n],\n\
          \"texts\": {{\"records\": {}, \"members\": {}, \
          \"cells\": {}, \"grid_reps\": {}, \"pts_reps\": {}, \
-         \"ovt_bytes\": {}}}\n\
+         \"ovt_bytes\": {}}},\n\
+         \"frontier\": {}\n\
          }}\n",
         crate::CACHE_VERSION,
         crate::jesc(&abs_src),
@@ -419,6 +588,7 @@ fn emit_viewer_side(
         tstats.grid_reps,
         tstats.pts_reps,
         tstats.string_bytes + tstats.pts_bytes,
+        frontier_json(doc, rbb),
     );
     std::fs::write(format!("{}/meta.json", outdir), meta)
         .expect("write meta");
