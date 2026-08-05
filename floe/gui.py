@@ -285,7 +285,8 @@ class LayerRow(object):
         pixels = bytearray(width * height * 3)
         for y in range(height):
             for x in range(width):
-                if (x + y) & 1:
+                border = x in (0, width - 1) or y in (0, height - 1)
+                if not border and (x + y) & 1:
                     continue
                 off = (y * width + x) * 3
                 pixels[off:off + 3] = rgb_bytes
@@ -533,6 +534,7 @@ class Viewer:
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         self._layers_scroller = scroller
         self._layers_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self._layers_box.set_margin_top(4)
         self._layers_box.get_style_context().add_class("floe-layers")
         scroller.add(self._layers_box)
         side.pack_start(scroller, True, True, 4)
