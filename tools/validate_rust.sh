@@ -21,8 +21,15 @@ if [ -z "$SRC" ]; then
         rm -rf "$SRC" "$SRC.ice" "${SRC%.oas}_rust.ice"
         .venv/bin/python tools/gen_valmini.py "$SRC"
     fi
-    [ -f "$SRC.ice/meta.json" ] || \
+    # the python .ice is the meta-parity oracle: refresh it when the
+    # python indexer itself changed, not only when the asset did (the
+    # layer-palette change tripped this once - stale colors failed
+    # validate_rust_meta on every host with an old cached .ice)
+    if [ ! -f "$SRC.ice/meta.json" ] || \
+       [ floe/cache.py -nt "$SRC.ice/meta.json" ]; then
+        rm -rf "$SRC.ice"
         PYTHONPATH=. .venv/bin/python -m floe index "$SRC" >/dev/null
+    fi
 fi
 (cd rust && PATH="$HOME/.cargo/bin:$PATH" \
     cargo build --release 2>/dev/null >/dev/null)
@@ -49,4 +56,7 @@ rust/target/release/floe-index vfs "$SRC" "$VOUT" --coverage \
 # v5 text index: oracle XOR, declutter, corrupt, determinism,
 # daemon label lifecycle
 .venv/bin/python tools/validate_vfs_text.py
+# viewer speckle fill: common phase, opaque overlap, and the
+# coverage composite staying out of speckled interiors
+.venv/bin/python tools/validate_render_speckle.py
 echo "RUST VALIDATION: ALL OK ($SRC)"
