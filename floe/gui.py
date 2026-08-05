@@ -439,7 +439,10 @@ class Viewer:
         # Explicit request controls; no shell environment is consulted.
         self.lod_on = bool(lod)
         self.frames_on = bool(frames)
-        self.labels_on = bool(labels)
+        # Frame is the normal UI control for both hierarchy outlines and
+        # texts. An explicit --labels off remains available as a startup/
+        # automation override, but frames off always suppresses texts.
+        self.labels_on = self.frames_on and bool(labels)
         self.stream_kb = stream_kb
         self.stream_target_ms = int(stream_target_ms)
         self.render_debug = bool(render_debug)
@@ -549,7 +552,15 @@ class Viewer:
         self._minimap_image.set_size_request(MINIMAP_PX, MINIMAP_PX)
         self._minimap_image.set_halign(Gtk.Align.CENTER)
         self._minimap_image.set_valign(Gtk.Align.CENTER)
-        side.pack_start(self._minimap_image, False, False, 4)
+        self._minimap_event = Gtk.EventBox()
+        self._minimap_event.set_size_request(MINIMAP_PX, MINIMAP_PX)
+        self._minimap_event.set_halign(Gtk.Align.CENTER)
+        self._minimap_event.add(self._minimap_image)
+        self._minimap_event.connect(
+            "button-press-event", self._on_minimap_click)
+        self._minimap_event.set_tooltip_text(
+            "Click inside the die to center the viewport")
+        side.pack_start(self._minimap_event, False, False, 4)
 
         brow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
         side.pack_start(brow, False, False, 4)
@@ -851,10 +862,14 @@ class Viewer:
                 opts[key] = value
         if opts.get("lod") in ("on", "off"):
             self._set_lod(opts["lod"] == "on")
-        if opts.get("frames") in ("on", "off"):
-            self._set_frames(opts["frames"] == "on")
-        if opts.get("labels") in ("on", "off"):
-            enabled = opts["labels"] == "on"
+        frames = opts.get("frames")
+        labels = opts.get("labels")
+        if frames in ("on", "off"):
+            label_override = None if labels not in ("on", "off") \
+                else labels == "on"
+            self._set_frames(frames == "on", labels=label_override)
+        elif labels in ("on", "off"):
+            enabled = self.frames_on and labels == "on"
             if enabled != self.labels_on:
                 self.labels_on = enabled
                 self.redraw(immediate=True)
@@ -1071,14 +1086,37 @@ class Viewer:
     def _minimap_frontier_depth(self):
         """Bucket the minimap mirrors: the CURRENT semantic depth.
         None = no frontier layer (full depth, beyond the baked/
-        folded range, frames toggled off, or an old cache)."""
-        if not getattr(self, "_frontier_depths", None) \
-                or not self.frames_on:
+        folded range, or an old cache). The minimap is navigation chrome,
+        so its frontier remains visible when main-view frames are off."""
+        if not getattr(self, "_frontier_depths", None):
             return None
         d = self.depth_value
         if d >= 999 or d >= len(self._frontier_depths):
             return None
         return d
+
+    def _minimap_world_point(self, px, py):
+        """Map a panel pixel inside the die to world coordinates."""
+        geom = self._minimap_geom()
+        if geom is None:
+            return None
+        scale, x0, y0, mw, mh = geom
+        if not (x0 <= px <= x0 + mw - 1 and
+                y0 <= py <= y0 + mh - 1):
+            return None
+        bb = self.meta["bbox"]
+        return (bb[0] + (px - x0) / scale,
+                bb[3] - (py - y0) / scale)
+
+    def _on_minimap_click(self, _widget, event):
+        if event.type != Gdk.EventType.BUTTON_PRESS or event.button != 1:
+            return False
+        point = self._minimap_world_point(event.x, event.y)
+        if point is None:
+            return True
+        self.cx, self.cy = point
+        self.redraw(immediate=True)
+        return True
 
     def _minimap_base(self, d):
         """Die background + the depth-d frontier boxes, rendered once
@@ -1113,8 +1151,8 @@ class Viewer:
 
     def _update_minimap(self, bbox):
         """Draw the die overview below the layer list: the cached
-        per-depth base (die + structural frontier, depth-synced with
-        the frame layer) plus the live view box."""
+        per-depth base (die + always-visible structural frontier) plus
+        the live view box."""
         geom = self._minimap_geom()
         disp = self._minimap_base(
             None if geom is None else self._minimap_frontier_depth())
@@ -1901,8 +1939,6 @@ class Viewer:
             lbl += " · lod:%s" % ("on" if self.lod_on else "off")
             lbl += " · frame:%s" % (
                 "on" if self.frames_on else "off")
-            lbl += " · text:%s" % (
-                "on" if self.labels_on else "off")
         if self.abstract:
             lbl += " · abstract"
         return lbl
@@ -1942,10 +1978,20 @@ class Viewer:
         if changed:
             self._on_depth()
 
-    def _set_frames(self, enabled):
+    def _set_frames(self, enabled, labels=None):
+        """Set hierarchy frames and their text as one normal UI state.
+
+        `labels` is reserved for an explicit CLI/forwarded-request override.
+        Frames off still forces text off; the `f` shortcut passes no override
+        and therefore always toggles both together.
+        """
         enabled = bool(enabled)
-        changed = enabled != self.frames_on
+        labels_enabled = enabled if labels is None \
+            else enabled and bool(labels)
+        changed = (enabled != self.frames_on or
+                   labels_enabled != self.labels_on)
         self.frames_on = enabled
+        self.labels_on = labels_enabled
         if changed:
             self._on_depth()
 

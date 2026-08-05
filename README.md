@@ -337,8 +337,8 @@ GUI는 **GTK3/PyGObject** 셸이다. flateyes와 같은 폐쇄망 호스트
   정보가 사라지지 않는다.
 - 운영 튜닝은 shell 환경변수를 사용하지 않고 `view` 옵션으로 명시한다:
   `--lod on|off`, `--frames on|off`, `--labels on|off`, `--stream-kb`,
-  `--stream-target-ms`, `--render-debug`. FRAME_LAYER는 `f`로 즉시 켜고 끌 수
-  있으며, off 요청은 daemon의 frontier와
+  `--stream-target-ms`, `--render-debug`. FRAME_LAYER는 `f`로 텍스트와 함께
+  즉시 켜고 끌 수 있으며, off 요청은 daemon의 frontier와
   블록명 생성을 중단한다. `lod/frames/labels`는 이미 실행 중인 단일
   인스턴스에도 전달된다. render-process 생성 옵션(`--stream-kb`, 기본과
   다른 `--stream-target-ms`, `--render-debug`)은 독립 인스턴스를 연다.
@@ -346,7 +346,7 @@ GUI는 **GTK3/PyGObject** 셸이다. flateyes와 같은 폐쇄망 호스트
   빌드 식별값은 애플리케이션 튜닝값이 아니므로 환경에서 계속 받는다.
 - 인스턴스 소켓은 `GLib.io_add_watch`로, 결과 큐는 `GLib.timeout_add`(25ms)로
   서비스한다. UI 라벨은 English only (XQuartz 한글 글리프 부재 — flateyes 규칙).
-- 키: `f` FRAME_LAYER 토글, `l` LOD 토글, `+`/`-`(`=`) 줌,
+- 키: `f` FRAME_LAYER+텍스트 토글, `l` LOD 토글, `+`/`-`(`=`) 줌,
   상/하/좌/우 방향키는 현재 뷰포트의 10% 단위로 화면 이동,
   `r` ruler, `m` 스냅, `d` depth 다이얼로그,
   `g` goto 다이얼로그, `c` detail cut 다이얼로그, `a` abstract 모드,
@@ -383,7 +383,10 @@ GUI는 **GTK3/PyGObject** 셸이다. flateyes와 같은 폐쇄망 호스트
   행 사이 여백은 위쪽 레이어의 클릭
   영역으로 취급한다. 다이 전체와 현재 뷰포트를 보여주는 미니맵은
   메인 화면을 가리지 않고 우측 레이어 목록 바로 아래에 180px
-  크기로 고정된다. 레이어 목록과 관련 조작부는 메인 뷰의 우측에 위치한다.
+  크기로 고정된다. 미니맵의 다이 외곽선과 현재 depth 구조
+  frame은 메인 화면의 FRAME_LAYER 상태와 무관하게 항상 표시된다.
+  미니맵의 다이 내부를 클릭하면 해당 설계 좌표로 뷰포트 중심이
+  이동한다. 레이어 목록과 관련 조작부는 메인 뷰의 우측에 위치한다.
   폴리곤을 pick하면 해당 행을 배경/글자색으로 강조한다. 접힌 datatype은
   자동으로 펼치고 그 행이 보이도록 스크롤하며, 빈 공간 pick 또는 `Esc`로
   선택을 해제하면 강조도 사라진다.
@@ -622,6 +625,13 @@ alias floe="/opt/floe/venv/bin/python -m floe"
   site-packages(`python3-gobject` RPM)에서 오므로 호스트 쪽 RPM은 여전히
   필요하다 (GNOME 호스트 기본 탑재). klayout·numpy는 manylinux 휠이라
   .so가 자체 완결적이어서 복사에 안전하다.
+
+### 향후 뷰포트 벡터 export
+
+현재 뷰포트를 레이어별 공간 청크·반복 보존 바이너리로 내보내고
+전용 뷰어에서 열기 위한 후속 설계는
+[`rust/VECTOR_EXPORT_PLAN.md`](rust/VECTOR_EXPORT_PLAN.md)에 정리했다. FVX는 제안
+상태이며 현재 명령·캐시 포맷은 변경하지 않는다.
 
 ### .ice 구조와 설계 노트
 
