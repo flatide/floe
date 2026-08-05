@@ -163,7 +163,9 @@ def cmd_render(args):
         from .render import Renderer
         colors = {(l["layer"], l["datatype"]): l["color"]
                   for l in c.meta["layers"]}
-        r = Renderer(ly, top, colors, hier_offset=0)
+        # exports keep solid archival fills; the speckle is a live-
+        # viewer presentation choice (README documents it as such)
+        r = Renderer(ly, top, colors, hier_offset=0, speckle=False)
         w = args.px
         h = max(1, round(w * (y1 - y0) / (x1 - x0)))
         depth = (None if args.depth is None or args.depth >= 999

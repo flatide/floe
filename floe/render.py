@@ -40,12 +40,15 @@ class Renderer:
     """
 
     def __init__(self, layout, top_cell, colors=None, hier_offset=0,
-                 show_texts=False, hollow=()):
+                 show_texts=False, hollow=(), speckle=True):
         """hier_offset: artificial hierarchy levels above the design top
         (the tile mosaic adds 2: FLOE_MOSAIC -> TILE_r_c -> design cells);
         user-facing depth values are shifted by this amount.
         show_texts: draw text shapes (skeleton view: cell names, labels).
-        hollow: (layer, datatype) keys drawn as outlines only."""
+        hollow: (layer, datatype) keys drawn as outlines only.
+        speckle: Calibre-style 50%% fill (the live viewer); False keeps
+        solid fills - headless exports (`floe render`) are archival
+        artifacts, and the speckle restyle is a viewer behavior."""
         _require_lay()
         self.lv = klay.LayoutView()
         for k, v in _VIEW_CONFIG.items():
@@ -68,6 +71,7 @@ class Renderer:
         self.colors = colors or {}  # (layer, datatype) -> "#rrggbb"
         self.hollow = set(hollow)
         self.hier_offset = hier_offset
+        self.speckle = bool(speckle)
         self.lv.show_layout(layout, False)
         self._design_speckle_patterns = tuple(
             self.lv.add_stipple("floe-calibre-speckle-%d" % i, pattern)
@@ -93,12 +97,16 @@ class Renderer:
                 lp.dither_pattern = 1  # hollow: outline only
                 lp.transparent = False
                 lp.width = 1
-            else:
+            elif self.speckle:
                 # Non-alpha, single-pass Calibre speckle. Filled pixels use
                 # the upper layer's color; common empty pixels preserve a
                 # lower polygon's continuous frame as a dotted trace.
                 lp.dither_pattern = self._design_speckle_patterns[
                     paint_plane & 1]
+                lp.transparent = False
+                lp.width = 1
+            else:
+                lp.dither_pattern = 0  # solid (headless exports)
                 lp.transparent = False
                 lp.width = 1
         self.lv.max_hier()
