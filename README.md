@@ -192,14 +192,17 @@ floe clip  data/testchip_1g5.oas --bbox 5000,5000,5100,5100 --out region.oas
 - `clip --exact`: 원본 파일을 다시 파싱하는 느린 경로 (타일 경계에서 잘리지 않은
   원본 geometry가 필요할 때).
 - 네이티브 뷰어 조작 (Calibre DESIGNrev 방식):
-  **좌드래그 = 영역 줌** (정방향 →: 박스 영역으로 줌인, 역방향 ←: 박스/화면
+  **우드래그 = 영역 줌** (정방향 →: 박스 영역으로 줌인, 역방향 ←: 박스/화면
   비율만큼 줌아웃 — 역방향일 때 밴드가 주황색으로 표시),
-  **좌클릭 = object picking**, **중/우클릭 드래그 = 팬**,
-  휠·트랙패드 = 커서 기준 줌(보조), `f` fit.
+  **좌클릭 = object picking**, **좌/중드래그 = 팬**,
+  휠·트랙패드 = 커서 기준 줌(보조), 우측 패널 `fit` 버튼 = 전체 뷰,
+  `f` = FRAME_LAYER 토글.
 
 ### Ruler (거리 측정, flateyes 기반 UX + 벡터 스냅)
 
 - `r` 측정 모드 시작/종료. 두 점을 클릭하면 측정선이 확정되어 남는다.
+  측정 모드에서도 **좌클릭은 측정점**, **좌드래그는 팬**으로 구분되어
+  별도 버튼 전환 없이 화면을 이동할 수 있다.
   flateyes와 달리 **측정선은 하나만 유지** — 새 측정을 시작하면 이전
   선은 사라진다. 기본은 수평/수직 축 스냅(우세한 축 자동 선택),
   `Shift` = 자유 각도.
@@ -334,8 +337,8 @@ GUI는 **GTK3/PyGObject** 셸이다. flateyes와 같은 폐쇄망 호스트
   정보가 사라지지 않는다.
 - 운영 튜닝은 shell 환경변수를 사용하지 않고 `view` 옵션으로 명시한다:
   `--lod on|off`, `--frames on|off`, `--labels on|off`, `--stream-kb`,
-  `--stream-target-ms`, `--render-debug`. FRAME_LAYER는 사이드 버튼 또는
-  `h`로도 즉시 켜고 끌 수 있으며, off 요청은 daemon의 frontier와
+  `--stream-target-ms`, `--render-debug`. FRAME_LAYER는 `f`로 즉시 켜고 끌 수
+  있으며, off 요청은 daemon의 frontier와
   블록명 생성을 중단한다. `lod/frames/labels`는 이미 실행 중인 단일
   인스턴스에도 전달된다. render-process 생성 옵션(`--stream-kb`, 기본과
   다른 `--stream-target-ms`, `--render-debug`)은 독립 인스턴스를 연다.
@@ -343,7 +346,9 @@ GUI는 **GTK3/PyGObject** 셸이다. flateyes와 같은 폐쇄망 호스트
   빌드 식별값은 애플리케이션 튜닝값이 아니므로 환경에서 계속 받는다.
 - 인스턴스 소켓은 `GLib.io_add_watch`로, 결과 큐는 `GLib.timeout_add`(25ms)로
   서비스한다. UI 라벨은 English only (XQuartz 한글 글리프 부재 — flateyes 규칙).
-- 키: `f` fit, `+`/`-`(`=`) 줌, `r` ruler, `m` 스냅, `d` depth 다이얼로그,
+- 키: `f` FRAME_LAYER 토글, `l` LOD 토글, `+`/`-`(`=`) 줌,
+  상/하/좌/우 방향키는 현재 뷰포트의 10% 단위로 화면 이동,
+  `r` ruler, `m` 스냅, `d` depth 다이얼로그,
   `g` goto 다이얼로그, `c` detail cut 다이얼로그, `a` abstract 모드,
   `v` coverage 밀도 채움 토글(VFS), `e` DRC 브라우저,
   `n`/`p` 다음/이전 DRC 에러, `0`-`9` depth, `Esc` 단계 해제,
@@ -362,11 +367,26 @@ GUI는 **GTK3/PyGObject** 셸이다. flateyes와 같은 폐쇄망 호스트
   펼치면 부모와 각 자식 datatype이 모두 개별적으로 토글된다.
   자식 없는 레이어는 마커 자리가 공백이라 모든 이름이 좌측 정렬된다.
   레이어 행은 기본 UI보다 약 20% 큰 글꼴을 사용하며 layer/datatype 열은
-  전체 목록의 최대 길이로 고정되어 모든 색상 마커가 같은 열에 정렬된다.
+  데이터와 무관하게 `999.999` 고정 폭 안에서 우측 정렬하고 약 0.2문자
+  여백을 둔다. 컬러 표시 열은 기존의 2.5배인 5문자 폭이며 실제 도형과
+  같은 1px 체크보드 speckle을 보여준다. layer name 앞에도 0.2문자 여백을
+  두며 행 간격은 폰트 행 높이의 약 10%를 추가한다.
+  행을 클릭하면 파란 배경으로 선택되고, `Shift+클릭`은 기준 행부터 범위를,
+  `Ctrl+클릭`은 해당 행을 기존 선택에서 추가하거나 제거한다. 우클릭 메뉴의
+  `show selected`,
+  `hide selected`, `toggle selected`로 선택 레이어를 한 번에 변경할 수 있으며
+  `show all`, `hide all`도 같은 메뉴에 있다. 우클릭 자체는 선택 상태를
+  변경하지 않는다. 접힌 부모 행을 대상으로 하면
+  해당 layer 번호의 모든 datatype에 적용된다. 기존 하단 `all`/`none` 버튼은
+  제거하고 `fit`/`clip…`만 유지한다. fit은 버튼으로만 실행한다.
+  행 사이 여백은 위쪽 레이어의 클릭
+  영역으로 취급한다. 다이 전체와 현재 뷰포트를 보여주는 미니맵은
+  메인 화면을 가리지 않고 우측 레이어 목록 바로 아래에 180px
+  크기로 고정된다. 레이어 목록과 관련 조작부는 메인 뷰의 우측에 위치한다.
   폴리곤을 pick하면 해당 행을 배경/글자색으로 강조한다. 접힌 datatype은
   자동으로 펼치고 그 행이 보이도록 스크롤하며, 빈 공간 pick 또는 `Esc`로
   선택을 해제하면 강조도 사라진다.
-  패널 하단 `expand all` / `collapse all` 버튼으로 모든 그룹을 한 번에
+  레이어 목록 상단 `expand all` / `collapse all` 버튼으로 모든 그룹을 한 번에
   펼치거나 접는다 (visibility에는 영향 없음).
 
 ### depth (계층 표시 깊이)

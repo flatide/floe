@@ -47,13 +47,21 @@ DRC_LIST_MAX = 2000        # tree rows per check (prev/next reaches all)
 MIN_SPP = 0.01     # max zoom-in: 1 px = 0.01 dbu; keeps render bboxes
                    # from collapsing to zero width after int rounding
 WHEEL_ZOOM_STEP = 0.96  # at most 4% per wheel event (was 10%)
+KEY_PAN_FRACTION = 0.10  # arrows move one tenth of the current viewport
 
-MINIMAP_PX = 110           # longest edge of the minimap (view px)
-MINIMAP_MARGIN = 12
+MINIMAP_PX = 180           # square palette area; die keeps its aspect ratio
 MINIMAP_DOT_MIN = 6        # view box smaller than this becomes a dot
 MINIMAP_BG = 0x141414FF
 MINIMAP_EDGE = 0x666666FF
 MINIMAP_VIEW = 0x8ECDF5FF
+
+# Layer/datatype is operationally capped at 999.999. The number column is
+# independent of the current design's actual maximum, so changing files or
+# expanding a group never moves the palette columns. A small fractional
+# margin is converted from the active font width by LayerRow.
+LAYER_NUM_WIDTH = len("999.999")
+LAYER_NUM_MARGIN_CHARS = 0.2
+LAYER_COLOR_WIDTH = 5       # former 2-char swatch column x 2.5
 
 
 def import_gtk():
@@ -195,7 +203,7 @@ class LayerRow(object):
     and children."""
 
     def __init__(self, l, marker, num_width, tooltip, on_toggle,
-                 on_expand=None):
+                 on_select, on_expand=None):
         self.key = (l["layer"], l["datatype"])
         # Calibre-style row: "127.1  <swatch>  NAME" - number first,
         # a color marker, then the name in plain white on black
@@ -205,28 +213,45 @@ class LayerRow(object):
         # consumes num_width (e.g. 63.63) would therefore grow beyond all
         # shorter rows. Render exactly num_width monospace glyph cells in
         # every row instead; Pango preserves the trailing spaces.
-        self._num = raw_num.ljust(num_width)
+        self._num = raw_num.rjust(num_width)
         self._name = l["name"]
         self._color = l["color"]
         self._marker = marker
         self._on_toggle = on_toggle
+        self._on_select = on_select
         self._on_expand = on_expand
         self._active = True
         self._picked = False
+        self._selected = False
         self._mlbl = Gtk.Label()
         self._mlbl.set_xalign(0.0)
         self._mlbl.set_width_chars(2)
         mbox = Gtk.EventBox()
         mbox.add(self._mlbl)
-        if on_expand is not None:
-            mbox.connect("button-press-event", self._on_marker_click)
+        # Every marker accepts the row context menu. Group parents also use
+        # its left click as the expand/collapse control.
+        mbox.connect("button-press-event", self._on_marker_click)
         self._nlbl = Gtk.Label()
-        self._nlbl.set_xalign(0.0)
-        self._clbl = Gtk.Label()
-        self._clbl.set_xalign(0.5)
-        self._clbl.set_width_chars(2)
+        self._nlbl.set_xalign(1.0)
+        # rjust gives every markup string the same natural width;
+        # width_chars is a second, GTK-allocation-level floor for backends
+        # that trim or measure trailing markup spaces differently.
+        self._nlbl.set_width_chars(num_width)
+        probe_width, probe_height = self._nlbl.create_pango_layout(
+            "0").get_pixel_size()
+        small_gap = max(
+            1, round(probe_width * 1.2 * LAYER_NUM_MARGIN_CHARS))
+        self._nlbl.set_margin_end(small_gap)
+        self._clbl = Gtk.Image()
+        self._clbl.set_halign(Gtk.Align.CENTER)
+        self._clbl.set_valign(Gtk.Align.CENTER)
+        swatch_w = max(5, round(probe_width * 1.2 * LAYER_COLOR_WIDTH))
+        swatch_h = max(3, round(probe_height * 1.2))
+        self._clbl.set_from_pixbuf(self._speckle_swatch(swatch_w, swatch_h))
+        self._clbl.set_size_request(swatch_w, swatch_h)
         self._lbl = Gtk.Label()
         self._lbl.set_xalign(0.0)
+        self._lbl.set_margin_start(small_gap)
         # long layer names must not widen the panel and squeeze the
         # view: ellipsize and show the full name as a tooltip
         self._lbl.set_ellipsize(Pango.EllipsizeMode.END)
@@ -238,14 +263,43 @@ class LayerRow(object):
         nbox = Gtk.EventBox()
         nbox.add(content)
         nbox.connect("button-press-event", self._on_name_click)
-        self.widget = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        self.widget.pack_start(mbox, False, False, 0)
-        self.widget.pack_start(nbox, True, True, 0)
+        row_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        row_box.set_margin_bottom(max(
+            1, round(probe_height * 1.2 * 0.1)))
+        row_box.pack_start(mbox, False, False, 0)
+        row_box.pack_start(nbox, True, True, 0)
+        # Keep the inter-row padding inside an event window. A click in the
+        # gap therefore belongs to this (upper) row instead of falling
+        # through the layer palette without selecting anything.
+        self.widget = Gtk.EventBox()
+        self.widget.add(row_box)
+        self.widget.connect("button-press-event", self._on_row_click)
         self.widget.set_tooltip_text(tooltip)
         self._paint()
 
+    def _speckle_swatch(self, width, height):
+        """Layer-palette preview of the renderer's 1px checker fill."""
+        color = int(self._color.lstrip("#"), 16)
+        rgb = ((color >> 16) & 255, (color >> 8) & 255, color & 255)
+        rgb_bytes = bytes(rgb)
+        pixels = bytearray(width * height * 3)
+        for y in range(height):
+            for x in range(width):
+                if (x + y) & 1:
+                    continue
+                off = (y * width + x) * 3
+                pixels[off:off + 3] = rgb_bytes
+        # Keep the immutable backing bytes with the row. Pixbuf normally
+        # retains its own GLib reference, and this also makes that lifetime
+        # explicit across older GTK3/PyGObject bundles.
+        self._swatch_bytes = GLib.Bytes.new(bytes(pixels))
+        return GdkPixbuf.Pixbuf.new_from_bytes(
+            self._swatch_bytes, GdkPixbuf.Colorspace.RGB, False, 8,
+            width, height, width * 3)
+
     def _paint(self):
         fg = ("#fff2a8" if self._picked else
+              "#d9f2ff" if self._selected else
               "#ffffff" if self._active else "#777777")
         self._mlbl.set_markup(
             '<span face="monospace" size="large" '
@@ -256,8 +310,6 @@ class LayerRow(object):
             '<span face="monospace" size="large" '
             'foreground="%s"%s>%s</span>'
             % (fg, strike, GLib.markup_escape_text(self._num)))
-        self._clbl.set_markup(
-            '<span size="large" foreground="%s">■</span>' % self._color)
         self._lbl.set_markup(
             '<span size="large" foreground="%s"%s>%s</span>'
             % (fg, strike, GLib.markup_escape_text(self._name)))
@@ -278,17 +330,50 @@ class LayerRow(object):
             context.remove_class("floe-layer-picked")
         self._paint()
 
+    def set_selected(self, on):
+        on = bool(on)
+        if on == self._selected:
+            return
+        self._selected = on
+        context = self.widget.get_style_context()
+        if on:
+            context.add_class("floe-layer-selected")
+        else:
+            context.remove_class("floe-layer-selected")
+        self._paint()
+
     def _on_marker_click(self, _w, event):
+        if event.type == Gdk.EventType.BUTTON_PRESS and event.button == 3:
+            self._on_select(self, event)
+            return True
         if event.type != Gdk.EventType.BUTTON_PRESS or event.button != 1:
             return False
+        if self._on_expand is None:
+            self._on_select(self, event)
+            return True
         self._on_expand(self)
         return True
 
-    def _on_name_click(self, _w, event):
-        if event.type != Gdk.EventType._2BUTTON_PRESS or event.button != 1:
+    def _on_row_click(self, _w, event):
+        if event.type != Gdk.EventType.BUTTON_PRESS or \
+                event.button not in (1, 3):
             return False
-        self.set_active(not self._active)
+        self._on_select(self, event)
         return True
+
+    def _on_name_click(self, _w, event):
+        if event.button == 3 and event.type == Gdk.EventType.BUTTON_PRESS:
+            self._on_select(self, event)
+            return True
+        if event.button != 1:
+            return False
+        if event.type in (Gdk.EventType.BUTTON_PRESS,
+                          Gdk.EventType._2BUTTON_PRESS):
+            self._on_select(self, event)
+            if event.type == Gdk.EventType._2BUTTON_PRESS:
+                self.set_active(not self._active)
+            return True
+        return False
 
     def get_active(self):
         return self._active
@@ -328,6 +413,10 @@ class Viewer:
         self._did_fit = False
         self.worker = None
         self._layer_rows = {}
+        self._selected_layers = set()
+        self._layer_select_anchor = None
+        self._layer_order = []
+        self._layer_menu = None
         # start depth: a plain open shows hierarchy level 1 (fast first
         # paint on huge chips - the industry default), a --goto jump is
         # an inspection: full depth unless --depth says otherwise.
@@ -404,7 +493,7 @@ class Viewer:
 
         side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         side.set_size_request(210, -1)
-        hbox.pack_start(side, False, False, 0)
+        hbox.pack_end(side, False, False, 0)
         title = Gtk.Label()
         title.set_markup("<b>%s</b>" % APP)
         title.set_xalign(0.0)
@@ -416,14 +505,24 @@ class Viewer:
         self._src_label.set_margin_start(10)
         side.pack_start(self._src_label, False, False, 0)
 
+        trow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        side.pack_start(trow, False, False, 4)
+        for text, cb in (("expand all", self._expand_all),
+                         ("collapse all", self._collapse_all)):
+            b = Gtk.Button(label=text)
+            b.connect("clicked", lambda _w, f=cb: f())
+            trow.pack_start(b, True, True, 0)
+
         scroller = Gtk.ScrolledWindow()
         # Calibre-style layer panel: black background, white text
         css = Gtk.CssProvider()
         css.load_from_data(
             b".floe-layers, .floe-layers * "
             b"{ background-color: #000000; } "
+            b".floe-layer-selected, .floe-layer-selected * "
+            b"{ background-color: #31566d; } "
             b".floe-layer-picked, .floe-layer-picked * "
-            b"{ background-color: #31566d; }")
+            b"{ background-color: #66582f; }")
         Gtk.StyleContext.add_provider_for_screen(
             Gdk.Screen.get_default(), css,
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
@@ -435,40 +534,21 @@ class Viewer:
         scroller.add(self._layers_box)
         side.pack_start(scroller, True, True, 4)
 
-        trow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
-        side.pack_start(trow, False, False, 0)
-        for text, cb in (("expand all", self._expand_all),
-                         ("collapse all", self._collapse_all)):
-            b = Gtk.Button(label=text)
-            b.connect("clicked", lambda _w, f=cb: f())
-            trow.pack_start(b, True, True, 0)
+        # Keep the overview in the palette instead of painting it over the
+        # design pixels in the bottom-right corner of the viewport.
+        self._minimap_image = Gtk.Image()
+        self._minimap_image.set_size_request(MINIMAP_PX, MINIMAP_PX)
+        self._minimap_image.set_halign(Gtk.Align.CENTER)
+        self._minimap_image.set_valign(Gtk.Align.CENTER)
+        side.pack_start(self._minimap_image, False, False, 4)
 
         brow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
         side.pack_start(brow, False, False, 4)
-        for text, cb in (("all", self._all_layers),
-                         ("none", self._no_layers),
-                         ("fit", lambda: self.fit()),
+        for text, cb in (("fit", lambda: self.fit()),
                          ("clip…", self._clip_dialog)):
             b = Gtk.Button(label=text)
             b.connect("clicked", lambda _w, f=cb: f())
             brow.pack_start(b, True, True, 0)
-
-        self._lod_button = Gtk.ToggleButton()
-        self._lod_button.set_active(self.lod_on)
-        self._lod_button.set_tooltip_text(
-            "Toggle merged LOD pages. Detail cut and hierarchy "
-            "outlines are independent (shortcut: l)")
-        self._lod_button.connect("toggled", self._on_lod_toggled)
-        side.pack_start(self._lod_button, False, False, 2)
-        self._update_lod_button()
-
-        self._frame_button = Gtk.ToggleButton()
-        self._frame_button.set_active(self.frames_on)
-        self._frame_button.set_tooltip_text(
-            "Toggle hierarchy FRAME_LAYER and block names (shortcut: h)")
-        self._frame_button.connect("toggled", self._on_frame_toggled)
-        side.pack_start(self._frame_button, False, False, 2)
-        self._update_frame_button()
 
         main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         hbox.pack_start(main, True, True, 0)
@@ -590,8 +670,6 @@ class Viewer:
                                       self.meta["grid"]["nx"],
                                       self.meta["grid"]["ny"]))
         self._build_layer_panel()
-        self._lod_button.set_sensitive(bool(self.meta.get("vfs")))
-        self._frame_button.set_sensitive(bool(self.meta.get("vfs")))
         if self.worker is not None:
             self.worker.stop()
         self.worker = RenderWorker(
@@ -608,28 +686,31 @@ class Viewer:
         ascending. Layers grouped by layer number:
         '+M1' = group parent (lowest datatype of a multi-datatype
         layer); its '+' expands/collapses the remaining datatypes
-        below it (collapsed by default), double-clicking any name
-        toggles visibility, and toggling a parent drags every child
-        datatype with it. All names left-aligned via the marker
-        column; hidden = strikethrough."""
+        below it (collapsed by default). Clicking selects rows,
+        double-clicking toggles visibility, and a collapsed parent drags
+        every child datatype with it. All names left-aligned via the
+        marker column; hidden = strikethrough."""
         for child in self._layers_box.get_children():
             self._layers_box.remove(child)
         self._layer_rows = {}
         self._layer_groups = {}     # parent key -> [child keys]
         self._layer_expanded = set()  # parent keys currently expanded
+        self._selected_layers = set()
+        self._layer_select_anchor = None
+        self._layer_order = []
         self._layers_batch = False
         groups = {}
         for l in self.meta["layers"]:
             groups.setdefault(l["layer"], []).append(l)
-        num_width = max(
-            (len("%d.%d" % (l["layer"], l["datatype"]))
-             for l in self.meta["layers"]), default=1)
+        num_width = LAYER_NUM_WIDTH
 
         def add_row(l, marker, tooltip, on_expand=None):
             row = LayerRow(l, marker, num_width, tooltip,
-                           self._on_layer_toggled, on_expand)
+                           self._on_layer_toggled, self._on_layer_clicked,
+                           on_expand)
             self._layers_box.pack_start(row.widget, False, False, 0)
             self._layer_rows[row.key] = row
+            self._layer_order.append(row.key)
             return row.key
 
         # Calibre ordering: layer numbers ascend down the panel
@@ -637,7 +718,8 @@ class Viewer:
             ls = groups[lnum]
             if len(ls) == 1:
                 l = ls[0]
-                add_row(l, " ", "%d.%d  %s\ndouble-click: show/hide"
+                add_row(l, " ", "%d.%d  %s\nclick: select; "
+                        "double-click: show/hide; right-click: actions"
                         % (lnum, l["datatype"], l["name"]))
                 continue
             ls = sorted(ls, key=lambda e: e["datatype"])
@@ -645,11 +727,13 @@ class Viewer:
             pkey = add_row(
                 head, "+",
                 "%d.%d  %s\n+/-: expand/collapse %d more datatypes\n"
-                "double-click: show/hide layer %d group"
+                "click: select; double-click: show/hide layer %d group; "
+                "right-click: actions"
                 % (lnum, head["datatype"], head["name"], len(rest), lnum),
                 self._on_group_expand)
             self._layer_groups[pkey] = [
-                add_row(l, " ", "%d.%d  %s\ndouble-click: show/hide"
+                add_row(l, " ", "%d.%d  %s\nclick: select; "
+                        "double-click: show/hide; right-click: actions"
                         % (lnum, l["datatype"], l["name"]))
                 for l in rest]
         self._layers_box.show_all()
@@ -857,7 +941,7 @@ class Viewer:
             obox, ospp = vb, fspp
         else:
             obox, ospp = bbox, self.spp
-        self._draw_overlays(disp, obox, ospp, bbox)
+        self._draw_overlays(disp, obox, ospp)
         if self.dump:
             # diagnosis: exactly what is handed to the screen widget, plus
             # whether the widget itself is sized/mapped (a 0-sized or
@@ -871,6 +955,7 @@ class Viewer:
                    ia.width, ia.height, ia.x, ia.y,
                    self.image.get_mapped(), self.image.get_visible()))
         self.image.set_from_pixbuf(disp)
+        self._update_minimap(bbox)
         self._update_labels(obox, ospp)
 
     def _composite_world(self, disp, src, src_bbox, bbox, spp=None):
@@ -896,7 +981,7 @@ class Viewer:
         src.composite(disp, dx0, dy0, dx1 - dx0, dy1 - dy0,
                       off_x, off_y, scale, scale, interp, 255)
 
-    def _draw_overlays(self, disp, obox, ospp, bbox):
+    def _draw_overlays(self, disp, obox, ospp):
         def sx(v):
             return (v - obox[0]) / ospp
 
@@ -950,22 +1035,21 @@ class Viewer:
             x1, y1 = self._band_cur
             color = BAND_IN if x1 >= x0 else BAND_OUT
             rect_outline(disp, x0, y0, x1, y1, BLACK, color)
-        self._draw_minimap(disp, bbox)
 
-    def _draw_minimap(self, disp, bbox):
-        """Die outline in the bottom-right corner with the current view
-        marked: a box while it is still readable, a dot once the zoom
-        makes the box degenerate."""
+    def _update_minimap(self, bbox):
+        """Draw the die overview below the layer list."""
+        disp = GdkPixbuf.Pixbuf.new(
+            GdkPixbuf.Colorspace.RGB, False, 8, MINIMAP_PX, MINIMAP_PX)
+        disp.fill(BLACK)
         bb = self.meta["bbox"]
         bw, bh = bb[2] - bb[0], bb[3] - bb[1]
         if bw <= 0 or bh <= 0:
+            self._minimap_image.set_from_pixbuf(disp)
             return
         scale = MINIMAP_PX / max(bw, bh)
         mw, mh = max(2, round(bw * scale)), max(2, round(bh * scale))
-        x0 = disp.get_width() - MINIMAP_MARGIN - mw
-        y0 = disp.get_height() - MINIMAP_MARGIN - mh
-        if x0 < 0 or y0 < 0:
-            return  # viewport too small for a minimap
+        x0 = (MINIMAP_PX - mw) // 2
+        y0 = (MINIMAP_PX - mh) // 2
         fill_rect(disp, x0, y0, mw, mh, MINIMAP_BG)
         frame_rect(disp, x0, y0, mw, mh, MINIMAP_EDGE)
 
@@ -990,6 +1074,7 @@ class Viewer:
             px, py = mx(self.cx), my(self.cy)
             fill_rect(disp, px - 3, py - 3, 7, 7, BLACK)
             fill_rect(disp, px - 2, py - 2, 5, 5, MINIMAP_VIEW)
+        self._minimap_image.set_from_pixbuf(disp)
 
     def _update_labels(self, obox, ospp):
         """Ruler distance labels: a pool of Gtk.Labels on the overlay."""
@@ -1414,8 +1499,9 @@ class Viewer:
             if self.mode == "ruler":
                 self._ruler_free = bool(ev.state &
                                         Gdk.ModifierType.SHIFT_MASK)
-                self._ruler_click(ev)
-                return True
+                # Defer the measurement click until release. The same
+                # button is a pan gesture once it crosses the normal drag
+                # threshold, so ruler mode does not lose navigation.
             self._drag = (ev.x, ev.y)
             self._drag_origin = self._drag
             self._drag_moved = False
@@ -1441,9 +1527,12 @@ class Viewer:
             if panned:
                 self.redraw()   # pan ended: render the final position
             elif was_drag and ev.button == 1:
-                # Preserve object selection as a left click, while a
-                # left-button movement is exclusively a pan gesture.
-                self._pick_click(ev)
+                # A stationary left click keeps its mode-specific action;
+                # movement is exclusively a pan gesture in both modes.
+                if self.mode == "ruler":
+                    self._ruler_click(ev)
+                else:
+                    self._pick_click(ev)
             return True
         if ev.button != 3 or self._zoomdrag is None:
             return True
@@ -1536,6 +1625,21 @@ class Viewer:
         self.spp *= factor
         self.redraw()
 
+    def _pan_view(self, direction):
+        """Move the viewport by a fixed fraction of its visible extent."""
+        width, height = self._viewport_size()
+        dx = width * self.spp * KEY_PAN_FRACTION
+        dy = height * self.spp * KEY_PAN_FRACTION
+        if direction == "Left":
+            self.cx -= dx
+        elif direction == "Right":
+            self.cx += dx
+        elif direction == "Up":
+            self.cy += dy
+        elif direction == "Down":
+            self.cy -= dy
+        self.redraw()
+
     # ---- keys ----------------------------------------------------------------
     def _command_key(self, ev):
         """Key name for shortcut matching. When a non-Latin layout owns
@@ -1573,7 +1677,11 @@ class Viewer:
             return False  # typing in the depth spinbox etc.
         name = self._command_key(ev)
         if name == "f":
-            self.fit()
+            self._set_frames(not self.frames_on)
+        elif name in ("Left", "Right", "Up", "Down"):
+            self._pan_view(name)
+        elif name in ("KP_Left", "KP_Right", "KP_Up", "KP_Down"):
+            self._pan_view(name[3:])
         elif name in ("plus", "equal", "KP_Add"):
             self._zoom_center(1 / 1.25)
         elif name in ("minus", "KP_Subtract"):
@@ -1596,8 +1704,6 @@ class Viewer:
             self._toggle_coverage()
         elif name == "l":
             self._set_lod(not self.lod_on)
-        elif name == "h":
-            self._set_frames(not self.frames_on)
         elif name == "e":
             self._drc_window()
         elif name == "n":
@@ -1677,37 +1783,17 @@ class Viewer:
         self.coverage_on = not self.coverage_on
         self._on_depth()
 
-    def _update_lod_button(self):
-        self._lod_button.set_label(
-            "LOD on" if self.lod_on else "LOD off")
-
-    def _on_lod_toggled(self, button):
-        self._set_lod(button.get_active())
-
     def _set_lod(self, enabled):
         enabled = bool(enabled)
         changed = enabled != self.lod_on
         self.lod_on = enabled
-        if self._lod_button.get_active() != enabled:
-            self._lod_button.set_active(enabled)
-        self._update_lod_button()
         if changed:
             self._on_depth()
-
-    def _update_frame_button(self):
-        self._frame_button.set_label(
-            "Frame on" if self.frames_on else "Frame off")
-
-    def _on_frame_toggled(self, button):
-        self._set_frames(button.get_active())
 
     def _set_frames(self, enabled):
         enabled = bool(enabled)
         changed = enabled != self.frames_on
         self.frames_on = enabled
-        if self._frame_button.get_active() != enabled:
-            self._frame_button.set_active(enabled)
-        self._update_frame_button()
         if changed:
             self._on_depth()
 
@@ -2375,6 +2461,118 @@ class Viewer:
         return False
 
     # ---- layers / clip -------------------------------------------------------
+    def _set_layer_selection(self, keys, anchor=None):
+        """Replace the palette selection without changing visibility."""
+        keys = set(keys).intersection(self._layer_rows)
+        self._selected_layers = keys
+        if anchor is not None:
+            self._layer_select_anchor = anchor
+        for key, row in self._layer_rows.items():
+            row.set_selected(key in keys)
+
+    def _selectable_layer_order(self):
+        """Return palette order without children hidden by collapsed groups."""
+        hidden = set()
+        for parent, children in self._layer_groups.items():
+            if parent not in self._layer_expanded:
+                hidden.update(children)
+        return [key for key in self._layer_order if key not in hidden]
+
+    def _on_layer_clicked(self, row, event):
+        """Apply desktop-list selection rules and open the row menu."""
+        key = row.key
+        if event.button == 3:
+            # Context-menu clicks never alter the palette selection. This
+            # keeps a prepared multi-selection intact even when the menu is
+            # opened over some other row or the inter-row padding.
+            self._popup_layer_menu(event)
+            return
+
+        state = event.state
+        shift = bool(state & Gdk.ModifierType.SHIFT_MASK)
+        control = bool(state & Gdk.ModifierType.CONTROL_MASK)
+        selectable = self._selectable_layer_order()
+        if shift and self._layer_select_anchor in selectable:
+            first = selectable.index(self._layer_select_anchor)
+            last = selectable.index(key)
+            if first > last:
+                first, last = last, first
+            selected = set(selectable[first:last + 1])
+            if control:
+                selected.update(self._selected_layers)
+            self._set_layer_selection(selected)
+        elif control:
+            # Desktop-list toggle: Ctrl-click adds an unselected row and
+            # removes an already selected row without disturbing the rest.
+            selected = set(self._selected_layers)
+            if key in selected:
+                selected.remove(key)
+            else:
+                selected.add(key)
+            self._set_layer_selection(selected, anchor=key)
+        else:
+            self._set_layer_selection({key}, anchor=key)
+
+    def _popup_layer_menu(self, event):
+        menu = Gtk.Menu()
+
+        def add_item(label, callback, sensitive=True):
+            item = Gtk.MenuItem(label=label)
+            item.set_sensitive(sensitive)
+            item.connect("activate", lambda _item: callback())
+            menu.append(item)
+
+        has_selection = bool(self._selected_layers)
+        add_item("show selected", lambda: self._set_selected_layers("show"),
+                 has_selection)
+        add_item("hide selected", lambda: self._set_selected_layers("hide"),
+                 has_selection)
+        add_item("toggle selected",
+                 lambda: self._set_selected_layers("toggle"), has_selection)
+        menu.append(Gtk.SeparatorMenuItem())
+        add_item("show all", self._all_layers)
+        add_item("hide all", self._no_layers)
+        self._layer_menu = menu
+
+        def released(_menu):
+            if self._layer_menu is menu:
+                self._layer_menu = None
+
+        menu.connect("deactivate", released)
+        menu.show_all()
+        if hasattr(menu, "popup_at_pointer"):
+            menu.popup_at_pointer(event)
+        else:
+            menu.popup(None, None, None, None, event.button, event.time)
+
+    def _set_selected_layers(self, action):
+        """Show, hide, or toggle the selected palette rows as one batch."""
+        changes = {}
+        covered = set()
+        for key in self._layer_order:
+            if key not in self._selected_layers or key in covered:
+                continue
+            row = self._layer_rows[key]
+            on = (not row.get_active()) if action == "toggle" \
+                else action == "show"
+            affected = [key]
+            kids = self._layer_groups.get(key)
+            if kids and key not in self._layer_expanded:
+                affected.extend(kids)
+            for affected_key in affected:
+                changes[affected_key] = on
+                covered.add(affected_key)
+
+        if not changes:
+            return
+        self._layers_batch = True
+        try:
+            for key, on in changes.items():
+                self._layer_rows[key].set_active(on)
+        finally:
+            self._layers_batch = False
+        self.redraw(immediate=True)
+
     def _on_layer_toggled(self, row, key):
         if row.get_active():
             self.visible.add(key)
