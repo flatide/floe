@@ -125,8 +125,17 @@ class Coverage:
 
 
 def composite(frame_png_path, cov_rgb, black=24):
-    """Fill the black (empty) pixels of the klayout frame with the
-    coverage RGB; returns PNG bytes. cov_rgb: uint8 [h,w,3] or None."""
+    """Fill the empty pixels of the klayout frame with the coverage
+    RGB; returns PNG bytes. cov_rgb: uint8 [h,w,3] or None.
+
+    "Empty" is neighborhood-aware: design fills are a 50% speckle
+    (render.py), so half the pixels INSIDE every drawn polygon are
+    near-black. A per-pixel darkness test would repaint them with
+    density tint - the exact "only fills black pixels" contract
+    violation. A pixel counts as background only when no lit pixel
+    sits in its 3x3 neighborhood; speckle interiors always have a
+    lit 4-neighbor, true background never does (drawn frames just
+    grow a 1px halo that stays unfilled - invisible)."""
     from PIL import Image
     import io
     im = Image.open(frame_png_path).convert("RGB")
@@ -135,7 +144,14 @@ def composite(frame_png_path, cov_rgb, black=24):
         buf = io.BytesIO()
         im.save(buf, "PNG")
         return buf.getvalue()
-    mask = (fr.max(axis=2) <= black)  # empty where near-black
+    lit = fr.max(axis=2) > black
+    near = lit.copy()  # separable 3x3 dilation, numpy only
+    near[1:, :] |= lit[:-1, :]
+    near[:-1, :] |= lit[1:, :]
+    grown = near.copy()
+    grown[:, 1:] |= near[:, :-1]
+    grown[:, :-1] |= near[:, 1:]
+    mask = ~grown
     out = fr.copy()
     out[mask] = cov_rgb[mask]
     buf = io.BytesIO()

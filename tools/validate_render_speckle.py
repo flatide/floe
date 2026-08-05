@@ -4,10 +4,15 @@ Checks KLayout's real compositor, including a hollow FRAME-like underlay:
 all design layers must use one common 50% checkerboard phase, hiding an
 intermediate layer must not move that phase, and overlapping fills must
 leave exactly half of the background pixels open without alpha blending.
+Also gates the coverage composite against the speckle: density tint may
+only land on true background, never inside a speckled polygon (the
+per-pixel darkness test once flooded 50% of every drawn interior).
 """
 
+import io
 import os
 import sys
+import tempfile
 
 import klayout.db as db
 
@@ -84,7 +89,33 @@ def main():
         if len(colored) != 40 or set(colored) != {0xff0000ff}:
             raise SystemExit("overlap is not opaque 50%% speckle: %r" %
                              sorted(set(overlap)))
-        print("render-speckle: common phase, visibility, opaque overlap OK")
+
+        # coverage composite vs the speckle: tint fills background
+        # only - a speckled interior has near-black pixels at every
+        # other position, and none of them may be repainted
+        import numpy as np
+        from PIL import Image
+        from floe.coverage import composite
+        renderer.set_visible(designs)
+        with tempfile.NamedTemporaryFile(suffix=".png") as f:
+            renderer.render_png(f.name, 0, 0, W, H, W, H,
+                                visible=designs, depth=None)
+            before = np.asarray(
+                Image.open(f.name).convert("RGB")).copy()
+            tint = np.full((H, W, 3), (7, 99, 55), dtype=np.uint8)
+            after = np.asarray(Image.open(io.BytesIO(
+                composite(f.name, tint))).convert("RGB"))
+        changed = (after != before).any(axis=2)
+        # interior of the first strip (render_png flips y vs the
+        # get_pixels path; the strip spans y 10..90, safely inside)
+        if changed[40:60, 9:16].any():
+            raise SystemExit(
+                "coverage tint flooded a speckled interior")
+        # true background well away from any drawn frame
+        if not changed[2:5, 2:5].all():
+            raise SystemExit("coverage tint missed real background")
+        print("render-speckle: common phase, visibility, opaque "
+              "overlap, coverage-composite containment OK")
     finally:
         renderer.lv._destroy()
 
