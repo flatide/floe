@@ -19,10 +19,11 @@ _VIEW_CONFIG = {
     "cell-box-visible": "false",
 }
 
-# Calibre-style screen-space fill: one colored pixel in each 2x2 block.
-# Keeping the other three pixels transparent preserves lower-layer detail
-# without a second outline pass over the full working set.
-_DESIGN_DOT_STIPPLE = "*.\n.."
+# Calibre speckle: a 50% one-physical-pixel checkerboard shared by every
+# design layer. KLayout offsets a stipple by paint-plane parity, even when
+# every plane names the same custom pattern. Assigning these inverse forms
+# alternately cancels that offset and leaves the SAME holes in every layer.
+_DESIGN_SPECKLE_STIPPLES = ("*.\n.*", ".*\n*.")
 
 
 def _require_lay():
@@ -68,8 +69,9 @@ class Renderer:
         self.hollow = set(hollow)
         self.hier_offset = hier_offset
         self.lv.show_layout(layout, False)
-        self._design_dot_pattern = self.lv.add_stipple(
-            "floe-calibre-dot", _DESIGN_DOT_STIPPLE)
+        self._design_speckle_patterns = tuple(
+            self.lv.add_stipple("floe-calibre-speckle-%d" % i, pattern)
+            for i, pattern in enumerate(_DESIGN_SPECKLE_STIPPLES))
         self.refresh()
 
     def refresh(self):
@@ -77,7 +79,10 @@ class Renderer:
         cv.cell = self.top
         self.lv.add_missing_layers()
         self._place_hollow_underlays_first()
-        for lp in self.lv.each_layer():
+        # Use the actual property-list position AFTER moving hollow
+        # underlays. KLayout's internal dither offset follows this paint
+        # plane, and remains stable when a layer is made invisible.
+        for paint_plane, lp in enumerate(self.lv.each_layer()):
             key = (lp.source_layer, lp.source_datatype)
             hexcol = self.colors.get(key)
             if hexcol:
@@ -86,12 +91,15 @@ class Renderer:
                 lp.frame_color = col
             if key in self.hollow:
                 lp.dither_pattern = 1  # hollow: outline only
+                lp.transparent = False
+                lp.width = 1
             else:
-                # Single-pass Calibre-style rendering: sparse screen-space
-                # dots let lower layers remain visible, while the polygon's
-                # continuous 1px frame uses the exact same layer color.
-                lp.dither_pattern = self._design_dot_pattern
-                lp.transparent = True
+                # Non-alpha, single-pass Calibre speckle. Filled pixels use
+                # the upper layer's color; common empty pixels preserve a
+                # lower polygon's continuous frame as a dotted trace.
+                lp.dither_pattern = self._design_speckle_patterns[
+                    paint_plane & 1]
+                lp.transparent = False
                 lp.width = 1
         self.lv.max_hier()
 

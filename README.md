@@ -314,9 +314,11 @@ GUI는 **GTK3/PyGObject** 셸이다. flateyes와 같은 폐쇄망 호스트
   표시 + 이벤트만 담당한다. 스레드가 아닌 프로세스인 이유: klayout 렌더 루프가
   GIL을 잡아 스레드로는 긴 렌더 동안 메인 루프가 얼어붙는다
   (spawn 방식이므로 `__main__` 가드 필수).
-- 실제 설계 레이어는 Calibre식 단일 패스로 표시한다. 2×2 화면 픽셀마다
-  한 점을 찍는 투명 stipple 채움과 동일한 레이어 색의 연속 1px 외곽선을
-  사용한다. hierarchy FRAME_LAYER는 별도의 hollow underlay 규칙을 유지한다.
+- 실제 설계 레이어는 Calibre식 단일 패스로 표시한다. 모든 레이어가 같은
+  화면 픽셀 위상을 공유하는 1px 50% 체크보드 speckle 채움과 동일한 레이어
+  색의 연속 1px 외곽선을 사용한다. KLayout의 paint-plane별 stipple 위상
+  이동은 두 역상 패턴을 교대로 지정해 상쇄하며 알파 색상 혼합은 하지 않는다.
+  hierarchy FRAME_LAYER는 별도의 hollow underlay 규칙을 유지한다.
 - live 상태줄은 `live (25 tiles, 233 ms = 0 load + 230 draw, cut<5.9um,
   ~3.4M drawn)` 형태다. `~N drawn` = 이 프레임이 그린 도형 멤버 수 추정치
   (타일·밴드 로드 시 서브트리 멤버 수를 캐시해 두고 뷰와 겹친 면적 비율로
