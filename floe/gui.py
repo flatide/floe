@@ -29,6 +29,8 @@ POLL_MS = 25
 DEBOUNCE_MS = 120
 DEFAULT_CUT_LEVEL = 2
 DEFAULT_LOD = False
+DEFAULT_FRAMES = True
+DEFAULT_LABELS = True
 
 BLACK = 0x000000FF
 BAND_IN = 0x8ECDF5FF       # forward drag: zoom in
@@ -302,7 +304,10 @@ class LayerRow(object):
 
 class Viewer:
     def __init__(self, cache, server_sock=None, show=True, goto=None,
-                 cut_level=None, dump=False, depth=None):
+                 cut_level=None, dump=False, depth=None, lod=DEFAULT_LOD,
+                 frames=DEFAULT_FRAMES, labels=DEFAULT_LABELS,
+                 stream_kb=None, stream_target_ms=500,
+                 render_debug=False):
         self.server_sock = server_sock
         self.cx = self.cy = 0
         self.spp = 1.0              # dbu per screen pixel
@@ -334,12 +339,13 @@ class Viewer:
         self.depth_value = max(0, min(999, int(depth)))
         self.abstract = False       # `a` key: klayout abstract mode
         self.coverage_on = False    # `v` key: density coverage fill (VFS)
-        # Per-view LOD switch. FLOE_LOD=0 remains the process-wide
-        # startup kill switch, while this can change live requests.
-        # Default off: cut is the baseline accelerator; merged page
-        # substitution is an independent opt-in approximation.
-        self._lod_forced_off = os.environ.get("FLOE_LOD") == "0"
-        self.lod_on = DEFAULT_LOD
+        # Explicit request controls; no shell environment is consulted.
+        self.lod_on = bool(lod)
+        self.frames_on = bool(frames)
+        self.labels_on = bool(labels)
+        self.stream_kb = stream_kb
+        self.stream_target_ms = int(stream_target_ms)
+        self.render_debug = bool(render_debug)
         self._depth_used = "?"      # depth of the last frame ("?" = none yet)
         self.max_depth = None        # learned from the VFS daemon
         # detail cut LEVEL: 0 = off, higher = more aggressive. Users
@@ -455,6 +461,14 @@ class Viewer:
         self._lod_button.connect("toggled", self._on_lod_toggled)
         side.pack_start(self._lod_button, False, False, 2)
         self._update_lod_button()
+
+        self._frame_button = Gtk.ToggleButton()
+        self._frame_button.set_active(self.frames_on)
+        self._frame_button.set_tooltip_text(
+            "Toggle hierarchy FRAME_LAYER and block names (shortcut: h)")
+        self._frame_button.connect("toggled", self._on_frame_toggled)
+        side.pack_start(self._frame_button, False, False, 2)
+        self._update_frame_button()
 
         main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         hbox.pack_start(main, True, True, 0)
@@ -576,14 +590,14 @@ class Viewer:
                                       self.meta["grid"]["nx"],
                                       self.meta["grid"]["ny"]))
         self._build_layer_panel()
-        self._lod_button.set_sensitive(
-            bool(self.meta.get("vfs")) and not self._lod_forced_off)
-        if self._lod_forced_off:
-            self._lod_button.set_tooltip_text(
-                "LOD is disabled by FLOE_LOD=0")
+        self._lod_button.set_sensitive(bool(self.meta.get("vfs")))
+        self._frame_button.set_sensitive(bool(self.meta.get("vfs")))
         if self.worker is not None:
             self.worker.stop()
-        self.worker = RenderWorker(cache)
+        self.worker = RenderWorker(
+            cache, stream_kb=self.stream_kb,
+            stream_target_ms=self.stream_target_ms,
+            debug=self.render_debug)
         self.worker.start()
         if self._did_fit:
             self.fit()
@@ -713,6 +727,7 @@ class Viewer:
             except OSError:
                 pass
             if not error:
+                self._forwarded_view_options(fields[1:])
                 self._forwarded_goto(fields[1:])
                 self._present()
         except Exception:
@@ -721,6 +736,23 @@ class Viewer:
         finally:
             conn.close()
         return True
+
+    def _forwarded_view_options(self, fields):
+        """Apply request-scoped CLI controls to the live instance."""
+        opts = {}
+        for field in fields:
+            if "=" in field:
+                key, value = field.split("=", 1)
+                opts[key] = value
+        if opts.get("lod") in ("on", "off"):
+            self._set_lod(opts["lod"] == "on")
+        if opts.get("frames") in ("on", "off"):
+            self._set_frames(opts["frames"] == "on")
+        if opts.get("labels") in ("on", "off"):
+            enabled = opts["labels"] == "on"
+            if enabled != self.labels_on:
+                self.labels_on = enabled
+                self.redraw(immediate=True)
 
     def _forwarded_goto(self, fields):
         """Apply a 'goto=X,Y[,W]' option (um) from a forwarded request.
@@ -777,7 +809,8 @@ class Viewer:
     def _render_key(self, scope):
         """Identity of a frame: what state it was rendered for."""
         return (scope, tuple(sorted(self.visible)), self._depth_key(),
-                self._effective_cut_px(), self.lod_on)
+                self._effective_cut_px(), self.lod_on, self.frames_on,
+                self.labels_on)
 
     def _effective_cut_px(self):
         """Screen-space detail cut is independent of merged LOD."""
@@ -785,7 +818,8 @@ class Viewer:
 
     def _structure_visible(self):
         """A finite VFS depth has a hierarchy frontier of its own."""
-        return bool(self.meta.get("vfs") and self._depth() is not None)
+        return bool(self.meta.get("vfs") and self.frames_on
+                    and self._depth() is not None)
 
     def _frame_compatible(self, frame):
         """A stale frame stays displayable rescaled until the fresh
@@ -1074,6 +1108,8 @@ class Viewer:
             "depth": depth,
             "cut_px": self._effective_cut_px(),
             "lod": self.lod_on,
+            "frames": self.frames_on,
+            "labels": self.labels_on,
             "abstract": self.abstract,
             "coverage": self.coverage_on,
             "visible": self._layers_arg()})
@@ -1257,8 +1293,12 @@ class Viewer:
                     if res.get("lod"):
                         lod = ", lod %d" % res["lod"]
                     text = ""
+                    if res.get("plan_ms") is not None:
+                        text += ", plan %.1fms/%s frames" % (
+                            res["plan_ms"],
+                            fmt_count(res.get("frame_rects", 0)))
                     if res.get("text_plan_ms") is not None:
-                        text = ", text %.1fms/%s places" % (
+                        text += ", text %.1fms/%s places" % (
                             res["text_plan_ms"],
                             fmt_count(res.get("text_place_records", 0)))
                     if res.get("labels_truncated"):
@@ -1556,6 +1596,8 @@ class Viewer:
             self._toggle_coverage()
         elif name == "l":
             self._set_lod(not self.lod_on)
+        elif name == "h":
+            self._set_frames(not self.frames_on)
         elif name == "e":
             self._drc_window()
         elif name == "n":
@@ -1599,6 +1641,10 @@ class Viewer:
             lbl += " · cov:%s" % (
                 "on" if self.coverage_on else "off")
             lbl += " · lod:%s" % ("on" if self.lod_on else "off")
+            lbl += " · frame:%s" % (
+                "on" if self.frames_on else "off")
+            lbl += " · text:%s" % (
+                "on" if self.labels_on else "off")
         if self.abstract:
             lbl += " · abstract"
         return lbl
@@ -1639,12 +1685,29 @@ class Viewer:
         self._set_lod(button.get_active())
 
     def _set_lod(self, enabled):
-        enabled = bool(enabled) and not self._lod_forced_off
+        enabled = bool(enabled)
         changed = enabled != self.lod_on
         self.lod_on = enabled
         if self._lod_button.get_active() != enabled:
             self._lod_button.set_active(enabled)
         self._update_lod_button()
+        if changed:
+            self._on_depth()
+
+    def _update_frame_button(self):
+        self._frame_button.set_label(
+            "Frame on" if self.frames_on else "Frame off")
+
+    def _on_frame_toggled(self, button):
+        self._set_frames(button.get_active())
+
+    def _set_frames(self, enabled):
+        enabled = bool(enabled)
+        changed = enabled != self.frames_on
+        self.frames_on = enabled
+        if self._frame_button.get_active() != enabled:
+            self._frame_button.set_active(enabled)
+        self._update_frame_button()
         if changed:
             self._on_depth()
 
@@ -2418,10 +2481,16 @@ class Viewer:
 
 
 def run_viewer(cache, server_sock=None, goto=None, drc=None,
-               cut_level=None, dump=False, depth=None):
+               cut_level=None, dump=False, depth=None, lod=DEFAULT_LOD,
+               frames=DEFAULT_FRAMES, labels=DEFAULT_LABELS,
+               stream_kb=None, stream_target_ms=500,
+               render_debug=False):
     import_gtk()
     viewer = Viewer(cache, server_sock, goto=goto, cut_level=cut_level,
-                    dump=dump, depth=depth)
+                    dump=dump, depth=depth, lod=lod, frames=frames,
+                    labels=labels, stream_kb=stream_kb,
+                    stream_target_ms=stream_target_ms,
+                    render_debug=render_debug)
     if drc:
         if viewer.load_drc(os.path.abspath(drc)):
             viewer._drc_window()

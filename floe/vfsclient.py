@@ -55,14 +55,16 @@ class VfsClient:
     def request(self, gen, view_um, px_per_um, cut_px, layers=None,
                 depth=None, probe=False, ack=0,
                 reset=False, stream_kb=None, want_labels=True,
-                lod=True):
+                lod=True, frames=True, labels=True):
         """One plan/materialize round-trip on the V4 hier protocol
         (rust/VFS_HIER.md par.3.5; flat retired in M5). view_um =
         (x0,y0,x1,y1) in um; layers = [(l,d), ...] or None (=all);
         depth None = full. The delta carries the whole working-set
         hierarchy; the response adds 'top' (gen top WC name) and
         'names' (ci->name table path, once per daemon run);
-        lod selects merged variants per request;
+        lod selects merged variants per request; frames controls the
+        hierarchy frontier and its block names; labels controls all
+        request-scoped text planning;
         ack/reset drive the par.3.7 session transaction; probe =
         session-less exact query. Response files are deleted on
         the NEXT request."""
@@ -80,7 +82,9 @@ class VfsClient:
         line = (f"gen={gen} view={view_um[0]},{view_um[1]},"
                 f"{view_um[2]},{view_um[3]} px={px_per_um} "
                 f"cut={cut_px} depth={dspec} layers={lspec} "
-                f"lod={1 if lod else 0} out={self.tmp}")
+                f"lod={1 if lod else 0} "
+                f"frames={1 if frames else 0} "
+                f"labels={1 if labels else 0} out={self.tmp}")
         if probe:
             line += " mode=probe"
         else:
@@ -123,6 +127,7 @@ class VfsClient:
         out["evict"] = [] if ev in ("-", "") else ev.split(",")
         for k in ("pages", "new", "bytes", "members", "lod",
                   "max_depth",
+                  "wc_cells", "inst_edges", "frame_rects",
                   "nlabels", "labels_truncated", "text_bvh_nodes",
                   "text_place_bvh_nodes", "text_place_records",
                   "text_members_tested", "text_members_visible"):

@@ -347,6 +347,7 @@ fn minkowski_neg(b: &BBox, o: &BBox) -> BBox {
 // ------------------------------------------------------ the sweep
 
 pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
+    let structural_frontier = opts.frame_cap != 0;
     let mut h = Hier {
         v,
         req,
@@ -375,7 +376,7 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
         // A finite, non-folded depth has a structural frontier even
         // when no design layer is selected. Full depth (including a
         // finite depth folded past the cell height) remains geometry-only.
-        if (r0 != REM_FULL
+        if ((r0 != REM_FULL && structural_frontier)
             || masks_intersect(v.bitset(tc.lmask_rec), &req.vis))
             && !tc.rbbox.is_empty()
             && (r0 != REM_FULL || !(w < h.cut && hh < h.cut))
@@ -639,7 +640,18 @@ impl<'a> Hier<'a> {
                         // the requested frontier. Only full-depth
                         // geometry traversal obeys layer and cut culls.
                         if r != REM_FULL {
-                            edges.insert(pli);
+                            if self.opts.frame_cap != 0
+                                || masks_intersect(
+                                    self.v.bitset(
+                                        self.v.cell_lmask_rec(h.child),
+                                    ),
+                                    &self.req.vis,
+                                )
+                            {
+                                edges.insert(pli);
+                            } else {
+                                self.st.cull_layer += 1;
+                            }
                             continue;
                         }
                         if !masks_intersect(
@@ -1387,6 +1399,15 @@ mod tests {
             "no frames at depth 0: {}",
             plan.stats.frame_rects
         );
+        let mut off = HierOpts::default();
+        off.frame_cap = 0;
+        let no_frames = plan_hier(&v, &req, &off);
+        assert_eq!(no_frames.stats.frame_rects, 0);
+        assert!(no_frames.wcells.iter().all(|w| w.frames.is_empty()));
+        let mut empty_req = req.clone();
+        empty_req.vis.fill(0);
+        let empty = plan_hier(&v, &empty_req, &off);
+        assert!(empty.wcells.is_empty() && empty.pages.is_empty());
     }
 
     /// Size cut is an omission contract. An all-layer recursive bbox

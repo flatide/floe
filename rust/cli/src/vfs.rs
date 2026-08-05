@@ -45,6 +45,9 @@ pub fn vfs_cmd(args: &[String]) {
     let mut encode_batch: Option<usize> = None;
     let mut plan_batch: Option<usize> = None;
     let mut page_target_mb: Option<u64> = None;
+    // Gate-only fault injection is still explicit CLI state so test
+    // behavior never depends on the caller's shell environment.
+    let mut kill_at: Option<String> = None;
     // coverage bitplanes are optional: off by default (extra build
     // time, and the viewer defaults to coverage off), --coverage to
     // include, --coverage-only to add design.ovc to an existing cache
@@ -90,6 +93,10 @@ pub fn vfs_cmd(args: &[String]) {
             "--coverage-only" => {
                 coverage_only = true;
                 i += 1;
+            }
+            "--kill-at" => {
+                kill_at = Some(args[i + 1].clone());
+                i += 2;
             }
             a => {
                 if src.is_none() {
@@ -220,9 +227,8 @@ pub fn vfs_cmd(args: &[String]) {
         // write everything, write the marker LAST - an interrupted
         // build reads as "no cache" (marker gone) or "corrupt cache"
         // (marker partial), never as a valid cache.
-        // FLOE_KILL_AT: gate-only hook forcing death at the three
-        // interrupt points (tools/validate_vfs_marker.py).
-        let kill_at = std::env::var("FLOE_KILL_AT").ok();
+        // --kill-at: gate-only hook forcing death at the interrupt
+        // points (tools/validate_vfs_marker.py).
         for f in [
             "design.ovm",
             "design.ovp",
@@ -238,7 +244,7 @@ pub fn vfs_cmd(args: &[String]) {
             let _ = std::fs::remove_file(format!("{}/{}", outdir, f));
         }
         if kill_at.as_deref() == Some("marker-deleted") {
-            eprintln!("[vfs] FLOE_KILL_AT=marker-deleted");
+            eprintln!("[vfs] --kill-at marker-deleted");
             std::process::exit(9);
         }
         let (ovm_bytes, rbb, lmems, tstats) = build(
@@ -252,12 +258,12 @@ pub fn vfs_cmd(args: &[String]) {
             page_target_bytes,
         );
         if kill_at.as_deref() == Some("ovp-written") {
-            eprintln!("[vfs] FLOE_KILL_AT=ovp-written");
+            eprintln!("[vfs] --kill-at ovp-written");
             std::process::exit(9);
         }
         // both payload files (ovp + ovt) exist, marker still absent
         if kill_at.as_deref() == Some("ovt-written") {
-            eprintln!("[vfs] FLOE_KILL_AT=ovt-written");
+            eprintln!("[vfs] --kill-at ovt-written");
             std::process::exit(9);
         }
         emit_viewer_side(&doc, &src, size, mtime, &outdir, &rbb,
@@ -271,7 +277,7 @@ pub fn vfs_cmd(args: &[String]) {
                 &ovm_bytes[..ovm_bytes.len() / 2],
             )
             .expect("write partial ovm");
-            eprintln!("[vfs] FLOE_KILL_AT=ovm-partial");
+            eprintln!("[vfs] --kill-at ovm-partial");
             std::process::exit(9);
         }
         std::fs::write(format!("{}/design.ovm", outdir), &ovm_bytes)
@@ -3228,7 +3234,8 @@ pub fn plan_cmd(args: &[String]) {
 // ------------------------------------------------------------- vfsd
 
 /// stdio daemon for the viewer render service. Line protocol:
-///   gen=1 view=x0,y0,x1,y1 px=5 cut=2 depth=full lod=1 \
+///   gen=1 view=x0,y0,x1,y1 px=5 cut=2 depth=full lod=1 frames=1 \
+///     labels=1 \
 ///     layers=all|none|11/0,12/0 out=/tmp/dir
 /// response:
 ///   gen=1 pages=N new=N evict=name,.. delta=path placements=path \
@@ -3269,10 +3276,6 @@ pub fn vfsd_cmd(args: &[String]) {
     let mut d = Daemon {
         v: &v,
         hier: floe_vfs::HierSession::new(budget_mb << 20),
-        lod_off: std::env::var("FLOE_LOD").ok().as_deref()
-            == Some("0"),
-        labels_off: std::env::var("FLOE_LABELS").ok().as_deref()
-            == Some("0"),
         names_sent: false,
         stream_budget: stream_kb << 10,
     };
@@ -3314,10 +3317,6 @@ struct Daemon<'a> {
     names_sent: bool,
     /// per-response cap on new payload bytes (0 = off)
     stream_budget: u64,
-    /// FLOE_LOD=0 kill switch: every request renders exact
-    lod_off: bool,
-    /// FLOE_LABELS=0 kill switch: responses carry no labels
-    labels_off: bool,
 }
 
 fn serve_one(d: &mut Daemon, line: &str) -> Result<String, String> {
@@ -3334,6 +3333,8 @@ fn serve_one(d: &mut Daemon, line: &str) -> Result<String, String> {
     let mut stream_kb: Option<u64> = None;
     let mut nolabels = false;
     let mut lod = true;
+    let mut frames = true;
+    let mut labels = true;
     for tok in line.split_whitespace() {
         let (k, val) = tok
             .split_once('=')
@@ -3388,6 +3389,20 @@ fn serve_one(d: &mut Daemon, line: &str) -> Result<String, String> {
                     _ => return Err("lod".into()),
                 }
             }
+            "frames" => {
+                frames = match val {
+                    "0" => false,
+                    "1" => true,
+                    _ => return Err("frames".into()),
+                }
+            }
+            "labels" => {
+                labels = match val {
+                    "0" => false,
+                    "1" => true,
+                    _ => return Err("labels".into()),
+                }
+            }
             _ => return Err(format!("unknown key {}", k)),
         }
     }
@@ -3399,17 +3414,17 @@ fn serve_one(d: &mut Daemon, line: &str) -> Result<String, String> {
     let mut req =
         make_req(d.v, view, px, cut, depth, layers.as_deref());
     // measurement paths are EXACT by construction: probes never
-    // take the LOD density gate; FLOE_LOD=0 disables it globally.
+    // take the LOD density gate; lod=0 disables it per request.
     // The ORIGINAL screen scale still drives the label planner
     // (bins/size gates) - the LOD kill switch must not also kill
     // labels - so it rides separately.
     let label_px = if probe { 0.0 } else { req.px_per_dbu };
-    if probe || d.lod_off || !lod {
+    if probe || !lod {
         req.px_per_dbu = 0.0;
     }
-    let label_px = if nolabels || d.labels_off { 0.0 } else { label_px };
+    let label_px = if nolabels || !labels { 0.0 } else { label_px };
     serve_hier(d, &req, gen, ack, reset, probe, stream_kb,
-               label_px, &out)
+               label_px, frames, &out)
 }
 
 /// hier-mode request (VFS_HIER.md par.3.5/3.7): resolve the ack (or
@@ -3426,6 +3441,7 @@ fn serve_hier(
     probe: bool,
     stream_kb: Option<u64>,
     label_px: f64,
+    frames: bool,
     out: &str,
 ) -> Result<String, String> {
     let v = d.v;
@@ -3437,7 +3453,13 @@ fn serve_hier(
             d.hier.resolve_ack(ack)?;
         }
     }
-    let plan = v.plan_hier(req);
+    let plan = if frames {
+        v.plan_hier(req)
+    } else {
+        let mut opts = floe_vfs::hier::HierOpts::default();
+        opts.frame_cap = 0;
+        floe_vfs::hier::plan_hier(&v.ovm, req, &opts)
+    };
     let upd = if probe {
         // session-less exact query: the delta carries EVERY planned
         // page, the working-set ledger is untouched
@@ -3521,7 +3543,13 @@ fn serve_hier(
         let tl = std::time::Instant::now();
         let mut lreq = req.clone();
         lreq.px_per_dbu = label_px;
-        let lp = v.plan_labels(&lreq)?;
+        let lp = if frames {
+            v.plan_labels(&lreq)?
+        } else {
+            let mut opts = floe_vfs::text::LabelOpts::default();
+            opts.blocks = false;
+            v.plan_labels_with(&lreq, &opts)?
+        };
         let ms = tl.elapsed().as_secs_f64() * 1e3;
         if lp.rows.is_empty() {
             ("-".to_string(), 0, ms, lp.stats)

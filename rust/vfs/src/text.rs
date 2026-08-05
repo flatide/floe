@@ -46,6 +46,9 @@ pub struct LabelOpts {
     /// dots need far less vertical ink than a full text line
     pub block_dots_px: f64,
     pub block_pad_px: f64,
+    /// synthesize hierarchy-frontier block names. False when the
+    /// request explicitly disables FRAME_LAYER.
+    pub blocks: bool,
     /// gate mode: exact candidate dump - no bins, no size gate,
     /// no view budget (oracle XOR comparisons)
     pub raw: bool,
@@ -62,6 +65,7 @@ impl Default for LabelOpts {
             block_line_px: 14.0,
             block_dots_px: 3.0,
             block_pad_px: 4.0,
+            blocks: true,
             raw: false,
         }
     }
@@ -473,7 +477,7 @@ impl<'a> LWalk<'a> {
         // its full name or "..." can fit. The former 96px gate ran
         // before this decision and made the ellipsis path unreachable
         // for the small boxes it was intended to represent.
-        let block = if r == 0 {
+        let block = if self.opts.blocks && r == 0 {
             let gb = xf_bbox(xf, &b0);
             let gw = (gb.x1 - gb.x0).max(0) as f64
                 * self.req.px_per_dbu;
@@ -1225,6 +1229,11 @@ mod tests {
         assert!(lp.stats.blocks_visible >= 3, "{:?}", lp.stats);
         assert!(blocks.iter().any(|r| r.rot == 0), "{:?}", blocks);
         assert!(blocks.iter().any(|r| r.rot == 1), "{:?}", blocks);
+        let mut no_blocks = LabelOpts::default();
+        no_blocks.blocks = false;
+        let lp_off = plan_labels(&v, &ovt, &req, &no_blocks).unwrap();
+        assert!(lp_off.rows.iter().all(|r| !r.block), "{:?}", lp_off.rows);
+        assert!(!lp_off.rows.is_empty(), "design text was also disabled");
         // zoomed way out: SUB is 0.4 px -> gate silences blocks
         let req2 = rq(bx(-400, 0, 6000, 6000), 0, 0, 0.001);
         let lp2 =

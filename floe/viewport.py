@@ -73,7 +73,8 @@ class VfsMosaic:
     names are globally unique, so reads never merge (no @t tags) and
     eviction prunes exactly one page subtree by name."""
 
-    def __init__(self, cache):
+    def __init__(self, cache, stream_kb=None, stream_target_ms=500,
+                 debug=False):
         self._dbu = cache.meta["dbu"]
         self._layer_keys = [(l["layer"], l["datatype"])
                             for l in cache.meta["layers"]]
@@ -106,13 +107,14 @@ class VfsMosaic:
         self.req_gen = 0      # daemon-gen counter (monotonic)
         self.applied_gen = 0  # last gen fully applied (the ack)
         self.need_reset = False
-        # adaptive streaming budget (KB of decoded payload per
-        # round): the service re-tunes it toward the round target
-        # from measured apply times. FLOE_STREAM_KB pins it (no
-        # adaptation); 0 disables streaming (single-shot loads).
-        env_kb = os.environ.get("FLOE_STREAM_KB")
-        self.stream_kb = int(env_kb) if env_kb else 24576
-        self.stream_pinned = env_kb is not None
+        # Adaptive streaming parameters are explicit viewer options.
+        # A supplied stream_kb pins the chunk size; None starts at 24MB
+        # and adapts toward stream_target_ms. Zero disables streaming.
+        self.stream_kb = 24576 if stream_kb is None else int(stream_kb)
+        self.stream_pinned = stream_kb is not None
+        self.stream_target_s = max(
+            0.1, min(2.0, float(stream_target_ms) / 1000.0))
+        self.debug = bool(debug)
         # gate-only hook (par.7 fault injection): apply_hier raises
         # at step N once, exercising the reset_all recovery path
         self._fault_step = None

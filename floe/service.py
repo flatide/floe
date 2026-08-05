@@ -32,16 +32,6 @@ CUT_PX = CUT_LEVEL_PX[1]
 # requests an unlimited round and takes the whole remainder
 _MAX_STREAM_ROUNDS = 8
 
-# streaming round target: the adaptive budget aims each refinement
-# round at ~this much parse time. Smaller = smoother/more responsive
-# refinement, larger = chunkier visible stages (0.6.2 behaved like
-# ~1300). Env-tunable for field taste; clamped 100..2000 ms.
-try:
-    _STREAM_TARGET_S = max(0.1, min(2.0, float(
-        os.environ.get("FLOE_STREAM_TARGET_MS", "500")) / 1000.0))
-except ValueError:
-    _STREAM_TARGET_S = 0.5
-
 # coverage handoff: composite the density bitplanes once a finest
 # coverage texel projects to at most this many screen pixels. Set
 # generously so coverage turns on slightly BEFORE the cut starts
@@ -335,8 +325,13 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
         renderer.set_text_visible(bool(labels))
         # the hierarchy-frontier layer is structural: always drawn,
         # even when the user has narrowed the visible-layer set
-        vis_r = (None if job["visible"] is None
-                 else list(job["visible"]) + [mosaic.FRAME_LAYER])
+        if job["visible"] is None:
+            vis_r = (None if job.get("frames", True)
+                     else list(mosaic._layer_keys))
+        else:
+            vis_r = list(job["visible"])
+            if job.get("frames", True):
+                vis_r.append(mosaic.FRAME_LAYER)
         renderer.render_png(tmp, x0, y0, x1, y1, job["w"], job["h"],
                             visible=vis_r, depth=None)
         draw_total[0] += time.perf_counter() - td
@@ -393,6 +388,11 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
             out["lod"] = r["lod"]
         if isinstance(r.get("text_plan_ms"), (int, float)):
             out["text_plan_ms"] = r["text_plan_ms"]
+        if isinstance(r.get("plan_ms"), (int, float)):
+            out["plan_ms"] = r["plan_ms"]
+        for key in ("wc_cells", "inst_edges", "frame_rects"):
+            if isinstance(r.get(key), int):
+                out[key] = r[key]
         if r.get("labels_truncated"):
             out["labels_truncated"] = True
         if isinstance(r.get("text_place_records"), int):
@@ -427,7 +427,9 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
             job.get("depth"), ack=mosaic.applied_gen,
             reset=mosaic.need_reset,
             stream_kb=0 if final_round else mosaic.stream_kb,
-            want_labels=want, lod=job.get("lod", True))
+            want_labels=want, lod=job.get("lod", True),
+            frames=job.get("frames", True),
+            labels=job.get("labels", True))
         mosaic.need_reset = False
         # names= arrives ONCE per daemon run and is view-
         # independent: consume it BEFORE the stale check, or a
@@ -453,7 +455,9 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
             r = cache.vfs_client.request(
                 mosaic.req_gen, view_um, px_per_um, cut_px, layers,
                 job.get("depth"), ack=0, reset=True,
-                want_labels=False, lod=job.get("lod", True))
+                want_labels=False, lod=job.get("lod", True),
+                frames=job.get("frames", True),
+                labels=job.get("labels", True))
             mosaic.need_reset = False
             if r["names"]:
                 mosaic.load_names(r["names"])
@@ -462,14 +466,17 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
                                         gen=mosaic.req_gen)
         if changed:
             renderer.refresh()
-        if os.environ.get("FLOE_DEBUG"):
+        if mosaic.debug:
             import sys as _sys
             print("[svc] gen=%s job=%s pages=%s new=%s partial=%s "
-                  "plan_ms=%s text_ms=%s text_places=%s "
+                  "plan_ms=%s wc=%s inst=%s frames=%s "
+                  "text_ms=%s text_places=%s "
                   "labels_truncated=%s newer=%s kb=%s" %
                   (mosaic.req_gen, job["gen"], r.get("pages"),
                    r.get("new"), r.get("partial"),
-                   r.get("plan_ms"), r.get("text_plan_ms"),
+                   r.get("plan_ms"), r.get("wc_cells"),
+                   r.get("inst_edges"), r.get("frame_rects"),
+                   r.get("text_plan_ms"),
                    r.get("text_place_records"),
                    r.get("labels_truncated"), newer(),
                    mosaic.stream_kb),
@@ -493,7 +500,7 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
         if not getattr(mosaic, "stream_pinned", False) \
                 and t_round > 0.02 \
                 and shipped_kb >= 0.5 * mosaic.stream_kb:
-            ideal = mosaic.stream_kb * _STREAM_TARGET_S / t_round
+            ideal = mosaic.stream_kb * mosaic.stream_target_s / t_round
             mosaic.stream_kb = int(
                 max(2048, min(32768,
                               (mosaic.stream_kb + ideal) / 2)))
@@ -557,7 +564,7 @@ def _svc_clip(cache, job, res):
         res.put({"kind": "error", "msg": f"clip failed: {e}"})
 
 
-def _render_service(src, req, res, latest=None):
+def _render_service(src, req, res, latest=None, options=None):
     """Entry point of the render process (see RenderWorker)."""
     # terminal Ctrl-C delivers SIGINT to the whole process group; shutdown
     # is coordinated by the parent (None sentinel / terminate), so ignore it
@@ -574,7 +581,11 @@ def _render_service(src, req, res, latest=None):
             return
         from .vfsclient import VfsClient
         cache.vfs_client = VfsClient(cache.dir)
-        mosaic = VfsMosaic(cache)
+        options = options or {}
+        mosaic = VfsMosaic(
+            cache, stream_kb=options.get("stream_kb"),
+            stream_target_ms=options.get("stream_target_ms", 500),
+            debug=options.get("debug", False))
         fcolors = dict(colors)
         fcolors[mosaic.FRAME_LAYER] = "#93a4ad"
         renderer = Renderer(mosaic.ly, mosaic.top, fcolors,
@@ -639,7 +650,8 @@ def _render_service(src, req, res, latest=None):
 class RenderWorker:
     """Runs the klayout render service in a separate process."""
 
-    def __init__(self, cache):
+    def __init__(self, cache, stream_kb=None, stream_target_ms=500,
+                 debug=False):
         ctx = mp.get_context("spawn")  # fork would clone GUI/klayout state
         self.req = ctx.Queue()
         self.res = ctx.Queue()
@@ -648,7 +660,11 @@ class RenderWorker:
         self.latest = ctx.Value("i", 0)
         self._proc = ctx.Process(target=_render_service,
                                  args=(cache.src, self.req, self.res,
-                                       self.latest),
+                                       self.latest,
+                                       {"stream_kb": stream_kb,
+                                        "stream_target_ms":
+                                            stream_target_ms,
+                                        "debug": debug}),
                                  daemon=True)
 
     def start(self):

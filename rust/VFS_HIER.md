@@ -187,7 +187,7 @@ rev 28 (T1~T4 cell-local Text VFS — 2026-08-04, 0.11.0, **ovm v5 =
   레코드 스윕 + **정확-1회 소유권**(텍스트·trange claim) + TBVH
   공유/사이클 DFS — places/inst-BVH와 동일한 mmap-지연 절충(§3.6
   기존 원칙). Vfs::open은 ovp_len처럼 **ovt_len 쌍 검증** + ovt
-  mmap. 마커: design.ovt 스크럽 목록 추가, FLOE_KILL_AT=
+  mmap. 마커: design.ovt 스크럽 목록 추가, `--kill-at`
   ovt-written 킬포인트(마커 매트릭스 4점).
 - **T2 (라벨 플래너)**: rust/vfs/text.rs — 기하 플래너와 동일
   규칙(vis 레이어·semantic depth·셀 컷)의 결정적 워크가 전체
@@ -207,7 +207,7 @@ rev 28 (T1~T4 cell-local Text VFS — 2026-08-04, 0.11.0, **ovm v5 =
   `blk\t-\t…`), 뷰-generation 자산(클라이언트가 다음 요청에서
   파일 삭제; stale이면 미적용 폐기). 리파인 라운드는
   `nolabels=1`로 재계산 생략, 뷰어는 라운드1 파싱 행을 재적용.
-  `FLOE_LABELS=0` = 데몬 킬스위치. **FLOE_LOD=0이 라벨까지 끄지
+  요청 `labels=0` = 라벨 계획 비활성화. **`lod=0`이 라벨까지 끄지
   않도록 label_px 분리**. blk 행은 뷰어 frame_layer로 매핑.
 - **T4 (컷오버)**: emit_viewer_side에서 collect_all_texts 호출·
   labels.tsv·texts.tsv 생성 제거(스크럽 목록에는 유지 — 구 캐시
@@ -370,7 +370,7 @@ rev 23 (M7-B 플래너 밀도 선택 — 2026-08-03, 0.9.1):
   히스테리시스는 M7-C 실측에서 플래핑 관찰 시 추가.
 - **계측 = exact by construction**: probe 요청(pick/snap/clip)은
   데몬에서 px_per_dbu=0으로 강제 — 밀도 게이트 자체가 실행되지
-  않음. `FLOE_LOD=0` = 전역 킬스위치(데몬 env), plan CLI는
+  않음. 요청별 `lod=0` = exact, plan CLI는
   `--lod 0`. 렌더 XOR 게이트는 probe 경유라 exact 그대로.
 - **이름 계약 수정**: `Vfs::page_name`이 LOD 페이지에 "…q" 명을
   반환 — WC 참조·evict 명이 payload 셀명과 일치해야 하며,
@@ -382,7 +382,7 @@ rev 23 (M7-B 플래너 밀도 선택 — 2026-08-03, 0.9.1):
 - **게이트**: 플래너 유닛(줌아웃=스왑/줌인=exact/probe=exact/
   킬스위치), **L7 신설** = 변종 사이클(광역 lod 발화 → 동일 뷰
   fine-px에서 exact 복귀 + XOR 0 + 원장 무결) — L1~L6은
-  FLOE_LOD=0으로 실행(수명주기 계약은 변종 선택과 직교), S5에
+  요청별 `lod=0`으로 실행(수명주기 계약은 변종 선택과 직교), S5에
   밀도 발화 + `--lod 0` 무발화 게이트 추가. 스위트 전체 green +
   testchip 서비스 스모크.
 
@@ -500,8 +500,8 @@ rev 19 (M4 실측 완료 — 2026-08-03, 9.8G b3/사무실 호스트,
      페이지 재계수·jobs 결정성) 스위트 편입.
   - 운영 대응(0.6.4~0.6.6 사이): 클라이언트 스트리밍 라운드 캡
     8(데몬 stateless라 잔여/N 바닥은 기하 꼬리 — 유닛으로 확인 후
-    회귀), `FLOE_STREAM_KB`(0=off/고정), `FLOE_STREAM_TARGET_MS`,
-    FLOE_DEBUG 라운드 로그.
+    회귀), viewer `--stream-kb`(0=off/고정),
+    `--stream-target-ms`, `--render-debug` 라운드 로그.
 - **M4 결과표** (9.8G b3, cold, 점진 로딩 on; v2 = 결함 수정 전
   0.6.5/0.6.6 빌드, v3 = 0.7.0 재인덱싱):
 
@@ -576,13 +576,13 @@ rev 18 (M3.5 외부 검토 반영 — 2026-08-03, 0.6.3; 5건 전부 실결함/
 - **⑤-c 적응 예산 상방 폭주 수정**(사용자 재현 "'+' 19회 줌 후
   끝까지 무변화→한 번에 교체"): 작은 웜 라운드(1~2MB/50ms)를 파싱
   속도 표본으로 오판해 예산이 128MB 클램프까지 폭증 → 헤비 뷰가
-  예산 안에 통째로 들어가 **partial 자체가 소멸**(FLOE_DEBUG로
+  예산 안에 통째로 들어가 **partial 자체가 소멸**(`--render-debug`로
   라운드 로그 실측: kb 24576→104637→131072, 최종 뷰 new=157
   partial=0 단일 7s 라운드). 수정: **유효 표본 조건**(그 라운드가
   실제로 예산의 ≥50%를 실었을 때만 적응 — `pending_new_mb` 사용)
   + **상한 32MB**(100MB급 뷰 ≥3 스테이지 보장) + 라운드 목표
-  `FLOE_STREAM_TARGET_MS`(기본 500, 100~2000 클램프; 0.6.2식
-  굵은 단계를 원하면 ~1300). `FLOE_DEBUG=1`이면 서비스가 라운드
+  `--stream-target-ms`(기본 500, 100~2000 클램프; 0.6.2식
+  굵은 단계를 원하면 ~1300). `--render-debug`이면 서비스가 라운드
   로그(gen/new/partial/kb)를 stderr로 출력(현장 진단용). 수정 후
   동일 재현: 최종 뷰 11라운드/0.7~0.9s 간격, 영역별(diff bbox
   상단/하단/코너 밴드) 가시 갱신 복구.
@@ -637,7 +637,7 @@ rev 16 (M2/M3 외부 검토 반영 — 2026-08-03, 0.6.1; 6건 중 5건 실결�
   heartbeat**(5s, elapsed+rss) 추가.
 - **검증 공백 게이트화**: lifecycle L3를 apply **①~④ 전 단계**
   주입으로 확장(뷰어 gate-훅 `_fault_step`) + L5(names stale),
-  `validate_vfs_marker.py` 신설 — `FLOE_KILL_AT` 훅으로 3지점
+  `validate_vfs_marker.py` 신설 — `--kill-at` 훅으로 3지점
   **실제 강제 종료** 후 no-cache/corrupt 확인 + 재빌드 복구,
   스위트 편입. narrowing 경계는 구성 가능한 것만 유닛(카운터
   오버플로 등 실물 불가 경계는 checked 코드로 보장).

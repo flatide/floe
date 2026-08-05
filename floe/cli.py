@@ -421,9 +421,20 @@ def cmd_view(args):
     if not os.path.isfile(src):
         raise SystemExit(f"floe: no such file: {src}")
     goto = parse_goto(args.goto) if args.goto else None
+    if args.stream_kb is not None and args.stream_kb < 0:
+        raise SystemExit("floe: --stream-kb must be >= 0")
+    if not 100 <= args.stream_target_ms <= 2000:
+        raise SystemExit("floe: --stream-target-ms must be 100..2000")
 
+    # Render-process construction parameters cannot be retrofitted into
+    # a running single instance. Open an independent viewer when one is
+    # explicitly supplied; live request controls are forwarded below.
+    process_options = (args.stream_kb is not None
+                       or args.stream_target_ms != 500
+                       or args.render_debug)
     server = None
-    if not args.multi:  # flateyes-style single instance per (uid, DISPLAY)
+    if not args.multi and not process_options:
+        # flateyes-style single instance per (uid, DISPLAY)
         from . import instance
         display = instance.display_key()
         if display is None:
@@ -440,6 +451,8 @@ def cmd_view(args):
         if goto is not None:
             # repr() round-trips floats exactly, unlike %g
             request += "\tgoto=" + ",".join(repr(v) for v in goto)
+        request += "\tlod=%s\tframes=%s\tlabels=%s" % (
+            args.lod, args.frames, args.labels)
         for _ in range(5):
             code = instance.try_forward(addr, request)
             if code is not None:
@@ -463,7 +476,11 @@ def cmd_view(args):
     if depth is None and (goto is not None or args.drc):
         depth = 999   # jumping somewhere = inspecting: full depth
     run_viewer(c, server, goto=goto, drc=args.drc,
-               cut_level=args.cut_level, dump=args.dump, depth=depth)
+               cut_level=args.cut_level, dump=args.dump, depth=depth,
+               lod=args.lod == "on", frames=args.frames == "on",
+               labels=args.labels == "on", stream_kb=args.stream_kb,
+               stream_target_ms=args.stream_target_ms,
+               render_debug=args.render_debug)
 
 
 def main(argv=None):
@@ -639,6 +656,28 @@ def main(argv=None):
                         "truthful first paint - and full when "
                         "--goto jumps to an inspection point. "
                         "Digits / the `d` dialog change it at runtime")
+    p.add_argument("--lod", choices=("on", "off"), default="off",
+                   help="starting merged geometry LOD state (default off; "
+                        "the viewer button/`l` changes it live)")
+    p.add_argument("--frames", choices=("on", "off"), default="on",
+                   help="starting hierarchy FRAME_LAYER state (default "
+                        "on; the viewer button/`h` changes it live)")
+    p.add_argument("--labels", choices=("on", "off"), default="on",
+                   help="enable request-scoped design text and block-name "
+                        "planning (default on; forwarded to a running "
+                        "instance)")
+    p.add_argument("--stream-kb", type=int, default=None, metavar="KB",
+                   help="pin progressive payload per round in KiB; 0 "
+                        "disables streaming (default: adaptive from 24576; "
+                        "opens an independent instance)")
+    p.add_argument("--stream-target-ms", type=int, default=500,
+                   metavar="MS",
+                   help="adaptive refinement round target, 100..2000 ms "
+                        "(default 500; a non-default value opens an "
+                        "independent instance)")
+    p.add_argument("--render-debug", action="store_true",
+                   help="print per-round VFS render metrics to stderr "
+                        "in an independent instance")
     p.add_argument("--layout-mode", default=None,
                    choices=("viewer", "editable"),
                    help="tile read mode (default: per-cache heuristic, "

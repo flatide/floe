@@ -151,8 +151,9 @@ class Sess:
             "FRAME_LAYER must be registered below every design layer")
         self.dbu = cache.meta["dbu"]
 
-    def request(self, view, reset=False, px=1.0, lod=True,
-                layers=None, depth=None, cut=0.0):
+    def request(self, view, reset=False, px=1.0, lod=False,
+                layers=None, depth=None, cut=0.0, frames=True,
+                labels=True):
         self.m.req_gen += 1
         x0, y0, x1, y1 = view
         r = self.client.request(
@@ -161,7 +162,7 @@ class Sess:
              x1 * self.dbu, y1 * self.dbu),
             px, cut, layers, depth,
             ack=0 if reset else self.m.applied_gen,
-            reset=reset, lod=lod)
+            reset=reset, lod=lod, frames=frames, labels=labels)
         # mirror the service: names= is view-independent and sent
         # once per run, so it is consumed at REQUEST time - even a
         # response the caller then drops must not lose it
@@ -185,10 +186,8 @@ class Sess:
 
 def main():
     src, floe_dir = sys.argv[1], sys.argv[2]
-    # L1-L6 assert EXACT XOR equality - the lifecycle contract is
-    # orthogonal to the M7 variant choice, so their daemons run
-    # with the LOD kill switch; L7 below owns the variant cycle
-    os.environ["FLOE_LOD"] = "0"
+    # L1-L6 assert EXACT XOR equality and use per-request lod=False;
+    # L7 below owns the explicit variant cycle.
     cache = cm.Cache(src)
     cache.dir = floe_dir
     cache.meta = json.load(open(os.path.join(floe_dir,
@@ -391,11 +390,10 @@ def main():
     # the SAME view at a fine px scale must come back exact and
     # XOR clean - the in-place variant upgrade is the transition
     # the session must survive.
-    os.environ.pop("FLOE_LOD", None)
     s = Sess(cache)
     try:
         full = (bx0, by0, bx1, by1)
-        r = s.request(full, px=0.01)
+        r = s.request(full, px=0.01, lod=True)
         chk(int(r.get("lod", 0) or 0) >= 1,
             "L7 density gate never fired (lod=%s)" % r.get("lod"))
         s.apply(r)

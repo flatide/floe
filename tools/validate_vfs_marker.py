@@ -1,6 +1,6 @@
 """Marker-protocol gate under FORCED KILLS (VFS_HIER.md par.3.6/7).
 
-The indexer dies (FLOE_KILL_AT, a gate-only hook) at each of the
+The indexer dies (--kill-at, a gate-only hook) at each of the
 three interrupt points; opening the cache afterwards must say
 "no cache" or "corrupt cache" - an interrupted build must NEVER look
 like a valid cache. A final clean rebuild proves recovery.
@@ -37,11 +37,11 @@ def main():
     out = tempfile.mkdtemp(prefix="floe_marker_") + "/c.floe"
 
     def build(kill=None):
-        env = dict(os.environ)
+        cmd = [fi, "vfs", src, out]
         if kill:
-            env["FLOE_KILL_AT"] = kill
+            cmd += ["--kill-at", kill]
         return subprocess.run(
-            [fi, "vfs", src, out], env=env,
+            cmd,
             capture_output=True, text=True)
 
     def open_err():

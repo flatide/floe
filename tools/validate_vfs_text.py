@@ -11,7 +11,7 @@ text index and the label planner vs the klayout source oracle.
   X4  corrupt: truncated design.ovt refuses to open
   X5  determinism: --jobs 1 vs 4 builds byte-identical ovm/ovt
   X6  daemon: labels=<gen file> arrives with rows parsing back to
-      the selection; nolabels=1, probes and FLOE_LABELS=0 suppress
+      the selection; nolabels=1, probes and labels=0 suppress
 
 usage: python tools/validate_vfs_text.py [workdir]
 """
@@ -309,13 +309,11 @@ def main():
     shutil.rmtree(out1, ignore_errors=True)
 
     # X6: daemon labels lifecycle
-    def start(env_extra=None):
-        env = dict(os.environ)
-        env.update(env_extra or {})
+    def start():
         return subprocess.Popen(
             [FI, "vfsd", out], stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            text=True, bufsize=1, env=env)
+            text=True, bufsize=1)
 
     tmp = tempfile.mkdtemp(prefix="floe_valtext_")
 
@@ -358,11 +356,11 @@ def main():
     p.stdin.write("quit\n")
     p.stdin.flush()
     p.wait(timeout=5)
-    p2 = start({"FLOE_LABELS": "0"})
+    p2 = start()
     r4 = ask(p2, "gen=1 view=0,0,20,20 px=100 cut=0 depth=full "
-                 "layers=all out=%s ack=0" % tmp)
+                 "layers=all labels=0 out=%s ack=0" % tmp)
     if r4.get("labels", "-") != "-":
-        fail("X6 FLOE_LABELS=0 shipped labels")
+        fail("X6 labels=0 shipped labels")
     p2.stdin.write("quit\n")
     p2.stdin.flush()
     p2.wait(timeout=5)
