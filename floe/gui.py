@@ -369,6 +369,14 @@ class LayerRow(object):
         # gap therefore belongs to this (upper) row instead of falling
         # through the layer palette without selecting anything.
         self.widget = Gtk.EventBox()
+        # Field experiment (shrinking-band bug): windowless event
+        # boxes route input through GTK-side picking and paint into
+        # the parent window, bypassing per-row child GdkWindows
+        # entirely - if the band bug is the quartz child-window
+        # layer, this makes it unreproducible.
+        if os.environ.get("FLOE_PANEL_WINDOWLESS"):
+            for eb in (mbox, nbox, self.widget):
+                eb.set_visible_window(False)
         self.widget.add(row_box)
         self.widget.connect("button-press-event", self._on_row_click)
         self.widget.set_tooltip_text(tooltip)
