@@ -452,9 +452,9 @@ class LayerRow(object):
         if self._active:
             return False
         alloc = widget.get_allocation()
-        y = max(0, (alloc.height - self._row_pad) // 2 - 1)
+        y = max(0, (alloc.height - self._row_pad) // 2)
         cr.set_source_rgb(*(c / 255.0 for c in LAYER_STRIKE_RGB))
-        cr.rectangle(0, y, alloc.width, 2)
+        cr.rectangle(0, y, alloc.width, 1)
         cr.fill()
         return False
 
