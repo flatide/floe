@@ -210,12 +210,9 @@ class LayerRow(object):
         # Calibre-style row: "127.1  <swatch>  NAME" - number first,
         # a color marker, then the name in plain white on black
         raw_num = "%d.%d" % (self.key[0], self.key[1])
-        # width_chars is measured using the label's base font, before the
-        # Pango "large" span below is applied. The one row that actually
-        # consumes num_width (e.g. 63.63) would therefore grow beyond all
-        # shorter rows. Render exactly num_width monospace glyph cells in
-        # every row instead; Pango preserves the trailing spaces.
-        self._num = raw_num.rjust(num_width)
+        # Render exactly num_width monospace glyph cells in every row so the
+        # swatches stay aligned. Layer/datatype text itself is left-aligned.
+        self._num = raw_num.ljust(num_width)
         self._name = l["name"]
         self._color = l["color"]
         self._marker = marker
@@ -227,37 +224,34 @@ class LayerRow(object):
         self._selected = False
         self._mlbl = Gtk.Label()
         self._mlbl.set_xalign(0.0)
-        self._mlbl.set_width_chars(2)
         mbox = Gtk.EventBox()
         mbox.add(self._mlbl)
         # Every marker accepts the row context menu. Group parents also use
         # its left click as the expand/collapse control.
         mbox.connect("button-press-event", self._on_marker_click)
         self._nlbl = Gtk.Label()
-        self._nlbl.set_xalign(1.0)
-        # rjust gives every markup string the same natural width;
-        # width_chars is a second, GTK-allocation-level floor for backends
-        # that trim or measure trailing markup spaces differently.
-        self._nlbl.set_width_chars(num_width)
-        probe_width, probe_height = self._nlbl.create_pango_layout(
-            "0").get_pixel_size()
-        small_gap = max(
-            1, round(probe_width * 1.2 * LAYER_NUM_MARGIN_CHARS))
+        self._nlbl.set_xalign(0.0)
+        probe = self._nlbl.create_pango_layout("")
+        probe.set_markup(
+            '<span face="monospace" size="x-small">0</span>', -1)
+        probe_width, probe_height = probe.get_pixel_size()
+        self._mlbl.set_size_request(max(1, probe_width * 2), -1)
+        self._nlbl.set_size_request(max(1, probe_width * num_width), -1)
+        small_gap = max(1, round(probe_width * LAYER_NUM_MARGIN_CHARS))
         self._nlbl.set_margin_end(small_gap)
         self._clbl = Gtk.Image()
         self._clbl.set_halign(Gtk.Align.CENTER)
         self._clbl.set_valign(Gtk.Align.CENTER)
-        swatch_w = max(5, round(probe_width * 1.2 * LAYER_COLOR_WIDTH))
-        swatch_h = max(3, round(probe_height * 1.2))
+        swatch_w = max(5, round(probe_width * LAYER_COLOR_WIDTH))
+        swatch_h = max(3, probe_height)
         self._clbl.set_from_pixbuf(self._speckle_swatch(swatch_w, swatch_h))
         self._clbl.set_size_request(swatch_w, swatch_h)
         self._lbl = Gtk.Label()
         self._lbl.set_xalign(0.0)
         self._lbl.set_margin_start(small_gap)
-        # long layer names must not widen the panel and squeeze the
-        # view: ellipsize and show the full name as a tooltip
-        self._lbl.set_ellipsize(Pango.EllipsizeMode.END)
-        self._lbl.set_max_width_chars(1)
+        # Preserve the complete layer name. The palette scroller owns the
+        # width constraint and exposes overflow through its bottom scrollbar.
+        self._lbl.set_ellipsize(Pango.EllipsizeMode.NONE)
         content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         content.pack_start(self._nlbl, False, False, 0)
         content.pack_start(self._clbl, False, False, 0)
@@ -267,7 +261,7 @@ class LayerRow(object):
         nbox.connect("button-press-event", self._on_name_click)
         row_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         row_box.set_margin_bottom(max(
-            1, round(probe_height * 1.2 * 0.1)))
+            1, round(probe_height * 0.1)))
         row_box.pack_start(mbox, False, False, 0)
         row_box.pack_start(nbox, True, True, 0)
         # Keep the inter-row padding inside an event window. A click in the
@@ -305,16 +299,16 @@ class LayerRow(object):
               "#d9f2ff" if self._selected else
               "#ffffff" if self._active else "#777777")
         self._mlbl.set_markup(
-            '<span face="monospace" size="large" '
+            '<span face="monospace" size="x-small" '
             'foreground="%s">%s</span>'
             % (fg, GLib.markup_escape_text(self._marker)))
         strike = "" if self._active else ' strikethrough="true"'
         self._nlbl.set_markup(
-            '<span face="monospace" size="large" '
+            '<span face="monospace" size="x-small" '
             'foreground="%s"%s>%s</span>'
             % (fg, strike, GLib.markup_escape_text(self._num)))
         self._lbl.set_markup(
-            '<span size="large" foreground="%s"%s>%s</span>'
+            '<span size="x-small" foreground="%s"%s>%s</span>'
             % (fg, strike, GLib.markup_escape_text(self._name)))
 
     def set_marker(self, marker):
@@ -538,7 +532,19 @@ class Viewer:
             Gdk.Screen.get_default(), css,
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         scroller.get_style_context().add_class("floe-layers")
-        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        # GTK overlay scrollbars temporarily cover the right edge only while
+        # scrolling, making the visible list narrower than at either end.
+        # Reserve stable scrollbar space for every scroll position instead.
+        try:
+            scroller.set_overlay_scrolling(False)
+        except AttributeError:
+            pass  # compatibility with older GTK3 builds
+        try:
+            scroller.set_propagate_natural_width(False)
+        except AttributeError:
+            pass
+        scroller.set_policy(Gtk.PolicyType.AUTOMATIC,
+                            Gtk.PolicyType.AUTOMATIC)
         self._layers_scroller = scroller
         self._layers_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self._layers_box.set_margin_top(4)
