@@ -512,9 +512,16 @@ class LayerRow(object):
         if event.button != 1:
             return False
         if event.type in (Gdk.EventType.BUTTON_PRESS,
-                          Gdk.EventType._2BUTTON_PRESS):
+                          Gdk.EventType._2BUTTON_PRESS,
+                          Gdk.EventType._3BUTTON_PRESS):
             self._on_select(self, event)
-            if event.type == Gdk.EventType._2BUTTON_PRESS:
+            # GTK turns the 4th rapid click into a TRIPLE press, so
+            # back-to-back double-clicks arrive as 2BP then 3BP -
+            # only honoring 2BP silently swallowed every second
+            # toggle (field report; it looked render-related but is
+            # pure event classification)
+            if event.type in (Gdk.EventType._2BUTTON_PRESS,
+                              Gdk.EventType._3BUTTON_PRESS):
                 self.set_active(not self._active)
             return True
         return False
@@ -991,13 +998,14 @@ class Viewer:
                         % (lnum, l["datatype"], l["name"]))
                 for l in rest]
         self._layers_box.show_all()
-        # children start collapsed; no_show_all keeps later show_all
-        # calls (window level) from revealing them
-        for ckeys in self._layer_groups.values():
+        # groups start EXPANDED (field request); no_show_all is
+        # still set so a later window-level show_all cannot reveal
+        # children the user collapses
+        for pkey, ckeys in self._layer_groups.items():
+            self._layer_expanded.add(pkey)
+            self._layer_rows[pkey].set_marker("-")
             for k in ckeys:
-                w = self._layer_rows[k].widget
-                w.set_no_show_all(True)
-                w.hide()
+                self._layer_rows[k].widget.set_no_show_all(True)
 
     def _on_group_expand(self, row):
         """'+'/'-' marker click on a group parent."""
@@ -2967,6 +2975,12 @@ class Viewer:
             else:
                 selected.add(key)
             self._set_layer_selection(selected, anchor=key)
+        elif event.type == Gdk.EventType.BUTTON_PRESS \
+                and self._selected_layers == {key}:
+            # plain click on the sole selected row deselects it
+            # (double-click presses re-select via their 2BP/3BP
+            # event, so a visibility toggle still ends selected)
+            self._set_layer_selection(set())
         else:
             self._set_layer_selection({key}, anchor=key)
 
