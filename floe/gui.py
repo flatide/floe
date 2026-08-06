@@ -624,6 +624,7 @@ class Viewer:
         self._pick_seq = 0
         self._pick_px = None
         self._pick_nth = 0
+        self._pick_mode = "replace"
         self._cursor = (0, 0)
         self._pending = None
         self._pending_t0 = 0.0
@@ -1267,8 +1268,10 @@ class Viewer:
         def sy(v):
             return (obox[3] - v) / ospp
 
-        if self.selection and self.selection.get("points"):
-            pts = [(sx(x), sy(y)) for x, y in self.selection["points"]]
+        for sel in self.selections:
+            if not sel.get("points"):
+                continue
+            pts = [(sx(x), sy(y)) for x, y in sel["points"]]
             for a, b in zip(pts, pts[1:] + pts[:1]):
                 stamp_segment(disp, a, b, BLACK, SEL_CORE)
         segs = list(self.rulers)
@@ -2839,23 +2842,58 @@ class Viewer:
             "x": int(x), "y": int(y), "r": r,
             "layers": self._layers_arg()})
 
+    @property
+    def selection(self):
+        """Primary (most recent) picked object, or None. The full
+        multi-selection lives in `selections`; this single-object
+        view keeps Esc/reset/deselect-contract code unchanged."""
+        return self.selections[-1] if self.selections else None
+
+    @selection.setter
+    def selection(self, res):
+        self.selections = [] if res is None else [res]
+
+    @staticmethod
+    def _sel_key(res):
+        """Identity for Ctrl-toggle/dedup: geometry + layer, NOT the
+        pick index (the same object reports a different nth/index
+        when clicked at a different spot)."""
+        pts = res.get("points")
+        return (res.get("layer"), res.get("datatype"), res.get("cell"),
+                tuple(res.get("bbox") or ()),
+                tuple(map(tuple, pts)) if pts else None)
+
     def _pick_click(self, ev):
         self._update_cursor(ev)
         x, y = self._cursor
-        tol = 8 * self.spp  # same-spot test in world coords: pan-proof
-        if self._pick_px is not None and \
-                abs(x - self._pick_px[0]) <= tol and \
-                abs(y - self._pick_px[1]) <= tol:
-            self._pick_nth += 1  # same spot: cycle overlapping objects
+        state = getattr(ev, "state", 0)
+        if state & Gdk.ModifierType.CONTROL_MASK:
+            mode = "toggle"  # add unselected / remove selected
+        elif state & Gdk.ModifierType.SHIFT_MASK:
+            mode = "add"     # extend the multi-selection
         else:
+            mode = "replace"
+        if mode == "replace":
+            tol = 8 * self.spp  # same-spot test in world coords: pan-proof
+            if self._pick_px is not None and \
+                    abs(x - self._pick_px[0]) <= tol and \
+                    abs(y - self._pick_px[1]) <= tol:
+                self._pick_nth += 1  # same spot: cycle overlapping objects
+            else:
+                self._pick_nth = 0
+            self._pick_px = (x, y)
+        else:
+            # modifier clicks always pick the topmost object: cycling
+            # would toggle a DIFFERENT overlapped object on the second
+            # Ctrl-click at the same spot
+            self._pick_px = None
             self._pick_nth = 0
-        self._pick_px = (x, y)
         r = max(1, int(3 * self.spp))
         if self.tiles_spanned((x - r, y - r, x + r, y + r)) > 4:
-            # too wide to pick - but a click must still honor the
-            # documented deselect contract instead of leaving the
+            # too wide to pick - but a plain click must still honor
+            # the documented deselect contract instead of leaving the
             # old selection (and its row highlight) stuck on screen
-            if self.selection is not None:
+            if mode == "replace" and self.selection is not None:
                 self._clear_selection()
                 self._set_live_status("selection cleared")
                 self._display()
@@ -2863,29 +2901,54 @@ class Viewer:
                 self._set_live_status("zoom in to pick objects")
             return
         self._pick_seq += 1
+        self._pick_mode = mode
         self.worker.submit({
             "kind": "pick", "seq": self._pick_seq,
             "x": int(x), "y": int(y), "r": r, "nth": self._pick_nth,
             "layers": self._layers_arg()})
 
     def _on_pick_result(self, res):
+        mode = self._pick_mode
         if not res.get("found"):
-            self._clear_selection()
+            if mode == "replace":
+                self._clear_selection()
             self._set_live_status("no object here")
+        elif mode == "replace":
+            self.selections = [res]
+            self._refresh_sel_status()
         else:
-            self.selection = res
-            self._set_picked_layer((res["layer"], res["datatype"]))
-            bb = res["bbox"]
-            w = (bb[2] - bb[0]) * self.dbu
-            h = (bb[3] - bb[1]) * self.dbu
-            self._sel_text = ("sel %s %d/%d · %s · %.3f x %.3f um @ "
-                              "(%.3f, %.3f) · %d/%d"
-                              % (res["lname"], res["layer"],
-                                 res["datatype"], res["cell"], w, h,
-                                 bb[0] * self.dbu, bb[1] * self.dbu,
-                                 res["index"] + 1, res["count"]))
-            self._set_live_status(self._sel_text)
+            key = self._sel_key(res)
+            kept = [s for s in self.selections
+                    if self._sel_key(s) != key]
+            if mode == "add" or len(kept) == len(self.selections):
+                # Shift always selects; Ctrl adds a new object and
+                # (the filter above) removes an already selected one
+                kept.append(res)
+            self.selections = kept
+            self._refresh_sel_status()
         self._display()
+
+    def _refresh_sel_status(self):
+        """Primary selection changed: row highlight + status text."""
+        res = self.selection
+        if res is None:
+            self._sel_text = ""
+            self._set_picked_layer(None)
+            self._set_live_status("selection cleared")
+            return
+        self._set_picked_layer((res["layer"], res["datatype"]))
+        bb = res["bbox"]
+        w = (bb[2] - bb[0]) * self.dbu
+        h = (bb[3] - bb[1]) * self.dbu
+        n = len(self.selections)
+        self._sel_text = ("sel%s %s %d/%d · %s · %.3f x %.3f um @ "
+                          "(%.3f, %.3f) · %d/%d"
+                          % ("(%d)" % n if n > 1 else "",
+                             res["lname"], res["layer"],
+                             res["datatype"], res["cell"], w, h,
+                             bb[0] * self.dbu, bb[1] * self.dbu,
+                             res["index"] + 1, res["count"]))
+        self._set_live_status(self._sel_text)
 
     def _clear_selection(self):
         self.selection = None
@@ -3066,10 +3129,16 @@ class Viewer:
             self.visible.add(key)
         else:
             self.visible.discard(key)
-            if self.selection is not None and \
-                    (self.selection.get("layer"),
-                     self.selection.get("datatype")) == key:
-                self._clear_selection()
+            if self.selections:
+                # hiding a layer drops only ITS objects from the
+                # multi-selection
+                kept = [s for s in self.selections
+                        if (s.get("layer"), s.get("datatype")) != key]
+                if not kept:
+                    self._clear_selection()
+                elif len(kept) != len(self.selections):
+                    self.selections = kept
+                    self._refresh_sel_status()
         if self._layers_batch:
             return  # group/all/none toggle: one redraw at the end
         kids = self._layer_groups.get(key)
