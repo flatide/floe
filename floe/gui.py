@@ -2773,19 +2773,20 @@ class Viewer:
 
     def _esc(self):
         """Step out flateyes-style: pending point -> ruler mode ->
-        selection -> finished rulers -> goto marker. The ruler steps
-        outrank the selection: measuring with an object selected,
-        Esc must cancel the measurement first (field report), and
-        only the next Esc drops the selection."""
+        finished rulers -> selection -> markers. EVERYTHING
+        ruler-related outranks the selection (field reports): with
+        an object selected, Esc first cancels the measurement in
+        progress, then clears finished rulers, and only then drops
+        the selection."""
         if self._ruler_start is not None:
             self._ruler_start = None
         elif self.mode == "ruler":
             self.mode = "normal"
             self._snap_res = None
-        elif self.selection is not None:
-            self._clear_selection()
         elif self.rulers:
             self.rulers = []
+        elif self.selection is not None:
+            self._clear_selection()
         elif self.drc_mark is not None:
             self.drc_mark = None
         elif self.goto_mark is not None:
