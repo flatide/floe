@@ -373,9 +373,15 @@ class LayerRow(object):
         nbox = Gtk.EventBox()
         nbox.add(content)
         nbox.connect("button-press-event", self._on_name_click)
+        # input-only sub-boxes: the hidden-layer strike is ONE line
+        # cairo-drawn across the whole row AFTER the children, and a
+        # child with a visible window would composite over it (the
+        # gaps were exactly where the old per-span strike vanished)
+        mbox.set_visible_window(False)
+        nbox.set_visible_window(False)
         row_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        row_box.set_margin_bottom(max(
-            1, round(probe_height * 0.1)))
+        self._row_pad = max(1, round(probe_height * 0.1))
+        row_box.set_margin_bottom(self._row_pad)
         row_box.pack_start(mbox, False, False, 0)
         row_box.pack_start(nbox, True, True, 0)
         # Keep the inter-row padding inside an event window. A click in the
@@ -383,6 +389,7 @@ class LayerRow(object):
         # through the layer palette without selecting anything.
         self.widget = Gtk.EventBox()
         self.widget.add(row_box)
+        self.widget.connect_after("draw", self._draw_strike)
         self.widget.connect("button-press-event", self._on_row_click)
         self.widget.set_tooltip_text(tooltip)
         self._paint()
@@ -405,14 +412,8 @@ class LayerRow(object):
                     continue
                 off = (y * width + x) * 3
                 pixels[off:off + 3] = rgb_bytes
-        if struck:
-            line = bytes(LAYER_STRIKE_RGB)
-            mid = height // 2
-            for y in (mid - 1, mid):
-                if 0 <= y < height:
-                    for x in range(width):
-                        off = (y * width + x) * 3
-                        pixels[off:off + 3] = line
+        # (the strike line itself is drawn row-wide by _draw_strike;
+        # the struck swatch only dims so the line stays single)
         # Keep the immutable backing bytes with the row. Pixbuf normally
         # retains its own GLib reference, and this also makes that lifetime
         # explicit across older GTK3/PyGObject bundles.
@@ -426,26 +427,36 @@ class LayerRow(object):
         fg = ("#fff2a8" if self._picked else
               "#d9f2ff" if self._selected else
               "#ffffff" if self._active else "#777777")
-        # hidden = a BRIGHT strike straight across the whole row:
-        # every text span carries it (marker included, and the
-        # number's padding spaces keep it continuous up to the
-        # swatch) and the swatch swaps to its struck variant
-        strike = ("" if self._active else
-                  ' strikethrough="true" strikethrough_color="'
-                  '#%02x%02x%02x"' % LAYER_STRIKE_RGB)
+        # hidden = ONE bright line cairo-drawn edge to edge by
+        # _draw_strike (no per-span pango strike: it vanished in
+        # the margins/swatch gaps and doubled over a drawn line);
+        # text dims and the swatch swaps to its dimmed variant
         self._mlbl.set_markup(
             '<span face="monospace" size="medium" '
-            'foreground="%s"%s>%s</span>'
-            % (fg, strike, GLib.markup_escape_text(self._marker)))
+            'foreground="%s">%s</span>'
+            % (fg, GLib.markup_escape_text(self._marker)))
         self._nlbl.set_markup(
             '<span face="monospace" size="medium" '
-            'foreground="%s"%s>%s</span>'
-            % (fg, strike, GLib.markup_escape_text(self._num)))
+            'foreground="%s">%s</span>'
+            % (fg, GLib.markup_escape_text(self._num)))
         self._lbl.set_markup(
-            '<span size="medium" foreground="%s"%s>%s</span>'
-            % (fg, strike, GLib.markup_escape_text(self._name)))
+            '<span size="medium" foreground="%s">%s</span>'
+            % (fg, GLib.markup_escape_text(self._name)))
         self._clbl.set_from_pixbuf(
             self._swatch_on if self._active else self._swatch_off)
+        self.widget.queue_draw()
+
+    def _draw_strike(self, widget, cr):
+        """Hidden layer: one continuous bright line across the FULL
+        row - text, swatch, margins and trailing space alike."""
+        if self._active:
+            return False
+        alloc = widget.get_allocation()
+        y = max(0, (alloc.height - self._row_pad) // 2 - 1)
+        cr.set_source_rgb(*(c / 255.0 for c in LAYER_STRIKE_RGB))
+        cr.rectangle(0, y, alloc.width, 2)
+        cr.fill()
+        return False
 
     def set_marker(self, marker):
         self._marker = marker
