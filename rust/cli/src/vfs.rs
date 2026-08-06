@@ -22,12 +22,25 @@ const MIB: u64 = 1 << 20;
 /// Encoded payloads are retained for at most one ordered batch. The old
 /// implementation encoded every page before writing design.ovp, so peak RSS
 /// included the complete payload file (tens of GB on the 9.8G asset).
-const ENCODE_BATCH_PER_JOB: usize = 2;
+/// Retained payloads cost ~hundreds of KB each, so a deep batch is nearly
+/// free RSS and spaces the encode barriers out (~5% on the bench sweep).
+const ENCODE_BATCH_PER_JOB: usize = 8;
 const ENCODE_BATCH_MAX: usize = 256;
 /// Completed CellPlans retain fragment arenas and Morton-prepared placement
-/// points. Bound the default independently from CPU count; `--plan-batch`
-/// remains available for hosts that deliberately trade RAM for throughput.
-const PLAN_BATCH_MAX: usize = 16;
+/// points until their batch is encoded - plan_batch is the dominant RSS
+/// knob. The old default min(jobs, 16) had a real defect: the plan phase
+/// spawns min(jobs, batch_len) threads, so any host with more than 16
+/// cores planned on 16 of them and idled the rest. Default is now
+/// PLAN_BATCH_PER_JOB x jobs (thread-starvation impossible, stragglers
+/// amortized over a deeper queue); the governor below walks it back when
+/// memory runs short. Batch size never changes the output bytes (metadata
+/// is appended in cell order regardless - the jobs-determinism gates build
+/// with different batch sizes and byte-compare).
+const PLAN_BATCH_PER_JOB: usize = 4;
+/// dynamic plan-batch governor: when MemAvailable drops below this,
+/// halve the next batch (never below `jobs` - that would re-starve the
+/// plan threads). Linux-only signal; hosts without it keep the default.
+const GOVERNOR_MIN_AVAIL_GB: f64 = 4.0;
 const BVH_LEAF: usize = 8;
 /// pages per page-BVH leaf, and the run size at or below which a
 /// (cell,layer) run gets no BVH at all (linear scan, root = NONE)
@@ -120,8 +133,9 @@ pub fn vfs_cmd(args: &[String]) {
             .saturating_mul(ENCODE_BATCH_PER_JOB)
             .min(ENCODE_BATCH_MAX)
     });
-    let plan_batch =
-        plan_batch.unwrap_or_else(|| jobs.max(1).min(PLAN_BATCH_MAX));
+    let plan_batch = plan_batch.unwrap_or_else(|| {
+        jobs.max(1).saturating_mul(PLAN_BATCH_PER_JOB)
+    });
     let page_target_mb =
         page_target_mb.unwrap_or(DEFAULT_PAGE_TARGET_MB);
     let page_target_bytes = page_target_mb
@@ -2635,8 +2649,31 @@ fn build(
     );
     let mut plan_elapsed = std::time::Duration::ZERO;
     let mut encode_elapsed = std::time::Duration::ZERO;
-    for cell_base in (0..n).step_by(plan_batch) {
-        let cell_end = (cell_base + plan_batch).min(n);
+    // plan-batch governor: batch size changes only RSS and speed,
+    // never output bytes (metadata is appended in cell order), so
+    // it is safe to adapt between batches. Halve while MemAvailable
+    // is short, floor at `jobs` - fewer would starve the plan
+    // threads, the very defect the new default removes. No signal
+    // (macOS) = no governor. The reduction is sticky: recovering
+    // memory mid-build usually just means the last big batch was
+    // freed, not that the next one fits.
+    let mut cur_batch = plan_batch;
+    let mut cell_base = 0usize;
+    while cell_base < n {
+        if let Some(avail) = crate::mem_available_gb() {
+            if avail < GOVERNOR_MIN_AVAIL_GB {
+                let next = (cur_batch / 2).max(jobs.max(1));
+                if next < cur_batch {
+                    eprintln!(
+                        "[vfs] build: plan-batch governor {} -> {} \
+                         (MemAvailable {:.1} GB)",
+                        cur_batch, next, avail
+                    );
+                    cur_batch = next;
+                }
+            }
+        }
+        let cell_end = (cell_base + cur_batch).min(n);
         let batch_len = cell_end - cell_base;
         let tp = std::time::Instant::now();
         let pslots: Vec<std::sync::OnceLock<CellPlan>> =
@@ -2873,6 +2910,7 @@ fn build(
         );
         encode_elapsed += te.elapsed();
         debug_assert_eq!(b.n_pages() as usize, pages_total);
+        cell_base = cell_end;
         // batch_jobs, batch_arenas and every PtsPrepared drop here.
     }
     pipeline_on.store(false, std::sync::atomic::Ordering::Relaxed);
