@@ -482,9 +482,12 @@ klayout은 서브픽셀 도형도 전부 순회하며 그리므로(멤버당 비
   가벼워진다. 레벨 뒤의 화면-px 문턱값(현재 2/4/8px)은 구현 세부라
   나중에 조정돼도 "L1"의 의미는 유지된다. `c` 키 다이얼로그로 실시간
   변경, 시작값은 `view --cut-level`(기본 2). 상태바 우측에
-  `depth: full · cut: L2 · cov:off · lod:off`처럼 각 상태를 상시 표시.
-  VFS의 LOD는 기본 off이며 merged page 선택만 제어한다. cut과
-  coverage는 LOD 상태와 독립적으로 동작한다.
+  `depth: full · cut: L2 · cov:off · lod:on`처럼 각 상태를 상시 표시.
+  VFS의 LOD는 **기본 on**이다(스켈레톤 폐기 후 첫 fit 뷰가 라이브
+  워킹셋이므로 병합 변종이 키 입력 없이 개입해야 한다; 플래너의
+  충실도/가치 게이트가 줌인 시 자동으로 exact 복귀시키고, 계측
+  프로브는 구조적으로 exact다). `l`로 토글하며 merged page 선택만
+  제어한다. cut과 coverage는 LOD 상태와 독립적으로 동작한다.
 - **병합 트윈 (merged twin)** (v0.6.0): 컷으로 빠지는 밴드는 화면에서
   사라지는 대신 **병합 트윈**으로 그려진다 — 인덱싱 때 밴드별 지오메트리를
   flatten하고 닫힘(closing: `sized(+d)→merged→sized(−d)`, d = 밴드

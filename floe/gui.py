@@ -28,7 +28,11 @@ APP = "floe"
 POLL_MS = 25
 DEBOUNCE_MS = 120
 DEFAULT_CUT_LEVEL = 2
-DEFAULT_LOD = False
+# LOD starts ON (rev 31): the skeleton is gone, so the first fit
+# view is a live working set - merged variants must engage there
+# without a keypress. The planner's fidelity/worth gates and the
+# probe exactness rule keep it self-limiting; 'l' still toggles.
+DEFAULT_LOD = True
 DEFAULT_FRAMES = True
 DEFAULT_LABELS = True
 

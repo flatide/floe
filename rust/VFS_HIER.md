@@ -170,6 +170,34 @@ rev 10 (지시: **인덱서/뷰어 책임 분리** + 이전 검토 잔여 1건):
   start·count, payload size 등)은 checked — silent truncation
   금지, 초과는 "limit exceeded: <필드>" 빌드 에러.
 
+rev 31 (유한 depth sub-cut 접기 + LOD 기본 on — 2026-08-06, 0.11.4;
+150M 실측이 계기):
+
+- **실측(150M, 900µm 뷰, depth 5, cut 3.48µm)**: 31.3s = plan 9.3s
+  (CLI 순수 플랜 1.9s + 데몬 델타 저작 ~7s) + klayout 파스 ~9s +
+  draw 13s. plan CLI 대조로 원인 확정 — **inst_edges 4,055,904
+  (depth 5) vs 663 (full)**, page_candidates/encoded_bytes는 사실상
+  동일(1,130/26.0MB vs 1,178/26.0MB): 유한 depth 구조 워크가 그릴
+  것 없는 sub-cut 서브트리 400만 레코드를 순회·저작·파스시켰다.
+  lod_pages는 양쪽 0 — 충실도 게이트(페이지 ≤128px = 이 줌 ~70µm)
+  가 밀집 페이지를 전부 배제(→ G 확정은 M7-C/Plan B).
+- **rev 29 계약 한 줄 수정**: 유한 depth frontier에서 **sub-cut
+  서브트리는 sub-cut이 된 레벨에서 접힌다** — 그 서브트리의 페이지
+  는 어느 depth에서도 컷을 못 넘고(페이지 컷 컬과 동일 기하) 더
+  깊은 frontier 프레임도 sub-px라, 하강은 순수 plan/델타/파스
+  비용이다. frames on = 접힘 지점에 아웃라인 1개, frames off =
+  무표시. r==0(요청 깊이 경계)의 "모든 직계 자식 프레임"은 그대로.
+  라벨 워크(text.rs)도 동일 규칙(깊은 블록명은 어차피 fit 게이트
+  탈락). **선택 페이지 집합은 불변**(컷 컬 기하 동일 — 실측으로
+  증명)이라 기하 게이트 무풍; 유닛
+  finite_depth_folds_sub_cut_subtrees(엣지 1 vs 구 2+, 접힘 프레임
+  1, frames off 무표시, 페이지 동일).
+- **LOD 뷰어 기본 on 복귀**(rev 29의 기본 off 철회): 스켈레톤 폐기
+  후 첫 fit 뷰가 라이브 워킹셋이므로 병합 변종이 키 입력 없이
+  개입해야 한다. 플래너 게이트(충실도/가치)가 줌인 시 자동 exact
+  복귀, probe는 구조적 exact — 기본 on이 안전하다는 M7-B 원설계로
+  회귀. FLOE_LOD=0·'l' 토글·요청별 lod=0은 그대로.
+
 rev 30 (미니맵 depth-frontier 굽기 — 2026-08-06, 0.11.2):
 
 - **meta.json `frontier`**: depth별 구조 frontier 박스를 빌드가 굽는다

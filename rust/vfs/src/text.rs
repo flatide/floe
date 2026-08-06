@@ -500,15 +500,19 @@ impl<'a> LWalk<'a> {
         // Finite depth walks structure to synthesize boundary names,
         // independent of text layers and geometry cut. Full depth has no
         // block frontier and retains the recursive text-mask/cut pruning.
+        // sub-cut subtrees fold at finite depth exactly like the
+        // geometry walk (rev 31): their deeper block names could
+        // never pass the readability fit anyway, and the label walk
+        // must not pay the descent the planner just stopped paying
         let descend = r != 0
+            && !below_cut
             && (r != REM_FULL
-                || (!below_cut
-                    && masks_intersect(
-                        self.v.bitset(
-                            self.v.cell_tmask_rec(h.child),
-                        ),
-                        &self.req.vis,
-                    )));
+                || masks_intersect(
+                    self.v.bitset(
+                        self.v.cell_tmask_rec(h.child),
+                    ),
+                    &self.req.vis,
+                ));
         if !block && !descend {
             return;
         }

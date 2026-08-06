@@ -637,9 +637,28 @@ impl<'a> Hier<'a> {
                             continue;
                         }
                         // A finite remaining depth walks structure to
-                        // the requested frontier. Only full-depth
-                        // geometry traversal obeys layer and cut culls.
+                        // the requested frontier - but a sub-cut
+                        // subtree FOLDS HERE: none of its pages can
+                        // pass the cut at any depth, and its own
+                        // frontier frames would be sub-pixel, so
+                        // descending is pure plan/delta/parse cost
+                        // (150M field case: 4,055,904 edges vs 663
+                        // for the identical drawable page set). One
+                        // outline now (frames on) or nothing.
                         if r != REM_FULL {
+                            if cw < cut && chh < cut {
+                                self.st.cull_size += 1;
+                                if self.frames_total
+                                    < self.opts.frame_cap
+                                {
+                                    framed.insert(pli);
+                                    self.frame_depth_boundary(
+                                        &mut wc, pli, &h, &rb,
+                                        &boxes,
+                                    );
+                                }
+                                continue;
+                            }
                             if self.opts.frame_cap != 0
                                 || masks_intersect(
                                     self.v.bitset(
@@ -1542,6 +1561,66 @@ mod tests {
         let p2 = plan_hier(&v, &rq(view, 0, 2), &HierOpts::default());
         assert_eq!(p2.top, (2, REM_FULL));
         assert_eq!(p2.stats.frame_rects, 0);
+    }
+
+    /// A sub-cut subtree FOLDS at a finite depth (rev 31): no edge,
+    /// no descent - its pages can never pass the cut and its deeper
+    /// frontier would be sub-pixel. Frames on: one outline at the
+    /// fold level; frames off (frame_cap 0): nothing at all. The
+    /// 150M field case put 4.06M such edges in one delta while the
+    /// drawable page set was identical to depth full.
+    #[test]
+    fn finite_depth_folds_sub_cut_subtrees() {
+        let v = fixture(
+            &[
+                FCell {
+                    name: "TINY",
+                    pages: vec![(bx(0, 0, 8, 8), 8, 8)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "SMALL", // 8x8 child -> ~9x9 subtree
+                    pages: vec![],
+                    places: vec![(0, 1, 1, 0, false, Rep::One)],
+                },
+                FCell {
+                    name: "BIG",
+                    pages: vec![(bx(0, 0, 900, 900), 900, 900)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "TOP",
+                    pages: vec![],
+                    places: vec![
+                        (1, 0, 0, 0, false, Rep::One),
+                        (2, 1000, 0, 0, false, Rep::One),
+                    ],
+                },
+            ],
+            3,
+        );
+        // cut 50: SMALL's whole subtree is sub-cut, BIG is not.
+        // depth 1 (< height 2, so it does NOT fold to full) would
+        // previously make SMALL an edge and frame TINY below it.
+        let req = rq(bx(-10, -10, 2000, 1000), 50, 1);
+        let plan = plan_hier(&v, &req, &HierOpts::default());
+        // BIG's page ships; TINY's page is cut-culled everywhere
+        assert_eq!(plan.pages.len(), 1);
+        assert_eq!(v.page(plan.pages[0]).cell, 2);
+        // the sub-cut subtree became ONE fold frame on TOP, and
+        // neither SMALL nor TINY got a working-set cell
+        let top = plan.wcells.iter().find(|w| w.key.0 == 3).unwrap();
+        assert_eq!(top.frames.len(), 1);
+        assert!(!plan.wcells.iter().any(|w| w.key.0 <= 1));
+        // the only edge is TOP -> BIG
+        assert_eq!(plan.stats.inst_edges, 1);
+        // frames off: the fold is silent (no frame, still no edge)
+        let mut off = HierOpts::default();
+        off.frame_cap = 0;
+        let p2 = plan_hier(&v, &req, &off);
+        assert_eq!(p2.stats.frame_rects, 0);
+        assert_eq!(p2.stats.inst_edges, 1);
+        assert_eq!(p2.pages, plan.pages);
     }
 
     fn rq(view: BBox, cut: i64, depth: u32) -> ViewReq {
