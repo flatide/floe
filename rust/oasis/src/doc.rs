@@ -121,8 +121,11 @@ pub struct Doc {
     /// seconds spent in the grid-normalize pass (parse-phase
     /// attribution for the CLI log)
     pub norm_s: f64,
-    /// names from LAYERNAME records with exact-value intervals
+    /// display name selected as the last applicable non-empty LAYERNAME
     pub layer_names: HashMap<(u32, u32), String>,
+    /// all non-empty LAYERNAME aliases applying to each concrete pair,
+    /// in source appearance order; layer_names is the last alias
+    pub layer_aliases: HashMap<(u32, u32), Vec<String>>,
 }
 
 // ------------------------------------------------------------ modal set
@@ -356,8 +359,85 @@ struct Builder {
     pending_texts: Vec<(usize, usize, u64)>,
     layer_order: Vec<(u32, u32)>,
     layer_seen: HashMap<(u32, u32), ()>,
-    layer_names: HashMap<(u32, u32), String>,
+    layer_name_rules: Vec<LayerNameRule>,
     unit: f64,
+}
+
+#[derive(Clone)]
+struct NameInterval {
+    lo: u64,
+    hi: u64,
+}
+
+impl NameInterval {
+    fn exact(&self) -> Option<u32> {
+        if self.lo == self.hi {
+            u32::try_from(self.lo).ok()
+        } else {
+            None
+        }
+    }
+
+    fn contains(&self, value: u32) -> bool {
+        self.lo <= value as u64 && value as u64 <= self.hi
+    }
+}
+
+#[derive(Clone)]
+struct LayerNameRule {
+    name: String,
+    layer: NameInterval,
+    datatype: NameInterval,
+}
+
+fn name_interval(c: &mut Cur) -> Result<NameInterval> {
+    let interval = match c.uint()? {
+        0 => NameInterval { lo: 0, hi: u64::MAX },
+        1 => NameInterval { lo: 0, hi: c.uint()? },
+        2 => NameInterval { lo: c.uint()?, hi: u64::MAX },
+        3 => {
+            let v = c.uint()?;
+            NameInterval { lo: v, hi: v }
+        }
+        4 => {
+            let lo = c.uint()?;
+            let hi = c.uint()?;
+            if lo > hi {
+                return err(c.here(), "reversed interval");
+            }
+            NameInterval { lo, hi }
+        }
+        _ => return err(c.here(), "bad interval"),
+    };
+    Ok(interval)
+}
+
+fn resolved_layer_names(
+    order: &[(u32, u32)],
+    rules: &[LayerNameRule],
+) -> (
+    HashMap<(u32, u32), String>,
+    HashMap<(u32, u32), Vec<String>>,
+) {
+    let mut names = HashMap::new();
+    let mut aliases = HashMap::new();
+    for &(layer, datatype) in order {
+        let mut matched = Vec::new();
+        for rule in rules {
+            if !rule.name.is_empty()
+                && rule.layer.contains(layer)
+                && rule.datatype.contains(datatype)
+                && !matched.contains(&rule.name)
+            {
+                matched.push(rule.name.clone());
+            }
+        }
+        if let Some(name) = matched.last() {
+            names.insert((layer, datatype), name.clone());
+            aliases.insert((layer, datatype), matched);
+        }
+    }
+    (names, aliases)
 }
 
 impl Builder {
@@ -435,34 +515,22 @@ fn parse_records(
                 }
             }
             11 | 12 => {
-                // LAYERNAME: register exact (layer, datatype) pairs in
-                // appearance order + remember the name (klayout's
-                // layer table starts with these)
+                // LAYERNAME: exact pairs participate in layer appearance
+                // order. Keep every interval rule until all concrete pairs
+                // are known; KLayout exposes overlapping aliases as
+                // "aaa;bbb", while Floe displays the last alias.
                 let sb = c.string()?.to_vec();
                 let name = utf8(c, &sb)?;
-                let mut exact: [Option<u64>; 2] = [None, None];
-                for e in &mut exact {
-                    match c.uint()? {
-                        0 => {}
-                        1 | 2 => {
-                            c.uint()?;
-                        }
-                        3 => *e = Some(c.uint()?),
-                        4 => {
-                            let a = c.uint()?;
-                            let bb = c.uint()?;
-                            if a == bb {
-                                *e = Some(a);
-                            }
-                        }
-                        _ => return err(c.here(), "bad interval"),
-                    }
+                let layer = name_interval(c)?;
+                let datatype = name_interval(c)?;
+                if let (Some(l), Some(d)) =
+                    (layer.exact(), datatype.exact())
+                {
+                    b.reg_layer(l, d);
                 }
-                if let (Some(l), Some(d)) = (exact[0], exact[1]) {
-                    let key = (l as u32, d as u32);
-                    b.reg_layer(key.0, key.1);
-                    b.layer_names.entry(key).or_insert(name);
-                }
+                b.layer_name_rules.push(LayerNameRule {
+                    name, layer, datatype,
+                });
             }
             13 | 14 => {
                 let name = if id == 13 {
@@ -1179,7 +1247,7 @@ fn new_builder(implicit_ref: u64, implicit_tref: u64) -> Builder {
         pending_texts: Vec::new(),
         layer_order: Vec::new(),
         layer_seen: HashMap::new(),
-        layer_names: HashMap::new(),
+        layer_name_rules: Vec::new(),
         unit: 0.0,
     }
 }
@@ -1324,9 +1392,7 @@ fn parse_doc_syntax(data: &[u8], jobs: usize) -> Result<Doc> {
         for &(l, d) in std::mem::take(&mut cb.layer_order).iter() {
             b.reg_layer(l, d);
         }
-        for (k, v) in std::mem::take(&mut cb.layer_names) {
-            b.layer_names.entry(k).or_insert(v);
-        }
+        b.layer_name_rules.append(&mut cb.layer_name_rules);
     }
     for cb in builders {
         merge_cells(&mut b, cb);
@@ -1387,12 +1453,15 @@ fn finish_inner(mut b: Builder) -> Result<Doc> {
     if tops.len() != 1 {
         return err(0, &format!("{} top cells (spike expects 1)", tops.len()));
     }
+    let (layer_names, layer_aliases) =
+        resolved_layer_names(&b.layer_order, &b.layer_name_rules);
     Ok(Doc {
         unit: b.unit,
         cells: b.cells,
         top: tops[0],
         layer_order: b.layer_order,
-        layer_names: b.layer_names,
+        layer_names,
+        layer_aliases,
         norm_s: 0.0,
     })
 }
@@ -1400,6 +1469,147 @@ fn finish_inner(mut b: Builder) -> Result<Doc> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn layer_aliases_apply_intervals_and_last_alias_wins() {
+        let interval = |lo, hi| NameInterval { lo, hi };
+        let rules = vec![
+            LayerNameRule {
+                name: "aaa".into(),
+                layer: interval(15, 15),
+                datatype: interval(192, 192),
+            },
+            LayerNameRule {
+                name: "bbb".into(),
+                layer: interval(15, 15),
+                datatype: interval(190, 200),
+            },
+            // Repeated matching rules do not create repeated aliases.
+            LayerNameRule {
+                name: "bbb".into(),
+                layer: interval(15, 15),
+                datatype: interval(192, 192),
+            },
+            LayerNameRule {
+                name: "ccc".into(),
+                layer: interval(16, 16),
+                datatype: interval(192, 192),
+            },
+        ];
+        let (names, aliases) = resolved_layer_names(
+            &[(15, 192), (15, 0), (16, 192)],
+            &rules,
+        );
+        assert_eq!(aliases[&(15, 192)], ["aaa", "bbb"]);
+        assert_eq!(names[&(15, 192)], "bbb");
+        assert!(!aliases.contains_key(&(15, 0)));
+        assert_eq!(aliases[&(16, 192)], ["ccc"]);
+    }
+
+    /// Byte-level LAYERNAME fixture: klayout only ever writes exact
+    /// (type 3) intervals, so no suite asset exercises the type
+    /// 0/1/2/4 decoders in name_interval(). A mis-consumed operand
+    /// there would desync the record stream and misparse the REST of
+    /// the file - hence the rects placed AFTER the rule block.
+    #[test]
+    fn layername_interval_records_parse_and_resolve() {
+        use crate::write::W;
+        let mut w = W::new();
+        w.out.extend_from_slice(b"%SEMI-OASIS\r\n");
+        w.uint(1); // START
+        w.string(b"1.0");
+        w.real_f64(1000.0);
+        w.uint(0);
+        for _ in 0..12 {
+            w.uint(0);
+        }
+        // every interval type once (name, layer-interval, dt-interval)
+        w.uint(11); // "all": type 0 x type 0 - matches every pair
+        w.string(b"all");
+        w.uint(0);
+        w.uint(0);
+        w.uint(11); // "low": layer 0..=100 (type 1), dt exactly 0
+        w.string(b"low");
+        w.uint(1);
+        w.uint(100);
+        w.uint(3);
+        w.uint(0);
+        w.uint(11); // "high": layer 200.. (type 2), any dt
+        w.string(b"high");
+        w.uint(2);
+        w.uint(200);
+        w.uint(0);
+        w.uint(11); // "band": layer 10..=20 x dt 0..=5 (type 4)
+        w.string(b"band");
+        w.uint(4);
+        w.uint(10);
+        w.uint(20);
+        w.uint(4);
+        w.uint(0);
+        w.uint(5);
+        w.uint(11); // "pin": exact 15/0 (type 3) - registers the pair
+        w.string(b"pin");
+        w.uint(3);
+        w.uint(15);
+        w.uint(3);
+        w.uint(0);
+        w.uint(11); // "eq4": type 4 with lo == hi is exact too
+        w.string(b"eq4");
+        w.uint(4);
+        w.uint(33);
+        w.uint(33);
+        w.uint(4);
+        w.uint(0);
+        w.uint(0);
+        // geometry AFTER the rules: the desync guard
+        w.uint(14); // CELL by name
+        w.string(b"TOP");
+        w.uint(20); // RECTANGLE on 15/0: L D W H X Y
+        w.byte(0x7B);
+        w.uint(15);
+        w.uint(0);
+        w.uint(4);
+        w.uint(5);
+        w.sint(1);
+        w.sint(2);
+        w.uint(20); // RECTANGLE on 250/7
+        w.byte(0x7B);
+        w.uint(250);
+        w.uint(7);
+        w.uint(6);
+        w.uint(7);
+        w.sint(3);
+        w.sint(4);
+        w.uint(2); // END
+        let doc = parse_doc(&w.out).expect("fixture parses");
+        // the stream survived every interval operand
+        let top = &doc.cells[doc.top];
+        assert_eq!(top.rects.len(), 2);
+        assert_eq!(
+            (top.rects[1].layer, top.rects[1].dt, top.rects[1].x),
+            (250, 7, 3)
+        );
+        // 15/0: every applicable alias in source order, last is
+        // the display name
+        assert_eq!(
+            doc.layer_aliases[&(15, 0)],
+            ["all", "low", "band", "pin"]
+        );
+        assert_eq!(doc.layer_names[&(15, 0)], "pin");
+        // 250/7: the lower-bounded rule applies, the bounded ones
+        // do not
+        assert_eq!(doc.layer_aliases[&(250, 7)], ["all", "high"]);
+        assert_eq!(doc.layer_names[&(250, 7)], "high");
+        // exact rules REGISTER their pair (type 3 and equal type 4
+        // alike), interval-only rules never create pairs
+        assert!(doc.layer_order.contains(&(15, 0)));
+        assert!(doc.layer_order.contains(&(33, 0)));
+        assert_eq!(doc.layer_aliases[&(33, 0)], ["all", "low", "eq4"]);
+        assert!(!doc
+            .layer_order
+            .iter()
+            .any(|&(l, _)| l == 100 || l == 200 || l == 10));
+    }
 
     #[test]
     fn modal_pts_reuse_shares_the_offset_storage() {

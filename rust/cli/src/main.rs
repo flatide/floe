@@ -1144,12 +1144,25 @@ fn index_cmd(args: &[String]) {
                 .cloned()
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| format!("{}/{}", l, d));
+            let aliases = doc
+                .layer_aliases
+                .get(&(l, d))
+                .map(|names| {
+                    names
+                        .iter()
+                        .map(|s| format!("\"{}\"", jesc(s)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
             format!(
                 "{{\"layer\": {}, \"datatype\": {}, \"name\": \"{}\", \
-                 \"color\": \"{}\", \"stored_shapes\": {}}}",
+                 \"aliases\": [{}], \"color\": \"{}\", \
+                 \"stored_shapes\": {}}}",
                 l,
                 d,
                 jesc(&name),
+                aliases,
                 layer_color(l as usize),
                 stored.get(&(l, d)).copied().unwrap_or(0)
             )

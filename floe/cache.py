@@ -191,6 +191,12 @@ def layer_color(layer):
     return "#%02x%02x%02x" % (int(r * 255), int(g * 255), int(b * 255))
 
 
+def _layer_aliases(name):
+    """Aliases exposed by KLayout as a semicolon-joined layer name."""
+    return list(dict.fromkeys(
+        part.strip() for part in (name or "").split(";") if part.strip()))
+
+
 def normalize_layer_colors(meta):
     """Apply the layer-number palette to new and existing caches.
 
@@ -312,8 +318,16 @@ class Cache:
         """Parse 'M1,5/1,MARKER' into [(layer, datatype), ...]. None = all."""
         if not spec or spec == "all":
             return None
-        byname = {l["name"]: (l["layer"], l["datatype"])
-                  for l in self.meta["layers"] if l.get("name")}
+        byname = {}
+        for layer in self.meta["layers"]:
+            key = (layer["layer"], layer["datatype"])
+            aliases = list(layer.get("aliases") or ())
+            if layer.get("name"):
+                aliases.append(layer["name"])
+            for alias in aliases:
+                matches = byname.setdefault(alias, [])
+                if key not in matches:
+                    matches.append(key)
         out = []
         for tok in spec.split(","):
             tok = tok.strip()
@@ -323,11 +337,11 @@ class Cache:
                 l, d = tok.split("/")
                 out.append((int(l), int(d)))
             elif tok in byname:
-                out.append(byname[tok])
+                out.extend(byname[tok])
             else:
                 raise ValueError(f"unknown layer: {tok!r} "
                                  f"(known: {sorted(byname)})")
-        return out
+        return list(dict.fromkeys(out))
 
 
 def _scan_layers(ly, log=None):
@@ -1858,8 +1872,11 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
     layers = []
     for li in ly.layer_indexes():
         info = ly.get_info(li)
+        aliases = _layer_aliases(info.name)
         layers.append({"layer": info.layer, "datatype": info.datatype,
-                       "name": info.name or f"{info.layer}/{info.datatype}",
+                       "name": aliases[-1] if aliases else
+                       f"{info.layer}/{info.datatype}",
+                       "aliases": aliases,
                        "color": layer_color(info.layer),
                        "stored_shapes": counts[li]})
     log(f"[index] layer scan done ({time.perf_counter() - t0:.1f}s, "

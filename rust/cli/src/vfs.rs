@@ -528,12 +528,25 @@ fn emit_viewer_side(
                 .cloned()
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| format!("{}/{}", l, d));
+            let aliases = doc
+                .layer_aliases
+                .get(&(l, d))
+                .map(|names| {
+                    names
+                        .iter()
+                        .map(|s| format!("\"{}\"", crate::jesc(s)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
             format!(
                 "{{\"layer\": {}, \"datatype\": {}, \"name\": \
-                 \"{}\", \"color\": \"{}\", \"stored_shapes\": {}}}",
+                 \"{}\", \"aliases\": [{}], \"color\": \"{}\", \
+                 \"stored_shapes\": {}}}",
                 l,
                 d,
                 crate::jesc(&name),
+                aliases,
                 crate::layer_color(l as usize),
                 stored.get(&(l, d)).copied().unwrap_or(0)
             )
@@ -3863,6 +3876,7 @@ mod split_tests {
             layer_order: vec![(1, 0)],
             norm_s: 0.0,
             layer_names: Default::default(),
+            layer_aliases: Default::default(),
         }
     }
 
