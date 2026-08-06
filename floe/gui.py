@@ -527,7 +527,14 @@ class Viewer:
             b".floe-layer-selected, .floe-layer-selected * "
             b"{ background-color: #31566d; } "
             b".floe-layer-picked, .floe-layer-picked * "
-            b"{ background-color: #66582f; }")
+            b"{ background-color: #66582f; } "
+            b".floe-layers scrollbar trough "
+            b"{ background-color: #000000; background-image: none; } "
+            b".floe-layers scrollbar slider, "
+            b".floe-layers scrollbar slider:hover, "
+            b".floe-layers scrollbar slider:active "
+            b"{ background-color: #ffffff; background-image: none; "
+            b"border-color: #ffffff; opacity: 1; }")
         Gtk.StyleContext.add_provider_for_screen(
             Gdk.Screen.get_default(), css,
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
