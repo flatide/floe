@@ -65,8 +65,12 @@ MINIMAP_FRONT = 0x46565FFF  # depth-frontier outlines: dim slate,
 # independent of the current design's actual maximum, so changing files or
 # expanding a group never moves the palette columns. A small fractional
 # margin is converted from the active font width by LayerRow.
-LAYER_NUM_WIDTH = len("999.999")
-LAYER_NUM_MARGIN_CHARS = 0.2
+LAYER_NUM_WIDTH = len("999.999")  # MINIMUM number column; the panel
+                                  # widens it to the longest actual
+                                  # pair + 1 so the swatch column can
+                                  # never break alignment
+LAYER_NUM_MARGIN_CHARS = 0.6      # number -> swatch breathing room
+LAYER_NAME_MARGIN_CHARS = 1.2     # swatch -> name: over a full glyph
 LAYER_COLOR_WIDTH = 5       # former 2-char swatch column x 2.5
 
 
@@ -334,7 +338,7 @@ class LayerRow(object):
         self._nlbl.set_xalign(0.0)
         probe = self._nlbl.create_pango_layout("")
         probe.set_markup(
-            '<span face="monospace" size="x-small">0</span>', -1)
+            '<span face="monospace" size="small">0</span>', -1)
         probe_width, probe_height = probe.get_pixel_size()
         self._mlbl.set_size_request(max(1, probe_width * 2), -1)
         self._nlbl.set_size_request(max(1, probe_width * num_width), -1)
@@ -349,7 +353,10 @@ class LayerRow(object):
         self._clbl.set_size_request(swatch_w, swatch_h)
         self._lbl = Gtk.Label()
         self._lbl.set_xalign(0.0)
-        self._lbl.set_margin_start(small_gap)
+        # the alias sits visibly APART from the swatch: at least a
+        # full glyph of air, not the thin number-column gap
+        self._lbl.set_margin_start(max(
+            1, round(probe_width * LAYER_NAME_MARGIN_CHARS)))
         # Preserve the complete layer name. The palette scroller owns the
         # width constraint and exposes overflow through its bottom scrollbar.
         self._lbl.set_ellipsize(Pango.EllipsizeMode.NONE)
@@ -400,16 +407,16 @@ class LayerRow(object):
               "#d9f2ff" if self._selected else
               "#ffffff" if self._active else "#777777")
         self._mlbl.set_markup(
-            '<span face="monospace" size="x-small" '
+            '<span face="monospace" size="small" '
             'foreground="%s">%s</span>'
             % (fg, GLib.markup_escape_text(self._marker)))
         strike = "" if self._active else ' strikethrough="true"'
         self._nlbl.set_markup(
-            '<span face="monospace" size="x-small" '
+            '<span face="monospace" size="small" '
             'foreground="%s"%s>%s</span>'
             % (fg, strike, GLib.markup_escape_text(self._num)))
         self._lbl.set_markup(
-            '<span size="x-small" foreground="%s"%s>%s</span>'
+            '<span size="small" foreground="%s"%s>%s</span>'
             % (fg, strike, GLib.markup_escape_text(self._name)))
 
     def set_marker(self, marker):
@@ -904,7 +911,13 @@ class Viewer:
         groups = {}
         for l in self.meta["layers"]:
             groups.setdefault(l["layer"], []).append(l)
-        num_width = LAYER_NUM_WIDTH
+        # the number column fits the LONGEST actual pair plus one
+        # glyph of margin - a fixed width broke the swatch column
+        # whenever a real pair outgrew it (field report: 63.63 era)
+        num_width = max(
+            [LAYER_NUM_WIDTH] +
+            [len("%d.%d" % (l["layer"], l["datatype"])) + 1
+             for l in self.meta["layers"]])
 
         def add_row(l, marker, tooltip, on_expand=None):
             row = LayerRow(l, marker, num_width, tooltip,
