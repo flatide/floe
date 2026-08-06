@@ -650,9 +650,43 @@ class Viewer:
         self._layers_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self._layers_box.set_margin_top(4)
         self._layers_box.set_margin_bottom(4)
+        # NATURAL height, never viewport-fill (field bug): a filled
+        # box keeps the tall allocation it got while the window was
+        # large; shrink the window into scrollable territory at the
+        # wrong moment and the adjustment upper stays at that stale
+        # height - a phantom scroll range of empty box. Scrolling
+        # then walks the rows out of view with dead black above and
+        # below (rows live only at the top of the oversized box).
+        # START-aligned, the box is always exactly as tall as its
+        # rows and the phantom range cannot exist.
+        self._layers_box.set_valign(Gtk.Align.START)
         self._layers_box.get_style_context().add_class("floe-layers")
         scroller.add(self._layers_box)
         side.pack_start(scroller, True, True, 4)
+
+        # Range watchdog for the same field bug: the adjustment
+        # upper legitimately equals max(content, viewport) - but a
+        # missed viewport re-allocate during an interactive window
+        # shrink leaves upper at the OLD viewport height while the
+        # page has already shrunk. That phantom range scrolls the
+        # rows out of a mostly-empty box: the panel shows a
+        # shrinking band with dead black above and below. Re-clamp
+        # whenever the geometry or the scroll position changes;
+        # when GTK got it right this is a no-op.
+        def _clamp_palette_range(*_a):
+            adj = scroller.get_vadjustment()
+            # GTK3 folds widget margins into preferred sizes
+            nat = self._layers_box.get_preferred_height()[1]
+            want = max(nat, adj.get_page_size())
+            if adj.get_upper() > want + 2:
+                adj.set_upper(want)
+                adj.set_value(max(0.0, min(
+                    adj.get_value(),
+                    want - adj.get_page_size())))
+
+        scroller.connect("size-allocate", _clamp_palette_range)
+        scroller.get_vadjustment().connect(
+            "value-changed", _clamp_palette_range)
         _panel_debug_hook(scroller, self._layers_box,
                           lambda: list(self._layer_rows.values()))
 
