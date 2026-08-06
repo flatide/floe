@@ -647,12 +647,24 @@ class Viewer:
         self.window.connect("delete-event", lambda *_: self._quit())
         self.window.connect("key-press-event", self._on_key)
 
-        hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        self.window.add(hbox)
+        # window > outer(V) > [paned(H): view | panel] + status rows.
+        # The status/info rows sit OUTSIDE the paned, spanning the
+        # full window width - the panel can no longer run over them
+        # (field report) - and the paned handle between the view and
+        # the panel drags the panel width.
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.window.add(outer)
+        paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        try:
+            paned.set_wide_handle(True)
+        except AttributeError:
+            pass
+        outer.pack_start(paned, True, True, 0)
+        self._outer = outer
 
         side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         side.set_size_request(210, -1)
-        hbox.pack_end(side, False, False, 0)
+        paned.pack2(side, resize=False, shrink=False)
         title = Gtk.Label()
         title.set_markup("<b>%s</b>" % APP)
         title.set_xalign(0.0)
@@ -794,7 +806,7 @@ class Viewer:
             brow.pack_start(b, True, True, 0)
 
         main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        hbox.pack_start(main, True, True, 0)
+        paned.pack1(main, resize=True, shrink=True)
         self.overlay = Gtk.Overlay()
         # the image lives in a ScrolledWindow so the window can shrink:
         # a bare Gtk.Image's minimum size is its pixbuf, and since we
@@ -849,7 +861,8 @@ class Viewer:
         infobar.pack_end(self.rstatus, False, False, 0)
         sbars.pack_start(livebar, False, False, 0)
         sbars.pack_start(infobar, False, False, 0)
-        main.pack_start(sbars, False, False, 2)
+        # full-width status strip UNDER both the view and the panel
+        outer.pack_start(sbars, False, False, 2)
 
         self.scroller.add_events(
             Gdk.EventMask.BUTTON_PRESS_MASK |
