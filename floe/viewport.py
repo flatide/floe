@@ -187,13 +187,16 @@ class VfsMosaic:
             self._lgen += 1
             lc = self.ly.create_cell("LABELS_%d" % self._lgen)
             self.label_ci = lc.cell_index()
-            for (l, d, x, y, s, rot, centered) in labels:
+            for (l, d, x, y, s, rot, _centered) in labels:
                 li = self.ly.layer(db.LayerInfo(l, d))
                 text = db.Text(
                     s, db.Trans(int(rot) & 3, False, int(x), int(y)))
-                if centered:
-                    text.halign = db.Text.HAlignCenter
-                    text.valign = db.Text.VAlignCenter
+                # every live label centers on its anchor - design
+                # texts (their layer color) exactly like block
+                # names; left/bottom anchoring read as offset
+                # strings next to the marker geometry
+                text.halign = db.Text.HAlignCenter
+                text.valign = db.Text.VAlignCenter
                 lc.shapes(li).insert(text)
             self.top.insert(
                 db.CellInstArray(self.label_ci, db.Trans()))
