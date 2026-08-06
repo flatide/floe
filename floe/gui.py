@@ -3192,7 +3192,9 @@ class Viewer:
             self._set_picked_layer(None)
             self._set_live_status("selection cleared")
             return
-        self._set_picked_layer((res["layer"], res["datatype"]))
+        self._set_picked_layer(
+            (res["layer"], res["datatype"]),
+            {(s["layer"], s["datatype"]) for s in self.selections})
         bb = res["bbox"]
         w = (bb[2] - bb[0]) * self.dbu
         h = (bb[3] - bb[1]) * self.dbu
@@ -3215,10 +3217,13 @@ class Viewer:
         self._pick_seq += 1
         self._set_picked_layer(None)
 
-    def _set_picked_layer(self, key):
-        """Highlight and reveal the layer of the picked polygon."""
+    def _set_picked_layer(self, key, keys=None):
+        """Highlight the layers of ALL picked polygons; reveal and
+        scroll to `key`, the primary pick's layer."""
+        if keys is None:
+            keys = {key} if key is not None else set()
         for row_key, row in self._layer_rows.items():
-            row.set_picked(row_key == key)
+            row.set_picked(row_key in keys)
         # a group WE expanded for a previous pick collapses back once
         # it is no longer needed - auto-expansion must not silently
         # flip the parent row's double-click semantics forever
