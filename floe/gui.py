@@ -198,6 +198,71 @@ def frame_rect(buf, x0, y0, w, h, color):
     fill_rect(buf, x0 + w - 1, y0, 1, h, color)
 
 
+def _panel_debug_hook(scroller, box, rows_getter):
+    """FLOE_PANEL_DEBUG=1: log palette geometry on every scroll tick
+    and size change - allocation vs GdkWindow vs mapped state for the
+    first/last rows in view. Field tool for the shrinking-range bug:
+    the log shows WHICH layer of the stack (logical allocation, gdk
+    window position, map state, adjustment clamp) diverges on the
+    machine where it reproduces."""
+    if not os.environ.get("FLOE_PANEL_DEBUG"):
+        return
+
+    def dump(tag, *_a):
+        try:
+            adj = scroller.get_vadjustment()
+            sa = scroller.get_allocation()
+            ba = box.get_allocation()
+            vp = scroller.get_child()
+            binpos = None
+            try:
+                # the BIN window is the one the scroll moves; its y
+                # should track -adj.value exactly
+                bw = vp.get_bin_window() if hasattr(
+                    vp, "get_bin_window") else None
+                if bw is not None:
+                    binpos = bw.get_position()
+            except Exception:
+                pass
+            lo = hi = None
+            unmapped = 0
+            for r in rows_getter():
+                w = r.widget
+                if not w.get_visible():
+                    continue
+                a = w.get_allocation()
+                inview = (a.y + a.height > adj.get_value()
+                          and a.y < adj.get_value()
+                          + adj.get_page_size())
+                if not inview:
+                    continue
+                if not w.get_mapped():
+                    unmapped += 1
+                gw = w.get_window()
+                pos = gw.get_position() if gw else None
+                ent = (a.y, a.height, w.get_mapped(), pos)
+                if lo is None:
+                    lo = ent
+                hi = ent
+            sys.stderr.write(
+                "[panel] %s adj=%.0f/%.0f pg=%.0f scr=(y%d h%d) "
+                "box_h=%d bin=%s first=%s last=%s "
+                "unmapped_in_view=%d\n"
+                % (tag, adj.get_value(), adj.get_upper(),
+                   adj.get_page_size(), sa.y, sa.height,
+                   ba.height, binpos, lo, hi, unmapped))
+            sys.stderr.flush()
+        except Exception as exc:
+            sys.stderr.write("[panel] dump failed: %s\n" % exc)
+
+    scroller.get_vadjustment().connect(
+        "value-changed", lambda *a: dump("scroll"))
+    scroller.connect(
+        "size-allocate", lambda *a: dump("alloc"))
+    box.connect(
+        "size-allocate", lambda *a: dump("box-alloc"))
+
+
 def _remote_x_scroll_repaint(scroller):
     """Repaint the whole scrolled area on every scroll step.
 
@@ -588,6 +653,8 @@ class Viewer:
         self._layers_box.get_style_context().add_class("floe-layers")
         scroller.add(self._layers_box)
         side.pack_start(scroller, True, True, 4)
+        _panel_debug_hook(scroller, self._layers_box,
+                          lambda: list(self._layer_rows.values()))
 
         # Keep the overview in the palette instead of painting it over the
         # design pixels in the bottom-right corner of the viewport.
