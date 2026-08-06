@@ -214,14 +214,23 @@ def _panel_debug_hook(scroller, box, rows_getter):
             sa = scroller.get_allocation()
             ba = box.get_allocation()
             vp = scroller.get_child()
-            binpos = None
+            binpos = viewpos = None
             try:
-                # the BIN window is the one the scroll moves; its y
-                # should track -adj.value exactly
+                # BIN window: moves with the scroll, must be as tall
+                # as the content and sit at y = -adj.value.
+                # VIEW window: the stationary clip, must span the
+                # whole scroller interior - a short/misplaced view
+                # window clips rows to a moving band.
                 bw = vp.get_bin_window() if hasattr(
                     vp, "get_bin_window") else None
                 if bw is not None:
-                    binpos = bw.get_position()
+                    g = bw.get_geometry()
+                    binpos = (g.x, g.y, g.width, g.height)
+                vw = vp.get_view_window() if hasattr(
+                    vp, "get_view_window") else None
+                if vw is not None:
+                    g = vw.get_geometry()
+                    viewpos = (g.x, g.y, g.width, g.height)
             except Exception:
                 pass
             lo = hi = None
@@ -246,11 +255,11 @@ def _panel_debug_hook(scroller, box, rows_getter):
                 hi = ent
             sys.stderr.write(
                 "[panel] %s adj=%.0f/%.0f pg=%.0f scr=(y%d h%d) "
-                "box_h=%d bin=%s first=%s last=%s "
+                "box_h=%d bin=%s view=%s first=%s last=%s "
                 "unmapped_in_view=%d\n"
                 % (tag, adj.get_value(), adj.get_upper(),
                    adj.get_page_size(), sa.y, sa.height,
-                   ba.height, binpos, lo, hi, unmapped))
+                   ba.height, binpos, viewpos, lo, hi, unmapped))
             sys.stderr.flush()
         except Exception as exc:
             sys.stderr.write("[panel] dump failed: %s\n" % exc)
