@@ -71,6 +71,8 @@ LAYER_NUM_WIDTH = len("999.999")  # MINIMUM number column; the panel
                                   # never break alignment
 LAYER_NUM_MARGIN_CHARS = 0.6      # number -> swatch breathing room
 LAYER_NAME_MARGIN_CHARS = 1.2     # swatch -> name: over a full glyph
+LAYER_STRIKE_RGB = (242, 242, 242)  # hidden-layer strike: bright,
+                                    # readable over dimmed text/swatch
 LAYER_COLOR_WIDTH = 5       # former 2-char swatch column x 2.5
 
 
@@ -338,7 +340,7 @@ class LayerRow(object):
         self._nlbl.set_xalign(0.0)
         probe = self._nlbl.create_pango_layout("")
         probe.set_markup(
-            '<span face="monospace" size="small">0</span>', -1)
+            '<span face="monospace" size="medium">0</span>', -1)
         probe_width, probe_height = probe.get_pixel_size()
         self._mlbl.set_size_request(max(1, probe_width * 2), -1)
         self._nlbl.set_size_request(max(1, probe_width * num_width), -1)
@@ -349,7 +351,11 @@ class LayerRow(object):
         self._clbl.set_valign(Gtk.Align.CENTER)
         swatch_w = max(5, round(probe_width * LAYER_COLOR_WIDTH))
         swatch_h = max(3, probe_height)
-        self._clbl.set_from_pixbuf(self._speckle_swatch(swatch_w, swatch_h))
+        self._swatch_refs = []
+        self._swatch_on = self._speckle_swatch(swatch_w, swatch_h)
+        self._swatch_off = self._speckle_swatch(
+            swatch_w, swatch_h, struck=True)
+        self._clbl.set_from_pixbuf(self._swatch_on)
         self._clbl.set_size_request(swatch_w, swatch_h)
         self._lbl = Gtk.Label()
         self._lbl.set_xalign(0.0)
@@ -381,10 +387,15 @@ class LayerRow(object):
         self.widget.set_tooltip_text(tooltip)
         self._paint()
 
-    def _speckle_swatch(self, width, height):
-        """Layer-palette preview of the renderer's 1px checker fill."""
+    def _speckle_swatch(self, width, height, struck=False):
+        """Layer-palette preview of the renderer's 1px checker fill.
+        struck: the hidden-layer variant - dimmed fill with a bright
+        strike line through the middle, so the row-wide strike does
+        not vanish inside the swatch."""
         color = int(self._color.lstrip("#"), 16)
         rgb = ((color >> 16) & 255, (color >> 8) & 255, color & 255)
+        if struck:
+            rgb = tuple(c // 2 for c in rgb)
         rgb_bytes = bytes(rgb)
         pixels = bytearray(width * height * 3)
         for y in range(height):
@@ -394,30 +405,47 @@ class LayerRow(object):
                     continue
                 off = (y * width + x) * 3
                 pixels[off:off + 3] = rgb_bytes
+        if struck:
+            line = bytes(LAYER_STRIKE_RGB)
+            mid = height // 2
+            for y in (mid - 1, mid):
+                if 0 <= y < height:
+                    for x in range(width):
+                        off = (y * width + x) * 3
+                        pixels[off:off + 3] = line
         # Keep the immutable backing bytes with the row. Pixbuf normally
         # retains its own GLib reference, and this also makes that lifetime
         # explicit across older GTK3/PyGObject bundles.
-        self._swatch_bytes = GLib.Bytes.new(bytes(pixels))
+        buf = GLib.Bytes.new(bytes(pixels))
+        self._swatch_refs.append(buf)
         return GdkPixbuf.Pixbuf.new_from_bytes(
-            self._swatch_bytes, GdkPixbuf.Colorspace.RGB, False, 8,
+            buf, GdkPixbuf.Colorspace.RGB, False, 8,
             width, height, width * 3)
 
     def _paint(self):
         fg = ("#fff2a8" if self._picked else
               "#d9f2ff" if self._selected else
               "#ffffff" if self._active else "#777777")
+        # hidden = a BRIGHT strike straight across the whole row:
+        # every text span carries it (marker included, and the
+        # number's padding spaces keep it continuous up to the
+        # swatch) and the swatch swaps to its struck variant
+        strike = ("" if self._active else
+                  ' strikethrough="true" strikethrough_color="'
+                  '#%02x%02x%02x"' % LAYER_STRIKE_RGB)
         self._mlbl.set_markup(
-            '<span face="monospace" size="small" '
-            'foreground="%s">%s</span>'
-            % (fg, GLib.markup_escape_text(self._marker)))
-        strike = "" if self._active else ' strikethrough="true"'
+            '<span face="monospace" size="medium" '
+            'foreground="%s"%s>%s</span>'
+            % (fg, strike, GLib.markup_escape_text(self._marker)))
         self._nlbl.set_markup(
-            '<span face="monospace" size="small" '
+            '<span face="monospace" size="medium" '
             'foreground="%s"%s>%s</span>'
             % (fg, strike, GLib.markup_escape_text(self._num)))
         self._lbl.set_markup(
-            '<span size="small" foreground="%s"%s>%s</span>'
+            '<span size="medium" foreground="%s"%s>%s</span>'
             % (fg, strike, GLib.markup_escape_text(self._name)))
+        self._clbl.set_from_pixbuf(
+            self._swatch_on if self._active else self._swatch_off)
 
     def set_marker(self, marker):
         self._marker = marker
