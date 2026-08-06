@@ -615,6 +615,7 @@ class Viewer:
         self.rulers = []
         self._ruler_start = None
         self._ruler_free = False
+        self._auto_rulers = []
         self.snap_on = True
         self._snap_seq = 0
         self._snap_res = None
@@ -917,6 +918,7 @@ class Viewer:
         self._clear_pending()
         self.rulers = []
         self._ruler_start = None
+        self._auto_rulers = []
         self._snap_res = None
         self.selection = None
         self._sel_text = ""
@@ -2760,11 +2762,73 @@ class Viewer:
             self._set_live_status("ruler off")
         else:
             self.mode = "ruler"
-            self._set_live_status(
-                "ruler: click two points (Shift=free angle, "
-                "m=snap %s, Esc=done)"
-                % ("on" if self.snap_on else "off"))
+            n = self._measure_selection()
+            if n:
+                self._set_live_status(
+                    "ruler: %d auto rulers from selection (x/y "
+                    "gap+span) · click two points, Esc=done" % n)
+            else:
+                self._set_live_status(
+                    "ruler: click two points (Shift=free angle, "
+                    "m=snap %s, Esc=done)"
+                    % ("on" if self.snap_on else "off"))
         self._display()
+
+    def _measure_selection(self):
+        """Entering ruler mode with 2+ picked objects auto-measures
+        them: per axis, the shortest distance (closest edge-to-edge
+        gap over all disjoint pairs) and the longest (union span),
+        as ordinary rulers with the usual distance labels. Bbox
+        based. Regenerated on every ruler-mode entry; the previous
+        auto set is replaced, hand-drawn rulers are kept."""
+        boxes = [tuple(s["bbox"]) for s in self.selections
+                 if s.get("bbox")]
+        if len(boxes) < 2:
+            return 0
+        if self._auto_rulers:
+            self.rulers = [r for r in self.rulers
+                           if r not in self._auto_rulers]
+
+        def cross_mid(a, b, olo, ohi):
+            # anchor a gap ruler where the pair overlaps on the
+            # OTHER axis; midway between centers when it does not
+            lo = max(a[olo], b[olo])
+            hi = min(a[ohi], b[ohi])
+            if lo <= hi:
+                return (lo + hi) / 2.0
+            return (a[olo] + a[ohi] + b[olo] + b[ohi]) / 4.0
+
+        auto = []
+        for horiz in (True, False):
+            lo, hi, olo, ohi = (0, 2, 1, 3) if horiz else (1, 3, 0, 2)
+            # longest: union span, drawn just outside the union's low
+            # edge so it does not sit on object outlines
+            s0 = min(b[lo] for b in boxes)
+            s1 = max(b[hi] for b in boxes)
+            edge = min(b[olo] for b in boxes) - 12 * self.spp
+            if s1 > s0:
+                auto.append((s0, edge, s1, edge) if horiz
+                            else (edge, s0, edge, s1))
+            best = None
+            for i in range(len(boxes)):
+                for j in range(i + 1, len(boxes)):
+                    a, b = boxes[i], boxes[j]
+                    if b[lo] >= a[hi]:
+                        d, e0, e1 = b[lo] - a[hi], a[hi], b[lo]
+                    elif a[lo] >= b[hi]:
+                        d, e0, e1 = a[lo] - b[hi], b[hi], a[lo]
+                    else:
+                        continue  # overlapping on this axis: no gap
+                    if d > 0 and (best is None or d < best[0]):
+                        best = (d, e0, e1,
+                                cross_mid(a, b, olo, ohi))
+            if best is not None:
+                _, e0, e1, m = best
+                auto.append((e0, m, e1, m) if horiz
+                            else (m, e0, m, e1))
+        self.rulers.extend(auto)
+        self._auto_rulers = auto
+        return len(auto)
 
     def _toggle_snap(self):
         self.snap_on = not self.snap_on
