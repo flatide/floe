@@ -198,6 +198,29 @@ def frame_rect(buf, x0, y0, w, h, color):
     fill_rect(buf, x0 + w - 1, y0, 1, h, color)
 
 
+def _remote_x_scroll_repaint(scroller):
+    """Repaint the whole scrolled area on every scroll step.
+
+    GTK scrolls a viewport by BLITTING the still-visible region
+    server-side (copy-area) and repainting only the exposed strip.
+    Remote X servers of this deployment (Exceed, XQuartz - the same
+    family as the XRender black-image bug) botch that blit: each
+    step leaves an unpainted band, so the visible strip appears to
+    shrink from the top and bottom as you scroll. Invalidating the
+    scroller per adjustment tick forces a full repaint of what is
+    on screen - the panels hold at most a few dozen visible rows,
+    so the cost is negligible on any display path."""
+    for adj in (scroller.get_vadjustment(),
+                scroller.get_hadjustment()):
+        if adj is not None:
+            adj.connect("value-changed",
+                        lambda *_a: scroller.queue_draw())
+    try:
+        scroller.set_kinetic_scrolling(False)
+    except AttributeError:
+        pass
+
+
 class LayerRow(object):
     """One layer row: [marker][layer.datatype][swatch][name].
 
@@ -557,6 +580,7 @@ class Viewer:
             pass
         scroller.set_policy(Gtk.PolicyType.ALWAYS,
                             Gtk.PolicyType.ALWAYS)
+        _remote_x_scroll_repaint(scroller)
         self._layers_scroller = scroller
         self._layers_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self._layers_box.set_margin_top(4)
@@ -2350,6 +2374,7 @@ class Viewer:
         sc = Gtk.ScrolledWindow()
         sc.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         sc.add(tree)
+        _remote_x_scroll_repaint(sc)  # same copy-area artifact path
         box.pack_start(sc, True, True, 0)
         nav = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         box.pack_start(nav, False, False, 2)
