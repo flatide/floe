@@ -658,9 +658,12 @@ def main(argv=None):
                         "truthful first paint - and full when "
                         "--goto jumps to an inspection point. "
                         "Digits / the `d` dialog change it at runtime")
-    p.add_argument("--lod", choices=("on", "off"), default="off",
-                   help="starting merged geometry LOD state (default off; "
-                        "the viewer button/`l` changes it live)")
+    p.add_argument("--lod", choices=("on", "off"), default="on",
+                   help="starting merged geometry LOD state (default on - "
+                        "the live first view needs merged variants without "
+                        "a keypress; the planner reverts to exact on zoom "
+                        "and probes are always exact. The viewer "
+                        "button/`l` changes it live)")
     p.add_argument("--frames", choices=("on", "off"), default="on",
                    help="starting hierarchy FRAME_LAYER state (default "
                         "on; the viewer button/`h` changes it live)")
