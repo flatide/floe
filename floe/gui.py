@@ -539,9 +539,10 @@ class Viewer:
             Gdk.Screen.get_default(), css,
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         scroller.get_style_context().add_class("floe-layers")
-        # GTK overlay scrollbars temporarily cover the right edge only while
-        # scrolling, making the visible list narrower than at either end.
-        # Reserve stable scrollbar space for every scroll position instead.
+        # GTK overlay/automatic scrollbars can reserve their gutter only while
+        # scrolling (notably with the macOS GTK theme). That changes both the
+        # width and height of the viewport and clips the edge rows. Keep both
+        # gutters allocated for the lifetime of the palette.
         try:
             scroller.set_overlay_scrolling(False)
         except AttributeError:
@@ -550,11 +551,12 @@ class Viewer:
             scroller.set_propagate_natural_width(False)
         except AttributeError:
             pass
-        scroller.set_policy(Gtk.PolicyType.AUTOMATIC,
-                            Gtk.PolicyType.AUTOMATIC)
+        scroller.set_policy(Gtk.PolicyType.ALWAYS,
+                            Gtk.PolicyType.ALWAYS)
         self._layers_scroller = scroller
         self._layers_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self._layers_box.set_margin_top(4)
+        self._layers_box.set_margin_bottom(4)
         self._layers_box.get_style_context().add_class("floe-layers")
         scroller.add(self._layers_box)
         side.pack_start(scroller, True, True, 4)
