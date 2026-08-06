@@ -369,14 +369,6 @@ class LayerRow(object):
         # gap therefore belongs to this (upper) row instead of falling
         # through the layer palette without selecting anything.
         self.widget = Gtk.EventBox()
-        # Field experiment (shrinking-band bug): windowless event
-        # boxes route input through GTK-side picking and paint into
-        # the parent window, bypassing per-row child GdkWindows
-        # entirely - if the band bug is the quartz child-window
-        # layer, this makes it unreproducible.
-        if os.environ.get("FLOE_PANEL_WINDOWLESS"):
-            for eb in (mbox, nbox, self.widget):
-                eb.set_visible_window(False)
         self.widget.add(row_box)
         self.widget.connect("button-press-event", self._on_row_click)
         self.widget.set_tooltip_text(tooltip)
@@ -628,26 +620,39 @@ class Viewer:
             trow.pack_start(b, True, True, 0)
 
         scroller = Gtk.ScrolledWindow()
-        # Calibre-style layer panel: black background, white text
+        # Calibre-style layer panel: black background, white text.
+        # FIELD BUG (mac/retina): the universal `.floe-layers *`
+        # background MUST NOT include the ScrolledWindow's own
+        # subtree - on the quartz backend that background renders
+        # with a broken clip band that overpaints the rows (a
+        # shrinking strip that tracks the scroll; full invalidation
+        # cannot repair it because every redraw repeats the same
+        # mis-clip). Pixel-gated bisect: class on the scroller =
+        # broken, class only on the rows box = clean. Hence three
+        # scoped hooks: `.floe-layers` for the rows box subtree,
+        # `.floe-layers-bg` DIRECTLY on the viewport (panel area
+        # below the rows stays black), `.floe-layers-frame` on the
+        # scroller solely for the scrollbar selectors.
         css = Gtk.CssProvider()
         css.load_from_data(
             b".floe-layers, .floe-layers * "
             b"{ background-color: #000000; } "
+            b".floe-layers-bg { background-color: #000000; } "
             b".floe-layer-selected, .floe-layer-selected * "
             b"{ background-color: #31566d; } "
             b".floe-layer-picked, .floe-layer-picked * "
             b"{ background-color: #66582f; } "
-            b".floe-layers scrollbar trough "
+            b".floe-layers-frame scrollbar trough "
             b"{ background-color: #000000; background-image: none; } "
-            b".floe-layers scrollbar slider, "
-            b".floe-layers scrollbar slider:hover, "
-            b".floe-layers scrollbar slider:active "
+            b".floe-layers-frame scrollbar slider, "
+            b".floe-layers-frame scrollbar slider:hover, "
+            b".floe-layers-frame scrollbar slider:active "
             b"{ background-color: #ffffff; background-image: none; "
             b"border-color: #ffffff; opacity: 1; }")
         Gtk.StyleContext.add_provider_for_screen(
             Gdk.Screen.get_default(), css,
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
-        scroller.get_style_context().add_class("floe-layers")
+        scroller.get_style_context().add_class("floe-layers-frame")
         # GTK overlay/automatic scrollbars can reserve their gutter only while
         # scrolling (notably with the macOS GTK theme). That changes both the
         # width and height of the viewport and clips the edge rows. Keep both
@@ -679,6 +684,10 @@ class Viewer:
         self._layers_box.set_valign(Gtk.Align.START)
         self._layers_box.get_style_context().add_class("floe-layers")
         scroller.add(self._layers_box)
+        # implicit viewport: the black panel background, styled
+        # DIRECTLY (never via a `*` selector - see the CSS note)
+        scroller.get_child().get_style_context().add_class(
+            "floe-layers-bg")
         side.pack_start(scroller, True, True, 4)
 
         # Range watchdog for the same field bug: the adjustment
