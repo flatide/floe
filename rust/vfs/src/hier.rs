@@ -26,7 +26,7 @@ pub const REM_FULL: u32 = u32::MAX;
 /// draws WHITE when both screen dimensions reach this many pixels,
 /// GRAY below - however long one side is, a short other side stays
 /// gray. Gray boxes go to (frame_layer, dt+1).
-pub const FRAME_WHITE_PX: f64 = 30.0;
+pub const FRAME_WHITE_PX: f64 = 40.0;
 
 /// (cell index, remaining depth) - the working-set cell identity.
 /// Full-depth views collapse to one key per cell (r >= height folds
@@ -1676,6 +1676,161 @@ mod tests {
         assert_eq!(p2.stats.frame_rects, 0);
         assert_eq!(p2.stats.inst_edges, 1);
         assert_eq!(p2.pages, plan.pages);
+    }
+
+    /// Rev 37 (final): a box lives ONLY at its own depth boundary,
+    /// exactly like its name. A box first shown at depth 1 must be
+    /// GONE at depth 2 - no bottomed-leaf persistence in expanded
+    /// regions, no collapse-root boxes (the rev 34/36 experiments).
+    #[test]
+    fn boxes_live_only_at_their_depth_boundary() {
+        let v = fixture(
+            &[
+                FCell {
+                    name: "LEAF",
+                    pages: vec![(bx(0, 0, 80, 80), 80, 80)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "B", // height 1
+                    pages: vec![],
+                    places: vec![(0, 0, 0, 0, false, Rep::One)],
+                },
+                FCell {
+                    name: "SLEAF",
+                    pages: vec![(bx(0, 0, 80, 80), 80, 80)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "S", // height 1: fully inside depth 2
+                    pages: vec![],
+                    places: vec![(2, 0, 0, 0, false, Rep::One)],
+                },
+                FCell {
+                    name: "A", // height 2
+                    pages: vec![],
+                    places: vec![(1, 0, 0, 0, false, Rep::One)],
+                },
+                FCell {
+                    name: "TOP", // height 3
+                    pages: vec![],
+                    places: vec![
+                        (4, 0, 0, 0, false, Rep::One),
+                        (3, 5000, 0, 0, false, Rep::One),
+                    ],
+                },
+            ],
+            5,
+        );
+        let view = bx(-10, -10, 7000, 1000);
+        // depth 1 boundary: B and SLEAF boxed (their parents hit
+        // r==0), nothing else
+        let p1 =
+            plan_hier(&v, &rq(view, 0, 1), &HierOpts::default());
+        assert_eq!(p1.stats.frame_rects, 2);
+        // depth 2: the boundary moved down - LEAF is boxed, and
+        // SLEAF's depth-1 box is GONE (S is now fully expanded)
+        let p2 =
+            plan_hier(&v, &rq(view, 0, 2), &HierOpts::default());
+        assert_eq!(p2.stats.frame_rects, 1);
+        let b_wc = p2
+            .wcells
+            .iter()
+            .find(|w| w.key == (1, 0))
+            .unwrap();
+        assert_eq!(b_wc.frames.len(), 1);
+        assert!(p2
+            .wcells
+            .iter()
+            .filter(|w| w.key.0 == 3 || w.key.0 == 5)
+            .all(|w| w.frames.is_empty()));
+        // layers off: identical box sets (structural frontier)
+        for (d, want) in [(1u32, 2u64), (2, 1)] {
+            let req = ViewReq {
+                vis: vec![0],
+                ..rq(view, 0, d)
+            };
+            let p = plan_hier(&v, &req, &HierOpts::default());
+            assert_eq!(p.stats.frame_rects, want, "depth {}", d);
+        }
+    }
+
+    /// Rev 35: Calibre tone split - white only when BOTH drawn
+    /// dimensions reach FRAME_WHITE_PX on screen (boundary
+    /// inclusive); no screen scale = legacy all-white. The fixed
+    /// sizes assume 20px < FRAME_WHITE_PX <= 90px.
+    #[test]
+    fn frames_split_white_gray_at_threshold() {
+        let at = (FRAME_WHITE_PX / 0.1).round() as i64;
+        let under = at - 10; // one pixel short of the threshold
+        let v = fixture(
+            &[
+                FCell {
+                    name: "MED", // 200 DBU -> 20px at 0.1: gray
+                    pages: vec![(bx(0, 0, 200, 200), 200, 200)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "THIN", // 4000x100 -> 400x10px: gray
+                    pages: vec![(bx(0, 0, 4000, 100), 4000, 100)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "BIG", // 900 -> 90px both dims: white
+                    pages: vec![(bx(0, 0, 900, 900), 900, 900)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "AT", // exactly the threshold: white
+                    pages: vec![(bx(0, 0, at, at), 1, 1)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "UNDER", // 1px below: gray
+                    pages: vec![(bx(0, 0, under, under), 1, 1)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "TOP",
+                    pages: vec![],
+                    places: vec![
+                        (0, 0, 0, 0, false, Rep::One),
+                        (1, 0, 500, 0, false, Rep::One),
+                        (2, 5000, 0, 0, false, Rep::One),
+                        (3, 10000, 0, 0, false, Rep::One),
+                        (4, 14000, 0, 0, false, Rep::One),
+                    ],
+                },
+            ],
+            5,
+        );
+        let view = bx(-10, -10, 20000, 1000);
+        let plan = plan_hier(
+            &v,
+            &rq_px(view, 0, 0, 0.1),
+            &HierOpts::default(),
+        );
+        let top =
+            plan.wcells.iter().find(|w| w.key.0 == 5).unwrap();
+        assert_eq!(top.frames.len(), 5);
+        let tone = |w: i64| {
+            top.frames
+                .iter()
+                .find(|(b, _, _)| b.x1 - b.x0 == w)
+                .unwrap()
+                .2
+        };
+        assert!(!tone(200), "20x20px box must be gray");
+        assert!(!tone(4000), "long thin box must be gray");
+        assert!(tone(900), "90x90px box must be white");
+        assert!(tone(at), "box exactly at the threshold is white");
+        assert!(!tone(under), "1px under the threshold is gray");
+        // no screen scale: everything stays white (legacy plans)
+        let p0 =
+            plan_hier(&v, &rq(view, 0, 0), &HierOpts::default());
+        let t0 =
+            p0.wcells.iter().find(|w| w.key.0 == 5).unwrap();
+        assert!(t0.frames.iter().all(|f| f.2));
     }
 
     /// Rev 34: r==0 depth-boundary boxes take the size cut exactly

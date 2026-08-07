@@ -1877,3 +1877,14 @@ rev 37 (최종 계약: 박스는 자기 depth 경계에서만 — 2026-08-07,
 - 유닛 boxes_live_only_at_their_depth_boundary(depth 1의 SLEAF
   박스가 depth 2에서 소멸·경계 이동·vis on/off 동일), fold 유닛
   원복(전개 BIG 무박스), 구 지속성 유닛 2개 제거.
+
+rev 38 (톤 임계 40px + rev 37 게이트 복구 — 2026-08-07, 0.11.15):
+
+- FRAME_WHITE_PX 30 → 40: 양변 40px 이상이어야 흰색, 미만은 회색
+  (블록명 라벨 동일 상수).
+- rev 37 커밋의 테스트 정리가 마커 범위를 과대하게 잡아
+  frames_split_white_gray_at_30px(rev 35 톤 게이트)와 신규
+  boxes_live_only_at_their_depth_boundary가 커밋에서 유실됐던 것을
+  복구. 톤 게이트는 임계 상수 기준으로 재작성
+  (frames_split_white_gray_at_threshold: 경계 정확값=흰색,
+  1px 미달=회색 케이스 추가). 프로덕션 코드는 무손상이었음.
