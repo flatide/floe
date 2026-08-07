@@ -1712,3 +1712,27 @@ gen 2: 데몬 "이미 resident" → 바디 재전송 안 함
   을 표에 병기해 사과-사과 비교 유지.
 - flat 경로 유지 기간: 계층이 valmini XOR green + MAIN09 자릿수 개선
   확인까지. 이후 M5에서 제거.
+
+rev 32 (프레임-컷 분리: 바닥나는 구조는 아웃라인 유지 — 2026-08-07,
+0.11.6; 실사용 보고가 계기):
+
+- **증상**: frames on·유한 depth·전 레이어 off에서 밀집 소형 셀을
+  확대하면 박스가 컷을 넘는 순간 화면에서 소멸. 원인 = 프레임이
+  fold 시에만 방출: above-cut으로 전개되는 자식 중 **남은 depth에
+  서브트리가 완전히 들어가 norm_r이 REM_FULL로 붕괴하는 셀**(리프
+  = height 0의 특수형)은 전개 후 아래에 구조 프레임이 영원히 0개
+  (sub-cut 손자는 생략, 지오메트리 페이지뿐). fold 프레임 → 전개
+  전이에서 표현이 증발했다.
+- **계약(Calibre와 동일)**: frontier는 "요청 depth **또는** 계층
+  바닥" — 줌(컷)은 프레임 박스 집합을 바꾸지 못한다. 구현 1곳:
+  유한-r 분류에서 above-cut 자식이 norm_r(child, r-1)==REM_FULL이면
+  edges 삽입과 동시에 frame_depth_boundary 방출. 중간 셀(구조가 더
+  남는 자식)은 종전대로 자식 프레임으로 hand-off — **누적 없음**
+  성질(각 depth는 자기 frontier만)은 그대로. depth full(REM_FULL
+  요청)은 종전대로 구조 프론티어 없음. frame_cap 200k 공유, frames
+  off(frame_cap 0) 무변화. 비용은 above-cut 엣지 수에 유계(150M
+  실측 663 — 콘텐츠 수준).
+- 유닛: above_cut_bottom_cell_keeps_outline(컷 100→50 전환에서
+  프레임 박스 집합 동일·페이지만 등장·frames off 침묵),
+  finite_depth_folds_sub_cut_subtrees 기대값 갱신(fold 1 + 바닥
+  아웃라인 1). 선택 페이지 집합 불변이라 기하 게이트 무풍.

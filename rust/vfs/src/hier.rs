@@ -667,6 +667,30 @@ impl<'a> Hier<'a> {
                                     &self.req.vis,
                                 )
                             {
+                                // Above-cut child whose structure
+                                // bottoms out within the remaining
+                                // depth (norm_r collapse; a leaf is
+                                // the height-0 case): no structural
+                                // frame can ever be emitted below
+                                // it, so its fold outline used to
+                                // VANISH the moment zoom pushed it
+                                // past the cut (field report: dense
+                                // small cells, frame layer only).
+                                // The frontier is depth OR hierarchy
+                                // bottom - the outline persists,
+                                // decoupled from the geometry cut
+                                // (rev 32, Calibre contract).
+                                if self.opts.frame_cap != 0
+                                    && self.frames_total
+                                        < self.opts.frame_cap
+                                    && self.norm_r(h.child, r - 1)
+                                        == REM_FULL
+                                {
+                                    self.frame_depth_boundary(
+                                        &mut wc, pli, &h, &rb,
+                                        &boxes,
+                                    );
+                                }
                                 edges.insert(pli);
                             } else {
                                 self.st.cull_layer += 1;
@@ -1607,10 +1631,12 @@ mod tests {
         // BIG's page ships; TINY's page is cut-culled everywhere
         assert_eq!(plan.pages.len(), 1);
         assert_eq!(v.page(plan.pages[0]).cell, 2);
-        // the sub-cut subtree became ONE fold frame on TOP, and
-        // neither SMALL nor TINY got a working-set cell
+        // the sub-cut subtree became ONE fold frame on TOP; BIG (an
+        // above-cut leaf = bottomed-out structure) keeps its own
+        // outline next to its geometry (rev 32); neither SMALL nor
+        // TINY got a working-set cell
         let top = plan.wcells.iter().find(|w| w.key.0 == 3).unwrap();
-        assert_eq!(top.frames.len(), 1);
+        assert_eq!(top.frames.len(), 2);
         assert!(!plan.wcells.iter().any(|w| w.key.0 <= 1));
         // the only edge is TOP -> BIG
         assert_eq!(plan.stats.inst_edges, 1);
@@ -1621,6 +1647,68 @@ mod tests {
         assert_eq!(p2.stats.frame_rects, 0);
         assert_eq!(p2.stats.inst_edges, 1);
         assert_eq!(p2.pages, plan.pages);
+    }
+
+    /// An above-cut child whose structure bottoms out within the
+    /// remaining depth keeps its outline when it expands (rev 32:
+    /// the frontier is depth OR hierarchy bottom): its fold frame
+    /// used to vanish the moment zoom pushed it past the cut,
+    /// because no structural frame exists below it (field report:
+    /// dense small cells with only the frame layer visible). Zoom
+    /// must never change the frame box set - only pages appear.
+    #[test]
+    fn above_cut_bottom_cell_keeps_outline() {
+        let v = fixture(
+            &[
+                FCell {
+                    name: "TINY",
+                    pages: vec![(bx(0, 0, 8, 8), 8, 8)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "SMALL", // keeps height(TOP) = 2 so depth 1
+                    pages: vec![], // stays finite (no full-fold)
+                    places: vec![(0, 1, 1, 0, false, Rep::One)],
+                },
+                FCell {
+                    name: "LEAF",
+                    pages: vec![(bx(0, 0, 80, 80), 80, 80)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "TOP",
+                    pages: vec![],
+                    places: vec![
+                        (1, 0, 0, 0, false, Rep::One),
+                        (2, 1000, 0, 0, false, Rep::One),
+                    ],
+                },
+            ],
+            3,
+        );
+        let view = bx(-10, -10, 2000, 1000);
+        // zoomed out (cut 100): LEAF folds like SMALL - two boxes
+        let folded =
+            plan_hier(&v, &rq(view, 100, 1), &HierOpts::default());
+        assert!(folded.pages.is_empty());
+        assert_eq!(folded.stats.inst_edges, 0);
+        let top =
+            folded.wcells.iter().find(|w| w.key.0 == 3).unwrap();
+        assert_eq!(top.frames.len(), 2);
+        // zoomed in (cut 50): LEAF expands - SAME two boxes + page
+        let exp =
+            plan_hier(&v, &rq(view, 50, 1), &HierOpts::default());
+        assert_eq!(exp.pages.len(), 1);
+        assert_eq!(v.page(exp.pages[0]).cell, 2);
+        assert_eq!(exp.stats.inst_edges, 1);
+        let top = exp.wcells.iter().find(|w| w.key.0 == 3).unwrap();
+        assert_eq!(top.frames.len(), 2);
+        // frames off: the outline machinery stays fully silent
+        let mut off = HierOpts::default();
+        off.frame_cap = 0;
+        let p = plan_hier(&v, &rq(view, 50, 1), &off);
+        assert_eq!(p.stats.frame_rects, 0);
+        assert_eq!(p.pages, exp.pages);
     }
 
     fn rq(view: BBox, cut: i64, depth: u32) -> ViewReq {
