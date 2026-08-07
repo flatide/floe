@@ -1771,3 +1771,20 @@ rev 32 철회 (텍스트 없는 박스는 그리지 않는다 — 2026-08-07, 0.
   보고의 "줌인 소멸"은 Calibre 동일 동작으로 수용한다.
 - 유닛 expanded_bottom_cell_emits_no_outline(전개 셀 무아웃라인
   vis 무관·fold 잔존·frames off 침묵)으로 게이트화.
+
+rev 33 (fold 침묵화: 프레임은 depth 전용 — 2026-08-07, 0.11.9; 4차
+실사용 보고 "아직 cut level과 연동된 박스가 보임"):
+
+- rev 32 철회 후 남은 컷 연동 박스 = rev 31 sub-cut fold의 프록시
+  박스. 컷 문턱을 오가며 나타났다 사라지고(줌 연동) 컷 미만 크기라
+  이름도 못 붙는다 — "텍스트 없는 박스는 그리지 않는다" 규칙에도
+  걸린다. **fold를 침묵화**: 하강 컬링(rev 31의 성능 핵심, 150M
+  4.06M→663 엣지)은 그대로 두고 박스 방출만 제거. depth-full의
+  "생략은 무표시" 규칙과 유한 depth가 이제 일치한다.
+- **최종 프레임 계약: 프레임 = r==0 depth-경계 전용** — 순수 depth
+  함수(줌·컷·레이어 불변), 블록명 fit 시 라벨 동반. Calibre의
+  "depth D만의 이름 달린 박스"와 동일. frames on/off 차이는 경계
+  프레임 유무뿐.
+- 유닛 갱신: finite_depth_folds_sub_cut_subtrees(fold 무프레임,
+  on/off 완전 일치), expanded_bottom_cell_emits_no_outline(컷 전환
+  전 구간 어떤 vis에서도 프레임 0, 페이지만 등장).

@@ -647,16 +647,20 @@ impl<'a> Hier<'a> {
                         // outline now (frames on) or nothing.
                         if r != REM_FULL {
                             if cw < cut && chh < cut {
+                                // rev 33: the fold is SILENT. A
+                                // fold box tracked the cut - it
+                                // appeared and vanished with zoom
+                                // and could never carry a name.
+                                // Calibre's box set is a pure
+                                // function of depth and so is ours
+                                // now: the r==0 boundary is the
+                                // only frame source. The descent
+                                // stays culled (rev 31's point);
+                                // only the proxy box is gone,
+                                // matching the depth-full omission
+                                // rule.
                                 self.st.cull_size += 1;
-                                if self.frames_total
-                                    < self.opts.frame_cap
-                                {
-                                    framed.insert(pli);
-                                    self.frame_depth_boundary(
-                                        &mut wc, pli, &h, &rb,
-                                        &boxes,
-                                    );
-                                }
+                                framed.insert(pli);
                                 continue;
                             }
                             // An expanded above-cut child draws NO
@@ -1579,10 +1583,11 @@ mod tests {
 
     /// A sub-cut subtree FOLDS at a finite depth (rev 31): no edge,
     /// no descent - its pages can never pass the cut and its deeper
-    /// frontier would be sub-pixel. Frames on: one outline at the
-    /// fold level; frames off (frame_cap 0): nothing at all. The
-    /// 150M field case put 4.06M such edges in one delta while the
-    /// drawable page set was identical to depth full.
+    /// frontier would be sub-pixel. The 150M field case put 4.06M
+    /// such edges in one delta while the drawable page set was
+    /// identical to depth full. Rev 33: the fold is also SILENT
+    /// (no proxy box) - frames are a pure function of depth, so
+    /// frames on and off now agree everywhere below the boundary.
     #[test]
     fn finite_depth_folds_sub_cut_subtrees() {
         let v = fixture(
@@ -1621,12 +1626,12 @@ mod tests {
         // BIG's page ships; TINY's page is cut-culled everywhere
         assert_eq!(plan.pages.len(), 1);
         assert_eq!(v.page(plan.pages[0]).cell, 2);
-        // the sub-cut subtree became ONE fold frame on TOP; BIG is
-        // fully expanded WITH visible content, so its geometry
-        // speaks and it gets no bottom outline (rev 32 amendment);
-        // neither SMALL nor TINY got a working-set cell
+        // the sub-cut subtree folded SILENTLY (rev 33) and BIG is
+        // fully expanded, so no frame exists anywhere; neither
+        // SMALL nor TINY got a working-set cell
+        assert_eq!(plan.stats.frame_rects, 0);
         let top = plan.wcells.iter().find(|w| w.key.0 == 3).unwrap();
-        assert_eq!(top.frames.len(), 1);
+        assert!(top.frames.is_empty());
         assert!(!plan.wcells.iter().any(|w| w.key.0 <= 1));
         // the only edge is TOP -> BIG
         assert_eq!(plan.stats.inst_edges, 1);
@@ -1639,11 +1644,11 @@ mod tests {
         assert_eq!(p2.pages, plan.pages);
     }
 
-    /// Rev 32 withdrawn (field decision: a box that shows no text
-    /// is not drawn). A fully expanded above-cut cell emits NO
-    /// outline in ANY layer-visibility state - its geometry alone
-    /// represents it, exactly like Calibre. Below the cut its fold
-    /// frame remains the zoomed-out stand-in for omitted detail.
+    /// Rev 32 withdrawn + rev 33 (field decisions: a box that shows
+    /// no text is not drawn, and no box may track the cut). Across
+    /// the whole cut transition of a bottoming-out cell - folded or
+    /// expanded, any layer visibility - NO frame is ever emitted;
+    /// only pages appear when zoom lets the geometry through.
     #[test]
     fn expanded_bottom_cell_emits_no_outline() {
         let v = fixture(
@@ -1679,30 +1684,27 @@ mod tests {
             vis: vec![0],
             ..rq(view, cut, 1)
         };
-        // layers off, zoomed out (cut 100): LEAF folds like SMALL
+        // layers off, zoomed out (cut 100): both children fold
+        // silently - no boxes, no edges, no pages
         let folded =
             plan_hier(&v, &off_vis(100), &HierOpts::default());
         assert!(folded.pages.is_empty());
         assert_eq!(folded.stats.inst_edges, 0);
-        let top =
-            folded.wcells.iter().find(|w| w.key.0 == 3).unwrap();
-        assert_eq!(top.frames.len(), 2);
+        assert_eq!(folded.stats.frame_rects, 0);
         // layers off, zoomed in (cut 50): LEAF expands to its
         // geometry alone - no visible layer, so nothing (Calibre)
         let exp = plan_hier(&v, &off_vis(50), &HierOpts::default());
         assert!(exp.pages.is_empty());
         assert_eq!(exp.stats.inst_edges, 1);
-        let top = exp.wcells.iter().find(|w| w.key.0 == 3).unwrap();
-        assert_eq!(top.frames.len(), 1);
-        // layers ON, zoomed in: page ships, still no extra outline
+        assert_eq!(exp.stats.frame_rects, 0);
+        // layers ON, zoomed in: the page ships, still no box
         let lv = plan_hier(&v, &rq(view, 50, 1),
                            &HierOpts::default());
         assert_eq!(lv.pages.len(), 1);
         assert_eq!(v.page(lv.pages[0]).cell, 2);
         assert_eq!(lv.stats.inst_edges, 1);
-        let top = lv.wcells.iter().find(|w| w.key.0 == 3).unwrap();
-        assert_eq!(top.frames.len(), 1);
-        // frames off: no frames at any cut, pages unaffected
+        assert_eq!(lv.stats.frame_rects, 0);
+        // frames off agrees completely below the boundary
         let mut off = HierOpts::default();
         off.frame_cap = 0;
         let p = plan_hier(&v, &off_vis(50), &off);
