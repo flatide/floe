@@ -25,7 +25,7 @@ _PICK_CAP = 64    # max candidates per pick query
 # the viewer cut LEVEL (the `c` dialog / view --cut-level); the px
 # value behind each level is an implementation detail. Level 0 = off
 # (draw all), higher = coarser wide views. CUT_PX = the level-1 px.
-CUT_LEVEL_PX = (0.0, 2.0, 4.0, 8.0)
+CUT_LEVEL_PX = (0.0, 1.0, 3.0, 5.0)
 CUT_PX = CUT_LEVEL_PX[1]
 
 # a streamed view completes within this many rounds: the last one
