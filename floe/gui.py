@@ -2957,8 +2957,8 @@ class Viewer:
             n = self._measure_selection()
             if n:
                 self._set_live_status(
-                    "ruler: %d auto rulers from selection (x/y "
-                    "gap+span) · click two points, Esc=done" % n)
+                    "ruler: %d auto rulers from selection (closest "
+                    "gaps) · click two points, Esc=done" % n)
             else:
                 self._set_live_status(
                     "ruler: click two points (Shift=free angle, "
@@ -2968,9 +2968,11 @@ class Viewer:
 
     def _measure_selection(self):
         """Entering ruler mode with 2+ picked objects auto-measures
-        them: per axis, the shortest distance (closest edge-to-edge
-        gap over all disjoint pairs) and the longest (union span),
-        as ordinary rulers with the usual distance labels. Bbox
+        them at their CLOSEST parts only (field request: no union
+        spans): every object pairs with its nearest neighbour, and
+        each pair gets a horizontal and/or vertical ruler between
+        the facing edges - only on axes where the pair is disjoint,
+        so touching or overlapping geometry adds nothing. Bbox
         based. Regenerated on every ruler-mode entry; the previous
         auto set is replaced, hand-drawn rulers are kept."""
         boxes = [tuple(s["bbox"]) for s in self.selections
@@ -2980,6 +2982,22 @@ class Viewer:
         if self._auto_rulers:
             self.rulers = [r for r in self.rulers
                            if r not in self._auto_rulers]
+
+        def sep(a, b):
+            dx = max(a[0] - b[2], b[0] - a[2], 0)
+            dy = max(a[1] - b[3], b[1] - a[3], 0)
+            return math.hypot(dx, dy)
+
+        pairs = set()
+        for i in range(len(boxes)):
+            best, bd = None, None
+            for j in range(len(boxes)):
+                if j == i:
+                    continue
+                d = sep(boxes[i], boxes[j])
+                if bd is None or d < bd:
+                    bd, best = d, j
+            pairs.add((min(i, best), max(i, best)))
 
         def cross_mid(a, b, olo, ohi):
             # anchor a gap ruler where the pair overlaps on the
@@ -2991,31 +3009,20 @@ class Viewer:
             return (a[olo] + a[ohi] + b[olo] + b[ohi]) / 4.0
 
         auto = []
-        for horiz in (True, False):
-            lo, hi, olo, ohi = (0, 2, 1, 3) if horiz else (1, 3, 0, 2)
-            # longest: union span, drawn just outside the union's low
-            # edge so it does not sit on object outlines
-            s0 = min(b[lo] for b in boxes)
-            s1 = max(b[hi] for b in boxes)
-            edge = min(b[olo] for b in boxes) - 12 * self.spp
-            if s1 > s0:
-                auto.append((s0, edge, s1, edge) if horiz
-                            else (edge, s0, edge, s1))
-            best = None
-            for i in range(len(boxes)):
-                for j in range(i + 1, len(boxes)):
-                    a, b = boxes[i], boxes[j]
-                    if b[lo] >= a[hi]:
-                        d, e0, e1 = b[lo] - a[hi], a[hi], b[lo]
-                    elif a[lo] >= b[hi]:
-                        d, e0, e1 = a[lo] - b[hi], b[hi], a[lo]
-                    else:
-                        continue  # overlapping on this axis: no gap
-                    if d > 0 and (best is None or d < best[0]):
-                        best = (d, e0, e1,
-                                cross_mid(a, b, olo, ohi))
-            if best is not None:
-                _, e0, e1, m = best
+        for i, j in sorted(pairs):
+            a, b = boxes[i], boxes[j]
+            for horiz in (True, False):
+                lo, hi, olo, ohi = ((0, 2, 1, 3) if horiz
+                                    else (1, 3, 0, 2))
+                if b[lo] >= a[hi]:
+                    d, e0, e1 = b[lo] - a[hi], a[hi], b[lo]
+                elif a[lo] >= b[hi]:
+                    d, e0, e1 = a[lo] - b[hi], b[hi], a[lo]
+                else:
+                    continue  # overlapping on this axis: no gap
+                if d <= 0:
+                    continue  # touching edges measure nothing
+                m = cross_mid(a, b, olo, ohi)
                 auto.append((e0, m, e1, m) if horiz
                             else (m, e0, m, e1))
         self.rulers.extend(auto)
