@@ -3636,17 +3636,19 @@ fn serve_one(d: &mut Daemon, line: &str) -> Result<String, String> {
     let mut req =
         make_req(d.v, view, px, cut, depth, layers.as_deref());
     // measurement paths are EXACT by construction: probes never
-    // take the LOD density gate; lod=0 disables it per request.
-    // The ORIGINAL screen scale still drives the label planner
-    // (bins/size gates) - the LOD kill switch must not also kill
-    // labels - so it rides separately.
+    // take the LOD density gate. lod=0 disables the gate via
+    // lod_k inside serve_hier - NOT by erasing the screen scale:
+    // the scale also drives frame rep fusing and the rev 35 tone
+    // split, and zeroing it painted every box white the moment
+    // LOD was toggled off (field report). Labels ride their own
+    // px for the same reason.
     let label_px = if probe { 0.0 } else { req.px_per_dbu };
-    if probe || !lod {
+    if probe {
         req.px_per_dbu = 0.0;
     }
     let label_px = if nolabels || !labels { 0.0 } else { label_px };
     serve_hier(d, &req, gen, ack, reset, probe, stream_kb,
-               label_px, frames, &out)
+               label_px, frames, lod, &out)
 }
 
 /// hier-mode request (VFS_HIER.md par.3.5/3.7): resolve the ack (or
@@ -3664,6 +3666,7 @@ fn serve_hier(
     stream_kb: Option<u64>,
     label_px: f64,
     frames: bool,
+    lod: bool,
     out: &str,
 ) -> Result<String, String> {
     let v = d.v;
@@ -3675,13 +3678,15 @@ fn serve_hier(
             d.hier.resolve_ack(ack)?;
         }
     }
-    let plan = if frames {
-        v.plan_hier(req)
-    } else {
-        let mut opts = floe_vfs::hier::HierOpts::default();
+    let mut opts = floe_vfs::hier::HierOpts::default();
+    if !frames {
         opts.frame_cap = 0;
-        floe_vfs::hier::plan_hier(&v.ovm, req, &opts)
-    };
+    }
+    if probe || !lod {
+        // documented kill switch: exact plan, screen scale intact
+        opts.lod_k = 0.0;
+    }
+    let plan = floe_vfs::hier::plan_hier(&v.ovm, req, &opts);
     let upd = if probe {
         // session-less exact query: the delta carries EVERY planned
         // page, the working-set ledger is untouched
