@@ -1843,3 +1843,22 @@ rev 35 수정 (LOD 킬스위치가 화면 스케일을 지우던 결함 — 2026
   밀도 게이트만 끄고 스케일은 유지(px 소거는 프로브 전용으로
   축소). L8에 회귀 게이트: lod off + 극소 px에서 프레임 전량이
   회색 dt에 실리고 흰색 dt는 빈다(데몬 경유 end-to-end).
+
+rev 36 (바닥 아웃라인은 붕괴 루트가 아니라 진짜 리프에 — 2026-08-07,
+0.11.13; 실사용 보고 "0부터 해당 depth까지 박스가 나옴"):
+
+- rev 34의 바닥 판정(norm_r 붕괴)이 **붕괴 루트**에서 발화 —
+  남은 depth에 서브트리가 통째로 들어가면 그 꼭대기(얕은 depth)에
+  박스가 앉아, depth D 뷰에 0..D-1 레벨 박스가 동시에 보였다.
+  Calibre는 중간 셀을 전개하고 구조가 실제로 끝나는 곳에만 박스를
+  둔다.
+- **수정**: 유한 분류의 바닥 조건 = height==0(진짜 리프)로 축소,
+  붕괴 서브트리는 edges로 하강. 유한 요청의 REM_FULL(완전 전개)
+  영역 안에서 리프가 자기 박스를 방출(크기 컷·톤은
+  frame_depth_boundary 내부 공통). 가시 콘텐츠 없는 비-리프 구조도
+  유한 요청에서는 하강 지속(깊은 리프의 박스 의무) — depth full
+  요청은 종전대로 geometry-only(bottom_frames=false). text.rs
+  블록명도 동일 이동: bottomed=리프, blocks on 유한 요청은 tmask
+  없는 구조도 하강(이름-박스 동행).
+- 유닛 bottom_outline_sits_on_leaves_not_collapse_roots(붕괴 루트
+  무박스·리프 박스·r==0 경계 공존, vis on/off 동일).

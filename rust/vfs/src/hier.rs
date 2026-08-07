@@ -370,12 +370,14 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
         px_per_dbu: req.px_per_dbu,
         lod_k: opts.lod_k,
         frames_total: 0,
+        bottom_frames: false,
     };
     let top_ci = v.top;
     let r0 = h.norm_r(
         top_ci,
         if req.depth == u32::MAX { REM_FULL } else { req.depth },
     );
+    h.bottom_frames = structural_frontier && r0 != REM_FULL;
     if v.n_cells > 0 {
         let tc = v.cell(top_ci);
         let w = (tc.rbbox.x1 - tc.rbbox.x0).max(0) as u64;
@@ -447,6 +449,10 @@ struct Hier<'a> {
     frames_total: usize,
     px_per_dbu: f64,
     lod_k: f64,
+    /// finite request with frames on: TRUE hierarchy bottoms (leaf
+    /// cells) draw their outline even inside fully-expanded
+    /// (REM_FULL-collapsed) regions - rev 36
+    bottom_frames: bool,
 }
 
 impl<'a> Hier<'a> {
@@ -684,24 +690,26 @@ impl<'a> Hier<'a> {
                                     &self.req.vis,
                                 )
                             {
-                                // Above-cut child whose structure
-                                // bottoms out within the remaining
-                                // depth (norm_r collapse; a leaf
-                                // is the height-0 case): the
-                                // frontier is depth OR hierarchy
-                                // bottom, so it keeps its outline
-                                // next to its geometry (rev 34 =
-                                // rev 32 restored - the earlier
-                                // "phantom rectangles" were a
-                                // Calibre cell-tree root mixup,
-                                // top-selected Calibre draws these
-                                // same boxes, size-cut like ours,
-                                // with names; text.rs labels them).
+                                // The frontier is depth OR
+                                // hierarchy bottom (rev 34), and
+                                // the bottom means TRUE leaves
+                                // (rev 36): boxing the norm_r
+                                // collapse ROOT put shallow-depth
+                                // boxes over every fully-fitting
+                                // subtree ("depth 0..D at once",
+                                // field report) - Calibre expands
+                                // mid cells and boxes only where
+                                // structure actually ends, so a
+                                // collapsed subtree descends and
+                                // its leaves box below.
                                 if self.opts.frame_cap != 0
                                     && self.frames_total
                                         < self.opts.frame_cap
-                                    && self.norm_r(h.child, r - 1)
-                                        == REM_FULL
+                                    && self
+                                        .v
+                                        .cell(h.child)
+                                        .height
+                                        == 0
                                 {
                                     self.frame_depth_boundary(
                                         &mut wc, pli, &h, &rb,
@@ -714,14 +722,40 @@ impl<'a> Hier<'a> {
                             }
                             continue;
                         }
+                        // Fully-expanded region of a FINITE
+                        // request: a leaf is a true hierarchy
+                        // bottom and draws its box here (rev 36;
+                        // size cut + tone inside
+                        // frame_depth_boundary). Full-depth
+                        // requests stay geometry-only.
+                        let leaf =
+                            self.v.cell(h.child).height == 0;
+                        if self.bottom_frames
+                            && leaf
+                            && self.frames_total
+                                < self.opts.frame_cap
+                        {
+                            self.frame_depth_boundary(
+                                &mut wc, pli, &h, &rb, &boxes,
+                            );
+                        }
                         if !masks_intersect(
                             self.v.bitset(
                                 self.v.cell_lmask_rec(h.child),
                             ),
                             &self.req.vis,
                         ) {
-                            self.st.cull_layer += 1;
-                            continue;
+                            // deeper leaves still owe their boxes:
+                            // non-leaf structure keeps descending
+                            // in a finite request even without
+                            // visible content
+                            if !self.bottom_frames || leaf {
+                                self.st.cull_layer += 1;
+                                if self.bottom_frames && leaf {
+                                    framed.insert(pli);
+                                }
+                                continue;
+                            }
                         }
                         // A size cut is a detail omission, not a
                         // hierarchy-depth boundary. cell_rbbox is an
@@ -1760,6 +1794,83 @@ mod tests {
         let p = plan_hier(&v, &off_vis(50), &off);
         assert_eq!(p.stats.frame_rects, 0);
         assert!(p.pages.is_empty());
+    }
+
+    /// Rev 36: a collapsed subtree (norm_r -> REM_FULL) descends
+    /// and its TRUE leaves draw the boxes - boxing the collapse
+    /// root painted shallow-depth boxes over every fully-fitting
+    /// subtree ("depth 0..D at once", field report). Works with
+    /// every layer off too: structure-only descent.
+    #[test]
+    fn bottom_outline_sits_on_leaves_not_collapse_roots() {
+        let v = fixture(
+            &[
+                FCell {
+                    name: "LEAF",
+                    pages: vec![(bx(0, 0, 80, 80), 80, 80)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "B", // height 1
+                    pages: vec![],
+                    places: vec![(0, 0, 0, 0, false, Rep::One)],
+                },
+                FCell {
+                    name: "SLEAF",
+                    pages: vec![(bx(0, 0, 80, 80), 80, 80)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "S", // height 1: collapses at depth 2
+                    pages: vec![],
+                    places: vec![(2, 0, 0, 0, false, Rep::One)],
+                },
+                FCell {
+                    name: "A", // height 2: stays finite at depth 2
+                    pages: vec![],
+                    places: vec![(1, 0, 0, 0, false, Rep::One)],
+                },
+                FCell {
+                    name: "TOP", // height 3
+                    pages: vec![],
+                    places: vec![
+                        (4, 0, 0, 0, false, Rep::One),
+                        (3, 5000, 0, 0, false, Rep::One),
+                    ],
+                },
+            ],
+            5,
+        );
+        let view = bx(-10, -10, 7000, 1000);
+        for vis in [vec![0xffu8], vec![0u8]] {
+            let req = ViewReq {
+                vis: vis.clone(),
+                ..rq(view, 0, 2)
+            };
+            let plan = plan_hier(&v, &req, &HierOpts::default());
+            // no box on TOP (S's collapse root is NOT framed)
+            let top = plan
+                .wcells
+                .iter()
+                .find(|w| w.key.0 == 5)
+                .unwrap();
+            assert!(top.frames.is_empty(), "vis {:?}", vis);
+            // S's leaf boxed inside the collapsed region
+            let s_wc = plan
+                .wcells
+                .iter()
+                .find(|w| w.key == (3, REM_FULL))
+                .unwrap();
+            assert_eq!(s_wc.frames.len(), 1, "vis {:?}", vis);
+            // the finite chain reaches its r==0 boundary: LEAF
+            // boxed on B as the requested-depth frontier
+            let b_wc = plan
+                .wcells
+                .iter()
+                .find(|w| w.key == (1, 0))
+                .unwrap();
+            assert_eq!(b_wc.frames.len(), 1, "vis {:?}", vis);
+        }
     }
 
     /// Rev 35: Calibre tone split. A frame is white only when BOTH
