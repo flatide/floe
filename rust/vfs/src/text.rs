@@ -486,17 +486,7 @@ impl<'a> LWalk<'a> {
         // structure bottoms out within the remaining depth (norm_r
         // collapse), both size-cut like the boxes themselves -
         // Calibre names its cell boxes the same way.
-        // bottomed = a TRUE leaf above the cut (rev 36: names sit
-        // on the boxes, and boxes sit on hierarchy bottoms, not on
-        // norm_r collapse roots), inside a finite request - also
-        // within its fully-expanded (REM_FULL) regions. r==0 keeps
-        // its fit-gate-only rule.
-        let finite_req = self.req.depth != u32::MAX;
-        let bottomed = finite_req
-            && r != 0
-            && !below_cut
-            && self.v.cell(h.child).height == 0;
-        let block = if self.opts.blocks && (r == 0 || bottomed) {
+        let block = if self.opts.blocks && r == 0 {
             let gb = xf_bbox(xf, &b0);
             let gw = (gb.x1 - gb.x0).max(0) as f64
                 * self.req.px_per_dbu;
@@ -531,11 +521,7 @@ impl<'a> LWalk<'a> {
                         self.v.cell_tmask_rec(h.child),
                     ),
                     &self.req.vis,
-                )
-                // finite request with blocks on: keep walking
-                // text-free structure too - deeper leaves owe
-                // their box names (rev 36)
-                || (self.opts.blocks && finite_req));
+                ));
         if !block && !descend {
             return;
         }

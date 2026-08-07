@@ -1862,3 +1862,18 @@ rev 36 (바닥 아웃라인은 붕괴 루트가 아니라 진짜 리프에 — 2
   없는 구조도 하강(이름-박스 동행).
 - 유닛 bottom_outline_sits_on_leaves_not_collapse_roots(붕괴 루트
   무박스·리프 박스·r==0 경계 공존, vis on/off 동일).
+
+rev 37 (최종 계약: 박스는 자기 depth 경계에서만 — 2026-08-07,
+0.11.14; 실사용 확정 "depth 1의 박스는 depth 1에서만"):
+
+- rev 34/36의 바닥 지속 실험 전면 철회: depth 1에서 처음 나타난
+  박스가 depth 2~10까지 유지되는 것은 오답(이름은 r==0 전용이라
+  사라지는데 박스만 남아 이름 없는 박스 재발). **박스와 이름은
+  같은 규칙**: r==0 depth 경계에서만 존재하고, 전개된 셀은 바닥
+  여부와 무관하게 아웃라인 없음. 이전 depth의 박스는 다음 depth
+  에서 사라진다(텍스트와 동일하게 "컷"됨).
+- 유지되는 직교 규칙: fold 침묵(rev 33), footprint 크기 컷(rev
+  34), 30px 2톤(rev 35), LOD 킬스위치 스케일 보존(rev 35 수정).
+- 유닛 boxes_live_only_at_their_depth_boundary(depth 1의 SLEAF
+  박스가 depth 2에서 소멸·경계 이동·vis on/off 동일), fold 유닛
+  원복(전개 BIG 무박스), 구 지속성 유닛 2개 제거.
