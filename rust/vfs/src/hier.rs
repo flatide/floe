@@ -659,48 +659,27 @@ impl<'a> Hier<'a> {
                                 }
                                 continue;
                             }
-                            let vis_content = masks_intersect(
-                                self.v.bitset(
-                                    self.v.cell_lmask_rec(h.child),
-                                ),
-                                &self.req.vis,
-                            );
-                            // Above-cut child whose structure
-                            // bottoms out within the remaining
-                            // depth (norm_r collapse; a leaf is
-                            // the height-0 case) AND has no
-                            // visible design content: no frame or
-                            // page can ever be emitted below it,
-                            // so without this its fold outline
-                            // VANISHED the moment zoom pushed it
-                            // past the cut (field report: dense
-                            // small cells, frame layer only). The
-                            // outline is its only representation
-                            // and persists, replacing the edge.
-                            // With content visible the geometry
-                            // tells the story - Calibre draws no
-                            // box for fully expanded cells, and
-                            // neither do we (rev 32 amendment,
-                            // second field report: depth-invariant
-                            // phantom rectangles).
+                            // An expanded above-cut child draws NO
+                            // outline of its own - not even when
+                            // its structure bottoms out right here
+                            // (rev 32 tried that, rev 32 withdrawal
+                            // removed it): such a box can carry no
+                            // block name, and a box that shows no
+                            // text is not drawn (field decision).
+                            // A fully expanded cell is represented
+                            // by its geometry alone, exactly like
+                            // Calibre - with every layer off that
+                            // means nothing, in Calibre too. Its
+                            // sub-cut fold frame remains the
+                            // zoomed-out stand-in for omitted
+                            // detail.
                             if self.opts.frame_cap != 0
-                                && !vis_content
-                                && self.norm_r(h.child, r - 1)
-                                    == REM_FULL
-                            {
-                                if self.frames_total
-                                    < self.opts.frame_cap
-                                {
-                                    framed.insert(pli);
-                                    self.frame_depth_boundary(
-                                        &mut wc, pli, &h, &rb,
-                                        &boxes,
-                                    );
-                                }
-                                continue;
-                            }
-                            if self.opts.frame_cap != 0
-                                || vis_content
+                                || masks_intersect(
+                                    self.v.bitset(
+                                        self.v.cell_lmask_rec(h.child),
+                                    ),
+                                    &self.req.vis,
+                                )
                             {
                                 edges.insert(pli);
                             } else {
@@ -1660,16 +1639,13 @@ mod tests {
         assert_eq!(p2.pages, plan.pages);
     }
 
-    /// Rev 32 + amendment. Frame-layer-only inspection (no visible
-    /// design content): an above-cut child whose structure bottoms
-    /// out within the remaining depth keeps ONE outline across the
-    /// cut transition - its fold frame used to vanish on zoom-in
-    /// because nothing can ever be emitted below it. With layers
-    /// visible the geometry tells the story: a fully expanded cell
-    /// gets NO box (Calibre look - the second field report was
-    /// depth-invariant phantom rectangles over live geometry).
+    /// Rev 32 withdrawn (field decision: a box that shows no text
+    /// is not drawn). A fully expanded above-cut cell emits NO
+    /// outline in ANY layer-visibility state - its geometry alone
+    /// represents it, exactly like Calibre. Below the cut its fold
+    /// frame remains the zoomed-out stand-in for omitted detail.
     #[test]
-    fn above_cut_bottom_cell_keeps_outline() {
+    fn expanded_bottom_cell_emits_no_outline() {
         let v = fixture(
             &[
                 FCell {
@@ -1711,15 +1687,14 @@ mod tests {
         let top =
             folded.wcells.iter().find(|w| w.key.0 == 3).unwrap();
         assert_eq!(top.frames.len(), 2);
-        // layers off, zoomed in (cut 50): LEAF expands - the SAME
-        // two boxes persist, the outline replaces the edge
+        // layers off, zoomed in (cut 50): LEAF expands to its
+        // geometry alone - no visible layer, so nothing (Calibre)
         let exp = plan_hier(&v, &off_vis(50), &HierOpts::default());
         assert!(exp.pages.is_empty());
-        assert_eq!(exp.stats.inst_edges, 0);
+        assert_eq!(exp.stats.inst_edges, 1);
         let top = exp.wcells.iter().find(|w| w.key.0 == 3).unwrap();
-        assert_eq!(top.frames.len(), 2);
-        // layers ON, zoomed in: geometry speaks - no bottom outline
-        // for the expanded LEAF (only SMALL's fold), page ships
+        assert_eq!(top.frames.len(), 1);
+        // layers ON, zoomed in: page ships, still no extra outline
         let lv = plan_hier(&v, &rq(view, 50, 1),
                            &HierOpts::default());
         assert_eq!(lv.pages.len(), 1);
@@ -1727,7 +1702,7 @@ mod tests {
         assert_eq!(lv.stats.inst_edges, 1);
         let top = lv.wcells.iter().find(|w| w.key.0 == 3).unwrap();
         assert_eq!(top.frames.len(), 1);
-        // frames off: the outline machinery stays fully silent
+        // frames off: no frames at any cut, pages unaffected
         let mut off = HierOpts::default();
         off.frame_cap = 0;
         let p = plan_hier(&v, &off_vis(50), &off);
