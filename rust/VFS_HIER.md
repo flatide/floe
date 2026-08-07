@@ -1911,3 +1911,34 @@ rev 39 (프레임 융합 폐지 + 멤버 박스 크기 컷 — 2026-08-07, 0.11.
   테스트 대체: sub-2px pitch도 Rep::Grid 유지+회색, cut>멤버면
   frame_rects 0), keep_rep/huge_pts/delta 테스트에 멤버 컷 케이스
   추가, 텍스트 depth_zero_blocks에 "cut이 이름도 자름" 케이스.
+
+rev 40 (M7-C 1차: 변종 문턱 256 + 서브픽셀 페이지 wash — 2026-08-07,
+0.11.17):
+
+- 계기(sample9 fit-뷰 0.044px/µm·depth 9 실측): 화면 2.2M px에
+  lod on 746만 레코드(×3.4 포화). 원인 ① LOD_MIN_MEMBERS=4096이라
+  10,560페이지 중 800개만 변종 보유(절대 밀도 문턱은 줌-의존 포화를
+  못 봄) ② 작은 페이지는 멤버가 128 격자 대비 커서 verbatim 통과
+  ③ 랜덤 먼지의 커버리지 RLE가 페이지당 ~1.8k 렉트로 수렴
+  ④ 서브픽셀 스트로크는 스페클을 우회.
+- 빌드: LOD_MIN_MEMBERS 4096 → 256 (sample9 변종 800→9,277,
+  ovp 119→142M).
+- 플래너 wash 강등(HierOpts.wash_px, 기본 2.0px): 양변이 wash_px
+  이하로 응축된 페이지는 지오메트리 대신 자기 레이어의 bbox 렉트
+  1개로 — 그 크기에선 어떤 멤버 부분집합도 같은 픽셀 덩어리이고,
+  렉트는 채움이라 스페클이 얇게 만든다(Calibre 질감). 델타는
+  프레임과 같은 경로로 WC 셀 본문에 저작. lod=0/probe/px=0이면
+  비활성(exact 패리티), 레이어 마스크 선행.
+- 실측(fit-뷰): 레코드 1,466만(lod off) → 486만(wash 2px+lod),
+  델타 148 → 45MB; wash 사다리 2/4/8/16px → 486/354/266/251만.
+  뷰어 경로 검증: washed=7,028, 픽셀 커버리지 62.5%로 exact와 동일
+  (풋프린트 보존, 페이로드만 감소).
+- 미결(M7-C 잔여): 화면 128px 초과 대형 페이지는 fidelity 전제
+  (격자 셀 ≤ 1px) 때문에 영원히 스왑 불가 — sample9 TOP/D1 배선
+  시트가 fit-뷰에서 여전히 스트로크 포화. 다음 결정 = --lod-grid
+  512(중간 줌 완화) 및/또는 빌드 페이지 분할의 공간 군집화(대형
+  셀 프래그먼트 bbox 국소화 → wash/스왑 가능). plan CLI --wash-px
+  노브로 현장 A/B 가능.
+- 게이트: sub_pixel_pages_wash_to_layer_rects(크기·줌복귀·킬스위치
+  ·마스크), delta 저작(레이어 1/0 렉트), lod_trigger_skips_sparse
+  256 기준 갱신. vfsd 응답에 washed= 추가.

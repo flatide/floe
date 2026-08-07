@@ -51,6 +51,13 @@ pub struct HierOpts {
     /// 0.0 disables (and req.px_per_dbu == 0.0 always disables -
     /// probes are exact by construction).
     pub lod_k: f64,
+    /// M7-C: pages spanning at most this many screen px in BOTH
+    /// axes collapse to one layer rect (their bbox). Baked LOD
+    /// variants cannot serve this zoom band: on small pages the
+    /// members are LARGE relative to the 128-grid and pass through
+    /// verbatim (sample9 fit view: 9216 swaps still shipped 8M
+    /// records). 0.0 disables; px_per_dbu == 0.0 always disables.
+    pub wash_px: f64,
 }
 
 impl Default for HierOpts {
@@ -61,6 +68,7 @@ impl Default for HierOpts {
             pts_enum_budget: 200_000,
             frame_cap: 200_000,
             lod_k: 4.0,
+            wash_px: 2.0,
                 }
     }
 }
@@ -90,6 +98,12 @@ pub struct WsCell {
     /// member) + the tone (true = white, both drawn dims >=
     /// FRAME_WHITE_PX on screen; false = gray, authored on dt+1)
     pub frames: Vec<(BBox, Rep, bool)>,
+    /// M7-C wash degrade: pages whose WHOLE screen image fits in
+    /// wash_px x wash_px collapse to one bbox rect on their own
+    /// layer (li, page bbox) - at that size any subset of the
+    /// page's members paints the same pixel blob, and shipping
+    /// geometry only builds a hairline wall no dither can thin
+    pub washes: Vec<(u32, BBox)>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -117,6 +131,8 @@ pub struct HierStats {
     pub kbox_merges: u64,
     /// pages swapped for their LOD variant by the density gate
     pub lod_swapped: u64,
+    /// pages collapsed to a single layer-colored bbox rect (M7-C)
+    pub washed_pages: u64,
 }
 
 #[derive(Debug, PartialEq)]
@@ -369,6 +385,7 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
         pts_budget: opts.pts_enum_budget,
         px_per_dbu: req.px_per_dbu,
         lod_k: opts.lod_k,
+        wash_px: opts.wash_px,
         frames_total: 0,
     };
     let top_ci = v.top;
@@ -447,6 +464,7 @@ struct Hier<'a> {
     frames_total: usize,
     px_per_dbu: f64,
     lod_k: f64,
+    wash_px: f64,
 }
 
 impl<'a> Hier<'a> {
@@ -491,6 +509,7 @@ impl<'a> Hier<'a> {
             pages: Vec::new(),
             insts: Vec::new(),
             frames: Vec::new(),
+            washes: Vec::new(),
         };
         // ---- own pages: (cell,layer) runs, layer roots skip whole,
         // per-box queries dedup into one sorted set
@@ -535,6 +554,24 @@ impl<'a> Hier<'a> {
         let mut sel: BTreeSet<u32> = BTreeSet::new();
         for &pi in &psel {
             let p = self.v.page(pi);
+            // M7-C wash: a page whose whole image is at most
+            // wash_px in both axes is ONE blob on screen - ship
+            // its bbox as a single rect on its own layer instead
+            // of geometry (baked variants keep small pages'
+            // relatively-large members verbatim and cannot thin
+            // them; strokes bypass the speckle, so exact geometry
+            // saturates into a solid wall)
+            if self.wash_px > 0.0 && self.px_per_dbu > 0.0 {
+                let pw = (p.bbox.x1 - p.bbox.x0).max(0) as f64
+                    * self.px_per_dbu;
+                let ph = (p.bbox.y1 - p.bbox.y0).max(0) as f64
+                    * self.px_per_dbu;
+                if pw <= self.wash_px && ph <= self.wash_px {
+                    wc.washes.push((p.layer_idx, p.bbox));
+                    self.st.washed_pages += 1;
+                    continue;
+                }
+            }
             let mut eff = pi;
             if self.lod_k > 0.0
                 && self.px_per_dbu > 0.0
@@ -1208,6 +1245,22 @@ impl crate::Vfs {
                         h: (b.y1 - b.y0).max(1),
                         rep: rep.clone(),
                     })
+                    .chain(w.washes.iter().map(|(li, b)| {
+                        // M7-C: sub-wash_px page -> one rect on the
+                        // page's own design layer (normal fill, so
+                        // the viewer's speckle thins it like any
+                        // geometry - the Calibre wash texture)
+                        let lv = self.ovm.layer(*li);
+                        RectRec {
+                            layer: lv.layer,
+                            dt: lv.dt,
+                            x: b.x0,
+                            y: b.y0,
+                            w: (b.x1 - b.x0).max(1),
+                            h: (b.y1 - b.y0).max(1),
+                            rep: Rep::One,
+                        }
+                    }))
                     .collect();
                 let mut places =
                     Vec::with_capacity(w.pages.len() + w.insts.len());
@@ -1653,6 +1706,60 @@ mod tests {
         assert_eq!(p2.stats.frame_rects, 0);
         assert_eq!(p2.stats.inst_edges, 1);
         assert_eq!(p2.pages, plan.pages);
+    }
+
+    /// M7-C: a page whose whole screen image fits wash_px in both
+    /// axes collapses to one rect on its own layer (any member
+    /// subset paints the same blob; exact geometry saturates into
+    /// a stroke wall). Zooming in, wash_px 0, px 0 (probe), and a
+    /// masked layer all keep/restore the exact behavior.
+    #[test]
+    fn sub_pixel_pages_wash_to_layer_rects() {
+        let v = fixture(
+            &[FCell {
+                name: "T",
+                pages: vec![(bx(0, 0, 1000, 1000), 500, 500)],
+                places: vec![],
+            }],
+            0,
+        );
+        let view = bx(-10, -10, 1100, 1100);
+        // 1000 dbu * 0.001 px/dbu = 1px <= wash_px 2
+        let p = plan_hier(
+            &v,
+            &rq_px(view, 0, 0, 0.001),
+            &HierOpts::default(),
+        );
+        assert_eq!(p.stats.washed_pages, 1);
+        assert!(p.pages.is_empty());
+        let t = p.wcells.iter().find(|w| w.key.0 == 0).unwrap();
+        assert_eq!(t.washes, vec![(0u32, bx(0, 0, 1000, 1000))]);
+        assert!(t.pages.is_empty());
+        // zoomed in (100px): geometry returns
+        let pz = plan_hier(
+            &v,
+            &rq_px(view, 0, 0, 0.1),
+            &HierOpts::default(),
+        );
+        assert_eq!(pz.stats.washed_pages, 0);
+        assert_eq!(pz.pages.len(), 1);
+        // kill switch: wash_px 0 ships geometry even sub-pixel
+        let mut off = HierOpts::default();
+        off.wash_px = 0.0;
+        let pk = plan_hier(&v, &rq_px(view, 0, 0, 0.001), &off);
+        assert_eq!(pk.stats.washed_pages, 0);
+        assert_eq!(pk.pages.len(), 1);
+        // no screen scale (probe parity): exact
+        let pn =
+            plan_hier(&v, &rq(view, 0, 0), &HierOpts::default());
+        assert_eq!(pn.stats.washed_pages, 0);
+        assert_eq!(pn.pages.len(), 1);
+        // layer masked off: neither geometry nor wash
+        let mut mreq = rq_px(view, 0, 0, 0.001);
+        mreq.vis = vec![0];
+        let pv = plan_hier(&v, &mreq, &HierOpts::default());
+        assert_eq!(pv.stats.washed_pages, 0);
+        assert!(pv.wcells.iter().all(|w| w.washes.is_empty()));
     }
 
     /// Rev 37 (final): a box lives ONLY at its own depth boundary,
@@ -3211,6 +3318,24 @@ mod tests {
             .cells
             .iter()
             .any(|c| c.name == "P1_0_0" && c.rects.is_empty()));
+        // M7-C wash: the same fixture at a sub-wash_px scale
+        // authors ONE rect on the page's own layer (1/0) instead
+        // of referencing the page
+        let wplan = plan_hier(
+            &vfs.ovm,
+            &rq_px(bx(0, 0, 4000, 100), 0, 0, 0.0004),
+            &HierOpts::default(),
+        );
+        let wdelta = vfs.delta_hier(&wplan, &[], 11, None).unwrap();
+        let wdoc = parse_doc(&wdelta).unwrap();
+        let wtop = &wdoc.cells[wdoc.top];
+        assert!(wplan.stats.washed_pages > 0);
+        assert!(wplan.pages.is_empty());
+        assert!(wtop
+            .rects
+            .iter()
+            .any(|r| (r.layer, r.dt) == (1, 0)));
+
         // pts: rebased subset survives the writer/parser round trip
         let (v2, offs) = pts_small();
         let plan2 = plan_hier(

@@ -1496,8 +1496,16 @@ fn split_pbvh(
     split_pbvh(nodes, c, lo + mid, l + 1);
 }
 
-/// M7 LOD trigger: pages this dense get a merged-coverage variant
-const LOD_MIN_MEMBERS: u64 = 4096;
+/// M7 LOD trigger: pages this dense get a merged-coverage variant.
+/// M7-C field finding (sample9, fit view 0.044 px/um, depth 9): at
+/// 4096 only 800 of 10560 pages had variants - the other ~9000
+/// average ~1400 members each and drew EXACT, 7.5M records into a
+/// 2.2M px screen (x3.4 saturation, hairline strokes bypass the
+/// speckle). Zoom-driven saturation is invisible to any absolute
+/// build threshold, so the floor is low: sub-256-member pages
+/// cannot saturate a fit view even en masse, and a variant that
+/// turns out useless is a few coverage rects in the ovp.
+const LOD_MIN_MEMBERS: u64 = 256;
 use floe_ovm::LOD_GRID;
 /// records whose SHAPE spans at least this many grid cells in BOTH
 /// axes pass through verbatim (individually visible blobs keep
@@ -3381,7 +3389,15 @@ pub fn plan_cmd(args: &[String]) {
     }
     {
         let t0 = std::time::Instant::now();
-        let plan = v.plan_hier(&req);
+        // --wash-px N overrides the M7-C wash threshold (field
+        // tuning; 0 disables the wash entirely)
+        let mut popts = floe_vfs::hier::HierOpts::default();
+        if let Some((_, val)) =
+            rest.iter().find(|(k, _)| k == "--wash-px")
+        {
+            popts.wash_px = val.parse().expect("wash-px");
+        }
+        let plan = floe_vfs::hier::plan_hier(&v.ovm, &req, &popts);
         let ms = t0.elapsed().as_secs_f64() * 1e3;
         let (mut cbytes, mut ubytes) = (0u64, 0u64);
         let (mut records, mut members) = (0u64, 0u64);
@@ -3415,6 +3431,7 @@ pub fn plan_cmd(args: &[String]) {
              \"pts_bytes_emitted\": {},\n  \
              \"grid_fallback_full\": {},\n  \
              \"kbox_merges\": {},\n  \"lod_pages\": {},\n  \
+             \"washed_pages\": {},\n  \
              \"plan_ms\": {:.2}\n}}",
             plan.pages.len(),
             cbytes,
@@ -3443,6 +3460,7 @@ pub fn plan_cmd(args: &[String]) {
             st.grid_fallback_full,
             st.kbox_merges,
             st.lod_swapped,
+            st.washed_pages,
             ms
         );
         if rest.iter().any(|(k, _)| k == "--inspect") {
@@ -3685,6 +3703,7 @@ fn serve_hier(
     if probe || !lod {
         // documented kill switch: exact plan, screen scale intact
         opts.lod_k = 0.0;
+        opts.wash_px = 0.0;
     }
     let plan = floe_vfs::hier::plan_hier(&v.ovm, req, &opts);
     let upd = if probe {
@@ -3822,7 +3841,7 @@ fn serve_hier(
          max_depth={} \
          bytes={} members={} plan_ms={:.2} wc_cells={} \
          inst_edges={} frame_rects={} partial={} deferred={} \
-         lod={} labels={} nlabels={} text_plan_ms={:.2} \
+         lod={} washed={} labels={} nlabels={} text_plan_ms={:.2} \
          labels_truncated={} text_bvh_nodes={} \
          text_place_bvh_nodes={} text_place_records={} \
          text_members_tested={} text_members_visible={} \
@@ -3854,6 +3873,7 @@ fn serve_hier(
         upd.partial as u8,
         upd.deferred,
         st.lod_swapped,
+        st.washed_pages,
         labels_path,
         nlabels,
         text_ms,
@@ -4418,11 +4438,13 @@ mod split_tests {
         assert_eq!(mems.len(), 90_000, "rep not kept verbatim");
     }
 
-    /// sparse pages stay LOD-free (trigger threshold)
+    /// sparse pages stay LOD-free (trigger threshold; M7-C lowered
+    /// the floor to 256 - sub-256 pages cannot saturate a fit view
+    /// even en masse, and the wash degrade covers them anyway)
     #[test]
     fn lod_trigger_skips_sparse() {
         const DIE: i64 = 1_000_000;
-        let doc = mini_doc(vec![pts_rec(3, 1000, DIE, 90)]);
+        let doc = mini_doc(vec![pts_rec(3, 200, DIE, 90)]);
         let plan = plan_of(&doc);
         assert!(plan
             .pages
