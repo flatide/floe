@@ -1788,3 +1788,27 @@ rev 33 (fold 침묵화: 프레임은 depth 전용 — 2026-08-07, 0.11.9; 4차
 - 유닛 갱신: finite_depth_folds_sub_cut_subtrees(fold 무프레임,
   on/off 완전 일치), expanded_bottom_cell_emits_no_outline(컷 전환
   전 구간 어떤 vis에서도 프레임 0, 페이지만 등장).
+
+rev 34 (rev 32 복원 + 박스 크기 컷 통일 + 블록명 — 2026-08-07,
+0.11.10; 관측 정정이 계기):
+
+- **관측 정정**: "depth 2~5 고정 위치의 Calibre에 없는 사각형"(rev
+  32 수정~철회의 근거)은 Calibre 셀트리에서 탑셀이 아닌 셀이 선택된
+  상태의 비교였음 — 탑셀 선택 시 Calibre도 같은 박스를 그린다.
+  또한 Calibre는 **박스 자체 크기를 컷**하는 로직이 있다(작은
+  박스는 안 그림).
+- **최종 계약**: frontier = 요청 depth **또는** 계층 바닥(rev 32
+  복원, vis 게이트 없는 원형) + **박스도 지오메트리처럼 크기 컷**
+  — 게이트는 placement footprint 기준으로 frame_depth_boundary
+  안에 있다(단일 sub-cut 셀 = 먼지로 탈락, 작은 셀의 넓은 배열 =
+  fuse 프레임 유지). sub-cut fold 침묵(rev 33)은 이 규칙의
+  특수형으로 자연 편입. frames on/off·depth full 규칙 불변.
+- **블록명**: 바닥 붕괴 지점(above-cut)도 r==0과 동일한 fit 게이트
+  로 이름 후보 합성(text.rs) — "박스는 있는데 텍스트가 없다" 3차
+  보고 해소. "텍스트 없는 박스는 안 그림" 규칙은 잘못된 전제에서
+  나온 것이므로 폐기(이름은 fit이 될 때만, 박스는 컷이 기준).
+- 유닛: bottom_outline_follows_box_size_cut(컷 전환: sub-cut 침묵
+  → above-cut 아웃라인, 모든 vis 상태),
+  boundary_frames_take_the_size_cut(r==0 단일 먼지 탈락·cut 0 전부
+  유지), fold 유닛(BIG 아웃라인 복귀), fuse/rep 유닛은 footprint
+  게이트라 무변경 통과.

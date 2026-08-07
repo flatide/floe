@@ -473,11 +473,23 @@ impl<'a> LWalk<'a> {
         let below_cut = cw < self.cut && chh < self.cut;
         let t0 = Xf::place(h.x, h.y, h.rot, h.flip);
         let b0 = xf_bbox(&t0, &rb);
-        // Depth boundary: admit a block candidate exactly when either
-        // its full name or "..." can fit. The former 96px gate ran
-        // before this decision and made the ellipsis path unreachable
-        // for the small boxes it was intended to represent.
-        let block = if self.opts.blocks && r == 0 {
+        // Admit a block candidate exactly when either its full name
+        // or "..." can fit (the former 96px gate ran before this
+        // decision and made the ellipsis path unreachable for the
+        // small boxes it was intended to represent). Names go where
+        // boxes go (rev 34): the r==0 depth boundary AND cells whose
+        // structure bottoms out within the remaining depth (norm_r
+        // collapse), both size-cut like the boxes themselves -
+        // Calibre names its cell boxes the same way.
+        // bottomed cells only name ABOVE-cut boxes (below the cut
+        // the geometry walk folds silently, so there is no box to
+        // name); r==0 keeps its fit-gate-only rule - the screen-px
+        // fit rejects anything near the cut size anyway.
+        let bottomed = r != 0
+            && r != REM_FULL
+            && !below_cut
+            && self.norm_r(h.child, r - 1) == REM_FULL;
+        let block = if self.opts.blocks && (r == 0 || bottomed) {
             let gb = xf_bbox(xf, &b0);
             let gw = (gb.x1 - gb.x0).max(0) as f64
                 * self.req.px_per_dbu;

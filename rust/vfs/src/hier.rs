@@ -618,13 +618,19 @@ impl<'a> Hier<'a> {
                         }
                         let cw = (rb.x1 - rb.x0).max(0) as u64;
                         let chh = (rb.y1 - rb.y0).max(0) as u64;
-                        // r == 0: depth is exhausted - EVERY child
-                        // renders as a structural outline, independent
-                        // of design-layer visibility and size cut.
-                        // frame (review finding: a pure-
-                        // hierarchy top opened at the depth-0
-                        // default as a black screen; "top geometry
-                        // + outlines" now means what it says)
+                        // r == 0: depth is exhausted - every child
+                        // renders as a structural outline,
+                        // independent of design-layer visibility
+                        // (review finding: a pure-hierarchy top
+                        // opened at the depth-0 default as a black
+                        // screen; "top geometry + outlines" now
+                        // means what it says). Rev 34: the box
+                        // itself takes the size cut like geometry
+                        // (Calibre size-cuts its cell boxes), but
+                        // on the PLACEMENT footprint - an array of
+                        // tiny cells spans a large extent and must
+                        // keep its fused frame; the gate lives in
+                        // frame_depth_boundary.
                         if r == 0 {
                             if self.frames_total
                                 < self.opts.frame_cap
@@ -663,20 +669,6 @@ impl<'a> Hier<'a> {
                                 framed.insert(pli);
                                 continue;
                             }
-                            // An expanded above-cut child draws NO
-                            // outline of its own - not even when
-                            // its structure bottoms out right here
-                            // (rev 32 tried that, rev 32 withdrawal
-                            // removed it): such a box can carry no
-                            // block name, and a box that shows no
-                            // text is not drawn (field decision).
-                            // A fully expanded cell is represented
-                            // by its geometry alone, exactly like
-                            // Calibre - with every layer off that
-                            // means nothing, in Calibre too. Its
-                            // sub-cut fold frame remains the
-                            // zoomed-out stand-in for omitted
-                            // detail.
                             if self.opts.frame_cap != 0
                                 || masks_intersect(
                                     self.v.bitset(
@@ -685,6 +677,30 @@ impl<'a> Hier<'a> {
                                     &self.req.vis,
                                 )
                             {
+                                // Above-cut child whose structure
+                                // bottoms out within the remaining
+                                // depth (norm_r collapse; a leaf
+                                // is the height-0 case): the
+                                // frontier is depth OR hierarchy
+                                // bottom, so it keeps its outline
+                                // next to its geometry (rev 34 =
+                                // rev 32 restored - the earlier
+                                // "phantom rectangles" were a
+                                // Calibre cell-tree root mixup,
+                                // top-selected Calibre draws these
+                                // same boxes, size-cut like ours,
+                                // with names; text.rs labels them).
+                                if self.opts.frame_cap != 0
+                                    && self.frames_total
+                                        < self.opts.frame_cap
+                                    && self.norm_r(h.child, r - 1)
+                                        == REM_FULL
+                                {
+                                    self.frame_depth_boundary(
+                                        &mut wc, pli, &h, &rb,
+                                        &boxes,
+                                    );
+                                }
                                 edges.insert(pli);
                             } else {
                                 self.st.cull_layer += 1;
@@ -840,6 +856,16 @@ impl<'a> Hier<'a> {
                 }
             }
         };
+        // rev 34: the box takes the size cut exactly like geometry
+        // (Calibre size-cuts its cell boxes) - gated on the whole
+        // placement footprint, so a single sub-cut cell drops as
+        // dust while a wide array of tiny cells keeps its frame
+        let fw = (fp.x1 - fp.x0).max(0) as u64;
+        let fh = (fp.y1 - fp.y0).max(0) as u64;
+        if fw < self.cut && fh < self.cut {
+            self.st.cull_size += 1;
+            return;
+        }
         if boxes.iter().any(|b| fp.intersects(b)) {
             wc.frames.push((rect, rep));
             self.frames_total += 1;
@@ -1626,12 +1652,13 @@ mod tests {
         // BIG's page ships; TINY's page is cut-culled everywhere
         assert_eq!(plan.pages.len(), 1);
         assert_eq!(v.page(plan.pages[0]).cell, 2);
-        // the sub-cut subtree folded SILENTLY (rev 33) and BIG is
-        // fully expanded, so no frame exists anywhere; neither
+        // the sub-cut subtree folded SILENTLY (rev 33: its box is
+        // below the size cut); BIG, an above-cut bottomed-out leaf,
+        // keeps its outline next to its geometry (rev 34); neither
         // SMALL nor TINY got a working-set cell
-        assert_eq!(plan.stats.frame_rects, 0);
+        assert_eq!(plan.stats.frame_rects, 1);
         let top = plan.wcells.iter().find(|w| w.key.0 == 3).unwrap();
-        assert!(top.frames.is_empty());
+        assert_eq!(top.frames.len(), 1);
         assert!(!plan.wcells.iter().any(|w| w.key.0 <= 1));
         // the only edge is TOP -> BIG
         assert_eq!(plan.stats.inst_edges, 1);
@@ -1644,13 +1671,15 @@ mod tests {
         assert_eq!(p2.pages, plan.pages);
     }
 
-    /// Rev 32 withdrawn + rev 33 (field decisions: a box that shows
-    /// no text is not drawn, and no box may track the cut). Across
-    /// the whole cut transition of a bottoming-out cell - folded or
-    /// expanded, any layer visibility - NO frame is ever emitted;
-    /// only pages appear when zoom lets the geometry through.
+    /// Rev 34 (Calibre observation corrected: with the top cell
+    /// selected Calibre draws bottomed-out cells' boxes too, and it
+    /// size-cuts the boxes themselves). A bottoming-out cell's
+    /// outline follows the box-size cut exactly like geometry:
+    /// below the cut nothing (silent fold, rev 33), above the cut
+    /// the outline appears in EVERY layer-visibility state, next to
+    /// its pages when they are visible.
     #[test]
-    fn expanded_bottom_cell_emits_no_outline() {
+    fn bottom_outline_follows_box_size_cut() {
         let v = fixture(
             &[
                 FCell {
@@ -1684,32 +1713,74 @@ mod tests {
             vis: vec![0],
             ..rq(view, cut, 1)
         };
-        // layers off, zoomed out (cut 100): both children fold
-        // silently - no boxes, no edges, no pages
+        // layers off, zoomed out (cut 100): both children's boxes
+        // are below the size cut - silent, no edges, no pages
         let folded =
             plan_hier(&v, &off_vis(100), &HierOpts::default());
         assert!(folded.pages.is_empty());
         assert_eq!(folded.stats.inst_edges, 0);
         assert_eq!(folded.stats.frame_rects, 0);
-        // layers off, zoomed in (cut 50): LEAF expands to its
-        // geometry alone - no visible layer, so nothing (Calibre)
+        // layers off, zoomed in (cut 50): LEAF's box passes the
+        // cut - its outline appears even with no visible layer
         let exp = plan_hier(&v, &off_vis(50), &HierOpts::default());
         assert!(exp.pages.is_empty());
         assert_eq!(exp.stats.inst_edges, 1);
-        assert_eq!(exp.stats.frame_rects, 0);
-        // layers ON, zoomed in: the page ships, still no box
+        assert_eq!(exp.stats.frame_rects, 1);
+        // layers ON, zoomed in: the same outline + the page
         let lv = plan_hier(&v, &rq(view, 50, 1),
                            &HierOpts::default());
         assert_eq!(lv.pages.len(), 1);
         assert_eq!(v.page(lv.pages[0]).cell, 2);
         assert_eq!(lv.stats.inst_edges, 1);
-        assert_eq!(lv.stats.frame_rects, 0);
-        // frames off agrees completely below the boundary
+        assert_eq!(lv.stats.frame_rects, 1);
+        // frames off: the outline machinery stays fully silent
         let mut off = HierOpts::default();
         off.frame_cap = 0;
         let p = plan_hier(&v, &off_vis(50), &off);
         assert_eq!(p.stats.frame_rects, 0);
         assert!(p.pages.is_empty());
+    }
+
+    /// Rev 34: r==0 depth-boundary boxes take the size cut exactly
+    /// like geometry (Calibre size-cuts its cell boxes) - sub-cut
+    /// boundary children are dropped instead of drawn as dust.
+    #[test]
+    fn boundary_frames_take_the_size_cut() {
+        let v = fixture(
+            &[
+                FCell {
+                    name: "TINY",
+                    pages: vec![(bx(0, 0, 8, 8), 8, 8)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "BIG",
+                    pages: vec![(bx(0, 0, 900, 900), 900, 900)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "TOP",
+                    pages: vec![],
+                    places: vec![
+                        (0, 0, 0, 0, false, Rep::One),
+                        (1, 1000, 0, 0, false, Rep::One),
+                    ],
+                },
+            ],
+            2,
+        );
+        let view = bx(-10, -10, 2000, 1000);
+        let plan =
+            plan_hier(&v, &rq(view, 50, 0), &HierOpts::default());
+        // only BIG's boundary box survives the size cut
+        assert_eq!(plan.stats.frame_rects, 1);
+        let top =
+            plan.wcells.iter().find(|w| w.key.0 == 2).unwrap();
+        assert_eq!(top.frames.len(), 1);
+        // cut 0 draws both boundary boxes as before
+        let all =
+            plan_hier(&v, &rq(view, 0, 0), &HierOpts::default());
+        assert_eq!(all.stats.frame_rects, 2);
     }
 
     fn rq(view: BBox, cut: i64, depth: u32) -> ViewReq {

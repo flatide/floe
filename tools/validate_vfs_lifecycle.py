@@ -255,12 +255,13 @@ def main():
         s.stop()
 
     # ---- L8: layers=none is a real empty mask, while a finite depth
-    # still emits the structural hierarchy frontier.
+    # still emits the structural hierarchy frontier. Frames take the
+    # box-size cut like geometry (rev 34): cut 0 keeps every boundary
+    # box; a huge cut culls them all (second round below).
     s = Sess(cache, stream_kb=0)
     try:
         full = (bx0, by0, bx1, by1)
-        r = s.request(full, px=10.0, layers=[], depth=0,
-                      cut=10_000.0)
+        r = s.request(full, px=10.0, layers=[], depth=0)
         chk(int(r.get("max_depth", -1)) >= 0,
             "L8 daemon omitted max_depth")
         chk(int(r.get("pages", -1)) == 0,
@@ -282,6 +283,12 @@ def main():
             for sh in lc.shapes(frame_li).each() if sh.is_text()]
         chk(centered and all(centered),
             "L8 block labels are not center-aligned")
+        # rev 34: a cut far above every placement footprint culls
+        # ALL boundary boxes - never applied, like L5's dropped gen
+        r2 = s.request(full, px=10.0, layers=[], depth=0,
+                       cut=10_000_000_000.0)
+        chk(int(r2.get("frame_rects", -1)) == 0,
+            "L8 box size cut failed to cull sub-cut boundary boxes")
     finally:
         s.stop()
 
