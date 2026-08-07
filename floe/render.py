@@ -69,6 +69,9 @@ class Renderer:
         self.layout = layout
         self.top = top_cell
         self.colors = colors or {}  # (layer, datatype) -> "#rrggbb"
+        # Earlier entries paint later, i.e. hollow[0] is the topmost
+        # outline plane (white frames above gray ones).
+        self._hollow_order = tuple(hollow)
         self.hollow = set(hollow)
         self.hier_offset = hier_offset
         self.speckle = bool(speckle)
@@ -118,32 +121,31 @@ class Renderer:
         layer number, regardless of the order in which layers were created
         in Layout. The runtime FRAME_LAYER is deliberately above the
         largest design layer number, so that default sorting puts its gray
-        outlines at the very top of the image. Rebuild the flat property
-        list only when that sorting has placed a hollow underlay after a
-        normal layer. KLayout paints later property entries over earlier
-        ones, hence hollow entries must come first.
+        outlines at the very top of the image; and within the frame pair
+        the white plane (dt 0) sorts before gray (dt 1), letting gray
+        paint over white where boxes touch. KLayout paints later property
+        entries over earlier ones, hence hollow entries must come first,
+        and within the hollow group in the REVERSE of the `hollow`
+        argument order (its first entry - the white frames - topmost).
+        Rebuild the flat property list only when it deviates.
         """
         nodes = list(self.lv.each_layer())
-        seen_design = False
-        misplaced = False
-        for node in nodes:
-            key = (node.source_layer, node.source_datatype)
-            if key in self.hollow:
-                misplaced |= seen_design
-            else:
-                seen_design = True
-        if not misplaced:
+        prio = {key: i for i, key in enumerate(self._hollow_order)}
+
+        def key(node):
+            return (node.source_layer, node.source_datatype)
+
+        under = sorted((n for n in nodes if key(n) in self.hollow),
+                       key=lambda n: -prio[key(n)])
+        design = [n for n in nodes if key(n) not in self.hollow]
+        want = under + design
+        if [key(n) for n in want] == [key(n) for n in nodes]:
             return
 
         # Duplicate before clear_layers(): node refs belong to the list
         # that is about to be destroyed. Preserve the relative ordering
-        # within the underlay and design groups.
-        ordered = [node.dup() for node in nodes
-                   if (node.source_layer,
-                       node.source_datatype) in self.hollow]
-        ordered.extend(
-            node.dup() for node in nodes
-            if (node.source_layer, node.source_datatype) not in self.hollow)
+        # within the design group.
+        ordered = [node.dup() for node in want]
         self.lv.clear_layers()
         for node in ordered:
             self.lv.insert_layer(self.lv.end_layers(), node)

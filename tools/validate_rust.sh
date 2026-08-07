@@ -59,4 +59,6 @@ rust/target/release/floe-index vfs "$SRC" "$VOUT" --coverage \
 # viewer speckle fill: common phase, opaque overlap, and the
 # coverage composite staying out of speckled interiors
 .venv/bin/python tools/validate_render_speckle.py
+# frame outline stacking: white over gray, 1px hollow, under design
+.venv/bin/python tools/validate_render_frames.py
 echo "RUST VALIDATION: ALL OK ($SRC)"
