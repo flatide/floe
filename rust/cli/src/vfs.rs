@@ -3350,10 +3350,11 @@ pub fn plan_cmd(args: &[String]) {
         for r in &lp.rows {
             if r.block {
                 println!(
-                    "blk\t-\t{}\t{}\t{}\t{}",
+                    "blk\t-\t{}\t{}\t{}\t{}\t{}",
                     r.x,
                     r.y,
                     r.rot,
+                    r.white as u8,
                     crate::tsv_esc(&r.s)
                 );
             } else {
@@ -3779,10 +3780,11 @@ fn serve_hier(
             for r in &lp.rows {
                 if r.block {
                     wbuf.push_str(&format!(
-                        "blk\t-\t{}\t{}\t{}\t{}\n",
+                        "blk\t-\t{}\t{}\t{}\t{}\t{}\n",
                         r.x,
                         r.y,
                         r.rot,
+                        r.white as u8,
                         crate::tsv_esc(&r.s)
                     ));
                 } else {

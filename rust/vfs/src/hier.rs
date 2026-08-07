@@ -22,6 +22,11 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet};
 
 /// remaining-depth sentinel: no depth truncation below this WC
 pub const REM_FULL: u32 = u32::MAX;
+/// Calibre-style frame tone split: a frame box (and its block name)
+/// draws WHITE when both screen dimensions reach this many pixels,
+/// GRAY below - however long one side is, a short other side stays
+/// gray. Gray boxes go to (frame_layer, dt+1).
+pub const FRAME_WHITE_PX: f64 = 30.0;
 
 /// (cell index, remaining depth) - the working-set cell identity.
 /// Full-depth views collapse to one key per cell (r >= height folds
@@ -81,8 +86,10 @@ pub struct WsCell {
     pub pages: Vec<u32>,
     pub insts: Vec<WsInst>,
     /// depth-boundary child outlines: offset-0 member bbox in
-    /// WC-local coords + the placement rep (arrays outline per member)
-    pub frames: Vec<(BBox, Rep)>,
+    /// WC-local coords + the placement rep (arrays outline per
+    /// member) + the tone (true = white, both drawn dims >=
+    /// FRAME_WHITE_PX on screen; false = gray, authored on dt+1)
+    pub frames: Vec<(BBox, Rep, bool)>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -867,7 +874,17 @@ impl<'a> Hier<'a> {
             return;
         }
         if boxes.iter().any(|b| fp.intersects(b)) {
-            wc.frames.push((rect, rep));
+            // tone from the box actually drawn (member box for
+            // per-member reps, footprint for fused ones); no screen
+            // scale = legacy single-tone white
+            let white = self.px_per_dbu <= 0.0
+                || ((rect.x1 - rect.x0).max(0) as f64
+                    * self.px_per_dbu
+                    >= FRAME_WHITE_PX
+                    && (rect.y1 - rect.y0).max(0) as f64
+                        * self.px_per_dbu
+                        >= FRAME_WHITE_PX);
+            wc.frames.push((rect, rep, white));
             self.frames_total += 1;
             self.st.frame_rects += 1;
         }
@@ -1215,9 +1232,13 @@ impl crate::Vfs {
                 let rects: Vec<RectRec> = w
                     .frames
                     .iter()
-                    .map(|(b, rep)| RectRec {
+                    .map(|(b, rep, white)| RectRec {
                         layer: frame_fl,
-                        dt: frame_fd,
+                        dt: if *white {
+                            frame_fd
+                        } else {
+                            frame_fd + 1
+                        },
                         x: b.x0,
                         y: b.y0,
                         w: (b.x1 - b.x0).max(1),
@@ -1739,6 +1760,68 @@ mod tests {
         let p = plan_hier(&v, &off_vis(50), &off);
         assert_eq!(p.stats.frame_rects, 0);
         assert!(p.pages.is_empty());
+    }
+
+    /// Rev 35: Calibre tone split. A frame is white only when BOTH
+    /// drawn screen dimensions reach FRAME_WHITE_PX (30) - a long
+    /// thin box stays gray however long its long side is. No screen
+    /// scale (px_per_dbu 0) = legacy single-tone white.
+    #[test]
+    fn frames_split_white_gray_at_30px() {
+        let v = fixture(
+            &[
+                FCell {
+                    name: "MED", // 200 DBU -> 20px at 0.1: gray
+                    pages: vec![(bx(0, 0, 200, 200), 200, 200)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "THIN", // 4000x100 -> 400x10px: gray
+                    pages: vec![(bx(0, 0, 4000, 100), 4000, 100)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "BIG", // 900 -> 90px both dims: white
+                    pages: vec![(bx(0, 0, 900, 900), 900, 900)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "TOP",
+                    pages: vec![],
+                    places: vec![
+                        (0, 0, 0, 0, false, Rep::One),
+                        (1, 0, 500, 0, false, Rep::One),
+                        (2, 5000, 0, 0, false, Rep::One),
+                    ],
+                },
+            ],
+            3,
+        );
+        let view = bx(-10, -10, 7000, 1000);
+        let plan = plan_hier(
+            &v,
+            &rq_px(view, 0, 0, 0.1),
+            &HierOpts::default(),
+        );
+        let top =
+            plan.wcells.iter().find(|w| w.key.0 == 3).unwrap();
+        assert_eq!(top.frames.len(), 3);
+        let tone = |w: i64| {
+            top.frames
+                .iter()
+                .find(|(b, _, _)| b.x1 - b.x0 == w)
+                .unwrap()
+                .2
+        };
+        assert!(!tone(200), "20x20px box must be gray");
+        assert!(!tone(4000), "400x10px box must be gray");
+        assert!(tone(900), "90x90px box must be white");
+        // no screen scale: everything stays white (legacy plans)
+        let p0 =
+            plan_hier(&v, &rq(view, 0, 0), &HierOpts::default());
+        let t0 =
+            p0.wcells.iter().find(|w| w.key.0 == 3).unwrap();
+        assert!(t0.frames.iter().all(|f| f.2));
     }
 
     /// Rev 34: r==0 depth-boundary boxes take the size cut exactly
@@ -2611,7 +2694,7 @@ mod tests {
         let plan = check(&v, &rq(bx(0, 0, 4000, 100), 10, 0), true);
         let t = plan.wcells.iter().find(|w| w.key.0 == 1).unwrap();
         assert_eq!(t.frames.len(), 1);
-        let (fb, frep) = &t.frames[0];
+        let (fb, frep, _) = &t.frames[0];
         assert_eq!(*fb, bx(0, 0, 5, 5));
         assert!(matches!(frep, Rep::Grid { na: 4, .. }));
         assert!(t.insts.is_empty());
@@ -2679,7 +2762,7 @@ mod tests {
         );
         let t = plan.wcells.iter().find(|w| w.key.0 == 1).unwrap();
         assert_eq!(t.frames.len(), 1);
-        let (fb, frep) = &t.frames[0];
+        let (fb, frep, _) = &t.frames[0];
         assert!(matches!(frep, Rep::One), "{:?}", frep);
         // footprint spans the whole array, not one member
         assert_eq!(*fb, bx(0, 0, 15 * 199 + 5, 5));

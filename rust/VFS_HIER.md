@@ -1812,3 +1812,21 @@ rev 34 (rev 32 복원 + 박스 크기 컷 통일 + 블록명 — 2026-08-07,
   boundary_frames_take_the_size_cut(r==0 단일 먼지 탈락·cut 0 전부
   유지), fold 유닛(BIG 아웃라인 복귀), fuse/rep 유닛은 footprint
   게이트라 무변경 통과.
+
+rev 35 (Calibre 2톤 프레임: 흰/회 30px 문턱 — 2026-08-07, 0.11.11):
+
+- **규칙(상수 FRAME_WHITE_PX=30)**: 그려지는 박스의 화면 크기가
+  **양변 모두 ≥30px면 흰색, 한 변이라도 미만이면 회색** — 한쪽이
+  아무리 길어도 다른 쪽이 짧으면 회색(Calibre 실측 규칙). 판정은
+  실제 그려지는 박스 기준: per-member rep은 멤버 박스, fuse된
+  프레임은 footprint. px_per_dbu 없는 플랜(CLI)은 흰색 폴백.
+- **배선**: frame_layer 번호는 미사용이 보장되므로 dt로 톤 분리 —
+  흰=(fl,0), 회=(fl,1) (rust/python 유도 규칙 무변경, WsCell.frames
+  에 톤 비트, 델타 저작에서 dt 라우팅). 블록명도 같은 판정
+  (cross≥30 ⇔ 양변)으로 blk TSV 행에 톤 컬럼 추가(7컬럼, 구식
+  6/5컬럼 하위호환) → 뷰어가 회색 이름을 (fl,1)에 얹어 글자색이
+  박스 톤을 자동 추종. 뷰어 색: 흰 #ffffff / 회 #808080, hollow·
+  pick 제외·frames 토글 가시셋에 양쪽 포함.
+- 유닛 frames_split_white_gray_at_30px(20px 회·400x10px 회·90px
+  흰·px 없음 전부 흰), X-게이트 blk 파서 7컬럼 인지. 재인덱싱
+  불필요.

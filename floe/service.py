@@ -52,7 +52,8 @@ def _iter_global_polys(mosaic, layers_sel, box):
         info = ly.get_info(li)
         # the hierarchy-frontier layer is a draw-only navigation aid
         # (depth outlines and block labels) - never pickable
-        if (info.layer, info.datatype) == tuple(mosaic.FRAME_LAYER):
+        if (info.layer, info.datatype) in (tuple(mosaic.FRAME_LAYER),
+                                           tuple(mosaic.FRAME_GRAY)):
             continue
         if layers_sel is not None and \
                 (info.layer, info.datatype) not in layers_sel:
@@ -223,7 +224,17 @@ def _labels_from(path, cache):
                 continue
             if p[0] == "blk":
                 l, d = fl, fd
-                if len(p) >= 6:
+                if len(p) >= 7:
+                    # v6 row: rot + tone; gray names land on the
+                    # gray frame dt so the text color follows its box
+                    try:
+                        rot = int(p[4])
+                        if p[5] == "0":
+                            d = fd + 1
+                    except ValueError:
+                        continue
+                    text_col = 6
+                elif len(p) >= 6:
                     try:
                         rot = int(p[4])
                     except ValueError:
@@ -332,6 +343,7 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
             vis_r = list(job["visible"])
             if job.get("frames", True):
                 vis_r.append(mosaic.FRAME_LAYER)
+                vis_r.append(mosaic.FRAME_GRAY)
         renderer.render_png(tmp, x0, y0, x1, y1, job["w"], job["h"],
                             visible=vis_r, depth=None)
         draw_total[0] += time.perf_counter() - td
@@ -587,10 +599,15 @@ def _render_service(src, req, res, latest=None, options=None):
             stream_target_ms=options.get("stream_target_ms", 500),
             debug=options.get("debug", False))
         fcolors = dict(colors)
-        fcolors[mosaic.FRAME_LAYER] = "#93a4ad"
+        # Calibre tone split: boxes (and their names) at >= 30x30
+        # screen px draw white, smaller ones gray - the daemon
+        # authors the tone onto dt 0 / dt 1 of the frame layer
+        fcolors[mosaic.FRAME_LAYER] = "#ffffff"
+        fcolors[mosaic.FRAME_GRAY] = "#808080"
         renderer = Renderer(mosaic.ly, mosaic.top, fcolors,
                             hier_offset=0,
-                            hollow=(mosaic.FRAME_LAYER,))
+                            hollow=(mosaic.FRAME_LAYER,
+                                    mosaic.FRAME_GRAY))
         lod = None
     except Exception as e:
         res.put({"kind": "error", "msg": f"render service init failed: {e}"})

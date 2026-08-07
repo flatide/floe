@@ -81,14 +81,20 @@ class VfsMosaic:
         # hierarchy-frontier outline layer, drawn hollow: one past the
         # highest DESIGN layer (same rule as the daemon's
         # frame_layer()) so it can never collide with real content
-        # - (255,0) exists in real designs (review finding)
+        # - (255,0) exists in real designs (review finding). The
+        # layer NUMBER is unused by the design, so dt 1 is free too:
+        # it carries the GRAY tone (boxes under 30x30 screen px,
+        # Calibre-style); dt 0 stays the white tone.
         self.FRAME_LAYER = frame_layer(cache.meta)
+        self.FRAME_GRAY = (self.FRAME_LAYER[0],
+                           self.FRAME_LAYER[1] + 1)
         self.ly = db.Layout(False)  # pages keep arrays compact
         self.ly.dbu = self._dbu
         # Keep the Layout index deterministic with the structural frontier
         # first. KLayout's LayoutView later re-sorts properties by source
         # number, so Renderer also pins this layer to the paint-stack bottom.
         self.ly.layer(db.LayerInfo(*self.FRAME_LAYER))
+        self.ly.layer(db.LayerInfo(*self.FRAME_GRAY))
         for (l, d) in self._layer_keys:
             self.ly.layer(db.LayerInfo(l, d))
         self.top = self.ly.create_cell("FLOE_WS")
@@ -241,6 +247,7 @@ class VfsMosaic:
         self.ly.clear()
         self.ly.dbu = self._dbu
         self.ly.layer(db.LayerInfo(*self.FRAME_LAYER))
+        self.ly.layer(db.LayerInfo(*self.FRAME_GRAY))
         for (l, d) in self._layer_keys:
             self.ly.layer(db.LayerInfo(l, d))
         self.top = self.ly.create_cell("FLOE_WS")

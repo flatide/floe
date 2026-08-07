@@ -20,7 +20,7 @@
 //! the child's cell name + placed bbox center - nothing is stored
 //! (par.4.3).
 
-use crate::hier::{grid_ranges, GridVis, REM_FULL};
+use crate::hier::{grid_ranges, GridVis, FRAME_WHITE_PX, REM_FULL};
 use crate::{xf_bbox, ViewReq};
 use floe_ovm::{
     bit_test, masks_intersect, BBox, Ovm, TrepV, PTS_CHUNK,
@@ -77,6 +77,9 @@ impl Default for LabelOpts {
 #[derive(Clone, Debug, PartialEq)]
 pub struct LabelRow {
     pub block: bool,
+    /// blocks: tone of the box this name belongs to (see
+    /// FRAME_WHITE_PX); text rows always false (layer color rules)
+    pub white: bool,
     pub layer: u32,
     pub dt: u32,
     pub x: i64,
@@ -124,6 +127,7 @@ enum Src {
 #[derive(Clone, Copy, Debug)]
 struct Cand {
     block: bool,
+    white: bool,
     /// text: ovm layer index (= display priority order); block: 0
     layer_pos: u32,
     hash: u64,
@@ -263,6 +267,7 @@ impl<'a> LWalk<'a> {
         let (gx, gy) = xf.apply(lx, ly);
         self.add(Cand {
             block: false,
+            white: false,
             layer_pos: li,
             hash: fnv(&[
                 gx as u64,
@@ -584,6 +589,9 @@ impl<'a> LWalk<'a> {
                 let gy = ((gb.y0 as i128 + gb.y1 as i128) / 2) as i64;
                 w.add(Cand {
                     block: true,
+                    // along >= cross, so both dims pass iff the
+                    // short one does - same rule as the box
+                    white: cross >= FRAME_WHITE_PX,
                     layer_pos: 0,
                     hash: fnv(&[gx as u64, gy as u64, h.child as u64]),
                     x: gx,
@@ -865,6 +873,7 @@ pub fn plan_labels(
         }
         rows.push(LabelRow {
             block: matches!(c.src, Src::Cell(_)),
+            white: c.white,
             layer,
             dt,
             x: c.x,

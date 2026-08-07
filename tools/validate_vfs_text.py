@@ -147,7 +147,9 @@ def plan_labels(outdir, view, mode, depth="full", px=5.0,
             rows.append(("txt", int(l), int(dd), int(p[2]),
                          int(p[3]), unesc(p[4])))
         elif p[0] == "blk":
-            text_col = 5 if len(p) >= 6 else 4
+            # v6 rows append the tone column before the text
+            text_col = (6 if len(p) >= 7
+                        else 5 if len(p) >= 6 else 4)
             rows.append(("blk", -1, -1, int(p[2]), int(p[3]),
                          unesc(p[text_col])))
     return rows
