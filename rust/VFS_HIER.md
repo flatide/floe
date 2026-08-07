@@ -1888,3 +1888,26 @@ rev 38 (톤 임계 40px + rev 37 게이트 복구 — 2026-08-07, 0.11.15):
   복구. 톤 게이트는 임계 상수 기준으로 재작성
   (frames_split_white_gray_at_threshold: 경계 정확값=흰색,
   1px 미달=회색 케이스 추가). 프로덕션 코드는 무손상이었음.
+
+rev 39 (프레임 융합 폐지 + 멤버 박스 크기 컷 — 2026-08-07, 0.11.16):
+
+- 계기: cut/cov/lod off·frame on에서 view 92.61000→92.61001μm 전환
+  시 흰 박스 대량 등장. 원인 = fuse_pitch=ceil(2/px)의 계단 함수가
+  같은 pitch의 배열 전부를 "회색 멤버 먼지 ↔ 흰 footprint 융합
+  박스" 사이에서 동시에 반전시킴.
+- ~2px pitch 융합(Grid)과 pts 밀도 융합 제거: 프레임 박스는 항상
+  멤버 단위(rect+rep). 사용자 판정: "frame box는 머지하지 않는다,
+  cut이 처리한다".
+- 크기 컷을 placement footprint → 그리는 멤버 박스 자체로 이동
+  (rev 34 수정): 양변이 cut 미만인 박스는 지오메트리처럼 소멸.
+  rep 멤버는 치수가 동일하므로 레코드 1회 검사로 배열 전체가
+  오프셋 작업 전에 컬링됨. r>0 fold(rev 31)와 같은 셀-박스 기준.
+- 이름도 동행(rev 37 계약 유지): r==0 블록 게이트에 !below_cut —
+  컬링된 박스가 이름만 남기지 않음.
+- 유일한 잔여 강등 = pts count > pts_full_rep(8192)의 footprint
+  폴백. 시각 휴리스틱이 아니라 플랜당 O(count) 오프셋 재실체화를
+  막는 메모리 가드이며, 멤버 컷이 먼저 적용된 뒤에만 도달.
+- 게이트: dense_frames_stay_per_member_and_take_the_cut(구 fuse
+  테스트 대체: sub-2px pitch도 Rep::Grid 유지+회색, cut>멤버면
+  frame_rects 0), keep_rep/huge_pts/delta 테스트에 멤버 컷 케이스
+  추가, 텍스트 depth_zero_blocks에 "cut이 이름도 자름" 케이스.

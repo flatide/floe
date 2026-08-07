@@ -631,12 +631,11 @@ impl<'a> Hier<'a> {
                         // (review finding: a pure-hierarchy top
                         // opened at the depth-0 default as a black
                         // screen; "top geometry + outlines" now
-                        // means what it says). Rev 34: the box
+                        // means what it says). Rev 39: the box
                         // itself takes the size cut like geometry
-                        // (Calibre size-cuts its cell boxes), but
-                        // on the PLACEMENT footprint - an array of
-                        // tiny cells spans a large extent and must
-                        // keep its fused frame; the gate lives in
+                        // (Calibre size-cuts its cell boxes), on
+                        // the MEMBER box - sub-cut boxes vanish
+                        // instead of merging; the gate lives in
                         // frame_depth_boundary.
                         if r == 0 {
                             if self.frames_total
@@ -771,10 +770,16 @@ impl<'a> Hier<'a> {
     }
 
     /// Explicit hierarchy-depth boundary -> outline frame. Per-member
-    /// outlines (rect+rep) are the accurate form, but below ~2 pixels
-    /// member pitch they fuse into a solid wash, and huge sparse pts
-    /// lists would re-materialize O(count) offsets per plan. Both
-    /// degrade to the whole-rep footprint box. Footprint visibility
+    /// outlines (rect+rep) are the only form (rev 39: the ~2px pitch
+    /// fuse and the pts density fuse are gone - a step function of the
+    /// screen scale made whole regions of arrays pop between "gray
+    /// member dust" and "big white footprint" on a hair of zoom).
+    /// Instead the size cut applies to the MEMBER box itself: sub-cut
+    /// boxes vanish exactly like geometry, uniformly for the whole
+    /// rep, and the r>0 fold above already uses the same cell-box
+    /// test. The one degradation left is the huge-pts count guard:
+    /// materializing O(count) offsets per plan is a memory hazard, so
+    /// such reps fall back to one footprint box. Footprint visibility
     /// test uses the repetition extent (zero-copy for pts).
     fn frame_depth_boundary(
         &mut self,
@@ -786,14 +791,15 @@ impl<'a> Hier<'a> {
     ) {
         let t0 = Xf::place(h.x, h.y, h.rot, h.flip);
         let b0 = xf_bbox(&t0, rb);
-        // Frontier appearance must not change when the geometry cut or
-        // LOD toggle changes. Fuse only repetitions whose pitch is below
-        // two screen pixels (or 1 DBU when no screen scale is supplied).
-        let fuse_pitch = if self.px_per_dbu > 0.0 {
-            (2.0 / self.px_per_dbu).ceil().max(1.0) as u64
-        } else {
-            1
-        };
+        // rev 39: the cut gates the drawn member box (all members of
+        // a rep share these dims, so one test culls the whole record
+        // before any offset work)
+        let bw = (b0.x1 - b0.x0).max(0) as u64;
+        let bh = (b0.y1 - b0.y0).max(0) as u64;
+        if bw < self.cut && bh < self.cut {
+            self.st.cull_size += 1;
+            return;
+        }
         let (rect, rep, fp) = match h.kind {
             0 => (b0, Rep::One, b0),
             1 => {
@@ -806,38 +812,19 @@ impl<'a> Hier<'a> {
                     h.vb,
                 );
                 let fp = grow_by_offsets(&b0, &ov);
-                let pv = |v: (i64, i64)| {
-                    v.0.unsigned_abs().max(v.1.unsigned_abs())
+                let rep = Rep::Grid {
+                    na: h.na as u64,
+                    nb: h.nb as u64,
+                    va: h.va,
+                    vb: h.vb,
                 };
-                let mut pitch = u64::MAX;
-                if h.na > 1 {
-                    pitch = pitch.min(pv(h.va));
-                }
-                if h.nb > 1 {
-                    pitch = pitch.min(pv(h.vb));
-                }
-                if pitch != u64::MAX && pitch < fuse_pitch {
-                    (fp, Rep::One, fp)
-                } else {
-                    let rep = Rep::Grid {
-                        na: h.na as u64,
-                        nb: h.nb as u64,
-                        va: h.va,
-                        vb: h.vb,
-                    };
-                    (b0, rep, fp)
-                }
+                (b0, rep, fp)
             }
             _ => {
                 let pr = self.v.pts_ref(pli).expect("pts kind");
                 let ext = pr.extent();
                 let fp = grow_by_offsets(&b0, &ext);
-                let area = (ext.x1 - ext.x0).max(1) as u128
-                    * (ext.y1 - ext.y0).max(1) as u128;
-                let c2 = fuse_pitch as u128;
-                if pr.count as u128 * c2 * c2 > area
-                    || pr.count > self.opts.pts_full_rep
-                {
+                if pr.count > self.opts.pts_full_rep {
                     (fp, Rep::One, fp)
                 } else {
                     let mut pts =
@@ -849,16 +836,6 @@ impl<'a> Hier<'a> {
                 }
             }
         };
-        // rev 34: the box takes the size cut exactly like geometry
-        // (Calibre size-cuts its cell boxes) - gated on the whole
-        // placement footprint, so a single sub-cut cell drops as
-        // dust while a wide array of tiny cells keeps its frame
-        let fw = (fp.x1 - fp.x0).max(0) as u64;
-        let fh = (fp.y1 - fp.y0).max(0) as u64;
-        if fw < self.cut && fh < self.cut {
-            self.st.cull_size += 1;
-            return;
-        }
         if boxes.iter().any(|b| fp.intersects(b)) {
             // tone from the box actually drawn (member box for
             // per-member reps, footprint for fused ones); no screen
@@ -2700,7 +2677,7 @@ mod tests {
             ],
             1,
         );
-        let plan = check(&v, &rq(bx(0, 0, 4000, 100), 10, 0), true);
+        let plan = check(&v, &rq(bx(0, 0, 4000, 100), 3, 0), true);
         let t = plan.wcells.iter().find(|w| w.key.0 == 1).unwrap();
         assert_eq!(t.frames.len(), 1);
         let (fb, frep, _) = &t.frames[0];
@@ -2710,11 +2687,20 @@ mod tests {
         // no S working-set cell, no S pages
         assert!(!plan.wcells.iter().any(|w| w.key.0 == 0));
         assert!(plan.pages.iter().all(|&pi| v.page(pi).cell != 0));
+        // rev 39: the cut gates the MEMBER box - 5x5 under cut 10
+        // culls the whole rep, footprint size notwithstanding
+        let pc = plan_hier(
+            &v,
+            &rq(bx(0, 0, 4000, 100), 10, 0),
+            &HierOpts::default(),
+        );
+        assert_eq!(pc.stats.frame_rects, 0);
+        assert!(pc.stats.cull_size > 0);
         // window over member 3 of the array only: frame still comes
         // (footprint test is per whole-rep extent)
         let plan2 = plan_hier(
             &v,
-            &rq(bx(2_900, 0, 3_100, 90), 10, 0),
+            &rq(bx(2_900, 0, 3_100, 90), 3, 0),
             &HierOpts::default(),
         );
         let t2 =
@@ -2722,7 +2708,7 @@ mod tests {
         assert_eq!(t2.frames.len(), 1);
         let plan3 = plan_hier(
             &v,
-            &rq(bx(4_500, 0, 4_800, 90), 10, 0),
+            &rq(bx(4_500, 0, 4_800, 90), 3, 0),
             &HierOpts::default(),
         );
         if let Some(t3) =
@@ -2733,10 +2719,12 @@ mod tests {
     }
 
     #[test]
-    fn depth_boundary_dense_frames_fuse_to_footprint() {
-        // sub-pixel pitch (15 DBU at 0.1 px/DBU < 2px): outlines
-        // would fuse into a solid wash burying real geometry -
-        // the frame degrades to ONE footprint box (flat parity)
+    fn dense_frames_stay_per_member_and_take_the_cut() {
+        // rev 39: no fusing, whatever the pitch. The old ~2px fuse
+        // was a step function of the screen scale - whole regions of
+        // same-pitch arrays popped between gray member dust and big
+        // white footprint boxes on a 0.00001um view change. Sub-cut
+        // members now simply vanish, like geometry.
         let v = fixture(
             &[
                 FCell {
@@ -2764,24 +2752,38 @@ mod tests {
             ],
             1,
         );
+        // sub-2px pitch (15 DBU at 0.1 px/DBU) with cut below the
+        // member size: the rep survives AS a rep, tone from the
+        // 0.5px member box (gray)
         let plan = check(
             &v,
-            &rq_px(bx(0, 0, 4000, 100), 10, 0, 0.1),
+            &rq_px(bx(0, 0, 4000, 100), 3, 0, 0.1),
             true,
         );
         let t = plan.wcells.iter().find(|w| w.key.0 == 1).unwrap();
         assert_eq!(t.frames.len(), 1);
-        let (fb, frep, _) = &t.frames[0];
-        assert!(matches!(frep, Rep::One), "{:?}", frep);
-        // footprint spans the whole array, not one member
-        assert_eq!(*fb, bx(0, 0, 15 * 199 + 5, 5));
+        let (fb, frep, white) = &t.frames[0];
+        assert!(matches!(frep, Rep::Grid { na: 200, .. }), "{:?}", frep);
+        assert_eq!(*fb, bx(0, 0, 5, 5));
+        assert!(!*white, "0.5px member box must be gray");
+        // cut above the member size culls the whole array outright -
+        // no fused footprint box reappears
+        let pc = plan_hier(
+            &v,
+            &rq_px(bx(0, 0, 4000, 100), 10, 0, 0.1),
+            &HierOpts::default(),
+        );
+        assert_eq!(pc.stats.frame_rects, 0);
+        assert!(pc.stats.cull_size > 0);
     }
 
     #[test]
     fn depth_boundary_huge_sparse_pts_frame_fuses() {
-        // sparse (members far apart) but HUGE: per-member frame
-        // would re-materialize O(count) offsets every plan - the
-        // count cap degrades it to one footprint box
+        // the ONE degradation rev 39 keeps: per-member frames for a
+        // huge pts list would re-materialize O(count) offsets every
+        // plan (memory guard, not a visual heuristic) - the count
+        // cap degrades it to one footprint box. Sub-cut members
+        // still cull the whole rep before the guard is consulted.
         let n = 9000usize;
         let offs: Vec<(i64, i64)> = (0..n as i64)
             .map(|i| (i % 100 * 1_000_000, i / 100 * 1_000_000))
@@ -2814,15 +2816,23 @@ mod tests {
         );
         let plan = plan_hier(
             &v,
-            &rq(bx(0, 0, 99_000_010, 200), 10, 0),
+            &rq(bx(0, 0, 99_000_010, 200), 3, 0),
             &HierOpts::default(),
         );
         let t = plan.wcells.iter().find(|w| w.key.0 == 1).unwrap();
         assert_eq!(t.frames.len(), 1);
         assert!(matches!(t.frames[0].1, Rep::One));
-        // spacing 1mm >> 2*cut, so ONLY the count cap explains the
-        // fuse (9000 > pts_full_rep 8192)
+        // ONLY the count cap explains the degrade
+        // (9000 > pts_full_rep 8192)
         assert!(9000 > HierOpts::default().pts_full_rep);
+        // member 5x5 under cut 10: the whole rep culls, no
+        // footprint fallback resurrects it
+        let pc = plan_hier(
+            &v,
+            &rq(bx(0, 0, 99_000_010, 200), 10, 0),
+            &HierOpts::default(),
+        );
+        assert_eq!(pc.stats.frame_rects, 0);
     }
 
     #[test]
@@ -3175,7 +3185,8 @@ mod tests {
         );
         let plan = plan_hier(
             &v,
-            &rq(bx(0, 0, 4000, 100), 10, 0),
+            // cut 3: under the 5x5 member box (rev 39 member cut)
+            &rq(bx(0, 0, 4000, 100), 3, 0),
             &HierOpts::default(),
         );
         let vfs = crate::Vfs {

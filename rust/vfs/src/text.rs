@@ -482,11 +482,10 @@ impl<'a> LWalk<'a> {
         // or "..." can fit (the former 96px gate ran before this
         // decision and made the ellipsis path unreachable for the
         // small boxes it was intended to represent). Names go where
-        // boxes go (rev 34): the r==0 depth boundary AND cells whose
-        // structure bottoms out within the remaining depth (norm_r
-        // collapse), both size-cut like the boxes themselves -
-        // Calibre names its cell boxes the same way.
-        let block = if self.opts.blocks && r == 0 {
+        // boxes go: the r==0 depth boundary, and (rev 39) they take
+        // the same member-box size cut as the boxes - a culled box
+        // must not leave its name floating.
+        let block = if self.opts.blocks && r == 0 && !below_cut {
             let gb = xf_bbox(xf, &b0);
             let gw = (gb.x1 - gb.x0).max(0) as f64
                 * self.req.px_per_dbu;
@@ -1258,11 +1257,12 @@ mod tests {
                 .unwrap();
         assert!(lp2.rows.iter().all(|r| !r.block), "{:?}", lp2.rows);
 
-        // Structural names follow the hierarchy frontier, not design
-        // text visibility or the geometry size cut.
+        // Structural names follow the hierarchy frontier; design
+        // text visibility does not gate them (layers off keeps the
+        // names)...
         let mut structural = rq(
             bx(-400, 0, 6000, 6000),
-            10_000,
+            0,
             0,
             1.0,
         );
@@ -1274,8 +1274,27 @@ mod tests {
             &LabelOpts::default(),
         )
         .unwrap();
+        assert!(!lp3.rows.is_empty(), "structural names lost");
         assert!(lp3.rows.iter().all(|r| r.block), "{:?}", lp3.rows);
         assert!(lp3.rows.iter().any(|r| r.s == "SUB"));
+        // ...but rev 39: they take the geometry size cut exactly
+        // like their boxes - a culled box leaves no floating name
+        // (SUB is 402x360, far under cut 10k)
+        let mut cut_all = rq(
+            bx(-400, 0, 6000, 6000),
+            10_000,
+            0,
+            1.0,
+        );
+        cut_all.vis.fill(0);
+        let lp3b = plan_labels(
+            &v,
+            &ovt,
+            &cut_all,
+            &LabelOpts::default(),
+        )
+        .unwrap();
+        assert!(lp3b.rows.is_empty(), "{:?}", lp3b.rows);
 
         // Reproduce a long/thin screen box: full line height fails,
         // but the dots-height gate passes, so the emitted row must be
