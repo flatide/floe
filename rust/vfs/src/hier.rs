@@ -659,38 +659,49 @@ impl<'a> Hier<'a> {
                                 }
                                 continue;
                             }
+                            let vis_content = masks_intersect(
+                                self.v.bitset(
+                                    self.v.cell_lmask_rec(h.child),
+                                ),
+                                &self.req.vis,
+                            );
+                            // Above-cut child whose structure
+                            // bottoms out within the remaining
+                            // depth (norm_r collapse; a leaf is
+                            // the height-0 case) AND has no
+                            // visible design content: no frame or
+                            // page can ever be emitted below it,
+                            // so without this its fold outline
+                            // VANISHED the moment zoom pushed it
+                            // past the cut (field report: dense
+                            // small cells, frame layer only). The
+                            // outline is its only representation
+                            // and persists, replacing the edge.
+                            // With content visible the geometry
+                            // tells the story - Calibre draws no
+                            // box for fully expanded cells, and
+                            // neither do we (rev 32 amendment,
+                            // second field report: depth-invariant
+                            // phantom rectangles).
                             if self.opts.frame_cap != 0
-                                || masks_intersect(
-                                    self.v.bitset(
-                                        self.v.cell_lmask_rec(h.child),
-                                    ),
-                                    &self.req.vis,
-                                )
+                                && !vis_content
+                                && self.norm_r(h.child, r - 1)
+                                    == REM_FULL
                             {
-                                // Above-cut child whose structure
-                                // bottoms out within the remaining
-                                // depth (norm_r collapse; a leaf is
-                                // the height-0 case): no structural
-                                // frame can ever be emitted below
-                                // it, so its fold outline used to
-                                // VANISH the moment zoom pushed it
-                                // past the cut (field report: dense
-                                // small cells, frame layer only).
-                                // The frontier is depth OR hierarchy
-                                // bottom - the outline persists,
-                                // decoupled from the geometry cut
-                                // (rev 32, Calibre contract).
-                                if self.opts.frame_cap != 0
-                                    && self.frames_total
-                                        < self.opts.frame_cap
-                                    && self.norm_r(h.child, r - 1)
-                                        == REM_FULL
+                                if self.frames_total
+                                    < self.opts.frame_cap
                                 {
+                                    framed.insert(pli);
                                     self.frame_depth_boundary(
                                         &mut wc, pli, &h, &rb,
                                         &boxes,
                                     );
                                 }
+                                continue;
+                            }
+                            if self.opts.frame_cap != 0
+                                || vis_content
+                            {
                                 edges.insert(pli);
                             } else {
                                 self.st.cull_layer += 1;
@@ -1631,12 +1642,12 @@ mod tests {
         // BIG's page ships; TINY's page is cut-culled everywhere
         assert_eq!(plan.pages.len(), 1);
         assert_eq!(v.page(plan.pages[0]).cell, 2);
-        // the sub-cut subtree became ONE fold frame on TOP; BIG (an
-        // above-cut leaf = bottomed-out structure) keeps its own
-        // outline next to its geometry (rev 32); neither SMALL nor
-        // TINY got a working-set cell
+        // the sub-cut subtree became ONE fold frame on TOP; BIG is
+        // fully expanded WITH visible content, so its geometry
+        // speaks and it gets no bottom outline (rev 32 amendment);
+        // neither SMALL nor TINY got a working-set cell
         let top = plan.wcells.iter().find(|w| w.key.0 == 3).unwrap();
-        assert_eq!(top.frames.len(), 2);
+        assert_eq!(top.frames.len(), 1);
         assert!(!plan.wcells.iter().any(|w| w.key.0 <= 1));
         // the only edge is TOP -> BIG
         assert_eq!(plan.stats.inst_edges, 1);
@@ -1649,13 +1660,14 @@ mod tests {
         assert_eq!(p2.pages, plan.pages);
     }
 
-    /// An above-cut child whose structure bottoms out within the
-    /// remaining depth keeps its outline when it expands (rev 32:
-    /// the frontier is depth OR hierarchy bottom): its fold frame
-    /// used to vanish the moment zoom pushed it past the cut,
-    /// because no structural frame exists below it (field report:
-    /// dense small cells with only the frame layer visible). Zoom
-    /// must never change the frame box set - only pages appear.
+    /// Rev 32 + amendment. Frame-layer-only inspection (no visible
+    /// design content): an above-cut child whose structure bottoms
+    /// out within the remaining depth keeps ONE outline across the
+    /// cut transition - its fold frame used to vanish on zoom-in
+    /// because nothing can ever be emitted below it. With layers
+    /// visible the geometry tells the story: a fully expanded cell
+    /// gets NO box (Calibre look - the second field report was
+    /// depth-invariant phantom rectangles over live geometry).
     #[test]
     fn above_cut_bottom_cell_keeps_outline() {
         let v = fixture(
@@ -1687,28 +1699,40 @@ mod tests {
             3,
         );
         let view = bx(-10, -10, 2000, 1000);
-        // zoomed out (cut 100): LEAF folds like SMALL - two boxes
+        let off_vis = |cut| ViewReq {
+            vis: vec![0],
+            ..rq(view, cut, 1)
+        };
+        // layers off, zoomed out (cut 100): LEAF folds like SMALL
         let folded =
-            plan_hier(&v, &rq(view, 100, 1), &HierOpts::default());
+            plan_hier(&v, &off_vis(100), &HierOpts::default());
         assert!(folded.pages.is_empty());
         assert_eq!(folded.stats.inst_edges, 0);
         let top =
             folded.wcells.iter().find(|w| w.key.0 == 3).unwrap();
         assert_eq!(top.frames.len(), 2);
-        // zoomed in (cut 50): LEAF expands - SAME two boxes + page
-        let exp =
-            plan_hier(&v, &rq(view, 50, 1), &HierOpts::default());
-        assert_eq!(exp.pages.len(), 1);
-        assert_eq!(v.page(exp.pages[0]).cell, 2);
-        assert_eq!(exp.stats.inst_edges, 1);
+        // layers off, zoomed in (cut 50): LEAF expands - the SAME
+        // two boxes persist, the outline replaces the edge
+        let exp = plan_hier(&v, &off_vis(50), &HierOpts::default());
+        assert!(exp.pages.is_empty());
+        assert_eq!(exp.stats.inst_edges, 0);
         let top = exp.wcells.iter().find(|w| w.key.0 == 3).unwrap();
         assert_eq!(top.frames.len(), 2);
+        // layers ON, zoomed in: geometry speaks - no bottom outline
+        // for the expanded LEAF (only SMALL's fold), page ships
+        let lv = plan_hier(&v, &rq(view, 50, 1),
+                           &HierOpts::default());
+        assert_eq!(lv.pages.len(), 1);
+        assert_eq!(v.page(lv.pages[0]).cell, 2);
+        assert_eq!(lv.stats.inst_edges, 1);
+        let top = lv.wcells.iter().find(|w| w.key.0 == 3).unwrap();
+        assert_eq!(top.frames.len(), 1);
         // frames off: the outline machinery stays fully silent
         let mut off = HierOpts::default();
         off.frame_cap = 0;
-        let p = plan_hier(&v, &rq(view, 50, 1), &off);
+        let p = plan_hier(&v, &off_vis(50), &off);
         assert_eq!(p.stats.frame_rects, 0);
-        assert_eq!(p.pages, exp.pages);
+        assert!(p.pages.is_empty());
     }
 
     fn rq(view: BBox, cut: i64, depth: u32) -> ViewReq {
