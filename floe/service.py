@@ -599,15 +599,18 @@ def _render_service(src, req, res, latest=None, options=None):
             stream_target_ms=options.get("stream_target_ms", 500),
             debug=options.get("debug", False))
         fcolors = dict(colors)
-        # Calibre tone split: boxes (and their names) at >= 30x30
-        # screen px draw white, smaller ones gray - the daemon
-        # authors the tone onto dt 0 / dt 1 of the frame layer
+        # Calibre tone split: boxes (and their names) above the px
+        # threshold draw white, smaller ones gray - the daemon
+        # authors the tone onto dt 0 / dt 1 of the frame layer.
+        # White rides ABOVE the design geometry (readable in dense
+        # fill), gray stays buried under it.
         fcolors[mosaic.FRAME_LAYER] = "#ffffff"
         fcolors[mosaic.FRAME_GRAY] = "#808080"
         renderer = Renderer(mosaic.ly, mosaic.top, fcolors,
                             hier_offset=0,
                             hollow=(mosaic.FRAME_LAYER,
-                                    mosaic.FRAME_GRAY))
+                                    mosaic.FRAME_GRAY),
+                            above=(mosaic.FRAME_LAYER,))
         lod = None
     except Exception as e:
         res.put({"kind": "error", "msg": f"render service init failed: {e}"})

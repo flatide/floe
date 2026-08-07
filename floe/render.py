@@ -40,12 +40,15 @@ class Renderer:
     """
 
     def __init__(self, layout, top_cell, colors=None, hier_offset=0,
-                 show_texts=False, hollow=(), speckle=True):
+                 show_texts=False, hollow=(), speckle=True, above=()):
         """hier_offset: artificial hierarchy levels above the design top
         (the tile mosaic adds 2: FLOE_MOSAIC -> TILE_r_c -> design cells);
         user-facing depth values are shifted by this amount.
         show_texts: draw text shapes (skeleton view: cell names, labels).
         hollow: (layer, datatype) keys drawn as outlines only.
+        above: the subset of hollow keys painted OVER the design
+        geometry instead of under it (white frames stay readable in
+        dense fill; gray dust stays buried).
         speckle: Calibre-style 50%% fill (the live viewer); False keeps
         solid fills - headless exports (`floe render`) are archival
         artifacts, and the speckle restyle is a viewer behavior."""
@@ -73,6 +76,7 @@ class Renderer:
         # outline plane (white frames above gray ones).
         self._hollow_order = tuple(hollow)
         self.hollow = set(hollow)
+        self._above = set(above) & self.hollow
         self.hier_offset = hier_offset
         self.speckle = bool(speckle)
         self.lv.show_layout(layout, False)
@@ -115,19 +119,17 @@ class Renderer:
         self.lv.max_hier()
 
     def _place_hollow_underlays_first(self):
-        """Keep structural outline layers behind design geometry.
+        """Order structural outline planes around design geometry.
 
         LayoutView.add_missing_layers sorts new properties by source
         layer number, regardless of the order in which layers were created
-        in Layout. The runtime FRAME_LAYER is deliberately above the
-        largest design layer number, so that default sorting puts its gray
-        outlines at the very top of the image; and within the frame pair
-        the white plane (dt 0) sorts before gray (dt 1), letting gray
-        paint over white where boxes touch. KLayout paints later property
-        entries over earlier ones, hence hollow entries must come first,
-        and within the hollow group in the REVERSE of the `hollow`
-        argument order (its first entry - the white frames - topmost).
-        Rebuild the flat property list only when it deviates.
+        in Layout. KLayout paints later property entries over earlier
+        ones; the wanted order is [gray underlays, design geometry,
+        `above` overlays]: gray frame dust stays buried under fill,
+        white frames (the `above` set) stay readable on top of it.
+        Within each hollow group the REVERSE of the `hollow` argument
+        order applies (its first entry topmost). Rebuild the flat
+        property list only when it deviates.
         """
         nodes = list(self.lv.each_layer())
         prio = {key: i for i, key in enumerate(self._hollow_order)}
@@ -135,10 +137,15 @@ class Renderer:
         def key(node):
             return (node.source_layer, node.source_datatype)
 
-        under = sorted((n for n in nodes if key(n) in self.hollow),
-                       key=lambda n: -prio[key(n)])
+        def by_prio(group):
+            return sorted(group, key=lambda n: -prio[key(n)])
+
+        under = by_prio(n for n in nodes
+                        if key(n) in self.hollow
+                        and key(n) not in self._above)
+        over = by_prio(n for n in nodes if key(n) in self._above)
         design = [n for n in nodes if key(n) not in self.hollow]
-        want = under + design
+        want = under + design + over
         if [key(n) for n in want] == [key(n) for n in nodes]:
             return
 
