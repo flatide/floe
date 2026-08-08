@@ -43,7 +43,7 @@ dependencies = [
 
 [[package]]
 name = "floe-index"
-version = "0.11.19"
+version = "0.11.20"
 dependencies = [
  "floe-oasis",
  "floe-ovm",

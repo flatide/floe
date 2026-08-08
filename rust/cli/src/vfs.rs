@@ -327,12 +327,18 @@ fn write_coverage(doc: &Doc, outdir: &str, jobs: usize) {
 /// because a child's placed box is contained in its parent's, the
 /// whole subtree prunes with it (the path-expansion guard)
 const FRONTIER_MIN_DIV: i64 = 512;
-/// stored boxes per depth, biggest-first (the "must not look
-/// busy" cap - large structures win, dust loses)
-const FRONTIER_KEEP: usize = 1024;
-/// per-depth member enumeration budget; exhaustion flags the
-/// depth truncated (deterministic prefix, DFS order)
-const FRONTIER_SCAN: u64 = 65_536;
+/// stored boxes per depth ceiling. When a depth exceeds this, the
+/// survivors are chosen by a SPATIAL round-robin (FRONTIER_GRID
+/// cells, biggest-first within each) so no die region is starved -
+/// a pure biggest-first global cap dropped whole quiet regions.
+const FRONTIER_KEEP: usize = 6000;
+/// spatial fairness grid over the die for the keep round-robin
+const FRONTIER_GRID: i64 = 64;
+/// per-depth member enumeration budget; a runaway guard only (the
+/// sub-min child prune already skips fill farms before enumerating,
+/// so a real chip never reaches this). Exhaustion flags the depth
+/// truncated. High enough that normal designs are never DFS-biased.
+const FRONTIER_SCAN: u64 = 1_000_000;
 /// depth buckets beyond this are meaningless on a minimap
 const FRONTIER_DEPTH_CAP: usize = 32;
 
@@ -453,11 +459,59 @@ fn frontier_json(
             }
         }
     }
-    // biggest-first per depth, deterministic ties, trailing empties
-    // dropped (their absence IS the "no frontier here" signal)
+    // per depth: biggest-first with deterministic ties. Over the
+    // ceiling, pick survivors by a SPATIAL round-robin so every die
+    // region keeps its dominant boxes (a global biggest-first cap
+    // starved whole quiet regions). Trailing empties dropped (their
+    // absence IS the "no frontier here" signal).
+    let diew = (die.2 - die.0).max(1);
+    let dieh = (die.3 - die.1).max(1);
+    let gcell = |bx: &[i64; 4]| -> (i64, i64) {
+        let cx = (bx[0] as i128 + bx[2] as i128) / 2 - die.0 as i128;
+        let cy = (bx[1] as i128 + bx[3] as i128) / 2 - die.1 as i128;
+        (
+            (cx * FRONTIER_GRID as i128 / diew as i128)
+                .clamp(0, (FRONTIER_GRID - 1) as i128) as i64,
+            (cy * FRONTIER_GRID as i128 / dieh as i128)
+                .clamp(0, (FRONTIER_GRID - 1) as i128) as i64,
+        )
+    };
     for b in buckets.iter_mut() {
         b.sort_by_key(|&(area, bx)| (std::cmp::Reverse(area), bx));
-        b.truncate(FRONTIER_KEEP);
+        if b.len() > FRONTIER_KEEP {
+            // group biggest-first into spatial cells, then round
+            // -robin across cells (BTreeMap = deterministic order)
+            let mut cells: std::collections::BTreeMap<
+                (i64, i64),
+                Vec<(i128, [i64; 4])>,
+            > = std::collections::BTreeMap::new();
+            for &item in b.iter() {
+                cells.entry(gcell(&item.1)).or_default().push(item);
+            }
+            let mut kept: Vec<(i128, [i64; 4])> =
+                Vec::with_capacity(FRONTIER_KEEP);
+            let mut round = 0usize;
+            loop {
+                let mut added = false;
+                for v in cells.values() {
+                    if let Some(&item) = v.get(round) {
+                        kept.push(item);
+                        added = true;
+                        if kept.len() >= FRONTIER_KEEP {
+                            break;
+                        }
+                    }
+                }
+                if !added || kept.len() >= FRONTIER_KEEP {
+                    break;
+                }
+                round += 1;
+            }
+            kept.sort_by_key(|&(area, bx)| {
+                (std::cmp::Reverse(area), bx)
+            });
+            *b = kept;
+        }
     }
     while buckets.last().is_some_and(|b| b.is_empty()) {
         buckets.pop();
