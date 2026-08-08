@@ -85,6 +85,12 @@ class VfsClient:
                 f"lod={1 if lod else 0} "
                 f"frames={1 if frames else 0} "
                 f"labels={1 if labels else 0} out={self.tmp}")
+        # rev 41 hairline factor: min-side cut = FLOE_HAIRLINE * cut.
+        # Field-tuning knob; unset keeps the daemon default (0.5),
+        # 0 disables the hairline cut entirely.
+        hair = os.environ.get("FLOE_HAIRLINE")
+        if hair:
+            line += f" hair={float(hair):g}"
         if probe:
             line += " mode=probe"
         else:

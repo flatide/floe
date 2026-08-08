@@ -35,14 +35,17 @@ pub const MAGIC: &[u8; 8] = b"FLOEOVM1";
 /// header spare at 80 becomes ovt_len (design.ovt byte length:
 /// string bytes + Morton-ordered text pts pools live THERE, the
 /// ovm keeps only fixed records).
-pub const VERSION: u32 = 5;
+pub const VERSION: u32 = 6;
 
 pub const HEADER_LEN: usize = 312;
 pub const LAYER_LEN: usize = 32;
 pub const CELL_LEN: usize = 144;
 pub const PLACE_LEN: usize = 64;
 pub const BVH_LEN: usize = 40;
-pub const PAGE_LEN: usize = 96;
+/// v6: +8 bytes - max_min at offset 96 (max over records
+/// of min(w,h): the whole page is hairline-thin iff this
+/// is small; planner cuts sub-hairline pages wholesale)
+pub const PAGE_LEN: usize = 104;
 pub const PRANGE_LEN: usize = 16;
 pub const PBVH_LEN: usize = 56;
 pub const TEXT_LEN: usize = 80;
@@ -765,8 +768,20 @@ impl Builder {
         p64(out, members);
         p64(out, max_w);
         p64(out, max_h);
+        // v6 max_min defaults to the single-record model (page =
+        // one max_w x max_h feature); multi-record builders follow
+        // up with page_max_min for the true value
+        p64(out, max_w.min(max_h));
         assert_eq!(out.len() % PAGE_LEN, 0, "page stride");
         bump(&mut self.n_pages, "page");
+    }
+    /// overwrite the LAST page's max_min (v6): max over records of
+    /// min(w,h) - mixed-orientation wire pages have large max_w AND
+    /// max_h, so only this field can prove "everything is thin"
+    pub fn page_max_min(&mut self, v: u64) {
+        let n = self.pages.len();
+        assert!(n >= PAGE_LEN, "page_max_min before any page");
+        self.pages[n - 8..].copy_from_slice(&v.to_le_bytes());
     }
 
     /// v5: trailing (trange_start, trange_count, tmask_rec) wire
@@ -1024,6 +1039,9 @@ pub struct PageV {
     pub members: u64,
     pub max_w: u64,
     pub max_h: u64,
+    /// v6: max over records of min(w,h) - small iff EVERY record
+    /// in the page is hairline-thin
+    pub max_min: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2152,6 +2170,7 @@ impl Ovm {
             members: g64(b, 72),
             max_w: g64(b, 80),
             max_h: g64(b, 88),
+            max_min: g64(b, 96),
         }
     }
 

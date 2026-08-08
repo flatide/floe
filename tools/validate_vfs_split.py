@@ -133,9 +133,9 @@ def main():
     secs = [struct.unpack_from("<QQ", d, 88 + 16 * i)
             for i in range(9)]
     po, pl = secs[6]
-    n_pages = pl // 96
+    n_pages = pl // 104  # v6 page stride
     n_lod = sum(1 for i in range(n_pages)
-                if d[po + 96 * i + 12] != 0)
+                if d[po + 104 * i + 12] != 0)
     if n_lod < 1:
         fail("S5 no lod pages on a rep-flood asset")
     if full["pages"] != n_pages - n_lod:

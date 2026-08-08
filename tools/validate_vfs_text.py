@@ -85,7 +85,7 @@ def gen(src):
 def read_text_sections(ovm_path):
     """per-layer (records, members) decoded from TEXTS + TREPS"""
     d = open(ovm_path, "rb").read()
-    assert d[:8] == b"FLOEOVM1" and struct.unpack_from("<I", d, 8)[0] == 5
+    assert d[:8] == b"FLOEOVM1" and struct.unpack_from("<I", d, 8)[0] == 6
     n_layers = struct.unpack_from("<I", d, 44)[0]
     secs = [struct.unpack_from("<QQ", d, 88 + 16 * i) for i in range(14)]
     layers = []

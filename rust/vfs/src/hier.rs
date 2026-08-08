@@ -58,6 +58,14 @@ pub struct HierOpts {
     /// verbatim (sample9 fit view: 9216 swaps still shipped 8M
     /// records). 0.0 disables; px_per_dbu == 0.0 always disables.
     pub wash_px: f64,
+    /// hairline cut factor (rev 41): everything the size cut
+    /// touches also culls when the MIN side is under
+    /// hairline * cut_dbu, however long the other side is - at a
+    /// wide view a sub-pixel-thin wire is a 1px stroke that only
+    /// builds walls. Pages use the v6 max_min field ("every record
+    /// is thin"), folds/frames/names use the box min side.
+    /// 0.0 disables; cut 0 disables naturally.
+    pub hairline: f64,
 }
 
 impl Default for HierOpts {
@@ -69,6 +77,7 @@ impl Default for HierOpts {
             frame_cap: 200_000,
             lod_k: 4.0,
             wash_px: 2.0,
+            hairline: 0.5,
                 }
     }
 }
@@ -386,6 +395,7 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
         px_per_dbu: req.px_per_dbu,
         lod_k: opts.lod_k,
         wash_px: opts.wash_px,
+        hair: (req.cut_dbu.max(0) as f64 * opts.hairline) as u64,
         frames_total: 0,
     };
     let top_ci = v.top;
@@ -465,6 +475,8 @@ struct Hier<'a> {
     px_per_dbu: f64,
     lod_k: f64,
     wash_px: f64,
+    /// hairline threshold in dbu (hairline * cut_dbu)
+    hair: u64,
 }
 
 impl<'a> Hier<'a> {
@@ -526,7 +538,10 @@ impl<'a> Hier<'a> {
                 for pi in pr.page_lo..pr.page_lo + pr.page_count {
                     self.st.page_candidates += 1;
                     let p = self.v.page(pi);
-                    if p.max_w < self.cut && p.max_h < self.cut {
+                    if (p.max_w < self.cut
+                        && p.max_h < self.cut)
+                        || p.max_min < self.hair
+                    {
                         self.st.cull_page_size += 1;
                         continue;
                     }
@@ -695,7 +710,9 @@ impl<'a> Hier<'a> {
                         // for the identical drawable page set). One
                         // outline now (frames on) or nothing.
                         if r != REM_FULL {
-                            if cw < cut && chh < cut {
+                            if (cw < cut && chh < cut)
+                                || cw.min(chh) < self.hair
+                            {
                                 // rev 33: the fold is SILENT. A
                                 // fold box tracked the cut - it
                                 // appeared and vanished with zoom
@@ -753,7 +770,9 @@ impl<'a> Hier<'a> {
                         // stripes. Until a per-(cell,layer) proxy is
                         // available, omit the below-cut child instead
                         // of displaying false geometry.
-                        if cw < cut && chh < cut {
+                        if (cw < cut && chh < cut)
+                            || cw.min(chh) < self.hair
+                        {
                             self.st.cull_size += 1;
                             continue;
                         }
@@ -790,7 +809,10 @@ impl<'a> Hier<'a> {
                 for pi in n.first..n.first + n.count as u32 {
                     self.st.page_candidates += 1;
                     let p = self.v.page(pi);
-                    if p.max_w < self.cut && p.max_h < self.cut {
+                    if (p.max_w < self.cut
+                        && p.max_h < self.cut)
+                        || p.max_min < self.hair
+                    {
                         self.st.cull_page_size += 1;
                         continue;
                     }
@@ -833,7 +855,9 @@ impl<'a> Hier<'a> {
         // before any offset work)
         let bw = (b0.x1 - b0.x0).max(0) as u64;
         let bh = (b0.y1 - b0.y0).max(0) as u64;
-        if bw < self.cut && bh < self.cut {
+        if (bw < self.cut && bh < self.cut)
+            || bw.min(bh) < self.hair
+        {
             self.st.cull_size += 1;
             return;
         }
@@ -920,7 +944,10 @@ impl<'a> Hier<'a> {
         // below-cut placements inline before this fn is reached.)
         let cw = (child.rbbox.x1 - child.rbbox.x0).max(0) as u64;
         let ch = (child.rbbox.y1 - child.rbbox.y0).max(0) as u64;
-        if !structural && cw < self.cut && ch < self.cut {
+        if !structural
+            && ((cw < self.cut && ch < self.cut)
+                || cw.min(ch) < self.hair)
+        {
             self.st.cull_size += 1;
             return;
         }
@@ -1762,6 +1789,104 @@ mod tests {
         assert!(pv.wcells.iter().all(|w| w.washes.is_empty()));
     }
 
+    /// Rev 41 hairline cut: everything the size cut touches also
+    /// culls when the MIN side is under hairline * cut - pages via
+    /// the v6 max_min field, folds and frames via the box min side.
+    /// A sub-hair wire is a 1px stroke however long it is; at wide
+    /// views it only builds walls the speckle cannot thin.
+    #[test]
+    fn hairline_min_side_cut() {
+        let v = fixture(
+            &[
+                FCell {
+                    name: "FAT",
+                    pages: vec![(bx(0, 0, 500, 500), 500, 500)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "MIX", // fat rbbox, one hairline page
+                    pages: vec![
+                        (bx(0, 0, 4000, 100), 4000, 100),
+                        (bx(0, 300, 500, 800), 500, 500),
+                    ],
+                    places: vec![],
+                },
+                FCell {
+                    name: "TOP",
+                    pages: vec![],
+                    places: vec![
+                        (0, 0, 0, 0, false, Rep::One),
+                        (1, 6000, 0, 0, false, Rep::One),
+                    ],
+                },
+            ],
+            2,
+        );
+        let view = bx(-10, -10, 11_000, 1000);
+        // cut 300 -> hair 150: MIX's hairline page (max_min 100)
+        // culled by the v6 field even though its long side is far
+        // above the cut AND the cell rbbox is fat; MIX's fat page
+        // and FAT survive
+        let p = plan_hier(
+            &v,
+            &rq(view, 300, u32::MAX),
+            &HierOpts::default(),
+        );
+        assert_eq!(p.pages.len(), 2);
+        assert!(p.pages.iter().all(
+            |&pi| v.page(pi).max_min >= 150
+        ));
+        assert!(p.stats.cull_page_size >= 1);
+        // hairline 0 restores the pure both-dims rule
+        let mut off = HierOpts::default();
+        off.hairline = 0.0;
+        let p0 = plan_hier(&v, &rq(view, 300, u32::MAX), &off);
+        assert_eq!(p0.pages.len(), 3);
+        // boundary: hair == max_min exactly (cut 200 -> hair 100)
+        // is NOT below - the thin page stays
+        let pb = plan_hier(
+            &v,
+            &rq(view, 200, u32::MAX),
+            &HierOpts::default(),
+        );
+        assert_eq!(pb.pages.len(), 3);
+        // fold + frame follow: THIN placed one level down folds at
+        // r>0 (min side 100 < 150) and gets no boundary box at r==0
+        let v2 = fixture(
+            &[
+                FCell {
+                    name: "THINLEAF",
+                    pages: vec![(bx(0, 0, 4000, 100), 4000, 100)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "MID",
+                    pages: vec![],
+                    places: vec![(0, 0, 0, 0, false, Rep::One)],
+                },
+                FCell {
+                    name: "TOP",
+                    pages: vec![],
+                    places: vec![(1, 0, 0, 0, false, Rep::One)],
+                },
+            ],
+            2,
+        );
+        let p2 = plan_hier(
+            &v2,
+            &rq(view, 300, 2),
+            &HierOpts::default(),
+        );
+        assert!(p2.pages.is_empty());
+        assert!(p2.stats.cull_size >= 1);
+        let p3 = plan_hier(
+            &v2,
+            &rq(view, 300, 1),
+            &HierOpts::default(),
+        );
+        assert_eq!(p3.stats.frame_rects, 0);
+    }
+
     /// Rev 37 (final): a box lives ONLY at its own depth boundary,
     /// exactly like its name. A box first shown at depth 1 must be
     /// GONE at depth 2 - no bottomed-leaf persistence in expanded
@@ -2108,7 +2233,8 @@ mod tests {
             }
             let w = (cell.rbbox.x1 - cell.rbbox.x0).max(0) as u64;
             let h = (cell.rbbox.y1 - cell.rbbox.y0).max(0) as u64;
-            if w < cut && h < cut {
+            let hair = cut / 2; // HierOpts::default().hairline
+            if (w < cut && h < cut) || w.min(h) < hair {
                 return;
             }
             let wb = xf_bbox(xf, &cell.rbbox);
@@ -2124,7 +2250,9 @@ mod tests {
                 if !bit_test(&req.vis, p.layer_idx as usize) {
                     continue;
                 }
-                if p.max_w < cut && p.max_h < cut {
+                if (p.max_w < cut && p.max_h < cut)
+                    || p.max_min < cut / 2
+                {
                     continue;
                 }
                 if p.bbox.intersects(&lview) {

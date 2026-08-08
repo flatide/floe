@@ -28,7 +28,7 @@ print = functools.partial(print, flush=True)
 # header 312B with ovp_len@72, ovt_len@80 + 14 sections@88, cell
 # 144B (height/topo_rank; rbbox@48; trange range@128, tmask@136),
 # page 96B (seq u32@8, max_w/max_h u64@80/88)
-PAGE_LEN = 96
+PAGE_LEN = 104
 CELL_LEN = 144
 
 
@@ -36,7 +36,7 @@ def read_ovm(path):
     d = open(path, "rb").read()
     assert d[:8] == b"FLOEOVM1", "magic"
     ver = struct.unpack_from("<I", d, 8)[0]
-    assert ver == 5, ver  # v5: cell-local text index
+    assert ver == 6, ver  # v6: page max_min (hairline cut)
     top, n_layers, n_cells, n_pages = struct.unpack_from(
         "<IIII", d, 40)
     ovp_len = struct.unpack_from("<Q", d, 72)[0]
@@ -62,6 +62,11 @@ def read_ovm(path):
         lod = d[o + 12]
         off, csz, usz, recs = struct.unpack_from("<QIII", d, o + 48)
         mems = struct.unpack_from("<Q", d, o + 72)[0]
+        max_w, max_h, max_min = struct.unpack_from("<QQQ", d, o + 80)
+        if not (max_min <= min(max_w, max_h)):
+            raise SystemExit("page %d max_min %d exceeds min(max_w "
+                             "%d, max_h %d)" % (i, max_min, max_w,
+                                                max_h))
         pages.append((cell, li, seq, off, csz, recs, mems, lod))
     return {"top": top, "layers": layers, "cells": cells,
             "pages": pages, "ovp_len": ovp_len}

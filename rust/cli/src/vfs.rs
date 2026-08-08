@@ -928,6 +928,8 @@ struct PageJob {
     members: u64,
     max_w: i64,
     max_h: i64,
+    /// max over records of min(w,h) - hairline-page detector (v6)
+    max_min: i64,
     /// LOD_EXACT or LOD_MERGED (M7 coverage variant)
     lod: u8,
     /// exact page -> its LOD twin. Cell-local page index at plan
@@ -949,12 +951,13 @@ fn emit_page(
 ) {
     let mut bb = BBox::EMPTY;
     let mut members = 0u64;
-    let (mut max_w, mut max_h) = (0i64, 0i64);
+    let (mut max_w, mut max_h, mut max_min) = (0i64, 0i64, 0i64);
     for r in recs.iter() {
         bb.grow(&r.bbox);
         members += r.members;
         max_w = max_w.max(r.w);
         max_h = max_h.max(r.h);
+        max_min = max_min.max(r.w.min(r.h));
     }
     out.push(PageJob {
         ci,
@@ -965,6 +968,7 @@ fn emit_page(
         members,
         max_w,
         max_h,
+        max_min,
         lod: floe_ovm::LOD_EXACT,
         lod_page: floe_ovm::LOD_PAGE_NONE,
         lod_rects: Vec::new(),
@@ -1263,6 +1267,7 @@ fn write_encoded_page(
         job.lod,
         job.lod_page,
     );
+    b.page_max_min(job.max_min.max(0) as u64);
     *ovp_off = ovp_off
         .checked_add(payload.len() as u64)
         .expect("limit exceeded: ovp bytes");
@@ -1790,7 +1795,7 @@ fn gen_lod_job(
         return None;
     }
     let mut lbb = BBox::EMPTY;
-    let (mut max_w, mut max_h) = (0i64, 0i64);
+    let (mut max_w, mut max_h, mut max_min) = (0i64, 0i64, 0i64);
     for rc in &rects {
         lbb.grow(&BBox {
             x0: rc.x,
@@ -1800,11 +1805,13 @@ fn gen_lod_job(
         });
         max_w = max_w.max(rc.w);
         max_h = max_h.max(rc.h);
+        max_min = max_min.max(rc.w.min(rc.h));
     }
     for r in &pass {
         lbb.grow(&r.bbox);
         max_w = max_w.max(r.w);
         max_h = max_h.max(r.h);
+        max_min = max_min.max(r.w.min(r.h));
     }
     Some(PageJob {
         ci: exact.ci,
@@ -1815,6 +1822,7 @@ fn gen_lod_job(
         bbox: lbb,
         max_w,
         max_h,
+        max_min,
         lod: floe_ovm::LOD_MERGED,
         lod_page: floe_ovm::LOD_PAGE_NONE,
         lod_rects: rects,
@@ -3397,6 +3405,13 @@ pub fn plan_cmd(args: &[String]) {
         {
             popts.wash_px = val.parse().expect("wash-px");
         }
+        // --hairline-f F: min-side cut factor (0 disables; the
+        // threshold is F * cut_dbu)
+        if let Some((_, val)) =
+            rest.iter().find(|(k, _)| k == "--hairline-f")
+        {
+            popts.hairline = val.parse().expect("hairline-f");
+        }
         let plan = floe_vfs::hier::plan_hier(&v.ovm, &req, &popts);
         let ms = t0.elapsed().as_secs_f64() * 1e3;
         let (mut cbytes, mut ubytes) = (0u64, 0u64);
@@ -3475,7 +3490,7 @@ pub fn plan_cmd(args: &[String]) {
 
 /// stdio daemon for the viewer render service. Line protocol:
 ///   gen=1 view=x0,y0,x1,y1 px=5 cut=2 depth=full lod=1 frames=1 \
-///     labels=1 \
+///     labels=1 [hair=0.5] \
 ///     layers=all|none|11/0,12/0 out=/tmp/dir
 /// response:
 ///   gen=1 pages=N new=N evict=name,.. delta=path placements=path \
@@ -3575,6 +3590,7 @@ fn serve_one(d: &mut Daemon, line: &str) -> Result<String, String> {
     let mut lod = true;
     let mut frames = true;
     let mut labels = true;
+    let mut hair = 0.5f64;
     for tok in line.split_whitespace() {
         let (k, val) = tok
             .split_once('=')
@@ -3643,6 +3659,9 @@ fn serve_one(d: &mut Daemon, line: &str) -> Result<String, String> {
                     _ => return Err("labels".into()),
                 }
             }
+            // rev 41 hairline factor (min-side cut = hair * cut);
+            // optional, default 0.5, 0 disables
+            "hair" => hair = val.parse().map_err(|_| "hair")?,
             _ => return Err(format!("unknown key {}", k)),
         }
     }
@@ -3666,7 +3685,7 @@ fn serve_one(d: &mut Daemon, line: &str) -> Result<String, String> {
     }
     let label_px = if nolabels || !labels { 0.0 } else { label_px };
     serve_hier(d, &req, gen, ack, reset, probe, stream_kb,
-               label_px, frames, lod, &out)
+               label_px, frames, lod, hair, &out)
 }
 
 /// hier-mode request (VFS_HIER.md par.3.5/3.7): resolve the ack (or
@@ -3685,6 +3704,7 @@ fn serve_hier(
     label_px: f64,
     frames: bool,
     lod: bool,
+    hair: f64,
     out: &str,
 ) -> Result<String, String> {
     let v = d.v;
@@ -3697,6 +3717,7 @@ fn serve_hier(
         }
     }
     let mut opts = floe_vfs::hier::HierOpts::default();
+    opts.hairline = hair;
     if !frames {
         opts.frame_cap = 0;
     }
@@ -3704,6 +3725,11 @@ fn serve_hier(
         // documented kill switch: exact plan, screen scale intact
         opts.lod_k = 0.0;
         opts.wash_px = 0.0;
+    }
+    if probe {
+        // probes measure/pick: never hairline-cut what a click
+        // may target
+        opts.hairline = 0.0;
     }
     let plan = floe_vfs::hier::plan_hier(&v.ovm, req, &opts);
     let upd = if probe {
@@ -3789,12 +3815,13 @@ fn serve_hier(
         let tl = std::time::Instant::now();
         let mut lreq = req.clone();
         lreq.px_per_dbu = label_px;
-        let lp = if frames {
-            v.plan_labels(&lreq)?
-        } else {
-            let mut opts = floe_vfs::text::LabelOpts::default();
-            opts.blocks = false;
-            v.plan_labels_with(&lreq, &opts)?
+        let lp = {
+            let mut lopts = floe_vfs::text::LabelOpts::default();
+            lopts.hairline = hair;
+            if !frames {
+                lopts.blocks = false;
+            }
+            v.plan_labels_with(&lreq, &lopts)?
         };
         let ms = tl.elapsed().as_secs_f64() * 1e3;
         if lp.rows.is_empty() {
@@ -4436,6 +4463,44 @@ mod split_tests {
         let li = plan.pages[k].lod_page as usize;
         let mems = page_mems(&doc, &plan, li);
         assert_eq!(mems.len(), 90_000, "rep not kept verbatim");
+    }
+
+    /// v6 max_min: mixed-orientation thin wires keep max_w AND
+    /// max_h large - only max_min proves the page is all-hairline.
+    /// One fat record lifts the floor and saves the page.
+    #[test]
+    fn split_max_min_detects_hairline_pages() {
+        const DIE: i64 = 1_000_000;
+        let thin = |x: i64, y: i64, w: i64, h: i64| RectRec {
+            layer: 1,
+            dt: 0,
+            x,
+            y,
+            w,
+            h,
+            rep: Rep::One,
+        };
+        let doc =
+            mini_doc(vec![thin(0, 0, DIE, 90), thin(0, 5000, 80, DIE)]);
+        let plan = plan_of(&doc);
+        let j = plan
+            .pages
+            .iter()
+            .find(|j| j.lod == floe_ovm::LOD_EXACT)
+            .unwrap();
+        assert!(j.max_w >= DIE && j.max_h >= DIE);
+        assert_eq!(j.max_min, 90);
+        let doc2 = mini_doc(vec![
+            thin(0, 0, DIE, 90),
+            thin(100, 100, 7000, 7000),
+        ]);
+        let plan2 = plan_of(&doc2);
+        let j2 = plan2
+            .pages
+            .iter()
+            .find(|j| j.lod == floe_ovm::LOD_EXACT)
+            .unwrap();
+        assert_eq!(j2.max_min, 7000);
     }
 
     /// sparse pages stay LOD-free (trigger threshold; M7-C lowered

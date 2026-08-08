@@ -52,6 +52,10 @@ pub struct LabelOpts {
     /// gate mode: exact candidate dump - no bins, no size gate,
     /// no view budget (oracle XOR comparisons)
     pub raw: bool,
+    /// hairline cut factor (rev 41) - names follow their boxes:
+    /// a cell whose min side is under hairline * cut_dbu is culled
+    /// like its geometry/frame. 0.0 disables.
+    pub hairline: f64,
 }
 
 impl Default for LabelOpts {
@@ -67,6 +71,7 @@ impl Default for LabelOpts {
             block_pad_px: 4.0,
             blocks: true,
             raw: false,
+            hairline: 0.5,
         }
     }
 }
@@ -205,6 +210,8 @@ struct LWalk<'a> {
     req: &'a ViewReq,
     opts: &'a LabelOpts,
     cut: u64,
+    /// hairline threshold in dbu (opts.hairline * cut_dbu)
+    hair: u64,
     bin: i64,
     member_budget: u64,
     /// Block labels already own a frontier bbox. They must not compete
@@ -475,7 +482,8 @@ impl<'a> LWalk<'a> {
         }
         let cw = (rb.x1 - rb.x0).max(0) as u64;
         let chh = (rb.y1 - rb.y0).max(0) as u64;
-        let below_cut = cw < self.cut && chh < self.cut;
+        let below_cut = (cw < self.cut && chh < self.cut)
+            || cw.min(chh) < self.hair;
         let t0 = Xf::place(h.x, h.y, h.rot, h.flip);
         let b0 = xf_bbox(&t0, &rb);
         // Admit a block candidate exactly when either its full name
@@ -725,6 +733,7 @@ pub fn plan_labels(
         req,
         opts,
         cut: req.cut_dbu.max(0) as u64,
+        hair: (req.cut_dbu.max(0) as f64 * opts.hairline) as u64,
         bin,
         member_budget: opts.member_budget,
         blocks: Vec::new(),

@@ -1942,3 +1942,29 @@ rev 40 (M7-C 1차: 변종 문턱 256 + 서브픽셀 페이지 wash — 2026-08-0
 - 게이트: sub_pixel_pages_wash_to_layer_rects(크기·줌복귀·킬스위치
   ·마스크), delta 저작(레이어 1/0 렉트), lod_trigger_skips_sparse
   256 기준 갱신. vfsd 응답에 washed= 추가.
+
+rev 41 (헤어라인 컷: ovm v6 max_min + min변 술어 — 2026-08-08,
+0.11.18):
+
+- 사용자 판정: "fit-뷰에서 헤어라인은 이득이 없다. 한쪽이 길어도
+  나머지가 cut×f 이하면 잘라내라(f 기본 0.5, 조절 가능)."
+- ovm v6: 페이지 디렉토리 +8B `max_min`(오프셋 96) = 레코드별
+  min(w,h)의 최대값. 가로+세로 와이어가 섞인 페이지는 max_w·max_h가
+  모두 커서 이 필드만이 "전부 얇음"을 증명함. 빌더 page()는
+  단일-레코드 모델(min(max_w,max_h))을 기본 기록, 실제 빌드는
+  page_max_min()으로 정확값 덮어씀. 버전 게이트 리빌드(관례대로).
+- 플래너 술어 통일: 컷이 닿는 모든 곳이
+  `(w<cut && h<cut) || min(w,h) < hairline×cut` —
+  페이지(v6 max_min), r>0 폴드, REM_FULL 엣지 프룬, r==0 프레임
+  멤버 박스, 블록명 below_cut(text). HierOpts.hairline /
+  LabelOpts.hairline 기본 0.5, 0=off, cut 0이면 자연 비활성.
+  프로브는 항상 0(픽·측정 대상 보존). 브루트포스 대조 워커 동기화.
+- 노브: plan CLI --hairline-f, vfsd hair=(기본 0.5), 뷰어
+  FLOE_HAIRLINE 환경변수(vfsclient가 요청에 전달).
+- sample9 fit-뷰 실측(0.044px/µm, depth 9, cut 3px): 레코드
+  313만 → **21.2만(0.10/px)**, 델타 32.7 → 2.1MB. 뷰어 경로 lit
+  5.1% — 배선 시트 소멸, 굵은 구조·라벨만 잔존. >128px 대형
+  페이지 문제는 이 컷이 흡수(장배선 성분이 지배적이었음).
+- 게이트: hairline_min_side_cut(페이지 v6 경로·hair 0 패리티·경계
+  포함·폴드·프레임), split_max_min_detects_hairline_pages(혼합
+  방향), 파이썬 게이트 v6 동기화(validate_vfs/split/text).
