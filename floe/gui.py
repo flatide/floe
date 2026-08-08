@@ -1938,8 +1938,13 @@ class Viewer:
                             fmt_count(res.get("text_place_records", 0)))
                     if res.get("labels_truncated"):
                         text += ", labels partial"
-                    mode = "live (%d tiles, %d ms%s%s%s%s%s%s%s)" \
-                        % (res["tiles"], res["ms"], split,
+                    # tiles = plan total (resident pages included);
+                    # +new = pages actually shipped for this view
+                    # (cache misses, summed over its stream rounds)
+                    mode = "live (%d tiles, +%d new, %d ms" \
+                           "%s%s%s%s%s%s%s)" \
+                        % (res["tiles"], res.get("new", 0) or 0,
+                           res["ms"], split,
                            self._depth_note(used), cut, drawn,
                            refin, lod, text)
                 # Also keep a terminal performance log (only the settled

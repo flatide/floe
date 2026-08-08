@@ -379,6 +379,10 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
                 png = f.read()
         out = {"kind": "frame", "png": png, "bbox": job["bbox"],
                "gen": job["gen"], "tiles": r.get("pages", 0),
+               # pages shipped this VIEW (cache misses, cumulative
+               # across its stream rounds); tiles is the plan total
+               # including already-resident pages
+               "new": r.get("new_total", 0),
                "scope": "live", "bg": False,
                "load_ms": round(t_load * 1000),
                "draw_ms": round(draw_total[0] * 1000),
@@ -424,6 +428,7 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
     # into hundreds of such rounds. The LAST allowed round therefore
     # requests stream=0 and swallows the whole remainder.
     load_total = 0.0
+    new_total = 0
     rounds = 0
     while True:
         rounds += 1
@@ -495,6 +500,10 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
                   file=_sys.stderr, flush=True)
         t_round = time.perf_counter() - tl
         load_total += t_round
+        try:
+            new_total += int(r.get("new", 0) or 0)
+        except (TypeError, ValueError):
+            pass
         # adapt the round budget toward ~0.35s of parse per round -
         # decoded bytes only approximate klayout's cost, and fill
         # distributions vary chip to chip (review finding). ONLY a
@@ -518,6 +527,7 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
                               (mosaic.stream_kb + ideal) / 2)))
         if newer():
             return
+        r["new_total"] = new_total
         emit(r, load_total)
         if r.get("partial") != "1" or newer():
             return
