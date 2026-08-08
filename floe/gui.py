@@ -2330,8 +2330,10 @@ class Viewer:
             self._detail_dialog()
         elif name == "g":
             self._goto_dialog()
-        elif name == "c":
-            self._depth_dialog()
+        elif name == "less":
+            self._depth_step(-1)
+        elif name == "greater":
+            self._depth_step(1)
         elif name == "a":
             self._toggle_abstract()
         elif name == "v":
@@ -2384,6 +2386,16 @@ class Viewer:
         if self.abstract:
             lbl += " · abstract"
         return lbl
+
+    def _depth_step(self, delta):
+        """< / > step the depth by one, clamped to [0, max_depth].
+        'full' (999) is treated as the deepest explicit level so a
+        step down lands on real geometry rather than jumping to 0."""
+        cap = self.max_depth if self.max_depth is not None else 999
+        cur = self.depth_value
+        if cur >= 999:
+            cur = cap
+        self._set_depth(max(0, min(cap, cur + delta)))
 
     def _set_depth(self, n):
         self.depth_value = max(0, min(999, int(n)))
@@ -2553,7 +2565,7 @@ class Viewer:
         note = Gtk.Label()
         note.set_markup(
             "<small>cells beyond the limit are drawn as outline frames"
-            "\nwith names - keys: c = this dialog, 0-9 = depth</small>")
+            "\nwith names - keys: 0-9 = depth, &lt; / &gt; = step</small>")
         note.set_xalign(0.0)
         box.pack_start(note, False, False, 0)
         # depth applies live (spin/presets); ok just closes
