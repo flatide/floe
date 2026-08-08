@@ -22,11 +22,16 @@ from .viewport import VfsMosaic, frame_layer
 _SNAP_CAP = 400   # max shapes examined per snap query
 _PICK_CAP = 64    # max candidates per pick query
 
-# the viewer cut LEVEL (the `c` dialog / view --cut-level); the px
-# value behind each level is an implementation detail. Level 0 = off
-# (draw all), higher = coarser wide views. CUT_PX = the level-1 px.
-CUT_LEVEL_PX = (0.0, 1.0, 3.0, 5.0)
-CUT_PX = CUT_LEVEL_PX[1]
+# the viewer DETAIL level (the `d` dialog / view --detail); the px
+# threshold behind each level is an implementation detail. Higher
+# detail = smaller cut px = finer wide views. There is no "off":
+# drawing everything at a wide view has no realistic performance
+# and exposed the frame-cap throttle artifact, so the coarsest
+# reachable level is "low".
+DETAIL_LEVELS = ("low", "medium", "high")
+DETAIL_PX = (5.0, 3.0, 1.0)     # low = coarsest cut, high = finest
+DEFAULT_DETAIL = 1              # medium
+CUT_PX = DETAIL_PX[DEFAULT_DETAIL]
 
 # a streamed view completes within this many rounds: the last one
 # requests an unlimited round and takes the whole remainder

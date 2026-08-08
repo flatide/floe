@@ -477,8 +477,10 @@ def cmd_view(args):
     depth = args.depth
     if depth is None and (goto is not None or args.drc):
         depth = 999   # jumping somewhere = inspecting: full depth
+    detail = (None if args.detail is None
+              else ("low", "medium", "high").index(args.detail))
     run_viewer(c, server, goto=goto, drc=args.drc,
-               cut_level=args.cut_level, dump=args.dump, depth=depth,
+               detail=detail, dump=args.dump, depth=depth,
                lod=args.lod == "on", frames=args.frames == "on",
                labels=args.labels == "on", stream_kb=args.stream_kb,
                stream_target_ms=args.stream_target_ms,
@@ -643,14 +645,15 @@ def main(argv=None):
     p.add_argument("--drc", default=None, metavar="FILE.db",
                    help="preload a Calibre ASCII DRC results db and "
                         "open the error browser (new instance only)")
-    p.add_argument("--cut-level", type=int, default=None, metavar="N",
-                   choices=(0, 1, 2, 3),
-                   help="starting detail cut level: 0 = off, 2 = "
-                        "default, higher = lighter wide views (finer "
-                        "detail omitted below the cut; coverage is an "
-                        "independent viewer toggle). The `c` dialog changes "
-                        "it at runtime; the px thresholds behind the "
-                        "levels are internal and may be retuned")
+    p.add_argument("--detail", default=None,
+                   choices=("low", "medium", "high"),
+                   help="starting detail level (default: medium; "
+                        "higher = finer, heavier wide views - lower "
+                        "levels omit finer features below the cut; "
+                        "coverage is an independent viewer toggle). "
+                        "The `d` dialog changes it at runtime; the px "
+                        "thresholds behind the levels are internal "
+                        "and may be retuned")
     p.add_argument("--depth", type=int, default=None, metavar="N",
                    help="starting hierarchy depth (999 = full). "
                         "Default: 0 for a plain open - top geometry "

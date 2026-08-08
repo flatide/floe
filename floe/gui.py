@@ -19,7 +19,8 @@ import sys
 import time
 
 from . import cache as cache_mod
-from .service import RenderWorker, CUT_LEVEL_PX
+from .service import (RenderWorker, DETAIL_PX, DETAIL_LEVELS,
+                      DEFAULT_DETAIL)
 from .viewport import live_caps
 
 Gtk = Gdk = GdkPixbuf = GLib = Pango = None
@@ -27,7 +28,6 @@ Gtk = Gdk = GdkPixbuf = GLib = Pango = None
 APP = "floe"
 POLL_MS = 25
 DEBOUNCE_MS = 120
-DEFAULT_CUT_LEVEL = 2
 # LOD starts ON (rev 31): the skeleton is gone, so the first fit
 # view is a live working set - merged variants must engage there
 # without a keypress. The planner's fidelity/worth gates and the
@@ -694,7 +694,7 @@ class LayerRow(object):
 
 class Viewer:
     def __init__(self, cache, server_sock=None, show=True, goto=None,
-                 cut_level=None, dump=False, depth=None, lod=DEFAULT_LOD,
+                 detail=None, dump=False, depth=None, lod=DEFAULT_LOD,
                  frames=DEFAULT_FRAMES, labels=DEFAULT_LABELS,
                  stream_kb=None, stream_target_ms=500,
                  render_debug=False):
@@ -750,15 +750,14 @@ class Viewer:
         self.render_debug = bool(render_debug)
         self._depth_used = "?"      # depth of the last frame ("?" = none yet)
         self.max_depth = None        # learned from the VFS daemon
-        # detail cut LEVEL: 0 = off, higher = more aggressive. Users
-        # only ever see the level; the screen-px threshold behind each
-        # level (CUT_LEVEL_PX) is an implementation detail that may be
-        # retuned later without changing what "L1" means. --cut-level
-        # sets the start value, the `c` dialog changes it at runtime.
-        self.cut_level = (DEFAULT_CUT_LEVEL if cut_level is None else
-                          max(0, min(len(CUT_LEVEL_PX) - 1,
-                                     int(cut_level))))
-        self.cut_px = CUT_LEVEL_PX[self.cut_level]
+        # DETAIL level: 0=low, 1=medium, 2=high. Users only ever see
+        # the name; the screen-px threshold behind each (DETAIL_PX) is
+        # an implementation detail that may be retuned without changing
+        # what "medium" means. --detail sets the start value, the `d`
+        # dialog changes it at runtime. Higher detail = smaller cut.
+        self.detail = (DEFAULT_DETAIL if detail is None else
+                       max(0, min(len(DETAIL_PX) - 1, int(detail))))
+        self.cut_px = DETAIL_PX[self.detail]
         # live-render span budget, scaled to the cache's tile size
         # (finer --tile-mb grids allow proportionally more tiles)
         self._live_cap = live_caps(cache.meta)[0]
@@ -2328,11 +2327,11 @@ class Viewer:
         elif name == "Escape":
             self._esc()
         elif name == "d":
-            self._depth_dialog()
+            self._detail_dialog()
         elif name == "g":
             self._goto_dialog()
         elif name == "c":
-            self._cut_dialog()
+            self._depth_dialog()
         elif name == "a":
             self._toggle_abstract()
         elif name == "v":
@@ -2375,9 +2374,7 @@ class Viewer:
                    else str(self.max_depth))
         lbl = "depth: %s/%s" % (current, maximum)
         if self.meta.get("bands") or self.meta.get("vfs"):
-            cut_on = self.cut_level > 0
-            lbl += " · cut: %s" % (
-                "L%d" % self.cut_level if cut_on else "off")
+            lbl += " · detail: %s" % DETAIL_LEVELS[self.detail]
         if self.meta.get("vfs"):
             lbl += " · cov:%s" % (
                 "on" if self.coverage_on else "off")
@@ -2397,9 +2394,9 @@ class Viewer:
                 spin.set_value(self.depth_value)
         self._on_depth()
 
-    def _set_cut_level(self, n):
-        self.cut_level = max(0, min(len(CUT_LEVEL_PX) - 1, int(n)))
-        self.cut_px = CUT_LEVEL_PX[self.cut_level]
+    def _set_detail(self, n):
+        self.detail = max(0, min(len(DETAIL_PX) - 1, int(n)))
+        self.cut_px = DETAIL_PX[self.detail]
         self._on_depth()  # same refresh: status label + re-render
 
     def _toggle_abstract(self):
@@ -2556,7 +2553,7 @@ class Viewer:
         note = Gtk.Label()
         note.set_markup(
             "<small>cells beyond the limit are drawn as outline frames"
-            "\nwith names - keys: d = this dialog, 0-9 = depth</small>")
+            "\nwith names - keys: c = this dialog, 0-9 = depth</small>")
         note.set_xalign(0.0)
         box.pack_start(note, False, False, 0)
         # depth applies live (spin/presets); ok just closes
@@ -2582,14 +2579,14 @@ class Viewer:
         dlg.connect("destroy", _gone)
         self._dialog_show(dlg, spin)
 
-    def _cut_dialog(self):
-        """Runtime control of the detail cut (screen px). The VFS
-        daemon applies the cut in its page plan, showing cut-dropped
-        subtrees as outline frames."""
+    def _detail_dialog(self):
+        """Runtime control of the detail level (low/medium/high). The
+        VFS daemon applies the matching screen-px cut in its page plan,
+        showing dropped subtrees as outline frames."""
         if self._cdlg is not None:
             self._cdlg.present()
             return
-        dlg = Gtk.Window(title="detail cut")
+        dlg = Gtk.Window(title="detail")
         self._dialog_setup(dlg)
         self._cdlg = dlg
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
@@ -2599,14 +2596,14 @@ class Viewer:
         box.set_margin_end(14)
         dlg.add(box)
         box.pack_start(Gtk.Label(
-            label="detail cut level (higher = lighter wide views)"),
+            label="detail level (higher = finer, heavier wide views)"),
             False, False, 0)
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         box.pack_start(row, False, False, 0)
         btns = []
-        for lvl in range(len(CUT_LEVEL_PX)):
-            b = Gtk.ToggleButton(label="off" if lvl == 0 else "L%d" % lvl)
-            b.set_active(lvl == self.cut_level)
+        for lvl, nm in enumerate(DETAIL_LEVELS):
+            b = Gtk.ToggleButton(label=nm)
+            b.set_active(lvl == self.detail)
 
             def _apply(w, n=lvl):
                 if not w.get_active():   # ignore the untoggle event
@@ -2614,18 +2611,18 @@ class Viewer:
                 for i, other in enumerate(btns):
                     if i != n and other.get_active():
                         other.set_active(False)
-                self._set_cut_level(n)
+                self._set_detail(n)
             b.connect("toggled", _apply)
             btns.append(b)
             row.pack_start(b, False, False, 0)
         note = Gtk.Label()
         note.set_markup(
-            "<small>each level hides finer detail from live renders;"
-            "\nareas below the cut draw as merged outlines instead"
-            "\n(when the cache carries them - floe index --merge-only"
-            "\nupgrades old caches). snap/pick/clip stay exact."
-            "\nthe status line shows the physical cut (cut&lt;0.35um)."
-            "\nkeys: c = this dialog</small>")
+            "<small>lower detail hides finer features from live "
+            "renders;\nareas below the cut draw as merged outlines "
+            "instead\n(when the cache carries them - floe index "
+            "--merge-only\nupgrades old caches). snap/pick/clip stay "
+            "exact.\nthe status line shows the physical cut "
+            "(cut&lt;0.35um).\nkeys: d = this dialog</small>")
         note.set_xalign(0.0)
         box.pack_start(note, False, False, 0)
         ok = Gtk.Button(label="ok")
@@ -2643,7 +2640,7 @@ class Viewer:
             self._cdlg = None
             self.window.present()
         dlg.connect("destroy", _gone)
-        self._dialog_show(dlg, btns[self.cut_level])
+        self._dialog_show(dlg, btns[self.detail])
 
     # ---- goto (Calibre-style jump to coordinates) ---------------------------
     GOTO_HINT = ("um coordinates. window = view width after the jump"
@@ -3509,12 +3506,12 @@ class Viewer:
 
 
 def run_viewer(cache, server_sock=None, goto=None, drc=None,
-               cut_level=None, dump=False, depth=None, lod=DEFAULT_LOD,
+               detail=None, dump=False, depth=None, lod=DEFAULT_LOD,
                frames=DEFAULT_FRAMES, labels=DEFAULT_LABELS,
                stream_kb=None, stream_target_ms=500,
                render_debug=False):
     import_gtk()
-    viewer = Viewer(cache, server_sock, goto=goto, cut_level=cut_level,
+    viewer = Viewer(cache, server_sock, goto=goto, detail=detail,
                     dump=dump, depth=depth, lod=lod, frames=frames,
                     labels=labels, stream_kb=stream_kb,
                     stream_target_ms=stream_target_ms,
