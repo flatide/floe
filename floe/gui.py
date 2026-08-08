@@ -1910,8 +1910,16 @@ class Viewer:
                 if True:
                     split = ""
                     if res.get("load_ms") is not None:
-                        split = " = %d load + %d draw" \
-                            % (res["load_ms"], res["draw_ms"])
+                        ph = ""
+                        if res.get("phase_apply") is not None:
+                            # load = plan (rust) + delta (author/IPC)
+                            #        + apply (klayout parse + WC build)
+                            ph = " [%d plan+%d delta+%d apply]" % (
+                                res.get("phase_plan", 0),
+                                res.get("phase_delta", 0),
+                                res.get("phase_apply", 0))
+                        split = " = %d load%s + %d draw" \
+                            % (res["load_ms"], ph, res["draw_ms"])
                         if res.get("wait_ms", 0) > 200:
                             split += " + %d wait" % res["wait_ms"]
                     cut = ""

@@ -389,6 +389,11 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
                "new": r.get("new_total", 0),
                "scope": "live", "bg": False,
                "load_ms": round(t_load * 1000),
+               # load phases (cumulative ms; plan+delta+apply ~= load)
+               "phase_plan": round(plan_total * 1000),
+               "phase_delta": round(
+                   max(0.0, daemon_total - plan_total) * 1000),
+               "phase_apply": round(apply_total * 1000),
                "draw_ms": round(draw_total[0] * 1000),
                "wait_ms": wait_ms,
                "ms": round((time.perf_counter() - t0) * 1000)}
@@ -433,6 +438,13 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
     # requests stream=0 and swallows the whole remainder.
     load_total = 0.0
     new_total = 0
+    # load-phase breakdown (cumulative seconds; sum ~= load_total):
+    #   plan  = daemon-side compute (geometry plan + block-name walk)
+    #   delta = daemon round-trip minus plan (author + write + IPC)
+    #   apply = klayout parse + working-set (WC/frames) rebuild
+    plan_total = 0.0
+    daemon_total = 0.0
+    apply_total = 0.0
     rounds = 0
     while True:
         rounds += 1
@@ -443,6 +455,7 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
         # gen is never reused
         mosaic.req_gen += 1
         want = labels is None
+        t_req = time.perf_counter()
         r = cache.vfs_client.request(
             mosaic.req_gen, view_um, px_per_um, cut_px, layers,
             job.get("depth"), ack=mosaic.applied_gen,
@@ -451,6 +464,10 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
             want_labels=want, lod=job.get("lod", True),
             frames=job.get("frames", True),
             labels=job.get("labels", True))
+        daemon_total += time.perf_counter() - t_req
+        # daemon-reported compute (ms): geometry plan + label walk
+        plan_total += (float(r.get("plan_ms", 0) or 0)
+                       + float(r.get("text_plan_ms", 0) or 0)) / 1000.0
         mosaic.need_reset = False
         # names= arrives ONCE per daemon run and is view-
         # independent: consume it BEFORE the stale check, or a
@@ -461,6 +478,7 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
             return
         if want:
             labels = _labels_from(r.get("labels"), cache)
+        t_ap = time.perf_counter()
         try:
             changed = mosaic.apply_hier(r["delta"], r["top"],
                                         r["evict"], labels,
@@ -485,6 +503,7 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
             changed = mosaic.apply_hier(r["delta"], r["top"],
                                         r["evict"], labels,
                                         gen=mosaic.req_gen)
+        apply_total += time.perf_counter() - t_ap
         if changed:
             renderer.refresh()
         if mosaic.debug:
