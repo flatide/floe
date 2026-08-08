@@ -1986,3 +1986,23 @@ rev 42 (프레임 박스 크기 밴드 4단 — 2026-08-08, 0.11.19):
 - 게이트: frames_split_into_size_bands(밴드 0/1/2/3 경계 포함),
   dense→band 3, L8 tiny-px는 FRAME_DOTS 확인. 재인덱싱 불필요
   (밴드는 요청별 플랜, ovm 포맷 불변).
+
+빌드 병렬화 2차 (직렬 append 제거 — 2026-08-09, 0.11.21):
+
+- 계기: 사무실 111k셀 빌드에서 top이 대부분 단일 스레드. 원인 =
+  배치당 [병렬 plan(짧음)] → [직렬 Builder append: placement·BVH
+  ·pbvh·prange를 레코드 단위로 재작성] → [병렬 encode(페이지 적어
+  짧음)]의 직렬 구간. RSS 거버너는 무관(배치 크기만 조절).
+- 구현: floe_ovm에 공유 섹션 인코더(enc_place/enc_pts_entry/
+  enc_bvh/enc_pbvh/enc_prange) + CellSink(셀-로컬 인덱스 인코더)
+  + Builder::append_cell_sink(memcpy + 고정 스트라이드 리베이스:
+  place kind==2 va.0+=pool, bvh leaf/inner, pbvh leaf(page)/inner,
+  prange lo/root). build_cell_plan(병렬)이 sink를 미리 인코딩,
+  직렬 커밋은 섹션 복사+패치만. 인코더 공유라 바이트 동일이 구조적
+  보장. bitset dedup·build_cell_texts(ovt 스트림)·b.page 커밋은
+  직렬 유지(2차 후보).
+- 게이트: cell_sink_append_is_byte_identical(3 rep 종류·leaf/inner
+  ·2셀 리베이스), 산출물 sha256 동일(valmini 기본/--jobs 1 +
+  sample9 + 4M-place 합성), 스위트 ALL OK.
+- 계측: 파이프라인 로그에 append {:.1}s 추가 — 사무실 빌드에서
+  직렬 잔여(텍스트/비트셋/커밋)의 비중을 이 값으로 정량화 가능.

@@ -194,6 +194,288 @@ fn pbox(out: &mut Vec<u8>, b: &BBox) {
     pi64(out, b.y1);
 }
 
+// ---- shared section encoders (build parallelization): the Builder
+// and the per-cell CellSink write through ONE encoder per section,
+// so a sink's bytes are identical to direct Builder calls by
+// construction (the append pass only rebases indexes).
+#[allow(clippy::too_many_arguments)]
+fn enc_place(
+    out: &mut Vec<u8>,
+    child: u32,
+    x: i64,
+    y: i64,
+    rot: u8,
+    flip: bool,
+    kind: u8,
+    na: u32,
+    nb: u32,
+    va: (i64, i64),
+    vb: (i64, i64),
+) {
+    p32(out, child);
+    out.push(rot);
+    out.push(flip as u8);
+    out.push(kind);
+    out.push(0);
+    pi64(out, x);
+    pi64(out, y);
+    p32(out, na);
+    p32(out, nb);
+    pi64(out, va.0);
+    pi64(out, va.1);
+    pi64(out, vb.0);
+    pi64(out, vb.1);
+    assert_eq!(out.len() % PLACE_LEN, 0, "place stride");
+}
+
+fn enc_pts_entry(pool: &mut Vec<u8>, prep: &PtsPrepared) {
+    pbox(pool, &prep.extent);
+    p32(
+        pool,
+        narrow_u32(prep.chunks.len() as u64, "pts chunk count"),
+    );
+    p32(pool, 0);
+    for c in &prep.chunks {
+        pbox(pool, c);
+    }
+    for &(px, py) in &prep.pts {
+        pi64(pool, px);
+        pi64(pool, py);
+    }
+}
+
+fn enc_bvh(
+    out: &mut Vec<u8>,
+    bbox: &BBox,
+    first: u32,
+    count: u16,
+    leaf: bool,
+) {
+    pbox(out, bbox);
+    p32(out, first);
+    p16(out, count);
+    p16(out, leaf as u16);
+    assert_eq!(out.len() % BVH_LEN, 0, "bvh stride");
+}
+
+fn enc_pbvh(
+    out: &mut Vec<u8>,
+    bbox: &BBox,
+    first: u32,
+    count: u16,
+    leaf: bool,
+    max_w: u64,
+    max_h: u64,
+) {
+    pbox(out, bbox);
+    p32(out, first);
+    p16(out, count);
+    out.push(leaf as u8);
+    out.push(0);
+    p64(out, max_w);
+    p64(out, max_h);
+    assert_eq!(out.len() % PBVH_LEN, 0, "pbvh stride");
+}
+
+fn enc_prange(
+    out: &mut Vec<u8>,
+    layer_idx: u32,
+    page_lo: u32,
+    page_count: u32,
+    pbvh_root: u32,
+) {
+    p32(out, layer_idx);
+    p32(out, page_lo);
+    p32(out, page_count);
+    p32(out, pbvh_root);
+    assert_eq!(out.len() % PRANGE_LEN, 0, "prange stride");
+}
+
+/// per-cell, thread-local section encoder for the parallel build:
+/// identical byte layout to the Builder but with CELL-LOCAL indexes
+/// (places/bvh/pbvh/pranges from 0, pts-pool offsets from 0). The
+/// single-threaded Builder::append_cell_sink commit rebases them.
+#[derive(Default)]
+pub struct CellSink {
+    pub places: Vec<u8>,
+    pub n_places: u64,
+    pub pts_pool: Vec<u8>,
+    pub bvh: Vec<u8>,
+    pub n_bvh: u32,
+    pub pbvh: Vec<u8>,
+    pub n_pbvh: u32,
+    pub pranges: Vec<u8>,
+    pub n_pranges: u32,
+}
+
+/// global section bases assigned to one appended CellSink
+pub struct SinkBases {
+    pub place_start: u64,
+    pub bvh_start: u32,
+    pub pbvh_start: u32,
+    pub prange_start: u32,
+}
+
+impl CellSink {
+    #[allow(clippy::too_many_arguments)]
+    fn place_raw(
+        &mut self,
+        child: u32,
+        x: i64,
+        y: i64,
+        rot: u8,
+        flip: bool,
+        kind: u8,
+        na: u32,
+        nb: u32,
+        va: (i64, i64),
+        vb: (i64, i64),
+    ) -> u64 {
+        let idx = self.n_places;
+        enc_place(
+            &mut self.places,
+            child,
+            x,
+            y,
+            rot,
+            flip,
+            kind,
+            na,
+            nb,
+            va,
+            vb,
+        );
+        self.n_places += 1;
+        idx
+    }
+
+    pub fn place(
+        &mut self,
+        child: u32,
+        x: i64,
+        y: i64,
+        rot: u8,
+        flip: bool,
+        rep: &Rep,
+    ) -> u64 {
+        match rep {
+            Rep::One => self.place_raw(
+                child,
+                x,
+                y,
+                rot,
+                flip,
+                0,
+                1,
+                1,
+                (0, 0),
+                (0, 0),
+            ),
+            Rep::Grid { na, nb, va, vb } => self.place_raw(
+                child,
+                x,
+                y,
+                rot,
+                flip,
+                1,
+                narrow_u32(*na, "rep na"),
+                narrow_u32(*nb, "rep nb"),
+                *va,
+                *vb,
+            ),
+            Rep::Pts(p) => {
+                let prep = prepare_pts(p);
+                self.place_pts(child, x, y, rot, flip, &prep)
+            }
+        }
+    }
+
+    pub fn place_pts(
+        &mut self,
+        child: u32,
+        x: i64,
+        y: i64,
+        rot: u8,
+        flip: bool,
+        prep: &PtsPrepared,
+    ) -> u64 {
+        let off = self.pts_pool.len() as u64;
+        let off_i64 = i64::try_from(off).unwrap_or_else(|_| {
+            panic!("limit exceeded: pts pool offset = {}", off)
+        });
+        enc_pts_entry(&mut self.pts_pool, prep);
+        let count = narrow_u32(prep.pts.len() as u64, "pts count");
+        self.place_raw(
+            child,
+            x,
+            y,
+            rot,
+            flip,
+            2,
+            count,
+            1,
+            (off_i64, 0),
+            (0, 0),
+        )
+    }
+
+    pub fn bvh_node(
+        &mut self,
+        bbox: &BBox,
+        first: u32,
+        count: u16,
+        leaf: bool,
+    ) -> u32 {
+        let idx = self.n_bvh;
+        enc_bvh(&mut self.bvh, bbox, first, count, leaf);
+        bump(&mut self.n_bvh, "bvh");
+        idx
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn pbvh_node(
+        &mut self,
+        bbox: &BBox,
+        first: u32,
+        count: u16,
+        leaf: bool,
+        max_w: u64,
+        max_h: u64,
+    ) -> u32 {
+        let idx = self.n_pbvh;
+        enc_pbvh(
+            &mut self.pbvh,
+            bbox,
+            first,
+            count,
+            leaf,
+            max_w,
+            max_h,
+        );
+        bump(&mut self.n_pbvh, "pbvh");
+        idx
+    }
+
+    pub fn prange(
+        &mut self,
+        layer_idx: u32,
+        page_lo: u32,
+        page_count: u32,
+        pbvh_root: u32,
+    ) -> u32 {
+        let idx = self.n_pranges;
+        enc_prange(
+            &mut self.pranges,
+            layer_idx,
+            page_lo,
+            page_count,
+            pbvh_root,
+        );
+        bump(&mut self.n_pranges, "prange");
+        idx
+    }
+}
+
 // -------------------------------------------------- pts preparation
 
 /// Build-side preprocessing of an irregular repetition: offsets are
@@ -384,6 +666,126 @@ impl Builder {
         i
     }
 
+    /// commit one thread-local CellSink: memcpy each section, then a
+    /// fixed-stride walk rebases cross-references (records are
+    /// self-describing - kind/leaf flags select the base). page_base
+    /// is the global index the cell's first page WILL get. Returns
+    /// the section bases for the caller's cell record.
+    pub fn append_cell_sink(
+        &mut self,
+        sink: &CellSink,
+        page_base: u64,
+    ) -> SinkBases {
+        let bases = SinkBases {
+            place_start: self.n_places,
+            bvh_start: self.n_bvh,
+            pbvh_start: self.n_pbvh,
+            prange_start: self.n_pranges,
+        };
+        let pool_base = self.pts_pool.len() as u64;
+        // places: kind==2 records carry a pts-pool byte offset in
+        // va.0 (bytes 32..40)
+        let at = self.places.len();
+        self.places.extend_from_slice(&sink.places);
+        if pool_base != 0 {
+            for rec in
+                self.places[at..].chunks_exact_mut(PLACE_LEN)
+            {
+                if rec[6] != 2 {
+                    continue;
+                }
+                let old = i64::from_le_bytes(
+                    rec[32..40].try_into().unwrap(),
+                );
+                let moved = (old as u64)
+                    .checked_add(pool_base)
+                    .expect("limit exceeded: pts pool offset");
+                let ni =
+                    i64::try_from(moved).unwrap_or_else(|_| {
+                        panic!(
+                            "limit exceeded: pts pool offset = {}",
+                            moved
+                        )
+                    });
+                rec[32..40].copy_from_slice(&ni.to_le_bytes());
+            }
+        }
+        self.pts_pool.extend_from_slice(&sink.pts_pool);
+        // instance BVH: leaf `first` -> +place_start, inner ->
+        // +bvh_start
+        let at = self.bvh.len();
+        self.bvh.extend_from_slice(&sink.bvh);
+        for rec in self.bvh[at..].chunks_exact_mut(BVH_LEN) {
+            let first =
+                u32::from_le_bytes(rec[32..36].try_into().unwrap());
+            let leaf =
+                u16::from_le_bytes(rec[38..40].try_into().unwrap());
+            let nf = if leaf != 0 {
+                narrow_u32(
+                    bases.place_start + first as u64,
+                    "place index",
+                )
+            } else {
+                narrow_u32(
+                    bases.bvh_start as u64 + first as u64,
+                    "bvh index",
+                )
+            };
+            rec[32..36].copy_from_slice(&nf.to_le_bytes());
+        }
+        // page BVH: leaf `first` -> +page_base, inner -> +pbvh_start
+        let at = self.pbvh.len();
+        self.pbvh.extend_from_slice(&sink.pbvh);
+        for rec in self.pbvh[at..].chunks_exact_mut(PBVH_LEN) {
+            let first =
+                u32::from_le_bytes(rec[32..36].try_into().unwrap());
+            let nf = if rec[38] != 0 {
+                narrow_u32(page_base + first as u64, "page index")
+            } else {
+                narrow_u32(
+                    bases.pbvh_start as u64 + first as u64,
+                    "pbvh index",
+                )
+            };
+            rec[32..36].copy_from_slice(&nf.to_le_bytes());
+        }
+        // pranges: page_lo -> +page_base; root -> +pbvh_start when
+        // not PBVH_NONE
+        let at = self.pranges.len();
+        self.pranges.extend_from_slice(&sink.pranges);
+        for rec in self.pranges[at..].chunks_exact_mut(PRANGE_LEN)
+        {
+            let lo =
+                u32::from_le_bytes(rec[4..8].try_into().unwrap());
+            let nl =
+                narrow_u32(page_base + lo as u64, "page index");
+            rec[4..8].copy_from_slice(&nl.to_le_bytes());
+            let root =
+                u32::from_le_bytes(rec[12..16].try_into().unwrap());
+            if root != PBVH_NONE {
+                let nr = narrow_u32(
+                    bases.pbvh_start as u64 + root as u64,
+                    "pbvh index",
+                );
+                rec[12..16].copy_from_slice(&nr.to_le_bytes());
+            }
+        }
+        self.n_places += sink.n_places;
+        self.n_bvh = self
+            .n_bvh
+            .checked_add(sink.n_bvh)
+            .expect("limit exceeded: bvh");
+        self.n_pbvh = self
+            .n_pbvh
+            .checked_add(sink.n_pbvh)
+            .expect("limit exceeded: pbvh");
+        self.n_pranges = self
+            .n_pranges
+            .checked_add(sink.n_pranges)
+            .expect("limit exceeded: prange");
+        bases
+    }
+
     fn place_raw(
         &mut self,
         child: u32,
@@ -398,21 +800,19 @@ impl Builder {
         vb: (i64, i64),
     ) -> u64 {
         let idx = self.n_places;
-        let out = &mut self.places;
-        p32(out, child);
-        out.push(rot);
-        out.push(flip as u8);
-        out.push(kind);
-        out.push(0);
-        pi64(out, x);
-        pi64(out, y);
-        p32(out, na);
-        p32(out, nb);
-        pi64(out, va.0);
-        pi64(out, va.1);
-        pi64(out, vb.0);
-        pi64(out, vb.1);
-        assert_eq!(out.len() % PLACE_LEN, 0, "place stride");
+        enc_place(
+            &mut self.places,
+            child,
+            x,
+            y,
+            rot,
+            flip,
+            kind,
+            na,
+            nb,
+            va,
+            vb,
+        );
         self.n_places += 1;
         idx
     }
@@ -468,19 +868,7 @@ impl Builder {
         let off_i64 = i64::try_from(off).unwrap_or_else(|_| {
             panic!("limit exceeded: pts pool offset = {}", off)
         });
-        pbox(&mut self.pts_pool, &prep.extent);
-        p32(
-            &mut self.pts_pool,
-            narrow_u32(prep.chunks.len() as u64, "pts chunk count"),
-        );
-        p32(&mut self.pts_pool, 0);
-        for c in &prep.chunks {
-            pbox(&mut self.pts_pool, c);
-        }
-        for &(px, py) in &prep.pts {
-            pi64(&mut self.pts_pool, px);
-            pi64(&mut self.pts_pool, py);
-        }
+        enc_pts_entry(&mut self.pts_pool, prep);
         let count = narrow_u32(prep.pts.len() as u64, "pts count");
         self.place_raw(
             child,
@@ -505,12 +893,7 @@ impl Builder {
         leaf: bool,
     ) -> u32 {
         let idx = self.n_bvh;
-        let out = &mut self.bvh;
-        pbox(out, bbox);
-        p32(out, first);
-        p16(out, count);
-        p16(out, leaf as u16);
-        assert_eq!(out.len() % BVH_LEN, 0, "bvh stride");
+        enc_bvh(&mut self.bvh, bbox, first, count, leaf);
         bump(&mut self.n_bvh, "bvh");
         idx
     }
@@ -528,15 +911,7 @@ impl Builder {
         max_h: u64,
     ) -> u32 {
         let idx = self.n_pbvh;
-        let out = &mut self.pbvh;
-        pbox(out, bbox);
-        p32(out, first);
-        p16(out, count);
-        out.push(leaf as u8);
-        out.push(0);
-        p64(out, max_w);
-        p64(out, max_h);
-        assert_eq!(out.len() % PBVH_LEN, 0, "pbvh stride");
+        enc_pbvh(&mut self.pbvh, bbox, first, count, leaf, max_w, max_h);
         bump(&mut self.n_pbvh, "pbvh");
         idx
     }
@@ -550,12 +925,7 @@ impl Builder {
         pbvh_root: u32,
     ) -> u32 {
         let idx = self.n_pranges;
-        let out = &mut self.pranges;
-        p32(out, layer_idx);
-        p32(out, page_lo);
-        p32(out, page_count);
-        p32(out, pbvh_root);
-        assert_eq!(out.len() % PRANGE_LEN, 0, "prange stride");
+        enc_prange(&mut self.pranges, layer_idx, page_lo, page_count, pbvh_root);
         bump(&mut self.n_pranges, "prange");
         idx
     }
@@ -2296,6 +2666,117 @@ pub fn masks_intersect(a: &[u8], b: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    /// build parallelization (task #58): a CellSink committed via
+    /// append_cell_sink must produce byte-identical sections to the
+    /// same calls made directly on the Builder - covering all three
+    /// rep kinds, leaf/inner BVH nodes, pbvh, pranges, and TWO cells
+    /// so every rebase base is non-zero for the second.
+    #[test]
+    fn cell_sink_append_is_byte_identical() {
+        let bb = BBox { x0: 0, y0: 0, x1: 100, y1: 50 };
+        let pts = std::sync::Arc::new(vec![
+            (0i64, 0i64),
+            (500, 40),
+            (90, 700),
+        ]);
+        let mk_direct = || {
+            let mut b = Builder::new(1000.0, 0, 0, 1);
+            for c in 0..2u32 {
+                let pb = b.n_places();
+                b.place(c, 10, 20, 1, false, &Rep::One);
+                b.place(
+                    c,
+                    -5,
+                    7,
+                    0,
+                    true,
+                    &Rep::Grid {
+                        na: 3,
+                        nb: 2,
+                        va: (100, 0),
+                        vb: (0, 200),
+                    },
+                );
+                b.place(
+                    c,
+                    1,
+                    2,
+                    2,
+                    false,
+                    &Rep::Pts(pts.clone().to_vec().into()),
+                );
+                let l0 = b.bvh_node(
+                    &bb,
+                    narrow_u32(pb, "p"),
+                    3,
+                    true,
+                );
+                b.bvh_node(&bb, l0, 1, false);
+                let page_base = (c as u32) * 7;
+                let pl = b.pbvh_node(
+                    &bb,
+                    page_base,
+                    2,
+                    true,
+                    11,
+                    22,
+                );
+                b.pbvh_node(&bb, pl, 1, false, 33, 44);
+                b.prange(0, page_base, 2, pl + 1);
+                b.prange(1, page_base + 2, 1, PBVH_NONE);
+            }
+            b
+        };
+        let mk_sink = || {
+            let mut b = Builder::new(1000.0, 0, 0, 1);
+            for c in 0..2u32 {
+                let mut s = CellSink::default();
+                s.place(c, 10, 20, 1, false, &Rep::One);
+                s.place(
+                    c,
+                    -5,
+                    7,
+                    0,
+                    true,
+                    &Rep::Grid {
+                        na: 3,
+                        nb: 2,
+                        va: (100, 0),
+                        vb: (0, 200),
+                    },
+                );
+                s.place(
+                    c,
+                    1,
+                    2,
+                    2,
+                    false,
+                    &Rep::Pts(pts.clone().to_vec().into()),
+                );
+                let l0 = s.bvh_node(&bb, 0, 3, true);
+                s.bvh_node(&bb, l0, 1, false);
+                let pl = s.pbvh_node(&bb, 0, 2, true, 11, 22);
+                s.pbvh_node(&bb, pl, 1, false, 33, 44);
+                s.prange(0, 0, 2, pl + 1);
+                s.prange(1, 2, 1, PBVH_NONE);
+                b.append_cell_sink(&s, (c as u32 * 7) as u64);
+            }
+            b
+        };
+        let d = mk_direct();
+        let s = mk_sink();
+        assert_eq!(d.places, s.places, "places section");
+        assert_eq!(d.pts_pool, s.pts_pool, "pts pool");
+        assert_eq!(d.bvh, s.bvh, "bvh section");
+        assert_eq!(d.pbvh, s.pbvh, "pbvh section");
+        assert_eq!(d.pranges, s.pranges, "prange section");
+        assert_eq!(d.n_places, s.n_places);
+        assert_eq!(d.n_bvh, s.n_bvh);
+        assert_eq!(d.n_pbvh, s.n_pbvh);
+        assert_eq!(d.n_pranges, s.n_pranges);
+    }
+
     use super::*;
 
     fn build_sample() -> Vec<u8> {

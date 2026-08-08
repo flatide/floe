@@ -1495,6 +1495,9 @@ fn topo_order(doc: &Doc) -> Vec<usize> {
 /// `first`/base offsets are fixed up then and the .ovm/.ovp stay
 /// byte-identical to the single-threaded build at any thread count.
 struct CellPlan {
+    /// pre-encoded sections with CELL-LOCAL indexes (built in the
+    /// parallel plan phase; the serial commit is memcpy + rebase)
+    sink: floe_ovm::CellSink,
     place_order: Vec<u32>,            // local place idx, leaf order
     bvh: Vec<(BBox, u32, u16, bool)>, // `first` is cell-local
     /// pages across this cell's (layer) runs, each run already in
@@ -2094,7 +2097,46 @@ fn build_cell_plan(
             _ => None,
         })
         .collect();
+    // ---- pre-encode the Builder sections with LOCAL indexes (the
+    // serial pipeline commit used to re-walk every record here on
+    // one thread; now it just memcpys and rebases)
+    let mut sink = floe_ovm::CellSink::default();
+    for &pi in &place_order {
+        let pl = &cell.places[pi as usize];
+        match &pts_prep[pi as usize] {
+            Some(prep) => {
+                sink.place_pts(
+                    pl.cell as u32,
+                    pl.x,
+                    pl.y,
+                    pl.rot,
+                    pl.flip,
+                    prep,
+                );
+            }
+            None => {
+                sink.place(
+                    pl.cell as u32,
+                    pl.x,
+                    pl.y,
+                    pl.rot,
+                    pl.flip,
+                    &pl.rep,
+                );
+            }
+        }
+    }
+    for &(bb, first, count, leaf) in &bvh {
+        sink.bvh_node(&bb, first, count, leaf);
+    }
+    for &(bb, first, count, leaf, mw, mh) in &pbvh {
+        sink.pbvh_node(&bb, first, count, leaf, mw, mh);
+    }
+    for &(li, lo, cnt, root) in &pranges {
+        sink.prange(li, lo, cnt, root);
+    }
     CellPlan {
+        sink,
         place_order,
         bvh,
         pages,
@@ -2718,6 +2760,7 @@ fn build(
         page_target_bytes / MIB
     );
     let mut plan_elapsed = std::time::Duration::ZERO;
+    let mut append_elapsed = std::time::Duration::ZERO;
     let mut encode_elapsed = std::time::Duration::ZERO;
     // plan-batch governor: batch size changes only RSS and speed,
     // never output bytes (metadata is appended in cell order), so
@@ -2778,6 +2821,7 @@ fn build(
             }
         });
         plan_elapsed += tp.elapsed();
+        let ta = std::time::Instant::now();
 
         // Append metadata in cell order and retain only this batch's page jobs
         // and fragment arenas for the immediately following encode pass.
@@ -2787,14 +2831,11 @@ fn build(
         for (local, slot) in pslots.into_iter().enumerate() {
             let ci = cell_base + local;
             let CellPlan {
-                place_order,
-                bvh,
+                sink,
                 mut pages,
-                pranges,
-                pbvh,
-                pts_prep,
                 arena,
                 split_stats,
+                ..
             } = slot.into_inner().expect("cell plan unset");
             batch_arenas.push(arena);
             split_total.fragments = split_total
@@ -2818,90 +2859,22 @@ fn build(
                 .checked_add(split_stats.lod_grid_verbatim)
                 .expect("limit exceeded: lod verbatim count");
             let cell = &doc.cells[ci];
-            let place_base = b.n_places();
-            for &pi in &place_order {
-                let pl = &cell.places[pi as usize];
-                match &pts_prep[pi as usize] {
-                    Some(prep) => {
-                        b.place_pts(
-                            pl.cell as u32,
-                            pl.x,
-                            pl.y,
-                            pl.rot,
-                            pl.flip,
-                            prep,
-                        );
-                    }
-                    None => {
-                        b.place(
-                            pl.cell as u32,
-                            pl.x,
-                            pl.y,
-                            pl.rot,
-                            pl.flip,
-                            &pl.rep,
-                        );
-                    }
-                }
-            }
-            let (bvh_start, bvh_count) = if bvh.is_empty() {
-                (0, 0)
-            } else {
-                let base = b.n_bvh();
-                for &(bb, first, count, leaf) in &bvh {
-                    let f = if leaf {
-                        narrow_u32(
-                            place_base + first as u64,
-                            "place index",
-                        )
-                    } else {
-                        narrow_u32(
-                            base as u64 + first as u64,
-                            "bvh index",
-                        )
-                    };
-                    b.bvh_node(&bb, f, count, leaf);
-                }
-                (
-                    base,
-                    narrow_u32(bvh.len() as u64, "cell bvh count"),
-                )
-            };
             let page_base = pages_total as u64;
             let page_start = narrow_u32(page_base, "page count");
             let page_count =
                 narrow_u32(pages.len() as u64, "cell page count");
-            let pb_base = b.n_pbvh();
-            for &(bb, first, count, leaf, mw, mh) in &pbvh {
-                let f = if leaf {
-                    narrow_u32(page_base + first as u64, "page index")
-                } else {
-                    narrow_u32(
-                        pb_base as u64 + first as u64,
-                        "pbvh index",
-                    )
-                };
-                b.pbvh_node(&bb, f, count, leaf, mw, mh);
-            }
-            let pr_start = b.n_pranges();
-            for &(li, lo, cnt, root) in &pranges {
-                let root = if root == PBVH_NONE {
-                    PBVH_NONE
-                } else {
-                    narrow_u32(
-                        pb_base as u64 + root as u64,
-                        "pbvh index",
-                    )
-                };
-                b.prange(
-                    li,
-                    narrow_u32(page_base + lo as u64, "page index"),
-                    cnt,
-                    root,
-                );
-            }
-            let pr_count =
-                narrow_u32(pranges.len() as u64, "prange count");
+            // one memcpy+rebase commit instead of the old
+            // record-at-a-time re-walk (the pipeline's serial
+            // bottleneck on placement-heavy chips)
+            let bases = b.append_cell_sink(&sink, page_base);
+            let place_base = bases.place_start;
+            let (bvh_start, bvh_count) = if sink.n_bvh == 0 {
+                (0, 0)
+            } else {
+                (bases.bvh_start, sink.n_bvh)
+            };
+            let pr_start = bases.prange_start;
+            let pr_count = sink.n_pranges;
             for job in pages.iter_mut() {
                 if job.lod_page != floe_ovm::LOD_PAGE_NONE {
                     job.lod_page = narrow_u32(
@@ -2964,6 +2937,7 @@ fn build(
             pages_total,
             std::sync::atomic::Ordering::Relaxed,
         );
+        append_elapsed += ta.elapsed();
         let te = std::time::Instant::now();
         encode_write_pages(
             doc,
@@ -2986,9 +2960,10 @@ fn build(
     pipeline_on.store(false, std::sync::atomic::Ordering::Relaxed);
     heartbeat.join().expect("pipeline heartbeat");
     eprintln!(
-        "[vfs] build: pipeline complete (plan {:.1}s, encode {:.1}s, \
-         rss {})",
+        "[vfs] build: pipeline complete (plan {:.1}s, append {:.1}s, \
+         encode {:.1}s, rss {})",
         plan_elapsed.as_secs_f64(),
+        append_elapsed.as_secs_f64(),
         encode_elapsed.as_secs_f64(),
         rss()
     );
