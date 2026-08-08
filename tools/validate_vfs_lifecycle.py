@@ -291,8 +291,8 @@ def main():
             "L8 box size cut failed to cull sub-cut boundary boxes")
         # rev 35: the tone split survives lod=off (Sess default) -
         # the LOD kill switch must not erase the screen scale. At a
-        # tiny scale every box is far under FRAME_WHITE_PX: all land on
-        # the GRAY dt, the white dt stays empty.
+        # tiny scale every box is far under FRAME_FILL_PX: all land on
+        # the smallest (dotted) band, the white dt stays empty.
         r3 = s.request(full, px=0.001, layers=[], depth=0)
         chk(int(r3.get("frame_rects", 0)) > 0,
             "L8 tiny-px round lost its frames")
@@ -302,9 +302,11 @@ def main():
         wit = s.m.top.begin_shapes_rec(frame_li)
         chk(wit.at_end(),
             "L8 white frames survived a sub-threshold scale")
-        gray_li = s.m.ly.layer(db.LayerInfo(*s.m.FRAME_GRAY))
-        git_ = s.m.top.begin_shapes_rec(gray_li)
-        chk(not git_.at_end(),
+        # sub-5px boxes fall to the dotted band (dt+3), not gray
+        # outline (dt+1); some gray-tone band must carry them
+        dots_li = s.m.ly.layer(db.LayerInfo(*s.m.FRAME_DOTS))
+        dit = s.m.top.begin_shapes_rec(dots_li)
+        chk(not dit.at_end(),
             "L8 gray frames missing at a sub-threshold scale")
     finally:
         s.stop()

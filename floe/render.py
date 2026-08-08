@@ -40,7 +40,8 @@ class Renderer:
     """
 
     def __init__(self, layout, top_cell, colors=None, hier_offset=0,
-                 show_texts=False, hollow=(), speckle=True, above=()):
+                 show_texts=False, hollow=(), speckle=True, above=(),
+                 dotted=(), solid=()):
         """hier_offset: artificial hierarchy levels above the design top
         (the tile mosaic adds 2: FLOE_MOSAIC -> TILE_r_c -> design cells);
         user-facing depth values are shifted by this amount.
@@ -49,6 +50,12 @@ class Renderer:
         above: the subset of hollow keys painted OVER the design
         geometry instead of under it (white frames stay readable in
         dense fill; gray dust stays buried).
+        dotted: hollow keys whose outline uses a dotted line style
+        (the smallest frame-box band: a ~4px box renders as a few
+        dots, approximating Calibre's 4-dot / 1px marks).
+        solid: keys drawn as opaque solid fill (no speckle, no
+        outline) yet stacked UNDER the design like the other frame
+        planes (the gray-fill frame band).
         speckle: Calibre-style 50%% fill (the live viewer); False keeps
         solid fills - headless exports (`floe render`) are archival
         artifacts, and the speckle restyle is a viewer behavior."""
@@ -77,12 +84,22 @@ class Renderer:
         self._hollow_order = tuple(hollow)
         self.hollow = set(hollow)
         self._above = set(above) & self.hollow
+        self._dotted = set(dotted) & self.hollow
+        self._solid = set(solid) - self.hollow
+        # all frame planes to stack (hollow outlines + solid fill),
+        # minus the ones painted over the design
+        self._frame_planes = (self.hollow | self._solid)
         self.hier_offset = hier_offset
         self.speckle = bool(speckle)
         self.lv.show_layout(layout, False)
         self._design_speckle_patterns = tuple(
             self.lv.add_stipple("floe-calibre-speckle-%d" % i, pattern)
             for i, pattern in enumerate(_DESIGN_SPECKLE_STIPPLES))
+        # dotted outline line style for the smallest frame band
+        # ('*' set, '.' clear pixel along the stroke)
+        self._dot_line_style = (
+            self.lv.add_line_style("floe-frame-dot", "*.")
+            if self._dotted else None)
         self.refresh()
 
     def refresh(self):
@@ -102,6 +119,15 @@ class Renderer:
                 lp.frame_color = col
             if key in self.hollow:
                 lp.dither_pattern = 1  # hollow: outline only
+                lp.transparent = False
+                lp.width = 1
+                if key in self._dotted and \
+                        self._dot_line_style is not None:
+                    lp.line_style = self._dot_line_style
+                else:
+                    lp.line_style = 0  # solid
+            elif key in self._solid:
+                lp.dither_pattern = 0  # opaque fill (no speckle)
                 lp.transparent = False
                 lp.width = 1
             elif self.speckle:
@@ -124,27 +150,31 @@ class Renderer:
         LayoutView.add_missing_layers sorts new properties by source
         layer number, regardless of the order in which layers were created
         in Layout. KLayout paints later property entries over earlier
-        ones; the wanted order is [gray underlays, design geometry,
-        `above` overlays]: gray frame dust stays buried under fill,
-        white frames (the `above` set) stay readable on top of it.
-        Within each hollow group the REVERSE of the `hollow` argument
-        order applies (its first entry topmost). Rebuild the flat
-        property list only when it deviates.
+        ones; the wanted order is [frame underlays, design geometry,
+        `above` overlays]: gray outline/fill/dotted frame planes stay
+        buried under the design, white frames (the `above` set) stay
+        readable on top. Within the frame group the REVERSE of the
+        `hollow` argument order applies (its first entry topmost).
+        Rebuild the flat property list only when it deviates.
         """
         nodes = list(self.lv.each_layer())
-        prio = {key: i for i, key in enumerate(self._hollow_order)}
+        order = list(self._hollow_order) + [
+            k for k in self._solid if k not in self._hollow_order]
+        prio = {key: i for i, key in enumerate(order)}
 
         def key(node):
             return (node.source_layer, node.source_datatype)
 
         def by_prio(group):
-            return sorted(group, key=lambda n: -prio[key(n)])
+            return sorted(group, key=lambda n: -prio.get(key(n),
+                                                         len(order)))
 
         under = by_prio(n for n in nodes
-                        if key(n) in self.hollow
+                        if key(n) in self._frame_planes
                         and key(n) not in self._above)
         over = by_prio(n for n in nodes if key(n) in self._above)
-        design = [n for n in nodes if key(n) not in self.hollow]
+        design = [n for n in nodes
+                  if key(n) not in self._frame_planes]
         want = under + design + over
         if [key(n) for n in want] == [key(n) for n in nodes]:
             return

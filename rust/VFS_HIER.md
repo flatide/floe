@@ -1968,3 +1968,21 @@ rev 41 (헤어라인 컷: ovm v6 max_min + min변 술어 — 2026-08-08,
 - 게이트: hairline_min_side_cut(페이지 v6 경로·hair 0 패리티·경계
   포함·폴드·프레임), split_max_min_detects_hairline_pages(혼합
   방향), 파이썬 게이트 v6 동기화(validate_vfs/split/text).
+
+rev 42 (프레임 박스 크기 밴드 4단 — 2026-08-08, 0.11.19):
+
+- Calibre 정방형 프레임 동작(사용자 제공): ≥25px 흰 외곽선,
+  9~24px 회색 외곽선, 5~8px 회색 채움(외곽선 없음), 4px 이하는
+  4점 근사(2·3px 없음, <4는 1px). min변 기준.
+- FRAME_WHITE_PX 40→25, FRAME_GRAY_PX 9, FRAME_FILL_PX 5 신설.
+  frame_band(rect, px)=0..3 (px<=0 → 0 흰색). WsCell.frames의
+  bool→u8 밴드. 델타 dt = frame_fd + band. 이름(text)은 밴드
+  0/1만(흰/회, 임계 25).
+- 뷰어: 프레임 레이어 dt+0..3 = 흰 외곽선(디자인 위)/회색
+  외곽선/회색 채움/회색 점선. render.py에 dotted(line_style "*.")
+  ·solid(스페클 제외 불투명 채움) 파라미터, 스태킹 재배열은
+  hollow∪solid 전체를 언더레이로. 4px 점선 실측 = 모서리+변중점
+  점으로 4점 패턴 근사.
+- 게이트: frames_split_into_size_bands(밴드 0/1/2/3 경계 포함),
+  dense→band 3, L8 tiny-px는 FRAME_DOTS 확인. 재인덱싱 불필요
+  (밴드는 요청별 플랜, ovm 포맷 불변).

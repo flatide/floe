@@ -22,11 +22,41 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet};
 
 /// remaining-depth sentinel: no depth truncation below this WC
 pub const REM_FULL: u32 = u32::MAX;
-/// Calibre-style frame tone split: a frame box (and its block name)
-/// draws WHITE when both screen dimensions reach this many pixels,
-/// GRAY below - however long one side is, a short other side stays
-/// gray. Gray boxes go to (frame_layer, dt+1).
-pub const FRAME_WHITE_PX: f64 = 40.0;
+/// Calibre-style frame size bands, judged on the MIN screen side
+/// (however long the other side is, a short side demotes the box):
+///   >= FRAME_WHITE_PX   white outline   (band 0, dt+0)
+///   >= FRAME_GRAY_PX    gray  outline   (band 1, dt+1)
+///   >= FRAME_FILL_PX    gray  fill      (band 2, dt+2)
+///   else                gray  dotted    (band 3, dt+3) - the dotted
+///     outline degrades to a few dots at ~4px and a single pixel
+///     below, approximating Calibre's 4-dot / 1px marks.
+/// Block names have no fill/dots form; they use band 0/1 only
+/// (white above FRAME_WHITE_PX, gray below).
+pub const FRAME_WHITE_PX: f64 = 25.0;
+pub const FRAME_GRAY_PX: f64 = 9.0;
+pub const FRAME_FILL_PX: f64 = 5.0;
+
+/// classify a drawn frame box (WC-local rect) into a size band by
+/// its min screen side. No screen scale (px_per_dbu <= 0, e.g.
+/// probes/legacy) => band 0 (white outline), the pre-tone default.
+pub fn frame_band(rect: &BBox, px_per_dbu: f64) -> u8 {
+    if px_per_dbu <= 0.0 {
+        return 0;
+    }
+    let mn = (rect.x1 - rect.x0)
+        .max(0)
+        .min((rect.y1 - rect.y0).max(0)) as f64
+        * px_per_dbu;
+    if mn >= FRAME_WHITE_PX {
+        0
+    } else if mn >= FRAME_GRAY_PX {
+        1
+    } else if mn >= FRAME_FILL_PX {
+        2
+    } else {
+        3
+    }
+}
 
 /// (cell index, remaining depth) - the working-set cell identity.
 /// Full-depth views collapse to one key per cell (r >= height folds
@@ -104,9 +134,9 @@ pub struct WsCell {
     pub insts: Vec<WsInst>,
     /// depth-boundary child outlines: offset-0 member bbox in
     /// WC-local coords + the placement rep (arrays outline per
-    /// member) + the tone (true = white, both drawn dims >=
-    /// FRAME_WHITE_PX on screen; false = gray, authored on dt+1)
-    pub frames: Vec<(BBox, Rep, bool)>,
+    /// member) + the size BAND (0..3, see frame_band; authored on
+    /// frame_layer dt+band)
+    pub frames: Vec<(BBox, Rep, u8)>,
     /// M7-C wash degrade: pages whose WHOLE screen image fits in
     /// wash_px x wash_px collapse to one bbox rect on their own
     /// layer (li, page bbox) - at that size any subset of the
@@ -898,17 +928,10 @@ impl<'a> Hier<'a> {
             }
         };
         if boxes.iter().any(|b| fp.intersects(b)) {
-            // tone from the box actually drawn (member box for
-            // per-member reps, footprint for fused ones); no screen
-            // scale = legacy single-tone white
-            let white = self.px_per_dbu <= 0.0
-                || ((rect.x1 - rect.x0).max(0) as f64
-                    * self.px_per_dbu
-                    >= FRAME_WHITE_PX
-                    && (rect.y1 - rect.y0).max(0) as f64
-                        * self.px_per_dbu
-                        >= FRAME_WHITE_PX);
-            wc.frames.push((rect, rep, white));
+            // band from the box actually drawn (member box for
+            // per-member reps, footprint for fused ones)
+            let band = frame_band(&rect, self.px_per_dbu);
+            wc.frames.push((rect, rep, band));
             self.frames_total += 1;
             self.st.frame_rects += 1;
         }
@@ -1259,13 +1282,12 @@ impl crate::Vfs {
                 let rects: Vec<RectRec> = w
                     .frames
                     .iter()
-                    .map(|(b, rep, white)| RectRec {
+                    .map(|(b, rep, band)| RectRec {
                         layer: frame_fl,
-                        dt: if *white {
-                            frame_fd
-                        } else {
-                            frame_fd + 1
-                        },
+                        // dt+band selects the viewer draw style:
+                        // 0 white outline, 1 gray outline, 2 gray
+                        // fill, 3 gray dotted
+                        dt: frame_fd + *band as u32,
                         x: b.x0,
                         y: b.y0,
                         w: (b.x1 - b.x0).max(1),
@@ -1969,34 +1991,44 @@ mod tests {
     /// inclusive); no screen scale = legacy all-white. The fixed
     /// sizes assume 20px < FRAME_WHITE_PX <= 90px.
     #[test]
-    fn frames_split_white_gray_at_threshold() {
-        let at = (FRAME_WHITE_PX / 0.1).round() as i64;
-        let under = at - 10; // one pixel short of the threshold
+    fn frames_split_into_size_bands() {
+        // px 0.1: DBU/10 = screen px. Sizes pick one box per band
+        // and the two boundary cases (>= is inclusive).
         let v = fixture(
             &[
                 FCell {
-                    name: "MED", // 200 DBU -> 20px at 0.1: gray
-                    pages: vec![(bx(0, 0, 200, 200), 200, 200)],
+                    name: "WHITE", // 300 -> 30px: band 0
+                    pages: vec![(bx(0, 0, 300, 300), 300, 300)],
                     places: vec![],
                 },
                 FCell {
-                    name: "THIN", // 4000x100 -> 400x10px: gray
-                    pages: vec![(bx(0, 0, 4000, 100), 4000, 100)],
+                    name: "W_AT", // 250 -> exactly 25px: band 0
+                    pages: vec![(bx(0, 0, 250, 250), 250, 250)],
                     places: vec![],
                 },
                 FCell {
-                    name: "BIG", // 900 -> 90px both dims: white
-                    pages: vec![(bx(0, 0, 900, 900), 900, 900)],
+                    name: "GRAY", // 150 -> 15px: band 1 outline
+                    pages: vec![(bx(0, 0, 150, 150), 150, 150)],
                     places: vec![],
                 },
                 FCell {
-                    name: "AT", // exactly the threshold: white
-                    pages: vec![(bx(0, 0, at, at), 1, 1)],
+                    name: "GTHIN", // 4000x150 -> 400x15px: band 1
+                    pages: vec![(bx(0, 0, 4000, 150), 4000, 150)],
                     places: vec![],
                 },
                 FCell {
-                    name: "UNDER", // 1px below: gray
-                    pages: vec![(bx(0, 0, under, under), 1, 1)],
+                    name: "FILL", // 70 -> 7px: band 2 fill
+                    pages: vec![(bx(0, 0, 70, 70), 70, 70)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "F_AT", // 50 -> exactly 5px: band 2
+                    pages: vec![(bx(0, 0, 50, 50), 50, 50)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "DOTS", // 40 -> 4px: band 3 dotted
+                    pages: vec![(bx(0, 0, 40, 40), 40, 40)],
                     places: vec![],
                 },
                 FCell {
@@ -2004,14 +2036,16 @@ mod tests {
                     pages: vec![],
                     places: vec![
                         (0, 0, 0, 0, false, Rep::One),
-                        (1, 0, 500, 0, false, Rep::One),
-                        (2, 5000, 0, 0, false, Rep::One),
-                        (3, 10000, 0, 0, false, Rep::One),
-                        (4, 14000, 0, 0, false, Rep::One),
+                        (1, 500, 0, 0, false, Rep::One),
+                        (2, 1000, 0, 0, false, Rep::One),
+                        (3, 1500, 0, 0, false, Rep::One),
+                        (4, 8000, 0, 0, false, Rep::One),
+                        (5, 8500, 0, 0, false, Rep::One),
+                        (6, 9000, 0, 0, false, Rep::One),
                     ],
                 },
             ],
-            5,
+            7,
         );
         let view = bx(-10, -10, 20000, 1000);
         let plan = plan_hier(
@@ -2020,26 +2054,28 @@ mod tests {
             &HierOpts::default(),
         );
         let top =
-            plan.wcells.iter().find(|w| w.key.0 == 5).unwrap();
-        assert_eq!(top.frames.len(), 5);
-        let tone = |w: i64| {
+            plan.wcells.iter().find(|w| w.key.0 == 7).unwrap();
+        assert_eq!(top.frames.len(), 7);
+        let band = |w: i64| {
             top.frames
                 .iter()
                 .find(|(b, _, _)| b.x1 - b.x0 == w)
                 .unwrap()
                 .2
         };
-        assert!(!tone(200), "20x20px box must be gray");
-        assert!(!tone(4000), "long thin box must be gray");
-        assert!(tone(900), "90x90px box must be white");
-        assert!(tone(at), "box exactly at the threshold is white");
-        assert!(!tone(under), "1px under the threshold is gray");
-        // no screen scale: everything stays white (legacy plans)
+        assert_eq!(band(300), 0, "30px -> white outline");
+        assert_eq!(band(250), 0, "exactly 25px -> white");
+        assert_eq!(band(150), 1, "15px -> gray outline");
+        assert_eq!(band(4000), 1, "long/thin (15px min) -> gray");
+        assert_eq!(band(70), 2, "7px -> gray fill");
+        assert_eq!(band(50), 2, "exactly 5px -> gray fill");
+        assert_eq!(band(40), 3, "4px -> gray dotted");
+        // no screen scale: everything stays band 0 (legacy plans)
         let p0 =
             plan_hier(&v, &rq(view, 0, 0), &HierOpts::default());
         let t0 =
-            p0.wcells.iter().find(|w| w.key.0 == 5).unwrap();
-        assert!(t0.frames.iter().all(|f| f.2));
+            p0.wcells.iter().find(|w| w.key.0 == 7).unwrap();
+        assert!(t0.frames.iter().all(|f| f.2 == 0));
     }
 
     /// Rev 34: r==0 depth-boundary boxes take the size cut exactly
@@ -2997,10 +3033,11 @@ mod tests {
         );
         let t = plan.wcells.iter().find(|w| w.key.0 == 1).unwrap();
         assert_eq!(t.frames.len(), 1);
-        let (fb, frep, white) = &t.frames[0];
+        let (fb, frep, band) = &t.frames[0];
         assert!(matches!(frep, Rep::Grid { na: 200, .. }), "{:?}", frep);
         assert_eq!(*fb, bx(0, 0, 5, 5));
-        assert!(!*white, "0.5px member box must be gray");
+        // 5 DBU member at 0.1 px = 0.5px min side -> band 3 (dotted)
+        assert_eq!(*band, 3, "0.5px member box -> dotted band");
         // cut above the member size culls the whole array outright -
         // no fused footprint box reappears
         let pc = plan_hier(

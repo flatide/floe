@@ -55,10 +55,10 @@ def _iter_global_polys(mosaic, layers_sel, box):
     top_ci = mosaic.top.cell_index()
     for li in ly.layer_indexes():
         info = ly.get_info(li)
-        # the hierarchy-frontier layer is a draw-only navigation aid
+        # the hierarchy-frontier layers are draw-only navigation aids
         # (depth outlines and block labels) - never pickable
-        if (info.layer, info.datatype) in (tuple(mosaic.FRAME_LAYER),
-                                           tuple(mosaic.FRAME_GRAY)):
+        if (info.layer, info.datatype) in {tuple(k)
+                                           for k in mosaic._frame_keys}:
             continue
         if layers_sel is not None and \
                 (info.layer, info.datatype) not in layers_sel:
@@ -347,8 +347,7 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
         else:
             vis_r = list(job["visible"])
             if job.get("frames", True):
-                vis_r.append(mosaic.FRAME_LAYER)
-                vis_r.append(mosaic.FRAME_GRAY)
+                vis_r.extend(mosaic._frame_keys)
         renderer.render_png(tmp, x0, y0, x1, y1, job["w"], job["h"],
                             visible=vis_r, depth=None)
         draw_total[0] += time.perf_counter() - td
@@ -614,18 +613,25 @@ def _render_service(src, req, res, latest=None, options=None):
             stream_target_ms=options.get("stream_target_ms", 500),
             debug=options.get("debug", False))
         fcolors = dict(colors)
-        # Calibre tone split: boxes (and their names) above the px
-        # threshold draw white, smaller ones gray - the daemon
-        # authors the tone onto dt 0 / dt 1 of the frame layer.
-        # White rides ABOVE the design geometry (readable in dense
-        # fill), gray stays buried under it.
+        # Calibre size bands: the daemon authors each depth-boundary
+        # box on dt+band of the frame layer -
+        #   dt+0 white outline (ABOVE design, readable in dense fill)
+        #   dt+1 gray outline, dt+2 gray fill, dt+3 gray dotted
+        #     (all buried UNDER the design geometry).
         fcolors[mosaic.FRAME_LAYER] = "#ffffff"
         fcolors[mosaic.FRAME_GRAY] = "#808080"
+        fcolors[mosaic.FRAME_FILL] = "#808080"
+        fcolors[mosaic.FRAME_DOTS] = "#808080"
         renderer = Renderer(mosaic.ly, mosaic.top, fcolors,
                             hier_offset=0,
+                            # outline bands are hollow; the fill band
+                            # (FRAME_FILL) is solid, so it is omitted
                             hollow=(mosaic.FRAME_LAYER,
-                                    mosaic.FRAME_GRAY),
-                            above=(mosaic.FRAME_LAYER,))
+                                    mosaic.FRAME_GRAY,
+                                    mosaic.FRAME_DOTS),
+                            above=(mosaic.FRAME_LAYER,),
+                            dotted=(mosaic.FRAME_DOTS,),
+                            solid=(mosaic.FRAME_FILL,))
         lod = None
     except Exception as e:
         res.put({"kind": "error", "msg": f"render service init failed: {e}"})

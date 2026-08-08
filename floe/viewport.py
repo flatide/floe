@@ -78,23 +78,29 @@ class VfsMosaic:
         self._dbu = cache.meta["dbu"]
         self._layer_keys = [(l["layer"], l["datatype"])
                             for l in cache.meta["layers"]]
-        # hierarchy-frontier outline layer, drawn hollow: one past the
-        # highest DESIGN layer (same rule as the daemon's
-        # frame_layer()) so it can never collide with real content
-        # - (255,0) exists in real designs (review finding). The
-        # layer NUMBER is unused by the design, so dt 1 is free too:
-        # it carries the GRAY tone (boxes under 30x30 screen px,
-        # Calibre-style); dt 0 stays the white tone.
-        self.FRAME_LAYER = frame_layer(cache.meta)
-        self.FRAME_GRAY = (self.FRAME_LAYER[0],
-                           self.FRAME_LAYER[1] + 1)
+        # hierarchy-frontier outline layer: one past the highest
+        # DESIGN layer (same rule as the daemon's frame_layer()) so
+        # it can never collide with real content - (255,0) exists in
+        # real designs (review finding). The layer NUMBER is unused
+        # by the design, so dt 0..3 are all free - the daemon authors
+        # each depth-boundary box on dt+band by its screen min side:
+        #   dt+0 white outline, dt+1 gray outline, dt+2 gray fill,
+        #   dt+3 gray dotted (Calibre size bands).
+        self.FRAME_LAYER = frame_layer(cache.meta)      # band 0
+        fl0 = self.FRAME_LAYER[0]
+        fd0 = self.FRAME_LAYER[1]
+        self.FRAME_GRAY = (fl0, fd0 + 1)                # band 1
+        self.FRAME_FILL = (fl0, fd0 + 2)                # band 2
+        self.FRAME_DOTS = (fl0, fd0 + 3)                # band 3
+        self._frame_keys = (self.FRAME_LAYER, self.FRAME_GRAY,
+                            self.FRAME_FILL, self.FRAME_DOTS)
         self.ly = db.Layout(False)  # pages keep arrays compact
         self.ly.dbu = self._dbu
         # Keep the Layout index deterministic with the structural frontier
         # first. KLayout's LayoutView later re-sorts properties by source
         # number, so Renderer also pins this layer to the paint-stack bottom.
-        self.ly.layer(db.LayerInfo(*self.FRAME_LAYER))
-        self.ly.layer(db.LayerInfo(*self.FRAME_GRAY))
+        for key in self._frame_keys:
+            self.ly.layer(db.LayerInfo(*key))
         for (l, d) in self._layer_keys:
             self.ly.layer(db.LayerInfo(l, d))
         self.top = self.ly.create_cell("FLOE_WS")
@@ -246,8 +252,8 @@ class VfsMosaic:
         renderer.top and refreshes, and sends reset=1 next."""
         self.ly.clear()
         self.ly.dbu = self._dbu
-        self.ly.layer(db.LayerInfo(*self.FRAME_LAYER))
-        self.ly.layer(db.LayerInfo(*self.FRAME_GRAY))
+        for key in self._frame_keys:
+            self.ly.layer(db.LayerInfo(*key))
         for (l, d) in self._layer_keys:
             self.ly.layer(db.LayerInfo(l, d))
         self.top = self.ly.create_cell("FLOE_WS")
