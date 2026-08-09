@@ -41,10 +41,9 @@ BAND_IN = 0xFFFFFFFF       # forward drag: zoom in (plain white, user
 BAND_OUT = 0xFFFFFFFF      # call 2026-08-09; direction no longer
                            # color-coded - backward drag zooms out)
 RULER_CORE = 0xFFFFFFFF    # plain white solid ruler (same call)
-SNAP_VERTEX = 0x66FFCCFF
-SNAP_EDGE = 0x66CCFFFF
+SNAP_VERTEX = 0xFFFFFFFF   # plain white (user call 2026-08-09;
+SNAP_EDGE = 0xFFFFFFFF     # vertex/edge no longer color-coded)
 SEL_CORE = 0xFFFFFFFF
-GOTO_MARK = 0xFF66D9FF
 DRC_MARK = 0xFF5252FF      # DRC violation outline
 
 DRC_LIST_MAX = 2000        # tree rows per check (prev/next reaches all)
@@ -795,7 +794,6 @@ class Viewer:
         self._ddlg = None
         self._gdlg = None
         self._cdlg = None
-        self.goto_mark = None       # world point of the last goto (X marker)
         # DRC results browser ('e' key)
         self._drc = None            # drc.DrcDb
         self._drcwin = None
@@ -1085,7 +1083,6 @@ class Viewer:
         self.selection = None
         self._sel_text = ""
         self._pick_px = None
-        self.goto_mark = None
         # a loaded DRC db belongs to the previous layout
         self.drc_mark = None
         self._drc = None
@@ -1457,14 +1454,6 @@ class Viewer:
             rect_outline(disp, mx - 5, my - 5, mx + 5, my + 5, None, color)
             fill_rect(disp, mx - 9, my, 19, 1, color)
             fill_rect(disp, mx, my - 9, 1, 19, color)
-        if self.goto_mark is not None:
-            gx, gy = sx(self.goto_mark[0]), sy(self.goto_mark[1])
-            if -12 <= gx <= disp.get_width() + 12 and \
-                    -12 <= gy <= disp.get_height() + 12:
-                stamp_segment(disp, (gx - 10, gy - 10), (gx + 10, gy + 10),
-                              BLACK, GOTO_MARK)
-                stamp_segment(disp, (gx - 10, gy + 10), (gx + 10, gy - 10),
-                              BLACK, GOTO_MARK)
         if self.drc_mark is not None:
             pts = [(sx(x), sy(y)) for x, y in self.drc_mark["pts"]]
             if self.drc_mark["kind"] == "p":
@@ -2769,10 +2758,11 @@ class Viewer:
         dlg.destroy()  # ok / Enter applied successfully: close
 
     def goto(self, x_um, y_um, window_um=None):
-        """Center the view on (x, y) um with an X marker; window is the
-        resulting view width in um (None/0 = keep the current zoom)."""
-        self.goto_mark = (x_um / self.dbu, y_um / self.dbu)
-        self.cx, self.cy = self.goto_mark
+        """Center the view on (x, y) um; window is the resulting
+        view width in um (None/0 = keep the current zoom). The old X
+        marker is gone (user call 2026-08-09)."""
+        self.cx = x_um / self.dbu
+        self.cy = y_um / self.dbu
         if window_um and window_um > 0:
             w, _h = self._viewport_size()
             self.spp = (window_um / self.dbu) / w
@@ -2931,7 +2921,6 @@ class Viewer:
         w_um, h_um = b[2] - b[0], b[3] - b[1]
         cx, cy = e.center()
         self.goto(cx, cy, max(max(w_um, h_um) * 8.0, 2.0))
-        self.goto_mark = None  # the violation outline is the marker
         self.drc_mark = {"kind": e.kind,
                          "pts": [(x / self.dbu, y / self.dbu)
                                  for x, y in e.pts]}
@@ -3098,8 +3087,6 @@ class Viewer:
             self._clear_selection()
         elif self.drc_mark is not None:
             self.drc_mark = None
-        elif self.goto_mark is not None:
-            self.goto_mark = None
         self._display()
 
     def _cursor_snapped(self):
