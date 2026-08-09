@@ -1720,12 +1720,22 @@ class Viewer:
         scope = self._pending_scope
         bbox = self.view_bbox()
         w, h = self._viewport_size()
-        # render exactly the viewport. The old 50%-per-side overdraw
-        # margin was meant to serve small pans straight from the frame,
-        # but in practice any pan re-renders anyway - the margin only
-        # multiplied every frame's pixels (4x) and the tiles/content
-        # drawn (user call, 2026-07-31)
-        eb = bbox
+        # Render the viewport snapped to the SPECKLE PERIOD. The 2x2
+        # checkerboard fill is anchored to the frame's device grid, so
+        # two renders whose origins differ by an ODD pixel count show
+        # inverted fill patterns - panning visibly "reshuffled" the
+        # image (field report 2026-08-09; measured 5.3% of pixels).
+        # Landing x0/left and y1/top on even-pixel boundaries of the
+        # layout-anchored grid makes the phase a pure function of the
+        # layout, so re-renders match across any pan (Calibre
+        # behavior). The frame grows by <= 2 px per axis to keep
+        # covering the exact viewport. (The old 50%-per-side overdraw
+        # margin stays retired - user call, 2026-07-31.)
+        spp2 = 2.0 * self.spp
+        rx0 = math.floor(bbox[0] / spp2) * spp2
+        ry1 = math.ceil(bbox[3] / spp2) * spp2
+        w, h = int(w) + 2, int(h) + 2
+        eb = (rx0, ry1 - h * self.spp, rx0 + w * self.spp, ry1)
         depth = self._depth()
         self.gen += 1
         self._job_keys[self.gen] = self._render_key(scope)
