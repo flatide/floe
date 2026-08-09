@@ -1045,7 +1045,7 @@ class Viewer:
         self._alloc_size = None
         self.scroller.connect("size-allocate", self._on_allocate)
         self.scroller.connect("realize",
-                              lambda w: self._set_cursor("crosshair"))
+                              lambda w: self._set_cursor(self._idle_cursor()))
 
         if server_sock is not None:
             GLib.io_add_watch(server_sock.fileno(), GLib.IO_IN,
@@ -1791,7 +1791,8 @@ class Viewer:
             GLib.source_remove(self._pending_timer)
             self._pending_timer = None
         self.rstatus.set_text("")
-        self._set_cursor("move" if self._drag is not None else "crosshair")
+        self._set_cursor("move" if self._drag is not None
+                         else self._idle_cursor())
 
     def _poll(self):
         if self._quitting:
@@ -2055,6 +2056,11 @@ class Viewer:
         else:
             self.redraw()
 
+    def _idle_cursor(self):
+        # plain arrow at rest; the crosshair belongs to the ruler
+        # tool (user call 2026-08-09)
+        return "crosshair" if self.mode == "ruler" else "default"
+
     def _set_cursor(self, name):
         win = self.scroller.get_window()  # flateyes' set_viewport_cursor
         if win is not None:
@@ -2081,7 +2087,7 @@ class Viewer:
         self._zoomdrag = None
         self._band_cur = None
         self._band_ext = None
-        self._set_cursor("crosshair")
+        self._set_cursor(self._idle_cursor())
         if band:
             self._display()  # erase the rubber band
 
@@ -2134,7 +2140,7 @@ class Viewer:
             self._drag_origin = None
             self._drag_moved = False
             self._drag_btn = None
-            self._set_cursor("crosshair")
+            self._set_cursor(self._idle_cursor())
             if panned:
                 self.redraw()   # pan ended: render the final position
             elif was_drag and ev.button == 1:
@@ -2996,6 +3002,7 @@ class Viewer:
                     "ruler: click two points (Shift=free angle, "
                     "m=snap %s, Esc=done)"
                     % ("on" if self.snap_on else "off"))
+        self._set_cursor(self._idle_cursor())
         self._display()
 
     def _measure_selection(self):
@@ -3081,6 +3088,7 @@ class Viewer:
         elif self.mode == "ruler":
             self.mode = "normal"
             self._snap_res = None
+            self._set_cursor(self._idle_cursor())
         elif self.rulers:
             self.rulers = []
         elif self.selection is not None:
