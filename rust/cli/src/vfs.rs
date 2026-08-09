@@ -2761,92 +2761,145 @@ fn build(
         })
     };
     eprintln!(
-        "[vfs] build: bounded pipeline {} cells ({} workers, \
-         plan batch {}, encode batch {}, page target {} MiB)...",
+        "[vfs] build: streaming pipeline {} cells ({} workers, \
+         plan window {}, encode batch {}, page target {} MiB)...",
         n,
         jobs.max(1),
         plan_batch,
         encode_batch.max(1),
         page_target_bytes / MIB
     );
-    let mut plan_elapsed = std::time::Duration::ZERO;
-    let mut append_elapsed = std::time::Duration::ZERO;
+    // ---- streaming pipeline (rev 44): a persistent worker pool
+    // plans cells inside a bounded in-flight window while THIS
+    // thread commits them in cell order and encodes chunk by chunk.
+    // The old per-batch scope joined every worker at each batch
+    // boundary, so one monster cell (fill farms: millions of rep
+    // fragments in ONE build_cell_plan call) idled the other
+    // workers at the barrier - 150M field case: plan 155.5s while
+    // append/encode sat at 2s. The committer is strictly ordered,
+    // so output bytes are identical at every worker count and
+    // window size.
+    let mut commit_elapsed = std::time::Duration::ZERO;
     let mut encode_elapsed = std::time::Duration::ZERO;
-    // plan-batch governor: batch size changes only RSS and speed,
-    // never output bytes (metadata is appended in cell order), so
-    // it is safe to adapt between batches. Halve while MemAvailable
-    // is short, floor at `jobs` - fewer would starve the plan
-    // threads, the very defect the new default removes. No signal
-    // (macOS) = no governor. The reduction is sticky: recovering
-    // memory mid-build usually just means the last big batch was
-    // freed, not that the next one fits.
-    let mut cur_batch = plan_batch;
-    let mut cell_base = 0usize;
-    while cell_base < n {
-        if let Some(avail) = crate::mem_available_gb() {
-            if avail < GOVERNOR_MIN_AVAIL_GB {
-                let next = (cur_batch / 2).max(jobs.max(1));
-                if next < cur_batch {
-                    eprintln!(
-                        "[vfs] build: plan-batch governor {} -> {} \
-                         (MemAvailable {:.1} GB)",
-                        cur_batch, next, avail
+    let t_pipeline = std::time::Instant::now();
+    // window = max in-flight plans past the commit point (the RSS
+    // knob the plan batch used to be); the governor halves it under
+    // memory pressure, floor `jobs` (fewer starves the pool)
+    let ring_cap = plan_batch.max(jobs.max(1));
+    let window = std::sync::atomic::AtomicUsize::new(ring_cap);
+    let next_cell = std::sync::atomic::AtomicUsize::new(0);
+    let commit_base = std::sync::atomic::AtomicUsize::new(0);
+    let ring: Vec<std::sync::Mutex<Option<CellPlan>>> =
+        (0..ring_cap).map(|_| std::sync::Mutex::new(None)).collect();
+    std::thread::scope(|s| {
+        for _ in 0..jobs.max(1).min(n.max(1)) {
+            let ring = &ring;
+            let window = &window;
+            let next_cell = &next_cell;
+            let commit_base = &commit_base;
+            let rbb = &rbb;
+            let lidx = &lidx;
+            s.spawn(move || loop {
+                let ci = next_cell.fetch_add(
+                    1,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                if ci >= n {
+                    return;
+                }
+                // bounded admission: never plan more than `window`
+                // cells past the committed watermark (RSS bound)
+                while ci
+                    >= commit_base
+                        .load(std::sync::atomic::Ordering::Acquire)
+                        + window
+                            .load(
+                                std::sync::atomic::Ordering::Relaxed,
+                            )
+                            .min(ring_cap)
+                {
+                    std::thread::sleep(
+                        std::time::Duration::from_millis(1),
                     );
-                    cur_batch = next;
+                }
+                let t = std::time::Instant::now();
+                let plan = build_cell_plan(
+                    doc,
+                    ci,
+                    rbb,
+                    lidx,
+                    nl,
+                    page_target_bytes,
+                );
+                let secs = t.elapsed().as_secs_f64();
+                if secs >= 5.0 {
+                    // straggler instrumentation: name the monster
+                    // cells so intra-cell parallelization (phase 2)
+                    // knows its targets
+                    eprintln!(
+                        "[vfs] build: slow cell {} (ci {}): plan \
+                         {:.1}s (places {}, pages {}, fragments {})",
+                        doc.cells[ci].name,
+                        ci,
+                        secs,
+                        doc.cells[ci].places.len(),
+                        plan.pages.len(),
+                        plan.split_stats.fragments
+                    );
+                }
+                *ring[ci % ring_cap].lock().unwrap() = Some(plan);
+            });
+        }
+
+        // ---- ordered committer (this thread): sink commit + texts
+        // + cell records, then encode a chunk and drop its arenas
+        let mut batch_jobs: Vec<PageJob> = Vec::new();
+        let mut batch_arenas: Vec<std::sync::Arc<Arena>> = Vec::new();
+        let mut chunk_base = 0usize;
+        for ci in 0..n {
+            if ci % 64 == 0 {
+                if let Some(avail) = crate::mem_available_gb() {
+                    if avail < GOVERNOR_MIN_AVAIL_GB {
+                        let cur = window.load(
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                        let nextw = (cur / 2).max(jobs.max(1));
+                        if nextw < cur {
+                            eprintln!(
+                                "[vfs] build: window governor {} \
+                                 -> {} (MemAvailable {:.1} GB)",
+                                cur, nextw, avail
+                            );
+                            window.store(
+                                nextw,
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
+                        }
+                    }
                 }
             }
-        }
-        let cell_end = (cell_base + cur_batch).min(n);
-        let batch_len = cell_end - cell_base;
-        let tp = std::time::Instant::now();
-        let pslots: Vec<std::sync::OnceLock<CellPlan>> =
-            (0..batch_len).map(|_| std::sync::OnceLock::new()).collect();
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        std::thread::scope(|s| {
-            let nthreads = jobs.max(1).min(batch_len);
-            for _ in 0..nthreads {
-                let pslots = &pslots;
-                let next = &next;
-                let rbb = &rbb;
-                let lidx = &lidx;
-                s.spawn(move || loop {
-                    let local = next.fetch_add(
-                        1,
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
-                    if local >= batch_len {
-                        return;
-                    }
-                    let ci = cell_base + local;
-                    let plan = build_cell_plan(
-                        doc,
-                        ci,
-                        rbb,
-                        lidx,
-                        nl,
-                        page_target_bytes,
-                    );
-                    let _ = pslots[local].set(plan);
-                });
-            }
-        });
-        plan_elapsed += tp.elapsed();
-        let ta = std::time::Instant::now();
-
-        // Append metadata in cell order and retain only this batch's page jobs
-        // and fragment arenas for the immediately following encode pass.
-        let mut batch_jobs: Vec<PageJob> = Vec::new();
-        let mut batch_arenas: Vec<std::sync::Arc<Arena>> =
-            Vec::with_capacity(batch_len);
-        for (local, slot) in pslots.into_iter().enumerate() {
-            let ci = cell_base + local;
+            let plan = loop {
+                if let Some(pl) =
+                    ring[ci % ring_cap].lock().unwrap().take()
+                {
+                    break pl;
+                }
+                std::thread::sleep(
+                    std::time::Duration::from_micros(200),
+                );
+            };
+            commit_base.store(
+                ci + 1,
+                std::sync::atomic::Ordering::Release,
+            );
+            let ta = std::time::Instant::now();
             let CellPlan {
                 sink,
                 mut pages,
                 arena,
                 split_stats,
                 ..
-            } = slot.into_inner().expect("cell plan unset");
+            } = plan;
             batch_arenas.push(arena);
             split_total.fragments = split_total
                 .fragments
@@ -2938,42 +2991,52 @@ fn build(
                 tr_count,
                 mask_t,
             );
+            commit_elapsed += ta.elapsed();
+            planned_cells.store(
+                ci + 1,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            planned_pages.store(
+                pages_total,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            let flush = ci + 1
+                >= chunk_base
+                    + window
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                        .min(ring_cap)
+                || ci + 1 == n;
+            if flush {
+                let te = std::time::Instant::now();
+                encode_write_pages(
+                    doc,
+                    &batch_jobs,
+                    &batch_arenas,
+                    chunk_base,
+                    encode_workers,
+                    encode_batch,
+                    &mut b,
+                    &mut ovp,
+                    &mut ovp_off,
+                    &mut pages_bytes,
+                    &encoded_pages,
+                );
+                encode_elapsed += te.elapsed();
+                batch_jobs.clear();
+                batch_arenas.clear();
+                chunk_base = ci + 1;
+                // this chunk's arenas and PtsPrepared drop here
+            }
         }
-        planned_cells.store(
-            cell_end,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        planned_pages.store(
-            pages_total,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        append_elapsed += ta.elapsed();
-        let te = std::time::Instant::now();
-        encode_write_pages(
-            doc,
-            &batch_jobs,
-            &batch_arenas,
-            cell_base,
-            encode_workers,
-            encode_batch,
-            &mut b,
-            &mut ovp,
-            &mut ovp_off,
-            &mut pages_bytes,
-            &encoded_pages,
-        );
-        encode_elapsed += te.elapsed();
-        debug_assert_eq!(b.n_pages() as usize, pages_total);
-        cell_base = cell_end;
-        // batch_jobs, batch_arenas and every PtsPrepared drop here.
-    }
+    });
+    debug_assert_eq!(b.n_pages() as usize, pages_total);
     pipeline_on.store(false, std::sync::atomic::Ordering::Relaxed);
     heartbeat.join().expect("pipeline heartbeat");
     eprintln!(
-        "[vfs] build: pipeline complete (plan {:.1}s, append {:.1}s, \
+        "[vfs] build: pipeline complete (wall {:.1}s, commit {:.1}s, \
          encode {:.1}s, rss {})",
-        plan_elapsed.as_secs_f64(),
-        append_elapsed.as_secs_f64(),
+        t_pipeline.elapsed().as_secs_f64(),
+        commit_elapsed.as_secs_f64(),
         encode_elapsed.as_secs_f64(),
         rss()
     );

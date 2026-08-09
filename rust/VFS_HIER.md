@@ -2028,3 +2028,26 @@ rev 43 (인스턴스 BVH 크기 주석, ovm v7 — 2026-08-09, 0.11.22):
 - 부수정정: 상태줄 phase 이중계상 수정 — 데몬 plan_ms는 라벨
   walk를 이미 포함하므로 phase_plan에 text_plan_ms를 재합산하지
   않음(150M 보고의 load<plan 모순 원인).
+
+빌드 병렬화 3차 (스트리밍 파이프라인 + 스트래글러 계측 — 2026-08-09,
+0.11.23):
+
+- 150M 실측(#58 이후): plan 155.5s vs append 2.0s·encode 1.9s —
+  직렬 커밋은 해소됐고, 남은 정체는 배치(192셀) scope-join 배리어
+  에서 몬스터 셀(수백만 rep 프래그먼트를 한 build_cell_plan이
+  단독 처리) 하나가 나머지 워커 전부를 대기시키는 것. rep-split
+  959만 프래그먼트, 특정 셀 인덱스(32640 등)에서 재현 정체.
+- 구현: 배치 배리어 제거 — 지속 워커 풀이 유계 윈도(구 plan_batch,
+  거버너가 메모리 부족 시 반감, 바닥 jobs) 안에서 전 셀을 연속
+  플래닝하고, 메인 스레드가 셀 순서 커미터(sink 커밋+텍스트+cell
+  레코드)로 소비, 윈도 단위로 인코드+아레나 해제. 커미터가 엄격
+  순서라 산출 바이트는 워커 수·윈도 크기와 무관하게 동일(배치
+  파이프라인 v7 산출물과 4/4 해시 일치 검증).
+- 스트래글러 계측: plan 5초 초과 셀을
+  "[vfs] build: slow cell NAME (ci N): plan Xs (places/pages/
+  fragments)"로 로그 — phase 2(몬스터 셀 내부 병렬화)의 표적 목록.
+- 로그 형식 변경: pipeline complete (wall/commit/encode), 시작
+  라인 "streaming pipeline ... plan window N".
+- 기대: 몬스터 셀이 분산돼 있으면 155s가 크게 붕괴; slow-cell
+  로그에 수십 초짜리 단일 셀이 남으면 phase 2로 (cell,layer) 런
+  분할 병렬 + Morton 정렬 병렬화.
