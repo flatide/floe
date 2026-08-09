@@ -26,7 +26,16 @@ Populated cases (all at the depth-0 boundary):
   6. dense column 1000x THINROW @3um Y, x=4050um      - stride 3,
      offsets {0,2} keep 667/1000 (demoted: 334)
   7. FAT 40x40um @(4200,3100)um - normal frame until cut > 40um
-  8. a context plate on L20 (design geometry under the frames)
+  8. a context plate on L20 (design geometry under the frames;
+     GEOMETRY takes the rev 41 hairline cull, so its 20um min side
+     vanishes once hair = 0.5 x cut exceeds 20um - NOT a lattice
+     candidate, frames only for now)
+  9. geometry row on L30: 100 vertical 2x100um boxes @3um pitch
+     (1um gap) - vanishes WHOLESALE once hair > 2um (view wider
+     than ~4x the die is not needed: at detail medium that is
+     px_per_um < 0.75). The Calibre-divergent case kept here on
+     purpose: geometry lattice alignment is pending the user's
+     Calibre geometry observation.
 
 Reference runs (after `floe-index vfs data/thintest.oas`),
 measured on 0.11.25 + rev 45:
@@ -71,6 +80,7 @@ def main():
 
     l10 = ly.layer(db.LayerInfo(10, 0))
     l20 = ly.layer(db.LayerInfo(20, 0))
+    l30 = ly.layer(db.LayerInfo(30, 0))
 
     thin = ly.create_cell("THINROW")  # horizontal 30x2um bar
     thin.shapes(l10).insert(db.Box(0, 0, 30 * U, 2 * U))
@@ -120,11 +130,22 @@ def main():
     # 8. context plate under everything
     top.shapes(l20).insert(
         db.Box(0, -30 * U, 4300 * U, -10 * U))
+    # 9. GEOMETRY row (L30): 100 vertical 2x100um boxes at 3um
+    #    pitch (1um gap). These are shapes, NOT frames: they follow
+    #    the rev 41 hairline cull and vanish WHOLESALE once
+    #    hair (0.5 x cut) exceeds 2um - the still-open Calibre
+    #    divergence for geometry (Calibre keeps ~7um lattice
+    #    representatives here too). The frame rows above are the
+    #    aligned counterpart to compare against.
+    for i in range(100):
+        x = i * 3 * U
+        top.shapes(l30).insert(
+            db.Box(x, 300 * U, x + 2 * U, 400 * U))
 
     opts = db.SaveLayoutOptions()
     opts.format = "OASIS"
     ly.write(out, opts)
-    print("wrote %s: %d cells, depth 1, 2 layers" % (out, ly.cells()))
+    print("wrote %s: %d cells, depth 1, 3 layers" % (out, ly.cells()))
 
 
 if __name__ == "__main__":
