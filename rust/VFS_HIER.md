@@ -2106,3 +2106,18 @@ rev 45 (프레임 헤어라인 → 7µm 격자 솎음, Calibre 정렬 — 2026-0
   cut0·격자off 폴백·양변 소멸), thin_singles_and_pts_dedupe_per_bin
   (빈 결정성·자식별 슬롯·Pts 리베이스); 스위트 전체 green, 포맷
   불변(재인덱싱 불필요).
+
+--no-lod 빌드 노브 (#61 — 2026-08-09, 0.11.26):
+
+- `floe-index vfs ... --no-lod`: LOD 변종 생성을 통째로 생략
+  (후보 목록을 비움 — 모든 페이지 lod_page = NONE, 플래너 밀도
+  게이트는 자연 미발화, 포맷·경로 불변). 빌드 로그에 "lod off"
+  표기.
+- 근거: rev 41/43/45 사다리가 LOD의 동작 구간을 흡수해 뷰어
+  on/off 체감차가 소멸(사용자 실측), 반면 생성 비용은 몬스터 셀
+  plan의 절반급(150M 실측)이고 ovm도 커짐.
+- 검증: --jobs 1/8 sha 동일(결정성), valmini 15页(4 lod) →
+  --no-lod 11页(0 lod) 양쪽 validate_vfs green, 스위트 전체
+  green(기본 경로 불변).
+- 기본값은 여전히 LOD ON — 사무실 실측(#48/#57 재측정)에서
+  no-lod 캐시로 A/B 후 기본 전환 여부 결정.

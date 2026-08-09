@@ -66,6 +66,11 @@ pub fn vfs_cmd(args: &[String]) {
     // include, --coverage-only to add design.ovc to an existing cache
     let mut coverage = false;
     let mut coverage_only = false;
+    // #61: LOD variants are optional. They only serve the planner's
+    // density gate, whose operating window the rev 41/43/45 ladder
+    // largely absorbed - and their generation dominates monster-cell
+    // build time (150M field: lod was ~half of a 164s cell plan).
+    let mut lod = true;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -105,6 +110,10 @@ pub fn vfs_cmd(args: &[String]) {
             }
             "--coverage-only" => {
                 coverage_only = true;
+                i += 1;
+            }
+            "--no-lod" => {
+                lod = false;
                 i += 1;
             }
             "--kill-at" => {
@@ -270,6 +279,7 @@ pub fn vfs_cmd(args: &[String]) {
             encode_batch,
             plan_batch,
             page_target_bytes,
+            lod,
         );
         if kill_at.as_deref() == Some("ovp-written") {
             eprintln!("[vfs] --kill-at ovp-written");
@@ -1896,6 +1906,7 @@ fn build_cell_plan(
     lidx: &std::collections::HashMap<(u32, u32), usize>,
     nl: usize,
     page_target_bytes: u64,
+    lod: bool,
 ) -> CellPlan {
     let cell = &doc.cells[ci];
     let mut phase_s = [0f32; 6];
@@ -2091,9 +2102,16 @@ fn build_cell_plan(
     // the exact->LOD link is rebased to global indices by the
     // append loop
     let n_exact = pages.len();
-    let cand: Vec<usize> = (0..n_exact)
-        .filter(|&k| pages[k].members >= LOD_MIN_MEMBERS)
-        .collect();
+    // --no-lod (#61): an empty candidate list skips generation
+    // entirely - every page keeps LOD_PAGE_NONE and the planner's
+    // density gate simply never fires
+    let cand: Vec<usize> = if lod {
+        (0..n_exact)
+            .filter(|&k| pages[k].members >= LOD_MIN_MEMBERS)
+            .collect()
+    } else {
+        Vec::new()
+    };
     // #60 monster cells: LOD variants are per-page independent, and
     // a fill cell can own thousands of dense pages (150M field: one
     // ESD dummy = 8821 pages; bench: lod was half the 164s plan).
@@ -2533,6 +2551,7 @@ fn build(
     encode_batch: usize,
     plan_batch: usize,
     page_target_bytes: u64,
+    lod: bool,
 ) -> (
     Vec<u8>,
     Vec<Option<(i64, i64, i64, i64)>>,
@@ -2844,12 +2863,13 @@ fn build(
     };
     eprintln!(
         "[vfs] build: streaming pipeline {} cells ({} workers, \
-         plan window {}, encode batch {}, page target {} MiB)...",
+         plan window {}, encode batch {}, page target {} MiB{})...",
         n,
         jobs.max(1),
         plan_batch,
         encode_batch.max(1),
-        page_target_bytes / MIB
+        page_target_bytes / MIB,
+        if lod { "" } else { ", lod off" }
     );
     // ---- streaming pipeline (rev 44): a persistent worker pool
     // plans cells inside a bounded in-flight window while THIS
@@ -2912,6 +2932,7 @@ fn build(
                     lidx,
                     nl,
                     page_target_bytes,
+                    lod,
                 );
                 let secs = t.elapsed().as_secs_f64();
                 if secs >= 5.0 {
@@ -4226,7 +4247,7 @@ mod split_tests {
                 .enumerate()
                 .map(|(i, &k)| (k, i))
                 .collect();
-        build_cell_plan(doc, 0, &rbb, &lidx, 1, MIB)
+        build_cell_plan(doc, 0, &rbb, &lidx, 1, MIB, true)
     }
 
     /// expand every member of a cell's records into
