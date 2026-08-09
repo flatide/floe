@@ -3608,6 +3608,13 @@ pub fn plan_cmd(args: &[String]) {
         {
             popts.hairline = val.parse().expect("hairline-f");
         }
+        // --thin-um F: rev 45 thin-frame lattice pitch in um (0
+        // restores the rev 41 hairline cull for frames)
+        if let Some((_, val)) =
+            rest.iter().find(|(k, _)| k == "--thin-um")
+        {
+            popts.thin_lattice_um = val.parse().expect("thin-um");
+        }
         let plan = floe_vfs::hier::plan_hier(&v.ovm, &req, &popts);
         let ms = t0.elapsed().as_secs_f64() * 1e3;
         let (mut cbytes, mut ubytes) = (0u64, 0u64);
@@ -3644,6 +3651,7 @@ pub fn plan_cmd(args: &[String]) {
              \"kbox_merges\": {},\n  \"lod_pages\": {},\n  \
              \"washed_pages\": {},\n  \
              \"culled_bvh_size\": {},\n  \
+             \"thin_frames\": {},\n  \
              \"plan_ms\": {:.2}\n}}",
             plan.pages.len(),
             cbytes,
@@ -3674,6 +3682,7 @@ pub fn plan_cmd(args: &[String]) {
             st.lod_swapped,
             st.washed_pages,
             st.culled_bvh_size,
+            st.thin_frames,
             ms
         );
         if rest.iter().any(|(k, _)| k == "--inspect") {
@@ -3688,7 +3697,7 @@ pub fn plan_cmd(args: &[String]) {
 
 /// stdio daemon for the viewer render service. Line protocol:
 ///   gen=1 view=x0,y0,x1,y1 px=5 cut=2 depth=full lod=1 frames=1 \
-///     labels=1 [hair=0.5] \
+///     labels=1 [hair=0.5] [thin=7.0] \
 ///     layers=all|none|11/0,12/0 out=/tmp/dir
 /// response:
 ///   gen=1 pages=N new=N evict=name,.. delta=path placements=path \
@@ -3789,6 +3798,7 @@ fn serve_one(d: &mut Daemon, line: &str) -> Result<String, String> {
     let mut frames = true;
     let mut labels = true;
     let mut hair = 0.5f64;
+    let mut thin = 7.0f64;
     for tok in line.split_whitespace() {
         let (k, val) = tok
             .split_once('=')
@@ -3860,6 +3870,9 @@ fn serve_one(d: &mut Daemon, line: &str) -> Result<String, String> {
             // rev 41 hairline factor (min-side cut = hair * cut);
             // optional, default 0.5, 0 disables
             "hair" => hair = val.parse().map_err(|_| "hair")?,
+            // rev 45 thin-frame lattice pitch in um; optional,
+            // default 7.0, 0 restores the rev 41 frame cull
+            "thin" => thin = val.parse().map_err(|_| "thin")?,
             _ => return Err(format!("unknown key {}", k)),
         }
     }
@@ -3883,7 +3896,7 @@ fn serve_one(d: &mut Daemon, line: &str) -> Result<String, String> {
     }
     let label_px = if nolabels || !labels { 0.0 } else { label_px };
     serve_hier(d, &req, gen, ack, reset, probe, stream_kb,
-               label_px, frames, lod, hair, &out)
+               label_px, frames, lod, hair, thin, &out)
 }
 
 /// hier-mode request (VFS_HIER.md par.3.5/3.7): resolve the ack (or
@@ -3903,6 +3916,7 @@ fn serve_hier(
     frames: bool,
     lod: bool,
     hair: f64,
+    thin: f64,
     out: &str,
 ) -> Result<String, String> {
     let v = d.v;
@@ -3916,6 +3930,7 @@ fn serve_hier(
     }
     let mut opts = floe_vfs::hier::HierOpts::default();
     opts.hairline = hair;
+    opts.thin_lattice_um = thin;
     if !frames {
         opts.frame_cap = 0;
     }
@@ -3925,9 +3940,10 @@ fn serve_hier(
         opts.wash_px = 0.0;
     }
     if probe {
-        // probes measure/pick: never hairline-cut what a click
-        // may target
+        // probes measure/pick: never hairline-cut (or lattice-thin)
+        // what a click may target
         opts.hairline = 0.0;
+        opts.thin_lattice_um = 0.0;
     }
     let plan = floe_vfs::hier::plan_hier(&v.ovm, req, &opts);
     let upd = if probe {

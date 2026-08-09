@@ -2071,3 +2071,38 @@ rev 43 (인스턴스 BVH 크기 주석, ovm v7 — 2026-08-09, 0.11.22):
   재설계 필요(Amdahl: 상위 레벨 분할이 직렬로 남으면 ~2배 한계,
   파티션 자체 병렬화까지 가면 그 이상). 사무실 재측정에서 ESD
   셀의 split 몫이 지배로 확인되면 착수.
+
+rev 45 (프레임 헤어라인 → 7µm 격자 솎음, Calibre 정렬 — 2026-08-09,
+0.11.25):
+
+- Calibre 실측(사무실): min변이 cut 미만이 된 프레임 박스는
+  사라지지 않고 ~7µm 간격의 레이아웃 고정 대표만 남으며(줌아웃
+  해도 동일 대표 유지), 한 구간에 상한·하한 2개 → 1개 → 양변
+  cut 미만에서 소멸의 사다리. 렌더 형태(회색 채움/4점/1점)는
+  rev 42 밴드가 이미 커버.
+- 규칙(프레임 전용): 경계 박스 min변 < cut ≤ max변이면 컬 대신
+  셀-로컬 좌표에 앵커된 thin_lattice_um(기본 7.0µm) 2D 격자의
+  대표만 유지. 양변 < cut 소멸은 불변. r>0 폴드·지오메트리
+  페이지(v6 max_min)·텍스트의 rev 41 헤어라인 컬은 그대로
+  (Calibre 지오메트리 동작은 미관찰 — 관찰 후 별도 정렬).
+- 대표 선택: Grid rep은 닫힌형 — 축별 stride k=ceil(격자/피치)
+  서브그리드, 구간 경계 오프셋 {0, k-1}(1열=빈당 2개, 2D=모서리
+  4개). 화면상 격자 1피치 < thin_demote_px(기본 14px)면 오프셋
+  {0}만(2→1 강등). 피치 ≥ 격자인 배열은 그대로 유지(이미 성김).
+  One/Pts는 (자식셀, 빈)당 첫 레코드 승리(배치 순서 결정적),
+  Pts 부분집합은 첫 유지 멤버로 리베이스((0,0)-first 유지).
+  huge-pts 카운트 가드(풋프린트 1박스)는 불변.
+- rev 43 노드 프루닝과의 조정: r==0 경계 워크에서만 max_min<hair
+  항을 해제(thin 서브트리를 방문해야 샘플 가능), 양변 프루닝
+  (max_dim<cut, 먼지 킬러)은 유지. r>0/REM_FULL 워크는 종전대로
+  — 사무실 fit-뷰 수십 ms 회귀 여부는 실측 재확인 대상
+  (thin_frames/culled_bvh_size 통계로 판별, FLOE_THIN_UM=0이
+  rev 41+43 완전 복원 노브).
+- 노브: HierOpts.thin_lattice_um/thin_demote_px, plan --thin-um,
+  vfsd thin=(기본 7.0, 0=rev 41 컬), 뷰어 FLOE_THIN_UM. 프로브는
+  hair와 함께 thin도 0 강제(측정 경로 정확성).
+- 통계: thin_frames(격자 경로 진입 레코드 수) — plan JSON에 추가.
+- 게이트: thin_frames_sample_on_lattice(닫힌형 수치·모서리·강등·
+  cut0·격자off 폴백·양변 소멸), thin_singles_and_pts_dedupe_per_bin
+  (빈 결정성·자식별 슬롯·Pts 리베이스); 스위트 전체 green, 포맷
+  불변(재인덱싱 불필요).

@@ -91,6 +91,13 @@ class VfsClient:
         hair = os.environ.get("FLOE_HAIRLINE")
         if hair:
             line += f" hair={float(hair):g}"
+        # rev 45 thin-frame lattice pitch (um): boundary boxes with
+        # min side under the cut keep lattice representatives
+        # instead of vanishing. Unset keeps the daemon default
+        # (7.0), 0 restores the rev 41 frame cull.
+        thin = os.environ.get("FLOE_THIN_UM")
+        if thin:
+            line += f" thin={float(thin):g}"
         if probe:
             line += " mode=probe"
         else:

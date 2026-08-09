@@ -95,7 +95,24 @@ pub struct HierOpts {
     /// builds walls. Pages use the v6 max_min field ("every record
     /// is thin"), folds/frames/names use the box min side.
     /// 0.0 disables; cut 0 disables naturally.
+    /// Rev 45: FRAMES no longer take this cull when thin_lattice_um
+    /// is on - boundary boxes follow the Calibre lattice ladder
+    /// below instead.
     pub hairline: f64,
+    /// rev 45 (Calibre alignment, frames only): a boundary box whose
+    /// MIN side is under the cut no longer vanishes - deterministic
+    /// representatives on a layout-fixed lattice of this pitch (um)
+    /// survive, banded like any frame (gray fill / dotted), until
+    /// BOTH sides are under the cut. The lattice is anchored to the
+    /// owning cell's coordinates, so the surviving set is identical
+    /// at every zoom (observed Calibre behavior). 0.0 restores the
+    /// rev 41 hairline cull for frames.
+    pub thin_lattice_um: f64,
+    /// screen px of one lattice pitch below which the per-bin
+    /// representative set demotes from the interval bounds (2 in a
+    /// row, 4 corners in a 2D array) to a single one - the observed
+    /// Calibre 2 -> 1 -> 0 ladder. px_per_dbu == 0 never demotes.
+    pub thin_demote_px: f64,
 }
 
 impl Default for HierOpts {
@@ -108,7 +125,9 @@ impl Default for HierOpts {
             lod_k: 4.0,
             wash_px: 2.0,
             hairline: 0.5,
-                }
+            thin_lattice_um: 7.0,
+            thin_demote_px: 14.0,
+        }
     }
 }
 
@@ -176,6 +195,9 @@ pub struct HierStats {
     /// (every placement under them would have been size/hairline
     /// culled - rev 43)
     pub culled_bvh_size: u64,
+    /// boundary records that entered the rev 45 thin-frame lattice
+    /// path (min side under the cut, lattice representatives kept)
+    pub thin_frames: u64,
 }
 
 #[derive(Debug, PartialEq)]
@@ -430,6 +452,15 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
         lod_k: opts.lod_k,
         wash_px: opts.wash_px,
         hair: (req.cut_dbu.max(0) as f64 * opts.hairline) as u64,
+        thin_dbu: if opts.thin_lattice_um > 0.0 {
+            (opts.thin_lattice_um * v.unit).max(1.0) as u64
+        } else {
+            0
+        },
+        thin_demote: req.px_per_dbu > 0.0
+            && opts.thin_lattice_um * v.unit * req.px_per_dbu
+                < opts.thin_demote_px,
+        thin_bins: HashSet::new(),
         frames_total: 0,
     };
     let top_ci = v.top;
@@ -511,6 +542,16 @@ struct Hier<'a> {
     wash_px: f64,
     /// hairline threshold in dbu (hairline * cut_dbu)
     hair: u64,
+    /// rev 45 thin-frame lattice pitch in dbu (0 = lattice off,
+    /// frames fall back to the rev 41 hairline cull)
+    thin_dbu: u64,
+    /// one lattice pitch is under thin_demote_px on screen: keep a
+    /// single representative per bin instead of the interval bounds
+    thin_demote: bool,
+    /// (child ci, bin x, bin y) bins already owning a representative
+    /// - One/Pts thin frames dedupe here; cleared per expand (bins
+    /// are WC-local coordinates)
+    thin_bins: HashSet<(u32, i64, i64)>,
 }
 
 impl<'a> Hier<'a> {
@@ -681,6 +722,17 @@ impl<'a> Hier<'a> {
             // only ABOVE-cut edges (few, bounded by real content)
             // are gathered for the multi-box contribution pass.
             let cut = self.cut;
+            // rev 45: at the r==0 boundary with the thin lattice on,
+            // hairline-thin subtrees must still be WALKED - their
+            // boxes are no longer culled but sampled. The both-dims
+            // prune (max_dim, the fit-view dust killer) stays; only
+            // the max_min term is depth-gated.
+            let hair_prune = if r == 0 && self.thin_dbu > 0 {
+                0
+            } else {
+                self.hair
+            };
+            self.thin_bins.clear();
             let mut edges: BTreeSet<u64> = BTreeSet::new();
             let mut framed: HashSet<u64> = HashSet::new();
             for b in &boxes {
@@ -695,7 +747,7 @@ impl<'a> Hier<'a> {
                     // boxes the cut was always going to drop (150M
                     // field case: 4.5s plan for 1023 boxes)
                     if (node.max_dim as u64) < cut
-                        || (node.max_min as u64) < self.hair
+                        || (node.max_min as u64) < hair_prune
                     {
                         self.st.culled_bvh_size += 1;
                         continue;
@@ -879,10 +931,14 @@ impl<'a> Hier<'a> {
     /// fuse and the pts density fuse are gone - a step function of the
     /// screen scale made whole regions of arrays pop between "gray
     /// member dust" and "big white footprint" on a hair of zoom).
-    /// Instead the size cut applies to the MEMBER box itself: sub-cut
-    /// boxes vanish exactly like geometry, uniformly for the whole
-    /// rep, and the r>0 fold above already uses the same cell-box
-    /// test. The one degradation left is the huge-pts count guard:
+    /// Instead the size cut applies to the MEMBER box itself: boxes
+    /// under the cut in BOTH dimensions vanish exactly like
+    /// geometry, uniformly for the whole rep, and the r>0 fold
+    /// above already uses the same cell-box test. Rev 45: a box
+    /// under the cut in ONE dimension (thin) degrades to lattice
+    /// representatives instead of vanishing - see
+    /// frame_thin_lattice. The one degradation left is the
+    /// huge-pts count guard:
     /// materializing O(count) offsets per plan is a memory hazard, so
     /// such reps fall back to one footprint box. Footprint visibility
     /// test uses the repetition extent (zero-copy for pts).
@@ -901,11 +957,26 @@ impl<'a> Hier<'a> {
         // before any offset work)
         let bw = (b0.x1 - b0.x0).max(0) as u64;
         let bh = (b0.y1 - b0.y0).max(0) as u64;
-        if (bw < self.cut && bh < self.cut)
-            || bw.min(bh) < self.hair
-        {
+        if bw < self.cut && bh < self.cut {
             self.st.cull_size += 1;
             return;
+        }
+        if bw.min(bh) < self.cut {
+            // rev 45 (Calibre): a thin box - min side under the cut,
+            // long side at or above it - no longer vanishes. The
+            // layout-fixed lattice keeps deterministic
+            // representatives (banded gray fill / dots by the
+            // existing ladder) until BOTH sides go under the cut.
+            if self.thin_dbu > 0 {
+                self.st.thin_frames += 1;
+                self.frame_thin_lattice(wc, pli, h, &b0, boxes);
+                return;
+            }
+            // lattice off: the rev 41 hairline cull
+            if bw.min(bh) < self.hair {
+                self.st.cull_size += 1;
+                return;
+            }
         }
         let (rect, rep, fp) = match h.kind {
             0 => (b0, Rep::One, b0),
@@ -943,6 +1014,163 @@ impl<'a> Hier<'a> {
                 }
             }
         };
+        self.push_frame(wc, rect, rep, &fp, boxes);
+    }
+
+    /// Rev 45 thin-frame sampling: representatives on a 2D lattice
+    /// of thin_dbu pitch, anchored to the owning cell's coordinates
+    /// (zoom-invariant survivor set - the observed Calibre
+    /// behavior). Grids thin in closed form per axis: stride
+    /// k = ceil(pitch_lattice / pitch_axis), keeping the interval
+    /// bound offsets {0, k-1} (2 per bin in a row, 4 corners in a
+    /// 2D array) until one lattice pitch is under thin_demote_px on
+    /// screen, then only offset 0 (the 2 -> 1 -> 0 ladder). One/Pts
+    /// members dedupe through thin_bins keyed by (child, bin) -
+    /// first record wins, deterministic in placement order.
+    fn frame_thin_lattice(
+        &mut self,
+        wc: &mut WsCell,
+        pli: u64,
+        h: &floe_ovm::PlaceHead,
+        b0: &BBox,
+        boxes: &[BBox],
+    ) {
+        let t = self.thin_dbu as i64;
+        let shift = |b: &BBox, dx: i64, dy: i64| BBox {
+            x0: b.x0.saturating_add(dx),
+            y0: b.y0.saturating_add(dy),
+            x1: b.x1.saturating_add(dx),
+            y1: b.y1.saturating_add(dy),
+        };
+        match h.kind {
+            0 => {
+                let key = (
+                    h.child,
+                    b0.x0.div_euclid(t),
+                    b0.y0.div_euclid(t),
+                );
+                if self.thin_bins.insert(key) {
+                    self.push_frame(wc, *b0, Rep::One, b0, boxes);
+                }
+            }
+            1 => {
+                let (na, nb) = (h.na as i64, h.nb as i64);
+                let stride = |v: (i64, i64)| {
+                    let p = v.0.abs().max(v.1.abs());
+                    if p <= 0 { 1 } else { ((t + p - 1) / p).max(1) }
+                };
+                let (ka, kb) = (stride(h.va), stride(h.vb));
+                let demote = self.thin_demote;
+                let offs = |k: i64| {
+                    if k > 1 && !demote {
+                        vec![0i64, k - 1]
+                    } else {
+                        vec![0i64]
+                    }
+                };
+                let (oas, obs) = (offs(ka), offs(kb));
+                // members of the axis sub-lattice i = o (mod k)
+                let cnt = |o: i64, n: i64, k: i64| {
+                    if o >= n { 0 } else { (n - o + k - 1) / k }
+                };
+                let sat = |v: i128| {
+                    v.clamp(i64::MIN as i128, i64::MAX as i128)
+                        as i64
+                };
+                for &oa in &oas {
+                    for &ob in &obs {
+                        let (ca, cb) =
+                            (cnt(oa, na, ka), cnt(ob, nb, kb));
+                        if ca == 0 || cb == 0 {
+                            continue;
+                        }
+                        let dx = sat(oa as i128 * h.va.0 as i128
+                            + ob as i128 * h.vb.0 as i128);
+                        let dy = sat(oa as i128 * h.va.1 as i128
+                            + ob as i128 * h.vb.1 as i128);
+                        let base = shift(b0, dx, dy);
+                        let sva = (
+                            h.va.0.saturating_mul(ka),
+                            h.va.1.saturating_mul(ka),
+                        );
+                        let svb = (
+                            h.vb.0.saturating_mul(kb),
+                            h.vb.1.saturating_mul(kb),
+                        );
+                        let rep = if ca == 1 && cb == 1 {
+                            Rep::One
+                        } else {
+                            Rep::Grid {
+                                na: ca as u64,
+                                nb: cb as u64,
+                                va: sva,
+                                vb: svb,
+                            }
+                        };
+                        let ov = grid_ovis(
+                            0,
+                            ca - 1,
+                            0,
+                            cb - 1,
+                            sva,
+                            svb,
+                        );
+                        let fp = grow_by_offsets(&base, &ov);
+                        self.push_frame(wc, base, rep, &fp, boxes);
+                    }
+                }
+            }
+            _ => {
+                let pr = self.v.pts_ref(pli).expect("pts kind");
+                let ext = pr.extent();
+                let fp = grow_by_offsets(b0, &ext);
+                if pr.count > self.opts.pts_full_rep {
+                    // count guard unchanged: one footprint box (a
+                    // memory guard, not a visual heuristic)
+                    self.push_frame(wc, fp, Rep::One, &fp, boxes);
+                    return;
+                }
+                let mut kept: Vec<(i64, i64)> = Vec::new();
+                for s in 0..pr.count {
+                    let (ox, oy) = pr.pt(s);
+                    let key = (
+                        h.child,
+                        b0.x0.saturating_add(ox).div_euclid(t),
+                        b0.y0.saturating_add(oy).div_euclid(t),
+                    );
+                    if self.thin_bins.insert(key) {
+                        kept.push((ox, oy));
+                    }
+                }
+                if kept.is_empty() {
+                    return;
+                }
+                // rebase on the first kept member ((0,0)-first)
+                let (rx, ry) = kept[0];
+                let base = shift(b0, rx, ry);
+                let rep = if kept.len() == 1 {
+                    Rep::One
+                } else {
+                    Rep::Pts(
+                        kept.iter()
+                            .map(|&(x, y)| (x - rx, y - ry))
+                            .collect::<Vec<_>>()
+                            .into(),
+                    )
+                };
+                self.push_frame(wc, base, rep, &fp, boxes);
+            }
+        }
+    }
+
+    fn push_frame(
+        &mut self,
+        wc: &mut WsCell,
+        rect: BBox,
+        rep: Rep,
+        fp: &BBox,
+        boxes: &[BBox],
+    ) {
         if boxes.iter().any(|b| fp.intersects(b)) {
             // band from the box actually drawn (member box for
             // per-member reps, footprint for fused ones)
@@ -1929,6 +2157,208 @@ mod tests {
             &HierOpts::default(),
         );
         assert_eq!(p3.stats.frame_rects, 0);
+    }
+
+    /// Rev 45 (Calibre alignment): a boundary box whose MIN side is
+    /// under the cut no longer vanishes - deterministic
+    /// representatives on a layout-fixed lattice survive (interval
+    /// bound offsets, 2 per bin in a row, demoting to 1 when a
+    /// lattice pitch is small on screen) until BOTH sides are under
+    /// the cut. Grids thin in closed form: stride
+    /// ceil(lattice/pitch) sub-grids, no member enumeration.
+    #[test]
+    fn thin_frames_sample_on_lattice() {
+        let v = fixture(
+            &[
+                FCell {
+                    name: "THIN", // 300 x 100 member box
+                    pages: vec![(bx(0, 0, 300, 100), 300, 100)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "TOP", // row of 100 at 200 DBU pitch
+                    pages: vec![],
+                    places: vec![(
+                        0,
+                        0,
+                        0,
+                        0,
+                        false,
+                        Rep::Grid {
+                            na: 100,
+                            nb: 1,
+                            va: (200, 0),
+                            vb: (0, 0),
+                        },
+                    )],
+                },
+            ],
+            1,
+        );
+        let view = bx(-10, -10, 30_000, 1_000);
+        // cut 300: min side 100 < 300 <= max side 300 -> thin band.
+        // px 0.01: one 7000-DBU lattice pitch = 70px >= demote 14 ->
+        // stride-35 sub-grids at the bound offsets {0, 34}
+        let p = plan_hier(
+            &v,
+            &rq_px(view, 300, 0, 0.01),
+            &HierOpts::default(),
+        );
+        assert_eq!(p.stats.thin_frames, 1);
+        let top =
+            p.wcells.iter().find(|w| w.key.0 == 1).unwrap();
+        assert_eq!(top.frames.len(), 2);
+        let members: u64 =
+            top.frames.iter().map(|(_, r, _)| r.members()).sum();
+        // ceil(100/35) = 3 at offset 0 (i = 0,35,70) + 2 at
+        // offset 34 (i = 34,69)
+        assert_eq!(members, 5);
+        for (b, rep, band) in &top.frames {
+            match rep {
+                Rep::Grid { va, .. } => {
+                    assert_eq!(*va, (7000, 0))
+                }
+                r => panic!("expected grid, got {:?}", r),
+            }
+            assert_eq!(b.y0, 0);
+            assert_eq!(*band, 3, "1px min side -> dotted");
+        }
+        let mut xs: Vec<i64> =
+            top.frames.iter().map(|(b, _, _)| b.x0).collect();
+        xs.sort();
+        assert_eq!(xs, vec![0, 6800]); // offsets 0 and 34 * 200
+        // one lattice pitch under thin_demote_px on screen (7px):
+        // a single representative per bin (the observed 2 -> 1
+        // ladder)
+        let pd = plan_hier(
+            &v,
+            &rq_px(view, 300, 0, 0.001),
+            &HierOpts::default(),
+        );
+        let td =
+            pd.wcells.iter().find(|w| w.key.0 == 1).unwrap();
+        assert_eq!(td.frames.len(), 1);
+        assert_eq!(td.frames[0].1.members(), 3);
+        // cut 0: no thin band, the full rep as before
+        let p0 = plan_hier(
+            &v,
+            &rq_px(view, 0, 0, 0.01),
+            &HierOpts::default(),
+        );
+        let t0 =
+            p0.wcells.iter().find(|w| w.key.0 == 1).unwrap();
+        assert_eq!(t0.frames.len(), 1);
+        assert_eq!(t0.frames[0].1.members(), 100);
+        // lattice off restores the rev 41 hairline cull
+        // (min 100 < hair 150)
+        let mut off = HierOpts::default();
+        off.thin_lattice_um = 0.0;
+        let pf = plan_hier(&v, &rq_px(view, 300, 0, 0.01), &off);
+        assert_eq!(pf.stats.frame_rects, 0);
+        assert_eq!(pf.stats.thin_frames, 0);
+        // BOTH sides under the cut: gone entirely, lattice or not
+        let pb = plan_hier(
+            &v,
+            &rq_px(view, 500, 0, 0.01),
+            &HierOpts::default(),
+        );
+        assert_eq!(pb.stats.frame_rects, 0);
+        assert_eq!(pb.stats.thin_frames, 0);
+    }
+
+    /// Rev 45 One/Pts thin frames: one deterministic representative
+    /// per (child, lattice bin) - the first record in placement
+    /// order wins; distinct children own distinct slots. Pts
+    /// subsets rebase on their first kept member ((0,0)-first
+    /// emission convention).
+    #[test]
+    fn thin_singles_and_pts_dedupe_per_bin() {
+        let v = fixture(
+            &[
+                FCell {
+                    name: "A",
+                    pages: vec![(bx(0, 0, 300, 100), 300, 100)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "B",
+                    pages: vec![(bx(0, 0, 300, 100), 300, 100)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "TOP",
+                    pages: vec![],
+                    places: vec![
+                        (0, 0, 0, 0, false, Rep::One),
+                        // same 7000-DBU bin as x = 0: deduped
+                        (0, 500, 0, 0, false, Rep::One),
+                        (0, 1_000, 0, 0, false, Rep::One),
+                        // next bin: its own representative
+                        (0, 8_000, 0, 0, false, Rep::One),
+                        // other child: own slot in bin 0
+                        (1, 100, 0, 0, false, Rep::One),
+                    ],
+                },
+            ],
+            2,
+        );
+        let view = bx(-10, -10, 30_000, 1_000);
+        let p = plan_hier(
+            &v,
+            &rq_px(view, 300, 0, 0.01),
+            &HierOpts::default(),
+        );
+        assert_eq!(p.stats.thin_frames, 5);
+        let top =
+            p.wcells.iter().find(|w| w.key.0 == 2).unwrap();
+        assert_eq!(top.frames.len(), 3);
+        let mut xs: Vec<i64> =
+            top.frames.iter().map(|(b, _, _)| b.x0).collect();
+        xs.sort();
+        assert_eq!(xs, vec![0, 100, 8_000]);
+        // pts rep: per-bin representative, rebased on the first
+        // kept member
+        let v2 = fixture(
+            &[
+                FCell {
+                    name: "A",
+                    pages: vec![(bx(0, 0, 300, 100), 300, 100)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "TOP",
+                    pages: vec![],
+                    places: vec![(
+                        0,
+                        0,
+                        0,
+                        0,
+                        false,
+                        Rep::Pts(
+                            vec![(0, 0), (100, 0), (7_500, 0)]
+                                .into(),
+                        ),
+                    )],
+                },
+            ],
+            1,
+        );
+        let p2 = plan_hier(
+            &v2,
+            &rq_px(view, 300, 0, 0.01),
+            &HierOpts::default(),
+        );
+        let t2 =
+            p2.wcells.iter().find(|w| w.key.0 == 1).unwrap();
+        assert_eq!(t2.frames.len(), 1);
+        let (b, rep, _) = &t2.frames[0];
+        assert_eq!(b.x0, 0);
+        match rep {
+            Rep::Pts(pts) => {
+                assert_eq!(&pts[..], &[(0, 0), (7_500, 0)])
+            }
+            r => panic!("expected pts, got {:?}", r),
+        }
     }
 
     /// Rev 37 (final): a box lives ONLY at its own depth boundary,
