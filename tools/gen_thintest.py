@@ -36,6 +36,10 @@ Populated cases (all at the depth-0 boundary):
      px_per_um < 0.75). The Calibre-divergent case kept here on
      purpose: geometry lattice alignment is pending the user's
      Calibre geometry observation.
+  10. frame counterpart next to 9: 100x LONGBAR(2x100um) CELLS at
+     the same 3um pitch - identical look at full zoom, but as
+     depth-0 frames the lattice keeps representatives until
+     cut > 100um while row 9 is long gone (side-by-side contrast)
 
 Reference runs (after `floe-index vfs data/thintest.oas`),
 measured on 0.11.25 + rev 45:
@@ -43,23 +47,26 @@ measured on 0.11.25 + rev 45:
   corners (cut 4um, 7um = 17.5px >= demote 14px -> bound offsets):
     floe-index plan data/thintest.oas.floe --view -10,-40,4300,3200 \
         --px-per-um 2.5 --cut-px 10 --depth 0
-    -> frame_rects 11, thin_frames 6
-       (rows/column/SHORTBAR 2 sub-grids each, 2D 1, all 17
-        singles pack into ONE pts record -> 1 entry, FAT normal)
+    -> frame_rects 13, thin_frames 7
+       (rows/column/SHORTBAR/LONGBAR 2 sub-grids each, 2D 1, all
+        17 singles pack into ONE pts record -> 1 entry, FAT normal)
   fit-like demoted (cut 15um, 7um = 1.4px -> one offset per bin,
   SHORTBAR row vanished - the fit-view contrast):
     ... --px-per-um 0.2 --cut-px 3 --depth 0
-    -> frame_rects 6, thin_frames 5
+    -> frame_rects 7, thin_frames 6
   nothing thin (cut 1um <= every min side):
     ... --px-per-um 3 --cut-px 3 --depth 0
-    -> frame_rects 7, thin_frames 0 (all reps intact)
+    -> frame_rects 8, thin_frames 0 (all reps intact)
   rev 41 fallback (cut 4.8um so hair 2.4um > min sides):
     ... --px-per-um 2.5 --cut-px 12 --depth 0 --thin-um 0
-    -> frame_rects 1 (FAT only; lattice ON at the same cut: 11)
-  beyond fit, the vanish stage (cut 34um > every bar's max side;
-  reachable in the viewer since FIT_ZOOM_OUT):
+    -> frame_rects 1 (FAT only; lattice ON at the same cut: 13)
+  beyond fit (cut 34um > the 30um bars, reachable in the viewer
+  since FIT_ZOOM_OUT): only LONGBAR representatives + FAT remain
     ... --px-per-um 0.088 --cut-px 3 --depth 0
-    -> frame_rects 1 (FAT alone survives until cut > 40um)
+    -> frame_rects 2, thin_frames 1
+  deep zoom-out (cut 110um > LONGBAR's 100um and FAT's 40um):
+    ... --px-per-um 0.027 --cut-px 3 --depth 0
+    -> frame_rects 0 (everything both-dims under the cut)
 
 thin_frames counts the records that entered the lattice path;
 frame_rects counts emitted entries (sub-grids/pts subsets/normals).
@@ -90,6 +97,9 @@ def main():
 
     short = ly.create_cell("SHORTBAR")  # 10x1um: vanish contrast
     short.shapes(l10).insert(db.Box(0, 0, 10 * U, 1 * U))
+
+    longbar = ly.create_cell("LONGBAR")  # 2x100um: long thin frame
+    longbar.shapes(l10).insert(db.Box(0, 0, 2 * U, 100 * U))
 
     fat = ly.create_cell("FAT")
     fat.shapes(l10).insert(db.Box(0, 0, 40 * U, 40 * U))
@@ -141,6 +151,16 @@ def main():
         x = i * 3 * U
         top.shapes(l30).insert(
             db.Box(x, 300 * U, x + 2 * U, 400 * U))
+    # 10. FRAME counterpart of 9, right next to it: 100 LONGBAR
+    #     (2x100um) CELLS at the same 3um pitch (1um gap). Same
+    #     look at full zoom, but these are depth-0 boundary frames:
+    #     the rev 45 lattice keeps representatives (stride 3,
+    #     offsets {0,2} -> 67/100, demoted 34) all the way until
+    #     cut > 100um, while the geometry row 9 vanished wholesale
+    #     at hair > 2um - the side-by-side Calibre contrast.
+    top.insert(db.CellInstArray(
+        longbar.cell_index(), db.Trans(0, False, 400 * U, 300 * U),
+        db.Vector(3 * U, 0), db.Vector(0, 0), 100, 1))
 
     opts = db.SaveLayoutOptions()
     opts.format = "OASIS"
