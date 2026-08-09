@@ -37,9 +37,10 @@ DEFAULT_FRAMES = True
 DEFAULT_LABELS = True
 
 BLACK = 0x000000FF
-BAND_IN = 0x8ECDF5FF       # forward drag: zoom in
-BAND_OUT = 0xF5B62EFF      # backward drag: zoom out
-RULER_CORE = 0xFFE97AFF
+BAND_IN = 0xFFFFFFFF       # forward drag: zoom in (plain white, user
+BAND_OUT = 0xFFFFFFFF      # call 2026-08-09; direction no longer
+                           # color-coded - backward drag zooms out)
+RULER_CORE = 0xFFFFFFFF    # plain white solid ruler (same call)
 SNAP_VERTEX = 0x66FFCCFF
 SNAP_EDGE = 0x66CCFFFF
 SEL_CORE = 0xFFFFFFFF
@@ -1441,10 +1442,10 @@ class Viewer:
             segs.append((*self._ruler_start, *self._ruler_end_preview()))
         for x0, y0, x1, y1 in segs:
             a, b = (sx(x0), sy(y0)), (sx(x1), sy(y1))
-            stamp_segment(disp, a, b, BLACK, RULER_CORE)
+            stamp_segment(disp, a, b, None, RULER_CORE)
             ang = math.atan2(b[1] - a[1], b[0] - a[0])
-            stamp_arrow(disp, b, ang, BLACK, RULER_CORE)      # outward
-            stamp_arrow(disp, a, ang + math.pi, BLACK, RULER_CORE)
+            stamp_arrow(disp, b, ang, None, RULER_CORE)       # outward
+            stamp_arrow(disp, a, ang + math.pi, None, RULER_CORE)
         if self.mode == "ruler" and self.snap_on and self._snap_res \
                 and self._snap_res.get("found"):
             mx, my = sx(self._snap_res["x"]), sy(self._snap_res["y"])
@@ -1478,7 +1479,7 @@ class Viewer:
             x0, y0 = self._zoomdrag
             x1, y1 = self._band_cur
             color = BAND_IN if x1 >= x0 else BAND_OUT
-            rect_outline(disp, x0, y0, x1, y1, BLACK, color)
+            rect_outline(disp, x0, y0, x1, y1, None, color)
 
     def _minimap_geom(self):
         """(scale, panel x0, panel y0, die px w, die px h) or None."""
@@ -1626,7 +1627,7 @@ class Viewer:
         for idx, (a, b, mx, my, d_um) in enumerate(vis):
             lbl = self._labels[idx]
             lbl.set_markup('<span background="#101010" foreground='
-                           '"#ffe97a"> %s </span>'
+                           '"#ffffff"> %s </span>'
                            % GLib.markup_escape_text("%.4f um" % d_um))
             lbl.show()   # a hidden label measures as zero
             # preferred size folds in the margins, which still hold
@@ -1654,7 +1655,7 @@ class Viewer:
             # line it measures (crossing rulers especially): dotted
             # leaders tie each chip back to its own line
             for end, foot in leaders:
-                stamp_dotted(disp, end, foot, BLACK, RULER_CORE)
+                stamp_dotted(disp, end, foot, None, RULER_CORE)
         for lbl in self._labels[len(vis):]:
             lbl.hide()
 
