@@ -50,6 +50,11 @@ DRC_LIST_MAX = 2000        # tree rows per check (prev/next reaches all)
 
 MIN_SPP = 0.01     # max zoom-in: 1 px = 0.01 dbu; keeps render bboxes
                    # from collapsing to zero width after int rounding
+FIT_ZOOM_OUT = 16.0  # max zoom-out: 16x beyond the fit view. The size
+                     # cut is cut_px / px_per_um, so the ladder of the
+                     # rev 45 thin-frame lattice (2 -> 1 -> gone) and
+                     # Calibre wide-view comparisons need room past
+                     # fit; the die stays centered out there.
 WHEEL_ZOOM_STEP = 0.96  # at most 4% per wheel event (was 10%)
 KEY_PAN_FRACTION = 0.10  # arrows move one tenth of the current viewport
 
@@ -2009,11 +2014,13 @@ class Viewer:
         return max((bb[2] - bb[0]) / w, (bb[3] - bb[1]) / h) * 1.05
 
     def _clamp_view(self):
-        """Zooms and pans never leave the die: spp is capped at the
-        fit-view scale and the viewport stays inside the die bbox
-        (centered on an axis the viewport is wider than)."""
+        """Zooms and pans never lose the die: spp is capped at
+        FIT_ZOOM_OUT x the fit-view scale and the viewport stays
+        inside the die bbox (centered on an axis the viewport is
+        wider than - so beyond fit the die is simply centered)."""
         bb = self.meta["bbox"]
-        self.spp = min(max(self.spp, MIN_SPP), self._fit_spp())
+        self.spp = min(max(self.spp, MIN_SPP),
+                       self._fit_spp() * FIT_ZOOM_OUT)
         w, h = self._viewport_size()
         hx, hy = w / 2 * self.spp, h / 2 * self.spp
         if 2 * hx >= bb[2] - bb[0]:
