@@ -129,18 +129,21 @@ def fill_rect(buf, x, y, w, h, rgba):
         buf.new_subpixbuf(x, y, w, h).fill(rgba)
 
 
-def stamp_segment(buf, a, b, casing, core):
-    """Line segment: flat rects for H/V, 3x3/2x2 dabs for free angles."""
+def stamp_segment(buf, a, b, casing, core, px=2):
+    """Line segment: flat rects for H/V, dabs for free angles.
+    px=1 draws a hairline core (rulers/zoom band, user call
+    2026-08-09); the casing geometry only serves the 2px default."""
     ax, ay = a
     bx, by = b
+    off = 0 if px == 1 else 1
     if round(ay) == round(by):    # horizontal
         if casing is not None:
             fill_rect(buf, min(ax, bx), ay - 2, abs(bx - ax) + 1, 5, casing)
-        fill_rect(buf, min(ax, bx), ay - 1, abs(bx - ax) + 1, 2, core)
+        fill_rect(buf, min(ax, bx), ay - off, abs(bx - ax) + 1, px, core)
     elif round(ax) == round(bx):  # vertical
         if casing is not None:
             fill_rect(buf, ax - 2, min(ay, by), 5, abs(by - ay) + 1, casing)
-        fill_rect(buf, ax - 1, min(ay, by), 2, abs(by - ay) + 1, core)
+        fill_rect(buf, ax - off, min(ay, by), px, abs(by - ay) + 1, core)
     else:
         steps = min(int(max(abs(bx - ax), abs(by - ay))) + 1, 8000)
         pts = [(ax + (bx - ax) * i / steps, ay + (by - ay) * i / steps)
@@ -149,7 +152,7 @@ def stamp_segment(buf, a, b, casing, core):
             for x, y in pts:
                 fill_rect(buf, x - 1, y - 1, 3, 3, casing)
         for x, y in pts:
-            fill_rect(buf, x - 1, y - 1, 2, 2, core)
+            fill_rect(buf, x - off, y - off, px, px, core)
 
 
 def stamp_dotted(buf, a, b, casing, core):
@@ -339,10 +342,10 @@ def stamp_arrow(buf, tip, ang, casing, core, size=11, half=4):
     fill_triangle(buf, *tri(tip[0], tip[1], size, half), core)
 
 
-def rect_outline(buf, x0, y0, x1, y1, casing, core):
+def rect_outline(buf, x0, y0, x1, y1, casing, core, px=2):
     for a, b in (((x0, y0), (x1, y0)), ((x0, y1), (x1, y1)),
                  ((x0, y0), (x0, y1)), ((x1, y0), (x1, y1))):
-        stamp_segment(buf, a, b, casing, core)
+        stamp_segment(buf, a, b, casing, core, px)
 
 
 def fmt_count(n):
@@ -1442,7 +1445,7 @@ class Viewer:
             segs.append((*self._ruler_start, *self._ruler_end_preview()))
         for x0, y0, x1, y1 in segs:
             a, b = (sx(x0), sy(y0)), (sx(x1), sy(y1))
-            stamp_segment(disp, a, b, None, RULER_CORE)
+            stamp_segment(disp, a, b, None, RULER_CORE, px=1)
             ang = math.atan2(b[1] - a[1], b[0] - a[0])
             stamp_arrow(disp, b, ang, None, RULER_CORE)       # outward
             stamp_arrow(disp, a, ang + math.pi, None, RULER_CORE)
@@ -1479,7 +1482,7 @@ class Viewer:
             x0, y0 = self._zoomdrag
             x1, y1 = self._band_cur
             color = BAND_IN if x1 >= x0 else BAND_OUT
-            rect_outline(disp, x0, y0, x1, y1, None, color)
+            rect_outline(disp, x0, y0, x1, y1, None, color, px=1)
 
     def _minimap_geom(self):
         """(scale, panel x0, panel y0, die px w, die px h) or None."""
