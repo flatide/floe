@@ -2051,3 +2051,23 @@ rev 43 (인스턴스 BVH 크기 주석, ovm v7 — 2026-08-09, 0.11.22):
 - 기대: 몬스터 셀이 분산돼 있으면 155s가 크게 붕괴; slow-cell
   로그에 수십 초짜리 단일 셀이 남으면 phase 2로 (cell,layer) 런
   분할 병렬 + Morton 정렬 병렬화.
+
+빌드 phase 2-A (몬스터 셀 LOD 병렬 + 서브페이즈 계측 — 2026-08-09,
+0.11.24):
+
+- 150M slow-cell 로그: MAIN09_ESD_FEOL_dmy* 한 셀이 plan 164.3s
+  (places 3451, pages 8821, fragments 9,216,328 — 전체의 96%).
+  다이-관통 Pts rep 다수 × 페이지 분할(R×P) 구조.
+- 인메모리 재현 벤치(monster_cell_split_bench, --ignored):
+  500 rep × 50k offsets = 2.74s, 내역 split 1.29 + lod 1.41.
+- build_cell_plan 서브페이즈 계측 영구화: slow-cell 로그에
+  (bvh/asm/split/lod/pts/sink) 초 단위 내역.
+- LOD 변종 생성 병렬화: 후보 페이지 ≥64인 셀은 페이지별
+  gen_lod_job을 스레드 팬아웃(상한 16), cand 순서로 병합 —
+  lod_page 번호·바이트 불변(valmini/sample9 해시 동일, 벤치
+  pages/fragments 동일). 벤치 lod 1.41→0.28s(5×), 총 2.74→1.61s.
+- 잔여(#60): split 재귀 병렬화 — 형제 분기가 아레나 order를
+  in-place 분할하는 구조라 분기 병렬에는 아레나 선생성+분리
+  재설계 필요(Amdahl: 상위 레벨 분할이 직렬로 남으면 ~2배 한계,
+  파티션 자체 병렬화까지 가면 그 이상). 사무실 재측정에서 ESD
+  셀의 split 몫이 지배로 확인되면 착수.

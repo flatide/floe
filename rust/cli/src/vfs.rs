@@ -1495,6 +1495,9 @@ fn topo_order(doc: &Doc) -> Vec<usize> {
 /// `first`/base offsets are fixed up then and the .ovm/.ovp stay
 /// byte-identical to the single-threaded build at any thread count.
 struct CellPlan {
+    /// plan sub-phase seconds for the slow-cell log:
+    /// [bvh, assemble, split+pbvh, lod, pts, sink]
+    phase_s: [f32; 6],
     /// pre-encoded sections with CELL-LOCAL indexes (built in the
     /// parallel plan phase; the serial commit is memcpy + rebase)
     sink: floe_ovm::CellSink,
@@ -1511,8 +1514,6 @@ struct CellPlan {
     /// (bbox, first, count, leaf, max_w, max_h) - leaf `first` is a
     /// cell-local page index, inner `first` a cell-local node index
     pbvh: Vec<(BBox, u32, u16, bool, u64, u64)>,
-    /// per local place idx: Morton-prepared pts (Rep::Pts only)
-    pts_prep: Vec<Option<floe_ovm::PtsPrepared>>,
     /// fragmented-Pts offset scratch shared by this cell's jobs
     arena: std::sync::Arc<Arena>,
     split_stats: SplitStats,
@@ -1897,6 +1898,13 @@ fn build_cell_plan(
     page_target_bytes: u64,
 ) -> CellPlan {
     let cell = &doc.cells[ci];
+    let mut phase_s = [0f32; 6];
+    let mut tmark = std::time::Instant::now();
+    let mut lap = |slot: &mut f32| {
+        let now = std::time::Instant::now();
+        *slot += (now - tmark).as_secs_f32();
+        tmark = now;
+    };
     // ---- placements + instance BVH (leaf order = emit order)
     let sat32 = |v: i64| u32::try_from(v.max(0)).unwrap_or(u32::MAX);
     let mut items: Vec<(BBox, u32, u32, usize)> = cell
@@ -1940,6 +1948,7 @@ fn build_cell_plan(
             items.iter().map(|&(.., pi)| pi as u32).collect();
         (place_order, nodes)
     };
+    lap(&mut phase_s[0]);
     // ---- pages per layer, in layer order
     let mut per_layer: Vec<Vec<PRec>> =
         (0..nl).map(|_| Vec::new()).collect();
@@ -2002,6 +2011,7 @@ fn build_cell_plan(
             frag: Frag::Whole,
         });
     }
+    lap(&mut phase_s[1]);
     let mut pages: Vec<PageJob> = Vec::new();
     let mut pranges: Vec<(u32, u32, u32, u32)> = Vec::new();
     let mut pbvh: Vec<(BBox, u32, u16, bool, u64, u64)> = Vec::new();
@@ -2075,30 +2085,100 @@ fn build_cell_plan(
             pranges.push((li as u32, run_lo, run_count, root_local));
         }
     }
+    lap(&mut phase_s[2]);
     // M7: LOD variants ride at the tail of the cell's page list -
     // pranges/pbvh reference only the exact runs before them, and
     // the exact->LOD link is rebased to global indices by the
     // append loop
     let n_exact = pages.len();
-    for k in 0..n_exact {
-        if pages[k].members < LOD_MIN_MEMBERS {
-            continue;
+    let cand: Vec<usize> = (0..n_exact)
+        .filter(|&k| pages[k].members >= LOD_MIN_MEMBERS)
+        .collect();
+    // #60 monster cells: LOD variants are per-page independent, and
+    // a fill cell can own thousands of dense pages (150M field: one
+    // ESD dummy = 8821 pages; bench: lod was half the 164s plan).
+    // Fan the generation out when the page count justifies threads;
+    // results merge in page order, so bytes are unchanged.
+    const LOD_PAR_MIN: usize = 64;
+    if cand.len() >= LOD_PAR_MIN {
+        let nthreads = std::thread::available_parallelism()
+            .map(|v| v.get())
+            .unwrap_or(1)
+            .min(cand.len())
+            .min(16)
+            .max(1);
+        let slots: Vec<
+            std::sync::Mutex<Option<(PageJob, SplitStats)>>,
+        > = (0..cand.len())
+            .map(|_| std::sync::Mutex::new(None))
+            .collect();
+        let nextk = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|sc| {
+            for _ in 0..nthreads {
+                let slots = &slots;
+                let nextk = &nextk;
+                let cand = &cand;
+                let pages = &pages;
+                let arena_ref = &arena;
+                sc.spawn(move || loop {
+                    let i = nextk.fetch_add(
+                        1,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    if i >= cand.len() {
+                        return;
+                    }
+                    let mut lst = SplitStats::default();
+                    if let Some(job) = gen_lod_job(
+                        doc,
+                        cell,
+                        arena_ref,
+                        &pages[cand[i]],
+                        &mut lst,
+                    ) {
+                        *slots[i].lock().unwrap() =
+                            Some((job, lst));
+                    }
+                });
+            }
+        });
+        for (i, &k) in cand.iter().enumerate() {
+            if let Some((job, lst)) =
+                slots[i].lock().unwrap().take()
+            {
+                split_stats.fragments += lst.fragments;
+                split_stats.oversize_pages += lst.oversize_pages;
+                split_stats.depth_capped += lst.depth_capped;
+                split_stats.lod_pages += lst.lod_pages;
+                split_stats.lod_grid_verbatim +=
+                    lst.lod_grid_verbatim;
+                pages[k].lod_page = narrow_u32(
+                    pages.len() as u64,
+                    "cell page count",
+                );
+                split_stats.lod_pages += 1;
+                pages.push(job);
+            }
         }
-        if let Some(job) = gen_lod_job(
-            doc,
-            cell,
-            &arena,
-            &pages[k],
-            &mut split_stats,
-        ) {
-            pages[k].lod_page = narrow_u32(
-                pages.len() as u64,
-                "cell page count",
-            );
-            split_stats.lod_pages += 1;
-            pages.push(job);
+    } else {
+        for &k in &cand {
+            if let Some(job) = gen_lod_job(
+                doc,
+                cell,
+                &arena,
+                &pages[k],
+                &mut split_stats,
+            ) {
+                pages[k].lod_page = narrow_u32(
+                    pages.len() as u64,
+                    "cell page count",
+                );
+                split_stats.lod_pages += 1;
+                pages.push(job);
+            }
         }
     }
+    lap(&mut phase_s[3]);
     let pts_prep: Vec<Option<floe_ovm::PtsPrepared>> = cell
         .places
         .iter()
@@ -2107,6 +2187,7 @@ fn build_cell_plan(
             _ => None,
         })
         .collect();
+    lap(&mut phase_s[4]);
     // ---- pre-encode the Builder sections with LOCAL indexes (the
     // serial pipeline commit used to re-walk every record here on
     // one thread; now it just memcpys and rebases)
@@ -2145,14 +2226,15 @@ fn build_cell_plan(
     for &(li, lo, cnt, root) in &pranges {
         sink.prange(li, lo, cnt, root);
     }
+    lap(&mut phase_s[5]);
     CellPlan {
+        phase_s,
         sink,
         place_order,
         bvh,
         pages,
         pranges,
         pbvh,
-        pts_prep,
         arena: std::sync::Arc::new(arena),
         split_stats,
     }
@@ -2838,13 +2920,21 @@ fn build(
                     // knows its targets
                     eprintln!(
                         "[vfs] build: slow cell {} (ci {}): plan \
-                         {:.1}s (places {}, pages {}, fragments {})",
+                         {:.1}s (places {}, pages {}, fragments \
+                         {}; bvh {:.1} asm {:.1} split {:.1} \
+                         lod {:.1} pts {:.1} sink {:.1})",
                         doc.cells[ci].name,
                         ci,
                         secs,
                         doc.cells[ci].places.len(),
                         plan.pages.len(),
-                        plan.split_stats.fragments
+                        plan.split_stats.fragments,
+                        plan.phase_s[0],
+                        plan.phase_s[1],
+                        plan.phase_s[2],
+                        plan.phase_s[3],
+                        plan.phase_s[4],
+                        plan.phase_s[5]
                     );
                 }
                 *ring[ci % ring_cap].lock().unwrap() = Some(plan);
@@ -4063,6 +4153,38 @@ mod split_tests {
             h: w,
             rep: Rep::Pts(pos.into()),
         }
+    }
+
+    /// #60 monster-cell repro (release, ignored): ~500 die-wide
+    /// Pts reps x 50k offsets - every page split partitions every
+    /// straddling rep, the ESD-dummy shape (150M field: one cell,
+    /// 9.2M fragments, plan 164s). Run:
+    /// cargo test --release -p floe-index -- --ignored monster \
+    ///   --nocapture
+    #[test]
+    #[ignore]
+    fn monster_cell_split_bench() {
+        const DIE: i64 = 4_000_000;
+        let recs: Vec<RectRec> = (0..500u64)
+            .map(|k| pts_rec(k + 11, 50_000, DIE, 200))
+            .collect();
+        let doc = mini_doc(recs);
+        let t = std::time::Instant::now();
+        let plan = plan_of(&doc);
+        eprintln!(
+            "monster: {:.2}s pages {} fragments {} \
+             (bvh {:.2} asm {:.2} split {:.2} lod {:.2} pts \
+             {:.2} sink {:.2})",
+            t.elapsed().as_secs_f64(),
+            plan.pages.len(),
+            plan.split_stats.fragments,
+            plan.phase_s[0],
+            plan.phase_s[1],
+            plan.phase_s[2],
+            plan.phase_s[3],
+            plan.phase_s[4],
+            plan.phase_s[5]
+        );
     }
 
     fn mini_doc(rects: Vec<RectRec>) -> Doc {
