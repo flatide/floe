@@ -35,13 +35,21 @@ pub const MAGIC: &[u8; 8] = b"FLOEOVM1";
 /// header spare at 80 becomes ovt_len (design.ovt byte length:
 /// string bytes + Morton-ordered text pts pools live THERE, the
 /// ovm keeps only fixed records).
-pub const VERSION: u32 = 6;
+pub const VERSION: u32 = 7;
 
 pub const HEADER_LEN: usize = 312;
 pub const LAYER_LEN: usize = 32;
 pub const CELL_LEN: usize = 144;
 pub const PLACE_LEN: usize = 64;
-pub const BVH_LEN: usize = 40;
+/// v7: +8 bytes - subtree child-cell size annotations at offsets
+/// 40 (max over places of max(w,h)) and 44 (max over places of
+/// min(w,h)), both u32 saturating. They let the planner prune a
+/// whole subtree against the size/hairline cut without visiting a
+/// single placement (the page BVH has carried max_w/max_h since v2;
+/// the instance BVH lacked it, so a fit view walked every boundary
+/// placement just to cull it - 150M field case: 4.5s plan for 1023
+/// boxes).
+pub const BVH_LEN: usize = 48;
 /// v6: +8 bytes - max_min at offset 96 (max over records
 /// of min(w,h): the whole page is hairline-thin iff this
 /// is small; planner cuts sub-hairline pages wholesale)
@@ -250,11 +258,15 @@ fn enc_bvh(
     first: u32,
     count: u16,
     leaf: bool,
+    max_dim: u32,
+    max_min: u32,
 ) {
     pbox(out, bbox);
     p32(out, first);
     p16(out, count);
     p16(out, leaf as u16);
+    p32(out, max_dim);
+    p32(out, max_min);
     assert_eq!(out.len() % BVH_LEN, 0, "bvh stride");
 }
 
@@ -425,9 +437,12 @@ impl CellSink {
         first: u32,
         count: u16,
         leaf: bool,
+        max_dim: u32,
+        max_min: u32,
     ) -> u32 {
         let idx = self.n_bvh;
-        enc_bvh(&mut self.bvh, bbox, first, count, leaf);
+        enc_bvh(&mut self.bvh, bbox, first, count, leaf, max_dim,
+                max_min);
         bump(&mut self.n_bvh, "bvh");
         idx
     }
@@ -884,16 +899,22 @@ impl Builder {
         )
     }
 
-    /// appends one instance-BVH node; returns its global index
+    /// appends one instance-BVH node; returns its global index.
+    /// max_dim/max_min: subtree child-cell size annotations (v7) -
+    /// max over the subtree's placements of max(w,h) / min(w,h) of
+    /// the child cell rbbox, u32-saturated (u32::MAX = never prune)
     pub fn bvh_node(
         &mut self,
         bbox: &BBox,
         first: u32,
         count: u16,
         leaf: bool,
+        max_dim: u32,
+        max_min: u32,
     ) -> u32 {
         let idx = self.n_bvh;
-        enc_bvh(&mut self.bvh, bbox, first, count, leaf);
+        enc_bvh(&mut self.bvh, bbox, first, count, leaf, max_dim,
+                max_min);
         bump(&mut self.n_bvh, "bvh");
         idx
     }
@@ -1389,6 +1410,9 @@ pub struct NodeV {
     pub first: u32,
     pub count: u16,
     pub leaf: bool,
+    /// v7 subtree size annotations (see Builder::bvh_node)
+    pub max_dim: u32,
+    pub max_min: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2519,6 +2543,8 @@ impl Ovm {
             first: g32(b, 32),
             count: g16(b, 36),
             leaf: g16(b, 38) != 0,
+            max_dim: g32(b, 40),
+            max_min: g32(b, 44),
         }
     }
 
@@ -2609,6 +2635,10 @@ impl Ovm {
             first: g32(b, 32),
             count: g16(b, 36),
             leaf: g16(b, 38) != 0,
+            // text-BVH nodes carry no size annotations (texts are
+            // points); MAX = the "never prune" neutral value
+            max_dim: u32::MAX,
+            max_min: u32::MAX,
         }
     }
 
@@ -2711,8 +2741,10 @@ mod tests {
                     narrow_u32(pb, "p"),
                     3,
                     true,
+                    500,
+                    200,
                 );
-                b.bvh_node(&bb, l0, 1, false);
+                b.bvh_node(&bb, l0, 1, false, 500, 200);
                 let page_base = (c as u32) * 7;
                 let pl = b.pbvh_node(
                     &bb,
@@ -2754,8 +2786,8 @@ mod tests {
                     false,
                     &Rep::Pts(pts.clone().to_vec().into()),
                 );
-                let l0 = s.bvh_node(&bb, 0, 3, true);
-                s.bvh_node(&bb, l0, 1, false);
+                let l0 = s.bvh_node(&bb, 0, 3, true, 500, 200);
+                s.bvh_node(&bb, l0, 1, false, 500, 200);
                 let pl = s.pbvh_node(&bb, 0, 2, true, 11, 22);
                 s.pbvh_node(&bb, pl, 1, false, 33, 44);
                 s.prange(0, 0, 2, pl + 1);
@@ -2803,7 +2835,7 @@ mod tests {
             &Rep::Pts(vec![(0, 0), (9, 9), (9, 9), (-4, 2)].into()),
         );
         let bb = BBox { x0: 0, y0: 0, x1: 100, y1: 50 };
-        let n0 = b.bvh_node(&bb, p0 as u32, 2, true);
+        let n0 = b.bvh_node(&bb, p0 as u32, 2, true, 90, 50);
         b.page(1, 0, 0, &bb, 128, 10, 20, 3, 9, 60, 60, LOD_EXACT, LOD_PAGE_NONE);
         b.page(1, 0, 70000, &bb, 138, 11, 21, 4, 8, 61, 1 << 40, LOD_EXACT, LOD_PAGE_NONE);
         let pv0 = b.pbvh_node(&bb, 0, 2, true, 61, 1 << 40);

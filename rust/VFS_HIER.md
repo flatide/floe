@@ -2006,3 +2006,25 @@ rev 42 (프레임 박스 크기 밴드 4단 — 2026-08-08, 0.11.19):
   sample9 + 4M-place 합성), 스위트 ALL OK.
 - 계측: 파이프라인 로그에 append {:.1}s 추가 — 사무실 빌드에서
   직렬 잔여(텍스트/비트셋/커밋)의 비중을 이 값으로 정량화 가능.
+
+rev 43 (인스턴스 BVH 크기 주석, ovm v7 — 2026-08-09, 0.11.22):
+
+- 150M 실측: fit 프레임-only plan 4459ms가 낸 산출물은 박스
+  1,023개 — walk가 경계 21.9M 배치를 전부 방문해 컷 판정 후
+  버림(전체-다이 뷰에선 bbox-only 인스턴스 BVH가 무력). 텍스트
+  walk도 동일 배치 507ms. output이 아니라 walk가 병목(선행
+  declutter 안 #56은 이 실측으로 폐기).
+- ovm v7: BVH 노드 +8B — max_dim(자식 rbbox max변의 서브트리
+  최대)·max_min(min변의 최대), u32 포화(MAX=프루닝 안 함). pbvh가
+  v2부터 갖던 것과 동형. 빌드는 items에 자식 치수 동반, split_bvh가
+  리프/이너로 전파. 버전 게이트 리빌드.
+- 플래너/텍스트 walk: 노드에서 (max_dim<cut)||(max_min<hair)면
+  서브트리째 스킵 — 어차피 전량 컬될 배치를 한 개도 방문하지 않음.
+  정확도·결정성 불변(브루트포스 대조 유지), culled_bvh_size 통계
+  신설. 프로브는 hair=0·cut 그대로라 의미 동일.
+- 실측: sample9 fit d9 plan 1.58→0.27ms; placeheavy(4M places,
+  Pts-rep 압축) 서브컷 리프 400개 노드 컬 확인. 150M 기대: 4.5s
+  → 수십 ms급(사무실 재검증 항목).
+- 부수정정: 상태줄 phase 이중계상 수정 — 데몬 plan_ms는 라벨
+  walk를 이미 포함하므로 phase_plan에 text_plan_ms를 재합산하지
+  않음(150M 보고의 load<plan 모순 원인).

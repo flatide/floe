@@ -1499,7 +1499,9 @@ struct CellPlan {
     /// parallel plan phase; the serial commit is memcpy + rebase)
     sink: floe_ovm::CellSink,
     place_order: Vec<u32>,            // local place idx, leaf order
-    bvh: Vec<(BBox, u32, u16, bool)>, // `first` is cell-local
+    // (bbox, first, count, leaf, max_dim, max_min) -
+    // `first` is cell-local; v7 size annotations ride along
+    bvh: Vec<(BBox, u32, u16, bool, u32, u32)>,
     /// pages across this cell's (layer) runs, each run already in
     /// its page-BVH leaf order (seq is a name, not a position)
     pages: Vec<PageJob>,
@@ -1896,12 +1898,19 @@ fn build_cell_plan(
 ) -> CellPlan {
     let cell = &doc.cells[ci];
     // ---- placements + instance BVH (leaf order = emit order)
-    let mut items: Vec<(BBox, usize)> = cell
+    let sat32 = |v: i64| u32::try_from(v.max(0)).unwrap_or(u32::MAX);
+    let mut items: Vec<(BBox, u32, u32, usize)> = cell
         .places
         .iter()
         .enumerate()
         .map(|(pi, pl)| {
             let cb = win_to_bbox(rbb[pl.cell]);
+            // v7 node annotations: child rbbox max/min side (the
+            // rotation-invariant pair the cut/hairline test uses)
+            let cw = (cb.x1 - cb.x0).max(0);
+            let ch = (cb.y1 - cb.y0).max(0);
+            let (md, mn) =
+                (sat32(cw.max(ch)), sat32(cw.min(ch)));
             let bb = if cb.is_empty() {
                 BBox { x0: pl.x, y0: pl.y, x1: pl.x, y1: pl.y }
             } else {
@@ -1917,17 +1926,18 @@ fn build_cell_plan(
                     y1: a.1.max(c.1) + ey.1.max(0),
                 }
             };
-            (bb, pi)
+            (bb, md, mn, pi)
         })
         .collect();
     let (place_order, bvh) = if items.is_empty() {
         (Vec::new(), Vec::new())
     } else {
-        let mut nodes: Vec<(BBox, u32, u16, bool)> = Vec::new();
-        nodes.push((BBox::EMPTY, 0, 0, false));
+        let mut nodes: Vec<(BBox, u32, u16, bool, u32, u32)> =
+            Vec::new();
+        nodes.push((BBox::EMPTY, 0, 0, false, 0, 0));
         split_bvh(&mut nodes, &mut items, 0, 0);
         let place_order =
-            items.iter().map(|&(_, pi)| pi as u32).collect();
+            items.iter().map(|&(.., pi)| pi as u32).collect();
         (place_order, nodes)
     };
     // ---- pages per layer, in layer order
@@ -2126,8 +2136,8 @@ fn build_cell_plan(
             }
         }
     }
-    for &(bb, first, count, leaf) in &bvh {
-        sink.bvh_node(&bb, first, count, leaf);
+    for &(bb, first, count, leaf, md, mn) in &bvh {
+        sink.bvh_node(&bb, first, count, leaf, md, mn);
     }
     for &(bb, first, count, leaf, mw, mh) in &pbvh {
         sink.pbvh_node(&bb, first, count, leaf, mw, mh);
@@ -3037,35 +3047,39 @@ fn pts_bbox(pts: &[(i64, i64)]) -> BBox {
 /// ranges are contiguous; nodes[slot] filled, children appended in
 /// adjacent pairs (first = local node index of the left child)
 fn split_bvh(
-    nodes: &mut Vec<(BBox, u32, u16, bool)>,
-    items: &mut [(BBox, usize)],
+    nodes: &mut Vec<(BBox, u32, u16, bool, u32, u32)>,
+    items: &mut [(BBox, u32, u32, usize)],
     lo: usize,
     slot: usize,
 ) {
     let mut bb = BBox::EMPTY;
-    for (ib, _) in items.iter() {
+    let (mut md, mut mn) = (0u32, 0u32);
+    for (ib, imd, imn, _) in items.iter() {
         bb.grow(ib);
+        md = md.max(*imd);
+        mn = mn.max(*imn);
     }
     if items.len() <= BVH_LEAF {
-        nodes[slot] = (bb, lo as u32, items.len() as u16, true);
+        nodes[slot] =
+            (bb, lo as u32, items.len() as u16, true, md, mn);
         return;
     }
     let wx = bb.x1 - bb.x0;
     let wy = bb.y1 - bb.y0;
     let mid = items.len() / 2;
     if wx >= wy {
-        items.select_nth_unstable_by_key(mid, |(b, _)| {
+        items.select_nth_unstable_by_key(mid, |(b, ..)| {
             b.x0 + b.x1
         });
     } else {
-        items.select_nth_unstable_by_key(mid, |(b, _)| {
+        items.select_nth_unstable_by_key(mid, |(b, ..)| {
             b.y0 + b.y1
         });
     }
     let l = nodes.len();
-    nodes.push((BBox::EMPTY, 0, 0, false));
-    nodes.push((BBox::EMPTY, 0, 0, false));
-    nodes[slot] = (bb, l as u32, 2, false);
+    nodes.push((BBox::EMPTY, 0, 0, false, 0, 0));
+    nodes.push((BBox::EMPTY, 0, 0, false, 0, 0));
+    nodes[slot] = (bb, l as u32, 2, false, md, mn);
     let (a, c) = items.split_at_mut(mid);
     split_bvh(nodes, a, lo, l);
     split_bvh(nodes, c, lo + mid, l + 1);
@@ -3476,6 +3490,7 @@ pub fn plan_cmd(args: &[String]) {
              \"grid_fallback_full\": {},\n  \
              \"kbox_merges\": {},\n  \"lod_pages\": {},\n  \
              \"washed_pages\": {},\n  \
+             \"culled_bvh_size\": {},\n  \
              \"plan_ms\": {:.2}\n}}",
             plan.pages.len(),
             cbytes,
@@ -3505,6 +3520,7 @@ pub fn plan_cmd(args: &[String]) {
             st.kbox_merges,
             st.lod_swapped,
             st.washed_pages,
+            st.culled_bvh_size,
             ms
         );
         if rest.iter().any(|(k, _)| k == "--inspect") {

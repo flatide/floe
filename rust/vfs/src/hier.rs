@@ -172,6 +172,10 @@ pub struct HierStats {
     pub lod_swapped: u64,
     /// pages collapsed to a single layer-colored bbox rect (M7-C)
     pub washed_pages: u64,
+    /// instance-BVH subtrees pruned by the v7 size annotations
+    /// (every placement under them would have been size/hairline
+    /// culled - rev 43)
+    pub culled_bvh_size: u64,
 }
 
 #[derive(Debug, PartialEq)]
@@ -684,6 +688,18 @@ impl<'a> Hier<'a> {
                 while let Some(ni) = stack.pop() {
                     let node = self.v.bvh(ni);
                     self.st.visited_bvh += 1;
+                    // rev 43: v7 size annotations - a subtree whose
+                    // every child cell is under the cut (or
+                    // hairline-thin) prunes wholesale; the fit-view
+                    // walk stops paying O(boundary placements) for
+                    // boxes the cut was always going to drop (150M
+                    // field case: 4.5s plan for 1023 boxes)
+                    if (node.max_dim as u64) < cut
+                        || (node.max_min as u64) < self.hair
+                    {
+                        self.st.culled_bvh_size += 1;
+                        continue;
+                    }
                     if !node.bbox.intersects(b) {
                         continue;
                     }
@@ -1616,7 +1632,8 @@ mod tests {
         let place_start = b.n_places() as u32;
         b.place(0, 1000, 0, 0, false, &Rep::One);
         let placed = bx(1000, 0, 1100, 100);
-        let bvh = b.bvh_node(&placed, place_start, 1, true);
+        let bvh =
+            b.bvh_node(&placed, place_start, 1, true, 100, 100);
         let top_own = bx(0, 0, 10, 10);
         b.page(
             1, 1, 0, &top_own, 0, 0, 0, 1, 1, 10, 10,
@@ -1900,7 +1917,12 @@ mod tests {
             &HierOpts::default(),
         );
         assert!(p2.pages.is_empty());
-        assert!(p2.stats.cull_size >= 1);
+        // rev 43: the v7 node annotation prunes the uniformly-thin
+        // subtree before the per-place fold even runs
+        assert!(
+            p2.stats.cull_size + p2.stats.culled_bvh_size >= 1
+        );
+        assert!(p2.stats.culled_bvh_size >= 1);
         let p3 = plan_hier(
             &v2,
             &rq(view, 300, 1),
@@ -2193,12 +2215,28 @@ mod tests {
                 if cells[ci].places.is_empty() {
                     (0, 0)
                 } else {
+                    // v7 size annotations: real values, like the
+                    // production build (max over places of the
+                    // child rbbox max/min side)
+                    let (mut md, mut mn) = (0u32, 0u32);
+                    for (c, ..) in &cells[ci].places {
+                        let rb = &rbb[*c];
+                        let w = (rb.x1 - rb.x0).max(0);
+                        let h = (rb.y1 - rb.y0).max(0);
+                        let sat = |v: i64| {
+                            u32::try_from(v).unwrap_or(u32::MAX)
+                        };
+                        md = md.max(sat(w.max(h)));
+                        mn = mn.max(sat(w.min(h)));
+                    }
                     (
                         b.bvh_node(
                             &items,
                             place_base,
                             cells[ci].places.len() as u16,
                             true,
+                            md,
+                            mn,
                         ),
                         1,
                     )
@@ -2966,7 +3004,9 @@ mod tests {
             &HierOpts::default(),
         );
         assert_eq!(pc.stats.frame_rects, 0);
-        assert!(pc.stats.cull_size > 0);
+        assert!(
+            pc.stats.cull_size + pc.stats.culled_bvh_size > 0
+        );
         // window over member 3 of the array only: frame still comes
         // (footprint test is per whole-rep extent)
         let plan2 = plan_hier(
@@ -3046,7 +3086,9 @@ mod tests {
             &HierOpts::default(),
         );
         assert_eq!(pc.stats.frame_rects, 0);
-        assert!(pc.stats.cull_size > 0);
+        assert!(
+            pc.stats.cull_size + pc.stats.culled_bvh_size > 0
+        );
     }
 
     #[test]
@@ -3333,8 +3375,14 @@ mod tests {
             false,
             &Rep::Grid { na: 2, nb: 1, va: (200, 0), vb: (0, 0) },
         );
-        let n0 =
-            b.bvh_node(&bx(0, 100, 300, 120), pl as u32, 1, true);
+        let n0 = b.bvh_node(
+            &bx(0, 100, 300, 120),
+            pl as u32,
+            1,
+            true,
+            u32::MAX,
+            u32::MAX,
+        );
         let pr0 = b.prange(0, 0, 1, PBVH_NONE);
         b.cell(
             "LEAF", 0, 1, &leafbb, &leafbb, 0, 0, 0, 1, 0, 0, pr0,

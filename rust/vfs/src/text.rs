@@ -794,6 +794,14 @@ pub fn plan_labels(
             while let Some(ni) = nodes.pop() {
                 let n = v.bvh(ni);
                 w.st.place_bvh_nodes += 1;
+                // rev 43: names follow their boxes through the v7
+                // size prune - a uniformly sub-cut/hairline subtree
+                // can neither admit a block nor descend
+                if (n.max_dim as u64) < w.cut
+                    || (n.max_min as u64) < w.hair
+                {
+                    continue;
+                }
                 if !n.bbox.intersects(&clip) {
                     continue;
                 }
@@ -978,7 +986,7 @@ mod tests {
             &Rep::Grid { na: 3, nb: 1, va: (600, 0), vb: (0, 0) },
         );
         let items = bx(-400, 0, 6000, 6000);
-        let n0 = b.bvh_node(&items, p0 as u32, 3, true);
+        let n0 = b.bvh_node(&items, p0 as u32, 3, true, u32::MAX, u32::MAX);
         let top_bb = bx(-400, 0, 6000, 6000);
         b.cell("TOP", 1, 0, &top_bb, &top_bb, p0 as u32, 3, 0, 0,
                n0, 1, 0, 0, m_all, m_all, 0, top_tr, 1, m_all);
@@ -1403,9 +1411,9 @@ mod tests {
         let near = bx(0, 0, 10, 10);
         let far = bx(10_000, 0, 17_010, 10);
         let all = bx(0, 0, 17_010, 10);
-        let root = b.bvh_node(&all, 1, 2, false);
-        b.bvh_node(&near, ps as u32, 1, true);
-        b.bvh_node(&far, ps as u32 + 1, 8, true);
+        let root = b.bvh_node(&all, 1, 2, false, u32::MAX, u32::MAX);
+        b.bvh_node(&near, ps as u32, 1, true, u32::MAX, u32::MAX);
+        b.bvh_node(&far, ps as u32 + 1, 8, true, u32::MAX, u32::MAX);
         b.cell(
             "TOP", 1, 0, &all, &all, ps as u32, 9, 0, 0, root, 3, 0,
             0, txt, txt, 0, b.n_tranges(), 0, txt,

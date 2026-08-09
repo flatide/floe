@@ -465,9 +465,11 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
             frames=job.get("frames", True),
             labels=job.get("labels", True))
         daemon_total += time.perf_counter() - t_req
-        # daemon-reported compute (ms): geometry plan + label walk
-        plan_total += (float(r.get("plan_ms", 0) or 0)
-                       + float(r.get("text_plan_ms", 0) or 0)) / 1000.0
+        # daemon-reported compute (ms). plan_ms is the daemon's
+        # whole serve window and already CONTAINS the label walk -
+        # adding text_plan_ms again once made the status line claim
+        # plan > load (150M field report)
+        plan_total += float(r.get("plan_ms", 0) or 0) / 1000.0
         mosaic.need_reset = False
         # names= arrives ONCE per daemon run and is view-
         # independent: consume it BEFORE the stale check, or a

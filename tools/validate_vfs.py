@@ -36,7 +36,7 @@ def read_ovm(path):
     d = open(path, "rb").read()
     assert d[:8] == b"FLOEOVM1", "magic"
     ver = struct.unpack_from("<I", d, 8)[0]
-    assert ver == 6, ver  # v6: page max_min (hairline cut)
+    assert ver == 7, ver  # v7: bvh size annotations
     top, n_layers, n_cells, n_pages = struct.unpack_from(
         "<IIII", d, 40)
     ovp_len = struct.unpack_from("<Q", d, 72)[0]
