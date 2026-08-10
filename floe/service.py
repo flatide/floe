@@ -436,6 +436,11 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
     # adaptive budget once shrank to its floor and shredded one view
     # into hundreds of such rounds. The LAST allowed round therefore
     # requests stream=0 and swallows the whole remainder.
+    # FLOE_PERF=1: one stderr line per streaming round with the
+    # PER-ROUND phase costs. The status line only shows the settled
+    # cumulative view, so multi-round refine zones (9.8G field) are
+    # unmeasurable from the screen - the office reads the terminal.
+    perf = bool(os.environ.get("FLOE_PERF"))
     load_total = 0.0
     new_total = 0
     # load-phase breakdown (cumulative seconds; sum ~= load_total):
@@ -464,12 +469,14 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
             want_labels=want, lod=job.get("lod", True),
             frames=job.get("frames", True),
             labels=job.get("labels", True))
-        daemon_total += time.perf_counter() - t_req
+        d_req = time.perf_counter() - t_req
+        daemon_total += d_req
         # daemon-reported compute (ms). plan_ms is the daemon's
         # whole serve window and already CONTAINS the label walk -
         # adding text_plan_ms again once made the status line claim
         # plan > load (150M field report)
-        plan_total += float(r.get("plan_ms", 0) or 0) / 1000.0
+        plan_r = float(r.get("plan_ms", 0) or 0)
+        plan_total += plan_r / 1000.0
         mosaic.need_reset = False
         # names= arrives ONCE per daemon run and is view-
         # independent: consume it BEFORE the stale check, or a
@@ -505,7 +512,8 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
             changed = mosaic.apply_hier(r["delta"], r["top"],
                                         r["evict"], labels,
                                         gen=mosaic.req_gen)
-        apply_total += time.perf_counter() - t_ap
+        d_ap = time.perf_counter() - t_ap
+        apply_total += d_ap
         if changed:
             renderer.refresh()
         if mosaic.debug:
@@ -553,7 +561,23 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
         if newer():
             return
         r["new_total"] = new_total
+        dr0 = draw_total[0]
         emit(r, load_total)
+        if perf:
+            import sys as _sys
+            print("[perf] gen=%d round=%d new=%s bytes=%s tiles=%s "
+                  "plan=%.0fms delta=%.0fms apply=%.0fms "
+                  "draw=%.0fms total=%.0fms lod=%s refining=%s "
+                  "settled=%d"
+                  % (mosaic.req_gen, rounds, r.get("new", 0),
+                     r.get("bytes", 0), r.get("pages", 0),
+                     plan_r, max(0.0, d_req * 1000 - plan_r),
+                     d_ap * 1000,
+                     (draw_total[0] - dr0) * 1000,
+                     (t_round + draw_total[0] - dr0) * 1000,
+                     r.get("lod", 0), r.get("deferred", 0) or 0,
+                     0 if r.get("partial") == "1" else 1),
+                  file=_sys.stderr, flush=True)
         if r.get("partial") != "1" or newer():
             return
         # a refinement can run for seconds: serve interactive
