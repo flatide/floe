@@ -2369,6 +2369,14 @@ class Viewer:
             self._toggle_ruler()
         elif name == "m":
             self._toggle_snap()
+        elif name == "C":
+            # Shift+C: frame (cell reference outline) toggle,
+            # Calibre parity; plain c stays unbound (user call)
+            self._set_frames(not self.frames_on)
+        elif name == "k":
+            self._ruler_pop()
+        elif name == "K":
+            self._rulers_clear()
         elif name == "Escape":
             self._esc()
         elif name == "d":
@@ -3035,7 +3043,7 @@ class Viewer:
             else:
                 self._set_live_status(
                     "ruler: click two points (Shift=free angle, "
-                    "m=snap %s, Esc=done)"
+                    "m=snap %s, k=undo, Shift+K=clear, Esc=done)"
                     % ("on" if self.snap_on else "off"))
         self._set_cursor(self._idle_cursor())
         self._display()
@@ -3132,6 +3140,22 @@ class Viewer:
             self.drc_mark = None
         self._display()
 
+    def _ruler_pop(self):
+        """k: delete the most recently created ruler."""
+        if self.rulers:
+            r = self.rulers.pop()
+            if r in self._auto_rulers:
+                self._auto_rulers.remove(r)
+            self._display()
+
+    def _rulers_clear(self):
+        """Shift+K: remove every ruler (and a pending first point)."""
+        if self.rulers or self._ruler_start is not None:
+            self.rulers = []
+            self._auto_rulers = []
+            self._ruler_start = None
+            self._display()
+
     def _cursor_snapped(self):
         if self.snap_on and self._snap_res \
                 and self._snap_res.get("found"):
@@ -3151,7 +3175,8 @@ class Viewer:
     def _ruler_click(self, ev):
         self._update_cursor(ev)
         if self._ruler_start is None:
-            self.rulers = []  # single ruler: starting a new one clears it
+            # rulers accumulate (Calibre): k pops the newest,
+            # Shift+K clears all (user call 2026-08-10)
             self._ruler_start = self._cursor_snapped()
         else:
             x0, y0 = self._ruler_start
