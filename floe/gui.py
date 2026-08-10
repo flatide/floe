@@ -794,6 +794,8 @@ class Viewer:
         self._ddlg = None
         self._gdlg = None
         self._cdlg = None
+        self._digit_last = None     # depth digit-pair state ('99' = full)
+        self._digit_t = 0.0
         # DRC results browser ('e' key)
         self._drc = None            # drc.DrcDb
         self._drcwin = None
@@ -2373,14 +2375,28 @@ class Viewer:
         elif name == "q":
             self._confirm_quit()
         elif len(name) == 1 and name.isdigit():
-            self._set_depth(int(name))
+            self._depth_digit(int(name))
         elif name.startswith("KP_") and name[3:].isdigit():
-            self._set_depth(int(name[3:]))
+            self._depth_digit(int(name[3:]))
         else:
             return False
         return True
 
     # ---- depth -----------------------------------------------------------------
+    def _depth_digit(self, n):
+        """Digit keys set the depth directly. A quick '9 9' (typing
+        99) means FULL depth (999 internally): 'full' never had a
+        key of its own (user call 2026-08-10)."""
+        now = time.time()
+        if n == 9 and self._digit_last == 9 \
+                and now - self._digit_t < 1.0:
+            self._digit_last = None
+            self._set_depth(999)
+            return
+        self._digit_last = n
+        self._digit_t = now
+        self._set_depth(n)
+
     def _depth(self):
         d = self.depth_value
         return None if d >= 999 else max(0, d)
@@ -2395,7 +2411,7 @@ class Viewer:
 
     def _depth_label(self):
         d = self._depth()
-        current = "full" if d is None else str(d)
+        current = "*" if d is None else str(d)
         maximum = ("?" if self.max_depth is None
                    else str(self.max_depth))
         lbl = "depth: %s/%s" % (current, maximum)
