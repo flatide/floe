@@ -520,8 +520,6 @@ class LayerRow(object):
         swatch_h = max(3, probe_height)
         self._swatch_refs = []
         self._swatch_on = self._speckle_swatch(swatch_w, swatch_h)
-        self._swatch_off = self._speckle_swatch(
-            swatch_w, swatch_h, struck=True)
         self._clbl.set_from_pixbuf(self._swatch_on)
         self._clbl.set_size_request(swatch_w, swatch_h)
         self._lbl = Gtk.Label()
@@ -561,15 +559,12 @@ class LayerRow(object):
         self.widget.set_tooltip_text(tooltip)
         self._paint()
 
-    def _speckle_swatch(self, width, height, struck=False):
-        """Layer-palette preview of the renderer's 1px checker fill.
-        struck: the hidden-layer variant - dimmed fill with a bright
-        strike line through the middle, so the row-wide strike does
-        not vanish inside the swatch."""
+    def _speckle_swatch(self, width, height):
+        """Layer-palette preview of the renderer's 1px checker fill
+        (hidden rows keep the same swatch - the row-wide strike from
+        _draw_strike is the only hidden marker)."""
         color = int(self._color.lstrip("#"), 16)
         rgb = ((color >> 16) & 255, (color >> 8) & 255, color & 255)
-        if struck:
-            rgb = tuple(c // 2 for c in rgb)
         rgb_bytes = bytes(rgb)
         pixels = bytearray(width * height * 3)
         for y in range(height):
@@ -579,8 +574,7 @@ class LayerRow(object):
                     continue
                 off = (y * width + x) * 3
                 pixels[off:off + 3] = rgb_bytes
-        # (the strike line itself is drawn row-wide by _draw_strike;
-        # the struck swatch only dims so the line stays single)
+        # (the strike line itself is drawn row-wide by _draw_strike)
         # Keep the immutable backing bytes with the row. Pixbuf normally
         # retains its own GLib reference, and this also makes that lifetime
         # explicit across older GTK3/PyGObject bundles.
@@ -593,11 +587,13 @@ class LayerRow(object):
     def _paint(self):
         fg = ("#fff2a8" if self._picked else
               "#d9f2ff" if self._selected else
-              "#ffffff" if self._active else "#777777")
+              "#ffffff")
         # hidden = ONE bright line cairo-drawn edge to edge by
         # _draw_strike (no per-span pango strike: it vanished in
-        # the margins/swatch gaps and doubled over a drawn line);
-        # text dims and the swatch swaps to its dimmed variant
+        # the margins/swatch gaps and doubled over a drawn line).
+        # Text and swatch keep their full colors - the strike alone
+        # marks the hidden state (dimmed text was too dark to read,
+        # user call 2026-08-10)
         self._mlbl.set_markup(
             '<span face="monospace" size="medium" '
             'foreground="%s">%s</span>'
@@ -609,8 +605,7 @@ class LayerRow(object):
         self._lbl.set_markup(
             '<span size="medium" foreground="%s">%s</span>'
             % (fg, GLib.markup_escape_text(self._name)))
-        self._clbl.set_from_pixbuf(
-            self._swatch_on if self._active else self._swatch_off)
+        self._clbl.set_from_pixbuf(self._swatch_on)
         self.widget.queue_draw()
 
     def _draw_strike(self, widget, cr):
