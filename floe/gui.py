@@ -1001,6 +1001,29 @@ class Viewer:
         self._left_pane.pack_end(self._minimap_event,
                                  False, False, 4)
 
+        # layer color palette (user call 2026-08-10): click a layer
+        # row to select it, then a swatch here to recolor. Personal
+        # overrides persist under ~/.cache/floe; meta.json untouched.
+        pal = Gtk.Grid()
+        pal.set_row_spacing(2)
+        pal.set_column_spacing(2)
+        pal.set_halign(Gtk.Align.CENTER)
+        for i, col in enumerate(PALETTE_COLORS):
+            pix = GdkPixbuf.Pixbuf.new(
+                GdkPixbuf.Colorspace.RGB, False, 8, 18, 14)
+            pix.fill((int(col.lstrip("#"), 16) << 8) | 0xFF)
+            img = Gtk.Image()
+            img.set_from_pixbuf(pix)
+            eb = Gtk.EventBox()
+            eb.add(img)
+            eb.set_tooltip_text(
+                "%s - recolor the selected layer(s)" % col)
+            eb.connect("button-press-event",
+                       lambda _w, _e, c=col:
+                       self._apply_palette_color(c))
+            pal.attach(eb, i % 8, i // 8, 1, 1)
+        side.pack_start(pal, False, False, 4)
+
         brow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
         side.pack_start(brow, False, False, 4)
         for text, cb in (("fit", lambda: self.fit()),
