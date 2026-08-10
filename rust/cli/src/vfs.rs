@@ -66,6 +66,10 @@ pub fn vfs_cmd(args: &[String]) {
     // include, --coverage-only to add design.ovc to an existing cache
     let mut coverage = false;
     let mut coverage_only = false;
+    // rev 46b: recompute the meta.json minimap frontier from an
+    // existing cache's design.ovm - no source parse, seconds even
+    // on the 9.8G class
+    let mut frontier_only = false;
     // #61: LOD variants are optional. They only serve the planner's
     // density gate, whose operating window the rev 41/43/45 ladder
     // largely absorbed - and their generation dominates monster-cell
@@ -116,6 +120,10 @@ pub fn vfs_cmd(args: &[String]) {
                 lod = false;
                 i += 1;
             }
+            "--frontier-only" => {
+                frontier_only = true;
+                i += 1;
+            }
             "--kill-at" => {
                 kill_at = Some(args[i + 1].clone());
                 i += 2;
@@ -150,6 +158,21 @@ pub fn vfs_cmd(args: &[String]) {
     let page_target_bytes = page_target_mb
         .checked_mul(MIB)
         .expect("limit exceeded: page target bytes");
+    if frontier_only {
+        let t0 = std::time::Instant::now();
+        let v = floe_vfs::Vfs::open(&outdir).unwrap_or_else(|e| {
+            eprintln!("--frontier-only: {}", e);
+            std::process::exit(1);
+        });
+        let fj = frontier_json_planned(&v.ovm);
+        patch_meta_frontier(&format!("{}/meta.json", outdir), &fj);
+        eprintln!(
+            "[vfs] frontier rebaked in {:.1}s -> {}/meta.json",
+            t0.elapsed().as_secs_f64(),
+            outdir
+        );
+        return;
+    }
     let t0 = std::time::Instant::now();
     eprintln!("[vfs] reading {}...", src);
     let data = std::fs::read(&src).expect("read src");
@@ -290,8 +313,21 @@ pub fn vfs_cmd(args: &[String]) {
             eprintln!("[vfs] --kill-at ovt-written");
             std::process::exit(9);
         }
+        // rev 46b: bake the minimap frontier through the real
+        // planner. The built bytes move into an Ovm view (deep
+        // validation included - a free extra gate) and move back
+        // out for the design.ovm commit below.
+        let (frontier, ovm_bytes) = {
+            let ovm = floe_ovm::Ovm::from_bytes(ovm_bytes)
+                .expect("reopen built ovm");
+            let fj = frontier_json_planned(&ovm);
+            match ovm.data {
+                floe_ovm::Backing::Vec(v) => (fj, v),
+                floe_ovm::Backing::Map(_) => unreachable!(),
+            }
+        };
         emit_viewer_side(&doc, &src, size, mtime, &outdir, &rbb,
-                         &lmems, &tstats);
+                         &lmems, &tstats, &frontier);
         if coverage {
             write_coverage(&doc, &outdir, jobs);
         }
@@ -332,225 +368,107 @@ fn write_coverage(doc: &Doc, outdir: &str, jobs: usize) {
     );
 }
 
-/// minimap frontier bake (rev 30): boxes must stay readable on a
-/// ~180 px minimap, so anything under die/512 is skipped - and
-/// because a child's placed box is contained in its parent's, the
-/// whole subtree prunes with it (the path-expansion guard)
-const FRONTIER_MIN_DIV: i64 = 512;
-/// stored boxes per depth ceiling. When a depth exceeds this, the
-/// survivors are chosen by a SPATIAL round-robin (FRONTIER_GRID
-/// cells, biggest-first within each) so no die region is starved -
-/// a pure biggest-first global cap dropped whole quiet regions.
+/// rev 46b minimap frontier: baked at INDEX time through the real
+/// planner - for every depth, plan_hier at a canonical fit scale
+/// (nominal canvas, medium detail) and expand the WS frame set to
+/// world boxes (floe_vfs::hier::frontier_boxes). The minimap is the
+/// fit view's own frame set by construction; the old raw-hierarchy
+/// DFS bake (rev 30) burned per-depth scan budgets in DFS order and
+/// left regional holes on 184M-placement chips. The canonical
+/// parameters ride in the meta object so the L9 gate can replay
+/// them against vfsd mode=frontier and demand byte equality.
 const FRONTIER_KEEP: usize = 6000;
-/// spatial fairness grid over the die for the keep round-robin
-const FRONTIER_GRID: i64 = 64;
-/// per-depth member enumeration budget; a runaway guard only (the
-/// sub-min child prune already skips fill farms before enumerating,
-/// so a real chip never reaches this). Exhaustion flags the depth
-/// truncated. High enough that normal designs are never DFS-biased.
-const FRONTIER_SCAN: u64 = 1_000_000;
 /// depth buckets beyond this are meaningless on a minimap
-const FRONTIER_DEPTH_CAP: usize = 32;
+const FRONTIER_DEPTH_CAP: u32 = 32;
+/// canonical bake scale: a nominal canvas width at medium detail
+const FRONTIER_CANVAS_PX: f64 = 1200.0;
+const FRONTIER_CUT_PX: f64 = 3.0;
 
-/// up to `cap` member offsets WITHOUT materializing the repetition
-/// (rep_offsets builds the full na*nb Vec); returns visited count
-fn frontier_offsets(
-    rep: &Rep,
-    cap: u64,
-    f: &mut impl FnMut(i64, i64),
-) -> u64 {
-    if cap == 0 {
-        return 0;
+fn frontier_json_planned(v: &floe_ovm::Ovm) -> String {
+    if v.n_cells == 0 {
+        return "{\"depths\": []}".to_string();
     }
-    let mut seen = 0u64;
-    match rep {
-        Rep::One => {
-            f(0, 0);
-            seen = 1;
-        }
-        Rep::Grid { na, nb, va, vb } => {
-            'outer: for j in 0..*nb as i64 {
-                for i in 0..*na as i64 {
-                    if seen >= cap {
-                        break 'outer;
-                    }
-                    f(i * va.0 + j * vb.0, i * va.1 + j * vb.1);
-                    seen += 1;
-                }
-            }
-        }
-        Rep::Pts(p) => {
-            for &(x, y) in p.iter().take(cap as usize) {
-                f(x, y);
-                seen += 1;
-            }
-        }
+    let top = v.cell(v.top);
+    let die = top.rbbox;
+    let unit = v.unit;
+    let die_um = ((die.x1 - die.x0).max(1) as f64 / unit)
+        .max((die.y1 - die.y0).max(1) as f64 / unit)
+        .max(1e-9);
+    // the viewer's fit view: canvas px over the die + its 5% margin
+    let px_per_um = FRONTIER_CANVAS_PX / (die_um * 1.05);
+    let px_per_dbu = px_per_um / unit;
+    let cut_dbu = (FRONTIER_CUT_PX / px_per_dbu) as i64;
+    let vis = vec![0xffu8; (v.n_layers as usize + 7) / 8];
+    let opts = floe_vfs::hier::HierOpts::default();
+    let mut depths: Vec<String> = Vec::new();
+    for d in 0..top.height.min(FRONTIER_DEPTH_CAP) {
+        let req = floe_vfs::ViewReq {
+            view: die,
+            cut_dbu,
+            vis: vis.clone(),
+            depth: d,
+            px_per_dbu,
+        };
+        let plan = floe_vfs::hier::plan_hier(v, &req, &opts);
+        let boxes = floe_vfs::hier::frontier_boxes(
+            v,
+            &plan,
+            FRONTIER_KEEP,
+        );
+        let rows: Vec<String> = boxes
+            .iter()
+            .map(|(b, band)| {
+                format!(
+                    "[{},{},{},{},{}]",
+                    b[0], b[1], b[2], b[3], band
+                )
+            })
+            .collect();
+        depths.push(format!("[{}]", rows.join(",")));
     }
-    seen
-}
-
-/// per-depth structural-frontier boxes for the minimap, as the
-/// meta.json "frontier" object. Bucket d holds the placed bboxes of
-/// path-depth d+1 members - exactly the planner's request-depth-d
-/// frame set (the planner's r>=height fold never cuts a path that
-/// actually reaches the bucket's depth, so no fold logic is needed;
-/// empty deep buckets ARE the folded/absent frontier). One DFS,
-/// min-size subtree pruning, biggest-first per-depth cap.
-fn frontier_json(
-    doc: &Doc,
-    rbb: &[Option<(i64, i64, i64, i64)>],
-) -> String {
-    let die = rbb[doc.top].unwrap_or((0, 0, 0, 0));
-    let min_dim =
-        ((die.2 - die.0).max(die.3 - die.1) / FRONTIER_MIN_DIV)
-            .max(1);
-    let mut buckets: Vec<Vec<(i128, [i64; 4])>> = Vec::new();
-    let mut scanned: Vec<u64> = Vec::new();
-    let mut truncated: Vec<bool> = Vec::new();
-    let mut stack: Vec<(usize, usize, Xf)> =
-        vec![(doc.top, 0, Xf::identity())];
-    while let Some((ci, k, xf)) = stack.pop() {
-        if k >= FRONTIER_DEPTH_CAP {
-            continue;
-        }
-        while buckets.len() <= k {
-            buckets.push(Vec::new());
-            scanned.push(0);
-            truncated.push(false);
-        }
-        for pl in &doc.cells[ci].places {
-            let cb = match rbb[pl.cell] {
-                Some(b) => b,
-                None => continue,
-            };
-            // a placed box's max dimension is rotation-invariant, so
-            // a sub-min CHILD disqualifies every member without
-            // enumerating one - fill farms must not eat the scan
-            // budget before the real blocks are reached
-            if (cb.2 - cb.0).max(cb.3 - cb.1) < min_dim {
-                continue;
-            }
-            if scanned[k] >= FRONTIER_SCAN {
-                truncated[k] = true;
-                break;
-            }
-            let budget = FRONTIER_SCAN - scanned[k];
-            let seen = frontier_offsets(
-                &pl.rep,
-                budget,
-                &mut |ox, oy| {
-                    let m = xf.compose(&Xf::place(
-                        pl.x + ox,
-                        pl.y + oy,
-                        pl.rot,
-                        pl.flip,
-                    ));
-                    let a = m.apply(cb.0, cb.1);
-                    let b2 = m.apply(cb.2, cb.3);
-                    let bx = [
-                        a.0.min(b2.0),
-                        a.1.min(b2.1),
-                        a.0.max(b2.0),
-                        a.1.max(b2.1),
-                    ];
-                    let (w, h) = (bx[2] - bx[0], bx[3] - bx[1]);
-                    if w.max(h) < min_dim {
-                        // descendants are strictly contained:
-                        // prune the whole member subtree
-                        return;
-                    }
-                    buckets[k].push((w as i128 * h as i128, bx));
-                    stack.push((pl.cell, k + 1, m));
-                },
-            );
-            scanned[k] += seen;
-            if seen < pl.rep.members() {
-                truncated[k] = true; // budget cut this rep short
-            }
-        }
+    while depths.last().is_some_and(|d| d == "[]") {
+        depths.pop();
     }
-    // per depth: biggest-first with deterministic ties. Over the
-    // ceiling, pick survivors by a SPATIAL round-robin so every die
-    // region keeps its dominant boxes (a global biggest-first cap
-    // starved whole quiet regions). Trailing empties dropped (their
-    // absence IS the "no frontier here" signal).
-    let diew = (die.2 - die.0).max(1);
-    let dieh = (die.3 - die.1).max(1);
-    let gcell = |bx: &[i64; 4]| -> (i64, i64) {
-        let cx = (bx[0] as i128 + bx[2] as i128) / 2 - die.0 as i128;
-        let cy = (bx[1] as i128 + bx[3] as i128) / 2 - die.1 as i128;
-        (
-            (cx * FRONTIER_GRID as i128 / diew as i128)
-                .clamp(0, (FRONTIER_GRID - 1) as i128) as i64,
-            (cy * FRONTIER_GRID as i128 / dieh as i128)
-                .clamp(0, (FRONTIER_GRID - 1) as i128) as i64,
-        )
-    };
-    for b in buckets.iter_mut() {
-        b.sort_by_key(|&(area, bx)| (std::cmp::Reverse(area), bx));
-        if b.len() > FRONTIER_KEEP {
-            // group biggest-first into spatial cells, then round
-            // -robin across cells (BTreeMap = deterministic order)
-            let mut cells: std::collections::BTreeMap<
-                (i64, i64),
-                Vec<(i128, [i64; 4])>,
-            > = std::collections::BTreeMap::new();
-            for &item in b.iter() {
-                cells.entry(gcell(&item.1)).or_default().push(item);
-            }
-            let mut kept: Vec<(i128, [i64; 4])> =
-                Vec::with_capacity(FRONTIER_KEEP);
-            let mut round = 0usize;
-            loop {
-                let mut added = false;
-                for v in cells.values() {
-                    if let Some(&item) = v.get(round) {
-                        kept.push(item);
-                        added = true;
-                        if kept.len() >= FRONTIER_KEEP {
-                            break;
-                        }
-                    }
-                }
-                if !added || kept.len() >= FRONTIER_KEEP {
-                    break;
-                }
-                round += 1;
-            }
-            kept.sort_by_key(|&(area, bx)| {
-                (std::cmp::Reverse(area), bx)
-            });
-            *b = kept;
-        }
-    }
-    while buckets.last().is_some_and(|b| b.is_empty()) {
-        buckets.pop();
-        truncated.pop();
-    }
-    let depths: Vec<String> = buckets
-        .iter()
-        .map(|b| {
-            let rows: Vec<String> = b
-                .iter()
-                .map(|(_, x)| {
-                    format!("[{},{},{},{}]", x[0], x[1], x[2], x[3])
-                })
-                .collect();
-            format!("[{}]", rows.join(","))
-        })
-        .collect();
-    let trunc: Vec<&str> = truncated
-        .iter()
-        .map(|&t| if t { "true" } else { "false" })
-        .collect();
     format!(
-        "{{\"min\": {}, \"keep\": {}, \"truncated\": [{}], \
+        "{{\"keep\": {}, \"px_per_um\": {}, \"cut_px\": {}, \
          \"depths\": [{}]}}",
-        min_dim,
         FRONTIER_KEEP,
-        trunc.join(","),
+        px_per_um,
+        FRONTIER_CUT_PX,
         depths.join(",")
     )
+}
+
+/// --frontier-only: splice a fresh "frontier" object into an
+/// existing meta.json (the value holds no strings, so a balanced-
+/// brace scan from its opening brace is exact)
+fn patch_meta_frontier(path: &str, frontier: &str) {
+    let meta = std::fs::read_to_string(path).expect("read meta");
+    let key = "\"frontier\":";
+    let k = meta.find(key).expect("meta has no frontier key");
+    let open = k + key.len()
+        + meta[k + key.len()..]
+            .find('{')
+            .expect("frontier value not an object");
+    let mut depth = 0usize;
+    let mut end = open;
+    for (i, c) in meta[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = open + i + 1;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(end > open, "unbalanced frontier object");
+    let out =
+        format!("{}{}{}", &meta[..open], frontier, &meta[end..]);
+    std::fs::write(path, out).expect("write meta");
 }
 
 /// meta.json: the viewer-facing summary (dbu/bbox/grid/layers+
@@ -563,6 +481,7 @@ fn frontier_json(
 /// frontier walk is min-size-pruned and budget-capped). grid
 /// stays synthetic on the .ice formula (legacy meta shape).
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn emit_viewer_side(
     doc: &Doc,
     src: &str,
@@ -572,6 +491,7 @@ fn emit_viewer_side(
     rbb: &[Option<(i64, i64, i64, i64)>],
     lmems: &[u64],
     tstats: &TextIndexStats,
+    frontier: &str,
 ) {
     let t0 = std::time::Instant::now();
     let bbox = rbb[doc.top].unwrap_or((0, 0, 0, 0));
@@ -679,7 +599,7 @@ fn emit_viewer_side(
         tstats.grid_reps,
         tstats.pts_reps,
         tstats.string_bytes + tstats.pts_bytes,
-        frontier_json(doc, rbb),
+        frontier,
     );
     std::fs::write(format!("{}/meta.json", outdir), meta)
         .expect("write meta");

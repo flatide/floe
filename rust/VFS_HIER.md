@@ -2143,3 +2143,24 @@ rev 46 (미니맵 = 라이브 프런티어 — 2026-08-10, 0.11.27):
   유지. 재인덱싱 불필요, 포맷 불변.
 - 게이트: frontier_boxes_expand_ws_world_space(월드 전개·keep
   캡·결정성), thintest 데몬/서비스 스모크 1705박스, 스위트 green.
+
+rev 46b (프런티어를 인덱싱 산출물로 — 2026-08-10, 0.11.28):
+
+- 사용자 지적 반영: 라이브 요청 대신 **인덱싱 마지막에 굽기** —
+  design.ovm 커밋 직전 depth 0..min(height,32) 각각을
+  frontier_json_planned로 플랜(정준 파라미터: 캔버스 1200px fit
+  스케일×1.05 마진, cut 3px=medium, hair/thin 기본) →
+  frontier_boxes 전개 → meta.json frontier{keep, px_per_um,
+  cut_px, depths[[x0,y0,x1,y1,band]..]}. 뷰어는 meta 소비로 복귀
+  (지연 0, 라이브 요청 경로 제거). from_bytes 재검증이 공짜
+  게이트로 추가됨(빌드 바이트 딥 밸리데이션).
+- **--frontier-only**: 기존 캐시의 design.ovm만으로 meta
+  frontier 재계산(소스 파스 없음 — thintest 0.0s, 9.8G도 초
+  단위 예상). 9.8G 미니맵 수리는 재인덱싱 없이 이걸로.
+- vfsd mode=frontier는 유지 — **L9 게이트의 오라클**: meta의
+  정준 파라미터를 재생(뷰는 µm 외향 라운딩 — 플랜 시드가 rbbox로
+  클립되므로 상위집합 뷰는 동일 플랜)해 굽기와 박스 단위 일치
+  요구. validate_vfs.py는 신 스키마 검사로 교체(구 rev 30 원시
+  전개 오라클 폐기).
+- 구 DFS 굽기(frontier_json/frontier_offsets/MIN_DIV/SCAN) 삭제.
+  detail 변경 시 미니맵은 medium 정준 유지(항법 크롬 판단).

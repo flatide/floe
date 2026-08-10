@@ -31,6 +31,7 @@ usage: python tools/validate_vfs_lifecycle.py <src.oas> <floe_dir>
 """
 import functools
 import json
+import math
 import os
 import sys
 
@@ -448,7 +449,51 @@ def main():
 
     sly._destroy()
 
-    print("vfs-lifecycle-checked L1-L8, failures: %d" % len(bad))
+    # ---- L9 (rev 46b): the baked meta frontier IS the planner's
+    # fit-view frame set - replaying its canonical parameters
+    # through vfsd mode=frontier must reproduce it box for box.
+    # (The view is rounded OUTWARD in um: plan seeds clip to the
+    # top rbbox, so any superset view yields the identical plan.)
+    fr = cache.meta.get("frontier") or {}
+    chk(bool(fr.get("depths")), "L9 meta has no baked frontier")
+    chk("px_per_um" in fr and "cut_px" in fr,
+        "L9 baked frontier lacks canonical parameters")
+    if fr.get("depths") and "px_per_um" in fr:
+        s = Sess(cache, stream_kb=0)
+        try:
+            mb = cache.meta["bbox"]
+            mdbu = cache.meta["dbu"]
+            vw = (math.floor(mb[0] * mdbu) - 1,
+                  math.floor(mb[1] * mdbu) - 1,
+                  math.ceil(mb[2] * mdbu) + 1,
+                  math.ceil(mb[3] * mdbu) + 1)
+            for d, want in enumerate(fr["depths"]):
+                line = ("gen=%d mode=frontier view=%s,%s,%s,%s "
+                        "px=%r cut=%r depth=%d layers=all out=%s\n"
+                        % (900 + d, vw[0], vw[1], vw[2], vw[3],
+                           fr["px_per_um"], fr["cut_px"], d,
+                           s.client.tmp))
+                s.client.proc.stdin.write(line)
+                s.client.proc.stdin.flush()
+                resp = s.client.proc.stdout.readline()
+                toks = dict(t.split("=", 1)
+                            for t in resp.split() if "=" in t)
+                chk("frontier" in toks,
+                    "L9 depth %d: no frontier reply (%s)"
+                    % (d, resp.strip()))
+                if "frontier" not in toks:
+                    continue
+                rows = sorted(tuple(map(int, ln.split()))
+                              for ln in open(toks["frontier"]))
+                os.unlink(toks["frontier"])
+                chk(rows == sorted(tuple(r) for r in want),
+                    "L9 depth %d: bake != mode=frontier replay "
+                    "(%d vs %d boxes)"
+                    % (d, len(want), len(rows)))
+        finally:
+            s.stop()
+
+    print("vfs-lifecycle-checked L1-L9, failures: %d" % len(bad))
     sys.exit(1 if bad else 0)
 
 
