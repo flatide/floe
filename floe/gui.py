@@ -56,7 +56,12 @@ FIT_ZOOM_OUT = 16.0  # max zoom-out: 16x beyond the fit view. The size
                      # Calibre wide-view comparisons need room past
                      # fit; the die stays centered out there.
 WHEEL_ZOOM_STEP = 0.96  # at most 4% per wheel event (was 10%)
-KEY_PAN_FRACTION = 0.10  # arrows move one tenth of the current viewport
+# Calibre-parity keys (user call 2026-08-10): arrows pan half the
+# viewport, Ctrl+arrows the old fine tenth; Ctrl+Z halves the view
+# span (zoom in 50%), Shift+Z doubles it back.
+KEY_PAN_FRACTION = 0.50
+KEY_PAN_FRACTION_FINE = 0.10
+CAL_ZOOM_IN = 0.5        # spp factor for Ctrl+Z (Shift+Z = inverse)
 
 MINIMAP_PX = 180           # square palette area; die keeps its aspect ratio
 MINIMAP_DOT_MIN = 6        # view box smaller than this becomes a dot
@@ -2285,11 +2290,12 @@ class Viewer:
         self.spp *= factor
         self.redraw()
 
-    def _pan_view(self, direction):
-        """Move the viewport by a fixed fraction of its visible extent."""
+    def _pan_view(self, direction, frac=KEY_PAN_FRACTION):
+        """Move the viewport by a fraction of its visible extent
+        (arrows: half; Ctrl+arrows: the fine tenth - Calibre)."""
         width, height = self._viewport_size()
-        dx = width * self.spp * KEY_PAN_FRACTION
-        dy = height * self.spp * KEY_PAN_FRACTION
+        dx = width * self.spp * frac
+        dy = height * self.spp * frac
         if direction == "Left":
             self.cx -= dx
         elif direction == "Right":
@@ -2336,12 +2342,25 @@ class Viewer:
         if isinstance(focus, Gtk.Entry):
             return False  # typing in the depth spinbox etc.
         name = self._command_key(ev)
-        if name == "f":
+        ctrl = bool(ev.state & Gdk.ModifierType.CONTROL_MASK)
+        # Calibre-parity chords first, so Ctrl+A never falls through
+        # to the plain-letter branches below
+        if ctrl and name in ("z", "Z"):
+            self._zoom_center(CAL_ZOOM_IN)     # zoom in 50%
+        elif name == "Z":
+            self._zoom_center(1 / CAL_ZOOM_IN)  # Shift+Z: out 50%
+        elif ctrl and name in ("a", "A"):
+            self.fit()                          # zoom all
+        elif ctrl and name == "period":
+            self._goto_dialog()                 # Ctrl+.
+        elif name == "f":
             self._set_frames(not self.frames_on)
         elif name in ("Left", "Right", "Up", "Down"):
-            self._pan_view(name)
+            self._pan_view(name, KEY_PAN_FRACTION_FINE if ctrl
+                           else KEY_PAN_FRACTION)
         elif name in ("KP_Left", "KP_Right", "KP_Up", "KP_Down"):
-            self._pan_view(name[3:])
+            self._pan_view(name[3:], KEY_PAN_FRACTION_FINE if ctrl
+                           else KEY_PAN_FRACTION)
         elif name in ("plus", "equal", "KP_Add"):
             self._zoom_center(1 / 1.25)
         elif name in ("minus", "KP_Subtract"):
