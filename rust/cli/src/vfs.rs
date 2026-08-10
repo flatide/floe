@@ -3720,6 +3720,10 @@ pub fn plan_cmd(args: &[String]) {
 ///   gen=1 view=x0,y0,x1,y1 px=5 cut=2 depth=full lod=1 frames=1 \
 ///     labels=1 [hair=0.5] [thin=7.0] \
 ///     layers=all|none|11/0,12/0 out=/tmp/dir
+/// mode=frontier (rev 46, session-less): plan at the given
+///   px/cut/depth and write the world-space frame boxes as
+///   out/frontier_GEN.tsv (x0 y0 x1 y1 band per row, spatially
+///   capped) - response `gen=N frontier=path boxes=N plan_ms=F`
 /// response:
 ///   gen=1 pages=N new=N evict=name,.. delta=path placements=path \
 ///     bytes=N plan_ms=F resident_mb=F
@@ -3904,6 +3908,12 @@ fn serve_one(d: &mut Daemon, line: &str) -> Result<String, String> {
     let out = out.ok_or("out required")?;
     let mut req =
         make_req(d.v, view, px, cut, depth, layers.as_deref());
+    // rev 46: session-less minimap frontier - plan at the CANVAS
+    // fit scale (px kept: the cut/band/lattice ladder must match
+    // the main view), expand the WS frame set to world boxes
+    if mode == "frontier" {
+        return serve_frontier(d, &req, gen, hair, thin, &out);
+    }
     // measurement paths are EXACT by construction: probes never
     // take the LOD density gate. lod=0 disables the gate via
     // lod_k inside serve_hier - NOT by erasing the screen scale:
@@ -3918,6 +3928,46 @@ fn serve_one(d: &mut Daemon, line: &str) -> Result<String, String> {
     let label_px = if nolabels || !labels { 0.0 } else { label_px };
     serve_hier(d, &req, gen, ack, reset, probe, stream_kb,
                label_px, frames, lod, hair, thin, &out)
+}
+
+/// rev 46 minimap frontier: plan_hier at the requested depth/scale
+/// (viewer knobs passed through), expand the frame set to world
+/// boxes (floe_vfs::hier::frontier_boxes), write one TSV
+/// `x0 y0 x1 y1 band` per row. Session-less like the probes.
+fn serve_frontier(
+    d: &mut Daemon,
+    req: &floe_vfs::ViewReq,
+    gen: u64,
+    hair: f64,
+    thin: f64,
+    out: &str,
+) -> Result<String, String> {
+    let t0 = std::time::Instant::now();
+    let mut opts = floe_vfs::hier::HierOpts::default();
+    opts.hairline = hair;
+    opts.thin_lattice_um = thin;
+    let plan = floe_vfs::hier::plan_hier(&d.v.ovm, req, &opts);
+    let boxes =
+        floe_vfs::hier::frontier_boxes(&d.v.ovm, &plan, 6000);
+    std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
+    let p = format!("{}/frontier_{}.tsv", out, gen);
+    let mut w = String::with_capacity(boxes.len() * 40);
+    for (bx, band) in &boxes {
+        use std::fmt::Write as _;
+        let _ = writeln!(
+            w,
+            "{}\t{}\t{}\t{}\t{}",
+            bx[0], bx[1], bx[2], bx[3], band
+        );
+    }
+    std::fs::write(&p, w).map_err(|e| e.to_string())?;
+    Ok(format!(
+        "gen={} frontier={} boxes={} plan_ms={:.2}",
+        gen,
+        p,
+        boxes.len(),
+        t0.elapsed().as_secs_f64() * 1e3
+    ))
 }
 
 /// hier-mode request (VFS_HIER.md par.3.5/3.7): resolve the ack (or

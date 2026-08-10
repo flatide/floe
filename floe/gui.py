@@ -737,6 +737,10 @@ class Viewer:
         self._layer_select_anchor = None
         self._pick_expanded = None  # group auto-expanded for a pick
         self._frontier_depths = []  # baked minimap frontier (meta)
+        # rev 46: live frontier from the daemon (exact fit-view frame
+        # set per depth) - keyed (depth, cut_px); meta is the fallback
+        self._frontier_live = {}
+        self._frontier_inflight = set()
         self._minimap_bases = {}    # depth -> rendered base pixbuf
         self._layer_order = []
         self._layer_menu = None
@@ -1077,6 +1081,8 @@ class Viewer:
         # caches; absent key = plain minimap) + per-depth base cache
         self._frontier_depths = (self.meta.get("frontier")
                                  or {}).get("depths") or []
+        self._frontier_live = {}
+        self._frontier_inflight = set()
         self._minimap_bases = {}
         self.last_frame = None
         self._frame_anchor = None
@@ -1493,15 +1499,51 @@ class Viewer:
 
     def _minimap_frontier_depth(self):
         """Bucket the minimap mirrors: the CURRENT semantic depth.
-        None = no frontier layer (full depth, beyond the baked/
-        folded range, or an old cache). The minimap is navigation chrome,
-        so its frontier remains visible when main-view frames are off."""
-        if not getattr(self, "_frontier_depths", None):
-            return None
+        None = no frontier layer (full depth, or a cache with
+        neither a daemon nor a baked frontier). The minimap is
+        navigation chrome, so its frontier remains visible when
+        main-view frames are off."""
         d = self.depth_value
-        if d >= 999 or d >= len(self._frontier_depths):
+        if d >= 999:
+            return None
+        if self.meta.get("vfs"):
+            return d  # rev 46: the live frontier serves any depth
+        if not getattr(self, "_frontier_depths", None) \
+                or d >= len(self._frontier_depths):
             return None
         return d
+
+    def _frontier_boxes_for(self, d):
+        """Frontier boxes for depth d: the daemon's live fit-view
+        frame set when available (requested lazily), else the baked
+        meta vectors (old caches / daemon errors)."""
+        key = (d, self.cut_px)
+        if key in self._frontier_live:
+            live = self._frontier_live[key]
+            if live is not None:
+                return live
+            # None = daemon failed once: stay on meta, no refetch
+        else:
+            self._request_frontier(d, key)
+        if d < len(self._frontier_depths):
+            return self._frontier_depths[d]
+        return []
+
+    def _request_frontier(self, d, key):
+        if not self.meta.get("vfs") \
+                or key in self._frontier_inflight:
+            return
+        self._frontier_inflight.add(key)
+        bb = self.meta["bbox"]
+        # plan at the CANVAS fit scale: the px cut ladder must match
+        # the main view, then the boxes downscale onto the panel
+        px_per_um = (1.0 / max(1e-12, self._fit_spp())) / self.dbu
+        self.worker.submit({
+            "kind": "frontier", "depth": int(d),
+            "cut_px": self.cut_px,
+            "view": (bb[0] * self.dbu, bb[1] * self.dbu,
+                     bb[2] * self.dbu, bb[3] * self.dbu),
+            "px_per_um": px_per_um})
 
     def _minimap_world_point(self, px, py):
         """Map a panel pixel inside the die to world coordinates."""
@@ -1544,10 +1586,12 @@ class Viewer:
             fill_rect(disp, x0, y0, mw, mh, MINIMAP_BG)
             frame_rect(disp, x0, y0, mw, mh, MINIMAP_EDGE)
             if d is not None:
-                for fx0, fy0, fx1, fy1 in self._frontier_depths[d]:
+                for row in self._frontier_boxes_for(d):
+                    fx0, fy0, fx1, fy1 = row[0], row[1], \
+                        row[2], row[3]
                     w = (fx1 - fx0) * scale
                     h = (fy1 - fy0) * scale
-                    if w < 2 and h < 2:
+                    if w < 0.7 and h < 0.7:
                         continue  # sub-pixel dust stays off the map
                     frame_rect(disp,
                                x0 + (fx0 - bb[0]) * scale,
@@ -1987,6 +2031,18 @@ class Viewer:
         elif kind == "pick":
             if res["seq"] == self._pick_seq:
                 self._on_pick_result(res)
+        elif kind == "frontier":
+            key = (res.get("depth"), res.get("cut_px"))
+            self._frontier_inflight.discard(key)
+            if res.get("error"):
+                # daemon failed: pin the meta fallback (no refetch
+                # loop; a reload starts fresh)
+                self._frontier_live[key] = None
+            else:
+                self._frontier_live[key] = [
+                    tuple(b) for b in res.get("boxes") or []]
+            self._minimap_bases.pop(res.get("depth"), None)
+            self._display()
         elif kind == "clip":
             self._set_live_status(
                 "clip saved: %s (%.2f MB, %d ms)"
@@ -2476,6 +2532,9 @@ class Viewer:
     def _set_detail(self, n):
         self.detail = max(0, min(len(DETAIL_PX) - 1, int(n)))
         self.cut_px = DETAIL_PX[self.detail]
+        # the live minimap frontier follows the cut: rebuild bases
+        # (the new (depth, cut) key refetches lazily)
+        self._minimap_bases = {}
         self._on_depth()  # same refresh: status label + re-render
 
     def _toggle_abstract(self):

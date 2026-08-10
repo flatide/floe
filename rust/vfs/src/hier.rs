@@ -510,6 +510,169 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
     }
 }
 
+/// Rev 46: world-space frame boxes for the MINIMAP - the exact set
+/// a fit view at this plan's depth/cut draws, expanded from the WS
+/// tree and thinned by a spatial round-robin keep. (The baked meta
+/// frontier walked the raw hierarchy with DFS-order scan budgets
+/// and left regional holes on 184M-placement chips; planning at
+/// the canvas fit scale reuses the whole rev 41/43/45 ladder and
+/// matches the main view by construction.) Deterministic: WS map
+/// order, in-order rep enumeration, strict-greater replacement.
+pub fn frontier_boxes(
+    v: &Ovm,
+    plan: &HierPlan,
+    keep: usize,
+) -> Vec<([i64; 4], u8)> {
+    const GRID: i128 = 64;
+    /// per grid cell candidates kept while streaming
+    const PER_CELL: usize = 4;
+    /// expansion work guard (frame members + instance pushes)
+    const BUDGET: u64 = 8_000_000;
+    if v.n_cells == 0 || plan.wcells.is_empty() {
+        return Vec::new();
+    }
+    let die = v.cell(v.top).rbbox;
+    let (dw, dh) = (
+        ((die.x1 - die.x0).max(1)) as i128,
+        ((die.y1 - die.y0).max(1)) as i128,
+    );
+    let by_key: HashMap<WsKey, &WsCell> =
+        plan.wcells.iter().map(|w| (w.key, w)).collect();
+    let mut cells: BTreeMap<
+        (i64, i64),
+        Vec<(i128, [i64; 4], u8)>,
+    > = BTreeMap::new();
+    let mut budget = BUDGET;
+    let mut stack: Vec<(WsKey, Xf)> =
+        vec![(plan.top, Xf::identity())];
+    while let Some((key, xf)) = stack.pop() {
+        let wc = match by_key.get(&key) {
+            Some(wc) => *wc,
+            None => continue,
+        };
+        for (rect, rep, band) in &wc.frames {
+            each_rep_offset(rep, &mut budget, &mut |ox, oy| {
+                let m = BBox {
+                    x0: rect.x0.saturating_add(ox),
+                    y0: rect.y0.saturating_add(oy),
+                    x1: rect.x1.saturating_add(ox),
+                    y1: rect.y1.saturating_add(oy),
+                };
+                let wb = xf_bbox(&xf, &m);
+                let bx = [wb.x0, wb.y0, wb.x1, wb.y1];
+                let area = (wb.x1 - wb.x0).max(0) as i128
+                    * (wb.y1 - wb.y0).max(0) as i128;
+                let cx = (wb.x0 as i128 + wb.x1 as i128) / 2
+                    - die.x0 as i128;
+                let cy = (wb.y0 as i128 + wb.y1 as i128) / 2
+                    - die.y0 as i128;
+                let g = (
+                    (cx * GRID / dw).clamp(0, GRID - 1) as i64,
+                    (cy * GRID / dh).clamp(0, GRID - 1) as i64,
+                );
+                let cell = cells.entry(g).or_default();
+                if cell.len() < PER_CELL {
+                    cell.push((area, bx, *band));
+                } else {
+                    // replace the smallest strictly-smaller entry
+                    // (deterministic: ties keep the earlier box)
+                    let mut mi = 0;
+                    for (i, it) in cell.iter().enumerate() {
+                        if (it.0, it.1) < (cell[mi].0, cell[mi].1)
+                        {
+                            mi = i;
+                        }
+                    }
+                    if area > cell[mi].0 {
+                        cell[mi] = (area, bx, *band);
+                    }
+                }
+            });
+        }
+        for inst in &wc.insts {
+            each_rep_offset(
+                &inst.rep,
+                &mut budget,
+                &mut |ox, oy| {
+                    let t = Xf::place(
+                        inst.x.saturating_add(ox),
+                        inst.y.saturating_add(oy),
+                        inst.rot,
+                        inst.flip,
+                    );
+                    stack.push((inst.child, xf.compose(&t)));
+                },
+            );
+        }
+    }
+    // biggest-first round-robin across grid cells (same fairness as
+    // the final keep of the retired bake)
+    for c in cells.values_mut() {
+        c.sort_by_key(|&(a, bx, _)| (Reverse(a), bx));
+    }
+    let mut kept: Vec<(i128, [i64; 4], u8)> = Vec::new();
+    let mut round = 0usize;
+    'rr: loop {
+        let mut added = false;
+        for c in cells.values() {
+            if let Some(&it) = c.get(round) {
+                kept.push(it);
+                added = true;
+                if kept.len() >= keep {
+                    break 'rr;
+                }
+            }
+        }
+        if !added {
+            break;
+        }
+        round += 1;
+    }
+    kept.sort_by_key(|&(a, bx, _)| (Reverse(a), bx));
+    kept.into_iter().map(|(_, bx, band)| (bx, band)).collect()
+}
+
+/// in-order rep member offsets under a shared work budget
+fn each_rep_offset(
+    rep: &Rep,
+    budget: &mut u64,
+    f: &mut impl FnMut(i64, i64),
+) {
+    match rep {
+        Rep::One => {
+            if *budget > 0 {
+                *budget -= 1;
+                f(0, 0);
+            }
+        }
+        Rep::Grid { na, nb, va, vb } => {
+            'o: for j in 0..*nb as i64 {
+                for i in 0..*na as i64 {
+                    if *budget == 0 {
+                        break 'o;
+                    }
+                    *budget -= 1;
+                    f(
+                        i.saturating_mul(va.0)
+                            .saturating_add(j.saturating_mul(vb.0)),
+                        i.saturating_mul(va.1)
+                            .saturating_add(j.saturating_mul(vb.1)),
+                    );
+                }
+            }
+        }
+        Rep::Pts(p) => {
+            for &(x, y) in p.iter() {
+                if *budget == 0 {
+                    break;
+                }
+                *budget -= 1;
+                f(x, y);
+            }
+        }
+    }
+}
+
 /// squared distance from the center of `b` to the box `p`
 /// (0 when the center lies inside)
 fn dist2_center_to_box(b: &BBox, p: &BBox) -> u128 {
@@ -2264,6 +2427,75 @@ mod tests {
         );
         assert_eq!(pb.stats.frame_rects, 0);
         assert_eq!(pb.stats.thin_frames, 0);
+    }
+
+    /// Rev 46: minimap frontier = the plan's frame set expanded to
+    /// world space through the WS instance tree (xf composition +
+    /// rep members on both the frame and the instance edge), with
+    /// a deterministic spatial keep.
+    #[test]
+    fn frontier_boxes_expand_ws_world_space() {
+        let v = fixture(
+            &[
+                FCell {
+                    name: "THIN",
+                    pages: vec![(bx(0, 0, 300, 100), 300, 100)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "MID",
+                    pages: vec![],
+                    places: vec![(
+                        0,
+                        0,
+                        0,
+                        0,
+                        false,
+                        Rep::Grid {
+                            na: 3,
+                            nb: 1,
+                            va: (1000, 0),
+                            vb: (0, 0),
+                        },
+                    )],
+                },
+                FCell {
+                    name: "TOP",
+                    pages: vec![],
+                    places: vec![
+                        (1, 10_000, 0, 0, false, Rep::One),
+                        (1, 0, 20_000, 0, false, Rep::One),
+                    ],
+                },
+            ],
+            2,
+        );
+        let view = bx(-10, -10, 40_000, 40_000);
+        let p = plan_hier(
+            &v,
+            &rq(view, 0, 1),
+            &HierOpts::default(),
+        );
+        let fb = frontier_boxes(&v, &p, 6000);
+        assert_eq!(fb.len(), 6);
+        let mut got: Vec<(i64, i64)> =
+            fb.iter().map(|(b, _)| (b[0], b[1])).collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                (0, 20_000),
+                (1_000, 20_000),
+                (2_000, 20_000),
+                (10_000, 0),
+                (11_000, 0),
+                (12_000, 0),
+            ]
+        );
+        // keep cap trims via the deterministic round-robin
+        assert_eq!(frontier_boxes(&v, &p, 4).len(), 4);
+        // determinism: same plan, same bytes
+        assert_eq!(fb, frontier_boxes(&v, &p, 6000));
     }
 
     /// Rev 45 One/Pts thin frames: one deterministic representative

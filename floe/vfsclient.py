@@ -157,6 +157,52 @@ class VfsClient:
                     pass
         return out
 
+    def frontier(self, gen, view_um, px_per_um, cut_px, depth):
+        """rev 46 minimap frontier: session-less request planning at
+        the CANVAS fit scale; returns [(x0, y0, x1, y1, band)] in
+        dbu, the exact frame set a fit view at this depth draws
+        (spatially capped daemon-side). The TSV is consumed and
+        deleted here."""
+        line = (f"gen={gen} mode=frontier view={view_um[0]},"
+                f"{view_um[1]},{view_um[2]},{view_um[3]} "
+                f"px={px_per_um} cut={cut_px} "
+                f"depth={max(0, int(depth))} layers=all "
+                f"out={self.tmp}")
+        hair = os.environ.get("FLOE_HAIRLINE")
+        if hair:
+            line += f" hair={float(hair):g}"
+        thin = os.environ.get("FLOE_THIN_UM")
+        if thin:
+            line += f" thin={float(thin):g}"
+        self.proc.stdin.write(line + "\n")
+        self.proc.stdin.flush()
+        resp = self.proc.stdout.readline()
+        if not resp:
+            raise RuntimeError("vfsd died")
+        out = {}
+        for tok in resp.split():
+            k, _, v = tok.partition("=")
+            out[k] = v
+        if "error" in out:
+            raise RuntimeError(f"vfsd: {out['error']}")
+        path = out.get("frontier", "-")
+        rows = []
+        if path not in ("-", ""):
+            try:
+                with open(path) as f:
+                    for ln in f:
+                        p = ln.split()
+                        if len(p) >= 5:
+                            rows.append((int(p[0]), int(p[1]),
+                                         int(p[2]), int(p[3]),
+                                         int(p[4])))
+            finally:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+        return rows
+
     def stop(self):
         try:
             self.proc.stdin.write("quit\n")

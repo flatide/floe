@@ -595,6 +595,8 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
                     _svc_snap(cache, mosaic, j, res)
                 elif k == "pick":
                     _svc_pick(cache, mosaic, j, res)
+                elif k == "frontier":
+                    _svc_frontier(cache, mosaic, j, res)
                 else:
                     # render job: put it back - `latest` was bumped
                     # at submit, so the next newer() check ends this
@@ -603,6 +605,29 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
                     break
         except queue.Empty:
             pass
+
+
+def _svc_frontier(cache, mosaic, job, res):
+    """rev 46 minimap frontier: the daemon plans at the canvas fit
+    scale and returns the world-space frame boxes a fit view at
+    this depth would draw. Session-less; errors degrade to the
+    baked meta frontier on the gui side."""
+    out = {"kind": "frontier", "depth": job["depth"],
+           "cut_px": job["cut_px"]}
+    vc = getattr(cache, "vfs_client", None)
+    if vc is None:
+        out["boxes"] = []
+        res.put(out)
+        return
+    try:
+        mosaic.req_gen += 1
+        out["boxes"] = vc.frontier(
+            mosaic.req_gen, job["view"], job["px_per_um"],
+            job["cut_px"], job["depth"])
+    except Exception as e:
+        out["boxes"] = []
+        out["error"] = str(e)
+    res.put(out)
 
 
 def _svc_clip(cache, job, res):
@@ -718,6 +743,9 @@ def _render_service(src, req, res, latest=None, options=None):
             picks = [j for j in jobs if j["kind"] == "pick"]
             if picks:
                 _svc_pick(cache, mosaic, picks[-1], res)
+            fronts = [j for j in jobs if j["kind"] == "frontier"]
+            for j in fronts:
+                _svc_frontier(cache, mosaic, j, res)
             renders = [j for j in jobs if j["kind"] == "render"]
             if renders:  # newest by gen: requeued aborted jobs must lose
                 _svc_render(cache, mosaic, renderer, lod,
