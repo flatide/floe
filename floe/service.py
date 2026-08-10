@@ -436,11 +436,6 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
     # adaptive budget once shrank to its floor and shredded one view
     # into hundreds of such rounds. The LAST allowed round therefore
     # requests stream=0 and swallows the whole remainder.
-    # FLOE_PERF=1: one stderr line per streaming round with the
-    # PER-ROUND phase costs. The status line only shows the settled
-    # cumulative view, so multi-round refine zones (9.8G field) are
-    # unmeasurable from the screen - the office reads the terminal.
-    perf = bool(os.environ.get("FLOE_PERF"))
     load_total = 0.0
     new_total = 0
     # load-phase breakdown (cumulative seconds; sum ~= load_total):
@@ -563,21 +558,24 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
         r["new_total"] = new_total
         dr0 = draw_total[0]
         emit(r, load_total)
-        if perf:
-            import sys as _sys
-            print("[perf] gen=%d round=%d new=%s bytes=%s tiles=%s "
-                  "plan=%.0fms delta=%.0fms apply=%.0fms "
-                  "draw=%.0fms total=%.0fms lod=%s refining=%s "
-                  "settled=%d"
-                  % (mosaic.req_gen, rounds, r.get("new", 0),
-                     r.get("bytes", 0), r.get("pages", 0),
-                     plan_r, max(0.0, d_req * 1000 - plan_r),
-                     d_ap * 1000,
-                     (draw_total[0] - dr0) * 1000,
-                     (t_round + draw_total[0] - dr0) * 1000,
-                     r.get("lod", 0), r.get("deferred", 0) or 0,
-                     0 if r.get("partial") == "1" else 1),
-                  file=_sys.stderr, flush=True)
+        # one stderr line per streaming round, PER-ROUND phase costs
+        # (the status line only shows the settled cumulative view -
+        # the 9.8G refine zones are measured from the terminal;
+        # always on, user call 2026-08-10)
+        import sys as _sys
+        print("[perf] gen=%d round=%d new=%s bytes=%s tiles=%s "
+              "plan=%.0fms delta=%.0fms apply=%.0fms "
+              "draw=%.0fms total=%.0fms lod=%s refining=%s "
+              "settled=%d"
+              % (mosaic.req_gen, rounds, r.get("new", 0),
+                 r.get("bytes", 0), r.get("pages", 0),
+                 plan_r, max(0.0, d_req * 1000 - plan_r),
+                 d_ap * 1000,
+                 (draw_total[0] - dr0) * 1000,
+                 (t_round + draw_total[0] - dr0) * 1000,
+                 r.get("lod", 0), r.get("deferred", 0) or 0,
+                 0 if r.get("partial") == "1" else 1),
+              file=_sys.stderr, flush=True)
         if r.get("partial") != "1" or newer():
             return
         # a refinement can run for seconds: serve interactive
