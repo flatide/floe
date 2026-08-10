@@ -63,6 +63,19 @@ KEY_PAN_FRACTION = 0.50
 KEY_PAN_FRACTION_FINE = 0.10
 CAL_ZOOM_IN = 0.5        # spp factor for Ctrl+Z (Shift+Z = inverse)
 
+# layer recolor palette: 4 rows x 8 - saturated hues, a second hue
+# ring, pastels, then neutrals (white for frames-like emphasis)
+PALETTE_COLORS = (
+    "#ff3f3f", "#ff7f3f", "#ffbf3f", "#ffe73f",
+    "#bfff3f", "#3fff77", "#3fffd7", "#3fdfff",
+    "#3f9fff", "#473fff", "#873fff", "#af3fff",
+    "#ef3fff", "#ff3fa7", "#ff3f67", "#ff6f6f",
+    "#ffb3b3", "#ffd9a6", "#fff2a8", "#d6ff8c",
+    "#a6ffc4", "#a6f0ff", "#b3c6ff", "#e0b3ff",
+    "#ffffff", "#d9d9d9", "#a6a6a6", "#808080",
+    "#595959", "#8c6d3f", "#3f8c6d", "#6d3f8c",
+)
+
 MINIMAP_PX = 180           # square palette area; die keeps its aspect ratio
 MINIMAP_DOT_MIN = 6        # view box smaller than this becomes a dot
 MINIMAP_BG = 0x141414FF
@@ -519,6 +532,7 @@ class LayerRow(object):
         swatch_w = max(5, round(probe_width * LAYER_COLOR_WIDTH))
         swatch_h = max(3, probe_height)
         self._swatch_refs = []
+        self._swatch_wh = (swatch_w, swatch_h)
         self._swatch_on = self._speckle_swatch(swatch_w, swatch_h)
         self._clbl.set_from_pixbuf(self._swatch_on)
         self._clbl.set_size_request(swatch_w, swatch_h)
@@ -634,6 +648,14 @@ class LayerRow(object):
             context.add_class("floe-layer-picked")
         else:
             context.remove_class("floe-layer-picked")
+        self._paint()
+
+    def set_color(self, color):
+        """Palette recolor: rebuild the speckle swatch in place."""
+        if color == self._color:
+            return
+        self._color = color
+        self._swatch_on = self._speckle_swatch(*self._swatch_wh)
         self._paint()
 
     def set_selected(self, on):
@@ -791,6 +813,7 @@ class Viewer:
         self._pending = None
         self._pending_t0 = 0.0
         self._pending_timer = None
+        self._color_epoch = 0       # bumped per palette recolor
         self._ddlg = None
         self._gdlg = None
         self._cdlg = None
@@ -818,13 +841,29 @@ class Viewer:
         # the panel drags the panel width.
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.window.add(outer)
+        # [left pane (future cell/object lists, minimap at the
+        # bottom) | [canvas | layer panel]] - user call 2026-08-10
+        lpaned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        try:
-            paned.set_wide_handle(True)
-        except AttributeError:
-            pass
-        outer.pack_start(paned, True, True, 0)
+        for pn in (lpaned, paned):
+            try:
+                pn.set_wide_handle(True)
+            except AttributeError:
+                pass
+        outer.pack_start(lpaned, True, True, 0)
         self._outer = outer
+        left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
+                       spacing=2)
+        left.set_size_request(MINIMAP_PX + 16, -1)
+        # placeholder container: the Calibre-style cell/object
+        # browser lands here later
+        self._left_stack = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL)
+        left.pack_start(self._left_stack, True, True, 0)
+        self._left_pane = left
+        lpaned.pack1(left, resize=False, shrink=False)
+        lpaned.pack2(paned, resize=True, shrink=True)
+        lpaned.set_position(MINIMAP_PX + 16)
 
         side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         side.set_size_request(210, -1)
@@ -959,7 +998,8 @@ class Viewer:
             "button-press-event", self._on_minimap_click)
         self._minimap_event.set_tooltip_text(
             "Click inside the die to center the viewport")
-        side.pack_start(self._minimap_event, False, False, 4)
+        self._left_pane.pack_end(self._minimap_event,
+                                 False, False, 4)
 
         brow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
         side.pack_start(brow, False, False, 4)
@@ -1337,7 +1377,7 @@ class Viewer:
         """Identity of a frame: what state it was rendered for."""
         return (scope, tuple(sorted(self.visible)), self._depth_key(),
                 self._effective_cut_px(), self.lod_on, self.frames_on,
-                self.labels_on)
+                self.labels_on, self._color_epoch)
 
     def _effective_cut_px(self):
         """Screen-space detail cut is independent of merged LOD."""
@@ -3371,6 +3411,36 @@ class Viewer:
         adj = self._layers_scroller.get_vadjustment()
         adj.clamp_page(alloc.y, alloc.y + alloc.height)
         return False
+
+    def _apply_palette_color(self, color):
+        """Palette swatch click: recolor every SELECTED layer row -
+        row swatch, meta copy, render service, coverage tint, and
+        the personal override file (~/.cache/floe)."""
+        keys = set(self._selected_layers)
+        if not keys:
+            self._set_live_status(
+                "select a layer row first, then pick a color")
+            return
+        for key in keys:
+            row = self._layer_rows.get(key)
+            if row is not None:
+                row.set_color(color)
+            for l in self.meta["layers"]:
+                if (l["layer"], l["datatype"]) == tuple(key):
+                    l["color"] = color
+        try:
+            cache_mod.save_personal_colors(
+                self.cache.src,
+                {"%d/%d" % tuple(k): color for k in keys})
+        except OSError as e:
+            self._set_live_status("color save failed: %s" % e)
+        self.worker.submit({
+            "kind": "recolor",
+            "colors": [[list(k), color] for k in sorted(keys)]})
+        # colors are part of the frame identity now: force a fresh
+        # render (the covered/preview reuse would keep old pixels)
+        self._color_epoch += 1
+        self.redraw(immediate=True)
 
     # ---- layers / clip -------------------------------------------------------
     def _set_layer_selection(self, keys, anchor=None):

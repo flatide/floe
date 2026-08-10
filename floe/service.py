@@ -595,6 +595,8 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
                     _svc_snap(cache, mosaic, j, res)
                 elif k == "pick":
                     _svc_pick(cache, mosaic, j, res)
+                elif k == "recolor":
+                    _svc_recolor(cache, renderer, j)
                 else:
                     # render job: put it back - `latest` was bumped
                     # at submit, so the next newer() check ends this
@@ -603,6 +605,22 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
                     break
         except queue.Empty:
             pass
+
+
+def _svc_recolor(cache, renderer, job):
+    """Live layer recolor (palette pick): renderer color table, the
+    meta copy, and the coverage tint palette. The gui bumps its
+    render key, so the next frame repaints with the new colors."""
+    for k, col in job["colors"]:
+        key = (int(k[0]), int(k[1]))
+        renderer.colors[key] = col
+        for l in cache.meta["layers"]:
+            if (l["layer"], l["datatype"]) == key:
+                l["color"] = col
+        cc = getattr(cache, "_cov_colors", None)
+        if cc is not None:
+            cc[key] = col
+    renderer.refresh()
 
 
 def _svc_clip(cache, job, res):
@@ -718,6 +736,9 @@ def _render_service(src, req, res, latest=None, options=None):
             picks = [j for j in jobs if j["kind"] == "pick"]
             if picks:
                 _svc_pick(cache, mosaic, picks[-1], res)
+            for j in jobs:
+                if j["kind"] == "recolor":
+                    _svc_recolor(cache, renderer, j)
             renders = [j for j in jobs if j["kind"] == "render"]
             if renders:  # newest by gen: requeued aborted jobs must lose
                 _svc_render(cache, mosaic, renderer, lod,

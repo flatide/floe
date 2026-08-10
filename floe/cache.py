@@ -209,6 +209,54 @@ def normalize_layer_colors(meta):
     return meta
 
 
+def personal_colors_path(src):
+    """Per-user layer color overrides (palette picks): keyed by the
+    absolute source path under XDG cache, so they survive cache
+    rebuilds and never touch meta.json (shared office caches stay
+    pristine - personalization, user call 2026-08-10)."""
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".cache")
+    import hashlib
+    h = hashlib.sha1(
+        os.path.abspath(src).encode("utf-8")).hexdigest()[:16]
+    return os.path.join(base, "floe", "colors", "%s.json" % h)
+
+
+def load_personal_colors(src):
+    """{'l/d': '#rrggbb'} or {} - malformed files are ignored."""
+    try:
+        with open(personal_colors_path(src)) as f:
+            d = json.load(f)
+        return dict(d.get("colors") or {})
+    except (OSError, ValueError):
+        return {}
+
+
+def save_personal_colors(src, updates):
+    """Merge {'l/d': '#rrggbb'} into the personal override file."""
+    path = personal_colors_path(src)
+    colors = load_personal_colors(src)
+    colors.update(updates)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump({"src": os.path.abspath(src),
+                   "colors": colors}, f, indent=1)
+
+
+def apply_personal_colors(meta, src):
+    """Overlay the user's palette picks onto the meta layer table
+    (AFTER normalize_layer_colors, so overrides win)."""
+    colors = load_personal_colors(src)
+    if not colors:
+        return meta
+    for entry in (meta or {}).get("layers", []):
+        c = colors.get("%d/%d" % (entry["layer"],
+                                  entry["datatype"]))
+        if c:
+            entry["color"] = c
+    return meta
+
+
 def save_opts():
     opt = db.SaveLayoutOptions()
     opt.format = "OASIS"
@@ -271,7 +319,10 @@ class Cache:
     def load(self):
         with open(self.meta_path) as f:
             self.meta = json.load(f)
-        return normalize_layer_colors(self.meta)
+        normalize_layer_colors(self.meta)
+        # both processes (gui + render service) come through here,
+        # so palette personalization applies everywhere at once
+        return apply_personal_colors(self.meta, self.src)
 
     def is_stale(self):
         if self.meta.get("version") != CACHE_VERSION:
