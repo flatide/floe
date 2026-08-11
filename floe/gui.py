@@ -63,17 +63,37 @@ KEY_PAN_FRACTION = 0.50
 KEY_PAN_FRACTION_FINE = 0.10
 CAL_ZOOM_IN = 0.5        # spp factor for Ctrl+Z (Shift+Z = inverse)
 
-# layer recolor palette: 4 rows x 8 - saturated hues, a second hue
-# ring, pastels, then neutrals (white for frames-like emphasis)
+# layer recolor palette: the Calibre 7x7 table (user-specified
+# values and X11-style names, row-major)
 PALETTE_COLORS = (
-    "#ff3f3f", "#ff7f3f", "#ffbf3f", "#ffe73f",
-    "#bfff3f", "#3fff77", "#3fffd7", "#3fdfff",
-    "#3f9fff", "#473fff", "#873fff", "#af3fff",
-    "#ef3fff", "#ff3fa7", "#ff3f67", "#ff6f6f",
-    "#ffb3b3", "#ffd9a6", "#fff2a8", "#d6ff8c",
-    "#a6ffc4", "#a6f0ff", "#b3c6ff", "#e0b3ff",
-    "#ffffff", "#d9d9d9", "#a6a6a6", "#808080",
-    "#595959", "#8c6d3f", "#3f8c6d", "#6d3f8c",
+    ("#ff8c00", "darkorange"), ("#ff6347", "tomato"),
+    ("#ff0000", "red"), ("#d02090", "violetred"),
+    ("#b22222", "firebrick"), ("#a52a2a", "brown"),
+    ("#8b0000", "red4"),
+    ("#ffff00", "yellow"), ("#ffff00", "yellow1"),
+    ("#ffd700", "gold"), ("#ffa500", "orange"),
+    ("#cd853f", "peru"), ("#d2691e", "chocolate"),
+    ("#8b5a00", "orange4"),
+    ("#f0ffff", "azure"), ("#7fff00", "chartreuse"),
+    ("#00ff00", "green"), ("#9acd32", "yellowgreen"),
+    ("#32cd32", "limegreen"), ("#228b22", "forestgreen"),
+    ("#008b00", "green4"),
+    ("#00ffff", "cyan"), ("#7fffd4", "aquamarine"),
+    ("#87ceeb", "skyblue"), ("#008b8b", "cyan4"),
+    ("#6a5acd", "slateblue"), ("#0000ff", "blue"),
+    ("#000080", "navyblue"),
+    ("#ffc0cb", "pink"), ("#da70d6", "orchid"),
+    ("#ee82ee", "violet"), ("#ff69b4", "hotpink"),
+    ("#ff00ff", "magenta"), ("#a020f0", "purple"),
+    ("#9400d3", "darkviolet"),
+    ("#ffffff", "white"), ("#ffffff", "gray100"),
+    ("#bfbfbf", "gray75"), ("#d8bfd8", "thistle"),
+    ("#7f7f7f", "gray50"), ("#404040", "gray25"),
+    ("#000000", "black"),
+    ("#faf0e6", "linen"), ("#ffe4c4", "bisque"),
+    ("#deb887", "burlywood"), ("#d2b48c", "tan"),
+    ("#fa8072", "salmon"), ("#a0522d", "sienna"),
+    ("#b03060", "maroon"),
 )
 
 MINIMAP_PX = 180           # square palette area; die keeps its aspect ratio
@@ -1008,20 +1028,21 @@ class Viewer:
         pal.set_row_spacing(2)
         pal.set_column_spacing(2)
         pal.set_halign(Gtk.Align.CENTER)
-        for i, col in enumerate(PALETTE_COLORS):
+        for i, (col, cname) in enumerate(PALETTE_COLORS):
             pix = GdkPixbuf.Pixbuf.new(
-                GdkPixbuf.Colorspace.RGB, False, 8, 18, 14)
+                GdkPixbuf.Colorspace.RGB, False, 8, 20, 14)
             pix.fill((int(col.lstrip("#"), 16) << 8) | 0xFF)
             img = Gtk.Image()
             img.set_from_pixbuf(pix)
             eb = Gtk.EventBox()
             eb.add(img)
             eb.set_tooltip_text(
-                "%s - recolor the selected layer(s)" % col)
+                "%s (%s) - recolor the selected layer(s)"
+                % (cname, col))
             eb.connect("button-press-event",
                        lambda _w, _e, c=col:
                        self._apply_palette_color(c))
-            pal.attach(eb, i % 8, i // 8, 1, 1)
+            pal.attach(eb, i % 7, i // 7, 1, 1)
         side.pack_start(pal, False, False, 4)
 
         brow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
