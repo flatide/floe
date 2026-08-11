@@ -3465,6 +3465,12 @@ class Viewer:
             self._set_live_status(
                 "select a layer row first, then pick a color")
             return
+        # a COLLAPSED group parent stands for its whole datatype
+        # group: recolor the folded members too (user call
+        # 2026-08-11; expanded groups keep per-row control)
+        for pkey, children in self._layer_groups.items():
+            if pkey in keys and pkey not in self._layer_expanded:
+                keys.update(children)
         for key in keys:
             row = self._layer_rows.get(key)
             if row is not None:
