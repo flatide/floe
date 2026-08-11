@@ -1027,15 +1027,31 @@ class Viewer:
         pal = Gtk.Grid()
         pal.set_row_spacing(2)
         pal.set_column_spacing(2)
-        pal.set_halign(Gtk.Align.CENTER)
+        # homogeneous + hexpand: the 7 swatch columns share the
+        # panel width, so resizing the pane resizes the swatches
+        pal.set_column_homogeneous(True)
+        pal.set_hexpand(True)
         for i, (col, cname) in enumerate(PALETTE_COLORS):
-            pix = GdkPixbuf.Pixbuf.new(
-                GdkPixbuf.Colorspace.RGB, False, 8, 20, 14)
-            pix.fill((int(col.lstrip("#"), 16) << 8) | 0xFF)
-            img = Gtk.Image()
-            img.set_from_pixbuf(pix)
+            rgb = tuple(int(col[j:j + 2], 16) / 255.0
+                        for j in (1, 3, 5))
+
+            def _draw_swatch(w, cr, rgb=rgb):
+                a = w.get_allocation()
+                cr.set_source_rgb(*rgb)
+                cr.rectangle(0, 0, a.width, a.height)
+                cr.fill()
+                cr.set_source_rgb(0.4, 0.4, 0.4)  # outline: reads
+                cr.set_line_width(1)              # on black too
+                cr.rectangle(0.5, 0.5, a.width - 1, a.height - 1)
+                cr.stroke()
+                return False
+
+            da = Gtk.DrawingArea()
+            da.set_size_request(12, 14)
+            da.set_hexpand(True)
+            da.connect("draw", _draw_swatch)
             eb = Gtk.EventBox()
-            eb.add(img)
+            eb.add(da)
             eb.set_tooltip_text(
                 "%s (%s) - recolor the selected layer(s)"
                 % (cname, col))
