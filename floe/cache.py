@@ -243,10 +243,50 @@ def save_personal_colors(src, updates):
                    "colors": colors}, f, indent=1)
 
 
+def shared_colors_path(src):
+    """Design-default palette published NEXT TO the source:
+    <dir>/colors/<filename>.json. Keyed by the file NAME (not an
+    absolute-path hash) so every machine that mounts the design
+    finds the same file."""
+    a = os.path.abspath(src)
+    return os.path.join(os.path.dirname(a), "colors",
+                        os.path.basename(a) + ".json")
+
+
+def load_shared_colors(src):
+    try:
+        with open(shared_colors_path(src)) as f:
+            return dict(json.load(f).get("colors") or {})
+    except (OSError, ValueError):
+        return {}
+
+
+def save_shared_colors(src, colors):
+    """Publish {'l/d': '#rrggbb'} as the design default; returns
+    the path (may raise OSError on read-only shares)."""
+    path = shared_colors_path(src)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump({"src": os.path.basename(os.path.abspath(src)),
+                   "colors": colors}, f, indent=1)
+    return path
+
+
 def apply_personal_colors(meta, src):
-    """Overlay the user's palette picks onto the meta layer table
-    (AFTER normalize_layer_colors, so overrides win)."""
+    """Overlay palette colors onto the meta layer table (AFTER
+    normalize_layer_colors, so overrides win). Personal picks win;
+    with no personal file yet, the design-default palette next to
+    the source seeds BOTH the session and the personal cache (user
+    call 2026-08-11: first-open adopts the published palette and
+    edits evolve from it privately)."""
     colors = load_personal_colors(src)
+    if not colors:
+        colors = load_shared_colors(src)
+        if colors:
+            try:
+                save_personal_colors(src, colors)
+            except OSError:
+                pass  # adopt for the session even if unsaveable
     if not colors:
         return meta
     for entry in (meta or {}).get("layers", []):

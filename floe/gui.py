@@ -3512,6 +3512,23 @@ class Viewer:
         self._color_epoch += 1
         self.redraw(immediate=True)
 
+    def _publish_default_colors(self):
+        """Publish the CURRENT effective palette (every layer) as
+        the design default next to the source
+        (<dir>/colors/<file>.json): anyone opening the design with
+        no personal palette adopts it - and it seeds their personal
+        cache on first open."""
+        colors = {"%d/%d" % (l["layer"], l["datatype"]): l["color"]
+                  for l in self.meta["layers"]}
+        try:
+            path = cache_mod.save_shared_colors(
+                self.cache.src, colors)
+            self._set_live_status(
+                "design default colors saved: %s" % path)
+        except OSError as e:
+            self._set_live_status(
+                "default colors save failed: %s" % e)
+
     # ---- layers / clip -------------------------------------------------------
     def _set_layer_selection(self, keys, anchor=None):
         """Replace the palette selection without changing visibility."""
@@ -3590,6 +3607,9 @@ class Viewer:
         menu.append(Gtk.SeparatorMenuItem())
         add_item("show all", self._all_layers)
         add_item("hide all", self._no_layers)
+        menu.append(Gtk.SeparatorMenuItem())
+        add_item("save colors as design default",
+                 self._publish_default_colors)
         self._layer_menu = menu
 
         def released(_menu):
