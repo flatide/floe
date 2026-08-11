@@ -148,13 +148,6 @@ def hex_to_rows(hx):
     return "\n".join(rows)
 
 
-def decode_pattern(p):
-    """Accept the hex word form OR the legacy rows form."""
-    if "*" in p or "." in p:
-        return p
-    return hex_to_rows(p)
-
-
 def pattern(name):
     for n, p in FILL_PATTERNS:
         if n == name:

@@ -1234,8 +1234,11 @@ class Viewer:
         # fill palette state: personal file wins, defaults otherwise
         pats, lpat = cache_mod.load_personal_patterns(self.cache.src)
         if pats and len(pats) == len(self._fill_patterns):
-            self._fill_patterns = [fillpat.decode_pattern(str(x))
-                                   for x in pats]
+            try:
+                self._fill_patterns = [fillpat.hex_to_rows(str(x))
+                                       for x in pats]
+            except ValueError:
+                pass  # malformed file: keep the defaults
         self._layer_patterns = {}
         for k, v in (lpat or {}).items():
             try:

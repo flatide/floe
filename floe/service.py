@@ -624,12 +624,12 @@ def _apply_personal_fills(cache, renderer):
         pats, lpat = cache_mod.load_personal_patterns(cache.src)
         if not pats or not lpat:
             return
-        from .fillpat import decode_pattern
+        from .fillpat import hex_to_rows
         fills = {}
         for k, slot in lpat.items():
             l, d = k.split("/")
             if 0 <= int(slot) < len(pats):
-                fills[(int(l), int(d))] = decode_pattern(
+                fills[(int(l), int(d))] = hex_to_rows(
                     str(pats[int(slot)]))
         if fills:
             renderer.set_fill_patterns(fills)
