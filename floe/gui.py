@@ -1231,21 +1231,16 @@ class Viewer:
         self._frontier_depths = (self.meta.get("frontier")
                                  or {}).get("depths") or []
         self._minimap_bases = {}
-        # fill palette state: personal file wins, defaults otherwise
-        pats, lpat = cache_mod.load_personal_patterns(self.cache.src)
-        if pats and len(pats) == len(self._fill_patterns):
-            try:
-                self._fill_patterns = [fillpat.hex_to_rows(str(x))
-                                       for x in pats]
-            except ValueError:
-                pass  # malformed file: keep the defaults
+        # fill palette state: user-global edited bitmaps + the
+        # effective layerprops (personal, else the design default
+        # next to the source - already seeded by Cache.load)
+        self._fill_patterns = cache_mod.load_fill_patterns()
         self._layer_patterns = {}
-        for k, v in (lpat or {}).items():
-            try:
-                l, d = k.split("/")
-                self._layer_patterns[(int(l), int(d))] = int(v)
-            except (ValueError, AttributeError):
-                pass
+        rows, _ = cache_mod.load_layer_props(self.cache.src)
+        for key, _color, fill, _name, _f1, _f2 in rows:
+            i = fillpat.fill_index(fill)
+            if i is not None:
+                self._layer_patterns[tuple(key)] = i
         for w in self._fill_slots:
             w.queue_draw()
         self.last_frame = None
@@ -3569,12 +3564,7 @@ class Viewer:
             for l in self.meta["layers"]:
                 if (l["layer"], l["datatype"]) == tuple(key):
                     l["color"] = color
-        try:
-            cache_mod.save_personal_colors(
-                self.cache.src,
-                {"%d/%d" % tuple(k): color for k in keys})
-        except OSError as e:
-            self._set_live_status("color save failed: %s" % e)
+        self._save_props_state()
         self.worker.submit({
             "kind": "recolor",
             "colors": [[list(k), color] for k in sorted(keys)]})
@@ -3624,16 +3614,35 @@ class Viewer:
             "fill '%s' -> %d layer(s)"
             % (fillpat.FILL_NAMES[slot], len(keys)))
 
+    def _props_rows(self):
+        """Current layer table as layerprops rows: color (7x7 name
+        or #hex), fill name, layer name, visibility flag."""
+        rows = []
+        for l in self.meta["layers"]:
+            key = (l["layer"], l["datatype"])
+            slot = self._layer_patterns.get(key)
+            fill = (fillpat.FILL_NAMES[slot]
+                    if slot is not None else "speckle")
+            rows.append((key, fillpat.color_name(l["color"]),
+                         fill, l.get("name") or "",
+                         "1" if key in self.visible else "0",
+                         "1"))
+        return rows
+
+    def _save_props_state(self):
+        try:
+            cache_mod.save_personal_props(
+                self.cache.src,
+                fillpat.format_layerprops(self._props_rows()))
+        except OSError as e:
+            self._set_live_status("layerprops save failed: %s" % e)
+
     def _save_fill_state(self):
         try:
-            cache_mod.save_personal_patterns(
-                self.cache.src,
-                patterns=[fillpat.rows_to_hex(x)
-                          for x in self._fill_patterns],
-                layer_patterns={"%d/%d" % k: v for k, v
-                                in self._layer_patterns.items()})
+            cache_mod.save_fill_patterns(self._fill_patterns)
         except OSError as e:
             self._set_live_status("fill save failed: %s" % e)
+        self._save_props_state()
 
     def _push_fills(self):
         """Ship the RESOLVED per-layer bitmaps to the render
@@ -3742,25 +3751,19 @@ class Viewer:
             self._push_fills()
 
     def _publish_default_colors(self):
-        """Publish the CURRENT effective palette (every layer) as
-        the design default next to the source
-        (<dir>/colors/<file>.json): anyone opening the design with
-        no personal palette adopts it - and it seeds their personal
-        cache on first open."""
-        colors = {"%d/%d" % (l["layer"], l["datatype"]): l["color"]
-                  for l in self.meta["layers"]}
+        """Publish the CURRENT layer table as the design-default
+        Calibre layerprops next to the source (<file>.layerprops):
+        anyone opening the design with no personal palette adopts
+        it - and it seeds their personal cache on first open."""
         try:
-            path = cache_mod.save_shared_colors(
-                self.cache.src, colors,
-                patterns=[fillpat.rows_to_hex(x)
-                          for x in self._fill_patterns],
-                layer_patterns={"%d/%d" % k: v for k, v
-                                in self._layer_patterns.items()})
+            path = cache_mod.save_shared_props(
+                self.cache.src,
+                fillpat.format_layerprops(self._props_rows()))
             self._set_live_status(
-                "design default colors saved: %s" % path)
+                "design default layerprops saved: %s" % path)
         except OSError as e:
             self._set_live_status(
-                "default colors save failed: %s" % e)
+                "default layerprops save failed: %s" % e)
 
     # ---- layers / clip -------------------------------------------------------
     def _set_layer_selection(self, keys, anchor=None):

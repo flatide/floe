@@ -25,6 +25,12 @@ _VIEW_CONFIG = {
 # alternately cancels that offset and leaves the SAME holes in every layer.
 _DESIGN_SPECKLE_STIPPLES = ("*.\n.*", ".*\n*.")
 
+# the 16x16 expansion of the default speckle: a layerprops row that
+# names "speckle" must keep the parity-pair path (shared holes)
+_SPECKLE16 = "\n".join(
+    "".join("*" if (x + y) % 2 == 0 else "." for x in range(16))
+    for y in range(16))
+
 
 def _require_lay():
     if klay is None:
@@ -135,7 +141,8 @@ class Renderer:
                 lp.dither_pattern = 0  # opaque fill (no speckle)
                 lp.transparent = False
                 lp.width = 1
-            elif key in self._layer_fill:
+            elif key in self._layer_fill \
+                    and self._layer_fill[key] != _SPECKLE16:
                 rows = self._layer_fill[key]
                 idx = self._fill_ids.get(rows)
                 if idx is None:

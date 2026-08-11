@@ -209,127 +209,131 @@ def normalize_layer_colors(meta):
     return meta
 
 
-def personal_colors_path(src):
-    """Per-user layer color overrides (palette picks): keyed by the
-    absolute source path under XDG cache, so they survive cache
-    rebuilds and never touch meta.json (shared office caches stay
-    pristine - personalization, user call 2026-08-10)."""
+def _xdg_floe_dir():
     base = os.environ.get("XDG_CACHE_HOME") or os.path.join(
         os.path.expanduser("~"), ".cache")
+    return os.path.join(base, "floe")
+
+
+def personal_props_path(src):
+    """Per-user Calibre-format layerprops (palette picks): keyed by
+    the absolute source path under XDG cache - personalization
+    never touches shared files."""
     import hashlib
     h = hashlib.sha1(
         os.path.abspath(src).encode("utf-8")).hexdigest()[:16]
-    return os.path.join(base, "floe", "colors", "%s.json" % h)
+    return os.path.join(_xdg_floe_dir(), "colors",
+                        "%s.layerprops" % h)
 
 
-def _load_doc(path):
+def shared_props_paths(src):
+    """Design-default layerprops candidates next to the source:
+    <file>.layerprops first, then <stem>.layerprops (what Calibre
+    MDPView itself generates)."""
+    a = os.path.abspath(src)
+    stem = os.path.splitext(a)[0]
+    return (a + ".layerprops", stem + ".layerprops")
+
+
+def load_layer_props(src):
+    """Effective layerprops rows for this user+design:
+    personal file first; else the shared design default, which is
+    also SEEDED into the personal cache on first open. Returns
+    (rows, path or None) - rows per floe.fillpat.parse_layerprops."""
+    from . import fillpat
+    pp = personal_props_path(src)
     try:
-        with open(path) as f:
-            d = json.load(f)
-        return d if isinstance(d, dict) else {}
-    except (OSError, ValueError):
-        return {}
+        with open(pp) as f:
+            return fillpat.parse_layerprops(f.read()), pp
+    except OSError:
+        pass
+    for sp in shared_props_paths(src):
+        try:
+            with open(sp) as f:
+                text = f.read()
+        except OSError:
+            continue
+        try:
+            os.makedirs(os.path.dirname(pp), exist_ok=True)
+            with open(pp, "w") as f:
+                f.write(text)
+        except OSError:
+            pass  # adopt for the session even if unsaveable
+        return fillpat.parse_layerprops(text), sp
+    return [], None
 
 
-def _save_doc(path, doc):
+def save_personal_props(src, text):
+    path = personal_props_path(src)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
-        json.dump(doc, f, indent=1)
+        f.write(text)
+    return path
 
 
-def load_personal_colors(src):
-    """{'l/d': '#rrggbb'} or {} - malformed files are ignored."""
-    return dict(_load_doc(
-        personal_colors_path(src)).get("colors") or {})
+def fill_patterns_store_path():
+    """User-global edited fill bitmaps: {name: hex words}. The
+    Calibre fill set is one standard table, not per-design."""
+    return os.path.join(_xdg_floe_dir(), "fillpatterns.json")
 
 
-def load_personal_patterns(src):
-    """(patterns list-of-rows or None, {'l/d': slot int}) from the
-    personal file - the viewer's fill palette state."""
-    d = _load_doc(personal_colors_path(src))
-    return d.get("patterns"), dict(d.get("layer_patterns") or {})
+def load_fill_patterns():
+    """The 20 slot bitmaps as klayout rows: fillpat defaults
+    overlaid by the user's edits (hex words on disk)."""
+    from . import fillpat
+    pats = fillpat.default_patterns()
+    try:
+        with open(fill_patterns_store_path()) as f:
+            edits = json.load(f)
+    except (OSError, ValueError):
+        return pats
+    for name, hx in (edits or {}).items():
+        i = fillpat.fill_index(str(name))
+        if i is not None:
+            try:
+                pats[i] = fillpat.hex_to_rows(str(hx))
+            except ValueError:
+                pass
+    return pats
 
 
-def save_personal_colors(src, updates):
-    """Merge {'l/d': '#rrggbb'} into the personal override file."""
-    path = personal_colors_path(src)
-    doc = _load_doc(path)
-    colors = dict(doc.get("colors") or {})
-    colors.update(updates)
-    doc.update(src=os.path.abspath(src), colors=colors)
-    _save_doc(path, doc)
+def save_fill_patterns(pats):
+    """Persist bitmaps that differ from the built-in defaults."""
+    from . import fillpat
+    defaults = fillpat.default_patterns()
+    edits = {fillpat.FILL_NAMES[i]: fillpat.rows_to_hex(p)
+             for i, p in enumerate(pats) if p != defaults[i]}
+    path = fill_patterns_store_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(edits, f, indent=1)
 
 
-def save_personal_patterns(src, patterns=None, layer_patterns=None):
-    """Persist the fill palette bitmaps and/or per-layer slots."""
-    path = personal_colors_path(src)
-    doc = _load_doc(path)
-    doc["src"] = os.path.abspath(src)
-    if patterns is not None:
-        doc["patterns"] = list(patterns)
-    if layer_patterns is not None:
-        doc["layer_patterns"] = dict(layer_patterns)
-    _save_doc(path, doc)
-
-
-def shared_colors_path(src):
-    """Design-default palette published NEXT TO the source:
-    <dir>/colors/<filename>.json. Keyed by the file NAME (not an
-    absolute-path hash) so every machine that mounts the design
-    finds the same file."""
-    a = os.path.abspath(src)
-    return os.path.join(os.path.dirname(a), "colors",
-                        os.path.basename(a) + ".json")
-
-
-def load_shared_colors(src):
-    return dict(_load_doc(shared_colors_path(src)).get("colors")
-                or {})
-
-
-def save_shared_colors(src, colors, patterns=None,
-                       layer_patterns=None):
-    """Publish colors (and optionally the fill palette) as the
-    design default; returns the path (may raise OSError on
-    read-only shares)."""
-    path = shared_colors_path(src)
-    doc = {"src": os.path.basename(os.path.abspath(src)),
-           "colors": colors}
-    if patterns is not None:
-        doc["patterns"] = list(patterns)
-    if layer_patterns is not None:
-        doc["layer_patterns"] = dict(layer_patterns)
-    _save_doc(path, doc)
+def save_shared_props(src, text):
+    """Publish the layerprops text as the design default next to
+    the source (may raise OSError on read-only shares)."""
+    path = shared_props_paths(src)[0]
+    with open(path, "w") as f:
+        f.write(text)
     return path
 
 
 def apply_personal_colors(meta, src):
-    """Overlay palette colors onto the meta layer table (AFTER
-    normalize_layer_colors, so overrides win). Personal picks win;
-    with no personal file yet, the design-default palette next to
-    the source seeds BOTH the session and the personal cache (user
-    call 2026-08-11: first-open adopts the published palette and
-    edits evolve from it privately)."""
-    colors = load_personal_colors(src)
-    if not colors:
-        shared = _load_doc(shared_colors_path(src))
-        colors = dict(shared.get("colors") or {})
-        if shared.get("colors") or shared.get("patterns"):
-            # first open: adopt the WHOLE published doc (colors +
-            # fill palette) as the personal starting point
-            try:
-                doc = {"src": os.path.abspath(src)}
-                for k in ("colors", "patterns", "layer_patterns"):
-                    if shared.get(k) is not None:
-                        doc[k] = shared[k]
-                _save_doc(personal_colors_path(src), doc)
-            except OSError:
-                pass  # adopt for the session even if unsaveable
-    if not colors:
+    """Overlay layerprops colors onto the meta layer table (AFTER
+    normalize_layer_colors). Rows name colors from the 7x7 table
+    (or literal #hex); fills are applied by the viewer/renderer,
+    not here."""
+    from . import fillpat
+    rows, _ = load_layer_props(src)
+    if not rows:
         return meta
+    colors = {}
+    for key, color, _fill, _name, _f1, _f2 in rows:
+        c = fillpat.color_hex(color)
+        if c:
+            colors[key] = c
     for entry in (meta or {}).get("layers", []):
-        c = colors.get("%d/%d" % (entry["layer"],
-                                  entry["datatype"]))
+        c = colors.get((entry["layer"], entry["datatype"]))
         if c:
             entry["color"] = c
     return meta
