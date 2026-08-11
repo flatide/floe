@@ -64,38 +64,9 @@ KEY_PAN_FRACTION = 0.50
 KEY_PAN_FRACTION_FINE = 0.10
 CAL_ZOOM_IN = 0.5        # spp factor for Ctrl+Z (Shift+Z = inverse)
 
-# layer recolor palette: the Calibre 7x7 table (user-specified
-# values and X11-style names, row-major)
-PALETTE_COLORS = (
-    ("#ff8c00", "darkorange"), ("#ff6347", "tomato"),
-    ("#ff0000", "red"), ("#d02090", "violetred"),
-    ("#b22222", "firebrick"), ("#a52a2a", "brown"),
-    ("#8b0000", "red4"),
-    ("#ffff00", "yellow"), ("#ffff00", "yellow1"),
-    ("#ffd700", "gold"), ("#ffa500", "orange"),
-    ("#cd853f", "peru"), ("#d2691e", "chocolate"),
-    ("#8b5a00", "orange4"),
-    ("#f0ffff", "azure"), ("#7fff00", "chartreuse"),
-    ("#00ff00", "green"), ("#9acd32", "yellowgreen"),
-    ("#32cd32", "limegreen"), ("#228b22", "forestgreen"),
-    ("#008b00", "green4"),
-    ("#00ffff", "cyan"), ("#7fffd4", "aquamarine"),
-    ("#87ceeb", "skyblue"), ("#008b8b", "cyan4"),
-    ("#6a5acd", "slateblue"), ("#0000ff", "blue"),
-    ("#000080", "navyblue"),
-    ("#ffc0cb", "pink"), ("#da70d6", "orchid"),
-    ("#ee82ee", "violet"), ("#ff69b4", "hotpink"),
-    ("#ff00ff", "magenta"), ("#a020f0", "purple"),
-    ("#9400d3", "darkviolet"),
-    ("#ffffff", "white"), ("#ffffff", "gray100"),
-    ("#bfbfbf", "gray75"), ("#d8bfd8", "thistle"),
-    ("#7f7f7f", "gray50"), ("#404040", "gray25"),
-    ("#000000", "black"),
-    ("#faf0e6", "linen"), ("#ffe4c4", "bisque"),
-    ("#deb887", "burlywood"), ("#d2b48c", "tan"),
-    ("#fa8072", "salmon"), ("#a0522d", "sienna"),
-    ("#b03060", "maroon"),
-)
+# layer recolor palette: (hex, name) in grid order, straight from
+# the packaged colornames.def (fillpat.COLOR_TABLE)
+PALETTE_COLORS = tuple((h, n) for n, h in fillpat.COLOR_TABLE)
 
 MINIMAP_PX = 180           # square palette area; die keeps its aspect ratio
 MINIMAP_DOT_MIN = 6        # view box smaller than this becomes a dot

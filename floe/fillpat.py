@@ -124,38 +124,33 @@ def default_patterns():
     return [p for _, p in FILL_PATTERNS]
 
 
-# the Calibre 7x7 color table (user-specified names/values,
-# grid order) - layerprops rows reference colors by these names
-COLOR_TABLE = (
-    ("darkorange", "#ff8c00"), ("tomato", "#ff6347"),
-    ("red", "#ff0000"), ("violetred", "#d02090"),
-    ("firebrick", "#b22222"), ("brown", "#a52a2a"),
-    ("red4", "#8b0000"),
-    ("yellow", "#ffff00"), ("yellow1", "#ffff00"),
-    ("gold", "#ffd700"), ("orange", "#ffa500"),
-    ("peru", "#cd853f"), ("chocolate", "#d2691e"),
-    ("orange4", "#8b5a00"),
-    ("azure", "#f0ffff"), ("chartreuse", "#7fff00"),
-    ("green", "#00ff00"), ("yellowgreen", "#9acd32"),
-    ("limegreen", "#32cd32"), ("forestgreen", "#228b22"),
-    ("green4", "#008b00"),
-    ("cyan", "#00ffff"), ("aquamarine", "#7fffd4"),
-    ("skyblue", "#87ceeb"), ("cyan4", "#008b8b"),
-    ("slateblue", "#6a5acd"), ("blue", "#0000ff"),
-    ("navyblue", "#000080"),
-    ("pink", "#ffc0cb"), ("orchid", "#da70d6"),
-    ("violet", "#ee82ee"), ("hotpink", "#ff69b4"),
-    ("magenta", "#ff00ff"), ("purple", "#a020f0"),
-    ("darkviolet", "#9400d3"),
-    ("white", "#ffffff"), ("gray100", "#ffffff"),
-    ("gray75", "#bfbfbf"), ("thistle", "#d8bfd8"),
-    ("gray50", "#7f7f7f"), ("gray25", "#404040"),
-    ("black", "#000000"),
-    ("linen", "#faf0e6"), ("bisque", "#ffe4c4"),
-    ("burlywood", "#deb887"), ("tan", "#d2b48c"),
-    ("salmon", "#fa8072"), ("sienna", "#a0522d"),
-    ("maroon", "#b03060"),
-)
+# the Calibre 7x7 color table: loaded from the packaged
+# colornames.def (single source for the palette grid order, the
+# layerprops color names and the hex values)
+def _load_color_table():
+    import os as _os
+    import sys as _sys
+    path = _os.path.join(_os.path.dirname(_os.path.abspath(
+        __file__)), "colornames.def")
+    rows = []
+    try:
+        with open(path) as f:
+            for ln in f:
+                ln = ln.strip()
+                if not ln or ln.startswith("#"):
+                    continue
+                parts = ln.split()
+                if len(parts) < 2:
+                    continue
+                rows.append((parts[0],
+                             "#" + parts[1].lstrip("#").lower()))
+    except OSError as e:
+        print("floe: colornames.def unreadable (%s) - empty "
+              "color table" % e, file=_sys.stderr)
+    return tuple(rows)
+
+
+COLOR_TABLE = _load_color_table()
 _COLOR_HEX = {n: h for n, h in COLOR_TABLE}
 # first name wins for a shared value (yellow over yellow1 etc.)
 _COLOR_NAME = {}
