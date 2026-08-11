@@ -1234,7 +1234,8 @@ class Viewer:
         # fill palette state: personal file wins, defaults otherwise
         pats, lpat = cache_mod.load_personal_patterns(self.cache.src)
         if pats and len(pats) == len(self._fill_patterns):
-            self._fill_patterns = [str(x) for x in pats]
+            self._fill_patterns = [fillpat.decode_pattern(str(x))
+                                   for x in pats]
         self._layer_patterns = {}
         for k, v in (lpat or {}).items():
             try:
@@ -3624,7 +3625,8 @@ class Viewer:
         try:
             cache_mod.save_personal_patterns(
                 self.cache.src,
-                patterns=self._fill_patterns,
+                patterns=[fillpat.rows_to_hex(x)
+                          for x in self._fill_patterns],
                 layer_patterns={"%d/%d" % k: v for k, v
                                 in self._layer_patterns.items()})
         except OSError as e:
@@ -3747,7 +3749,8 @@ class Viewer:
         try:
             path = cache_mod.save_shared_colors(
                 self.cache.src, colors,
-                patterns=self._fill_patterns,
+                patterns=[fillpat.rows_to_hex(x)
+                          for x in self._fill_patterns],
                 layer_patterns={"%d/%d" % k: v for k, v
                                 in self._layer_patterns.items()})
             self._set_live_status(

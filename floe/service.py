@@ -624,11 +624,13 @@ def _apply_personal_fills(cache, renderer):
         pats, lpat = cache_mod.load_personal_patterns(cache.src)
         if not pats or not lpat:
             return
+        from .fillpat import decode_pattern
         fills = {}
         for k, slot in lpat.items():
             l, d = k.split("/")
             if 0 <= int(slot) < len(pats):
-                fills[(int(l), int(d))] = pats[int(slot)]
+                fills[(int(l), int(d))] = decode_pattern(
+                    str(pats[int(slot)]))
         if fills:
             renderer.set_fill_patterns(fills)
     except Exception:

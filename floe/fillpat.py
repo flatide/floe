@@ -124,6 +124,37 @@ def default_patterns():
     return [p for _, p in FILL_PATTERNS]
 
 
+def rows_to_hex(rows):
+    """'*'/'.' rows -> 16 four-digit hex words ("FFFF 01B4 ..."),
+    MSB = leftmost pixel (the on-disk form, user call 2026-08-11)."""
+    words = []
+    for line in rows.split("\n"):
+        v = 0
+        for x, c in enumerate(line[:SIZE]):
+            if c == "*":
+                v |= 1 << (SIZE - 1 - x)
+        words.append("%04X" % v)
+    return " ".join(words)
+
+
+def hex_to_rows(hx):
+    """16 hex words -> klayout '*'/'.' rows."""
+    rows = []
+    for w in hx.split():
+        v = int(w, 16)
+        rows.append("".join(
+            "*" if v & (1 << (SIZE - 1 - x)) else "."
+            for x in range(SIZE)))
+    return "\n".join(rows)
+
+
+def decode_pattern(p):
+    """Accept the hex word form OR the legacy rows form."""
+    if "*" in p or "." in p:
+        return p
+    return hex_to_rows(p)
+
+
 def pattern(name):
     for n, p in FILL_PATTERNS:
         if n == name:
