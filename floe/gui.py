@@ -887,6 +887,10 @@ class Viewer:
 
         side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         side.set_size_request(210, -1)
+        # breathing room against the window edge: without it the
+        # layer scrollbar and the palette's last column sit flush
+        # on the app border (user call 2026-08-11)
+        side.set_margin_end(6)
         paned.pack2(side, resize=False, shrink=False)
         title = Gtk.Label()
         title.set_markup("<b>%s</b>" % APP)
