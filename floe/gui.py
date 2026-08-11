@@ -1083,13 +1083,14 @@ class Viewer:
 
             def _draw_slot(w, cr, i=i):
                 a = w.get_allocation()
-                cr.set_source_rgb(0.05, 0.05, 0.05)
+                # white paper, black dots (user call 2026-08-11)
+                cr.set_source_rgb(1.0, 1.0, 1.0)
                 cr.rectangle(0, 0, a.width, a.height)
                 cr.fill()
                 rows = self._fill_patterns[i].split("\n")
                 cw = a.width / 16.0
                 ch = a.height / 16.0
-                cr.set_source_rgb(0.85, 0.85, 0.85)
+                cr.set_source_rgb(0.0, 0.0, 0.0)
                 for y, r in enumerate(rows[:16]):
                     for x, c in enumerate(r[:16]):
                         if c == "*":
@@ -3665,11 +3666,11 @@ class Viewer:
             for y in range(16):
                 for x in range(16):
                     on = rows[y][x] == "*"
-                    cr.set_source_rgb(*((0.9, 0.9, 0.9) if on
-                                        else (0.1, 0.1, 0.1)))
+                    cr.set_source_rgb(*((0.0, 0.0, 0.0) if on
+                                        else (1.0, 1.0, 1.0)))
                     cr.rectangle(x * cell, y * cell, cell, cell)
                     cr.fill()
-            cr.set_source_rgb(0.35, 0.35, 0.35)
+            cr.set_source_rgb(0.6, 0.6, 0.6)
             cr.set_line_width(1)
             for i in range(17):
                 cr.move_to(i * cell + 0.5, 0)
