@@ -1088,15 +1088,14 @@ class Viewer:
                 cr.rectangle(0, 0, a.width, a.height)
                 cr.fill()
                 rows = self._fill_patterns[i].split("\n")
-                cw = a.width / 16.0
-                ch = a.height / 16.0
+                # tile the 16x16 bitmap 1:1 across the box (no
+                # stretching - user call 2026-08-11)
                 cr.set_source_rgb(0.0, 0.0, 0.0)
-                for y, r in enumerate(rows[:16]):
-                    for x, c in enumerate(r[:16]):
-                        if c == "*":
-                            cr.rectangle(x * cw, y * ch,
-                                         max(1.0, cw),
-                                         max(1.0, ch))
+                for y in range(a.height):
+                    r = rows[y % 16]
+                    for x in range(a.width):
+                        if r[x % 16] == "*":
+                            cr.rectangle(x, y, 1, 1)
                 cr.fill()
                 cr.set_source_rgb(0.4, 0.4, 0.4)
                 cr.set_line_width(1)
