@@ -597,6 +597,8 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
                     _svc_pick(cache, mosaic, j, res)
                 elif k == "recolor":
                     _svc_recolor(cache, renderer, j)
+                elif k == "repattern":
+                    _svc_repattern(cache, renderer, j)
                 else:
                     # render job: put it back - `latest` was bumped
                     # at submit, so the next newer() check ends this
@@ -605,6 +607,32 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
                     break
         except queue.Empty:
             pass
+
+
+def _svc_repattern(cache, renderer, job):
+    """Live per-layer fill change (pattern palette): job carries
+    the RESOLVED bitmaps {[l, d]: rows}. Wholesale replace - the
+    gui owns the slot mapping."""
+    renderer.set_fill_patterns(
+        {tuple(k): v for k, v in job["fills"]})
+
+
+def _apply_personal_fills(cache, renderer):
+    """Startup: apply the personal fill palette (if any) so the
+    first frame already carries the user's patterns."""
+    try:
+        pats, lpat = cache_mod.load_personal_patterns(cache.src)
+        if not pats or not lpat:
+            return
+        fills = {}
+        for k, slot in lpat.items():
+            l, d = k.split("/")
+            if 0 <= int(slot) < len(pats):
+                fills[(int(l), int(d))] = pats[int(slot)]
+        if fills:
+            renderer.set_fill_patterns(fills)
+    except Exception:
+        pass  # personalization must never kill the service
 
 
 def _svc_recolor(cache, renderer, job):
@@ -693,6 +721,7 @@ def _render_service(src, req, res, latest=None, options=None):
                             above=(mosaic.FRAME_LAYER,),
                             dotted=(mosaic.FRAME_DOTS,),
                             solid=(mosaic.FRAME_FILL,))
+        _apply_personal_fills(cache, renderer)
         lod = None
     except Exception as e:
         res.put({"kind": "error", "msg": f"render service init failed: {e}"})
@@ -739,6 +768,8 @@ def _render_service(src, req, res, latest=None, options=None):
             for j in jobs:
                 if j["kind"] == "recolor":
                     _svc_recolor(cache, renderer, j)
+                elif j["kind"] == "repattern":
+                    _svc_repattern(cache, renderer, j)
             renders = [j for j in jobs if j["kind"] == "render"]
             if renders:  # newest by gen: requeued aborted jobs must lose
                 _svc_render(cache, mosaic, renderer, lod,

@@ -222,25 +222,54 @@ def personal_colors_path(src):
     return os.path.join(base, "floe", "colors", "%s.json" % h)
 
 
-def load_personal_colors(src):
-    """{'l/d': '#rrggbb'} or {} - malformed files are ignored."""
+def _load_doc(path):
     try:
-        with open(personal_colors_path(src)) as f:
+        with open(path) as f:
             d = json.load(f)
-        return dict(d.get("colors") or {})
+        return d if isinstance(d, dict) else {}
     except (OSError, ValueError):
         return {}
+
+
+def _save_doc(path, doc):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(doc, f, indent=1)
+
+
+def load_personal_colors(src):
+    """{'l/d': '#rrggbb'} or {} - malformed files are ignored."""
+    return dict(_load_doc(
+        personal_colors_path(src)).get("colors") or {})
+
+
+def load_personal_patterns(src):
+    """(patterns list-of-rows or None, {'l/d': slot int}) from the
+    personal file - the viewer's fill palette state."""
+    d = _load_doc(personal_colors_path(src))
+    return d.get("patterns"), dict(d.get("layer_patterns") or {})
 
 
 def save_personal_colors(src, updates):
     """Merge {'l/d': '#rrggbb'} into the personal override file."""
     path = personal_colors_path(src)
-    colors = load_personal_colors(src)
+    doc = _load_doc(path)
+    colors = dict(doc.get("colors") or {})
     colors.update(updates)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
-        json.dump({"src": os.path.abspath(src),
-                   "colors": colors}, f, indent=1)
+    doc.update(src=os.path.abspath(src), colors=colors)
+    _save_doc(path, doc)
+
+
+def save_personal_patterns(src, patterns=None, layer_patterns=None):
+    """Persist the fill palette bitmaps and/or per-layer slots."""
+    path = personal_colors_path(src)
+    doc = _load_doc(path)
+    doc["src"] = os.path.abspath(src)
+    if patterns is not None:
+        doc["patterns"] = list(patterns)
+    if layer_patterns is not None:
+        doc["layer_patterns"] = dict(layer_patterns)
+    _save_doc(path, doc)
 
 
 def shared_colors_path(src):
@@ -254,21 +283,23 @@ def shared_colors_path(src):
 
 
 def load_shared_colors(src):
-    try:
-        with open(shared_colors_path(src)) as f:
-            return dict(json.load(f).get("colors") or {})
-    except (OSError, ValueError):
-        return {}
+    return dict(_load_doc(shared_colors_path(src)).get("colors")
+                or {})
 
 
-def save_shared_colors(src, colors):
-    """Publish {'l/d': '#rrggbb'} as the design default; returns
-    the path (may raise OSError on read-only shares)."""
+def save_shared_colors(src, colors, patterns=None,
+                       layer_patterns=None):
+    """Publish colors (and optionally the fill palette) as the
+    design default; returns the path (may raise OSError on
+    read-only shares)."""
     path = shared_colors_path(src)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
-        json.dump({"src": os.path.basename(os.path.abspath(src)),
-                   "colors": colors}, f, indent=1)
+    doc = {"src": os.path.basename(os.path.abspath(src)),
+           "colors": colors}
+    if patterns is not None:
+        doc["patterns"] = list(patterns)
+    if layer_patterns is not None:
+        doc["layer_patterns"] = dict(layer_patterns)
+    _save_doc(path, doc)
     return path
 
 
@@ -281,10 +312,17 @@ def apply_personal_colors(meta, src):
     edits evolve from it privately)."""
     colors = load_personal_colors(src)
     if not colors:
-        colors = load_shared_colors(src)
-        if colors:
+        shared = _load_doc(shared_colors_path(src))
+        colors = dict(shared.get("colors") or {})
+        if shared.get("colors") or shared.get("patterns"):
+            # first open: adopt the WHOLE published doc (colors +
+            # fill palette) as the personal starting point
             try:
-                save_personal_colors(src, colors)
+                doc = {"src": os.path.abspath(src)}
+                for k in ("colors", "patterns", "layer_patterns"):
+                    if shared.get(k) is not None:
+                        doc[k] = shared[k]
+                _save_doc(personal_colors_path(src), doc)
             except OSError:
                 pass  # adopt for the session even if unsaveable
     if not colors:

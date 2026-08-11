@@ -91,6 +91,11 @@ class Renderer:
         self._frame_planes = (self.hollow | self._solid)
         self.hier_offset = hier_offset
         self.speckle = bool(speckle)
+        # per-layer fill override (viewer pattern palette): (l, d) ->
+        # 16x16 '*'/'.' rows; layers absent here keep the shared
+        # speckle. Stipple ids are cached per unique bitmap.
+        self._layer_fill = {}
+        self._fill_ids = {}
         self.lv.show_layout(layout, False)
         self._design_speckle_patterns = tuple(
             self.lv.add_stipple("floe-calibre-speckle-%d" % i, pattern)
@@ -128,6 +133,16 @@ class Renderer:
                     lp.line_style = 0  # solid
             elif key in self._solid:
                 lp.dither_pattern = 0  # opaque fill (no speckle)
+                lp.transparent = False
+                lp.width = 1
+            elif key in self._layer_fill:
+                rows = self._layer_fill[key]
+                idx = self._fill_ids.get(rows)
+                if idx is None:
+                    idx = self.lv.add_stipple(
+                        "floe-fill-%d" % len(self._fill_ids), rows)
+                    self._fill_ids[rows] = idx
+                lp.dither_pattern = idx
                 lp.transparent = False
                 lp.width = 1
             elif self.speckle:
@@ -186,6 +201,15 @@ class Renderer:
         self.lv.clear_layers()
         for node in ordered:
             self.lv.insert_layer(self.lv.end_layers(), node)
+
+    def set_fill_patterns(self, mapping):
+        """Replace the per-layer fill overrides wholesale:
+        {(l, d): rows} with 16x16 '*'/'.' rows (an all-set bitmap
+        IS solid, an all-clear one IS clear - no special cases).
+        Falsy rows drop a layer back to the shared speckle."""
+        self._layer_fill = {tuple(k): v
+                            for k, v in mapping.items() if v}
+        self.refresh()
 
     def set_visible(self, visible):
         """visible: None (all) or iterable of (layer, datatype)."""

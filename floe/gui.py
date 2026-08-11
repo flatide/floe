@@ -19,6 +19,7 @@ import sys
 import time
 
 from . import cache as cache_mod
+from . import fillpat
 from .service import (RenderWorker, DETAIL_PX, DETAIL_LEVELS,
                       DEFAULT_DETAIL)
 from .viewport import live_caps
@@ -833,7 +834,12 @@ class Viewer:
         self._pending = None
         self._pending_t0 = 0.0
         self._pending_timer = None
-        self._color_epoch = 0       # bumped per palette recolor
+        self._color_epoch = 0       # bumped per palette recolor/refill
+        # fill pattern palette: 20 slots (Calibre names), editable
+        # 16x16 bitmaps; (l, d) -> slot assignments
+        self._fill_patterns = fillpat.default_patterns()
+        self._layer_patterns = {}
+        self._fill_slots = []
         self._ddlg = None
         self._gdlg = None
         self._cdlg = None
@@ -1065,6 +1071,54 @@ class Viewer:
             pal.attach(eb, i % 7, i // 7, 1, 1)
         side.pack_start(pal, False, False, 4)
 
+        # fill pattern palette (user call 2026-08-11): 20 Calibre
+        # fills, 5x4. Left click assigns to the selected layer(s);
+        # right click edits the bitmap (Solid/Clear are fixed).
+        patg = Gtk.Grid()
+        patg.set_row_spacing(2)
+        patg.set_column_spacing(2)
+        patg.set_column_homogeneous(True)
+        patg.set_hexpand(True)
+        for i, fname in enumerate(fillpat.FILL_NAMES):
+
+            def _draw_slot(w, cr, i=i):
+                a = w.get_allocation()
+                cr.set_source_rgb(0.05, 0.05, 0.05)
+                cr.rectangle(0, 0, a.width, a.height)
+                cr.fill()
+                rows = self._fill_patterns[i].split("\n")
+                cw = a.width / 16.0
+                ch = a.height / 16.0
+                cr.set_source_rgb(0.85, 0.85, 0.85)
+                for y, r in enumerate(rows[:16]):
+                    for x, c in enumerate(r[:16]):
+                        if c == "*":
+                            cr.rectangle(x * cw, y * ch,
+                                         max(1.0, cw),
+                                         max(1.0, ch))
+                cr.fill()
+                cr.set_source_rgb(0.4, 0.4, 0.4)
+                cr.set_line_width(1)
+                cr.rectangle(0.5, 0.5, a.width - 1, a.height - 1)
+                cr.stroke()
+                return False
+
+            da = Gtk.DrawingArea()
+            da.set_size_request(12, 22)
+            da.set_hexpand(True)
+            da.connect("draw", _draw_slot)
+            self._fill_slots.append(da)
+            eb = Gtk.EventBox()
+            eb.add(da)
+            eb.set_tooltip_text(
+                "%s - click: fill selected layer(s); right-click: "
+                "edit bitmap" % fname)
+            eb.connect("button-press-event",
+                       lambda _w, ev, i=i:
+                       self._on_fill_slot_click(i, ev))
+            patg.attach(eb, i % 5, i // 5, 1, 1)
+        side.pack_start(patg, False, False, 4)
+
         brow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
         side.pack_start(brow, False, False, 4)
         for text, cb in (("fit", lambda: self.fit()),
@@ -1177,6 +1231,19 @@ class Viewer:
         self._frontier_depths = (self.meta.get("frontier")
                                  or {}).get("depths") or []
         self._minimap_bases = {}
+        # fill palette state: personal file wins, defaults otherwise
+        pats, lpat = cache_mod.load_personal_patterns(self.cache.src)
+        if pats and len(pats) == len(self._fill_patterns):
+            self._fill_patterns = [str(x) for x in pats]
+        self._layer_patterns = {}
+        for k, v in (lpat or {}).items():
+            try:
+                l, d = k.split("/")
+                self._layer_patterns[(int(l), int(d))] = int(v)
+            except (ValueError, AttributeError):
+                pass
+        for w in self._fill_slots:
+            w.queue_draw()
         self.last_frame = None
         self._frame_anchor = None
         self._depth_used = "?"
@@ -3512,6 +3579,163 @@ class Viewer:
         self._color_epoch += 1
         self.redraw(immediate=True)
 
+    def _on_fill_slot_click(self, slot, ev):
+        if ev.type != Gdk.EventType.BUTTON_PRESS:
+            return True
+        if ev.button == 3:
+            menu = Gtk.Menu()
+            item = Gtk.MenuItem(label="edit bitmap\u2026")
+            fixed = fillpat.FILL_NAMES[slot] in fillpat.FIXED_FILLS
+            item.set_sensitive(not fixed)
+            item.connect("activate",
+                         lambda _i: self._edit_fill_pattern(slot))
+            menu.append(item)
+            menu.show_all()
+            self._fill_menu = menu  # keep alive while popped up
+            if hasattr(menu, "popup_at_pointer"):
+                menu.popup_at_pointer(ev)
+            else:
+                menu.popup(None, None, None, None,
+                           ev.button, ev.time)
+            return True
+        self._apply_fill_slot(slot)
+        return True
+
+    def _apply_fill_slot(self, slot):
+        """Assign a fill slot to every SELECTED layer row (folded
+        group parents cover their members, like colors)."""
+        keys = set(self._selected_layers)
+        if not keys:
+            self._set_live_status(
+                "select a layer row first, then pick a fill")
+            return
+        for pkey, children in self._layer_groups.items():
+            if pkey in keys and pkey not in self._layer_expanded:
+                keys.update(children)
+        for key in keys:
+            self._layer_patterns[tuple(key)] = slot
+        self._save_fill_state()
+        self._push_fills()
+        self._set_live_status(
+            "fill '%s' -> %d layer(s)"
+            % (fillpat.FILL_NAMES[slot], len(keys)))
+
+    def _save_fill_state(self):
+        try:
+            cache_mod.save_personal_patterns(
+                self.cache.src,
+                patterns=self._fill_patterns,
+                layer_patterns={"%d/%d" % k: v for k, v
+                                in self._layer_patterns.items()})
+        except OSError as e:
+            self._set_live_status("fill save failed: %s" % e)
+
+    def _push_fills(self):
+        """Ship the RESOLVED per-layer bitmaps to the render
+        service and force a fresh frame."""
+        self.worker.submit({
+            "kind": "repattern",
+            "fills": [[list(k), self._fill_patterns[v]]
+                      for k, v in sorted(
+                          self._layer_patterns.items())
+                      if 0 <= v < len(self._fill_patterns)]})
+        self._color_epoch += 1
+        self.redraw(immediate=True)
+
+    def _edit_fill_pattern(self, slot):
+        """16x16 bitmap editor popup: click toggles a cell, drag
+        paints with the first cell's new value."""
+        name = fillpat.FILL_NAMES[slot]
+        rows = [list(r) for r in
+                self._fill_patterns[slot].split("\n")]
+        dlg = Gtk.Dialog(title="fill: %s" % name,
+                         transient_for=self.window, modal=True)
+        for label, code in (("clear", 10), ("solid", 11),
+                            ("invert", 12), ("reset", 13)):
+            dlg.add_button(label, code)
+        dlg.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dlg.add_button("Apply", Gtk.ResponseType.OK)
+        cell = 18
+        da = Gtk.DrawingArea()
+        da.set_size_request(16 * cell + 1, 16 * cell + 1)
+        da.set_halign(Gtk.Align.CENTER)
+        paint = {"v": None}
+
+        def draw(_w, cr):
+            for y in range(16):
+                for x in range(16):
+                    on = rows[y][x] == "*"
+                    cr.set_source_rgb(*((0.9, 0.9, 0.9) if on
+                                        else (0.1, 0.1, 0.1)))
+                    cr.rectangle(x * cell, y * cell, cell, cell)
+                    cr.fill()
+            cr.set_source_rgb(0.35, 0.35, 0.35)
+            cr.set_line_width(1)
+            for i in range(17):
+                cr.move_to(i * cell + 0.5, 0)
+                cr.line_to(i * cell + 0.5, 16 * cell)
+                cr.move_to(0, i * cell + 0.5)
+                cr.line_to(16 * cell, i * cell + 0.5)
+            cr.stroke()
+            return False
+
+        def cell_at(ev):
+            return int(ev.x) // cell, int(ev.y) // cell
+
+        def press(_w, ev):
+            x, y = cell_at(ev)
+            if 0 <= x < 16 and 0 <= y < 16:
+                paint["v"] = "." if rows[y][x] == "*" else "*"
+                rows[y][x] = paint["v"]
+                da.queue_draw()
+            return True
+
+        def motion(_w, ev):
+            if paint["v"] is None:
+                return False
+            x, y = cell_at(ev)
+            if 0 <= x < 16 and 0 <= y < 16 \
+                    and rows[y][x] != paint["v"]:
+                rows[y][x] = paint["v"]
+                da.queue_draw()
+            return True
+
+        da.add_events(Gdk.EventMask.BUTTON_PRESS_MASK
+                      | Gdk.EventMask.BUTTON1_MOTION_MASK
+                      | Gdk.EventMask.BUTTON_RELEASE_MASK)
+        da.connect("draw", draw)
+        da.connect("button-press-event", press)
+        da.connect("motion-notify-event", motion)
+        da.connect("button-release-event",
+                   lambda _w, _e: paint.update(v=None) or True)
+        dlg.get_content_area().pack_start(da, True, True, 8)
+        dlg.show_all()
+        while True:
+            r = dlg.run()
+            if r == 10:
+                rows[:] = [["."] * 16 for _ in range(16)]
+            elif r == 11:
+                rows[:] = [["*"] * 16 for _ in range(16)]
+            elif r == 12:
+                rows[:] = [["." if c == "*" else "*" for c in rr]
+                           for rr in rows]
+            elif r == 13:
+                rows[:] = [list(rr) for rr in
+                           fillpat.pattern(name).split("\n")]
+            else:
+                break
+            da.queue_draw()
+        ok = r == Gtk.ResponseType.OK
+        dlg.destroy()
+        if not ok:
+            return
+        self._fill_patterns[slot] = "\n".join(
+            "".join(rr) for rr in rows)
+        self._fill_slots[slot].queue_draw()
+        self._save_fill_state()
+        if slot in self._layer_patterns.values():
+            self._push_fills()
+
     def _publish_default_colors(self):
         """Publish the CURRENT effective palette (every layer) as
         the design default next to the source
@@ -3522,7 +3746,10 @@ class Viewer:
                   for l in self.meta["layers"]}
         try:
             path = cache_mod.save_shared_colors(
-                self.cache.src, colors)
+                self.cache.src, colors,
+                patterns=self._fill_patterns,
+                layer_patterns={"%d/%d" % k: v for k, v
+                                in self._layer_patterns.items()})
             self._set_live_status(
                 "design default colors saved: %s" % path)
         except OSError as e:
@@ -3608,7 +3835,7 @@ class Viewer:
         add_item("show all", self._all_layers)
         add_item("hide all", self._no_layers)
         menu.append(Gtk.SeparatorMenuItem())
-        add_item("save colors as design default",
+        add_item("save colors+fills as design default",
                  self._publish_default_colors)
         self._layer_menu = menu
 
