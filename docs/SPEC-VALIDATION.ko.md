@@ -1,0 +1,64 @@
+# SPEC: 검증 게이트 체계
+
+진입점: `sh tools/validate_rust.sh` — valmini 픽스처를 생성/갱신하고
+아래 전부를 순서대로 실행, 마지막 줄 `RUST VALIDATION: ALL OK` 필수.
+러스트 유닛: `cd rust && cargo test --release`(워크스페이스; floe-vfs
+41개 포함, `monster_cell_split_bench`는 `--ignored` 벤치).
+
+## 1. 픽스처
+
+- **valmini**: `tools/gen_valmini.py` — 작은 결정적 자산. 파이썬 .ice
+  캐시가 메타 패리티 오라클(파이썬 인덱서가 바뀌면 재생성 필요 —
+  mtime 불일치 함정 주의: 캐시 디렉토리 삭제 후 재실행).
+- **sample9**: `tools/gen_sample9.py` — 145MB depth-9, seed 42, 티어
+  테이블. 성능/실측용.
+- **frametest**: `tools/gen_frametest.py` — 프레임 톤/스택 검증용 소형.
+- **thintest**: `tools/gen_thintest.py` — rev 45 격자 관찰용(성긴/밀집
+  행·2D·클러스터·수직 열·SHORTBAR 소멸 대조·LONGBAR 프레임 행·L30
+  지오메트리 행). 독스트링에 기준 plan 수치 내장.
+
+## 2. 게이트 카탈로그
+
+| 게이트 | 스크립트 | 고정하는 계약 |
+|---|---|---|
+| scan/tile/depth/meta XOR | validate_rust_scan.py 등 | 러스트 vs klayout 밴드 타일 완전 일치 |
+| vfs 오픈 검증 | `tools/validate_vfs.py` | ovm v7 구조(PAGE_LEN 104, 텍스트 수), **frontier 스키마**(keep/px_per_um/cut_px/5원소 행/다이 내부/depth0 비지 않음) |
+| 렌더 6뷰 | validate_vfs_render | hier 델타 → klayout 렌더 XOR |
+| H1~H5 | validate_vfs_hier | 실데몬 hier: 프로브 cut=0 XOR 일치 등 |
+| L1~L9 | `tools/validate_vfs_lifecycle.py` | 세션 수명주기: L1 팬 루프, L2 스테일 드롭/재전송, L3 부분적용 폴트 ①~④+bad-top 복구, L4 제로 예산 축출, L5 names 보존, L7 LOD 변종 사이클/킬스위치, L8 layers=none+프레임 컷/밴드, **L9 미니맵 굽기 == vfsd mode=frontier 재생(박스 단위)** |
+| S1~S5 | validate_vfs_split | rep-split: multiset 보존·경계 소유·skew·oversize 비오염·플로어 |
+| X1~X6 | validate_vfs_text | v5 텍스트/라벨/declutter |
+| 마커 | validate_vfs_marker | --kill-at 4지점 + 재빌드 |
+| render-speckle | validate_render_speckle | 공통 위상(전 레이어 구멍 공유), 가시성, 불투명 겹침, 커버리지 합성 포함관계 |
+| render-frames | `tools/validate_render_frames.py` | 페인트 순서 회색<디자인<흰, 1px 외곽, 흰-위/회-아래 |
+
+## 3. 러스트 유닛 (핵심만)
+
+hier.rs: `hairline_min_side_cut`(rev 41), `frames_split_into_size_bands`
+(rev 42 4밴드), `boundary_frames_take_the_size_cut`/`depth_boundary_
+frames_keep_rep`/`dense_frames_stay_per_member…`(rev 34/39),
+`thin_frames_sample_on_lattice`/`thin_singles_and_pts_dedupe_per_bin`
+(rev 45: 닫힌형 수치·모서리·강등·cut0·격자off 폴백·양변 소멸),
+`frontier_boxes_expand_ws_world_space`(rev 46), `brute` 오라클(페이지
+과소선택 금지 — 술어는 hairline 0.5를 미러: 규칙 변경 시 동기화),
+`deterministic_plans`. ovm: `cell_sink_append_is_byte_identical`,
+`split_max_min_detects_hairline_pages`. cli: 분할/파이프라인 13개.
+
+## 4. 결정성 게이트
+
+- 인덱서: --jobs 값과 무관하게 design.ovm sha256 동일(스위트).
+- 플래너: 동일 요청 = 동일 플랜(HashSet 순회에 의존 금지 — thin_bins는
+  insert 전용, frontier keep은 BTreeMap+strict-greater).
+- 프런티어: 인덱싱 굽기 vs 데몬 재생 박스 일치(L9).
+
+## 5. 게이트 작성 규칙
+
+- 새 파이썬 게이트는 `tools/validate_<영역>.py`, 자산 생성기는
+  `tools/gen_<이름>.py`.
+- klayout Region 비교는 소스 레이아웃 `_destroy()` **이전**에(파괴된
+  레이아웃의 region은 조용히 빈 값 — L7 함정 메모).
+- 테스트 블록을 스크립트로 지울 땐 마커 범위를 좁게(rev 37 테스트
+  유실 사고).
+- 실측 하니스에서 RenderWorker는 spawn — `if __name__ == "__main__"`
+  가드 필수, 뷰 좌표는 dbu, 경계 프레임은 depth 0에서 나온다는 것
+  (r==0 확장 주체가 부모) 주의.
