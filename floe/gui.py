@@ -3721,6 +3721,102 @@ class Viewer:
         if slot in self._layer_patterns.values():
             self._push_fills()
 
+    def _props_chooser(self, save):
+        dlg = Gtk.FileChooserDialog(
+            title=("save layer properties" if save
+                   else "load layer properties"),
+            transient_for=self.window,
+            action=(Gtk.FileChooserAction.SAVE if save
+                    else Gtk.FileChooserAction.OPEN))
+        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                        "Save" if save else "Open",
+                        Gtk.ResponseType.OK)
+        flt = Gtk.FileFilter()
+        flt.set_name("layerprops (*.layerprops)")
+        flt.add_pattern("*.layerprops")
+        dlg.add_filter(flt)
+        allf = Gtk.FileFilter()
+        allf.set_name("all files")
+        allf.add_pattern("*")
+        dlg.add_filter(allf)
+        src = os.path.abspath(self.cache.src)
+        dlg.set_current_folder(os.path.dirname(src))
+        if save:
+            dlg.set_do_overwrite_confirmation(True)
+            dlg.set_current_name(
+                os.path.basename(src) + ".layerprops")
+        ok = dlg.run() == Gtk.ResponseType.OK
+        path = dlg.get_filename() if ok else None
+        dlg.destroy()
+        return path
+
+    def _load_props_dialog(self):
+        """Layer menu: apply a Calibre .layerprops file to the
+        session (colors + fill assignments; rows for layers the
+        design lacks are skipped, unlisted layers keep their
+        state). The personal snapshot is rewritten, so the load
+        sticks across restarts."""
+        path = self._props_chooser(save=False)
+        if not path:
+            return
+        try:
+            with open(path) as fh:
+                rows = fillpat.parse_layerprops(fh.read())
+        except OSError as e:
+            self._set_live_status(
+                "layer properties load failed: %s" % e)
+            return
+        known = set(self._layer_rows)
+        recolors = {}
+        nfill = 0
+        for key, color, fill, _name, _f1, _f2 in rows:
+            key = tuple(key)
+            if key not in known:
+                continue
+            c = fillpat.color_hex(color)
+            if c:
+                for l in self.meta["layers"]:
+                    if (l["layer"], l["datatype"]) == key:
+                        l["color"] = c
+                row = self._layer_rows.get(key)
+                if row is not None:
+                    row.set_color(c)
+                recolors[key] = c
+            i = fillpat.fill_index(fill)
+            if i is not None:
+                self._layer_patterns[key] = i
+                nfill += 1
+        if not recolors and not nfill:
+            self._set_live_status(
+                "no matching layers in %s" % path)
+            return
+        if recolors:
+            self.worker.submit({
+                "kind": "recolor",
+                "colors": [[list(k), v] for k, v
+                           in sorted(recolors.items())]})
+        self._save_props_state()
+        self._push_fills()  # repattern + epoch bump + redraw
+        self._set_live_status(
+            "layer properties loaded: %s (%d colors, %d fills)"
+            % (path, len(recolors), nfill))
+
+    def _save_props_dialog(self):
+        """Layer menu: export the current layer table as a Calibre
+        .layerprops file wherever the user points."""
+        path = self._props_chooser(save=True)
+        if not path:
+            return
+        try:
+            with open(path, "w") as fh:
+                fh.write(
+                    fillpat.format_layerprops(self._props_rows()))
+            self._set_live_status(
+                "layer properties saved: %s" % path)
+        except OSError as e:
+            self._set_live_status(
+                "layer properties save failed: %s" % e)
+
     def _publish_default_colors(self):
         """Publish the CURRENT layer table as the design-default
         Calibre layerprops next to the source (<file>.layerprops):
@@ -3815,6 +3911,10 @@ class Viewer:
         add_item("show all", self._all_layers)
         add_item("hide all", self._no_layers)
         menu.append(Gtk.SeparatorMenuItem())
+        add_item("load layer properties\u2026",
+                 self._load_props_dialog)
+        add_item("save layer properties\u2026",
+                 self._save_props_dialog)
         add_item("save colors+fills as design default",
                  self._publish_default_colors)
         self._layer_menu = menu

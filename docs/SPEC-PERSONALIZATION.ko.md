@@ -45,6 +45,10 @@ fill 적용은 뷰어 상태(`_layer_patterns`) + 서비스 기동 시
 - 팔레트 조작(색/fill 지정)마다 개인 파일을 **전체 스냅샷**으로 재작성
   (`_props_rows`: 모든 레이어 행 — 색은 테이블 이름 우선, 없으면 #hex;
   fill은 지정 슬롯 이름, 미지정은 `speckle`; f1=현재 표시 여부).
+- **로드/내보내기**: 레이어 우클릭 "load layer properties…"(파일 선택
+  → 세션 적용: 알려진 레이어의 색/fill만, 미기재 레이어는 유지; 개인
+  스냅샷 재작성으로 재시작에도 유지) / "save layer properties…"(임의
+  경로로 현재 테이블 내보내기).
 - **발행**: 레이어 우클릭 메뉴 "save colors+fills as design default" →
   같은 텍스트를 `<src>.layerprops`에 기록(`save_shared_props`). 실패
   (읽기 전용)는 상태줄 안내. 발행에는 fill **이름만** 실린다(비트맵은
