@@ -46,7 +46,7 @@ def _load_fill_table():
     return tuple(rows)
 
 
-FIXED_FILLS = ("Solid", "Clear")
+FIXED_FILLS = ("solid", "clear")
 
 
 def default_patterns():
