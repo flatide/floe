@@ -298,15 +298,15 @@ def load_fill_patterns():
 
 
 def save_fill_patterns(pats):
-    """Persist bitmaps that differ from the built-in defaults."""
+    """Persist the WHOLE 20-slot table (user call 2026-08-12:
+    a full snapshot, not a diff against the shipped defaults)."""
     from . import fillpat
-    defaults = fillpat.default_patterns()
-    edits = {fillpat.FILL_NAMES[i]: fillpat.rows_to_hex(p)
-             for i, p in enumerate(pats) if p != defaults[i]}
+    full = {fillpat.FILL_NAMES[i]: fillpat.rows_to_hex(p)
+            for i, p in enumerate(pats)}
     path = fill_patterns_store_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
-        json.dump(edits, f, indent=1)
+        json.dump(full, f, indent=1)
 
 
 def save_shared_props(src, text):
