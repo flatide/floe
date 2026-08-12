@@ -3657,6 +3657,51 @@ class Viewer:
         finally:
             self._layers_batch = False
 
+    def _selected_with_folded(self):
+        """Selection for palette-style actions: a COLLAPSED group
+        parent stands for its whole datatype group."""
+        keys = set(self._selected_layers)
+        for pkey, children in self._layer_groups.items():
+            if pkey in keys and pkey not in self._layer_expanded:
+                keys.update(children)
+        return keys
+
+    def _set_layer_width(self, px):
+        """Layer menu: outline width for the selected rows
+        (layerprops trailing column; width 1 = the default, so it
+        drops out of the map). Session-scoped like the palettes."""
+        keys = self._selected_with_folded()
+        if not keys:
+            self._set_live_status(
+                "select a layer row first, then pick a width")
+            return
+        for key in keys:
+            k = tuple(key)
+            if px <= 1:
+                self._layer_widths.pop(k, None)
+            else:
+                self._layer_widths[k] = min(8, int(px))
+        self._push_fills()
+        self._set_live_status(
+            "line width %d px -> %d layer(s)" % (px, len(keys)))
+
+    def _step_layer_width(self, delta):
+        keys = self._selected_with_folded()
+        if not keys:
+            self._set_live_status(
+                "select a layer row first, then pick a width")
+            return
+        for key in keys:
+            k = tuple(key)
+            w = max(1, min(8, self._layer_widths.get(k, 1) + delta))
+            if w <= 1:
+                self._layer_widths.pop(k, None)
+            else:
+                self._layer_widths[k] = w
+        self._push_fills()
+        self._set_live_status(
+            "line width %+d -> %d layer(s)" % (delta, len(keys)))
+
     def _refresh_row_fills(self):
         """Sync every layer row's swatch with its assigned fill."""
         for key, row in getattr(self, "_layer_rows", {}).items():
@@ -3975,6 +4020,23 @@ class Viewer:
         menu.append(Gtk.SeparatorMenuItem())
         add_item("show all", self._all_layers)
         add_item("hide all", self._no_layers)
+        menu.append(Gtk.SeparatorMenuItem())
+        wsub = Gtk.Menu()
+        wroot = Gtk.MenuItem(label="line width")
+        wroot.set_sensitive(has_selection)
+        wroot.set_submenu(wsub)
+        for px in (1, 3, 5):
+            it = Gtk.MenuItem(label="%d px" % px)
+            it.connect("activate",
+                       lambda _i, p=px: self._set_layer_width(p))
+            wsub.append(it)
+        wsub.append(Gtk.SeparatorMenuItem())
+        for label, d in (("increase", 1), ("decrease", -1)):
+            it = Gtk.MenuItem(label=label)
+            it.connect("activate",
+                       lambda _i, dd=d: self._step_layer_width(dd))
+            wsub.append(it)
+        menu.append(wroot)
         menu.append(Gtk.SeparatorMenuItem())
         add_item("load layer properties\u2026",
                  self._load_props_dialog)
