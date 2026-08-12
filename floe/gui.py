@@ -501,6 +501,7 @@ class LayerRow(object):
         self._active = True
         self._picked = False
         self._selected = False
+        self._fill_rows = None      # None = default speckle checker
         self._mlbl = Gtk.Label()
         self._mlbl.set_xalign(0.0)
         mbox = Gtk.EventBox()
@@ -566,18 +567,27 @@ class LayerRow(object):
         self._paint()
 
     def _speckle_swatch(self, width, height):
-        """Layer-palette preview of the renderer's 1px checker fill
-        (hidden rows keep the same swatch - the row-wide strike from
-        _draw_strike is the only hidden marker)."""
+        """Layer-palette preview: the layer's ASSIGNED fill pattern
+        tiled 1:1 in the layer color (default = the renderer's 1px
+        speckle checker), inside a solid border. Hidden rows keep
+        the same swatch - the row-wide strike from _draw_strike is
+        the only hidden marker."""
         color = int(self._color.lstrip("#"), 16)
         rgb = ((color >> 16) & 255, (color >> 8) & 255, color & 255)
         rgb_bytes = bytes(rgb)
+        rows = (self._fill_rows.split("\n")
+                if self._fill_rows else None)
         pixels = bytearray(width * height * 3)
         for y in range(height):
             for x in range(width):
                 border = x in (0, width - 1) or y in (0, height - 1)
-                if not border and (x + y) & 1:
-                    continue
+                if not border:
+                    if rows is not None:
+                        r = rows[y % 16]
+                        if x % 16 >= len(r) or r[x % 16] != "*":
+                            continue
+                    elif (x + y) & 1:
+                        continue
                 off = (y * width + x) * 3
                 pixels[off:off + 3] = rgb_bytes
         # (the strike line itself is drawn row-wide by _draw_strike)
@@ -643,10 +653,19 @@ class LayerRow(object):
         self._paint()
 
     def set_color(self, color):
-        """Palette recolor: rebuild the speckle swatch in place."""
+        """Palette recolor: rebuild the swatch in place."""
         if color == self._color:
             return
         self._color = color
+        self._swatch_on = self._speckle_swatch(*self._swatch_wh)
+        self._paint()
+
+    def set_fill(self, rows):
+        """Fill assignment changed: retile the swatch (None =
+        default speckle checker)."""
+        if rows == self._fill_rows:
+            return
+        self._fill_rows = rows
         self._swatch_on = self._speckle_swatch(*self._swatch_wh)
         self._paint()
 
@@ -1214,6 +1233,7 @@ class Viewer:
                 self._layer_patterns[tuple(key)] = i
         for w in self._fill_slots:
             w.queue_draw()
+        self._refresh_row_fills()
         self.last_frame = None
         self._frame_anchor = None
         self._depth_used = "?"
@@ -1324,6 +1344,7 @@ class Viewer:
             self._layer_rows[pkey].set_marker("-")
             for k in ckeys:
                 self._layer_rows[k].widget.set_no_show_all(True)
+        self._refresh_row_fills()
 
     def _on_group_expand(self, row):
         """'+'/'-' marker click on a group parent."""
@@ -3579,6 +3600,7 @@ class Viewer:
                 keys.update(children)
         for key in keys:
             self._layer_patterns[tuple(key)] = slot
+        self._refresh_row_fills()
         self._save_fill_state()
         self._push_fills()
         self._set_live_status(
@@ -3599,6 +3621,16 @@ class Viewer:
                          "1" if key in self.visible else "0",
                          "1"))
         return rows
+
+    def _refresh_row_fills(self):
+        """Sync every layer row's swatch with its assigned fill."""
+        for key, row in getattr(self, "_layer_rows", {}).items():
+            slot = self._layer_patterns.get(key)
+            row.set_fill(
+                self._fill_patterns[slot]
+                if slot is not None
+                and 0 <= slot < len(self._fill_patterns)
+                else None)
 
     def _save_props_state(self):
         try:
@@ -3717,6 +3749,7 @@ class Viewer:
         self._fill_patterns[slot] = "\n".join(
             "".join(rr) for rr in rows)
         self._fill_slots[slot].queue_draw()
+        self._refresh_row_fills()
         self._save_fill_state()
         if slot in self._layer_patterns.values():
             self._push_fills()
@@ -3795,6 +3828,7 @@ class Viewer:
                 "kind": "recolor",
                 "colors": [[list(k), v] for k, v
                            in sorted(recolors.items())]})
+        self._refresh_row_fills()
         self._save_props_state()
         self._push_fills()  # repattern + epoch bump + redraw
         self._set_live_status(
