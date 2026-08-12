@@ -620,8 +620,9 @@ def _svc_repattern(cache, renderer, job):
 
 
 def _apply_personal_fills(cache, renderer):
-    """Startup: apply the personal fill palette (if any) so the
-    first frame already carries the user's patterns."""
+    """Startup: apply the design-default layerprops fills/widths
+    (if a file sits next to the source) so the first frame
+    already matches."""
     try:
         from .fillpat import fill_index, default_patterns
         rows, _ = cache_mod.load_layer_props(cache.src)

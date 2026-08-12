@@ -209,23 +209,6 @@ def normalize_layer_colors(meta):
     return meta
 
 
-def _xdg_floe_dir():
-    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(
-        os.path.expanduser("~"), ".cache")
-    return os.path.join(base, "floe")
-
-
-def personal_props_path(src):
-    """Per-user Calibre-format layerprops (palette picks): keyed by
-    the absolute source path under XDG cache - personalization
-    never touches shared files."""
-    import hashlib
-    h = hashlib.sha1(
-        os.path.abspath(src).encode("utf-8")).hexdigest()[:16]
-    return os.path.join(_xdg_floe_dir(), "colors",
-                        "%s.layerprops" % h)
-
-
 def shared_props_paths(src):
     """Design-default layerprops candidates next to the source:
     <file>.layerprops first, then <stem>.layerprops (what Calibre
@@ -236,39 +219,19 @@ def shared_props_paths(src):
 
 
 def load_layer_props(src):
-    """Effective layerprops rows for this user+design:
-    personal file first; else the shared design default, which is
-    also SEEDED into the personal cache on first open. Returns
+    """Design-default layerprops rows: <src>.layerprops first,
+    then Calibre's own <stem>.layerprops. No per-user cache -
+    persistence is EXPLICIT via the viewer's load/save layer
+    properties menu (user call 2026-08-13). Returns
     (rows, path or None) - rows per floe.fillpat.parse_layerprops."""
     from . import fillpat
-    pp = personal_props_path(src)
-    try:
-        with open(pp) as f:
-            return fillpat.parse_layerprops(f.read()), pp
-    except OSError:
-        pass
     for sp in shared_props_paths(src):
         try:
             with open(sp) as f:
-                text = f.read()
+                return fillpat.parse_layerprops(f.read()), sp
         except OSError:
             continue
-        try:
-            os.makedirs(os.path.dirname(pp), exist_ok=True)
-            with open(pp, "w") as f:
-                f.write(text)
-        except OSError:
-            pass  # adopt for the session even if unsaveable
-        return fillpat.parse_layerprops(text), sp
     return [], None
-
-
-def save_personal_props(src, text):
-    path = personal_props_path(src)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
-        f.write(text)
-    return path
 
 
 def save_shared_props(src, text):
@@ -281,10 +244,10 @@ def save_shared_props(src, text):
 
 
 def apply_personal_colors(meta, src):
-    """Overlay layerprops colors onto the meta layer table (AFTER
-    normalize_layer_colors). Rows name colors from the 7x7 table
-    (or literal #hex); fills are applied by the viewer/renderer,
-    not here."""
+    """Overlay the design-default layerprops colors onto the meta
+    layer table (AFTER normalize_layer_colors). Rows name colors
+    from the 7x7 table (or literal #hex); fills/visibility/width
+    are applied by the viewer/renderer, not here."""
     from . import fillpat
     rows, _ = load_layer_props(src)
     if not rows:

@@ -3573,7 +3573,6 @@ class Viewer:
             for l in self.meta["layers"]:
                 if (l["layer"], l["datatype"]) == tuple(key):
                     l["color"] = color
-        self._save_props_state()
         self.worker.submit({
             "kind": "recolor",
             "colors": [[list(k), color] for k in sorted(keys)]})
@@ -3622,7 +3621,6 @@ class Viewer:
         for key in keys:
             self._layer_patterns[tuple(key)] = slot
         self._refresh_row_fills()
-        self._save_fill_state()
         self._push_fills()
         self._set_live_status(
             "fill '%s' -> %d layer(s)"
@@ -3668,21 +3666,6 @@ class Viewer:
                 if slot is not None
                 and 0 <= slot < len(self._fill_patterns)
                 else None)
-
-    def _save_props_state(self):
-        try:
-            cache_mod.save_personal_props(
-                self.cache.src,
-                fillpat.format_layerprops(self._props_rows()))
-        except OSError as e:
-            self._set_live_status("layerprops save failed: %s" % e)
-
-    def _save_fill_state(self):
-        # bitmaps are NOT personalized (user call 2026-08-12):
-        # editor changes live for the session only; the shipped
-        # fillpatterns.def is the sole bitmap source. Only the
-        # per-layer assignments persist (layerprops).
-        self._save_props_state()
 
     def _push_fills(self):
         """Ship the RESOLVED per-layer bitmaps to the render
@@ -3789,7 +3772,6 @@ class Viewer:
             "".join(rr) for rr in rows)
         self._fill_slots[slot].queue_draw()
         self._refresh_row_fills()
-        self._save_fill_state()
         if slot in self._layer_patterns.values():
             self._push_fills()
 
@@ -3826,8 +3808,9 @@ class Viewer:
         """Layer menu: apply a Calibre .layerprops file to the
         session (colors, fill assignments, visibility and outline
         width; rows for layers the design lacks are skipped,
-        unlisted layers keep their state). The personal snapshot
-        is rewritten, so the load sticks across restarts."""
+        unlisted layers keep their state). Session-scoped: persist
+        via "save layer properties..." or the design-default
+        publish."""
         path = self._props_chooser(save=False)
         if not path:
             return
@@ -3878,7 +3861,6 @@ class Viewer:
                 "colors": [[list(k), v] for k, v
                            in sorted(recolors.items())]})
         self._refresh_row_fills()
-        self._save_props_state()
         self._push_fills()  # repattern + epoch bump + redraw
         self._set_live_status(
             "layer properties loaded: %s (%d colors, %d fills)"
