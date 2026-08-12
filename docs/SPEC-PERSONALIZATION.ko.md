@@ -73,8 +73,10 @@ alt_light_speckle, alt_speckle, triangle_small, wave_small, wave,
 right_slope, left_slope, plus, brick, circles, carpet_1, solid, clear.
 
 - `FIXED_FILLS = ("solid", "clear")` — 에디터 편집 불가 슬롯.
-- **비트맵은 개인화하지 않는다**(사용자 결정 2026-08-12): 에디터 수정은
-  세션 한정, 영구 변경은 이 .def 수정+커밋으로.
+- **비트맵은 개인화하지 않는다**(사용자 결정 2026-08-12): 세트 확정
+  후 비트맵 에디터는 개발용으로 숨김 — `FLOE_FILL_EDIT=1`로 실행할
+  때만 슬롯 우클릭 메뉴 노출(세션 한정 수정). 영구 변경은 .def
+  수정+커밋으로.
 - 렌더 특례: fill이 `speckle`(16×16 체커)로 해석되면 렌더러는 단일
   스티플 대신 **역상 쌍 경로**를 유지(전 레이어 공통 구멍 계약 보존).
 

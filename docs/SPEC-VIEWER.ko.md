@@ -68,7 +68,7 @@
   선택 하이라이트 d9f2ff/픽 fff2a8), **색 팔레트 7×7**(colornames.def
   순서, DrawingArea·pane 폭 연동·1px 외곽), **fill 팔레트 5×4**
   (fillpatterns.def 순서, 1:1 타일 미리보기·흰 바탕 검은 도트,
-  좌클릭=지정/우클릭=비트맵 에디터; solid/clear 고정), fit/clip 버튼.
+  좌클릭=지정; 비트맵 에디터는 FLOE_FILL_EDIT=1 개발용), fit/clip 버튼.
 - 오버레이(픽스버프 직접 스탬프, gui.py 상단 헬퍼): 룰러(흰 1px 실선
   + 화살촉 + 거리 칩 흰 텍스트 + 점선 리더), 러버밴드(흰 1px), 스냅
   마커(흰 십자+사각), DRC 마크(빨강), 선택 하이라이트. stamp_segment/

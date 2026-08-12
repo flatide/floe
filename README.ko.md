@@ -105,8 +105,7 @@ settled=..` 한 줄이 상시 출력된다(라운드별 비누적 — 성능 실
 ### 색/패턴 팔레트
 
 - 레이어 행 선택 → 색 스와치 클릭 = 즉시 recolor (폴딩된 그룹 부모는
-  멤버 전체 적용). 패턴 스와치 좌클릭 = fill 지정, 우클릭 = 16×16
-  비트맵 에디터(세션 한정; Solid/Clear는 고정).
+  멤버 전체 적용). 패턴 스와치 좌클릭 = fill 지정.
 - 레이어 우클릭 메뉴: **load/save layer properties…**(임의 경로의
   Calibre layerprops 로드/내보내기), **save colors+fills as design
   default**(`<oasis>.layerprops`로 발행). 자세한 규칙은

@@ -1111,8 +1111,7 @@ class Viewer:
             eb = Gtk.EventBox()
             eb.add(da)
             eb.set_tooltip_text(
-                "%s - click: fill selected layer(s); right-click: "
-                "edit bitmap" % fname)
+                "%s - click: fill selected layer(s)" % fname)
             eb.connect("button-press-event",
                        lambda _w, ev, i=i:
                        self._on_fill_slot_click(i, ev))
@@ -3587,6 +3586,10 @@ class Viewer:
         if ev.type != Gdk.EventType.BUTTON_PRESS:
             return True
         if ev.button == 3:
+            # the bitmap editor is a development tool (the Calibre
+            # set is finalized) - hidden unless FLOE_FILL_EDIT=1
+            if not os.environ.get("FLOE_FILL_EDIT"):
+                return True
             menu = Gtk.Menu()
             item = Gtk.MenuItem(label="edit bitmap\u2026")
             fixed = fillpat.FILL_NAMES[slot] in fillpat.FIXED_FILLS
