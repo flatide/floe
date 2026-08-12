@@ -1241,6 +1241,7 @@ class Viewer:
                 pass
         for w in self._fill_slots:
             w.queue_draw()
+        self._apply_props_visibility(rows)
         self._refresh_row_fills()
         self.last_frame = None
         self._frame_anchor = None
@@ -3630,6 +3631,22 @@ class Viewer:
                          str(self._layer_widths.get(key, 1))))
         return rows
 
+    def _apply_props_visibility(self, rows):
+        """layerprops second-to-last column: 0=hide, 1=show.
+        Batch-apply to rows the design knows (set_active fires the
+        toggle handler, which maintains self.visible)."""
+        self._layers_batch = True
+        try:
+            for key, _c, _f, _n, f1, _f2 in rows:
+                row = self._layer_rows.get(tuple(key))
+                if row is None or f1 not in ("0", "1"):
+                    continue
+                want = f1 == "1"
+                if row.get_active() != want:
+                    row.set_active(want)
+        finally:
+            self._layers_batch = False
+
     def _refresh_row_fills(self):
         """Sync every layer row's swatch with its assigned fill."""
         for key, row in getattr(self, "_layer_rows", {}).items():
@@ -3795,10 +3812,10 @@ class Viewer:
 
     def _load_props_dialog(self):
         """Layer menu: apply a Calibre .layerprops file to the
-        session (colors + fill assignments; rows for layers the
-        design lacks are skipped, unlisted layers keep their
-        state). The personal snapshot is rewritten, so the load
-        sticks across restarts."""
+        session (colors, fill assignments, visibility and outline
+        width; rows for layers the design lacks are skipped,
+        unlisted layers keep their state). The personal snapshot
+        is rewritten, so the load sticks across restarts."""
         path = self._props_chooser(save=False)
         if not path:
             return
@@ -3837,9 +3854,11 @@ class Viewer:
                     del self._layer_widths[key]
             except ValueError:
                 pass
+        self._apply_props_visibility(rows)
         if not recolors and not nfill:
             self._set_live_status(
                 "no matching layers in %s" % path)
+            self.redraw(immediate=True)  # visibility may have changed
             return
         if recolors:
             self.worker.submit({
