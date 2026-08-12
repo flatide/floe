@@ -90,9 +90,9 @@
 
 ## 6. 개인화/공유 (SPEC-PERSONALIZATION)
 
-- Calibre `.layerprops`가 색/fill 소스: 개인(`~/.cache/floe/colors/
-  <sha1(abs src)>.layerprops`) → 없으면 소스 옆(`<file>.layerprops` 또는
-  `<stem>.layerprops`) 채택+개인 시드.
+- Calibre `.layerprops`가 색/fill/표시/두께 소스: 소스 옆
+  (`<file>.layerprops` 또는 `<stem>.layerprops`)만 자동 적용. 개인
+  캐시는 없음 — 지속은 뷰어 메뉴(load/save layer properties…, 발행).
 - 색 이름표: `floe/colornames.def`(7×7). fill 비트맵: `floe/
   fillpatterns.def`(20종, 실물 Calibre hex) — **비트맵은 개인화 없음**,
   fill *지정*만 layerprops로 개인화.

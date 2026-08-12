@@ -119,7 +119,6 @@ settled=..` 한 줄이 상시 출력된다(라운드별 비누적 — 성능 실
 | `FLOE_THIN_UM` | rev 45 프레임 격자 피치 µm (기본 7.0, **0 = rev41+43 완전 복원**) |
 | `FLOE_XQUARTZ` 계열 | XQuartz XRender 흑화 우회 (런처가 `CAIRO_DEBUG=xrender-version=-1` 설정) |
 | `FLOE_PANEL_DEBUG`, `FLOE_MOSAIC`, `FLOE_WS`, `FLOE_CLIP`, `FLOE_REGION`, `FLOE_TESTCHIP` | 디버그/테스트용 |
-| `XDG_CACHE_HOME` | 개인화 저장 위치 (기본 `~/.cache`) |
 
 ## 7. 기타 CLI
 
