@@ -488,11 +488,20 @@ class LayerRow(object):
         self.key = (l["layer"], l["datatype"])
         # Calibre-style row: "127.1  <swatch>  NAME" - number first,
         # a color marker, then the name in plain white on black
-        raw_num = "%d.%d" % (self.key[0], self.key[1])
+        # datatype 0 displays bare (Calibre style): 2.0 -> 2
+        raw_num = ("%d" % self.key[0] if self.key[1] == 0
+                   else "%d.%d" % (self.key[0], self.key[1]))
         # Render exactly num_width monospace glyph cells in every row so the
         # swatches stay aligned. Layer/datatype text itself is left-aligned.
         self._num = raw_num.ljust(num_width)
-        self._name = l["name"]
+        name = l["name"] or ""
+        # placeholder names arrive as "layer/type": show them in
+        # the l.d form (same dt-0 omission as the number column)
+        if "/" in name:
+            a, _, b = name.partition("/")
+            if a.isdigit() and b.isdigit():
+                name = a if b == "0" else "%s.%s" % (a, b)
+        self._name = name
         self._color = l["color"]
         self._marker = marker
         self._on_toggle = on_toggle
