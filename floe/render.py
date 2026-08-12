@@ -102,6 +102,9 @@ class Renderer:
         # speckle. Stipple ids are cached per unique bitmap.
         self._layer_fill = {}
         self._fill_ids = {}
+        # per-layer outline width px (layerprops last column);
+        # absent = 1
+        self._layer_width = {}
         self.lv.show_layout(layout, False)
         self._design_speckle_patterns = tuple(
             self.lv.add_stipple("floe-calibre-speckle-%d" % i, pattern)
@@ -151,7 +154,7 @@ class Renderer:
                     self._fill_ids[rows] = idx
                 lp.dither_pattern = idx
                 lp.transparent = False
-                lp.width = 1
+                lp.width = self._layer_width.get(key, 1)
             elif self.speckle:
                 # Non-alpha, single-pass Calibre speckle. Filled pixels use
                 # the upper layer's color; common empty pixels preserve a
@@ -159,11 +162,11 @@ class Renderer:
                 lp.dither_pattern = self._design_speckle_patterns[
                     paint_plane & 1]
                 lp.transparent = False
-                lp.width = 1
+                lp.width = self._layer_width.get(key, 1)
             else:
                 lp.dither_pattern = 0  # solid (headless exports)
                 lp.transparent = False
-                lp.width = 1
+                lp.width = self._layer_width.get(key, 1)
         self.lv.max_hier()
 
     def _place_hollow_underlays_first(self):
@@ -208,6 +211,13 @@ class Renderer:
         self.lv.clear_layers()
         for node in ordered:
             self.lv.insert_layer(self.lv.end_layers(), node)
+
+    def set_line_widths(self, mapping):
+        """Replace per-layer outline widths wholesale: {(l, d): px}
+        (the layerprops trailing column)."""
+        self._layer_width = {tuple(k): max(1, min(8, int(v)))
+                             for k, v in mapping.items()}
+        self.refresh()
 
     def set_fill_patterns(self, mapping):
         """Replace the per-layer fill overrides wholesale:

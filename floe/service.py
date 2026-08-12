@@ -610,11 +610,13 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
 
 
 def _svc_repattern(cache, renderer, job):
-    """Live per-layer fill change (pattern palette): job carries
-    the RESOLVED bitmaps {[l, d]: rows}. Wholesale replace - the
-    gui owns the slot mapping."""
+    """Live per-layer fill/width change (pattern palette or a
+    layerprops load): RESOLVED bitmaps {[l, d]: rows} + outline
+    widths. Wholesale replace - the gui owns the mapping."""
     renderer.set_fill_patterns(
         {tuple(k): v for k, v in job["fills"]})
+    renderer.set_line_widths(
+        {tuple(k): w for k, w in job.get("widths", [])})
 
 
 def _apply_personal_fills(cache, renderer):
@@ -627,12 +629,21 @@ def _apply_personal_fills(cache, renderer):
             return
         pats = default_patterns()
         fills = {}
-        for key, _color, fill, _name, _f1, _f2 in rows:
+        widths = {}
+        for key, _color, fill, _name, _f1, f2 in rows:
             i = fill_index(fill)
             if i is not None:
                 fills[key] = pats[i]
+            try:
+                w = int(f2)
+                if w > 1:
+                    widths[key] = w
+            except ValueError:
+                pass
         if fills:
             renderer.set_fill_patterns(fills)
+        if widths:
+            renderer.set_line_widths(widths)
     except Exception:
         pass  # personalization must never kill the service
 

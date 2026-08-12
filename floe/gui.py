@@ -829,6 +829,7 @@ class Viewer:
         # 16x16 bitmaps; (l, d) -> slot assignments
         self._fill_patterns = fillpat.default_patterns()
         self._layer_patterns = {}
+        self._layer_widths = {}     # (l, d) -> outline px (기본 1)
         self._fill_slots = []
         self._ddlg = None
         self._gdlg = None
@@ -1226,11 +1227,18 @@ class Viewer:
         # next to the source - already seeded by Cache.load)
         self._fill_patterns = fillpat.default_patterns()
         self._layer_patterns = {}
+        self._layer_widths = {}
         rows, _ = cache_mod.load_layer_props(self.cache.src)
-        for key, _color, fill, _name, _f1, _f2 in rows:
+        for key, _color, fill, _name, _f1, f2 in rows:
             i = fillpat.fill_index(fill)
             if i is not None:
                 self._layer_patterns[tuple(key)] = i
+            try:
+                w = int(f2)
+                if w > 1:
+                    self._layer_widths[tuple(key)] = w
+            except ValueError:
+                pass
         for w in self._fill_slots:
             w.queue_draw()
         self._refresh_row_fills()
@@ -3619,7 +3627,7 @@ class Viewer:
             rows.append((key, fillpat.color_name(l["color"]),
                          fill, l.get("name") or "",
                          "1" if key in self.visible else "0",
-                         "1"))
+                         str(self._layer_widths.get(key, 1))))
         return rows
 
     def _refresh_row_fills(self):
@@ -3655,7 +3663,9 @@ class Viewer:
             "fills": [[list(k), self._fill_patterns[v]]
                       for k, v in sorted(
                           self._layer_patterns.items())
-                      if 0 <= v < len(self._fill_patterns)]})
+                      if 0 <= v < len(self._fill_patterns)],
+            "widths": [[list(k), w] for k, w in sorted(
+                self._layer_widths.items())]})
         self._color_epoch += 1
         self.redraw(immediate=True)
 
@@ -3819,6 +3829,14 @@ class Viewer:
             if i is not None:
                 self._layer_patterns[key] = i
                 nfill += 1
+            try:
+                w = int(_f2)
+                if w > 1:
+                    self._layer_widths[key] = w
+                elif key in self._layer_widths:
+                    del self._layer_widths[key]
+            except ValueError:
+                pass
         if not recolors and not nfill:
             self._set_live_status(
                 "no matching layers in %s" % path)
