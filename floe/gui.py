@@ -1205,7 +1205,7 @@ class Viewer:
         # fill palette state: user-global edited bitmaps + the
         # effective layerprops (personal, else the design default
         # next to the source - already seeded by Cache.load)
-        self._fill_patterns = cache_mod.load_fill_patterns()
+        self._fill_patterns = fillpat.default_patterns()
         self._layer_patterns = {}
         rows, _ = cache_mod.load_layer_props(self.cache.src)
         for key, _color, fill, _name, _f1, _f2 in rows:
@@ -3609,10 +3609,10 @@ class Viewer:
             self._set_live_status("layerprops save failed: %s" % e)
 
     def _save_fill_state(self):
-        try:
-            cache_mod.save_fill_patterns(self._fill_patterns)
-        except OSError as e:
-            self._set_live_status("fill save failed: %s" % e)
+        # bitmaps are NOT personalized (user call 2026-08-12):
+        # editor changes live for the session only; the shipped
+        # fillpatterns.def is the sole bitmap source. Only the
+        # per-layer assignments persist (layerprops).
         self._save_props_state()
 
     def _push_fills(self):

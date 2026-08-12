@@ -271,44 +271,6 @@ def save_personal_props(src, text):
     return path
 
 
-def fill_patterns_store_path():
-    """User-global edited fill bitmaps: {name: hex words}. The
-    Calibre fill set is one standard table, not per-design."""
-    return os.path.join(_xdg_floe_dir(), "fillpatterns.json")
-
-
-def load_fill_patterns():
-    """The 20 slot bitmaps as klayout rows: fillpat defaults
-    overlaid by the user's edits (hex words on disk)."""
-    from . import fillpat
-    pats = fillpat.default_patterns()
-    try:
-        with open(fill_patterns_store_path()) as f:
-            edits = json.load(f)
-    except (OSError, ValueError):
-        return pats
-    for name, hx in (edits or {}).items():
-        i = fillpat.fill_index(str(name))
-        if i is not None:
-            try:
-                pats[i] = fillpat.hex_to_rows(str(hx))
-            except ValueError:
-                pass
-    return pats
-
-
-def save_fill_patterns(pats):
-    """Persist the WHOLE 20-slot table (user call 2026-08-12:
-    a full snapshot, not a diff against the shipped defaults)."""
-    from . import fillpat
-    full = {fillpat.FILL_NAMES[i]: fillpat.rows_to_hex(p)
-            for i, p in enumerate(pats)}
-    path = fill_patterns_store_path()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(full, f, indent=1)
-
-
 def save_shared_props(src, text):
     """Publish the layerprops text as the design default next to
     the source (may raise OSError on read-only shares)."""

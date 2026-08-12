@@ -621,11 +621,11 @@ def _apply_personal_fills(cache, renderer):
     """Startup: apply the personal fill palette (if any) so the
     first frame already carries the user's patterns."""
     try:
-        from .fillpat import fill_index
+        from .fillpat import fill_index, default_patterns
         rows, _ = cache_mod.load_layer_props(cache.src)
         if not rows:
             return
-        pats = cache_mod.load_fill_patterns()
+        pats = default_patterns()
         fills = {}
         for key, _color, fill, _name, _f1, _f2 in rows:
             i = fill_index(fill)
