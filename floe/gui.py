@@ -88,7 +88,7 @@ LAYER_NUM_MARGIN_CHARS = 0.6      # number -> swatch breathing room
 LAYER_NAME_MARGIN_CHARS = 1.2     # swatch -> name: over a full glyph
 LAYER_STRIKE_RGB = (242, 242, 242)  # hidden-layer strike: bright,
                                     # readable over dimmed text/swatch
-LAYER_COLOR_WIDTH = 5       # former 2-char swatch column x 2.5
+LAYER_SWATCH_WH = (31, 14)  # layer-row color/fill box, fixed px
 
 
 def import_gtk():
@@ -531,8 +531,7 @@ class LayerRow(object):
         self._clbl = Gtk.Image()
         self._clbl.set_halign(Gtk.Align.CENTER)
         self._clbl.set_valign(Gtk.Align.CENTER)
-        swatch_w = max(5, round(probe_width * LAYER_COLOR_WIDTH))
-        swatch_h = max(3, probe_height)
+        swatch_w, swatch_h = LAYER_SWATCH_WH
         self._swatch_refs = []
         self._swatch_wh = (swatch_w, swatch_h)
         self._swatch_on = self._speckle_swatch(swatch_w, swatch_h)
@@ -1062,7 +1061,7 @@ class Viewer:
                 return False
 
             da = Gtk.DrawingArea()
-            da.set_size_request(12, 11)
+            da.set_size_request(12, 14)
             da.set_hexpand(True)
             da.connect("draw", _draw_swatch)
             eb = Gtk.EventBox()
@@ -1109,7 +1108,7 @@ class Viewer:
                 return False
 
             da = Gtk.DrawingArea()
-            da.set_size_request(12, 18)
+            da.set_size_request(12, 20)
             da.set_hexpand(True)
             da.connect("draw", _draw_slot)
             self._fill_slots.append(da)
