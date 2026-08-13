@@ -522,7 +522,7 @@ class LayerRow(object):
         self._nlbl.set_xalign(0.0)
         probe = self._nlbl.create_pango_layout("")
         probe.set_markup(
-            '<span face="monospace" size="medium">0</span>', -1)
+            '<span face="monospace" size="small">0</span>', -1)
         probe_width, probe_height = probe.get_pixel_size()
         self._mlbl.set_size_request(max(1, probe_width * 2), -1)
         self._nlbl.set_size_request(max(1, probe_width * num_width), -1)
@@ -619,16 +619,21 @@ class LayerRow(object):
         # Text and swatch keep their full colors - the strike alone
         # marks the hidden state (dimmed text was too dark to read,
         # user call 2026-08-10)
+        # the name uses the SAME monospace face as the number column:
+        # the default proportional font drew thinner strokes that
+        # antialiased to gray next to the bright digits (user report
+        # 2026-08-13)
         self._mlbl.set_markup(
-            '<span face="monospace" size="medium" '
+            '<span face="monospace" size="small" '
             'foreground="%s">%s</span>'
             % (fg, GLib.markup_escape_text(self._marker)))
         self._nlbl.set_markup(
-            '<span face="monospace" size="medium" '
+            '<span face="monospace" size="small" '
             'foreground="%s">%s</span>'
             % (fg, GLib.markup_escape_text(self._num)))
         self._lbl.set_markup(
-            '<span size="medium" foreground="%s">%s</span>'
+            '<span face="monospace" size="small" '
+            'foreground="%s">%s</span>'
             % (fg, GLib.markup_escape_text(self._name)))
         self._clbl.set_from_pixbuf(self._swatch_on)
         self.widget.queue_draw()
@@ -1057,7 +1062,7 @@ class Viewer:
                 return False
 
             da = Gtk.DrawingArea()
-            da.set_size_request(12, 14)
+            da.set_size_request(12, 11)
             da.set_hexpand(True)
             da.connect("draw", _draw_swatch)
             eb = Gtk.EventBox()
@@ -1104,7 +1109,7 @@ class Viewer:
                 return False
 
             da = Gtk.DrawingArea()
-            da.set_size_request(12, 22)
+            da.set_size_request(12, 18)
             da.set_hexpand(True)
             da.connect("draw", _draw_slot)
             self._fill_slots.append(da)
