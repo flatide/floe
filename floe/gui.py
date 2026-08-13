@@ -52,6 +52,7 @@ DRC_LIST_MAX = 2000        # grid cells per rule (prev/next reaches all)
 DRC_GRID_W = 5             # error numbers per browser grid row
 DRC_VIEW_FRACTION = 0.3    # error extent ~30% of the view on a jump
 DRC_HL_CAP = 1000          # highlight-in-view marker budget
+DRC_SEL_CAP = 5000         # box-select budget ('e' mode)
 DRC_CYAN = 0x00FFFFFF      # highlight squares / focus halo
 
 
@@ -877,6 +878,9 @@ class Viewer:
         self._drc_cell = None       # marked grid cell (row, col)
         self._drc_gridw = DRC_GRID_W   # columns, reflowed to pane
         self._drc_cellw = 60        # px per number cell (probe)
+        self._drc_sel = None        # box selection: (ci, [ei],
+                                    # [(ei, cx, cy) dbu]) - 'e' mode
+        self._esel_start = None     # pending first box corner (dbu)
         self._drc_grid_map = None   # None = all errors (arithmetic)
                                     # else the in-view ei list (hl)
         self._drc_focus = None      # single-clicked error (ci, ei,
@@ -1312,6 +1316,8 @@ class Viewer:
         self._drc_grid_rows = 0
         self._drc_cell = None
         self._drc_grid_map = None
+        self._drc_sel = None
+        self._esel_start = None
         self._drc_focus = None
         self._drc_hl = False
         self._drc_hl_res = None
@@ -1712,7 +1718,26 @@ class Viewer:
                 for j in range(0, len(sp) - 1, 2):
                     stamp_segment(disp, sp[j], sp[j + 1], DRC_CYAN,
                                   DRC_MARK)
-        if self._drc_hl and self._drc is not None \
+        if self._drc_sel is not None:
+            # box selection ('e'): the selected errors draw as the
+            # zoom-independent cyan squares, replacing the broader
+            # highlight set while active
+            sci, _seis, marks = self._drc_sel
+            focus = self._drc_focus
+            for ei_, mx, my in marks:
+                cxp, cyp = sx(mx), sy(my)
+                s_px = 5 if (focus is not None
+                             and focus[0] == sci
+                             and focus[1] == ei_) else 3
+                fill_rect(disp, cxp - s_px // 2, cyp - s_px // 2,
+                          s_px, s_px, DRC_CYAN)
+        if self.mode == "esel" and self._esel_start is not None:
+            ax, ay = self._esel_start
+            bx, by = self._cursor
+            rect_outline(disp, sx(ax), sy(ay), sx(bx), sy(by),
+                         None, RULER_CORE, px=1)
+        if self._drc_hl and self._drc_sel is None \
+                and self._drc is not None \
                 and hasattr(self._drc, "query_rect"):
             # highlight-in-view: every violation is a zoom-
             # independent 3x3 cyan square (5x5 for the clicked
@@ -2325,8 +2350,9 @@ class Viewer:
 
     def _idle_cursor(self):
         # plain arrow at rest; the crosshair belongs to the ruler
-        # tool (user call 2026-08-09)
-        return "crosshair" if self.mode == "ruler" else "default"
+        # and error-box-select tools
+        return ("crosshair" if self.mode in ("ruler", "esel")
+                else "default")
 
     def _set_cursor(self, name):
         win = self.scroller.get_window()  # flateyes' set_viewport_cursor
@@ -2415,6 +2441,8 @@ class Viewer:
                 # movement is exclusively a pan gesture in both modes.
                 if self.mode == "ruler":
                     self._ruler_click(ev)
+                elif self.mode == "esel":
+                    self._esel_click(ev)
                 else:
                     self._pick_click(ev)
             return True
@@ -2656,7 +2684,7 @@ class Viewer:
         elif name == "b":
             self._set_mono(not self._mono)
         elif name == "e":
-            self._drc_window()
+            self._esel_toggle()
         elif name == "n":
             self._drc_step(1)
         elif name == "p":
@@ -3081,12 +3109,82 @@ class Viewer:
 
     # ---- DRC results browser -------------------------------------------------
     def _drc_window(self):
-        """'e': the browser lives in the LEFT pane now (user call
-        2026-08-13) - load a db when none is open, else focus it."""
+        """The browser lives in the LEFT pane - load a db when none
+        is open, else focus it (open .db button equivalent)."""
         if self._drc is None:
             self._drc_open_dialog()
         else:
             self._drcwin._rules.grab_focus()
+
+    def _esel_toggle(self):
+        """'e': error box-select mode for the OPEN rule (user call
+        2026-08-14) - two clicks span a box, every error of that
+        rule inside it gets selected; works with highlight mode on
+        or off."""
+        if self.mode == "esel":
+            self.mode = "normal"
+            self._esel_start = None
+            self._set_cursor(self._idle_cursor())
+            self._set_live_status("error select off")
+            self._display()
+            return
+        db, ci = self._drc, self._drc_sel_check()
+        if db is None or ci is None:
+            self._set_live_status(
+                "error select: open a DRC db and select a rule first")
+            return
+        if not hasattr(db, "query_rect"):
+            self._set_live_status(
+                "error select needs a packed index: "
+                "floe-index drc <db> --pack")
+            return
+        self.mode = "esel"
+        self._esel_start = None
+        self._set_cursor(self._idle_cursor())
+        self._set_live_status(
+            "error select %s: click the 1st box corner (Esc quits)"
+            % db.checks[ci].name)
+
+    def _esel_click(self, _ev):
+        if self._esel_start is None:
+            self._esel_start = self._cursor
+            self._set_live_status(
+                "error select: click the opposite corner")
+            self._display()
+            return
+        a = self._esel_start
+        b = self._cursor
+        self._esel_start = None
+        self.mode = "normal"
+        self._set_cursor(self._idle_cursor())
+        self._esel_apply(a, b)
+
+    def _esel_apply(self, a, b):
+        """Box done: select the open rule's errors inside it, show
+        them in the grid and as cyan squares."""
+        db, ci = self._drc, self._drc_sel_check()
+        if db is None or ci is None:
+            return
+        k = self.dbu
+        x0, x1 = sorted((a[0] * k, b[0] * k))
+        y0, y1 = sorted((a[1] * k, b[1] * k))
+        res = db.query_rect(x0, y0, x1, y1, cap=DRC_SEL_CAP,
+                            checks=(ci,))
+        eis = []
+        marks = []
+        for _rci, ei, e in res:
+            eis.append(ei)
+            bb = e.bbox()
+            marks.append((ei, (bb[0] + bb[2]) / 2.0 / k,
+                          (bb[1] + bb[3]) / 2.0 / k))
+        self._drc_sel = (ci, eis, marks)
+        self._drc_focus = None
+        self._drc_grid_fill(ci)
+        self._set_live_status(
+            "error select %s: %d selected%s (Esc clears)"
+            % (db.checks[ci].name, len(eis),
+               " (capped)" if len(eis) >= DRC_SEL_CAP else ""))
+        self._display()
 
     def _build_drc_panel(self):
         """DRC browser panel, embedded in the left pane (always
@@ -3318,6 +3416,8 @@ class Viewer:
         self._drc_pos = -1
         self.drc_mark = None
         self._drc_hl_res = None
+        self._drc_sel = None
+        self._esel_start = None
         if self._drcwin is not None:
             self._drc_fill()
         self._set_live_status(
@@ -3353,6 +3453,7 @@ class Viewer:
         if ci == self._drc_open:
             return
         self._drc_open = ci
+        self._drc_sel = None
         self._drc_grid_fill(ci)
         self._drc_show_rule(ci)
         if self._drc_hl:
@@ -3419,10 +3520,19 @@ class Viewer:
         self._drc_grid_ci = ci
         c = db.checks[ci]
         gbase = self._drc_cum[ci]
-        if self._drc_hl and hasattr(db, "query_rect"):
+        sel = self._drc_sel
+        cap_note = None
+        if sel is not None and sel[0] == ci:
+            eis = sel[1]
+            maxnum = gbase + (max(eis) + 1 if eis else 1)
+            if len(eis) >= DRC_SEL_CAP:
+                cap_note = DRC_SEL_CAP
+        elif self._drc_hl and hasattr(db, "query_rect"):
             eis = [ei for rci, ei, _k, _p in self._drc_hl_list()
                    if rci == ci]
             maxnum = gbase + (eis[-1] + 1 if eis else 1)
+            if len(eis) >= DRC_HL_CAP:
+                cap_note = DRC_HL_CAP
         else:
             eis = None
             maxnum = gbase + max(1, min(len(c.errors),
@@ -3447,8 +3557,8 @@ class Viewer:
                 cells += [""] * (W - len(cells))
                 gstore.append(cells)
             self._drc_grid_rows = (len(eis) + W - 1) // W
-            if len(eis) >= DRC_HL_CAP:
-                gstore.append(["… capped at %d" % DRC_HL_CAP]
+            if cap_note is not None:
+                gstore.append(["… capped at %d" % cap_note]
                               + [""] * (W - 1))
             # keep the focused error marked if it is still in view
             f = self._drc_focus
@@ -3816,6 +3926,13 @@ class Viewer:
                 parts.append("ruler: click 1st point"
                              + (" [snap]" if self.snap_on else ""))
             self._display()
+        elif self.mode == "esel":
+            if self._esel_start is not None:
+                parts.append("error select: click the opposite "
+                             "corner (Esc cancels)")
+                self._display()   # live box preview
+            else:
+                parts.append("error select: click the 1st corner")
         elif self._sel_text:
             parts.append(self._sel_text)
         text = "   |   ".join(parts)
@@ -3920,7 +4037,13 @@ class Viewer:
         an object selected, Esc first cancels the measurement in
         progress, then clears finished rulers, and only then drops
         the selection."""
-        if self._ruler_start is not None:
+        if self.mode == "esel":
+            if self._esel_start is not None:
+                self._esel_start = None
+            else:
+                self.mode = "normal"
+                self._set_cursor(self._idle_cursor())
+        elif self._ruler_start is not None:
             self._ruler_start = None
         elif self.mode == "ruler":
             self.mode = "normal"
@@ -3930,6 +4053,10 @@ class Viewer:
             self.rulers = []
         elif self.selection is not None:
             self._clear_selection()
+        elif self._drc_sel is not None:
+            self._drc_sel = None
+            if self._drc_grid_ci is not None:
+                self._drc_grid_fill(self._drc_grid_ci)
         elif self.drc_mark is not None or self._drc_focus is not None:
             self.drc_mark = None
             self._drc_focus = None
