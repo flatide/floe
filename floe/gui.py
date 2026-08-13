@@ -1634,13 +1634,9 @@ class Viewer:
         segs = list(self.rulers)
         if self.mode == "ruler" and self._ruler_start is not None:
             segs.append((*self._ruler_start, *self._ruler_end_preview()))
-        for seg4 in segs:
-            x0, y0, x1, y1 = seg4
+        for x0, y0, x1, y1 in segs:
             a, b = (sx(x0), sy(y0)), (sx(x1), sy(y1))
-            # auto DRC CD rulers read at 2px (user call 2026-08-13);
-            # hand-drawn rulers stay the 1px hairline
-            px = 2 if seg4 in self._drc_ruler else 1
-            stamp_segment(disp, a, b, None, RULER_CORE, px=px)
+            stamp_segment(disp, a, b, None, RULER_CORE, px=1)
             ang = math.atan2(b[1] - a[1], b[0] - a[0])
             stamp_arrow(disp, b, ang, None, RULER_CORE)       # outward
             stamp_arrow(disp, a, ang + math.pi, None, RULER_CORE)
