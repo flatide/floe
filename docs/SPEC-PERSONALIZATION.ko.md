@@ -46,10 +46,12 @@ fill 적용은 뷰어 상태(`_layer_patterns`) + 서비스 기동 시
   유지) / "save layer properties…"(임의 경로로 현재 테이블 전체
   스냅샷 내보내기 — `_props_rows`: 색은 테이블 이름 우선/없으면 #hex,
   fill은 슬롯 이름/미지정 `speckle`, f1=표시, f2=두께).
-- **발행**: 레이어 우클릭 메뉴 "save colors+fills as design default" →
-  같은 텍스트를 `<src>.layerprops`에 기록(`save_shared_props`). 실패
-  (읽기 전용)는 상태줄 안내. 발행에는 fill **이름만** 실린다(비트맵은
-  .def가 소스).
+- **발행**(개발용 — `FLOE_FILL_EDIT=1`일 때만 메뉴 노출): "save
+  colors+fills as design default" → 같은 텍스트를 `<src>.layerprops`에
+  기록(`save_shared_props`). 실패(읽기 전용)는 상태줄 안내. 발행에는
+  fill **이름만** 실린다(비트맵은 .def가 소스). 일반 사용자는 save
+  layer properties…로 내보낸 파일을 `<src>.layerprops` 위치에 두면
+  동일 효과.
 
 ## 4. 색 테이블 — floe/colornames.def
 

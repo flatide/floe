@@ -4042,8 +4042,11 @@ class Viewer:
                  self._load_props_dialog)
         add_item("save layer properties\u2026",
                  self._save_props_dialog)
-        add_item("save colors+fills as design default",
-                 self._publish_default_colors)
+        # dev-only, like the fill bitmap editor: publishing the design
+        # default next to the source stays hidden from end users
+        if os.environ.get("FLOE_FILL_EDIT"):
+            add_item("save colors+fills as design default",
+                     self._publish_default_colors)
         self._layer_menu = menu
 
         def released(_menu):
