@@ -1649,18 +1649,18 @@ class Viewer:
             fill_rect(disp, mx - 9, my, 19, 1, color)
             fill_rect(disp, mx, my - 9, 1, 19, color)
         if self.drc_mark is not None:
+            # solid 2px lines, speckled polygon interiors (user call
+            # 2026-08-13: edges = plain 2px, polygons = 50% fill)
             pts = [(sx(x), sy(y)) for x, y in self.drc_mark["pts"]]
             if self.drc_mark["kind"] == "p":
+                self._drc_fill_speckle(disp, pts)
                 for a, b in zip(pts, pts[1:] + pts[:1]):
-                    stamp_segment(disp, a, b, BLACK, DRC_MARK)
+                    stamp_segment(disp, a, b, None, DRC_MARK)
             else:
                 # edge records: consecutive point pairs are segments
                 for j in range(0, len(pts) - 1, 2):
-                    a, b = pts[j], pts[j + 1]
-                    stamp_segment(disp, a, b, BLACK, DRC_MARK)
-                    for px, py in (a, b):
-                        rect_outline(disp, px - 3, py - 3, px + 3,
-                                     py + 3, None, DRC_MARK)
+                    stamp_segment(disp, pts[j], pts[j + 1], None,
+                                  DRC_MARK)
         if self._zoomdrag is not None and self._band_cur is not None:
             x0, y0 = self._zoomdrag
             x1, y1 = self._band_cur
@@ -3219,6 +3219,60 @@ class Viewer:
                "poly" if e.kind == "p" else "edge",
                w_um, h_um, cx, cy))
         self._display()
+
+    def _drc_speckle_strip(self, width):
+        """Two-row RGBA checker strip in the mark color (row r: on
+        where (x+r) is even), composited row-by-row into polygon
+        spans - GdkPixbuf has no stipple fill, and per-pixel
+        subpixbuf fills would be far too slow per frame."""
+        strip = getattr(self, "_drc_strip", None)
+        if strip is not None and strip.get_width() >= width:
+            return strip
+        strip = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, True,
+                                     8, max(width, 2), 2)
+        strip.fill(0x00000000)
+        for r in (0, 1):
+            for x in range(r & 1, strip.get_width(), 2):
+                strip.new_subpixbuf(x, r, 1, 1).fill(DRC_MARK)
+        self._drc_strip = strip
+        return strip
+
+    def _drc_fill_speckle(self, disp, pts):
+        """Even-odd scanline fill of the violation polygon with the
+        50% speckle checker (screen-anchored phase). Degenerate and
+        very complex outlines fall back to outline-only."""
+        if len(pts) < 3 or len(pts) > 256:
+            return
+        w_px, h_px = disp.get_width(), disp.get_height()
+        ys = [p[1] for p in pts]
+        y0 = max(0, int(math.floor(min(ys))))
+        y1 = min(h_px - 1, int(math.ceil(max(ys))))
+        if y1 < y0:
+            return
+        strip = self._drc_speckle_strip(w_px)
+        edges = [(a, b) for a, b in zip(pts, pts[1:] + pts[:1])
+                 if a[1] != b[1]]
+        budget = 20000   # spans; beyond this the fill just stops
+        for y in range(y0, y1 + 1):
+            yc = y + 0.5
+            xs = []
+            for (ax, ay), (bx, by) in edges:
+                if (ay <= yc < by) or (by <= yc < ay):
+                    xs.append(ax + (yc - ay) * (bx - ax) / (by - ay))
+            if not xs:
+                continue
+            xs.sort()
+            for i in range(0, len(xs) - 1, 2):
+                x0 = max(0, int(math.ceil(xs[i])))
+                x1 = min(w_px, int(math.floor(xs[i + 1])) + 1)
+                if x1 <= x0:
+                    continue
+                strip.composite(disp, x0, y, x1 - x0, 1,
+                                0, y - (y & 1), 1, 1,
+                                GdkPixbuf.InterpType.NEAREST, 255)
+                budget -= 1
+                if budget <= 0:
+                    return
 
     def _drc_cd_ruler(self, e):
         """CD rulers for SIMPLE violations (list of dbu 4-tuples):

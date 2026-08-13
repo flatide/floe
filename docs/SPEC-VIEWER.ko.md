@@ -71,8 +71,10 @@
   좌클릭=지정; 비트맵 에디터는 FLOE_FILL_EDIT=1 개발용), fit/clip 버튼.
 - 오버레이(픽스버프 직접 스탬프, gui.py 상단 헬퍼): 룰러(흰 1px 실선
   + 화살촉 + 거리 칩 흰 텍스트 + 점선 리더), 러버밴드(흰 1px), 스냅
-  마커(흰 십자+사각), DRC 마크(빨강), 선택 하이라이트. stamp_segment/
-  rect_outline은 px 파라미터(기본 2, 룰러/밴드는 1).
+  마커(흰 십자+사각), DRC 마크(빨강: 엣지=2px 단색 실선, 폴리곤=2px
+  단색 외곽 + 내부 50% 스페클 — `_drc_fill_speckle` 짝홀 스캔라인 +
+  2행 체커 스트립 composite, >256 꼭짓점은 외곽만), 선택 하이라이트.
+  stamp_segment/rect_outline은 px 파라미터(기본 2, 룰러/밴드는 1).
 - 룰러: 다중 누적, k/Shift+K 삭제, 스냅(m, vertex/edge, _SNAP_CAP 400),
   자유각 Shift. 커서: 기본 default, 룰러 모드만 crosshair(_idle_cursor).
 
