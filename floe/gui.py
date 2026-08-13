@@ -55,6 +55,7 @@ DRC_VIEW_FRACTION = 0.3    # error extent ~30% of the view on a jump
 DRC_HL_CAP = 1000          # highlight-in-view marker budget
 DRC_SEL_CAP = 5000         # box-select budget ('e' mode)
 DRC_CYAN = 0x00FFFFFF      # highlight squares / focus halo
+DRC_GOLD = 0xFFD700FF      # box-selected errors (canvas + grid)
 
 
 class _DrcPanel(object):
@@ -879,8 +880,9 @@ class Viewer:
         self._drc_cell = None       # marked grid cell (row, col)
         self._drc_gridw = DRC_GRID_W   # columns, reflowed to pane
         self._drc_cellw = 60        # px per number cell (probe)
-        self._drc_sel = None        # box selection: (ci, [ei],
-                                    # [(ei, cx, cy) dbu]) - 'e' mode
+        self._drc_sel = None        # box selection ('e'): (ci,
+                                    # [ei], [(ei, kind, pts dbu)],
+                                    # frozenset(ei))
         self._esel_start = None     # pending first box corner (dbu)
         self._drc_grid_map = None   # None = all errors (arithmetic)
                                     # else the in-view ei list (hl)
@@ -1719,44 +1721,12 @@ class Viewer:
                 for j in range(0, len(sp) - 1, 2):
                     stamp_segment(disp, sp[j], sp[j + 1], DRC_CYAN,
                                   DRC_MARK)
-        if self._drc_sel is not None:
-            # box selection ('e'): squares while highlight mode is
-            # on, the errors' REAL shapes when it is off (user call
-            # 2026-08-14)
-            sci, _seis, marks = self._drc_sel
-            focus = self._drc_focus
-            if self._drc_hl:
-                for ei_, _kind, spts in marks:
-                    hxs = [p[0] for p in spts]
-                    hys = [p[1] for p in spts]
-                    cxp = sx((min(hxs) + max(hxs)) / 2.0)
-                    cyp = sy((min(hys) + max(hys)) / 2.0)
-                    s_px = 5 if (focus is not None
-                                 and focus[0] == sci
-                                 and focus[1] == ei_) else 3
-                    fill_rect(disp, cxp - s_px // 2,
-                              cyp - s_px // 2, s_px, s_px, DRC_CYAN)
-            else:
-                budget = 20000   # segments; huge selections stop
-                for ei_, kind, spts in marks:
-                    sp = [(sx(x), sy(y)) for x, y in spts]
-                    if kind == "p":
-                        segs = list(zip(sp, sp[1:] + sp[:1]))
-                    else:
-                        segs = [(sp[j], sp[j + 1])
-                                for j in range(0, len(sp) - 1, 2)]
-                    for a, b in segs:
-                        stamp_segment(disp, a, b, None, DRC_MARK)
-                        budget -= 1
-                    if budget <= 0:
-                        break
         if self.mode == "esel" and self._esel_start is not None:
             ax, ay = self._esel_start
             bx, by = self._cursor
             rect_outline(disp, sx(ax), sy(ay), sx(bx), sy(by),
                          None, RULER_CORE, px=1)
-        if self._drc_hl and self._drc_sel is None \
-                and self._drc is not None \
+        if self._drc_hl and self._drc is not None \
                 and hasattr(self._drc, "query_rect"):
             # highlight-in-view: every violation is a zoom-
             # independent 3x3 cyan square (5x5 for the clicked
@@ -1772,6 +1742,38 @@ class Viewer:
                              and focus[1] == ei_) else 3
                 fill_rect(disp, cxp - s_px // 2, cyp - s_px // 2,
                           s_px, s_px, DRC_CYAN)
+        if self._drc_sel is not None:
+            # box selection ('e'): GOLD on top - squares while
+            # highlight mode is on (covering their cyan twins),
+            # the errors' REAL shapes when it is off (user calls
+            # 2026-08-14)
+            sci, _seis, marks, _eset = self._drc_sel
+            focus = self._drc_focus
+            if self._drc_hl:
+                for ei_, _kind, spts in marks:
+                    hxs = [p[0] for p in spts]
+                    hys = [p[1] for p in spts]
+                    cxp = sx((min(hxs) + max(hxs)) / 2.0)
+                    cyp = sy((min(hys) + max(hys)) / 2.0)
+                    s_px = 5 if (focus is not None
+                                 and focus[0] == sci
+                                 and focus[1] == ei_) else 3
+                    fill_rect(disp, cxp - s_px // 2,
+                              cyp - s_px // 2, s_px, s_px, DRC_GOLD)
+            else:
+                budget = 20000   # segments; huge selections stop
+                for ei_, kind, spts in marks:
+                    sp = [(sx(x), sy(y)) for x, y in spts]
+                    if kind == "p":
+                        segs = list(zip(sp, sp[1:] + sp[:1]))
+                    else:
+                        segs = [(sp[j], sp[j + 1])
+                                for j in range(0, len(sp) - 1, 2)]
+                    for a, b in segs:
+                        stamp_segment(disp, a, b, None, DRC_GOLD)
+                        budget -= 1
+                    if budget <= 0:
+                        break
         if self._zoomdrag is not None and self._band_cur is not None:
             x0, y0 = self._zoomdrag
             x1, y1 = self._band_cur
@@ -3195,7 +3197,7 @@ class Viewer:
             eis.append(ei)
             marks.append((ei, e.kind,
                           [(x / k, y / k) for x, y in e.pts]))
-        self._drc_sel = (ci, eis, marks)
+        self._drc_sel = (ci, eis, marks, frozenset(eis))
         self._drc_focus = None
         self._drc_grid_fill(ci)
         self._set_live_status(
@@ -3539,13 +3541,10 @@ class Viewer:
         c = db.checks[ci]
         gbase = self._drc_cum[ci]
         sel = self._drc_sel
+        eset = (sel[3] if sel is not None and sel[0] == ci
+                else frozenset())
         cap_note = None
-        if sel is not None and sel[0] == ci:
-            eis = sel[1]
-            maxnum = gbase + (max(eis) + 1 if eis else 1)
-            if len(eis) >= DRC_SEL_CAP:
-                cap_note = DRC_SEL_CAP
-        elif self._drc_hl and hasattr(db, "query_rect"):
+        if self._drc_hl and hasattr(db, "query_rect"):
             eis = [ei for rci, ei, _k, _p in self._drc_hl_list()
                    if rci == ci]
             maxnum = gbase + (eis[-1] + 1 if eis else 1)
@@ -3567,11 +3566,21 @@ class Viewer:
             self._drc_grid_set_cols(n)  # refills at the new width
             return
         W = self._drc_gridw
+
+        def cellfmt(ei):
+            # selected numbers wear GOLD in the grid; the rest stay
+            # plain (user call 2026-08-14: selection no longer
+            # filters the list)
+            t = "%d" % (gbase + ei + 1)
+            if ei in eset:
+                return ("<span background='#ffd700' "
+                        "foreground='#000000'>%s</span>" % t)
+            return t
+
         if eis is not None:
             self._drc_grid_map = eis
             for base in range(0, len(eis), W):
-                cells = ["%d" % (gbase + ei + 1)
-                         for ei in eis[base:base + W]]
+                cells = [cellfmt(ei) for ei in eis[base:base + W]]
                 cells += [""] * (W - len(cells))
                 gstore.append(cells)
             self._drc_grid_rows = (len(eis) + W - 1) // W
@@ -3590,7 +3599,7 @@ class Viewer:
         self._drc_focus = None
         shown = min(len(c.errors), DRC_LIST_MAX)
         for base in range(0, shown, W):
-            cells = ["%d" % (gbase + i + 1)
+            cells = [cellfmt(i)
                      for i in range(base, min(base + W, shown))]
             cells += [""] * (W - len(cells))
             gstore.append(cells)
@@ -3609,20 +3618,28 @@ class Viewer:
             return
         gstore = win._gstore
         gbase = self._drc_cum[ci]
+        sel = self._drc_sel
+        eset = (sel[3] if sel is not None and sel[0] == ci
+                else frozenset())
 
-        def num_at(r, c_):
+        def cell_at(r, c_, current):
             idx = r * self._drc_gridw + c_
             if self._drc_grid_map is not None:
                 idx = self._drc_grid_map[idx]
-            return gbase + idx + 1
+            t = "%d" % (gbase + idx + 1)
+            if current:
+                return ("<span background='#3465a4' "
+                        "foreground='#ffffff'>%s</span>" % t)
+            if idx in eset:
+                return ("<span background='#ffd700' "
+                        "foreground='#000000'>%s</span>" % t)
+            return t
 
         old = self._drc_cell
         if old is not None and old != (row, j):
             orow, oj = old
-            gstore[orow][oj] = "%d" % num_at(orow, oj)
-        gstore[row][j] = (
-            "<span background='#3465a4' foreground='#ffffff'>"
-            "%d</span>" % num_at(row, j))
+            gstore[orow][oj] = cell_at(orow, oj, False)
+        gstore[row][j] = cell_at(row, j, True)
         self._drc_cell = (row, j)
 
     def _on_drc_grid_click(self, tree, ev):
