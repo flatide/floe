@@ -119,7 +119,7 @@ def load_db(path):
         head = f.read(12)
     if head[:8] == _ICE_MAGIC:
         version = int.from_bytes(head[8:12], "little")
-        if version == 2:
+        if version >= 2:
             return IcePack(path)
         return IceDb(path)
     side = path + ".ice"
@@ -128,7 +128,7 @@ def load_db(path):
             with open(side, "rb") as f:
                 shead = f.read(12)
             if shead[:8] == _ICE_MAGIC and \
-                    int.from_bytes(shead[8:12], "little") == 2:
+                    int.from_bytes(shead[8:12], "little") >= 2:
                 return IcePack(side, src_path=path, verify_src=True)
             return IceDb(side, src_path=path)
         except (ValueError, OSError) as exc:
@@ -459,8 +459,16 @@ class IcePack(object):
             head = f.read(_ICE_HEADER.size)
             (magic, version, _flags, precision, src_size,
              src_mtime) = _ICE_HEADER.unpack(head)
-            if magic != _ICE_MAGIC or version != 2:
-                raise ValueError("%s: not a packed .ice v2" % path)
+            if magic != _ICE_MAGIC or version < 2:
+                raise ValueError("%s: not a packed .ice" % path)
+            if version != 3:
+                # the packed layout revved (file order, status,
+                # footer size); a stale pack misaligns sections and
+                # SILENTLY breaks small-rect queries - refuse it
+                raise ValueError(
+                    "%s: packed .ice layout %d is from an older "
+                    "build - re-run: floe-index drc <db> --pack"
+                    % (path, version))
             f.seek(0, os.SEEK_END)
             fsize = f.tell()
             f.seek(fsize - _ICE2_FOOTER.size)

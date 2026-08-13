@@ -4,8 +4,14 @@
 //!
 //! Layout (LE; header/string sections shared with v1):
 //!
-//!   [header 40B]   magic | u32 version=2 | u32 flags=1 | f64
+//!   [header 40B]   magic | u32 version=3 | u32 flags=1 | f64
 //!                  precision | u64 src_size | u64 src_mtime
+//!                  (version counts LAYOUT revisions: 2 = the
+//!                  short-lived pre-status/pre-file-order packs;
+//!                  the reader refuses anything but the current
+//!                  value - a stale pack once shifted the qbox
+//!                  section by 40B and silently broke small-rect
+//!                  queries)
 //!   [coord blob]   BLOCK(64)-error groups in FILE ORDER, varint
 //!                  records: uv((npts<<1)|kind), zz(first-point
 //!                  delta from the previous error's first point),
@@ -537,7 +543,7 @@ fn encode(
     let mut w = std::io::BufWriter::with_capacity(8 << 20, wf);
     let mut header = Vec::with_capacity(40);
     header.extend_from_slice(MAGIC);
-    header.extend_from_slice(&2u32.to_le_bytes());
+    header.extend_from_slice(&3u32.to_le_bytes());
     header.extend_from_slice(&1u32.to_le_bytes());
     header.extend_from_slice(&precision.to_le_bytes());
     header.extend_from_slice(&src_size.to_le_bytes());
