@@ -22,6 +22,11 @@
 //!                  outward - always a superset). A viewport query
 //!                  narrows candidates to RECORDS without touching
 //!                  the varint blob.
+//!   [status]       1B per error, ZERO at build: review state
+//!                  (0=none, 1=waived, 2=reserved, rest app-
+//!                  defined). Fixed offset per global error id, so
+//!                  the viewer mutates it IN PLACE (pwrite) without
+//!                  rewriting anything. A re-pack resets it.
 //!   [block table]  48B: u64 blob_off | u32 count | u32 pad
 //!                  | i64 bbox x0 y0 x1 y1  (dbu)
 //!                  - with [qbox] this is the spatial index: numpy
@@ -31,11 +36,11 @@
 //!                  | u64 err_start, err_cnt, declared, original,
 //!                  block_start, block_cnt
 //!   [desc refs][string table]   as v1 (line-level dedup)
-//!   [footer 120B]  13 u64 (blob_off, blob_len, qbox_off,
-//!                  qbox_len, blk_off, blk_cnt, dir_off, check_cnt,
-//!                  descref_off, descref_cnt, str_off, str_len,
-//!                  err_total) | u32 cell_ref | u32 reserved
-//!                  | magic
+//!   [footer 128B]  14 u64 (blob_off, blob_len, qbox_off,
+//!                  qbox_len, status_off, blk_off, blk_cnt,
+//!                  dir_off, check_cnt, descref_off, descref_cnt,
+//!                  str_off, str_len, err_total) | u32 cell_ref
+//!                  | u32 reserved | magic
 //!
 //! Parallel build: the file is split into --jobs byte segments;
 //! each worker syncs onto a speculative check header (name line +
@@ -693,7 +698,18 @@ fn encode(
         std::io::copy(&mut qr, &mut w).map_err(|e| e.to_string())?;
     }
     let _ = std::fs::remove_file(&qpath);
-    let blk_off = qbox_off + qbox_len;
+    // [status]: one zero byte per error, mutated in place later
+    let status_off = qbox_off + qbox_len;
+    {
+        let zeros = vec![0u8; 1 << 20];
+        let mut left = err_total as usize;
+        while left > 0 {
+            let n = left.min(zeros.len());
+            w.write_all(&zeros[..n]).map_err(|e| e.to_string())?;
+            left -= n;
+        }
+    }
+    let blk_off = status_off + err_total;
     for (off, cnt, x0, y0, x1, y1) in &blocks {
         let mut rec = [0u8; 48];
         rec[..8].copy_from_slice(&off.to_le_bytes());
@@ -715,12 +731,13 @@ fn encode(
     let str_off = descref_off + desc_refs.len() as u64 * 4;
     w.write_all(&strtab.bytes).map_err(|e| e.to_string())?;
 
-    let mut foot = Vec::with_capacity(120);
+    let mut foot = Vec::with_capacity(128);
     for v in [
         40u64,
         blob - 40,
         qbox_off,
         qbox_len,
+        status_off,
         blk_off,
         blocks.len() as u64,
         dir_off,

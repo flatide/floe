@@ -36,7 +36,7 @@
 | 마커 | validate_vfs_marker | --kill-at 4지점 + 재빌드 |
 | render-speckle | validate_render_speckle | 공통 위상(전 레이어 구멍 공유), 가시성, 불투명 겹침, 커버리지 합성 포함관계 |
 | render-frames | `tools/validate_render_frames.py` | 페인트 순서 회색<디자인<흰, 1px 외곽, 흰-위/회-아래 |
-| D1~D6 | `tools/validate_drc_ice.py` | DRC .ice: D1 사이드카 경유 == ASCII 파스(적대 픽스처 — 결과0 체크·중복 체크명·카운트줄 없음·미지 레코드·절단·CRLF·Waiver Criteria·`*_RDBS` 빈 것 드롭/에러 보유 시 유지), D2 신선 자동 선택/스테일 거부+폴백, D3 줄 단위 dedup+lazy 슬라이싱, D4 `--pack` v2 왕복 == ASCII(체크당 멀티셋 — Z-정렬로 순서 상이), D5 pack 바이트 --jobs 무관(2KB 픽스처 5분할 = 체크 중간 이음새 강제), D6 query_rect == 브루트포스 bbox 스캔 |
+| D1~D6 | `tools/validate_drc_ice.py` | DRC .ice: D1 사이드카 경유 == ASCII 파스(적대 픽스처 — 결과0 체크·중복 체크명·카운트줄 없음·미지 레코드·절단·CRLF·Waiver Criteria·`*_RDBS` 빈 것 드롭/에러 보유 시 유지), D2 신선 자동 선택/스테일 거부+폴백, D3 줄 단위 dedup+lazy 슬라이싱, D4 `--pack` v2 왕복 == ASCII(체크당 멀티셋 — Z-정렬로 순서 상이), D5 pack 바이트 --jobs 무관(2KB 픽스처 5분할 = 체크 중간 이음새 강제), D6 query_rect == 브루트포스 bbox 스캔, D7 status 바이트 제자리 set/get·재오픈 지속·이웃 무오염 |
 
 ## 3. 러스트 유닛 (핵심만)
 

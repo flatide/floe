@@ -142,8 +142,12 @@ ovm 헤더와 meta.src 모두 소스 절대경로/size/mtime을 기록. `Vfs::op
 [qbox]      에러당 4B: 소속 체크 bbox 위 256×256 u8 격자로
             바깥쪽 라운딩한 bbox — 디코드 없이 레코드 단위
             후보 필터(항상 superset). 공간 쿼리의 주 필터.
+[status]    에러당 1B 리뷰 상태(빌드 시 0): 0=none, 1=waived,
+            2=reserved, 이후 앱 정의. 고정 오프셋이라 파일
+            재작성 없이 제자리 수정(IcePack.set_status → pwrite,
+            읽기 매핑과 일관). **재-pack 시 초기화됨** 주의.
 [블록 테이블] 블록당 48B: 블롭 오프셋·개수·i64 bbox(dbu)
-[체크 디렉토리 64B/체크][desc refs][문자열 테이블][푸터 120B]
+[체크 디렉토리 64B/체크][desc refs][문자열 테이블][푸터 128B]
 ```
 
 - **에러 번호 = 전역 파일순 순번**(Calibre RVE 방식, 2026-08-13

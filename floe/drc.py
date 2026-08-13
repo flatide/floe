@@ -389,10 +389,15 @@ class IceDb(object):
 
 # ---- .ice v2 packed reader ----------------------------------------------
 
-# footer: blob_off blob_len qbox_off qbox_len blk_off blk_cnt
-#         dir_off check_cnt descref_off descref_cnt str_off str_len
-#         err_total | u32 cell_ref | u32 reserved | magic
-_ICE2_FOOTER = struct.Struct("<13QII8s")
+# footer: blob_off blob_len qbox_off qbox_len status_off blk_off
+#         blk_cnt dir_off check_cnt descref_off descref_cnt str_off
+#         str_len err_total | u32 cell_ref | u32 reserved | magic
+_ICE2_FOOTER = struct.Struct("<14QII8s")
+
+# per-error review status byte ([status] section; app-defined >2)
+STATUS_NONE = 0
+STATUS_WAIVED = 1
+STATUS_RESERVED = 2
 # check dir: name_ref desc_start desc_cnt pad | err_start err_cnt
 #            declared original block_start block_cnt
 _ICE2_CHECK = struct.Struct("<IIII6Q")
@@ -444,7 +449,8 @@ class IcePack(object):
     doubles as the spatial index; the source .db is not needed)."""
     __slots__ = ("path", "cell", "precision", "checks", "total",
                  "_map", "_blk", "_qbox", "_dir_es", "_dir_bs",
-                 "_ecnt", "_cbb", "_cache", "_order")
+                 "_ecnt", "_cbb", "_cache", "_order",
+                 "_status", "_status_off", "_wfd")
 
     def __init__(self, path, src_path=None, verify_src=False):
         import mmap
@@ -458,10 +464,10 @@ class IcePack(object):
             f.seek(0, os.SEEK_END)
             fsize = f.tell()
             f.seek(fsize - _ICE2_FOOTER.size)
-            (_blob_off, _blob_len, qbox_off, _qbox_len, blk_off,
-             blk_cnt, dir_off, check_cnt, descref_off, descref_cnt,
-             str_off, str_len, err_total, cell_ref, _resv,
-             fmagic) = \
+            (_blob_off, _blob_len, qbox_off, _qbox_len,
+             status_off, blk_off, blk_cnt, dir_off, check_cnt,
+             descref_off, descref_cnt, str_off, str_len, err_total,
+             cell_ref, _resv, fmagic) = \
                 _ICE2_FOOTER.unpack(f.read(_ICE2_FOOTER.size))
             if fmagic != _ICE_MAGIC:
                 raise ValueError("%s: truncated .ice (bad footer)"
@@ -501,6 +507,14 @@ class IcePack(object):
                                 shape=(err_total, 4), dtype=np.uint8)
                       if err_total else
                       np.zeros((0, 4), dtype=np.uint8))
+        # review status bytes: shared read mapping stays coherent
+        # with in-place pwrite updates (set_status)
+        self._status = (np.memmap(path, mode="r", offset=status_off,
+                                  shape=(err_total,), dtype=np.uint8)
+                        if err_total else
+                        np.zeros(0, dtype=np.uint8))
+        self._status_off = status_off
+        self._wfd = None
         self.checks = []
         drefs = struct.unpack("<%dI" % descref_cnt, descbuf)
         es, bs, ec = [], [], []
@@ -567,6 +581,22 @@ class IcePack(object):
         if len(self._order) > 16:
             self._cache.pop(self._order.pop(0), None)
         return errs
+
+    def get_status(self, ci, ei):
+        """Review status byte of check ci's error ei (0=none,
+        1=waived, 2=reserved, >2 app-defined)."""
+        return int(self._status[int(self._dir_es[ci]) + ei])
+
+    def set_status(self, ci, ei, value):
+        """Set the status byte IN PLACE (pwrite; the read mapping is
+        coherent). Raises OSError if the .ice is not writable."""
+        gid = int(self._dir_es[ci]) + ei
+        if not 0 <= gid < self.total:
+            raise IndexError((ci, ei))
+        if self._wfd is None:
+            self._wfd = os.open(self.path, os.O_RDWR)
+        os.pwrite(self._wfd, bytes((int(value) & 0xFF,)),
+                  self._status_off + gid)
 
     def _perr(self, gid):
         """Global error id -> DrcError via its 256-record block."""

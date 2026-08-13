@@ -21,6 +21,8 @@ ASCII database directly.
       fixture forces mid-check segment splits; 1 vs 4 on the
       gen_drcdb asset).
   D6  IcePack.query_rect == brute-force bbox scan on random rects.
+  D7  [status] byte: zero at build, in-place set/get via pwrite,
+      persists across reopen, neighbours untouched.
 
 usage: .venv/bin/python tools/validate_drc_ice.py [floe-index-bin]
 """
@@ -282,6 +284,24 @@ def main():
                  % (q, len(got), len(want),
                     len(got.symmetric_difference(want))))
     print("D6 OK: query_rect == brute force on 12 random rects")
+
+    # D7: per-error review status byte
+    if any(int(v) for v in gpk._status):
+        fail("status section not zero at build")
+    gpk.set_status(3, 2, drc.STATUS_WAIVED)
+    gpk.set_status(3, 3, drc.STATUS_RESERVED)
+    if gpk.get_status(3, 2) != drc.STATUS_WAIVED \
+            or gpk.get_status(3, 3) != drc.STATUS_RESERVED:
+        fail("status set/get mismatch")
+    re2 = drc.IcePack(os.path.join(tmp, "gen.j1.ice"))
+    if re2.get_status(3, 2) != drc.STATUS_WAIVED \
+            or re2.get_status(3, 3) != drc.STATUS_RESERVED \
+            or re2.get_status(3, 1) != drc.STATUS_NONE \
+            or re2.get_status(4, 2) != drc.STATUS_NONE:
+        fail("status did not persist / leaked to neighbours")
+    if int(re2._status.sum()) != drc.STATUS_WAIVED + drc.STATUS_RESERVED:
+        fail("stray status bytes written")
+    print("D7 OK: status byte set/get, persistent, zero elsewhere")
 
     print("DRC ICE VALIDATION: ALL OK")
 
