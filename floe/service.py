@@ -599,6 +599,8 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
                     _svc_recolor(cache, renderer, j)
                 elif k == "repattern":
                     _svc_repattern(cache, renderer, j)
+                elif k == "mono":
+                    renderer.set_mono(j["on"])
                 else:
                     # render job: put it back - `latest` was bumped
                     # at submit, so the next newer() check ends this
@@ -784,6 +786,8 @@ def _render_service(src, req, res, latest=None, options=None):
                     _svc_recolor(cache, renderer, j)
                 elif j["kind"] == "repattern":
                     _svc_repattern(cache, renderer, j)
+                elif j["kind"] == "mono":
+                    renderer.set_mono(j["on"])
             renders = [j for j in jobs if j["kind"] == "render"]
             if renders:  # newest by gen: requeued aborted jobs must lose
                 _svc_render(cache, mosaic, renderer, lod,

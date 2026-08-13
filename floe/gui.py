@@ -52,6 +52,7 @@ DRC_LIST_MAX = 2000        # grid cells per rule (prev/next reaches all)
 DRC_GRID_W = 5             # error numbers per browser grid row
 DRC_VIEW_FRACTION = 0.3    # error extent ~30% of the view on a jump
 DRC_HL_CAP = 1000          # highlight-in-view marker budget
+DRC_CYAN = 0x00FFFFFF      # highlight squares / focus halo
 
 MIN_SPP = 0.01     # max zoom-in: 1 px = 0.01 dbu; keeps render bboxes
                    # from collapsing to zero width after int rounding
@@ -868,7 +869,12 @@ class Viewer:
         self._drc_grid_ci = None    # rule the number grid shows
         self._drc_grid_rows = 0
         self._drc_cell = None       # marked grid cell (row, col)
+        self._drc_focus = None      # single-clicked error (ci, ei,
+                                    # kind, pts dbu) - emphasized in
+                                    # place, no zoom change
         self._drc_hl = False        # highlight-in-view toggle (v2)
+        self._mono = False          # grayscale layers (b key)
+        self._mono_saved = False    # mono state before highlight
         self._drc_hl_res = None     # (view key, [(kind, pts dbu)])
         self._labels = []           # Gtk.Label pool for ruler distances
 
@@ -1291,8 +1297,11 @@ class Viewer:
         self._drc_grid_ci = None
         self._drc_grid_rows = 0
         self._drc_cell = None
+        self._drc_focus = None
         self._drc_hl = False
         self._drc_hl_res = None
+        self._mono = False
+        self._mono_saved = False
         if self._drcwin is not None:
             self._drcwin.destroy()
         src = self.meta["src"]
@@ -1671,19 +1680,34 @@ class Viewer:
                 for j in range(0, len(pts) - 1, 2):
                     stamp_segment(disp, pts[j], pts[j + 1], None,
                                   DRC_MARK)
+        if self._drc_focus is not None and not self._drc_hl:
+            # single-clicked error at the CURRENT zoom: its outline
+            # gets a cyan halo (user call 2026-08-13)
+            _fc, _fe, fkind, fpts = self._drc_focus
+            sp = [(sx(x), sy(y)) for x, y in fpts]
+            if fkind == "p":
+                for a, b in zip(sp, sp[1:] + sp[:1]):
+                    stamp_segment(disp, a, b, DRC_CYAN, DRC_MARK)
+            else:
+                for j in range(0, len(sp) - 1, 2):
+                    stamp_segment(disp, sp[j], sp[j + 1], DRC_CYAN,
+                                  DRC_MARK)
         if self._drc_hl and self._drc is not None \
                 and hasattr(self._drc, "query_rect"):
-            # highlight-in-view: outlines only (no fill/rulers) so
-            # hundreds of markers stay cheap to stamp
-            for kind, hpts in self._drc_hl_list():
-                sp = [(sx(x), sy(y)) for x, y in hpts]
-                if kind == "p":
-                    for a, b in zip(sp, sp[1:] + sp[:1]):
-                        stamp_segment(disp, a, b, None, DRC_MARK)
-                else:
-                    for j in range(0, len(sp) - 1, 2):
-                        stamp_segment(disp, sp[j], sp[j + 1], None,
-                                      DRC_MARK)
+            # highlight-in-view: every violation is a zoom-
+            # independent 3x3 cyan square (5x5 for the clicked
+            # one) - user call 2026-08-13
+            focus = self._drc_focus
+            for ci_, ei_, _kind, hpts in self._drc_hl_list():
+                hxs = [p[0] for p in hpts]
+                hys = [p[1] for p in hpts]
+                cxp = sx((min(hxs) + max(hxs)) / 2.0)
+                cyp = sy((min(hys) + max(hys)) / 2.0)
+                s_px = 5 if (focus is not None
+                             and focus[0] == ci_
+                             and focus[1] == ei_) else 3
+                fill_rect(disp, cxp - s_px // 2, cyp - s_px // 2,
+                          s_px, s_px, DRC_CYAN)
         if self._zoomdrag is not None and self._band_cur is not None:
             x0, y0 = self._zoomdrag
             x1, y1 = self._band_cur
@@ -2609,6 +2633,8 @@ class Viewer:
             self._toggle_coverage()
         elif name == "l":
             self._set_lod(not self.lod_on)
+        elif name == "b":
+            self._set_mono(not self._mono)
         elif name == "e":
             self._drc_window()
         elif name == "n":
@@ -3128,6 +3154,7 @@ class Viewer:
                             "(packed .ice v2 only)")
         hl.connect("toggled", self._on_drc_hl)
         nav.pack_start(hl, False, False, 2)
+        win._hl = hl
         hint = Gtk.Label()
         hint.set_markup("<small>click an error number for details - "
                         "double-click jumps - Esc clears the "
@@ -3154,7 +3181,27 @@ class Viewer:
             return
         self._drc_hl = on
         self._drc_hl_res = None
+        # highlight defaults the canvas to grayscale for contrast
+        # (user call 2026-08-13); leaving restores the prior state
+        if on:
+            self._mono_saved = self._mono
+            self._set_mono(True, announce=False)
+        else:
+            self._set_mono(self._mono_saved, announce=False)
         self._display()
+
+    def _set_mono(self, on, announce=True):
+        """Grayscale all design layers ('b'; DRC visibility)."""
+        on = bool(on)
+        if on == self._mono:
+            return
+        self._mono = on
+        self.worker.submit({"kind": "mono", "on": on})
+        self._color_epoch += 1
+        if announce:
+            self._set_live_status(
+                "layers grayscale %s" % ("on" if on else "off"))
+        self.redraw(immediate=True)
 
     def _drc_sel_check(self):
         """Check index the highlight applies to: the rule selected
@@ -3187,8 +3234,9 @@ class Viewer:
         res = self._drc.query_rect(bb[0] * k, bb[1] * k,
                                    bb[2] * k, bb[3] * k,
                                    cap=DRC_HL_CAP, checks=(ci,))
-        lst = [(e.kind, [(x / k, y / k) for x, y in e.pts])
-               for _ci, _ei, e in res]
+        lst = [(rci, rei, e.kind,
+                [(x / k, y / k) for x, y in e.pts])
+               for rci, rei, e in res]
         self._drc_hl_res = (key, lst)
         self._set_live_status(
             "DRC highlight %s: %d in view%s"
@@ -3291,6 +3339,7 @@ class Viewer:
         gstore = win._gstore
         gstore.clear()
         self._drc_cell = None
+        self._drc_focus = None
         self._drc_grid_ci = ci
         c = db.checks[ci]
         gbase = self._drc_cum[ci]
@@ -3348,10 +3397,24 @@ class Viewer:
         if db is None or ei >= len(db.checks[ci].errors):
             return False
         if ev.type == Gdk.EventType.DOUBLE_BUTTON_PRESS:
+            # a jump means inspecting ONE error: highlight mode
+            # switches itself off (user call 2026-08-13)
+            if self._drc_hl:
+                w = self._drcwin
+                if w is not None:
+                    w._hl.set_active(False)
+                else:
+                    self._drc_hl = False
             self._drc_jump(ci, ei)
             return False
         self._drc_cell_mark(row, j)
+        e = db.checks[ci].errors[ei]
+        self._drc_focus = (ci, ei, e.kind,
+                           [(x / self.dbu, y / self.dbu)
+                            for x, y in e.pts])
+        self._drc_hl_res = None   # 5x5 emphasis needs a redraw key
         self._drc_show_detail(ci, ei)
+        self._display()
         return False
 
     def _drc_show_rule(self, ci):
@@ -3412,6 +3475,7 @@ class Viewer:
         check = db.checks[ci]
         e = check.errors[ei]
         self._drc_pos = self._drc_cum[ci] + ei
+        self._drc_focus = None    # the jump mark supersedes it
         b = e.bbox()
         w_um, h_um = b[2] - b[0], b[3] - b[1]
         cx, cy = e.center()
@@ -3731,8 +3795,9 @@ class Viewer:
             self.rulers = []
         elif self.selection is not None:
             self._clear_selection()
-        elif self.drc_mark is not None:
+        elif self.drc_mark is not None or self._drc_focus is not None:
             self.drc_mark = None
+            self._drc_focus = None
         self._display()
 
     def _ruler_pop(self):

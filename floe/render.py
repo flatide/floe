@@ -105,6 +105,10 @@ class Renderer:
         # per-layer outline width px (layerprops last column);
         # absent = 1
         self._layer_width = {}
+        # grayscale toggle (DRC visibility): colors collapse to
+        # their luminance at refresh() time; frame planes (no
+        # colors entry) are untouched
+        self._mono = False
         self.lv.show_layout(layout, False)
         self._design_speckle_patterns = tuple(
             self.lv.add_stipple("floe-calibre-speckle-%d" % i, pattern)
@@ -129,6 +133,11 @@ class Renderer:
             hexcol = self.colors.get(key)
             if hexcol:
                 col = int(hexcol.lstrip("#"), 16)
+                if self._mono:
+                    y = int(round(0.299 * ((col >> 16) & 255)
+                                  + 0.587 * ((col >> 8) & 255)
+                                  + 0.114 * (col & 255)))
+                    col = (y << 16) | (y << 8) | y
                 lp.fill_color = col
                 lp.frame_color = col
             if key in self.hollow:
@@ -211,6 +220,11 @@ class Renderer:
         self.lv.clear_layers()
         for node in ordered:
             self.lv.insert_layer(self.lv.end_layers(), node)
+
+    def set_mono(self, on):
+        """Grayscale all design layers (DRC visibility toggle)."""
+        self._mono = bool(on)
+        self.refresh()
 
     def set_line_widths(self, mapping):
         """Replace per-layer outline widths wholesale: {(l, d): px}

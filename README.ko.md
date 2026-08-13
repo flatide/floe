@@ -76,6 +76,7 @@ settled=..` 한 줄이 상시 출력된다(라운드별 비누적 — 성능 실
 | `d` | 디테일 다이얼로그 (low/medium/high = 컷 5/3/1px) |
 | `f`, `Shift+C` | 프레임(cell reference outline) on/off |
 | `l` | LOD on/off · `v` | 커버리지 on/off · `a` | abstract 모드 |
+| `b` | 레이어 흑백(그레이스케일) on/off — DRC 시인성용; highlight 모드가 켜지면 자동 on, 꺼지면 이전 상태 복원 |
 | `+`/`=` / `-` | 중심 줌 ±(1.25×) |
 | **Ctrl+Z** / **Shift+Z** | Calibre 줌인 50%(스팬 ×0.5) / 줌아웃 50%(×2) |
 | **Ctrl+A** | Zoom All(fit) — 줌아웃은 fit의 **16배**까지 허용 |
