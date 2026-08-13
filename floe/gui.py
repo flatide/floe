@@ -3136,6 +3136,9 @@ class Viewer:
         for j in range(DRC_GRID_W):
             col = Gtk.TreeViewColumn("", Gtk.CellRendererText(),
                                      markup=j)
+            # every column expands: leftover pane width spreads
+            # evenly instead of stacking up as a right margin
+            col.set_expand(True)
             grid.append_column(col)
         grid.set_headers_visible(False)
         grid.get_selection().set_mode(Gtk.SelectionMode.NONE)
@@ -3382,8 +3385,10 @@ class Viewer:
             grid.remove_column(col)
         store = Gtk.ListStore(*([str] * n))
         for j in range(n):
-            grid.append_column(Gtk.TreeViewColumn(
-                "", Gtk.CellRendererText(), markup=j))
+            col = Gtk.TreeViewColumn(
+                "", Gtk.CellRendererText(), markup=j)
+            col.set_expand(True)
+            grid.append_column(col)
         grid.set_model(store)
         win._gstore = store
         if self._drc_grid_ci is not None:
