@@ -99,9 +99,17 @@ recolor: 행 스와치 재생성(set_color) + meta 갱신 + 개인 layerprops
   (checks[].errors는 시퀀스 프로토콜).
 - prev/next 워크는 에러 전수 리스트를 **절대 만들지 않는다** —
   `_drc_cum` 누적 카운트 + bisect 산술(수억 에러 안전).
-- 트리의 에러 자식 행은 펼칠 때 생성(`_drc_populate`, placeholder
-  ei=-3 교체; 체크당 상한 DRC_LIST_MAX, 초과분은 "… more" 행).
-  n/p 스텝은 하이라이트 전에 해당 체크를 populate.
+- **상/하 pane**(2026-08-13 개편): 위 = 룰 트리 + 에러 번호 그리드,
+  아래 = 상세 TextView. 룰 부제는 `Rule File Pathname:` 줄을 건너뛴
+  첫 설명 줄. **아코디언**: 룰을 열면 직전에 열린 룰이 닫힘
+  (`_drc_open`).
+- 룰을 펼치면 자식은 **DRC_GRID_W(5)열 2차원 그리드**의 전역 에러
+  번호(레코드 디코드 없음 — 번호 = cum[ci]+i+1). 셀 단클릭 =
+  하단 상세(룰 설명 전문·poly/edge·좌표(엣지쌍/꼭짓점, 상한
+  64~128줄)·waive 상태[v2 get_status, v1은 '-']), 더블클릭/Enter =
+  점프(점프도 상세 갱신). 룰 행 단클릭 = 룰 정보 표시. 상한
+  DRC_LIST_MAX 셀, 초과분 "… more" 행; n/p 스텝은 해당 그리드
+  행+열에 커서를 놓는다.
 - **에러 번호 = 전역 파일순 순번**(Calibre RVE와 동일, 파일의 서수
   토큰 무시): 모든 백엔드(ASCII/v1/v2)가 동일 번호를 내며, 룰별
   트리 나열은 저장순=파일순이라 자동 오름차순.

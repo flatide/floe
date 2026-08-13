@@ -48,7 +48,8 @@ SNAP_EDGE = 0xFFFFFFFF     # vertex/edge no longer color-coded)
 SEL_CORE = 0xFFFFFFFF
 DRC_MARK = 0xFF5252FF      # DRC violation outline
 
-DRC_LIST_MAX = 2000        # tree rows per check (prev/next reaches all)
+DRC_LIST_MAX = 2000        # grid cells per rule (prev/next reaches all)
+DRC_GRID_W = 5             # error numbers per browser grid row
 DRC_VIEW_FRACTION = 0.3    # error extent ~30% of the view on a jump
 DRC_HL_CAP = 1000          # highlight-in-view marker budget
 
@@ -865,6 +866,7 @@ class Viewer:
         self._drc_pos = -1
         self._drc_paths = {}        # (ci, ei) -> tree path string
         self._drc_filled = set()    # check rows with children built
+        self._drc_open = None       # accordion: the one open rule
         self._drc_hl = False        # highlight-in-view toggle (v2)
         self._drc_hl_res = None     # (view key, [(kind, pts dbu)])
         self._labels = []           # Gtk.Label pool for ruler distances
@@ -1286,6 +1288,7 @@ class Viewer:
         self._drc_pos = -1
         self._drc_paths = {}
         self._drc_filled = set()
+        self._drc_open = None
         self._drc_hl = False
         self._drc_hl_res = None
         if self._drcwin is not None:
@@ -3036,7 +3039,7 @@ class Viewer:
             return
         win = Gtk.Window(title="DRC results")
         win.set_transient_for(self.window)
-        win.set_default_size(430, 520)
+        win.set_default_size(470, 680)
         win.connect("destroy", self._on_drc_destroy)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         win.add(box)
@@ -3050,24 +3053,43 @@ class Viewer:
         info.set_ellipsize(Pango.EllipsizeMode.START)
         top.pack_start(info, True, True, 2)
         win._info = info
-        # columns: text, position, check index, error index
-        # (error index -1 = check row, -2 = "... more" stub,
-        #  -3 = lazy placeholder swapped out by _drc_populate)
-        store = Gtk.TreeStore(str, str, int, int)
+        # columns 0..DRC_GRID_W-1 = text cells: rule rows put their
+        # title/count in the first two, grid rows show a 2-D array
+        # of GLOBAL error numbers. Col DRC_GRID_W = check idx,
+        # +1 = tag (-1 rule, -2 "... more", -3 lazy placeholder,
+        # >=0 = first error index of the grid row).
+        store = Gtk.TreeStore(*([str] * DRC_GRID_W + [int, int]))
         tree = Gtk.TreeView(model=store)
-        for j, (t, expand) in enumerate((("rule / error", True),
-                                         ("count / position", False))):
-            col = Gtk.TreeViewColumn(t, Gtk.CellRendererText(), text=j)
-            col.set_expand(expand)
+        for j in range(DRC_GRID_W):
+            col = Gtk.TreeViewColumn("", Gtk.CellRendererText(),
+                                     text=j)
+            col.set_expand(j == 0)
             tree.append_column(col)
+        tree.set_headers_visible(False)
         tree.set_tooltip_column(0)
         tree.connect("row-activated", self._on_drc_row)
         tree.connect("row-expanded", self._on_drc_expand)
+        tree.connect("button-press-event", self._on_drc_click)
         sc = Gtk.ScrolledWindow()
         sc.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         sc.add(tree)
         _remote_x_scroll_repaint(sc)  # same copy-area artifact path
-        box.pack_start(sc, True, True, 0)
+        # top/bottom panes (user call 2026-08-13): rules + error
+        # number grid above, per-error detail text below
+        paned = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL)
+        paned.pack1(sc, resize=True, shrink=True)
+        detail = Gtk.TextView()
+        detail.set_editable(False)
+        detail.set_cursor_visible(False)
+        detail.set_monospace(True)
+        dsc = Gtk.ScrolledWindow()
+        dsc.set_policy(Gtk.PolicyType.AUTOMATIC,
+                       Gtk.PolicyType.AUTOMATIC)
+        dsc.add(detail)
+        paned.pack2(dsc, resize=False, shrink=True)
+        paned.set_position(420)
+        box.pack_start(paned, True, True, 0)
+        win._detail = detail.get_buffer()
         nav = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         box.pack_start(nav, False, False, 2)
         for text, d in (("< prev (p)", -1), ("next (n) >", 1)):
@@ -3083,8 +3105,9 @@ class Viewer:
         nav.pack_start(hl, False, False, 2)
         tree.connect("cursor-changed", self._on_drc_cursor)
         hint = Gtk.Label()
-        hint.set_markup("<small>double-click an error to jump - "
-                        "Esc clears the marker</small>")
+        hint.set_markup("<small>click an error number for details - "
+                        "double-click jumps - Esc clears the "
+                        "marker</small>")
         box.pack_start(hint, False, False, 0)
         win._store, win._tree = store, tree
         self._drcwin = win
@@ -3123,7 +3146,7 @@ class Viewer:
             path, _col = win._tree.get_cursor()
             if path is not None:
                 it = win._store.get_iter(path)
-                return win._store.get_value(it, 2)
+                return win._store.get_value(it, DRC_GRID_W)
         if self._drc_pos >= 0 and self._drc_cum:
             return bisect.bisect_right(self._drc_cum,
                                        self._drc_pos) - 1
@@ -3211,27 +3234,36 @@ class Viewer:
         return True
 
     def _drc_fill(self):
-        """Check rows only; error children are built on expand
-        (_drc_populate) so a huge .ice browser opens instantly."""
+        """Rule rows only; the error-number grid is built on expand
+        (_drc_populate) so a huge .ice browser opens instantly. The
+        rule subtitle skips 'Rule File Pathname:' lines (user call
+        2026-08-13)."""
         win, db = self._drcwin, self._drc
         store = win._store
         store.clear()
         self._drc_paths = {}
         self._drc_filled = set()
+        self._drc_open = None
+        blank = [""] * (DRC_GRID_W - 2)
         for ci, c in enumerate(db.checks):
-            head = c.name
-            if c.desc:
-                head += "\n" + c.desc.split("\n")[0]
-            pit = store.append(None, [head, "%d" % len(c.errors),
-                                      ci, -1])
+            sub = next((ln for ln in c.desc.split("\n")
+                        if ln and not ln.startswith(
+                            "Rule File Pathname:")), "")
+            head = c.name + ("\n" + sub if sub else "")
+            pit = store.append(
+                None,
+                [head, "%d" % len(c.errors)] + blank + [ci, -1])
             if len(c.errors):
-                store.append(pit, ["loading…", "", ci, -3])
+                store.append(pit, ["loading…"]
+                             + [""] * (DRC_GRID_W - 1) + [ci, -3])
         win._info.set_text("%s — cell %s · %d checks · %d errors"
                            % (os.path.basename(db.path), db.cell,
                               len(db.checks), db.total))
 
     def _drc_populate(self, ci):
-        """Replace a check row's placeholder with its error rows."""
+        """Replace a rule's placeholder with its 2-D grid of GLOBAL
+        error numbers (no record decode: the number is the file
+        order, cum[ci] + index + 1)."""
         win, db = self._drcwin, self._drc
         if win is None or db is None or ci in self._drc_filled:
             return
@@ -3239,41 +3271,142 @@ class Viewer:
         store = win._store
         pit = store.get_iter(Gtk.TreePath.new_from_string(str(ci)))
         c = db.checks[ci]
-        for ei in range(min(len(c.errors), DRC_LIST_MAX)):
-            e = c.errors[ei]
-            x, y = e.center()
-            it = store.append(
-                pit, ["#%d  %s" % (e.num,
-                                   "poly" if e.kind == "p"
-                                   else "edge"),
-                      "(%.3f, %.3f)" % (x, y), ci, ei])
-            self._drc_paths[(ci, ei)] = str(store.get_path(it))
+        gbase = self._drc_cum[ci]
+        shown = min(len(c.errors), DRC_LIST_MAX)
+        for base in range(0, shown, DRC_GRID_W):
+            cells = ["%d" % (gbase + i + 1)
+                     for i in range(base,
+                                    min(base + DRC_GRID_W, shown))]
+            cells += [""] * (DRC_GRID_W - len(cells))
+            it = store.append(pit, cells + [ci, base])
+            self._drc_paths[(ci, base)] = str(store.get_path(it))
         if len(c.errors) > DRC_LIST_MAX:
             store.append(pit, ["… %d more (use prev/next)"
-                               % (len(c.errors) - DRC_LIST_MAX),
-                               "", ci, -2])
+                               % (len(c.errors) - DRC_LIST_MAX)]
+                         + [""] * (DRC_GRID_W - 1) + [ci, -2])
         # placeholder went in first; drop it AFTER the real rows so
         # an expanded row never collapses from becoming childless
         ch = store.iter_children(pit)
-        if ch is not None and store.get_value(ch, 3) == -3:
+        if ch is not None \
+                and store.get_value(ch, DRC_GRID_W + 1) == -3:
             store.remove(ch)
 
-    def _on_drc_expand(self, tree, it, _path):
+    def _on_drc_expand(self, tree, it, path):
         store = tree.get_model()
-        if store.get_value(it, 3) == -1:
-            self._drc_populate(store.get_value(it, 2))
+        if store.get_value(it, DRC_GRID_W + 1) != -1:
+            return
+        ci = store.get_value(it, DRC_GRID_W)
+        self._drc_populate(ci)
+        # accordion (user call 2026-08-13): opening a rule closes
+        # the previously open one
+        prev = self._drc_open
+        if prev is not None and prev != ci:
+            p = Gtk.TreePath.new_from_string(str(prev))
+            if tree.row_expanded(p):
+                tree.collapse_row(p)
+        self._drc_open = ci
 
-    def _on_drc_row(self, tree, path, _col):
+    def _drc_cell_ei(self, tree, store, it, col, tag):
+        """Grid cell -> error index within its rule (None = empty
+        trailing cell)."""
+        try:
+            j = tree.get_columns().index(col)
+        except ValueError:
+            return None
+        if not store.get_value(it, j):
+            return None
+        return tag + j
+
+    def _on_drc_row(self, tree, path, col):
         store = tree.get_model()
         it = store.get_iter(path)
-        ci, ei = store.get_value(it, 2), store.get_value(it, 3)
-        if ei < 0:  # check row: toggle its children
-            if tree.row_expanded(path):
-                tree.collapse_row(path)
-            else:
-                tree.expand_row(path, False)
+        ci = store.get_value(it, DRC_GRID_W)
+        tag = store.get_value(it, DRC_GRID_W + 1)
+        if tag < 0:
+            if tag == -1:   # rule row: toggle open/closed
+                if tree.row_expanded(path):
+                    tree.collapse_row(path)
+                else:
+                    tree.expand_row(path, False)
             return
-        self._drc_jump(ci, ei)
+        ei = self._drc_cell_ei(tree, store, it, col, tag)
+        if ei is not None:
+            self._drc_jump(ci, ei)
+
+    def _on_drc_click(self, tree, ev):
+        """Single left click on an error number: detail pane only
+        (double-click/Enter jumps); on a rule row: rule info."""
+        if ev.button != 1 \
+                or ev.type != Gdk.EventType.BUTTON_PRESS:
+            return False
+        hit = tree.get_path_at_pos(int(ev.x), int(ev.y))
+        if hit is None:
+            return False
+        path, col, _cx, _cy = hit
+        store = tree.get_model()
+        it = store.get_iter(path)
+        ci = store.get_value(it, DRC_GRID_W)
+        tag = store.get_value(it, DRC_GRID_W + 1)
+        if tag == -1:
+            self._drc_show_rule(ci)
+        elif tag >= 0:
+            ei = self._drc_cell_ei(tree, store, it, col, tag)
+            if ei is not None:
+                self._drc_show_detail(ci, ei)
+        return False    # selection/activation continue as usual
+
+    def _drc_show_rule(self, ci):
+        win, db = self._drcwin, self._drc
+        if win is None or db is None:
+            return
+        c = db.checks[ci]
+        lines = ["rule: %s" % c.name,
+                 "errors: %d (declared %d)"
+                 % (len(c.errors), c.declared)]
+        if c.desc:
+            lines.append("")
+            lines += c.desc.split("\n")
+        win._detail.set_text("\n".join(lines))
+
+    def _drc_show_detail(self, ci, ei):
+        """Bottom pane: rule description, kind, coordinates and the
+        review status of one violation."""
+        win, db = self._drcwin, self._drc
+        if win is None or db is None:
+            return
+        c = db.checks[ci]
+        e = c.errors[ei]
+        status = "-"
+        if hasattr(db, "get_status"):
+            s = db.get_status(ci, ei)
+            status = {0: "none", 1: "waived",
+                      2: "reserved"}.get(s, "status %d" % s)
+        lines = ["#%d  %s  [%s]"
+                 % (e.num,
+                    "polygon" if e.kind == "p" else "edge", status),
+                 "rule: %s" % c.name]
+        if c.desc:
+            lines += c.desc.split("\n")
+        b = e.bbox()
+        lines.append("bbox: (%.4f, %.4f) - (%.4f, %.4f) um"
+                     % (b[0], b[1], b[2], b[3]))
+        pts = e.pts
+        if e.kind == "e":
+            lines.append("edges (um):")
+            for j in range(0, min(len(pts) - 1, 128), 2):
+                lines.append("  (%.4f, %.4f) - (%.4f, %.4f)"
+                             % (pts[j][0], pts[j][1],
+                                pts[j + 1][0], pts[j + 1][1]))
+            if len(pts) > 129:
+                lines.append("  … %d more edges"
+                             % ((len(pts) - 128) // 2))
+        else:
+            lines.append("vertices (um):")
+            for x, y in pts[:64]:
+                lines.append("  (%.4f, %.4f)" % (x, y))
+            if len(pts) > 64:
+                lines.append("  … %d more" % (len(pts) - 64))
+        win._detail.set_text("\n".join(lines))
 
     def _drc_jump(self, ci, ei):
         db = self._drc
@@ -3308,6 +3441,7 @@ class Viewer:
             % (check.name, e.num, len(check.errors),
                "poly" if e.kind == "p" else "edge",
                w_um, h_um, cx, cy))
+        self._drc_show_detail(ci, ei)
         self._display()
 
     def _drc_speckle_strip(self, width):
@@ -3448,11 +3582,13 @@ class Viewer:
         win = self._drcwin
         if win is not None and ei < DRC_LIST_MAX:
             self._drc_populate(ci)
-        ps = self._drc_paths.get((ci, ei))
+        base = (ei // DRC_GRID_W) * DRC_GRID_W
+        ps = self._drc_paths.get((ci, base))
         if win is not None and ps is not None:
             path = Gtk.TreePath.new_from_string(ps)
-            win._tree.expand_to_path(path)
-            win._tree.set_cursor(path, None, False)
+            win._tree.expand_to_path(path)   # accordion follows
+            col = win._tree.get_columns()[ei - base]
+            win._tree.set_cursor(path, col, False)
             win._tree.scroll_to_cell(path, None, False, 0.0, 0.0)
 
     # ---- ruler / snap / pick -----------------------------------------------
