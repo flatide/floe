@@ -574,23 +574,33 @@ class IcePack(object):
         bi = int(self._dir_bs[ci]) + rel // _ICE2_BLOCK
         return self._block(bi)[rel % _ICE2_BLOCK]
 
-    def query_rect(self, x0_um, y0_um, x1_um, y1_um, cap=2000):
+    def query_rect(self, x0_um, y0_um, x1_um, y1_um, cap=2000,
+                   checks=None):
         """Errors intersecting the um rect -> [(ci, ei, DrcError)].
 
         Two numpy stages before any varint decode: check bboxes
         prune whole rules, then the per-error [qbox] lattice (an
         outward-rounded superset) prunes down to candidate RECORDS;
         only blocks holding candidates are decoded, and the exact
-        bbox test on the decoded error settles it. Stops at cap."""
+        bbox test on the decoded error settles it. Stops at cap.
+        `checks` (iterable of check indices) restricts the query to
+        those rules; None = all."""
         import math as _math
         import numpy as np
         prec = self.precision
         qx0, qy0 = x0_um * prec, y0_um * prec
         qx1, qy1 = x1_um * prec, y1_um * prec
         cbb = self._cbb
-        hitc = np.nonzero((cbb[:, 0] <= qx1) & (cbb[:, 2] >= qx0) &
-                          (cbb[:, 1] <= qy1) & (cbb[:, 3] >= qy0) &
-                          (self._ecnt > 0))[0]
+        mask = ((cbb[:, 0] <= qx1) & (cbb[:, 2] >= qx0) &
+                (cbb[:, 1] <= qy1) & (cbb[:, 3] >= qy0) &
+                (self._ecnt > 0))
+        if checks is not None:
+            only = np.zeros(len(self.checks), dtype=bool)
+            for c in checks:
+                if 0 <= int(c) < len(only):
+                    only[int(c)] = True
+            mask &= only
+        hitc = np.nonzero(mask)[0]
         out = []
         for ci in hitc:
             ci = int(ci)

@@ -50,7 +50,7 @@ DRC_MARK = 0xFF5252FF      # DRC violation outline
 
 DRC_LIST_MAX = 2000        # tree rows per check (prev/next reaches all)
 DRC_VIEW_FRACTION = 0.3    # error extent ~30% of the view on a jump
-DRC_HL_CAP = 800           # highlight-in-view marker budget
+DRC_HL_CAP = 1000          # highlight-in-view marker budget
 
 MIN_SPP = 0.01     # max zoom-in: 1 px = 0.01 dbu; keeps render bboxes
                    # from collapsing to zero width after int rounding
@@ -3076,10 +3076,12 @@ class Viewer:
             nav.pack_start(nb, True, True, 2)
         hl = Gtk.CheckButton(label="highlight in view")
         hl.set_active(self._drc_hl)
-        hl.set_tooltip_text("mark every violation inside the current "
-                            "view (packed .ice v2 only)")
+        hl.set_tooltip_text("mark the SELECTED rule's violations "
+                            "inside the current view "
+                            "(packed .ice v2 only)")
         hl.connect("toggled", self._on_drc_hl)
         nav.pack_start(hl, False, False, 2)
+        tree.connect("cursor-changed", self._on_drc_cursor)
         hint = Gtk.Label()
         hint.set_markup("<small>double-click an error to jump - "
                         "Esc clears the marker</small>")
@@ -3106,24 +3108,53 @@ class Viewer:
         self._drc_hl_res = None
         self._display()
 
+    def _on_drc_cursor(self, _tree):
+        """Rule selection changed: the highlight follows it."""
+        if self._drc_hl:
+            self._drc_hl_res = None
+            self._display()
+
+    def _drc_sel_check(self):
+        """Check index the highlight applies to: the rule selected
+        in the browser tree (an error row counts as its rule), else
+        the rule of the last jumped error, else None."""
+        win = self._drcwin
+        if win is not None:
+            path, _col = win._tree.get_cursor()
+            if path is not None:
+                it = win._store.get_iter(path)
+                return win._store.get_value(it, 2)
+        if self._drc_pos >= 0 and self._drc_cum:
+            return bisect.bisect_right(self._drc_cum,
+                                       self._drc_pos) - 1
+        return None
+
     def _drc_hl_list(self):
-        """Violations in the current view as [(kind, pts dbu)] -
-        recomputed only when the view or db changes."""
-        key = (self.cx, self.cy, self.spp, id(self._drc))
+        """The SELECTED rule's violations in the current view as
+        [(kind, pts dbu)] - recomputed only when the view, db or
+        selected rule changes (user call 2026-08-13: one rule at a
+        time, cap DRC_HL_CAP)."""
+        ci = self._drc_sel_check()
+        key = (self.cx, self.cy, self.spp, id(self._drc), ci)
         cached = self._drc_hl_res
         if cached is not None and cached[0] == key:
             return cached[1]
+        if ci is None:
+            self._drc_hl_res = (key, [])
+            self._set_live_status(
+                "DRC highlight: select a rule in the browser first")
+            return []
         bb = self.view_bbox()
         k = self.dbu
         res = self._drc.query_rect(bb[0] * k, bb[1] * k,
                                    bb[2] * k, bb[3] * k,
-                                   cap=DRC_HL_CAP)
+                                   cap=DRC_HL_CAP, checks=(ci,))
         lst = [(e.kind, [(x / k, y / k) for x, y in e.pts])
                for _ci, _ei, e in res]
         self._drc_hl_res = (key, lst)
         self._set_live_status(
-            "DRC highlight: %d in view%s"
-            % (len(lst),
+            "DRC highlight %s: %d in view%s"
+            % (self._drc.checks[ci].name, len(lst),
                " (capped)" if len(lst) >= DRC_HL_CAP else ""))
         return lst
 
