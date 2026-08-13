@@ -14,6 +14,12 @@ ASCII database directly.
   D3  string table dedupes the repeated Rule File Pathname/Title
       lines (sidecar stays small) and lazy slicing/iteration agree
       with full decode.
+  D4  --pack (self-contained .ice v2) round-trip == load_ascii on
+      the adversarial fixture AND on a gen_drcdb asset.
+  D5  pack output bytes are --jobs invariant (1 vs 5 on the tiny
+      fixture forces mid-check segment splits; 1 vs 4 on the
+      gen_drcdb asset).
+  D6  IcePack.query_rect == brute-force bbox scan on random rects.
 
 usage: .venv/bin/python tools/validate_drc_ice.py [floe-index-bin]
 """
@@ -115,6 +121,23 @@ def eq(a, b, what):
         fail("%s: %r != %r" % (what, a, b))
 
 
+def compare_unordered(ref, pk):
+    """Pack round-trip: v2 Z-orders errors inside a check, so the
+    per-check comparison is a multiset match on (num, kind, pts)."""
+    eq(ref.cell, pk.cell, "cell")
+    eq(ref.precision, pk.precision, "precision")
+    eq(len(ref.checks), len(pk.checks), "check count")
+    for ci, (rc, xc) in enumerate(zip(ref.checks, pk.checks)):
+        tag = "check[%d] %s" % (ci, rc.name)
+        eq(rc.name, xc.name, tag + " name")
+        eq(rc.desc, xc.desc, tag + " desc")
+        eq(rc.declared, xc.declared, tag + " declared")
+        eq(len(rc.errors), len(xc.errors), tag + " error count")
+        a = sorted((e.num, e.kind, e.pts) for e in rc.errors)
+        b = sorted((e.num, e.kind, e.pts) for e in xc.errors)
+        eq(a, b, tag + " errors (multiset)")
+
+
 def compare(ref, ice):
     eq(ref.cell, ice.cell, "cell")
     eq(ref.precision, ice.precision, "precision")
@@ -202,6 +225,77 @@ def main():
     if blob.count(b"Rule File Title:") != 1:
         fail("title line stored more than once")
     print("D3 OK: line-level dedup + lazy slicing/iteration")
+
+    # D4/D5 on the tiny adversarial fixture: 5 jobs on a ~2KB file
+    # forces segment boundaries inside checks and records
+    packs = {}
+    for jobs in (1, 5):
+        p = os.path.join(tmp, "fixture.j%d.ice" % jobs)
+        r = subprocess.run(
+            [BIN, "drc", db, p, "--pack", "--jobs", str(jobs)],
+            capture_output=True, text=True)
+        if r.returncode != 0:
+            fail("pack jobs=%d rc=%d: %s"
+                 % (jobs, r.returncode, r.stderr.strip()))
+        packs[jobs] = open(p, "rb").read()
+    if packs[1] != packs[5]:
+        fail("packed bytes differ between jobs=1 and jobs=5")
+    pk = drc.load_db(os.path.join(tmp, "fixture.j1.ice"))
+    if not isinstance(pk, drc.IcePack):
+        fail("packed file not opened as IcePack")
+    compare_unordered(ref, pk)
+    print("D4/D5 OK (fixture): pack == ASCII, jobs-invariant bytes")
+
+    # bigger deterministic asset via gen_drcdb (few MB)
+    gdb = os.path.join(tmp, "gen.db")
+    r = subprocess.run(
+        [sys.executable,
+         os.path.join(os.path.dirname(__file__), "gen_drcdb.py"),
+         gdb, "--checks", "60", "--max-errors", "150", "--seed", "7"],
+        capture_output=True, text=True)
+    if r.returncode != 0:
+        fail("gen_drcdb rc=%d: %s" % (r.returncode, r.stderr))
+    gpacks = {}
+    for jobs in (1, 4):
+        p = os.path.join(tmp, "gen.j%d.ice" % jobs)
+        r = subprocess.run(
+            [BIN, "drc", gdb, p, "--pack", "--jobs", str(jobs)],
+            capture_output=True, text=True)
+        if r.returncode != 0:
+            fail("gen pack jobs=%d rc=%d" % (jobs, r.returncode))
+        gpacks[jobs] = open(p, "rb").read()
+    if gpacks[1] != gpacks[4]:
+        fail("gen packed bytes differ between jobs=1 and jobs=4")
+    gref = drc.load_ascii(gdb)
+    gpk = drc.IcePack(os.path.join(tmp, "gen.j1.ice"))
+    compare_unordered(gref, gpk)
+    print("D4/D5 OK (gen_drcdb): %d checks / %d errors round-trip"
+          % (len(gref.checks), gref.total))
+
+    # D6: query_rect == brute force bbox scan (in the pack's own
+    # per-check index space - v2 stores errors in Z order)
+    import random
+    rng = random.Random(11)
+    brute = []
+    for ci, c in enumerate(gpk.checks):
+        for ei in range(len(c.errors)):
+            brute.append((ci, ei, c.errors[ei].bbox()))
+    for _ in range(12):
+        x = rng.uniform(0, 4300)
+        y = rng.uniform(0, 3100)
+        w = rng.uniform(0.5, 400)
+        h = rng.uniform(0.5, 400)
+        q = (x, y, x + w, y + h)
+        want = {(ci, ei) for ci, ei, bb in brute
+                if bb[0] <= q[2] and bb[2] >= q[0]
+                and bb[1] <= q[3] and bb[3] >= q[1]}
+        got = {(ci, ei) for ci, ei, _e in gpk.query_rect(
+            q[0], q[1], q[2], q[3], cap=10 ** 9)}
+        if got != want:
+            fail("query_rect mismatch at %r: %d vs %d (sym diff %d)"
+                 % (q, len(got), len(want),
+                    len(got.symmetric_difference(want))))
+    print("D6 OK: query_rect == brute force on 12 random rects")
 
     print("DRC ICE VALIDATION: ALL OK")
 

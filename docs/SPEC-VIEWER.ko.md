@@ -102,6 +102,10 @@ recolor: 행 스와치 재생성(set_color) + meta 갱신 + 개인 layerprops
 - 트리의 에러 자식 행은 펼칠 때 생성(`_drc_populate`, placeholder
   ei=-3 교체; 체크당 상한 DRC_LIST_MAX, 초과분은 "… more" 행).
   n/p 스텝은 하이라이트 전에 해당 체크를 populate.
+- **highlight in view**(체크박스, packed .ice v2 전용): 현재 뷰포트의
+  위반 전부(상한 DRC_HL_CAP 800)를 `query_rect`로 얻어 외곽선만
+  스탬프(채움/룰러 없음 — 수백 개도 프레임당 저렴). 뷰 키로 캐시,
+  뷰/db 변경 시에만 재쿼리. v1 사이드카에서는 토글 거부+안내.
 - **점프 규약**(`_drc_jump`): 줌 = 에러 전체 extent가 양축 모두 뷰의
   ~30%(DRC_VIEW_FRACTION, 세로축은 캔버스 종횡비로 환산; 퇴화 시
   0.1µm 창). **CD 자동 룰러**(`_drc_cd_ruler`, 리스트)를 점프마다

@@ -11,6 +11,7 @@
 use std::time::Instant;
 
 mod drcice;
+mod drcpack;
 mod vfs;
 
 #[cfg(target_env = "musl")]
@@ -95,7 +96,8 @@ fn main() {
              floe-index plan <outdir> --view x0,y0,x1,y1 \
              [--px-per-um N] [--cut-px N] [--layers a/b,..] \
              [--depth N]\n       \
-             floe-index drc <results.db> [out.ice]"
+             floe-index drc <results.db> [out.ice] \
+             [--pack] [--jobs N]"
         );
         std::process::exit(2);
     }

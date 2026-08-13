@@ -36,16 +36,16 @@ pub const MAGIC: &[u8; 8] = b"FLOEICE\0";
 
 /// One parsed line: byte range of the content (CR stripped) plus the
 /// range end including the terminator (for record spans).
-struct Lines<'a> {
-    data: &'a [u8],
-    pos: usize,
+pub(crate) struct Lines<'a> {
+    pub(crate) data: &'a [u8],
+    pub(crate) pos: usize,
 }
 
 impl<'a> Lines<'a> {
-    fn new(data: &'a [u8]) -> Self {
+    pub(crate) fn new(data: &'a [u8]) -> Self {
         Lines { data, pos: 0 }
     }
-    fn peek(&self) -> Option<(usize, usize)> {
+    pub(crate) fn peek(&self) -> Option<(usize, usize)> {
         if self.pos >= self.data.len() {
             return None;
         }
@@ -61,7 +61,7 @@ impl<'a> Lines<'a> {
         }
         Some((start, end))
     }
-    fn consume(&mut self) {
+    pub(crate) fn consume(&mut self) {
         if let Some((start, _)) = self.peek() {
             let rest = &self.data[start..];
             self.pos = match rest.iter().position(|&b| b == b'\n') {
@@ -72,24 +72,24 @@ impl<'a> Lines<'a> {
     }
 }
 
-fn tokens(line: &[u8]) -> Vec<&[u8]> {
+pub(crate) fn tokens(line: &[u8]) -> Vec<&[u8]> {
     line.split(|b| b.is_ascii_whitespace())
         .filter(|t| !t.is_empty())
         .collect()
 }
 
-fn parse_i64(t: &[u8]) -> Option<i64> {
+pub(crate) fn parse_i64(t: &[u8]) -> Option<i64> {
     std::str::from_utf8(t).ok()?.parse::<i64>().ok()
 }
 
-fn parse_f64(t: &[u8]) -> Option<f64> {
+pub(crate) fn parse_f64(t: &[u8]) -> Option<f64> {
     // python float() accepts nan/inf spellings; rust f64 parse
     // matches for every token a real Calibre db contains
     std::str::from_utf8(t).ok()?.trim().parse::<f64>().ok()
 }
 
 /// drc.py _ints_prefix: leading base-10 integers of the token list.
-fn ints_prefix(toks: &[&[u8]]) -> Vec<i64> {
+pub(crate) fn ints_prefix(toks: &[&[u8]]) -> Vec<i64> {
     let mut out = Vec::new();
     for t in toks {
         match parse_i64(t) {
@@ -101,7 +101,7 @@ fn ints_prefix(toks: &[&[u8]]) -> Vec<i64> {
 }
 
 /// drc.py _is_geom_header: 1-letter kind + two integer-ish tokens.
-fn is_geom_header(toks: &[&[u8]]) -> bool {
+pub(crate) fn is_geom_header(toks: &[&[u8]]) -> bool {
     fn intish(t: &[u8]) -> bool {
         let s: &[u8] = if t.starts_with(b"-") {
             let n = t.iter().take_while(|&&b| b == b'-').count();
@@ -119,13 +119,13 @@ fn is_geom_header(toks: &[&[u8]]) -> bool {
 }
 
 #[derive(Default)]
-struct StrTab {
-    bytes: Vec<u8>,
+pub(crate) struct StrTab {
+    pub(crate) bytes: Vec<u8>,
     refs: HashMap<Vec<u8>, u32>,
 }
 
 impl StrTab {
-    fn intern(&mut self, s: &[u8]) -> u32 {
+    pub(crate) fn intern(&mut self, s: &[u8]) -> u32 {
         if let Some(&r) = self.refs.get(s) {
             return r;
         }
@@ -147,7 +147,7 @@ struct CheckRec {
     original: u64,
 }
 
-fn trim(line: &[u8]) -> &[u8] {
+pub(crate) fn trim(line: &[u8]) -> &[u8] {
     let s = line.iter().position(|b| !b.is_ascii_whitespace());
     match s {
         None => b"",
@@ -165,15 +165,32 @@ fn trim(line: &[u8]) -> &[u8] {
 
 pub fn drc_cmd(args: &[String]) {
     let mut pos = Vec::new();
-    for a in args {
-        if a.starts_with("--") {
-            eprintln!("drc: unknown option {}", a);
-            std::process::exit(2);
+    let mut pack = false;
+    let mut jobs = 0usize;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--pack" => pack = true,
+            "--jobs" => {
+                i += 1;
+                jobs = args
+                    .get(i)
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+            }
+            a if a.starts_with("--") => {
+                eprintln!("drc: unknown option {}", a);
+                std::process::exit(2);
+            }
+            a => pos.push(a.to_string()),
         }
-        pos.push(a.clone());
+        i += 1;
     }
     if pos.is_empty() || pos.len() > 2 {
-        eprintln!("usage: floe-index drc <results.db> [out.ice]");
+        eprintln!(
+            "usage: floe-index drc <results.db> [out.ice] \
+             [--pack] [--jobs N]"
+        );
         std::process::exit(2);
     }
     let src = &pos[0];
@@ -183,6 +200,34 @@ pub fn drc_cmd(args: &[String]) {
         format!("{}.ice", src)
     };
     let t0 = std::time::Instant::now();
+    if pack {
+        if jobs == 0 {
+            jobs = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1);
+        }
+        match crate::drcpack::pack(src, &out, jobs) {
+            Ok((checks, errors, bytes)) => {
+                eprintln!(
+                    "[drc] {} -> {} (packed v2, jobs {}): {} checks, \
+                     {} errors, {:.2}G in {:.1}s",
+                    src,
+                    out,
+                    jobs,
+                    checks,
+                    errors,
+                    bytes as f64 / 1e9,
+                    t0.elapsed().as_secs_f64()
+                );
+            }
+            Err(e) => {
+                eprintln!("drc --pack {}: {}", src, e);
+                let _ = std::fs::remove_file(&out);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     match build(src, &out) {
         Ok((checks, errors)) => {
             eprintln!(

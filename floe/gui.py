@@ -50,6 +50,7 @@ DRC_MARK = 0xFF5252FF      # DRC violation outline
 
 DRC_LIST_MAX = 2000        # tree rows per check (prev/next reaches all)
 DRC_VIEW_FRACTION = 0.3    # error extent ~30% of the view on a jump
+DRC_HL_CAP = 800           # highlight-in-view marker budget
 
 MIN_SPP = 0.01     # max zoom-in: 1 px = 0.01 dbu; keeps render bboxes
                    # from collapsing to zero width after int rounding
@@ -864,6 +865,8 @@ class Viewer:
         self._drc_pos = -1
         self._drc_paths = {}        # (ci, ei) -> tree path string
         self._drc_filled = set()    # check rows with children built
+        self._drc_hl = False        # highlight-in-view toggle (v2)
+        self._drc_hl_res = None     # (view key, [(kind, pts dbu)])
         self._labels = []           # Gtk.Label pool for ruler distances
 
         self.window = Gtk.Window(title=APP)
@@ -1283,6 +1286,8 @@ class Viewer:
         self._drc_pos = -1
         self._drc_paths = {}
         self._drc_filled = set()
+        self._drc_hl = False
+        self._drc_hl_res = None
         if self._drcwin is not None:
             self._drcwin.destroy()
         src = self.meta["src"]
@@ -1661,6 +1666,19 @@ class Viewer:
                 for j in range(0, len(pts) - 1, 2):
                     stamp_segment(disp, pts[j], pts[j + 1], None,
                                   DRC_MARK)
+        if self._drc_hl and self._drc is not None \
+                and hasattr(self._drc, "query_rect"):
+            # highlight-in-view: outlines only (no fill/rulers) so
+            # hundreds of markers stay cheap to stamp
+            for kind, hpts in self._drc_hl_list():
+                sp = [(sx(x), sy(y)) for x, y in hpts]
+                if kind == "p":
+                    for a, b in zip(sp, sp[1:] + sp[:1]):
+                        stamp_segment(disp, a, b, None, DRC_MARK)
+                else:
+                    for j in range(0, len(sp) - 1, 2):
+                        stamp_segment(disp, sp[j], sp[j + 1], None,
+                                      DRC_MARK)
         if self._zoomdrag is not None and self._band_cur is not None:
             x0, y0 = self._zoomdrag
             x1, y1 = self._band_cur
@@ -3056,6 +3074,12 @@ class Viewer:
             nb = Gtk.Button(label=text)
             nb.connect("clicked", lambda _w, dd=d: self._drc_step(dd))
             nav.pack_start(nb, True, True, 2)
+        hl = Gtk.CheckButton(label="highlight in view")
+        hl.set_active(self._drc_hl)
+        hl.set_tooltip_text("mark every violation inside the current "
+                            "view (packed .ice v2 only)")
+        hl.connect("toggled", self._on_drc_hl)
+        nav.pack_start(hl, False, False, 2)
         hint = Gtk.Label()
         hint.set_markup("<small>double-click an error to jump - "
                         "Esc clears the marker</small>")
@@ -3068,6 +3092,40 @@ class Viewer:
 
     def _on_drc_destroy(self, _w):
         self._drcwin = None
+
+    def _on_drc_hl(self, btn):
+        on = btn.get_active()
+        if on and not (self._drc is not None
+                       and hasattr(self._drc, "query_rect")):
+            btn.set_active(False)
+            self._set_live_status(
+                "highlight needs a packed index: "
+                "floe-index drc <db> --pack")
+            return
+        self._drc_hl = on
+        self._drc_hl_res = None
+        self._display()
+
+    def _drc_hl_list(self):
+        """Violations in the current view as [(kind, pts dbu)] -
+        recomputed only when the view or db changes."""
+        key = (self.cx, self.cy, self.spp, id(self._drc))
+        cached = self._drc_hl_res
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        bb = self.view_bbox()
+        k = self.dbu
+        res = self._drc.query_rect(bb[0] * k, bb[1] * k,
+                                   bb[2] * k, bb[3] * k,
+                                   cap=DRC_HL_CAP)
+        lst = [(e.kind, [(x / k, y / k) for x, y in e.pts])
+               for _ci, _ei, e in res]
+        self._drc_hl_res = (key, lst)
+        self._set_live_status(
+            "DRC highlight: %d in view%s"
+            % (len(lst),
+               " (capped)" if len(lst) >= DRC_HL_CAP else ""))
+        return lst
 
     def _drc_open_dialog(self):
         dlg = Gtk.FileChooserDialog(title="open DRC results (.db)",
@@ -3113,6 +3171,7 @@ class Viewer:
         self._drc_total = total
         self._drc_pos = -1
         self.drc_mark = None
+        self._drc_hl_res = None
         if self._drcwin is not None:
             self._drc_fill()
         self._set_live_status(

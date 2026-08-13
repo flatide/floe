@@ -1,6 +1,6 @@
 [package]
 name = "floe-index"
-version = "0.11.30"
+version = "0.11.31"
 edition.workspace = true
 license.workspace = true
 description = "floe native indexer CLI (spike: scan/inventory)"

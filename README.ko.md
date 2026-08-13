@@ -136,15 +136,22 @@ settled=..` 한 줄이 상시 출력된다(라운드별 비누적 — 성능 실
 정본으로 남음):
 
 ```sh
-rust/target/release/floe-index drc results.db     # → results.db.ice
+rust/target/release/floe-index drc results.db            # v1 사이드카
+rust/target/release/floe-index drc results.db --pack     # v2 완전 변환
 .venv/bin/python -m floe view chip.oas --drc results.db
 ```
 
-체크 이름·설명·개수는 인덱스에서, 좌표는 점프할 때 해당 레코드만
-읽는다. 소스가 바뀌면(size/mtime) 인덱스는 자동 무시되고 ASCII 전체
-파스로 폴백하니 `floe-index drc`를 다시 실행하면 된다. 참고: 구
-레거시 타일 캐시가 쓰던 `.ice` 확장자는 `.tiles`로 개명되어 이제
-`.ice`는 DRC 인덱스 전용이다.
+- **v1 사이드카**(기본): .db 옆 오프셋 인덱스(원본의 2~4%), .db가
+  정본으로 유지. 좌표는 점프할 때 해당 레코드만 읽음.
+- **v2 pack**(`--pack [--jobs N]`): 자기완결 바이너리 변환(실측 1/4~
+  1/5, .db 불필요), 병렬 빌드(--jobs 무관 동일 바이트), 위치 쿼리
+  내장 → DRC 브라우저의 **highlight in view** 토글(현재 화면의 위반
+  일괄 표시)이 활성화된다.
+
+소스가 바뀌면(size/mtime) 인덱스는 자동 무시되고 ASCII 전체 파스로
+폴백하니 `floe-index drc`를 다시 실행하면 된다. 참고: 구 레거시 타일
+캐시가 쓰던 `.ice` 확장자는 `.tiles`로 개명되어 이제 `.ice`는 DRC
+인덱스 전용이다.
 
 ## 8. 검증
 

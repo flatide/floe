@@ -33,6 +33,7 @@ line-parse above, so a sidecar read equals the full ASCII parse
 (tools/validate_drc_ice.py locks the equivalence).
 """
 
+import bisect
 import os
 import struct
 import sys
@@ -112,12 +113,20 @@ def load_db(path):
       the full ASCII parse with a stderr note.
     """
     with open(path, "rb") as f:
-        magic = f.read(8)
-    if magic == _ICE_MAGIC:
+        head = f.read(12)
+    if head[:8] == _ICE_MAGIC:
+        version = int.from_bytes(head[8:12], "little")
+        if version == 2:
+            return IcePack(path)
         return IceDb(path)
     side = path + ".ice"
     if os.path.exists(side):
         try:
+            with open(side, "rb") as f:
+                shead = f.read(12)
+            if shead[:8] == _ICE_MAGIC and \
+                    int.from_bytes(shead[8:12], "little") == 2:
+                return IcePack(side, src_path=path, verify_src=True)
             return IceDb(side, src_path=path)
         except (ValueError, OSError) as exc:
             sys.stderr.write("[drc] %s; parsing ASCII instead "
@@ -374,3 +383,246 @@ class IceDb(object):
             for j in range(0, len(nums) - 1, 2):
                 pts.append((nums[j] / prec, nums[j + 1] / prec))
         return DrcError(kind, num, pts)
+
+
+# ---- .ice v2 packed reader ----------------------------------------------
+
+# footer: blob_off blob_len qbox_off qbox_len blk_off blk_cnt
+#         dir_off check_cnt descref_off descref_cnt str_off str_len
+#         err_total | u32 cell_ref | u32 reserved | magic
+_ICE2_FOOTER = struct.Struct("<13QII8s")
+# check dir: name_ref desc_start desc_cnt pad | err_start err_cnt
+#            declared original block_start block_cnt
+_ICE2_CHECK = struct.Struct("<IIII6Q")
+_ICE2_BLOCK = 64
+
+
+def _uv(buf, pos):
+    val = 0
+    shift = 0
+    while True:
+        b = buf[pos]
+        pos += 1
+        val |= (b & 0x7F) << shift
+        if not b & 0x80:
+            return val, pos
+        shift += 7
+
+
+def _unzz(u):
+    return (u >> 1) ^ -(u & 1)
+
+
+class _PackErrors(object):
+    """Lazy per-check error sequence over decoded blocks."""
+    __slots__ = ("_db", "_start", "_count")
+
+    def __init__(self, db, start, count):
+        self._db = db
+        self._start = start
+        self._count = count
+
+    def __len__(self):
+        return self._count
+
+    def __getitem__(self, i):
+        if isinstance(i, slice):
+            return [self._db._perr(self._start + j)
+                    for j in range(*i.indices(self._count))]
+        if i < 0:
+            i += self._count
+        if not 0 <= i < self._count:
+            raise IndexError(i)
+        return self._db._perr(self._start + i)
+
+
+class IcePack(object):
+    """mmap reader for a PACKED .ice v2 (self-contained: rule table
+    + delta/varint coordinate blocks + per-block bbox table that
+    doubles as the spatial index; the source .db is not needed)."""
+    __slots__ = ("path", "cell", "precision", "checks", "total",
+                 "_map", "_blk", "_qbox", "_dir_es", "_dir_bs",
+                 "_ecnt", "_cbb", "_cache", "_order")
+
+    def __init__(self, path, src_path=None, verify_src=False):
+        import mmap
+        import numpy as np
+        with open(path, "rb") as f:
+            head = f.read(_ICE_HEADER.size)
+            (magic, version, _flags, precision, src_size,
+             src_mtime) = _ICE_HEADER.unpack(head)
+            if magic != _ICE_MAGIC or version != 2:
+                raise ValueError("%s: not a packed .ice v2" % path)
+            f.seek(0, os.SEEK_END)
+            fsize = f.tell()
+            f.seek(fsize - _ICE2_FOOTER.size)
+            (_blob_off, _blob_len, qbox_off, _qbox_len, blk_off,
+             blk_cnt, dir_off, check_cnt, descref_off, descref_cnt,
+             str_off, str_len, err_total, cell_ref, _resv,
+             fmagic) = \
+                _ICE2_FOOTER.unpack(f.read(_ICE2_FOOTER.size))
+            if fmagic != _ICE_MAGIC:
+                raise ValueError("%s: truncated .ice (bad footer)"
+                                 % path)
+            f.seek(dir_off)
+            dirbuf = f.read(check_cnt * _ICE2_CHECK.size)
+            f.seek(descref_off)
+            descbuf = f.read(descref_cnt * 4)
+            f.seek(str_off)
+            strbuf = f.read(str_len)
+        if verify_src and src_path is not None:
+            st = os.stat(src_path)
+            if st.st_size != src_size or int(st.st_mtime) != src_mtime:
+                raise ValueError(
+                    "%s: stale pack (source size/mtime changed)"
+                    % path)
+
+        def s(ref):
+            (n,) = struct.unpack_from("<I", strbuf, ref)
+            return strbuf[ref + 4:ref + 4 + n].decode(
+                "utf-8", errors="replace")
+
+        self.path = path
+        self.cell = s(cell_ref)
+        self.precision = precision
+        self.total = err_total
+        with open(path, "rb") as f:
+            self._map = mmap.mmap(f.fileno(), 0,
+                                  access=mmap.ACCESS_READ)
+        self._blk = np.memmap(
+            path, mode="r", offset=blk_off, shape=(blk_cnt,),
+            dtype=np.dtype([("off", "<u8"), ("cnt", "<u4"),
+                            ("pad", "<u4"), ("x0", "<i8"),
+                            ("y0", "<i8"), ("x1", "<i8"),
+                            ("y1", "<i8")]))
+        self._qbox = (np.memmap(path, mode="r", offset=qbox_off,
+                                shape=(err_total, 4), dtype=np.uint8)
+                      if err_total else
+                      np.zeros((0, 4), dtype=np.uint8))
+        self.checks = []
+        drefs = struct.unpack("<%dI" % descref_cnt, descbuf)
+        es, bs, ec = [], [], []
+        cbb = np.zeros((check_cnt, 4), dtype=np.int64)
+        for ci in range(check_cnt):
+            (name_ref, dstart, dcnt, _pad, estart, ecnt, declared,
+             _orig, bstart, bcnt) = _ICE2_CHECK.unpack_from(
+                dirbuf, ci * _ICE2_CHECK.size)
+            desc = "\n".join(s(r) for r in drefs[dstart:dstart + dcnt])
+            es.append(estart)
+            bs.append(bstart)
+            ec.append(ecnt)
+            if bcnt:
+                sl = self._blk[bstart:bstart + bcnt]
+                cbb[ci] = (sl["x0"].min(), sl["y0"].min(),
+                           sl["x1"].max(), sl["y1"].max())
+            else:
+                cbb[ci] = (1, 1, 0, 0)   # empty: never intersects
+            self.checks.append(IceCheck(
+                s(name_ref), desc, declared,
+                _PackErrors(self, estart, ecnt)))
+        self._dir_es = np.array(es, dtype=np.int64)
+        self._dir_bs = np.array(bs, dtype=np.int64)
+        self._ecnt = np.array(ec, dtype=np.int64)
+        self._cbb = cbb
+        self._cache = {}       # block idx -> [DrcError]; tiny LRU
+        self._order = []
+
+    def _block(self, bi):
+        got = self._cache.get(bi)
+        if got is not None:
+            return got
+        rec = self._blk[bi]
+        pos, cnt = int(rec["off"]), int(rec["cnt"])
+        buf = self._map
+        prec = self.precision
+        errs = []
+        prev_num = pfx = pfy = 0
+        for _ in range(cnt):
+            knpts, pos = _uv(buf, pos)
+            kind = "e" if knpts & 1 else "p"
+            npts = knpts >> 1
+            d, pos = _uv(buf, pos)
+            num = prev_num + _unzz(d)
+            prev_num = num
+            d, pos = _uv(buf, pos)
+            x = pfx + _unzz(d)
+            d, pos = _uv(buf, pos)
+            y = pfy + _unzz(d)
+            pfx, pfy = x, y
+            pts = [(x / prec, y / prec)]
+            for _ in range(npts - 1):
+                d, pos = _uv(buf, pos)
+                x += _unzz(d)
+                d, pos = _uv(buf, pos)
+                y += _unzz(d)
+                pts.append((x / prec, y / prec))
+            errs.append(DrcError(kind, num, pts))
+        self._cache[bi] = errs
+        self._order.append(bi)
+        if len(self._order) > 16:
+            self._cache.pop(self._order.pop(0), None)
+        return errs
+
+    def _perr(self, gid):
+        """Global error id -> DrcError via its 256-record block."""
+        ci = bisect.bisect_right(self._dir_es, gid) - 1
+        # empty checks share err_start with their successor: walk
+        # back to the check that actually owns this id
+        while len(self.checks[ci].errors) == 0:
+            ci -= 1
+        rel = gid - int(self._dir_es[ci])
+        bi = int(self._dir_bs[ci]) + rel // _ICE2_BLOCK
+        return self._block(bi)[rel % _ICE2_BLOCK]
+
+    def query_rect(self, x0_um, y0_um, x1_um, y1_um, cap=2000):
+        """Errors intersecting the um rect -> [(ci, ei, DrcError)].
+
+        Two numpy stages before any varint decode: check bboxes
+        prune whole rules, then the per-error [qbox] lattice (an
+        outward-rounded superset) prunes down to candidate RECORDS;
+        only blocks holding candidates are decoded, and the exact
+        bbox test on the decoded error settles it. Stops at cap."""
+        import math as _math
+        import numpy as np
+        prec = self.precision
+        qx0, qy0 = x0_um * prec, y0_um * prec
+        qx1, qy1 = x1_um * prec, y1_um * prec
+        cbb = self._cbb
+        hitc = np.nonzero((cbb[:, 0] <= qx1) & (cbb[:, 2] >= qx0) &
+                          (cbb[:, 1] <= qy1) & (cbb[:, 3] >= qy0) &
+                          (self._ecnt > 0))[0]
+        out = []
+        for ci in hitc:
+            ci = int(ci)
+            cx0, cy0, cx1, cy1 = (int(v) for v in cbb[ci])
+            sx, sy = cx1 - cx0, cy1 - cy0
+
+            def q(v, c0, span, up):
+                if span <= 0:
+                    return 255 if up else 0
+                d = (v - c0) * 255.0 / span
+                r = _math.ceil(d) if up else _math.floor(d)
+                return max(0, min(255, r))
+
+            qlx = q(qx0, cx0, sx, False)
+            qhx = q(qx1, cx0, sx, True)
+            qly = q(qy0, cy0, sy, False)
+            qhy = q(qy1, cy0, sy, True)
+            es = int(self._dir_es[ci])
+            n = int(self._ecnt[ci])
+            sl = self._qbox[es:es + n]
+            cand = np.nonzero((sl[:, 0] <= qhx) & (sl[:, 2] >= qlx) &
+                              (sl[:, 1] <= qhy) & (sl[:, 3] >= qly))[0]
+            if not len(cand):
+                continue
+            bs = int(self._dir_bs[ci])
+            for brel in np.unique(cand // _ICE2_BLOCK):
+                base = int(brel) * _ICE2_BLOCK
+                for j, e in enumerate(self._block(bs + int(brel))):
+                    bb = e.bbox()
+                    if bb[0] <= x1_um and bb[2] >= x0_um \
+                            and bb[1] <= y1_um and bb[3] >= y0_um:
+                        out.append((ci, base + j, e))
+                        if len(out) >= cap:
+                            return out
+        return out
