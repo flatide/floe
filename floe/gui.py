@@ -3306,11 +3306,6 @@ class Viewer:
         # pane once a db is loaded (user can still drag it back)
         if self._lpaned.get_position() < 420:
             self._lpaned.set_position(420)
-        # number-cell width for the reflow: widest possible number
-        # of THIS db plus breathing room
-        probe = self._drcwin._grid.create_pango_layout(
-            "0" * max(3, len(str(db.total))))
-        self._drc_cellw = probe.get_pixel_size()[0] + 18
         self._drc_cum = []
         total = 0
         for c in db.checks:
@@ -3419,10 +3414,27 @@ class Viewer:
         self._drc_grid_ci = ci
         c = db.checks[ci]
         gbase = self._drc_cum[ci]
-        W = self._drc_gridw
         if self._drc_hl and hasattr(db, "query_rect"):
             eis = [ei for rci, ei, _k, _p in self._drc_hl_list()
                    if rci == ci]
+            maxnum = gbase + (eis[-1] + 1 if eis else 1)
+        else:
+            eis = None
+            maxnum = gbase + max(1, min(len(c.errors),
+                                        DRC_LIST_MAX))
+        # cell width follows THIS rule's widest number (user call
+        # 2026-08-13: single-digit rules wasted space); a width
+        # change reflows the columns before filling
+        probe = win._grid.create_pango_layout(
+            "0" * max(2, len(str(maxnum))))
+        self._drc_cellw = probe.get_pixel_size()[0] + 18
+        avail = win._grid.get_allocation().width
+        n = max(1, min(24, avail // max(24, self._drc_cellw)))
+        if n != self._drc_gridw:
+            self._drc_grid_set_cols(n)  # refills at the new width
+            return
+        W = self._drc_gridw
+        if eis is not None:
             self._drc_grid_map = eis
             for base in range(0, len(eis), W):
                 cells = ["%d" % (gbase + ei + 1)

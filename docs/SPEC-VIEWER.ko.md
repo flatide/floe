@@ -111,8 +111,9 @@ recolor: 행 스와치 재생성(set_color) + meta 갱신 + 개인 layerprops
   `_drc_open`).
 - 그리드 = 전용 TreeView, **pane 폭에 맞춰 열 수 재배치**(가로
   스크롤 없음 — hscroll NEVER, size-allocate에서 열 수 = 폭 ÷ 셀
-  폭[db 최대 번호 자릿수 프로브]; `_drc_grid_set_cols`가 모델/열을
-  재구축하고 마킹 셀 유지). 셀 = 전역 에러 번호(레코드 디코드 없음
+  폭[**현재 룰의 최대 번호 자릿수** 프로브 — 룰 전환/그리드 갱신마다
+  재계산]; `_drc_grid_set_cols`가 모델/열을 재구축하고 마킹 셀
+  유지). 셀 = 전역 에러 번호(레코드 디코드 없음
   — 번호 = cum[ci]+i+1), 행 선택 모드 NONE — 클릭한 **셀 하나만**
   마킹(markup 배경, `_drc_cell_mark`).
   셀 단클릭 = 하단 상세(`#번호 [상태]`·룰 설명 전문·`edge (um):`/
