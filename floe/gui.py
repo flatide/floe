@@ -1709,18 +1709,6 @@ class Viewer:
                 for j in range(0, len(pts) - 1, 2):
                     stamp_segment(disp, pts[j], pts[j + 1], None,
                                   DRC_MARK)
-        if self._drc_focus is not None and not self._drc_hl:
-            # single-clicked error at the CURRENT zoom: its outline
-            # gets a cyan halo (user call 2026-08-13)
-            _fc, _fe, fkind, fpts = self._drc_focus
-            sp = [(sx(x), sy(y)) for x, y in fpts]
-            if fkind == "p":
-                for a, b in zip(sp, sp[1:] + sp[:1]):
-                    stamp_segment(disp, a, b, DRC_CYAN, DRC_MARK)
-            else:
-                for j in range(0, len(sp) - 1, 2):
-                    stamp_segment(disp, sp[j], sp[j + 1], DRC_CYAN,
-                                  DRC_MARK)
         if self.mode == "esel" and self._esel_start is not None:
             ax, ay = self._esel_start
             bx, by = self._cursor
@@ -3609,6 +3597,48 @@ class Viewer:
                            % (len(c.errors) - DRC_LIST_MAX)]
                           + [""] * (W - 1))
 
+    def _drc_sel_click(self, ci, row, j, idx, ei, is_range):
+        """Grid selection editing (user call 2026-08-14):
+        Ctrl+click toggles ONE error in/out of the selection,
+        Shift+click ADDS the visual range from the current cell.
+        No pan/zoom change."""
+        db = self._drc
+        sel = self._drc_sel
+        eset = (set(sel[3]) if sel is not None and sel[0] == ci
+                else set())
+        if is_range:
+            aidx = idx
+            if self._drc_cell is not None:
+                aidx = (self._drc_cell[0] * self._drc_gridw
+                        + self._drc_cell[1])
+            lo, hi = sorted((aidx, idx))
+            for k2 in range(lo, hi + 1):
+                if self._drc_grid_map is not None:
+                    if k2 >= len(self._drc_grid_map):
+                        break
+                    eset.add(self._drc_grid_map[k2])
+                elif k2 < len(db.checks[ci].errors):
+                    eset.add(k2)
+        elif ei in eset:
+            eset.discard(ei)
+        else:
+            eset.add(ei)
+        eis = sorted(eset)
+        k = self.dbu
+        errs = db.checks[ci].errors
+        marks = [(e2, errs[e2].kind,
+                  [(x / k, y / k) for x, y in errs[e2].pts])
+                 for e2 in eis]
+        self._drc_sel = ((ci, eis, marks, frozenset(eset))
+                         if eis else None)
+        self._drc_grid_fill(ci)   # repaint the gold marks
+        self._drc_cell_mark(row, j)
+        self._drc_show_detail(ci, ei)
+        self._set_live_status(
+            "error select %s: %d selected"
+            % (db.checks[ci].name, len(eis)))
+        self._display()
+
     def _drc_cell_mark(self, row, j):
         """Mark ONE grid cell as current (no row-wide selection -
         user call 2026-08-13): previous cell reverts to plain."""
@@ -3679,6 +3709,12 @@ class Viewer:
                 else:
                     self._drc_hl = False
             self._drc_jump(ci, ei)
+            return False
+        if ev.state & (Gdk.ModifierType.CONTROL_MASK
+                       | Gdk.ModifierType.SHIFT_MASK):
+            self._drc_sel_click(
+                ci, row, j, idx, ei,
+                bool(ev.state & Gdk.ModifierType.SHIFT_MASK))
             return False
         self._drc_cell_mark(row, j)
         e = db.checks[ci].errors[ei]
