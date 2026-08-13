@@ -869,6 +869,8 @@ class Viewer:
         self._drc_grid_ci = None    # rule the number grid shows
         self._drc_grid_rows = 0
         self._drc_cell = None       # marked grid cell (row, col)
+        self._drc_grid_map = None   # None = all errors (arithmetic)
+                                    # else the in-view ei list (hl)
         self._drc_focus = None      # single-clicked error (ci, ei,
                                     # kind, pts dbu) - emphasized in
                                     # place, no zoom change
@@ -1297,6 +1299,7 @@ class Viewer:
         self._drc_grid_ci = None
         self._drc_grid_rows = 0
         self._drc_cell = None
+        self._drc_grid_map = None
         self._drc_focus = None
         self._drc_hl = False
         self._drc_hl_res = None
@@ -3188,6 +3191,8 @@ class Viewer:
             self._set_mono(True, announce=False)
         else:
             self._set_mono(self._mono_saved, announce=False)
+        if self._drc_open is not None:
+            self._drc_grid_fill(self._drc_open)
         self._display()
 
     def _set_mono(self, on, announce=True):
@@ -3242,6 +3247,11 @@ class Viewer:
             "DRC highlight %s: %d in view%s"
             % (self._drc.checks[ci].name, len(lst),
                " (capped)" if len(lst) >= DRC_HL_CAP else ""))
+        # the browser grid lists exactly these in-view errors: let
+        # it follow pans/zooms (idle: this runs inside the overlay
+        # draw path; the refill re-reads the now-cached list)
+        if self._drc_hl and self._drc_grid_ci == ci:
+            GLib.idle_add(self._drc_grid_fill, ci)
         return lst
 
     def _drc_open_dialog(self):
@@ -3332,17 +3342,44 @@ class Viewer:
 
     def _drc_grid_fill(self, ci):
         """2-D grid of GLOBAL error numbers for one rule (no record
-        decode: the number is the file order, cum[ci] + i + 1)."""
+        decode: the number is the file order, cum[ci] + i + 1).
+        In highlight mode only the errors INSIDE the current view
+        are listed (user call 2026-08-13) and the grid follows the
+        view via _drc_hl_list's recompute."""
         win, db = self._drcwin, self._drc
         if win is None or db is None:
             return
         gstore = win._gstore
         gstore.clear()
         self._drc_cell = None
-        self._drc_focus = None
         self._drc_grid_ci = ci
         c = db.checks[ci]
         gbase = self._drc_cum[ci]
+        if self._drc_hl and hasattr(db, "query_rect"):
+            eis = [ei for rci, ei, _k, _p in self._drc_hl_list()
+                   if rci == ci]
+            self._drc_grid_map = eis
+            for base in range(0, len(eis), DRC_GRID_W):
+                cells = ["%d" % (gbase + ei + 1)
+                         for ei in eis[base:base + DRC_GRID_W]]
+                cells += [""] * (DRC_GRID_W - len(cells))
+                gstore.append(cells)
+            self._drc_grid_rows = ((len(eis) + DRC_GRID_W - 1)
+                                   // DRC_GRID_W)
+            if len(eis) >= DRC_HL_CAP:
+                gstore.append(["… capped at %d" % DRC_HL_CAP]
+                              + [""] * (DRC_GRID_W - 1))
+            # keep the focused error marked if it is still in view
+            f = self._drc_focus
+            if f is not None and f[0] == ci and f[1] in eis:
+                idx = eis.index(f[1])
+                self._drc_cell_mark(idx // DRC_GRID_W,
+                                    idx % DRC_GRID_W)
+            else:
+                self._drc_focus = None
+            return
+        self._drc_grid_map = None
+        self._drc_focus = None
         shown = min(len(c.errors), DRC_LIST_MAX)
         for base in range(0, shown, DRC_GRID_W):
             cells = ["%d" % (gbase + i + 1)
@@ -3365,14 +3402,20 @@ class Viewer:
             return
         gstore = win._gstore
         gbase = self._drc_cum[ci]
+
+        def num_at(r, c_):
+            idx = r * DRC_GRID_W + c_
+            if self._drc_grid_map is not None:
+                idx = self._drc_grid_map[idx]
+            return gbase + idx + 1
+
         old = self._drc_cell
         if old is not None and old != (row, j):
             orow, oj = old
-            gstore[orow][oj] = "%d" % (
-                gbase + orow * DRC_GRID_W + oj + 1)
+            gstore[orow][oj] = "%d" % num_at(orow, oj)
         gstore[row][j] = (
             "<span background='#3465a4' foreground='#ffffff'>"
-            "%d</span>" % (gbase + row * DRC_GRID_W + j + 1))
+            "%d</span>" % num_at(row, j))
         self._drc_cell = (row, j)
 
     def _on_drc_grid_click(self, tree, ev):
@@ -3392,7 +3435,13 @@ class Viewer:
             j = tree.get_columns().index(col)
         except ValueError:
             return False
-        ei = row * DRC_GRID_W + j
+        idx = row * DRC_GRID_W + j
+        if self._drc_grid_map is not None:
+            if idx >= len(self._drc_grid_map):
+                return False
+            ei = self._drc_grid_map[idx]
+        else:
+            ei = idx
         db = self._drc
         if db is None or ei >= len(db.checks[ci].errors):
             return False
@@ -3412,8 +3461,12 @@ class Viewer:
         self._drc_focus = (ci, ei, e.kind,
                            [(x / self.dbu, y / self.dbu)
                             for x, y in e.pts])
-        self._drc_hl_res = None   # 5x5 emphasis needs a redraw key
         self._drc_show_detail(ci, ei)
+        if not self._drc_hl:
+            # center the error at the CURRENT zoom (pan only -
+            # user call 2026-08-13)
+            fx, fy = e.center()
+            self.goto(fx, fy, None)
         self._display()
         return False
 
@@ -3649,12 +3702,20 @@ class Viewer:
                 p = Gtk.TreePath.new_from_string(str(ci))
                 win._rules.set_cursor(p, None, False)
                 win._rules.scroll_to_cell(p, None, False, 0.0, 0.0)
-            if ei < DRC_LIST_MAX and self._drc_grid_ci == ci:
-                row, j = divmod(ei, DRC_GRID_W)
-                self._drc_cell_mark(row, j)
-                win._grid.scroll_to_cell(
-                    Gtk.TreePath.new_from_string(str(row)),
-                    None, False, 0.0, 0.0)
+            if self._drc_grid_ci == ci:
+                if self._drc_grid_map is not None:
+                    idx = (self._drc_grid_map.index(ei)
+                           if ei in self._drc_grid_map else None)
+                elif ei < DRC_LIST_MAX:
+                    idx = ei
+                else:
+                    idx = None
+                if idx is not None:
+                    row, j = divmod(idx, DRC_GRID_W)
+                    self._drc_cell_mark(row, j)
+                    win._grid.scroll_to_cell(
+                        Gtk.TreePath.new_from_string(str(row)),
+                        None, False, 0.0, 0.0)
         self._drc_jump(ci, ei)
 
     # ---- ruler / snap / pick -----------------------------------------------
