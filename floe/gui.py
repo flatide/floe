@@ -46,7 +46,8 @@ RULER_CORE = 0xFFFFFFFF    # plain white solid ruler (same call)
 SNAP_VERTEX = 0xFFFFFFFF   # plain white (user call 2026-08-09;
 SNAP_EDGE = 0xFFFFFFFF     # vertex/edge no longer color-coded)
 SEL_CORE = 0xFFFFFFFF
-DRC_MARK = 0xFF5252FF      # DRC violation outline
+DRC_MARK = 0x00FFFFFF      # DRC violation geometry - all cyan
+                           # (user call 2026-08-14; was red)
 
 DRC_LIST_MAX = 2000        # grid cells per rule (prev/next reaches all)
 DRC_GRID_W = 5             # error numbers per browser grid row
@@ -1719,18 +1720,36 @@ class Viewer:
                     stamp_segment(disp, sp[j], sp[j + 1], DRC_CYAN,
                                   DRC_MARK)
         if self._drc_sel is not None:
-            # box selection ('e'): the selected errors draw as the
-            # zoom-independent cyan squares, replacing the broader
-            # highlight set while active
+            # box selection ('e'): squares while highlight mode is
+            # on, the errors' REAL shapes when it is off (user call
+            # 2026-08-14)
             sci, _seis, marks = self._drc_sel
             focus = self._drc_focus
-            for ei_, mx, my in marks:
-                cxp, cyp = sx(mx), sy(my)
-                s_px = 5 if (focus is not None
-                             and focus[0] == sci
-                             and focus[1] == ei_) else 3
-                fill_rect(disp, cxp - s_px // 2, cyp - s_px // 2,
-                          s_px, s_px, DRC_CYAN)
+            if self._drc_hl:
+                for ei_, _kind, spts in marks:
+                    hxs = [p[0] for p in spts]
+                    hys = [p[1] for p in spts]
+                    cxp = sx((min(hxs) + max(hxs)) / 2.0)
+                    cyp = sy((min(hys) + max(hys)) / 2.0)
+                    s_px = 5 if (focus is not None
+                                 and focus[0] == sci
+                                 and focus[1] == ei_) else 3
+                    fill_rect(disp, cxp - s_px // 2,
+                              cyp - s_px // 2, s_px, s_px, DRC_CYAN)
+            else:
+                budget = 20000   # segments; huge selections stop
+                for ei_, kind, spts in marks:
+                    sp = [(sx(x), sy(y)) for x, y in spts]
+                    if kind == "p":
+                        segs = list(zip(sp, sp[1:] + sp[:1]))
+                    else:
+                        segs = [(sp[j], sp[j + 1])
+                                for j in range(0, len(sp) - 1, 2)]
+                    for a, b in segs:
+                        stamp_segment(disp, a, b, None, DRC_MARK)
+                        budget -= 1
+                    if budget <= 0:
+                        break
         if self.mode == "esel" and self._esel_start is not None:
             ax, ay = self._esel_start
             bx, by = self._cursor
@@ -3174,9 +3193,8 @@ class Viewer:
         marks = []
         for _rci, ei, e in res:
             eis.append(ei)
-            bb = e.bbox()
-            marks.append((ei, (bb[0] + bb[2]) / 2.0 / k,
-                          (bb[1] + bb[3]) / 2.0 / k))
+            marks.append((ei, e.kind,
+                          [(x / k, y / k) for x, y in e.pts]))
         self._drc_sel = (ci, eis, marks)
         self._drc_focus = None
         self._drc_grid_fill(ci)
