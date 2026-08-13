@@ -3496,18 +3496,13 @@ class Viewer:
             s = db.get_status(ci, ei)
             status = {0: "none", 1: "waived",
                       2: "reserved"}.get(s, "status %d" % s)
-        lines = ["#%d  %s  [%s]"
-                 % (e.num,
-                    "polygon" if e.kind == "p" else "edge", status),
+        lines = ["#%d  [%s]" % (e.num, status),
                  "rule: %s" % c.name]
         if c.desc:
             lines += c.desc.split("\n")
-        b = e.bbox()
-        lines.append("bbox: (%.4f, %.4f) - (%.4f, %.4f) um"
-                     % (b[0], b[1], b[2], b[3]))
         pts = e.pts
         if e.kind == "e":
-            lines.append("edges (um):")
+            lines.append("edge (um):")
             for j in range(0, min(len(pts) - 1, 128), 2):
                 lines.append("  (%.4f, %.4f) - (%.4f, %.4f)"
                              % (pts[j][0], pts[j][1],
@@ -3516,7 +3511,7 @@ class Viewer:
                 lines.append("  … %d more edges"
                              % ((len(pts) - 128) // 2))
         else:
-            lines.append("vertices (um):")
+            lines.append("polygon (um):")
             for x, y in pts[:64]:
                 lines.append("  (%.4f, %.4f)" % (x, y))
             if len(pts) > 64:
