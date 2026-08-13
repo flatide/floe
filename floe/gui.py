@@ -49,6 +49,7 @@ SEL_CORE = 0xFFFFFFFF
 DRC_MARK = 0xFF5252FF      # DRC violation outline
 
 DRC_LIST_MAX = 2000        # tree rows per check (prev/next reaches all)
+DRC_VIEW_FRACTION = 0.3    # error extent ~30% of the view on a jump
 
 MIN_SPP = 0.01     # max zoom-in: 1 px = 0.01 dbu; keeps render bboxes
                    # from collapsing to zero width after int rounding
@@ -824,6 +825,7 @@ class Viewer:
         self._ruler_start = None
         self._ruler_free = False
         self._auto_rulers = []
+        self._drc_ruler = []        # auto CD ruler of the current jump
         self.snap_on = True
         self._snap_seq = 0
         self._snap_res = None
@@ -1268,6 +1270,7 @@ class Viewer:
         self.rulers = []
         self._ruler_start = None
         self._auto_rulers = []
+        self._drc_ruler = []
         self._snap_res = None
         self.selection = None
         self._sel_text = ""
@@ -3190,16 +3193,103 @@ class Viewer:
         b = e.bbox()
         w_um, h_um = b[2] - b[0], b[3] - b[1]
         cx, cy = e.center()
-        self.goto(cx, cy, max(max(w_um, h_um) * 8.0, 2.0))
+        # zoom so the whole violation spans ~DRC_VIEW_FRACTION of
+        # the view on BOTH axes (goto sets the view WIDTH, so the
+        # vertical requirement converts through the canvas aspect)
+        vw, vh = self._viewport_size()
+        win = w_um / DRC_VIEW_FRACTION
+        if vh > 0:
+            win = max(win, h_um / DRC_VIEW_FRACTION * (vw / float(vh)))
+        if win <= 0:
+            win = 0.1   # degenerate (point-like) violation
+        self.goto(cx, cy, win)
         self.drc_mark = {"kind": e.kind,
                          "pts": [(x / self.dbu, y / self.dbu)
                                  for x, y in e.pts]}
+        # auto CD ruler: one per jump, replacing the previous one
+        # (hand-drawn rulers stay; k/Esc treat it like any ruler)
+        for r in self._drc_ruler:
+            if r in self.rulers:
+                self.rulers.remove(r)
+        self._drc_ruler = []
+        cd = self._drc_cd_ruler(e)
+        if cd is not None:
+            self.rulers.append(cd)
+            self._drc_ruler = [cd]
         self._set_live_status(
             "DRC %s #%d/%d · %s · %.3f x %.3f um at (%.3f, %.3f)"
             % (check.name, e.num, len(check.errors),
                "poly" if e.kind == "p" else "edge",
                w_um, h_um, cx, cy))
         self._display()
+
+    def _drc_cd_ruler(self, e):
+        """CD ruler for SIMPLE violations (dbu 4-tuple, else None):
+        single edge = its length, edge pair = the closest gap
+        between the edges (anchored at the midpoint when the edges
+        face each other in parallel - the common spacing shape),
+        axis-aligned rectangle = its narrow span through the middle.
+        Complex polygons/edge sets get NO ruler (user call
+        2026-08-13) - the distance chip on the ruler is the CD."""
+        pts = e.pts   # um
+        k = self.dbu
+
+        def dist(p, q):
+            return math.hypot(p[0] - q[0], p[1] - q[1])
+
+        def foot(p, a, b):
+            ax, ay = a
+            dx, dy = b[0] - ax, b[1] - ay
+            l2 = dx * dx + dy * dy
+            if l2 <= 0:
+                return a
+            t = ((p[0] - ax) * dx + (p[1] - ay) * dy) / l2
+            t = max(0.0, min(1.0, t))
+            return (ax + t * dx, ay + t * dy)
+
+        def seg(p, q):
+            return (p[0] / k, p[1] / k, q[0] / k, q[1] / k)
+
+        if e.kind == "e" and len(pts) == 2:
+            if dist(pts[0], pts[1]) <= 0:
+                return None
+            return seg(pts[0], pts[1])
+        if e.kind == "e" and len(pts) == 4:
+            a0, a1, b0, b1 = pts
+
+            def orient(a, b, c):
+                return ((b[0] - a[0]) * (c[1] - a[1])
+                        - (b[1] - a[1]) * (c[0] - a[0]))
+            if (orient(a0, a1, b0) > 0) != (orient(a0, a1, b1) > 0) \
+                    and (orient(b0, b1, a0) > 0) != (orient(b0, b1,
+                                                            a1) > 0):
+                return None   # edges properly cross: gap is zero
+            cand = [(p, foot(p, b0, b1)) for p in (a0, a1)]
+            cand += [(foot(p, a0, a1), p) for p in (b0, b1)]
+            dmin = min(dist(p, q) for p, q in cand)
+            if dmin <= 0:
+                return None   # touching edges: no gap
+            mid = ((a0[0] + a1[0]) / 2.0, (a0[1] + a1[1]) / 2.0)
+            fm = foot(mid, b0, b1)
+            if dist(mid, fm) <= dmin * 1.0001:
+                return seg(mid, fm)
+            return seg(*min(cand, key=lambda c: dist(c[0], c[1])))
+        if e.kind == "p" and len(pts) == 4:
+            xs = sorted(set(x for x, _ in pts))
+            ys = sorted(set(y for _, y in pts))
+            if len(xs) != 2 or len(ys) != 2:
+                return None   # not an axis-aligned rectangle
+            if set(pts) != {(x, y) for x in xs for y in ys}:
+                return None
+            w, h = xs[1] - xs[0], ys[1] - ys[0]
+            if w <= 0 or h <= 0:
+                return None
+            if w <= h:
+                my = (ys[0] + ys[1]) / 2.0
+                return seg((xs[0], my), (xs[1], my))
+            mx = (xs[0] + xs[1]) / 2.0
+            return seg((mx, ys[0]), (mx, ys[1]))
+        return None
 
     def _drc_step(self, delta):
         """n/p keys and the prev/next buttons walk every error."""
