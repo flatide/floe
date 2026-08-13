@@ -54,6 +54,12 @@ DRC_VIEW_FRACTION = 0.3    # error extent ~30% of the view on a jump
 DRC_HL_CAP = 1000          # highlight-in-view marker budget
 DRC_CYAN = 0x00FFFFFF      # highlight squares / focus halo
 
+
+class _DrcPanel(object):
+    """Widget refs of the embedded DRC browser (attribute bag)."""
+    __slots__ = ("_info", "_rules", "_rstore", "_grid", "_gstore",
+                 "_detail", "_hl")
+
 MIN_SPP = 0.01     # max zoom-in: 1 px = 0.01 dbu; keeps render bboxes
                    # from collapsing to zero width after int rounding
 FIT_ZOOM_OUT = 16.0  # max zoom-out: 16x beyond the fit view. The size
@@ -907,11 +913,15 @@ class Viewer:
                        spacing=2)
         left.set_size_request(MINIMAP_PX + 16, -1)
         # placeholder container: the Calibre-style cell/object
-        # browser lands here later
+        # browser lands here later; the DRC browser lives here
+        # permanently (user call 2026-08-13)
         self._left_stack = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL)
+        self._left_stack.pack_start(self._build_drc_panel(),
+                                    True, True, 0)
         left.pack_start(self._left_stack, True, True, 0)
         self._left_pane = left
+        self._lpaned = lpaned
         lpaned.pack1(left, resize=False, shrink=False)
         lpaned.pack2(paned, resize=True, shrink=True)
         lpaned.set_position(MINIMAP_PX + 16)
@@ -1305,8 +1315,13 @@ class Viewer:
         self._drc_hl_res = None
         self._mono = False
         self._mono_saved = False
-        if self._drcwin is not None:
-            self._drcwin.destroy()
+        w = self._drcwin
+        if w is not None:
+            w._hl.set_active(False)
+            w._rstore.clear()
+            w._gstore.clear()
+            w._detail.set_text("")
+            w._info.set_text("no results database loaded")
         src = self.meta["src"]
         self.window.set_title(
             "%s - %s" % (APP, os.path.basename(src["path"])))
@@ -3064,16 +3079,18 @@ class Viewer:
 
     # ---- DRC results browser -------------------------------------------------
     def _drc_window(self):
-        """'e': non-modal DRC error browser (Calibre-RVE style)."""
-        if self._drcwin is not None:
-            self._drcwin.present()
-            return
-        win = Gtk.Window(title="DRC results")
-        win.set_transient_for(self.window)
-        win.set_default_size(470, 680)
-        win.connect("destroy", self._on_drc_destroy)
+        """'e': the browser lives in the LEFT pane now (user call
+        2026-08-13) - load a db when none is open, else focus it."""
+        if self._drc is None:
+            self._drc_open_dialog()
+        else:
+            self._drcwin._rules.grab_focus()
+
+    def _build_drc_panel(self):
+        """DRC browser panel, embedded in the left pane (always
+        available; formerly a separate window)."""
+        win = _DrcPanel()
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        win.add(box)
         top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         box.pack_start(top, False, False, 2)
         b = Gtk.Button(label="open .db…")
@@ -3158,20 +3175,10 @@ class Viewer:
         hl.connect("toggled", self._on_drc_hl)
         nav.pack_start(hl, False, False, 2)
         win._hl = hl
-        hint = Gtk.Label()
-        hint.set_markup("<small>click an error number for details - "
-                        "double-click jumps - Esc clears the "
-                        "marker</small>")
-        box.pack_start(hint, False, False, 0)
         win._rules, win._rstore = rules, rstore
         win._grid, win._gstore = grid, gstore
         self._drcwin = win
-        win.show_all()
-        if self._drc is not None:
-            self._drc_fill()
-
-    def _on_drc_destroy(self, _w):
-        self._drcwin = None
+        return box
 
     def _on_drc_hl(self, btn):
         on = btn.get_active()
@@ -3256,7 +3263,7 @@ class Viewer:
 
     def _drc_open_dialog(self):
         dlg = Gtk.FileChooserDialog(title="open DRC results (.db)",
-                                    parent=self._drcwin or self.window,
+                                    parent=self.window,
                                     action=Gtk.FileChooserAction.OPEN)
         dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
                         "Open", Gtk.ResponseType.OK)
@@ -3290,6 +3297,10 @@ class Viewer:
             self._set_live_status(msg)
             return False
         self._drc = db
+        # the embedded browser needs elbow room: widen the left
+        # pane once a db is loaded (user can still drag it back)
+        if self._lpaned.get_position() < 420:
+            self._lpaned.set_position(420)
         self._drc_cum = []
         total = 0
         for c in db.checks:

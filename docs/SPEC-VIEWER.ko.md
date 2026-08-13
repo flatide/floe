@@ -60,9 +60,10 @@
 
 ## 6. 패널/오버레이
 
-- 3-pane: `lpaned[ left | paned[ canvas | side ] ]`. left: `_left_stack`
-  (예정: cell/object 브라우저) + 하단 미니맵(180px, `_frontier_depths`
-  = meta.frontier.depths, 클릭 센터링, 0.7px 미만 도트 생략).
+- 3-pane: `lpaned[ left | paned[ canvas | side ] ]`. left:
+  `_left_stack`(DRC 브라우저 상시 내장 §8b; cell/object 브라우저
+  추후 동거) + 하단 미니맵(180px, `_frontier_depths` =
+  meta.frontier.depths, 클릭 센터링, 0.7px 미만 도트 생략).
 - side(우측, margin_end 6): 제목/소스, 토글 버튼행, 레이어 목록
   (LayerRow: `l.d ■ NAME` 모노스페이스, 숨김=행 전체 취소선만·색 유지,
   선택 하이라이트 d9f2ff/픽 fff2a8), **색 팔레트 7×7**(colornames.def
@@ -99,8 +100,11 @@ recolor: 행 스와치 재생성(set_color) + meta 갱신 + 개인 layerprops
   (checks[].errors는 시퀀스 프로토콜).
 - prev/next 워크는 에러 전수 리스트를 **절대 만들지 않는다** —
   `_drc_cum` 누적 카운트 + bisect 산술(수억 에러 안전).
-- **상/하 pane**(2026-08-13 개편·수정): 위 = [룰 목록 | 에러 번호
-  그리드] 가로 분할, 아래 = 상세 TextView. 룰 목록은 **이름 +
+- **뷰어 왼쪽 pane에 상시 내장**(2026-08-13; 별도 윈도 폐지 —
+  `_build_drc_panel`, `_DrcPanel` 위젯 홀더, 'e' = 미로드 시 db
+  열기/이후 포커스, db 로드 시 lpaned ≥420px 자동 확장). 내부는
+  위 = [룰 목록 | 에러 번호 그리드] 가로 분할, 아래 = 상세
+  TextView. 룰 목록은 **이름 +
   에러 개수만**(부제 없음 — 이름은 ellipsize로 잘려도 개수 열은
   항상 보임; 설명은 상세 pane 전담). **룰 선택 = 열기**: 선택한
   룰의 그리드만 표시(한 번에 한 룰 — 아코디언 요구 충족,
