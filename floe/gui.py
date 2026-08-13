@@ -875,6 +875,8 @@ class Viewer:
         self._drc_grid_ci = None    # rule the number grid shows
         self._drc_grid_rows = 0
         self._drc_cell = None       # marked grid cell (row, col)
+        self._drc_gridw = DRC_GRID_W   # columns, reflowed to pane
+        self._drc_cellw = 60        # px per number cell (probe)
         self._drc_grid_map = None   # None = all errors (arithmetic)
                                     # else the in-view ei list (hl)
         self._drc_focus = None      # single-clicked error (ci, ei,
@@ -3138,8 +3140,11 @@ class Viewer:
         grid.set_headers_visible(False)
         grid.get_selection().set_mode(Gtk.SelectionMode.NONE)
         grid.connect("button-press-event", self._on_drc_grid_click)
+        # the number array REFLOWS to the pane width instead of
+        # scrolling horizontally (user call 2026-08-13)
+        grid.connect("size-allocate", self._on_drc_grid_alloc)
         gsc = Gtk.ScrolledWindow()
-        gsc.set_policy(Gtk.PolicyType.AUTOMATIC,
+        gsc.set_policy(Gtk.PolicyType.NEVER,
                        Gtk.PolicyType.AUTOMATIC)
         gsc.add(grid)
         _remote_x_scroll_repaint(gsc)
@@ -3301,6 +3306,11 @@ class Viewer:
         # pane once a db is loaded (user can still drag it back)
         if self._lpaned.get_position() < 420:
             self._lpaned.set_position(420)
+        # number-cell width for the reflow: widest possible number
+        # of THIS db plus breathing room
+        probe = self._drcwin._grid.create_pango_layout(
+            "0" * max(3, len(str(db.total))))
+        self._drc_cellw = probe.get_pixel_size()[0] + 18
         self._drc_cum = []
         total = 0
         for c in db.checks:
@@ -3351,6 +3361,49 @@ class Viewer:
             self._drc_hl_res = None
             self._display()
 
+    def _on_drc_grid_alloc(self, _w, alloc):
+        n = max(1, min(24, alloc.width // max(24, self._drc_cellw)))
+        if n != self._drc_gridw:
+            self._drc_grid_set_cols(n)
+
+    def _drc_grid_set_cols(self, n):
+        """Rebuild the grid with n columns (model column count is
+        fixed per ListStore) and refill, keeping the marked cell."""
+        win = self._drcwin
+        if win is None:
+            return
+        grid = win._grid
+        mei = None
+        if self._drc_cell is not None:
+            row, j = self._drc_cell
+            idx = row * self._drc_gridw + j
+            if self._drc_grid_map is not None:
+                if idx < len(self._drc_grid_map):
+                    mei = self._drc_grid_map[idx]
+            else:
+                mei = idx
+        self._drc_gridw = n
+        for col in list(grid.get_columns()):
+            grid.remove_column(col)
+        store = Gtk.ListStore(*([str] * n))
+        for j in range(n):
+            grid.append_column(Gtk.TreeViewColumn(
+                "", Gtk.CellRendererText(), markup=j))
+        grid.set_model(store)
+        win._gstore = store
+        if self._drc_grid_ci is not None:
+            keep = self._drc_focus
+            self._drc_grid_fill(self._drc_grid_ci)
+            self._drc_focus = keep
+            if mei is not None:
+                if self._drc_grid_map is not None:
+                    idx = (self._drc_grid_map.index(mei)
+                           if mei in self._drc_grid_map else None)
+                else:
+                    idx = mei
+                if idx is not None:
+                    self._drc_cell_mark(idx // n, idx % n)
+
     def _drc_grid_fill(self, ci):
         """2-D grid of GLOBAL error numbers for one rule (no record
         decode: the number is the file order, cum[ci] + i + 1).
@@ -3366,43 +3419,41 @@ class Viewer:
         self._drc_grid_ci = ci
         c = db.checks[ci]
         gbase = self._drc_cum[ci]
+        W = self._drc_gridw
         if self._drc_hl and hasattr(db, "query_rect"):
             eis = [ei for rci, ei, _k, _p in self._drc_hl_list()
                    if rci == ci]
             self._drc_grid_map = eis
-            for base in range(0, len(eis), DRC_GRID_W):
+            for base in range(0, len(eis), W):
                 cells = ["%d" % (gbase + ei + 1)
-                         for ei in eis[base:base + DRC_GRID_W]]
-                cells += [""] * (DRC_GRID_W - len(cells))
+                         for ei in eis[base:base + W]]
+                cells += [""] * (W - len(cells))
                 gstore.append(cells)
-            self._drc_grid_rows = ((len(eis) + DRC_GRID_W - 1)
-                                   // DRC_GRID_W)
+            self._drc_grid_rows = (len(eis) + W - 1) // W
             if len(eis) >= DRC_HL_CAP:
                 gstore.append(["… capped at %d" % DRC_HL_CAP]
-                              + [""] * (DRC_GRID_W - 1))
+                              + [""] * (W - 1))
             # keep the focused error marked if it is still in view
             f = self._drc_focus
             if f is not None and f[0] == ci and f[1] in eis:
                 idx = eis.index(f[1])
-                self._drc_cell_mark(idx // DRC_GRID_W,
-                                    idx % DRC_GRID_W)
+                self._drc_cell_mark(idx // W, idx % W)
             else:
                 self._drc_focus = None
             return
         self._drc_grid_map = None
         self._drc_focus = None
         shown = min(len(c.errors), DRC_LIST_MAX)
-        for base in range(0, shown, DRC_GRID_W):
+        for base in range(0, shown, W):
             cells = ["%d" % (gbase + i + 1)
-                     for i in range(base,
-                                    min(base + DRC_GRID_W, shown))]
-            cells += [""] * (DRC_GRID_W - len(cells))
+                     for i in range(base, min(base + W, shown))]
+            cells += [""] * (W - len(cells))
             gstore.append(cells)
-        self._drc_grid_rows = (shown + DRC_GRID_W - 1) // DRC_GRID_W
+        self._drc_grid_rows = (shown + W - 1) // W
         if len(c.errors) > DRC_LIST_MAX:
             gstore.append(["… %d more (use prev/next)"
                            % (len(c.errors) - DRC_LIST_MAX)]
-                          + [""] * (DRC_GRID_W - 1))
+                          + [""] * (W - 1))
 
     def _drc_cell_mark(self, row, j):
         """Mark ONE grid cell as current (no row-wide selection -
@@ -3415,7 +3466,7 @@ class Viewer:
         gbase = self._drc_cum[ci]
 
         def num_at(r, c_):
-            idx = r * DRC_GRID_W + c_
+            idx = r * self._drc_gridw + c_
             if self._drc_grid_map is not None:
                 idx = self._drc_grid_map[idx]
             return gbase + idx + 1
@@ -3446,7 +3497,7 @@ class Viewer:
             j = tree.get_columns().index(col)
         except ValueError:
             return False
-        idx = row * DRC_GRID_W + j
+        idx = row * self._drc_gridw + j
         if self._drc_grid_map is not None:
             if idx >= len(self._drc_grid_map):
                 return False
@@ -3717,7 +3768,7 @@ class Viewer:
                 else:
                     idx = None
                 if idx is not None:
-                    row, j = divmod(idx, DRC_GRID_W)
+                    row, j = divmod(idx, self._drc_gridw)
                     self._drc_cell_mark(row, j)
                     win._grid.scroll_to_cell(
                         Gtk.TreePath.new_from_string(str(row)),
