@@ -1,6 +1,6 @@
 [package]
 name = "floe-index"
-version = "0.11.28"
+version = "0.11.29"
 edition.workspace = true
 license.workspace = true
 description = "floe native indexer CLI (spike: scan/inventory)"
@@ -10,3 +10,4 @@ floe-oasis = { path = "../oasis" }
 floe-tiler = { path = "../tiler" }
 floe-ovm = { path = "../ovm" }
 floe-vfs = { path = "../vfs" }
+memmap2 = "0.9"

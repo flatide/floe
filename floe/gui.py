@@ -12,6 +12,7 @@ GTK imports are lazy (import_gtk), so importing this module works
 headless and the spawned render process never touches GTK.
 """
 
+import bisect
 import math
 import os
 import queue
@@ -850,13 +851,17 @@ class Viewer:
         self._digit_last = None     # depth digit-pair state ('99' = full)
         self._digit_t = 0.0
         # DRC results browser ('e' key)
-        self._drc = None            # drc.DrcDb
+        self._drc = None            # drc.DrcDb or drc.IceDb
         self._drcwin = None
         self.drc_mark = None        # {"kind": 'p'|'e', "pts": [(dbu)]}
-        self._drc_flat = []         # [(check idx, err idx)] for prev/next
-        self._drc_ord = {}          # (ci, ei) -> flat position
+        # prev/next walk by ARITHMETIC over cumulative counts, never
+        # a materialized per-error list: an .ice sidecar can hold
+        # hundreds of millions of violations
+        self._drc_cum = []          # check idx -> first flat position
+        self._drc_total = 0
         self._drc_pos = -1
         self._drc_paths = {}        # (ci, ei) -> tree path string
+        self._drc_filled = set()    # check rows with children built
         self._labels = []           # Gtk.Label pool for ruler distances
 
         self.window = Gtk.Window(title=APP)
@@ -1270,10 +1275,11 @@ class Viewer:
         # a loaded DRC db belongs to the previous layout
         self.drc_mark = None
         self._drc = None
-        self._drc_flat = []
-        self._drc_ord = {}
+        self._drc_cum = []
+        self._drc_total = 0
         self._drc_pos = -1
         self._drc_paths = {}
+        self._drc_filled = set()
         if self._drcwin is not None:
             self._drcwin.destroy()
         src = self.meta["src"]
@@ -3024,7 +3030,8 @@ class Viewer:
         top.pack_start(info, True, True, 2)
         win._info = info
         # columns: text, position, check index, error index
-        # (error index -1 = check row, -2 = "... more" stub)
+        # (error index -1 = check row, -2 = "... more" stub,
+        #  -3 = lazy placeholder swapped out by _drc_populate)
         store = Gtk.TreeStore(str, str, int, int)
         tree = Gtk.TreeView(model=store)
         for j, (t, expand) in enumerate((("rule / error", True),
@@ -3034,6 +3041,7 @@ class Viewer:
             tree.append_column(col)
         tree.set_tooltip_column(0)
         tree.connect("row-activated", self._on_drc_row)
+        tree.connect("row-expanded", self._on_drc_expand)
         sc = Gtk.ScrolledWindow()
         sc.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         sc.add(tree)
@@ -3066,8 +3074,8 @@ class Viewer:
                         "Open", Gtk.ResponseType.OK)
         dlg.set_current_folder(
             os.path.dirname(self.meta["src"]["path"]))
-        for name, pats in (("DRC results (*.db, *.results)",
-                            ("*.db", "*.results")),
+        for name, pats in (("DRC results (*.db, *.results, *.ice)",
+                            ("*.db", "*.results", "*.ice")),
                            ("all files", ("*",))):
             ff = Gtk.FileFilter()
             ff.set_name(name)
@@ -3082,7 +3090,8 @@ class Viewer:
             dlg.destroy()
 
     def load_drc(self, path):
-        """Parse a Calibre ASCII DRC db and populate the browser."""
+        """Open a Calibre DRC db (.ice index-aware) and populate the
+        browser."""
         from . import drc as drc_mod
         try:
             db = drc_mod.load_db(path)
@@ -3093,10 +3102,12 @@ class Viewer:
             self._set_live_status(msg)
             return False
         self._drc = db
-        self._drc_flat = [(ci, ei)
-                          for ci, c in enumerate(db.checks)
-                          for ei in range(len(c.errors))]
-        self._drc_ord = {k: n for n, k in enumerate(self._drc_flat)}
+        self._drc_cum = []
+        total = 0
+        for c in db.checks:
+            self._drc_cum.append(total)
+            total += len(c.errors)
+        self._drc_total = total
         self._drc_pos = -1
         self.drc_mark = None
         if self._drcwin is not None:
@@ -3107,31 +3118,57 @@ class Viewer:
         return True
 
     def _drc_fill(self):
+        """Check rows only; error children are built on expand
+        (_drc_populate) so a huge .ice browser opens instantly."""
         win, db = self._drcwin, self._drc
         store = win._store
         store.clear()
         self._drc_paths = {}
+        self._drc_filled = set()
         for ci, c in enumerate(db.checks):
             head = c.name
             if c.desc:
                 head += "\n" + c.desc.split("\n")[0]
             pit = store.append(None, [head, "%d" % len(c.errors),
                                       ci, -1])
-            for ei, e in enumerate(c.errors[:DRC_LIST_MAX]):
-                x, y = e.center()
-                it = store.append(
-                    pit, ["#%d  %s" % (e.num,
-                                       "poly" if e.kind == "p"
-                                       else "edge"),
-                          "(%.3f, %.3f)" % (x, y), ci, ei])
-                self._drc_paths[(ci, ei)] = str(store.get_path(it))
-            if len(c.errors) > DRC_LIST_MAX:
-                store.append(pit, ["… %d more (use prev/next)"
-                                   % (len(c.errors) - DRC_LIST_MAX),
-                                   "", ci, -2])
+            if len(c.errors):
+                store.append(pit, ["loading…", "", ci, -3])
         win._info.set_text("%s — cell %s · %d checks · %d errors"
                            % (os.path.basename(db.path), db.cell,
                               len(db.checks), db.total))
+
+    def _drc_populate(self, ci):
+        """Replace a check row's placeholder with its error rows."""
+        win, db = self._drcwin, self._drc
+        if win is None or db is None or ci in self._drc_filled:
+            return
+        self._drc_filled.add(ci)
+        store = win._store
+        pit = store.get_iter(Gtk.TreePath.new_from_string(str(ci)))
+        c = db.checks[ci]
+        for ei in range(min(len(c.errors), DRC_LIST_MAX)):
+            e = c.errors[ei]
+            x, y = e.center()
+            it = store.append(
+                pit, ["#%d  %s" % (e.num,
+                                   "poly" if e.kind == "p"
+                                   else "edge"),
+                      "(%.3f, %.3f)" % (x, y), ci, ei])
+            self._drc_paths[(ci, ei)] = str(store.get_path(it))
+        if len(c.errors) > DRC_LIST_MAX:
+            store.append(pit, ["… %d more (use prev/next)"
+                               % (len(c.errors) - DRC_LIST_MAX),
+                               "", ci, -2])
+        # placeholder went in first; drop it AFTER the real rows so
+        # an expanded row never collapses from becoming childless
+        ch = store.iter_children(pit)
+        if ch is not None and store.get_value(ch, 3) == -3:
+            store.remove(ch)
+
+    def _on_drc_expand(self, tree, it, _path):
+        store = tree.get_model()
+        if store.get_value(it, 3) == -1:
+            self._drc_populate(store.get_value(it, 2))
 
     def _on_drc_row(self, tree, path, _col):
         store = tree.get_model()
@@ -3149,7 +3186,7 @@ class Viewer:
         db = self._drc
         check = db.checks[ci]
         e = check.errors[ei]
-        self._drc_pos = self._drc_ord.get((ci, ei), -1)
+        self._drc_pos = self._drc_cum[ci] + ei
         b = e.bbox()
         w_um, h_um = b[2] - b[0], b[3] - b[1]
         cx, cy = e.center()
@@ -3166,15 +3203,18 @@ class Viewer:
 
     def _drc_step(self, delta):
         """n/p keys and the prev/next buttons walk every error."""
-        if not self._drc_flat:
+        if not self._drc_total:
             return
         if self._drc_pos < 0:
-            pos = 0 if delta > 0 else len(self._drc_flat) - 1
+            pos = 0 if delta > 0 else self._drc_total - 1
         else:
-            pos = (self._drc_pos + delta) % len(self._drc_flat)
-        ci, ei = self._drc_flat[pos]
+            pos = (self._drc_pos + delta) % self._drc_total
+        ci = bisect.bisect_right(self._drc_cum, pos) - 1
+        ei = pos - self._drc_cum[ci]
         self._drc_jump(ci, ei)
         win = self._drcwin
+        if win is not None and ei < DRC_LIST_MAX:
+            self._drc_populate(ci)
         ps = self._drc_paths.get((ci, ei))
         if win is not None and ps is not None:
             path = Gtk.TreePath.new_from_string(ps)

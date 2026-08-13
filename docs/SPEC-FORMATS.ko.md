@@ -86,3 +86,37 @@ v5 텍스트 인덱스의 문자열/좌표 풀. 빈 파일 허용(mmap 0 예외 
 
 ovm 헤더와 meta.src 모두 소스 절대경로/size/mtime을 기록. `Vfs::open`이
 불일치 시 거부("read src"/stale). 자산 재생성 후엔 반드시 재인덱싱.
+
+## <db>.ice — Calibre DRC 결과 인덱스 사이드카 (v1)
+
+정본: `rust/cli/src/drcice.rs`(빌더 `floe-index drc results.db`),
+`floe/drc.py` IceDb(리더). 수백 GB ASCII .db는 **변환하지 않는다** —
+.db가 정본으로 남고, 사이드카는 mmap 랜덤 액세스용 오프셋 인덱스만
+담는다(원본의 2~4%). 좌표는 조회 시 해당 레코드 슬라이스만 ASCII
+파스(load_ascii와 동일한 관용 파서 — 동치성은 D1 게이트가 고정).
+
+레이아웃(전부 LE, 헤더 40B/푸터 80B):
+
+```
+[헤더]   magic "FLOEICE\0" · u32 version=1 · u32 flags ·
+         f64 precision · u64 src_size · u64 src_mtime(초)
+[에러 인덱스]  에러당 16B: u64 src_off · u32 src_len ·
+         u8 kind(0=p,1=e) · 3B pad — src_off..+len = .db의 레코드
+         헤더 줄부터 마지막 좌표 줄까지
+[체크 디렉토리] 체크당 48B: u32 name_ref · u32 desc_start ·
+         u32 desc_cnt · u32 pad · u64 err_start · u64 err_cnt ·
+         u64 declared · u64 original
+[desc refs]    설명 **줄 단위** u32 문자열 ref — 체크마다 반복되는
+         "Rule File Pathname:/Title:" 줄이 여기서 1회로 dedup
+[문자열 테이블] u32 len + 원시 바이트, ref = 섹션 내 오프셋
+[푸터]   8×u64 섹션 오프셋/개수 · u32 cell_ref · u32 · magic
+```
+
+- stale 규칙: src_size/src_mtime 불일치 시 리더가 거부, 뷰어는 ASCII
+  전체 파스로 폴백(+stderr 안내). 재굽기는 `floe-index drc` 재실행.
+- 오픈은 푸터(EOF 역방향) 기준 — 빌더는 단일 순방향 패스로 쓴다.
+- 파스 관용 규칙(빈 줄/CRLF/선언 개수 무시/미지 레코드 스킵/절단
+  허용)은 drc.py와 러스트 빌더가 **동일 상태기계**를 공유한다.
+
+주의: 구 `.ice`(레거시 타일 캐시 디렉토리)는 2026-08-13에 `.tiles`로
+개명되어 이 확장자는 DRC 인덱스 전용이다.

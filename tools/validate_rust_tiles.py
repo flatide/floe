@@ -11,7 +11,7 @@ S-H bridge edges); coverage identity is the contract that rendering,
 snap and clip rest on.
 
 usage: python tools/validate_rust_tiles.py <src.oas> [outdir]
-       (needs <src.oas>.ice built by the Python indexer)
+       (needs <src.oas>.tiles built by the Python indexer)
 """
 import functools
 import json
@@ -49,7 +49,7 @@ def flatten(path):
 def main():
     src = sys.argv[1]
     outdir = sys.argv[2] if len(sys.argv) > 2 else src + ".rustice"
-    meta = json.load(open(src + ".ice/meta.json"))
+    meta = json.load(open(src + ".tiles/meta.json"))
     g = meta["grid"]
     if os.path.isdir(outdir):   # stale grids leave orphan tiles
         shutil.rmtree(outdir)
@@ -70,7 +70,7 @@ def main():
     for rr in range(g["ny"]):
         for cc in range(g["nx"]):
             for k in range(nb):
-                kp = os.path.join(src + ".ice", "tiles_b%d" % k,
+                kp = os.path.join(src + ".tiles", "tiles_b%d" % k,
                                   "t_%d_%d.oas" % (rr, cc))
                 rp = os.path.join(outdir, "tiles_b%d" % k,
                                   "t_%d_%d.oas" % (rr, cc))

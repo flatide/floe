@@ -105,7 +105,7 @@ def main():
     src = sys.argv[1]
     outdir = sys.argv[2]
     t0 = time.perf_counter()
-    py = json.load(open(src + ".ice/meta.json"))
+    py = json.load(open(src + ".tiles/meta.json"))
     rs = json.load(open(os.path.join(outdir, "meta.json")))
     bad = []
 
@@ -117,7 +117,7 @@ def main():
              % (py.get("texts_thinned"), rs.get("texts_thinned")))
 
     kregs, ktexts, kly = skel_content(
-        os.path.join(src + ".ice", "skeleton.oas"))
+        os.path.join(src + ".tiles", "skeleton.oas"))
     rregs, rtexts, rly = skel_content(
         os.path.join(outdir, "skeleton.oas"))
     for key in sorted(set(kregs) | set(rregs)):

@@ -5,11 +5,12 @@
 //!           klayout by tools/validate_rust_scan.py
 //!   tile  - band partitioning with an EXPLICIT grid (debug/A-B path)
 //!   index - the production build: grid choice, band tiles, LOD
-//!           companions, density table, meta.json - a complete .ice
+//!           companions, density table, meta.json - a complete .tiles
 //!           (skeleton/texts land with milestone 3)
 
 use std::time::Instant;
 
+mod drcice;
 mod vfs;
 
 #[cfg(target_env = "musl")]
@@ -77,6 +78,9 @@ fn main() {
     if args.len() >= 3 && args[1] == "vfsd" {
         return vfs::vfsd_cmd(&args[2..]);
     }
+    if args.len() >= 3 && args[1] == "drc" {
+        return drcice::drc_cmd(&args[2..]);
+    }
     if args.len() < 3 || args[1] != "scan" {
         eprintln!(
             "usage: floe-index scan <file.oas> [jobs]\n       \
@@ -90,7 +94,8 @@ fn main() {
              [--coverage | --coverage-only] [--no-lod] [--frontier-only]\n       \
              floe-index plan <outdir> --view x0,y0,x1,y1 \
              [--px-per-um N] [--cut-px N] [--layers a/b,..] \
-             [--depth N]"
+             [--depth N]\n       \
+             floe-index drc <results.db> [out.ice]"
         );
         std::process::exit(2);
     }
@@ -699,7 +704,7 @@ fn index_cmd(args: &[String]) {
         }
     }
     let src = src.expect("src");
-    let outdir = outdir.unwrap_or_else(|| format!("{}.ice", src));
+    let outdir = outdir.unwrap_or_else(|| format!("{}.tiles", src));
     let abs_src = if std::path::Path::new(&src).is_absolute() {
         src.clone()
     } else {

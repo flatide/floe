@@ -479,7 +479,7 @@ fn patch_meta_frontier(path: &str, frontier: &str) {
 /// this stage no longer scales with path expansion (the old
 /// collect_all_texts residency, par.6 risk 0, is GONE; the minimap
 /// frontier walk is min-size-pruned and budget-capped). grid
-/// stays synthetic on the .ice formula (legacy meta shape).
+/// stays synthetic on the .tiles formula (legacy meta shape).
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn emit_viewer_side(

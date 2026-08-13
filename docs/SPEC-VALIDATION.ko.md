@@ -7,9 +7,10 @@
 
 ## 1. 픽스처
 
-- **valmini**: `tools/gen_valmini.py` — 작은 결정적 자산. 파이썬 .ice
-  캐시가 메타 패리티 오라클(파이썬 인덱서가 바뀌면 재생성 필요 —
-  mtime 불일치 함정 주의: 캐시 디렉토리 삭제 후 재실행).
+- **valmini**: `tools/gen_valmini.py` — 작은 결정적 자산. 파이썬
+  .tiles 캐시(구명 .ice, 2026-08-13 개명)가 메타 패리티 오라클
+  (파이썬 인덱서가 바뀌면 재생성 필요 — mtime 불일치 함정 주의:
+  캐시 디렉토리 삭제 후 재실행).
 - **sample9**: `tools/gen_sample9.py` — 145MB depth-9, seed 42, 티어
   테이블. 성능/실측용.
 - **frametest**: `tools/gen_frametest.py` — 프레임 톤/스택 검증용 소형.
@@ -31,6 +32,7 @@
 | 마커 | validate_vfs_marker | --kill-at 4지점 + 재빌드 |
 | render-speckle | validate_render_speckle | 공통 위상(전 레이어 구멍 공유), 가시성, 불투명 겹침, 커버리지 합성 포함관계 |
 | render-frames | `tools/validate_render_frames.py` | 페인트 순서 회색<디자인<흰, 1px 외곽, 흰-위/회-아래 |
+| D1~D3 | `tools/validate_drc_ice.py` | DRC .ice 사이드카: D1 인덱스 경유 == ASCII 파스(체크/에러/좌표 완전 일치, 적대 픽스처 자체 생성 — 결과0 체크·중복 체크명·카운트줄 없음·미지 레코드·절단·CRLF), D2 신선 자동 선택/스테일 거부+ASCII 폴백, D3 줄 단위 문자열 dedup+lazy 슬라이싱 |
 
 ## 3. 러스트 유닛 (핵심만)
 

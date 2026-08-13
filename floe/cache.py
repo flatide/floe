@@ -1,6 +1,6 @@
 """Spatial tile cache for large OASIS files.
 
-`build_index` scans the source file once and produces `<src>.ice/`:
+`build_index` scans the source file once and produces `<src>.tiles/`:
 
     meta.json           source fingerprint, grid geometry, layer table,
                         per-tile depth-density table, stats
@@ -55,12 +55,13 @@ BAND_THRESHOLDS_UM = (0.125, 0.5, 2.0)
 
 def cache_dir_for(src):
     """Cache directory for a source: the VFS cache (<src>.floe, built
-    by `floe-index vfs`) wins when present, else the classic .ice."""
+    by `floe-index vfs`) wins when present, else the classic .tiles
+    (legacy tile cache; .ice now means a DRC index sidecar)."""
     base = os.path.abspath(src)
     floe = base + ".floe"
     if os.path.isfile(os.path.join(floe, "meta.json")):
         return floe
-    return base + ".ice"
+    return base + ".tiles"
 
 
 def _rss_gb(pid):
@@ -309,7 +310,7 @@ def pick_top_cell(ly, log=None):
 
 
 class Cache:
-    """Read-side accessor for a built .ice directory."""
+    """Read-side accessor for a built .tiles directory."""
 
     def __init__(self, src):
         self.src = os.path.abspath(src)

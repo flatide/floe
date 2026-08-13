@@ -90,6 +90,17 @@ recolor: 행 스와치 재생성(set_color) + meta 갱신 + 개인 layerprops
 지정 전체를 resolved rows로 전송). 폴딩된 그룹 부모 선택 시 멤버 전체
 적용. 시작 시 service `_apply_personal_fills`가 layerprops로 복원.
 
+## 8b. DRC 브라우저 (대용량 규약)
+
+- `drc.load_db`가 소스: .ice 사이드카(신선)면 IceDb(mmap, 레코드
+  단위 lazy 디코드), 아니면 ASCII 전체 파스. 인터페이스 동일
+  (checks[].errors는 시퀀스 프로토콜).
+- prev/next 워크는 에러 전수 리스트를 **절대 만들지 않는다** —
+  `_drc_cum` 누적 카운트 + bisect 산술(수억 에러 안전).
+- 트리의 에러 자식 행은 펼칠 때 생성(`_drc_populate`, placeholder
+  ei=-3 교체; 체크당 상한 DRC_LIST_MAX, 초과분은 "… more" 행).
+  n/p 스텝은 하이라이트 전에 해당 체크를 populate.
+
 ## 9. 픽/스냅/클립
 
 - pick: 화면 워킹셋에서 점 포함 도형 최소면적 순(_PICK_CAP 64),

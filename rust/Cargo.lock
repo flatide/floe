@@ -43,12 +43,13 @@ dependencies = [
 
 [[package]]
 name = "floe-index"
-version = "0.11.28"
+version = "0.11.29"
 dependencies = [
  "floe-oasis",
  "floe-ovm",
  "floe-tiler",
  "floe-vfs",
+ "memmap2",
 ]
 
 [[package]]

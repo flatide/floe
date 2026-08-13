@@ -59,7 +59,7 @@ rust/target/release/floe-index vfs <design.oas> [outdir] [옵션]
 | `--depth N` | 시작 깊이 (기본 0; 999=full; --goto 시 full) |
 | `--detail low\|medium\|high` | 시작 디테일 (기본 medium) |
 | `--lod on\|off`, `--frames on\|off`, `--labels on\|off` | 시작 토글 |
-| `--drc FILE.db` | Calibre ASCII DRC 결과 브라우저 프리로드 |
+| `--drc FILE.db` | Calibre ASCII DRC 결과 브라우저 프리로드 (옆에 신선한 `FILE.db.ice` 인덱스가 있으면 자동 사용 — 수백 GB도 즉시 오픈) |
 | `--stream-kb KB` | 점진 페인트 라운드 예산 고정 (0=비활성; 기본 적응형 24576) |
 | `--multi` | 단일 인스턴스 소켓 무시하고 새 창 |
 
@@ -123,10 +123,28 @@ settled=..` 한 줄이 상시 출력된다(라운드별 비누적 — 성능 실
 
 ## 7. 기타 CLI
 
-`python -m floe <cmd>`: `index`(레거시 타일 캐시 .ice), `info`,
+`python -m floe <cmd>`: `index`(레거시 타일 캐시 .tiles), `info`,
 `render --bbox … --out view.png`, `clip --bbox …`, `probe`, `profile`,
-`drc`, `gtktest`. `floe-index`: `scan`, `tile`, `index`, `vfs`, `plan`
-(플래너 계측 JSON), `vfsd`(데몬).
+`drc`(요약; .ice 인덱스 자동 사용), `gtktest`. `floe-index`: `scan`,
+`tile`, `index`, `vfs`, `plan`(플래너 계측 JSON), `vfsd`(데몬),
+`drc`(DRC 인덱스 사이드카 굽기).
+
+### DRC 결과 인덱스 (.ice)
+
+수백 MB~수백 GB Calibre ASCII DRC 결과(.db)는 옆에 인덱스 사이드카를
+한 번 구우면 뷰어/CLI가 mmap으로 즉시 연다(.db 자체는 변환하지 않고
+정본으로 남음):
+
+```sh
+rust/target/release/floe-index drc results.db     # → results.db.ice
+.venv/bin/python -m floe view chip.oas --drc results.db
+```
+
+체크 이름·설명·개수는 인덱스에서, 좌표는 점프할 때 해당 레코드만
+읽는다. 소스가 바뀌면(size/mtime) 인덱스는 자동 무시되고 ASCII 전체
+파스로 폴백하니 `floe-index drc`를 다시 실행하면 된다. 참고: 구
+레거시 타일 캐시가 쓰던 `.ice` 확장자는 `.tiles`로 개명되어 이제
+`.ice`는 DRC 인덱스 전용이다.
 
 ## 8. 검증
 
@@ -140,5 +158,7 @@ cd rust && cargo test --release
 - **XQuartz에서 이미지가 검게 나옴**: XRender 합성 버그. 런처가 자동
   우회하며, 진단 사다리는 selfcheck→render→probe→gtktest (`FLOE_DUMP`).
 - **`open: size/mtime mismatch`**: 소스가 바뀜 → 재인덱싱.
+- **DRC가 stale index 경고 후 느리게 열림**: .db가 갱신됨 →
+  `floe-index drc results.db` 재실행.
 - **미니맵 누락**: 구 캐시 → `--frontier-only`로 초 단위 재굽기.
 - **pip 실행 오류**: venv의 pip 셔뱅 깨짐 → `.venv/bin/python -m pip`.

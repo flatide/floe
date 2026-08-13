@@ -4,7 +4,7 @@
 컴포넌트별 상세는 `docs/SPEC-*.ko.md`, 플래너의 설계 결정 이력 정본은
 `rust/VFS_HIER.md`(rev 1~46b), 저장소 규약은 `AGENTS.md`.
 
-현재 버전: floe-index **0.11.28**, ovm 포맷 **v7**, meta CACHE_VERSION 8.
+현재 버전: floe-index **0.11.29**, ovm 포맷 **v7**, meta CACHE_VERSION 8.
 
 ## 1. 3-프로세스 구조
 
@@ -52,7 +52,12 @@
 | `design.ovc` | (선택) 밀도 커버리지 비트플레인 | SPEC-FORMATS |
 | `meta.json` | dbu/bbox/레이어(+색)/텍스트 통계/**미니맵 프런티어** | SPEC-FORMATS |
 
-구(레거시) 경로: `.ice` 타일 캐시(`python -m floe index`) — 동결 유지.
+구(레거시) 경로: `.tiles` 타일 캐시(`python -m floe index`) — 동결
+유지, rust scan/tile 게이트의 오라클로만 사용(2026-08-13에 `.ice`에서
+개명). `.ice`는 이제 **Calibre DRC 결과 인덱스 사이드카** 전용:
+`floe-index drc results.db` → `results.db.ice`(SPEC-FORMATS §.ice) —
+.db는 정본으로 남고 뷰어(drc.py IceDb)가 둘을 mmap해 레코드 단위로
+읽는다.
 
 ## 4. 성능 사다리 (와이드 뷰가 사는 이유)
 
@@ -102,7 +107,8 @@
 `tools/validate_rust.sh` = 단일 진입 게이트(ALL OK 필수). valmini 자산
 생성 → 러스트/파이썬 대조(XOR), vfs 오픈 검증, H1~H5(hier), L1~**L9**
 (라이프사이클; L9 = 미니맵 굽기 == vfsd frontier 재생), S1~S5(분할),
-X1~X6(텍스트), 마커 킬포인트, 렌더 스페클/프레임 픽셀 게이트.
+X1~X6(텍스트), 마커 킬포인트, 렌더 스페클/프레임 픽셀 게이트,
+D1~D3(DRC .ice 인덱스 == ASCII 파스 동치).
 러스트 유닛: `cargo test --release` (floe-vfs 41개 포함).
 불변식: **빌드 결정성**(--jobs 무관 sha 동일), 브루트포스 오라클
 (플래너는 절대 더 적게 선택하지 않음).
@@ -129,7 +135,8 @@ floe/            파이썬 앱
   viewport.py    VfsMosaic (WC apply, 프레임 레이어 키, 원장)
   vfsclient.py   vfsd 라인 프로토콜 클라이언트
   render.py      klayout Renderer (스페클/프레임 플레인/fill 오버라이드)
-  cache.py       캐시 로딩, layerprops 개인화, 레거시 .ice
+  cache.py       캐시 로딩, layerprops 개인화, 레거시 .tiles
+  drc.py         Calibre DRC .db 파서 + .ice 인덱스 mmap 리더
   fillpat.py     색테이블/fill 로더, layerprops 파서, hex 변환
   colornames.def / fillpatterns.def   팔레트 단일 소스
   coverage.py drc.py instance.py …
@@ -138,7 +145,8 @@ rust/            Cargo 워크스페이스 (vendored deps, 오프라인 빌드)
   ovm/           .ovm v7 포맷 (lib.rs: Builder/Ovm/CellSink)
   vfs/           플래너 (hier.rs), 텍스트(text.rs), 세션(lib.rs)
   tiler/         Xf 변환, 레거시 타일러
-  cli/           floe-index 바이너리 (vfs.rs: 빌드+vfsd+plan)
+  cli/           floe-index 바이너리 (vfs.rs: 빌드+vfsd+plan,
+                 drcice.rs: DRC .ice 인덱스 빌더)
   VFS_HIER.md    플래너 설계 정본 (rev 1~46b)
 tools/           gen_*(자산 생성) validate_*(게이트) make_portable.sh
 docs/            SPEC-*.ko.md (본 문서 세트)

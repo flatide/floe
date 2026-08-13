@@ -54,14 +54,14 @@ def level_counts(path):
 def main():
     src = sys.argv[1]
     outdir = sys.argv[2]
-    meta = json.load(open(src + ".ice/meta.json"))
+    meta = json.load(open(src + ".tiles/meta.json"))
     g = meta["grid"]
     nb = len(meta["bands"]["thresholds_um"]) + 1
     bad = checked = 0
     for r in range(g["ny"]):
         for c in range(g["nx"]):
             for k in range(nb):
-                kp = os.path.join(src + ".ice", "tiles_b%d" % k,
+                kp = os.path.join(src + ".tiles", "tiles_b%d" % k,
                                   "t_%d_%d.oas" % (r, c))
                 rp = os.path.join(outdir, "tiles_b%d" % k,
                                   "t_%d_%d.oas" % (r, c))

@@ -22,7 +22,7 @@ klayout-built cache.
     equal to the Python meta.
 
 usage: python tools/validate_rust_meta.py <src.oas> <rust_outdir>
-       (needs <src.oas>.ice built by the Python indexer and
+       (needs <src.oas>.tiles built by the Python indexer and
        <rust_outdir> built by `floe-index index`)
 """
 import functools
@@ -155,7 +155,7 @@ def flatten(path):
 def main():
     src = sys.argv[1]
     outdir = sys.argv[2]
-    icedir = src + ".ice"
+    icedir = src + ".tiles"
     py = json.load(open(os.path.join(icedir, "meta.json")))
     rs = json.load(open(os.path.join(outdir, "meta.json")))
     bad = []

@@ -18,22 +18,22 @@ if [ -z "$SRC" ]; then
     # regenerate when the generator changed (asset evolves with the
     # milestones: new record kinds get added here first)
     if [ ! -f "$SRC" ] || [ tools/gen_valmini.py -nt "$SRC" ]; then
-        rm -rf "$SRC" "$SRC.ice" "${SRC%.oas}_rust.ice"
+        rm -rf "$SRC" "$SRC.tiles" "${SRC%.oas}_rust.tiles"
         .venv/bin/python tools/gen_valmini.py "$SRC"
     fi
-    # the python .ice is the meta-parity oracle: refresh it when the
+    # the python .tiles is the meta-parity oracle: refresh it when the
     # python indexer itself changed, not only when the asset did (the
     # layer-palette change tripped this once - stale colors failed
-    # validate_rust_meta on every host with an old cached .ice)
-    if [ ! -f "$SRC.ice/meta.json" ] || \
-       [ floe/cache.py -nt "$SRC.ice/meta.json" ]; then
-        rm -rf "$SRC.ice"
+    # validate_rust_meta on every host with an old cached .tiles)
+    if [ ! -f "$SRC.tiles/meta.json" ] || \
+       [ floe/cache.py -nt "$SRC.tiles/meta.json" ]; then
+        rm -rf "$SRC.tiles"
         PYTHONPATH=. .venv/bin/python -m floe index "$SRC" >/dev/null
     fi
 fi
 (cd rust && PATH="$HOME/.cargo/bin:$PATH" \
     cargo build --release 2>/dev/null >/dev/null)
-OUT="${SRC%.oas}_rust.ice"
+OUT="${SRC%.oas}_rust.tiles"
 .venv/bin/python tools/validate_rust_scan.py "$SRC"
 .venv/bin/python tools/validate_rust_tiles.py "$SRC" "$OUT"
 .venv/bin/python tools/validate_rust_depth.py "$SRC" "$OUT"
@@ -61,4 +61,6 @@ rust/target/release/floe-index vfs "$SRC" "$VOUT" --coverage \
 .venv/bin/python tools/validate_render_speckle.py
 # frame outline stacking: white over gray, 1px hollow, under design
 .venv/bin/python tools/validate_render_frames.py
+# DRC .ice index sidecar: reading through the index == ASCII parse
+.venv/bin/python tools/validate_drc_ice.py
 echo "RUST VALIDATION: ALL OK ($SRC)"

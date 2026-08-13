@@ -318,7 +318,7 @@ def cmd_profile(args):
     """Emit a structure-only profile (counts/sizes/grid, no geometry) of
     an indexed layout, for synthesizing a render-performance lookalike
     outside the closed network (tools/gen_from_profile.py). This is a
-    dev tool paired with the retained .ice indexer (the rust-validation
+    dev tool paired with the retained .tiles indexer (the rust-validation
     oracle), so it reads a tile cache directly rather than a VFS one."""
     from . import cache as cache_mod
     c = cache_mod.Cache(args.src)
@@ -619,7 +619,9 @@ def main(argv=None):
     p.set_defaults(fn=cmd_profile)
 
     p = sub.add_parser("drc", help="summarize a Calibre ASCII DRC "
-                                   "results database (.db)")
+                                   "results database (.db; a fresh "
+                                   ".ice index sidecar is used "
+                                   "automatically)")
     p.add_argument("db")
     p.add_argument("--list", action="store_true",
                    help="also list every error (center + size, um)")
@@ -644,7 +646,9 @@ def main(argv=None):
                         "Forwarded to a running instance too.")
     p.add_argument("--drc", default=None, metavar="FILE.db",
                    help="preload a Calibre ASCII DRC results db and "
-                        "open the error browser (new instance only)")
+                        "open the error browser (new instance only; "
+                        "a fresh FILE.db.ice index built by "
+                        "'floe-index drc' is used automatically)")
     p.add_argument("--detail", default=None,
                    choices=("low", "medium", "high"),
                    help="starting detail level (default: medium; "

@@ -2,7 +2,7 @@
 
 Used by the native GUI (gui.py); all klayout objects live here, the GUI
 shell only displays PNG bytes. The viewer is VFS-only - it renders a
-FLOE_WS layout fed by vfsd deltas (see VfsMosaic); the old .ice tile
+FLOE_WS layout fed by vfsd deltas (see VfsMosaic); the old .tiles tile
 mosaic was removed.
 """
 
