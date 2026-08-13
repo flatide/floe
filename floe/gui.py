@@ -1698,9 +1698,18 @@ class Viewer:
             fill_rect(disp, mx, my - 9, 1, 19, color)
         if self.drc_mark is not None:
             # solid 2px lines, speckled polygon interiors (user call
-            # 2026-08-13: edges = plain 2px, polygons = 50% fill)
+            # 2026-08-13: edges = plain 2px, polygons = 50% fill);
+            # <=2x2 px on screen collapses to a 3x3 marker square
+            # (user call 2026-08-14)
             pts = [(sx(x), sy(y)) for x, y in self.drc_mark["pts"]]
-            if self.drc_mark["kind"] == "p":
+            mxs = [p[0] for p in pts]
+            mys = [p[1] for p in pts]
+            if (max(mxs) - min(mxs) <= 2
+                    and max(mys) - min(mys) <= 2):
+                cxp = (min(mxs) + max(mxs)) / 2.0
+                cyp = (min(mys) + max(mys)) / 2.0
+                fill_rect(disp, cxp - 1, cyp - 1, 3, 3, DRC_MARK)
+            elif self.drc_mark["kind"] == "p":
                 self._drc_fill_speckle(disp, pts)
                 for a, b in zip(pts, pts[1:] + pts[:1]):
                     stamp_segment(disp, a, b, None, DRC_MARK)
@@ -1752,6 +1761,24 @@ class Viewer:
                 budget = 20000   # segments; huge selections stop
                 for ei_, kind, spts in marks:
                     sp = [(sx(x), sy(y)) for x, y in spts]
+                    hxs = [p[0] for p in sp]
+                    hys = [p[1] for p in sp]
+                    if (max(hxs) - min(hxs) <= 2
+                            and max(hys) - min(hys) <= 2):
+                        # <=2x2 px: marker square, like the
+                        # highlight mode (user call 2026-08-14)
+                        cxp = (min(hxs) + max(hxs)) / 2.0
+                        cyp = (min(hys) + max(hys)) / 2.0
+                        s_px = 5 if (focus is not None
+                                     and focus[0] == sci
+                                     and focus[1] == ei_) else 3
+                        fill_rect(disp, cxp - s_px // 2,
+                                  cyp - s_px // 2, s_px, s_px,
+                                  DRC_GOLD)
+                        budget -= 1
+                        if budget <= 0:
+                            break
+                        continue
                     if kind == "p":
                         segs = list(zip(sp, sp[1:] + sp[:1]))
                     else:
