@@ -15,7 +15,8 @@ ASCII database directly.
       lines (sidecar stays small) and lazy slicing/iteration agree
       with full decode.
   D4  --pack (self-contained .ice v2) round-trip == load_ascii on
-      the adversarial fixture AND on a gen_drcdb asset.
+      the adversarial fixture AND on a gen_drcdb asset (ordered:
+      v2 stores file order; numbers are the global sequence).
   D5  pack output bytes are --jobs invariant (1 vs 5 on the tiny
       fixture forces mid-check segment splits; 1 vs 4 on the
       gen_drcdb asset).
@@ -121,23 +122,6 @@ def eq(a, b, what):
         fail("%s: %r != %r" % (what, a, b))
 
 
-def compare_unordered(ref, pk):
-    """Pack round-trip: v2 Z-orders errors inside a check, so the
-    per-check comparison is a multiset match on (num, kind, pts)."""
-    eq(ref.cell, pk.cell, "cell")
-    eq(ref.precision, pk.precision, "precision")
-    eq(len(ref.checks), len(pk.checks), "check count")
-    for ci, (rc, xc) in enumerate(zip(ref.checks, pk.checks)):
-        tag = "check[%d] %s" % (ci, rc.name)
-        eq(rc.name, xc.name, tag + " name")
-        eq(rc.desc, xc.desc, tag + " desc")
-        eq(rc.declared, xc.declared, tag + " declared")
-        eq(len(rc.errors), len(xc.errors), tag + " error count")
-        a = sorted((e.num, e.kind, e.pts) for e in rc.errors)
-        b = sorted((e.num, e.kind, e.pts) for e in xc.errors)
-        eq(a, b, tag + " errors (multiset)")
-
-
 def compare(ref, ice):
     eq(ref.cell, ice.cell, "cell")
     eq(ref.precision, ice.precision, "precision")
@@ -172,6 +156,9 @@ def main():
         fail("sidecar not written")
 
     ref = drc.load_ascii(db)
+    nums = [e.num for c in ref.checks for e in c.errors]
+    if nums != list(range(1, ref.total + 1)):
+        fail("global file-order numbering broken: %r" % nums[:10])
     # D1: explicit sidecar open
     ice = drc.IceDb(side)
     # M1.SPACE 3 + dup block 1 + NOCOUNT 1 + SHORTDESC 2
@@ -243,7 +230,7 @@ def main():
     pk = drc.load_db(os.path.join(tmp, "fixture.j1.ice"))
     if not isinstance(pk, drc.IcePack):
         fail("packed file not opened as IcePack")
-    compare_unordered(ref, pk)
+    compare(ref, pk)
     print("D4/D5 OK (fixture): pack == ASCII, jobs-invariant bytes")
 
     # bigger deterministic asset via gen_drcdb (few MB)
@@ -268,12 +255,11 @@ def main():
         fail("gen packed bytes differ between jobs=1 and jobs=4")
     gref = drc.load_ascii(gdb)
     gpk = drc.IcePack(os.path.join(tmp, "gen.j1.ice"))
-    compare_unordered(gref, gpk)
+    compare(gref, gpk)
     print("D4/D5 OK (gen_drcdb): %d checks / %d errors round-trip"
           % (len(gref.checks), gref.total))
 
-    # D6: query_rect == brute force bbox scan (in the pack's own
-    # per-check index space - v2 stores errors in Z order)
+    # D6: query_rect == brute force bbox scan
     import random
     rng = random.Random(11)
     brute = []

@@ -102,6 +102,9 @@ recolor: 행 스와치 재생성(set_color) + meta 갱신 + 개인 layerprops
 - 트리의 에러 자식 행은 펼칠 때 생성(`_drc_populate`, placeholder
   ei=-3 교체; 체크당 상한 DRC_LIST_MAX, 초과분은 "… more" 행).
   n/p 스텝은 하이라이트 전에 해당 체크를 populate.
+- **에러 번호 = 전역 파일순 순번**(Calibre RVE와 동일, 파일의 서수
+  토큰 무시): 모든 백엔드(ASCII/v1/v2)가 동일 번호를 내며, 룰별
+  트리 나열은 저장순=파일순이라 자동 오름차순.
 - **highlight in view**(체크박스, packed .ice v2 전용): **선택된 룰
   하나만** 적용(트리에서 선택한 체크 행 또는 에러 행의 소속 룰;
   없으면 마지막 점프의 룰) — 뷰포트 내 그 룰의 위반(상한

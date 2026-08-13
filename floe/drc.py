@@ -45,7 +45,10 @@ class DrcError(object):
 
     def __init__(self, kind, num, pts):
         self.kind = kind
-        self.num = num          # ordinal within its check (1-based)
+        # GLOBAL 1-based file-order sequence across the whole db
+        # (Calibre RVE numbering, user call 2026-08-13); the per-
+        # record ordinal token in the ASCII file is ignored
+        self.num = num
         self.pts = pts          # [(x_um, y_um), ...]
 
     def bbox(self):
@@ -156,6 +159,7 @@ def load_ascii(path):
         precision = 1000.0
 
     checks = []
+    gnum = 0                    # global file-order error number
     n = len(lines)
     while i < n:
         name = lines[i].strip()
@@ -208,7 +212,8 @@ def load_ascii(path):
                     pts.append((nums[j] / precision,
                                 nums[j + 1] / precision))
             if pts and kind in ("p", "e"):
-                check.errors.append(DrcError(kind, num, pts))
+                gnum += 1
+                check.errors.append(DrcError(kind, gnum, pts))
             # unknown kinds: coordinates consumed, record dropped
         # administrative tail sections (DENSITY_RDBS,
         # NET_AREA_RATIO_RDBS, DFM_RDBS, LAYOUT_INPUT_EXCEPTION_RDBS)
@@ -364,10 +369,7 @@ class IceDb(object):
         lines = buf.splitlines()
         head = lines[0].split()
         kind = head[0].decode("ascii", errors="replace").lower()
-        try:
-            num = int(head[1])
-        except (IndexError, ValueError):
-            num = 0
+        num = gi + 1    # global file-order number (storage order)
         pts = []
         prec = self.precision
         for line in lines[1:]:
@@ -533,17 +535,20 @@ class IcePack(object):
             return got
         rec = self._blk[bi]
         pos, cnt = int(rec["off"]), int(rec["cnt"])
+        # global number base: blocks store no ordinal - storage is
+        # file order, so the number is err_start + offset + 1
+        ci = bisect.bisect_right(self._dir_bs, bi) - 1
+        base = int(self._dir_es[ci]) \
+            + (bi - int(self._dir_bs[ci])) * _ICE2_BLOCK
         buf = self._map
         prec = self.precision
         errs = []
-        prev_num = pfx = pfy = 0
-        for _ in range(cnt):
+        pfx = pfy = 0
+        for j in range(cnt):
             knpts, pos = _uv(buf, pos)
             kind = "e" if knpts & 1 else "p"
             npts = knpts >> 1
-            d, pos = _uv(buf, pos)
-            num = prev_num + _unzz(d)
-            prev_num = num
+            num = base + j + 1
             d, pos = _uv(buf, pos)
             x = pfx + _unzz(d)
             d, pos = _uv(buf, pos)

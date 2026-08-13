@@ -6,11 +6,17 @@
 //!
 //!   [header 40B]   magic | u32 version=2 | u32 flags=1 | f64
 //!                  precision | u64 src_size | u64 src_mtime
-//!   [coord blob]   BLOCK(64)-error groups, varint records:
-//!                  uv((npts<<1)|kind), zz(num delta),
-//!                  zz(first-point delta from previous error's
-//!                  first point), then per point zz deltas from the
-//!                  previous point. Deltas reset at block start.
+//!   [coord blob]   BLOCK(64)-error groups in FILE ORDER, varint
+//!                  records: uv((npts<<1)|kind), zz(first-point
+//!                  delta from the previous error's first point),
+//!                  then per point zz deltas from the previous
+//!                  point. Deltas reset at block start. There is NO
+//!                  per-record ordinal: the displayed number IS the
+//!                  global file-order sequence (err_start + index
+//!                  + 1, Calibre-RVE-style), and per-rule browser
+//!                  listings come out ascending for free - which is
+//!                  why records are NOT spatially reordered; the
+//!                  [qbox] lattice carries the spatial query.
 //!   [qbox]         4B per error: its bbox quantized to a u8
 //!                  256x256 lattice over ITS CHECK's bbox (rounded
 //!                  outward - always a superset). A viewport query
@@ -85,25 +91,6 @@ fn uv_read(buf: &[u8], pos: &mut usize) -> u64 {
 
 fn unzz(u: u64) -> i64 {
     ((u >> 1) as i64) ^ -((u & 1) as i64)
-}
-
-fn part1by1(mut x: u64) -> u64 {
-    x &= 0xffff_ffff;
-    x = (x | (x << 16)) & 0x0000_ffff_0000_ffff;
-    x = (x | (x << 8)) & 0x00ff_00ff_00ff_00ff;
-    x = (x | (x << 4)) & 0x0f0f_0f0f_0f0f_0f0f;
-    x = (x | (x << 2)) & 0x3333_3333_3333_3333;
-    x = (x | (x << 1)) & 0x5555_5555_5555_5555;
-    x
-}
-
-/// Z-order key of a first point relative to the check's min corner.
-/// Blocks of Morton-adjacent errors get COMPACT bboxes - that is
-/// the whole spatial index - and near-zero first-point deltas.
-fn morton(dx: i64, dy: i64) -> u64 {
-    let qx = dx.max(0).min(u32::MAX as i64) as u64;
-    let qy = dy.max(0).min(u32::MAX as i64) as u64;
-    part1by1(qx) | (part1by1(qy) << 1)
 }
 
 struct RawCheck {
@@ -194,7 +181,6 @@ fn parse_span(
                 break;
             }
             let kind = toks[0][0].to_ascii_lowercase();
-            let num = parse_i64(toks[1]).unwrap_or(0);
             let nv = parse_i64(toks[2]).unwrap_or(0);
             lines.consume();
             let mut got: i64 = 0;
@@ -249,7 +235,6 @@ fn parse_span(
             }
             if !pts.is_empty() && (kind == b'p' || kind == b'e') {
                 rec.clear();
-                uv_push(&mut rec, zz(num));
                 let npts = (pts.len() / 2) as u64;
                 uv_push(
                     &mut rec,
@@ -586,36 +571,10 @@ fn encode(
                 .ok_or("temp file vanished")?;
             let span =
                 &t[c.temp_off as usize..(c.temp_off + c.temp_len) as usize];
-            // pass 1: first point + byte offset of every record,
-            // then Z-order them (offset tiebreak keeps the output
-            // --jobs invariant). ~24B/record transiently: a check
-            // this can hurt on would be pathological (maxresults
-            // usually caps per-check counts).
-            let mut keys: Vec<(i64, i64, u64)> =
-                Vec::with_capacity(c.err_cnt as usize);
+            // delta-encode in FILE ORDER, BLOCK per block (see the
+            // module doc: no spatial reorder - global numbering and
+            // ascending per-rule listings fall out of the order)
             let mut pos = 0usize;
-            let mut mnx = i64::MAX;
-            let mut mny = i64::MAX;
-            for _ in 0..c.err_cnt {
-                let off = pos as u64;
-                let _num = uv_read(span, &mut pos);
-                let knpts = uv_read(span, &mut pos);
-                let npts = (knpts >> 1) as usize;
-                let x0 = unzz(uv_read(span, &mut pos));
-                let y0 = unzz(uv_read(span, &mut pos));
-                for _ in 1..npts {
-                    uv_read(span, &mut pos);
-                    uv_read(span, &mut pos);
-                }
-                mnx = mnx.min(x0);
-                mny = mny.min(y0);
-                keys.push((x0, y0, off));
-            }
-            keys.sort_unstable_by_key(|&(x, y, off)| {
-                (morton(x - mnx, y - mny), off)
-            });
-            // pass 2: delta-encode in Z order, BLOCK per block
-            let mut ki = 0usize;
             let mut left = c.err_cnt;
             ebb.clear();
             let mut cx0 = i64::MAX;
@@ -628,19 +587,13 @@ fn encode(
                 let mut by0 = i64::MAX;
                 let mut bx1 = i64::MIN;
                 let mut by1 = i64::MIN;
-                let mut prev_num = 0i64;
                 let mut pfx = 0i64;
                 let mut pfy = 0i64;
                 buf.clear();
                 for _ in 0..cnt {
-                    let mut pos = keys[ki].2 as usize;
-                    ki += 1;
-                    let num = unzz(uv_read(span, &mut pos));
                     let knpts = uv_read(span, &mut pos);
                     let npts = (knpts >> 1) as usize;
                     uv_push(&mut buf, knpts);
-                    uv_push(&mut buf, zz(num - prev_num));
-                    prev_num = num;
                     let mut px = 0i64;
                     let mut py = 0i64;
                     let mut ex0 = i64::MAX;
