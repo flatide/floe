@@ -3206,16 +3206,13 @@ class Viewer:
         self.drc_mark = {"kind": e.kind,
                          "pts": [(x / self.dbu, y / self.dbu)
                                  for x, y in e.pts]}
-        # auto CD ruler: one per jump, replacing the previous one
-        # (hand-drawn rulers stay; k/Esc treat it like any ruler)
+        # auto CD rulers: replaced on every jump (hand-drawn rulers
+        # stay; k/Esc treat them like any ruler)
         for r in self._drc_ruler:
             if r in self.rulers:
                 self.rulers.remove(r)
-        self._drc_ruler = []
-        cd = self._drc_cd_ruler(e)
-        if cd is not None:
-            self.rulers.append(cd)
-            self._drc_ruler = [cd]
+        self._drc_ruler = self._drc_cd_ruler(e)
+        self.rulers.extend(self._drc_ruler)
         self._set_live_status(
             "DRC %s #%d/%d · %s · %.3f x %.3f um at (%.3f, %.3f)"
             % (check.name, e.num, len(check.errors),
@@ -3224,13 +3221,14 @@ class Viewer:
         self._display()
 
     def _drc_cd_ruler(self, e):
-        """CD ruler for SIMPLE violations (dbu 4-tuple, else None):
+        """CD rulers for SIMPLE violations (list of dbu 4-tuples):
         single edge = its length, edge pair = the closest gap
         between the edges (anchored at the midpoint when the edges
         face each other in parallel - the common spacing shape),
-        axis-aligned rectangle = its narrow span through the middle.
-        Complex polygons/edge sets get NO ruler (user call
-        2026-08-13) - the distance chip on the ruler is the CD."""
+        axis-aligned rectangle = BOTH spans through the middle
+        (width and height are each meaningful, user call
+        2026-08-13). Complex polygons/edge sets get NO ruler -
+        the distance chip on each ruler is the CD."""
         pts = e.pts   # um
         k = self.dbu
 
@@ -3252,8 +3250,8 @@ class Viewer:
 
         if e.kind == "e" and len(pts) == 2:
             if dist(pts[0], pts[1]) <= 0:
-                return None
-            return seg(pts[0], pts[1])
+                return []
+            return [seg(pts[0], pts[1])]
         if e.kind == "e" and len(pts) == 4:
             a0, a1, b0, b1 = pts
 
@@ -3263,33 +3261,34 @@ class Viewer:
             if (orient(a0, a1, b0) > 0) != (orient(a0, a1, b1) > 0) \
                     and (orient(b0, b1, a0) > 0) != (orient(b0, b1,
                                                             a1) > 0):
-                return None   # edges properly cross: gap is zero
+                return []   # edges properly cross: gap is zero
             cand = [(p, foot(p, b0, b1)) for p in (a0, a1)]
             cand += [(foot(p, a0, a1), p) for p in (b0, b1)]
             dmin = min(dist(p, q) for p, q in cand)
             if dmin <= 0:
-                return None   # touching edges: no gap
+                return []   # touching edges: no gap
             mid = ((a0[0] + a1[0]) / 2.0, (a0[1] + a1[1]) / 2.0)
             fm = foot(mid, b0, b1)
             if dist(mid, fm) <= dmin * 1.0001:
-                return seg(mid, fm)
-            return seg(*min(cand, key=lambda c: dist(c[0], c[1])))
+                return [seg(mid, fm)]
+            return [seg(*min(cand, key=lambda c: dist(c[0], c[1])))]
         if e.kind == "p" and len(pts) == 4:
             xs = sorted(set(x for x, _ in pts))
             ys = sorted(set(y for _, y in pts))
             if len(xs) != 2 or len(ys) != 2:
-                return None   # not an axis-aligned rectangle
+                return []   # not an axis-aligned rectangle
             if set(pts) != {(x, y) for x in xs for y in ys}:
-                return None
+                return []
             w, h = xs[1] - xs[0], ys[1] - ys[0]
-            if w <= 0 or h <= 0:
-                return None
-            if w <= h:
+            out = []
+            if w > 0:   # width span through the middle
                 my = (ys[0] + ys[1]) / 2.0
-                return seg((xs[0], my), (xs[1], my))
-            mx = (xs[0] + xs[1]) / 2.0
-            return seg((mx, ys[0]), (mx, ys[1]))
-        return None
+                out.append(seg((xs[0], my), (xs[1], my)))
+            if h > 0:   # height span through the middle
+                mx = (xs[0] + xs[1]) / 2.0
+                out.append(seg((mx, ys[0]), (mx, ys[1])))
+            return out
+        return []
 
     def _drc_step(self, delta):
         """n/p keys and the prev/next buttons walk every error."""
