@@ -50,7 +50,6 @@ DRC_MARK = 0xFF5252FF      # DRC violation outline
 
 DRC_LIST_MAX = 2000        # grid cells per rule (prev/next reaches all)
 DRC_GRID_W = 5             # error numbers per browser grid row
-_DRC_BOILER = ("Rule File ", "Waiver Criteria")  # hidden in rule list
 DRC_VIEW_FRACTION = 0.3    # error extent ~30% of the view on a jump
 DRC_HL_CAP = 1000          # highlight-in-view marker budget
 
@@ -3061,11 +3060,16 @@ class Viewer:
         # grid alone (one rule at a time = the accordion ask), and
         # the grid's own equal columns keep the numbers aligned
         # regardless of rule-title widths.
-        rstore = Gtk.ListStore(str, str, int)  # title, count, ci
+        rstore = Gtk.ListStore(str, str, int)  # name, count, ci
         rules = Gtk.TreeView(model=rstore)
         for j, expand in ((0, True), (1, False)):
-            col = Gtk.TreeViewColumn("", Gtk.CellRendererText(),
-                                     text=j)
+            cell = Gtk.CellRendererText()
+            if j == 0:
+                # long rule names truncate so the error count
+                # column always stays visible
+                cell.set_property("ellipsize",
+                                  Pango.EllipsizeMode.END)
+            col = Gtk.TreeViewColumn("", cell, text=j)
             col.set_expand(expand)
             rules.append_column(col)
         rules.set_headers_visible(False)
@@ -3245,9 +3249,9 @@ class Viewer:
         return True
 
     def _drc_fill(self):
-        """Rules list; the subtitle skips every boilerplate header
-        line (Rule File Pathname/Title, Waiver Criteria - user call
-        2026-08-13) so the actual rule text shows."""
+        """Rules list: NAME and error count only - no subtitle
+        (user call 2026-08-13); the description lives in the
+        detail pane."""
         win, db = self._drcwin, self._drc
         rstore = win._rstore
         rstore.clear()
@@ -3257,11 +3261,7 @@ class Viewer:
         self._drc_grid_rows = 0
         self._drc_cell = None
         for ci, c in enumerate(db.checks):
-            sub = next((ln for ln in c.desc.split("\n")
-                        if ln and not ln.startswith(_DRC_BOILER)),
-                       "")
-            head = c.name + ("\n" + sub if sub else "")
-            rstore.append([head, "%d" % len(c.errors), ci])
+            rstore.append([c.name, "%d" % len(c.errors), ci])
         win._info.set_text("%s — cell %s · %d checks · %d errors"
                            % (os.path.basename(db.path), db.cell,
                               len(db.checks), db.total))
