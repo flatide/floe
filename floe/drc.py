@@ -201,6 +201,13 @@ def load_ascii(path):
             if pts and kind in ("p", "e"):
                 check.errors.append(DrcError(kind, num, pts))
             # unknown kinds: coordinates consumed, record dropped
+        # administrative tail sections (DENSITY_RDBS,
+        # NET_AREA_RATIO_RDBS, DFM_RDBS, LAYOUT_INPUT_EXCEPTION_RDBS)
+        # list rdb files, not violations: drop them - but only when
+        # empty, so a real check that happens to end in _RDBS can
+        # never lose its errors (the rust indexer mirrors this)
+        if check.name.endswith("_RDBS") and not check.errors:
+            continue
         checks.append(check)
     return DrcDb(path, cell, precision, checks)
 

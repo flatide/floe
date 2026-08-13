@@ -378,6 +378,15 @@ fn build(src: &str, out: &str) -> Result<(usize, u64), String> {
                 );
             }
         }
+        // administrative tail sections (*_RDBS: DENSITY_RDBS,
+        // NET_AREA_RATIO_RDBS, DFM_RDBS, LAYOUT_INPUT_EXCEPTION_RDBS)
+        // list rdb files, not violations: drop them - but only when
+        // empty, so a real check that happens to end in _RDBS can
+        // never lose its errors (drc.py load_ascii mirrors this)
+        if name.ends_with(b"_RDBS") && err_cnt == err_start {
+            desc_refs.truncate(desc_start as usize);
+            continue;
+        }
         checks.push(CheckRec {
             name_ref,
             desc_start,

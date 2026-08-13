@@ -4,7 +4,9 @@ ASCII database directly.
   D1  build sidecar on an adversarial synthetic .db (zero-result
       checks, duplicate check blocks, missing count line, unknown
       record kind, truncated records, CRLF, blank lines, negative
-      coords) -> IceDb equals load_ascii check-for-check and
+      coords, Waiver Criteria desc lines, *_RDBS admin tail
+      sections dropped when empty / kept when they carry errors)
+      -> IceDb equals load_ascii check-for-check and
       error-for-error (kind/num/pts exact).
   D2  load_db(<db>) auto-picks a fresh sidecar; a stale sidecar
       (source mtime bumped) falls back to the ASCII parse and
@@ -30,9 +32,10 @@ BIN = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
 
 DB = """MAIN09_ESD 40000
 GRGEOM.1_BFMOAT
-0 0 3 Jul 11 01:55:00 2026
+0 0 4 Jul 11 01:55:00 2026
 Rule File Pathname: sfa14.drc.cal
 Rule File Title: SFA14 CalibreDRC S00-V0.5.0.0-ENG_0520
+Waiver Criteria: none - -
 All Design Layers grid must be an integer multiple of 0.00025um. - -
 GRGEOM.1_BIPOLAR
 0 0 3 Jul 11 01:55:00 2026
@@ -75,6 +78,25 @@ e 1 1
 -1 -2 -3 -4
 e 2 1
 5 6 7 8
+FAKE_RDBS
+1 1 0 Jul 11 01:58:00 2026
+p 1 1
+42 42
+DENSITY_RDBS
+0 0 2 Jul 11 01:59:00 2026
+density.rdb
+density2.rdb
+NET_AREA_RATIO_RDBS
+0 0 2 Jul 11 01:59:00 2026
+nar.rdb
+nar2.rdb
+DFM_RDBS
+0 0 2 Jul 11 01:59:00 2026
+dfm.rdb
+dfm2.rdb
+LAYOUT_INPUT_EXCEPTION_RDBS
+0 0 1 Jul 11 01:59:00 2026
+layout_input_exceptions.rdb
 TRUNC.TAIL
 1 1 0 Jul 11 01:58:00 2026
 p 1 5
@@ -129,9 +151,17 @@ def main():
     ref = drc.load_ascii(db)
     # D1: explicit sidecar open
     ice = drc.IceDb(side)
-    # M1.SPACE 3 + dup block 1 + NOCOUNT 1 + SHORTDESC 2 + TRUNC 1
-    if ref.total != 3 + 1 + 1 + 2 + 1:
+    # M1.SPACE 3 + dup block 1 + NOCOUNT 1 + SHORTDESC 2
+    # + FAKE_RDBS 1 + TRUNC 1
+    if ref.total != 3 + 1 + 1 + 2 + 1 + 1:
         fail("fixture drifted: ascii total=%d" % ref.total)
+    names = [c.name for c in ref.checks]
+    for gone in ("DENSITY_RDBS", "NET_AREA_RATIO_RDBS", "DFM_RDBS",
+                 "LAYOUT_INPUT_EXCEPTION_RDBS"):
+        if gone in names:
+            fail("admin section %s surfaced as a check" % gone)
+    if "FAKE_RDBS" not in names:
+        fail("non-empty _RDBS check was dropped")
     compare(ref, ice)
     print("D1 OK: %d checks / %d errors identical through the sidecar"
           % (len(ref.checks), ref.total))
