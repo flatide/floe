@@ -193,12 +193,8 @@ recolor: 행 스와치 재생성(set_color) + meta 갱신 + 개인 layerprops
 
 ## 9. 픽/스냅/클립
 
-- pick: **표시 중인 DRC 에러가 우선**(2026-08-14, `_drc_pick`) —
-  열린 룰의 in-view 세트에서 bbox+마커 반경(5px) 히트, 최근접 중심
-  승자 → 그리드 클릭과 동일하게 포커스/상세/셀 동기(뷰 불변).
-  에러 미히트 시 지오메트리 픽: 화면 워킹셋에서 점 포함 도형
-  최소면적 순(_PICK_CAP 64), nth 순환. 프레임/라벨 셀(FRAMES/
-  LABELS 프리픽스)은 픽 제외.
+- pick: 화면 워킹셋에서 점 포함 도형 최소면적 순(_PICK_CAP 64),
+  nth 순환. 프레임/라벨 셀(FRAMES/LABELS 프리픽스)은 픽 제외.
 - snap: 반경 내 vertex 우선, edge 수선(투영) 차선(_SNAP_CAP 400).
 - clip: probe(exact) 경로로 영역 저장. 계측은 절대 LOD/컷/격자를
   거치지 않는다(프로브 강제 0).
