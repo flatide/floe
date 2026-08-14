@@ -47,15 +47,14 @@ RULER_CORE = 0xFFFFFFFF    # plain white solid ruler (same call)
 SNAP_VERTEX = 0xFFFFFFFF   # plain white (user call 2026-08-09;
 SNAP_EDGE = 0xFFFFFFFF     # vertex/edge no longer color-coded)
 SEL_CORE = 0xFFFFFFFF
-DRC_MARK = 0x00FFFFFF      # DRC violation geometry - all cyan
-                           # (user call 2026-08-14; was red)
+DRC_RED = 0xFF5252FF       # NOT-WAIVED errors (geometry+numbers)
 
 DRC_PAGE = 1000            # error-grid cells per page
 DRC_GRID_W = 5             # error numbers per browser grid row
 DRC_VIEW_FRACTION = 0.3    # error extent ~30% of the view on a jump
 DRC_HL_CAP = 1000          # highlight-in-view marker budget
 DRC_SEL_CAP = 5000         # box-select budget ('e' mode)
-DRC_CYAN = 0x00FFFFFF      # highlight squares / focus halo
+DRC_CYAN = 0x00FFFFFF      # WAIVED errors (geometry+numbers)
 DRC_GOLD = 0xFFD700FF      # box-selected errors (canvas + grid)
 
 
@@ -1708,22 +1707,23 @@ class Viewer:
             # <=2x2 px on screen collapses to a 3x3 marker square
             # (user call 2026-08-14)
             pts = [(sx(x), sy(y)) for x, y in self.drc_mark["pts"]]
+            mcol = self.drc_mark.get("color", DRC_RED)
             mxs = [p[0] for p in pts]
             mys = [p[1] for p in pts]
             if (max(mxs) - min(mxs) <= 2
                     and max(mys) - min(mys) <= 2):
                 cxp = (min(mxs) + max(mxs)) / 2.0
                 cyp = (min(mys) + max(mys)) / 2.0
-                fill_rect(disp, cxp - 2, cyp - 2, 5, 5, DRC_MARK)
+                fill_rect(disp, cxp - 2, cyp - 2, 5, 5, mcol)
             elif self.drc_mark["kind"] == "p":
-                self._drc_fill_speckle(disp, pts)
+                self._drc_fill_speckle(disp, pts, mcol)
                 for a, b in zip(pts, pts[1:] + pts[:1]):
-                    stamp_segment(disp, a, b, None, DRC_MARK)
+                    stamp_segment(disp, a, b, None, mcol)
             else:
                 # edge records: consecutive point pairs are segments
                 for j in range(0, len(pts) - 1, 2):
                     stamp_segment(disp, pts[j], pts[j + 1], None,
-                                  DRC_MARK)
+                                  mcol)
         if self.mode == "esel" and self._esel_start is not None:
             ax, ay = self._esel_start
             bx, by = self._cursor
@@ -1736,7 +1736,7 @@ class Viewer:
             # markers. The same call keeps the in-view filter list
             # fresh so the grid follows pans/zooms.
             self._drc_stamp_errs(disp, sx, sy,
-                                 self._drc_hl_list(), DRC_MARK)
+                                 self._drc_hl_list())
         if self._drc_sel is not None:
             # box selection ('e'): GOLD on top of the rule's cyan
             sci, _seis, marks, _eset = self._drc_sel
@@ -3724,10 +3724,12 @@ class Viewer:
 
         def cellfmt(ei):
             t = "%d" % (ei + 1)      # rule-local numbering
+            fg = ("#00ffff" if self._drc_waived(db, ci, ei)
+                  else "#ff5252")    # waived cyan / not-waived red
             if ei in eset:
                 return ("<span background='#ffd700' "
-                        "foreground='#000000'>%s</span>" % t)
-            return t
+                        "foreground='%s'>%s</span>" % (fg, t))
+            return "<span foreground='%s'>%s</span>" % (fg, t)
 
         for b2 in range(0, len(eis), W):
             cells = [cellfmt(ei) for ei in eis[b2:b2 + W]]
@@ -3890,6 +3892,8 @@ class Viewer:
                 else frozenset())
         gmap = self._drc_grid_map
 
+        db = self._drc
+
         def cell_at(r, c_, current):
             k2 = r * self._drc_gridw + c_
             if k2 >= len(gmap):
@@ -3899,10 +3903,12 @@ class Viewer:
             if current:
                 return ("<span background='#3465a4' "
                         "foreground='#ffffff'>%s</span>" % t)
+            fg = ("#00ffff" if self._drc_waived(db, ci, ei)
+                  else "#ff5252")
             if ei in eset:
                 return ("<span background='#ffd700' "
-                        "foreground='#000000'>%s</span>" % t)
-            return t
+                        "foreground='%s'>%s</span>" % (fg, t))
+            return "<span foreground='%s'>%s</span>" % (fg, t)
 
         old = self._drc_cell
         if old is not None and old != (row, j):
@@ -4027,7 +4033,10 @@ class Viewer:
         self.goto(cx, cy, win)
         self.drc_mark = {"kind": e.kind,
                          "pts": [(x / self.dbu, y / self.dbu)
-                                 for x, y in e.pts]}
+                                 for x, y in e.pts],
+                         "color": (DRC_CYAN
+                                   if self._drc_waived(db, ci, ei)
+                                   else DRC_RED)}
         # auto CD rulers: replaced on every jump (hand-drawn rulers
         # stay; k/Esc treat them like any ruler)
         for r in self._drc_ruler:
@@ -4043,14 +4052,21 @@ class Viewer:
         self._drc_show_detail(ci, ei)
         self._display()
 
-    def _drc_stamp_errs(self, disp, sx, sy, items, color):
-        """Error painter: real geometry in `color`; errors <=2x2 px
-        on screen collapse to 3x3 marker squares (the focused one:
-        5x5). items = iterable of (ci, ei, kind, pts dbu); a 20k
-        segment budget bounds pathological frames."""
+    def _drc_stamp_errs(self, disp, sx, sy, items, color=None):
+        """Error painter: geometry in `color`, or per-status when
+        None (user call 2026-08-14: not waived = red, waived =
+        cyan). Errors <=2x2 px on screen collapse to 5x5 marker
+        squares (the focused one: 9x9); a 20k segment budget
+        bounds pathological frames."""
+        db = self._drc
         focus = self._drc_focus
         budget = 20000
         for ci_, ei_, kind, spts in items:
+            col = color
+            if col is None:
+                col = (DRC_CYAN
+                       if self._drc_waived(db, ci_, ei_)
+                       else DRC_RED)
             sp = [(sx(x), sy(y)) for x, y in spts]
             hxs = [p[0] for p in sp]
             hys = [p[1] for p in sp]
@@ -4062,7 +4078,7 @@ class Viewer:
                              and focus[0] == ci_
                              and focus[1] == ei_) else 5
                 fill_rect(disp, cxp - s_px // 2, cyp - s_px // 2,
-                          s_px, s_px, color)
+                          s_px, s_px, col)
                 budget -= 1
             else:
                 if kind == "p":
@@ -4071,17 +4087,27 @@ class Viewer:
                     segs = [(sp[j], sp[j + 1])
                             for j in range(0, len(sp) - 1, 2)]
                 for a, b in segs:
-                    stamp_segment(disp, a, b, None, color)
+                    stamp_segment(disp, a, b, None, col)
                     budget -= 1
             if budget <= 0:
                 return
 
-    def _drc_speckle_strip(self, width):
-        """Two-row RGBA checker strip in the mark color (row r: on
-        where (x+r) is even), composited row-by-row into polygon
-        spans - GdkPixbuf has no stipple fill, and per-pixel
-        subpixbuf fills would be far too slow per frame."""
-        strip = getattr(self, "_drc_strip", None)
+    def _drc_waived(self, db, ci, ei):
+        """True when the error's status byte says WAIVED (v1 dbs
+        have no status: everything counts as not waived)."""
+        return (hasattr(db, "get_status")
+                and db.get_status(ci, ei)
+                == drc_mod.STATUS_WAIVED)
+
+    def _drc_speckle_strip(self, width, color):
+        """Two-row RGBA checker strip in `color` (row r: on where
+        (x+r) is even), composited row-by-row into polygon spans -
+        GdkPixbuf has no stipple fill, and per-pixel subpixbuf
+        fills would be far too slow per frame. Cached per color."""
+        strips = getattr(self, "_drc_strips", None)
+        if strips is None:
+            strips = self._drc_strips = {}
+        strip = strips.get(color)
         if strip is not None and strip.get_width() >= width:
             return strip
         strip = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, True,
@@ -4089,11 +4115,11 @@ class Viewer:
         strip.fill(0x00000000)
         for r in (0, 1):
             for x in range(r & 1, strip.get_width(), 2):
-                strip.new_subpixbuf(x, r, 1, 1).fill(DRC_MARK)
-        self._drc_strip = strip
+                strip.new_subpixbuf(x, r, 1, 1).fill(color)
+        strips[color] = strip
         return strip
 
-    def _drc_fill_speckle(self, disp, pts):
+    def _drc_fill_speckle(self, disp, pts, color=DRC_RED):
         """Even-odd scanline fill of the violation polygon with the
         50% speckle checker (screen-anchored phase). Degenerate and
         very complex outlines fall back to outline-only."""
@@ -4105,7 +4131,7 @@ class Viewer:
         y1 = min(h_px - 1, int(math.ceil(max(ys))))
         if y1 < y0:
             return
-        strip = self._drc_speckle_strip(w_px)
+        strip = self._drc_speckle_strip(w_px, color)
         edges = [(a, b) for a, b in zip(pts, pts[1:] + pts[:1])
                  if a[1] != b[1]]
         budget = 20000   # spans; beyond this the fill just stops

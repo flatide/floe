@@ -72,10 +72,11 @@
   좌클릭=지정; 비트맵 에디터는 FLOE_FILL_EDIT=1 개발용), fit/clip 버튼.
 - 오버레이(픽스버프 직접 스탬프, gui.py 상단 헬퍼): 룰러(흰 1px 실선
   + 화살촉 + 거리 칩 흰 텍스트 + 점선 리더), 러버밴드(흰 1px), 스냅
-  마커(흰 십자+사각), DRC 마크(**cyan** — 2026-08-14 빨강에서 변경:
-  엣지=2px 단색 실선, 폴리곤=2px 단색 외곽 + 내부 50% 스페클 —
-  `_drc_fill_speckle` 짝홀 스캔라인 + 2행 체커 스트립 composite,
-  >256 꼭짓점은 외곽만), 선택 하이라이트.
+  마커(흰 십자+사각), DRC 마크(**상태색** — 2026-08-14: not waived
+  = red(#FF5252), waived = cyan; 엣지=2px 단색 실선, 폴리곤=2px
+  단색 외곽 + 내부 50% 스페클 — `_drc_fill_speckle` 짝홀 스캔라인
+  + 색상별 캐시 2행 체커 스트립 composite, >256 꼭짓점은 외곽만),
+  선택 하이라이트.
   stamp_segment/rect_outline은 px 파라미터(기본 2, 룰러/밴드는 1).
 - 룰러: 다중 누적, k/Shift+K 삭제, 스냅(m, vertex/edge, _SNAP_CAP 400),
   자유각 Shift. 커서: 기본 default, 룰러 모드만 crosshair(_idle_cursor).
@@ -156,10 +157,12 @@ recolor: 행 스와치 재생성(set_color) + meta 갱신 + 개인 layerprops
   시 상태줄 안내(상태줄 카운트는 필터 on일 때만). v1 사이드카에서는
   토글 거부+안내.
 - **룰 에러 상시 표시**(2026-08-14): 룰이 열려 있으면 필터 여부와
-  무관하게 그 룰의 뷰포트 내 에러(상한 1000)가 캔버스에 **cyan
-  실도형**으로 항상 그려짐 — `_drc_stamp_errs` 공용 페인터(≤2×2px
-  마커 붕괴·포커스 5×5·세그먼트 예산 20k). 선택(gold)은 그 위에
-  같은 페인터로 덮임.
+  무관하게 그 룰의 뷰포트 내 에러(상한 1000)가 캔버스에 **상태색
+  실도형**(not waived=red, waived=cyan)으로 항상 그려짐 —
+  `_drc_stamp_errs` 공용 페인터(≤2×2px 마커 붕괴 5×5·포커스 9×9·
+  세그먼트 예산 20k). 선택(gold)은 그 위에 같은 페인터로 덮임.
+  **그리드 숫자도 상태색**(waived cyan / not-waived red; gold 선택
+  배경 위에도 상태색 유지, 현재 셀은 파랑 배경+흰 글자).
 - **mono(그레이스케일)**: `b` 키 토글(독립 — 필터와 연동 없음),
   서비스 "mono" 잡 → Renderer.set_mono(디자인 레이어 색을
   luminance 회색으로; 프레임/스페클 구조 불변) + _color_epoch
