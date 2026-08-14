@@ -4122,6 +4122,39 @@ class Viewer:
             self._drc_goto_cell(ci, ei)
         self._drc_jump(ci, ei)
 
+    def _drc_pick(self):
+        """Canvas click: displayed DRC errors take PICK PRIORITY
+        over geometry (user call 2026-08-14). Hits the open rule's
+        in-view set (what is painted), nearest bbox center wins;
+        focuses it like a grid click. False = no error hit, fall
+        through to the geometry pick."""
+        db = self._drc
+        if db is None or self._drc_open is None \
+                or not hasattr(db, "query_rect"):
+            return False
+        x, y = self._cursor            # dbu
+        pad = 5 * self.spp             # ~marker radius on screen
+        best = None
+        for ci_, ei_, kind, pts in self._drc_hl_list():
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            if not (min(xs) - pad <= x <= max(xs) + pad
+                    and min(ys) - pad <= y <= max(ys) + pad):
+                continue
+            cx_ = (min(xs) + max(xs)) / 2.0
+            cy_ = (min(ys) + max(ys)) / 2.0
+            d = (cx_ - x) ** 2 + (cy_ - y) ** 2
+            if best is None or d < best[0]:
+                best = (d, ci_, ei_, kind, pts)
+        if best is None:
+            return False
+        _d, ci_, ei_, kind, pts = best
+        self._drc_focus = (ci_, ei_, kind, pts)
+        self._drc_goto_cell(ci_, ei_)
+        self._drc_show_detail(ci_, ei_)
+        self._display()
+        return True
+
     def _drc_goto_cell(self, ci, ei):
         """Flip the grid to the page holding ei and mark its
         cell (skips silently when a filter hides it)."""
@@ -4392,6 +4425,8 @@ class Viewer:
 
     def _pick_click(self, ev):
         self._update_cursor(ev)
+        if self._drc_pick():
+            return   # a displayed error under the cursor wins
         x, y = self._cursor
         state = getattr(ev, "state", 0)
         if state & Gdk.ModifierType.CONTROL_MASK:
