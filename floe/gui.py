@@ -907,6 +907,7 @@ class Viewer:
         self._drc_gridw = DRC_GRID_W   # columns, reflowed to pane
         self._drc_cellw = 60        # px per number cell (probe)
         self._drc_page = 0          # error-grid page of the rule
+        self._drc_rules_busy = False   # rebuilding the rules list
         self._drc_grid_base = None  # filtered ei base (None = all)
         self._drc_wfilter = "all"   # all | notwaived | waived
         self._drc_sel = None        # box selection ('e'): (ci,
@@ -3576,7 +3577,9 @@ class Viewer:
         win, db = self._drcwin, self._drc
         rstore = win._rstore
         _t0 = time.perf_counter()
-        rstore.clear()
+        self._drc_rules_busy = True
+        win._rules.set_model(None)   # detach: clear/append without
+        rstore.clear()               # per-row view+selection work
         win._gstore.clear()
         self._drc_open = None
         self._drc_grid_ci = None
@@ -3598,6 +3601,8 @@ class Viewer:
                 continue
             rstore.append([c.name, "%d" % cnt, ci])
             shown += 1
+        win._rules.set_model(rstore)
+        self._drc_rules_busy = False
         if _DRC_PROF:
             sys.stderr.write(
                 "[drcprof] rules_fill rules=%d shown=%d clear=%.1f "
@@ -3674,6 +3679,14 @@ class Viewer:
     def _on_drc_rule_sel(self, sel):
         """Selecting a rule shows ITS error grid alone (the
         accordion ask) and its info in the detail pane."""
+        if self._drc_rules_busy:
+            # ListStore.clear() deletes row by row and SOME GTK
+            # builds auto-select the next row each time - without
+            # this guard the full handler (grid fill + query +
+            # display) ran per deleted row: a 1000-rule filter
+            # switch took 9.7s on one machine (field profile
+            # 2026-08-15)
+            return
         model, it = sel.get_selected()
         if it is None or self._drc is None:
             return
