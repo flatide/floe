@@ -157,7 +157,10 @@ rust/target/release/floe-index drc results.db --pack     # v2 완전 변환
   초기화).
 
 소스가 바뀌면(size/mtime) 인덱스는 자동 무시되고 ASCII 전체 파스로
-폴백하니 `floe-index drc`를 다시 실행하면 된다. 참고: 구 레거시 타일
+폴백하니 `floe-index drc`를 다시 실행하면 된다. **뷰어의 open .db…
+다이얼로그는 .db만 보여주지만 로딩은 항상 pack(.ice)으로 한다** —
+pack이 없거나 오래되면 그 자리에서 `--pack` 인덱싱을 돌리고 로그를
+모달 창에 보여준 뒤 연다. 참고: 구 레거시 타일
 캐시가 쓰던 `.ice` 확장자는 `.tiles`로 개명되어 이제 `.ice`는 DRC
 인덱스 전용이다.
 

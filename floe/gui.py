@@ -3353,8 +3353,8 @@ class Viewer:
                         "Open", Gtk.ResponseType.OK)
         dlg.set_current_folder(
             os.path.dirname(self.meta["src"]["path"]))
-        for name, pats in (("DRC results (*.db, *.results, *.ice)",
-                            ("*.db", "*.results", "*.ice")),
+        for name, pats in (("Calibre DRC results (*.db)",
+                            ("*.db",)),
                            ("all files", ("*",))):
             ff = Gtk.FileFilter()
             ff.set_name(name)
@@ -3364,9 +3364,97 @@ class Viewer:
         if dlg.run() == Gtk.ResponseType.OK:
             path = dlg.get_filename()
             dlg.destroy()
-            self.load_drc(path)
+            self._drc_open_db(path)
         else:
             dlg.destroy()
+
+    def _drc_open_db(self, path):
+        """Dialog flow (user call 2026-08-14): the user PICKS the
+        ASCII .db, floe LOADS only its packed .ice - building the
+        pack first (modal log dialog) when it is missing, stale or
+        an old layout/v1 sidecar."""
+        from . import drc as drc_mod
+        side = path + ".ice"
+        if os.path.exists(side):
+            try:
+                drc_mod.IcePack(side, src_path=path,
+                                verify_src=True)
+                self.load_drc(path)  # fresh pack: load_db picks it
+                return
+            except (ValueError, OSError):
+                pass
+        self._drc_pack_and_load(path)
+
+    def _drc_pack_and_load(self, path):
+        """Run `floe-index drc <db> --pack` with its log in a MODAL
+        dialog, then load the pack."""
+        import subprocess
+        import threading
+        from .vfsclient import find_binary
+        try:
+            bin_ = find_binary()
+        except RuntimeError as exc:
+            self._set_live_status("DRC indexing failed: %s" % exc)
+            return
+        dlg = Gtk.Dialog(title="indexing DRC results…",
+                         transient_for=self.window, modal=True)
+        dlg.set_default_size(600, 340)
+        tv = Gtk.TextView()
+        tv.set_editable(False)
+        tv.set_cursor_visible(False)
+        tv.set_monospace(True)
+        buf = tv.get_buffer()
+        sc = Gtk.ScrolledWindow()
+        sc.set_policy(Gtk.PolicyType.AUTOMATIC,
+                      Gtk.PolicyType.AUTOMATIC)
+        sc.add(tv)
+        dlg.get_content_area().pack_start(sc, True, True, 4)
+        dlg.add_button("cancel", Gtk.ResponseType.CANCEL)
+        dlg.show_all()
+        try:
+            proc = subprocess.Popen(
+                [bin_, "drc", path, "--pack"],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1)
+        except OSError as exc:
+            dlg.destroy()
+            self._set_live_status("DRC indexing failed: %s" % exc)
+            return
+        state = {"cancelled": False}
+
+        def on_response(_d, _resp):
+            state["cancelled"] = True
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+
+        dlg.connect("response", on_response)
+
+        def append(line):
+            buf.insert(buf.get_end_iter(), line)
+            buf.place_cursor(buf.get_end_iter())
+            tv.scroll_mark_onscreen(buf.get_insert())
+            return False
+
+        def done(rc):
+            dlg.destroy()
+            if state["cancelled"]:
+                self._set_live_status("DRC indexing cancelled")
+            elif rc == 0:
+                self.load_drc(path)
+            else:
+                self._set_live_status(
+                    "DRC indexing failed (rc %d)" % rc)
+            return False
+
+        def pump():
+            for line in proc.stdout:
+                GLib.idle_add(append, line)
+            rc = proc.wait()
+            GLib.idle_add(done, rc)
+
+        threading.Thread(target=pump, daemon=True).start()
 
     def load_drc(self, path):
         """Open a Calibre DRC db (.ice index-aware) and populate the

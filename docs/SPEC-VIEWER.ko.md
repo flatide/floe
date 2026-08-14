@@ -101,6 +101,13 @@ recolor: 행 스와치 재생성(set_color) + meta 갱신 + 개인 layerprops
   (checks[].errors는 시퀀스 프로토콜).
 - prev/next 워크는 에러 전수 리스트를 **절대 만들지 않는다** —
   `_drc_cum` 누적 카운트 + bisect 산술(수억 에러 안전).
+- **open .db… 다이얼로그**(2026-08-14): 파일 타입은 `*.db`만.
+  선택한 .db는 직접 파스하지 않고 **오직 `<db>.ice`(pack)만
+  로딩** — 신선한 v3 pack이 없으면(부재/스테일/v1/구 레이아웃)
+  `floe-index drc <db> --pack`을 실행하고 로그를 **모달
+  다이얼로그**에 실시간 표시(cancel = terminate) 후 로딩
+  (`_drc_open_db`/`_drc_pack_and_load`, 바이너리는
+  vfsclient.find_binary).
 - **뷰어 왼쪽 pane에 상시 내장**(2026-08-13; 별도 윈도 폐지 —
   `_build_drc_panel`, `_DrcPanel` 위젯 홀더, 'e' = 미로드 시 db
   열기/이후 포커스, db 로드 시 lpaned ≥420px 자동 확장). 내부는
