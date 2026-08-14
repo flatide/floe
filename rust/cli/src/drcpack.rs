@@ -4,14 +4,13 @@
 //!
 //! Layout (LE; header/string sections shared with v1):
 //!
-//!   [header 40B]   magic | u32 version=3 | u32 flags=1 | f64
+//!   [header 40B]   magic | u32 version=4 | u32 flags=1 | f64
 //!                  precision | u64 src_size | u64 src_mtime
-//!                  (version counts LAYOUT revisions: 2 = the
-//!                  short-lived pre-status/pre-file-order packs;
-//!                  the reader refuses anything but the current
-//!                  value - a stale pack once shifted the qbox
-//!                  section by 40B and silently broke small-rect
-//!                  queries)
+//!                  (version counts LAYOUT revisions: 2/3 = the
+//!                  short-lived earlier packs; the reader refuses
+//!                  anything but the current value - a stale pack
+//!                  once shifted the qbox section by 40B and
+//!                  silently broke small-rect queries)
 //!   [coord blob]   BLOCK(64)-error groups in FILE ORDER, varint
 //!                  records: uv((npts<<1)|kind), zz(first-point
 //!                  delta from the previous error's first point),
@@ -33,6 +32,12 @@
 //!                  defined). Fixed offset per global error id, so
 //!                  the viewer mutates it IN PLACE (pwrite) without
 //!                  rewriting anything. A re-pack resets it.
+//!   [wcount]       u32 per check, ZERO at build: the rule's
+//!                  WAIVED-error count, incrementally updated by
+//!                  set_status - the waive filters read this
+//!                  instead of rescanning the whole [status]
+//!                  section (field report 2026-08-14: filter
+//!                  switches scanned GBs).
 //!   [block table]  48B: u64 blob_off | u32 count | u32 pad
 //!                  | i64 bbox x0 y0 x1 y1  (dbu)
 //!                  - with [qbox] this is the spatial index: numpy
@@ -42,11 +47,11 @@
 //!                  | u64 err_start, err_cnt, declared, original,
 //!                  block_start, block_cnt
 //!   [desc refs][string table]   as v1 (line-level dedup)
-//!   [footer 128B]  14 u64 (blob_off, blob_len, qbox_off,
-//!                  qbox_len, status_off, blk_off, blk_cnt,
-//!                  dir_off, check_cnt, descref_off, descref_cnt,
-//!                  str_off, str_len, err_total) | u32 cell_ref
-//!                  | u32 reserved | magic
+//!   [footer 136B]  15 u64 (blob_off, blob_len, qbox_off,
+//!                  qbox_len, status_off, wcount_off, blk_off,
+//!                  blk_cnt, dir_off, check_cnt, descref_off,
+//!                  descref_cnt, str_off, str_len, err_total)
+//!                  | u32 cell_ref | u32 reserved | magic
 //!
 //! Parallel build: the file is split into --jobs byte segments;
 //! each worker syncs onto a speculative check header (name line +
@@ -543,7 +548,7 @@ fn encode(
     let mut w = std::io::BufWriter::with_capacity(8 << 20, wf);
     let mut header = Vec::with_capacity(40);
     header.extend_from_slice(MAGIC);
-    header.extend_from_slice(&3u32.to_le_bytes());
+    header.extend_from_slice(&4u32.to_le_bytes());
     header.extend_from_slice(&1u32.to_le_bytes());
     header.extend_from_slice(&precision.to_le_bytes());
     header.extend_from_slice(&src_size.to_le_bytes());
@@ -715,7 +720,13 @@ fn encode(
             left -= n;
         }
     }
-    let blk_off = status_off + err_total;
+    // [wcount]: one zero u32 per check (waived counters)
+    let wcount_off = status_off + err_total;
+    {
+        let zeros = vec![0u8; checks.len() * 4];
+        w.write_all(&zeros).map_err(|e| e.to_string())?;
+    }
+    let blk_off = wcount_off + checks.len() as u64 * 4;
     for (off, cnt, x0, y0, x1, y1) in &blocks {
         let mut rec = [0u8; 48];
         rec[..8].copy_from_slice(&off.to_le_bytes());
@@ -737,13 +748,14 @@ fn encode(
     let str_off = descref_off + desc_refs.len() as u64 * 4;
     w.write_all(&strtab.bytes).map_err(|e| e.to_string())?;
 
-    let mut foot = Vec::with_capacity(128);
+    let mut foot = Vec::with_capacity(136);
     for v in [
         40u64,
         blob - 40,
         qbox_off,
         qbox_len,
         status_off,
+        wcount_off,
         blk_off,
         blocks.len() as u64,
         dir_off,

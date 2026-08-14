@@ -389,10 +389,11 @@ class IceDb(object):
 
 # ---- .ice v2 packed reader ----------------------------------------------
 
-# footer: blob_off blob_len qbox_off qbox_len status_off blk_off
-#         blk_cnt dir_off check_cnt descref_off descref_cnt str_off
-#         str_len err_total | u32 cell_ref | u32 reserved | magic
-_ICE2_FOOTER = struct.Struct("<14QII8s")
+# footer: blob_off blob_len qbox_off qbox_len status_off
+#         wcount_off blk_off blk_cnt dir_off check_cnt descref_off
+#         descref_cnt str_off str_len err_total | u32 cell_ref
+#         | u32 reserved | magic
+_ICE2_FOOTER = struct.Struct("<15QII8s")
 
 # per-error review status byte ([status] section; app-defined >2)
 STATUS_NONE = 0
@@ -450,7 +451,8 @@ class IcePack(object):
     __slots__ = ("path", "cell", "precision", "checks", "total",
                  "_map", "_blk", "_qbox", "_dir_es", "_dir_bs",
                  "_ecnt", "_cbb", "_cache", "_order",
-                 "_status", "_status_off", "_wfd")
+                 "_status", "_status_off", "_wfd",
+                 "_wcount", "_wcount_off")
 
     def __init__(self, path, src_path=None, verify_src=False):
         import mmap
@@ -461,10 +463,10 @@ class IcePack(object):
              src_mtime) = _ICE_HEADER.unpack(head)
             if magic != _ICE_MAGIC or version < 2:
                 raise ValueError("%s: not a packed .ice" % path)
-            if version != 3:
+            if version != 4:
                 # the packed layout revved (file order, status,
-                # footer size); a stale pack misaligns sections and
-                # SILENTLY breaks small-rect queries - refuse it
+                # wcount, footer size); a stale pack misaligns
+                # sections and SILENTLY breaks queries - refuse it
                 raise ValueError(
                     "%s: packed .ice layout %d is from an older "
                     "build - re-run: floe-index drc <db> --pack"
@@ -473,9 +475,9 @@ class IcePack(object):
             fsize = f.tell()
             f.seek(fsize - _ICE2_FOOTER.size)
             (_blob_off, _blob_len, qbox_off, _qbox_len,
-             status_off, blk_off, blk_cnt, dir_off, check_cnt,
-             descref_off, descref_cnt, str_off, str_len, err_total,
-             cell_ref, _resv, fmagic) = \
+             status_off, wcount_off, blk_off, blk_cnt, dir_off,
+             check_cnt, descref_off, descref_cnt, str_off, str_len,
+             err_total, cell_ref, _resv, fmagic) = \
                 _ICE2_FOOTER.unpack(f.read(_ICE2_FOOTER.size))
             if fmagic != _ICE_MAGIC:
                 raise ValueError("%s: truncated .ice (bad footer)"
@@ -522,6 +524,15 @@ class IcePack(object):
                         if err_total else
                         np.zeros(0, dtype=np.uint8))
         self._status_off = status_off
+        # per-rule waived counters: O(1) filter counts, kept in
+        # sync by set_status (no [status] rescans)
+        self._wcount = (np.memmap(path, mode="r",
+                                  offset=wcount_off,
+                                  shape=(check_cnt,),
+                                  dtype="<u4")
+                        if check_cnt else
+                        np.zeros(0, dtype="<u4"))
+        self._wcount_off = wcount_off
         self._wfd = None
         self.checks = []
         drefs = struct.unpack("<%dI" % descref_cnt, descbuf)
@@ -596,24 +607,30 @@ class IcePack(object):
         return int(self._status[int(self._dir_es[ci]) + ei])
 
     def set_status(self, ci, ei, value):
-        """Set the status byte IN PLACE (pwrite; the read mapping is
-        coherent). Raises OSError if the .ice is not writable."""
+        """Set the status byte IN PLACE (pwrite; the read mapping
+        is coherent) and keep the rule's [wcount] waived counter in
+        sync. Raises OSError if the .ice is not writable."""
         gid = int(self._dir_es[ci]) + ei
         if not 0 <= gid < self.total:
             raise IndexError((ci, ei))
+        value = int(value) & 0xFF
+        old = int(self._status[gid])
+        if old == value:
+            return
         if self._wfd is None:
             self._wfd = os.open(self.path, os.O_RDWR)
-        os.pwrite(self._wfd, bytes((int(value) & 0xFF,)),
+        os.pwrite(self._wfd, bytes((value,)),
                   self._status_off + gid)
+        was = old == STATUS_WAIVED
+        now = value == STATUS_WAIVED
+        if was != now:
+            cur = int(self._wcount[ci]) + (1 if now else -1)
+            os.pwrite(self._wfd, struct.pack("<I", max(0, cur)),
+                      self._wcount_off + 4 * ci)
 
     def status_counts(self, ci):
-        """(waived, total) of one rule via the [status] slice."""
-        es = int(self._dir_es[ci])
-        n = int(self._ecnt[ci])
-        if n == 0:
-            return (0, 0)
-        sl = self._status[es:es + n]
-        return (int((sl == STATUS_WAIVED).sum()), n)
+        """(waived, total) of one rule - O(1) via [wcount]."""
+        return (int(self._wcount[ci]), int(self._ecnt[ci]))
 
     def status_eis(self, ci, waived):
         """Rule-local error indices whose waived-ness matches."""

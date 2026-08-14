@@ -22,7 +22,9 @@ ASCII database directly.
       gen_drcdb asset).
   D6  IcePack.query_rect == brute-force bbox scan on random rects.
   D7  [status] byte: zero at build, in-place set/get via pwrite,
-      persists across reopen, neighbours untouched.
+      persists across reopen, neighbours untouched; the [wcount]
+      per-rule waived counter stays in sync (incl. idempotent sets
+      and reserved-status writes) so filter counts are O(1).
 
 usage: .venv/bin/python tools/validate_drc_ice.py [floe-index-bin]
 """
@@ -301,7 +303,20 @@ def main():
         fail("status did not persist / leaked to neighbours")
     if int(re2._status.sum()) != drc.STATUS_WAIVED + drc.STATUS_RESERVED:
         fail("stray status bytes written")
-    print("D7 OK: status byte set/get, persistent, zero elsewhere")
+    # [wcount]: only the WAIVED write counted; reserved did not
+    n3 = len(re2.checks[3].errors)
+    if re2.status_counts(3) != (1, n3):
+        fail("wcount out of sync: %r" % (re2.status_counts(3),))
+    re2.set_status(3, 2, drc.STATUS_WAIVED)   # idempotent
+    if re2.status_counts(3) != (1, n3):
+        fail("idempotent set bumped wcount")
+    re2.set_status(3, 2, drc.STATUS_NONE)
+    re2.set_status(3, 3, drc.STATUS_NONE)
+    if re2.status_counts(3) != (0, n3):
+        fail("unwaive did not restore wcount")
+    if int(re2._wcount.sum()) != 0:
+        fail("stray wcount entries")
+    print("D7 OK: status byte + wcount counters in sync")
 
     print("DRC ICE VALIDATION: ALL OK")
 
