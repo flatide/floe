@@ -15,11 +15,10 @@ import tempfile
 
 
 def find_binary():
-    """floe-index discovery: PATH, then the dev tree, then next to
-    the interpreter (venv/portable layouts)."""
-    p = shutil.which("floe-index")
-    if p:
-        return p
+    """floe-index discovery: the DEV TREE build first, then dist/
+    and next-to-interpreter (portable layouts), PATH last - a stale
+    binary on PATH once made the viewer's DRC auto-indexing emit an
+    old pack layout that the reader then refused (2026-08-14)."""
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     for cand in (
         os.path.join(here, "rust", "target", "release", "floe-index"),
@@ -29,9 +28,12 @@ def find_binary():
     ):
         if os.path.isfile(cand) and os.access(cand, os.X_OK):
             return cand
+    p = shutil.which("floe-index")
+    if p:
+        return p
     raise RuntimeError(
-        "floe-index binary not found (PATH, rust/target/release, "
-        "dist/) - the VFS cache needs the rust daemon")
+        "floe-index binary not found (rust/target/release, dist/, "
+        "PATH) - the VFS cache needs the rust daemon")
 
 
 class VfsClient:

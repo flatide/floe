@@ -3485,6 +3485,13 @@ class Viewer:
                 self._set_live_status("DRC indexing cancelled")
             elif rc == 0:
                 self.load_drc(path)
+                if not isinstance(self._drc, drc_mod.IcePack):
+                    # the indexer that just ran wrote a layout the
+                    # reader refuses: it is an OUTDATED binary
+                    self._set_live_status(
+                        "DRC pack from %s is an old layout - "
+                        "rebuild it: cd rust && cargo build "
+                        "--release" % bin_)
             else:
                 self._set_live_status(
                     "DRC indexing failed (rc %d)" % rc)
@@ -3559,9 +3566,13 @@ class Viewer:
                 continue
             rstore.append([c.name, "%d" % cnt, ci])
             shown += 1
+        backend = ("pack v4" if isinstance(db, drc_mod.IcePack)
+                   else "v1 sidecar (no pack!)"
+                   if isinstance(db, drc_mod.IceDb)
+                   else "ASCII - NO INDEX")
         win._info.set_text(
-            "%s — cell %s · %d/%d rules · %d errors"
-            % (os.path.basename(db.path), db.cell, shown,
+            "%s [%s] — cell %s · %d/%d rules · %d errors"
+            % (os.path.basename(db.path), backend, db.cell, shown,
                len(db.checks), db.total))
 
     def _drc_wf_count(self, db, ci):
