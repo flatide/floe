@@ -3434,9 +3434,10 @@ class Viewer:
         self._drc_sel = None
         self._drc_grid_fill(ci)
         self._drc_show_rule(ci)
-        if self._drc_hl:
-            self._drc_hl_res = None
-            self._display()
+        # the rule's errors are painted on the canvas: repaint NOW,
+        # not on the next incidental redraw (user call 2026-08-14)
+        self._drc_hl_res = None
+        self._display()
 
     def _on_drc_grid_alloc(self, _w, alloc):
         n = max(1, min(24, alloc.width // max(24, self._drc_cellw)))
