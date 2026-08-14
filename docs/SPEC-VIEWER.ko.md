@@ -100,9 +100,11 @@ recolor: 행 스와치 재생성(set_color) + meta 갱신 + 개인 layerprops
 - `drc.load_db`가 소스: .ice 사이드카(신선)면 IceDb(mmap, 레코드
   단위 lazy 디코드), 아니면 ASCII 전체 파스. 인터페이스 동일
   (checks[].errors는 시퀀스 프로토콜).
-- prev/next(n/p)는 **열린 룰 안에서 순환**(2026-08-15; 이전엔 전
-  룰 전역 워크). 전수 리스트 없음 — 룰-로컬 인덱스 산술만
-  (`_drc_pos`는 전역 좌표 유지, 룰 경계에서 wrap).
+- prev/next(n/p)는 **현재 보이는 목록 안에서 순환**(2026-08-15):
+  목록 = selected ∧ in-view ∧ waive 필터의 교집합, 페이지 경계는
+  자동 이동. base 종류별 스텝(`_drc_step_ei`): None=전체 산술,
+  리스트=index 순환, lazy 상태필터=status_rank→status_page(다음
+  1개만) — 전수 리스트 없음.
 - **open .db… 다이얼로그**(2026-08-14): 파일 타입은 `*.db`만.
   선택한 .db는 직접 파스하지 않고 **오직 `<db>.ice`(pack)만
   로딩** — 신선한 v3 pack이 없으면(부재/스테일/v1/구 레이아웃)
@@ -152,8 +154,10 @@ recolor: 행 스와치 재생성(set_color) + meta 갱신 + 개인 layerprops
 - **에러 번호 = 전역 파일순 순번**(Calibre RVE와 동일, 파일의 서수
   토큰 무시): 모든 백엔드(ASCII/v1/v2)가 동일 번호를 내며, 룰별
   트리 나열은 저장순=파일순이라 자동 오름차순.
-- **filter errors in view**(체크박스, packed .ice v2 전용 — 구
-  highlight, 2026-08-14 의미 전환): **순수 목록 필터**. 선택된 룰의
+- **in view**(체크박스, packed .ice v2 전용 — 구 filter errors in
+  view/highlight): **순수 목록 필터**. **selected**(체크박스,
+  2026-08-15): gold 선택 에러만 목록에 — 두 체크와 waive 콤보는
+  교집합으로 합성. 선택된 룰의
   뷰포트 내 위반(상한 DRC_HL_CAP 1000)만 그리드에 나열
   (`_drc_grid_map` = in-view ei 리스트; 오버레이 패스의
   `_drc_hl_list()` 호출이 뷰 키 캐시를 갱신하고 idle로 그리드를

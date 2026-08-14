@@ -86,8 +86,8 @@ DRC_GOLD = 0xFFD700FF      # box-selected errors (canvas + grid)
 class _DrcPanel(object):
     """Widget refs of the embedded DRC browser (attribute bag)."""
     __slots__ = ("_info", "_rules", "_rstore", "_grid", "_gstore",
-                 "_detail", "_hl", "_wf", "_plabel", "_pprev",
-                 "_pnext")
+                 "_detail", "_hl", "_wf", "_selv", "_plabel",
+                 "_pprev", "_pnext")
 
 MIN_SPP = 0.01     # max zoom-in: 1 px = 0.01 dbu; keeps render bboxes
                    # from collapsing to zero width after int rounding
@@ -912,6 +912,7 @@ class Viewer:
                                     # kind, pts dbu) for the canvas
         self._drc_grid_base = None  # filtered ei base (None = all)
         self._drc_wfilter = "all"   # all | notwaived | waived
+        self._drc_show_sel = False  # 'selected' list filter
         self._drc_sel = None        # box selection ('e'): (ci,
                                     # [ei], [(ei, kind, pts dbu)],
                                     # frozenset(ei))
@@ -1353,6 +1354,7 @@ class Viewer:
         self._drc_grid_base = None
         self._drc_page = 0
         self._drc_page_marks = []
+        self._drc_show_sel = False
         self._drc_sel = None
         self._esel_start = None
         self._drc_focus = None
@@ -3313,14 +3315,19 @@ class Viewer:
             nb = Gtk.Button(label=text)
             nb.connect("clicked", lambda _w, dd=d: self._drc_step(dd))
             nav.pack_start(nb, True, True, 2)
-        hl = Gtk.CheckButton(label="filter errors in view")
+        hl = Gtk.CheckButton(label="in view")
         hl.set_active(self._drc_hl)
-        hl.set_tooltip_text("list only the selected rule's errors "
-                            "inside the current view "
-                            "(packed .ice v2 only)")
+        hl.set_tooltip_text("list only the errors inside the "
+                            "current view (packed .ice v2 only)")
         hl.connect("toggled", self._on_drc_hl)
         nav.pack_start(hl, False, False, 2)
         win._hl = hl
+        selv = Gtk.CheckButton(label="selected")
+        selv.set_tooltip_text("list only the box/Ctrl-selected "
+                              "errors")
+        selv.connect("toggled", self._on_drc_selview)
+        nav.pack_start(selv, False, False, 2)
+        win._selv = selv
         wf = Gtk.ComboBoxText()
         for wid, lbl in (("all", "All"),
                          ("notwaived", "Not Waived"),
@@ -3670,6 +3677,12 @@ class Viewer:
         with _dprof("wfilter: display"):
             self._display()
 
+    def _on_drc_selview(self, btn):
+        self._drc_show_sel = btn.get_active()
+        if self._drc_open is not None:
+            self._drc_grid_fill(self._drc_open)
+        self._display()
+
     def _drc_page_step(self, delta):
         ci = self._drc_grid_ci
         if ci is None:
@@ -3772,13 +3785,30 @@ class Viewer:
         self._drc_cell = None
         self._drc_grid_ci = ci
         c = db.checks[ci]
+        # the visible list = selected ∧ in-view ∧ waive filter
+        # (each stage narrows; None = every error of the rule)
+        base = None
+        sel = self._drc_sel
+        if self._drc_show_sel and sel is not None \
+                and sel[0] == ci and sel[1]:
+            base = list(sel[1])
         if self._drc_hl and hasattr(db, "query_rect"):
-            base = [ei for rci, ei, _k, _p in self._drc_hl_list()
-                    if rci == ci]
-        elif self._drc_wfilter != "all":
-            base = self._drc_wf_base(db, ci)
-        else:
-            base = None
+            inview = [ei for rci, ei, _k, _p in self._drc_hl_list()
+                      if rci == ci]
+            if base is None:
+                base = inview
+            else:
+                iv = set(inview)
+                base = [ei for ei in base if ei in iv]
+        if self._drc_wfilter != "all":
+            if base is None:
+                base = self._drc_wf_base(db, ci)
+            elif hasattr(db, "get_status"):
+                want = self._drc_wfilter == "waived"
+                base = [ei for ei in base
+                        if (db.get_status(ci, ei) == 1) == want]
+            elif self._drc_wfilter == "waived":
+                base = []
         if base is None:
             count = len(c.errors)
         elif isinstance(base, tuple):
@@ -4352,39 +4382,66 @@ class Viewer:
         return []
 
     def _drc_step(self, delta):
-        """n/p keys and the prev/next buttons CYCLE within the
-        open rule (user call 2026-08-15; formerly a global walk
-        across every rule)."""
+        """n/p: cycle within the VISIBLE list of the open rule
+        (user call 2026-08-15) - whatever the selected/in-view/
+        waive filters left, across pages."""
         db = self._drc
         ci = self._drc_sel_check()
         if db is None or ci is None:
             self._set_live_status(
                 "n/p cycles the open rule: select a rule first")
             return
-        n = len(db.checks[ci].errors)
-        if not n:
-            self._set_live_status("rule %s has no errors"
-                                  % db.checks[ci].name)
-            return
-        lo = self._drc_cum[ci]
-        if self._drc_pos >= 0 and lo <= self._drc_pos < lo + n:
-            ei = (self._drc_pos - lo + delta) % n
-        else:
-            ei = 0 if delta > 0 else n - 1
         win = self._drcwin
-        # sync the browser BEFORE the jump so the rule-info text the
-        # selection change writes is overwritten by the error detail
+        # sync the browser FIRST so the grid base belongs to ci
+        if win is not None and self._drc_grid_ci != ci:
+            self._drc_page = 0
+            for r in win._rstore:   # the list may be filtered
+                if r[2] == ci:
+                    win._rules.set_cursor(r.path, None, False)
+                    win._rules.scroll_to_cell(
+                        r.path, None, False, 0.0, 0.0)
+                    break
+        n_all = len(db.checks[ci].errors)
+        lo = self._drc_cum[ci]
+        cur = (self._drc_pos - lo
+               if self._drc_pos >= 0
+               and lo <= self._drc_pos < lo + n_all else None)
+        ei = self._drc_step_ei(db, ci, self._drc_grid_base, cur,
+                               delta)
+        if ei is None:
+            self._set_live_status(
+                "no errors in the current list (rule %s)"
+                % db.checks[ci].name)
+            return
         if win is not None:
-            if self._drc_grid_ci != ci:
-                self._drc_page = 0
-                for r in win._rstore:   # the list may be filtered
-                    if r[2] == ci:
-                        win._rules.set_cursor(r.path, None, False)
-                        win._rules.scroll_to_cell(
-                            r.path, None, False, 0.0, 0.0)
-                        break
             self._drc_goto_cell(ci, ei)
         self._drc_jump(ci, ei)
+
+    def _drc_step_ei(self, db, ci, base, cur, delta):
+        """Next/previous ei within the visible list, wrapping."""
+        if base is None:
+            n = len(db.checks[ci].errors)
+            if not n:
+                return None
+            if cur is None:
+                return 0 if delta > 0 else n - 1
+            return (cur + delta) % n
+        if isinstance(base, tuple):     # lazy waive filter
+            waived = base[1]
+            cnt = self._drc_wf_count(db, ci)
+            if not cnt:
+                return None
+            rank = (db.status_rank(ci, waived, cur)
+                    if cur is not None else None)
+            nrank = ((rank + delta) % cnt if rank is not None
+                     else (0 if delta > 0 else cnt - 1))
+            page = db.status_page(ci, waived, nrank, 1)
+            return page[0] if page else None
+        if not base:
+            return None
+        if cur is None or cur not in base:
+            return base[0] if delta > 0 else base[-1]
+        return base[(base.index(cur) + delta) % len(base)]
 
     def _drc_goto_cell(self, ci, ei):
         """Flip the grid to the page holding ei and mark its
