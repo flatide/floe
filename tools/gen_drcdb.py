@@ -14,7 +14,13 @@ viewer must hide. Error mix exercises every viewer path:
 usage:
   .venv/bin/python tools/gen_drcdb.py data/drctest.db \
       [--checks 1000] [--max-errors 1000] [--precision 40000] \
-      [--die 0,0,4300,3100] [--seed 42]
+      [--die 0,0,4300,3100] [--seed 42] \
+      [--zeros N] [--heavy 120000,250000,...]
+
+--zeros N spreads N zero-error rules evenly through the list;
+--heavy c1,c2,... assigns those exact counts to evenly spaced
+rules (browser stress: 0-rule display, >100k-rule grids, 6-digit
+global numbers).
 
 Then index and open:
   rust/target/release/floe-index drc data/drctest.db
@@ -45,6 +51,11 @@ def main():
     ap.add_argument("--die", default="0,0,4300,3100",
                     help="die extent in um: x0,y0,x1,y1")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--zeros", type=int, default=0,
+                    help="this many rules get 0 errors")
+    ap.add_argument("--heavy", default="",
+                    help="comma list of exact error counts to "
+                         "assign to evenly spaced rules")
     a = ap.parse_args()
     prec = a.precision
     x0, y0, x1, y1 = (int(float(v) * prec)
@@ -59,6 +70,18 @@ def main():
                "foundry sign-off - -",
                "Waiver Criteria: see DRM chapter 7 - -")
 
+    counts = [(ci * 37 + 13) % (a.max_errors + 1)
+              for ci in range(a.checks)]
+    if a.zeros:
+        for k in range(min(a.zeros, a.checks)):
+            counts[(k * a.checks) // min(a.zeros, a.checks)
+                   % a.checks] = 0
+    heavy = [int(v) for v in a.heavy.split(",") if v.strip()]
+    for k, h in enumerate(heavy):
+        # offset by 1 so heavies never land on the zero slots
+        counts[(1 + (k * a.checks) // max(1, len(heavy)))
+               % a.checks] = h
+
     total = 0
     with open(a.out, "w") as f:
         f.write("MAIN09_ESD %d\n" % prec)
@@ -66,7 +89,7 @@ def main():
             name = "%s.%s.%d" % (layers[ci % len(layers)],
                                  kinds[(ci * 7) % len(kinds)],
                                  ci % 97 + 1)
-            n = (ci * 37 + 13) % (a.max_errors + 1)
+            n = counts[ci]
             desc = ["Rule File Pathname: sfa14.drc.cal",
                     "Rule File Title: SFA14 CalibreDRC "
                     "S00-V0.5.0.0-ENG_0520"]
