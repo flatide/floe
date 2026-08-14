@@ -3679,6 +3679,7 @@ class Viewer:
             return
         self._drc_page = p       # the fill clamps to the last page
         self._drc_grid_fill(ci)
+        self._display()          # the canvas markers show THIS page
 
     def _on_drc_rule_sel(self, sel):
         """Selecting a rule shows ITS error grid alone (the
@@ -3796,9 +3797,8 @@ class Viewer:
         else:
             eis = base[start:stop]
         self._drc_grid_map = eis
-        win._plabel.set_text(
-            "%d – %d / %d" % (start + 1 if count else 0, stop,
-                              count))
+        win._plabel.set_text("%d / %d" % (self._drc_page + 1,
+                                          pages))
         win._pprev.set_sensitive(self._drc_page > 0)
         win._pnext.set_sensitive(self._drc_page < pages - 1)
         sel = self._drc_sel
