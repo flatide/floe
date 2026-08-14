@@ -100,8 +100,9 @@ recolor: 행 스와치 재생성(set_color) + meta 갱신 + 개인 layerprops
 - `drc.load_db`가 소스: .ice 사이드카(신선)면 IceDb(mmap, 레코드
   단위 lazy 디코드), 아니면 ASCII 전체 파스. 인터페이스 동일
   (checks[].errors는 시퀀스 프로토콜).
-- prev/next 워크는 에러 전수 리스트를 **절대 만들지 않는다** —
-  `_drc_cum` 누적 카운트 + bisect 산술(수억 에러 안전).
+- prev/next(n/p)는 **열린 룰 안에서 순환**(2026-08-15; 이전엔 전
+  룰 전역 워크). 전수 리스트 없음 — 룰-로컬 인덱스 산술만
+  (`_drc_pos`는 전역 좌표 유지, 룰 경계에서 wrap).
 - **open .db… 다이얼로그**(2026-08-14): 파일 타입은 `*.db`만.
   선택한 .db는 직접 파스하지 않고 **오직 `<db>.ice`(pack)만
   로딩** — 신선한 v3 pack이 없으면(부재/스테일/v1/구 레이아웃)

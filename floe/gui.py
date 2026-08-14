@@ -4352,15 +4352,25 @@ class Viewer:
         return []
 
     def _drc_step(self, delta):
-        """n/p keys and the prev/next buttons walk every error."""
-        if not self._drc_total:
+        """n/p keys and the prev/next buttons CYCLE within the
+        open rule (user call 2026-08-15; formerly a global walk
+        across every rule)."""
+        db = self._drc
+        ci = self._drc_sel_check()
+        if db is None or ci is None:
+            self._set_live_status(
+                "n/p cycles the open rule: select a rule first")
             return
-        if self._drc_pos < 0:
-            pos = 0 if delta > 0 else self._drc_total - 1
+        n = len(db.checks[ci].errors)
+        if not n:
+            self._set_live_status("rule %s has no errors"
+                                  % db.checks[ci].name)
+            return
+        lo = self._drc_cum[ci]
+        if self._drc_pos >= 0 and lo <= self._drc_pos < lo + n:
+            ei = (self._drc_pos - lo + delta) % n
         else:
-            pos = (self._drc_pos + delta) % self._drc_total
-        ci = bisect.bisect_right(self._drc_cum, pos) - 1
-        ei = pos - self._drc_cum[ci]
+            ei = 0 if delta > 0 else n - 1
         win = self._drcwin
         # sync the browser BEFORE the jump so the rule-info text the
         # selection change writes is overwritten by the error detail
