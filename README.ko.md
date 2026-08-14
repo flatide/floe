@@ -76,7 +76,7 @@ settled=..` 한 줄이 상시 출력된다(라운드별 비누적 — 성능 실
 | `d` | 디테일 다이얼로그 (low/medium/high = 컷 5/3/1px) |
 | `f`, `Shift+C` | 프레임(cell reference outline) on/off |
 | `l` | LOD on/off · `v` | 커버리지 on/off · `a` | abstract 모드 |
-| `b` | 레이어 흑백(그레이스케일) on/off — DRC 시인성용; highlight 모드가 켜지면 자동 on, 꺼지면 이전 상태 복원 |
+| `b` | 레이어 흑백(그레이스케일) on/off — DRC 시인성용(독립 토글) |
 | `+`/`=` / `-` | 중심 줌 ±(1.25×) |
 | **Ctrl+Z** / **Shift+Z** | Calibre 줌인 50%(스팬 ×0.5) / 줌아웃 50%(×2) |
 | **Ctrl+A** | Zoom All(fit) — 줌아웃은 fit의 **16배**까지 허용 |
@@ -150,10 +150,11 @@ rust/target/release/floe-index drc results.db --pack     # v2 완전 변환
   정본으로 유지. 좌표는 점프할 때 해당 레코드만 읽음.
 - **v2 pack**(`--pack [--jobs N]`): 자기완결 바이너리 변환(실측 1/4~
   1/5, .db 불필요), 병렬 빌드(--jobs 무관 동일 바이트), 위치 쿼리
-  내장 → DRC 브라우저의 **highlight in view** 토글이 활성화된다:
-  브라우저에서 선택한 룰의 위반을 현재 화면 범위에서 일괄 표시
-  (상한 1000). 에러당 1B 리뷰 상태(waived/reserved 등)를 내장해
-  제자리 기록 가능(재-pack 시 초기화).
+  내장 → DRC 브라우저의 **filter errors in view** 토글이
+  활성화된다: 선택한 룰의 에러 중 현재 화면 안에 있는 것만 목록에
+  나열(상한 1000, 뷰를 따라 갱신). 에러당 1B 리뷰 상태
+  (waived/reserved 등)를 내장해 제자리 기록 가능(재-pack 시
+  초기화).
 
 소스가 바뀌면(size/mtime) 인덱스는 자동 무시되고 ASCII 전체 파스로
 폴백하니 `floe-index drc`를 다시 실행하면 된다. 참고: 구 레거시 타일

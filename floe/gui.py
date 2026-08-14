@@ -1725,70 +1725,47 @@ class Viewer:
                          None, RULER_CORE, px=1)
         if self._drc_hl and self._drc is not None \
                 and hasattr(self._drc, "query_rect"):
-            # highlight-in-view: every violation is a zoom-
-            # independent 3x3 cyan square (5x5 for the clicked
-            # one) - user call 2026-08-13
-            focus = self._drc_focus
-            for ci_, ei_, _kind, hpts in self._drc_hl_list():
-                hxs = [p[0] for p in hpts]
-                hys = [p[1] for p in hpts]
-                cxp = sx((min(hxs) + max(hxs)) / 2.0)
-                cyp = sy((min(hys) + max(hys)) / 2.0)
-                s_px = 5 if (focus is not None
-                             and focus[0] == ci_
-                             and focus[1] == ei_) else 3
-                fill_rect(disp, cxp - s_px // 2, cyp - s_px // 2,
-                          s_px, s_px, DRC_CYAN)
+            # in-view FILTER (formerly highlight, 2026-08-14): no
+            # canvas marks of its own - the call keeps the cached
+            # list fresh so the grid follows pans/zooms
+            self._drc_hl_list()
         if self._drc_sel is not None:
-            # box selection ('e'): GOLD on top - squares while
-            # highlight mode is on (covering their cyan twins),
-            # the errors' REAL shapes when it is off (user calls
-            # 2026-08-14)
+            # box selection ('e'): GOLD real shapes; <=2x2 px
+            # errors collapse to marker squares (the in-view
+            # toggle is a pure list filter now - 2026-08-14)
             sci, _seis, marks, _eset = self._drc_sel
             focus = self._drc_focus
-            if self._drc_hl:
-                for ei_, _kind, spts in marks:
-                    hxs = [p[0] for p in spts]
-                    hys = [p[1] for p in spts]
-                    cxp = sx((min(hxs) + max(hxs)) / 2.0)
-                    cyp = sy((min(hys) + max(hys)) / 2.0)
+            budget = 20000   # segments; huge selections stop
+            for ei_, kind, spts in marks:
+                sp = [(sx(x), sy(y)) for x, y in spts]
+                hxs = [p[0] for p in sp]
+                hys = [p[1] for p in sp]
+                if (max(hxs) - min(hxs) <= 2
+                        and max(hys) - min(hys) <= 2):
+                    # <=2x2 px: marker square, like the
+                    # highlight mode (user call 2026-08-14)
+                    cxp = (min(hxs) + max(hxs)) / 2.0
+                    cyp = (min(hys) + max(hys)) / 2.0
                     s_px = 5 if (focus is not None
                                  and focus[0] == sci
                                  and focus[1] == ei_) else 3
                     fill_rect(disp, cxp - s_px // 2,
-                              cyp - s_px // 2, s_px, s_px, DRC_GOLD)
-            else:
-                budget = 20000   # segments; huge selections stop
-                for ei_, kind, spts in marks:
-                    sp = [(sx(x), sy(y)) for x, y in spts]
-                    hxs = [p[0] for p in sp]
-                    hys = [p[1] for p in sp]
-                    if (max(hxs) - min(hxs) <= 2
-                            and max(hys) - min(hys) <= 2):
-                        # <=2x2 px: marker square, like the
-                        # highlight mode (user call 2026-08-14)
-                        cxp = (min(hxs) + max(hxs)) / 2.0
-                        cyp = (min(hys) + max(hys)) / 2.0
-                        s_px = 5 if (focus is not None
-                                     and focus[0] == sci
-                                     and focus[1] == ei_) else 3
-                        fill_rect(disp, cxp - s_px // 2,
-                                  cyp - s_px // 2, s_px, s_px,
-                                  DRC_GOLD)
-                        budget -= 1
-                        if budget <= 0:
-                            break
-                        continue
-                    if kind == "p":
-                        segs = list(zip(sp, sp[1:] + sp[:1]))
-                    else:
-                        segs = [(sp[j], sp[j + 1])
-                                for j in range(0, len(sp) - 1, 2)]
-                    for a, b in segs:
-                        stamp_segment(disp, a, b, None, DRC_GOLD)
-                        budget -= 1
+                              cyp - s_px // 2, s_px, s_px,
+                              DRC_GOLD)
+                    budget -= 1
                     if budget <= 0:
                         break
+                    continue
+                if kind == "p":
+                    segs = list(zip(sp, sp[1:] + sp[:1]))
+                else:
+                    segs = [(sp[j], sp[j + 1])
+                            for j in range(0, len(sp) - 1, 2)]
+                for a, b in segs:
+                    stamp_segment(disp, a, b, None, DRC_GOLD)
+                    budget -= 1
+                if budget <= 0:
+                    break
         if self._zoomdrag is not None and self._band_cur is not None:
             x0, y0 = self._zoomdrag
             x1, y1 = self._band_cur
@@ -3308,9 +3285,9 @@ class Viewer:
             nb = Gtk.Button(label=text)
             nb.connect("clicked", lambda _w, dd=d: self._drc_step(dd))
             nav.pack_start(nb, True, True, 2)
-        hl = Gtk.CheckButton(label="highlight in view")
+        hl = Gtk.CheckButton(label="filter errors in view")
         hl.set_active(self._drc_hl)
-        hl.set_tooltip_text("mark the SELECTED rule's violations "
+        hl.set_tooltip_text("list only the selected rule's errors "
                             "inside the current view "
                             "(packed .ice v2 only)")
         hl.connect("toggled", self._on_drc_hl)
@@ -3327,18 +3304,11 @@ class Viewer:
                        and hasattr(self._drc, "query_rect")):
             btn.set_active(False)
             self._set_live_status(
-                "highlight needs a packed index: "
+                "the in-view filter needs a packed index: "
                 "floe-index drc <db> --pack")
             return
         self._drc_hl = on
         self._drc_hl_res = None
-        # highlight defaults the canvas to grayscale for contrast
-        # (user call 2026-08-13); leaving restores the prior state
-        if on:
-            self._mono_saved = self._mono
-            self._set_mono(True, announce=False)
-        else:
-            self._set_mono(self._mono_saved, announce=False)
         if self._drc_open is not None:
             self._drc_grid_fill(self._drc_open)
         self._display()
@@ -3380,7 +3350,7 @@ class Viewer:
         if ci is None:
             self._drc_hl_res = (key, [])
             self._set_live_status(
-                "DRC highlight: select a rule in the browser first")
+                "DRC filter: select a rule in the browser first")
             return []
         bb = self.view_bbox()
         k = self.dbu
@@ -3392,7 +3362,7 @@ class Viewer:
                for rci, rei, e in res]
         self._drc_hl_res = (key, lst)
         self._set_live_status(
-            "DRC highlight %s: %d in view%s"
+            "DRC filter %s: %d in view%s"
             % (self._drc.checks[ci].name, len(lst),
                " (capped)" if len(lst) >= DRC_HL_CAP else ""))
         # the browser grid lists exactly these in-view errors: let
@@ -3727,14 +3697,6 @@ class Viewer:
         if db is None or ei >= len(db.checks[ci].errors):
             return False
         if ev.type == Gdk.EventType.DOUBLE_BUTTON_PRESS:
-            # a jump means inspecting ONE error: highlight mode
-            # switches itself off (user call 2026-08-13)
-            if self._drc_hl:
-                w = self._drcwin
-                if w is not None:
-                    w._hl.set_active(False)
-                else:
-                    self._drc_hl = False
             self._drc_jump(ci, ei)
             return False
         if ev.state & (Gdk.ModifierType.CONTROL_MASK
@@ -3749,11 +3711,9 @@ class Viewer:
                            [(x / self.dbu, y / self.dbu)
                             for x, y in e.pts])
         self._drc_show_detail(ci, ei)
-        if not self._drc_hl:
-            # center the error at the CURRENT zoom (pan only -
-            # user call 2026-08-13)
-            fx, fy = e.center()
-            self.goto(fx, fy, None)
+        # center the error at the CURRENT zoom (pan only)
+        fx, fy = e.center()
+        self.goto(fx, fy, None)
         self._display()
         return False
 
