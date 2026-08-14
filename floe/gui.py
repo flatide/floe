@@ -3160,11 +3160,6 @@ class Viewer:
             self._set_live_status(
                 "error select: open a DRC db and select a rule first")
             return
-        if not hasattr(db, "query_rect"):
-            self._set_live_status(
-                "error select needs a packed index: "
-                "floe-index drc <db> --pack")
-            return
         self.mode = "esel"
         self._esel_start = None
         self._set_cursor(self._idle_cursor())
@@ -3187,29 +3182,32 @@ class Viewer:
         self._esel_apply(a, b)
 
     def _esel_apply(self, a, b):
-        """Box done: select the open rule's errors inside it, show
-        them in the grid and as cyan squares."""
+        """Box done: select the VISIBLE errors inside it - only
+        what is currently painted (the filtered list's page) can be
+        picked up (user call 2026-08-15)."""
         db, ci = self._drc, self._drc_sel_check()
         if db is None or ci is None:
             return
-        k = self.dbu
-        x0, x1 = sorted((a[0] * k, b[0] * k))
-        y0, y1 = sorted((a[1] * k, b[1] * k))
-        res = db.query_rect(x0, y0, x1, y1, cap=DRC_SEL_CAP,
-                            checks=(ci,))
+        x0, x1 = sorted((a[0], b[0]))    # dbu, like the marks
+        y0, y1 = sorted((a[1], b[1]))
         eis = []
         marks = []
-        for _rci, ei, e in res:
-            eis.append(ei)
-            marks.append((ei, e.kind,
-                          [(x / k, y / k) for x, y in e.pts]))
-        self._drc_set_sel((ci, eis, marks, frozenset(eis)))
+        for mci, ei, kind, pts in self._drc_page_marks:
+            if mci != ci:
+                continue
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            if min(xs) <= x1 and max(xs) >= x0 \
+                    and min(ys) <= y1 and max(ys) >= y0:
+                eis.append(ei)
+                marks.append((ei, kind, pts))
+        self._drc_set_sel((ci, eis, marks, frozenset(eis))
+                          if eis else None)
         self._drc_focus = None
         self._drc_grid_fill(ci)
         self._set_live_status(
-            "error select %s: %d selected%s (Esc clears)"
-            % (db.checks[ci].name, len(eis),
-               " (capped)" if len(eis) >= DRC_SEL_CAP else ""))
+            "error select %s: %d of the visible errors selected "
+            "(Esc clears)" % (db.checks[ci].name, len(eis)))
         self._display()
 
     def _build_drc_panel(self):
