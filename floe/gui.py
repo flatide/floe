@@ -20,6 +20,7 @@ import sys
 import time
 
 from . import cache as cache_mod
+from . import drc as drc_mod
 from . import fillpat
 from .service import (RenderWorker, DETAIL_PX, DETAIL_LEVELS,
                       DEFAULT_DETAIL)
@@ -3779,6 +3780,102 @@ class Viewer:
             % (db.checks[ci].name, len(eis)))
         self._display()
 
+    def _on_drc_grid_menu(self, tree, ev):
+        """Right click on an error number: waive/unwaive it - or
+        the whole GOLD selection when one exists (user call
+        2026-08-14; writes the v2 status byte in place)."""
+        hit = tree.get_path_at_pos(int(ev.x), int(ev.y))
+        if hit is None:
+            return False
+        path, col, _cx, _cy = hit
+        row = path.get_indices()[0]
+        ci = self._drc_grid_ci
+        db = self._drc
+        if ci is None or db is None \
+                or row >= self._drc_grid_rows:
+            return False
+        try:
+            j = tree.get_columns().index(col)
+        except ValueError:
+            return False
+        idx = row * self._drc_gridw + j
+        gmap = self._drc_grid_map
+        if idx >= len(gmap):
+            return False
+        ei = gmap[idx]
+        if not hasattr(db, "set_status"):
+            self._set_live_status(
+                "waive needs a packed index: "
+                "floe-index drc <db> --pack")
+            return True
+        self._drc_cell_mark(row, j)
+        self._drc_show_detail(ci, ei)
+        sel = self._drc_sel
+        if sel is not None and sel[0] == ci and sel[1]:
+            targets = list(sel[1])
+            scope = "%d selected" % len(targets)
+        else:
+            targets = [ei]
+            scope = "#%d" % (ei + 1)
+        menu = Gtk.Menu()
+        for label, on in (("waive %s" % scope, True),
+                          ("unwaive %s" % scope, False)):
+            it = Gtk.MenuItem(label=label)
+            it.connect("activate",
+                       lambda _i, o=on, t=targets:
+                       self._drc_set_waived(ci, t, o))
+            menu.append(it)
+        self._drc_menu = menu
+
+        def released(_menu):
+            if self._drc_menu is menu:
+                self._drc_menu = None
+
+        menu.connect("deactivate", released)
+        menu.show_all()
+        if hasattr(menu, "popup_at_pointer"):
+            menu.popup_at_pointer(ev)
+        else:
+            menu.popup(None, None, None, None, ev.button, ev.time)
+        return True
+
+    def _drc_set_waived(self, ci, eis, on):
+        """Write the status byte for the targets and refresh every
+        dependent surface (rule counts, grid, detail, canvas)."""
+        db = self._drc
+        if db is None or not hasattr(db, "set_status"):
+            return
+        val = drc_mod.STATUS_WAIVED if on else drc_mod.STATUS_NONE
+        try:
+            for ei in eis:
+                db.set_status(ci, ei, val)
+        except OSError as exc:
+            self._set_live_status("waive failed (%s) - is the .ice "
+                                  "writable?" % exc)
+            return
+        self._drc_hl_res = None
+        if self._drc_wfilter == "all":
+            self._drc_grid_fill(ci)
+        else:
+            # counts and membership changed under a waive filter:
+            # rebuild the rule list and reselect the open rule
+            keep = self._drc_open
+            self._drc_fill()
+            if keep is not None:
+                for r in self._drcwin._rstore:
+                    if r[2] == keep:
+                        self._drcwin._rules.set_cursor(
+                            r.path, None, False)
+                        break
+        f = self._drc_focus
+        if f is not None and f[0] == ci:
+            self._drc_show_detail(ci, f[1])
+        self._set_live_status(
+            "%s %d error(s) in %s"
+            % ("waived" if on else "unwaived", len(eis),
+               db.checks[ci].name))
+        self._display()
+
     def _drc_cell_mark(self, row, j):
         """Mark ONE grid cell as current: the previous cell reverts
         through the shared formatter (local number, gold when
@@ -3816,7 +3913,11 @@ class Viewer:
 
     def _on_drc_grid_click(self, tree, ev):
         """Click an error number: mark the cell + detail pane;
-        double-click also jumps."""
+        double-click also jumps; Ctrl/Shift edit the selection;
+        right click = waive/unwaive menu."""
+        if ev.button == 3 \
+                and ev.type == Gdk.EventType.BUTTON_PRESS:
+            return self._on_drc_grid_menu(tree, ev)
         if ev.button != 1:
             return False
         hit = tree.get_path_at_pos(int(ev.x), int(ev.y))

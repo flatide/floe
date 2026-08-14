@@ -152,9 +152,10 @@ rust/target/release/floe-index drc results.db --pack     # v2 완전 변환
   1/5, .db 불필요), 병렬 빌드(--jobs 무관 동일 바이트), 위치 쿼리
   내장 → DRC 브라우저의 **filter errors in view** 토글이
   활성화된다: 선택한 룰의 에러 중 현재 화면 안에 있는 것만 목록에
-  나열(상한 1000, 뷰를 따라 갱신). 에러당 1B 리뷰 상태
-  (waived/reserved 등)를 내장해 제자리 기록 가능(재-pack 시
-  초기화).
+  나열(상한 1000, 뷰를 따라 갱신). 에러당 1B 리뷰 상태를 내장 —
+  브라우저 그리드 **우클릭 → waive/unwaive**(gold 선택 시 일괄)로
+  제자리 기록되고 All/Not Waived/Waived 필터와 연동된다(재-pack
+  시 초기화).
 
 소스가 바뀌면(size/mtime) 인덱스는 자동 무시되고 ASCII 전체 파스로
 폴백하니 `floe-index drc`를 다시 실행하면 된다. **뷰어의 open .db…
