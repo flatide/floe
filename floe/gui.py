@@ -908,6 +908,8 @@ class Viewer:
         self._drc_cellw = 60        # px per number cell (probe)
         self._drc_page = 0          # error-grid page of the rule
         self._drc_rules_busy = False   # rebuilding the rules list
+        self._drc_page_marks = []   # this grid page's (ci, ei,
+                                    # kind, pts dbu) for the canvas
         self._drc_grid_base = None  # filtered ei base (None = all)
         self._drc_wfilter = "all"   # all | notwaived | waived
         self._drc_sel = None        # box selection ('e'): (ci,
@@ -1350,6 +1352,7 @@ class Viewer:
         self._drc_grid_map = []
         self._drc_grid_base = None
         self._drc_page = 0
+        self._drc_page_marks = []
         self._drc_sel = None
         self._esel_start = None
         self._drc_focus = None
@@ -1755,15 +1758,16 @@ class Viewer:
             bx, by = self._cursor
             rect_outline(disp, sx(ax), sy(ay), sx(bx), sy(by),
                          None, RULER_CORE, px=1)
-        if self._drc is not None and self._drc_open is not None \
-                and hasattr(self._drc, "query_rect"):
-            # the OPEN rule's in-view errors are ALWAYS visible
-            # (user call 2026-08-14): cyan geometry, tiny ones as
-            # markers. The same call keeps the in-view filter list
-            # fresh so the grid follows pans/zooms.
+        if self._drc is not None and self._drc_open is not None:
+            # the canvas shows the CURRENT GRID PAGE's errors (user
+            # call 2026-08-15: page flips must move the markers) -
+            # geometry prebuilt by _drc_grid_fill
+            if self._drc_hl and hasattr(self._drc, "query_rect"):
+                # keeps the in-view filter grid following the view
+                self._drc_hl_list()
             with _dprof("paint: rule errors"):
                 self._drc_stamp_errs(disp, sx, sy,
-                                     self._drc_hl_list())
+                                     self._drc_page_marks)
         if self._drc_sel is not None:
             # box selection ('e'): GOLD on top of the rule's cyan
             sci, _seis, marks, _eset = self._drc_sel
@@ -3833,6 +3837,26 @@ class Viewer:
         elif f is not None and f[1] in eis:
             idx = eis.index(f[1])
             self._drc_cell_mark(idx // W, idx % W)
+        # the canvas paints THIS page (user call 2026-08-15):
+        # geometry built once per fill; the in-view filter already
+        # decoded its pts, other modes decode the page's blocks
+        k = self.dbu
+        marks = []
+        if self._drc_hl and hasattr(db, "query_rect"):
+            have = {rei: (k2, p2)
+                    for rci, rei, k2, p2 in self._drc_hl_list()
+                    if rci == ci}
+            for ei in eis:
+                kp = have.get(ei)
+                if kp is not None:
+                    marks.append((ci, ei, kp[0], kp[1]))
+        else:
+            errs = c.errors
+            for ei in eis:
+                e = errs[ei]
+                marks.append((ci, ei, e.kind,
+                              [(x / k, y / k) for x, y in e.pts]))
+        self._drc_page_marks = marks
         if _DRC_PROF:
             dt = (time.perf_counter() - _t0) * 1e3
             if dt >= 1.0:
