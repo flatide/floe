@@ -913,9 +913,11 @@ class Viewer:
         self._drc_grid_base = None  # filtered ei base (None = all)
         self._drc_wfilter = "all"   # all | notwaived | waived
         self._drc_show_sel = False  # 'selected' list filter
-        self._drc_sel = None        # box selection ('e'): (ci,
+        self._drc_sel = None        # OPEN rule's selection: (ci,
                                     # [ei], [(ei, kind, pts dbu)],
                                     # frozenset(ei))
+        self._drc_sels = {}         # ci -> selection (kept across
+                                    # rule switches, 2026-08-15)
         self._esel_start = None     # pending first box corner (dbu)
         self._drc_grid_map = []     # the grid PAGE's ei list
         self._drc_focus = None      # single-clicked error (ci, ei,
@@ -1356,6 +1358,7 @@ class Viewer:
         self._drc_page_marks = []
         self._drc_show_sel = False
         self._drc_sel = None
+        self._drc_sels = {}
         self._esel_start = None
         self._drc_focus = None
         self._drc_hl = False
@@ -3200,7 +3203,7 @@ class Viewer:
             eis.append(ei)
             marks.append((ei, e.kind,
                           [(x / k, y / k) for x, y in e.pts]))
-        self._drc_sel = (ci, eis, marks, frozenset(eis))
+        self._drc_set_sel((ci, eis, marks, frozenset(eis)))
         self._drc_focus = None
         self._drc_grid_fill(ci)
         self._set_live_status(
@@ -3571,6 +3574,7 @@ class Viewer:
         self.drc_mark = None
         self._drc_hl_res = None
         self._drc_sel = None
+        self._drc_sels = {}
         self._esel_start = None
         if self._drcwin is not None:
             self._drc_fill()
@@ -3677,6 +3681,15 @@ class Viewer:
         with _dprof("wfilter: display"):
             self._display()
 
+    def _drc_set_sel(self, selobj):
+        """Set the open rule's selection and keep the per-rule
+        store in sync (None clears the open rule's entry)."""
+        self._drc_sel = selobj
+        if selobj is not None:
+            self._drc_sels[selobj[0]] = selobj
+        elif self._drc_open is not None:
+            self._drc_sels.pop(self._drc_open, None)
+
     def _on_drc_selview(self, btn):
         self._drc_show_sel = btn.get_active()
         if self._drc_open is not None:
@@ -3711,8 +3724,12 @@ class Viewer:
         ci = model.get_value(it, 2)
         if ci == self._drc_open:
             return
+        if self._drc_sel is not None:
+            self._drc_sels[self._drc_sel[0]] = self._drc_sel
         self._drc_open = ci
-        self._drc_sel = None
+        # selections are PER RULE and survive switches (user call
+        # 2026-08-15: 'selected' must keep applying)
+        self._drc_sel = self._drc_sels.get(ci)
         self._drc_page = 0
         with _dprof("rule_sel: grid fill"):
             self._drc_grid_fill(ci)
@@ -3789,9 +3806,11 @@ class Viewer:
         # (each stage narrows; None = every error of the rule)
         base = None
         sel = self._drc_sel
-        if self._drc_show_sel and sel is not None \
-                and sel[0] == ci and sel[1]:
-            base = list(sel[1])
+        if self._drc_show_sel:
+            if sel is not None and sel[0] == ci and sel[1]:
+                base = list(sel[1])
+            else:
+                base = []   # 'selected' with no selection = empty
         if self._drc_hl and hasattr(db, "query_rect"):
             inview = [ei for rci, ei, _k, _p in self._drc_hl_list()
                       if rci == ci]
@@ -3927,8 +3946,8 @@ class Viewer:
         marks = [(e2, errs[e2].kind,
                   [(x / k, y / k) for x, y in errs[e2].pts])
                  for e2 in eis]
-        self._drc_sel = ((ci, eis, marks, frozenset(eset))
-                         if eis else None)
+        self._drc_set_sel((ci, eis, marks, frozenset(eset))
+                          if eis else None)
         self._drc_grid_fill(ci)   # repaint the gold marks
         self._drc_cell_mark(row, j)
         self._drc_show_detail(ci, ei)
@@ -4623,7 +4642,7 @@ class Viewer:
         elif self.selection is not None:
             self._clear_selection()
         elif self._drc_sel is not None:
-            self._drc_sel = None
+            self._drc_set_sel(None)
             if self._drc_grid_ci is not None:
                 self._drc_grid_fill(self._drc_grid_ci)
         elif self.drc_mark is not None or self._drc_focus is not None:
