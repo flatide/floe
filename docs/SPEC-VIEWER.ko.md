@@ -157,7 +157,10 @@ recolor: 행 스와치 재생성(set_color) + meta 갱신 + 개인 layerprops
 - **in view**(체크박스, packed .ice v2 전용 — 구 filter errors in
   view/highlight): **순수 목록 필터**. **selected**(체크박스,
   2026-08-15): gold 선택 에러만 목록에 — 두 체크와 waive 콤보는
-  교집합으로 합성. 선택된 룰의
+  교집합으로 합성. **선택은 룰별 보존**(`_drc_sels` dict: 룰 전환
+  시 저장/복원, Esc·빈 토글은 그 룰 것만 삭제, db 리로드가 전체
+  초기화); selected 체크 상태에서 선택 없는 룰은 **빈 목록**(전체
+  표시 아님). 선택된 룰의
   뷰포트 내 위반(상한 DRC_HL_CAP 1000)만 그리드에 나열
   (`_drc_grid_map` = in-view ei 리스트; 오버레이 패스의
   `_drc_hl_list()` 호출이 뷰 키 캐시를 갱신하고 idle로 그리드를
