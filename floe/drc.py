@@ -702,13 +702,15 @@ class IcePack(object):
                    checks=None):
         """Errors intersecting the um rect -> [(ci, ei, DrcError)].
 
-        Two numpy stages before any varint decode: check bboxes
-        prune whole rules, then the per-error [qbox] lattice (an
-        outward-rounded superset) prunes down to candidate RECORDS;
-        only blocks holding candidates are decoded, and the exact
-        bbox test on the decoded error settles it. Stops at cap.
-        `checks` (iterable of check indices) restricts the query to
-        those rules; None = all."""
+        STREAMING with early exit (2026-08-14): per check the BLOCK
+        table is scanned in chunks (48B/block - 1/64th of qbox);
+        only blocks whose bbox intersects get their 64 qbox rows
+        tested, and only blocks holding candidates are decoded. A
+        wide view fills `cap` within the first blocks and never
+        touches the rest of a huge rule - the previous full-rule
+        qbox scan cost O(rule size) per call (seconds + a cold
+        page-in of hundreds of MB on 100M-error rules).
+        `checks` restricts the query to those rules; None = all."""
         import math as _math
         import numpy as np
         prec = self.precision
@@ -744,19 +746,63 @@ class IcePack(object):
             qhy = q(qy1, cy0, sy, True)
             es = int(self._dir_es[ci])
             n = int(self._ecnt[ci])
-            sl = self._qbox[es:es + n]
-            cand = np.nonzero((sl[:, 0] <= qhx) & (sl[:, 2] >= qlx) &
-                              (sl[:, 1] <= qhy) & (sl[:, 3] >= qly))[0]
-            if not len(cand):
-                continue
             bs = int(self._dir_bs[ci])
-            for brel in np.unique(cand // _ICE2_BLOCK):
-                base = int(brel) * _ICE2_BLOCK
-                for j, e in enumerate(self._block(bs + int(brel))):
+            nblocks = -(-n // _ICE2_BLOCK)
+            B = _ICE2_BLOCK
+            step = 1 << 16          # blocks per vectorized chunk
+            for c0_ in range(0, nblocks, step):
+                c1_ = min(c0_ + step, nblocks)
+                bsl = self._blk[bs + c0_:bs + c1_]
+                bm = ((bsl["x0"] <= qx1) & (bsl["x1"] >= qx0) &
+                      (bsl["y0"] <= qy1) & (bsl["y1"] >= qy0))
+                bhits = np.nonzero(bm)[0]
+                if not len(bhits):
+                    continue
+                if len(bhits) <= 64:
+                    # sparse: touch only the hit blocks' qbox rows
+                    for brel in bhits:
+                        brel = int(brel) + c0_
+                        base = brel * B
+                        rcnt = min(B, n - base)
+                        qs = self._qbox[es + base:es + base + rcnt]
+                        qm = ((qs[:, 0] <= qhx) &
+                              (qs[:, 2] >= qlx) &
+                              (qs[:, 1] <= qhy) &
+                              (qs[:, 3] >= qly))
+                        if not qm.any():
+                            continue
+                        errs = self._block(bs + brel)
+                        for j in np.nonzero(qm)[0]:
+                            e = errs[int(j)]
+                            bb = e.bbox()
+                            if bb[0] <= x1_um and bb[2] >= x0_um \
+                                    and bb[1] <= y1_um \
+                                    and bb[3] >= y0_um:
+                                out.append((ci, base + int(j), e))
+                                if len(out) >= cap:
+                                    return out
+                    continue
+                # dense (file-order block bboxes are wide): one
+                # vectorized qbox pass over the chunk's row span
+                # beats thousands of per-block python iterations
+                r0 = c0_ * B
+                rcnt = min(c1_ * B, n) - r0
+                qs = self._qbox[es + r0:es + r0 + rcnt]
+                qm = ((qs[:, 0] <= qhx) & (qs[:, 2] >= qlx) &
+                      (qs[:, 1] <= qhy) & (qs[:, 3] >= qly))
+                errs = None
+                cur = -1
+                for r in np.nonzero(qm)[0]:
+                    grel = r0 + int(r)
+                    brel = grel // B
+                    if brel != cur:
+                        cur = brel
+                        errs = self._block(bs + brel)
+                    e = errs[grel - brel * B]
                     bb = e.bbox()
                     if bb[0] <= x1_um and bb[2] >= x0_um \
                             and bb[1] <= y1_um and bb[3] >= y0_um:
-                        out.append((ci, base + j, e))
+                        out.append((ci, grel, e))
                         if len(out) >= cap:
                             return out
         return out
