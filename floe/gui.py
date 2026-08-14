@@ -3575,10 +3575,14 @@ class Viewer:
         return w if self._drc_wfilter == "waived" else t - w
 
     def _drc_wf_base(self, db, ci):
-        """Filtered ei base list, or None meaning ALL errors."""
-        if not hasattr(db, "status_eis"):
+        """Grid base under the waive filter: None = all errors,
+        list = explicit eis, ('status', waived) = LAZY - pages come
+        from status_page so a 100M-error rule never materializes
+        its filtered list (field report 2026-08-14: filter
+        switches still took seconds)."""
+        if not hasattr(db, "status_page"):
             return [] if self._drc_wfilter == "waived" else None
-        return db.status_eis(ci, self._drc_wfilter == "waived")
+        return ("status", self._drc_wfilter == "waived")
 
     def _on_drc_wfilter(self, combo):
         wid = combo.get_active_id() or "all"
@@ -3693,14 +3697,23 @@ class Viewer:
             base = self._drc_wf_base(db, ci)
         else:
             base = None
-        count = len(c.errors) if base is None else len(base)
+        if base is None:
+            count = len(c.errors)
+        elif isinstance(base, tuple):
+            count = self._drc_wf_count(db, ci)   # O(1) via wcount
+        else:
+            count = len(base)
         self._drc_grid_base = base
         pages = max(1, -(-count // DRC_PAGE))
         self._drc_page = max(0, min(self._drc_page, pages - 1))
         start = self._drc_page * DRC_PAGE
         stop = min(start + DRC_PAGE, count)
-        eis = (list(range(start, stop)) if base is None
-               else base[start:stop])
+        if base is None:
+            eis = list(range(start, stop))
+        elif isinstance(base, tuple):
+            eis = db.status_page(ci, base[1], start, stop - start)
+        else:
+            eis = base[start:stop]
         self._drc_grid_map = eis
         win._plabel.set_text(
             "%d – %d / %d" % (start + 1 if count else 0, stop,
@@ -4260,6 +4273,10 @@ class Viewer:
         base = self._drc_grid_base
         if base is None:
             bidx = ei
+        elif isinstance(base, tuple):
+            bidx = self._drc.status_rank(ci, base[1], ei)
+            if bidx is None:
+                return
         elif ei in base:
             bidx = base.index(ei)
         else:

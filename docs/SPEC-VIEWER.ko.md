@@ -112,7 +112,11 @@ recolor: 행 스와치 재생성(set_color) + meta 갱신 + 개인 layerprops
 - **필터/페이지네이션**(2026-08-14): 룰 목록은 **All = 전체 룰
   (에러 0개 포함)**, Not Waived/Waived = 매칭 0개 룰 숨김.
   All/Not Waived/Waived 콤보가 status 바이트 기준으로 룰 카운트·
-  그리드·in-view 필터·캔버스 페인트를 일괄 필터링(실데이터의 waived
+  그리드·in-view 필터·캔버스 페인트를 일괄 필터링. **성능 계약**:
+  카운트 = [wcount] O(1), 필터 그리드 베이스 = `('status', waived)`
+  lazy 서술자 — 페이지는 `status_page`(청크 스캔+조기 종료),
+  n/p 셀 위치는 `status_rank`(단일 카운트) — 어떤 크기의 룰도
+  필터 리스트를 실체화하지 않음(실데이터의 waived
   표기법 미파악 상태라 현재는 전부 Not Waived; v1은 status 없음 →
   Waived 항상 빈 목록). 그리드는 **DRC_PAGE(1000)셀 페이지** —
   ◀ "start – stop / count" ▶ 바, n/p 스텝이 자동으로 페이지를

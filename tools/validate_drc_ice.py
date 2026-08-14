@@ -316,7 +316,20 @@ def main():
         fail("unwaive did not restore wcount")
     if int(re2._wcount.sum()) != 0:
         fail("stray wcount entries")
-    print("D7 OK: status byte + wcount counters in sync")
+    # lazy paging == the materializing oracle
+    n4 = len(re2.checks[4].errors)
+    for ei in (1, 5, 9):
+        re2.set_status(4, ei, drc.STATUS_WAIVED)
+    for waived in (True, False):
+        oracle = re2.status_eis(4, waived)
+        if re2.status_page(4, waived, 0, 10 ** 9) != oracle:
+            fail("status_page != status_eis (waived=%s)" % waived)
+        for rank, ei in enumerate(oracle[:5]):
+            if re2.status_rank(4, waived, ei) != rank:
+                fail("status_rank mismatch")
+    for ei in (1, 5, 9):
+        re2.set_status(4, ei, drc.STATUS_NONE)
+    print("D7 OK: status byte + wcount + lazy paging in sync")
 
     print("DRC ICE VALIDATION: ALL OK")
 

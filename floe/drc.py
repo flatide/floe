@@ -633,7 +633,9 @@ class IcePack(object):
         return (int(self._wcount[ci]), int(self._ecnt[ci]))
 
     def status_eis(self, ci, waived):
-        """Rule-local error indices whose waived-ness matches."""
+        """Rule-local error indices whose waived-ness matches.
+        MATERIALIZES the full list - use status_page/status_rank
+        for huge rules (the viewer does)."""
         import numpy as np
         es = int(self._dir_es[ci])
         n = int(self._ecnt[ci])
@@ -643,6 +645,47 @@ class IcePack(object):
         mask = ((sl == STATUS_WAIVED) if waived
                 else (sl != STATUS_WAIVED))
         return np.nonzero(mask)[0].tolist()
+
+    def status_page(self, ci, waived, start, limit):
+        """The start..start+limit-th MATCHING rule-local indices,
+        scanned in chunks with early exit - a filter page over a
+        100M-error rule never builds the full filtered list."""
+        import numpy as np
+        es = int(self._dir_es[ci])
+        n = int(self._ecnt[ci])
+        out = []
+        seen = 0
+        step = 1 << 22
+        for off in range(0, n, step):
+            sl = self._status[es + off:es + min(off + step, n)]
+            m = ((sl == STATUS_WAIVED) if waived
+                 else (sl != STATUS_WAIVED))
+            cnt = int(m.sum())
+            if seen + cnt <= start:
+                seen += cnt
+                continue
+            idx = np.nonzero(m)[0]
+            lo = max(0, start - seen)
+            for v in idx[lo:lo + (limit - len(out))]:
+                out.append(int(v) + off)
+            seen += cnt
+            if len(out) >= limit:
+                break
+        return out
+
+    def status_rank(self, ci, waived, ei):
+        """Rank of ei among the rule's matching errors (None when
+        ei itself does not match) - one count, no lists."""
+        es = int(self._dir_es[ci])
+        st = int(self._status[es + ei])
+        match = ((st == STATUS_WAIVED) if waived
+                 else (st != STATUS_WAIVED))
+        if not match:
+            return None
+        sl = self._status[es:es + ei]
+        m = ((sl == STATUS_WAIVED) if waived
+             else (sl != STATUS_WAIVED))
+        return int(m.sum())
 
     def _perr(self, gid):
         """Global error id -> DrcError via its 256-record block."""
