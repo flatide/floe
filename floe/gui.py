@@ -1713,7 +1713,7 @@ class Viewer:
                     and max(mys) - min(mys) <= 2):
                 cxp = (min(mxs) + max(mxs)) / 2.0
                 cyp = (min(mys) + max(mys)) / 2.0
-                fill_rect(disp, cxp - 1, cyp - 1, 3, 3, DRC_MARK)
+                fill_rect(disp, cxp - 2, cyp - 2, 5, 5, DRC_MARK)
             elif self.drc_mark["kind"] == "p":
                 self._drc_fill_speckle(disp, pts)
                 for a, b in zip(pts, pts[1:] + pts[:1]):
@@ -3852,9 +3852,6 @@ class Viewer:
                            [(x / self.dbu, y / self.dbu)
                             for x, y in e.pts])
         self._drc_show_detail(ci, ei)
-        # center the error at the CURRENT zoom (pan only)
-        fx, fy = e.center()
-        self.goto(fx, fy, None)
         self._display()
         return False
 
@@ -3958,9 +3955,9 @@ class Viewer:
                     and max(hys) - min(hys) <= 2):
                 cxp = (min(hxs) + max(hxs)) / 2.0
                 cyp = (min(hys) + max(hys)) / 2.0
-                s_px = 5 if (focus is not None
+                s_px = 9 if (focus is not None
                              and focus[0] == ci_
-                             and focus[1] == ei_) else 3
+                             and focus[1] == ei_) else 5
                 fill_rect(disp, cxp - s_px // 2, cyp - s_px // 2,
                           s_px, s_px, color)
                 budget -= 1
