@@ -1723,49 +1723,21 @@ class Viewer:
             bx, by = self._cursor
             rect_outline(disp, sx(ax), sy(ay), sx(bx), sy(by),
                          None, RULER_CORE, px=1)
-        if self._drc_hl and self._drc is not None \
+        if self._drc is not None and self._drc_open is not None \
                 and hasattr(self._drc, "query_rect"):
-            # in-view FILTER (formerly highlight, 2026-08-14): no
-            # canvas marks of its own - the call keeps the cached
-            # list fresh so the grid follows pans/zooms
-            self._drc_hl_list()
+            # the OPEN rule's in-view errors are ALWAYS visible
+            # (user call 2026-08-14): cyan geometry, tiny ones as
+            # markers. The same call keeps the in-view filter list
+            # fresh so the grid follows pans/zooms.
+            self._drc_stamp_errs(disp, sx, sy,
+                                 self._drc_hl_list(), DRC_MARK)
         if self._drc_sel is not None:
-            # box selection ('e'): GOLD real shapes; <=2x2 px
-            # errors collapse to marker squares (the in-view
-            # toggle is a pure list filter now - 2026-08-14)
+            # box selection ('e'): GOLD on top of the rule's cyan
             sci, _seis, marks, _eset = self._drc_sel
-            focus = self._drc_focus
-            budget = 20000   # segments; huge selections stop
-            for ei_, kind, spts in marks:
-                sp = [(sx(x), sy(y)) for x, y in spts]
-                hxs = [p[0] for p in sp]
-                hys = [p[1] for p in sp]
-                if (max(hxs) - min(hxs) <= 2
-                        and max(hys) - min(hys) <= 2):
-                    # <=2x2 px: marker square, like the
-                    # highlight mode (user call 2026-08-14)
-                    cxp = (min(hxs) + max(hxs)) / 2.0
-                    cyp = (min(hys) + max(hys)) / 2.0
-                    s_px = 5 if (focus is not None
-                                 and focus[0] == sci
-                                 and focus[1] == ei_) else 3
-                    fill_rect(disp, cxp - s_px // 2,
-                              cyp - s_px // 2, s_px, s_px,
-                              DRC_GOLD)
-                    budget -= 1
-                    if budget <= 0:
-                        break
-                    continue
-                if kind == "p":
-                    segs = list(zip(sp, sp[1:] + sp[:1]))
-                else:
-                    segs = [(sp[j], sp[j + 1])
-                            for j in range(0, len(sp) - 1, 2)]
-                for a, b in segs:
-                    stamp_segment(disp, a, b, None, DRC_GOLD)
-                    budget -= 1
-                if budget <= 0:
-                    break
+            self._drc_stamp_errs(
+                disp, sx, sy,
+                [(sci, ei_, kind, spts)
+                 for ei_, kind, spts in marks], DRC_GOLD)
         if self._zoomdrag is not None and self._band_cur is not None:
             x0, y0 = self._zoomdrag
             x1, y1 = self._band_cur
@@ -3361,10 +3333,11 @@ class Viewer:
                 [(x / k, y / k) for x, y in e.pts])
                for rci, rei, e in res]
         self._drc_hl_res = (key, lst)
-        self._set_live_status(
-            "DRC filter %s: %d in view%s"
-            % (self._drc.checks[ci].name, len(lst),
-               " (capped)" if len(lst) >= DRC_HL_CAP else ""))
+        if self._drc_hl:
+            self._set_live_status(
+                "DRC filter %s: %d in view%s"
+                % (self._drc.checks[ci].name, len(lst),
+                   " (capped)" if len(lst) >= DRC_HL_CAP else ""))
         # the browser grid lists exactly these in-view errors: let
         # it follow pans/zooms (idle: this runs inside the overlay
         # draw path; the refill re-reads the now-cached list)
@@ -3801,6 +3774,39 @@ class Viewer:
                w_um, h_um, cx, cy))
         self._drc_show_detail(ci, ei)
         self._display()
+
+    def _drc_stamp_errs(self, disp, sx, sy, items, color):
+        """Error painter: real geometry in `color`; errors <=2x2 px
+        on screen collapse to 3x3 marker squares (the focused one:
+        5x5). items = iterable of (ci, ei, kind, pts dbu); a 20k
+        segment budget bounds pathological frames."""
+        focus = self._drc_focus
+        budget = 20000
+        for ci_, ei_, kind, spts in items:
+            sp = [(sx(x), sy(y)) for x, y in spts]
+            hxs = [p[0] for p in sp]
+            hys = [p[1] for p in sp]
+            if (max(hxs) - min(hxs) <= 2
+                    and max(hys) - min(hys) <= 2):
+                cxp = (min(hxs) + max(hxs)) / 2.0
+                cyp = (min(hys) + max(hys)) / 2.0
+                s_px = 5 if (focus is not None
+                             and focus[0] == ci_
+                             and focus[1] == ei_) else 3
+                fill_rect(disp, cxp - s_px // 2, cyp - s_px // 2,
+                          s_px, s_px, color)
+                budget -= 1
+            else:
+                if kind == "p":
+                    segs = list(zip(sp, sp[1:] + sp[:1]))
+                else:
+                    segs = [(sp[j], sp[j + 1])
+                            for j in range(0, len(sp) - 1, 2)]
+                for a, b in segs:
+                    stamp_segment(disp, a, b, None, color)
+                    budget -= 1
+            if budget <= 0:
+                return
 
     def _drc_speckle_strip(self, width):
         """Two-row RGBA checker strip in the mark color (row r: on
