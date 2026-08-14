@@ -55,6 +55,31 @@ DRC_VIEW_FRACTION = 0.3    # error extent ~30% of the view on a jump
 DRC_HL_CAP = 1000          # highlight-in-view marker budget
 DRC_SEL_CAP = 5000         # box-select budget ('e' mode)
 DRC_CYAN = 0x00FFFFFF      # WAIVED errors (geometry+numbers)
+
+# FLOE_DRC_PROF=1: print a per-stage timing breakdown of the DRC
+# browser paths to stderr - for machine-specific slowness reports
+_DRC_PROF = bool(os.environ.get("FLOE_DRC_PROF"))
+
+
+class _dprof(object):
+    """with _dprof("tag"): ... -> [drcprof] tag N ms (>=1ms)."""
+    __slots__ = ("tag", "t0")
+
+    def __init__(self, tag):
+        self.tag = tag
+
+    def __enter__(self):
+        self.t0 = time.perf_counter()
+        return self
+
+    def __exit__(self, *_exc):
+        if _DRC_PROF:
+            dt = (time.perf_counter() - self.t0) * 1e3
+            if dt >= 1.0:
+                sys.stderr.write("[drcprof] %-28s %8.1f ms\n"
+                                 % (self.tag, dt))
+                sys.stderr.flush()
+        return False
 DRC_GOLD = 0xFFD700FF      # box-selected errors (canvas + grid)
 
 
@@ -1735,8 +1760,9 @@ class Viewer:
             # (user call 2026-08-14): cyan geometry, tiny ones as
             # markers. The same call keeps the in-view filter list
             # fresh so the grid follows pans/zooms.
-            self._drc_stamp_errs(disp, sx, sy,
-                                 self._drc_hl_list())
+            with _dprof("paint: rule errors"):
+                self._drc_stamp_errs(disp, sx, sy,
+                                     self._drc_hl_list())
         if self._drc_sel is not None:
             # box selection ('e'): GOLD on top of the rule's cyan
             sci, _seis, marks, _eset = self._drc_sel
@@ -3362,9 +3388,10 @@ class Viewer:
             return []
         bb = self.view_bbox()
         k = self.dbu
-        res = self._drc.query_rect(bb[0] * k, bb[1] * k,
-                                   bb[2] * k, bb[3] * k,
-                                   cap=DRC_HL_CAP, checks=(ci,))
+        with _dprof("hl_list: query_rect"):
+            res = self._drc.query_rect(bb[0] * k, bb[1] * k,
+                                       bb[2] * k, bb[3] * k,
+                                       cap=DRC_HL_CAP, checks=(ci,))
         if self._drc_wfilter != "all" \
                 and hasattr(self._drc, "get_status"):
             want = self._drc_wfilter == "waived"
@@ -3548,6 +3575,7 @@ class Viewer:
         notation is known."""
         win, db = self._drcwin, self._drc
         rstore = win._rstore
+        _t0 = time.perf_counter()
         rstore.clear()
         win._gstore.clear()
         self._drc_open = None
@@ -3557,15 +3585,27 @@ class Viewer:
         self._drc_grid_base = None
         self._drc_cell = None
         self._drc_page = 0
+        _t1 = time.perf_counter()
+        _tc = 0.0
         shown = 0
         for ci, c in enumerate(db.checks):
+            _t2 = time.perf_counter()
             cnt = self._drc_wf_count(db, ci)
+            _tc += time.perf_counter() - _t2
             # All lists EVERY rule, zero-error ones included (user
             # call 2026-08-14); the waive filters hide empty rules
             if cnt <= 0 and self._drc_wfilter != "all":
                 continue
             rstore.append([c.name, "%d" % cnt, ci])
             shown += 1
+        if _DRC_PROF:
+            sys.stderr.write(
+                "[drcprof] rules_fill rules=%d shown=%d clear=%.1f "
+                "counts=%.1f appends=%.1f ms\n"
+                % (len(db.checks), shown,
+                   (_t1 - _t0) * 1e3, _tc * 1e3,
+                   (time.perf_counter() - _t1 - _tc) * 1e3))
+            sys.stderr.flush()
         backend = ("pack v4" if isinstance(db, drc_mod.IcePack)
                    else "v1 sidecar (no pack!)"
                    if isinstance(db, drc_mod.IceDb)
@@ -3599,17 +3639,27 @@ class Viewer:
         wid = combo.get_active_id() or "all"
         if wid == self._drc_wfilter or self._drc is None:
             return
+        if _DRC_PROF:
+            import platform
+            import numpy
+            sys.stderr.write(
+                "[drcprof] == filter -> %s | py %s %s numpy %s\n"
+                % (wid, sys.version.split()[0], platform.machine(),
+                   numpy.__version__))
         self._drc_wfilter = wid
         self._drc_hl_res = None
         keep = self._drc_open
-        self._drc_fill()
-        if keep is not None:
-            for r in self._drcwin._rstore:
-                if r[2] == keep:
-                    self._drcwin._rules.set_cursor(r.path, None,
-                                                   False)
-                    break
-        self._display()
+        with _dprof("wfilter: rules refill"):
+            self._drc_fill()
+        with _dprof("wfilter: reselect rule"):
+            if keep is not None:
+                for r in self._drcwin._rstore:
+                    if r[2] == keep:
+                        self._drcwin._rules.set_cursor(
+                            r.path, None, False)
+                        break
+        with _dprof("wfilter: display"):
+            self._display()
 
     def _drc_page_step(self, delta):
         ci = self._drc_grid_ci
@@ -3633,12 +3683,14 @@ class Viewer:
         self._drc_open = ci
         self._drc_sel = None
         self._drc_page = 0
-        self._drc_grid_fill(ci)
+        with _dprof("rule_sel: grid fill"):
+            self._drc_grid_fill(ci)
         self._drc_show_rule(ci)
         # the rule's errors are painted on the canvas: repaint NOW,
         # not on the next incidental redraw (user call 2026-08-14)
         self._drc_hl_res = None
-        self._display()
+        with _dprof("rule_sel: display"):
+            self._display()
 
     def _on_drc_grid_alloc(self, _w, alloc):
         n = max(1, min(24, alloc.width // max(24, self._drc_cellw)))
@@ -3696,6 +3748,7 @@ class Viewer:
         win, db = self._drcwin, self._drc
         if win is None or db is None:
             return
+        _t0 = time.perf_counter()
         gstore = win._gstore
         gstore.clear()
         self._drc_cell = None
@@ -3767,6 +3820,17 @@ class Viewer:
         elif f is not None and f[1] in eis:
             idx = eis.index(f[1])
             self._drc_cell_mark(idx // W, idx % W)
+        if _DRC_PROF:
+            dt = (time.perf_counter() - _t0) * 1e3
+            if dt >= 1.0:
+                sys.stderr.write(
+                    "[drcprof] grid_fill ci=%d page=%d cells=%d "
+                    "base=%s %8.1f ms\n"
+                    % (ci, self._drc_page, len(eis),
+                       ("all" if base is None else
+                        "lazy" if isinstance(base, tuple)
+                        else "list"), dt))
+                sys.stderr.flush()
 
     def _drc_sel_click(self, ci, row, j, idx, ei, is_range):
         """Grid selection editing (user call 2026-08-14):
