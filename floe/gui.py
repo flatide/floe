@@ -3552,7 +3552,9 @@ class Viewer:
         shown = 0
         for ci, c in enumerate(db.checks):
             cnt = self._drc_wf_count(db, ci)
-            if cnt <= 0:
+            # All lists EVERY rule, zero-error ones included (user
+            # call 2026-08-14); the waive filters hide empty rules
+            if cnt <= 0 and self._drc_wfilter != "all":
                 continue
             rstore.append([c.name, "%d" % cnt, ci])
             shown += 1

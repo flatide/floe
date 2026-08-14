@@ -108,7 +108,8 @@ recolor: 행 스와치 재생성(set_color) + meta 갱신 + 개인 layerprops
   다이얼로그**에 실시간 표시(cancel = terminate) 후 로딩
   (`_drc_open_db`/`_drc_pack_and_load`, 바이너리는
   vfsclient.find_binary).
-- **필터/페이지네이션**(2026-08-14): 룰 목록은 **에러 0개 룰 제외**,
+- **필터/페이지네이션**(2026-08-14): 룰 목록은 **All = 전체 룰
+  (에러 0개 포함)**, Not Waived/Waived = 매칭 0개 룰 숨김.
   All/Not Waived/Waived 콤보가 status 바이트 기준으로 룰 카운트·
   그리드·in-view 필터·캔버스 페인트를 일괄 필터링(실데이터의 waived
   표기법 미파악 상태라 현재는 전부 Not Waived; v1은 status 없음 →
