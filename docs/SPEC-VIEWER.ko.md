@@ -108,6 +108,18 @@ recolor: 행 스와치 재생성(set_color) + meta 갱신 + 개인 layerprops
   다이얼로그**에 실시간 표시(cancel = terminate) 후 로딩
   (`_drc_open_db`/`_drc_pack_and_load`, 바이너리는
   vfsclient.find_binary).
+- **필터/페이지네이션**(2026-08-14): 룰 목록은 **에러 0개 룰 제외**,
+  All/Not Waived/Waived 콤보가 status 바이트 기준으로 룰 카운트·
+  그리드·in-view 필터·캔버스 페인트를 일괄 필터링(실데이터의 waived
+  표기법 미파악 상태라 현재는 전부 Not Waived; v1은 status 없음 →
+  Waived 항상 빈 목록). 그리드는 **DRC_PAGE(1000)셀 페이지** —
+  ◀ "start – stop / count" ▶ 바, n/p 스텝이 자동으로 페이지를
+  넘김(`_drc_goto_cell`). 대형 룰 클릭 시 그리드가 계속 갱신되던
+  루프는 vscrollbar 폭 진동이 원인 — 그리드 스크롤러 vscroll
+  ALWAYS로 고정.
+- **에러 번호 표기**(2026-08-14): 그리드·상태줄은 **룰-로컬 1부터**
+  (`ei+1`), Calibre식 전역 번호는 상세 pane의 `#로컬(전역)`과 점프
+  상태줄로만 노출. 셀 폭은 페이지의 최대 로컬 번호 자릿수.
 - **뷰어 왼쪽 pane에 상시 내장**(2026-08-13; 별도 윈도 폐지 —
   `_build_drc_panel`, `_DrcPanel` 위젯 홀더, 'e' = 미로드 시 db
   열기/이후 포커스, db 로드 시 lpaned ≥420px 자동 확장). 내부는

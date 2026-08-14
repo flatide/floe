@@ -49,7 +49,7 @@ SEL_CORE = 0xFFFFFFFF
 DRC_MARK = 0x00FFFFFF      # DRC violation geometry - all cyan
                            # (user call 2026-08-14; was red)
 
-DRC_LIST_MAX = 2000        # grid cells per rule (prev/next reaches all)
+DRC_PAGE = 1000            # error-grid cells per page
 DRC_GRID_W = 5             # error numbers per browser grid row
 DRC_VIEW_FRACTION = 0.3    # error extent ~30% of the view on a jump
 DRC_HL_CAP = 1000          # highlight-in-view marker budget
@@ -61,7 +61,8 @@ DRC_GOLD = 0xFFD700FF      # box-selected errors (canvas + grid)
 class _DrcPanel(object):
     """Widget refs of the embedded DRC browser (attribute bag)."""
     __slots__ = ("_info", "_rules", "_rstore", "_grid", "_gstore",
-                 "_detail", "_hl")
+                 "_detail", "_hl", "_wf", "_plabel", "_pprev",
+                 "_pnext")
 
 MIN_SPP = 0.01     # max zoom-in: 1 px = 0.01 dbu; keeps render bboxes
                    # from collapsing to zero width after int rounding
@@ -880,12 +881,14 @@ class Viewer:
         self._drc_cell = None       # marked grid cell (row, col)
         self._drc_gridw = DRC_GRID_W   # columns, reflowed to pane
         self._drc_cellw = 60        # px per number cell (probe)
+        self._drc_page = 0          # error-grid page of the rule
+        self._drc_grid_base = None  # filtered ei base (None = all)
+        self._drc_wfilter = "all"   # all | notwaived | waived
         self._drc_sel = None        # box selection ('e'): (ci,
                                     # [ei], [(ei, kind, pts dbu)],
                                     # frozenset(ei))
         self._esel_start = None     # pending first box corner (dbu)
-        self._drc_grid_map = None   # None = all errors (arithmetic)
-                                    # else the in-view ei list (hl)
+        self._drc_grid_map = []     # the grid PAGE's ei list
         self._drc_focus = None      # single-clicked error (ci, ei,
                                     # kind, pts dbu) - emphasized in
                                     # place, no zoom change
@@ -1318,7 +1321,9 @@ class Viewer:
         self._drc_grid_ci = None
         self._drc_grid_rows = 0
         self._drc_cell = None
-        self._drc_grid_map = None
+        self._drc_grid_map = []
+        self._drc_grid_base = None
+        self._drc_page = 0
         self._drc_sel = None
         self._esel_start = None
         self._drc_focus = None
@@ -3229,13 +3234,32 @@ class Viewer:
         # scrolling horizontally (user call 2026-08-13)
         grid.connect("size-allocate", self._on_drc_grid_alloc)
         gsc = Gtk.ScrolledWindow()
+        # ALWAYS-on vscrollbar: its appearing/vanishing width made
+        # the column reflow oscillate on big rules (field report
+        # 2026-08-14 - the 120k rule "kept refreshing")
         gsc.set_policy(Gtk.PolicyType.NEVER,
-                       Gtk.PolicyType.AUTOMATIC)
+                       Gtk.PolicyType.ALWAYS)
         gsc.add(grid)
         _remote_x_scroll_repaint(gsc)
+        pbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                       spacing=2)
+        pprev = Gtk.Button(label="◀")
+        pnext = Gtk.Button(label="▶")
+        plabel = Gtk.Label(label="")
+        for b, d in ((pprev, -1), (pnext, 1)):
+            b.connect("clicked",
+                      lambda _w, dd=d: self._drc_page_step(dd))
+            b.set_sensitive(False)
+        pbar.pack_start(pprev, False, False, 0)
+        pbar.pack_start(plabel, True, True, 0)
+        pbar.pack_start(pnext, False, False, 0)
+        gbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
+                       spacing=2)
+        gbox.pack_start(pbar, False, False, 0)
+        gbox.pack_start(gsc, True, True, 0)
         hsplit = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         hsplit.pack1(rsc, resize=True, shrink=True)
-        hsplit.pack2(gsc, resize=True, shrink=True)
+        hsplit.pack2(gbox, resize=True, shrink=True)
         hsplit.set_position(220)
         paned = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL)
         paned.pack1(hsplit, resize=True, shrink=True)
@@ -3265,8 +3289,18 @@ class Viewer:
         hl.connect("toggled", self._on_drc_hl)
         nav.pack_start(hl, False, False, 2)
         win._hl = hl
+        wf = Gtk.ComboBoxText()
+        for wid, lbl in (("all", "All"),
+                         ("notwaived", "Not Waived"),
+                         ("waived", "Waived")):
+            wf.append(wid, lbl)
+        wf.set_active_id("all")
+        wf.connect("changed", self._on_drc_wfilter)
+        nav.pack_start(wf, False, False, 2)
+        win._wf = wf
         win._rules, win._rstore = rules, rstore
         win._grid, win._gstore = grid, gstore
+        win._plabel, win._pprev, win._pnext = plabel, pprev, pnext
         self._drcwin = win
         return box
 
@@ -3315,7 +3349,8 @@ class Viewer:
         selected rule changes (user call 2026-08-13: one rule at a
         time, cap DRC_HL_CAP)."""
         ci = self._drc_sel_check()
-        key = (self.cx, self.cy, self.spp, id(self._drc), ci)
+        key = (self.cx, self.cy, self.spp, id(self._drc), ci,
+               self._drc_wfilter)
         cached = self._drc_hl_res
         if cached is not None and cached[0] == key:
             return cached[1]
@@ -3329,6 +3364,12 @@ class Viewer:
         res = self._drc.query_rect(bb[0] * k, bb[1] * k,
                                    bb[2] * k, bb[3] * k,
                                    cap=DRC_HL_CAP, checks=(ci,))
+        if self._drc_wfilter != "all" \
+                and hasattr(self._drc, "get_status"):
+            want = self._drc_wfilter == "waived"
+            res = [r for r in res
+                   if (self._drc.get_status(r[0], r[1]) == 1)
+                   == want]   # 1 = STATUS_WAIVED
         lst = [(rci, rei, e.kind,
                 [(x / k, y / k) for x, y in e.pts])
                for rci, rei, e in res]
@@ -3492,9 +3533,11 @@ class Viewer:
         return True
 
     def _drc_fill(self):
-        """Rules list: NAME and error count only - no subtitle
-        (user call 2026-08-13); the description lives in the
-        detail pane."""
+        """Rules list: NAME + error count under the current waive
+        filter; rules with no matching errors are hidden (user
+        call 2026-08-14). No waived state exists in the data yet,
+        so every error counts as Not Waived until Calibre's
+        notation is known."""
         win, db = self._drcwin, self._drc
         rstore = win._rstore
         rstore.clear()
@@ -3502,12 +3545,63 @@ class Viewer:
         self._drc_open = None
         self._drc_grid_ci = None
         self._drc_grid_rows = 0
+        self._drc_grid_map = []
+        self._drc_grid_base = None
         self._drc_cell = None
+        self._drc_page = 0
+        shown = 0
         for ci, c in enumerate(db.checks):
-            rstore.append([c.name, "%d" % len(c.errors), ci])
-        win._info.set_text("%s — cell %s · %d checks · %d errors"
-                           % (os.path.basename(db.path), db.cell,
-                              len(db.checks), db.total))
+            cnt = self._drc_wf_count(db, ci)
+            if cnt <= 0:
+                continue
+            rstore.append([c.name, "%d" % cnt, ci])
+            shown += 1
+        win._info.set_text(
+            "%s — cell %s · %d/%d rules · %d errors"
+            % (os.path.basename(db.path), db.cell, shown,
+               len(db.checks), db.total))
+
+    def _drc_wf_count(self, db, ci):
+        """Error count of a rule under the waive filter."""
+        total = len(db.checks[ci].errors)
+        if self._drc_wfilter == "all":
+            return total
+        if not hasattr(db, "status_counts"):
+            return 0 if self._drc_wfilter == "waived" else total
+        w, t = db.status_counts(ci)
+        return w if self._drc_wfilter == "waived" else t - w
+
+    def _drc_wf_base(self, db, ci):
+        """Filtered ei base list, or None meaning ALL errors."""
+        if not hasattr(db, "status_eis"):
+            return [] if self._drc_wfilter == "waived" else None
+        return db.status_eis(ci, self._drc_wfilter == "waived")
+
+    def _on_drc_wfilter(self, combo):
+        wid = combo.get_active_id() or "all"
+        if wid == self._drc_wfilter or self._drc is None:
+            return
+        self._drc_wfilter = wid
+        self._drc_hl_res = None
+        keep = self._drc_open
+        self._drc_fill()
+        if keep is not None:
+            for r in self._drcwin._rstore:
+                if r[2] == keep:
+                    self._drcwin._rules.set_cursor(r.path, None,
+                                                   False)
+                    break
+        self._display()
+
+    def _drc_page_step(self, delta):
+        ci = self._drc_grid_ci
+        if ci is None:
+            return
+        p = self._drc_page + delta
+        if p < 0:
+            return
+        self._drc_page = p       # the fill clamps to the last page
+        self._drc_grid_fill(ci)
 
     def _on_drc_rule_sel(self, sel):
         """Selecting a rule shows ITS error grid alone (the
@@ -3520,6 +3614,7 @@ class Viewer:
             return
         self._drc_open = ci
         self._drc_sel = None
+        self._drc_page = 0
         self._drc_grid_fill(ci)
         self._drc_show_rule(ci)
         # the rule's errors are painted on the canvas: repaint NOW,
@@ -3573,11 +3668,13 @@ class Viewer:
                     self._drc_cell_mark(idx // n, idx % n)
 
     def _drc_grid_fill(self, ci):
-        """2-D grid of GLOBAL error numbers for one rule (no record
-        decode: the number is the file order, cum[ci] + i + 1).
-        In highlight mode only the errors INSIDE the current view
-        are listed (user call 2026-08-13) and the grid follows the
-        view via _drc_hl_list's recompute."""
+        """One PAGE (DRC_PAGE cells) of the rule's error grid.
+
+        Numbers are RULE-LOCAL 1-based (user call 2026-08-14 - the
+        Calibre-style global number lives in the detail pane as
+        #local(global)). The base honours the waive filter and,
+        with 'filter errors in view' on, the viewport;
+        _drc_grid_map always holds the page's ei list."""
         win, db = self._drcwin, self._drc
         if win is None or db is None:
             return
@@ -3586,26 +3683,34 @@ class Viewer:
         self._drc_cell = None
         self._drc_grid_ci = ci
         c = db.checks[ci]
-        gbase = self._drc_cum[ci]
+        if self._drc_hl and hasattr(db, "query_rect"):
+            base = [ei for rci, ei, _k, _p in self._drc_hl_list()
+                    if rci == ci]
+        elif self._drc_wfilter != "all":
+            base = self._drc_wf_base(db, ci)
+        else:
+            base = None
+        count = len(c.errors) if base is None else len(base)
+        self._drc_grid_base = base
+        pages = max(1, -(-count // DRC_PAGE))
+        self._drc_page = max(0, min(self._drc_page, pages - 1))
+        start = self._drc_page * DRC_PAGE
+        stop = min(start + DRC_PAGE, count)
+        eis = (list(range(start, stop)) if base is None
+               else base[start:stop])
+        self._drc_grid_map = eis
+        win._plabel.set_text(
+            "%d – %d / %d" % (start + 1 if count else 0, stop,
+                              count))
+        win._pprev.set_sensitive(self._drc_page > 0)
+        win._pnext.set_sensitive(self._drc_page < pages - 1)
         sel = self._drc_sel
         eset = (sel[3] if sel is not None and sel[0] == ci
                 else frozenset())
-        cap_note = None
-        if self._drc_hl and hasattr(db, "query_rect"):
-            eis = [ei for rci, ei, _k, _p in self._drc_hl_list()
-                   if rci == ci]
-            maxnum = gbase + (eis[-1] + 1 if eis else 1)
-            if len(eis) >= DRC_HL_CAP:
-                cap_note = DRC_HL_CAP
-        else:
-            eis = None
-            maxnum = gbase + max(1, min(len(c.errors),
-                                        DRC_LIST_MAX))
-        # cell width follows THIS rule's widest number (user call
-        # 2026-08-13: single-digit rules wasted space); a width
-        # change reflows the columns before filling
+        # cell width follows the page's widest LOCAL number
+        maxloc = (max(eis) + 1) if eis else 1
         probe = win._grid.create_pango_layout(
-            "0" * max(2, len(str(maxnum))))
+            "0" * max(2, len(str(maxloc))))
         self._drc_cellw = probe.get_pixel_size()[0] + 18
         avail = win._grid.get_allocation().width
         n = max(1, min(24, avail // max(24, self._drc_cellw)))
@@ -3615,46 +3720,24 @@ class Viewer:
         W = self._drc_gridw
 
         def cellfmt(ei):
-            # selected numbers wear GOLD in the grid; the rest stay
-            # plain (user call 2026-08-14: selection no longer
-            # filters the list)
-            t = "%d" % (gbase + ei + 1)
+            t = "%d" % (ei + 1)      # rule-local numbering
             if ei in eset:
                 return ("<span background='#ffd700' "
                         "foreground='#000000'>%s</span>" % t)
             return t
 
-        if eis is not None:
-            self._drc_grid_map = eis
-            for base in range(0, len(eis), W):
-                cells = [cellfmt(ei) for ei in eis[base:base + W]]
-                cells += [""] * (W - len(cells))
-                gstore.append(cells)
-            self._drc_grid_rows = (len(eis) + W - 1) // W
-            if cap_note is not None:
-                gstore.append(["… capped at %d" % cap_note]
-                              + [""] * (W - 1))
-            # keep the focused error marked if it is still in view
-            f = self._drc_focus
-            if f is not None and f[0] == ci and f[1] in eis:
-                idx = eis.index(f[1])
-                self._drc_cell_mark(idx // W, idx % W)
-            else:
-                self._drc_focus = None
-            return
-        self._drc_grid_map = None
-        self._drc_focus = None
-        shown = min(len(c.errors), DRC_LIST_MAX)
-        for base in range(0, shown, W):
-            cells = [cellfmt(i)
-                     for i in range(base, min(base + W, shown))]
+        for b2 in range(0, len(eis), W):
+            cells = [cellfmt(ei) for ei in eis[b2:b2 + W]]
             cells += [""] * (W - len(cells))
             gstore.append(cells)
-        self._drc_grid_rows = (shown + W - 1) // W
-        if len(c.errors) > DRC_LIST_MAX:
-            gstore.append(["… %d more (use prev/next)"
-                           % (len(c.errors) - DRC_LIST_MAX)]
-                          + [""] * (W - 1))
+        self._drc_grid_rows = (len(eis) + W - 1) // W
+        # keep the focused error marked when it is on this page
+        f = self._drc_focus
+        if f is not None and f[0] != ci:
+            self._drc_focus = None
+        elif f is not None and f[1] in eis:
+            idx = eis.index(f[1])
+            self._drc_cell_mark(idx // W, idx % W)
 
     def _drc_sel_click(self, ci, row, j, idx, ei, is_range):
         """Grid selection editing (user call 2026-08-14):
@@ -3671,13 +3754,9 @@ class Viewer:
                 aidx = (self._drc_cell[0] * self._drc_gridw
                         + self._drc_cell[1])
             lo, hi = sorted((aidx, idx))
-            for k2 in range(lo, hi + 1):
-                if self._drc_grid_map is not None:
-                    if k2 >= len(self._drc_grid_map):
-                        break
-                    eset.add(self._drc_grid_map[k2])
-                elif k2 < len(db.checks[ci].errors):
-                    eset.add(k2)
+            gmap = self._drc_grid_map
+            for k2 in range(lo, min(hi + 1, len(gmap))):
+                eset.add(gmap[k2])
         elif ei in eset:
             eset.discard(ei)
         else:
@@ -3699,27 +3778,29 @@ class Viewer:
         self._display()
 
     def _drc_cell_mark(self, row, j):
-        """Mark ONE grid cell as current (no row-wide selection -
-        user call 2026-08-13): previous cell reverts to plain."""
+        """Mark ONE grid cell as current: the previous cell reverts
+        through the shared formatter (local number, gold when
+        selected)."""
         win = self._drcwin
         ci = self._drc_grid_ci
         if win is None or ci is None:
             return
         gstore = win._gstore
-        gbase = self._drc_cum[ci]
         sel = self._drc_sel
         eset = (sel[3] if sel is not None and sel[0] == ci
                 else frozenset())
+        gmap = self._drc_grid_map
 
         def cell_at(r, c_, current):
-            idx = r * self._drc_gridw + c_
-            if self._drc_grid_map is not None:
-                idx = self._drc_grid_map[idx]
-            t = "%d" % (gbase + idx + 1)
+            k2 = r * self._drc_gridw + c_
+            if k2 >= len(gmap):
+                return ""
+            ei = gmap[k2]
+            t = "%d" % (ei + 1)
             if current:
                 return ("<span background='#3465a4' "
                         "foreground='#ffffff'>%s</span>" % t)
-            if idx in eset:
+            if ei in eset:
                 return ("<span background='#ffd700' "
                         "foreground='#000000'>%s</span>" % t)
             return t
@@ -3749,12 +3830,10 @@ class Viewer:
         except ValueError:
             return False
         idx = row * self._drc_gridw + j
-        if self._drc_grid_map is not None:
-            if idx >= len(self._drc_grid_map):
-                return False
-            ei = self._drc_grid_map[idx]
-        else:
-            ei = idx
+        gmap = self._drc_grid_map
+        if idx >= len(gmap):
+            return False
+        ei = gmap[idx]
         db = self._drc
         if db is None or ei >= len(db.checks[ci].errors):
             return False
@@ -3805,7 +3884,7 @@ class Viewer:
             s = db.get_status(ci, ei)
             status = {0: "none", 1: "waived",
                       2: "reserved"}.get(s, "status %d" % s)
-        lines = ["#%d  [%s]" % (e.num, status),
+        lines = ["#%d(%d)  [%s]" % (ei + 1, e.num, status),
                  "rule: %s" % c.name]
         if c.desc:
             lines += c.desc.split("\n")
@@ -3857,8 +3936,8 @@ class Viewer:
         self._drc_ruler = self._drc_cd_ruler(e)
         self.rulers.extend(self._drc_ruler)
         self._set_live_status(
-            "DRC %s #%d/%d · %s · %.3f x %.3f um at (%.3f, %.3f)"
-            % (check.name, e.num, len(check.errors),
+            "DRC %s #%d(%d)/%d · %s · %.3f x %.3f um at (%.3f, %.3f)"
+            % (check.name, ei + 1, e.num, len(check.errors),
                "poly" if e.kind == "p" else "edge",
                w_um, h_um, cx, cy))
         self._drc_show_detail(ci, ei)
@@ -4036,24 +4115,39 @@ class Viewer:
         # selection change writes is overwritten by the error detail
         if win is not None:
             if self._drc_grid_ci != ci:
-                p = Gtk.TreePath.new_from_string(str(ci))
-                win._rules.set_cursor(p, None, False)
-                win._rules.scroll_to_cell(p, None, False, 0.0, 0.0)
-            if self._drc_grid_ci == ci:
-                if self._drc_grid_map is not None:
-                    idx = (self._drc_grid_map.index(ei)
-                           if ei in self._drc_grid_map else None)
-                elif ei < DRC_LIST_MAX:
-                    idx = ei
-                else:
-                    idx = None
-                if idx is not None:
-                    row, j = divmod(idx, self._drc_gridw)
-                    self._drc_cell_mark(row, j)
-                    win._grid.scroll_to_cell(
-                        Gtk.TreePath.new_from_string(str(row)),
-                        None, False, 0.0, 0.0)
+                self._drc_page = 0
+                for r in win._rstore:   # the list may be filtered
+                    if r[2] == ci:
+                        win._rules.set_cursor(r.path, None, False)
+                        win._rules.scroll_to_cell(
+                            r.path, None, False, 0.0, 0.0)
+                        break
+            self._drc_goto_cell(ci, ei)
         self._drc_jump(ci, ei)
+
+    def _drc_goto_cell(self, ci, ei):
+        """Flip the grid to the page holding ei and mark its
+        cell (skips silently when a filter hides it)."""
+        win = self._drcwin
+        if win is None or self._drc_grid_ci != ci:
+            return
+        base = self._drc_grid_base
+        if base is None:
+            bidx = ei
+        elif ei in base:
+            bidx = base.index(ei)
+        else:
+            return
+        page = bidx // DRC_PAGE
+        if page != self._drc_page:
+            self._drc_page = page
+            self._drc_grid_fill(ci)
+        rel = bidx - page * DRC_PAGE
+        row, j = divmod(rel, self._drc_gridw)
+        self._drc_cell_mark(row, j)
+        win._grid.scroll_to_cell(
+            Gtk.TreePath.new_from_string(str(row)),
+            None, False, 0.0, 0.0)
 
     # ---- ruler / snap / pick -----------------------------------------------
     def _update_cursor(self, ev):

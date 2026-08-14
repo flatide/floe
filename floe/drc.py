@@ -606,6 +606,27 @@ class IcePack(object):
         os.pwrite(self._wfd, bytes((int(value) & 0xFF,)),
                   self._status_off + gid)
 
+    def status_counts(self, ci):
+        """(waived, total) of one rule via the [status] slice."""
+        es = int(self._dir_es[ci])
+        n = int(self._ecnt[ci])
+        if n == 0:
+            return (0, 0)
+        sl = self._status[es:es + n]
+        return (int((sl == STATUS_WAIVED).sum()), n)
+
+    def status_eis(self, ci, waived):
+        """Rule-local error indices whose waived-ness matches."""
+        import numpy as np
+        es = int(self._dir_es[ci])
+        n = int(self._ecnt[ci])
+        if n == 0:
+            return []
+        sl = self._status[es:es + n]
+        mask = ((sl == STATUS_WAIVED) if waived
+                else (sl != STATUS_WAIVED))
+        return np.nonzero(mask)[0].tolist()
+
     def _perr(self, gid):
         """Global error id -> DrcError via its 256-record block."""
         ci = bisect.bisect_right(self._dir_es, gid) - 1
