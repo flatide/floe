@@ -3167,11 +3167,12 @@ class Viewer:
             "error select %s: click the 1st box corner (Esc quits)"
             % db.checks[ci].name)
 
-    def _esel_click(self, _ev):
+    def _esel_click(self, ev):
         if self._esel_start is None:
             self._esel_start = self._cursor
             self._set_live_status(
-                "error select: click the opposite corner")
+                "error select: click the opposite corner "
+                "(Shift = add, Ctrl = toggle)")
             self._display()
             return
         a = self._esel_start
@@ -3179,19 +3180,24 @@ class Viewer:
         self._esel_start = None
         self.mode = "normal"
         self._set_cursor(self._idle_cursor())
-        self._esel_apply(a, b)
+        state = getattr(ev, "state", 0)
+        mode = ("toggle" if state & Gdk.ModifierType.CONTROL_MASK
+                else "add" if state & Gdk.ModifierType.SHIFT_MASK
+                else "replace")
+        self._esel_apply(a, b, mode)
 
-    def _esel_apply(self, a, b):
-        """Box done: select the VISIBLE errors inside it - only
-        what is currently painted (the filtered list's page) can be
-        picked up (user call 2026-08-15)."""
+    def _esel_apply(self, a, b, mode="replace"):
+        """Box done: the VISIBLE errors inside it - only what is
+        currently painted (the filtered list's page) can be picked
+        up. mode: replace (plain), add (Shift), toggle (Ctrl) -
+        same second-click modifiers as the grid (user call
+        2026-08-15)."""
         db, ci = self._drc, self._drc_sel_check()
         if db is None or ci is None:
             return
         x0, x1 = sorted((a[0], b[0]))    # dbu, like the marks
         y0, y1 = sorted((a[1], b[1]))
-        eis = []
-        marks = []
+        hits = []
         for mci, ei, kind, pts in self._drc_page_marks:
             if mci != ci:
                 continue
@@ -3199,15 +3205,26 @@ class Viewer:
             ys = [p[1] for p in pts]
             if min(xs) <= x1 and max(xs) >= x0 \
                     and min(ys) <= y1 and max(ys) >= y0:
-                eis.append(ei)
-                marks.append((ei, kind, pts))
+                hits.append((ei, kind, pts))
+        sel = self._drc_sel
+        if mode == "replace" or sel is None or sel[0] != ci:
+            m = {ei: (kind, pts) for ei, kind, pts in hits}
+        else:
+            m = {ei: (kind, pts) for ei, kind, pts in sel[2]}
+            for ei, kind, pts in hits:
+                if mode == "toggle" and ei in m:
+                    del m[ei]
+                else:
+                    m[ei] = (kind, pts)
+        eis = sorted(m)
+        marks = [(ei,) + m[ei] for ei in eis]
         self._drc_set_sel((ci, eis, marks, frozenset(eis))
                           if eis else None)
         self._drc_focus = None
         self._drc_grid_fill(ci)
         self._set_live_status(
-            "error select %s: %d of the visible errors selected "
-            "(Esc clears)" % (db.checks[ci].name, len(eis)))
+            "error select %s [%s]: %d selected (Esc clears)"
+            % (db.checks[ci].name, mode, len(eis)))
         self._display()
 
     def _build_drc_panel(self):
