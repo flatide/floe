@@ -179,3 +179,39 @@ ovm 헤더와 meta.src 모두 소스 절대경로/size/mtime을 기록. `Vfs::op
   구(2) pack을 새 리더가 읽으면 푸터 크기 차이로 qbox가 40B 밀려
   **작은 사각형 쿼리만 조용히 빗나가는** 사고가 실제로 있었음
   (2026-08-13, #5/#8 하이라이트 실종).
+
+## <deck>.rules.json — SVRF 룰 메타데이터 사이드카 (v1)
+
+정본: `floe/svrf.py`(`python -m floe svrf deck.cal [-D SW]…`), 게이트
+`tools/validate_svrf.py` R1~R4. Calibre SVRF 룰덱의 **서브셋 파스**
+결과를 JSON으로 굽고 뷰어는 이 파일만 로드한다(덱 직접 파스 없음).
+목적은 waive 판단 보조: 룰별 제약(연산자·수치)·참조 레이어·원천 GDS
+레이어를 에러 디테일에 붙인다.
+
+- **스코프 컷(핵심)**: 지오메트리 연산 의미는 구현하지 않는다 —
+  derivation(`name = expr`)은 우변의 **피연산자 이름만** 방향
+  그래프 엣지로 넣고(연산자 전부 무시), 체크의 `source_gds`는 이
+  그래프를 LAYER/LAYER MAP 테이블까지 폐쇄(전이)해서 얻는다.
+- 파싱 대상: 전처리(INCLUDE 병합·`#DEFINE`/`#IFDEF`/`#IFNDEF`/
+  `#ELSE`/`#ENDIF`·`#DEFINE` 값 치환·VARIABLE 수치 해석 — **실런과
+  동일한 -D 세트 필수**, 아니면 체크 목록이 달라진다), `LAYER`/
+  `LAYER MAP`, 할당문, 체크 블록(`@` 설명 + 측정문 INTERNAL/INT·
+  EXTERNAL/EXT·ENCLOSURE/ENC·AREA·DENSITY·LENGTH·ANGLE·PERIMETER·
+  VERTEX에서 (metric, op, value) 추출; `>= a <= b` 이중 한계는 제약
+  2건, `ABUT<90`류 붙은 옵션 토큰은 식별자 lookbehind로 제외).
+- 미인식 문장은 히스토그램 카운트 후 스킵(치명 아님). **의도적
+  공백**: DMACRO/CMACRO 비전개(바디는 브레이스 깊이로 통스킵,
+  CMACRO 호출 수를 경고로 노출), TVF(Tcl) 덱은 Calibre가 생성한
+  SVRF 산출물을 입력으로, 멀티라인 문장은 미지원(미지 히스토그램에
+  잡힘). 새 덱은 `--scan`(양쪽 #IFDEF 분기 모두 워크, 인벤토리만
+  출력)을 먼저 돌려 스코프 구멍을 확인한다.
+- JSON 구조(`format: "floe-svrf-rules"`, `version: 1`): `defines`/
+  `variables`/`layers`(이름→[[gds,dt|null]]…)/`derived`(이름→우변
+  원문; 뷰어가 `svrf.rhs_operands()`로 체인 워크)/`checks`(이름→
+  desc·constraints[{metric,op,value,text}]·layers·source_gds·
+  unresolved)/`stats`(스킵·CMACRO·경고 — 침묵 절단 금지).
+- 뷰어 연동: .db 로드 시 자동 탐색(체크 desc의 Rule File Pathname
+  베이스네임 기준 **db 옆** `<deck>.rules.json` 우선 — 덱 절대
+  경로는 Calibre 런 머신 기준이라 뷰잉 머신에 없기 일쑤 — 그다음
+  기록된 경로·`<db>.rules.json`) + DRC 패널 `rules…` 수동 로드.
+  정보줄 `svrf N/M` = 매칭된 룰 수.

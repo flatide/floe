@@ -913,6 +913,10 @@ class Viewer:
         self._drc_grid_base = None  # filtered ei base (None = all)
         self._drc_wfilter = "all"   # all | notwaived | waived
         self._drc_search = ""       # rule-name substring filter
+        self._drc_rmeta = None      # <deck>.rules.json dict (the
+                                    # `floe svrf` sidecar metadata)
+        self._drc_rmatch = (0, 0)   # sidecar-matched / db rules
+        self._drc_shown = 0         # rules listed (info line)
         self._drc_show_sel = False  # 'selected' list filter
         self._drc_sel = None        # OPEN rule's selection: (ci,
                                     # [ei], [(ei, kind, pts dbu)],
@@ -1346,6 +1350,8 @@ class Viewer:
         # a loaded DRC db belongs to the previous layout
         self.drc_mark = None
         self._drc = None
+        self._drc_rmeta = None
+        self._drc_rmatch = (0, 0)
         self._drc_cum = []
         self._drc_total = 0
         self._drc_pos = -1
@@ -3239,6 +3245,13 @@ class Viewer:
         b = Gtk.Button(label="open .db…")
         b.connect("clicked", lambda *_: self._drc_open_dialog())
         top.pack_start(b, False, False, 2)
+        b = Gtk.Button(label="rules…")
+        b.set_tooltip_text(
+            "attach SVRF rule metadata (<deck>.rules.json from "
+            "`python -m floe svrf <deck>`): constraint, source "
+            "layers and measured value in the error detail")
+        b.connect("clicked", lambda *_: self._drc_rules_dialog())
+        top.pack_start(b, False, False, 0)
         info = Gtk.Label(label="no results database loaded")
         info.set_xalign(0.0)
         info.set_ellipsize(Pango.EllipsizeMode.START)
@@ -3602,12 +3615,93 @@ class Viewer:
         self._drc_sel = None
         self._drc_sels = {}
         self._esel_start = None
+        self._drc_rules_auto(path)
         if self._drcwin is not None:
             self._drc_fill()
         self._set_live_status(
             "DRC %s: %d checks, %d errors (n/p = step)"
             % (os.path.basename(path), len(db.checks), db.total))
         return True
+
+    def _drc_rules_auto(self, db_path):
+        """Auto-pick the `floe svrf` rule-metadata sidecar: the
+        deck's Rule File Pathname is an absolute path from the
+        CALIBRE RUN machine, so <deck basename>.rules.json NEXT TO
+        THE DB is searched first, the recorded path second."""
+        self._drc_rmeta = None
+        self._drc_rmatch = (0, 0)
+        deck = None
+        for c in self._drc.checks[:50]:
+            for ln in (c.desc or "").split("\n"):
+                if ln.startswith("Rule File Pathname:"):
+                    deck = ln.split(":", 1)[1].strip()
+                    break
+            if deck:
+                break
+        dbdir = os.path.dirname(os.path.abspath(db_path))
+        cands = []
+        if deck:
+            cands.append(os.path.join(
+                dbdir, os.path.basename(deck) + ".rules.json"))
+            cands.append(deck + ".rules.json")
+        cands.append(db_path + ".rules.json")
+        for p in cands:
+            if os.path.isfile(p):
+                self._drc_rules_load(p, silent=True)
+                return
+
+    def _drc_rules_load(self, path, silent=False):
+        """Attach a <deck>.rules.json metadata sidecar to the open
+        db; the detail pane then shows constraint / measured /
+        source layers per error."""
+        from . import svrf
+        db = self._drc
+        if db is None:
+            if not silent:
+                self._set_live_status("open a DRC .db first")
+            return False
+        try:
+            data = svrf.load_rules(path)
+        except (OSError, ValueError) as exc:
+            if not silent:
+                self._set_live_status(
+                    "rules metadata load failed: %s" % exc)
+            return False
+        meta = data.get("checks", {})
+        matched = sum(1 for c in db.checks if c.name in meta)
+        self._drc_rmeta = data
+        self._drc_rmatch = (matched, len(db.checks))
+        self._drc_info_refresh()
+        if not silent or matched:
+            self._set_live_status(
+                "rules metadata %s: %d/%d rules matched"
+                % (os.path.basename(path), matched, len(db.checks)))
+        return True
+
+    def _drc_rules_dialog(self):
+        dlg = Gtk.FileChooserDialog(
+            title="open rule metadata (*.rules.json)",
+            parent=self.window,
+            action=Gtk.FileChooserAction.OPEN)
+        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                        "Open", Gtk.ResponseType.OK)
+        if self._drc is not None:
+            dlg.set_current_folder(
+                os.path.dirname(os.path.abspath(self._drc.path)))
+        for name, pats in (("rule metadata (*.rules.json)",
+                            ("*.rules.json",)),
+                           ("all files", ("*",))):
+            ff = Gtk.FileFilter()
+            ff.set_name(name)
+            for p in pats:
+                ff.add_pattern(p)
+            dlg.add_filter(ff)
+        if dlg.run() == Gtk.ResponseType.OK:
+            path = dlg.get_filename()
+            dlg.destroy()
+            self._drc_rules_load(path)
+        else:
+            dlg.destroy()
 
     def _drc_fill(self):
         """Rules list: NAME + error count under the current waive
@@ -3655,14 +3749,24 @@ class Viewer:
                    (_t1 - _t0) * 1e3, _tc * 1e3,
                    (time.perf_counter() - _t1 - _tc) * 1e3))
             sys.stderr.flush()
+        self._drc_shown = shown
+        self._drc_info_refresh()
+
+    def _drc_info_refresh(self):
+        win, db = self._drcwin, self._drc
+        if win is None or db is None:
+            return
         backend = ("pack v4" if isinstance(db, drc_mod.IcePack)
                    else "v1 sidecar (no pack!)"
                    if isinstance(db, drc_mod.IceDb)
                    else "ASCII - NO INDEX")
+        rules = ""
+        if self._drc_rmeta is not None:
+            rules = " · svrf %d/%d" % self._drc_rmatch
         win._info.set_text(
-            "%s [%s] — cell %s · %d/%d rules · %d errors"
-            % (os.path.basename(db.path), backend, db.cell, shown,
-               len(db.checks), db.total))
+            "%s [%s] — cell %s · %d/%d rules · %d errors%s"
+            % (os.path.basename(db.path), backend, db.cell,
+               self._drc_shown, len(db.checks), db.total, rules))
 
     def _drc_wf_count(self, db, ci):
         """Error count of a rule under the waive filter."""
@@ -4237,6 +4341,7 @@ class Viewer:
             lines += [ln for ln in c.desc.split("\n")
                       if not ln.startswith(("Rule File Pathname:",
                                             "Rule File Title:"))]
+        lines += self._drc_meta_lines(c.name, e)
         pts = e.pts
         if e.kind == "e":
             lines.append("edge (um):")
@@ -4398,6 +4503,92 @@ class Viewer:
                 budget -= 1
                 if budget <= 0:
                     return
+
+    def _drc_meta_lines(self, name, e):
+        """Detail-pane block from the `floe svrf` sidecar: the
+        constraint as written in the deck, this violation's own
+        measured dimension vs the bound (the waive-decision aid),
+        the referenced layer names + source gds, and the derivation
+        chain that produced them."""
+        meta = self._drc_rmeta
+        mc = meta.get("checks", {}).get(name) if meta else None
+        if not mc:
+            return []
+        lines = [""]
+        cons = mc.get("constraints") or []
+        for t in dict.fromkeys(c.get("text", "") for c in cons):
+            if t:
+                lines.append("constraint: %s" % t)
+        for con in cons:
+            v = con.get("value")
+            if v is None:
+                continue
+            mv = self._drc_measured(e, con.get("metric"))
+            if mv is None:
+                continue
+            pct = (" (%+.1f%%)" % ((mv - v) / v * 100.0)) if v else ""
+            unit = "um2" if con.get("metric") == "area" else "um"
+            lines.append("measured: %.4f %s vs %s %.4f · "
+                         "Δ %+.4f%s"
+                         % (mv, unit, con.get("op", "?"), v,
+                            mv - v, pct))
+            break
+        lays = mc.get("layers") or []
+        if lays:
+            lines.append("layers: %s" % ", ".join(lays))
+        gds = mc.get("source_gds") or []
+        if gds:
+            lines.append("gds: %s" % ", ".join(
+                "%s/%s" % (g, "*" if d is None else d)
+                for g, d in gds))
+        if mc.get("unresolved"):
+            lines.append("unresolved: %s"
+                         % ", ".join(mc["unresolved"]))
+        from . import svrf
+        derived = meta.get("derived", {})
+        out, seen, stack = [], set(), list(lays)
+        while stack and len(out) < 6:
+            n = stack.pop(0)
+            if n in seen or n not in derived:
+                continue
+            seen.add(n)
+            out.append("  %s = %s" % (n, derived[n]))
+            stack.extend(svrf.rhs_operands(derived[n]))
+        if out:
+            lines.append("derivation:")
+            lines += out
+            if any(n in derived and n not in seen for n in stack):
+                lines.append("  …")
+        return lines
+
+    def _drc_measured(self, e, metric):
+        """This violation's own dimension for a sidecar constraint
+        metric - only shapes whose measurement is unambiguous (the
+        same ones that get auto CD rulers). Returns um (um^2 for
+        area) or None."""
+        pts = e.pts   # um
+        if metric == "area":
+            if e.kind != "p" or len(pts) < 3:
+                return None
+            s = 0.0
+            for i in range(len(pts)):
+                x0, y0 = pts[i]
+                x1, y1 = pts[(i + 1) % len(pts)]
+                s += x0 * y1 - x1 * y0
+            return abs(s) / 2.0
+        if metric in ("width", "space", "enclosure"):
+            # rect region -> min span; facing edge pair -> the gap
+            if e.kind == "p" or (e.kind == "e" and len(pts) == 4):
+                segs = self._drc_cd_ruler(e)   # dbu 4-tuples
+                if not segs:
+                    return None
+                return min(math.hypot(x1 - x0, y1 - y0)
+                           for x0, y0, x1, y1 in segs) * self.dbu
+            return None
+        if metric == "length" and e.kind == "e" and len(pts) == 2:
+            return math.hypot(pts[1][0] - pts[0][0],
+                              pts[1][1] - pts[0][1])
+        return None
 
     def _drc_cd_ruler(self, e):
         """CD rulers for SIMPLE violations (list of dbu 4-tuples):

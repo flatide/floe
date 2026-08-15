@@ -116,6 +116,17 @@ recolor: 행 스와치 재생성(set_color) + meta 갱신 + 개인 layerprops
   자리 — n/p 키는 유지)가 룰 이름 부분일치(대소문자 무관)로 목록을
   실시간 필터. TreeView 내장 typeahead 검색은 rules/grid 모두
   비활성(set_enable_search False — 반쪽짜리 팝업 제거).
+- **SVRF 룰 메타데이터**(2026-08-15, SPEC-FORMATS `<deck>.rules.json`
+  참조): db 로드 시 자동 탐색(`_drc_rules_auto` — Rule File Pathname
+  베이스네임의 **db 옆** 사이드카 우선, 기록 경로·`<db>.rules.json`
+  차선) + 패널 `rules…` 버튼 수동 로드. 정보줄에 `svrf 매칭/전체`.
+  상세 pane 하단(`_drc_meta_lines`): 덱 원문 제약(constraint:) ·
+  **measured** = 이 에러 자체의 치수 vs 한계값과 Δ/%(waive 판단
+  보조; `_drc_measured` — CD 룰러와 동일 판정: rect=min(w,h)·마주
+  보는 엣지쌍=갭·단일 엣지=길이·area=신발끈, 복잡 도형은 생략) ·
+  layers(직접 피연산자) · gds(원천 레이어 폐쇄) · derivation 체인
+  (`derived` 맵을 `svrf.rhs_operands`로 워크, 6줄 캡). 메타 없는
+  룰/사이드카 부재 시 상세는 기존 그대로(추가 줄 0).
 - **필터/페이지네이션**(2026-08-14): 룰 목록은 **All = 전체 룰
   (에러 0개 포함)**, Not Waived/Waived = 매칭 0개 룰 숨김.
   All/Not Waived/Waived 콤보가 status 바이트 기준으로 룰 카운트·

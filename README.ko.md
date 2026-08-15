@@ -130,7 +130,8 @@ settled=..` 한 줄이 상시 출력된다(라운드별 비누적 — 성능 실
 
 `python -m floe <cmd>`: `index`(레거시 타일 캐시 .tiles), `info`,
 `render --bbox … --out view.png`, `clip --bbox …`, `probe`, `profile`,
-`drc`(요약; .ice 인덱스 자동 사용), `gtktest`. `floe-index`: `scan`,
+`drc`(요약; .ice 인덱스 자동 사용), `svrf`(SVRF 룰덱 서브셋 파스 →
+`<deck>.rules.json`), `gtktest`. `floe-index`: `scan`,
 `tile`, `index`, `vfs`, `plan`(플래너 계측 JSON), `vfsd`(데몬),
 `drc`(DRC 인덱스 사이드카 굽기).
 
@@ -164,6 +165,26 @@ pack이 없거나 오래되면 그 자리에서 `--pack` 인덱싱을 돌리고 
 모달 창에 보여준 뒤 연다. 참고: 구 레거시 타일
 캐시가 쓰던 `.ice` 확장자는 `.tiles`로 개명되어 이제 `.ice`는 DRC
 인덱스 전용이다.
+
+### SVRF 룰 메타데이터 (.rules.json)
+
+DRC 에러의 waive 판단을 돕기 위해 SVRF 룰덱을 **서브셋 파스**해서
+룰별 제약(연산자·수치)·참조 레이어·원천 GDS 레이어를 뽑아 둔다
+(지오메트리 연산은 구현하지 않음 — derivation은 피연산자 이름
+그래프만):
+
+```sh
+.venv/bin/python -m floe svrf sfa14.drc.cal --scan     # 새 덱: 먼저 인벤토리
+.venv/bin/python -m floe svrf sfa14.drc.cal -D FEOL    # 실런과 같은 -D 세트!
+# -> sfa14.drc.cal.rules.json (뷰어가 로드하는 사이드카)
+```
+
+만든 `.rules.json`을 **.db 옆에 두면** 뷰어가 db를 열 때 자동으로
+붙인다(패널 `rules…` 버튼으로 수동 로드도 가능, 정보줄 `svrf N/M` =
+매칭 룰 수). 이후 에러 상세에 덱 원문 제약, **이 에러 자체의 측정
+치수 vs 한계값(Δ·%)**, 참조/원천 레이어, derivation 체인이 붙는다.
+TVF(Tcl) 덱은 Calibre가 생성한 SVRF 산출물을 입력으로 쓰고,
+DMACRO/CMACRO는 전개하지 않으니 `--scan`으로 사용 여부부터 확인.
 
 ## 8. 검증
 

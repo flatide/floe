@@ -358,6 +358,36 @@ def cmd_drc(args):
                          x, y, b[2] - b[0], b[3] - b[1]))
 
 
+def cmd_svrf(args):
+    """Parse a Calibre SVRF rule deck (subset) into rule metadata."""
+    from . import svrf
+    defines = {}
+    for d in args.define:
+        name, _, val = d.partition("=")
+        if name:
+            defines[name] = val or None
+    deck = svrf.parse_deck(args.deck, defines, args.include_dir,
+                           scan_all=args.scan)
+    if args.scan:
+        print(svrf.format_scan(deck))
+        return
+    out = args.out or (args.deck + ".rules.json")
+    data = svrf.write_json(deck, out)
+    st = data["stats"]
+    print("%s: %d checks, %d derivations, %d layers -> %s"
+          % (args.deck, st["checks"], st["derivations"],
+             len(data["layers"]), out))
+    if st["cmacro_calls"]:
+        print("[floe][warn] %d CMACRO calls NOT expanded - metadata "
+              "is incomplete for macro-generated rules"
+              % st["cmacro_calls"], file=sys.stderr)
+    if st["skipped"]:
+        print("[floe] %d unrecognized statements skipped "
+              "(--scan lists them)" % st["skipped"], file=sys.stderr)
+    for w in st["warnings"][:10]:
+        print("[floe][warn] %s" % w, file=sys.stderr)
+
+
 def cmd_gtktest(args):
     """Minimal pixbuf-display matrix for diagnosing a black view.
     Three panels: (a) pixbuf loaded from a PNG file, (b) pixbuf
@@ -626,6 +656,28 @@ def main(argv=None):
     p.add_argument("--list", action="store_true",
                    help="also list every error (center + size, um)")
     p.set_defaults(fn=cmd_drc)
+
+    p = sub.add_parser("svrf", help="parse a Calibre SVRF rule deck "
+                                    "(subset: layers, derivations, "
+                                    "check constraints) into "
+                                    "<deck>.rules.json - the viewer "
+                                    "loads it next to the DRC .db "
+                                    "for waive-decision aid")
+    p.add_argument("deck")
+    p.add_argument("-o", "--out", default=None,
+                   help="output path (default <deck>.rules.json)")
+    p.add_argument("--scan", action="store_true",
+                   help="print a syntax inventory only (macros, "
+                        "#IFDEF switches, measurement kinds, skipped "
+                        "statements; both #IFDEF branches walked) - "
+                        "run this FIRST on a new deck")
+    p.add_argument("-D", "--define", action="append", default=[],
+                   metavar="NAME[=VAL]",
+                   help="preprocessor switch; pass the SAME set the "
+                        "Calibre run used or the check list differs")
+    p.add_argument("-I", "--include-dir", action="append", default=[],
+                   help="extra search dir for INCLUDE files")
+    p.set_defaults(fn=cmd_svrf)
 
     p = sub.add_parser("gtktest", help="minimal pixbuf display test "
                                        "(diagnoses a black view)")

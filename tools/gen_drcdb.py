@@ -22,12 +22,21 @@ usage:
 rules (browser stress: 0-rule display, >100k-rule grids, 6-digit
 global numbers).
 
+--svrf DECK also writes a synthetic SVRF rule deck (plus a
+DECK.layers INCLUDE file) whose check names/constraint values
+match the db (floe/svrf.py end-to-end fixture): LAYER MAP + LAYER
+tables, fill_excl/*_drawn derivations, one measurement per check
+kind, a VARIABLE, and an #IFDEF SYNTH_EXTRA rule that exists only
+under -D SYNTH_EXTRA. Rule names repeat past ~2328 checks - keep
+--checks below that when the deck matters (names key the JSON).
+
 Then index and open:
   rust/target/release/floe-index drc data/drctest.db
   .venv/bin/python -m floe view <design.oas> --drc data/drctest.db
 """
 
 import argparse
+import os
 import random
 
 
@@ -56,6 +65,9 @@ def main():
     ap.add_argument("--heavy", default="",
                     help="comma list of exact error counts to "
                          "assign to evenly spaced rules")
+    ap.add_argument("--svrf", default="",
+                    help="also write a matching synthetic SVRF "
+                         "rule deck to this path")
     a = ap.parse_args()
     prec = a.precision
     x0, y0, x1, y1 = (int(float(v) * prec)
@@ -83,12 +95,18 @@ def main():
                % a.checks] = h
 
     total = 0
+    svrf_rules = []   # (name, layer, kind, value-um) for --svrf
     with open(a.out, "w") as f:
         f.write("MAIN09_ESD %d\n" % prec)
         for ci in range(a.checks):
             name = "%s.%s.%d" % (layers[ci % len(layers)],
                                  kinds[(ci * 7) % len(kinds)],
                                  ci % 97 + 1)
+            if a.svrf:
+                svrf_rules.append(
+                    (name, layers[ci % len(layers)],
+                     kinds[(ci * 7) % len(kinds)], ci,
+                     0.02 + (ci % 40) * 0.005))
             n = counts[ci]
             desc = ["Rule File Pathname: sfa14.drc.cal",
                     "Rule File Title: SFA14 CalibreDRC "
@@ -153,6 +171,69 @@ def main():
                 "layout_input_exceptions.rdb\n")
     print("%s: %d checks + 4 admin sections, %d errors"
           % (a.out, a.checks, total))
+    if a.svrf:
+        write_svrf(a.svrf, layers, svrf_rules)
+        print("%s: matching SVRF deck (%d checks + 1 under "
+              "-D SYNTH_EXTRA)" % (a.svrf, len(svrf_rules)))
+
+
+# gds numbers for the synthetic layer names (M1/M2 go through
+# LAYER MAP so the parser's map resolution is exercised too)
+SVRF_GDS = {"M1": 31, "M2": 32, "M3": 33, "M4": 34, "V1": 51,
+            "V2": 52, "CT": 17, "GT": 20, "AA": 10, "NW": 11,
+            "PP": 12, "NP": 13, "FILLA": 60, "FILLB": 61}
+
+
+def write_svrf(path, layers, rules):
+    """Synthetic deck mirroring the db: every check derives from
+    <layer>_drawn = LAYER NOT fill_excl, so source_gds closures
+    always reach the LAYER MAP/LAYER tables."""
+    lay = path + ".layers"
+    with open(lay, "w") as f:
+        f.write("// layer tables for %s (INCLUDE fixture)\n" % path)
+        f.write("LAYER MAP 31 DATATYPE 0 100\n")
+        f.write("LAYER MAP 32 DATATYPE 0 101\n")
+        f.write("LAYER M1 100\nLAYER M2 101\n")
+        for n in layers[2:] + ("FILLA", "FILLB"):
+            f.write("LAYER %s %d\n" % (n, SVRF_GDS[n]))
+
+    def drawn(n):
+        return n.lower() + "_drawn"
+
+    def meas(kind, x, y, v):
+        vs = "%.3f" % v
+        return {"SPACE": "EXT %s < %s" % (x, vs),
+                "WIDTH": "INT %s < %s" % (x, vs),
+                "ENC": "ENC %s %s < %s" % (x, y, vs),
+                "EXT": "EXT %s %s < %s" % (x, y, vs),
+                "AREA": "AREA %s < %s" % (x, vs),
+                "DENSITY.W": "DENSITY %s < %s WINDOW 50 50"
+                             % (x, vs),
+                "NOTCH": "INT %s < %s ABUT<90 SINGULAR REGION"
+                         % (x, vs),
+                "OVERLAP": "ENC %s %s < %s" % (y, x, vs)}[kind]
+
+    with open(path, "w") as f:
+        f.write("// synthetic SVRF deck (subset-parser fixture)\n"
+                "PRECISION 40000\n"
+                "INCLUDE \"%s\"\n"
+                "VARIABLE SYN_GRID 0.005\n"
+                "fill_excl = FILLA OR FILLB\n"
+                % os.path.basename(lay))
+        for n in layers:
+            f.write("%s = %s NOT fill_excl\n" % (drawn(n), n))
+        f.write("#IFDEF SYNTH_EXTRA\n"
+                "EXTRA.CHECK.1 { @ extra rule, -D SYNTH_EXTRA only\n"
+                "    INT m1_drawn < 0.001\n"
+                "}\n"
+                "#ENDIF\n")
+        for name, layer, kind, ci, v in rules:
+            x = drawn(layer)
+            y = drawn(layers[(layers.index(layer) + 1)
+                             % len(layers)])
+            f.write("%s { @ %s : rule text for synthetic check %d, "
+                    "min dimension %.3fum\n    %s\n}\n"
+                    % (name, name, ci, v, meas(kind, x, y, v)))
 
 
 if __name__ == "__main__":

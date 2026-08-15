@@ -63,4 +63,7 @@ rust/target/release/floe-index vfs "$SRC" "$VOUT" --coverage \
 .venv/bin/python tools/validate_render_frames.py
 # DRC .ice index sidecar: reading through the index == ASCII parse
 .venv/bin/python tools/validate_drc_ice.py
+# SVRF subset parser: preprocessing / derivation closure / check
+# extraction / end-to-end vs gen_drcdb --svrf
+.venv/bin/python tools/validate_svrf.py
 echo "RUST VALIDATION: ALL OK ($SRC)"
