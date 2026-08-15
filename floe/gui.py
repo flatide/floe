@@ -3684,6 +3684,11 @@ class Viewer:
                    numpy.__version__))
         self._drc_wfilter = wid
         self._drc_hl_res = None
+        # a waive-filter switch RESETS the selections (user call
+        # 2026-08-15): the old sets no longer match what is listed
+        self._drc_sel = None
+        self._drc_sels = {}
+        self._drc_focus = None
         keep = self._drc_open
         with _dprof("wfilter: rules refill"):
             self._drc_fill()
