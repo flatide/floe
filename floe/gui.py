@@ -917,6 +917,8 @@ class Viewer:
                                     # `floe svrf` sidecar metadata)
         self._drc_rmatch = (0, 0)   # sidecar-matched / db rules
         self._drc_shown = 0         # rules listed (info line)
+        self._drc_lyr_saved = None  # visibility snapshot before a
+                                    # double-click layer isolation
         self._drc_show_sel = False  # 'selected' list filter
         self._drc_sel = None        # OPEN rule's selection: (ci,
                                     # [ei], [(ei, kind, pts dbu)],
@@ -1352,6 +1354,7 @@ class Viewer:
         self._drc = None
         self._drc_rmeta = None
         self._drc_rmatch = (0, 0)
+        self._drc_lyr_saved = None   # new design = new layer table
         self._drc_cum = []
         self._drc_total = 0
         self._drc_pos = -1
@@ -4290,7 +4293,7 @@ class Viewer:
         if db is None or ei >= len(db.checks[ci].errors):
             return False
         if ev.type == Gdk.EventType.DOUBLE_BUTTON_PRESS:
-            self._drc_jump(ci, ei)
+            self._drc_jump(ci, ei, isolate=True)
             return False
         if ev.state & (Gdk.ModifierType.CONTROL_MASK
                        | Gdk.ModifierType.SHIFT_MASK):
@@ -4360,12 +4363,15 @@ class Viewer:
                 lines.append("  … %d more" % (len(pts) - 64))
         win._detail.set_text("\n".join(lines))
 
-    def _drc_jump(self, ci, ei):
+    def _drc_jump(self, ci, ei, isolate=False):
         db = self._drc
         check = db.checks[ci]
         e = check.errors[ei]
         self._drc_pos = self._drc_cum[ci] + ei
         self._drc_focus = None    # the jump mark supersedes it
+        iso = None
+        if isolate:   # double-click only (user call 2026-08-15)
+            iso = self._drc_isolate_layers(check.name)
         b = e.bbox()
         w_um, h_um = b[2] - b[0], b[3] - b[1]
         cx, cy = e.center()
@@ -4393,12 +4399,63 @@ class Viewer:
         self._drc_ruler = self._drc_cd_ruler(e)
         self.rulers.extend(self._drc_ruler)
         self._set_live_status(
-            "DRC %s #%d(%d)/%d · %s · %.3f x %.3f um at (%.3f, %.3f)"
+            "DRC %s #%d(%d)/%d · %s · %.3f x %.3f um at (%.3f, %.3f)%s"
             % (check.name, ei + 1, e.num, len(check.errors),
                "poly" if e.kind == "p" else "edge",
-               w_um, h_um, cx, cy))
+               w_um, h_um, cx, cy,
+               "" if iso is None
+               else " · %d layer(s) on, Esc restores" % iso))
         self._drc_show_detail(ci, ei)
         self._display()
+
+    def _drc_isolate_layers(self, name):
+        """Double-click jump: show ONLY the layers the rule
+        metadata traces this check to (source_gds closure; dt None
+        = every datatype of that gds layer). The pre-isolation
+        visibility is snapshotted ONCE - Esc restores it (its own
+        stage, before the DRC mark). Applied BEFORE goto so the
+        jump renders once with the new layer set. Returns the
+        matched layer count or None (no sidecar / no match)."""
+        meta = self._drc_rmeta
+        mc = meta.get("checks", {}).get(name) if meta else None
+        gds = (mc or {}).get("source_gds") or []
+        if not gds:
+            return None
+        want = set()
+        for l in self.meta["layers"]:
+            key = (l["layer"], l["datatype"])
+            for g, d in gds:
+                if key[0] == g and (d is None or key[1] == d):
+                    want.add(key)
+                    break
+        if not want:
+            return None   # metadata names no layer of THIS design
+        if self._drc_lyr_saved is None:
+            self._drc_lyr_saved = set(self.visible)
+        if want != self.visible:
+            self._layers_batch = True
+            try:
+                for key, row in self._layer_rows.items():
+                    row.set_active(key in want)
+            finally:
+                self._layers_batch = False
+        return len(want)
+
+    def _drc_restore_layers(self):
+        """Esc: back to the visibility snapshot taken by the first
+        isolation."""
+        saved, self._drc_lyr_saved = self._drc_lyr_saved, None
+        if saved is None:
+            return
+        self._layers_batch = True
+        try:
+            for key, row in self._layer_rows.items():
+                row.set_active(key in saved)
+        finally:
+            self._layers_batch = False
+        self._set_live_status(
+            "layer visibility restored (%d on)" % len(saved))
+        self.redraw(immediate=True)
 
     def _drc_stamp_errs(self, disp, sx, sy, items, color=None):
         """Error painter: geometry in `color`, or per-status when
@@ -4905,6 +4962,8 @@ class Viewer:
             self._drc_set_sel(None)
             if self._drc_grid_ci is not None:
                 self._drc_grid_fill(self._drc_grid_ci)
+        elif self._drc_lyr_saved is not None:
+            self._drc_restore_layers()
         elif self.drc_mark is not None or self._drc_focus is not None:
             self.drc_mark = None
             self._drc_focus = None

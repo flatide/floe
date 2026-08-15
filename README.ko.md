@@ -88,7 +88,7 @@ settled=..` 한 줄이 상시 출력된다(라운드별 비누적 — 성능 실
 | `g`, **Ctrl+.** | goto 다이얼로그 |
 | `e` | **에러 박스 선택 모드**(룰러처럼 **Esc까지 유지** — 박스 반복 가능): 클릭 2점으로 박스 → **화면에 보이는(현재 필터·페이지) 에러** 중 박스 안의 것 선택(gold). 두 번째 클릭에 **Shift = 추가**, **Ctrl = 토글**, 무수식 = 대체. 그리드도 동일(Ctrl 토글/Shift 범위) — 모든 선택은 보이는 에러만 대상 |
 | `n` / `p` | **현재 보이는 목록**(selected/in view/waive 필터 적용분) 안에서 다음 / 이전 순환 (페이지 자동 이동) |
-| `Esc` | 단계별 해제: 에러선택 모드→찍던 점→룰러모드→룰러들→선택→에러 박스선택→DRC 마크 |
+| `Esc` | 단계별 해제: 에러선택 모드→찍던 점→룰러모드→룰러들→선택→에러 박스선택→격리 레이어 복원→DRC 마크 |
 | `q` | 종료 확인 |
 
 마우스: 좌클릭 = pick(겹침 순환), 좌/중 드래그 = 팬, 미니맵 클릭 = 센터링.
@@ -182,9 +182,30 @@ DRC 에러의 waive 판단을 돕기 위해 SVRF 룰덱을 **서브셋 파스**�
 만든 `.rules.json`을 **.db 옆에 두면** 뷰어가 db를 열 때 자동으로
 붙인다(패널 `rules…` 버튼으로 수동 로드도 가능, 정보줄 `svrf N/M` =
 매칭 룰 수). 이후 에러 상세에 덱 원문 제약, **이 에러 자체의 측정
-치수 vs 한계값(Δ·%)**, 참조/원천 레이어, derivation 체인이 붙는다.
+치수 vs 한계값(Δ·%)**, 참조/원천 레이어, derivation 체인이 붙고,
+**에러 더블클릭 점프가 그 룰의 원천 레이어만 켜고 나머지를 끈다**
+(레이어 격리 — Esc로 이전 가시성 복원, 상태줄에 켜진 수 표시).
 TVF(Tcl) 덱은 Calibre가 생성한 SVRF 산출물을 입력으로 쓰고,
 DMACRO/CMACRO는 전개하지 않으니 `--scan`으로 사용 여부부터 확인.
+
+레이어 격리를 실제 디자인과 연동해 시험하려면 `gen_drcdb.py`의
+`--layers`/`--svrf-gds`(디자인 실제 gds 번호로 덱 정렬)/
+`--pathname`(db가 가리킬 덱 이름) 옵션으로 디자인 맞춤 db+덱을
+만든다. testchip_1g5 예:
+
+```sh
+.venv/bin/python tools/gen_drcdb.py data/testchip_1g5.drc.db \
+  --checks 96 --max-errors 400 --die 0,0,10500,10500 --seed 7 \
+  --layers M1,M2,M3,M4,M5,M6,VIA1,VIA2,POLY,ACTIVE,CONT,NWELL \
+  --svrf-gds "M1=5/0,M2=7/0,M3=9/0,M4=11/0,M5=13/0,M6=15/0,\
+VIA1=6/0,VIA2=8/0,POLY=3/0,ACTIVE=2/0,CONT=4/0,NWELL=1/0,\
+FILLA=0/0,FILLB=63/63" \
+  --pathname testchip.drc.cal --svrf data/testchip.drc.cal
+rust/target/release/floe-index drc data/testchip_1g5.drc.db --pack
+.venv/bin/python -m floe svrf data/testchip.drc.cal
+.venv/bin/python -m floe view data/testchip_1g5.oas \
+  --drc data/testchip_1g5.drc.db
+```
 
 ## 8. 검증
 

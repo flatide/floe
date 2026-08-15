@@ -30,6 +30,14 @@ kind, a VARIABLE, and an #IFDEF SYNTH_EXTRA rule that exists only
 under -D SYNTH_EXTRA. Rule names repeat past ~2328 checks - keep
 --checks below that when the deck matters (names key the JSON).
 
+To align the deck with a REAL design (viewer layer-isolation
+tests): --layers renames the rule/derivation pool, --svrf-gds
+NAME=layer[/dt],... pins each name (and FILLA/FILLB) to the
+design's gds numbers as direct LAYER specs, --pathname sets the
+Rule File Pathname the db records (the viewer looks for
+<pathname-basename>.rules.json next to the db). See README §DRC
+for the testchip_1g5 recipe.
+
 Then index and open:
   rust/target/release/floe-index drc data/drctest.db
   .venv/bin/python -m floe view <design.oas> --drc data/drctest.db
@@ -68,6 +76,18 @@ def main():
     ap.add_argument("--svrf", default="",
                     help="also write a matching synthetic SVRF "
                          "rule deck to this path")
+    ap.add_argument("--layers", default="",
+                    help="comma list overriding the layer-name pool "
+                         "(rule-name prefixes + *_drawn derivations)")
+    ap.add_argument("--svrf-gds", default="",
+                    help="NAME=layer[/dt],... gds table for --svrf "
+                         "(direct LAYER specs, no LAYER MAP) - align "
+                         "the deck with a real design's layers; must "
+                         "cover every --layers name + FILLA,FILLB")
+    ap.add_argument("--pathname", default="sfa14.drc.cal",
+                    help="Rule File Pathname recorded in the db - "
+                         "the viewer looks for <basename>.rules.json "
+                         "NEXT TO the db")
     a = ap.parse_args()
     prec = a.precision
     x0, y0, x1, y1 = (int(float(v) * prec)
@@ -75,6 +95,21 @@ def main():
     rng = random.Random(a.seed)
     layers = ("M1", "M2", "M3", "M4", "V1", "V2", "CT", "GT",
               "AA", "NW", "PP", "NP")
+    if a.layers:
+        layers = tuple(t.strip() for t in a.layers.split(",")
+                       if t.strip())
+    gds_map = None
+    if a.svrf_gds:
+        gds_map = {}
+        for ent in a.svrf_gds.split(","):
+            name, _, spec = ent.strip().partition("=")
+            l, _, dt = spec.partition("/")
+            gds_map[name] = (int(l), int(dt) if dt else None)
+        missing = [n for n in tuple(layers) + ("FILLA", "FILLB")
+                   if n not in gds_map]
+        if missing:
+            raise SystemExit("--svrf-gds missing: %s"
+                             % ",".join(missing))
     kinds = ("SPACE", "WIDTH", "ENC", "EXT", "AREA", "DENSITY.W",
              "NOTCH", "OVERLAP")
     waivers = ("Waiver Criteria: none - -",
@@ -108,7 +143,7 @@ def main():
                      kinds[(ci * 7) % len(kinds)], ci,
                      0.02 + (ci % 40) * 0.005))
             n = counts[ci]
-            desc = ["Rule File Pathname: sfa14.drc.cal",
+            desc = ["Rule File Pathname: %s" % a.pathname,
                     "Rule File Title: SFA14 CalibreDRC "
                     "S00-V0.5.0.0-ENG_0520"]
             if ci % 3 == 0:
@@ -172,7 +207,7 @@ def main():
     print("%s: %d checks + 4 admin sections, %d errors"
           % (a.out, a.checks, total))
     if a.svrf:
-        write_svrf(a.svrf, layers, svrf_rules)
+        write_svrf(a.svrf, layers, svrf_rules, gds_map)
         print("%s: matching SVRF deck (%d checks + 1 under "
               "-D SYNTH_EXTRA)" % (a.svrf, len(svrf_rules)))
 
@@ -184,18 +219,27 @@ SVRF_GDS = {"M1": 31, "M2": 32, "M3": 33, "M4": 34, "V1": 51,
             "PP": 12, "NP": 13, "FILLA": 60, "FILLB": 61}
 
 
-def write_svrf(path, layers, rules):
+def write_svrf(path, layers, rules, gds_map=None):
     """Synthetic deck mirroring the db: every check derives from
     <layer>_drawn = LAYER NOT fill_excl, so source_gds closures
-    always reach the LAYER MAP/LAYER tables."""
+    always reach the LAYER MAP/LAYER tables. With a --svrf-gds map
+    every LAYER is a direct layer[.datatype] spec (aligning the
+    deck with a real design for viewer layer-isolation tests)."""
     lay = path + ".layers"
     with open(lay, "w") as f:
         f.write("// layer tables for %s (INCLUDE fixture)\n" % path)
-        f.write("LAYER MAP 31 DATATYPE 0 100\n")
-        f.write("LAYER MAP 32 DATATYPE 0 101\n")
-        f.write("LAYER M1 100\nLAYER M2 101\n")
-        for n in layers[2:] + ("FILLA", "FILLB"):
-            f.write("LAYER %s %d\n" % (n, SVRF_GDS[n]))
+        if gds_map is not None:
+            for n in tuple(layers) + ("FILLA", "FILLB"):
+                l, dt = gds_map[n]
+                f.write("LAYER %s %s\n"
+                        % (n, "%d.%d" % (l, dt) if dt is not None
+                           else "%d" % l))
+        else:
+            f.write("LAYER MAP 31 DATATYPE 0 100\n")
+            f.write("LAYER MAP 32 DATATYPE 0 101\n")
+            f.write("LAYER M1 100\nLAYER M2 101\n")
+            for n in layers[2:] + ("FILLA", "FILLB"):
+                f.write("LAYER %s %d\n" % (n, SVRF_GDS[n]))
 
     def drawn(n):
         return n.lower() + "_drawn"

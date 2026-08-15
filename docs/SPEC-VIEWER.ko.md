@@ -166,6 +166,15 @@ recolor: 행 스와치 재생성(set_color) + meta 갱신 + 개인 layerprops
   상세 갱신). 룰 행 클릭 = 룰 정보 표시. 상한
   DRC_LIST_MAX 셀, 초과분 "… more" 행; n/p 스텝은 룰 선택·셀
   마킹·스크롤을 동기화한다.
+- **더블클릭 레이어 격리**(2026-08-15, rules.json 필요): 점프 시
+  `_drc_isolate_layers` — 해당 룰의 source_gds에 매칭되는 레이어만
+  켜고 나머지는 끔(dt null = 그 gds 레이어의 전 datatype). 최초
+  격리 때 이전 가시성을 1회 스냅샷(`_drc_lyr_saved`), **Esc가 전용
+  단계로 복원**(에러 박스선택 뒤·DRC 마크 앞). goto **앞**에 배치
+  적용(set_active 배치 + goto의 redraw 1회 — 이중 렌더 없음). 룰
+  전환 더블클릭은 스냅샷을 덮지 않고 격리 세트만 교체. 사이드카
+  없음/매칭 레이어 0 = 무동작(None, 상태줄 표기 생략). n/p 스텝
+  점프는 격리하지 않음(더블클릭 전용, isolate= kwarg).
 - **에러 번호 = 전역 파일순 순번**(Calibre RVE와 동일, 파일의 서수
   토큰 무시): 모든 백엔드(ASCII/v1/v2)가 동일 번호를 내며, 룰별
   트리 나열은 저장순=파일순이라 자동 오름차순.
