@@ -3178,8 +3178,8 @@ class Viewer:
         a = self._esel_start
         b = self._cursor
         self._esel_start = None
-        self.mode = "normal"
-        self._set_cursor(self._idle_cursor())
+        # like ruler mode the tool STAYS ARMED for the next box
+        # until Esc (or 'e') leaves it - user call 2026-08-15
         state = getattr(ev, "state", 0)
         mode = ("toggle" if state & Gdk.ModifierType.CONTROL_MASK
                 else "add" if state & Gdk.ModifierType.SHIFT_MASK
@@ -3223,7 +3223,8 @@ class Viewer:
         self._drc_focus = None
         self._drc_grid_fill(ci)
         self._set_live_status(
-            "error select %s [%s]: %d selected (Esc clears)"
+            "error select %s [%s]: %d selected - next box ready "
+            "(Shift add / Ctrl toggle, Esc exits)"
             % (db.checks[ci].name, mode, len(eis)))
         self._display()
 
