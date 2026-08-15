@@ -4205,7 +4205,11 @@ class Viewer:
         lines = ["#%d(%d)  [%s]" % (ei + 1, e.num, status),
                  "rule: %s" % c.name]
         if c.desc:
-            lines += c.desc.split("\n")
+            # pathname/title already show in the RULE info (user
+            # call 2026-08-15)
+            lines += [ln for ln in c.desc.split("\n")
+                      if not ln.startswith(("Rule File Pathname:",
+                                            "Rule File Title:"))]
         pts = e.pts
         if e.kind == "e":
             lines.append("edge (um):")
