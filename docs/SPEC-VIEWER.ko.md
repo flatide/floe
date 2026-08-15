@@ -112,6 +112,10 @@ recolor: 행 스와치 재생성(set_color) + meta 갱신 + 개인 layerprops
   다이얼로그**에 실시간 표시(cancel = terminate) 후 로딩
   (`_drc_open_db`/`_drc_pack_and_load`, 바이너리는
   vfsclient.find_binary).
+- **룰 검색**(2026-08-15): nav 행의 검색 박스(구 prev/next 버튼
+  자리 — n/p 키는 유지)가 룰 이름 부분일치(대소문자 무관)로 목록을
+  실시간 필터. TreeView 내장 typeahead 검색은 rules/grid 모두
+  비활성(set_enable_search False — 반쪽짜리 팝업 제거).
 - **필터/페이지네이션**(2026-08-14): 룰 목록은 **All = 전체 룰
   (에러 0개 포함)**, Not Waived/Waived = 매칭 0개 룰 숨김.
   All/Not Waived/Waived 콤보가 status 바이트 기준으로 룰 카운트·

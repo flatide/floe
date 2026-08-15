@@ -86,8 +86,8 @@ DRC_GOLD = 0xFFD700FF      # box-selected errors (canvas + grid)
 class _DrcPanel(object):
     """Widget refs of the embedded DRC browser (attribute bag)."""
     __slots__ = ("_info", "_rules", "_rstore", "_grid", "_gstore",
-                 "_detail", "_hl", "_wf", "_selv", "_plabel",
-                 "_pprev", "_pnext")
+                 "_detail", "_hl", "_wf", "_selv", "_search",
+                 "_plabel", "_pprev", "_pnext")
 
 MIN_SPP = 0.01     # max zoom-in: 1 px = 0.01 dbu; keeps render bboxes
                    # from collapsing to zero width after int rounding
@@ -912,6 +912,7 @@ class Viewer:
                                     # kind, pts dbu) for the canvas
         self._drc_grid_base = None  # filtered ei base (None = all)
         self._drc_wfilter = "all"   # all | notwaived | waived
+        self._drc_search = ""       # rule-name substring filter
         self._drc_show_sel = False  # 'selected' list filter
         self._drc_sel = None        # OPEN rule's selection: (ci,
                                     # [ei], [(ei, kind, pts dbu)],
@@ -3261,6 +3262,7 @@ class Viewer:
             col.set_expand(expand)
             rules.append_column(col)
         rules.set_headers_visible(False)
+        rules.set_enable_search(False)
         rules.set_tooltip_column(0)
         rules.get_selection().connect("changed",
                                       self._on_drc_rule_sel)
@@ -3281,6 +3283,7 @@ class Viewer:
             col.set_expand(True)
             grid.append_column(col)
         grid.set_headers_visible(False)
+        grid.set_enable_search(False)
         grid.get_selection().set_mode(Gtk.SelectionMode.NONE)
         grid.connect("button-press-event", self._on_drc_grid_click)
         # the number array REFLOWS to the pane width instead of
@@ -3330,10 +3333,17 @@ class Viewer:
         win._detail = detail.get_buffer()
         nav = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         box.pack_start(nav, False, False, 2)
-        for text, d in (("< prev (p)", -1), ("next (n) >", 1)):
-            nb = Gtk.Button(label=text)
-            nb.connect("clicked", lambda _w, dd=d: self._drc_step(dd))
-            nav.pack_start(nb, True, True, 2)
+        # rule search (replaces the prev/next buttons - n/p keys
+        # remain; GTK's built-in typeahead popup is disabled)
+        try:
+            se = Gtk.SearchEntry()
+            se.connect("search-changed", self._on_drc_search)
+        except AttributeError:
+            se = Gtk.Entry()
+            se.connect("changed", self._on_drc_search)
+        se.set_placeholder_text("find rule…")
+        nav.pack_start(se, True, True, 2)
+        win._search = se
         hl = Gtk.CheckButton(label="in view")
         hl.set_active(self._drc_hl)
         hl.set_tooltip_text("list only the errors inside the "
@@ -3624,6 +3634,9 @@ class Viewer:
         shown = 0
         for ci, c in enumerate(db.checks):
             _t2 = time.perf_counter()
+            if self._drc_search \
+                    and self._drc_search not in c.name.lower():
+                continue
             cnt = self._drc_wf_count(db, ci)
             _tc += time.perf_counter() - _t2
             # All lists EVERY rule, zero-error ones included (user
@@ -3710,6 +3723,20 @@ class Viewer:
             self._drc_sels[selobj[0]] = selobj
         elif self._drc_open is not None:
             self._drc_sels.pop(self._drc_open, None)
+
+    def _on_drc_search(self, entry):
+        txt = entry.get_text().strip().lower()
+        if txt == self._drc_search or self._drc is None:
+            return
+        self._drc_search = txt
+        keep = self._drc_open
+        self._drc_fill()
+        if keep is not None:
+            for r in self._drcwin._rstore:
+                if r[2] == keep:
+                    self._drcwin._rules.set_cursor(r.path, None,
+                                                   False)
+                    break
 
     def _on_drc_selview(self, btn):
         self._drc_show_sel = btn.get_active()
