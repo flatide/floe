@@ -4051,6 +4051,23 @@ class Viewer:
                                   "writable?" % exc)
             return
         self._drc_hl_res = None
+        # under a waive filter the toggled errors leave the list -
+        # purge them from the gold selection too, or their markers
+        # linger on the canvas (user report 2026-08-15)
+        sel = self._drc_sel
+        if sel is not None and sel[0] == ci \
+                and self._drc_wfilter != "all" \
+                and hasattr(db, "get_status"):
+            want = self._drc_wfilter == "waived"
+            keep = [(e2, k2, p2) for e2, k2, p2 in sel[2]
+                    if (db.get_status(ci, e2) == 1) == want]
+            eis2 = [m[0] for m in keep]
+            self._drc_set_sel((ci, eis2, keep, frozenset(eis2))
+                              if eis2 else None)
+            f = self._drc_focus
+            if f is not None and f[0] == ci \
+                    and (db.get_status(ci, f[1]) == 1) != want:
+                self._drc_focus = None
         if self._drc_wfilter == "all":
             self._drc_grid_fill(ci)
         else:
