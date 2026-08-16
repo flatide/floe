@@ -4,12 +4,21 @@ Defaults produce ~100 MB: 1000 rule checks, 0..1000 errors each
 (deterministic per-check counts, some zero-result checks), realistic
 block structure - shared Rule File Pathname/Title lines, occasional
 Waiver Criteria: lines, and the four *_RDBS admin tail sections the
-viewer must hide. Error mix exercises every viewer path:
+viewer must hide.
 
-  rect      35%  axis-aligned width/space region  -> dual CD rulers
-  edgepair  30%  two parallel facing edges        -> gap CD ruler
-  edge      10%  single edge                      -> length CD ruler
-  stair     25%  rectilinear staircase (12..48 v) -> no ruler (complex)
+Error SHAPES follow the rule KIND (user call 2026-08-16 - a WIDTH
+rule must not emit edge pairs), and every violating dimension sits
+BELOW its limit (0.02 + (ci%40)*0.005 um - the same formula the
+rule text and the --svrf deck record), so the detail pane's
+measured-vs-constraint delta reads as a real violation:
+
+  SPACE/EXT/NOTCH  facing edge pair, gap < limit   -> gap CD ruler
+  WIDTH            thin rect, short side < limit   -> dual CD rulers
+                   (15%: bent staircase region of that width
+                    -> complex, no ruler)
+  ENC/OVERLAP      facing edge pair, dist < limit  -> gap CD ruler
+  AREA             small rect, w*h < limit um^2
+  DENSITY.W        the 50x50 um measurement window rect
 
 usage:
   .venv/bin/python tools/gen_drcdb.py data/drctest.db \
@@ -44,14 +53,15 @@ Then index and open:
 """
 
 import argparse
+import math
 import os
 import random
 
 
-def staircase(rng, x, y, prec):
-    """Rectilinear staircase polygon (simple, 2k+2 vertices)."""
+def staircase(rng, x, y, s):
+    """Rectilinear staircase polygon with arm width s (simple,
+    2k+2 vertices) - a bent wire of that width."""
     k = rng.randrange(5, 24)
-    s = rng.randrange(int(0.03 * prec), int(0.12 * prec))
     pts = [(x, y), (x + k * s, y)]
     for i in range(k, 0, -1):
         pts.append((x + i * s, y + (k - i + 1) * s))
@@ -134,14 +144,13 @@ def main():
     with open(a.out, "w") as f:
         f.write("MAIN09_ESD %d\n" % prec)
         for ci in range(a.checks):
+            kind = kinds[(ci * 7) % len(kinds)]
+            vum = 0.02 + (ci % 40) * 0.005   # limit (um) - the same
             name = "%s.%s.%d" % (layers[ci % len(layers)],
-                                 kinds[(ci * 7) % len(kinds)],
-                                 ci % 97 + 1)
+                                 kind, ci % 97 + 1)
             if a.svrf:
                 svrf_rules.append(
-                    (name, layers[ci % len(layers)],
-                     kinds[(ci * 7) % len(kinds)], ci,
-                     0.02 + (ci % 40) * 0.005))
+                    (name, layers[ci % len(layers)], kind, ci, vum))
             n = counts[ci]
             desc = ["Rule File Pathname: %s" % a.pathname,
                     "Rule File Title: SFA14 CalibreDRC "
@@ -150,27 +159,24 @@ def main():
                 desc.append(waivers[ci % len(waivers)])
             desc.append("%s : rule text for synthetic check %d, "
                         "min dimension %.3fum - -"
-                        % (name, ci, 0.02 + (ci % 40) * 0.005))
+                        % (name, ci, vum))
             f.write("%s\n%d %d %d Jul 11 01:55:00 2026\n%s\n"
                     % (name, n, n, len(desc), "\n".join(desc)))
+            vd = max(2, int(vum * prec))   # limit in dbu
             out = []
             for ei in range(1, n + 1):
                 ex = rng.randrange(x0, max(x0 + 1, x1 - prec * 6))
                 ey = rng.randrange(y0, max(y0 + 1, y1 - prec * 6))
-                cd = rng.randrange(int(0.02 * prec),
-                                   int(0.2 * prec))
+                # the violating dimension: always BELOW the limit
+                cd = max(1, int(vd * rng.uniform(0.45, 0.97)))
                 ln = rng.randrange(int(0.2 * prec),
                                    int(2.0 * prec))
-                m = rng.random()
-                if m < 0.35:      # rect region
-                    if rng.random() < 0.5:
-                        w, h = cd, ln
-                    else:
-                        w, h = ln, cd
-                    out.append("p %d 4\n%d %d\n%d %d\n%d %d\n%d %d"
-                               % (ei, ex, ey, ex + w, ey,
-                                  ex + w, ey + h, ex, ey + h))
-                elif m < 0.65:    # facing edge pair, gap = cd
+                if kind in ("SPACE", "EXT", "NOTCH",
+                            "ENC", "OVERLAP"):
+                    # spacing/enclosure: two facing edges, gap = cd
+                    if kind in ("ENC", "OVERLAP"):
+                        ln = rng.randrange(int(0.1 * prec),
+                                           int(0.6 * prec))
                     if rng.random() < 0.5:   # vertical edges
                         out.append(
                             "e %d 2\n%d %d %d %d\n%d %d %d %d"
@@ -181,15 +187,43 @@ def main():
                             "e %d 2\n%d %d %d %d\n%d %d %d %d"
                             % (ei, ex, ey, ex + ln, ey,
                                ex, ey + cd, ex + ln, ey + cd))
-                elif m < 0.75:    # single edge, length = cd
-                    out.append("e %d 1\n%d %d %d %d"
-                               % (ei, ex, ey, ex + cd, ey))
-                else:             # complex staircase: no CD ruler
-                    pts = staircase(rng, ex, ey, prec)
-                    out.append("p %d %d\n%s"
-                               % (ei, len(pts),
-                                  "\n".join("%d %d" % p
-                                            for p in pts)))
+                elif kind == "WIDTH":
+                    if rng.random() < 0.15:
+                        # bent wire of width cd: complex region,
+                        # no CD ruler (keeps that viewer path)
+                        pts = staircase(rng, ex, ey, max(cd, 2))
+                        out.append("p %d %d\n%s"
+                                   % (ei, len(pts),
+                                      "\n".join("%d %d" % p
+                                                for p in pts)))
+                    else:
+                        # thin rect, short side = cd
+                        if rng.random() < 0.5:
+                            w, h = cd, ln
+                        else:
+                            w, h = ln, cd
+                        out.append(
+                            "p %d 4\n%d %d\n%d %d\n%d %d\n%d %d"
+                            % (ei, ex, ey, ex + w, ey,
+                               ex + w, ey + h, ex, ey + h))
+                elif kind == "AREA":
+                    # small rect, area below the limit (um^2)
+                    a_um2 = vum * rng.uniform(0.4, 0.95)
+                    w_um = math.sqrt(a_um2) * rng.uniform(0.6, 1.6)
+                    w = max(1, int(w_um * prec))
+                    h = max(1, int(a_um2 / w_um * prec))
+                    out.append(
+                        "p %d 4\n%d %d\n%d %d\n%d %d\n%d %d"
+                        % (ei, ex, ey, ex + w, ey,
+                           ex + w, ey + h, ex, ey + h))
+                else:   # DENSITY.W: the 50x50 um window rect
+                    w = h = int(50 * prec)
+                    wx = max(x0, min(ex, x1 - w))
+                    wy = max(y0, min(ey, y1 - h))
+                    out.append(
+                        "p %d 4\n%d %d\n%d %d\n%d %d\n%d %d"
+                        % (ei, wx, wy, wx + w, wy,
+                           wx + w, wy + h, wx, wy + h))
             if out:
                 f.write("\n".join(out) + "\n")
             total += n
