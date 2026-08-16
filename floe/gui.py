@@ -55,6 +55,10 @@ DRC_VIEW_FRACTION = 0.3    # error extent ~30% of the view on a jump
 DRC_HL_CAP = 1000          # highlight-in-view marker budget
 DRC_SEL_CAP = 5000         # box-select budget ('e' mode)
 DRC_CYAN = 0x00FFFFFF      # WAIVED errors (geometry+numbers)
+DRC_MARK_PX = 5            # collapsed-marker square side; geometry
+                           # whose screen span shrinks BELOW this
+                           # paints as the marker (no gap where the
+                           # shape draws smaller than the marker)
 
 # FLOE_DRC_PROF=1: print a per-stage timing breakdown of the DRC
 # browser paths to stderr - for machine-specific slowness reports
@@ -1748,17 +1752,20 @@ class Viewer:
         if self.drc_mark is not None:
             # solid 2px lines, speckled polygon interiors (user call
             # 2026-08-13: edges = plain 2px, polygons = 50% fill);
-            # <=2x2 px on screen collapses to a 3x3 marker square
-            # (user call 2026-08-14)
+            # spans below the marker size collapse to the marker
+            # square (user call 2026-08-16: no in-between zoom range
+            # where the shape paints smaller than the marker)
             pts = [(sx(x), sy(y)) for x, y in self.drc_mark["pts"]]
             mcol = self.drc_mark.get("color", DRC_RED)
             mxs = [p[0] for p in pts]
             mys = [p[1] for p in pts]
-            if (max(mxs) - min(mxs) <= 2
-                    and max(mys) - min(mys) <= 2):
+            if (max(mxs) - min(mxs) < DRC_MARK_PX
+                    and max(mys) - min(mys) < DRC_MARK_PX):
                 cxp = (min(mxs) + max(mxs)) / 2.0
                 cyp = (min(mys) + max(mys)) / 2.0
-                fill_rect(disp, cxp - 2, cyp - 2, 5, 5, mcol)
+                fill_rect(disp, cxp - DRC_MARK_PX // 2,
+                          cyp - DRC_MARK_PX // 2,
+                          DRC_MARK_PX, DRC_MARK_PX, mcol)
             elif self.drc_mark["kind"] == "p":
                 self._drc_fill_speckle(disp, pts, mcol)
                 for a, b in zip(pts, pts[1:] + pts[:1]):
@@ -4460,9 +4467,12 @@ class Viewer:
     def _drc_stamp_errs(self, disp, sx, sy, items, color=None):
         """Error painter: geometry in `color`, or per-status when
         None (user call 2026-08-14: not waived = red, waived =
-        cyan). Errors <=2x2 px on screen collapse to 5x5 marker
-        squares (the focused one: 9x9); a 20k segment budget
-        bounds pathological frames."""
+        cyan). Errors whose screen span is below the marker size
+        collapse to DRC_MARK_PX squares (the focused one: 9x9) -
+        the threshold IS the marker size, so there is no zoom range
+        where the shape draws smaller than the marker (user call
+        2026-08-16); a 20k segment budget bounds pathological
+        frames."""
         db = self._drc
         focus = self._drc_focus
         budget = 20000
@@ -4475,13 +4485,13 @@ class Viewer:
             sp = [(sx(x), sy(y)) for x, y in spts]
             hxs = [p[0] for p in sp]
             hys = [p[1] for p in sp]
-            if (max(hxs) - min(hxs) <= 2
-                    and max(hys) - min(hys) <= 2):
+            if (max(hxs) - min(hxs) < DRC_MARK_PX
+                    and max(hys) - min(hys) < DRC_MARK_PX):
                 cxp = (min(hxs) + max(hxs)) / 2.0
                 cyp = (min(hys) + max(hys)) / 2.0
                 s_px = 9 if (focus is not None
                              and focus[0] == ci_
-                             and focus[1] == ei_) else 5
+                             and focus[1] == ei_) else DRC_MARK_PX
                 fill_rect(disp, cxp - s_px // 2, cyp - s_px // 2,
                           s_px, s_px, col)
                 budget -= 1
