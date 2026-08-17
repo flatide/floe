@@ -138,34 +138,30 @@ settled=..` 한 줄이 상시 출력된다(라운드별 비누적 — 성능 실
 
 ### DRC 결과 인덱스 (.ice)
 
-수백 MB~수백 GB Calibre ASCII DRC 결과(.db)는 옆에 인덱스 사이드카를
-한 번 구우면 뷰어/CLI가 mmap으로 즉시 연다(.db 자체는 변환하지 않고
-정본으로 남음):
+수백 MB~수백 GB Calibre ASCII DRC 결과(.db)는 자기완결 **pack**으로
+한 번 변환하면 뷰어/CLI가 mmap으로 즉시 연다:
 
 ```sh
-rust/target/release/floe-index drc results.db            # v1 사이드카
-rust/target/release/floe-index drc results.db --pack     # v2 완전 변환
+rust/target/release/floe-index drc results.db [--jobs N]
 .venv/bin/python -m floe view chip.oas --drc results.db
 ```
 
-- **v1 사이드카**(기본): .db 옆 오프셋 인덱스(원본의 2~4%), .db가
-  정본으로 유지. 좌표는 점프할 때 해당 레코드만 읽음.
-- **v2 pack**(`--pack [--jobs N]`): 자기완결 바이너리 변환(실측 1/4~
-  1/5, .db 불필요), 병렬 빌드(--jobs 무관 동일 바이트), 위치 쿼리
-  내장 → DRC 브라우저의 **filter errors in view** 토글이
-  활성화된다: 선택한 룰의 에러 중 현재 화면 안에 있는 것만 목록에
-  나열(상한 1000, 뷰를 따라 갱신). 에러당 1B 리뷰 상태를 내장 —
-  브라우저 그리드 **우클릭 → waive/unwaive**(gold 선택 시 일괄)로
-  제자리 기록되고 All/Not Waived/Waived 필터와 연동된다(재-pack
-  시 초기화).
+- 실측 1/4~1/5 크기, 변환 후 .db 불필요. 병렬 빌드(--jobs 무관 동일
+  바이트).
+- 위치 쿼리 내장 → DRC 브라우저의 **in view** 필터: 선택한 룰의
+  에러 중 현재 화면 안에 있는 것만 나열(상한 1000, 뷰 추적).
+- 에러당 1B 리뷰 상태 내장 — 그리드 **우클릭 → waive/unwaive**
+  (gold 선택 시 일괄)로 제자리 기록, All/Not Waived/Waived 필터와
+  룰 행의 `에러수/waived` 카운트에 연동(재-pack 시 초기화 주의).
 
-소스가 바뀌면(size/mtime) 인덱스는 자동 무시되고 ASCII 전체 파스로
-폴백하니 `floe-index drc`를 다시 실행하면 된다. **뷰어의 open .db…
-다이얼로그는 .db만 보여주지만 로딩은 항상 pack(.ice)으로 한다** —
-pack이 없거나 오래되면 그 자리에서 `--pack` 인덱싱을 돌리고 로그를
-모달 창에 보여준 뒤 연다. 참고: 구 레거시 타일
-캐시가 쓰던 `.ice` 확장자는 `.tiles`로 개명되어 이제 `.ice`는 DRC
-인덱스 전용이다.
+구 **v1 오프셋 사이드카는 폐기**됐다(2026-08-19 — waive 저장·공간
+쿼리 불가, 원본 .db 상시 필요): 남아 있는 v1 .ice는 안내 후 ASCII
+폴백되니 `floe-index drc`로 재변환하면 된다. 소스가 바뀌어도
+(size/mtime) 동일하게 폴백+재변환. **뷰어의 open .db… 다이얼로그는
+.db만 보여주지만 로딩은 항상 pack(.ice)으로 한다** — pack이 없거나
+오래되면 그 자리에서 인덱싱을 돌리고 로그를 모달 창에 보여준 뒤
+연다. 참고: 구 레거시 타일 캐시가 쓰던 `.ice` 확장자는 `.tiles`로
+개명되어 이제 `.ice`는 DRC 인덱스 전용이다.
 
 ### SVRF 룰 메타데이터 (.rules.json)
 

@@ -650,8 +650,8 @@ def main(argv=None):
 
     p = sub.add_parser("drc", help="summarize a Calibre ASCII DRC "
                                    "results database (.db; a fresh "
-                                   ".ice index sidecar is used "
-                                   "automatically)")
+                                   "packed .ice built by 'floe-index "
+                                   "drc' is used automatically)")
     p.add_argument("db")
     p.add_argument("--list", action="store_true",
                    help="also list every error (center + size, um)")

@@ -900,7 +900,7 @@ class Viewer:
         self._digit_last = None     # depth digit-pair state ('99' = full)
         self._digit_t = 0.0
         # DRC results browser ('e' key)
-        self._drc = None            # drc.DrcDb or drc.IceDb
+        self._drc = None            # drc.DrcDb or drc.IcePack
         self._drcwin = None
         self.drc_mark = None        # {"kind": 'p'|'e', "pts": [(dbu)]}
         # prev/next walk by ARITHMETIC over cumulative counts, never
@@ -3860,8 +3860,6 @@ class Viewer:
         if win is None or db is None:
             return
         backend = ("pack v4" if isinstance(db, drc_mod.IcePack)
-                   else "v1 sidecar (no pack!)"
-                   if isinstance(db, drc_mod.IceDb)
                    else "ASCII - NO INDEX")
         rules = ""
         if self._drc_rmeta is not None:
