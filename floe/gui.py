@@ -984,7 +984,11 @@ class Viewer:
         left.pack_start(self._left_stack, True, True, 0)
         self._left_pane = left
         self._lpaned = lpaned
-        lpaned.pack1(left, resize=False, shrink=False)
+        # shrink=True: without it the paned handle floors at the
+        # left content's NATURAL minimum (the DRC nav row alone is
+        # ~450px) and the pane cannot be dragged small (field
+        # report 2026-08-18) - shrinking simply clips the content
+        lpaned.pack1(left, resize=False, shrink=True)
         lpaned.pack2(paned, resize=True, shrink=True)
         lpaned.set_position(MINIMAP_PX + 16)
 
@@ -3382,6 +3386,8 @@ class Viewer:
             se = Gtk.Entry()
             se.connect("changed", self._on_drc_search)
         se.set_placeholder_text("find rule…")
+        se.set_width_chars(8)   # keep the nav row's minimum small
+                                # (it sets the left pane's floor)
         nav.pack_start(se, True, True, 2)
         win._search = se
         hl = Gtk.CheckButton(label="in view")
