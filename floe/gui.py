@@ -1030,6 +1030,12 @@ class Viewer:
         # scroller solely for the scrollbar selectors.
         css = Gtk.CssProvider()
         css.load_from_data(
+            # combo popups as a LIST, not a menu: GTK menu grabs
+            # misfire under XQuartz/remote X (field report
+            # 2026-08-18 - the popup closed on the slightest
+            # pointer move during the click). List mode selects on
+            # a plain row click and never times out.
+            b"combobox { -GtkComboBox-appears-as-list: true; } "
             b".floe-layers, .floe-layers * "
             b"{ background-color: #000000; } "
             b".floe-layers-bg { background-color: #000000; } "

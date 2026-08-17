@@ -225,4 +225,10 @@ cd rust && cargo test --release
 - **DRC가 stale index 경고 후 느리게 열림**: .db가 갱신됨 →
   `floe-index drc results.db` 재실행.
 - **미니맵 누락**: 구 캐시 → `--frontier-only`로 초 단위 재굽기.
+- **콤보 박스가 마우스만 살짝 움직여도 닫힘**: GTK 메뉴 그랩이
+  XQuartz/원격 X에서 깨지는 증상 — 콤보 팝업을 리스트 모드로 전역
+  전환해 완화(`-GtkComboBox-appears-as-list`). 그래도 재현되면
+  XQuartz 환경설정에서 "Focus Follows Mouse"(포커스가 마우스를
+  따름)를 꺼야 한다(`defaults write org.xquartz.X11 wm_ffm -bool
+  false` 후 XQuartz 재시작).
 - **pip 실행 오류**: venv의 pip 셔뱅 깨짐 → `.venv/bin/python -m pip`.
