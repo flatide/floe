@@ -122,6 +122,11 @@ recolor: 행 스와치 재생성(set_color) + meta 갱신 + 개인 layerprops
   필터 컨트롤 행 = **FlowBox**(좁으면 여러 줄로 래핑, 1~4열).
   lpaned pack1 shrink=True + 검색 박스 width_chars 8이 pane 폭
   하한을 낮게 유지(실질 하한 = 미니맵 196px).
+- **룰|그리드 분할 = 비율 유지**(2026-08-18): hsplit 위치는 고정
+  px가 아니라 **pane 폭의 분수**(초기 0.45) — 드래그가 분수를
+  재고정하고 size-allocate가 재적용(guard 플래그로 루프 차단).
+  구 고정 220px는 시작 pane(196px)을 통째로 삼켜 그리드가 0폭으로
+  숨고 핸들이 가장자리에 붙던 원인.
 - **룰 행 카운트 = 에러수/waived**(2026-08-18, "30/20" 형태):
   둘 다 O(1)([wcount]) — waive 필터의 룰 숨김 판정은 기존
   `_drc_wf_count` 그대로. waive/unwaive는 all 필터에서도 해당

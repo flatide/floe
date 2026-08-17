@@ -3379,7 +3379,30 @@ class Viewer:
         hsplit = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         hsplit.pack1(rbox, resize=True, shrink=True)
         hsplit.pack2(gbox, resize=True, shrink=True)
-        hsplit.set_position(220)
+        # PROPORTIONAL split (user report 2026-08-18: a fixed 220px
+        # position swallowed the whole 196px startup pane, hiding
+        # the grid with the handle stuck at the edge): the divider
+        # keeps its FRACTION of the pane - drags update it, resizes
+        # (like the auto-widen on db load) re-apply it
+        frac = [0.45]
+        guard = [False]
+
+        def _hs_pos(wdg, _pspec):
+            w = wdg.get_allocated_width()
+            if not guard[0] and w > 1:
+                frac[0] = wdg.get_position() / float(w)
+
+        def _hs_alloc(wdg, alloc):
+            if alloc.width <= 1:
+                return
+            guard[0] = True
+            try:
+                wdg.set_position(int(alloc.width * frac[0]))
+            finally:
+                guard[0] = False
+
+        hsplit.connect("notify::position", _hs_pos)
+        hsplit.connect("size-allocate", _hs_alloc)
         paned = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL)
         paned.pack1(hsplit, resize=True, shrink=True)
         detail = Gtk.TextView()
