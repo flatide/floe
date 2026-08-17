@@ -197,8 +197,15 @@ ovm 헤더와 meta.src 모두 소스 절대경로/size/mtime을 기록. `Vfs::op
   동일한 -D 세트 필수**, 아니면 체크 목록이 달라진다), `LAYER`/
   `LAYER MAP`, 할당문, 체크 블록(`@` 설명 + 측정문 INTERNAL/INT·
   EXTERNAL/EXT·ENCLOSURE/ENC·AREA·DENSITY·LENGTH·ANGLE·PERIMETER·
-  VERTEX에서 (metric, op, value) 추출; `>= a <= b` 이중 한계는 제약
-  2건, `ABUT<90`류 붙은 옵션 토큰은 식별자 lookbehind로 제외).
+  VERTEX에서 (metric, op, value) 추출).
+- **제약 추출 규칙**(R3b, 2026-08-17): 제약 = **첫 비교연산자에서
+  시작하는 연속 체인만**(`>= a <= b`, `> 0 < v` = 각 제약; 체인은
+  첫 비-비교 토큰에서 종료). 그래서 옵션 토큰의 비교값(`ABUT<90`,
+  `ABUT>0<90`, `OPPOSITE EXTENDED < x`)은 절대 제약으로 읽히지
+  않는다. **비교연산자로 시작하는 다음 줄 = 직전 측정문의 연속**
+  (SVRF 자유 서식 — 한계값이 제 줄로 감싸인 실덱 대응, 다중 줄
+  가능, 블록 닫힘을 넘어 누출 금지). 한계: 피연산자가 줄바꿈으로
+  갈라진 경우는 미지 히스토그램행(--scan으로 가시).
 - 미인식 문장은 히스토그램 카운트 후 스킵(치명 아님). **의도적
   공백**: DMACRO/CMACRO 비전개(바디는 브레이스 깊이로 통스킵,
   CMACRO 호출 수를 경고로 노출), TVF(Tcl) 덱은 Calibre가 생성한

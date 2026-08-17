@@ -15,10 +15,19 @@
       measurement RHS inside a block records constraint + operands,
       unknown in-block statements are counted not fatal, quoted
       check names, DMACRO bodies are skipped whole.
+  R3b real-world expression forms (user call 2026-08-17): bounds =
+      the CONTIGUOUS comparator chain at the first comparator only
+      - option comparators (ABUT>0<90, OPPOSITE EXTENDED < x) never
+      read as constraints; zero-lower-bound chains (> 0 < v);
+      leading-dot values; comparator-leading next lines continue
+      the wrapped measurement (multi-line too), without leaking
+      across a block close.
   R4  end-to-end vs gen_drcdb --svrf: every db check name resolves
-      in the sidecar, constraint values match the generator formula,
-      every check reaches a source gds layer; -D SYNTH_EXTRA adds
-      exactly the EXTRA.CHECK.1 rule.
+      in the sidecar, constraint values match the generator formula
+      through all five emitted syntax styles (spaced/fused/range/
+      VARIABLE bound/wrapped line), every check reaches a source
+      gds layer; -D SYNTH_EXTRA adds exactly the EXTRA.CHECK.1
+      rule.
 
 usage: .venv/bin/python tools/validate_svrf.py
 """
@@ -157,6 +166,48 @@ def r3(tmp):
                       for x in ch.constraints))
 
 
+def r3b(tmp):
+    print("[R3b] real-world expression forms")
+    cases = [
+        ("abut range not a bound",
+         "INT m1 < 0.05 ABUT>0<90 SINGULAR REGION",
+         [("width", "<", 0.05)]),
+        ("option value not a bound",
+         "EXT a b < 0.1 OPPOSITE EXTENDED < 0.05",
+         [("space", "<", 0.1)]),
+        ("zero-lower chain stops at options",
+         "EXT a b > 0 < 0.1 ABUT>0<90",
+         [("space", ">", 0.0), ("space", "<", 0.1)]),
+        ("leading-dot value",
+         "INT m1 < .05", [("width", "<", 0.05)]),
+        ("wrapped bound line",
+         "INT m1\n  < 0.05 ABUT>0<90", [("width", "<", 0.05)]),
+        ("wrapped twice",
+         "INT m1\n  >= 0.05\n  <= 0.10",
+         [("width", ">=", 0.05), ("width", "<=", 0.10)]),
+    ]
+    for label, stmt, want in cases:
+        p = os.path.join(tmp, "expr.svrf")
+        w(p, "LAYER m1 1\nLAYER a 2\nLAYER b 3\n"
+             "X.1 { @ d\n  %s\n}\nY.1 { @ y\n  INT m1 < 0.9\n}\n"
+             % stmt.replace("\n", "\n  "))
+        d = svrf.parse_deck(p)
+        got = [(c["metric"], c["op"], c["value"])
+               for c in d.checks["X.1"].constraints]
+        ynext = [(c["op"], c["value"])
+                 for c in d.checks["Y.1"].constraints]
+        check(label, got == want and ynext == [("<", 0.9)],
+              "got=%s next=%s" % (got, ynext))
+    p = os.path.join(tmp, "leak.svrf")
+    w(p, "LAYER m1 1\nX.1 { @ d\n  INT m1\n}\n"
+         "Z.1 { @ z\n  ENC m1 m1 < 0.2\n}\n")
+    d = svrf.parse_deck(p)
+    check("boundless wrap never leaks past the block close",
+          d.checks["X.1"].constraints == []
+          and len(d.checks["Z.1"].constraints) == 1
+          and d.stats["meas_no_bound"] == 1)
+
+
 def r4(tmp):
     print("[R4] end-to-end vs gen_drcdb --svrf")
     db = os.path.join(tmp, "e2e.db")
@@ -205,6 +256,7 @@ def main():
         r1(tmp)
         r2(tmp)
         r3(tmp)
+        r3b(tmp)
         r4(tmp)
     print("validate_svrf:", "FAIL" if FAIL else "all green")
     sys.exit(FAIL)

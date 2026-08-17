@@ -123,7 +123,9 @@ recolor: 행 스와치 재생성(set_color) + meta 갱신 + 개인 layerprops
   상세 pane 하단(`_drc_meta_lines`): 덱 원문 제약(constraint:) ·
   **measured** = 이 에러 자체의 치수 vs 한계값과 Δ/%(waive 판단
   보조; `_drc_measured` — CD 룰러와 동일 판정: rect=min(w,h)·마주
-  보는 엣지쌍=갭·단일 엣지=길이·area=신발끈, 복잡 도형은 생략) ·
+  보는 엣지쌍=갭·단일 엣지=길이·area=신발끈, 복잡 도형은 생략;
+  제약이 여럿이면 **상한(<,<=,==) 우선** — `> 0 < v` 체인의 하한은
+  무의미한 +Δ라 표시하지 않음, 2026-08-17) ·
   layers(직접 피연산자) · gds(원천 레이어 폐쇄) · derivation 체인
   (`derived` 맵을 `svrf.rhs_operands`로 워크, 6줄 캡). 메타 없는
   룰/사이드카 부재 시 상세는 기존 그대로(추가 줄 0).

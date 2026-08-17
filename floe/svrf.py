@@ -201,6 +201,10 @@ class _Parser(object):
         self.cur = None            # open Check
         self.depth = 0
         self.macro_depth = 0       # >0: inside a DMACRO body (skipped)
+        self._cont = None          # [check, metric, text, had_bound]
+                                   # of the last measurement - a
+                                   # comparator-leading next line
+                                   # continues it (wrapped bounds)
         self._sub_rx = None        # compiled #DEFINE substitution
         self._sub_map = {}
 
@@ -315,6 +319,9 @@ class _Parser(object):
         if self.cur is not None:
             self.block_line(s)
             return
+        if self._try_cont(s):
+            return
+        self._cont = None
         m = _CHECK_RX.match(s)
         if m and m.group(2).upper() not in IGNORED_HEADS \
                 and not _ASSIGN_RX.match(s):
@@ -368,6 +375,7 @@ class _Parser(object):
             s = s[1:].lstrip()
             if self.depth <= 0:
                 self.cur = None
+                self._cont = None
                 if s:
                     self.statement(s)
                 return
@@ -379,19 +387,25 @@ class _Parser(object):
             s = s[:-1].rstrip()
         nested = s.count("{") - s.count("}") if s else 0
         if s:
-            am = _ASSIGN_RX.match(s)
-            if am:
-                self.assign(am.group(1), am.group(2), self.cur)
+            if self._try_cont(s):
+                pass
             else:
-                head = s.split(None, 1)[0].upper()
-                if head in MEAS:
-                    self.measurement(s, self.cur)
+                am = _ASSIGN_RX.match(s)
+                if am:
+                    self._cont = None
+                    self.assign(am.group(1), am.group(2), self.cur)
                 else:
-                    self.d.stats["unknown_in_block"] += 1
-                    self.d.unknown[head] += 1
+                    head = s.split(None, 1)[0].upper()
+                    if head in MEAS:
+                        self.measurement(s, self.cur)
+                    else:
+                        self._cont = None
+                        self.d.stats["unknown_in_block"] += 1
+                        self.d.unknown[head] += 1
         self.depth += nested - closes
         if self.depth <= 0:
             self.cur = None
+            self._cont = None
 
     def layer_stmt(self, s):
         tok = s.split()
@@ -448,6 +462,49 @@ class _Parser(object):
                         check.layers.append(n)
         self.d.stats["assign"] += 1
 
+    @staticmethod
+    def _chain(text, pos):
+        """The CONTIGUOUS comparator+value chain starting at pos -
+        the statement's own bounds end at the first non-comparator
+        token, so option comparators further right (ABUT>0<90,
+        OPPOSITE EXTENDED < x) never read as constraints."""
+        out = []
+        while True:
+            bm = _BOUND_RX.match(text, pos)
+            if bm is None:
+                break
+            out.append((bm.group(1), bm.group(2)))
+            pos = bm.end()
+            while pos < len(text) and text[pos].isspace():
+                pos += 1
+        return out
+
+    def _add_bounds(self, check, metric, bounds, text):
+        for op, tok in bounds:
+            val = _to_num(tok, self.d.variables)
+            c = {"metric": metric, "op": op, "value": val,
+                 "text": text}
+            if val is None:
+                c["raw"] = tok
+            check.constraints.append(c)
+
+    def _try_cont(self, s):
+        """A comparator-leading line continues the previous
+        measurement statement - real decks wrap the constraint
+        onto its own line (SVRF is free-format)."""
+        if self._cont is None or _OP_RX.match(s) is None:
+            return False
+        bounds = self._chain(s, 0)
+        if not bounds:
+            return False
+        check, metric, base, had = self._cont
+        text = base + " " + s.strip()
+        self._add_bounds(check, metric, bounds, text)
+        if not had:
+            self.d.stats["meas_no_bound"] -= 1
+        self._cont = [check, metric, text, True]
+        return True
+
     def measurement(self, s, check):
         """INTERNAL/EXTERNAL/... [layers] op value [op value] opts.
         Returns the operand names (for assignment RHS reuse)."""
@@ -462,15 +519,11 @@ class _Parser(object):
             for n in ops:
                 if n not in check.layers:
                     check.layers.append(n)
-            for bm in _BOUND_RX.finditer(rest):
-                val = _to_num(bm.group(2), self.d.variables)
-                c = {"metric": metric, "op": bm.group(1),
-                     "value": val, "text": s.strip()}
-                if val is None:
-                    c["raw"] = bm.group(2)
-                check.constraints.append(c)
-            if not m:
+            bounds = self._chain(rest, m.start()) if m else []
+            self._add_bounds(check, metric, bounds, s.strip())
+            if not bounds:
                 self.d.stats["meas_no_bound"] += 1
+            self._cont = [check, metric, s.strip(), bool(bounds)]
         return ops
 
 

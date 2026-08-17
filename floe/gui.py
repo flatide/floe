@@ -4674,20 +4674,28 @@ class Viewer:
         for t in dict.fromkeys(c.get("text", "") for c in cons):
             if t:
                 lines.append("constraint: %s" % t)
+        cands = []
         for con in cons:
             v = con.get("value")
             if v is None:
                 continue
             mv = self._drc_measured(e, con.get("metric"))
-            if mv is None:
-                continue
+            if mv is not None:
+                cands.append((con, v, mv))
+        if cands:
+            # prefer the UPPER bound: "> 0 < v" chains flag by the
+            # upper limit - the lower bound reads as a meaningless
+            # positive delta (real decks use zero-lower ranges)
+            pick = next((c for c in cands
+                         if c[0].get("op") in ("<", "<=", "==")),
+                        cands[0])
+            con, v, mv = pick
             pct = (" (%+.1f%%)" % ((mv - v) / v * 100.0)) if v else ""
             unit = "um2" if con.get("metric") == "area" else "um"
             lines.append("measured: %.4f %s vs %s %.4f · "
                          "Δ %+.4f%s"
                          % (mv, unit, con.get("op", "?"), v,
                             mv - v, pct))
-            break
         lays = mc.get("layers") or []
         if lays:
             lines.append("layers: %s" % ", ".join(lays))

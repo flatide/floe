@@ -157,9 +157,7 @@ def main():
                     "S00-V0.5.0.0-ENG_0520"]
             if ci % 3 == 0:
                 desc.append(waivers[ci % len(waivers)])
-            desc.append("%s : rule text for synthetic check %d, "
-                        "min dimension %.3fum - -"
-                        % (name, ci, vum))
+            desc.append(DESCS[ci % 4] % (name, ci, vum) + " - -")
             f.write("%s\n%d %d %d Jul 11 01:55:00 2026\n%s\n"
                     % (name, n, n, len(desc), "\n".join(desc)))
             vd = max(2, int(vum * prec))   # limit in dbu
@@ -246,6 +244,17 @@ def main():
               "-D SYNTH_EXTRA)" % (a.svrf, len(svrf_rules)))
 
 
+# rule-text phrasings, cycled per check (real decks do not share
+# one uniform "min dimension" sentence) - used in the db desc AND
+# the deck @ description
+DESCS = ("%s : rule text for synthetic check %d, "
+         "min dimension %.3fum",
+         "%s : check %d - dimension must be >= %.3f um",
+         "%s : check %d fails where the value is < %.3fum "
+         "(see DRM ch.7)",
+         "%s : [check %d] limit %.3f, waivable per foundry "
+         "sign-off")
+
 # gds numbers for the synthetic layer names (M1/M2 go through
 # LAYER MAP so the parser's map resolution is exercised too)
 SVRF_GDS = {"M1": 31, "M2": 32, "M3": 33, "M4": 34, "V1": 51,
@@ -278,18 +287,39 @@ def write_svrf(path, layers, rules, gds_map=None):
     def drawn(n):
         return n.lower() + "_drawn"
 
-    def meas(kind, x, y, v):
+    def meas(kind, x, y, v, ci):
+        """Measurement statement: core + bound + options, the bound
+        written in one of FIVE real-deck syntax styles (ci-cycled;
+        user call 2026-08-17 - real rules are not one uniform
+        expression): spaced / fused / zero-lower range / VARIABLE
+        reference / bound wrapped onto its own line."""
+        core, opts = {
+            "SPACE": ("EXT %s" % x, ""),
+            "WIDTH": ("INT %s" % x, ""),
+            "ENC": ("ENC %s %s" % (x, y), ""),
+            "EXT": ("EXT %s %s" % (x, y), ""),
+            "AREA": ("AREA %s" % x, ""),
+            "DENSITY.W": ("DENSITY %s" % x, "WINDOW 50 50"),
+            "NOTCH": ("INT %s" % x, "ABUT>0<90 SINGULAR REGION"),
+            "OVERLAP": ("ENC %s %s" % (y, x), "")}[kind]
         vs = "%.3f" % v
-        return {"SPACE": "EXT %s < %s" % (x, vs),
-                "WIDTH": "INT %s < %s" % (x, vs),
-                "ENC": "ENC %s %s < %s" % (x, y, vs),
-                "EXT": "EXT %s %s < %s" % (x, y, vs),
-                "AREA": "AREA %s < %s" % (x, vs),
-                "DENSITY.W": "DENSITY %s < %s WINDOW 50 50"
-                             % (x, vs),
-                "NOTCH": "INT %s < %s ABUT<90 SINGULAR REGION"
-                         % (x, vs),
-                "OVERLAP": "ENC %s %s < %s" % (y, x, vs)}[kind]
+        style = ci % 5
+        pre = ""
+        if style == 0:
+            bound = "< %s" % vs
+        elif style == 1:
+            bound = "<%s" % vs
+        elif style == 2:
+            bound = "> 0 < %s" % vs
+        elif style == 3:
+            pre = "VARIABLE V_%d %s\n" % (ci, vs)
+            bound = "< V_%d" % ci
+        else:
+            bound = "\n        < %s" % vs   # wrapped line
+        stmt = "%s %s" % (core, bound)
+        if opts:
+            stmt += " " + opts
+        return pre, stmt
 
     with open(path, "w") as f:
         f.write("// synthetic SVRF deck (subset-parser fixture)\n"
@@ -309,9 +339,10 @@ def write_svrf(path, layers, rules, gds_map=None):
             x = drawn(layer)
             y = drawn(layers[(layers.index(layer) + 1)
                              % len(layers)])
-            f.write("%s { @ %s : rule text for synthetic check %d, "
-                    "min dimension %.3fum\n    %s\n}\n"
-                    % (name, name, ci, v, meas(kind, x, y, v)))
+            pre, stmt = meas(kind, x, y, v, ci)
+            f.write("%s%s { @ %s\n    %s\n}\n"
+                    % (pre, name, DESCS[ci % 4] % (name, ci, v),
+                       stmt))
 
 
 if __name__ == "__main__":
