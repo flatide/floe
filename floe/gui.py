@@ -54,7 +54,8 @@ DRC_GRID_W = 5             # error numbers per browser grid row
 DRC_VIEW_FRACTION = 0.3    # error extent ~30% of the view on a jump
 DRC_HL_CAP = 1000          # highlight-in-view marker budget
 DRC_SEL_CAP = 5000         # box-select budget ('e' mode)
-DRC_CYAN = 0x00FFFFFF      # WAIVED errors (geometry+numbers)
+DRC_GREEN = 0x00E676FF     # WAIVED errors (geometry+numbers;
+                           # cyan->green, user call 2026-08-17)
 DRC_MARK_PX = 5            # collapsed-marker square side; geometry
                            # whose screen span shrinks BELOW this
                            # paints as the marker (no gap where the
@@ -1791,7 +1792,7 @@ class Viewer:
                 self._drc_stamp_errs(disp, sx, sy,
                                      self._drc_page_marks)
         if self._drc_sel is not None:
-            # box selection ('e'): GOLD on top of the rule's cyan
+            # box selection ('e'): GOLD on top of the status colors
             sci, _seis, marks, _eset = self._drc_sel
             self._drc_stamp_errs(
                 disp, sx, sy,
@@ -4029,8 +4030,8 @@ class Viewer:
 
         def cellfmt(ei):
             t = "%d" % (ei + 1)      # rule-local numbering
-            fg = ("#00ffff" if self._drc_waived(db, ci, ei)
-                  else "#ff5252")    # waived cyan / not-waived red
+            fg = ("#00e676" if self._drc_waived(db, ci, ei)
+                  else "#ff5252")    # waived green / not-waived red
             if ei in eset:
                 return ("<span background='#ffd700' "
                         "foreground='%s'>%s</span>" % (fg, t))
@@ -4395,7 +4396,7 @@ class Viewer:
         self.drc_mark = {"kind": e.kind,
                          "pts": [(x / self.dbu, y / self.dbu)
                                  for x, y in e.pts],
-                         "color": (DRC_CYAN
+                         "color": (DRC_GREEN
                                    if self._drc_waived(db, ci, ei)
                                    else DRC_RED)}
         # auto CD rulers: replaced on every jump (hand-drawn rulers
@@ -4466,8 +4467,8 @@ class Viewer:
 
     def _drc_stamp_errs(self, disp, sx, sy, items, color=None):
         """Error painter: geometry in `color`, or per-status when
-        None (user call 2026-08-14: not waived = red, waived =
-        cyan). Errors whose screen span is below the marker size
+        None (user call 2026-08-14/17: not waived = red, waived =
+        green). Errors whose screen span is below the marker size
         collapse to DRC_MARK_PX squares (the focused one: 9x9) -
         the threshold IS the marker size, so there is no zoom range
         where the shape draws smaller than the marker (user call
@@ -4479,7 +4480,7 @@ class Viewer:
         for ci_, ei_, kind, spts in items:
             col = color
             if col is None:
-                col = (DRC_CYAN
+                col = (DRC_GREEN
                        if self._drc_waived(db, ci_, ei_)
                        else DRC_RED)
             sp = [(sx(x), sy(y)) for x, y in spts]

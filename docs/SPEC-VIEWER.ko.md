@@ -73,7 +73,7 @@
 - 오버레이(픽스버프 직접 스탬프, gui.py 상단 헬퍼): 룰러(흰 1px 실선
   + 화살촉 + 거리 칩 흰 텍스트 + 점선 리더), 러버밴드(흰 1px), 스냅
   마커(흰 십자+사각), DRC 마크(**상태색** — 2026-08-14: not waived
-  = red(#FF5252), waived = cyan; 엣지=2px 단색 실선, 폴리곤=2px
+  = red(#FF5252), waived = green(#00E676, 2026-08-17 cyan에서 변경); 엣지=2px 단색 실선, 폴리곤=2px
   단색 외곽 + 내부 50% 스페클 — `_drc_fill_speckle` 짝홀 스캔라인
   + 색상별 캐시 2행 체커 스트립 composite, >256 꼭짓점은 외곽만),
   선택 하이라이트.
@@ -195,12 +195,12 @@ recolor: 행 스와치 재생성(set_color) + meta 갱신 + 개인 layerprops
 - **룰 에러 상시 표시**(2026-08-14→15 수정): 룰이 열려 있으면
   **현재 그리드 페이지의 에러들**(_drc_page_marks — 그리드 채움 시
   지오메트리 프리빌드, 페이지당 ~7ms)이 캔버스에 **상태색 실도형**
-  (not waived=red, waived=cyan)으로 그려짐 — 페이지 넘김·필터·waive
+  (not waived=red, waived=green)으로 그려짐 — 페이지 넘김·필터·waive
   변경이 마커에 즉시 반영. `_drc_stamp_errs` 공용 페인터(마커
   붕괴 = 스팬 < DRC_MARK_PX·포커스 9×9·세그먼트 예산 20k). 선택(gold)은 그
   위에 같은 페인터로 덮임. in-view 필터의 뷰 추적 호출은 유지.
   v1 사이드카도 페이지 마커 표시(query_rect 불필요해짐).
-  **그리드 숫자도 상태색**(waived cyan / not-waived red; gold 선택
+  **그리드 숫자도 상태색**(waived green / not-waived red; gold 선택
   배경 위에도 상태색 유지, 현재 셀은 파랑 배경+흰 글자).
 - **mono(그레이스케일)**: `b` 키 토글(독립 — 필터와 연동 없음),
   서비스 "mono" 잡 → Renderer.set_mono(디자인 레이어 색을
