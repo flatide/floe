@@ -18,7 +18,9 @@ pack; D2 keeps the retirement honest.)
   D4  pack round-trip == load_ascii on a gen_drcdb asset too.
   D5  pack output bytes are --jobs invariant (1 vs 5 on the tiny
       fixture forces mid-check segment splits; 1 vs 4 on the
-      gen_drcdb asset).
+      gen_drcdb asset). D5b: FLOE_DRC_QBOX_RESIDENT=0 forces the
+      big-rule streaming qbox path (bbox pre-pass + per-block
+      rows) for every check - bytes must equal the default pack.
   D6  IcePack.query_rect == brute-force bbox scan on random rects;
       D6b: the waived= filter applies INSIDE the query, before the
       cap (regression: a capped post-filter lost matches hiding
@@ -276,6 +278,20 @@ def main():
     print("D4/D5 OK: fixture+gen round-trip, jobs-invariant bytes"
           " (%d checks / %d errors)"
           % (len(gref.checks), gref.total))
+
+    # D5b: forcing the streaming qbox encoder (resident max 0 -> a
+    # bbox pre-pass + per-block qbox rows for EVERY check) must not
+    # change a single byte vs the resident path
+    sp = os.path.join(tmp, "gen.stream.ice")
+    r = subprocess.run(
+        [BIN, "drc", gdb, sp, "--jobs", "4"],
+        capture_output=True, text=True,
+        env=dict(os.environ, FLOE_DRC_QBOX_RESIDENT="0"))
+    if r.returncode != 0:
+        fail("stream pack rc=%d: %s" % (r.returncode, r.stderr))
+    if open(sp, "rb").read() != gpacks[1]:
+        fail("streaming qbox encoder changed pack bytes")
+    print("D5b OK: forced-streaming pack byte-identical")
 
     # D6: query_rect == brute force bbox scan
     import random

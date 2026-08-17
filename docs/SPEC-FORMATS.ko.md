@@ -157,6 +157,14 @@ ovm 헤더와 meta.src 모두 소스 절대경로/size/mtime을 기록. `Vfs::op
   파일 정리. 주의: [status]/[wcount]는 여전히 pack 안에만 있어
   재-pack이 waive 검토 상태를 초기화함(저널 사이드카는 S4에서
   결정).
+- **인코더 메모리 계약**(2026-08-18): RSS가 최대 룰 크기에
+  비례하지 않는다 — 룰당 per-error bbox(ebb 32B/에러)는
+  상주 임계(기본 4M 에러 ≈ 128MB, `FLOE_DRC_QBOX_RESIDENT`)까지만
+  유지하고, 초과 룰은 **2-pass**(bbox 프리패스로 체크 bbox 확정 →
+  인코딩하며 qbox 행을 블록 단위 스트리밍). 블록 bbox 테이블도
+  `.tmpb`로 스풀 후 제자리 복사(1.25G 에러 ≈ 20M 블록 = 940MB
+  상주 제거). 두 경로는 **바이트 동일**(D5b가 강제 스트리밍
+  vs 기본을 비교). 잔여 상주 = dir(64B/체크)+strtab.
 - 크기 실측: 합성 95MB → 21MB(1/4.5; qbox 4B/에러 포함).
 - 리더 디스패치: 헤더 version 필드(1=사이드카 IceDb, ≥2=IcePack).
   **레이아웃 개정 규율**: pack 섹션 배치가 바뀌면 version을 올린다.

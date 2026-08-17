@@ -337,6 +337,41 @@ fn final_tmp_path(out: &str) -> String {
     format!("{}.tmpw", out)
 }
 
+// qbox quantization: outward-rounded u8 lattice coordinate over the
+// check bbox. Shared by the resident and streaming encoders - the
+// bytes must match whichever path runs (D5b).
+fn qcoord(v: i64, c0: i64, span: i128, up: bool) -> u8 {
+    if span <= 0 {
+        return if up { 255 } else { 0 };
+    }
+    let d = (v - c0) as i128 * 255;
+    let r = if up { (d + span - 1) / span } else { d / span };
+    r.clamp(0, 255) as u8
+}
+
+// bbox-only pre-pass over one check's temp span: pass 1 of the
+// big-rule streaming encode (the check bbox must be known before
+// any qbox row can be quantized). The per-point fold equals the
+// resident path's fold of block bboxes.
+fn span_bbox(span: &[u8], err_cnt: u64) -> (i64, i64, i64, i64) {
+    let mut pos = 0usize;
+    let (mut x0, mut y0) = (i64::MAX, i64::MAX);
+    let (mut x1, mut y1) = (i64::MIN, i64::MIN);
+    for _ in 0..err_cnt {
+        let knpts = uv_read(span, &mut pos);
+        let npts = (knpts >> 1) as usize;
+        for _ in 0..npts {
+            let x = unzz(uv_read(span, &mut pos));
+            let y = unzz(uv_read(span, &mut pos));
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x);
+            y1 = y1.max(y);
+        }
+    }
+    (x0, y0, x1, y1)
+}
+
 pub fn pack(
     src: &str,
     out: &str,
@@ -514,6 +549,7 @@ pub fn pack(
     if res.is_err() {
         let _ = std::fs::remove_file(final_tmp_path(out));
         let _ = std::fs::remove_file(format!("{}.tmpq", out));
+        let _ = std::fs::remove_file(format!("{}.tmpb", out));
     }
     let (_blk_cnt, err_total) = res?;
     Ok((
@@ -570,7 +606,14 @@ fn encode(
     let mut strtab = StrTab::default();
     let cell_ref = strtab.intern(cell);
     let mut blob = 40u64;
-    let mut blocks: Vec<(u64, u32, i64, i64, i64, i64)> = Vec::new();
+    // block bbox recs spool to a temp as well: a 1.25G-error db
+    // has ~20M blocks (48B each) - never resident
+    let bpath = format!("{}.tmpb", out);
+    let mut bw = std::io::BufWriter::with_capacity(
+        1 << 20,
+        std::fs::File::create(&bpath).map_err(|e| e.to_string())?,
+    );
+    let mut blk_cnt = 0u64;
     let mut dir: Vec<[u8; 64]> = Vec::with_capacity(checks.len());
     let mut desc_refs: Vec<u32> = Vec::new();
     let mut err_total = 0u64;
@@ -583,7 +626,18 @@ fn encode(
         1 << 20,
         std::fs::File::create(&qpath).map_err(|e| e.to_string())?,
     );
+    // per-error bboxes of ONE check stay resident only up to this
+    // many errors (~128MB); bigger rules take a bbox pre-pass and
+    // stream their qbox rows block by block. Encoder RSS used to
+    // be O(largest rule): a 100M-error rule held 3.2GB of ebb +
+    // 0.4GB of q4 here. Env knob exists for the D5b byte gate.
+    let q_resident_max: u64 =
+        std::env::var("FLOE_DRC_QBOX_RESIDENT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4 << 20);
     let mut ebb: Vec<(i64, i64, i64, i64)> = Vec::new();
+    let mut q4blk: Vec<u8> = Vec::with_capacity(BLOCK * 4);
 
     for (ci, c) in checks.iter().enumerate() {
         let name_ref = strtab.intern(&c.name);
@@ -591,7 +645,7 @@ fn encode(
         for d in &c.desc {
             desc_refs.push(strtab.intern(d));
         }
-        let block_start = blocks.len() as u64;
+        let block_start = blk_cnt;
         let err_start = err_total;
         if c.err_cnt > 0 {
             let t = temps[c.temp_id]
@@ -604,11 +658,22 @@ fn encode(
             // ascending per-rule listings fall out of the order)
             let mut pos = 0usize;
             let mut left = c.err_cnt;
+            let resident = c.err_cnt <= q_resident_max;
             ebb.clear();
             let mut cx0 = i64::MAX;
             let mut cy0 = i64::MAX;
             let mut cx1 = i64::MIN;
             let mut cy1 = i64::MIN;
+            let (mut sx, mut sy) = (0i128, 0i128);
+            if !resident {
+                let (a, b, cc, d) = span_bbox(span, c.err_cnt);
+                cx0 = a;
+                cy0 = b;
+                cx1 = cc;
+                cy1 = d;
+                sx = (cx1 - cx0).max(0) as i128;
+                sy = (cy1 - cy0).max(0) as i128;
+            }
             while left > 0 {
                 let cnt = left.min(BLOCK as u64) as u32;
                 let mut bx0 = i64::MAX;
@@ -618,6 +683,7 @@ fn encode(
                 let mut pfx = 0i64;
                 let mut pfy = 0i64;
                 buf.clear();
+                q4blk.clear();
                 for _ in 0..cnt {
                     let knpts = uv_read(span, &mut pos);
                     let npts = (knpts >> 1) as usize;
@@ -647,40 +713,55 @@ fn encode(
                         ex1 = ex1.max(x);
                         ey1 = ey1.max(y);
                     }
-                    ebb.push((ex0, ey0, ex1, ey1));
+                    if resident {
+                        ebb.push((ex0, ey0, ex1, ey1));
+                    } else {
+                        q4blk.push(qcoord(ex0, cx0, sx, false));
+                        q4blk.push(qcoord(ey0, cy0, sy, false));
+                        q4blk.push(qcoord(ex1, cx0, sx, true));
+                        q4blk.push(qcoord(ey1, cy0, sy, true));
+                    }
                     bx0 = bx0.min(ex0);
                     by0 = by0.min(ey0);
                     bx1 = bx1.max(ex1);
                     by1 = by1.max(ey1);
                 }
                 w.write_all(&buf).map_err(|e| e.to_string())?;
-                blocks.push((blob, cnt, bx0, by0, bx1, by1));
+                let mut rec = [0u8; 48];
+                rec[..8].copy_from_slice(&blob.to_le_bytes());
+                rec[8..12].copy_from_slice(&cnt.to_le_bytes());
+                rec[16..24].copy_from_slice(&bx0.to_le_bytes());
+                rec[24..32].copy_from_slice(&by0.to_le_bytes());
+                rec[32..40].copy_from_slice(&bx1.to_le_bytes());
+                rec[40..48].copy_from_slice(&by1.to_le_bytes());
+                bw.write_all(&rec).map_err(|e| e.to_string())?;
+                blk_cnt += 1;
                 blob += buf.len() as u64;
                 left -= cnt as u64;
-                cx0 = cx0.min(bx0);
-                cy0 = cy0.min(by0);
-                cx1 = cx1.max(bx1);
-                cy1 = cy1.max(by1);
+                if resident {
+                    cx0 = cx0.min(bx0);
+                    cy0 = cy0.min(by0);
+                    cx1 = cx1.max(bx1);
+                    cy1 = cy1.max(by1);
+                } else {
+                    qw.write_all(&q4blk)
+                        .map_err(|e| e.to_string())?;
+                }
             }
-            // qbox: outward-rounded u8 lattice over the check bbox
-            let sx = (cx1 - cx0).max(0) as i128;
-            let sy = (cy1 - cy0).max(0) as i128;
-            let mut q4 = Vec::with_capacity(ebb.len() * 4);
-            for &(ex0, ey0, ex1, ey1) in &ebb {
-                let q = |v: i64, c0: i64, span: i128, up: bool| -> u8 {
-                    if span <= 0 {
-                        return if up { 255 } else { 0 };
-                    }
-                    let d = (v - c0) as i128 * 255;
-                    let r = if up { (d + span - 1) / span } else { d / span };
-                    r.clamp(0, 255) as u8
-                };
-                q4.push(q(ex0, cx0, sx, false));
-                q4.push(q(ey0, cy0, sy, false));
-                q4.push(q(ex1, cx0, sx, true));
-                q4.push(q(ey1, cy0, sy, true));
+            if resident {
+                // qbox after the fact: the check bbox is the fold
+                // of the block bboxes just encoded
+                sx = (cx1 - cx0).max(0) as i128;
+                sy = (cy1 - cy0).max(0) as i128;
+                let mut q4 = Vec::with_capacity(ebb.len() * 4);
+                for &(ex0, ey0, ex1, ey1) in &ebb {
+                    q4.push(qcoord(ex0, cx0, sx, false));
+                    q4.push(qcoord(ey0, cy0, sy, false));
+                    q4.push(qcoord(ex1, cx0, sx, true));
+                    q4.push(qcoord(ey1, cy0, sy, true));
+                }
+                qw.write_all(&q4).map_err(|e| e.to_string())?;
             }
-            qw.write_all(&q4).map_err(|e| e.to_string())?;
             err_total += c.err_cnt;
         }
         let mut rec = [0u8; 64];
@@ -695,7 +776,7 @@ fn encode(
         rec[40..48].copy_from_slice(&c.original.to_le_bytes());
         rec[48..56].copy_from_slice(&block_start.to_le_bytes());
         rec[56..64].copy_from_slice(
-            &(blocks.len() as u64 - block_start).to_le_bytes(),
+            &(blk_cnt - block_start).to_le_bytes(),
         );
         dir.push(rec);
         if last_log.elapsed().as_secs() >= 15 {
@@ -739,17 +820,15 @@ fn encode(
         w.write_all(&zeros).map_err(|e| e.to_string())?;
     }
     let blk_off = wcount_off + checks.len() as u64 * 4;
-    for (off, cnt, x0, y0, x1, y1) in &blocks {
-        let mut rec = [0u8; 48];
-        rec[..8].copy_from_slice(&off.to_le_bytes());
-        rec[8..12].copy_from_slice(&cnt.to_le_bytes());
-        rec[16..24].copy_from_slice(&x0.to_le_bytes());
-        rec[24..32].copy_from_slice(&y0.to_le_bytes());
-        rec[32..40].copy_from_slice(&x1.to_le_bytes());
-        rec[40..48].copy_from_slice(&y1.to_le_bytes());
-        w.write_all(&rec).map_err(|e| e.to_string())?;
+    bw.flush().map_err(|e| e.to_string())?;
+    drop(bw);
+    {
+        let mut br = std::fs::File::open(&bpath)
+            .map_err(|e| e.to_string())?;
+        std::io::copy(&mut br, &mut w).map_err(|e| e.to_string())?;
     }
-    let dir_off = blk_off + blocks.len() as u64 * 48;
+    let _ = std::fs::remove_file(&bpath);
+    let dir_off = blk_off + blk_cnt * 48;
     for rec in &dir {
         w.write_all(rec).map_err(|e| e.to_string())?;
     }
@@ -769,7 +848,7 @@ fn encode(
         status_off,
         wcount_off,
         blk_off,
-        blocks.len() as u64,
+        blk_cnt,
         dir_off,
         checks.len() as u64,
         descref_off,
@@ -788,7 +867,7 @@ fn encode(
     drop(w);
     std::fs::rename(&tmp, out)
         .map_err(|e| format!("rename {} -> {}: {}", tmp, out, e))?;
-    Ok((blocks.len() as u64, err_total))
+    Ok((blk_cnt, err_total))
 }
 
 #[cfg(test)]

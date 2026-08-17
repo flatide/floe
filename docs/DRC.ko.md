@@ -53,7 +53,9 @@ rust/target/release/floe-index drc results.db [--jobs N]
   검증 — **--jobs 무관 동일 바이트**(D5). 95MB 8코어 0.2s.
   기록은 `<out>.tmpw` → 완성 후 rename(원자적) — 재-pack이 기존
   pack(열린 뷰어 mmap 포함)을 truncate하지 않고, 실패 시 부분
-  파일을 남기지 않음.
+  파일을 남기지 않음. 인코더 메모리는 최대 룰 크기와 무관:
+  대형 룰(4M 에러 초과)은 bbox 프리패스 + qbox 블록 스트리밍
+  2-pass, 블록 테이블은 임시 스풀(두 경로 바이트 동일 — D5b).
 - **레이아웃 규율**: 섹션 배치가 바뀌면 헤더 version을 올리고
   리더는 현재 값만 수용(구 pack을 새 리더가 조용히 오독해 소형
   쿼리만 빗나갔던 사고의 재발 방지 — 거부 시 재-pack 안내).

@@ -1827,6 +1827,7 @@ fn build_cell_plan(
     nl: usize,
     page_target_bytes: u64,
     lod: bool,
+    lod_budget: &std::sync::atomic::AtomicIsize,
 ) -> CellPlan {
     let cell = &doc.cells[ci];
     let mut phase_s = [0f32; 6];
@@ -2039,47 +2040,80 @@ fn build_cell_plan(
     // results merge in page order, so bytes are unchanged.
     const LOD_PAR_MIN: usize = 64;
     if cand.len() >= LOD_PAR_MIN {
-        let nthreads = std::thread::available_parallelism()
+        // review 2026-08-17 (#60): threads beyond this planner's
+        // own come from the shared lod_budget - the outer pool
+        // already runs `jobs` planners, so extras exist only at
+        // the monster-cell tail (planners exited) or when fewer
+        // cells than jobs are in flight
+        let desired = std::thread::available_parallelism()
             .map(|v| v.get())
             .unwrap_or(1)
             .min(cand.len())
             .min(16)
             .max(1);
+        let mut extra = 0usize;
+        while extra + 1 < desired {
+            let cur = lod_budget
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if cur <= 0 {
+                break;
+            }
+            if lod_budget
+                .compare_exchange(
+                    cur,
+                    cur - 1,
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                extra += 1;
+            }
+        }
         let slots: Vec<
             std::sync::Mutex<Option<(PageJob, SplitStats)>>,
         > = (0..cand.len())
             .map(|_| std::sync::Mutex::new(None))
             .collect();
         let nextk = std::sync::atomic::AtomicUsize::new(0);
-        std::thread::scope(|sc| {
-            for _ in 0..nthreads {
-                let slots = &slots;
-                let nextk = &nextk;
-                let cand = &cand;
-                let pages = &pages;
-                let arena_ref = &arena;
-                sc.spawn(move || loop {
-                    let i = nextk.fetch_add(
-                        1,
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
-                    if i >= cand.len() {
-                        return;
+        {
+            // the planner thread itself always participates: the
+            // slot-merge order (cand index) fixes output bytes at
+            // any thread count
+            let work = || loop {
+                let i = nextk.fetch_add(
+                    1,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                if i >= cand.len() {
+                    return;
+                }
+                let mut lst = SplitStats::default();
+                if let Some(job) = gen_lod_job(
+                    doc,
+                    cell,
+                    &arena,
+                    &pages[cand[i]],
+                    &mut lst,
+                ) {
+                    *slots[i].lock().unwrap() = Some((job, lst));
+                }
+            };
+            if extra == 0 {
+                work();
+            } else {
+                std::thread::scope(|sc| {
+                    for _ in 0..extra {
+                        sc.spawn(&work);
                     }
-                    let mut lst = SplitStats::default();
-                    if let Some(job) = gen_lod_job(
-                        doc,
-                        cell,
-                        arena_ref,
-                        &pages[cand[i]],
-                        &mut lst,
-                    ) {
-                        *slots[i].lock().unwrap() =
-                            Some((job, lst));
-                    }
+                    work();
                 });
+                lod_budget.fetch_add(
+                    extra as isize,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
             }
-        });
+        }
         for (i, &k) in cand.iter().enumerate() {
             if let Some((job, lst)) =
                 slots[i].lock().unwrap().take()
@@ -2827,11 +2861,22 @@ fn build(
             }
         }
     }
+    // LOD helper budget (review 2026-08-17, #60): total planning
+    // threads stay <= jobs. Every live planner implicitly owns one
+    // slot (accounted at init, released at exit) and build_cell_plan
+    // borrows only FREE slots for extra LOD threads - so extras
+    // appear only at the monster-cell tail (planners exited) or when
+    // fewer cells than jobs are in flight. jobs=96 used to mean 96
+    // planners x up to 16 LOD threads each.
+    let planners = jobs.max(1).min(n.max(1));
+    let lod_budget = std::sync::atomic::AtomicIsize::new(
+        jobs.max(1) as isize - planners as isize,
+    );
     std::thread::scope(|s| {
         // committer side: a panic below (commit/encode) must also
         // release workers stuck in the admission wait
         let _died_guard = DiedFlag(&died);
-        for _ in 0..jobs.max(1).min(n.max(1)) {
+        for _ in 0..planners {
             let ring = &ring;
             let window = &window;
             let next_cell = &next_cell;
@@ -2839,12 +2884,18 @@ fn build(
             let rbb = &rbb;
             let lidx = &lidx;
             let died = &died;
+            let lod_budget = &lod_budget;
             s.spawn(move || loop {
                 let ci = next_cell.fetch_add(
                     1,
                     std::sync::atomic::Ordering::Relaxed,
                 );
                 if ci >= n {
+                    // this planner's implicit LOD slot frees up
+                    lod_budget.fetch_add(
+                        1,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                     return;
                 }
                 // bounded admission: never plan more than `window`
@@ -2860,6 +2911,10 @@ fn build(
                 {
                     if died.load(std::sync::atomic::Ordering::Acquire)
                     {
+                        lod_budget.fetch_add(
+                            1,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
                         return;
                     }
                     std::thread::sleep(
@@ -2877,6 +2932,7 @@ fn build(
                             nl,
                             page_target_bytes,
                             lod,
+                            lod_budget,
                         )
                     }),
                 ) {
@@ -4262,7 +4318,8 @@ mod split_tests {
                 .enumerate()
                 .map(|(i, &k)| (k, i))
                 .collect();
-        build_cell_plan(doc, 0, &rbb, &lidx, 1, MIB, true)
+        let budget = std::sync::atomic::AtomicIsize::new(0);
+        build_cell_plan(doc, 0, &rbb, &lidx, 1, MIB, true, &budget)
     }
 
     /// expand every member of a cell's records into
