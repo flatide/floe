@@ -522,14 +522,19 @@ pub fn frontier_boxes(
     v: &Ovm,
     plan: &HierPlan,
     keep: usize,
-) -> Vec<([i64; 4], u8)> {
+) -> (Vec<([i64; 4], u8)>, bool) {
     const GRID: i128 = 64;
     /// per grid cell candidates kept while streaming
     const PER_CELL: usize = 4;
-    /// expansion work guard (frame members + instance pushes)
+    /// expansion work guard (frame members + instance pushes).
+    /// The second return value reports whether it ran dry: the
+    /// walk stops SILENTLY at the budget, so on monster chips
+    /// the DFS prefix bias can leave regional holes - callers
+    /// log it (review 2026-08-18; the lazy-expansion redesign
+    /// waits for an office-scale measurement).
     const BUDGET: u64 = 8_000_000;
     if v.n_cells == 0 || plan.wcells.is_empty() {
-        return Vec::new();
+        return (Vec::new(), false);
     }
     let die = v.cell(v.top).rbbox;
     let (dw, dh) = (
@@ -629,7 +634,10 @@ pub fn frontier_boxes(
         round += 1;
     }
     kept.sort_by_key(|&(a, bx, _)| (Reverse(a), bx));
-    kept.into_iter().map(|(_, bx, band)| (bx, band)).collect()
+    (
+        kept.into_iter().map(|(_, bx, band)| (bx, band)).collect(),
+        budget == 0,
+    )
 }
 
 /// in-order rep member offsets under a shared work budget
@@ -2476,7 +2484,8 @@ mod tests {
             &rq(view, 0, 1),
             &HierOpts::default(),
         );
-        let fb = frontier_boxes(&v, &p, 6000);
+        let (fb, trunc) = frontier_boxes(&v, &p, 6000);
+        assert!(!trunc, "tiny fixture must not hit the budget");
         assert_eq!(fb.len(), 6);
         let mut got: Vec<(i64, i64)> =
             fb.iter().map(|(b, _)| (b[0], b[1])).collect();
@@ -2493,9 +2502,9 @@ mod tests {
             ]
         );
         // keep cap trims via the deterministic round-robin
-        assert_eq!(frontier_boxes(&v, &p, 4).len(), 4);
+        assert_eq!(frontier_boxes(&v, &p, 4).0.len(), 4);
         // determinism: same plan, same bytes
-        assert_eq!(fb, frontier_boxes(&v, &p, 6000));
+        assert_eq!(fb, frontier_boxes(&v, &p, 6000).0);
     }
 
     /// Rev 45 One/Pts thin frames: one deterministic representative

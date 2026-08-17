@@ -158,9 +158,12 @@ recolor: 행 스와치 재생성(set_color) + meta 갱신 + 개인 layerprops
   All/Not Waived/Waived 콤보가 status 바이트 기준으로 룰 카운트·
   그리드·in-view 필터·캔버스 페인트를 일괄 필터링. **성능 계약**:
   카운트 = [wcount] O(1), 필터 그리드 베이스 = `('status', waived)`
-  lazy 서술자 — 페이지는 `status_page`(청크 스캔+조기 종료),
-  n/p 셀 위치는 `status_rank`(단일 카운트) — 어떤 크기의 룰도
-  필터 리스트를 실체화하지 않음. in-view 목록(`_drc_hl_list`)의
+  lazy 서술자 — `status_page`/`status_rank`는 룰당 4M-청크
+  waived 카운트 캐시(첫 필터 접근 시 1패스 생성, set_status가
+  증분 유지)로 시작 청크까지 status 접근 없이 점프하고 **최대 한
+  청크만 스캔**(2026-08-18: 구현은 rank가 위치까지 전량 합산이라
+  100M 룰 n/p가 O(룰 크기)였음 — 계약 위반 수정). 어떤 크기의
+  룰도 필터 리스트를 실체화하지 않음. in-view 목록(`_drc_hl_list`)의
   waive 판정은 `query_rect(waived=)`로 **쿼리 내부 cap 이전**에
   적용(2026-08-17: cap 결과에 대한 후필터는 cap 뒤의 매칭을 누락
   — capped 표기도 필터 후 개수 기준이라 누락을 숨겼음)(실데이터의 waived

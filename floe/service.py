@@ -448,6 +448,11 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
     rounds = 0
     while True:
         rounds += 1
+        # a newer job may have arrived while the previous round's
+        # drain re-queued it: bail BEFORE paying the round's fixed
+        # cost (whole-view re-plan) on a stale generation
+        if newer():
+            return
         final_round = rounds >= _MAX_STREAM_ROUNDS
         tl = time.perf_counter()
         # dedicated monotonic daemon-gen: GUI job gens coalesce/
@@ -602,11 +607,14 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
                 elif k == "mono":
                     renderer.set_mono(j["on"])
                 else:
-                    # render job: put it back - `latest` was bumped
-                    # at submit, so the next newer() check ends this
-                    # refinement and the outer loop picks it up
+                    # render job: put it back and end this
+                    # refinement NOW - `latest` was bumped at
+                    # submit, and riding on to the next newer()
+                    # check used to cost one full stale daemon
+                    # round first (withheld ack = daemon rollback,
+                    # par.3.7)
                     req.put(j)
-                    break
+                    return
         except queue.Empty:
             pass
 

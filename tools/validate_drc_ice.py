@@ -13,6 +13,9 @@ pack; D2 keeps the retirement honest.)
   D2  dispatch: load_db(<db>) auto-picks a fresh pack; a stale
       pack (source mtime bumped) and a retired v1 sidecar both
       fall back to the ASCII parse (v1 opened directly raises).
+      Corrupt packs (12-byte stub, truncated mid-file, wild
+      footer offset) all raise ValueError - never struct.error -
+      and a corrupt SIDE pack falls back to ASCII.
   D3  string table dedupes the repeated Rule File Pathname/Title
       lines and lazy slicing/iteration agree with full decode.
   D4  pack round-trip == load_ascii on a gen_drcdb asset too.
@@ -28,7 +31,9 @@ pack; D2 keeps the retirement honest.)
   D7  [status] byte: zero at build, in-place set/get via pwrite,
       persists across reopen, neighbours untouched; the [wcount]
       per-rule waived counter stays in sync (incl. idempotent sets
-      and reserved-status writes) so filter counts are O(1).
+      and reserved-status writes) so filter counts are O(1); the
+      per-chunk waived-count cache (rank/page jumps) stays in
+      sync across toggles made after it is built.
 
 usage: .venv/bin/python tools/validate_drc_ice.py [floe-index-bin]
 """
@@ -201,6 +206,7 @@ def main():
     if not isinstance(stale, drc.DrcDb):
         fail("stale pack did not fall back to ASCII")
     compare(ref, stale)
+    good = open(side, "rb").read()   # structurally valid pack bytes
     with open(side, "wb") as f:      # fake RETIRED v1 sidecar
         f.write(b"FLOEICE\0" + (1).to_bytes(4, "little") + b"\0" * 68)
     v1 = drc.load_db(db)
@@ -209,6 +215,37 @@ def main():
     try:
         drc.load_db(side)
         fail("retired v1 file opened directly")
+    except ValueError:
+        pass
+    # corrupt packs: every damage mode must surface as ValueError
+    # ("corrupt/truncated - rebuild"), never struct.error etc., and
+    # a corrupt SIDE pack must fall back to the ASCII parse
+    with open(side, "wb") as f:      # 12-byte stub (header cut off)
+        f.write(b"FLOEICE\0" + (4).to_bytes(4, "little"))
+    try:
+        drc.IcePack(side)
+        fail("12-byte corrupt pack opened")
+    except ValueError:
+        pass
+    if not isinstance(drc.load_db(db), drc.DrcDb):
+        fail("12-byte side pack did not fall back to ASCII")
+    with open(side, "wb") as f:      # truncated mid-file
+        f.write(good[:len(good) // 2])
+    try:
+        drc.IcePack(side)
+        fail("truncated pack opened")
+    except ValueError:
+        pass
+    if not isinstance(drc.load_db(db), drc.DrcDb):
+        fail("truncated side pack did not fall back to ASCII")
+    bad = bytearray(good)            # footer dir_off -> absurd
+    off = len(bad) - drc._ICE2_FOOTER.size + 8 * 8
+    bad[off:off + 8] = (1 << 60).to_bytes(8, "little")
+    with open(side, "wb") as f:
+        f.write(bytes(bad))
+    try:
+        drc.IcePack(side)
+        fail("wild dir_off accepted")
     except ValueError:
         pass
     r = subprocess.run([BIN, "drc", db], capture_output=True, text=True)
@@ -359,7 +396,23 @@ def main():
                 fail("status_rank mismatch")
     for ei in (1, 5, 9):
         re2.set_status(4, ei, drc.STATUS_NONE)
-    print("D7 OK: status byte + wcount + lazy paging in sync")
+    # chunk-count cache (C-3): toggles AFTER the cache is built
+    # (the calls above built it) must keep rank/page == oracle
+    for ei in (0, 7):
+        re2.set_status(4, ei, drc.STATUS_WAIVED)
+    for waived in (True, False):
+        oracle = re2.status_eis(4, waived)
+        if re2.status_page(4, waived, 0, 10 ** 9) != oracle:
+            fail("chunk cache out of sync after toggles")
+        for rank, ei in enumerate(oracle[:4]):
+            if re2.status_rank(4, waived, ei) != rank:
+                fail("chunk-cache rank mismatch")
+    for ei in (0, 7):
+        re2.set_status(4, ei, drc.STATUS_NONE)
+    if re2.status_page(4, True, 0, 10 ** 9):
+        fail("chunk cache kept waived entries after clear")
+    print("D7 OK: status byte + wcount + lazy paging + chunk "
+          "cache in sync")
 
     # D6b: waived= filters INSIDE query_rect, before the cap - the
     # old caller-side post-filter dropped every match hiding past

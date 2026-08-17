@@ -387,6 +387,29 @@ pub fn pack(
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
         .unwrap_or(0);
+    // sweep temps a killed/cancelled previous run left behind -
+    // they share this run's `<out>.tmp*` namespace (tmp0..N, tmpq,
+    // tmpb, tmpw)
+    {
+        let p = std::path::Path::new(out);
+        let dir = match p.parent() {
+            Some(d) if !d.as_os_str().is_empty() => d,
+            _ => std::path::Path::new("."),
+        };
+        if let (Some(base), Ok(rd)) =
+            (p.file_name(), std::fs::read_dir(dir))
+        {
+            let prefix = format!("{}.tmp", base.to_string_lossy());
+            for e in rd.flatten() {
+                if e.file_name()
+                    .to_string_lossy()
+                    .starts_with(&prefix)
+                {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
+    }
     let map;
     let empty: [u8; 0] = [];
     let data: &[u8] = if src_size == 0 {

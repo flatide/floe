@@ -47,8 +47,12 @@ rust/target/release/floe-index drc results.db [--jobs N]
   누락 — D6b).
 - **waive 리뷰**: 에러당 1B `[status]`(0=none, 1=waived,
   2=reserved) — 파일 재작성 없이 pwrite 제자리 수정. 룰당 u32
-  `[wcount]` 카운터를 set_status가 증분 유지 → 필터 카운트 O(1).
-  **재-pack 시 status 초기화** 주의.
+  `[wcount]` 카운터를 set_status가 증분 유지 → 필터 카운트 O(1);
+  필터 상태 n/p·페이지 점프는 룰당 4M-청크 카운트 캐시로 최대 한
+  청크만 스캔. **재-pack 시 status 초기화** 주의.
+- **손상 방어**: 절단·오염 pack은 전부 "corrupt .ice → 재-pack
+  안내" ValueError로 정규화(섹션 경계·체크 범위 검증), 사이드
+  pack이면 ASCII 폴백. 인덱서는 시작 시 잔존 `<out>.tmp*` 청소.
 - **병렬 빌드**: 바이트 구간 분할 + 체크 헤더 투기 동기화 + 이음새
   검증 — **--jobs 무관 동일 바이트**(D5). 95MB 8코어 0.2s.
   기록은 `<out>.tmpw` → 완성 후 rename(원자적) — 재-pack이 기존

@@ -269,6 +269,9 @@ STATUS_RESERVED = 2
 #            declared original block_start block_cnt
 _ICE2_CHECK = struct.Struct("<IIII6Q")
 _ICE2_BLOCK = 64
+# status scan granularity: rank/page jumps read cached per-chunk
+# waived counts and touch at most ONE chunk of status bytes
+_STATUS_CHUNK = 1 << 22
 
 
 def _uv(buf, pos):
@@ -318,13 +321,59 @@ class IcePack(object):
                  "_map", "_blk", "_qbox", "_dir_es", "_dir_bs",
                  "_ecnt", "_cbb", "_cache", "_order",
                  "_status", "_status_off", "_wfd",
-                 "_wcount", "_wcount_off")
+                 "_wcount", "_wcount_off", "_wchunk")
 
     def __init__(self, path, src_path=None, verify_src=False):
+        self._wfd = None
+        self._map = None
+        try:
+            self._load(path, src_path, verify_src)
+        except (struct.error, IndexError, OverflowError) as exc:
+            # every parse mishap on a damaged file normalizes to
+            # ONE catchable story: corrupt pack -> rebuild
+            self.close()
+            raise ValueError(
+                "%s: corrupt packed .ice (%s) - re-run: "
+                "floe-index drc <db>" % (path, exc))
+        except Exception:
+            self.close()
+            raise
+
+    def close(self):
+        """Release the pwrite fd and the coordinate mmap
+        (idempotent; the object is unusable afterwards). The
+        np.memmap section views hold their own mappings and are
+        freed by GC."""
+        wfd = getattr(self, "_wfd", None)
+        self._wfd = None
+        if wfd is not None:
+            try:
+                os.close(wfd)
+            except OSError:
+                pass
+        m = getattr(self, "_map", None)
+        self._map = None
+        if m is not None:
+            try:
+                m.close()
+            except (OSError, ValueError):
+                pass
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def _load(self, path, src_path, verify_src):
         import mmap
         import numpy as np
         with open(path, "rb") as f:
             head = f.read(_ICE_HEADER.size)
+            if len(head) != _ICE_HEADER.size:
+                raise ValueError(
+                    "%s: truncated .ice - re-run: floe-index drc "
+                    "<db>" % path)
             (magic, version, _flags, precision, src_size,
              src_mtime) = _ICE_HEADER.unpack(head)
             if magic != _ICE_MAGIC or version < 2:
@@ -339,6 +388,10 @@ class IcePack(object):
                     % (path, version))
             f.seek(0, os.SEEK_END)
             fsize = f.tell()
+            if fsize < _ICE_HEADER.size + _ICE2_FOOTER.size:
+                raise ValueError(
+                    "%s: truncated .ice - re-run: floe-index drc "
+                    "<db>" % path)
             f.seek(fsize - _ICE2_FOOTER.size)
             (_blob_off, _blob_len, qbox_off, _qbox_len,
              status_off, wcount_off, blk_off, blk_cnt, dir_off,
@@ -348,6 +401,21 @@ class IcePack(object):
             if fmagic != _ICE_MAGIC:
                 raise ValueError("%s: truncated .ice (bad footer)"
                                  % path)
+            # every section must land inside the file body, or the
+            # reads below decode garbage / explode arbitrarily
+            body_end = fsize - _ICE2_FOOTER.size
+            for off, ln in ((qbox_off, err_total * 4),
+                            (status_off, err_total),
+                            (wcount_off, check_cnt * 4),
+                            (blk_off, blk_cnt * 48),
+                            (dir_off, check_cnt * _ICE2_CHECK.size),
+                            (descref_off, descref_cnt * 4),
+                            (str_off, str_len)):
+                if off < _ICE_HEADER.size or off + ln > body_end:
+                    raise ValueError(
+                        "%s: corrupt packed .ice (section out of "
+                        "range) - re-run: floe-index drc <db>"
+                        % path)
             f.seek(dir_off)
             dirbuf = f.read(check_cnt * _ICE2_CHECK.size)
             f.seek(descref_off)
@@ -408,6 +476,12 @@ class IcePack(object):
             (name_ref, dstart, dcnt, _pad, estart, ecnt, declared,
              _orig, bstart, bcnt) = _ICE2_CHECK.unpack_from(
                 dirbuf, ci * _ICE2_CHECK.size)
+            if estart + ecnt > err_total or bstart + bcnt > blk_cnt \
+                    or dstart + dcnt > descref_cnt:
+                raise ValueError(
+                    "%s: corrupt packed .ice (check %d out of "
+                    "range) - re-run: floe-index drc <db>"
+                    % (path, ci))
             desc = "\n".join(s(r) for r in drefs[dstart:dstart + dcnt])
             es.append(estart)
             bs.append(bstart)
@@ -427,6 +501,7 @@ class IcePack(object):
         self._cbb = cbb
         self._cache = {}       # block idx -> [DrcError]; tiny LRU
         self._order = []
+        self._wchunk = {}      # ci -> per-chunk waived counts
 
     def _block(self, bi):
         got = self._cache.get(bi)
@@ -493,6 +568,9 @@ class IcePack(object):
             cur = int(self._wcount[ci]) + (1 if now else -1)
             os.pwrite(self._wfd, struct.pack("<I", max(0, cur)),
                       self._wcount_off + 4 * ci)
+            ch = self._wchunk.get(ci)
+            if ch is not None:
+                ch[ei // _STATUS_CHUNK] += 1 if now else -1
 
     def status_counts(self, ci):
         """(waived, total) of one rule - O(1) via [wcount]."""
@@ -512,28 +590,57 @@ class IcePack(object):
                 else (sl != STATUS_WAIVED))
         return np.nonzero(mask)[0].tolist()
 
+    def _wf_chunks(self, ci):
+        """Per-_STATUS_CHUNK WAIVED counts of one rule (lazy: built
+        on the first filtered access with one status pass, then
+        kept in sync incrementally by set_status). Rank and page
+        jumps read these whole-chunk counts and scan at most ONE
+        chunk of status bytes - n/p on a 100M-error rule used to
+        re-sum status from index 0 (review 2026-08-18)."""
+        got = self._wchunk.get(ci)
+        if got is not None:
+            return got
+        import numpy as np
+        es = int(self._dir_es[ci])
+        n = int(self._ecnt[ci])
+        nch = -(-n // _STATUS_CHUNK) if n else 0
+        arr = np.zeros(nch, dtype=np.int64)
+        for k in range(nch):
+            a = k * _STATUS_CHUNK
+            b = min(a + _STATUS_CHUNK, n)
+            arr[k] = int(
+                (self._status[es + a:es + b]
+                 == STATUS_WAIVED).sum())
+        self._wchunk[ci] = arr
+        return arr
+
     def status_page(self, ci, waived, start, limit):
-        """The start..start+limit-th MATCHING rule-local indices,
-        scanned in chunks with early exit - a filter page over a
+        """The start..start+limit-th MATCHING rule-local indices -
+        whole chunks before `start` are skipped via the cached
+        counts (no status reads), and a filter page over a
         100M-error rule never builds the full filtered list."""
         import numpy as np
         es = int(self._dir_es[ci])
         n = int(self._ecnt[ci])
+        if n == 0 or limit <= 0:
+            return []
+        ch = self._wf_chunks(ci)
         out = []
         seen = 0
-        step = 1 << 22
-        for off in range(0, n, step):
-            sl = self._status[es + off:es + min(off + step, n)]
-            m = ((sl == STATUS_WAIVED) if waived
-                 else (sl != STATUS_WAIVED))
-            cnt = int(m.sum())
+        for k in range(len(ch)):
+            a = k * _STATUS_CHUNK
+            b = min(a + _STATUS_CHUNK, n)
+            cnt = int(ch[k]) if waived else (b - a) - int(ch[k])
             if seen + cnt <= start:
                 seen += cnt
                 continue
+            sl = self._status[es + a:es + b]
+            m = ((sl == STATUS_WAIVED) if waived
+                 else (sl != STATUS_WAIVED))
             idx = np.nonzero(m)[0]
             lo = max(0, start - seen)
             for v in idx[lo:lo + (limit - len(out))]:
-                out.append(int(v) + off)
+                out.append(int(v) + a)
             seen += cnt
             if len(out) >= limit:
                 break
@@ -541,17 +648,23 @@ class IcePack(object):
 
     def status_rank(self, ci, waived, ei):
         """Rank of ei among the rule's matching errors (None when
-        ei itself does not match) - one count, no lists."""
+        ei itself does not match) - cached chunk counts + a partial
+        scan of ei's own chunk only."""
         es = int(self._dir_es[ci])
         st = int(self._status[es + ei])
         match = ((st == STATUS_WAIVED) if waived
                  else (st != STATUS_WAIVED))
         if not match:
             return None
-        sl = self._status[es:es + ei]
-        m = ((sl == STATUS_WAIVED) if waived
-             else (sl != STATUS_WAIVED))
-        return int(m.sum())
+        ch = self._wf_chunks(ci)
+        k = ei // _STATUS_CHUNK
+        wbefore = int(ch[:k].sum())
+        a = k * _STATUS_CHUNK
+        w_in = int((self._status[es + a:es + ei]
+                    == STATUS_WAIVED).sum())
+        if waived:
+            return wbefore + w_in
+        return (a - wbefore) + (ei - a - w_in)
 
     def _perr(self, gid):
         """Global error id -> DrcError via its 256-record block."""

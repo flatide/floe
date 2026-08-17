@@ -166,6 +166,14 @@ ovm 헤더와 meta.src 모두 소스 절대경로/size/mtime을 기록. `Vfs::op
   상주 제거). 두 경로는 **바이트 동일**(D5b가 강제 스트리밍
   vs 기본을 비교). 잔여 상주 = dir(64B/체크)+strtab.
 - 크기 실측: 합성 95MB → 21MB(1/4.5; qbox 4B/에러 포함).
+- **손상 방어**(2026-08-18): 리더는 헤더/푸터 길이·매직에 더해
+  **전 섹션 경계**(파일 내부)와 체크 dir 범위(estart+ecnt ≤
+  err_total 등)를 검증하고, 파싱 중 어떤 예외(struct.error 등)든
+  단일 스토리 `ValueError("corrupt packed .ice - 재-pack 안내")`로
+  정규화 — 열기 경로(ValueError/OSError 캐치)가 항상 ASCII 폴백/
+  재빌드로 이어진다(D2 corrupt 픽스처 3종). `close()`가 pwrite
+  fd·mmap을 해제(__del__ 연동; fd 누수 수정). 인코더는 시작 시
+  잔존 `<out>.tmp*`(취소/kill 잔재)를 청소.
 - 리더 디스패치: 헤더 version 필드(1=사이드카 IceDb, ≥2=IcePack).
   **레이아웃 개정 규율**: pack 섹션 배치가 바뀌면 version을 올린다.
   리더는 현재 값(4)만 수용하고 옛 pack은 재-pack 안내와 함께 거부 —

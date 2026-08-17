@@ -410,11 +410,18 @@ fn frontier_json_planned(v: &floe_ovm::Ovm) -> String {
             px_per_dbu,
         };
         let plan = floe_vfs::hier::plan_hier(v, &req, &opts);
-        let boxes = floe_vfs::hier::frontier_boxes(
+        let (boxes, truncated) = floe_vfs::hier::frontier_boxes(
             v,
             &plan,
             FRONTIER_KEEP,
         );
+        if truncated {
+            eprintln!(
+                "[vfs] frontier: depth {} hit the 8M expansion \
+                 budget - minimap may under-sample dense regions",
+                d
+            );
+        }
         let rows: Vec<String> = boxes
             .iter()
             .map(|(b, band)| {
@@ -3968,8 +3975,14 @@ fn serve_frontier(
     opts.hairline = hair;
     opts.thin_lattice_um = thin;
     let plan = floe_vfs::hier::plan_hier(&d.v.ovm, req, &opts);
-    let boxes =
+    let (boxes, truncated) =
         floe_vfs::hier::frontier_boxes(&d.v.ovm, &plan, 6000);
+    if truncated {
+        eprintln!(
+            "[vfsd] frontier: gen {} hit the 8M expansion budget",
+            gen
+        );
+    }
     std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
     let p = format!("{}/frontier_{}.tsv", out, gen);
     let mut w = String::with_capacity(boxes.len() * 40);
