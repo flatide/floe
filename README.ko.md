@@ -185,6 +185,9 @@ DRC 에러의 waive 판단을 돕기 위해 SVRF 룰덱을 **서브셋 파스**�
 치수 vs 한계값(Δ·%)**, 참조/원천 레이어, derivation 체인이 붙고,
 **에러 더블클릭 점프가 그 룰의 원천 레이어만 켜고 나머지를 끈다**
 (레이어 격리 — Esc로 이전 가시성 복원, 상태줄에 켜진 수 표시).
+nav 행의 **룰 유형 콤보**는 SVRF 측정문 기준 분류(width/space/
+enclosure/area/density/…)로 룰 목록을 거른다 — 검색·waive 필터와
+교집합, 측정문이 파스되지 않은 룰은 other.
 TVF(Tcl) 덱은 Calibre가 생성한 SVRF 산출물을 입력으로 쓰고,
 DMACRO/CMACRO는 전개하지 않으니 `--scan`으로 사용 여부부터 확인.
 

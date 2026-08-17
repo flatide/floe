@@ -60,6 +60,10 @@ DRC_MARK_PX = 5            # collapsed-marker square side; geometry
                            # whose screen span shrinks BELOW this
                            # paints as the marker (no gap where the
                            # shape draws smaller than the marker)
+# canonical order of the rule-type combo (SVRF measurement metrics
+# from the rules.json sidecar; "other" = no parsed measurement)
+DRC_METRICS = ("width", "space", "enclosure", "area", "density",
+               "length", "angle", "perimeter", "vertex", "other")
 
 # FLOE_DRC_PROF=1: print a per-stage timing breakdown of the DRC
 # browser paths to stderr - for machine-specific slowness reports
@@ -92,7 +96,7 @@ class _DrcPanel(object):
     """Widget refs of the embedded DRC browser (attribute bag)."""
     __slots__ = ("_info", "_rules", "_rstore", "_grid", "_gstore",
                  "_detail", "_hl", "_wf", "_selv", "_search",
-                 "_plabel", "_pprev", "_pnext")
+                 "_tf", "_plabel", "_pprev", "_pnext")
 
 MIN_SPP = 0.01     # max zoom-in: 1 px = 0.01 dbu; keeps render bboxes
                    # from collapsing to zero width after int rounding
@@ -921,6 +925,9 @@ class Viewer:
         self._drc_rmeta = None      # <deck>.rules.json dict (the
                                     # `floe svrf` sidecar metadata)
         self._drc_rmatch = (0, 0)   # sidecar-matched / db rules
+        self._drc_tfilter = "all"   # rule-type filter (svrf metric)
+        self._drc_rtypes = None     # rule name -> metric frozenset
+        self._drc_tf_busy = False   # rebuilding the type combo
         self._drc_shown = 0         # rules listed (info line)
         self._drc_lyr_saved = None  # visibility snapshot before a
                                     # double-click layer isolation
@@ -1359,6 +1366,8 @@ class Viewer:
         self._drc = None
         self._drc_rmeta = None
         self._drc_rmatch = (0, 0)
+        self._drc_tfilter = "all"
+        self._drc_rtypes = None
         self._drc_lyr_saved = None   # new design = new layer table
         self._drc_cum = []
         self._drc_total = 0
@@ -1387,6 +1396,7 @@ class Viewer:
             w._gstore.clear()
             w._detail.set_text("")
             w._info.set_text("no results database loaded")
+            self._drc_types_rebuild()   # empty+disable type combo
         src = self.meta["src"]
         self.window.set_title(
             "%s - %s" % (APP, os.path.basename(src["path"])))
@@ -3381,6 +3391,15 @@ class Viewer:
         selv.connect("toggled", self._on_drc_selview)
         nav.pack_start(selv, False, False, 2)
         win._selv = selv
+        tf = Gtk.ComboBoxText()
+        tf.append("all", "all types")
+        tf.set_active_id("all")
+        tf.set_sensitive(False)   # enabled once rules.json attaches
+        tf.set_tooltip_text("filter rules by their SVRF measurement "
+                            "type (needs the .rules.json sidecar)")
+        tf.connect("changed", self._on_drc_tfilter)
+        nav.pack_start(tf, False, False, 2)
+        win._tf = tf
         wf = Gtk.ComboBoxText()
         for wid, lbl in (("all", "All"),
                          ("notwaived", "Not Waived"),
@@ -3626,7 +3645,9 @@ class Viewer:
         self._drc_sel = None
         self._drc_sels = {}
         self._esel_start = None
+        self._drc_tfilter = "all"   # new db = new type census
         self._drc_rules_auto(path)
+        self._drc_types_rebuild()   # no-sidecar case: combo empties
         if self._drcwin is not None:
             self._drc_fill()
         self._set_live_status(
@@ -3682,6 +3703,7 @@ class Viewer:
         matched = sum(1 for c in db.checks if c.name in meta)
         self._drc_rmeta = data
         self._drc_rmatch = (matched, len(db.checks))
+        self._drc_types_rebuild()
         self._drc_info_refresh()
         if not silent or matched:
             self._set_live_status(
@@ -3742,6 +3764,10 @@ class Viewer:
             if self._drc_search \
                     and self._drc_search not in c.name.lower():
                 continue
+            if self._drc_tfilter != "all":
+                ts = (self._drc_rtypes or {}).get(c.name)
+                if not ts or self._drc_tfilter not in ts:
+                    continue
             cnt = self._drc_wf_count(db, ci)
             _tc += time.perf_counter() - _t2
             # All lists EVERY rule, zero-error ones included (user
@@ -3778,6 +3804,67 @@ class Viewer:
             "%s [%s] — cell %s · %d/%d rules · %d errors%s"
             % (os.path.basename(db.path), backend, db.cell,
                self._drc_shown, len(db.checks), db.total, rules))
+
+    def _drc_types_rebuild(self):
+        """Classify every rule by its SVRF measurement metrics
+        (rules.json constraints) and rebuild the type combo: 'all
+        types' + each metric present with its rule count. A matched
+        rule with no parsed measurement (and any unmatched rule)
+        classifies as 'other'. No sidecar -> combo empty+disabled,
+        filter forced back to 'all'."""
+        win, db = self._drcwin, self._drc
+        self._drc_rtypes = None
+        counts = {}
+        meta = (self._drc_rmeta or {}).get("checks", {})
+        if db is not None and meta:
+            types = {}
+            for c in db.checks:
+                mc = meta.get(c.name)
+                ms = frozenset(
+                    x.get("metric")
+                    for x in (mc or {}).get("constraints", ())
+                    if x.get("metric")) or frozenset(("other",))
+                types[c.name] = ms
+                for m in ms:
+                    counts[m] = counts.get(m, 0) + 1
+            self._drc_rtypes = types
+        if self._drc_tfilter != "all" and self._drc_tfilter \
+                not in counts:
+            self._drc_tfilter = "all"
+        if win is None:
+            return
+        tf = win._tf
+        self._drc_tf_busy = True
+        try:
+            tf.remove_all()
+            tf.append("all", "all types")
+            ordered = [m for m in DRC_METRICS if m in counts]
+            ordered += sorted(set(counts) - set(DRC_METRICS))
+            for m in ordered:
+                tf.append(m, "%s (%d)" % (m, counts[m]))
+            tf.set_active_id(self._drc_tfilter)
+            tf.set_sensitive(bool(counts))
+        finally:
+            self._drc_tf_busy = False
+
+    def _on_drc_tfilter(self, combo):
+        if self._drc_tf_busy:
+            return
+        tid = combo.get_active_id() or "all"
+        if tid == self._drc_tfilter or self._drc is None:
+            return
+        self._drc_tfilter = tid
+        # per-rule selections stay valid (the filter only hides
+        # RULES); the open rule may vanish from the list, though
+        keep = self._drc_open
+        self._drc_fill()
+        if keep is not None:
+            for r in self._drcwin._rstore:
+                if r[2] == keep:
+                    self._drcwin._rules.set_cursor(r.path, None,
+                                                   False)
+                    break
+        self._display()
 
     def _drc_wf_count(self, db, ci):
         """Error count of a rule under the waive filter."""

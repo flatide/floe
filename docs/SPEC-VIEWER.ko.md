@@ -127,6 +127,15 @@ recolor: 행 스와치 재생성(set_color) + meta 갱신 + 개인 layerprops
   layers(직접 피연산자) · gds(원천 레이어 폐쇄) · derivation 체인
   (`derived` 맵을 `svrf.rhs_operands`로 워크, 6줄 캡). 메타 없는
   룰/사이드카 부재 시 상세는 기존 그대로(추가 줄 0).
+- **룰 유형 필터**(2026-08-17, rules.json 필요): nav 행 콤보 —
+  "all types" + 사이드카 constraint **metric별 룰 수**(width/space/
+  enclosure/area/density/… DRC_METRICS 정순, 그 외 알파벳순;
+  측정문 없는 매칭 룰·미매칭 룰 = other). `_drc_types_rebuild`가
+  로드/사이드카 부착 시 룰당 metric frozenset(`_drc_rtypes`)을
+  굽고, `_drc_fill`이 검색·waive 필터와 **교집합**으로 룰 목록을
+  거름(다중 측정문 룰은 각 유형에 모두 매칭). 유형 전환은 룰만
+  숨기므로 룰별 선택은 유지(waive 필터와 달리 초기화 없음), 열린
+  룰이 살아남으면 재선택. 사이드카 없음 = 콤보 비활성·all 강제.
 - **필터/페이지네이션**(2026-08-14): 룰 목록은 **All = 전체 룰
   (에러 0개 포함)**, Not Waived/Waived = 매칭 0개 룰 숨김.
   All/Not Waived/Waived 콤보가 status 바이트 기준으로 룰 카운트·
