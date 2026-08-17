@@ -3311,10 +3311,29 @@ class Viewer:
         rules.get_selection().connect("changed",
                                       self._on_drc_rule_sel)
         rsc = Gtk.ScrolledWindow()
-        rsc.set_policy(Gtk.PolicyType.AUTOMATIC,
+        # NO hscroll: at any pane width the name column ellipsizes
+        # instead of the list panning/clipping sideways (user call
+        # 2026-08-18 - shrunk panes must degrade to "…", never to
+        # content cut off at the edge)
+        rsc.set_policy(Gtk.PolicyType.NEVER,
                        Gtk.PolicyType.AUTOMATIC)
         rsc.add(rules)
         _remote_x_scroll_repaint(rsc)
+        # rule search on TOP of the rules list (user call
+        # 2026-08-18; GTK's built-in typeahead popup stays disabled)
+        try:
+            se = Gtk.SearchEntry()
+            se.connect("search-changed", self._on_drc_search)
+        except AttributeError:
+            se = Gtk.Entry()
+            se.connect("changed", self._on_drc_search)
+        se.set_placeholder_text("find rule…")
+        se.set_width_chars(8)   # keep the pane's width floor small
+        win._search = se
+        rbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
+                       spacing=2)
+        rbox.pack_start(se, False, False, 0)
+        rbox.pack_start(rsc, True, True, 0)
         # grid: DRC_GRID_W equal markup columns, NO row selection -
         # the clicked cell alone is marked (user call 2026-08-13)
         gstore = Gtk.ListStore(*([str] * DRC_GRID_W))
@@ -3358,7 +3377,7 @@ class Viewer:
         gbox.pack_start(pbar, False, False, 0)
         gbox.pack_start(gsc, True, True, 0)
         hsplit = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        hsplit.pack1(rsc, resize=True, shrink=True)
+        hsplit.pack1(rbox, resize=True, shrink=True)
         hsplit.pack2(gbox, resize=True, shrink=True)
         hsplit.set_position(220)
         paned = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL)
@@ -3367,41 +3386,38 @@ class Viewer:
         detail.set_editable(False)
         detail.set_cursor_visible(False)
         detail.set_monospace(True)
+        # narrow panes WRAP the detail text - no sideways clipping
+        # or panning (user call 2026-08-18)
+        detail.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
         dsc = Gtk.ScrolledWindow()
-        dsc.set_policy(Gtk.PolicyType.AUTOMATIC,
+        dsc.set_policy(Gtk.PolicyType.NEVER,
                        Gtk.PolicyType.AUTOMATIC)
         dsc.add(detail)
         paned.pack2(dsc, resize=False, shrink=True)
         paned.set_position(420)
         box.pack_start(paned, True, True, 0)
         win._detail = detail.get_buffer()
-        nav = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        # filter controls in a FlowBox: on a narrow pane they WRAP
+        # onto extra rows instead of clipping (user call 2026-08-18)
+        nav = Gtk.FlowBox()
+        nav.set_selection_mode(Gtk.SelectionMode.NONE)
+        nav.set_min_children_per_line(1)
+        nav.set_max_children_per_line(4)
+        nav.set_column_spacing(4)
+        nav.set_row_spacing(2)
         box.pack_start(nav, False, False, 2)
-        # rule search (replaces the prev/next buttons - n/p keys
-        # remain; GTK's built-in typeahead popup is disabled)
-        try:
-            se = Gtk.SearchEntry()
-            se.connect("search-changed", self._on_drc_search)
-        except AttributeError:
-            se = Gtk.Entry()
-            se.connect("changed", self._on_drc_search)
-        se.set_placeholder_text("find rule…")
-        se.set_width_chars(8)   # keep the nav row's minimum small
-                                # (it sets the left pane's floor)
-        nav.pack_start(se, True, True, 2)
-        win._search = se
         hl = Gtk.CheckButton(label="in view")
         hl.set_active(self._drc_hl)
         hl.set_tooltip_text("list only the errors inside the "
                             "current view (packed .ice v2 only)")
         hl.connect("toggled", self._on_drc_hl)
-        nav.pack_start(hl, False, False, 2)
+        nav.add(hl)
         win._hl = hl
         selv = Gtk.CheckButton(label="selected")
         selv.set_tooltip_text("list only the box/Ctrl-selected "
                               "errors")
         selv.connect("toggled", self._on_drc_selview)
-        nav.pack_start(selv, False, False, 2)
+        nav.add(selv)
         win._selv = selv
         tf = Gtk.ComboBoxText()
         tf.append("all", "all types")
@@ -3410,7 +3426,7 @@ class Viewer:
         tf.set_tooltip_text("filter rules by their SVRF measurement "
                             "type (needs the .rules.json sidecar)")
         tf.connect("changed", self._on_drc_tfilter)
-        nav.pack_start(tf, False, False, 2)
+        nav.add(tf)
         win._tf = tf
         wf = Gtk.ComboBoxText()
         for wid, lbl in (("all", "All"),
@@ -3419,7 +3435,7 @@ class Viewer:
             wf.append(wid, lbl)
         wf.set_active_id("all")
         wf.connect("changed", self._on_drc_wfilter)
-        nav.pack_start(wf, False, False, 2)
+        nav.add(wf)
         win._wf = wf
         win._rules, win._rstore = rules, rstore
         win._grid, win._gstore = grid, gstore
@@ -3749,11 +3765,11 @@ class Viewer:
             dlg.destroy()
 
     def _drc_fill(self):
-        """Rules list: NAME + error count under the current waive
-        filter; rules with no matching errors are hidden (user
-        call 2026-08-14). No waived state exists in the data yet,
-        so every error counts as Not Waived until Calibre's
-        notation is known."""
+        """Rules list: NAME + total/waived counts (user call
+        2026-08-18); under a waive filter rules with no matching
+        errors are hidden (2026-08-14). No waived state exists in
+        real data yet, so every error counts as Not Waived until
+        Calibre's notation is known."""
         win, db = self._drcwin, self._drc
         rstore = win._rstore
         _t0 = time.perf_counter()
@@ -3786,7 +3802,12 @@ class Viewer:
             # call 2026-08-14); the waive filters hide empty rules
             if cnt <= 0 and self._drc_wfilter != "all":
                 continue
-            rstore.append([c.name, "%d" % cnt, ci])
+            # count column = total/waived (user call 2026-08-18);
+            # both are O(1) ([wcount] table - the perf contract)
+            wv = (db.status_counts(ci)[0]
+                  if hasattr(db, "status_counts") else 0)
+            rstore.append([c.name,
+                           "%d/%d" % (len(c.errors), wv), ci])
             shown += 1
         win._rules.set_model(rstore)
         self._drc_rules_busy = False
@@ -4310,6 +4331,14 @@ class Viewer:
                     and (db.get_status(ci, f[1]) == 1) != want:
                 self._drc_focus = None
         if self._drc_wfilter == "all":
+            # membership is unchanged but the row's total/waived
+            # text is not: refresh that one row in place
+            for r in self._drcwin._rstore:
+                if r[2] == ci:
+                    wv = (db.status_counts(ci)[0]
+                          if hasattr(db, "status_counts") else 0)
+                    r[1] = "%d/%d" % (len(db.checks[ci].errors), wv)
+                    break
             self._drc_grid_fill(ci)
         else:
             # counts and membership changed under a waive filter:

@@ -112,10 +112,20 @@ recolor: 행 스와치 재생성(set_color) + meta 갱신 + 개인 layerprops
   다이얼로그**에 실시간 표시(cancel = terminate) 후 로딩
   (`_drc_open_db`/`_drc_pack_and_load`, 바이너리는
   vfsclient.find_binary).
-- **룰 검색**(2026-08-15): nav 행의 검색 박스(구 prev/next 버튼
-  자리 — n/p 키는 유지)가 룰 이름 부분일치(대소문자 무관)로 목록을
-  실시간 필터. TreeView 내장 typeahead 검색은 rules/grid 모두
-  비활성(set_enable_search False — 반쪽짜리 팝업 제거).
+- **룰 검색**(2026-08-15/18): 검색 박스는 **룰 목록 상단**(구
+  prev/next 버튼 자리 nav 행에서 이동 — n/p 키는 유지). 룰 이름
+  부분일치(대소문자 무관) 실시간 필터. TreeView 내장 typeahead
+  검색은 rules/grid 모두 비활성(set_enable_search False).
+- **좁은 pane 열화 규약**(2026-08-18): 내용이 옆으로 잘리거나
+  패닝되면 안 됨 — 룰 목록 hscroll NEVER(이름 열 ellipsize END로
+  "…" 줄임), 상세 TextView WORD_CHAR 줄바꿈 + hscroll NEVER,
+  필터 컨트롤 행 = **FlowBox**(좁으면 여러 줄로 래핑, 1~4열).
+  lpaned pack1 shrink=True + 검색 박스 width_chars 8이 pane 폭
+  하한을 낮게 유지(실질 하한 = 미니맵 196px).
+- **룰 행 카운트 = 에러수/waived**(2026-08-18, "30/20" 형태):
+  둘 다 O(1)([wcount]) — waive 필터의 룰 숨김 판정은 기존
+  `_drc_wf_count` 그대로. waive/unwaive는 all 필터에서도 해당
+  행 텍스트를 제자리 갱신.
 - **SVRF 룰 메타데이터**(2026-08-15, SPEC-FORMATS `<deck>.rules.json`
   참조): db 로드 시 자동 탐색(`_drc_rules_auto` — Rule File Pathname
   베이스네임의 **db 옆** 사이드카 우선, 기록 경로·`<db>.rules.json`
