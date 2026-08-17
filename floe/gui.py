@@ -3701,6 +3701,18 @@ class Viewer:
         self._drc_types_rebuild()   # no-sidecar case: combo empties
         if self._drcwin is not None:
             self._drc_fill()
+            # GTK can auto-select row 0 while the busy guard is up
+            # (model reattach), skipping the handler: the rule LOOKS
+            # selected but its grid stays empty (field report
+            # 2026-08-18, --drc startup). Open the selection now -
+            # or the first rule when nothing is selected yet.
+            rst = self._drcwin._rstore
+            sel = self._drcwin._rules.get_selection()
+            if sel.get_selected()[1] is not None:
+                self._on_drc_rule_sel(sel)
+            elif len(rst):
+                self._drcwin._rules.set_cursor(rst[0].path, None,
+                                               False)
         self._set_live_status(
             "DRC %s: %d checks, %d errors (n/p = step)"
             % (os.path.basename(path), len(db.checks), db.total))
