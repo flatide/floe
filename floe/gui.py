@@ -6040,8 +6040,12 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
                     stream_target_ms=stream_target_ms,
                     render_debug=render_debug)
     if drc:
-        if viewer.load_drc(os.path.abspath(drc)):
-            viewer._drc_window()
+        # NO _drc_window() here: its grab_focus made the BROWSE
+        # TreeView auto-select row 0 on focus-in, so --drc startups
+        # showed the first rule selected (field reports 2026-08-18;
+        # a db must open with no rule selected). The embedded panel
+        # is always visible - there is nothing to focus.
+        viewer.load_drc(os.path.abspath(drc))
     try:
         import signal as _signal
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, _signal.SIGINT,
