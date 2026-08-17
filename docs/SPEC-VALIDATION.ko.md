@@ -20,7 +20,7 @@
 - **drctest**: `tools/gen_drcdb.py` — DRC 부하 테스트용 합성 .db
   (기본 ~95MB, 체크 1000개, 체크당 0..1000 에러, rect/엣지쌍/단일
   엣지/계단 폴리곤 믹스 + Waiver 줄 + `*_RDBS` 꼬리 4종). 실측:
-  인덱싱 0.34s, IceDb 오픈 58ms vs ASCII 전체 파스 2.7s.
+  인덱싱 0.34s, pack 오픈 수십 ms vs ASCII 전체 파스 2.7s.
 
 ## 2. 게이트 카탈로그
 

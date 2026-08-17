@@ -3511,8 +3511,11 @@ class Viewer:
         selected rule changes (user call 2026-08-13: one rule at a
         time, cap DRC_HL_CAP)."""
         ci = self._drc_sel_check()
-        key = (self.cx, self.cy, self.spp, id(self._drc), ci,
-               self._drc_wfilter)
+        # the viewport bbox keys the cache: it folds center, zoom
+        # AND canvas size (cx/cy/spp alone served a stale list
+        # after a window resize)
+        bb = self.view_bbox()
+        key = (bb, id(self._drc), ci, self._drc_wfilter)
         cached = self._drc_hl_res
         if cached is not None and cached[0] == key:
             return cached[1]
@@ -3521,7 +3524,6 @@ class Viewer:
             self._set_live_status(
                 "DRC filter: select a rule in the browser first")
             return []
-        bb = self.view_bbox()
         k = self.dbu
         kw = {}
         if self._drc_wfilter != "all" \
@@ -4350,6 +4352,16 @@ class Viewer:
                                   "writable?" % exc)
             return
         self._drc_hl_res = None
+        # the jump mark stores a RESOLVED color: re-derive it for
+        # the marked error or a toggle leaves the old status color
+        if self.drc_mark is not None and self._drc_pos >= 0 \
+                and self._drc_cum:
+            mci = bisect.bisect_right(self._drc_cum,
+                                      self._drc_pos) - 1
+            mei = self._drc_pos - self._drc_cum[mci]
+            self.drc_mark["color"] = (
+                DRC_GREEN if self._drc_waived(db, mci, mei)
+                else DRC_RED)
         # under a waive filter the toggled errors leave the list -
         # purge them from the gold selection too, or their markers
         # linger on the canvas (user report 2026-08-15)

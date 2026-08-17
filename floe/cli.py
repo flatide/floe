@@ -452,6 +452,13 @@ def cmd_view(args):
     src = os.path.abspath(args.src)
     if not os.path.isfile(src):
         raise SystemExit(f"floe: no such file: {src}")
+    # documented entry for the frame-tuning knobs: the flags set
+    # the env vars vfsclient reads per request (children inherit;
+    # a forwarded running instance keeps its own values)
+    if args.hairline is not None:
+        os.environ["FLOE_HAIRLINE"] = "%g" % args.hairline
+    if args.thin_um is not None:
+        os.environ["FLOE_THIN_UM"] = "%g" % args.thin_um
     goto = parse_goto(args.goto) if args.goto else None
     if args.stream_kb is not None and args.stream_kb < 0:
         raise SystemExit("floe: --stream-kb must be >= 0")
@@ -746,6 +753,16 @@ def main(argv=None):
                    choices=("viewer", "editable"),
                    help="tile read mode (default: per-cache heuristic, "
                         "see 'floe info'; new instance only)")
+    p.add_argument("--hairline", type=float, default=None, metavar="F",
+                   help="hairline factor: frame min-side cut = F x cut "
+                        "(default: daemon 0.5; 0 disables the hairline "
+                        "cut. Sets FLOE_HAIRLINE - the env var still "
+                        "works; new instance only)")
+    p.add_argument("--thin-um", type=float, default=None, metavar="UM",
+                   help="thin-frame lattice pitch in um (default: "
+                        "daemon 7.0; 0 restores the plain cull. Sets "
+                        "FLOE_THIN_UM - the env var still works; new "
+                        "instance only)")
     p.add_argument("--dump", action="store_true",
                    help="save display-path debug dumps to /tmp/floe_*.png "
                         "(XQuartz black-view diagnosis; new instance only)")

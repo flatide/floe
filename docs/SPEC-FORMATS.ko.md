@@ -174,7 +174,8 @@ ovm 헤더와 meta.src 모두 소스 절대경로/size/mtime을 기록. `Vfs::op
   재빌드로 이어진다(D2 corrupt 픽스처 3종). `close()`가 pwrite
   fd·mmap을 해제(__del__ 연동; fd 누수 수정). 인코더는 시작 시
   잔존 `<out>.tmp*`(취소/kill 잔재)를 청소.
-- 리더 디스패치: 헤더 version 필드(1=사이드카 IceDb, ≥2=IcePack).
+- 리더 디스패치: 헤더 version 필드(1=폐기된 v1 오프셋 사이드카 →
+  직접 오픈 거부·사이드는 ASCII 폴백, ≥2=IcePack).
   **레이아웃 개정 규율**: pack 섹션 배치가 바뀌면 version을 올린다.
   리더는 현재 값(4)만 수용하고 옛 pack은 재-pack 안내와 함께 거부 —
   구(2) pack을 새 리더가 읽으면 푸터 크기 차이로 qbox가 40B 밀려

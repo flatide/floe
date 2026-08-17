@@ -97,9 +97,10 @@ recolor: 행 스와치 재생성(set_color) + meta 갱신 + 개인 layerprops
 
 ## 8b. DRC 브라우저 (대용량 규약)
 
-- `drc.load_db`가 소스: .ice 사이드카(신선)면 IceDb(mmap, 레코드
-  단위 lazy 디코드), 아니면 ASCII 전체 파스. 인터페이스 동일
-  (checks[].errors는 시퀀스 프로토콜).
+- `drc.load_db`가 소스: 신선한 packed .ice면 IcePack(mmap, 블록
+  단위 lazy 디코드), 아니면 ASCII 전체 파스(v1 오프셋 사이드카는
+  2026-08-19 폐기 — 잔존 파일은 stderr 안내 후 ASCII 폴백).
+  인터페이스 동일(checks[].errors는 시퀀스 프로토콜).
 - prev/next(n/p)는 **현재 보이는 목록 안에서 순환**(2026-08-15):
   목록 = selected ∧ in-view ∧ waive 필터의 교집합, 페이지 경계는
   자동 이동. base 종류별 스텝(`_drc_step_ei`): None=전체 산술,
@@ -107,7 +108,8 @@ recolor: 행 스와치 재생성(set_color) + meta 갱신 + 개인 layerprops
   1개만) — 전수 리스트 없음.
 - **open .db… 다이얼로그**(2026-08-14): 파일 타입은 `*.db`만.
   선택한 .db는 직접 파스하지 않고 **오직 `<db>.ice`(pack)만
-  로딩** — 신선한 v3 pack이 없으면(부재/스테일/v1/구 레이아웃)
+  로딩** — 신선한 현-레이아웃 pack이 없으면(부재/스테일/v1/구
+  레이아웃)
   `floe-index drc <db> --pack`을 실행하고 로그를 **모달
   다이얼로그**에 실시간 표시(cancel = terminate) 후 로딩
   (`_drc_open_db`/`_drc_pack_and_load`, 바이너리는
