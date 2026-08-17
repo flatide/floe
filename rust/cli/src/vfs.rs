@@ -2813,7 +2813,24 @@ fn build(
     let commit_base = std::sync::atomic::AtomicUsize::new(0);
     let ring: Vec<std::sync::Mutex<Option<CellPlan>>> =
         (0..ring_cap).map(|_| std::sync::Mutex::new(None)).collect();
+    // a thread that panics leaves its ring slot empty forever and
+    // the others polling it: this flag turns every wait loop into
+    // an exit so the scope can join and propagate the panic
+    // instead of hanging a multi-hour build
+    let died = std::sync::atomic::AtomicBool::new(false);
+    struct DiedFlag<'a>(&'a std::sync::atomic::AtomicBool);
+    impl Drop for DiedFlag<'_> {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                self.0
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+    }
     std::thread::scope(|s| {
+        // committer side: a panic below (commit/encode) must also
+        // release workers stuck in the admission wait
+        let _died_guard = DiedFlag(&died);
         for _ in 0..jobs.max(1).min(n.max(1)) {
             let ring = &ring;
             let window = &window;
@@ -2821,6 +2838,7 @@ fn build(
             let commit_base = &commit_base;
             let rbb = &rbb;
             let lidx = &lidx;
+            let died = &died;
             s.spawn(move || loop {
                 let ci = next_cell.fetch_add(
                     1,
@@ -2840,20 +2858,37 @@ fn build(
                             )
                             .min(ring_cap)
                 {
+                    if died.load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        return;
+                    }
                     std::thread::sleep(
                         std::time::Duration::from_millis(1),
                     );
                 }
                 let t = std::time::Instant::now();
-                let plan = build_cell_plan(
-                    doc,
-                    ci,
-                    rbb,
-                    lidx,
-                    nl,
-                    page_target_bytes,
-                    lod,
-                );
+                let plan = match std::panic::catch_unwind(
+                    std::panic::AssertUnwindSafe(|| {
+                        build_cell_plan(
+                            doc,
+                            ci,
+                            rbb,
+                            lidx,
+                            nl,
+                            page_target_bytes,
+                            lod,
+                        )
+                    }),
+                ) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        died.store(
+                            true,
+                            std::sync::atomic::Ordering::Release,
+                        );
+                        std::panic::resume_unwind(e);
+                    }
+                };
                 let secs = t.elapsed().as_secs_f64();
                 if secs >= 5.0 {
                     // straggler instrumentation: name the monster
@@ -2914,6 +2949,16 @@ fn build(
                     ring[ci % ring_cap].lock().unwrap().take()
                 {
                     break pl;
+                }
+                if died.load(std::sync::atomic::Ordering::Acquire) {
+                    // the owning worker crashed: its slot never
+                    // fills - stop waiting so the scope joins and
+                    // the original panic surfaces
+                    panic!(
+                        "build: a cell planner worker panicked \
+                         (cell {} never arrived)",
+                        ci
+                    );
                 }
                 std::thread::sleep(
                     std::time::Duration::from_micros(200),

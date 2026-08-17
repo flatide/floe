@@ -3523,16 +3523,18 @@ class Viewer:
             return []
         bb = self.view_bbox()
         k = self.dbu
+        kw = {}
+        if self._drc_wfilter != "all" \
+                and hasattr(self._drc, "get_status"):
+            # the waive filter runs INSIDE the query, before the
+            # cap: a post-filter over a capped result dropped every
+            # match hiding past `cap` non-matching errors
+            kw["waived"] = self._drc_wfilter == "waived"
         with _dprof("hl_list: query_rect"):
             res = self._drc.query_rect(bb[0] * k, bb[1] * k,
                                        bb[2] * k, bb[3] * k,
-                                       cap=DRC_HL_CAP, checks=(ci,))
-        if self._drc_wfilter != "all" \
-                and hasattr(self._drc, "get_status"):
-            want = self._drc_wfilter == "waived"
-            res = [r for r in res
-                   if (self._drc.get_status(r[0], r[1]) == 1)
-                   == want]   # 1 = STATUS_WAIVED
+                                       cap=DRC_HL_CAP, checks=(ci,),
+                                       **kw)
         lst = [(rci, rei, e.kind,
                 [(x / k, y / k) for x, y in e.pts])
                for rci, rei, e in res]
@@ -3581,12 +3583,13 @@ class Viewer:
         side = path + ".ice"
         if os.path.exists(side):
             try:
-                drc_mod.IcePack(side, src_path=path,
-                                verify_src=True)
-                self.load_drc(path)  # fresh pack: load_db picks it
-                return
+                db = drc_mod.IcePack(side, src_path=path,
+                                     verify_src=True)
             except (ValueError, OSError):
                 pass
+            else:
+                self.load_drc(path, db=db)  # adopt the fresh pack
+                return
         self._drc_pack_and_load(path)
 
     def _drc_pack_and_load(self, path):
@@ -3667,18 +3670,21 @@ class Viewer:
 
         threading.Thread(target=pump, daemon=True).start()
 
-    def load_drc(self, path):
+    def load_drc(self, path, db=None):
         """Open a Calibre DRC db (.ice index-aware) and populate the
-        browser."""
+        browser. `db` = an already-opened backend to adopt (the
+        dialog preflight verifies the pack by opening it - opening
+        twice pays the block-table bbox scan twice)."""
         from . import drc as drc_mod
-        try:
-            db = drc_mod.load_db(path)
-        except Exception as exc:
-            msg = "DRC load failed: %s" % exc
-            if self._drcwin is not None:
-                self._drcwin._info.set_text(msg)
-            self._set_live_status(msg)
-            return False
+        if db is None:
+            try:
+                db = drc_mod.load_db(path)
+            except Exception as exc:
+                msg = "DRC load failed: %s" % exc
+                if self._drcwin is not None:
+                    self._drcwin._info.set_text(msg)
+                self._set_live_status(msg)
+                return False
         self._drc = db
         # the embedded browser needs elbow room: widen the left
         # pane once a db is loaded (user can still drag it back)

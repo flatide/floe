@@ -19,7 +19,10 @@ pack; D2 keeps the retirement honest.)
   D5  pack output bytes are --jobs invariant (1 vs 5 on the tiny
       fixture forces mid-check segment splits; 1 vs 4 on the
       gen_drcdb asset).
-  D6  IcePack.query_rect == brute-force bbox scan on random rects.
+  D6  IcePack.query_rect == brute-force bbox scan on random rects;
+      D6b: the waived= filter applies INSIDE the query, before the
+      cap (regression: a capped post-filter lost matches hiding
+      past `cap` non-matching errors).
   D7  [status] byte: zero at build, in-place set/get via pwrite,
       persists across reopen, neighbours untouched; the [wcount]
       per-rule waived counter stays in sync (incl. idempotent sets
@@ -341,6 +344,41 @@ def main():
     for ei in (1, 5, 9):
         re2.set_status(4, ei, drc.STATUS_NONE)
     print("D7 OK: status byte + wcount + lazy paging in sync")
+
+    # D6b: waived= filters INSIDE query_rect, before the cap - the
+    # old caller-side post-filter dropped every match hiding past
+    # `cap` non-matching errors
+    cb = next(ci for ci, c in enumerate(re2.checks)
+              if len(c.errors) >= 20)
+    nb = len(re2.checks[cb].errors)
+    last = nb - 1
+    re2.set_status(cb, last, drc.STATUS_WAIVED)
+    bbs = [re2.checks[cb].errors[i].bbox() for i in range(nb)]
+    q = (min(b[0] for b in bbs), min(b[1] for b in bbs),
+         max(b[2] for b in bbs), max(b[3] for b in bbs))
+    got = re2.query_rect(q[0], q[1], q[2], q[3], cap=5,
+                         checks=(cb,), waived=True)
+    if [(ci, ei) for ci, ei, _e in got] != [(cb, last)]:
+        fail("waived query missed the lone waived error under a "
+             "small cap: %r" % [(ci, ei) for ci, ei, _e in got])
+    nw = re2.query_rect(q[0], q[1], q[2], q[3], cap=10 ** 9,
+                        checks=(cb,), waived=False)
+    if {(ci, ei) for ci, ei, _e in nw} != \
+            {(cb, i) for i in range(nb)} - {(cb, last)}:
+        fail("not-waived query wrong")
+    allq = re2.query_rect(q[0], q[1], q[2], q[3], cap=10 ** 9,
+                          checks=(cb,))
+    if {(ci, ei) for ci, ei, _e in allq} != \
+            {(cb, i) for i in range(nb)}:
+        fail("unfiltered query changed by the waived= addition")
+    # waived=True + zero wcount takes the O(1) whole-rule skip
+    cz = next(ci for ci, c in enumerate(re2.checks)
+              if ci != cb and len(c.errors) >= 1)
+    if re2.query_rect(-1e9, -1e9, 1e9, 1e9, cap=10 ** 9,
+                      checks=(cz,), waived=True):
+        fail("waived query returned errors from a wcount-0 rule")
+    re2.set_status(cb, last, drc.STATUS_NONE)
+    print("D6b OK: status filter inside query_rect, cap-safe")
 
     print("DRC ICE VALIDATION: ALL OK")
 

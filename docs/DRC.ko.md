@@ -43,12 +43,17 @@ rust/target/release/floe-index drc results.db [--jobs N]
 - **공간 쿼리**: 에러당 4B qbox(체크 bbox 위 256×256 격자) + 블록
   bbox 테이블 → `query_rect` 스트리밍(청크 → 희소/밀집 하이브리드
   → 후보 블록만 디코드, cap 조기 종료). 뷰포트 쿼리 0.1~3ms.
+  `waived=` 필터는 쿼리 내부 cap 이전 적용(후필터는 cap 뒤 매칭
+  누락 — D6b).
 - **waive 리뷰**: 에러당 1B `[status]`(0=none, 1=waived,
   2=reserved) — 파일 재작성 없이 pwrite 제자리 수정. 룰당 u32
   `[wcount]` 카운터를 set_status가 증분 유지 → 필터 카운트 O(1).
   **재-pack 시 status 초기화** 주의.
 - **병렬 빌드**: 바이트 구간 분할 + 체크 헤더 투기 동기화 + 이음새
   검증 — **--jobs 무관 동일 바이트**(D5). 95MB 8코어 0.2s.
+  기록은 `<out>.tmpw` → 완성 후 rename(원자적) — 재-pack이 기존
+  pack(열린 뷰어 mmap 포함)을 truncate하지 않고, 실패 시 부분
+  파일을 남기지 않음.
 - **레이아웃 규율**: 섹션 배치가 바뀌면 헤더 version을 올리고
   리더는 현재 값만 수용(구 pack을 새 리더가 조용히 오독해 소형
   쿼리만 빗나갔던 사고의 재발 방지 — 거부 시 재-pack 안내).

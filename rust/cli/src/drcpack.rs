@@ -333,6 +333,10 @@ fn temp_path(out: &str, id: usize) -> String {
     format!("{}.tmp{}", out, id)
 }
 
+fn final_tmp_path(out: &str) -> String {
+    format!("{}.tmpw", out)
+}
+
 pub fn pack(
     src: &str,
     out: &str,
@@ -507,6 +511,10 @@ pub fn pack(
     for k in 0..=n {
         let _ = std::fs::remove_file(temp_path(out, k));
     }
+    if res.is_err() {
+        let _ = std::fs::remove_file(final_tmp_path(out));
+        let _ = std::fs::remove_file(format!("{}.tmpq", out));
+    }
     let (_blk_cnt, err_total) = res?;
     Ok((
         all.len(),
@@ -543,8 +551,12 @@ fn encode(
         }
     }
 
-    let wf = std::fs::File::create(out)
-        .map_err(|e| format!("create {}: {}", out, e))?;
+    // write to a temp and rename on success: creating `out`
+    // directly truncated a live pack (open viewer mmaps) and left
+    // a partial file behind on any failure
+    let tmp = final_tmp_path(out);
+    let wf = std::fs::File::create(&tmp)
+        .map_err(|e| format!("create {}: {}", tmp, e))?;
     let mut w = std::io::BufWriter::with_capacity(8 << 20, wf);
     let mut header = Vec::with_capacity(40);
     header.extend_from_slice(MAGIC);
@@ -773,6 +785,9 @@ fn encode(
     foot.extend_from_slice(MAGIC);
     w.write_all(&foot).map_err(|e| e.to_string())?;
     w.flush().map_err(|e| e.to_string())?;
+    drop(w);
+    std::fs::rename(&tmp, out)
+        .map_err(|e| format!("rename {} -> {}: {}", tmp, out, e))?;
     Ok((blocks.len() as u64, err_total))
 }
 

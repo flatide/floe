@@ -565,7 +565,7 @@ class IcePack(object):
         return self._block(bi)[rel % _ICE2_BLOCK]
 
     def query_rect(self, x0_um, y0_um, x1_um, y1_um, cap=2000,
-                   checks=None):
+                   checks=None, waived=None):
         """Errors intersecting the um rect -> [(ci, ei, DrcError)].
 
         STREAMING with early exit (2026-08-14): per check the BLOCK
@@ -576,7 +576,10 @@ class IcePack(object):
         touches the rest of a huge rule - the previous full-rule
         qbox scan cost O(rule size) per call (seconds + a cold
         page-in of hundreds of MB on 100M-error rules).
-        `checks` restricts the query to those rules; None = all."""
+        `checks` restricts the query to those rules; None = all.
+        `waived` = None/True/False filters by review status INSIDE
+        the query, before the cap - a caller-side post-filter over
+        a capped result silently drops matches past the cap."""
         import math as _math
         import numpy as np
         prec = self.precision
@@ -596,6 +599,8 @@ class IcePack(object):
         out = []
         for ci in hitc:
             ci = int(ci)
+            if waived is True and int(self._wcount[ci]) == 0:
+                continue   # O(1) skip: rule has no waived errors
             cx0, cy0, cx1, cy1 = (int(v) for v in cbb[ci])
             sx, sy = cx1 - cx0, cy1 - cy0
 
@@ -635,6 +640,11 @@ class IcePack(object):
                               (qs[:, 2] >= qlx) &
                               (qs[:, 1] <= qhy) &
                               (qs[:, 3] >= qly))
+                        if waived is not None:
+                            ssl = self._status[es + base:
+                                               es + base + rcnt]
+                            qm &= ((ssl == STATUS_WAIVED) if waived
+                                   else (ssl != STATUS_WAIVED))
                         if not qm.any():
                             continue
                         errs = self._block(bs + brel)
@@ -656,6 +666,10 @@ class IcePack(object):
                 qs = self._qbox[es + r0:es + r0 + rcnt]
                 qm = ((qs[:, 0] <= qhx) & (qs[:, 2] >= qlx) &
                       (qs[:, 1] <= qhy) & (qs[:, 3] >= qly))
+                if waived is not None:
+                    ssl = self._status[es + r0:es + r0 + rcnt]
+                    qm &= ((ssl == STATUS_WAIVED) if waived
+                           else (ssl != STATUS_WAIVED))
                 errs = None
                 cur = -1
                 for r in np.nonzero(qm)[0]:
