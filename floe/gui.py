@@ -5301,28 +5301,13 @@ class Viewer:
         return best
 
     def _drc_pick(self, ci, ei):
-        """Canvas marker pick (user call 2026-08-18): make the
-        error CURRENT - detail, grid cell, jump mark (it now draws
-        its real shape) - WITHOUT moving the view."""
-        db = self._drc
-        e = db.checks[ci].errors[ei]
-        self._drc_pos = self._drc_cum[ci] + ei
-        self._drc_focus = None
-        k = self.dbu
-        self.drc_mark = {"kind": e.kind,
-                         "pts": [(x / k, y / k) for x, y in e.pts],
-                         "color": (DRC_GREEN
-                                   if self._drc_waived(db, ci, ei)
-                                   else DRC_RED)}
+        """Canvas marker pick = the same action as double-clicking
+        the error's grid number (user call 2026-08-18, revised):
+        full jump - framing goto, CD rulers, layer isolation - and
+        the grid page follows."""
         if self._drcwin is not None:
             self._drc_goto_cell(ci, ei)
-        self._drc_show_detail(ci, ei)
-        b = e.bbox()
-        self._set_live_status(
-            "DRC pick %s #%d(%d) · %.3f x %.3f um"
-            % (db.checks[ci].name, ei + 1, e.num,
-               b[2] - b[0], b[3] - b[1]))
-        self._display()
+        self._drc_jump(ci, ei, isolate=True)
 
     def _pick_click(self, ev):
         self._update_cursor(ev)

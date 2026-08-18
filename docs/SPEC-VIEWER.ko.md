@@ -243,9 +243,11 @@ recolor: 행 스와치 재생성(set_color) + meta 갱신 + 개인 layerprops
   **마커 hover/pick**(2026-08-18): 페인터가 프레임마다 화면좌표
   히트 리스트(_drc_hits)를 굽고 — ① hover 툴팁 = "룰명
   #로컬(전역) · waived"(변경 시에만 set_tooltip_text), ② 정지
-  좌클릭이 마커 6px 안이면 `_drc_pick` = 디테일+그리드 셀+점프
-  마크 교체(실도형 승격), **뷰 이동 없음**; Ctrl/Shift 클릭은
-  디자인 선택 제스처 유지, 마커 미히트 시 기존 디자인 pick 폴스루.
+  좌클릭이 마커 6px 안이면 `_drc_pick` = **그리드 번호 더블클릭과
+  동일**(2026-08-18 수정: goto_cell + _drc_jump(isolate=True) —
+  프레이밍 goto·CD 룰러·레이어 격리, 그리드 동행); Ctrl/Shift
+  클릭은 디자인 선택 제스처 유지, 마커 미히트 시 기존 디자인
+  pick 폴스루.
   v1 사이드카도 페이지 마커 표시(query_rect 불필요해짐).
   **그리드 숫자도 상태색**(waived green / not-waived red; gold 선택
   배경 위에도 상태색 유지, 현재 셀은 파랑 배경+흰 글자).
