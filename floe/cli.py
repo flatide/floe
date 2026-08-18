@@ -367,7 +367,8 @@ def cmd_svrf(args):
         if name:
             defines[name] = val or None
     deck = svrf.parse_deck(args.deck, defines, args.include_dir,
-                           scan_all=args.scan)
+                           scan_all=args.scan,
+                           follow_verbatim=args.follow_verbatim)
     if args.scan:
         print(svrf.format_scan(deck))
         return
@@ -684,6 +685,11 @@ def main(argv=None):
                         "Calibre run used or the check list differs")
     p.add_argument("-I", "--include-dir", action="append", default=[],
                    help="extra search dir for INCLUDE files")
+    p.add_argument("--follow-verbatim", action="store_true",
+                   help="follow INCLUDEs found inside VERBATIM/Tcl "
+                        "blocks in the normal parse too (hybrid "
+                        "decks select layer stacks via Tcl; --scan "
+                        "always follows them)")
     p.set_defaults(fn=cmd_svrf)
 
     p = sub.add_parser("gtktest", help="minimal pixbuf display test "

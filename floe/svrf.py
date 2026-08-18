@@ -78,7 +78,8 @@ IGNORED_HEADS = {"PRECISION", "RESOLUTION", "TITLE", "DRC", "LAYOUT",
                  "MASK", "LVS", "ERC", "PEX", "SOURCE", "GROUND",
                  "UNIT", "FLAG", "GROUP", "PORT", "EXCLUDE",
                  "CAPACITANCE", "RESISTANCE", "DEVICE", "TRACE",
-                 "SVRF", "PUSHDOWN", "POLYGON", "FILTER"}
+                 "SVRF", "PUSHDOWN", "POLYGON", "FILTER",
+                 "DFM", "RDB", "DVPARAMS", "OFFGRID"}
 
 # `NAME { ... }` blocks that are NOT rule checks: hybrid decks wrap
 # Tcl in VERBATIM blocks (sfa14 field scan 2026-08-18 - the body
@@ -222,10 +223,20 @@ class _Parser(object):
         self.macro_pending = False  # DMACRO header seen, body { on
                                     # a LATER line (real-deck style)
         self.verbatim_depth = 0    # >0: inside a VERBATIM/Tcl block
+        self.follow_verbatim = False  # normal parse follows Tcl-
+                                      # conditional includes too
+                                      # (--follow-verbatim; layers
+                                      # picked via Tcl need it)
         self._cont = None          # [check, metric, text, had_bound]
                                    # of the last measurement - a
                                    # comparator-leading next line
                                    # continues it (wrapped bounds)
+        self._acont = None         # (lhs, check) of the last assign
+                                   # - wrapped derivations continue
+                                   # on operator-leading lines
+        self._acont_open = False   # rhs ended with an operator: the
+                                   # NEXT line continues regardless
+                                   # of its head (layer-name wraps)
         self._sub_rx = None        # compiled #DEFINE substitution
         self._sub_map = {}
 
@@ -340,7 +351,8 @@ class _Parser(object):
                            if len(tok0) > 1 else "")
                     if tgt and tgt not in self.d.verbatim_includes:
                         self.d.verbatim_includes.append(tgt)
-                    if self.scan_all and tgt:
+                    if (self.scan_all or self.follow_verbatim) \
+                            and tgt:
                         inc = self._find_include(tgt, path, incdirs)
                         if inc:
                             self.d.includes.append(inc)
@@ -475,6 +487,7 @@ class _Parser(object):
             self.verbatim_depth = max(
                 1 + rest.count("{") - rest.count("}"), 0)
             self._cont = None
+            self._acont = None
             return
         if m and m.group(2).upper() not in IGNORED_HEADS \
                 and not _ASSIGN_RX.match(s):
@@ -485,18 +498,22 @@ class _Parser(object):
             self.cur = Check(name)
             self.d.checks[name] = self.cur
             self.depth = 1
+            self._acont = None
             rest = m.group(3).strip()
             if rest:
                 self.block_line(rest)
             return
         head = s.split(None, 1)[0].upper()
         if head == "LAYER":
+            self._acont = None
             self.layer_stmt(s)
         elif head == "VARIABLE":
+            self._acont = None
             self.variable_stmt(s)
         elif head == "DMACRO":
             # macros are NOT expanded (scope call: --scan reports
             # usage); the body is skipped by brace depth
+            self._acont = None
             self.d.stats["dmacro"] += 1
             d = s.count("{") - s.count("}")
             if "{" in s:
@@ -506,14 +523,23 @@ class _Parser(object):
             else:
                 self.macro_pending = True   # { on a later line
         elif head == "CMACRO":
+            self._acont = None
             self.d.stats["cmacro"] += 1
         else:
             am = _ASSIGN_RX.match(s)
             if am:
                 self.assign(am.group(1), am.group(2), None)
+            elif self._try_acont(s):
+                pass
             elif head in IGNORED_HEADS:
+                self._acont = None
                 self.d.stats["ignored"] += 1
+            elif head[:1] in "[~(":
+                # DFM property math / expression continuations
+                self._acont = None
+                self.d.stats["prop_expr"] += 1
             else:
+                self._acont = None
                 self.d.stats["unknown"] += 1
                 self.d.unknown[head] += 1
 
@@ -551,9 +577,23 @@ class _Parser(object):
                 else:
                     head = s.split(None, 1)[0].upper()
                     if head in MEAS:
+                        self._acont = None
                         self.measurement(s, self.cur)
+                    elif self._try_acont(s):
+                        pass
+                    elif head in IGNORED_HEADS:
+                        # DFM RDB / spec statements inside checks
+                        self._cont = None
+                        self._acont = None
+                        self.d.stats["ignored"] += 1
+                    elif head[:1] in "[~(":
+                        # DFM property math wraps ([expr], ~(..))
+                        self._cont = None
+                        self._acont = None
+                        self.d.stats["prop_expr"] += 1
                     else:
                         self._cont = None
+                        self._acont = None
                         self.d.stats["unknown_in_block"] += 1
                         self.d.unknown[head] += 1
         self.depth += nested - closes
@@ -607,6 +647,7 @@ class _Parser(object):
         if head in MEAS:
             ops = self.measurement(rhs, check)
             self.d.derived_ops[lhs] = ops
+            self._acont = None
         else:
             names = rhs_operands(rhs)
             self.d.derived_ops[lhs] = names
@@ -614,7 +655,38 @@ class _Parser(object):
                 for n in names:
                     if n not in check.layers:
                         check.layers.append(n)
+            # the rhs may wrap onto following lines (sfa14 field
+            # scan: ~1.5k NOT/WITH/layer-name-leading wraps)
+            toks = rhs.split()
+            self._acont = (lhs, check)
+            self._acont_open = bool(toks) \
+                and toks[-1].upper() in KEYWORDS
         self.d.stats["assign"] += 1
+
+    def _try_acont(self, s):
+        """Continuation line of a wrapped derivation: taken when the
+        previous assign's rhs ended with an operator, or this line
+        LEADS with one - both real-deck wrap styles. Operands join
+        the derivation's operand list (closure completeness)."""
+        if self._acont is None:
+            return False
+        head = s.split(None, 1)[0].upper()
+        if not (self._acont_open or head in KEYWORDS):
+            return False
+        lhs, check = self._acont
+        self.d.derived[lhs] = (self.d.derived.get(lhs, "")
+                               + " " + s.strip())
+        ops = self.d.derived_ops.setdefault(lhs, [])
+        names = [n for n in rhs_operands(s) if n not in ops]
+        ops.extend(names)
+        if check is not None:
+            for n in names:
+                if n not in check.layers:
+                    check.layers.append(n)
+        toks = s.split()
+        self._acont_open = bool(toks) \
+            and toks[-1].upper() in KEYWORDS
+        return True
 
     @staticmethod
     def _chain(text, pos):
@@ -681,20 +753,24 @@ class _Parser(object):
         return ops
 
 
-def parse_deck(path, defines=None, include_dirs=(), scan_all=False):
+def parse_deck(path, defines=None, include_dirs=(), scan_all=False,
+               follow_verbatim=False):
     deck = Deck(path)
     deck.defines.update(defines or {})
     p = _Parser(deck, scan_all)
+    p.follow_verbatim = follow_verbatim
     if deck.defines:
         p._rebuild_sub()
     p.feed_file(path, list(include_dirs), frozenset())
     if p.cur is not None:
         deck.warnings.append("unterminated check block %s"
                              % p.cur.name)
-    if deck.verbatim_includes and not scan_all:
+    if deck.verbatim_includes and not scan_all \
+            and not follow_verbatim:
         deck.warnings.append(
             "%d INCLUDE(s) inside VERBATIM/Tcl blocks were NOT "
-            "followed (Tcl-conditional; --scan follows them)"
+            "followed (Tcl-conditional; --scan or "
+            "--follow-verbatim follows them)"
             % len(deck.verbatim_includes))
     deck.resolve()
     return deck
@@ -742,6 +818,9 @@ def format_scan(deck):
         if len(d.verbatim_includes) > 10:
             L.append("    ... %d more"
                      % (len(d.verbatim_includes) - 10))
+    if d.stats["prop_expr"]:
+        L.append("  property-expression continuations skipped %d"
+                 % d.stats["prop_expr"])
     unk = d.unknown.most_common(20)
     L.append("  skipped statements %d%s"
              % (d.stats["unknown"] + d.stats["unknown_in_block"],

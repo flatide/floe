@@ -242,6 +242,11 @@ def r1(tmp):
           and "verbatim include inc/nested2.svrf"
           in svrf.format_scan(dv1),
           svrf.format_scan(dv1))   # 2 = VERBATIM + top-level if
+    dv2f = svrf.parse_deck(vb, follow_verbatim=True)
+    check("--follow-verbatim follows them in the normal parse",
+          "NEST2" in dv2f.layers
+          and not any("NOT followed" in x for x in dv2f.warnings),
+          str((sorted(dv2f.layers), dv2f.warnings)))
 
 
 def r2(tmp):
@@ -264,6 +269,58 @@ def r2(tmp):
     check("diamond closure reaches all sources + LAYER MAP dt",
           dia.source_gds == [(2, None), (3, None), (31, 0)],
           str(dia.source_gds))
+    # wrapped derivations (sfa14 field scan: ~1.5k operator-leading
+    # and operator-trailing continuation lines)
+    p2 = os.path.join(tmp, "wrap.svrf")
+    w(p2,
+      "LAYER L1 1\nLAYER L2 2\nLAYER L3 3\nLAYER L9 9\n"
+      "w1 = L1\n"
+      "    NOT L2\n"
+      "w2 = L1 OR\n"
+      "    L3\n"
+      "w3 = L1\n"
+      "    NOT L2\n"
+      "    AND L3\n"
+      "w4 = L1\n"
+      "LAYER LX 8\n"
+      "NOT L3\n"
+      "W1.RULE { @ a\n  INT w1 < 0.1\n}\n"
+      "W2.RULE { @ b\n  INT w2 < 0.1\n}\n"
+      "W3.RULE { @ c\n  INT w3 < 0.1\n}\n"
+      "W4.RULE { @ d\n  INT w4 < 0.1\n}\n")
+    d2 = svrf.parse_deck(p2)
+    check("operator-LEADING wrap joins the derivation",
+          d2.derived_ops["w1"] == ["L1", "L2"],
+          str(d2.derived_ops["w1"]))
+    check("operator-TRAILING wrap joins the next line",
+          d2.derived_ops["w2"] == ["L1", "L3"],
+          str(d2.derived_ops["w2"]))
+    check("multi-line wrap keeps extending",
+          d2.derived_ops["w3"] == ["L1", "L2", "L3"],
+          str(d2.derived_ops["w3"]))
+    check("closure includes wrapped operands",
+          d2.checks["W1.RULE"].source_gds == [(1, None), (2, None)],
+          str(d2.checks["W1.RULE"].source_gds))
+    check("no false join across an intervening statement",
+          d2.derived_ops["w4"] == ["L1"]
+          and d2.unknown.get("NOT", 0) == 1,
+          str((d2.derived_ops["w4"], dict(d2.unknown))))
+    # spec heads inside checks are classified, not unknown noise
+    p3 = os.path.join(tmp, "dfm.svrf")
+    w(p3,
+      "LAYER L1 1\n"
+      "DFM.RULE { @ d\n"
+      "  INT L1 < 0.1\n"
+      "  DFM RDB ONLY x.rdb\n"
+      "  [MIN_VOLTAGE(v) > 1.0]\n"
+      "  ~(2.751)\n"
+      "}\n")
+    d3 = svrf.parse_deck(p3)
+    check("DFM/property lines skipped quietly inside checks",
+          d3.stats["unknown_in_block"] == 0
+          and d3.stats["prop_expr"] == 2
+          and len(d3.checks["DFM.RULE"].constraints) == 1,
+          str((dict(d3.unknown), d3.stats["prop_expr"])))
     cyc = d.checks["CYCLE.1"]
     check("cycle terminates, sources found through it",
           set(cyc.source_gds) == {(2, None), (3, None), (31, 0)},
@@ -288,6 +345,7 @@ def r3(tmp):
       "  EXT M1 M2 <0.03 ABUT<90 SINGULAR REGION\n"
       "  bad = ENC M1 M2 < 0.02\n"
       "  DFM PROPERTY M1 whatever\n"
+      "  FROBNICATE M1 x\n"
       "}\n")
     d = svrf.parse_deck(p)
     check("quoted check name", "Q.RULE.1" in d.checks,
@@ -308,7 +366,9 @@ def r3(tmp):
     check("operands collected in order",
           c.layers == ["M1", "M2"], str(c.layers))
     check("unknown in-block statement counted, not fatal",
-          d.stats["unknown_in_block"] == 1 and "DFM" in d.unknown)
+          d.stats["unknown_in_block"] == 1
+          and "FROBNICATE" in d.unknown
+          and "DFM" not in d.unknown)   # DFM = quietly ignored now
     check("DMACRO body skipped (no SKIPME artifacts)",
           "SKIPME" not in d.checks and d.stats["dmacro"] == 1
           and not any(x["value"] == 9.9

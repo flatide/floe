@@ -194,6 +194,15 @@ ovm 헤더와 meta.src 모두 소스 절대경로/size/mtime을 기록. `Vfs::op
   derivation(`name = expr`)은 우변의 **피연산자 이름만** 방향
   그래프 엣지로 넣고(연산자 전부 무시), 체크의 `source_gds`는 이
   그래프를 LAYER/LAYER MAP 테이블까지 폐쇄(전이)해서 얻는다.
+  **줄바꿈 derivation 지원**(2026-08-18, sfa14 실덱 ~1.5k줄):
+  직전 assign의 우변이 연산자로 끝났거나 다음 줄이 연산자로
+  시작하면 연속 줄로 이어 피연산자를 추가(중간에 다른 문장이
+  오면 즉시 종료 — 오결합 방지). **하이브리드 VERBATIM/Tcl 덱**:
+  VERBATIM·Tcl 제어 블록(`if {...}` 등)은 체크가 아니라 중괄호
+  스킵, 내부 INCLUDE는 항상 인벤토리(`--scan`은 전부 추적,
+  일반 파스는 `--follow-verbatim`으로 선택). DFM/RDB/DVPARAMS/
+  OFFGRID와 `[`/`~`/`(` 시작 property 수식 줄은 조용히 분류
+  (unknown 히스토그램 오염 방지).
 - 파싱 대상: 전처리(INCLUDE 병합 — 경로 `$VAR`/`${VAR}`/`~` 환경
   확장 · `#DEFINE`/`#UNDEFINE`/`#IFDEF`/`#IFNDEF`/`#ELSE`/`#ENDIF`
   — **2-인자 값 검사** `#IFDEF STACK 6LM` = 정의됨∧값일치, 지시자
