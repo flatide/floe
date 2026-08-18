@@ -201,6 +201,8 @@ class _Parser(object):
         self.cur = None            # open Check
         self.depth = 0
         self.macro_depth = 0       # >0: inside a DMACRO body (skipped)
+        self.macro_pending = False  # DMACRO header seen, body { on
+                                    # a LATER line (real-deck style)
         self._cont = None          # [check, metric, text, had_bound]
                                    # of the last measurement - a
                                    # comparator-leading next line
@@ -281,8 +283,21 @@ class _Parser(object):
                         lambda m: self._sub_map[m.group(1)], s)
                 tok0 = s.split(None, 1)
                 if tok0 and tok0[0].upper() == "INCLUDE" \
-                        and self.cur is None \
-                        and self.macro_depth == 0:
+                        and (self.cur is not None
+                             or self.macro_depth > 0
+                             or self.macro_pending):
+                    # an INCLUDE textually inside a macro body or
+                    # an open block never executes: say so instead
+                    # of losing the file silently (the DMACRO
+                    # brace-drift bug hid a whole include tree)
+                    self.d.warnings.append(
+                        "INCLUDE swallowed by %s: %s"
+                        % ("a DMACRO body"
+                           if (self.macro_depth or self.macro_pending)
+                           else "open block %s" % self.cur.name, s))
+                    self.statement(s)
+                    continue
+                if tok0 and tok0[0].upper() == "INCLUDE":
                     tgt = (tok0[1].strip().strip('"\'')
                            if len(tok0) > 1 else "")
                     inc = self._find_include(tgt, path, incdirs)
@@ -300,6 +315,17 @@ class _Parser(object):
                         self.d.warnings.append(msg)
                     continue
                 self.statement(s)
+        # parse state open at a file boundary is always an anomaly
+        # (INCLUDE is blocked while a block/macro is open, so state
+        # cannot legitimately span files)
+        if self.cur is not None:
+            self.d.warnings.append(
+                "unclosed block %s at end of %s"
+                % (self.cur.name, os.path.basename(path)))
+        if self.macro_depth > 0 or self.macro_pending:
+            self.d.warnings.append(
+                "unclosed DMACRO body at end of %s (brace drift?)"
+                % os.path.basename(path))
         if self.cond and not chain:
             self.d.warnings.append("unbalanced #IFDEF at end of deck")
 
@@ -323,9 +349,21 @@ class _Parser(object):
     # -- statements ---------------------------------------------------
 
     def statement(self, s):
-        if self.macro_depth > 0:
-            # inside a DMACRO body: skip everything, track braces
-            self.macro_depth += s.count("{") - s.count("}")
+        if self.macro_depth > 0 or self.macro_pending:
+            # inside (or awaiting) a DMACRO body: skip everything,
+            # track braces. The body's first { often sits ALONE on
+            # the line below the header - counting it on top of an
+            # assumed depth left macro_depth stuck at 1 and
+            # swallowed the rest of the deck, nested INCLUDEs
+            # included (field report 2026-08-18)
+            d = s.count("{") - s.count("}")
+            if self.macro_pending:
+                if "{" not in s:
+                    return       # header continuation line
+                self.macro_pending = False
+                self.macro_depth = max(d, 0)
+            else:
+                self.macro_depth = max(self.macro_depth + d, 0)
             return
         if self.cur is not None:
             self.block_line(s)
@@ -357,11 +395,12 @@ class _Parser(object):
             # usage); the body is skipped by brace depth
             self.d.stats["dmacro"] += 1
             d = s.count("{") - s.count("}")
-            if "{" in s and d <= 0:
-                pass    # one-line macro: opened and closed here
+            if "{" in s:
+                if d > 0:
+                    self.macro_depth = d
+                # else: one-line macro, opened and closed here
             else:
-                # brace on this line or expected on the next
-                self.macro_depth = d if d > 0 else 1
+                self.macro_pending = True   # { on a later line
         elif head == "CMACRO":
             self.d.stats["cmacro"] += 1
         else:

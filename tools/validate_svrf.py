@@ -112,6 +112,47 @@ def r1(tmp):
     check("unset env var: warned with a hint, not crashed",
           any("FLOE_SVRF_UNSET" in x and "env var unset" in x
               for x in d3.warnings), str(d3.warnings))
+    # DMACRO with its body brace on the NEXT line (real-deck style)
+    # must not swallow the rest of the deck - the drifted depth hid
+    # a whole nested-include tree in the field (2026-08-18)
+    n2 = os.path.join(tmp, "inc", "nested2.svrf")
+    w(n2, "LAYER NEST2 88\n")
+    dm = os.path.join(tmp, "dmacro.svrf")
+    w(dm,
+      "DMACRO CHK L\n"
+      "{\n"
+      "  INT L < 0.1\n"
+      "}\n"
+      "LAYER AFTER 9\n"
+      "INCLUDE inc/nested2.svrf\n"
+      "DMACRO ONE X { EXT X > 0.2 }\n"
+      "LAYER TAIL 10\n")
+    d4 = svrf.parse_deck(dm)
+    check("next-line-brace DMACRO: deck continues after the body",
+          "AFTER" in d4.layers and not d4.checks,
+          str((sorted(d4.layers), list(d4.checks))))
+    check("nested INCLUDE after the DMACRO processed",
+          "NEST2" in d4.layers, str(sorted(d4.layers)))
+    check("one-line DMACRO still skipped in place",
+          "TAIL" in d4.layers and d4.stats["dmacro"] == 2,
+          str((sorted(d4.layers), d4.stats["dmacro"])))
+    check("clean deck: no unclosed-state warnings",
+          not any("unclosed" in x for x in d4.warnings),
+          str(d4.warnings))
+    # an INCLUDE textually inside a macro body is reported, and an
+    # unclosed body is flagged at end of file
+    bad = os.path.join(tmp, "badmacro.svrf")
+    w(bad,
+      "DMACRO B L\n"
+      "{\n"
+      "  INCLUDE inc/nested2.svrf\n")
+    d5 = svrf.parse_deck(bad)
+    check("INCLUDE inside a macro body warned, not resolved",
+          any("swallowed" in x for x in d5.warnings)
+          and "NEST2" not in d5.layers, str(d5.warnings))
+    check("unclosed DMACRO body flagged at end of file",
+          any("unclosed DMACRO" in x for x in d5.warnings),
+          str(d5.warnings))
 
 
 def r2(tmp):
