@@ -4102,6 +4102,16 @@ class Viewer:
         if self._drc_sel is not None:
             self._drc_sels[self._drc_sel[0]] = self._drc_sel
         self._drc_open = ci
+        # a live jump belongs to the PREVIOUS rule: drop its mark,
+        # position and auto CD rulers or they linger on the canvas
+        # over the new rule's errors (user call 2026-08-18)
+        if self.drc_mark is not None:
+            self.drc_mark = None
+            self._drc_pos = -1
+            for r in self._drc_ruler:
+                if r in self.rulers:
+                    self.rulers.remove(r)
+            self._drc_ruler = []
         # selections are PER RULE and survive switches (user call
         # 2026-08-15: 'selected' must keep applying)
         self._drc_sel = self._drc_sels.get(ci)
