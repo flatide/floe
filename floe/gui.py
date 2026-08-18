@@ -4645,14 +4645,20 @@ class Viewer:
     def _drc_stamp_errs(self, disp, sx, sy, items, color=None):
         """Error painter: geometry in `color`, or per-status when
         None (user call 2026-08-14/17: not waived = red, waived =
-        green). Errors whose screen span is below the marker size
-        collapse to DRC_MARK_PX squares (the focused one: 9x9) -
-        the threshold IS the marker size, so there is no zoom range
-        where the shape draws smaller than the marker (user call
-        2026-08-16); a 20k segment budget bounds pathological
-        frames."""
+        green). ONLY the jumped error (double-click / n-p - the one
+        drc_mark points at) draws its real shape, collapsing to a
+        marker when its screen span is below the marker size; every
+        OTHER error is a DRC_MARK_PX square at ANY zoom (user call
+        2026-08-18 - shape soup at wide views; the focused one:
+        9x9). A 20k segment budget bounds pathological frames."""
         db = self._drc
         focus = self._drc_focus
+        jci = jei = -1
+        if self.drc_mark is not None and self._drc_pos >= 0 \
+                and self._drc_cum:
+            jci = bisect.bisect_right(self._drc_cum,
+                                      self._drc_pos) - 1
+            jei = self._drc_pos - self._drc_cum[jci]
         budget = 20000
         for ci_, ei_, kind, spts in items:
             col = color
@@ -4663,8 +4669,9 @@ class Viewer:
             sp = [(sx(x), sy(y)) for x, y in spts]
             hxs = [p[0] for p in sp]
             hys = [p[1] for p in sp]
-            if (max(hxs) - min(hxs) < DRC_MARK_PX
-                    and max(hys) - min(hys) < DRC_MARK_PX):
+            if (ci_ != jci or ei_ != jei) \
+                    or (max(hxs) - min(hxs) < DRC_MARK_PX
+                        and max(hys) - min(hys) < DRC_MARK_PX):
                 cxp = (min(hxs) + max(hxs)) / 2.0
                 cyp = (min(hys) + max(hys)) / 2.0
                 s_px = 9 if (focus is not None
