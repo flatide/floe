@@ -93,6 +93,8 @@ rust/target/release/floe-index drc results.db [--jobs N]
 | 단클릭 | 상세 + 셀 마킹만 (뷰 불변) |
 | 더블클릭 | 점프(에러가 화면 30% 프레이밍) + 자동 CD 룰러 + **레이어 격리**(rules.json의 원천 레이어만 켬, Esc 복원) |
 | n / p | 보이는 목록(selected ∧ in view ∧ waive) 안에서 순환, 페이지 자동 이동 |
+| 캔버스 마커 hover | 툴팁: 룰명 #로컬(전역) · waived 여부 |
+| 캔버스 마커 클릭 | 그 에러 pick — 디테일·그리드 셀·점프 마크 갱신(실도형 승격), 뷰 이동 없음. Ctrl/Shift 클릭은 디자인 선택 유지 |
 | `e` + 두 클릭 | 박스 선택(Esc까지 유지; Shift 추가, Ctrl 토글; 보이는 에러만; 룰별 보존; gold 표시) |
 | Ctrl/Shift + 셀 클릭 | 선택 추가/토글 |
 | 우클릭 | waive/unwaive 메뉴(gold 선택 시 일괄) — [status] 제자리 기록, 카운트·색·필터 즉시 연동 |

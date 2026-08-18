@@ -903,6 +903,9 @@ class Viewer:
         self._drc = None            # drc.DrcDb or drc.IcePack
         self._drcwin = None
         self.drc_mark = None        # {"kind": 'p'|'e', "pts": [(dbu)]}
+        self._drc_hits = []         # frame's painted markers:
+                                    # (px, py, ci, ei) for hover/pick
+        self._drc_tip = None        # last tooltip text set
         # prev/next walk by ARITHMETIC over cumulative counts, never
         # a materialized per-error list: an .ice sidecar can hold
         # hundreds of millions of violations
@@ -1770,6 +1773,9 @@ class Viewer:
             rect_outline(disp, mx - 5, my - 5, mx + 5, my + 5, None, color)
             fill_rect(disp, mx - 9, my, 19, 1, color)
             fill_rect(disp, mx, my - 9, 1, 19, color)
+        # screen-space marker hit list rebuilt every frame by
+        # _drc_stamp_errs (hover tooltip + canvas pick)
+        self._drc_hits = []
         if self.drc_mark is not None:
             # solid 2px lines, speckled polygon interiors (user call
             # 2026-08-13: edges = plain 2px, polygons = 50% fill);
@@ -2594,8 +2600,33 @@ class Viewer:
             self._track_band(ev)
             self._display()
             return True
+        self._drc_tooltip(ev)
         self._hover(ev)
         return True
+
+    def _drc_tooltip(self, ev):
+        """Hover tooltip over a painted DRC marker: rule name,
+        #local(global) number and waive status (user call
+        2026-08-18)."""
+        tip = None
+        if self._drc is not None and self._drc_hits:
+            hit = self._drc_hit_at(ev.x, ev.y)
+            if hit is not None:
+                ci, ei = hit
+                try:
+                    e = self._drc.checks[ci].errors[ei]
+                    tip = "%s #%d(%d)%s" % (
+                        self._drc.checks[ci].name, ei + 1, e.num,
+                        " · waived"
+                        if self._drc_waived(self._drc, ci, ei)
+                        else "")
+                except Exception:
+                    tip = None
+        if tip != self._drc_tip:
+            self._drc_tip = tip
+            self.scroller.set_tooltip_text(tip)
+            if tip:
+                self.scroller.trigger_tooltip_query()
 
     def _track_band(self, ev):
         self._band_cur = (ev.x, ev.y)
@@ -4679,6 +4710,7 @@ class Viewer:
                              and focus[1] == ei_) else DRC_MARK_PX
                 fill_rect(disp, cxp - s_px // 2, cyp - s_px // 2,
                           s_px, s_px, col)
+                self._drc_hits.append((cxp, cyp, ci_, ei_))
                 budget -= 1
             else:
                 if kind == "p":
@@ -5256,10 +5288,55 @@ class Viewer:
                 tuple(res.get("bbox") or ()),
                 tuple(map(tuple, pts)) if pts else None)
 
+    def _drc_hit_at(self, x, y, r=6):
+        """(ci, ei) of the nearest DRC marker painted within r px
+        of the screen point, else None (list rebuilt per frame)."""
+        best = None
+        bd = r * r + 1
+        for hx, hy, ci, ei in self._drc_hits:
+            d = (hx - x) ** 2 + (hy - y) ** 2
+            if d <= r * r and d < bd:
+                bd = d
+                best = (ci, ei)
+        return best
+
+    def _drc_pick(self, ci, ei):
+        """Canvas marker pick (user call 2026-08-18): make the
+        error CURRENT - detail, grid cell, jump mark (it now draws
+        its real shape) - WITHOUT moving the view."""
+        db = self._drc
+        e = db.checks[ci].errors[ei]
+        self._drc_pos = self._drc_cum[ci] + ei
+        self._drc_focus = None
+        k = self.dbu
+        self.drc_mark = {"kind": e.kind,
+                         "pts": [(x / k, y / k) for x, y in e.pts],
+                         "color": (DRC_GREEN
+                                   if self._drc_waived(db, ci, ei)
+                                   else DRC_RED)}
+        if self._drcwin is not None:
+            self._drc_goto_cell(ci, ei)
+        self._drc_show_detail(ci, ei)
+        b = e.bbox()
+        self._set_live_status(
+            "DRC pick %s #%d(%d) · %.3f x %.3f um"
+            % (db.checks[ci].name, ei + 1, e.num,
+               b[2] - b[0], b[3] - b[1]))
+        self._display()
+
     def _pick_click(self, ev):
         self._update_cursor(ev)
         x, y = self._cursor
         state = getattr(ev, "state", 0)
+        # a click ON a DRC marker picks that error (plain clicks
+        # only - Ctrl/Shift stay design-selection gestures)
+        if self._drc is not None and not (
+                state & (Gdk.ModifierType.CONTROL_MASK
+                         | Gdk.ModifierType.SHIFT_MASK)):
+            hit = self._drc_hit_at(ev.x, ev.y)
+            if hit is not None:
+                self._drc_pick(*hit)
+                return
         if state & Gdk.ModifierType.CONTROL_MASK:
             mode = "toggle"  # add unselected / remove selected
         elif state & Gdk.ModifierType.SHIFT_MASK:
