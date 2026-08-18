@@ -253,7 +253,10 @@ recolor: 행 스와치 재생성(set_color) + meta 갱신 + 개인 layerprops
   레이어 격리; _on_press에서 drag 가드 **앞**에 처리 — 짝 단일
   press가 재장전한 pan drag를 해제해야 이벤트가 살았음, 2026-08-18
   rev 2); Ctrl/Shift 클릭은 디자인 선택 제스처 유지, 마커 미히트
-  시 기존 디자인 pick 폴스루.
+  시 기존 디자인 pick 폴스루. **룰 전환 시 점프 잔재 정리**
+  (2026-08-18): 다른 룰 선택은 이전 룰의 drc_mark·_drc_pos·자동
+  CD 룰러를 제거(수동 룰러 유지) — 새 룰의 마커 위에 이전 점프
+  도형이 남지 않음.
   v1 사이드카도 페이지 마커 표시(query_rect 불필요해짐).
   **그리드 숫자도 상태색**(waived green / not-waived red; gold 선택
   배경 위에도 상태색 유지, 현재 셀은 파랑 배경+흰 글자).
