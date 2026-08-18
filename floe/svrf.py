@@ -86,7 +86,7 @@ IGNORED_HEADS = {"PRECISION", "RESOLUTION", "TITLE", "DRC", "LAYOUT",
 # conditional INCLUDEs), and Tcl control flow surfaces if/else/...
 # at statement level. Bodies are brace-skipped; INCLUDEs inside are
 # inventoried (and followed under --scan).
-_NONCHECK_BLOCKS = {"VERBATIM", "VARBATIM", "IF", "ELSE", "ELSEIF",
+_NONCHECK_BLOCKS = {"VERBATIM", "IF", "ELSE", "ELSEIF",
                     "FOREACH", "WHILE", "PROC", "SWITCH"}
 
 
@@ -468,7 +468,7 @@ class _Parser(object):
         m = _CHECK_RX.match(s)
         if m and m.group(2).upper() in _NONCHECK_BLOCKS:
             # VERBATIM / Tcl control block: never a check - the
-            # sfa14 scan grew phantom checks named "if"/"VARBATIM"
+            # sfa14 scan grew phantom checks named "if"/"VERBATIM"
             # whose "bodies" ate the rest of the deck
             self.d.stats["verbatim"] += 1
             rest = m.group(3)
