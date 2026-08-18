@@ -201,6 +201,47 @@ def r1(tmp):
     check("scan report lists the -D candidates",
           "STACK(7LM)" in svrf.format_scan(d9),
           svrf.format_scan(d9))
+    # hybrid decks wrap Tcl in VERBATIM blocks (sfa14 field scan):
+    # never checks, bodies brace-skipped, INCLUDEs inside are
+    # inventoried and followed only by --scan
+    vb = os.path.join(tmp, "verbatim.svrf")
+    w(vb,
+      "LAYER TOP1 11\n"
+      "VERBATIM {\n"
+      "  if {[info exists env(DRC_SEL)]} {\n"
+      "    puts \"sel\"\n"
+      "    INCLUDE inc/nested2.svrf\n"
+      "  } else {\n"
+      "    set x 1\n"
+      "  }\n"
+      "}\n"
+      "if {[info exists env(X)]} {\n"
+      "  puts \"x\"\n"
+      "}\n"
+      "AFTER.RULE { @ a\n  INT TOP1 < 0.1\n}\n")
+    dv0 = svrf.parse_deck(vb)
+    check("VERBATIM / top-level Tcl if never become checks",
+          list(dv0.checks) == ["AFTER.RULE"],
+          str(list(dv0.checks)))
+    check("normal parse: verbatim include listed, not followed",
+          dv0.verbatim_includes == ["inc/nested2.svrf"]
+          and "NEST2" not in dv0.layers
+          and any("NOT followed" in x for x in dv0.warnings),
+          str((dv0.verbatim_includes, sorted(dv0.layers),
+               dv0.warnings)))
+    dv1 = svrf.parse_deck(vb, scan_all=True)
+    check("--scan follows verbatim includes",
+          "NEST2" in dv1.layers, str(sorted(dv1.layers)))
+    check("deck continues after the Tcl blocks",
+          "AFTER.RULE" in dv1.checks
+          and dv1.checks["AFTER.RULE"].constraints[0]["value"]
+          == 0.1,
+          str(list(dv1.checks)))
+    check("scan report shows the verbatim inventory",
+          "VERBATIM/Tcl blocks 2" in svrf.format_scan(dv1)
+          and "verbatim include inc/nested2.svrf"
+          in svrf.format_scan(dv1),
+          svrf.format_scan(dv1))   # 2 = VERBATIM + top-level if
 
 
 def r2(tmp):

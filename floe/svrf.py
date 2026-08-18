@@ -80,6 +80,15 @@ IGNORED_HEADS = {"PRECISION", "RESOLUTION", "TITLE", "DRC", "LAYOUT",
                  "CAPACITANCE", "RESISTANCE", "DEVICE", "TRACE",
                  "SVRF", "PUSHDOWN", "POLYGON", "FILTER"}
 
+# `NAME { ... }` blocks that are NOT rule checks: hybrid decks wrap
+# Tcl in VERBATIM blocks (sfa14 field scan 2026-08-18 - the body
+# held `if {[info exists env(...)]}` selection logic and 97
+# conditional INCLUDEs), and Tcl control flow surfaces if/else/...
+# at statement level. Bodies are brace-skipped; INCLUDEs inside are
+# inventoried (and followed under --scan).
+_NONCHECK_BLOCKS = {"VERBATIM", "VARBATIM", "IF", "ELSE", "ELSEIF",
+                    "FOREACH", "WHILE", "PROC", "SWITCH"}
+
 
 class Check(object):
     __slots__ = ("name", "desc", "constraints", "layers",
@@ -114,6 +123,8 @@ class Deck(object):
         self.switch_values = {}       # name -> values tested by the
                                       # two-arg #IFDEF form (the -D
                                       # candidates --scan reports)
+        self.verbatim_includes = []   # INCLUDE targets seen inside
+                                      # VERBATIM/Tcl blocks
         self.meas_hist = Counter()
 
     # -- resolution ---------------------------------------------------
@@ -210,6 +221,7 @@ class _Parser(object):
         self.macro_depth = 0       # >0: inside a DMACRO body (skipped)
         self.macro_pending = False  # DMACRO header seen, body { on
                                     # a LATER line (real-deck style)
+        self.verbatim_depth = 0    # >0: inside a VERBATIM/Tcl block
         self._cont = None          # [check, metric, text, had_bound]
                                    # of the last measurement - a
                                    # comparator-leading next line
@@ -319,6 +331,37 @@ class _Parser(object):
                         lambda m: self._sub_map[m.group(1)], s)
                 tok0 = s.split(None, 1)
                 if tok0 and tok0[0].upper() == "INCLUDE" \
+                        and self.verbatim_depth > 0:
+                    # Tcl-conditional include: inventory it always,
+                    # dive into it only under --scan (same
+                    # philosophy as walking both #IFDEF branches -
+                    # the normal parse cannot evaluate the Tcl)
+                    tgt = (tok0[1].strip().strip('"\'')
+                           if len(tok0) > 1 else "")
+                    if tgt and tgt not in self.d.verbatim_includes:
+                        self.d.verbatim_includes.append(tgt)
+                    if self.scan_all and tgt:
+                        inc = self._find_include(tgt, path, incdirs)
+                        if inc:
+                            self.d.includes.append(inc)
+                            sav = self.verbatim_depth
+                            self.verbatim_depth = 0
+                            self.feed_file(inc, incdirs,
+                                           chain | {real})
+                            self.verbatim_depth = sav
+                        else:
+                            exp = os.path.expanduser(
+                                os.path.expandvars(tgt))
+                            msg = ("INCLUDE (in VERBATIM) not "
+                                   "found: %s" % tgt)
+                            if exp != tgt:
+                                msg += " -> %s" % exp
+                            if "$" in exp:
+                                msg += (" (env var unset in this "
+                                        "shell?)")
+                            self.d.warnings.append(msg)
+                    continue
+                if tok0 and tok0[0].upper() == "INCLUDE" \
                         and (self.cur is not None
                              or self.macro_depth > 0
                              or self.macro_pending):
@@ -362,6 +405,13 @@ class _Parser(object):
             self.d.warnings.append(
                 "unclosed DMACRO body at end of %s (brace drift?)"
                 % os.path.basename(path))
+        if self.verbatim_depth > 0:
+            # contain Tcl brace drift (quoted braces etc.) to the
+            # file it happened in
+            self.d.warnings.append(
+                "unclosed VERBATIM/Tcl block at end of %s (brace "
+                "drift?)" % os.path.basename(path))
+            self.verbatim_depth = 0
         if self.cond and not chain:
             self.d.warnings.append("unbalanced #IFDEF at end of deck")
 
@@ -385,6 +435,14 @@ class _Parser(object):
     # -- statements ---------------------------------------------------
 
     def statement(self, s):
+        if self.verbatim_depth > 0:
+            # VERBATIM/Tcl body: pure brace tracking - `} else {`
+            # nets 0 and correctly stays inside. INCLUDE lines are
+            # intercepted in feed_file for the scan inventory.
+            self.verbatim_depth = max(
+                self.verbatim_depth + s.count("{") - s.count("}"),
+                0)
+            return
         if self.macro_depth > 0 or self.macro_pending:
             # inside (or awaiting) a DMACRO body: skip everything,
             # track braces. The body's first { often sits ALONE on
@@ -408,6 +466,16 @@ class _Parser(object):
             return
         self._cont = None
         m = _CHECK_RX.match(s)
+        if m and m.group(2).upper() in _NONCHECK_BLOCKS:
+            # VERBATIM / Tcl control block: never a check - the
+            # sfa14 scan grew phantom checks named "if"/"VARBATIM"
+            # whose "bodies" ate the rest of the deck
+            self.d.stats["verbatim"] += 1
+            rest = m.group(3)
+            self.verbatim_depth = max(
+                1 + rest.count("{") - rest.count("}"), 0)
+            self._cont = None
+            return
         if m and m.group(2).upper() not in IGNORED_HEADS \
                 and not _ASSIGN_RX.match(s):
             name = m.group(2)
@@ -623,6 +691,11 @@ def parse_deck(path, defines=None, include_dirs=(), scan_all=False):
     if p.cur is not None:
         deck.warnings.append("unterminated check block %s"
                              % p.cur.name)
+    if deck.verbatim_includes and not scan_all:
+        deck.warnings.append(
+            "%d INCLUDE(s) inside VERBATIM/Tcl blocks were NOT "
+            "followed (Tcl-conditional; --scan follows them)"
+            % len(deck.verbatim_includes))
     deck.resolve()
     return deck
 
@@ -659,6 +732,16 @@ def format_scan(deck):
              % (dm, cm, "  << macros in use: expansion is NOT "
                 "implemented, metadata will be incomplete"
                 if cm else ""))
+    if d.stats["verbatim"] or d.verbatim_includes:
+        L.append("  VERBATIM/Tcl blocks %d; INCLUDEs inside %d "
+                 "(--scan follows them, the normal parse skips)"
+                 % (d.stats["verbatim"],
+                    len(d.verbatim_includes)))
+        for t in d.verbatim_includes[:10]:
+            L.append("    verbatim include %s" % t)
+        if len(d.verbatim_includes) > 10:
+            L.append("    ... %d more"
+                     % (len(d.verbatim_includes) - 10))
     unk = d.unknown.most_common(20)
     L.append("  skipped statements %d%s"
              % (d.stats["unknown"] + d.stats["unknown_in_block"],
