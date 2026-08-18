@@ -2383,9 +2383,14 @@ class Viewer:
     def _clamp_view(self):
         """Zooms and pans never lose the die: spp is capped at
         FIT_ZOOM_OUT x the fit-view scale and the viewport stays
-        inside the die bbox (centered on an axis the viewport is
-        wider than - so beyond fit the die is simply centered)."""
-        bb = self.meta["bbox"]
+        inside the die bbox grown by a 10% outer margin per side
+        (user call 2026-08-18: pinned to the exact die edge there
+        was no room to band-zoom around edge features). Centered
+        on an axis the viewport is wider than."""
+        db = self.meta["bbox"]
+        mx = (db[2] - db[0]) * 0.10
+        my = (db[3] - db[1]) * 0.10
+        bb = (db[0] - mx, db[1] - my, db[2] + mx, db[3] + my)
         self.spp = min(max(self.spp, MIN_SPP),
                        self._fit_spp() * FIT_ZOOM_OUT)
         w, h = self._viewport_size()
