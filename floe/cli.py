@@ -368,7 +368,8 @@ def cmd_svrf(args):
             defines[name] = val or None
     deck = svrf.parse_deck(args.deck, defines, args.include_dir,
                            scan_all=args.scan,
-                           follow_verbatim=args.follow_verbatim)
+                           follow_verbatim=args.follow_verbatim,
+                           env_switches=not args.no_env_switches)
     if args.scan:
         print(svrf.format_scan(deck))
         return
@@ -690,6 +691,14 @@ def main(argv=None):
                         "blocks in the normal parse too (hybrid "
                         "decks select layer stacks via Tcl; --scan "
                         "always follows them)")
+    p.add_argument("--no-env-switches", action="store_true",
+                   help="do NOT fall back to environment variables "
+                        "for #IFDEF switches. Default: names the "
+                        "deck tests are looked up in the "
+                        "environment when not -D'd (sourceme "
+                        "workflow: `source sourceme.* && floe svrf "
+                        "...`); used ones are reported and stored "
+                        "in the sidecar for provenance")
     p.set_defaults(fn=cmd_svrf)
 
     p = sub.add_parser("gtktest", help="minimal pixbuf display test "

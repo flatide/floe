@@ -209,7 +209,13 @@ ovm 헤더와 meta.src 모두 소스 절대경로/size/mtime을 기록. `Vfs::op
   줄 `//` 주석 제거, 따옴표 값 · `#DEFINE` 값 치환 · VARIABLE 수치
   해석 — **실런과 동일한 -D 세트 필수**, 아니면 체크 목록이
   달라진다; --scan이 스위치별 검사된 값 후보를 `NAME(v1|v2)`로
-  보고), `LAYER`/
+  보고. **환경 폴백**(2026-08-18): 덱이 검사하는 스위치 이름은
+  -D에 없으면 os.environ을 **지연 조회**(sourceme 워크플로 —
+  `source sourceme.* && floe svrf ...`; 전체 env 벌크 임포트
+  아님, -D 우선, 히트는 defines로 승격되어 값 치환까지 동작).
+  사용된 이름은 scan 리포트와 사이드카 stats.env_switches에
+  provenance로 기록, `--no-env-switches`로 비활성),
+  `LAYER`/
   `LAYER MAP`, 할당문, 체크 블록(`@` 설명 + 측정문 INTERNAL/INT·
   EXTERNAL/EXT·ENCLOSURE/ENC·AREA·DENSITY·LENGTH·ANGLE·PERIMETER·
   VERTEX에서 (metric, op, value) 추출).

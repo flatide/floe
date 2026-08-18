@@ -247,6 +247,48 @@ def r1(tmp):
           "NEST2" in dv2f.layers
           and not any("NOT followed" in x for x in dv2f.warnings),
           str((sorted(dv2f.layers), dv2f.warnings)))
+    # environment-sourced switches (sourceme workflow): names the
+    # deck TESTS fall back to os.environ lazily; -D wins; a hit is
+    # promoted (value substitution) and recorded for provenance
+    ev = os.path.join(tmp, "envsw.svrf")
+    w(ev,
+      "#IFDEF FLOE_SW_A\nLAYER EA 21\n#ENDIF\n"
+      "#IFDEF FLOE_SW_B 6LM\nLAYER EB 22\n#ENDIF\n"
+      "#IFDEF FLOE_SW_B 7LM\nLAYER EB7 23\n#ENDIF\n"
+      "#IFNDEF FLOE_SW_W\n#DEFINE FLOE_SW_W 0.05\n#ENDIF\n"
+      "E.RULE { @ e\n  INT EA < FLOE_SW_W\n}\n")
+    os.environ["FLOE_SW_A"] = ""
+    os.environ["FLOE_SW_B"] = "6LM"
+    os.environ["FLOE_SW_W"] = "0.077"
+    try:
+        de = svrf.parse_deck(ev)
+        de2 = svrf.parse_deck(ev, {"FLOE_SW_B": "7LM"})
+        de3 = svrf.parse_deck(ev, env_switches=False)
+    finally:
+        for k in ("FLOE_SW_A", "FLOE_SW_B", "FLOE_SW_W"):
+            del os.environ[k]
+    check("env satisfies one-arg and two-arg #IFDEF",
+          "EA" in de.layers and "EB" in de.layers
+          and "EB7" not in de.layers, str(sorted(de.layers)))
+    check("env value substitutes via the #IFNDEF-guard pattern",
+          de.checks["E.RULE"].constraints[0]["value"] == 0.077,
+          str(de.checks["E.RULE"].constraints))
+    check("-D beats the environment",
+          "EB7" in de2.layers and "EB" not in de2.layers,
+          str(sorted(de2.layers)))
+    check("env_switches=False disables the fallback",
+          "EA" not in de3.layers
+          and de3.checks["E.RULE"].constraints[0]["value"] == 0.05,
+          str((sorted(de3.layers),
+               de3.checks["E.RULE"].constraints)))
+    check("env provenance recorded in scan + json",
+          set(de.env_used) == {"FLOE_SW_A", "FLOE_SW_B",
+                               "FLOE_SW_W"}
+          and "satisfied from the environment"
+          in svrf.format_scan(de)
+          and de.to_json()["stats"]["env_switches"]
+          .get("FLOE_SW_B") == "6LM",
+          str(de.env_used))
 
 
 def r2(tmp):

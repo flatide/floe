@@ -25,7 +25,11 @@ gate optional rules on switches: pass the same -D set as the
 Calibre run or the check list will differ. #IFDEF/#IFNDEF support
 the two-arg value form (`#IFDEF STACK 6LM` = defined AND equal),
 directive lines strip // comments, values may be quoted, and
-INCLUDE paths expand $VAR/${VAR}/~ from the environment.
+INCLUDE paths expand $VAR/${VAR}/~ from the environment. Switch
+names the deck tests also FALL BACK to the environment (sourceme
+workflow: `source sourceme.* && floe svrf ...` - lazy per-name
+lookup, never a bulk env import; -D wins; used names are reported
+and stored in the sidecar; --no-env-switches disables).
 """
 
 import json
@@ -126,6 +130,9 @@ class Deck(object):
                                       # candidates --scan reports)
         self.verbatim_includes = []   # INCLUDE targets seen inside
                                       # VERBATIM/Tcl blocks
+        self.env_used = OrderedDict()  # switches satisfied from the
+                                       # ENVIRONMENT (sourceme
+                                       # workflow) - provenance
         self.meas_hist = Counter()
 
     # -- resolution ---------------------------------------------------
@@ -191,6 +198,7 @@ class Deck(object):
                           "skipped": self.stats["unknown"],
                           "cmacro_calls": self.stats["cmacro"],
                           "includes": self.includes,
+                          "env_switches": dict(self.env_used),
                           "warnings": self.warnings}}
 
 
@@ -227,6 +235,9 @@ class _Parser(object):
                                       # conditional includes too
                                       # (--follow-verbatim; layers
                                       # picked via Tcl need it)
+        self.env_switches = True   # #IFDEF falls back to the
+                                   # ENVIRONMENT for names the deck
+                                   # tests (sourceme workflow)
         self._cont = None          # [check, metric, text, had_bound]
                                    # of the last measurement - a
                                    # comparator-leading next line
@@ -244,6 +255,27 @@ class _Parser(object):
 
     def active(self):
         return all(self.cond)
+
+    def _switch_val(self, name):
+        """(defined, value) of a preprocessor switch: -D / #DEFINE
+        first, then the ENVIRONMENT - the in-house flow exports
+        every deck switch via `source sourceme.*` (user call
+        2026-08-18), so names the deck TESTS are looked up lazily
+        in os.environ (never a bulk import - unrelated env vars
+        cannot leak in). A hit is promoted into defines (value
+        substitution + provenance in env_used); -D still wins."""
+        if name in self.d.defines:
+            return True, self.d.defines[name]
+        if self.env_switches:
+            key = name[1:] if name.startswith("$") else name
+            if key in os.environ:
+                v = os.environ[key]
+                self.d.env_used[name] = v
+                if not name.startswith("$"):
+                    self.d.defines[name] = v or None
+                    self._rebuild_sub()
+                return True, (v or None)
+        return False, None
 
     def _rebuild_sub(self):
         vals = {n: v for n, v in self.d.defines.items() if v}
@@ -290,10 +322,10 @@ class _Parser(object):
                 vals = self.d.switch_values.setdefault(name, [])
                 if want not in vals:
                     vals.append(want)
-                cur = self.d.defines.get(name)
-                on = cur is not None and str(cur) == want
+                ok, cur = self._switch_val(name)
+                on = ok and cur is not None and str(cur) == want
             else:
-                on = name in self.d.defines
+                on = self._switch_val(name)[0]
             if head == "#IFNDEF":
                 on = not on
             self.cond.append(on or self.scan_all)
@@ -754,11 +786,12 @@ class _Parser(object):
 
 
 def parse_deck(path, defines=None, include_dirs=(), scan_all=False,
-               follow_verbatim=False):
+               follow_verbatim=False, env_switches=True):
     deck = Deck(path)
     deck.defines.update(defines or {})
     p = _Parser(deck, scan_all)
     p.follow_verbatim = follow_verbatim
+    p.env_switches = env_switches
     if deck.defines:
         p._rebuild_sub()
     p.feed_file(path, list(include_dirs), frozenset())
@@ -793,6 +826,11 @@ def format_scan(deck):
         sw.append("%s(%s)" % (name, "|".join(vals))
                   if vals else name)
     L.append("  switches (#IFDEF): %s" % (", ".join(sw) or "-"))
+    if d.env_used:
+        L.append("  switches satisfied from the environment: %s"
+                 % ", ".join(
+                     "%s=%s" % (n, v) if v else n
+                     for n, v in d.env_used.items()))
     L.append("  defines in effect: %s"
              % (", ".join(sorted(d.defines)) or "-"))
     L.append("  layers %d, layer maps %d, variables %d"
