@@ -5246,6 +5246,15 @@ class Viewer:
                 self._drc_grid_fill(self._drc_grid_ci)
         elif self._drc_lyr_saved is not None:
             self._drc_restore_layers()
+            # restoring isolation ALSO ends the jump (user call
+            # 2026-08-18): mark and auto CD rulers go in the same
+            # Esc; _drc_pos stays so click-mode n/p continues from
+            # the same error
+            self.drc_mark = None
+            for r in self._drc_ruler:
+                if r in self.rulers:
+                    self.rulers.remove(r)
+            self._drc_ruler = []
         elif self.drc_mark is not None or self._drc_focus is not None:
             self.drc_mark = None
             self._drc_focus = None
