@@ -83,7 +83,8 @@ IGNORED_HEADS = {"PRECISION", "RESOLUTION", "TITLE", "DRC", "LAYOUT",
                  "UNIT", "FLAG", "GROUP", "PORT", "EXCLUDE",
                  "CAPACITANCE", "RESISTANCE", "DEVICE", "TRACE",
                  "SVRF", "PUSHDOWN", "POLYGON", "FILTER",
-                 "DFM", "RDB", "DVPARAMS", "OFFGRID"}
+                 "DFM", "RDB", "DVPARAMS", "OFFGRID",
+                 "NET", "FLATTEN"}
 
 # `NAME { ... }` blocks that are NOT rule checks: hybrid decks wrap
 # Tcl in VERBATIM blocks (sfa14 field scan 2026-08-18 - the body
@@ -231,6 +232,10 @@ class _Parser(object):
         self.macro_pending = False  # DMACRO header seen, body { on
                                     # a LATER line (real-deck style)
         self.verbatim_depth = 0    # >0: inside a VERBATIM/Tcl block
+        self.in_comment = False    # inside a /* ... */ banner
+        self._icont = False        # last statement was IGNORED: its
+                                   # wrapped continuation lines are
+                                   # classified quietly too
         self.follow_verbatim = False  # normal parse follows Tcl-
                                       # conditional includes too
                                       # (--follow-verbatim; layers
@@ -360,6 +365,27 @@ class _Parser(object):
                 s = line.strip()
                 if not s:
                     continue
+                # /* ... */ block comments (real decks carry banner
+                # blocks whose doc lines leaked into the unknown
+                # histogram as arbitrary heads)
+                if self.in_comment:
+                    j = s.find("*/")
+                    if j < 0:
+                        continue
+                    s = s[j + 2:].strip()
+                    self.in_comment = False
+                    if not s:
+                        continue
+                while not s.startswith("@") and "/*" in s:
+                    i = s.find("/*")
+                    j = s.find("*/", i + 2)
+                    if j < 0:
+                        s = s[:i].rstrip()
+                        self.in_comment = True
+                        break
+                    s = (s[:i] + " " + s[j + 2:]).strip()
+                if not s:
+                    continue
                 if s.startswith("#"):
                     self.directive(s)
                     continue
@@ -456,6 +482,11 @@ class _Parser(object):
                 "unclosed VERBATIM/Tcl block at end of %s (brace "
                 "drift?)" % os.path.basename(path))
             self.verbatim_depth = 0
+        if self.in_comment:
+            self.d.warnings.append(
+                "unclosed /* comment at end of %s"
+                % os.path.basename(path))
+            self.in_comment = False
         if self.cond and not chain:
             self.d.warnings.append("unbalanced #IFDEF at end of deck")
 
@@ -531,6 +562,7 @@ class _Parser(object):
             self.d.checks[name] = self.cur
             self.depth = 1
             self._acont = None
+            self._icont = False
             rest = m.group(3).strip()
             if rest:
                 self.block_line(rest)
@@ -538,14 +570,17 @@ class _Parser(object):
         head = s.split(None, 1)[0].upper()
         if head == "LAYER":
             self._acont = None
+            self._icont = False
             self.layer_stmt(s)
         elif head == "VARIABLE":
             self._acont = None
+            self._icont = False
             self.variable_stmt(s)
         elif head == "DMACRO":
             # macros are NOT expanded (scope call: --scan reports
             # usage); the body is skipped by brace depth
             self._acont = None
+            self._icont = False
             self.d.stats["dmacro"] += 1
             d = s.count("{") - s.count("}")
             if "{" in s:
@@ -562,14 +597,18 @@ class _Parser(object):
             if am:
                 self.assign(am.group(1), am.group(2), None)
             elif self._try_acont(s):
-                pass
+                self._icont = False
             elif head in IGNORED_HEADS:
                 self._acont = None
+                self._icont = True
                 self.d.stats["ignored"] += 1
             elif head[:1] in "[~(":
                 # DFM property math / expression continuations
                 self._acont = None
                 self.d.stats["prop_expr"] += 1
+            elif self._icont:
+                # wrapped continuation of an ignored statement
+                self.d.stats["ignored"] += 1
             else:
                 self._acont = None
                 self.d.stats["unknown"] += 1
@@ -610,19 +649,39 @@ class _Parser(object):
                     head = s.split(None, 1)[0].upper()
                     if head in MEAS:
                         self._acont = None
+                        self._icont = False
                         self.measurement(s, self.cur)
                     elif self._try_acont(s):
-                        pass
+                        self._icont = False
+                    elif self._cont is not None \
+                            and head in KEYWORDS:
+                        # operator-leading wrap of the previous
+                        # measurement (NOT/WITH/ENCLOSE...): its
+                        # operands join the check (source closure);
+                        # a comparator line may still follow and
+                        # lands via _try_cont
+                        ck = self._cont[0]
+                        if ck is not None:
+                            for n in rhs_operands(s):
+                                if n not in ck.layers:
+                                    ck.layers.append(n)
+                        self._icont = False
                     elif head in IGNORED_HEADS:
                         # DFM RDB / spec statements inside checks
                         self._cont = None
                         self._acont = None
+                        self._icont = True
                         self.d.stats["ignored"] += 1
                     elif head[:1] in "[~(":
                         # DFM property math wraps ([expr], ~(..))
                         self._cont = None
                         self._acont = None
                         self.d.stats["prop_expr"] += 1
+                    elif self._icont:
+                        # wrapped continuation of an ignored
+                        # statement (DFM RDB argument lists etc.)
+                        self._cont = None
+                        self.d.stats["ignored"] += 1
                     else:
                         self._cont = None
                         self._acont = None
@@ -687,6 +746,7 @@ class _Parser(object):
                 for n in names:
                     if n not in check.layers:
                         check.layers.append(n)
+            self._icont = False
             # the rhs may wrap onto following lines (sfa14 field
             # scan: ~1.5k NOT/WITH/layer-name-leading wraps)
             toks = rhs.split()

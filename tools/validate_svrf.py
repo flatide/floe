@@ -386,9 +386,10 @@ def r3(tmp):
       "  INT M1 >= 0.05 <= 0.10\n"
       "  EXT M1 M2 <0.03 ABUT<90 SINGULAR REGION\n"
       "  bad = ENC M1 M2 < 0.02\n"
-      "  DFM PROPERTY M1 whatever\n"
       "  FROBNICATE M1 x\n"
-      "}\n")
+      "  DFM PROPERTY M1 whatever\n"
+      "}\n")   # FROBNICATE before DFM: after an ignored head the
+               # next unrecognized line counts as its continuation
     d = svrf.parse_deck(p)
     check("quoted check name", "Q.RULE.1" in d.checks,
           str(list(d.checks)))
@@ -458,6 +459,46 @@ def r3b(tmp):
           d.checks["X.1"].constraints == []
           and len(d.checks["Z.1"].constraints) == 1
           and d.stats["meas_no_bound"] == 1)
+    # /* */ banners, measurement operator-wraps, ignored-statement
+    # continuations (sfa14 re-scan 2026-08-18)
+    p = os.path.join(tmp, "wrap2.svrf")
+    w(p,
+      "/**********************************\n"
+      " * D_DOC_LINE : looks like a head *\n"
+      " CHK_DOC also a fake head\n"
+      " **********************************/\n"
+      "LAYER m1 1 /* inline comment */\n"
+      "LAYER m2 2\n"
+      "W.1 { @ w\n"
+      "  EXT m1 m2\n"
+      "    NOT m1\n"
+      "    < 0.05\n"
+      "  DFM RDB ONLY out.rdb\n"
+      "    D_ARGWRAP more args\n"
+      "}\n"
+      "NET AREA RATIO m1 m2 > 400\n"
+      "FLATTEN\n")
+    d = svrf.parse_deck(p)
+    c = d.checks["W.1"]
+    check("/* */ banner and inline comments stripped",
+          not d.unknown and "m1" in d.layers,
+          str((dict(d.unknown), sorted(d.layers))))
+    check("operator-wrapped measurement keeps its operands",
+          c.layers == ["m1", "m2"], str(c.layers))
+    check("comparator after an operator-wrap line still binds",
+          [(x["op"], x["value"]) for x in c.constraints]
+          == [("<", 0.05)], str(c.constraints))
+    check("ignored-statement continuation classified quietly",
+          d.stats["unknown_in_block"] == 0, str(dict(d.unknown)))
+    check("NET/FLATTEN ignored", d.stats["unknown"] == 0,
+          str(dict(d.unknown)))
+    p = os.path.join(tmp, "opencmt.svrf")
+    w(p, "LAYER m1 1\n/* never closed\nLAYER m2 2\n")
+    d = svrf.parse_deck(p)
+    check("unclosed /* comment warned, prior layers kept",
+          "m1" in d.layers and "m2" not in d.layers
+          and any("unclosed /*" in x for x in d.warnings),
+          str((sorted(d.layers), d.warnings)))
 
 
 def r4(tmp):
