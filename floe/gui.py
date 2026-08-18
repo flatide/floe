@@ -4986,7 +4986,22 @@ class Viewer:
             return
         if win is not None:
             self._drc_goto_cell(ci, ei)
-        self._drc_jump(ci, ei)
+        if self.drc_mark is not None:
+            # an error is designated (double-click/pick jump is
+            # live): n/p keeps the full framing jump + CD rulers
+            self._drc_jump(ci, ei)
+            return
+        # Esc-restored (or never jumped): n/p acts like a plain
+        # click on the grid number - cell mark (goto_cell above),
+        # detail, focus - the VIEW does not move (user call
+        # 2026-08-18); position still advances for the next step
+        e = db.checks[ci].errors[ei]
+        self._drc_pos = lo + ei
+        self._drc_focus = (ci, ei, e.kind,
+                           [(x / self.dbu, y / self.dbu)
+                            for x, y in e.pts])
+        self._drc_show_detail(ci, ei)
+        self._display()
 
     def _drc_step_ei(self, db, ci, base, cur, delta):
         """Next/previous ei within the visible list, wrapping."""
