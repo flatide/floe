@@ -2465,6 +2465,28 @@ class Viewer:
     def _on_press(self, _w, ev):
         if self._pending is not None:
             return True  # render in flight: mouse input waits
+        if ev.type == Gdk.EventType.DOUBLE_BUTTON_PRESS \
+                and ev.button == 1 \
+                and self.mode not in ("ruler", "esel") \
+                and self._drc is not None \
+                and not (ev.state & (Gdk.ModifierType.CONTROL_MASK
+                                     | Gdk.ModifierType.SHIFT_MASK)):
+            # canvas double-click ON a marker = grid-number double-
+            # click (full jump). Checked BEFORE the drag guard: the
+            # paired single press has already re-armed a pan drag,
+            # which used to swallow the double event - disarm it.
+            hit = self._drc_hit_at(ev.x, ev.y)
+            if hit is not None:
+                self._drag = None
+                self._drag_origin = None
+                self._drag_moved = False
+                self._drag_btn = None
+                self._set_cursor(self._idle_cursor())
+                ci, ei = hit
+                if self._drcwin is not None:
+                    self._drc_goto_cell(ci, ei)
+                self._drc_jump(ci, ei, isolate=True)
+                return True
         if self._drag is not None or self._zoomdrag is not None:
             # one gesture at a time: a second button pressed mid-pan
             # must not clobber the drag state (spurious pick on
@@ -5316,13 +5338,19 @@ class Viewer:
         return best
 
     def _drc_pick(self, ci, ei):
-        """Canvas marker pick = the same action as double-clicking
-        the error's grid number (user call 2026-08-18, revised):
-        full jump - framing goto, CD rulers, layer isolation - and
-        the grid page follows."""
+        """Canvas marker SINGLE click = plain grid-number click
+        (user call 2026-08-18, rev 2): select the error - grid
+        cell, focus, detail - the view does not move. The full
+        jump lives on the canvas DOUBLE click (_on_press)."""
+        db = self._drc
+        e = db.checks[ci].errors[ei]
         if self._drcwin is not None:
             self._drc_goto_cell(ci, ei)
-        self._drc_jump(ci, ei, isolate=True)
+        self._drc_focus = (ci, ei, e.kind,
+                           [(x / self.dbu, y / self.dbu)
+                            for x, y in e.pts])
+        self._drc_show_detail(ci, ei)
+        self._display()
 
     def _pick_click(self, ev):
         self._update_cursor(ev)
