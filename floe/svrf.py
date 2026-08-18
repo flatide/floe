@@ -290,8 +290,14 @@ class _Parser(object):
                         self.d.includes.append(inc)
                         self.feed_file(inc, incdirs, chain | {real})
                     else:
-                        self.d.warnings.append(
-                            "INCLUDE not found: %s" % tgt)
+                        exp = os.path.expanduser(
+                            os.path.expandvars(tgt))
+                        msg = "INCLUDE not found: %s" % tgt
+                        if exp != tgt:
+                            msg += " -> %s" % exp
+                        if "$" in exp:
+                            msg += " (env var unset in this shell?)"
+                        self.d.warnings.append(msg)
                     continue
                 self.statement(s)
         if self.cond and not chain:
@@ -301,6 +307,11 @@ class _Parser(object):
     def _find_include(tgt, src, incdirs):
         if not tgt:
             return None
+        # Calibre expands $VAR / ${VAR} (and ~) in INCLUDE paths -
+        # real decks do `INCLUDE $TECHDIR/DRC/...`. Mirror it from
+        # this process's environment; an unset var keeps the
+        # literal text and the caller's warning flags it.
+        tgt = os.path.expanduser(os.path.expandvars(tgt))
         cands = [tgt] if os.path.isabs(tgt) else \
             [os.path.join(os.path.dirname(src), tgt)] + \
             [os.path.join(d, tgt) for d in incdirs]

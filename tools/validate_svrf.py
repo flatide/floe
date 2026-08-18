@@ -92,6 +92,26 @@ def r1(tmp):
     d2 = svrf.parse_deck(main, scan_all=True)
     check("--scan walks both #IFDEF branches",
           {"OPT.RULE", "BASE.RULE"} <= set(d2.checks))
+    # env vars in INCLUDE paths (real decks: $TECHDIR/DRC/...)
+    envmain = os.path.join(tmp, "envmain.svrf")
+    w(envmain,
+      "LAYER M2 32\n"
+      "INCLUDE $FLOE_SVRF_T/inc/sub.svrf\n"
+      "INCLUDE ${FLOE_SVRF_T}/inc/sub.svrf\n"
+      "INCLUDE $FLOE_SVRF_UNSET/x.svrf\n")
+    os.environ["FLOE_SVRF_T"] = tmp
+    try:
+        d3 = svrf.parse_deck(envmain)
+    finally:
+        del os.environ["FLOE_SVRF_T"]
+    check("INCLUDE $VAR expanded from the environment",
+          "SUB" in d3.layers, str(sorted(d3.layers)))
+    check("INCLUDE ${VAR} form expanded too",
+          not any("FLOE_SVRF_T" in x for x in d3.warnings),
+          str(d3.warnings))
+    check("unset env var: warned with a hint, not crashed",
+          any("FLOE_SVRF_UNSET" in x and "env var unset" in x
+              for x in d3.warnings), str(d3.warnings))
 
 
 def r2(tmp):
