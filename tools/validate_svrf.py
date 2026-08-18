@@ -153,6 +153,54 @@ def r1(tmp):
     check("unclosed DMACRO body flagged at end of file",
           any("unclosed DMACRO" in x for x in d5.warnings),
           str(d5.warnings))
+    # directive precision (field 2026-08-18): two-arg value tests,
+    # comments on directive lines, quoted values, #UNDEFINE
+    dv = os.path.join(tmp, "dvals.svrf")
+    w(dv,
+      "#DEFINE STACK 6LM // metal stack\n"
+      "#DEFINE REV \"A0\"\n"
+      "#DEFINE WMIN2 0.061 // um\n"
+      "#IFDEF STACK 6LM\nLAYER SIX 61\n#ENDIF\n"
+      "#IFDEF STACK 7LM\nLAYER SEVEN 71\n#ENDIF\n"
+      "#IFNDEF STACK 7LM\nLAYER NOT7 72\n#ENDIF\n"
+      "#IFDEF REV A0\nLAYER REVA 73\n#ENDIF\n"
+      "CMT.RULE { @ c\n  INT NOT7 < WMIN2\n}\n"
+      "#UNDEFINE STACK\n"
+      "#IFDEF STACK\nLAYER GONE 74\n#ENDIF\n")
+    d6 = svrf.parse_deck(dv)
+    check("two-arg #IFDEF: matching value taken",
+          "SIX" in d6.layers, str(sorted(d6.layers)))
+    check("two-arg #IFDEF: other value skipped",
+          "SEVEN" not in d6.layers, str(sorted(d6.layers)))
+    check("two-arg #IFNDEF: other value taken",
+          "NOT7" in d6.layers, str(sorted(d6.layers)))
+    check("quoted define value matches a bare test literal",
+          "REVA" in d6.layers and d6.defines.get("REV") == "A0",
+          str((sorted(d6.layers), d6.defines)))
+    check("directive-line comment not glued into the value",
+          d6.checks["CMT.RULE"].constraints[0]["value"] == 0.061,
+          str(d6.checks["CMT.RULE"].constraints))
+    check("#UNDEFINE removes the switch",
+          "GONE" not in d6.layers, str(sorted(d6.layers)))
+    dv2 = os.path.join(tmp, "dvals2.svrf")
+    w(dv2,
+      "#IFDEF STACK 7LM\nLAYER SEVEN 71\n"
+      "#ELSE\nLAYER OTHER 79\n#ENDIF\n")
+    d7 = svrf.parse_deck(dv2, {"STACK": "7LM"})
+    check("-D NAME=VAL satisfies a two-arg test",
+          "SEVEN" in d7.layers and "OTHER" not in d7.layers,
+          str(sorted(d7.layers)))
+    d8 = svrf.parse_deck(dv2, {"STACK": "6LM"})
+    check("-D other value takes #ELSE",
+          "OTHER" in d8.layers and "SEVEN" not in d8.layers,
+          str(sorted(d8.layers)))
+    d9 = svrf.parse_deck(dv2, scan_all=True)
+    check("--scan records tested switch values",
+          d9.switch_values.get("STACK") == ["7LM"],
+          str(d9.switch_values))
+    check("scan report lists the -D candidates",
+          "STACK(7LM)" in svrf.format_scan(d9),
+          svrf.format_scan(d9))
 
 
 def r2(tmp):

@@ -194,9 +194,13 @@ ovm 헤더와 meta.src 모두 소스 절대경로/size/mtime을 기록. `Vfs::op
   derivation(`name = expr`)은 우변의 **피연산자 이름만** 방향
   그래프 엣지로 넣고(연산자 전부 무시), 체크의 `source_gds`는 이
   그래프를 LAYER/LAYER MAP 테이블까지 폐쇄(전이)해서 얻는다.
-- 파싱 대상: 전처리(INCLUDE 병합·`#DEFINE`/`#IFDEF`/`#IFNDEF`/
-  `#ELSE`/`#ENDIF`·`#DEFINE` 값 치환·VARIABLE 수치 해석 — **실런과
-  동일한 -D 세트 필수**, 아니면 체크 목록이 달라진다), `LAYER`/
+- 파싱 대상: 전처리(INCLUDE 병합 — 경로 `$VAR`/`${VAR}`/`~` 환경
+  확장 · `#DEFINE`/`#UNDEFINE`/`#IFDEF`/`#IFNDEF`/`#ELSE`/`#ENDIF`
+  — **2-인자 값 검사** `#IFDEF STACK 6LM` = 정의됨∧값일치, 지시자
+  줄 `//` 주석 제거, 따옴표 값 · `#DEFINE` 값 치환 · VARIABLE 수치
+  해석 — **실런과 동일한 -D 세트 필수**, 아니면 체크 목록이
+  달라진다; --scan이 스위치별 검사된 값 후보를 `NAME(v1|v2)`로
+  보고), `LAYER`/
   `LAYER MAP`, 할당문, 체크 블록(`@` 설명 + 측정문 INTERNAL/INT·
   EXTERNAL/EXT·ENCLOSURE/ENC·AREA·DENSITY·LENGTH·ANGLE·PERIMETER·
   VERTEX에서 (metric, op, value) 추출).

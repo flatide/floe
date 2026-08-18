@@ -19,9 +19,13 @@ into a histogram and skipped, never fatal. Known gaps, deliberate:
     generates from them, never the Tcl itself.
   - Statements are line-oriented; a derivation wrapped across lines
     is dropped into the unknown histogram, not mis-parsed.
-Preprocessing (INCLUDE / #DEFINE / #IFDEF / VARIABLE) IS implemented
-because in-house decks gate optional rules on switches: pass the
-same -D set as the Calibre run or the check list will differ.
+Preprocessing (INCLUDE / #DEFINE / #UNDEFINE / #IFDEF / #IFNDEF /
+#ELSE / #ENDIF / VARIABLE) IS implemented because in-house decks
+gate optional rules on switches: pass the same -D set as the
+Calibre run or the check list will differ. #IFDEF/#IFNDEF support
+the two-arg value form (`#IFDEF STACK 6LM` = defined AND equal),
+directive lines strip // comments, values may be quoted, and
+INCLUDE paths expand $VAR/${VAR}/~ from the environment.
 """
 
 import json
@@ -107,6 +111,9 @@ class Deck(object):
         self.stats = Counter()
         self.unknown = Counter()      # first token of skipped lines
         self.switches = []            # #IFDEF names, in order seen
+        self.switch_values = {}       # name -> values tested by the
+                                      # two-arg #IFDEF form (the -D
+                                      # candidates --scan reports)
         self.meas_hist = Counter()
 
     # -- resolution ---------------------------------------------------
@@ -225,16 +232,45 @@ class _Parser(object):
             if vals else None)
 
     def directive(self, s):
+        # comments ride on directive lines too: `#DEFINE W 5 // um`
+        # must not glue the comment into the stored value (it broke
+        # both value tests and numeric substitution)
+        s = s.split("//", 1)[0].strip()
+        if not s:
+            return
         tok = s.split()
         head = tok[0].upper()
+
+        def unq(t):
+            if len(t) >= 2 and t[0] in "\"'" and t[-1] == t[0]:
+                return t[1:-1]
+            return t
+
         if head == "#DEFINE" and len(tok) >= 2:
             if self.active() or self.scan_all:
-                self.d.defines[tok[1]] = (" ".join(tok[2:]) or None)
+                val = unq(" ".join(tok[2:]))
+                self.d.defines[tok[1]] = val or None
+                self._rebuild_sub()
+        elif head == "#UNDEFINE" and len(tok) >= 2:
+            if self.active() or self.scan_all:
+                self.d.defines.pop(tok[1], None)
                 self._rebuild_sub()
         elif head in ("#IFDEF", "#IFNDEF") and len(tok) >= 2:
-            if tok[1] not in self.d.switches:
-                self.d.switches.append(tok[1])
-            on = tok[1] in self.d.defines
+            name = tok[1]
+            if name not in self.d.switches:
+                self.d.switches.append(name)
+            if len(tok) >= 3:
+                # Calibre two-arg form: true iff NAME is defined
+                # AND its value equals the literal (real configs
+                # branch stacks/options this way)
+                want = unq(" ".join(tok[2:]))
+                vals = self.d.switch_values.setdefault(name, [])
+                if want not in vals:
+                    vals.append(want)
+                cur = self.d.defines.get(name)
+                on = cur is not None and str(cur) == want
+            else:
+                on = name in self.d.defines
             if head == "#IFNDEF":
                 on = not on
             self.cond.append(on or self.scan_all)
@@ -602,8 +638,12 @@ def format_scan(deck):
         L.append("    include %s" % inc)
     if len(d.includes) > 20:
         L.append("    ... %d more" % (len(d.includes) - 20))
-    L.append("  switches (#IFDEF): %s"
-             % (", ".join(d.switches) or "-"))
+    sw = []
+    for name in d.switches:
+        vals = d.switch_values.get(name)
+        sw.append("%s(%s)" % (name, "|".join(vals))
+                  if vals else name)
+    L.append("  switches (#IFDEF): %s" % (", ".join(sw) or "-"))
     L.append("  defines in effect: %s"
              % (", ".join(sorted(d.defines)) or "-"))
     L.append("  layers %d, layer maps %d, variables %d"
