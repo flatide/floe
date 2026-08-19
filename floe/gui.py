@@ -2764,6 +2764,8 @@ class Viewer:
             self.fit()                          # zoom all
         elif ctrl and name == "period":
             self._goto_dialog()                 # Ctrl+.
+        elif ctrl and name in ("c", "C"):
+            self._copy_view()                   # view -> clipboard
         elif name == "f":
             self._set_frames(not self.frames_on)
         elif name in ("Left", "Right", "Up", "Down"):
@@ -5264,6 +5266,23 @@ class Viewer:
             self.drc_mark = None
             self._drc_focus = None
         self._display()
+
+    def _copy_view(self):
+        """Ctrl+C (user call 2026-08-19): copy the CURRENT composed
+        frame - exactly what is on screen, overlays and markers
+        included - to the clipboard as an image."""
+        pb = self.image.get_pixbuf()
+        if pb is None:
+            self._set_live_status("nothing to copy yet")
+            return
+        cb = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+        cb.set_image(pb)
+        # best effort: persists past window close only where a
+        # clipboard manager is running (plain X drops it)
+        cb.store()
+        self._set_live_status(
+            "view copied to clipboard (%d x %d)"
+            % (pb.get_width(), pb.get_height()))
 
     def _ruler_pop(self):
         """k: delete the most recently created ruler."""

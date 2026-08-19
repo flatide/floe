@@ -12,6 +12,10 @@
 
 ## 2. 렌더 파이프라인 (GUI 쪽)
 
+- **Ctrl+C = 화면 클립보드 복사**(2026-08-19): `_copy_view` —
+  `image.get_pixbuf()`(합성 프레임 그대로: 디자인+오버레이+마커+
+  룰러)를 `Gtk.Clipboard.set_image`로; store()는 클립보드 매니저
+  있을 때만 창 종료 후 지속(플레인 X 한계).
 - `redraw()` → `_clamp_view()`: spp ∈ [MIN_SPP=0.01, fit_spp×FIT_ZOOM_OUT
   (16)]; 팬 한계 = 다이 bbox를 **변당 10% 확장**한 박스(2026-08-18:
   다이 가장자리에 붙박이면 외곽 피처 밴드 줌 드래그 공간이 없음);
