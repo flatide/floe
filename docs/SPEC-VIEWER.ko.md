@@ -27,7 +27,9 @@
 - **Tab = 오버레이 토글**(2026-08-19, flateyes 패리티):
   `overlays_on` — off면 `_draw_overlays`가 조기 종료(룰러·DRC
   마크/마커·선택·스냅 전부 스킵, **줌 밴드만 유지**), `_drc_hits`
-  비움(보이지 않는 마커 pick/툴팁 방지). ISO_Left_Tab 포함.
+  비움(보이지 않는 마커 pick/툴팁 방지), **룰러 거리 칩도 숨김**
+  (`_update_labels` — 칩은 위젯이라 페인트 게이트와 별도, 잔존
+  실사고). ISO_Left_Tab 포함.
 - `redraw()` → `_clamp_view()`: spp ∈ [MIN_SPP=0.01, fit_spp×FIT_ZOOM_OUT
   (16)]; 팬 한계 = 다이 bbox를 **변당 10% 확장**한 박스(2026-08-18:
   다이 가장자리에 붙박이면 외곽 피처 밴드 줌 드래그 공간이 없음);

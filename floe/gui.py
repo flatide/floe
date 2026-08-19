@@ -1973,8 +1973,12 @@ class Viewer:
         line, off shared crossings, never covering another chip,
         leader or line) and each chip ties back to ITS line with a
         dotted leader stamped into the frame."""
-        segs = list(self.rulers)
-        if self.mode == "ruler" and self._ruler_start is not None:
+        # Tab hides overlays: the distance chips are WIDGETS, not
+        # pixbuf paint, so they need their own gate (field report
+        # 2026-08-19: chips survived the toggle)
+        segs = [] if not self.overlays_on else list(self.rulers)
+        if self.overlays_on and self.mode == "ruler" \
+                and self._ruler_start is not None:
             segs.append((*self._ruler_start, *self._ruler_end_preview()))
         w, h = self._viewport_size()
         vis = []
