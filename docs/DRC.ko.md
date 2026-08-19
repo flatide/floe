@@ -46,7 +46,10 @@ python -m floe drc results.db --errs M1.SPACE.1 \
 # 에러 스냅샷 PNG (--drc-err N | A-B | all, 기본 cap 200):
 # 에러가 프레임의 30%(--drc-frac)를 차지하게 정사각 렌더,
 # 도형은 흰 헤일로 + 상태색(red/waived green) 스탬프,
-# 파일당 `로컬# <TAB> 전역# <TAB> 경로` 한 줄 출력
+# 파일당 `로컬# <TAB> 전역# <TAB> 경로` 한 줄 출력.
+# rules.json 사이드카가 발견되면(뷰어와 같은 자동 탐색, 또는
+# --drc-rules 지정) 그 룰의 원천 GDS 레이어만 켜고 렌더 —
+# 뷰어 더블클릭 격리와 동일; --layers 명시가 우선
 python -m floe render chip.oas --drc results.db \
     --drc-rule M1.SPACE.1 --drc-err 1-50 --px 800 --out snap.png
 ```

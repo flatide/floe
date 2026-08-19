@@ -205,6 +205,65 @@ def _stamp_error_png(path, e, bb_um, w, h, waived):
     im.save(path)
 
 
+def _drc_isolate_layers_cli(args, c, d, rule):
+    """SVRF sidecar layer isolation for snapshots (viewer double-
+    click parity): only the rule's source GDS layers stay on.
+    Returns resolved [(l, d), ...] or None = no metadata (render
+    all layers, note on stderr). Sidecar search mirrors the
+    viewer: --drc-rules, deck-basename NEXT TO the db, recorded
+    deck path, <db>.rules.json."""
+    from . import svrf
+    path = args.drc_rules
+    if path is None:
+        deck = None
+        for ch in d.checks[:50]:
+            for ln in (ch.desc or "").split("\n"):
+                if ln.startswith("Rule File Pathname:"):
+                    deck = ln.split(":", 1)[1].strip()
+                    break
+            if deck:
+                break
+        dbdir = os.path.dirname(os.path.abspath(args.drc))
+        cands = []
+        if deck:
+            cands.append(os.path.join(
+                dbdir, os.path.basename(deck) + ".rules.json"))
+            cands.append(deck + ".rules.json")
+        cands.append(args.drc + ".rules.json")
+        path = next((p for p in cands if os.path.isfile(p)), None)
+        if path is None:
+            print("[floe] no rules.json sidecar found - rendering "
+                  "all layers", file=sys.stderr)
+            return None
+    try:
+        meta = svrf.load_rules(path)
+    except (OSError, ValueError) as exc:
+        print("[floe][warn] rules sidecar unusable (%s) - all "
+              "layers" % exc, file=sys.stderr)
+        return None
+    ent = (meta.get("checks") or {}).get(rule) or {}
+    sg = ent.get("source_gds") or []
+    if not sg:
+        print("[floe] rule %r has no svrf layer metadata - all "
+              "layers" % rule, file=sys.stderr)
+        return None
+    sel = []
+    for lay in c.meta["layers"]:
+        for g, dt in sg:
+            if lay["layer"] == g and (dt is None
+                                      or lay["datatype"] == dt):
+                sel.append((lay["layer"], lay["datatype"]))
+                break
+    if not sel:
+        print("[floe][warn] svrf source layers %r not in this "
+              "design - all layers" % sg, file=sys.stderr)
+        return None
+    print("[floe] svrf isolate %s: %s"
+          % (rule, ",".join("%d/%d" % t for t in sel)),
+          file=sys.stderr)
+    return sel
+
+
 def _render_drc_errors(args, c):
     """--drc/--drc-rule: one square PNG per requested error, framed
     so the violation spans --drc-frac of the image, its geometry
@@ -224,7 +283,10 @@ def _render_drc_errors(args, c):
         raise SystemExit("floe: rule %r has no errors"
                          % args.drc_rule)
     dbu = c.meta["dbu"]
-    layers = c.resolve_layers(args.layers)
+    if args.layers is not None:
+        layers = c.resolve_layers(args.layers)  # explicit wins
+    else:
+        layers = _drc_isolate_layers_cli(args, c, d, ch.name)
     colors = {(l["layer"], l["datatype"]): l["color"]
               for l in c.meta["layers"]}
     depth = (None if args.depth is None or args.depth >= 999
@@ -801,6 +863,13 @@ def main(argv=None):
     p.add_argument("--drc-frac", type=float, default=0.3, metavar="F",
                    help="error span as a fraction of the frame "
                         "(default 0.3 - viewer framing parity)")
+    p.add_argument("--drc-rules", default=None, metavar="RULES.json",
+                   help="SVRF rules sidecar for layer isolation "
+                        "(default: auto-search like the viewer - "
+                        "deck basename next to the db, recorded "
+                        "deck path, <db>.rules.json). Snapshots "
+                        "then keep only the rule's source GDS "
+                        "layers on; an explicit --layers wins")
     p.set_defaults(fn=cmd_render)
 
     p = sub.add_parser("clip", help="save a region as a new OASIS file")
