@@ -35,6 +35,7 @@ the ASCII fallback until re-packed.
 """
 
 import bisect
+import math
 import os
 import struct
 import sys
@@ -85,6 +86,75 @@ class DrcDb(object):
     @property
     def total(self):
         return sum(len(c.errors) for c in self.checks)
+
+
+def cd_segments(e):
+    """CD ruler segments for SIMPLE violations, as um 4-tuples -
+    shared by the viewer's auto rulers and the CLI snapshot embeds
+    (keep them identical): single edge = its length, facing edge
+    pair = the closest gap (anchored at the midpoint when the
+    edges face in parallel - the common spacing shape),
+    axis-aligned rectangle = BOTH spans through the middle.
+    Complex polygons/edge sets get none."""
+    pts = e.pts   # um
+
+    def dist(p, q):
+        return math.hypot(p[0] - q[0], p[1] - q[1])
+
+    def foot(p, a, b):
+        ax, ay = a
+        dx, dy = b[0] - ax, b[1] - ay
+        l2 = dx * dx + dy * dy
+        if l2 <= 0:
+            return a
+        t = ((p[0] - ax) * dx + (p[1] - ay) * dy) / l2
+        t = max(0.0, min(1.0, t))
+        return (ax + t * dx, ay + t * dy)
+
+    def seg(p, q):
+        return (p[0], p[1], q[0], q[1])
+
+    if e.kind == "e" and len(pts) == 2:
+        if dist(pts[0], pts[1]) <= 0:
+            return []
+        return [seg(pts[0], pts[1])]
+    if e.kind == "e" and len(pts) == 4:
+        a0, a1, b0, b1 = pts
+
+        def orient(a, b, c):
+            return ((b[0] - a[0]) * (c[1] - a[1])
+                    - (b[1] - a[1]) * (c[0] - a[0]))
+        if (orient(a0, a1, b0) > 0) != (orient(a0, a1, b1) > 0) \
+                and (orient(b0, b1, a0) > 0) != (orient(b0, b1,
+                                                        a1) > 0):
+            return []   # edges properly cross: gap is zero
+        cand = [(p, foot(p, b0, b1)) for p in (a0, a1)]
+        cand += [(foot(p, a0, a1), p) for p in (b0, b1)]
+        dmin = min(dist(p, q) for p, q in cand)
+        if dmin <= 0:
+            return []   # touching edges: no gap
+        mid = ((a0[0] + a1[0]) / 2.0, (a0[1] + a1[1]) / 2.0)
+        fm = foot(mid, b0, b1)
+        if dist(mid, fm) <= dmin * 1.0001:
+            return [seg(mid, fm)]
+        return [seg(*min(cand, key=lambda c: dist(c[0], c[1])))]
+    if e.kind == "p" and len(pts) == 4:
+        xs = sorted(set(x for x, _ in pts))
+        ys = sorted(set(y for _, y in pts))
+        if len(xs) != 2 or len(ys) != 2:
+            return []   # not an axis-aligned rectangle
+        if set(pts) != {(x, y) for x in xs for y in ys}:
+            return []
+        w, h = xs[1] - xs[0], ys[1] - ys[0]
+        out = []
+        if w > 0:   # width span through the middle
+            my = (ys[0] + ys[1]) / 2.0
+            out.append(seg((xs[0], my), (xs[1], my)))
+        if h > 0:   # height span through the middle
+            mx = (xs[0] + xs[1]) / 2.0
+            out.append(seg((mx, ys[0]), (mx, ys[1])))
+        return out
+    return []
 
 
 def _ints_prefix(tokens):

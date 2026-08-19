@@ -4944,74 +4944,13 @@ class Viewer:
         return None
 
     def _drc_cd_ruler(self, e):
-        """CD rulers for SIMPLE violations (list of dbu 4-tuples):
-        single edge = its length, edge pair = the closest gap
-        between the edges (anchored at the midpoint when the edges
-        face each other in parallel - the common spacing shape),
-        axis-aligned rectangle = BOTH spans through the middle
-        (width and height are each meaningful, user call
-        2026-08-13). Complex polygons/edge sets get NO ruler -
-        the distance chip on each ruler is the CD."""
-        pts = e.pts   # um
+        """CD rulers of a violation as dbu 4-tuples - the geometry
+        (single edge / facing gap / rect spans) lives in
+        drc.cd_segments, SHARED with the CLI snapshot embeds; this
+        wrapper only converts um -> dbu."""
         k = self.dbu
-
-        def dist(p, q):
-            return math.hypot(p[0] - q[0], p[1] - q[1])
-
-        def foot(p, a, b):
-            ax, ay = a
-            dx, dy = b[0] - ax, b[1] - ay
-            l2 = dx * dx + dy * dy
-            if l2 <= 0:
-                return a
-            t = ((p[0] - ax) * dx + (p[1] - ay) * dy) / l2
-            t = max(0.0, min(1.0, t))
-            return (ax + t * dx, ay + t * dy)
-
-        def seg(p, q):
-            return (p[0] / k, p[1] / k, q[0] / k, q[1] / k)
-
-        if e.kind == "e" and len(pts) == 2:
-            if dist(pts[0], pts[1]) <= 0:
-                return []
-            return [seg(pts[0], pts[1])]
-        if e.kind == "e" and len(pts) == 4:
-            a0, a1, b0, b1 = pts
-
-            def orient(a, b, c):
-                return ((b[0] - a[0]) * (c[1] - a[1])
-                        - (b[1] - a[1]) * (c[0] - a[0]))
-            if (orient(a0, a1, b0) > 0) != (orient(a0, a1, b1) > 0) \
-                    and (orient(b0, b1, a0) > 0) != (orient(b0, b1,
-                                                            a1) > 0):
-                return []   # edges properly cross: gap is zero
-            cand = [(p, foot(p, b0, b1)) for p in (a0, a1)]
-            cand += [(foot(p, a0, a1), p) for p in (b0, b1)]
-            dmin = min(dist(p, q) for p, q in cand)
-            if dmin <= 0:
-                return []   # touching edges: no gap
-            mid = ((a0[0] + a1[0]) / 2.0, (a0[1] + a1[1]) / 2.0)
-            fm = foot(mid, b0, b1)
-            if dist(mid, fm) <= dmin * 1.0001:
-                return [seg(mid, fm)]
-            return [seg(*min(cand, key=lambda c: dist(c[0], c[1])))]
-        if e.kind == "p" and len(pts) == 4:
-            xs = sorted(set(x for x, _ in pts))
-            ys = sorted(set(y for _, y in pts))
-            if len(xs) != 2 or len(ys) != 2:
-                return []   # not an axis-aligned rectangle
-            if set(pts) != {(x, y) for x in xs for y in ys}:
-                return []
-            w, h = xs[1] - xs[0], ys[1] - ys[0]
-            out = []
-            if w > 0:   # width span through the middle
-                my = (ys[0] + ys[1]) / 2.0
-                out.append(seg((xs[0], my), (xs[1], my)))
-            if h > 0:   # height span through the middle
-                mx = (xs[0] + xs[1]) / 2.0
-                out.append(seg((mx, ys[0]), (mx, ys[1])))
-            return out
-        return []
+        return [(x0 / k, y0 / k, x1 / k, y1 / k)
+                for x0, y0, x1, y1 in drc_mod.cd_segments(e)]
 
     def _drc_step(self, delta):
         """n/p: cycle within the VISIBLE list of the open rule

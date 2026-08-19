@@ -45,8 +45,13 @@ python -m floe drc results.db --rules > rules.json
 python -m floe drc results.db --errs M1.SPACE.1 > errs.json
 # 에러 스냅샷 PNG (--drc-err N | A-B | all; cap 200은
 # 'all'에만 적용 — 명시 범위는 전량 렌더):
-# 에러가 프레임의 30%(--drc-frac)를 차지하게 정사각 렌더,
-# 도형은 흰 헤일로 + 상태색(red/waived green) 스탬프,
+# 에러가 프레임의 30%(--drc-frac)를 차지하게 정사각 렌더
+# (뷰어의 렌더 서비스 경로 그대로 — detail/헤어라인/LOD/커버리지
+# 동일, depth만 full; 상주 세션이라 에러당 수십 ms).
+# 에러 도형·CD 룰러·길이 라벨은 픽셀에 굽지 않고 **flateyes
+# embed(iTXt "flateyes" 청크, fe_embed 포맷)**로 PNG 안에 실림
+# — flateyes로 열면 주석으로 표시·편집되고(ppu로 um 길이 자동
+# 라벨), 다른 도구에선 평범한 PNG. note = "룰 #로컬(전역)".
 # 파일당 `로컬# <TAB> 전역# <TAB> 경로` 한 줄 출력.
 # rules.json 사이드카가 발견되면(뷰어와 같은 자동 탐색, 또는
 # --drc-rules 지정) 그 룰의 원천 GDS 레이어만 켜고 렌더 —

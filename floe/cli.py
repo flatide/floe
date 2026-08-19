@@ -169,72 +169,41 @@ def _drc_err_spec(spec, n):
     return [k - 1]
 
 
-def _stamp_error_png(path, e, bb_um, w, h, waived):
-    """Draw the error geometry over the rendered PNG (viewer
-    parity: red not-waived / green waived over a white halo - the
-    error often sits ON metal of the same hue - tiny spans collapse
-    to a marker square). Pillow when available; GdkPixbuf fallback
-    otherwise (the portable bundle ships GTK but no PIL, field
-    report 2026-08-19); neither leaves the PNG unstamped, noted."""
+def _embed_error_png(path, e, bb_um, px, waived, rule, local):
+    """flateyes-embed annotations (user call 2026-08-19): the error
+    geometry, its CD ruler(s) and the length labels ride INSIDE the
+    PNG as the flateyes iTXt chunk (fe_embed format, vendored) -
+    pixels stay untouched, flateyes shows and edits them on open,
+    every other tool sees a plain PNG. Coordinates are image-
+    center-origin pixels; the embedded ppu makes flateyes label
+    the rulers in um by itself."""
+    from . import drc as drc_mod
+    from . import fe_embed as fe
     x0, y0, x1, y1 = bb_um
+    ppu = px / max(1e-9, x1 - x0)          # square frame
+    cxu, cyu = (x0 + x1) / 2, (y0 + y1) / 2
 
-    def sx(x):
-        return (x - x0) / (x1 - x0) * w
+    def P(x, y):
+        return ((x - cxu) * ppu, (cyu - y) * ppu)   # y down
 
-    def sy(y):
-        return (y1 - y) / (y1 - y0) * h
-
-    pts = [(sx(x), sy(y)) for x, y in e.pts]
-    xs = [p[0] for p in pts] or [w / 2]
-    ys = [p[1] for p in pts] or [h / 2]
-    tiny = (max(xs) - min(xs) < 5 and max(ys) - min(ys) < 5)
-    ctr = ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
-    if e.kind == "p" and len(pts) >= 2:
-        segs = list(zip(pts, pts[1:] + pts[:1]))
-    else:
-        segs = [(pts[j], pts[j + 1])
-                for j in range(0, len(pts) - 1, 2)]
-    try:
-        from PIL import Image, ImageDraw
-    except ImportError:
-        Image = None
-    if Image is not None:
-        im = Image.open(path).convert("RGB")
-        dr = ImageDraw.Draw(im)
-        col = (0, 230, 118) if waived else (255, 82, 82)
-        halo = (255, 255, 255)
-        if tiny:
-            cx, cy = ctr
-            dr.rectangle([cx - 3, cy - 3, cx + 4, cy + 4],
-                         fill=halo)
-            dr.rectangle([cx - 2, cy - 2, cx + 3, cy + 3],
-                         fill=col)
-        else:
-            for a, b in segs:
-                dr.line([a, b], fill=halo, width=4)
-            for a, b in segs:
-                dr.line([a, b], fill=col, width=2)
-        im.save(path)
-        return
-    try:
-        import gi
-        gi.require_version("GdkPixbuf", "2.0")
-        from gi.repository import GdkPixbuf
-    except (ImportError, ValueError):
-        print("[floe][warn] neither Pillow nor GdkPixbuf available "
-              "- %s left unstamped" % path, file=sys.stderr)
-        return
-    from .gui import fill_rect, stamp_segment, DRC_RED, DRC_GREEN
-    pb = GdkPixbuf.Pixbuf.new_from_file(path)
-    col = DRC_GREEN if waived else DRC_RED
-    if tiny:
-        cx, cy = ctr
-        fill_rect(pb, cx - 3, cy - 3, 7, 7, 0xFFFFFFFF)
-        fill_rect(pb, cx - 2, cy - 2, 5, 5, col)
-    else:
-        for a, b in segs:
-            stamp_segment(pb, a, b, 0xFFFFFFFF, col, px=2)
-    pb.savev(path, "png", [], [])
+    col = "#00E676" if waived else "#FF5252"
+    annos = []
+    pts = [P(x, y) for x, y in e.pts]
+    if e.kind == "p" and len(pts) >= 3:
+        annos.append(fe.polygon(pts, color=col, width=2))
+    elif len(pts) >= 2:
+        for j in range(0, len(pts) - 1, 2):
+            a, b = pts[j], pts[j + 1]
+            if a != b:
+                annos.append(fe.line(a[0], a[1], b[0], b[1],
+                                     color=col, width=2))
+    for sx0, sy0, sx1, sy1 in drc_mod.cd_segments(e):
+        a, b = P(sx0, sy0), P(sx1, sy1)
+        if a != b:
+            annos.append(fe.ruler(a[0], a[1], b[0], b[1]))
+    note = "%s #%d(%d)%s" % (rule, local, e.num,
+                             " - waived" if waived else "")
+    fe.embed(path, annos, ppu=ppu, unit="um", note=note)
 
 
 def _drc_isolate_layers_cli(args, c, d, rule):
@@ -387,8 +356,8 @@ def _render_drc_errors(args, c):
                 f.write(png)
             waived = (has_st and d.get_status(ci, k)
                       == drc_mod.STATUS_WAIVED)
-            _stamp_error_png(path, e, bb_um, args.px, args.px,
-                             waived)
+            _embed_error_png(path, e, bb_um, args.px, waived,
+                             ch.name, k + 1)
             print("%d\t%d\t%s" % (k + 1, e.num, path))
     finally:
         w.stop()
