@@ -5286,15 +5286,22 @@ class Viewer:
         self._display()
 
     def _copy_view(self):
-        """Ctrl+C (user call 2026-08-19): copy the CURRENT composed
-        frame - exactly what is on screen, overlays and markers
-        included - to the clipboard as an image. flateyes parity:
-        NO clipboard.store() - handing the data to a clipboard
-        manager (Exceed TurboX sync agent) can drop the image
-        targets, leaving "no image" on paste; serving the selection
-        ourselves works everywhere while the viewer runs (the
-        clipboard empties when it quits)."""
-        pb = self.image.get_pixbuf()
+        """Ctrl+C (user call 2026-08-19): copy the canvas AS SEEN -
+        grabbed from the WINDOW (flateyes capture_view) so widget
+        overlays ride along: ruler distance chips and design labels
+        are Gtk.Labels on the overlay, NOT part of the composed
+        pixbuf (field report: lengths missing from copies). NO
+        clipboard.store() - a clipboard manager (Exceed TurboX sync
+        agent) can drop the image targets on store; the viewer
+        serves the selection itself and it empties on quit."""
+        pb = None
+        win = self.window.get_window()
+        if win is not None:
+            alloc = self.overlay.get_allocation()
+            pb = Gdk.pixbuf_get_from_window(
+                win, alloc.x, alloc.y, alloc.width, alloc.height)
+        if pb is None:
+            pb = self.image.get_pixbuf()   # unmapped fallback
         if pb is None:
             self._set_live_status("nothing to copy yet")
             return
