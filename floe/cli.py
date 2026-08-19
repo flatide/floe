@@ -345,8 +345,13 @@ def _render_drc_errors(args, c):
                 else "%s_%d%s" % (stem, k + 1, ext))
         ly, top, vc = _vfs_region(c, x0, y0, x1, y1, layers)
         try:
+            # viewer parity (user call 2026-08-19): 50% speckle
+            # fills like the live viewer - solid archival fills
+            # let a late-painted cover layer (well/boundary) hide
+            # every layer under it ("solid background" field
+            # report on the real chip)
             r = Renderer(ly, top, colors, hier_offset=0,
-                         speckle=False)
+                         speckle=True)
             r.render_png(path, x0, y0, x1, y1, args.px, args.px,
                          visible=layers, depth=depth)
         finally:
