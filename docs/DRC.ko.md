@@ -43,7 +43,8 @@ python -m floe drc results.db --rules > rules.json
 # 한 룰의 에러 목록(스트리밍 배열):
 #   [{"local","global","kind","status","bbox":[x0,y0,x1,y1 um]},...]
 python -m floe drc results.db --errs M1.SPACE.1 > errs.json
-# 에러 스냅샷 PNG (--drc-err N | A-B | all, 기본 cap 200):
+# 에러 스냅샷 PNG (--drc-err N | A-B | all; cap 200은
+# 'all'에만 적용 — 명시 범위는 전량 렌더):
 # 에러가 프레임의 30%(--drc-frac)를 차지하게 정사각 렌더,
 # 도형은 흰 헤일로 + 상태색(red/waived green) 스탬프,
 # 파일당 `로컬# <TAB> 전역# <TAB> 경로` 한 줄 출력.

@@ -312,9 +312,14 @@ def _render_drc_errors(args, c):
     ci = _drc_rule_index(d, args.drc_rule)
     ch = d.checks[ci]
     idxs = _drc_err_spec(args.drc_err, len(ch.errors))
-    if len(idxs) > args.drc_cap:
-        print("[floe][warn] %d errors requested - rendering the "
-              "first %d (--drc-cap)" % (len(idxs), args.drc_cap),
+    # the cap guards the IMPLICIT all only - an explicit N or A-B
+    # is the user's stated intent and renders in full (field
+    # report 2026-08-19: 1-1000 silently stopped at 200)
+    explicit = args.drc_err not in (None, "", "all")
+    if not explicit and len(idxs) > args.drc_cap:
+        print("[floe][warn] %d errors in the rule - rendering the "
+              "first %d (--drc-cap; pass an explicit range for "
+              "more)" % (len(idxs), args.drc_cap),
               file=sys.stderr)
         idxs = idxs[:args.drc_cap]
     if not idxs:
@@ -926,7 +931,9 @@ def main(argv=None):
                    help="rule-local error number(s), 1-based "
                         "(default all, capped by --drc-cap)")
     p.add_argument("--drc-cap", type=int, default=200, metavar="N",
-                   help="max PNGs per run (default 200)")
+                   help="max PNGs when --drc-err is 'all' (default "
+                        "200); explicit N / A-B ranges always "
+                        "render in full")
     p.add_argument("--drc-frac", type=float, default=0.3, metavar="F",
                    help="error span as a fraction of the frame "
                         "(default 0.3 - viewer framing parity)")
