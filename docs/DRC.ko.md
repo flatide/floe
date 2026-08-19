@@ -128,6 +128,7 @@ python -m floe render chip.oas --drc results.db \
 | `e` + 두 클릭 | 박스 선택(Esc까지 유지; Shift 추가, Ctrl 토글; 보이는 에러만; 룰별 보존; gold 표시) |
 | Ctrl/Shift + 셀 클릭 | 선택 추가/토글 |
 | 우클릭 | waive/unwaive 메뉴(gold 선택 시 일괄) — [status] 제자리 기록, 카운트·색·필터 즉시 연동 |
+| `w` | **현재 에러 waive 토글** — 단클릭/n·p 포커스 우선, 없으면 점프 위치(Esc 복원 후에도 상세에 남은 에러). 우클릭 메뉴와 동일 경로로 기록·갱신, v1은 pack 안내 |
 | 체크박스 | in view(공간 쿼리, 뷰 추적) · selected(선택만) |
 | `b` | 레이어 흑백 토글(시인성) |
 | Esc | 단계 해제(…에러 박스선택 → 격리 레이어 복원 → DRC 마크) |

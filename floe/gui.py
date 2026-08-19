@@ -2832,6 +2832,8 @@ class Viewer:
             self._set_mono(not self._mono)
         elif name == "e":
             self._esel_toggle()
+        elif name == "w":
+            self._drc_waive_key()
         elif name == "n":
             self._drc_step(1)
         elif name == "p":
@@ -4500,6 +4502,36 @@ class Viewer:
             % ("waived" if on else "unwaived", len(eis),
                db.checks[ci].name))
         self._display()
+
+    def _drc_waive_key(self):
+        """w: toggle the waive status of the CURRENT error (user
+        call 2026-08-20) - the single-clicked/stepped focus first,
+        else the jump position (_drc_focus is None while a jump
+        mark is live, and _drc_pos survives the Esc restore, so the
+        error still shown in the detail pane stays toggleable)."""
+        db = self._drc
+        if db is None:
+            return
+        ci = ei = None
+        f = self._drc_focus
+        if f is not None:
+            ci, ei = f[0], f[1]
+        elif self._drc_pos >= 0 and self._drc_cum:
+            ci = bisect.bisect_right(self._drc_cum,
+                                     self._drc_pos) - 1
+            ei = self._drc_pos - self._drc_cum[ci]
+        if ci is None or ei >= len(db.checks[ci].errors):
+            self._set_live_status(
+                "w toggles the current error: click or jump one "
+                "first")
+            return
+        if not hasattr(db, "set_status"):
+            self._set_live_status(
+                "waive needs a packed index: "
+                "floe-index drc <db> --pack")
+            return
+        self._drc_set_waived(ci, [ei],
+                             not self._drc_waived(db, ci, ei))
 
     def _drc_cell_mark(self, row, j):
         """Mark ONE grid cell as current: the previous cell reverts
