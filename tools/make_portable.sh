@@ -76,11 +76,11 @@ echo "== runtime python $PYVER"
 if [ -n "$WHEELS" ]; then
     echo "== installing klayout/numpy from local wheels: $WHEELS"
     "$PYBIN" -m pip install --no-index --find-links "$WHEELS" \
-        --only-binary=:all: klayout numpy
+        --only-binary=:all: klayout numpy pillow
 else
-    "$PYBIN" -m pip install --only-binary=:all: klayout numpy
+    "$PYBIN" -m pip install --only-binary=:all: klayout numpy pillow
 fi
-"$PYBIN" -c 'import klayout, numpy; print("== klayout", klayout.__version__, "numpy", numpy.__version__)'
+"$PYBIN" -c 'import klayout, numpy, PIL; print("== klayout", klayout.__version__, "numpy", numpy.__version__, "pillow", PIL.__version__)'
 
 # -- 4. drop the floe package into site-packages ------------------------
 SITE="$("$PYBIN" -c 'import site;print(site.getsitepackages()[0])')"
