@@ -477,22 +477,33 @@ def cmd_drc(args):
     from . import drc as drc_mod
     d = drc_mod.load_db(args.db)
     if args.rules:
-        # scripting surface: one TSV line per rule
+        # scripting surface: JSON array, one object per rule
+        rules = []
         for ci, ch in enumerate(d.checks):
             wv = (d.status_counts(ci)[0]
                   if hasattr(d, "status_counts") else 0)
-            print("%s\t%d\t%d" % (ch.name, len(ch.errors), wv))
+            rules.append({"name": ch.name,
+                          "errors": len(ch.errors),
+                          "waived": wv})
+        json.dump(rules, sys.stdout, indent=1)
+        sys.stdout.write("\n")
         return
     if args.errs is not None:
-        # scripting surface: one TSV line per error of ONE rule
+        # scripting surface: JSON array of ONE rule's errors -
+        # STREAMED object by object (a rule can hold millions)
         ci = _drc_rule_index(d, args.errs)
         has_st = hasattr(d, "get_status")
+        sys.stdout.write("[\n")
         for k, e in enumerate(d.checks[ci].errors):
             b = e.bbox()
             st = d.get_status(ci, k) if has_st else 0
-            print("%d\t%d\t%s\t%d\t%.4f\t%.4f\t%.4f\t%.4f"
-                  % (k + 1, e.num, e.kind, st,
-                     b[0], b[1], b[2], b[3]))
+            if k:
+                sys.stdout.write(",\n")
+            sys.stdout.write(json.dumps(
+                {"local": k + 1, "global": e.num, "kind": e.kind,
+                 "status": st,
+                 "bbox": [round(v, 4) for v in b]}))
+        sys.stdout.write("\n]\n")
         return
     print(f"{d.path}: cell {d.cell}, precision {d.precision:g}")
     print(f"{len(d.checks)} checks, {d.total} errors")
@@ -832,12 +843,12 @@ def main(argv=None):
     p.add_argument("--list", action="store_true",
                    help="also list every error (center + size, um)")
     p.add_argument("--rules", action="store_true",
-                   help="machine-readable rule list: one TSV line "
-                        "per rule (name, errors, waived)")
+                   help="machine-readable rule list as JSON: "
+                        "[{name, errors, waived}, ...]")
     p.add_argument("--errs", default=None, metavar="RULE",
-                   help="machine-readable error list of ONE rule: "
-                        "TSV (local#, global#, kind, status, "
-                        "x0 y0 x1 y1 um)")
+                   help="machine-readable error list of ONE rule "
+                        "as JSON: [{local, global, kind, status, "
+                        "bbox um}, ...] (streamed)")
     p.set_defaults(fn=cmd_drc)
 
     p = sub.add_parser("svrf", help="parse a Calibre SVRF rule deck "
