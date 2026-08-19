@@ -169,7 +169,28 @@ def _drc_err_spec(spec, n):
     return [k - 1]
 
 
-def _embed_error_png(path, e, bb_um, px, waived, rule, local):
+def _drc_layer_legend(c, layers):
+    """flateyes legend lines for the layers that are ON in the
+    snapshot (user call 2026-08-19): one color swatch per visible
+    layer, labeled "NAME l/d". None when everything is on (a full
+    palette table would drown the image)."""
+    if layers is None:
+        return None
+    by = {(l["layer"], l["datatype"]): l for l in c.meta["layers"]}
+    legend = []
+    for key in layers:
+        lay = by.get(tuple(key))
+        if lay is None:
+            continue
+        color = lay.get("color") or "#808080"
+        name = (lay.get("name") or "").strip()
+        label = ("%s %d/%d" % (name, key[0], key[1])).strip()
+        legend.append("box %s solid %s" % (color, label))
+    return legend or None
+
+
+def _embed_error_png(path, e, bb_um, px, waived, rule, local,
+                     legend=None):
     """flateyes-embed annotations (user call 2026-08-19): the error
     geometry, its CD ruler(s) and the length labels ride INSIDE the
     PNG as the flateyes iTXt chunk (fe_embed format, vendored) -
@@ -203,7 +224,8 @@ def _embed_error_png(path, e, bb_um, px, waived, rule, local):
             annos.append(fe.ruler(a[0], a[1], b[0], b[1]))
     note = "%s #%d(%d)%s" % (rule, local, e.num,
                              " - waived" if waived else "")
-    fe.embed(path, annos, ppu=ppu, unit="um", note=note)
+    fe.embed(path, annos, ppu=ppu, unit="um", note=note,
+             legend=legend)
 
 
 def _drc_isolate_layers_cli(args, c, d, rule):
@@ -309,6 +331,7 @@ def _render_drc_errors(args, c):
     else:
         stem, ext = safe, ".png"
     has_st = hasattr(d, "get_status")
+    legend = _drc_layer_legend(c, layers)
     w = RenderWorker(c)
     w.start()
     try:
@@ -357,7 +380,7 @@ def _render_drc_errors(args, c):
             waived = (has_st and d.get_status(ci, k)
                       == drc_mod.STATUS_WAIVED)
             _embed_error_png(path, e, bb_um, args.px, waived,
-                             ch.name, k + 1)
+                             ch.name, k + 1, legend=legend)
             print("%d\t%d\t%s" % (k + 1, e.num, path))
     finally:
         w.stop()
