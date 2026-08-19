@@ -12,10 +12,16 @@
 
 ## 2. 렌더 파이프라인 (GUI 쪽)
 
-- **Ctrl+C = 화면 클립보드 복사**(2026-08-19): `_copy_view` —
-  `image.get_pixbuf()`(합성 프레임 그대로: 디자인+오버레이+마커+
-  룰러)를 `Gtk.Clipboard.set_image`로; store()는 클립보드 매니저
-  있을 때만 창 종료 후 지속(플레인 X 한계).
+- **Ctrl+C = 화면 클립보드 복사**(2026-08-19, flateyes 패리티):
+  `_copy_view` — `image.get_pixbuf()`(합성 프레임 그대로: 디자인+
+  오버레이+마커+룰러)를 `Gtk.Clipboard.set_image`로. **store()
+  호출 금지** — 클립보드 매니저(Exceed TurboX 동기화)가 이미지
+  타깃을 떨어뜨려 붙여넣기가 비는 실사고(flateyes에서 확정);
+  셀렉션은 뷰어가 직접 서빙, 종료 시 비워짐. 상태줄 "copied WxH".
+- **Tab = 오버레이 토글**(2026-08-19, flateyes 패리티):
+  `overlays_on` — off면 `_draw_overlays`가 조기 종료(룰러·DRC
+  마크/마커·선택·스냅 전부 스킵, **줌 밴드만 유지**), `_drc_hits`
+  비움(보이지 않는 마커 pick/툴팁 방지). ISO_Left_Tab 포함.
 - `redraw()` → `_clamp_view()`: spp ∈ [MIN_SPP=0.01, fit_spp×FIT_ZOOM_OUT
   (16)]; 팬 한계 = 다이 bbox를 **변당 10% 확장**한 박스(2026-08-18:
   다이 가장자리에 붙박이면 외곽 피처 밴드 줌 드래그 공간이 없음);

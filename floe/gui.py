@@ -906,6 +906,7 @@ class Viewer:
         self._drc_hits = []         # frame's painted markers:
                                     # (px, py, ci, ei) for hover/pick
         self._drc_tip = None        # last tooltip text set
+        self.overlays_on = True     # Tab: rulers/marks/markers
         # prev/next walk by ARITHMETIC over cumulative counts, never
         # a materialized per-error list: an .ice sidecar can hold
         # hundreds of millions of violations
@@ -1749,6 +1750,21 @@ class Viewer:
 
         def sy(v):
             return (obox[3] - v) / ospp
+
+        if not self.overlays_on:
+            # Tab (flateyes parity): overlays hidden - rulers,
+            # marks, markers, selections all skip; only the live
+            # zoom band stays interactive. Stale marker hits must
+            # not pick invisible markers.
+            self._drc_hits = []
+            if self._zoomdrag is not None \
+                    and self._band_cur is not None:
+                x0, y0 = self._zoomdrag
+                x1, y1 = self._band_cur
+                color = BAND_IN if x1 >= x0 else BAND_OUT
+                rect_outline(disp, x0, y0, x1, y1, None, color,
+                             px=1)
+            return
 
         for sel in self.selections:
             if not sel.get("points"):
@@ -2792,6 +2808,8 @@ class Viewer:
             self._rulers_clear()
         elif name == "Escape":
             self._esc()
+        elif name in ("Tab", "ISO_Left_Tab"):
+            self._toggle_overlays()
         elif name == "d":
             self._detail_dialog()
         elif name == "g":
@@ -5270,19 +5288,30 @@ class Viewer:
     def _copy_view(self):
         """Ctrl+C (user call 2026-08-19): copy the CURRENT composed
         frame - exactly what is on screen, overlays and markers
-        included - to the clipboard as an image."""
+        included - to the clipboard as an image. flateyes parity:
+        NO clipboard.store() - handing the data to a clipboard
+        manager (Exceed TurboX sync agent) can drop the image
+        targets, leaving "no image" on paste; serving the selection
+        ourselves works everywhere while the viewer runs (the
+        clipboard empties when it quits)."""
         pb = self.image.get_pixbuf()
         if pb is None:
             self._set_live_status("nothing to copy yet")
             return
         cb = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
         cb.set_image(pb)
-        # best effort: persists past window close only where a
-        # clipboard manager is running (plain X drops it)
-        cb.store()
         self._set_live_status(
-            "view copied to clipboard (%d x %d)"
-            % (pb.get_width(), pb.get_height()))
+            "copied  %dx%d" % (pb.get_width(), pb.get_height()))
+
+    def _toggle_overlays(self):
+        """Tab (flateyes parity): show/hide every overlay - rulers,
+        DRC marks and markers, selections, snap cross - for a clean
+        look at the design underneath."""
+        self.overlays_on = not self.overlays_on
+        self._set_live_status(
+            "overlays %s" % ("shown" if self.overlays_on
+                             else "hidden (Tab restores)"))
+        self._display()
 
     def _ruler_pop(self):
         """k: delete the most recently created ruler."""
