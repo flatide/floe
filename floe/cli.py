@@ -297,11 +297,17 @@ def _drc_isolate_layers_cli(args, c, d, rule):
 
 
 def _render_drc_errors(args, c):
-    """--drc/--drc-rule: one square PNG per requested error, framed
-    so the violation spans --drc-frac of the image, its geometry
-    stamped on top. Prints `local<TAB>global<TAB>path` per file."""
+    """--drc/--drc-rule: one square PNG per requested error through
+    the VIEWER'S OWN render service (user call 2026-08-19: the
+    exact-cut probe path looked nothing like the app - snapshots
+    must carry the default detail/hairline/LOD/coverage knobs with
+    depth forced full, and the per-error cold spawn cost 5s+). One
+    persistent service = one vfsd session + one klayout working
+    set, so consecutive errors render at viewer-jump speed.
+    Prints `local<TAB>global<TAB>path` per file."""
+    import queue as _queue
     from . import drc as drc_mod
-    from .render import Renderer
+    from .service import RenderWorker
     d = drc_mod.load_db(args.drc)
     ci = _drc_rule_index(d, args.drc_rule)
     ch = d.checks[ci]
@@ -319,8 +325,6 @@ def _render_drc_errors(args, c):
         layers = c.resolve_layers(args.layers)  # explicit wins
     else:
         layers = _drc_isolate_layers_cli(args, c, d, ch.name)
-    colors = {(l["layer"], l["datatype"]): l["color"]
-              for l in c.meta["layers"]}
     depth = (None if args.depth is None or args.depth >= 999
              else args.depth)
     frac = min(max(args.drc_frac, 0.02), 1.0)
@@ -331,35 +335,58 @@ def _render_drc_errors(args, c):
     else:
         stem, ext = safe, ".png"
     has_st = hasattr(d, "get_status")
-    for k in idxs:
-        e = ch.errors[k]
-        b = e.bbox()
-        cx, cy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
-        span = max(b[2] - b[0], b[3] - b[1], 0.0) / frac
-        if span <= 0:
-            span = 0.1
-        bb_um = (cx - span / 2, cy - span / 2,
-                 cx + span / 2, cy + span / 2)
-        x0, y0, x1, y1 = (int(round(v / dbu)) for v in bb_um)
-        path = ("%s%s" % (stem, ext) if len(idxs) == 1
-                else "%s_%d%s" % (stem, k + 1, ext))
-        ly, top, vc = _vfs_region(c, x0, y0, x1, y1, layers)
-        try:
-            # viewer parity (user call 2026-08-19): 50% speckle
-            # fills like the live viewer - solid archival fills
-            # let a late-painted cover layer (well/boundary) hide
-            # every layer under it ("solid background" field
-            # report on the real chip)
-            r = Renderer(ly, top, colors, hier_offset=0,
-                         speckle=True)
-            r.render_png(path, x0, y0, x1, y1, args.px, args.px,
-                         visible=layers, depth=depth)
-        finally:
-            vc.stop()
-        waived = (has_st
-                  and d.get_status(ci, k) == drc_mod.STATUS_WAIVED)
-        _stamp_error_png(path, e, bb_um, args.px, args.px, waived)
-        print("%d\t%d\t%s" % (k + 1, e.num, path))
+    w = RenderWorker(c)
+    w.start()
+    try:
+        gen = 0
+        for k in idxs:
+            e = ch.errors[k]
+            b = e.bbox()
+            cx, cy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
+            span = max(b[2] - b[0], b[3] - b[1], 0.0) / frac
+            if span <= 0:
+                span = 0.1
+            bb_um = (cx - span / 2, cy - span / 2,
+                     cx + span / 2, cy + span / 2)
+            bx = tuple(int(round(v / dbu)) for v in bb_um)
+            gen += 1
+            w.submit({"kind": "render", "gen": gen,
+                      "scope": "live", "bbox": bx, "view": None,
+                      "w": args.px, "h": args.px,
+                      "depth": depth, "visible": layers})
+            png = None
+            while True:
+                try:
+                    # first frame pays the cold spawn (vfsd +
+                    # klayout); later errors ride the warm session
+                    res = w.res.get(timeout=300 if gen == 1
+                                    else 120)
+                except _queue.Empty:
+                    raise SystemExit(
+                        "floe: render service timeout (alive=%s)"
+                        % w.alive())
+                kind = res.get("kind")
+                if kind == "error":
+                    raise SystemExit("floe: render service: %s"
+                                     % res.get("msg"))
+                if kind != "frame" or res.get("gen") != gen:
+                    continue
+                if res.get("preview") or res.get("bg") \
+                        or res.get("refining"):
+                    continue   # streaming round: wait for settled
+                png = res.get("png", b"")
+                break
+            path = ("%s%s" % (stem, ext) if len(idxs) == 1
+                    else "%s_%d%s" % (stem, k + 1, ext))
+            with open(path, "wb") as f:
+                f.write(png)
+            waived = (has_st and d.get_status(ci, k)
+                      == drc_mod.STATUS_WAIVED)
+            _stamp_error_png(path, e, bb_um, args.px, args.px,
+                             waived)
+            print("%d\t%d\t%s" % (k + 1, e.num, path))
+    finally:
+        w.stop()
 
 
 def cmd_render(args):
