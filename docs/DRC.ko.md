@@ -33,16 +33,14 @@ rust/target/release/floe-index drc results.db [--jobs N]
 .venv/bin/python -m floe view chip.oas --drc results.db
 ```
 
-**셸 스크립팅 표면**(2026-08-19): 룰 목록·에러 목록은 JSON(jq
-친화), 스냅샷은 룰/에러 지정 PNG 렌더 — 리포트 자동화용.
+**셸 스크립팅 표면**(2026-08-19): 룰 목록·에러 목록은 TSV,
+스냅샷은 룰/에러 지정 PNG 렌더 — 리포트 자동화용.
 
 ```sh
-# 룰 목록: [{"name","errors","waived"}, ...]
-python -m floe drc results.db --rules | jq -r '.[].name'
-# 한 룰의 에러 목록(스트리밍 배열):
-#   [{"local","global","kind","status","bbox":[x0,y0,x1,y1 um]},...]
-python -m floe drc results.db --errs M1.SPACE.1 \
-    | jq '.[] | select(.status == 0) | .local'
+# 룰 목록: 이름 <TAB> 에러수 <TAB> waived수
+python -m floe drc results.db --rules
+# 한 룰의 에러 목록: 로컬# 전역# 종류 status x0 y0 x1 y1(um)
+python -m floe drc results.db --errs M1.SPACE.1
 # 에러 스냅샷 PNG (--drc-err N | A-B | all, 기본 cap 200):
 # 에러가 프레임의 30%(--drc-frac)를 차지하게 정사각 렌더,
 # 도형은 흰 헤일로 + 상태색(red/waived green) 스탬프,
