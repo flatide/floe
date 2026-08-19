@@ -4,6 +4,7 @@ import argparse
 import functools
 import json
 import os
+import re
 import sys
 import time
 
@@ -152,8 +153,127 @@ def cmd_info(args):
               f"{l['stored_shapes']:>14,}")
 
 
+def _drc_err_spec(spec, n):
+    """--drc-err N | A-B | all -> 0-based local indices."""
+    if spec in (None, "", "all"):
+        return list(range(n))
+    if "-" in spec:
+        a, b = spec.split("-", 1)
+        lo, hi = int(a), int(b)
+        if lo < 1 or hi < lo:
+            raise SystemExit("floe: bad --drc-err range %r" % spec)
+        return list(range(lo - 1, min(hi, n)))
+    k = int(spec)
+    if not 1 <= k <= n:
+        raise SystemExit("floe: --drc-err %d out of 1..%d" % (k, n))
+    return [k - 1]
+
+
+def _stamp_error_png(path, e, bb_um, w, h, waived):
+    """Draw the error geometry over the rendered PNG (viewer
+    parity: red not-waived / green waived, tiny spans collapse to
+    a 5x5 marker)."""
+    from PIL import Image, ImageDraw
+    im = Image.open(path).convert("RGB")
+    dr = ImageDraw.Draw(im)
+    x0, y0, x1, y1 = bb_um
+
+    def sx(x):
+        return (x - x0) / (x1 - x0) * w
+
+    def sy(y):
+        return (y1 - y) / (y1 - y0) * h
+
+    pts = [(sx(x), sy(y)) for x, y in e.pts]
+    col = (0, 230, 118) if waived else (255, 82, 82)
+    halo = (255, 255, 255)   # the error often sits ON metal of the
+    xs = [p[0] for p in pts] or [w / 2]   # same hue: white casing
+    ys = [p[1] for p in pts] or [h / 2]   # keeps it visible
+    if max(xs) - min(xs) < 5 and max(ys) - min(ys) < 5:
+        cx = (min(xs) + max(xs)) / 2
+        cy = (min(ys) + max(ys)) / 2
+        dr.rectangle([cx - 3, cy - 3, cx + 4, cy + 4], fill=halo)
+        dr.rectangle([cx - 2, cy - 2, cx + 3, cy + 3], fill=col)
+    elif e.kind == "p":
+        dr.line(pts + [pts[0]], fill=halo, width=4)
+        dr.line(pts + [pts[0]], fill=col, width=2)
+    else:
+        for j in range(0, len(pts) - 1, 2):
+            dr.line([pts[j], pts[j + 1]], fill=halo, width=4)
+        for j in range(0, len(pts) - 1, 2):
+            dr.line([pts[j], pts[j + 1]], fill=col, width=2)
+    im.save(path)
+
+
+def _render_drc_errors(args, c):
+    """--drc/--drc-rule: one square PNG per requested error, framed
+    so the violation spans --drc-frac of the image, its geometry
+    stamped on top. Prints `local<TAB>global<TAB>path` per file."""
+    from . import drc as drc_mod
+    from .render import Renderer
+    d = drc_mod.load_db(args.drc)
+    ci = _drc_rule_index(d, args.drc_rule)
+    ch = d.checks[ci]
+    idxs = _drc_err_spec(args.drc_err, len(ch.errors))
+    if len(idxs) > args.drc_cap:
+        print("[floe][warn] %d errors requested - rendering the "
+              "first %d (--drc-cap)" % (len(idxs), args.drc_cap),
+              file=sys.stderr)
+        idxs = idxs[:args.drc_cap]
+    if not idxs:
+        raise SystemExit("floe: rule %r has no errors"
+                         % args.drc_rule)
+    dbu = c.meta["dbu"]
+    layers = c.resolve_layers(args.layers)
+    colors = {(l["layer"], l["datatype"]): l["color"]
+              for l in c.meta["layers"]}
+    depth = (None if args.depth is None or args.depth >= 999
+             else args.depth)
+    frac = min(max(args.drc_frac, 0.02), 1.0)
+    safe = re.sub(r"[^\w.\-]+", "_", args.drc_rule)
+    if args.out and args.out != "view.png":
+        stem, ext = os.path.splitext(args.out)
+        ext = ext or ".png"
+    else:
+        stem, ext = safe, ".png"
+    has_st = hasattr(d, "get_status")
+    for k in idxs:
+        e = ch.errors[k]
+        b = e.bbox()
+        cx, cy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
+        span = max(b[2] - b[0], b[3] - b[1], 0.0) / frac
+        if span <= 0:
+            span = 0.1
+        bb_um = (cx - span / 2, cy - span / 2,
+                 cx + span / 2, cy + span / 2)
+        x0, y0, x1, y1 = (int(round(v / dbu)) for v in bb_um)
+        path = ("%s%s" % (stem, ext) if len(idxs) == 1
+                else "%s_%d%s" % (stem, k + 1, ext))
+        ly, top, vc = _vfs_region(c, x0, y0, x1, y1, layers)
+        try:
+            r = Renderer(ly, top, colors, hier_offset=0,
+                         speckle=False)
+            r.render_png(path, x0, y0, x1, y1, args.px, args.px,
+                         visible=layers, depth=depth)
+        finally:
+            vc.stop()
+        waived = (has_st
+                  and d.get_status(ci, k) == drc_mod.STATUS_WAIVED)
+        _stamp_error_png(path, e, bb_um, args.px, args.px, waived)
+        print("%d\t%d\t%s" % (k + 1, e.num, path))
+
+
 def cmd_render(args):
     c = open_cache(args.src, args=args)
+    if args.drc or args.drc_rule:
+        if not (args.drc and args.drc_rule):
+            raise SystemExit(
+                "floe: --drc and --drc-rule go together")
+        _render_drc_errors(args, c)
+        return
+    if not args.bbox:
+        raise SystemExit("floe: --bbox is required (or use "
+                         "--drc/--drc-rule)")
     dbu = c.meta["dbu"]
     x0, y0, x1, y1 = parse_bbox_um(args.bbox, dbu)
     layers = c.resolve_layers(args.layers)
@@ -340,10 +460,40 @@ def cmd_profile(args):
         print(text)
 
 
+def _drc_rule_index(d, name):
+    """Check index for a rule name; duplicate names take the first
+    occurrence (Calibre dbs may repeat a check block)."""
+    hits = [i for i, ch in enumerate(d.checks) if ch.name == name]
+    if not hits:
+        raise SystemExit("floe: no such rule %r (see --rules)" % name)
+    if len(hits) > 1:
+        print("[floe][warn] rule %r appears %d times - using the "
+              "first" % (name, len(hits)), file=sys.stderr)
+    return hits[0]
+
+
 def cmd_drc(args):
     """Summarize a Calibre ASCII DRC results database."""
     from . import drc as drc_mod
     d = drc_mod.load_db(args.db)
+    if args.rules:
+        # scripting surface: one TSV line per rule
+        for ci, ch in enumerate(d.checks):
+            wv = (d.status_counts(ci)[0]
+                  if hasattr(d, "status_counts") else 0)
+            print("%s\t%d\t%d" % (ch.name, len(ch.errors), wv))
+        return
+    if args.errs is not None:
+        # scripting surface: one TSV line per error of ONE rule
+        ci = _drc_rule_index(d, args.errs)
+        has_st = hasattr(d, "get_status")
+        for k, e in enumerate(d.checks[ci].errors):
+            b = e.bbox()
+            st = d.get_status(ci, k) if has_st else 0
+            print("%d\t%d\t%s\t%d\t%.4f\t%.4f\t%.4f\t%.4f"
+                  % (k + 1, e.num, e.kind, st,
+                     b[0], b[1], b[2], b[3]))
+        return
     print(f"{d.path}: cell {d.cell}, precision {d.precision:g}")
     print(f"{len(d.checks)} checks, {d.total} errors")
     for c in d.checks:
@@ -614,15 +764,32 @@ def main(argv=None):
     p.add_argument("src")
     p.set_defaults(fn=cmd_info)
 
-    p = sub.add_parser("render", help="render a region to PNG")
+    p = sub.add_parser("render", help="render a region to PNG "
+                                      "(or DRC errors via --drc)")
     p.add_argument("src")
-    p.add_argument("--bbox", required=True, help="X0,Y0,X1,Y1 in um")
+    p.add_argument("--bbox", default=None, help="X0,Y0,X1,Y1 in um "
+                   "(omit when using --drc/--drc-rule)")
     p.add_argument("--layers", default=None,
                    help="comma list: names or layer/datatype (default all)")
     p.add_argument("--px", type=int, default=1200, help="output width px")
     p.add_argument("--out", default="view.png")
     p.add_argument("--depth", type=int, default=None,
                    help="hierarchy depth (0=top only, 999/omit=full)")
+    p.add_argument("--drc", default=None, metavar="FILE.db",
+                   help="DRC results db: render error snapshots of "
+                        "--drc-rule instead of a fixed bbox (square "
+                        "--px PNGs, geometry stamped red/green by "
+                        "waive status; prints local/global/path TSV)")
+    p.add_argument("--drc-rule", default=None, metavar="NAME",
+                   help="rule name (see `floe drc <db> --rules`)")
+    p.add_argument("--drc-err", default="all", metavar="N|A-B|all",
+                   help="rule-local error number(s), 1-based "
+                        "(default all, capped by --drc-cap)")
+    p.add_argument("--drc-cap", type=int, default=200, metavar="N",
+                   help="max PNGs per run (default 200)")
+    p.add_argument("--drc-frac", type=float, default=0.3, metavar="F",
+                   help="error span as a fraction of the frame "
+                        "(default 0.3 - viewer framing parity)")
     p.set_defaults(fn=cmd_render)
 
     p = sub.add_parser("clip", help="save a region as a new OASIS file")
@@ -664,6 +831,13 @@ def main(argv=None):
     p.add_argument("db")
     p.add_argument("--list", action="store_true",
                    help="also list every error (center + size, um)")
+    p.add_argument("--rules", action="store_true",
+                   help="machine-readable rule list: one TSV line "
+                        "per rule (name, errors, waived)")
+    p.add_argument("--errs", default=None, metavar="RULE",
+                   help="machine-readable error list of ONE rule: "
+                        "TSV (local#, global#, kind, status, "
+                        "x0 y0 x1 y1 um)")
     p.set_defaults(fn=cmd_drc)
 
     p = sub.add_parser("svrf", help="parse a Calibre SVRF rule deck "

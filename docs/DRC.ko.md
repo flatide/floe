@@ -33,6 +33,22 @@ rust/target/release/floe-index drc results.db [--jobs N]
 .venv/bin/python -m floe view chip.oas --drc results.db
 ```
 
+**셸 스크립팅 표면**(2026-08-19): 룰 목록·에러 목록은 TSV,
+스냅샷은 룰/에러 지정 PNG 렌더 — 리포트 자동화용.
+
+```sh
+# 룰 목록: 이름 <TAB> 에러수 <TAB> waived수
+python -m floe drc results.db --rules
+# 한 룰의 에러 목록: 로컬# 전역# 종류 status x0 y0 x1 y1(um)
+python -m floe drc results.db --errs M1.SPACE.1
+# 에러 스냅샷 PNG (--drc-err N | A-B | all, 기본 cap 200):
+# 에러가 프레임의 30%(--drc-frac)를 차지하게 정사각 렌더,
+# 도형은 흰 헤일로 + 상태색(red/waived green) 스탬프,
+# 파일당 `로컬# <TAB> 전역# <TAB> 경로` 한 줄 출력
+python -m floe render chip.oas --drc results.db \
+    --drc-rule M1.SPACE.1 --drc-err 1-50 --px 800 --out snap.png
+```
+
 ## 2. .ice pack (v2, 레이아웃 버전 4) — 유일한 인덱스 포맷
 
 - **자기완결**: 변환 후 .db 불필요. 크기 실측 원본의 1/3~1/4.5.
