@@ -169,13 +169,50 @@ def _drc_err_spec(spec, n):
     return [k - 1]
 
 
+def _pat_hex(rows_str):
+    """klayout '*'/'.' stipple rows -> the legend pat: payload
+    (16 u16 rows, 4 hex chars each, MSB = leftmost pixel - the
+    fillpatterns.def convention). Non-16 patterns tile."""
+    rows = (rows_str or "").split("\n")
+    out = []
+    for y in range(16):
+        r = rows[y % len(rows)] if rows else ""
+        v = 0
+        for x in range(16):
+            if r and r[x % len(r)] == "*":
+                v |= 1 << (15 - x)
+        out.append("%04x" % v)
+    return "".join(out)
+
+
 def _drc_layer_legend(c, layers):
     """flateyes legend lines for the layers that are ON in the
-    snapshot (user call 2026-08-19): one color swatch per visible
-    layer, labeled "NAME l/d". None when everything is on (a full
-    palette table would drown the image)."""
+    snapshot (user call 2026-08-19): one swatch per visible layer
+    in the design color AND its actual fill pattern (pat:HEX64 -
+    layerprops custom fills like the viewer, 50% speckle default,
+    solid/clear kept literal), labeled "NAME l/d". None when
+    everything is on (a full palette table would drown the
+    image)."""
     if layers is None:
         return None
+    fills = {}
+    try:
+        from . import fillpat
+        from . import cache as cache_mod
+        lrows, _ = cache_mod.load_layer_props(c.src)
+        if lrows:
+            pats = fillpat.default_patterns()
+            for key, _color, fill, _nm, _f1, _f2 in lrows:
+                fl = (fill or "").strip().lower()
+                if fl in ("solid", "clear"):
+                    fills[tuple(key)] = fl
+                else:
+                    i = fillpat.fill_index(fill)
+                    if i is not None:
+                        fills[tuple(key)] = pats[i]
+    except Exception:
+        pass
+    from .render import _SPECKLE16
     by = {(l["layer"], l["datatype"]): l for l in c.meta["layers"]}
     legend = []
     for key in layers:
@@ -185,7 +222,14 @@ def _drc_layer_legend(c, layers):
         color = lay.get("color") or "#808080"
         name = (lay.get("name") or "").strip()
         label = ("%s %d/%d" % (name, key[0], key[1])).strip()
-        legend.append("box %s solid %s" % (color, label))
+        pat = fills.get(tuple(key), _SPECKLE16)
+        if pat == "solid":
+            legend.append("box %s solid %s" % (color, label))
+        elif pat == "clear":
+            legend.append("box %s none %s" % (color, label))
+        else:
+            legend.append("box %s pat:%s %s"
+                          % (color, _pat_hex(pat), label))
     return legend or None
 
 
