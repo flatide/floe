@@ -5297,9 +5297,19 @@ class Viewer:
         pb = None
         win = self.window.get_window()
         if win is not None:
+            # the overlay's allocation x/y are NOT toplevel-relative
+            # in this nested paned/scroller layout (field report:
+            # the whole app window got captured) - translate the
+            # canvas origin into toplevel coordinates explicitly
             alloc = self.overlay.get_allocation()
-            pb = Gdk.pixbuf_get_from_window(
-                win, alloc.x, alloc.y, alloc.width, alloc.height)
+            try:
+                ox, oy = self.overlay.translate_coordinates(
+                    self.window, 0, 0)
+            except (TypeError, ValueError):
+                ox = None
+            if ox is not None:
+                pb = Gdk.pixbuf_get_from_window(
+                    win, ox, oy, alloc.width, alloc.height)
         if pb is None:
             pb = self.image.get_pixbuf()   # unmapped fallback
         if pb is None:

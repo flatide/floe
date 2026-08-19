@@ -13,8 +13,11 @@
 ## 2. 렌더 파이프라인 (GUI 쪽)
 
 - **Ctrl+C = 화면 클립보드 복사**(2026-08-19, flateyes 패리티):
-  `_copy_view` — **윈도우 그랩**(`Gdk.pixbuf_get_from_window` +
-  overlay allocation, flateyes capture_view 방식): 룰러 거리 칩과
+  `_copy_view` — **윈도우 그랩**(`Gdk.pixbuf_get_from_window`,
+  flateyes capture_view 방식; 원점은 `translate_coordinates`로
+  톱레벨 기준 변환 — allocation x/y를 그대로 쓰면 중첩 paned/
+  scroller 레이아웃에서 앱 창 전체가 잡히는 실사고 2026-08-19):
+  룰러 거리 칩과
   디자인 라벨은 Gtk.Overlay 위 **위젯**이라 합성 픽스버프에 없음
   (현장 보고: 길이 텍스트 미캡처) — 윈도우에서 떠야 함께 실림.
   창 미매핑 시 `image.get_pixbuf()` 폴백. **store() 호출 금지** —
