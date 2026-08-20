@@ -7,7 +7,8 @@
 - 타겟: Linux(사무실), 개발/테스트: macOS
 - 구성 문서: [ARCHITECTURE.ko.md](ARCHITECTURE.ko.md),
   [docs/SPEC-*.ko.md](docs/), DRC 기능 개요:
-  [docs/DRC.ko.md](docs/DRC.ko.md), 플래너 정본 이력:
+  [docs/DRC.ko.md](docs/DRC.ko.md), DRC 스크립팅 CLI:
+  [docs/DRC-CLI.ko.md](docs/DRC-CLI.ko.md), 플래너 정본 이력:
   `rust/VFS_HIER.md`
 
 ## 1. 설치

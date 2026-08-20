@@ -36,6 +36,8 @@ rust/target/release/floe-index drc results.db [--jobs N]
 **셸 스크립팅 표면**(2026-08-19): 룰 목록·에러 목록은 JSON,
 스냅샷은 룰/에러 지정 PNG 렌더 — 리포트 자동화용. **캡처 상한이
 있는 호출자(ProperTee 등)는 파일로 리다이렉션 후 json_parse.**
+옵션·출력 스키마·엔드-투-엔드 예시는
+[DRC-CLI.ko.md](DRC-CLI.ko.md)가 스크립팅 전용 레퍼런스.
 
 ```sh
 # 룰 목록: [{"name","errors","waived"}, ...]
