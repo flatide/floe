@@ -231,7 +231,13 @@ def _embed_error_png(path, e, bb_um, px, waived, rule, local,
     annos = []
     pts = [P(x, y) for x, y in e.pts]
     if e.kind == "p" and len(pts) >= 3:
-        annos.append(fe.polygon(pts, color=col, width=2))
+        # viewer parity (user call 2026-08-21): the jumped polygon
+        # interior is a 50% status-color speckle in the viewer;
+        # flateyes fills are translucent, so 50% alpha reads the
+        # same - and like the viewer, >256-vertex interiors stay
+        # outline-only (_drc_fill_speckle cap)
+        fill = col + "80" if len(pts) <= 256 else None
+        annos.append(fe.polygon(pts, color=col, fill=fill, width=2))
     elif len(pts) >= 2:
         for j in range(0, len(pts) - 1, 2):
             a, b = pts[j], pts[j + 1]
