@@ -41,6 +41,28 @@ import struct
 import sys
 
 
+EDGE_RULER_OFFSET_PX = 14
+
+
+def offset_screen_segment(a, b, distance=EDGE_RULER_OFFSET_PX):
+    """Move a screen-space segment along a stable normal.
+
+    Prefer the upper side, with the right side as the tie-break for a
+    vertical segment.  The rule is independent of endpoint order so the
+    viewer and rendered snapshot place a one-edge CD ruler identically.
+    """
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    length = math.hypot(dx, dy)
+    if length <= 0:
+        return a, b
+    nx, ny = -dy / length, dx / length
+    if ny > 1e-12 or (abs(ny) <= 1e-12 and nx < 0):
+        nx, ny = -nx, -ny
+    ox, oy = nx * distance, ny * distance
+    return ((a[0] + ox, a[1] + oy),
+            (b[0] + ox, b[1] + oy))
+
+
 class DrcError(object):
     """One violation: kind 'p' (polygon) or 'e' (edge), pts in um."""
     __slots__ = ("kind", "num", "pts")
@@ -91,11 +113,17 @@ class DrcDb(object):
 def cd_segments(e):
     """CD ruler segments for SIMPLE violations, as um 4-tuples -
     shared by the viewer's auto rulers and the CLI snapshot embeds
-    (keep them identical): single edge = its length, facing edge
-    pair = the closest gap (anchored at the midpoint when the
-    edges face in parallel - the common spacing shape),
-    axis-aligned rectangle = BOTH spans through the middle.
-    Complex polygons/edge sets get none."""
+    (keep them identical):
+
+    * single edge = its length;
+    * facing edge pair = the closest gap, anchored at the midpoint
+      when the edges face in parallel (the common spacing shape);
+    * parallel edge pair with diagonal closest endpoints = the primary
+      diagonal ruler followed by horizontal and vertical components;
+    * axis-aligned rectangle = both spans through the middle.
+
+    Complex polygons and edge sets get none.
+    """
     pts = e.pts   # um
 
     def dist(p, q):
@@ -137,7 +165,25 @@ def cd_segments(e):
         fm = foot(mid, b0, b1)
         if dist(mid, fm) <= dmin * 1.0001:
             return [seg(mid, fm)]
-        return [seg(*min(cand, key=lambda c: dist(c[0], c[1])))]
+        p, q = min(cand, key=lambda c: dist(c[0], c[1]))
+        out = [seg(p, q)]
+
+        # Disjoint projections of parallel edges produce a diagonal
+        # endpoint-to-endpoint minimum.  Keep that true minimum first,
+        # then expose its X/Y components as an L between the same points.
+        # The sorted endpoints make the elbow independent of record order.
+        adx, ady = a1[0] - a0[0], a1[1] - a0[1]
+        bdx, bdy = b1[0] - b0[0], b1[1] - b0[1]
+        al2, bl2 = adx * adx + ady * ady, bdx * bdx + bdy * bdy
+        cross = adx * bdy - ady * bdx
+        parallel = (al2 > 0 and bl2 > 0
+                    and abs(cross) <= 1e-12 * math.sqrt(al2 * bl2))
+        if parallel and p[0] != q[0] and p[1] != q[1]:
+            lo, hi = sorted((p, q))
+            elbow = (hi[0], lo[1])
+            out.append(seg(lo, elbow))       # horizontal component
+            out.append(seg(elbow, hi))       # vertical component
+        return out
     if e.kind == "p" and len(pts) == 4:
         xs = sorted(set(x for x, _ in pts))
         ys = sorted(set(y for _, y in pts))

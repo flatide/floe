@@ -34,6 +34,9 @@ pack; D2 keeps the retirement honest.)
       and reserved-status writes) so filter counts are O(1); the
       per-chunk waived-count cache (rank/page jumps) stays in
       sync across toggles made after it is built.
+  D8  diagonal closest endpoints of a parallel edge pair retain the
+      true minimum first and add deterministic horizontal + vertical
+      component rulers; facing and non-parallel pairs stay single.
 
 usage: .venv/bin/python tools/validate_drc_ice.py [floe-index-bin]
 """
@@ -461,6 +464,34 @@ def main():
         fail("waived query returned errors from a wcount-0 rule")
     re2.set_status(cb, last, drc.STATUS_NONE)
     print("D6b OK: status filter inside query_rect, cap-safe")
+
+    # D8: a parallel pair with disjoint projections needs the true
+    # diagonal minimum plus its two axis components.  The first entry
+    # is the measurement contract consumed by the DRC details panel.
+    diagonal = drc.DrcError("e", 1,
+                            [(0.0, 0.0), (1.0, 0.0),
+                             (2.0, 1.0), (3.0, 1.0)])
+    eq(drc.cd_segments(diagonal),
+       [(1.0, 0.0, 2.0, 1.0),
+        (1.0, 0.0, 2.0, 0.0),
+        (2.0, 0.0, 2.0, 1.0)],
+       "diagonal edge-pair component rulers")
+    reversed_edges = drc.DrcError(
+        "e", 2, [(1.0, 0.0), (0.0, 0.0),
+                 (3.0, 1.0), (2.0, 1.0)])
+    eq(drc.cd_segments(reversed_edges), drc.cd_segments(diagonal),
+       "edge endpoint order changed component rulers")
+    facing = drc.DrcError("e", 3,
+                          [(0.0, 0.0), (3.0, 0.0),
+                           (0.0, 1.0), (3.0, 1.0)])
+    if len(drc.cd_segments(facing)) != 1:
+        fail("facing parallel pair gained component rulers")
+    skew = drc.DrcError("e", 4,
+                        [(0.0, 0.0), (1.0, 0.0),
+                         (2.0, 1.0), (3.0, 2.0)])
+    if len(drc.cd_segments(skew)) != 1:
+        fail("non-parallel pair gained component rulers")
+    print("D8 OK: diagonal parallel gap + X/Y component rulers")
 
     print("DRC ICE VALIDATION: ALL OK")
 

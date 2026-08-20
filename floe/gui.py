@@ -227,6 +227,22 @@ def stamp_dotted(buf, a, b, casing, core):
         fill_rect(buf, x - 1, y - 1, 2, 2, core)
 
 
+class _DrcOffsetRuler(object):
+    """A normal 4-coordinate ruler tagged for screen-space offset.
+
+    Keeping the source segment in world coordinates preserves its exact
+    measurement while the viewer can move only its painted dimension line.
+    The object remains unpackable everywhere ordinary ruler tuples are used.
+    """
+    __slots__ = ("segment",)
+
+    def __init__(self, segment):
+        self.segment = tuple(segment)
+
+    def __iter__(self):
+        return iter(self.segment)
+
+
 # ---- ruler-label placement (flateyes port) ---------------------------------
 
 def rects_overlap(p, q):
@@ -1775,8 +1791,16 @@ class Viewer:
         segs = list(self.rulers)
         if self.mode == "ruler" and self._ruler_start is not None:
             segs.append((*self._ruler_start, *self._ruler_end_preview()))
-        for x0, y0, x1, y1 in segs:
+        for seg in segs:
+            x0, y0, x1, y1 = seg
             a, b = (sx(x0), sy(y0)), (sx(x1), sy(y1))
+            if isinstance(seg, _DrcOffsetRuler):
+                edge_a, edge_b = a, b
+                a, b = drc_mod.offset_screen_segment(a, b)
+                # Extension lines expose the error edge underneath while
+                # tying both endpoints to its parallel dimension line.
+                stamp_dotted(disp, edge_a, a, None, RULER_CORE)
+                stamp_dotted(disp, edge_b, b, None, RULER_CORE)
             stamp_segment(disp, a, b, None, RULER_CORE, px=1)
             ang = math.atan2(b[1] - a[1], b[0] - a[0])
             stamp_arrow(disp, b, ang, None, RULER_CORE)       # outward
@@ -1982,9 +2006,12 @@ class Viewer:
             segs.append((*self._ruler_start, *self._ruler_end_preview()))
         w, h = self._viewport_size()
         vis = []
-        for x0, y0, x1, y1 in segs:
+        for seg in segs:
+            x0, y0, x1, y1 = seg
             a = ((x0 - obox[0]) / ospp, (obox[3] - y0) / ospp)
             b = ((x1 - obox[0]) / ospp, (obox[3] - y1) / ospp)
+            if isinstance(seg, _DrcOffsetRuler):
+                a, b = drc_mod.offset_screen_segment(a, b)
             mx, my = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
             if -40 <= mx <= w and -20 <= my <= h:
                 vis.append((a, b, mx, my,
@@ -4706,6 +4733,11 @@ class Viewer:
             if r in self.rulers:
                 self.rulers.remove(r)
         self._drc_ruler = self._drc_cd_ruler(e)
+        if e.kind == "e" and len(e.pts) == 2 and self._drc_ruler:
+            # A ruler painted directly over a one-edge violation hides the
+            # red error. Tag it for a constant screen-space parallel offset;
+            # rendering adds dotted endpoint extension lines.
+            self._drc_ruler = [_DrcOffsetRuler(self._drc_ruler[0])]
         self.rulers.extend(self._drc_ruler)
         self._set_live_status(
             "DRC %s #%d(%d)/%d · %s · %.3f x %.3f um at (%.3f, %.3f)%s"
@@ -4967,6 +4999,11 @@ class Viewer:
                 segs = self._drc_cd_ruler(e)   # dbu 4-tuples
                 if not segs:
                     return None
+                # cd_segments keeps the true closest edge-pair gap first;
+                # later entries can be its horizontal/vertical diagnostics.
+                if e.kind == "e":
+                    x0, y0, x1, y1 = segs[0]
+                    return math.hypot(x1 - x0, y1 - y0) * self.dbu
                 return min(math.hypot(x1 - x0, y1 - y0)
                            for x0, y0, x1, y1 in segs) * self.dbu
             return None
@@ -4977,7 +5014,8 @@ class Viewer:
 
     def _drc_cd_ruler(self, e):
         """CD rulers of a violation as dbu 4-tuples - the geometry
-        (single edge / facing gap / rect spans) lives in
+        (single edge / facing gap and optional axis components /
+        rect spans) lives in
         drc.cd_segments, SHARED with the CLI snapshot embeds; this
         wrapper only converts um -> dbu."""
         k = self.dbu
@@ -5238,6 +5276,8 @@ class Viewer:
             self._set_cursor(self._idle_cursor())
         elif self.rulers:
             self.rulers = []
+            self._auto_rulers = []
+            self._drc_ruler = []
         elif self.selection is not None:
             self._clear_selection()
         elif self._drc_sel is not None:
@@ -5311,6 +5351,8 @@ class Viewer:
             r = self.rulers.pop()
             if r in self._auto_rulers:
                 self._auto_rulers.remove(r)
+            if r in self._drc_ruler:
+                self._drc_ruler.remove(r)
             self._display()
 
     def _rulers_clear(self):
@@ -5318,6 +5360,7 @@ class Viewer:
         if self.rulers or self._ruler_start is not None:
             self.rulers = []
             self._auto_rulers = []
+            self._drc_ruler = []
             self._ruler_start = None
             self._display()
 

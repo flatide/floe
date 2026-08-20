@@ -216,7 +216,8 @@ def _embed_error_png(path, e, bb_um, px, waived, rule, local,
     pixels stay untouched, flateyes shows and edits them on open,
     every other tool sees a plain PNG. Coordinates are image-
     center-origin pixels; the embedded ppu makes flateyes label
-    the rulers in um by itself."""
+    the rulers in um by itself.  A one-edge ruler uses the viewer's
+    same 14 px normal offset, without endpoint extension lines."""
     from . import drc as drc_mod
     from . import fe_embed as fe
     x0, y0, x1, y1 = bb_um
@@ -237,9 +238,12 @@ def _embed_error_png(path, e, bb_um, px, waived, rule, local,
             if a != b:
                 annos.append(fe.line(a[0], a[1], b[0], b[1],
                                      color=col, width=2))
+    offset_single_edge = e.kind == "e" and len(e.pts) == 2
     for sx0, sy0, sx1, sy1 in drc_mod.cd_segments(e):
         a, b = P(sx0, sy0), P(sx1, sy1)
         if a != b:
+            if offset_single_edge:
+                a, b = drc_mod.offset_screen_segment(a, b)
             annos.append(fe.ruler(a[0], a[1], b[0], b[1]))
     note = "%s #%d(%d)%s" % (rule, local, e.num,
                              " - waived" if waived else "")

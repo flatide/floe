@@ -53,7 +53,11 @@ python -m floe drc results.db --errs M1.SPACE.1 > errs.json
 # 에러 도형·CD 룰러·길이 라벨은 픽셀에 굽지 않고 **flateyes
 # embed(iTXt "flateyes" 청크, fe_embed 포맷)**로 PNG 안에 실림
 # — flateyes로 열면 주석으로 표시·편집되고(ppu로 um 길이 자동
-# 라벨), 다른 도구에선 평범한 PNG. note = "룰 #로컬(전역)".
+# 라벨), 다른 도구에선 평범한 PNG. 단일 엣지 CD 룰러는 뷰어와
+# 동일하게 화면 법선 방향으로 14px 띄우되 flateyes 임베드에는
+# 양 끝 연결 점선을 넣지 않음. note = "룰 #로컬(전역)".
+# 서로 평행한 두 엣지의 최근접점이 대각선으로 떨어지는 경우에는
+# 대각선 실제 거리와 그 수평·수직 성분 룰러를 모두 임베드함.
 # 레이어가 좁혀진 캡처(svrf 격리 또는 --layers)는 켜진 레이어의
 # 색+fill 스와치 legend도 임베드 — fill은 패턴 **이름**으로 실림
 # ("box <색> speckle NAME l/d"; flateyes 1.16+가 같은
