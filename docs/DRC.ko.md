@@ -53,7 +53,9 @@ python -m floe drc results.db --errs M1.SPACE.1 > errs.json
 # — flateyes로 열면 주석으로 표시·편집되고(ppu로 um 길이 자동
 # 라벨), 다른 도구에선 평범한 PNG. note = "룰 #로컬(전역)".
 # 레이어가 좁혀진 캡처(svrf 격리 또는 --layers)는 켜진 레이어의
-# 색 스와치 legend도 임베드(flateyes가 우하단 표로 표시).
+# 색+fill 스와치 legend도 임베드 — fill은 패턴 **이름**으로 실림
+# ("box <색> speckle NAME l/d"; flateyes 1.16+가 같은
+# fillpatterns.def 표를 내장, 우하단 표에 실제 패턴으로 표시).
 # 파일당 `로컬# <TAB> 전역# <TAB> 경로` 한 줄 출력.
 # rules.json 사이드카가 발견되면(뷰어와 같은 자동 탐색, 또는
 # --drc-rules 지정) 그 룰의 원천 GDS 레이어만 켜고 렌더 —
