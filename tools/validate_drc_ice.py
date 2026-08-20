@@ -88,6 +88,16 @@ duplicate check name: merged runs keep separate blocks
 e 1 2
 0 0 4000 0
 4000 0 4000 4000
+__RVE_ERROR_TAG2__
+2 2 1 Jul 11 01:56:30 2026
+RVE tag bookkeeping mid-file: records are NOT violations
+p 1 4
+100 100
+200 100
+200 200
+100 200
+e 2 1
+0 0 10 0
 NOCOUNT.CHECK
 p 1 1
 123456 654321
@@ -175,12 +185,15 @@ def main():
     # D1: pack == ASCII on the adversarial fixture
     ice = drc.IcePack(side, src_path=db, verify_src=True)
     # M1.SPACE 3 + dup block 1 + NOCOUNT 1 + SHORTDESC 2
-    # + FAKE_RDBS 1 + TRUNC 1
+    # + FAKE_RDBS 1 + TRUNC 1 (__RVE_ERROR_TAG2__'s 2 records are
+    # excluded AND consume no global numbers - the 1..total
+    # contiguity assert above catches a missing rollback)
     if ref.total != 3 + 1 + 1 + 2 + 1 + 1:
         fail("fixture drifted: ascii total=%d" % ref.total)
     names = [c.name for c in ref.checks]
     for gone in ("DENSITY_RDBS", "NET_AREA_RATIO_RDBS", "DFM_RDBS",
-                 "LAYOUT_INPUT_EXCEPTION_RDBS"):
+                 "LAYOUT_INPUT_EXCEPTION_RDBS",
+                 "__RVE_ERROR_TAG2__"):
         if gone in names:
             fail("admin section %s surfaced as a check" % gone)
     if "FAKE_RDBS" not in names:

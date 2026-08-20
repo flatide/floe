@@ -287,6 +287,15 @@ def load_ascii(path):
                 gnum += 1
                 check.errors.append(DrcError(kind, gnum, pts))
             # unknown kinds: coordinates consumed, record dropped
+        # RVE-internal bookkeeping sections (__RVE_ERROR_TAG2__
+        # etc., dunder-named) carry tag data, not violations
+        # (field report 2026-08-20): ALWAYS dropped - records too,
+        # and those never consume global file-order numbers, so
+        # the numbering matches what RVE displays
+        if check.name.startswith("__RVE_") \
+                and check.name.endswith("__"):
+            gnum -= len(check.errors)
+            continue
         # administrative tail sections (DENSITY_RDBS,
         # NET_AREA_RATIO_RDBS, DFM_RDBS, LAYOUT_INPUT_EXCEPTION_RDBS)
         # list rdb files, not violations: drop them - but only when

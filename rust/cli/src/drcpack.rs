@@ -275,8 +275,15 @@ fn parse_span(
                 }
             }
         }
-        // empty *_RDBS admin tails vanish (drc.py mirror)
-        if name.ends_with(b"_RDBS") && err_cnt == 0 {
+        // RVE-internal bookkeeping sections (__RVE_ERROR_TAG2__
+        // etc.) are tag data, not violations: ALWAYS dropped,
+        // records included - the reader derives global numbers
+        // from stored checks, so numbering stays contiguous;
+        // empty *_RDBS admin tails vanish too (drc.py mirror,
+        // field 2026-08-20)
+        if (name.starts_with(b"__RVE_") && name.ends_with(b"__"))
+            || (name.ends_with(b"_RDBS") && err_cnt == 0)
+        {
             continue;
         }
         checks.push(RawCheck {
