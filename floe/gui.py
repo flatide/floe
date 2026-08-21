@@ -1312,6 +1312,15 @@ class Viewer:
                        Gtk.Label(label="minimap"))
         nb.append_page(palbox, Gtk.Label(label="palette"))
         side.pack_start(nb, False, False, 4)
+        if os.environ.get("FLOE_CLICK_DEBUG"):
+            # presses that bubbled past the grids (or never reached
+            # them) surface here - FLOE_CLICK_DEBUG=1 run + one
+            # click per target tells where the chain breaks
+            nb.connect(
+                "button-press-event",
+                lambda _w, ev: bool(sys.stderr.write(
+                    "[click] notebook-level press at (%.1f, %.1f)"
+                    "\n" % (ev.x, ev.y))) and False)
 
         main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         paned.pack1(main, resize=True, shrink=True)
@@ -2014,6 +2023,10 @@ class Viewer:
                 bb[3] - (py - y0) / scale)
 
     def _on_minimap_click(self, _widget, event):
+        if os.environ.get("FLOE_CLICK_DEBUG"):
+            sys.stderr.write(
+                "[click] minimap press at (%.1f, %.1f) cache=%s\n"
+                % (event.x, event.y, self.cache is not None))
         if self.cache is None:
             return False
         if event.type != Gdk.EventType.BUTTON_PRESS or event.button != 1:
@@ -5972,6 +5985,10 @@ class Viewer:
         row swatch, meta copy, render service, coverage tint, and
         the personal override file (~/.cache/floe)."""
         keys = set(self._selected_layers)
+        if os.environ.get("FLOE_CLICK_DEBUG"):
+            sys.stderr.write(
+                "[click] apply color %s to %d selected layer(s)\n"
+                % (color, len(keys)))
         if not keys:
             self._set_live_status(
                 "select a layer row first, then pick a color")
@@ -6004,6 +6021,14 @@ class Viewer:
         + coordinate resolution kept working - same pattern here.
         Resolve the swatch under the click via widget allocations
         (translate_coordinates crosses windows correctly)."""
+        dbg = os.environ.get("FLOE_CLICK_DEBUG")
+        if dbg:
+            sys.stderr.write(
+                "[click] grid press type=%s button=%s at "
+                "(%.1f, %.1f) own-window=%s cells=%d\n"
+                % (ev.type.value_nick, getattr(ev, "button", "?"),
+                   ev.x, ev.y, ev.window is box.get_window(),
+                   len(cells)))
         if ev.type != Gdk.EventType.BUTTON_PRESS:
             return True
         for wdg, payload in cells:
@@ -6013,11 +6038,21 @@ class Viewer:
             a = wdg.get_allocation()
             if off[0] <= ev.x < off[0] + a.width \
                     and off[1] <= ev.y < off[1] + a.height:
+                if dbg:
+                    sys.stderr.write(
+                        "[click] grid pick -> %r (cell at %s "
+                        "%dx%d)\n" % (payload, off,
+                                       a.width, a.height))
                 cb(payload, ev)
                 return True
+        if dbg:
+            sys.stderr.write("[click] grid pick MISS (gap)\n")
         return True   # spacing gap: swallow, nothing to do
 
     def _on_fill_slot_click(self, slot, ev):
+        if os.environ.get("FLOE_CLICK_DEBUG"):
+            sys.stderr.write("[click] fill slot %d button=%s\n"
+                             % (slot, getattr(ev, "button", "?")))
         if ev.type != Gdk.EventType.BUTTON_PRESS:
             return True
         if ev.button == 3:
