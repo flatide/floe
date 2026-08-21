@@ -203,12 +203,6 @@ def cd_segments(e):
     return []
 
 
-def _is_rve_name(name):
-    """RVE-internal dunder bookkeeping section (__RVE_ERROR_TAG2__
-    etc.) - tag data, never violations (field 2026-08-20)."""
-    return name.startswith("__RVE_") and name.endswith("__")
-
-
 def _ints_prefix(tokens):
     """Leading integers of a token list (check header: ints, then a
     textual timestamp)."""
@@ -344,7 +338,8 @@ def load_ascii(path):
         # (field report 2026-08-20): ALWAYS dropped - records too,
         # and those never consume global file-order numbers, so
         # the numbering matches what RVE displays
-        if _is_rve_name(check.name):
+        if check.name.startswith("__RVE_") \
+                and check.name.endswith("__"):
             gnum -= len(check.errors)
             continue
         # administrative tail sections (DENSITY_RDBS,
@@ -625,31 +620,6 @@ class IcePack(object):
             self.checks.append(IceCheck(
                 s(name_ref), desc, declared,
                 _PackErrors(self, estart, ecnt)))
-        # OLD packs (built before 0.11.40) still carry RVE-internal
-        # sections baked in - the freshness check pins source
-        # size/mtime, not indexer fixes, so they stay "fresh"
-        # forever. TRAILING ones (the real-deck shape) drop safely
-        # at open: every ci-indexed structure keeps its stored
-        # prefix meaning and no global number shifts (nothing
-        # follows them). A mid-file one is kept - dropping it would
-        # shift the stored numbering - with a re-pack hint.
-        kept = check_cnt
-        while kept and _is_rve_name(self.checks[kept - 1].name):
-            kept -= 1
-        if kept < check_cnt:
-            self.total -= sum(ec[kept:])
-            del self.checks[kept:], es[kept:], bs[kept:], ec[kept:]
-            cbb = cbb[:kept]
-            self._wcount = self._wcount[:kept]
-            sys.stderr.write(
-                "[drc] %s: dropped %d RVE-internal tail section(s) "
-                "baked into an old pack (re-run: floe-index drc "
-                "<db> to slim it)\n" % (path, check_cnt - kept))
-        if any(_is_rve_name(c.name) for c in self.checks):
-            sys.stderr.write(
-                "[drc] %s: mid-pack RVE-internal section kept "
-                "(stored numbering) - re-run: floe-index drc <db>\n"
-                % path)
         self._dir_es = np.array(es, dtype=np.int64)
         self._dir_bs = np.array(bs, dtype=np.int64)
         self._ecnt = np.array(ec, dtype=np.int64)
