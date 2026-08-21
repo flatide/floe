@@ -773,9 +773,14 @@ def cmd_gtktest(args):
 
 
 def cmd_view(args):
-    src = os.path.abspath(args.src)
-    if not os.path.isfile(src):
-        raise SystemExit(f"floe: no such file: {src}")
+    # src is optional (user call 2026-08-22): no file = empty
+    # viewer, attach one later via File > load layout… (or a
+    # forwarded `floe view <file>`)
+    src = None
+    if args.src:
+        src = os.path.abspath(args.src)
+        if not os.path.isfile(src):
+            raise SystemExit(f"floe: no such file: {src}")
     # documented entry for the frame-tuning knobs: the flags set
     # the env vars vfsclient reads per request (children inherit;
     # a forwarded running instance keeps its own values)
@@ -806,11 +811,13 @@ def cmd_view(args):
         # the viewer is VFS-only and never builds a cache: fail here, in
         # this terminal, rather than forwarding an unopenable file to the
         # GUI instance
-        if not _cache_ready(src):
+        if src and not _cache_ready(src):
             raise SystemExit(f"no VFS cache for {src}; "
                              f"run: floe-index vfs {src}")
         addr = instance.socket_address(display)
-        request = src
+        # no src: an empty path forwards as a present-only request
+        # (raise the running window; open nothing)
+        request = src or ""
         if goto is not None:
             # repr() round-trips floats exactly, unlike %g
             request += "\tgoto=" + ",".join(repr(v) for v in goto)
@@ -832,7 +839,7 @@ def cmd_view(args):
             import atexit
             atexit.register(lambda: os.path.exists(addr) and os.unlink(addr))
 
-    c = open_cache(src, args=args)
+    c = open_cache(src, args=args) if src else None
     # PyGObject/GTK3 problems are reported inside import_gtk (exit 3)
     from .gui import run_viewer
     depth = args.depth
@@ -849,6 +856,12 @@ def cmd_view(args):
 
 
 def main(argv=None):
+    if argv is None:
+        argv = sys.argv[1:]
+    if not argv:
+        # bare `floe` = `floe view` (user call 2026-08-22): open
+        # the empty viewer (or raise the running instance)
+        argv = ["view"]
     ap = argparse.ArgumentParser(
         prog="floe",
         description="fast viewer/clipper for large OASIS files "
@@ -1066,7 +1079,9 @@ def main(argv=None):
     p = sub.add_parser("view", help="native desktop viewer (GTK3); "
                                     "one instance per (uid, DISPLAY) - "
                                     "later calls forward the path to it")
-    p.add_argument("src")
+    p.add_argument("src", nargs="?", default=None,
+                   help="OASIS source (omit to start empty and use "
+                        "File > load layout…)")
     p.add_argument("--multi", action="store_true",
                    help="always open an independent window (skip the "
                         "single-instance socket)")

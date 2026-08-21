@@ -53,7 +53,8 @@ rust/target/release/floe-index vfs <design.oas> [outdir] [옵션]
 ## 3. 뷰어 실행
 
 ```sh
-.venv/bin/python -m floe view <design.oas> [옵션]
+.venv/bin/python -m floe view [design.oas] [옵션]   # 파일 생략 = 빈 뷰어
+.venv/bin/python -m floe                            # 인자 없음 = view
 ```
 
 | 옵션 | 의미 |
@@ -72,9 +73,11 @@ settled=..` 한 줄이 상시 출력된다(라운드별 비누적 — 성능 실
 
 ## 4. 키맵
 
-상단 **메뉴 바**(File/View/Ruler/DRC)가 아래 명령 전부와 패널
+상단 **메뉴 바**(File/View/Ruler/DRC/Help)가 아래 명령 전부와 패널
 버튼(fit·clip·open .db·rules)을 같은 핸들러로 노출한다 — 라벨에
 키가 병기되고, 토글류는 메뉴를 열 때 현재 상태가 체크로 표시된다.
+**File > load layout…** = 인덱싱된 소스를 실행 중에 열기(빈 뷰어로
+시작했을 때의 첫 로드 포함 — 미인덱스 파일은 floe-index 안내).
 
 | 키 | 동작 |
 |---|---|

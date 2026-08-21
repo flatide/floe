@@ -113,7 +113,17 @@
 상태에서도 하드웨어 키코드로 라틴 키를 복원. 숫자는 `_depth_digit`
 (9-9 1초 내 = full). depth 라벨은 full을 `*`로 표기(`depth: */13`).
 
-- **메뉴 바**(2026-08-22, `_build_menubar`): File(clip·copy·quit) /
+- **빈 시작**(2026-08-22): `floe view`(src 생략)와 인자 없는
+  `floe`(= view)는 레이아웃 없이 뜬다 — `_apply_cache(None)` =
+  meta None·worker None·레이어 패널 빈 상태·타이틀 APP·상태줄
+  "no layout"; redraw/fit/_clamp_view/미니맵/캔버스·미니맵 입력
+  핸들러가 cache None에서 조기 반환. **File > load layout…** =
+  `open_file()`(인스턴스 포워딩과 동일 경로: 인덱스 필수, 없으면
+  floe-index vfs 안내 모달) → `_apply_cache(c)`가 워커 기동·패널
+  재구축, 창이 이미 실현돼 있으면(_did_fit) 즉시 fit. 실행 중
+  인스턴스에 빈 요청("")이 포워딩되면 창만 present(옵션 무시).
+- **메뉴 바**(2026-08-22, `_build_menubar`): File(**load layout**·
+  clip·copy·quit) /
   View(fit·줌·goto·detail·depth·토글 체크 5종·오버레이 순환) /
   Ruler(모드·스냅 체크, 삭제/전체 삭제) / DRC(open .db·SVRF rules·
   n/p·waive·박스선택 체크). 항목은 키와 **같은 핸들러**를 호출하고

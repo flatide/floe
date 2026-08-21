@@ -914,8 +914,10 @@ class Viewer:
                        max(0, min(len(DETAIL_PX) - 1, int(detail))))
         self.cut_px = DETAIL_PX[self.detail]
         # live-render span budget, scaled to the cache's tile size
-        # (finer --tile-mb grids allow proportionally more tiles)
-        self._live_cap = live_caps(cache.meta)[0]
+        # (finer --tile-mb grids allow proportionally more tiles);
+        # the real value lands in _apply_cache (cache may be None -
+        # empty start, user call 2026-08-22)
+        self._live_cap = 1
         self.dump = bool(dump)      # --dump: save debug frame dumps
         self._quitting = False
         # ruler / snap / pick state
@@ -1385,25 +1387,41 @@ class Viewer:
     # ---- cache binding / instance requests --------------------------------
     def _apply_cache(self, cache):
         self.cache = cache
-        self.meta = cache.meta
-        self.dbu = self.meta["dbu"]
-        bb = self.meta["bbox"]
-        self.cx = (bb[0] + bb[2]) / 2
-        self.cy = (bb[1] + bb[3]) / 2
-        self.visible = {(l["layer"], l["datatype"])
-                        for l in self.meta["layers"]}
-        # baked minimap frontier (per-depth structural boxes, v0.11.2
-        # caches; absent key = plain minimap) + per-depth base cache
-        self._frontier_depths = (self.meta.get("frontier")
-                                 or {}).get("depths") or []
-        self._minimap_bases = {}
+        if cache is None:
+            # EMPTY START (user call 2026-08-22): the viewer opens
+            # with no layout - File > load layout… or a forwarded
+            # `floe view <file>` attaches one via open_file. Every
+            # render entry point (redraw/fit/_clamp_view/minimap/
+            # canvas input) guards on cache None.
+            self.meta = None
+            self.dbu = 0.001
+            self.cx = self.cy = 0
+            self.visible = set()
+            self._frontier_depths = []
+            self._minimap_bases = {}
+        else:
+            self.meta = cache.meta
+            self.dbu = self.meta["dbu"]
+            bb = self.meta["bbox"]
+            self.cx = (bb[0] + bb[2]) / 2
+            self.cy = (bb[1] + bb[3]) / 2
+            self.visible = {(l["layer"], l["datatype"])
+                            for l in self.meta["layers"]}
+            # baked minimap frontier (per-depth structural boxes,
+            # v0.11.2 caches; absent key = plain minimap) +
+            # per-depth base cache
+            self._frontier_depths = (self.meta.get("frontier")
+                                     or {}).get("depths") or []
+            self._minimap_bases = {}
+            self._live_cap = live_caps(cache.meta)[0]
         # fill palette state: user-global edited bitmaps + the
         # effective layerprops (personal, else the design default
         # next to the source - already seeded by Cache.load)
         self._fill_patterns = fillpat.default_patterns()
         self._layer_patterns = {}
         self._layer_widths = {}
-        rows, _ = cache_mod.load_layer_props(self.cache.src)
+        rows = ([] if cache is None else
+                cache_mod.load_layer_props(self.cache.src)[0])
         for key, _color, fill, _name, _f1, f2 in rows:
             i = fillpat.fill_index(fill)
             if i is not None:
@@ -1467,23 +1485,32 @@ class Viewer:
             w._detail.set_text("")
             w._info.set_text("no results database loaded")
             self._drc_types_rebuild()   # empty+disable type combo
-        src = self.meta["src"]
-        self.window.set_title(
-            "%s - %s" % (APP, os.path.basename(src["path"])))
-        self._src_label.set_text(
-            "%.2f GB · grid %dx%d" % (src["size"] / 1e9,
-                                      self.meta["grid"]["nx"],
-                                      self.meta["grid"]["ny"]))
+        if cache is None:
+            self.window.set_title(APP)
+            self._src_label.set_text(
+                "no layout - File > load layout…")
+        else:
+            src = self.meta["src"]
+            self.window.set_title(
+                "%s - %s" % (APP, os.path.basename(src["path"])))
+            self._src_label.set_text(
+                "%.2f GB · grid %dx%d" % (src["size"] / 1e9,
+                                          self.meta["grid"]["nx"],
+                                          self.meta["grid"]["ny"]))
         self._build_layer_panel()
         if self.worker is not None:
             self.worker.stop()
-        self.worker = RenderWorker(
-            cache, stream_kb=self.stream_kb,
-            stream_target_ms=self.stream_target_ms,
-            debug=self.render_debug)
-        self.worker.start()
-        if self._did_fit:
-            self.fit()
+            self.worker = None
+        if cache is not None:
+            self.worker = RenderWorker(
+                cache, stream_kb=self.stream_kb,
+                stream_target_ms=self.stream_target_ms,
+                debug=self.render_debug)
+            self.worker.start()
+            if self._did_fit:
+                # window already sized (layout switch, or the FIRST
+                # load into an empty start): frame the new die
+                self.fit()
 
     def _build_layer_panel(self):
         """Calibre-style panel: black background, rows of
@@ -1504,6 +1531,8 @@ class Viewer:
         self._layer_select_anchor = None
         self._layer_order = []
         self._layers_batch = False
+        if self.meta is None:
+            return   # empty start: no layers yet
         groups = {}
         for l in self.meta["layers"]:
             groups.setdefault(l["layer"], []).append(l)
@@ -1582,14 +1611,17 @@ class Viewer:
         self._expand_all(False)
 
     def open_file(self, path):
-        """Open another OASIS file (instance-forwarded request)."""
+        """Open another OASIS file (instance-forwarded request or
+        File > load layout…; also the FIRST layout of an empty
+        start)."""
         path = os.path.abspath(path)
-        if path == self.cache.src and not self.cache.is_stale():
+        if self.cache is not None and path == self.cache.src \
+                and not self.cache.is_stale():
             return None
         c = cache_mod.Cache(path)
         if not c.exists():
-            return "ERR no index for %s; run: %s index %s" % (path, APP,
-                                                              path)
+            return ("ERR no VFS cache for %s; run: floe-index vfs %s"
+                    % (path, path))
         c.load()
         self._apply_cache(c)
         return None
@@ -1613,7 +1645,12 @@ class Viewer:
             fields = line.split("\t")
             path = fields[0].strip()
             if not path:
-                error = "ERR empty request"
+                # bare `floe` with an instance already running:
+                # present the window, change nothing else (the
+                # request's option fields are ignored on purpose -
+                # they are only the sender's defaults)
+                error = None
+                fields = [path]
             else:
                 try:
                     error = self.open_file(path)
@@ -1918,6 +1955,8 @@ class Viewer:
 
     def _minimap_geom(self):
         """(scale, panel x0, panel y0, die px w, die px h) or None."""
+        if self.meta is None:
+            return None
         bb = self.meta["bbox"]
         bw, bh = bb[2] - bb[0], bb[3] - bb[1]
         if bw <= 0 or bh <= 0:
@@ -1957,6 +1996,8 @@ class Viewer:
                 bb[3] - (py - y0) / scale)
 
     def _on_minimap_click(self, _widget, event):
+        if self.cache is None:
+            return False
         if event.type != Gdk.EventType.BUTTON_PRESS or event.button != 1:
             return False
         point = self._minimap_world_point(event.x, event.y)
@@ -2003,6 +2044,8 @@ class Viewer:
         """Draw the die overview below the layer list: the cached
         per-depth base (die + always-visible structural frontier) plus
         the live view box."""
+        if self.meta is None:
+            return   # empty start: the minimap slot stays blank
         geom = self._minimap_geom()
         disp = self._minimap_base(
             None if geom is None else self._minimap_frontier_depth())
@@ -2126,6 +2169,8 @@ class Viewer:
                 fb[2] >= bbox[2] + pad_x and fb[3] >= bbox[3] + pad_y)
 
     def redraw(self, immediate=False):
+        if self.cache is None:
+            return   # empty start: nothing to render yet
         self._clamp_view()
         bbox = self.view_bbox()
         span = self.tiles_spanned(bbox)
@@ -2276,7 +2321,7 @@ class Viewer:
                     "versions in the bundle? overwrite the WHOLE floe/ "
                     "package, not single files\n" % exc)
         try:
-            while True:
+            while self.worker is not None:
                 res = self.worker.res.get_nowait()
                 try:
                     self._handle_result(res)
@@ -2462,6 +2507,8 @@ class Viewer:
 
     # ---- interaction --------------------------------------------------------
     def fit(self):
+        if self.cache is None:
+            return
         bb = self.meta["bbox"]
         self.cx = (bb[0] + bb[2]) / 2
         self.cy = (bb[1] + bb[3]) / 2
@@ -2480,6 +2527,8 @@ class Viewer:
         (user call 2026-08-18: pinned to the exact die edge there
         was no room to band-zoom around edge features). Centered
         on an axis the viewport is wider than."""
+        if self.cache is None:
+            return
         db = self.meta["bbox"]
         mx = (db[2] - db[0]) * 0.10
         my = (db[3] - db[1]) * 0.10
@@ -2508,7 +2557,9 @@ class Viewer:
         self._alloc_size = size
         if not self._did_fit and alloc.width > 50:
             self._did_fit = True
-            if self._start_goto is not None:
+            if self.cache is None:
+                pass   # empty start: _apply_cache fits on first load
+            elif self._start_goto is not None:
                 self.spp = self._fit_spp()  # zoom baseline if no window given
                 self.goto(*self._start_goto)
                 self._start_goto = None
@@ -2561,6 +2612,8 @@ class Viewer:
             int(ox), int(oy), int(x), int(y))
 
     def _on_press(self, _w, ev):
+        if self.cache is None:
+            return False
         if self._pending is not None:
             return True  # render in flight: mouse input waits
         if ev.type == Gdk.EventType.DOUBLE_BUTTON_PRESS \
@@ -2615,6 +2668,8 @@ class Viewer:
         return True
 
     def _on_release(self, _w, ev):
+        if self.cache is None:
+            return False
         if ev.button in (1, 2):
             if self._drag is not None and ev.button != self._drag_btn:
                 return True  # not the button that started the pan
@@ -2681,6 +2736,8 @@ class Viewer:
         return True
 
     def _on_motion(self, _w, ev):
+        if self.cache is None:
+            return False
         self._update_cursor(ev)
         if self._pending is not None:
             # render in flight: the VIEW must not move, but gesture
@@ -2754,6 +2811,8 @@ class Viewer:
         self._band_ext = (min(bmin, ev.x), max(bmax, ev.x))
 
     def _on_scroll(self, _w, ev):
+        if self.cache is None:
+            return False
         if self._pending is not None:
             return True  # render in flight: mouse input waits
         # some X setups (libinput button-scroll, Exceed pointer emulation)
@@ -2949,6 +3008,8 @@ class Viewer:
         return "" if used is None else ", depth %d" % used
 
     def _depth_label(self):
+        if self.meta is None:
+            return "depth: -"
         d = self._depth()
         current = "*" if d is None else str(d)
         maximum = ("?" if self.max_depth is None
@@ -3462,6 +3523,7 @@ class Viewer:
             return menu
 
         m = top("File")
+        item(m, "load layout…", self._load_layout_dialog)
         item(m, "clip region…", self._clip_dialog)
         item(m, "copy view to clipboard\tCtrl+C", self._copy_view)
         sep(m)
@@ -3521,6 +3583,50 @@ class Viewer:
         item(m, "About Floe", self._about_dialog)
         item(m, "Open Source Licenses", self._licenses_dialog)
         return mb
+
+    def _load_layout_dialog(self):
+        """File > load layout… (user call 2026-08-22): open an
+        INDEXED source in place - the same open_file path an
+        instance-forwarded `floe view <file>` takes; the viewer
+        never builds a VFS cache itself, so an unindexed pick gets
+        the floe-index hint."""
+        dlg = Gtk.FileChooserDialog(title="load layout",
+                                    parent=self.window,
+                                    action=Gtk.FileChooserAction.OPEN)
+        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                        "Open", Gtk.ResponseType.OK)
+        if self.meta is not None:
+            dlg.set_current_folder(
+                os.path.dirname(self.meta["src"]["path"]))
+        for name, pats in (("layouts (*.oas, *.gds)",
+                            ("*.oas", "*.oas.gz", "*.gds",
+                             "*.gds.gz")),
+                           ("all files", ("*",))):
+            ff = Gtk.FileFilter()
+            ff.set_name(name)
+            for p in pats:
+                ff.add_pattern(p)
+            dlg.add_filter(ff)
+        if dlg.run() != Gtk.ResponseType.OK:
+            dlg.destroy()
+            return
+        path = dlg.get_filename()
+        dlg.destroy()
+        try:
+            err = self.open_file(path)
+        except Exception as exc:
+            err = "ERR %s" % exc
+        if err:
+            msg = err[4:] if err.startswith("ERR ") else err
+            self._set_live_status(msg)
+            info = Gtk.MessageDialog(
+                transient_for=self.window, modal=True,
+                message_type=Gtk.MessageType.ERROR,
+                buttons=Gtk.ButtonsType.OK, text=msg)
+            self._center_on_parent(info)
+            info.run()
+            info.destroy()
+            self.window.present()
 
     def _about_dialog(self):
         """Help > About (flateyes show_about parity): plain-text
@@ -3796,7 +3902,7 @@ class Viewer:
     def _set_mono(self, on, announce=True):
         """Grayscale all design layers ('b'; DRC visibility)."""
         on = bool(on)
-        if on == self._mono:
+        if on == self._mono or self.worker is None:
             return
         self._mono = on
         self.worker.submit({"kind": "mono", "on": on})
@@ -3871,8 +3977,9 @@ class Viewer:
                                     action=Gtk.FileChooserAction.OPEN)
         dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
                         "Open", Gtk.ResponseType.OK)
-        dlg.set_current_folder(
-            os.path.dirname(self.meta["src"]["path"]))
+        if self.meta is not None:
+            dlg.set_current_folder(
+                os.path.dirname(self.meta["src"]["path"]))
         for name, pats in (("Calibre DRC results (*.db)",
                             ("*.db",)),
                            ("all files", ("*",))):
@@ -6406,6 +6513,9 @@ class Viewer:
         self._set_all_layers(False)
 
     def _clip_dialog(self):
+        if self.cache is None:
+            self._set_live_status("no layout loaded")
+            return
         bbox = self.view_bbox()
         um = [round(v * self.dbu, 1) for v in bbox]
         dlg = Gtk.FileChooserDialog(title="save clip as OASIS",
