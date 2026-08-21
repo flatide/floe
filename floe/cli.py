@@ -241,11 +241,14 @@ def _embed_error_png(path, e, bb_um, px, waived, rule, local,
         annos.append(fe.polygon(pts, color=col, fill=fill, width=2,
                                 casing=False))
     elif len(pts) >= 2:
+        # edge records: 2px status-color segments, halo-free like
+        # the polygon outline (user call 2026-08-21)
         for j in range(0, len(pts) - 1, 2):
             a, b = pts[j], pts[j + 1]
             if a != b:
                 annos.append(fe.line(a[0], a[1], b[0], b[1],
-                                     color=col, width=2))
+                                     color=col, width=2,
+                                     casing=False))
     offset_single_edge = e.kind == "e" and len(e.pts) == 2
     for sx0, sy0, sx1, sy1 in drc_mod.cd_segments(e):
         a, b = P(sx0, sy0), P(sx1, sy1)
