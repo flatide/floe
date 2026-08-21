@@ -1212,6 +1212,7 @@ class Viewer:
         # panel width, so resizing the pane resizes the swatches
         pal.set_column_homogeneous(True)
         pal.set_hexpand(True)
+        pal_cells = []   # (swatch DrawingArea, color) for the pick
         for i, (col, cname) in enumerate(PALETTE_COLORS):
             rgb = tuple(int(col[j:j + 2], 16) / 255.0
                         for j in (1, 3, 5))
@@ -1231,20 +1232,28 @@ class Viewer:
             da.set_size_request(12, 14)
             da.set_hexpand(True)
             da.connect("draw", _draw_swatch)
-            eb = Gtk.EventBox()
-            eb.add(da)
-            eb.set_tooltip_text(
+            da.set_tooltip_text(
                 "%s (%s) - recolor the selected layer(s)"
                 % (cname, col))
-            eb.connect("button-press-event",
-                       lambda _w, _e, c=col:
-                       self._apply_palette_color(c))
-            pal.attach(eb, i % 7, i // 7, 1, 1)
+            pal.attach(da, i % 7, i // 7, 1, 1)
+            pal_cells.append((da, col))
+        # ONE event box per palette grid, swatch resolved by
+        # coordinates (2026-08-22): per-swatch event boxes nested
+        # in the notebook page dropped clicks on the field X server
+        # - the minimap's single-window + coordinate pattern is
+        # proven there
+        pal_eb = Gtk.EventBox()
+        pal_eb.add(pal)
+        pal_eb.connect(
+            "button-press-event",
+            lambda w, ev: self._palette_grid_pick(
+                w, ev, pal_cells,
+                lambda c, _e: self._apply_palette_color(c)))
         # color + fill palettes share ONE notebook tab; the minimap
         # is the other (and default) tab - built after patg below
         palbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
                          spacing=2)
-        palbox.pack_start(pal, False, False, 4)
+        palbox.pack_start(pal_eb, False, False, 4)
 
         # fill pattern palette (user call 2026-08-11): 20 Calibre
         # fills, 5x4. Left click assigns to the selected layer(s);
@@ -1254,6 +1263,7 @@ class Viewer:
         patg.set_column_spacing(2)
         patg.set_column_homogeneous(True)
         patg.set_hexpand(True)
+        patg_cells = []   # (slot DrawingArea, index) for the pick
         for i, fname in enumerate(fillpat.FILL_NAMES):
 
             def _draw_slot(w, cr, i=i):
@@ -1283,15 +1293,18 @@ class Viewer:
             da.set_hexpand(True)
             da.connect("draw", _draw_slot)
             self._fill_slots.append(da)
-            eb = Gtk.EventBox()
-            eb.add(da)
-            eb.set_tooltip_text(
+            da.set_tooltip_text(
                 "%s - click: fill selected layer(s)" % fname)
-            eb.connect("button-press-event",
-                       lambda _w, ev, i=i:
-                       self._on_fill_slot_click(i, ev))
-            patg.attach(eb, i % 5, i // 5, 1, 1)
-        palbox.pack_start(patg, False, False, 4)
+            patg.attach(da, i % 5, i // 5, 1, 1)
+            patg_cells.append((da, i))
+        patg_eb = Gtk.EventBox()
+        patg_eb.add(patg)
+        patg_eb.connect(
+            "button-press-event",
+            lambda w, ev: self._palette_grid_pick(
+                w, ev, patg_cells,
+                lambda slot, e: self._on_fill_slot_click(slot, e)))
+        palbox.pack_start(patg_eb, False, False, 4)
         # fit/clip buttons retired 2026-08-22: View > fit (Ctrl+A)
         # and File > clip region… own them now
         nb = Gtk.Notebook()
@@ -5983,6 +5996,26 @@ class Viewer:
         # render (the covered/preview reuse would keep old pixels)
         self._color_epoch += 1
         self.redraw(immediate=True)
+
+    def _palette_grid_pick(self, box, ev, cells, cb):
+        """One EventBox per palette GRID (2026-08-22): the field
+        X server dropped clicks on per-swatch event boxes nested in
+        the notebook page, while the minimap's single input window
+        + coordinate resolution kept working - same pattern here.
+        Resolve the swatch under the click via widget allocations
+        (translate_coordinates crosses windows correctly)."""
+        if ev.type != Gdk.EventType.BUTTON_PRESS:
+            return True
+        for wdg, payload in cells:
+            off = wdg.translate_coordinates(box, 0, 0)
+            if not off:
+                continue
+            a = wdg.get_allocation()
+            if off[0] <= ev.x < off[0] + a.width \
+                    and off[1] <= ev.y < off[1] + a.height:
+                cb(payload, ev)
+                return True
+        return True   # spacing gap: swallow, nothing to do
 
     def _on_fill_slot_click(self, slot, ev):
         if ev.type != Gdk.EventType.BUTTON_PRESS:
