@@ -85,8 +85,9 @@
 
 - 3-pane: `lpaned[ left | paned[ canvas | side ] ]`. left:
   `_left_stack`(DRC 브라우저 상시 내장 §8b; cell/object 브라우저
-  추후 동거) + 하단 미니맵(180px, `_frontier_depths` =
-  meta.frontier.depths, 클릭 센터링, 0.7px 미만 도트 생략).
+  추후 동거) — 미니맵은 2026-08-22 우측 pane 노트북으로 이전,
+  왼쪽 pane 전체가 DRC 브라우저; 상세(TextView)는 pack2
+  shrink=False + 높이 하한 150px로 **상시 노출**.
 - side(우측, margin_end 6): 토글 버튼행부터 시작(구 제목/소스
   줄은 2026-08-22 창 타이틀로 이전 — "floe - 파일명 · N GB ·
   grid NxN", 빈 시작은 "no layout"), 레이어 목록
@@ -94,7 +95,10 @@
   선택 하이라이트 d9f2ff/픽 fff2a8), **색 팔레트 7×7**(colornames.def
   순서, DrawingArea·pane 폭 연동·1px 외곽), **fill 팔레트 5×4**
   (fillpatterns.def 순서, 1:1 타일 미리보기·흰 바탕 검은 도트,
-  좌클릭=지정; 비트맵 에디터는 FLOE_FILL_EDIT=1 개발용). fit/clip·
+  좌클릭=지정; 비트맵 에디터는 FLOE_FILL_EDIT=1 개발용) — 두 팔레트는
+  **Notebook의 palette 탭**, **minimap 탭이 기본**(180px,
+  `_frontier_depths` = meta.frontier.depths, 클릭 센터링, 0.7px 미만
+  도트 생략; 2026-08-22 왼쪽 pane 하단에서 이전). fit/clip·
   open .db…·rules… 버튼은 2026-08-22 메뉴 바로 이전(패널 정보줄만 잔류).
 - 오버레이(픽스버프 직접 스탬프, gui.py 상단 헬퍼): 룰러(흰 1px 실선
   + 화살촉 + 거리 칩 흰 텍스트 + 점선 리더), 러버밴드(흰 1px), 스냅

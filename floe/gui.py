@@ -1180,8 +1180,10 @@ class Viewer:
         _panel_debug_hook(scroller, self._layers_box,
                           lambda: list(self._layer_rows.values()))
 
-        # Keep the overview in the palette instead of painting it over the
-        # design pixels in the bottom-right corner of the viewport.
+        # Overview minimap: lives in the RIGHT pane notebook since
+        # 2026-08-22 (user call - the left pane keeps its full
+        # height for the DRC browser); tabbed with the palettes
+        # below, minimap tab shown by default.
         self._minimap_image = Gtk.Image()
         self._minimap_image.set_size_request(MINIMAP_PX, MINIMAP_PX)
         self._minimap_image.set_halign(Gtk.Align.CENTER)
@@ -1194,8 +1196,6 @@ class Viewer:
             "button-press-event", self._on_minimap_click)
         self._minimap_event.set_tooltip_text(
             "Click inside the die to center the viewport")
-        self._left_pane.pack_end(self._minimap_event,
-                                 False, False, 4)
 
         # layer color palette (user call 2026-08-10): click a layer
         # row to select it, then a swatch here to recolor. Personal
@@ -1235,7 +1235,11 @@ class Viewer:
                        lambda _w, _e, c=col:
                        self._apply_palette_color(c))
             pal.attach(eb, i % 7, i // 7, 1, 1)
-        side.pack_start(pal, False, False, 4)
+        # color + fill palettes share ONE notebook tab; the minimap
+        # is the other (and default) tab - built after patg below
+        palbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
+                         spacing=2)
+        palbox.pack_start(pal, False, False, 4)
 
         # fill pattern palette (user call 2026-08-11): 20 Calibre
         # fills, 5x4. Left click assigns to the selected layer(s);
@@ -1282,9 +1286,14 @@ class Viewer:
                        lambda _w, ev, i=i:
                        self._on_fill_slot_click(i, ev))
             patg.attach(eb, i % 5, i // 5, 1, 1)
-        side.pack_start(patg, False, False, 4)
+        palbox.pack_start(patg, False, False, 4)
         # fit/clip buttons retired 2026-08-22: View > fit (Ctrl+A)
         # and File > clip region… own them now
+        nb = Gtk.Notebook()
+        nb.append_page(self._minimap_event,
+                       Gtk.Label(label="minimap"))
+        nb.append_page(palbox, Gtk.Label(label="palette"))
+        side.pack_start(nb, False, False, 4)
 
         main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         paned.pack1(main, resize=True, shrink=True)
@@ -3821,7 +3830,13 @@ class Viewer:
         dsc.set_policy(Gtk.PolicyType.NEVER,
                        Gtk.PolicyType.AUTOMATIC)
         dsc.add(detail)
-        paned.pack2(dsc, resize=False, shrink=True)
+        # the error detail keeps a guaranteed slice of the pane
+        # (user call 2026-08-22 - the minimap left, so the browser
+        # owns the full height): shrink=False + a height floor
+        # means neither the splitter nor a tall rules list can
+        # squeeze it to nothing
+        dsc.set_size_request(-1, 150)
+        paned.pack2(dsc, resize=False, shrink=False)
         paned.set_position(420)
         box.pack_start(paned, True, True, 0)
         win._detail = detail.get_buffer()
