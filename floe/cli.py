@@ -231,18 +231,15 @@ def _embed_error_png(path, e, bb_um, px, waived, rule, local,
     annos = []
     pts = [P(x, y) for x, y in e.pts]
     if e.kind == "p" and len(pts) >= 3:
-        # viewer parity (user calls 2026-08-21): interior = the
-        # speckle PATTERN in opaque status-color pixels (flateyes
-        # 1.18 fill_pat replaces the translucent wash - exactly the
-        # viewer's 50% checker of full-intensity pixels), outline =
-        # 2px without the casing halo; like the viewer,
-        # >256-vertex interiors stay outline-only
-        # (_drc_fill_speckle cap)
-        fill = col if len(pts) <= 256 else None
-        annos.append(fe.polygon(
-            pts, color=col, fill=fill,
-            fill_pat="speckle" if fill else None,
-            width=2, casing=False))
+        # interior = SOLID status color at 50% alpha (user call
+        # 2026-08-21 FINAL, after trying the viewer's speckle
+        # fill_pat: the translucent wash reads better in captures -
+        # don't re-propose the pattern); outline = 2px without the
+        # casing halo; >256-vertex interiors stay outline-only
+        # (the viewer's _drc_fill_speckle cap)
+        fill = col + "80" if len(pts) <= 256 else None
+        annos.append(fe.polygon(pts, color=col, fill=fill, width=2,
+                                casing=False))
     elif len(pts) >= 2:
         for j in range(0, len(pts) - 1, 2):
             a, b = pts[j], pts[j + 1]

@@ -58,9 +58,9 @@ python -m floe drc results.db --errs M1.SPACE.1 > errs.json
 # 양 끝 연결 점선을 넣지 않음. note = "룰 #로컬(전역)".
 # 서로 평행한 두 엣지의 최근접점이 대각선으로 떨어지는 경우에는
 # 대각선 실제 거리와 그 수평·수직 성분 룰러를 모두 임베드함.
-# 폴리곤 에러는 뷰어와 동일: 상태색 2px 외곽(halo 없음) + 내부
-# **speckle 패턴 fill(불투명 픽셀, 반투명 아님)** — flateyes 1.18+
-# fill_pat. 256 꼭짓점 초과는 뷰어처럼 외곽만.
+# 폴리곤 에러: 상태색 2px 외곽(halo 없음) + 내부 solid 50%
+# 반투명 fill(#RRGGBB80 — 캡처 가독성 사용자 확정 2026-08-21,
+# speckle 패턴 시도 후 회귀). 256 꼭짓점 초과는 외곽만.
 # 레이어가 좁혀진 캡처(svrf 격리 또는 --layers)는 켜진 레이어의
 # 색+fill 스와치 legend도 임베드 — fill은 패턴 **이름**으로 실림
 # ("box <색> speckle NAME l/d"; flateyes 1.16+가 같은
