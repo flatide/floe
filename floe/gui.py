@@ -1065,16 +1065,9 @@ class Viewer:
         # on the app border (user call 2026-08-11)
         side.set_margin_end(6)
         paned.pack2(side, resize=False, shrink=False)
-        title = Gtk.Label()
-        title.set_markup("<b>%s</b>" % APP)
-        title.set_xalign(0.0)
-        title.set_margin_start(10)
-        title.set_margin_top(8)
-        side.pack_start(title, False, False, 0)
-        self._src_label = Gtk.Label(label="")
-        self._src_label.set_xalign(0.0)
-        self._src_label.set_margin_start(10)
-        side.pack_start(self._src_label, False, False, 0)
+        # the pane-top "floe" title and the size·grid line moved
+        # into the WINDOW TITLE (user call 2026-08-22) - the pane
+        # starts straight at the toggle row
 
         trow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
         side.pack_start(trow, False, False, 4)
@@ -1483,18 +1476,18 @@ class Viewer:
             w._detail.set_text("")
             w._info.set_text("no results database loaded")
             self._drc_types_rebuild()   # empty+disable type combo
+        # size + grid live in the WINDOW TITLE (user call
+        # 2026-08-22: the side pane's floe/source header is gone)
         if cache is None:
-            self.window.set_title(APP)
-            self._src_label.set_text(
-                "no layout - File > load layout…")
+            self.window.set_title(
+                "%s - no layout (File > load layout…)" % APP)
         else:
             src = self.meta["src"]
             self.window.set_title(
-                "%s - %s" % (APP, os.path.basename(src["path"])))
-            self._src_label.set_text(
-                "%.2f GB · grid %dx%d" % (src["size"] / 1e9,
-                                          self.meta["grid"]["nx"],
-                                          self.meta["grid"]["ny"]))
+                "%s - %s · %.2f GB · grid %dx%d"
+                % (APP, os.path.basename(src["path"]),
+                   src["size"] / 1e9, self.meta["grid"]["nx"],
+                   self.meta["grid"]["ny"]))
         self._build_layer_panel()
         if self.worker is not None:
             self.worker.stop()

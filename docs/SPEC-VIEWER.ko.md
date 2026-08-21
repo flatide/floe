@@ -87,7 +87,9 @@
   `_left_stack`(DRC 브라우저 상시 내장 §8b; cell/object 브라우저
   추후 동거) + 하단 미니맵(180px, `_frontier_depths` =
   meta.frontier.depths, 클릭 센터링, 0.7px 미만 도트 생략).
-- side(우측, margin_end 6): 제목/소스, 토글 버튼행, 레이어 목록
+- side(우측, margin_end 6): 토글 버튼행부터 시작(구 제목/소스
+  줄은 2026-08-22 창 타이틀로 이전 — "floe - 파일명 · N GB ·
+  grid NxN", 빈 시작은 "no layout"), 레이어 목록
   (LayerRow: `l.d ■ NAME` 모노스페이스, 숨김=행 전체 취소선만·색 유지,
   선택 하이라이트 d9f2ff/픽 fff2a8), **색 팔레트 7×7**(colornames.def
   순서, DrawingArea·pane 폭 연동·1px 외곽), **fill 팔레트 5×4**
