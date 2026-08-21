@@ -1820,11 +1820,13 @@ class Viewer:
         # _drc_stamp_errs (hover tooltip + canvas pick)
         self._drc_hits = []
         if self.drc_mark is not None:
-            # solid 2px lines, speckled polygon interiors (user call
-            # 2026-08-13: edges = plain 2px, polygons = 50% fill);
-            # spans below the marker size collapse to the marker
-            # square (user call 2026-08-16: no in-between zoom range
-            # where the shape paints smaller than the marker)
+            # solid 2px lines, polygon interiors = solid 50%-alpha
+            # wash (2026-08-22, replaced the opaque checker that
+            # could phase-align with the design speckle and hide
+            # the layers underneath at some zooms); spans below the
+            # marker size collapse to the marker square (user call
+            # 2026-08-16: no in-between zoom range where the shape
+            # paints smaller than the marker)
             pts = [(sx(x), sy(y)) for x, y in self.drc_mark["pts"]]
             mcol = self.drc_mark.get("color", DRC_RED)
             mxs = [p[0] for p in pts]
@@ -1837,7 +1839,7 @@ class Viewer:
                           cyp - DRC_MARK_PX // 2,
                           DRC_MARK_PX, DRC_MARK_PX, mcol)
             elif self.drc_mark["kind"] == "p":
-                self._drc_fill_speckle(disp, pts, mcol)
+                self._drc_fill_translucent(disp, pts, mcol)
                 for a, b in zip(pts, pts[1:] + pts[:1]):
                     stamp_segment(disp, a, b, None, mcol)
             else:
@@ -4863,11 +4865,15 @@ class Viewer:
                 and db.get_status(ci, ei)
                 == drc_mod.STATUS_WAIVED)
 
-    def _drc_speckle_strip(self, width, color):
-        """Two-row RGBA checker strip in `color` (row r: on where
-        (x+r) is even), composited row-by-row into polygon spans -
-        GdkPixbuf has no stipple fill, and per-pixel subpixbuf
-        fills would be far too slow per frame. Cached per color."""
+    def _drc_fill_strip(self, width, color):
+        """One-row SOLID strip in `color` at 50% alpha, composited
+        row-by-row into polygon spans (composite BLENDS, fill would
+        replace). Cached per color. The old 50% checker of opaque
+        pixels shared the design speckle's period: at zoom/pan
+        parities where the two checkers landed in phase, the error
+        covered exactly every drawn design pixel and the layer
+        underneath vanished (field report 2026-08-22) - an alpha
+        blend is phase-free."""
         strips = getattr(self, "_drc_strips", None)
         if strips is None:
             strips = self._drc_strips = {}
@@ -4875,17 +4881,15 @@ class Viewer:
         if strip is not None and strip.get_width() >= width:
             return strip
         strip = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, True,
-                                     8, max(width, 2), 2)
-        strip.fill(0x00000000)
-        for r in (0, 1):
-            for x in range(r & 1, strip.get_width(), 2):
-                strip.new_subpixbuf(x, r, 1, 1).fill(color)
+                                     8, max(width, 2), 1)
+        strip.fill((color & 0xFFFFFF00) | 0x80)
         strips[color] = strip
         return strip
 
-    def _drc_fill_speckle(self, disp, pts, color=DRC_RED):
-        """Even-odd scanline fill of the violation polygon with the
-        50% speckle checker (screen-anchored phase). Degenerate and
+    def _drc_fill_translucent(self, disp, pts, color=DRC_RED):
+        """Even-odd scanline fill of the violation polygon with a
+        SOLID 50%-alpha wash (capture-embed parity - the underlying
+        layers always show through at every zoom). Degenerate and
         very complex outlines fall back to outline-only."""
         if len(pts) < 3 or len(pts) > 256:
             return
@@ -4895,7 +4899,7 @@ class Viewer:
         y1 = min(h_px - 1, int(math.ceil(max(ys))))
         if y1 < y0:
             return
-        strip = self._drc_speckle_strip(w_px, color)
+        strip = self._drc_fill_strip(w_px, color)
         edges = [(a, b) for a, b in zip(pts, pts[1:] + pts[:1])
                  if a[1] != b[1]]
         budget = 20000   # spans; beyond this the fill just stops
@@ -4914,7 +4918,7 @@ class Viewer:
                 if x1 <= x0:
                     continue
                 strip.composite(disp, x0, y, x1 - x0, 1,
-                                0, y - (y & 1), 1, 1,
+                                0, y, 1, 1,
                                 GdkPixbuf.InterpType.NEAREST, 255)
                 budget -= 1
                 if budget <= 0:

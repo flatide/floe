@@ -234,9 +234,10 @@ def _embed_error_png(path, e, bb_um, px, waived, rule, local,
         # interior = SOLID status color at 50% alpha (user call
         # 2026-08-21 FINAL, after trying the viewer's speckle
         # fill_pat: the translucent wash reads better in captures -
-        # don't re-propose the pattern); outline = 2px without the
-        # casing halo; >256-vertex interiors stay outline-only
-        # (the viewer's _drc_fill_speckle cap)
+        # don't re-propose the pattern; the viewer fill matched on
+        # 2026-08-22); outline = 2px without the casing halo;
+        # >256-vertex interiors stay outline-only (the viewer's
+        # _drc_fill_translucent cap)
         fill = col + "80" if len(pts) <= 256 else None
         annos.append(fe.polygon(pts, color=col, fill=fill, width=2,
                                 casing=False))
