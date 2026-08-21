@@ -37,6 +37,14 @@ pack; D2 keeps the retirement honest.)
   D8  diagonal closest endpoints of a parallel edge pair retain the
       true minimum first and add deterministic horizontal + vertical
       component rulers; facing and non-parallel pairs stay single.
+  D9  OLD packs with RVE-internal sections baked in (built before
+      the 0.11.40 __RVE_*__ drop; source freshness cannot see
+      indexer fixes): a TRAILING one drops at open - checks/total
+      shrink, query_rect and set_status still work on the kept
+      prefix - while a mid-file one is kept with a re-pack hint
+      (dropping it would shift the stored global numbers).
+      Simulated by byte-renaming a placeholder check inside a
+      freshly built pack (same length, string table has no CRC).
 
 usage: .venv/bin/python tools/validate_drc_ice.py [floe-index-bin]
 """
@@ -492,6 +500,91 @@ def main():
     if len(drc.cd_segments(skew)) != 1:
         fail("non-parallel pair gained component rulers")
     print("D8 OK: diagonal parallel gap + X/Y component rulers")
+
+    # D9: reader-side drop of RVE tail sections baked into OLD
+    # packs. A fresh pack never contains them (the builder drops),
+    # so simulate age: build with a same-length placeholder name
+    # and byte-rename it inside the pack (no string-table CRC).
+    import contextlib
+    import io
+    d9 = os.path.join(tmp, "d9.db")
+    with open(d9, "w") as f:
+        f.write("D9CELL 1000\n"
+                "RULE.A\n2 2 1 Jul 11 02:00:00 2026\nrule a\n"
+                "p 1 4\n0 0\n100 0\n100 100\n0 100\n"
+                "e 2 1\n0 0 400 0\n"
+                "RULE.B\n1 1 1 Jul 11 02:00:00 2026\nrule b\n"
+                "p 1 3\n10 10\n20 10\n20 20\n"
+                "X_RVE_ERROR_TAG2__\n"
+                "2 2 1 Jul 11 02:00:30 2026\nplaceholder tail\n"
+                "p 1 4\n1 1\n2 1\n2 2\n1 2\n"
+                "e 2 1\n0 0 10 0\n")
+    r = subprocess.run([BIN, "drc", d9], capture_output=True,
+                       text=True)
+    if r.returncode != 0:
+        fail("D9 indexer rc=%d: %s" % (r.returncode,
+                                       r.stderr.strip()))
+    with open(d9 + ".ice", "rb") as f:
+        blob = f.read()
+    if blob.count(b"X_RVE_ERROR_TAG2__") != 1:
+        fail("D9 placeholder name not unique in the pack")
+    with open(d9 + ".ice", "wb") as f:
+        f.write(blob.replace(b"X_RVE_ERROR_TAG2__",
+                             b"__RVE_ERROR_TAG2__"))
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        old = drc.IcePack(d9 + ".ice", src_path=d9, verify_src=True)
+    if [c.name for c in old.checks] != ["RULE.A", "RULE.B"]:
+        fail("D9 tail RVE section survived the open: %r"
+             % [c.name for c in old.checks])
+    if old.total != 3:
+        fail("D9 total kept dropped records: %d" % old.total)
+    if "dropped 1 RVE-internal tail" not in err.getvalue():
+        fail("D9 missing re-pack hint: %r" % err.getvalue())
+    hits = old.query_rect(-1.0, -1.0, 1.0, 1.0, checks=[0, 1])
+    if not hits or any(ci > 1 for ci, _e, _x in hits):
+        fail("D9 query_rect broken after truncation: %r" % hits)
+    old.set_status(1, 0, drc.STATUS_WAIVED)
+    if old.status_counts(1) != (1, 1):
+        fail("D9 set_status/wcount broken on the kept prefix")
+    old.set_status(1, 0, drc.STATUS_NONE)
+    old.close()
+
+    # mid-file variant: kept (stored numbering) + hint
+    d9m = os.path.join(tmp, "d9m.db")
+    with open(d9m, "w") as f:
+        f.write("D9CELL 1000\n"
+                "RULE.A\n1 1 1 Jul 11 02:00:00 2026\nrule a\n"
+                "p 1 3\n0 0\n10 0\n10 10\n"
+                "X_RVE_ERROR_TAG2__\n"
+                "1 1 1 Jul 11 02:00:30 2026\nplaceholder mid\n"
+                "p 1 3\n1 1\n2 1\n2 2\n"
+                "RULE.B\n1 1 1 Jul 11 02:00:00 2026\nrule b\n"
+                "p 1 3\n10 10\n20 10\n20 20\n")
+    r = subprocess.run([BIN, "drc", d9m], capture_output=True,
+                       text=True)
+    if r.returncode != 0:
+        fail("D9m indexer rc=%d" % r.returncode)
+    with open(d9m + ".ice", "rb") as f:
+        blob = f.read()
+    with open(d9m + ".ice", "wb") as f:
+        f.write(blob.replace(b"X_RVE_ERROR_TAG2__",
+                             b"__RVE_ERROR_TAG2__"))
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        mid = drc.IcePack(d9m + ".ice", src_path=d9m,
+                          verify_src=True)
+    names = [c.name for c in mid.checks]
+    if names != ["RULE.A", "__RVE_ERROR_TAG2__", "RULE.B"]:
+        fail("D9m mid-file RVE section not kept: %r" % names)
+    if "mid-pack RVE-internal section kept" not in err.getvalue():
+        fail("D9m missing mid-file hint: %r" % err.getvalue())
+    nums = [e.num for c in mid.checks for e in c.errors]
+    if nums != [1, 2, 3]:
+        fail("D9m stored numbering disturbed: %r" % nums)
+    mid.close()
+    print("D9 OK: old-pack RVE tail dropped at open, mid-file "
+          "kept with hint")
 
     print("DRC ICE VALIDATION: ALL OK")
 
