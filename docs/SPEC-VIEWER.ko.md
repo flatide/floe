@@ -92,7 +92,9 @@
   줄은 2026-08-22 창 타이틀로 이전 — "floe - 파일명 · N GB ·
   grid NxN", 빈 시작은 "no layout"), 레이어 목록
   (LayerRow: `l.d ■ NAME` 모노스페이스, 숨김=행 전체 취소선만·색 유지,
-  선택 하이라이트 d9f2ff/픽 fff2a8), **색 팔레트 7×7**(colornames.def
+  선택 하이라이트 d9f2ff 배경, 지오메트리 픽 = **흰 1px 외곽
+  박스만**(배경 채움 없음 — 2026-08-22: 채움 픽이 레이어 선택과
+  혼동)), **색 팔레트 7×7**(colornames.def
   순서, DrawingArea·pane 폭 연동·1px 외곽), **fill 팔레트 5×4**
   (fillpatterns.def 순서, 1:1 타일 미리보기·흰 바탕 검은 도트,
   좌클릭=지정; 비트맵 에디터는 FLOE_FILL_EDIT=1 개발용; **입력은

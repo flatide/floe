@@ -710,9 +710,10 @@ class LayerRow(object):
             width, height, width * 3)
 
     def _paint(self):
-        fg = ("#fff2a8" if self._picked else
-              "#d9f2ff" if self._selected else
-              "#ffffff")
+        # a geometry pick no longer tints the text - it draws a
+        # white outline box instead (2026-08-22: the filled pick
+        # highlight was mistaken for layer SELECTION)
+        fg = "#d9f2ff" if self._selected else "#ffffff"
         # hidden = ONE bright line cairo-drawn edge to edge by
         # _draw_strike (no per-span pango strike: it vanished in
         # the margins/swatch gaps and doubled over a drawn line).
@@ -740,10 +741,19 @@ class LayerRow(object):
 
     def _draw_strike(self, widget, cr):
         """Hidden layer: one continuous bright line across the FULL
-        row - text, swatch, margins and trailing space alike."""
+        row - text, swatch, margins and trailing space alike.
+        A geometry PICK outlines the row with a white 1px box
+        (no fill - 2026-08-22, the filled highlight read as layer
+        selection)."""
+        alloc = widget.get_allocation()
+        if self._picked:
+            cr.set_source_rgb(1.0, 1.0, 1.0)
+            cr.set_line_width(1)
+            cr.rectangle(0.5, 0.5, alloc.width - 1,
+                         alloc.height - 1)
+            cr.stroke()
         if self._active:
             return False
-        alloc = widget.get_allocation()
         y = max(0, (alloc.height - self._row_pad) // 2)
         cr.set_source_rgb(*(c / 255.0 for c in LAYER_STRIKE_RGB))
         cr.rectangle(0, y, alloc.width, 1)
@@ -759,12 +769,7 @@ class LayerRow(object):
         if on == self._picked:
             return
         self._picked = on
-        context = self.widget.get_style_context()
-        if on:
-            context.add_class("floe-layer-picked")
-        else:
-            context.remove_class("floe-layer-picked")
-        self._paint()
+        self.widget.queue_draw()   # outline drawn by _draw_strike
 
     def set_color(self, color):
         """Palette recolor: rebuild the swatch in place."""
@@ -1104,8 +1109,6 @@ class Viewer:
             b".floe-layers-bg { background-color: #000000; } "
             b".floe-layer-selected, .floe-layer-selected * "
             b"{ background-color: #31566d; } "
-            b".floe-layer-picked, .floe-layer-picked * "
-            b"{ background-color: #66582f; } "
             b".floe-layers-frame scrollbar trough "
             b"{ background-color: #000000; background-image: none; } "
             b".floe-layers-frame scrollbar slider, "
