@@ -19,6 +19,7 @@ import queue
 import sys
 import time
 
+from . import __version__
 from . import cache as cache_mod
 from . import drc as drc_mod
 from . import fillpat
@@ -111,6 +112,41 @@ WHEEL_ZOOM_STEP = 0.96  # at most 4% per wheel event (was 10%)
 # span (zoom in 50%), Shift+Z doubles it back.
 KEY_PAN_FRACTION = 0.50
 KEY_PAN_FRACTION_FINE = 0.10
+
+# Help > Open Source Licenses (license names surveyed 2026-08-22;
+# the full texts travel with each component's own distribution -
+# PyPI/conda-forge packages under the portable runtime/, crates.io
+# sources for the rust side)
+_OSS_LICENSES = """\
+floe links, embeds or ships these open source components.
+
+viewer / CLI (python)
+  Python 3                      PSF License 2.0
+  PyGObject                     LGPL-2.1-or-later
+  GTK 3, GLib, Pango,
+  gdk-pixbuf, ATK               LGPL-2.1-or-later
+  cairo                         LGPL-2.1 / MPL-1.1 (dual)
+  KLayout (python module)       GPL-3.0-or-later
+  NumPy                         BSD-3-Clause
+  Pillow                        MIT-CMU (HPND)
+
+indexer / render daemon (rust, floe-index)
+  flate2, memmap2, crc32fast,
+  miniz_oxide, adler2, cfg-if,
+  libc                          MIT / Apache-2.0 (dual)
+  simd-adler32                  MIT
+
+portable bundle runtime (conda-forge)
+  librsvg                       LGPL-2.1-or-later
+  fontconfig, harfbuzz,
+  libX11 & X client libs        MIT / X11
+  freetype                      FreeType License (BSD-style)
+  Ubuntu fonts                  Ubuntu Font Licence 1.0
+  DejaVu fonts                  Bitstream Vera Licence
+
+Full license texts accompany each component's own
+distribution (PyPI / conda-forge packages, crates.io
+sources)."""
 CAL_ZOOM_IN = 0.5        # spp factor for Ctrl+Z (Shift+Z = inverse)
 
 # layer recolor palette: (hex, name) in grid order, straight from
@@ -3480,7 +3516,56 @@ class Viewer:
         sep(m)
         check(m, "error box-select mode\te", self._esel_toggle,
               lambda: self.mode == "esel")
+
+        m = top("Help")
+        item(m, "About Floe", self._about_dialog)
+        item(m, "Open Source Licenses", self._licenses_dialog)
         return mb
+
+    def _about_dialog(self):
+        """Help > About (flateyes show_about parity): plain-text
+        copyright with the URL shown, NOT clickable - a website
+        link cannot open anything on the closed network."""
+        dlg = Gtk.AboutDialog(transient_for=self.window, modal=True)
+        dlg.set_keep_above(True)   # stay over a fullscreen parent
+        dlg.set_program_name("Floe")
+        dlg.set_version(__version__)
+        dlg.set_copyright("2026 FLATIDE LC.\nhttp://flatide.com")
+        self._center_on_parent(dlg)
+        dlg.run()
+        dlg.destroy()
+        # quartz fails to refocus the parent when a transient
+        # closes (same as _confirm_quit)
+        self.window.present()
+
+    def _licenses_dialog(self):
+        """Help > Open Source Licenses: the components floe links,
+        embeds or ships in the portable bundle, with their license
+        names (full texts travel with each component's own
+        distribution)."""
+        dlg = Gtk.Window(title="Open Source Licenses")
+        dlg.set_transient_for(self.window)
+        dlg.set_modal(True)
+        dlg.set_default_size(560, 480)
+        self._center_on_parent(dlg)
+        self._only_close_button(dlg)
+        sw = Gtk.ScrolledWindow()
+        tv = Gtk.TextView()
+        tv.set_editable(False)
+        tv.set_cursor_visible(False)
+        tv.set_monospace(True)
+        for m in (tv.set_left_margin, tv.set_right_margin,
+                  tv.set_top_margin, tv.set_bottom_margin):
+            m(10)
+        tv.get_buffer().set_text(_OSS_LICENSES)
+        sw.add(tv)
+        dlg.add(sw)
+        dlg.connect(
+            "key-press-event",
+            lambda _w, ev: (dlg.destroy() or True)
+            if Gdk.keyval_name(ev.keyval) == "Escape" else False)
+        dlg.show_all()
+        dlg.present()
 
     def _menu_sync(self):
         """Reflect live state into the menu check items each time a
