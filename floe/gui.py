@@ -1290,14 +1290,8 @@ class Viewer:
                        self._on_fill_slot_click(i, ev))
             patg.attach(eb, i % 5, i // 5, 1, 1)
         side.pack_start(patg, False, False, 4)
-
-        brow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
-        side.pack_start(brow, False, False, 4)
-        for text, cb in (("fit", lambda: self.fit()),
-                         ("clip…", self._clip_dialog)):
-            b = Gtk.Button(label=text)
-            b.connect("clicked", lambda _w, f=cb: f())
-            brow.pack_start(b, True, True, 0)
+        # fit/clip buttons retired 2026-08-22: View > fit (Ctrl+A)
+        # and File > clip region… own them now
 
         main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         paned.pack1(main, resize=True, shrink=True)
@@ -3698,16 +3692,9 @@ class Viewer:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         box.pack_start(top, False, False, 2)
-        b = Gtk.Button(label="open .db…")
-        b.connect("clicked", lambda *_: self._drc_open_dialog())
-        top.pack_start(b, False, False, 2)
-        b = Gtk.Button(label="rules…")
-        b.set_tooltip_text(
-            "attach SVRF rule metadata (<deck>.rules.json from "
-            "`python -m floe svrf <deck>`): constraint, source "
-            "layers and measured value in the error detail")
-        b.connect("clicked", lambda *_: self._drc_rules_dialog())
-        top.pack_start(b, False, False, 0)
+        # open .db…/rules… buttons retired 2026-08-22: the DRC menu
+        # (open results .db… / load SVRF rules…) owns them now; the
+        # info line stays
         info = Gtk.Label(label="no results database loaded")
         info.set_xalign(0.0)
         info.set_ellipsize(Pango.EllipsizeMode.START)

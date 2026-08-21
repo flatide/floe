@@ -170,7 +170,7 @@ python -m floe render chip.oas --drc results.db \
   `--scan`(양쪽 #IFDEF 분기 워크, 인벤토리 출력)으로 구멍 확인.
 
 **뷰어 연동**: db 옆 `<덱 베이스네임>.rules.json` 자동 부착(수동
-`rules…` 버튼), 상세에 추가되는 블록:
+DRC 메뉴 load SVRF rules…), 상세에 추가되는 블록:
 ```
 constraint: ENC via1_drawn m6_drawn > 0 < 0.105
 measured: 0.0399 um vs < 0.1050 · Δ -0.0651 (-62.0%)
