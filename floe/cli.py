@@ -231,17 +231,18 @@ def _embed_error_png(path, e, bb_um, px, waived, rule, local,
     annos = []
     pts = [P(x, y) for x, y in e.pts]
     if e.kind == "p" and len(pts) >= 3:
-        # viewer parity (user call 2026-08-21): the jumped polygon
-        # interior is a 50% status-color speckle in the viewer;
-        # flateyes fills are translucent, so 50% alpha reads the
-        # same - and like the viewer, >256-vertex interiors stay
-        # outline-only (_drc_fill_speckle cap)
-        fill = col + "80" if len(pts) <= 256 else None
-        # no casing halo on the outline (user call 2026-08-21):
-        # the status color sits directly on the design pixels,
-        # like the viewer's plain 2px outline
-        annos.append(fe.polygon(pts, color=col, fill=fill, width=2,
-                                casing=False))
+        # viewer parity (user calls 2026-08-21): interior = the
+        # speckle PATTERN in opaque status-color pixels (flateyes
+        # 1.18 fill_pat replaces the translucent wash - exactly the
+        # viewer's 50% checker of full-intensity pixels), outline =
+        # 2px without the casing halo; like the viewer,
+        # >256-vertex interiors stay outline-only
+        # (_drc_fill_speckle cap)
+        fill = col if len(pts) <= 256 else None
+        annos.append(fe.polygon(
+            pts, color=col, fill=fill,
+            fill_pat="speckle" if fill else None,
+            width=2, casing=False))
     elif len(pts) >= 2:
         for j in range(0, len(pts) - 1, 2):
             a, b = pts[j], pts[j + 1]
