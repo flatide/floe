@@ -1191,6 +1191,11 @@ class Viewer:
         self._minimap_event = Gtk.EventBox()
         self._minimap_event.set_size_request(MINIMAP_PX, MINIMAP_PX)
         self._minimap_event.set_halign(Gtk.Align.CENTER)
+        # keep the box at its natural square inside the notebook
+        # page too - without a vertical alignment it stretches to
+        # the tallest page and the centered image drifts off the
+        # click coordinates (belt: the handler also translates)
+        self._minimap_event.set_valign(Gtk.Align.CENTER)
         self._minimap_event.add(self._minimap_image)
         self._minimap_event.connect(
             "button-press-event", self._on_minimap_click)
@@ -2000,7 +2005,15 @@ class Viewer:
             return False
         if event.type != Gdk.EventType.BUTTON_PRESS or event.button != 1:
             return False
-        point = self._minimap_world_point(event.x, event.y)
+        # inside the notebook page the event box can be LARGER than
+        # the 180px image, which centers within it - event coords
+        # are box-relative, the world mapping is image-relative:
+        # subtract the image's offset (field report 2026-08-22:
+        # clicks landed below the intended point by half the slack)
+        ea = self._minimap_event.get_allocation()
+        ia = self._minimap_image.get_allocation()
+        point = self._minimap_world_point(
+            event.x - (ia.x - ea.x), event.y - (ia.y - ea.y))
         if point is None:
             return True
         self.cx, self.cy = point
