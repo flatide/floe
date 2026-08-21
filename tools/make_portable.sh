@@ -113,6 +113,25 @@ for f in *; do
 done
 cd "$WORK"
 
+# -- 5b. floe-index (rust daemon/indexer) next to the interpreter --------
+# vfsclient.find_binary()'s portable slot is NEXT TO sys.executable =
+# runtime/bin/floe-index. Without it the viewer still OPENS (the python
+# side is complete) but every render waits forever on a vfsd that never
+# spawns, and indexing / DRC --pack cannot run at all (field 2026-08-21).
+# The python package and this binary are a matched pair (pack layout /
+# ovm version discipline): always ship and update them together.
+FLOE_INDEX_BIN=${FLOE_INDEX_BIN:-$REPO/rust/target/release/floe-index}
+if [ ! -x "$FLOE_INDEX_BIN" ] && command -v cargo >/dev/null; then
+    echo "== floe-index not built yet - building (release)"
+    (cd "$REPO/rust" && cargo build --release -p floe-index)
+fi
+[ -x "$FLOE_INDEX_BIN" ] || {
+    echo "floe-index binary not found ($FLOE_INDEX_BIN):"
+    echo "build rust/ on this machine or point FLOE_INDEX_BIN at a"
+    echo "Linux x86_64 release build"; exit 1; }
+cp "$FLOE_INDEX_BIN" "$WORK/runtime/bin/floe-index"
+chmod +x "$WORK/runtime/bin/floe-index"
+
 # -- 6. verify: arch, glibc floor <= ceiling, key files -----------------
 # The real host requirement is the MAX GLIBC_2.x any bundled ELF needs
 # (dominated by klayout/numpy wheels ~2.27); ceiling only guards against
@@ -150,6 +169,7 @@ must = ["lib/libgtk-3.so.0", "lib/girepository-1.0/Gtk-3.0.typelib",
         "lib/python%s/site-packages/gi/__init__.py" % pyver,
         "lib/python%s/site-packages/floe/cli.py" % pyver,
         "lib/python%s/site-packages/klayout" % pyver,
+        "bin/floe-index",   # rust daemon: render/indexing hang without it
         "share/glib-2.0/schemas",
         "fonts"]  # bundled sans fallback (fonts.conf lists it first)
 missing = [m for m in must if not os.path.exists(os.path.join(root, m))]
@@ -270,6 +290,17 @@ print("numpy:        %s OK" % numpy.__version__)
 import floe; print("floe:         %s OK" % floe.__version__)
 PY
 rm -f "\$CACHE"
+if [ -x "\$RT/bin/floe-index" ]; then
+    "\$RT/bin/floe-index" >/dev/null 2>&1
+    if [ \$? -eq 2 ]; then
+        echo "floe-index:   OK (runtime/bin)"
+    else
+        echo "floe-index:   present but failed to run (host glibc?)"
+    fi
+else
+    echo "floe-index:   MISSING - viewer opens but rendering and"
+    echo "              indexing hang (re-deploy runtime/bin/floe-index)"
+fi
 echo "display:      DISPLAY=\${DISPLAY:-<unset>}  (open test: ./floe view <file.oas>)"
 EOF
 
@@ -335,8 +366,9 @@ cat > "$B/README-PORTABLE.txt" <<EOF
 floe 포터블 번들 (floe ${VERSION}, ${STAMP} 빌드)
 ====================
 PyGObject(python3-gobject)가 없는 호스트에서 floe를 실행하기 위한 자체
-포함 런타임. Python + PyGObject + GTK3 + klayout + numpy + floe가 runtime/
-안에 들어 있으며 시스템에는 아무것도 설치·변경하지 않는다. 시스템에서
+포함 런타임. Python + PyGObject + GTK3 + klayout + numpy + floe 패키지 +
+floe-index(러스트 인덱서/렌더 데몬, runtime/bin/)가 runtime/ 안에 들어
+있으며 시스템에는 아무것도 설치·변경하지 않는다. 시스템에서
 쓰는 것은 X 디스플레이와 (있다면) 시스템 폰트뿐.
 
 요구: x86_64 리눅스, glibc ${FLOOR}+ (RHEL8+; klayout/numpy 휠 요구), X 디스플레이.
@@ -351,12 +383,17 @@ PyGObject(python3-gobject)가 없는 호스트에서 floe를 실행하기 위한
 
 floe 코드 업데이트: 새 floe/ 패키지를
     runtime/lib/python*/site-packages/floe
-에 덮어쓰면 된다. 런타임은 재사용.
+에 덮어쓰고, 같은 체크아웃에서 빌드한 floe-index를
+    runtime/bin/floe-index
+로 함께 교체한다 (chmod +x). 파이썬 패키지와 러스트 바이너리는
+포맷 버전이 한 쌍이라 항상 같이 움직여야 한다. 런타임은 재사용.
 
 문제 해결:
 - "GLIBC_x.xx not found": 호스트 glibc가 ${FLOOR} 미만 → 사용 불가 (selfcheck 확인)
 - 코드 3 종료: DISPLAY 미설정/접속 불가
 - 창은 뜨는데 회색/렌더 오류: ~/.cache/floe-rt 삭제 후 재실행 (캐시 재생성)
+- 뷰어는 열리는데 렌더가 멈춤·인덱싱이 안 됨: runtime/bin/floe-index
+  누락/실행 불가 (selfcheck의 floe-index 줄 확인)
 EOF
 
 chmod +x "$B/floe" "$B/selfcheck"
