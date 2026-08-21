@@ -237,7 +237,11 @@ def _embed_error_png(path, e, bb_um, px, waived, rule, local,
         # same - and like the viewer, >256-vertex interiors stay
         # outline-only (_drc_fill_speckle cap)
         fill = col + "80" if len(pts) <= 256 else None
-        annos.append(fe.polygon(pts, color=col, fill=fill, width=2))
+        # no casing halo on the outline (user call 2026-08-21):
+        # the status color sits directly on the design pixels,
+        # like the viewer's plain 2px outline
+        annos.append(fe.polygon(pts, color=col, fill=fill, width=2,
+                                casing=False))
     elif len(pts) >= 2:
         for j in range(0, len(pts) - 1, 2):
             a, b = pts[j], pts[j + 1]
