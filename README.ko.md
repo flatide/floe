@@ -143,6 +143,7 @@ fit·clip·open .db·rules 기능을 노출한다(구 패널 버튼들은 메뉴
 | `FLOE_HAIRLINE` | rev 41 헤어라인 계수 (기본 0.5, 0=off) |
 | `FLOE_THIN_UM` | rev 45 프레임 격자 피치 µm (기본 7.0, **0 = rev41+43 완전 복원**) |
 | `FLOE_XQUARTZ` 계열 | XQuartz XRender 흑화 우회 (런처가 `CAIRO_DEBUG=xrender-version=-1` 설정) |
+| `FLOE_CLICK_DEBUG` | 팔레트/미니맵 클릭 경로 stderr 트레이스 (`[click]` 줄) |
 | `FLOE_PANEL_DEBUG`, `FLOE_MOSAIC`, `FLOE_WS`, `FLOE_CLIP`, `FLOE_REGION`, `FLOE_TESTCHIP` | 디버그/테스트용 |
 
 ## 7. 기타 CLI

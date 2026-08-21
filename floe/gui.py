@@ -1238,10 +1238,9 @@ class Viewer:
             pal.attach(da, i % 7, i // 7, 1, 1)
             pal_cells.append((da, col))
         # ONE event box per palette grid, swatch resolved by
-        # coordinates (2026-08-22): per-swatch event boxes nested
-        # in the notebook page dropped clicks on the field X server
-        # - the minimap's single-window + coordinate pattern is
-        # proven there
+        # coordinates (2026-08-22; see _palette_grid_pick - the
+        # "dead clicks" were no-layer-selected in the end, this
+        # structure stays as a simplification)
         pal_eb = Gtk.EventBox()
         pal_eb.add(pal)
         pal_eb.connect(
@@ -6015,12 +6014,14 @@ class Viewer:
         self.redraw(immediate=True)
 
     def _palette_grid_pick(self, box, ev, cells, cb):
-        """One EventBox per palette GRID (2026-08-22): the field
-        X server dropped clicks on per-swatch event boxes nested in
-        the notebook page, while the minimap's single input window
-        + coordinate resolution kept working - same pattern here.
-        Resolve the swatch under the click via widget allocations
-        (translate_coordinates crosses windows correctly)."""
+        """One EventBox per palette GRID resolves the swatch by
+        coordinates (translate_coordinates + allocations). Built
+        while chasing the 2026-08-22 "dead palette" reports, which
+        turned out to be clicks WITHOUT a selected layer row (the
+        only feedback is the status line) - delivery itself was
+        verified end to end. Kept as a simplification: 2 input
+        windows instead of 69, same pattern as the minimap.
+        FLOE_CLICK_DEBUG=1 traces this path."""
         dbg = os.environ.get("FLOE_CLICK_DEBUG")
         if dbg:
             sys.stderr.write(

@@ -96,9 +96,11 @@
   순서, DrawingArea·pane 폭 연동·1px 외곽), **fill 팔레트 5×4**
   (fillpatterns.def 순서, 1:1 타일 미리보기·흰 바탕 검은 도트,
   좌클릭=지정; 비트맵 에디터는 FLOE_FILL_EDIT=1 개발용; **입력은
-  그리드당 EventBox 1개 + `_palette_grid_pick` 좌표 해석** —
-  스와치별 중첩 EventBox는 노트북 페이지 안에서 현장 X 서버가
-  클릭을 떨어뜨린 실사고 2026-08-22, 미니맵과 동일 패턴) — 두 팔레트는
+  그리드당 EventBox 1개 + `_palette_grid_pick` 좌표 해석**(미니맵과
+  동일 패턴, 입력 윈도우 69→2 단순화). 2026-08-22 "팔레트 무반응"
+  보고의 실원인은 **레이어 행 미선택**(피드백이 상태줄뿐) —
+  배달·좌표·핸들러는 계측으로 전 구간 정상 확인, FLOE_CLICK_DEBUG=1
+  트레이스 존치) — 두 팔레트는
   **Notebook의 palette 탭**, **minimap 탭이 기본**(180px,
   `_frontier_depths` = meta.frontier.depths, 클릭 센터링, 0.7px 미만
   도트 생략; 2026-08-22 왼쪽 pane 하단에서 이전). fit/clip·
