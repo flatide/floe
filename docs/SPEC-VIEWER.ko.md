@@ -113,6 +113,15 @@
 상태에서도 하드웨어 키코드로 라틴 키를 복원. 숫자는 `_depth_digit`
 (9-9 1초 내 = full). depth 라벨은 full을 `*`로 표기(`depth: */13`).
 
+- **메뉴 바**(2026-08-22, `_build_menubar`): File(clip·copy·quit) /
+  View(fit·줌·goto·detail·depth·토글 체크 5종·오버레이 순환) /
+  Ruler(모드·스냅 체크, 삭제/전체 삭제) / DRC(open .db·SVRF rules·
+  n/p·waive·박스선택 체크). 항목은 키와 **같은 핸들러**를 호출하고
+  라벨에 키를 병기(AccelGroup 미등록 — 키는 `_on_key` 단일 경로,
+  이중 발화 방지). CheckMenuItem은 메뉴 `show` 시 `_menu_sync`가
+  실상태(frames_on/abstract/coverage_on/lod_on/_mono/snap_on/mode)를
+  반영하며 `_menu_guard`로 set_active의 핸들러 역발화를 차단.
+
 ## 8. 색/패턴 적용 경로
 
 recolor: 행 스와치 재생성(set_color) + meta 갱신 + 개인 layerprops

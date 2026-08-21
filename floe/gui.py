@@ -983,6 +983,7 @@ class Viewer:
         # the panel drags the panel width.
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.window.add(outer)
+        outer.pack_start(self._build_menubar(), False, False, 0)
         # [left pane (future cell/object lists, minimap at the
         # bottom) | [canvas | layer panel]] - user call 2026-08-10
         lpaned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
@@ -3385,6 +3386,112 @@ class Viewer:
             "(Shift add / Ctrl toggle, Esc exits)"
             % (db.checks[ci].name, mode, len(eis)))
         self._display()
+
+    def _build_menubar(self):
+        """Top menu bar (user call 2026-08-22): the key-bound
+        commands, the panel buttons (fit/clip/open .db/rules) and
+        the ruler tools grouped under File/View/Ruler/DRC. Every
+        item calls the SAME handler as its key, with the key shown
+        in the label; check items re-sync from live state each time
+        their menu opens (guard flag so set_active cannot fire the
+        handler back)."""
+        mb = Gtk.MenuBar()
+        self._menu_checks = []   # (CheckMenuItem, live-state getter)
+        self._menu_guard = False
+
+        def item(menu, label, cb):
+            it = Gtk.MenuItem(label=label)
+            it.connect("activate", lambda *_: cb())
+            menu.append(it)
+
+        def check(menu, label, cb, state):
+            it = Gtk.CheckMenuItem(label=label)
+
+            def on_toggle(_i):
+                if not self._menu_guard:
+                    cb()
+            it.connect("toggled", on_toggle)
+            menu.append(it)
+            self._menu_checks.append((it, state))
+
+        def sep(menu):
+            menu.append(Gtk.SeparatorMenuItem())
+
+        def top(label):
+            root = Gtk.MenuItem(label=label)
+            menu = Gtk.Menu()
+            root.set_submenu(menu)
+            menu.connect("show", lambda *_: self._menu_sync())
+            mb.append(root)
+            return menu
+
+        m = top("File")
+        item(m, "clip region…", self._clip_dialog)
+        item(m, "copy view to clipboard\tCtrl+C", self._copy_view)
+        sep(m)
+        item(m, "quit\tq", self._confirm_quit)
+
+        m = top("View")
+        item(m, "fit (zoom all)\tCtrl+A", self.fit)
+        item(m, "zoom in 50%\tCtrl+Z",
+             lambda: self._zoom_center(CAL_ZOOM_IN))
+        item(m, "zoom out 50%\tShift+Z",
+             lambda: self._zoom_center(1 / CAL_ZOOM_IN))
+        item(m, "goto position…\tg", self._goto_dialog)
+        sep(m)
+        item(m, "detail…\td", self._detail_dialog)
+        item(m, "depth +1\t>", lambda: self._depth_step(1))
+        item(m, "depth -1\t<", lambda: self._depth_step(-1))
+        item(m, "depth full\t9 9", lambda: self._set_depth(999))
+        sep(m)
+        check(m, "hierarchy frames\tf",
+              lambda: self._set_frames(not self.frames_on),
+              lambda: self.frames_on)
+        check(m, "abstract cells\ta", self._toggle_abstract,
+              lambda: self.abstract)
+        check(m, "density coverage\tv", self._toggle_coverage,
+              lambda: self.coverage_on)
+        check(m, "LOD\tl", lambda: self._set_lod(not self.lod_on),
+              lambda: self.lod_on)
+        check(m, "grayscale layers\tb",
+              lambda: self._set_mono(not self._mono),
+              lambda: self._mono)
+        sep(m)
+        item(m, "cycle overlays (all / errors / none)\tTab",
+             self._toggle_overlays)
+
+        m = top("Ruler")
+        check(m, "ruler mode\tr", self._toggle_ruler,
+              lambda: self.mode == "ruler")
+        check(m, "edge/vertex snap\tm", self._toggle_snap,
+              lambda: self.snap_on)
+        sep(m)
+        item(m, "delete last ruler\tk", self._ruler_pop)
+        item(m, "clear rulers\tShift+K", self._rulers_clear)
+
+        m = top("DRC")
+        item(m, "open results .db…", self._drc_open_dialog)
+        item(m, "load SVRF rules…", self._drc_rules_dialog)
+        sep(m)
+        item(m, "next error\tn", lambda: self._drc_step(1))
+        item(m, "previous error\tp", lambda: self._drc_step(-1))
+        item(m, "waive/unwaive current error\tw",
+             self._drc_waive_key)
+        sep(m)
+        check(m, "error box-select mode\te", self._esel_toggle,
+              lambda: self.mode == "esel")
+        return mb
+
+    def _menu_sync(self):
+        """Reflect live state into the menu check items each time a
+        menu opens (guarded: set_active must not call the toggle
+        handlers back)."""
+        self._menu_guard = True
+        try:
+            for it, state in self._menu_checks:
+                it.set_active(bool(state()))
+        finally:
+            self._menu_guard = False
 
     def _build_drc_panel(self):
         """DRC browser panel, embedded in the left pane (always
