@@ -922,7 +922,10 @@ class Viewer:
         self._drc_hits = []         # frame's painted markers:
                                     # (px, py, ci, ei) for hover/pick
         self._drc_tip = None        # last tooltip text set
-        self.overlays_on = True     # Tab: rulers/marks/markers
+        self.overlay_mode = 0       # Tab cycles (user call
+        # 2026-08-21): 0 = everything shown, 1 = OTHER errors
+        # hidden (jumped error + rulers stay), 2 = all overlays
+        # hidden (the old flateyes-parity clean look)
         # prev/next walk by ARITHMETIC over cumulative counts, never
         # a materialized per-error list: an .ice sidecar can hold
         # hundreds of millions of violations
@@ -1767,11 +1770,11 @@ class Viewer:
         def sy(v):
             return (obox[3] - v) / ospp
 
-        if not self.overlays_on:
-            # Tab (flateyes parity): overlays hidden - rulers,
-            # marks, markers, selections all skip; only the live
-            # zoom band stays interactive. Stale marker hits must
-            # not pick invisible markers.
+        if self.overlay_mode == 2:
+            # Tab state 2 (flateyes parity): overlays hidden -
+            # rulers, marks, markers, selections all skip; only the
+            # live zoom band stays interactive. Stale marker hits
+            # must not pick invisible markers.
             self._drc_hits = []
             if self._zoomdrag is not None \
                     and self._band_cur is not None:
@@ -1847,17 +1850,21 @@ class Viewer:
             bx, by = self._cursor
             rect_outline(disp, sx(ax), sy(ay), sx(bx), sy(by),
                          None, RULER_CORE, px=1)
-        if self._drc is not None and self._drc_open is not None:
+        if self.overlay_mode == 0 and self._drc is not None \
+                and self._drc_open is not None:
             # the canvas shows the CURRENT GRID PAGE's errors (user
             # call 2026-08-15: page flips must move the markers) -
-            # geometry prebuilt by _drc_grid_fill
+            # geometry prebuilt by _drc_grid_fill. Tab state 1
+            # hides these (and the gold set below): only the jumped
+            # error above stays (user call 2026-08-21); _drc_hits
+            # then stays empty so hidden markers cannot be picked.
             if self._drc_hl and hasattr(self._drc, "query_rect"):
                 # keeps the in-view filter grid following the view
                 self._drc_hl_list()
             with _dprof("paint: rule errors"):
                 self._drc_stamp_errs(disp, sx, sy,
                                      self._drc_page_marks)
-        if self._drc_sel is not None:
+        if self.overlay_mode == 0 and self._drc_sel is not None:
             # box selection ('e'): GOLD on top of the status colors
             sci, _seis, marks, _eset = self._drc_sel
             self._drc_stamp_errs(
@@ -2000,8 +2007,8 @@ class Viewer:
         # Tab hides overlays: the distance chips are WIDGETS, not
         # pixbuf paint, so they need their own gate (field report
         # 2026-08-19: chips survived the toggle)
-        segs = [] if not self.overlays_on else list(self.rulers)
-        if self.overlays_on and self.mode == "ruler" \
+        segs = [] if self.overlay_mode == 2 else list(self.rulers)
+        if self.overlay_mode != 2 and self.mode == "ruler" \
                 and self._ruler_start is not None:
             segs.append((*self._ruler_start, *self._ruler_end_preview()))
         w, h = self._viewport_size()
@@ -5336,13 +5343,15 @@ class Viewer:
             "copied  %dx%d" % (pb.get_width(), pb.get_height()))
 
     def _toggle_overlays(self):
-        """Tab (flateyes parity): show/hide every overlay - rulers,
-        DRC marks and markers, selections, snap cross - for a clean
-        look at the design underneath."""
-        self.overlays_on = not self.overlays_on
+        """Tab cycles THREE states (user call 2026-08-21): all
+        shown -> other errors hidden (the jumped error, rulers and
+        chips stay) -> everything hidden (the old flateyes-parity
+        clean look) -> all shown."""
+        self.overlay_mode = (self.overlay_mode + 1) % 3
         self._set_live_status(
-            "overlays %s" % ("shown" if self.overlays_on
-                             else "hidden (Tab restores)"))
+            {0: "overlays shown",
+             1: "other errors hidden (Tab cycles)",
+             2: "overlays hidden (Tab restores)"}[self.overlay_mode])
         self._display()
 
     def _ruler_pop(self):
