@@ -2007,13 +2007,15 @@ class Viewer:
             return False
         # inside the notebook page the event box can be LARGER than
         # the 180px image, which centers within it - event coords
-        # are box-relative, the world mapping is image-relative:
-        # subtract the image's offset (field report 2026-08-22:
-        # clicks landed below the intended point by half the slack)
-        ea = self._minimap_event.get_allocation()
-        ia = self._minimap_image.get_allocation()
-        point = self._minimap_world_point(
-            event.x - (ia.x - ea.x), event.y - (ia.y - ea.y))
+        # are box-relative, the world mapping is image-relative.
+        # translate_coordinates handles the offset CORRECTLY across
+        # the event box's own GdkWindow (raw allocation subtraction
+        # mixed coordinate spaces and sent every click off the die
+        # - field reports 2026-08-22 x2)
+        off = self._minimap_image.translate_coordinates(
+            self._minimap_event, 0, 0)
+        ox, oy = off if off else (0, 0)
+        point = self._minimap_world_point(event.x - ox, event.y - oy)
         if point is None:
             return True
         self.cx, self.cy = point
