@@ -4833,13 +4833,28 @@ class Viewer:
         self._display()
 
     def _drc_waive_key(self):
-        """w: toggle the waive status of the CURRENT error (user
-        call 2026-08-20) - the single-clicked/stepped focus first,
-        else the jump position (_drc_focus is None while a jump
-        mark is live, and _drc_pos survives the Esc restore, so the
-        error still shown in the detail pane stays toggleable)."""
+        """w (user calls 2026-08-20/22): with a gold SELECTION,
+        toggle the selected errors as ONE batch - all waived means
+        unwaive all, anything else means waive all (a mixed set
+        resolves to waived, so w-w round-trips). Without a
+        selection, toggle the CURRENT error - the single-clicked/
+        stepped focus first, else the jump position (_drc_focus is
+        None while a jump mark is live, and _drc_pos survives the
+        Esc restore, so the error still shown in the detail pane
+        stays toggleable)."""
         db = self._drc
         if db is None:
+            return
+        if not hasattr(db, "set_status"):
+            self._set_live_status(
+                "waive needs a packed index: "
+                "floe-index drc <db> --pack")
+            return
+        sel = self._drc_sel
+        if sel is not None and sel[1]:
+            ci, eis = sel[0], list(sel[1])
+            on = not all(self._drc_waived(db, ci, e) for e in eis)
+            self._drc_set_waived(ci, eis, on)
             return
         ci = ei = None
         f = self._drc_focus
@@ -4851,13 +4866,8 @@ class Viewer:
             ei = self._drc_pos - self._drc_cum[ci]
         if ci is None or ei >= len(db.checks[ci].errors):
             self._set_live_status(
-                "w toggles the current error: click or jump one "
-                "first")
-            return
-        if not hasattr(db, "set_status"):
-            self._set_live_status(
-                "waive needs a packed index: "
-                "floe-index drc <db> --pack")
+                "w toggles the selected/current error: select, "
+                "click or jump one first")
             return
         self._drc_set_waived(ci, [ei],
                              not self._drc_waived(db, ci, ei))
