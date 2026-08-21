@@ -920,6 +920,10 @@ class Viewer:
         self._live_cap = 1
         self.dump = bool(dump)      # --dump: save debug frame dumps
         self._quitting = False
+        # folder floe was launched from: the load-layout dialog's
+        # initial base (user call 2026-08-22) - GTK would otherwise
+        # open at Recent/Home on an empty start
+        self._launch_dir = os.getcwd()
         # ruler / snap / pick state
         self.mode = "normal"
         self.rulers = []
@@ -3595,9 +3599,12 @@ class Viewer:
                                     action=Gtk.FileChooserAction.OPEN)
         dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
                         "Open", Gtk.ResponseType.OK)
-        if self.meta is not None:
-            dlg.set_current_folder(
-                os.path.dirname(self.meta["src"]["path"]))
+        # initial base = the folder floe was launched from (user
+        # call 2026-08-22); once a layout is loaded, its own folder
+        # (sibling layouts live together, same as the DRC dialog)
+        dlg.set_current_folder(
+            self._launch_dir if self.meta is None
+            else os.path.dirname(self.meta["src"]["path"]))
         for name, pats in (("layouts (*.oas, *.gds)",
                             ("*.oas", "*.oas.gz", "*.gds",
                              "*.gds.gz")),
