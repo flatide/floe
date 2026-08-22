@@ -81,16 +81,52 @@ floe 뷰어의 klayout 경로를 대체하려면 무엇을 소비하고, 무엇�
 | L1~L9 (`validate_vfs_lifecycle`) | 세션 수명주기(apply 대체 시 필수) | apply를 렌더러 쪽으로 바꾸면 필수 |
 | X1~X6 (`validate_vfs_text`) | 라벨 응답/declutter | 라벨 그리기 치환 시 |
 
-**대체 시점에 새로 정할 것** (지금은 미정, 착수 시 결정):
+### 픽셀 동일성 정책 (2026-08-22 확정)
 
-1. **픽셀 동일성 정책** — klayout과 서브픽셀 좌표 반올림·선 굵기
-   규약이 다르면 완전 XOR=0은 불가능. 허용 오차(경계 1px 밴드
-   제외 XOR, 또는 멤버-recount 동등 + 구조 XOR)를 명시적으로
-   재정의해야 한다. 픽셀-동일 재현은 FVX 계획에서도 비목표.
-2. **pick/snap 동등성** — 현재 klayout Layout 쿼리로 구현
+klayout과의 완전 XOR=0은 요구하지 않는다(서브픽셀 규약 차이는
+정당). 대신 **바이너리 커버리지**(레이어당 on/off, oversampling 1,
+AA 없음) 기준으로 아래 세 규칙을 모두 만족해야 한다 — 구현·자기
+검증은 `tools/validate_render_goldens.py`:
+
+- **P-a (경계 밴드)**: diff 픽셀은 골든 경계로부터 Chebyshev ≤1px
+  밴드 **안에서만** 허용. 내부 diff 1픽셀 = 실패. (1px 위상
+  시프트는 통과, 2px 시프트는 실패 — 자기검사로 고정.)
+- **P-b (소멸 금지)**: 골든의 4-연결 성분은 크기 무관 후보와
+  겹침 ≥1px — 1px 피처가 밴드 속으로 사라지는 것을 잡는다.
+- **P-c (면적 드리프트)**: |on(후보)−on(골든)| ≤ max(16,
+  0.75×골든 경계픽셀수) — half-open 채움 규약 차이(≈0.5×둘레)는
+  허용, 전변 1px 성장(≈1.3×둘레)은 거부.
+
+색·패턴·합성(스펙클/프레임/DRC 워시)은 이 정책의 대상이 아니고
+§3의 speckle/frames 게이트가 따로 고정한다.
+
+### 래스터 골든 (PX1~PX5)
+
+`tools/validate_render_goldens.py` — klayout 오라클로 마이크로
+픽스처를 정확히 고정된 뷰포트에서 구워 두고, 렌더러 출력물을 위
+정책으로 대조한다. **골든은 커밋하지 않는다**(klayout 버전·호스트
+종속 — manifest에 버전 기록, 불일치 시 자동 재베이크):
+
+| 케이스 | 내용 |
+|---|---|
+| PX1 | 반픽셀·¼픽셀·음수 원점·원점 교차 뷰포트 반올림 (정렬 박스 격자) |
+| PX2 | 엣지 기울기: 수평/수직/45°/atan(1/3)/atan(2/7)/atan(3) 웨지 |
+| PX3 | 1~8px 선폭, 수평/수직/45° |
+| PX4 | concave 폴리곤: L/U/plus/comb/예각 노치 (vertex/join 픽셀) |
+| PX5 | PATH flush/square/round/비대칭 extension + 90°/45°/135° 꺾임 |
+
+각 케이스는 정렬 뷰와 반픽셀 오프셋 뷰 양쪽으로 렌더된다(총
+13뷰). 하네스 자기검사: 재렌더 == 골든(결정성), 정책 판별력
+(shift1 통과/shift2 실패/dilate 실패/성분 소멸 실패). 렌더러
+프로젝트 사용법: 같은 픽스처(.oas는 workdir에 생성됨)·같은
+뷰(manifest.json)로 렌더한 PNG를 `--candidate DIR`로 대조.
+
+**대체 시점에 새로 정할 것** (잔여):
+
+1. **pick/snap 동등성** — 현재 klayout Layout 쿼리로 구현
    (`service.py` `_SNAP_CAP=400`/`_PICK_CAP=64`). 렌더러가 지오메트리
    상주를 가져가면 같은 캡·같은 겹침 순환 의미를 보장해야 한다.
-3. **[perf] A/B 벤치** — 아래 기준선 대비 회귀 금지.
+2. **[perf] A/B 벤치** — 아래 기준선 대비 회귀 금지.
 
 ## 5. 성능 기준선 (렌더러 대체의 성공 지표)
 
@@ -135,5 +171,7 @@ rust/target/release/floe-index plan design.oas.floe --mode hier \
 .venv/bin/python tools/validate_vfs_render.py <src.oas> <cache.floe>
 .venv/bin/python tools/validate_render_speckle.py
 .venv/bin/python tools/validate_render_frames.py
+.venv/bin/python tools/validate_render_goldens.py            # 베이크+자기검사
+.venv/bin/python tools/validate_render_goldens.py . --candidate out/  # 렌더러 대조
 sh tools/validate_rust.sh        # 전체 스위트 (RUST VALIDATION: ALL OK)
 ```

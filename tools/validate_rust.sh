@@ -66,6 +66,9 @@ rm -f "$VOUT.buildlog"
 # v5 text index: oracle XOR, declutter, corrupt, determinism,
 # daemon label lifecycle
 .venv/bin/python tools/validate_vfs_text.py
+# rasterization goldens for the rust-renderer replacement:
+# bake (version-pinned) + determinism + policy discrimination
+.venv/bin/python tools/validate_render_goldens.py
 # viewer speckle fill: common phase, opaque overlap, and the
 # coverage composite staying out of speckled interiors
 .venv/bin/python tools/validate_render_speckle.py
