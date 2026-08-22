@@ -30,7 +30,11 @@ floe 뷰어의 klayout 경로를 대체하려면 무엇을 소비하고, 무엇�
   CBLOCK 압축). 셀 하나만 담고(`Vfs::page_name()`: exact는
   `P{ci}_{li}_{seq}`, LOD 변종은 `q…` 접두), 좌표는 **셀-로컬
   dbu**. 도형 = RECTANGLE/POLYGON/PATH + repetition
-  (One/Grid/Pts — Pts는 비전개, 1M 멤버 = 레코드 1개). 배치 변환은
+  (One/Grid/Pts — Pts는 비전개, 1M 멤버 = 레코드 1개). 소스의
+  CIRCLE(record 27)은 인덱싱 파스에서 **내접 64각형 폴리곤**으로
+  변환되므로(0.11.46, 상수 코사인 테이블 = 플랫폼 무관 바이트)
+  페이지 페이로드에 CIRCLE은 나타나지 않는다 — 렌더러는 원
+  프리미티브가 필요 없다. 배치 변환은
   페이지에 없고 델타/플랜의 placement(x,y,rot,flip,rep)가 준다.
 - **데몬 프로토콜(운영 경로)**: plan → delta(ack-gen 트랜잭션) →
   apply. 델타 = WC top `W{gen}_{r}_{ci}` + 페이지 셀 스플라이스,

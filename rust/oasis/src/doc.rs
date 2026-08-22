@@ -130,6 +130,61 @@ pub struct Doc {
 
 // ------------------------------------------------------------ modal set
 
+/// first-quadrant cosine table for the CIRCLE 64-gon:
+/// cos(k*pi/32), k = 0..=16. LITERALS, not runtime cos() - libm
+/// may differ by an ulp across platforms and the built page bytes
+/// must not depend on the build host.
+const COS64: [f64; 17] = [
+    1.0,
+    0.9951847266721969,
+    0.9807852804032304,
+    0.9569403357322088,
+    0.9238795325112867,
+    0.881921264348355,
+    0.8314696123025452,
+    0.773010453362737,
+    0.7071067811865476,
+    0.6343932841636455,
+    0.5555702330196022,
+    0.4713967368259976,
+    0.3826834323650898,
+    0.29028467725446233,
+    0.19509032201612825,
+    0.0980171403295606,
+    0.0,
+];
+
+/// CIRCLE materialization: inscribed 64-gon, vertex 0 on +x, CCW.
+/// The four axis vertices are exact, so the polygon bbox equals
+/// the circle's. Consecutive duplicates collapse (a radius under
+/// ~6 dbu rounds neighbors together) - the count stays >= 4 for
+/// any r >= 1.
+fn circle64(x: i64, y: i64, r: i64) -> Vec<(i64, i64)> {
+    let rf = r as f64;
+    let mut pts: Vec<(i64, i64)> = Vec::with_capacity(64);
+    for k in 0..64usize {
+        let (q, i) = (k / 16, k % 16);
+        let (c, s) = (COS64[i], COS64[16 - i]);
+        let (cx, cy) = match q {
+            0 => (c, s),
+            1 => (-s, c),
+            2 => (-c, -s),
+            _ => (s, -c),
+        };
+        let p = (
+            x + (rf * cx).round() as i64,
+            y + (rf * cy).round() as i64,
+        );
+        if pts.last() != Some(&p) {
+            pts.push(p);
+        }
+    }
+    while pts.len() > 1 && pts.first() == pts.last() {
+        pts.pop();
+    }
+    pts
+}
+
 #[derive(Default)]
 struct Modal {
     rep: Option<Rep>,
@@ -147,6 +202,7 @@ struct Modal {
     tx_y: i64,
     geo_w: Option<i64>,
     geo_h: Option<i64>,
+    circle_r: Option<i64>,
     poly_pts: Option<Vec<(i64, i64)>>, // deltas from anchor
     path_pts: Option<Vec<(i64, i64)>>, // separate modal per spec
     path_hw: Option<i64>,
@@ -834,7 +890,76 @@ fn parse_records(
                 });
             }
             23..=26 => return err(c.here(), "TRAPEZOID: out of spike scope"),
-            27 => return err(c.here(), "CIRCLE: out of spike scope"),
+            27 => {
+                // CIRCLE (00rXYRDL) - materialized as an inscribed
+                // 64-gon PolyRec so it rides the existing polygon
+                // page path unchanged (no OVM/OVP format bump).
+                let info = c.byte()?;
+                let cur = match b.cur {
+                    Some(i) => i,
+                    None => {
+                        return err(c.here(), "shape outside cell")
+                    }
+                };
+                if info & 0x01 != 0 {
+                    m.layer = Some(c.uint()?);
+                }
+                if info & 0x02 != 0 {
+                    m.datatype = Some(c.uint()?);
+                }
+                if info & 0x20 != 0 {
+                    let r = c.uint()?;
+                    m.circle_r = Some(match i64::try_from(r) {
+                        Ok(v) => v,
+                        Err(_) => {
+                            return err(
+                                c.here(),
+                                "circle radius out of range",
+                            )
+                        }
+                    });
+                }
+                if info & 0x10 != 0 {
+                    coord(c, &mut m.geo_x, m.relative)?;
+                }
+                if info & 0x08 != 0 {
+                    coord(c, &mut m.geo_y, m.relative)?;
+                }
+                let rep = if info & 0x04 != 0 {
+                    read_rep(c, &mut m.rep)?
+                } else {
+                    Rep::One
+                };
+                let (l, d) = match (m.layer, m.datatype) {
+                    (Some(l), Some(d)) => (l as u32, d as u32),
+                    _ => {
+                        return err(
+                            c.here(),
+                            "circle before layer modal",
+                        )
+                    }
+                };
+                let r = match m.circle_r {
+                    Some(r) => r,
+                    None => {
+                        return err(
+                            c.here(),
+                            "circle without radius",
+                        )
+                    }
+                };
+                if r > 0 {
+                    b.reg_layer(l, d);
+                    b.cells[cur].polys.push(PolyRec {
+                        layer: l,
+                        dt: d,
+                        pts: circle64(m.geo_x, m.geo_y, r),
+                        rep,
+                    });
+                }
+                // r == 0 defines no geometry; a 1-point "polygon"
+                // would not survive the page re-encode - skip
+            }
             28 => {
                 let info = c.byte()?;
                 if info & 0x04 != 0 {
@@ -1504,6 +1629,86 @@ mod tests {
         assert_eq!(names[&(15, 192)], "bbb");
         assert!(!aliases.contains_key(&(15, 0)));
         assert_eq!(aliases[&(16, 192)], ["ccc"]);
+    }
+
+    /// CIRCLE (record 27) parses into an inscribed 64-gon PolyRec:
+    /// exact axis vertices (bbox == circle bbox), modal reuse for
+    /// layer/datatype/radius, repetition pass-through, and r == 0
+    /// producing no geometry. Byte-level - klayout's python API
+    /// cannot author CIRCLE records directly.
+    #[test]
+    fn circle_records_become_64gon_polys() {
+        use crate::write::W;
+        let mut w = W::new();
+        w.out.extend_from_slice(b"%SEMI-OASIS\r\n");
+        w.uint(1); // START
+        w.string(b"1.0");
+        w.real_f64(1000.0);
+        w.uint(0);
+        for _ in 0..12 {
+            w.uint(0);
+        }
+        w.uint(14); // CELL by name
+        w.string(b"TOP");
+        w.uint(27); // CIRCLE: L D R X Y (0x3B)
+        w.byte(0x3B);
+        w.uint(7); // layer
+        w.uint(1); // datatype
+        w.uint(100); // radius
+        w.sint(1000); // x
+        w.sint(-500); // y
+        w.uint(27); // CIRCLE: X + repetition (0x14), modals reused
+        w.byte(0x14);
+        w.sint(5000); // x
+        w.uint(2); // rep type 2: horizontal, 3 columns
+        w.uint(1); // dimension - 2
+        w.uint(400); // x-space
+        w.uint(27); // CIRCLE: R only (0x20) - r = 0, no geometry
+        w.byte(0x20);
+        w.uint(0);
+        w.uint(2); // END
+        let doc = parse_doc(&w.out).expect("circle fixture parses");
+        let top = &doc.cells[doc.top];
+        assert_eq!(top.polys.len(), 2, "r=0 must not emit");
+        let p = &top.polys[0];
+        assert_eq!((p.layer, p.dt), (7, 1));
+        assert_eq!(p.pts.len(), 64, "r=100: all vertices distinct");
+        let xs: Vec<i64> = p.pts.iter().map(|q| q.0).collect();
+        let ys: Vec<i64> = p.pts.iter().map(|q| q.1).collect();
+        assert_eq!(
+            (
+                *xs.iter().min().unwrap(),
+                *xs.iter().max().unwrap(),
+                *ys.iter().min().unwrap(),
+                *ys.iter().max().unwrap()
+            ),
+            (900, 1100, -600, -400),
+            "bbox must equal the circle bbox exactly"
+        );
+        assert_eq!(p.pts[0], (1100, -500), "vertex 0 on +x");
+        assert_eq!(p.pts[16], (1000, -400), "vertex 16 on +y");
+        // every vertex within half a dbu of the true circle
+        for &(vx, vy) in &p.pts {
+            let (dx, dy) = (vx - 1000, vy + 500);
+            let d2 = dx * dx + dy * dy;
+            assert!(
+                (99 * 99..=100 * 100 + 100).contains(&d2),
+                "vertex off circle: ({}, {}) d2={}",
+                vx,
+                vy,
+                d2
+            );
+        }
+        // second circle: modal radius/layer reused, x moved, rep
+        let p2 = &top.polys[1];
+        assert_eq!((p2.layer, p2.dt), (7, 1));
+        assert_eq!(p2.pts[0], (5100, -500));
+        assert_eq!(p2.rep.members(), 3);
+        // tiny radius: consecutive duplicates collapse but the
+        // polygon stays closed and >= 4 points
+        let tiny = circle64(0, 0, 1);
+        assert!(tiny.len() >= 4 && tiny.len() < 64);
+        assert_eq!(tiny[0], (1, 0));
     }
 
     /// Byte-level LAYERNAME fixture: klayout only ever writes exact

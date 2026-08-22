@@ -17,6 +17,18 @@ floe-index vfs <src.oas> [outdir=.floe] [--jobs N] [--plan-batch N]
 게이트/계측용), `--p2-shard-limit-mb N` = P2 arena 샤딩 복사 명시
 상한(미지정: Linux = MemAvailable 여유 절반, off-Linux = 무제한).
 
+## 1.5 파스 규약 (도형 변환)
+
+- CIRCLE(record 27) = **내접 64각형 PolyRec**으로 파스 시 변환
+  (0.11.46) — 축 꼭짓점 4개가 정확해 bbox는 원과 동일, 꼭짓점
+  좌표는 리터럴 코사인 테이블(런타임 cos 금지 — 플랫폼별 1ulp
+  차이가 빌드 바이트를 가르면 안 됨), 반지름이 작으면 연속 중복
+  꼭짓점 접힘(r≥1이면 ≥4점), r=0은 지오메트리 없음. 기존 폴리곤
+  페이지 경로를 그대로 타므로 OVM/OVP 포맷 범프 없음. 게이트:
+  `circle_records_become_64gon_polys` 유닛 + klayout이 쓴 실제
+  CIRCLE(round 제로길이 path) 자산의 G5 recount.
+- TRAPEZOID/CTRAPEZOID(23~26)는 여전히 파스 에러(스코프 밖).
+
 ## 2. 파이프라인 (스트리밍, rev 44)
 
 1. **파스**: `std::fs::read` 전체 → `parse_doc` (진행 하트비트 스레드가
