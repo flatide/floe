@@ -178,17 +178,31 @@ def main():
         return d
 
     def usable_cpus():
-        # mirror Rust's available_parallelism(): affinity/cgroup
-        # aware - a container pinned to 1 CPU must not read as a
-        # multi-core host (os.cpu_count() reports the host)
+        # mirror Rust's available_parallelism(): affinity AND
+        # cgroup quota aware - a 32-CPU affinity under a 1-CPU
+        # cpu.max still runs Rust at 1
         try:
-            return len(os.sched_getaffinity(0))
+            n = len(os.sched_getaffinity(0))
         except AttributeError:
-            pass
-        try:
-            return os.process_cpu_count() or 1
-        except AttributeError:
-            return os.cpu_count() or 1
+            try:
+                n = os.process_cpu_count() or 1
+            except AttributeError:
+                n = os.cpu_count() or 1
+        try:  # cgroup v2
+            q, per = open("/sys/fs/cgroup/cpu.max").read().split()[:2]
+            if q != "max":
+                n = min(n, max(1, int(q) // int(per)))
+        except (OSError, ValueError):
+            try:  # cgroup v1
+                q = int(open(
+                    "/sys/fs/cgroup/cpu/cpu.cfs_quota_us").read())
+                per = int(open(
+                    "/sys/fs/cgroup/cpu/cpu.cfs_period_us").read())
+                if q > 0:
+                    n = min(n, max(1, q // per))
+            except (OSError, ValueError):
+                pass
+        return n
 
     def fanout_expected():
         """the build legitimately stays serial on starved hosts

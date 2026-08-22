@@ -43,6 +43,8 @@ rust/target/release/floe-index vfs <design.oas> [outdir] [옵션]
 | `--no-lod` | LOD 변종 생성 생략 (빌드 −5분@9.8G, 기본은 LOD 포함) |
 | `--coverage` / `--coverage-only` | 밀도 커버리지(design.ovc) 생성/추가 |
 | `--frontier-only` | **재인덱싱 없이** meta.json의 미니맵 프런티어만 재굽기(초 단위) |
+| `--slow-cell-s S` | slow-cell 로그 임계 초 (기본 5.0, 0 = 전 셀 — 스레드/팬아웃 계측용) |
+| `--p2-shard-limit-mb N` | P2 arena 샤딩 복사 상한. 미지정 시 Linux는 MemAvailable 여유의 절반, **macOS는 무제한** — Mac에서 대용량 인덱싱 시 지정 권장 |
 | `--kill-at <지점>` | 게이트 전용 장애 주입 |
 
 산출물(`<src>.floe/`): `design.ovm`(메타·인덱스), `design.ovp`(페이지

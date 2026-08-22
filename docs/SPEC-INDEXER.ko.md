@@ -47,11 +47,18 @@ floe-index vfs <src.oas> [outdir=.floe] [--jobs N] [--plan-batch N]
          pbvh는 병합 완료 후 레이어당 1회 → 바이트 불변. 헬퍼 0이면
          frontier/sharding 자체를 만들지 않는 완전 직렬 폴백.
          **shard-복사 한도**: 예상 복사량(레코드 범위 합×4B, 복사
-         전에 정확히 계산됨)이 MemAvailable 여유의 절반을 넘으면
+         전에 정확히 계산됨)을 **결정 시점**(프리픽스·타 레이어·타
+         플래너 할당 이후)의 MemAvailable 여유 절반과 대조하고,
+         동시 P2 셀 간 경쟁은 **전역 reservation**(SHARD_RESERVED,
+         결정→태스크 실행 종료까지 유지)으로 중재 — 초과 시
          frontier는 유지하되 태스크를 프리픽스 arena로 **직렬**
-         실행(복사 0, 로그 `shard=0MiB`) — 수 GB 단일 Pts 엔트리가
-         OOM을 만들지 않는다. **기아 계측**: P2 대상인데 셀 시작
-         시점 여유 슬롯이 0이면 `p2_eligible=1 helpers=0` 표시 +
+         실행(복사 0, **helper lease는 결정 즉시 반환**되어 꼬리가
+         LOD/타 셀에 재대여, 로그 `p2_mem_fallback=1`·split 1t
+         보고). off-Linux는 MemAvailable이 없어 기본 무제한 —
+         `--p2-shard-limit-mb`로 명시 상한. 수 GB 단일 Pts
+         엔트리가 OOM을 만들지 않는다. **기아 계측**: P2 대상인데
+         셀 시작 시점 여유 슬롯이 0이면(jobs>1·usable CPU>1 조건 —
+         풀로 해결 가능한 사례만) `p2_eligible=1 helpers=0` 표시 +
          빌드 말미 집계 한 줄 — 통합 워커 풀(#76)의 실측 근거.
          남은 지렛대 = 프리픽스 파티션 병렬화(P2-ext, 미착수).
      - **LOD 변종 생성**: 후보 members≥256; 후보 ≥64(LOD_PAR_MIN)면

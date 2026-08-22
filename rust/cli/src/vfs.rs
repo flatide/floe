@@ -79,6 +79,10 @@ pub fn vfs_cmd(args: &[String]) {
     // S6/S7 gates use it to observe fanout uptake). CLI state, not
     // an env var - same rule as --kill-at above.
     let mut slow_cell_s = 5.0f64;
+    // explicit P2 shard-copy ceiling. Off-Linux there is no
+    // MemAvailable, so without this flag the ceiling is UNBOUNDED
+    // there - set it when indexing big files on macOS.
+    let mut p2_shard_limit: Option<u64> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -135,6 +139,13 @@ pub fn vfs_cmd(args: &[String]) {
             "--slow-cell-s" => {
                 slow_cell_s =
                     args[i + 1].parse().expect("slow cell seconds");
+                i += 2;
+            }
+            "--p2-shard-limit-mb" => {
+                let mb: u64 =
+                    args[i + 1].parse().expect("shard limit MB");
+                p2_shard_limit =
+                    Some(mb.checked_mul(MIB).expect("shard limit"));
                 i += 2;
             }
             a => {
@@ -313,6 +324,7 @@ pub fn vfs_cmd(args: &[String]) {
             page_target_bytes,
             lod,
             slow_cell_s,
+            p2_shard_limit,
         );
         if kill_at.as_deref() == Some("ovp-written") {
             eprintln!("[vfs] --kill-at ovp-written");
@@ -726,7 +738,7 @@ const P2_TASK_CAP: usize = 32;
 /// forces threads = 1 to prove that frontier expansion, arena
 /// sharding and the segment merge alone are byte-neutral vs the
 /// serial recursion.
-struct P2Opts {
+struct P2Opts<'a> {
     /// total split threads, this thread included
     threads: usize,
     /// frontier granularity target (threads x 4, capped)
@@ -734,12 +746,41 @@ struct P2Opts {
     /// frontier cutoff floor (production: P2_TASK_MIN_BYTES;
     /// small-fixture unit tests lower it to form a real frontier)
     task_min: u64,
-    /// ceiling on transient arena-sharding copies (bytes). A
-    /// single Pts entry can be GBs on fill farms - past this the
-    /// frontier's tasks run SERIALLY against the prefix arena
-    /// (no copies, same bytes) instead of risking OOM. Production
-    /// derives it from MemAvailable headroom; unit tests pin it.
-    shard_limit: u64,
+    /// explicit ceiling on transient arena-sharding copies
+    /// (--p2-shard-limit-mb, or a unit-test pin). None = derive
+    /// from MemAvailable AT DECISION TIME - after the prefix ran
+    /// and other layers/planners allocated, not at cell entry
+    /// (review 0.11.43: the early snapshot missed both).
+    shard_limit: Option<u64>,
+    /// the shared plan-thread budget + this cell's borrowed lease:
+    /// the memory fallback returns the lease IMMEDIATELY (it runs
+    /// on one thread) so the tail can re-lend it to LOD or other
+    /// cells instead of holding idle helpers to layer-plan end
+    budget: Option<&'a std::sync::atomic::AtomicIsize>,
+    lease: usize,
+}
+
+/// bytes currently reserved by in-flight P2 shardings across all
+/// planner threads: two concurrent P2 cells must not budget the
+/// SAME MemAvailable headroom (review 0.11.43 #1). Reserved from
+/// the copy decision until task execution ends - past that the
+/// copies are ordinary plan memory under the window governor.
+static SHARD_RESERVED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// sharding headroom in bytes: the explicit cap when given, else
+/// half the current MemAvailable above the governor floor;
+/// unbounded when neither exists (off-Linux without the flag)
+fn shard_headroom(explicit: Option<u64>) -> u64 {
+    match explicit {
+        Some(v) => v,
+        None => crate::mem_available_gb()
+            .map(|gb| {
+                (((gb - GOVERNOR_MIN_AVAIL_GB).max(0.0) / 2.0)
+                    * (1u64 << 30) as f64) as u64
+            })
+            .unwrap_or(u64::MAX),
+    }
 }
 
 fn rep_est_n(n: u64) -> u32 {
@@ -1591,6 +1632,8 @@ struct CellPlan {
     p2_tasks: usize,
     /// bytes copied by P2 arena sharding
     shard_bytes: u64,
+    /// P2 memory fallback ran (tasks serial, lease pre-returned)
+    p2_fallback: bool,
     /// P2-eligible but zero free budget slots at cell start (#60
     /// review: the field counter that sizes the unified-pool work)
     p2_starved: bool,
@@ -1991,6 +2034,9 @@ struct LayerPlan {
     p2_tasks: usize,
     /// bytes copied by P2 arena sharding (0 = serial split)
     shard_bytes: u64,
+    /// P2 memory fallback ran (frontier kept, tasks serial, no
+    /// copies, helper lease already returned)
+    p2_fallback: bool,
     secs: f32,
 }
 
@@ -2026,12 +2072,13 @@ fn plan_layer(
         }
         vec![arena]
     };
-    finish_layer(li, run, arenas, stats, 0, 0, t)
+    finish_layer(li, run, arenas, stats, 0, 0, false, t)
 }
 
 /// pbvh + leaf-order permute over a layer's finished emission run,
 /// shared by the serial path and the P2 merge - the tree is built
 /// ONCE per layer, after the complete page order exists
+#[allow(clippy::too_many_arguments)]
 fn finish_layer(
     li: u32,
     run: Vec<PageJob>,
@@ -2039,6 +2086,7 @@ fn finish_layer(
     stats: SplitStats,
     p2_tasks: usize,
     shard_bytes: u64,
+    p2_fallback: bool,
     t: std::time::Instant,
 ) -> LayerPlan {
     let mut pbvh: Vec<(BBox, u32, u16, bool, u64, u64)> = Vec::new();
@@ -2080,6 +2128,7 @@ fn finish_layer(
         stats,
         p2_tasks,
         shard_bytes,
+        p2_fallback,
         secs: t.elapsed().as_secs_f32(),
     }
 }
@@ -2164,11 +2213,13 @@ fn plan_layer_frontier(
         }
     }
     // ---- shard-copy ceiling (#60 review): the projected copies
-    // are known exactly BEFORE any allocation happens - if they
-    // exceed the memory headroom, keep the frontier but run its
-    // tasks serially against the shared prefix arena. No copies,
-    // one thread, identical bytes (arena indices are scratch);
-    // the log shows it as p2_tasks=N shard=0MiB.
+    // are known exactly BEFORE any allocation happens. The limit
+    // is evaluated HERE (not at cell entry) and admission goes
+    // through the global reservation, so concurrent P2 cells
+    // cannot each budget the same headroom. Past the ceiling the
+    // frontier is kept but its tasks run serially against the
+    // shared prefix arena - no copies, one thread, identical
+    // bytes; the log shows p2_mem_fallback=1.
     let copy_bytes: u64 = tasks
         .iter()
         .flat_map(|(r, _)| r.iter())
@@ -2177,7 +2228,38 @@ fn plan_layer_frontier(
             _ => 0,
         })
         .sum();
-    if copy_bytes > opts.shard_limit {
+    let mut reserved = false;
+    if copy_bytes > 0 {
+        let limit = shard_headroom(opts.shard_limit);
+        loop {
+            let cur = SHARD_RESERVED
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if copy_bytes > limit.saturating_sub(cur) {
+                break; // no headroom: serial fallback below
+            }
+            if SHARD_RESERVED
+                .compare_exchange(
+                    cur,
+                    cur + copy_bytes,
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                reserved = true;
+                break;
+            }
+        }
+    }
+    if copy_bytes > 0 && !reserved {
+        // memory fallback runs on ONE thread: hand the helper
+        // lease back right away so the tail can re-lend it
+        if let Some(b) = opts.budget {
+            b.fetch_add(
+                opts.lease as isize,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
         let p2_tasks = tasks.len();
         let mut outs: Vec<Vec<PageJob>> =
             Vec::with_capacity(tasks.len());
@@ -2226,7 +2308,9 @@ fn plan_layer_frontier(
         for (i, j) in run.iter_mut().enumerate() {
             j.seq = narrow_u32(i as u64, "page seq");
         }
-        return finish_layer(li, run, arenas, stats, p2_tasks, 0, t);
+        return finish_layer(
+            li, run, arenas, stats, p2_tasks, 0, true, t,
+        );
     }
     // ---- arena sharding: copy each task's Frag::Pts ranges into
     // a task-local shard so parallel subtrees never touch shared
@@ -2394,9 +2478,18 @@ fn plan_layer_frontier(
     for (i, j) in run.iter_mut().enumerate() {
         j.seq = narrow_u32(i as u64, "page seq");
     }
-    finish_layer(li, run, arenas, stats, p2_tasks, shard_bytes, t)
+    if reserved {
+        SHARD_RESERVED.fetch_sub(
+            copy_bytes,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+    finish_layer(
+        li, run, arenas, stats, p2_tasks, shard_bytes, false, t,
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_cell_plan(
     doc: &Doc,
     ci: usize,
@@ -2406,6 +2499,8 @@ fn build_cell_plan(
     page_target_bytes: u64,
     lod: bool,
     lod_budget: &std::sync::atomic::AtomicIsize,
+    jobs: usize,
+    p2_shard_limit: Option<u64>,
 ) -> CellPlan {
     let cell = &doc.cells[ci];
     let mut phase_s = [0f32; 6];
@@ -2578,18 +2673,18 @@ fn build_cell_plan(
     } else {
         SplitMode::Serial
     };
+    let desired = std::thread::available_parallelism()
+        .map(|v| v.get())
+        .unwrap_or(1)
+        .min(if mode == SplitMode::P1 {
+            layers_active
+        } else {
+            usize::MAX
+        })
+        .min(SPLIT_PAR_MAX)
+        .max(1);
     let mut split_helpers = 0usize;
-    if mode != SplitMode::Serial {
-        let desired = std::thread::available_parallelism()
-            .map(|v| v.get())
-            .unwrap_or(1)
-            .min(if mode == SplitMode::P1 {
-                layers_active
-            } else {
-                usize::MAX
-            })
-            .min(SPLIT_PAR_MAX)
-            .max(1);
+    if mode != SplitMode::Serial && desired > 1 {
         while split_helpers + 1 < desired {
             let cur =
                 lod_budget.load(std::sync::atomic::Ordering::Relaxed);
@@ -2609,7 +2704,6 @@ fn build_cell_plan(
             }
         }
     }
-    let split_threads = split_helpers + 1;
     let layer_plans: Vec<LayerPlan> = if split_helpers == 0 {
         // operational fallback: without helpers neither fanout
         // pays - P2 sharding in particular would copy scratch for
@@ -2623,22 +2717,17 @@ fn build_cell_plan(
     } else if mode == SplitMode::P2 {
         // the dominant layer fans its subtrees over all borrowed
         // helpers; the other layers are small by the dominance
-        // test and run serially on this thread. Sharding copies
-        // must fit in half the headroom above the governor floor
-        // (a single multi-GB Pts entry must not OOM the build);
-        // off-Linux there is no MemAvailable, same as the governor.
+        // test and run serially on this thread. The shard-copy
+        // ceiling is evaluated inside the frontier at decision
+        // time (see shard_headroom), not here.
         let opts = P2Opts {
             threads: split_helpers + 1,
             target_tasks: ((split_helpers + 1) * 4)
                 .min(P2_TASK_CAP),
             task_min: P2_TASK_MIN_BYTES,
-            shard_limit: crate::mem_available_gb()
-                .map(|gb| {
-                    (((gb - GOVERNOR_MIN_AVAIL_GB).max(0.0) / 2.0)
-                        * (1u64 << 30) as f64)
-                        as u64
-                })
-                .unwrap_or(u64::MAX),
+            shard_limit: p2_shard_limit,
+            budget: Some(lod_budget),
+            lease: split_helpers,
         };
         layer_inputs
             .into_iter()
@@ -2706,16 +2795,26 @@ fn build_cell_plan(
             })
             .collect()
     };
-    if split_helpers > 0 {
+    // the memory fallback returns the lease inside the frontier
+    // (it runs single-threaded) - do not return it twice
+    let p2_fallback = layer_plans.iter().any(|lp| lp.p2_fallback);
+    if split_helpers > 0 && !p2_fallback {
         lod_budget.fetch_add(
             split_helpers as isize,
             std::sync::atomic::Ordering::Relaxed,
         );
     }
+    let split_threads =
+        if p2_fallback { 1 } else { split_helpers + 1 };
     // #60 review: a P2-eligible cell that starts while every
     // planner still owns its budget slot runs serial to the end -
-    // count it so the field data can justify the unified pool
-    let p2_starved = mode == SplitMode::P2 && split_helpers == 0;
+    // counted only where a pool could actually help (jobs > 1 and
+    // more than one usable CPU), so --jobs 1 hosts don't inflate
+    // the unified-pool case
+    let p2_starved = mode == SplitMode::P2
+        && split_helpers == 0
+        && jobs > 1
+        && desired > 1;
     // merge in li order (this is what fixes the output bytes)
     let mut pages: Vec<PageJob> = Vec::new();
     let mut pranges: Vec<(u32, u32, u32, u32)> = Vec::new();
@@ -2972,6 +3071,7 @@ fn build_cell_plan(
         layers_active,
         p2_tasks,
         shard_bytes,
+        p2_fallback,
         p2_starved,
         top_split,
     }
@@ -3273,6 +3373,7 @@ fn build(
     page_target_bytes: u64,
     lod: bool,
     slow_cell_s: f64,
+    p2_shard_limit: Option<u64>,
 ) -> (
     Vec<u8>,
     Vec<Option<(i64, i64, i64, i64)>>,
@@ -3702,6 +3803,8 @@ fn build(
                             page_target_bytes,
                             lod,
                             lod_budget,
+                            jobs,
+                            p2_shard_limit,
                         )
                     }),
                 ) {
@@ -3730,9 +3833,14 @@ fn build(
                     }
                     let p2 = if plan.p2_tasks > 0 {
                         format!(
-                            " p2_tasks={} shard={}MiB",
+                            " p2_tasks={} shard={}MiB{}",
                             plan.p2_tasks,
-                            plan.shard_bytes / MIB
+                            plan.shard_bytes / MIB,
+                            if plan.p2_fallback {
+                                " p2_mem_fallback=1"
+                            } else {
+                                ""
+                            }
                         )
                     } else if plan.p2_starved {
                         String::from(" p2_eligible=1 helpers=0")
@@ -5201,7 +5309,9 @@ mod split_tests {
                 threads: 1,
                 target_tasks: 8,
                 task_min: 4096,
-                shard_limit: u64::MAX,
+                shard_limit: Some(u64::MAX),
+                budget: None,
+                lease: 0,
             },
         );
         assert!(b.p2_tasks > 1, "frontier never formed");
@@ -5226,6 +5336,7 @@ mod split_tests {
         let doc = mini_doc(recs);
         let cell = &doc.cells[0];
         let a = plan_layer(cell, 0, 0, assemble_rects(cell), 64 * 1024);
+        let lease = std::sync::atomic::AtomicIsize::new(0);
         let b = plan_layer_frontier(
             cell,
             0,
@@ -5236,11 +5347,20 @@ mod split_tests {
                 threads: 4,
                 target_tasks: 8,
                 task_min: 4096,
-                shard_limit: 0,
+                shard_limit: Some(0),
+                budget: Some(&lease),
+                lease: 3,
             },
         );
         assert!(b.p2_tasks > 1, "frontier never formed");
+        assert!(b.p2_fallback, "fallback flag missing");
         assert_eq!(b.shard_bytes, 0, "fallback still copied");
+        // the lease returns AT the fallback decision, not at
+        // layer end - the tail can re-lend it immediately
+        assert_eq!(
+            lease.load(std::sync::atomic::Ordering::Relaxed),
+            3
+        );
         layer_bytes_equal(&doc, &a, &b);
     }
 
@@ -5287,7 +5407,7 @@ mod split_tests {
         for budget in [0isize, 7] {
             let b = std::sync::atomic::AtomicIsize::new(budget);
             plans.push(build_cell_plan(
-                &doc, 0, &rbb, &lidx, 1, MIB, false, &b,
+                &doc, 0, &rbb, &lidx, 1, MIB, false, &b, 8, None,
             ));
         }
         let (a, b) = (&plans[0], &plans[1]);
@@ -5336,7 +5456,7 @@ mod split_tests {
             let b = std::sync::atomic::AtomicIsize::new(budget);
             let t = std::time::Instant::now();
             let plan = build_cell_plan(
-                &doc, 0, &rbb, &lidx, 1, MIB, true, &b,
+                &doc, 0, &rbb, &lidx, 1, MIB, true, &b, 8, None,
             );
             eprintln!(
                 "p2 budget {}: plan {:.2}s (split {:.2}/{}t \
@@ -5410,7 +5530,16 @@ mod split_tests {
             let b = std::sync::atomic::AtomicIsize::new(budget);
             let t = std::time::Instant::now();
             let plan = build_cell_plan(
-                &doc, 0, &rbb, &lidx, NL as usize, MIB, true, &b,
+                &doc,
+                0,
+                &rbb,
+                &lidx,
+                NL as usize,
+                MIB,
+                true,
+                &b,
+                8,
+                None,
             );
             eprintln!(
                 "fanout budget {}: plan {:.2}s (split {:.2}/{}t \
@@ -5463,7 +5592,9 @@ mod split_tests {
                 .map(|(i, &k)| (k, i))
                 .collect();
         let budget = std::sync::atomic::AtomicIsize::new(0);
-        build_cell_plan(doc, 0, &rbb, &lidx, 1, MIB, true, &budget)
+        build_cell_plan(
+            doc, 0, &rbb, &lidx, 1, MIB, true, &budget, 1, None,
+        )
     }
 
     /// expand every member of a cell's records into
