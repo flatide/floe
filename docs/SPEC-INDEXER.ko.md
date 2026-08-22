@@ -24,14 +24,29 @@ floe-index vfs <src.oas> [outdir=.floe] [--jobs N] [--plan-batch N]
      - 인스턴스 BVH(리프 순서=방출 순서, v7 max_dim/max_min 주석),
      - (cell,layer) 런 조립 + **rep-split**(목표 페이지 크기 초과 시
        Grid 인덱스 분할/Pts rebase 분할, oversize 격리, v6 max_min 계산).
-       **셀 내부 레이어 팬아웃**(#60 P1): 비어있지 않은 레이어가 태스크
-       단위 — 조건(레이어≥2·입력≥4MiB·MemAvailable≥4GB)에서 공유
-       예산의 여유 슬롯만 빌려 ≤8 스레드로 병렬 분할(무거운 레이어
-       우선 스케줄), 결과는 **li 순서로 병합**(pages/pbvh 리베이스 +
-       레이어별 compact arena slot) → 바이트 불변. 예산 슬롯은 종료한
-       플래너만 반환하므로 이는 몬스터-셀 꼬리 최적화다(윈도 대기
-       플래너는 슬롯을 보유). 한 레이어가 지배하는 셀(단일 레이어
-       fill 팜)은 P1 비대상 — per-layer top 로그로 P2 필요를 판정.
+       **셀별 분할 모드**(#60): 지배 레이어(최대 레이어 ≥60% AND
+       ≥8MiB) → **P2 서브트리 팬아웃**, 아니고 레이어≥2·입력≥4MiB →
+       **P1 레이어 팬아웃**, 그 외/헬퍼 0/MemAvailable<4GB → 직렬.
+       셀당 한 모드만 — 중첩하면 P1이 전 레이어 종료까지 헬퍼를
+       쥐고 있어 지배 레이어의 P2가 항상 예산 0을 본다. 예산 슬롯은
+       종료한 플래너만 반환하므로 두 팬아웃 모두 몬스터-셀 꼬리
+       최적화다(윈도 대기 플래너는 슬롯 보유; 일반 위치까지 가속 =
+       통합 워커 풀, 후속).
+       - **P1**: 비어있지 않은 레이어가 태스크 단위, ≤8 스레드
+         (무거운 레이어 우선), 결과는 li 순서 병합(pages/pbvh
+         리베이스 + compact **arena shard** slot) → 바이트 불변.
+       - **P2**: 지배 레이어 내부 — 직렬 프리픽스 전개(노드 1스텝
+         `split_node`를 직렬 재귀와 공유)로 frontier 태스크 생성
+         (target = 스레드×4, cap 32, cutoff = max(입력/target,
+         2MiB)), 세그먼트 리스트가 DFS 방출 순서(노드 oversize →
+         left → right)를 기록. 태스크 생성 시 **arena sharding**:
+         Frag::Pts 참조 범위를 태스크-로컬 shard로 복사(태스크만
+         참조하는 원본 엔트리는 즉시 해제 — 일시 오버헤드 = 엔트리
+         1개분), 실행은 무거운 태스크 우선, 병합은 세그먼트 순서 +
+         **seq 재부여** + shard slot(프리픽스 → 태스크 순) 지정,
+         pbvh는 병합 완료 후 레이어당 1회 → 바이트 불변. 헬퍼 0이면
+         frontier/sharding 자체를 만들지 않는 완전 직렬 폴백.
+         남은 지렛대 = 프리픽스 파티션 병렬화(P2-ext, 미착수).
      - **LOD 변종 생성**: 후보 members≥256; 후보 ≥64(LOD_PAR_MIN)면
        셀 내부 스레드 팬아웃(≤16, 같은 공유 예산), cand 순서 병합 →
        바이트 불변. `--no-lod`면 후보 목록 자체를 비움(전 페이지
@@ -43,10 +58,10 @@ floe-index vfs <src.oas> [outdir=.floe] [--jobs N] [--plan-batch N]
    - **slow-cell 로그**: plan이 임계(기본 5s, `FLOE_SLOW_CELL_S`,
      0=전 셀) 초과인 셀을 stderr로:
      `slow cell NAME (ci N/total): plan Xs (places, pages, frag
-     splits; bvh asm split/Nt lod/Nt pts sink; layers A, top
-     L<layer>.<dt> Xs ...)` — split/lod 스레드 수와 레이어별 split
-     상위 3개가 P1 효과·P2 필요의 실측 근거(150M 실측: ESD dummy
-     164.3→42.5s).
+     splits; bvh asm split/Nt[ p2_tasks=K shard=MMiB] lod/Nt pts
+     sink; layers A, top L<layer>.<dt> Xs ...)` — split/lod 스레드
+     수·P2 태스크/샤딩량·레이어별 split 상위 3개가 팬아웃 효과의
+     실측 근거(150M 실측: ESD dummy 164.3→42.5s).
 4. **ovt/ovp 쓰기** → **meta.json**(`emit_viewer_side`) →
    **design.ovm 커밋**(빌드 바이트를 `Ovm::from_bytes` 딥 검증 통과
    후 파일로 — 검증이 공짜 게이트).

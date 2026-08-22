@@ -19,6 +19,14 @@ honest pages.
       (FLOE_SLOW_CELL_S=0) shows >1 split thread and the per-layer
       top list on the multi-layer cell, and the parallel build's
       peak child RSS stays within 1.5x + 512MB of the serial one
+      (per-run RSS via a fresh wrapper process; thread checks skip
+      on hosts where the fanout legitimately stays off)
+  S7  subtree fanout (#60 P2): p2floor - ONE dominant layer mixing
+      600 medium Pts floods with a single 2M-member rep. The log
+      shows p2_tasks>=2 and split threads>=2, jobs 1/4/16 builds
+      are byte-identical (arena shard isolation), validate_vfs.py
+      recounts every page, and the parallel peak RSS (sharding
+      copies included) stays within 1.5x + 512MB of serial
 
 Usage: validate_vfs_split.py [workdir]  (default $TMPDIR/floe-valsplit)
 """
@@ -26,7 +34,6 @@ import json
 import os
 import random
 import re
-import resource
 import shutil
 import subprocess
 import sys
@@ -83,6 +90,49 @@ def gen(src):
     ly.write(src, opt)
 
 
+def gen_p2(src):
+    """S7 asset: ONE dominant layer (>= P2_MIN, ~99% of the split
+    input) mixing many medium Pts reps with a single giant one -
+    the two P2 shapes (record-parallel and single-rep) in one cell.
+    A small second layer keeps the dominance test (not layers==1)
+    on the deciding path."""
+    import klayout.db as db
+    ly = db.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell("TOP")
+    l1 = ly.layer(1, 0)
+    l2 = ly.layer(2, 0)
+    rnd = random.Random(11)
+    die = 1_000_000
+    for _ in range(600):
+        w = rnd.randint(80, 200)
+        h = rnd.randint(80, 200)
+        for _ in range(4000):
+            x = rnd.randint(0, die - w)
+            y = rnd.randint(0, die - h)
+            top.shapes(l1).insert(db.Box(x, y, x + w, y + h))
+    # one identical box at 2M UNIQUE positions: klayout folds it
+    # into a single Pts rep (the P2-B shape - one entry owns
+    # everything). Sampled without replacement - a random draw
+    # collides a few times over 2M and exact duplicate boxes get
+    # collapsed by the G5 klayout recount (3-member mismatch).
+    step = 400
+    grid = (die - 100) // step
+    for v in rnd.sample(range(grid * grid), 2_000_000):
+        x = (v % grid) * step
+        y = (v // grid) * step
+        top.shapes(l1).insert(db.Box(x, y, x + 100, y + 100))
+    for k in range(100):
+        x = rnd.randint(0, die - 200)
+        for j in range(200):
+            top.shapes(l2).insert(
+                db.Box(x, j * 5000, x + 150, j * 5000 + 400))
+    opt = db.SaveLayoutOptions()
+    opt.format = "OASIS"
+    opt.oasis_compression_level = 10
+    ly.write(src, opt)
+
+
 def plan(outdir, view, ppu, depth=0, cut=0.0):
     r = subprocess.run(
         [FI, "plan", outdir, "--mode", "hier",
@@ -108,44 +158,68 @@ def main():
         bad.append(msg)
         print("FAIL " + msg)
 
-    def child_maxrss():
-        # macOS reports bytes, Linux kilobytes
-        mult = 1 if sys.platform == "darwin" else 1024
-        return resource.getrusage(
-            resource.RUSAGE_CHILDREN).ru_maxrss * mult
+    def measured_build(args, env=None):
+        """run one build in a FRESH wrapper process so
+        RUSAGE_CHILDREN reports this run's peak RSS independently
+        (in this process it would be a running max across builds)"""
+        code = (
+            "import json,resource,subprocess,sys\n"
+            "r=subprocess.run(sys.argv[1:],capture_output=True)\n"
+            "ru=resource.getrusage(resource.RUSAGE_CHILDREN)\n"
+            "m=1 if sys.platform=='darwin' else 1024\n"
+            "json.dump({'rc':r.returncode,'rss':ru.ru_maxrss*m,"
+            "'err':r.stderr.decode('utf-8','replace')},sys.stdout)\n"
+        )
+        r = subprocess.run([sys.executable, "-c", code] + args,
+                           capture_output=True, check=True, env=env)
+        d = json.loads(r.stdout)
+        if d["rc"] != 0:
+            raise RuntimeError("build failed:\n" + d["err"][-4000:])
+        return d
 
-    # serial build first: S4's byte reference AND the RSS baseline
-    # (RUSAGE_CHILDREN.ru_maxrss is a running max over reaped
-    # children, so the serial peak must be sampled first)
+    def fanout_expected():
+        """the build legitimately stays serial on starved hosts
+        (1 CPU, or Linux MemAvailable under the 4GB governor)"""
+        if (os.cpu_count() or 1) < 2:
+            return False
+        try:
+            for ln in open("/proc/meminfo"):
+                if ln.startswith("MemAvailable:"):
+                    if int(ln.split()[1]) < 4 * 1024 * 1024:
+                        return False
+        except OSError:
+            pass
+        return True
+
+    # serial build first: S4's byte reference and the RSS baseline
     out1 = os.path.join(work, "repfloor_j1.floe")
     shutil.rmtree(out1, ignore_errors=True)
-    subprocess.run([FI, "vfs", src, out1, "--jobs", "1"],
-                   capture_output=True, check=True)
-    rss_j1 = child_maxrss()
+    d1 = measured_build([FI, "vfs", src, out1, "--jobs", "1"])
 
     out = os.path.join(work, "repfloor.oas.floe")
     shutil.rmtree(out, ignore_errors=True)
-    env = dict(os.environ, FLOE_SLOW_CELL_S="0")
-    r = subprocess.run([FI, "vfs", src, out, "--jobs", "4"],
-                       capture_output=True, check=True, env=env)
-    rss_j4 = child_maxrss()
+    d4 = measured_build(
+        [FI, "vfs", src, out, "--jobs", "4"],
+        env=dict(os.environ, FLOE_SLOW_CELL_S="0"))
 
-    # S6: the multi-layer cell fans its split out and says so
-    slow = [ln for ln in r.stderr.decode().splitlines()
+    # S6: the multi-layer cell fans its split out (P1) and says so
+    slow = [ln for ln in d4["err"].splitlines()
             if "slow cell TOP " in ln]
-    m = re.search(r"split [0-9.]+/(\d+)t", slow[0]) if slow else None
-    if not m:
+    if not slow:
         fail("S6 no slow-cell line for TOP (FLOE_SLOW_CELL_S=0)")
-    else:
-        if int(m.group(1)) < 2:
+    elif fanout_expected():
+        m = re.search(r"split [0-9.]+/(\d+)t", slow[0])
+        if not m or int(m.group(1)) < 2:
             fail("S6 split fanout never engaged: %s" % slow[0])
         if "top L" not in slow[0]:
             fail("S6 per-layer top list missing: %s" % slow[0])
-    if rss_j4 > rss_j1 * 1.5 + (512 << 20):
+    else:
+        print("S6 fanout checks skipped (starved host)")
+    if d4["rss"] > d1["rss"] * 1.5 + (512 << 20):
         fail("S6 parallel build peak RSS %.0fMB vs serial %.0fMB"
-             % (rss_j4 / 2**20, rss_j1 / 2**20))
-    print("split-rss serial %.0fMB parallel-peak %.0fMB"
-          % (rss_j1 / 2**20, rss_j4 / 2**20))
+             % (d4["rss"] / 2**20, d1["rss"] / 2**20))
+    print("split-rss serial %.0fMB parallel %.0fMB"
+          % (d1["rss"] / 2**20, d4["rss"] / 2**20))
 
     # S2 first (full view = whole-asset reference)
     full = plan(out, (0, 0, 1000, 1000), 1.047, cut=0.0)
@@ -220,7 +294,61 @@ def main():
             fail("S4 %s differs between --jobs 4 and --jobs 1" % f)
     shutil.rmtree(out1, ignore_errors=True)
 
-    print("vfs-split-checked S1-S6, failures: %d" % len(bad))
+    # S7 (#60 P2): dominant single layer - frontier fanout log,
+    # jobs 1/4/16 bytes, per-run RSS bound, full klayout recount
+    p2src = os.path.join(work, "p2floor.oas")
+    p2marker = p2src + ".gen2"
+    if not os.path.exists(p2src) or not os.path.exists(p2marker):
+        gen_p2(p2src)
+        open(p2marker, "w").write("ok")
+    p2j1 = os.path.join(work, "p2floor_j1.floe")
+    p2out = os.path.join(work, "p2floor.oas.floe")
+    p2j16 = os.path.join(work, "p2floor_j16.floe")
+    for d_ in (p2j1, p2out, p2j16):
+        shutil.rmtree(d_, ignore_errors=True)
+    p1d = measured_build([FI, "vfs", p2src, p2j1, "--jobs", "1"])
+    p4d = measured_build(
+        [FI, "vfs", p2src, p2out, "--jobs", "4"],
+        env=dict(os.environ, FLOE_SLOW_CELL_S="0"))
+    measured_build([FI, "vfs", p2src, p2j16, "--jobs", "16"])
+    slow = [ln for ln in p4d["err"].splitlines()
+            if "slow cell TOP " in ln]
+    if not slow:
+        fail("S7 no slow-cell line for TOP")
+    elif fanout_expected():
+        m = re.search(r"p2_tasks=(\d+)", slow[0])
+        if not m or int(m.group(1)) < 2:
+            fail("S7 P2 frontier never engaged: %s" % slow[0])
+        mt = re.search(r"split [0-9.]+/(\d+)t", slow[0])
+        if not mt or int(mt.group(1)) < 2:
+            fail("S7 split threads never borrowed: %s" % slow[0])
+    else:
+        print("S7 fanout checks skipped (starved host)")
+    for f in ("design.ovm", "design.ovp", "design.ovt"):
+        a = open(os.path.join(p2out, f), "rb").read()
+        for o in (p2j1, p2j16):
+            if a != open(os.path.join(o, f), "rb").read():
+                fail("S7 %s differs vs %s"
+                     % (f, os.path.basename(o)))
+    if p4d["rss"] > p1d["rss"] * 1.5 + (512 << 20):
+        fail("S7 P2 peak RSS %.0fMB vs serial %.0fMB"
+             % (p4d["rss"] / 2**20, p1d["rss"] / 2**20))
+    print("p2-rss serial %.0fMB parallel %.0fMB (%s)"
+          % (p1d["rss"] / 2**20, p4d["rss"] / 2**20,
+             slow[0].split("frag", 1)[0].strip() if slow else "-"))
+    r = subprocess.run(
+        [sys.executable, os.path.join(ROOT, "tools",
+                                      "validate_vfs.py"),
+         p2src, p2out],
+        capture_output=True)
+    sys.stdout.write(r.stdout.decode())
+    if r.returncode != 0:
+        sys.stderr.write(r.stderr.decode())
+        fail("S7 validate_vfs.py failed on p2floor")
+    shutil.rmtree(p2j1, ignore_errors=True)
+    shutil.rmtree(p2j16, ignore_errors=True)
+
+    print("vfs-split-checked S1-S7, failures: %d" % len(bad))
     sys.exit(1 if bad else 0)
 
 

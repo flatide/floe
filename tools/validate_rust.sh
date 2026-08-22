@@ -42,8 +42,18 @@ OUT="${SRC%.oas}_rust.tiles"
 # VFS V1 (rust/VFS.md): build .floe and run the G5/G6 gates
 VOUT="${SRC%.oas}_rust.floe"
 rm -rf "$VOUT"
-rust/target/release/floe-index vfs "$SRC" "$VOUT" --coverage \
-    >/dev/null 2>&1
+FLOE_SLOW_CELL_S=0 rust/target/release/floe-index vfs "$SRC" "$VOUT" \
+    --coverage >/dev/null 2> "$VOUT.buildlog"
+# small assets must never fan out (#60): no P2 frontier, no split
+# helper threads - the thresholds keep tiny cells on the fast
+# serial path
+if grep -q "p2_tasks=" "$VOUT.buildlog"; then
+    echo "FAIL: P2 frontier engaged on valmini"; exit 1
+fi
+if grep -Eq "split [0-9.]+/([2-9]|[1-9][0-9])t" "$VOUT.buildlog"; then
+    echo "FAIL: split fanout engaged on valmini"; exit 1
+fi
+rm -f "$VOUT.buildlog"
 .venv/bin/python tools/validate_vfs.py "$SRC" "$VOUT"
 .venv/bin/python tools/validate_vfs_render.py "$SRC" "$VOUT"
 .venv/bin/python tools/validate_vfs_coverage.py "$SRC" "$VOUT"

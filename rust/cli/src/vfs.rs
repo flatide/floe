@@ -649,8 +649,9 @@ enum Frag {
     Whole,
     /// [lo,hi) into Arena[arena] offsets (reordered in place while
     /// splitting; sibling ranges are disjoint by construction).
-    /// `arena` indexes the owning LAYER's arena (#60 P1) - the
-    /// page's arena_slot names which layer arena that is.
+    /// `arena` indexes the owning ARENA SHARD (#60 P1/P2: one per
+    /// serial/P1 layer, one per P2 frontier task) - the page's
+    /// arena_slot names which shard that is.
     Pts { arena: u32, lo: u32, hi: u32 },
     /// index sub-rectangle [i0,i1) x [j0,j1) of a Grid rep
     Grid { i0: u64, i1: u64, j0: u64, j1: u64 },
@@ -667,11 +668,11 @@ struct PtsArena {
 
 type Arena = Vec<PtsArena>;
 
-/// arena_slot of a page whose layer allocated no Pts scratch
+/// arena_slot of a page whose recs reference no Pts scratch
 const ARENA_NONE: u32 = u32::MAX;
 
-/// resolve a page's layer arena from the cell's compact arena list
-/// (slots exist only for layers that fragmented a Pts rep)
+/// resolve a page's arena shard from the cell's compact shard list
+/// (slots exist only for shards that hold fragmented-Pts scratch)
 fn arena_at(arenas: &[Arena], slot: u32) -> &Arena {
     static EMPTY: Arena = Vec::new();
     if slot == ARENA_NONE {
@@ -701,6 +702,29 @@ const SPLIT_PAR_MAX: usize = 8;
 /// byte estimates); below it a cell splits in well under a second
 /// and thread setup is pure overhead
 const SPLIT_PAR_MIN_BYTES: u64 = 4 * MIB;
+/// P2 (#60) dominant-layer floor: below this even a dominant layer
+/// is fast enough serially and the sharding copies don't amortize
+const P2_MIN_BYTES: u64 = 8 * MIB;
+/// P2 frontier cutoff floor - stops skewed splits from minting
+/// piles of tiny sibling tasks
+const P2_TASK_MIN_BYTES: u64 = 2 * MIB;
+/// P2 hard cap on frontier tasks per layer
+const P2_TASK_CAP: usize = 32;
+
+/// P2 (#60) frontier options. Production passes threads >= 2 only
+/// after a successful budget borrow; the determinism unit test
+/// forces threads = 1 to prove that frontier expansion, arena
+/// sharding and the segment merge alone are byte-neutral vs the
+/// serial recursion.
+struct P2Opts {
+    /// total split threads, this thread included
+    threads: usize,
+    /// frontier granularity target (threads x 4, capped)
+    target_tasks: usize,
+    /// frontier cutoff floor (production: P2_TASK_MIN_BYTES;
+    /// small-fixture unit tests lower it to form a real frontier)
+    task_min: u64,
+}
 
 fn rep_est_n(n: u64) -> u32 {
     (4u64.saturating_mul(n)).min(u32::MAX as u64) as u32
@@ -941,9 +965,9 @@ fn frag_split(
 struct PageJob {
     ci: usize,
     li: u32,
-    /// which compact layer arena this page's Frag::Pts indices
-    /// address (ARENA_NONE when the layer has none); assigned at
-    /// the layer merge, inherited by the page's LOD variant
+    /// which compact arena shard this page's Frag::Pts indices
+    /// address (ARENA_NONE when it references none); assigned by
+    /// the layer/P2 merge, inherited by the page's LOD variant
     arena_slot: u32,
     seq: u32,
     recs: Vec<PRec>,
@@ -1007,18 +1031,33 @@ fn emit_page(
 /// recs.len()>MIN gate left one huge Pts record as one page).
 /// Ownership at the plane: center*2 < plane2 -> left, else right.
 #[allow(clippy::too_many_arguments)]
-fn split_pages(
+/// the recursion decision of one split node - shared verbatim by
+/// the serial recursion and the P2 frontier expansion so both
+/// produce identical bytes
+enum NodeStep {
+    /// under target, unsplittable, depth-capped or spatially
+    /// irreducible: emit as ONE page (after this node's oversize
+    /// pages)
+    Leaf(Vec<PRec>),
+    /// everything went to oversize pages at this node
+    Drained,
+    /// recurse left then right (after this node's oversize pages)
+    Split { lv: Vec<PRec>, rv: Vec<PRec> },
+}
+
+/// one split_pages node: classify, partition, quarantine - this
+/// node's oversize (wide) pages come back as packed record groups
+/// in `oversize` and MUST be emitted before anything the returned
+/// step produces (emission order = page seq = bytes)
+fn split_node(
     cell: &floe_oasis::doc::Cell,
     arena: &mut Arena,
-    ci: usize,
-    li: u32,
     recs: Vec<PRec>,
-    seq: &mut u32,
-    out: &mut Vec<PageJob>,
     st: &mut SplitStats,
     page_target_bytes: u64,
     depth: u32,
-) {
+    oversize: &mut Vec<Vec<PRec>>,
+) -> NodeStep {
     let bytes: u64 = recs.iter().map(|r| r.bytes as u64).sum();
     // the split gate is BYTES, not record count - with repetitions
     // a handful of records can be gigabytes, and page decode cost
@@ -1027,13 +1066,11 @@ fn split_pages(
     let splittable = recs.len() >= 2
         || recs.iter().any(|r| can_frag(cell, r));
     if bytes <= page_target_bytes || !splittable {
-        emit_page(ci, li, recs, seq, out);
-        return;
+        return NodeStep::Leaf(recs);
     }
     if depth >= SPLIT_MAX_DEPTH {
         st.depth_capped += 1;
-        emit_page(ci, li, recs, seq, out);
-        return;
+        return NodeStep::Leaf(recs);
     }
     let mut bb = BBox::EMPTY;
     for r in recs.iter() {
@@ -1093,7 +1130,7 @@ fn split_pages(
             && !acc.is_empty()
         {
             st.oversize_pages += 1;
-            emit_page(ci, li, std::mem::take(&mut acc), seq, out);
+            oversize.push(std::mem::take(&mut acc));
             acc_bytes = 0;
         }
         acc_bytes += r.bytes as u64;
@@ -1101,18 +1138,53 @@ fn split_pages(
     }
     if !acc.is_empty() {
         st.oversize_pages += 1;
-        emit_page(ci, li, acc, seq, out);
+        oversize.push(acc);
     }
     if lv.is_empty() && rv.is_empty() {
-        return;
+        return NodeStep::Drained;
     }
     if lv.is_empty() || rv.is_empty() {
         // nothing separable at this plane (coincident pile):
         // over-target but spatially irreducible - emit as-is
         lv.extend(rv);
-        emit_page(ci, li, lv, seq, out);
-        return;
+        return NodeStep::Leaf(lv);
     }
+    NodeStep::Split { lv, rv }
+}
+
+fn split_pages(
+    cell: &floe_oasis::doc::Cell,
+    arena: &mut Arena,
+    ci: usize,
+    li: u32,
+    recs: Vec<PRec>,
+    seq: &mut u32,
+    out: &mut Vec<PageJob>,
+    st: &mut SplitStats,
+    page_target_bytes: u64,
+    depth: u32,
+) {
+    let mut oversize: Vec<Vec<PRec>> = Vec::new();
+    let step = split_node(
+        cell,
+        arena,
+        recs,
+        st,
+        page_target_bytes,
+        depth,
+        &mut oversize,
+    );
+    for grp in oversize {
+        emit_page(ci, li, grp, seq, out);
+    }
+    let (lv, rv) = match step {
+        NodeStep::Leaf(r) => {
+            emit_page(ci, li, r, seq, out);
+            return;
+        }
+        NodeStep::Drained => return,
+        NodeStep::Split { lv, rv } => (lv, rv),
+    };
     split_pages(
         cell,
         arena,
@@ -1489,14 +1561,19 @@ struct CellPlan {
     /// cell-local page index, inner `first` a cell-local node index
     pbvh: Vec<(BBox, u32, u16, bool, u64, u64)>,
     /// fragmented-Pts offset scratch shared by this cell's jobs:
-    /// one compact slot per layer that fragmented a Pts rep
-    /// (PageJob.arena_slot names a page's slot)
+    /// compact ARENA SHARDS - one per serial/P1 layer that
+    /// fragmented a Pts rep, one per P2 frontier task (+ prefix).
+    /// PageJob.arena_slot names a page's shard.
     arenas: std::sync::Arc<Vec<Arena>>,
     split_stats: SplitStats,
-    /// #60 P1 instrumentation for the slow-cell log
+    /// #60 P1/P2 instrumentation for the slow-cell log
     split_threads: usize,
     lod_threads: usize,
     layers_active: usize,
+    /// P2 frontier task count (0 = no subtree fanout ran)
+    p2_tasks: usize,
+    /// bytes copied by P2 arena sharding
+    shard_bytes: u64,
     /// ((layer, datatype), split seconds), heaviest first, <= 3
     top_split: Vec<((u32, u32), f32)>,
 }
@@ -1878,15 +1955,22 @@ fn gen_lod_job(
 /// scheduling and thread count
 struct LayerPlan {
     li: u32,
-    /// pbvh leaf order when a tree exists, split emit order else
+    /// pbvh leaf order when a tree exists, split emit order else.
+    /// arena_slot is LAYER-LOCAL here (an index into `arenas`);
+    /// the cell merge rebases it onto the cell's shard list.
     pages: Vec<PageJob>,
     /// empty = short run (linear scan, prange root PBVH_NONE);
     /// leaf `first` is a run-local page index, inner `first` a
     /// run-local node index
     pbvh: Vec<(BBox, u32, u16, bool, u64, u64)>,
-    /// layer-local Pts scratch (Frag::Pts.arena indexes this)
-    arena: Arena,
+    /// Pts scratch shards, non-empty only: one for a serial/P1
+    /// layer, one per frontier task (+ prefix) under P2
+    arenas: Vec<Arena>,
     stats: SplitStats,
+    /// P2 frontier task count (0 = serial split)
+    p2_tasks: usize,
+    /// bytes copied by P2 arena sharding (0 = serial split)
+    shard_bytes: u64,
     secs: f32,
 }
 
@@ -1914,6 +1998,29 @@ fn plan_layer(
         page_target_bytes,
         0,
     );
+    let arenas = if arena.is_empty() {
+        Vec::new()
+    } else {
+        for j in run.iter_mut() {
+            j.arena_slot = 0; // the layer's single shard
+        }
+        vec![arena]
+    };
+    finish_layer(li, run, arenas, stats, 0, 0, t)
+}
+
+/// pbvh + leaf-order permute over a layer's finished emission run,
+/// shared by the serial path and the P2 merge - the tree is built
+/// ONCE per layer, after the complete page order exists
+fn finish_layer(
+    li: u32,
+    run: Vec<PageJob>,
+    arenas: Vec<Arena>,
+    stats: SplitStats,
+    p2_tasks: usize,
+    shard_bytes: u64,
+    t: std::time::Instant,
+) -> LayerPlan {
     let mut pbvh: Vec<(BBox, u32, u16, bool, u64, u64)> = Vec::new();
     let pages = if run.len() <= PBVH_LEAF {
         // short run: linear scan beats a tree
@@ -1949,10 +2056,260 @@ fn plan_layer(
         li,
         pages,
         pbvh,
-        arena,
+        arenas,
         stats,
+        p2_tasks,
+        shard_bytes,
         secs: t.elapsed().as_secs_f32(),
     }
+}
+
+/// P2 (#60): split one dominant layer via a serial frontier
+/// expansion plus parallel subtree tasks. The segment list records
+/// the serial DFS emission order (a node's oversize pages, then
+/// its left subtree, then its right), seq is re-assigned over the
+/// merged run and the pbvh is built once at the end - so the
+/// output bytes equal plan_layer's at any thread count.
+fn plan_layer_frontier(
+    cell: &floe_oasis::doc::Cell,
+    ci: usize,
+    li: u32,
+    recs: Vec<PRec>,
+    page_target_bytes: u64,
+    opts: &P2Opts,
+) -> LayerPlan {
+    let t = std::time::Instant::now();
+    let total: u64 = recs.iter().map(|r| r.bytes as u64).sum();
+    let cutoff =
+        (total / opts.target_tasks.max(1) as u64).max(opts.task_min);
+    if total / 2 < cutoff {
+        // the frontier would be a single task: plain serial is
+        // the same work without the sharding copies
+        return plan_layer(cell, ci, li, recs, page_target_bytes);
+    }
+    enum Seg {
+        Pages(Vec<PageJob>),
+        Task(usize),
+    }
+    // ---- serial prefix: DFS pre-order via explicit stack (right
+    // child pushed first so the left subtree pops - and merges -
+    // first)
+    let mut prefix: Arena = Vec::new();
+    let mut stats = SplitStats::default();
+    let mut segs: Vec<Seg> = Vec::new();
+    let mut tasks: Vec<(Vec<PRec>, u32)> = Vec::new();
+    let mut seq0 = 0u32; // placeholder ids, re-assigned at merge
+    let mut stack: Vec<(Vec<PRec>, u32)> = vec![(recs, 0)];
+    while let Some((recs, depth)) = stack.pop() {
+        let bytes: u64 =
+            recs.iter().map(|r| r.bytes as u64).sum();
+        if bytes <= cutoff
+            || tasks.len() + stack.len() + 1 >= P2_TASK_CAP
+        {
+            segs.push(Seg::Task(tasks.len()));
+            tasks.push((recs, depth));
+            continue;
+        }
+        let mut oversize: Vec<Vec<PRec>> = Vec::new();
+        let step = split_node(
+            cell,
+            &mut prefix,
+            recs,
+            &mut stats,
+            page_target_bytes,
+            depth,
+            &mut oversize,
+        );
+        let mut emitted: Vec<PageJob> = Vec::new();
+        for grp in oversize {
+            emit_page(ci, li, grp, &mut seq0, &mut emitted);
+        }
+        match step {
+            NodeStep::Split { lv, rv } => {
+                if !emitted.is_empty() {
+                    segs.push(Seg::Pages(emitted));
+                }
+                stack.push((rv, depth + 1));
+                stack.push((lv, depth + 1));
+            }
+            NodeStep::Leaf(r) => {
+                emit_page(ci, li, r, &mut seq0, &mut emitted);
+                segs.push(Seg::Pages(emitted));
+            }
+            NodeStep::Drained => {
+                if !emitted.is_empty() {
+                    segs.push(Seg::Pages(emitted));
+                }
+            }
+        }
+    }
+    // ---- arena sharding: copy each task's Frag::Pts ranges into
+    // a task-local shard so parallel subtrees never touch shared
+    // scratch. Entries referenced only by tasks free right after
+    // their copies, so the transient overhead is one entry's
+    // ranges, not the whole prefix arena.
+    let mut retained = vec![false; prefix.len()];
+    for s in &segs {
+        if let Seg::Pages(pages) = s {
+            for p in pages {
+                for r in &p.recs {
+                    if let Frag::Pts { arena, .. } = r.frag {
+                        retained[arena as usize] = true;
+                    }
+                }
+            }
+        }
+    }
+    let mut refs: Vec<Vec<(usize, usize, u32, u32)>> =
+        (0..prefix.len()).map(|_| Vec::new()).collect();
+    for (ti, (recs, _)) in tasks.iter().enumerate() {
+        for (ri, r) in recs.iter().enumerate() {
+            if let Frag::Pts { arena, lo, hi } = r.frag {
+                refs[arena as usize].push((ti, ri, lo, hi));
+            }
+        }
+    }
+    let mut shards: Vec<Arena> =
+        (0..tasks.len()).map(|_| Arena::new()).collect();
+    let mut shard_bytes = 0u64;
+    for (a, list) in refs.into_iter().enumerate() {
+        if list.is_empty() {
+            continue;
+        }
+        let sb = prefix[a].shape_box;
+        for (ti, ri, lo, hi) in list {
+            let order =
+                prefix[a].order[lo as usize..hi as usize].to_vec();
+            shard_bytes += 4 * order.len() as u64;
+            let na = narrow_u32(
+                shards[ti].len() as u64,
+                "fragment arena index",
+            );
+            let hi2 = narrow_u32(
+                order.len() as u64,
+                "fragment pts index",
+            );
+            shards[ti].push(PtsArena { shape_box: sb, order });
+            tasks[ti].0[ri].frag =
+                Frag::Pts { arena: na, lo: 0, hi: hi2 };
+        }
+        if !retained[a] {
+            prefix[a].order = Vec::new(); // free promptly
+        }
+    }
+    // ---- execute tasks, heaviest first; the segment list alone
+    // fixes the merge order, so scheduling cannot change bytes
+    let p2_tasks = tasks.len();
+    let mut order: Vec<usize> = (0..tasks.len()).collect();
+    order.sort_by_key(|&k| {
+        std::cmp::Reverse(
+            tasks[k].0.iter().map(|r| r.bytes as u64).sum::<u64>(),
+        )
+    });
+    let cells: Vec<
+        std::sync::Mutex<Option<(Vec<PRec>, u32, Arena)>>,
+    > = tasks
+        .into_iter()
+        .zip(shards)
+        .map(|((recs, depth), shard)| {
+            std::sync::Mutex::new(Some((recs, depth, shard)))
+        })
+        .collect();
+    let done: Vec<
+        std::sync::Mutex<Option<(Vec<PageJob>, SplitStats, Arena)>>,
+    > = (0..cells.len())
+        .map(|_| std::sync::Mutex::new(None))
+        .collect();
+    let nextk = std::sync::atomic::AtomicUsize::new(0);
+    let work = || loop {
+        let i =
+            nextk.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if i >= order.len() {
+            return;
+        }
+        let k = order[i];
+        let (recs, depth, mut arena) =
+            cells[k].lock().unwrap().take().expect("p2 task");
+        let mut st = SplitStats::default();
+        let mut out: Vec<PageJob> = Vec::new();
+        let mut seq = 0u32;
+        split_pages(
+            cell,
+            &mut arena,
+            ci,
+            li,
+            recs,
+            &mut seq,
+            &mut out,
+            &mut st,
+            page_target_bytes,
+            depth,
+        );
+        *done[k].lock().unwrap() = Some((out, st, arena));
+    };
+    if opts.threads <= 1 || p2_tasks <= 1 {
+        work();
+    } else {
+        std::thread::scope(|sc| {
+            for _ in 0..opts.threads.min(p2_tasks) - 1 {
+                sc.spawn(&work);
+            }
+            work();
+        });
+    }
+    // ---- merge: shard slots (prefix first, then task order),
+    // pages in segment order, seq over the final run
+    let mut arenas: Vec<Arena> = Vec::new();
+    let prefix_slot = if retained.iter().any(|&r| r) {
+        arenas.push(prefix);
+        Some(0u32)
+    } else {
+        None
+    };
+    let mut results: Vec<
+        Option<(Vec<PageJob>, SplitStats, Arena)>,
+    > = done.into_iter().map(|m| m.into_inner().unwrap()).collect();
+    let mut task_slot: Vec<Option<u32>> = vec![None; results.len()];
+    for (k, r) in results.iter_mut().enumerate() {
+        let (_, st, arena) = r.as_mut().expect("p2 task result");
+        stats.fragments += st.fragments;
+        stats.oversize_pages += st.oversize_pages;
+        stats.depth_capped += st.depth_capped;
+        stats.lod_pages += st.lod_pages;
+        stats.lod_grid_verbatim += st.lod_grid_verbatim;
+        if !arena.is_empty() {
+            task_slot[k] = Some(narrow_u32(
+                arenas.len() as u64,
+                "cell arena count",
+            ));
+            arenas.push(std::mem::take(arena));
+        }
+    }
+    let mut run: Vec<PageJob> = Vec::new();
+    for s in segs {
+        match s {
+            Seg::Pages(mut p) => {
+                let sl = prefix_slot.unwrap_or(ARENA_NONE);
+                for j in p.iter_mut() {
+                    j.arena_slot = sl;
+                }
+                run.append(&mut p);
+            }
+            Seg::Task(k) => {
+                let (mut out, ..) =
+                    results[k].take().expect("p2 seg result");
+                let sl = task_slot[k].unwrap_or(ARENA_NONE);
+                for j in out.iter_mut() {
+                    j.arena_slot = sl;
+                }
+                run.append(&mut out);
+            }
+        }
+    }
+    for (i, j) in run.iter_mut().enumerate() {
+        j.seq = narrow_u32(i as u64, "page seq");
+    }
+    finish_layer(li, run, arenas, stats, p2_tasks, shard_bytes, t)
 }
 
 fn build_cell_plan(
@@ -2089,28 +2446,63 @@ fn build_cell_plan(
         .map(|(li, r)| (li as u32, r))
         .collect();
     let layers_active = layer_inputs.len();
-    // helper borrowing mirrors the LOD fanout below: free budget
+    // ---- cell-level split mode (#60): dominant layer -> P2
+    // subtree fanout, balanced layers -> P1 layer fanout, else
+    // serial. ONE mode per cell: nesting would starve P2, because
+    // P1 returns its helpers only after ALL layers finish - a
+    // dominant layer's P2 would always see budget 0.
+    //
+    // Helper borrowing mirrors the LOD fanout below: free budget
     // slots exist only when planners EXITED (the monster-cell
     // tail) or fewer cells than jobs are in flight - a planner
-    // blocked on the plan window still owns its slot, so this is
-    // a tail optimization by construction. Fanout also multiplies
-    // live recursion temporaries, so it stays off under governor
-    // memory pressure.
-    let split_bytes: u64 = layer_inputs
+    // blocked on the plan window still owns its slot, so both
+    // fanouts are tail optimizations by construction. They also
+    // multiply live recursion temporaries, so they stay off under
+    // governor memory pressure.
+    #[derive(PartialEq, Clone, Copy)]
+    enum SplitMode {
+        Serial,
+        P1,
+        P2,
+    }
+    let per_bytes: Vec<u64> = layer_inputs
         .iter()
-        .flat_map(|(_, r)| r.iter())
-        .map(|r| r.bytes as u64)
-        .sum();
-    let mut split_helpers = 0usize;
-    if layer_inputs.len() >= 2
-        && split_bytes >= SPLIT_PAR_MIN_BYTES
-        && crate::mem_available_gb()
-            .is_none_or(|gb| gb >= GOVERNOR_MIN_AVAIL_GB)
+        .map(|(_, r)| r.iter().map(|x| x.bytes as u64).sum())
+        .collect();
+    let split_bytes: u64 = per_bytes.iter().sum();
+    let (max_k, max_bytes) = per_bytes
+        .iter()
+        .enumerate()
+        .max_by_key(|&(_, &b)| b)
+        .map(|(k, &b)| (k, b))
+        .unwrap_or((0, 0));
+    let mem_ok = crate::mem_available_gb()
+        .is_none_or(|gb| gb >= GOVERNOR_MIN_AVAIL_GB);
+    let mode = if !mem_ok {
+        SplitMode::Serial
+    } else if max_bytes >= P2_MIN_BYTES
+        && max_bytes * 10 >= split_bytes * 6
     {
+        // >= 60% of the split input in one layer: P1 cannot beat
+        // that layer's serial time - go inside it
+        SplitMode::P2
+    } else if layers_active >= 2
+        && split_bytes >= SPLIT_PAR_MIN_BYTES
+    {
+        SplitMode::P1
+    } else {
+        SplitMode::Serial
+    };
+    let mut split_helpers = 0usize;
+    if mode != SplitMode::Serial {
         let desired = std::thread::available_parallelism()
             .map(|v| v.get())
             .unwrap_or(1)
-            .min(layer_inputs.len())
+            .min(if mode == SplitMode::P1 {
+                layers_active
+            } else {
+                usize::MAX
+            })
             .min(SPLIT_PAR_MAX)
             .max(1);
         while split_helpers + 1 < desired {
@@ -2134,26 +2526,55 @@ fn build_cell_plan(
     }
     let split_threads = split_helpers + 1;
     let layer_plans: Vec<LayerPlan> = if split_helpers == 0 {
+        // operational fallback: without helpers neither fanout
+        // pays - P2 sharding in particular would copy scratch for
+        // no speedup, so the frontier is never even built
         layer_inputs
             .into_iter()
             .map(|(li, recs)| {
                 plan_layer(cell, ci, li, recs, page_target_bytes)
             })
             .collect()
+    } else if mode == SplitMode::P2 {
+        // the dominant layer fans its subtrees over all borrowed
+        // helpers; the other layers are small by the dominance
+        // test and run serially on this thread
+        let opts = P2Opts {
+            threads: split_helpers + 1,
+            target_tasks: ((split_helpers + 1) * 4)
+                .min(P2_TASK_CAP),
+            task_min: P2_TASK_MIN_BYTES,
+        };
+        layer_inputs
+            .into_iter()
+            .enumerate()
+            .map(|(k, (li, recs))| {
+                if k == max_k {
+                    plan_layer_frontier(
+                        cell,
+                        ci,
+                        li,
+                        recs,
+                        page_target_bytes,
+                        &opts,
+                    )
+                } else {
+                    plan_layer(
+                        cell,
+                        ci,
+                        li,
+                        recs,
+                        page_target_bytes,
+                    )
+                }
+            })
+            .collect()
     } else {
-        // heaviest-first scheduling, li-order merge: load balance
-        // freely - the merge order alone fixes the output bytes
+        // P1: heaviest-first scheduling, li-order merge - load
+        // balance freely, the merge order alone fixes the bytes
         let mut order: Vec<usize> =
             (0..layer_inputs.len()).collect();
-        order.sort_by_key(|&k| {
-            std::cmp::Reverse(
-                layer_inputs[k]
-                    .1
-                    .iter()
-                    .map(|r| r.bytes as u64)
-                    .sum::<u64>(),
-            )
-        });
+        order.sort_by_key(|&k| std::cmp::Reverse(per_bytes[k]));
         let tasks: Vec<std::sync::Mutex<Option<(u32, Vec<PRec>)>>> =
             layer_inputs
                 .into_iter()
@@ -2183,10 +2604,6 @@ fn build_cell_plan(
             }
             work();
         });
-        lod_budget.fetch_add(
-            split_helpers as isize,
-            std::sync::atomic::Ordering::Relaxed,
-        );
         slots
             .into_iter()
             .map(|s| {
@@ -2194,6 +2611,12 @@ fn build_cell_plan(
             })
             .collect()
     };
+    if split_helpers > 0 {
+        lod_budget.fetch_add(
+            split_helpers as isize,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
     // merge in li order (this is what fixes the output bytes)
     let mut pages: Vec<PageJob> = Vec::new();
     let mut pranges: Vec<(u32, u32, u32, u32)> = Vec::new();
@@ -2201,6 +2624,7 @@ fn build_cell_plan(
     let mut arenas: Vec<Arena> = Vec::new();
     let mut split_stats = SplitStats::default();
     let mut top_split: Vec<((u32, u32), f32)> = Vec::new();
+    let (mut p2_tasks, mut shard_bytes) = (0usize, 0u64);
     for mut lp in layer_plans {
         let run_lo = narrow_u32(pages.len() as u64, "cell page count");
         let run_count =
@@ -2220,13 +2644,20 @@ fn build_cell_plan(
             }
             root_local
         };
-        if !lp.arena.is_empty() {
-            let slot =
+        if !lp.arenas.is_empty() {
+            // layer-local shard slots -> cell-local (compact:
+            // LayerPlan carries only non-empty shards)
+            let base =
                 narrow_u32(arenas.len() as u64, "cell arena count");
-            for j in lp.pages.iter_mut() {
-                j.arena_slot = slot;
+            if base > 0 {
+                for j in lp.pages.iter_mut() {
+                    if j.arena_slot != ARENA_NONE {
+                        j.arena_slot += base;
+                    }
+                }
             }
-            arenas.push(lp.arena);
+            arenas.extend(lp.arenas);
+            narrow_u32(arenas.len() as u64, "cell arena count");
         }
         pranges.push((lp.li, run_lo, run_count, root));
         pages.append(&mut lp.pages);
@@ -2235,6 +2666,8 @@ fn build_cell_plan(
         split_stats.depth_capped += lp.stats.depth_capped;
         split_stats.lod_pages += lp.stats.lod_pages;
         split_stats.lod_grid_verbatim += lp.stats.lod_grid_verbatim;
+        p2_tasks += lp.p2_tasks;
+        shard_bytes += lp.shard_bytes;
         top_split.push((doc.layer_order[lp.li as usize], lp.secs));
     }
     top_split.sort_by(|a, b| {
@@ -2438,6 +2871,8 @@ fn build_cell_plan(
         split_threads,
         lod_threads,
         layers_active,
+        p2_tasks,
+        shard_bytes,
         top_split,
     }
 }
@@ -3195,11 +3630,20 @@ fn build(
                             l, d, s
                         ));
                     }
+                    let p2 = if plan.p2_tasks > 0 {
+                        format!(
+                            " p2_tasks={} shard={}MiB",
+                            plan.p2_tasks,
+                            plan.shard_bytes / MIB
+                        )
+                    } else {
+                        String::new()
+                    };
                     eprintln!(
                         "[vfs] build: slow cell {} (ci {}/{}): \
                          plan {:.1}s (places {}, pages {}, frag \
                          splits {}; bvh {:.1} asm {:.1} split \
-                         {:.1}/{}t lod {:.1}/{}t pts {:.1} sink \
+                         {:.1}/{}t{} lod {:.1}/{}t pts {:.1} sink \
                          {:.1}; layers {}, top{})",
                         doc.cells[ci].name,
                         ci,
@@ -3212,6 +3656,7 @@ fn build(
                         plan.phase_s[1],
                         plan.phase_s[2],
                         plan.split_threads,
+                        p2,
                         plan.phase_s[3],
                         plan.lod_threads,
                         plan.phase_s[4],
@@ -4551,6 +4996,218 @@ mod split_tests {
             plan.phase_s[4],
             plan.phase_s[5]
         );
+    }
+
+    /// PRec assembly for a rect-only single-layer cell (mirror of
+    /// build_cell_plan's rect arm) - lets tests drive plan_layer /
+    /// plan_layer_frontier directly
+    fn assemble_rects(cell: &floe_oasis::doc::Cell) -> Vec<PRec> {
+        cell.rects
+            .iter()
+            .enumerate()
+            .map(|(idx, r)| {
+                let (ex, ey) = rep_extent(&r.rep);
+                PRec {
+                    kind: 0,
+                    idx: idx as u32,
+                    bbox: BBox {
+                        x0: r.x + ex.0.min(0),
+                        y0: r.y + ey.0.min(0),
+                        x1: r.x + r.w + ex.1.max(0),
+                        y1: r.y + r.h + ey.1.max(0),
+                    },
+                    bytes: 16 + rep_est(&r.rep),
+                    members: r.rep.members(),
+                    w: r.w,
+                    h: r.h,
+                    frag: Frag::Whole,
+                }
+            })
+            .collect()
+    }
+
+    /// #60 P2 determinism: frontier expansion + arena sharding +
+    /// segment merge alone (threads=1) must be byte-neutral vs the
+    /// serial recursion, on a layer that exercises every split
+    /// path - mid Pts floods, one giant Pts rep, die-wide Rep::One
+    /// spines (parent oversize before left/right), a coincident
+    /// pile and a negative-vector skew grid.
+    #[test]
+    fn p2_forced_frontier_is_byte_neutral() {
+        const DIE: i64 = 1_000_000;
+        let mut recs: Vec<RectRec> = (0..40u64)
+            .map(|k| pts_rec(k + 3, 3_000, DIE, 150))
+            .collect();
+        recs.push(pts_rec(999, 200_000, DIE, 80)); // giant (P2-B)
+        for k in 0..10i64 {
+            recs.push(RectRec {
+                layer: 1,
+                dt: 0,
+                x: 0,
+                y: k * 90_000,
+                w: DIE,
+                h: 60,
+                rep: Rep::One,
+            });
+        }
+        recs.push(RectRec {
+            layer: 1,
+            dt: 0,
+            x: DIE / 2,
+            y: DIE / 2,
+            w: 40,
+            h: 40,
+            rep: Rep::Pts(vec![(0, 0); 5].into()),
+        });
+        recs.push(RectRec {
+            layer: 1,
+            dt: 0,
+            x: DIE / 2,
+            y: 0,
+            w: 30,
+            h: 30,
+            rep: Rep::Grid {
+                na: 400,
+                nb: 300,
+                va: (-2000, 700),
+                vb: (350, 2900),
+            },
+        });
+        let doc = mini_doc(recs);
+        let cell = &doc.cells[0];
+        let a = plan_layer(cell, 0, 0, assemble_rects(cell), 64 * 1024);
+        let b = plan_layer_frontier(
+            cell,
+            0,
+            0,
+            assemble_rects(cell),
+            64 * 1024,
+            &P2Opts { threads: 1, target_tasks: 8, task_min: 4096 },
+        );
+        assert!(b.p2_tasks > 1, "frontier never formed");
+        assert!(
+            a.stats.oversize_pages > 0,
+            "fixture lost its oversize path"
+        );
+        assert_eq!(a.stats.fragments, b.stats.fragments);
+        assert_eq!(a.stats.oversize_pages, b.stats.oversize_pages);
+        assert_eq!(a.stats.depth_capped, b.stats.depth_capped);
+        assert_eq!(a.pbvh, b.pbvh);
+        assert_eq!(a.pages.len(), b.pages.len());
+        for (x, y) in a.pages.iter().zip(b.pages.iter()) {
+            assert_eq!(x.seq, y.seq);
+            assert_eq!(x.bbox, y.bbox);
+            assert_eq!(x.members, y.members);
+            let (pa, ra) = encode_job(&doc, x, a.arenas.as_slice());
+            let (pb, rb) = encode_job(&doc, y, b.arenas.as_slice());
+            assert_eq!(ra, rb);
+            assert_eq!(pa, pb, "payload differs at seq {}", x.seq);
+        }
+    }
+
+    /// #60 P2 mode selection: a dominant single layer past
+    /// P2_MIN_BYTES engages the frontier when budget exists and
+    /// falls back to the untouched serial path (no frontier, no
+    /// sharding) when it does not; both agree structurally.
+    #[test]
+    fn p2_mode_engages_and_matches_serial() {
+        const DIE: i64 = 2_000_000;
+        // 500 x 4400 members ~ 8.8MB: just past P2_MIN_BYTES
+        let recs: Vec<RectRec> = (0..500u64)
+            .map(|k| pts_rec(k + 7, 4_400, DIE, 120))
+            .collect();
+        let doc = mini_doc(recs);
+        let rbb = cell_bboxes_full(&doc);
+        let lidx: std::collections::HashMap<(u32, u32), usize> =
+            doc.layer_order
+                .iter()
+                .enumerate()
+                .map(|(i, &k)| (k, i))
+                .collect();
+        let mut plans = Vec::new();
+        for budget in [0isize, 7] {
+            let b = std::sync::atomic::AtomicIsize::new(budget);
+            plans.push(build_cell_plan(
+                &doc, 0, &rbb, &lidx, 1, MIB, false, &b,
+            ));
+        }
+        let (a, b) = (&plans[0], &plans[1]);
+        // operational fallback: no helpers -> no frontier at all
+        assert_eq!(a.p2_tasks, 0, "sharding without helpers");
+        assert_eq!(a.split_threads, 1);
+        assert_eq!(a.shard_bytes, 0);
+        assert!(b.p2_tasks > 1, "P2 never engaged with budget");
+        assert!(b.split_threads > 1);
+        assert_eq!(a.pranges, b.pranges);
+        assert_eq!(a.pbvh, b.pbvh);
+        assert_eq!(a.pages.len(), b.pages.len());
+        for (x, y) in a.pages.iter().zip(b.pages.iter()) {
+            assert_eq!(x.li, y.li);
+            assert_eq!(x.seq, y.seq);
+            assert_eq!(x.bbox, y.bbox);
+            assert_eq!(x.recs.len(), y.recs.len());
+        }
+    }
+
+    /// #60 P2 bench (release, ignored): the ORIGINAL monster shape
+    /// - one layer owns all 500 die-wide Pts floods. Run:
+    /// cargo test --release -p floe-index -- --ignored p2_bench \
+    ///   --nocapture
+    /// Caveat on P/E-core hosts (this M4 = 4P+4E): 8 threads
+    /// straggle on E cores and can read WORSE than 4 - judge
+    /// scaling on the 4-thread row (uniform-core Linux scales
+    /// through 8).
+    #[test]
+    #[ignore]
+    fn monster_cell_p2_bench() {
+        const DIE: i64 = 4_000_000;
+        let recs: Vec<RectRec> = (0..500u64)
+            .map(|k| pts_rec(k + 11, 50_000, DIE, 200))
+            .collect();
+        let doc = mini_doc(recs);
+        let rbb = cell_bboxes_full(&doc);
+        let lidx: std::collections::HashMap<(u32, u32), usize> =
+            doc.layer_order
+                .iter()
+                .enumerate()
+                .map(|(i, &k)| (k, i))
+                .collect();
+        let mut plans = Vec::new();
+        for budget in [0isize, 1, 3, 7] {
+            let b = std::sync::atomic::AtomicIsize::new(budget);
+            let t = std::time::Instant::now();
+            let plan = build_cell_plan(
+                &doc, 0, &rbb, &lidx, 1, MIB, true, &b,
+            );
+            eprintln!(
+                "p2 budget {}: plan {:.2}s (split {:.2}/{}t \
+                 p2_tasks={} shard={}MiB lod {:.2}/{}t, pages {})",
+                budget,
+                t.elapsed().as_secs_f64(),
+                plan.phase_s[2],
+                plan.split_threads,
+                plan.p2_tasks,
+                plan.shard_bytes / MIB,
+                plan.phase_s[3],
+                plan.lod_threads,
+                plan.pages.len(),
+            );
+            plans.push(plan);
+        }
+        let (a, b) = (&plans[0], &plans[1]);
+        assert!(b.p2_tasks > 1, "P2 never engaged");
+        assert_eq!(a.pranges, b.pranges);
+        assert_eq!(a.pbvh, b.pbvh);
+        assert_eq!(a.pages.len(), b.pages.len());
+        // arena_slot intentionally NOT compared: P2 shards the
+        // scratch differently than the serial single slot - the
+        // output bytes (S7) are the oracle for that
+        for (x, y) in a.pages.iter().zip(b.pages.iter()) {
+            assert_eq!(x.li, y.li);
+            assert_eq!(x.seq, y.seq);
+            assert_eq!(x.bbox, y.bbox);
+            assert_eq!(x.recs.len(), y.recs.len());
+        }
     }
 
     /// #60 P1 fanout bench (release, ignored): the same rep flood

@@ -1,4 +1,4 @@
 """floe - fast viewer/clipper for large OASIS files backed by a spatial tile cache."""
 
-__version__ = "0.11.41"   # keep in step with rust/cli/Cargo.toml
+__version__ = "0.11.42"   # keep in step with rust/cli/Cargo.toml
 # (the About dialog and the portable bundle name read this)
