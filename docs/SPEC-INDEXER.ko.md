@@ -10,7 +10,12 @@
 floe-index vfs <src.oas> [outdir=.floe] [--jobs N] [--plan-batch N]
     [--encode-batch N] [--page-target-mb N] [--no-lod]
     [--coverage | --coverage-only] [--frontier-only] [--kill-at P]
+    [--slow-cell-s S] [--p2-shard-limit-mb N]
 ```
+
+`--slow-cell-s S` = slow-cell 로그 임계 초(기본 5.0, 0 = 전 셀 —
+게이트/계측용), `--p2-shard-limit-mb N` = P2 arena 샤딩 복사 명시
+상한(미지정: Linux = MemAvailable 여유 절반, off-Linux = 무제한).
 
 ## 2. 파이프라인 (스트리밍, rev 44)
 
