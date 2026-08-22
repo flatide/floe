@@ -132,6 +132,65 @@ impl Vfs {
         Ok(vis)
     }
 
+    /// PUBLIC batch page read (rust-renderer bring-up, external
+    /// tools): (page index, payload bytes) pairs in the CALLER's
+    /// order, duplicates included. Each payload is the stored
+    /// bytes verbatim - a complete OASIS file (CBLOCK inside)
+    /// holding that page's single cell (see page_name()), with
+    /// coordinates in cell-local dbu. IO runs in ovp file order
+    /// (sequential); an out-of-range index is an Err, not a skip.
+    pub fn read_page_batch(
+        &self,
+        pages: &[u32],
+    ) -> Result<Vec<(u32, Vec<u8>)>, String> {
+        let n = self.ovm.n_pages;
+        for &pi in pages {
+            if pi >= n {
+                return Err(format!(
+                    "page {} out of range ({} pages)",
+                    pi, n
+                ));
+            }
+        }
+        if pages.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut uniq: Vec<u32> = pages.to_vec();
+        uniq.sort_unstable_by_key(|&pi| {
+            self.ovm.page(pi).file_off
+        });
+        uniq.dedup();
+        let mut f = std::fs::File::open(&self.ovp_path)
+            .map_err(|e| format!("{}: {}", self.ovp_path, e))?;
+        let mut got: HashMap<u32, Vec<u8>> =
+            HashMap::with_capacity(uniq.len());
+        for &pi in &uniq {
+            let p = self.ovm.page(pi);
+            let mut buf = vec![0u8; p.csize as usize];
+            f.seek(SeekFrom::Start(p.file_off))
+                .map_err(|e| e.to_string())?;
+            f.read_exact(&mut buf).map_err(|e| e.to_string())?;
+            got.insert(pi, buf);
+        }
+        let mut out: Vec<(u32, Vec<u8>)> =
+            Vec::with_capacity(pages.len());
+        for &pi in pages {
+            let payload = match got.remove(&pi) {
+                Some(b) => b,
+                // duplicate request index: clone the copy already
+                // handed out (got holds each page only once)
+                None => out
+                    .iter()
+                    .rev()
+                    .find(|(q, _)| *q == pi)
+                    .map(|(_, b)| b.clone())
+                    .expect("duplicate page lookup"),
+            };
+            out.push((pi, payload));
+        }
+        Ok(out)
+    }
+
     /// page payload files read in ovp file order (sequential IO)
     pub(crate) fn read_page_payloads(
         &self,
@@ -476,6 +535,107 @@ mod tests {
             m,
         );
         Ovm::from_bytes(b.finish(1 << 20, 0)).unwrap()
+    }
+
+    /// read_page_batch: caller order preserved (duplicates
+    /// included), IO deduped and file-ordered, out-of-range
+    /// rejected - the rust-renderer bring-up entry point
+    #[test]
+    fn read_page_batch_pairs_and_bounds() {
+        use floe_oasis::doc::{RectRec, Rep};
+        let mk = |name: &str, w: i64| {
+            let r = RectRec {
+                layer: 1,
+                dt: 0,
+                x: 0,
+                y: 0,
+                w,
+                h: 10,
+                rep: Rep::One,
+            };
+            write_tree(
+                &[WCell {
+                    name: name.into(),
+                    rects: std::slice::from_ref(&r),
+                    polys: &[],
+                    paths: &[],
+                    texts: &[],
+                    places: vec![],
+                }],
+                1000.0,
+            )
+            .unwrap()
+        };
+        let p0 = mk("P0_0_0", 100);
+        let p1 = mk("P0_0_1", 200);
+        let p2 = mk("P0_0_2", 300);
+        // file order deliberately != page-index order: p2|p0|p1
+        let mut ovp = p2.clone();
+        ovp.extend_from_slice(&p0);
+        ovp.extend_from_slice(&p1);
+        let dir = std::env::temp_dir().join(format!(
+            "floe_batch_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ovp_path = dir.join("design.ovp");
+        std::fs::write(&ovp_path, &ovp).unwrap();
+        let mut b = floe_ovm::Builder::new(1000.0, 0, 0, 1);
+        b.top = 0;
+        b.layer(1, 0, "L", 0, 0);
+        let m = b.bitset(&[1]);
+        let offs = [
+            p2.len() as u64,
+            (p2.len() + p0.len()) as u64,
+            0u64,
+        ];
+        let lens = [p0.len(), p1.len(), p2.len()];
+        for k in 0..3u32 {
+            let pb = BBox {
+                x0: k as i64 * 1000,
+                y0: 0,
+                x1: k as i64 * 1000 + 10,
+                y1: 10,
+            };
+            b.page(
+                0,
+                0,
+                k,
+                &pb,
+                offs[k as usize],
+                lens[k as usize] as u64,
+                lens[k as usize] as u64,
+                1,
+                1,
+                10,
+                10,
+                floe_ovm::LOD_EXACT,
+                floe_ovm::LOD_PAGE_NONE,
+            );
+        }
+        let pr = b.prange(0, 0, 3, floe_ovm::PBVH_NONE);
+        let bbx = BBox { x0: 0, y0: 0, x1: 10, y1: 10 };
+        b.cell(
+            "C", 0, 0, &bbx, &bbx, 0, 0, 0, 3, 0, 0, pr, 1, m, m,
+            1, 0, 0, m,
+        );
+        let ovm =
+            Ovm::from_bytes(b.finish(ovp.len() as u64, 0)).unwrap();
+        let vfs = Vfs {
+            ovm,
+            ovp_path: ovp_path.to_string_lossy().into_owned(),
+            ovt: floe_ovm::Backing::Vec(Vec::new()),
+        };
+        let got = vfs.read_page_batch(&[2, 0, 1, 0]).unwrap();
+        assert_eq!(got.len(), 4);
+        assert_eq!(got[0], (2, p2.clone()));
+        assert_eq!(got[1], (0, p0.clone()));
+        assert_eq!(got[2], (1, p1.clone()));
+        assert_eq!(got[3], (0, p0.clone()));
+        assert!(vfs.read_page_batch(&[]).unwrap().is_empty());
+        let e = vfs.read_page_batch(&[1, 3]).unwrap_err();
+        assert!(e.contains("out of range"), "{}", e);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
