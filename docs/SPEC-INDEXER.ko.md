@@ -46,6 +46,13 @@ floe-index vfs <src.oas> [outdir=.floe] [--jobs N] [--plan-batch N]
          **seq 재부여** + shard slot(프리픽스 → 태스크 순) 지정,
          pbvh는 병합 완료 후 레이어당 1회 → 바이트 불변. 헬퍼 0이면
          frontier/sharding 자체를 만들지 않는 완전 직렬 폴백.
+         **shard-복사 한도**: 예상 복사량(레코드 범위 합×4B, 복사
+         전에 정확히 계산됨)이 MemAvailable 여유의 절반을 넘으면
+         frontier는 유지하되 태스크를 프리픽스 arena로 **직렬**
+         실행(복사 0, 로그 `shard=0MiB`) — 수 GB 단일 Pts 엔트리가
+         OOM을 만들지 않는다. **기아 계측**: P2 대상인데 셀 시작
+         시점 여유 슬롯이 0이면 `p2_eligible=1 helpers=0` 표시 +
+         빌드 말미 집계 한 줄 — 통합 워커 풀(#76)의 실측 근거.
          남은 지렛대 = 프리픽스 파티션 병렬화(P2-ext, 미착수).
      - **LOD 변종 생성**: 후보 members≥256; 후보 ≥64(LOD_PAR_MIN)면
        셀 내부 스레드 팬아웃(≤16, 같은 공유 예산), cand 순서 병합 →
@@ -55,8 +62,8 @@ floe-index vfs <src.oas> [outdir=.floe] [--jobs N] [--plan-batch N]
    - 커미터(메인): 순서대로 `append_cell_sink` 리베이스, lod_page
      전역화, 텍스트/비트셋/cell 레코드 커밋. 윈도 채워지면 청크 인코드
      + 아레나 해제. 메모리 거버너: MemAvailable<4GB면 윈도 반감.
-   - **slow-cell 로그**: plan이 임계(기본 5s, `FLOE_SLOW_CELL_S`,
-     0=전 셀) 초과인 셀을 stderr로:
+   - **slow-cell 로그**: plan이 임계(기본 5s, `--slow-cell-s`,
+     0=전 셀; 환경변수 아님 — --kill-at과 같은 CLI-상태 규칙) 초과인 셀을 stderr로:
      `slow cell NAME (ci N/total): plan Xs (places, pages, frag
      splits; bvh asm split/Nt[ p2_tasks=K shard=MMiB] lod/Nt pts
      sink; layers A, top L<layer>.<dt> Xs ...)` — split/lod 스레드

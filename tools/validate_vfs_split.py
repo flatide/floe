@@ -16,7 +16,7 @@ honest pages.
       never selects them (pranges cover exact pages only); their
       payloads pass the same klayout recount via S3
   S6  split fanout (#60 P1): the --jobs 4 build's slow-cell log
-      (FLOE_SLOW_CELL_S=0) shows >1 split thread and the per-layer
+      (--slow-cell-s 0) shows >1 split thread and the per-layer
       top list on the multi-layer cell, and the parallel build's
       peak child RSS stays within 1.5x + 512MB of the serial one
       (per-run RSS via a fresh wrapper process; thread checks skip
@@ -158,7 +158,7 @@ def main():
         bad.append(msg)
         print("FAIL " + msg)
 
-    def measured_build(args, env=None):
+    def measured_build(args):
         """run one build in a FRESH wrapper process so
         RUSAGE_CHILDREN reports this run's peak RSS independently
         (in this process it would be a running max across builds)"""
@@ -171,16 +171,30 @@ def main():
             "'err':r.stderr.decode('utf-8','replace')},sys.stdout)\n"
         )
         r = subprocess.run([sys.executable, "-c", code] + args,
-                           capture_output=True, check=True, env=env)
+                           capture_output=True, check=True)
         d = json.loads(r.stdout)
         if d["rc"] != 0:
             raise RuntimeError("build failed:\n" + d["err"][-4000:])
         return d
 
+    def usable_cpus():
+        # mirror Rust's available_parallelism(): affinity/cgroup
+        # aware - a container pinned to 1 CPU must not read as a
+        # multi-core host (os.cpu_count() reports the host)
+        try:
+            return len(os.sched_getaffinity(0))
+        except AttributeError:
+            pass
+        try:
+            return os.process_cpu_count() or 1
+        except AttributeError:
+            return os.cpu_count() or 1
+
     def fanout_expected():
         """the build legitimately stays serial on starved hosts
-        (1 CPU, or Linux MemAvailable under the 4GB governor)"""
-        if (os.cpu_count() or 1) < 2:
+        (1 usable CPU, or Linux MemAvailable under the 4GB
+        governor)"""
+        if usable_cpus() < 2:
             return False
         try:
             for ln in open("/proc/meminfo"):
@@ -199,14 +213,13 @@ def main():
     out = os.path.join(work, "repfloor.oas.floe")
     shutil.rmtree(out, ignore_errors=True)
     d4 = measured_build(
-        [FI, "vfs", src, out, "--jobs", "4"],
-        env=dict(os.environ, FLOE_SLOW_CELL_S="0"))
+        [FI, "vfs", src, out, "--jobs", "4", "--slow-cell-s", "0"])
 
     # S6: the multi-layer cell fans its split out (P1) and says so
     slow = [ln for ln in d4["err"].splitlines()
             if "slow cell TOP " in ln]
     if not slow:
-        fail("S6 no slow-cell line for TOP (FLOE_SLOW_CELL_S=0)")
+        fail("S6 no slow-cell line for TOP (--slow-cell-s 0)")
     elif fanout_expected():
         m = re.search(r"split [0-9.]+/(\d+)t", slow[0])
         if not m or int(m.group(1)) < 2:
@@ -308,8 +321,8 @@ def main():
         shutil.rmtree(d_, ignore_errors=True)
     p1d = measured_build([FI, "vfs", p2src, p2j1, "--jobs", "1"])
     p4d = measured_build(
-        [FI, "vfs", p2src, p2out, "--jobs", "4"],
-        env=dict(os.environ, FLOE_SLOW_CELL_S="0"))
+        [FI, "vfs", p2src, p2out, "--jobs", "4",
+         "--slow-cell-s", "0"])
     measured_build([FI, "vfs", p2src, p2j16, "--jobs", "16"])
     slow = [ln for ln in p4d["err"].splitlines()
             if "slow cell TOP " in ln]

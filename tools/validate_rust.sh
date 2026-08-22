@@ -42,8 +42,8 @@ OUT="${SRC%.oas}_rust.tiles"
 # VFS V1 (rust/VFS.md): build .floe and run the G5/G6 gates
 VOUT="${SRC%.oas}_rust.floe"
 rm -rf "$VOUT"
-FLOE_SLOW_CELL_S=0 rust/target/release/floe-index vfs "$SRC" "$VOUT" \
-    --coverage >/dev/null 2> "$VOUT.buildlog"
+rust/target/release/floe-index vfs "$SRC" "$VOUT" \
+    --coverage --slow-cell-s 0 >/dev/null 2> "$VOUT.buildlog"
 # small assets must never fan out (#60): no P2 frontier, no split
 # helper threads - the thresholds keep tiny cells on the fast
 # serial path

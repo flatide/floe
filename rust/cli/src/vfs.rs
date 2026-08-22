@@ -75,6 +75,10 @@ pub fn vfs_cmd(args: &[String]) {
     // largely absorbed - and their generation dominates monster-cell
     // build time (150M field: lod was ~half of a 164s cell plan).
     let mut lod = true;
+    // slow-cell log threshold in seconds; 0 logs every cell (the
+    // S6/S7 gates use it to observe fanout uptake). CLI state, not
+    // an env var - same rule as --kill-at above.
+    let mut slow_cell_s = 5.0f64;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -126,6 +130,11 @@ pub fn vfs_cmd(args: &[String]) {
             }
             "--kill-at" => {
                 kill_at = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--slow-cell-s" => {
+                slow_cell_s =
+                    args[i + 1].parse().expect("slow cell seconds");
                 i += 2;
             }
             a => {
@@ -303,6 +312,7 @@ pub fn vfs_cmd(args: &[String]) {
             plan_batch,
             page_target_bytes,
             lod,
+            slow_cell_s,
         );
         if kill_at.as_deref() == Some("ovp-written") {
             eprintln!("[vfs] --kill-at ovp-written");
@@ -724,6 +734,12 @@ struct P2Opts {
     /// frontier cutoff floor (production: P2_TASK_MIN_BYTES;
     /// small-fixture unit tests lower it to form a real frontier)
     task_min: u64,
+    /// ceiling on transient arena-sharding copies (bytes). A
+    /// single Pts entry can be GBs on fill farms - past this the
+    /// frontier's tasks run SERIALLY against the prefix arena
+    /// (no copies, same bytes) instead of risking OOM. Production
+    /// derives it from MemAvailable headroom; unit tests pin it.
+    shard_limit: u64,
 }
 
 fn rep_est_n(n: u64) -> u32 {
@@ -1030,7 +1046,6 @@ fn emit_page(
 /// over-target rep record splits even alone (the old
 /// recs.len()>MIN gate left one huge Pts record as one page).
 /// Ownership at the plane: center*2 < plane2 -> left, else right.
-#[allow(clippy::too_many_arguments)]
 /// the recursion decision of one split node - shared verbatim by
 /// the serial recursion and the P2 frontier expansion so both
 /// produce identical bytes
@@ -1049,6 +1064,7 @@ enum NodeStep {
 /// node's oversize (wide) pages come back as packed record groups
 /// in `oversize` and MUST be emitted before anything the returned
 /// step produces (emission order = page seq = bytes)
+#[allow(clippy::too_many_arguments)]
 fn split_node(
     cell: &floe_oasis::doc::Cell,
     arena: &mut Arena,
@@ -1152,6 +1168,7 @@ fn split_node(
     NodeStep::Split { lv, rv }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn split_pages(
     cell: &floe_oasis::doc::Cell,
     arena: &mut Arena,
@@ -1574,6 +1591,9 @@ struct CellPlan {
     p2_tasks: usize,
     /// bytes copied by P2 arena sharding
     shard_bytes: u64,
+    /// P2-eligible but zero free budget slots at cell start (#60
+    /// review: the field counter that sizes the unified-pool work)
+    p2_starved: bool,
     /// ((layer, datatype), split seconds), heaviest first, <= 3
     top_split: Vec<((u32, u32), f32)>,
 }
@@ -2143,6 +2163,71 @@ fn plan_layer_frontier(
             }
         }
     }
+    // ---- shard-copy ceiling (#60 review): the projected copies
+    // are known exactly BEFORE any allocation happens - if they
+    // exceed the memory headroom, keep the frontier but run its
+    // tasks serially against the shared prefix arena. No copies,
+    // one thread, identical bytes (arena indices are scratch);
+    // the log shows it as p2_tasks=N shard=0MiB.
+    let copy_bytes: u64 = tasks
+        .iter()
+        .flat_map(|(r, _)| r.iter())
+        .map(|r| match r.frag {
+            Frag::Pts { lo, hi, .. } => 4 * (hi - lo) as u64,
+            _ => 0,
+        })
+        .sum();
+    if copy_bytes > opts.shard_limit {
+        let p2_tasks = tasks.len();
+        let mut outs: Vec<Vec<PageJob>> =
+            Vec::with_capacity(tasks.len());
+        for (recs, depth) in tasks {
+            let mut out: Vec<PageJob> = Vec::new();
+            let mut seq = 0u32;
+            split_pages(
+                cell,
+                &mut prefix,
+                ci,
+                li,
+                recs,
+                &mut seq,
+                &mut out,
+                &mut stats,
+                page_target_bytes,
+                depth,
+            );
+            outs.push(out);
+        }
+        let mut arenas: Vec<Arena> = Vec::new();
+        let slot = if prefix.is_empty() {
+            ARENA_NONE
+        } else {
+            arenas.push(prefix);
+            0u32
+        };
+        let mut run: Vec<PageJob> = Vec::new();
+        for s in segs {
+            match s {
+                Seg::Pages(mut p) => {
+                    for j in p.iter_mut() {
+                        j.arena_slot = slot;
+                    }
+                    run.append(&mut p);
+                }
+                Seg::Task(k) => {
+                    let mut out = std::mem::take(&mut outs[k]);
+                    for j in out.iter_mut() {
+                        j.arena_slot = slot;
+                    }
+                    run.append(&mut out);
+                }
+            }
+        }
+        for (i, j) in run.iter_mut().enumerate() {
+            j.seq = narrow_u32(i as u64, "page seq");
+        }
+        return finish_layer(li, run, arenas, stats, p2_tasks, 0, t);
+    }
     // ---- arena sharding: copy each task's Frag::Pts ranges into
     // a task-local shard so parallel subtrees never touch shared
     // scratch. Entries referenced only by tasks free right after
@@ -2538,12 +2623,22 @@ fn build_cell_plan(
     } else if mode == SplitMode::P2 {
         // the dominant layer fans its subtrees over all borrowed
         // helpers; the other layers are small by the dominance
-        // test and run serially on this thread
+        // test and run serially on this thread. Sharding copies
+        // must fit in half the headroom above the governor floor
+        // (a single multi-GB Pts entry must not OOM the build);
+        // off-Linux there is no MemAvailable, same as the governor.
         let opts = P2Opts {
             threads: split_helpers + 1,
             target_tasks: ((split_helpers + 1) * 4)
                 .min(P2_TASK_CAP),
             task_min: P2_TASK_MIN_BYTES,
+            shard_limit: crate::mem_available_gb()
+                .map(|gb| {
+                    (((gb - GOVERNOR_MIN_AVAIL_GB).max(0.0) / 2.0)
+                        * (1u64 << 30) as f64)
+                        as u64
+                })
+                .unwrap_or(u64::MAX),
         };
         layer_inputs
             .into_iter()
@@ -2617,6 +2712,10 @@ fn build_cell_plan(
             std::sync::atomic::Ordering::Relaxed,
         );
     }
+    // #60 review: a P2-eligible cell that starts while every
+    // planner still owns its budget slot runs serial to the end -
+    // count it so the field data can justify the unified pool
+    let p2_starved = mode == SplitMode::P2 && split_helpers == 0;
     // merge in li order (this is what fixes the output bytes)
     let mut pages: Vec<PageJob> = Vec::new();
     let mut pranges: Vec<(u32, u32, u32, u32)> = Vec::new();
@@ -2873,6 +2972,7 @@ fn build_cell_plan(
         layers_active,
         p2_tasks,
         shard_bytes,
+        p2_starved,
         top_split,
     }
 }
@@ -3161,6 +3261,7 @@ fn build_cell_texts(
 }
 
 #[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_arguments)]
 fn build(
     doc: &Doc,
     size: u64,
@@ -3171,6 +3272,7 @@ fn build(
     plan_batch: usize,
     page_target_bytes: u64,
     lod: bool,
+    slow_cell_s: f64,
 ) -> (
     Vec<u8>,
     Vec<Option<(i64, i64, i64, i64)>>,
@@ -3435,6 +3537,7 @@ fn build(
     let mut pages_total = 0usize;
     let mut lrecs_stored = vec![0u64; nl];
     let mut split_total = SplitStats::default();
+    let mut p2_starved_cells = 0usize;
     let planned_cells = std::sync::Arc::new(
         std::sync::atomic::AtomicUsize::new(0),
     );
@@ -3533,12 +3636,7 @@ fn build(
     // appear only at the monster-cell tail (planners exited) or when
     // fewer cells than jobs are in flight. jobs=96 used to mean 96
     // planners x up to 16 LOD threads each.
-    // slow-cell log threshold in seconds; FLOE_SLOW_CELL_S=0 logs
-    // every cell (the S6 gate uses it to observe helper uptake)
-    let slow_s: f64 = std::env::var("FLOE_SLOW_CELL_S")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(5.0);
+    let slow_s = slow_cell_s;
     let planners = jobs.max(1).min(n.max(1));
     let lod_budget = std::sync::atomic::AtomicIsize::new(
         jobs.max(1) as isize - planners as isize,
@@ -3636,6 +3734,8 @@ fn build(
                             plan.p2_tasks,
                             plan.shard_bytes / MIB
                         )
+                    } else if plan.p2_starved {
+                        String::from(" p2_eligible=1 helpers=0")
                     } else {
                         String::new()
                     };
@@ -3727,9 +3827,13 @@ fn build(
                 mut pages,
                 arenas,
                 split_stats,
+                p2_starved,
                 ..
             } = plan;
             batch_arenas.push(arenas);
+            if p2_starved {
+                p2_starved_cells += 1;
+            }
             split_total.fragments = split_total
                 .fragments
                 .checked_add(split_stats.fragments)
@@ -3869,6 +3973,17 @@ fn build(
         encode_elapsed.as_secs_f64(),
         rss()
     );
+    if p2_starved_cells > 0 {
+        // budget slots return only when planners EXIT, so a
+        // P2-eligible monster that starts mid-build stays serial
+        // even while cores idle later - this counter is the field
+        // case for the unified cell/subtree worker pool (#76)
+        eprintln!(
+            "[vfs] build: {} P2-eligible cell(s) ran serial (no \
+             free helpers at cell start)",
+            p2_starved_cells
+        );
+    }
 
     for (i, &(l, d)) in doc.layer_order.iter().enumerate() {
         debug_assert!(lrecs_stored[i] >= lrecs[i]);
@@ -5082,13 +5197,57 @@ mod split_tests {
             0,
             assemble_rects(cell),
             64 * 1024,
-            &P2Opts { threads: 1, target_tasks: 8, task_min: 4096 },
+            &P2Opts {
+                threads: 1,
+                target_tasks: 8,
+                task_min: 4096,
+                shard_limit: u64::MAX,
+            },
         );
         assert!(b.p2_tasks > 1, "frontier never formed");
+        assert!(b.shard_bytes > 0, "sharding never ran");
         assert!(
             a.stats.oversize_pages > 0,
             "fixture lost its oversize path"
         );
+        layer_bytes_equal(&doc, &a, &b);
+    }
+
+    /// #60 review: past the shard-copy ceiling the frontier's
+    /// tasks run SERIALLY against the prefix arena - no copies
+    /// (shard=0), byte-identical output
+    #[test]
+    fn p2_shard_limit_serial_fallback() {
+        const DIE: i64 = 1_000_000;
+        let mut recs: Vec<RectRec> = (0..40u64)
+            .map(|k| pts_rec(k + 3, 3_000, DIE, 150))
+            .collect();
+        recs.push(pts_rec(999, 200_000, DIE, 80));
+        let doc = mini_doc(recs);
+        let cell = &doc.cells[0];
+        let a = plan_layer(cell, 0, 0, assemble_rects(cell), 64 * 1024);
+        let b = plan_layer_frontier(
+            cell,
+            0,
+            0,
+            assemble_rects(cell),
+            64 * 1024,
+            &P2Opts {
+                threads: 4,
+                target_tasks: 8,
+                task_min: 4096,
+                shard_limit: 0,
+            },
+        );
+        assert!(b.p2_tasks > 1, "frontier never formed");
+        assert_eq!(b.shard_bytes, 0, "fallback still copied");
+        layer_bytes_equal(&doc, &a, &b);
+    }
+
+    /// pages, pbvh, stats and encoded payloads of two LayerPlans
+    /// must agree byte-for-byte (arena layout is scratch and may
+    /// differ - the encode goes through each plan's own shards)
+    fn layer_bytes_equal(doc: &Doc, a: &LayerPlan, b: &LayerPlan) {
         assert_eq!(a.stats.fragments, b.stats.fragments);
         assert_eq!(a.stats.oversize_pages, b.stats.oversize_pages);
         assert_eq!(a.stats.depth_capped, b.stats.depth_capped);
@@ -5098,8 +5257,8 @@ mod split_tests {
             assert_eq!(x.seq, y.seq);
             assert_eq!(x.bbox, y.bbox);
             assert_eq!(x.members, y.members);
-            let (pa, ra) = encode_job(&doc, x, a.arenas.as_slice());
-            let (pb, rb) = encode_job(&doc, y, b.arenas.as_slice());
+            let (pa, ra) = encode_job(doc, x, a.arenas.as_slice());
+            let (pb, rb) = encode_job(doc, y, b.arenas.as_slice());
             assert_eq!(ra, rb);
             assert_eq!(pa, pb, "payload differs at seq {}", x.seq);
         }
