@@ -23,16 +23,30 @@ floe-index vfs <src.oas> [outdir=.floe] [--jobs N] [--plan-batch N]
      `build_cell_plan` — phase 타이머 6칸 [bvh/asm/split/lod/pts/sink]:
      - 인스턴스 BVH(리프 순서=방출 순서, v7 max_dim/max_min 주석),
      - (cell,layer) 런 조립 + **rep-split**(목표 페이지 크기 초과 시
-       Grid 인덱스 분할/Pts rebase 분할, oversize 격리, v6 max_min 계산),
+       Grid 인덱스 분할/Pts rebase 분할, oversize 격리, v6 max_min 계산).
+       **셀 내부 레이어 팬아웃**(#60 P1): 비어있지 않은 레이어가 태스크
+       단위 — 조건(레이어≥2·입력≥4MiB·MemAvailable≥4GB)에서 공유
+       예산의 여유 슬롯만 빌려 ≤8 스레드로 병렬 분할(무거운 레이어
+       우선 스케줄), 결과는 **li 순서로 병합**(pages/pbvh 리베이스 +
+       레이어별 compact arena slot) → 바이트 불변. 예산 슬롯은 종료한
+       플래너만 반환하므로 이는 몬스터-셀 꼬리 최적화다(윈도 대기
+       플래너는 슬롯을 보유). 한 레이어가 지배하는 셀(단일 레이어
+       fill 팜)은 P1 비대상 — per-layer top 로그로 P2 필요를 판정.
      - **LOD 변종 생성**: 후보 members≥256; 후보 ≥64(LOD_PAR_MIN)면
-       셀 내부 스레드 팬아웃(≤16), cand 순서 병합 → 바이트 불변.
-       `--no-lod`면 후보 목록 자체를 비움(전 페이지 LOD_PAGE_NONE).
+       셀 내부 스레드 팬아웃(≤16, 같은 공유 예산), cand 순서 병합 →
+       바이트 불변. `--no-lod`면 후보 목록 자체를 비움(전 페이지
+       LOD_PAGE_NONE).
      - CellSink 프리인코딩.
    - 커미터(메인): 순서대로 `append_cell_sink` 리베이스, lod_page
      전역화, 텍스트/비트셋/cell 레코드 커밋. 윈도 채워지면 청크 인코드
      + 아레나 해제. 메모리 거버너: MemAvailable<4GB면 윈도 반감.
-   - **slow-cell 로그**: plan 5s 초과 셀을 이름/ci/phase 내역과 함께
-     stderr 출력 (몬스터 셀 표적 목록; 150M 실측: ESD dummy 164.3→42.5s).
+   - **slow-cell 로그**: plan이 임계(기본 5s, `FLOE_SLOW_CELL_S`,
+     0=전 셀) 초과인 셀을 stderr로:
+     `slow cell NAME (ci N/total): plan Xs (places, pages, frag
+     splits; bvh asm split/Nt lod/Nt pts sink; layers A, top
+     L<layer>.<dt> Xs ...)` — split/lod 스레드 수와 레이어별 split
+     상위 3개가 P1 효과·P2 필요의 실측 근거(150M 실측: ESD dummy
+     164.3→42.5s).
 4. **ovt/ovp 쓰기** → **meta.json**(`emit_viewer_side`) →
    **design.ovm 커밋**(빌드 바이트를 `Ovm::from_bytes` 딥 검증 통과
    후 파일로 — 검증이 공짜 게이트).

@@ -31,7 +31,7 @@
 | 렌더 6뷰 | validate_vfs_render | hier 델타 → klayout 렌더 XOR |
 | H1~H5 | validate_vfs_hier | 실데몬 hier: 프로브 cut=0 XOR 일치 등 |
 | L1~L9 | `tools/validate_vfs_lifecycle.py` | 세션 수명주기: L1 팬 루프, L2 스테일 드롭/재전송, L3 부분적용 폴트 ①~④+bad-top 복구, L4 제로 예산 축출, L5 names 보존, L7 LOD 변종 사이클/킬스위치, L8 layers=none+프레임 컷/밴드, **L9 미니맵 굽기 == vfsd mode=frontier 재생(박스 단위)** |
-| S1~S5 | validate_vfs_split | rep-split: multiset 보존·경계 소유·skew·oversize 비오염·플로어 |
+| S1~S6 | validate_vfs_split | rep-split: multiset 보존·경계 소유·skew·oversize 비오염·플로어; S6(#60 P1) = 두 Pts-플러드 레이어 픽스처에서 split 팬아웃 관측(`FLOE_SLOW_CELL_S=0` slow-cell 로그의 `split x/Nt`≥2·per-layer top 리스트) + 병렬 피크 RSS ≤ 직렬×1.5+512MB; jobs 1↔4 바이트 동일(S4)이 레이어별 arena slot 격리를 함께 고정 |
 | X1~X6 | validate_vfs_text | v5 텍스트/라벨/declutter |
 | 마커 | validate_vfs_marker | --kill-at 4지점 + 재빌드 |
 | render-speckle | validate_render_speckle | 공통 위상(전 레이어 구멍 공유), 가시성, 불투명 겹침, 커버리지 합성 포함관계 |

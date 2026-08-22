@@ -10,15 +10,23 @@ honest pages.
       recount + layer sums (validate_vfs.py reused - this is the
       end-to-end proof that fragment REBASE re-encodes correctly)
   S4  determinism: --jobs 1 and --jobs 4 builds are byte-identical
+      (with TWO Pts-flood layers this also proves the per-layer
+      arena slots of the #60 P1 split fanout never cross)
   S5  LOD variants (M7): dense layers grow lod pages; the planner
       never selects them (pranges cover exact pages only); their
       payloads pass the same klayout recount via S3
+  S6  split fanout (#60 P1): the --jobs 4 build's slow-cell log
+      (FLOE_SLOW_CELL_S=0) shows >1 split thread and the per-layer
+      top list on the multi-layer cell, and the parallel build's
+      peak child RSS stays within 1.5x + 512MB of the serial one
 
 Usage: validate_vfs_split.py [workdir]  (default $TMPDIR/floe-valsplit)
 """
 import json
 import os
 import random
+import re
+import resource
 import shutil
 import subprocess
 import sys
@@ -26,7 +34,8 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FI = os.path.join(ROOT, "rust", "target", "release", "floe-index")
-TOTAL_MEMBERS = 1_150_050  # 500x2000 pts + 150k grid + 50 ones
+# 500x2000 + 200x1500 pts + 150k grid + 50 ones
+TOTAL_MEMBERS = 1_450_050
 
 
 def gen(src):
@@ -57,6 +66,17 @@ def gen(src):
     for k in range(50):
         y = rnd.randint(0, die - 60)
         top.shapes(l2).insert(db.Box(k * 17, y, die - k * 13, y + 50))
+    # SECOND Pts-flood layer (#60 P1): both layer arenas start at
+    # local index 0, so a slot mixup between them corrupts pages
+    # that S3's recount and S4's byte compare then catch
+    l3 = ly.layer(3, 0)
+    for _ in range(200):
+        w = rnd.randint(80, 200)
+        h = rnd.randint(80, 200)
+        for _ in range(1500):
+            x = rnd.randint(0, die - w)
+            y = rnd.randint(0, die - h)
+            top.shapes(l3).insert(db.Box(x, y, x + w, y + h))
     opt = db.SaveLayoutOptions()
     opt.format = "OASIS"
     opt.oasis_compression_level = 10
@@ -78,7 +98,7 @@ def main():
         tempfile.gettempdir(), "floe-valsplit")
     os.makedirs(work, exist_ok=True)
     src = os.path.join(work, "repfloor.oas")
-    gen_marker = src + ".gen3"
+    gen_marker = src + ".gen4"
     if not os.path.exists(src) or not os.path.exists(gen_marker):
         gen(src)
         open(gen_marker, "w").write("ok")
@@ -88,10 +108,44 @@ def main():
         bad.append(msg)
         print("FAIL " + msg)
 
+    def child_maxrss():
+        # macOS reports bytes, Linux kilobytes
+        mult = 1 if sys.platform == "darwin" else 1024
+        return resource.getrusage(
+            resource.RUSAGE_CHILDREN).ru_maxrss * mult
+
+    # serial build first: S4's byte reference AND the RSS baseline
+    # (RUSAGE_CHILDREN.ru_maxrss is a running max over reaped
+    # children, so the serial peak must be sampled first)
+    out1 = os.path.join(work, "repfloor_j1.floe")
+    shutil.rmtree(out1, ignore_errors=True)
+    subprocess.run([FI, "vfs", src, out1, "--jobs", "1"],
+                   capture_output=True, check=True)
+    rss_j1 = child_maxrss()
+
     out = os.path.join(work, "repfloor.oas.floe")
     shutil.rmtree(out, ignore_errors=True)
-    subprocess.run([FI, "vfs", src, out, "--jobs", "4"],
-                   capture_output=True, check=True)
+    env = dict(os.environ, FLOE_SLOW_CELL_S="0")
+    r = subprocess.run([FI, "vfs", src, out, "--jobs", "4"],
+                       capture_output=True, check=True, env=env)
+    rss_j4 = child_maxrss()
+
+    # S6: the multi-layer cell fans its split out and says so
+    slow = [ln for ln in r.stderr.decode().splitlines()
+            if "slow cell TOP " in ln]
+    m = re.search(r"split [0-9.]+/(\d+)t", slow[0]) if slow else None
+    if not m:
+        fail("S6 no slow-cell line for TOP (FLOE_SLOW_CELL_S=0)")
+    else:
+        if int(m.group(1)) < 2:
+            fail("S6 split fanout never engaged: %s" % slow[0])
+        if "top L" not in slow[0]:
+            fail("S6 per-layer top list missing: %s" % slow[0])
+    if rss_j4 > rss_j1 * 1.5 + (512 << 20):
+        fail("S6 parallel build peak RSS %.0fMB vs serial %.0fMB"
+             % (rss_j4 / 2**20, rss_j1 / 2**20))
+    print("split-rss serial %.0fMB parallel-peak %.0fMB"
+          % (rss_j1 / 2**20, rss_j4 / 2**20))
 
     # S2 first (full view = whole-asset reference)
     full = plan(out, (0, 0, 1000, 1000), 1.047, cut=0.0)
@@ -158,11 +212,7 @@ def main():
         fail("S5 --lod 0 still swapped %d pages"
              % exact["lod_pages"])
 
-    # S4: thread-count determinism
-    out1 = os.path.join(work, "repfloor_j1.floe")
-    shutil.rmtree(out1, ignore_errors=True)
-    subprocess.run([FI, "vfs", src, out1, "--jobs", "1"],
-                   capture_output=True, check=True)
+    # S4: thread-count determinism (serial reference built above)
     for f in ("design.ovm", "design.ovp", "design.ovt"):
         a = open(os.path.join(out, f), "rb").read()
         b = open(os.path.join(out1, f), "rb").read()
@@ -170,7 +220,7 @@ def main():
             fail("S4 %s differs between --jobs 4 and --jobs 1" % f)
     shutil.rmtree(out1, ignore_errors=True)
 
-    print("vfs-split-checked S1-S5, failures: %d" % len(bad))
+    print("vfs-split-checked S1-S6, failures: %d" % len(bad))
     sys.exit(1 if bad else 0)
 
 

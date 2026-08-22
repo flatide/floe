@@ -648,7 +648,9 @@ struct PRec {
 enum Frag {
     Whole,
     /// [lo,hi) into Arena[arena] offsets (reordered in place while
-    /// splitting; sibling ranges are disjoint by construction)
+    /// splitting; sibling ranges are disjoint by construction).
+    /// `arena` indexes the owning LAYER's arena (#60 P1) - the
+    /// page's arena_slot names which layer arena that is.
     Pts { arena: u32, lo: u32, hi: u32 },
     /// index sub-rectangle [i0,i1) x [j0,j1) of a Grid rep
     Grid { i0: u64, i1: u64, j0: u64, j1: u64 },
@@ -665,6 +667,20 @@ struct PtsArena {
 
 type Arena = Vec<PtsArena>;
 
+/// arena_slot of a page whose layer allocated no Pts scratch
+const ARENA_NONE: u32 = u32::MAX;
+
+/// resolve a page's layer arena from the cell's compact arena list
+/// (slots exist only for layers that fragmented a Pts rep)
+fn arena_at(arenas: &[Arena], slot: u32) -> &Arena {
+    static EMPTY: Arena = Vec::new();
+    if slot == ARENA_NONE {
+        &EMPTY
+    } else {
+        &arenas[slot as usize]
+    }
+}
+
 #[derive(Default, Clone, Copy)]
 struct SplitStats {
     fragments: u64,
@@ -676,6 +692,15 @@ struct SplitStats {
 
 /// hard recursion cap (records above it emit as-is + stat)
 const SPLIT_MAX_DEPTH: u32 = 64;
+
+/// split fanout (#60 P1): cap on threads per cell - each live
+/// layer task holds its own recursion temporaries, so this is a
+/// memory bound as much as a scheduling one
+const SPLIT_PAR_MAX: usize = 8;
+/// fanout engages only past this much split input (sum of record
+/// byte estimates); below it a cell splits in well under a second
+/// and thread setup is pure overhead
+const SPLIT_PAR_MIN_BYTES: u64 = 4 * MIB;
 
 fn rep_est_n(n: u64) -> u32 {
     (4u64.saturating_mul(n)).min(u32::MAX as u64) as u32
@@ -743,24 +768,6 @@ fn grid_frag_bbox(
     for &(i, j) in &[(i0, j0), (im, j0), (i0, jm), (im, jm)] {
         let ox = i * va.0 + j * vb.0;
         let oy = i * va.1 + j * vb.1;
-        bb.grow(&BBox {
-            x0: sb.x0 + ox,
-            y0: sb.y0 + oy,
-            x1: sb.x1 + ox,
-            y1: sb.y1 + oy,
-        });
-    }
-    bb
-}
-
-fn pts_order_bbox(
-    sb: &BBox,
-    pts: &[(i64, i64)],
-    order: &[u32],
-) -> BBox {
-    let mut bb = BBox::EMPTY;
-    for &i in order {
-        let (ox, oy) = pts[i as usize];
         bb.grow(&BBox {
             x0: sb.x0 + ox,
             y0: sb.y0 + oy,
@@ -870,13 +877,28 @@ fn frag_split(
                 (e.shape_box, &mut e.order)
             };
             let sc2 = axis_c2(&sb, ax);
-            let off_ax =
-                |p: (i64, i64)| if ax == 0 { p.0 } else { p.1 };
+            // partition + per-side offset extents in ONE pass (the
+            // two bbox rescans doubled the per-member cost on fill
+            // monsters). Each source member is classified exactly
+            // once - a swap pulls an already-classified element
+            // into a position k has passed - so the extents equal
+            // a rescan of the final slices.
             let mut m = lo;
+            let (mut l0, mut l1) =
+                ((i64::MAX, i64::MAX), (i64::MIN, i64::MIN));
+            let (mut r0, mut r1) =
+                ((i64::MAX, i64::MAX), (i64::MIN, i64::MIN));
             for k in lo..hi {
-                if 2 * off_ax(pts[order[k] as usize]) + sc2 < plane2 {
+                let (ox, oy) = pts[order[k] as usize];
+                let c = if ax == 0 { ox } else { oy };
+                if 2 * c + sc2 < plane2 {
                     order.swap(k, m);
                     m += 1;
+                    l0 = (l0.0.min(ox), l0.1.min(oy));
+                    l1 = (l1.0.max(ox), l1.1.max(oy));
+                } else {
+                    r0 = (r0.0.min(ox), r0.1.min(oy));
+                    r1 = (r1.0.max(ox), r1.1.max(oy));
                 }
             }
             if m == lo || m == hi {
@@ -884,8 +906,14 @@ fn frag_split(
             }
             let base =
                 r.bytes.saturating_sub(rep_est_n(r.members));
-            let bl = pts_order_bbox(&sb, pts, &order[lo..m]);
-            let br = pts_order_bbox(&sb, pts, &order[m..hi]);
+            let shift = |o0: (i64, i64), o1: (i64, i64)| BBox {
+                x0: sb.x0 + o0.0,
+                y0: sb.y0 + o0.1,
+                x1: sb.x1 + o1.0,
+                y1: sb.y1 + o1.1,
+            };
+            let bl = shift(l0, l1);
+            let br = shift(r0, r1);
             let mk = |bb: BBox, s: usize, e: usize| {
                 child(
                     bb,
@@ -913,6 +941,10 @@ fn frag_split(
 struct PageJob {
     ci: usize,
     li: u32,
+    /// which compact layer arena this page's Frag::Pts indices
+    /// address (ARENA_NONE when the layer has none); assigned at
+    /// the layer merge, inherited by the page's LOD variant
+    arena_slot: u32,
     seq: u32,
     recs: Vec<PRec>,
     bbox: BBox,
@@ -953,6 +985,7 @@ fn emit_page(
     out.push(PageJob {
         ci,
         li,
+        arena_slot: ARENA_NONE, // assigned at the layer merge
         seq: *seq,
         recs,
         bbox: bb,
@@ -1165,9 +1198,10 @@ fn frag_rep(
 fn encode_job(
     doc: &Doc,
     job: &PageJob,
-    arena: &Arena,
+    arenas: &[Arena],
 ) -> (Vec<u8>, u64) {
     let cell = &doc.cells[job.ci];
+    let arena = arena_at(arenas, job.arena_slot);
     let mut rects: Vec<RectRec> = Vec::new();
     let mut polys: Vec<PolyRec> = Vec::new();
     let mut paths: Vec<PathRec> = Vec::new();
@@ -1275,7 +1309,7 @@ fn write_encoded_page(
 fn encode_write_pages(
     doc: &Doc,
     page_jobs: &[PageJob],
-    arenas: &[std::sync::Arc<Arena>],
+    arenas: &[std::sync::Arc<Vec<Arena>>],
     arena_cell_base: usize,
     workers: usize,
     batch_limit: usize,
@@ -1289,12 +1323,15 @@ fn encode_write_pages(
     if ptotal == 0 {
         return;
     }
-    let arena_for = |job: &PageJob| -> &Arena {
+    let arena_for = |job: &PageJob| -> &[Arena] {
         let ai = job
             .ci
             .checked_sub(arena_cell_base)
             .expect("page cell before arena batch");
-        arenas.get(ai).expect("page cell after arena batch")
+        arenas
+            .get(ai)
+            .expect("page cell after arena batch")
+            .as_slice()
     };
     if workers <= 1 || ptotal == 1 {
         for job in page_jobs {
@@ -1451,9 +1488,17 @@ struct CellPlan {
     /// (bbox, first, count, leaf, max_w, max_h) - leaf `first` is a
     /// cell-local page index, inner `first` a cell-local node index
     pbvh: Vec<(BBox, u32, u16, bool, u64, u64)>,
-    /// fragmented-Pts offset scratch shared by this cell's jobs
-    arena: std::sync::Arc<Arena>,
+    /// fragmented-Pts offset scratch shared by this cell's jobs:
+    /// one compact slot per layer that fragmented a Pts rep
+    /// (PageJob.arena_slot names a page's slot)
+    arenas: std::sync::Arc<Vec<Arena>>,
     split_stats: SplitStats,
+    /// #60 P1 instrumentation for the slow-cell log
+    split_threads: usize,
+    lod_threads: usize,
+    layers_active: usize,
+    /// ((layer, datatype), split seconds), heaviest first, <= 3
+    top_split: Vec<((u32, u32), f32)>,
 }
 
 /// binary BVH over one (cell,layer) page run with subtree max_w/
@@ -1813,6 +1858,7 @@ fn gen_lod_job(
     Some(PageJob {
         ci: exact.ci,
         li: exact.li,
+        arena_slot: exact.arena_slot,
         seq: exact.seq,
         members: pass_members + rects.len() as u64,
         recs: pass,
@@ -1824,6 +1870,89 @@ fn gen_lod_job(
         lod_page: floe_ovm::LOD_PAGE_NONE,
         lod_rects: rects,
     })
+}
+
+/// one layer's split product with RUN-LOCAL indices (#60 P1): the
+/// li-order merge in build_cell_plan rebases pages/pbvh onto
+/// cell-local bases, so output bytes are independent of task
+/// scheduling and thread count
+struct LayerPlan {
+    li: u32,
+    /// pbvh leaf order when a tree exists, split emit order else
+    pages: Vec<PageJob>,
+    /// empty = short run (linear scan, prange root PBVH_NONE);
+    /// leaf `first` is a run-local page index, inner `first` a
+    /// run-local node index
+    pbvh: Vec<(BBox, u32, u16, bool, u64, u64)>,
+    /// layer-local Pts scratch (Frag::Pts.arena indexes this)
+    arena: Arena,
+    stats: SplitStats,
+    secs: f32,
+}
+
+fn plan_layer(
+    cell: &floe_oasis::doc::Cell,
+    ci: usize,
+    li: u32,
+    recs: Vec<PRec>,
+    page_target_bytes: u64,
+) -> LayerPlan {
+    let t = std::time::Instant::now();
+    let mut arena: Arena = Vec::new();
+    let mut stats = SplitStats::default();
+    let mut seq = 0u32;
+    let mut run: Vec<PageJob> = Vec::new();
+    split_pages(
+        cell,
+        &mut arena,
+        ci,
+        li,
+        recs,
+        &mut seq,
+        &mut run,
+        &mut stats,
+        page_target_bytes,
+        0,
+    );
+    let mut pbvh: Vec<(BBox, u32, u16, bool, u64, u64)> = Vec::new();
+    let pages = if run.len() <= PBVH_LEAF {
+        // short run: linear scan beats a tree
+        run
+    } else {
+        let mut items: Vec<(BBox, u64, u64, usize)> = run
+            .iter()
+            .enumerate()
+            .map(|(k, j)| {
+                (
+                    j.bbox,
+                    j.max_w.max(0) as u64,
+                    j.max_h.max(0) as u64,
+                    k,
+                )
+            })
+            .collect();
+        let mut nodes: Vec<(BBox, u32, u16, bool, u64, u64)> =
+            vec![(BBox::EMPTY, 0, 0, false, 0, 0)];
+        split_pbvh(&mut nodes, &mut items, 0, 0);
+        pbvh = nodes;
+        // the run's jobs in leaf order (items order after the
+        // split IS the directory order)
+        let mut slots: Vec<Option<PageJob>> =
+            run.into_iter().map(Some).collect();
+        let mut pages = Vec::with_capacity(slots.len());
+        for &(_, _, _, k) in &items {
+            pages.push(slots[k].take().expect("pbvh perm"));
+        }
+        pages
+    };
+    LayerPlan {
+        li,
+        pages,
+        pbvh,
+        arena,
+        stats,
+        secs: t.elapsed().as_secs_f32(),
+    }
 }
 
 fn build_cell_plan(
@@ -1951,79 +2080,167 @@ fn build_cell_plan(
         });
     }
     lap(&mut phase_s[1]);
+    // ---- per-layer page split (#60 P1): every non-empty layer is
+    // an independent task with its own arena and run-local output
+    let layer_inputs: Vec<(u32, Vec<PRec>)> = per_layer
+        .into_iter()
+        .enumerate()
+        .filter(|(_, r)| !r.is_empty())
+        .map(|(li, r)| (li as u32, r))
+        .collect();
+    let layers_active = layer_inputs.len();
+    // helper borrowing mirrors the LOD fanout below: free budget
+    // slots exist only when planners EXITED (the monster-cell
+    // tail) or fewer cells than jobs are in flight - a planner
+    // blocked on the plan window still owns its slot, so this is
+    // a tail optimization by construction. Fanout also multiplies
+    // live recursion temporaries, so it stays off under governor
+    // memory pressure.
+    let split_bytes: u64 = layer_inputs
+        .iter()
+        .flat_map(|(_, r)| r.iter())
+        .map(|r| r.bytes as u64)
+        .sum();
+    let mut split_helpers = 0usize;
+    if layer_inputs.len() >= 2
+        && split_bytes >= SPLIT_PAR_MIN_BYTES
+        && crate::mem_available_gb()
+            .is_none_or(|gb| gb >= GOVERNOR_MIN_AVAIL_GB)
+    {
+        let desired = std::thread::available_parallelism()
+            .map(|v| v.get())
+            .unwrap_or(1)
+            .min(layer_inputs.len())
+            .min(SPLIT_PAR_MAX)
+            .max(1);
+        while split_helpers + 1 < desired {
+            let cur =
+                lod_budget.load(std::sync::atomic::Ordering::Relaxed);
+            if cur <= 0 {
+                break;
+            }
+            if lod_budget
+                .compare_exchange(
+                    cur,
+                    cur - 1,
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                split_helpers += 1;
+            }
+        }
+    }
+    let split_threads = split_helpers + 1;
+    let layer_plans: Vec<LayerPlan> = if split_helpers == 0 {
+        layer_inputs
+            .into_iter()
+            .map(|(li, recs)| {
+                plan_layer(cell, ci, li, recs, page_target_bytes)
+            })
+            .collect()
+    } else {
+        // heaviest-first scheduling, li-order merge: load balance
+        // freely - the merge order alone fixes the output bytes
+        let mut order: Vec<usize> =
+            (0..layer_inputs.len()).collect();
+        order.sort_by_key(|&k| {
+            std::cmp::Reverse(
+                layer_inputs[k]
+                    .1
+                    .iter()
+                    .map(|r| r.bytes as u64)
+                    .sum::<u64>(),
+            )
+        });
+        let tasks: Vec<std::sync::Mutex<Option<(u32, Vec<PRec>)>>> =
+            layer_inputs
+                .into_iter()
+                .map(|t| std::sync::Mutex::new(Some(t)))
+                .collect();
+        let slots: Vec<std::sync::Mutex<Option<LayerPlan>>> =
+            (0..tasks.len())
+                .map(|_| std::sync::Mutex::new(None))
+                .collect();
+        let nextk = std::sync::atomic::AtomicUsize::new(0);
+        let work = || loop {
+            let i = nextk
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if i >= order.len() {
+                return;
+            }
+            let k = order[i];
+            let (li, recs) =
+                tasks[k].lock().unwrap().take().expect("layer task");
+            let lp =
+                plan_layer(cell, ci, li, recs, page_target_bytes);
+            *slots[k].lock().unwrap() = Some(lp);
+        };
+        std::thread::scope(|sc| {
+            for _ in 0..split_helpers {
+                sc.spawn(&work);
+            }
+            work();
+        });
+        lod_budget.fetch_add(
+            split_helpers as isize,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        slots
+            .into_iter()
+            .map(|s| {
+                s.into_inner().unwrap().expect("layer plan slot")
+            })
+            .collect()
+    };
+    // merge in li order (this is what fixes the output bytes)
     let mut pages: Vec<PageJob> = Vec::new();
     let mut pranges: Vec<(u32, u32, u32, u32)> = Vec::new();
     let mut pbvh: Vec<(BBox, u32, u16, bool, u64, u64)> = Vec::new();
-    let mut arena: Arena = Vec::new();
+    let mut arenas: Vec<Arena> = Vec::new();
     let mut split_stats = SplitStats::default();
-    for (li, recs) in per_layer.into_iter().enumerate() {
-        if recs.is_empty() {
-            continue;
-        }
-        let mut seq = 0u32;
-        let mut run: Vec<PageJob> = Vec::new();
-        split_pages(
-            cell,
-            &mut arena,
-            ci,
-            li as u32,
-            recs,
-            &mut seq,
-            &mut run,
-            &mut split_stats,
-            page_target_bytes,
-            0,
-        );
+    let mut top_split: Vec<((u32, u32), f32)> = Vec::new();
+    for mut lp in layer_plans {
         let run_lo = narrow_u32(pages.len() as u64, "cell page count");
-        let run_count = narrow_u32(run.len() as u64, "run page count");
-        if run.len() <= PBVH_LEAF {
-            // short run: linear scan beats a tree
-            pranges.push((li as u32, run_lo, run_count, PBVH_NONE));
-            pages.append(&mut run);
+        let run_count =
+            narrow_u32(lp.pages.len() as u64, "run page count");
+        let root = if lp.pbvh.is_empty() {
+            PBVH_NONE
         } else {
-            let mut items: Vec<(BBox, u64, u64, usize)> = run
-                .iter()
-                .enumerate()
-                .map(|(k, j)| {
-                    (
-                        j.bbox,
-                        j.max_w.max(0) as u64,
-                        j.max_h.max(0) as u64,
-                        k,
-                    )
-                })
-                .collect();
             let root_local =
                 narrow_u32(pbvh.len() as u64, "cell pbvh count");
-            let base = pbvh.len();
-            pbvh.push((BBox::EMPTY, 0, 0, false, 0, 0));
-            {
-                // split fills nodes with run-relative leaf ranges;
-                // shift both leaf-first (page) and inner-first
-                // (node) to cell-local bases afterwards
-                let mut nodes: Vec<(BBox, u32, u16, bool, u64, u64)> =
-                    vec![(BBox::EMPTY, 0, 0, false, 0, 0)];
-                split_pbvh(&mut nodes, &mut items, 0, 0);
-                pbvh.truncate(base);
-                for (bb, first, count, leaf, mw, mh) in nodes {
-                    let f = if leaf {
-                        run_lo + first
-                    } else {
-                        root_local + first
-                    };
-                    pbvh.push((bb, f, count, leaf, mw, mh));
-                }
+            for (bb, first, count, leaf, mw, mh) in lp.pbvh {
+                let f = if leaf {
+                    run_lo + first
+                } else {
+                    root_local + first
+                };
+                pbvh.push((bb, f, count, leaf, mw, mh));
             }
-            // append the run's jobs in leaf order (items order
-            // after the split IS the directory order)
-            let mut slots: Vec<Option<PageJob>> =
-                run.into_iter().map(Some).collect();
-            for &(_, _, _, k) in &items {
-                pages.push(slots[k].take().expect("pbvh perm"));
+            root_local
+        };
+        if !lp.arena.is_empty() {
+            let slot =
+                narrow_u32(arenas.len() as u64, "cell arena count");
+            for j in lp.pages.iter_mut() {
+                j.arena_slot = slot;
             }
-            pranges.push((li as u32, run_lo, run_count, root_local));
+            arenas.push(lp.arena);
         }
+        pranges.push((lp.li, run_lo, run_count, root));
+        pages.append(&mut lp.pages);
+        split_stats.fragments += lp.stats.fragments;
+        split_stats.oversize_pages += lp.stats.oversize_pages;
+        split_stats.depth_capped += lp.stats.depth_capped;
+        split_stats.lod_pages += lp.stats.lod_pages;
+        split_stats.lod_grid_verbatim += lp.stats.lod_grid_verbatim;
+        top_split.push((doc.layer_order[lp.li as usize], lp.secs));
     }
+    top_split.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    top_split.truncate(3);
     lap(&mut phase_s[2]);
     // M7: LOD variants ride at the tail of the cell's page list -
     // pranges/pbvh reference only the exact runs before them, and
@@ -2046,6 +2263,7 @@ fn build_cell_plan(
     // Fan the generation out when the page count justifies threads;
     // results merge in page order, so bytes are unchanged.
     const LOD_PAR_MIN: usize = 64;
+    let mut lod_threads = 1usize;
     if cand.len() >= LOD_PAR_MIN {
         // review 2026-08-17 (#60): threads beyond this planner's
         // own come from the shared lod_budget - the outer pool
@@ -2099,7 +2317,7 @@ fn build_cell_plan(
                 if let Some(job) = gen_lod_job(
                     doc,
                     cell,
-                    &arena,
+                    arena_at(&arenas, pages[cand[i]].arena_slot),
                     &pages[cand[i]],
                     &mut lst,
                 ) {
@@ -2109,6 +2327,7 @@ fn build_cell_plan(
             if extra == 0 {
                 work();
             } else {
+                lod_threads = extra + 1;
                 std::thread::scope(|sc| {
                     for _ in 0..extra {
                         sc.spawn(&work);
@@ -2144,7 +2363,7 @@ fn build_cell_plan(
             if let Some(job) = gen_lod_job(
                 doc,
                 cell,
-                &arena,
+                arena_at(&arenas, pages[k].arena_slot),
                 &pages[k],
                 &mut split_stats,
             ) {
@@ -2214,8 +2433,12 @@ fn build_cell_plan(
         pages,
         pranges,
         pbvh,
-        arena: std::sync::Arc::new(arena),
+        arenas: std::sync::Arc::new(arenas),
         split_stats,
+        split_threads,
+        lod_threads,
+        layers_active,
+        top_split,
     }
 }
 
@@ -2875,6 +3098,12 @@ fn build(
     // appear only at the monster-cell tail (planners exited) or when
     // fewer cells than jobs are in flight. jobs=96 used to mean 96
     // planners x up to 16 LOD threads each.
+    // slow-cell log threshold in seconds; FLOE_SLOW_CELL_S=0 logs
+    // every cell (the S6 gate uses it to observe helper uptake)
+    let slow_s: f64 = std::env::var("FLOE_SLOW_CELL_S")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5.0);
     let planners = jobs.max(1).min(n.max(1));
     let lod_budget = std::sync::atomic::AtomicIsize::new(
         jobs.max(1) as isize - planners as isize,
@@ -2953,17 +3182,28 @@ fn build(
                     }
                 };
                 let secs = t.elapsed().as_secs_f64();
-                if secs >= 5.0 {
+                if secs >= slow_s {
                     // straggler instrumentation: name the monster
-                    // cells so intra-cell parallelization (phase 2)
-                    // knows its targets
+                    // cells, their thread uptake (helpers exist
+                    // only when the shared budget had free slots)
+                    // and the per-layer split skew that decides
+                    // whether P1 fanout can help (#60)
+                    let mut top = String::new();
+                    for ((l, d), s) in &plan.top_split {
+                        top.push_str(&format!(
+                            " L{}.{} {:.1}s",
+                            l, d, s
+                        ));
+                    }
                     eprintln!(
-                        "[vfs] build: slow cell {} (ci {}): plan \
-                         {:.1}s (places {}, pages {}, fragments \
-                         {}; bvh {:.1} asm {:.1} split {:.1} \
-                         lod {:.1} pts {:.1} sink {:.1})",
+                        "[vfs] build: slow cell {} (ci {}/{}): \
+                         plan {:.1}s (places {}, pages {}, frag \
+                         splits {}; bvh {:.1} asm {:.1} split \
+                         {:.1}/{}t lod {:.1}/{}t pts {:.1} sink \
+                         {:.1}; layers {}, top{})",
                         doc.cells[ci].name,
                         ci,
+                        n,
                         secs,
                         doc.cells[ci].places.len(),
                         plan.pages.len(),
@@ -2971,9 +3211,13 @@ fn build(
                         plan.phase_s[0],
                         plan.phase_s[1],
                         plan.phase_s[2],
+                        plan.split_threads,
                         plan.phase_s[3],
+                        plan.lod_threads,
                         plan.phase_s[4],
-                        plan.phase_s[5]
+                        plan.phase_s[5],
+                        plan.layers_active,
+                        top
                     );
                 }
                 *ring[ci % ring_cap].lock().unwrap() = Some(plan);
@@ -2983,7 +3227,8 @@ fn build(
         // ---- ordered committer (this thread): sink commit + texts
         // + cell records, then encode a chunk and drop its arenas
         let mut batch_jobs: Vec<PageJob> = Vec::new();
-        let mut batch_arenas: Vec<std::sync::Arc<Arena>> = Vec::new();
+        let mut batch_arenas: Vec<std::sync::Arc<Vec<Arena>>> =
+            Vec::new();
         let mut chunk_base = 0usize;
         for ci in 0..n {
             if ci % 64 == 0 {
@@ -3035,11 +3280,11 @@ fn build(
             let CellPlan {
                 sink,
                 mut pages,
-                arena,
+                arenas,
                 split_stats,
                 ..
             } = plan;
-            batch_arenas.push(arena);
+            batch_arenas.push(arenas);
             split_total.fragments = split_total
                 .fragments
                 .checked_add(split_stats.fragments)
@@ -4308,6 +4553,76 @@ mod split_tests {
         );
     }
 
+    /// #60 P1 fanout bench (release, ignored): the same rep flood
+    /// spread over 8 layers, planned serial (budget 0) then fanned
+    /// out (budget 7); the two plans must agree structurally. Run:
+    /// cargo test --release -p floe-index -- --ignored fanout \
+    ///   --nocapture
+    #[test]
+    #[ignore]
+    fn monster_cell_fanout_bench() {
+        const DIE: i64 = 4_000_000;
+        const NL: u32 = 8;
+        let recs: Vec<RectRec> = (0..500u64)
+            .map(|k| {
+                let mut r = pts_rec(k + 11, 50_000, DIE, 200);
+                r.layer = 1 + (k % NL as u64) as u32;
+                r
+            })
+            .collect();
+        let mut c = floe_oasis::doc::Cell::default();
+        c.name = String::from("T");
+        c.rects = recs;
+        let doc = Doc {
+            unit: 1000.0,
+            cells: vec![c],
+            top: 0,
+            layer_order: (0..NL).map(|l| (1 + l, 0)).collect(),
+            norm_s: 0.0,
+            layer_names: Default::default(),
+            layer_aliases: Default::default(),
+        };
+        let rbb = cell_bboxes_full(&doc);
+        let lidx: std::collections::HashMap<(u32, u32), usize> =
+            doc.layer_order
+                .iter()
+                .enumerate()
+                .map(|(i, &k)| (k, i))
+                .collect();
+        let mut plans = Vec::new();
+        for budget in [0isize, 7] {
+            let b = std::sync::atomic::AtomicIsize::new(budget);
+            let t = std::time::Instant::now();
+            let plan = build_cell_plan(
+                &doc, 0, &rbb, &lidx, NL as usize, MIB, true, &b,
+            );
+            eprintln!(
+                "fanout budget {}: plan {:.2}s (split {:.2}/{}t \
+                 lod {:.2}/{}t, pages {})",
+                budget,
+                t.elapsed().as_secs_f64(),
+                plan.phase_s[2],
+                plan.split_threads,
+                plan.phase_s[3],
+                plan.lod_threads,
+                plan.pages.len(),
+            );
+            plans.push(plan);
+        }
+        let (a, b) = (&plans[0], &plans[1]);
+        assert!(b.split_threads > 1, "fanout never engaged");
+        assert_eq!(a.pranges, b.pranges);
+        assert_eq!(a.pbvh, b.pbvh);
+        assert_eq!(a.pages.len(), b.pages.len());
+        for (x, y) in a.pages.iter().zip(b.pages.iter()) {
+            assert_eq!(x.li, y.li);
+            assert_eq!(x.seq, y.seq);
+            assert_eq!(x.bbox, y.bbox);
+            assert_eq!(x.arena_slot, y.arena_slot);
+            assert_eq!(x.recs.len(), y.recs.len());
+        }
+    }
+
     fn mini_doc(rects: Vec<RectRec>) -> Doc {
         let mut c = floe_oasis::doc::Cell::default();
         c.name = String::from("T");
@@ -4403,7 +4718,7 @@ mod split_tests {
             .filter(|j| j.lod == floe_ovm::LOD_EXACT)
         {
             let (payload, _raw) =
-                encode_job(doc, job, &plan.arena);
+                encode_job(doc, job, plan.arenas.as_slice());
             // page payloads are complete OASIS files (CBLOCKs
             // inflate inside the parser)
             let pd = floe_oasis::doc::parse_doc(&payload)
@@ -4690,7 +5005,7 @@ mod split_tests {
         k: usize,
     ) -> Vec<Mem> {
         let (payload, _raw) =
-            encode_job(doc, &plan.pages[k], &plan.arena);
+            encode_job(doc, &plan.pages[k], plan.arenas.as_slice());
         let pd = floe_oasis::doc::parse_doc(&payload)
             .expect("page parse");
         expand_cell(&pd.cells[0])
