@@ -213,6 +213,17 @@ impl Cache {
             .collect()
     }
 
+    /// Original design-cell name for query/pick provenance.
+    pub fn cell_name(&self, cell_id: u32) -> Result<String, String> {
+        if cell_id >= self.vfs.ovm.n_cells {
+            return Err(format!(
+                "cell index {} out of range 0..{}",
+                cell_id, self.vfs.ovm.n_cells
+            ));
+        }
+        Ok(self.vfs.ovm.cell(cell_id).name)
+    }
+
     pub(crate) fn cell_bbox(&self, cell_id: u32) -> Result<BBox, String> {
         if cell_id >= self.vfs.ovm.n_cells {
             return Err(format!(

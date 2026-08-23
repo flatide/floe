@@ -150,6 +150,64 @@ class WorkerContractTests(unittest.TestCase):
             self.assertNotIn("refining", result)
             self.assertNotIn(7, worker._jobs)
 
+    def test_query_commands_and_results_match_parent_schema(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = os.path.join(directory, "floe-renderd")
+            with open(binary, "w", encoding="ascii") as script:
+                script.write("#!/bin/sh\n")
+            os.chmod(binary, 0o755)
+            with mock.patch.dict(os.environ, {
+                "FLOE_RENDERD_BIN": binary,
+            }, clear=False):
+                worker = RustRenderWorker(FakeCache(directory))
+            commands = []
+            worker._send = commands.append
+            worker._submit_snap({
+                "seq": 7, "x": 11, "y": -3, "r": 4,
+                "layers": [(2, 0), (1, 0), (2, 0)],
+            })
+            worker._submit_pick({
+                "seq": 8, "x": 5, "y": 6, "r": 0, "nth": -1,
+                "layers": [],
+            })
+            self.assertEqual(
+                commands[0],
+                "snap seq=7 x=11 y=-3 r=4 layers=1/0,2/0")
+            self.assertEqual(
+                commands[1],
+                "pick seq=8 x=5 y=6 r=1 nth=-1 layers=all")
+
+            kind, fields = _parse_wire_line(
+                "snap seq=7 found=1 x=10 y=-2 snap=vertex")
+            worker._handle_line(kind, fields, "")
+            self.assertEqual(worker.res.get_nowait(), {
+                "kind": "snap", "seq": 7, "found": True,
+                "x": 10, "y": -2, "snap": "vertex",
+            })
+
+            layer_name = "M 1/metal"
+            cell_name = "TOP 한글"
+            kind, fields = _parse_wire_line(
+                "pick seq=8 found=1 count=2 index=1 layer=2 "
+                "datatype=0 lname_hex=%s cell_hex=%s area=100 "
+                "bbox=0,0,10,10 points=0,0;0,10;10,10;10,0" % (
+                    layer_name.encode().hex(), cell_name.encode().hex()))
+            worker._handle_line(kind, fields, "")
+            self.assertEqual(worker.res.get_nowait(), {
+                "kind": "pick", "seq": 8, "found": True,
+                "count": 2, "index": 1, "layer": 2, "datatype": 0,
+                "lname": layer_name, "cell": cell_name, "area": 100.0,
+                "bbox": [0, 0, 10, 10],
+                "points": [(0, 0), (0, 10), (10, 10), (10, 0)],
+            })
+
+            kind, fields = _parse_wire_line(
+                "pick seq=9 found=0 count=0")
+            worker._handle_line(kind, fields, "")
+            self.assertEqual(worker.res.get_nowait(), {
+                "kind": "pick", "seq": 9, "found": False, "count": 0,
+            })
+
     def test_rejects_invalid_environment_limits(self):
         with tempfile.TemporaryDirectory() as directory:
             binary = os.path.join(directory, "floe-renderd")
@@ -203,6 +261,8 @@ class WorkerContractTests(unittest.TestCase):
 @unittest.skipUnless(os.environ.get("FLOE_INTEGRATION_SOURCE"),
                      "set FLOE_INTEGRATION_SOURCE for the real daemon test")
 class RealDaemonIntegrationTests(unittest.TestCase):
+    maxDiff = None
+
     def test_parent_cache_progressive_style_and_shutdown(self):
         from floe.cache import Cache
         from floe.service import make_render_worker
@@ -218,9 +278,13 @@ class RealDaemonIntegrationTests(unittest.TestCase):
         worker.start()
         try:
             bbox = tuple(cache.meta["bbox"])
+            span_x = max(1, int(bbox[2] - bbox[0]))
+            span_y = max(1, int(bbox[3] - bbox[1]))
+            render_height = max(1, (400 * span_y + span_x - 1) // span_x)
             base_job = {
                 "kind": "render", "gen": 1, "scope": "live",
-                "bbox": bbox, "view": None, "w": 400, "h": 300,
+                "bbox": bbox, "view": None, "w": 400,
+                "h": render_height,
                 "depth": None, "cut_px": 0.0, "visible": None,
                 "frames": False, "labels": False, "abstract": False,
                 "coverage": False,
@@ -232,6 +296,7 @@ class RealDaemonIntegrationTests(unittest.TestCase):
             self.assertNotIn("refining", first_frames[-1])
             self.assertGreater(first_frames[-1]["tiles"], 4)
             first_png = first_frames[-1]["png"]
+            self._assert_query_parity(cache, worker, bbox)
 
             solid = "\n".join(["*" * 16] * 16)
             worker.submit({
@@ -308,6 +373,99 @@ class RealDaemonIntegrationTests(unittest.TestCase):
                 return frames
         raise AssertionError("timed out waiting for generation %d" %
                              generation)
+
+    def _assert_query_parity(self, cache, worker, bbox):
+        """Use the legacy KLayout service only as a query oracle."""
+        import klayout.db as db
+        from floe.service import (
+            _iter_global_polys,
+            _svc_pick,
+            _svc_snap,
+        )
+        from floe.vfsclient import VfsClient
+        from floe.viewport import VfsMosaic
+
+        box = db.Box(*(int(value) for value in bbox))
+        cache.vfs_client = VfsClient(cache.dir)
+        try:
+            mosaic = VfsMosaic(cache, stream_kb=0)
+            dbu = float(cache.meta["dbu"])
+            view_um = tuple(float(value) * dbu for value in bbox)
+            px_per_um = 400.0 / max(1e-9, view_um[2] - view_um[0])
+            response = cache.vfs_client.request(
+                1, view_um, px_per_um, 0.0, None, None,
+                ack=0, reset=True, stream_kb=0, want_labels=False,
+                lod=True, frames=False, labels=False)
+            if response["names"]:
+                mosaic.load_names(response["names"])
+            mosaic.apply_hier(
+                response["delta"], response["top"], response["evict"],
+                gen=1)
+            self._assert_query_parity_with_mosaic(
+                cache, worker, box, mosaic, _iter_global_polys,
+                _svc_snap, _svc_pick)
+        finally:
+            client = cache.vfs_client
+            client.stop()
+            for stream in (client.proc.stdin, client.proc.stdout):
+                if stream is not None:
+                    stream.close()
+            del cache.vfs_client
+
+    def _assert_query_parity_with_mosaic(
+            self, cache, worker, box, mosaic, iter_polys,
+            svc_snap, svc_pick):
+        selected = None
+        anchor = None
+        for poly, _text, li, _cell in iter_polys(
+                mosaic, None, box):
+            if poly is None:
+                continue
+            points = list(poly.each_point_hull())
+            if points:
+                info = mosaic.ly.get_info(li)
+                selected = [(info.layer, info.datatype)]
+                anchor = (points[0].x, points[0].y)
+                break
+        self.assertIsNotNone(anchor, "query oracle found no polygon")
+
+        snap_job = {
+            "kind": "snap", "seq": 700,
+            "x": anchor[0], "y": anchor[1], "r": 2,
+            "layers": selected,
+        }
+        expected_queue = queue.Queue()
+        svc_snap(cache, mosaic, snap_job, expected_queue)
+        expected_snap = expected_queue.get_nowait()
+        worker.submit(snap_job)
+        actual_snap = self._query_result(worker, "snap", 700)
+        self.assertEqual(actual_snap, expected_snap)
+
+        pick_job = {
+            "kind": "pick", "seq": 701,
+            "x": anchor[0], "y": anchor[1], "r": 2, "nth": 3,
+            "layers": selected,
+        }
+        svc_pick(cache, mosaic, pick_job, expected_queue)
+        expected_pick = expected_queue.get_nowait()
+        worker.submit(pick_job)
+        actual_pick = self._query_result(worker, "pick", 701)
+        self.assertEqual(actual_pick, expected_pick)
+
+    @staticmethod
+    def _query_result(worker, kind, sequence):
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            try:
+                result = worker.res.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if result.get("kind") == "error":
+                raise AssertionError(result.get("msg"))
+            if result.get("kind") == kind and result.get("seq") == sequence:
+                return result
+        raise AssertionError("timed out waiting for %s %d" %
+                             (kind, sequence))
 
 
 if __name__ == "__main__":

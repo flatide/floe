@@ -1,7 +1,8 @@
 use floe_render_core::{
-    render_geometry_occupancy_cancellable, render_geometry_styled_cancellable, validate_font_px,
-    Cache, CacheLayer, DecodedPageCache, FrameScene, GeometryRasterRequest, LayerFill, LayerStyle,
-    PlanRequest, RasterViewBox, RenderCancellation, StyledGeometryRasterRequest, ViewBox,
+    pick_scene, render_geometry_occupancy_cancellable, render_geometry_styled_cancellable,
+    snap_scene, validate_font_px, Cache, CacheLayer, DecodedPageCache, FrameScene,
+    GeometryRasterRequest, LayerFill, LayerStyle, PlanRequest, RasterViewBox, RenderCancellation,
+    SceneQueryLayer, SceneQueryRequest, SceneSnapKind, StyledGeometryRasterRequest, ViewBox,
     DEFAULT_LABEL_FONT_PX, DEFAULT_TILE_SIZE, MAX_TILE_SIZE,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -9,7 +10,7 @@ use std::io::{self, BufRead, Write};
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Instant;
 
@@ -17,6 +18,16 @@ const DEFAULT_BUDGET_MB: u64 = 1024;
 const DEFAULT_JOBS: u16 = 1;
 const DEFAULT_ROUND_PAGES: usize = 128;
 const MAX_JOBS: u16 = 256;
+const SNAP_SHAPE_CAP: usize = 400;
+const PICK_CANDIDATE_CAP: usize = 64;
+
+struct PublishedScene {
+    scene: Arc<FrameScene>,
+    layers: Arc<[CacheLayer]>,
+    cell_names: Arc<BTreeMap<u32, String>>,
+}
+
+type SharedPublishedScene = Arc<RwLock<Option<Arc<PublishedScene>>>>;
 
 fn main() -> ExitCode {
     if let Err(error) = serve() {
@@ -37,9 +48,17 @@ fn serve() -> Result<(), String> {
     let cancellation = RenderCancellation::new();
     let worker_cancellation = cancellation.clone();
     let worker_responses = response_tx.clone();
+    let published_scene = Arc::new(RwLock::new(None));
+    let worker_scene = Arc::clone(&published_scene);
     let (command_tx, command_rx) = mpsc::channel::<WorkerCommand>();
-    let worker =
-        thread::spawn(move || render_worker(command_rx, worker_responses, worker_cancellation));
+    let worker = thread::spawn(move || {
+        render_worker(
+            command_rx,
+            worker_responses,
+            worker_cancellation,
+            worker_scene,
+        )
+    });
 
     let stdin = io::stdin();
     let mut latest_generation = None;
@@ -85,6 +104,8 @@ fn serve() -> Result<(), String> {
                 let frontier = cancellation.cancel_before(before_generation);
                 respond(&response_tx, format!("cancelled before_gen={frontier}"));
             }
+            InputCommand::Snap(command) => handle_snap(&published_scene, command, &response_tx),
+            InputCommand::Pick(command) => handle_pick(&published_scene, command, &response_tx),
             InputCommand::Quit => {
                 cancellation.cancel_before(u64::MAX);
                 let _ = command_tx.send(WorkerCommand::Shutdown);
@@ -131,6 +152,8 @@ fn respond(responses: &Sender<String>, response: String) {
 enum InputCommand {
     Worker(WorkerCommand),
     Cancel(u64),
+    Snap(SnapCommand),
+    Pick(PickCommand),
     Quit,
 }
 
@@ -176,6 +199,35 @@ struct RenderCommand {
     unique_round_paths: bool,
     style_epoch: Option<u64>,
     out: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SnapCommand {
+    sequence: i64,
+    x: i64,
+    y: i64,
+    radius: i64,
+    visible_layers: Option<Vec<String>>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PickCommand {
+    sequence: i64,
+    x: i64,
+    y: i64,
+    radius: i64,
+    nth: i64,
+    visible_layers: Option<Vec<String>>,
+}
+
+struct PickWireResponse {
+    count: usize,
+    index: usize,
+    candidate: floe_render_core::ScenePickCandidate,
+    layer: u32,
+    datatype: u32,
+    layer_name: String,
+    cell_name: String,
 }
 
 fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
@@ -295,6 +347,27 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                     out: required(&fields, "out")?.to_string(),
                 },
             ))))
+        }
+        "snap" => {
+            reject_unknown(&fields, &["seq", "x", "y", "r", "layers"])?;
+            Ok(Some(InputCommand::Snap(SnapCommand {
+                sequence: optional_parse(&fields, "seq")?.unwrap_or(-1),
+                x: required_parse(&fields, "x")?,
+                y: required_parse(&fields, "y")?,
+                radius: required_parse::<i64>(&fields, "r")?.max(1),
+                visible_layers: parse_layers(fields.get("layers"))?,
+            })))
+        }
+        "pick" => {
+            reject_unknown(&fields, &["seq", "x", "y", "r", "nth", "layers"])?;
+            Ok(Some(InputCommand::Pick(PickCommand {
+                sequence: optional_parse(&fields, "seq")?.unwrap_or(-1),
+                x: required_parse(&fields, "x")?,
+                y: required_parse(&fields, "y")?,
+                radius: required_parse::<i64>(&fields, "r")?.max(1),
+                nth: optional_parse(&fields, "nth")?.unwrap_or(0),
+                visible_layers: parse_layers(fields.get("layers"))?,
+            })))
         }
         "cancel" => {
             reject_unknown(&fields, &["before_gen"])?;
@@ -447,22 +520,34 @@ fn render_worker(
     commands: Receiver<WorkerCommand>,
     responses: Sender<String>,
     cancellation: RenderCancellation,
+    published_scene: SharedPublishedScene,
 ) {
     let mut state = WorkerState::default();
     for command in commands {
         match command {
-            WorkerCommand::Open(command) => handle_open(&mut state, command, &responses),
-            WorkerCommand::Style(command) => handle_style(&mut state, command, &responses),
-            WorkerCommand::Render(command) => {
-                handle_render(&mut state, command, &responses, &cancellation)
+            WorkerCommand::Open(command) => {
+                handle_open(&mut state, command, &responses, &published_scene)
             }
+            WorkerCommand::Style(command) => handle_style(&mut state, command, &responses),
+            WorkerCommand::Render(command) => handle_render(
+                &mut state,
+                command,
+                &responses,
+                &cancellation,
+                &published_scene,
+            ),
             WorkerCommand::Info => handle_info(&state, &responses),
             WorkerCommand::Shutdown => break,
         }
     }
 }
 
-fn handle_open(state: &mut WorkerState, command: OpenCommand, responses: &Sender<String>) {
+fn handle_open(
+    state: &mut WorkerState,
+    command: OpenCommand,
+    responses: &Sender<String>,
+    published_scene: &SharedPublishedScene,
+) {
     if state.cache.is_some() {
         respond(
             responses,
@@ -488,6 +573,9 @@ fn handle_open(state: &mut WorkerState, command: OpenCommand, responses: &Sender
             state.jobs = command.jobs;
             state.styles.clear();
             state.style_epoch = None;
+            if let Ok(mut published) = published_scene.write() {
+                *published = None;
+            }
             respond(
                 responses,
                 format!(
@@ -571,11 +659,204 @@ fn handle_info(state: &WorkerState, responses: &Sender<String>) {
     }
 }
 
+fn handle_snap(shared: &SharedPublishedScene, command: SnapCommand, responses: &Sender<String>) {
+    let result: Result<Option<floe_render_core::SceneSnap>, String> = (|| {
+        let Some(published) = current_scene(shared)? else {
+            return Ok(None);
+        };
+        let request = scene_query_request(
+            &published,
+            command.x,
+            command.y,
+            command.radius,
+            command.visible_layers.as_deref(),
+            SNAP_SHAPE_CAP,
+        )?;
+        snap_scene(&published.scene, &request)
+    })();
+    match result {
+        Ok(Some(snap)) => respond(
+            responses,
+            format!(
+                "snap seq={} found=1 x={} y={} snap={}",
+                command.sequence,
+                snap.x,
+                snap.y,
+                match snap.kind {
+                    SceneSnapKind::Vertex => "vertex",
+                    SceneSnapKind::Edge => "edge",
+                }
+            ),
+        ),
+        Ok(None) => respond(
+            responses,
+            format!(
+                "snap seq={} found=0 x={} y={} snap=-",
+                command.sequence, command.x, command.y
+            ),
+        ),
+        Err(error) => respond(
+            responses,
+            format!(
+                "snap seq={} found=0 x={} y={} snap=- err_hex={}",
+                command.sequence,
+                command.x,
+                command.y,
+                wire_hex(&error)
+            ),
+        ),
+    }
+}
+
+fn handle_pick(shared: &SharedPublishedScene, command: PickCommand, responses: &Sender<String>) {
+    let result: Result<Option<PickWireResponse>, String> = (|| {
+        let Some(published) = current_scene(shared)? else {
+            return Ok(None);
+        };
+        let request = scene_query_request(
+            &published,
+            command.x,
+            command.y,
+            command.radius,
+            command.visible_layers.as_deref(),
+            PICK_CANDIDATE_CAP,
+        )?;
+        let pick = pick_scene(&published.scene, &request, command.nth)?;
+        let Some(candidate) = pick.candidate else {
+            return Ok(None);
+        };
+        let layer = published
+            .layers
+            .iter()
+            .find(|layer| layer.index == candidate.layer_idx)
+            .ok_or_else(|| format!("query layer index {} not found", candidate.layer_idx))?;
+        let layer_name = if layer.name.is_empty() {
+            format!("{}/{}", layer.layer, layer.datatype)
+        } else {
+            layer.name.clone()
+        };
+        let cell_name = published
+            .cell_names
+            .get(&candidate.cell_id)
+            .ok_or_else(|| format!("query cell index {} not found", candidate.cell_id))?;
+        Ok(Some(PickWireResponse {
+            count: pick.count,
+            index: pick.index,
+            candidate,
+            layer: layer.layer,
+            datatype: layer.datatype,
+            layer_name,
+            cell_name: cell_name.to_string(),
+        }))
+    })();
+    match result {
+        Ok(Some(pick)) => respond(
+            responses,
+            format!(
+                "pick seq={} found=1 count={} index={} layer={} datatype={} lname_hex={} cell_hex={} area={} bbox={},{},{},{} points={}",
+                command.sequence,
+                pick.count,
+                pick.index,
+                pick.layer,
+                pick.datatype,
+                wire_hex(&pick.layer_name),
+                wire_hex(&pick.cell_name),
+                pick.candidate.area,
+                pick.candidate.bbox.x0,
+                pick.candidate.bbox.y0,
+                pick.candidate.bbox.x1,
+                pick.candidate.bbox.y1,
+                wire_points(&pick.candidate.points),
+            ),
+        ),
+        Ok(None) => respond(
+            responses,
+            format!("pick seq={} found=0 count=0", command.sequence),
+        ),
+        Err(error) => respond(
+            responses,
+            format!(
+                "pick seq={} found=0 count=0 err_hex={}",
+                command.sequence,
+                wire_hex(&error)
+            ),
+        ),
+    }
+}
+
+fn current_scene(shared: &SharedPublishedScene) -> Result<Option<Arc<PublishedScene>>, String> {
+    shared
+        .read()
+        .map(|published| published.clone())
+        .map_err(|_| "published scene lock poisoned".to_string())
+}
+
+fn scene_query_request(
+    published: &PublishedScene,
+    x: i64,
+    y: i64,
+    radius: i64,
+    visible_layers: Option<&[String]>,
+    shape_cap: usize,
+) -> Result<SceneQueryRequest, String> {
+    let selected: Option<BTreeSet<u32>> = visible_layers
+        .map(|specs| {
+            specs
+                .iter()
+                .map(|spec| {
+                    resolve_layer(spec, &published.layers)
+                        .map(|layer| layer.index)
+                        .ok_or_else(|| format!("query layer not found: {spec}"))
+                })
+                .collect()
+        })
+        .transpose()?;
+    let layers = published
+        .layers
+        .iter()
+        .filter(|layer| {
+            selected
+                .as_ref()
+                .is_none_or(|selected| selected.contains(&layer.index))
+        })
+        .map(|layer| SceneQueryLayer {
+            index: layer.index,
+            layer: layer.layer,
+            datatype: layer.datatype,
+        })
+        .collect();
+    Ok(SceneQueryRequest {
+        x,
+        y,
+        radius,
+        layers,
+        shape_cap,
+    })
+}
+
+fn wire_hex(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len() * 2);
+    for byte in value.as_bytes() {
+        use std::fmt::Write as _;
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
+}
+
+fn wire_points(points: &[(i64, i64)]) -> String {
+    points
+        .iter()
+        .map(|(x, y)| format!("{x},{y}"))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
 fn handle_render(
     state: &mut WorkerState,
     command: RenderCommand,
     responses: &Sender<String>,
     cancellation: &RenderCancellation,
+    published_scene: &SharedPublishedScene,
 ) {
     let generation = command.generation;
     if cancellation.is_cancelled(generation) {
@@ -592,7 +873,7 @@ fn handle_render(
         );
         return;
     }
-    let result = run_render(state, &command, responses, cancellation);
+    let result = run_render(state, &command, responses, cancellation, published_scene);
     match result {
         Ok(()) => {}
         Err(_) if cancellation.is_cancelled(generation) => {
@@ -614,6 +895,7 @@ fn run_render(
     command: &RenderCommand,
     responses: &Sender<String>,
     cancellation: &RenderCancellation,
+    published_scene: &SharedPublishedScene,
 ) -> Result<(), String> {
     let cache = state
         .cache
@@ -673,6 +955,16 @@ fn run_render(
         state.styles.clone()
     };
     let plan = Arc::new(planned.plan);
+    let query_layers: Arc<[CacheLayer]> = Arc::from(cache.layers());
+    let mut query_cell_names = BTreeMap::new();
+    for cell in &plan.wcells {
+        if let std::collections::btree_map::Entry::Vacant(entry) =
+            query_cell_names.entry(cell.key.0)
+        {
+            entry.insert(cache.cell_name(cell.key.0)?);
+        }
+    }
+    let query_cell_names = Arc::new(query_cell_names);
     let labels: Arc<[floe_render_core::RenderLabel]> = planned_labels
         .as_ref()
         .map(|planned| Arc::from(planned.rows.clone()))
@@ -691,13 +983,13 @@ fn run_render(
         decoded_pages.append(&mut round_pages);
         check_generation(cancellation, command.generation)?;
         let scene_started = Instant::now();
-        let scene = FrameScene::new_shared_with_labels(
+        let scene = Arc::new(FrameScene::new_shared_with_labels(
             cache,
             Arc::clone(&plan),
             decoded_pages.clone(),
             Arc::clone(&labels),
             command.label_font_px,
-        )?;
+        )?);
         let scene_us = elapsed_us(scene_started);
         check_generation(cancellation, command.generation)?;
 
@@ -739,6 +1031,16 @@ fn run_render(
         };
         publish_png(&published_output, command.generation, &png, cancellation)?;
         check_generation(cancellation, command.generation)?;
+        {
+            let mut published = published_scene
+                .write()
+                .map_err(|_| "published scene lock poisoned".to_string())?;
+            *published = Some(Arc::new(PublishedScene {
+                scene: Arc::clone(&scene),
+                layers: Arc::clone(&query_layers),
+                cell_names: Arc::clone(&query_cell_names),
+            }));
+        }
 
         respond(
             responses,
@@ -1027,6 +1329,20 @@ mod tests {
         }
     }
 
+    fn snap(command: InputCommand) -> SnapCommand {
+        match command {
+            InputCommand::Snap(snap) => snap,
+            _ => panic!("expected snap command"),
+        }
+    }
+
+    fn pick(command: InputCommand) -> PickCommand {
+        match command {
+            InputCommand::Pick(pick) => pick,
+            _ => panic!("expected pick command"),
+        }
+    }
+
     #[test]
     fn parses_open_and_exact_render_contract() {
         let open = parse_command("open cache=/tmp/a.floe budget_mb=64 jobs=8")
@@ -1097,6 +1413,42 @@ mod tests {
         assert!(parse_command("open cache=a cache=b").is_err());
         assert!(parse_command("info surprise=1").is_err());
         assert!(parse_command("cancel before_gen=9").is_ok());
+    }
+
+    #[test]
+    fn parses_bounded_scene_queries() {
+        assert_eq!(
+            snap(
+                parse_command("snap seq=4 x=-2 y=7 r=0 layers=2/0,1/3")
+                    .unwrap()
+                    .unwrap()
+            ),
+            SnapCommand {
+                sequence: 4,
+                x: -2,
+                y: 7,
+                radius: 1,
+                visible_layers: Some(vec!["2/0".to_string(), "1/3".to_string()]),
+            }
+        );
+        assert_eq!(
+            pick(
+                parse_command("pick seq=5 x=1 y=2 r=3 nth=-1 layers=all")
+                    .unwrap()
+                    .unwrap()
+            ),
+            PickCommand {
+                sequence: 5,
+                x: 1,
+                y: 2,
+                radius: 3,
+                nth: -1,
+                visible_layers: None,
+            }
+        );
+        assert!(parse_command("snap x=1 y=2 r=3 unknown=4").is_err());
+        assert_eq!(wire_hex("TOP 한글"), "544f5020ed959ceab880");
+        assert_eq!(wire_points(&[(0, 1), (-2, 3)]), "0,1;-2,3");
     }
 
     #[test]

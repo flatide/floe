@@ -89,15 +89,18 @@ circle-like source geometry is expected to arrive as polygons after indexing.
 
 ## Persistent render daemon
 
-`floe-renderd` owns one cache, a decoded-page LRU, the current style epoch, and
-the render worker for its process lifetime. Its stdin/stdout protocol is line
-oriented; paths and field values must not contain whitespace. Unlike the CLI,
-daemon `view` coordinates are raw DBU.
+`floe-renderd` owns one cache, a decoded-page LRU, the current style epoch, the
+render worker, and the latest published immutable query scene for its process
+lifetime. Its stdin/stdout protocol is line oriented; paths and field values
+must not contain whitespace. Unlike the CLI, daemon `view` coordinates are raw
+DBU.
 
 ```text
 open cache=/abs/valmini.oas.floe budget_mb=64 jobs=4
 style epoch=1 path=/tmp/valmini.styles
 render gen=10 view=0,0,404000,447000 w=1200 h=800 depth=full cut=0 exact=0 layers=1/0,2/0 frames=on labels=on font_px=14 mono=off jobs=4 tile_px=128 decode_pages=99 round_pages=32 style_epoch=1 out=/tmp/frame.png
+snap seq=20 x=1000 y=2000 r=10 layers=1/0,2/0
+pick seq=21 x=1000 y=2000 r=3 nth=0 layers=1/0,2/0
 cancel before_gen=11
 info
 quit
@@ -132,6 +135,18 @@ PNG publication is a same-directory write/sync/rename transaction serialized
 with frontier changes, so a stale generation cannot commit a frame. Successfully
 decoded immutable pages remain reusable in the LRU. `exact=1` is accepted only
 with `cut=0 depth=full frames=off`; conflicting options are errors.
+
+Every successfully published refinement round atomically replaces the shared
+query snapshot with that round's `FrameScene`. Snap and pick therefore inspect
+exactly the decoded design geometry currently on screen, including hierarchy,
+orthogonal transforms, repetitions, paths, and planner washes, while excluding
+draw-only frames and live labels. They never load delta OASIS into KLayout and
+never consult a stale KLayout shadow scene. The stdin thread clones the scene
+`Arc` and performs the bounded query while the render worker continues decoding
+and rasterizing later rounds. Snap examines at most 400 touching shapes and
+prefers any in-radius vertex over the nearest edge. Pick retains at most 64
+containing candidates, is boundary-inclusive, sorts by
+`(integer area, layer, datatype)`, and preserves `nth` overlap cycling.
 
 Page loading keeps the parent's file-order batched OVP read, then parses the
 independent page OASIS payloads with up to `jobs` workers. Parse completion
@@ -184,7 +199,8 @@ A/B run.
 
 The adapter is implemented at `floe/rust_render.py` and
 accepts the existing `RenderWorker` constructor and queue contract. It owns one
-persistent `floe-renderd`, translates render/recolor/repattern/mono jobs,
+persistent `floe-renderd`, translates
+render/recolor/repattern/mono/pick/snap jobs,
 converts layerprops and live 16x16 fills to deterministic Rust styles, maps
 progressive telemetry back to the existing frame result schema, and cleans up
 its private frame/style directory on shutdown. The default worker target is
@@ -215,15 +231,14 @@ FLOE_RENDERER=rust \
 Pass `--multi` when launching the GTK viewer so the request cannot forward to
 an already-running KLayout process. Current adapter scope is render,
 progressive refinement, visibility, depth, cut, frames, labels, color, fill,
-width, and mono. Label strings, positions, visibility, declutter, block-name
-fit, and budgets come directly from the existing Rust VFS planner. The
+width, mono, pick, and snap. Label strings, positions, visibility, declutter,
+block-name fit, and budgets come directly from the existing Rust VFS planner. The
 renderer uses a bundled Noto Sans Mono font with center alignment, deterministic
 integer alpha composition, and 0/90/180/270-degree rotation. It never consults
-the OS or KLayout font engine. Abstract/coverage/pick/snap/clip return explicit
-errors. Abstract mode is a KLayout-specific feature
+the OS or KLayout font engine. Abstract/coverage/clip return explicit errors.
+Abstract mode is a KLayout-specific feature
 and is intentionally outside the Rust renderer scope; it will not be
-implemented. Coverage/pick/snap/clip remain possible follow-up work. No query
-is silently answered from a stale KLayout shadow scene.
+implemented. Coverage and clip remain possible follow-up work.
 
 The native Python/GTK viewer runs directly on this Mac; XQuartz is not part of
 the Rust-backend launch path. A real `sample9` full-depth mid-zoom session

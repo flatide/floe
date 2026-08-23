@@ -10,6 +10,7 @@ mod cancel;
 mod font;
 mod page_cache;
 mod png;
+mod query;
 mod raster;
 mod repetition;
 mod request;
@@ -24,6 +25,10 @@ pub use cache::{
 pub use cancel::RenderCancellation;
 pub use font::{validate_font_px, DEFAULT_LABEL_FONT_PX, MAX_LABEL_FONT_PX, MIN_LABEL_FONT_PX};
 pub use page_cache::DecodedPageCache;
+pub use query::{
+    pick_scene, snap_scene, ScenePick, ScenePickCandidate, SceneQueryLayer, SceneQueryRequest,
+    SceneSnap, SceneSnapKind,
+};
 pub use raster::{
     render_geometry_occupancy, render_geometry_occupancy_cancellable, render_geometry_styled,
     render_geometry_styled_cancellable, GeometryRasterReport, GeometryRasterRequest, LayerFill,

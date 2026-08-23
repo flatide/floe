@@ -75,6 +75,29 @@ def _wire_int(fields, name, default=0):
         return default
 
 
+def _wire_hex(fields, name):
+    value = fields.get(name)
+    if value is None:
+        raise ValueError("missing wire field: %s" % name)
+    try:
+        return bytes.fromhex(value).decode("utf-8")
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ValueError("invalid UTF-8 hex field: %s" % name) from exc
+
+
+def _wire_pair_list(value, field):
+    if not value:
+        return []
+    points = []
+    try:
+        for pair in value.split(";"):
+            x, y = pair.split(",")
+            points.append((int(x), int(y)))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid %s field" % field) from exc
+    return points
+
+
 def _pattern_fill(rows):
     """Convert floe's 16x16 `*`/`.` bitmap to renderd style syntax."""
     if not isinstance(rows, str):
@@ -251,7 +274,11 @@ class RustRenderWorker:
                 self._submit_repattern(job)
             elif kind == "mono":
                 self._mono = bool(job.get("on"))
-            elif kind in ("snap", "pick", "clip"):
+            elif kind == "snap":
+                self._submit_snap(job)
+            elif kind == "pick":
+                self._submit_pick(job)
+            elif kind == "clip":
                 self.res.put({
                     "kind": "error",
                     "msg": "Rust backend does not implement %s yet" % kind})
@@ -386,6 +413,27 @@ class RustRenderWorker:
         self._widths = widths
         self._publish_style(wait=False)
 
+    @staticmethod
+    def _query_layers(job):
+        layers = job.get("layers")
+        # Match the parent service: an absent or empty selection means all
+        # layers for pick/snap (render jobs intentionally use "none").
+        if not layers:
+            return "all"
+        return ",".join("%d/%d" % layer for layer in sorted(
+            set(_layer_key(layer) for layer in layers)))
+
+    def _submit_snap(self, job):
+        self._send("snap seq=%d x=%d y=%d r=%d layers=%s" % (
+            int(job.get("seq", -1)), int(job["x"]), int(job["y"]),
+            max(1, int(job["r"])), self._query_layers(job)))
+
+    def _submit_pick(self, job):
+        self._send("pick seq=%d x=%d y=%d r=%d nth=%d layers=%s" % (
+            int(job.get("seq", -1)), int(job["x"]), int(job["y"]),
+            max(1, int(job["r"])), int(job.get("nth", 0)),
+            self._query_layers(job)))
+
     def _publish_style(self, wait):
         self._style_epoch += 1
         epoch = self._style_epoch
@@ -452,6 +500,10 @@ class RustRenderWorker:
                 self._condition.notify_all()
         elif kind == "frame":
             self._emit_frame(fields)
+        elif kind == "snap":
+            self._emit_snap(fields)
+        elif kind == "pick":
+            self._emit_pick(fields)
         elif kind in ("cancelled", "dropped"):
             generation = _wire_int(fields, "gen", -1)
             with self._jobs_lock:
@@ -467,6 +519,56 @@ class RustRenderWorker:
             else:
                 self.res.put({"kind": "error", "msg": message,
                               "gen": generation if known else -1})
+
+    def _emit_snap(self, fields):
+        output = {
+            "kind": "snap",
+            "seq": _wire_int(fields, "seq", -1),
+            "found": _wire_int(fields, "found") != 0,
+            "x": _wire_int(fields, "x"),
+            "y": _wire_int(fields, "y"),
+            "snap": "" if fields.get("snap") == "-" else
+                    fields.get("snap", ""),
+        }
+        try:
+            if "err_hex" in fields:
+                output["err"] = _wire_hex(fields, "err_hex")
+        except ValueError as exc:
+            self.res.put({"kind": "error", "msg": str(exc)})
+            return
+        self.res.put(output)
+
+    def _emit_pick(self, fields):
+        output = {
+            "kind": "pick",
+            "seq": _wire_int(fields, "seq", -1),
+            "found": _wire_int(fields, "found") != 0,
+            "count": _wire_int(fields, "count"),
+        }
+        try:
+            if "err_hex" in fields:
+                output["err"] = _wire_hex(fields, "err_hex")
+            if output["found"]:
+                bbox = [int(value) for value in
+                        fields["bbox"].split(",")]
+                if len(bbox) != 4:
+                    raise ValueError("invalid bbox field")
+                output.update({
+                    "index": _wire_int(fields, "index"),
+                    "layer": _wire_int(fields, "layer"),
+                    "datatype": _wire_int(fields, "datatype"),
+                    "lname": _wire_hex(fields, "lname_hex"),
+                    "cell": _wire_hex(fields, "cell_hex"),
+                    "area": float(fields["area"]),
+                    "bbox": bbox,
+                    "points": _wire_pair_list(
+                        fields.get("points", ""), "points"),
+                })
+        except (KeyError, TypeError, ValueError) as exc:
+            self.res.put({"kind": "error", "msg":
+                          "invalid Rust pick response: %s" % exc})
+            return
+        self.res.put(output)
 
     def _emit_frame(self, fields):
         generation = _wire_int(fields, "gen", -1)

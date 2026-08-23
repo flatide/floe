@@ -1443,7 +1443,7 @@ fn translate_bbox(bbox: BBox, x: i64, y: i64) -> Result<BBox, String> {
     })
 }
 
-fn checked_path_outline(
+pub(crate) fn checked_path_outline(
     points: &[(i64, i64)],
     half_width: i64,
     start_extension: i64,

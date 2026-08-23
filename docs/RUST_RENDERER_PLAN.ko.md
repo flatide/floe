@@ -1,13 +1,14 @@
 # floe Rust renderer 구현 계획
 
 상태: M1 완료, M2 정확도·결정성 vertical slice 완료, M3 paint/frame vertical slice 완료,
-M4 text/label vertical slice 완료, M5 daemon/session vertical slice 완료
+M4 text/label vertical slice 완료, M5 daemon/session vertical slice 완료,
+M7 pick/snap vertical slice 완료
 목표: 기존 `floe`의 Rust 인덱서·VFS 플래너는 유지하고, KLayout의 런타임
 렌더 책임을 결정적 멀티코어 CPU 렌더러로 대체한다.
 
 ### 현재 구현 상태 (2026-08-23)
 
-통합 기준선은 부모 `floe` 커밋 `191bd1f`, `floe-index 0.11.46`, OVM v7이다.
+통합 기준선은 현재 부모 `floe` main, `floe-index 0.11.46`, OVM v7이다.
 
 - 완료: Cargo workspace와 `render-core`, `render-cli`, `renderd` scaffold
 - 완료: 폐쇄망 vendor 설정과 동일 Cargo workspace 내 직접 path dependency
@@ -66,6 +67,14 @@ M4 text/label vertical slice 완료, M5 daemon/session vertical slice 완료
   glyph는 bounded process cache로 progressive round/generation 사이 재사용
 - 완료: gray block text < design layer geometry+text < white block text paint stack,
   layer visibility/mono 연동, label glyph 262,144개 명시적 요청 상한
+- 완료: 최신 게시 `FrameScene`을 공유하는 현재 화면 기준 pick/snap. 제품 경로에서
+  KLayout layout/delta 등록 없이 page/hierarchy/transform/repetition/path/wash를 직접
+  순회하고 frame/live label은 제외. snap 400 shape, pick 64 candidate 상한과 vertex
+  우선, edge Python ties-even 반올림, boundary-inclusive inside, integer area 및
+  `(area, layer, datatype)`/`nth` 순환 계약을 보존
+- 완료: query는 render worker queue 밖의 stdin 제어 경로에서 게시 scene `Arc`를
+  clone하므로 이후 refinement round의 page decode/raster와 병행 가능. 새 round PNG가
+  원자 게시될 때만 query scene도 교체되어 미게시 partial을 노출하지 않음
 - 완료: CLI 반복 `--style L/D,#RRGGBB,FILL[,WIDTH]`, `--frames`, `--mono` 경로와
   OVM layer key→index 공개 매핑
 - 완료: strict monotonic generation cancellation. plan/decode/scene/raster/PNG 경계,
@@ -125,7 +134,7 @@ M4 text/label vertical slice 완료, M5 daemon/session vertical slice 완료
   17/290, 17/159, 21/122, 31/99ms. 기본 128은 64 대비 첫 화면 +4ms 대신 final
   -37ms여서 유지. 같은 영역 100세대 1000×700 pan burst는 stale frame 0,
   최신 세대 3 frame, pending job 0
-- 다음: 실제 GTK GUI A/B 장기 운용과 coverage/pick/snap/clip 후속 범위
+- 다음: 실제 GTK GUI A/B 장기 운용과 coverage/clip 후속 범위
 
 부모의 `data/m1/valmini*.floe`는 현행 OVM v7로 재생성됐으며 M1 smoke/golden
 fixture로 사용한다. `v_j1.floe`, `v_j8.floe`는 과거 M1 비교 산출물이라 v2 상태다.
@@ -186,14 +195,13 @@ OVM/OVP 포맷은 바뀌지 않는다.
 - image-tile 병렬 렌더, generation 취소, progressive frame
 - RGBA 출력과 결정적 PNG encoding
 - Python `RenderWorker` 호환 adapter
+- 현재 화면 `FrameScene` 기반 pick/snap
 - 성능/메모리/취소 telemetry
 
 ### 2.2 후속이지만 KLayout 완전 제거 전에 필요한 범위
 
-- design text와 block label
-- 현재 화면 기준 pick/snap
-- `floe render --depth`의 depth-boundary 표시 동치
 - GUI/CLI clip의 Rust exact OASIS 출력
+- 필요성이 확인될 경우 coverage 표시 경로
 
 ### 2.3 제외 범위
 
@@ -261,6 +269,12 @@ floe-renderd (Rust)
 위해 수행하던 delta OASIS 저작, `Layout.read`, 이름 바인딩, WC cell 삭제/재생성은
 제품 렌더 경로에서 사라진다. 기존 `vfsd`와 delta 경로는 A/B oracle 및 rollback용으로
 cutover가 끝날 때까지 유지한다.
+
+게시된 각 progressive round의 불변 `FrameScene`은 query snapshot으로도 공유한다.
+stdin 제어 경로가 이를 짧게 `Arc` clone한 뒤 lock 없이 pick/snap을 수행하므로,
+render worker는 다음 round의 병렬 decode/raster를 계속할 수 있다. 이는 KLayout 단일
+인스턴스용 부모 `rust vfsd -> delta OASIS -> Layout.read` 직렬 병목을 query 경로에도
+되살리지 않기 위한 명시적 경계다.
 
 ### 4.1 프레임 생성 흐름
 
@@ -699,8 +713,9 @@ Rust 실행·goto pan/zoom·frames/labels 상태 검증은 통과했다. 독립 
 
 작업:
 
-- FrameScene 기반 pick/snap
-- 필요 시 exact-page 우선 decode 후 query 재시도
+- 완료: 현재 게시 FrameScene 기반 bounded pick/snap
+- 제외: exact-page 우선 decode 재시도. 부모의 계약이 “what you see”이므로 미게시
+  페이지를 query만을 위해 추가 decode하지 않음
 - headless render depth 동치
 - clip은 별도 승인 후 exact OASIS writer로 이전
 - `cache.py` legacy 기능을 lazy import/별도 모듈로 격리
@@ -708,7 +723,8 @@ Rust 실행·goto pan/zoom·frames/labels 상태 검증은 통과했다. 독립 
 
 종료 gate:
 
-- pick/snap fixture 결과와 순환 순서 동치
+- 완료(vertical slice): Rust scene/unit fixture와 부모 adapter wire schema
+- 완료(integration): 동일 VFS 작업 집합의 KLayout pick/snap oracle 결과 동치
 - `view`, `render`, `probe`, `info` clean environment selfcheck
 - `rg '^import klayout' floe/` 결과가 dev/legacy 경로에만 존재
 - KLayout은 개발 oracle로만 남음
@@ -721,7 +737,8 @@ Rust 실행·goto pan/zoom·frames/labels 상태 검증은 통과했다. 독립 
 2. 완료(vertical slice): `adapter: parent backend hook + in-tree Python RenderWorker`
 3. 완료: `test: 100-generation cancellation soak + KLayout style oracle automation`
 4. 완료: `path: operating-input inventory + unsupported-path hard failure`
-5. `parallel: consider daemon-lifetime pool only if thread startup is measurable`
+5. 완료: `query: published FrameScene pick/snap + KLayout oracle parity`
+6. `parallel: consider daemon-lifetime pool only if thread startup is measurable`
 
 progressive/adapter vertical slice의 완료 정의였던 `page_prio` refinement, 100회
 pan/zoom burst의 stale publish 0, 기존 GUI job/result schema를 유지한 opt-in Rust
@@ -748,6 +765,7 @@ source/OASIS/KLayout oracle을 함께 추가해 범위를 다시 연다.
 | pattern | speckle/fill + visibility toggle | phase·색·적층 동일 |
 | KLayout style oracle | PX 13 + style 14, jobs 1/8 | 허용 edge 외 RGB 완전 일치 |
 | frame | 4밴드 collision fixture | gray < design < white |
+| pick/snap | 동일 VFS scene + KLayout service oracle | found/좌표/도형/순환 dict 동일 |
 | cancellation | 100 zoom/pan generation | stale publish 0 |
 | corrupt input | ovm/ovp offset·length 오류와 page OASIS 손상 | panic 없이 명시 오류 |
 | memory | 큰 page/repetition | configured budget 준수 |
@@ -767,6 +785,7 @@ KLayout oracle 비교는 renderer 개발 기간에만 사용한다. Rust 내부 
 | worker 수에 따른 pixel 차이 | tile 단독 소유, 레이어 직렬 paint, 공유 blend 금지 |
 | PNG가 새 병목 | raster/PNG 시간을 분리하고 frame publish용 raw/shared-memory는 후속 검토 |
 | text/font host 차이 | 라이선스 확인된 font를 bundle, OS font lookup 금지 |
+| pick tie/source 순서 drift | canonical hull, OVM layer 순회, stable source ordinal 회귀 고정 |
 | parent Rust API drift | renderer adapter 한 crate로 격리, parser/planner 복사 금지 |
 | Python integration rollback 어려움 | `FLOE_RENDERER` A/B와 기존 KLayout 경로 유지 후 cutover |
 
