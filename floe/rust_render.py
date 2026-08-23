@@ -20,6 +20,7 @@ _DEFAULT_JOBS = max(1, min(8, os.cpu_count() or 1))
 _DEFAULT_BUDGET_MB = 1024
 _DEFAULT_ROUND_PAGES = 128
 _DEFAULT_TILE_PX = 128
+_DEFAULT_LABEL_FONT_PX = 14
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
@@ -168,6 +169,8 @@ class RustRenderWorker:
             "FLOE_RUST_ROUND_PAGES", _DEFAULT_ROUND_PAGES, 1, 1 << 30)
         self._tile_px = _env_int(
             "FLOE_RUST_TILE_PX", _DEFAULT_TILE_PX, 1, 4096)
+        self._label_font_px = _env_int(
+            "FLOE_RUST_LABEL_PX", _DEFAULT_LABEL_FONT_PX, 6, 96)
         self._init_styles()
 
     def _init_styles(self):
@@ -343,12 +346,14 @@ class RustRenderWorker:
             self._jobs[generation] = state
         command = (
             "render gen=%d view=%s w=%d h=%d depth=%s cut=%s exact=0 "
-            "layers=%s frames=%s mono=%s jobs=%d tile_px=%d "
+            "layers=%s frames=%s labels=%s font_px=%d mono=%s "
+            "jobs=%d tile_px=%d "
             "round_pages=%d round_paths=1 style_epoch=%d out=%s" % (
                 generation, ",".join(repr(value) for value in bbox),
                 int(job["w"]), int(job["h"]), depth,
                 repr(max(0.0, float(job.get("cut_px") or 0.0))), layers,
                 _bool_wire(job.get("frames", True)),
+                _bool_wire(job.get("labels", True)), self._label_font_px,
                 _bool_wire(self._mono), self._jobs_count, self._tile_px,
                 self._round_pages, self._style_epoch, output))
         self._send(command)
@@ -508,10 +513,15 @@ class RustRenderWorker:
             "wc_cells": _wire_int(fields, "wc_cells"),
             "inst_edges": _wire_int(fields, "inst_edges"),
             "frame_rects": _wire_int(fields, "frame_rects"),
+            "text_plan_ms": _wire_int(fields, "text_plan_us") / 1000.0,
+            "text_place_records": _wire_int(fields, "text_place_records"),
+            "labels": _wire_int(fields, "labels"),
+            "label_tile_paints": _wire_int(fields, "label_tile_paints"),
+            "label_pixel_paints": _wire_int(fields, "label_pixel_paints"),
         }
         if partial:
             output["refining"] = deferred
-        if job.get("labels", True):
+        if _wire_int(fields, "labels_truncated") != 0:
             output["labels_truncated"] = True
         cut_px = max(0.0, float(job.get("cut_px") or 0.0))
         if cut_px:

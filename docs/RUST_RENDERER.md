@@ -97,7 +97,7 @@ daemon `view` coordinates are raw DBU.
 ```text
 open cache=/abs/valmini.oas.floe budget_mb=64 jobs=4
 style epoch=1 path=/tmp/valmini.styles
-render gen=10 view=0,0,404000,447000 w=1200 h=800 depth=full cut=0 exact=1 layers=1/0,2/0 frames=off mono=off jobs=4 tile_px=128 decode_pages=99 round_pages=32 style_epoch=1 out=/tmp/frame.png
+render gen=10 view=0,0,404000,447000 w=1200 h=800 depth=full cut=0 exact=0 layers=1/0,2/0 frames=on labels=on font_px=14 mono=off jobs=4 tile_px=128 decode_pages=99 round_pages=32 style_epoch=1 out=/tmp/frame.png
 cancel before_gen=11
 info
 quit
@@ -186,8 +186,10 @@ the previous 99 generations published a frame, only the latest generation
 settled, and no partial file or pending adapter job remained.
 
 The operational knobs are `FLOE_RENDERD_BIN`, `FLOE_RUST_JOBS` (default up to
-8 host CPUs), `FLOE_RUST_BUDGET_MB` (1024), `FLOE_RUST_ROUND_PAGES` (128), and
-`FLOE_RUST_TILE_PX` (128). A headless smoke test is:
+8 host CPUs), `FLOE_RUST_BUDGET_MB` (1024), `FLOE_RUST_ROUND_PAGES` (128),
+`FLOE_RUST_TILE_PX` (128), and `FLOE_RUST_LABEL_PX` (14, whole-pixel range
+6..96).
+A headless smoke test is:
 
 ```sh
 FLOE_RENDERER=rust \
@@ -196,9 +198,13 @@ FLOE_RENDERER=rust \
 
 Pass `--multi` when launching the GTK viewer so the request cannot forward to
 an already-running KLayout process. Current adapter scope is render,
-progressive refinement, visibility, depth, cut, frames, color, fill, width,
-and mono. Design labels are reported as partial, and abstract/coverage/pick/
-snap/clip return explicit errors. Abstract mode is a KLayout-specific feature
+progressive refinement, visibility, depth, cut, frames, labels, color, fill,
+width, and mono. Label strings, positions, visibility, declutter, block-name
+fit, and budgets come directly from the existing Rust VFS planner. The
+renderer uses a bundled Noto Sans Mono font with center alignment, deterministic
+integer alpha composition, and 0/90/180/270-degree rotation. It never consults
+the OS or KLayout font engine. Abstract/coverage/pick/snap/clip return explicit
+errors. Abstract mode is a KLayout-specific feature
 and is intentionally outside the Rust renderer scope; it will not be
 implemented. Coverage/pick/snap/clip remain possible follow-up work. No query
 is silently answered from a stale KLayout shadow scene.
@@ -206,5 +212,6 @@ is silently answered from a stale KLayout shadow scene.
 The native Python/GTK viewer runs directly on this Mac; XQuartz is not part of
 the Rust-backend launch path. A real `sample9` full-depth mid-zoom session
 measured 25ms cold (4ms load + 13ms draw), then 16ms for an adjacent forwarded
-pan with no new page and 11ms for a 2x warm zoom. Forwarded frame and label
-state changes also rendered normally; labels remain explicitly marked partial.
+pan with no new page and 11ms for a 2x warm zoom. A native parent-adapter
+`valmini` labels-on render selected 136 labels in 0.065ms and published 28,377
+antialiased label pixels without `labels partial`.

@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
+use crate::font::{normalized_chars, GlyphAtlas};
 use crate::repetition::for_each_visible_offset;
 use crate::transform::OrthoTransform;
 use crate::{FrameScene, RenderCancellation, RenderStats, ViewBox};
@@ -15,6 +16,7 @@ pub const MAX_TILE_SIZE: u16 = 4096;
 pub const DEFAULT_TILE_SIZE: u16 = 128;
 const DEVICE_ONE: i128 = 1i128 << 32;
 const DEVICE_HALF: i128 = DEVICE_ONE / 2;
+const MAX_LABEL_GLYPHS: usize = 262_144;
 
 /// Exact viewport used for world-to-pixel mapping, in layout database units.
 ///
@@ -208,6 +210,8 @@ pub struct GeometryRasterReport {
     pub frame_record_tests: u64,
     pub frame_member_paints: u64,
     pub deferred_frame_tests: u64,
+    pub label_tile_paints: u64,
+    pub label_pixel_paints: u64,
     pub partial: bool,
 }
 
@@ -269,6 +273,154 @@ enum RenderMode<'a> {
     Styled(&'a StyledGeometryRasterRequest),
 }
 
+struct PreparedLabels {
+    atlas: GlyphAtlas,
+    rows: Vec<PreparedLabel>,
+}
+
+struct PreparedLabel {
+    block: bool,
+    white: bool,
+    layer_idx: Option<u32>,
+    rotation: u8,
+    anchor: (f64, f64),
+    glyphs: Vec<PreparedGlyph>,
+    /// Half-open device-pixel bounds used to reject all other raster tiles.
+    bbox: (i64, i64, i64, i64),
+}
+
+struct PreparedGlyph {
+    ch: char,
+    x: f64,
+    y: f64,
+}
+
+impl PreparedLabels {
+    fn build(scene: &FrameScene, request: &GeometryRasterRequest) -> Result<Option<Self>, String> {
+        if scene.labels().is_empty() {
+            return Ok(None);
+        }
+        let atlas = GlyphAtlas::build(scene.labels(), scene.label_font_px())?;
+        let total_glyphs = scene.labels().iter().try_fold(0usize, |total, label| {
+            total
+                .checked_add(label.text.chars().count())
+                .ok_or_else(|| "label glyph count overflow".to_string())
+        })?;
+        if total_glyphs > MAX_LABEL_GLYPHS {
+            return Err(format!(
+                "label glyph limit exceeded: {total_glyphs} > {MAX_LABEL_GLYPHS}"
+            ));
+        }
+        let view = request.view;
+        let span_x = view.x1 - view.x0;
+        let span_y = view.y1 - view.y0;
+        let mut rows = Vec::with_capacity(scene.labels().len());
+        for label in scene.labels() {
+            let chars: Vec<char> = normalized_chars(&label.text).collect();
+            let mut advance = 0.0f64;
+            let mut previous = None;
+            for &ch in &chars {
+                if let Some(left) = previous {
+                    advance += f64::from(atlas.kern(left, ch));
+                }
+                advance += f64::from(atlas.glyph(ch).advance);
+                previous = Some(ch);
+            }
+            let baseline = f64::from((atlas.ascent + atlas.descent) * 0.5);
+            let mut pen = -advance * 0.5;
+            let mut glyphs = Vec::with_capacity(chars.len());
+            previous = None;
+            for ch in chars {
+                if let Some(left) = previous {
+                    pen += f64::from(atlas.kern(left, ch));
+                }
+                let glyph = atlas.glyph(ch);
+                glyphs.push(PreparedGlyph {
+                    ch,
+                    x: pen + f64::from(glyph.xmin),
+                    y: baseline - f64::from(glyph.ymin) - glyph.height as f64,
+                });
+                pen += f64::from(glyph.advance);
+                previous = Some(ch);
+            }
+            let anchor = (
+                (label.x as f64 - view.x0) * request.width as f64 / span_x,
+                (view.y1 - label.y as f64) * request.height as f64 / span_y,
+            );
+            let rotation = label.rotation & 3;
+            let bbox = prepared_label_bbox(&atlas, &glyphs, anchor, rotation);
+            rows.push(PreparedLabel {
+                block: label.block,
+                white: label.white,
+                layer_idx: label.layer_idx,
+                rotation,
+                anchor,
+                glyphs,
+                bbox,
+            });
+        }
+        Ok(Some(Self { atlas, rows }))
+    }
+}
+
+fn rotate_label_offset(x: f64, y: f64, rotation: u8) -> (f64, f64) {
+    match rotation & 3 {
+        0 => (x, y),
+        // Database rotations are counter-clockwise in Y-up coordinates;
+        // framebuffer rows point down.
+        1 => (y, -x),
+        2 => (-x, -y),
+        3 => (-y, x),
+        _ => unreachable!(),
+    }
+}
+
+fn prepared_label_bbox(
+    atlas: &GlyphAtlas,
+    glyphs: &[PreparedGlyph],
+    anchor: (f64, f64),
+    rotation: u8,
+) -> (i64, i64, i64, i64) {
+    let mut bounds = None::<(f64, f64, f64, f64)>;
+    for placed in glyphs {
+        let glyph = atlas.glyph(placed.ch);
+        if glyph.width == 0 || glyph.height == 0 {
+            continue;
+        }
+        for (x, y) in [
+            (placed.x, placed.y),
+            (placed.x + glyph.width as f64, placed.y),
+            (placed.x, placed.y + glyph.height as f64),
+            (
+                placed.x + glyph.width as f64,
+                placed.y + glyph.height as f64,
+            ),
+        ] {
+            let (dx, dy) = rotate_label_offset(x, y, rotation);
+            let point = (anchor.0 + dx, anchor.1 + dy);
+            bounds = Some(match bounds {
+                Some((x0, y0, x1, y1)) => (
+                    x0.min(point.0),
+                    y0.min(point.1),
+                    x1.max(point.0),
+                    y1.max(point.1),
+                ),
+                None => (point.0, point.1, point.0, point.1),
+            });
+        }
+    }
+    bounds
+        .map(|(x0, y0, x1, y1)| {
+            (
+                x0.floor() as i64,
+                y0.floor() as i64,
+                x1.ceil() as i64,
+                y1.ceil() as i64,
+            )
+        })
+        .unwrap_or((0, 0, 0, 0))
+}
+
 #[derive(Clone, Copy)]
 struct RenderGuard<'a> {
     generation: u64,
@@ -303,6 +455,10 @@ fn render_geometry(
     guard: Option<RenderGuard<'_>>,
 ) -> Result<GeometryRasterReport, String> {
     check_cancelled(guard)?;
+    let prepared_labels = match mode {
+        RenderMode::Occupancy => None,
+        RenderMode::Styled(_) => PreparedLabels::build(scene, request)?,
+    };
     let tile_size = u32::from(request.tile_size);
     let tile_columns = request.width.div_ceil(tile_size);
     let tile_rows = request.height.div_ceil(tile_size);
@@ -323,6 +479,7 @@ fn render_geometry(
         let mut handles = Vec::with_capacity(worker_count);
         for _ in 0..worker_count {
             let next_tile = &next_tile;
+            let prepared_labels = prepared_labels.as_ref();
             handles.push(scope.spawn(move || {
                 let mut outputs = Vec::new();
                 loop {
@@ -337,7 +494,15 @@ fn render_geometry(
                     let row0 = tile_boundary(request.height, tile_y, tile_size);
                     let row1 = tile_boundary(request.height, tile_y + 1, tile_size);
                     outputs.push(raster_tile(
-                        scene, request, mode, guard, col0, col1, row0, row1,
+                        scene,
+                        request,
+                        mode,
+                        prepared_labels,
+                        guard,
+                        col0,
+                        col1,
+                        row0,
+                        row1,
                     )?);
                 }
                 Ok::<_, String>(outputs)
@@ -384,6 +549,8 @@ fn render_geometry(
         frame_record_tests: counters.frame_records,
         frame_member_paints: counters.frame_members_drawn,
         deferred_frame_tests: counters.deferred_frame_records,
+        label_tile_paints: counters.label_tiles_drawn,
+        label_pixel_paints: counters.label_pixels_drawn,
         partial: scene.is_partial(),
     })
 }
@@ -454,6 +621,7 @@ fn raster_tile(
     scene: &FrameScene,
     request: &GeometryRasterRequest,
     mode: RenderMode<'_>,
+    labels: Option<&PreparedLabels>,
     guard: Option<RenderGuard<'_>>,
     col0: u32,
     col1: u32,
@@ -511,6 +679,14 @@ fn raster_tile(
                         &mut path,
                     )?;
                 }
+                render_prepared_labels(
+                    labels,
+                    &mut band,
+                    LabelSelection::Block { white: false },
+                    [128, 128, 128, 255],
+                    &mut counters,
+                    guard,
+                )?;
             }
             for layer in &styled.layers {
                 check_cancelled(guard)?;
@@ -537,6 +713,18 @@ fn raster_tile(
                     OrthoTransform::identity(),
                     &mut path,
                 )?;
+                render_prepared_labels(
+                    labels,
+                    &mut band,
+                    LabelSelection::Layer(layer.layer_idx),
+                    if styled.mono {
+                        monochrome(layer.color)
+                    } else {
+                        layer.color
+                    },
+                    &mut counters,
+                    guard,
+                )?;
             }
             if styled.hierarchy_frames {
                 check_cancelled(guard)?;
@@ -554,6 +742,14 @@ fn raster_tile(
                     OrthoTransform::identity(),
                     &mut path,
                 )?;
+                render_prepared_labels(
+                    labels,
+                    &mut band,
+                    LabelSelection::Block { white: true },
+                    [255, 255, 255, 255],
+                    &mut counters,
+                    guard,
+                )?;
             }
         }
     }
@@ -563,6 +759,98 @@ fn raster_tile(
         stats,
         counters,
     })
+}
+
+#[derive(Clone, Copy)]
+enum LabelSelection {
+    Block { white: bool },
+    Layer(u32),
+}
+
+impl LabelSelection {
+    fn includes(self, label: &PreparedLabel) -> bool {
+        match self {
+            Self::Block { white } => label.block && label.white == white,
+            Self::Layer(layer_idx) => !label.block && label.layer_idx == Some(layer_idx),
+        }
+    }
+}
+
+fn render_prepared_labels(
+    labels: Option<&PreparedLabels>,
+    band: &mut RasterBand,
+    selection: LabelSelection,
+    color: [u8; 4],
+    counters: &mut RasterCounters,
+    guard: Option<RenderGuard<'_>>,
+) -> Result<(), String> {
+    let Some(labels) = labels else {
+        return Ok(());
+    };
+    let tile = (
+        i64::from(band.col0),
+        i64::from(band.row0),
+        i64::from(band.col1),
+        i64::from(band.row1),
+    );
+    let mut cancel_member = 0u16;
+    for label in &labels.rows {
+        check_member_cancelled(guard, &mut cancel_member)?;
+        if !selection.includes(label)
+            || label.bbox.2 <= tile.0
+            || label.bbox.0 >= tile.2
+            || label.bbox.3 <= tile.1
+            || label.bbox.1 >= tile.3
+        {
+            continue;
+        }
+        let mut label_drew = false;
+        for placed in &label.glyphs {
+            let glyph = labels.atlas.glyph(placed.ch);
+            for glyph_row in 0..glyph.height {
+                for glyph_col in 0..glyph.width {
+                    let alpha = glyph.alpha[glyph_row * glyph.width + glyph_col];
+                    if alpha == 0 {
+                        continue;
+                    }
+                    let (dx, dy) = rotate_label_offset(
+                        placed.x + glyph_col as f64 + 0.5,
+                        placed.y + glyph_row as f64 + 0.5,
+                        label.rotation,
+                    );
+                    let col = (label.anchor.0 + dx).floor() as i64;
+                    let row = (label.anchor.1 + dy).floor() as i64;
+                    if col < tile.0 || col >= tile.2 || row < tile.1 || row >= tile.3 {
+                        continue;
+                    }
+                    let local_col = col as usize - band.col0 as usize;
+                    let local_row = row as usize - band.row0 as usize;
+                    let offset = (local_row * band.tile_width() as usize + local_col) * 4;
+                    blend_text_pixel(&mut band.pixels[offset..offset + 4], color, alpha);
+                    counters.label_pixels_drawn = counters.label_pixels_drawn.saturating_add(1);
+                    label_drew = true;
+                }
+            }
+        }
+        if label_drew {
+            counters.label_tiles_drawn = counters.label_tiles_drawn.saturating_add(1);
+        }
+    }
+    Ok(())
+}
+
+fn blend_text_pixel(target: &mut [u8], color: [u8; 4], coverage: u8) {
+    if coverage == 255 {
+        target.copy_from_slice(&color);
+        return;
+    }
+    let coverage = u32::from(coverage);
+    let inverse = 255 - coverage;
+    for channel in 0..4 {
+        target[channel] =
+            ((u32::from(color[channel]) * coverage + u32::from(target[channel]) * inverse + 127)
+                / 255) as u8;
+    }
 }
 
 #[cfg(test)]
@@ -665,6 +953,8 @@ struct RasterCounters {
     frame_records: u64,
     frame_members_drawn: u64,
     deferred_frame_records: u64,
+    label_tiles_drawn: u64,
+    label_pixels_drawn: u64,
 }
 
 impl RasterCounters {
@@ -688,6 +978,12 @@ impl RasterCounters {
         self.deferred_frame_records = self
             .deferred_frame_records
             .saturating_add(other.deferred_frame_records);
+        self.label_tiles_drawn = self
+            .label_tiles_drawn
+            .saturating_add(other.label_tiles_drawn);
+        self.label_pixels_drawn = self
+            .label_pixels_drawn
+            .saturating_add(other.label_pixels_drawn);
     }
 }
 
@@ -2022,7 +2318,7 @@ fn scale_ceil_f64(offset: f64, pixels: u32, span: f64) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::DecodedPage;
+    use crate::{DecodedPage, RenderLabel, DEFAULT_LABEL_FONT_PX};
     use floe_oasis::doc::{Cell, Doc, PathRec, PolyRec, RectRec, Rep};
     use floe_vfs::hier::{HierPlan, HierStats, WsCell, WsInst, REM_FULL};
     use std::collections::{BTreeMap, HashMap};
@@ -2428,6 +2724,13 @@ mod tests {
     }
 
     fn styled_scene(frames: Vec<(BBox, Rep, u8)>) -> FrameScene {
+        styled_scene_with_labels(frames, Vec::new())
+    }
+
+    fn styled_scene_with_labels(
+        frames: Vec<(BBox, Rep, u8)>,
+        labels: Vec<RenderLabel>,
+    ) -> FrameScene {
         let top = (0, REM_FULL);
         let plan = HierPlan {
             top,
@@ -2452,7 +2755,7 @@ mod tests {
                 y1: 10,
             },
         );
-        FrameScene::from_test_parts(
+        FrameScene::from_test_parts_with_labels(
             plan,
             vec![
                 styled_page(
@@ -2477,6 +2780,8 @@ mod tests {
                 ),
             ],
             bounds,
+            Arc::from(labels),
+            DEFAULT_LABEL_FONT_PX,
         )
         .unwrap()
     }
@@ -3010,5 +3315,182 @@ mod tests {
         assert_eq!(serial.polygon_member_paints, 2);
         assert_eq!(serial.path_member_paints, 4);
         assert_eq!(serial.path_record_tests, 4);
+    }
+
+    fn design_label(text: &str, x: i64, y: i64, rotation: u8, layer_idx: u32) -> RenderLabel {
+        RenderLabel {
+            block: false,
+            white: false,
+            layer_idx: Some(layer_idx),
+            x,
+            y,
+            rotation,
+            text: text.to_string(),
+        }
+    }
+
+    fn label_request(workers: u16, tile_size: u16) -> GeometryRasterRequest {
+        GeometryRasterRequest {
+            view: RasterViewBox::new(0.0, 0.0, 10.0, 10.0).unwrap(),
+            width: 100,
+            height: 100,
+            background: [0, 0, 0, 255],
+            foreground: [255, 255, 255, 255],
+            workers,
+            tile_size,
+        }
+    }
+
+    fn colored_bounds(frame: &RgbaFrame, color_channel: usize) -> (usize, usize, usize, usize) {
+        let mut bounds = (usize::MAX, usize::MAX, 0usize, 0usize);
+        for (index, rgba) in frame.pixels().chunks_exact(4).enumerate() {
+            let x = index % frame.width() as usize;
+            let y = index / frame.width() as usize;
+            if (30..70).contains(&x) && (30..70).contains(&y) && rgba[color_channel] != 0 {
+                bounds.0 = bounds.0.min(x);
+                bounds.1 = bounds.1.min(y);
+                bounds.2 = bounds.2.max(x);
+                bounds.3 = bounds.3.max(y);
+            }
+        }
+        bounds
+    }
+
+    #[test]
+    fn bundled_labels_center_rotate_and_follow_layer_visibility() {
+        let red = LayerStyle {
+            layer_idx: 0,
+            color: [255, 0, 0, 255],
+            fill: LayerFill::Clear,
+            outline_width: 1,
+        };
+        let render = |rotation, layers: Vec<LayerStyle>| {
+            render_geometry_styled(
+                &styled_scene_with_labels(Vec::new(), vec![design_label("AB", 5, 5, rotation, 0)]),
+                &StyledGeometryRasterRequest {
+                    raster: label_request(2, 16),
+                    layers,
+                    hierarchy_frames: false,
+                    mono: false,
+                },
+            )
+            .unwrap()
+        };
+        let horizontal = render(0, vec![red]);
+        let vertical = render(1, vec![red]);
+        let hb = colored_bounds(&horizontal.frame, 0);
+        let vb = colored_bounds(&vertical.frame, 0);
+        assert!(hb.0 < 50 && hb.2 >= 50 && hb.1 < 50 && hb.3 >= 50);
+        assert!(vb.0 < 50 && vb.2 >= 50 && vb.1 < 50 && vb.3 >= 50);
+        assert_eq!(hb.2 - hb.0, vb.3 - vb.1);
+        assert_eq!(hb.3 - hb.1, vb.2 - vb.0);
+        assert!(horizontal.label_pixel_paints > 0);
+        assert!(vertical.label_pixel_paints > 0);
+
+        let hidden = render(
+            0,
+            vec![LayerStyle {
+                layer_idx: 1,
+                color: [0, 0, 255, 255],
+                fill: LayerFill::Clear,
+                outline_width: 1,
+            }],
+        );
+        assert_eq!(hidden.label_pixel_paints, 0);
+        assert_eq!(colored_bounds(&hidden.frame, 0).0, usize::MAX);
+    }
+
+    #[test]
+    fn label_pixels_are_identical_across_tiles_and_worker_counts() {
+        let labels = (0..4)
+            .map(|rotation| design_label("VDD_PIN", 5, 5, rotation, 0))
+            .collect();
+        let scene = styled_scene_with_labels(Vec::new(), labels);
+        let style = LayerStyle {
+            layer_idx: 0,
+            color: [31, 211, 97, 255],
+            fill: LayerFill::Clear,
+            outline_width: 1,
+        };
+        let render = |workers, tile_size| {
+            render_geometry_styled(
+                &scene,
+                &StyledGeometryRasterRequest {
+                    raster: label_request(workers, tile_size),
+                    layers: vec![style],
+                    hierarchy_frames: false,
+                    mono: false,
+                },
+            )
+            .unwrap()
+        };
+        let serial = render(1, 100);
+        let parallel = render(8, 13);
+        assert_eq!(serial.frame, parallel.frame);
+        assert_eq!(serial.label_pixel_paints, parallel.label_pixel_paints);
+        assert!(parallel.label_tile_paints > serial.label_tile_paints);
+    }
+
+    #[test]
+    fn label_coverage_blends_style_alpha_deterministically() {
+        let mut target = [10, 20, 30, 40];
+        blend_text_pixel(&mut target, [110, 120, 130, 140], 128);
+        assert_eq!(target, [60, 70, 80, 90]);
+        blend_text_pixel(&mut target, [1, 2, 3, 4], 255);
+        assert_eq!(target, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn block_label_tone_obeys_frame_paint_stack() {
+        let labels = vec![
+            RenderLabel {
+                block: true,
+                white: false,
+                layer_idx: None,
+                x: 3,
+                y: 5,
+                rotation: 0,
+                text: "GRAY".to_string(),
+            },
+            RenderLabel {
+                block: true,
+                white: true,
+                layer_idx: None,
+                x: 7,
+                y: 5,
+                rotation: 0,
+                text: "WHITE".to_string(),
+            },
+        ];
+        let report = render_geometry_styled(
+            &styled_scene_with_labels(Vec::new(), labels),
+            &StyledGeometryRasterRequest {
+                raster: label_request(4, 16),
+                layers: Vec::new(),
+                hierarchy_frames: true,
+                mono: false,
+            },
+        )
+        .unwrap();
+        let gray_max = report
+            .frame
+            .pixels()
+            .chunks_exact(4)
+            .enumerate()
+            .filter(|(index, _)| (15..45).contains(&(index % 100)))
+            .map(|(_, rgba)| rgba[0])
+            .max()
+            .unwrap();
+        let white_max = report
+            .frame
+            .pixels()
+            .chunks_exact(4)
+            .enumerate()
+            .filter(|(index, _)| (55..90).contains(&(index % 100)))
+            .map(|(_, rgba)| rgba[0])
+            .max()
+            .unwrap();
+        assert_eq!(gray_max, 128);
+        assert_eq!(white_max, 255);
     }
 }

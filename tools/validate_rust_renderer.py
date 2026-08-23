@@ -90,6 +90,7 @@ class WorkerContractTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {
                 "FLOE_RENDERD_BIN": binary,
                 "FLOE_RUST_JOBS": "4",
+                "FLOE_RUST_LABEL_PX": "18",
             }, clear=False):
                 worker = RustRenderWorker(FakeCache(directory))
             worker._work_dir = directory
@@ -108,6 +109,8 @@ class WorkerContractTests(unittest.TestCase):
             self.assertIn("layers=1/0,2/0", commands[0])
             self.assertIn("style_epoch=3", commands[0])
             self.assertIn("round_paths=1", commands[0])
+            self.assertIn("labels=0", commands[0])
+            self.assertIn("font_px=18", commands[0])
 
             png_path = os.path.join(directory, "frame-7.png")
             with open(png_path, "wb") as frame:
@@ -122,6 +125,9 @@ class WorkerContractTests(unittest.TestCase):
                 "path_paints": "8", "frame_paints": "9",
                 "wc_cells": "10", "inst_edges": "11",
                 "frame_rects": "12",
+                "text_plan_us": "250", "text_place_records": "13",
+                "labels": "2", "labels_truncated": "0",
+                "label_tile_paints": "3", "label_pixel_paints": "40",
             })
             result = worker.res.get_nowait()
             self.assertEqual(result["kind"], "frame")
@@ -130,6 +136,11 @@ class WorkerContractTests(unittest.TestCase):
             self.assertEqual(result["new"], 2)
             self.assertEqual(result["load_ms"], 10)
             self.assertEqual(result["draw_ms"], 5)
+            self.assertEqual(result["text_plan_ms"], 0.25)
+            self.assertEqual(result["text_place_records"], 13)
+            self.assertEqual(result["labels"], 2)
+            self.assertEqual(result["label_pixel_paints"], 40)
+            self.assertNotIn("labels_truncated", result)
             self.assertNotIn("drawn", result)
             self.assertNotIn("refining", result)
             self.assertNotIn(7, worker._jobs)
@@ -145,6 +156,12 @@ class WorkerContractTests(unittest.TestCase):
                 "FLOE_RUST_JOBS": "0",
             }, clear=False):
                 with self.assertRaisesRegex(RuntimeError, "1..256"):
+                    RustRenderWorker(FakeCache(directory))
+            with mock.patch.dict(os.environ, {
+                "FLOE_RENDERD_BIN": binary,
+                "FLOE_RUST_LABEL_PX": "5",
+            }, clear=False):
+                with self.assertRaisesRegex(RuntimeError, "6..96"):
                     RustRenderWorker(FakeCache(directory))
 
     def test_rejects_abstract_as_intentionally_out_of_scope(self):
@@ -206,10 +223,16 @@ class RealDaemonIntegrationTests(unittest.TestCase):
                 "widths": [[[1, 0], 2]],
             })
             worker.submit({"kind": "mono", "on": True})
-            second_job = dict(base_job, gen=2)
+            second_job = dict(
+                base_job, gen=2, depth=3, frames=True, labels=True)
             worker.submit(second_job)
             second_frames = self._frames_through_settled(worker, 2)
             self.assertNotEqual(second_frames[-1]["png"], first_png)
+            self.assertIn("labels", second_frames[-1])
+            self.assertNotIn("labels_truncated", second_frames[-1])
+            if second_frames[-1]["labels"]:
+                self.assertGreater(
+                    second_frames[-1]["label_pixel_paints"], 0)
 
             # Model a pan/zoom burst: every request advances the strict
             # generation frontier before the previous expensive frame can

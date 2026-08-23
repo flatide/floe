@@ -2,7 +2,7 @@ use floe_vfs::hier::{HierPlan, WsCell, WsKey};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::{Cache, DecodedPage};
+use crate::{validate_font_px, Cache, DecodedPage, RenderLabel, DEFAULT_LABEL_FONT_PX};
 
 /// Immutable geometry snapshot for one render/refinement round.
 ///
@@ -13,6 +13,8 @@ pub struct FrameScene {
     pages: BTreeMap<u32, Arc<DecodedPage>>,
     deferred_pages: Vec<u32>,
     cell_bounds: BTreeMap<WsKey, floe_ovm::BBox>,
+    labels: Arc<[RenderLabel]>,
+    label_font_px: f32,
 }
 
 impl FrameScene {
@@ -31,18 +33,41 @@ impl FrameScene {
         plan: Arc<HierPlan>,
         decoded_pages: Vec<Arc<DecodedPage>>,
     ) -> Result<Self, String> {
+        Self::new_shared_with_labels(
+            source,
+            plan,
+            decoded_pages,
+            Arc::from([]),
+            DEFAULT_LABEL_FONT_PX,
+        )
+    }
+
+    /// Builds a refinement scene with one immutable request-scoped label plan.
+    /// Every round and raster worker shares these rows; page decoding never
+    /// causes the hierarchy/text planner to run again.
+    pub fn new_shared_with_labels(
+        source: &Cache,
+        plan: Arc<HierPlan>,
+        decoded_pages: Vec<Arc<DecodedPage>>,
+        labels: Arc<[RenderLabel]>,
+        label_font_px: f32,
+    ) -> Result<Self, String> {
+        validate_font_px(label_font_px)?;
         let mut cell_bounds = BTreeMap::new();
         for cell in &plan.wcells {
             cell_bounds.insert(cell.key, source.cell_bbox(cell.key.0)?);
         }
-        Self::assemble(plan, decoded_pages, cell_bounds)
+        Self::assemble_with_labels(plan, decoded_pages, cell_bounds, labels, label_font_px)
     }
 
-    fn assemble(
+    fn assemble_with_labels(
         plan: Arc<HierPlan>,
         decoded_pages: Vec<Arc<DecodedPage>>,
         cell_bounds: BTreeMap<WsKey, floe_ovm::BBox>,
+        labels: Arc<[RenderLabel]>,
+        label_font_px: f32,
     ) -> Result<Self, String> {
+        validate_font_px(label_font_px)?;
         if plan.pages.len() != plan.page_prio.len() {
             return Err(format!(
                 "invalid plan: {} pages but {} priorities",
@@ -92,6 +117,8 @@ impl FrameScene {
             pages,
             deferred_pages,
             cell_bounds,
+            labels,
+            label_font_px,
         })
     }
 
@@ -127,6 +154,14 @@ impl FrameScene {
         &self.deferred_pages
     }
 
+    pub fn labels(&self) -> &[RenderLabel] {
+        &self.labels
+    }
+
+    pub fn label_font_px(&self) -> f32 {
+        self.label_font_px
+    }
+
     pub fn is_partial(&self) -> bool {
         !self.deferred_pages.is_empty()
     }
@@ -137,7 +172,30 @@ impl FrameScene {
         decoded_pages: Vec<Arc<DecodedPage>>,
         cell_bounds: BTreeMap<WsKey, floe_ovm::BBox>,
     ) -> Result<Self, String> {
-        Self::assemble(Arc::new(plan), decoded_pages, cell_bounds)
+        Self::assemble_with_labels(
+            Arc::new(plan),
+            decoded_pages,
+            cell_bounds,
+            Arc::from([]),
+            DEFAULT_LABEL_FONT_PX,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_test_parts_with_labels(
+        plan: HierPlan,
+        decoded_pages: Vec<Arc<DecodedPage>>,
+        cell_bounds: BTreeMap<WsKey, floe_ovm::BBox>,
+        labels: Arc<[RenderLabel]>,
+        label_font_px: f32,
+    ) -> Result<Self, String> {
+        Self::assemble_with_labels(
+            Arc::new(plan),
+            decoded_pages,
+            cell_bounds,
+            labels,
+            label_font_px,
+        )
     }
 }
 
@@ -195,7 +253,7 @@ mod tests {
     fn tracks_available_and_deferred_pages() {
         let mut bounds = BTreeMap::new();
         bounds.insert(plan().top, page(2).bbox);
-        let scene = FrameScene::assemble(Arc::new(plan()), vec![page(2)], bounds).unwrap();
+        let scene = FrameScene::from_test_parts(plan(), vec![page(2)], bounds).unwrap();
         assert_eq!(scene.available_pages(), 1);
         assert_eq!(scene.deferred_pages(), &[4]);
         assert!(scene.is_partial());
@@ -207,7 +265,7 @@ mod tests {
     fn rejects_page_outside_plan() {
         let mut bounds = BTreeMap::new();
         bounds.insert(plan().top, page(2).bbox);
-        let error = FrameScene::assemble(Arc::new(plan()), vec![page(3)], bounds)
+        let error = FrameScene::from_test_parts(plan(), vec![page(3)], bounds)
             .err()
             .expect("scene should reject foreign page");
         assert!(error.contains("outside the plan"));

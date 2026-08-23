@@ -1,8 +1,8 @@
 use floe_render_core::{
-    render_geometry_occupancy_cancellable, render_geometry_styled_cancellable, Cache, CacheLayer,
-    DecodedPageCache, FrameScene, GeometryRasterRequest, LayerFill, LayerStyle, PlanRequest,
-    RasterViewBox, RenderCancellation, StyledGeometryRasterRequest, ViewBox, DEFAULT_TILE_SIZE,
-    MAX_TILE_SIZE,
+    render_geometry_occupancy_cancellable, render_geometry_styled_cancellable, validate_font_px,
+    Cache, CacheLayer, DecodedPageCache, FrameScene, GeometryRasterRequest, LayerFill, LayerStyle,
+    PlanRequest, RasterViewBox, RenderCancellation, StyledGeometryRasterRequest, ViewBox,
+    DEFAULT_LABEL_FONT_PX, DEFAULT_TILE_SIZE, MAX_TILE_SIZE,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufRead, Write};
@@ -166,6 +166,8 @@ struct RenderCommand {
     exact: bool,
     visible_layers: Option<Vec<String>>,
     frames: bool,
+    labels: bool,
+    label_font_px: f32,
     mono: bool,
     jobs: Option<u16>,
     tile_size: u16,
@@ -220,6 +222,8 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                     "exact",
                     "layers",
                     "frames",
+                    "labels",
+                    "font_px",
                     "mono",
                     "jobs",
                     "tile_px",
@@ -256,6 +260,10 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
             }
             let exact = optional_bool(&fields, "exact")?.unwrap_or(false);
             let frames = optional_bool(&fields, "frames")?.unwrap_or(true);
+            let labels = optional_bool(&fields, "labels")?.unwrap_or(false);
+            let label_font_px =
+                optional_parse(&fields, "font_px")?.unwrap_or(DEFAULT_LABEL_FONT_PX);
+            validate_font_px(label_font_px)?;
             if exact && (cut_px != 0.0 || depth != u32::MAX || frames) {
                 return Err("exact render requires cut=0 depth=full frames=off".to_string());
             }
@@ -275,6 +283,8 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                     exact,
                     visible_layers: parse_layers(fields.get("layers"))?,
                     frames,
+                    labels,
+                    label_font_px,
                     mono: optional_bool(&fields, "mono")?.unwrap_or(false),
                     jobs,
                     tile_size,
@@ -613,6 +623,12 @@ fn run_render(
     let request = make_plan_request(cache, command)?;
     let planned = cache.plan(&request)?;
     check_generation(cancellation, command.generation)?;
+    let planned_labels = if command.labels {
+        Some(cache.plan_labels(&request, command.frames)?)
+    } else {
+        None
+    };
+    check_generation(cancellation, command.generation)?;
 
     let mut prioritized: Vec<(u64, u32)> = planned
         .plan
@@ -642,7 +658,7 @@ fn run_render(
         workers,
         tile_size: command.tile_size,
     };
-    let styles = if state.styles.is_empty() && command.frames {
+    let styles = if state.styles.is_empty() && (command.frames || command.labels) {
         cache
             .layers()
             .into_iter()
@@ -657,6 +673,10 @@ fn run_render(
         state.styles.clone()
     };
     let plan = Arc::new(planned.plan);
+    let labels: Arc<[floe_render_core::RenderLabel]> = planned_labels
+        .as_ref()
+        .map(|planned| Arc::from(planned.rows.clone()))
+        .unwrap_or_else(|| Arc::from([]));
     let rounds = refinement_ranges(selected.len(), command.round_pages)?;
     let mut decoded_pages = Vec::with_capacity(selected.len());
     for (round_index, range) in rounds.iter().enumerate() {
@@ -671,7 +691,13 @@ fn run_render(
         decoded_pages.append(&mut round_pages);
         check_generation(cancellation, command.generation)?;
         let scene_started = Instant::now();
-        let scene = FrameScene::new_shared(cache, Arc::clone(&plan), decoded_pages.clone())?;
+        let scene = FrameScene::new_shared_with_labels(
+            cache,
+            Arc::clone(&plan),
+            decoded_pages.clone(),
+            Arc::clone(&labels),
+            command.label_font_px,
+        )?;
         let scene_us = elapsed_us(scene_started);
         check_generation(cancellation, command.generation)?;
 
@@ -717,7 +743,7 @@ fn run_render(
         respond(
             responses,
             format!(
-                "frame gen={} round={} final={} png={} partial={} deferred={} style_epoch={} plan_us={} read_us={} decode_us={} decode_workers={} scene_us={} raster_us={} png_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={}",
+                "frame gen={} round={} final={} png={} partial={} deferred={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_workers={} scene_us={} raster_us={} png_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={}",
                 command.generation,
                 round_index + 1,
                 final_round as u8,
@@ -729,6 +755,15 @@ fn run_render(
                     .map(|epoch| epoch.to_string())
                     .unwrap_or_else(|| "none".to_string()),
                 planned.stats.plan_us,
+                planned_labels.as_ref().map(|p| p.plan_us).unwrap_or(0),
+                labels.len(),
+                planned_labels
+                    .as_ref()
+                    .is_some_and(|p| p.stats.truncated) as u8,
+                planned_labels
+                    .as_ref()
+                    .map(|p| p.stats.place_records_scanned)
+                    .unwrap_or(0),
                 decode_stats.page_read_us,
                 decode_stats.page_decode_us,
                 decode_stats.decode_workers_used,
@@ -750,6 +785,8 @@ fn run_render(
                 report.polygon_member_paints,
                 report.path_member_paints,
                 report.frame_member_paints,
+                report.label_tile_paints,
+                report.label_pixel_paints,
             ),
         );
     }
@@ -1023,6 +1060,8 @@ mod tests {
         assert!(!parsed_render.unique_round_paths);
         assert!(parsed_render.exact);
         assert!(!parsed_render.frames);
+        assert!(!parsed_render.labels);
+        assert_eq!(parsed_render.label_font_px, DEFAULT_LABEL_FONT_PX);
         assert!(parse_command(
             "render gen=8 view=0,0,1,1 w=1 h=1 depth=0 cut=0 exact=1 frames=off out=/tmp/f.png"
         )
@@ -1038,13 +1077,19 @@ mod tests {
 
         let progressive = render(
             parse_command(
-                "render gen=11 view=0,0,1,1 w=1 h=1 round_pages=17 round_paths=1 frames=off out=/tmp/f.png",
+                "render gen=11 view=0,0,1,1 w=1 h=1 round_pages=17 round_paths=1 frames=off labels=on font_px=18 out=/tmp/f.png",
             )
             .unwrap()
             .unwrap(),
         );
         assert_eq!(progressive.round_pages, 17);
         assert!(progressive.unique_round_paths);
+        assert!(progressive.labels);
+        assert_eq!(progressive.label_font_px, 18.0);
+        assert!(parse_command(
+            "render gen=12 view=0,0,1,1 w=1 h=1 frames=off font_px=100 out=/tmp/f.png"
+        )
+        .is_err());
     }
 
     #[test]

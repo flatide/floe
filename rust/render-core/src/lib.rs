@@ -7,6 +7,7 @@
 
 mod cache;
 mod cancel;
+mod font;
 mod page_cache;
 mod png;
 mod raster;
@@ -16,8 +17,12 @@ mod scene;
 mod stats;
 mod transform;
 
-pub use cache::{Cache, CacheInfo, CacheLayer, DecodedPage, PagePayload, PlanSummary, PlannedView};
+pub use cache::{
+    Cache, CacheInfo, CacheLayer, DecodedPage, PagePayload, PlanSummary, PlannedLabels,
+    PlannedView, RenderLabel,
+};
 pub use cancel::RenderCancellation;
+pub use font::{validate_font_px, DEFAULT_LABEL_FONT_PX, MAX_LABEL_FONT_PX, MIN_LABEL_FONT_PX};
 pub use page_cache::DecodedPageCache;
 pub use raster::{
     render_geometry_occupancy, render_geometry_occupancy_cancellable, render_geometry_styled,

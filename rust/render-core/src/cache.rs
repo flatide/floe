@@ -1,7 +1,9 @@
 use floe_oasis::doc::{Doc, Rep};
 use floe_ovm::{BBox, PageV, CODEC_OASIS};
 use floe_vfs::hier::HierPlan;
+use floe_vfs::text::{LabelOpts, TextStats};
 use floe_vfs::{Vfs, ViewReq};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
@@ -45,6 +47,25 @@ pub struct PlannedView {
     pub plan: HierPlan,
     pub summary: PlanSummary,
     pub stats: RenderStats,
+}
+
+/// Display label selected by the parent VFS planner and resolved to the
+/// renderer's stable OVM layer index. Block labels have no design layer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RenderLabel {
+    pub block: bool,
+    pub white: bool,
+    pub layer_idx: Option<u32>,
+    pub x: i64,
+    pub y: i64,
+    pub rotation: u8,
+    pub text: String,
+}
+
+pub struct PlannedLabels {
+    pub rows: Vec<RenderLabel>,
+    pub stats: TextStats,
+    pub plan_us: u64,
 }
 
 #[derive(Debug)]
@@ -203,19 +224,7 @@ impl Cache {
     }
 
     pub fn plan(&self, request: &PlanRequest) -> Result<PlannedView, String> {
-        request.validate()?;
-        let vis = self.vfs.layer_mask(request.visible_layers.as_deref())?;
-        let req = ViewReq {
-            view: request.view.as_bbox(),
-            cut_dbu: if request.exact { 0 } else { request.cut_dbu },
-            vis,
-            depth: request.depth,
-            px_per_dbu: if request.exact {
-                0.0
-            } else {
-                request.px_per_dbu
-            },
-        };
+        let req = self.view_request(request)?;
         let started = Instant::now();
         let plan = self.vfs.plan_hier(&req);
         let plan_us = elapsed_us(started);
@@ -254,6 +263,72 @@ impl Cache {
             stats: RenderStats {
                 plan_us,
                 ..RenderStats::default()
+            },
+        })
+    }
+
+    /// Uses the same request-scoped VFS walk as the KLayout backend, without
+    /// creating a TSV file or registering transient KLayout layers.
+    pub fn plan_labels(
+        &self,
+        request: &PlanRequest,
+        hierarchy_blocks: bool,
+    ) -> Result<PlannedLabels, String> {
+        let req = self.view_request(request)?;
+        let mut opts = LabelOpts {
+            blocks: hierarchy_blocks,
+            ..LabelOpts::default()
+        };
+        // Exact geometry renders are archival/probe operations. Their planner
+        // scale is deliberately zero and therefore produces no display text.
+        if request.exact {
+            opts.blocks = false;
+        }
+        let started = Instant::now();
+        let planned = self.vfs.plan_labels_with(&req, &opts)?;
+        let plan_us = elapsed_us(started);
+        let layer_indices: BTreeMap<(u32, u32), u32> = self
+            .layers()
+            .into_iter()
+            .map(|layer| ((layer.layer, layer.datatype), layer.index))
+            .collect();
+        let mut rows = Vec::with_capacity(planned.rows.len());
+        for row in planned.rows {
+            let layer_idx = if row.block {
+                None
+            } else {
+                Some(*layer_indices.get(&(row.layer, row.dt)).ok_or_else(|| {
+                    format!("label references missing layer {}/{}", row.layer, row.dt)
+                })?)
+            };
+            rows.push(RenderLabel {
+                block: row.block,
+                white: row.white,
+                layer_idx,
+                x: row.x,
+                y: row.y,
+                rotation: row.rot & 3,
+                text: row.s,
+            });
+        }
+        Ok(PlannedLabels {
+            rows,
+            stats: planned.stats,
+            plan_us,
+        })
+    }
+
+    fn view_request(&self, request: &PlanRequest) -> Result<ViewReq, String> {
+        request.validate()?;
+        Ok(ViewReq {
+            view: request.view.as_bbox(),
+            cut_dbu: if request.exact { 0 } else { request.cut_dbu },
+            vis: self.vfs.layer_mask(request.visible_layers.as_deref())?,
+            depth: request.depth,
+            px_per_dbu: if request.exact {
+                0.0
+            } else {
+                request.px_per_dbu
             },
         })
     }

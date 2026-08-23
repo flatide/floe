@@ -1,13 +1,13 @@
 # floe Rust renderer 구현 계획
 
 상태: M1 완료, M2 정확도·결정성 vertical slice 완료, M3 paint/frame vertical slice 완료,
-M5 daemon/session vertical slice 완료
+M4 text/label vertical slice 완료, M5 daemon/session vertical slice 완료
 목표: 기존 `floe`의 Rust 인덱서·VFS 플래너는 유지하고, KLayout의 런타임
 렌더 책임을 결정적 멀티코어 CPU 렌더러로 대체한다.
 
 ### 현재 구현 상태 (2026-08-23)
 
-기준선은 부모 `floe` 커밋 `030faf2`, `floe-index 0.11.46`, OVM v7이다.
+통합 기준선은 부모 `floe` 커밋 `191bd1f`, `floe-index 0.11.46`, OVM v7이다.
 
 - 완료: Cargo workspace와 `render-core`, `render-cli`, `renderd` scaffold
 - 완료: 폐쇄망 vendor 설정과 동일 Cargo workspace 내 직접 path dependency
@@ -57,6 +57,15 @@ M5 daemon/session vertical slice 완료
   begin/end extension은 hull에만 적용하며 중심선 끝점은 확장하지 않음
 - 완료: planner wash와 hierarchy frame 4밴드(gray fill/dotted/outline < design <
   white outline), frame repetition/transform 직접 순회
+- 완료: 기존 `Vfs::plan_labels_with`를 generation당 한 번 호출해 선택된 design
+  text/block label을 모든 progressive round와 tile worker가 불변 `Arc`로 공유.
+  TSV 생성, KLayout layer 등록, round별 재계획 없음
+- 완료: SIL OFL 1.1 Noto Sans Mono를 binary에 번들하고 pure-Rust `fontdue`와
+  의존성을 offline vendor. OS font lookup 없이 6..96 정수 px 크기, center
+  alignment, 0/90/180/270도 회전, 결정적 정수 alpha 합성을 구현. ASCII
+  glyph는 bounded process cache로 progressive round/generation 사이 재사용
+- 완료: gray block text < design layer geometry+text < white block text paint stack,
+  layer visibility/mono 연동, label glyph 262,144개 명시적 요청 상한
 - 완료: CLI 반복 `--style L/D,#RRGGBB,FILL[,WIDTH]`, `--frames`, `--mono` 경로와
   OVM layer key→index 공개 매핑
 - 완료: strict monotonic generation cancellation. plan/decode/scene/raster/PNG 경계,
@@ -96,7 +105,11 @@ M5 daemon/session vertical slice 완료
 - 검증: 이 Mac의 native Python/GTK floe를 XQuartz 없이 Rust backend로 직접 실행.
   sample9 밀집 영역 full-depth mid-zoom에서 cold 25ms(1 page, load 4ms + draw
   13ms), 같은 GUI/daemon/LRU로 전달한 인접 pan 16ms(+0 page), 2배 zoom 11ms,
-  frames 전환 12ms, labels-on의 명시적 `labels partial` 상태까지 정상
+  frames 전환 12ms까지 정상
+- 검증: 번들 글꼴 로드/제어문자 정규화/크기 상한, anchor center, 90도 회전,
+  layer visibility, gray/white block tone, 1/8 worker와 100/13px tile의 RGBA byte
+  동일성 Rust 회귀 통과. 실제 valmini 부모 adapter labels-on은 136개를 0.065ms에
+  계획하고 28,377 antialiased pixel을 게시, `labels_truncated=0`
 - 검증: 실제 styled valmini에서 tile 64/128/256 × worker 1/4/8의 9개 PNG가
   기존 band renderer PNG와 SHA-256 일치. 합성 primitive seam 회귀는 pattern,
   4px dotted stroke, rectangle/polygon/path를 3px 타일 경계에 교차시켜 byte 동일
@@ -112,7 +125,7 @@ M5 daemon/session vertical slice 완료
   17/290, 17/159, 21/122, 31/99ms. 기본 128은 64 대비 첫 화면 +4ms 대신 final
   -37ms여서 유지. 같은 영역 100세대 1000×700 pan burst는 stale frame 0,
   최신 세대 3 frame, pending job 0
-- 다음: 실제 GTK GUI A/B 장기 운용과 text/label
+- 다음: 실제 GTK GUI A/B 장기 운용과 coverage/pick/snap/clip 후속 범위
 
 부모의 `data/m1/valmini*.floe`는 현행 OVM v7로 재생성됐으며 M1 smoke/golden
 fixture로 사용한다. `v_j1.floe`, `v_j8.floe`는 과거 M1 비교 산출물이라 v2 상태다.
@@ -626,17 +639,18 @@ coverage를 적용하지 않으며, Calibre/KLayout 목표 화면이 이를 요�
 
 ### M4 — text/label
 
-작업:
+완료:
 
-- deterministic font asset 선정·라이선스 기록·번들
-- glyph cache, center alignment, 90도 단위 회전
-- design text와 block label plane
+- Noto Sans Mono asset/source/SHA-256/OFL 기록·번들
+- generation label plan 공유, frame-local glyph cache, center alignment, 90도 단위 회전
+- design text와 gray/white block label paint plane
+- daemon `labels`, `font_px` 및 Python `FLOE_RUST_LABEL_PX` 연결
 
-종료 gate:
+종료 gate 현황:
 
-- label anchor/rotation/visibility golden 통과
-- overview label budget을 넘겨도 geometry frame 시간이 비정상 증가하지 않음
-- font 없는 OS에서도 동일 결과
+- label anchor/rotation/visibility 및 worker/tile byte 동일 회귀 통과
+- VFS 4096 label budget과 raster 262,144 glyph 상한으로 작업량 제한
+- OS font lookup이 코드 경로에 없고 번들 bytes만 사용
 
 ### M5 — render daemon과 Python A/B
 

@@ -12,3 +12,4 @@ floe-tiler = { path = "../tiler" }
 floe-vfs = { path = "../vfs" }
 crc32fast = "1"
 flate2 = "1"
+fontdue = { version = "0.9.4", default-features = false, features = ["std"] }
