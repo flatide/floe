@@ -906,7 +906,7 @@ fn run_render(
     let planned = cache.plan(&request)?;
     check_generation(cancellation, command.generation)?;
     let planned_labels = if command.labels {
-        Some(cache.plan_labels(&request, command.frames)?)
+        Some(cache.plan_labels(&request, command.frames, command.label_font_px)?)
     } else {
         None
     };

@@ -113,6 +113,13 @@ or rebuilding the index. The menu item is disabled for backends that do not
 advertise this capability. `FLOE_RUST_LABEL_PX` remains only the headless
 adapter fallback when a request omits the field.
 
+The same request size controls glyph rasterization, world-anchored declutter
+spacing, hierarchy-name fit, ellipsis fit, and hierarchy-name padding. Those decisions
+are made before rasterization but are scaled from the bundled-font 14px
+calibration, so changing the font does not leave a hidden KLayout/default-size
+layout policy behind. The 14px default preserves the original selection and
+pixel contract byte-for-byte.
+
 Design-label orientation is derived from the full composed hierarchy
 placement: the local text baseline follows its top-coordinate 0/90/180/270
 degree direction. A reflected instance moves the anchor and baseline exactly
@@ -121,6 +128,12 @@ remain runtime annotations aligned to the long side of their top-coordinate
 frame. This behavior is owned by the Rust renderer; KLayout's text renderer
 was verified to draw transformed text horizontally and cannot serve as the
 rotation oracle.
+
+OASIS TEXT itself has no angle field. Quarter-turn orientation therefore comes
+from composed record-17 hierarchy placements. Magnified/arbitrary-angle
+record-18 placements remain an explicit parser/indexer scope error for all
+geometry, not a text-rendering fallback; the renderer never silently draws such
+text horizontally.
 
 The style file is bottom-to-top, one `L/D COLOR FILL WIDTH` row per layer:
 

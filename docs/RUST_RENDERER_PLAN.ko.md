@@ -667,8 +667,13 @@ post-composite는 M5 adapter에서 구현되어 GUI의 `v` 토글로 동작한�
 - design text와 gray/white block label paint plane
 - daemon `labels`, `font_px` 및 Python `FLOE_RUST_LABEL_PX` 연결
 - 요청별 6..96px 크기, Rust backend 전용 GUI/CLI live 제어
+- 요청 크기를 글리프뿐 아니라 declutter 간격·블록명/말줄임 fit·블록명 padding에도
+  동일 비율로 적용(14px 기본 선택/픽셀 계약 유지)
 - design text의 합성 계층 회전(0/90/180/270) 보존; reflection은 anchor와
   baseline 방향에 반영하되 glyph는 가독성을 위해 mirror하지 않음
+- OASIS TEXT 자체에는 각도 필드가 없으며 record 17 합성 회전만 적용한다.
+  임의각/배율 record 18은 전체 geometry parser/indexer의 명시적 범위 밖이고,
+  텍스트만 수평으로 대체 렌더링하지 않음
 
 종료 gate 현황:
 

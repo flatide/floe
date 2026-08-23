@@ -8,6 +8,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
+use crate::font::label_planner_metrics;
 use crate::{PlanRequest, RenderCancellation, RenderStats};
 
 const MAX_DECODE_WORKERS: u16 = 256;
@@ -284,10 +285,17 @@ impl Cache {
         &self,
         request: &PlanRequest,
         hierarchy_blocks: bool,
+        font_px: f32,
     ) -> Result<PlannedLabels, String> {
         let req = self.view_request(request)?;
+        let metrics = label_planner_metrics(font_px)?;
         let mut opts = LabelOpts {
             blocks: hierarchy_blocks,
+            cell_px: metrics.declutter_cell_px,
+            block_char_px: metrics.block_char_px,
+            block_line_px: metrics.block_line_px,
+            block_dots_px: metrics.block_dots_px,
+            block_pad_px: metrics.block_pad_px,
             ..LabelOpts::default()
         };
         // Exact geometry renders are archival/probe operations. Their planner

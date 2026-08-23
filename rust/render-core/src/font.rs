@@ -14,7 +14,37 @@ pub const DEFAULT_LABEL_FONT_PX: f32 = 14.0;
 pub const MIN_LABEL_FONT_PX: f32 = 6.0;
 pub const MAX_LABEL_FONT_PX: f32 = 96.0;
 
+// These values are the display-policy calibration for the bundled font at
+// DEFAULT_LABEL_FONT_PX.  The VFS text walk uses them before any glyph bitmap
+// exists, so they must scale with the requested font size as one contract.
+const DEFAULT_DECLUTTER_CELL_PX: f64 = 48.0;
+const DEFAULT_BLOCK_CHAR_PX: f64 = 8.0;
+const DEFAULT_BLOCK_LINE_PX: f64 = 14.0;
+const DEFAULT_BLOCK_DOTS_PX: f64 = 3.0;
+const DEFAULT_BLOCK_PAD_PX: f64 = 4.0;
+
 const FONT_BYTES: &[u8] = include_bytes!("../assets/NotoSansMono-Regular.ttf");
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct LabelPlannerMetrics {
+    pub declutter_cell_px: f64,
+    pub block_char_px: f64,
+    pub block_line_px: f64,
+    pub block_dots_px: f64,
+    pub block_pad_px: f64,
+}
+
+pub(crate) fn label_planner_metrics(font_px: f32) -> Result<LabelPlannerMetrics, String> {
+    validate_font_px(font_px)?;
+    let scale = f64::from(font_px / DEFAULT_LABEL_FONT_PX);
+    Ok(LabelPlannerMetrics {
+        declutter_cell_px: DEFAULT_DECLUTTER_CELL_PX * scale,
+        block_char_px: DEFAULT_BLOCK_CHAR_PX * scale,
+        block_line_px: DEFAULT_BLOCK_LINE_PX * scale,
+        block_dots_px: DEFAULT_BLOCK_DOTS_PX * scale,
+        block_pad_px: DEFAULT_BLOCK_PAD_PX * scale,
+    })
+}
 
 #[derive(Debug)]
 pub(crate) struct RasterGlyph {
@@ -202,5 +232,28 @@ mod tests {
         assert!(validate_font_px(f32::NAN).is_err());
         assert!(validate_font_px(MAX_LABEL_FONT_PX + 1.0).is_err());
         assert!(validate_font_px(14.5).is_err());
+    }
+
+    #[test]
+    fn planner_spacing_scales_with_the_raster_font() {
+        let default = label_planner_metrics(DEFAULT_LABEL_FONT_PX).unwrap();
+        assert_eq!(default.declutter_cell_px, 48.0);
+        assert_eq!(default.block_char_px, 8.0);
+        assert_eq!(default.block_line_px, 14.0);
+        assert_eq!(default.block_dots_px, 3.0);
+        assert_eq!(default.block_pad_px, 4.0);
+
+        let double = label_planner_metrics(DEFAULT_LABEL_FONT_PX * 2.0).unwrap();
+        assert_eq!(double.declutter_cell_px, 96.0);
+        assert_eq!(double.block_char_px, 16.0);
+        assert_eq!(double.block_line_px, 28.0);
+        assert_eq!(double.block_dots_px, 6.0);
+        assert_eq!(double.block_pad_px, 8.0);
+    }
+
+    #[test]
+    fn planner_spacing_rejects_a_size_the_rasterizer_rejects() {
+        assert!(label_planner_metrics(MIN_LABEL_FONT_PX - 1.0).is_err());
+        assert!(label_planner_metrics(14.5).is_err());
     }
 }
