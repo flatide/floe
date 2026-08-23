@@ -220,6 +220,15 @@ An unknown backend, malformed `MODULE:TYPE`, failed import, or non-callable
 worker is a hard error; the hook never silently falls back and contaminates an
 A/B run.
 
+With `FLOE_RENDERER=rust`, importing the cache reader, backend factory, and GTK
+shell no longer imports `klayout.db`, `floe.render`, or `floe.viewport`. Shared
+frame-layer/live-cap policy lives in a pure-Python module, while the legacy
+database and renderer modules load only inside the KLayout worker. Therefore
+`view`, `probe`, and Rust `clip` can start on a KLayout-free installation; the
+Python indexer and explicitly selected legacy commands still require KLayout.
+The validation suite enforces this with a fresh subprocess whose import hook
+rejects every `klayout` module.
+
 The adapter is implemented at `floe/rust_render.py` and
 accepts the existing `RenderWorker` constructor and queue contract. It owns one
 persistent `floe-renderd`, translates

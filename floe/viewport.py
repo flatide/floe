@@ -9,10 +9,8 @@ mosaic was removed.
 import os
 
 import klayout.db as db
-
-
-MAX_LIVE_TILES = 32     # a render request may touch at most this many tiles
-EVICT_ABOVE = 128       # keep at most this many loaded entries in the mosaic
+from .view_policy import (EVICT_ABOVE, MAX_LIVE_TILES, frame_layer,
+                          live_caps)
 
 
 class _WsNames:
@@ -36,34 +34,6 @@ class _WsNames:
         except (ValueError, IndexError):
             pass
         return default
-
-
-def frame_layer(meta):
-    """runtime frame/outline layer, dt 0: max design layer + 1,
-    saturated at u32::MAX and stepping DOWN to the nearest unused
-    number on collision - MUST match the daemon's floe_vfs
-    frame_layer() rule exactly (both derive it from the same layer
-    list; u32::MAX is a legal design layer)"""
-    used = {int(l["layer"]) for l in meta.get("layers", [])}
-    fl = max(min(max(used) + 1, 0xFFFFFFFF) if used else 1, 1)
-    while fl in used:
-        fl -= 1
-    return (fl, 0)
-
-
-def live_caps(meta):
-    """(max live tiles, LRU evict-above) scaled to the cache's tile
-    size. The base constants are tuned for the 6 MB --tile-mb default;
-    a finer grid means proportionally lighter tiles, so a view may
-    span proportionally more of them for the same load/draw/memory
-    budget (capped at 8x so a sparse file cannot unbound the caps)."""
-    try:
-        g = meta["grid"]
-        avg = meta["src"]["size"] / max(1, g["nx"] * g["ny"])
-        f = max(1, min(8, round(6e6 / max(1.0, avg))))
-    except (KeyError, TypeError):
-        f = 1
-    return MAX_LIVE_TILES * f, EVICT_ABOVE * f
 
 
 class VfsMosaic:

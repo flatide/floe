@@ -116,7 +116,7 @@ M5 density coverage 완료, M7 pick/snap 완료, M8 exact clip vertical slice �
 - 검증: 부모 `make_render_worker`가 실제 in-tree adapter를 선택한 headless
   `floe probe`에서 valmini 2개 화면 PNG magic/queue/process lifecycle 통과
   (4 workers, 각각 약 54ms/39ms). 4-page progressive + recolor/repattern/mono
-  실제 통합 1개와 Python 순수 계약 테스트 10개 통과
+  실제 통합 1개와 Python 순수 계약 테스트 11개 통과
 - 검증: 실제 adapter/daemon/부모 Cache 조합에서 100세대 pan/zoom burst를
   valmini(4-page round)와 sample9(506 pages, 64-page round)에 각각 실행. 이전
   99세대 frame publish 0, 최신 세대 settled frame 수신, 작업 상태와 partial 파일
@@ -741,14 +741,17 @@ Rust 실행·goto pan/zoom·frames/labels 상태 검증은 통과했다. 독립 
   페이지를 query만을 위해 추가 decode하지 않음
 - headless render depth 동치
 - 완료: exact plan/병렬 decode/평탄화/정수 polygon clip/OASIS writer
-- `cache.py` legacy 기능을 lazy import/별도 모듈로 격리
+- 완료: `cache.py`의 `klayout.db`를 실제 legacy 함수 호출까지 지연하고,
+  `service.py`의 KLayout renderer/viewport import도 legacy worker 내부로 격리.
+  frame layer/live-cap 계산은 KLayout-free `view_policy.py`로 분리
 - portable bundle에서 klayout wheel 제거
 
 종료 gate:
 
 - 완료(vertical slice): Rust scene/unit fixture와 부모 adapter wire schema
 - 완료(integration): 동일 VFS 작업 집합의 KLayout pick/snap oracle 결과 동치
-- `view`, `render`, `probe`, `info` clean environment selfcheck
+- 완료(부분): `view`, `probe`, Rust `clip` import/worker 선택 clean-environment
+  selfcheck. headless `render` 전환과 실제 portable bundle 검증은 후속
 - `rg '^import klayout' floe/` 결과가 dev/legacy 경로에만 존재
 - KLayout은 개발 oracle로만 남음
 

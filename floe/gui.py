@@ -25,7 +25,7 @@ from . import drc as drc_mod
 from . import fillpat
 from .service import (make_render_worker, DETAIL_PX, DETAIL_LEVELS,
                       DEFAULT_DETAIL)
-from .viewport import live_caps
+from .view_policy import live_caps
 
 Gtk = Gdk = GdkPixbuf = GLib = Pango = None
 

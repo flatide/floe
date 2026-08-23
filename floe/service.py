@@ -1,9 +1,10 @@
-"""Render service: all klayout work in a dedicated process.
+"""Backend selection and the legacy KLayout render service.
 
 Toolkit-independent - the GUI shell (gui.py) talks to RenderWorker over
-multiprocessing queues only. A thread would not do: klayout's C++ render
-loop holds the GIL, so a long render (e.g. a depth-limited view over a
-large cell array) would freeze the GUI main loop for its whole duration.
+multiprocessing queues only.  The KLayout modules are loaded lazily so the
+Rust worker and GUI startup path do not require the KLayout Python package.
+The legacy renderer still uses a process because its C++ render loop holds
+the GIL.
 """
 
 import multiprocessing as mp
@@ -13,11 +14,23 @@ import signal
 import tempfile
 import time
 
-import klayout.db as db
-
 from . import cache as cache_mod
-from .render import Renderer
-from .viewport import VfsMosaic, frame_layer
+from .view_policy import frame_layer
+
+db = Renderer = VfsMosaic = None
+
+
+def _load_klayout_backend():
+    """Load modules owned exclusively by the rollback renderer."""
+    global db, Renderer, VfsMosaic
+    if db is not None:
+        return
+    import klayout.db as klayout_db
+    from .render import Renderer as KLayoutRenderer
+    from .viewport import VfsMosaic as KLayoutVfsMosaic
+    db = klayout_db
+    Renderer = KLayoutRenderer
+    VfsMosaic = KLayoutVfsMosaic
 
 _SNAP_CAP = 400   # max shapes examined per snap query
 _PICK_CAP = 64    # max candidates per pick query
@@ -88,6 +101,7 @@ def _probe_layout(cache, box, layers):
     """VFS caches: an exact (cut=0, session-less) throwaway working
     set for a small query box - the pick/snap/clip counterpart of
     'load every band'."""
+    _load_klayout_backend()
     dbu = cache.meta["dbu"]
     view = (box.left * dbu, box.bottom * dbu,
             box.right * dbu, box.top * dbu)
@@ -103,6 +117,7 @@ def _probe_layout(cache, box, layers):
 def _svc_snap(cache, mosaic, job, res):
     """Vector snap: nearest vertex within radius wins, else the nearest
     point on an edge."""
+    _load_klayout_backend()
     out = {"kind": "snap", "seq": job.get("seq", -1), "found": False,
            "x": job.get("x", 0), "y": job.get("y", 0), "snap": ""}
     try:
@@ -151,6 +166,7 @@ def _svc_snap(cache, mosaic, job, res):
 def _svc_pick(cache, mosaic, job, res):
     """Calibre-style pick: shapes containing the point, smallest first;
     job['nth'] cycles through overlapping candidates."""
+    _load_klayout_backend()
     out = {"kind": "pick", "seq": job.get("seq", -1), "found": False,
            "count": 0}
     try:
@@ -676,6 +692,7 @@ def _svc_recolor(cache, renderer, job):
 
 
 def _svc_clip(cache, job, res):
+    _load_klayout_backend()
     t0 = time.perf_counter()
     try:
         x0, y0, x1, y1 = job["bbox"]
@@ -709,6 +726,7 @@ def _render_service(src, req, res, latest=None, options=None):
     # is coordinated by the parent (None sentinel / terminate), so ignore it
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
+        _load_klayout_backend()
         cache = cache_mod.Cache(src)
         cache.load()
         colors = {(l["layer"], l["datatype"]): l["color"]

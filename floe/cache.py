@@ -36,7 +36,24 @@ print = functools.partial(print, flush=True)
 
 print = functools.partial(print, flush=True)
 
-import klayout.db as db
+
+class _LazyKLayoutDb:
+    """Import the legacy layout database only when a legacy path uses it.
+
+    Cache metadata, layer properties, and Rust renderer startup are pure
+    Python operations.  A module-level KLayout import made those read-side
+    paths fail before the Rust backend could be selected on a KLayout-free
+    installation.
+    """
+
+    def __getattr__(self, name):
+        import importlib
+        module = importlib.import_module("klayout.db")
+        globals()["db"] = module
+        return getattr(module, name)
+
+
+db = _LazyKLayoutDb()
 
 CACHE_VERSION = 8
 TILE_TARGET_BYTES = 6_000_000

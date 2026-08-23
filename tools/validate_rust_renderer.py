@@ -35,6 +35,55 @@ class FakeCache:
 
 
 class WorkerContractTests(unittest.TestCase):
+    def test_rust_gui_startup_does_not_import_klayout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = os.path.join(directory, "floe-renderd")
+            with open(binary, "w", encoding="ascii") as script:
+                script.write("#!/bin/sh\n")
+            os.chmod(binary, 0o755)
+            code = r'''
+import builtins
+import os
+import sys
+
+real_import = builtins.__import__
+
+def guarded_import(name, *args, **kwargs):
+    if name == "klayout" or name.startswith("klayout."):
+        raise ImportError("KLayout intentionally unavailable")
+    return real_import(name, *args, **kwargs)
+
+builtins.__import__ = guarded_import
+os.environ["FLOE_RENDERER"] = "rust"
+
+from floe import cache
+from floe import gui
+from floe.service import make_render_worker
+
+class Cache:
+    src = "/tmp/source.oas"
+    dir = "/tmp/source.oas.floe"
+    meta = {"dbu": 0.001, "layers": []}
+
+worker = make_render_worker(Cache())
+assert worker.__class__.__name__ == "RustRenderWorker"
+assert cache.db.__class__.__name__ == "_LazyKLayoutDb"
+assert all(not name.startswith("klayout") for name in sys.modules)
+assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
+                      "src": {"size": 1}}) == (256, 1024)
+'''
+            environment = os.environ.copy()
+            environment.update({
+                "FLOE_RENDERD_BIN": binary,
+                "FLOE_RENDERER": "rust",
+                "PYTHONDONTWRITEBYTECODE": "1",
+            })
+            completed = subprocess.run(
+                [sys.executable, "-B", "-c", code], cwd=str(ROOT),
+                env=environment, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, timeout=10)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+
     def test_parses_wire_fields(self):
         kind, fields = _parse_wire_line(
             "frame gen=7 png=/tmp/f.png partial=1 deferred=9")
