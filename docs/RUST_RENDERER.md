@@ -110,6 +110,15 @@ or rebuilding the index. The menu item is disabled for backends that do not
 advertise this capability. `FLOE_RUST_LABEL_PX` remains only the headless
 adapter fallback when a request omits the field.
 
+Design-label orientation is derived from the full composed hierarchy
+placement: the local text baseline follows its top-coordinate 0/90/180/270
+degree direction. A reflected instance moves the anchor and baseline exactly
+but does not mirror the glyph bitmap, keeping annotations readable. Block names
+remain runtime annotations aligned to the long side of their top-coordinate
+frame. This behavior is owned by the Rust renderer; KLayout's text renderer
+was verified to draw transformed text horizontally and cannot serve as the
+rotation oracle.
+
 The style file is bottom-to-top, one `L/D COLOR FILL WIDTH` row per layer:
 
 ```text

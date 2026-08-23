@@ -646,6 +646,8 @@ coverage를 적용하지 않으며, Calibre/KLayout 목표 화면이 이를 요�
 - design text와 gray/white block label paint plane
 - daemon `labels`, `font_px` 및 Python `FLOE_RUST_LABEL_PX` 연결
 - 요청별 6..96px 크기, Rust backend 전용 GUI/CLI live 제어
+- design text의 합성 계층 회전(0/90/180/270) 보존; reflection은 anchor와
+  baseline 방향에 반영하되 glyph는 가독성을 위해 mirror하지 않음
 
 종료 gate 현황:
 

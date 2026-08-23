@@ -89,7 +89,10 @@ pub struct LabelRow {
     pub dt: u32,
     pub x: i64,
     pub y: i64,
-    /// quarter turns for synthesized block names (0 or 1)
+    /// Quarter turns in top coordinates. Design text follows the composed
+    /// hierarchy transform's baseline direction; synthesized block names use
+    /// the long side of their top-coordinate box (0 or 1). Reflection never
+    /// mirrors glyphs, so labels remain readable.
     pub rot: u8,
     pub s: String,
 }
@@ -272,6 +275,13 @@ impl<'a> LWalk<'a> {
     ) {
         self.st.members_visible += 1;
         let (gx, gy) = xf.apply(lx, ly);
+        // OASIS TEXT has no orientation field of its own, but its cell can be
+        // reached through rotated/reflected placements. The local +X column
+        // gives the composed baseline quarter-turn even for a reflection.
+        // Deliberately ignore the determinant: reflecting glyph ink makes the
+        // annotation unreadable, while preserving this baseline still follows
+        // the physical placement orientation exactly.
+        let (_, _, rot, _flip) = xf.decompose();
         self.add(Cand {
             block: false,
             white: false,
@@ -285,7 +295,7 @@ impl<'a> LWalk<'a> {
             ]),
             x: gx,
             y: gy,
-            rot: 0,
+            rot,
             ellipsis: false,
             src: Src::Ovt(soff, slen),
         });
@@ -1211,6 +1221,29 @@ mod tests {
         assert_eq!(got, brute(&v, &ovt, &req));
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].3, "TOPLBL");
+    }
+
+    #[test]
+    fn design_text_tracks_composed_rotation_but_stays_readable_on_flip() {
+        let (v, ovt) = fixture();
+        let req = rq(bx(-400, 0, 6000, 6000), 0, u32::MAX, 1.0);
+        let mut opts = LabelOpts::default();
+        opts.raw = true;
+        opts.cand_cap = usize::MAX;
+        opts.member_budget = u64::MAX;
+        let plan = plan_labels(&v, &ovt, &req, &opts).unwrap();
+        let pins: Vec<(i64, i64, u8)> = plan
+            .rows
+            .iter()
+            .filter(|row| !row.block && row.s == "pin")
+            .map(|row| (row.x, row.y, row.rot))
+            .collect();
+        assert!(pins.contains(&(10, 20, 0)), "{pins:?}");
+        // SUB placement: R90 * mirror-X at (2000, 100). The anchor is
+        // reflected/rotated to (2020, 110), while its baseline follows local
+        // +X upward (quarter-turn 1). The glyph itself is not mirrored.
+        assert!(pins.contains(&(2020, 110, 1)), "{pins:?}");
+        assert!(pins.iter().all(|(_, _, rot)| *rot < 4));
     }
 
     /// declutter: budget respected, selected is a subset of raw,
