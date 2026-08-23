@@ -421,6 +421,85 @@ def _render_drc_errors(args, c):
         w.stop()
 
 
+def _cmd_render_rust(args, c, bbox, layers):
+    """Render one archival PNG through the persistent Rust worker."""
+    import queue as _queue
+    import tempfile as _tempfile
+    from .service import make_render_worker
+
+    if not 6 <= args.label_font_px <= 96:
+        raise SystemExit("floe: --label-font-px must be 6..96")
+    x0, y0, x1, y1 = bbox
+    width = args.px
+    height = max(1, round(width * (y1 - y0) / (x1 - x0)))
+    depth = None if args.depth is None or args.depth >= 999 else args.depth
+    # The legacy headless renderer uses solid archival fills regardless of
+    # the interactive layer-property pattern.  Preserve that output policy
+    # while routing geometry and optional text through Rust.
+    solid = "\n".join(["*" * 16] * 16)
+    style_keys = [
+        (int(layer["layer"]), int(layer["datatype"]))
+        for layer in c.meta["layers"]
+    ]
+    worker = make_render_worker(c)
+    worker.start()
+    try:
+        worker.submit({
+            "kind": "repattern",
+            "fills": [(key, solid) for key in style_keys],
+            "widths": [(key, 1) for key in style_keys],
+        })
+        worker.submit({
+            "kind": "render", "gen": 1, "scope": "headless",
+            "bbox": tuple(float(value) for value in bbox),
+            "view": None, "w": width, "h": height,
+            "depth": depth, "cut_px": 0.0, "lod": False,
+            "frames": args.frames, "labels": args.labels,
+            "label_font_px": args.label_font_px,
+            "abstract": False, "coverage": False,
+            "visible": layers,
+        })
+        while True:
+            try:
+                result = worker.res.get(timeout=300)
+            except _queue.Empty:
+                raise SystemExit("floe: Rust render service timeout")
+            if result.get("kind") == "error":
+                raise SystemExit("floe: Rust render service: %s" %
+                                 result.get("msg", "render failed"))
+            if result.get("kind") != "frame" or result.get("gen") != 1:
+                continue
+            if result.get("preview") or result.get("bg") or \
+                    result.get("refining"):
+                continue
+            png = result.get("png", b"")
+            if not png.startswith(b"\x89PNG\r\n\x1a\n"):
+                raise SystemExit("floe: Rust renderer returned invalid PNG")
+            break
+    finally:
+        worker.stop()
+
+    destination = os.path.abspath(args.out)
+    parent = os.path.dirname(destination) or "."
+    descriptor, staged = _tempfile.mkstemp(
+        prefix=".%s.floe-render-" %
+        (os.path.basename(destination) or "view"), dir=parent)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(png)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(staged, destination)
+    except Exception:
+        try:
+            os.unlink(staged)
+        except OSError:
+            pass
+        raise
+    print(f"[floe] rendered {args.out} ({width}x{height}) "
+          f"in {result.get('ms', 0) / 1000:.2f}s")
+
+
 def cmd_render(args):
     c = open_cache(args.src, args=args)
     if args.drc or args.drc_rule:
@@ -435,6 +514,13 @@ def cmd_render(args):
     dbu = c.meta["dbu"]
     x0, y0, x1, y1 = parse_bbox_um(args.bbox, dbu)
     layers = c.resolve_layers(args.layers)
+    rust_backend = os.environ.get(
+        "FLOE_RENDERER", "klayout").strip().lower() == "rust"
+    if rust_backend:
+        return _cmd_render_rust(args, c, (x0, y0, x1, y1), layers)
+    if args.frames or args.labels or args.label_font_px != 14:
+        raise SystemExit("floe: --frames/--labels/--label-font-px "
+                         "require FLOE_RENDERER=rust")
     t0 = time.perf_counter()
     ly, top, vc = _vfs_region(c, x0, y0, x1, y1, layers)
     try:
@@ -992,6 +1078,14 @@ def main(argv=None):
     p.add_argument("--out", default="view.png")
     p.add_argument("--depth", type=int, default=None,
                    help="hierarchy depth (0=top only, 999/omit=full)")
+    p.add_argument("--frames", action="store_true",
+                   help="Rust backend: draw hierarchy frontier frames")
+    p.add_argument("--labels", action="store_true",
+                   help="Rust backend: draw design labels and enabled "
+                        "frontier names")
+    p.add_argument("--label-font-px", type=int, default=14, metavar="PX",
+                   help="Rust backend: bundled label font size, 6..96 "
+                        "screen pixels (default 14)")
     p.add_argument("--drc", default=None, metavar="FILE.db",
                    help="DRC results db: render error snapshots of "
                         "--drc-rule instead of a fixed bbox (square "

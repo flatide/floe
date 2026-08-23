@@ -739,7 +739,9 @@ Rust 실행·goto pan/zoom·frames/labels 상태 검증은 통과했다. 독립 
 - 완료: 현재 게시 FrameScene 기반 bounded pick/snap
 - 제외: exact-page 우선 decode 재시도. 부모의 계약이 “what you see”이므로 미게시
   페이지를 query만을 위해 추가 decode하지 않음
-- headless render depth 동치
+- 완료: headless `floe render`를 Rust worker로 전환. 기존 solid archival fill,
+  settled progressive frame 대기, PNG magic 검증, fsync+atomic replace를 유지하고
+  `--labels --label-font-px`, `--frames`, finite/full depth를 연결
 - 완료: exact plan/병렬 decode/평탄화/정수 polygon clip/OASIS writer
 - 완료: `cache.py`의 `klayout.db`를 실제 legacy 함수 호출까지 지연하고,
   `service.py`의 KLayout renderer/viewport import도 legacy worker 내부로 격리.
@@ -750,8 +752,8 @@ Rust 실행·goto pan/zoom·frames/labels 상태 검증은 통과했다. 독립 
 
 - 완료(vertical slice): Rust scene/unit fixture와 부모 adapter wire schema
 - 완료(integration): 동일 VFS 작업 집합의 KLayout pick/snap oracle 결과 동치
-- 완료(부분): `view`, `probe`, Rust `clip` import/worker 선택 clean-environment
-  selfcheck. headless `render` 전환과 실제 portable bundle 검증은 후속
+- 완료: `view`, `render`, `probe`, `info`, Rust `clip` import/worker 선택
+  clean-environment selfcheck. 실제 portable bundle 검증은 후속
 - `rg '^import klayout' floe/` 결과가 dev/legacy 경로에만 존재
 - KLayout은 개발 oracle로만 남음
 

@@ -521,12 +521,44 @@ class RealDaemonIntegrationTests(unittest.TestCase):
             cli_source = os.path.join(directory, "CLI source.oas")
             os.symlink(source, cli_source)
             os.symlink(cache.dir, cli_source + ".floe")
+            # sitecustomize runs before `python -m floe` and turns an
+            # accidental KLayout import anywhere in the CLI startup path
+            # into a hard failure.  The parent test process keeps KLayout as
+            # the independent OASIS/Region oracle.
+            with open(os.path.join(directory, "sitecustomize.py"),
+                      "w", encoding="ascii") as startup:
+                startup.write(
+                    "import builtins\n"
+                    "_real = builtins.__import__\n"
+                    "def _guard(name, *args, **kwargs):\n"
+                    "    if name == 'klayout' or "
+                    "name.startswith('klayout.'):\n"
+                    "        raise ImportError('KLayout unavailable')\n"
+                    "    return _real(name, *args, **kwargs)\n"
+                    "builtins.__import__ = _guard\n")
+            child_env = os.environ.copy()
+            child_env["PYTHONPATH"] = directory + os.pathsep + \
+                child_env.get("PYTHONPATH", "")
+            completed = subprocess.run(
+                [sys.executable, "-B", "-m", "floe", "info", cli_source],
+                cwd=str(ROOT), env=child_env, check=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, timeout=10)
+            self.assertIn("top cell", completed.stdout)
+
+            completed = subprocess.run(
+                [sys.executable, "-B", "-m", "floe", "probe", cli_source],
+                cwd=str(ROOT), env=child_env, check=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, timeout=30)
+            self.assertIn("[probe] OK", completed.stdout)
+
             output = os.path.join(directory, "CLI output with spaces.oas")
             completed = subprocess.run(
                 [sys.executable, "-B", "-m", "floe", "clip", cli_source,
                  "--bbox", bbox_um, "--layers", layer_arg,
                  "--cell-name", "CLI 한글", "--out", output],
-                cwd=str(ROOT), env=os.environ.copy(), check=True,
+                cwd=str(ROOT), env=child_env, check=True,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, timeout=30)
             self.assertIn("clip saved:", completed.stdout)
@@ -537,6 +569,30 @@ class RealDaemonIntegrationTests(unittest.TestCase):
             self.assertTrue(any(
                 layout.top_cell().shapes(li).size() > 0
                 for li in layout.layer_indexes()))
+
+            png_path = os.path.join(
+                directory, "CLI rendered labels with spaces.png")
+            completed = subprocess.run(
+                [sys.executable, "-B", "-m", "floe", "render",
+                 cli_source, "--bbox", bbox_um, "--layers", layer_arg,
+                 "--px", "257", "--depth", "999", "--labels",
+                 "--label-font-px", "19", "--out", png_path],
+                cwd=str(ROOT), env=child_env, check=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, timeout=30)
+            self.assertIn("rendered", completed.stdout)
+            with open(png_path, "rb") as png_file:
+                png = png_file.read(24)
+            self.assertEqual(png[:8], b"\x89PNG\r\n\x1a\n")
+            self.assertEqual(png[12:16], b"IHDR")
+            self.assertEqual(int.from_bytes(png[16:20], "big"), 257)
+            expected_height = max(1, round(
+                257 * (y1 - source_bbox[1]) /
+                max(1, x1 - source_bbox[0])))
+            self.assertEqual(
+                int.from_bytes(png[20:24], "big"), expected_height)
+            self.assertFalse(list(Path(directory).glob(
+                ".*.floe-render-*")))
 
     @staticmethod
     def _frames_through_settled(worker, generation,

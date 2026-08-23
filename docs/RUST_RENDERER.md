@@ -224,8 +224,9 @@ With `FLOE_RENDERER=rust`, importing the cache reader, backend factory, and GTK
 shell no longer imports `klayout.db`, `floe.render`, or `floe.viewport`. Shared
 frame-layer/live-cap policy lives in a pure-Python module, while the legacy
 database and renderer modules load only inside the KLayout worker. Therefore
-`view`, `probe`, and Rust `clip` can start on a KLayout-free installation; the
-Python indexer and explicitly selected legacy commands still require KLayout.
+`view`, `render`, `probe`, `info`, and Rust `clip` can start on a KLayout-free
+installation; the Python indexer and explicitly selected legacy commands still
+require KLayout.
 The validation suite enforces this with a fresh subprocess whose import hook
 rejects every `klayout` module.
 
@@ -259,6 +260,15 @@ A headless smoke test is:
 FLOE_RENDERER=rust \
 .venv/bin/python -B -m floe probe data/m1/valmini.oas
 ```
+
+`floe render` also uses the worker when the Rust backend is selected. It keeps
+the archival solid-fill policy of the previous command, waits for the settled
+progressive frame, validates the PNG, and publishes it with fsync + atomic
+replace. `--labels --label-font-px 19` renders design text using the bundled
+font, including composed quarter-turn hierarchy orientation;
+`--frames --depth N` additionally exports hierarchy-frontier boxes and names.
+The default remains no frames or labels for byte-policy compatibility with the
+old headless command.
 
 Pass `--multi` when launching the GTK viewer so the request cannot forward to
 an already-running KLayout process. Current adapter scope is render,
