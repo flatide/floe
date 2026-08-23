@@ -6,7 +6,7 @@ M5 density coverage 완료, M7 pick/snap 완료, M8 exact clip vertical slice �
 목표: 기존 `floe`의 Rust 인덱서·VFS 플래너는 유지하고, KLayout의 런타임
 렌더 책임을 결정적 멀티코어 CPU 렌더러로 대체한다.
 
-### 현재 구현 상태 (2026-08-23)
+### 현재 구현 상태 (2026-08-24)
 
 통합 기준선은 현재 부모 `floe` main, `floe-index 0.11.46`, OVM v7이다.
 
@@ -20,8 +20,8 @@ M5 density coverage 완료, M7 pick/snap 완료, M8 exact clip vertical slice �
 - 완료: daemon `open/style/render/cancel/info/quit` line protocol, 영속 cache/LRU와
   style epoch, 요청별 jobs/page budget, DBU viewport, exact-mode 충돌 검증
 - 완료: 부모 Python의 GUI/DRC snapshot/headless probe가 공통
-  `make_render_worker` factory를 사용. 기본/rollback은 KLayout이며
-  `FLOE_RENDERER=rust`일 때만 in-tree `floe.rust_render` adapter를 lazy import.
+  `make_render_worker` factory를 사용. 기본은 in-tree Rust adapter이고
+  `FLOE_RENDERER=klayout`일 때만 rollback worker를 선택.
   `FLOE_RUST_WORKER=MODULE:TYPE`은 개발용 override로만 유지
 - 완료: in-tree `RustRenderWorker` vertical slice. 부모 job/result queue 계약을
   persistent `floe-renderd` protocol로 변환하고 progressive frame,
@@ -116,7 +116,7 @@ M5 density coverage 완료, M7 pick/snap 완료, M8 exact clip vertical slice �
 - 검증: 부모 `make_render_worker`가 실제 in-tree adapter를 선택한 headless
   `floe probe`에서 valmini 2개 화면 PNG magic/queue/process lifecycle 통과
   (4 workers, 각각 약 54ms/39ms). 4-page progressive + recolor/repattern/mono
-  실제 통합 1개와 Python 순수 계약 테스트 11개 통과
+  실제 통합 1개와 Python 순수 계약 테스트 13개 통과
 - 검증: 실제 adapter/daemon/부모 Cache 조합에서 100세대 pan/zoom burst를
   valmini(4-page round)와 sample9(506 pages, 64-page round)에 각각 실행. 이전
   99세대 frame publish 0, 최신 세대 settled frame 수신, 작업 상태와 partial 파일
@@ -730,7 +730,7 @@ Rust 실행·goto pan/zoom·frames/labels 상태 검증은 통과했다. 독립 
 - 사용자 승인된 실칩 화면에서 정확도 gate 전부 통과
 - 대표 render-bound 화면에서 `raster_us` 기준 확정 scaling gate 통과
 - peak RSS가 설정 budget + framebuffer/tile scratch 상한 이내
-- `FLOE_RENDERER=rust`를 기본으로 전환, klayout rollback 유지
+- 완료: Rust를 기본으로 전환하고 `FLOE_RENDERER=klayout` rollback 유지
 
 ### M7 — 상호작용과 KLayout 런타임 제거
 
@@ -754,6 +754,8 @@ Rust 실행·goto pan/zoom·frames/labels 상태 검증은 통과했다. 독립 
 - 완료(integration): 동일 VFS 작업 집합의 KLayout pick/snap oracle 결과 동치
 - 완료: `view`, `render`, `probe`, `info`, Rust `clip` import/worker 선택
   clean-environment selfcheck. 실제 portable bundle 검증은 후속
+- 완료: Rust worker는 abstract capability=false, GUI 메뉴/`a` 동작 비활성화.
+  명시적 KLayout rollback worker에서만 abstract capability=true
 - `rg '^import klayout' floe/` 결과가 dev/legacy 경로에만 존재
 - KLayout은 개발 oracle로만 남음
 

@@ -831,11 +831,12 @@ def make_render_worker(cache, stream_kb=None, stream_target_ms=500,
                        debug=False):
     """Create the selected render backend without changing GUI callers.
 
-    KLayout remains the default and rollback path. The Rust backend is imported
-    only when explicitly selected, keeping ordinary KLayout startup unchanged.
+    Rust is the default.  KLayout remains an explicit rollback backend and its
+    modules stay unloaded unless that backend is selected and started.
     """
-    backend = os.environ.get("FLOE_RENDERER", "klayout").strip().lower()
-    if backend in ("", "klayout"):
+    backend = os.environ.get(
+        "FLOE_RENDERER", "rust").strip().lower() or "rust"
+    if backend == "klayout":
         worker_type = RenderWorker
     elif backend == "rust":
         target = os.environ.get(
@@ -865,6 +866,8 @@ def make_render_worker(cache, stream_kb=None, stream_target_ms=500,
 
 class RenderWorker:
     """Runs the klayout render service in a separate process."""
+
+    supports_abstract = True
 
     def __init__(self, cache, stream_kb=None, stream_target_ms=500,
                  debug=False):

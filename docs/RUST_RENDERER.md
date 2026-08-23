@@ -206,21 +206,22 @@ See [RUST_RENDERER_PLAN.ko.md](RUST_RENDERER_PLAN.ko.md) for scope and gates.
 
 ## floe backend selection
 
-`floe` keeps KLayout as its default and rollback backend. Its GUI,
+`floe` now uses Rust as its default backend and keeps KLayout as an explicit
+rollback. Its GUI,
 DRC snapshot renderer, and headless render probe now construct workers through
-one lazy backend factory. The in-tree Rust adapter is selected explicitly:
+one lazy backend factory. No backend variable is needed for normal use:
 
 ```sh
-FLOE_RENDERER=rust \
 .venv/bin/python -m floe view --multi design.oas
 ```
 
-Without `FLOE_RENDERER`, or with `FLOE_RENDERER=klayout`, behavior is unchanged.
+Set `FLOE_RENDERER=klayout` for the rollback renderer. `FLOE_RENDERER=rust`
+remains accepted for explicit A/B scripts.
 An unknown backend, malformed `MODULE:TYPE`, failed import, or non-callable
 worker is a hard error; the hook never silently falls back and contaminates an
 A/B run.
 
-With `FLOE_RENDERER=rust`, importing the cache reader, backend factory, and GTK
+With the default Rust backend, importing the cache reader, backend factory, and GTK
 shell no longer imports `klayout.db`, `floe.render`, or `floe.viewport`. Shared
 frame-layer/live-cap policy lives in a pure-Python module, while the legacy
 database and renderer modules load only inside the KLayout worker. Therefore
@@ -229,6 +230,10 @@ installation; the Python indexer and explicitly selected legacy commands still
 require KLayout.
 The validation suite enforces this with a fresh subprocess whose import hook
 rejects every `klayout` module.
+
+Abstract mode remains intentionally KLayout-only. The Rust worker advertises
+that capability as unavailable, so the GUI clears the state and disables the
+menu/`a` action instead of submitting a render request that can never succeed.
 
 The adapter is implemented at `floe/rust_render.py` and
 accepts the existing `RenderWorker` constructor and queue contract. It owns one

@@ -54,7 +54,7 @@ def guarded_import(name, *args, **kwargs):
     return real_import(name, *args, **kwargs)
 
 builtins.__import__ = guarded_import
-os.environ["FLOE_RENDERER"] = "rust"
+os.environ.pop("FLOE_RENDERER", None)
 
 from floe import cache
 from floe import gui
@@ -75,14 +75,67 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             environment = os.environ.copy()
             environment.update({
                 "FLOE_RENDERD_BIN": binary,
-                "FLOE_RENDERER": "rust",
                 "PYTHONDONTWRITEBYTECODE": "1",
             })
+            environment.pop("FLOE_RENDERER", None)
             completed = subprocess.run(
                 [sys.executable, "-B", "-c", code], cwd=str(ROOT),
                 env=environment, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, text=True, timeout=10)
             self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_klayout_is_an_explicit_abstract_capable_rollback(self):
+        from floe import service
+        from floe.cli import _renderer_backend
+
+        sentinel = object()
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.dict(os.environ, {
+                    "FLOE_RENDERER": "klayout",
+                }, clear=False), \
+                mock.patch.object(
+                    service, "RenderWorker", return_value=sentinel) as ctor:
+            selected = service.make_render_worker(FakeCache(directory))
+        self.assertIs(selected, sentinel)
+        ctor.assert_called_once()
+        self.assertTrue(service.RenderWorker.supports_abstract)
+        self.assertFalse(RustRenderWorker.supports_abstract)
+        with mock.patch.dict(os.environ, {"FLOE_RENDERER": ""},
+                             clear=False):
+            self.assertEqual(_renderer_backend(), "rust")
+        with mock.patch.dict(os.environ, {"FLOE_RENDERER": "unknown"},
+                             clear=False):
+            with self.assertRaisesRegex(SystemExit, "klayout or rust"):
+                _renderer_backend()
+
+    def test_gui_abstract_control_follows_backend_capability(self):
+        from types import SimpleNamespace
+        from floe.gui import Viewer
+
+        class Item:
+            sensitive = None
+
+            def set_sensitive(self, value):
+                self.sensitive = bool(value)
+
+        item = Item()
+        viewer = SimpleNamespace(
+            worker=SimpleNamespace(supports_abstract=False),
+            abstract=True, _abstract_menu_item=item)
+        Viewer._sync_abstract_capability(viewer)
+        self.assertFalse(viewer.abstract)
+        self.assertFalse(item.sensitive)
+        Viewer._toggle_abstract(viewer)
+        self.assertFalse(viewer.abstract)
+
+        redraws = []
+        viewer.worker = SimpleNamespace(supports_abstract=True)
+        viewer._on_depth = lambda: redraws.append(True)
+        Viewer._sync_abstract_capability(viewer)
+        Viewer._toggle_abstract(viewer)
+        self.assertTrue(viewer.abstract)
+        self.assertTrue(item.sensitive)
+        self.assertEqual(redraws, [True])
 
     def test_parses_wire_fields(self):
         kind, fields = _parse_wire_line(
@@ -537,6 +590,7 @@ class RealDaemonIntegrationTests(unittest.TestCase):
                     "    return _real(name, *args, **kwargs)\n"
                     "builtins.__import__ = _guard\n")
             child_env = os.environ.copy()
+            child_env.pop("FLOE_RENDERER", None)
             child_env["PYTHONPATH"] = directory + os.pathsep + \
                 child_env.get("PYTHONPATH", "")
             completed = subprocess.run(

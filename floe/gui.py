@@ -1539,6 +1539,7 @@ class Viewer:
             self.worker.stop()
             self.worker = None
         self._sync_label_font_capability()
+        self._sync_abstract_capability()
         if cache is not None:
             self.worker = make_render_worker(
                 cache, stream_kb=self.stream_kb,
@@ -1546,6 +1547,7 @@ class Viewer:
                 debug=self.render_debug)
             self.worker.start()
             self._sync_label_font_capability()
+            self._sync_abstract_capability()
             if self._did_fit:
                 # window already sized (layout switch, or the FIRST
                 # load into an empty start): frame the new die
@@ -3117,6 +3119,10 @@ class Viewer:
         # klayout abstract mode: sub-10px cells draw as empty frames -
         # a lossy navigation accelerator (wide views 25x, measured);
         # turn it off before reading fine content
+        if self.worker is None or not getattr(
+                self.worker, "supports_abstract", False):
+            self.abstract = False
+            return
         self.abstract = not self.abstract
         self._on_depth()
 
@@ -3170,6 +3176,16 @@ class Viewer:
             item.set_sensitive(bool(
                 self.worker is not None and
                 getattr(self.worker, "supports_label_font_px", False)))
+
+    def _sync_abstract_capability(self):
+        supported = bool(
+            self.worker is not None and
+            getattr(self.worker, "supports_abstract", False))
+        if not supported:
+            self.abstract = False
+        item = getattr(self, "_abstract_menu_item", None)
+        if item is not None:
+            item.set_sensitive(supported)
 
     def _on_depth(self):
         self.dstatus.set_text(self._depth_label())
@@ -3683,8 +3699,10 @@ class Viewer:
         check(m, "hierarchy frames\tf",
               lambda: self._set_frames(not self.frames_on),
               lambda: self.frames_on)
-        check(m, "abstract cells\ta", self._toggle_abstract,
-              lambda: self.abstract)
+        self._abstract_menu_item = check(
+            m, "abstract cells\ta", self._toggle_abstract,
+            lambda: self.abstract)
+        self._abstract_menu_item.set_sensitive(False)
         check(m, "density coverage\tv", self._toggle_coverage,
               lambda: self.coverage_on)
         check(m, "LOD\tl", lambda: self._set_lod(not self.lod_on),

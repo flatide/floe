@@ -159,6 +159,7 @@ class RustRenderWorker:
     """Queue-compatible worker backed by one persistent Rust daemon."""
 
     supports_label_font_px = True
+    supports_abstract = False
 
     def __init__(self, cache, stream_kb=None, stream_target_ms=500,
                  debug=False):

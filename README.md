@@ -12,11 +12,13 @@
 
 ## 환경 설정
 
-엔진은 KLayout pip 모듈(`klayout.db`/`klayout.lay` 헤드리스), GUI 셸은
+기본 렌더 엔진은 번들 글꼴을 사용하는 멀티코어 Rust renderer이며, GUI 셸은
 시스템 PyGObject/GTK3. **`gi`(PyGObject)는 pip으로 설치하지 않는다** —
 OS 패키지로 설치하고, venv를 그 gi가 보이는 파이썬으로
 `--system-site-packages` 옵션과 함께 만든다. CLI 전용
-(`index/info/render/clip`)이면 GTK 없이 klayout+numpy만으로 동작한다.
+(`info/render/clip`)이면 GTK 없이 동작한다. KLayout pip 모듈은 Python
+legacy indexer/renderer와 개발 정확도 oracle에만 필요하며
+`FLOE_RENDERER=klayout`으로 rollback할 수 있다.
 
 Python 3.14 + klayout 0.30.9 확인됨.
 
@@ -429,7 +431,8 @@ full은 다이얼로그의 full 프리셋/스핀박스(999)로 지정.
   **탐색 가속 모드**다 (광역 실측 4.5s→0.18s, 25×; 화면 정보의 큰
   부분이 생략되므로 상태바에 `· abstract`가 떠 있는 동안은 판독용으로
   쓰지 말 것). 셀 단위라 flat 필에는 효과가 없다 — 그건 컷 레벨과
-  병합 트윈의 몫.
+  병합 트윈의 몫. Rust 기본 backend에서는 제외 범위이므로 메뉴와 `a`가
+  비활성화되고, `FLOE_RENDERER=klayout` rollback에서만 사용할 수 있다.
 - 광역 뷰 비용은 depth가 아니라 크기 밴드 컷이 제한한다 (아래 크기
   밴드 섹션). 예전의 밀도 기반 auto depth는 밴드 도입으로 제거했다 —
   depth는 순수하게 계층 탐색 도구다.
@@ -740,11 +743,11 @@ payload decode와 2D image tile raster를 worker 여러 개로 병렬 수행한�
 cd rust
 cargo build --release -p floe-renderd -p floe-render-cli
 cd ..
-FLOE_RENDERER=rust .venv/bin/python -m floe view --multi chip.oas
+.venv/bin/python -m floe view --multi chip.oas
 ```
 
-기본 backend는 계속 KLayout이고 `FLOE_RENDERER=rust`일 때만 in-tree
-`floe.rust_render.RustRenderWorker`와 persistent `floe-renderd`를 사용한다. 개발
+기본 backend는 in-tree `floe.rust_render.RustRenderWorker`와 persistent
+`floe-renderd`다. KLayout rollback은 `FLOE_RENDERER=klayout`으로 선택한다. 개발
 트리에서는 `rust/target/release/floe-renderd`를 자동 탐색하므로 별도 `PYTHONPATH`나
 worker 설정이 필요 없다. 지원 범위, 정확도 계약, 성능 실측과 운영 knob는
 [`docs/RUST_RENDERER.md`](docs/RUST_RENDERER.md), 구현 순서는

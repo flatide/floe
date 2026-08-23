@@ -17,6 +17,15 @@ from . import __version__
 # paying the klayout import cost (see instance.py)
 
 
+def _renderer_backend():
+    backend = os.environ.get(
+        "FLOE_RENDERER", "rust").strip().lower() or "rust"
+    if backend not in ("rust", "klayout"):
+        raise SystemExit(
+            "FLOE_RENDERER must be klayout or rust, got %r" % backend)
+    return backend
+
+
 def parse_goto(s):
     """--goto X,Y[,WINDOW] in um -> [x, y] or [x, y, window]."""
     try:
@@ -514,8 +523,7 @@ def cmd_render(args):
     dbu = c.meta["dbu"]
     x0, y0, x1, y1 = parse_bbox_um(args.bbox, dbu)
     layers = c.resolve_layers(args.layers)
-    rust_backend = os.environ.get(
-        "FLOE_RENDERER", "klayout").strip().lower() == "rust"
+    rust_backend = _renderer_backend() == "rust"
     if rust_backend:
         return _cmd_render_rust(args, c, (x0, y0, x1, y1), layers)
     if args.frames or args.labels or args.label_font_px != 14:
@@ -569,7 +577,7 @@ def _cmd_clip_rust(args):
 
 
 def cmd_clip(args):
-    if os.environ.get("FLOE_RENDERER", "klayout").strip().lower() == "rust":
+    if _renderer_backend() == "rust":
         return _cmd_clip_rust(args)
     import klayout.db as db
     from . import cache as cache_mod
