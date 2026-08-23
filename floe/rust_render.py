@@ -23,6 +23,7 @@ _DEFAULT_TILE_PX = 128
 _DEFAULT_LABEL_FONT_PX = 14
 _COV_MAX_TEXEL_PX = 160.0  # must match floe.service.COV_MAX_TEXEL_PX
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+_OASIS_SIGNATURE = b"%SEMI-OASIS\r\n"
 
 
 class _PopenCompat:
@@ -178,6 +179,8 @@ class RustRenderWorker:
         self._stopping = False
         self._jobs = {}
         self._jobs_lock = threading.Lock()
+        self._clip_seq = 0
+        self._clip_jobs = {}
         self._mono = False
         self._style_epoch = 0
         self._colors = {}
@@ -294,9 +297,7 @@ class RustRenderWorker:
             elif kind == "pick":
                 self._submit_pick(job)
             elif kind == "clip":
-                self.res.put({
-                    "kind": "error",
-                    "msg": "Rust backend does not implement %s yet" % kind})
+                self._submit_clip(job)
             else:
                 self.res.put({"kind": "error", "msg":
                               "unknown Rust worker job: %r" % kind})
@@ -447,6 +448,38 @@ class RustRenderWorker:
             max(1, int(job["r"])), int(job.get("nth", 0)),
             self._query_layers(job)))
 
+    def _submit_clip(self, job):
+        bbox = tuple(int(value) for value in job["bbox"])
+        if len(bbox) != 4:
+            raise ValueError("clip bbox must have four coordinates")
+        if bbox[0] > bbox[2] or bbox[1] > bbox[3]:
+            raise ValueError("clip bbox coordinates are reversed")
+        destination = os.path.abspath(os.fspath(job["out"]))
+        with self._jobs_lock:
+            self._clip_seq += 1
+            sequence = self._clip_seq
+            daemon_output = os.path.join(
+                self._work_dir, "clip-%d.oas" % sequence)
+            self._clip_jobs[sequence] = {
+                "out": destination,
+                "daemon": daemon_output,
+                "started": time.monotonic(),
+            }
+        try:
+            cell_name = str(job.get("cell_name", "FLOE_CLIP"))
+            if not cell_name:
+                raise ValueError("clip cell name must not be empty")
+            self._send(
+                "clip seq=%d box=%s layers=%s jobs=%d cell_hex=%s out=%s" % (
+                    sequence, ",".join(str(value) for value in bbox),
+                    self._query_layers(job), self._jobs_count,
+                    cell_name.encode("utf-8").hex(),
+                    daemon_output))
+        except Exception:
+            with self._jobs_lock:
+                self._clip_jobs.pop(sequence, None)
+            raise
+
     def _apply_coverage(self, path, png, job):
         coverage = self._coverage
         if coverage is None or not job.get("coverage"):
@@ -542,12 +575,25 @@ class RustRenderWorker:
             self._emit_snap(fields)
         elif kind == "pick":
             self._emit_pick(fields)
+        elif kind == "clip":
+            self._emit_clip(fields)
         elif kind in ("cancelled", "dropped"):
             generation = _wire_int(fields, "gen", -1)
             with self._jobs_lock:
                 self._jobs.pop(generation, None)
         elif kind == "error":
             message = fields.get("message", line).replace("_", " ")
+            if fields.get("code") == "clip":
+                sequence = _wire_int(fields, "seq", -1)
+                with self._jobs_lock:
+                    state = self._clip_jobs.pop(sequence, None)
+                if state is not None:
+                    try:
+                        os.unlink(state["daemon"])
+                    except OSError:
+                        pass
+                self.res.put({"kind": "error", "msg": message})
+                return
             generation = _wire_int(fields, "gen", -1)
             with self._jobs_lock:
                 known = self._jobs.pop(generation, None)
@@ -607,6 +653,53 @@ class RustRenderWorker:
                           "invalid Rust pick response: %s" % exc})
             return
         self.res.put(output)
+
+    def _emit_clip(self, fields):
+        sequence = _wire_int(fields, "seq", -1)
+        with self._jobs_lock:
+            state = self._clip_jobs.pop(sequence, None)
+        if state is None:
+            return
+        daemon_output = state["daemon"]
+        destination = state["out"]
+        staged = None
+        try:
+            parent = os.path.dirname(destination) or "."
+            prefix = ".%s.floe-clip-" % (
+                os.path.basename(destination) or "clip")
+            descriptor, staged = tempfile.mkstemp(prefix=prefix, dir=parent)
+            with open(daemon_output, "rb") as source, \
+                    os.fdopen(descriptor, "wb") as target:
+                signature = source.read(len(_OASIS_SIGNATURE))
+                if signature != _OASIS_SIGNATURE:
+                    raise ValueError("Rust clip is not an OASIS file")
+                target.write(signature)
+                shutil.copyfileobj(source, target, 1024 * 1024)
+                target.flush()
+                os.fsync(target.fileno())
+            os.replace(staged, destination)
+            staged = None
+            size = os.path.getsize(destination)
+            self.res.put({
+                "kind": "clip", "path": destination,
+                "size_mb": size / 1e6,
+                "ms": _wire_int(
+                    fields, "ms",
+                    round((time.monotonic() - state["started"]) * 1000)),
+            })
+        except (OSError, ValueError) as exc:
+            self.res.put({"kind": "error", "msg":
+                          "publish Rust clip: %s" % exc})
+        finally:
+            if staged is not None:
+                try:
+                    os.unlink(staged)
+                except OSError:
+                    pass
+            try:
+                os.unlink(daemon_output)
+            except OSError:
+                pass
 
     def _emit_frame(self, fields):
         generation = _wire_int(fields, "gen", -1)

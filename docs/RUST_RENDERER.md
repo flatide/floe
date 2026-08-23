@@ -99,6 +99,7 @@ DBU.
 open cache=/abs/valmini.oas.floe budget_mb=64 jobs=4
 style epoch=1 path=/tmp/valmini.styles
 render gen=10 view=0,0,404000,447000 w=1200 h=800 depth=full cut=0 exact=0 layers=1/0,2/0 frames=on labels=on font_px=14 mono=off jobs=4 tile_px=128 decode_pages=99 round_pages=32 style_epoch=1 out=/tmp/frame.png
+clip seq=12 box=0,0,404000,447000 layers=1/0,2/0 jobs=4 out=/tmp/clip.oas
 snap seq=20 x=1000 y=2000 r=10 layers=1/0,2/0
 pick seq=21 x=1000 y=2000 r=3 nth=0 layers=1/0,2/0
 cancel before_gen=11
@@ -253,15 +254,23 @@ FLOE_RENDERER=rust \
 Pass `--multi` when launching the GTK viewer so the request cannot forward to
 an already-running KLayout process. Current adapter scope is render,
 progressive refinement, visibility, depth, cut, frames, labels, color, fill,
-width, mono, pick, snap, and density coverage. Label strings, positions,
-visibility, declutter,
-block-name fit, and budgets come directly from the existing Rust VFS planner. The
-renderer uses a bundled Noto Sans Mono font with center alignment, deterministic
-integer alpha composition, and 0/90/180/270-degree rotation. It never consults
-the OS or KLayout font engine. Abstract/clip return explicit errors.
+width, mono, pick, snap, exact OASIS clip, and density coverage. Clip builds a
+cut=0/full-depth plan, decodes pages with the daemon worker count and persistent
+LRU, flattens hierarchy/repetitions, and writes one `FLOE_CLIP` cell. Rectangle
+type is preserved; paths become polygons like KLayout. Concave intersections
+are split into components and diagonal boundary intersections use KLayout's
+nearest-DBU, half-toward-positive-infinity rule. The daemon always writes a
+private whitespace-free path; the Python adapter fsyncs and atomically replaces
+the user-selected destination, so destination paths may contain spaces.
+
+Label strings, positions, visibility, declutter, block-name fit, and budgets
+come directly from the existing Rust VFS planner. The renderer uses a bundled
+Noto Sans Mono font with center alignment, deterministic integer alpha
+composition, and 0/90/180/270-degree rotation. It never consults the OS or
+KLayout font engine.
 Abstract mode is a KLayout-specific feature
 and is intentionally outside the Rust renderer scope; it will not be
-implemented. Clip remains follow-up work.
+implemented.
 
 The native Python/GTK viewer runs directly on this Mac; XQuartz is not part of
 the Rust-backend launch path. A real `sample9` full-depth mid-zoom session

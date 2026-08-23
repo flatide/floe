@@ -456,7 +456,35 @@ def cmd_render(args):
           f"in {time.perf_counter() - t0:.2f}s")
 
 
+def _cmd_clip_rust(args):
+    c = open_cache(args.src, args=args)
+    dbu = c.meta["dbu"]
+    x0, y0, x1, y1 = parse_bbox_um(args.bbox, dbu)
+    layers = c.resolve_layers(args.layers) if args.layers else None
+    from .service import make_render_worker
+    worker = make_render_worker(c)
+    worker.start()
+    try:
+        worker.submit({
+            "kind": "clip", "bbox": (x0, y0, x1, y1),
+            "layers": layers, "out": args.out,
+            "cell_name": args.cell_name,
+        })
+        while True:
+            result = worker.res.get()
+            if result.get("kind") in ("clip", "error"):
+                break
+    finally:
+        worker.stop()
+    if result.get("kind") == "error":
+        raise SystemExit("floe: %s" % result.get("msg", "Rust clip failed"))
+    print(f"[floe] clip saved: {result['path']} "
+          f"({result['size_mb']:.2f} MB) in {result['ms'] / 1000:.2f}s")
+
+
 def cmd_clip(args):
+    if os.environ.get("FLOE_RENDERER", "klayout").strip().lower() == "rust":
+        return _cmd_clip_rust(args)
     import klayout.db as db
     from . import cache as cache_mod
     t0 = time.perf_counter()
@@ -997,7 +1025,9 @@ def main(argv=None):
     p.add_argument("--out", default="clip.oas")
     p.add_argument("--cell-name", default="FLOE_CLIP")
     p.add_argument("--exact", action="store_true",
-                   help="clip from the original file (slow, boundary-exact)")
+                   help="KLayout backend: clip from the original file "
+                        "(slow); Rust backend clips the exact VFS plan "
+                        "regardless")
     p.set_defaults(fn=cmd_clip)
 
     p = sub.add_parser("probe", help="test the viewer's render service "

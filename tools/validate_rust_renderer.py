@@ -3,6 +3,7 @@
 
 import os
 import queue
+import subprocess
 import sys
 import tempfile
 import time
@@ -148,6 +149,50 @@ class WorkerContractTests(unittest.TestCase):
             self.assertNotIn("labels_truncated", result)
             self.assertNotIn("drawn", result)
             self.assertNotIn("refining", result)
+
+    def test_clip_uses_private_wire_path_and_atomically_publishes_oasis(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = os.path.join(directory, "floe-renderd")
+            with open(binary, "w", encoding="ascii") as script:
+                script.write("#!/bin/sh\n")
+            os.chmod(binary, 0o755)
+            with mock.patch.dict(os.environ, {
+                "FLOE_RENDERD_BIN": binary,
+                "FLOE_RUST_JOBS": "4",
+            }, clear=False):
+                worker = RustRenderWorker(FakeCache(directory))
+            worker._work_dir = directory
+            commands = []
+            worker._send = commands.append
+            destination = os.path.join(directory, "user clip output.oas")
+            worker._submit_clip({
+                "bbox": (-10, -20, 30, 40),
+                "layers": [(2, 0), (1, 0)],
+                "out": destination,
+            })
+            self.assertIn("clip seq=1 box=-10,-20,30,40", commands[0])
+            self.assertIn("layers=1/0,2/0", commands[0])
+            self.assertIn("cell_hex=464c4f455f434c4950", commands[0])
+            self.assertNotIn(destination, commands[0])
+            daemon_output = commands[0].split("out=", 1)[1]
+            payload = b"%SEMI-OASIS\r\nfixture"
+            with open(daemon_output, "wb") as output:
+                output.write(payload)
+            worker._emit_clip({"seq": "1", "size_bytes": str(len(payload)),
+                               "ms": "17"})
+            result = worker.res.get_nowait()
+            self.assertEqual(result, {
+                "kind": "clip", "path": destination,
+                "size_mb": len(payload) / 1e6, "ms": 17,
+            })
+            with open(destination, "rb") as output:
+                self.assertEqual(output.read(), payload)
+            self.assertFalse(os.path.exists(daemon_output))
+            with self.assertRaisesRegex(ValueError, "reversed"):
+                worker._submit_clip({
+                    "bbox": (4, 0, 3, 1), "layers": [],
+                    "out": destination,
+                })
             self.assertNotIn(7, worker._jobs)
 
     def test_query_commands_and_results_match_parent_schema(self):
@@ -343,6 +388,7 @@ class RealDaemonIntegrationTests(unittest.TestCase):
             self.assertGreater(first_frames[-1]["tiles"], 4)
             first_png = first_frames[-1]["png"]
             self._assert_query_parity(cache, worker, bbox)
+            self._assert_clip_parity(cache, worker, bbox)
 
             if os.path.isfile(os.path.join(cache.dir, "design.ovc")):
                 cut_job = dict(
@@ -403,6 +449,45 @@ class RealDaemonIntegrationTests(unittest.TestCase):
             worker.stop()
         self.assertFalse(worker.alive())
         self.assertEqual(worker.exitcode(), 0)
+        self._assert_cli_clip(source, cache)
+
+    def _assert_cli_clip(self, source, cache):
+        import klayout.db as db
+
+        dbu = float(cache.meta["dbu"])
+        source_bbox = tuple(int(value) for value in cache.meta["bbox"])
+        x1 = min(source_bbox[2], source_bbox[0] + 100_000)
+        y1 = min(source_bbox[3], source_bbox[1] + 100_000)
+        bbox_um = ",".join(str(value * dbu) for value in (
+            source_bbox[0], source_bbox[1], x1, y1))
+        layers = cache.meta["layers"][:2]
+        layer_arg = ",".join("%d/%d" % (
+            int(layer["layer"]), int(layer["datatype"]))
+            for layer in layers)
+        with tempfile.TemporaryDirectory() as directory:
+            # The integration driver may place its generated VFS cache at
+            # FLOE_INTEGRATION_CACHE instead of the CLI's normal
+            # <source>.floe location.  Give the subprocess a conventional
+            # source/cache pair while retaining the same files and metadata.
+            cli_source = os.path.join(directory, "CLI source.oas")
+            os.symlink(source, cli_source)
+            os.symlink(cache.dir, cli_source + ".floe")
+            output = os.path.join(directory, "CLI output with spaces.oas")
+            completed = subprocess.run(
+                [sys.executable, "-B", "-m", "floe", "clip", cli_source,
+                 "--bbox", bbox_um, "--layers", layer_arg,
+                 "--cell-name", "CLI 한글", "--out", output],
+                cwd=str(ROOT), env=os.environ.copy(), check=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, timeout=30)
+            self.assertIn("clip saved:", completed.stdout)
+            layout = db.Layout()
+            layout.read(output)
+            self.assertEqual(layout.top_cell().name, "CLI 한글")
+            self.assertEqual(len(list(layout.each_cell())), 1)
+            self.assertTrue(any(
+                layout.top_cell().shapes(li).size() > 0
+                for li in layout.layer_indexes()))
 
     @staticmethod
     def _frames_through_settled(worker, generation,
@@ -468,6 +553,93 @@ class RealDaemonIntegrationTests(unittest.TestCase):
                 if stream is not None:
                     stream.close()
             del cache.vfs_client
+
+    def _assert_clip_parity(self, cache, worker, bbox):
+        """Exact Rust export must be Region-identical to parent KLayout."""
+        import klayout.db as db
+        from floe.service import _svc_clip
+        from floe.vfsclient import VfsClient
+
+        layers = [
+            (int(layer["layer"]), int(layer["datatype"]))
+            for layer in cache.meta["layers"][:3]
+        ]
+        clip_bbox = tuple(int(value) for value in bbox)
+        with tempfile.TemporaryDirectory() as directory:
+            rust_j1_path = os.path.join(directory, "rust-j1.oas")
+            rust_path = os.path.join(directory, "rust j8 clip output.oas")
+            oracle_path = os.path.join(directory, "klayout.oas")
+            original_jobs = worker._jobs_count
+            try:
+                worker._jobs_count = 1
+                worker.submit({
+                    "kind": "clip", "bbox": clip_bbox,
+                    "layers": layers, "out": rust_j1_path,
+                })
+                self._clip_result(worker)
+                worker._jobs_count = 8
+                worker.submit({
+                    "kind": "clip", "bbox": clip_bbox,
+                    "layers": layers, "out": rust_path,
+                })
+                rust_result = self._clip_result(worker)
+            finally:
+                worker._jobs_count = original_jobs
+            self.assertEqual(rust_result["path"], rust_path)
+            self.assertGreater(rust_result["size_mb"], 0.0)
+            with open(rust_j1_path, "rb") as j1, \
+                    open(rust_path, "rb") as j8:
+                self.assertEqual(j1.read(), j8.read(),
+                                 "clip bytes differ for jobs=1/8")
+
+            cache.vfs_client = VfsClient(cache.dir)
+            try:
+                expected_queue = queue.Queue()
+                _svc_clip(cache, {
+                    "kind": "clip", "bbox": clip_bbox,
+                    "layers": layers, "out": oracle_path,
+                }, expected_queue)
+                expected_result = expected_queue.get_nowait()
+                self.assertEqual(expected_result["kind"], "clip",
+                                 expected_result)
+            finally:
+                client = cache.vfs_client
+                client.stop()
+                for stream in (client.proc.stdin, client.proc.stdout):
+                    if stream is not None:
+                        stream.close()
+                del cache.vfs_client
+
+            actual = db.Layout()
+            actual.read(rust_path)
+            expected = db.Layout()
+            expected.read(oracle_path)
+            self.assertEqual(actual.top_cell().name, "FLOE_CLIP")
+            self.assertEqual(len(list(actual.each_cell())), 1)
+            for layer, datatype in layers:
+                actual_li = actual.find_layer(layer, datatype)
+                expected_li = expected.find_layer(layer, datatype)
+                actual_region = db.Region() if actual_li is None or actual_li < 0 else \
+                    db.Region(actual.top_cell().begin_shapes_rec(actual_li))
+                expected_region = db.Region() if expected_li is None or expected_li < 0 else \
+                    db.Region(expected.top_cell().begin_shapes_rec(expected_li))
+                self.assertTrue(
+                    (actual_region ^ expected_region).is_empty(),
+                    "clip XOR mismatch on %d/%d" % (layer, datatype))
+
+    @staticmethod
+    def _clip_result(worker):
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline:
+            try:
+                result = worker.res.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if result.get("kind") == "error":
+                raise AssertionError(result.get("msg"))
+            if result.get("kind") == "clip":
+                return result
+        raise AssertionError("timed out waiting for exact clip")
 
     def _assert_query_parity_with_mosaic(
             self, cache, worker, box, mosaic, iter_polys,

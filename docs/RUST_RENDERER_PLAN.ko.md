@@ -2,7 +2,7 @@
 
 상태: M1 완료, M2 정확도·결정성 vertical slice 완료, M3 paint/frame vertical slice 완료,
 M4 text/label vertical slice 완료, M5 daemon/session vertical slice 완료,
-M5 density coverage 완료, M7 pick/snap vertical slice 완료
+M5 density coverage 완료, M7 pick/snap 완료, M8 exact clip vertical slice 완료
 목표: 기존 `floe`의 Rust 인덱서·VFS 플래너는 유지하고, KLayout의 런타임
 렌더 책임을 결정적 멀티코어 CPU 렌더러로 대체한다.
 
@@ -79,6 +79,15 @@ M5 density coverage 완료, M7 pick/snap vertical slice 완료
   KLayout 없이 기존 NumPy/Pillow의 neighborhood-aware blank mask, live palette/visibility,
   `cut_px > 0`, finest texel 160px handoff 계약을 그대로 사용. binary geometry의 8-bit
   edge antialias coverage와는 별도 기능
+- 완료: GUI `clip`을 cut=0/full-depth exact `HierPlan`으로 실행하고 daemon jobs로
+  page를 병렬 decode/LRU 재사용한 뒤 계층·repetition·PATH outline을 평탄화하여
+  단일 `FLOE_CLIP` OASIS cell로 기록. rectangle type은 유지하고 PATH는 KLayout
+  clip처럼 polygon으로 기록
+- 완료: clip 교점을 rational로 끝까지 유지한 뒤 KLayout의 nearest DBU
+  (정확한 half tie는 +무한대 방향)로 한 번만 반올림. concave clip의 역방향
+  경계 bridge를 분할·상쇄해 분리된 component를 각각 단순 polygon으로 방출
+- 완료: daemon은 공백 없는 전용 임시 경로만 받고, Python adapter가 사용자 선택
+  경로와 같은 디렉터리에 write/fsync 후 atomic replace. 공백 포함 출력 경로 지원
 - 완료: CLI 반복 `--style L/D,#RRGGBB,FILL[,WIDTH]`, `--frames`, `--mono` 경로와
   OVM layer key→index 공개 매핑
 - 완료: strict monotonic generation cancellation. plan/decode/scene/raster/PNG 경계,
@@ -107,11 +116,16 @@ M5 density coverage 완료, M7 pick/snap vertical slice 완료
 - 검증: 부모 `make_render_worker`가 실제 in-tree adapter를 선택한 headless
   `floe probe`에서 valmini 2개 화면 PNG magic/queue/process lifecycle 통과
   (4 workers, 각각 약 54ms/39ms). 4-page progressive + recolor/repattern/mono
-  통합 테스트와 Python 순수 계약 테스트 6개 통과
+  실제 통합 1개와 Python 순수 계약 테스트 10개 통과
 - 검증: 실제 adapter/daemon/부모 Cache 조합에서 100세대 pan/zoom burst를
   valmini(4-page round)와 sample9(506 pages, 64-page round)에 각각 실행. 이전
   99세대 frame publish 0, 최신 세대 settled frame 수신, 작업 상태와 partial 파일
   잔류 0
+- 검증: exact clip Rust unit 4개가 KLayout half-up 대각 교점, boundary-touch
+  drop, 분리 concave component, OASIS 왕복을 고정. 실제 valmini 선택 3-layer
+  export는 jobs 1/8 OASIS byte 동일이고 부모 `_svc_clip` 결과와 Region XOR 0;
+  공백 포함 사용자 경로 atomic publish와 `floe clip` custom UTF-8 cell-name
+  실제 CLI smoke 통과
 - 검증: `valmini`, `thintest`, `stress30`, `sample9`, `testchip_1g5`의 총 30,456
   page를 inventory. PATH는 valmini의 record 6개/member 8개뿐이고 모두 현재
   renderer 범위이며 U-turn/퇴화/음수 extension/zero half-width는 0
@@ -138,7 +152,7 @@ M5 density coverage 완료, M7 pick/snap vertical slice 완료
   17/290, 17/159, 21/122, 31/99ms. 기본 128은 64 대비 첫 화면 +4ms 대신 final
   -37ms여서 유지. 같은 영역 100세대 1000×700 pan burst는 stale frame 0,
   최신 세대 3 frame, pending job 0
-- 다음: 실제 GTK GUI A/B 장기 운용과 clip 후속 범위
+- 다음: 실제 GTK GUI A/B 장기 운용
 
 부모의 `data/m1/valmini*.floe`는 현행 OVM v7로 재생성됐으며 M1 smoke/golden
 fixture로 사용한다. `v_j1.floe`, `v_j8.floe`는 과거 M1 비교 산출물이라 v2 상태다.
@@ -200,14 +214,11 @@ OVM/OVP 포맷은 바뀌지 않는다.
 - RGBA 출력과 결정적 PNG encoding
 - Python `RenderWorker` 호환 adapter
 - 현재 화면 `FrameScene` 기반 pick/snap
+- GUI/CLI clip의 Rust exact OASIS 출력
 - OVC density coverage의 KLayout-free PNG post-composite
 - 성능/메모리/취소 telemetry
 
-### 2.2 후속이지만 KLayout 완전 제거 전에 필요한 범위
-
-- GUI/CLI clip의 Rust exact OASIS 출력
-
-### 2.3 제외 범위
+### 2.2 제외 범위
 
 - 인덱서, OVM 포맷, VFS planner 재설계
 - 범용 mutable layout database와 KLayout API 호환층
@@ -729,7 +740,7 @@ Rust 실행·goto pan/zoom·frames/labels 상태 검증은 통과했다. 독립 
 - 제외: exact-page 우선 decode 재시도. 부모의 계약이 “what you see”이므로 미게시
   페이지를 query만을 위해 추가 decode하지 않음
 - headless render depth 동치
-- clip은 별도 승인 후 exact OASIS writer로 이전
+- 완료: exact plan/병렬 decode/평탄화/정수 polygon clip/OASIS writer
 - `cache.py` legacy 기능을 lazy import/별도 모듈로 격리
 - portable bundle에서 klayout wheel 제거
 
@@ -751,7 +762,8 @@ Rust 실행·goto pan/zoom·frames/labels 상태 검증은 통과했다. 독립 
 4. 완료: `path: operating-input inventory + unsupported-path hard failure`
 5. 완료: `query: published FrameScene pick/snap + KLayout oracle parity`
 6. 완료: `coverage: OVC density post-composite + off/on integration gate`
-7. `parallel: consider daemon-lifetime pool only if thread startup is measurable`
+7. 완료: `clip: exact scene flatten + KLayout Region XOR oracle`
+8. `parallel: consider daemon-lifetime pool only if thread startup is measurable`
 
 progressive/adapter vertical slice의 완료 정의였던 `page_prio` refinement, 100회
 pan/zoom burst의 stale publish 0, 기존 GUI job/result schema를 유지한 opt-in Rust
@@ -779,6 +791,7 @@ source/OASIS/KLayout oracle을 함께 추가해 범위를 다시 연다.
 | KLayout style oracle | PX 13 + style 14, jobs 1/8 | 허용 edge 외 RGB 완전 일치 |
 | frame | 4밴드 collision fixture | gray < design < white |
 | pick/snap | 동일 VFS scene + KLayout service oracle | found/좌표/도형/순환 dict 동일 |
+| exact clip | rectangle/diagonal/분리 concave + valmini | KLayout Region XOR 0 |
 | OVC density | 동일 cut view coverage off/on | vector 보존, blank density 합성 |
 | cancellation | 100 zoom/pan generation | stale publish 0 |
 | corrupt input | ovm/ovp offset·length 오류와 page OASIS 손상 | panic 없이 명시 오류 |
@@ -813,6 +826,5 @@ KLayout oracle 비교는 renderer 개발 기간에만 사용한다. Rust 내부 
 - GUI의 render/depth/layer/style 조작에 기능 회귀가 없다.
 - `view`, headless `render`, `probe`가 KLayout 미설치 번들에서 동작한다.
 - pick/snap을 Rust scene이 제공한다.
-- clip을 아직 KLayout에 남긴 경우에는 `clip`만 명시적 optional legacy 기능으로
-  분리하고, 완전한 KLayout 패키지 제거 선언은 clip 이전 후에만 한다.
+- GUI clip이 Rust exact OASIS writer로 동작한다.
 - KLayout은 개발 oracle과 레거시 도구에서만 사용한다.

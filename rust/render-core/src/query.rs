@@ -89,12 +89,19 @@ pub struct ScenePick {
     pub shapes_tested: usize,
 }
 
-struct QueryShape {
-    layer_idx: u32,
-    layer: u32,
-    datatype: u32,
-    cell_id: u32,
-    points: Vec<(i64, i64)>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SceneShapeKind {
+    Rectangle,
+    Polygon,
+}
+
+pub(crate) struct SceneShape {
+    pub kind: SceneShapeKind,
+    pub layer_idx: u32,
+    pub layer: u32,
+    pub datatype: u32,
+    pub cell_id: u32,
+    pub points: Vec<(i64, i64)>,
 }
 
 pub fn snap_scene(
@@ -226,23 +233,30 @@ pub fn pick_scene(
 fn visit_query_shapes(
     scene: &FrameScene,
     request: &SceneQueryRequest,
-    mut visit: impl FnMut(QueryShape) -> Result<(), String>,
+    visit: impl FnMut(SceneShape) -> Result<(), String>,
 ) -> Result<(), String> {
-    let view = request.view();
-    for layer in &request.layers {
-        let result = visit_cell_layer(
+    match visit_scene_shapes(scene, request.view(), &request.layers, visit) {
+        Err(error) if error == QUERY_STOP => Ok(()),
+        other => other,
+    }
+}
+
+pub(crate) fn visit_scene_shapes(
+    scene: &FrameScene,
+    view: BBox,
+    layers: &[SceneQueryLayer],
+    mut visit: impl FnMut(SceneShape) -> Result<(), String>,
+) -> Result<(), String> {
+    for &layer in layers {
+        visit_cell_layer(
             scene,
             view,
-            *layer,
+            layer,
             scene.top(),
             OrthoTransform::identity(),
             &mut Vec::new(),
             &mut visit,
-        );
-        match result {
-            Err(error) if error == QUERY_STOP => return Ok(()),
-            other => other?,
-        }
+        )?;
     }
     Ok(())
 }
@@ -255,7 +269,7 @@ fn visit_cell_layer(
     key: WsKey,
     world_transform: OrthoTransform,
     path: &mut Vec<WsKey>,
-    visit: &mut impl FnMut(QueryShape) -> Result<(), String>,
+    visit: &mut impl FnMut(SceneShape) -> Result<(), String>,
 ) -> Result<(), String> {
     if path.contains(&key) {
         return Err(format!("invalid plan: hierarchy cycle at {:?}", key));
@@ -267,9 +281,10 @@ fn visit_cell_layer(
     let local_view = world_transform.invert()?.apply_bbox(view)?;
 
     {
-        let mut emit = |points: Vec<(i64, i64)>| -> Result<(), String> {
+        let mut emit = |kind: SceneShapeKind, points: Vec<(i64, i64)>| -> Result<(), String> {
             let points = canonical_polygon(points)?;
-            visit(QueryShape {
+            visit(SceneShape {
+                kind,
                 layer_idx: layer.index,
                 layer: layer.layer,
                 datatype: layer.datatype,
@@ -315,27 +330,30 @@ fn visit_cell_layer(
                     y1,
                 };
                 for_each_visible_offset(&rect.rep, base, local_view, |ox, oy| {
-                    emit(transform_points(
-                        &world_transform,
-                        &[
-                            (
-                                checked_add(base.x0, ox, "rectangle x0")?,
-                                checked_add(base.y0, oy, "rectangle y0")?,
-                            ),
-                            (
-                                checked_add(base.x1, ox, "rectangle x1")?,
-                                checked_add(base.y0, oy, "rectangle y0")?,
-                            ),
-                            (
-                                checked_add(base.x1, ox, "rectangle x1")?,
-                                checked_add(base.y1, oy, "rectangle y1")?,
-                            ),
-                            (
-                                checked_add(base.x0, ox, "rectangle x0")?,
-                                checked_add(base.y1, oy, "rectangle y1")?,
-                            ),
-                        ],
-                    )?)
+                    emit(
+                        SceneShapeKind::Rectangle,
+                        transform_points(
+                            &world_transform,
+                            &[
+                                (
+                                    checked_add(base.x0, ox, "rectangle x0")?,
+                                    checked_add(base.y0, oy, "rectangle y0")?,
+                                ),
+                                (
+                                    checked_add(base.x1, ox, "rectangle x1")?,
+                                    checked_add(base.y0, oy, "rectangle y0")?,
+                                ),
+                                (
+                                    checked_add(base.x1, ox, "rectangle x1")?,
+                                    checked_add(base.y1, oy, "rectangle y1")?,
+                                ),
+                                (
+                                    checked_add(base.x0, ox, "rectangle x0")?,
+                                    checked_add(base.y1, oy, "rectangle y1")?,
+                                ),
+                            ],
+                        )?,
+                    )
                 })?;
             }
             for polygon in &geometry.polys {
@@ -356,7 +374,10 @@ fn visit_cell_layer(
                             ))
                         })
                         .collect();
-                    emit(transform_points(&world_transform, &local?)?)
+                    emit(
+                        SceneShapeKind::Polygon,
+                        transform_points(&world_transform, &local?)?,
+                    )
                 })?;
             }
             for path_record in &geometry.paths {
@@ -377,7 +398,10 @@ fn visit_cell_layer(
                             Ok((checked_add(x, ox, "path x")?, checked_add(y, oy, "path y")?))
                         })
                         .collect();
-                    emit(transform_points(&world_transform, &local?)?)
+                    emit(
+                        SceneShapeKind::Polygon,
+                        transform_points(&world_transform, &local?)?,
+                    )
                 })?;
             }
         }
@@ -388,7 +412,7 @@ fn visit_cell_layer(
             }
             let world = world_transform.apply_bbox(wash)?;
             if world.intersects(&view) {
-                emit(canonical_rect(world))?;
+                emit(SceneShapeKind::Rectangle, canonical_rect(world))?;
             }
         }
     }
@@ -442,7 +466,7 @@ fn canonical_rect(bbox: BBox) -> Vec<(i64, i64)> {
     ]
 }
 
-fn polygon_bbox(points: &[(i64, i64)]) -> Option<BBox> {
+pub(crate) fn polygon_bbox(points: &[(i64, i64)]) -> Option<BBox> {
     let &(first_x, first_y) = points.first()?;
     let mut bbox = BBox {
         x0: first_x,
@@ -459,7 +483,7 @@ fn polygon_bbox(points: &[(i64, i64)]) -> Option<BBox> {
     (points.len() >= 3).then_some(bbox)
 }
 
-fn canonical_polygon(mut points: Vec<(i64, i64)>) -> Result<Vec<(i64, i64)>, String> {
+pub(crate) fn canonical_polygon(mut points: Vec<(i64, i64)>) -> Result<Vec<(i64, i64)>, String> {
     points.dedup();
     if points.len() > 1 && points.first() == points.last() {
         points.pop();
@@ -528,7 +552,7 @@ fn cross(a: (i64, i64), b: (i64, i64), c: (i64, i64)) -> Result<i128, String> {
         .ok_or_else(|| "coordinate overflow: query cross result".to_string())
 }
 
-fn signed_area2(points: &[(i64, i64)]) -> Result<i128, String> {
+pub(crate) fn signed_area2(points: &[(i64, i64)]) -> Result<i128, String> {
     let mut area = 0i128;
     for (&(x1, y1), &(x2, y2)) in points.iter().zip(points.iter().cycle().skip(1)) {
         let first = (x1 as i128)

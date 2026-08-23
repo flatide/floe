@@ -7,6 +7,7 @@
 
 mod cache;
 mod cancel;
+mod clip;
 mod font;
 mod page_cache;
 mod png;
@@ -23,6 +24,7 @@ pub use cache::{
     PlannedView, RenderLabel,
 };
 pub use cancel::RenderCancellation;
+pub use clip::ClipGeometry;
 pub use font::{validate_font_px, DEFAULT_LABEL_FONT_PX, MAX_LABEL_FONT_PX, MIN_LABEL_FONT_PX};
 pub use page_cache::DecodedPageCache;
 pub use query::{

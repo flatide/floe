@@ -1,9 +1,9 @@
 use floe_render_core::{
     pick_scene, render_geometry_occupancy_cancellable, render_geometry_styled_cancellable,
-    snap_scene, validate_font_px, Cache, CacheLayer, DecodedPageCache, FrameScene,
+    snap_scene, validate_font_px, Cache, CacheLayer, ClipGeometry, DecodedPageCache, FrameScene,
     GeometryRasterRequest, LayerFill, LayerStyle, PlanRequest, RasterViewBox, RenderCancellation,
     SceneQueryLayer, SceneQueryRequest, SceneSnapKind, StyledGeometryRasterRequest, ViewBox,
-    DEFAULT_LABEL_FONT_PX, DEFAULT_TILE_SIZE, MAX_TILE_SIZE,
+    DEFAULT_LABEL_FONT_PX, DEFAULT_TILE_SIZE, FULL_DEPTH, MAX_TILE_SIZE,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufRead, Write};
@@ -161,6 +161,7 @@ enum WorkerCommand {
     Open(OpenCommand),
     Style(StyleCommand),
     Render(RenderCommand),
+    Clip(ClipCommand),
     Info,
     Shutdown,
 }
@@ -218,6 +219,16 @@ struct PickCommand {
     radius: i64,
     nth: i64,
     visible_layers: Option<Vec<String>>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ClipCommand {
+    sequence: i64,
+    bbox: [i64; 4],
+    visible_layers: Option<Vec<String>>,
+    jobs: Option<u16>,
+    cell_name: String,
+    out: String,
 }
 
 struct PickWireResponse {
@@ -369,6 +380,30 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                 visible_layers: parse_layers(fields.get("layers"))?,
             })))
         }
+        "clip" => {
+            reject_unknown(
+                &fields,
+                &["seq", "box", "layers", "jobs", "cell_hex", "out"],
+            )?;
+            let jobs = optional_parse(&fields, "jobs")?;
+            if let Some(jobs) = jobs {
+                validate_jobs(jobs)?;
+            }
+            Ok(Some(InputCommand::Worker(WorkerCommand::Clip(
+                ClipCommand {
+                    sequence: optional_parse(&fields, "seq")?.unwrap_or(-1),
+                    bbox: parse_i64_box(required(&fields, "box")?)?,
+                    visible_layers: parse_layers(fields.get("layers"))?,
+                    jobs,
+                    cell_name: fields
+                        .get("cell_hex")
+                        .map(|value| wire_unhex(value, "cell_hex"))
+                        .transpose()?
+                        .unwrap_or_else(|| "FLOE_CLIP".to_string()),
+                    out: required(&fields, "out")?.to_string(),
+                },
+            ))))
+        }
         "cancel" => {
             reject_unknown(&fields, &["before_gen"])?;
             Ok(Some(InputCommand::Cancel(required_parse(
@@ -475,6 +510,18 @@ fn parse_view(value: &str) -> Result<[f64; 4], String> {
     Ok(view)
 }
 
+fn parse_i64_box(value: &str) -> Result<[i64; 4], String> {
+    let values = value
+        .split(',')
+        .map(|part| parse_value(part, "box"))
+        .collect::<Result<Vec<i64>, _>>()?;
+    let bbox: [i64; 4] = values
+        .try_into()
+        .map_err(|_| "box requires four coordinates".to_string())?;
+    ViewBox::new(bbox[0], bbox[1], bbox[2], bbox[3])?;
+    Ok(bbox)
+}
+
 fn parse_layers(value: Option<&String>) -> Result<Option<Vec<String>>, String> {
     match value.map(String::as_str) {
         None | Some("all") => Ok(None),
@@ -536,10 +583,129 @@ fn render_worker(
                 &cancellation,
                 &published_scene,
             ),
+            WorkerCommand::Clip(command) => handle_clip(&mut state, command, &responses),
             WorkerCommand::Info => handle_info(&state, &responses),
             WorkerCommand::Shutdown => break,
         }
     }
+}
+
+fn handle_clip(state: &mut WorkerState, command: ClipCommand, responses: &Sender<String>) {
+    let started = Instant::now();
+    let result = run_clip(state, &command);
+    match result {
+        Ok((geometry, bytes, plan_us, read_us, decode_us, clip_us, write_us)) => respond(
+            responses,
+            format!(
+                "clip seq={} size_bytes={} ms={} records={} rects={} polys={} plan_us={} read_us={} decode_us={} clip_us={} write_us={}",
+                command.sequence,
+                bytes,
+                elapsed_us(started).saturating_add(500) / 1000,
+                geometry.records(),
+                geometry.rects.len(),
+                geometry.polys.len(),
+                plan_us,
+                read_us,
+                decode_us,
+                clip_us,
+                write_us,
+            ),
+        ),
+        Err(error) => respond(
+            responses,
+            format!(
+                "error code=clip seq={} message={}",
+                command.sequence,
+                wire_escape(&error)
+            ),
+        ),
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn run_clip(
+    state: &mut WorkerState,
+    command: &ClipCommand,
+) -> Result<(ClipGeometry, u64, u64, u64, u64, u64, u64), String> {
+    let cache = state
+        .cache
+        .as_ref()
+        .ok_or_else(|| "cache not open".to_string())?;
+    let view = ViewBox::new(
+        command.bbox[0],
+        command.bbox[1],
+        command.bbox[2],
+        command.bbox[3],
+    )?;
+    let request = PlanRequest {
+        view,
+        cut_dbu: 0,
+        visible_layers: command.visible_layers.clone(),
+        depth: FULL_DEPTH,
+        px_per_dbu: 0.0,
+        exact: true,
+    };
+    let plan_started = Instant::now();
+    let planned = cache.plan(&request)?;
+    let plan_us = elapsed_us(plan_started);
+    let layers = selected_scene_layers(cache, command.visible_layers.as_deref())?;
+    let page_ids = planned.plan.pages.clone();
+    let plan = Arc::new(planned.plan);
+    let workers = command.jobs.unwrap_or(state.jobs);
+    let mut geometry = ClipGeometry::default();
+    let mut read_us = 0u64;
+    let mut decode_us = 0u64;
+    let clip_started = Instant::now();
+    for page_chunk in page_ids.chunks(DEFAULT_ROUND_PAGES) {
+        let (pages, stats) = state.page_cache.load_parallel(cache, page_chunk, workers)?;
+        read_us = read_us.saturating_add(stats.page_read_us);
+        decode_us = decode_us.saturating_add(stats.page_decode_us);
+        let scene = FrameScene::new_shared(cache, Arc::clone(&plan), pages)?;
+        geometry.append_scene(&scene, view.as_bbox(), &layers)?;
+    }
+    let clip_us = elapsed_us(clip_started)
+        .saturating_sub(read_us)
+        .saturating_sub(decode_us);
+    let oasis = geometry.oasis_bytes_named(cache.unit(), &command.cell_name)?;
+    let bytes = u64::try_from(oasis.len()).unwrap_or(u64::MAX);
+    let write_started = Instant::now();
+    publish_bytes(&command.out, command.sequence, &oasis)?;
+    let write_us = elapsed_us(write_started);
+    Ok((
+        geometry, bytes, plan_us, read_us, decode_us, clip_us, write_us,
+    ))
+}
+
+fn selected_scene_layers(
+    cache: &Cache,
+    visible_layers: Option<&[String]>,
+) -> Result<Vec<SceneQueryLayer>, String> {
+    let cache_layers = cache.layers();
+    let selected: Option<BTreeSet<u32>> = visible_layers
+        .map(|specs| {
+            specs
+                .iter()
+                .map(|spec| {
+                    resolve_layer(spec, &cache_layers)
+                        .map(|layer| layer.index)
+                        .ok_or_else(|| format!("clip layer not found: {spec}"))
+                })
+                .collect()
+        })
+        .transpose()?;
+    Ok(cache_layers
+        .into_iter()
+        .filter(|layer| {
+            selected
+                .as_ref()
+                .is_none_or(|selected| selected.contains(&layer.index))
+        })
+        .map(|layer| SceneQueryLayer {
+            index: layer.index,
+            layer: layer.layer,
+            datatype: layer.datatype,
+        })
+        .collect())
 }
 
 fn handle_open(
@@ -841,6 +1007,20 @@ fn wire_hex(value: &str) -> String {
         let _ = write!(encoded, "{byte:02x}");
     }
     encoded
+}
+
+fn wire_unhex(value: &str, field: &str) -> Result<String, String> {
+    if !value.len().is_multiple_of(2) {
+        return Err(format!("invalid {field}: odd hex length"));
+    }
+    let mut bytes = Vec::with_capacity(value.len() / 2);
+    for offset in (0..value.len()).step_by(2) {
+        bytes.push(
+            u8::from_str_radix(&value[offset..offset + 2], 16)
+                .map_err(|_| format!("invalid {field}: non-hex byte"))?,
+        );
+    }
+    String::from_utf8(bytes).map_err(|_| format!("invalid {field}: not UTF-8"))
 }
 
 fn wire_points(points: &[(i64, i64)]) -> String {
@@ -1163,6 +1343,41 @@ fn cancelled_response(responses: &Sender<String>, generation: u64, phase: &str) 
     );
 }
 
+fn publish_bytes(output: &str, sequence: i64, bytes: &[u8]) -> Result<(), String> {
+    let output = Path::new(output);
+    let parent = output.parent().unwrap_or_else(|| Path::new("."));
+    let name = output
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("invalid output path: {}", output.display()))?;
+    let temporary = parent.join(format!(
+        ".{name}.floe-renderd-{}-clip-{sequence}.tmp",
+        std::process::id()
+    ));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    let mut file = options
+        .open(&temporary)
+        .map_err(|error| format!("create {}: {}", temporary.display(), error))?;
+    if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(format!("write {}: {}", temporary.display(), error));
+    }
+    drop(file);
+    match std::fs::rename(&temporary, output) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = std::fs::remove_file(&temporary);
+            Err(format!(
+                "publish {} -> {}: {}",
+                temporary.display(),
+                output.display(),
+                error
+            ))
+        }
+    }
+}
+
 fn publish_png(
     output: &str,
     generation: u64,
@@ -1343,6 +1558,13 @@ mod tests {
         }
     }
 
+    fn clip(command: InputCommand) -> ClipCommand {
+        match command {
+            InputCommand::Worker(WorkerCommand::Clip(clip)) => clip,
+            _ => panic!("expected clip command"),
+        }
+    }
+
     #[test]
     fn parses_open_and_exact_render_contract() {
         let open = parse_command("open cache=/tmp/a.floe budget_mb=64 jobs=8")
@@ -1406,6 +1628,27 @@ mod tests {
             "render gen=12 view=0,0,1,1 w=1 h=1 frames=off font_px=100 out=/tmp/f.png"
         )
         .is_err());
+
+        assert_eq!(
+            clip(
+                parse_command(
+                    "clip seq=13 box=-10,-20,30,40 layers=1/0,2/0 jobs=6 cell_hex=544f5020ed959ceab880 out=/tmp/c.oas",
+                )
+                .unwrap()
+                .unwrap(),
+            ),
+            ClipCommand {
+                sequence: 13,
+                bbox: [-10, -20, 30, 40],
+                visible_layers: Some(vec!["1/0".to_string(), "2/0".to_string()]),
+                jobs: Some(6),
+                cell_name: "TOP 한글".to_string(),
+                out: "/tmp/c.oas".to_string(),
+            }
+        );
+        assert!(parse_command("clip box=4,0,3,1 out=/tmp/c.oas").is_err());
+        assert!(parse_command("clip box=0,0,1 out=/tmp/c.oas").is_err());
+        assert!(parse_command("clip box=0,0,1,1 cell_hex=f out=/tmp/c.oas").is_err());
     }
 
     #[test]
@@ -1448,6 +1691,10 @@ mod tests {
         );
         assert!(parse_command("snap x=1 y=2 r=3 unknown=4").is_err());
         assert_eq!(wire_hex("TOP 한글"), "544f5020ed959ceab880");
+        assert_eq!(
+            wire_unhex("544f5020ed959ceab880", "cell_hex").unwrap(),
+            "TOP 한글"
+        );
         assert_eq!(wire_points(&[(0, 1), (-2, 3)]), "0,1;-2,3");
     }
 
@@ -1507,6 +1754,12 @@ mod tests {
         assert_eq!(std::fs::read(&output).unwrap(), b"png-bytes");
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         std::fs::remove_file(output).unwrap();
+
+        let clip_output = dir.join("clip.oas");
+        publish_bytes(clip_output.to_str().unwrap(), 8, b"oasis-bytes").unwrap();
+        assert_eq!(std::fs::read(&clip_output).unwrap(), b"oasis-bytes");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_file(clip_output).unwrap();
 
         cancellation.cancel_before(5);
         assert!(publish_png(
