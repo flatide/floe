@@ -133,6 +133,8 @@ def _find_binary():
 class RustRenderWorker:
     """Queue-compatible worker backed by one persistent Rust daemon."""
 
+    supports_label_font_px = True
+
     def __init__(self, cache, stream_kb=None, stream_target_ms=500,
                  debug=False):
         del stream_target_ms  # Rust rounds are page-budgeted, not time-tuned.
@@ -321,6 +323,13 @@ class RustRenderWorker:
         if job.get("coverage"):
             raise RuntimeError("Rust backend does not implement coverage mode yet")
         generation = int(job["gen"])
+        try:
+            label_font_px = int(job.get(
+                "label_font_px", self._label_font_px))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("label_font_px must be an integer") from exc
+        if label_font_px < 6 or label_font_px > 96:
+            raise ValueError("label_font_px must be in 6..96")
         bbox = tuple(float(value) for value in job["bbox"])
         if len(bbox) != 4:
             raise ValueError("render bbox must have four coordinates")
@@ -353,7 +362,7 @@ class RustRenderWorker:
                 int(job["w"]), int(job["h"]), depth,
                 repr(max(0.0, float(job.get("cut_px") or 0.0))), layers,
                 _bool_wire(job.get("frames", True)),
-                _bool_wire(job.get("labels", True)), self._label_font_px,
+                _bool_wire(job.get("labels", True)), label_font_px,
                 _bool_wire(self._mono), self._jobs_count, self._tile_px,
                 self._round_pages, self._style_epoch, output))
         self._send(command)

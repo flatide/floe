@@ -103,6 +103,13 @@ info
 quit
 ```
 
+`font_px` is an integer screen-pixel size in `6..96`. The Python Rust worker
+passes it on every render request, so `View > label size... (Rust renderer)` or
+`floe view --label-font-px PX` changes size live without restarting the daemon
+or rebuilding the index. The menu item is disabled for backends that do not
+advertise this capability. `FLOE_RUST_LABEL_PX` remains only the headless
+adapter fallback when a request omits the field.
+
 The style file is bottom-to-top, one `L/D COLOR FILL WIDTH` row per layer:
 
 ```text

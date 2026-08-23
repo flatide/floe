@@ -645,10 +645,12 @@ coverage를 적용하지 않으며, Calibre/KLayout 목표 화면이 이를 요�
 - generation label plan 공유, frame-local glyph cache, center alignment, 90도 단위 회전
 - design text와 gray/white block label paint plane
 - daemon `labels`, `font_px` 및 Python `FLOE_RUST_LABEL_PX` 연결
+- 요청별 6..96px 크기, Rust backend 전용 GUI/CLI live 제어
 
 종료 gate 현황:
 
 - label anchor/rotation/visibility 및 worker/tile byte 동일 회귀 통과
+- 번들 글꼴·회전·alpha를 포함한 RGBA CRC32 golden 고정
 - VFS 4096 label budget과 raster 262,144 glyph 상한으로 작업량 제한
 - OS font lookup이 코드 경로에 없고 번들 bytes만 사용
 

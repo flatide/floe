@@ -793,6 +793,8 @@ def cmd_view(args):
         raise SystemExit("floe: --stream-kb must be >= 0")
     if not 100 <= args.stream_target_ms <= 2000:
         raise SystemExit("floe: --stream-target-ms must be 100..2000")
+    if not 6 <= args.label_font_px <= 96:
+        raise SystemExit("floe: --label-font-px must be 6..96")
 
     # Render-process construction parameters cannot be retrofitted into
     # a running single instance. Open an independent viewer when one is
@@ -821,8 +823,8 @@ def cmd_view(args):
         if goto is not None:
             # repr() round-trips floats exactly, unlike %g
             request += "\tgoto=" + ",".join(repr(v) for v in goto)
-        request += "\tlod=%s\tframes=%s\tlabels=%s" % (
-            args.lod, args.frames, args.labels)
+        request += "\tlod=%s\tframes=%s\tlabels=%s\tlabelpx=%d" % (
+            args.lod, args.frames, args.labels, args.label_font_px)
         for _ in range(5):
             code = instance.try_forward(addr, request)
             if code is not None:
@@ -850,7 +852,9 @@ def cmd_view(args):
     run_viewer(c, server, goto=goto, drc=args.drc,
                detail=detail, dump=args.dump, depth=depth,
                lod=args.lod == "on", frames=args.frames == "on",
-               labels=args.labels == "on", stream_kb=args.stream_kb,
+               labels=args.labels == "on",
+               label_font_px=args.label_font_px,
+               stream_kb=args.stream_kb,
                stream_target_ms=args.stream_target_ms,
                render_debug=args.render_debug)
 
@@ -1123,6 +1127,10 @@ def main(argv=None):
                    help="enable request-scoped design text and block-name "
                         "planning (default on; forwarded to a running "
                         "instance)")
+    p.add_argument("--label-font-px", type=int, default=14, metavar="PX",
+                   help="bundled Rust renderer label size, 6..96 screen "
+                        "pixels (default 14; forwarded to a running "
+                        "instance and adjustable from the View menu)")
     p.add_argument("--stream-kb", type=int, default=None, metavar="KB",
                    help="pin progressive payload per round in KiB; 0 "
                         "disables streaming (default: adaptive from 24576; "

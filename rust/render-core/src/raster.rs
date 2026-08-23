@@ -2731,6 +2731,14 @@ mod tests {
         frames: Vec<(BBox, Rep, u8)>,
         labels: Vec<RenderLabel>,
     ) -> FrameScene {
+        styled_scene_with_label_font(frames, labels, DEFAULT_LABEL_FONT_PX)
+    }
+
+    fn styled_scene_with_label_font(
+        frames: Vec<(BBox, Rep, u8)>,
+        labels: Vec<RenderLabel>,
+        label_font_px: f32,
+    ) -> FrameScene {
         let top = (0, REM_FULL);
         let plan = HierPlan {
             top,
@@ -2781,7 +2789,7 @@ mod tests {
             ],
             bounds,
             Arc::from(labels),
-            DEFAULT_LABEL_FONT_PX,
+            label_font_px,
         )
         .unwrap()
     }
@@ -3429,6 +3437,31 @@ mod tests {
         assert_eq!(serial.frame, parallel.frame);
         assert_eq!(serial.label_pixel_paints, parallel.label_pixel_paints);
         assert!(parallel.label_tile_paints > serial.label_tile_paints);
+    }
+
+    #[test]
+    fn bundled_font_pixels_match_golden_crc32() {
+        let labels = (0..4)
+            .map(|rotation| design_label("Floe_19", 5, 5, rotation, 2))
+            .collect();
+        let scene = styled_scene_with_label_font(Vec::new(), labels, 19.0);
+        let report = render_geometry_styled(
+            &scene,
+            &StyledGeometryRasterRequest {
+                raster: label_request(7, 13),
+                layers: vec![LayerStyle {
+                    layer_idx: 2,
+                    color: [29, 211, 103, 220],
+                    fill: LayerFill::Clear,
+                    outline_width: 1,
+                }],
+                hierarchy_frames: false,
+                mono: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(report.label_pixel_paints, 1_852);
+        assert_eq!(crc32fast::hash(report.frame.pixels()), 0xfa90_edf6);
     }
 
     #[test]

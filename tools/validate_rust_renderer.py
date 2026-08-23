@@ -103,6 +103,7 @@ class WorkerContractTests(unittest.TestCase):
                 "w": 20, "h": 10, "depth": None,
                 "cut_px": 3.0, "visible": [(2, 0), (1, 0)],
                 "frames": False, "labels": False, "scope": "live",
+                "label_font_px": 22,
             }
             worker._submit_render(job)
             self.assertIn("depth=full", commands[0])
@@ -110,7 +111,11 @@ class WorkerContractTests(unittest.TestCase):
             self.assertIn("style_epoch=3", commands[0])
             self.assertIn("round_paths=1", commands[0])
             self.assertIn("labels=0", commands[0])
-            self.assertIn("font_px=18", commands[0])
+            self.assertIn("font_px=22", commands[0])
+            fallback_job = dict(job, gen=8)
+            fallback_job.pop("label_font_px")
+            worker._submit_render(fallback_job)
+            self.assertIn("font_px=18", commands[1])
 
             png_path = os.path.join(directory, "frame-7.png")
             with open(png_path, "wb") as frame:
@@ -177,6 +182,22 @@ class WorkerContractTests(unittest.TestCase):
             with self.assertRaisesRegex(
                     RuntimeError, "intentionally unsupported"):
                 worker._submit_render({"abstract": True})
+
+    def test_rejects_invalid_request_label_size(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = os.path.join(directory, "floe-renderd")
+            with open(binary, "w", encoding="ascii") as script:
+                script.write("#!/bin/sh\n")
+            os.chmod(binary, 0o755)
+            with mock.patch.dict(os.environ, {
+                "FLOE_RENDERD_BIN": binary,
+            }, clear=False):
+                worker = RustRenderWorker(FakeCache(directory))
+            with self.assertRaisesRegex(ValueError, "6..96"):
+                worker._submit_render({
+                    "gen": 1, "bbox": (0, 0, 1, 1),
+                    "label_font_px": 5,
+                })
 
 
 @unittest.skipUnless(os.environ.get("FLOE_INTEGRATION_SOURCE"),

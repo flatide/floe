@@ -39,6 +39,9 @@ DEBOUNCE_MS = 120
 DEFAULT_LOD = True
 DEFAULT_FRAMES = True
 DEFAULT_LABELS = True
+DEFAULT_LABEL_FONT_PX = 14
+MIN_LABEL_FONT_PX = 6
+MAX_LABEL_FONT_PX = 96
 
 BLACK = 0x000000FF
 BAND_IN = 0xFFFFFFFF       # forward drag: zoom in (plain white, user
@@ -856,6 +859,7 @@ class Viewer:
     def __init__(self, cache, server_sock=None, show=True, goto=None,
                  detail=None, dump=False, depth=None, lod=DEFAULT_LOD,
                  frames=DEFAULT_FRAMES, labels=DEFAULT_LABELS,
+                 label_font_px=DEFAULT_LABEL_FONT_PX,
                  stream_kb=None, stream_target_ms=500,
                  render_debug=False):
         self.server_sock = server_sock
@@ -905,6 +909,9 @@ class Viewer:
         # texts. An explicit --labels off remains available as a startup/
         # automation override, but frames off always suppresses texts.
         self.labels_on = self.frames_on and bool(labels)
+        self.label_font_px = max(
+            MIN_LABEL_FONT_PX,
+            min(MAX_LABEL_FONT_PX, int(label_font_px)))
         self.stream_kb = stream_kb
         self.stream_target_ms = int(stream_target_ms)
         self.render_debug = bool(render_debug)
@@ -960,6 +967,7 @@ class Viewer:
         self._ddlg = None
         self._gdlg = None
         self._cdlg = None
+        self._fontdlg = None
         self._digit_last = None     # depth digit-pair state ('99' = full)
         self._digit_t = 0.0
         # DRC results browser ('e' key)
@@ -1530,12 +1538,14 @@ class Viewer:
         if self.worker is not None:
             self.worker.stop()
             self.worker = None
+        self._sync_label_font_capability()
         if cache is not None:
             self.worker = make_render_worker(
                 cache, stream_kb=self.stream_kb,
                 stream_target_ms=self.stream_target_ms,
                 debug=self.render_debug)
             self.worker.start()
+            self._sync_label_font_capability()
             if self._did_fit:
                 # window already sized (layout switch, or the FIRST
                 # load into an empty start): frame the new die
@@ -1720,6 +1730,14 @@ class Viewer:
             if enabled != self.labels_on:
                 self.labels_on = enabled
                 self.redraw(immediate=True)
+        label_px = opts.get("labelpx")
+        if label_px is not None:
+            try:
+                label_px = int(label_px)
+            except ValueError:
+                return
+            if MIN_LABEL_FONT_PX <= label_px <= MAX_LABEL_FONT_PX:
+                self._set_label_font_px(label_px)
 
     def _forwarded_goto(self, fields):
         """Apply a 'goto=X,Y[,W]' option (um) from a forwarded request.
@@ -2296,6 +2314,7 @@ class Viewer:
             "lod": self.lod_on,
             "frames": self.frames_on,
             "labels": self.labels_on,
+            "label_font_px": self.label_font_px,
             "abstract": self.abstract,
             "coverage": self.coverage_on,
             "visible": self._layers_arg()})
@@ -3132,6 +3151,26 @@ class Viewer:
         if changed:
             self._on_depth()
 
+    def _set_label_font_px(self, value):
+        value = max(MIN_LABEL_FONT_PX,
+                    min(MAX_LABEL_FONT_PX, int(value)))
+        changed = value != self.label_font_px
+        self.label_font_px = value
+        if self._fontdlg is not None:
+            spin = getattr(self._fontdlg, "_spin", None)
+            if spin is not None and int(spin.get_value()) != value:
+                spin.set_value(value)
+        if changed and self.worker is not None and \
+                getattr(self.worker, "supports_label_font_px", False):
+            self.redraw(immediate=True)
+
+    def _sync_label_font_capability(self):
+        item = getattr(self, "_label_font_menu_item", None)
+        if item is not None:
+            item.set_sensitive(bool(
+                self.worker is not None and
+                getattr(self.worker, "supports_label_font_px", False)))
+
     def _on_depth(self):
         self.dstatus.set_text(self._depth_label())
         self.redraw(immediate=True)
@@ -3336,6 +3375,58 @@ class Viewer:
             self.window.present()
         dlg.connect("destroy", _gone)
         self._dialog_show(dlg, btns[self.detail])
+
+    def _label_font_dialog(self):
+        """Set the bundled Rust renderer font size in integer pixels."""
+        if self.worker is None or not getattr(
+                self.worker, "supports_label_font_px", False):
+            return
+        if self._fontdlg is not None:
+            self._fontdlg.present()
+            return
+        dlg = Gtk.Window(title="label size")
+        self._dialog_setup(dlg)
+        self._fontdlg = dlg
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_margin_top(10)
+        box.set_margin_bottom(10)
+        box.set_margin_start(14)
+        box.set_margin_end(14)
+        dlg.add(box)
+        box.pack_start(Gtk.Label(
+            label="Rust label font size (screen pixels)"),
+            False, False, 0)
+        spin = Gtk.SpinButton.new_with_range(
+            MIN_LABEL_FONT_PX, MAX_LABEL_FONT_PX, 1)
+        spin.set_value(self.label_font_px)
+        spin.connect("value-changed", lambda s: self._set_label_font_px(
+            int(s.get_value())))
+        spin.connect("activate", lambda *_: dlg.destroy())
+        dlg._spin = spin
+        box.pack_start(spin, False, False, 0)
+        note = Gtk.Label()
+        note.set_markup(
+            "<small>applies live without rebuilding the index; "
+            "integer 6..96 px\nrotation and antialiasing remain "
+            "deterministic</small>")
+        note.set_xalign(0.0)
+        box.pack_start(note, False, False, 0)
+        ok = Gtk.Button(label="ok")
+        ok.connect("clicked", lambda *_: dlg.destroy())
+        box.pack_start(ok, False, False, 0)
+
+        def on_dialog_key(_w, ev):
+            if Gdk.keyval_name(ev.keyval) == "Escape":
+                dlg.destroy()
+                return True
+            return False
+        dlg.connect("key-press-event", on_dialog_key)
+
+        def _gone(*_a):
+            self._fontdlg = None
+            self.window.present()
+        dlg.connect("destroy", _gone)
+        self._dialog_show(dlg, spin)
 
     # ---- goto (Calibre-style jump to coordinates) ---------------------------
     GOTO_HINT = ("um coordinates. window = view width after the jump"
@@ -3543,6 +3634,7 @@ class Viewer:
             it = Gtk.MenuItem(label=label)
             it.connect("activate", lambda *_: cb())
             menu.append(it)
+            return it
 
         def check(menu, label, cb, state):
             it = Gtk.CheckMenuItem(label=label)
@@ -3581,6 +3673,9 @@ class Viewer:
         item(m, "goto position…\tg", self._goto_dialog)
         sep(m)
         item(m, "detail…\td", self._detail_dialog)
+        self._label_font_menu_item = item(
+            m, "label size… (Rust renderer)", self._label_font_dialog)
+        self._label_font_menu_item.set_sensitive(False)
         item(m, "depth +1\t>", lambda: self._depth_step(1))
         item(m, "depth -1\t<", lambda: self._depth_step(-1))
         item(m, "depth full\t9 9", lambda: self._set_depth(999))
@@ -6680,12 +6775,14 @@ class Viewer:
 def run_viewer(cache, server_sock=None, goto=None, drc=None,
                detail=None, dump=False, depth=None, lod=DEFAULT_LOD,
                frames=DEFAULT_FRAMES, labels=DEFAULT_LABELS,
+               label_font_px=DEFAULT_LABEL_FONT_PX,
                stream_kb=None, stream_target_ms=500,
                render_debug=False):
     import_gtk()
     viewer = Viewer(cache, server_sock, goto=goto, detail=detail,
                     dump=dump, depth=depth, lod=lod, frames=frames,
-                    labels=labels, stream_kb=stream_kb,
+                    labels=labels, label_font_px=label_font_px,
+                    stream_kb=stream_kb,
                     stream_target_ms=stream_target_ms,
                     render_debug=render_debug)
     if drc:
