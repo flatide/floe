@@ -21,6 +21,7 @@ _DEFAULT_BUDGET_MB = 1024
 _DEFAULT_ROUND_PAGES = 128
 _DEFAULT_TILE_PX = 128
 _DEFAULT_LABEL_FONT_PX = 14
+_COV_MAX_TEXEL_PX = 160.0  # must match floe.service.COV_MAX_TEXEL_PX
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
@@ -197,6 +198,8 @@ class RustRenderWorker:
         self._label_font_px = _env_int(
             "FLOE_RUST_LABEL_PX", _DEFAULT_LABEL_FONT_PX, 6, 96)
         self._init_styles()
+        self._coverage = None
+        self._init_coverage()
 
     def _init_styles(self):
         layers = self.cache.meta.get("layers", [])
@@ -222,6 +225,18 @@ class RustRenderWorker:
         except (ImportError, OSError, ValueError):
             # Personalization must not prevent the renderer from starting.
             pass
+
+    def _init_coverage(self):
+        path = os.path.join(self.cache.dir, "design.ovc")
+        if not os.path.isfile(path):
+            return
+        try:
+            from floe.coverage import Coverage
+            self._coverage = Coverage(path)
+        except Exception:
+            # Match the rollback backend: a missing/corrupt optional density
+            # sidecar leaves ordinary vector rendering available.
+            self._coverage = None
 
     def start(self):
         if self._proc is not None:
@@ -347,8 +362,6 @@ class RustRenderWorker:
             raise RuntimeError(
                 "abstract mode is intentionally unsupported by the Rust "
                 "backend (KLayout-specific)")
-        if job.get("coverage"):
-            raise RuntimeError("Rust backend does not implement coverage mode yet")
         generation = int(job["gen"])
         try:
             label_font_px = int(job.get(
@@ -433,6 +446,31 @@ class RustRenderWorker:
             int(job.get("seq", -1)), int(job["x"]), int(job["y"]),
             max(1, int(job["r"])), int(job.get("nth", 0)),
             self._query_layers(job)))
+
+    def _apply_coverage(self, path, png, job):
+        coverage = self._coverage
+        if coverage is None or not job.get("coverage"):
+            return png
+        cut_px = max(0.0, float(job.get("cut_px") or 0.0))
+        if cut_px == 0.0:
+            return png
+        x0, y0, x1, y1 = (float(value) for value in job["bbox"])
+        width, height = int(job["w"]), int(job["h"])
+        tex0_px = coverage.tex0[0] * width / max(1e-9, x1 - x0)
+        if tex0_px > _COV_MAX_TEXEL_PX:
+            return png
+        try:
+            from floe.coverage import composite
+            visible = job.get("visible")
+            visible = (None if visible is None else
+                       set(_layer_key(layer) for layer in visible))
+            rgb, any_coverage = coverage.view_rgb(
+                x0, y0, x1, y1, width, height, visible, self._colors)
+            return composite(path, rgb) if any_coverage else png
+        except Exception:
+            # The KLayout backend treats density as an optional display aid;
+            # preserve the already-valid vector frame on sidecar/PIL failure.
+            return png
 
     def _publish_style(self, wait):
         self._style_epoch += 1
@@ -588,6 +626,7 @@ class RustRenderWorker:
             self.res.put({"kind": "error", "gen": generation,
                           "msg": "Rust frame is not a PNG"})
             return
+        png = self._apply_coverage(path, png, state["job"])
         if path != state["output"]:
             try:
                 os.unlink(path)

@@ -21,7 +21,8 @@ COV_GAMMA = 0.35
 
 class Coverage:
     def __init__(self, path):
-        d = open(path, "rb").read()
+        with open(path, "rb") as coverage_file:
+            d = coverage_file.read()
         (magic, ver, self.dbu, x0, y0, x1, y1, self.res_x,
          self.res_y, self.n_levels, n_layers) = struct.unpack_from(
              _HDR, d, 0)

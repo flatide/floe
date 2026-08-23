@@ -208,6 +208,52 @@ class WorkerContractTests(unittest.TestCase):
                 "kind": "pick", "seq": 9, "found": False, "count": 0,
             })
 
+    def test_coverage_handoff_matches_parent_gates(self):
+        class FakeCoverage:
+            tex0 = (1.0, 1.0)
+
+            def __init__(self):
+                self.calls = []
+
+            def view_rgb(self, *args):
+                self.calls.append(args)
+                return object(), True
+
+        with tempfile.TemporaryDirectory() as directory:
+            binary = os.path.join(directory, "floe-renderd")
+            with open(binary, "w", encoding="ascii") as script:
+                script.write("#!/bin/sh\n")
+            os.chmod(binary, 0o755)
+            with mock.patch.dict(os.environ, {
+                "FLOE_RENDERD_BIN": binary,
+            }, clear=False):
+                worker = RustRenderWorker(FakeCache(directory))
+            coverage = FakeCoverage()
+            worker._coverage = coverage
+            job = {
+                "coverage": True, "cut_px": 3.0,
+                "bbox": (0, 0, 100, 50), "w": 100, "h": 50,
+                "visible": [(2, 0)],
+            }
+            with mock.patch("floe.coverage.composite",
+                            return_value=b"coverage-png") as composite:
+                self.assertEqual(
+                    worker._apply_coverage("/tmp/frame.png", b"base", job),
+                    b"coverage-png")
+            composite.assert_called_once()
+            self.assertEqual(coverage.calls[0][6], {(2, 0)})
+            self.assertIs(coverage.calls[0][7], worker._colors)
+
+            no_cut = dict(job, cut_px=0.0)
+            self.assertEqual(
+                worker._apply_coverage("/tmp/frame.png", b"base", no_cut),
+                b"base")
+            coverage.tex0 = (1000.0, 1000.0)
+            self.assertEqual(
+                worker._apply_coverage("/tmp/frame.png", b"base", job),
+                b"base")
+            self.assertEqual(len(coverage.calls), 1)
+
     def test_rejects_invalid_environment_limits(self):
         with tempfile.TemporaryDirectory() as directory:
             binary = os.path.join(directory, "floe-renderd")
@@ -298,6 +344,17 @@ class RealDaemonIntegrationTests(unittest.TestCase):
             first_png = first_frames[-1]["png"]
             self._assert_query_parity(cache, worker, bbox)
 
+            if os.path.isfile(os.path.join(cache.dir, "design.ovc")):
+                cut_job = dict(
+                    base_job, gen=2, cut_px=3.0, coverage=False)
+                worker.submit(cut_job)
+                cut_png = self._frames_through_settled(
+                    worker, 2)[-1]["png"]
+                worker.submit(dict(cut_job, gen=3, coverage=True))
+                coverage_png = self._frames_through_settled(
+                    worker, 3)[-1]["png"]
+                self.assertNotEqual(coverage_png, cut_png)
+
             solid = "\n".join(["*" * 16] * 16)
             worker.submit({
                 "kind": "recolor",
@@ -310,9 +367,9 @@ class RealDaemonIntegrationTests(unittest.TestCase):
             })
             worker.submit({"kind": "mono", "on": True})
             second_job = dict(
-                base_job, gen=2, depth=3, frames=True, labels=True)
+                base_job, gen=4, depth=3, frames=True, labels=True)
             worker.submit(second_job)
-            second_frames = self._frames_through_settled(worker, 2)
+            second_frames = self._frames_through_settled(worker, 4)
             self.assertNotEqual(second_frames[-1]["png"], first_png)
             self.assertIn("labels", second_frames[-1])
             self.assertNotIn("labels_truncated", second_frames[-1])
@@ -323,8 +380,8 @@ class RealDaemonIntegrationTests(unittest.TestCase):
             # Model a pan/zoom burst: every request advances the strict
             # generation frontier before the previous expensive frame can
             # settle.  Only the latest generation may publish a frame.
-            burst_first = 3
-            burst_last = 102
+            burst_first = 5
+            burst_last = 104
             for generation in range(burst_first, burst_last + 1):
                 shift = generation % 11 - 5
                 shifted_bbox = (

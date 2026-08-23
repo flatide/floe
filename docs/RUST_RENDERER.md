@@ -148,6 +148,15 @@ prefers any in-radius vertex over the nearest edge. Pick retains at most 64
 containing candidates, is boundary-inclusive, sorts by
 `(integer area, layer, datatype)`, and preserves `nth` overlap cycling.
 
+The GUI's optional density coverage (`v`) reuses `design.ovc` and the existing
+NumPy/Pillow post-compositor; it does not invoke KLayout. Every progressive
+Rust PNG is tinted with the live layer palette only when coverage is requested,
+`cut_px > 0`, and the finest OVC texel projects to at most 160 screen pixels.
+The neighborhood-aware mask fills only genuinely blank screen regions, keeping
+speckled vector interiors intact. This display-density feature is distinct from
+8-bit antialiased edge coverage, which remains outside the binary pixel
+contract.
+
 Page loading keeps the parent's file-order batched OVP read, then parses the
 independent page OASIS payloads with up to `jobs` workers. Parse completion
 order cannot change decoded-page order, LRU insertion order, or which corrupt
@@ -200,7 +209,7 @@ A/B run.
 The adapter is implemented at `floe/rust_render.py` and
 accepts the existing `RenderWorker` constructor and queue contract. It owns one
 persistent `floe-renderd`, translates
-render/recolor/repattern/mono/pick/snap jobs,
+render/recolor/repattern/mono/pick/snap jobs and density-coverage frames,
 converts layerprops and live 16x16 fills to deterministic Rust styles, maps
 progressive telemetry back to the existing frame result schema, and cleans up
 its private frame/style directory on shutdown. The default worker target is
@@ -231,14 +240,15 @@ FLOE_RENDERER=rust \
 Pass `--multi` when launching the GTK viewer so the request cannot forward to
 an already-running KLayout process. Current adapter scope is render,
 progressive refinement, visibility, depth, cut, frames, labels, color, fill,
-width, mono, pick, and snap. Label strings, positions, visibility, declutter,
+width, mono, pick, snap, and density coverage. Label strings, positions,
+visibility, declutter,
 block-name fit, and budgets come directly from the existing Rust VFS planner. The
 renderer uses a bundled Noto Sans Mono font with center alignment, deterministic
 integer alpha composition, and 0/90/180/270-degree rotation. It never consults
-the OS or KLayout font engine. Abstract/coverage/clip return explicit errors.
+the OS or KLayout font engine. Abstract/clip return explicit errors.
 Abstract mode is a KLayout-specific feature
 and is intentionally outside the Rust renderer scope; it will not be
-implemented. Coverage and clip remain possible follow-up work.
+implemented. Clip remains follow-up work.
 
 The native Python/GTK viewer runs directly on this Mac; XQuartz is not part of
 the Rust-backend launch path. A real `sample9` full-depth mid-zoom session

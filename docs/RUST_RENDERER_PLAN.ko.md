@@ -2,7 +2,7 @@
 
 상태: M1 완료, M2 정확도·결정성 vertical slice 완료, M3 paint/frame vertical slice 완료,
 M4 text/label vertical slice 완료, M5 daemon/session vertical slice 완료,
-M7 pick/snap vertical slice 완료
+M5 density coverage 완료, M7 pick/snap vertical slice 완료
 목표: 기존 `floe`의 Rust 인덱서·VFS 플래너는 유지하고, KLayout의 런타임
 렌더 책임을 결정적 멀티코어 CPU 렌더러로 대체한다.
 
@@ -75,6 +75,10 @@ M7 pick/snap vertical slice 완료
 - 완료: query는 render worker queue 밖의 stdin 제어 경로에서 게시 scene `Arc`를
   clone하므로 이후 refinement round의 page decode/raster와 병행 가능. 새 round PNG가
   원자 게시될 때만 query scene도 교체되어 미게시 partial을 노출하지 않음
+- 완료: GUI `v`의 OVC density coverage를 Rust progressive PNG에 직접 post-composite.
+  KLayout 없이 기존 NumPy/Pillow의 neighborhood-aware blank mask, live palette/visibility,
+  `cut_px > 0`, finest texel 160px handoff 계약을 그대로 사용. binary geometry의 8-bit
+  edge antialias coverage와는 별도 기능
 - 완료: CLI 반복 `--style L/D,#RRGGBB,FILL[,WIDTH]`, `--frames`, `--mono` 경로와
   OVM layer key→index 공개 매핑
 - 완료: strict monotonic generation cancellation. plan/decode/scene/raster/PNG 경계,
@@ -134,7 +138,7 @@ M7 pick/snap vertical slice 완료
   17/290, 17/159, 21/122, 31/99ms. 기본 128은 64 대비 첫 화면 +4ms 대신 final
   -37ms여서 유지. 같은 영역 100세대 1000×700 pan burst는 stale frame 0,
   최신 세대 3 frame, pending job 0
-- 다음: 실제 GTK GUI A/B 장기 운용과 coverage/clip 후속 범위
+- 다음: 실제 GTK GUI A/B 장기 운용과 clip 후속 범위
 
 부모의 `data/m1/valmini*.floe`는 현행 OVM v7로 재생성됐으며 M1 smoke/golden
 fixture로 사용한다. `v_j1.floe`, `v_j8.floe`는 과거 M1 비교 산출물이라 v2 상태다.
@@ -196,12 +200,12 @@ OVM/OVP 포맷은 바뀌지 않는다.
 - RGBA 출력과 결정적 PNG encoding
 - Python `RenderWorker` 호환 adapter
 - 현재 화면 `FrameScene` 기반 pick/snap
+- OVC density coverage의 KLayout-free PNG post-composite
 - 성능/메모리/취소 telemetry
 
 ### 2.2 후속이지만 KLayout 완전 제거 전에 필요한 범위
 
 - GUI/CLI clip의 Rust exact OASIS 출력
-- 필요성이 확인될 경우 coverage 표시 경로
 
 ### 2.3 제외 범위
 
@@ -636,6 +640,9 @@ Rust 회귀 테스트를 완료했다. 실제 KLayout style PNG 자동 대조도
 coverage를 적용하지 않으며, Calibre/KLayout 목표 화면이 이를 요구한다는 실측이
 나올 때만 범위를 다시 연다.
 
+여기서 제외한 edge coverage는 OVC density overview와 다르다. `design.ovc` density
+post-composite는 M5 adapter에서 구현되어 GUI의 `v` 토글로 동작한다.
+
 작업:
 
 - 완료: path stroker와 extension/join rounding, 원 spine 중심선
@@ -683,7 +690,7 @@ Rust 실행·goto pan/zoom·frames/labels 상태 검증은 통과했다. 독립 
 - 완료: `floe-renderd` protocol/session/PNG handoff
 - 완료: 기존 `RenderWorker` API를 구현하는 in-tree Rust adapter
 - 완료: 부모의 최소 `FLOE_RENDERER=klayout|rust` opt-in hook
-- coverage.py post-composite 유지
+- 완료: coverage.py OVC density post-composite 유지(Rust progressive frame 연결)
 - 완료: 기존 GUI status schema로 Rust phase stats 전달
 
 종료 gate:
@@ -738,7 +745,8 @@ Rust 실행·goto pan/zoom·frames/labels 상태 검증은 통과했다. 독립 
 3. 완료: `test: 100-generation cancellation soak + KLayout style oracle automation`
 4. 완료: `path: operating-input inventory + unsupported-path hard failure`
 5. 완료: `query: published FrameScene pick/snap + KLayout oracle parity`
-6. `parallel: consider daemon-lifetime pool only if thread startup is measurable`
+6. 완료: `coverage: OVC density post-composite + off/on integration gate`
+7. `parallel: consider daemon-lifetime pool only if thread startup is measurable`
 
 progressive/adapter vertical slice의 완료 정의였던 `page_prio` refinement, 100회
 pan/zoom burst의 stale publish 0, 기존 GUI job/result schema를 유지한 opt-in Rust
@@ -766,6 +774,7 @@ source/OASIS/KLayout oracle을 함께 추가해 범위를 다시 연다.
 | KLayout style oracle | PX 13 + style 14, jobs 1/8 | 허용 edge 외 RGB 완전 일치 |
 | frame | 4밴드 collision fixture | gray < design < white |
 | pick/snap | 동일 VFS scene + KLayout service oracle | found/좌표/도형/순환 dict 동일 |
+| OVC density | 동일 cut view coverage off/on | vector 보존, blank density 합성 |
 | cancellation | 100 zoom/pan generation | stale publish 0 |
 | corrupt input | ovm/ovp offset·length 오류와 page OASIS 손상 | panic 없이 명시 오류 |
 | memory | 큰 page/repetition | configured budget 준수 |
