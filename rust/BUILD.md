@@ -1,6 +1,6 @@
-# floe-index 빌드 안내 (리눅스 서버)
+# floe Rust runtime 빌드 안내 (리눅스 서버)
 
-`sh build-linux.sh` 한 번에 산출물 두 개가 나온다:
+`sh build-linux.sh`는 각 Rust runtime binary를 GNU와 musl 두 형식으로 만든다:
 
 - `dist/floe-index-linux-gnu` — **glibc 동적 빌드, 권장.** 병렬
   인덱싱이 musl 대비 ~40% 빠르다 (MAIN09 실측 60s vs 97s — glibc의
@@ -11,6 +11,8 @@
   폴백.** glibc 버전과 무관하게 어떤 x86_64 리눅스에서든 실행된다.
   rustc 내장 rust-lld가 링크하므로 gcc 등 시스템 패키지가 전혀
   필요 없다.
+
+동일 suffix로 `floe-renderd`(GUI Rust backend), `floe-render-cli`(headless oracle), `path-inventory`도 함께 생성된다.
 
 의존 크레이트는 순수 Rust에 전부 `vendor/`로 동봉되어 **빌드 중
 crates.io 접속이 없다**. 인터넷이 필요한 것은 Rust 툴체인
@@ -32,6 +34,7 @@ cd floe/rust
 sh build-linux.sh
 #   -> dist/floe-index-linux-gnu     (권장, + .sha256)
 #   -> dist/floe-index-linux-x86_64  (정적 폴백, + .sha256)
+#   -> 같은 suffix의 floe-renderd/floe-render-cli/path-inventory
 ```
 
 ## B. 완전 오프라인 서버 (소스 zip 반입 빌드)
@@ -72,7 +75,7 @@ sh build-linux.sh        # vendor/ 동봉, 네트워크 불필요
 ./dist/floe-index-linux-gnu --version    # 버전 번호로 반입분 확인
 ```
 
-gnu 툴체인 tarball에 gnu용 std가 들어 있어 두 산출물 모두 오프라인
+gnu 툴체인 tarball에 gnu용 std가 들어 있어 모든 산출물을 오프라인
 으로 빌드된다 (gnu 링크에 필요한 gcc만 서버에 있어야 한다).
 
 ## 확인
@@ -84,6 +87,8 @@ sha256sum -c dist/floe-index-linux-gnu.sha256
 sha256sum -c dist/floe-index-linux-x86_64.sha256
 ./dist/floe-index-linux-gnu scan some.oas 16      # 스모크
 ```
+
+`floe-renderd-linux-*`는 Python runtime 옆에 `floe-renderd` 이름으로 배치하거나 `FLOE_RENDERD_BIN`으로 지정한다.
 
 반입한 바이너리가 어떤 빌드인지는 실행 시 첫 줄 스탬프로 확인한다:
 `[floe-index <버전> [<git>] (gnu)]` / `(musl-static)`. gnu 바이너리가

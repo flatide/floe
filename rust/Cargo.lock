@@ -68,6 +68,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "floe-render-cli"
+version = "0.1.0"
+dependencies = [
+ "floe-render-core",
+]
+
+[[package]]
+name = "floe-render-core"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
+ "flate2",
+ "floe-oasis",
+ "floe-ovm",
+ "floe-tiler",
+ "floe-vfs",
+]
+
+[[package]]
+name = "floe-renderd"
+version = "0.1.0"
+dependencies = [
+ "floe-render-core",
+]
+
+[[package]]
 name = "floe-tiler"
 version = "0.1.0"
 dependencies = [

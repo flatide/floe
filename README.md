@@ -728,6 +728,38 @@ alias floe="/opt/floe/venv/bin/python -m floe"
   무시하고 전체 재빌드. 타일링 중 워커 전원이 외부에서 죽으면(3분간
   busy 0) 잃어버린 타일을 자동 재디스패치한다.
 
+## Rust CPU renderer (opt-in)
+
+KLayout의 단일 `Layout` 인스턴스와 delta `Layout.read` 병목을 피하는 결정적
+멀티코어 CPU renderer가 `rust/render-core`, `rust/renderd`, `rust/render-cli`에
+포함된다. 기존 OVM/OVP planner 결과를 직접 소비하며 page read 뒤 독립 OASIS
+payload decode와 2D image tile raster를 worker 여러 개로 병렬 수행한다. GPU는
+사용하지 않으며 동일 요청은 worker 수와 무관하게 byte-identical PNG를 만든다.
+
+```sh
+cd rust
+cargo build --release -p floe-renderd -p floe-render-cli
+cd ..
+FLOE_RENDERER=rust .venv/bin/python -m floe view --multi chip.oas
+```
+
+기본 backend는 계속 KLayout이고 `FLOE_RENDERER=rust`일 때만 in-tree
+`floe.rust_render.RustRenderWorker`와 persistent `floe-renderd`를 사용한다. 개발
+트리에서는 `rust/target/release/floe-renderd`를 자동 탐색하므로 별도 `PYTHONPATH`나
+worker 설정이 필요 없다. 지원 범위, 정확도 계약, 성능 실측과 운영 knob는
+[`docs/RUST_RENDERER.md`](docs/RUST_RENDERER.md), 구현 순서는
+[`docs/RUST_RENDERER_PLAN.ko.md`](docs/RUST_RENDERER_PLAN.ko.md)에 정리했다.
+abstract는 KLayout 고유 기능이므로 Rust 범위에서 제외하며, 지원하지 않는 요청이나
+PATH를 조용히 누락하지 않고 명시적 오류로 반환한다.
+
+검증:
+
+```sh
+.venv/bin/python tools/validate_rust_renderer.py
+.venv/bin/python tools/validate_klayout_oracle.py --jobs 1
+.venv/bin/python tools/validate_klayout_oracle.py --jobs 8
+```
+
 ## Rust 인덱서 (floe-index)
 
 `rust/` 워크스페이스의 네이티브 인덱서. **Python `floe index`를 대체**하며

@@ -809,6 +809,42 @@ def _render_service(src, req, res, latest=None, options=None):
             vc.stop()
 
 
+def make_render_worker(cache, stream_kb=None, stream_target_ms=500,
+                       debug=False):
+    """Create the selected render backend without changing GUI callers.
+
+    KLayout remains the default and rollback path. The Rust backend is imported
+    only when explicitly selected, keeping ordinary KLayout startup unchanged.
+    """
+    backend = os.environ.get("FLOE_RENDERER", "klayout").strip().lower()
+    if backend in ("", "klayout"):
+        worker_type = RenderWorker
+    elif backend == "rust":
+        target = os.environ.get(
+            "FLOE_RUST_WORKER",
+            "floe.rust_render:RustRenderWorker")
+        module_name, separator, type_name = target.partition(":")
+        if not separator or not module_name or not type_name:
+            raise RuntimeError(
+                "FLOE_RUST_WORKER must be MODULE:TYPE, got %r" % target)
+        try:
+            import importlib
+            module = importlib.import_module(module_name)
+            worker_type = getattr(module, type_name)
+        except (ImportError, AttributeError) as exc:
+            raise RuntimeError(
+                "cannot load Rust render worker %r: %s" %
+                (target, exc)) from exc
+        if not callable(worker_type):
+            raise RuntimeError(
+                "Rust render worker %r is not callable" % target)
+    else:
+        raise RuntimeError(
+            "FLOE_RENDERER must be klayout or rust, got %r" % backend)
+    return worker_type(cache, stream_kb=stream_kb,
+                       stream_target_ms=stream_target_ms, debug=debug)
+
+
 class RenderWorker:
     """Runs the klayout render service in a separate process."""
 

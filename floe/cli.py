@@ -333,7 +333,7 @@ def _render_drc_errors(args, c):
     Prints `local<TAB>global<TAB>path` per file."""
     import queue as _queue
     from . import drc as drc_mod
-    from .service import RenderWorker
+    from .service import make_render_worker
     d = drc_mod.load_db(args.drc)
     ci = _drc_rule_index(d, args.drc_rule)
     ch = d.checks[ci]
@@ -367,7 +367,7 @@ def _render_drc_errors(args, c):
         stem, ext = safe, ".png"
     has_st = hasattr(d, "get_status")
     legend = _drc_layer_legend(c, layers)
-    w = RenderWorker(c)
+    w = make_render_worker(c)
     w.start()
     try:
         gen = 0
@@ -528,8 +528,8 @@ def cmd_probe(args):
     (this fails too) or the display side (this passes)."""
     import queue as _queue
     c = open_cache(args.src, args=args)
-    from .service import RenderWorker
-    w = RenderWorker(c)
+    from .service import make_render_worker
+    w = make_render_worker(c)
     w.start()
     print(f"[probe] service spawned (pid {w._proc.pid})")
     bb = c.meta["bbox"]

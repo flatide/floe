@@ -23,7 +23,7 @@ from . import __version__
 from . import cache as cache_mod
 from . import drc as drc_mod
 from . import fillpat
-from .service import (RenderWorker, DETAIL_PX, DETAIL_LEVELS,
+from .service import (make_render_worker, DETAIL_PX, DETAIL_LEVELS,
                       DEFAULT_DETAIL)
 from .viewport import live_caps
 
@@ -1531,7 +1531,7 @@ class Viewer:
             self.worker.stop()
             self.worker = None
         if cache is not None:
-            self.worker = RenderWorker(
+            self.worker = make_render_worker(
                 cache, stream_kb=self.stream_kb,
                 stream_target_ms=self.stream_target_ms,
                 debug=self.render_debug)

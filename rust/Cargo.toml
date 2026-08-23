@@ -1,6 +1,16 @@
 [workspace]
 resolver = "2"
-members = ["oasis", "tiler", "ovm", "vfs", "cli", "dbg"]
+members = [
+    "oasis",
+    "tiler",
+    "ovm",
+    "vfs",
+    "cli",
+    "dbg",
+    "render-core",
+    "render-cli",
+    "renderd",
+]
 
 [workspace.package]
 edition = "2021"

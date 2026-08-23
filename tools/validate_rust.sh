@@ -33,6 +33,7 @@ if [ -z "$SRC" ]; then
 fi
 (cd rust && PATH="$HOME/.cargo/bin:$PATH" \
     cargo build --release 2>/dev/null >/dev/null)
+(cd rust && PATH="$HOME/.cargo/bin:$PATH" cargo test --workspace)
 OUT="${SRC%.oas}_rust.tiles"
 .venv/bin/python tools/validate_rust_scan.py "$SRC"
 .venv/bin/python tools/validate_rust_tiles.py "$SRC" "$OUT"
@@ -79,4 +80,11 @@ rm -f "$VOUT.buildlog"
 # SVRF subset parser: preprocessing / derivation closure / check
 # extraction / end-to-end vs gen_drcdb --svrf
 .venv/bin/python tools/validate_svrf.py
+# in-tree CPU renderer: Python queue contract plus independent
+# KLayout pixel oracle at deterministic serial/parallel settings
+PYTHONDONTWRITEBYTECODE=1 FLOE_RENDERER=rust FLOE_RUST_ROUND_PAGES=4 \
+    FLOE_INTEGRATION_SOURCE="$SRC" FLOE_INTEGRATION_CACHE="$VOUT" \
+    .venv/bin/python tools/validate_rust_renderer.py
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python tools/validate_klayout_oracle.py --jobs 1
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python tools/validate_klayout_oracle.py --jobs 8
 echo "RUST VALIDATION: ALL OK ($SRC)"
