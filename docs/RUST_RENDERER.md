@@ -286,7 +286,7 @@ settled, and no partial file or pending adapter job remained.
 
 The operational knobs are `FLOE_RENDERD_BIN`, `FLOE_RUST_JOBS` (page decode,
 default up to 8 host CPUs), `FLOE_RUST_RASTER_JOBS` (default up to 4 and never
-above decode jobs), `FLOE_RUST_BUDGET_MB` (1024), `FLOE_RUST_ROUND_PAGES` (128),
+above decode jobs), `FLOE_RUST_BUDGET_MB` (1024), `FLOE_RUST_ROUND_PAGES` (1024),
 `FLOE_RUST_TILE_PX` (384), and `FLOE_RUST_LABEL_PX` (14, whole-pixel range
 6..96). The raw daemon fallback remains one shared jobs value and 128px when
 the new fields are omitted. `FLOE_RUST_OPEN_TIMEOUT_S` and
@@ -341,6 +341,11 @@ benchmark accepts `--detail low|medium|high` and includes a
 `hotspot_revisit` case. On an 858x789 `sample9` detail-high hotspot, the first
 frame measured 198ms while the exact revisit after one intervening frame took
 6ms with raster and PNG encode both zero.
+The floe2 adapter uses 1024 miss pages per interactive round. A field pan with
+744 misses previously produced six cumulative raster/PNG passes (54 reported
+image tiles for a nine-tile framebuffer) and took 936ms. The larger product
+batch preserves the frozen previous frame until one settled result; the raw
+daemon fallback remains 128 and requests above 1024 misses still refine.
 Abstract mode is a KLayout-specific feature
 and is intentionally outside the Rust renderer scope; it will not be
 implemented.

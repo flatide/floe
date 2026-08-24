@@ -200,6 +200,10 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "FLOE_RUST_RASTER_JOBS": "3",
                 "FLOE_RUST_LABEL_PX": "18",
             }, clear=False):
+                # validate_rust.sh deliberately forces four-page rounds for its
+                # progressive integration cases.  This unit instead exercises
+                # the product default emitted when no override is present.
+                os.environ.pop("FLOE_RUST_ROUND_PAGES", None)
                 worker = RustRenderWorker(FakeCache(directory))
             worker._work_dir = directory
             worker._style_epoch = 3
@@ -219,6 +223,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertIn("style_epoch=3", commands[0])
             self.assertIn("round_paths=1", commands[0])
             self.assertIn("jobs=3 decode_jobs=4 tile_px=384", commands[0])
+            self.assertIn("round_pages=1024", commands[0])
             self.assertIn("labels=0", commands[0])
             self.assertIn("font_px=22", commands[0])
             fallback_job = dict(job, gen=8)

@@ -29,7 +29,7 @@ canonical이며 여기서 중복 추적하지 않는다.
    trace에서 회귀가 없는 경우에만 승인한다.
 
 현재 floe2 제품 기본값은 page decode `jobs=min(8, host CPUs)`, raster
-`jobs=min(4, decode jobs)`, `tile_px=384`, `round_pages=128`이다. daemon의
+`jobs=min(4, decode jobs)`, `tile_px=384`, `round_pages=1024`이다. daemon의
 하위 호환 protocol fallback은 raster/decode 공통 jobs와 128px tile을 유지한다.
 환경변수 `FLOE_RUST_JOBS`, `FLOE_RUST_RASTER_JOBS`, `FLOE_RUST_TILE_PX`로
 각 값을 독립 재현할 수 있다.
@@ -50,7 +50,7 @@ canonical이며 여기서 중복 추적하지 않는다.
 FLOE_RUST_JOBS=8 \
 FLOE_RUST_RASTER_JOBS=4 \
 FLOE_RUST_TILE_PX=384 \
-FLOE_RUST_ROUND_PAGES=128 \
+FLOE_RUST_ROUND_PAGES=1024 \
   .venv/bin/python -m floe2 view data/sample9.oas
 ```
 
@@ -182,6 +182,19 @@ PNG 27.0)에서 한 화면을 사이에 둔 exact 재방문 6ms(raster/PNG 0, pu
 감소했다. 다른 좌표·크기·depth/cut/layer/style/font/mono는 cache miss이며 정상
 raster 경로를 탄다. decoded page가 퇴거된 경우에도 cache를 억지로 쓰지 않는다.
 
+### 3.7 cold pan의 반복 raster 제거
+
+700µm 화면에서 위로 한 번 이동한 현장 trace는 신규 744 pages를 128씩 6 round로
+나눴다. 860x804/384px 화면의 실제 image tile은 9개인데 누적 telemetry가 54개였고,
+load 16ms에 비해 누적 raster 748ms + PNG 135.7ms + publish 26.3ms로 total 936ms가
+됐다. 같은 화면의 floe는 301ms였다. 이전 frame이 frozen preview로 계속 보이는
+interactive GUI에서 이 6개 partial의 first-paint 이득은 작고 settled 비용만 키웠다.
+
+floe2 제품 round 기본을 1024 pages로 올렸다. 같은 방향의 local detail-high trace는
+128-page 406ms에서 1024-page 220ms로 줄었고, 4096-page 228ms보다도 나쁘지 않았다.
+raw daemon protocol fallback 128과 `FLOE_RUST_ROUND_PAGES` override는 유지한다.
+1024를 넘는 매우 큰 miss 집합에는 progressive/cancellation이 계속 적용된다.
+
 ## 4. 이슈 목록
 
 | ID | 우선순위 | 상태 | 요약 | 다음 판정 |
@@ -194,6 +207,7 @@ raster 경로를 탄다. decoded page가 퇴거된 경우에도 cache를 억지�
 | F2R-06 | P3 | `BLOCKED` | render마다 OS thread 생성 | startup_us가 병목일 때만 pool |
 | F2R-07 | P1 | `DONE` | OVC coverage post-composite 회귀 | 제품 경로 제거 gate 유지 |
 | F2R-08 | P1 | `DONE` | exact 재방문도 full raster/PNG 반복 | bounded PNG+scene 복원 gate 완료 |
+| F2R-09 | P1 | `DONE` | 744-page pan에서 6회 full raster/PNG | 제품 round 1024 승인 |
 
 ## 5. 상세 이슈와 수용 기준
 
@@ -328,6 +342,15 @@ CLI/UI/request/Rust worker에서 제거했으며 공유 cache의 `design.ovc`는
   기존 fsync+atomic rename 경로로 게시
 - gate: exact 두 번째 generation의 PNG bytes 동일, raster/png 0,
   `frame_cache_hit=1`, 복원 뒤 KLayout pick/snap parity 유지
+
+### F2R-09 — interactive cold-miss round (`DONE`)
+
+- 원인: 128-page decode round마다 지금까지의 누적 scene 전체를 다시 raster/PNG 게시
+- 제품 정책: 1024 miss pages까지 single settled frame. 그 이상에서만 progressive
+- 근거: GUI는 새 frame을 기다리는 동안 직전 완성 frame을 frozen preview로 표시하므로
+  sub-second 작업의 partial PNG가 검은 화면을 막아 주는 역할을 하지 않음
+- gate: adapter 기본 wire `round_pages=1024`, benchmark `--round-pages` 기본과 일치,
+  1024 초과 unit/cancellation progressive 계약 유지
 
 ## 6. 남은 착수 순서
 

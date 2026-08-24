@@ -111,7 +111,8 @@ M5 density coverage 폐기(2026-08-25), M7 pick/snap 완료, M8 exact clip verti
 - 완료: PNG same-directory 임시 파일 write/sync/rename과 cancellation frontier의
   직렬 commit; 실패·취소 시 임시 파일 정리
 - 완료: cache-aware `page_prio` progressive refinement. cache hit는 첫 scene에 모두
-  포함하고 miss만 기본 128 page budget으로 decode하며, 절반 이하의 마지막 tail은
+  포함하고 miss만 daemon fallback 128/floe2 제품 1024 page budget으로 decode하며,
+  절반 이하의 마지막 tail은
   앞 round와 합침. 같은 generation의 `round/final/partial` frame을 원자 게시하고
   새 generation이 남은 round를 취소. `decode_pages`는 전체 상한,
   `round_pages`는 miss round 상한
@@ -124,6 +125,9 @@ M5 density coverage 폐기(2026-08-25), M7 pick/snap 완료, M8 exact clip verti
   decoded-page 전량 resident 조건에서 `FrameScene`만 재구성해 query snapshot을
   교체하고 raster/PNG encode 없이 cached PNG를 atomic publish. old scene Arc는
   보관하지 않아 page budget을 우회하지 않음
+- 완료: floe2 interactive miss round 기본 128→1024. 744-page pan의 6회 누적
+  raster/PNG를 한 번으로 합치고, raw daemon fallback 128 및 1024 초과 progressive는
+  유지
 - 완료: 부모 정확도 계약 P-a(골든 edge Chebyshev 1px band), P-b(4-connected
   component 보존), P-c(area drift 제한) 반영
 - 검증: 2D tile 전환 후 PX1~PX5 13개 실제 Rust 후보를 재생성해 모두
@@ -579,7 +583,7 @@ stdin EOF와 `quit`도 frontier를 최대로 올려 현재 render/clip을 끝까
 ```text
 open cache=/abs/design.oas.floe budget_mb=1024 jobs=8
 style epoch=3 path=/tmp/floe-style-3.tsv
-render gen=42 view=x0,y0,x1,y1 w=1922 h=1082 depth=full cut=3 exact=0 layers=all frames=on mono=off jobs=4 decode_jobs=8 tile_px=384 decode_pages=512 round_pages=128 round_paths=0 style_epoch=3 out=/tmp/floe-frame-42.png
+render gen=42 view=x0,y0,x1,y1 w=1922 h=1082 depth=full cut=3 exact=0 layers=all frames=on mono=off jobs=4 decode_jobs=8 tile_px=384 decode_pages=512 round_pages=1024 round_paths=0 style_epoch=3 out=/tmp/floe-frame-42.png
 cancel before_gen=43
 info
 quit
@@ -606,7 +610,8 @@ dropped gen=40 reason=stale
 error gen=42 code=limit message=...
 ```
 
-`round_pages` 기본값은 128이며 한 round에서 새로 읽을 최대 cache-miss page 수다.
+daemon protocol `round_pages` fallback은 128, floe2 adapter 제품 기본은 1024이며
+한 round에서 새로 읽을 최대 cache-miss page 수다.
 cache hit는 개수와 무관하게 첫 scene에 모두 포함하며 마지막 miss tail이 budget의
 절반 이하면 앞 round와 합친다. `jobs`는 raster worker, `decode_jobs`는 page decode
 worker이고 후자를 생략하면 하위 호환으로 `jobs`를 공통 사용한다.

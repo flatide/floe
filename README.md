@@ -785,7 +785,8 @@ persistent `floe-renderd`다. `FLOE_RENDERER=klayout`을 포함한 다른 backen
 제품 기본은 cold page decode 8 workers, viewport raster 4 workers와 384px tile이다.
 `FLOE_RUST_JOBS`, `FLOE_RUST_RASTER_JOBS`, `FLOE_RUST_TILE_PX`로 각각 바꿀 수
 있다. cache hit page는 첫 frame에 전부 포함하므로 warm 재방문은 page 수만으로
-refinement하지 않는다. 최근 exact viewport 3개는 bounded daemon cache가 query
+refinement하지 않는다. interactive miss round는 1024 pages이고, 최근 exact
+viewport 3개는 bounded daemon cache가 query
 scene과 PNG를 함께 복원해 raster/PNG encode를 생략한다.
 abstract는 KLayout 고유 기능이므로 Rust 범위에서 제외하며, 지원하지 않는 요청이나
 PATH를 조용히 누락하지 않고 명시적 오류로 반환한다.

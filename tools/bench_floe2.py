@@ -409,7 +409,7 @@ def make_parser():
         "--detail", choices=DETAIL_LEVELS,
         default=DETAIL_LEVELS[DEFAULT_DETAIL])
     parser.add_argument("--budget-mb", type=positive_int, default=1024)
-    parser.add_argument("--round-pages", type=positive_int, default=128)
+    parser.add_argument("--round-pages", type=positive_int, default=1024)
     parser.add_argument("--tile-px", type=positive_int, default=128)
     parser.add_argument("--timeout", type=positive_int, default=600)
     parser.add_argument("--renderd", help="explicit floe-renderd binary")
