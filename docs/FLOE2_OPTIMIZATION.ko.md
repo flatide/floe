@@ -195,6 +195,45 @@ floe2 제품 round 기본을 1024 pages로 올렸다. 같은 방향의 local det
 raw daemon protocol fallback 128과 `FLOE_RUST_ROUND_PAGES` override는 유지한다.
 1024를 넘는 매우 큰 miss 집합에는 progressive/cancellation이 계속 적용된다.
 
+같은 현장 동작을 제품 기본으로 재측정한 결과는 floe 300ms(load 157/draw 143),
+floe2 201ms(load 22/raster 142/PNG 22.4/publish 4.4)였다. 실제 image tile도
+54에서 framebuffer의 정확한 개수인 9로 줄었다. 표시된 Rust raster와 KLayout draw는
+142/143ms로 비슷하지만 전자는 raster만, 후자는 `save_image()`의 raster+PNG라 같은
+phase는 아니다. page load 절감까지 합친 전체 latency는 floe2가 33% 빨랐다.
+
+### 3.8 exact 밖의 인접 뷰 재사용과 refinement 재설계
+
+사용자 관찰은 exact하지 않은 인접 viewport에서도 floe가 floe2보다 cache hit처럼
+반응한다는 것이다. 아직 고정 pan sweep으로 확인한 결론은 아니지만 코드상 가능한
+구조 차이는 명확하다.
+
+- 공통 GUI는 `last_frame` 하나를 frozen preview로 표시하고, 같은 scale/render state의
+  현재 viewport가 기존 frame 안에 들어올 때 `_covered()`로 새 render를 생략한다.
+  현재 render bbox 여유는 축당 약 2px뿐이므로 backend별 인접 재사용 차이를 설명하지
+  못한다.
+- floe는 하나의 KLayout `Layout`과 `LayoutView`를 세션 내내 유지한다. VFS delta는
+  working layout에 없는 page-cell만 parse/apply하고 resident cell은 남긴다. 따라서
+  인접 pan은 이미 등록된 native cell/hierarchy/spatial 구조를 재사용한다.
+- floe2는 decoded page `Arc`를 LRU에 남기므로 read/decode는 피하지만, viewport마다
+  새 `HierPlan`/`FrameScene`을 조립하고 viewport-local image tile마다 layer/hierarchy를
+  다시 순회해 full framebuffer를 만든다. 최종 PNG cache key도 viewport float bits를
+  포함하므로 조금만 이동해도 miss다.
+- KLayout `LayoutView` 내부의 display-list/bitmap 재사용 범위는 현재 telemetry로
+  보이지 않는다. persistent native scene이 유리하다는 것은 확정이나, 내부 pixel
+  cache가 체감 차이의 얼마를 차지하는지는 별도 A/B 전까지 추정으로 남긴다.
+
+이 문제와 cold refinement는 분리한다. 인접 pan은 same-scale world-aligned retained
+tile/scene cache 문제이고, 대형 cold view는 first-paint/settled scheduling 문제다.
+exact PNG LRU를 넓혀 둘을 함께 해결하지 않는다.
+
+현재 Rust refinement도 미리 만든 PNG에 정밀 geometry를 덧붙이는 방식은 아니다.
+exact hit만 이전 최종 PNG를 재사용하고, frozen preview는 기다리는 동안 보일 뿐이다.
+실제 progressive round는 miss page를 추가 decode한 뒤 누적 `FrameScene` 전체를 다시
+raster하고 full PNG를 새로 만든다. 장기 후보는 page-round PNG가 아니라 page→final
+image-tile dependency를 만든 뒤, 필요한 page가 준비된 tile을 center-first로 한 번만
+병렬 raster하여 raw RGBA/shared framebuffer에 게시하는 방식이다. sub-second 작업은
+이전 frame을 frozen 상태로 유지하고 single final render만 하는 현재 정책을 우선한다.
+
 ## 4. 이슈 목록
 
 | ID | 우선순위 | 상태 | 요약 | 다음 판정 |
@@ -208,6 +247,8 @@ raw daemon protocol fallback 128과 `FLOE_RUST_ROUND_PAGES` override는 유지�
 | F2R-07 | P1 | `DONE` | OVC coverage post-composite 회귀 | 제품 경로 제거 gate 유지 |
 | F2R-08 | P1 | `DONE` | exact 재방문도 full raster/PNG 반복 | bounded PNG+scene 복원 gate 완료 |
 | F2R-09 | P1 | `DONE` | 744-page pan에서 6회 full raster/PNG | 제품 round 1024 승인 |
+| F2R-10 | P1 | `OPEN` | exact 밖 인접 pan은 full viewport raster | pan sweep 후 world-tile prototype 판정 |
+| F2R-11 | P2 | `DESIGN` | page-round refinement가 누적 full PNG 반복 | final-tile streaming 채택 여부 결정 |
 
 ## 5. 상세 이슈와 수용 기준
 
@@ -352,13 +393,89 @@ CLI/UI/request/Rust worker에서 제거했으며 공유 cache의 `design.ovc`는
 - gate: adapter 기본 wire `round_pages=1024`, benchmark `--round-pages` 기본과 일치,
   1024 초과 unit/cancellation progressive 계약 유지
 
+### F2R-10 — same-scale 인접 viewport retained 재사용 (`OPEN`)
+
+확정된 현재 경계:
+
+- GUI `last_frame`/`_covered()`는 floe와 floe2 공통이며 넓은 인접 cache가 아니다.
+- floe는 persistent KLayout `Layout`/`LayoutView`와 resident page-cell을 유지한다.
+- floe2의 decoded-page hit는 raw geometry read/decode만 줄이고, 새 viewport의 scene
+  traversal/raster/PNG는 줄이지 않는다.
+- exact frame cache는 zoom 복귀에는 유효하지만 좌표가 다른 인접 pan에는 맞지 않는다.
+
+먼저 같은 zoom/detail/depth/layer에서 warm settle 후 X/Y로 화면 폭의
+`1/16, 1/8, 1/4`만큼 이동하고 되돌아오는 trace를 각각 3회 측정한다. floe는
+plan/new/apply/draw/total, floe2는 plan/cache hit/scene/raster/PNG/publish/total과
+process CPU를 함께 기록한다. 진단용으로 같은 KLayout working `Layout`에서 persistent
+`LayoutView`와 매 요청 새 `LayoutView`도 비교해 native retained renderer의 기여를
+분리한다.
+
+구현 후보는 viewport-local 384px tile이 아니라 world/scale에 고정된 RGBA tile LRU다.
+key에는 world tile 좌표, scale, depth/cut, visible layer, style epoch, frame/mono 상태를
+넣는다. label declutter는 viewport 의존이므로 geometry tile과 분리한다. 384px RGBA
+64개는 약 36MiB이며 이 수준의 명시 상한 안에서 시작한다. zoom 변경은 miss로 처리하고
+현재 exact frame cache는 정확한 zoom 복귀용으로 유지한다.
+
+수용 gate:
+
+- same-scale 인접 pan에서 `world_tile_hit/miss`를 계측하고 겹치는 tile을 다시 raster하지
+  않음.
+- 대표 1/8-width pan의 settled total 중앙값이 현 full-raster보다 20% 이상 개선되고,
+  exact/cold trace는 10% 넘게 회귀하지 않음.
+- speckle device phase, hierarchy/geometry edge, layer paint order가 jobs/tile 수와 무관하게
+  기존 PNG와 byte-identical.
+- cache는 page/generation budget을 우회하지 않고 style/depth/layer/scale 변경에서 정확히
+  무효화됨.
+
+### F2R-11 — PNG 없는 multi-thread final-tile refinement (`DESIGN`)
+
+목표는 큰 cold view의 first paint를 유지하면서 같은 framebuffer를 round마다 다시
+그리지 않는 것이다. 다음 구조는 후보이며 아직 제품 결정이 아니다.
+
+1. 전체 viewport plan과 transformed page→image-tile dependency를 한 번 만든다.
+2. page를 decode pool에서 병렬 로드한다.
+3. 필요한 page가 모두 준비된 final tile을 center-first raster queue에 넣는다.
+4. raster worker가 각 tile을 정확히 한 번 완성하고 generation-tagged raw RGBA/shared
+   framebuffer에 게시한다.
+5. interactive GUI는 tile-ready dirty rect만 합성한다. headless/export만 final PNG를
+   한 번 encode하고 기존 atomic publish 계약을 탄다.
+
+새로 decode된 page만 이전 pixels 위에 덧칠하는 방식은 채택하지 않는다. 새 page의
+geometry가 기존 pixel보다 아래 paint plane에 놓일 수 있고 opaque speckle/outline/frame
+순서도 있어 단순 incremental alpha composite는 정확하지 않다. 각 tile은 모든 의존
+page가 준비된 뒤 최종 paint order로 한 번 그려야 한다.
+
+결정 전에 query 계약도 고정해야 한다. 안전한 초기안은 partial tile이 보이는 동안
+pick/snap은 이전 settled scene을 유지하고, 모든 tile 완료 시 새 `FrameScene`과 화면을
+함께 전환하는 것이다. 부분 화면에 대한 tile별 query snapshot은 복잡도가 커 첫 구현
+범위에서 제외한다.
+
+수용 gate 후보:
+
+- generation당 final image tile raster 횟수는 tile 수 이하이고 누적 full-frame pass는 0.
+- direct-final 대비 settled overhead 10% 이하이면서 장시간 fixture first paint는 목표
+  시간 안에 도착.
+- jobs 1/4/8, tile 완료 순서와 무관하게 final RGBA/PNG bytes 동일.
+- cancel 이후 stale tile/scene publish 0, raw framebuffer와 tile-ready 상태의 bounded 정리.
+- GUI 경로의 intermediate PNG encode/write/sync/rename은 0이고 headless final atomic
+  publish는 유지.
+
+F2R-03의 work bin/transform 공유는 F2R-10의 world tile과 F2R-11의 dependency graph가
+공통으로 요구하는 선행 작업이다.
+
 ## 6. 남은 착수 순서
 
-1. F2R-03 frame work bin/transform 재사용으로 새로운 viewport의 단일-worker total을
+1. F2R-10의 fixed-scale pan sweep과 persistent/new KLayout `LayoutView` 진단으로 인접
+   cache 체감을 수치화한다.
+2. F2R-03 frame work bin/transform 재사용으로 새로운 viewport의 단일-worker total을
    floe의 95% 안으로 낮춘다. exact 재방문 cache를 회귀시키지 않는 경우에만 편입한다.
-2. F2R-06은 thread startup 실측이 frame의 5%를 넘을 때만 수행한다.
-3. 대표 실칩 trace에서 4-worker tail imbalance가 확인될 때만 bounded adaptive tile/jobs를
-   다시 연다.
+3. 같은 work bin 위에서 F2R-10 world-aligned tile LRU를 작게 prototype하고 field trace
+   20% gate를 넘을 때만 제품화한다.
+4. 1024-page를 넘는 장시간 cold fixture로 F2R-11 final-tile streaming의 first/settled
+   이득을 측정한 뒤 protocol 변경 여부를 결정한다. 500~700ms 이하 작업에는 refinement를
+   만들지 않는다.
+5. F2R-06은 thread startup 실측이 frame의 5%를 넘을 때만 수행한다. 대표 실칩에서
+   4-worker tail imbalance가 확인될 때만 bounded adaptive tile/jobs를 다시 연다.
 
 각 완료 항목은 이 표의 상태, before/after 중앙값, 실행 명령, 적용 커밋과 자동 gate를
 같이 갱신한다.
