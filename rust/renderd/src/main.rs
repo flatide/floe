@@ -20,6 +20,7 @@ const DEFAULT_ROUND_PAGES: usize = 128;
 const MAX_JOBS: u16 = 256;
 const SNAP_SHAPE_CAP: usize = 400;
 const PICK_CANDIDATE_CAP: usize = 64;
+const QUERY_MEMBER_CAP: usize = 400;
 
 struct PublishedScene {
     scene: Arc<FrameScene>,
@@ -837,6 +838,7 @@ fn handle_snap(shared: &SharedPublishedScene, command: SnapCommand, responses: &
             command.radius,
             command.visible_layers.as_deref(),
             SNAP_SHAPE_CAP,
+            QUERY_MEMBER_CAP,
         )?;
         snap_scene(&published.scene, &request)
     })();
@@ -886,6 +888,7 @@ fn handle_pick(shared: &SharedPublishedScene, command: PickCommand, responses: &
             command.radius,
             command.visible_layers.as_deref(),
             PICK_CANDIDATE_CAP,
+            QUERY_MEMBER_CAP,
         )?;
         let pick = pick_scene(&published.scene, &request, command.nth)?;
         let Some(candidate) = pick.candidate else {
@@ -964,6 +967,7 @@ fn scene_query_request(
     radius: i64,
     visible_layers: Option<&[String]>,
     shape_cap: usize,
+    member_cap: usize,
 ) -> Result<SceneQueryRequest, String> {
     let selected: Option<BTreeSet<u32>> = visible_layers
         .map(|specs| {
@@ -997,6 +1001,7 @@ fn scene_query_request(
         radius,
         layers,
         shape_cap,
+        member_cap,
     })
 }
 

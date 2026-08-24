@@ -385,6 +385,8 @@ recolor: 행 스와치 재생성(set_color) + meta 갱신 + 개인 layerprops
 
 - pick: 화면 워킹셋에서 점 포함 도형 최소면적 순(_PICK_CAP 64),
   nth 순환. 프레임/라벨 셀(FRAMES/LABELS 프리픽스)은 픽 제외.
+- Rust pick/snap 공통: page bbox 선행 prune, 비가시 Pts까지 포함해 query당
+  repetition member 400개 상한.
 - snap: 반경 내 vertex 우선, edge 수선(투영) 차선(_SNAP_CAP 400).
 - clip: probe(exact) 경로로 영역 저장. 계측은 절대 LOD/컷/격자를
   거치지 않는다(프로브 강제 0).

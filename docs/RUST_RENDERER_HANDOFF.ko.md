@@ -48,7 +48,11 @@ fixture는 `docs/RENDERER-TESTS.ko.md`가 canonical source다.
 - rectangle/polygon/path, hierarchy, One/Grid/Pts repetition, frame/wash,
   speckle/custom fill/outline/mono의 결정적 CPU raster
 - 번들 글꼴 label, live GUI/CLI font size, 합성 quarter-turn label rotation
-- 게시 `FrameScene` 기반 bounded pick/snap; query는 다음 decode/raster와 병행
+- 게시 `FrameScene` 기반 bounded pick/snap; page bbox를 먼저 자르고 query당
+  repetition member 400개/포함 pick 후보 64개를 상한으로 둔다. query는 다음
+  decode/raster와 병행
+- 축퇴 2-D Grid는 렌더/query/clip 공통 전개 전에 명시 오류로 거부하고, 손상
+  OASIS의 point-list 선언 개수는 남은 payload byte보다 클 때 할당 전에 거부
 - OVC density coverage의 KLayout-free PNG post-composite
 - cut=0/full-depth exact clip, rational 교점, KLayout half-tie 규칙, concave component
   분리, single-cell OASIS writer, 공백 경로/UTF-8 cell name atomic publish
@@ -60,6 +64,7 @@ fixture는 `docs/RENDERER-TESTS.ko.md`가 canonical source다.
 최근 연속 커밋:
 
 ```text
+6efefda renderer: complete KLayout-free 0.12 cutover
 62d866f renderer: make Rust the default backend
 f628270 renderer: route headless exports through Rust
 95555a0 renderer: decouple Rust startup from KLayout

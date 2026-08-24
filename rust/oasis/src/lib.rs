@@ -68,6 +68,10 @@ impl<'a> Cur<'a> {
         self.base + self.pos
     }
 
+    pub(crate) fn remaining(&self) -> usize {
+        self.data.len().saturating_sub(self.pos)
+    }
+
     pub(crate) fn byte(&mut self) -> Result<u8> {
         match self.data.get(self.pos) {
             Some(b) => {
@@ -79,7 +83,7 @@ impl<'a> Cur<'a> {
     }
 
     pub(crate) fn bytes(&mut self, n: usize) -> Result<&'a [u8]> {
-        if self.pos + n > self.data.len() {
+        if n > self.remaining() {
             return err(self.here(), "unexpected end of stream (bytes)");
         }
         let s = &self.data[self.pos..self.pos + n];

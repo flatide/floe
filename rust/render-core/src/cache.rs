@@ -546,3 +546,70 @@ fn check_decode_cancelled(guard: Option<(u64, &RenderCancellation)>) -> Result<(
 fn elapsed_us(started: Instant) -> u64 {
     started.elapsed().as_micros().try_into().unwrap_or(u64::MAX)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use floe_oasis::write::W;
+
+    #[test]
+    fn corrupt_page_repetition_count_returns_a_decode_error() {
+        let mut w = W::new();
+        w.out.extend_from_slice(b"%SEMI-OASIS\r\n");
+        w.uint(1);
+        w.string(b"1.0");
+        w.real_f64(1000.0);
+        w.uint(0);
+        for _ in 0..12 {
+            w.uint(0);
+        }
+        w.uint(14);
+        w.string(b"TOP");
+        w.uint(20);
+        w.byte(0x7f); // layer, datatype, width, height, x, y, repetition
+        w.uint(1);
+        w.uint(0);
+        w.uint(10);
+        w.uint(10);
+        w.sint(0);
+        w.sint(0);
+        w.uint(4);
+        w.uint(1 << 40);
+
+        let payload = PagePayload {
+            page_id: 77,
+            meta: PageV {
+                cell: 0,
+                layer_idx: 0,
+                seq: 0,
+                lod: 0,
+                codec: CODEC_OASIS,
+                bbox: BBox {
+                    x0: 0,
+                    y0: 0,
+                    x1: 10,
+                    y1: 10,
+                },
+                file_off: 0,
+                csize: w.out.len() as u32,
+                usize_: w.out.len() as u32,
+                records: 1,
+                lod_page: u32::MAX,
+                members: 1,
+                max_w: 10,
+                max_h: 10,
+                max_min: 10,
+            },
+            bytes: w.out,
+        };
+        let error = match decode_payload(&payload) {
+            Ok(_) => panic!("corrupt page decoded successfully"),
+            Err(error) => error,
+        };
+        assert!(error.contains("decode page 77"), "{error}");
+        assert!(
+            error.contains("repetition x offsets count") && error.contains("remaining bytes"),
+            "{error}"
+        );
+    }
+}

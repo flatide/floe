@@ -157,10 +157,20 @@ orthogonal transforms, repetitions, paths, and planner washes, while excluding
 draw-only frames and live labels. They never load delta OASIS into KLayout and
 never consult a stale KLayout shadow scene. The stdin thread clones the scene
 `Arc` and performs the bounded query while the render worker continues decoding
-and rasterizing later rounds. Snap examines at most 400 touching shapes and
-prefers any in-radius vertex over the nearest edge. Pick retains at most 64
-containing candidates, is boundary-inclusive, sorts by
+and rasterizing later rounds. Query traversal skips decoded pages whose
+cell-local bbox misses the probe and examines at most 400 repetition members,
+including non-visible members of sparse explicit-point repetitions. Snap also
+examines at most 400 touching shapes and prefers any in-radius vertex over the
+nearest edge. Pick retains at most 64 containing candidates, is
+boundary-inclusive, sorts by
 `(integer area, layer, datatype)`, and preserves `nth` overlap cycling.
+
+Renderer repetition traversal rejects collinear or zero-vector two-dimensional
+grids explicitly before enumerating them; the normal one-dimensional grid forms
+remain supported. Page OASIS point-list and explicit-point repetition counts
+are bounded by the remaining payload bytes before any proportional allocation,
+and corrupt payloads return a page decode error rather than attempting an
+unbounded allocation.
 
 The GUI's optional density coverage (`v`) reuses `design.ovc` and the existing
 NumPy/Pillow post-compositor; it does not invoke KLayout. Every progressive

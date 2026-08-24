@@ -1,9 +1,10 @@
 use crate::raster::checked_path_outline;
-use crate::repetition::for_each_visible_offset;
+use crate::repetition::{for_each_visible_offset, for_each_visible_offset_bounded};
 use crate::scene::FrameScene;
 use crate::transform::OrthoTransform;
 use floe_ovm::BBox;
 use floe_vfs::hier::WsKey;
+use std::cell::Cell;
 use std::collections::BTreeSet;
 
 const QUERY_STOP: &str = "__floe_query_cap__";
@@ -18,6 +19,9 @@ pub struct SceneQueryRequest {
     pub layers: Vec<SceneQueryLayer>,
     /// Snap: maximum shapes examined. Pick: maximum containing candidates.
     pub shape_cap: usize,
+    /// Maximum repetition members examined, including members outside the
+    /// query box. This bounds sparse explicit-point repetitions.
+    pub member_cap: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,6 +41,9 @@ impl SceneQueryRequest {
         }
         if self.shape_cap == 0 {
             return Err("query shape_cap must be positive".to_string());
+        }
+        if self.member_cap == 0 {
+            return Err("query member_cap must be positive".to_string());
         }
         let unique: BTreeSet<_> = self.layers.iter().map(|layer| layer.index).collect();
         if unique.len() != self.layers.len() {
@@ -235,7 +242,14 @@ fn visit_query_shapes(
     request: &SceneQueryRequest,
     visit: impl FnMut(SceneShape) -> Result<(), String>,
 ) -> Result<(), String> {
-    match visit_scene_shapes(scene, request.view(), &request.layers, visit) {
+    let member_budget = Cell::new(request.member_cap);
+    match visit_scene_shapes_impl(
+        scene,
+        request.view(),
+        &request.layers,
+        Some(&member_budget),
+        visit,
+    ) {
         Err(error) if error == QUERY_STOP => Ok(()),
         other => other,
     }
@@ -245,6 +259,16 @@ pub(crate) fn visit_scene_shapes(
     scene: &FrameScene,
     view: BBox,
     layers: &[SceneQueryLayer],
+    visit: impl FnMut(SceneShape) -> Result<(), String>,
+) -> Result<(), String> {
+    visit_scene_shapes_impl(scene, view, layers, None, visit)
+}
+
+fn visit_scene_shapes_impl(
+    scene: &FrameScene,
+    view: BBox,
+    layers: &[SceneQueryLayer],
+    member_budget: Option<&Cell<usize>>,
     mut visit: impl FnMut(SceneShape) -> Result<(), String>,
 ) -> Result<(), String> {
     for &layer in layers {
@@ -255,6 +279,7 @@ pub(crate) fn visit_scene_shapes(
             scene.top(),
             OrthoTransform::identity(),
             &mut Vec::new(),
+            member_budget,
             &mut visit,
         )?;
     }
@@ -269,6 +294,7 @@ fn visit_cell_layer(
     key: WsKey,
     world_transform: OrthoTransform,
     path: &mut Vec<WsKey>,
+    member_budget: Option<&Cell<usize>>,
     visit: &mut impl FnMut(SceneShape) -> Result<(), String>,
 ) -> Result<(), String> {
     if path.contains(&key) {
@@ -300,6 +326,9 @@ fn visit_cell_layer(
             if page.layer_idx != layer.index {
                 continue;
             }
+            if !page.bbox.intersects(&local_view) {
+                continue;
+            }
             let geometry = page
                 .doc
                 .cells
@@ -329,7 +358,7 @@ fn visit_cell_layer(
                     x1,
                     y1,
                 };
-                for_each_visible_offset(&rect.rep, base, local_view, |ox, oy| {
+                for_each_query_offset(&rect.rep, base, local_view, member_budget, |ox, oy| {
                     emit(
                         SceneShapeKind::Rectangle,
                         transform_points(
@@ -363,7 +392,7 @@ fn visit_cell_layer(
                         page_id
                     )
                 })?;
-                for_each_visible_offset(&polygon.rep, base, local_view, |ox, oy| {
+                for_each_query_offset(&polygon.rep, base, local_view, member_budget, |ox, oy| {
                     let local: Result<Vec<_>, String> = polygon
                         .pts
                         .iter()
@@ -391,18 +420,24 @@ fn visit_cell_layer(
                 let base = polygon_bbox(&outline).ok_or_else(|| {
                     format!("corrupt page {}: path outline is degenerate", page_id)
                 })?;
-                for_each_visible_offset(&path_record.rep, base, local_view, |ox, oy| {
-                    let local: Result<Vec<_>, String> = outline
-                        .iter()
-                        .map(|&(x, y)| {
-                            Ok((checked_add(x, ox, "path x")?, checked_add(y, oy, "path y")?))
-                        })
-                        .collect();
-                    emit(
-                        SceneShapeKind::Polygon,
-                        transform_points(&world_transform, &local?)?,
-                    )
-                })?;
+                for_each_query_offset(
+                    &path_record.rep,
+                    base,
+                    local_view,
+                    member_budget,
+                    |ox, oy| {
+                        let local: Result<Vec<_>, String> = outline
+                            .iter()
+                            .map(|&(x, y)| {
+                                Ok((checked_add(x, ox, "path x")?, checked_add(y, oy, "path y")?))
+                            })
+                            .collect();
+                        emit(
+                            SceneShapeKind::Polygon,
+                            transform_points(&world_transform, &local?)?,
+                        )
+                    },
+                )?;
             }
         }
 
@@ -426,22 +461,49 @@ fn visit_cell_layer(
         let base_place =
             OrthoTransform::place(instance.x, instance.y, instance.rot, instance.flip)?;
         let base_bbox = base_place.apply_bbox(child_bbox)?;
-        for_each_visible_offset(&instance.rep, base_bbox, local_view, |ox, oy| {
-            let x = checked_add(instance.x, ox, "instance x")?;
-            let y = checked_add(instance.y, oy, "instance y")?;
-            let local = OrthoTransform::place(x, y, instance.rot, instance.flip)?;
-            visit_cell_layer(
-                scene,
-                view,
-                layer,
-                instance.child,
-                world_transform.compose(&local)?,
-                path,
-                visit,
-            )
-        })?;
+        for_each_query_offset(
+            &instance.rep,
+            base_bbox,
+            local_view,
+            member_budget,
+            |ox, oy| {
+                let x = checked_add(instance.x, ox, "instance x")?;
+                let y = checked_add(instance.y, oy, "instance y")?;
+                let local = OrthoTransform::place(x, y, instance.rot, instance.flip)?;
+                visit_cell_layer(
+                    scene,
+                    view,
+                    layer,
+                    instance.child,
+                    world_transform.compose(&local)?,
+                    path,
+                    member_budget,
+                    visit,
+                )
+            },
+        )?;
     }
     path.pop();
+    Ok(())
+}
+
+fn for_each_query_offset(
+    rep: &floe_oasis::doc::Rep,
+    base_bbox: BBox,
+    local_view: BBox,
+    member_budget: Option<&Cell<usize>>,
+    visit: impl FnMut(i64, i64) -> Result<(), String>,
+) -> Result<(), String> {
+    match member_budget {
+        Some(remaining) => {
+            for_each_visible_offset_bounded(
+                rep, base_bbox, local_view, remaining, QUERY_STOP, visit,
+            )?;
+        }
+        None => {
+            for_each_visible_offset(rep, base_bbox, local_view, visit)?;
+        }
+    }
     Ok(())
 }
 
@@ -619,18 +681,35 @@ mod tests {
     use std::sync::Arc;
 
     fn page(page_id: u32, layer_idx: u32) -> Arc<DecodedPage> {
-        Arc::new(DecodedPage {
+        page_with_rect(
             page_id,
             layer_idx,
-            bbox: BBox {
+            BBox {
                 x0: 0,
                 y0: 0,
                 x1: 10,
                 y1: 10,
             },
+            (0, 0),
+            Rep::One,
+        )
+    }
+
+    fn page_with_rect(
+        page_id: u32,
+        layer_idx: u32,
+        bbox: BBox,
+        origin: (i64, i64),
+        rep: Rep,
+    ) -> Arc<DecodedPage> {
+        let members = rep.members();
+        Arc::new(DecodedPage {
+            page_id,
+            layer_idx,
+            bbox,
             encoded_bytes: 1,
             records: 1,
-            members: 1,
+            members,
             doc: Doc {
                 unit: 1.0,
                 cells: vec![Cell {
@@ -638,11 +717,11 @@ mod tests {
                     rects: vec![RectRec {
                         layer: layer_idx,
                         dt: 0,
-                        x: 0,
-                        y: 0,
+                        x: origin.0,
+                        y: origin.1,
                         w: 10,
                         h: 10,
-                        rep: Rep::One,
+                        rep,
                     }],
                     ..Cell::default()
                 }],
@@ -653,6 +732,27 @@ mod tests {
                 layer_aliases: HashMap::new(),
             },
         })
+    }
+
+    fn single_page_scene(page: Arc<DecodedPage>) -> FrameScene {
+        let top = (0, REM_FULL);
+        let page_id = page.page_id;
+        let plan = HierPlan {
+            top,
+            wcells: vec![WsCell {
+                key: top,
+                pages: vec![page_id],
+                insts: Vec::new(),
+                frames: Vec::new(),
+                washes: Vec::new(),
+            }],
+            pages: vec![page_id],
+            page_prio: vec![0],
+            stats: HierStats::default(),
+        };
+        let mut bounds = BTreeMap::new();
+        bounds.insert(top, page.bbox);
+        FrameScene::from_test_parts(plan, vec![page], bounds).unwrap()
     }
 
     fn query_scene() -> FrameScene {
@@ -703,6 +803,7 @@ mod tests {
                 },
             ],
             shape_cap: 400,
+            member_cap: 400,
         }
     }
 
@@ -790,5 +891,52 @@ mod tests {
         // Parent KLayout stops as soon as the cap is reached, before it can
         // discover the later numerically lower layer.
         assert_eq!(picked.candidate.unwrap().layer_idx, 0);
+    }
+
+    #[test]
+    fn pick_member_cap_counts_non_visible_explicit_offsets() {
+        let scene = single_page_scene(page_with_rect(
+            0,
+            0,
+            BBox {
+                x0: 0,
+                y0: 0,
+                x1: 510,
+                y1: 510,
+            },
+            (0, 0),
+            Rep::Pts(Arc::from([(100, 100), (200, 200), (500, 500)])),
+        ));
+        let mut capped = request(505, 505);
+        capped.member_cap = 2;
+        let missed = pick_scene(&scene, &capped, 0).unwrap();
+        assert_eq!((missed.count, missed.shapes_tested), (0, 0));
+
+        capped.member_cap = 3;
+        let found = pick_scene(&scene, &capped, 0).unwrap();
+        assert_eq!((found.count, found.shapes_tested), (1, 1));
+    }
+
+    #[test]
+    fn page_bbox_prunes_before_repetition_validation() {
+        let scene = single_page_scene(page_with_rect(
+            0,
+            0,
+            BBox {
+                x0: 1000,
+                y0: 1000,
+                x1: 2020,
+                y1: 2020,
+            },
+            (1000, 1000),
+            Rep::Grid {
+                na: 1 << 31,
+                nb: 1 << 31,
+                va: (1, 1),
+                vb: (2, 2),
+            },
+        ));
+        let picked = pick_scene(&scene, &request(0, 0), 0).unwrap();
+        assert_eq!((picked.count, picked.shapes_tested), (0, 0));
     }
 }

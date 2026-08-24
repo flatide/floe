@@ -69,9 +69,13 @@ M5 density coverage 완료, M7 pick/snap 완료, M8 exact clip vertical slice �
   layer visibility/mono 연동, label glyph 262,144개 명시적 요청 상한
 - 완료: 최신 게시 `FrameScene`을 공유하는 현재 화면 기준 pick/snap. 제품 경로에서
   KLayout layout/delta 등록 없이 page/hierarchy/transform/repetition/path/wash를 직접
-  순회하고 frame/live label은 제외. snap 400 shape, pick 64 candidate 상한과 vertex
-  우선, edge Python ties-even 반올림, boundary-inclusive inside, integer area 및
-  `(area, layer, datatype)`/`nth` 순환 계약을 보존
+  순회하고 frame/live label은 제외. page bbox를 먼저 prune하고 snap 400 shape,
+  pick 64 candidate, query당 repetition member 400개 상한과 vertex 우선, edge Python
+  ties-even 반올림, boundary-inclusive inside, integer area 및 `(area, layer, datatype)`/
+  `nth` 순환 계약을 보존
+- 완료: 렌더/query/clip의 축퇴 2-D Grid를 열거 전에 명시 오류로 거부. page OASIS의
+  point-list/repetition 선언 개수는 남은 payload byte로 검증한 뒤에만 capacity를
+  잡고, renderer `DecodedPage` corrupt-input 회귀로 이를 고정
 - 완료: query는 render worker queue 밖의 stdin 제어 경로에서 게시 scene `Arc`를
   clone하므로 이후 refinement round의 page decode/raster와 병행 가능. 새 round PNG가
   원자 게시될 때만 query scene도 교체되어 미게시 partial을 노출하지 않음
@@ -736,7 +740,8 @@ Rust 실행·goto pan/zoom·frames/labels 상태 검증은 통과했다. 독립 
 
 작업:
 
-- 완료: 현재 게시 FrameScene 기반 bounded pick/snap
+- 완료: 현재 게시 FrameScene 기반 bounded pick/snap. page bbox prune, query당
+  repetition member 400개, pick candidate 64개 상한
 - 제외: exact-page 우선 decode 재시도. 부모의 계약이 “what you see”이므로 미게시
   페이지를 query만을 위해 추가 decode하지 않음
 - 완료: headless `floe render`를 Rust worker로 전환. 기존 solid archival fill,

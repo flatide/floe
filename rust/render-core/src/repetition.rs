@@ -1,6 +1,7 @@
 use floe_oasis::doc::Rep;
 use floe_ovm::BBox;
 use floe_vfs::hier::{grid_ranges, GridVis};
+use std::cell::Cell;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct RepVisit {
@@ -12,14 +13,43 @@ pub(crate) fn for_each_visible_offset(
     rep: &Rep,
     base_bbox: BBox,
     local_view: BBox,
+    visit: impl FnMut(i64, i64) -> Result<(), String>,
+) -> Result<RepVisit, String> {
+    for_each_visible_offset_impl(rep, base_bbox, local_view, None, visit)
+}
+
+pub(crate) fn for_each_visible_offset_bounded(
+    rep: &Rep,
+    base_bbox: BBox,
+    local_view: BBox,
+    remaining: &Cell<usize>,
+    limit_error: &str,
+    visit: impl FnMut(i64, i64) -> Result<(), String>,
+) -> Result<RepVisit, String> {
+    for_each_visible_offset_impl(
+        rep,
+        base_bbox,
+        local_view,
+        Some((remaining, limit_error)),
+        visit,
+    )
+}
+
+fn for_each_visible_offset_impl(
+    rep: &Rep,
+    base_bbox: BBox,
+    local_view: BBox,
+    mut budget: Option<(&Cell<usize>, &str)>,
     mut visit: impl FnMut(i64, i64) -> Result<(), String>,
 ) -> Result<RepVisit, String> {
+    validate_render_repetition(rep)?;
     if base_bbox.is_empty() || local_view.is_empty() {
         return Ok(RepVisit::default());
     }
     let offsets = offset_region(local_view, base_bbox);
     match rep {
         Rep::One => {
+            charge_member(&mut budget)?;
             let visible = offsets.contains_pt(0, 0);
             if visible {
                 visit(0, 0)?;
@@ -47,6 +77,7 @@ pub(crate) fn for_each_visible_offset(
                 .ok_or_else(|| "limit exceeded: visible grid members".to_string())?;
             for i in i0..=i1 {
                 for j in j0..=j1 {
+                    charge_member(&mut budget)?;
                     let ox = i as i128 * va.0 as i128 + j as i128 * vb.0 as i128;
                     let oy = i as i128 * va.1 as i128 + j as i128 * vb.1 as i128;
                     visit(
@@ -63,6 +94,7 @@ pub(crate) fn for_each_visible_offset(
         Rep::Pts(points) => {
             let mut visible = 0u64;
             for &(x, y) in points.iter() {
+                charge_member(&mut budget)?;
                 if offsets.contains_pt(x, y) {
                     visit(x, y)?;
                     visible = visible.saturating_add(1);
@@ -74,6 +106,35 @@ pub(crate) fn for_each_visible_offset(
             })
         }
     }
+}
+
+fn charge_member(budget: &mut Option<(&Cell<usize>, &str)>) -> Result<(), String> {
+    let Some((remaining, limit_error)) = budget.as_mut() else {
+        return Ok(());
+    };
+    let value = remaining.get();
+    if value == 0 {
+        return Err((*limit_error).to_string());
+    }
+    remaining.set(value - 1);
+    Ok(())
+}
+
+fn validate_render_repetition(rep: &Rep) -> Result<(), String> {
+    let Rep::Grid { na, nb, va, vb } = rep else {
+        return Ok(());
+    };
+    if *na <= 1 || *nb <= 1 {
+        return Ok(());
+    }
+    let determinant = va.0 as i128 * vb.1 as i128 - va.1 as i128 * vb.0 as i128;
+    if determinant == 0 {
+        return Err(format!(
+            "unsupported repetition: degenerate 2-D grid {}x{} with vectors ({},{}) and ({},{})",
+            na, nb, va.0, va.1, vb.0, vb.1
+        ));
+    }
+    Ok(())
 }
 
 fn offset_region(view: BBox, object: BBox) -> BBox {
@@ -134,5 +195,45 @@ mod tests {
         assert_eq!(offsets, vec![(0, 0), (0, 0)]);
         assert_eq!(stats.tested, 3);
         assert_eq!(stats.visible, 2);
+    }
+
+    #[test]
+    fn degenerate_2d_grid_returns_an_error_before_enumeration() {
+        let rep = Rep::Grid {
+            na: 1 << 31,
+            nb: 1 << 31,
+            va: (1, 1),
+            vb: (2, 2),
+        };
+        let mut visits = 0;
+        let error = for_each_visible_offset(&rep, bbox(0, 0, 1, 1), bbox(0, 0, 1, 1), |_, _| {
+            visits += 1;
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(visits, 0);
+        assert!(error.contains("degenerate 2-D grid"), "{error}");
+    }
+
+    #[test]
+    fn bounded_pts_counts_non_visible_members() {
+        let rep = Rep::Pts(Arc::from([(100, 100), (200, 200), (0, 0)]));
+        let remaining = Cell::new(2);
+        let mut visits = 0;
+        let error = for_each_visible_offset_bounded(
+            &rep,
+            bbox(0, 0, 1, 1),
+            bbox(0, 0, 1, 1),
+            &remaining,
+            "member cap",
+            |_, _| {
+                visits += 1;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error, "member cap");
+        assert_eq!(remaining.get(), 0);
+        assert_eq!(visits, 0);
     }
 }

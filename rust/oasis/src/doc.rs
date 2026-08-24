@@ -251,10 +251,11 @@ fn read_rep(c: &mut Cur, modal: &mut Option<Rep>) -> Result<Rep> {
         4 | 5 => {
             let xd = c.uint()?;
             let g = if t == 5 { c.uint()? as i64 } else { 1 };
-            let mut pts = Vec::with_capacity(xd as usize + 2);
+            let deltas = bounded_encoded_count(c, xd, 1, "repetition x offsets")?;
+            let mut pts = Vec::with_capacity(checked_capacity(c, deltas, 1)?);
             let mut x = 0i64;
             pts.push((0, 0));
-            for _ in 0..=xd {
+            for _ in 0..deltas {
                 x += c.uint()? as i64 * g;
                 pts.push((x, 0));
             }
@@ -263,10 +264,11 @@ fn read_rep(c: &mut Cur, modal: &mut Option<Rep>) -> Result<Rep> {
         6 | 7 => {
             let yd = c.uint()?;
             let g = if t == 7 { c.uint()? as i64 } else { 1 };
-            let mut pts = Vec::with_capacity(yd as usize + 2);
+            let deltas = bounded_encoded_count(c, yd, 1, "repetition y offsets")?;
+            let mut pts = Vec::with_capacity(checked_capacity(c, deltas, 1)?);
             let mut y = 0i64;
             pts.push((0, 0));
-            for _ in 0..=yd {
+            for _ in 0..deltas {
                 y += c.uint()? as i64 * g;
                 pts.push((0, y));
             }
@@ -287,10 +289,11 @@ fn read_rep(c: &mut Cur, modal: &mut Option<Rep>) -> Result<Rep> {
         10 | 11 => {
             let d = c.uint()?;
             let g = if t == 11 { c.uint()? as i64 } else { 1 };
-            let mut pts = Vec::with_capacity(d as usize + 2);
+            let deltas = bounded_encoded_count(c, d, 1, "repetition point offsets")?;
+            let mut pts = Vec::with_capacity(checked_capacity(c, deltas, 1)?);
             let (mut x, mut y) = (0i64, 0i64);
             pts.push((0, 0));
-            for _ in 0..=d {
+            for _ in 0..deltas {
                 let (dx, dy) = c.g_delta()?;
                 x += dx * g;
                 y += dy * g;
@@ -304,13 +307,49 @@ fn read_rep(c: &mut Cur, modal: &mut Option<Rep>) -> Result<Rep> {
     Ok(rep)
 }
 
+fn bounded_encoded_count(
+    c: &Cur<'_>,
+    declared: u64,
+    encoded_extra: u64,
+    field: &str,
+) -> Result<usize> {
+    let encoded = match declared.checked_add(encoded_extra) {
+        Some(value) => value,
+        None => return err(c.here(), &format!("{} count overflow", field)),
+    };
+    let encoded: usize = match encoded.try_into() {
+        Ok(value) => value,
+        Err(_) => return err(c.here(), &format!("{} count exceeds platform limit", field)),
+    };
+    if encoded > c.remaining() {
+        return err(
+            c.here(),
+            &format!(
+                "{} count {} exceeds {} remaining bytes",
+                field,
+                encoded,
+                c.remaining()
+            ),
+        );
+    }
+    Ok(encoded)
+}
+
+fn checked_capacity(c: &Cur<'_>, encoded: usize, extra: usize) -> Result<usize> {
+    match encoded.checked_add(extra) {
+        Some(value) => Ok(value),
+        None => err(c.here(), "point-list capacity overflow"),
+    }
+}
+
 /// point list -> vertex deltas from the anchor. `closed`: polygon
 /// semantics (implicit closing vertex for the manhattan types);
 /// path point lists are open chains.
 fn read_points(c: &mut Cur, closed: bool) -> Result<Vec<(i64, i64)>> {
     let t = c.uint()?;
-    let n = c.uint()? as usize;
-    let mut pts: Vec<(i64, i64)> = Vec::with_capacity(n + 2);
+    let declared = c.uint()?;
+    let n = bounded_encoded_count(c, declared, 0, "point-list entries")?;
+    let mut pts: Vec<(i64, i64)> = Vec::with_capacity(checked_capacity(c, n, 2)?);
     pts.push((0, 0));
     let (mut x, mut y) = (0i64, 0i64);
     match t {
@@ -1832,6 +1871,25 @@ mod tests {
                 assert_eq!(a.as_ref(), &[(0, 0), (7, 0)]);
             }
             _ => panic!("expected explicit point repetitions"),
+        }
+    }
+
+    #[test]
+    fn oversized_point_repetitions_fail_before_allocation() {
+        use crate::write::W;
+
+        for repetition_type in [4, 5, 6, 7, 10, 11] {
+            let mut w = W::new();
+            w.uint(repetition_type);
+            w.uint(1 << 40);
+            if matches!(repetition_type, 5 | 7 | 11) {
+                w.uint(1);
+            }
+            let error = read_rep(&mut Cur::new(&w.out, 0), &mut None).unwrap_err();
+            assert!(
+                error.to_string().contains("exceeds 0 remaining bytes"),
+                "type {repetition_type}: {error}"
+            );
         }
     }
 }
