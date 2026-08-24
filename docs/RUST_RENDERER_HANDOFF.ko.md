@@ -7,7 +7,8 @@ canonical 저장소: `/Users/journey/Flatide/floe`
 이 문서는 대화 메모리에 의존하지 않고 부모 `floe` 저장소에서 바로 후속 작업을
 재개하기 위한 짧은 인계서다. 상세 설계와 완료 gate는
 `docs/RUST_RENDERER_PLAN.ko.md`, 실행 계약은 `docs/RUST_RENDERER.md`, 정확도
-fixture는 `docs/RENDERER-TESTS.ko.md`가 canonical source다.
+fixture는 `docs/RENDERER-TESTS.ko.md`, 열린 runtime 성능 이슈와 실측 기준선은
+`docs/FLOE2_OPTIMIZATION.ko.md`가 canonical source다.
 
 ## 1. 저장소 소유권
 
@@ -133,6 +134,10 @@ KLayout indexer이므로 KLayout-free portable에서 그대로 호출할 수 없
 - 유지: 안정판 `floe` bundle은 KLayout wheel을 넣은 별도 환경에서 oracle로 검사한다.
 
 ### P3 — 운영 gate
+
+renderer 최적화는 `docs/FLOE2_OPTIMIZATION.ko.md`의 F2R-01부터 추적한다.
+특히 warm cache hit도 전체 선택 page 수로 refine하는 문제와 128px tile의 반복
+hierarchy 순회가 현재 P1이다.
 
 - 완료: `tools/bench_floe2.py`가 실제 GUI와 같은 persistent session에서 fit,
   full-depth mid zoom 첫 방문, hotspot, single-layer near, 5회 warm pan을 고정 순서로

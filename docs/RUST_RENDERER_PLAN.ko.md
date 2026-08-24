@@ -792,6 +792,10 @@ fixture gate는 이 전체 trace를 jobs=1로 실행하며, 최종 운영 수치
 
 ## 12. 다음 착수 작업 목록
 
+runtime 성능의 재현 수치, 고정 이슈 ID와 완료 gate는
+`docs/FLOE2_OPTIMIZATION.ko.md`가 canonical source다. 이 절은 기능 milestone
+순서만 유지하며 최적화 상태를 중복 기록하지 않는다.
+
 현재 vertical slice 이후 작업을 아래 순서로 나눈다.
 
 1. 완료: `session: partial-page progressive refinement rounds`

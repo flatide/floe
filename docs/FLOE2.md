@@ -70,6 +70,10 @@ import하기 때문이며, KLayout wheel은 포함하지 않는다. Python 패�
 
 ## 운영 성능 gate
 
+열린 renderer 최적화의 우선순위, sample9 기준선과 수용 조건은
+`docs/FLOE2_OPTIMIZATION.ko.md`에서 추적한다. 성능 변경은 해당 이슈 ID와
+before/after 수치 및 gate를 함께 갱신한다.
+
 기존 VFS cache에 대해 실제 GUI와 같은 persistent Rust session 흐름을 재현한다.
 fit(depth 0), full-depth 중간 줌 첫 방문, hotspot, single-layer near, 겹치는 5회
 warm pan을 순서대로 실행하며 jobs 1/4/8/16의 단계별 시간과 daemon peak RSS를
