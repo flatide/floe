@@ -137,6 +137,8 @@ KLayout indexer이므로 KLayout-free portable에서 그대로 호출할 수 없
 
 renderer 최적화는 `docs/FLOE2_OPTIMIZATION.ko.md`에서 추적한다. cache-aware
 refinement, 384px 제품 tile, decode 8/raster 4 분리와 publish 계측은 완료됐다.
+exact viewport 재방문은 최근 PNG 3개/64MiB bounded daemon LRU가 decoded page로
+query scene을 복원한 뒤 raster/PNG encode를 생략한다.
 남은 P1은 frame work bin/transform 재사용으로 단일-worker 성능을 floe의 95%
 안으로 낮추는 F2R-03이다.
 

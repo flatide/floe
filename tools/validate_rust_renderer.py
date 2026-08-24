@@ -237,7 +237,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "scene_us": "4000", "raster_us": "5000",
                 "png_us": "6000", "publish_write_us": "7000",
                 "publish_sync_us": "8000", "publish_rename_us": "9000",
-                "cache_hit": "14",
+                "cache_hit": "14", "frame_cache_hit": "1",
                 "resident_bytes": str(15 * 1024 * 1024),
                 "decode_workers": "3", "workers": "4", "tiles": "16",
                 "tile_px": "128",
@@ -268,11 +268,15 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertGreaterEqual(result["adapter_read_ms"], 0.0)
             self.assertEqual(result["cache_hit"], 14)
             self.assertEqual(result["cache_miss"], 2)
+            self.assertEqual(result["frame_cache_hit"], 1)
             self.assertEqual(result["resident_mb"], 15.0)
             self.assertEqual(result["decode_workers"], 3)
             self.assertEqual(result["workers"], 4)
             self.assertEqual(result["render_tiles"], 16)
             self.assertEqual(result["tile_px"], 128)
+            self.assertEqual(result["raster_jobs"], 3)
+            self.assertEqual(result["frame_width"], 20)
+            self.assertEqual(result["frame_height"], 10)
             self.assertEqual(result["text_plan_ms"], 0.25)
             self.assertEqual(result["text_place_records"], 13)
             self.assertEqual(result["labels"], 2)
@@ -522,6 +526,17 @@ class RealDaemonIntegrationTests(unittest.TestCase):
             self.assertNotIn("refining", first_frames[-1])
             self.assertGreater(first_frames[-1]["tiles"], 4)
             first_png = first_frames[-1]["png"]
+
+            # An exact revisit rebuilds/publishes the query scene from the
+            # decoded-page LRU but reuses the bounded final PNG. Raster and
+            # PNG encode must both disappear without weakening pick/snap.
+            worker.submit(dict(base_job, gen=2))
+            revisited = self._frames_through_settled(worker, 2)
+            self.assertEqual(len(revisited), 1)
+            self.assertEqual(revisited[0].get("frame_cache_hit"), 1)
+            self.assertEqual(revisited[0].get("raster_ms"), 0.0)
+            self.assertEqual(revisited[0].get("png_ms"), 0.0)
+            self.assertEqual(revisited[0]["png"], first_png)
             self._assert_query_parity(cache, worker, bbox)
             self._assert_clip_parity(cache, worker, bbox)
 

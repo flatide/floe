@@ -435,6 +435,7 @@ class RustRenderWorker:
             "publish_write_us": 0, "publish_sync_us": 0,
             "publish_rename_us": 0, "adapter_read_us": 0,
             "cache_hit": 0, "render_tiles": 0,
+            "frame_cache_hit": 0,
             "resident_bytes": 0, "decode_workers": 0,
         }
         with self._jobs_lock:
@@ -828,6 +829,8 @@ class RustRenderWorker:
         state["adapter_read_us"] += adapter_read_us
         state["new"] += _wire_int(fields, "cache_miss")
         state["cache_hit"] += _wire_int(fields, "cache_hit")
+        state["frame_cache_hit"] += _wire_int(
+            fields, "frame_cache_hit")
         state["render_tiles"] += _wire_int(fields, "tiles")
         state["resident_bytes"] = max(
             state["resident_bytes"], _wire_int(fields, "resident_bytes"))
@@ -866,11 +869,15 @@ class RustRenderWorker:
             "adapter_read_ms": state["adapter_read_us"] / 1000.0,
             "cache_hit": state["cache_hit"],
             "cache_miss": state["new"],
+            "frame_cache_hit": state["frame_cache_hit"],
             "resident_mb": state["resident_bytes"] / (1024.0 * 1024.0),
             "decode_workers": state["decode_workers"],
             "workers": _wire_int(fields, "workers"),
+            "raster_jobs": self._raster_jobs_count,
             "render_tiles": state["render_tiles"],
             "tile_px": _wire_int(fields, "tile_px"),
+            "frame_width": int(job.get("w", 0)),
+            "frame_height": int(job.get("h", 0)),
             "wait_ms": 0,
             "ms": round((time.monotonic() - state["started"]) * 1000),
             "plan_ms": state["plan_us"] / 1000.0,

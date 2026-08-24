@@ -28,15 +28,16 @@ import floe2  # noqa: E402,F401 - select the Rust-only product first
 from floe import __version__  # noqa: E402
 from floe.cache import Cache  # noqa: E402
 from floe.rust_render import RustRenderWorker  # noqa: E402
-from floe.service import DEFAULT_DETAIL, DETAIL_PX  # noqa: E402
+from floe.service import DEFAULT_DETAIL, DETAIL_LEVELS, DETAIL_PX  # noqa: E402
 
 
 PHASE_FIELDS = (
     "ms", "plan_ms", "read_ms", "decode_ms", "scene_ms", "raster_ms",
     "png_ms", "publish_write_ms", "publish_sync_ms", "publish_rename_ms",
     "publish_ms", "adapter_read_ms", "text_plan_ms", "cache_hit",
-    "cache_miss", "resident_mb",
-    "decode_workers", "workers", "render_tiles", "tile_px", "tiles",
+    "cache_miss", "frame_cache_hit", "resident_mb",
+    "decode_workers", "workers", "raster_jobs", "render_tiles", "tile_px",
+    "frame_width", "frame_height", "tiles",
     "wc_cells", "inst_edges", "frame_rects", "text_place_records",
     "labels", "label_tile_paints", "label_pixel_paints",
 )
@@ -160,6 +161,7 @@ def build_trace(meta, width, height, hotspot, layer_spec, cache):
         ("mid_first", mid, None, None),
         ("hotspot", hot, None, None),
         ("single_layer_near", near, None, single_layer),
+        ("hotspot_revisit", hot, None, None),
     ]
     trace.extend(("warm_pan_%d" % (index + 1), bbox, None, None)
                  for index, bbox in enumerate(pan_windows(mid)))
@@ -260,14 +262,14 @@ def wait_frame(worker, generation, timeout):
         return result
 
 
-def render_trace(worker, trace, width, height, timeout, run_number):
+def render_trace(worker, trace, width, height, detail, timeout, run_number):
     results = []
     for generation, (name, bbox, depth, visible) in enumerate(trace, 1):
         worker.submit({
             "kind": "render", "gen": generation, "scope": "benchmark",
             "bbox": tuple(float(value) for value in bbox), "view": None,
             "w": width, "h": height, "depth": depth,
-            "cut_px": DETAIL_PX[DEFAULT_DETAIL], "lod": False,
+            "cut_px": DETAIL_PX[detail], "lod": False,
             "frames": True, "labels": True, "label_font_px": 14,
             "abstract": False, "visible": visible,
         })
@@ -313,7 +315,8 @@ def benchmark_session(cache, trace, args, jobs, run_number):
     try:
         monitor = start_worker(worker, args.timeout)
         results = render_trace(
-            worker, trace, args.width, args.height, args.timeout, run_number)
+            worker, trace, args.width, args.height,
+            DETAIL_LEVELS.index(args.detail), args.timeout, run_number)
         if monitor is not None:
             monitor.stop()
         peak_mb = monitor.peak_kb / 1024.0 if monitor is not None else 0.0
@@ -402,6 +405,9 @@ def make_parser():
     parser.add_argument("--runs", type=positive_int, default=1)
     parser.add_argument("--width", type=positive_int, default=1200)
     parser.add_argument("--height", type=positive_int, default=800)
+    parser.add_argument(
+        "--detail", choices=DETAIL_LEVELS,
+        default=DETAIL_LEVELS[DEFAULT_DETAIL])
     parser.add_argument("--budget-mb", type=positive_int, default=1024)
     parser.add_argument("--round-pages", type=positive_int, default=128)
     parser.add_argument("--tile-px", type=positive_int, default=128)
@@ -454,6 +460,7 @@ def main(argv=None):
             "viewport": [args.width, args.height],
             "budget_mb": args.budget_mb,
             "round_pages": args.round_pages,
+            "detail": args.detail,
             "tile_px": args.tile_px,
             "hotspot_supplied": args.hotspot is not None,
             "single_layer_selection": layer_mode,

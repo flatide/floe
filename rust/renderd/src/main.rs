@@ -18,6 +18,8 @@ const DEFAULT_BUDGET_MB: u64 = 1024;
 const DEFAULT_JOBS: u16 = 1;
 const DEFAULT_ROUND_PAGES: usize = 128;
 const MAX_JOBS: u16 = 256;
+const MAX_CACHED_FRAMES: usize = 3;
+const MAX_FRAME_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const SNAP_SHAPE_CAP: usize = 400;
 const PICK_CANDIDATE_CAP: usize = 64;
 const QUERY_MEMBER_CAP: usize = 400;
@@ -557,6 +559,7 @@ fn validate_jobs(jobs: u16) -> Result<(), String> {
 struct WorkerState {
     cache: Option<Cache>,
     page_cache: DecodedPageCache,
+    frame_cache: FramePngCache,
     jobs: u16,
     styles: Vec<LayerStyle>,
     style_epoch: Option<u64>,
@@ -567,11 +570,116 @@ impl Default for WorkerState {
         Self {
             cache: None,
             page_cache: DecodedPageCache::new(DEFAULT_BUDGET_MB * 1024 * 1024),
+            frame_cache: FramePngCache::default(),
             jobs: DEFAULT_JOBS,
             styles: Vec::new(),
             style_epoch: None,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FrameCacheKey {
+    view: [u64; 4],
+    width: u32,
+    height: u32,
+    depth: u32,
+    cut_px: u64,
+    exact: bool,
+    visible_layers: Option<Vec<String>>,
+    frames: bool,
+    labels: bool,
+    label_font_px: u32,
+    mono: bool,
+    decode_pages: Option<usize>,
+    style_epoch: Option<u64>,
+}
+
+impl FrameCacheKey {
+    fn new(command: &RenderCommand, style_epoch: Option<u64>) -> Self {
+        Self {
+            view: command.view.map(f64::to_bits),
+            width: command.width,
+            height: command.height,
+            depth: command.depth,
+            cut_px: command.cut_px.to_bits(),
+            exact: command.exact,
+            visible_layers: command.visible_layers.clone(),
+            frames: command.frames,
+            labels: command.labels,
+            label_font_px: command.label_font_px.to_bits(),
+            mono: command.mono,
+            decode_pages: command.decode_pages,
+            style_epoch,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct CachedFramePng {
+    png: Arc<Vec<u8>>,
+    labels_truncated: bool,
+}
+
+#[derive(Default)]
+struct FramePngCache {
+    entries: Vec<(FrameCacheKey, CachedFramePng)>,
+    bytes: usize,
+}
+
+impl FramePngCache {
+    fn get(&mut self, key: &FrameCacheKey) -> Option<CachedFramePng> {
+        let index = self
+            .entries
+            .iter()
+            .position(|(candidate, _)| candidate == key)?;
+        let entry = self.entries.remove(index);
+        let value = entry.1.clone();
+        self.entries.push(entry);
+        Some(value)
+    }
+
+    fn insert(&mut self, key: FrameCacheKey, value: CachedFramePng) {
+        if value.png.len() > MAX_FRAME_CACHE_BYTES {
+            return;
+        }
+        if let Some(index) = self
+            .entries
+            .iter()
+            .position(|(candidate, _)| candidate == &key)
+        {
+            let (_, old) = self.entries.remove(index);
+            self.bytes = self.bytes.saturating_sub(old.png.len());
+        }
+        self.bytes = self.bytes.saturating_add(value.png.len());
+        self.entries.push((key, value));
+        while self.entries.len() > MAX_CACHED_FRAMES || self.bytes > MAX_FRAME_CACHE_BYTES {
+            let (_, evicted) = self.entries.remove(0);
+            self.bytes = self.bytes.saturating_sub(evicted.png.len());
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.bytes = 0;
+    }
+}
+
+struct FramePixels {
+    png: Arc<Vec<u8>>,
+    frame_cache_hit: bool,
+    raster_us: u64,
+    png_us: u64,
+    workers_used: u16,
+    tiles: u32,
+    partial: bool,
+    labels_truncated: bool,
+    rectangle_member_paints: u64,
+    polygon_member_paints: u64,
+    path_member_paints: u64,
+    frame_member_paints: u64,
+    label_tile_paints: u64,
+    label_pixel_paints: u64,
 }
 
 fn render_worker(
@@ -778,6 +886,7 @@ fn handle_open(
             let info = cache.info();
             state.cache = Some(cache);
             state.page_cache = DecodedPageCache::new(budget_bytes);
+            state.frame_cache.clear();
             state.jobs = command.jobs;
             state.styles.clear();
             state.style_epoch = None;
@@ -818,6 +927,7 @@ fn handle_style(state: &mut WorkerState, command: StyleCommand, responses: &Send
         Ok(styles) => {
             state.styles = styles;
             state.style_epoch = Some(command.epoch);
+            state.frame_cache.clear();
             respond(
                 responses,
                 format!(
@@ -1156,6 +1266,19 @@ fn run_render(
         .take(command.decode_pages.unwrap_or(usize::MAX))
         .map(|(_, page_id)| page_id)
         .collect();
+    let frame_cache_key = FrameCacheKey::new(command, state.style_epoch);
+    // A cached PNG is useful only when the matching query scene can be
+    // reconstructed entirely from resident decoded pages. This keeps the
+    // displayed frame and pick/snap snapshot synchronized without retaining
+    // old FrameScene Arcs outside the decoded-page budget.
+    let cached_frame = if selected
+        .iter()
+        .all(|page_id| state.page_cache.contains(*page_id))
+    {
+        state.frame_cache.get(&frame_cache_key)
+    } else {
+        None
+    };
     let raster_workers = command.jobs.unwrap_or(state.jobs);
     let decode_workers = command.decode_jobs.or(command.jobs).unwrap_or(state.jobs);
     let raster_request = GeometryRasterRequest {
@@ -1238,30 +1361,65 @@ fn run_render(
         let scene_us = elapsed_us(scene_started);
         check_generation(cancellation, command.generation)?;
 
-        let report = if styles.is_empty() && !command.frames {
-            render_geometry_occupancy_cancellable(
-                &scene,
-                &raster_request,
-                command.generation,
-                cancellation,
-            )?
+        let pixels = if let Some(cached) = cached_frame.as_ref() {
+            FramePixels {
+                png: Arc::clone(&cached.png),
+                frame_cache_hit: true,
+                raster_us: 0,
+                png_us: 0,
+                workers_used: 0,
+                tiles: 0,
+                partial: scene.is_partial(),
+                labels_truncated: cached.labels_truncated,
+                rectangle_member_paints: 0,
+                polygon_member_paints: 0,
+                path_member_paints: 0,
+                frame_member_paints: 0,
+                label_tile_paints: 0,
+                label_pixel_paints: 0,
+            }
         } else {
-            render_geometry_styled_cancellable(
-                &scene,
-                &StyledGeometryRasterRequest {
-                    raster: raster_request,
-                    layers: styles.clone(),
-                    hierarchy_frames: command.frames,
-                    mono: command.mono,
-                },
-                command.generation,
-                cancellation,
-            )?
+            let report = if styles.is_empty() && !command.frames {
+                render_geometry_occupancy_cancellable(
+                    &scene,
+                    &raster_request,
+                    command.generation,
+                    cancellation,
+                )?
+            } else {
+                render_geometry_styled_cancellable(
+                    &scene,
+                    &StyledGeometryRasterRequest {
+                        raster: raster_request,
+                        layers: styles.clone(),
+                        hierarchy_frames: command.frames,
+                        mono: command.mono,
+                    },
+                    command.generation,
+                    cancellation,
+                )?
+            };
+            check_generation(cancellation, command.generation)?;
+            let png_started = Instant::now();
+            let png = Arc::new(report.frame.png_bytes()?);
+            let png_us = elapsed_us(png_started);
+            FramePixels {
+                png,
+                frame_cache_hit: false,
+                raster_us: report.stats.raster_us,
+                png_us,
+                workers_used: report.stats.workers_used,
+                tiles: report.stats.tiles,
+                partial: report.partial,
+                labels_truncated: report.labels_truncated,
+                rectangle_member_paints: report.rectangle_member_paints,
+                polygon_member_paints: report.polygon_member_paints,
+                path_member_paints: report.path_member_paints,
+                frame_member_paints: report.frame_member_paints,
+                label_tile_paints: report.label_tile_paints,
+                label_pixel_paints: report.label_pixel_paints,
+            }
         };
-        check_generation(cancellation, command.generation)?;
-        let png_started = Instant::now();
-        let png = report.frame.png_bytes()?;
-        let png_us = elapsed_us(png_started);
         check_generation(cancellation, command.generation)?;
         let final_round = round_index + 1 == rounds.len();
         let published_output = if command.unique_round_paths && !final_round {
@@ -1274,8 +1432,12 @@ fn run_render(
         } else {
             command.out.clone()
         };
-        let publish_stats =
-            publish_png(&published_output, command.generation, &png, cancellation)?;
+        let publish_stats = publish_png(
+            &published_output,
+            command.generation,
+            pixels.png.as_slice(),
+            cancellation,
+        )?;
         // A successful rename is the generation's linearization point. A
         // later cancellation must not turn an already-published frame into a
         // cancelled response or leave a reported-less partial file behind.
@@ -1289,17 +1451,27 @@ fn run_render(
                 cell_names: Arc::clone(&query_cell_names),
             }));
         }
+        if final_round && !pixels.frame_cache_hit {
+            state.frame_cache.insert(
+                frame_cache_key.clone(),
+                CachedFramePng {
+                    png: Arc::clone(&pixels.png),
+                    labels_truncated: pixels.labels_truncated,
+                },
+            );
+        }
 
         respond(
             responses,
             format!(
-                "frame gen={} round={} final={} png={} partial={} deferred={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_workers={} scene_us={} raster_us={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={}",
+                "frame gen={} round={} final={} png={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_workers={} scene_us={} raster_us={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={}",
                 command.generation,
                 round_index + 1,
                 final_round as u8,
                 published_output,
-                report.partial as u8,
+                pixels.partial as u8,
                 scene.deferred_pages().len(),
+                pixels.frame_cache_hit as u8,
                 state
                     .style_epoch
                     .map(|epoch| epoch.to_string())
@@ -1307,7 +1479,7 @@ fn run_render(
                 planned.stats.plan_us,
                 planned_labels.as_ref().map(|p| p.plan_us).unwrap_or(0),
                 labels.len(),
-                (report.labels_truncated
+                (pixels.labels_truncated
                     || planned_labels
                         .as_ref()
                         .is_some_and(|p| p.stats.truncated)) as u8,
@@ -1319,13 +1491,13 @@ fn run_render(
                 decode_stats.page_decode_us,
                 decode_stats.decode_workers_used,
                 scene_us,
-                report.stats.raster_us,
-                png_us,
+                pixels.raster_us,
+                pixels.png_us,
                 publish_stats.write_us,
                 publish_stats.sync_us,
                 publish_stats.rename_us,
-                report.stats.workers_used,
-                report.stats.tiles,
+                pixels.workers_used,
+                pixels.tiles,
                 command.tile_size,
                 scene.available_pages(),
                 planned.summary.pages,
@@ -1335,12 +1507,12 @@ fn run_render(
                 planned.summary.wc_cells,
                 planned.summary.inst_edges,
                 planned.summary.frame_rects,
-                report.rectangle_member_paints,
-                report.polygon_member_paints,
-                report.path_member_paints,
-                report.frame_member_paints,
-                report.label_tile_paints,
-                report.label_pixel_paints,
+                pixels.rectangle_member_paints,
+                pixels.polygon_member_paints,
+                pixels.path_member_paints,
+                pixels.frame_member_paints,
+                pixels.label_tile_paints,
+                pixels.label_pixel_paints,
             ),
         );
     }
@@ -1365,10 +1537,7 @@ fn refinement_batches(
         }
     }
 
-    let mut batches: Vec<Vec<u32>> = missing
-        .chunks(round_pages)
-        .map(<[u32]>::to_vec)
-        .collect();
+    let mut batches: Vec<Vec<u32>> = missing.chunks(round_pages).map(<[u32]>::to_vec).collect();
     // A tiny final chunk makes first paint barely earlier, then repeats the
     // entire raster and PNG for the accumulated scene. Coalesce a <=50% tail
     // with its predecessor; sample9's 146-page view becomes one 128+18 batch
@@ -1896,6 +2065,44 @@ mod tests {
         covered.sort_unstable();
         assert_eq!(covered, selected);
         assert!(refinement_batches(&[1], 0, |_| false).is_err());
+    }
+
+    #[test]
+    fn frame_png_cache_is_bounded_lru_and_keys_exact_pixels() {
+        let command = render(
+            parse_command(
+                "render gen=1 view=0,0,10,10 w=20 h=20 depth=full cut=0 frames=on labels=on font_px=14 jobs=4 tile_px=384 out=/tmp/a.png",
+            )
+            .unwrap()
+            .unwrap(),
+        );
+        let base = FrameCacheKey::new(&command, Some(7));
+        let value = |byte| CachedFramePng {
+            png: Arc::new(vec![byte; 8]),
+            labels_truncated: false,
+        };
+        let mut cache = FramePngCache::default();
+        let mut keys = Vec::new();
+        for offset in 0..3 {
+            let mut key = base.clone();
+            key.view[0] = (offset as f64).to_bits();
+            cache.insert(key.clone(), value(offset as u8));
+            keys.push(key);
+        }
+        assert_eq!(cache.entries.len(), MAX_CACHED_FRAMES);
+        assert!(cache.get(&keys[0]).is_some());
+
+        let mut newest = base.clone();
+        newest.view[0] = 3.0f64.to_bits();
+        cache.insert(newest.clone(), value(3));
+        assert!(cache.get(&keys[1]).is_none());
+        assert!(cache.get(&keys[0]).is_some());
+        assert!(cache.get(&newest).is_some());
+
+        let mut other_font = base.clone();
+        other_font.label_font_px = 15.0f32.to_bits();
+        assert_ne!(base, other_font);
+        assert_ne!(base, FrameCacheKey::new(&command, Some(8)));
     }
 
     #[test]

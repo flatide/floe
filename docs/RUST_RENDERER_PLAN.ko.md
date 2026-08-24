@@ -120,6 +120,10 @@ M5 density coverage 폐기(2026-08-25), M7 pick/snap 완료, M8 exact clip verti
   단계에 공통 적용
 - 완료: raster 전 page local bbox prune, PNG encode와 publish write/sync/rename,
   adapter handoff telemetry. sample9 warm에서 sync는 약 3~6ms라 유지
+- 완료: 최근 settled PNG 3개/합계 64MiB bounded LRU. bit-exact render key와
+  decoded-page 전량 resident 조건에서 `FrameScene`만 재구성해 query snapshot을
+  교체하고 raster/PNG encode 없이 cached PNG를 atomic publish. old scene Arc는
+  보관하지 않아 page budget을 우회하지 않음
 - 완료: 부모 정확도 계약 P-a(골든 edge Chebyshev 1px band), P-b(4-connected
   component 보존), P-c(area drift 제한) 반영
 - 검증: 2D tile 전환 후 PX1~PX5 13개 실제 Rust 후보를 재생성해 모두
@@ -322,11 +326,13 @@ render worker는 다음 round의 병렬 decode/raster를 계속할 수 있다. �
    budget만큼 읽는다. file-order I/O 뒤 독립 OASIS payload를 `decode_jobs`
    worker로 decode한다.
 4. 현재 상주 page 집합과 `HierPlan`으로 immutable `FrameScene`을 만든다.
-5. 화면을 제품 기본 384x384 pixel tile로 분할한다.
-6. worker가 tile마다 모든 paint plane을 정해진 순서로 렌더한다.
-7. tile 결과를 고정 위치에 복사한다. 완료 순서는 결과에 영향을 주지 않는다.
-8. generation이 최신일 때만 PNG를 publish한다.
-9. deferred cache miss가 있으면 다음 refinement round를 수행한다.
+5. exact render key의 최근 PNG가 있고 선택 page가 전부 상주하면 query scene을
+   게시하고 9번으로 간다.
+6. 화면을 제품 기본 384x384 pixel tile로 분할한다.
+7. worker가 tile마다 모든 paint plane을 정해진 순서로 렌더한다.
+8. tile 결과를 고정 위치에 복사한다. 완료 순서는 결과에 영향을 주지 않는다.
+9. generation이 최신일 때만 PNG를 publish한다.
+10. deferred cache miss가 있으면 다음 refinement round를 수행한다.
 
 daemon protocol fallback tile은 128x128이고 floe2 제품 기본은 sample9 재방문
 실측으로 확정한 384x384다. 실제 raster worker 수는

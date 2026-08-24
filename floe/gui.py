@@ -2555,6 +2555,14 @@ class Viewer:
                     if res.get("png_ms") is not None:
                         text += ", png %.1fms/pub %.1fms" % (
                             res["png_ms"], res.get("publish_ms", 0.0))
+                        if res.get("frame_cache_hit"):
+                            text += ", frame-cache"
+                        text += ", rust %dj/%dt@%spx %sx%s" % (
+                            res.get("raster_jobs", 0),
+                            res.get("render_tiles", 0),
+                            res.get("tile_px", 0),
+                            res.get("frame_width", 0),
+                            res.get("frame_height", 0))
                     if res.get("labels_truncated"):
                         text += ", labels partial"
                     # tiles = plan total (resident pages included);

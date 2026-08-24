@@ -94,4 +94,6 @@ total/raster speedup을 기록한다. `--hotspot`을 생략한 개발 fixture �
 기본은 page decode 8 workers, raster 4 workers, 384px tile이며 각각
 `FLOE_RUST_JOBS`, `FLOE_RUST_RASTER_JOBS`, `FLOE_RUST_TILE_PX`로 재현한다.
 cache hit page는 첫 frame에 전부 포함되어 warm 재방문에서 page 수만으로 refine하지
-않는다.
+않는다. 최근 exact viewport 3개는 daemon의 64MiB bounded PNG LRU가 담당한다.
+hit 시 decoded pages로 query scene을 다시 게시한 뒤 raster/PNG encode를 생략하므로
+pick/snap 화면 일치 계약도 유지된다.

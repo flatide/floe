@@ -166,6 +166,22 @@ sample9 결과다. 측정 편차를 고려해도 floe warm의 95% 이내라는 �
 결과는 아니며, Rust는 매 viewport를 다시 raster한다. 다만 현재 사용성 trace에서는
 그 구조 차이를 제한된 병렬성과 더 큰 image tile로 상쇄한다.
 
+### 3.6 exact viewport 재방문 cache
+
+다른 실행 환경의 700→560→700 detail-high 현장 trace는 cache-aware round 뒤에도
+warm 700이 206ms였다. load는 0이지만 raster 158ms + PNG 36.4ms + publish 6.3ms를
+다시 지불해, page cache만으로는 KLayout의 retained-render 이득을 재현하지 못했다.
+
+daemon에 최근 최종 PNG 3개, 합계 최대 64MiB의 LRU를 추가했다. viewport/device
+크기/render state가 bit-exact 일치하고 선택 page가 decoded LRU에 모두 남아 있으면
+`FrameScene`만 재구성·게시하고 raster/PNG encode를 생략한다. scene을 같이 복원하므로
+GUI pixbuf만 재사용할 때 생기는 pick/snap WYSIWYG 불일치가 없다.
+
+858x789 sample9 detail-high hotspot release 실측은 첫 방문 198ms(raster 116.3,
+PNG 27.0)에서 한 화면을 사이에 둔 exact 재방문 6ms(raster/PNG 0, publish 2.8)로
+감소했다. 다른 좌표·크기·depth/cut/layer/style/font/mono는 cache miss이며 정상
+raster 경로를 탄다. decoded page가 퇴거된 경우에도 cache를 억지로 쓰지 않는다.
+
 ## 4. 이슈 목록
 
 | ID | 우선순위 | 상태 | 요약 | 다음 판정 |
@@ -177,6 +193,7 @@ sample9 결과다. 측정 편차를 고려해도 floe warm의 95% 이내라는 �
 | F2R-05 | P2 | `DONE` | jobs=8의 CPU/전력 비용 | decode 8/raster 4 분리 승인 |
 | F2R-06 | P3 | `BLOCKED` | render마다 OS thread 생성 | startup_us가 병목일 때만 pool |
 | F2R-07 | P1 | `DONE` | OVC coverage post-composite 회귀 | 제품 경로 제거 gate 유지 |
+| F2R-08 | P1 | `DONE` | exact 재방문도 full raster/PNG 반복 | bounded PNG+scene 복원 gate 완료 |
 
 ## 5. 상세 이슈와 수용 기준
 
@@ -300,10 +317,22 @@ progressive PNG마다 NumPy/Pillow decode/composite/encode를 반복했다. floe
 CLI/UI/request/Rust worker에서 제거했으며 공유 cache의 `design.ovc`는 무시한다.
 회귀 gate는 `tools/validate_floe2.py`와 `tools/validate_rust_renderer.py`가 소유한다.
 
+### F2R-08 — exact viewport 재방문 (`DONE`)
+
+- key: float viewport bits, framebuffer, depth/cut, exact, layer selection,
+  frames/labels/font, mono, decode cap, style epoch
+- value: 최종 deterministic PNG와 label truncation 상태만 보관. `FrameScene`은 보관하지
+  않아 decoded-page budget을 우회하지 않음
+- bound: 최대 3 frames / 64MiB, style 변경·새 cache open에서 즉시 clear
+- hit: 선택 page가 전부 decoded LRU resident일 때만 scene을 재구성하고 cached PNG를
+  기존 fsync+atomic rename 경로로 게시
+- gate: exact 두 번째 generation의 PNG bytes 동일, raster/png 0,
+  `frame_cache_hit=1`, 복원 뒤 KLayout pick/snap parity 유지
+
 ## 6. 남은 착수 순서
 
-1. F2R-03 frame work bin/transform 재사용으로 단일 worker total을 floe의 95% 안으로
-   낮춘다. 현 제품 기본 성능을 회귀시키지 않는 경우에만 편입한다.
+1. F2R-03 frame work bin/transform 재사용으로 새로운 viewport의 단일-worker total을
+   floe의 95% 안으로 낮춘다. exact 재방문 cache를 회귀시키지 않는 경우에만 편입한다.
 2. F2R-06은 thread startup 실측이 frame의 5%를 넘을 때만 수행한다.
 3. 대표 실칩 trace에서 4-worker tail imbalance가 확인될 때만 bounded adaptive tile/jobs를
    다시 연다.

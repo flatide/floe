@@ -212,6 +212,16 @@ saving 37ms to the final frame. A 100-generation 1000x700 pan burst at that
 setting published zero stale frames, produced three frames for the latest
 generation, and left no pending daemon job.
 
+The daemon also keeps a bounded LRU of the last three settled deterministic
+PNGs, capped at 64 MiB total. An exact request-key revisit can use it only when
+every selected decoded page is still resident. The daemon rebuilds and
+publishes the immutable `FrameScene` for the new generation, then atomically
+publishes the cached PNG with `raster_us=0`, `png_us=0`, and
+`frame_cache_hit=1`. It does not retain old scene Arcs outside the page budget,
+so pick/snap stays synchronized with the visible cached frame. View bits,
+framebuffer size, depth/cut, layers, frames/labels/font, mono, decode cap, and
+style epoch are in the key; style changes and cache open clear the LRU.
+
 The rasterizer uses independently owned 2D tile scratch buffers and dynamic
 atomic work assignment. Tile completion order cannot affect pixels because the
 coordinator copies every tile to its fixed framebuffer position. On the styled
@@ -325,6 +335,12 @@ adapter adds its output-file handoff time. The GUI performance status and
 `tools/bench_floe2.py` expose these fields. Publication still uses `sync_all()`:
 the measured 3--6ms is too small to justify weakening the atomic publication
 contract.
+The GUI line also reports requested raster jobs, actual image tiles, tile size,
+framebuffer dimensions, and `frame-cache` on an exact revisit. The field
+benchmark accepts `--detail low|medium|high` and includes a
+`hotspot_revisit` case. On an 858x789 `sample9` detail-high hotspot, the first
+frame measured 198ms while the exact revisit after one intervening frame took
+6ms with raster and PNG encode both zero.
 Abstract mode is a KLayout-specific feature
 and is intentionally outside the Rust renderer scope; it will not be
 implemented.

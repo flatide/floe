@@ -125,7 +125,7 @@ def validate_runtime(base, fixture):
         check(payload.get("schema") == "floe2-render-benchmark-v1",
               "floe2 benchmark report schema drifted")
         check(len(payload.get("sessions", [])) == 1 and
-              len(payload["sessions"][0].get("results", [])) == 9,
+              len(payload["sessions"][0].get("results", [])) == 10,
               "floe2 benchmark did not cover the complete field trace")
         private_tokens = (str(source), source.name, meta.get("top_cell", ""))
         check(all(not token or token not in report_text
