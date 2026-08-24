@@ -318,6 +318,7 @@ cat > "$B/selfcheck" <<EOF
 HERE=\$(CDPATH= cd -- "\$(dirname -- "\$0")" && pwd)
 RT="\$HERE/runtime"
 LOADERS="\$RT/lib/gdk-pixbuf-2.0/2.10.0/loaders"
+FAILED=0
 echo "host glibc:   \$(ldd --version 2>/dev/null | head -1)"
 echo "arch:         \$(uname -m)   (needs x86_64, glibc >= ${FLOOR})"
 # build the pixbuf loader cache exactly as the launcher does, so the png
@@ -325,7 +326,7 @@ echo "arch:         \$(uname -m)   (needs x86_64, glibc >= ${FLOOR})"
 CACHE=\$(mktemp)
 LD_LIBRARY_PATH="\$RT/lib" GDK_PIXBUF_MODULEDIR="\$LOADERS" \\
     "\$RT/bin/gdk-pixbuf-query-loaders" > "\$CACHE" 2>/dev/null || true
-GI_TYPELIB_PATH="\$RT/lib/girepository-1.0" LD_LIBRARY_PATH="\$RT/lib" \\
+if ! GI_TYPELIB_PATH="\$RT/lib/girepository-1.0" LD_LIBRARY_PATH="\$RT/lib" \\
 GDK_PIXBUF_MODULE_FILE="\$CACHE" FONTCONFIG_FILE="\$HERE/fonts.conf" \\
 PYTHONHOME="\$RT" PYTHONNOUSERSITE=1 \\
 "\$RT/bin/python3" - <<'PY'
@@ -358,29 +359,39 @@ import floe; print("floe:         %s OK" % floe.__version__)
 import ${FLOE_PORTABLE_PRODUCT}
 print("product:      ${FLOE_PORTABLE_PRODUCT} %s OK" % ${FLOE_PORTABLE_PRODUCT}.__version__)
 PY
+then
+    FAILED=1
+fi
 rm -f "\$CACHE"
 if [ -x "\$RT/bin/floe-index" ]; then
     "\$RT/bin/floe-index" >/dev/null 2>&1
-    if [ \$? -eq 2 ]; then
+    INDEX_STATUS=\$?
+    if [ \$INDEX_STATUS -eq 2 ]; then
         echo "floe-index:   OK (runtime/bin)"
     else
         echo "floe-index:   present but failed to run (host glibc?)"
+        FAILED=1
     fi
 else
     echo "floe-index:   MISSING - viewer opens but rendering and"
     echo "              indexing hang (re-deploy runtime/bin/floe-index)"
+    FAILED=1
 fi
 if [ -x "\$RT/bin/floe-renderd" ]; then
     "\$RT/bin/floe-renderd" </dev/null >/dev/null 2>&1
-    if [ \$? -eq 0 ]; then
+    RENDERD_STATUS=\$?
+    if [ \$RENDERD_STATUS -eq 0 ]; then
         echo "floe-renderd: OK (runtime/bin)"
     else
         echo "floe-renderd: present but failed to run (host glibc?)"
+        FAILED=1
     fi
 else
     echo "floe-renderd: MISSING - FLOE_RENDERER=rust unavailable"
+    FAILED=1
 fi
 echo "display:      DISPLAY=\${DISPLAY:-<unset>}  (open test: ./${FLOE_PORTABLE_PRODUCT} view <file.oas>)"
+exit "\$FAILED"
 EOF
 
 cat > "$B/fonts.conf" <<'EOF'
@@ -484,6 +495,8 @@ EOF
 
 chmod +x "$B/$FLOE_PORTABLE_PRODUCT" "$B/selfcheck"
 sh -n "$B/$FLOE_PORTABLE_PRODUCT"; sh -n "$B/selfcheck"
+echo "== assembled ${FLOE_PORTABLE_PRODUCT} runtime selfcheck"
+"$B/selfcheck"
 
 # -- 8. pack ------------------------------------------------------------
 cd "$WORK"

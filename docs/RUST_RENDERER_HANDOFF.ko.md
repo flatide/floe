@@ -116,23 +116,31 @@ KLayout indexer이므로 KLayout-free portable에서 그대로 호출할 수 없
    cache만 재사용하며, 임의 cache 삭제를 추론하지 않는다. 명시한
    `FLOE_INDEX_BIN`이 무효면 다른 후보로 폴스루하지 않는다.
 
-### P2 — KLayout-free portable gate
+### P2 — KLayout-free portable gate (완료: 2026-08-24)
 
-- clean environment에서 Rust index → `info` → `probe` → labels 포함 `render` →
-  UTF-8 cell-name `clip` 순서로 실행한다.
-- Python import hook이 모든 `klayout` import를 거부하는 현재 renderer 통합 검사를
-  index command까지 확장한다.
-- 실제 portable tarball의 selfcheck가 `floe-index`, `floe-renderd`, GTK pixbuf PNG,
-  NumPy/Pillow, `floe`를 검사하되 KLayout을 요구하지 않는지 확인한다.
-- legacy rollback은 KLayout wheel을 넣은 별도 환경에서 계속 oracle로 검사한다.
+- 완료: `tools/validate_floe2.py`가 모든 `klayout` import를 차단한 subprocess에서
+  실제 release Rust index → `info` → `probe` → labels/frame 포함 `render` → UTF-8
+  cell-name `clip`을 공백/UTF-8 source 경로 하나로 연속 실행한다.
+- 완료: clip은 Rust scan 재파싱, render는 PNG magic, 각 단계는 `floe2` product
+  prefix까지 단언한다. 전체 gate는 대형 milestone source가 주어져도 이 lifecycle에
+  복사하지 않고 항상 작은 valmini를 사용한다.
+- 완료: portable selfcheck가 GTK pixbuf PNG, NumPy/Pillow, `floe`/`floe2`,
+  `floe-index`, `floe-renderd`, KLayout 부재를 검사하고 실패를 exit status로
+  집계한다. `make_portable.sh`는 tar 생성 전에 조립된 runtime의 selfcheck를 반드시
+  실행한다. 실제 Linux tarball은 매 build에서 이 gate를 통과해야만 생성된다.
+- 유지: 안정판 `floe` bundle은 KLayout wheel을 넣은 별도 환경에서 oracle로 검사한다.
 
 ### P3 — 운영 gate
 
-- 사용자 실칩에서 native GTK 장기 A/B: fit, full-depth mid zoom 첫 방문, hotspot,
-  single-layer near, warm pan
-- jobs 1/4/8/16의 decode/raster scaling과 peak RSS
-- 기존 문제였던 mid-zoom 첫 방문 9~10초 구간을 `plan/read/decode/scene/raster/png`
-  telemetry로 기록. Rust 경로는 KLayout 단일 Layout 등록 단계가 없어야 한다.
+- 완료: `tools/bench_floe2.py`가 실제 GUI와 같은 persistent session에서 fit,
+  full-depth mid zoom 첫 방문, hotspot, single-layer near, 5회 warm pan을 고정 순서로
+  실행한다. jobs 1/4/8/16, 반복 횟수, viewport, budget을 한 명령으로 통제한다.
+- 완료: adapter가 정확한 `plan/read/decode/scene/raster/png`, cache hit/miss,
+  decoded resident, decode worker/tile 수를 결과 schema에 보존한다. 하네스는 daemon
+  peak RSS와 jobs=1 대비 total/raster speedup까지 privacy-safe JSON으로 기록한다.
+- 남음: 사용자 실칩에서 대표 hotspot/layer를 지정한 `--runs 3` 측정과 native GTK
+  장기 `floe`/`floe2` A/B. 기존 mid-zoom 첫 방문 9~10초가 어느 단계인지 판정하고,
+  Rust 경로에 KLayout 단일 Layout 등록 단계가 없음을 운영 기록으로 확정한다.
 
 ## 5. 검증 명령
 
@@ -165,7 +173,7 @@ cargo test --workspace
 ```
 
 마지막 `sh tools/validate_rust.sh`는 2026-08-24에 `RUST VALIDATION: ALL OK`로
-끝났다. Rust workspace 단위 테스트는 140 passed + 3 ignored, renderer Python
+끝났다. Rust workspace 단위 테스트는 158 passed + 3 ignored, renderer Python
 검사는 13 pure + 1 real integration이며 KLayout jobs 1/8 pixel/style oracle도
 모두 통과했다. 기존 workspace의 일부 unrelated compiler warning은 남아 있지만
 renderer-core/renderd 대상 clippy hard-error는 없다.

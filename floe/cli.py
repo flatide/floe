@@ -1557,8 +1557,9 @@ def main(argv=None, *, prog=None, rust_only=None):
                         "FLOE_THIN_UM - the env var still works; new "
                         "instance only)")
     p.add_argument("--dump", action="store_true",
-                   help="save display-path debug dumps to /tmp/floe_*.png "
-                        "(XQuartz black-view diagnosis; new instance only)")
+                   help="save display-path debug dumps to /tmp/%s_*.png "
+                        "(XQuartz black-view diagnosis; new instance only)"
+                        % prog)
     p.set_defaults(fn=cmd_view)
 
     args = ap.parse_args(argv)

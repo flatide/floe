@@ -444,7 +444,9 @@ class RustRenderWorker:
             "job": dict(job), "output": output,
             "started": time.monotonic(), "new": 0,
             "read_us": 0, "decode_us": 0, "scene_us": 0,
-            "draw_us": 0, "plan_us": 0,
+            "draw_us": 0, "png_us": 0, "plan_us": 0,
+            "cache_hit": 0, "render_tiles": 0,
+            "resident_bytes": 0, "decode_workers": 0,
         }
         with self._jobs_lock:
             self._jobs[generation] = state
@@ -850,7 +852,14 @@ class RustRenderWorker:
         state["decode_us"] += _wire_int(fields, "decode_us")
         state["scene_us"] += _wire_int(fields, "scene_us")
         state["draw_us"] += _wire_int(fields, "raster_us")
+        state["png_us"] += _wire_int(fields, "png_us")
         state["new"] += _wire_int(fields, "cache_miss")
+        state["cache_hit"] += _wire_int(fields, "cache_hit")
+        state["render_tiles"] += _wire_int(fields, "tiles")
+        state["resident_bytes"] = max(
+            state["resident_bytes"], _wire_int(fields, "resident_bytes"))
+        state["decode_workers"] = max(
+            state["decode_workers"], _wire_int(fields, "decode_workers"))
         job = state["job"]
         deferred = _wire_int(fields, "deferred")
         output = {
@@ -868,6 +877,20 @@ class RustRenderWorker:
             "phase_apply": round((state["decode_us"] +
                                   state["scene_us"]) / 1000),
             "draw_ms": round(state["draw_us"] / 1000),
+            # Exact phase telemetry for benchmark/field traces. The rounded
+            # legacy fields above remain the GUI status contract.
+            "read_ms": state["read_us"] / 1000.0,
+            "decode_ms": state["decode_us"] / 1000.0,
+            "scene_ms": state["scene_us"] / 1000.0,
+            "raster_ms": state["draw_us"] / 1000.0,
+            "png_ms": state["png_us"] / 1000.0,
+            "cache_hit": state["cache_hit"],
+            "cache_miss": state["new"],
+            "resident_mb": state["resident_bytes"] / (1024.0 * 1024.0),
+            "decode_workers": state["decode_workers"],
+            "workers": _wire_int(fields, "workers"),
+            "render_tiles": state["render_tiles"],
+            "tile_px": _wire_int(fields, "tile_px"),
             "wait_ms": 0,
             "ms": round((time.monotonic() - state["started"]) * 1000),
             "plan_ms": state["plan_us"] / 1000.0,

@@ -12,15 +12,21 @@
 set -e
 cd "$(dirname "$0")/.."
 SRC=${1:-}
+FLOE2_SMOKE_SRC=${TMPDIR:-/tmp}/floe-valmini/valmini.oas
+mkdir -p "$(dirname "$FLOE2_SMOKE_SRC")"
+# The floe2 lifecycle gate always uses the small deterministic fixture. A
+# caller may pass a 100+GB milestone source as $SRC; copying and re-indexing it
+# merely to test the product shell would be both destructive to time and RAM.
+if [ ! -f "$FLOE2_SMOKE_SRC" ] || \
+   [ tools/gen_valmini.py -nt "$FLOE2_SMOKE_SRC" ]; then
+    rm -rf "$FLOE2_SMOKE_SRC" "$FLOE2_SMOKE_SRC.tiles" \
+        "${FLOE2_SMOKE_SRC%.oas}_rust.tiles"
+    .venv/bin/python tools/gen_valmini.py "$FLOE2_SMOKE_SRC"
+fi
 if [ -z "$SRC" ]; then
-    SRC=${TMPDIR:-/tmp}/floe-valmini/valmini.oas
-    mkdir -p "$(dirname "$SRC")"
-    # regenerate when the generator changed (asset evolves with the
-    # milestones: new record kinds get added here first)
-    if [ ! -f "$SRC" ] || [ tools/gen_valmini.py -nt "$SRC" ]; then
-        rm -rf "$SRC" "$SRC.tiles" "${SRC%.oas}_rust.tiles"
-        .venv/bin/python tools/gen_valmini.py "$SRC"
-    fi
+    SRC=$FLOE2_SMOKE_SRC
+fi
+if [ "$SRC" = "$FLOE2_SMOKE_SRC" ]; then
     # the python .tiles is the meta-parity oracle: refresh it when the
     # python indexer itself changed, not only when the asset did (the
     # layer-palette change tripped this once - stale colors failed
@@ -35,7 +41,7 @@ fi
     cargo build --release 2>/dev/null >/dev/null)
 (cd rust && PATH="$HOME/.cargo/bin:$PATH" cargo test --workspace)
 .venv/bin/python tools/validate_index_cli.py
-.venv/bin/python tools/validate_floe2.py
+.venv/bin/python tools/validate_floe2.py "$FLOE2_SMOKE_SRC"
 OUT="${SRC%.oas}_rust.tiles"
 .venv/bin/python tools/validate_rust_scan.py "$SRC"
 .venv/bin/python tools/validate_rust_tiles.py "$SRC" "$OUT"

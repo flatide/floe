@@ -233,6 +233,10 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "pages": "2", "cache_miss": "2", "plan_us": "1000",
                 "read_us": "2000", "decode_us": "3000",
                 "scene_us": "4000", "raster_us": "5000",
+                "png_us": "6000", "cache_hit": "14",
+                "resident_bytes": str(15 * 1024 * 1024),
+                "decode_workers": "3", "workers": "4", "tiles": "16",
+                "tile_px": "128",
                 "rect_paints": "6", "polygon_paints": "7",
                 "path_paints": "8", "frame_paints": "9",
                 "wc_cells": "10", "inst_edges": "11",
@@ -248,6 +252,18 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertEqual(result["new"], 2)
             self.assertEqual(result["load_ms"], 10)
             self.assertEqual(result["draw_ms"], 5)
+            self.assertEqual(result["read_ms"], 2.0)
+            self.assertEqual(result["decode_ms"], 3.0)
+            self.assertEqual(result["scene_ms"], 4.0)
+            self.assertEqual(result["raster_ms"], 5.0)
+            self.assertEqual(result["png_ms"], 6.0)
+            self.assertEqual(result["cache_hit"], 14)
+            self.assertEqual(result["cache_miss"], 2)
+            self.assertEqual(result["resident_mb"], 15.0)
+            self.assertEqual(result["decode_workers"], 3)
+            self.assertEqual(result["workers"], 4)
+            self.assertEqual(result["render_tiles"], 16)
+            self.assertEqual(result["tile_px"], 128)
             self.assertEqual(result["text_plan_ms"], 0.25)
             self.assertEqual(result["text_place_records"], 13)
             self.assertEqual(result["labels"], 2)

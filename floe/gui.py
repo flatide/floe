@@ -1870,7 +1870,7 @@ class Viewer:
             # diagnosis: exactly what is handed to the screen widget, plus
             # whether the widget itself is sized/mapped (a 0-sized or
             # unmapped Gtk.Image displays nothing without any error)
-            disp.savev("/tmp/floe_disp.png", "png", [], [])
+            disp.savev("/tmp/%s_disp.png" % APP, "png", [], [])
             ia = self.image.get_allocation()
             sys.stderr.write(
                 "[dump] disp %dx%d | image alloc %dx%d at (%d,%d) "
@@ -2473,7 +2473,7 @@ class Viewer:
                 pix = loader.get_pixbuf()
                 if self.dump:
                     # diagnosis: the frame as received from the service
-                    pix.savev("/tmp/floe_frame.png", "png", [], [])
+                    pix.savev("/tmp/%s_frame.png" % APP, "png", [], [])
                 fb = res["bbox"]
                 fspp = (fb[2] - fb[0]) / max(1, pix.get_width())
                 key = self._job_keys.get(res["gen"])
@@ -6772,8 +6772,8 @@ class Viewer:
         self._only_close_button(dlg)
         self._center_on_parent(dlg)
         dlg.set_do_overwrite_confirmation(True)
-        dlg.set_current_name("floe_clip_%s_%s_%s_%sum.oas"
-                             % (um[0], um[1], um[2], um[3]))
+        dlg.set_current_name("%s_clip_%s_%s_%s_%sum.oas"
+                             % (APP, um[0], um[1], um[2], um[3]))
         out = dlg.get_filename() if dlg.run() == Gtk.ResponseType.OK \
             else None
         dlg.destroy()
@@ -6837,6 +6837,30 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
                     stream_kb=stream_kb,
                     stream_target_ms=stream_target_ms,
                     render_debug=render_debug)
+    smoke_ms = os.environ.get("FLOE_GUI_SMOKE_MS")
+    smoke_error = []
+    if smoke_ms is not None:
+        try:
+            smoke_ms = int(smoke_ms)
+        except ValueError:
+            raise SystemExit(
+                "%s: FLOE_GUI_SMOKE_MS must be an integer" % APP)
+        if not 100 <= smoke_ms <= 60000:
+            raise SystemExit(
+                "%s: FLOE_GUI_SMOKE_MS must be 100..60000" % APP)
+
+        def finish_smoke():
+            if cache is not None:
+                if viewer._worker_starting:
+                    smoke_error.append("Rust render cache is still opening")
+                elif viewer.worker is None or not viewer.worker.alive():
+                    smoke_error.append("Rust render worker is not alive")
+                elif viewer.last_frame is None:
+                    smoke_error.append("no GUI frame was displayed")
+            viewer._quit()
+            return False
+
+        GLib.timeout_add(smoke_ms, finish_smoke)
     if drc:
         # NO _drc_window() here: its grab_focus made the BROWSE
         # TreeView auto-select row 0 on focus-in, so --drc startups
@@ -6856,3 +6880,6 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
         pass
     finally:
         viewer._quit()
+    if smoke_error:
+        raise SystemExit("%s: GUI smoke failed: %s" %
+                         (APP, smoke_error[0]))

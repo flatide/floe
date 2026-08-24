@@ -719,6 +719,11 @@ post-composite는 M5 adapter에서 구현되어 GUI의 `v` 토글로 동작한�
 adapter vertical slice는 완료했다. headless parent probe/통합 계약과 native GTK
 Rust 실행·goto pan/zoom·frames/labels 상태 검증은 통과했다. 독립 KLayout/Rust
 자동 oracle도 통과했으며 실제 실칩의 장기 GUI A/B 운용이 남아 있다.
+운영 측정 형식은 `tools/bench_floe2.py`로 고정했다. 같은 daemon session에서
+fit → mid first → hotspot → single-layer near → warm pan을 재현하고 jobs
+1/4/8/16의 정확한 Rust phase와 peak RSS를 source 이름·좌표 없는 JSON으로 남긴다.
+fixture gate는 이 전체 trace를 jobs=1로 실행하며, 최종 운영 수치는 사용자 실칩의
+대표 hotspot/layer를 지정한 3회 반복으로 채운다.
 
 작업:
 
@@ -777,8 +782,9 @@ Rust 실행·goto pan/zoom·frames/labels 상태 검증은 통과했다. 독립 
 
 - 완료(vertical slice): Rust scene/unit fixture와 부모 adapter wire schema
 - 완료(integration): 동일 VFS 작업 집합의 KLayout pick/snap oracle 결과 동치
-- 완료: `floe2 view`, `render`, `probe`, `info`, `clip` import/worker 선택
-  clean-environment selfcheck. 실제 portable bundle 검증은 후속
+- 완료: `floe2` 실제 Rust index → `info` → `probe` → label/frame `render` → UTF-8
+  `clip`의 KLayout-import 차단 lifecycle gate. portable은 tar 생성 전에 조립된
+  runtime selfcheck를 의무 실행
 - 완료: Rust worker는 abstract capability=false, GUI 메뉴/`a` 동작 비활성화.
   안정판 `floe` KLayout worker에서만 abstract capability=true
 - `rg '^import klayout' floe/` 결과가 dev/legacy 경로에만 존재
@@ -801,6 +807,8 @@ progressive/adapter vertical slice의 완료 정의였던 `page_prio` refinement
 pan/zoom burst의 stale publish 0, 기존 GUI job/result schema를 유지한 opt-in Rust
 frame 반환은 모두 충족했다. native GTK Rust 세션의 cold/warm goto와 frames/labels
 상태도 확인했다. 다음 운용 gate는 실제 실칩의 장기 KLayout/Rust GUI A/B다.
+자동 측정은 `tools/bench_floe2.py`의 privacy-safe trace로 준비됐으므로 남은 판정은
+동일 실칩의 대표 hotspot/layer 측정과 장기 GUI 체감 비교다.
 
 PATH inventory 결과 OASIS page의 `PathRec`에는 start/end extension만 있고 별도
 round-cap flag는 없다. 운영 5개 cache에서는 U-turn도 없었다. 따라서 검증되지 않은

@@ -4,6 +4,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -17,10 +18,10 @@ def check(condition, message):
         raise AssertionError(message)
 
 
-def run(env, *args, ok=True):
+def run(env, *args, ok=True, timeout=20):
     result = subprocess.run(
         [sys.executable, "-B", *map(str, args)], cwd=ROOT, env=env,
-        capture_output=True, text=True, timeout=20)
+        capture_output=True, text=True, timeout=timeout)
     if ok and result.returncode:
         raise AssertionError(
             "command failed: %r\nstdout:\n%s\nstderr:\n%s" %
@@ -30,7 +31,107 @@ def run(env, *args, ok=True):
     return result
 
 
-def main():
+def install_import_blocker(directory):
+    blocker = Path(directory) / "blocker"
+    blocker.mkdir()
+    (blocker / "sitecustomize.py").write_text(
+        "import builtins\n"
+        "_real = builtins.__import__\n"
+        "def _guard(name, *args, **kwargs):\n"
+        "    if name == 'klayout' or name.startswith('klayout.'):\n"
+        "        raise RuntimeError('KLayout import forbidden')\n"
+        "    return _real(name, *args, **kwargs)\n"
+        "builtins.__import__ = _guard\n", encoding="utf-8")
+    return blocker
+
+
+def validate_runtime(base, fixture):
+    """Run the complete floe2 CLI lifecycle with KLayout imports blocked."""
+    indexer = ROOT / "rust" / "target" / "release" / "floe-index"
+    renderer = ROOT / "rust" / "target" / "release" / "floe-renderd"
+    check(indexer.is_file(), "release floe-index is not built")
+    check(renderer.is_file(), "release floe-renderd is not built")
+    check(fixture.is_file(), "integration fixture is missing: %s" % fixture)
+
+    with tempfile.TemporaryDirectory(prefix="floe2-runtime-") as td:
+        work = Path(td)
+        blocker = install_import_blocker(work)
+        source = work / "설계 fixture with spaces.oas"
+        shutil.copy2(fixture, source)
+        env = dict(base, FLOE_INDEX_BIN=str(indexer),
+                   FLOE_RENDERD_BIN=str(renderer), FLOE_RUST_ROUND_PAGES="4")
+        env["PYTHONPATH"] = os.pathsep.join((str(blocker), str(ROOT)))
+
+        indexed = run(env, "-m", "floe2", "index", source,
+                      "--jobs", "2", timeout=60)
+        check("[floe2]" in indexed.stdout,
+              "floe2 index output kept the shared floe product prefix")
+        cache = Path(str(source) + ".floe")
+        meta = json.loads((cache / "meta.json").read_text())
+        bbox = meta["bbox"]
+        dbu = float(meta["dbu"])
+
+        info = run(env, "-m", "floe2", "info", source)
+        check("top cell" in info.stdout, "floe2 info omitted cache identity")
+        probe = run(env, "-m", "floe2", "probe", source, timeout=90)
+        check("[probe] OK" in probe.stdout,
+              "floe2 probe did not settle a Rust frame")
+
+        def bbox_arg(inset):
+            x0, y0, x1, y1 = (float(value) for value in bbox)
+            dx, dy = (x1 - x0) * inset, (y1 - y0) * inset
+            values = (x0 + dx, y0 + dy, x1 - dx, y1 - dy)
+            return ",".join("%.12g" % (value * dbu) for value in values)
+
+        png = work / "floe2 labels with spaces.png"
+        rendered = run(
+            env, "-m", "floe2", "render", source,
+            "--bbox", bbox_arg(0), "--px", "257", "--depth", "999",
+            "--frames", "--labels", "--label-font-px", "17",
+            "--out", png, timeout=90)
+        check("[floe2] rendered" in rendered.stdout,
+              "floe2 render output kept the shared floe product prefix")
+        check(png.read_bytes().startswith(b"\x89PNG\r\n\x1a\n"),
+              "floe2 render did not publish a PNG")
+
+        cell_name = "FLOE2_한글"
+        clipped = work / "UTF-8 clip with spaces.oas"
+        clip_result = run(
+            env, "-m", "floe2", "clip", source,
+            "--bbox", bbox_arg(0.2), "--cell-name", cell_name,
+            "--out", clipped, timeout=90)
+        check("[floe2] clip saved" in clip_result.stdout,
+              "floe2 clip output kept the shared floe product prefix")
+        check(cell_name.encode("utf-8") in clipped.read_bytes(),
+              "UTF-8 clip cell name was not serialized")
+        scanned = subprocess.run(
+            [str(indexer), "scan", str(clipped), "1"], cwd=ROOT,
+            capture_output=True, text=True, timeout=30)
+        check(scanned.returncode == 0,
+              "Rust parser rejected floe2 clip: %s" % scanned.stderr)
+
+        report = work / "anonymous floe2 benchmark.json"
+        benchmark = run(
+            env, ROOT / "tools" / "bench_floe2.py", source,
+            "--jobs", "1", "--runs", "1", "--width", "257",
+            "--height", "171", "--round-pages", "4",
+            "--renderd", renderer, "--out", report, timeout=90)
+        check("privacy-safe report:" in benchmark.stdout,
+              "floe2 benchmark did not finish")
+        report_text = report.read_text(encoding="utf-8")
+        payload = json.loads(report_text)
+        check(payload.get("schema") == "floe2-render-benchmark-v1",
+              "floe2 benchmark report schema drifted")
+        check(len(payload.get("sessions", [])) == 1 and
+              len(payload["sessions"][0].get("results", [])) == 9,
+              "floe2 benchmark did not cover the complete field trace")
+        private_tokens = (str(source), source.name, meta.get("top_cell", ""))
+        check(all(not token or token not in report_text
+                  for token in private_tokens),
+              "floe2 benchmark report exposed design identity")
+
+
+def main(fixture=None):
     base = os.environ.copy()
     base.pop("FLOE_PRODUCT", None)
     base.pop("FLOE_RENDERER", None)
@@ -91,16 +192,7 @@ print(json.dumps([_renderer_backend(), instance.APP,
 
     with tempfile.TemporaryDirectory(prefix="floe2-cli-") as td:
         work = Path(td)
-        blocker = work / "blocker"
-        blocker.mkdir()
-        (blocker / "sitecustomize.py").write_text(
-            "import builtins\n"
-            "_real = builtins.__import__\n"
-            "def _guard(name, *args, **kwargs):\n"
-            "    if name == 'klayout' or name.startswith('klayout.'):\n"
-            "        raise RuntimeError('KLayout import forbidden')\n"
-            "    return _real(name, *args, **kwargs)\n"
-            "builtins.__import__ = _guard\n", encoding="utf-8")
+        blocker = install_import_blocker(work)
         log = work / "calls.json"
         binary = work / "floe-index"
         binary.write_text(
@@ -121,8 +213,12 @@ print(json.dumps([_renderer_backend(), instance.APP,
             "vfs", str(source), str(source) + ".floe", "--jobs", "2",
         ], "floe2 changed the canonical Rust index argv")
 
+    if fixture is not None:
+        validate_runtime(base, Path(fixture).resolve())
     print("FLOE2 PRODUCT VALIDATION: ALL OK")
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 2:
+        raise SystemExit("usage: validate_floe2.py [fixture.oas]")
+    main(sys.argv[1] if len(sys.argv) == 2 else None)
