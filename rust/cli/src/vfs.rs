@@ -733,6 +733,33 @@ const P2_TASK_MIN_BYTES: u64 = 2 * MIB;
 /// P2 hard cap on frontier tasks per layer
 const P2_TASK_CAP: usize = 32;
 
+/// Borrow one runnable planning slot without blocking. Cell planners, P1/P2
+/// split helpers and LOD helpers all draw from the same counter, so the number
+/// of CPU-active planning tasks never exceeds `--jobs`. A persistent cell
+/// planner returns its slot while it is stalled beyond the ordered plan window
+/// and must borrow it again before touching the next cell (#76).
+fn try_borrow_plan_slot(
+    free: &std::sync::atomic::AtomicIsize,
+) -> bool {
+    loop {
+        let cur = free.load(std::sync::atomic::Ordering::Relaxed);
+        if cur <= 0 {
+            return false;
+        }
+        if free
+            .compare_exchange(
+                cur,
+                cur - 1,
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            return true;
+        }
+    }
+}
+
 /// P2 (#60) frontier options. Production passes threads >= 2 only
 /// after a successful budget borrow; the determinism unit test
 /// forces threads = 1 to prove that frontier expansion, arena
@@ -2498,7 +2525,7 @@ fn build_cell_plan(
     nl: usize,
     page_target_bytes: u64,
     lod: bool,
-    lod_budget: &std::sync::atomic::AtomicIsize,
+    plan_budget: &std::sync::atomic::AtomicIsize,
     jobs: usize,
     p2_shard_limit: Option<u64>,
 ) -> CellPlan {
@@ -2632,13 +2659,11 @@ fn build_cell_plan(
     // P1 returns its helpers only after ALL layers finish - a
     // dominant layer's P2 would always see budget 0.
     //
-    // Helper borrowing mirrors the LOD fanout below: free budget
-    // slots exist only when planners EXITED (the monster-cell
-    // tail) or fewer cells than jobs are in flight - a planner
-    // blocked on the plan window still owns its slot, so both
-    // fanouts are tail optimizations by construction. They also
-    // multiply live recursion temporaries, so they stay off under
-    // governor memory pressure.
+    // P1/P2 and LOD share one runnable-task budget. Persistent cell
+    // planners lend their slot while blocked beyond the ordered plan
+    // window (#76), so a mid-build monster can use otherwise-idle CPUs
+    // without exceeding --jobs. Fanout still stays off under governor
+    // memory pressure because it multiplies live recursion temporaries.
     #[derive(PartialEq, Clone, Copy)]
     enum SplitMode {
         Serial,
@@ -2685,23 +2710,10 @@ fn build_cell_plan(
         .max(1);
     let mut split_helpers = 0usize;
     if mode != SplitMode::Serial && desired > 1 {
-        while split_helpers + 1 < desired {
-            let cur =
-                lod_budget.load(std::sync::atomic::Ordering::Relaxed);
-            if cur <= 0 {
-                break;
-            }
-            if lod_budget
-                .compare_exchange(
-                    cur,
-                    cur - 1,
-                    std::sync::atomic::Ordering::Relaxed,
-                    std::sync::atomic::Ordering::Relaxed,
-                )
-                .is_ok()
-            {
-                split_helpers += 1;
-            }
+        while split_helpers + 1 < desired
+            && try_borrow_plan_slot(plan_budget)
+        {
+            split_helpers += 1;
         }
     }
     let layer_plans: Vec<LayerPlan> = if split_helpers == 0 {
@@ -2726,7 +2738,7 @@ fn build_cell_plan(
                 .min(P2_TASK_CAP),
             task_min: P2_TASK_MIN_BYTES,
             shard_limit: p2_shard_limit,
-            budget: Some(lod_budget),
+            budget: Some(plan_budget),
             lease: split_helpers,
         };
         layer_inputs
@@ -2799,7 +2811,7 @@ fn build_cell_plan(
     // (it runs single-threaded) - do not return it twice
     let p2_fallback = layer_plans.iter().any(|lp| lp.p2_fallback);
     if split_helpers > 0 && !p2_fallback {
-        lod_budget.fetch_add(
+        plan_budget.fetch_add(
             split_helpers as isize,
             std::sync::atomic::Ordering::Relaxed,
         );
@@ -2896,11 +2908,10 @@ fn build_cell_plan(
     const LOD_PAR_MIN: usize = 64;
     let mut lod_threads = 1usize;
     if cand.len() >= LOD_PAR_MIN {
-        // review 2026-08-17 (#60): threads beyond this planner's
-        // own come from the shared lod_budget - the outer pool
-        // already runs `jobs` planners, so extras exist only at
-        // the monster-cell tail (planners exited) or when fewer
-        // cells than jobs are in flight
+        // Threads beyond this planner's own come from the shared
+        // runnable-task budget. Cell planners blocked on the ordered
+        // plan window lend their slots, so this fanout also works for
+        // monsters in the middle of a large build (#76).
         let desired = std::thread::available_parallelism()
             .map(|v| v.get())
             .unwrap_or(1)
@@ -2908,23 +2919,10 @@ fn build_cell_plan(
             .min(16)
             .max(1);
         let mut extra = 0usize;
-        while extra + 1 < desired {
-            let cur = lod_budget
-                .load(std::sync::atomic::Ordering::Relaxed);
-            if cur <= 0 {
-                break;
-            }
-            if lod_budget
-                .compare_exchange(
-                    cur,
-                    cur - 1,
-                    std::sync::atomic::Ordering::Relaxed,
-                    std::sync::atomic::Ordering::Relaxed,
-                )
-                .is_ok()
-            {
-                extra += 1;
-            }
+        while extra + 1 < desired
+            && try_borrow_plan_slot(plan_budget)
+        {
+            extra += 1;
         }
         let slots: Vec<
             std::sync::Mutex<Option<(PageJob, SplitStats)>>,
@@ -2965,7 +2963,7 @@ fn build_cell_plan(
                     }
                     work();
                 });
-                lod_budget.fetch_add(
+                plan_budget.fetch_add(
                     extra as isize,
                     std::sync::atomic::Ordering::Relaxed,
                 );
@@ -3730,18 +3728,19 @@ fn build(
             }
         }
     }
-    // LOD helper budget (review 2026-08-17, #60): total planning
-    // threads stay <= jobs. Every live planner implicitly owns one
-    // slot (accounted at init, released at exit) and build_cell_plan
-    // borrows only FREE slots for extra LOD threads - so extras
-    // appear only at the monster-cell tail (planners exited) or when
-    // fewer cells than jobs are in flight. jobs=96 used to mean 96
-    // planners x up to 16 LOD threads each.
+    // Unified runnable planning budget (#76): persistent cell planners and
+    // their P1/P2/LOD helpers share exactly `jobs` slots. A planner lends its
+    // slot while blocked beyond the ordered plan window, then must reacquire
+    // one before it can plan the claimed cell. This keeps active planning
+    // work <= jobs while letting a mid-build monster consume CPUs that would
+    // otherwise sit in the admission sleep. (The OS planner threads remain
+    // parked; only runnable planning tasks are pooled.)
     let slow_s = slow_cell_s;
     let planners = jobs.max(1).min(n.max(1));
-    let lod_budget = std::sync::atomic::AtomicIsize::new(
+    let plan_budget = std::sync::atomic::AtomicIsize::new(
         jobs.max(1) as isize - planners as isize,
     );
+    let window_slot_lends = std::sync::atomic::AtomicUsize::new(0);
     std::thread::scope(|s| {
         // committer side: a panic below (commit/encode) must also
         // release workers stuck in the admission wait
@@ -3754,42 +3753,59 @@ fn build(
             let rbb = &rbb;
             let lidx = &lidx;
             let died = &died;
-            let lod_budget = &lod_budget;
+            let plan_budget = &plan_budget;
+            let window_slot_lends = &window_slot_lends;
             s.spawn(move || loop {
                 let ci = next_cell.fetch_add(
                     1,
                     std::sync::atomic::Ordering::Relaxed,
                 );
                 if ci >= n {
-                    // this planner's implicit LOD slot frees up
-                    lod_budget.fetch_add(
+                    // This planner still owns its runnable slot here.
+                    plan_budget.fetch_add(
                         1,
                         std::sync::atomic::Ordering::Relaxed,
                     );
                     return;
                 }
-                // bounded admission: never plan more than `window`
-                // cells past the committed watermark (RSS bound)
-                while ci
-                    >= commit_base
+                let admitted = || {
+                    ci < commit_base
                         .load(std::sync::atomic::Ordering::Acquire)
                         + window
                             .load(
                                 std::sync::atomic::Ordering::Relaxed,
                             )
                             .min(ring_cap)
-                {
-                    if died.load(std::sync::atomic::Ordering::Acquire)
-                    {
-                        lod_budget.fetch_add(
-                            1,
-                            std::sync::atomic::Ordering::Relaxed,
-                        );
-                        return;
-                    }
-                    std::thread::sleep(
-                        std::time::Duration::from_millis(1),
+                };
+                if !admitted() {
+                    // The claimed cell cannot enter the RSS-bounded window.
+                    // Lend this planner's runnable slot to a P1/P2/LOD task;
+                    // admission alone is not enough to resume because a
+                    // helper may still own the slot.
+                    plan_budget.fetch_add(
+                        1,
+                        std::sync::atomic::Ordering::Relaxed,
                     );
+                    window_slot_lends.fetch_add(
+                        1,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    loop {
+                        if died.load(
+                            std::sync::atomic::Ordering::Acquire,
+                        ) {
+                            // Slot was already returned before this wait.
+                            return;
+                        }
+                        if admitted()
+                            && try_borrow_plan_slot(plan_budget)
+                        {
+                            break;
+                        }
+                        std::thread::sleep(
+                            std::time::Duration::from_millis(1),
+                        );
+                    }
                 }
                 let t = std::time::Instant::now();
                 let plan = match std::panic::catch_unwind(
@@ -3802,7 +3818,7 @@ fn build(
                             nl,
                             page_target_bytes,
                             lod,
-                            lod_budget,
+                            plan_budget,
                             jobs,
                             p2_shard_limit,
                         )
@@ -4070,6 +4086,11 @@ fn build(
             }
         }
     });
+    debug_assert_eq!(
+        plan_budget.load(std::sync::atomic::Ordering::Relaxed),
+        jobs.max(1) as isize,
+        "planning slot lease imbalance"
+    );
     debug_assert_eq!(b.n_pages() as usize, pages_total);
     pipeline_on.store(false, std::sync::atomic::Ordering::Relaxed);
     heartbeat.join().expect("pipeline heartbeat");
@@ -4081,14 +4102,21 @@ fn build(
         encode_elapsed.as_secs_f64(),
         rss()
     );
+    let lends =
+        window_slot_lends.load(std::sync::atomic::Ordering::Relaxed);
+    if lends > 0 {
+        eprintln!(
+            "[vfs] build: plan window lent {} idle slot(s) to the \
+             shared P1/P2/LOD budget",
+            lends
+        );
+    }
     if p2_starved_cells > 0 {
-        // budget slots return only when planners EXIT, so a
-        // P2-eligible monster that starts mid-build stays serial
-        // even while cores idle later - this counter is the field
-        // case for the unified cell/subtree worker pool (#76)
+        // This now means all runnable slots were doing real planning at the
+        // split decision; window waiters lend their slots before sleeping.
         eprintln!(
             "[vfs] build: {} P2-eligible cell(s) ran serial (no \
-             free helpers at cell start)",
+             free runnable slots at split start)",
             p2_starved_cells
         );
     }
@@ -5152,6 +5180,70 @@ fn serve_hier(
 #[cfg(test)]
 mod split_tests {
     use super::*;
+
+    /// #76 runnable-slot contract: a planner stalled beyond the ordered
+    /// window lends its slot, cannot resume while a helper owns it, and
+    /// reacquires it after the helper returns it. The final increment mirrors
+    /// planner exit and proves that every lease is accounted exactly once.
+    #[test]
+    fn plan_window_slot_lending_requires_reacquire() {
+        let budget = std::sync::atomic::AtomicIsize::new(0);
+
+        budget.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        assert!(try_borrow_plan_slot(&budget), "helper missed lent slot");
+        assert_eq!(budget.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert!(
+            !try_borrow_plan_slot(&budget),
+            "planner resumed while helper still owned its slot"
+        );
+
+        budget.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            try_borrow_plan_slot(&budget),
+            "planner did not reacquire the returned slot"
+        );
+        budget.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(budget.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    /// The field regression was dominated by a serial 8,821-page LOD phase.
+    /// A modest dense Pts record plus a small test page target creates at
+    /// least 64 LOD candidates and proves that lent runnable slots reach the
+    /// LOD fanout, then return to the shared budget.
+    #[test]
+    fn lod_uses_lent_plan_slots_and_returns_them() {
+        const DIE: i64 = 1_000_000;
+        let doc = mini_doc(vec![pts_rec(76, 200_000, DIE, 100)]);
+        let rbb = cell_bboxes_full(&doc);
+        let lidx: std::collections::HashMap<(u32, u32), usize> =
+            doc.layer_order
+                .iter()
+                .enumerate()
+                .map(|(i, &k)| (k, i))
+                .collect();
+        let budget = std::sync::atomic::AtomicIsize::new(3);
+        let plan = build_cell_plan(
+            &doc,
+            0,
+            &rbb,
+            &lidx,
+            1,
+            8 * 1024,
+            true,
+            &budget,
+            4,
+            None,
+        );
+        assert!(
+            plan.lod_threads > 1,
+            "LOD did not borrow the lent runnable slots"
+        );
+        assert_eq!(
+            budget.load(std::sync::atomic::Ordering::Relaxed),
+            3,
+            "LOD helper lease was not returned"
+        );
+    }
 
     /// deterministic LCG so tests need no rand crate
     struct Lcg(u64);

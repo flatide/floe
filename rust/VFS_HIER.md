@@ -2164,3 +2164,28 @@ rev 46b (프런티어를 인덱싱 산출물로 — 2026-08-10, 0.11.28):
   전개 오라클 폐기).
 - 구 DFS 굽기(frontier_json/frontier_offsets/MIN_DIV/SCAN) 삭제.
   detail 변경 시 미니맵은 medium 정준 유지(항법 크롬 판단).
+
+빌드 phase 2-C (#76 통합 runnable planning 슬롯 — 2026-08-24,
+0.12.1):
+
+- 실측 회귀: `ltv_top_FEOL_dmy`가 358.8s → 1137.2s. split은
+  292.3→304.6s로 거의 같았지만 LOD가 53.6→810.4s(15.1배), 로그는
+  `p2_eligible=1 helpers=0`. 시작 직후 보이던 약 48개 스레드는
+  ordered plan window에서 잠들면서도 각자 helper 슬롯을 계속
+  보유해, 몬스터 셀만 CPU 하나로 남았다.
+- 셀 플래너와 P1/P2/LOD 헬퍼가 `--jobs`개의 **runnable planning
+  slot**을 공유한다. 플래너가 commit watermark+window 밖의 셀을
+  claim하면 자기 슬롯을 반납하고, admission과 슬롯 재획득을 모두
+  만족한 뒤에만 플래닝을 재개한다. 따라서 중간 위치 몬스터가
+  대기자의 CPU를 빌리면서도 active planning task는 `--jobs`를
+  넘지 않는다. OS 플래너 스레드는 그대로 park되므로 산출 순서와
+  streaming RSS window 계약도 불변이다.
+- 계측: 빌드 말미 `plan window lent N idle slot(s) ...`; #76 이후
+  `p2_eligible=1 helpers=0`은 윈도 기아가 아니라 그 순간 모든
+  슬롯이 실제 플래닝 중이었다는 뜻이다. scope 종료 시 debug
+  빌드는 예산이 정확히 `jobs`로 복원됐는지 단언한다.
+- 게이트: runnable-slot 임대/점유/재획득·LOD lease 반환 유닛,
+  commit-head MONSTER+뒤 filler E2E에서 jobs=4 `split .../4t`,
+  `p2_tasks=12`, window lend 관측. jobs 1/4/16 ovm/ovp/ovt 바이트
+  동일, 전 페이지 KLayout recount, 병렬 RSS 한도 통과. 포맷 불변;
+  기존 캐시는 재인덱싱할 필요가 없다.

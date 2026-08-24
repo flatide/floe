@@ -21,12 +21,14 @@ honest pages.
       peak child RSS stays within 1.5x + 512MB of the serial one
       (per-run RSS via a fresh wrapper process; thread checks skip
       on hosts where the fanout legitimately stays off)
-  S7  subtree fanout (#60 P2): p2floor - ONE dominant layer mixing
-      600 medium Pts floods with a single 2M-member rep. The log
-      shows p2_tasks>=2 and split threads>=2, jobs 1/4/16 builds
-      are byte-identical (arena shard isolation), validate_vfs.py
-      recounts every page, and the parallel peak RSS (sharding
-      copies included) stays within 1.5x + 512MB of serial
+  S7  unified plan slots (#60 P2/#76): a mid-order MONSTER owns one
+      dominant layer mixing 600 medium Pts floods with a single
+      2M-member rep. Lightweight later cells fill the ordered plan
+      window. Their blocked planners must lend slots, so the log
+      shows window lending, p2_tasks>=2 and split threads>=2 rather
+      than helpers=0. Jobs 1/4/16 remain byte-identical (arena shard
+      isolation), validate_vfs.py recounts every page, and parallel
+      peak RSS stays within 1.5x + 512MB of serial.
 
 Usage: validate_vfs_split.py [workdir]  (default $TMPDIR/floe-valsplit)
 """
@@ -99,9 +101,17 @@ def gen_p2(src):
     import klayout.db as db
     ly = db.Layout()
     ly.dbu = 0.001
-    top = ly.create_cell("TOP")
     l1 = ly.layer(1, 0)
     l2 = ly.layer(2, 0)
+    # The OASIS writer numbers these sibling dependencies in reverse cell
+    # creation order. Create the fillers first and MONSTER last so the parser
+    # sees the expensive cell at the ordered commit head (ci 0).
+    fillers = []
+    for k in range(12):
+        cell = ly.create_cell("FILLER_%02d" % k)
+        cell.shapes(l2).insert(db.Box(k * 10, 0, k * 10 + 5, 5))
+        fillers.append(cell)
+    monster = ly.create_cell("MONSTER")
     rnd = random.Random(11)
     die = 1_000_000
     for _ in range(600):
@@ -110,7 +120,7 @@ def gen_p2(src):
         for _ in range(4000):
             x = rnd.randint(0, die - w)
             y = rnd.randint(0, die - h)
-            top.shapes(l1).insert(db.Box(x, y, x + w, y + h))
+            monster.shapes(l1).insert(db.Box(x, y, x + w, y + h))
     # one identical box at 2M UNIQUE positions: klayout folds it
     # into a single Pts rep (the P2-B shape - one entry owns
     # everything). Sampled without replacement - a random draw
@@ -121,12 +131,20 @@ def gen_p2(src):
     for v in rnd.sample(range(grid * grid), 2_000_000):
         x = (v % grid) * step
         y = (v // grid) * step
-        top.shapes(l1).insert(db.Box(x, y, x + 100, y + 100))
+        monster.shapes(l1).insert(db.Box(x, y, x + 100, y + 100))
     for k in range(100):
         x = rnd.randint(0, die - 200)
         for j in range(200):
-            top.shapes(l2).insert(
+            monster.shapes(l2).insert(
                 db.Box(x, j * 5000, x + 150, j * 5000 + 400))
+    # Keep MONSTER at the ordered commit head while enough tiny later cells
+    # fill a jobs=4/plan-window=4 ring. Before #76 those planner threads slept
+    # while retaining every helper slot, so MONSTER logged helpers=0. ROOT
+    # references every cell so the OASIS writer cannot discard the fixture.
+    top = ly.create_cell("TOP")
+    for cell in fillers:
+        top.insert(db.CellInstArray(cell.cell_index(), db.Trans()))
+    top.insert(db.CellInstArray(monster.cell_index(), db.Trans()))
     opt = db.SaveLayoutOptions()
     opt.format = "OASIS"
     opt.oasis_compression_level = 10
@@ -321,10 +339,10 @@ def main():
             fail("S4 %s differs between --jobs 4 and --jobs 1" % f)
     shutil.rmtree(out1, ignore_errors=True)
 
-    # S7 (#60 P2): dominant single layer - frontier fanout log,
-    # jobs 1/4/16 bytes, per-run RSS bound, full klayout recount
+    # S7 (#60 P2/#76): a mid-build dominant layer borrows slots from
+    # plan-window waiters; jobs 1/4/16 bytes, RSS, full klayout recount
     p2src = os.path.join(work, "p2floor.oas")
-    p2marker = p2src + ".gen2"
+    p2marker = p2src + ".gen6"
     if not os.path.exists(p2src) or not os.path.exists(p2marker):
         gen_p2(p2src)
         open(p2marker, "w").write("ok")
@@ -336,13 +354,17 @@ def main():
     p1d = measured_build([FI, "vfs", p2src, p2j1, "--jobs", "1"])
     p4d = measured_build(
         [FI, "vfs", p2src, p2out, "--jobs", "4",
-         "--slow-cell-s", "0"])
+         "--plan-batch", "4", "--slow-cell-s", "0"])
     measured_build([FI, "vfs", p2src, p2j16, "--jobs", "16"])
     slow = [ln for ln in p4d["err"].splitlines()
-            if "slow cell TOP " in ln]
+            if "slow cell MONSTER " in ln]
     if not slow:
-        fail("S7 no slow-cell line for TOP")
+        fail("S7 no slow-cell line for MONSTER")
     elif fanout_expected():
+        if "plan window lent" not in p4d["err"]:
+            fail("S7 plan-window workers never lent slots")
+        if "helpers=0" in slow[0]:
+            fail("S7 mid-build monster still starved: %s" % slow[0])
         m = re.search(r"p2_tasks=(\d+)", slow[0])
         if not m or int(m.group(1)) < 2:
             fail("S7 P2 frontier never engaged: %s" % slow[0])
