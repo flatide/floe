@@ -1,6 +1,6 @@
 # Rust renderer 작업 인계
 
-갱신일: 2026-08-24
+갱신일: 2026-08-25
 canonical 저장소: `/Users/journey/Flatide/floe`
 현재 구현 기준: P1/HIGH와 이 문서의 runtime hardening까지 반영된 부모 저장소 HEAD
 
@@ -37,7 +37,7 @@ fixture는 `docs/RENDERER-TESTS.ko.md`가 canonical source다.
 - 글꼴은 SIL OFL Noto Sans Mono bytes와 pure-Rust `fontdue`를 binary에 번들한다.
   OS/KLayout font lookup은 하지 않는다. 요청별 6..96 정수 screen px 크기가 glyph,
   declutter, block-name/ellipsis fit, padding에 같은 비율로 적용된다.
-- OVM/OVP/design.ovc는 기존 mmap 기반을 유지한다. renderer가 VFS planner 결과와
+- OVM/OVP는 기존 mmap 기반을 유지한다. renderer가 VFS planner 결과와
   page OASIS payload를 직접 소비하며 KLayout delta/Layout 등록을 거치지 않는다.
 - 병렬 단위는 독립 page decode와 2D image tile raster다. worker 수가 달라도 PNG
   bytes가 같아야 하며, stale generation은 게시되지 않아야 한다.
@@ -59,7 +59,9 @@ fixture는 `docs/RENDERER-TESTS.ko.md`가 canonical source다.
   decode/raster와 병행
 - 축퇴 2-D Grid는 렌더/query/clip 공통 전개 전에 명시 오류로 거부하고, 손상
   OASIS의 point-list 선언 개수는 남은 payload byte보다 클 때 할당 전에 거부
-- OVC density coverage의 KLayout-free PNG post-composite
+- floe2 density coverage는 제거됨: sample09 detail-high refine에서 화면 차이 없이
+  350→980ms였고 progressive PNG마다 NumPy/Pillow 합성을 반복했다. CLI/UI/request/
+  Rust worker에서 제거했으며 공유 cache의 기존 design.ovc는 무시한다.
 - cut=0/full-depth exact clip, rational 교점, KLayout half-tie 규칙, concave component
   분리, single-cell OASIS writer, 공백 경로/UTF-8 cell name atomic publish
 - `view`, `render`, `probe`, `info`, `clip`의 KLayout-free 시작 경로
@@ -103,8 +105,8 @@ KLayout indexer이므로 KLayout-free portable에서 그대로 호출할 수 없
 1. 완료: 기본 `floe index SRC`를 함께 배포되는 `floe-index vfs SRC SRC.floe`
    subprocess로 위임.
 2. 완료: `--jobs`, 명시적 `--force`를 Rust 경로에 연결.
-3. 완료: coverage/LOD/page target/slow-cell/P2 shard ceiling을 Rust 의미의
-   옵션으로 노출. density overview는 GUI 기본과 맞춰 opt-in으로 유지.
+3. 완료: LOD/page target/slow-cell/P2 shard ceiling을 Rust 의미의 옵션으로 노출.
+   coverage 옵션은 floe2 제품에서 제거하고 안정판 floe에만 유지.
 4. 완료: `--skeleton-only`, `--texts-only`, `--merge-only`, `--merge`, `--tile-mb`,
    `--mem`, `--mem-floor`, `--no-gov`, text cap, `--bands`, KLayout read/edit mode는
    Python legacy 전용이므로 `--legacy` 또는 별도 legacy command에서만 허용한다.
@@ -192,7 +194,7 @@ renderer-core/renderd 대상 clippy hard-error는 없다.
 | renderer 운영 계약 | `docs/RUST_RENDERER.md` |
 | 정확도 fixture 계약 | `docs/RENDERER-TESTS.ko.md` |
 | Python backend 선택/legacy worker | `floe/service.py` |
-| Rust queue adapter/coverage/atomic export | `floe/rust_render.py` |
+| Rust queue adapter/atomic export | `floe/rust_render.py` |
 | GUI font/abstract capability | `floe/gui.py` |
 | headless render/clip/index CLI | `floe/cli.py` |
 | scene/raster/font/query/clip | `rust/render-core/src/` |

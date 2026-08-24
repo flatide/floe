@@ -130,7 +130,6 @@ alias floe=".venv/bin/python -m floe"
 
 floe2 index data/testchip_1g5.oas          # 1회: 공유 <src>.floe/ 생성
 floe2 index data/testchip_1g5.oas --jobs 1 # 병렬 끄기
-floe2 index data/testchip_1g5.oas --coverage
 floe2 info  data/testchip_1g5.oas
 floe2 view  data/testchip_1g5.oas
 floe2 view  data/testchip_1g5.oas --goto 5240,5260,50
@@ -145,8 +144,9 @@ floe view data/testchip_1g5.oas            # 안정판 KLayout 화면
 - `floe2 index`와 `floe index`는 같은 `floe-index vfs`를 실행한다. 같은 source
   fingerprint의 정상 캐시는 재사용하며 기존·불완전·stale 캐시 교체는 명시적
   `--force`가 있어야 한다. `--page-target-mb`, `--no-lod`, `--slow-cell-s`,
-  `--p2-shard-limit-mb`는 Rust 빌드 옵션이다. coverage는 GUI 기본값과 같이
-  opt-in이며 기존 캐시에는 `--coverage-only`로 비파괴 추가할 수 있다.
+  `--p2-shard-limit-mb`는 Rust 빌드 옵션이다. floe2는 density coverage를
+  생성·표시하지 않으며 공유 cache에 남은 `design.ovc`도 읽지 않는다. 안정판
+  `floe`의 KLayout 화면만 `--coverage`/`--coverage-only`를 계속 제공한다.
 
 ### Python/KLayout 레거시 인덱서
 
@@ -358,7 +358,7 @@ GUI는 **GTK3/PyGObject** 셸이다. flateyes와 같은 폐쇄망 호스트
   인디케이터가 즉시 표시되고, 1.5초를 넘기면 경과 초가 붙는다. 렌더 중에도
   팬/줌 가능하며, 밀린 요청은 최신 것만 처리된다.
 - 상태 영역은 2단이다. 윗단에는 커서 좌표, ruler/selection/DRC/clip 메시지와
-  view 크기, depth/cut/coverage/LOD 상태를 표시한다. 아랫단에는 마지막 렌더
+  view 크기와 depth/cut/LOD 상태를 표시한다. 아랫단에는 마지막 렌더
   성능과 `rendering…`/refinement 진행을 표시하므로 마우스 이동으로 렌더
   정보가 사라지지 않는다.
 - 운영 튜닝은 shell 환경변수를 사용하지 않고 `view` 옵션으로 명시한다:
@@ -376,10 +376,10 @@ GUI는 **GTK3/PyGObject** 셸이다. flateyes와 같은 폐쇄망 호스트
   상/하/좌/우 방향키는 현재 뷰포트의 10% 단위로 화면 이동,
   `r` ruler, `m` 스냅, `d` depth 다이얼로그,
   `g` goto 다이얼로그, `c` detail cut 다이얼로그, `a` abstract 모드,
-  `v` coverage 밀도 채움 토글(VFS), `e` DRC 브라우저,
+  `e` DRC 브라우저,
   `n`/`p` 다음/이전 DRC 에러, `0`-`9` depth, `Esc` 단계 해제,
-  `q` 종료 (확인 다이얼로그). cut/coverage 상태는 윗단 상태바 우측
-  (`cut: L1 · cov: off` 등).
+  `q` 종료 (확인 다이얼로그). 안정판 floe만 `v` density coverage 토글을
+  유지한다.
 - 마우스: 왼쪽 드래그는 패닝(짧은 클릭은 객체 선택), 오른쪽 드래그는
   영역 줌(오른쪽 방향은 확대, 왼쪽 방향은 축소)이다. 휠은 커서 위치를
   기준으로 이벤트당 최대 한 단계(4%)만 줌한다. 가운데 드래그도 패닝을
@@ -511,12 +511,12 @@ klayout은 서브픽셀 도형도 전부 순회하며 그리므로(멤버당 비
   가벼워진다. 레벨 뒤의 화면-px 문턱값(현재 2/4/8px)은 구현 세부라
   나중에 조정돼도 "L1"의 의미는 유지된다. `c` 키 다이얼로그로 실시간
   변경, 시작값은 `view --cut-level`(기본 2). 상태바 우측에
-  `depth: full · cut: L2 · cov:off · lod:on`처럼 각 상태를 상시 표시.
+  floe2는 `depth: full · cut: L2 · lod:on`처럼 각 상태를 상시 표시.
   VFS의 LOD는 **기본 on**이다(스켈레톤 폐기 후 첫 fit 뷰가 라이브
   워킹셋이므로 병합 변종이 키 입력 없이 개입해야 한다; 플래너의
   충실도/가치 게이트가 줌인 시 자동으로 exact 복귀시키고, 계측
   프로브는 구조적으로 exact다). `l`로 토글하며 merged page 선택만
-  제어한다. cut과 coverage는 LOD 상태와 독립적으로 동작한다.
+  제어한다.
 - **병합 트윈 (merged twin)** (v0.6.0): 컷으로 빠지는 밴드는 화면에서
   사라지는 대신 **병합 트윈**으로 그려진다 — 인덱싱 때 밴드별 지오메트리를
   flatten하고 닫힘(closing: `sized(+d)→merged→sized(−d)`, d = 밴드
@@ -803,8 +803,8 @@ PATH를 조용히 누락하지 않고 명시적 오류로 반환한다.
   floe-index CLI. 의존 크레이트는 `vendor/` 동봉이라 빌드 중 crates.io
   접속이 없고 C 툴체인도 불필요하다.
 - 페이지는 cell-local OASIS payload로 유지되고 hierarchy/repetition은 OVM
-  planner가 직접 선택한다. LOD merged page는 기본 on, `design.ovc` density
-  overview는 빌드 비용 때문에 기본 off다.
+  planner가 직접 선택한다. LOD merged page는 기본 on이다. 저수준 인덱서와
+  안정판 floe는 `design.ovc`를 호환용으로 유지하지만 floe2는 생성·표시하지 않는다.
 - Python은 `FLOE_INDEX_BIN` → 개발 트리 `rust/target/release/floe-index` →
   Python 실행 파일 인접 binary(portable) → `PATH` 순으로 찾는다.
 

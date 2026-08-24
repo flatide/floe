@@ -2,14 +2,14 @@
 
 상태: M1 완료, M2 정확도·결정성 vertical slice 완료, M3 paint/frame vertical slice 완료,
 M4 text/label vertical slice 완료, M5 daemon/session vertical slice 완료,
-M5 density coverage 완료, M7 pick/snap 완료, M8 exact clip vertical slice 완료
+M5 density coverage 폐기(2026-08-25), M7 pick/snap 완료, M8 exact clip vertical slice 완료
 목표: 공통 Rust 인덱서·VFS 플래너를 유지하고, `floe2`에서 KLayout의 런타임
 렌더 책임을 결정적 멀티코어 CPU 렌더러로 대체한다. 안정판 `floe`는 KLayout
 기본 제품으로 유지하며 같은 cache를 이용한 화면 A/B 기준이 된다.
 
-### 현재 구현 상태 (2026-08-24)
+### 현재 구현 상태 (2026-08-25)
 
-통합 기준선은 현재 부모 `floe` main, `floe-index 0.12.0`, OVM v7이다.
+통합 기준선은 현재 부모 `floe` main, `floe-index 0.12.2`, OVM v7이다.
 
 - 완료: Cargo workspace와 `render-core`, `render-cli`, `renderd` scaffold
 - 완료: 폐쇄망 vendor 설정과 동일 Cargo workspace 내 직접 path dependency
@@ -87,10 +87,10 @@ M5 density coverage 완료, M7 pick/snap 완료, M8 exact clip vertical slice �
 - 완료: query는 render worker queue 밖의 stdin 제어 경로에서 게시 scene `Arc`를
   clone하므로 이후 refinement round의 page decode/raster와 병행 가능. 새 round PNG가
   원자 게시될 때만 query scene도 교체되어 미게시 partial을 노출하지 않음
-- 완료: GUI `v`의 OVC density coverage를 Rust progressive PNG에 직접 post-composite.
-  KLayout 없이 기존 NumPy/Pillow의 neighborhood-aware blank mask, live palette/visibility,
-  `cut_px > 0`, finest texel 160px handoff 계약을 그대로 사용. binary geometry의 8-bit
-  edge antialias coverage와는 별도 기능
+- 폐기: GUI `v`의 OVC density post-composite. sample09 detail-high 특정 줌에서
+  시각 변화 없이 refine 350→980ms였고 progressive round마다 full-frame
+  NumPy/Pillow 샘플·decode·encode를 반복했다. floe2 CLI/UI/request/Rust worker에서
+  제거했으며 공유 cache의 기존 `design.ovc`는 읽지 않는다.
 - 완료: GUI `clip`을 cut=0/full-depth exact `HierPlan`으로 실행하고 daemon jobs로
   page를 병렬 decode/LRU 재사용한 뒤 계층·repetition·PATH outline을 평탄화하여
   단일 `FLOE_CLIP` OASIS cell로 기록. rectangle type은 유지하고 PATH는 KLayout
@@ -193,7 +193,7 @@ OVM/OVP 포맷은 바뀌지 않는다.
 
 성공 조건은 다음과 같다.
 
-1. `cut=0`, full depth, LOD/wash/coverage/abstract off에서 소스 geometry가
+1. `cut=0`, full depth, LOD/wash/abstract off에서 소스 geometry가
    누락 없이 전달되고, binary raster는 부모의 P-a/P-b/P-c 정확도 정책을
    모든 승인 fixture와 대표 실칩 view에서 통과한다.
 2. 동일 요청은 worker 수, 실행 순서와 무관하게 동일한 RGBA/PNG를 만든다.
@@ -229,7 +229,7 @@ OVM/OVP 포맷은 바뀌지 않는다.
 - Python `RenderWorker` 호환 adapter
 - 현재 화면 `FrameScene` 기반 pick/snap
 - GUI/CLI clip의 Rust exact OASIS 출력
-- OVC density coverage의 KLayout-free PNG post-composite
+- OVC density coverage post-composite는 제품 범위에서 폐기
 - 성능/메모리/취소 telemetry
 
 ### 2.2 제외 범위
@@ -424,7 +424,7 @@ pub struct RenderStats {
 }
 ```
 
-`exact=true`는 `cut=0`, full depth, LOD/wash/coverage/abstract off를 검증하고
+`exact=true`는 `cut=0`, full depth, LOD/wash/abstract off를 검증하고
 상충하는 요청을 거부한다. 조용히 옵션을 덮어쓰지 않는다.
 
 ## 7. scene과 page cache
@@ -670,8 +670,8 @@ Rust 회귀 테스트를 완료했다. 실제 KLayout style PNG 자동 대조도
 coverage를 적용하지 않으며, Calibre/KLayout 목표 화면이 이를 요구한다는 실측이
 나올 때만 범위를 다시 연다.
 
-여기서 제외한 edge coverage는 OVC density overview와 다르다. `design.ovc` density
-post-composite는 M5 adapter에서 구현되어 GUI의 `v` 토글로 동작한다.
+여기서 제외한 edge coverage는 폐기된 OVC density overview와 다르다. floe2의
+`design.ovc` post-composite 및 GUI `v` 토글은 성능 회귀 때문에 제거했다.
 
 작업:
 
@@ -730,7 +730,7 @@ fixture gate는 이 전체 trace를 jobs=1로 실행하며, 최종 운영 수치
 - 완료: `floe-renderd` protocol/session/PNG handoff
 - 완료: 기존 `RenderWorker` API를 구현하는 in-tree Rust adapter
 - 완료: 부모의 최소 `FLOE_RENDERER=klayout|rust` opt-in hook
-- 완료: coverage.py OVC density post-composite 유지(Rust progressive frame 연결)
+- 폐기: OVC density post-composite와 progressive frame 연결 제거
 - 완료: 기존 GUI status schema로 Rust phase stats 전달
 
 종료 gate:
@@ -799,7 +799,7 @@ fixture gate는 이 전체 trace를 jobs=1로 실행하며, 최종 운영 수치
 3. 완료: `test: 100-generation cancellation soak + KLayout style oracle automation`
 4. 완료: `path: operating-input inventory + unsupported-path hard failure`
 5. 완료: `query: published FrameScene pick/snap + KLayout oracle parity`
-6. 완료: `coverage: OVC density post-composite + off/on integration gate`
+6. 완료: `coverage: floe2 CLI/UI/request/worker 부재 integration gate`
 7. 완료: `clip: exact scene flatten + KLayout Region XOR oracle`
 8. `parallel: consider daemon-lifetime pool only if thread startup is measurable`
 
@@ -832,7 +832,7 @@ source/OASIS/KLayout oracle을 함께 추가해 범위를 다시 연다.
 | frame | 4밴드 collision fixture | gray < design < white |
 | pick/snap | 동일 VFS scene + KLayout service oracle | found/좌표/도형/순환 dict 동일 |
 | exact clip | rectangle/diagonal/분리 concave + valmini | KLayout Region XOR 0 |
-| OVC density | 동일 cut view coverage off/on | vector 보존, blank density 합성 |
+| OVC density 제거 | floe2 CLI/UI/request/worker | 옵션·상태·OVC 로딩·합성 없음 |
 | cancellation | 100 zoom/pan generation | stale publish 0 |
 | corrupt input | ovm/ovp offset·length 오류와 page OASIS 손상 | panic 없이 명시 오류 |
 | memory | 큰 page/repetition | configured budget 준수 |

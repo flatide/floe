@@ -363,7 +363,9 @@ def cmd_info(args):
           f"({bb[2] * dbu:.1f}, {bb[3] * dbu:.1f}) um")
     print(f"cache      : {c.dir}  ({_du(c.dir) / 1e6:.1f} MB, VFS v"
           f"{m.get('vfs')})")
-    for part in ("design.ovm", "design.ovp", "design.ovc"):
+    parts = (("design.ovm", "design.ovp") if APP == "floe2" else
+             ("design.ovm", "design.ovp", "design.ovc"))
+    for part in parts:
         p = os.path.join(c.dir, part)
         if os.path.exists(p):
             print(f"  {part:<11}: {os.path.getsize(p) / 1e6:.1f} MB")
@@ -552,7 +554,7 @@ def _render_drc_errors(args, c):
     """--drc/--drc-rule: one square PNG per requested error through
     the VIEWER'S OWN render service (user call 2026-08-19: the
     exact-cut probe path looked nothing like the app - snapshots
-    must carry the default detail/hairline/LOD/coverage knobs with
+    must carry the default detail/hairline/LOD knobs with
     depth forced full, and the per-error cold spawn cost 5s+). One
     persistent service = one vfsd session + one klayout working
     set, so consecutive errors render at viewer-jump speed.
@@ -682,7 +684,7 @@ def _cmd_render_rust(args, c, bbox, layers):
             "depth": depth, "cut_px": 0.0, "lod": False,
             "frames": args.frames, "labels": args.labels,
             "label_font_px": args.label_font_px,
-            "abstract": False, "coverage": False,
+            "abstract": False,
             "visible": layers,
         })
         while True:
@@ -1238,14 +1240,16 @@ def main(argv=None, *, prog=None, rust_only=None):
     rust.add_argument("--page-target-mb", type=_positive_int, default=None,
                       metavar="N", help="encoded page target in MiB "
                       "(default: 1)")
-    coverage = rust.add_mutually_exclusive_group()
-    coverage.add_argument(
-        "--coverage", action="store_true",
-        help="build optional design.ovc density coverage; when a current "
-             "cache lacks it, add it without replacing the cache")
-    coverage.add_argument(
-        "--coverage-only", action="store_true",
-        help="add design.ovc to a current cache without rebuilding it")
+    p.set_defaults(coverage=False, coverage_only=False)
+    if not rust_only:
+        coverage = rust.add_mutually_exclusive_group()
+        coverage.add_argument(
+            "--coverage", action="store_true",
+            help="build optional design.ovc density coverage; when a current "
+                 "cache lacks it, add it without replacing the cache")
+        coverage.add_argument(
+            "--coverage-only", action="store_true",
+            help="add design.ovc to a current cache without rebuilding it")
     rust.add_argument("--no-lod", action="store_true",
                       help="do not generate merged LOD page variants")
     rust.add_argument("--slow-cell-s", type=_nonnegative_float,
@@ -1496,15 +1500,18 @@ def main(argv=None, *, prog=None, rust_only=None):
                         "open the error browser (new instance only; "
                         "a fresh FILE.db.ice index built by "
                         "'floe-index drc' is used automatically)")
+    detail_help = (
+        "starting detail level (default: medium; higher = finer, heavier "
+        "wide views - lower levels omit finer features below the cut). "
+        "The `d` dialog changes it at runtime; the px thresholds behind "
+        "the levels are internal and may be retuned" if rust_only else
+        "starting detail level (default: medium; higher = finer, heavier "
+        "wide views - lower levels omit finer features below the cut; "
+        "coverage is an independent viewer toggle). The `d` dialog changes "
+        "it at runtime; the px thresholds behind the levels are internal "
+        "and may be retuned")
     p.add_argument("--detail", default=None,
-                   choices=("low", "medium", "high"),
-                   help="starting detail level (default: medium; "
-                        "higher = finer, heavier wide views - lower "
-                        "levels omit finer features below the cut; "
-                        "coverage is an independent viewer toggle). "
-                        "The `d` dialog changes it at runtime; the px "
-                        "thresholds behind the levels are internal "
-                        "and may be retuned")
+                   choices=("low", "medium", "high"), help=detail_help)
     p.add_argument("--depth", type=int, default=None, metavar="N",
                    help="starting hierarchy depth (999 = full). "
                         "Default: 0 for a plain open - top geometry "

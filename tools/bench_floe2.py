@@ -267,7 +267,7 @@ def render_trace(worker, trace, width, height, timeout, run_number):
             "w": width, "h": height, "depth": depth,
             "cut_px": DETAIL_PX[DEFAULT_DETAIL], "lod": False,
             "frames": True, "labels": True, "label_font_px": 14,
-            "abstract": False, "coverage": False, "visible": visible,
+            "abstract": False, "visible": visible,
         })
         result = wait_frame(worker, generation, timeout)
         metrics = {field: result[field] for field in PHASE_FIELDS

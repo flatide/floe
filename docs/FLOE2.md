@@ -10,6 +10,7 @@
 | backend override | `FLOE_RENDERER=rust` A/B 허용 | Rust 외 전부 하드 에러 |
 | Python/KLayout legacy index | `index --legacy` | 도움말에서 제거, 실행 거부 |
 | legacy `.tiles` profile | 제공 | 명령 제거 |
+| density coverage (`design.ovc`) | KLayout에서 선택 제공 | 생성 옵션·UI·로딩·합성 제거 |
 | VFS cache | `<src>.floe` v8 | 같은 cache를 비파괴 공유 |
 | native binaries | `floe-index`, 선택적 `floe-renderd` | 같은 `floe-index`, `floe-renderd` |
 | GUI instance | `floe-<uid>-<display>` | `floe2-<uid>-<display>` |
@@ -28,7 +29,9 @@
 두 GUI는 socket identity가 달라 같은 DISPLAY에서 동시에 실행할 수 있다. 캐시는
 source 옆의 동일한 `<src>.floe`를 읽으므로 복사하거나 변환하지 않는다. cache와
 Rust wire/OVM/OVP 버전은 계속 `floe/__init__.py`, `floe/cache.py`, `rust/`에서 한
-번만 올린다.
+번만 올린다. 공유 cache에 과거 `design.ovc`가 있어도 floe2 `info`와 Rust worker는
+이를 무시한다. sample09 detail-high refinement 실측에서 화면 변화 없이
+350ms→980ms로 느려져 제품 경로에서 제거했다.
 
 실제 GTK 시작부터 Rust worker open과 첫 frame 표시까지 자동 확인할 때는 개발용
 종료 타이머를 사용한다. 값은 100..60000ms이며 일반 실행에서는 설정하지 않는다.
@@ -83,3 +86,4 @@ DBU로 변환되고 결과에는 `hotspot_supplied` 여부만 남는다. `plan/r
 raster/png`, cache hit/miss, decoded resident peak, 프로세스 RSS peak와 jobs=1 대비
 total/raster speedup을 기록한다. `--hotspot`을 생략한 개발 fixture 실행은 design
 중앙을 사용하지만, 실칩 운영 gate에서는 대표 좌표를 반드시 지정한다.
+모든 trace는 coverage post-composite 없이 daemon PNG를 그대로 측정한다.

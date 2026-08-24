@@ -400,51 +400,24 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "kind": "pick", "seq": 9, "found": False, "count": 0,
             })
 
-    def test_coverage_handoff_matches_parent_gates(self):
-        class FakeCoverage:
-            tex0 = (1.0, 1.0)
-
-            def __init__(self):
-                self.calls = []
-
-            def view_rgb(self, *args):
-                self.calls.append(args)
-                return object(), True
-
+    def test_rust_worker_never_loads_or_composites_density_coverage(self):
         with tempfile.TemporaryDirectory() as directory:
             binary = os.path.join(directory, "floe-renderd")
             with open(binary, "w", encoding="ascii") as script:
                 script.write("#!/bin/sh\n")
             os.chmod(binary, 0o755)
+            # Old/shared caches may still carry the optional sidecar. The
+            # floe2 Rust worker must not read it or expose a post-compositor:
+            # sample09 measured 350ms -> 980ms refinement with no visible
+            # change when this path ran on every progressive PNG.
+            with open(os.path.join(directory, "design.ovc"), "wb") as ovc:
+                ovc.write(b"must remain unread")
             with mock.patch.dict(os.environ, {
                 "FLOE_RENDERD_BIN": binary,
             }, clear=False):
                 worker = RustRenderWorker(FakeCache(directory))
-            coverage = FakeCoverage()
-            worker._coverage = coverage
-            job = {
-                "coverage": True, "cut_px": 3.0,
-                "bbox": (0, 0, 100, 50), "w": 100, "h": 50,
-                "visible": [(2, 0)],
-            }
-            with mock.patch("floe.coverage.composite",
-                            return_value=b"coverage-png") as composite:
-                self.assertEqual(
-                    worker._apply_coverage("/tmp/frame.png", b"base", job),
-                    b"coverage-png")
-            composite.assert_called_once()
-            self.assertEqual(coverage.calls[0][6], {(2, 0)})
-            self.assertIs(coverage.calls[0][7], worker._colors)
-
-            no_cut = dict(job, cut_px=0.0)
-            self.assertEqual(
-                worker._apply_coverage("/tmp/frame.png", b"base", no_cut),
-                b"base")
-            coverage.tex0 = (1000.0, 1000.0)
-            self.assertEqual(
-                worker._apply_coverage("/tmp/frame.png", b"base", job),
-                b"base")
-            self.assertEqual(len(coverage.calls), 1)
+            self.assertFalse(hasattr(worker, "_coverage"))
+            self.assertFalse(hasattr(worker, "_apply_coverage"))
 
     def test_rejects_invalid_environment_limits(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -525,7 +498,6 @@ class RealDaemonIntegrationTests(unittest.TestCase):
                 "h": render_height,
                 "depth": None, "cut_px": 0.0, "visible": None,
                 "frames": False, "labels": False, "abstract": False,
-                "coverage": False,
             }
             worker.submit(base_job)
             first_frames = self._frames_through_settled(worker, 1)
@@ -536,17 +508,6 @@ class RealDaemonIntegrationTests(unittest.TestCase):
             first_png = first_frames[-1]["png"]
             self._assert_query_parity(cache, worker, bbox)
             self._assert_clip_parity(cache, worker, bbox)
-
-            if os.path.isfile(os.path.join(cache.dir, "design.ovc")):
-                cut_job = dict(
-                    base_job, gen=2, cut_px=3.0, coverage=False)
-                worker.submit(cut_job)
-                cut_png = self._frames_through_settled(
-                    worker, 2)[-1]["png"]
-                worker.submit(dict(cut_job, gen=3, coverage=True))
-                coverage_png = self._frames_through_settled(
-                    worker, 3)[-1]["png"]
-                self.assertNotEqual(coverage_png, cut_png)
 
             solid = "\n".join(["*" * 16] * 16)
             worker.submit({

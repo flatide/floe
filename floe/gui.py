@@ -31,6 +31,7 @@ from .view_policy import live_caps
 Gtk = Gdk = GdkPixbuf = GLib = Pango = None
 
 APP = product_name()
+HAS_DENSITY_COVERAGE = APP != "floe2"
 POLL_MS = 25
 DEBOUNCE_MS = 120
 # LOD starts ON (rev 31): the skeleton is gone, so the first fit
@@ -897,13 +898,16 @@ class Viewer:
         # paint on huge chips - the industry default), a --goto jump is
         # an inspection: full depth unless --depth says otherwise.
         # 999 = full; runtime digits/`d` dialog change it as before.
-        # Open default is depth 0 (top geometry + outlines +
-        # coverage): the fastest truthful first view on any chip.
+        # Open default is depth 0 (top geometry + outlines): the fastest
+        # truthful first view on any chip.
         if depth is None:
             depth = 999 if goto is not None else 0
         self.depth_value = max(0, min(999, int(depth)))
         self.abstract = False       # `a` key: klayout abstract mode
-        self.coverage_on = False    # `v` key: density coverage fill (VFS)
+        # Stable floe keeps the optional KLayout density overlay. floe2
+        # intentionally has no coverage state or OVC render path.
+        if HAS_DENSITY_COVERAGE:
+            self.coverage_on = False
         # Explicit request controls; no shell environment is consulted.
         self.lod_on = bool(lod)
         self.frames_on = bool(frames)
@@ -2266,8 +2270,8 @@ class Viewer:
         self._clamp_view()
         bbox = self.view_bbox()
         span = self.tiles_spanned(bbox)
-        # skeleton retired (rev 24): every view renders live - wide
-        # views are carried by coverage + LOD variants
+        # skeleton retired (rev 24): every view renders live; wide floe2
+        # views use the hierarchy cut/wash/LOD ladder.
         scope = "live"
         self._display()
         if not self.visible and not self._structure_visible():
@@ -2334,7 +2338,7 @@ class Viewer:
         # request skewed the frame's effective scale by whole percents -
         # the anchor logic then treated every frame as a zoom mismatch
         # and pans stopped tracking (the "weird panning at 0.01um" bug)
-        self.worker.submit({
+        job = {
             "kind": "render", "gen": self.gen, "scope": scope,
             "t_sub": time.time(),
             "bbox": tuple(float(v) for v in eb),
@@ -2347,8 +2351,10 @@ class Viewer:
             "labels": self.labels_on,
             "label_font_px": self.label_font_px,
             "abstract": self.abstract,
-            "coverage": self.coverage_on,
-            "visible": self._layers_arg()})
+            "visible": self._layers_arg()}
+        if HAS_DENSITY_COVERAGE:
+            job["coverage"] = self.coverage_on
+        self.worker.submit(job)
         self._pending = self.gen
         self._preview_gen = None   # stop a stale preview ticker
         self._pending_t0 = time.perf_counter()
@@ -3049,7 +3055,7 @@ class Viewer:
             self._depth_step(1)
         elif name == "a":
             self._toggle_abstract()
-        elif name == "v":
+        elif name == "v" and HAS_DENSITY_COVERAGE:
             self._toggle_coverage()
         elif name == "l":
             self._set_lod(not self.lod_on)
@@ -3111,8 +3117,9 @@ class Viewer:
         if self.meta.get("bands") or self.meta.get("vfs"):
             lbl += " · detail: %s" % DETAIL_LEVELS[self.detail]
         if self.meta.get("vfs"):
-            lbl += " · cov:%s" % (
-                "on" if self.coverage_on else "off")
+            if HAS_DENSITY_COVERAGE:
+                lbl += " · cov:%s" % (
+                    "on" if self.coverage_on else "off")
             lbl += " · lod:%s" % ("on" if self.lod_on else "off")
             lbl += " · frame:%s" % (
                 "on" if self.frames_on else "off")
@@ -3159,6 +3166,8 @@ class Viewer:
         # `v`: density-coverage fill at cut/wide views (VFS caches).
         # Off = the cut just drops small features (they vanish) with
         # no density stand-in - useful to see exactly what is real.
+        if not HAS_DENSITY_COVERAGE:
+            return
         self.coverage_on = not self.coverage_on
         self._on_depth()
 
@@ -3737,8 +3746,9 @@ class Viewer:
             m, "abstract cells\ta", self._toggle_abstract,
             lambda: self.abstract)
         self._abstract_menu_item.set_sensitive(False)
-        check(m, "density coverage\tv", self._toggle_coverage,
-              lambda: self.coverage_on)
+        if HAS_DENSITY_COVERAGE:
+            check(m, "density coverage\tv", self._toggle_coverage,
+                  lambda: self.coverage_on)
         check(m, "LOD\tl", lambda: self._set_lod(not self.lod_on),
               lambda: self.lod_on)
         check(m, "grayscale layers\tb",
@@ -6131,8 +6141,8 @@ class Viewer:
 
     def _apply_palette_color(self, color):
         """Palette swatch click: recolor every SELECTED layer row -
-        row swatch, meta copy, render service, coverage tint, and
-        the personal override file (~/.cache/floe)."""
+        row swatch, meta copy, render service, and the personal override
+        file (~/.cache/floe)."""
         keys = set(self._selected_layers)
         if os.environ.get("FLOE_CLICK_DEBUG"):
             sys.stderr.write(

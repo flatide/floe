@@ -176,14 +176,13 @@ are bounded by the remaining payload bytes before any proportional allocation,
 and corrupt payloads return a page decode error rather than attempting an
 unbounded allocation.
 
-The GUI's optional density coverage (`v`) reuses `design.ovc` and the existing
-NumPy/Pillow post-compositor; it does not invoke KLayout. Every progressive
-Rust PNG is tinted with the live layer palette only when coverage is requested,
-`cut_px > 0`, and the finest OVC texel projects to at most 160 screen pixels.
-The neighborhood-aware mask fills only genuinely blank screen regions, keeping
-speckled vector interiors intact. This display-density feature is distinct from
-8-bit antialiased edge coverage, which remains outside the binary pixel
-contract.
+floe2 intentionally has no density-coverage path. Its CLI does not expose
+`--coverage`/`--coverage-only`, the GUI has no `v` control or coverage request
+state, and `RustRenderWorker` never opens or composites `design.ovc`. Old/shared
+caches may retain the optional sidecar; floe2 ignores it. This was retired after
+sample09 detail-high refinement measured 350ms without coverage and 980ms with
+it, while producing no visible difference. Stable floe's KLayout-only optional
+overlay remains outside this Rust product contract.
 
 Page loading keeps the parent's file-order batched OVP read, then parses the
 independent page OASIS payloads with up to `jobs` workers. Parse completion
@@ -252,7 +251,7 @@ menu/`a` action instead of submitting a render request that can never succeed.
 The adapter is implemented at `floe/rust_render.py` and
 accepts the existing `RenderWorker` constructor and queue contract. It owns one
 persistent `floe-renderd`, translates
-render/recolor/repattern/mono/pick/snap jobs and density-coverage frames,
+render/recolor/repattern/mono/pick/snap jobs,
 converts layerprops and live 16x16 fills to deterministic Rust styles, maps
 progressive telemetry back to the existing frame result schema, and cleans up
 its private frame/style directory on shutdown. The default worker target is
@@ -296,7 +295,7 @@ old headless command.
 Pass `--multi` when launching the GTK viewer so the request cannot forward to
 an already-running KLayout process. Current adapter scope is render,
 progressive refinement, visibility, depth, cut, frames, labels, color, fill,
-width, mono, pick, snap, exact OASIS clip, and density coverage. Clip builds a
+width, mono, pick, snap, and exact OASIS clip. Clip builds a
 cut=0/full-depth plan, decodes pages with the daemon worker count and persistent
 LRU, flattens hierarchy/repetitions, and writes one `FLOE_CLIP` cell. Rectangle
 type is preserved; paths become polygons like KLayout. Concave intersections

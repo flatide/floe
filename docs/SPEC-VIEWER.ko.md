@@ -145,12 +145,14 @@
   이중 발화 방지). CheckMenuItem은 메뉴 `show` 시 `_menu_sync`가
   실상태(frames_on/abstract/coverage_on/lod_on/_mono/snap_on/mode)를
   반영하며 `_menu_guard`로 set_active의 핸들러 역발화를 차단.
+  단, floe2는 density coverage 상태와 메뉴/키 입력 자체를 노출하지 않는다.
 
 ## 8. 색/패턴 적용 경로
 
 recolor: 행 스와치 재생성(set_color) + meta 갱신 + 개인 layerprops
-스냅샷(_save_props_state) + `recolor` 잡(renderer.colors+coverage 틴트
-갱신+refresh) + epoch↑ + 즉시 재렌더. repattern 동일 구조(_push_fills:
+스냅샷(_save_props_state) + `recolor` 잡(renderer colors 갱신+refresh) +
+epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트를 함께
+갱신한다. repattern 동일 구조(_push_fills:
 지정 전체를 resolved rows로 전송). 폴딩된 그룹 부모 선택 시 멤버 전체
 적용. 시작 시 service `_apply_personal_fills`가 layerprops로 복원.
 

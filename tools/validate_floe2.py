@@ -73,6 +73,8 @@ def validate_runtime(base, fixture):
 
         info = run(env, "-m", "floe2", "info", source)
         check("top cell" in info.stdout, "floe2 info omitted cache identity")
+        check("design.ovc" not in info.stdout,
+              "floe2 info exposed retired density coverage")
         probe = run(env, "-m", "floe2", "probe", source, timeout=90)
         check("[probe] OK" in probe.stdout,
               "floe2 probe did not settle a Rust frame")
@@ -145,7 +147,8 @@ def main(fixture=None):
     check("profile" not in floe2.stdout,
           "floe2 exposed the legacy tile-cache profile command")
     index_help = run(base, "-m", "floe2", "index", "--help")
-    for legacy in ("--legacy", "--tile-mb", "--read-mode", "KLayout"):
+    for legacy in ("--legacy", "--tile-mb", "--read-mode", "KLayout",
+                   "--coverage", "--coverage-only", "design.ovc"):
         check(legacy not in index_help.stdout,
               "floe2 index help exposed %s" % legacy)
     for command in ("probe", "view"):
@@ -161,12 +164,17 @@ def main(fixture=None):
                  "--legacy", ok=False)
     check("legacy indexing belongs to floe" in legacy.stderr,
           "floe2 legacy indexing did not fail at the product boundary")
+    coverage = run(base, "-m", "floe2", "index", "missing.oas",
+                   "--coverage", ok=False)
+    check("unrecognized arguments: --coverage" in coverage.stderr,
+          "floe2 still accepted retired density coverage")
 
     identity = r'''import json, os
 from floe.cli import _renderer_backend
 from floe import instance
+from floe.gui import HAS_DENSITY_COVERAGE
 print(json.dumps([_renderer_backend(), instance.APP,
-                  instance.socket_address(":77")]))
+                  instance.socket_address(":77"), HAS_DENSITY_COVERAGE]))
 '''
     stable = json.loads(run(base, "-c", identity).stdout)
     rust = json.loads(run(base, "-c", "import floe2\n" + identity).stdout)
@@ -175,6 +183,8 @@ print(json.dumps([_renderer_backend(), instance.APP,
     check(rust[0:2] == ["rust", "floe2"],
           "floe2 did not select the Rust/floe2 identity")
     check(stable[2] != rust[2], "floe and floe2 share an instance socket")
+    check(stable[3] is True and rust[3] is False,
+          "floe2 still advertises density coverage UI state")
 
     portable = ROOT / "tools" / "make_portable.sh"
     syntax = subprocess.run(
