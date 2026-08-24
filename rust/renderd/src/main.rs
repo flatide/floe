@@ -1010,6 +1010,9 @@ fn wire_hex(value: &str) -> String {
 }
 
 fn wire_unhex(value: &str, field: &str) -> Result<String, String> {
+    if !value.is_ascii() {
+        return Err(format!("invalid {field}: non-hex byte"));
+    }
     if !value.len().is_multiple_of(2) {
         return Err(format!("invalid {field}: odd hex length"));
     }
@@ -1485,6 +1488,9 @@ fn parse_color(value: &str) -> Result<[u8; 4], String> {
     let hex = value
         .strip_prefix('#')
         .ok_or_else(|| format!("color must start with #: {value}"))?;
+    if !hex.is_ascii() {
+        return Err(format!("invalid color: {value}"));
+    }
     if hex.len() != 6 && hex.len() != 8 {
         return Err(format!("color must have 6 or 8 hex digits: {value}"));
     }
@@ -1509,6 +1515,9 @@ fn parse_fill(value: &str) -> Result<LayerFill, String> {
             let hex = value
                 .strip_prefix("pat:")
                 .ok_or_else(|| format!("unknown fill: {value}"))?;
+            if !hex.is_ascii() {
+                return Err(format!("invalid pat fill: {value}"));
+            }
             if hex.len() != 64 {
                 return Err("pat fill requires exactly 64 hex digits".to_string());
             }
@@ -1696,6 +1705,17 @@ mod tests {
             "TOP 한글"
         );
         assert_eq!(wire_points(&[(0, 1), (-2, 3)]), "0,1;-2,3");
+    }
+
+    #[test]
+    fn non_ascii_wire_fields_return_errors_instead_of_panicking() {
+        assert!(wire_unhex("한글", "cell_hex").is_err());
+        // These have an accepted byte length but invalid UTF-8 character
+        // boundaries for the old byte-offset string slicing.
+        assert!(parse_color("#한글").is_err());
+        let pattern = format!("pat:{}x", "한".repeat(21));
+        assert_eq!(pattern[4..].len(), 64);
+        assert!(parse_fill(&pattern).is_err());
     }
 
     #[test]

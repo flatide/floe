@@ -28,12 +28,13 @@ if [ -z "$SRC" ]; then
     if [ ! -f "$SRC.tiles/meta.json" ] || \
        [ floe/cache.py -nt "$SRC.tiles/meta.json" ]; then
         rm -rf "$SRC.tiles"
-        PYTHONPATH=. .venv/bin/python -m floe index "$SRC" >/dev/null
+        PYTHONPATH=. .venv/bin/python -m floe index --legacy "$SRC" >/dev/null
     fi
 fi
 (cd rust && PATH="$HOME/.cargo/bin:$PATH" \
     cargo build --release 2>/dev/null >/dev/null)
 (cd rust && PATH="$HOME/.cargo/bin:$PATH" cargo test --workspace)
+.venv/bin/python tools/validate_index_cli.py
 OUT="${SRC%.oas}_rust.tiles"
 .venv/bin/python tools/validate_rust_scan.py "$SRC"
 .venv/bin/python tools/validate_rust_tiles.py "$SRC" "$OUT"

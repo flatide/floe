@@ -307,7 +307,7 @@ def _svc_render(cache, mosaic, renderer, lod, tmp, job,
                                    t0)
         else:
             res.put({"kind": "error", "msg": "viewer is "
-                     "VFS-only; run floe-index vfs"})
+                     "VFS-only; run floe index"})
             return
         with open(tmp, "rb") as f:
             png = f.read()
@@ -734,7 +734,7 @@ def _render_service(src, req, res, latest=None, options=None):
         # viewer is VFS-only
         if not cache.meta.get("vfs"):
             res.put({"kind": "error", "msg": "not a VFS cache; "
-                     "run: floe-index vfs <file.oas>"})
+                     "run: floe index <file.oas>"})
             return
         from .vfsclient import VfsClient
         cache.vfs_client = VfsClient(cache.dir)

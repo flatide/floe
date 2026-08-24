@@ -967,7 +967,7 @@ def build_skeleton(ly, top, texts, out_path, log=print, skel_texts=None):
 def add_skeleton(cache, log=print, text_cap=None, text_tile_cap=None,
                  skel_texts=None, jobs=None):
     """Upgrade an existing cache in place (one source read, no re-tiling):
-    floe index --skeleton-only."""
+    floe index --legacy --skeleton-only."""
     t0 = time.perf_counter()
     meta = cache.meta or cache.load()
     log(f"[index] reading {cache.src} for skeleton...")
@@ -1000,7 +1000,7 @@ def add_skeleton(cache, log=print, text_cap=None, text_tile_cap=None,
 def rebuild_texts(cache, log=print, text_cap=None, text_tile_cap=None,
                   skel_texts=None, jobs=None):
     """Refresh the text handling of an existing banded cache in place
-    (floe index --texts-only), NO re-tiling: strips any texts still
+    (floe index --legacy --texts-only), NO re-tiling: strips any texts still
     living in the b0 tiles (pre-0.5.4 caches carried them - texts now
     exist only as far-view skeleton labels) and rebuilds the skeleton
     with a fresh bounded collection. Combine with --text-cap /

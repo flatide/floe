@@ -32,7 +32,8 @@ ls /opt/homebrew/lib | grep python
 
 # 반드시 그 버전의 Homebrew 파이썬으로 venv 생성
 /opt/homebrew/bin/python3.14 -m venv --system-site-packages .venv
-.venv/bin/pip install klayout numpy
+.venv/bin/pip install numpy pillow
+# 개발 oracle/KLayout rollback까지 쓸 때만: .venv/bin/pip install klayout
 .venv/bin/python -c "import gi; gi.require_version('Gtk', '3.0'); print(gi.__file__)"
 ```
 
@@ -51,7 +52,8 @@ sudo dnf install python3-gobject gtk3      # Debian/Ubuntu: python3-gi gir1.2-gt
 
 python3 -c 'import gi; gi.require_version("Gtk", "3.0")'   # 사전 확인
 python3 -m venv --system-site-packages .venv
-.venv/bin/pip install klayout numpy
+.venv/bin/pip install numpy pillow
+# 개발 oracle/KLayout rollback까지 쓸 때만: .venv/bin/pip install klayout
 ```
 
 폐쇄망 호스트는 아래 [폐쇄망 리눅스 배포](#폐쇄망-리눅스-배포) 절차를 따른다.
@@ -97,7 +99,7 @@ python3 -m venv --system-site-packages .venv
 - 생성 자체는 블록별 임시 파일 + viewer 모드 병합이라 RAM ~2GB로 동작
 - 결과 파일은 shapes/byte가 높아 floe가 자동으로 viewer 모드를 선택함.
   병리 자체를 보려면 `--layout-mode editable`로 강제.
-  (`floe index`도 v0.4.3부터 기본 viewer read — `--read-mode editable`이
+  (`floe index --legacy`도 기본 viewer read — `--read-mode editable`이
   펼침 RAM을 요구하는 옛 경로.)
 
 ## 레이어 맵
@@ -119,10 +121,9 @@ floe는 **최초 1회 인덱싱**으로 이 비용을 지불하고, 이후 모�
 ```sh
 alias floe=".venv/bin/python -m floe"
 
-floe index data/testchip_1g5.oas          # 1회: <src>.ice/ 생성 (전 코어 사용)
-floe index data/testchip_1g5.oas --jobs 1 # 병렬 끄기 (기본: 코어 수만큼 fork)
-# 대용량 실칩 인덱싱은 Rust 인덱서 권장 - 아래 [Rust 인덱서] 섹션
-# (python 인덱서는 동결 상태, 같은 .ice를 훨씬 빠르게 만든다)
+floe index data/testchip_1g5.oas          # 1회: <src>.floe/ 생성 (Rust, 전 코어)
+floe index data/testchip_1g5.oas --jobs 1 # 병렬 끄기
+floe index data/testchip_1g5.oas --coverage  # 선택형 density overview 포함
 floe info  data/testchip_1g5.oas          # 레이어/그리드/통계 요약
 floe view  data/testchip_1g5.oas          # 네이티브 데스크톱 뷰어 (기본)
 floe view  data/testchip_1g5.oas --goto 5240,5260,50   # 시작 위치+뷰 폭(um)
@@ -132,6 +133,18 @@ floe clip  data/testchip_1g5.oas --bbox 5000,5000,5100,5100 --out region.oas
 ```
 
 - `--bbox`는 µm 단위 `X0,Y0,X1,Y1`. `--layers`는 이름 또는 `layer/datatype` 목록.
+- `floe index`는 기본적으로 동봉된 `floe-index vfs`를 실행한다. 같은 source
+  fingerprint의 정상 캐시는 재사용하며 기존·불완전·stale 캐시 교체는 명시적
+  `--force`가 있어야 한다. `--page-target-mb`, `--no-lod`, `--slow-cell-s`,
+  `--p2-shard-limit-mb`는 Rust 빌드 옵션이다. coverage는 GUI 기본값과 같이
+  opt-in이며 기존 캐시에는 `--coverage-only`로 비파괴 추가할 수 있다.
+
+### Python/KLayout 레거시 인덱서
+
+동결된 `.tiles` 인덱서는 명시적 `floe index --legacy <src>`에서만 사용한다.
+아래의 read mode, band, skeleton/text cap, merge, memory governor 옵션은 모두
+`--legacy` 전용이다.
+
 - **인덱스 read는 기본 viewer 모드** (v0.4.3): klayout editable 모드는
   반복(repetition) 배열을 읽으면서 멤버 전부를 개별 객체로 펼친다
   (~46B/멤버 — 운영 호스트에서 9.83GB 파일이 **400GB RSS**까지 관측).
@@ -166,7 +179,8 @@ floe clip  data/testchip_1g5.oas --bbox 5000,5000,5100,5100 --out region.oas
   5만으로 버리는 낭비도 있었다. `--text-cap` / `--text-tile-cap`을
   명시하면 그 값이 우선. 솎임은 로그 + meta(`texts_thinned`) +
   `floe info`에 표시.
-- **텍스트 정책 변경은 재인덱싱 없이**: `floe index <src> --texts-only`
+- **텍스트 정책 변경은 재인덱싱 없이**:
+  `floe index --legacy <src> --texts-only`
   — 구버전 캐시의 b0 잔존 텍스트 제거 + 스켈레톤 라벨 재생성만 수행
   (b1~b3 무변경). 캡 옵션과 조합해 수십 분짜리 조정으로 끝난다.
 - **밴드 파티션 v2** (v0.5.0): 타일 클립도 viewer 모드로 수행 —
@@ -236,7 +250,7 @@ floe clip  data/testchip_1g5.oas --bbox 5000,5000,5100,5100 --out region.oas
   어차피 재렌더를 유발하므로 마진은 프레임당 픽셀 4배 + 걸리는 타일
   수만 늘리는 비용이었다 — 제거. 배율·depth·레이어가 그대로인 동일
   뷰는 여전히 다시 그리지 않고, 팬 중에는 이전 프레임이 고정 표시된다.
-- 구버전 캐시에는 `floe index --skeleton-only` 로 skeleton만 추가할 수
+- 구버전 캐시에는 `floe index --legacy --skeleton-only`로 skeleton만 추가할 수
   있다 (원본 1회 읽기, 재타일링 없음).
 
 ### Goto (좌표 이동, Calibre 방식)
@@ -475,7 +489,7 @@ klayout은 서브픽셀 도형도 전부 순회하며 그리므로(멤버당 비
 로드/드로우에서 통째로 제외한다.
 
 - 인덱싱 때 각 타일을 `tiles_b0/`(≥2µm) `b1`(0.5–2) `b2`(0.125–0.5)
-  `b3`(<0.125µm) 파일로 분할 (`floe index --bands 0.125,0.5,2` 기본,
+  `b3`(<0.125µm) 파일로 분할 (`floe index --legacy --bands 0.125,0.5,2` 기본,
   `--bands none` = 구형 단일 타일). 셀 트리·인스턴스는 밴드마다 보존
   (셀명에 `__b<k>` 접미사)되어 depth 의미는 동일하고, 그 밴드에 도형이
   없는 서브트리는 가지치기된다. 밴드 합 = 원본 타일 전체 (손실 없음).
@@ -525,21 +539,22 @@ klayout은 서브픽셀 도형도 전부 순회하며 그리므로(멤버당 비
 
 ## 폐쇄망 리눅스 배포
 
-floe는 순수 파이썬. 의존성: `klayout`, `numpy` pip 휠 + GUI는
+기본 경로의 Python 의존성은 `numpy`, `pillow` 휠이고 GUI는
 PyGObject/GTK3 (**RHEL 계열 GNOME 호스트에 기본 탑재** — flateyes와 동일하게
-추가 설치 없음). 인덱싱만이라면 Rust 바이너리 한 개 반입이 가장 단순하다
-(아래 [Rust 인덱서](#rust-인덱서-floe-index) 섹션).
+추가 설치 없음). 인덱싱/렌더용 Rust 바이너리 두 개를 함께 배포한다.
+KLayout wheel은 legacy indexer/renderer와 개발 oracle에서만 선택적으로 필요하다.
 
 ```sh
 # 1) 인터넷 PC에서 휠 수집 (타겟 파이썬 버전에 맞춰)
-pip download klayout numpy -d wheels/ \
+pip download numpy pillow -d wheels/ \
     --platform manylinux2014_x86_64 --only-binary=:all: \
     --python-version 311        # 예: 타겟이 python3.11
 
 # 2) 폐쇄망 호스트에서 - 반드시 시스템 PyGObject가 보이는 파이썬으로
 python3 -c 'import gi; gi.require_version("Gtk", "3.0")'   # GUI 사전 확인
 python3 -m venv --system-site-packages .venv               # gi가 보이게
-.venv/bin/pip install --no-index --find-links wheels/ klayout numpy
+.venv/bin/pip install --no-index --find-links wheels/ numpy pillow
+# rollback/oracle 환경만 별도로 klayout wheel을 설치
 # floe/ 디렉토리 복사 후: .venv/bin/python -m floe ...
 ```
 
@@ -560,20 +575,22 @@ python3 -m venv --system-site-packages .venv               # gi가 보이게
 
 호스트에 `python3-gobject`(gi)조차 없거나 파이썬 버전이 안 맞는 경우,
 flateyes-portable과 동일하게 필요한 걸 전부 싸서 가져간다. Python +
-PyGObject + GTK3 (conda-forge, 재배치 가능) + klayout + numpy + floe가
-한 tar에 들어가고, 호스트엔 아무것도 설치·변경하지 않는다 (쓰는 것은 X
-디스플레이와 시스템 폰트뿐).
+PyGObject + GTK3 (conda-forge, 재배치 가능) + NumPy/Pillow + floe +
+`floe-index`/`floe-renderd`가 한 tar에 들어가고, 호스트엔 아무것도
+설치·변경하지 않는다 (쓰는 것은 X 디스플레이와 시스템 폰트뿐).
+기본 번들은 KLayout을 포함하지 않는다.
 
-flateyes와 달리 floe는 **klayout/numpy가 PyPI 휠**이라 런타임의 pip으로
-설치해야 하므로, 번들은 **x86_64 Linux 빌드 머신**에서 만든다. 그 휠들이
-**glibc 2.27+**를 요구하므로 타깃은 **RHEL8+**여야 한다 (RHEL7은 klayout
-휠 자체가 안 돌아 불가). 빌드 시 verify가 실제 glibc floor를 출력한다.
-`tools/make_portable.sh`가 flateyes의 레시피를 그대로 따른다:
+NumPy/Pillow Linux 휠과 네이티브 바이너리를 런타임에 넣으므로 번들은
+**x86_64 Linux 빌드 머신**에서 만든다. 빌드 시 verify가 모든 ELF의 실제
+glibc floor를 출력한다. `tools/make_portable.sh`가 flateyes의 레시피를
+따른다:
 
 ```sh
 tools/make_portable.sh                     # -> floe-portable-<ver>-<date>.tar.gz
-# 폐쇄망 미러만 되는 빌드 머신이면 klayout/numpy 휠을 미리 받아두고:
+# 폐쇄망 미러만 되는 빌드 머신이면 numpy/pillow 휠을 미리 받아두고:
 WHEELS=./wheels tools/make_portable.sh
+# KLayout rollback/oracle이 꼭 필요한 별도 번들(기본 배포 아님):
+FLOE_PORTABLE_KLAYOUT=1 tools/make_portable.sh
 ```
 
 호스트에서는 **풀고 실행만** (설치·권한 불필요):
@@ -592,7 +609,8 @@ gdk-pixbuf 로더·스키마·폰트 포함) gi를 시스템에 얹을 필요가
 `runtime/lib/python*/site-packages/floe`에 덮어쓰면 된다 (재빌드 불필요).
 
 **뷰어 문제 진단 순서** (창이 검게 나오는 등):
-1. `selfcheck` — 스택(gi/GTK/pixbuf/klayout) 검증, 창 없이.
+1. `selfcheck` — 스택(gi/GTK/pixbuf/NumPy/Pillow/Rust binaries) 검증,
+   창 없이. 기본 번들은 KLayout 부재도 확인한다.
 2. `floe render <src> --bbox ... --out t.png` — 캐시·렌더 엔진 검증, GUI 없이.
 3. `floe probe <src>` — **뷰어의 렌더 서비스 경로**(spawn 자식 + 큐 + 프레임)
    를 GUI 없이 그대로 실행. 여기가 실패하면 뷰어는 검게 뜬다; 통과하면
@@ -765,47 +783,36 @@ PATH를 조용히 누락하지 않고 명시적 오류로 반환한다.
 
 ## Rust 인덱서 (floe-index)
 
-`rust/` 워크스페이스의 네이티브 인덱서. **Python `floe index`를 대체**하며
-(python 인덱서는 동결 — 버그 수정 없음), 동일 포맷의 `.ice` 캐시(밴드
-타일 b0~b3 + tiles_lod + density + meta.json + skeleton.oas + texts.tsv
-사이드카)를 만들고 뷰어가 그대로 연다 (호환 확인 완료).
+`rust/` 워크스페이스의 KLayout-free 네이티브 인덱서다. 사용자 명령
+`floe index`가 `floe-index vfs`로 위임하여 `<src>.floe`의 mmap OVM/OVP/OVT
+캐시를 만든다. Python `.tiles` 인덱서는 `--legacy`에만 남아 있다.
 
 - **순수 Rust, klayout 무관** — floe-oasis(파서/라이터), floe-tiler,
   floe-index CLI. 의존 크레이트는 `vendor/` 동봉이라 빌드 중 crates.io
   접속이 없고 C 툴체인도 불필요하다.
-- **성능**: MAIN09(150MB, 25타일) 실측 **60초** (glibc, `--jobs 12`).
-  파스·타일링 모두 병렬. 권장 jobs는 **12~16** — 테스트 서버 실측에서
-  12가 24보다 빨랐다 (메모리 대역폭 무릎).
-- **캐시 크기**: klayout급 모달 인코딩 (XYRELATIVE, 레코드 정렬로 델타
-  생략, W/H·halfwidth·repetition 모달 재사용) + CBLOCK 압축.
+- 페이지는 cell-local OASIS payload로 유지되고 hierarchy/repetition은 OVM
+  planner가 직접 선택한다. LOD merged page는 기본 on, `design.ovc` density
+  overview는 빌드 비용 때문에 기본 off다.
+- Python은 `FLOE_INDEX_BIN` → 개발 트리 `rust/target/release/floe-index` →
+  Python 실행 파일 인접 binary(portable) → `PATH` 순으로 찾는다.
 
 ### 사용법
 
 ```sh
-floe-index index chip.oas --jobs 12          # outdir 생략 = <src>.ice
-floe-index index chip.oas out.ice --mem 200 --mem-floor 8   # 공유 호스트
+floe index chip.oas --jobs 12                # <src>.floe
+floe index chip.oas --coverage               # density overview 포함
+floe index chip.oas --page-target-mb 2 --p2-shard-limit-mb 4096
+floe index chip.oas --force                  # 기존 캐시 교체 권한
+floe-index vfs chip.oas custom.floe --jobs 12  # 저수준 직접 실행
 floe-index scan chip.oas 16                  # JSON 인벤토리 (진단용)
 floe-index --version
 ```
 
-- `--jobs N` 워커 수, `--tile-bytes N` 타일 목표 크기,
-  `--bands um,um,um` 크기 밴드 문턱 (기본 0.125,0.5,2 — python과 동일).
-- **메모리 거버너**: `--mem GB` = 프로세스 RSS 상한, `--mem-floor GB` =
-  시스템 가용 메모리 바닥 여유 (기본 max(4GB, RAM 5%)). 한도에 닿으면
-  새 타일 착수를 보류하되 최소 1워커는 항상 진행하고, 하트비트에
-  `K waiting (mem)`으로 표시된다. /proc 기반이라 리눅스 전용
-  (macOS에서는 비활성).
 - **진행 로그**: 시작 시 버전 스탬프 `[floe-index <버전> <git> (gnu)]`
   (반입 바이너리가 여럿 돌아다니므로 어떤 빌드인지 매 실행 명시 —
   버전은 rust 변경이 포함된 푸시마다 올라가서 zip 반입 빌드도
-  버전 번호만으로 식별된다),
-  5초마다 `tiles N done, M building / total (Ns)` 하트비트, 타일이
-  64개 이하면 타일별 완료 라인(멤버 수·소요 시간)도 나온다.
-- **종료 요약**: 끝나면 캐시 크기 요약이 자동 출력된다 — 밴드별
-  (`tiles_b0..b3`, `tiles_lod`) 크기·파일 수, skeleton/texts.tsv/
-  meta.json 크기, 합계와 원본 대비 배율, 피크 RSS(`VmHWM`)와 거버너
-  대기 횟수(리눅스). `du` 스윕 없이 이 블록만 옮겨 적으면 된다.
-  stdout JSON에도 `src_bytes`/`cache_bytes`가 들어간다.
+  버전 번호만으로 식별된다). parse/build phase, 느린 cell의 split/LOD
+  fanout, RSS가 stderr에 기록된다.
 - `scan`은 셀/레이어별 레코드·멤버 수, 텍스트, placement, repetition
   타입 히스토그램(`rep_types`)을 JSON으로 출력한다 — 파일 구성 진단용
   (175GB 캐시 사건의 원인 확정도 이 히스토그램으로 했다).
@@ -824,14 +831,14 @@ sh rust/build-linux.sh
 #                                   실행되는 이식성 폴백 (+ .sha256)
 ```
 
-- 배포는 **바이너리 한 개 반입 + `chmod +x`** 로 끝난다 (venv/휠 불필요).
+- 소스 트리 밖의 바이너리는 `FLOE_INDEX_BIN`으로 지정하거나 Python 실행
+  파일 옆/`PATH`에 둔다. portable은 `runtime/bin/floe-index`에 동봉한다.
 - musl 정적 빌드에는 musl malloc의 전역 락(전 스레드 수가 ~190초로
   수렴하는 병목)을 우회하는 스레드 캐시 allocator가 내장된다. glibc/
   macOS 빌드는 순수 시스템 allocator를 쓴다 (자체 per-thread 캐시 보유).
-- **검증**: `sh tools/validate_rust.sh` (~20초) — scan 카운트, 밴드 파일
-  지오메트리 XOR, depth별 멤버 수, meta/density(밴드 파일 기반 정밀
-  오라클), skeleton/사이드카를 klayout 빌드 캐시와 대조하는 5단계
-  스위트. rust 쪽 커밋 전 필수.
+- **검증**: `sh tools/validate_rust.sh` — CLI 위임/overwrite 보호부터 VFS,
+  renderer, KLayout oracle까지 전체 gate를 실행한다. Rust/VFS/packaging 변경
+  전 필수다.
 
 ## 로드맵
 

@@ -52,22 +52,52 @@ def parse_bbox_um(s, dbu):
     return a, c, b, d
 
 
+def _positive_int(value):
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be an integer")
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return parsed
+
+
+def _nonnegative_int(value):
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be an integer")
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be zero or greater")
+    return parsed
+
+
+def _nonnegative_float(value):
+    try:
+        parsed = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be a number")
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be zero or greater")
+    return parsed
+
+
 def open_cache(src, args):
     # the viewer is VFS-only: it opens <src>.floe (built by
-    # `floe-index vfs`) and never auto-builds a cache.
+    # `floe index`, backed by `floe-index vfs`) and never auto-builds a cache.
     from . import cache as cache_mod
     c = cache_mod.Cache(src)
     c.layout_mode = getattr(args, "layout_mode", None)
     if not c.exists():
         raise SystemExit(
-            f"no VFS cache for {src}; run: floe-index vfs {src}")
+            f"no VFS cache for {src}; run: floe index {src}")
     c.load()
     if not c.meta.get("vfs"):
         raise SystemExit(
-            f"{c.dir} is not a VFS cache; rebuild: floe-index vfs {src}")
+            f"{c.dir} is not a VFS cache; rebuild: floe index --force {src}")
     if c.is_stale():
         print("[floe][warn] cache is outdated (source changed); "
-              "rebuild: floe-index vfs", file=sys.stderr)
+              "rebuild: floe index --force", file=sys.stderr)
     return c
 
 
@@ -88,8 +118,39 @@ def _vfs_region(c, x0, y0, x1, y1, layers):
     return m.ly, m.top, vc
 
 
-def cmd_index(args):
+def _legacy_index_options(args):
+    """Return explicitly selected Python/KLayout-only index flags."""
+    names = (
+        ("tile_mb", "--tile-mb"),
+        ("skeleton_only", "--skeleton-only"),
+        ("texts_only", "--texts-only"),
+        ("merge_only", "--merge-only"),
+        ("merge", "--merge"),
+        ("mem", "--mem"),
+        ("mem_floor", "--mem-floor"),
+        ("no_gov", "--no-gov"),
+        ("text_cap", "--text-cap"),
+        ("text_tile_cap", "--text-tile-cap"),
+        ("skel_texts", "--skel-texts"),
+        ("tile_tgt", "--tile-tgt"),
+        ("bands", "--bands"),
+        ("read_mode", "--read-mode"),
+    )
+    selected = []
+    for name, flag in names:
+        value = getattr(args, name)
+        if value is not None and (not isinstance(value, bool) or value):
+            selected.append(flag)
+    return selected
+
+
+def _cmd_index_legacy(args):
     from . import cache as cache_mod
+    vfs_meta = os.path.abspath(args.src) + ".floe/meta.json"
+    if os.path.isfile(vfs_meta):
+        raise SystemExit(
+            "floe: --legacy cannot select <src>.tiles while a VFS cache "
+            "for the same source exists; move the .floe cache aside first")
     caps = dict(text_cap=args.text_cap, text_tile_cap=args.text_tile_cap,
                 skel_texts=args.skel_texts)
     if args.skeleton_only or args.texts_only or args.merge_only:
@@ -111,9 +172,11 @@ def cmd_index(args):
         if not c.is_stale():
             print(f"[floe] cache up to date: {c.dir} (use --force to rebuild)")
             return
-    bands = (None if args.bands.strip().lower() in ("none", "0", "")
-             else tuple(sorted(float(t) for t in args.bands.split(","))))
-    cache_mod.build_index(args.src, tile_bytes=args.tile_mb * 1e6,
+    bands_arg = args.bands if args.bands is not None else "0.125,0.5,2"
+    bands = (None if bands_arg.strip().lower() in ("none", "0", "")
+             else tuple(sorted(float(t) for t in bands_arg.split(","))))
+    tile_mb = 6.0 if args.tile_mb is None else args.tile_mb
+    cache_mod.build_index(args.src, tile_bytes=tile_mb * 1e6,
                           jobs=args.jobs, bands=bands,
                           read_mode=args.read_mode,
                           gov=not args.no_gov, mem_gb=args.mem,
@@ -121,6 +184,140 @@ def cmd_index(args):
                           tile_tgt=args.tile_tgt,
                           merge=args.merge, force=args.force,
                           **caps)
+
+
+def _current_vfs_cache(src, outdir, binary):
+    """Return whether outdir is a complete cache for src.
+
+    Any existing directory that is not a current cache is deliberately a
+    hard error at the caller unless --force was explicit: floe-index vfs
+    replaces its commit files, so merely noticing a stale directory must not
+    be treated as permission to overwrite it.
+    """
+    if not os.path.lexists(outdir):
+        return False, "missing"
+    if not os.path.isdir(outdir):
+        return False, "cache path exists and is not a directory"
+    meta_path = os.path.join(outdir, "meta.json")
+    marker_path = os.path.join(outdir, "design.ovm")
+    if not os.path.isfile(meta_path) or not os.path.isfile(marker_path):
+        return False, "cache is incomplete (meta.json/design.ovm missing)"
+    try:
+        with open(meta_path, encoding="utf-8") as f:
+            meta = json.load(f)
+        src_meta = meta["src"]
+        size = int(src_meta["size"])
+        mtime = int(src_meta["mtime"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return False, "cache metadata is unreadable"
+    if not meta.get("vfs"):
+        return False, "cache is not a Rust VFS cache"
+    from .cache import CACHE_VERSION
+    if meta.get("version") != CACHE_VERSION:
+        return False, "cache version %r does not match %r" % (
+            meta.get("version"), CACHE_VERSION)
+    st = os.stat(src)
+    if st.st_size != size or int(st.st_mtime) != mtime:
+        return False, "source fingerprint changed"
+    import subprocess
+    try:
+        checked = subprocess.run(
+            [binary, "vfsd", outdir], stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            check=False, text=True)
+    except OSError as exc:
+        return False, f"cannot validate cache marker: {exc}"
+    if checked.returncode:
+        detail = checked.stderr.strip().splitlines()
+        detail = detail[-1] if detail else "floe-index vfsd failed"
+        return False, f"cache commit validation failed: {detail}"
+    return True, "current"
+
+
+def _run_rust_index(args, binary, coverage_only=False):
+    import shlex
+    import subprocess
+
+    outdir = os.path.abspath(args.src) + ".floe"
+    command = [binary, "vfs", os.path.abspath(args.src), outdir]
+    if args.jobs is not None:
+        command += ["--jobs", str(args.jobs)]
+    if coverage_only:
+        command.append("--coverage-only")
+    else:
+        if args.page_target_mb is not None:
+            command += ["--page-target-mb", str(args.page_target_mb)]
+        if args.coverage:
+            command.append("--coverage")
+        if args.no_lod:
+            command.append("--no-lod")
+        if args.slow_cell_s is not None:
+            command += ["--slow-cell-s", str(args.slow_cell_s)]
+        if args.p2_shard_limit_mb is not None:
+            command += ["--p2-shard-limit-mb",
+                        str(args.p2_shard_limit_mb)]
+    print("[floe] " + shlex.join(command))
+    try:
+        result = subprocess.run(command, check=False)
+    except OSError as exc:
+        raise SystemExit(f"floe: cannot run floe-index: {exc}")
+    if result.returncode:
+        raise SystemExit(result.returncode)
+
+
+def cmd_index(args):
+    legacy_options = _legacy_index_options(args)
+    if legacy_options and not args.legacy:
+        raise SystemExit(
+            "floe: %s %s Python/KLayout legacy option(s); add --legacy "
+            "or use the Rust VFS options shown by 'floe index --help'" %
+            (", ".join(legacy_options),
+             "is a" if len(legacy_options) == 1 else "are"))
+    rust_options = any((args.page_target_mb is not None, args.coverage,
+                        args.coverage_only, args.no_lod,
+                        args.slow_cell_s is not None,
+                        args.p2_shard_limit_mb is not None))
+    if args.legacy:
+        if rust_options:
+            raise SystemExit(
+                "floe: Rust VFS options cannot be combined with --legacy")
+        return _cmd_index_legacy(args)
+
+    src = os.path.abspath(args.src)
+    try:
+        os.stat(src)
+    except FileNotFoundError:
+        raise SystemExit(f"floe: source not found: {src}")
+    except OSError as exc:
+        raise SystemExit(f"floe: cannot stat source {src}: {exc}")
+    from .vfsclient import find_binary
+    try:
+        binary = find_binary()
+    except RuntimeError as exc:
+        raise SystemExit(f"floe: {exc}")
+    outdir = src + ".floe"
+    current, reason = _current_vfs_cache(src, outdir, binary)
+    if args.coverage_only:
+        if not current:
+            raise SystemExit(
+                f"floe: --coverage-only needs a current cache at {outdir} "
+                f"({reason})")
+        if os.path.isfile(os.path.join(outdir, "design.ovc")):
+            print(f"[floe] coverage already present: {outdir}/design.ovc")
+            return
+        return _run_rust_index(args, binary, coverage_only=True)
+    if current and not args.force:
+        if args.coverage and not os.path.isfile(
+                os.path.join(outdir, "design.ovc")):
+            return _run_rust_index(args, binary, coverage_only=True)
+        print(f"[floe] cache up to date: {outdir} "
+              "(use --force to rebuild with new options)")
+        return
+    if os.path.lexists(outdir) and not args.force:
+        raise SystemExit(
+            f"floe: refusing to replace existing cache {outdir}: {reason}; "
+            "rerun with --force to rebuild it")
+    return _run_rust_index(args, binary)
 
 
 def cmd_info(args):
@@ -151,7 +348,7 @@ def cmd_info(args):
         if os.path.exists(p):
             print(f"  {part:<11}: {os.path.getsize(p) / 1e6:.1f} MB")
         elif part == "design.ovc":
-            print("  design.ovc : (none; add: floe-index vfs "
+            print("  design.ovc : (none; add: floe index "
                   "--coverage-only)")
     sk = m.get("skeleton") or {}
     print(f"skeleton   : {sk.get('shapes', 0):,} shapes, "
@@ -937,7 +1134,7 @@ def cmd_view(args):
         # GUI instance
         if src and not _cache_ready(src):
             raise SystemExit(f"no VFS cache for {src}; "
-                             f"run: floe-index vfs {src}")
+                             f"run: floe index {src}")
         addr = instance.socket_address(display)
         # no src: an empty path forwards as a present-only request
         # (raise the running window; open nothing)
@@ -995,75 +1192,101 @@ def main(argv=None):
     ap.add_argument("--version", action="version", version=__version__)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("index", help="build the spatial tile cache (one-time)")
+    p = sub.add_parser(
+        "index", help="build the Rust VFS spatial cache (one-time)")
     p.add_argument("src")
     p.add_argument("--force", action="store_true",
-                   help="rebuild from scratch, ignoring both an "
-                        "up-to-date cache and a resumable progress "
-                        "journal from an interrupted run")
-    p.add_argument("--tile-mb", type=float, default=6.0,
-                   help="target tile file size in MB (default 6)")
-    p.add_argument("--skeleton-only", action="store_true",
+                   help="allow replacement of an existing <src>.floe "
+                        "cache (without this flag a current cache is "
+                        "reused and a stale/incomplete cache is refused)")
+    p.add_argument("--jobs", type=_positive_int, default=None, metavar="N",
+                   help="Rust parser/planner worker count (default: host "
+                        "parallelism)")
+    rust = p.add_argument_group("Rust VFS options (default backend)")
+    rust.add_argument("--page-target-mb", type=_positive_int, default=None,
+                      metavar="N", help="encoded page target in MiB "
+                      "(default: 1)")
+    coverage = rust.add_mutually_exclusive_group()
+    coverage.add_argument(
+        "--coverage", action="store_true",
+        help="build optional design.ovc density coverage; when a current "
+             "cache lacks it, add it without replacing the cache")
+    coverage.add_argument(
+        "--coverage-only", action="store_true",
+        help="add design.ovc to a current cache without rebuilding it")
+    rust.add_argument("--no-lod", action="store_true",
+                      help="do not generate merged LOD page variants")
+    rust.add_argument("--slow-cell-s", type=_nonnegative_float,
+                      default=None, metavar="S",
+                      help="slow-cell log threshold in seconds (default: "
+                           "5; 0 logs every cell)")
+    rust.add_argument("--p2-shard-limit-mb", type=_nonnegative_int,
+                      default=None, metavar="N",
+                      help="P2 arena shard-copy ceiling in MiB; useful on "
+                           "hosts without Linux MemAvailable")
+    legacy = p.add_argument_group(
+        "Python/KLayout legacy options (require --legacy)")
+    legacy.add_argument(
+        "--legacy", action="store_true",
+        help="use the frozen Python/KLayout .tiles indexer instead of "
+             "floe-index vfs")
+    legacy.add_argument("--tile-mb", type=float, default=None,
+                   help="legacy target tile file size in MB (default 6)")
+    legacy.add_argument("--skeleton-only", action="store_true",
                    help="add the far-zoom skeleton to an existing cache "
                         "(one source read, no re-tiling)")
-    p.add_argument("--texts-only", action="store_true",
+    legacy.add_argument("--texts-only", action="store_true",
                    help="refresh text handling of an existing banded "
                         "cache without re-tiling: strip pre-0.5.4 b0 "
                         "texts and rebuild the skeleton labels "
                         "(--text-cap / --text-tile-cap / --skel-texts "
                         "adjust the label budgets)")
-    p.add_argument("--merge-only", action="store_true",
+    legacy.add_argument("--merge-only", action="store_true",
                    help="add merged twins to an existing banded cache "
                         "without re-tiling (reads the band files back; "
                         "no source read). Twins stand in for bands the "
                         "viewer's cut drops")
-    p.add_argument("--merge", action="store_true",
+    legacy.add_argument("--merge", action="store_true",
                    help="also build merged twins, as a post-pass after "
                         "tiling (reads the band files back; no source "
                         "in RAM, so it parallelizes freely). Default: "
                         "off - add them any time later with "
                         "--merge-only. Without twins, bands the "
                         "viewer's cut drops simply disappear)")
-    p.add_argument("--jobs", type=int, default=None, metavar="N",
-                   help="max fork workers for the tiling phase (default: "
-                        "all cores; 1 = sequential). A memory governor "
-                        "probes one tile solo, then keeps only as many "
-                        "workers busy as free RAM affords (see --mem / "
-                        "--mem-floor / --no-gov).")
-    p.add_argument("--mem", type=float, default=None, metavar="GB",
+    legacy.add_argument("--mem", type=float, default=None, metavar="GB",
                    help="memory ceiling for this index run: loaded "
                         "source + tile workers stay under it. Use when "
                         "other programs (or users) need their share of "
                         "RAM. Default: bounded only by free RAM")
-    p.add_argument("--mem-floor", type=float, default=None, metavar="GB",
+    legacy.add_argument("--mem-floor", type=float, default=None, metavar="GB",
                    help="free-RAM reserve the governor never dips into "
                         "(default: max(2, 5%% of RAM))")
-    p.add_argument("--no-gov", action="store_true",
+    legacy.add_argument("--no-gov", action="store_true",
                    help="disable the memory governor and always run "
                         "--jobs workers (pre-0.5.5 behavior; can OOM "
                         "on small machines)")
-    p.add_argument("--text-cap", type=int, default=None, metavar="N",
+    legacy.add_argument("--text-cap", type=int, default=None, metavar="N",
                    help="per-layer text budget when collecting skeleton "
                         "labels (default 1,000,000; layers over it are "
                         "thinned per tile; 0 = unlimited)")
-    p.add_argument("--text-tile-cap", type=int, default=None, metavar="N",
+    legacy.add_argument("--text-tile-cap", type=int, default=None, metavar="N",
                    help="per-tile text sample kept for over-budget "
                         "layers (default 10,000; 0 = drop those layers "
                         "whole)")
-    p.add_argument("--skel-texts", type=int, default=None, metavar="N",
+    legacy.add_argument("--skel-texts", type=int, default=None, metavar="N",
                    help="total far-view skeleton labels kept (default "
                         "50,000; 0 = unlimited)")
-    p.add_argument("--tile-tgt", default=None,
+    legacy.add_argument("--tile-tgt", default=None,
                    choices=("viewer", "editable"),
                    help="layout mode for tile clip targets (default "
                         "viewer; editable = pre-0.5.0 path, for "
                         "comparison runs)")
-    p.add_argument("--bands", default="0.125,0.5,2",
+    legacy.add_argument("--bands", default=None,
                    help="size-band edges in um (ascending); shapes are "
                         "split per band so wide views skip subpixel "
                         "content entirely. 'none' = legacy single-file "
                         "tiles (default: 0.125,0.5,2)")
-    p.add_argument("--read-mode", default=None,
+    legacy.add_argument("--read-mode", default=None,
                    choices=("viewer", "editable"),
                    help="source read mode (default viewer): viewer keeps "
                         "repetition arrays compact - editable "

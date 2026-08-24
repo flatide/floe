@@ -8,7 +8,7 @@ M5 density coverage 완료, M7 pick/snap 완료, M8 exact clip vertical slice �
 
 ### 현재 구현 상태 (2026-08-24)
 
-통합 기준선은 현재 부모 `floe` main, `floe-index 0.11.46`, OVM v7이다.
+통합 기준선은 현재 부모 `floe` main, `floe-index 0.12.0`, OVM v7이다.
 
 - 완료: Cargo workspace와 `render-core`, `render-cli`, `renderd` scaffold
 - 완료: 폐쇄망 vendor 설정과 동일 Cargo workspace 내 직접 path dependency
@@ -746,7 +746,11 @@ Rust 실행·goto pan/zoom·frames/labels 상태 검증은 통과했다. 독립 
 - 완료: `cache.py`의 `klayout.db`를 실제 legacy 함수 호출까지 지연하고,
   `service.py`의 KLayout renderer/viewport import도 legacy worker 내부로 격리.
   frame layer/live-cap 계산은 KLayout-free `view_policy.py`로 분리
-- portable bundle에서 klayout wheel 제거
+- 완료: 기본 portable bundle에서 KLayout wheel/import를 제거하고 NumPy/Pillow,
+  GTK/PyGObject와 두 Rust binary를 유지. `FLOE_PORTABLE_KLAYOUT=1`만 별도
+  `-klayout` rollback bundle을 생성
+- 완료: `floe index`를 Rust VFS subprocess로 전환하고 cache reuse/명시적
+  `--force`, Rust 옵션, `--legacy` 경계를 고정
 
 종료 gate:
 

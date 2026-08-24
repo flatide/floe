@@ -2,38 +2,43 @@
 # Build a self-contained floe runtime bundle for hosts without PyGObject.
 # Adapted from flateyes' make_portable.sh - the GTK3 stack is pulled from
 # conda-forge (relocatable) exactly as flateyes does; floe additionally
-# needs klayout + numpy, which are PyPI-only wheels, so unlike flateyes
-# this MUST run on an x86_64 LINUX build machine (the runtime's own pip
-# installs the Linux wheels; they cannot be installed from macOS).
+# needs NumPy + Pillow wheels. KLayout is absent by default;
+# FLOE_PORTABLE_KLAYOUT=1 builds a separate rollback/oracle bundle.
 #
 #   ./make_portable.sh [output-dir]     # -> floe-portable-<ver>-<date>.tar.gz
 #
-# The bundle holds python + PyGObject + GTK3 (conda-forge) + klayout +
-# numpy + the floe package, plus a launcher that builds the machine-local
-# GTK caches on first run. Target: x86_64 Linux, glibc 2.27+ (RHEL8+)
-# - the klayout/numpy wheels need it; the verify prints the exact floor.
+# The bundle holds python + PyGObject + GTK3 (conda-forge) + NumPy/Pillow +
+# the floe package and matched Rust binaries, plus a launcher that builds
+# the machine-local GTK caches on first run. Target: x86_64 Linux; verify
+# computes the exact glibc floor and enforces the configured ceiling.
 set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)          # floe repo root
 OUT_DIR=${1:-$REPO}
 WORK=${FLOE_PORTABLE_WORK:-${TMPDIR:-/tmp}/floe-portable-build}
 PY_SPEC=${PY_SPEC:-python=3.11}                 # conda-forge python line
-# Two glibc knobs (flateyes conflated them): floe's klayout/numpy PyPI
-# wheels require glibc >= 2.27 (RHEL8+) - RHEL7 cannot run floe
-# regardless - so there is no point starving the conda solver at 2.17;
-# a 2.17 cap can even exclude newer builds (librsvg etc). The verify
-# ceiling guards against accidentally-newer deps; the real floor is the
-# max found across all ELFs, printed and baked into selfcheck/README.
+# Two glibc knobs: keep the conda solver at the supported deployment
+# baseline while independently checking every bundled ELF (including the
+# wheels and Rust daemons). The measured floor is baked into selfcheck/README.
 CONDA_GLIBC=${CONDA_GLIBC:-2.27}                # conda solver target
 GLIBC_CEILING=${GLIBC_CEILING:-28}              # verify guard (RHEL8=2.28)
 WHEELS=${WHEELS:-}                              # local wheel dir (closed net)
+FLOE_PORTABLE_KLAYOUT=${FLOE_PORTABLE_KLAYOUT:-0}
+case "$FLOE_PORTABLE_KLAYOUT" in
+    0 | 1) ;;
+    *) echo "FLOE_PORTABLE_KLAYOUT must be 0 or 1"; exit 1 ;;
+esac
 VERSION=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "$REPO/floe/__init__.py")
 STAMP=$(date +%Y%m%d)
-NAME="floe-portable-${VERSION}-${STAMP}"
+FLAVOR=""
+if [ "$FLOE_PORTABLE_KLAYOUT" = 1 ]; then
+    FLAVOR="-klayout"
+fi
+NAME="floe-portable-${VERSION}-${STAMP}${FLAVOR}"
 
 case "$(uname -s)-$(uname -m)" in
     Linux-x86_64) : ;;
-    *) echo "floe's bundle needs klayout/numpy Linux wheels installed by the"
+    *) echo "floe's bundle needs numpy/pillow Linux wheels installed by the"
        echo "runtime's pip, so build on an x86_64 Linux machine (got"
        echo "$(uname -s)-$(uname -m))."; exit 1 ;;
 esac
@@ -71,16 +76,24 @@ PYBIN="$(ls "$WORK"/runtime/bin/python3.[0-9]* 2>/dev/null | head -1)"
 PYVER="$("$PYBIN" -c 'import sys;print("%d.%d"%sys.version_info[:2])')"
 echo "== runtime python $PYVER"
 
-# -- 3. add klayout + numpy (PyPI wheels) into the runtime --------------
+# -- 3. add NumPy/Pillow; KLayout only for an opt-in rollback bundle ---
 "$PYBIN" -m pip install --upgrade pip >/dev/null
-if [ -n "$WHEELS" ]; then
-    echo "== installing klayout/numpy from local wheels: $WHEELS"
-    "$PYBIN" -m pip install --no-index --find-links "$WHEELS" \
-        --only-binary=:all: klayout numpy pillow
-else
-    "$PYBIN" -m pip install --only-binary=:all: klayout numpy pillow
+PIP_PACKAGES=(numpy pillow)
+if [ "$FLOE_PORTABLE_KLAYOUT" = 1 ]; then
+    PIP_PACKAGES+=(klayout)
+    echo "== KLayout rollback bundle requested"
 fi
-"$PYBIN" -c 'import klayout, numpy, PIL; print("== klayout", klayout.__version__, "numpy", numpy.__version__, "pillow", PIL.__version__)'
+if [ -n "$WHEELS" ]; then
+    echo "== installing runtime wheels from local directory: $WHEELS"
+    "$PYBIN" -m pip install --no-index --find-links "$WHEELS" \
+        --only-binary=:all: "${PIP_PACKAGES[@]}"
+else
+    "$PYBIN" -m pip install --only-binary=:all: "${PIP_PACKAGES[@]}"
+fi
+"$PYBIN" -c 'import numpy, PIL; print("== numpy", numpy.__version__, "pillow", PIL.__version__)'
+if [ "$FLOE_PORTABLE_KLAYOUT" = 1 ]; then
+    "$PYBIN" -c 'import klayout; print("== klayout rollback", klayout.__version__)'
+fi
 
 # -- 4. drop the floe package into site-packages ------------------------
 SITE="$("$PYBIN" -c 'import site;print(site.getsitepackages()[0])')"
@@ -142,13 +155,15 @@ chmod +x "$WORK/runtime/bin/floe-index" "$WORK/runtime/bin/floe-renderd"
 
 # -- 6. verify: arch, glibc floor <= ceiling, key files -----------------
 # The real host requirement is the MAX GLIBC_2.x any bundled ELF needs
-# (dominated by klayout/numpy wheels ~2.27); ceiling only guards against
-# accidentally-newer deps. The floor is written to $WORK/floor.txt so the
+# (wheels or Rust binaries); ceiling only guards against accidentally-newer
+# deps. The floor is written to $WORK/floor.txt so the
 # launcher/README can state the true "glibc >= 2.x" the target must meet.
-python3 - "$WORK/runtime" "$GLIBC_CEILING" "$PYVER" "$WORK/floor.txt" <<'PY'
+python3 - "$WORK/runtime" "$GLIBC_CEILING" "$PYVER" "$WORK/floor.txt" \
+    "$FLOE_PORTABLE_KLAYOUT" <<'PY'
 import os, re, struct, sys
 root, ceiling, pyver, floorf = sys.argv[1], int(sys.argv[2]), \
     sys.argv[3], sys.argv[4]
+with_klayout = sys.argv[5] == "1"
 pat = re.compile(rb"GLIBC_2\.(\d+)")
 bad, elves, floor = [], 0, 0
 for dp, _, names in os.walk(root):
@@ -176,11 +191,16 @@ for why, p in bad:
 must = ["lib/libgtk-3.so.0", "lib/girepository-1.0/Gtk-3.0.typelib",
         "lib/python%s/site-packages/gi/__init__.py" % pyver,
         "lib/python%s/site-packages/floe/cli.py" % pyver,
-        "lib/python%s/site-packages/klayout" % pyver,
         "bin/floe-index",   # vfs/index runtime
-        "bin/floe-renderd", # opt-in multicore CPU renderer
+        "bin/floe-renderd", # default multicore CPU renderer
         "share/glib-2.0/schemas",
         "fonts"]  # bundled sans fallback (fonts.conf lists it first)
+klayout_dir = "lib/python%s/site-packages/klayout" % pyver
+if with_klayout:
+    must.append(klayout_dir)
+elif os.path.exists(os.path.join(root, klayout_dir)):
+    print("FAIL unexpected KLayout in default bundle", klayout_dir)
+    bad.append(("unexpected KLayout", os.path.join(root, klayout_dir)))
 missing = [m for m in must if not os.path.exists(os.path.join(root, m))]
 for m in missing:
     print("MISSING", m)
@@ -214,7 +234,8 @@ mv "$WORK/runtime" "$B/runtime"
 
 cat > "$B/floe" <<EOF
 #!/bin/sh
-# floe portable launcher: self-contained python + GTK3 + klayout runtime.
+# floe portable launcher: self-contained Python + GTK3 + Rust runtime.
+# KLayout is present only in an explicitly requested rollback bundle.
 # Nothing is installed; the bundle runs from wherever it was untarred.
 HERE=\$(CDPATH= cd -- "\$(dirname -- "\$0")" && pwd)
 RT="\$HERE/runtime"
@@ -293,9 +314,20 @@ svg = "svg OK" if "svg" in fmts else "svg MISSING (checkbox icons)"
 print("pixbuf:       %s, %s" % (png, svg))
 if "png" not in fmts:
     sys.exit(2)
-import klayout.db, klayout.lay, numpy
-print("klayout:      %s OK" % klayout.__version__)
+import importlib.util
+import numpy, PIL
 print("numpy:        %s OK" % numpy.__version__)
+print("pillow:       %s OK" % PIL.__version__)
+if "$FLOE_PORTABLE_KLAYOUT" == "1":
+    klayout = importlib.import_module("klayout")
+    importlib.import_module("klayout.db")
+    importlib.import_module("klayout.lay")
+    print("klayout:      %s OK (rollback bundle)" % klayout.__version__)
+elif importlib.util.find_spec("klayout") is not None:
+    print("klayout:      UNEXPECTED in default bundle")
+    sys.exit(2)
+else:
+    print("klayout:      not bundled (expected; Rust default)")
 import floe; print("floe:         %s OK" % floe.__version__)
 PY
 rm -f "\$CACHE"
@@ -385,13 +417,16 @@ cat > "$B/README-PORTABLE.txt" <<EOF
 floe 포터블 번들 (floe ${VERSION}, ${STAMP} 빌드)
 ====================
 PyGObject(python3-gobject)가 없는 호스트에서 floe를 실행하기 위한 자체
-포함 런타임. Python + PyGObject + GTK3 + klayout + numpy + floe 패키지 +
-floe-index(러스트 인덱서/VFS daemon)와 floe-renderd(선택형 CPU renderer)가
+포함 런타임. Python + PyGObject + GTK3 + NumPy/Pillow + floe 패키지 +
+floe-index(러스트 인덱서/VFS daemon)와 floe-renderd(기본 CPU renderer)가
 runtime/bin/ 안에 들어
 있으며 시스템에는 아무것도 설치·변경하지 않는다. 시스템에서
 쓰는 것은 X 디스플레이와 (있다면) 시스템 폰트뿐.
 
-요구: x86_64 리눅스, glibc ${FLOOR}+ (RHEL8+; klayout/numpy 휠 요구), X 디스플레이.
+기본 번들은 KLayout을 포함하지 않는다. KLayout rollback/oracle이 필요한 별도
+번들만 FLOE_PORTABLE_KLAYOUT=1로 빌드한다.
+
+요구: x86_64 리눅스, glibc ${FLOOR}+, X 디스플레이.
 
 설치/실행:
     tar xzf ${NAME}.tar.gz -C /opt        # 위치 자유

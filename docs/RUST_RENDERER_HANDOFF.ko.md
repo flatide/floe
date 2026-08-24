@@ -74,32 +74,32 @@ f357b3f renderer: add deterministic Rust labels
 
 ## 4. 바로 이어갈 작업
 
-### P1 — portable의 필수 KLayout 제거
+### P1 — portable의 필수 KLayout 제거 (완료: 2026-08-24)
 
-`tools/make_portable.sh`는 아직 KLayout wheel을 설치하고 selfcheck에서
-`klayout.db/lay`를 import한다. 기본 portable에서는 이를 제거하고 NumPy/Pillow와
-GTK/PyGObject는 유지한다. KLayout rollback bundle이 필요하면 별도 opt-in으로
-명확히 분리한다.
+기본 `tools/make_portable.sh`에서 KLayout wheel과 selfcheck import를 제거하고
+NumPy/Pillow와 GTK/PyGObject를 유지했다. `FLOE_PORTABLE_KLAYOUT=1`은 이름에
+`-klayout` suffix가 붙는 별도 rollback/oracle bundle을 만든다.
 
 이 작업은 `floe index`를 함께 정리해야 한다. 현재 Python `cmd_index`는 legacy
 KLayout indexer이므로 KLayout-free portable에서 그대로 호출할 수 없다.
 
 권장 경계:
 
-1. 기본 `floe index SRC`를 함께 배포되는 `floe-index vfs SRC SRC.floe` subprocess로
-   위임한다.
-2. `--jobs`, 명시적 `--force`는 Rust 경로에 연결한다.
-3. coverage/LOD/page target/slow-cell/P2 shard ceiling은 Rust 의미의 옵션으로
-   노출한다. density overview가 제품 기본이면 `--coverage` 기본 여부를 문서와
-   selfcheck에서 한 번 결정한다.
-4. `--skeleton-only`, `--texts-only`, `--merge-only`, `--merge`, `--tile-mb`,
+1. 완료: 기본 `floe index SRC`를 함께 배포되는 `floe-index vfs SRC SRC.floe`
+   subprocess로 위임.
+2. 완료: `--jobs`, 명시적 `--force`를 Rust 경로에 연결.
+3. 완료: coverage/LOD/page target/slow-cell/P2 shard ceiling을 Rust 의미의
+   옵션으로 노출. density overview는 GUI 기본과 맞춰 opt-in으로 유지.
+4. 완료: `--skeleton-only`, `--texts-only`, `--merge-only`, `--merge`, `--tile-mb`,
    `--mem`, `--mem-floor`, `--no-gov`, text cap, `--bands`, KLayout read/edit mode는
    Python legacy 전용이므로 `--legacy` 또는 별도 legacy command에서만 허용한다.
-5. binary 검색은 `FLOE_INDEX_BIN`, 개발 tree의
+5. 완료: binary 검색은 `FLOE_INDEX_BIN`, 개발 tree의
    `rust/target/release/floe-index`, Python executable 인접 `floe-index`, PATH 순으로
    두고 누락 시 설치 지침이 포함된 hard error를 낸다.
-6. `--force`만 기존 `SRC.floe` 교체 권한으로 간주한다. 평상시에는 source
-   fingerprint가 맞는 cache를 재사용하고, 임의 cache 삭제를 추론하지 않는다.
+6. 완료: `--force`만 기존 `SRC.floe` 교체 권한으로 간주. 평상시에는 source
+   fingerprint/cache version이 맞고 Rust `Vfs::open` 구조·pair 검증을 통과한
+   cache만 재사용하며, 임의 cache 삭제를 추론하지 않는다. 명시한
+   `FLOE_INDEX_BIN`이 무효면 다른 후보로 폴스루하지 않는다.
 
 ### P2 — KLayout-free portable gate
 

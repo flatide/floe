@@ -4,6 +4,28 @@
 `build_cell_plan`, `frontier_json_planned`). 이력: `rust/VFS_HIER.md`
 "빌드 병렬화 2차/3차", "phase 2-A", rev 46b.
 
+## 0. Python 사용자 명령
+
+기본 `floe index <src.oas>`는 `floe-index vfs <abs-src>
+<abs-src>.floe`를 shell 없이 subprocess로 실행한다. `--jobs`,
+`--page-target-mb`, `--coverage`/`--coverage-only`, `--no-lod`,
+`--slow-cell-s`, `--p2-shard-limit-mb`를 같은 이름의 Rust 옵션으로 전달한다.
+coverage는 viewer 기본값과 맞춰 opt-in이다.
+
+정상 VFS cache의 cache version과 source size/mtime fingerprint가 맞고,
+`floe-index vfsd`의 `Vfs::open` 검증(OVM 구조 + OVP/OVT committed length)을
+통과하면 재사용한다. 기존 cache가 stale/incomplete/non-VFS/corrupt이면
+`--force` 없이 Rust를 실행하지 않는다. 즉 `--force`만 기존 `<src>.floe`를
+교체할 권한이다. 현재 cache에 `--coverage`를 지정하면 `--coverage-only`로
+`design.ovc`만 비파괴 추가한다.
+
+binary 검색 순서는 `FLOE_INDEX_BIN`, 개발 트리
+`rust/target/release/floe-index`, Python 실행 파일 인접 `floe-index`, PATH다.
+명시한 `FLOE_INDEX_BIN`이 실행 불가하면 다른 후보로 폴스루하지 않고 hard
+error다. 전체 누락도 빌드/설치 지침을 포함한 hard error다. 동결된 Python/KLayout `.tiles`
+인덱서는 명시적 `--legacy`에서만 사용하며 그 전용 옵션을 기본 Rust 경로와
+섞으면 hard error다.
+
 ## 1. 명령
 
 ```

@@ -15,25 +15,36 @@ import tempfile
 
 
 def find_binary():
-    """floe-index discovery: the DEV TREE build first, then dist/
-    and next-to-interpreter (portable layouts), PATH last - a stale
-    binary on PATH once made the viewer's DRC auto-indexing emit an
-    old pack layout that the reader then refused (2026-08-14)."""
+    """Find the matched floe-index used by indexing and VFS clients.
+
+    An explicit override wins, followed by the development build, the
+    portable slot beside Python, and PATH.  Keeping PATH last prevents an
+    older system binary from silently taking precedence over the package.
+    """
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    for cand in (
+    candidates = []
+    configured = os.environ.get("FLOE_INDEX_BIN")
+    if configured:
+        if os.path.isfile(configured) and os.access(configured, os.X_OK):
+            return os.path.abspath(configured)
+        raise RuntimeError(
+            "FLOE_INDEX_BIN is set but is not an executable file: %s" %
+            configured)
+    candidates.extend((
         os.path.join(here, "rust", "target", "release", "floe-index"),
-        os.path.join(here, "dist", "floe-index-linux-gnu"),
-        os.path.join(here, "dist", "floe-index-linux-x86_64"),
         os.path.join(os.path.dirname(sys.executable), "floe-index"),
-    ):
+    ))
+    on_path = shutil.which("floe-index")
+    if on_path:
+        candidates.append(on_path)
+    for cand in candidates:
         if os.path.isfile(cand) and os.access(cand, os.X_OK):
-            return cand
-    p = shutil.which("floe-index")
-    if p:
-        return p
+            return os.path.abspath(cand)
     raise RuntimeError(
-        "floe-index binary not found (rust/target/release, dist/, "
-        "PATH) - the VFS cache needs the rust daemon")
+        "floe-index binary not found; set FLOE_INDEX_BIN, build it with "
+        "'cd rust && cargo build --release -p floe-index', or install it "
+        "beside Python/on PATH (checked: %s)" %
+        ", ".join(candidates or ["no candidates"]))
 
 
 class VfsClient:

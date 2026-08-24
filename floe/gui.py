@@ -1661,7 +1661,7 @@ class Viewer:
             return None
         c = cache_mod.Cache(path)
         if not c.exists():
-            return ("ERR no VFS cache for %s; run: floe-index vfs %s"
+            return ("ERR no VFS cache for %s; run: floe index %s"
                     % (path, path))
         c.load()
         self._apply_cache(c)
@@ -3661,6 +3661,7 @@ class Viewer:
             it.connect("toggled", on_toggle)
             menu.append(it)
             self._menu_checks.append((it, state))
+            return it
 
         def sep(menu):
             menu.append(Gtk.SeparatorMenuItem())
