@@ -883,6 +883,7 @@ class Viewer:
         self._debounce = None
         self._did_fit = False
         self.worker = None
+        self._worker_starting = False
         self._layer_rows = {}
         self._selected_layers = set()
         self._layer_select_anchor = None
@@ -1538,6 +1539,7 @@ class Viewer:
         if self.worker is not None:
             self.worker.stop()
             self.worker = None
+        self._worker_starting = False
         self._sync_label_font_capability()
         self._sync_abstract_capability()
         if cache is not None:
@@ -1545,13 +1547,31 @@ class Viewer:
                 cache, stream_kb=self.stream_kb,
                 stream_target_ms=self.stream_target_ms,
                 debug=self.render_debug)
-            self.worker.start()
-            self._sync_label_font_capability()
-            self._sync_abstract_capability()
-            if self._did_fit:
-                # window already sized (layout switch, or the FIRST
-                # load into an empty start): frame the new die
-                self.fit()
+            if hasattr(self.worker, "start_async"):
+                worker = self.worker
+                self._worker_starting = True
+                self._set_live_status("opening Rust render cache...")
+                worker.start_async(
+                    lambda error: GLib.idle_add(
+                        self._worker_start_finished, worker, error))
+            else:
+                self.worker.start()
+                self._worker_start_finished(self.worker, None)
+
+    def _worker_start_finished(self, worker, error):
+        if worker is not self.worker:
+            return False
+        self._worker_starting = False
+        if error is not None:
+            self._set_live_status("render service open failed: %s" % error)
+            return False
+        self._sync_label_font_capability()
+        self._sync_abstract_capability()
+        if self._did_fit:
+            # window already sized (layout switch, or the FIRST load into an
+            # empty start): frame the new die after the cold open completes.
+            self.fit()
+        return False
 
     def _build_layer_panel(self):
         """Calibre-style panel: black background, rows of
@@ -2234,6 +2254,14 @@ class Viewer:
     def redraw(self, immediate=False):
         if self.cache is None:
             return   # empty start: nothing to render yet
+        if self._worker_starting:
+            self._display()
+            self._set_live_status("opening Rust render cache...")
+            return
+        if self.worker is None or not self.worker.alive():
+            self._display()
+            self._set_live_status("render service is not available")
+            return
         self._clamp_view()
         bbox = self.view_bbox()
         span = self.tiles_spanned(bbox)

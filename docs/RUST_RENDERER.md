@@ -258,7 +258,9 @@ already `floe.rust_render:RustRenderWorker`, so
 The adapter requests `round_paths=1`, which gives every intermediate frame a
 unique handoff path. This removes the race where the daemon could atomically
 replace a shared path with round N+1 while Python was consuming the response
-for round N; the unchanged daemon default still publishes to one path.
+for round N; the unchanged daemon default still publishes to one path. Consumed
+partial and final PNGs are removed immediately, as are style TSVs after the
+daemon acknowledges them.
 
 The real parent `Cache` integration test also submits a 100-generation
 pan/zoom burst. It passed on both `valmini` and the 506-page `sample9`: none of
@@ -268,7 +270,9 @@ settled, and no partial file or pending adapter job remained.
 The operational knobs are `FLOE_RENDERD_BIN`, `FLOE_RUST_JOBS` (default up to
 8 host CPUs), `FLOE_RUST_BUDGET_MB` (1024), `FLOE_RUST_ROUND_PAGES` (128),
 `FLOE_RUST_TILE_PX` (128), and `FLOE_RUST_LABEL_PX` (14, whole-pixel range
-6..96).
+6..96). `FLOE_RUST_OPEN_TIMEOUT_S` and `FLOE_RUST_CLIP_TIMEOUT_S` both default
+to 300 seconds. Cold cache open runs outside the GTK thread, and the daemon is
+placed in its own POSIX session so terminal SIGINT does not kill it.
 A headless smoke test is:
 
 ```sh
@@ -301,7 +305,9 @@ Label strings, positions, visibility, declutter, block-name fit, and budgets
 come directly from the existing Rust VFS planner. The renderer uses a bundled
 Noto Sans Mono font with center alignment, deterministic integer alpha
 composition, and 0/90/180/270-degree rotation. It never consults the OS or
-KLayout font engine.
+KLayout font engine. If the 262,144-glyph raster cap is reached, it renders a
+deterministic whole-label prefix, reports `labels_truncated=1`, and still
+publishes the geometry frame.
 Abstract mode is a KLayout-specific feature
 and is intentionally outside the Rust renderer scope; it will not be
 implemented.

@@ -21,6 +21,8 @@ _DEFAULT_BUDGET_MB = 1024
 _DEFAULT_ROUND_PAGES = 128
 _DEFAULT_TILE_PX = 128
 _DEFAULT_LABEL_FONT_PX = 14
+_DEFAULT_OPEN_TIMEOUT_S = 300
+_DEFAULT_CLIP_TIMEOUT_S = 300
 _COV_MAX_TEXEL_PX = 160.0  # must match floe.service.COV_MAX_TEXEL_PX
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _OASIS_SIGNATURE = b"%SEMI-OASIS\r\n"
@@ -171,13 +173,16 @@ class RustRenderWorker:
         self._proc = None
         self._reader = None
         self._stderr_reader = None
+        self._lifecycle_lock = threading.Lock()
         self._write_lock = threading.Lock()
         self._condition = threading.Condition()
         self._ready = False
         self._opened = False
         self._styled_epoch = None
+        self._style_paths = {}
         self._startup_error = None
         self._stopping = False
+        self._expected_exit = False
         self._jobs = {}
         self._jobs_lock = threading.Lock()
         self._clip_seq = 0
@@ -201,6 +206,12 @@ class RustRenderWorker:
             "FLOE_RUST_TILE_PX", _DEFAULT_TILE_PX, 1, 4096)
         self._label_font_px = _env_int(
             "FLOE_RUST_LABEL_PX", _DEFAULT_LABEL_FONT_PX, 6, 96)
+        self._open_timeout_s = _env_int(
+            "FLOE_RUST_OPEN_TIMEOUT_S", _DEFAULT_OPEN_TIMEOUT_S,
+            1, 24 * 60 * 60)
+        self._clip_timeout_s = _env_int(
+            "FLOE_RUST_CLIP_TIMEOUT_S", _DEFAULT_CLIP_TIMEOUT_S,
+            1, 24 * 60 * 60)
         self._init_styles()
         self._coverage = None
         self._init_coverage()
@@ -243,25 +254,34 @@ class RustRenderWorker:
             self._coverage = None
 
     def start(self):
-        if self._proc is not None:
-            raise RuntimeError("RustRenderWorker is already started")
-        self._work_dir = tempfile.mkdtemp(prefix="floe-rust-worker-")
-        cache_path = os.path.abspath(self.cache.dir)
-        if any(ch.isspace() for ch in cache_path):
-            alias = os.path.join(self._work_dir, "cache")
-            os.symlink(cache_path, alias)
-            cache_path = alias
-        self._cache_path = cache_path
-        self._proc = _PopenCompat(subprocess.Popen(
-            [self._binary], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, bufsize=1))
-        self._reader = threading.Thread(
-            target=self._read_stdout, name="floe-renderd-stdout", daemon=True)
-        self._stderr_reader = threading.Thread(
-            target=self._read_stderr, name="floe-renderd-stderr", daemon=True)
         try:
-            self._reader.start()
-            self._stderr_reader.start()
+            with self._lifecycle_lock:
+                if self._stopping:
+                    raise RuntimeError(
+                        "RustRenderWorker was stopped before startup")
+                if self._proc is not None:
+                    raise RuntimeError("RustRenderWorker is already started")
+                self._work_dir = tempfile.mkdtemp(
+                    prefix="floe-rust-worker-")
+                cache_path = os.path.abspath(self.cache.dir)
+                if any(ch.isspace() for ch in cache_path):
+                    alias = os.path.join(self._work_dir, "cache")
+                    os.symlink(cache_path, alias)
+                    cache_path = alias
+                self._cache_path = cache_path
+                self._proc = _PopenCompat(subprocess.Popen(
+                    [self._binary], stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, bufsize=1,
+                    start_new_session=(os.name == "posix")))
+                self._reader = threading.Thread(
+                    target=self._read_stdout, name="floe-renderd-stdout",
+                    daemon=True)
+                self._stderr_reader = threading.Thread(
+                    target=self._read_stderr, name="floe-renderd-stderr",
+                    daemon=True)
+                self._reader.start()
+                self._stderr_reader.start()
             self._wait_for(lambda: self._ready, "ready")
             self._send("open cache=%s budget_mb=%d jobs=%d" %
                        (self._cache_path, self._budget_mb,
@@ -271,6 +291,26 @@ class RustRenderWorker:
         except Exception:
             self.stop()
             raise
+
+    def start_async(self, callback):
+        """Run the potentially cold cache open without blocking GTK."""
+        def run():
+            error = None
+            try:
+                self.start()
+            except Exception as exc:
+                error = exc
+            try:
+                callback(error)
+            except Exception:
+                if self.debug:
+                    import traceback
+                    traceback.print_exc()
+
+        thread = threading.Thread(
+            target=run, name="floe-renderd-start", daemon=True)
+        thread.start()
+        return thread
 
     def alive(self):
         return self._proc is not None and self._proc.poll() is None
@@ -306,25 +346,37 @@ class RustRenderWorker:
             self.res.put({"kind": "error", "msg": str(exc)})
 
     def stop(self):
-        if self._proc is None:
+        with self._lifecycle_lock:
+            if self._stopping:
+                return
+            self._stopping = True
+            proc = self._proc
+        if proc is None:
+            if self._work_dir:
+                shutil.rmtree(self._work_dir, ignore_errors=True)
             return
-        self._stopping = True
+        with self._jobs_lock:
+            clip_states = list(self._clip_jobs.values())
+            self._clip_jobs.clear()
+        for state in clip_states:
+            timer = state.get("timer")
+            if timer is not None:
+                timer.cancel()
         if self.alive():
             try:
                 self._send("quit")
             except (BrokenPipeError, OSError):
                 pass
         try:
-            self._proc.wait(timeout=1.5)
+            proc.wait(timeout=1.5)
         except subprocess.TimeoutExpired:
-            self._proc.terminate()
+            proc.terminate()
             try:
-                self._proc.wait(timeout=1.0)
+                proc.wait(timeout=1.0)
             except subprocess.TimeoutExpired:
-                self._proc.kill()
-                self._proc.wait(timeout=1.0)
-        for stream in (self._proc.stdin, self._proc.stdout,
-                       self._proc.stderr):
+                proc.kill()
+                proc.wait(timeout=1.0)
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
             try:
                 stream.close()
             except (AttributeError, OSError):
@@ -336,7 +388,8 @@ class RustRenderWorker:
             shutil.rmtree(self._work_dir, ignore_errors=True)
 
     def _wait_for(self, predicate, phase):
-        deadline = time.monotonic() + 10.0
+        timeout = self._open_timeout_s if phase == "open" else 10.0
+        deadline = time.monotonic() + timeout
         with self._condition:
             while not predicate():
                 if self._startup_error:
@@ -466,6 +519,11 @@ class RustRenderWorker:
                 "daemon": daemon_output,
                 "started": time.monotonic(),
             }
+            timer = threading.Timer(
+                self._clip_timeout_s, self._clip_timed_out,
+                args=(sequence,))
+            timer.daemon = True
+            self._clip_jobs[sequence]["timer"] = timer
         try:
             cell_name = str(job.get("cell_name", "FLOE_CLIP"))
             if not cell_name:
@@ -476,10 +534,37 @@ class RustRenderWorker:
                     self._query_layers(job), self._jobs_count,
                     cell_name.encode("utf-8").hex(),
                     daemon_output))
+            timer.start()
         except Exception:
             with self._jobs_lock:
-                self._clip_jobs.pop(sequence, None)
+                state = self._clip_jobs.pop(sequence, None)
+            if state is not None:
+                state["timer"].cancel()
             raise
+
+    def _clip_timed_out(self, sequence):
+        with self._jobs_lock:
+            state = self._clip_jobs.pop(sequence, None)
+        if state is None:
+            return
+        state["timer"].cancel()
+        try:
+            os.unlink(state["daemon"])
+        except OSError:
+            pass
+        self.res.put({
+            "kind": "error",
+            "msg": "Rust clip timed out after %d seconds" %
+                   self._clip_timeout_s,
+        })
+        # clip runs inline in renderd's worker. Once it has exceeded the hard
+        # deadline the daemon cannot serve renders or even process `quit`.
+        if self.alive():
+            try:
+                self._expected_exit = True
+                self._proc.terminate()
+            except OSError:
+                pass
 
     def _apply_coverage(self, path, png, job):
         coverage = self._coverage
@@ -523,7 +608,18 @@ class RustRenderWorker:
             style_file.writelines(rows)
             style_file.flush()
             os.fsync(style_file.fileno())
-        self._send("style epoch=%d path=%s" % (epoch, path))
+        with self._condition:
+            self._style_paths[epoch] = path
+        try:
+            self._send("style epoch=%d path=%s" % (epoch, path))
+        except Exception:
+            with self._condition:
+                self._style_paths.pop(epoch, None)
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+            raise
         if wait:
             self._wait_for(lambda: self._styled_epoch == epoch, "style")
 
@@ -541,7 +637,8 @@ class RustRenderWorker:
         finally:
             with self._condition:
                 self._condition.notify_all()
-            if not self._stopping and not self._startup_error:
+            if (not self._stopping and not self._expected_exit and
+                    not self._startup_error):
                 self.res.put({"kind": "error", "msg":
                               self._exit_message("stdout")})
 
@@ -569,7 +666,14 @@ class RustRenderWorker:
         elif kind == "styled":
             with self._condition:
                 self._styled_epoch = _wire_int(fields, "epoch", -1)
+                style_path = self._style_paths.pop(
+                    self._styled_epoch, None)
                 self._condition.notify_all()
+            if style_path is not None:
+                try:
+                    os.unlink(style_path)
+                except OSError:
+                    pass
         elif kind == "frame":
             self._emit_frame(fields)
         elif kind == "snap":
@@ -589,6 +693,7 @@ class RustRenderWorker:
                 with self._jobs_lock:
                     state = self._clip_jobs.pop(sequence, None)
                 if state is not None:
+                    state["timer"].cancel()
                     try:
                         os.unlink(state["daemon"])
                     except OSError:
@@ -661,6 +766,7 @@ class RustRenderWorker:
             state = self._clip_jobs.pop(sequence, None)
         if state is None:
             return
+        state["timer"].cancel()
         daemon_output = state["daemon"]
         destination = state["out"]
         staged = None
@@ -712,20 +818,32 @@ class RustRenderWorker:
         try:
             with open(path, "rb") as frame_file:
                 png = frame_file.read()
-        except OSError as exc:
+            if not png.startswith(_PNG_SIGNATURE):
+                raise ValueError("Rust frame is not a PNG")
+            png = self._apply_coverage(path, png, state["job"])
+        except (OSError, TypeError, ValueError) as exc:
             self.res.put({"kind": "error", "gen": generation,
                           "msg": "read Rust frame: %s" % exc})
+            with self._jobs_lock:
+                self._jobs.pop(generation, None)
             return
-        if not png.startswith(_PNG_SIGNATURE):
-            self.res.put({"kind": "error", "gen": generation,
-                          "msg": "Rust frame is not a PNG"})
-            return
-        png = self._apply_coverage(path, png, state["job"])
-        if path != state["output"]:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
+        finally:
+            controlled = path == state["output"] or (
+                isinstance(path, str) and
+                path.startswith(state["output"] + ".gen-"))
+            if controlled:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+
+        final = _wire_int(fields, "final") != 0
+        if not final:
+            # `partial=1 deferred=0` is still a progressive round. The wire's
+            # final bit, not deferred's truthiness, decides settled state.
+            refining = max(1, _wire_int(fields, "deferred"))
+        else:
+            refining = 0
 
         state["plan_us"] = _wire_int(fields, "plan_us")
         state["read_us"] += _wire_int(fields, "read_us")
@@ -735,7 +853,6 @@ class RustRenderWorker:
         state["new"] += _wire_int(fields, "cache_miss")
         job = state["job"]
         deferred = _wire_int(fields, "deferred")
-        partial = _wire_int(fields, "partial") != 0
         output = {
             "kind": "frame", "png": png, "bbox": job["bbox"],
             "gen": generation, "tiles": _wire_int(
@@ -763,8 +880,8 @@ class RustRenderWorker:
             "label_tile_paints": _wire_int(fields, "label_tile_paints"),
             "label_pixel_paints": _wire_int(fields, "label_pixel_paints"),
         }
-        if partial:
-            output["refining"] = deferred
+        if refining:
+            output["refining"] = refining
         if _wire_int(fields, "labels_truncated") != 0:
             output["labels_truncated"] = True
         cut_px = max(0.0, float(job.get("cut_px") or 0.0))
@@ -774,7 +891,7 @@ class RustRenderWorker:
                 1e-12, span_dbu * float(self.cache.meta["dbu"]))
             output["cut_um"] = round(cut_px / px_per_um, 3)
         self.res.put(output)
-        if _wire_int(fields, "final") != 0:
+        if final:
             with self._jobs_lock:
                 self._jobs.pop(generation, None)
 

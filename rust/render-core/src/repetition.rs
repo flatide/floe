@@ -3,6 +3,8 @@ use floe_ovm::BBox;
 use floe_vfs::hier::{grid_ranges, GridVis};
 use std::cell::Cell;
 
+use crate::RenderCancellation;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct RepVisit {
     pub tested: u64,
@@ -15,7 +17,7 @@ pub(crate) fn for_each_visible_offset(
     local_view: BBox,
     visit: impl FnMut(i64, i64) -> Result<(), String>,
 ) -> Result<RepVisit, String> {
-    for_each_visible_offset_impl(rep, base_bbox, local_view, None, visit)
+    for_each_visible_offset_impl(rep, base_bbox, local_view, None, None, visit)
 }
 
 pub(crate) fn for_each_visible_offset_bounded(
@@ -31,6 +33,25 @@ pub(crate) fn for_each_visible_offset_bounded(
         base_bbox,
         local_view,
         Some((remaining, limit_error)),
+        None,
+        visit,
+    )
+}
+
+pub(crate) fn for_each_visible_offset_cancellable(
+    rep: &Rep,
+    base_bbox: BBox,
+    local_view: BBox,
+    generation: u64,
+    cancellation: &RenderCancellation,
+    visit: impl FnMut(i64, i64) -> Result<(), String>,
+) -> Result<RepVisit, String> {
+    for_each_visible_offset_impl(
+        rep,
+        base_bbox,
+        local_view,
+        None,
+        Some((generation, cancellation)),
         visit,
     )
 }
@@ -40,16 +61,19 @@ fn for_each_visible_offset_impl(
     base_bbox: BBox,
     local_view: BBox,
     mut budget: Option<(&Cell<usize>, &str)>,
+    cancellation: Option<(u64, &RenderCancellation)>,
     mut visit: impl FnMut(i64, i64) -> Result<(), String>,
 ) -> Result<RepVisit, String> {
     validate_render_repetition(rep)?;
+    check_repetition_cancelled(cancellation)?;
     if base_bbox.is_empty() || local_view.is_empty() {
         return Ok(RepVisit::default());
     }
+    let mut cancel_member = 0u16;
     let offsets = offset_region(local_view, base_bbox);
     match rep {
         Rep::One => {
-            charge_member(&mut budget)?;
+            charge_member(&mut budget, cancellation, &mut cancel_member)?;
             let visible = offsets.contains_pt(0, 0);
             if visible {
                 visit(0, 0)?;
@@ -77,7 +101,7 @@ fn for_each_visible_offset_impl(
                 .ok_or_else(|| "limit exceeded: visible grid members".to_string())?;
             for i in i0..=i1 {
                 for j in j0..=j1 {
-                    charge_member(&mut budget)?;
+                    charge_member(&mut budget, cancellation, &mut cancel_member)?;
                     let ox = i as i128 * va.0 as i128 + j as i128 * vb.0 as i128;
                     let oy = i as i128 * va.1 as i128 + j as i128 * vb.1 as i128;
                     visit(
@@ -94,7 +118,7 @@ fn for_each_visible_offset_impl(
         Rep::Pts(points) => {
             let mut visible = 0u64;
             for &(x, y) in points.iter() {
-                charge_member(&mut budget)?;
+                charge_member(&mut budget, cancellation, &mut cancel_member)?;
                 if offsets.contains_pt(x, y) {
                     visit(x, y)?;
                     visible = visible.saturating_add(1);
@@ -108,15 +132,31 @@ fn for_each_visible_offset_impl(
     }
 }
 
-fn charge_member(budget: &mut Option<(&Cell<usize>, &str)>) -> Result<(), String> {
-    let Some((remaining, limit_error)) = budget.as_mut() else {
-        return Ok(());
-    };
-    let value = remaining.get();
-    if value == 0 {
-        return Err((*limit_error).to_string());
+fn charge_member(
+    budget: &mut Option<(&Cell<usize>, &str)>,
+    cancellation: Option<(u64, &RenderCancellation)>,
+    cancel_member: &mut u16,
+) -> Result<(), String> {
+    if let Some((remaining, limit_error)) = budget.as_mut() {
+        let value = remaining.get();
+        if value == 0 {
+            return Err((*limit_error).to_string());
+        }
+        remaining.set(value - 1);
     }
-    remaining.set(value - 1);
+    if *cancel_member == 0 {
+        check_repetition_cancelled(cancellation)?;
+    }
+    *cancel_member = cancel_member.wrapping_add(1) & 1023;
+    Ok(())
+}
+
+fn check_repetition_cancelled(
+    cancellation: Option<(u64, &RenderCancellation)>,
+) -> Result<(), String> {
+    if let Some((generation, cancellation)) = cancellation {
+        cancellation.check(generation)?;
+    }
     Ok(())
 }
 
@@ -234,6 +274,28 @@ mod tests {
         .unwrap_err();
         assert_eq!(error, "member cap");
         assert_eq!(remaining.get(), 0);
+        assert_eq!(visits, 0);
+    }
+
+    #[test]
+    fn cancellable_repetition_stops_before_enumeration() {
+        let cancellation = RenderCancellation::new();
+        cancellation.cancel_before(2);
+        let rep = Rep::Pts(Arc::from([(100, 100); 2048]));
+        let mut visits = 0;
+        let error = for_each_visible_offset_cancellable(
+            &rep,
+            bbox(0, 0, 1, 1),
+            bbox(0, 0, 1, 1),
+            1,
+            &cancellation,
+            |_, _| {
+                visits += 1;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("render cancelled"), "{error}");
         assert_eq!(visits, 0);
     }
 }

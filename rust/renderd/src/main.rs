@@ -107,14 +107,15 @@ fn serve() -> Result<(), String> {
             }
             InputCommand::Snap(command) => handle_snap(&published_scene, command, &response_tx),
             InputCommand::Pick(command) => handle_pick(&published_scene, command, &response_tx),
-            InputCommand::Quit => {
-                cancellation.cancel_before(u64::MAX);
-                let _ = command_tx.send(WorkerCommand::Shutdown);
-                break;
-            }
+            InputCommand::Quit => break,
         }
     }
 
+    // EOF and stdin read failures are process shutdown requests just like
+    // `quit`: do not let an in-flight render run to completion after its
+    // client has disappeared.
+    cancellation.cancel_before(u64::MAX);
+    let _ = command_tx.send(WorkerCommand::Shutdown);
     drop(command_tx);
     if worker.join().is_err() {
         main_error.get_or_insert_with(|| "render worker panicked".to_string());
@@ -584,16 +585,24 @@ fn render_worker(
                 &cancellation,
                 &published_scene,
             ),
-            WorkerCommand::Clip(command) => handle_clip(&mut state, command, &responses),
+            WorkerCommand::Clip(command) => {
+                handle_clip(&mut state, command, &responses, &cancellation)
+            }
             WorkerCommand::Info => handle_info(&state, &responses),
             WorkerCommand::Shutdown => break,
         }
     }
 }
 
-fn handle_clip(state: &mut WorkerState, command: ClipCommand, responses: &Sender<String>) {
+fn handle_clip(
+    state: &mut WorkerState,
+    command: ClipCommand,
+    responses: &Sender<String>,
+    cancellation: &RenderCancellation,
+) {
     let started = Instant::now();
-    let result = run_clip(state, &command);
+    let generation = cancellation.before_generation();
+    let result = run_clip(state, &command, generation, cancellation);
     match result {
         Ok((geometry, bytes, plan_us, read_us, decode_us, clip_us, write_us)) => respond(
             responses,
@@ -627,6 +636,8 @@ fn handle_clip(state: &mut WorkerState, command: ClipCommand, responses: &Sender
 fn run_clip(
     state: &mut WorkerState,
     command: &ClipCommand,
+    generation: u64,
+    cancellation: &RenderCancellation,
 ) -> Result<(ClipGeometry, u64, u64, u64, u64, u64, u64), String> {
     let cache = state
         .cache
@@ -648,6 +659,7 @@ fn run_clip(
     };
     let plan_started = Instant::now();
     let planned = cache.plan(&request)?;
+    check_generation(cancellation, generation)?;
     let plan_us = elapsed_us(plan_started);
     let layers = selected_scene_layers(cache, command.visible_layers.as_deref())?;
     let page_ids = planned.plan.pages.clone();
@@ -658,19 +670,39 @@ fn run_clip(
     let mut decode_us = 0u64;
     let clip_started = Instant::now();
     for page_chunk in page_ids.chunks(DEFAULT_ROUND_PAGES) {
-        let (pages, stats) = state.page_cache.load_parallel(cache, page_chunk, workers)?;
+        let (pages, stats) = state.page_cache.load_cancellable(
+            cache,
+            page_chunk,
+            workers,
+            generation,
+            cancellation,
+        )?;
         read_us = read_us.saturating_add(stats.page_read_us);
         decode_us = decode_us.saturating_add(stats.page_decode_us);
         let scene = FrameScene::new_shared(cache, Arc::clone(&plan), pages)?;
-        geometry.append_scene(&scene, view.as_bbox(), &layers)?;
+        geometry.append_scene_cancellable(
+            &scene,
+            view.as_bbox(),
+            &layers,
+            generation,
+            cancellation,
+        )?;
     }
     let clip_us = elapsed_us(clip_started)
         .saturating_sub(read_us)
         .saturating_sub(decode_us);
+    check_generation(cancellation, generation)?;
     let oasis = geometry.oasis_bytes_named(cache.unit(), &command.cell_name)?;
+    check_generation(cancellation, generation)?;
     let bytes = u64::try_from(oasis.len()).unwrap_or(u64::MAX);
     let write_started = Instant::now();
-    publish_bytes(&command.out, command.sequence, &oasis)?;
+    publish_bytes(
+        &command.out,
+        command.sequence,
+        generation,
+        &oasis,
+        cancellation,
+    )?;
     let write_us = elapsed_us(write_started);
     Ok((
         geometry, bytes, plan_us, read_us, decode_us, clip_us, write_us,
@@ -1064,7 +1096,9 @@ fn handle_render(
     let result = run_render(state, &command, responses, cancellation, published_scene);
     match result {
         Ok(()) => {}
-        Err(_) if cancellation.is_cancelled(generation) => {
+        Err(error)
+            if cancellation.is_cancelled(generation) && is_render_cancelled_error(&error) =>
+        {
             cancelled_response(responses, generation, "render")
         }
         Err(error) => respond(
@@ -1159,6 +1193,7 @@ fn run_render(
         .unwrap_or_else(|| Arc::from([]));
     let rounds = refinement_ranges(selected.len(), command.round_pages)?;
     let mut decoded_pages = Vec::with_capacity(selected.len());
+    let mut generation_bytes = 0u64;
     for (round_index, range) in rounds.iter().enumerate() {
         check_generation(cancellation, command.generation)?;
         let (mut round_pages, decode_stats) = state.page_cache.load_cancellable(
@@ -1167,6 +1202,16 @@ fn run_render(
             workers,
             command.generation,
             cancellation,
+        )?;
+        let round_bytes = round_pages.iter().try_fold(0u64, |total, page| {
+            total
+                .checked_add(page.estimated_bytes())
+                .ok_or_else(|| "decoded generation byte charge overflow".to_string())
+        })?;
+        generation_bytes = checked_generation_bytes(
+            generation_bytes,
+            round_bytes,
+            state.page_cache.budget_bytes(),
         )?;
         decoded_pages.append(&mut round_pages);
         check_generation(cancellation, command.generation)?;
@@ -1218,7 +1263,9 @@ fn run_render(
             command.out.clone()
         };
         publish_png(&published_output, command.generation, &png, cancellation)?;
-        check_generation(cancellation, command.generation)?;
+        // A successful rename is the generation's linearization point. A
+        // later cancellation must not turn an already-published frame into a
+        // cancelled response or leave a reported-less partial file behind.
         {
             let mut published = published_scene
                 .write()
@@ -1247,9 +1294,10 @@ fn run_render(
                 planned.stats.plan_us,
                 planned_labels.as_ref().map(|p| p.plan_us).unwrap_or(0),
                 labels.len(),
-                planned_labels
-                    .as_ref()
-                    .is_some_and(|p| p.stats.truncated) as u8,
+                (report.labels_truncated
+                    || planned_labels
+                        .as_ref()
+                        .is_some_and(|p| p.stats.truncated)) as u8,
                 planned_labels
                     .as_ref()
                     .map(|p| p.stats.place_records_scanned)
@@ -1300,6 +1348,18 @@ fn refinement_ranges(
         .collect())
 }
 
+fn checked_generation_bytes(current: u64, incoming: u64, budget: u64) -> Result<u64, String> {
+    let next = current
+        .checked_add(incoming)
+        .ok_or_else(|| "decoded generation byte charge overflow".to_string())?;
+    if next > budget {
+        return Err(format!(
+            "decoded generation budget exceeded: {next} > {budget} bytes"
+        ));
+    }
+    Ok(next)
+}
+
 fn make_plan_request(cache: &Cache, command: &RenderCommand) -> Result<PlanRequest, String> {
     let [x0, y0, x1, y1] = command.view;
     let planner_x0 = checked_bound(x0.floor(), "view x0")?;
@@ -1344,6 +1404,10 @@ fn check_generation(cancellation: &RenderCancellation, generation: u64) -> Resul
     }
 }
 
+fn is_render_cancelled_error(error: &str) -> bool {
+    error == "render cancelled" || error.starts_with("render cancelled:")
+}
+
 fn cancelled_response(responses: &Sender<String>, generation: u64, phase: &str) {
     respond(
         responses,
@@ -1351,7 +1415,14 @@ fn cancelled_response(responses: &Sender<String>, generation: u64, phase: &str) 
     );
 }
 
-fn publish_bytes(output: &str, sequence: i64, bytes: &[u8]) -> Result<(), String> {
+fn publish_bytes(
+    output: &str,
+    sequence: i64,
+    generation: u64,
+    bytes: &[u8],
+    cancellation: &RenderCancellation,
+) -> Result<(), String> {
+    check_generation(cancellation, generation)?;
     let output = Path::new(output);
     let parent = output.parent().unwrap_or_else(|| Path::new("."));
     let name = output
@@ -1372,16 +1443,25 @@ fn publish_bytes(output: &str, sequence: i64, bytes: &[u8]) -> Result<(), String
         return Err(format!("write {}: {}", temporary.display(), error));
     }
     drop(file);
-    match std::fs::rename(&temporary, output) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            let _ = std::fs::remove_file(&temporary);
-            Err(format!(
+    let published = cancellation.commit_if_current(generation, || {
+        std::fs::rename(&temporary, output).map_err(|error| {
+            format!(
                 "publish {} -> {}: {}",
                 temporary.display(),
                 output.display(),
                 error
-            ))
+            )
+        })
+    });
+    match published {
+        Ok(Some(())) => Ok(()),
+        Ok(None) => {
+            let _ = std::fs::remove_file(&temporary);
+            Err("render cancelled".to_string())
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(&temporary);
+            Err(error)
         }
     }
 }
@@ -1736,6 +1816,23 @@ mod tests {
     }
 
     #[test]
+    fn generation_page_charge_is_bounded_by_open_budget() {
+        assert_eq!(checked_generation_bytes(40, 24, 64).unwrap(), 64);
+        let error = checked_generation_bytes(40, 25, 64).unwrap_err();
+        assert!(error.contains("decoded generation budget exceeded"));
+        assert!(checked_generation_bytes(u64::MAX, 1, u64::MAX).is_err());
+    }
+
+    #[test]
+    fn cancellation_errors_are_distinct_from_render_failures() {
+        assert!(is_render_cancelled_error("render cancelled"));
+        assert!(is_render_cancelled_error(
+            "render cancelled: generation 4 is before 5"
+        ));
+        assert!(!is_render_cancelled_error("write frame.png: no space left"));
+    }
+
+    #[test]
     fn parses_style_file_in_bottom_to_top_order() {
         let layers = [
             CacheLayer {
@@ -1781,7 +1878,14 @@ mod tests {
         std::fs::remove_file(output).unwrap();
 
         let clip_output = dir.join("clip.oas");
-        publish_bytes(clip_output.to_str().unwrap(), 8, b"oasis-bytes").unwrap();
+        publish_bytes(
+            clip_output.to_str().unwrap(),
+            8,
+            4,
+            b"oasis-bytes",
+            &cancellation,
+        )
+        .unwrap();
         assert_eq!(std::fs::read(&clip_output).unwrap(), b"oasis-bytes");
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         std::fs::remove_file(clip_output).unwrap();
@@ -1789,6 +1893,16 @@ mod tests {
         cancellation.cancel_before(5);
         assert!(publish_png(
             dir.join("stale.png").to_str().unwrap(),
+            4,
+            b"must-not-publish",
+            &cancellation,
+        )
+        .is_err());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+
+        assert!(publish_bytes(
+            dir.join("stale.oas").to_str().unwrap(),
+            9,
             4,
             b"must-not-publish",
             &cancellation,

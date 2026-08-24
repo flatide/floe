@@ -183,6 +183,8 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "2/0 #222222 speckle 1",
             ])
             self.assertIn("epoch=1", commands[0])
+            worker._handle_line("styled", {"epoch": "1"}, "")
+            self.assertFalse(os.path.exists(style_path))
 
     def test_render_command_and_frame_result_match_parent_schema(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -251,6 +253,22 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertNotIn("labels_truncated", result)
             self.assertNotIn("drawn", result)
             self.assertNotIn("refining", result)
+            self.assertFalse(os.path.exists(png_path))
+
+            partial_job = dict(job, gen=9)
+            worker._submit_render(partial_job)
+            partial_path = os.path.join(
+                directory, "frame-9.png.gen-9.round-1.partial.png")
+            with open(partial_path, "wb") as frame:
+                frame.write(b"\x89PNG\r\n\x1a\npartial")
+            worker._emit_frame({
+                "gen": "9", "png": partial_path, "partial": "1",
+                "deferred": "0", "final": "0", "pages": "1",
+            })
+            partial = worker.res.get_nowait()
+            self.assertEqual(partial["refining"], 1)
+            self.assertIn(9, worker._jobs)
+            self.assertFalse(os.path.exists(partial_path))
 
     def test_clip_uses_private_wire_path_and_atomically_publishes_oasis(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -290,6 +308,15 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             with open(destination, "rb") as output:
                 self.assertEqual(output.read(), payload)
             self.assertFalse(os.path.exists(daemon_output))
+            worker._submit_clip({
+                "bbox": (0, 0, 1, 1), "layers": [],
+                "out": destination,
+            })
+            worker._clip_timed_out(2)
+            timeout = worker.res.get_nowait()
+            self.assertEqual(timeout["kind"], "error")
+            self.assertIn("timed out after", timeout["msg"])
+            self.assertNotIn(2, worker._clip_jobs)
             with self.assertRaisesRegex(ValueError, "reversed"):
                 worker._submit_clip({
                     "bbox": (4, 0, 3, 1), "layers": [],

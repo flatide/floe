@@ -1,7 +1,10 @@
 use crate::raster::checked_path_outline;
-use crate::repetition::{for_each_visible_offset, for_each_visible_offset_bounded};
+use crate::repetition::{
+    for_each_visible_offset, for_each_visible_offset_bounded, for_each_visible_offset_cancellable,
+};
 use crate::scene::FrameScene;
 use crate::transform::OrthoTransform;
+use crate::RenderCancellation;
 use floe_ovm::BBox;
 use floe_vfs::hier::WsKey;
 use std::cell::Cell;
@@ -248,6 +251,7 @@ fn visit_query_shapes(
         request.view(),
         &request.layers,
         Some(&member_budget),
+        None,
         visit,
     ) {
         Err(error) if error == QUERY_STOP => Ok(()),
@@ -261,7 +265,25 @@ pub(crate) fn visit_scene_shapes(
     layers: &[SceneQueryLayer],
     visit: impl FnMut(SceneShape) -> Result<(), String>,
 ) -> Result<(), String> {
-    visit_scene_shapes_impl(scene, view, layers, None, visit)
+    visit_scene_shapes_impl(scene, view, layers, None, None, visit)
+}
+
+pub(crate) fn visit_scene_shapes_cancellable(
+    scene: &FrameScene,
+    view: BBox,
+    layers: &[SceneQueryLayer],
+    generation: u64,
+    cancellation: &RenderCancellation,
+    visit: impl FnMut(SceneShape) -> Result<(), String>,
+) -> Result<(), String> {
+    visit_scene_shapes_impl(
+        scene,
+        view,
+        layers,
+        None,
+        Some((generation, cancellation)),
+        visit,
+    )
 }
 
 fn visit_scene_shapes_impl(
@@ -269,9 +291,12 @@ fn visit_scene_shapes_impl(
     view: BBox,
     layers: &[SceneQueryLayer],
     member_budget: Option<&Cell<usize>>,
+    cancellation: Option<(u64, &RenderCancellation)>,
     mut visit: impl FnMut(SceneShape) -> Result<(), String>,
 ) -> Result<(), String> {
+    check_visit_cancelled(cancellation)?;
     for &layer in layers {
+        check_visit_cancelled(cancellation)?;
         visit_cell_layer(
             scene,
             view,
@@ -280,6 +305,7 @@ fn visit_scene_shapes_impl(
             OrthoTransform::identity(),
             &mut Vec::new(),
             member_budget,
+            cancellation,
             &mut visit,
         )?;
     }
@@ -295,6 +321,7 @@ fn visit_cell_layer(
     world_transform: OrthoTransform,
     path: &mut Vec<WsKey>,
     member_budget: Option<&Cell<usize>>,
+    cancellation: Option<(u64, &RenderCancellation)>,
     visit: &mut impl FnMut(SceneShape) -> Result<(), String>,
 ) -> Result<(), String> {
     if path.contains(&key) {
@@ -308,6 +335,7 @@ fn visit_cell_layer(
 
     {
         let mut emit = |kind: SceneShapeKind, points: Vec<(i64, i64)>| -> Result<(), String> {
+            check_visit_cancelled(cancellation)?;
             let points = canonical_polygon(points)?;
             visit(SceneShape {
                 kind,
@@ -358,32 +386,39 @@ fn visit_cell_layer(
                     x1,
                     y1,
                 };
-                for_each_query_offset(&rect.rep, base, local_view, member_budget, |ox, oy| {
-                    emit(
-                        SceneShapeKind::Rectangle,
-                        transform_points(
-                            &world_transform,
-                            &[
-                                (
-                                    checked_add(base.x0, ox, "rectangle x0")?,
-                                    checked_add(base.y0, oy, "rectangle y0")?,
-                                ),
-                                (
-                                    checked_add(base.x1, ox, "rectangle x1")?,
-                                    checked_add(base.y0, oy, "rectangle y0")?,
-                                ),
-                                (
-                                    checked_add(base.x1, ox, "rectangle x1")?,
-                                    checked_add(base.y1, oy, "rectangle y1")?,
-                                ),
-                                (
-                                    checked_add(base.x0, ox, "rectangle x0")?,
-                                    checked_add(base.y1, oy, "rectangle y1")?,
-                                ),
-                            ],
-                        )?,
-                    )
-                })?;
+                for_each_query_offset(
+                    &rect.rep,
+                    base,
+                    local_view,
+                    member_budget,
+                    cancellation,
+                    |ox, oy| {
+                        emit(
+                            SceneShapeKind::Rectangle,
+                            transform_points(
+                                &world_transform,
+                                &[
+                                    (
+                                        checked_add(base.x0, ox, "rectangle x0")?,
+                                        checked_add(base.y0, oy, "rectangle y0")?,
+                                    ),
+                                    (
+                                        checked_add(base.x1, ox, "rectangle x1")?,
+                                        checked_add(base.y0, oy, "rectangle y0")?,
+                                    ),
+                                    (
+                                        checked_add(base.x1, ox, "rectangle x1")?,
+                                        checked_add(base.y1, oy, "rectangle y1")?,
+                                    ),
+                                    (
+                                        checked_add(base.x0, ox, "rectangle x0")?,
+                                        checked_add(base.y1, oy, "rectangle y1")?,
+                                    ),
+                                ],
+                            )?,
+                        )
+                    },
+                )?;
             }
             for polygon in &geometry.polys {
                 let base = polygon_bbox(&polygon.pts).ok_or_else(|| {
@@ -392,22 +427,29 @@ fn visit_cell_layer(
                         page_id
                     )
                 })?;
-                for_each_query_offset(&polygon.rep, base, local_view, member_budget, |ox, oy| {
-                    let local: Result<Vec<_>, String> = polygon
-                        .pts
-                        .iter()
-                        .map(|&(x, y)| {
-                            Ok((
-                                checked_add(x, ox, "polygon x")?,
-                                checked_add(y, oy, "polygon y")?,
-                            ))
-                        })
-                        .collect();
-                    emit(
-                        SceneShapeKind::Polygon,
-                        transform_points(&world_transform, &local?)?,
-                    )
-                })?;
+                for_each_query_offset(
+                    &polygon.rep,
+                    base,
+                    local_view,
+                    member_budget,
+                    cancellation,
+                    |ox, oy| {
+                        let local: Result<Vec<_>, String> = polygon
+                            .pts
+                            .iter()
+                            .map(|&(x, y)| {
+                                Ok((
+                                    checked_add(x, ox, "polygon x")?,
+                                    checked_add(y, oy, "polygon y")?,
+                                ))
+                            })
+                            .collect();
+                        emit(
+                            SceneShapeKind::Polygon,
+                            transform_points(&world_transform, &local?)?,
+                        )
+                    },
+                )?;
             }
             for path_record in &geometry.paths {
                 let outline = checked_path_outline(
@@ -425,6 +467,7 @@ fn visit_cell_layer(
                     base,
                     local_view,
                     member_budget,
+                    cancellation,
                     |ox, oy| {
                         let local: Result<Vec<_>, String> = outline
                             .iter()
@@ -466,6 +509,7 @@ fn visit_cell_layer(
             base_bbox,
             local_view,
             member_budget,
+            cancellation,
             |ox, oy| {
                 let x = checked_add(instance.x, ox, "instance x")?;
                 let y = checked_add(instance.y, oy, "instance y")?;
@@ -478,6 +522,7 @@ fn visit_cell_layer(
                     world_transform.compose(&local)?,
                     path,
                     member_budget,
+                    cancellation,
                     visit,
                 )
             },
@@ -487,20 +532,38 @@ fn visit_cell_layer(
     Ok(())
 }
 
+fn check_visit_cancelled(cancellation: Option<(u64, &RenderCancellation)>) -> Result<(), String> {
+    if let Some((generation, cancellation)) = cancellation {
+        cancellation.check(generation)?;
+    }
+    Ok(())
+}
+
 fn for_each_query_offset(
     rep: &floe_oasis::doc::Rep,
     base_bbox: BBox,
     local_view: BBox,
     member_budget: Option<&Cell<usize>>,
+    cancellation: Option<(u64, &RenderCancellation)>,
     visit: impl FnMut(i64, i64) -> Result<(), String>,
 ) -> Result<(), String> {
-    match member_budget {
-        Some(remaining) => {
+    match (member_budget, cancellation) {
+        (Some(remaining), _) => {
             for_each_visible_offset_bounded(
                 rep, base_bbox, local_view, remaining, QUERY_STOP, visit,
             )?;
         }
-        None => {
+        (None, Some((generation, cancellation))) => {
+            for_each_visible_offset_cancellable(
+                rep,
+                base_bbox,
+                local_view,
+                generation,
+                cancellation,
+                visit,
+            )?;
+        }
+        (None, None) => {
             for_each_visible_offset(rep, base_bbox, local_view, visit)?;
         }
     }
@@ -865,6 +928,33 @@ mod tests {
         let edge = snap_scene(&scene, &request(5, 1)).unwrap().unwrap();
         assert_eq!((edge.x, edge.y, edge.kind), (5, 0, SceneSnapKind::Edge));
         assert_eq!(edge.shapes_tested, 2);
+    }
+
+    #[test]
+    fn cancellable_shape_visit_rejects_a_stale_clip_generation() {
+        let scene = query_scene();
+        let cancellation = RenderCancellation::new();
+        cancellation.cancel_before(2);
+        let mut visits = 0;
+        let error = visit_scene_shapes_cancellable(
+            &scene,
+            BBox {
+                x0: 0,
+                y0: 0,
+                x1: 10,
+                y1: 10,
+            },
+            &request(5, 5).layers,
+            1,
+            &cancellation,
+            |_| {
+                visits += 1;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("render cancelled"), "{error}");
+        assert_eq!(visits, 0);
     }
 
     #[test]

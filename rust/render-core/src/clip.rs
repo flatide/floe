@@ -9,9 +9,10 @@
 //! are split, cancelled, and traced back into separate simple polygons.
 
 use crate::query::{
-    canonical_polygon, polygon_bbox, signed_area2, visit_scene_shapes, SceneShapeKind,
+    canonical_polygon, polygon_bbox, signed_area2, visit_scene_shapes,
+    visit_scene_shapes_cancellable, SceneShapeKind,
 };
-use crate::{FrameScene, SceneQueryLayer};
+use crate::{FrameScene, RenderCancellation, SceneQueryLayer};
 use floe_oasis::doc::{PathRec, PolyRec, RectRec, Rep, TextRec};
 use floe_oasis::write::{write_tree, WCell};
 use floe_ovm::BBox;
@@ -166,10 +167,31 @@ impl ClipGeometry {
         clip: BBox,
         layers: &[SceneQueryLayer],
     ) -> Result<(), String> {
+        self.append_scene_impl(scene, clip, layers, None)
+    }
+
+    pub fn append_scene_cancellable(
+        &mut self,
+        scene: &FrameScene,
+        clip: BBox,
+        layers: &[SceneQueryLayer],
+        generation: u64,
+        cancellation: &RenderCancellation,
+    ) -> Result<(), String> {
+        self.append_scene_impl(scene, clip, layers, Some((generation, cancellation)))
+    }
+
+    fn append_scene_impl(
+        &mut self,
+        scene: &FrameScene,
+        clip: BBox,
+        layers: &[SceneQueryLayer],
+        cancellation: Option<(u64, &RenderCancellation)>,
+    ) -> Result<(), String> {
         if clip.x0 >= clip.x1 || clip.y0 >= clip.y1 {
             return Ok(());
         }
-        visit_scene_shapes(scene, clip, layers, |shape| {
+        let mut append = |shape: crate::query::SceneShape| {
             match shape.kind {
                 SceneShapeKind::Rectangle => {
                     let bbox = polygon_bbox(&shape.points)
@@ -202,7 +224,18 @@ impl ClipGeometry {
                 }
             }
             Ok(())
-        })
+        };
+        match cancellation {
+            Some((generation, cancellation)) => visit_scene_shapes_cancellable(
+                scene,
+                clip,
+                layers,
+                generation,
+                cancellation,
+                &mut append,
+            ),
+            None => visit_scene_shapes(scene, clip, layers, &mut append),
+        }
     }
 
     pub fn oasis_bytes(&self, unit: f64) -> Result<Vec<u8>, String> {

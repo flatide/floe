@@ -16,6 +16,7 @@ pub const MAX_TILE_SIZE: u16 = 4096;
 pub const DEFAULT_TILE_SIZE: u16 = 128;
 const DEVICE_ONE: i128 = 1i128 << 32;
 const DEVICE_HALF: i128 = DEVICE_ONE / 2;
+const MAX_DEVICE_COORD: i128 = 1i128 << 96;
 const MAX_LABEL_GLYPHS: usize = 262_144;
 
 /// Exact viewport used for world-to-pixel mapping, in layout database units.
@@ -212,6 +213,7 @@ pub struct GeometryRasterReport {
     pub deferred_frame_tests: u64,
     pub label_tile_paints: u64,
     pub label_pixel_paints: u64,
+    pub labels_truncated: bool,
     pub partial: bool,
 }
 
@@ -296,26 +298,41 @@ struct PreparedGlyph {
 }
 
 impl PreparedLabels {
-    fn build(scene: &FrameScene, request: &GeometryRasterRequest) -> Result<Option<Self>, String> {
+    fn build(
+        scene: &FrameScene,
+        request: &GeometryRasterRequest,
+    ) -> Result<(Option<Self>, bool), String> {
         if scene.labels().is_empty() {
-            return Ok(None);
+            return Ok((None, false));
         }
-        let atlas = GlyphAtlas::build(scene.labels(), scene.label_font_px())?;
-        let total_glyphs = scene.labels().iter().try_fold(0usize, |total, label| {
-            total
-                .checked_add(label.text.chars().count())
-                .ok_or_else(|| "label glyph count overflow".to_string())
-        })?;
-        if total_glyphs > MAX_LABEL_GLYPHS {
-            return Err(format!(
-                "label glyph limit exceeded: {total_glyphs} > {MAX_LABEL_GLYPHS}"
-            ));
+
+        // Keep a deterministic whole-label prefix. A pathological hierarchy
+        // name must not discard the geometry frame or force the atlas to
+        // allocate for text that will never be drawn.
+        let mut total_glyphs = 0usize;
+        let mut label_count = 0usize;
+        for label in scene.labels() {
+            let glyphs = label.text.chars().count();
+            let Some(next_total) = total_glyphs.checked_add(glyphs) else {
+                break;
+            };
+            if next_total > MAX_LABEL_GLYPHS {
+                break;
+            }
+            total_glyphs = next_total;
+            label_count += 1;
         }
+        let labels_truncated = label_count != scene.labels().len();
+        let labels = &scene.labels()[..label_count];
+        if labels.is_empty() {
+            return Ok((None, labels_truncated));
+        }
+        let atlas = GlyphAtlas::build(labels, scene.label_font_px())?;
         let view = request.view;
         let span_x = view.x1 - view.x0;
         let span_y = view.y1 - view.y0;
-        let mut rows = Vec::with_capacity(scene.labels().len());
-        for label in scene.labels() {
+        let mut rows = Vec::with_capacity(labels.len());
+        for label in labels {
             let chars: Vec<char> = normalized_chars(&label.text).collect();
             let mut advance = 0.0f64;
             let mut previous = None;
@@ -359,7 +376,7 @@ impl PreparedLabels {
                 bbox,
             });
         }
-        Ok(Some(Self { atlas, rows }))
+        Ok((Some(Self { atlas, rows }), labels_truncated))
     }
 }
 
@@ -455,8 +472,8 @@ fn render_geometry(
     guard: Option<RenderGuard<'_>>,
 ) -> Result<GeometryRasterReport, String> {
     check_cancelled(guard)?;
-    let prepared_labels = match mode {
-        RenderMode::Occupancy => None,
+    let (prepared_labels, labels_truncated) = match mode {
+        RenderMode::Occupancy => (None, false),
         RenderMode::Styled(_) => PreparedLabels::build(scene, request)?,
     };
     let tile_size = u32::from(request.tile_size);
@@ -551,6 +568,7 @@ fn render_geometry(
         deferred_frame_tests: counters.deferred_frame_records,
         label_tile_paints: counters.label_tiles_drawn,
         label_pixel_paints: counters.label_pixels_drawn,
+        labels_truncated,
         partial: scene.is_partial(),
     })
 }
@@ -2120,8 +2138,16 @@ fn fill_world_polygon_with_phase(
             // Both sampling phases use a half-open y rule so shared vertices
             // always contribute exactly one incident edge.
             FillPhase::PixelCenter => (
-                floor_div(y0 - DEVICE_HALF, DEVICE_ONE) + 1,
-                floor_div(y1 - DEVICE_HALF, DEVICE_ONE) + 1,
+                floor_div(
+                    y0.checked_sub(DEVICE_HALF)
+                        .ok_or_else(|| "coordinate overflow: polygon first row".to_string())?,
+                    DEVICE_ONE,
+                ) + 1,
+                floor_div(
+                    y1.checked_sub(DEVICE_HALF)
+                        .ok_or_else(|| "coordinate overflow: polygon end row".to_string())?,
+                    DEVICE_ONE,
+                ) + 1,
             ),
             FillPhase::LowerBoundary => (floor_div(y0, DEVICE_ONE), floor_div(y1, DEVICE_ONE)),
         };
@@ -2131,8 +2157,12 @@ fn fill_world_polygon_with_phase(
         edges.push(ActiveEdge {
             x0,
             y0,
-            dx: x1 - x0,
-            dy: y1 - y0,
+            dx: x1
+                .checked_sub(x0)
+                .ok_or_else(|| "coordinate overflow: polygon edge dx".to_string())?,
+            dy: y1
+                .checked_sub(y0)
+                .ok_or_else(|| "coordinate overflow: polygon edge dy".to_string())?,
             first_row: checked_i64(first_row, "polygon first row")?,
             end_row: checked_i64(end_row, "polygon end row")?,
         });
@@ -2180,7 +2210,9 @@ fn fill_world_polygon_with_phase(
         };
         let mut intersections = Vec::with_capacity(active.len());
         for edge in &active {
-            let rise = scan_y - edge.y0;
+            let rise = scan_y
+                .checked_sub(edge.y0)
+                .ok_or_else(|| "coordinate overflow: polygon edge rise".to_string())?;
             let product = rise
                 .checked_mul(edge.dx)
                 .ok_or_else(|| "coordinate overflow: polygon intersection".to_string())?;
@@ -2202,8 +2234,18 @@ fn fill_world_polygon_with_phase(
         for pair in intersections.chunks_exact(2) {
             let (first_col, end_col) = match phase {
                 FillPhase::PixelCenter => (
-                    floor_div(pair[0] - DEVICE_HALF, DEVICE_ONE) + 1,
-                    floor_div(pair[1] - DEVICE_HALF, DEVICE_ONE) + 1,
+                    floor_div(
+                        pair[0].checked_sub(DEVICE_HALF).ok_or_else(|| {
+                            "coordinate overflow: polygon first column".to_string()
+                        })?,
+                        DEVICE_ONE,
+                    ) + 1,
+                    floor_div(
+                        pair[1]
+                            .checked_sub(DEVICE_HALF)
+                            .ok_or_else(|| "coordinate overflow: polygon end column".to_string())?,
+                        DEVICE_ONE,
+                    ) + 1,
                 ),
                 FillPhase::LowerBoundary => (
                     floor_div(pair[0], DEVICE_ONE) + 1,
@@ -2263,7 +2305,7 @@ fn world_to_device(
 
 fn scale_device_f64(offset: f64, pixels: u32, span: f64, field: &str) -> Result<i128, String> {
     let value = offset * pixels as f64 * DEVICE_ONE as f64 / span;
-    if !value.is_finite() || value < i128::MIN as f64 || value > i128::MAX as f64 {
+    if !value.is_finite() || value < -(MAX_DEVICE_COORD as f64) || value > MAX_DEVICE_COORD as f64 {
         return Err(format!("coordinate overflow: {}", field));
     }
     Ok(value.floor() as i128)
@@ -2281,7 +2323,14 @@ fn floor_div(numerator: i128, denominator: i128) -> i128 {
 }
 
 fn ceil_div(numerator: i128, denominator: i128) -> i128 {
-    -floor_div(-numerator, denominator)
+    debug_assert!(denominator > 0);
+    let quotient = numerator / denominator;
+    let remainder = numerator % denominator;
+    if remainder > 0 {
+        quotient + 1
+    } else {
+        quotient
+    }
 }
 
 fn checked_i64(value: i128, field: &str) -> Result<i64, String> {
@@ -2361,6 +2410,16 @@ mod tests {
                 y1: 11,
             }
         );
+    }
+
+    #[test]
+    fn rejects_device_coordinates_outside_checked_q32_domain() {
+        let request = GeometryRasterRequest {
+            view: RasterViewBox::new(0.0, 0.0, 1.0, 1.0).unwrap(),
+            ..request()
+        };
+        let error = world_to_device(&request, i64::MAX, 0).unwrap_err();
+        assert!(error.contains("coordinate overflow: polygon device x"));
     }
 
     fn full_band(request: &GeometryRasterRequest) -> RasterBand {
@@ -3437,6 +3496,31 @@ mod tests {
         assert_eq!(serial.frame, parallel.frame);
         assert_eq!(serial.label_pixel_paints, parallel.label_pixel_paints);
         assert!(parallel.label_tile_paints > serial.label_tile_paints);
+    }
+
+    #[test]
+    fn oversized_label_is_truncated_without_losing_geometry() {
+        let label = design_label(&"X".repeat(MAX_LABEL_GLYPHS + 1), 5, 5, 0, 0);
+        let scene = styled_scene_with_labels(Vec::new(), vec![label]);
+        let report = render_geometry_styled(
+            &scene,
+            &StyledGeometryRasterRequest {
+                raster: label_request(2, 16),
+                layers: vec![LayerStyle {
+                    layer_idx: 0,
+                    color: [255, 0, 0, 255],
+                    fill: LayerFill::Solid,
+                    outline_width: 1,
+                }],
+                hierarchy_frames: false,
+                mono: false,
+            },
+        )
+        .unwrap();
+
+        assert!(report.labels_truncated);
+        assert_eq!(report.label_pixel_paints, 0);
+        assert!(report.rectangle_member_paints > 0);
     }
 
     #[test]

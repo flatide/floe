@@ -2,7 +2,7 @@
 
 갱신일: 2026-08-24
 canonical 저장소: `/Users/journey/Flatide/floe`
-현재 기준 커밋: `62d866f renderer: make Rust the default backend`
+현재 구현 기준: P1/HIGH와 이 문서의 runtime hardening까지 반영된 부모 저장소 HEAD
 
 이 문서는 대화 메모리에 의존하지 않고 부모 `floe` 저장소에서 바로 후속 작업을
 재개하기 위한 짧은 인계서다. 상세 설계와 완료 gate는
@@ -43,11 +43,13 @@ fixture는 `docs/RENDERER-TESTS.ko.md`가 canonical source다.
 
 ## 3. 현재 완료 상태
 
-- persistent `floe-renderd`, decoded-page budget LRU, progressive page rounds,
-  generation 취소, jobs/tile/page budget, phase telemetry
+- persistent `floe-renderd`, decoded-page budget LRU와 generation 상주 상한,
+  progressive page rounds, render/clip generation 취소, jobs/tile/page budget,
+  phase telemetry
 - rectangle/polygon/path, hierarchy, One/Grid/Pts repetition, frame/wash,
   speckle/custom fill/outline/mono의 결정적 CPU raster
-- 번들 글꼴 label, live GUI/CLI font size, 합성 quarter-turn label rotation
+- 번들 글꼴 label, live GUI/CLI font size, 합성 quarter-turn label rotation. glyph 상한
+  초과는 geometry frame을 실패시키지 않고 결정적 label 접두부만 표시
 - 게시 `FrameScene` 기반 bounded pick/snap; page bbox를 먼저 자르고 query당
   repetition member 400개/포함 pick 후보 64개를 상한으로 둔다. query는 다음
   decode/raster와 병행
@@ -57,6 +59,8 @@ fixture는 `docs/RENDERER-TESTS.ko.md`가 canonical source다.
 - cut=0/full-depth exact clip, rational 교점, KLayout half-tie 규칙, concave component
   분리, single-cell OASIS writer, 공백 경로/UTF-8 cell name atomic publish
 - `view`, `render`, `probe`, `info`, `clip`의 KLayout-free 시작 경로
+- GTK를 막지 않는 비동기 cold open, SIGINT 격리, open/clip timeout, 소비한
+  progressive PNG/style TSV의 즉시 정리
 - headless `floe render`의 solid archival fill, settled frame 대기,
   `--labels --label-font-px`, `--frames --depth`, fsync + atomic PNG replace
 - Rust가 기본 backend. KLayout은 명시적 rollback이며 legacy 모듈은 lazy import
@@ -64,6 +68,7 @@ fixture는 `docs/RENDERER-TESTS.ko.md`가 canonical source다.
 최근 연속 커밋:
 
 ```text
+2975d74 renderer: reject unsafe repetition workloads
 6efefda renderer: complete KLayout-free 0.12 cutover
 62d866f renderer: make Rust the default backend
 f628270 renderer: route headless exports through Rust

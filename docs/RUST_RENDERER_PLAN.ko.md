@@ -29,7 +29,10 @@ M5 density coverage 완료, M7 pick/snap 완료, M8 exact clip vertical slice �
   프로세스/임시 파일 lifecycle을 처리
 - 완료: adapter 전용 `round_paths=1`. 각 partial PNG를 고유 경로로 게시해
   다음 round의 atomic replace가 Python의 이전 응답 read와 경합하지 않으며,
-  읽은 partial은 즉시 제거하고 final/전체 임시 디렉터리는 종료 시 정리
+  읽은 partial/final PNG와 daemon이 반영한 style TSV를 즉시 제거하고 전체 임시
+  디렉터리는 종료 시 정리
+- 완료: daemon cold open은 GTK 밖의 thread에서 수행하고 SIGINT process group을
+  격리. open/clip timeout을 두며 timeout된 inline clip daemon은 종료해 queue를 복구
 - 완료: 부모 `Vfs::read_page_batch` 전환과 임시 OVP reader 제거
 - 완료: 결정적 budget LRU와 불변 partial/complete `FrameScene`
 - 완료: checked orthogonal transform과 One/Grid/Pts 가시 범위 순회
@@ -66,7 +69,8 @@ M5 density coverage 완료, M7 pick/snap 완료, M8 exact clip vertical slice �
   alignment, 0/90/180/270도 회전, 결정적 정수 alpha 합성을 구현. ASCII
   glyph는 bounded process cache로 progressive round/generation 사이 재사용
 - 완료: gray block text < design layer geometry+text < white block text paint stack,
-  layer visibility/mono 연동, label glyph 262,144개 명시적 요청 상한
+  layer visibility/mono 연동. label glyph 262,144개 상한 초과 시 whole-label 기준의
+  결정적 접두부만 그리고 `labels_truncated=1`로 보고하며 geometry는 계속 게시
 - 완료: 최신 게시 `FrameScene`을 공유하는 현재 화면 기준 pick/snap. 제품 경로에서
   KLayout layout/delta 등록 없이 page/hierarchy/transform/repetition/path/wash를 직접
   순회하고 frame/live label은 제외. page bbox를 먼저 prune하고 snap 400 shape,
@@ -97,6 +101,8 @@ M5 density coverage 완료, M7 pick/snap 완료, M8 exact clip vertical slice �
 - 완료: strict monotonic generation cancellation. plan/decode/scene/raster/PNG 경계,
   paint plane과 repetition 1024-member batch에서 취소를 확인하고 stale frame은
   응답·파일 모두 미게시
+- 완료: clip도 plan/page decode/shape repetition/OASIS encode/atomic publish 경계에서
+  같은 frontier를 확인. stdin EOF/quit은 frontier를 최대로 올려 진행 작업을 중단
 - 완료: PNG same-directory 임시 파일 write/sync/rename과 cancellation frontier의
   직렬 commit; 실패·취소 시 임시 파일 정리
 - 완료: `page_prio` 기반 progressive refinement. daemon 기본 128 page씩 decode해
@@ -439,9 +445,10 @@ pub struct DecodedPage {
 페이지는 `(cache identity 또는 mmap된 OVM generation, page_id, file_off, csize)`로
 식별하고 immutable하게 공유한다. 현재 OVM page record에는 payload checksum이
 없으므로 parse 성공, record limit, 예상 길이 검증으로 손상을 검출한다. LRU budget은
-decoded bytes 기준이며 기본값은 현재 vfsd의 1024 MiB를 따른다. stale generation에서
-끝난 decode도 같은 cache identity이면 LRU에 남길 수 있지만 frame에는 commit하지
-않는다.
+decoded bytes 기준이며 기본값은 현재 vfsd의 1024 MiB를 따른다. 같은 상한을 한
+generation의 누적 `FrameScene` page charge에도 적용하므로 progressive round가 LRU에서
+밀려난 `Arc`를 계속 붙들어 budget을 넘으면 명시 오류로 중단한다. stale generation에서
+끝난 decode도 같은 cache identity이면 LRU에 남길 수 있지만 frame에는 commit하지 않는다.
 
 ### 7.2 FrameScene
 
@@ -465,6 +472,7 @@ tile worker는 world tile bbox를 inverse transform하여 WC/page local bbox로
 - raster viewport: 요청의 f64 DBU target box를 그대로 보존
 - edge/intersection 산술: i128 checked arithmetic
 - device subpixel/intersection: i128 Q32.32 pixel
+- device 좌표는 산술 안전 영역인 절댓값 `2^96` 이하로 제한
 - Y축은 `view.y1 -> image row 0`으로 변환
 - overflow 또는 limit 초과는 명시적 render error
 
@@ -534,10 +542,12 @@ strict monotonic frontier다. 새 render 명령 `N`을 읽는 stdin thread가 �
 - paint plane 사이
 - 현재 worker band 시작/끝 및 향후 image tile 시작 전
 - PNG encode 전
+- clip shape repetition/OASIS encode/atomic publish 전
 
 취소된 generation은 frame을 publish하지 않는다. 이미 decode된 immutable page는
 LRU에 남겨 다음 요청이 재사용할 수 있다. PNG는 encode 뒤에도 다시 확인하며,
 same-directory 임시 파일의 최종 rename은 frontier와 원자적으로 결정한다.
+stdin EOF와 `quit`도 frontier를 최대로 올려 현재 render/clip을 끝까지 완주하지 않는다.
 
 ## 10. daemon 프로토콜
 
