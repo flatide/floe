@@ -90,4 +90,8 @@ DBU로 변환되고 결과에는 `hotspot_supplied` 여부만 남는다. `plan/r
 raster/png`, cache hit/miss, decoded resident peak, 프로세스 RSS peak와 jobs=1 대비
 total/raster speedup을 기록한다. `--hotspot`을 생략한 개발 fixture 실행은 design
 중앙을 사용하지만, 실칩 운영 gate에서는 대표 좌표를 반드시 지정한다.
-모든 trace는 coverage post-composite 없이 daemon PNG를 그대로 측정한다.
+모든 trace는 coverage post-composite 없이 daemon PNG를 그대로 측정한다. 제품
+기본은 page decode 8 workers, raster 4 workers, 384px tile이며 각각
+`FLOE_RUST_JOBS`, `FLOE_RUST_RASTER_JOBS`, `FLOE_RUST_TILE_PX`로 재현한다.
+cache hit page는 첫 frame에 전부 포함되어 warm 재방문에서 page 수만으로 refine하지
+않는다.

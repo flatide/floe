@@ -197,6 +197,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             with mock.patch.dict(os.environ, {
                 "FLOE_RENDERD_BIN": binary,
                 "FLOE_RUST_JOBS": "4",
+                "FLOE_RUST_RASTER_JOBS": "3",
                 "FLOE_RUST_LABEL_PX": "18",
             }, clear=False):
                 worker = RustRenderWorker(FakeCache(directory))
@@ -217,6 +218,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertIn("layers=1/0,2/0", commands[0])
             self.assertIn("style_epoch=3", commands[0])
             self.assertIn("round_paths=1", commands[0])
+            self.assertIn("jobs=3 decode_jobs=4 tile_px=384", commands[0])
             self.assertIn("labels=0", commands[0])
             self.assertIn("font_px=22", commands[0])
             fallback_job = dict(job, gen=8)
@@ -233,7 +235,9 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "pages": "2", "cache_miss": "2", "plan_us": "1000",
                 "read_us": "2000", "decode_us": "3000",
                 "scene_us": "4000", "raster_us": "5000",
-                "png_us": "6000", "cache_hit": "14",
+                "png_us": "6000", "publish_write_us": "7000",
+                "publish_sync_us": "8000", "publish_rename_us": "9000",
+                "cache_hit": "14",
                 "resident_bytes": str(15 * 1024 * 1024),
                 "decode_workers": "3", "workers": "4", "tiles": "16",
                 "tile_px": "128",
@@ -257,6 +261,11 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertEqual(result["scene_ms"], 4.0)
             self.assertEqual(result["raster_ms"], 5.0)
             self.assertEqual(result["png_ms"], 6.0)
+            self.assertEqual(result["publish_write_ms"], 7.0)
+            self.assertEqual(result["publish_sync_ms"], 8.0)
+            self.assertEqual(result["publish_rename_ms"], 9.0)
+            self.assertEqual(result["publish_ms"], 24.0)
+            self.assertGreaterEqual(result["adapter_read_ms"], 0.0)
             self.assertEqual(result["cache_hit"], 14)
             self.assertEqual(result["cache_miss"], 2)
             self.assertEqual(result["resident_mb"], 15.0)
@@ -428,6 +437,13 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             with mock.patch.dict(os.environ, {
                 "FLOE_RENDERD_BIN": binary,
                 "FLOE_RUST_JOBS": "0",
+            }, clear=False):
+                with self.assertRaisesRegex(RuntimeError, "1..256"):
+                    RustRenderWorker(FakeCache(directory))
+            with mock.patch.dict(os.environ, {
+                "FLOE_RENDERD_BIN": binary,
+                "FLOE_RUST_JOBS": "4",
+                "FLOE_RUST_RASTER_JOBS": "0",
             }, clear=False):
                 with self.assertRaisesRegex(RuntimeError, "1..256"):
                     RustRenderWorker(FakeCache(directory))

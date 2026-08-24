@@ -782,6 +782,10 @@ persistent `floe-renderd`다. `FLOE_RENDERER=klayout`을 포함한 다른 backen
 설정이 필요 없다. 지원 범위, 정확도 계약, 성능 실측과 운영 knob는
 [`docs/RUST_RENDERER.md`](docs/RUST_RENDERER.md), 구현 순서는
 [`docs/RUST_RENDERER_PLAN.ko.md`](docs/RUST_RENDERER_PLAN.ko.md)에 정리했다.
+제품 기본은 cold page decode 8 workers, viewport raster 4 workers와 384px tile이다.
+`FLOE_RUST_JOBS`, `FLOE_RUST_RASTER_JOBS`, `FLOE_RUST_TILE_PX`로 각각 바꿀 수
+있다. cache hit page는 첫 frame에 전부 포함하므로 warm 재방문은 page 수만으로
+refinement하지 않는다.
 abstract는 KLayout 고유 기능이므로 Rust 범위에서 제외하며, 지원하지 않는 요청이나
 PATH를 조용히 누락하지 않고 명시적 오류로 반환한다.
 

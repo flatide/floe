@@ -33,7 +33,9 @@ from floe.service import DEFAULT_DETAIL, DETAIL_PX  # noqa: E402
 
 PHASE_FIELDS = (
     "ms", "plan_ms", "read_ms", "decode_ms", "scene_ms", "raster_ms",
-    "png_ms", "text_plan_ms", "cache_hit", "cache_miss", "resident_mb",
+    "png_ms", "publish_write_ms", "publish_sync_ms", "publish_rename_ms",
+    "publish_ms", "adapter_read_ms", "text_plan_ms", "cache_hit",
+    "cache_miss", "resident_mb",
     "decode_workers", "workers", "render_tiles", "tile_px", "tiles",
     "wc_cells", "inst_edges", "frame_rects", "text_place_records",
     "labels", "label_tile_paints", "label_pixel_paints",
@@ -281,7 +283,7 @@ def render_trace(worker, trace, width, height, timeout, run_number):
         results.append(metrics)
         print("jobs=%-3d run=%d %-18s total=%8.1f  "
               "plan=%7.1f read=%7.1f decode=%7.1f scene=%7.1f "
-              "raster=%7.1f png=%7.1f" % (
+              "raster=%7.1f png=%7.1f publish=%7.1f handoff=%6.1f" % (
                   worker._jobs_count, run_number, name,
                   float(metrics.get("ms", 0)),
                   float(metrics.get("plan_ms", 0)),
@@ -289,12 +291,17 @@ def render_trace(worker, trace, width, height, timeout, run_number):
                   float(metrics.get("decode_ms", 0)),
                   float(metrics.get("scene_ms", 0)),
                   float(metrics.get("raster_ms", 0)),
-                  float(metrics.get("png_ms", 0))), flush=True)
+                  float(metrics.get("png_ms", 0)),
+                  float(metrics.get("publish_ms", 0)),
+                  float(metrics.get("adapter_read_ms", 0))), flush=True)
     return results
 
 
 def benchmark_session(cache, trace, args, jobs, run_number):
     os.environ["FLOE_RUST_JOBS"] = str(jobs)
+    # `--jobs` is an explicit scaling experiment, so keep decode and raster
+    # counts equal instead of taking the interactive raster cap of four.
+    os.environ["FLOE_RUST_RASTER_JOBS"] = str(jobs)
     os.environ["FLOE_RUST_BUDGET_MB"] = str(args.budget_mb)
     os.environ["FLOE_RUST_ROUND_PAGES"] = str(args.round_pages)
     os.environ["FLOE_RUST_TILE_PX"] = str(args.tile_px)

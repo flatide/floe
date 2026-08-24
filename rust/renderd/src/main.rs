@@ -195,7 +195,10 @@ struct RenderCommand {
     labels: bool,
     label_font_px: f32,
     mono: bool,
+    /// Raster workers. Legacy `jobs` continues to set both phases when
+    /// `decode_jobs` is absent.
     jobs: Option<u16>,
+    decode_jobs: Option<u16>,
     tile_size: u16,
     decode_pages: Option<usize>,
     round_pages: usize,
@@ -291,6 +294,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                     "font_px",
                     "mono",
                     "jobs",
+                    "decode_jobs",
                     "tile_px",
                     "decode_pages",
                     "round_pages",
@@ -302,6 +306,10 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
             let jobs = optional_parse(&fields, "jobs")?;
             if let Some(jobs) = jobs {
                 validate_jobs(jobs)?;
+            }
+            let decode_jobs = optional_parse(&fields, "decode_jobs")?;
+            if let Some(decode_jobs) = decode_jobs {
+                validate_jobs(decode_jobs)?;
             }
             let tile_size = optional_parse(&fields, "tile_px")?.unwrap_or(DEFAULT_TILE_SIZE);
             if tile_size == 0 || tile_size > MAX_TILE_SIZE {
@@ -352,6 +360,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                     label_font_px,
                     mono: optional_bool(&fields, "mono")?.unwrap_or(false),
                     jobs,
+                    decode_jobs,
                     tile_size,
                     decode_pages: optional_parse(&fields, "decode_pages")?,
                     round_pages,
@@ -1147,7 +1156,8 @@ fn run_render(
         .take(command.decode_pages.unwrap_or(usize::MAX))
         .map(|(_, page_id)| page_id)
         .collect();
-    let workers = command.jobs.unwrap_or(state.jobs);
+    let raster_workers = command.jobs.unwrap_or(state.jobs);
+    let decode_workers = command.decode_jobs.or(command.jobs).unwrap_or(state.jobs);
     let raster_request = GeometryRasterRequest {
         view: RasterViewBox::new(
             command.view[0],
@@ -1159,7 +1169,7 @@ fn run_render(
         height: command.height,
         background: [0, 0, 0, 255],
         foreground: [255, 255, 255, 255],
-        workers,
+        workers: raster_workers,
         tile_size: command.tile_size,
     };
     let styles = if state.styles.is_empty() && (command.frames || command.labels) {
@@ -1191,15 +1201,17 @@ fn run_render(
         .as_ref()
         .map(|planned| Arc::from(planned.rows.clone()))
         .unwrap_or_else(|| Arc::from([]));
-    let rounds = refinement_ranges(selected.len(), command.round_pages)?;
+    let rounds = refinement_batches(&selected, command.round_pages, |page_id| {
+        state.page_cache.contains(page_id)
+    })?;
     let mut decoded_pages = Vec::with_capacity(selected.len());
     let mut generation_bytes = 0u64;
-    for (round_index, range) in rounds.iter().enumerate() {
+    for (round_index, round_page_ids) in rounds.iter().enumerate() {
         check_generation(cancellation, command.generation)?;
         let (mut round_pages, decode_stats) = state.page_cache.load_cancellable(
             cache,
-            &selected[range.clone()],
-            workers,
+            round_page_ids,
+            decode_workers,
             command.generation,
             cancellation,
         )?;
@@ -1262,7 +1274,8 @@ fn run_render(
         } else {
             command.out.clone()
         };
-        publish_png(&published_output, command.generation, &png, cancellation)?;
+        let publish_stats =
+            publish_png(&published_output, command.generation, &png, cancellation)?;
         // A successful rename is the generation's linearization point. A
         // later cancellation must not turn an already-published frame into a
         // cancelled response or leave a reported-less partial file behind.
@@ -1280,7 +1293,7 @@ fn run_render(
         respond(
             responses,
             format!(
-                "frame gen={} round={} final={} png={} partial={} deferred={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_workers={} scene_us={} raster_us={} png_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={}",
+                "frame gen={} round={} final={} png={} partial={} deferred={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_workers={} scene_us={} raster_us={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={}",
                 command.generation,
                 round_index + 1,
                 final_round as u8,
@@ -1308,6 +1321,9 @@ fn run_render(
                 scene_us,
                 report.stats.raster_us,
                 png_us,
+                publish_stats.write_us,
+                publish_stats.sync_us,
+                publish_stats.rename_us,
                 report.stats.workers_used,
                 report.stats.tiles,
                 command.tile_size,
@@ -1331,21 +1347,55 @@ fn run_render(
     Ok(())
 }
 
-fn refinement_ranges(
-    page_count: usize,
+fn refinement_batches(
+    selected: &[u32],
     round_pages: usize,
-) -> Result<Vec<std::ops::Range<usize>>, String> {
+    mut is_cached: impl FnMut(u32) -> bool,
+) -> Result<Vec<Vec<u32>>, String> {
     if round_pages == 0 {
         return Err("round_pages must be positive".to_string());
     }
-    let round_count = page_count.max(1).div_ceil(round_pages);
-    Ok((0..round_count)
-        .map(|round| {
-            let start = round.saturating_mul(round_pages);
-            let end = start.saturating_add(round_pages).min(page_count);
-            start..end
-        })
-        .collect())
+    let mut cached = Vec::new();
+    let mut missing = Vec::new();
+    for &page_id in selected {
+        if is_cached(page_id) {
+            cached.push(page_id);
+        } else {
+            missing.push(page_id);
+        }
+    }
+
+    let mut batches: Vec<Vec<u32>> = missing
+        .chunks(round_pages)
+        .map(<[u32]>::to_vec)
+        .collect();
+    // A tiny final chunk makes first paint barely earlier, then repeats the
+    // entire raster and PNG for the accumulated scene. Coalesce a <=50% tail
+    // with its predecessor; sample9's 146-page view becomes one 128+18 batch
+    // instead of doing almost all work twice.
+    if batches.len() >= 2
+        && batches
+            .last()
+            .is_some_and(|tail| tail.len() <= round_pages / 2)
+    {
+        let tail = batches.pop().expect("checked non-empty refinement tail");
+        batches
+            .last_mut()
+            .expect("checked refinement predecessor")
+            .extend(tail);
+    }
+    if batches.is_empty() {
+        // Empty plans still publish a background frame; an all-hit plan must
+        // settle in one frame regardless of its page count.
+        batches.push(cached);
+    } else if !cached.is_empty() {
+        // Resident pages cost no read/decode and belong in the first scene.
+        // Only actual misses are eligible for progressive splitting.
+        let mut first = cached;
+        first.append(&mut batches[0]);
+        batches[0] = first;
+    }
+    Ok(batches)
 }
 
 fn checked_generation_bytes(current: u64, incoming: u64, budget: u64) -> Result<u64, String> {
@@ -1466,12 +1516,18 @@ fn publish_bytes(
     }
 }
 
+struct PublishStats {
+    write_us: u64,
+    sync_us: u64,
+    rename_us: u64,
+}
+
 fn publish_png(
     output: &str,
     generation: u64,
     bytes: &[u8],
     cancellation: &RenderCancellation,
-) -> Result<(), String> {
+) -> Result<PublishStats, String> {
     check_generation(cancellation, generation)?;
     let output = Path::new(output);
     let parent = output.parent().unwrap_or_else(|| Path::new("."));
@@ -1485,13 +1541,22 @@ fn publish_png(
     ));
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
+    let write_started = Instant::now();
     let mut file = options
         .open(&temporary)
         .map_err(|error| format!("create {}: {}", temporary.display(), error))?;
-    if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+    if let Err(error) = file.write_all(bytes) {
         let _ = std::fs::remove_file(&temporary);
         return Err(format!("write {}: {}", temporary.display(), error));
     }
+    let write_us = elapsed_us(write_started);
+    let sync_started = Instant::now();
+    if let Err(error) = file.sync_all() {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(format!("sync {}: {}", temporary.display(), error));
+    }
+    let sync_us = elapsed_us(sync_started);
+    let rename_started = Instant::now();
     let published = cancellation.commit_if_current(generation, || {
         std::fs::rename(&temporary, output).map_err(|error| {
             format!(
@@ -1502,8 +1567,13 @@ fn publish_png(
             )
         })
     });
+    let rename_us = elapsed_us(rename_started);
     match published {
-        Ok(Some(())) => Ok(()),
+        Ok(Some(())) => Ok(PublishStats {
+            write_us,
+            sync_us,
+            rename_us,
+        }),
         Ok(None) => {
             let _ = std::fs::remove_file(&temporary);
             Err("render cancelled".to_string())
@@ -1709,12 +1779,14 @@ mod tests {
 
         let progressive = render(
             parse_command(
-                "render gen=11 view=0,0,1,1 w=1 h=1 round_pages=17 round_paths=1 frames=off labels=on font_px=18 out=/tmp/f.png",
+                "render gen=11 view=0,0,1,1 w=1 h=1 jobs=3 decode_jobs=8 round_pages=17 round_paths=1 frames=off labels=on font_px=18 out=/tmp/f.png",
             )
             .unwrap()
             .unwrap(),
         );
         assert_eq!(progressive.round_pages, 17);
+        assert_eq!(progressive.jobs, Some(3));
+        assert_eq!(progressive.decode_jobs, Some(8));
         assert!(progressive.unique_round_paths);
         assert!(progressive.labels);
         assert_eq!(progressive.label_font_px, 18.0);
@@ -1804,15 +1876,26 @@ mod tests {
     }
 
     #[test]
-    fn refinement_ranges_cover_every_selected_page_once() {
-        let empty = refinement_ranges(0, 64).unwrap();
+    fn refinement_batches_are_cache_aware_and_cover_pages_once() {
+        let empty = refinement_batches(&[], 64, |_| false).unwrap();
         assert_eq!(empty.len(), 1);
-        assert_eq!(empty[0], 0..0);
-        assert_eq!(
-            refinement_ranges(130, 64).unwrap(),
-            [0..64, 64..128, 128..130]
-        );
-        assert!(refinement_ranges(1, 0).is_err());
+        assert!(empty[0].is_empty());
+
+        let selected: Vec<u32> = (0..130).collect();
+        let cold = refinement_batches(&selected, 64, |_| false).unwrap();
+        assert_eq!(cold.iter().map(Vec::len).collect::<Vec<_>>(), [64, 66]);
+        assert_eq!(cold.concat(), selected);
+
+        let warm = refinement_batches(&selected, 64, |_| true).unwrap();
+        assert_eq!(warm, [selected.clone()]);
+
+        let mixed = refinement_batches(&selected, 32, |page_id| page_id % 2 == 0).unwrap();
+        assert_eq!(mixed.len(), 2);
+        assert_eq!(mixed[0].len(), 65 + 32);
+        let mut covered = mixed.concat();
+        covered.sort_unstable();
+        assert_eq!(covered, selected);
+        assert!(refinement_batches(&[1], 0, |_| false).is_err());
     }
 
     #[test]

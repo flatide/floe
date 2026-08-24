@@ -102,7 +102,7 @@ DBU.
 ```text
 open cache=/abs/valmini.oas.floe budget_mb=64 jobs=4
 style epoch=1 path=/tmp/valmini.styles
-render gen=10 view=0,0,404000,447000 w=1200 h=800 depth=full cut=0 exact=0 layers=1/0,2/0 frames=on labels=on font_px=14 mono=off jobs=4 tile_px=128 decode_pages=99 round_pages=32 style_epoch=1 out=/tmp/frame.png
+render gen=10 view=0,0,404000,447000 w=1200 h=800 depth=full cut=0 exact=0 layers=1/0,2/0 frames=on labels=on font_px=14 mono=off jobs=4 decode_jobs=8 tile_px=384 decode_pages=99 round_pages=32 style_epoch=1 out=/tmp/frame.png
 clip seq=12 box=0,0,404000,447000 layers=1/0,2/0 jobs=4 out=/tmp/clip.oas
 snap seq=20 x=1000 y=2000 r=10 layers=1/0,2/0
 pick seq=21 x=1000 y=2000 r=3 nth=0 layers=1/0,2/0
@@ -185,22 +185,26 @@ it, while producing no visible difference. Stable floe's KLayout-only optional
 overlay remains outside this Rust product contract.
 
 Page loading keeps the parent's file-order batched OVP read, then parses the
-independent page OASIS payloads with up to `jobs` workers. Parse completion
+independent page OASIS payloads with up to `decode_jobs` workers. Raster tiles
+use `jobs`; omitting `decode_jobs` preserves the legacy behavior of using
+`jobs` for both phases. Parse completion
 order cannot change decoded-page order, LRU insertion order, or which corrupt
 page error is reported first. On the 506-page `sample9` full-depth mid-zoom
 view, release decode median changed from 131.8ms at one worker to 41.9ms at four
 and 31.7ms at eight workers (3.15x/4.16x); cached rounds perform no decode.
 
-The daemon progressively publishes priority-ordered pages in batches. Add
-`round_pages=N` to select the batch size; the default is 128 and
-`decode_pages=N` remains the total page cap. Every successful response for the
-same generation includes `round=N final=0|1 partial=0|1`; the output path is
-atomically replaced after each round. A newer generation cancels the remaining
-decode/raster rounds. A 506-page `sample9` run with `round_pages=64` published
-its first 600x600 partial frame in roughly 10ms over eight rounds, and the final
-PNG was byte-identical to single-shot rendering.
+The daemon progressively publishes priority-ordered cache misses in batches.
+All cache hits enter the first scene regardless of count; `round_pages=N`
+limits only new misses, and a final miss tail no larger than half a batch is
+coalesced into its predecessor. The default is 128 and `decode_pages=N` remains
+the total page cap. Every successful response for the same generation includes
+`round=N final=0|1 partial=0|1`; the output path is atomically replaced after
+each round. A newer generation cancels the remaining decode/raster rounds.
+Before this cache-aware policy, a 506-page `sample9` run with `round_pages=64`
+published its first 600x600 partial frame in roughly 10ms over eight rounds;
+the final PNG was byte-identical to single-shot rendering.
 
-A second cold-daemon gate on a 303-page dense `sample9` mid-zoom view measured
+A historical cold-daemon gate on a 303-page dense `sample9` mid-zoom view measured
 first/final frame latency of 17/290ms, 17/159ms, 21/122ms, and 31/99ms for
 `round_pages=32/64/128/256` respectively at 600x600 with eight workers. The
 default remains 128: it gives up 4ms of first-paint latency versus 64 while
@@ -270,10 +274,13 @@ pan/zoom burst. It passed on both `valmini` and the 506-page `sample9`: none of
 the previous 99 generations published a frame, only the latest generation
 settled, and no partial file or pending adapter job remained.
 
-The operational knobs are `FLOE_RENDERD_BIN`, `FLOE_RUST_JOBS` (default up to
-8 host CPUs), `FLOE_RUST_BUDGET_MB` (1024), `FLOE_RUST_ROUND_PAGES` (128),
-`FLOE_RUST_TILE_PX` (128), and `FLOE_RUST_LABEL_PX` (14, whole-pixel range
-6..96). `FLOE_RUST_OPEN_TIMEOUT_S` and `FLOE_RUST_CLIP_TIMEOUT_S` both default
+The operational knobs are `FLOE_RENDERD_BIN`, `FLOE_RUST_JOBS` (page decode,
+default up to 8 host CPUs), `FLOE_RUST_RASTER_JOBS` (default up to 4 and never
+above decode jobs), `FLOE_RUST_BUDGET_MB` (1024), `FLOE_RUST_ROUND_PAGES` (128),
+`FLOE_RUST_TILE_PX` (384), and `FLOE_RUST_LABEL_PX` (14, whole-pixel range
+6..96). The raw daemon fallback remains one shared jobs value and 128px when
+the new fields are omitted. `FLOE_RUST_OPEN_TIMEOUT_S` and
+`FLOE_RUST_CLIP_TIMEOUT_S` both default
 to 300 seconds. Cold cache open runs outside the GTK thread, and the daemon is
 placed in its own POSIX session so terminal SIGINT does not kill it.
 A headless smoke test is:
@@ -311,6 +318,13 @@ composition, and 0/90/180/270-degree rotation. It never consults the OS or
 KLayout font engine. If the 262,144-glyph raster cap is reached, it renders a
 deterministic whole-label prefix, reports `labels_truncated=1`, and still
 publishes the geometry frame.
+
+Frame telemetry separates `raster_us`, `png_us`, and atomic publication into
+`publish_write_us`, `publish_sync_us`, and `publish_rename_us`; the Python
+adapter adds its output-file handoff time. The GUI performance status and
+`tools/bench_floe2.py` expose these fields. Publication still uses `sync_all()`:
+the measured 3--6ms is too small to justify weakening the atomic publication
+contract.
 Abstract mode is a KLayout-specific feature
 and is intentionally outside the Rust renderer scope; it will not be
 implemented.

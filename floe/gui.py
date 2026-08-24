@@ -2552,6 +2552,9 @@ class Viewer:
                         text += ", text %.1fms/%s places" % (
                             res["text_plan_ms"],
                             fmt_count(res.get("text_place_records", 0)))
+                    if res.get("png_ms") is not None:
+                        text += ", png %.1fms/pub %.1fms" % (
+                            res["png_ms"], res.get("publish_ms", 0.0))
                     if res.get("labels_truncated"):
                         text += ", labels partial"
                     # tiles = plan total (resident pages included);

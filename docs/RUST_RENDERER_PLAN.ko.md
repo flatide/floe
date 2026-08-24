@@ -54,7 +54,8 @@ M5 density coverage 폐기(2026-08-25), M7 pick/snap 완료, M8 exact clip verti
 - 완료(기준선): `--jobs` scoped worker와 수평 band 단독 소유로 worker 수 독립
   RGBA 합성을 먼저 고정
 - 완료: 2D square tile 독립 scratch, atomic work index의 bounded worker pool,
-  `(row,col)` 고정 위치 합성, CLI/daemon `tile_px`(기본 128, 1..4096)
+  `(row,col)` 고정 위치 합성, CLI/daemon `tile_px`(protocol fallback 128,
+  floe2 제품 기본 384, 1..4096)
 - 완료: KLayout solid geometry의 1 device-pixel frame, 전역 Bresenham 위상,
   1~8px outline의 KLayout 짝수 폭 device 편향, tile/viewport 경계의
   stroke 폭 기반 tile/viewport cull footprint
@@ -109,9 +110,16 @@ M5 density coverage 폐기(2026-08-25), M7 pick/snap 완료, M8 exact clip verti
   같은 frontier를 확인. stdin EOF/quit은 frontier를 최대로 올려 진행 작업을 중단
 - 완료: PNG same-directory 임시 파일 write/sync/rename과 cancellation frontier의
   직렬 commit; 실패·취소 시 임시 파일 정리
-- 완료: `page_prio` 기반 progressive refinement. daemon 기본 128 page씩 decode해
-  같은 generation의 `round/final/partial` frame을 원자 게시하고 새 generation이
-  남은 round를 취소. `decode_pages`는 전체 상한, `round_pages`는 round 상한
+- 완료: cache-aware `page_prio` progressive refinement. cache hit는 첫 scene에 모두
+  포함하고 miss만 기본 128 page budget으로 decode하며, 절반 이하의 마지막 tail은
+  앞 round와 합침. 같은 generation의 `round/final/partial` frame을 원자 게시하고
+  새 generation이 남은 round를 취소. `decode_pages`는 전체 상한,
+  `round_pages`는 miss round 상한
+- 완료: page decode `decode_jobs`와 image raster `jobs`를 protocol에서 분리하고
+  floe2 제품 기본을 decode 8/raster 4로 설정. 생략한 기존 호출은 `jobs`를 두
+  단계에 공통 적용
+- 완료: raster 전 page local bbox prune, PNG encode와 publish write/sync/rename,
+  adapter handoff telemetry. sample9 warm에서 sync는 약 3~6ms라 유지
 - 완료: 부모 정확도 계약 P-a(골든 edge Chebyshev 1px band), P-b(4-connected
   component 보존), P-c(area drift 제한) 반영
 - 검증: 2D tile 전환 후 PX1~PX5 13개 실제 Rust 후보를 재생성해 모두
@@ -310,19 +318,21 @@ render worker는 다음 round의 병렬 decode/raster를 계속할 수 있다. �
 1. 요청의 부분 DBU viewport를 반올림하지 않고 보존하고, device 교차점을
    Q32.32로 정규화한다.
 2. 기존 planner로 `HierPlan`을 만든다.
-3. `page_prio` 순으로 미상주 page를 round budget만큼 읽고, file-order I/O 뒤
-   독립 OASIS payload를 `jobs` worker로 decode한다.
+3. cache hit page는 모두 첫 batch에 넣고, `page_prio` 순 미상주 page만 round
+   budget만큼 읽는다. file-order I/O 뒤 독립 OASIS payload를 `decode_jobs`
+   worker로 decode한다.
 4. 현재 상주 page 집합과 `HierPlan`으로 immutable `FrameScene`을 만든다.
-5. 화면을 128x128 pixel tile로 분할한다.
+5. 화면을 제품 기본 384x384 pixel tile로 분할한다.
 6. worker가 tile마다 모든 paint plane을 정해진 순서로 렌더한다.
 7. tile 결과를 고정 위치에 복사한다. 완료 순서는 결과에 영향을 주지 않는다.
 8. generation이 최신일 때만 PNG를 publish한다.
-9. deferred page가 있으면 다음 refinement round를 수행한다.
+9. deferred cache miss가 있으면 다음 refinement round를 수행한다.
 
-기본 tile 크기는 실측으로 확정한 128x128이며 실제 worker 수는
+daemon protocol fallback tile은 128x128이고 floe2 제품 기본은 sample9 재방문
+실측으로 확정한 384x384다. 실제 raster worker 수는
 `min(request.jobs, tile_count)`다. CLI/daemon의 `--tile-px`/`tile_px`와
-`--jobs`/`jobs`로 고정할 수 있다. 64/128/256 결과는 byte-identical이고 현재
-styled valmini 4-worker 중앙 경향에서는 128px가 가장 빨랐다.
+`--jobs`/`jobs`, `decode_jobs`로 고정할 수 있다. 64/128/256/384 결과는
+byte-identical이다.
 
 ## 5. workspace 구조
 
@@ -530,8 +540,8 @@ bounded worker를 만들고 tile index를 atomic counter로 배분한다. 각 wo
 크기의 scratch RGBA에 그린 뒤 `(tile_index, scratch)`를 반환하고, coordinator가
 tile의 `(row,col)` 고정 위치에 한 번 복사한다. 완료 순서는 pixel 결과에 영향을
 주지 않는다. worker별 전체 framebuffer와 공유 framebuffer에 대한 unsafe 동시
-쓰기는 없다. 기본 tile은 128px이며 CLI/daemon의 `tile_px`로 1..4096 범위에서
-고정할 수 있다.
+쓰기는 없다. protocol fallback tile은 128px, floe2 제품 기본은 384px이며
+CLI/daemon의 `tile_px`로 1..4096 범위에서 고정할 수 있다.
 
 구현된 `RenderCancellation`은 `generation < before_generation`일 때만 취소하는
 strict monotonic frontier다. 새 render 명령 `N`을 읽는 stdin thread가 즉시 frontier를
@@ -563,7 +573,7 @@ stdin EOF와 `quit`도 frontier를 최대로 올려 현재 render/clip을 끝까
 ```text
 open cache=/abs/design.oas.floe budget_mb=1024 jobs=8
 style epoch=3 path=/tmp/floe-style-3.tsv
-render gen=42 view=x0,y0,x1,y1 w=1922 h=1082 depth=full cut=3 exact=0 layers=all frames=on mono=off jobs=8 tile_px=128 decode_pages=512 round_pages=128 round_paths=0 style_epoch=3 out=/tmp/floe-frame-42.png
+render gen=42 view=x0,y0,x1,y1 w=1922 h=1082 depth=full cut=3 exact=0 layers=all frames=on mono=off jobs=4 decode_jobs=8 tile_px=384 decode_pages=512 round_pages=128 round_paths=0 style_epoch=3 out=/tmp/floe-frame-42.png
 cancel before_gen=43
 info
 quit
@@ -590,7 +600,10 @@ dropped gen=40 reason=stale
 error gen=42 code=limit message=...
 ```
 
-`round_pages` 기본값은 128이며 한 round에서 새로 읽을 최대 page 수다.
+`round_pages` 기본값은 128이며 한 round에서 새로 읽을 최대 cache-miss page 수다.
+cache hit는 개수와 무관하게 첫 scene에 모두 포함하며 마지막 miss tail이 budget의
+절반 이하면 앞 round와 합친다. `jobs`는 raster worker, `decode_jobs`는 page decode
+worker이고 후자를 생략하면 하위 호환으로 `jobs`를 공통 사용한다.
 `decode_pages`는 generation 전체 page 상한이고 생략하면 plan 전체를 refinement한다.
 기본 `round_paths=0`에서는 같은 generation이 `final=1`까지 같은 출력 경로를 원자
 교체한다. Python adapter는 `round_paths=1`을 사용해 intermediate round마다 고유

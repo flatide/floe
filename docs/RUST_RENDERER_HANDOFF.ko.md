@@ -135,15 +135,16 @@ KLayout indexer이므로 KLayout-free portable에서 그대로 호출할 수 없
 
 ### P3 — 운영 gate
 
-renderer 최적화는 `docs/FLOE2_OPTIMIZATION.ko.md`의 F2R-01부터 추적한다.
-특히 warm cache hit도 전체 선택 page 수로 refine하는 문제와 128px tile의 반복
-hierarchy 순회가 현재 P1이다.
+renderer 최적화는 `docs/FLOE2_OPTIMIZATION.ko.md`에서 추적한다. cache-aware
+refinement, 384px 제품 tile, decode 8/raster 4 분리와 publish 계측은 완료됐다.
+남은 P1은 frame work bin/transform 재사용으로 단일-worker 성능을 floe의 95%
+안으로 낮추는 F2R-03이다.
 
 - 완료: `tools/bench_floe2.py`가 실제 GUI와 같은 persistent session에서 fit,
   full-depth mid zoom 첫 방문, hotspot, single-layer near, 5회 warm pan을 고정 순서로
   실행한다. jobs 1/4/8/16, 반복 횟수, viewport, budget을 한 명령으로 통제한다.
-- 완료: adapter가 정확한 `plan/read/decode/scene/raster/png`, cache hit/miss,
-  decoded resident, decode worker/tile 수를 결과 schema에 보존한다. 하네스는 daemon
+- 완료: adapter가 정확한 `plan/read/decode/scene/raster/png/publish/handoff`, cache hit/miss,
+  decoded resident, decode/raster worker와 tile 수를 결과 schema에 보존한다. 하네스는 daemon
   peak RSS와 jobs=1 대비 total/raster speedup까지 privacy-safe JSON으로 기록한다.
 - 완료(milestone calibration): 이미 index된 1.4GB 합성 fixture에서 1200x800 전체
   trace와 jobs 1/4/8/16을 완주했다. 가장 무거운 hotspot의 raster는

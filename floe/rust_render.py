@@ -19,7 +19,7 @@ from pathlib import Path
 _DEFAULT_JOBS = max(1, min(8, os.cpu_count() or 1))
 _DEFAULT_BUDGET_MB = 1024
 _DEFAULT_ROUND_PAGES = 128
-_DEFAULT_TILE_PX = 128
+_DEFAULT_TILE_PX = 384
 _DEFAULT_LABEL_FONT_PX = 14
 _DEFAULT_OPEN_TIMEOUT_S = 300
 _DEFAULT_CLIP_TIMEOUT_S = 300
@@ -197,6 +197,8 @@ class RustRenderWorker:
         self._binary = _find_binary()
         self._jobs_count = _env_int(
             "FLOE_RUST_JOBS", _DEFAULT_JOBS, 1, 256)
+        self._raster_jobs_count = _env_int(
+            "FLOE_RUST_RASTER_JOBS", min(4, self._jobs_count), 1, 256)
         self._budget_mb = _env_int(
             "FLOE_RUST_BUDGET_MB", _DEFAULT_BUDGET_MB, 1, 1 << 20)
         self._round_pages = _env_int(
@@ -430,6 +432,8 @@ class RustRenderWorker:
             "started": time.monotonic(), "new": 0,
             "read_us": 0, "decode_us": 0, "scene_us": 0,
             "draw_us": 0, "png_us": 0, "plan_us": 0,
+            "publish_write_us": 0, "publish_sync_us": 0,
+            "publish_rename_us": 0, "adapter_read_us": 0,
             "cache_hit": 0, "render_tiles": 0,
             "resident_bytes": 0, "decode_workers": 0,
         }
@@ -438,14 +442,15 @@ class RustRenderWorker:
         command = (
             "render gen=%d view=%s w=%d h=%d depth=%s cut=%s exact=0 "
             "layers=%s frames=%s labels=%s font_px=%d mono=%s "
-            "jobs=%d tile_px=%d "
+            "jobs=%d decode_jobs=%d tile_px=%d "
             "round_pages=%d round_paths=1 style_epoch=%d out=%s" % (
                 generation, ",".join(repr(value) for value in bbox),
                 int(job["w"]), int(job["h"]), depth,
                 repr(max(0.0, float(job.get("cut_px") or 0.0))), layers,
                 _bool_wire(job.get("frames", True)),
                 _bool_wire(job.get("labels", True)), label_font_px,
-                _bool_wire(self._mono), self._jobs_count, self._tile_px,
+                _bool_wire(self._mono), self._raster_jobs_count,
+                self._jobs_count, self._tile_px,
                 self._round_pages, self._style_epoch, output))
         self._send(command)
 
@@ -777,6 +782,7 @@ class RustRenderWorker:
         if state is None:
             return
         path = fields.get("png")
+        read_started = time.monotonic()
         try:
             with open(path, "rb") as frame_file:
                 png = frame_file.read()
@@ -797,6 +803,7 @@ class RustRenderWorker:
                     os.unlink(path)
                 except OSError:
                     pass
+        adapter_read_us = round((time.monotonic() - read_started) * 1e6)
 
         final = _wire_int(fields, "final") != 0
         if not final:
@@ -812,6 +819,13 @@ class RustRenderWorker:
         state["scene_us"] += _wire_int(fields, "scene_us")
         state["draw_us"] += _wire_int(fields, "raster_us")
         state["png_us"] += _wire_int(fields, "png_us")
+        state["publish_write_us"] += _wire_int(
+            fields, "publish_write_us")
+        state["publish_sync_us"] += _wire_int(
+            fields, "publish_sync_us")
+        state["publish_rename_us"] += _wire_int(
+            fields, "publish_rename_us")
+        state["adapter_read_us"] += adapter_read_us
         state["new"] += _wire_int(fields, "cache_miss")
         state["cache_hit"] += _wire_int(fields, "cache_hit")
         state["render_tiles"] += _wire_int(fields, "tiles")
@@ -843,6 +857,13 @@ class RustRenderWorker:
             "scene_ms": state["scene_us"] / 1000.0,
             "raster_ms": state["draw_us"] / 1000.0,
             "png_ms": state["png_us"] / 1000.0,
+            "publish_write_ms": state["publish_write_us"] / 1000.0,
+            "publish_sync_ms": state["publish_sync_us"] / 1000.0,
+            "publish_rename_ms": state["publish_rename_us"] / 1000.0,
+            "publish_ms": (state["publish_write_us"] +
+                           state["publish_sync_us"] +
+                           state["publish_rename_us"]) / 1000.0,
+            "adapter_read_ms": state["adapter_read_us"] / 1000.0,
             "cache_hit": state["cache_hit"],
             "cache_miss": state["new"],
             "resident_mb": state["resident_bytes"] / (1024.0 * 1024.0),

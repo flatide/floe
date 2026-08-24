@@ -1144,7 +1144,12 @@ fn render_cell(
         let Some(page) = scene.page(page_id) else {
             continue;
         };
-        if !selection.includes(page.layer_idx) {
+        // The planner selects pages for the whole viewport, while this hot
+        // loop runs independently for every image tile. Reject a page in
+        // cell-local coordinates before walking any of its records. Without
+        // this gate every tile rescanned every selected page; sample9's
+        // 858x789 frame repeated the same record walks 49 times at 128px.
+        if !selection.includes(page.layer_idx) || !page.bbox.intersects(&local_view) {
             continue;
         }
         let geometry = page
@@ -2892,6 +2897,86 @@ mod tests {
 
     fn styled_scene(frames: Vec<(BBox, Rep, u8)>) -> FrameScene {
         styled_scene_with_labels(frames, Vec::new())
+    }
+
+    #[test]
+    fn page_bbox_prunes_record_walks_per_image_tile() {
+        let top = (0, REM_FULL);
+        let left = BBox {
+            x0: 1,
+            y0: 1,
+            x1: 4,
+            y1: 9,
+        };
+        let right = BBox {
+            x0: 16,
+            y0: 1,
+            x1: 19,
+            y1: 9,
+        };
+        let plan = HierPlan {
+            top,
+            wcells: vec![WsCell {
+                key: top,
+                pages: vec![0, 1],
+                insts: Vec::new(),
+                frames: Vec::new(),
+                washes: Vec::new(),
+            }],
+            pages: vec![0, 1],
+            page_prio: vec![0, 1],
+            stats: HierStats::default(),
+        };
+        let mut bounds = BTreeMap::new();
+        bounds.insert(
+            top,
+            BBox {
+                x0: 0,
+                y0: 0,
+                x1: 20,
+                y1: 10,
+            },
+        );
+        let scene = FrameScene::from_test_parts(
+            plan,
+            vec![styled_page(0, 0, left), styled_page(1, 1, right)],
+            bounds,
+        )
+        .unwrap();
+        let raster = GeometryRasterRequest {
+            view: RasterViewBox::new(0.0, 0.0, 20.0, 10.0).unwrap(),
+            width: 20,
+            height: 10,
+            workers: 2,
+            tile_size: 10,
+            ..request()
+        };
+        let report = render_geometry_styled(
+            &scene,
+            &StyledGeometryRasterRequest {
+                raster,
+                layers: vec![
+                    LayerStyle {
+                        layer_idx: 0,
+                        color: [255, 0, 0, 255],
+                        fill: LayerFill::Solid,
+                        outline_width: 1,
+                    },
+                    LayerStyle {
+                        layer_idx: 1,
+                        color: [0, 255, 0, 255],
+                        fill: LayerFill::Solid,
+                        outline_width: 1,
+                    },
+                ],
+                hierarchy_frames: false,
+                mono: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(report.rect_record_tests, 2);
+        assert_eq!(pixel(&report.frame, 2, 5), [255, 0, 0, 255]);
+        assert_eq!(pixel(&report.frame, 17, 5), [0, 255, 0, 255]);
     }
 
     fn styled_scene_with_labels(
