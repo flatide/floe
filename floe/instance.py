@@ -17,7 +17,9 @@ import socket
 import sys
 import tempfile
 
-APP = "floe"
+from .product import name as product_name
+
+APP = product_name()
 
 
 def display_key():

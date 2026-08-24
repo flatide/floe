@@ -35,6 +35,7 @@ fi
     cargo build --release 2>/dev/null >/dev/null)
 (cd rust && PATH="$HOME/.cargo/bin:$PATH" cargo test --workspace)
 .venv/bin/python tools/validate_index_cli.py
+.venv/bin/python tools/validate_floe2.py
 OUT="${SRC%.oas}_rust.tiles"
 .venv/bin/python tools/validate_rust_scan.py "$SRC"
 .venv/bin/python tools/validate_rust_tiles.py "$SRC" "$OUT"

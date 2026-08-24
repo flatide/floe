@@ -10,15 +10,21 @@
 
 하는 것을 목표로 한다. 타겟 환경은 Linux, 개발/테스트는 macOS.
 
-## 환경 설정
+## 제품 경계와 환경 설정
 
-기본 렌더 엔진은 번들 글꼴을 사용하는 멀티코어 Rust renderer이며, GUI 셸은
-시스템 PyGObject/GTK3. **`gi`(PyGObject)는 pip으로 설치하지 않는다** —
+한 저장소에서 두 제품을 개발한다. 안정판 `floe`는 KLayout renderer를 기본으로
+유지하고, `floe2`는 번들 글꼴을 사용하는 멀티코어 Rust renderer만 허용한다.
+두 제품은 같은 `rust/` workspace, `floe-index`/`floe-renderd`, `<src>.floe`
+VFS 캐시 규약과 공통 Python 구현을 사용하지만 GUI 제목과 single-instance
+소켓은 분리된다. 상세 경계는 [`docs/FLOE2.md`](docs/FLOE2.md)에 있다.
+
+GUI 셸은 시스템 PyGObject/GTK3다. **`gi`(PyGObject)는 pip으로 설치하지 않는다** —
 OS 패키지로 설치하고, venv를 그 gi가 보이는 파이썬으로
 `--system-site-packages` 옵션과 함께 만든다. CLI 전용
-(`info/render/clip`)이면 GTK 없이 동작한다. KLayout pip 모듈은 Python
-legacy indexer/renderer와 개발 정확도 oracle에만 필요하며
-`FLOE_RENDERER=klayout`으로 rollback할 수 있다.
+(`info/render/clip`)이면 GTK 없이 동작한다. `floe2`만 실행할 때 KLayout은
+필요하지 않다. 안정판 `floe` renderer, Python legacy indexer와 개발 정확도
+oracle에는 KLayout pip 모듈이 필요하다. `floe`의 명시적 A/B에서만
+`FLOE_RENDERER=rust`를 사용할 수 있고 `floe2`는 다른 backend를 거부한다.
 
 Python 3.14 + klayout 0.30.9 확인됨.
 
@@ -33,7 +39,7 @@ ls /opt/homebrew/lib | grep python
 # 반드시 그 버전의 Homebrew 파이썬으로 venv 생성
 /opt/homebrew/bin/python3.14 -m venv --system-site-packages .venv
 .venv/bin/pip install numpy pillow
-# 개발 oracle/KLayout rollback까지 쓸 때만: .venv/bin/pip install klayout
+# 안정판 floe 또는 개발 oracle을 쓸 때: .venv/bin/pip install klayout
 .venv/bin/python -c "import gi; gi.require_version('Gtk', '3.0'); print(gi.__file__)"
 ```
 
@@ -53,7 +59,7 @@ sudo dnf install python3-gobject gtk3      # Debian/Ubuntu: python3-gi gir1.2-gt
 python3 -c 'import gi; gi.require_version("Gtk", "3.0")'   # 사전 확인
 python3 -m venv --system-site-packages .venv
 .venv/bin/pip install numpy pillow
-# 개발 oracle/KLayout rollback까지 쓸 때만: .venv/bin/pip install klayout
+# 안정판 floe 또는 개발 oracle을 쓸 때: .venv/bin/pip install klayout
 ```
 
 폐쇄망 호스트는 아래 [폐쇄망 리눅스 배포](#폐쇄망-리눅스-배포) 절차를 따른다.
@@ -112,28 +118,31 @@ python3 -m venv --system-site-packages .venv
 | 5/1, 7/1, 9/1, 11/1, 13/1, 15/1 | M*_FILL | 더미필 (용량 대부분) |
 | 63/63 | MARKER | 검증용 마커/라벨 |
 
-## floe 사용법
+## floe2 / floe 사용법
 
 OASIS에는 공간 인덱스가 없어 어떤 조회든 파일 전체 파싱이 필요하다.
-floe는 **최초 1회 인덱싱**으로 이 비용을 지불하고, 이후 모든 조회는
+두 제품은 **최초 1회 인덱싱**으로 이 비용을 지불하고, 이후 모든 조회는
 관심 영역과 교차하는 타일만 로딩해 ms~초 단위로 응답한다.
 
 ```sh
+alias floe2=".venv/bin/python -m floe2"  # Rust-only 개발 제품
 alias floe=".venv/bin/python -m floe"
 
-floe index data/testchip_1g5.oas          # 1회: <src>.floe/ 생성 (Rust, 전 코어)
-floe index data/testchip_1g5.oas --jobs 1 # 병렬 끄기
-floe index data/testchip_1g5.oas --coverage  # 선택형 density overview 포함
-floe info  data/testchip_1g5.oas          # 레이어/그리드/통계 요약
-floe view  data/testchip_1g5.oas          # 네이티브 데스크톱 뷰어 (기본)
-floe view  data/testchip_1g5.oas --goto 5240,5260,50   # 시작 위치+뷰 폭(um)
-floe render data/testchip_1g5.oas --bbox 5000,5000,5200,5200 \
+floe2 index data/testchip_1g5.oas          # 1회: 공유 <src>.floe/ 생성
+floe2 index data/testchip_1g5.oas --jobs 1 # 병렬 끄기
+floe2 index data/testchip_1g5.oas --coverage
+floe2 info  data/testchip_1g5.oas
+floe2 view  data/testchip_1g5.oas
+floe2 view  data/testchip_1g5.oas --goto 5240,5260,50
+floe2 render data/testchip_1g5.oas --bbox 5000,5000,5200,5200 \
           --layers M2,M3,VIA2 --out view.png
-floe clip  data/testchip_1g5.oas --bbox 5000,5000,5100,5100 --out region.oas
+floe2 clip data/testchip_1g5.oas --bbox 5000,5000,5100,5100 --out region.oas
+
+floe view data/testchip_1g5.oas            # 안정판 KLayout 화면
 ```
 
 - `--bbox`는 µm 단위 `X0,Y0,X1,Y1`. `--layers`는 이름 또는 `layer/datatype` 목록.
-- `floe index`는 기본적으로 동봉된 `floe-index vfs`를 실행한다. 같은 source
+- `floe2 index`와 `floe index`는 같은 `floe-index vfs`를 실행한다. 같은 source
   fingerprint의 정상 캐시는 재사용하며 기존·불완전·stale 캐시 교체는 명시적
   `--force`가 있어야 한다. `--page-target-mb`, `--no-lod`, `--slow-cell-s`,
   `--p2-shard-limit-mb`는 Rust 빌드 옵션이다. coverage는 GUI 기본값과 같이
@@ -142,6 +151,7 @@ floe clip  data/testchip_1g5.oas --bbox 5000,5000,5100,5100 --out region.oas
 ### Python/KLayout 레거시 인덱서
 
 동결된 `.tiles` 인덱서는 명시적 `floe index --legacy <src>`에서만 사용한다.
+`floe2`에서는 명령과 옵션을 노출하지 않는다.
 아래의 read mode, band, skeleton/text cap, merge, memory governor 옵션은 모두
 `--legacy` 전용이다.
 
@@ -445,8 +455,8 @@ full은 다이얼로그의 full 프리셋/스핀박스(999)로 지정.
   **탐색 가속 모드**다 (광역 실측 4.5s→0.18s, 25×; 화면 정보의 큰
   부분이 생략되므로 상태바에 `· abstract`가 떠 있는 동안은 판독용으로
   쓰지 말 것). 셀 단위라 flat 필에는 효과가 없다 — 그건 컷 레벨과
-  병합 트윈의 몫. Rust 기본 backend에서는 제외 범위이므로 메뉴와 `a`가
-  비활성화되고, `FLOE_RENDERER=klayout` rollback에서만 사용할 수 있다.
+  병합 트윈의 몫. 안정판 `floe`에서는 기본으로 사용할 수 있고, Rust-only
+  `floe2`에서는 제외 범위라 메뉴와 `a`가 비활성화된다.
 - 광역 뷰 비용은 depth가 아니라 크기 밴드 컷이 제한한다 (아래 크기
   밴드 섹션). 예전의 밀도 기반 auto depth는 밴드 도입으로 제거했다 —
   depth는 순수하게 계층 탐색 도구다.
@@ -571,14 +581,14 @@ python3 -m venv --system-site-packages .venv               # gi가 보이게
 - 원격에서는 Exceed TurboX/XQuartz 등 X 서버로 `floe view` 실행 (flateyes와
   동일한 접속 형태). macOS 개발 환경 설정은 위 [환경 설정](#환경-설정) 참고.
 
-### floe-portable: 완전 자립 번들 (PyGObject 없는 호스트용) — 권장
+### floe2-portable: 완전 자립 번들 (PyGObject 없는 호스트용) — 권장
 
 호스트에 `python3-gobject`(gi)조차 없거나 파이썬 버전이 안 맞는 경우,
 flateyes-portable과 동일하게 필요한 걸 전부 싸서 가져간다. Python +
-PyGObject + GTK3 (conda-forge, 재배치 가능) + NumPy/Pillow + floe +
+PyGObject + GTK3 (conda-forge, 재배치 가능) + NumPy/Pillow + floe/floe2 +
 `floe-index`/`floe-renderd`가 한 tar에 들어가고, 호스트엔 아무것도
 설치·변경하지 않는다 (쓰는 것은 X 디스플레이와 시스템 폰트뿐).
-기본 번들은 KLayout을 포함하지 않는다.
+기본 floe2 번들은 KLayout을 포함하지 않는다.
 
 NumPy/Pillow Linux 휠과 네이티브 바이너리를 런타임에 넣으므로 번들은
 **x86_64 Linux 빌드 머신**에서 만든다. 빌드 시 verify가 모든 ELF의 실제
@@ -586,37 +596,37 @@ glibc floor를 출력한다. `tools/make_portable.sh`가 flateyes의 레시피�
 따른다:
 
 ```sh
-tools/make_portable.sh                     # -> floe-portable-<ver>-<date>.tar.gz
+tools/make_portable.sh                     # -> floe2-portable-<ver>-<date>.tar.gz
 # 폐쇄망 미러만 되는 빌드 머신이면 numpy/pillow 휠을 미리 받아두고:
 WHEELS=./wheels tools/make_portable.sh
-# KLayout rollback/oracle이 꼭 필요한 별도 번들(기본 배포 아님):
+# 안정판 floe/KLayout 별도 번들(기본 배포 아님):
 FLOE_PORTABLE_KLAYOUT=1 tools/make_portable.sh
 ```
 
 호스트에서는 **풀고 실행만** (설치·권한 불필요):
 
 ```sh
-tar xzf floe-portable-*.tar.gz -C /opt     # 위치 자유
-/opt/floe-portable/selfcheck               # 창 없이 스택 검증 (모두 OK 확인)
-/opt/floe-portable/floe view /path/chip.oas
-/opt/floe-portable/floe index /path/chip.oas   # CLI도 동일
+tar xzf floe2-portable-*.tar.gz -C /opt     # 위치 자유
+/opt/floe2-portable/selfcheck
+/opt/floe2-portable/floe2 view /path/chip.oas
+/opt/floe2-portable/floe2 index /path/chip.oas
 ```
 
 conda-forge가 GTK 스택 전체를 재배치 가능하게 묶어주므로 (GIR 타입립·
 gdk-pixbuf 로더·스키마·폰트 포함) gi를 시스템에 얹을 필요가 없다. 런처가
 첫 실행 시 호스트별 캐시(GSettings 스키마, pixbuf 로더 목록)를 자동
-생성한다. floe 코드만 갱신하려면 새 `floe/` 패키지를 번들의
-`runtime/lib/python*/site-packages/floe`에 덮어쓰면 된다 (재빌드 불필요).
+생성한다. 코드를 갱신할 때는 새 `floe/`와 `floe2/` 패키지를 번들의
+`runtime/lib/python*/site-packages/`에 함께 덮어쓴다.
 
 **뷰어 문제 진단 순서** (창이 검게 나오는 등):
 1. `selfcheck` — 스택(gi/GTK/pixbuf/NumPy/Pillow/Rust binaries) 검증,
    창 없이. 기본 번들은 KLayout 부재도 확인한다.
-2. `floe render <src> --bbox ... --out t.png` — 캐시·렌더 엔진 검증, GUI 없이.
-3. `floe probe <src>` — **뷰어의 렌더 서비스 경로**(spawn 자식 + 큐 + 프레임)
+2. `floe2 render <src> --bbox ... --out t.png` — 캐시·렌더 엔진 검증, GUI 없이.
+3. `floe2 probe <src>` — **뷰어의 렌더 서비스 경로**(spawn 자식 + 큐 + 프레임)
    를 GUI 없이 그대로 실행. 여기가 실패하면 뷰어는 검게 뜬다; 통과하면
    디스플레이 쪽 문제다. 뷰어 자체도 서비스가 죽으면 상태바에
    "error: render service died"를 표시한다 (워치독).
-4. `floe gtktest [png]` — 최소 픽스버프 표시 매트릭스 (표시 계층 문제 판별).
+4. `floe2 gtktest [png]` — 최소 픽스버프 표시 매트릭스 (표시 계층 문제 판별).
 
 **XQuartz 주의 — 이미지가 검게 표시**: XQuartz(맥에서 ssh -X로 접속)의
 XRender 구현은 텍스트만 그리고 **이미지 합성을 검게 표시**한다 (창을
@@ -749,7 +759,7 @@ alias floe="/opt/floe/venv/bin/python -m floe"
   무시하고 전체 재빌드. 타일링 중 워커 전원이 외부에서 죽으면(3분간
   busy 0) 잃어버린 타일을 자동 재디스패치한다.
 
-## Rust CPU renderer (opt-in)
+## Rust CPU renderer (floe2)
 
 KLayout의 단일 `Layout` 인스턴스와 delta `Layout.read` 병목을 피하는 결정적
 멀티코어 CPU renderer가 `rust/render-core`, `rust/renderd`, `rust/render-cli`에
@@ -761,13 +771,15 @@ payload decode와 2D image tile raster를 worker 여러 개로 병렬 수행한�
 cd rust
 cargo build --release -p floe-renderd -p floe-render-cli
 cd ..
-.venv/bin/python -m floe view --multi chip.oas
+.venv/bin/python -m floe2 view --multi chip.oas
 ```
 
-기본 backend는 in-tree `floe.rust_render.RustRenderWorker`와 persistent
-`floe-renderd`다. KLayout rollback은 `FLOE_RENDERER=klayout`으로 선택한다. 개발
-트리에서는 `rust/target/release/floe-renderd`를 자동 탐색하므로 별도 `PYTHONPATH`나
-worker 설정이 필요 없다. 지원 범위, 정확도 계약, 성능 실측과 운영 knob는
+`floe2`의 유일한 backend는 in-tree `floe.rust_render.RustRenderWorker`와
+persistent `floe-renderd`다. `FLOE_RENDERER=klayout`을 포함한 다른 backend는
+시작 전에 거부한다. 안정판 `floe`는 KLayout을 기본으로 유지하며 명시적인
+`FLOE_RENDERER=rust` A/B만 허용한다. 개발 트리에서는
+`rust/target/release/floe-renderd`를 자동 탐색하므로 별도 `PYTHONPATH`나 worker
+설정이 필요 없다. 지원 범위, 정확도 계약, 성능 실측과 운영 knob는
 [`docs/RUST_RENDERER.md`](docs/RUST_RENDERER.md), 구현 순서는
 [`docs/RUST_RENDERER_PLAN.ko.md`](docs/RUST_RENDERER_PLAN.ko.md)에 정리했다.
 abstract는 KLayout 고유 기능이므로 Rust 범위에서 제외하며, 지원하지 않는 요청이나

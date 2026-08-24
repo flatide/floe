@@ -56,6 +56,7 @@ def guarded_import(name, *args, **kwargs):
 builtins.__import__ = guarded_import
 os.environ.pop("FLOE_RENDERER", None)
 
+import floe2
 from floe import cache
 from floe import gui
 from floe.service import make_render_worker
@@ -100,7 +101,8 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         ctor.assert_called_once()
         self.assertTrue(service.RenderWorker.supports_abstract)
         self.assertFalse(RustRenderWorker.supports_abstract)
-        with mock.patch.dict(os.environ, {"FLOE_RENDERER": ""},
+        with mock.patch.dict(os.environ, {
+                "FLOE_PRODUCT": "floe2", "FLOE_RENDERER": ""},
                              clear=False):
             self.assertEqual(_renderer_backend(), "rust")
         with mock.patch.dict(os.environ, {"FLOE_RENDERER": "unknown"},
@@ -601,7 +603,7 @@ class RealDaemonIntegrationTests(unittest.TestCase):
             cli_source = os.path.join(directory, "CLI source.oas")
             os.symlink(source, cli_source)
             os.symlink(cache.dir, cli_source + ".floe")
-            # sitecustomize runs before `python -m floe` and turns an
+            # sitecustomize runs before `python -m floe2` and turns an
             # accidental KLayout import anywhere in the CLI startup path
             # into a hard failure.  The parent test process keeps KLayout as
             # the independent OASIS/Region oracle.
@@ -621,14 +623,14 @@ class RealDaemonIntegrationTests(unittest.TestCase):
             child_env["PYTHONPATH"] = directory + os.pathsep + \
                 child_env.get("PYTHONPATH", "")
             completed = subprocess.run(
-                [sys.executable, "-B", "-m", "floe", "info", cli_source],
+                [sys.executable, "-B", "-m", "floe2", "info", cli_source],
                 cwd=str(ROOT), env=child_env, check=True,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, timeout=10)
             self.assertIn("top cell", completed.stdout)
 
             completed = subprocess.run(
-                [sys.executable, "-B", "-m", "floe", "probe", cli_source],
+                [sys.executable, "-B", "-m", "floe2", "probe", cli_source],
                 cwd=str(ROOT), env=child_env, check=True,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, timeout=30)
@@ -636,7 +638,7 @@ class RealDaemonIntegrationTests(unittest.TestCase):
 
             output = os.path.join(directory, "CLI output with spaces.oas")
             completed = subprocess.run(
-                [sys.executable, "-B", "-m", "floe", "clip", cli_source,
+                [sys.executable, "-B", "-m", "floe2", "clip", cli_source,
                  "--bbox", bbox_um, "--layers", layer_arg,
                  "--cell-name", "CLI 한글", "--out", output],
                 cwd=str(ROOT), env=child_env, check=True,
@@ -654,7 +656,7 @@ class RealDaemonIntegrationTests(unittest.TestCase):
             png_path = os.path.join(
                 directory, "CLI rendered labels with spaces.png")
             completed = subprocess.run(
-                [sys.executable, "-B", "-m", "floe", "render",
+                [sys.executable, "-B", "-m", "floe2", "render",
                  cli_source, "--bbox", bbox_um, "--layers", layer_arg,
                  "--px", "257", "--depth", "999", "--labels",
                  "--label-font-px", "19", "--out", png_path],

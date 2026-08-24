@@ -831,11 +831,14 @@ def make_render_worker(cache, stream_kb=None, stream_target_ms=500,
                        debug=False):
     """Create the selected render backend without changing GUI callers.
 
-    Rust is the default.  KLayout remains an explicit rollback backend and its
-    modules stay unloaded unless that backend is selected and started.
+    The stable floe shell defaults to KLayout.  The floe2 shell is Rust-only;
+    an explicit environment override remains available to floe A/B runs.
+    Backend-specific modules stay unloaded until the selected worker starts.
     """
+    from .product import default_renderer
     backend = os.environ.get(
-        "FLOE_RENDERER", "rust").strip().lower() or "rust"
+        "FLOE_RENDERER", default_renderer()).strip().lower()
+    backend = backend or default_renderer()
     if backend == "klayout":
         worker_type = RenderWorker
     elif backend == "rust":

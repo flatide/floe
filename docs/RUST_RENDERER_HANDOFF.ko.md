@@ -24,8 +24,9 @@ fixture는 `docs/RENDERER-TESTS.ko.md`가 canonical source다.
 
 - 목표 화면은 Calibre와 실질적으로 동일한 CPU 화면이다. GPU는 현재 범위가
   아니고 속도보다 geometry·표시 정확도가 우선이다.
-- KLayout은 개발 oracle과 명시적 rollback에만 남긴다. 기본 renderer는 Rust이며
-  rollback은 `FLOE_RENDERER=klayout`이다. 알 수 없는 backend는 hard error다.
+- Rust renderer 제품은 같은 저장소의 `floe2`이며 KLayout backend를 거부한다.
+  안정판 `floe`는 KLayout을 기본으로 유지하고 `FLOE_RENDERER=rust` 명시 A/B만
+  허용한다. 두 제품은 같은 `rust/`와 `<src>.floe` cache를 공유한다.
 - abstract는 KLayout 고유 기능이라 Rust 범위에서 제외한다. Rust worker는
   `supports_abstract = False`이고 GUI 메뉴/`a` 동작도 비활성화된다.
 - OASIS CIRCLE(record 27)은 인덱싱 시 결정적 내접 64각형 `PolyRec`으로 바뀐다.
@@ -64,9 +65,10 @@ fixture는 `docs/RENDERER-TESTS.ko.md`가 canonical source다.
 - `view`, `render`, `probe`, `info`, `clip`의 KLayout-free 시작 경로
 - GTK를 막지 않는 비동기 cold open, SIGINT 격리, open/clip timeout, 소비한
   progressive PNG/style TSV의 즉시 정리
-- headless `floe render`의 solid archival fill, settled frame 대기,
+- headless `floe2 render`의 solid archival fill, settled frame 대기,
   `--labels --label-font-px`, `--frames --depth`, fsync + atomic PNG replace
-- Rust가 기본 backend. KLayout은 명시적 rollback이며 legacy 모듈은 lazy import
+- `floe2`가 Rust-only backend를 소유하고 `floe`는 KLayout 기본 안정판. 공통
+  backend factory의 legacy 모듈은 계속 lazy import
 
 최근 연속 커밋:
 

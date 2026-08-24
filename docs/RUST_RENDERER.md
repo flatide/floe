@@ -113,7 +113,7 @@ quit
 
 `font_px` is an integer screen-pixel size in `6..96`. The Python Rust worker
 passes it on every render request, so `View > label size... (Rust renderer)` or
-`floe view --label-font-px PX` changes size live without restarting the daemon
+`floe2 view --label-font-px PX` changes size live without restarting the daemon
 or rebuilding the index. The menu item is disabled for backends that do not
 advertise this capability. `FLOE_RUST_LABEL_PX` remains only the headless
 adapter fallback when a request omits the field.
@@ -218,30 +218,30 @@ former band renderer byte-for-byte. With 128px tiles, five-run median
 
 See [RUST_RENDERER_PLAN.ko.md](RUST_RENDERER_PLAN.ko.md) for scope and gates.
 
-## floe backend selection
+## floe2 product boundary
 
-`floe` now uses Rust as its default backend and keeps KLayout as an explicit
-rollback. Its GUI,
-DRC snapshot renderer, and headless render probe now construct workers through
-one lazy backend factory. No backend variable is needed for normal use:
+`floe2` is the Rust-only product shell. The stable `floe` shell defaults to
+KLayout, while both products share this renderer implementation, the canonical
+`rust/` workspace, and the same VFS cache. Their GUI instance sockets are
+separate, so both screens can run on one display for comparison.
 
 ```sh
-.venv/bin/python -m floe view --multi design.oas
+.venv/bin/python -m floe2 view --multi design.oas
 ```
 
-Set `FLOE_RENDERER=klayout` for the rollback renderer. `FLOE_RENDERER=rust`
-remains accepted for explicit A/B scripts.
+`floe2` rejects `FLOE_RENDERER=klayout` instead of falling back. Stable `floe`
+accepts `FLOE_RENDERER=rust` only for explicit A/B scripts.
 An unknown backend, malformed `MODULE:TYPE`, failed import, or non-callable
 worker is a hard error; the hook never silently falls back and contaminates an
 A/B run.
 
-With the default Rust backend, importing the cache reader, backend factory, and GTK
+With the floe2 Rust backend, importing the cache reader, backend factory, and GTK
 shell no longer imports `klayout.db`, `floe.render`, or `floe.viewport`. Shared
 frame-layer/live-cap policy lives in a pure-Python module, while the legacy
 database and renderer modules load only inside the KLayout worker. Therefore
-`view`, `render`, `probe`, `info`, and Rust `clip` can start on a KLayout-free
+floe2 `view`, `render`, `probe`, `info`, and `clip` can start on a KLayout-free
 installation; the Python indexer and explicitly selected legacy commands still
-require KLayout.
+require KLayout and remain in stable floe only.
 The validation suite enforces this with a fresh subprocess whose import hook
 rejects every `klayout` module.
 

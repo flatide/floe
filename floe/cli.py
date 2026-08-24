@@ -1,16 +1,35 @@
 """floe command line interface."""
 
 import argparse
-import functools
 import json
 import os
 import re
 import sys
 import time
 
-print = functools.partial(print, flush=True)
+_builtin_print = print
 
 from . import __version__
+from .product import default_renderer, name as product_name
+
+APP = product_name()
+
+
+def _brand(text):
+    """Translate shared user-facing prefixes without renaming binaries."""
+    if APP == "floe" or not isinstance(text, str):
+        return text
+    return (text.replace("[floe]", "[%s]" % APP)
+            .replace("floe:", "%s:" % APP)
+            .replace("floe index", "%s index" % APP)
+            .replace("floe view", "%s view" % APP))
+
+
+def print(*values, **kwargs):
+    if values:
+        values = (_brand(values[0]),) + values[1:]
+    kwargs.setdefault("flush", True)
+    return _builtin_print(*values, **kwargs)
 
 # NOTE: klayout / floe.cache are imported inside the commands that need
 # them - `view` must be able to forward to a running instance without
@@ -19,7 +38,8 @@ from . import __version__
 
 def _renderer_backend():
     backend = os.environ.get(
-        "FLOE_RENDERER", "rust").strip().lower() or "rust"
+        "FLOE_RENDERER", default_renderer()).strip().lower()
+    backend = backend or default_renderer()
     if backend not in ("rust", "klayout"):
         raise SystemExit(
             "FLOE_RENDERER must be klayout or rust, got %r" % backend)
@@ -1178,7 +1198,17 @@ def cmd_view(args):
                render_debug=args.render_debug)
 
 
-def main(argv=None):
+def main(argv=None, *, prog=None, rust_only=None):
+    prog = prog or APP
+    rust_only = (prog == "floe2") if rust_only is None else bool(rust_only)
+    if rust_only:
+        backend = os.environ.get(
+            "FLOE_RENDERER", "rust").strip().lower() or "rust"
+        if backend != "rust":
+            raise SystemExit(
+                "%s is Rust-only; FLOE_RENDERER=%r is not supported" %
+                (prog, backend))
+        os.environ["FLOE_RENDERER"] = "rust"
     if argv is None:
         argv = sys.argv[1:]
     if not argv:
@@ -1186,9 +1216,11 @@ def main(argv=None):
         # the empty viewer (or raise the running instance)
         argv = ["view"]
     ap = argparse.ArgumentParser(
-        prog="floe",
-        description="fast viewer/clipper for large OASIS files "
-                    "(spatial tile cache)")
+        prog=prog,
+        description=("Rust-only viewer/clipper for large OASIS files "
+                     "(shared VFS spatial cache)" if rust_only else
+                     "stable KLayout viewer/clipper for large OASIS files "
+                     "(shared VFS spatial cache)"))
     ap.add_argument("--version", action="version", version=__version__)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -1292,6 +1324,12 @@ def main(argv=None):
                         "repetition arrays compact - editable "
                         "materializes every member (~46 B each; a 10 GB "
                         "array-heavy file was observed at 400 GB RSS)")
+    if rust_only:
+        # Keep parsing the old flags so floe2 can issue an intentional product
+        # boundary error, but remove the whole legacy group from its help.
+        for action in legacy._group_actions:
+            action.help = argparse.SUPPRESS
+        p._action_groups.remove(legacy)
     p.set_defaults(fn=cmd_index)
 
     p = sub.add_parser("info", help="show cache/layout summary")
@@ -1349,10 +1387,12 @@ def main(argv=None):
     p.add_argument("--layers", default=None)
     p.add_argument("--out", default="clip.oas")
     p.add_argument("--cell-name", default="FLOE_CLIP")
-    p.add_argument("--exact", action="store_true",
-                   help="KLayout backend: clip from the original file "
-                        "(slow); Rust backend clips the exact VFS plan "
-                        "regardless")
+    p.add_argument(
+        "--exact", action="store_true",
+        help=("clip the exact VFS plan (already the floe2 default)"
+              if rust_only else
+              "KLayout backend: clip from the original file (slow); "
+              "Rust backend clips the exact VFS plan regardless"))
     p.set_defaults(fn=cmd_clip)
 
     p = sub.add_parser("probe", help="test the viewer's render service "
@@ -1361,21 +1401,24 @@ def main(argv=None):
     p.add_argument("src")
     p.add_argument("--layout-mode", default=None,
                    choices=("viewer", "editable"),
-                   help="tile read mode (default: per-cache heuristic)")
+                   help=(argparse.SUPPRESS if rust_only else
+                         "tile read mode (default: per-cache heuristic)"))
     p.set_defaults(fn=cmd_probe)
 
-    p = sub.add_parser("profile", help="emit a structure-only profile "
-                                       "(counts/sizes only, no geometry) "
-                                       "for building a lookalike sample")
-    p.add_argument("src")
-    p.add_argument("--out", default=None, help="write JSON here "
-                                               "(default: stdout)")
-    p.add_argument("--sample-tiles", type=int, default=4,
-                   help="tile files to census for instance/shape-type "
-                        "stats (default 4; 0 = meta only)")
-    p.add_argument("--anon", action="store_true",
-                   help="replace layer names with L<num>_<dt>")
-    p.set_defaults(fn=cmd_profile)
+    if not rust_only:
+        p = sub.add_parser(
+            "profile", help="emit a structure-only profile "
+                            "(counts/sizes only, no geometry) "
+                            "for building a lookalike sample")
+        p.add_argument("src")
+        p.add_argument("--out", default=None, help="write JSON here "
+                                                   "(default: stdout)")
+        p.add_argument("--sample-tiles", type=int, default=4,
+                       help="tile files to census for instance/shape-type "
+                            "stats (default 4; 0 = meta only)")
+        p.add_argument("--anon", action="store_true",
+                       help="replace layer names with L<num>_<dt>")
+        p.set_defaults(fn=cmd_profile)
 
     p = sub.add_parser("drc", help="summarize a Calibre ASCII DRC "
                                    "results database (.db; a fresh "
@@ -1500,8 +1543,9 @@ def main(argv=None):
                         "in an independent instance")
     p.add_argument("--layout-mode", default=None,
                    choices=("viewer", "editable"),
-                   help="tile read mode (default: per-cache heuristic, "
-                        "see 'floe info'; new instance only)")
+                   help=(argparse.SUPPRESS if rust_only else
+                         "tile read mode (default: per-cache heuristic, "
+                         "see 'floe info'; new instance only)"))
     p.add_argument("--hairline", type=float, default=None, metavar="F",
                    help="hairline factor: frame min-side cut = F x cut "
                         "(default: daemon 0.5; 0 disables the hairline "
@@ -1518,7 +1562,22 @@ def main(argv=None):
     p.set_defaults(fn=cmd_view)
 
     args = ap.parse_args(argv)
-    args.fn(args)
+    if rust_only and args.cmd == "index":
+        legacy_flags = _legacy_index_options(args)
+        if args.legacy or legacy_flags:
+            raise SystemExit(
+                "%s: Python/KLayout legacy indexing belongs to floe; "
+                "floe2 accepts Rust VFS options only" % prog)
+    if rust_only and getattr(args, "layout_mode", None) is not None:
+        raise SystemExit(
+            "%s: --layout-mode is a KLayout worker option and is not "
+            "supported" % prog)
+    try:
+        return args.fn(args)
+    except SystemExit as exc:
+        if isinstance(exc.code, str):
+            raise SystemExit(_brand(exc.code)) from None
+        raise
 
 
 if __name__ == "__main__":

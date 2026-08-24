@@ -1,10 +1,11 @@
-# floe Rust renderer 구현 계획
+# floe2 Rust renderer 구현 계획
 
 상태: M1 완료, M2 정확도·결정성 vertical slice 완료, M3 paint/frame vertical slice 완료,
 M4 text/label vertical slice 완료, M5 daemon/session vertical slice 완료,
 M5 density coverage 완료, M7 pick/snap 완료, M8 exact clip vertical slice 완료
-목표: 기존 `floe`의 Rust 인덱서·VFS 플래너는 유지하고, KLayout의 런타임
-렌더 책임을 결정적 멀티코어 CPU 렌더러로 대체한다.
+목표: 공통 Rust 인덱서·VFS 플래너를 유지하고, `floe2`에서 KLayout의 런타임
+렌더 책임을 결정적 멀티코어 CPU 렌더러로 대체한다. 안정판 `floe`는 KLayout
+기본 제품으로 유지하며 같은 cache를 이용한 화면 A/B 기준이 된다.
 
 ### 현재 구현 상태 (2026-08-24)
 
@@ -19,9 +20,9 @@ M5 density coverage 완료, M7 pick/snap 완료, M8 exact clip vertical slice �
 - 완료: CLI 실캐시 smoke test와 부모 `floe-index plan` 결과 대조
 - 완료: daemon `open/style/render/cancel/info/quit` line protocol, 영속 cache/LRU와
   style epoch, 요청별 jobs/page budget, DBU viewport, exact-mode 충돌 검증
-- 완료: 부모 Python의 GUI/DRC snapshot/headless probe가 공통
-  `make_render_worker` factory를 사용. 기본은 in-tree Rust adapter이고
-  `FLOE_RENDERER=klayout`일 때만 rollback worker를 선택.
+- 완료: 공통 Python GUI/DRC snapshot/headless probe가 `make_render_worker`
+  factory를 사용. `floe2`는 in-tree Rust adapter만 허용하고 안정판 `floe`는
+  KLayout을 기본으로 하되 `FLOE_RENDERER=rust` 명시 A/B를 허용.
   `FLOE_RUST_WORKER=MODULE:TYPE`은 개발용 override로만 유지
 - 완료: in-tree `RustRenderWorker` vertical slice. 부모 job/result queue 계약을
   persistent `floe-renderd` protocol로 변환하고 progressive frame,
@@ -295,8 +296,8 @@ floe-renderd (Rust)
 
 `floe-renderd`는 planner와 renderer를 같은 프로세스에서 소유한다. 따라서 KLayout을
 위해 수행하던 delta OASIS 저작, `Layout.read`, 이름 바인딩, WC cell 삭제/재생성은
-제품 렌더 경로에서 사라진다. 기존 `vfsd`와 delta 경로는 A/B oracle 및 rollback용으로
-cutover가 끝날 때까지 유지한다.
+`floe2` 렌더 경로에서 사라진다. 기존 `vfsd`와 delta 경로는 안정판 `floe`의
+KLayout 렌더와 A/B oracle용으로 유지한다.
 
 게시된 각 progressive round의 불변 `FrameScene`은 query snapshot으로도 공유한다.
 stdin 제어 경로가 이를 짧게 `Arc` clone한 뒤 lock 없이 pick/snap을 수행하므로,
@@ -748,7 +749,8 @@ Rust 실행·goto pan/zoom·frames/labels 상태 검증은 통과했다. 독립 
 - 사용자 승인된 실칩 화면에서 정확도 gate 전부 통과
 - 대표 render-bound 화면에서 `raster_us` 기준 확정 scaling gate 통과
 - peak RSS가 설정 budget + framebuffer/tile scratch 상한 이내
-- 완료: Rust를 기본으로 전환하고 `FLOE_RENDERER=klayout` rollback 유지
+- 완료(당시): 통합 `floe`에서 Rust 기본 전환 gate 통과
+- 완료(제품 분리): Rust 기본 계약을 `floe2`로 이동하고 `floe`는 KLayout 기본 복원
 
 ### M7 — 상호작용과 KLayout 런타임 제거
 
@@ -765,9 +767,9 @@ Rust 실행·goto pan/zoom·frames/labels 상태 검증은 통과했다. 독립 
 - 완료: `cache.py`의 `klayout.db`를 실제 legacy 함수 호출까지 지연하고,
   `service.py`의 KLayout renderer/viewport import도 legacy worker 내부로 격리.
   frame layer/live-cap 계산은 KLayout-free `view_policy.py`로 분리
-- 완료: 기본 portable bundle에서 KLayout wheel/import를 제거하고 NumPy/Pillow,
-  GTK/PyGObject와 두 Rust binary를 유지. `FLOE_PORTABLE_KLAYOUT=1`만 별도
-  `-klayout` rollback bundle을 생성
+- 완료: 기본 `floe2` portable에서 KLayout wheel/import를 제거하고 NumPy/Pillow,
+  GTK/PyGObject와 두 Rust binary를 유지. `FLOE_PORTABLE_KLAYOUT=1`은 별도
+  안정판 `floe` KLayout bundle을 생성
 - 완료: `floe index`를 Rust VFS subprocess로 전환하고 cache reuse/명시적
   `--force`, Rust 옵션, `--legacy` 경계를 고정
 
@@ -775,12 +777,12 @@ Rust 실행·goto pan/zoom·frames/labels 상태 검증은 통과했다. 독립 
 
 - 완료(vertical slice): Rust scene/unit fixture와 부모 adapter wire schema
 - 완료(integration): 동일 VFS 작업 집합의 KLayout pick/snap oracle 결과 동치
-- 완료: `view`, `render`, `probe`, `info`, Rust `clip` import/worker 선택
+- 완료: `floe2 view`, `render`, `probe`, `info`, `clip` import/worker 선택
   clean-environment selfcheck. 실제 portable bundle 검증은 후속
 - 완료: Rust worker는 abstract capability=false, GUI 메뉴/`a` 동작 비활성화.
-  명시적 KLayout rollback worker에서만 abstract capability=true
+  안정판 `floe` KLayout worker에서만 abstract capability=true
 - `rg '^import klayout' floe/` 결과가 dev/legacy 경로에만 존재
-- KLayout은 개발 oracle로만 남음
+- KLayout은 안정판 `floe`, 개발 oracle과 legacy 도구에만 남음
 
 ## 12. 다음 착수 작업 목록
 
@@ -844,17 +846,17 @@ KLayout oracle 비교는 renderer 개발 기간에만 사용한다. Rust 내부 
 | text/font host 차이 | 라이선스 확인된 font를 bundle, OS font lookup 금지 |
 | pick tie/source 순서 drift | canonical hull, OVM layer 순회, stable source ordinal 회귀 고정 |
 | parent Rust API drift | renderer adapter 한 crate로 격리, parser/planner 복사 금지 |
-| Python integration rollback 어려움 | `FLOE_RENDERER` A/B와 기존 KLayout 경로 유지 후 cutover |
+| Python integration rollback 어려움 | `floe`/`floe2` 동시 실행과 공유 cache로 A/B 유지 |
 
 ## 15. 완료 정의
 
 다음을 모두 만족할 때 KLayout renderer 대체가 완료된 것으로 본다.
 
-- Rust renderer가 기본 경로다.
+- Rust renderer가 `floe2`의 유일한 기본 경로다.
 - exact geometry, pattern/frame, determinism, cancellation gate가 모두 통과한다.
 - 실칩 1/4/8 worker scaling과 RSS gate가 통과한다.
 - GUI의 render/depth/layer/style 조작에 기능 회귀가 없다.
 - `view`, headless `render`, `probe`가 KLayout 미설치 번들에서 동작한다.
 - pick/snap을 Rust scene이 제공한다.
 - GUI clip이 Rust exact OASIS writer로 동작한다.
-- KLayout은 개발 oracle과 레거시 도구에서만 사용한다.
+- KLayout은 안정판 `floe`, 개발 oracle과 레거시 도구에서만 사용한다.

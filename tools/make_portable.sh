@@ -1,14 +1,15 @@
 #!/bin/bash
-# Build a self-contained floe runtime bundle for hosts without PyGObject.
+# Build a self-contained floe2/floe runtime bundle for hosts without PyGObject.
 # Adapted from flateyes' make_portable.sh - the GTK3 stack is pulled from
 # conda-forge (relocatable) exactly as flateyes does; floe additionally
-# needs NumPy + Pillow wheels. KLayout is absent by default;
-# FLOE_PORTABLE_KLAYOUT=1 builds a separate rollback/oracle bundle.
+# needs NumPy + Pillow wheels. The default product is Rust-only floe2;
+# FLOE_PORTABLE_KLAYOUT=1 keeps building the stable KLayout floe bundle.
 #
-#   ./make_portable.sh [output-dir]     # -> floe-portable-<ver>-<date>.tar.gz
+#   ./make_portable.sh [output-dir]     # -> floe2-portable-<ver>-<date>.tar.gz
 #
 # The bundle holds python + PyGObject + GTK3 (conda-forge) + NumPy/Pillow +
-# the floe package and matched Rust binaries, plus a launcher that builds
+# the shared floe implementation, floe2 shell, and matched Rust binaries,
+# plus a launcher that builds
 # the machine-local GTK caches on first run. Target: x86_64 Linux; verify
 # computes the exact glibc floor and enforces the configured ceiling.
 set -euo pipefail
@@ -28,13 +29,35 @@ case "$FLOE_PORTABLE_KLAYOUT" in
     0 | 1) ;;
     *) echo "FLOE_PORTABLE_KLAYOUT must be 0 or 1"; exit 1 ;;
 esac
+FLOE_PORTABLE_PRODUCT=${FLOE_PORTABLE_PRODUCT:-}
+if [ -z "$FLOE_PORTABLE_PRODUCT" ]; then
+    if [ "$FLOE_PORTABLE_KLAYOUT" = 1 ]; then
+        FLOE_PORTABLE_PRODUCT=floe
+    else
+        FLOE_PORTABLE_PRODUCT=floe2
+    fi
+fi
+case "$FLOE_PORTABLE_PRODUCT" in
+    floe)
+        # The stable product owns the KLayout renderer. Keep the historical
+        # FLOE_PORTABLE_KLAYOUT=1 spelling as a compatible product selector.
+        FLOE_PORTABLE_KLAYOUT=1
+        ;;
+    floe2)
+        if [ "$FLOE_PORTABLE_KLAYOUT" = 1 ]; then
+            echo "floe2 is Rust-only; do not combine FLOE_PORTABLE_PRODUCT=floe2 with KLayout"
+            exit 1
+        fi
+        ;;
+    *) echo "FLOE_PORTABLE_PRODUCT must be floe or floe2"; exit 1 ;;
+esac
 VERSION=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "$REPO/floe/__init__.py")
 STAMP=$(date +%Y%m%d)
 FLAVOR=""
 if [ "$FLOE_PORTABLE_KLAYOUT" = 1 ]; then
     FLAVOR="-klayout"
 fi
-NAME="floe-portable-${VERSION}-${STAMP}${FLAVOR}"
+NAME="${FLOE_PORTABLE_PRODUCT}-portable-${VERSION}-${STAMP}${FLAVOR}"
 
 case "$(uname -s)-$(uname -m)" in
     Linux-x86_64) : ;;
@@ -95,10 +118,12 @@ if [ "$FLOE_PORTABLE_KLAYOUT" = 1 ]; then
     "$PYBIN" -c 'import klayout; print("== klayout rollback", klayout.__version__)'
 fi
 
-# -- 4. drop the floe package into site-packages ------------------------
+# -- 4. drop the shared implementation + product shell into site-packages
 SITE="$("$PYBIN" -c 'import site;print(site.getsitepackages()[0])')"
 rm -rf "$SITE/floe"; cp -r "$REPO/floe" "$SITE/floe"
+rm -rf "$SITE/floe2"; cp -r "$REPO/floe2" "$SITE/floe2"
 find "$SITE/floe" -name '__pycache__' -type d -prune -exec rm -rf {} +
+find "$SITE/floe2" -name '__pycache__' -type d -prune -exec rm -rf {} +
 
 # -- 5. slim: build-time payloads never touched at runtime --------------
 cd "$WORK/runtime"
@@ -191,6 +216,7 @@ for why, p in bad:
 must = ["lib/libgtk-3.so.0", "lib/girepository-1.0/Gtk-3.0.typelib",
         "lib/python%s/site-packages/gi/__init__.py" % pyver,
         "lib/python%s/site-packages/floe/cli.py" % pyver,
+        "lib/python%s/site-packages/floe2/cli.py" % pyver,
         "bin/floe-index",   # vfs/index runtime
         "bin/floe-renderd", # default multicore CPU renderer
         "share/glib-2.0/schemas",
@@ -228,19 +254,19 @@ FLOOR="$(cat "$WORK/floor.txt" 2>/dev/null || echo 2.28)"
 echo "== bundle runs on glibc >= $FLOOR"
 
 # -- 7. assemble the bundle ---------------------------------------------
-B="$WORK/floe-portable"
+B="$WORK/${FLOE_PORTABLE_PRODUCT}-portable"
 rm -rf "$B"; mkdir -p "$B"
 mv "$WORK/runtime" "$B/runtime"
 
-cat > "$B/floe" <<EOF
+cat > "$B/$FLOE_PORTABLE_PRODUCT" <<EOF
 #!/bin/sh
-# floe portable launcher: self-contained Python + GTK3 + Rust runtime.
-# KLayout is present only in an explicitly requested rollback bundle.
+# ${FLOE_PORTABLE_PRODUCT} portable launcher: self-contained Python + GTK3.
+# floe2 is Rust-only; the stable floe product includes KLayout.
 # Nothing is installed; the bundle runs from wherever it was untarred.
 HERE=\$(CDPATH= cd -- "\$(dirname -- "\$0")" && pwd)
 RT="\$HERE/runtime"
-CACHE="\${XDG_CACHE_HOME:-\$HOME/.cache}/floe-rt"
-mkdir -p "\$CACHE/schemas" 2>/dev/null || CACHE="\${TMPDIR:-/tmp}/floe-rt.\$(id -u)"
+CACHE="\${XDG_CACHE_HOME:-\$HOME/.cache}/${FLOE_PORTABLE_PRODUCT}-rt"
+mkdir -p "\$CACHE/schemas" 2>/dev/null || CACHE="\${TMPDIR:-/tmp}/${FLOE_PORTABLE_PRODUCT}-rt.\$(id -u)"
 mkdir -p "\$CACHE/schemas" 2>/dev/null
 
 # First run (or after the bundle moved/updated): build the machine-local
@@ -283,7 +309,7 @@ if [ -n "\${FLOE_XQUARTZ:-}" ]; then
     CAIRO_DEBUG=xrender-version=-1
     export CAIRO_DEBUG
 fi
-exec "\$RT/bin/python3" -m floe "\$@"
+exec "\$RT/bin/python3" -m ${FLOE_PORTABLE_PRODUCT} "\$@"
 EOF
 
 cat > "$B/selfcheck" <<EOF
@@ -329,6 +355,8 @@ elif importlib.util.find_spec("klayout") is not None:
 else:
     print("klayout:      not bundled (expected; Rust default)")
 import floe; print("floe:         %s OK" % floe.__version__)
+import ${FLOE_PORTABLE_PRODUCT}
+print("product:      ${FLOE_PORTABLE_PRODUCT} %s OK" % ${FLOE_PORTABLE_PRODUCT}.__version__)
 PY
 rm -f "\$CACHE"
 if [ -x "\$RT/bin/floe-index" ]; then
@@ -352,7 +380,7 @@ if [ -x "\$RT/bin/floe-renderd" ]; then
 else
     echo "floe-renderd: MISSING - FLOE_RENDERER=rust unavailable"
 fi
-echo "display:      DISPLAY=\${DISPLAY:-<unset>}  (open test: ./floe view <file.oas>)"
+echo "display:      DISPLAY=\${DISPLAY:-<unset>}  (open test: ./${FLOE_PORTABLE_PRODUCT} view <file.oas>)"
 EOF
 
 cat > "$B/fonts.conf" <<'EOF'
@@ -414,31 +442,32 @@ gtk-xft-dpi = 98304
 EOF
 
 cat > "$B/README-PORTABLE.txt" <<EOF
-floe 포터블 번들 (floe ${VERSION}, ${STAMP} 빌드)
+${FLOE_PORTABLE_PRODUCT} 포터블 번들 (${FLOE_PORTABLE_PRODUCT} ${VERSION}, ${STAMP} 빌드)
 ====================
-PyGObject(python3-gobject)가 없는 호스트에서 floe를 실행하기 위한 자체
-포함 런타임. Python + PyGObject + GTK3 + NumPy/Pillow + floe 패키지 +
+PyGObject(python3-gobject)가 없는 호스트에서 ${FLOE_PORTABLE_PRODUCT}를 실행하기 위한 자체
+포함 런타임. Python + PyGObject + GTK3 + NumPy/Pillow + floe/floe2 패키지 +
 floe-index(러스트 인덱서/VFS daemon)와 floe-renderd(기본 CPU renderer)가
 runtime/bin/ 안에 들어
 있으며 시스템에는 아무것도 설치·변경하지 않는다. 시스템에서
 쓰는 것은 X 디스플레이와 (있다면) 시스템 폰트뿐.
 
-기본 번들은 KLayout을 포함하지 않는다. KLayout rollback/oracle이 필요한 별도
-번들만 FLOE_PORTABLE_KLAYOUT=1로 빌드한다.
+기본 floe2 번들은 KLayout을 포함하지 않는다. 안정판 floe/KLayout 번들은
+FLOE_PORTABLE_KLAYOUT=1로 별도 빌드한다.
 
 요구: x86_64 리눅스, glibc ${FLOOR}+, X 디스플레이.
 
 설치/실행:
     tar xzf ${NAME}.tar.gz -C /opt        # 위치 자유
-    /opt/floe-portable/selfcheck          # 창 없이 스택 검증 (모두 OK 확인)
-    /opt/floe-portable/floe view /path/to/chip.oas
-    /opt/floe-portable/floe index /path/to/chip.oas   # CLI도 동일
+    /opt/${FLOE_PORTABLE_PRODUCT}-portable/selfcheck
+    /opt/${FLOE_PORTABLE_PRODUCT}-portable/${FLOE_PORTABLE_PRODUCT} view /path/to/chip.oas
+    /opt/${FLOE_PORTABLE_PRODUCT}-portable/${FLOE_PORTABLE_PRODUCT} index /path/to/chip.oas
 
-편의상 링크: ln -s /opt/floe-portable/floe /usr/local/bin/floe
+편의상 링크: ln -s /opt/${FLOE_PORTABLE_PRODUCT}-portable/${FLOE_PORTABLE_PRODUCT} /usr/local/bin/${FLOE_PORTABLE_PRODUCT}
 
-floe 코드 업데이트: 새 floe/ 패키지를
+코드 업데이트: 새 floe/와 floe2/ 패키지를
     runtime/lib/python*/site-packages/floe
-에 덮어쓰고, 같은 체크아웃에서 빌드한 두 바이너리를
+    runtime/lib/python*/site-packages/floe2
+에 각각 덮어쓰고, 같은 체크아웃에서 빌드한 두 바이너리를
     runtime/bin/floe-index
     runtime/bin/floe-renderd
 로 함께 교체한다 (chmod +x). 파이썬 패키지와 러스트 바이너리는
@@ -447,18 +476,18 @@ floe 코드 업데이트: 새 floe/ 패키지를
 문제 해결:
 - "GLIBC_x.xx not found": 호스트 glibc가 ${FLOOR} 미만 → 사용 불가 (selfcheck 확인)
 - 코드 3 종료: DISPLAY 미설정/접속 불가
-- 창은 뜨는데 회색/렌더 오류: ~/.cache/floe-rt 삭제 후 재실행 (캐시 재생성)
+- 창은 뜨는데 회색/렌더 오류: ~/.cache/${FLOE_PORTABLE_PRODUCT}-rt 삭제 후 재실행
 - 뷰어는 열리는데 렌더가 멈춤·인덱싱이 안 됨: runtime/bin/floe-index
   누락/실행 불가 (selfcheck의 floe-index 줄 확인)
-- `FLOE_RENDERER=rust` 시작 오류: runtime/bin/floe-renderd 누락/실행 불가
+- floe2 시작 오류: runtime/bin/floe-renderd 누락/실행 불가
 EOF
 
-chmod +x "$B/floe" "$B/selfcheck"
-sh -n "$B/floe"; sh -n "$B/selfcheck"
+chmod +x "$B/$FLOE_PORTABLE_PRODUCT" "$B/selfcheck"
+sh -n "$B/$FLOE_PORTABLE_PRODUCT"; sh -n "$B/selfcheck"
 
 # -- 8. pack ------------------------------------------------------------
 cd "$WORK"
-COPYFILE_DISABLE=1 tar -czf "$NAME.tar.gz" floe-portable
+COPYFILE_DISABLE=1 tar -czf "$NAME.tar.gz" "${FLOE_PORTABLE_PRODUCT}-portable"
 mkdir -p "$OUT_DIR"; mv "$NAME.tar.gz" "$OUT_DIR/"
 cd "$OUT_DIR"
 ( command -v sha256sum >/dev/null && sha256sum "$NAME.tar.gz" ) \
