@@ -138,6 +138,12 @@ KLayout indexer이므로 KLayout-free portable에서 그대로 호출할 수 없
 - 완료: adapter가 정확한 `plan/read/decode/scene/raster/png`, cache hit/miss,
   decoded resident, decode worker/tile 수를 결과 schema에 보존한다. 하네스는 daemon
   peak RSS와 jobs=1 대비 total/raster speedup까지 privacy-safe JSON으로 기록한다.
+- 완료(milestone calibration): 이미 index된 1.4GB 합성 fixture에서 1200x800 전체
+  trace와 jobs 1/4/8/16을 완주했다. 가장 무거운 hotspot의 raster는
+  36.0/10.2/7.3/6.8ms(1 대비 1.00/3.54/4.95/5.31배), total은
+  49/20/17/17ms였다. 같은 cache의 native GTK smoke도 Rust worker open과 첫 depth-0
+  frame(24ms)을 표시한 뒤 정상 종료했다. 이 fixture는 analytic repetition/frame
+  비중이 높아 decoded resident가 0MB였으므로 실칩 메모리 gate를 대신하지 않는다.
 - 남음: 사용자 실칩에서 대표 hotspot/layer를 지정한 `--runs 3` 측정과 native GTK
   장기 `floe`/`floe2` A/B. 기존 mid-zoom 첫 방문 9~10초가 어느 단계인지 판정하고,
   Rust 경로에 KLayout 단일 Layout 등록 단계가 없음을 운영 기록으로 확정한다.
