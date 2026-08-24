@@ -887,6 +887,11 @@ class Viewer:
         self._did_fit = False
         self.worker = None
         self._worker_starting = False
+        # A layout switch after the window is allocated needs a fit once the
+        # replacement worker opens.  Initial CLI --goto does not: allocation
+        # has already applied that exact view, and a late async open callback
+        # must never overwrite it with fit-to-die.
+        self._fit_after_worker_start = False
         self._layer_rows = {}
         self._selected_layers = set()
         self._layer_select_anchor = None
@@ -1433,6 +1438,11 @@ class Viewer:
 
     # ---- cache binding / instance requests --------------------------------
     def _apply_cache(self, cache):
+        # Initial construction is fitted/goto'd by _on_allocate.  An in-place
+        # layout load happens after allocation and needs a deferred fit unless
+        # its caller immediately supplies a goto (goto() cancels this flag).
+        self._fit_after_worker_start = bool(cache is not None and
+                                            self._did_fit)
         self.cache = cache
         if cache is None:
             # EMPTY START (user call 2026-08-22): the viewer opens
@@ -1576,10 +1586,18 @@ class Viewer:
             return False
         self._sync_label_font_capability()
         self._sync_abstract_capability()
-        if self._did_fit:
-            # window already sized (layout switch, or the FIRST load into an
-            # empty start): frame the new die after the cold open completes.
+        if self._fit_after_worker_start:
+            # The window was already sized before this layout was attached.
+            # Do not key this off _did_fit alone: on a cold initial open GTK
+            # can allocate first, apply --goto and then finish the Rust open;
+            # an unconditional fit here used to erase that requested view.
+            self._fit_after_worker_start = False
             self.fit()
+        elif self._did_fit:
+            # Allocation (and possibly CLI --goto) happened while the Rust
+            # cache was opening. redraw() deliberately submitted nothing in
+            # that state, so issue the preserved view now that it can run.
+            self.redraw(immediate=True)
         return False
 
     def _build_layer_panel(self):
@@ -2624,6 +2642,7 @@ class Viewer:
     def fit(self):
         if self.cache is None:
             return
+        self._fit_after_worker_start = False
         bb = self.meta["bbox"]
         self.cx = (bb[0] + bb[2]) / 2
         self.cy = (bb[1] + bb[3]) / 2
@@ -3591,6 +3610,9 @@ class Viewer:
         """Center the view on (x, y) um; window is the resulting
         view width in um (None/0 = keep the current zoom). The old X
         marker is gone (user call 2026-08-09)."""
+        # A user/CLI target always wins over the deferred auto-fit used when a
+        # new layout is attached to an already allocated window.
+        self._fit_after_worker_start = False
         self.cx = x_um / self.dbu
         self.cy = y_um / self.dbu
         if window_um and window_um > 0:

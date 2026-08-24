@@ -36,6 +36,47 @@ class FakeCache:
 
 
 class WorkerContractTests(unittest.TestCase):
+    def test_cold_gui_open_redraws_without_overwriting_cli_goto(self):
+        from floe import gui
+
+        worker = object()
+        calls = []
+        viewer = SimpleNamespace(
+            worker=worker,
+            _worker_starting=True,
+            _fit_after_worker_start=False,
+            _did_fit=True,
+            _sync_label_font_capability=lambda: None,
+            _sync_abstract_capability=lambda: None,
+            fit=lambda: calls.append("fit"),
+            redraw=lambda immediate=False: calls.append(
+                ("redraw", immediate)),
+        )
+        self.assertFalse(gui.Viewer._worker_start_finished(
+            viewer, worker, None))
+        self.assertEqual(calls, [("redraw", True)])
+
+    def test_layout_switch_keeps_its_deferred_fit(self):
+        from floe import gui
+
+        worker = object()
+        calls = []
+        viewer = SimpleNamespace(
+            worker=worker,
+            _worker_starting=True,
+            _fit_after_worker_start=True,
+            _did_fit=True,
+            _sync_label_font_capability=lambda: None,
+            _sync_abstract_capability=lambda: None,
+            fit=lambda: calls.append("fit"),
+            redraw=lambda immediate=False: calls.append(
+                ("redraw", immediate)),
+        )
+        self.assertFalse(gui.Viewer._worker_start_finished(
+            viewer, worker, None))
+        self.assertEqual(calls, ["fit"])
+        self.assertFalse(viewer._fit_after_worker_start)
+
     def test_common_perf_baseline_disables_optional_render_work(self):
         from floe import cli
 
