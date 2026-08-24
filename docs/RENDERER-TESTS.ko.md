@@ -125,6 +125,12 @@ AA 없음) 기준으로 아래 세 규칙을 모두 만족해야 한다 — 구�
 프로젝트 사용법: 같은 픽스처(.oas는 workdir에 생성됨)·같은
 뷰(manifest.json)로 렌더한 PNG를 `--candidate DIR`로 대조.
 
+`tools/validate_klayout_oracle.py`는 별도 half-phase fixture에서 같은 월드
+사각형을 RECTANGLE/POLYGON/PATH로 각각 기록한다. KLayout 세 mask의 exact
+동일성과 Rust 세 mask의 exact 동일성을 각각 요구하고, 엔진 사이에는 위의
+P-a/P-b/P-c를 적용한다. 이 gate는 primitive 종류에 따라 fill phase가 달라지는
+회귀를 1픽셀 허용 밴드 뒤에 숨기지 않는다.
+
 **대체 시점에 새로 정할 것** (잔여):
 
 1. **pick/snap 동등성** — 현재 klayout Layout 쿼리로 구현

@@ -1813,12 +1813,9 @@ fn paint_world_polygon(
     points: &[(i64, i64)],
     paint: PaintStyle,
 ) -> Result<bool, String> {
-    let centered =
-        fill_world_polygon_with_phase(band, request, points, FillPhase::PixelCenter, paint)?;
-    let boundary =
-        fill_world_polygon_with_phase(band, request, points, FillPhase::LowerBoundary, paint)?;
+    let filled = fill_world_polygon(band, request, points, paint)?;
     let stroked = stroke_world_polygon(band, request, points, paint)?;
-    Ok(centered || boundary || stroked)
+    Ok(filled || stroked)
 }
 
 fn paint_world_path_outline(
@@ -1827,8 +1824,7 @@ fn paint_world_path_outline(
     points: &[(i64, i64)],
     paint: PaintStyle,
 ) -> Result<bool, String> {
-    let filled =
-        fill_world_polygon_with_phase(band, request, points, FillPhase::LowerBoundary, paint)?;
+    let filled = fill_world_polygon(band, request, points, paint)?;
     let stroked = stroke_world_polygon(band, request, points, paint)?;
     Ok(filled || stroked)
 }
@@ -1851,54 +1847,80 @@ fn fill_world_rect(
     world: BBox,
     paint: PaintStyle,
 ) -> Result<bool, String> {
-    let Some((col0, col1, row0, row1)) = world_rect_pixel_bounds(request, world) else {
-        return Ok(false);
-    };
-    let col0 = col0.max(band.col0);
-    let col1 = col1.min(band.col1);
-    let row0 = row0.max(band.row0);
-    let row1 = row1.min(band.row1);
-    if col0 >= col1 || row0 >= row1 {
+    let (x0, y1) = world_to_device(request, world.x0, world.y0)?;
+    let (x1, y0) = world_to_device(request, world.x1, world.y1)?;
+    let centered =
+        fill_device_rect_with_phase(band, request, x0, y0, x1, y1, FillPhase::PixelCenter, paint)?;
+    let boundary = fill_device_rect_with_phase(
+        band,
+        request,
+        x0,
+        y0,
+        x1,
+        y1,
+        FillPhase::LowerBoundary,
+        paint,
+    )?;
+    Ok(centered || boundary)
+}
+
+fn fill_world_polygon(
+    band: &mut RasterBand,
+    request: &GeometryRasterRequest,
+    points: &[(i64, i64)],
+    paint: PaintStyle,
+) -> Result<bool, String> {
+    let centered =
+        fill_world_polygon_with_phase(band, request, points, FillPhase::PixelCenter, paint)?;
+    let boundary =
+        fill_world_polygon_with_phase(band, request, points, FillPhase::LowerBoundary, paint)?;
+    Ok(centered || boundary)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fill_device_rect_with_phase(
+    band: &mut RasterBand,
+    request: &GeometryRasterRequest,
+    x0: i128,
+    y0: i128,
+    x1: i128,
+    y1: i128,
+    phase: FillPhase,
+    paint: PaintStyle,
+) -> Result<bool, String> {
+    let (first_row, end_row) = fill_phase_rows(y0, y1, phase)?;
+    let (first_col, end_col) = fill_phase_columns(x0, x1, phase)?;
+    let first_row = first_row.max(band.row0 as i128);
+    let end_row = end_row.min(band.row1 as i128);
+    let first_col = first_col.max(band.col0 as i128);
+    let end_col = end_col.min(band.col1 as i128);
+    if first_row >= end_row || first_col >= end_col {
         return Ok(false);
     }
+    let first_row = checked_usize(first_row, "rectangle first row")?;
+    let end_row = checked_usize(end_row, "rectangle end row")?;
+    let first_col = checked_usize(first_col, "rectangle first column")?;
+    let end_col = checked_usize(end_col, "rectangle end column")?;
     let mut drew = false;
-    for row in row0..row1 {
-        let local_row = row - band.row0;
-        for col in col0..col1 {
-            if !paint.fills(row, col, request.height) {
+    for row in first_row..end_row {
+        let row_u32: u32 = row
+            .try_into()
+            .map_err(|_| format!("limit exceeded: rectangle row = {row}"))?;
+        let local_row = row - band.row0 as usize;
+        for col in first_col..end_col {
+            let col_u32: u32 = col
+                .try_into()
+                .map_err(|_| format!("limit exceeded: rectangle column = {col}"))?;
+            if !paint.fills(row_u32, col_u32, request.height) {
                 continue;
             }
-            let local_col = col - band.col0;
-            let offset = (local_row as usize * band.tile_width() as usize + local_col as usize) * 4;
+            let local_col = col - band.col0 as usize;
+            let offset = (local_row * band.tile_width() as usize + local_col) * 4;
             band.pixels[offset..offset + 4].copy_from_slice(&paint.color);
             drew = true;
         }
     }
     Ok(drew)
-}
-
-fn world_rect_pixel_bounds(
-    request: &GeometryRasterRequest,
-    world: BBox,
-) -> Option<(u32, u32, u32, u32)> {
-    let view = request.view;
-    let x0 = (world.x0 as f64).max(view.x0);
-    let y0 = (world.y0 as f64).max(view.y0);
-    let x1 = (world.x1 as f64).min(view.x1);
-    let y1 = (world.y1 as f64).min(view.y1);
-    if x0 >= x1 || y0 >= y1 {
-        return None;
-    }
-    let span_x = view.x1 - view.x0;
-    let span_y = view.y1 - view.y0;
-    let col0 = scale_floor_f64(x0 - view.x0, request.width, span_x);
-    let col1 = scale_ceil_f64(x1 - view.x0, request.width, span_x);
-    let row0 = scale_floor_f64(view.y1 - y1, request.height, span_y);
-    let row1 = scale_ceil_f64(view.y1 - y0, request.height, span_y);
-    if col0 >= col1 || row0 >= row1 {
-        return None;
-    }
-    Some((col0, col1, row0, row1))
 }
 
 fn polygon_bbox(points: &[(i64, i64)]) -> Option<BBox> {
@@ -2108,6 +2130,57 @@ enum FillPhase {
     LowerBoundary,
 }
 
+fn fill_phase_rows(y0: i128, y1: i128, phase: FillPhase) -> Result<(i128, i128), String> {
+    match phase {
+        // Both sampling phases use a half-open y rule so shared vertices
+        // always contribute exactly one incident edge.
+        FillPhase::PixelCenter => Ok((
+            floor_div(
+                y0.checked_sub(DEVICE_HALF)
+                    .ok_or_else(|| "coordinate overflow: polygon first row".to_string())?,
+                DEVICE_ONE,
+            )
+            .checked_add(1)
+            .ok_or_else(|| "coordinate overflow: polygon first row".to_string())?,
+            floor_div(
+                y1.checked_sub(DEVICE_HALF)
+                    .ok_or_else(|| "coordinate overflow: polygon end row".to_string())?,
+                DEVICE_ONE,
+            )
+            .checked_add(1)
+            .ok_or_else(|| "coordinate overflow: polygon end row".to_string())?,
+        )),
+        FillPhase::LowerBoundary => Ok((floor_div(y0, DEVICE_ONE), floor_div(y1, DEVICE_ONE))),
+    }
+}
+
+fn fill_phase_columns(x0: i128, x1: i128, phase: FillPhase) -> Result<(i128, i128), String> {
+    match phase {
+        FillPhase::PixelCenter => Ok((
+            floor_div(
+                x0.checked_sub(DEVICE_HALF)
+                    .ok_or_else(|| "coordinate overflow: polygon first column".to_string())?,
+                DEVICE_ONE,
+            )
+            .checked_add(1)
+            .ok_or_else(|| "coordinate overflow: polygon first column".to_string())?,
+            floor_div(
+                x1.checked_sub(DEVICE_HALF)
+                    .ok_or_else(|| "coordinate overflow: polygon end column".to_string())?,
+                DEVICE_ONE,
+            )
+            .checked_add(1)
+            .ok_or_else(|| "coordinate overflow: polygon end column".to_string())?,
+        )),
+        FillPhase::LowerBoundary => Ok((
+            floor_div(x0, DEVICE_ONE)
+                .checked_add(1)
+                .ok_or_else(|| "coordinate overflow: polygon first column".to_string())?,
+            ceil_div(x1, DEVICE_ONE),
+        )),
+    }
+}
+
 fn fill_world_polygon_with_phase(
     band: &mut RasterBand,
     request: &GeometryRasterRequest,
@@ -2134,23 +2207,7 @@ fn fill_world_polygon_with_phase(
             std::mem::swap(&mut x0, &mut x1);
             std::mem::swap(&mut y0, &mut y1);
         }
-        let (first_row, end_row) = match phase {
-            // Both sampling phases use a half-open y rule so shared vertices
-            // always contribute exactly one incident edge.
-            FillPhase::PixelCenter => (
-                floor_div(
-                    y0.checked_sub(DEVICE_HALF)
-                        .ok_or_else(|| "coordinate overflow: polygon first row".to_string())?,
-                    DEVICE_ONE,
-                ) + 1,
-                floor_div(
-                    y1.checked_sub(DEVICE_HALF)
-                        .ok_or_else(|| "coordinate overflow: polygon end row".to_string())?,
-                    DEVICE_ONE,
-                ) + 1,
-            ),
-            FillPhase::LowerBoundary => (floor_div(y0, DEVICE_ONE), floor_div(y1, DEVICE_ONE)),
-        };
+        let (first_row, end_row) = fill_phase_rows(y0, y1, phase)?;
         if first_row >= end_row {
             continue;
         }
@@ -2232,26 +2289,7 @@ fn fill_world_polygon_with_phase(
             ));
         }
         for pair in intersections.chunks_exact(2) {
-            let (first_col, end_col) = match phase {
-                FillPhase::PixelCenter => (
-                    floor_div(
-                        pair[0].checked_sub(DEVICE_HALF).ok_or_else(|| {
-                            "coordinate overflow: polygon first column".to_string()
-                        })?,
-                        DEVICE_ONE,
-                    ) + 1,
-                    floor_div(
-                        pair[1]
-                            .checked_sub(DEVICE_HALF)
-                            .ok_or_else(|| "coordinate overflow: polygon end column".to_string())?,
-                        DEVICE_ONE,
-                    ) + 1,
-                ),
-                FillPhase::LowerBoundary => (
-                    floor_div(pair[0], DEVICE_ONE) + 1,
-                    ceil_div(pair[1], DEVICE_ONE),
-                ),
-            };
+            let (first_col, end_col) = fill_phase_columns(pair[0], pair[1], phase)?;
             let first_col = first_col.max(band.col0 as i128);
             let end_col = end_col.min(band.col1 as i128);
             if first_col >= end_col {
@@ -2350,18 +2388,6 @@ fn checked_usize(value: i128, field: &str) -> Result<usize, String> {
     value
         .try_into()
         .map_err(|_| format!("limit exceeded: {} = {}", field, value))
-}
-
-fn scale_floor_f64(offset: f64, pixels: u32, span: f64) -> u32 {
-    (offset * pixels as f64 / span)
-        .floor()
-        .clamp(0.0, pixels as f64) as u32
-}
-
-fn scale_ceil_f64(offset: f64, pixels: u32, span: f64) -> u32 {
-    (offset * pixels as f64 / span)
-        .ceil()
-        .clamp(0.0, pixels as f64) as u32
 }
 
 #[cfg(test)]
@@ -2478,6 +2504,88 @@ mod tests {
         )
         .unwrap();
         assert_eq!(polygon.pixels, rectangle.pixels);
+    }
+
+    #[test]
+    fn rectangle_fast_path_matches_polygon_phase_matrix() {
+        let paint = PaintStyle {
+            color: [37, 211, 89, 255],
+            fill: LayerFill::Speckle,
+            stroke: StrokeStyle::Solid,
+            stroke_width: 1,
+        };
+        for offset in [-0.125, -0.05, 0.0, 0.025, 0.05, 0.125] {
+            let request = GeometryRasterRequest {
+                view: RasterViewBox::new(offset, offset, 10.0 + offset, 10.0 + offset).unwrap(),
+                ..request()
+            };
+            for bbox in [
+                BBox {
+                    x0: -1,
+                    y0: -1,
+                    x1: 3,
+                    y1: 4,
+                },
+                BBox {
+                    x0: 2,
+                    y0: 3,
+                    x1: 4,
+                    y1: 5,
+                },
+                BBox {
+                    x0: 7,
+                    y0: 6,
+                    x1: 12,
+                    y1: 11,
+                },
+            ] {
+                let points = [
+                    (bbox.x0, bbox.y0),
+                    (bbox.x1, bbox.y0),
+                    (bbox.x1, bbox.y1),
+                    (bbox.x0, bbox.y1),
+                ];
+                let mut rectangle = full_band(&request);
+                let mut polygon = rectangle.clone();
+                fill_world_rect(&mut rectangle, &request, bbox, paint).unwrap();
+                fill_world_polygon(&mut polygon, &request, &points, paint).unwrap();
+                assert_eq!(
+                    polygon.pixels, rectangle.pixels,
+                    "offset={offset} bbox={bbox:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn half_phase_fill_is_exact_across_rect_polygon_and_path_outline() {
+        let request = GeometryRasterRequest {
+            view: RasterViewBox::new(0.05, 0.05, 10.05, 10.05).unwrap(),
+            width: 100,
+            height: 100,
+            ..request()
+        };
+        let bbox = BBox {
+            x0: 2,
+            y0: 2,
+            x1: 8,
+            y1: 8,
+        };
+        let points = [(2, 2), (8, 2), (8, 8), (2, 8)];
+        let centerline = [(2, 5), (8, 5)];
+        let path_outline = checked_path_outline(&centerline, 3, 0, 0).unwrap();
+        assert_eq!(polygon_bbox(&path_outline), Some(bbox));
+
+        let mut rectangle = full_band(&request);
+        let mut polygon = rectangle.clone();
+        let mut path = rectangle.clone();
+        let paint = paint(&request);
+        paint_world_rect(&mut rectangle, &request, bbox, paint).unwrap();
+        paint_world_polygon(&mut polygon, &request, &points, paint).unwrap();
+        paint_world_path(&mut path, &request, &path_outline, &centerline, paint).unwrap();
+
+        assert_eq!(polygon.pixels, rectangle.pixels);
+        assert_eq!(path.pixels, rectangle.pixels);
     }
 
     #[test]
@@ -3368,6 +3476,7 @@ mod tests {
                 (7, 2),
                 (8, 2),
                 (9, 2),
+                (1, 3),
                 (2, 3),
                 (3, 3),
                 (4, 3),

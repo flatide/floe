@@ -39,6 +39,9 @@ M5 density coverage 완료, M7 pick/snap 완료, M8 exact clip vertical slice �
 - 완료: 단일 스레드 rectangle occupancy와 결정적 RGBA PNG vertical slice
 - 완료: 부분 DBU viewport 위상을 보존하는 device Q32.32 even-odd polygon
   active-edge fill과 checked 산술 gate
+- 완료: rectangle fast path, polygon, PATH outline 내부를 공통
+  `PixelCenter ∪ LowerBoundary` 규칙으로 통일. half-DBU 위상에서 KLayout과 Rust
+  각각 RECT/POLYGON/PATH 표현 간 pixel-exact 동일 gate를 자동화
 - 완료: 부모 `floe-tiler`와 동일한 Manhattan PATH square-miter/extension fill,
   KLayout `Path.polygon()`과 동일한 복수 segment 비맨해튼 PATH miter 및 급각 외곽
   clip. 퇴화 spine/U-turn은 조용히 누락하지 않고 page ID를 포함한 명시적 render
@@ -483,9 +486,10 @@ float bbox를 전달하여 `-10.9375 µm` 같은 half-DBU 위상을 잃지 않�
 
 ### 8.2 도형
 
-- rectangle: tile clip 후 scanline span 직접 기록
-- polygon: active-edge scan conversion, fill rule은 M0 KLayout probe로 고정
-- path: fully visible path도 동일 stroker를 사용한다. 경계 path만 다른 표현으로
+- rectangle: polygon과 같은 Q32.32 phase-bound helper를 쓰는 allocation-free scanline fast path
+- polygon: active-edge `PixelCenter ∪ LowerBoundary` scan conversion
+- path: outline 내부도 polygon과 같은 두 phase의 합집합을 사용하고, fully visible
+  path도 동일 stroker를 사용한다. 경계 path만 다른 표현으로
   바꾸지 않는다. start/end extension과 join의 KLayout rounding을 golden으로 고정.
   퇴화 spine/U-turn은 성공 응답에서 geometry를 생략하지 않고 명시적으로 실패
 - outline: device-pixel width, bbox cull 시 `width + 1px` 확장

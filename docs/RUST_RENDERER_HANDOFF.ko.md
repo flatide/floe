@@ -48,6 +48,9 @@ fixture는 `docs/RENDERER-TESTS.ko.md`가 canonical source다.
   phase telemetry
 - rectangle/polygon/path, hierarchy, One/Grid/Pts repetition, frame/wash,
   speckle/custom fill/outline/mono의 결정적 CPU raster
+- rectangle fast path, polygon, PATH outline 내부가 같은 Q32.32
+  `PixelCenter ∪ LowerBoundary` scan-conversion 규칙을 사용. half-phase에서
+  KLayout과 Rust 각각 RECT/POLYGON/PATH 표현 간 exact 동일성 gate 통과
 - 번들 글꼴 label, live GUI/CLI font size, 합성 quarter-turn label rotation. glyph 상한
   초과는 geometry frame을 실패시키지 않고 결정적 label 접두부만 표시
 - 게시 `FrameScene` 기반 bounded pick/snap; page bbox를 먼저 자르고 query당

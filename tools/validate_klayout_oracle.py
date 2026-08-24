@@ -165,6 +165,25 @@ def _build_style_fixture(source):
     layout.write(str(source))
 
 
+def _build_phase_fixture(source):
+    """Same world rectangle authored as RECTANGLE, POLYGON, and PATH."""
+    import klayout.db as db
+
+    layout = db.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    box = (3.0, 3.0, 13.0, 9.0)
+    top.shapes(layout.layer(1, 0)).insert(db.DBox(*box))
+    top.shapes(layout.layer(2, 0)).insert(db.DPolygon([
+        db.DPoint(3.0, 3.0), db.DPoint(13.0, 3.0),
+        db.DPoint(13.0, 9.0), db.DPoint(3.0, 9.0),
+    ]))
+    top.shapes(layout.layer(3, 0)).insert(db.DPath([
+        db.DPoint(3.0, 6.0), db.DPoint(13.0, 6.0),
+    ], 6.0, 0.0, 0.0, False))
+    layout.write(str(source))
+
+
 def _save_klayout_style(source, output, view, width, height, visible,
                         mono, fills, widths):
     import klayout.db as db
@@ -217,6 +236,53 @@ def _dilate(mask, radius):
             shifted[yd, xd] = mask[ys, xs]
             result |= shifted
     return result
+
+
+def _phase_exact_oracle(work, parent_oracle, indexer, renderer, jobs):
+    source = work / "phase-exact.oas"
+    cache = work / "phase-exact.oas.floe"
+    golden_dir = work / "phase-exact-golden"
+    candidate_dir = work / "phase-exact-rust"
+    golden_dir.mkdir()
+    candidate_dir.mkdir()
+    _build_phase_fixture(source)
+    _index(indexer, source, cache, jobs)
+
+    # At 10 px/um this 0.05um shift puts every integer-DBU boundary exactly
+    # on a pixel center, where the former three fill policies diverged.
+    view = (0.05, 0.05, 16.05, 12.05)
+    width, height = 160, 120
+    solid = "\n".join(("*" * 16,) * 16)
+    golden_masks = []
+    candidate_masks = []
+    for layer in ((1, 0), (2, 0), (3, 0)):
+        tag = "%d_%d" % layer
+        golden_path = golden_dir / (tag + ".png")
+        candidate_path = candidate_dir / (tag + ".png")
+        _save_klayout_style(
+            source, golden_path, view, width, height, [layer], False,
+            {layer: solid}, {layer: 1})
+        _render_rust(
+            renderer, cache, candidate_path, view, width, height, jobs,
+            layers=tag.replace("_", "/"),
+            styles=("%s,#ffffff,solid,1" % tag.replace("_", "/"),))
+        golden_masks.append(_occupied(_rgb(golden_path)))
+        candidate_masks.append(_occupied(_rgb(candidate_path)))
+
+    for label, masks in (("KLayout", golden_masks),
+                         ("Rust", candidate_masks)):
+        if any(not np.array_equal(masks[0], mask) for mask in masks[1:]):
+            raise OracleFailure(
+                "half-phase %s primitive representations differ" % label)
+    for index, (golden, candidate) in enumerate(zip(
+            golden_masks, candidate_masks), 1):
+        ok, reason = parent_oracle.compare(golden, candidate)
+        if not ok:
+            raise OracleFailure(
+                "half-phase layer %d: %s" % (index, reason))
+    print("PHASE half rect/polygon/path representation-exact "
+          "(KLayout exact, Rust exact) ok")
+    return 2
 
 
 def _style_oracle(work, parent_oracle, indexer, renderer, jobs):
@@ -384,10 +450,13 @@ def main():
     try:
         px_count = _geometry_oracle(
             work, parent_oracle, indexer, renderer, args.jobs)
+        phase_count = _phase_exact_oracle(
+            work, parent_oracle, indexer, renderer, args.jobs)
         style_count = _style_oracle(
             work, parent_oracle, indexer, renderer, args.jobs)
-        print("KLAYOUT ORACLE: ALL OK (%d PX + %d style checks)" %
-              (px_count, style_count))
+        print("KLAYOUT ORACLE: ALL OK "
+              "(%d PX + %d phase-exact + %d style checks)" %
+              (px_count, phase_count, style_count))
     except Exception:
         print("oracle artifacts retained: %s" % work, file=sys.stderr)
         raise

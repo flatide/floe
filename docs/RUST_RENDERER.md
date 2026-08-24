@@ -18,6 +18,9 @@ begin/end extensions affect the hull but not that centerline. Degenerate and
 U-turn PATHs are outside the verified operating-input scope and fail the render
 explicitly; they are never silently omitted. Rendering uses CPU workers only;
 no GPU path is planned.
+Rectangle, polygon, and PATH-outline interiors all use the same Q32.32
+`PixelCenter | LowerBoundary` scan-conversion policy; rectangles retain an
+allocation-free fast path driven by the same phase-bound helpers.
 
 ```sh
 cd rust
@@ -52,8 +55,9 @@ primitive contract; renderer pages contain only the normalized polygons.
 `tools/validate_klayout_oracle.py` independently writes OASIS fixtures, indexes
 them through the release `floe-index`, renders the source through
 KLayout and the cache through `floe-render-cli`, and compares the resulting
-screens. It covers all 13 PX1-PX5 views plus 14 styled checks for a half-pixel
-viewport, 16x16 pattern phase, speckle, 1/2/4px outlines, overlapping paint
+screens. It covers all 13 PX1-PX5 views, two half-phase representation-exact
+checks, plus 14 styled checks for a half-pixel viewport, 16x16 pattern phase,
+speckle, 1/2/4px outlines, overlapping paint
 order, visibility, PATH styling, and mono.
 
 ```sh
