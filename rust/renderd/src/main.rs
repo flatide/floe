@@ -197,6 +197,8 @@ struct RenderCommand {
     labels: bool,
     label_font_px: f32,
     mono: bool,
+    /// Allow exact settled PNG reuse. Page/decode caching is independent.
+    frame_cache: bool,
     /// Raster workers. Legacy `jobs` continues to set both phases when
     /// `decode_jobs` is absent.
     jobs: Option<u16>,
@@ -295,6 +297,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                     "labels",
                     "font_px",
                     "mono",
+                    "frame_cache",
                     "jobs",
                     "decode_jobs",
                     "tile_px",
@@ -361,6 +364,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                     labels,
                     label_font_px,
                     mono: optional_bool(&fields, "mono")?.unwrap_or(false),
+                    frame_cache: optional_bool(&fields, "frame_cache")?.unwrap_or(true),
                     jobs,
                     decode_jobs,
                     tile_size,
@@ -1271,9 +1275,10 @@ fn run_render(
     // reconstructed entirely from resident decoded pages. This keeps the
     // displayed frame and pick/snap snapshot synchronized without retaining
     // old FrameScene Arcs outside the decoded-page budget.
-    let cached_frame = if selected
-        .iter()
-        .all(|page_id| state.page_cache.contains(*page_id))
+    let cached_frame = if command.frame_cache
+        && selected
+            .iter()
+            .all(|page_id| state.page_cache.contains(*page_id))
     {
         state.frame_cache.get(&frame_cache_key)
     } else {
@@ -1451,7 +1456,7 @@ fn run_render(
                 cell_names: Arc::clone(&query_cell_names),
             }));
         }
-        if final_round && !pixels.frame_cache_hit {
+        if final_round && command.frame_cache && !pixels.frame_cache_hit {
             state.frame_cache.insert(
                 frame_cache_key.clone(),
                 CachedFramePng {
@@ -1932,6 +1937,7 @@ mod tests {
         assert!(parsed_render.exact);
         assert!(!parsed_render.frames);
         assert!(!parsed_render.labels);
+        assert!(parsed_render.frame_cache);
         assert_eq!(parsed_render.label_font_px, DEFAULT_LABEL_FONT_PX);
         assert!(parse_command(
             "render gen=8 view=0,0,1,1 w=1 h=1 depth=0 cut=0 exact=1 frames=off out=/tmp/f.png"
@@ -1948,7 +1954,7 @@ mod tests {
 
         let progressive = render(
             parse_command(
-                "render gen=11 view=0,0,1,1 w=1 h=1 jobs=3 decode_jobs=8 round_pages=17 round_paths=1 frames=off labels=on font_px=18 out=/tmp/f.png",
+                "render gen=11 view=0,0,1,1 w=1 h=1 jobs=3 decode_jobs=8 round_pages=17 round_paths=1 frames=off labels=on font_px=18 frame_cache=0 out=/tmp/f.png",
             )
             .unwrap()
             .unwrap(),
@@ -1958,6 +1964,7 @@ mod tests {
         assert_eq!(progressive.decode_jobs, Some(8));
         assert!(progressive.unique_round_paths);
         assert!(progressive.labels);
+        assert!(!progressive.frame_cache);
         assert_eq!(progressive.label_font_px, 18.0);
         assert!(parse_command(
             "render gen=12 view=0,0,1,1 w=1 h=1 frames=off font_px=100 out=/tmp/f.png"
@@ -2056,7 +2063,7 @@ mod tests {
         assert_eq!(cold.concat(), selected);
 
         let warm = refinement_batches(&selected, 64, |_| true).unwrap();
-        assert_eq!(warm, [selected.clone()]);
+        assert_eq!(warm.as_slice(), std::slice::from_ref(&selected));
 
         let mixed = refinement_batches(&selected, 32, |page_id| page_id % 2 == 0).unwrap();
         assert_eq!(mixed.len(), 2);

@@ -862,6 +862,7 @@ class Viewer:
                  detail=None, dump=False, depth=None, lod=DEFAULT_LOD,
                  frames=DEFAULT_FRAMES, labels=DEFAULT_LABELS,
                  label_font_px=DEFAULT_LABEL_FONT_PX,
+                 frame_cache=True,
                  stream_kb=None, stream_target_ms=500,
                  render_debug=False):
         self.server_sock = server_sock
@@ -918,6 +919,9 @@ class Viewer:
         self.label_font_px = max(
             MIN_LABEL_FONT_PX,
             min(MAX_LABEL_FONT_PX, int(label_font_px)))
+        # Exact settled-frame reuse is a Rust optimization.  Stable floe
+        # accepts the same control so A/B command lines remain identical.
+        self.frame_cache_on = bool(frame_cache)
         self.stream_kb = stream_kb
         self.stream_target_ms = int(stream_target_ms)
         self.render_debug = bool(render_debug)
@@ -2350,6 +2354,7 @@ class Viewer:
             "frames": self.frames_on,
             "labels": self.labels_on,
             "label_font_px": self.label_font_px,
+            "frame_cache": self.frame_cache_on,
             "abstract": self.abstract,
             "visible": self._layers_arg()}
         if HAS_DENSITY_COVERAGE:
@@ -6849,12 +6854,14 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
                detail=None, dump=False, depth=None, lod=DEFAULT_LOD,
                frames=DEFAULT_FRAMES, labels=DEFAULT_LABELS,
                label_font_px=DEFAULT_LABEL_FONT_PX,
+               frame_cache=True,
                stream_kb=None, stream_target_ms=500,
                render_debug=False):
     import_gtk()
     viewer = Viewer(cache, server_sock, goto=goto, detail=detail,
                     dump=dump, depth=depth, lod=lod, frames=frames,
                     labels=labels, label_font_px=label_font_px,
+                    frame_cache=frame_cache,
                     stream_kb=stream_kb,
                     stream_target_ms=stream_target_ms,
                     render_debug=render_debug)

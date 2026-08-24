@@ -19,6 +19,7 @@ from pathlib import Path
 _DEFAULT_JOBS = max(1, min(8, os.cpu_count() or 1))
 _DEFAULT_BUDGET_MB = 1024
 _DEFAULT_ROUND_PAGES = 1024
+_NO_REFINEMENT_ROUND_PAGES = 1 << 30
 _DEFAULT_TILE_PX = 384
 _DEFAULT_LABEL_FONT_PX = 14
 _DEFAULT_OPEN_TIMEOUT_S = 300
@@ -201,8 +202,14 @@ class RustRenderWorker:
             "FLOE_RUST_RASTER_JOBS", min(4, self._jobs_count), 1, 256)
         self._budget_mb = _env_int(
             "FLOE_RUST_BUDGET_MB", _DEFAULT_BUDGET_MB, 1, 1 << 20)
-        self._round_pages = _env_int(
-            "FLOE_RUST_ROUND_PAGES", _DEFAULT_ROUND_PAGES, 1, 1 << 30)
+        # The shared viewer spells no intermediate frames as stream_kb=0:
+        # stable floe passes that to vfsd, while Rust makes every practical
+        # miss set one batch.  This intentionally overrides the tuning env so
+        # identical floe/floe2 `--refinement off` command lines mean the same.
+        self._round_pages = (
+            _NO_REFINEMENT_ROUND_PAGES if stream_kb == 0 else
+            _env_int("FLOE_RUST_ROUND_PAGES", _DEFAULT_ROUND_PAGES,
+                     1, _NO_REFINEMENT_ROUND_PAGES))
         self._tile_px = _env_int(
             "FLOE_RUST_TILE_PX", _DEFAULT_TILE_PX, 1, 4096)
         self._label_font_px = _env_int(
@@ -443,6 +450,7 @@ class RustRenderWorker:
         command = (
             "render gen=%d view=%s w=%d h=%d depth=%s cut=%s exact=0 "
             "layers=%s frames=%s labels=%s font_px=%d mono=%s "
+            "frame_cache=%s "
             "jobs=%d decode_jobs=%d tile_px=%d "
             "round_pages=%d round_paths=1 style_epoch=%d out=%s" % (
                 generation, ",".join(repr(value) for value in bbox),
@@ -450,7 +458,9 @@ class RustRenderWorker:
                 repr(max(0.0, float(job.get("cut_px") or 0.0))), layers,
                 _bool_wire(job.get("frames", True)),
                 _bool_wire(job.get("labels", True)), label_font_px,
-                _bool_wire(self._mono), self._raster_jobs_count,
+                _bool_wire(self._mono),
+                _bool_wire(job.get("frame_cache", True)),
+                self._raster_jobs_count,
                 self._jobs_count, self._tile_px,
                 self._round_pages, self._style_epoch, output))
         self._send(command)

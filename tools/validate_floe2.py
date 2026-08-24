@@ -151,6 +151,13 @@ def main(fixture=None):
                    "--coverage", "--coverage-only", "design.ovc"):
         check(legacy not in index_help.stdout,
               "floe2 index help exposed %s" % legacy)
+    stable_view_help = run(base, "-m", "floe", "view", "--help")
+    rust_view_help = run(base, "-m", "floe2", "view", "--help")
+    for option in ("--refinement", "--frame-cache", "--perf-baseline"):
+        check(option in stable_view_help.stdout,
+              "floe view omitted common performance option %s" % option)
+        check(option in rust_view_help.stdout,
+              "floe2 view omitted common performance option %s" % option)
     for command in ("probe", "view"):
         command_help = run(base, "-m", "floe2", command, "--help")
         check("--layout-mode" not in command_help.stdout,

@@ -54,6 +54,21 @@ FLOE_RUST_ROUND_PAGES=1024 \
   .venv/bin/python -m floe2 view data/sample9.oas
 ```
 
+backend-neutral 기본 성능은 환경변수 대신 두 제품에 동일한 preset으로 측정한다.
+refinement/exact frame cache/LOD/frame/label을 끄고 page·working-set cache 및 최종
+PNG publish는 남긴다. 첫 명령은 cold session, 이후 pan은 warm working-set을 잰다.
+
+```sh
+.venv/bin/python -m floe view data/sample9.oas --multi \
+  --goto 13600,8600,700 --detail high --depth 999 --perf-baseline
+.venv/bin/python -m floe2 view data/sample9.oas --multi \
+  --goto 13600,8600,700 --detail high --depth 999 --perf-baseline
+```
+
+refinement만 비교할 때는 `--refinement off`를 사용한다. floe에서는 `stream_kb=0`,
+floe2에서는 `round_pages=2^30` wire 값으로 대응해 intermediate frame을 만들지 않는다.
+`--frame-cache off`는 floe2의 exact PNG LRU만 우회하며 decoded page LRU는 유지한다.
+
 GUI의 `tiles`는 VFS 계획 page 수다. Rust의 실제 image tile 수는 별도
 `render_tiles` telemetry로 판정한다.
 
@@ -462,6 +477,10 @@ pick/snap은 이전 settled scene을 유지하고, 모든 tile 완료 시 새 `F
 
 F2R-03의 work bin/transform 공유는 F2R-10의 world tile과 F2R-11의 dependency graph가
 공통으로 요구하는 선행 작업이다.
+
+비교 gate는 공통 `--refinement off`와 `--perf-baseline`을 먼저 실행해 direct-final
+비용을 고정한 뒤 refinement on의 first/settled overhead를 별도로 계산한다. exact
+frame cache hit는 이 비교에서 허용하지 않는다.
 
 ## 6. 남은 착수 순서
 

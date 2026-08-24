@@ -583,7 +583,7 @@ stdin EOF와 `quit`도 frontier를 최대로 올려 현재 render/clip을 끝까
 ```text
 open cache=/abs/design.oas.floe budget_mb=1024 jobs=8
 style epoch=3 path=/tmp/floe-style-3.tsv
-render gen=42 view=x0,y0,x1,y1 w=1922 h=1082 depth=full cut=3 exact=0 layers=all frames=on mono=off jobs=4 decode_jobs=8 tile_px=384 decode_pages=512 round_pages=1024 round_paths=0 style_epoch=3 out=/tmp/floe-frame-42.png
+render gen=42 view=x0,y0,x1,y1 w=1922 h=1082 depth=full cut=3 exact=0 layers=all frames=on mono=off frame_cache=1 jobs=4 decode_jobs=8 tile_px=384 decode_pages=512 round_pages=1024 round_paths=0 style_epoch=3 out=/tmp/floe-frame-42.png
 cancel before_gen=43
 info
 quit
@@ -616,6 +616,10 @@ cache hit는 개수와 무관하게 첫 scene에 모두 포함하며 마지막 m
 절반 이하면 앞 round와 합친다. `jobs`는 raster worker, `decode_jobs`는 page decode
 worker이고 후자를 생략하면 하위 호환으로 `jobs`를 공통 사용한다.
 `decode_pages`는 generation 전체 page 상한이고 생략하면 plan 전체를 refinement한다.
+`frame_cache=0`은 exact settled PNG LRU의 lookup/insert만 우회하고 decoded page LRU는
+유지한다. 공통 GUI `--refinement off`는 floe2 요청을 실질적 무한 round로 바꿔
+intermediate frame 없이 한 번 settle한다. `--perf-baseline`은 여기에 LOD/frame/label
+off를 묶어 floe와 같은 end-to-end 측정 표면을 제공한다.
 기본 `round_paths=0`에서는 같은 generation이 `final=1`까지 같은 출력 경로를 원자
 교체한다. Python adapter는 `round_paths=1`을 사용해 intermediate round마다 고유
 경로를 받고, 읽은 partial을 즉시 지운다. 이 방식은 응답 N을 읽는 중 daemon이

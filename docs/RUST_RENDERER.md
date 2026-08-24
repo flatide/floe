@@ -102,7 +102,7 @@ DBU.
 ```text
 open cache=/abs/valmini.oas.floe budget_mb=64 jobs=4
 style epoch=1 path=/tmp/valmini.styles
-render gen=10 view=0,0,404000,447000 w=1200 h=800 depth=full cut=0 exact=0 layers=1/0,2/0 frames=on labels=on font_px=14 mono=off jobs=4 decode_jobs=8 tile_px=384 decode_pages=99 round_pages=32 style_epoch=1 out=/tmp/frame.png
+render gen=10 view=0,0,404000,447000 w=1200 h=800 depth=full cut=0 exact=0 layers=1/0,2/0 frames=on labels=on font_px=14 mono=off frame_cache=1 jobs=4 decode_jobs=8 tile_px=384 decode_pages=99 round_pages=32 style_epoch=1 out=/tmp/frame.png
 clip seq=12 box=0,0,404000,447000 layers=1/0,2/0 jobs=4 out=/tmp/clip.oas
 snap seq=20 x=1000 y=2000 r=10 layers=1/0,2/0
 pick seq=21 x=1000 y=2000 r=3 nth=0 layers=1/0,2/0
@@ -221,6 +221,9 @@ publishes the cached PNG with `raster_us=0`, `png_us=0`, and
 so pick/snap stays synchronized with the visible cached frame. View bits,
 framebuffer size, depth/cut, layers, frames/labels/font, mono, decode cap, and
 style epoch are in the key; style changes and cache open clear the LRU.
+`frame_cache=0` bypasses lookup and insertion for that request without
+disabling the decoded-page LRU, which keeps warm backend comparisons focused
+on scene/raster/PNG work.
 
 The rasterizer uses independently owned 2D tile scratch buffers and dynamic
 atomic work assignment. Tile completion order cannot affect pixels because the
@@ -293,6 +296,11 @@ the new fields are omitted. `FLOE_RUST_OPEN_TIMEOUT_S` and
 `FLOE_RUST_CLIP_TIMEOUT_S` both default
 to 300 seconds. Cold cache open runs outside the GTK thread, and the daemon is
 placed in its own POSIX session so terminal SIGINT does not kill it.
+For backend-neutral GUI timing, both products accept `--refinement off` and
+`--frame-cache off`; `--perf-baseline` additionally disables LOD, hierarchy
+frames, and labels. Rust maps refinement-off to one practical all-miss batch,
+while frame-cache-off bypasses only the exact settled PNG LRU and preserves the
+decoded-page cache.
 A headless smoke test is:
 
 ```sh

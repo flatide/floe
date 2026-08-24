@@ -1137,12 +1137,34 @@ def cmd_view(args):
     if not 6 <= args.label_font_px <= 96:
         raise SystemExit("floe: --label-font-px must be 6..96")
 
+    # A baseline comparison must select the same work in floe/KLayout and
+    # floe2/Rust.  Keep geometry/detail/depth explicit, but remove optional
+    # staging, approximation and presentation work.  Page/working-set caches
+    # stay enabled: cold vs warm cache behavior is itself part of the product.
+    stream_kb = args.stream_kb
+    if args.perf_baseline:
+        args.lod = "off"
+        args.frames = "off"
+        args.labels = "off"
+        args.refinement = "off"
+        args.frame_cache = "off"
+    if args.refinement == "off":
+        if stream_kb not in (None, 0):
+            raise SystemExit(
+                "floe: --refinement off conflicts with nonzero --stream-kb")
+        stream_kb = 0
+    elif stream_kb == 0:
+        # Preserve the established stable-floe spelling.  Rust maps the same
+        # construction value to a single all-miss batch.
+        args.refinement = "off"
+
     # Render-process construction parameters cannot be retrofitted into
     # a running single instance. Open an independent viewer when one is
     # explicitly supplied; live request controls are forwarded below.
-    process_options = (args.stream_kb is not None
+    process_options = (stream_kb is not None
                        or args.stream_target_ms != 500
-                       or args.render_debug)
+                       or args.render_debug
+                       or args.frame_cache == "off")
     server = None
     if not args.multi and not process_options:
         # flateyes-style single instance per (uid, DISPLAY)
@@ -1195,7 +1217,8 @@ def cmd_view(args):
                lod=args.lod == "on", frames=args.frames == "on",
                labels=args.labels == "on",
                label_font_px=args.label_font_px,
-               stream_kb=args.stream_kb,
+               frame_cache=args.frame_cache == "on",
+               stream_kb=stream_kb,
                stream_target_ms=args.stream_target_ms,
                render_debug=args.render_debug)
 
@@ -1525,6 +1548,18 @@ def main(argv=None, *, prog=None, rust_only=None):
                         "a keypress; the planner reverts to exact on zoom "
                         "and probes are always exact. The viewer "
                         "button/`l` changes it live)")
+    p.add_argument("--refinement", choices=("on", "off"), default="on",
+                   help="publish progressive intermediate frames (default "
+                        "on); off waits for one settled frame in both floe "
+                        "and floe2 and opens an independent instance")
+    p.add_argument("--frame-cache", choices=("on", "off"), default="on",
+                   help="allow exact settled-frame reuse (default on; Rust "
+                        "renderer only); off is useful for backend-neutral "
+                        "render timing and opens an independent instance")
+    p.add_argument("--perf-baseline", action="store_true",
+                   help="backend-neutral timing preset: refinement, exact "
+                        "frame cache, LOD, hierarchy frames and labels off; "
+                        "detail and depth remain explicit")
     p.add_argument("--frames", choices=("on", "off"), default="on",
                    help="starting hierarchy FRAME_LAYER state (default "
                         "on; the viewer button/`h` changes it live)")

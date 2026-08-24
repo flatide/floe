@@ -99,3 +99,19 @@ cache hit page는 첫 frame에 전부 포함되어 warm 재방문에서 page 수
 bounded PNG LRU가 담당한다.
 hit 시 decoded pages로 query scene을 다시 게시한 뒤 raster/PNG encode를 생략하므로
 pick/snap 화면 일치 계약도 유지된다.
+
+stable floe와 floe2의 기본 end-to-end renderer를 같은 조건으로 비교할 때는 두
+명령 모두 같은 `--perf-baseline`을 사용한다. 이 preset은 refinement, exact final
+frame cache, LOD, hierarchy frames와 labels를 끄되 page/working-set cache와 최종
+PNG publish는 유지한다. detail/depth/좌표/window는 workload이므로 명시적으로 맞춘다.
+
+```sh
+.venv/bin/python -m floe view chip.oas --multi --goto X,Y,W \
+  --detail high --depth 999 --perf-baseline
+.venv/bin/python -m floe2 view chip.oas --multi --goto X,Y,W \
+  --detail high --depth 999 --perf-baseline
+```
+
+개별 제어는 `--refinement on|off`, `--frame-cache on|off`, `--lod on|off`,
+`--frames on|off`, `--labels on|off`다. `--refinement off`는 floe의 VFS stream을
+0으로, floe2의 miss round를 single all-page batch로 바꾼다.

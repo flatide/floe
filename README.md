@@ -362,12 +362,16 @@ GUI는 **GTK3/PyGObject** 셸이다. flateyes와 같은 폐쇄망 호스트
   성능과 `rendering…`/refinement 진행을 표시하므로 마우스 이동으로 렌더
   정보가 사라지지 않는다.
 - 운영 튜닝은 shell 환경변수를 사용하지 않고 `view` 옵션으로 명시한다:
-  `--lod on|off`, `--frames on|off`, `--labels on|off`, `--stream-kb`,
+  `--lod on|off`, `--frames on|off`, `--labels on|off`,
+  `--refinement on|off`, `--frame-cache on|off`, `--stream-kb`,
   `--stream-target-ms`, `--render-debug`. FRAME_LAYER는 `f`로 텍스트와 함께
   즉시 켜고 끌 수 있으며, off 요청은 daemon의 frontier와
   블록명 생성을 중단한다. `lod/frames/labels`는 이미 실행 중인 단일
   인스턴스에도 전달된다. render-process 생성 옵션(`--stream-kb`, 기본과
   다른 `--stream-target-ms`, `--render-debug`)은 독립 인스턴스를 연다.
+  `--perf-baseline`은 backend-neutral end-to-end 비교를 위해 refinement, exact
+  frame cache, LOD, frame, label을 모두 끄고 독립 인스턴스를 연다. detail/depth는
+  workload 자체이므로 호출자가 같게 지정한다.
   OS 세션의 `DISPLAY`/`XDG_RUNTIME_DIR`과 Cargo
   빌드 식별값은 애플리케이션 튜닝값이 아니므로 환경에서 계속 받는다.
 - 인스턴스 소켓은 `GLib.io_add_watch`로, 결과 큐는 `GLib.timeout_add`(25ms)로

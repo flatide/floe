@@ -141,6 +141,8 @@ exact viewport 재방문은 최근 PNG 3개/64MiB bounded daemon LRU가 decoded 
 query scene을 복원한 뒤 raster/PNG encode를 생략한다.
 interactive miss round는 제품 기본 1024 pages로, 744-page pan의 반복
 raster/PNG 6회를 한 번으로 줄였다.
+floe/floe2 공통 `--refinement off`, `--frame-cache off`, `--perf-baseline`으로
+direct-final과 부수 기능 없는 end-to-end A/B를 같은 명령 표면에서 측정한다.
 남은 P1은 frame work bin/transform 재사용으로 단일-worker 성능을 floe의 95%
 안으로 낮추는 F2R-03이다.
 

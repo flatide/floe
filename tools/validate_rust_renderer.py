@@ -9,6 +9,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,6 +36,40 @@ class FakeCache:
 
 
 class WorkerContractTests(unittest.TestCase):
+    def test_common_perf_baseline_disables_optional_render_work(self):
+        from floe import cli
+
+        args = SimpleNamespace(
+            src=None, hairline=None, thin_um=None, goto=None,
+            stream_kb=None, stream_target_ms=500, label_font_px=14,
+            perf_baseline=True, lod="on", frames="on", labels="on",
+            refinement="on", frame_cache="on", render_debug=False,
+            multi=True, drc=None, detail="high", depth=999, dump=False,
+        )
+        with mock.patch("floe.gui.run_viewer") as run_viewer:
+            cli.cmd_view(args)
+        options = run_viewer.call_args.kwargs
+        self.assertFalse(options["lod"])
+        self.assertFalse(options["frames"])
+        self.assertFalse(options["labels"])
+        self.assertFalse(options["frame_cache"])
+        self.assertEqual(options["stream_kb"], 0)
+        self.assertEqual(options["detail"], 2)
+        self.assertEqual(options["depth"], 999)
+
+    def test_refinement_off_rejects_nonzero_stable_stream_budget(self):
+        from floe import cli
+
+        args = SimpleNamespace(
+            src=None, hairline=None, thin_um=None, goto=None,
+            stream_kb=4096, stream_target_ms=500, label_font_px=14,
+            perf_baseline=False, lod="off", frames="off", labels="off",
+            refinement="off", frame_cache="off", render_debug=False,
+            multi=True, drc=None, detail="high", depth=999, dump=False,
+        )
+        with self.assertRaisesRegex(SystemExit, "conflicts"):
+            cli.cmd_view(args)
+
     def test_rust_gui_startup_does_not_import_klayout(self):
         with tempfile.TemporaryDirectory() as directory:
             binary = os.path.join(directory, "floe-renderd")
@@ -224,6 +259,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertIn("round_paths=1", commands[0])
             self.assertIn("jobs=3 decode_jobs=4 tile_px=384", commands[0])
             self.assertIn("round_pages=1024", commands[0])
+            self.assertIn("frame_cache=1", commands[0])
             self.assertIn("labels=0", commands[0])
             self.assertIn("font_px=22", commands[0])
             fallback_job = dict(job, gen=8)
@@ -305,6 +341,20 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertEqual(partial["refining"], 1)
             self.assertIn(9, worker._jobs)
             self.assertFalse(os.path.exists(partial_path))
+
+    def test_refinement_off_overrides_rust_round_tuning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = os.path.join(directory, "floe-renderd")
+            with open(binary, "w", encoding="ascii") as script:
+                script.write("#!/bin/sh\n")
+            os.chmod(binary, 0o755)
+            with mock.patch.dict(os.environ, {
+                "FLOE_RENDERD_BIN": binary,
+                "FLOE_RUST_ROUND_PAGES": "4",
+            }, clear=False):
+                worker = RustRenderWorker(
+                    FakeCache(directory), stream_kb=0)
+            self.assertEqual(worker._round_pages, 1 << 30)
 
     def test_clip_uses_private_wire_path_and_atomically_publishes_oasis(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -544,6 +594,15 @@ class RealDaemonIntegrationTests(unittest.TestCase):
             self.assertEqual(revisited[0]["png"], first_png)
             self._assert_query_parity(cache, worker, bbox)
             self._assert_clip_parity(cache, worker, bbox)
+
+            # Backend-neutral timing can explicitly bypass only the exact
+            # final-frame cache while retaining the decoded-page warm set.
+            worker.submit(dict(base_job, gen=3, frame_cache=False))
+            uncached = self._frames_through_settled(worker, 3)
+            self.assertEqual(len(uncached), 1)
+            self.assertEqual(uncached[0].get("frame_cache_hit"), 0)
+            self.assertGreater(uncached[0].get("raster_ms", 0.0), 0.0)
+            self.assertEqual(uncached[0]["png"], first_png)
 
             solid = "\n".join(["*" * 16] * 16)
             worker.submit({
