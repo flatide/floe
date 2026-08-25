@@ -7,6 +7,7 @@
 # (stable/KLayout) and `floe2` (Rust) launchers.
 #
 #   ./make_portable.sh [output-dir]     # -> floe2-portable-<ver>-<date>.tar.gz
+#   ./make_portable.sh --print-name     # print the artifact name and stop
 #
 # The bundle holds python + PyGObject + GTK3 (conda-forge) + NumPy/Pillow +
 # the shared floe implementation, floe2 shell, and matched Rust binaries,
@@ -16,6 +17,11 @@
 set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)          # floe repo root
+PRINT_NAME=0
+if [ "${1:-}" = "--print-name" ]; then
+    PRINT_NAME=1
+    shift
+fi
 OUT_DIR=${1:-$REPO}
 WORK=${FLOE_PORTABLE_WORK:-${TMPDIR:-/tmp}/floe-portable-build}
 PY_SPEC=${PY_SPEC:-python=3.11}                 # conda-forge python line
@@ -52,13 +58,21 @@ case "$FLOE_PORTABLE_PRODUCT" in
         ;;
     *) echo "FLOE_PORTABLE_PRODUCT must be floe or floe2"; exit 1 ;;
 esac
-VERSION=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "$REPO/floe/__init__.py")
+VERSION=$(sed -n \
+    's/^__version__[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p' \
+    "$REPO/floe/__init__.py")
+[ -n "$VERSION" ] || {
+    echo "could not read floe version from floe/__init__.py"; exit 1; }
 STAMP=$(date +%Y%m%d)
 FLAVOR=""
 if [ "$FLOE_PORTABLE_KLAYOUT" = 1 ]; then
     FLAVOR="-klayout"
 fi
 NAME="${FLOE_PORTABLE_PRODUCT}-portable-${VERSION}-${STAMP}${FLAVOR}"
+if [ "$PRINT_NAME" = 1 ]; then
+    printf '%s\n' "$NAME"
+    exit 0
+fi
 
 case "$(uname -s)-$(uname -m)" in
     Linux-x86_64) : ;;

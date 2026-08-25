@@ -217,6 +217,17 @@ print(json.dumps([_renderer_backend(), instance.APP,
     check("FLOE_INDEX_BIN and FLOE_RENDERD_BIN must be specified together"
           in portable_source,
           "portable permits a mismatched Rust binary override")
+    package_version = run(
+        base, "-c", "import floe; print(floe.__version__)").stdout.strip()
+    portable_name = subprocess.run(
+        ["bash", str(portable), "--print-name"], cwd=ROOT, env=base,
+        capture_output=True, text=True, timeout=10)
+    check(portable_name.returncode == 0 and
+          portable_name.stdout.strip().startswith(
+              "floe2-portable-%s-" % package_version) and
+          "#" not in portable_name.stdout,
+          "portable artifact name contains the __version__ line comment: %s"
+          % portable_name.stdout.strip())
     launcher_source = launcher.read_text(encoding="utf-8")
     check('exec "$RT/bin/python3" -m "$PRODUCT" "$@"' in
           launcher_source,
