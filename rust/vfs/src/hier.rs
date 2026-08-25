@@ -304,9 +304,10 @@ pub enum GridVis {
 /// visible index rectangle of a grid rep against offset-region R
 /// (member o = i*va + j*vb visible iff o in R). Exact for det != 0
 /// (Cramer corners + floor/ceil) and for the writer's 1-D normal
-/// forms; degenerate 2-D collapses to conservative full range -
-/// over-inclusion is cost, omission is a bug (par.2.3). All math
-/// i128: i64 products cannot overflow it.
+/// forms; a zero-vector 2-D form prunes its nonzero axis exactly,
+/// while other degenerate 2-D forms use a conservative full range.
+/// Over-inclusion is cost, omission is a bug (par.2.3). All math
+/// is i128: i64 products cannot overflow it.
 pub fn grid_ranges(
     na: i64,
     nb: i64,
@@ -367,7 +368,23 @@ pub fn grid_ranges(
             None => GridVis::Empty,
         };
     }
-    // collinear / zero-vector 2-D: conservative full range
+    // A used zero vector is legal in field OASIS and means duplicate members,
+    // not an unbounded array.  Keep the duplicate axis in full while pruning
+    // the other axis exactly.  The renderer separately caps the resulting
+    // visit count, so a corrupt enormous duplicate grid cannot hang it.
+    if vb == (0, 0) {
+        return match axis1d(na, va, r) {
+            Some((a, b)) => clamp(a, b, 0, nb as i128 - 1),
+            None => GridVis::Empty,
+        };
+    }
+    if va == (0, 0) {
+        return match axis1d(nb, vb, r) {
+            Some((a, b)) => clamp(0, na as i128 - 1, a, b),
+            None => GridVis::Empty,
+        };
+    }
+    // Other collinear 2-D grids retain the conservative full range.
     clamp(0, na as i128 - 1, 0, nb as i128 - 1)
 }
 

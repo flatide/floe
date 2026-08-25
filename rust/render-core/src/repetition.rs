@@ -5,6 +5,13 @@ use std::cell::Cell;
 
 use crate::RenderCancellation;
 
+// Degenerate 2-D arrays cannot use the determinant-based viewport inverse.
+// Small forms occur in valid field data (most commonly one zero vector), but
+// accepting an unchecked 2^31 x 2^31 form would turn one tile into a permanent
+// enumeration.  This is a per-repetition, per-view bound; normal non-degenerate
+// grids remain analytically pruned and are not subject to it.
+const MAX_DEGENERATE_GRID_VISITS: u64 = 1_048_576;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct RepVisit {
     pub tested: u64,
@@ -64,7 +71,6 @@ fn for_each_visible_offset_impl(
     cancellation: Option<(u64, &RenderCancellation)>,
     mut visit: impl FnMut(i64, i64) -> Result<(), String>,
 ) -> Result<RepVisit, String> {
-    validate_render_repetition(rep)?;
     check_repetition_cancelled(cancellation)?;
     if base_bbox.is_empty() || local_view.is_empty() {
         return Ok(RepVisit::default());
@@ -99,6 +105,14 @@ fn for_each_visible_offset_impl(
                 .checked_mul(nj)
                 .and_then(|value| value.try_into().ok())
                 .ok_or_else(|| "limit exceeded: visible grid members".to_string())?;
+            let determinant = va.0 as i128 * vb.1 as i128 - va.1 as i128 * vb.0 as i128;
+            if na > 1 && nb > 1 && determinant == 0 && count > MAX_DEGENERATE_GRID_VISITS {
+                return Err(format!(
+                    "limit exceeded: degenerate 2-D grid visible members {} > {} \
+                     ({}x{}, vectors ({},{}) and ({},{}))",
+                    count, MAX_DEGENERATE_GRID_VISITS, na, nb, va.0, va.1, vb.0, vb.1
+                ));
+            }
             for i in i0..=i1 {
                 for j in j0..=j1 {
                     charge_member(&mut budget, cancellation, &mut cancel_member)?;
@@ -156,23 +170,6 @@ fn check_repetition_cancelled(
 ) -> Result<(), String> {
     if let Some((generation, cancellation)) = cancellation {
         cancellation.check(generation)?;
-    }
-    Ok(())
-}
-
-fn validate_render_repetition(rep: &Rep) -> Result<(), String> {
-    let Rep::Grid { na, nb, va, vb } = rep else {
-        return Ok(());
-    };
-    if *na <= 1 || *nb <= 1 {
-        return Ok(());
-    }
-    let determinant = va.0 as i128 * vb.1 as i128 - va.1 as i128 * vb.0 as i128;
-    if determinant == 0 {
-        return Err(format!(
-            "unsupported repetition: degenerate 2-D grid {}x{} with vectors ({},{}) and ({},{})",
-            na, nb, va.0, va.1, vb.0, vb.1
-        ));
     }
     Ok(())
 }
@@ -238,7 +235,34 @@ mod tests {
     }
 
     #[test]
-    fn degenerate_2d_grid_returns_an_error_before_enumeration() {
+    fn small_zero_vector_grid_preserves_duplicates_and_prunes_axis() {
+        let rep = Rep::Grid {
+            na: 12,
+            nb: 2,
+            va: (2_400, 0),
+            vb: (0, 0),
+        };
+        let mut offsets = Vec::new();
+        let stats = for_each_visible_offset(
+            &rep,
+            bbox(0, 0, 100, 100),
+            bbox(4_800, 0, 7_300, 100),
+            |x, y| {
+                offsets.push((x, y));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            offsets,
+            vec![(4_800, 0), (4_800, 0), (7_200, 0), (7_200, 0)]
+        );
+        assert_eq!(stats.tested, 4);
+        assert_eq!(stats.visible, 4);
+    }
+
+    #[test]
+    fn enormous_degenerate_2d_grid_returns_an_error_before_enumeration() {
         let rep = Rep::Grid {
             na: 1 << 31,
             nb: 1 << 31,
@@ -252,7 +276,10 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(visits, 0);
-        assert!(error.contains("degenerate 2-D grid"), "{error}");
+        assert!(
+            error.contains("limit exceeded: degenerate 2-D grid"),
+            "{error}"
+        );
     }
 
     #[test]
