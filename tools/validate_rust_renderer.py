@@ -36,6 +36,80 @@ class FakeCache:
 
 
 class WorkerContractTests(unittest.TestCase):
+    def test_single_instance_forwards_effective_detail_and_depth(self):
+        from floe import cli, instance
+
+        def forward(detail, depth):
+            args = SimpleNamespace(
+                src="/tmp/forwarded.oas", hairline=None, thin_um=None,
+                goto="1,2,700", stream_kb=None, stream_target_ms=500,
+                label_font_px=14, perf_baseline=False, lod="on",
+                frames="on", labels="on", refinement="on",
+                frame_cache="on", render_debug=False, multi=False,
+                drc=None, detail=detail, depth=depth, dump=False,
+            )
+            with mock.patch.object(cli.os.path, "isfile", return_value=True), \
+                    mock.patch.object(cli, "_cache_ready", return_value=True), \
+                    mock.patch.object(instance, "display_key",
+                                      return_value=":test"), \
+                    mock.patch.object(instance, "socket_address",
+                                      return_value="/tmp/floe-test.sock"), \
+                    mock.patch.object(instance, "try_forward",
+                                      return_value=0) as try_forward:
+                with self.assertRaises(SystemExit) as stopped:
+                    cli.cmd_view(args)
+            self.assertEqual(stopped.exception.code, 0)
+            return try_forward.call_args.args[1]
+
+        explicit = forward("high", 7)
+        self.assertIn("\tdetail=high\tdepth=7\t", explicit)
+        implicit = forward(None, None)
+        self.assertIn("\tdetail=medium\tdepth=999\t", implicit)
+
+    def test_forwarded_view_options_batch_before_one_goto(self):
+        from floe import gui
+
+        class Status:
+            text = None
+
+            def set_text(self, value):
+                self.text = value
+
+        viewer = gui.Viewer.__new__(gui.Viewer)
+        viewer.detail = 1
+        viewer.cut_px = gui.DETAIL_PX[1]
+        viewer.depth_value = 0
+        viewer.lod_on = True
+        viewer.frames_on = True
+        viewer.labels_on = True
+        viewer.label_font_px = 14
+        viewer._ddlg = None
+        viewer._fontdlg = None
+        viewer.worker = SimpleNamespace(supports_label_font_px=True)
+        viewer.dstatus = Status()
+        viewer._depth_label = lambda: "forwarded state"
+        viewer.redraw = mock.Mock()
+
+        changed = gui.Viewer._forwarded_view_options(viewer, [
+            "detail=high", "depth=999", "lod=off", "frames=off",
+            "labels=off", "labelpx=18",
+        ])
+        self.assertTrue(changed)
+        self.assertEqual(viewer.detail, 2)
+        self.assertEqual(viewer.depth_value, 999)
+        self.assertFalse(viewer.lod_on)
+        self.assertFalse(viewer.frames_on)
+        self.assertFalse(viewer.labels_on)
+        self.assertEqual(viewer.label_font_px, 18)
+        self.assertEqual(viewer.dstatus.text, "forwarded state")
+        viewer.redraw.assert_not_called()
+
+        viewer.goto = mock.Mock()
+        jumped = gui.Viewer._forwarded_goto(
+            viewer, ["goto=13600,8600,700"])
+        self.assertTrue(jumped)
+        viewer.goto.assert_called_once_with(13600.0, 8600.0, 700.0)
+
     def test_cold_gui_open_redraws_without_overwriting_cli_goto(self):
         from floe import gui
 

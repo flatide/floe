@@ -1749,8 +1749,10 @@ class Viewer:
             except OSError:
                 pass
             if not error:
-                self._forwarded_view_options(fields[1:])
-                self._forwarded_goto(fields[1:])
+                changed = self._forwarded_view_options(fields[1:])
+                jumped = self._forwarded_goto(fields[1:])
+                if changed and not jumped:
+                    self.redraw(immediate=True)
                 self._present()
         except Exception:
             import traceback
@@ -1760,37 +1762,60 @@ class Viewer:
         return True
 
     def _forwarded_view_options(self, fields):
-        """Apply request-scoped CLI controls to the live instance."""
+        """Apply request-scoped CLI controls without intermediate renders.
+
+        A forwarded goto follows immediately and owns the one redraw.  A
+        path-only request is redrawn once by _on_incoming when this method
+        reports a state change.
+        """
         opts = {}
         for field in fields:
             if "=" in field:
                 key, value = field.split("=", 1)
                 opts[key] = value
+        before = (self.detail, self.depth_value, self.lod_on,
+                  self.frames_on, self.labels_on, self.label_font_px)
+        detail = opts.get("detail")
+        if detail in DETAIL_LEVELS:
+            self._set_detail(DETAIL_LEVELS.index(detail), redraw=False)
+        depth = opts.get("depth")
+        if depth is not None:
+            try:
+                self._set_depth(int(depth), redraw=False)
+            except ValueError:
+                pass
         if opts.get("lod") in ("on", "off"):
-            self._set_lod(opts["lod"] == "on")
+            self._set_lod(opts["lod"] == "on", redraw=False)
         frames = opts.get("frames")
         labels = opts.get("labels")
         if frames in ("on", "off"):
             label_override = None if labels not in ("on", "off") \
                 else labels == "on"
-            self._set_frames(frames == "on", labels=label_override)
+            self._set_frames(frames == "on", labels=label_override,
+                             redraw=False)
         elif labels in ("on", "off"):
             enabled = self.frames_on and labels == "on"
-            if enabled != self.labels_on:
-                self.labels_on = enabled
-                self.redraw(immediate=True)
+            self.labels_on = enabled
         label_px = opts.get("labelpx")
         if label_px is not None:
             try:
                 label_px = int(label_px)
             except ValueError:
-                return
-            if MIN_LABEL_FONT_PX <= label_px <= MAX_LABEL_FONT_PX:
-                self._set_label_font_px(label_px)
+                label_px = None
+            if label_px is not None and \
+                    MIN_LABEL_FONT_PX <= label_px <= MAX_LABEL_FONT_PX:
+                self._set_label_font_px(label_px, redraw=False)
+        changed = before != (
+            self.detail, self.depth_value, self.lod_on,
+            self.frames_on, self.labels_on, self.label_font_px)
+        if changed:
+            self.dstatus.set_text(self._depth_label())
+        return changed
 
     def _forwarded_goto(self, fields):
         """Apply a 'goto=X,Y[,W]' option (um) from a forwarded request.
-        The sender already validated it, so parse leniently."""
+        The sender already validated it, so parse leniently. Return whether
+        a jump supplied the render owned by this forwarded request."""
         for f in fields:
             if not f.startswith("goto="):
                 continue
@@ -1798,11 +1823,13 @@ class Viewer:
                 vals = [float(t) for t in
                         f[len("goto="):].replace(",", " ").split()]
             except ValueError:
-                return
+                return False
             if len(vals) >= 2:
                 self.goto(vals[0], vals[1],
                           vals[2] if len(vals) > 2 else None)
-            return
+                return True
+            return False
+        return False
 
     def _present(self):
         self.window.deiconify()
@@ -3172,19 +3199,23 @@ class Viewer:
             cur = cap
         self._set_depth(max(0, min(cap, cur + delta)))
 
-    def _set_depth(self, n):
-        self.depth_value = max(0, min(999, int(n)))
+    def _set_depth(self, n, redraw=True):
+        value = max(0, min(999, int(n)))
+        changed = value != self.depth_value
+        self.depth_value = value
         if self._ddlg is not None:
             spin = getattr(self._ddlg, "_spin", None)
             if spin is not None and \
                     int(spin.get_value()) != self.depth_value:
                 spin.set_value(self.depth_value)
-        self._on_depth()
+        if changed and redraw:
+            self._on_depth()
 
-    def _set_detail(self, n):
+    def _set_detail(self, n, redraw=True):
         self.detail = max(0, min(len(DETAIL_PX) - 1, int(n)))
         self.cut_px = DETAIL_PX[self.detail]
-        self._on_depth()  # same refresh: status label + re-render
+        if redraw:
+            self._on_depth()  # same refresh: status label + re-render
 
     def _toggle_abstract(self):
         # klayout abstract mode: sub-10px cells draw as empty frames -
@@ -3206,14 +3237,14 @@ class Viewer:
         self.coverage_on = not self.coverage_on
         self._on_depth()
 
-    def _set_lod(self, enabled):
+    def _set_lod(self, enabled, redraw=True):
         enabled = bool(enabled)
         changed = enabled != self.lod_on
         self.lod_on = enabled
-        if changed:
+        if changed and redraw:
             self._on_depth()
 
-    def _set_frames(self, enabled, labels=None):
+    def _set_frames(self, enabled, labels=None, redraw=True):
         """Set hierarchy frames and their text as one normal UI state.
 
         `labels` is reserved for an explicit CLI/forwarded-request override.
@@ -3227,10 +3258,10 @@ class Viewer:
                    labels_enabled != self.labels_on)
         self.frames_on = enabled
         self.labels_on = labels_enabled
-        if changed:
+        if changed and redraw:
             self._on_depth()
 
-    def _set_label_font_px(self, value):
+    def _set_label_font_px(self, value, redraw=True):
         value = max(MIN_LABEL_FONT_PX,
                     min(MAX_LABEL_FONT_PX, int(value)))
         changed = value != self.label_font_px
@@ -3239,7 +3270,7 @@ class Viewer:
             spin = getattr(self._fontdlg, "_spin", None)
             if spin is not None and int(spin.get_value()) != value:
                 spin.set_value(value)
-        if changed and self.worker is not None and \
+        if changed and redraw and self.worker is not None and \
                 getattr(self.worker, "supports_label_font_px", False):
             self.redraw(immediate=True)
 

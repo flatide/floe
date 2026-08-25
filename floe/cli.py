@@ -1158,6 +1158,17 @@ def cmd_view(args):
         # construction value to a single all-miss batch.
         args.refinement = "off"
 
+    # Resolve startup view policy before the single-instance branch so a
+    # forwarded request and a newly constructed Viewer receive exactly the
+    # same detail/depth.  In particular, --goto without an explicit depth is
+    # a full-depth inspection in both paths.
+    detail_name = args.detail or "medium"
+    detail = ("low", "medium", "high").index(detail_name)
+    depth = args.depth
+    if depth is None:
+        depth = 999 if (goto is not None or args.drc) else 0
+    depth = max(0, min(999, int(depth)))
+
     # Render-process construction parameters cannot be retrofitted into
     # a running single instance. Open an independent viewer when one is
     # explicitly supplied; live request controls are forwarded below.
@@ -1186,8 +1197,10 @@ def cmd_view(args):
         if goto is not None:
             # repr() round-trips floats exactly, unlike %g
             request += "\tgoto=" + ",".join(repr(v) for v in goto)
-        request += "\tlod=%s\tframes=%s\tlabels=%s\tlabelpx=%d" % (
-            args.lod, args.frames, args.labels, args.label_font_px)
+        request += ("\tdetail=%s\tdepth=%d\tlod=%s\tframes=%s"
+                    "\tlabels=%s\tlabelpx=%d" % (
+                        detail_name, depth, args.lod, args.frames,
+                        args.labels, args.label_font_px))
         for _ in range(5):
             code = instance.try_forward(addr, request)
             if code is not None:
@@ -1207,11 +1220,6 @@ def cmd_view(args):
     c = open_cache(src, args=args) if src else None
     # PyGObject/GTK3 problems are reported inside import_gtk (exit 3)
     from .gui import run_viewer
-    depth = args.depth
-    if depth is None and (goto is not None or args.drc):
-        depth = 999   # jumping somewhere = inspecting: full depth
-    detail = (None if args.detail is None
-              else ("low", "medium", "high").index(args.detail))
     run_viewer(c, server, goto=goto, drc=args.drc,
                detail=detail, dump=args.dump, depth=depth,
                lod=args.lod == "on", frames=args.frames == "on",
@@ -1527,12 +1535,13 @@ def main(argv=None, *, prog=None, rust_only=None):
         "starting detail level (default: medium; higher = finer, heavier "
         "wide views - lower levels omit finer features below the cut). "
         "The `d` dialog changes it at runtime; the px thresholds behind "
-        "the levels are internal and may be retuned" if rust_only else
+        "the levels are internal and may be retuned. Forwarded to a "
+        "running instance" if rust_only else
         "starting detail level (default: medium; higher = finer, heavier "
         "wide views - lower levels omit finer features below the cut; "
         "coverage is an independent viewer toggle). The `d` dialog changes "
         "it at runtime; the px thresholds behind the levels are internal "
-        "and may be retuned")
+        "and may be retuned. Forwarded to a running instance")
     p.add_argument("--detail", default=None,
                    choices=("low", "medium", "high"), help=detail_help)
     p.add_argument("--depth", type=int, default=None, metavar="N",
@@ -1541,7 +1550,8 @@ def main(argv=None, *, prog=None, rust_only=None):
                         "plus child outline frames, the fastest "
                         "truthful first paint - and full when "
                         "--goto jumps to an inspection point. "
-                        "Digits / the `d` dialog change it at runtime")
+                        "Digits / the `d` dialog change it at runtime. "
+                        "Forwarded to a running instance")
     p.add_argument("--lod", choices=("on", "off"), default="on",
                    help="starting merged geometry LOD state (default on - "
                         "the live first view needs merged variants without "
