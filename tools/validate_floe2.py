@@ -4,6 +4,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -16,6 +17,21 @@ ROOT = Path(__file__).resolve().parents[1]
 def check(condition, message):
     if not condition:
         raise AssertionError(message)
+
+
+def cargo_package_version(path):
+    """Read package.version without depending on the host Python's TOML API."""
+    in_package = False
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if line.startswith("["):
+            in_package = line == "[package]"
+            continue
+        if in_package:
+            match = re.fullmatch(r'version\s*=\s*"([^"]+)"', line)
+            if match:
+                return match.group(1)
+    raise AssertionError("package.version is missing from %s" % path)
 
 
 def run(env, *args, ok=True, timeout=20):
@@ -219,6 +235,13 @@ print(json.dumps([_renderer_backend(), instance.APP,
           "portable permits a mismatched Rust binary override")
     package_version = run(
         base, "-c", "import floe; print(floe.__version__)").stdout.strip()
+    index_version = cargo_package_version(ROOT / "rust" / "cli" /
+                                          "Cargo.toml")
+    renderd_version = cargo_package_version(ROOT / "rust" / "renderd" /
+                                            "Cargo.toml")
+    check(package_version == index_version == renderd_version,
+          "floe/index/renderd version mismatch: %s/%s/%s" %
+          (package_version, index_version, renderd_version))
     portable_name = subprocess.run(
         ["bash", str(portable), "--print-name"], cwd=ROOT, env=base,
         capture_output=True, text=True, timeout=10)

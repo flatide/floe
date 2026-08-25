@@ -15,6 +15,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from floe import __version__  # noqa: E402
 from floe.rust_render import (  # noqa: E402
     RustRenderWorker,
     _parse_wire_line,
@@ -295,6 +296,31 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         self.assertEqual(kind, "frame")
         self.assertEqual(fields["gen"], "7")
         self.assertEqual(fields["deferred"], "9")
+
+    def test_ready_rejects_stale_renderd_before_open(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = os.path.join(directory, "floe-renderd")
+            with open(binary, "w", encoding="ascii") as script:
+                script.write("#!/bin/sh\n")
+            os.chmod(binary, 0o755)
+            with mock.patch.dict(os.environ, {
+                "FLOE_RENDERD_BIN": binary,
+            }, clear=False):
+                stale = RustRenderWorker(FakeCache(directory))
+                current = RustRenderWorker(FakeCache(directory))
+
+            stale._handle_line("ready", {"version": "0.1.0"}, "")
+            self.assertFalse(stale._ready)
+            self.assertIsNone(stale._renderd_version)
+            self.assertIn(
+                "expected %s, got 0.1.0" % __version__,
+                stale._startup_error)
+
+            current._handle_line(
+                "ready", {"version": __version__}, "")
+            self.assertTrue(current._ready)
+            self.assertEqual(current._renderd_version, __version__)
+            self.assertIsNone(current._startup_error)
 
     def test_converts_patterns_and_preserves_special_fills(self):
         solid = "\n".join(["*" * 16] * 16)

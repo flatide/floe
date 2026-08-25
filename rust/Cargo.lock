@@ -98,7 +98,7 @@ dependencies = [
 
 [[package]]
 name = "floe-renderd"
-version = "0.1.0"
+version = "0.12.10"
 dependencies = [
  "floe-render-core",
 ]

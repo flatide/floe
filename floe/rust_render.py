@@ -15,6 +15,8 @@ import threading
 import time
 from pathlib import Path
 
+from . import __version__
+
 
 _DEFAULT_JOBS = max(1, min(8, os.cpu_count() or 1))
 _DEFAULT_BUDGET_MB = 1024
@@ -177,6 +179,7 @@ class RustRenderWorker:
         self._write_lock = threading.Lock()
         self._condition = threading.Condition()
         self._ready = False
+        self._renderd_version = None
         self._opened = False
         self._styled_epoch = None
         self._style_paths = {}
@@ -634,7 +637,16 @@ class RustRenderWorker:
 
     def _handle_line(self, kind, fields, line):
         if kind == "ready":
+            renderd_version = fields.get("version")
+            if renderd_version != __version__:
+                self._set_startup_error(
+                    "floe-renderd version mismatch: expected %s, got %s "
+                    "(%s); rebuild or replace the Rust binaries" % (
+                        __version__, renderd_version or "missing",
+                        self._binary))
+                return
             with self._condition:
+                self._renderd_version = renderd_version
                 self._ready = True
                 self._condition.notify_all()
         elif kind == "opened":

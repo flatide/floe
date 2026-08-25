@@ -99,6 +99,12 @@ lifetime. Its stdin/stdout protocol is line oriented; paths and field values
 must not contain whitespace. Unlike the CLI, daemon `view` coordinates are raw
 DBU.
 
+The initial `ready version=...` handshake is an exact compatibility boundary.
+Its Cargo package version must match the Python product and `floe-index` version;
+the adapter rejects a missing or stale version before opening the cache. This is
+also a field diagnostic: an old daemon cannot masquerade as current code when a
+repetition rule changes.
+
 ```text
 open cache=/abs/valmini.oas.floe budget_mb=64 jobs=4
 style epoch=1 path=/tmp/valmini.styles

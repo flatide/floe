@@ -67,6 +67,12 @@ FLOE_PORTABLE_KLAYOUT=1 tools/make_portable.sh
 기본 bundle에는 두 Python 패키지가 함께 들어간다. `floe2`가 공통 구현인 `floe`를
 import하기 때문이며, KLayout wheel은 포함하지 않는다. Python 패키지와
 `floe-index`/`floe-renderd`는 항상 같은 checkout의 조합으로 배포한다.
+Python 패키지, `floe-index`, `floe-renderd`의 버전도 모두 동일해야 한다.
+adapter는 daemon의 `ready version=...` 응답을 `floe.__version__`과 비교하고,
+다르면 첫 open/render 전에 선택된 바이너리 경로와 함께 명시 오류를 낸다. 따라서
+이전에 설치한 `0.1.0` renderd가 탐색 순서에서 잡혀 새 repetition 처리 코드를
+우회하는 상태는 첫 화면의 도형 오류로 위장하지 않는다. `validate_floe2.py`도 세
+manifest/package 버전의 일치를 고정한다.
 Rust 바이너리는 portable의 glibc 하한이 빌드 호스트 버전으로 상승하지 않도록
 기본적으로 `x86_64-unknown-linux-musl` 정적 타깃으로 빌드한다. 별도 바이너리를
 쓸 때는 `FLOE_INDEX_BIN`과 `FLOE_RENDERD_BIN`을 반드시 함께 지정한다.
