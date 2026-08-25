@@ -760,11 +760,38 @@ fn try_borrow_plan_slot(
     }
 }
 
-/// P2 (#60) frontier options. Production passes threads >= 2 only
-/// after a successful budget borrow; the determinism unit test
-/// forces threads = 1 to prove that frontier expansion, arena
-/// sharding and the segment merge alone are byte-neutral vs the
-/// serial recursion.
+/// Reserve up to `want` parked late-helper OS threads. These waiters do not
+/// own a runnable planning slot until work is still pending and a planner
+/// lends one, so they fix the one-shot #76 borrow without oversubscribing
+/// CPU-active work. A separate cap prevents many concurrent cells from
+/// multiplying the persistent planner thread count without bound.
+fn reserve_late_waiters(
+    free: Option<&std::sync::atomic::AtomicIsize>,
+    want: usize,
+) -> usize {
+    let Some(free) = free else { return 0 };
+    let mut got = 0usize;
+    while got < want && try_borrow_plan_slot(free) {
+        got += 1;
+    }
+    got
+}
+
+struct ReturnAtomicPermit<'a>(&'a std::sync::atomic::AtomicIsize);
+
+impl Drop for ReturnAtomicPermit<'_> {
+    fn drop(&mut self) {
+        self.0
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// P2 (#60) frontier options. `threads` is the desired ceiling, not just the
+/// helpers available at cell entry: parked late helpers may borrow slots
+/// returned while the frontier is already running (#76b). The determinism
+/// unit test forces threads = 1 to prove that frontier expansion, arena
+/// sharding and the segment merge alone are byte-neutral vs the serial
+/// recursion.
 struct P2Opts<'a> {
     /// total split threads, this thread included
     threads: usize,
@@ -785,6 +812,12 @@ struct P2Opts<'a> {
     /// cells instead of holding idle helpers to layer-plan end
     budget: Option<&'a std::sync::atomic::AtomicIsize>,
     lease: usize,
+    /// bounded permits for helper OS threads that wait for a planning slot
+    late_waiters: Option<&'a std::sync::atomic::AtomicIsize>,
+    /// actual helpers that executed at least one frontier worker loop
+    helpers_used: Option<&'a std::sync::atomic::AtomicUsize>,
+    /// deterministic late-lending gate; production never sets this
+    join_barrier: Option<&'a std::sync::Barrier>,
 }
 
 /// bytes currently reserved by in-flight P2 shardings across all
@@ -1661,8 +1694,7 @@ struct CellPlan {
     shard_bytes: u64,
     /// P2 memory fallback ran (tasks serial, lease pre-returned)
     p2_fallback: bool,
-    /// P2-eligible but zero free budget slots at cell start (#60
-    /// review: the field counter that sizes the unified-pool work)
+    /// P2-eligible but no helper joined before its useful frontier work ended
     p2_starved: bool,
     /// ((layer, datatype), split seconds), heaviest first, <= 3
     top_split: Vec<((u32, u32), f32)>,
@@ -2446,11 +2478,80 @@ fn plan_layer_frontier(
     if opts.threads <= 1 || p2_tasks <= 1 {
         work();
     } else {
+        let helper_cap = opts
+            .threads
+            .min(p2_tasks)
+            .saturating_sub(1);
+        let leased = opts.lease.min(helper_cap);
+        let late = reserve_late_waiters(
+            opts.late_waiters,
+            helper_cap.saturating_sub(leased),
+        );
+        let stop = std::sync::atomic::AtomicBool::new(false);
         std::thread::scope(|sc| {
-            for _ in 0..opts.threads.min(p2_tasks) - 1 {
-                sc.spawn(&work);
+            struct StopOnDrop<'a>(&'a std::sync::atomic::AtomicBool);
+            impl Drop for StopOnDrop<'_> {
+                fn drop(&mut self) {
+                    self.0.store(
+                        true,
+                        std::sync::atomic::Ordering::Release,
+                    );
+                }
+            }
+            let _stop_on_drop = StopOnDrop(&stop);
+            for _ in 0..leased {
+                sc.spawn(|| {
+                    if let Some(used) = opts.helpers_used {
+                        used.fetch_add(
+                            1,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                    }
+                    work();
+                });
+            }
+            for _ in 0..late {
+                sc.spawn(|| {
+                    let _waiter = ReturnAtomicPermit(
+                        opts.late_waiters.expect("late waiter budget"),
+                    );
+                    loop {
+                        if stop.load(
+                            std::sync::atomic::Ordering::Acquire,
+                        ) || nextk.load(
+                            std::sync::atomic::Ordering::Relaxed,
+                        ) >= order.len()
+                        {
+                            return;
+                        }
+                        let Some(budget) = opts.budget else {
+                            return;
+                        };
+                        if try_borrow_plan_slot(budget) {
+                            let _slot = ReturnAtomicPermit(budget);
+                            if let Some(used) = opts.helpers_used {
+                                used.fetch_add(
+                                    1,
+                                    std::sync::atomic::Ordering::Relaxed,
+                                );
+                            }
+                            if let Some(barrier) = opts.join_barrier {
+                                barrier.wait();
+                            }
+                            work();
+                            return;
+                        }
+                        std::thread::sleep(
+                            std::time::Duration::from_millis(1),
+                        );
+                    }
+                });
+            }
+            if let Some(barrier) = opts.join_barrier {
+                barrier.wait();
             }
             work();
+            stop.store(true, std::sync::atomic::Ordering::Release);
         });
     }
     // ---- merge: shard slots (prefix first, then task order),
@@ -2526,6 +2627,8 @@ fn build_cell_plan(
     page_target_bytes: u64,
     lod: bool,
     plan_budget: &std::sync::atomic::AtomicIsize,
+    late_waiters: Option<&std::sync::atomic::AtomicIsize>,
+    late_join_barrier: Option<&std::sync::Barrier>,
     jobs: usize,
     p2_shard_limit: Option<u64>,
 ) -> CellPlan {
@@ -2698,9 +2801,12 @@ fn build_cell_plan(
     } else {
         SplitMode::Serial
     };
-    let desired = std::thread::available_parallelism()
-        .map(|v| v.get())
-        .unwrap_or(1)
+    // `--jobs` is the scheduler contract. Re-reading
+    // available_parallelism here could silently collapse explicitly requested
+    // fanout to one under a container/affinity view even though the outer pool
+    // already created `jobs` planners.
+    let desired = jobs
+        .max(1)
         .min(if mode == SplitMode::P1 {
             layers_active
         } else {
@@ -2716,10 +2822,14 @@ fn build_cell_plan(
             split_helpers += 1;
         }
     }
-    let layer_plans: Vec<LayerPlan> = if split_helpers == 0 {
+    let p2_helpers_used = std::sync::atomic::AtomicUsize::new(0);
+    let layer_plans: Vec<LayerPlan> = if mode == SplitMode::Serial
+        || desired <= 1
+        || (mode == SplitMode::P1 && split_helpers == 0)
+    {
         // operational fallback: without helpers neither fanout
-        // pays - P2 sharding in particular would copy scratch for
-        // no speedup, so the frontier is never even built
+        // pays. P2 with jobs>1 is different: it forms a frontier
+        // even if no slot exists yet so late-lent slots can join.
         layer_inputs
             .into_iter()
             .map(|(li, recs)| {
@@ -2733,13 +2843,16 @@ fn build_cell_plan(
         // ceiling is evaluated inside the frontier at decision
         // time (see shard_headroom), not here.
         let opts = P2Opts {
-            threads: split_helpers + 1,
-            target_tasks: ((split_helpers + 1) * 4)
+            threads: desired,
+            target_tasks: (desired * 4)
                 .min(P2_TASK_CAP),
             task_min: P2_TASK_MIN_BYTES,
             shard_limit: p2_shard_limit,
             budget: Some(plan_budget),
             lease: split_helpers,
+            late_waiters,
+            helpers_used: Some(&p2_helpers_used),
+            join_barrier: late_join_barrier,
         };
         layer_inputs
             .into_iter()
@@ -2816,15 +2929,20 @@ fn build_cell_plan(
             std::sync::atomic::Ordering::Relaxed,
         );
     }
-    let split_threads =
-        if p2_fallback { 1 } else { split_helpers + 1 };
-    // #60 review: a P2-eligible cell that starts while every
-    // planner still owns its budget slot runs serial to the end -
-    // counted only where a pool could actually help (jobs > 1 and
-    // more than one usable CPU), so --jobs 1 hosts don't inflate
-    // the unified-pool case
+    let split_threads = if p2_fallback {
+        1
+    } else if mode == SplitMode::P2 {
+        1 + p2_helpers_used.load(
+            std::sync::atomic::Ordering::Relaxed,
+        )
+    } else {
+        split_helpers + 1
+    };
+    // #76b: count a P2 cell only if neither an entry-time lease nor a slot
+    // lent while useful frontier work remained actually joined it. jobs=1
+    // stays out because no pool could help there.
     let p2_starved = mode == SplitMode::P2
-        && split_helpers == 0
+        && split_threads == 1
         && jobs > 1
         && desired > 1;
     // merge in li order (this is what fixes the output bytes)
@@ -2912,9 +3030,8 @@ fn build_cell_plan(
         // runnable-task budget. Cell planners blocked on the ordered
         // plan window lend their slots, so this fanout also works for
         // monsters in the middle of a large build (#76).
-        let desired = std::thread::available_parallelism()
-            .map(|v| v.get())
-            .unwrap_or(1)
+        let desired = jobs
+            .max(1)
             .min(cand.len())
             .min(16)
             .max(1);
@@ -2924,6 +3041,10 @@ fn build_cell_plan(
         {
             extra += 1;
         }
+        let late = reserve_late_waiters(
+            late_waiters,
+            desired.saturating_sub(extra + 1),
+        );
         let slots: Vec<
             std::sync::Mutex<Option<(PageJob, SplitStats)>>,
         > = (0..cand.len())
@@ -2953,16 +3074,82 @@ fn build_cell_plan(
                     *slots[i].lock().unwrap() = Some((job, lst));
                 }
             };
-            if extra == 0 {
+            if extra == 0 && late == 0 {
                 work();
             } else {
-                lod_threads = extra + 1;
+                let helpers_used =
+                    std::sync::atomic::AtomicUsize::new(0);
+                let stop = std::sync::atomic::AtomicBool::new(false);
                 std::thread::scope(|sc| {
+                    struct StopOnDrop<'a>(
+                        &'a std::sync::atomic::AtomicBool,
+                    );
+                    impl Drop for StopOnDrop<'_> {
+                        fn drop(&mut self) {
+                            self.0.store(
+                                true,
+                                std::sync::atomic::Ordering::Release,
+                            );
+                        }
+                    }
+                    let _stop_on_drop = StopOnDrop(&stop);
                     for _ in 0..extra {
-                        sc.spawn(&work);
+                        sc.spawn(|| {
+                            helpers_used.fetch_add(
+                                1,
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
+                            work();
+                        });
+                    }
+                    for _ in 0..late {
+                        sc.spawn(|| {
+                            let _waiter = ReturnAtomicPermit(
+                                late_waiters
+                                    .expect("late waiter budget"),
+                            );
+                            loop {
+                                if stop.load(
+                                    std::sync::atomic::Ordering::Acquire,
+                                ) || nextk.load(
+                                    std::sync::atomic::Ordering::Relaxed,
+                                ) >= cand.len()
+                                {
+                                    return;
+                                }
+                                if try_borrow_plan_slot(plan_budget) {
+                                    let _slot =
+                                        ReturnAtomicPermit(plan_budget);
+                                    helpers_used.fetch_add(
+                                        1,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    );
+                                    if let Some(barrier) =
+                                        late_join_barrier
+                                    {
+                                        barrier.wait();
+                                    }
+                                    work();
+                                    return;
+                                }
+                                std::thread::sleep(
+                                    std::time::Duration::from_millis(1),
+                                );
+                            }
+                        });
+                    }
+                    if let Some(barrier) = late_join_barrier {
+                        barrier.wait();
                     }
                     work();
+                    stop.store(
+                        true,
+                        std::sync::atomic::Ordering::Release,
+                    );
                 });
+                lod_threads = 1 + helpers_used.load(
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 plan_budget.fetch_add(
                     extra as isize,
                     std::sync::atomic::Ordering::Relaxed,
@@ -3646,6 +3833,12 @@ fn build(
     let encoded_pages = std::sync::Arc::new(
         std::sync::atomic::AtomicUsize::new(0),
     );
+    let active_cell_plans = std::sync::Arc::new(
+        std::sync::atomic::AtomicUsize::new(0),
+    );
+    let peak_cell_plans = std::sync::Arc::new(
+        std::sync::atomic::AtomicUsize::new(0),
+    );
     let pipeline_on = std::sync::Arc::new(
         std::sync::atomic::AtomicBool::new(true),
     );
@@ -3654,6 +3847,8 @@ fn build(
         let planned_cells = planned_cells.clone();
         let planned_pages = planned_pages.clone();
         let encoded_pages = encoded_pages.clone();
+        let active_cell_plans = active_cell_plans.clone();
+        let peak_cell_plans = peak_cell_plans.clone();
         let pipeline_on = pipeline_on.clone();
         std::thread::spawn(move || {
             use std::sync::atomic::Ordering::Relaxed;
@@ -3670,11 +3865,14 @@ fn build(
                     last = elapsed;
                     eprintln!(
                         "[vfs] build: pipeline cells {}/{} pages \
-                         planned={} encoded={} ({}s, rss {})",
+                         planned={} encoded={} active_cells={} \
+                         peak={} ({}s, rss {})",
                         planned_cells.load(Relaxed),
                         n,
                         planned_pages.load(Relaxed),
                         encoded_pages.load(Relaxed),
+                        active_cell_plans.load(Relaxed),
+                        peak_cell_plans.load(Relaxed),
                         elapsed,
                         rss()
                     );
@@ -3740,6 +3938,12 @@ fn build(
     let plan_budget = std::sync::atomic::AtomicIsize::new(
         jobs.max(1) as isize - planners as isize,
     );
+    // Parked late helpers repair the one-shot #76 race: a P2/LOD phase that
+    // starts at budget zero can consume slots lent later. They do not own a
+    // CPU slot while parked, and this separate cap bounds extra OS threads.
+    let late_waiters = std::sync::atomic::AtomicIsize::new(
+        jobs.saturating_sub(1).min(16) as isize,
+    );
     let window_slot_lends = std::sync::atomic::AtomicUsize::new(0);
     std::thread::scope(|s| {
         // committer side: a panic below (commit/encode) must also
@@ -3754,6 +3958,9 @@ fn build(
             let lidx = &lidx;
             let died = &died;
             let plan_budget = &plan_budget;
+            let late_waiters = &late_waiters;
+            let active_cell_plans = &active_cell_plans;
+            let peak_cell_plans = &peak_cell_plans;
             let window_slot_lends = &window_slot_lends;
             s.spawn(move || loop {
                 let ci = next_cell.fetch_add(
@@ -3808,6 +4015,26 @@ fn build(
                     }
                 }
                 let t = std::time::Instant::now();
+                let active = active_cell_plans.fetch_add(
+                    1,
+                    std::sync::atomic::Ordering::Relaxed,
+                ) + 1;
+                peak_cell_plans.fetch_max(
+                    active,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                struct ActiveCellGuard<'a>(
+                    &'a std::sync::atomic::AtomicUsize,
+                );
+                impl Drop for ActiveCellGuard<'_> {
+                    fn drop(&mut self) {
+                        self.0.fetch_sub(
+                            1,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                    }
+                }
+                let _active_cell = ActiveCellGuard(active_cell_plans);
                 let plan = match std::panic::catch_unwind(
                     std::panic::AssertUnwindSafe(|| {
                         build_cell_plan(
@@ -3819,6 +4046,8 @@ fn build(
                             page_target_bytes,
                             lod,
                             plan_budget,
+                            Some(late_waiters),
+                            None,
                             jobs,
                             p2_shard_limit,
                         )
@@ -3849,11 +4078,16 @@ fn build(
                     }
                     let p2 = if plan.p2_tasks > 0 {
                         format!(
-                            " p2_tasks={} shard={}MiB{}",
+                            " p2_tasks={} shard={}MiB{}{}",
                             plan.p2_tasks,
                             plan.shard_bytes / MIB,
                             if plan.p2_fallback {
                                 " p2_mem_fallback=1"
+                            } else {
+                                ""
+                            },
+                            if plan.p2_starved {
+                                " helpers=0"
                             } else {
                                 ""
                             }
@@ -4091,15 +4325,21 @@ fn build(
         jobs.max(1) as isize,
         "planning slot lease imbalance"
     );
+    debug_assert_eq!(
+        late_waiters.load(std::sync::atomic::Ordering::Relaxed),
+        jobs.saturating_sub(1).min(16) as isize,
+        "late helper waiter lease imbalance"
+    );
     debug_assert_eq!(b.n_pages() as usize, pages_total);
     pipeline_on.store(false, std::sync::atomic::Ordering::Relaxed);
     heartbeat.join().expect("pipeline heartbeat");
     eprintln!(
         "[vfs] build: pipeline complete (wall {:.1}s, commit {:.1}s, \
-         encode {:.1}s, rss {})",
+         encode {:.1}s, cell-plan peak {}, rss {})",
         t_pipeline.elapsed().as_secs_f64(),
         commit_elapsed.as_secs_f64(),
         encode_elapsed.as_secs_f64(),
+        peak_cell_plans.load(std::sync::atomic::Ordering::Relaxed),
         rss()
     );
     let lends =
@@ -4112,11 +4352,11 @@ fn build(
         );
     }
     if p2_starved_cells > 0 {
-        // This now means all runnable slots were doing real planning at the
-        // split decision; window waiters lend their slots before sleeping.
+        // This means no runnable slot became available while useful frontier
+        // work remained; the one-shot-at-entry race is covered by #76b.
         eprintln!(
             "[vfs] build: {} P2-eligible cell(s) ran serial (no \
-             free runnable slots at split start)",
+             runnable slot joined before split completion)",
             p2_starved_cells
         );
     }
@@ -5231,6 +5471,8 @@ mod split_tests {
             8 * 1024,
             true,
             &budget,
+            None,
+            None,
             4,
             None,
         );
@@ -5242,6 +5484,64 @@ mod split_tests {
             budget.load(std::sync::atomic::Ordering::Relaxed),
             3,
             "LOD helper lease was not returned"
+        );
+    }
+
+    #[test]
+    fn lod_borrows_slot_lent_after_phase_start() {
+        const DIE: i64 = 1_000_000;
+        let doc = mini_doc(vec![pts_rec(77, 200_000, DIE, 100)]);
+        let rbb = cell_bboxes_full(&doc);
+        let lidx: std::collections::HashMap<(u32, u32), usize> =
+            doc.layer_order
+                .iter()
+                .enumerate()
+                .map(|(i, &k)| (k, i))
+                .collect();
+        let budget = std::sync::atomic::AtomicIsize::new(0);
+        let waiters = std::sync::atomic::AtomicIsize::new(1);
+        let join_barrier = std::sync::Barrier::new(2);
+        let plan = std::thread::scope(|sc| {
+            sc.spawn(|| {
+                while waiters.load(
+                    std::sync::atomic::Ordering::Acquire,
+                ) != 0
+                {
+                    std::thread::yield_now();
+                }
+                budget.fetch_add(
+                    1,
+                    std::sync::atomic::Ordering::Release,
+                );
+            });
+            build_cell_plan(
+                &doc,
+                0,
+                &rbb,
+                &lidx,
+                1,
+                8 * 1024,
+                true,
+                &budget,
+                Some(&waiters),
+                Some(&join_barrier),
+                4,
+                None,
+            )
+        });
+        assert!(
+            plan.lod_threads > 1,
+            "late-lent slot never joined LOD work"
+        );
+        assert_eq!(
+            waiters.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "late LOD waiter permit leaked"
+        );
+        assert_eq!(
+            budget.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "late LOD planning slot was not returned"
         );
     }
 
@@ -5404,13 +5704,100 @@ mod split_tests {
                 shard_limit: Some(u64::MAX),
                 budget: None,
                 lease: 0,
+                late_waiters: None,
+                helpers_used: None,
+                join_barrier: None,
             },
         );
-        assert!(b.p2_tasks > 1, "frontier never formed");
+        assert!(
+            b.p2_tasks > 1,
+            "frontier formed {} task(s)",
+            b.p2_tasks
+        );
         assert!(b.shard_bytes > 0, "sharding never ran");
         assert!(
             a.stats.oversize_pages > 0,
             "fixture lost its oversize path"
+        );
+        layer_bytes_equal(&doc, &a, &b);
+    }
+
+    /// #76b regression: the real field can reach the P2 decision before
+    /// future-cell planners fill the (default jobs*4) window. The old
+    /// one-shot borrow then fixed the whole split at one thread even when a
+    /// slot was lent milliseconds later. Synchronize the lender on waiter
+    /// registration so this gate proves late uptake, lease return and byte
+    /// neutrality rather than relying on timing.
+    #[test]
+    fn p2_borrows_slot_lent_after_frontier_start() {
+        const DIE: i64 = 1_000_000;
+        let recs: Vec<RectRec> = (0..40u64)
+            .map(|k| pts_rec(k + 3, 1_000, DIE, 150))
+            .collect();
+        let doc = mini_doc(recs);
+        let cell = &doc.cells[0];
+        let a = plan_layer(
+            cell,
+            0,
+            0,
+            assemble_rects(cell),
+            16 * 1024,
+        );
+        let budget = std::sync::atomic::AtomicIsize::new(0);
+        let waiters = std::sync::atomic::AtomicIsize::new(1);
+        let used = std::sync::atomic::AtomicUsize::new(0);
+        let join_barrier = std::sync::Barrier::new(2);
+        let b = std::thread::scope(|sc| {
+            sc.spawn(|| {
+                while waiters.load(
+                    std::sync::atomic::Ordering::Acquire,
+                ) != 0
+                {
+                    std::thread::yield_now();
+                }
+                budget.fetch_add(
+                    1,
+                    std::sync::atomic::Ordering::Release,
+                );
+            });
+            plan_layer_frontier(
+                cell,
+                0,
+                0,
+                assemble_rects(cell),
+                16 * 1024,
+                &P2Opts {
+                    threads: 2,
+                    target_tasks: 8,
+                    task_min: 2 * 1024,
+                    shard_limit: Some(u64::MAX),
+                    budget: Some(&budget),
+                    lease: 0,
+                    late_waiters: Some(&waiters),
+                    helpers_used: Some(&used),
+                    join_barrier: Some(&join_barrier),
+                },
+            )
+        });
+        assert!(
+            b.p2_tasks > 1,
+            "late frontier formed {} task(s)",
+            b.p2_tasks
+        );
+        assert_eq!(
+            used.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "late-lent slot never joined the P2 work"
+        );
+        assert_eq!(
+            waiters.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "late waiter permit leaked"
+        );
+        assert_eq!(
+            budget.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "late planning slot was not returned"
         );
         layer_bytes_equal(&doc, &a, &b);
     }
@@ -5442,6 +5829,9 @@ mod split_tests {
                 shard_limit: Some(0),
                 budget: Some(&lease),
                 lease: 3,
+                late_waiters: None,
+                helpers_used: None,
+                join_barrier: None,
             },
         );
         assert!(b.p2_tasks > 1, "frontier never formed");
@@ -5498,12 +5888,14 @@ mod split_tests {
         let mut plans = Vec::new();
         for budget in [0isize, 7] {
             let b = std::sync::atomic::AtomicIsize::new(budget);
+            let jobs = if budget == 0 { 1 } else { 8 };
             plans.push(build_cell_plan(
-                &doc, 0, &rbb, &lidx, 1, MIB, false, &b, 8, None,
+                &doc, 0, &rbb, &lidx, 1, MIB, false, &b, None,
+                None, jobs, None,
             ));
         }
         let (a, b) = (&plans[0], &plans[1]);
-        // operational fallback: no helpers -> no frontier at all
+        // jobs=1 is the explicit serial reference; jobs=8 engages P2.
         assert_eq!(a.p2_tasks, 0, "sharding without helpers");
         assert_eq!(a.split_threads, 1);
         assert_eq!(a.shard_bytes, 0);
@@ -5548,7 +5940,8 @@ mod split_tests {
             let b = std::sync::atomic::AtomicIsize::new(budget);
             let t = std::time::Instant::now();
             let plan = build_cell_plan(
-                &doc, 0, &rbb, &lidx, 1, MIB, true, &b, 8, None,
+                &doc, 0, &rbb, &lidx, 1, MIB, true, &b, None,
+                None, 8, None,
             );
             eprintln!(
                 "p2 budget {}: plan {:.2}s (split {:.2}/{}t \
@@ -5630,6 +6023,8 @@ mod split_tests {
                 MIB,
                 true,
                 &b,
+                None,
+                None,
                 8,
                 None,
             );
@@ -5685,7 +6080,8 @@ mod split_tests {
                 .collect();
         let budget = std::sync::atomic::AtomicIsize::new(0);
         build_cell_plan(
-            doc, 0, &rbb, &lidx, 1, MIB, true, &budget, 1, None,
+            doc, 0, &rbb, &lidx, 1, MIB, true, &budget, None,
+            None, 1, None,
         )
     }
 

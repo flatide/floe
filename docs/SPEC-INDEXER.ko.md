@@ -71,8 +71,14 @@ floe-index vfs <src.oas> [outdir=.floe] [--jobs N] [--plan-batch N]
        실행 슬롯 예산**: 셀 플래너와 P1/P2/LOD 헬퍼가 `--jobs`개의
        슬롯을 공유한다. 순서 커밋 윈도 밖에서 기다리는 플래너는
        슬롯을 반납하고, 입장이 허용돼도 슬롯을 다시 얻은 뒤에만
-       플래닝을 재개한다. 따라서 중간 위치 몬스터도 유휴 CPU를
-       빌리되 CPU-active 플래닝 작업은 항상 `--jobs` 이하이다.
+       플래닝을 재개한다. **#76b 늦은 임대 흡수**: P2/LOD는 단계
+       시작 시점의 한 번뿐인 슬롯 조회로 스레드 수를 고정하지 않는다.
+       최대 16개의 전역 제한된 parked helper가 태스크가 남아 있을 때
+       뒤늦게 반납된 슬롯을 빌려 합류하고 즉시 반환한다. 따라서 기본
+       `plan-window=jobs×4`가 늦게 찬 실칩에서도 중간 위치 몬스터가
+       유휴 CPU를 빌리며, parked helper는 실행 슬롯을 소유하지 않아
+       CPU-active 플래닝 작업은 항상 `--jobs` 이하이다. 내부 fanout
+       상한은 런타임 재탐지값이 아니라 명시 `--jobs`를 따른다.
        - **P1**: 비어있지 않은 레이어가 태스크 단위, ≤8 스레드
          (무거운 레이어 우선), 결과는 li 순서 병합(pages/pbvh
          리베이스 + compact **arena shard** slot) → 바이트 불변.
@@ -85,8 +91,10 @@ floe-index vfs <src.oas> [outdir=.floe] [--jobs N] [--plan-batch N]
          참조하는 원본 엔트리는 즉시 해제 — 일시 오버헤드 = 엔트리
          1개분), 실행은 무거운 태스크 우선, 병합은 세그먼트 순서 +
          **seq 재부여** + shard slot(프리픽스 → 태스크 순) 지정,
-         pbvh는 병합 완료 후 레이어당 1회 → 바이트 불변. 헬퍼 0이면
-         frontier/sharding 자체를 만들지 않는 완전 직렬 폴백.
+         pbvh는 병합 완료 후 레이어당 1회 → 바이트 불변. jobs=1이면
+         frontier/sharding 자체를 만들지 않는 완전 직렬 폴백;
+         jobs>1이면 시작 슬롯이 0이어도 frontier를 만들어 늦은 슬롯이
+         남은 태스크에 합류할 수 있다.
          **shard-복사 한도**: 예상 복사량(레코드 범위 합×4B, 복사
          전에 정확히 계산됨)을 **결정 시점**(프리픽스·타 레이어·타
          플래너 할당 이후)의 MemAvailable 여유 절반과 대조하고,
@@ -97,21 +105,29 @@ floe-index vfs <src.oas> [outdir=.floe] [--jobs N] [--plan-batch N]
          LOD/타 셀에 재대여, 로그 `p2_mem_fallback=1`·split 1t
          보고). off-Linux는 MemAvailable이 없어 기본 무제한 —
          `--p2-shard-limit-mb`로 명시 상한. 수 GB 단일 Pts
-         엔트리가 OOM을 만들지 않는다. **기아 계측**: P2 대상인데
-         셀 시작 시점 여유 슬롯이 0이면(jobs>1·usable CPU>1 조건)
-         `p2_eligible=1 helpers=0` 표시 + 빌드 말미 집계 한 줄. #76
-         이후 이는 윈도 대기자가 아니라 모든 실행 슬롯이 실제
-         플래닝 중이었다는 뜻이다. 윈도 대기 슬롯 임대 횟수도 빌드
+         엔트리가 OOM을 만들지 않는다. **기아 계측**: P2 frontier의
+         유효 태스크가 끝날 때까지 helper가 하나도 합류하지 못하면
+         `p2_tasks=... helpers=0` 표시 + 빌드 말미 집계 한 줄. #76b
+         이후 이는 시작 순간 슬롯 0이 아니라 실행 중에도 빌릴 슬롯이
+         끝내 생기지 않았다는 뜻이다. 윈도 대기 슬롯 임대 횟수도 빌드
          말미 `plan window lent ...`로 보고한다.
          남은 지렛대 = 프리픽스 파티션 병렬화(P2-ext, 미착수).
      - **LOD 변종 생성**: 후보 members≥256; 후보 ≥64(LOD_PAR_MIN)면
-       셀 내부 스레드 팬아웃(≤16, 같은 공유 예산), cand 순서 병합 →
-       바이트 불변. `--no-lod`면 후보 목록 자체를 비움(전 페이지
+       셀 내부 스레드 팬아웃(≤16, 같은 공유 예산), 단계 시작 뒤 늦게
+       생긴 슬롯도 태스크가 남아 있으면 합류, cand 순서 병합 → 바이트
+       불변. `--no-lod`면 후보 목록 자체를 비움(전 페이지
        LOD_PAGE_NONE).
      - CellSink 프리인코딩.
    - 커미터(메인): 순서대로 `append_cell_sink` 리베이스, lod_page
      전역화, 텍스트/비트셋/cell 레코드 커밋. 윈도 채워지면 청크 인코드
      + 아레나 해제. 메모리 거버너: MemAvailable<4GB면 윈도 반감.
+     page encode는 persistent planner와 별도의 최대 `jobs` scoped
+     스레드를 사용하므로 청크 경계에서 OS thread 수가 잠시 약
+     `2×jobs`로 보일 수 있다. 이는 cell-plan 병렬도와 다른 계측이며
+     후속 고정 풀 통합 대상이다.
+   - **동시성 계측**: 5초 heartbeat는 `active_cells`/`peak`, 완료 줄은
+     `cell-plan peak`를 출력한다. 셀 로그가 순차로 보여도 실제 동시
+     cell-plan 수는 이 값으로 판정한다.
    - **slow-cell 로그**: plan이 임계(기본 5s, `--slow-cell-s`,
      0=전 셀; 환경변수 아님 — --kill-at과 같은 CLI-상태 규칙) 초과인 셀을 stderr로:
      `slow cell NAME (ci N/total): plan Xs (places, pages, frag
