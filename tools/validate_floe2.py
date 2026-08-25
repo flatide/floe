@@ -194,11 +194,63 @@ print(json.dumps([_renderer_backend(), instance.APP,
           "floe2 still advertises density coverage UI state")
 
     portable = ROOT / "tools" / "make_portable.sh"
+    launcher = ROOT / "tools" / "portable_launcher.sh"
     syntax = subprocess.run(
         ["bash", "-n", str(portable)], cwd=ROOT,
         capture_output=True, text=True)
     check(syntax.returncode == 0,
           "portable script syntax failed: %s" % syntax.stderr)
+    launcher_syntax = subprocess.run(
+        ["sh", "-n", str(launcher)], cwd=ROOT,
+        capture_output=True, text=True)
+    check(launcher_syntax.returncode == 0,
+          "portable launcher syntax failed: %s" % launcher_syntax.stderr)
+    portable_source = portable.read_text(encoding="utf-8")
+    check('PORTABLE_LAUNCHERS="floe floe2"' in portable_source and
+          'cp "$REPO/tools/portable_launcher.sh" "$B/$PRODUCT"' in
+          portable_source,
+          "KLayout floe-portable does not install both product launchers")
+    check("MUSL_TARGET=x86_64-unknown-linux-musl" in portable_source and
+          '--target "$MUSL_TARGET" -p floe-index -p floe-renderd' in
+          portable_source,
+          "portable defaults to host-glibc Rust binaries instead of musl")
+    check("FLOE_INDEX_BIN and FLOE_RENDERD_BIN must be specified together"
+          in portable_source,
+          "portable permits a mismatched Rust binary override")
+    launcher_source = launcher.read_text(encoding="utf-8")
+    check('exec "$RT/bin/python3" -m "$PRODUCT" "$@"' in
+          launcher_source,
+          "portable launcher does not dispatch by floe/floe2 basename")
+    with tempfile.TemporaryDirectory(
+            prefix="floe-portable-launcher-") as td:
+        bundle = Path(td)
+        (bundle / "runtime" / "bin").mkdir(parents=True)
+        echo = shutil.which("echo")
+        check(echo is not None, "portable launcher test needs echo")
+        os.symlink(echo, bundle / "runtime" / "bin" / "python3")
+        for product in ("floe", "floe2"):
+            target = bundle / product
+            shutil.copy2(launcher, target)
+            target.chmod(0o755)
+            launched = subprocess.run(
+                [str(target), "view", "chip.oas"], cwd=bundle,
+                env=dict(base, XDG_CACHE_HOME=str(bundle / "cache")),
+                capture_output=True, text=True, timeout=10)
+            check(launched.returncode == 0 and
+                  launched.stdout.strip() ==
+                  "-m %s view chip.oas" % product,
+                  "portable %s launcher dispatched incorrectly: %s %s" %
+                  (product, launched.stdout, launched.stderr))
+        link_dir = bundle / "links"
+        link_dir.mkdir()
+        os.symlink("../floe2", link_dir / "floe2")
+        linked = subprocess.run(
+            [str(link_dir / "floe2"), "--version"], cwd=bundle,
+            env=dict(base, XDG_CACHE_HOME=str(bundle / "cache")),
+            capture_output=True, text=True, timeout=10)
+        check(linked.returncode == 0 and
+              linked.stdout.strip() == "-m floe2 --version",
+              "portable floe2 convenience symlink lost its runtime")
     conflict_env = dict(base, FLOE_PORTABLE_PRODUCT="floe2",
                         FLOE_PORTABLE_KLAYOUT="1")
     conflict = subprocess.run(

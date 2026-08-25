@@ -3,7 +3,8 @@
 # Adapted from flateyes' make_portable.sh - the GTK3 stack is pulled from
 # conda-forge (relocatable) exactly as flateyes does; floe additionally
 # needs NumPy + Pillow wheels. The default product is Rust-only floe2;
-# FLOE_PORTABLE_KLAYOUT=1 keeps building the stable KLayout floe bundle.
+# FLOE_PORTABLE_KLAYOUT=1 builds the KLayout floe bundle with both `floe`
+# (stable/KLayout) and `floe2` (Rust) launchers.
 #
 #   ./make_portable.sh [output-dir]     # -> floe2-portable-<ver>-<date>.tar.gz
 #
@@ -157,23 +158,49 @@ cd "$WORK"
 # side is complete) but every render waits forever on a vfsd that never
 # spawns, and indexing / DRC --pack cannot run at all (field 2026-08-21).
 # The Python package and both binaries are a matched set (pack/OVM/protocol
-# version discipline): always ship and update them together.
-FLOE_INDEX_BIN=${FLOE_INDEX_BIN:-$REPO/rust/target/release/floe-index}
-FLOE_RENDERD_BIN=${FLOE_RENDERD_BIN:-$REPO/rust/target/release/floe-renderd}
-if { [ ! -x "$FLOE_INDEX_BIN" ] || [ ! -x "$FLOE_RENDERD_BIN" ]; } \
-   && command -v cargo >/dev/null; then
-    echo "== Rust runtime not built yet - building (release)"
-    (cd "$REPO/rust" && cargo build --release \
-        -p floe-index -p floe-renderd)
+# version discipline): always ship and update them together. Portable defaults
+# to static musl binaries. A normal `cargo build --release` inherits the build
+# host's glibc floor (for example GLIBC_2.35 on Ubuntu 22.04) and cannot satisfy
+# the RHEL8/2.28 deployment ceiling even though the bundled GTK runtime can.
+# Explicit overrides remain available for already-built, compatible binaries,
+# but must be supplied as a pair.
+MUSL_TARGET=x86_64-unknown-linux-musl
+if [ -n "${FLOE_INDEX_BIN:-}" ] || [ -n "${FLOE_RENDERD_BIN:-}" ]; then
+    if [ -z "${FLOE_INDEX_BIN:-}" ] || [ -z "${FLOE_RENDERD_BIN:-}" ]; then
+        echo "FLOE_INDEX_BIN and FLOE_RENDERD_BIN must be specified together"
+        exit 1
+    fi
+else
+    FLOE_INDEX_BIN="$REPO/rust/target/$MUSL_TARGET/release/floe-index"
+    FLOE_RENDERD_BIN="$REPO/rust/target/$MUSL_TARGET/release/floe-renderd"
+    if command -v cargo >/dev/null; then
+        if command -v rustup >/dev/null && \
+           ! rustup target list --installed | grep -qx "$MUSL_TARGET"; then
+            echo "== installing Rust target $MUSL_TARGET"
+            rustup target add "$MUSL_TARGET"
+        fi
+        echo "== building static Rust runtime ($MUSL_TARGET, release)"
+        if ! (cd "$REPO/rust" && cargo build --release \
+            --target "$MUSL_TARGET" -p floe-index -p floe-renderd); then
+            echo "static Rust build failed; install the $MUSL_TARGET target"
+            echo "or specify both FLOE_INDEX_BIN and FLOE_RENDERD_BIN"
+            exit 1
+        fi
+    elif [ -x "$REPO/rust/dist/floe-index-linux-x86_64" ] && \
+         [ -x "$REPO/rust/dist/floe-renderd-linux-x86_64" ]; then
+        FLOE_INDEX_BIN="$REPO/rust/dist/floe-index-linux-x86_64"
+        FLOE_RENDERD_BIN="$REPO/rust/dist/floe-renderd-linux-x86_64"
+        echo "== using prebuilt static Rust runtime from rust/dist"
+    fi
 fi
 [ -x "$FLOE_INDEX_BIN" ] || {
     echo "floe-index binary not found ($FLOE_INDEX_BIN):"
-    echo "build rust/ on this machine or point FLOE_INDEX_BIN at a"
-    echo "Linux x86_64 release build"; exit 1; }
+    echo "install cargo + the $MUSL_TARGET target, or point both"
+    echo "FLOE_INDEX_BIN and FLOE_RENDERD_BIN at Linux x86_64 builds"; exit 1; }
 [ -x "$FLOE_RENDERD_BIN" ] || {
     echo "floe-renderd binary not found ($FLOE_RENDERD_BIN):"
-    echo "build rust/ on this machine or point FLOE_RENDERD_BIN at a"
-    echo "Linux x86_64 release build"; exit 1; }
+    echo "install cargo + the $MUSL_TARGET target, or point both"
+    echo "FLOE_INDEX_BIN and FLOE_RENDERD_BIN at Linux x86_64 builds"; exit 1; }
 cp "$FLOE_INDEX_BIN" "$WORK/runtime/bin/floe-index"
 cp "$FLOE_RENDERD_BIN" "$WORK/runtime/bin/floe-renderd"
 chmod +x "$WORK/runtime/bin/floe-index" "$WORK/runtime/bin/floe-renderd"
@@ -258,59 +285,18 @@ B="$WORK/${FLOE_PORTABLE_PRODUCT}-portable"
 rm -rf "$B"; mkdir -p "$B"
 mv "$WORK/runtime" "$B/runtime"
 
-cat > "$B/$FLOE_PORTABLE_PRODUCT" <<EOF
-#!/bin/sh
-# ${FLOE_PORTABLE_PRODUCT} portable launcher: self-contained Python + GTK3.
-# floe2 is Rust-only; the stable floe product includes KLayout.
-# Nothing is installed; the bundle runs from wherever it was untarred.
-HERE=\$(CDPATH= cd -- "\$(dirname -- "\$0")" && pwd)
-RT="\$HERE/runtime"
-CACHE="\${XDG_CACHE_HOME:-\$HOME/.cache}/${FLOE_PORTABLE_PRODUCT}-rt"
-mkdir -p "\$CACHE/schemas" 2>/dev/null || CACHE="\${TMPDIR:-/tmp}/${FLOE_PORTABLE_PRODUCT}-rt.\$(id -u)"
-mkdir -p "\$CACHE/schemas" 2>/dev/null
-
-# First run (or after the bundle moved/updated): build the machine-local
-# GTK caches a normal package install would have produced.
-if [ ! -f "\$CACHE/schemas/gschemas.compiled" ] \\
-   || [ "\$RT/share/glib-2.0/schemas" -nt "\$CACHE/schemas/gschemas.compiled" ]; then
-    "\$RT/bin/glib-compile-schemas" --targetdir="\$CACHE/schemas" \\
-        "\$RT/share/glib-2.0/schemas" 2>/dev/null || true
+# The KLayout-enabled floe bundle can run both products from the same shared
+# packages/runtime. The Rust-only floe2 bundle intentionally omits a `floe`
+# launcher because stable floe requires KLayout.
+PORTABLE_LAUNCHERS="floe2"
+if [ "$FLOE_PORTABLE_KLAYOUT" = 1 ]; then
+    PORTABLE_LAUNCHERS="floe floe2"
 fi
-if [ ! -f "\$CACHE/pixbuf-loaders.cache" ] \\
-   || [ "\$RT/lib/gdk-pixbuf-2.0/2.10.0/loaders" -nt "\$CACHE/pixbuf-loaders.cache" ]; then
-    # LD_LIBRARY_PATH so query-loaders can dlopen the svg loader's deps
-    LD_LIBRARY_PATH="\$RT/lib" \\
-    GDK_PIXBUF_MODULEDIR="\$RT/lib/gdk-pixbuf-2.0/2.10.0/loaders" \\
-        "\$RT/bin/gdk-pixbuf-query-loaders" \\
-        > "\$CACHE/pixbuf-loaders.cache" 2>/dev/null || true
-fi
-
-GDK_PIXBUF_MODULE_FILE="\$CACHE/pixbuf-loaders.cache"
-GI_TYPELIB_PATH="\$RT/lib/girepository-1.0"
-GSETTINGS_SCHEMA_DIR="\$CACHE/schemas"
-XDG_DATA_DIRS="\$RT/share:/usr/local/share:/usr/share"
-XDG_CONFIG_DIRS="\$HERE/etc:/etc/xdg"   # gtk-3.0/settings.ini (font, dpi)
-FONTCONFIG_FILE="\$HERE/fonts.conf"
-LD_LIBRARY_PATH="\$RT/lib\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
-GDK_BACKEND=x11
-NO_AT_BRIDGE=1                 # silence the at-spi accessibility bridge noise
-PYTHONHOME="\$RT"
-PYTHONNOUSERSITE=1
-export GDK_PIXBUF_MODULE_FILE GI_TYPELIB_PATH GSETTINGS_SCHEMA_DIR \\
-    XDG_DATA_DIRS XDG_CONFIG_DIRS FONTCONFIG_FILE LD_LIBRARY_PATH \\
-    GDK_BACKEND NO_AT_BRIDGE PYTHONHOME PYTHONNOUSERSITE
-# XQuartz's XRender implementation composites images to BLACK while text
-# renders. Set FLOE_XQUARTZ=1 when viewing through XQuartz to force
-# cairo's core-protocol fallback: images then render at every size, at
-# the cost of slower frame pushes and a residual quirk (screen updates
-# may wait for the next input event). The DEFAULT is normal XRender -
-# correct and fast on real X servers (Exceed TurboX, Linux desktops).
-if [ -n "\${FLOE_XQUARTZ:-}" ]; then
-    CAIRO_DEBUG=xrender-version=-1
-    export CAIRO_DEBUG
-fi
-exec "\$RT/bin/python3" -m ${FLOE_PORTABLE_PRODUCT} "\$@"
-EOF
+for PRODUCT in $PORTABLE_LAUNCHERS; do
+    cp "$REPO/tools/portable_launcher.sh" "$B/$PRODUCT"
+    chmod +x "$B/$PRODUCT"
+    sh -n "$B/$PRODUCT"
+done
 
 cat > "$B/selfcheck" <<EOF
 #!/bin/sh
@@ -355,9 +341,9 @@ elif importlib.util.find_spec("klayout") is not None:
     sys.exit(2)
 else:
     print("klayout:      not bundled (expected; Rust default)")
-import floe; print("floe:         %s OK" % floe.__version__)
-import ${FLOE_PORTABLE_PRODUCT}
-print("product:      ${FLOE_PORTABLE_PRODUCT} %s OK" % ${FLOE_PORTABLE_PRODUCT}.__version__)
+import floe, floe2
+print("packages:     floe %s, floe2 %s OK" %
+      (floe.__version__, floe2.__version__))
 PY
 then
     FAILED=1
@@ -390,7 +376,15 @@ else
     echo "floe-renderd: MISSING - FLOE_RENDERER=rust unavailable"
     FAILED=1
 fi
-echo "display:      DISPLAY=\${DISPLAY:-<unset>}  (open test: ./${FLOE_PORTABLE_PRODUCT} view <file.oas>)"
+for PRODUCT in $PORTABLE_LAUNCHERS; do
+    if "\$HERE/\$PRODUCT" --version >/dev/null 2>&1; then
+        echo "launcher:     \$PRODUCT OK"
+    else
+        echo "launcher:     \$PRODUCT FAILED"
+        FAILED=1
+    fi
+done
+echo "display:      DISPLAY=\${DISPLAY:-<unset>}  (open test: ./floe2 view <file.oas>)"
 exit "\$FAILED"
 EOF
 
@@ -463,17 +457,20 @@ runtime/bin/ 안에 들어
 쓰는 것은 X 디스플레이와 (있다면) 시스템 폰트뿐.
 
 기본 floe2 번들은 KLayout을 포함하지 않는다. 안정판 floe/KLayout 번들은
-FLOE_PORTABLE_KLAYOUT=1로 별도 빌드한다.
+FLOE_PORTABLE_KLAYOUT=1로 별도 빌드하며, 이 번들은 같은 runtime에서
+floe(KLayout)와 floe2(Rust) 실행 파일을 모두 제공한다.
 
 요구: x86_64 리눅스, glibc ${FLOOR}+, X 디스플레이.
 
 설치/실행:
     tar xzf ${NAME}.tar.gz -C /opt        # 위치 자유
     /opt/${FLOE_PORTABLE_PRODUCT}-portable/selfcheck
-    /opt/${FLOE_PORTABLE_PRODUCT}-portable/${FLOE_PORTABLE_PRODUCT} view /path/to/chip.oas
-    /opt/${FLOE_PORTABLE_PRODUCT}-portable/${FLOE_PORTABLE_PRODUCT} index /path/to/chip.oas
+    /opt/${FLOE_PORTABLE_PRODUCT}-portable/floe2 view /path/to/chip.oas
+    /opt/${FLOE_PORTABLE_PRODUCT}-portable/floe2 index /path/to/chip.oas
+    # KLayout 포함 floe-portable에서만:
+    /opt/floe-portable/floe view /path/to/chip.oas
 
-편의상 링크: ln -s /opt/${FLOE_PORTABLE_PRODUCT}-portable/${FLOE_PORTABLE_PRODUCT} /usr/local/bin/${FLOE_PORTABLE_PRODUCT}
+편의상 링크: ln -s /opt/${FLOE_PORTABLE_PRODUCT}-portable/floe2 /usr/local/bin/floe2
 
 코드 업데이트: 새 floe/와 floe2/ 패키지를
     runtime/lib/python*/site-packages/floe
@@ -487,14 +484,14 @@ FLOE_PORTABLE_KLAYOUT=1로 별도 빌드한다.
 문제 해결:
 - "GLIBC_x.xx not found": 호스트 glibc가 ${FLOOR} 미만 → 사용 불가 (selfcheck 확인)
 - 코드 3 종료: DISPLAY 미설정/접속 불가
-- 창은 뜨는데 회색/렌더 오류: ~/.cache/${FLOE_PORTABLE_PRODUCT}-rt 삭제 후 재실행
+- 창은 뜨는데 회색/렌더 오류: ~/.cache/floe2-rt 또는 ~/.cache/floe-rt 삭제 후 재실행
 - 뷰어는 열리는데 렌더가 멈춤·인덱싱이 안 됨: runtime/bin/floe-index
   누락/실행 불가 (selfcheck의 floe-index 줄 확인)
 - floe2 시작 오류: runtime/bin/floe-renderd 누락/실행 불가
 EOF
 
-chmod +x "$B/$FLOE_PORTABLE_PRODUCT" "$B/selfcheck"
-sh -n "$B/$FLOE_PORTABLE_PRODUCT"; sh -n "$B/selfcheck"
+chmod +x "$B/selfcheck"
+sh -n "$B/selfcheck"
 echo "== assembled ${FLOE_PORTABLE_PRODUCT} runtime selfcheck"
 "$B/selfcheck"
 

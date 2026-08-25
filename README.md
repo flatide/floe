@@ -585,7 +585,7 @@ python3 -m venv --system-site-packages .venv               # gi가 보이게
 - 원격에서는 Exceed TurboX/XQuartz 등 X 서버로 `floe view` 실행 (flateyes와
   동일한 접속 형태). macOS 개발 환경 설정은 위 [환경 설정](#환경-설정) 참고.
 
-### floe2-portable: 완전 자립 번들 (PyGObject 없는 호스트용) — 권장
+### floe2 / floe-portable: 완전 자립 번들 (PyGObject 없는 호스트용)
 
 호스트에 `python3-gobject`(gi)조차 없거나 파이썬 버전이 안 맞는 경우,
 flateyes-portable과 동일하게 필요한 걸 전부 싸서 가져간다. Python +
@@ -595,15 +595,17 @@ PyGObject + GTK3 (conda-forge, 재배치 가능) + NumPy/Pillow + floe/floe2 +
 기본 floe2 번들은 KLayout을 포함하지 않는다.
 
 NumPy/Pillow Linux 휠과 네이티브 바이너리를 런타임에 넣으므로 번들은
-**x86_64 Linux 빌드 머신**에서 만든다. 빌드 시 verify가 모든 ELF의 실제
-glibc floor를 출력한다. `tools/make_portable.sh`가 flateyes의 레시피를
-따른다:
+**x86_64 Linux 빌드 머신**에서 만든다. Rust 바이너리는 빌드 호스트의 glibc
+버전을 끌고 들어오지 않도록 기본적으로 `x86_64-unknown-linux-musl` 정적
+타깃으로 빌드한다(`rustup target`이 없으면 자동 설치). 빌드 시 verify가 모든
+ELF의 실제 glibc floor를 출력한다. `tools/make_portable.sh`가 flateyes의
+레시피를 따른다:
 
 ```sh
 tools/make_portable.sh                     # -> floe2-portable-<ver>-<date>.tar.gz
 # 폐쇄망 미러만 되는 빌드 머신이면 numpy/pillow 휠을 미리 받아두고:
 WHEELS=./wheels tools/make_portable.sh
-# 안정판 floe/KLayout 별도 번들(기본 배포 아님):
+# KLayout 포함 번들(기본 배포 아님): floe와 floe2 실행 파일을 함께 제공
 FLOE_PORTABLE_KLAYOUT=1 tools/make_portable.sh
 ```
 
@@ -614,6 +616,11 @@ tar xzf floe2-portable-*.tar.gz -C /opt     # 위치 자유
 /opt/floe2-portable/selfcheck
 /opt/floe2-portable/floe2 view /path/chip.oas
 /opt/floe2-portable/floe2 index /path/chip.oas
+
+# KLayout 포함 floe-portable에서도 같은 Rust 제품을 바로 실행
+/opt/floe-portable/floe2 view /path/chip.oas
+# 안정판 KLayout 제품은 기존 launcher 유지
+/opt/floe-portable/floe view /path/chip.oas
 ```
 
 conda-forge가 GTK 스택 전체를 재배치 가능하게 묶어주므로 (GIR 타입립·
@@ -621,6 +628,9 @@ gdk-pixbuf 로더·스키마·폰트 포함) gi를 시스템에 얹을 필요가
 첫 실행 시 호스트별 캐시(GSettings 스키마, pixbuf 로더 목록)를 자동
 생성한다. 코드를 갱신할 때는 새 `floe/`와 `floe2/` 패키지를 번들의
 `runtime/lib/python*/site-packages/`에 함께 덮어쓴다.
+`floe-portable`은 KLayout과 Rust renderer를 모두 포함하므로 루트의 `floe`는
+안정판 KLayout 제품, `floe2`는 Rust-only 제품으로 같은 cache를 공유한다. 기본
+`floe2-portable`은 KLayout이 없으므로 `floe2` launcher만 제공한다.
 
 **뷰어 문제 진단 순서** (창이 검게 나오는 등):
 1. `selfcheck` — 스택(gi/GTK/pixbuf/NumPy/Pillow/Rust binaries) 검증,

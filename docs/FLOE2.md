@@ -61,12 +61,18 @@ tools/make_portable.sh
 
 FLOE_PORTABLE_KLAYOUT=1 tools/make_portable.sh
 # floe-portable-<version>-<date>-klayout.tar.gz
+# 내부에 floe(KLayout)와 floe2(Rust) launcher를 모두 생성
 ```
 
 기본 bundle에는 두 Python 패키지가 함께 들어간다. `floe2`가 공통 구현인 `floe`를
 import하기 때문이며, KLayout wheel은 포함하지 않는다. Python 패키지와
 `floe-index`/`floe-renderd`는 항상 같은 checkout의 조합으로 배포한다.
+Rust 바이너리는 portable의 glibc 하한이 빌드 호스트 버전으로 상승하지 않도록
+기본적으로 `x86_64-unknown-linux-musl` 정적 타깃으로 빌드한다. 별도 바이너리를
+쓸 때는 `FLOE_INDEX_BIN`과 `FLOE_RENDERD_BIN`을 반드시 함께 지정한다.
 빌드 스크립트는 조립된 runtime의 `selfcheck`가 성공해야만 tar를 생성한다.
+KLayout을 포함한 `floe-portable`은 두 renderer가 모두 있으므로 `./floe`와
+`./floe2`를 함께 제공한다. Rust-only 기본 `floe2-portable`은 `./floe2`만 제공한다.
 
 ## 운영 성능 gate
 
