@@ -27,6 +27,9 @@ canonical이며 여기서 중복 추적하지 않는다.
    첫 frame/settled 시간을 함께 본다.
 4. sample9 수치는 방향을 정하는 재현 gate다. 기본값 변경은 valmini와 대표 실칩
    trace에서 회귀가 없는 경우에만 승인한다.
+5. KLayout과의 비교는 제품 latency와 단일-core 효율을 분리한다. floe의 KLayout
+   drawing worker를 1로 고정한 total을 single-raster 기준으로 삼고, Rust의 병렬
+   raster는 사용자 latency를 줄이는 별도 가속으로 평가한다.
 
 현재 floe2 제품 기본값은 page decode `jobs=min(8, host CPUs)`, raster
 `jobs=min(4, decode jobs)`, `tile_px=384`, `round_pages=1024`이다. daemon의
@@ -52,6 +55,17 @@ FLOE_RUST_RASTER_JOBS=4 \
 FLOE_RUST_TILE_PX=384 \
 FLOE_RUST_ROUND_PAGES=1024 \
   .venv/bin/python -m floe2 view data/sample9.oas
+```
+
+KLayout과 같은 단일 raster 기준은 decode만 병렬로 유지하고 framebuffer가
+858x789px인 이 fixture를 한 image tile로 만든다.
+
+```sh
+FLOE_RUST_JOBS=8 \
+FLOE_RUST_RASTER_JOBS=1 \
+FLOE_RUST_TILE_PX=1024 \
+  .venv/bin/python -m floe2 view data/sample9.oas --multi \
+  --goto 13600,8600,500 --detail high --depth 999 --perf-baseline
 ```
 
 backend-neutral 기본 성능은 환경변수 대신 두 제품에 동일한 preset으로 측정한다.
@@ -233,9 +247,10 @@ phase는 아니다. page load 절감까지 합친 전체 latency는 floe2가 33%
   새 `HierPlan`/`FrameScene`을 조립하고 viewport-local image tile마다 layer/hierarchy를
   다시 순회해 full framebuffer를 만든다. 최종 PNG cache key도 viewport float bits를
   포함하므로 조금만 이동해도 miss다.
-- KLayout `LayoutView` 내부의 display-list/bitmap 재사용 범위는 현재 telemetry로
-  보이지 않는다. persistent native scene이 유리하다는 것은 확정이나, 내부 pixel
-  cache가 체감 차이의 얼마를 차지하는지는 별도 A/B 전까지 추정으로 남긴다.
+- KLayout `save_image()`의 `image_with_options()`는 호출마다 detached pixel buffer와
+  `BitmapRedrawThreadCanvas`를 새로 만들어 완성 이미지를 그린다. 따라서 이 경로의
+  장점은 이전 PNG를 그대로 재사용하는 데 있지 않고, persistent `Layout`의 native
+  hierarchy/spatial 구조와 이미 apply된 page-cell을 재사용하는 데 있다.
 
 이 문제와 cold refinement는 분리한다. 인접 pan은 same-scale world-aligned retained
 tile/scene cache 문제이고, 대형 cold view는 first-paint/settled scheduling 문제다.
@@ -248,6 +263,44 @@ raster하고 full PNG를 새로 만든다. 장기 후보는 page-round PNG가 �
 image-tile dependency를 만든 뒤, 필요한 page가 준비된 tile을 center-first로 한 번만
 병렬 raster하여 raw RGBA/shared framebuffer에 게시하는 방식이다. sub-second 작업은
 이전 frame을 frozen 상태로 유지하고 single final render만 하는 현재 정책을 우선한다.
+
+### 3.9 KLayout 병렬성 조사와 single-raster 기준선
+
+조사 범위는 저장소의 `.venv` KLayout 0.30.9와 2026-08-25 시점 upstream source다.
+KLayout renderer 전체를 single-thread라고 부르면 정확하지 않다. GUI drawing은 오래전부터
+서로 다른 layer를 여러 CPU에서 그릴 수 있고, `Display > Optimizations`의 worker 수로
+조절한다. 공식 기본값은 1이다.
+([Changelog](https://github.com/KLayout/klayout/blob/master/Changelog),
+[thread 구조 설명](https://www.klayout.de/forum/discussion/2288/threaded-rendering-question))
+
+floe의 실제 경로는 GUI paint가 아니다. `floe/service.py`의 단일 render service가
+`floe/render.py::Renderer.render_png()`를 호출하고, 마지막에
+`LayoutView.save_image()`로 PNG를 만든다. API의 "synchronous"는 호출이 완성까지
+기다린다는 계약이며 최신 구현에서는 곧바로 single-thread를 뜻하지 않는다.
+2026-08-25 upstream `image_with_options()`는 view가 synchronous이면 worker 0,
+아니면 `drawing_workers()`를 넘기고 완료를 기다린다.
+([API](https://www.klayout.de/doc/code/class_LayoutView.html),
+[source](https://github.com/KLayout/klayout/blob/master/src/laybasic/laybasic/layLayoutCanvas.cc))
+
+그러나 현재 floe 비교 환경은 실제로 단일 C++ raster다.
+
+- KLayout 0.30.9의 새 `LayoutView`에서 `drawing-workers=1`이다.
+- 설치된 0.30.9 binary의 color `image_with_options()`는 `RedrawThread::start()`에
+  synchronous worker 0을 전달한다.
+- 16-layer synthetic probe에서 config를 1과 4로 바꿔도 각각
+  `wall=0.099s`, `process CPU=0.099s`로 동일했다.
+- floe의 `_VIEW_CONFIG`는 `drawing-workers`를 변경하지 않는다.
+
+따라서 현재 비교의 해석은 `병렬 page 계획/적재 + persistent KLayout Layout + 단일
+C++ raster/PNG` 대 `병렬 page decode + Rust tile raster/PNG`다. 향후 KLayout 버전에서
+`save_image()`의 worker 사용이 달라질 수 있으므로 기준선에는 KLayout 버전과 worker를
+기록하고 floe 쪽 worker를 명시적으로 1로 고정해야 한다.
+
+single-raster 최적화는 제품의 4-worker 기본값을 즉시 없애는 작업이 아니다. sample9
+500um warm에서 floe/KLayout total은 129ms, Rust jobs=1/tile=1024는 149ms, 현재
+Rust jobs=4/tile=384는 99ms다. Rust single의 처리 성능은 KLayout의 약 86.6%이며
+95% gate는 total 136ms 이하다. 먼저 F2R-03으로 이 간격을 닫고, 대표 실칩에서도
+통과한 뒤에만 raster=1 기본 또는 work 기반 adaptive 전환을 판정한다.
 
 ## 4. 이슈 목록
 
@@ -264,6 +317,7 @@ image-tile dependency를 만든 뒤, 필요한 page가 준비된 tile을 center-
 | F2R-09 | P1 | `DONE` | 744-page pan에서 6회 full raster/PNG | 제품 round 1024 승인 |
 | F2R-10 | P1 | `OPEN` | exact 밖 인접 pan은 full viewport raster | pan sweep 후 world-tile prototype 판정 |
 | F2R-11 | P2 | `DESIGN` | page-round refinement가 누적 full PNG 반복 | final-tile streaming 채택 여부 결정 |
+| F2R-12 | P1 | `READY` | KLayout single-core parity와 Rust serial 기준선 | worker pin·split jobs gate 후 F2R-03 측정 |
 
 ## 5. 상세 이슈와 수용 기준
 
@@ -371,7 +425,8 @@ page decode와 raster의 worker 수를 분리했다. cold page read/decode는 8 
 운영 방향:
 
 - actual tile count로 worker를 제한하고 16-worker 역효과를 피함.
-- `FLOE_RUST_RASTER_JOBS=1`은 진단/절약 profile로 남기되 자동 warm 전환은 하지 않음.
+- `FLOE_RUST_RASTER_JOBS=1`은 KLayout 대비 core 효율을 재는 first-class profile로
+  유지하되, 95% gate 전에는 제품의 자동 warm 전환에 사용하지 않음.
 - idle daemon은 현재처럼 CPU를 소비하지 않음.
 
 ### F2R-06 — daemon-lifetime raster pool
@@ -482,18 +537,47 @@ F2R-03의 work bin/transform 공유는 F2R-10의 world tile과 F2R-11의 depende
 비용을 고정한 뒤 refinement on의 first/settled overhead를 별도로 계산한다. exact
 frame cache hit는 이 비교에서 허용하지 않는다.
 
+### F2R-12 — KLayout single-core parity와 split worker gate (`READY`)
+
+목표는 멀티코어로 Rust의 중복 작업을 가리는 것이 아니라, 같은 single-raster 조건에서
+KLayout의 95% 처리 성능을 먼저 달성하고 병렬 raster를 latency 가속으로만 평가하는
+것이다. page decode와 raster의 역할이 다르므로 `tools/bench_floe2.py --jobs`가 둘을
+같이 바꾸는 현재 scaling mode만으로는 이 조건을 고정할 수 없다.
+
+착수 항목:
+
+1. floe `_VIEW_CONFIG`에 `drawing-workers=1`을 명시하고 perf 로그/report에 KLayout
+   version과 실제 worker 설정을 기록한다.
+2. benchmark에 `decode_jobs`와 `raster_jobs`를 독립 지정하는 옵션을 추가한다.
+3. serial profile은 `decode_jobs=8`, `raster_jobs=1`로 고정하고 tile 크기를
+   `max(framebuffer width, height)` 이상으로 잡아 한 화면을 한 tile로 그린다.
+4. 동일 source/session/viewport에서 cold first frame, warm exact-cache-off, fixed pan을
+   3회씩 재고 total, raster, PNG/publish, process CPU와 peak RSS를 함께 저장한다.
+
+수용 gate:
+
+- KLayout과 Rust 모두 refinement/LOD/frame/label/exact frame cache가 꺼진 동일
+  `--perf-baseline` work를 선택함.
+- sample9 500um warm Rust serial total이 149ms에서 136ms 이하로 내려감.
+- 대표 실칩 p50/p95가 floe/KLayout single의 1/0.95배 안이고 pixel oracle과 jobs/tile
+  byte 결정성이 유지됨.
+- serial gate 통과 전에는 제품 기본 `decode=8/raster=4/tile=384`를 변경하지 않음.
+- gate 통과 뒤에도 raster=1 기본과 adaptive 1/4 전환은 total latency와 CPU-seconds를
+  함께 비교해 별도 승인함.
+
 ## 6. 남은 착수 순서
 
-1. F2R-10의 fixed-scale pan sweep과 persistent/new KLayout `LayoutView` 진단으로 인접
+1. F2R-12의 KLayout worker pin과 decode/raster split benchmark로 비교 기준을 고정한다.
+2. F2R-10의 fixed-scale pan sweep과 persistent/new KLayout `LayoutView` 진단으로 인접
    cache 체감을 수치화한다.
-2. F2R-03 frame work bin/transform 재사용으로 새로운 viewport의 단일-worker total을
+3. F2R-03 frame work bin/transform 재사용으로 새로운 viewport의 단일-worker total을
    floe의 95% 안으로 낮춘다. exact 재방문 cache를 회귀시키지 않는 경우에만 편입한다.
-3. 같은 work bin 위에서 F2R-10 world-aligned tile LRU를 작게 prototype하고 field trace
+4. 같은 work bin 위에서 F2R-10 world-aligned tile LRU를 작게 prototype하고 field trace
    20% gate를 넘을 때만 제품화한다.
-4. 1024-page를 넘는 장시간 cold fixture로 F2R-11 final-tile streaming의 first/settled
+5. 1024-page를 넘는 장시간 cold fixture로 F2R-11 final-tile streaming의 first/settled
    이득을 측정한 뒤 protocol 변경 여부를 결정한다. 500~700ms 이하 작업에는 refinement를
    만들지 않는다.
-5. F2R-06은 thread startup 실측이 frame의 5%를 넘을 때만 수행한다. 대표 실칩에서
+6. F2R-06은 thread startup 실측이 frame의 5%를 넘을 때만 수행한다. 대표 실칩에서
    4-worker tail imbalance가 확인될 때만 bounded adaptive tile/jobs를 다시 연다.
 
 각 완료 항목은 이 표의 상태, before/after 중앙값, 실행 명령, 적용 커밋과 자동 gate를
