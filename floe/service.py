@@ -764,6 +764,12 @@ def _render_service(src, req, res, latest=None, options=None):
                             dotted=(mosaic.FRAME_DOTS,),
                             solid=(mosaic.FRAME_FILL,))
         _apply_personal_fills(cache, renderer)
+        # F2R-12: perf baselines must record which raster they compared
+        # against; save_image() concurrency depends on the KLayout version
+        # and this pinned setting.
+        from .render import klayout_version
+        print("[perf] backend=klayout version=%s drawing-workers=%s"
+              % (klayout_version(), renderer.drawing_workers), flush=True)
         lod = None
     except Exception as e:
         res.put({"kind": "error", "msg": f"render service init failed: {e}"})

@@ -17,7 +17,21 @@ _VIEW_CONFIG = {
     "text-lazy-rendering": "false",
     "text-point-mode": "false",
     "cell-box-visible": "false",
+    # F2R-12: the Rust A/B baseline is defined against a single C++ raster.
+    # KLayout 0.30.9 passes worker 0 to synchronous image_with_options(),
+    # but upstream may start honoring drawing_workers() there; pin it so a
+    # KLayout upgrade cannot silently change the comparison target.
+    "drawing-workers": "1",
 }
+
+
+def klayout_version():
+    """KLayout package version for perf baselines ("unknown" if absent)."""
+    try:
+        import klayout
+        return str(getattr(klayout, "__version__", "unknown"))
+    except ImportError:
+        return "unknown"
 
 # Calibre speckle: a 50% one-physical-pixel checkerboard shared by every
 # design layer. KLayout offsets a stipple by paint-plane parity, even when
@@ -72,6 +86,12 @@ class Renderer:
                 self.lv.set_config(k, v)
             except Exception:
                 pass
+        # Actual value after config, so perf baselines can record what the
+        # comparison really ran with (F2R-12).
+        try:
+            self.drawing_workers = self.lv.get_config("drawing-workers")
+        except Exception:
+            self.drawing_workers = "unknown"
         self._text_visible = bool(show_texts)
         if show_texts:
             try:

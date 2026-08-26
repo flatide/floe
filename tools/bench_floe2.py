@@ -262,18 +262,22 @@ def wait_frame(worker, generation, timeout):
         return result
 
 
-def render_trace(worker, trace, width, height, detail, timeout, run_number):
+def render_trace(worker, trace, args, run_number):
     results = []
+    detail = DETAIL_LEVELS.index(args.detail)
+    decorations = not args.perf_baseline
+    frame_cache = args.frame_cache == "on" and not args.perf_baseline
     for generation, (name, bbox, depth, visible) in enumerate(trace, 1):
         worker.submit({
             "kind": "render", "gen": generation, "scope": "benchmark",
             "bbox": tuple(float(value) for value in bbox), "view": None,
-            "w": width, "h": height, "depth": depth,
+            "w": args.width, "h": args.height, "depth": depth,
             "cut_px": DETAIL_PX[detail], "lod": False,
-            "frames": True, "labels": True, "label_font_px": 14,
+            "frames": decorations, "labels": decorations,
+            "label_font_px": 14, "frame_cache": frame_cache,
             "abstract": False, "visible": visible,
         })
-        result = wait_frame(worker, generation, timeout)
+        result = wait_frame(worker, generation, args.timeout)
         metrics = {field: result[field] for field in PHASE_FIELDS
                    if field in result}
         metrics.update({
@@ -283,10 +287,11 @@ def render_trace(worker, trace, width, height, detail, timeout, run_number):
             "depth": "fit" if depth == 0 else "full",
         })
         results.append(metrics)
-        print("jobs=%-3d run=%d %-18s total=%8.1f  "
+        print("jobs=r%d/d%-3d run=%d %-18s total=%8.1f  "
               "plan=%7.1f read=%7.1f decode=%7.1f scene=%7.1f "
               "raster=%7.1f png=%7.1f publish=%7.1f handoff=%6.1f" % (
-                  worker._jobs_count, run_number, name,
+                  worker._raster_jobs_count, worker._jobs_count,
+                  run_number, name,
                   float(metrics.get("ms", 0)),
                   float(metrics.get("plan_ms", 0)),
                   float(metrics.get("read_ms", 0)),
@@ -300,9 +305,12 @@ def render_trace(worker, trace, width, height, detail, timeout, run_number):
 
 
 def benchmark_session(cache, trace, args, jobs, run_number):
-    os.environ["FLOE_RUST_JOBS"] = str(jobs)
-    # `--jobs` is an explicit scaling experiment, so keep decode and raster
-    # counts equal instead of taking the interactive raster cap of four.
+    # `--jobs` sweeps the raster workers. Without --decode-jobs the decode
+    # workers follow the same value (the legacy scaling experiment); with
+    # --decode-jobs they stay pinned so raster scaling and the F2R-12
+    # serial profile are measured against a fixed page-load configuration.
+    decode_jobs = args.decode_jobs if args.decode_jobs else jobs
+    os.environ["FLOE_RUST_JOBS"] = str(decode_jobs)
     os.environ["FLOE_RUST_RASTER_JOBS"] = str(jobs)
     os.environ["FLOE_RUST_BUDGET_MB"] = str(args.budget_mb)
     os.environ["FLOE_RUST_ROUND_PAGES"] = str(args.round_pages)
@@ -314,9 +322,7 @@ def benchmark_session(cache, trace, args, jobs, run_number):
     monitor = None
     try:
         monitor = start_worker(worker, args.timeout)
-        results = render_trace(
-            worker, trace, args.width, args.height,
-            DETAIL_LEVELS.index(args.detail), args.timeout, run_number)
+        results = render_trace(worker, trace, args, run_number)
         if monitor is not None:
             monitor.stop()
         peak_mb = monitor.peak_kb / 1024.0 if monitor is not None else 0.0
@@ -325,6 +331,7 @@ def benchmark_session(cache, trace, args, jobs, run_number):
                            for row in results), default=0.0)
         return {
             "jobs": jobs,
+            "decode_jobs": decode_jobs,
             "run": run_number,
             "rss_peak_mb": round(peak_mb, 3),
             "resident_peak_mb": round(resident_mb, 3),
@@ -401,7 +408,23 @@ def make_parser():
         help="private hotspot center and optional square span in micrometers")
     parser.add_argument(
         "--layer", help="single layer name or L/D for the near-view case")
-    parser.add_argument("--jobs", type=parse_jobs, default=parse_jobs("1,4,8,16"))
+    parser.add_argument("--jobs", type=parse_jobs, default=parse_jobs("1,4,8,16"),
+                        help="raster worker sweep; decode workers follow "
+                        "unless --decode-jobs pins them")
+    parser.add_argument("--decode-jobs", type=positive_int,
+                        help="pin page-decode workers for every session "
+                        "while --jobs sweeps raster workers only")
+    parser.add_argument("--serial", action="store_true",
+                        help="F2R-12 serial profile: raster jobs 1, decode "
+                        "jobs 8 (unless --decode-jobs), one image tile "
+                        "covering the framebuffer (unless --tile-px)")
+    parser.add_argument("--frame-cache", choices=("on", "off"), default="on",
+                        help="exact-viewport PNG LRU; 'off' keeps warm "
+                        "revisits on the full raster path")
+    parser.add_argument("--perf-baseline", action="store_true",
+                        help="backend-neutral measurement surface: frames, "
+                        "labels, and the exact frame cache off (LOD is "
+                        "always off here)")
     parser.add_argument("--runs", type=positive_int, default=1)
     parser.add_argument("--width", type=positive_int, default=1200)
     parser.add_argument("--height", type=positive_int, default=800)
@@ -410,7 +433,9 @@ def make_parser():
         default=DETAIL_LEVELS[DEFAULT_DETAIL])
     parser.add_argument("--budget-mb", type=positive_int, default=1024)
     parser.add_argument("--round-pages", type=positive_int, default=1024)
-    parser.add_argument("--tile-px", type=positive_int, default=128)
+    parser.add_argument("--tile-px", type=positive_int,
+                        help="image tile size (default 128; --serial "
+                        "defaults to max(width, height))")
     parser.add_argument("--timeout", type=positive_int, default=600)
     parser.add_argument("--renderd", help="explicit floe-renderd binary")
     parser.add_argument("--out", help="write privacy-safe JSON report here")
@@ -419,6 +444,16 @@ def make_parser():
 
 def main(argv=None):
     args = make_parser().parse_args(argv)
+    if args.serial:
+        args.jobs = [1]
+        if args.decode_jobs is None:
+            args.decode_jobs = 8
+        if args.tile_px is None:
+            # One tile must cover the framebuffer so the serial baseline
+            # pays no cross-tile traversal; renderd caps tiles at 4096px.
+            args.tile_px = min(4096, max(args.width, args.height))
+    if args.tile_px is None:
+        args.tile_px = 128
     source = os.path.abspath(args.source)
     cache = Cache(source)
     if not cache.exists():
@@ -456,6 +491,10 @@ def main(argv=None):
         },
         "config": {
             "jobs": args.jobs,
+            "decode_jobs": args.decode_jobs,
+            "serial": args.serial,
+            "frame_cache": args.frame_cache,
+            "perf_baseline": args.perf_baseline,
             "runs": args.runs,
             "viewport": [args.width, args.height],
             "budget_mb": args.budget_mb,
