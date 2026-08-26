@@ -415,7 +415,7 @@ tile LRU(F2R-10)의 착수 판정은 관찰이 나온 실칩 trace에서 같은 
 |---|---:|---|---|---|
 | F2R-01 | P1 | `DONE` | cache hit까지 128-page refine | cache-aware batch/unit+현장 gate 완료 |
 | F2R-02 | P1 | `DONE` | 128px tile의 반복 hierarchy 순회 | 제품 기본 384px 승인 |
-| F2R-03 | P1 | `DOING` | tile x layer x hierarchy 총 CPU 작업량 | 03a·03b 1단계 완료(§3.10~11). 2단계 설계 확정, 실칩 판정 대기 |
+| F2R-03 | P1 | `DOING` | tile x layer x hierarchy 총 CPU 작업량 | 03a·03b-1·03b-2a 완료. 다음: 2b layer mask, 실칩 판정 |
 | F2R-04 | P1 | `DONE` | total에서 사라진 PNG/publish 37~44ms | write/sync/rename/handoff 계측 완료 |
 | F2R-05 | P2 | `DONE` | jobs=8의 CPU/전력 비용 | decode 8/raster 4 분리 승인 |
 | F2R-06 | P3 | `BLOCKED` | render마다 OS thread 생성 | startup_us가 병목일 때만 pool |
@@ -536,7 +536,7 @@ prune과 큰 tile은 중복을 줄이는 완화책일 뿐이다. jobs=1도 tile=
   gate로 나눠 구현한다. 공통 원칙: 출력 byte 불변, repetition 선행 전개
   금지, 모든 보조 구조는 LRU/frame budget에 계량, query/clip 경로 불변.
 
-  **2a. Pts chunk index** (decode 시, `PageIndex` 확장)
+  **2a. Pts chunk index** (`DONE` 2026-08-26 — decode 시, `PageIndex` 확장)
   - 문제: 1단계 후에도 방문된 record의 `Rep::Pts`는 tile·방문마다 전체
     point를 스캔한다(`repetition.rs` Pts arm). 실칩 fill 데이터는 수천
     point Pts가 흔하다.
@@ -549,6 +549,22 @@ prune과 큰 tile은 중복을 줄이는 완화책일 뿐이다. jobs=1도 tile=
     순회로 자동 유지된다.
   - gate: chunked/full-scan의 visible 집합·pixel 동일성 unit oracle,
     대형 Pts fixture에서 `rep_members_tested` 감소, KLayout oracle 유지.
+  - 완료(2026-08-26): 구현에 두 가지 설계 보강이 추가됐다. (1) 공유 `Arc`
+    point list 단위로 테이블을 dedupe한다(OASIS modal 재사용 대응). (2)
+    **축별 선택도 gate** — 파일 순서가 공간적으로 무질서한 list는 chunk가
+    전체를 덮어 prune이 0이므로 테이블을 버리고 기존 full-scan을 유지한다.
+    한 축이라도 평균 chunk 폭이 전체의 1/4 이하면 유지하는데, KLayout
+    writer가 point list를 y-정렬해 기록함을 실측으로 확인했으므로
+    KLayout 계열 flow가 쓴 실칩 파일은 y축 선택도로 자연히 적중한다.
+    200k-point 합성 fixture(858x789) 실측 `rep_members_tested`:
+    100µm window에서 200,000→1,216(자체 row-major)/10,240(KLayout
+    y-sorted, -95%), 1µm window에서 256/384. wall-time은 framebuffer
+    clear/copy 바닥(≈0.3ms)에 가려 tiny-window에서 -43%로 나타난다.
+    sample9는 대형 Pts가 없어 회귀 없음(PNG md5 동일). `floe-render-cli`
+    raster 라인에 `rep_members_tested/drawn`을 추가했고 재현 generator는
+    `rust/oasis/examples/pts_bench_gen.rs`다. 검증: 동등성·비선택 보호
+    unit oracle, workspace 15 suite, KLayout oracle jobs 1/8, PX golden,
+    integration 22 tests 전부 통과.
 
   **2b. cell×layer subtree mask** (FrameScene 조립 시)
   - 문제: `render_cell()`이 styled layer마다, `render_frame_band()`가
@@ -807,10 +823,11 @@ KLayout의 95% 처리 성능을 먼저 달성하고 병렬 raster를 latency 가
 3. F2R-10 fixed-scale pan sweep은 sample9에서 완료(§3.12): 인접 pan 열세가
    재현되지 않았고 floe2가 전 구간 우세였다. 관찰이 나온 실칩 trace에서 같은
    `--pan-sweep`을 재측정한 뒤 world-tile 착수를 판정한다.
-4. F2R-03b 2단계는 설계 확정(2a Pts chunk → 2b layer mask → 판정 후 2c
-   work bin). 실칩 bench의 traversal 곱셈 비중과 load 축 판정(F2R-10 관찰
-   갱신)을 입력으로 착수한다. exact 재방문 cache를 회귀시키지 않는
-   경우에만 편입한다.
+4. F2R-03b 2단계: 2a Pts chunk는 완료(-95% member 테스트, KLayout
+   y-sort 자연 적중). 다음은 2b layer mask이며, 2c work bin은 실칩
+   bench의 traversal 곱셈 비중과 load 축 판정(F2R-10 관찰 갱신)을
+   입력으로 착수한다. exact 재방문 cache를 회귀시키지 않는 경우에만
+   편입한다.
 5. 같은 work bin 위에서 F2R-10 world-aligned tile LRU를 작게 prototype하고 field trace
    20% gate를 넘을 때만 제품화한다.
 6. 1024-page를 넘는 장시간 cold fixture로 F2R-11 final-tile streaming의 first/settled

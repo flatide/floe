@@ -7,12 +7,17 @@
 //! path reports as an explicit error) is indexed with an all-covering extent
 //! so the render-time validation error stays reachable.
 
-use floe_oasis::doc::{Doc, PathRec, PolyRec, RectRec, Rep};
+use floe_oasis::doc::{Cell, Doc, PathRec, PolyRec, RectRec, Rep};
 use floe_ovm::BBox;
 
 use crate::raster::{checked_path_centerline, checked_path_outline};
+use crate::repetition::PTS_CHUNK_POINTS;
 
 const LEAF_RECORDS: usize = 8;
+
+/// `Rep::Pts` forms below this point count are scanned directly; the chunk
+/// table would cost more than the skipped work.
+const PTS_CHUNK_MIN_POINTS: usize = 256;
 
 /// All-covering extent: never pruned, so render-time validation still runs.
 const ALWAYS: BBox = BBox {
@@ -26,6 +31,7 @@ pub struct PageIndex {
     rects: RecordTree,
     polys: RecordTree,
     paths: RecordTree,
+    pts: PtsChunkIndex,
 }
 
 impl PageIndex {
@@ -37,16 +43,20 @@ impl PageIndex {
                 rects: RecordTree::default(),
                 polys: RecordTree::default(),
                 paths: RecordTree::default(),
+                pts: PtsChunkIndex::default(),
             };
         };
         Self {
             rects: RecordTree::build(cell.rects.iter().map(rect_extent).collect()),
             polys: RecordTree::build(cell.polys.iter().map(poly_extent).collect()),
             paths: RecordTree::build(cell.paths.iter().map(path_extent).collect()),
+            pts: PtsChunkIndex::build(cell),
         }
     }
 
     /// Reference index that never prunes; the oracle for equivalence tests.
+    /// It also carries no Pts chunk tables, so every repetition walk is the
+    /// full source-order scan.
     #[cfg(test)]
     pub(crate) fn unpruned(doc: &Doc) -> Self {
         let Some(cell) = doc.cells.get(doc.top) else {
@@ -56,7 +66,14 @@ impl PageIndex {
             rects: RecordTree::build(vec![ALWAYS; cell.rects.len()]),
             polys: RecordTree::build(vec![ALWAYS; cell.polys.len()]),
             paths: RecordTree::build(vec![ALWAYS; cell.paths.len()]),
+            pts: PtsChunkIndex::default(),
         }
+    }
+
+    /// Chunk bboxes for a large `Rep::Pts`, or `None` when the repetition is
+    /// not a Pts form, is below the threshold, or belongs to another page.
+    pub(crate) fn pts_chunks(&self, rep: &Rep) -> Option<&[BBox]> {
+        self.pts.chunks_for(rep)
     }
 
     pub(crate) fn rects(&self) -> &RecordTree {
@@ -77,6 +94,113 @@ impl PageIndex {
             .saturating_add(self.rects.estimated_bytes())
             .saturating_add(self.polys.estimated_bytes())
             .saturating_add(self.paths.estimated_bytes())
+            .saturating_add(self.pts.estimated_bytes())
+    }
+}
+
+/// Decode-time chunk bboxes for large `Rep::Pts` offset lists (F2R-03b 2a).
+///
+/// OASIS modal repetition reuse makes many records share one `Arc` point
+/// list, so tables are deduplicated by the slice's data pointer. The `Arc`
+/// slices live in the page's `Doc` for the index lifetime; the key is
+/// identity only and is never dereferenced.
+#[derive(Default)]
+pub(crate) struct PtsChunkIndex {
+    tables: Vec<(usize, Box<[BBox]>)>,
+}
+
+impl PtsChunkIndex {
+    fn build(cell: &Cell) -> Self {
+        let mut large: Vec<&[(i64, i64)]> = Vec::new();
+        for rep in cell
+            .rects
+            .iter()
+            .map(|rect| &rect.rep)
+            .chain(cell.polys.iter().map(|polygon| &polygon.rep))
+            .chain(cell.paths.iter().map(|path| &path.rep))
+        {
+            if let Rep::Pts(points) = rep {
+                if points.len() >= PTS_CHUNK_MIN_POINTS {
+                    large.push(points);
+                }
+            }
+        }
+        large.sort_by_key(|points| points.as_ptr() as usize);
+        large.dedup_by_key(|points| points.as_ptr() as usize);
+        let tables = large
+            .into_iter()
+            .filter_map(|points| {
+                let chunks: Box<[BBox]> = points
+                    .chunks(PTS_CHUNK_POINTS)
+                    .map(|chunk| {
+                        let mut bbox = BBox::EMPTY;
+                        for &(x, y) in chunk {
+                            bbox.grow(&BBox {
+                                x0: x,
+                                y0: y,
+                                x1: x,
+                                y1: y,
+                            });
+                        }
+                        bbox
+                    })
+                    .collect();
+                Self::chunks_are_selective(&chunks).then_some((points.as_ptr() as usize, chunks))
+            })
+            .collect();
+        Self { tables }
+    }
+
+    /// File-order chunks only pay off while they stay spatially tight on at
+    /// least one axis. Writers commonly sort point lists along one axis
+    /// (KLayout emits them y-sorted), which makes chunks razor-thin on that
+    /// axis even when the other axis spans the whole cloud — still highly
+    /// selective for window queries. A list whose chunks span most of the
+    /// cloud on both axes (randomly ordered fill) would add bbox tests
+    /// without ever skipping a chunk, so its table is dropped and the plain
+    /// full scan keeps running. An axis only counts when the full extent is
+    /// non-degenerate there; a zero-width axis cannot tell chunks apart.
+    fn chunks_are_selective(chunks: &[BBox]) -> bool {
+        let mut full = BBox::EMPTY;
+        let mut width_sum: i128 = 0;
+        let mut height_sum: i128 = 0;
+        for chunk in chunks {
+            full.grow(chunk);
+            if !chunk.is_empty() {
+                width_sum += (chunk.x1 - chunk.x0) as i128;
+                height_sum += (chunk.y1 - chunk.y0) as i128;
+            }
+        }
+        if full.is_empty() {
+            return false;
+        }
+        let count = chunks.len() as i128;
+        let full_width = (full.x1 - full.x0) as i128;
+        let full_height = (full.y1 - full.y0) as i128;
+        (full_width > 0 && width_sum * 4 <= full_width * count)
+            || (full_height > 0 && height_sum * 4 <= full_height * count)
+    }
+
+    fn chunks_for(&self, rep: &Rep) -> Option<&[BBox]> {
+        let Rep::Pts(points) = rep else {
+            return None;
+        };
+        let key = points.as_ptr() as usize;
+        self.tables
+            .binary_search_by_key(&key, |entry| entry.0)
+            .ok()
+            .map(|found| &*self.tables[found].1)
+    }
+
+    fn estimated_bytes(&self) -> u64 {
+        let mut bytes = (self.tables.capacity() as u64)
+            .saturating_mul(std::mem::size_of::<(usize, Box<[BBox]>)>() as u64);
+        for (_, chunks) in &self.tables {
+            bytes = bytes.saturating_add(
+                (chunks.len() as u64).saturating_mul(std::mem::size_of::<BBox>() as u64),
+            );
+        }
+        bytes
     }
 }
 
@@ -422,6 +546,74 @@ mod tests {
                 assert!(hits.is_empty());
             }
         }
+    }
+
+    #[test]
+    fn pts_chunk_tables_are_deduplicated_and_thresholded() {
+        let shared: Arc<[(i64, i64)]> = (0..PTS_CHUNK_MIN_POINTS as i64).map(|i| (i, -i)).collect();
+        let small: Arc<[(i64, i64)]> = Arc::from([(0i64, 0i64), (5, 5)]);
+        let rect = |rep: Rep| RectRec {
+            layer: 0,
+            dt: 0,
+            x: 0,
+            y: 0,
+            w: 1,
+            h: 1,
+            rep,
+        };
+        let cell = Cell {
+            rects: vec![
+                rect(Rep::Pts(Arc::clone(&shared))),
+                rect(Rep::Pts(Arc::clone(&shared))),
+                rect(Rep::Pts(Arc::clone(&small))),
+                rect(Rep::One),
+            ],
+            ..Cell::default()
+        };
+        let index = PtsChunkIndex::build(&cell);
+        assert_eq!(index.tables.len(), 1, "shared arc builds one table");
+        let chunks = index
+            .chunks_for(&cell.rects[0].rep)
+            .expect("large Pts must be chunked");
+        assert_eq!(
+            chunks.len(),
+            PTS_CHUNK_MIN_POINTS.div_ceil(PTS_CHUNK_POINTS)
+        );
+        assert!(std::ptr::eq(
+            chunks,
+            index.chunks_for(&cell.rects[1].rep).unwrap()
+        ));
+        assert!(index.chunks_for(&cell.rects[2].rep).is_none());
+        assert!(index.chunks_for(&cell.rects[3].rep).is_none());
+    }
+
+    #[test]
+    fn spatially_incoherent_pts_get_no_chunk_table() {
+        // Alternating far corners make every chunk bbox span the whole
+        // cloud; the table would never skip a chunk, so it is dropped.
+        let scattered: Arc<[(i64, i64)]> = (0..PTS_CHUNK_MIN_POINTS as i64)
+            .map(|i| {
+                if i % 2 == 0 {
+                    (0, 0)
+                } else {
+                    (100_000, 100_000)
+                }
+            })
+            .collect();
+        let cell = Cell {
+            rects: vec![RectRec {
+                layer: 0,
+                dt: 0,
+                x: 0,
+                y: 0,
+                w: 1,
+                h: 1,
+                rep: Rep::Pts(scattered),
+            }],
+            ..Cell::default()
+        };
+        let index = PtsChunkIndex::build(&cell);
+        assert!(index.chunks_for(&cell.rects[0].rep).is_none());
     }
 
     #[test]

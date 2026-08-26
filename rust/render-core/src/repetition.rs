@@ -12,6 +12,12 @@ use crate::RenderCancellation;
 // grids remain analytically pruned and are not subject to it.
 const MAX_DEGENERATE_GRID_VISITS: u64 = 1_048_576;
 
+/// Consecutive `Rep::Pts` members covered by one decode-time chunk bbox
+/// (F2R-03b 2a). The chunk tables in `PageIndex` and the chunked walk below
+/// must agree on this size; a table with a different chunk count is ignored
+/// and the full scan runs instead.
+pub(crate) const PTS_CHUNK_POINTS: usize = 64;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct RepVisit {
     pub tested: u64,
@@ -24,7 +30,21 @@ pub(crate) fn for_each_visible_offset(
     local_view: BBox,
     visit: impl FnMut(i64, i64) -> Result<(), String>,
 ) -> Result<RepVisit, String> {
-    for_each_visible_offset_impl(rep, base_bbox, local_view, None, None, visit)
+    for_each_visible_offset_impl(rep, None, base_bbox, local_view, None, None, visit)
+}
+
+/// Raster-only variant: `pts_chunks` carries the decode-time per-chunk
+/// offset bboxes for this repetition's `Pts` form (see `PageIndex`), letting
+/// the walk skip whole chunks whose bbox misses the offset region. Surviving
+/// points keep their source order and duplicates.
+pub(crate) fn for_each_visible_offset_chunked(
+    rep: &Rep,
+    pts_chunks: Option<&[BBox]>,
+    base_bbox: BBox,
+    local_view: BBox,
+    visit: impl FnMut(i64, i64) -> Result<(), String>,
+) -> Result<RepVisit, String> {
+    for_each_visible_offset_impl(rep, pts_chunks, base_bbox, local_view, None, None, visit)
 }
 
 pub(crate) fn for_each_visible_offset_bounded(
@@ -37,6 +57,7 @@ pub(crate) fn for_each_visible_offset_bounded(
 ) -> Result<RepVisit, String> {
     for_each_visible_offset_impl(
         rep,
+        None,
         base_bbox,
         local_view,
         Some((remaining, limit_error)),
@@ -55,6 +76,7 @@ pub(crate) fn for_each_visible_offset_cancellable(
 ) -> Result<RepVisit, String> {
     for_each_visible_offset_impl(
         rep,
+        None,
         base_bbox,
         local_view,
         None,
@@ -63,8 +85,10 @@ pub(crate) fn for_each_visible_offset_cancellable(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn for_each_visible_offset_impl(
     rep: &Rep,
+    pts_chunks: Option<&[BBox]>,
     base_bbox: BBox,
     local_view: BBox,
     mut budget: Option<(&Cell<usize>, &str)>,
@@ -131,6 +155,25 @@ fn for_each_visible_offset_impl(
         }
         Rep::Pts(points) => {
             let mut visible = 0u64;
+            if let Some(chunks) =
+                pts_chunks.filter(|chunks| chunks.len() == points.len().div_ceil(PTS_CHUNK_POINTS))
+            {
+                let mut tested = 0u64;
+                for (chunk, chunk_bbox) in points.chunks(PTS_CHUNK_POINTS).zip(chunks) {
+                    if !offsets.intersects(chunk_bbox) {
+                        continue;
+                    }
+                    for &(x, y) in chunk {
+                        charge_member(&mut budget, cancellation, &mut cancel_member)?;
+                        tested = tested.saturating_add(1);
+                        if offsets.contains_pt(x, y) {
+                            visit(x, y)?;
+                            visible = visible.saturating_add(1);
+                        }
+                    }
+                }
+                return Ok(RepVisit { tested, visible });
+            }
             for &(x, y) in points.iter() {
                 charge_member(&mut budget, cancellation, &mut cancel_member)?;
                 if offsets.contains_pt(x, y) {
@@ -302,6 +345,75 @@ mod tests {
         assert_eq!(error, "member cap");
         assert_eq!(remaining.get(), 0);
         assert_eq!(visits, 0);
+    }
+
+    fn chunk_bboxes(points: &[(i64, i64)]) -> Vec<BBox> {
+        points
+            .chunks(PTS_CHUNK_POINTS)
+            .map(|chunk| {
+                let mut bbox = BBox::EMPTY;
+                for &(x, y) in chunk {
+                    bbox.grow(&BBox {
+                        x0: x,
+                        y0: y,
+                        x1: x,
+                        y1: y,
+                    });
+                }
+                bbox
+            })
+            .collect()
+    }
+
+    #[test]
+    fn chunked_pts_matches_full_scan_and_skips_far_chunks() {
+        // Chunk 0 sits near the origin, chunks 1-2 are far away, chunk 3
+        // mixes near duplicates with far points.
+        let mut points = Vec::new();
+        for index in 0..64i64 {
+            points.push((index % 8, index / 8));
+        }
+        for index in 0..128i64 {
+            points.push((10_000 + index, 10_000));
+        }
+        for index in 0..64i64 {
+            points.push(if index % 2 == 0 { (5, 5) } else { (20_000, 0) });
+        }
+        let rep = Rep::Pts(Arc::from(points.clone()));
+        let chunks = chunk_bboxes(&points);
+        let base = bbox(0, 0, 2, 2);
+        let view = bbox(0, 0, 40, 40);
+
+        let mut full_offsets = Vec::new();
+        let full = for_each_visible_offset(&rep, base, view, |x, y| {
+            full_offsets.push((x, y));
+            Ok(())
+        })
+        .unwrap();
+        let mut chunked_offsets = Vec::new();
+        let chunked = for_each_visible_offset_chunked(&rep, Some(&chunks), base, view, |x, y| {
+            chunked_offsets.push((x, y));
+            Ok(())
+        })
+        .unwrap();
+
+        // Identical visible members, order, and duplicates; far chunks are
+        // skipped without testing their points.
+        assert_eq!(chunked_offsets, full_offsets);
+        assert_eq!(chunked.visible, full.visible);
+        assert_eq!(full.tested, points.len() as u64);
+        assert_eq!(chunked.tested, 128, "only chunks 0 and 3 are scanned");
+
+        // A stale or mismatched table must fall back to the full scan.
+        let mut fallback_offsets = Vec::new();
+        let fallback =
+            for_each_visible_offset_chunked(&rep, Some(&chunks[..1]), base, view, |x, y| {
+                fallback_offsets.push((x, y));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(fallback_offsets, full_offsets);
+        assert_eq!(fallback.tested, full.tested);
     }
 
     #[test]

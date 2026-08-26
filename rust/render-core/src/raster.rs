@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use crate::font::{normalized_chars, GlyphAtlas};
 use crate::page_index::RecordSet;
-use crate::repetition::for_each_visible_offset;
+use crate::repetition::{for_each_visible_offset, for_each_visible_offset_chunked};
 use crate::transform::OrthoTransform;
 use crate::{FrameScene, RenderCancellation, RenderStats, ViewBox};
 
@@ -1210,8 +1210,12 @@ fn render_cell(
                 };
                 let mut drawn = 0u64;
                 let mut cancel_member = 0u16;
-                let visit =
-                    for_each_visible_offset(&rect.rep, base, local_view, |offset_x, offset_y| {
+                let visit = for_each_visible_offset_chunked(
+                    &rect.rep,
+                    page.index.pts_chunks(&rect.rep),
+                    base,
+                    local_view,
+                    |offset_x, offset_y| {
                         check_member_cancelled(guard, &mut cancel_member)?;
                         let local = translate_bbox(base, offset_x, offset_y)?;
                         let world = world_transform.apply_bbox(local)?;
@@ -1219,7 +1223,8 @@ fn render_cell(
                             drawn = drawn.saturating_add(1);
                         }
                         Ok(())
-                    })?;
+                    },
+                )?;
                 stats.rep_members_tested = stats.rep_members_tested.saturating_add(visit.tested);
                 stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(drawn);
                 stats.primitives_drawn = stats.primitives_drawn.saturating_add(drawn);
@@ -1247,8 +1252,9 @@ fn render_cell(
                 let mut cancel_member = 0u16;
                 // One scratch per record, reused by every repetition member.
                 let mut world_points = Vec::with_capacity(polygon.pts.len());
-                let visit = for_each_visible_offset(
+                let visit = for_each_visible_offset_chunked(
                     &polygon.rep,
+                    page.index.pts_chunks(&polygon.rep),
                     base,
                     local_view,
                     |offset_x, offset_y| {
@@ -1300,8 +1306,9 @@ fn render_cell(
                 // every repetition member.
                 let mut world_points = Vec::with_capacity(outline.len());
                 let mut world_centerline = Vec::with_capacity(centerline.len());
-                let visit = for_each_visible_offset(
+                let visit = for_each_visible_offset_chunked(
                     &path_record.rep,
+                    page.index.pts_chunks(&path_record.rep),
                     base,
                     local_view,
                     |offset_x, offset_y| {
@@ -3447,6 +3454,25 @@ mod tests {
                     rep: Rep::One,
                 });
             }
+            // A large Pts fill record: a few members near the viewport,
+            // the remaining chunks far away (exercises the 2a chunk skip).
+            let mut fill_offsets: Vec<(i64, i64)> = Vec::new();
+            for index in 0..24i64 {
+                fill_offsets.push(((index % 6) * 4, (index / 6) * 4));
+            }
+            while fill_offsets.len() < 320 {
+                let index = fill_offsets.len() as i64;
+                fill_offsets.push((40_000 + index * 8, 40_000));
+            }
+            rects.push(RectRec {
+                layer: 1,
+                dt: 0,
+                x: 0,
+                y: 0,
+                w: 2,
+                h: 2,
+                rep: Rep::Pts(Arc::from(fill_offsets)),
+            });
             Doc {
                 unit: 1000.0,
                 cells: vec![Cell {
@@ -3557,6 +3583,12 @@ mod tests {
             unpruned.rect_record_tests
         );
         assert!(pruned.path_record_tests < unpruned.path_record_tests);
+        assert!(
+            pruned.stats.rep_members_tested < unpruned.stats.rep_members_tested,
+            "chunked Pts must skip far chunks: {} vs {}",
+            pruned.stats.rep_members_tested,
+            unpruned.stats.rep_members_tested
+        );
     }
 
     #[test]
