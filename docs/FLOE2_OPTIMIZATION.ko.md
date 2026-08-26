@@ -415,14 +415,14 @@ tile LRU(F2R-10)의 착수 판정은 관찰이 나온 실칩 trace에서 같은 
 |---|---:|---|---|---|
 | F2R-01 | P1 | `DONE` | cache hit까지 128-page refine | cache-aware batch/unit+현장 gate 완료 |
 | F2R-02 | P1 | `DONE` | 128px tile의 반복 hierarchy 순회 | 제품 기본 384px 승인 |
-| F2R-03 | P1 | `DOING` | tile x layer x hierarchy 총 CPU 작업량 | 03a·03b record index 완료(§3.10~11). 실칩 확인과 2단계(work bin) 필요성 재평가 |
+| F2R-03 | P1 | `DOING` | tile x layer x hierarchy 총 CPU 작업량 | 03a·03b 1단계 완료(§3.10~11). 2단계 설계 확정, 실칩 판정 대기 |
 | F2R-04 | P1 | `DONE` | total에서 사라진 PNG/publish 37~44ms | write/sync/rename/handoff 계측 완료 |
 | F2R-05 | P2 | `DONE` | jobs=8의 CPU/전력 비용 | decode 8/raster 4 분리 승인 |
 | F2R-06 | P3 | `BLOCKED` | render마다 OS thread 생성 | startup_us가 병목일 때만 pool |
 | F2R-07 | P1 | `DONE` | OVC coverage post-composite 회귀 | 제품 경로 제거 gate 유지 |
 | F2R-08 | P1 | `DONE` | exact 재방문도 full raster/PNG 반복 | bounded PNG+scene 복원 gate 완료 |
 | F2R-09 | P1 | `DONE` | 744-page pan에서 6회 full raster/PNG | 제품 round 1024 승인 |
-| F2R-10 | P1 | `OPEN` | exact 밖 인접 pan은 full viewport raster | sample9 sweep은 floe2 우세(§3.12); 실칩 sweep로 판정 |
+| F2R-10 | P1 | `OPEN` | exact 밖 인접 pan은 full viewport raster | 실체는 load 재사용(관찰 갱신); 실칩 sweep의 load 축으로 판정 |
 | F2R-11 | P2 | `DESIGN` | page-round refinement가 누적 full PNG 반복 | final-tile streaming 채택 여부 결정 |
 | F2R-12 | P1 | `DOING` | KLayout single-core parity와 Rust serial 기준선 | sample9 gate 통과 124%(§3.12); 실칩 p50/p95 남음 |
 
@@ -532,12 +532,69 @@ prune과 큰 tile은 중복을 줄이는 완화책일 뿐이다. jobs=1도 tile=
   128px tile 58.7→39.9ms, serial 동률, 출력 byte 불변. repetition 선행
   전개 없이 extent만 색인하며 index bytes는 decoded LRU budget에 계량된다.
   대표 실칩 재확인은 F2R-12 잔여 측정과 함께 수행한다.
-- **F2R-03b 2단계 (`OPEN`)** — visited record의 `Rep::Pts` member 전량
-  스캔에 chunk bbox를 도입하고, frame당 1회 traversal의 (image tile ×
-  paint plane) work bin과 cell×layer bbox subtree pruning을 구현한다.
-  1단계로 tile 축 곱셈이 크게 줄었으므로, 2단계는 F2R-10 world tile/
-  F2R-11 dependency graph 요구와 묶어 필요성을 재평가한 뒤 착수한다.
-  bin key는 world/scale 정렬 tile로 확장 가능하게 설계한다.
+- **F2R-03b 2단계 (`READY` — 설계 확정 2026-08-26)** — 세 요소를 독립
+  gate로 나눠 구현한다. 공통 원칙: 출력 byte 불변, repetition 선행 전개
+  금지, 모든 보조 구조는 LRU/frame budget에 계량, query/clip 경로 불변.
+
+  **2a. Pts chunk index** (decode 시, `PageIndex` 확장)
+  - 문제: 1단계 후에도 방문된 record의 `Rep::Pts`는 tile·방문마다 전체
+    point를 스캔한다(`repetition.rs` Pts arm). 실칩 fill 데이터는 수천
+    point Pts가 흔하다.
+  - 설계: point 수 임계(초안 256) 이상인 Pts에 대해 decode 시 파일 순서
+    그대로 64-point chunk의 offset bbox 배열을 record별 side table로
+    `PageIndex`에 보관한다(≈0.5B/point, `estimated_bytes()` 계량).
+    raster 전용 진입점이 chunk bbox와 `offset_region`을 먼저 교차
+    검사하고 교차 chunk의 point만 기존 순서로 스캔한다. 중복·원본 순서
+    보존 계약(`pts_preserves_duplicates_and_source_order`)은 chunk 순차
+    순회로 자동 유지된다.
+  - gate: chunked/full-scan의 visible 집합·pixel 동일성 unit oracle,
+    대형 Pts fixture에서 `rep_members_tested` 감소, KLayout oracle 유지.
+
+  **2b. cell×layer subtree mask** (FrameScene 조립 시)
+  - 문제: `render_cell()`이 styled layer마다, `render_frame_band()`가
+    band 4회 hierarchy 전체를 재귀하며, subtree에 해당 layer가 없어도
+    instance repetition을 전개한다. 실칩 mid-zoom(wc_cells 수천 × layer
+    수십 × tile 수)에서 이 곱셈이 지배 후보다.
+  - 설계: `FrameScene` 조립에서 plan-local layer를 dense index로 매핑해
+    cell별 subtree layer bitmask와 frames-보유 bit를 bottom-up 1회
+    (memoized DFS, O(cells+edges+pages))로 만든다. per-frame 구조라 포맷
+    변경이 없다. `Layer(l)` 순회는 subtree mask에 l이 없는 child로
+    재귀하지 않고, frame band 순회는 frames 없는 subtree를 건너뛴다.
+    band 범위 검증(>3 거부)은 방문 의존을 없애도록 scene 조립 1회로
+    옮긴다.
+  - gate: mask on/off pixel 동일성 unit oracle, 오류 도달성 유지(mask는
+    pages/frames가 실제로 없는 subtree만 자르므로 오류 record를 숨길 수
+    없음을 테스트로 고정), 신규 cell-방문 telemetry 감소 확인.
+
+  **2c. frame당 1회 (image tile × paint plane) work bin**
+  - 문제: 2b 후에도 tile마다 hierarchy walk 자체는 반복된다. 4-worker
+    CPU 합계, F2R-10 world tile, F2R-11 dependency graph가 공통으로
+    frame-level 가시 item 목록을 요구한다.
+  - 설계: FrameScene 확정 후 round당 1회, 취소 가능한 단일 traversal이
+    가시 (page_id, 누적 OrthoTransform) item과 frame-band item을
+    수집한다. instance repetition은 frame view에 대한 해석적 가시
+    범위만 전개하므로 item 수는 "한 tile=전체 화면" 순회의 방문 수와
+    같다(선행 전개 아님). item world bbox로 교차 tile에 binning하고
+    (plane, tile) counting-sort로 정렬하면 tile worker는 hierarchy 없이
+    자기 bin의 item만 record index에 질의한다. plane 순서가 기존 paint
+    순서를 보존하므로 pixel 불변.
+  - 한도·폴백: item 수와 구성 시간에 상한을 두고 초과 시 현재 per-tile
+    순회로 폴백한다(정확도 동일, `work_bin=off` telemetry). bin 메모리는
+    frame 수명으로 계량한다.
+  - 확장 키: binning 함수를 분리해 tile key를 viewport-local 대신
+    world/scale 정렬 tile로도 계산할 수 있게 한다. F2R-10 world-tile
+    LRU와 F2R-11 page→tile dependency가 같은 bin을 소비한다.
+  - gate: bin on/off PNG byte 동일(jobs 1/4/8 × tile 128/384/858),
+    hotspot 회귀 없음 + 실칩 mid-zoom 개선, bin 구성 중 취소를 포함한
+    cancellation soak stale publish 0.
+
+  **착수 판정과 순서**: 실칩 bench의 wc_cells/inst_edges/render_tiles/
+  layer 수로 traversal 곱셈 비중을 추정해 2b·2c의 기대 이득을 정한다.
+  구현 순서는 2a → 2b → (실칩 판정 후) 2c. record 수 대비 traversal
+  비중이 낮으면 2c는 F2R-11 채택 시점까지 미룬다. 1단계 index build가
+  실칩 decode에서 병목으로 나타나면(§3.11: sample9 decode +70%) index를
+  첫 raster 사용 시 lazy 구축하는 변형을 2a와 함께 검토한다. OVP에
+  사전 계산 index를 저장하는 안은 포맷 변경이라 별도 결정으로 남긴다.
 - **F2R-03c (`DESIGN`)** — fill 파이프라인 재설계: 2-phase를 단일 edge walk
   통합, 장기적으로 layer별 1bpp plane + 최종 word 합성. paint 순서 계약
   (PLAN §8.3 "레이어 병렬 합성 금지")의 재개정이 필요할 수 있어 F2R-03a/b
@@ -624,8 +681,25 @@ CLI/UI/request/Rust worker에서 제거했으며 공유 cache의 `design.ovc`는
   traversal/raster/PNG는 줄이지 않는다.
 - exact frame cache는 zoom 복귀에는 유효하지만 좌표가 다른 인접 pan에는 맞지 않는다.
 
+관찰 갱신(2026-08-26): 실칩 재관측으로 floe의 인접 이점은 draw가 아니라
+**load 단계**로 확정됐다 — 첫 방문 8~9초 loading이 재방문(정확한 위치가
+아니어도)에서 2초 내외로 준다. §3.12의 sample9 sweep과 부호가 일치한다:
+floe는 인접 pan마다 full draw를 다시 지불하지만(73~96ms), persistent
+Layout에 apply된 page-cell은 세션 내내 남아 load(plan/delta/apply)만
+급감한다(cold apply 296ms → warm 1~9ms). floe2의 대응물은 decoded-page
+LRU(기본 `FLOE_RUST_BUDGET_MB=1024`)이므로, 실칩 working set이 budget을
+넘거나 영역을 오가면 재방문에도 read/decode를 다시 지불한다. 따라서 실칩
+sweep의 1차 판정 축은 draw 비교가 아니라 **재방문 load — floe의
+plan/delta/apply vs floe2의 read/decode/cache_miss** 다. world-tile LRU
+이전에 검토할 후보 대응은 (1) 실칩 프로파일 기반 decoded budget(호스트
+메모리 비례 adaptive), (2) decode 처리량 — 1단계 record index build가
+decode를 키우므로(§3.11 sample9 +70%) 실칩에서 병목이면 lazy 구축 변형,
+(3) F2R-11 center-first streaming이다. bench report가 두 backend의 해당
+phase를 모두 담으므로(§3.12) 같은 두 명령으로 바로 판정한다.
+
 먼저 같은 zoom/detail/depth/layer에서 warm settle 후 X/Y로 화면 폭의
-`1/16, 1/8, 1/4`만큼 이동하고 되돌아오는 trace를 각각 3회 측정한다. floe는
+`1/16, 1/8, 1/4`만큼 이동하고 되돌아오는 trace를 각각 3회 측정한다
+(`tools/bench_floe2.py --pan-sweep`; sample9 결과는 §3.12). floe는
 plan/new/apply/draw/total, floe2는 plan/cache hit/scene/raster/PNG/publish/total과
 process CPU를 함께 기록한다. 진단용으로 같은 KLayout working `Layout`에서 persistent
 `LayoutView`와 매 요청 새 `LayoutView`도 비교해 native retained renderer의 기여를
@@ -733,9 +807,10 @@ KLayout의 95% 처리 성능을 먼저 달성하고 병렬 raster를 latency 가
 3. F2R-10 fixed-scale pan sweep은 sample9에서 완료(§3.12): 인접 pan 열세가
    재현되지 않았고 floe2가 전 구간 우세였다. 관찰이 나온 실칩 trace에서 같은
    `--pan-sweep`을 재측정한 뒤 world-tile 착수를 판정한다.
-4. F2R-03b 2단계(frame당 1회 tile×plane work bin, cell×layer bbox, Pts chunk
-   bbox)는 F2R-10/11 요구와 묶어 필요성을 재평가한 뒤 진행한다. exact 재방문
-   cache를 회귀시키지 않는 경우에만 편입한다.
+4. F2R-03b 2단계는 설계 확정(2a Pts chunk → 2b layer mask → 판정 후 2c
+   work bin). 실칩 bench의 traversal 곱셈 비중과 load 축 판정(F2R-10 관찰
+   갱신)을 입력으로 착수한다. exact 재방문 cache를 회귀시키지 않는
+   경우에만 편입한다.
 5. 같은 work bin 위에서 F2R-10 world-aligned tile LRU를 작게 prototype하고 field trace
    20% gate를 넘을 때만 제품화한다.
 6. 1024-page를 넘는 장시간 cold fixture로 F2R-11 final-tile streaming의 first/settled
