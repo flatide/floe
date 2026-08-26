@@ -1,6 +1,6 @@
 # floe2 renderer 최적화 추적
 
-갱신일: 2026-08-25
+갱신일: 2026-08-26
 
 이 문서는 floe2의 **실행 중 renderer** 성능 이슈를 재현 수치와 수용 gate로
 추적하는 canonical 목록이다. 정확도·취소·게시 계약은
@@ -302,13 +302,85 @@ Rust jobs=4/tile=384는 99ms다. Rust single의 처리 성능은 KLayout의 약 
 95% gate는 total 136ms 이하다. 먼저 F2R-03으로 이 간격을 닫고, 대표 실칩에서도
 통과한 뒤에만 raster=1 기본 또는 work 기반 adaptive 전환을 판정한다.
 
+### 3.10 serial raster 분해와 F2R-03a 결과 (2026-08-26)
+
+canonical sample9(858x789, hotspot 13600,8600, 500µm, detail high, frame cache
+off, 3회 중앙값)에서 F2R-12 serial profile로 분해했다. 이 viewport의 plan은
+43 pages, records 1,255,269, 실제 paint member 123,845로 전부 rectangle이다.
+
+occupancy mode(전 layer 1회 순회)가 styled 40-layer와 같은 132ms를 기록해
+**layer 축 중복·frame band·label은 이 fixture에서 무시 가능**함을 직접 확인했다.
+view span 125/250/500µm sweep(§record test 1.07M 동일 조건 포함)으로 분리한
+결과, record당 가시성 판정 상한 ≈33ns(≈40ms), 나머지 ≈90ms가 member paint
+(≈700ns/member)였고, 그 지배 항은 **member당 4-segment Bresenham stroke**
+(clip + per-step block 중복 쓰기)였다.
+
+solid stroke의 axis-aligned segment는 Bresenham 합집합이 단일 블록이므로
+clamped row span 쓰기로 치환했다(대각선·dotted는 기존 경로 유지). 결과:
+
+| profile | 변경 전 raster/total | 변경 후 raster/total |
+|---|---:|---:|
+| serial r1/d8, tile 858 | 136.1 / 157ms | 43.8 / 66ms |
+| 제품 r4/d8, tile 384 | 79.8 / 101ms | 26.0 / 48ms |
+
+serial total 66ms는 F2R-12 gate 136ms를 크게 통과하며, 문서의 KLayout warm
+129ms 대비 약 2배 빠르다(단, 이 머신의 KLayout GUI 재측정은 잔여 항목).
+정확도는 PNG md5 동일(hotspot occupancy 전후), KLayout oracle jobs 1/8
+ALL OK, PX1~PX5 golden 0 실패, renderer integration 22 tests OK,
+`axis_aligned_stroke_span_matches_stepped_oracle`·
+`fill_span_matches_per_pixel_fill_oracle` unit oracle로 고정했다.
+
+남은 serial 항은 record 가시성 판정 ≈44ms다. page 내부에 spatial 구조가
+없어 선택된 모든 record가 매 frame `for_each_visible_offset`를 타며, 제품
+병렬 경로에서는 같은 판정이 tile 수만큼 반복된다(4-worker raster CPU
+4x26=104ms vs serial 44ms). F2R-03b는 이에 따라 sub-page record pruning을
+1순위로 재조준한다.
+
+### 3.11 F2R-03b sub-page record index 결과 (2026-08-26)
+
+decode 시 page의 record extent(base bbox ⊕ repetition offset 범위) BVH를
+`DecodedPage::index`로 만들어 LRU에 상주시키고, raster의 record 열거를
+tile-local view 교차 질의로 바꿨다(`rust/render-core/src/page_index.rs`).
+
+- 보수성: overflow·손상 geometry 등 render가 명시 오류로 보고하는 record는
+  전면 커버 extent로 색인해 오류 도달성을 보존한다. PATH extent는 render와
+  같은 outline bbox를 사용해 member 단위로 동일하게 판정된다.
+- 접근 순서: 첫 구현의 BVH leaf 순 방문은 random access로 serial 1-tile에서
+  +3ms 회귀했다(43.8→46.9ms). per-worker bitset으로 히트를 모아 **record
+  오름차순으로 재방문**하고, view가 root extent를 덮으면 순차 전량 스캔으로
+  폴백해 회귀를 제거했다.
+- page 내 record 도색 순서는 같은 paint plane(동일 색/fill)이라 pixel에
+  영향이 없고, 방문 순서 변경은 telemetry 카운터에만 반영된다.
+
+sample9 hotspot(858x789/500µm, 3회 중앙값) 결과:
+
+| profile | index 전 raster | index 후 raster |
+|---|---:|---:|
+| serial r1/d8, tile 858 | 43.8ms | 44.0ms (동률) |
+| 제품 r4/d8, tile 384 | 26.0ms | 20.4ms (total 48→43ms) |
+| r8/d8, tile 128 | 58.7ms | 39.9ms |
+| serial r1, tile 128 | 272.2ms | 207.6ms |
+
+방문 record는 1,302,013→329,859로 75% 줄었고, tile이 작을수록(=tile 축
+곱셈이 클수록) 이득이 커진다. serial 1-tile은 이미 paint-bound라 동률이다.
+비용: 43-page 화면 기준 decode 19→32ms(8-way, LRU 상주당 1회), decoded
+resident 161→188MB — index bytes는 `estimated_bytes()`로 LRU budget에
+계량된다. 검증: hotspot occupancy PNG md5 동일, KLayout oracle jobs 1/8
+ALL OK, PX1~PX5 golden 0 실패, integration 22 tests OK, unit gate
+`record_index_pruning_matches_unpruned_pixels`(pruned/unpruned pixel·paint
+동일 + 방문 감소)와 extent 보수성 테스트 추가.
+
+남은 축소 후보: visited record의 `Rep::Pts` member 전량 스캔(chunk bbox),
+tile×plane work bin(F2R-10/11 선행), 그리고 paint-bound가 된 serial의
+잔여는 F2R-03c 영역이다.
+
 ## 4. 이슈 목록
 
 | ID | 우선순위 | 상태 | 요약 | 다음 판정 |
 |---|---:|---|---|---|
 | F2R-01 | P1 | `DONE` | cache hit까지 128-page refine | cache-aware batch/unit+현장 gate 완료 |
 | F2R-02 | P1 | `DONE` | 128px tile의 반복 hierarchy 순회 | 제품 기본 384px 승인 |
-| F2R-03 | P1 | `OPEN` | tile x layer x hierarchy 총 CPU 작업량 | work bin 설계·jobs=1 개선 |
+| F2R-03 | P1 | `DOING` | tile x layer x hierarchy 총 CPU 작업량 | 03a·03b record index 완료(§3.10~11). 실칩 확인과 2단계(work bin) 필요성 재평가 |
 | F2R-04 | P1 | `DONE` | total에서 사라진 PNG/publish 37~44ms | write/sync/rename/handoff 계측 완료 |
 | F2R-05 | P2 | `DONE` | jobs=8의 CPU/전력 비용 | decode 8/raster 4 분리 승인 |
 | F2R-06 | P3 | `BLOCKED` | render마다 OS thread 생성 | startup_us가 병목일 때만 pool |
@@ -317,7 +389,7 @@ Rust jobs=4/tile=384는 99ms다. Rust single의 처리 성능은 KLayout의 약 
 | F2R-09 | P1 | `DONE` | 744-page pan에서 6회 full raster/PNG | 제품 round 1024 승인 |
 | F2R-10 | P1 | `OPEN` | exact 밖 인접 pan은 full viewport raster | pan sweep 후 world-tile prototype 판정 |
 | F2R-11 | P2 | `DESIGN` | page-round refinement가 누적 full PNG 반복 | final-tile streaming 채택 여부 결정 |
-| F2R-12 | P1 | `READY` | KLayout single-core parity와 Rust serial 기준선 | worker pin·split jobs gate 후 F2R-03 측정 |
+| F2R-12 | P1 | `DOING` | KLayout single-core parity와 Rust serial 기준선 | pin/split/serial 코드 완료, canonical 측정 남음 |
 
 ## 5. 상세 이슈와 수용 기준
 
@@ -380,17 +452,61 @@ batch 경계를 검증한다. adapter/cancellation integration gate도 동일 pr
 - jobs 1/2/4/8/16, tile 64/128/256/384의 RGBA와 PNG bytes 동일.
 - tile seam/KLayout oracle/cancellation/RSS gate 통과.
 
-### F2R-03 — 반복 hierarchy/layer traversal 제거
+### F2R-03 — 반복 hierarchy/layer traversal 제거와 raster 상수 비용
 
 현재 구조는 `tile -> paint layer -> render_cell hierarchy -> page records`다. page bbox
 prune과 큰 tile은 중복을 줄이는 완화책일 뿐이다. jobs=1도 tile=1024에서는 raster
 126.5ms까지 내려왔지만 total 149ms로 floe 129ms의 95% 목표에는 아직 약 16% 부족하다.
 
-후보:
+2026-08-26 코드 분석으로 원인을 다음과 같이 확정했다
+(`rust/render-core/src/raster.rs` 기준).
 
-- frame당 WC/page를 visible image tile과 paint plane에 한 번 binning
-- layer별 page 목록과 transformed bbox를 `FrameScene`에서 불변 공유
-- 같은 hierarchy transform/repetition 가시 범위 결과를 tile/plane 사이 재사용
+1. tile 축 중복: `raster_tile()`이 tile마다 `scene.top()`부터 hierarchy 전체를
+   재순회한다. culling은 page bbox 교차와 repetition 해석 prune뿐이라 instance
+   순회(place/compose/invert, member 전개)는 tile 수만큼 반복된다. §3.3의
+   jobs=1 tile sweep(49 tile 744ms → 1 tile 126.5ms)이 이 곱셈의 실측이다.
+2. layer 축 중복: tile당 styled layer마다 `render_cell()` 전체 순회에 frame
+   band 4회가 더해져 tile 하나가 (L+4)회 hierarchy를 걷는다.
+   `FrameScene::cell_bounds`는 cell당 전체 bbox 하나뿐이라 layer별 subtree
+   pruning이 없고, 해당 layer에 아무것도 없는 subtree도 끝까지 재귀한다.
+   `cell.pages`와 label rows도 layer마다 전체 재스캔한다. 순회 비용이
+   `O(L × 전체 가시 instance)`로 스케일하며, 단일 tile에서도 남는 잔여 16%의
+   주요 후보다.
+3. `Rep::Pts`는 tile·layer 방문마다 전체 point를 스캔한다
+   (`repetition.rs`). PLAN §7.2의 "선택 subset 또는 chunk bbox" 계획이
+   미구현 상태다.
+4. shape/pixel 상수 비용: 2-phase fill(PixelCenter ∪ LowerBoundary)에 무조건
+   outline stroke가 더해지고 PATH는 4패스다. span 내부 루프가 pixel마다
+   stipple 판정·u32 변환·4B RGBA 쓰기를 수행하고, member마다 world_points
+   Vec, scanline row마다 intersections Vec을 새로 할당하며, 같은
+   world→device 변환을 phase마다 반복한다. KLayout은 layer별 1bpp bitmap에
+   word 단위 span을 쓰고 dither는 최종 합성에서 word 단위로 적용한다.
+
+단계 (모두 jobs/tile byte 결정성과 half-phase oracle을 유지):
+
+- **F2R-03a (`DONE` — sample9, 2026-08-26)** — 순회 구조 불변의 상수 비용
+  제거. 적용 내용: `fill_span()` fill-종류별 특수화(기존 per-pixel `fills()`는
+  test 전용 oracle로 강등, 동등성 unit gate 추가), polygon fill의 device 변환
+  1회화, scanline row별 intersections 재사용, polygon/path member scratch
+  재사용, stroke 꼭짓점 변환 절반화, **axis-aligned solid stroke의 span fast
+  path**(stepped oracle 동등성 unit gate 추가). 결과와 검증은 §3.10 —
+  serial raster 136→44ms, 제품 raster 80→26ms, 출력 byte 불변.
+  대표 실칩 재확인은 F2R-12 잔여 측정과 함께 수행한다.
+- **F2R-03b 1단계 (`DONE` — sample9, 2026-08-26)** — sub-page record extent
+  index. 구현·수치·비용·검증은 §3.11. 제품 기본 raster 26.0→20.4ms,
+  128px tile 58.7→39.9ms, serial 동률, 출력 byte 불변. repetition 선행
+  전개 없이 extent만 색인하며 index bytes는 decoded LRU budget에 계량된다.
+  대표 실칩 재확인은 F2R-12 잔여 측정과 함께 수행한다.
+- **F2R-03b 2단계 (`OPEN`)** — visited record의 `Rep::Pts` member 전량
+  스캔에 chunk bbox를 도입하고, frame당 1회 traversal의 (image tile ×
+  paint plane) work bin과 cell×layer bbox subtree pruning을 구현한다.
+  1단계로 tile 축 곱셈이 크게 줄었으므로, 2단계는 F2R-10 world tile/
+  F2R-11 dependency graph 요구와 묶어 필요성을 재평가한 뒤 착수한다.
+  bin key는 world/scale 정렬 tile로 확장 가능하게 설계한다.
+- **F2R-03c (`DESIGN`)** — fill 파이프라인 재설계: 2-phase를 단일 edge walk
+  통합, 장기적으로 layer별 1bpp plane + 최종 word 합성. paint 순서 계약
+  (PLAN §8.3 "레이어 병렬 합성 금지")의 재개정이 필요할 수 있어 F2R-03a/b
+  측정 뒤 별도 승인으로만 진행한다.
 
 수용 gate:
 
@@ -546,13 +662,19 @@ KLayout의 95% 처리 성능을 먼저 달성하고 병렬 raster를 latency 가
 
 착수 항목:
 
-1. floe `_VIEW_CONFIG`에 `drawing-workers=1`을 명시하고 perf 로그/report에 KLayout
-   version과 실제 worker 설정을 기록한다.
-2. benchmark에 `decode_jobs`와 `raster_jobs`를 독립 지정하는 옵션을 추가한다.
-3. serial profile은 `decode_jobs=8`, `raster_jobs=1`로 고정하고 tile 크기를
-   `max(framebuffer width, height)` 이상으로 잡아 한 화면을 한 tile로 그린다.
-4. 동일 source/session/viewport에서 cold first frame, warm exact-cache-off, fixed pan을
-   3회씩 재고 total, raster, PNG/publish, process CPU와 peak RSS를 함께 저장한다.
+1. 완료(2026-08-26): floe `_VIEW_CONFIG`에 `drawing-workers=1`을 명시하고 render
+   service 시작 시 `[perf] backend=klayout version=.. drawing-workers=..` 한 줄로
+   실제 설정을 기록한다 (`floe/render.py`, `floe/service.py`).
+2. 완료(2026-08-26): `tools/bench_floe2.py`에 `--decode-jobs`를 추가했다. 지정 시
+   decode worker는 고정되고 `--jobs`는 raster worker만 sweep하며, 세션 로그와
+   JSON report에 두 값을 분리 기록한다.
+3. 완료(2026-08-26): `--serial` preset이 `decode_jobs=8`(미지정 시),
+   `raster_jobs=[1]`, tile `min(4096, max(width, height))`를 고정해 한 화면을 한
+   tile로 그린다.
+4. 부분 완료(2026-08-26): canonical sample9로 Rust serial/제품 profile을 3회
+   측정했다(§3.10; bench에 `--frame-cache off`/`--perf-baseline` 표면 추가).
+   남음: 같은 머신의 floe/KLayout GUI 세션 재측정(새 `[perf]` 라인으로
+   version/worker 고정 확인)과 대표 실칩 trace.
 
 수용 gate:
 
@@ -567,17 +689,22 @@ KLayout의 95% 처리 성능을 먼저 달성하고 병렬 raster를 latency 가
 
 ## 6. 남은 착수 순서
 
-1. F2R-12의 KLayout worker pin과 decode/raster split benchmark로 비교 기준을 고정한다.
-2. F2R-10의 fixed-scale pan sweep과 persistent/new KLayout `LayoutView` 진단으로 인접
+1. 완료(2026-08-26): F2R-12 worker pin·bench split·serial preset과 F2R-03a
+   상수 비용 제거. sample9 serial 66ms로 gate 통과(§3.10). 남은 확인: 같은
+   머신 KLayout GUI 재측정과 대표 실칩 trace.
+2. 완료(2026-08-26): F2R-03b 1단계 sub-page record index. 제품 raster
+   26.0→20.4ms, 128px tile -32%, serial 동률(§3.11).
+3. F2R-10의 fixed-scale pan sweep과 persistent/new KLayout `LayoutView` 진단으로 인접
    cache 체감을 수치화한다.
-3. F2R-03 frame work bin/transform 재사용으로 새로운 viewport의 단일-worker total을
-   floe의 95% 안으로 낮춘다. exact 재방문 cache를 회귀시키지 않는 경우에만 편입한다.
-4. 같은 work bin 위에서 F2R-10 world-aligned tile LRU를 작게 prototype하고 field trace
+4. F2R-03b 2단계(frame당 1회 tile×plane work bin, cell×layer bbox, Pts chunk
+   bbox)는 F2R-10/11 요구와 묶어 필요성을 재평가한 뒤 진행한다. exact 재방문
+   cache를 회귀시키지 않는 경우에만 편입한다.
+5. 같은 work bin 위에서 F2R-10 world-aligned tile LRU를 작게 prototype하고 field trace
    20% gate를 넘을 때만 제품화한다.
-5. 1024-page를 넘는 장시간 cold fixture로 F2R-11 final-tile streaming의 first/settled
+6. 1024-page를 넘는 장시간 cold fixture로 F2R-11 final-tile streaming의 first/settled
    이득을 측정한 뒤 protocol 변경 여부를 결정한다. 500~700ms 이하 작업에는 refinement를
    만들지 않는다.
-6. F2R-06은 thread startup 실측이 frame의 5%를 넘을 때만 수행한다. 대표 실칩에서
+7. F2R-06은 thread startup 실측이 frame의 5%를 넘을 때만 수행한다. 대표 실칩에서
    4-worker tail imbalance가 확인될 때만 bounded adaptive tile/jobs를 다시 연다.
 
 각 완료 항목은 이 표의 상태, before/after 중앙값, 실행 명령, 적용 커밋과 자동 gate를
