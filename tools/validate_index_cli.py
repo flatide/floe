@@ -180,11 +180,14 @@ else:
 
         # A cell profile bypasses cache reuse and does not even pass the cache
         # path to floe-index. Relevant planner knobs still propagate.
-        snapshot = {p.name: p.read_bytes() for p in cache.iterdir()
-                    if p.is_file()}
+        cache_snapshot = {p.name: p.read_bytes() for p in cache.iterdir()
+                          if p.is_file()}
+        profile_snapshot = work / "scratch profile.bin"
         profiled = run(env, additive, "--jobs", "7", "--no-lod",
                        "--page-target-mb", "3", "--profile-cell",
-                       "MONSTER CELL")
+                       "MONSTER CELL", "--profile-jobs", "8,12,16",
+                       "--profile-repeat", "2", "--profile-snapshot",
+                       profile_snapshot, "--profile-snapshot-refresh")
         check(json.loads(profiled.stdout)["mode"] == "vfs-cell-profile",
               "profile stdout was not one standalone JSON object")
         check("[floe]" in profiled.stderr,
@@ -193,14 +196,21 @@ else:
             "vfs", str(additive), "--jobs", "7",
             "--page-target-mb", "3", "--no-lod",
             "--profile-cell", "MONSTER CELL",
+            "--profile-jobs", "8,12,16", "--profile-repeat", "2",
+            "--profile-snapshot", str(profile_snapshot),
+            "--profile-snapshot-refresh",
         ], "cell profile argv is not the non-publishing form")
-        check(snapshot == {p.name: p.read_bytes() for p in cache.iterdir()
-                           if p.is_file()},
+        check(cache_snapshot == {
+            p.name: p.read_bytes() for p in cache.iterdir() if p.is_file()},
               "cell profile modified an existing cache")
         conflict = run(env, additive, "--force", "--profile-cell-ci", "0",
                        ok=False)
         check("cannot be combined" in conflict.stderr,
               "profile accepted a destructive --force combination")
+        tuning_without_cell = run(
+            env, additive, "--profile-jobs", "8,16", ok=False)
+        check("require --profile-cell" in tuning_without_cell.stderr,
+              "profile tuning was accepted without a cell selector")
 
         invalid_env = env.copy()
         invalid_env["FLOE_INDEX_BIN"] = str(work / "missing-floe-index")

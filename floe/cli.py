@@ -92,6 +92,22 @@ def _nonnegative_int(value):
     return parsed
 
 
+def _positive_int_list(value):
+    values = value.split(",")
+    if not values or any(not item for item in values):
+        raise argparse.ArgumentTypeError(
+            "expected comma-separated positive integers")
+    try:
+        parsed = [int(item) for item in values]
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "expected comma-separated positive integers") from None
+    if any(item <= 0 for item in parsed):
+        raise argparse.ArgumentTypeError(
+            "expected comma-separated positive integers")
+    return ",".join(str(item) for item in parsed)
+
+
 def _nonnegative_float(value):
     try:
         parsed = float(value)
@@ -284,8 +300,17 @@ def _run_rust_index(args, binary, coverage_only=False):
             command += ["--profile-cell", args.profile_cell]
         if args.profile_cell_ci is not None:
             command += ["--profile-cell-ci", str(args.profile_cell_ci)]
-    # The cell profiler reserves stdout for one JSON object so callers can
-    # redirect it directly to a repeatable measurement artifact.
+        if args.profile_jobs is not None:
+            command += ["--profile-jobs", args.profile_jobs]
+        if args.profile_repeat != 1:
+            command += ["--profile-repeat", str(args.profile_repeat)]
+        if args.profile_snapshot is not None:
+            command += ["--profile-snapshot",
+                        os.path.abspath(args.profile_snapshot)]
+        if args.profile_snapshot_refresh:
+            command.append("--profile-snapshot-refresh")
+    # The cell profiler reserves stdout for one JSON object, or an array for
+    # a jobs/repeat series, so it can be redirected to a measurement artifact.
     print("[floe] " + shlex.join(command),
           file=sys.stderr if profiling else sys.stdout)
     try:
@@ -306,10 +331,26 @@ def cmd_index(args):
              "is a" if len(legacy_options) == 1 else "are"))
     profiling = (args.profile_cell is not None or
                  args.profile_cell_ci is not None)
+    profile_tuning = (args.profile_jobs is not None or
+                      args.profile_repeat != 1 or
+                      args.profile_snapshot is not None or
+                      args.profile_snapshot_refresh)
+    if profile_tuning and not profiling:
+        raise SystemExit(
+            "floe: profile jobs/repeat/snapshot options require "
+            "--profile-cell or --profile-cell-ci")
+    if args.profile_snapshot_refresh and args.profile_snapshot is None:
+        raise SystemExit(
+            "floe: --profile-snapshot-refresh requires "
+            "--profile-snapshot")
     rust_options = any((args.page_target_mb is not None, args.coverage,
                         args.coverage_only, args.no_lod,
                         args.slow_cell_s is not None,
-                        args.p2_shard_limit_mb is not None, profiling))
+                        args.p2_shard_limit_mb is not None, profiling,
+                        args.profile_jobs is not None,
+                        args.profile_repeat != 1,
+                        args.profile_snapshot is not None,
+                        args.profile_snapshot_refresh))
     if args.legacy:
         if rust_options:
             raise SystemExit(
@@ -1330,6 +1371,22 @@ def main(argv=None, *, prog=None, rust_only=None):
         "--profile-cell-ci", type=_nonnegative_int, metavar="N",
         help="like --profile-cell, selecting the zero-based parsed cell "
              "index shown by slow-cell logs")
+    rust.add_argument(
+        "--profile-jobs", type=_positive_int_list, metavar="N,N,...",
+        help="run the selected cell sequentially at each planner job count "
+             "after one parse/prepare (for example 8,12,16)")
+    rust.add_argument(
+        "--profile-repeat", type=_positive_int, default=1, metavar="N",
+        help="repeat every selected-cell planner job count N times while "
+             "reusing parse/prepare (default: 1)")
+    rust.add_argument(
+        "--profile-snapshot", metavar="PATH",
+        help="load or atomically save an explicit selected-cell profile "
+             "snapshot; never modifies the normal .floe cache")
+    rust.add_argument(
+        "--profile-snapshot-refresh", action="store_true",
+        help="replace the explicit profile snapshot after parsing; required "
+             "when its schema, source fingerprint, or cell differs")
     legacy = p.add_argument_group(
         "Python/KLayout legacy options (require --legacy)")
     legacy.add_argument(

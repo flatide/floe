@@ -835,8 +835,10 @@ floe index chip.oas --jobs 12                # <src>.floe
 floe index chip.oas --coverage               # density overview 포함
 floe index chip.oas --page-target-mb 2 --p2-shard-limit-mb 4096
 floe index chip.oas --force                  # 기존 캐시 교체 권한
-floe2 index chip.oas --jobs 48 --profile-cell ltv_top_FEOL_dmy \
-  > monster-profile.json                     # 셀 1개 dry-run, cache 쓰기 없음
+floe2 index chip.oas --jobs 16 --profile-cell-ci 32810 \
+  --profile-jobs 8,12,16 --profile-repeat 2 \
+  --profile-snapshot /fast-scratch/monster.floe-profile \
+  > monster-profile.json                     # parse/prepare 1회, cache 쓰기 없음
 floe-index vfs chip.oas custom.floe --jobs 12  # 저수준 직접 실행
 floe-index scan chip.oas 16                  # JSON 인벤토리 (진단용)
 floe-index --version
@@ -854,6 +856,12 @@ floe-index --version
   `--profile-cell-ci N`은 전체 소스를 파스한 뒤 지정 셀의 planner만 격리
   실행한다. stderr에는 레이어별 P2 prefix/shard/task/merge/pbvh 시간이,
   stdout에는 같은 결과의 JSON이 나오며 기존 `<src>.floe`는 건드리지 않는다.
+  `--profile-jobs 8,12,16 --profile-repeat 2`는 한 번의 parse/recursive-bbox
+  결과로 6개 planner 실행을 순차 비교한다. `--profile-snapshot PATH`는 선택
+  셀의 준비된 입력을 별도 atomic/checksummed scratch 파일로 저장해 다음
+  프로세스의 OASIS parse를 생략한다. 원본 지문·셀·스키마가 다르면 재사용을
+  거부하며 `--profile-snapshot-refresh`로만 교체한다. 큰 snapshot은
+  zero-copy가 아니므로 `timing_s.snapshot_load`가 실제로 줄었는지 확인한다.
 
 ### 빌드와 배포
 

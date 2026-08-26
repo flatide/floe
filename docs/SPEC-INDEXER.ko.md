@@ -10,7 +10,9 @@
 <abs-src>.floe`를 shell 없이 subprocess로 실행한다. `--jobs`,
 `--page-target-mb`, `--coverage`/`--coverage-only`, `--no-lod`,
 `--slow-cell-s`, `--p2-shard-limit-mb`, `--profile-cell`/
-`--profile-cell-ci`를 같은 이름의 Rust 옵션으로 전달한다.
+`--profile-cell-ci`, `--profile-jobs`, `--profile-repeat`,
+`--profile-snapshot`/`--profile-snapshot-refresh`를 같은 이름의 Rust
+옵션으로 전달한다.
 coverage는 viewer 기본값과 맞춰 opt-in이다.
 
 정상 VFS cache의 cache version과 source size/mtime fingerprint가 맞고,
@@ -35,6 +37,8 @@ floe-index vfs <src.oas> [outdir=.floe] [--jobs N] [--plan-batch N]
     [--coverage | --coverage-only] [--frontier-only] [--kill-at P]
     [--slow-cell-s S] [--p2-shard-limit-mb N]
     [--profile-cell NAME | --profile-cell-ci N]
+    [--profile-jobs N,N,...] [--profile-repeat N]
+    [--profile-snapshot PATH] [--profile-snapshot-refresh]
 ```
 
 `--slow-cell-s S` = slow-cell 로그 임계 초(기본 5.0, 0 = 전 셀 —
@@ -50,18 +54,46 @@ floe-index vfs <src.oas> [outdir=.floe] [--jobs N] [--plan-batch N]
 전혀 쓰지 않는다. 기존 cache가 있어도 Python CLI는 freshness/`--force`
 경로를 거치지 않고 프로파일을 실행한다.
 
-stderr는 진행과 사람이 읽는 요약, stdout은 반복 측정용 JSON 객체 하나다.
-JSON은 read/parse/prepare/plan, 셀 6페이즈, 레이어별 serial split 및 P2
+stderr는 진행과 사람이 읽는 요약, stdout은 반복 측정용 JSON이다. 기본 단일
+실행은 기존과 같은 객체 하나이고, jobs/반복 행렬은 같은 객체들의 JSON 배열이다.
+JSON은 read/parse/prepare/common inventory/plan, 셀 6페이즈, 레이어별 serial split 및 P2
 `prefix/shard/tasks wall/tasks sum/task peak/merge/pbvh`, 작업량, RSS/HWM과
 retained Pts arena를 기록한다. `tasks sum`은 각 태스크 wall의 합이며 OS CPU
 clock은 아니다. 프로파일러 호출 스레드가 한 실행 슬롯을 소유하고 나머지
 `jobs-1` 슬롯은 즉시 P1/P2/LOD에 제공되므로, 전체 빌드의 다른 셀/commit
 window 경합이 없는 **격리 셀 확장성**을 측정한다.
 
+`--profile-jobs 8,12,16`은 `--jobs`로 소스를 한 번만 파스하고 recursive
+bbox/layer map도 한 번만 준비한 뒤, 지정한 planner job 수를 순서대로 실행한다.
+`--profile-repeat N`은 각 job 수를 N번 반복한다. 각 실행이 끝날 때 `CellPlan`과
+arena를 먼저 drop하므로 결과는 동시에 겹치지 않으며, 첫 실행의 cold allocator
+효과도 숨기지 않고 `settings.repeat`로 구분한다. 공유 서버의 운영 후보를 비교할
+때는 source parse도 `--jobs 16` 이하로 묶는다. 배열 안의 `timing_s.plan`은 해당
+실행만의 wall이고 `timing_s.total`은 명령 시작부터 해당 실행 종료까지의 누적 wall이다.
+
+`--profile-snapshot PATH`는 선택 셀의 rect/poly/path/place, 공유 Pts repetition
+pool, 전체 recursive bbox와 layer order를 일반 `.floe`와 별개의 프로파일 전용
+바이너리에 저장한다. 파일이 없으면 parse/prepare 뒤 같은 디렉터리 임시 파일을
+`0600`으로 쓰고 sync한 뒤 원자 rename하며, 있으면 mmap으로 읽어 소스 parse와
+recursive bbox 계산을 생략한다. 스키마 버전, canonical source path, size,
+나노초 mtime, 선택 cell, 전 파일 CRC32 checksum과 commit footer를 모두
+검사한다. stale/corrupt/다른 셀은 자동 재사용하지 않으며 명시적인
+`--profile-snapshot-refresh`로만 교체한다. snapshot은 planner 입력을 owned
+record로 복원하므로 완전한 zero-copy 형식은 아니다. 큰 셀에서는 JSON의
+`timing_s.snapshot_load`를 실제로 확인해 OASIS parse 대비 이득을 판정한다.
+고정폭 레코드라 파일 크기는 선택 셀 record 수에 비례하므로 여유 있는 로컬
+scratch를 명시해야 한다. 텍스트는 `build_cell_plan` 입력이 아니므로 snapshot에
+넣지 않는다.
+
 ```sh
-floe2 index chip.oas --jobs 48 --profile-cell ltv_top_FEOL_dmy \
+floe2 index chip.oas --jobs 16 --profile-cell-ci 32810 \
+    --profile-jobs 8,12,16 --profile-repeat 2 \
+    --profile-snapshot /fast-scratch/ltv_top_FEOL_dmy.floe-profile \
     > ltv_top_FEOL_dmy.profile.json
-floe-index vfs chip.oas --jobs 48 --profile-cell-ci 32810 --no-lod
+# 원본이 바뀌거나 스냅샷 스키마/선택 셀이 달라졌을 때만:
+floe2 index chip.oas --jobs 16 --profile-cell-ci 32810 \
+    --profile-snapshot /fast-scratch/ltv_top_FEOL_dmy.floe-profile \
+    --profile-snapshot-refresh
 ```
 
 ## 1.5 파스 규약 (도형 변환)

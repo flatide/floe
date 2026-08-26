@@ -1,6 +1,6 @@
 [package]
 name = "floe-index"
-version = "0.12.11"
+version = "0.12.12"
 edition.workspace = true
 license.workspace = true
 description = "floe native indexer CLI (spike: scan/inventory)"
@@ -11,3 +11,4 @@ floe-tiler = { path = "../tiler" }
 floe-ovm = { path = "../ovm" }
 floe-vfs = { path = "../vfs" }
 memmap2 = "0.9"
+crc32fast = "1.4"

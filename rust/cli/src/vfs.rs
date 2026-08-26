@@ -10,7 +10,7 @@
 //! skeleton own them), which makes the G5 gate exact: page record/
 //! member sums must equal the source's geometry scan.
 
-use floe_oasis::doc::{Doc, PathRec, PolyRec, RectRec, Rep};
+use floe_oasis::doc::{Cell, Doc, PathRec, PlaceRec, PolyRec, RectRec, Rep};
 use floe_oasis::write::WCell;
 use floe_ovm::{narrow_u32, BBox, Builder, PBVH_NONE};
 use floe_tiler::hier::{cell_bboxes_full, rep_extent};
@@ -88,6 +88,15 @@ pub fn vfs_cmd(args: &[String]) {
     // build_cell_plan call runs and no cache path is created or modified.
     let mut profile_cell: Option<String> = None;
     let mut profile_cell_ci: Option<usize> = None;
+    // A profile series reuses the parsed Doc and recursive bbox preparation.
+    // --jobs still controls the one source parse; these values control only
+    // the isolated build_cell_plan calls.
+    let mut profile_jobs: Option<Vec<usize>> = None;
+    let mut profile_repeat = 1usize;
+    // Explicit scratch snapshot for cross-process profile iteration. This is
+    // deliberately not inferred from the source or mixed with the VFS cache.
+    let mut profile_snapshot: Option<String> = None;
+    let mut profile_snapshot_refresh = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -165,6 +174,51 @@ pub fn vfs_cmd(args: &[String]) {
                 );
                 i += 2;
             }
+            "--profile-jobs" => {
+                let Some(value) = args.get(i + 1) else {
+                    eprintln!("--profile-jobs requires a value");
+                    std::process::exit(2);
+                };
+                let values: Vec<usize> = value
+                    .split(',')
+                    .map(|v| v.parse::<usize>())
+                    .collect::<Result<_, _>>()
+                    .unwrap_or_else(|_| {
+                        eprintln!("--profile-jobs requires positive comma-separated integers");
+                        std::process::exit(2);
+                    });
+                if values.is_empty() || values.contains(&0) {
+                    eprintln!("--profile-jobs requires positive comma-separated integers");
+                    std::process::exit(2);
+                }
+                profile_jobs = Some(values);
+                i += 2;
+            }
+            "--profile-repeat" => {
+                profile_repeat = args
+                    .get(i + 1)
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or_else(|| {
+                        eprintln!("--profile-repeat requires a positive integer");
+                        std::process::exit(2);
+                    });
+                if profile_repeat == 0 {
+                    eprintln!("--profile-repeat must be positive");
+                    std::process::exit(2);
+                }
+                i += 2;
+            }
+            "--profile-snapshot" => {
+                profile_snapshot = Some(args.get(i + 1).cloned().unwrap_or_else(|| {
+                    eprintln!("--profile-snapshot requires a path");
+                    std::process::exit(2);
+                }));
+                i += 2;
+            }
+            "--profile-snapshot-refresh" => {
+                profile_snapshot_refresh = true;
+                i += 1;
+            }
             a => {
                 if src.is_none() {
                     src = Some(a.to_string());
@@ -202,6 +256,19 @@ pub fn vfs_cmd(args: &[String]) {
         std::process::exit(2);
     }
     let profiling = profile_cell.is_some() || profile_cell_ci.is_some();
+    if !profiling
+        && (profile_jobs.is_some()
+            || profile_repeat != 1
+            || profile_snapshot.is_some()
+            || profile_snapshot_refresh)
+    {
+        eprintln!("profile tuning and snapshot options require a profile cell selector");
+        std::process::exit(2);
+    }
+    if profile_snapshot_refresh && profile_snapshot.is_none() {
+        eprintln!("--profile-snapshot-refresh requires --profile-snapshot");
+        std::process::exit(2);
+    }
     if profiling
         && (coverage
             || coverage_only
@@ -229,6 +296,87 @@ pub fn vfs_cmd(args: &[String]) {
         return;
     }
     let t0 = std::time::Instant::now();
+    let source_fingerprint = if profiling {
+        Some(SourceFingerprint::read(&src).unwrap_or_else(|e| {
+            eprintln!("profile source fingerprint {}: {}", src, e);
+            std::process::exit(1);
+        }))
+    } else {
+        None
+    };
+    if profiling {
+        if let Some(path) = profile_snapshot.as_deref() {
+            if std::path::Path::new(path).exists()
+                && !profile_snapshot_refresh
+            {
+                eprintln!("[vfs] profile: loading snapshot {}...", path);
+                let ts = std::time::Instant::now();
+                let heartbeat = ProfileIoHeartbeat::start(format!(
+                    "loading snapshot {}",
+                    path
+                ));
+                let loaded = load_profile_snapshot(
+                    path,
+                    source_fingerprint.as_ref().expect("profile fingerprint"),
+                    profile_cell.as_deref(),
+                    profile_cell_ci,
+                )
+                .unwrap_or_else(|e| {
+                    eprintln!(
+                        "--profile-snapshot: {}; rerun with --profile-snapshot-refresh to replace it",
+                        e
+                    );
+                    std::process::exit(1);
+                });
+                if SourceFingerprint::read(&src).unwrap_or_else(|e| {
+                    eprintln!("profile source fingerprint {}: {}", src, e);
+                    std::process::exit(1);
+                }) != *source_fingerprint.as_ref().expect("profile fingerprint")
+                {
+                    eprintln!(
+                        "--profile-snapshot: source changed while snapshot was loading"
+                    );
+                    std::process::exit(1);
+                }
+                drop(heartbeat);
+                let load_s = ts.elapsed().as_secs_f64();
+                eprintln!(
+                    "[vfs] profile: snapshot loaded in {:.3}s ({}, rss {})",
+                    load_s,
+                    fmt_size(loaded.bytes),
+                    rss()
+                );
+                let run_jobs = profile_jobs
+                    .as_deref()
+                    .unwrap_or(std::slice::from_ref(&jobs));
+                profile_cell_plan(
+                    &loaded.doc,
+                    &src,
+                    profile_cell.as_deref(),
+                    profile_cell_ci,
+                    run_jobs,
+                    profile_repeat,
+                    page_target_bytes,
+                    page_target_mb,
+                    lod,
+                    p2_shard_limit,
+                    0.0,
+                    0.0,
+                    Some(loaded.rbb),
+                    ProfileSnapshotStats {
+                        path: Some(path.to_string()),
+                        state: "loaded",
+                        bytes: loaded.bytes,
+                        load_s,
+                        save_s: 0.0,
+                    },
+                    None,
+                    t0,
+                );
+                return;
+            }
+        }
+    }
     eprintln!("[vfs] reading {}...", src);
     let data = std::fs::read(&src).expect("read src");
     let read_s = t0.elapsed().as_secs_f64();
@@ -310,18 +458,40 @@ pub fn vfs_cmd(args: &[String]) {
         rss()
     );
     if profiling {
+        let run_jobs = profile_jobs
+            .as_deref()
+            .unwrap_or(std::slice::from_ref(&jobs));
         profile_cell_plan(
             &doc,
             &src,
             profile_cell.as_deref(),
             profile_cell_ci,
-            jobs,
+            run_jobs,
+            profile_repeat,
             page_target_bytes,
             page_target_mb,
             lod,
             p2_shard_limit,
             read_s,
             parse_s,
+            None,
+            ProfileSnapshotStats {
+                path: profile_snapshot.clone(),
+                state: if profile_snapshot.is_some() {
+                    "saved"
+                } else {
+                    "disabled"
+                },
+                bytes: 0,
+                load_s: 0.0,
+                save_s: 0.0,
+            },
+            profile_snapshot.as_deref().map(|path| {
+                (
+                    path,
+                    source_fingerprint.as_ref().expect("profile fingerprint"),
+                )
+            }),
             t0,
         );
         return;
@@ -430,19 +600,681 @@ pub fn vfs_cmd(args: &[String]) {
     );
 }
 
+const PROFILE_SNAPSHOT_MAGIC: &[u8; 8] = b"FLOEPS01";
+const PROFILE_SNAPSHOT_END: &[u8; 8] = b"FLOEPSEN";
+const PROFILE_SNAPSHOT_VERSION: u32 = 1;
+const PROFILE_SNAPSHOT_TRAILER: usize = 24;
+type RecursiveBbox = Option<(i64, i64, i64, i64)>;
+
+#[derive(PartialEq, Eq)]
+struct SourceFingerprint {
+    path: String,
+    size: u64,
+    mtime_secs: u64,
+    mtime_nanos: u32,
+}
+
+impl SourceFingerprint {
+    fn read(path: &str) -> Result<Self, String> {
+        let canonical = std::fs::canonicalize(path)
+            .map_err(|e| format!("cannot resolve source: {e}"))?;
+        let meta = std::fs::metadata(&canonical)
+            .map_err(|e| format!("cannot stat source: {e}"))?;
+        let modified = meta
+            .modified()
+            .map_err(|e| format!("cannot read source mtime: {e}"))?
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| String::from("source mtime predates UNIX epoch"))?;
+        Ok(Self {
+            path: canonical.to_string_lossy().into_owned(),
+            size: meta.len(),
+            mtime_secs: modified.as_secs(),
+            mtime_nanos: modified.subsec_nanos(),
+        })
+    }
+}
+
+struct ProfileSnapshotStats {
+    path: Option<String>,
+    state: &'static str,
+    bytes: u64,
+    load_s: f64,
+    save_s: f64,
+}
+
+struct LoadedProfileSnapshot {
+    doc: Doc,
+    rbb: Vec<RecursiveBbox>,
+    bytes: u64,
+}
+
+struct ProfileIoHeartbeat {
+    stop: std::sync::mpsc::Sender<()>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ProfileIoHeartbeat {
+    fn start(action: String) -> Self {
+        let (stop, rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let mut last = 0u64;
+            loop {
+                match rx.recv_timeout(std::time::Duration::from_millis(200)) {
+                    Ok(())
+                    | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        return;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                }
+                let elapsed = started.elapsed().as_secs();
+                if elapsed >= last + 5 {
+                    last = elapsed;
+                    eprintln!(
+                        "[vfs] profile: {}... ({}s, rss {})",
+                        action,
+                        elapsed,
+                        rss()
+                    );
+                }
+            }
+        });
+        Self { stop, thread: Some(thread) }
+    }
+}
+
+impl Drop for ProfileIoHeartbeat {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+struct SnapshotWriter<W: Write> {
+    inner: W,
+    pos: u64,
+}
+
+impl<W: Write> SnapshotWriter<W> {
+    fn new(inner: W) -> Self {
+        Self { inner, pos: 0 }
+    }
+
+    fn bytes(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.inner.write_all(bytes)?;
+        self.pos = self
+            .pos
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| std::io::Error::other("snapshot size overflow"))?;
+        Ok(())
+    }
+
+    fn u8(&mut self, value: u8) -> std::io::Result<()> {
+        self.bytes(&[value])
+    }
+
+    fn u32(&mut self, value: u32) -> std::io::Result<()> {
+        self.bytes(&value.to_le_bytes())
+    }
+
+    fn u64(&mut self, value: u64) -> std::io::Result<()> {
+        self.bytes(&value.to_le_bytes())
+    }
+
+    fn i64(&mut self, value: i64) -> std::io::Result<()> {
+        self.bytes(&value.to_le_bytes())
+    }
+
+    fn string(&mut self, value: &str) -> std::io::Result<()> {
+        self.u64(value.len() as u64)?;
+        self.bytes(value.as_bytes())
+    }
+}
+
+fn snapshot_write_rep<W: Write>(
+    out: &mut SnapshotWriter<W>,
+    rep: &Rep,
+    pool_ids: &mut std::collections::HashMap<(usize, usize), u64>,
+    pools: &mut Vec<std::sync::Arc<[(i64, i64)]>>,
+) -> std::io::Result<()> {
+    match rep {
+        Rep::One => out.u8(0),
+        Rep::Grid { na, nb, va, vb } => {
+            out.u8(1)?;
+            out.u64(*na)?;
+            out.u64(*nb)?;
+            out.i64(va.0)?;
+            out.i64(va.1)?;
+            out.i64(vb.0)?;
+            out.i64(vb.1)
+        }
+        Rep::Pts(pts) => {
+            let key = (pts.as_ptr() as usize, pts.len());
+            let id = if let Some(&id) = pool_ids.get(&key) {
+                id
+            } else {
+                let id = pools.len() as u64;
+                pools.push(pts.clone());
+                pool_ids.insert(key, id);
+                id
+            };
+            out.u8(2)?;
+            out.u64(id)
+        }
+    }
+}
+
+fn snapshot_write_points<W: Write>(
+    out: &mut SnapshotWriter<W>,
+    points: &[(i64, i64)],
+) -> std::io::Result<()> {
+    out.u64(points.len() as u64)?;
+    for &(x, y) in points {
+        out.i64(x)?;
+        out.i64(y)?;
+    }
+    Ok(())
+}
+
+fn snapshot_target_path(
+    path: &str,
+    fingerprint: &SourceFingerprint,
+) -> Result<std::path::PathBuf, String> {
+    let path = std::path::Path::new(path);
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let parent = std::fs::canonicalize(parent)
+        .map_err(|e| format!("cannot resolve snapshot directory: {e}"))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| String::from("snapshot path has no file name"))?;
+    let target = parent.join(name);
+    if target == std::path::Path::new(&fingerprint.path) {
+        return Err(String::from("snapshot path must not replace the source"));
+    }
+    Ok(target)
+}
+
+fn save_profile_snapshot(
+    path: &str,
+    fingerprint: &SourceFingerprint,
+    doc: &Doc,
+    ci: usize,
+    rbb: &[RecursiveBbox],
+) -> Result<u64, String> {
+    if SourceFingerprint::read(&fingerprint.path)? != *fingerprint {
+        return Err(String::from(
+            "source changed while it was being parsed; snapshot not written",
+        ));
+    }
+    let target = snapshot_target_path(path, fingerprint)?;
+    let file_name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| String::from("snapshot file name is not UTF-8"))?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let temp = target.with_file_name(format!(
+        ".{file_name}.tmp.{}.{}",
+        std::process::id(),
+        nonce
+    ));
+    let result = (|| -> Result<u64, String> {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
+            .open(&temp)
+            .map_err(|e| format!("cannot create temporary snapshot: {e}"))?;
+        let buffered = std::io::BufWriter::with_capacity(1 << 20, file);
+        let mut out = SnapshotWriter::new(buffered);
+        out.bytes(PROFILE_SNAPSHOT_MAGIC).map_err(|e| e.to_string())?;
+        out.u32(PROFILE_SNAPSHOT_VERSION).map_err(|e| e.to_string())?;
+        out.string(&fingerprint.path).map_err(|e| e.to_string())?;
+        out.u64(fingerprint.size).map_err(|e| e.to_string())?;
+        out.u64(fingerprint.mtime_secs).map_err(|e| e.to_string())?;
+        out.u32(fingerprint.mtime_nanos).map_err(|e| e.to_string())?;
+        out.u64(doc.cells.len() as u64).map_err(|e| e.to_string())?;
+        out.u64(ci as u64).map_err(|e| e.to_string())?;
+        out.string(&doc.cells[ci].name).map_err(|e| e.to_string())?;
+        out.u64(doc.unit.to_bits()).map_err(|e| e.to_string())?;
+
+        out.u64(doc.layer_order.len() as u64).map_err(|e| e.to_string())?;
+        for &(layer, datatype) in &doc.layer_order {
+            out.u32(layer).map_err(|e| e.to_string())?;
+            out.u32(datatype).map_err(|e| e.to_string())?;
+        }
+        out.u64(rbb.len() as u64).map_err(|e| e.to_string())?;
+        for bbox in rbb {
+            match bbox {
+                None => out.u8(0).map_err(|e| e.to_string())?,
+                Some((x0, y0, x1, y1)) => {
+                    out.u8(1).map_err(|e| e.to_string())?;
+                    out.i64(*x0).map_err(|e| e.to_string())?;
+                    out.i64(*y0).map_err(|e| e.to_string())?;
+                    out.i64(*x1).map_err(|e| e.to_string())?;
+                    out.i64(*y1).map_err(|e| e.to_string())?;
+                }
+            }
+        }
+
+        let cell = &doc.cells[ci];
+        let mut pool_ids = std::collections::HashMap::new();
+        let mut pools = Vec::new();
+        out.u64(cell.rects.len() as u64).map_err(|e| e.to_string())?;
+        for rec in &cell.rects {
+            out.u32(rec.layer).map_err(|e| e.to_string())?;
+            out.u32(rec.dt).map_err(|e| e.to_string())?;
+            out.i64(rec.x).map_err(|e| e.to_string())?;
+            out.i64(rec.y).map_err(|e| e.to_string())?;
+            out.i64(rec.w).map_err(|e| e.to_string())?;
+            out.i64(rec.h).map_err(|e| e.to_string())?;
+            snapshot_write_rep(&mut out, &rec.rep, &mut pool_ids, &mut pools)
+                .map_err(|e| e.to_string())?;
+        }
+        out.u64(cell.polys.len() as u64).map_err(|e| e.to_string())?;
+        for rec in &cell.polys {
+            out.u32(rec.layer).map_err(|e| e.to_string())?;
+            out.u32(rec.dt).map_err(|e| e.to_string())?;
+            snapshot_write_points(&mut out, &rec.pts).map_err(|e| e.to_string())?;
+            snapshot_write_rep(&mut out, &rec.rep, &mut pool_ids, &mut pools)
+                .map_err(|e| e.to_string())?;
+        }
+        out.u64(cell.paths.len() as u64).map_err(|e| e.to_string())?;
+        for rec in &cell.paths {
+            out.u32(rec.layer).map_err(|e| e.to_string())?;
+            out.u32(rec.dt).map_err(|e| e.to_string())?;
+            snapshot_write_points(&mut out, &rec.pts).map_err(|e| e.to_string())?;
+            out.i64(rec.hw).map_err(|e| e.to_string())?;
+            out.i64(rec.es).map_err(|e| e.to_string())?;
+            out.i64(rec.ee).map_err(|e| e.to_string())?;
+            snapshot_write_rep(&mut out, &rec.rep, &mut pool_ids, &mut pools)
+                .map_err(|e| e.to_string())?;
+        }
+        out.u64(cell.places.len() as u64).map_err(|e| e.to_string())?;
+        for rec in &cell.places {
+            out.u64(rec.cell as u64).map_err(|e| e.to_string())?;
+            out.i64(rec.x).map_err(|e| e.to_string())?;
+            out.i64(rec.y).map_err(|e| e.to_string())?;
+            out.u8(rec.rot).map_err(|e| e.to_string())?;
+            out.u8(u8::from(rec.flip)).map_err(|e| e.to_string())?;
+            snapshot_write_rep(&mut out, &rec.rep, &mut pool_ids, &mut pools)
+                .map_err(|e| e.to_string())?;
+        }
+
+        let pool_offset = out.pos;
+        out.u64(pools.len() as u64).map_err(|e| e.to_string())?;
+        for points in &pools {
+            snapshot_write_points(&mut out, points).map_err(|e| e.to_string())?;
+        }
+        let body_bytes = out.pos;
+        out.inner
+            .flush()
+            .map_err(|e| format!("flush snapshot body: {e}"))?;
+        let hash = {
+            let body = unsafe { memmap2::Mmap::map(out.inner.get_ref()) }
+                .map_err(|e| format!("map snapshot for checksum: {e}"))?;
+            u64::from(crc32fast::hash(&body[..body_bytes as usize]))
+        };
+        out.inner
+            .write_all(&pool_offset.to_le_bytes())
+            .and_then(|_| out.inner.write_all(&hash.to_le_bytes()))
+            .and_then(|_| out.inner.write_all(PROFILE_SNAPSHOT_END))
+            .and_then(|_| out.inner.flush())
+            .map_err(|e| format!("write snapshot: {e}"))?;
+        out.inner
+            .get_ref()
+            .sync_all()
+            .map_err(|e| format!("sync snapshot: {e}"))?;
+        drop(out);
+        if SourceFingerprint::read(&fingerprint.path)? != *fingerprint {
+            return Err(String::from(
+                "source changed while snapshot was being written; snapshot not published",
+            ));
+        }
+        std::fs::rename(&temp, &target)
+            .map_err(|e| format!("publish snapshot: {e}"))?;
+        if let Some(parent) = target.parent() {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
+        Ok(body_bytes + PROFILE_SNAPSHOT_TRAILER as u64)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
+struct SnapshotCursor<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> SnapshotCursor<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, pos: 0 }
+    }
+
+    fn remaining(&self) -> usize {
+        self.data.len().saturating_sub(self.pos)
+    }
+
+    fn take(&mut self, count: usize) -> Result<&'a [u8], String> {
+        let end = self
+            .pos
+            .checked_add(count)
+            .filter(|&end| end <= self.data.len())
+            .ok_or_else(|| String::from("truncated snapshot"))?;
+        let bytes = &self.data[self.pos..end];
+        self.pos = end;
+        Ok(bytes)
+    }
+
+    fn u8(&mut self) -> Result<u8, String> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn u32(&mut self) -> Result<u32, String> {
+        let mut bytes = [0; 4];
+        bytes.copy_from_slice(self.take(4)?);
+        Ok(u32::from_le_bytes(bytes))
+    }
+
+    fn u64(&mut self) -> Result<u64, String> {
+        let mut bytes = [0; 8];
+        bytes.copy_from_slice(self.take(8)?);
+        Ok(u64::from_le_bytes(bytes))
+    }
+
+    fn i64(&mut self) -> Result<i64, String> {
+        let mut bytes = [0; 8];
+        bytes.copy_from_slice(self.take(8)?);
+        Ok(i64::from_le_bytes(bytes))
+    }
+
+    fn string(&mut self) -> Result<String, String> {
+        let count = self.count(1, "string")?;
+        String::from_utf8(self.take(count)?.to_vec())
+            .map_err(|_| String::from("snapshot string is not UTF-8"))
+    }
+
+    fn count(&mut self, min_bytes: usize, what: &str) -> Result<usize, String> {
+        let count = usize::try_from(self.u64()?)
+            .map_err(|_| format!("{what} count exceeds address space"))?;
+        if min_bytes > 0 && count > self.remaining() / min_bytes {
+            return Err(format!("{what} count exceeds remaining snapshot bytes"));
+        }
+        Ok(count)
+    }
+}
+
+fn snapshot_read_points(cur: &mut SnapshotCursor<'_>) -> Result<Vec<(i64, i64)>, String> {
+    let count = cur.count(16, "point")?;
+    let mut points = Vec::with_capacity(count);
+    for _ in 0..count {
+        points.push((cur.i64()?, cur.i64()?));
+    }
+    Ok(points)
+}
+
+fn snapshot_read_rep(
+    cur: &mut SnapshotCursor<'_>,
+    pools: &[std::sync::Arc<[(i64, i64)]>],
+) -> Result<Rep, String> {
+    match cur.u8()? {
+        0 => Ok(Rep::One),
+        1 => {
+            let na = cur.u64()?;
+            let nb = cur.u64()?;
+            if na == 0 || nb == 0 || na.checked_mul(nb).is_none() {
+                return Err(String::from("invalid grid repetition dimensions"));
+            }
+            Ok(Rep::Grid {
+                na,
+                nb,
+                va: (cur.i64()?, cur.i64()?),
+                vb: (cur.i64()?, cur.i64()?),
+            })
+        }
+        2 => {
+            let id = usize::try_from(cur.u64()?)
+                .map_err(|_| String::from("Pts pool index exceeds address space"))?;
+            let points = pools
+                .get(id)
+                .cloned()
+                .ok_or_else(|| String::from("Pts pool index is out of range"))?;
+            if points.is_empty() {
+                return Err(String::from("empty Pts repetition pool"));
+            }
+            Ok(Rep::Pts(points))
+        }
+        tag => Err(format!("unknown repetition tag {tag}")),
+    }
+}
+
+fn load_profile_snapshot(
+    path: &str,
+    fingerprint: &SourceFingerprint,
+    requested_name: Option<&str>,
+    requested_ci: Option<usize>,
+) -> Result<LoadedProfileSnapshot, String> {
+    let file = std::fs::File::open(path)
+        .map_err(|e| format!("cannot open snapshot: {e}"))?;
+    let bytes = file
+        .metadata()
+        .map_err(|e| format!("cannot stat snapshot: {e}"))?
+        .len();
+    let map = unsafe { memmap2::Mmap::map(&file) }
+        .map_err(|e| format!("cannot map snapshot: {e}"))?;
+    if map.len() < PROFILE_SNAPSHOT_MAGIC.len() + PROFILE_SNAPSHOT_TRAILER {
+        return Err(String::from("snapshot is truncated"));
+    }
+    let body_end = map.len() - PROFILE_SNAPSHOT_TRAILER;
+    if &map[map.len() - 8..] != PROFILE_SNAPSHOT_END {
+        return Err(String::from("snapshot commit footer is missing"));
+    }
+    let mut raw = [0; 8];
+    raw.copy_from_slice(&map[body_end..body_end + 8]);
+    let pool_offset = usize::try_from(u64::from_le_bytes(raw))
+        .map_err(|_| String::from("snapshot pool offset exceeds address space"))?;
+    raw.copy_from_slice(&map[body_end + 8..body_end + 16]);
+    let expected_hash = u64::from_le_bytes(raw);
+    if pool_offset > body_end {
+        return Err(String::from("snapshot pool offset is out of range"));
+    }
+    let actual_hash = u64::from(crc32fast::hash(&map[..body_end]));
+    if actual_hash != expected_hash {
+        return Err(String::from("snapshot checksum mismatch"));
+    }
+
+    let mut pool_cur = SnapshotCursor::new(&map[pool_offset..body_end]);
+    let pool_count = pool_cur.count(8, "Pts pool")?;
+    let mut pools = Vec::with_capacity(pool_count);
+    for _ in 0..pool_count {
+        pools.push(std::sync::Arc::from(
+            snapshot_read_points(&mut pool_cur)?.into_boxed_slice(),
+        ));
+    }
+    if pool_cur.remaining() != 0 {
+        return Err(String::from("snapshot has trailing pool data"));
+    }
+
+    let mut cur = SnapshotCursor::new(&map[..pool_offset]);
+    if cur.take(8)? != PROFILE_SNAPSHOT_MAGIC {
+        return Err(String::from("snapshot magic mismatch"));
+    }
+    let version = cur.u32()?;
+    if version != PROFILE_SNAPSHOT_VERSION {
+        return Err(format!(
+            "snapshot version {version} is not supported (expected {PROFILE_SNAPSHOT_VERSION})"
+        ));
+    }
+    let source_path = cur.string()?;
+    let source_size = cur.u64()?;
+    let mtime_secs = cur.u64()?;
+    let mtime_nanos = cur.u32()?;
+    if source_path != fingerprint.path
+        || source_size != fingerprint.size
+        || mtime_secs != fingerprint.mtime_secs
+        || mtime_nanos != fingerprint.mtime_nanos
+    {
+        return Err(String::from("source fingerprint changed"));
+    }
+    let cell_count = cur.count(0, "cell")?;
+    let ci = usize::try_from(cur.u64()?)
+        .map_err(|_| String::from("cell index exceeds address space"))?;
+    if cell_count == 0 || ci >= cell_count {
+        return Err(String::from("snapshot cell index is out of range"));
+    }
+    let name = cur.string()?;
+    if requested_ci.is_some_and(|requested| requested != ci)
+        || requested_name.is_some_and(|requested| requested != name)
+    {
+        return Err(format!(
+            "snapshot selects cell {name:?} (ci {ci}), not the requested cell"
+        ));
+    }
+    let unit = f64::from_bits(cur.u64()?);
+    if !unit.is_finite() || unit <= 0.0 {
+        return Err(String::from("snapshot unit is invalid"));
+    }
+    let layer_count = cur.count(8, "layer")?;
+    let mut layer_order = Vec::with_capacity(layer_count);
+    for _ in 0..layer_count {
+        layer_order.push((cur.u32()?, cur.u32()?));
+    }
+    let bbox_count = cur.count(1, "recursive bbox")?;
+    if bbox_count != cell_count {
+        return Err(String::from("recursive bbox count does not match cell count"));
+    }
+    let mut rbb = Vec::with_capacity(bbox_count);
+    for _ in 0..bbox_count {
+        rbb.push(match cur.u8()? {
+            0 => None,
+            1 => Some((cur.i64()?, cur.i64()?, cur.i64()?, cur.i64()?)),
+            tag => return Err(format!("unknown recursive bbox tag {tag}")),
+        });
+    }
+
+    let rect_count = cur.count(41, "rectangle")?;
+    let mut rects = Vec::with_capacity(rect_count);
+    for _ in 0..rect_count {
+        rects.push(RectRec {
+            layer: cur.u32()?,
+            dt: cur.u32()?,
+            x: cur.i64()?,
+            y: cur.i64()?,
+            w: cur.i64()?,
+            h: cur.i64()?,
+            rep: snapshot_read_rep(&mut cur, &pools)?,
+        });
+    }
+    let poly_count = cur.count(17, "polygon")?;
+    let mut polys = Vec::with_capacity(poly_count);
+    for _ in 0..poly_count {
+        polys.push(PolyRec {
+            layer: cur.u32()?,
+            dt: cur.u32()?,
+            pts: snapshot_read_points(&mut cur)?,
+            rep: snapshot_read_rep(&mut cur, &pools)?,
+        });
+    }
+    let path_count = cur.count(41, "path")?;
+    let mut paths = Vec::with_capacity(path_count);
+    for _ in 0..path_count {
+        paths.push(PathRec {
+            layer: cur.u32()?,
+            dt: cur.u32()?,
+            pts: snapshot_read_points(&mut cur)?,
+            hw: cur.i64()?,
+            es: cur.i64()?,
+            ee: cur.i64()?,
+            rep: snapshot_read_rep(&mut cur, &pools)?,
+        });
+    }
+    let place_count = cur.count(27, "placement")?;
+    let mut places = Vec::with_capacity(place_count);
+    for _ in 0..place_count {
+        let child = usize::try_from(cur.u64()?)
+            .map_err(|_| String::from("placement cell exceeds address space"))?;
+        if child >= cell_count {
+            return Err(String::from("placement cell is out of range"));
+        }
+        let x = cur.i64()?;
+        let y = cur.i64()?;
+        let rot = cur.u8()?;
+        if rot > 3 {
+            return Err(format!("invalid placement rotation {rot}"));
+        }
+        let flip = match cur.u8()? {
+            0 => false,
+            1 => true,
+            value => return Err(format!("invalid placement flip {value}")),
+        };
+        places.push(PlaceRec {
+            cell: child,
+            x,
+            y,
+            rot,
+            flip,
+            rep: snapshot_read_rep(&mut cur, &pools)?,
+        });
+    }
+    if cur.remaining() != 0 {
+        return Err(String::from("snapshot has trailing record data"));
+    }
+
+    let mut cells: Vec<Cell> =
+        (0..cell_count).map(|_| Cell::default()).collect();
+    cells[ci] = Cell {
+        name,
+        rects,
+        polys,
+        paths,
+        places,
+        texts: Vec::new(),
+    };
+    Ok(LoadedProfileSnapshot {
+        doc: Doc {
+            unit,
+            cells,
+            top: ci,
+            layer_order,
+            norm_s: 0.0,
+            layer_names: std::collections::HashMap::new(),
+            layer_aliases: std::collections::HashMap::new(),
+        },
+        rbb,
+        bytes,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn profile_cell_plan(
     doc: &Doc,
     src: &str,
     cell_name: Option<&str>,
     cell_index: Option<usize>,
-    jobs: usize,
+    plan_jobs: &[usize],
+    profile_repeat: usize,
     page_target_bytes: u64,
     page_target_mb: u64,
     lod: bool,
     p2_shard_limit: Option<u64>,
     read_s: f64,
     parse_s: f64,
+    prepared_rbb: Option<Vec<RecursiveBbox>>,
+    mut snapshot: ProfileSnapshotStats,
+    snapshot_save: Option<(&str, &SourceFingerprint)>,
     all_started: std::time::Instant,
 ) {
     let ci = if let Some(ci) = cell_index {
@@ -477,11 +1309,12 @@ fn profile_cell_plan(
     };
     let cell = &doc.cells[ci];
     eprintln!(
-        "[vfs] profile: isolated dry-run cell {} (ci {}/{}, jobs {}, page {}MiB, lod {}); no cache files will be written",
+        "[vfs] profile: isolated dry-run cell {} (ci {}/{}, plan jobs {:?}, repeat {}, page {}MiB, lod {}); no cache files will be written",
         cell.name,
         ci,
         doc.cells.len(),
-        jobs.max(1),
+        plan_jobs,
+        profile_repeat,
         page_target_mb,
         if lod { "on" } else { "off" }
     );
@@ -490,7 +1323,11 @@ fn profile_cell_plan(
     // Keep them outside plan_s so repeated optimizer work can distinguish
     // whole-source preparation from the selected cell's own planner.
     let tprep = std::time::Instant::now();
-    let rbb = cell_bboxes_full(doc);
+    let rbb = if let Some(rbb) = prepared_rbb {
+        rbb
+    } else {
+        cell_bboxes_full(doc)
+    };
     let lidx: std::collections::HashMap<(u32, u32), usize> = doc
         .layer_order
         .iter()
@@ -504,6 +1341,124 @@ fn profile_cell_plan(
         rss()
     );
 
+    if let Some((path, fingerprint)) = snapshot_save {
+        eprintln!("[vfs] profile: saving snapshot {}...", path);
+        let ts = std::time::Instant::now();
+        let heartbeat = ProfileIoHeartbeat::start(format!(
+            "saving snapshot {}",
+            path
+        ));
+        let bytes = save_profile_snapshot(
+            path,
+            fingerprint,
+            doc,
+            ci,
+            &rbb,
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("--profile-snapshot: {}", e);
+            std::process::exit(1);
+        });
+        drop(heartbeat);
+        snapshot.bytes = bytes;
+        snapshot.save_s = ts.elapsed().as_secs_f64();
+        eprintln!(
+            "[vfs] profile: snapshot saved in {:.3}s ({})",
+            snapshot.save_s,
+            fmt_size(bytes)
+        );
+    }
+
+    // These source invariants are common to every run. On the measured
+    // monster cell this walk covers hundreds of millions of records, so do
+    // not accidentally charge it once per jobs/repeat combination.
+    let tinventory = std::time::Instant::now();
+    let source_records =
+        cell.rects.len() + cell.polys.len() + cell.paths.len();
+    let source_members: u64 = cell
+        .rects
+        .iter()
+        .map(|r| r.rep.members())
+        .chain(cell.polys.iter().map(|r| r.rep.members()))
+        .chain(cell.paths.iter().map(|r| r.rep.members()))
+        .sum();
+    let inventory_s = tinventory.elapsed().as_secs_f64();
+    eprintln!(
+        "[vfs] profile: common source inventory {:.3}s",
+        inventory_s
+    );
+    let mut reports = Vec::new();
+    let total_runs = plan_jobs.len().saturating_mul(profile_repeat);
+    let mut series_index = 0usize;
+    for &jobs in plan_jobs {
+        for repeat_index in 0..profile_repeat {
+            series_index += 1;
+            eprintln!(
+                "[vfs] profile: run {}/{} (jobs {}, repeat {})",
+                series_index,
+                total_runs,
+                jobs,
+                repeat_index + 1
+            );
+            reports.push(profile_cell_run(
+                doc,
+                src,
+                cell,
+                ci,
+                &rbb,
+                &lidx,
+                jobs,
+                repeat_index,
+                series_index,
+                total_runs,
+                page_target_bytes,
+                page_target_mb,
+                lod,
+                p2_shard_limit,
+                read_s,
+                parse_s,
+                prepare_s,
+                inventory_s,
+                &snapshot,
+                source_records,
+                source_members,
+                &all_started,
+            ));
+        }
+    }
+    if reports.len() == 1 {
+        print!("{}", reports[0]);
+    } else {
+        print!("[\n{}]\n", reports.join(",\n"));
+    }
+    eprintln!("[vfs] profile: complete; wrote 0 cache files");
+}
+
+#[allow(clippy::too_many_arguments)]
+fn profile_cell_run(
+    doc: &Doc,
+    src: &str,
+    cell: &Cell,
+    ci: usize,
+    rbb: &[RecursiveBbox],
+    lidx: &std::collections::HashMap<(u32, u32), usize>,
+    jobs: usize,
+    repeat_index: usize,
+    series_index: usize,
+    total_runs: usize,
+    page_target_bytes: u64,
+    page_target_mb: u64,
+    lod: bool,
+    p2_shard_limit: Option<u64>,
+    read_s: f64,
+    parse_s: f64,
+    prepare_s: f64,
+    inventory_s: f64,
+    snapshot: &ProfileSnapshotStats,
+    source_records: usize,
+    source_members: u64,
+    all_started: &std::time::Instant,
+) -> String {
     let rss_before = proc_status_bytes("VmRSS");
     let hwm_before = proc_status_bytes("VmHWM");
     let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
@@ -547,8 +1502,8 @@ fn profile_cell_plan(
     let plan = build_cell_plan(
         doc,
         ci,
-        &rbb,
-        &lidx,
+        rbb,
+        lidx,
         doc.layer_order.len(),
         page_target_bytes,
         lod,
@@ -575,13 +1530,6 @@ fn profile_cell_plan(
         .iter()
         .filter(|p| p.lod == floe_ovm::LOD_EXACT)
         .count();
-    let source_members: u64 = cell
-        .rects
-        .iter()
-        .map(|r| r.rep.members())
-        .chain(cell.polys.iter().map(|r| r.rep.members()))
-        .chain(cell.paths.iter().map(|r| r.rep.members()))
-        .sum();
     let arena_bytes: u64 = plan
         .arenas
         .iter()
@@ -593,7 +1541,7 @@ fn profile_cell_plan(
         "[vfs] profile: plan {:.3}s (places {}, source records {}, members {}, pages {} exact + {} lod, fragments {}; bvh {:.3} asm {:.3} split {:.3}/{}t lod {:.3}/{}t pts {:.3} sink {:.3}; p2_tasks {} shard {}MiB arenas {}MiB)",
         plan_s,
         cell.places.len(),
-        cell.rects.len() + cell.polys.len() + cell.paths.len(),
+        source_records,
         source_members,
         exact_pages,
         plan.pages.len().saturating_sub(exact_pages),
@@ -646,8 +1594,8 @@ fn profile_cell_plan(
         );
     }
 
-    // stdout is one machine-readable record so repeated runs can be captured
-    // directly as JSONL while all human progress remains on stderr.
+    // Build one machine-readable record per plan. The caller emits the sole
+    // record directly or wraps a jobs/repeat series in one JSON array.
     use std::fmt::Write as _;
     let opt_u64 = |v: Option<u64>| {
         v.map(|n| n.to_string())
@@ -670,21 +1618,40 @@ fn profile_cell_plan(
     .unwrap();
     writeln!(
         &mut out,
-        "  \"settings\": {{\"jobs\": {}, \"page_target_mb\": {}, \"lod\": {}, \"isolated\": true, \"writes\": false, \"p2_shard_limit_bytes\": {}}},",
+        "  \"settings\": {{\"jobs\": {}, \"page_target_mb\": {}, \"lod\": {}, \"isolated\": true, \"writes\": false, \"cache_writes\": false, \"snapshot_writes\": {}, \"p2_shard_limit_bytes\": {}, \"series_index\": {}, \"series_total\": {}, \"repeat\": {}}},",
         jobs.max(1),
         page_target_mb,
         lod,
+        snapshot.state == "saved",
         opt_u64(p2_shard_limit),
+        series_index,
+        total_runs,
+        repeat_index + 1,
     )
     .unwrap();
     writeln!(
         &mut out,
-        "  \"timing_s\": {{\"read\": {:.6}, \"parse\": {:.6}, \"prepare\": {:.6}, \"plan\": {:.6}, \"total\": {:.6}}},",
+        "  \"timing_s\": {{\"read\": {:.6}, \"parse\": {:.6}, \"prepare\": {:.6}, \"inventory\": {:.6}, \"snapshot_load\": {:.6}, \"snapshot_save\": {:.6}, \"plan\": {:.6}, \"total\": {:.6}}},",
         read_s,
         parse_s,
         prepare_s,
+        inventory_s,
+        snapshot.load_s,
+        snapshot.save_s,
         plan_s,
         measured_total_s,
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "  \"snapshot\": {{\"state\": \"{}\", \"path\": {}, \"bytes\": {}}},",
+        snapshot.state,
+        snapshot
+            .path
+            .as_deref()
+            .map(|p| format!("\"{}\"", crate::jesc(p)))
+            .unwrap_or_else(|| String::from("null")),
+        snapshot.bytes,
     )
     .unwrap();
     writeln!(
@@ -702,7 +1669,7 @@ fn profile_cell_plan(
         &mut out,
         "  \"work\": {{\"places\": {}, \"source_records\": {}, \"source_members\": {}, \"exact_pages\": {}, \"lod_pages\": {}, \"fragments\": {}, \"split_threads\": {}, \"lod_threads\": {}, \"p2_tasks\": {}}},",
         cell.places.len(),
-        cell.rects.len() + cell.polys.len() + cell.paths.len(),
+        source_records,
         source_members,
         exact_pages,
         plan.pages.len().saturating_sub(exact_pages),
@@ -755,8 +1722,7 @@ fn profile_cell_plan(
         .unwrap();
     }
     writeln!(&mut out, "  ]\n}}").unwrap();
-    print!("{out}");
-    eprintln!("[vfs] profile: complete; wrote 0 cache files");
+    out
 }
 
 /// coverage bitplanes (V3b): optional density overview
