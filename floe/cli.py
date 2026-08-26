@@ -258,8 +258,12 @@ def _run_rust_index(args, binary, coverage_only=False):
     import shlex
     import subprocess
 
+    profiling = (args.profile_cell is not None or
+                 args.profile_cell_ci is not None)
     outdir = os.path.abspath(args.src) + ".floe"
-    command = [binary, "vfs", os.path.abspath(args.src), outdir]
+    command = [binary, "vfs", os.path.abspath(args.src)]
+    if not profiling:
+        command.append(outdir)
     if args.jobs is not None:
         command += ["--jobs", str(args.jobs)]
     if coverage_only:
@@ -276,7 +280,14 @@ def _run_rust_index(args, binary, coverage_only=False):
         if args.p2_shard_limit_mb is not None:
             command += ["--p2-shard-limit-mb",
                         str(args.p2_shard_limit_mb)]
-    print("[floe] " + shlex.join(command))
+        if args.profile_cell is not None:
+            command += ["--profile-cell", args.profile_cell]
+        if args.profile_cell_ci is not None:
+            command += ["--profile-cell-ci", str(args.profile_cell_ci)]
+    # The cell profiler reserves stdout for one JSON object so callers can
+    # redirect it directly to a repeatable measurement artifact.
+    print("[floe] " + shlex.join(command),
+          file=sys.stderr if profiling else sys.stdout)
     try:
         result = subprocess.run(command, check=False)
     except OSError as exc:
@@ -293,10 +304,12 @@ def cmd_index(args):
             "or use the Rust VFS options shown by 'floe index --help'" %
             (", ".join(legacy_options),
              "is a" if len(legacy_options) == 1 else "are"))
+    profiling = (args.profile_cell is not None or
+                 args.profile_cell_ci is not None)
     rust_options = any((args.page_target_mb is not None, args.coverage,
                         args.coverage_only, args.no_lod,
                         args.slow_cell_s is not None,
-                        args.p2_shard_limit_mb is not None))
+                        args.p2_shard_limit_mb is not None, profiling))
     if args.legacy:
         if rust_options:
             raise SystemExit(
@@ -315,6 +328,23 @@ def cmd_index(args):
         binary = find_binary()
     except RuntimeError as exc:
         raise SystemExit(f"floe: {exc}")
+    if profiling:
+        incompatible = []
+        if args.force:
+            incompatible.append("--force")
+        if args.coverage:
+            incompatible.append("--coverage")
+        if args.coverage_only:
+            incompatible.append("--coverage-only")
+        if args.slow_cell_s is not None:
+            incompatible.append("--slow-cell-s")
+        if incompatible:
+            raise SystemExit(
+                "floe: cell profiling cannot be combined with " +
+                ", ".join(incompatible))
+        # Profiling deliberately bypasses cache reuse/replacement checks: it
+        # reads the source, plans one cell and never names or touches outdir.
+        return _run_rust_index(args, binary)
     outdir = src + ".floe"
     current, reason = _current_vfs_cache(src, outdir, binary)
     if args.coverage_only:
@@ -1291,6 +1321,15 @@ def main(argv=None, *, prog=None, rust_only=None):
                       default=None, metavar="N",
                       help="P2 arena shard-copy ceiling in MiB; useful on "
                            "hosts without Linux MemAvailable")
+    profile = rust.add_mutually_exclusive_group()
+    profile.add_argument(
+        "--profile-cell", metavar="NAME",
+        help="parse the source and plan only this exact cell name; emit "
+             "JSON timing to stdout and write no cache files")
+    profile.add_argument(
+        "--profile-cell-ci", type=_nonnegative_int, metavar="N",
+        help="like --profile-cell, selecting the zero-based parsed cell "
+             "index shown by slow-cell logs")
     legacy = p.add_argument_group(
         "Python/KLayout legacy options (require --legacy)")
     legacy.add_argument(

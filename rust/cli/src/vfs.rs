@@ -83,6 +83,11 @@ pub fn vfs_cmd(args: &[String]) {
     // MemAvailable, so without this flag the ceiling is UNBOUNDED
     // there - set it when indexing big files on macOS.
     let mut p2_shard_limit: Option<u64> = None;
+    // Isolated, non-publishing cell planner profile. The complete source is
+    // still parsed and recursive child bboxes are prepared, but exactly one
+    // build_cell_plan call runs and no cache path is created or modified.
+    let mut profile_cell: Option<String> = None;
+    let mut profile_cell_ci: Option<usize> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -148,6 +153,18 @@ pub fn vfs_cmd(args: &[String]) {
                     Some(mb.checked_mul(MIB).expect("shard limit"));
                 i += 2;
             }
+            "--profile-cell" => {
+                profile_cell = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--profile-cell-ci" => {
+                profile_cell_ci = Some(
+                    args[i + 1]
+                        .parse::<usize>()
+                        .expect("profile cell index"),
+                );
+                i += 2;
+            }
             a => {
                 if src.is_none() {
                     src = Some(a.to_string());
@@ -178,6 +195,24 @@ pub fn vfs_cmd(args: &[String]) {
     let page_target_bytes = page_target_mb
         .checked_mul(MIB)
         .expect("limit exceeded: page target bytes");
+    if profile_cell.is_some() && profile_cell_ci.is_some() {
+        eprintln!(
+            "--profile-cell and --profile-cell-ci are mutually exclusive"
+        );
+        std::process::exit(2);
+    }
+    let profiling = profile_cell.is_some() || profile_cell_ci.is_some();
+    if profiling
+        && (coverage
+            || coverage_only
+            || frontier_only
+            || kill_at.is_some())
+    {
+        eprintln!(
+            "cell profiling cannot be combined with coverage, frontier-only, or kill-at"
+        );
+        std::process::exit(2);
+    }
     if frontier_only {
         let t0 = std::time::Instant::now();
         let v = floe_vfs::Vfs::open(&outdir).unwrap_or_else(|e| {
@@ -196,6 +231,7 @@ pub fn vfs_cmd(args: &[String]) {
     let t0 = std::time::Instant::now();
     eprintln!("[vfs] reading {}...", src);
     let data = std::fs::read(&src).expect("read src");
+    let read_s = t0.elapsed().as_secs_f64();
     let size = data.len() as u64;
     let mtime = std::fs::metadata(&src)
         .and_then(|m| m.modified())
@@ -256,6 +292,7 @@ pub fn vfs_cmd(args: &[String]) {
             std::process::exit(1);
         }
     };
+    let parse_s = t1.elapsed().as_secs_f64();
     parsing.store(false, std::sync::atomic::Ordering::Relaxed);
     eprintln!(
         "[vfs] repetition normalization complete in {:.1}s \
@@ -272,6 +309,23 @@ pub fn vfs_cmd(args: &[String]) {
         jobs,
         rss()
     );
+    if profiling {
+        profile_cell_plan(
+            &doc,
+            &src,
+            profile_cell.as_deref(),
+            profile_cell_ci,
+            jobs,
+            page_target_bytes,
+            page_target_mb,
+            lod,
+            p2_shard_limit,
+            read_s,
+            parse_s,
+            t0,
+        );
+        return;
+    }
     std::fs::create_dir_all(&outdir).expect("mkdir outdir");
     if coverage_only {
         // add design.ovc to an existing cache (additive op, outside
@@ -374,6 +428,335 @@ pub fn vfs_cmd(args: &[String]) {
         t0.elapsed().as_secs_f64(),
         outdir
     );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn profile_cell_plan(
+    doc: &Doc,
+    src: &str,
+    cell_name: Option<&str>,
+    cell_index: Option<usize>,
+    jobs: usize,
+    page_target_bytes: u64,
+    page_target_mb: u64,
+    lod: bool,
+    p2_shard_limit: Option<u64>,
+    read_s: f64,
+    parse_s: f64,
+    all_started: std::time::Instant,
+) {
+    let ci = if let Some(ci) = cell_index {
+        if ci >= doc.cells.len() {
+            eprintln!(
+                "--profile-cell-ci {} is out of range 0..{}",
+                ci,
+                doc.cells.len()
+            );
+            std::process::exit(2);
+        }
+        ci
+    } else {
+        let name = cell_name.expect("profile selector");
+        let mut hits = doc
+            .cells
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.name == name)
+            .map(|(ci, _)| ci);
+        let Some(ci) = hits.next() else {
+            eprintln!("--profile-cell: exact cell name not found: {name}");
+            std::process::exit(2);
+        };
+        if hits.next().is_some() {
+            eprintln!(
+                "--profile-cell: duplicate cell name {name:?}; use --profile-cell-ci"
+            );
+            std::process::exit(2);
+        }
+        ci
+    };
+    let cell = &doc.cells[ci];
+    eprintln!(
+        "[vfs] profile: isolated dry-run cell {} (ci {}/{}, jobs {}, page {}MiB, lod {}); no cache files will be written",
+        cell.name,
+        ci,
+        doc.cells.len(),
+        jobs.max(1),
+        page_target_mb,
+        if lod { "on" } else { "off" }
+    );
+
+    // Recursive placement bboxes are an actual prerequisite of the cell BVH.
+    // Keep them outside plan_s so repeated optimizer work can distinguish
+    // whole-source preparation from the selected cell's own planner.
+    let tprep = std::time::Instant::now();
+    let rbb = cell_bboxes_full(doc);
+    let lidx: std::collections::HashMap<(u32, u32), usize> = doc
+        .layer_order
+        .iter()
+        .enumerate()
+        .map(|(i, &k)| (k, i))
+        .collect();
+    let prepare_s = tprep.elapsed().as_secs_f64();
+    eprintln!(
+        "[vfs] profile: recursive bbox + layer map {:.3}s (rss {})",
+        prepare_s,
+        rss()
+    );
+
+    let rss_before = proc_status_bytes("VmRSS");
+    let hwm_before = proc_status_bytes("VmHWM");
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+    let heartbeat = {
+        let name = cell.name.clone();
+        std::thread::spawn(move || {
+            let t = std::time::Instant::now();
+            let mut last = 0u64;
+            loop {
+                match stop_rx.recv_timeout(
+                    std::time::Duration::from_millis(200),
+                ) {
+                    Ok(())
+                    | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) =>
+                    {
+                        return;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                }
+                let elapsed = t.elapsed().as_secs();
+                if elapsed >= last + 5 {
+                    last = elapsed;
+                    eprintln!(
+                        "[vfs] profile: planning {}... ({}s, rss {})",
+                        name,
+                        elapsed,
+                        rss()
+                    );
+                }
+            }
+        })
+    };
+
+    // The caller itself owns one planning slot; all other requested slots are
+    // immediately available to P1/P2/LOD. This measures isolated cell
+    // scalability, independently of the full-build commit window.
+    let available_helpers = jobs.max(1).saturating_sub(1);
+    let plan_budget =
+        std::sync::atomic::AtomicIsize::new(available_helpers as isize);
+    let tplan = std::time::Instant::now();
+    let plan = build_cell_plan(
+        doc,
+        ci,
+        &rbb,
+        &lidx,
+        doc.layer_order.len(),
+        page_target_bytes,
+        lod,
+        &plan_budget,
+        None,
+        None,
+        jobs.max(1),
+        p2_shard_limit,
+    );
+    let plan_s = tplan.elapsed().as_secs_f64();
+    let _ = stop_tx.send(());
+    heartbeat.join().expect("profile heartbeat");
+    assert_eq!(
+        plan_budget.load(std::sync::atomic::Ordering::Relaxed),
+        available_helpers as isize,
+        "profile planning slot lease imbalance"
+    );
+    let rss_after = proc_status_bytes("VmRSS");
+    let hwm_after = proc_status_bytes("VmHWM");
+    let measured_total_s = all_started.elapsed().as_secs_f64();
+
+    let exact_pages = plan
+        .pages
+        .iter()
+        .filter(|p| p.lod == floe_ovm::LOD_EXACT)
+        .count();
+    let source_members: u64 = cell
+        .rects
+        .iter()
+        .map(|r| r.rep.members())
+        .chain(cell.polys.iter().map(|r| r.rep.members()))
+        .chain(cell.paths.iter().map(|r| r.rep.members()))
+        .sum();
+    let arena_bytes: u64 = plan
+        .arenas
+        .iter()
+        .flat_map(|shard| shard.iter())
+        .map(|arena| arena.order.len() as u64 * 4)
+        .sum();
+
+    eprintln!(
+        "[vfs] profile: plan {:.3}s (places {}, source records {}, members {}, pages {} exact + {} lod, fragments {}; bvh {:.3} asm {:.3} split {:.3}/{}t lod {:.3}/{}t pts {:.3} sink {:.3}; p2_tasks {} shard {}MiB arenas {}MiB)",
+        plan_s,
+        cell.places.len(),
+        cell.rects.len() + cell.polys.len() + cell.paths.len(),
+        source_members,
+        exact_pages,
+        plan.pages.len().saturating_sub(exact_pages),
+        plan.split_stats.fragments,
+        plan.phase_s[0],
+        plan.phase_s[1],
+        plan.phase_s[2],
+        plan.split_threads,
+        plan.phase_s[3],
+        plan.lod_threads,
+        plan.phase_s[4],
+        plan.phase_s[5],
+        plan.p2_tasks,
+        plan.shard_bytes / MIB,
+        arena_bytes / MIB,
+    );
+    let mut by_time: Vec<&LayerProfile> =
+        plan.layer_profiles.iter().collect();
+    by_time.sort_by(|a, b| {
+        b.timing
+            .total_s
+            .partial_cmp(&a.timing.total_s)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for lp in &by_time {
+        eprintln!(
+            "[vfs] profile: layer L{}.{} {:.3}s (records {} est {}MiB pages {} fragments {}; serial {:.3} p2 prefix {:.3} shard {:.3} tasks {:.3} wall/{:.3} sum peak {} merge {:.3} pbvh {:.3}; tasks {} shard {}MiB{})",
+            lp.layer.0,
+            lp.layer.1,
+            lp.timing.total_s,
+            lp.input_records,
+            lp.input_bytes / MIB,
+            lp.pages,
+            lp.fragments,
+            lp.timing.serial_split_s,
+            lp.timing.p2_prefix_s,
+            lp.timing.p2_shard_s,
+            lp.timing.p2_tasks_wall_s,
+            lp.timing.p2_tasks_sum_s,
+            lp.timing.p2_task_peak,
+            lp.timing.p2_merge_s,
+            lp.timing.pbvh_s,
+            lp.p2_tasks,
+            lp.shard_bytes / MIB,
+            if lp.p2_fallback {
+                " fallback=1"
+            } else {
+                ""
+            },
+        );
+    }
+
+    // stdout is one machine-readable record so repeated runs can be captured
+    // directly as JSONL while all human progress remains on stderr.
+    use std::fmt::Write as _;
+    let opt_u64 = |v: Option<u64>| {
+        v.map(|n| n.to_string())
+            .unwrap_or_else(|| String::from("null"))
+    };
+    let mut out = String::new();
+    writeln!(&mut out, "{{").unwrap();
+    writeln!(
+        &mut out,
+        "  \"mode\": \"vfs-cell-profile\", \"source\": \"{}\",",
+        crate::jesc(src)
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "  \"cell\": {{\"name\": \"{}\", \"index\": {}}},",
+        crate::jesc(&cell.name),
+        ci
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "  \"settings\": {{\"jobs\": {}, \"page_target_mb\": {}, \"lod\": {}, \"isolated\": true, \"writes\": false, \"p2_shard_limit_bytes\": {}}},",
+        jobs.max(1),
+        page_target_mb,
+        lod,
+        opt_u64(p2_shard_limit),
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "  \"timing_s\": {{\"read\": {:.6}, \"parse\": {:.6}, \"prepare\": {:.6}, \"plan\": {:.6}, \"total\": {:.6}}},",
+        read_s,
+        parse_s,
+        prepare_s,
+        plan_s,
+        measured_total_s,
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "  \"memory_bytes\": {{\"rss_before\": {}, \"rss_after\": {}, \"hwm_before\": {}, \"hwm_after\": {}, \"retained_pts_arenas\": {}, \"p2_shard_copies\": {}}},",
+        opt_u64(rss_before),
+        opt_u64(rss_after),
+        opt_u64(hwm_before),
+        opt_u64(hwm_after),
+        arena_bytes,
+        plan.shard_bytes,
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "  \"work\": {{\"places\": {}, \"source_records\": {}, \"source_members\": {}, \"exact_pages\": {}, \"lod_pages\": {}, \"fragments\": {}, \"split_threads\": {}, \"lod_threads\": {}, \"p2_tasks\": {}}},",
+        cell.places.len(),
+        cell.rects.len() + cell.polys.len() + cell.paths.len(),
+        source_members,
+        exact_pages,
+        plan.pages.len().saturating_sub(exact_pages),
+        plan.split_stats.fragments,
+        plan.split_threads,
+        plan.lod_threads,
+        plan.p2_tasks,
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "  \"phase_s\": {{\"bvh\": {:.6}, \"assemble\": {:.6}, \"split\": {:.6}, \"lod\": {:.6}, \"pts\": {:.6}, \"sink\": {:.6}}},",
+        plan.phase_s[0],
+        plan.phase_s[1],
+        plan.phase_s[2],
+        plan.phase_s[3],
+        plan.phase_s[4],
+        plan.phase_s[5],
+    )
+    .unwrap();
+    writeln!(&mut out, "  \"layers\": [").unwrap();
+    for (k, lp) in plan.layer_profiles.iter().enumerate() {
+        writeln!(
+            &mut out,
+            "    {{\"layer\": {}, \"datatype\": {}, \"input_records\": {}, \"input_bytes\": {}, \"pages\": {}, \"fragments\": {}, \"total_s\": {:.6}, \"serial_split_s\": {:.6}, \"p2_prefix_s\": {:.6}, \"p2_shard_s\": {:.6}, \"p2_tasks_wall_s\": {:.6}, \"p2_tasks_sum_s\": {:.6}, \"p2_task_peak\": {}, \"p2_merge_s\": {:.6}, \"pbvh_s\": {:.6}, \"p2_tasks\": {}, \"shard_bytes\": {}, \"p2_fallback\": {}}}{}",
+            lp.layer.0,
+            lp.layer.1,
+            lp.input_records,
+            lp.input_bytes,
+            lp.pages,
+            lp.fragments,
+            lp.timing.total_s,
+            lp.timing.serial_split_s,
+            lp.timing.p2_prefix_s,
+            lp.timing.p2_shard_s,
+            lp.timing.p2_tasks_wall_s,
+            lp.timing.p2_tasks_sum_s,
+            lp.timing.p2_task_peak,
+            lp.timing.p2_merge_s,
+            lp.timing.pbvh_s,
+            lp.p2_tasks,
+            lp.shard_bytes,
+            lp.p2_fallback,
+            if k + 1 == plan.layer_profiles.len() {
+                ""
+            } else {
+                ","
+            },
+        )
+        .unwrap();
+    }
+    writeln!(&mut out, "  ]\n}}").unwrap();
+    print!("{out}");
+    eprintln!("[vfs] profile: complete; wrote 0 cache files");
 }
 
 /// coverage bitplanes (V3b): optional density overview
@@ -1611,6 +1994,29 @@ fn rss() -> String {
     String::from("?")
 }
 
+/// Linux process status value in bytes (VmRSS/VmHWM); absent on other
+/// platforms. The cell profiler records both sides of its plan so a field run
+/// can separate retained arena growth from the parse baseline.
+fn proc_status_bytes(key: &str) -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    if let Ok(s) = std::fs::read_to_string("/proc/self/status") {
+        for line in s.lines() {
+            let Some(rest) = line.strip_prefix(key) else {
+                continue;
+            };
+            let kib = rest
+                .trim_start_matches(':')
+                .split_whitespace()
+                .next()?
+                .parse::<u64>()
+                .ok()?;
+            return kib.checked_mul(1024);
+        }
+    }
+    let _ = key;
+    None
+}
+
 /// reverse-topological (children-before-parents) cell order so the
 /// recursive fold converges in ONE pass instead of the old O(depth)
 /// fixpoint. Iterative post-order DFS. A back-edge (cyclic
@@ -1698,6 +2104,46 @@ struct CellPlan {
     p2_starved: bool,
     /// ((layer, datatype), split seconds), heaviest first, <= 3
     top_split: Vec<((u32, u32), f32)>,
+    /// Complete per-layer timing retained for isolated cell profiling. This
+    /// is tiny compared with the page and Pts arenas and is also useful when
+    /// a field slow-cell needs more than the top-three aggregate.
+    layer_profiles: Vec<LayerProfile>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct LayerTiming {
+    /// Complete layer wall time, including its page BVH.
+    total_s: f64,
+    /// Serial split_pages wall time (non-P2 layers).
+    serial_split_s: f64,
+    /// P2 serial frontier construction.
+    p2_prefix_s: f64,
+    /// P2 admission plus arena-shard preparation/copy.
+    p2_shard_s: f64,
+    /// Wall time from starting frontier tasks until all have joined.
+    p2_tasks_wall_s: f64,
+    /// Sum of individual task wall times. This is deliberately not labelled
+    /// CPU time: OS preemption can be included, but the ratio to task wall is
+    /// a useful parallel-occupancy measure without a platform-specific clock.
+    p2_tasks_sum_s: f64,
+    /// Deterministic segment merge and seq/arena-slot rebasing.
+    p2_merge_s: f64,
+    /// Page-BVH construction and leaf-order permutation.
+    pbvh_s: f64,
+    /// Maximum number of P2 subtree tasks simultaneously executing.
+    p2_task_peak: usize,
+}
+
+struct LayerProfile {
+    layer: (u32, u32),
+    input_records: usize,
+    input_bytes: u64,
+    pages: usize,
+    fragments: u64,
+    timing: LayerTiming,
+    p2_tasks: usize,
+    shard_bytes: u64,
+    p2_fallback: bool,
 }
 
 /// binary BVH over one (cell,layer) page run with subtree max_w/
@@ -2077,6 +2523,8 @@ fn gen_lod_job(
 /// scheduling and thread count
 struct LayerPlan {
     li: u32,
+    input_records: usize,
+    input_bytes: u64,
     /// pbvh leaf order when a tree exists, split emit order else.
     /// arena_slot is LAYER-LOCAL here (an index into `arenas`);
     /// the cell merge rebases it onto the cell's shard list.
@@ -2097,6 +2545,7 @@ struct LayerPlan {
     /// copies, helper lease already returned)
     p2_fallback: bool,
     secs: f32,
+    timing: LayerTiming,
 }
 
 fn plan_layer(
@@ -2107,6 +2556,9 @@ fn plan_layer(
     page_target_bytes: u64,
 ) -> LayerPlan {
     let t = std::time::Instant::now();
+    let input_records = recs.len();
+    let input_bytes = recs.iter().map(|r| r.bytes as u64).sum();
+    let tsplit = std::time::Instant::now();
     let mut arena: Arena = Vec::new();
     let mut stats = SplitStats::default();
     let mut seq = 0u32;
@@ -2123,6 +2575,10 @@ fn plan_layer(
         page_target_bytes,
         0,
     );
+    let timing = LayerTiming {
+        serial_split_s: tsplit.elapsed().as_secs_f64(),
+        ..LayerTiming::default()
+    };
     let arenas = if arena.is_empty() {
         Vec::new()
     } else {
@@ -2131,7 +2587,10 @@ fn plan_layer(
         }
         vec![arena]
     };
-    finish_layer(li, run, arenas, stats, 0, 0, false, t)
+    finish_layer(
+        li, input_records, input_bytes, run, arenas, stats, 0, 0,
+        false, t, timing,
+    )
 }
 
 /// pbvh + leaf-order permute over a layer's finished emission run,
@@ -2140,6 +2599,8 @@ fn plan_layer(
 #[allow(clippy::too_many_arguments)]
 fn finish_layer(
     li: u32,
+    input_records: usize,
+    input_bytes: u64,
     run: Vec<PageJob>,
     arenas: Vec<Arena>,
     stats: SplitStats,
@@ -2147,7 +2608,9 @@ fn finish_layer(
     shard_bytes: u64,
     p2_fallback: bool,
     t: std::time::Instant,
+    mut timing: LayerTiming,
 ) -> LayerPlan {
+    let tpbvh = std::time::Instant::now();
     let mut pbvh: Vec<(BBox, u32, u16, bool, u64, u64)> = Vec::new();
     let pages = if run.len() <= PBVH_LEAF {
         // short run: linear scan beats a tree
@@ -2179,8 +2642,12 @@ fn finish_layer(
         }
         pages
     };
+    timing.pbvh_s = tpbvh.elapsed().as_secs_f64();
+    timing.total_s = t.elapsed().as_secs_f64();
     LayerPlan {
         li,
+        input_records,
+        input_bytes,
         pages,
         pbvh,
         arenas,
@@ -2188,7 +2655,8 @@ fn finish_layer(
         p2_tasks,
         shard_bytes,
         p2_fallback,
-        secs: t.elapsed().as_secs_f32(),
+        secs: timing.total_s as f32,
+        timing,
     }
 }
 
@@ -2207,7 +2675,9 @@ fn plan_layer_frontier(
     opts: &P2Opts,
 ) -> LayerPlan {
     let t = std::time::Instant::now();
+    let input_records = recs.len();
     let total: u64 = recs.iter().map(|r| r.bytes as u64).sum();
+    let mut timing = LayerTiming::default();
     let cutoff =
         (total / opts.target_tasks.max(1) as u64).max(opts.task_min);
     if total / 2 < cutoff {
@@ -2228,6 +2698,7 @@ fn plan_layer_frontier(
     let mut tasks: Vec<(Vec<PRec>, u32)> = Vec::new();
     let mut seq0 = 0u32; // placeholder ids, re-assigned at merge
     let mut stack: Vec<(Vec<PRec>, u32)> = vec![(recs, 0)];
+    let tprefix = std::time::Instant::now();
     while let Some((recs, depth)) = stack.pop() {
         let bytes: u64 =
             recs.iter().map(|r| r.bytes as u64).sum();
@@ -2271,6 +2742,7 @@ fn plan_layer_frontier(
             }
         }
     }
+    timing.p2_prefix_s = tprefix.elapsed().as_secs_f64();
     // ---- shard-copy ceiling (#60 review): the projected copies
     // are known exactly BEFORE any allocation happens. The limit
     // is evaluated HERE (not at cell entry) and admission goes
@@ -2279,6 +2751,7 @@ fn plan_layer_frontier(
     // frontier is kept but its tasks run serially against the
     // shared prefix arena - no copies, one thread, identical
     // bytes; the log shows p2_mem_fallback=1.
+    let tshard = std::time::Instant::now();
     let copy_bytes: u64 = tasks
         .iter()
         .flat_map(|(r, _)| r.iter())
@@ -2322,7 +2795,11 @@ fn plan_layer_frontier(
         let p2_tasks = tasks.len();
         let mut outs: Vec<Vec<PageJob>> =
             Vec::with_capacity(tasks.len());
+        timing.p2_shard_s = tshard.elapsed().as_secs_f64();
+        let ttasks = std::time::Instant::now();
+        let mut task_sum_s = 0.0f64;
         for (recs, depth) in tasks {
+            let tone = std::time::Instant::now();
             let mut out: Vec<PageJob> = Vec::new();
             let mut seq = 0u32;
             split_pages(
@@ -2337,8 +2814,13 @@ fn plan_layer_frontier(
                 page_target_bytes,
                 depth,
             );
+            task_sum_s += tone.elapsed().as_secs_f64();
             outs.push(out);
         }
+        timing.p2_tasks_wall_s = ttasks.elapsed().as_secs_f64();
+        timing.p2_tasks_sum_s = task_sum_s;
+        timing.p2_task_peak = usize::from(p2_tasks > 0);
+        let tmerge = std::time::Instant::now();
         let mut arenas: Vec<Arena> = Vec::new();
         let slot = if prefix.is_empty() {
             ARENA_NONE
@@ -2367,8 +2849,10 @@ fn plan_layer_frontier(
         for (i, j) in run.iter_mut().enumerate() {
             j.seq = narrow_u32(i as u64, "page seq");
         }
+        timing.p2_merge_s = tmerge.elapsed().as_secs_f64();
         return finish_layer(
-            li, run, arenas, stats, p2_tasks, 0, true, t,
+            li, input_records, total, run, arenas, stats, p2_tasks,
+            0, true, t, timing,
         );
     }
     // ---- arena sharding: copy each task's Frag::Pts ranges into
@@ -2425,6 +2909,7 @@ fn plan_layer_frontier(
             prefix[a].order = Vec::new(); // free promptly
         }
     }
+    timing.p2_shard_s = tshard.elapsed().as_secs_f64();
     // ---- execute tasks, heaviest first; the segment list alone
     // fixes the merge order, so scheduling cannot change bytes
     let p2_tasks = tasks.len();
@@ -2444,11 +2929,15 @@ fn plan_layer_frontier(
         })
         .collect();
     let done: Vec<
-        std::sync::Mutex<Option<(Vec<PageJob>, SplitStats, Arena)>>,
+        std::sync::Mutex<
+            Option<(Vec<PageJob>, SplitStats, Arena, f64)>,
+        >,
     > = (0..cells.len())
         .map(|_| std::sync::Mutex::new(None))
         .collect();
     let nextk = std::sync::atomic::AtomicUsize::new(0);
+    let task_active = std::sync::atomic::AtomicUsize::new(0);
+    let task_peak = std::sync::atomic::AtomicUsize::new(0);
     let work = || loop {
         let i =
             nextk.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2456,6 +2945,14 @@ fn plan_layer_frontier(
             return;
         }
         let k = order[i];
+        let tone = std::time::Instant::now();
+        let active = task_active
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        task_peak.fetch_max(
+            active,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         let (recs, depth, mut arena) =
             cells[k].lock().unwrap().take().expect("p2 task");
         let mut st = SplitStats::default();
@@ -2473,8 +2970,11 @@ fn plan_layer_frontier(
             page_target_bytes,
             depth,
         );
-        *done[k].lock().unwrap() = Some((out, st, arena));
+        task_active.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        *done[k].lock().unwrap() =
+            Some((out, st, arena, tone.elapsed().as_secs_f64()));
     };
+    let ttasks = std::time::Instant::now();
     if opts.threads <= 1 || p2_tasks <= 1 {
         work();
     } else {
@@ -2554,6 +3054,10 @@ fn plan_layer_frontier(
             stop.store(true, std::sync::atomic::Ordering::Release);
         });
     }
+    timing.p2_tasks_wall_s = ttasks.elapsed().as_secs_f64();
+    timing.p2_task_peak =
+        task_peak.load(std::sync::atomic::Ordering::Relaxed);
+    let tmerge = std::time::Instant::now();
     // ---- merge: shard slots (prefix first, then task order),
     // pages in segment order, seq over the final run
     let mut arenas: Vec<Arena> = Vec::new();
@@ -2564,11 +3068,13 @@ fn plan_layer_frontier(
         None
     };
     let mut results: Vec<
-        Option<(Vec<PageJob>, SplitStats, Arena)>,
+        Option<(Vec<PageJob>, SplitStats, Arena, f64)>,
     > = done.into_iter().map(|m| m.into_inner().unwrap()).collect();
     let mut task_slot: Vec<Option<u32>> = vec![None; results.len()];
     for (k, r) in results.iter_mut().enumerate() {
-        let (_, st, arena) = r.as_mut().expect("p2 task result");
+        let (_, st, arena, task_s) =
+            r.as_mut().expect("p2 task result");
+        timing.p2_tasks_sum_s += *task_s;
         stats.fragments += st.fragments;
         stats.oversize_pages += st.oversize_pages;
         stats.depth_capped += st.depth_capped;
@@ -2612,8 +3118,10 @@ fn plan_layer_frontier(
             std::sync::atomic::Ordering::Relaxed,
         );
     }
+    timing.p2_merge_s = tmerge.elapsed().as_secs_f64();
     finish_layer(
-        li, run, arenas, stats, p2_tasks, shard_bytes, false, t,
+        li, input_records, total, run, arenas, stats, p2_tasks,
+        shard_bytes, false, t, timing,
     )
 }
 
@@ -2952,8 +3460,21 @@ fn build_cell_plan(
     let mut arenas: Vec<Arena> = Vec::new();
     let mut split_stats = SplitStats::default();
     let mut top_split: Vec<((u32, u32), f32)> = Vec::new();
+    let mut layer_profiles: Vec<LayerProfile> = Vec::new();
     let (mut p2_tasks, mut shard_bytes) = (0usize, 0u64);
     for mut lp in layer_plans {
+        let layer_key = doc.layer_order[lp.li as usize];
+        layer_profiles.push(LayerProfile {
+            layer: layer_key,
+            input_records: lp.input_records,
+            input_bytes: lp.input_bytes,
+            pages: lp.pages.len(),
+            fragments: lp.stats.fragments,
+            timing: lp.timing,
+            p2_tasks: lp.p2_tasks,
+            shard_bytes: lp.shard_bytes,
+            p2_fallback: lp.p2_fallback,
+        });
         let run_lo = narrow_u32(pages.len() as u64, "cell page count");
         let run_count =
             narrow_u32(lp.pages.len() as u64, "run page count");
@@ -2996,7 +3517,7 @@ fn build_cell_plan(
         split_stats.lod_grid_verbatim += lp.stats.lod_grid_verbatim;
         p2_tasks += lp.p2_tasks;
         shard_bytes += lp.shard_bytes;
-        top_split.push((doc.layer_order[lp.li as usize], lp.secs));
+        top_split.push((layer_key, lp.secs));
     }
     top_split.sort_by(|a, b| {
         b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
@@ -3259,6 +3780,7 @@ fn build_cell_plan(
         p2_fallback,
         p2_starved,
         top_split,
+        layer_profiles,
     }
 }
 

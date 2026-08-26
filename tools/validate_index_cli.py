@@ -87,6 +87,10 @@ with open(os.environ["FLOE_INDEX_TEST_LOG"], "a", encoding="utf-8") as f:
 if len(args) == 2 and args[0] == "vfsd":
     marker = pathlib.Path(args[1]) / "design.ovm"
     sys.exit(0 if marker.read_bytes() == b"committed" else 1)
+if args and args[0] == "vfs" and ("--profile-cell" in args or
+                                  "--profile-cell-ci" in args):
+    print(json.dumps({"mode": "vfs-cell-profile", "writes": False}))
+    sys.exit(0)
 if len(args) < 3 or args[0] != "vfs":
     sys.exit(2)
 src, out = pathlib.Path(args[1]), pathlib.Path(args[2])
@@ -173,6 +177,30 @@ else:
         check("commit validation failed" in partial.stderr,
               "partial OVM marker was incorrectly reused")
         marker.write_bytes(b"committed")
+
+        # A cell profile bypasses cache reuse and does not even pass the cache
+        # path to floe-index. Relevant planner knobs still propagate.
+        snapshot = {p.name: p.read_bytes() for p in cache.iterdir()
+                    if p.is_file()}
+        profiled = run(env, additive, "--jobs", "7", "--no-lod",
+                       "--page-target-mb", "3", "--profile-cell",
+                       "MONSTER CELL")
+        check(json.loads(profiled.stdout)["mode"] == "vfs-cell-profile",
+              "profile stdout was not one standalone JSON object")
+        check("[floe]" in profiled.stderr,
+              "profile command provenance was not kept on stderr")
+        check(calls(log)[-1] == [
+            "vfs", str(additive), "--jobs", "7",
+            "--page-target-mb", "3", "--no-lod",
+            "--profile-cell", "MONSTER CELL",
+        ], "cell profile argv is not the non-publishing form")
+        check(snapshot == {p.name: p.read_bytes() for p in cache.iterdir()
+                           if p.is_file()},
+              "cell profile modified an existing cache")
+        conflict = run(env, additive, "--force", "--profile-cell-ci", "0",
+                       ok=False)
+        check("cannot be combined" in conflict.stderr,
+              "profile accepted a destructive --force combination")
 
         invalid_env = env.copy()
         invalid_env["FLOE_INDEX_BIN"] = str(work / "missing-floe-index")

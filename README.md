@@ -835,6 +835,8 @@ floe index chip.oas --jobs 12                # <src>.floe
 floe index chip.oas --coverage               # density overview 포함
 floe index chip.oas --page-target-mb 2 --p2-shard-limit-mb 4096
 floe index chip.oas --force                  # 기존 캐시 교체 권한
+floe2 index chip.oas --jobs 48 --profile-cell ltv_top_FEOL_dmy \
+  > monster-profile.json                     # 셀 1개 dry-run, cache 쓰기 없음
 floe-index vfs chip.oas custom.floe --jobs 12  # 저수준 직접 실행
 floe-index scan chip.oas 16                  # JSON 인벤토리 (진단용)
 floe-index --version
@@ -848,6 +850,10 @@ floe-index --version
 - `scan`은 셀/레이어별 레코드·멤버 수, 텍스트, placement, repetition
   타입 히스토그램(`rep_types`)을 JSON으로 출력한다 — 파일 구성 진단용
   (175GB 캐시 사건의 원인 확정도 이 히스토그램으로 했다).
+- `--profile-cell NAME` 또는 slow-cell 로그의 0-based 번호를 쓰는
+  `--profile-cell-ci N`은 전체 소스를 파스한 뒤 지정 셀의 planner만 격리
+  실행한다. stderr에는 레이어별 P2 prefix/shard/task/merge/pbvh 시간이,
+  stdout에는 같은 결과의 JSON이 나오며 기존 `<src>.floe`는 건드리지 않는다.
 
 ### 빌드와 배포
 

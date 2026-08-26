@@ -9,7 +9,8 @@
 기본 `floe index <src.oas>`는 `floe-index vfs <abs-src>
 <abs-src>.floe`를 shell 없이 subprocess로 실행한다. `--jobs`,
 `--page-target-mb`, `--coverage`/`--coverage-only`, `--no-lod`,
-`--slow-cell-s`, `--p2-shard-limit-mb`를 같은 이름의 Rust 옵션으로 전달한다.
+`--slow-cell-s`, `--p2-shard-limit-mb`, `--profile-cell`/
+`--profile-cell-ci`를 같은 이름의 Rust 옵션으로 전달한다.
 coverage는 viewer 기본값과 맞춰 opt-in이다.
 
 정상 VFS cache의 cache version과 source size/mtime fingerprint가 맞고,
@@ -33,11 +34,35 @@ floe-index vfs <src.oas> [outdir=.floe] [--jobs N] [--plan-batch N]
     [--encode-batch N] [--page-target-mb N] [--no-lod]
     [--coverage | --coverage-only] [--frontier-only] [--kill-at P]
     [--slow-cell-s S] [--p2-shard-limit-mb N]
+    [--profile-cell NAME | --profile-cell-ci N]
 ```
 
 `--slow-cell-s S` = slow-cell 로그 임계 초(기본 5.0, 0 = 전 셀 —
 게이트/계측용), `--p2-shard-limit-mb N` = P2 arena 샤딩 복사 명시
 상한(미지정: Linux = MemAvailable 여유 절반, off-Linux = 무제한).
+
+### 1.1 단일 셀 비게시 프로파일
+
+`--profile-cell NAME`은 정확한 셀 이름, `--profile-cell-ci N`은 slow-cell
+로그의 0-based `ci`로 셀 하나를 고른다. 소스 전체 파스와 recursive bbox
+준비는 실제 빌드와 같이 수행하지만 `build_cell_plan`은 선택 셀 한 번만
+호출한다. 출력 디렉터리를 생성·삭제하지 않고 OVM/OVP/OVT/meta/coverage를
+전혀 쓰지 않는다. 기존 cache가 있어도 Python CLI는 freshness/`--force`
+경로를 거치지 않고 프로파일을 실행한다.
+
+stderr는 진행과 사람이 읽는 요약, stdout은 반복 측정용 JSON 객체 하나다.
+JSON은 read/parse/prepare/plan, 셀 6페이즈, 레이어별 serial split 및 P2
+`prefix/shard/tasks wall/tasks sum/task peak/merge/pbvh`, 작업량, RSS/HWM과
+retained Pts arena를 기록한다. `tasks sum`은 각 태스크 wall의 합이며 OS CPU
+clock은 아니다. 프로파일러 호출 스레드가 한 실행 슬롯을 소유하고 나머지
+`jobs-1` 슬롯은 즉시 P1/P2/LOD에 제공되므로, 전체 빌드의 다른 셀/commit
+window 경합이 없는 **격리 셀 확장성**을 측정한다.
+
+```sh
+floe2 index chip.oas --jobs 48 --profile-cell ltv_top_FEOL_dmy \
+    > ltv_top_FEOL_dmy.profile.json
+floe-index vfs chip.oas --jobs 48 --profile-cell-ci 32810 --no-lod
+```
 
 ## 1.5 파스 규약 (도형 변환)
 

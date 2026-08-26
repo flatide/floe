@@ -93,7 +93,8 @@ fn main() {
              [--plan-batch N] [--encode-batch N] \
              [--page-target-mb N] \
              [--coverage | --coverage-only] [--no-lod] [--frontier-only] \
-             [--slow-cell-s S] [--p2-shard-limit-mb N]\n       \
+             [--slow-cell-s S] [--p2-shard-limit-mb N] \
+             [--profile-cell NAME | --profile-cell-ci N]\n       \
              floe-index plan <outdir> --view x0,y0,x1,y1 \
              [--px-per-um N] [--cut-px N] [--layers a/b,..] \
              [--depth N]\n       \
