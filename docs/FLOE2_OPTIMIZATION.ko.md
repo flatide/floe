@@ -374,6 +374,41 @@ ALL OK, PX1~PX5 golden 0 실패, integration 22 tests OK, unit gate
 tile×plane work bin(F2R-10/11 선행), 그리고 paint-bound가 된 serial의
 잔여는 F2R-03c 영역이다.
 
+### 3.12 같은 머신 KLayout 기준선과 F2R-12 gate 판정 (2026-08-26)
+
+`tools/bench_floe2.py --backend klayout`이 같은 persistent trace로 stable
+floe/KLayout render service를 headless 구동한다(제품/renderer env를 세션에
+고정, KLayout worker는 첫 frame에 cold open 포함). 세션 시작의
+`[perf] backend=klayout version=0.30.9 drawing-workers=1` 라인이 §3.9의
+단일 C++ raster 고정을 실행 시점에 증명한다.
+
+sample9 858x789 hotspot 500µm, detail high, LOD off, frames/labels on,
+3회 중앙값(total ms):
+
+| 조건 | floe/KLayout | floe2 serial r1/tile858 | floe2 제품 r4/384 |
+|---|---:|---:|---:|
+| hotspot warm | 82 (draw 80) | 66 (raster 44) | 43 (raster 20) |
+| hotspot cold | 381 (apply 296 + draw 79) | 103 | 79 |
+
+**F2R-12 gate(단일 raster에서 KLayout의 95%)는 sample9에서 통과**: Rust
+serial total 66ms는 KLayout 82ms 대비 124% 처리 성능이다. §3.9의 86.6%는
+F2R-03a/03b 이전 수치다. 대표 실칩 p50/p95 확인이 남는다.
+
+F2R-10 사전 sweep(`--pan-sweep`: 1/16·1/8·1/4 폭/높이 이동과 복귀, 3회
+중앙값):
+
+| 동작 | KLayout | floe2 r4 cache-off | floe2 r4 cache-on |
+|---|---:|---:|---:|
+| 인접 pan | 73~96ms | 44~48ms | 44~49ms |
+| 정확 복귀 | 81~82ms | 42~43ms | 첫 복귀 44ms, 이후 6~7ms(hit 5/6) |
+
+이 fixture에서는 "floe가 인접 pan에서 cache hit처럼 빠르다"는 관찰이
+재현되지 않는다: floe는 인접 pan마다 full draw ~80ms를 다시 지불하고
+retained Layout의 이득은 load(apply ≤9ms)뿐이다. floe2는 모든 인접 pan에서
+약 2배 빠르고 exact 복귀는 frame cache가 6~7ms로 처리한다. world-aligned
+tile LRU(F2R-10)의 착수 판정은 관찰이 나온 실칩 trace에서 같은 sweep을
+재측정한 뒤 내린다.
+
 ## 4. 이슈 목록
 
 | ID | 우선순위 | 상태 | 요약 | 다음 판정 |
@@ -387,9 +422,9 @@ tile×plane work bin(F2R-10/11 선행), 그리고 paint-bound가 된 serial의
 | F2R-07 | P1 | `DONE` | OVC coverage post-composite 회귀 | 제품 경로 제거 gate 유지 |
 | F2R-08 | P1 | `DONE` | exact 재방문도 full raster/PNG 반복 | bounded PNG+scene 복원 gate 완료 |
 | F2R-09 | P1 | `DONE` | 744-page pan에서 6회 full raster/PNG | 제품 round 1024 승인 |
-| F2R-10 | P1 | `OPEN` | exact 밖 인접 pan은 full viewport raster | pan sweep 후 world-tile prototype 판정 |
+| F2R-10 | P1 | `OPEN` | exact 밖 인접 pan은 full viewport raster | sample9 sweep은 floe2 우세(§3.12); 실칩 sweep로 판정 |
 | F2R-11 | P2 | `DESIGN` | page-round refinement가 누적 full PNG 반복 | final-tile streaming 채택 여부 결정 |
-| F2R-12 | P1 | `DOING` | KLayout single-core parity와 Rust serial 기준선 | pin/split/serial 코드 완료, canonical 측정 남음 |
+| F2R-12 | P1 | `DOING` | KLayout single-core parity와 Rust serial 기준선 | sample9 gate 통과 124%(§3.12); 실칩 p50/p95 남음 |
 
 ## 5. 상세 이슈와 수용 기준
 
@@ -671,10 +706,11 @@ KLayout의 95% 처리 성능을 먼저 달성하고 병렬 raster를 latency 가
 3. 완료(2026-08-26): `--serial` preset이 `decode_jobs=8`(미지정 시),
    `raster_jobs=[1]`, tile `min(4096, max(width, height))`를 고정해 한 화면을 한
    tile로 그린다.
-4. 부분 완료(2026-08-26): canonical sample9로 Rust serial/제품 profile을 3회
-   측정했다(§3.10; bench에 `--frame-cache off`/`--perf-baseline` 표면 추가).
-   남음: 같은 머신의 floe/KLayout GUI 세션 재측정(새 `[perf]` 라인으로
-   version/worker 고정 확인)과 대표 실칩 trace.
+4. 완료(sample9, 2026-08-26): canonical sample9로 Rust serial/제품 profile과
+   같은 머신 KLayout 기준선을 3회씩 측정했다(§3.10~12). bench가
+   `--backend klayout`으로 stable service를 같은 trace로 headless 구동하며,
+   `[perf]` 라인이 version/worker 고정을 증명한다. gate는 124%로 통과.
+   남음: 대표 실칩 p50/p95.
 
 수용 gate:
 
@@ -694,8 +730,9 @@ KLayout의 95% 처리 성능을 먼저 달성하고 병렬 raster를 latency 가
    머신 KLayout GUI 재측정과 대표 실칩 trace.
 2. 완료(2026-08-26): F2R-03b 1단계 sub-page record index. 제품 raster
    26.0→20.4ms, 128px tile -32%, serial 동률(§3.11).
-3. F2R-10의 fixed-scale pan sweep과 persistent/new KLayout `LayoutView` 진단으로 인접
-   cache 체감을 수치화한다.
+3. F2R-10 fixed-scale pan sweep은 sample9에서 완료(§3.12): 인접 pan 열세가
+   재현되지 않았고 floe2가 전 구간 우세였다. 관찰이 나온 실칩 trace에서 같은
+   `--pan-sweep`을 재측정한 뒤 world-tile 착수를 판정한다.
 4. F2R-03b 2단계(frame당 1회 tile×plane work bin, cell×layer bbox, Pts chunk
    bbox)는 F2R-10/11 요구와 묶어 필요성을 재평가한 뒤 진행한다. exact 재방문
    cache를 회귀시키지 않는 경우에만 편입한다.

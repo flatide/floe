@@ -24,10 +24,11 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-import floe2  # noqa: E402,F401 - select the Rust-only product first
+# Product/backend selection happens in main() before any worker spawns:
+# --backend rust imports floe2 (Rust-only product), --backend klayout keeps
+# the stable floe product so the same trace drives the KLayout service.
 from floe import __version__  # noqa: E402
 from floe.cache import Cache  # noqa: E402
-from floe.rust_render import RustRenderWorker  # noqa: E402
 from floe.service import DEFAULT_DETAIL, DETAIL_LEVELS, DETAIL_PX  # noqa: E402
 
 
@@ -40,6 +41,9 @@ PHASE_FIELDS = (
     "frame_width", "frame_height", "tiles",
     "wc_cells", "inst_edges", "frame_rects", "text_place_records",
     "labels", "label_tile_paints", "label_pixel_paints",
+    # stable floe/KLayout service phases (absent from Rust results)
+    "load_ms", "phase_plan", "phase_delta", "phase_apply", "draw_ms",
+    "wait_ms", "new",
 )
 
 
@@ -113,6 +117,13 @@ def pan_windows(mid_bbox):
     return windows
 
 
+def shifted_window(bbox, fraction, axis):
+    x0, y0, x1, y1 = bbox
+    dx = (x1 - x0) * fraction if axis == "x" else 0.0
+    dy = (y1 - y0) * fraction if axis == "y" else 0.0
+    return (x0 + dx, y0 + dy, x1 + dx, y1 + dy)
+
+
 def build_trace(meta, width, height, hotspot, layer_spec, cache):
     full = tuple(float(value) for value in meta["bbox"])
     aspect = width / height
@@ -165,7 +176,21 @@ def build_trace(meta, width, height, hotspot, layer_spec, cache):
     ]
     trace.extend(("warm_pan_%d" % (index + 1), bbox, None, None)
                  for index, bbox in enumerate(pan_windows(mid)))
-    return trace, layer_mode
+    return trace, layer_mode, hot
+
+
+def pan_sweep_trace(hot):
+    """F2R-10 fixed-scale adjacency sweep: shift the settled hotspot by a
+    fraction of its width/height and return, at the same zoom/detail."""
+    trace = []
+    for fraction, tag in ((1.0 / 16.0, "16"), (1.0 / 8.0, "8"),
+                          (1.0 / 4.0, "4")):
+        for axis in ("x", "y"):
+            trace.append(("hot_pan_%s_%s" % (axis, tag),
+                          shifted_window(hot, fraction, axis), None, None))
+            trace.append(("hot_pan_%s_%s_back" % (axis, tag),
+                          hot, None, None))
+    return trace
 
 
 def read_rss_kb(pid):
@@ -208,6 +233,15 @@ class RssMonitor:
 
 
 def start_worker(worker, timeout):
+    if not hasattr(worker, "start_async"):
+        # The KLayout RenderWorker opens its cache inside the spawned
+        # process; the first frame therefore includes the cold open.
+        worker.start()
+        if worker._proc is None or worker._proc.pid is None:
+            raise RuntimeError("render worker process failed to start")
+        monitor = RssMonitor(worker._proc.pid)
+        monitor.start()
+        return monitor
     done = threading.Event()
     errors = []
 
@@ -287,20 +321,32 @@ def render_trace(worker, trace, args, run_number):
             "depth": "fit" if depth == 0 else "full",
         })
         results.append(metrics)
-        print("jobs=r%d/d%-3d run=%d %-18s total=%8.1f  "
-              "plan=%7.1f read=%7.1f decode=%7.1f scene=%7.1f "
-              "raster=%7.1f png=%7.1f publish=%7.1f handoff=%6.1f" % (
-                  worker._raster_jobs_count, worker._jobs_count,
-                  run_number, name,
-                  float(metrics.get("ms", 0)),
-                  float(metrics.get("plan_ms", 0)),
-                  float(metrics.get("read_ms", 0)),
-                  float(metrics.get("decode_ms", 0)),
-                  float(metrics.get("scene_ms", 0)),
-                  float(metrics.get("raster_ms", 0)),
-                  float(metrics.get("png_ms", 0)),
-                  float(metrics.get("publish_ms", 0)),
-                  float(metrics.get("adapter_read_ms", 0))), flush=True)
+        if hasattr(worker, "_raster_jobs_count"):
+            print("jobs=r%d/d%-3d run=%d %-18s total=%8.1f  "
+                  "plan=%7.1f read=%7.1f decode=%7.1f scene=%7.1f "
+                  "raster=%7.1f png=%7.1f publish=%7.1f handoff=%6.1f" % (
+                      worker._raster_jobs_count, worker._jobs_count,
+                      run_number, name,
+                      float(metrics.get("ms", 0)),
+                      float(metrics.get("plan_ms", 0)),
+                      float(metrics.get("read_ms", 0)),
+                      float(metrics.get("decode_ms", 0)),
+                      float(metrics.get("scene_ms", 0)),
+                      float(metrics.get("raster_ms", 0)),
+                      float(metrics.get("png_ms", 0)),
+                      float(metrics.get("publish_ms", 0)),
+                      float(metrics.get("adapter_read_ms", 0))), flush=True)
+        else:
+            print("klayout    run=%d %-18s total=%8.1f  "
+                  "load=%7.1f plan=%7.1f delta=%7.1f apply=%7.1f "
+                  "draw=%7.1f" % (
+                      run_number, name,
+                      float(metrics.get("ms", 0)),
+                      float(metrics.get("load_ms", 0)),
+                      float(metrics.get("phase_plan", 0)),
+                      float(metrics.get("phase_delta", 0)),
+                      float(metrics.get("phase_apply", 0)),
+                      float(metrics.get("draw_ms", 0))), flush=True)
     return results
 
 
@@ -310,15 +356,22 @@ def benchmark_session(cache, trace, args, jobs, run_number):
     # --decode-jobs they stay pinned so raster scaling and the F2R-12
     # serial profile are measured against a fixed page-load configuration.
     decode_jobs = args.decode_jobs if args.decode_jobs else jobs
-    os.environ["FLOE_RUST_JOBS"] = str(decode_jobs)
-    os.environ["FLOE_RUST_RASTER_JOBS"] = str(jobs)
-    os.environ["FLOE_RUST_BUDGET_MB"] = str(args.budget_mb)
-    os.environ["FLOE_RUST_ROUND_PAGES"] = str(args.round_pages)
-    os.environ["FLOE_RUST_TILE_PX"] = str(args.tile_px)
-    os.environ["FLOE_RUST_OPEN_TIMEOUT_S"] = str(args.timeout)
-    if args.renderd:
-        os.environ["FLOE_RENDERD_BIN"] = os.path.abspath(args.renderd)
-    worker = RustRenderWorker(cache)
+    if args.backend == "klayout":
+        # The stable service runs its pinned single C++ raster; the jobs
+        # sweep only labels the session.
+        from floe.service import make_render_worker
+        worker = make_render_worker(cache)
+    else:
+        os.environ["FLOE_RUST_JOBS"] = str(decode_jobs)
+        os.environ["FLOE_RUST_RASTER_JOBS"] = str(jobs)
+        os.environ["FLOE_RUST_BUDGET_MB"] = str(args.budget_mb)
+        os.environ["FLOE_RUST_ROUND_PAGES"] = str(args.round_pages)
+        os.environ["FLOE_RUST_TILE_PX"] = str(args.tile_px)
+        os.environ["FLOE_RUST_OPEN_TIMEOUT_S"] = str(args.timeout)
+        if args.renderd:
+            os.environ["FLOE_RENDERD_BIN"] = os.path.abspath(args.renderd)
+        from floe.rust_render import RustRenderWorker
+        worker = RustRenderWorker(cache)
     monitor = None
     try:
         monitor = start_worker(worker, args.timeout)
@@ -408,6 +461,10 @@ def make_parser():
         help="private hotspot center and optional square span in micrometers")
     parser.add_argument(
         "--layer", help="single layer name or L/D for the near-view case")
+    parser.add_argument(
+        "--backend", choices=("rust", "klayout"), default="rust",
+        help="rust drives the floe2 renderd adapter; klayout drives the "
+        "stable floe render service headlessly over the same trace")
     parser.add_argument("--jobs", type=parse_jobs, default=parse_jobs("1,4,8,16"),
                         help="raster worker sweep; decode workers follow "
                         "unless --decode-jobs pins them")
@@ -418,6 +475,10 @@ def make_parser():
                         help="F2R-12 serial profile: raster jobs 1, decode "
                         "jobs 8 (unless --decode-jobs), one image tile "
                         "covering the framebuffer (unless --tile-px)")
+    parser.add_argument("--pan-sweep", action="store_true",
+                        help="append the F2R-10 hotspot adjacency sweep: "
+                        "1/16, 1/8, 1/4 width/height shifts with returns "
+                        "at the same zoom")
     parser.add_argument("--frame-cache", choices=("on", "off"), default="on",
                         help="exact-viewport PNG LRU; 'off' keeps warm "
                         "revisits on the full raster path")
@@ -444,6 +505,13 @@ def make_parser():
 
 def main(argv=None):
     args = make_parser().parse_args(argv)
+    if args.backend == "klayout":
+        # Stay on the stable floe product and force the KLayout service;
+        # both are inherited by the spawned render process.
+        os.environ["FLOE_PRODUCT"] = "floe"
+        os.environ["FLOE_RENDERER"] = "klayout"
+    else:
+        import floe2  # noqa: F401 - select the Rust-only product
     if args.serial:
         args.jobs = [1]
         if args.decode_jobs is None:
@@ -462,9 +530,11 @@ def main(argv=None):
     if cache.is_stale():
         raise SystemExit("floe2 benchmark: VFS cache is stale; rebuild it")
     try:
-        trace, layer_mode = build_trace(
+        trace, layer_mode, hot = build_trace(
             cache.meta, args.width, args.height, args.hotspot,
             args.layer, cache)
+        if args.pan_sweep:
+            trace.extend(pan_sweep_trace(hot))
     except (KeyError, TypeError, ValueError) as exc:
         raise SystemExit("floe2 benchmark: %s" % exc) from exc
 
@@ -490,6 +560,7 @@ def main(argv=None):
             "logical_cpus": os.cpu_count(),
         },
         "config": {
+            "backend": args.backend,
             "jobs": args.jobs,
             "decode_jobs": args.decode_jobs,
             "serial": args.serial,
