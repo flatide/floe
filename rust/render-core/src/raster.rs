@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use crate::font::{normalized_chars, GlyphAtlas};
+use crate::page_index::RecordSet;
 use crate::repetition::for_each_visible_offset;
 use crate::transform::OrthoTransform;
 use crate::{FrameScene, RenderCancellation, RenderStats, ViewBox};
@@ -661,6 +662,7 @@ fn raster_tile(
     let mut stats = RenderStats::default();
     let mut counters = RasterCounters::default();
     let mut path = Vec::new();
+    let mut record_scratch = RecordSet::default();
     match mode {
         RenderMode::Occupancy => {
             render_cell(
@@ -676,6 +678,7 @@ fn raster_tile(
                 scene.top(),
                 OrthoTransform::identity(),
                 &mut path,
+                &mut record_scratch,
             )?;
         }
         RenderMode::Styled(styled) => {
@@ -730,6 +733,7 @@ fn raster_tile(
                     scene.top(),
                     OrthoTransform::identity(),
                     &mut path,
+                    &mut record_scratch,
                 )?;
                 render_prepared_labels(
                     labels,
@@ -1044,6 +1048,9 @@ impl PaintStyle {
         }
     }
 
+    /// Per-pixel fill rule. Production spans go through `fill_span`; this
+    /// stays as the oracle the span specializations are tested against.
+    #[cfg(test)]
     fn fills(self, row: u32, col: u32, height: u32) -> bool {
         match self.fill {
             LayerFill::Solid => true,
@@ -1128,6 +1135,7 @@ fn render_cell(
     key: WsKey,
     world_transform: OrthoTransform,
     path: &mut Vec<WsKey>,
+    record_scratch: &mut RecordSet,
 ) -> Result<(), String> {
     check_cancelled(guard)?;
     if path.contains(&key) {
@@ -1163,134 +1171,166 @@ fn render_cell(
                 page_id
             ));
         }
-        counters.rect_records = counters
-            .rect_records
-            .saturating_add(geometry.rects.len().try_into().unwrap_or(u64::MAX));
-        counters.polygon_records = counters
-            .polygon_records
-            .saturating_add(geometry.polys.len().try_into().unwrap_or(u64::MAX));
-        counters.path_records = counters
-            .path_records
-            .saturating_add(geometry.paths.len().try_into().unwrap_or(u64::MAX));
-
-        for rect in &geometry.rects {
-            stats.primitives_tested = stats.primitives_tested.saturating_add(1);
-            if rect.w < 0 || rect.h < 0 {
-                return Err(format!(
-                    "corrupt page {}: negative rectangle size {}x{}",
-                    page_id, rect.w, rect.h
-                ));
-            }
-            if rect.w == 0 || rect.h == 0 {
-                continue;
-            }
-            let x1 = rect
-                .x
-                .checked_add(rect.w)
-                .ok_or_else(|| format!("rectangle x overflow in page {}", page_id))?;
-            let y1 = rect
-                .y
-                .checked_add(rect.h)
-                .ok_or_else(|| format!("rectangle y overflow in page {}", page_id))?;
-            let base = BBox {
-                x0: rect.x,
-                y0: rect.y,
-                x1,
-                y1,
-            };
-            let mut drawn = 0u64;
-            let mut cancel_member = 0u16;
-            let visit =
-                for_each_visible_offset(&rect.rep, base, local_view, |offset_x, offset_y| {
-                    check_member_cancelled(guard, &mut cancel_member)?;
-                    let local = translate_bbox(base, offset_x, offset_y)?;
-                    let world = world_transform.apply_bbox(local)?;
-                    if paint_world_rect(band, request, world, paint)? {
-                        drawn = drawn.saturating_add(1);
-                    }
-                    Ok(())
-                })?;
-            stats.rep_members_tested = stats.rep_members_tested.saturating_add(visit.tested);
-            stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(drawn);
-            stats.primitives_drawn = stats.primitives_drawn.saturating_add(drawn);
-            counters.rectangle_members_drawn =
-                counters.rectangle_members_drawn.saturating_add(drawn);
-        }
-
-        for polygon in &geometry.polys {
-            stats.primitives_tested = stats.primitives_tested.saturating_add(1);
-            let base = polygon_bbox(&polygon.pts).ok_or_else(|| {
-                format!(
-                    "corrupt page {}: polygon has fewer than 3 vertices",
-                    page_id
-                )
+        // Record enumeration is driven by the page's decode-time extent
+        // index: records whose full repetition extent cannot reach this
+        // tile's local view are never visited (F2R-03b). Corrupt or
+        // overflowing records are indexed as always-visible, so the
+        // validation errors below stay reachable.
+        page.index
+            .rects()
+            .for_each_intersecting(local_view, record_scratch, |record| {
+                let rect = geometry
+                    .rects
+                    .get(record as usize)
+                    .ok_or_else(|| format!("corrupt page {}: stale record index", page_id))?;
+                counters.rect_records = counters.rect_records.saturating_add(1);
+                stats.primitives_tested = stats.primitives_tested.saturating_add(1);
+                if rect.w < 0 || rect.h < 0 {
+                    return Err(format!(
+                        "corrupt page {}: negative rectangle size {}x{}",
+                        page_id, rect.w, rect.h
+                    ));
+                }
+                if rect.w == 0 || rect.h == 0 {
+                    return Ok(());
+                }
+                let x1 = rect
+                    .x
+                    .checked_add(rect.w)
+                    .ok_or_else(|| format!("rectangle x overflow in page {}", page_id))?;
+                let y1 = rect
+                    .y
+                    .checked_add(rect.h)
+                    .ok_or_else(|| format!("rectangle y overflow in page {}", page_id))?;
+                let base = BBox {
+                    x0: rect.x,
+                    y0: rect.y,
+                    x1,
+                    y1,
+                };
+                let mut drawn = 0u64;
+                let mut cancel_member = 0u16;
+                let visit =
+                    for_each_visible_offset(&rect.rep, base, local_view, |offset_x, offset_y| {
+                        check_member_cancelled(guard, &mut cancel_member)?;
+                        let local = translate_bbox(base, offset_x, offset_y)?;
+                        let world = world_transform.apply_bbox(local)?;
+                        if paint_world_rect(band, request, world, paint)? {
+                            drawn = drawn.saturating_add(1);
+                        }
+                        Ok(())
+                    })?;
+                stats.rep_members_tested = stats.rep_members_tested.saturating_add(visit.tested);
+                stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(drawn);
+                stats.primitives_drawn = stats.primitives_drawn.saturating_add(drawn);
+                counters.rectangle_members_drawn =
+                    counters.rectangle_members_drawn.saturating_add(drawn);
+                Ok(())
             })?;
-            let mut drawn = 0u64;
-            let mut cancel_member = 0u16;
-            let visit =
-                for_each_visible_offset(&polygon.rep, base, local_view, |offset_x, offset_y| {
-                    check_member_cancelled(guard, &mut cancel_member)?;
-                    let mut world_points = Vec::with_capacity(polygon.pts.len());
-                    for &(x, y) in &polygon.pts {
-                        let x = checked_add(x, offset_x, "polygon x")?;
-                        let y = checked_add(y, offset_y, "polygon y")?;
-                        world_points.push(world_transform.apply(x, y)?);
-                    }
-                    if paint_world_polygon(band, request, &world_points, paint)? {
-                        drawn = drawn.saturating_add(1);
-                    }
-                    Ok(())
-                })?;
-            stats.rep_members_tested = stats.rep_members_tested.saturating_add(visit.tested);
-            stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(drawn);
-            stats.primitives_drawn = stats.primitives_drawn.saturating_add(drawn);
-            counters.polygon_members_drawn = counters.polygon_members_drawn.saturating_add(drawn);
-        }
 
-        for path_record in &geometry.paths {
-            stats.primitives_tested = stats.primitives_tested.saturating_add(1);
-            let outline = checked_path_outline(
-                &path_record.pts,
-                path_record.hw,
-                path_record.es,
-                path_record.ee,
-            )
-            .map_err(|error| format!("page {}: {}", page_id, error))?;
-            let centerline = checked_path_centerline(&path_record.pts)?
-                .ok_or_else(|| format!("corrupt page {}: path spine is degenerate", page_id))?;
-            let base = polygon_bbox(&outline)
-                .ok_or_else(|| format!("corrupt page {}: path outline is degenerate", page_id))?;
-            let mut drawn = 0u64;
-            let mut cancel_member = 0u16;
-            let visit = for_each_visible_offset(
-                &path_record.rep,
-                base,
-                local_view,
-                |offset_x, offset_y| {
-                    check_member_cancelled(guard, &mut cancel_member)?;
-                    let mut world_points = Vec::with_capacity(outline.len());
-                    for &(x, y) in &outline {
-                        let x = checked_add(x, offset_x, "path x")?;
-                        let y = checked_add(y, offset_y, "path y")?;
-                        world_points.push(world_transform.apply(x, y)?);
-                    }
-                    let mut world_centerline = Vec::with_capacity(centerline.len());
-                    for &(x, y) in &centerline {
-                        let x = checked_add(x, offset_x, "path centerline x")?;
-                        let y = checked_add(y, offset_y, "path centerline y")?;
-                        world_centerline.push(world_transform.apply(x, y)?);
-                    }
-                    if paint_world_path(band, request, &world_points, &world_centerline, paint)? {
-                        drawn = drawn.saturating_add(1);
-                    }
-                    Ok(())
-                },
-            )?;
-            stats.rep_members_tested = stats.rep_members_tested.saturating_add(visit.tested);
-            stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(drawn);
-            stats.primitives_drawn = stats.primitives_drawn.saturating_add(drawn);
-            counters.path_members_drawn = counters.path_members_drawn.saturating_add(drawn);
-        }
+        page.index
+            .polys()
+            .for_each_intersecting(local_view, record_scratch, |record| {
+                let polygon = geometry
+                    .polys
+                    .get(record as usize)
+                    .ok_or_else(|| format!("corrupt page {}: stale record index", page_id))?;
+                counters.polygon_records = counters.polygon_records.saturating_add(1);
+                stats.primitives_tested = stats.primitives_tested.saturating_add(1);
+                let base = polygon_bbox(&polygon.pts).ok_or_else(|| {
+                    format!(
+                        "corrupt page {}: polygon has fewer than 3 vertices",
+                        page_id
+                    )
+                })?;
+                let mut drawn = 0u64;
+                let mut cancel_member = 0u16;
+                // One scratch per record, reused by every repetition member.
+                let mut world_points = Vec::with_capacity(polygon.pts.len());
+                let visit = for_each_visible_offset(
+                    &polygon.rep,
+                    base,
+                    local_view,
+                    |offset_x, offset_y| {
+                        check_member_cancelled(guard, &mut cancel_member)?;
+                        world_points.clear();
+                        for &(x, y) in &polygon.pts {
+                            let x = checked_add(x, offset_x, "polygon x")?;
+                            let y = checked_add(y, offset_y, "polygon y")?;
+                            world_points.push(world_transform.apply(x, y)?);
+                        }
+                        if paint_world_polygon(band, request, &world_points, paint)? {
+                            drawn = drawn.saturating_add(1);
+                        }
+                        Ok(())
+                    },
+                )?;
+                stats.rep_members_tested = stats.rep_members_tested.saturating_add(visit.tested);
+                stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(drawn);
+                stats.primitives_drawn = stats.primitives_drawn.saturating_add(drawn);
+                counters.polygon_members_drawn =
+                    counters.polygon_members_drawn.saturating_add(drawn);
+                Ok(())
+            })?;
+
+        page.index
+            .paths()
+            .for_each_intersecting(local_view, record_scratch, |record| {
+                let path_record = geometry
+                    .paths
+                    .get(record as usize)
+                    .ok_or_else(|| format!("corrupt page {}: stale record index", page_id))?;
+                counters.path_records = counters.path_records.saturating_add(1);
+                stats.primitives_tested = stats.primitives_tested.saturating_add(1);
+                let outline = checked_path_outline(
+                    &path_record.pts,
+                    path_record.hw,
+                    path_record.es,
+                    path_record.ee,
+                )
+                .map_err(|error| format!("page {}: {}", page_id, error))?;
+                let centerline = checked_path_centerline(&path_record.pts)?
+                    .ok_or_else(|| format!("corrupt page {}: path spine is degenerate", page_id))?;
+                let base = polygon_bbox(&outline).ok_or_else(|| {
+                    format!("corrupt page {}: path outline is degenerate", page_id)
+                })?;
+                let mut drawn = 0u64;
+                let mut cancel_member = 0u16;
+                // One outline/centerline scratch pair per record, reused by
+                // every repetition member.
+                let mut world_points = Vec::with_capacity(outline.len());
+                let mut world_centerline = Vec::with_capacity(centerline.len());
+                let visit = for_each_visible_offset(
+                    &path_record.rep,
+                    base,
+                    local_view,
+                    |offset_x, offset_y| {
+                        check_member_cancelled(guard, &mut cancel_member)?;
+                        world_points.clear();
+                        for &(x, y) in &outline {
+                            let x = checked_add(x, offset_x, "path x")?;
+                            let y = checked_add(y, offset_y, "path y")?;
+                            world_points.push(world_transform.apply(x, y)?);
+                        }
+                        world_centerline.clear();
+                        for &(x, y) in &centerline {
+                            let x = checked_add(x, offset_x, "path centerline x")?;
+                            let y = checked_add(y, offset_y, "path centerline y")?;
+                            world_centerline.push(world_transform.apply(x, y)?);
+                        }
+                        if paint_world_path(band, request, &world_points, &world_centerline, paint)?
+                        {
+                            drawn = drawn.saturating_add(1);
+                        }
+                        Ok(())
+                    },
+                )?;
+                stats.rep_members_tested = stats.rep_members_tested.saturating_add(visit.tested);
+                stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(drawn);
+                stats.primitives_drawn = stats.primitives_drawn.saturating_add(drawn);
+                counters.path_members_drawn = counters.path_members_drawn.saturating_add(drawn);
+                Ok(())
+            })?;
     }
 
     for &(layer_idx, wash) in &cell.washes {
@@ -1348,6 +1388,7 @@ fn render_cell(
                     instance.child,
                     child_world,
                     path,
+                    record_scratch,
                 )
             },
         )?;
@@ -1563,7 +1604,9 @@ pub(crate) fn checked_path_outline(
         .ok_or_else(|| "path outline helper rejected a checked Manhattan path".to_string())
 }
 
-fn checked_path_centerline(points: &[(i64, i64)]) -> Result<Option<Vec<(i64, i64)>>, String> {
+pub(crate) fn checked_path_centerline(
+    points: &[(i64, i64)],
+) -> Result<Option<Vec<(i64, i64)>>, String> {
     let mut spine = Vec::with_capacity(points.len());
     for &point in points {
         if spine.last() == Some(&point) {
@@ -1875,10 +1918,17 @@ fn fill_world_polygon(
     points: &[(i64, i64)],
     paint: PaintStyle,
 ) -> Result<bool, String> {
+    if points.len() < 3 {
+        return Err("polygon has fewer than 3 vertices".to_string());
+    }
+    let mut device = Vec::with_capacity(points.len());
+    for &(x, y) in points {
+        device.push(world_to_device(request, x, y)?);
+    }
     let centered =
-        fill_world_polygon_with_phase(band, request, points, FillPhase::PixelCenter, paint)?;
+        fill_device_polygon_with_phase(band, request, &device, FillPhase::PixelCenter, paint)?;
     let boundary =
-        fill_world_polygon_with_phase(band, request, points, FillPhase::LowerBoundary, paint)?;
+        fill_device_polygon_with_phase(band, request, &device, FillPhase::LowerBoundary, paint)?;
     Ok(centered || boundary)
 }
 
@@ -1908,24 +1958,68 @@ fn fill_device_rect_with_phase(
     let end_col = checked_usize(end_col, "rectangle end column")?;
     let mut drew = false;
     for row in first_row..end_row {
-        let row_u32: u32 = row
-            .try_into()
-            .map_err(|_| format!("limit exceeded: rectangle row = {row}"))?;
-        let local_row = row - band.row0 as usize;
-        for col in first_col..end_col {
-            let col_u32: u32 = col
-                .try_into()
-                .map_err(|_| format!("limit exceeded: rectangle column = {col}"))?;
-            if !paint.fills(row_u32, col_u32, request.height) {
-                continue;
-            }
-            let local_col = col - band.col0 as usize;
-            let offset = (local_row * band.tile_width() as usize + local_col) * 4;
-            band.pixels[offset..offset + 4].copy_from_slice(&paint.color);
+        if fill_span(band, paint, request.height, row, first_col, end_col) {
             drew = true;
         }
     }
     Ok(drew)
+}
+
+/// Paints one device-row span with the interior fill rule, matching
+/// `PaintStyle::fills` pixel for pixel. `row` and the half-open column range
+/// are already clamped to the band, so the per-pixel checked conversions of
+/// the former loop cannot fail and the fill kind is decided once per span.
+fn fill_span(
+    band: &mut RasterBand,
+    paint: PaintStyle,
+    frame_height: u32,
+    row: usize,
+    first_col: usize,
+    end_col: usize,
+) -> bool {
+    if first_col >= end_col {
+        return false;
+    }
+    let row_offset = (row - band.row0 as usize) * band.tile_width() as usize;
+    let col_base = band.col0 as usize;
+    match paint.fill {
+        LayerFill::Clear => false,
+        LayerFill::Solid => {
+            let start = (row_offset + first_col - col_base) * 4;
+            let end = (row_offset + end_col - col_base) * 4;
+            for pixel in band.pixels[start..end].chunks_exact_mut(4) {
+                pixel.copy_from_slice(&paint.color);
+            }
+            true
+        }
+        LayerFill::Speckle => {
+            let mut col = first_col + ((row + first_col) & 1);
+            let drew = col < end_col;
+            while col < end_col {
+                let offset = (row_offset + col - col_base) * 4;
+                band.pixels[offset..offset + 4].copy_from_slice(&paint.color);
+                col += 2;
+            }
+            drew
+        }
+        LayerFill::Pattern(rows) => {
+            let source_row = (row as u32).wrapping_add(frame_height - 1) & 15;
+            let word = rows[source_row as usize];
+            if word == 0 {
+                return false;
+            }
+            let mut drew = false;
+            for col in first_col..end_col {
+                if word & (1u16 << (15 - (col & 15))) == 0 {
+                    continue;
+                }
+                let offset = (row_offset + col - col_base) * 4;
+                band.pixels[offset..offset + 4].copy_from_slice(&paint.color);
+                drew = true;
+            }
+            drew
+        }
+    }
 }
 
 fn polygon_bbox(points: &[(i64, i64)]) -> Option<BBox> {
@@ -1953,13 +2047,20 @@ fn stroke_world_polygon(
     if points.len() < 2 {
         return Ok(false);
     }
+    // Convert each vertex once; the previous per-segment form converted
+    // every vertex twice (as an end and again as the next start).
+    let first = world_to_stroke_vertex(request, points[0])?;
+    let mut start = first;
     let mut drew = false;
-    for index in 0..points.len() {
-        let start = world_to_stroke_vertex(request, points[index])?;
-        let end = world_to_stroke_vertex(request, points[(index + 1) % points.len()])?;
+    for &point in &points[1..] {
+        let end = world_to_stroke_vertex(request, point)?;
         if stroke_device_segment(band, request, start, end, paint)? {
             drew = true;
         }
+        start = end;
+    }
+    if stroke_device_segment(band, request, start, first, paint)? {
+        drew = true;
     }
     Ok(drew)
 }
@@ -1973,13 +2074,14 @@ fn stroke_world_polyline(
     if points.len() < 2 {
         return Ok(false);
     }
+    let mut start = world_to_stroke_vertex(request, points[0])?;
     let mut drew = false;
-    for segment in points.windows(2) {
-        let start = world_to_stroke_vertex(request, segment[0])?;
-        let end = world_to_stroke_vertex(request, segment[1])?;
+    for &point in &points[1..] {
+        let end = world_to_stroke_vertex(request, point)?;
         if stroke_device_segment(band, request, start, end, paint)? {
             drew = true;
         }
+        start = end;
     }
     Ok(drew)
 }
@@ -2026,6 +2128,29 @@ fn stroke_device_segment(
     let mut y0 = checked_rounded_f64(y0, "edge y0")?;
     let x1 = checked_rounded_f64(x1, "edge x1")?;
     let y1 = checked_rounded_f64(y1, "edge y1")?;
+    // A solid axis-aligned segment visits each Bresenham step exactly once
+    // along one axis, so the painted union is one rectangular block. Writing
+    // it as clamped row spans skips the per-step overlapping block writes;
+    // dotted strokes keep the stepped path below.
+    if matches!(paint.stroke, StrokeStyle::Solid) && (x0 == x1 || y0 == y1) {
+        let row_lo = (y0.min(y1) + stroke_low).max(band.row0 as i64);
+        let row_hi = (y0.max(y1) + stroke_high).min(band.row1 as i64 - 1);
+        let col_lo = (x0.min(x1) + stroke_low).max(band.col0 as i64);
+        let col_hi = (x0.max(x1) + stroke_high).min(band.col1 as i64 - 1);
+        if row_lo > row_hi || col_lo > col_hi {
+            return Ok(false);
+        }
+        let width = band.tile_width() as usize;
+        for row in row_lo..=row_hi {
+            let local_row = row as usize - band.row0 as usize;
+            let start = (local_row * width + col_lo as usize - band.col0 as usize) * 4;
+            let end = (local_row * width + col_hi as usize + 1 - band.col0 as usize) * 4;
+            for pixel in band.pixels[start..end].chunks_exact_mut(4) {
+                pixel.copy_from_slice(&paint.color);
+            }
+        }
+        return Ok(true);
+    }
     let dx = (x1 - x0).abs();
     let sx = if x0 < x1 { 1 } else { -1 };
     let dy = -(y1 - y0).abs();
@@ -2186,6 +2311,7 @@ fn fill_phase_columns(x0: i128, x1: i128, phase: FillPhase) -> Result<(i128, i12
     }
 }
 
+#[cfg(test)]
 fn fill_world_polygon_with_phase(
     band: &mut RasterBand,
     request: &GeometryRasterRequest,
@@ -2200,7 +2326,16 @@ fn fill_world_polygon_with_phase(
     for &(x, y) in points {
         device.push(world_to_device(request, x, y)?);
     }
+    fill_device_polygon_with_phase(band, request, &device, phase, paint)
+}
 
+fn fill_device_polygon_with_phase(
+    band: &mut RasterBand,
+    request: &GeometryRasterRequest,
+    device: &[(i128, i128)],
+    phase: FillPhase,
+    paint: PaintStyle,
+) -> Result<bool, String> {
     let mut edges = Vec::with_capacity(device.len());
     for index in 0..device.len() {
         let (mut x0, mut y0) = device[index];
@@ -2260,6 +2395,7 @@ fn fill_world_polygon_with_phase(
         .filter(|edge| edge.first_row < first_row && edge.end_row > first_row)
         .collect();
     let mut drew = false;
+    let mut intersections = Vec::with_capacity(active.len());
     for row in first_row..end_row {
         while next_edge < edges.len() && edges[next_edge].first_row == row {
             active.push(edges[next_edge]);
@@ -2270,7 +2406,7 @@ fn fill_world_polygon_with_phase(
             FillPhase::PixelCenter => row as i128 * DEVICE_ONE + DEVICE_HALF,
             FillPhase::LowerBoundary => (row as i128 + 1) * DEVICE_ONE,
         };
-        let mut intersections = Vec::with_capacity(active.len());
+        intersections.clear();
         for edge in &active {
             let rise = scan_y
                 .checked_sub(edge.y0)
@@ -2302,20 +2438,14 @@ fn fill_world_polygon_with_phase(
             }
             let first_col = checked_usize(first_col, "polygon first column")?;
             let end_col = checked_usize(end_col, "polygon end column")?;
-            let row_u32: u32 = row
-                .try_into()
-                .map_err(|_| format!("limit exceeded: polygon row = {}", row))?;
-            let local_row = row as usize - band.row0 as usize;
-            for col in first_col..end_col {
-                let col_u32: u32 = col
-                    .try_into()
-                    .map_err(|_| format!("limit exceeded: polygon column = {}", col))?;
-                if !paint.fills(row_u32, col_u32, request.height) {
-                    continue;
-                }
-                let local_col = col - band.col0 as usize;
-                let offset = (local_row * band.tile_width() as usize + local_col) * 4;
-                band.pixels[offset..offset + 4].copy_from_slice(&paint.color);
+            if fill_span(
+                band,
+                paint,
+                request.height,
+                row as usize,
+                first_col,
+                end_col,
+            ) {
                 drew = true;
             }
         }
@@ -2559,6 +2689,169 @@ mod tests {
                     "offset={offset} bbox={bbox:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn fill_span_matches_per_pixel_fill_oracle() {
+        let request = GeometryRasterRequest {
+            view: RasterViewBox::new(0.0, 0.0, 40.0, 40.0).unwrap(),
+            width: 40,
+            height: 40,
+            background: [0, 0, 0, 255],
+            foreground: [255, 255, 255, 255],
+            workers: 1,
+            tile_size: DEFAULT_TILE_SIZE,
+        };
+        let mut pattern = [0u16; 16];
+        for (row, word) in pattern.iter_mut().enumerate() {
+            *word = 0b1010_0110_0001_1101u16.rotate_left(row as u32);
+        }
+        for fill in [
+            LayerFill::Solid,
+            LayerFill::Speckle,
+            LayerFill::Pattern(pattern),
+            LayerFill::Pattern([0u16; 16]),
+            LayerFill::Clear,
+        ] {
+            let paint = PaintStyle {
+                color: [200, 30, 90, 255],
+                fill,
+                stroke: StrokeStyle::Solid,
+                stroke_width: 1,
+            };
+            // A tile with odd origins exercises the local offset arithmetic
+            // and every speckle parity and pattern column phase.
+            let mut band = RasterBand::new_tile(&request, 3, 27, 5, 23).unwrap();
+            let mut oracle = band.clone();
+            for row in 5..23usize {
+                for (first_col, end_col) in [(3usize, 27usize), (7, 8), (10, 10)] {
+                    let drew = fill_span(&mut band, paint, request.height, row, first_col, end_col);
+                    let mut oracle_drew = false;
+                    for col in first_col..end_col {
+                        if !paint.fills(row as u32, col as u32, request.height) {
+                            continue;
+                        }
+                        let offset = ((row - 5) * oracle.tile_width() as usize + (col - 3)) * 4;
+                        oracle.pixels[offset..offset + 4].copy_from_slice(&paint.color);
+                        oracle_drew = true;
+                    }
+                    assert_eq!(drew, oracle_drew, "fill={fill:?} row={row}");
+                }
+            }
+            assert_eq!(band.pixels, oracle.pixels, "fill={fill:?}");
+        }
+    }
+
+    /// The original stepped stroke loop, kept verbatim as the oracle for
+    /// the axis-aligned solid span fast path.
+    fn stroke_device_segment_reference(
+        band: &mut RasterBand,
+        request: &GeometryRasterRequest,
+        start: (f64, f64),
+        end: (f64, f64),
+        paint: PaintStyle,
+    ) -> Result<bool, String> {
+        let stroke_low = -((i64::from(paint.stroke_width) - 1) / 2);
+        let stroke_high = i64::from(paint.stroke_width) / 2;
+        let Some((x0, y0, x1, y1)) = clip_device_segment(
+            start.0,
+            start.1,
+            end.0,
+            end.1,
+            -(stroke_high as f64),
+            request.width as f64 - 1.0 - stroke_low as f64,
+            -(stroke_high as f64),
+            request.height as f64 - 1.0 - stroke_low as f64,
+        ) else {
+            return Ok(false);
+        };
+        let mut x0 = checked_rounded_f64(x0, "edge x0")?;
+        let mut y0 = checked_rounded_f64(y0, "edge y0")?;
+        let x1 = checked_rounded_f64(x1, "edge x1")?;
+        let y1 = checked_rounded_f64(y1, "edge y1")?;
+        let dx = (x1 - x0).abs();
+        let sx = if x0 < x1 { 1 } else { -1 };
+        let dy = -(y1 - y0).abs();
+        let sy = if y0 < y1 { 1 } else { -1 };
+        let mut error = dx + dy;
+        let mut drew = false;
+        let mut step = 0u64;
+        loop {
+            if paint.strokes(step) {
+                for stroke_y in y0 + stroke_low..=y0 + stroke_high {
+                    if stroke_y < band.row0 as i64 || stroke_y >= band.row1 as i64 {
+                        continue;
+                    }
+                    for stroke_x in x0 + stroke_low..=x0 + stroke_high {
+                        if stroke_x < band.col0 as i64 || stroke_x >= band.col1 as i64 {
+                            continue;
+                        }
+                        let local_row = stroke_y as usize - band.row0 as usize;
+                        let local_col = stroke_x as usize - band.col0 as usize;
+                        let offset = (local_row * band.tile_width() as usize + local_col) * 4;
+                        band.pixels[offset..offset + 4].copy_from_slice(&paint.color);
+                        drew = true;
+                    }
+                }
+            }
+            if x0 == x1 && y0 == y1 {
+                break;
+            }
+            let doubled = error.saturating_mul(2);
+            if doubled >= dy {
+                error += dy;
+                x0 += sx;
+            }
+            if doubled <= dx {
+                error += dx;
+                y0 += sy;
+            }
+            step = step.saturating_add(1);
+        }
+        Ok(drew)
+    }
+
+    #[test]
+    fn axis_aligned_stroke_span_matches_stepped_oracle() {
+        let request = GeometryRasterRequest {
+            view: RasterViewBox::new(0.0, 0.0, 30.0, 30.0).unwrap(),
+            width: 30,
+            height: 30,
+            background: [0, 0, 0, 255],
+            foreground: [255, 255, 255, 255],
+            workers: 1,
+            tile_size: DEFAULT_TILE_SIZE,
+        };
+        let segments = [
+            ((4.0, 9.0), (21.0, 9.0)),   // horizontal inside the tile
+            ((21.0, 12.0), (4.0, 12.0)), // horizontal, reversed direction
+            ((11.0, 2.0), (11.0, 28.0)), // vertical crossing tile rows
+            ((2.0, 14.0), (2.0, 14.0)),  // degenerate point segment
+            ((0.0, 3.0), (29.0, 3.0)),   // horizontal above the tile rows
+            ((5.0, 5.0), (17.0, 20.0)),  // diagonal: same stepped path
+        ];
+        for stroke_width in [1u8, 2, 3, 8] {
+            let paint = PaintStyle {
+                color: [90, 140, 250, 255],
+                fill: LayerFill::Solid,
+                stroke: StrokeStyle::Solid,
+                stroke_width,
+            };
+            let mut fast = RasterBand::new_tile(&request, 3, 25, 6, 26).unwrap();
+            let mut oracle = fast.clone();
+            for (start, end) in segments {
+                let drew_fast =
+                    stroke_device_segment(&mut fast, &request, start, end, paint).unwrap();
+                let drew_oracle =
+                    stroke_device_segment_reference(&mut oracle, &request, start, end, paint)
+                        .unwrap();
+                assert_eq!(
+                    drew_fast, drew_oracle,
+                    "width={stroke_width} segment={start:?}->{end:?}"
+                );
+            }
+            assert_eq!(fast.pixels, oracle.pixels, "width={stroke_width}");
         }
     }
 
@@ -2864,6 +3157,27 @@ mod tests {
     }
 
     fn styled_page(page_id: u32, layer_idx: u32, bbox: BBox) -> Arc<DecodedPage> {
+        let doc = Doc {
+            unit: 1.0,
+            cells: vec![Cell {
+                name: format!("P{page_id}"),
+                rects: vec![RectRec {
+                    layer: layer_idx,
+                    dt: 0,
+                    x: bbox.x0,
+                    y: bbox.y0,
+                    w: bbox.x1 - bbox.x0,
+                    h: bbox.y1 - bbox.y0,
+                    rep: Rep::One,
+                }],
+                ..Cell::default()
+            }],
+            top: 0,
+            layer_order: vec![(layer_idx, 0)],
+            norm_s: 0.0,
+            layer_names: HashMap::new(),
+            layer_aliases: HashMap::new(),
+        };
         Arc::new(DecodedPage {
             page_id,
             layer_idx,
@@ -2871,27 +3185,8 @@ mod tests {
             encoded_bytes: 1,
             records: 1,
             members: 1,
-            doc: Doc {
-                unit: 1.0,
-                cells: vec![Cell {
-                    name: format!("P{page_id}"),
-                    rects: vec![RectRec {
-                        layer: layer_idx,
-                        dt: 0,
-                        x: bbox.x0,
-                        y: bbox.y0,
-                        w: bbox.x1 - bbox.x0,
-                        h: bbox.y1 - bbox.y0,
-                        rep: Rep::One,
-                    }],
-                    ..Cell::default()
-                }],
-                top: 0,
-                layer_order: vec![(layer_idx, 0)],
-                norm_s: 0.0,
-                layer_names: HashMap::new(),
-                layer_aliases: HashMap::new(),
-            },
+            index: crate::PageIndex::build(&doc),
+            doc,
         })
     }
 
@@ -3069,6 +3364,27 @@ mod tests {
             page_prio: vec![0],
             stats: HierStats::default(),
         };
+        let doc = Doc {
+            unit: 1.0,
+            cells: vec![Cell {
+                name: "U_TURN".to_string(),
+                paths: vec![PathRec {
+                    layer: 1,
+                    dt: 0,
+                    pts: vec![(1, 5), (9, 5), (1, 5)],
+                    hw: 1,
+                    es: 0,
+                    ee: 0,
+                    rep: Rep::One,
+                }],
+                ..Cell::default()
+            }],
+            top: 0,
+            layer_order: vec![(1, 0)],
+            norm_s: 0.0,
+            layer_names: HashMap::new(),
+            layer_aliases: HashMap::new(),
+        };
         let decoded = Arc::new(DecodedPage {
             page_id,
             layer_idx: 0,
@@ -3076,27 +3392,8 @@ mod tests {
             encoded_bytes: 1,
             records: 1,
             members: 1,
-            doc: Doc {
-                unit: 1.0,
-                cells: vec![Cell {
-                    name: "U_TURN".to_string(),
-                    paths: vec![PathRec {
-                        layer: 1,
-                        dt: 0,
-                        pts: vec![(1, 5), (9, 5), (1, 5)],
-                        hw: 1,
-                        es: 0,
-                        ee: 0,
-                        rep: Rep::One,
-                    }],
-                    ..Cell::default()
-                }],
-                top: 0,
-                layer_order: vec![(1, 0)],
-                norm_s: 0.0,
-                layer_names: HashMap::new(),
-                layer_aliases: HashMap::new(),
-            },
+            index: crate::PageIndex::build(&doc),
+            doc,
         });
         let scene = FrameScene::from_test_parts(plan, vec![decoded], BTreeMap::from([(top, bbox)]))
             .unwrap();
@@ -3110,6 +3407,156 @@ mod tests {
     fn pixel(frame: &RgbaFrame, x: usize, y: usize) -> [u8; 4] {
         let offset = (y * frame.width as usize + x) * 4;
         frame.pixels[offset..offset + 4].try_into().unwrap()
+    }
+
+    #[test]
+    fn record_index_pruning_matches_unpruned_pixels() {
+        // In-view geometry mixed with records far outside the viewport,
+        // including a far-anchored Pts repetition whose one member reaches
+        // back into view: pruning must drop work but never a pixel.
+        let make_doc = || {
+            let mut rects = Vec::new();
+            for i in 0..40i64 {
+                rects.push(RectRec {
+                    layer: 1,
+                    dt: 0,
+                    x: (i % 8) * 3 - 6,
+                    y: (i / 8) * 3 - 6,
+                    w: 2,
+                    h: 2,
+                    rep: if i % 3 == 0 {
+                        Rep::Grid {
+                            na: 4,
+                            nb: 2,
+                            va: (5, 0),
+                            vb: (0, 7),
+                        }
+                    } else {
+                        Rep::One
+                    },
+                });
+            }
+            for i in 0..40i64 {
+                rects.push(RectRec {
+                    layer: 1,
+                    dt: 0,
+                    x: 1_000 + i * 10,
+                    y: -2_000,
+                    w: 4,
+                    h: 4,
+                    rep: Rep::One,
+                });
+            }
+            Doc {
+                unit: 1000.0,
+                cells: vec![Cell {
+                    name: "IDX".to_string(),
+                    rects,
+                    polys: vec![
+                        PolyRec {
+                            layer: 1,
+                            dt: 0,
+                            pts: vec![(1, 1), (6, 2), (4, 6)],
+                            rep: Rep::One,
+                        },
+                        PolyRec {
+                            layer: 1,
+                            dt: 0,
+                            pts: vec![(900, 900), (920, 905), (910, 930)],
+                            rep: Rep::Pts(Arc::from([(0, 0), (-895, -897)])),
+                        },
+                    ],
+                    paths: vec![
+                        PathRec {
+                            layer: 1,
+                            dt: 0,
+                            pts: vec![(0, 8), (9, 8)],
+                            hw: 1,
+                            es: 0,
+                            ee: 0,
+                            rep: Rep::One,
+                        },
+                        PathRec {
+                            layer: 1,
+                            dt: 0,
+                            pts: vec![(500, 0), (560, 0)],
+                            hw: 2,
+                            es: 1,
+                            ee: 1,
+                            rep: Rep::One,
+                        },
+                    ],
+                    ..Cell::default()
+                }],
+                top: 0,
+                layer_order: vec![(1, 0)],
+                norm_s: 0.0,
+                layer_names: HashMap::new(),
+                layer_aliases: HashMap::new(),
+            }
+        };
+        let bbox = BBox {
+            x0: -3_000,
+            y0: -3_000,
+            x1: 3_000,
+            y1: 3_000,
+        };
+        let scene_with = |index: fn(&Doc) -> crate::PageIndex| {
+            let doc = make_doc();
+            let decoded = Arc::new(DecodedPage {
+                page_id: 0,
+                layer_idx: 1,
+                bbox,
+                encoded_bytes: 1,
+                records: 1,
+                members: 1,
+                index: index(&doc),
+                doc,
+            });
+            let top = (0, REM_FULL);
+            let plan = HierPlan {
+                top,
+                wcells: vec![WsCell {
+                    key: top,
+                    pages: vec![0],
+                    insts: Vec::new(),
+                    frames: Vec::new(),
+                    washes: Vec::new(),
+                }],
+                pages: vec![0],
+                page_prio: vec![0],
+                stats: HierStats::default(),
+            };
+            FrameScene::from_test_parts(plan, vec![decoded], BTreeMap::from([(top, bbox)])).unwrap()
+        };
+        let request = GeometryRasterRequest {
+            view: RasterViewBox::new(0.0, 0.0, 30.0, 30.0).unwrap(),
+            width: 30,
+            height: 30,
+            background: [0, 0, 0, 255],
+            foreground: [255, 255, 255, 255],
+            workers: 2,
+            tile_size: 16,
+        };
+        let pruned =
+            render_geometry_occupancy(&scene_with(crate::PageIndex::build), &request).unwrap();
+        let unpruned =
+            render_geometry_occupancy(&scene_with(crate::PageIndex::unpruned), &request).unwrap();
+        assert_eq!(pruned.frame.pixels(), unpruned.frame.pixels());
+        assert_eq!(
+            pruned.rectangle_member_paints,
+            unpruned.rectangle_member_paints
+        );
+        assert_eq!(pruned.polygon_member_paints, unpruned.polygon_member_paints);
+        assert_eq!(pruned.path_member_paints, unpruned.path_member_paints);
+        assert!(pruned.polygon_member_paints >= 2, "Pts member must survive");
+        assert!(
+            pruned.rect_record_tests < unpruned.rect_record_tests,
+            "pruning must drop far records: {} vs {}",
+            pruned.rect_record_tests,
+            unpruned.rect_record_tests
+        );
+        assert!(pruned.path_record_tests < unpruned.path_record_tests);
     }
 
     #[test]
@@ -3443,6 +3890,53 @@ mod tests {
             page_prio: vec![0],
             stats: HierStats::default(),
         };
+        let decoded_doc = Doc {
+            unit: 1000.0,
+            cells: vec![Cell {
+                name: "P".to_string(),
+                rects: vec![RectRec {
+                    layer: 1,
+                    dt: 0,
+                    x: 0,
+                    y: 0,
+                    w: 2,
+                    h: 2,
+                    rep: Rep::One,
+                }],
+                polys: vec![PolyRec {
+                    layer: 1,
+                    dt: 0,
+                    pts: vec![(2, 0), (4, 0), (4, 4), (2, 4)],
+                    rep: Rep::One,
+                }],
+                paths: vec![
+                    PathRec {
+                        layer: 1,
+                        dt: 0,
+                        pts: vec![(0, 1), (2, 1)],
+                        hw: 1,
+                        es: 0,
+                        ee: 0,
+                        rep: Rep::One,
+                    },
+                    PathRec {
+                        layer: 1,
+                        dt: 0,
+                        pts: vec![(0, 0), (2, 2)],
+                        hw: 1,
+                        es: 0,
+                        ee: 0,
+                        rep: Rep::One,
+                    },
+                ],
+                ..Cell::default()
+            }],
+            top: 0,
+            layer_order: vec![(1, 0)],
+            norm_s: 0.0,
+            layer_names: HashMap::new(),
+            layer_aliases: HashMap::new(),
+        };
         let decoded = Arc::new(DecodedPage {
             page_id: 0,
             layer_idx: 0,
@@ -3455,53 +3949,8 @@ mod tests {
             encoded_bytes: 1,
             records: 1,
             members: 1,
-            doc: Doc {
-                unit: 1000.0,
-                cells: vec![Cell {
-                    name: "P".to_string(),
-                    rects: vec![RectRec {
-                        layer: 1,
-                        dt: 0,
-                        x: 0,
-                        y: 0,
-                        w: 2,
-                        h: 2,
-                        rep: Rep::One,
-                    }],
-                    polys: vec![PolyRec {
-                        layer: 1,
-                        dt: 0,
-                        pts: vec![(2, 0), (4, 0), (4, 4), (2, 4)],
-                        rep: Rep::One,
-                    }],
-                    paths: vec![
-                        PathRec {
-                            layer: 1,
-                            dt: 0,
-                            pts: vec![(0, 1), (2, 1)],
-                            hw: 1,
-                            es: 0,
-                            ee: 0,
-                            rep: Rep::One,
-                        },
-                        PathRec {
-                            layer: 1,
-                            dt: 0,
-                            pts: vec![(0, 0), (2, 2)],
-                            hw: 1,
-                            es: 0,
-                            ee: 0,
-                            rep: Rep::One,
-                        },
-                    ],
-                    ..Cell::default()
-                }],
-                top: 0,
-                layer_order: vec![(1, 0)],
-                norm_s: 0.0,
-                layer_names: HashMap::new(),
-                layer_aliases: HashMap::new(),
-            },
+            index: crate::PageIndex::build(&decoded_doc),
+            doc: decoded_doc,
         });
         let mut bounds = BTreeMap::new();
         bounds.insert(

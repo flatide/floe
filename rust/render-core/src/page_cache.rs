@@ -211,6 +211,15 @@ mod tests {
     use floe_ovm::BBox;
 
     fn page(page_id: u32) -> Arc<DecodedPage> {
+        let doc = Doc {
+            unit: 1000.0,
+            cells: vec![Cell::default()],
+            top: 0,
+            layer_order: Vec::new(),
+            norm_s: 0.0,
+            layer_names: HashMap::new(),
+            layer_aliases: HashMap::new(),
+        };
         Arc::new(DecodedPage {
             page_id,
             layer_idx: 0,
@@ -223,15 +232,8 @@ mod tests {
             encoded_bytes: 1,
             records: 0,
             members: 0,
-            doc: Doc {
-                unit: 1000.0,
-                cells: vec![Cell::default()],
-                top: 0,
-                layer_order: Vec::new(),
-                norm_s: 0.0,
-                layer_names: HashMap::new(),
-                layer_aliases: HashMap::new(),
-            },
+            index: crate::PageIndex::build(&doc),
+            doc,
         })
     }
 

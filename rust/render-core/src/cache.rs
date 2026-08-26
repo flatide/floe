@@ -84,6 +84,9 @@ pub struct DecodedPage {
     pub records: u32,
     pub members: u64,
     pub doc: Doc,
+    /// Record-extent index built once per decode and reused by every frame
+    /// and raster tile that holds this page (F2R-03b).
+    pub index: crate::PageIndex,
 }
 
 impl DecodedPage {
@@ -156,6 +159,7 @@ impl DecodedPage {
                 bytes = bytes.saturating_add(alias.capacity() as u64);
             }
         }
+        bytes = bytes.saturating_add(self.index.estimated_bytes());
         bytes.max(self.encoded_bytes as u64)
     }
 }
@@ -525,6 +529,7 @@ fn decode_payload(payload: &PagePayload) -> Result<DecodedPage, String> {
             doc.cells.len()
         ));
     }
+    let index = crate::PageIndex::build(&doc);
     Ok(DecodedPage {
         page_id: payload.page_id,
         layer_idx: payload.meta.layer_idx,
@@ -533,6 +538,7 @@ fn decode_payload(payload: &PagePayload) -> Result<DecodedPage, String> {
         records: payload.meta.records,
         members: payload.meta.members,
         doc,
+        index,
     })
 }
 

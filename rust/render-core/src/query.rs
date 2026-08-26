@@ -766,6 +766,27 @@ mod tests {
         rep: Rep,
     ) -> Arc<DecodedPage> {
         let members = rep.members();
+        let doc = Doc {
+            unit: 1.0,
+            cells: vec![Cell {
+                name: format!("P{page_id}"),
+                rects: vec![RectRec {
+                    layer: layer_idx,
+                    dt: 0,
+                    x: origin.0,
+                    y: origin.1,
+                    w: 10,
+                    h: 10,
+                    rep,
+                }],
+                ..Cell::default()
+            }],
+            top: 0,
+            layer_order: vec![(layer_idx, 0)],
+            norm_s: 0.0,
+            layer_names: HashMap::new(),
+            layer_aliases: HashMap::new(),
+        };
         Arc::new(DecodedPage {
             page_id,
             layer_idx,
@@ -773,27 +794,8 @@ mod tests {
             encoded_bytes: 1,
             records: 1,
             members,
-            doc: Doc {
-                unit: 1.0,
-                cells: vec![Cell {
-                    name: format!("P{page_id}"),
-                    rects: vec![RectRec {
-                        layer: layer_idx,
-                        dt: 0,
-                        x: origin.0,
-                        y: origin.1,
-                        w: 10,
-                        h: 10,
-                        rep,
-                    }],
-                    ..Cell::default()
-                }],
-                top: 0,
-                layer_order: vec![(layer_idx, 0)],
-                norm_s: 0.0,
-                layer_names: HashMap::new(),
-                layer_aliases: HashMap::new(),
-            },
+            index: crate::PageIndex::build(&doc),
+            doc,
         })
     }
 

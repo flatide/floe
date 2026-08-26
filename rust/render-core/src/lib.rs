@@ -10,6 +10,7 @@ mod cancel;
 mod clip;
 mod font;
 mod page_cache;
+mod page_index;
 mod png;
 mod query;
 mod raster;
@@ -27,6 +28,7 @@ pub use cancel::RenderCancellation;
 pub use clip::ClipGeometry;
 pub use font::{validate_font_px, DEFAULT_LABEL_FONT_PX, MAX_LABEL_FONT_PX, MIN_LABEL_FONT_PX};
 pub use page_cache::DecodedPageCache;
+pub use page_index::PageIndex;
 pub use query::{
     pick_scene, snap_scene, ScenePick, ScenePickCandidate, SceneQueryLayer, SceneQueryRequest,
     SceneSnap, SceneSnapKind,
