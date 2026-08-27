@@ -104,6 +104,32 @@ AA 없음) 기준으로 아래 세 규칙을 모두 만족해야 한다 — 구�
 색·패턴·합성(스펙클/프레임/DRC 워시)은 이 정책의 대상이 아니고
 §3의 speckle/frames 게이트가 따로 고정한다.
 
+#### 헤어라인 스케일 실측 (2026-08-27 — 정책 결정 대기)
+
+실칩 ~100µm 뷰 현장 관측("헤어라인이 다르게 처리되어 화면이 다름")을
+`tools/hairline_ab.py`로 재현·분류했다 (858px/100µm, 1px≈0.117µm,
+내부 diff **0** — P-a/P-b/P-c 계약 자체는 지켜진다):
+
+| 클래스 | KLayout | Rust | 규모 |
+|---|---|---|---|
+| sub-pixel 점(0.05µm box × 300) | 항상 정확히 1px | 걸친 픽셀 전부 (2px 144개, 2×2 48개) | on 300→588 |
+| 축정렬 극세 wire(0.03µm) | 한 행/열 | 스트래들 시 1px 위상 시프트/이중행 | diff 7,482 |
+| 대각 극세 wire | 얇게 | 약간 굵게 | +982/-439 |
+
+근원: **KLayout은 sub-pixel 도형을 edge 최근접 반올림으로 픽셀
+하나에 collapse**하고(32px 정렬 프로브로 확인 — 분수 위치 ≥.5면 다음
+픽셀로 스냅), **Rust는 2-phase fill + outline stroke가 도형이 걸친
+모든 픽셀을 점등**한다. 정수 스케일에선 스트래들 셀에서만 갈라지지만
+비정수 스케일(실뷰)에선 대부분의 sub-pixel 도형이 걸치므로 화면
+질감(밝기·굵기)이 달라진다. Rust 출력은 KLayout의 superset에
+가깝다(점 클래스 missing 0).
+
+수렴 옵션: (A) device bbox가 축별 sub-pixel인 도형을 KLayout 규칙
+(최근접 격자 collapse)으로 스냅 — representation-exact 계약을 지키려
+rect/polygon/path 공통의 device-bbox 단계에서 적용해야 하며 대각
+클래스는 잔차로 남는다. (B) 현행 유지(계약상 정당, 소멸 없음) +
+제품 문서에 명시. 채택 결정 전까지 렌더러는 현행 그대로다.
+
 ### 래스터 골든 (PX1~PX5)
 
 `tools/validate_render_goldens.py` — klayout 오라클로 마이크로

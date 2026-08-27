@@ -453,6 +453,12 @@ refinement 다회 발생. 대부분 floe보다 빠르지만 비슷한 지점들�
 잔량(2c 재개 조건), (e) r4 tile tail imbalance(F2R-06). §3.14의
 telemetry가 이들을 분리 판정한다.
 
+같은 세션에서 **~100µm 뷰 헤어라인 표시 상이**도 관측됐다. 재현·근원
+확정은 RENDERER-TESTS.ko.md 픽셀 정책 §헤어라인 스케일 실측 참조 —
+P-a 1px 밴드 계약 안(내부 diff 0)이지만 sub-pixel 도형을 KLayout은
+1px로 collapse, Rust는 걸친 픽셀 전부를 점등해 mid-zoom 질감이
+달라진다. 수렴(A) vs 현행 유지(B)는 픽셀 정책 결정 대기.
+
 ### 3.14 진단 telemetry (2026-08-27, 0.12.15)
 
 위 관측을 분리 판정하기 위해 renderd frame 라인→어댑터→GUI perf
