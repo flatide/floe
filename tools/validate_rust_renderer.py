@@ -346,6 +346,12 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "flavor": "native"}, "")
             self.assertEqual(unstamped.renderd_build(),
                              "%s (native)" % __version__)
+            # opened carries the GUI depth cap; a pre-0.12.16 renderd
+            # omits it and the display keeps its "?" fallback
+            stamped._handle_line("opened", {"max_depth": "7"}, "")
+            self.assertEqual(stamped._max_depth, 7)
+            unstamped._handle_line("opened", {}, "")
+            self.assertIsNone(unstamped._max_depth)
 
     def test_about_component_versions(self):
         from floe import gui

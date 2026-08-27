@@ -943,13 +943,14 @@ fn handle_open(
             respond(
                 responses,
                 format!(
-                    "opened unit={} top={} layers={} cells={} pages={} ovp_bytes={} budget_bytes={} jobs={}",
+                    "opened unit={} top={} layers={} cells={} pages={} ovp_bytes={} max_depth={} budget_bytes={} jobs={}",
                     info.unit,
                     info.top_cell,
                     info.layers,
                     info.cells,
                     info.pages,
                     info.ovp_bytes,
+                    info.max_depth,
                     budget_bytes,
                     command.jobs
                 ),

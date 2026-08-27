@@ -183,6 +183,7 @@ class RustRenderWorker:
         self._ready = False
         self._renderd_version = None
         self._renderd_build = None
+        self._max_depth = None
         self._opened = False
         self._styled_epoch = None
         self._style_paths = {}
@@ -676,6 +677,10 @@ class RustRenderWorker:
         elif kind == "opened":
             with self._condition:
                 self._opened = True
+                # GUI depth cap ("depth: N/?" otherwise); absent on a
+                # pre-0.12.16 renderd, so keep None rather than 0
+                max_depth = _wire_int(fields, "max_depth", -1)
+                self._max_depth = max_depth if max_depth >= 0 else None
                 self._condition.notify_all()
         elif kind == "styled":
             with self._condition:
@@ -965,6 +970,10 @@ class RustRenderWorker:
         }
         if refining:
             output["refining"] = refining
+        if self._max_depth is not None:
+            # parent-schema parity: the KLayout worker forwards the VFS
+            # daemon's max_depth on every frame (gui learns the cap)
+            output["max_depth"] = self._max_depth
         if _wire_int(fields, "labels_truncated") != 0:
             output["labels_truncated"] = True
         cut_px = max(0.0, float(job.get("cut_px") or 0.0))

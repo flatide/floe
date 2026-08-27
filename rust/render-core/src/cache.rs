@@ -21,6 +21,9 @@ pub struct CacheInfo {
     pub cells: u32,
     pub pages: u32,
     pub ovp_bytes: u64,
+    /// Hierarchy height of the top cell — the deepest explicit depth
+    /// level (matches the VFS daemon's max_depth).
+    pub max_depth: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -196,6 +199,13 @@ impl Cache {
             cells: self.vfs.ovm.n_cells,
             pages: self.vfs.ovm.n_pages,
             ovp_bytes: self.vfs.ovm.ovp_len,
+            // GUI depth cap; the same expression the VFS daemon
+            // reports as max_depth (top cell hierarchy height)
+            max_depth: if self.vfs.ovm.n_cells == 0 {
+                0
+            } else {
+                self.vfs.ovm.cell(self.vfs.ovm.top).height
+            },
         }
     }
 

@@ -52,8 +52,14 @@ fn run(raw: Vec<String>) -> Result<(), String> {
     let planned = cache.plan(&request)?;
 
     println!(
-        "cache\tunit={}\ttop={}\tlayers={}\tcells={}\tpages={}\tovp_bytes={}",
-        info.unit, info.top_cell, info.layers, info.cells, info.pages, info.ovp_bytes
+        "cache\tunit={}\ttop={}\tlayers={}\tcells={}\tpages={}\tovp_bytes={}\tmax_depth={}",
+        info.unit,
+        info.top_cell,
+        info.layers,
+        info.cells,
+        info.pages,
+        info.ovp_bytes,
+        info.max_depth
     );
     println!(
         "plan\tpages={}\tcompressed_bytes={}\tencoded_bytes={}\trecords={}\tmembers={}\twc_cells={}\twc_variants={}\tinst_edges={}\tframe_rects={}\tplan_us={}",
