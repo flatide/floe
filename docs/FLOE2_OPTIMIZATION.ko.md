@@ -457,7 +457,12 @@ telemetry가 이들을 분리 판정한다.
 확정은 RENDERER-TESTS.ko.md 픽셀 정책 §헤어라인 스케일 실측 참조 —
 P-a 1px 밴드 계약 안(내부 diff 0)이지만 sub-pixel 도형을 KLayout은
 1px로 collapse, Rust는 걸친 픽셀 전부를 점등해 mid-zoom 질감이
-달라진다. 수렴(A) vs 현행 유지(B)는 픽셀 정책 결정 대기.
+달라진다. **수렴안(A) 채택·구현(2026-08-27)**: KLayout의 collapse
+규칙(점=round(center)·y−1 bias, wire=edge round 쌍)을 실측해 sub-pixel
+member를 fill+stroke 파이프라인 진입 없이 collapse된 픽셀로 그린다.
+점 300개 KLayout과 동수·95% 픽셀 일치. 이 fast path는 hairline
+regime의 member당 비용도 제거하므로 mid-zoom draw 열세(위 관측)의
+개선 후보이기도 하다 — 실칩 재측정으로 확인한다.
 
 ### 3.14 진단 telemetry (2026-08-27, 0.12.15)
 

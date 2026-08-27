@@ -1892,12 +1892,111 @@ fn checked_add(a: i64, b: i64, field: &str) -> Result<i64, String> {
         .map_err(|_| format!("coordinate overflow: {} = {}", field, value))
 }
 
+/// KLayout hairline parity (2026-08-27, RENDERER-TESTS §픽셀 정책
+/// 헤어라인 실측): a member whose device extent rounds to zero on an
+/// axis collapses to the nearest-grid pixel on that axis — KLayout
+/// snaps edges to the pixel grid before scan-converting, so a
+/// sub-pixel feature lights exactly one pixel per collapsed axis
+/// instead of every pixel it touches. The collapse also skips the
+/// whole fill+stroke pipeline, which is the dominant per-member cost
+/// in hairline-scale views. Solid strokes only: dotted hierarchy
+/// frames keep their band styling.
+///
+/// Correctness note: the world bbox is exact for every caller (rect =
+/// itself, polygon/path = vertex bbox), the device map is monotone
+/// affine, and a connected shape's axis projection is an interval, so
+/// the collapsed rect equals the snapped shape exactly. Using the
+/// bbox for all three primitives keeps the representation-exact
+/// contract (same world rect as RECT/POLYGON/PATH renders the same).
+fn hairline_world_bbox(
+    request: &GeometryRasterRequest,
+    world: BBox,
+    stroke: StrokeStyle,
+) -> Result<Option<(i128, i128, i128, i128)>, String> {
+    if !matches!(stroke, StrokeStyle::Solid) {
+        return Ok(None);
+    }
+    let (x0, y1) = world_to_device(request, world.x0, world.y0)?;
+    let (x1, y0) = world_to_device(request, world.x1, world.y1)?;
+    let sub_x = x1 - x0 < DEVICE_ONE;
+    let sub_y = y1 - y0 < DEVICE_ONE;
+    if !sub_x && !sub_y {
+        return Ok(None);
+    }
+    let point = sub_x && sub_y;
+    let (cx0, cx1) = hairline_axis_span(x0, x1, sub_x, point, 0);
+    let (cy0, cy1) = hairline_axis_span(y0, y1, sub_y, point, -1);
+    Ok(Some((cx0, cy0, cx1, cy1)))
+}
+
+/// Measured KLayout hairline placement (32px-aligned and 858px
+/// fractional probes agree):
+/// - a POINT (both axes sub-pixel) lands in the single pixel nearest
+///   its center — an 0.8px box matches round(center) exactly, smaller
+///   boxes shift the threshold by ~0.05px (inside the P-a band);
+/// - a WIRE's narrow axis lights the rounded pixel of EACH edge (two
+///   columns when the edges round apart, ~w probability);
+/// - the y axis carries a constant -1 pixel bias in both cases;
+/// - the long axis keeps its edge-snapped span.
+fn hairline_axis_span(v0: i128, v1: i128, sub: bool, point: bool, bias: i128) -> (i128, i128) {
+    if sub && point {
+        let cell = floor_div(v0 + v1 + DEVICE_ONE, 2 * DEVICE_ONE) + bias;
+        (cell, cell + 1)
+    } else if sub {
+        let lo = floor_div(v0 + DEVICE_HALF, DEVICE_ONE) + bias;
+        let hi = floor_div(v1 + DEVICE_HALF, DEVICE_ONE) + bias;
+        (lo, hi + 1)
+    } else {
+        (
+            floor_div(v0 + DEVICE_HALF, DEVICE_ONE),
+            floor_div(v1 + DEVICE_HALF, DEVICE_ONE),
+        )
+    }
+}
+
+/// Paints a collapsed hairline rect as solid spans in the member's
+/// color — KLayout draws sub-pixel features via their outline line,
+/// so the fill pattern does not apply.
+fn paint_hairline_device_rect(
+    band: &mut RasterBand,
+    request: &GeometryRasterRequest,
+    rect: (i128, i128, i128, i128),
+    paint: PaintStyle,
+) -> Result<bool, String> {
+    let (x0, y0, x1, y1) = rect;
+    let first_row = y0.max(band.row0 as i128);
+    let end_row = y1.min(band.row1 as i128);
+    let first_col = x0.max(band.col0 as i128);
+    let end_col = x1.min(band.col1 as i128);
+    if first_row >= end_row || first_col >= end_col {
+        return Ok(false);
+    }
+    let first_row = checked_usize(first_row, "hairline first row")?;
+    let end_row = checked_usize(end_row, "hairline end row")?;
+    let first_col = checked_usize(first_col, "hairline first column")?;
+    let end_col = checked_usize(end_col, "hairline end column")?;
+    let solid = PaintStyle {
+        fill: LayerFill::Solid,
+        ..paint
+    };
+    let mut drew = false;
+    for row in first_row..end_row {
+        if fill_span(band, solid, request.height, row, first_col, end_col) {
+            drew = true;
+        }
+    }
+    Ok(drew)
+}
+
 fn paint_world_rect(
     band: &mut RasterBand,
     request: &GeometryRasterRequest,
     world: BBox,
     paint: PaintStyle,
 ) -> Result<bool, String> {
+    if let Some(rect) = hairline_world_bbox(request, world, paint.stroke)? {
+        return paint_hairline_device_rect(band, request, rect, paint);
+    }
     let filled = fill_world_rect(band, request, world, paint)?;
     let stroked = stroke_world_polygon(
         band,
@@ -1919,6 +2018,11 @@ fn paint_world_polygon(
     points: &[(i64, i64)],
     paint: PaintStyle,
 ) -> Result<bool, String> {
+    if let Some(world) = polygon_bbox(points) {
+        if let Some(rect) = hairline_world_bbox(request, world, paint.stroke)? {
+            return paint_hairline_device_rect(band, request, rect, paint);
+        }
+    }
     let filled = fill_world_polygon(band, request, points, paint)?;
     let stroked = stroke_world_polygon(band, request, points, paint)?;
     Ok(filled || stroked)
@@ -1942,6 +2046,13 @@ fn paint_world_path(
     centerline: &[(i64, i64)],
     paint: PaintStyle,
 ) -> Result<bool, String> {
+    if let Some(world) = polygon_bbox(outline) {
+        if let Some(rect) = hairline_world_bbox(request, world, paint.stroke)? {
+            // The centerline lies inside the collapsed outline bbox, so
+            // its stroke pass is covered by the collapsed spans.
+            return paint_hairline_device_rect(band, request, rect, paint);
+        }
+    }
     let outlined = paint_world_path_outline(band, request, outline, paint)?;
     let centered = stroke_world_polyline(band, request, centerline, paint)?;
     Ok(outlined || centered)
@@ -3794,6 +3905,203 @@ mod tests {
             hierarchy_frames: false,
             mono: false,
         }
+    }
+
+    /// One-layer scene over a 320x320-unit world rendered at 32px
+    /// (10 units/px), so sub-pixel features are expressible in i64
+    /// world coordinates.
+    fn hairline_scene(rects: Vec<RectRec>, polys: Vec<PolyRec>, paths: Vec<PathRec>) -> FrameScene {
+        let doc = Doc {
+            unit: 1.0,
+            cells: vec![Cell {
+                name: "HAIR".to_string(),
+                rects,
+                polys,
+                paths,
+                ..Cell::default()
+            }],
+            top: 0,
+            layer_order: vec![(1, 0)],
+            norm_s: 0.0,
+            layer_names: HashMap::new(),
+            layer_aliases: HashMap::new(),
+        };
+        let bbox = BBox {
+            x0: 0,
+            y0: 0,
+            x1: 320,
+            y1: 320,
+        };
+        let decoded = Arc::new(DecodedPage {
+            page_id: 0,
+            layer_idx: 1,
+            bbox,
+            encoded_bytes: 1,
+            records: 1,
+            members: 1,
+            index: crate::PageIndex::build(&doc),
+            doc,
+        });
+        let top = (0, REM_FULL);
+        let plan = HierPlan {
+            top,
+            wcells: vec![WsCell {
+                key: top,
+                pages: vec![0],
+                insts: Vec::new(),
+                frames: Vec::new(),
+                washes: Vec::new(),
+            }],
+            pages: vec![0],
+            page_prio: vec![0],
+            stats: HierStats::default(),
+        };
+        FrameScene::from_test_parts(plan, vec![decoded], BTreeMap::from([(top, bbox)])).unwrap()
+    }
+
+    fn hairline_request() -> StyledGeometryRasterRequest {
+        StyledGeometryRasterRequest {
+            raster: GeometryRasterRequest {
+                view: RasterViewBox::new(0.0, 0.0, 320.0, 320.0).unwrap(),
+                width: 32,
+                height: 32,
+                workers: 1,
+                tile_size: DEFAULT_TILE_SIZE,
+                ..request()
+            },
+            layers: vec![LayerStyle {
+                layer_idx: 1,
+                color: [255, 255, 255, 255],
+                fill: LayerFill::Solid,
+                outline_width: 1,
+            }],
+            hierarchy_frames: false,
+            mono: false,
+        }
+    }
+
+    fn lit_pixels(frame: &RgbaFrame) -> Vec<(usize, usize)> {
+        let mut lit = Vec::new();
+        for row in 0..32 {
+            for col in 0..32 {
+                if pixel(frame, col, row) != [0, 0, 0, 255] {
+                    lit.push((col, row));
+                }
+            }
+        }
+        lit
+    }
+
+    #[test]
+    fn hairline_point_collapses_to_klayout_cell() {
+        // Device x 2.4..2.9 -> round(center 2.65) = col 3; device y
+        // 1.1..1.6 -> round(center 1.35) - 1 = row 0 (measured KLayout
+        // y bias). Exactly one pixel, placed like the oracle.
+        let rect = RectRec {
+            layer: 1,
+            dt: 0,
+            x: 24,
+            y: 304,
+            w: 5,
+            h: 5,
+            rep: Rep::One,
+        };
+        let report = render_geometry_styled(
+            &hairline_scene(vec![rect], Vec::new(), Vec::new()),
+            &hairline_request(),
+        )
+        .unwrap();
+        assert_eq!(lit_pixels(&report.frame), vec![(3, 0)]);
+    }
+
+    #[test]
+    fn hairline_wire_lights_each_rounded_edge_column() {
+        // Vertical wires 20px tall. Edges at device x 12.4/12.7 round
+        // apart -> two columns; edges at 20.1/20.4 round together ->
+        // one column. Rows are the edge-snapped span.
+        let wire = |x, w| RectRec {
+            layer: 1,
+            dt: 0,
+            x,
+            y: 40,
+            w,
+            h: 200,
+            rep: Rep::One,
+        };
+        let report = render_geometry_styled(
+            &hairline_scene(vec![wire(124, 3), wire(201, 3)], Vec::new(), Vec::new()),
+            &hairline_request(),
+        )
+        .unwrap();
+        let lit = lit_pixels(&report.frame);
+        let columns: std::collections::BTreeSet<usize> = lit.iter().map(|&(c, _)| c).collect();
+        assert_eq!(columns.into_iter().collect::<Vec<_>>(), vec![12, 13, 20]);
+        let rows: std::collections::BTreeSet<usize> = lit.iter().map(|&(_, r)| r).collect();
+        assert_eq!(rows.len(), 20, "edge-snapped 20-row span");
+    }
+
+    #[test]
+    fn hairline_collapse_is_representation_exact() {
+        // The same sub-pixel world rect as RECTANGLE / POLYGON / PATH
+        // must collapse to the same pixel (device-bbox rule).
+        let rect = RectRec {
+            layer: 1,
+            dt: 0,
+            x: 24,
+            y: 304,
+            w: 5,
+            h: 4,
+            rep: Rep::One,
+        };
+        let poly = PolyRec {
+            layer: 1,
+            dt: 0,
+            pts: vec![(24, 304), (29, 304), (29, 308), (24, 308)],
+            rep: Rep::One,
+        };
+        let path = PathRec {
+            layer: 1,
+            dt: 0,
+            pts: vec![(24, 306), (29, 306)],
+            hw: 2,
+            es: 0,
+            ee: 0,
+            rep: Rep::One,
+        };
+        let request = hairline_request();
+        let as_rect = render_geometry_styled(
+            &hairline_scene(vec![rect], Vec::new(), Vec::new()),
+            &request,
+        )
+        .unwrap();
+        let as_poly = render_geometry_styled(
+            &hairline_scene(Vec::new(), vec![poly], Vec::new()),
+            &request,
+        )
+        .unwrap();
+        let as_path = render_geometry_styled(
+            &hairline_scene(Vec::new(), Vec::new(), vec![path]),
+            &request,
+        )
+        .unwrap();
+        assert_eq!(as_rect.frame.pixels(), as_poly.frame.pixels());
+        assert_eq!(as_rect.frame.pixels(), as_path.frame.pixels());
+        assert_eq!(lit_pixels(&as_rect.frame).len(), 1, "non-vanish, single cell");
+    }
+
+    #[test]
+    fn hairline_collapse_skips_dotted_strokes() {
+        let request = hairline_request().raster;
+        let world = BBox {
+            x0: 24,
+            y0: 304,
+            x1: 29,
+            y1: 309,
+        };
+        let dotted = hairline_world_bbox(&request, world, StrokeStyle::Dotted).unwrap();
+        assert!(dotted.is_none(), "dotted frames keep their band styling");
+        let solid = hairline_world_bbox(&request, world, StrokeStyle::Solid).unwrap();
+        assert!(solid.is_some());
     }
 
     #[test]

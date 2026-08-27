@@ -128,7 +128,34 @@ AA 없음) 기준으로 아래 세 규칙을 모두 만족해야 한다 — 구�
 (최근접 격자 collapse)으로 스냅 — representation-exact 계약을 지키려
 rect/polygon/path 공통의 device-bbox 단계에서 적용해야 하며 대각
 클래스는 잔차로 남는다. (B) 현행 유지(계약상 정당, 소멸 없음) +
-제품 문서에 명시. 채택 결정 전까지 렌더러는 현행 그대로다.
+제품 문서에 명시.
+
+**A 채택·구현 (2026-08-27)**. KLayout 규칙을 세 프로브(32px 정렬
+`hairline_probe`, 858px 분수 스윕 `kl_rule_probe`/`kl_switch_probe`/
+`kl_wire_probe` — scratch 스크립트, 재현은 `tools/hairline_ab.py`)로
+실측해 다음을 확정하고 `hairline_world_bbox`/`hairline_axis_span`
+(raster.rs)에 구현했다. 조건: solid stroke + world bbox의 device
+span이 한 축이라도 1px 미만. 해당 member는 fill+stroke 파이프라인을
+건너뛰고 collapse된 rect를 member 색 solid로 칠한다(KLayout도
+sub-pixel은 outline line으로 그리므로 패턴 미적용이 맞다).
+
+- **점(양축 sub-pixel)**: `round(center)` 단일 셀, **y축은 −1 bias**
+  (32px·858px 프로브 공통 실측). 0.8px box는 KLayout과 전 위치 일치,
+  0.43px는 임계가 ~0.53이라 위치의 ~4%만 1px 오프.
+- **wire(한 축만 sub-pixel)**: 좁은 축은 **양 edge의 round 픽셀**
+  (edge가 갈라지면 2열 — 0.26px wire 기준 KLayout과 V 18/20·H 20/20
+  일치), 긴 축은 edge-snap span.
+- 대각(양축 모두 1px 이상인 얇은 도형)은 비대상 — 기존 경로.
+- dotted stroke(frame band 3)는 비대상 — band 스타일 유지.
+
+효과(`tools/hairline_ab.py`, 858px/100µm): sub-pixel 점 300개 on
+588→**300**(KLayout과 동수), 그중 285개는 픽셀까지 일치. hairline
+wire 밀도 19,532→24,158 vs KLayout 24,510(±1.4%). 내부 diff는 전후
+모두 0. 잔여(계약 내 band): (1) 전역 y anchor 차이 — KLayout은 큰
+도형의 top edge를 한 행 위까지 칠한다(이번 변경 이전부터 있던
+관습 차이, oracle band로 흡수), (2) 소형 box 임계창 ~0.05px, (3)
+대각 클래스. gate: `hairline_point/wire/representation/dotted` unit
+4종(P-b 비소멸 포함) + 기존 oracle/골든 배터리.
 
 ### 래스터 골든 (PX1~PX5)
 
