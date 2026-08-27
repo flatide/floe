@@ -39,6 +39,7 @@ import math
 import os
 import struct
 import sys
+import time
 
 
 EDGE_RULER_OFFSET_PX = 14
@@ -398,6 +399,42 @@ _ICE2_BLOCK = 64
 # waived counts and touch at most ONE chunk of status bytes
 _STATUS_CHUNK = 1 << 22
 
+# ---- per-user waive sidecar ---------------------------------------------
+# Review status lives OUTSIDE the pack (user call 2026-08-28): the
+# pack sits on shared storage, so in-pack pwrites made one review
+# global and required write permission. The sidecar mirrors the
+# pack's two mutable sections behind a small header:
+#   header | status[err_total] u8 | wcount[check_cnt] u32
+# header: magic | u32 version | u64 src_size | u64 src_mtime
+#         | u64 err_total | u32 check_cnt
+# (src_size/src_mtime = the PACK's source fingerprint: a re-run DRC
+# renumbers errors, so statuses recorded against the old pack must
+# not silently apply to the new one.)
+_WAIVE_MAGIC = b"FLOEWAIV"
+_WAIVE_HEADER = struct.Struct("<8sIQQQI")
+_WAIVE_VERSION = 1
+
+
+def waive_dir():
+    """Per-user waive store: $XDG_CACHE_HOME/floe/waive (fallback
+    ~/.cache/floe/waive)."""
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".cache")
+    return os.path.join(base, "floe", "waive")
+
+
+def waive_sidecar_path(pack_path):
+    """Sidecar file for one pack: db basename for the human, a hash
+    of the absolute pack path so equal-named dbs never collide."""
+    import hashlib
+    ap = os.path.abspath(pack_path)
+    name = os.path.basename(pack_path)
+    if name.endswith(".ice"):
+        name = name[:-4]
+    tag = hashlib.sha1(ap.encode("utf-8", "surrogateescape")) \
+        .hexdigest()[:12]
+    return os.path.join(waive_dir(), "%s-%s.waive" % (name, tag))
+
 
 def _uv(buf, pos):
     val = 0
@@ -446,7 +483,8 @@ class IcePack(object):
                  "_map", "_blk", "_qbox", "_dir_es", "_dir_bs",
                  "_ecnt", "_cbb", "_cache", "_order",
                  "_status", "_status_off", "_wfd",
-                 "_wcount", "_wcount_off", "_wchunk")
+                 "_wcount", "_wcount_off", "_wchunk",
+                 "_waive_path", "_waive_hdr")
 
     def __init__(self, path, src_path=None, verify_src=False):
         self._wfd = None
@@ -576,22 +614,44 @@ class IcePack(object):
                                 shape=(err_total, 4), dtype=np.uint8)
                       if err_total else
                       np.zeros((0, 4), dtype=np.uint8))
-        # review status bytes: shared read mapping stays coherent
-        # with in-place pwrite updates (set_status)
-        self._status = (np.memmap(path, mode="r", offset=status_off,
+        # review status: per-user sidecar under ~/.cache (the pack
+        # itself is never written again - shared/read-only packs
+        # stay reviewable, each user keeps their own state). If the
+        # cache dir is unusable, fall back to the legacy in-pack
+        # sections so the viewer still opens.
+        self._waive_hdr = _WAIVE_HEADER.pack(
+            _WAIVE_MAGIC, _WAIVE_VERSION, src_size, src_mtime,
+            err_total, check_cnt)
+        try:
+            wpath = self._ensure_waive_sidecar(
+                path, err_total, check_cnt, status_off, wcount_off)
+            wstatus_off = _WAIVE_HEADER.size
+            wwcount_off = _WAIVE_HEADER.size + err_total
+        except OSError as exc:
+            sys.stderr.write(
+                "[drc] waive sidecar unavailable (%s); statuses "
+                "fall back INTO the pack (shared, needs write "
+                "permission)\n" % exc)
+            wpath, wstatus_off, wwcount_off = \
+                path, status_off, wcount_off
+        self._waive_path = wpath
+        # shared read mapping stays coherent with in-place pwrite
+        # updates (set_status)
+        self._status = (np.memmap(wpath, mode="r",
+                                  offset=wstatus_off,
                                   shape=(err_total,), dtype=np.uint8)
                         if err_total else
                         np.zeros(0, dtype=np.uint8))
-        self._status_off = status_off
+        self._status_off = wstatus_off
         # per-rule waived counters: O(1) filter counts, kept in
         # sync by set_status (no [status] rescans)
-        self._wcount = (np.memmap(path, mode="r",
-                                  offset=wcount_off,
+        self._wcount = (np.memmap(wpath, mode="r",
+                                  offset=wwcount_off,
                                   shape=(check_cnt,),
                                   dtype="<u4")
                         if check_cnt else
                         np.zeros(0, dtype="<u4"))
-        self._wcount_off = wcount_off
+        self._wcount_off = wwcount_off
         self._wfd = None
         self.checks = []
         drefs = struct.unpack("<%dI" % descref_cnt, descbuf)
@@ -627,6 +687,105 @@ class IcePack(object):
         self._cache = {}       # block idx -> [DrcError]; tiny LRU
         self._order = []
         self._wchunk = {}      # ci -> per-chunk waived counts
+
+    def _ensure_waive_sidecar(self, path, err_total, check_cnt,
+                              status_off, wcount_off):
+        """Create/validate the per-user sidecar; returns its path.
+        A fingerprint mismatch (re-run DRC = renumbered errors)
+        moves the old file ASIDE rather than deleting review work.
+        First creation seeds from the pack's embedded sections so
+        waives made under the retired in-pack scheme survive."""
+        side = waive_sidecar_path(path)
+        want = self._waive_hdr
+        size = _WAIVE_HEADER.size + err_total + 4 * check_cnt
+        try:
+            with open(side, "rb") as f:
+                head = f.read(_WAIVE_HEADER.size)
+                f.seek(0, os.SEEK_END)
+                ok = head == want and f.tell() == size
+            if ok:
+                return side
+            aside = "%s.stale-%d" % (side, int(time.time()))
+            os.replace(side, aside)
+            sys.stderr.write(
+                "[drc] waive sidecar does not match this pack "
+                "(DRC re-run?); moved aside: %s\n" % aside)
+        except FileNotFoundError:
+            pass
+        os.makedirs(os.path.dirname(side), exist_ok=True)
+        with open(path, "rb") as f:
+            f.seek(status_off)
+            st = f.read(err_total)
+            f.seek(wcount_off)
+            wc = f.read(4 * check_cnt)
+        if len(st) != err_total or len(wc) != 4 * check_cnt:
+            raise OSError("pack status sections truncated")
+        tmp = "%s.tmp-%d" % (side, os.getpid())
+        with open(tmp, "wb") as f:
+            f.write(want)
+            f.write(st)
+            f.write(wc)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, side)
+        return side
+
+    def waive_export(self, dst):
+        """Save the review state to `dst` (same format as the
+        auto-saved sidecar - a saved file loads anywhere the SAME
+        pack is open). Atomic: tmp in dst's directory + rename."""
+        import numpy as np
+        data = self._waive_hdr \
+            + np.asarray(self._status).tobytes() \
+            + np.asarray(self._wcount).tobytes()
+        d = os.path.dirname(os.path.abspath(dst)) or "."
+        tmp = os.path.join(d, ".%s.tmp-%d"
+                           % (os.path.basename(dst), os.getpid()))
+        try:
+            with open(tmp, "wb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, dst)
+        except OSError:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
+
+    def waive_import(self, src):
+        """REPLACE the review state with a file saved by
+        waive_export (or a copied auto sidecar). Refuses a file
+        recorded against a different pack - a re-run DRC renumbers
+        errors, so old statuses must not silently apply. wcount is
+        recomputed from the imported statuses (never trusted).
+        Returns the waived-error count."""
+        import numpy as np
+        with open(src, "rb") as f:
+            data = f.read()
+        n = self.total
+        ck = len(self.checks)
+        if len(data) != _WAIVE_HEADER.size + n + 4 * ck \
+                or data[:_WAIVE_HEADER.size] != self._waive_hdr:
+            raise ValueError(
+                "%s: waive file does not match this pack "
+                "(different DRC run / re-packed db?)" % src)
+        st = np.frombuffer(data, dtype=np.uint8, count=n,
+                           offset=_WAIVE_HEADER.size)
+        wc = np.zeros(ck, dtype="<u4")
+        for ci in range(ck):
+            a = int(self._dir_es[ci])
+            wc[ci] = np.count_nonzero(
+                st[a:a + int(self._ecnt[ci])] == STATUS_WAIVED)
+        if self._wfd is None:
+            self._wfd = os.open(self._waive_path, os.O_RDWR)
+        if n:
+            os.pwrite(self._wfd, st.tobytes(), self._status_off)
+        if ck:
+            os.pwrite(self._wfd, wc.tobytes(), self._wcount_off)
+        self._wchunk = {}
+        return int(np.count_nonzero(st == STATUS_WAIVED))
 
     def _block(self, bi):
         got = self._cache.get(bi)
@@ -673,9 +832,10 @@ class IcePack(object):
         return int(self._status[int(self._dir_es[ci]) + ei])
 
     def set_status(self, ci, ei, value):
-        """Set the status byte IN PLACE (pwrite; the read mapping
-        is coherent) and keep the rule's [wcount] waived counter in
-        sync. Raises OSError if the .ice is not writable."""
+        """Set the status byte IN PLACE (pwrite into the per-user
+        waive sidecar; the read mapping is coherent) and keep the
+        rule's [wcount] waived counter in sync. Raises OSError if
+        the store is not writable."""
         gid = int(self._dir_es[ci]) + ei
         if not 0 <= gid < self.total:
             raise IndexError((ci, ei))
@@ -684,7 +844,7 @@ class IcePack(object):
         if old == value:
             return
         if self._wfd is None:
-            self._wfd = os.open(self.path, os.O_RDWR)
+            self._wfd = os.open(self._waive_path, os.O_RDWR)
         os.pwrite(self._wfd, bytes((value,)),
                   self._status_off + gid)
         was = old == STATUS_WAIVED

@@ -28,7 +28,8 @@ pack; D2 keeps the retirement honest.)
       D6b: the waived= filter applies INSIDE the query, before the
       cap (regression: a capped post-filter lost matches hiding
       past `cap` non-matching errors).
-  D7  [status] byte: zero at build, in-place set/get via pwrite,
+  D7  [status] byte: zero at build, set/get via pwrite into the
+      per-user waive sidecar (the PACK bytes stay untouched),
       persists across reopen, neighbours untouched; the [wcount]
       per-rule waived counter stays in sync (incl. idempotent sets
       and reserved-status writes) so filter counts are O(1); the
@@ -37,11 +38,21 @@ pack; D2 keeps the retirement honest.)
   D8  diagonal closest endpoints of a parallel edge pair retain the
       true minimum first and add deterministic horizontal + vertical
       component rulers; facing and non-parallel pairs stay single.
+  D9  waive sidecar (user call 2026-08-28: per-user review in
+      $XDG_CACHE_HOME/floe/waive): export -> clear -> import
+      round-trips statuses with wcount recomputed and the chunk
+      cache reset; tampered and foreign-pack files are refused;
+      a READ-ONLY pack stays reviewable (fresh sidecar included);
+      a corrupt sidecar is moved aside (review work preserved)
+      and replaced fresh; embedded in-pack statuses from the
+      retired scheme seed the first sidecar; the pack bytes are
+      identical before/after everything above.
 
 usage: .venv/bin/python tools/validate_drc_ice.py [floe-index-bin]
 """
 
 import os
+import struct
 import subprocess
 import sys
 import tempfile
@@ -167,6 +178,8 @@ def compare(ref, ice):
 
 def main():
     tmp = tempfile.mkdtemp(prefix="floe-drcice-")
+    # hermetic per-user waive store: never touch the real ~/.cache
+    os.environ["XDG_CACHE_HOME"] = os.path.join(tmp, "xdg")
     db = os.path.join(tmp, "results.db")
     # CRLF stretch: rewrite one whole check block with \r\n line ends
     text = DB.replace("e 1 1\n-1 -2 -3 -4\n",
@@ -371,6 +384,14 @@ def main():
     print("D6 OK: query_rect == brute force on 12 random rects")
 
     # D7: per-error review status byte
+    import hashlib
+
+    def sha(p):
+        with open(p, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+
+    gp = os.path.join(tmp, "gen.j1.ice")
+    gh0 = sha(gp)
     if any(int(v) for v in gpk._status):
         fail("status section not zero at build")
     gpk.set_status(3, 2, drc.STATUS_WAIVED)
@@ -378,6 +399,13 @@ def main():
     if gpk.get_status(3, 2) != drc.STATUS_WAIVED \
             or gpk.get_status(3, 3) != drc.STATUS_RESERVED:
         fail("status set/get mismatch")
+    if sha(gp) != gh0:
+        fail("waive wrote into the PACK (must go to the sidecar)")
+    gside = drc.waive_sidecar_path(gp)
+    if not os.path.isfile(gside) \
+            or not gside.startswith(os.environ["XDG_CACHE_HOME"]):
+        fail("waive sidecar missing / outside XDG_CACHE_HOME: %s"
+             % gside)
     re2 = drc.IcePack(os.path.join(tmp, "gen.j1.ice"))
     if re2.get_status(3, 2) != drc.STATUS_WAIVED \
             or re2.get_status(3, 3) != drc.STATUS_RESERVED \
@@ -492,6 +520,93 @@ def main():
     if len(drc.cd_segments(skew)) != 1:
         fail("non-parallel pair gained component rulers")
     print("D8 OK: diagonal parallel gap + X/Y component rulers")
+
+    # D9: waive sidecar - save-as/load, refusal, read-only pack,
+    # corrupt-aside, in-pack seed migration
+    # export -> clear -> import round-trip (wcount recomputed,
+    # chunk cache reset)
+    re2.set_status(4, 2, drc.STATUS_WAIVED)
+    re2.set_status(4, 5, drc.STATUS_WAIVED)
+    wsave = os.path.join(tmp, "review.waive")
+    re2.waive_export(wsave)
+    re2.set_status(4, 2, drc.STATUS_NONE)
+    re2.set_status(4, 5, drc.STATUS_NONE)
+    if re2.waive_import(wsave) != 2:
+        fail("import waived-count wrong")
+    if re2.get_status(4, 2) != drc.STATUS_WAIVED \
+            or re2.get_status(4, 5) != drc.STATUS_WAIVED \
+            or re2.status_counts(4) != (2, n4):
+        fail("import did not restore statuses/wcount")
+    if re2.status_page(4, True, 0, 10 ** 9) != [2, 5]:
+        fail("chunk cache stale after import")
+    # tampered and foreign-pack files are refused, state untouched
+    with open(wsave, "rb") as f:
+        blob = bytearray(f.read())
+    blob[9] ^= 0xFF   # version field
+    bad = os.path.join(tmp, "bad.waive")
+    with open(bad, "wb") as f:
+        f.write(bytes(blob))
+    try:
+        re2.waive_import(bad)
+        fail("tampered waive file accepted")
+    except ValueError:
+        pass
+    try:
+        ice.waive_import(wsave)
+        fail("foreign pack accepted another pack's waive file")
+    except ValueError:
+        pass
+    if re2.status_counts(4) != (2, n4):
+        fail("refused import disturbed the state")
+    re2.set_status(4, 2, drc.STATUS_NONE)
+    re2.set_status(4, 5, drc.STATUS_NONE)
+    # READ-ONLY pack: reviewable, including fresh sidecar creation
+    os.remove(gside)
+    mode = os.stat(gp).st_mode
+    os.chmod(gp, 0o444)
+    try:
+        ro = drc.IcePack(gp)
+        ro.set_status(3, 0, drc.STATUS_WAIVED)
+        if ro.get_status(3, 0) != drc.STATUS_WAIVED:
+            fail("read-only pack: waive did not stick")
+        ro.close()
+    finally:
+        os.chmod(gp, mode)
+    # corrupt sidecar: moved ASIDE (not deleted) + fresh start
+    with open(gside, "r+b") as f:
+        f.write(b"JUNKJUNK")
+    x = drc.IcePack(gp)
+    if x.get_status(3, 0) != drc.STATUS_NONE:
+        fail("corrupt sidecar not replaced fresh")
+    x.close()
+    wdir = os.path.dirname(gside)
+    if not any(".waive.stale-" in p for p in os.listdir(wdir)):
+        fail("corrupt sidecar was not preserved aside")
+    # migration: embedded in-pack statuses (retired scheme) seed
+    # the first sidecar; pack restored byte-identical afterwards
+    with open(gp, "rb") as f:
+        f.seek(os.path.getsize(gp) - drc._ICE2_FOOTER.size)
+        foot = drc._ICE2_FOOTER.unpack(f.read(drc._ICE2_FOOTER.size))
+    soff, woff = foot[4], foot[5]
+    gid = int(x._dir_es[3])   # check 3, error 0
+    os.remove(drc.waive_sidecar_path(gp))
+    fd = os.open(gp, os.O_RDWR)
+    try:
+        os.pwrite(fd, bytes((drc.STATUS_WAIVED,)), soff + gid)
+        os.pwrite(fd, struct.pack("<I", 1), woff + 4 * 3)
+        mig = drc.IcePack(gp)
+        if mig.get_status(3, 0) != drc.STATUS_WAIVED \
+                or mig.status_counts(3)[0] != 1:
+            fail("in-pack statuses did not seed the sidecar")
+        mig.close()
+    finally:
+        os.pwrite(fd, bytes((drc.STATUS_NONE,)), soff + gid)
+        os.pwrite(fd, struct.pack("<I", 0), woff + 4 * 3)
+        os.close(fd)
+    if sha(gp) != gh0:
+        fail("D9 left the pack modified")
+    print("D9 OK: sidecar save-as/load + refusal + read-only pack "
+          "+ corrupt-aside + seed migration")
 
     print("DRC ICE VALIDATION: ALL OK")
 

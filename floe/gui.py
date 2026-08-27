@@ -3844,6 +3844,8 @@ class Viewer:
         item(m, "previous error\tp", lambda: self._drc_step(-1))
         item(m, "waive/unwaive current error\tw",
              self._drc_waive_key)
+        item(m, "save waives as…", self._drc_waive_save_dialog)
+        item(m, "load waives…", self._drc_waive_load_dialog)
         sep(m)
         check(m, "error box-select mode\te", self._esel_toggle,
               lambda: self.mode == "esel")
@@ -5048,8 +5050,8 @@ class Viewer:
             for ei in eis:
                 db.set_status(ci, ei, val)
         except OSError as exc:
-            self._set_live_status("waive failed (%s) - is the .ice "
-                                  "writable?" % exc)
+            self._set_live_status("waive failed (%s) - is the "
+                                  "waive store writable?" % exc)
             return
         self._drc_hl_res = None
         # the jump mark stores a RESOLVED color: re-derive it for
@@ -5148,6 +5150,105 @@ class Viewer:
             return
         self._drc_set_waived(ci, [ei],
                              not self._drc_waived(db, ci, ei))
+
+    def _drc_waive_save_dialog(self):
+        """DRC > save waives as… (user call 2026-08-28): snapshot
+        the auto-saved per-user waive state (~/.cache/floe/waive)
+        to a picked file - for sharing a review or keeping a
+        round's record. Same format as the auto sidecar."""
+        db = self._drc
+        if db is None or not hasattr(db, "waive_export"):
+            self._set_live_status(
+                "waive save needs a packed index: "
+                "floe-index drc <db> --pack")
+            return
+        dlg = Gtk.FileChooserDialog(title="save waives as",
+                                    parent=self.window,
+                                    action=Gtk.FileChooserAction.SAVE)
+        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                        "Save", Gtk.ResponseType.OK)
+        self._only_close_button(dlg)
+        self._center_on_parent(dlg)
+        dlg.set_do_overwrite_confirmation(True)
+        base = os.path.basename(db.path)
+        if base.endswith(".ice"):
+            base = base[:-4]
+        dlg.set_current_name(base + ".waive")
+        out = dlg.get_filename() \
+            if dlg.run() == Gtk.ResponseType.OK else None
+        dlg.destroy()
+        self.window.present()
+        if not out:
+            return
+        try:
+            db.waive_export(out)
+        except OSError as exc:
+            self._set_live_status("waive save failed (%s)" % exc)
+            return
+        self._set_live_status("waives saved: %s" % out)
+
+    def _drc_waive_load_dialog(self):
+        """DRC > load waives… (user call 2026-08-28): REPLACE the
+        current review state with a saved waive file (save your own
+        first to keep it). Refused when the file was recorded
+        against a different pack."""
+        db = self._drc
+        if db is None or not hasattr(db, "waive_import"):
+            self._set_live_status(
+                "waive load needs a packed index: "
+                "floe-index drc <db> --pack")
+            return
+        dlg = Gtk.FileChooserDialog(title="load waives",
+                                    parent=self.window,
+                                    action=Gtk.FileChooserAction.OPEN)
+        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                        "Open", Gtk.ResponseType.OK)
+        self._only_close_button(dlg)
+        self._center_on_parent(dlg)
+        for name, pats in (("floe waives (*.waive)", ("*.waive",)),
+                           ("all files", ("*",))):
+            ff = Gtk.FileFilter()
+            ff.set_name(name)
+            for p in pats:
+                ff.add_pattern(p)
+            dlg.add_filter(ff)
+        path = dlg.get_filename() \
+            if dlg.run() == Gtk.ResponseType.OK else None
+        dlg.destroy()
+        self.window.present()
+        if not path:
+            return
+        try:
+            waived = db.waive_import(path)
+        except (OSError, ValueError) as exc:
+            self._set_live_status("waive load failed: %s" % exc)
+            return
+        # the whole status array changed: reset every dependent
+        # surface, exactly like a waive-filter switch
+        self._drc_hl_res = None
+        self._drc_sel = None
+        self._drc_sels = {}
+        self._drc_focus = None
+        if self.drc_mark is not None and self._drc_pos >= 0 \
+                and self._drc_cum:
+            mci = bisect.bisect_right(self._drc_cum,
+                                      self._drc_pos) - 1
+            mei = self._drc_pos - self._drc_cum[mci]
+            self.drc_mark["color"] = (
+                DRC_GREEN if self._drc_waived(db, mci, mei)
+                else DRC_RED)
+        keep = self._drc_open
+        self._drc_fill()
+        if keep is not None:
+            for r in self._drcwin._rstore:
+                if r[2] == keep:
+                    self._drcwin._rules.set_cursor(r.path, None,
+                                                   False)
+                    break
+        self._display()
+        self._set_live_status(
+            "waives loaded: %d waived (%s)"
+            % (waived, os.path.basename(path)))
 
     def _drc_cell_mark(self, row, j):
         """Mark ONE grid cell as current: the previous cell reverts
