@@ -443,6 +443,39 @@ end-to-end 1048 vs 149ms — 7배. load는 예상대로 불변(71→72ms)이며
 다시 불거지는지만 후속 확인으로 남긴다. 다음 우선 축은 load(신규
 page read+decode)와 재방문 load 잔량(F2R-10 pan-sweep)이다.
 
+**실칩 추가 관측(2026-08-27, 정밀 수치 없음 — 재측정 대기)**: 여러
+viewport 비교 중 특정 지점의 ~100µm 뷰에서 **load 10초+, draw 5초+**,
+refinement 다회 발생. 대부분 floe보다 빠르지만 비슷한 지점들이 있었고
+그런 경우 draw가 floe보다 느렸다. decode 8-thread가 항상 이상적으로
+돌지 않는 듯한 느낌 보고. 가설 후보: (a) decode CPU의 index-build
+비중(§3.11 +70%, §3.14 sample9 41%), (b) decode straggler/pool idle,
+(c) 거대 working set의 refinement 다회 왕복, (d) mid-zoom traversal
+잔량(2c 재개 조건), (e) r4 tile tail imbalance(F2R-06). §3.14의
+telemetry가 이들을 분리 판정한다.
+
+### 3.14 진단 telemetry (2026-08-27, 0.12.15)
+
+위 관측을 분리 판정하기 위해 renderd frame 라인→어댑터→GUI perf
+라인·`bench_floe2.py` JSON까지 다음 필드를 관통시켰다. GUI는 rust
+구간에 `rounds N, dec sum/max/idx ms, tile-max ms, hier 방문/prune`
+형태로 덧붙인다(모두 generation 누적, max류는 max).
+
+| 필드 | 답하는 질문 |
+|---|---|
+| `rounds` | refinement가 몇 round 돌았나 (다회 왕복 = c) |
+| `decode_sum_ms` vs `decode_ms`×`decode_workers` | pool 유휴율 (b) — 같으면 완전 가동 |
+| `decode_max_ms` | 최다 소요 단일 page = straggler (b) |
+| `index_ms` | decode CPU 중 record-index build 몫 (a; lazy-index 판정 입력) |
+| `raster_tile_max_ms` | 최다 소요 image tile = r4 tail imbalance (e; F2R-06 gate) |
+| `hier_cells_visited`/`subtrees_pruned` | traversal 규모/2b 절감 (d; 2c 재개 판정) |
+| `rep_members_tested/drawn` | member 스캔 vs 실제 paint (d) |
+
+sample9 hotspot(r4/384, detail high) 첫 판독: decode pool 가동률
+92%(232.2 sum / 31.4 wall × 8w), straggler 없음(max 12.0ms),
+**index build가 decode CPU의 41%**(96.0/232.2ms — lazy-index 후보
+근거), raster 19.8ms 중 **tile-max 17.7ms(wall의 90%)** — r4 tail
+imbalance의 첫 실측 신호(F2R-06 재개 조건 충족 여부는 실칩에서 확인).
+
 ## 4. 이슈 목록
 
 | ID | 우선순위 | 상태 | 요약 | 다음 판정 |

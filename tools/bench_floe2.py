@@ -41,6 +41,11 @@ PHASE_FIELDS = (
     "frame_width", "frame_height", "tiles",
     "wc_cells", "inst_edges", "frame_rects", "text_place_records",
     "labels", "label_tile_paints", "label_pixel_paints",
+    # F2R diagnostics: refinement rounds, decode pool utilization and
+    # stragglers, record-index build share, raster tail, traversal size
+    "rounds", "decode_sum_ms", "decode_max_ms", "index_ms",
+    "raster_tile_max_ms", "rep_members_tested", "rep_members_drawn",
+    "hier_cells_visited", "subtrees_pruned",
     # stable floe/KLayout service phases (absent from Rust results)
     "load_ms", "phase_plan", "phase_delta", "phase_apply", "draw_ms",
     "wait_ms", "new",

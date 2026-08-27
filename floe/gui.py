@@ -2665,6 +2665,25 @@ class Viewer:
                             res.get("tile_px", 0),
                             res.get("frame_width", 0),
                             res.get("frame_height", 0))
+                    # F2R diagnostics: refinement round count, decode
+                    # pool shape (sum/max vs wall exposes idle workers
+                    # and stragglers, idx = record-index build share),
+                    # slowest raster tile, and traversal visit/prune
+                    # counts for the 2c work-bin verdict.
+                    if res.get("rounds", 0) > 1:
+                        text += ", rounds %d" % res["rounds"]
+                    if res.get("decode_sum_ms"):
+                        text += ", dec sum %.0f/max %.0f/idx %.0fms" % (
+                            res["decode_sum_ms"],
+                            res.get("decode_max_ms", 0.0),
+                            res.get("index_ms", 0.0))
+                    if res.get("raster_tile_max_ms"):
+                        text += ", tile-max %.0fms" % (
+                            res["raster_tile_max_ms"])
+                    if res.get("hier_cells_visited"):
+                        text += ", hier %s/%s pruned" % (
+                            fmt_count(res["hier_cells_visited"]),
+                            fmt_count(res.get("subtrees_pruned", 0)))
                     if res.get("labels_truncated"):
                         text += ", labels partial"
                     # tiles = plan total (resident pages included);

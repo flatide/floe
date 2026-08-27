@@ -4,9 +4,20 @@ pub struct RenderStats {
     pub plan_us: u64,
     pub page_read_us: u64,
     pub page_decode_us: u64,
+    /// Sum of per-page decode wall times. Compared against
+    /// `page_decode_us * decode_workers_used` this exposes worker idle
+    /// time; equal values mean the pool ran fully busy.
+    pub page_decode_sum_us: u64,
+    /// Slowest single page decode (straggler detection).
+    pub page_decode_max_us: u64,
+    /// Portion of `page_decode_sum_us` spent building record indexes
+    /// (the F2R-03b lazy-index decision input).
+    pub page_index_us: u64,
     pub decode_workers_used: u16,
     pub scene_us: u64,
     pub raster_us: u64,
+    /// Slowest single image tile (tail imbalance across raster workers).
+    pub raster_tile_max_us: u64,
     pub png_us: u64,
     pub tiles: u32,
     pub workers_used: u16,

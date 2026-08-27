@@ -511,7 +511,8 @@ fn render_geometry(
                     let col1 = tile_boundary(request.width, tile_x + 1, tile_size);
                     let row0 = tile_boundary(request.height, tile_y, tile_size);
                     let row1 = tile_boundary(request.height, tile_y + 1, tile_size);
-                    outputs.push(raster_tile(
+                    let tile_started = Instant::now();
+                    let mut output = raster_tile(
                         scene,
                         request,
                         mode,
@@ -521,7 +522,13 @@ fn render_geometry(
                         col1,
                         row0,
                         row1,
-                    )?);
+                    )?;
+                    output.stats.raster_tile_max_us = tile_started
+                        .elapsed()
+                        .as_micros()
+                        .try_into()
+                        .unwrap_or(u64::MAX);
+                    outputs.push(output);
                 }
                 Ok::<_, String>(outputs)
             }));
@@ -1142,6 +1149,7 @@ fn add_stats(total: &mut RenderStats, worker: &RenderStats) {
         .hier_cells_visited
         .saturating_add(worker.hier_cells_visited);
     total.subtrees_pruned = total.subtrees_pruned.saturating_add(worker.subtrees_pruned);
+    total.raster_tile_max_us = total.raster_tile_max_us.max(worker.raster_tile_max_us);
 }
 
 #[allow(clippy::too_many_arguments)]

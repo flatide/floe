@@ -711,6 +711,7 @@ struct FramePixels {
     png: Arc<Vec<u8>>,
     frame_cache_hit: bool,
     raster_us: u64,
+    raster_tile_max_us: u64,
     png_us: u64,
     workers_used: u16,
     tiles: u32,
@@ -722,6 +723,10 @@ struct FramePixels {
     frame_member_paints: u64,
     label_tile_paints: u64,
     label_pixel_paints: u64,
+    rep_members_tested: u64,
+    rep_members_drawn: u64,
+    hier_cells_visited: u64,
+    subtrees_pruned: u64,
 }
 
 fn render_worker(
@@ -1409,6 +1414,7 @@ fn run_render(
                 png: Arc::clone(&cached.png),
                 frame_cache_hit: true,
                 raster_us: 0,
+                raster_tile_max_us: 0,
                 png_us: 0,
                 workers_used: 0,
                 tiles: 0,
@@ -1420,6 +1426,10 @@ fn run_render(
                 frame_member_paints: 0,
                 label_tile_paints: 0,
                 label_pixel_paints: 0,
+                rep_members_tested: 0,
+                rep_members_drawn: 0,
+                hier_cells_visited: 0,
+                subtrees_pruned: 0,
             }
         } else {
             let report = if styles.is_empty() && !command.frames {
@@ -1450,6 +1460,7 @@ fn run_render(
                 png,
                 frame_cache_hit: false,
                 raster_us: report.stats.raster_us,
+                raster_tile_max_us: report.stats.raster_tile_max_us,
                 png_us,
                 workers_used: report.stats.workers_used,
                 tiles: report.stats.tiles,
@@ -1461,6 +1472,10 @@ fn run_render(
                 frame_member_paints: report.frame_member_paints,
                 label_tile_paints: report.label_tile_paints,
                 label_pixel_paints: report.label_pixel_paints,
+                rep_members_tested: report.stats.rep_members_tested,
+                rep_members_drawn: report.stats.rep_members_drawn,
+                hier_cells_visited: report.stats.hier_cells_visited,
+                subtrees_pruned: report.stats.subtrees_pruned,
             }
         };
         check_generation(cancellation, command.generation)?;
@@ -1507,7 +1522,7 @@ fn run_render(
         respond(
             responses,
             format!(
-                "frame gen={} round={} final={} png={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_workers={} scene_us={} raster_us={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={}",
+                "frame gen={} round={} final={} png={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} raster_us={} raster_tile_max_us={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={}",
                 command.generation,
                 round_index + 1,
                 final_round as u8,
@@ -1532,9 +1547,13 @@ fn run_render(
                     .unwrap_or(0),
                 decode_stats.page_read_us,
                 decode_stats.page_decode_us,
+                decode_stats.page_decode_sum_us,
+                decode_stats.page_decode_max_us,
+                decode_stats.page_index_us,
                 decode_stats.decode_workers_used,
                 scene_us,
                 pixels.raster_us,
+                pixels.raster_tile_max_us,
                 pixels.png_us,
                 publish_stats.write_us,
                 publish_stats.sync_us,
@@ -1556,6 +1575,10 @@ fn run_render(
                 pixels.frame_member_paints,
                 pixels.label_tile_paints,
                 pixels.label_pixel_paints,
+                pixels.rep_members_tested,
+                pixels.rep_members_drawn,
+                pixels.hier_cells_visited,
+                pixels.subtrees_pruned,
             ),
         );
     }

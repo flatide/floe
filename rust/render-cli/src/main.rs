@@ -93,7 +93,7 @@ fn run(raw: Vec<String>) -> Result<(), String> {
     let decoded_cells: usize = decoded.iter().map(|page| page.doc.cells.len()).sum();
     let scene = FrameScene::new(&cache, planned.plan, decoded)?;
     println!(
-        "decode\tpages={}\tcells={}\trecords={}\tmembers={}\tresident_bytes={}\tcache_hit={}\tcache_miss={}\tread_us={}\tdecode_us={}\tworkers={}",
+        "decode\tpages={}\tcells={}\trecords={}\tmembers={}\tresident_bytes={}\tcache_hit={}\tcache_miss={}\tread_us={}\tdecode_us={}\tdecode_sum_us={}\tdecode_max_us={}\tindex_us={}\tworkers={}",
         scene.available_pages(),
         decoded_cells,
         decoded_records,
@@ -103,6 +103,9 @@ fn run(raw: Vec<String>) -> Result<(), String> {
         stats.decoded_cache_miss,
         stats.page_read_us,
         stats.page_decode_us,
+        stats.page_decode_sum_us,
+        stats.page_decode_max_us,
+        stats.page_index_us,
         stats.decode_workers_used,
     );
     println!(
@@ -148,7 +151,7 @@ fn run(raw: Vec<String>) -> Result<(), String> {
         };
         raster.frame.write_png(path)?;
         println!(
-            "raster\tmode={}\tpartial={}\tworkers={}\ttiles={}\trect_record_tests={}\trect_member_paints={}\tpolygon_record_tests={}\tpolygon_member_paints={}\tpath_record_tests={}\tpath_member_paints={}\tframe_record_tests={}\tframe_member_paints={}\tdeferred_frame_tests={}\trep_members_tested={}\trep_members_drawn={}\thier_cells_visited={}\tsubtrees_pruned={}\traster_us={}\tout={}",
+            "raster\tmode={}\tpartial={}\tworkers={}\ttiles={}\trect_record_tests={}\trect_member_paints={}\tpolygon_record_tests={}\tpolygon_member_paints={}\tpath_record_tests={}\tpath_member_paints={}\tframe_record_tests={}\tframe_member_paints={}\tdeferred_frame_tests={}\trep_members_tested={}\trep_members_drawn={}\thier_cells_visited={}\tsubtrees_pruned={}\traster_us={}\traster_tile_max_us={}\tout={}",
             mode,
             raster.partial as u8,
             raster.stats.workers_used,
@@ -167,6 +170,7 @@ fn run(raw: Vec<String>) -> Result<(), String> {
             raster.stats.hier_cells_visited,
             raster.stats.subtrees_pruned,
             raster.stats.raster_us,
+            raster.stats.raster_tile_max_us,
             path,
         );
     }

@@ -456,6 +456,13 @@ class RustRenderWorker:
             "cache_hit": 0, "render_tiles": 0,
             "frame_cache_hit": 0,
             "resident_bytes": 0, "decode_workers": 0,
+            # F2R diagnostics: refinement rounds, decode pool
+            # utilization/stragglers, index-build share, raster tail,
+            # traversal counters (sum over rounds; maxes keep max)
+            "rounds": 0, "decode_sum_us": 0, "decode_max_us": 0,
+            "index_us": 0, "raster_tile_max_us": 0,
+            "rep_tested": 0, "rep_drawn": 0,
+            "hier_cells": 0, "subtree_prunes": 0,
         }
         with self._jobs_lock:
             self._jobs[generation] = state
@@ -866,6 +873,18 @@ class RustRenderWorker:
         state["publish_rename_us"] += _wire_int(
             fields, "publish_rename_us")
         state["adapter_read_us"] += adapter_read_us
+        state["rounds"] += 1
+        state["decode_sum_us"] += _wire_int(fields, "decode_sum_us")
+        state["decode_max_us"] = max(
+            state["decode_max_us"], _wire_int(fields, "decode_max_us"))
+        state["index_us"] += _wire_int(fields, "index_us")
+        state["raster_tile_max_us"] = max(
+            state["raster_tile_max_us"],
+            _wire_int(fields, "raster_tile_max_us"))
+        state["rep_tested"] += _wire_int(fields, "rep_tested")
+        state["rep_drawn"] += _wire_int(fields, "rep_drawn")
+        state["hier_cells"] += _wire_int(fields, "hier_cells")
+        state["subtree_prunes"] += _wire_int(fields, "subtree_prunes")
         state["new"] += _wire_int(fields, "cache_miss")
         state["cache_hit"] += _wire_int(fields, "cache_hit")
         state["frame_cache_hit"] += _wire_int(
@@ -928,6 +947,21 @@ class RustRenderWorker:
             "labels": _wire_int(fields, "labels"),
             "label_tile_paints": _wire_int(fields, "label_tile_paints"),
             "label_pixel_paints": _wire_int(fields, "label_pixel_paints"),
+            # F2R diagnostics (cumulative over this generation's rounds):
+            # rounds = refinement rounds served; decode_sum/decode_max
+            # expose pool idle time and stragglers against decode_ms *
+            # decode_workers; index_ms is the record-index share of
+            # decode; raster_tile_max the slowest image tile; hier/prune
+            # counters size the traversal for the 2c work-bin verdict.
+            "rounds": state["rounds"],
+            "decode_sum_ms": state["decode_sum_us"] / 1000.0,
+            "decode_max_ms": state["decode_max_us"] / 1000.0,
+            "index_ms": state["index_us"] / 1000.0,
+            "raster_tile_max_ms": state["raster_tile_max_us"] / 1000.0,
+            "rep_members_tested": state["rep_tested"],
+            "rep_members_drawn": state["rep_drawn"],
+            "hier_cells_visited": state["hier_cells"],
+            "subtrees_pruned": state["subtree_prunes"],
         }
         if refining:
             output["refining"] = refining

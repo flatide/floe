@@ -432,11 +432,18 @@ impl Cache {
         check_decode_cancelled(guard)?;
         let decode_started = Instant::now();
         let worker_count = usize::from(workers).min(payloads.len());
+        // Per-page wall time rides along with each output: the sum vs the
+        // phase wall exposes worker idle time, the max exposes stragglers.
+        let timed_decode = |payload: &PagePayload| {
+            let page_started = Instant::now();
+            let result = decode_payload(payload);
+            (result, elapsed_us(page_started))
+        };
         let mut indexed = if worker_count <= 1 {
             let mut outputs = Vec::with_capacity(payloads.len());
             for (index, payload) in payloads.iter().enumerate() {
                 check_decode_cancelled(guard)?;
-                outputs.push((index, decode_payload(payload)));
+                outputs.push((index, timed_decode(payload)));
             }
             outputs
         } else {
@@ -446,6 +453,7 @@ impl Cache {
                 for _ in 0..worker_count {
                     let next_page = &next_page;
                     let payloads = &payloads;
+                    let timed_decode = &timed_decode;
                     handles.push(scope.spawn(move || {
                         let mut outputs = Vec::new();
                         loop {
@@ -454,7 +462,7 @@ impl Cache {
                             let Some(payload) = payloads.get(index) else {
                                 break;
                             };
-                            outputs.push((index, decode_payload(payload)));
+                            outputs.push((index, timed_decode(payload)));
                         }
                         Ok::<_, String>(outputs)
                     }));
@@ -492,13 +500,19 @@ impl Cache {
 
         let mut decoded = Vec::with_capacity(indexed.len());
         let mut decoded_bytes = 0u64;
-        for (expected_index, (index, page)) in indexed.into_iter().enumerate() {
+        let mut page_decode_sum_us = 0u64;
+        let mut page_decode_max_us = 0u64;
+        let mut page_index_us = 0u64;
+        for (expected_index, (index, (page, page_us))) in indexed.into_iter().enumerate() {
             if index != expected_index {
                 return Err(format!(
                     "internal error: decoded page index {index}, expected {expected_index}"
                 ));
             }
-            let page = page?;
+            let (page, index_us) = page?;
+            page_decode_sum_us = page_decode_sum_us.saturating_add(page_us);
+            page_decode_max_us = page_decode_max_us.max(page_us);
+            page_index_us = page_index_us.saturating_add(index_us);
             decoded_bytes = decoded_bytes
                 .checked_add(page.encoded_bytes as u64)
                 .ok_or_else(|| "limit exceeded: decoded page bytes".to_string())?;
@@ -510,6 +524,9 @@ impl Cache {
             RenderStats {
                 page_read_us,
                 page_decode_us,
+                page_decode_sum_us,
+                page_decode_max_us,
+                page_index_us,
                 decode_workers_used: worker_count.try_into().unwrap_or(u16::MAX),
                 decoded_cache_miss: page_ids.len().try_into().unwrap_or(u32::MAX),
                 decoded_cache_bytes: decoded_bytes,
@@ -519,7 +536,10 @@ impl Cache {
     }
 }
 
-fn decode_payload(payload: &PagePayload) -> Result<DecodedPage, String> {
+/// Decodes one page payload; the second value is the time spent
+/// building the record index alone (the lazy-index decision input —
+/// §3.11 measured it at +70% of raw decode on sample9).
+fn decode_payload(payload: &PagePayload) -> Result<(DecodedPage, u64), String> {
     let doc = floe_oasis::doc::parse_doc(&payload.bytes)
         .map_err(|error| format!("decode page {}: {error}", payload.page_id))?;
     if doc.cells.len() != 1 {
@@ -529,17 +549,22 @@ fn decode_payload(payload: &PagePayload) -> Result<DecodedPage, String> {
             doc.cells.len()
         ));
     }
+    let index_started = Instant::now();
     let index = crate::PageIndex::build(&doc);
-    Ok(DecodedPage {
-        page_id: payload.page_id,
-        layer_idx: payload.meta.layer_idx,
-        bbox: payload.meta.bbox,
-        encoded_bytes: payload.meta.usize_,
-        records: payload.meta.records,
-        members: payload.meta.members,
-        doc,
-        index,
-    })
+    let index_us = elapsed_us(index_started);
+    Ok((
+        DecodedPage {
+            page_id: payload.page_id,
+            layer_idx: payload.meta.layer_idx,
+            bbox: payload.meta.bbox,
+            encoded_bytes: payload.meta.usize_,
+            records: payload.meta.records,
+            members: payload.meta.members,
+            doc,
+            index,
+        },
+        index_us,
+    ))
 }
 
 fn check_decode_cancelled(guard: Option<(u64, &RenderCancellation)>) -> Result<(), String> {
