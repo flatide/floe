@@ -32,7 +32,40 @@ struct PublishedScene {
 
 type SharedPublishedScene = Arc<RwLock<Option<Arc<PublishedScene>>>>;
 
+// which target this binary was built for, mirrored from floe-index:
+// multiple builds circulate on the closed-network hosts and "which
+// one is this" keeps coming up
+const BUILD_FLAVOR: &str = if cfg!(target_env = "musl") {
+    "musl-static"
+} else if cfg!(target_os = "linux") {
+    "gnu"
+} else {
+    "native"
+};
+
+fn version() -> String {
+    let git = env!("FLOE_GIT");
+    format!(
+        "floe-renderd {}{} ({})",
+        env!("CARGO_PKG_VERSION"),
+        if git == "unknown" {
+            String::new()
+        } else {
+            format!(" {git}")
+        },
+        BUILD_FLAVOR
+    )
+}
+
 fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() >= 2 && (args[1] == "--version" || args[1] == "-V") {
+        println!("{}", version());
+        return ExitCode::SUCCESS;
+    }
+    // every run states which build it is (stderr - stdout carries the
+    // wire protocol)
+    eprintln!("[{}]", version());
     if let Err(error) = serve() {
         eprintln!("error: {error}");
         return ExitCode::FAILURE;
@@ -45,7 +78,12 @@ fn serve() -> Result<(), String> {
     let writer = thread::spawn(move || response_writer(response_rx));
     respond(
         &response_tx,
-        format!("ready version={}", env!("CARGO_PKG_VERSION")),
+        format!(
+            "ready version={} git={} flavor={}",
+            env!("CARGO_PKG_VERSION"),
+            env!("FLOE_GIT"),
+            BUILD_FLAVOR
+        ),
     );
 
     let cancellation = RenderCancellation::new();

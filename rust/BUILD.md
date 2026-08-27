@@ -13,6 +13,10 @@
   필요 없다.
 
 동일 suffix로 `floe-renderd`(GUI Rust backend), `floe-render-cli`(headless oracle), `path-inventory`도 함께 생성된다.
+`floe-renderd`도 0.12.13부터 같은 형식의 `--version`/시작 스탬프를
+찍고, 앱의 Help > About이 floe-index/renderd 스탬프를 그대로
+보여준다 — 호스트에서 "이 바이너리가 어느 빌드냐"는 질문은 About
+화면만으로 답할 수 있다.
 
 의존 크레이트는 순수 Rust에 전부 `vendor/`로 동봉되어 **빌드 중
 crates.io 접속이 없다**. 인터넷이 필요한 것은 Rust 툴체인

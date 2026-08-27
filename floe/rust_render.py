@@ -135,7 +135,9 @@ def _layer_key(value):
     return int(value[0]), int(value[1])
 
 
-def _find_binary():
+def find_binary():
+    """Find the floe-renderd the worker would launch (vfsclient.
+    find_binary sibling; Help > About probes the same path)."""
     configured = os.environ.get("FLOE_RENDERD_BIN")
     candidates = []
     if configured:
@@ -180,6 +182,7 @@ class RustRenderWorker:
         self._condition = threading.Condition()
         self._ready = False
         self._renderd_version = None
+        self._renderd_build = None
         self._opened = False
         self._styled_epoch = None
         self._style_paths = {}
@@ -198,7 +201,7 @@ class RustRenderWorker:
         self._stderr_tail = []
         self._work_dir = None
         self._cache_path = None
-        self._binary = _find_binary()
+        self._binary = find_binary()
         self._jobs_count = _env_int(
             "FLOE_RUST_JOBS", _DEFAULT_JOBS, 1, 256)
         self._raster_jobs_count = _env_int(
@@ -311,6 +314,12 @@ class RustRenderWorker:
 
     def alive(self):
         return self._proc is not None and self._proc.poll() is None
+
+    def renderd_build(self):
+        """'0.12.13 abc123 (gnu)' from the running daemon's ready
+        line; None until the handshake (Help > About reads this)."""
+        with self._condition:
+            return self._renderd_build
 
     def exitcode(self):
         return None if self._proc is None else self._proc.poll()
@@ -645,8 +654,16 @@ class RustRenderWorker:
                         __version__, renderd_version or "missing",
                         self._binary))
                 return
+            build = renderd_version
+            git = fields.get("git")
+            if git and git != "unknown":
+                build += " " + git
+            flavor = fields.get("flavor")
+            if flavor:
+                build += " (%s)" % flavor
             with self._condition:
                 self._renderd_version = renderd_version
+                self._renderd_build = build
                 self._ready = True
                 self._condition.notify_all()
         elif kind == "opened":

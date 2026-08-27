@@ -463,6 +463,58 @@ def rect_outline(buf, x0, y0, x1, y1, casing, core, px=2):
         stamp_segment(buf, a, b, casing, core, px)
 
 
+def _probe_binary_version(find_binary):
+    """One '--version' stamp line from a Rust helper binary, resolved
+    exactly the way the app would launch it. A pre-0.12.13
+    floe-renderd has no --version: it greets `ready version=...` on
+    stdout and exits on the closed stdin, so that shape is accepted
+    too."""
+    import subprocess
+    path = find_binary()
+    probe = subprocess.run(
+        [path, "--version"], stdin=subprocess.DEVNULL,
+        capture_output=True, text=True, timeout=5)
+    for line in probe.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("ready "):
+            for token in line.split()[1:]:
+                if token.startswith("version="):
+                    return "%s %s" % (os.path.basename(path),
+                                      token.split("=", 1)[1])
+            break
+        return line
+    raise RuntimeError("no version line from %s" % path)
+
+
+def component_versions(worker):
+    """Help > About body lines: which floe-index / floe-renderd builds
+    the app is wired to. Closed-network hosts carry several
+    circulating binaries (rust/BUILD.md stamp policy), so About must
+    answer "which one is this" without a terminal. The running
+    daemon's handshake stamp wins over probing the binary on disk -
+    the two can differ after an in-place binary swap."""
+    from . import rust_render, vfsclient
+    lines = []
+    try:
+        lines.append(_probe_binary_version(vfsclient.find_binary))
+    except Exception as exc:
+        lines.append("floe-index unavailable: %s" %
+                     str(exc).splitlines()[0][:60])
+    build = getattr(worker, "renderd_build", None)
+    build = build() if callable(build) else None
+    if build:
+        lines.append("floe-renderd %s [running]" % build)
+    else:
+        try:
+            lines.append(_probe_binary_version(rust_render.find_binary))
+        except Exception as exc:
+            lines.append("floe-renderd unavailable: %s" %
+                         str(exc).splitlines()[0][:60])
+    return lines
+
+
 def fmt_count(n):
     """Human shape count: 950 / 12k / 3.4M / 1.2G."""
     if n >= 1e9:
@@ -3908,6 +3960,7 @@ class Viewer:
         dlg.set_keep_above(True)   # stay over a fullscreen parent
         dlg.set_program_name(APP)
         dlg.set_version(__version__)
+        dlg.set_comments("\n".join(component_versions(self.worker)))
         dlg.set_copyright("2026 FLATIDE LC.\nhttp://flatide.com")
         self._center_on_parent(dlg)
         dlg.run()

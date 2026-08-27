@@ -321,6 +321,70 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertTrue(current._ready)
             self.assertEqual(current._renderd_version, __version__)
             self.assertIsNone(current._startup_error)
+            # a bare pre-stamp ready line still yields a usable build
+            self.assertEqual(current.renderd_build(), __version__)
+
+    def test_ready_build_stamp_reaches_about(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = os.path.join(directory, "floe-renderd")
+            with open(binary, "w", encoding="ascii") as script:
+                script.write("#!/bin/sh\n")
+            os.chmod(binary, 0o755)
+            with mock.patch.dict(os.environ, {
+                "FLOE_RENDERD_BIN": binary,
+            }, clear=False):
+                stamped = RustRenderWorker(FakeCache(directory))
+                unstamped = RustRenderWorker(FakeCache(directory))
+            stamped._handle_line("ready", {
+                "version": __version__, "git": "abc123+",
+                "flavor": "gnu"}, "")
+            self.assertEqual(stamped.renderd_build(),
+                             "%s abc123+ (gnu)" % __version__)
+            # an unknown git hash is noise, not identity - omitted
+            unstamped._handle_line("ready", {
+                "version": __version__, "git": "unknown",
+                "flavor": "native"}, "")
+            self.assertEqual(unstamped.renderd_build(),
+                             "%s (native)" % __version__)
+
+    def test_about_component_versions(self):
+        from floe import gui
+        with tempfile.TemporaryDirectory() as directory:
+            index = os.path.join(directory, "floe-index")
+            with open(index, "w", encoding="ascii") as script:
+                script.write("#!/bin/sh\n"
+                             "echo 'floe-index 9.9.9 abc (native)'\n")
+            os.chmod(index, 0o755)
+            renderd = os.path.join(directory, "floe-renderd")
+            with open(renderd, "w", encoding="ascii") as script:
+                # pre-0.12.13 shape: no --version, greets and exits
+                script.write("#!/bin/sh\n"
+                             "echo 'ready version=0.12.11'\n")
+            os.chmod(renderd, 0o755)
+            silent = os.path.join(directory, "silent")
+            with open(silent, "w", encoding="ascii") as script:
+                script.write("#!/bin/sh\nexit 1\n")
+            os.chmod(silent, 0o755)
+            env = {"FLOE_INDEX_BIN": index, "FLOE_RENDERD_BIN": renderd}
+            with mock.patch.dict(os.environ, env, clear=False):
+                self.assertEqual(gui.component_versions(None), [
+                    "floe-index 9.9.9 abc (native)",
+                    "floe-renderd 0.12.11",
+                ])
+                running = SimpleNamespace(
+                    renderd_build=lambda: "0.12.13 abc (gnu)")
+                self.assertEqual(
+                    gui.component_versions(running)[1],
+                    "floe-renderd 0.12.13 abc (gnu) [running]")
+            # probe failures must not break Help > About
+            env = {"FLOE_INDEX_BIN": os.path.join(directory, "gone"),
+                   "FLOE_RENDERD_BIN": silent}
+            with mock.patch.dict(os.environ, env, clear=False):
+                lines = gui.component_versions(None)
+            self.assertTrue(
+                lines[0].startswith("floe-index unavailable:"), lines)
+            self.assertTrue(
+                lines[1].startswith("floe-renderd unavailable:"), lines)
 
     def test_converts_patterns_and_preserves_special_fills(self):
         solid = "\n".join(["*" * 16] * 16)
