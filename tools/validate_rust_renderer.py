@@ -698,6 +698,35 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertFalse(hasattr(worker, "_coverage"))
             self.assertFalse(hasattr(worker, "_apply_coverage"))
 
+    def test_adaptive_budget_scales_with_host_memory(self):
+        from floe.rust_render import _default_budget_mb
+        adaptive = _default_budget_mb()
+        self.assertGreaterEqual(adaptive, 1024, "1024MB floor")
+        try:
+            total = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+        except (AttributeError, OSError, ValueError):
+            total = 0
+        if total > 0:
+            self.assertEqual(adaptive,
+                             max(1024, total // (2 * 1024 * 1024)),
+                             "half of physical RAM")
+        with tempfile.TemporaryDirectory() as directory:
+            binary = os.path.join(directory, "floe-renderd")
+            with open(binary, "w", encoding="ascii") as script:
+                script.write("#!/bin/sh\n")
+            os.chmod(binary, 0o755)
+            environment = dict(os.environ)
+            environment["FLOE_RENDERD_BIN"] = binary
+            environment.pop("FLOE_RUST_BUDGET_MB", None)
+            with mock.patch.dict(os.environ, environment, clear=True):
+                worker = RustRenderWorker(FakeCache(directory))
+            self.assertEqual(worker._budget_mb, adaptive)
+            environment["FLOE_RUST_BUDGET_MB"] = "2048"
+            with mock.patch.dict(os.environ, environment, clear=True):
+                pinned = RustRenderWorker(FakeCache(directory))
+            self.assertEqual(pinned._budget_mb, 2048,
+                             "explicit override beats adaptive")
+
     def test_rejects_invalid_environment_limits(self):
         with tempfile.TemporaryDirectory() as directory:
             binary = os.path.join(directory, "floe-renderd")

@@ -816,6 +816,21 @@ phase를 모두 담으므로(§3.12) 같은 두 명령으로 바로 판정한다
 LRU에 남은 상태)의 load 잔량과 budget 초과 여부이며 pan-sweep trace로
 잰다.
 
+원인 확정과 후보 (1) 구현(2026-08-28): "floe는 인근 이동이 캐시
+히트인데 floe2는 다 다시 로딩한다"는 현장 체감의 근원은 **같은
+1024MB 예산의 회계 기준 차이**다 — vfsd ledger는 ENCODED
+bytes(`usize_`), floe2 LRU는 실메모리(decoded+index) 기준이며 sample9
+hotspot 실측 13.8MB vs 211.4MB, **15.3배**. 같은 숫자로 floe가 약
+15배 넓은 방문 이력을 유지한다(그 대신 KLayout Layout의 실제 RAM은
+회계 밖). 대응으로 floe2 기본 budget을 **호스트 물리 RAM의 절반
+(최소 1024MB, `FLOE_RUST_BUDGET_MB` override 유지)**으로 바꿨다 —
+budget은 상한일 뿐 선할당이 아니므로 유휴 비용이 없다. 세션 시작
+`[perf] backend=rust renderd=… budget-mb=…` 라인이 유효값을 찍는다
+(bench는 재현성 위해 1024 고정 유지). 인코드 victim cache(강등
+보관)는 실칩 `read_ms`가 유의미할 때만 채택한다 — 로컬 SSD에선 OS
+page cache가 그 역할을 이미 하고, read는 sample9 실측 decode의
+0.6%다.
+
 먼저 같은 zoom/detail/depth/layer에서 warm settle 후 X/Y로 화면 폭의
 `1/16, 1/8, 1/4`만큼 이동하고 되돌아오는 trace를 각각 3회 측정한다
 (`tools/bench_floe2.py --pan-sweep`; sample9 결과는 §3.12). floe는
