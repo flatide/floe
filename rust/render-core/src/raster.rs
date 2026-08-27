@@ -673,6 +673,7 @@ fn raster_tile(
                 &mut stats,
                 &mut counters,
                 GeometrySelection::All,
+                SubtreePrune::Off,
                 PaintStyle::solid(request.foreground),
                 guard,
                 scene.top(),
@@ -682,23 +683,28 @@ fn raster_tile(
             )?;
         }
         RenderMode::Styled(styled) => {
+            // The masks are subtree-cumulative, so a frame-free plan
+            // skips all four band walks in one test (labels still run).
+            let walk_frames = styled.hierarchy_frames && scene.subtree_has_frames(scene.top());
             if styled.hierarchy_frames {
-                for frame_band in [2, 3, 1] {
-                    check_cancelled(guard)?;
-                    render_frame_band(
-                        scene,
-                        request,
-                        &mut band,
-                        cull_view,
-                        &mut stats,
-                        &mut counters,
-                        frame_band,
-                        frame_paint(frame_band),
-                        guard,
-                        scene.top(),
-                        OrthoTransform::identity(),
-                        &mut path,
-                    )?;
+                if walk_frames {
+                    for frame_band in [2, 3, 1] {
+                        check_cancelled(guard)?;
+                        render_frame_band(
+                            scene,
+                            request,
+                            &mut band,
+                            cull_view,
+                            &mut stats,
+                            &mut counters,
+                            frame_band,
+                            frame_paint(frame_band),
+                            guard,
+                            scene.top(),
+                            OrthoTransform::identity(),
+                            &mut path,
+                        )?;
+                    }
                 }
                 render_prepared_labels(
                     labels,
@@ -719,6 +725,7 @@ fn raster_tile(
                     &mut stats,
                     &mut counters,
                     GeometrySelection::Layer(layer.layer_idx),
+                    SubtreePrune::Layer(scene.layer_mask_bit(layer.layer_idx)),
                     PaintStyle {
                         color: if styled.mono {
                             monochrome(layer.color)
@@ -750,20 +757,22 @@ fn raster_tile(
             }
             if styled.hierarchy_frames {
                 check_cancelled(guard)?;
-                render_frame_band(
-                    scene,
-                    request,
-                    &mut band,
-                    cull_view,
-                    &mut stats,
-                    &mut counters,
-                    0,
-                    frame_paint(0),
-                    guard,
-                    scene.top(),
-                    OrthoTransform::identity(),
-                    &mut path,
-                )?;
+                if walk_frames {
+                    render_frame_band(
+                        scene,
+                        request,
+                        &mut band,
+                        cull_view,
+                        &mut stats,
+                        &mut counters,
+                        0,
+                        frame_paint(0),
+                        guard,
+                        scene.top(),
+                        OrthoTransform::identity(),
+                        &mut path,
+                    )?;
+                }
                 render_prepared_labels(
                     labels,
                     &mut band,
@@ -1024,6 +1033,16 @@ impl GeometrySelection {
     }
 }
 
+/// Subtree gate for the per-plane hierarchy walk (F2R-03b 2b).
+#[derive(Clone, Copy)]
+enum SubtreePrune {
+    /// Occupancy paints every layer: no subtree can be skipped.
+    Off,
+    /// Styled plane: skip children whose subtree holds no decoded page
+    /// or wash for this dense scene layer bit (None = nowhere at all).
+    Layer(Option<usize>),
+}
+
 #[derive(Clone, Copy)]
 enum StrokeStyle {
     Solid,
@@ -1119,6 +1138,10 @@ fn add_stats(total: &mut RenderStats, worker: &RenderStats) {
     total.rep_members_drawn = total
         .rep_members_drawn
         .saturating_add(worker.rep_members_drawn);
+    total.hier_cells_visited = total
+        .hier_cells_visited
+        .saturating_add(worker.hier_cells_visited);
+    total.subtrees_pruned = total.subtrees_pruned.saturating_add(worker.subtrees_pruned);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1130,6 +1153,7 @@ fn render_cell(
     stats: &mut RenderStats,
     counters: &mut RasterCounters,
     selection: GeometrySelection,
+    prune: SubtreePrune,
     paint: PaintStyle,
     guard: Option<RenderGuard<'_>>,
     key: WsKey,
@@ -1144,6 +1168,7 @@ fn render_cell(
     let cell = scene
         .cell(key)
         .ok_or_else(|| format!("invalid plan: missing working cell {:?}", key))?;
+    stats.hier_cells_visited = stats.hier_cells_visited.saturating_add(1);
     path.push(key);
     let local_view = world_transform.invert()?.apply_bbox(cull_view)?;
 
@@ -1368,6 +1393,16 @@ fn render_cell(
         if child_bbox.is_empty() {
             continue;
         }
+        // Subtree mask gate (F2R-03b 2b): a child whose subtree holds no
+        // decoded page or wash for this plane's layer cannot change a
+        // pixel, so its repetition is never expanded. Runs after the
+        // bbox lookup so the missing-child validation stays reachable.
+        if let SubtreePrune::Layer(bit) = prune {
+            if !scene.subtree_paints(instance.child, bit) {
+                stats.subtrees_pruned = stats.subtrees_pruned.saturating_add(1);
+                continue;
+            }
+        }
         let base_place =
             OrthoTransform::place(instance.x, instance.y, instance.rot, instance.flip)?;
         let base_bbox = base_place.apply_bbox(child_bbox)?;
@@ -1390,6 +1425,7 @@ fn render_cell(
                     stats,
                     counters,
                     selection,
+                    prune,
                     paint,
                     guard,
                     instance.child,
@@ -1427,6 +1463,7 @@ fn render_frame_band(
     let cell = scene
         .cell(key)
         .ok_or_else(|| format!("invalid plan: missing working cell {:?}", key))?;
+    stats.hier_cells_visited = stats.hier_cells_visited.saturating_add(1);
     path.push(key);
     let local_view = world_transform.invert()?.apply_bbox(cull_view)?;
 
@@ -1467,6 +1504,12 @@ fn render_frame_band(
             .cell_bbox(instance.child)
             .ok_or_else(|| format!("invalid plan: missing bbox for child {:?}", instance.child))?;
         if child_bbox.is_empty() {
+            continue;
+        }
+        // Frame-mask gate (F2R-03b 2b): band walks only paint hierarchy
+        // frames, so a frame-free subtree is skipped whole.
+        if !scene.subtree_has_frames(instance.child) {
+            stats.subtrees_pruned = stats.subtrees_pruned.saturating_add(1);
             continue;
         }
         let base_place =
@@ -3589,6 +3632,353 @@ mod tests {
             pruned.stats.rep_members_tested,
             unpruned.stats.rep_members_tested
         );
+    }
+
+    /// Hierarchy for the 2b mask tests: top holds a layer-0 page and
+    /// instantiates child A (layer-0 page, gridded) plus child B
+    /// (layer-1 page, gridded, in view) and child C whose only page
+    /// stays deferred. Layer plane 0 must prune B and C whole.
+    fn masked_scene(corrupt_b: bool) -> FrameScene {
+        let top = (0, REM_FULL);
+        let child_a = (1, REM_FULL);
+        let child_b = (2, REM_FULL);
+        let child_c = (3, REM_FULL);
+        let unit = BBox {
+            x0: 0,
+            y0: 0,
+            x1: 2,
+            y1: 2,
+        };
+        let grid = Rep::Grid {
+            na: 3,
+            nb: 3,
+            va: (4, 0),
+            vb: (0, 4),
+        };
+        let inst = |child, x, y| WsInst {
+            child,
+            x,
+            y,
+            rot: 0,
+            flip: false,
+            rep: grid.clone(),
+        };
+        let plan = HierPlan {
+            top,
+            wcells: vec![
+                WsCell {
+                    key: top,
+                    pages: vec![0],
+                    insts: vec![inst(child_a, 2, 2), inst(child_b, 4, 2), inst(child_c, 2, 4)],
+                    frames: Vec::new(),
+                    washes: Vec::new(),
+                },
+                WsCell {
+                    key: child_a,
+                    pages: vec![1],
+                    insts: Vec::new(),
+                    frames: Vec::new(),
+                    washes: Vec::new(),
+                },
+                WsCell {
+                    key: child_b,
+                    pages: vec![2],
+                    insts: Vec::new(),
+                    frames: Vec::new(),
+                    washes: Vec::new(),
+                },
+                WsCell {
+                    key: child_c,
+                    pages: vec![3],
+                    insts: Vec::new(),
+                    frames: Vec::new(),
+                    washes: Vec::new(),
+                },
+            ],
+            pages: vec![0, 1, 2, 3],
+            page_prio: vec![0, 1, 2, 3],
+            stats: HierStats::default(),
+        };
+        let page_b = if corrupt_b {
+            let doc = Doc {
+                unit: 1.0,
+                cells: vec![Cell {
+                    name: "BAD".to_string(),
+                    rects: vec![RectRec {
+                        layer: 1,
+                        dt: 0,
+                        x: 0,
+                        y: 0,
+                        w: -1,
+                        h: 2,
+                        rep: Rep::One,
+                    }],
+                    ..Cell::default()
+                }],
+                top: 0,
+                layer_order: vec![(1, 0)],
+                norm_s: 0.0,
+                layer_names: HashMap::new(),
+                layer_aliases: HashMap::new(),
+            };
+            Arc::new(DecodedPage {
+                page_id: 2,
+                layer_idx: 1,
+                bbox: unit,
+                encoded_bytes: 1,
+                records: 1,
+                members: 1,
+                index: crate::PageIndex::build(&doc),
+                doc,
+            })
+        } else {
+            styled_page(2, 1, unit)
+        };
+        let span = BBox {
+            x0: 0,
+            y0: 0,
+            x1: 16,
+            y1: 16,
+        };
+        let bounds = BTreeMap::from([
+            (top, span),
+            (child_a, unit),
+            (child_b, unit),
+            (child_c, unit),
+        ]);
+        FrameScene::from_test_parts(
+            plan,
+            vec![
+                styled_page(0, 0, unit),
+                styled_page(1, 0, unit),
+                page_b,
+                // page 3 stays deferred: child C prunes on every plane
+            ],
+            bounds,
+        )
+        .unwrap()
+    }
+
+    fn masked_request() -> StyledGeometryRasterRequest {
+        StyledGeometryRasterRequest {
+            raster: GeometryRasterRequest {
+                view: RasterViewBox::new(0.0, 0.0, 16.0, 16.0).unwrap(),
+                width: 16,
+                height: 16,
+                workers: 2,
+                tile_size: 8,
+                ..request()
+            },
+            layers: vec![
+                LayerStyle {
+                    layer_idx: 0,
+                    color: [255, 0, 0, 255],
+                    fill: LayerFill::Solid,
+                    outline_width: 1,
+                },
+                LayerStyle {
+                    layer_idx: 7, // styled but present nowhere in the scene
+                    color: [0, 0, 255, 255],
+                    fill: LayerFill::Solid,
+                    outline_width: 1,
+                },
+            ],
+            hierarchy_frames: false,
+            mono: false,
+        }
+    }
+
+    #[test]
+    fn subtree_mask_pruning_matches_full_mask_pixels() {
+        let request = masked_request();
+        let masked = render_geometry_styled(&masked_scene(false), &request).unwrap();
+        let full =
+            render_geometry_styled(&masked_scene(false).with_full_masks(), &request).unwrap();
+        assert_eq!(masked.frame.pixels(), full.frame.pixels());
+        assert_eq!(
+            masked.rectangle_member_paints,
+            full.rectangle_member_paints
+        );
+        assert_eq!(full.stats.subtrees_pruned, 0);
+        assert!(
+            masked.stats.subtrees_pruned > 0,
+            "layer-1-only and deferred-only subtrees must be pruned"
+        );
+        assert!(
+            masked.stats.hier_cells_visited < full.stats.hier_cells_visited,
+            "mask must cut hierarchy visits: {} vs {}",
+            masked.stats.hier_cells_visited,
+            full.stats.hier_cells_visited
+        );
+    }
+
+    #[test]
+    fn subtree_mask_keeps_corrupt_records_reachable() {
+        // The corrupt page is decoded on layer 1, so a layer-1 plane must
+        // still descend into child B and surface the validation error.
+        let request = StyledGeometryRasterRequest {
+            layers: vec![LayerStyle {
+                layer_idx: 1,
+                color: [255, 0, 0, 255],
+                fill: LayerFill::Solid,
+                outline_width: 1,
+            }],
+            ..masked_request()
+        };
+        let error = render_geometry_styled(&masked_scene(true), &request)
+            .err()
+            .expect("corrupt record must still be reached");
+        assert!(
+            error.contains("negative rectangle size"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn frame_band_walk_prunes_frame_free_subtrees() {
+        // Child A carries the only hierarchy frame; child B holds layer-0
+        // geometry but no frames, so the band walks skip it whole while
+        // the geometry plane still paints it.
+        let top = (0, REM_FULL);
+        let child_a = (1, REM_FULL);
+        let child_b = (2, REM_FULL);
+        let unit = BBox {
+            x0: 0,
+            y0: 0,
+            x1: 2,
+            y1: 2,
+        };
+        let inst = |child, x| WsInst {
+            child,
+            x,
+            y: 2,
+            rot: 0,
+            flip: false,
+            rep: Rep::Grid {
+                na: 3,
+                nb: 1,
+                va: (4, 0),
+                vb: (0, 0),
+            },
+        };
+        let make_scene = || {
+            let plan = HierPlan {
+                top,
+                wcells: vec![
+                    WsCell {
+                        key: top,
+                        pages: Vec::new(),
+                        insts: vec![inst(child_a, 2), inst(child_b, 4)],
+                        frames: Vec::new(),
+                        washes: Vec::new(),
+                    },
+                    WsCell {
+                        key: child_a,
+                        pages: Vec::new(),
+                        insts: Vec::new(),
+                        frames: vec![(unit, Rep::One, 1)],
+                        washes: Vec::new(),
+                    },
+                    WsCell {
+                        key: child_b,
+                        pages: vec![0],
+                        insts: Vec::new(),
+                        frames: Vec::new(),
+                        washes: Vec::new(),
+                    },
+                ],
+                pages: vec![0],
+                page_prio: vec![0],
+                stats: HierStats::default(),
+            };
+            let span = BBox {
+                x0: 0,
+                y0: 0,
+                x1: 16,
+                y1: 16,
+            };
+            let bounds =
+                BTreeMap::from([(top, span), (child_a, unit), (child_b, unit)]);
+            FrameScene::from_test_parts(plan, vec![styled_page(0, 0, unit)], bounds).unwrap()
+        };
+        let request = StyledGeometryRasterRequest {
+            layers: vec![LayerStyle {
+                layer_idx: 0,
+                color: [255, 0, 0, 255],
+                fill: LayerFill::Solid,
+                outline_width: 1,
+            }],
+            hierarchy_frames: true,
+            ..masked_request()
+        };
+        let masked = render_geometry_styled(&make_scene(), &request).unwrap();
+        let full = render_geometry_styled(&make_scene().with_full_masks(), &request).unwrap();
+        assert_eq!(masked.frame.pixels(), full.frame.pixels());
+        assert_eq!(masked.frame_member_paints, full.frame_member_paints);
+        assert!(masked.frame_member_paints > 0, "frame must still paint");
+        assert_eq!(full.stats.subtrees_pruned, 0);
+        assert!(
+            masked.stats.subtrees_pruned > 0,
+            "band walk must skip the frame-free subtree"
+        );
+    }
+
+    #[test]
+    fn subtree_mask_floods_cycles_so_their_error_stays_reachable() {
+        let top = (0, REM_FULL);
+        let child = (1, REM_FULL);
+        let unit = BBox {
+            x0: 0,
+            y0: 0,
+            x1: 2,
+            y1: 2,
+        };
+        let inst = |target| WsInst {
+            child: target,
+            x: 0,
+            y: 0,
+            rot: 0,
+            flip: false,
+            rep: Rep::One,
+        };
+        let plan = HierPlan {
+            top,
+            wcells: vec![
+                WsCell {
+                    key: top,
+                    pages: vec![0],
+                    insts: vec![inst(child)],
+                    frames: Vec::new(),
+                    washes: Vec::new(),
+                },
+                WsCell {
+                    key: child,
+                    pages: Vec::new(),
+                    insts: vec![inst(top)],
+                    frames: Vec::new(),
+                    washes: Vec::new(),
+                },
+            ],
+            pages: vec![0],
+            page_prio: vec![0],
+            stats: HierStats::default(),
+        };
+        let bounds = BTreeMap::from([(top, unit), (child, unit)]);
+        let scene =
+            FrameScene::from_test_parts(plan, vec![styled_page(0, 0, unit)], bounds).unwrap();
+        let request = StyledGeometryRasterRequest {
+            layers: vec![LayerStyle {
+                layer_idx: 0,
+                color: [255, 0, 0, 255],
+                fill: LayerFill::Solid,
+                outline_width: 1,
+            }],
+            ..masked_request()
+        };
+        let error = render_geometry_styled(&scene, &request)
+            .err()
+            .expect("cycle must not be masked away");
+        assert!(error.contains("hierarchy cycle"), "unexpected error: {error}");
     }
 
     #[test]

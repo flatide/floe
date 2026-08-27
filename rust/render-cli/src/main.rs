@@ -148,7 +148,7 @@ fn run(raw: Vec<String>) -> Result<(), String> {
         };
         raster.frame.write_png(path)?;
         println!(
-            "raster\tmode={}\tpartial={}\tworkers={}\ttiles={}\trect_record_tests={}\trect_member_paints={}\tpolygon_record_tests={}\tpolygon_member_paints={}\tpath_record_tests={}\tpath_member_paints={}\tframe_record_tests={}\tframe_member_paints={}\tdeferred_frame_tests={}\trep_members_tested={}\trep_members_drawn={}\traster_us={}\tout={}",
+            "raster\tmode={}\tpartial={}\tworkers={}\ttiles={}\trect_record_tests={}\trect_member_paints={}\tpolygon_record_tests={}\tpolygon_member_paints={}\tpath_record_tests={}\tpath_member_paints={}\tframe_record_tests={}\tframe_member_paints={}\tdeferred_frame_tests={}\trep_members_tested={}\trep_members_drawn={}\thier_cells_visited={}\tsubtrees_pruned={}\traster_us={}\tout={}",
             mode,
             raster.partial as u8,
             raster.stats.workers_used,
@@ -164,6 +164,8 @@ fn run(raw: Vec<String>) -> Result<(), String> {
             raster.deferred_frame_tests,
             raster.stats.rep_members_tested,
             raster.stats.rep_members_drawn,
+            raster.stats.hier_cells_visited,
+            raster.stats.subtrees_pruned,
             raster.stats.raster_us,
             path,
         );

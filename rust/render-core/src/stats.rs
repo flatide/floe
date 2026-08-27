@@ -14,6 +14,11 @@ pub struct RenderStats {
     pub primitives_drawn: u64,
     pub rep_members_tested: u64,
     pub rep_members_drawn: u64,
+    /// Hierarchy walk entries across all tiles and paint planes
+    /// (geometry and frame-band walks; F2R-03b 2b gate metric).
+    pub hier_cells_visited: u64,
+    /// Instance edges skipped by the subtree content masks.
+    pub subtrees_pruned: u64,
     pub decoded_cache_hit: u32,
     pub decoded_cache_miss: u32,
     pub decoded_cache_bytes: u64,

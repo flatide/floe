@@ -409,13 +409,36 @@ retained Layout의 이득은 load(apply ≤9ms)뿐이다. floe2는 모든 인접
 tile LRU(F2R-10)의 착수 판정은 관찰이 나온 실칩 trace에서 같은 sweep을
 재측정한 뒤 내린다.
 
+### 3.13 실칩 GUI 첫 관측 — deep-zoom cold 뷰 (2026-08-27)
+
+실칩에서 두 제품 GUI를 depth 99(full), detail high로 열고
+`goto 775,1125,2`(view 2.0 x 1.9µm)로 이동한 cold 측정. 같은 working set
+(plan 246 pages, +194 new)에서:
+
+| 제품 | total | load | draw |
+|---|---:|---:|---:|
+| floe/KLayout | 1048ms | 906 (plan+delta+apply) | 142 |
+| floe2 | 564ms | 71 (plan+read+decode+scene) | 439 |
+
+- **load 축은 F2R-10 재구성(§F2R-10 관찰)이 실칩에서 확정**: 같은 194 새
+  page에 대해 KLayout delta authoring+apply 906ms vs Rust read+decode
+  71ms, **12.8배**. end-to-end로 floe2가 1.9배 빠르다.
+- **draw 축은 반대로 3.1배 열세**(439 vs 142ms, floe2는 r4 병렬 기준) —
+  깊은 zoom + full depth에서 tile×plane hierarchy 재순회가 지배한다는
+  F2R-03b 2단계 가설의 실칩 확인이다. sample9 hotspot(§3.12)에서는 이미
+  KLayout보다 빠르므로, 격차는 record 상수가 아니라 traversal 곱셈 쪽이다.
+  2b(cell×layer mask)가 이 regime를 직접 겨냥하고, 2c(tile×plane work
+  bin) 착수 판정에는 같은 뷰의 bench `--perf-baseline` phase/telemetry
+  (`wc_cells`/`inst_edges`/`hier_cells_visited`/`subtrees_pruned`)가
+  필요하다.
+
 ## 4. 이슈 목록
 
 | ID | 우선순위 | 상태 | 요약 | 다음 판정 |
 |---|---:|---|---|---|
 | F2R-01 | P1 | `DONE` | cache hit까지 128-page refine | cache-aware batch/unit+현장 gate 완료 |
 | F2R-02 | P1 | `DONE` | 128px tile의 반복 hierarchy 순회 | 제품 기본 384px 승인 |
-| F2R-03 | P1 | `DOING` | tile x layer x hierarchy 총 CPU 작업량 | 03a·03b-1·03b-2a 완료. 다음: 2b layer mask, 실칩 판정 |
+| F2R-03 | P1 | `DOING` | tile x layer x hierarchy 총 CPU 작업량 | 03a·03b-1·03b-2a·2b 완료. 다음: 실칩 재측정으로 2c work bin 판정 |
 | F2R-04 | P1 | `DONE` | total에서 사라진 PNG/publish 37~44ms | write/sync/rename/handoff 계측 완료 |
 | F2R-05 | P2 | `DONE` | jobs=8의 CPU/전력 비용 | decode 8/raster 4 분리 승인 |
 | F2R-06 | P3 | `BLOCKED` | render마다 OS thread 생성 | startup_us가 병목일 때만 pool |
@@ -566,7 +589,7 @@ prune과 큰 tile은 중복을 줄이는 완화책일 뿐이다. jobs=1도 tile=
     unit oracle, workspace 15 suite, KLayout oracle jobs 1/8, PX golden,
     integration 22 tests 전부 통과.
 
-  **2b. cell×layer subtree mask** (FrameScene 조립 시)
+  **2b. cell×layer subtree mask** (`DONE` 2026-08-27 — FrameScene 조립 시)
   - 문제: `render_cell()`이 styled layer마다, `render_frame_band()`가
     band 4회 hierarchy 전체를 재귀하며, subtree에 해당 layer가 없어도
     instance repetition을 전개한다. 실칩 mid-zoom(wc_cells 수천 × layer
@@ -581,6 +604,24 @@ prune과 큰 tile은 중복을 줄이는 완화책일 뿐이다. jobs=1도 tile=
   - gate: mask on/off pixel 동일성 unit oracle, 오류 도달성 유지(mask는
     pages/frames가 실제로 없는 subtree만 자르므로 오류 record를 숨길 수
     없음을 테스트로 고정), 신규 cell-방문 telemetry 감소 확인.
+  - 완료(2026-08-27): `SceneMasks`가 decoded page의 `layer_idx`와 wash
+    layer만 색인한다 — deferred page는 의도적으로 제외(순회도 건너뛰므로
+    pixel 불변). 오류 도달성 보존 규칙 두 가지를 구현에 고정했다: (1)
+    cycle back-edge는 조립을 실패시키는 대신 방문 cell을 full mask로
+    flood해 순회가 계속 내려가 자체 cycle 오류에 도달하게 한다. (2) plan
+    에 없는 child는 mask가 답하지 않고(무조건 true) 순회의 missing-cell
+    검증이 그대로 발화한다. occupancy(`All`)는 gate 없음. telemetry
+    `hier_cells_visited`/`subtrees_pruned`를 `RenderStats`와 render-cli
+    raster 라인에 추가했다. 측정: sample9 hotspot(§3.12 설정)은 얕은
+    계층(wc_cells 22)이라 회귀·이득 모두 없음(serial raster 44.6→43.6ms
+    동률, occupancy PNG md5 동일). 합성 deep-hier fixture(8 layer × 8
+    chain × depth 5 2x2 array, 800x778 tile128 j1)에서 styled raster
+    24.3→16.6ms(-32%), `rep_members_tested` 223,424→101,512(-55%),
+    `subtrees_pruned` 2,744, PNG md5 동일. 검증: mask on/off·corrupt
+    도달성·cycle flood·frame prune unit oracle 포함 render-core 84개,
+    `validate_rust.sh` 전체 배터리(KLayout oracle jobs 1/8, PX/STYLE
+    골든, 실daemon integration) ALL OK. 실칩 deep-zoom(§3.13)의 draw
+    439ms가 어디까지 줄었는지는 같은 GUI/bench 재측정으로 판정한다.
 
   **2c. frame당 1회 (image tile × paint plane) work bin**
   - 문제: 2b 후에도 tile마다 hierarchy walk 자체는 반복된다. 4-worker
@@ -713,6 +754,12 @@ decode를 키우므로(§3.11 sample9 +70%) 실칩에서 병목이면 lazy 구�
 (3) F2R-11 center-first streaming이다. bench report가 두 backend의 해당
 phase를 모두 담으므로(§3.12) 같은 두 명령으로 바로 판정한다.
 
+관찰 갱신(2026-08-27): 실칩 GUI cold deep-zoom 실측(§3.13)이 load 축을
+수치로 확정했다 — 같은 +194 page에 KLayout load 906ms vs floe2 71ms
+(12.8배), end-to-end 1048 vs 564ms. 남은 판정은 **재방문**(working set이
+LRU에 남은 상태)의 load 잔량과 budget 초과 여부이며 pan-sweep trace로
+잰다.
+
 먼저 같은 zoom/detail/depth/layer에서 warm settle 후 X/Y로 화면 폭의
 `1/16, 1/8, 1/4`만큼 이동하고 되돌아오는 trace를 각각 3회 측정한다
 (`tools/bench_floe2.py --pan-sweep`; sample9 결과는 §3.12). floe는
@@ -823,11 +870,12 @@ KLayout의 95% 처리 성능을 먼저 달성하고 병렬 raster를 latency 가
 3. F2R-10 fixed-scale pan sweep은 sample9에서 완료(§3.12): 인접 pan 열세가
    재현되지 않았고 floe2가 전 구간 우세였다. 관찰이 나온 실칩 trace에서 같은
    `--pan-sweep`을 재측정한 뒤 world-tile 착수를 판정한다.
-4. F2R-03b 2단계: 2a Pts chunk는 완료(-95% member 테스트, KLayout
-   y-sort 자연 적중). 다음은 2b layer mask이며, 2c work bin은 실칩
-   bench의 traversal 곱셈 비중과 load 축 판정(F2R-10 관찰 갱신)을
-   입력으로 착수한다. exact 재방문 cache를 회귀시키지 않는 경우에만
-   편입한다.
+4. F2R-03b 2단계: 2a Pts chunk 완료(-95% member 테스트, KLayout
+   y-sort 자연 적중), 2b layer mask 완료(deep-hier fixture styled raster
+   -32%·member 테스트 -55%, sample9 회귀 없음, 2026-08-27). 2c work
+   bin은 2b 반영 실칩 재측정의 draw 잔량과
+   `hier_cells_visited`/`subtrees_pruned` telemetry를 입력으로
+   착수한다. exact 재방문 cache를 회귀시키지 않는 경우에만 편입한다.
 5. 같은 work bin 위에서 F2R-10 world-aligned tile LRU를 작게 prototype하고 field trace
    20% gate를 넘을 때만 제품화한다.
 6. 1024-page를 넘는 장시간 cold fixture로 F2R-11 final-tile streaming의 first/settled
