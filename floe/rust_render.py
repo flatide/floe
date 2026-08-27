@@ -19,28 +19,14 @@ from . import __version__
 
 
 _DEFAULT_JOBS = max(1, min(8, os.cpu_count() or 1))
+# Deliberately FIXED, not host-proportional (F2R-10, user call
+# 2026-08-28): the viewers run on shared servers where a
+# half-the-RAM default is a neighbor hazard. Revisits beyond the
+# budget re-decode, but the OS page cache holds the encoded .floe
+# pages, so a miss costs decode only (read was 0.6% of decode on
+# sample9). Sessions that want floe-scale retention opt in with
+# FLOE_RUST_BUDGET_MB.
 _DEFAULT_BUDGET_MB = 1024
-
-
-def _default_budget_mb():
-    """Adaptive decoded-page budget: half the host's physical RAM,
-    never under the historic 1024MB floor (also the fallback when the
-    host size cannot be read).
-
-    F2R-10 (2026-08-28): the stable product's vfsd ledger charges
-    ENCODED bytes while this LRU charges decoded memory - 15.3x apart
-    on sample9 - so a fixed 1024MB retains ~1/15th of the area floe
-    keeps and real-chip revisits thrash. The budget is a cap, not an
-    allocation: the LRU only holds pages actually decoded, so small
-    sessions cost nothing extra. FLOE_RUST_BUDGET_MB still overrides.
-    """
-    try:
-        total = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
-    except (AttributeError, OSError, ValueError):
-        return _DEFAULT_BUDGET_MB
-    if total <= 0:
-        return _DEFAULT_BUDGET_MB
-    return max(_DEFAULT_BUDGET_MB, int(total // (2 * 1024 * 1024)))
 _DEFAULT_ROUND_PAGES = 1024
 _NO_REFINEMENT_ROUND_PAGES = 1 << 30
 _DEFAULT_TILE_PX = 384
@@ -229,7 +215,7 @@ class RustRenderWorker:
         self._raster_jobs_count = _env_int(
             "FLOE_RUST_RASTER_JOBS", min(4, self._jobs_count), 1, 256)
         self._budget_mb = _env_int(
-            "FLOE_RUST_BUDGET_MB", _default_budget_mb(), 1, 1 << 20)
+            "FLOE_RUST_BUDGET_MB", _DEFAULT_BUDGET_MB, 1, 1 << 20)
         # The shared viewer spells no intermediate frames as stream_kb=0:
         # stable floe passes that to vfsd, while Rust makes every practical
         # miss set one batch.  This intentionally overrides the tuning env so
