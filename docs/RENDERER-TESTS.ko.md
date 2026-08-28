@@ -147,6 +147,16 @@ sub-pixel은 outline line으로 그리므로 패턴 미적용이 맞다).
   일치), 긴 축은 edge-snap span.
 - 대각(양축 모두 1px 이상인 얇은 도형)은 비대상 — 기존 경로.
 - dotted stroke(frame band 3)는 비대상 — band 스타일 유지.
+- **stroke width > 1도 비대상** (2026-08-28 리뷰 HIGH 수정): 최초
+  구현이 StrokeStyle만 보고 collapse해 굵은 외곽선(2~8px)이 1px로
+  뭉개졌다 — w4 A/B에서 l1-axis KLayout 84,303 vs Rust 24,158px,
+  interior missing 44,206(밴드 밖 회귀). width==1 gate 후 84,042 vs
+  84,303(±0.3%), interior 257로 수렴. `tools/hairline_ab.py
+  <workdir> [width]`가 w별 A/B를 재현하고, unit oracle
+  `hairline_fast_path_requires_unit_stroke_width`가 w {1,2,4,8}
+  sweep과 w4 representation-exact를 고정한다. KLayout의 폭별
+  collapse 규칙(폭 w hairline이 어느 픽셀들을 얻는가)은 측정 후
+  별도 채택 판단으로 남긴다.
 
 효과(`tools/hairline_ab.py`, 858px/100µm): sub-pixel 점 300개 on
 588→**300**(KLayout과 동수), 그중 285개는 픽셀까지 일치. hairline

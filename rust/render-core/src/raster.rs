@@ -1911,9 +1911,15 @@ fn checked_add(a: i64, b: i64, field: &str) -> Result<i64, String> {
 fn hairline_world_bbox(
     request: &GeometryRasterRequest,
     world: BBox,
-    stroke: StrokeStyle,
+    paint: PaintStyle,
 ) -> Result<Option<(i128, i128, i128, i128)>, String> {
-    if !matches!(stroke, StrokeStyle::Solid) {
+    // 1px solid strokes only. A wider outline paints far more than
+    // the collapsed cells (KLayout w4 A/B: 84,303 vs 24,158 px — an
+    // interior-diff regression, not band noise), so thick-stroked
+    // members keep the full fill+stroke pipeline until KLayout's
+    // per-width collapse rule is measured. Dotted keeps the frame
+    // band styling.
+    if !matches!(paint.stroke, StrokeStyle::Solid) || paint.stroke_width != 1 {
         return Ok(None);
     }
     let (x0, y1) = world_to_device(request, world.x0, world.y0)?;
@@ -1994,7 +2000,7 @@ fn paint_world_rect(
     world: BBox,
     paint: PaintStyle,
 ) -> Result<bool, String> {
-    if let Some(rect) = hairline_world_bbox(request, world, paint.stroke)? {
+    if let Some(rect) = hairline_world_bbox(request, world, paint)? {
         return paint_hairline_device_rect(band, request, rect, paint);
     }
     let filled = fill_world_rect(band, request, world, paint)?;
@@ -2019,7 +2025,7 @@ fn paint_world_polygon(
     paint: PaintStyle,
 ) -> Result<bool, String> {
     if let Some(world) = polygon_bbox(points) {
-        if let Some(rect) = hairline_world_bbox(request, world, paint.stroke)? {
+        if let Some(rect) = hairline_world_bbox(request, world, paint)? {
             return paint_hairline_device_rect(band, request, rect, paint);
         }
     }
@@ -2047,7 +2053,7 @@ fn paint_world_path(
     paint: PaintStyle,
 ) -> Result<bool, String> {
     if let Some(world) = polygon_bbox(outline) {
-        if let Some(rect) = hairline_world_bbox(request, world, paint.stroke)? {
+        if let Some(rect) = hairline_world_bbox(request, world, paint)? {
             // The centerline lies inside the collapsed outline bbox, so
             // its stroke pass is covered by the collapsed spans.
             return paint_hairline_device_rect(band, request, rect, paint);
@@ -4090,6 +4096,81 @@ mod tests {
     }
 
     #[test]
+    fn hairline_fast_path_requires_unit_stroke_width() {
+        // A 2-8px outline paints far more than the collapsed cells
+        // (KLayout w4 A/B: 84,303 vs 24,158 px), so only width-1
+        // solid strokes may take the fast path. Wider widths must
+        // keep the full fill+stroke pipeline and stay
+        // representation-exact.
+        let sub_rect = RectRec {
+            layer: 1,
+            dt: 0,
+            x: 24,
+            y: 304,
+            w: 5,
+            h: 4,
+            rep: Rep::One,
+        };
+        let request_with = |width: u8| {
+            let mut styled = hairline_request();
+            styled.layers[0].outline_width = width;
+            styled
+        };
+        let mut previous = 0usize;
+        for width in [1u8, 2, 4, 8] {
+            let report = render_geometry_styled(
+                &hairline_scene(vec![sub_rect.clone()], Vec::new(), Vec::new()),
+                &request_with(width),
+            )
+            .unwrap();
+            let lit = lit_pixels(&report.frame).len();
+            if width == 1 {
+                assert_eq!(lit, 1, "width 1 collapses to one cell");
+            } else {
+                assert!(
+                    lit > previous,
+                    "width {width} must stroke wider: {lit} vs {previous}"
+                );
+            }
+            previous = lit;
+        }
+        // representation-exact must hold on the non-collapsed path too
+        let poly = PolyRec {
+            layer: 1,
+            dt: 0,
+            pts: vec![(24, 304), (29, 304), (29, 308), (24, 308)],
+            rep: Rep::One,
+        };
+        let path = PathRec {
+            layer: 1,
+            dt: 0,
+            pts: vec![(24, 306), (29, 306)],
+            hw: 2,
+            es: 0,
+            ee: 0,
+            rep: Rep::One,
+        };
+        let request = request_with(4);
+        let as_rect = render_geometry_styled(
+            &hairline_scene(vec![sub_rect], Vec::new(), Vec::new()),
+            &request,
+        )
+        .unwrap();
+        let as_poly = render_geometry_styled(
+            &hairline_scene(Vec::new(), vec![poly], Vec::new()),
+            &request,
+        )
+        .unwrap();
+        let as_path = render_geometry_styled(
+            &hairline_scene(Vec::new(), Vec::new(), vec![path]),
+            &request,
+        )
+        .unwrap();
+        assert_eq!(as_rect.frame.pixels(), as_poly.frame.pixels());
+        assert_eq!(as_rect.frame.pixels(), as_path.frame.pixels());
+    }
+
+    #[test]
     fn hairline_collapse_skips_dotted_strokes() {
         let request = hairline_request().raster;
         let world = BBox {
@@ -4098,9 +4179,22 @@ mod tests {
             x1: 29,
             y1: 309,
         };
-        let dotted = hairline_world_bbox(&request, world, StrokeStyle::Dotted).unwrap();
+        let dotted = hairline_world_bbox(
+            &request,
+            world,
+            PaintStyle {
+                stroke: StrokeStyle::Dotted,
+                ..PaintStyle::solid([255, 255, 255, 255])
+            },
+        )
+        .unwrap();
         assert!(dotted.is_none(), "dotted frames keep their band styling");
-        let solid = hairline_world_bbox(&request, world, StrokeStyle::Solid).unwrap();
+        let solid = hairline_world_bbox(
+            &request,
+            world,
+            PaintStyle::solid([255, 255, 255, 255]),
+        )
+        .unwrap();
         assert!(solid.is_some());
     }
 

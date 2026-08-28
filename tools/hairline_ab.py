@@ -29,6 +29,9 @@ assert (ROOT / "floe").is_dir(), "run from the repo root"
 sys.path.insert(0, str(ROOT))
 
 SCRATCH = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT
+# Optional outline width (default 1): `hairline_ab.py <workdir> 4`
+# reproduces the w4 review finding - wide strokes must NOT collapse.
+STROKE_W = int(sys.argv[2]) if len(sys.argv) > 2 else 1
 WORK = SCRATCH / "hairline-ab"
 WORK.mkdir(exist_ok=True)
 
@@ -94,7 +97,7 @@ def render_klayout(source, output, visible):
     renderer = Renderer(layout, layout.top_cell(), COLORS)
     try:
         renderer.set_fill_patterns({key: "solid" for key in COLORS})
-        renderer.set_line_widths({key: 1 for key in COLORS})
+        renderer.set_line_widths({key: STROKE_W for key in COLORS})
         renderer.set_mono(False)
         renderer.set_visible(visible)
         renderer.lv.save_image_with_options(
@@ -146,11 +149,11 @@ def main():
         str(source), str(cache)], check=True, capture_output=True)
 
     cases = {
-        "l1-axis": ([(1, 0)], ("1/0,#ef3340,solid,1",)),
-        "l2-diag": ([(2, 0)], ("2/0,#35d04f,solid,1",)),
-        "l3-dots": ([(3, 0)], ("3/0,#3578ff,solid,1",)),
+        "l1-axis": ([(1, 0)], ("1/0,#ef3340,solid,%d" % STROKE_W,)),
+        "l2-diag": ([(2, 0)], ("2/0,#35d04f,solid,%d" % STROKE_W,)),
+        "l3-dots": ([(3, 0)], ("3/0,#3578ff,solid,%d" % STROKE_W,)),
         "all": (list(COLORS), tuple(
-            "%d/%d,%s,solid,1" % (l, d, COLORS[(l, d)])
+            "%d/%d,%s,solid," % (l, d, COLORS[(l, d)]) + str(STROKE_W)
             for (l, d) in sorted(COLORS))),
     }
     for name, (visible, styles) in cases.items():
