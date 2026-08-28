@@ -531,6 +531,18 @@ fanout**(개별 배치, members=1)이 원인이라 per-(visit,page) item이
 형태도 수집을 부풀릴 수 없다. byte 동일 oracle 유지(92 tests).
 실칩 3차 확인 대기.
 
+**비교 조건 정정(실칩 3차 정보)**: floe2 측정은 전부 frame off였고,
+**floe도 frame off로 맞추면 draw 2,252→1,101ms** — 동일 조건에서
+floe2 draw(2,496ms)는 아직 **2.3배 열세**다(total은 floe2 2.9s vs
+floe ~5.1s로 여전히 우세). 이 1,101ms는 §3.15 분해의 floe2 paint
+몫(~1.2s)과 일치하므로, **bin 적중 시 draw 동률**이 기대
+시나리오이고 그 이하는 F2R-03c 영역이다. 별개로 이 조사에서
+`render_prepared_labels`의 스캔 배수를 발견해 수정했다 — 호출마다
+전체 row를 선별 검사(207k row × (tile 9 × plane ~40 + block pass)
+≈ 78M/frame)하던 것을 build 시 selection별(layer/block) 그룹으로
+나눠 자기 그룹만 순회한다(그룹 내 순서 = row 순서 → byte 불변).
+labels on 뷰의 label 비용이 크게 줄어든다.
+
 §3.13의 "load 10초+/draw 5초+" 지점을 0.12.19 telemetry로 실측한
 결과 (view 100.0×96.6µm, 824x796, cut<0.122µm, 5698 pages/+5616
 miss, 207k text places, labels partial):

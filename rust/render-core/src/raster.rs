@@ -312,6 +312,13 @@ enum RenderMode<'a> {
 struct PreparedLabels {
     atlas: GlyphAtlas,
     rows: Vec<PreparedLabel>,
+    /// Row indices grouped per selection, in row order. A field view
+    /// carried 207k rows scanned once per (tile x plane) - ~78M
+    /// selection tests per frame (2026-08-28); the walk now touches
+    /// only its own plane's rows.
+    by_layer: std::collections::HashMap<u32, Vec<u32>>,
+    block_gray: Vec<u32>,
+    block_white: Vec<u32>,
 }
 
 struct PreparedLabel {
@@ -410,7 +417,32 @@ impl PreparedLabels {
                 bbox,
             });
         }
-        Ok((Some(Self { atlas, rows }), labels_truncated))
+        let mut by_layer: std::collections::HashMap<u32, Vec<u32>> =
+            std::collections::HashMap::new();
+        let mut block_gray = Vec::new();
+        let mut block_white = Vec::new();
+        for (index, row) in rows.iter().enumerate() {
+            let index = index as u32;
+            if row.block {
+                if row.white {
+                    block_white.push(index);
+                } else {
+                    block_gray.push(index);
+                }
+            } else if let Some(layer_idx) = row.layer_idx {
+                by_layer.entry(layer_idx).or_default().push(index);
+            }
+        }
+        Ok((
+            Some(Self {
+                atlas,
+                rows,
+                by_layer,
+                block_gray,
+                block_white,
+            }),
+            labels_truncated,
+        ))
     }
 }
 
@@ -1560,11 +1592,20 @@ fn render_prepared_labels(
         i64::from(band.col1),
         i64::from(band.row1),
     );
+    static EMPTY: Vec<u32> = Vec::new();
+    let group = match selection {
+        LabelSelection::Block { white: true } => &labels.block_white,
+        LabelSelection::Block { white: false } => &labels.block_gray,
+        LabelSelection::Layer(layer_idx) => {
+            labels.by_layer.get(&layer_idx).unwrap_or(&EMPTY)
+        }
+    };
     let mut cancel_member = 0u16;
-    for label in &labels.rows {
+    for &row in group {
         check_member_cancelled(guard, &mut cancel_member)?;
-        if !selection.includes(label)
-            || label.bbox.2 <= tile.0
+        let label = &labels.rows[row as usize];
+        debug_assert!(selection.includes(label));
+        if label.bbox.2 <= tile.0
             || label.bbox.0 >= tile.2
             || label.bbox.3 <= tile.1
             || label.bbox.1 >= tile.3
