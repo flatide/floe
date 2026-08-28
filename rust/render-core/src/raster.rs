@@ -719,14 +719,38 @@ enum PlaneItem {
     Wash {
         world_bbox: BBox,
     },
+    /// A member-dense instance left unexpanded (field §3.15: expanding
+    /// fill arrays at frame scope blew the 768k cap). The tile expands
+    /// it locally with the walk's own code, so pixels are unchanged
+    /// and the collection stays bounded. `bit` is this plane's 2b mask
+    /// bit, mirroring the walk's per-plane descent gate.
+    Deferred {
+        transform: OrthoTransform,
+        inverse: OrthoTransform,
+        cell: WsKey,
+        inst: usize,
+        bit: Option<usize>,
+    },
 }
 
-struct FrameItem {
-    world_bbox: BBox,
-    transform: OrthoTransform,
-    inverse: OrthoTransform,
-    cell: WsKey,
+enum FrameItem {
+    Cell {
+        world_bbox: BBox,
+        transform: OrthoTransform,
+        inverse: OrthoTransform,
+        cell: WsKey,
+    },
+    Deferred {
+        transform: OrthoTransform,
+        inverse: OrthoTransform,
+        cell: WsKey,
+        inst: usize,
+    },
 }
+
+/// Instances whose repetition holds more members than this stay
+/// unexpanded in the bin and are walked per tile instead.
+const WORK_BIN_DEFER_MEMBERS: u64 = 4096;
 
 /// Item cap (~64MB of items); past it the round falls back to the
 /// per-tile walk (`work_bin_items=0` telemetry), pixels unchanged.
@@ -762,6 +786,11 @@ fn collect_work_bin(
     }
     let layer_indices: Vec<u32> = styled.layers.iter().map(|layer| layer.layer_idx).collect();
     let query = scene.layer_query_words(&layer_indices);
+    let plane_bits: Vec<Option<usize>> = styled
+        .layers
+        .iter()
+        .map(|layer| scene.layer_mask_bit(layer.layer_idx))
+        .collect();
     let mut bin = WorkBin {
         planes: (0..styled.layers.len()).map(|_| Vec::new()).collect(),
         frames: Vec::new(),
@@ -773,6 +802,7 @@ fn collect_work_bin(
         &mut bin,
         &plane_of,
         &query,
+        &plane_bits,
         styled.hierarchy_frames,
         cull_view,
         guard,
@@ -797,6 +827,7 @@ fn collect_cell(
     bin: &mut WorkBin,
     plane_of: &std::collections::HashMap<u32, usize>,
     query: &[u64],
+    plane_bits: &[Option<usize>],
     want_frames: bool,
     cull_view: BBox,
     guard: Option<RenderGuard<'_>>,
@@ -860,7 +891,7 @@ fn collect_cell(
             world_transform.apply_bbox(cell_bbox)?
         };
         bin.charge()?;
-        bin.frames.push(FrameItem {
+        bin.frames.push(FrameItem::Cell {
             world_bbox,
             transform: world_transform,
             inverse,
@@ -868,7 +899,7 @@ fn collect_cell(
         });
     }
 
-    for instance in &cell.insts {
+    for (inst_index, instance) in cell.insts.iter().enumerate() {
         check_cancelled(guard)?;
         let child_bbox = scene
             .cell_bbox(instance.child)
@@ -881,6 +912,33 @@ fn collect_cell(
         // and (when frames are on) no hierarchy frames.
         if !scene.subtree_intersects(instance.child, query, want_frames) {
             stats.subtrees_pruned = stats.subtrees_pruned.saturating_add(1);
+            continue;
+        }
+        if instance.rep.members() > WORK_BIN_DEFER_MEMBERS {
+            // Dense repetition: keep it unexpanded, one deferred item
+            // per plane the subtree can actually paint (the walk's own
+            // per-plane descent gate), plus one for the band walks.
+            for (plane, bit) in plane_bits.iter().enumerate() {
+                if scene.subtree_paints(instance.child, *bit) {
+                    bin.charge()?;
+                    bin.planes[plane].push(PlaneItem::Deferred {
+                        transform: world_transform,
+                        inverse,
+                        cell: key,
+                        inst: inst_index,
+                        bit: *bit,
+                    });
+                }
+            }
+            if want_frames && scene.subtree_has_frames(instance.child) {
+                bin.charge()?;
+                bin.frames.push(FrameItem::Deferred {
+                    transform: world_transform,
+                    inverse,
+                    cell: key,
+                    inst: inst_index,
+                });
+            }
             continue;
         }
         let base_place =
@@ -902,6 +960,7 @@ fn collect_cell(
                     bin,
                     plane_of,
                     query,
+                    plane_bits,
                     want_frames,
                     cull_view,
                     guard,
@@ -1018,6 +1077,67 @@ fn raster_tile_from_bin(
                         stats.primitives_drawn = stats.primitives_drawn.saturating_add(1);
                     }
                 }
+                PlaneItem::Deferred {
+                    transform,
+                    inverse,
+                    cell,
+                    inst,
+                    bit,
+                } => {
+                    let parent = scene.cell(*cell).ok_or_else(|| {
+                        format!("internal error: binned cell {:?} left the scene", cell)
+                    })?;
+                    let instance = parent.insts.get(*inst).ok_or_else(|| {
+                        format!("internal error: binned instance {inst} left the scene")
+                    })?;
+                    let child_bbox = scene.cell_bbox(instance.child).ok_or_else(|| {
+                        format!(
+                            "invalid plan: missing bbox for child {:?}",
+                            instance.child
+                        )
+                    })?;
+                    let base_place = OrthoTransform::place(
+                        instance.x,
+                        instance.y,
+                        instance.rot,
+                        instance.flip,
+                    )?;
+                    let base_bbox = base_place.apply_bbox(child_bbox)?;
+                    let local_view = inverse.apply_bbox(cull_view)?;
+                    let mut deferred_path = Vec::new();
+                    let mut cancel_member = 0u16;
+                    let visit = for_each_visible_offset(
+                        &instance.rep,
+                        base_bbox,
+                        local_view,
+                        |offset_x, offset_y| {
+                            check_member_cancelled(guard, &mut cancel_member)?;
+                            let x = checked_add(instance.x, offset_x, "instance x")?;
+                            let y = checked_add(instance.y, offset_y, "instance y")?;
+                            let local =
+                                OrthoTransform::place(x, y, instance.rot, instance.flip)?;
+                            let child_world = transform.compose(&local)?;
+                            render_cell(
+                                scene,
+                                request,
+                                band,
+                                cull_view,
+                                stats,
+                                counters,
+                                GeometrySelection::Layer(layer.layer_idx),
+                                SubtreePrune::Layer(*bit),
+                                paint,
+                                guard,
+                                instance.child,
+                                child_world,
+                                &mut deferred_path,
+                                record_scratch,
+                            )
+                        },
+                    )?;
+                    stats.rep_members_tested =
+                        stats.rep_members_tested.saturating_add(visit.tested);
+                }
             }
         }
         render_prepared_labels(
@@ -1071,25 +1191,87 @@ fn bin_frames(
     guard: Option<RenderGuard<'_>>,
 ) -> Result<(), String> {
     for item in &bin.frames {
-        if !item.world_bbox.intersects(&cull_view) {
-            continue;
+        match item {
+            FrameItem::Cell {
+                world_bbox,
+                transform,
+                inverse,
+                cell,
+            } => {
+                if !world_bbox.intersects(&cull_view) {
+                    continue;
+                }
+                let cell = scene.cell(*cell).ok_or_else(|| {
+                    format!("internal error: binned cell {:?} left the scene", cell)
+                })?;
+                let local_view = inverse.apply_bbox(cull_view)?;
+                raster_cell_frames(
+                    band,
+                    request,
+                    cell,
+                    selected_band,
+                    local_view,
+                    *transform,
+                    stats,
+                    counters,
+                    paint,
+                    guard,
+                )?;
+            }
+            FrameItem::Deferred {
+                transform,
+                inverse,
+                cell,
+                inst,
+            } => {
+                let parent = scene.cell(*cell).ok_or_else(|| {
+                    format!("internal error: binned cell {:?} left the scene", cell)
+                })?;
+                let instance = parent.insts.get(*inst).ok_or_else(|| {
+                    format!("internal error: binned instance {inst} left the scene")
+                })?;
+                let child_bbox = scene.cell_bbox(instance.child).ok_or_else(|| {
+                    format!("invalid plan: missing bbox for child {:?}", instance.child)
+                })?;
+                let base_place = OrthoTransform::place(
+                    instance.x,
+                    instance.y,
+                    instance.rot,
+                    instance.flip,
+                )?;
+                let base_bbox = base_place.apply_bbox(child_bbox)?;
+                let local_view = inverse.apply_bbox(cull_view)?;
+                let mut deferred_path = Vec::new();
+                let mut cancel_member = 0u16;
+                let visit = for_each_visible_offset(
+                    &instance.rep,
+                    base_bbox,
+                    local_view,
+                    |offset_x, offset_y| {
+                        check_member_cancelled(guard, &mut cancel_member)?;
+                        let x = checked_add(instance.x, offset_x, "instance x")?;
+                        let y = checked_add(instance.y, offset_y, "instance y")?;
+                        let local = OrthoTransform::place(x, y, instance.rot, instance.flip)?;
+                        let child_world = transform.compose(&local)?;
+                        render_frame_band(
+                            scene,
+                            request,
+                            band,
+                            cull_view,
+                            stats,
+                            counters,
+                            selected_band,
+                            paint,
+                            guard,
+                            instance.child,
+                            child_world,
+                            &mut deferred_path,
+                        )
+                    },
+                )?;
+                stats.rep_members_tested = stats.rep_members_tested.saturating_add(visit.tested);
+            }
         }
-        let cell = scene.cell(item.cell).ok_or_else(|| {
-            format!("internal error: binned cell {:?} left the scene", item.cell)
-        })?;
-        let local_view = item.inverse.apply_bbox(cull_view)?;
-        raster_cell_frames(
-            band,
-            request,
-            cell,
-            selected_band,
-            local_view,
-            item.transform,
-            stats,
-            counters,
-            paint,
-            guard,
-        )?;
     }
     Ok(())
 }
@@ -4839,6 +5021,91 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn work_bin_defers_dense_repetitions_instead_of_capping() {
+        // A 70x70 instance grid (4,900 members) crosses the deferral
+        // threshold: the bin must stay tiny (deferred items, no member
+        // expansion) and the pixels must still match the walk - the
+        // field failure mode was this shape blowing the 768k cap.
+        let top = (0, REM_FULL);
+        let child = (1, REM_FULL);
+        let unit = BBox {
+            x0: 0,
+            y0: 0,
+            x1: 2,
+            y1: 2,
+        };
+        let span = BBox {
+            x0: 0,
+            y0: 0,
+            x1: 320,
+            y1: 320,
+        };
+        let bounds = BTreeMap::from([(top, span), (child, unit)]);
+        let make_scene = || {
+            let plan = HierPlan {
+                top,
+                wcells: vec![
+                    WsCell {
+                        key: top,
+                        pages: Vec::new(),
+                        insts: vec![WsInst {
+                            child,
+                            x: 2,
+                            y: 2,
+                            rot: 0,
+                            flip: false,
+                            rep: Rep::Grid {
+                                na: 70,
+                                nb: 70,
+                                va: (4, 0),
+                                vb: (0, 4),
+                            },
+                        }],
+                        frames: Vec::new(),
+                        washes: Vec::new(),
+                    },
+                    WsCell {
+                        key: child,
+                        pages: vec![0],
+                        insts: Vec::new(),
+                        frames: vec![(unit, Rep::One, 1)],
+                        washes: Vec::new(),
+                    },
+                ],
+                pages: vec![0],
+                page_prio: vec![0],
+                stats: HierStats::default(),
+            };
+            FrameScene::from_test_parts(
+                plan,
+                vec![styled_page(0, 1, unit)],
+                bounds.clone(),
+            )
+            .unwrap()
+        };
+        let request = StyledGeometryRasterRequest {
+            hierarchy_frames: true,
+            ..hairline_request()
+        };
+        let walk = render_geometry_styled_unbinned(&make_scene(), &request).unwrap();
+        let bin = render_geometry_styled(&make_scene(), &request).unwrap();
+        assert!(bin.stats.work_bin_items > 0, "bin must engage");
+        assert!(
+            bin.stats.work_bin_items < 100,
+            "dense grid must defer, not expand: {} items",
+            bin.stats.work_bin_items
+        );
+        assert_eq!(bin.stats.work_bin_overflow_items, 0, "no cap fallback");
+        assert_eq!(bin.frame.pixels(), walk.frame.pixels());
+        assert_eq!(
+            bin.rectangle_member_paints,
+            walk.rectangle_member_paints
+        );
+        assert_eq!(bin.frame_member_paints, walk.frame_member_paints);
+        assert!(bin.rectangle_member_paints > 1000, "grid must paint");
     }
 
     #[test]

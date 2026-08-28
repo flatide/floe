@@ -509,6 +509,17 @@ hier 1.8M/60.5M(walk 폴백의 per-tile gate). 잔여 후보의 기대 이득:
 plane(구조적 per-member 상수). 경과 요약:
 11.66s → 5.00s(cost-aware 2 round) → **2.92s**(단발 round).
 
+**tile sweep 판정(같은 날)**: FLOE_RUST_TILE_PX 384/192/128 → draw
+2.47/4.78/8.78초, pruned 60.5/155.1/311.3M — walk 모드 traversal이
+tile 수(9/25/49)에 정확히 비례한다. ② adaptive tile은 이 regime에서
+**기각**(역효과), 대신 회귀선에서 tile당 traversal ≈144ms →
+**384px에서 draw의 ~53%(1.3초)가 traversal**로 확정. 이에 따라 ①을
+구현했다: `Rep.members() > 4096`인 instance는 수집 시 전개하지 않고
+plane별 Deferred item으로 남겨 tile이 기존 walk 코드로 지역
+전개한다(2b per-plane gate 그대로, byte 동일 oracle로 고정 — dense
+70×70 grid에서 bin item < 100, cap 미달, pixel 동일). 기대: bin
+적중 시 draw 2.47→~1.2초. 실칩 `bin N items` 확인 대기.
+
 §3.13의 "load 10초+/draw 5초+" 지점을 0.12.19 telemetry로 실측한
 결과 (view 100.0×96.6µm, 824x796, cut<0.122µm, 5698 pages/+5616
 miss, 207k text places, labels partial):
