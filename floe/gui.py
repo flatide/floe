@@ -2683,6 +2683,14 @@ class Viewer:
                     if res.get("raster_tile_max_ms"):
                         text += ", tile-max %.0fms" % (
                             res["raster_tile_max_ms"])
+                    if res.get("work_bin_items"):
+                        text += ", bin %s items" % fmt_count(
+                            res["work_bin_items"])
+                    elif res.get("work_bin_overflow_items"):
+                        # bin hit its item cap and fell back to the
+                        # per-tile walk (pixels identical, slower)
+                        text += ", bin off(cap@%s)" % fmt_count(
+                            res["work_bin_overflow_items"])
                     if res.get("hier_cells_visited"):
                         text += ", hier %s/%s pruned" % (
                             fmt_count(res["hier_cells_visited"]),

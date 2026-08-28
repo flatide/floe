@@ -783,7 +783,10 @@ fn collect_work_bin(
     );
     match walk {
         Ok(()) => Ok(Some(bin)),
-        Err(error) if error == WORK_BIN_OVERFLOW => Ok(None),
+        Err(error) if error == WORK_BIN_OVERFLOW => {
+            stats.work_bin_overflow_items = bin.items;
+            Ok(None)
+        }
         Err(error) => Err(error),
     }
 }

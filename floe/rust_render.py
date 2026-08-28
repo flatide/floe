@@ -469,7 +469,7 @@ class RustRenderWorker:
             # traversal counters (sum over rounds; maxes keep max)
             "rounds": 0, "decode_sum_us": 0, "decode_max_us": 0,
             "index_us": 0, "raster_tile_max_us": 0, "mask_bytes": 0,
-            "bin_items": 0,
+            "bin_items": 0, "bin_overflow": 0,
             "rep_tested": 0, "rep_drawn": 0,
             "hier_cells": 0, "subtree_prunes": 0,
         }
@@ -906,6 +906,8 @@ class RustRenderWorker:
         state["mask_bytes"] = max(
             state["mask_bytes"], _wire_int(fields, "mask_bytes"))
         state["bin_items"] += _wire_int(fields, "bin_items")
+        state["bin_overflow"] = max(
+            state["bin_overflow"], _wire_int(fields, "bin_overflow"))
         state["rep_tested"] += _wire_int(fields, "rep_tested")
         state["rep_drawn"] += _wire_int(fields, "rep_drawn")
         state["hier_cells"] += _wire_int(fields, "hier_cells")
@@ -985,6 +987,7 @@ class RustRenderWorker:
             "raster_tile_max_ms": state["raster_tile_max_us"] / 1000.0,
             "mask_mb": state["mask_bytes"] / (1024.0 * 1024.0),
             "work_bin_items": state["bin_items"],
+            "work_bin_overflow_items": state["bin_overflow"],
             "rep_members_tested": state["rep_tested"],
             "rep_members_drawn": state["rep_drawn"],
             "hier_cells_visited": state["hier_cells"],

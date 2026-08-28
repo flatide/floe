@@ -44,7 +44,8 @@ PHASE_FIELDS = (
     # F2R diagnostics: refinement rounds, decode pool utilization and
     # stragglers, record-index build share, raster tail, traversal size
     "rounds", "decode_sum_ms", "decode_max_ms", "index_ms",
-    "raster_tile_max_ms", "mask_mb", "work_bin_items", "rep_members_tested",
+    "raster_tile_max_ms", "mask_mb", "work_bin_items",
+    "work_bin_overflow_items", "rep_members_tested",
     "rep_members_drawn",
     "hier_cells_visited", "subtrees_pruned",
     # stable floe/KLayout service phases (absent from Rust results)

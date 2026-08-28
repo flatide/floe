@@ -21,6 +21,9 @@ pub struct RenderStats {
     /// Items collected by the 2c work bin (0 = walk fallback or
     /// occupancy mode).
     pub work_bin_items: u64,
+    /// Items reached when the bin hit its cap and fell back to the
+    /// per-tile walk (0 = no overflow).
+    pub work_bin_overflow_items: u64,
     pub png_us: u64,
     pub tiles: u32,
     pub workers_used: u16,
