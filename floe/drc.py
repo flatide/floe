@@ -639,7 +639,7 @@ class IcePack(object):
                 # sections and SILENTLY breaks queries - refuse it
                 raise ValueError(
                     "%s: packed .ice layout %d is from an older "
-                    "build - re-run: floe-index drc <db> --pack"
+                    "build - re-run: floe-index drc <db>"
                     % (path, version))
             f.seek(0, os.SEEK_END)
             fsize = f.tell()

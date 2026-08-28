@@ -181,7 +181,8 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   선택한 .db는 직접 파스하지 않고 **오직 `<db>.ice`(pack)만
   로딩** — 신선한 현-레이아웃 pack이 없으면(부재/스테일/v1/구
   레이아웃) **"Build it now?" Yes/No로 물은 뒤**(2026-08-28,
-  `_ask_yes_no`) Yes면 `floe-index drc <db> --pack`을 실행하고
+  `_ask_yes_no`) Yes면 `floe-index drc <db>`(--pack은 no-op이라
+  생략)를 실행하고
   로그를 공용 **모달 다이얼로그**(`_index_modal`, cancel =
   terminate)에 실시간 표시 후 로딩(`_drc_open_db`/
   `_drc_pack_and_load`, 바이너리는 vfsclient.find_binary). load

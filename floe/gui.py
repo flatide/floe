@@ -4257,7 +4257,7 @@ class Viewer:
             btn.set_active(False)
             self._set_live_status(
                 "the in-view filter needs a packed index: "
-                "floe-index drc <db> --pack")
+                "floe-index drc <db>")
             return
         self._drc_hl = on
         self._drc_hl_res = None
@@ -4387,7 +4387,7 @@ class Viewer:
         self._drc_pack_and_load(path)
 
     def _drc_pack_and_load(self, path):
-        """Run `floe-index drc <db> --pack` with its log in a MODAL
+        """Run `floe-index drc <db>` with its log in a MODAL
         dialog, then load the pack."""
         from . import drc as drc_mod
         from .vfsclient import find_binary
@@ -4407,7 +4407,7 @@ class Viewer:
                     "cd rust && cargo build --release" % bin_)
 
         self._index_modal("indexing DRC results…",
-                          [bin_, "drc", path, "--pack", "--jobs", "12"],
+                          [bin_, "drc", path, "--jobs", "12"],
                           on_success, "DRC indexing")
 
     def _ask_yes_no(self, text, default_yes=True):
@@ -5140,7 +5140,7 @@ class Viewer:
         if not hasattr(db, "set_status"):
             self._set_live_status(
                 "waive needs a packed index: "
-                "floe-index drc <db> --pack")
+                "floe-index drc <db>")
             return True
         self._drc_cell_mark(row, j)
         self._drc_show_detail(ci, ei)
@@ -5261,7 +5261,7 @@ class Viewer:
         if not hasattr(db, "set_status"):
             self._set_live_status(
                 "waive needs a packed index: "
-                "floe-index drc <db> --pack")
+                "floe-index drc <db>")
             return
         sel = self._drc_sel
         if sel is not None and sel[1]:
@@ -5313,7 +5313,7 @@ class Viewer:
             return
         if not hasattr(db, "set_note"):
             self._set_live_status(
-                "note needs a packed index: floe-index drc <db> --pack")
+                "note needs a packed index: floe-index drc <db>")
             return
         target = self._drc_current_target()
         if target is None:
@@ -5497,7 +5497,7 @@ class Viewer:
         db = self._drc
         if db is None or not hasattr(db, "note_export"):
             self._set_live_status(
-                "notes need a packed index: floe-index drc <db> --pack")
+                "notes need a packed index: floe-index drc <db>")
             return
         dlg = Gtk.FileChooserDialog(title="save notes as",
                                     parent=self.window,
@@ -5532,7 +5532,7 @@ class Viewer:
         db = self._drc
         if db is None or not hasattr(db, "note_import"):
             self._set_live_status(
-                "notes need a packed index: floe-index drc <db> --pack")
+                "notes need a packed index: floe-index drc <db>")
             return
         dlg = Gtk.FileChooserDialog(title="load notes",
                                     parent=self.window,
@@ -5578,7 +5578,7 @@ class Viewer:
         if db is None or not hasattr(db, "waive_export"):
             self._set_live_status(
                 "waive save needs a packed index: "
-                "floe-index drc <db> --pack")
+                "floe-index drc <db>")
             return
         dlg = Gtk.FileChooserDialog(title="save waives as",
                                     parent=self.window,
@@ -5616,7 +5616,7 @@ class Viewer:
         if db is None or not hasattr(db, "waive_import"):
             self._set_live_status(
                 "waive load needs a packed index: "
-                "floe-index drc <db> --pack")
+                "floe-index drc <db>")
             return
         dlg = Gtk.FileChooserDialog(title="load waives",
                                     parent=self.window,
