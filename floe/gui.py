@@ -2294,43 +2294,26 @@ class Viewer:
             lbl.hide()
 
     def _update_note_labels(self, obox, ospp):
-        """DRC notes as a translucent panel at the top-left (flateyes
-        note style): the distinct notes of the errors currently
-        painted on the canvas, one per line. A widget like the ruler
-        chips, so the FIRST Tab (overlay_mode 0 -> 1) hides it with
-        the other error markers (user call 2026-08-28)."""
+        """The DOUBLE-CLICKED error's note as a translucent panel at
+        the canvas top-left (flateyes note style). Shows only while a
+        jump mark is live (double-click / .,-step), and hides on the
+        FIRST Tab (overlay_mode 0 -> 1) like the other markers (user
+        calls 2026-08-28)."""
         panel = self._note_panel
         db = self._drc
-        if db is None or not hasattr(db, "get_note") \
-                or self.overlay_mode != 0 or self._drc_open is None:
+        note = None
+        if db is not None and hasattr(db, "get_note") \
+                and self.overlay_mode == 0 and self.drc_mark is not None \
+                and self._drc_pos >= 0 and self._drc_cum:
+            jci = bisect.bisect_right(self._drc_cum, self._drc_pos) - 1
+            if 0 <= jci < len(db.checks):
+                jei = self._drc_pos - self._drc_cum[jci]
+                if 0 <= jei < len(db.checks[jci].errors):
+                    note = db.get_note(jci, jei)
+        if not note:
             if panel is not None:
                 panel.hide()
             return
-        # errors drawn on the canvas at mode 0: current grid page plus
-        # the gold box-selection (same sources as _drc_stamp_errs)
-        marks = list(self._drc_page_marks or [])
-        if self._drc_sel is not None:
-            sci = self._drc_sel[0]
-            marks += [(sci, ei_, kind, spts)
-                      for ei_, kind, spts in self._drc_sel[2]]
-        seen, texts, order = set(), set(), []
-        for ci_, ei_, _kind, _spts in marks:
-            key = (ci_, ei_)
-            if key in seen:
-                continue
-            seen.add(key)
-            note = db.get_note(ci_, ei_)
-            if note and note not in texts:
-                texts.add(note)
-                order.append(note)
-        if not order:
-            if panel is not None:
-                panel.hide()
-            return
-        cap = 8
-        body = "\n".join("• " + t for t in order[:cap])
-        if len(order) > cap:
-            body += "\n… (+%d)" % (len(order) - cap)
         if panel is None:
             panel = self._note_panel = Gtk.Label()
             panel.set_halign(Gtk.Align.START)
@@ -2347,7 +2330,7 @@ class Viewer:
                 self.overlay.set_overlay_pass_through(panel, True)
             except AttributeError:  # GTK < 3.18
                 pass
-        panel.set_text(body)
+        panel.set_text(note)
         panel.show()
 
     # ---- drawing / rendering ------------------------------------------------
@@ -4950,10 +4933,14 @@ class Viewer:
         sel = self._drc_sel
         eset = (sel[3] if sel is not None and sel[0] == ci
                 else frozenset())
-        # cell width follows the page's widest LOCAL number
+        # errors carrying a note get a "*" prefix in the grid
+        noted = ({ei for ei in eis if db.get_note(ci, ei)}
+                 if hasattr(db, "get_note") else set())
+        # cell width follows the page's widest LOCAL number (+1 for
+        # the "*" when any cell on the page is noted)
         maxloc = (max(eis) + 1) if eis else 1
         probe = win._grid.create_pango_layout(
-            "0" * max(2, len(str(maxloc))))
+            "0" * (max(2, len(str(maxloc))) + (1 if noted else 0)))
         self._drc_cellw = probe.get_pixel_size()[0] + 18
         avail = win._grid.get_allocation().width
         n = max(1, min(24, avail // max(24, self._drc_cellw)))
@@ -4964,6 +4951,8 @@ class Viewer:
 
         def cellfmt(ei):
             t = "%d" % (ei + 1)      # rule-local numbering
+            if ei in noted:
+                t = "*" + t          # note present (user call 2026-08-28)
             fg = ("#00e676" if self._drc_waived(db, ci, ei)
                   else "#ff5252")    # waived green / not-waived red
             if ei in eset:
@@ -5288,10 +5277,14 @@ class Viewer:
         self._set_live_status("note cleared on %d error(s)" % len(eis))
 
     def _drc_note_refresh(self, ci, eis):
-        """Repaint after a note change: refresh the detail pane if it
-        shows one of these errors, and the canvas (tooltip re-reads on
-        hover). Note membership never changes the list, so no refill."""
+        """Repaint after a note change: the grid (the "*" prefix), the
+        detail pane if it shows one of these errors, and the canvas.
+        Note membership never changes the list, so the grid keeps its
+        page/selection - only the cell text is rebuilt."""
         self._drc_hl_res = None
+        if getattr(self, "_drc_grid_ci", None) == ci \
+                and self._drcwin is not None:
+            self._drc_grid_fill(ci)
         shown = None
         f = self._drc_focus
         if f is not None and f[0] == ci:
@@ -5428,6 +5421,9 @@ class Viewer:
             self._set_live_status("note load failed: %s" % exc)
             return
         self._drc_hl_res = None
+        gci = getattr(self, "_drc_grid_ci", None)
+        if gci is not None and self._drcwin is not None:
+            self._drc_grid_fill(gci)   # refresh the "*" prefixes
         self._display()
         self._set_live_status(
             "notes loaded: %d (%s)" % (n, os.path.basename(path)))
