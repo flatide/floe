@@ -1995,31 +1995,39 @@ class Viewer:
             pts = [(sx(x), sy(y)) for x, y in sel["points"]]
             for a, b in zip(pts, pts[1:] + pts[:1]):
                 stamp_segment(disp, a, b, BLACK, SEL_CORE)
-        segs = list(self.rulers)
-        if self.mode == "ruler" and self._ruler_start is not None:
-            segs.append((*self._ruler_start, *self._ruler_end_preview()))
-        for seg in segs:
-            x0, y0, x1, y1 = seg
-            a, b = (sx(x0), sy(y0)), (sx(x1), sy(y1))
-            if isinstance(seg, _DrcOffsetRuler):
-                edge_a, edge_b = a, b
-                a, b = drc_mod.offset_screen_segment(a, b)
-                # Extension lines expose the error edge underneath while
-                # tying both endpoints to its parallel dimension line.
-                stamp_dotted(disp, edge_a, a, None, RULER_CORE)
-                stamp_dotted(disp, edge_b, b, None, RULER_CORE)
-            stamp_segment(disp, a, b, None, RULER_CORE, px=1)
-            ang = math.atan2(b[1] - a[1], b[0] - a[0])
-            stamp_arrow(disp, b, ang, None, RULER_CORE)       # outward
-            stamp_arrow(disp, a, ang + math.pi, None, RULER_CORE)
-        if self.mode == "ruler" and self.snap_on and self._snap_res \
-                and self._snap_res.get("found"):
-            mx, my = sx(self._snap_res["x"]), sy(self._snap_res["y"])
-            color = SNAP_VERTEX if self._snap_res["snap"] == "vertex" \
-                else SNAP_EDGE
-            rect_outline(disp, mx - 5, my - 5, mx + 5, my + 5, None, color)
-            fill_rect(disp, mx - 9, my, 19, 1, color)
-            fill_rect(disp, mx, my - 9, 1, 19, color)
+        # rulers (and the snap marker) belong to the overlays the
+        # FIRST Tab clears: shown only at overlay_mode 0, like the note
+        # panel and the error markers (user call 2026-08-28 - mode 1
+        # keeps only the jumped error)
+        if self.overlay_mode == 0:
+            segs = list(self.rulers)
+            if self.mode == "ruler" and self._ruler_start is not None:
+                segs.append((*self._ruler_start,
+                             *self._ruler_end_preview()))
+            for seg in segs:
+                x0, y0, x1, y1 = seg
+                a, b = (sx(x0), sy(y0)), (sx(x1), sy(y1))
+                if isinstance(seg, _DrcOffsetRuler):
+                    edge_a, edge_b = a, b
+                    a, b = drc_mod.offset_screen_segment(a, b)
+                    # Extension lines expose the error edge underneath
+                    # while tying both endpoints to its dimension line.
+                    stamp_dotted(disp, edge_a, a, None, RULER_CORE)
+                    stamp_dotted(disp, edge_b, b, None, RULER_CORE)
+                stamp_segment(disp, a, b, None, RULER_CORE, px=1)
+                ang = math.atan2(b[1] - a[1], b[0] - a[0])
+                stamp_arrow(disp, b, ang, None, RULER_CORE)   # outward
+                stamp_arrow(disp, a, ang + math.pi, None, RULER_CORE)
+            if self.mode == "ruler" and self.snap_on and self._snap_res \
+                    and self._snap_res.get("found"):
+                mx, my = sx(self._snap_res["x"]), sy(self._snap_res["y"])
+                color = (SNAP_VERTEX
+                         if self._snap_res["snap"] == "vertex"
+                         else SNAP_EDGE)
+                rect_outline(disp, mx - 5, my - 5, mx + 5, my + 5,
+                             None, color)
+                fill_rect(disp, mx - 9, my, 19, 1, color)
+                fill_rect(disp, mx, my - 9, 1, 19, color)
         # screen-space marker hit list rebuilt every frame by
         # _drc_stamp_errs (hover tooltip + canvas pick)
         self._drc_hits = []
@@ -2232,9 +2240,11 @@ class Viewer:
         dotted leader stamped into the frame."""
         # Tab hides overlays: the distance chips are WIDGETS, not
         # pixbuf paint, so they need their own gate (field report
-        # 2026-08-19: chips survived the toggle)
-        segs = [] if self.overlay_mode == 2 else list(self.rulers)
-        if self.overlay_mode != 2 and self.mode == "ruler" \
+        # 2026-08-19: chips survived the toggle). The FIRST Tab
+        # (overlay_mode 1) now clears rulers too, so the chips hide
+        # whenever the mode is not 0 (matches the ruler lines above).
+        segs = list(self.rulers) if self.overlay_mode == 0 else []
+        if self.overlay_mode == 0 and self.mode == "ruler" \
                 and self._ruler_start is not None:
             segs.append((*self._ruler_start, *self._ruler_end_preview()))
         w, h = self._viewport_size()
@@ -3876,7 +3886,7 @@ class Viewer:
               lambda: self._set_mono(not self._mono),
               lambda: self._mono)
         sep(m)
-        item(m, "cycle overlays (all / errors / none)\tTab",
+        item(m, "cycle overlays (all / jumped only / none)\tTab",
              self._toggle_overlays)
 
         m = top("Ruler")
@@ -6383,14 +6393,14 @@ class Viewer:
             "copied  %dx%d" % (pb.get_width(), pb.get_height()))
 
     def _toggle_overlays(self):
-        """Tab cycles THREE states (user call 2026-08-21): all
-        shown -> other errors hidden (the jumped error, rulers and
-        chips stay) -> everything hidden (the old flateyes-parity
-        clean look) -> all shown."""
+        """Tab cycles THREE states: all shown -> only the jumped error
+        kept (rulers, notes, other-error markers and chips all hide;
+        user call 2026-08-28 folded rulers into this first step) ->
+        everything hidden (flateyes-parity clean look) -> all shown."""
         self.overlay_mode = (self.overlay_mode + 1) % 3
         self._set_live_status(
             {0: "overlays shown",
-             1: "other errors hidden (Tab cycles)",
+             1: "only the jumped error (Tab cycles)",
              2: "overlays hidden (Tab restores)"}[self.overlay_mode])
         self._display()
 
