@@ -520,6 +520,17 @@ plane별 Deferred item으로 남겨 tile이 기존 walk 코드로 지역
 70×70 grid에서 bin item < 100, cap 미달, pixel 동일). 기대: bin
 적중 시 draw 2.47→~1.2초. 실칩 `bin N items` 확인 대기.
 
+**실칩 2차 피드백**: member 임계만으로는 여전히 `bin off(cap@786k)`
+— pruned 60.5M 역산 결과 tile·plane당 ~15만 개의 **평평한 instance
+fanout**(개별 배치, members=1)이 원인이라 per-(visit,page) item이
+상한을 채웠다. 보강 2건: (1) item을 **(visit, plane) 단위로 통합**
+— page 스캔은 tile 소비 시 walk과 같은 코드로 수행, 150k-edge
+구조에서 item이 visit 규모로 떨어진다. (2) 지연 판정을 members가
+아니라 **members × subtree item weight**(SceneMasks가 post-order로
+계산, cycle은 포화→전량 지연)로 바꿔 dense rep·깊은 곱·혼합 어느
+형태도 수집을 부풀릴 수 없다. byte 동일 oracle 유지(92 tests).
+실칩 3차 확인 대기.
+
 §3.13의 "load 10초+/draw 5초+" 지점을 0.12.19 telemetry로 실측한
 결과 (view 100.0×96.6µm, 824x796, cut<0.122µm, 5698 pages/+5616
 miss, 207k text places, labels partial):

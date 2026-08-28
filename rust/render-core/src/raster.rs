@@ -710,11 +710,15 @@ struct WorkBin {
 }
 
 enum PlaneItem {
-    Page {
+    /// One cell visit's decoded pages for this plane (field 2026-08-28:
+    /// per-(visit, page) items blew the cap on flat 150k-instance
+    /// fanouts; per-(visit, plane) keeps the count at the visit scale).
+    /// The tile scans the cell's page list exactly like the walk does.
+    Cell {
         world_bbox: BBox,
         transform: OrthoTransform,
         inverse: OrthoTransform,
-        page_id: u32,
+        cell: WsKey,
     },
     Wash {
         world_bbox: BBox,
@@ -748,8 +752,9 @@ enum FrameItem {
     },
 }
 
-/// Instances whose repetition holds more members than this stay
-/// unexpanded in the bin and are walked per tile instead.
+/// Instances whose members x subtree item weight exceed this stay
+/// unexpanded in the bin and are walked per tile instead — the guard
+/// covers dense reps, deep multiplications, and their mix alike.
 const WORK_BIN_DEFER_MEMBERS: u64 = 4096;
 
 /// Item cap (~64MB of items); past it the round falls back to the
@@ -797,6 +802,11 @@ fn collect_work_bin(
         items: 0,
     };
     let mut path = Vec::new();
+    // Stamped per-plane scratch: one row per plane, valid only while
+    // its stamp equals the current visit - avoids a per-visit alloc
+    // across (measured) 100k+ visits.
+    let mut plane_scratch: Vec<(u64, BBox)> = vec![(0, BBox::EMPTY); styled.layers.len()];
+    let mut visit_seq = 0u64;
     let walk = collect_cell(
         scene,
         &mut bin,
@@ -809,6 +819,8 @@ fn collect_work_bin(
         scene.top(),
         OrthoTransform::identity(),
         &mut path,
+        &mut plane_scratch,
+        &mut visit_seq,
         stats,
     );
     match walk {
@@ -834,6 +846,8 @@ fn collect_cell(
     key: WsKey,
     world_transform: OrthoTransform,
     path: &mut Vec<WsKey>,
+    plane_scratch: &mut Vec<(u64, BBox)>,
+    visit_seq: &mut u64,
     stats: &mut RenderStats,
 ) -> Result<(), String> {
     check_cancelled(guard)?;
@@ -848,6 +862,10 @@ fn collect_cell(
     let inverse = world_transform.invert()?;
     let local_view = inverse.apply_bbox(cull_view)?;
 
+    // One item per (visit, plane): union the plane's page bboxes for
+    // the tile filter; the tile re-runs the page scan itself.
+    *visit_seq += 1;
+    let stamp = *visit_seq;
     for &page_id in &cell.pages {
         let Some(page) = scene.page(page_id) else {
             continue;
@@ -858,13 +876,24 @@ fn collect_cell(
         if !page.bbox.intersects(&local_view) {
             continue;
         }
+        let entry = &mut plane_scratch[plane];
+        if entry.0 == stamp {
+            entry.1.grow(&page.bbox);
+        } else {
+            *entry = (stamp, page.bbox);
+        }
+    }
+    for (plane, entry) in plane_scratch.iter().enumerate() {
+        if entry.0 != stamp {
+            continue;
+        }
         bin.charge()?;
-        let world_bbox = world_transform.apply_bbox(page.bbox)?;
-        bin.planes[plane].push(PlaneItem::Page {
+        let world_bbox = world_transform.apply_bbox(entry.1)?;
+        bin.planes[plane].push(PlaneItem::Cell {
             world_bbox,
             transform: world_transform,
             inverse,
-            page_id,
+            cell: key,
         });
     }
     for &(layer_idx, wash) in &cell.washes {
@@ -914,7 +943,11 @@ fn collect_cell(
             stats.subtrees_pruned = stats.subtrees_pruned.saturating_add(1);
             continue;
         }
-        if instance.rep.members() > WORK_BIN_DEFER_MEMBERS {
+        let deferred_weight = instance
+            .rep
+            .members()
+            .saturating_mul(scene.subtree_item_weight(instance.child));
+        if deferred_weight > WORK_BIN_DEFER_MEMBERS {
             // Dense repetition: keep it unexpanded, one deferred item
             // per plane the subtree can actually paint (the walk's own
             // per-plane descent gate), plus one for the band walks.
@@ -967,6 +1000,8 @@ fn collect_cell(
                     instance.child,
                     child_world,
                     path,
+                    plane_scratch,
+                    visit_seq,
                     stats,
                 )
             },
@@ -1036,32 +1071,42 @@ fn raster_tile_from_bin(
         };
         for item in &bin.planes[plane] {
             match item {
-                PlaneItem::Page {
+                PlaneItem::Cell {
                     world_bbox,
                     transform,
                     inverse,
-                    page_id,
+                    cell,
                 } => {
                     if !world_bbox.intersects(&cull_view) {
                         continue;
                     }
-                    let page = scene.page(*page_id).ok_or_else(|| {
-                        format!("internal error: binned page {page_id} left the scene")
+                    let visited = scene.cell(*cell).ok_or_else(|| {
+                        format!("internal error: binned cell {:?} left the scene", cell)
                     })?;
                     let local_view = inverse.apply_bbox(cull_view)?;
-                    raster_page_records(
-                        band,
-                        request,
-                        page,
-                        *page_id,
-                        local_view,
-                        *transform,
-                        stats,
-                        counters,
-                        paint,
-                        guard,
-                        record_scratch,
-                    )?;
+                    for &page_id in &visited.pages {
+                        let Some(page) = scene.page(page_id) else {
+                            continue;
+                        };
+                        if page.layer_idx != layer.layer_idx
+                            || !page.bbox.intersects(&local_view)
+                        {
+                            continue;
+                        }
+                        raster_page_records(
+                            band,
+                            request,
+                            page,
+                            page_id,
+                            local_view,
+                            *transform,
+                            stats,
+                            counters,
+                            paint,
+                            guard,
+                            record_scratch,
+                        )?;
+                    }
                 }
                 PlaneItem::Wash { world_bbox } => {
                     if !world_bbox.intersects(&cull_view) {

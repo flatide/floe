@@ -31,6 +31,13 @@ struct SceneMasks {
     words: usize,
     bits: Vec<u64>,
     frames: Vec<bool>,
+    /// Estimated work-bin items one instantiation of each cell's
+    /// subtree would emit (own content + members x child weights,
+    /// saturating). The collection walk defers instances whose
+    /// members x weight exceed its threshold, so no subtree shape -
+    /// dense rep, deep multiplication, or their mix - can blow the
+    /// item cap (field 2026-08-28).
+    weights: Vec<u64>,
     /// FULL masks: every subtree answers "paints everything", so the
     /// walk never prunes. Used when the bit matrix would outgrow
     /// `MASK_BUDGET_BYTES` (review 2026-08-28: wcells × layer words
@@ -56,6 +63,7 @@ impl SceneMasks {
             words: 0,
             bits: Vec::new(),
             frames: Vec::new(),
+            weights: Vec::new(),
             full: true,
         }
     }
@@ -109,6 +117,7 @@ impl SceneMasks {
         // the walk's missing-cell error fires before any pruning.
         let mut state = vec![0u8; cells.len()]; // 0 new, 1 open, 2 done
         let mut stack: Vec<(usize, usize)> = Vec::new();
+        let mut post_order: Vec<usize> = Vec::with_capacity(cells.len());
         for root in 0..cells.len() {
             if state[root] != 0 {
                 continue;
@@ -143,6 +152,7 @@ impl SceneMasks {
                     }
                 } else {
                     state[index] = 2;
+                    post_order.push(index);
                     stack.pop();
                     if let Some(&(parent, _)) = stack.last() {
                         union_rows(&mut bits, words, parent, index);
@@ -151,11 +161,32 @@ impl SceneMasks {
                 }
             }
         }
+        // Post-order weight pass: children are final before parents;
+        // a cycle's back edge sees a not-yet-final child and saturates,
+        // which simply defers everything reaching into the cycle.
+        let mut weights = vec![u64::MAX; cells.len()];
+        for &index in &post_order {
+            let cell = &cells[index];
+            let own = u64::from(
+                !cell.pages.is_empty() || !cell.washes.is_empty() || !cell.frames.is_empty(),
+            );
+            let mut weight = own;
+            for instance in &cell.insts {
+                let child_weight = cells
+                    .binary_search_by_key(&instance.child, |cell| cell.key)
+                    .map(|child| weights[child])
+                    .unwrap_or(0);
+                weight = weight
+                    .saturating_add(instance.rep.members().saturating_mul(child_weight));
+            }
+            weights[index] = weight;
+        }
         Self {
             layers,
             words,
             bits,
             frames,
+            weights,
             full: false,
         }
     }
@@ -416,6 +447,23 @@ impl FrameScene {
             .iter()
             .zip(query)
             .any(|(word, wanted)| word & wanted != 0)
+    }
+
+    /// Estimated work-bin items one instantiation of `key`'s subtree
+    /// emits; unknown cells and capped masks answer MAX so the walk
+    /// defers them (always byte-safe).
+    pub fn subtree_item_weight(&self, key: WsKey) -> u64 {
+        if self.masks.full {
+            return u64::MAX;
+        }
+        match self
+            .plan
+            .wcells
+            .binary_search_by_key(&key, |cell| cell.key)
+        {
+            Ok(index) => self.masks.weights[index],
+            Err(_) => u64::MAX,
+        }
     }
 
     /// Whether the subtree rooted at `key` holds any hierarchy frame.
