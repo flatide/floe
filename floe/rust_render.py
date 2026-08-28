@@ -27,8 +27,14 @@ _DEFAULT_JOBS = max(1, min(8, os.cpu_count() or 1))
 # sample9). Sessions that want floe-scale retention opt in with
 # FLOE_RUST_BUDGET_MB.
 _DEFAULT_BUDGET_MB = 1024
-_DEFAULT_ROUND_PAGES = 1024
 _NO_REFINEMENT_ROUND_PAGES = 1 << 30
+# User call 2026-08-28: floe draws each view once, and floe2's
+# intermediate refinement frames each cost a full re-raster of the
+# accumulated scene (SS3.15) - even the cost-aware two rounds lose to a
+# single settled draw. The product default is therefore NO
+# intermediate frames; FLOE_RUST_ROUND_PAGES restores streaming
+# rounds (the daemon still collapses expensive tails past 500ms).
+_DEFAULT_ROUND_PAGES = _NO_REFINEMENT_ROUND_PAGES
 _DEFAULT_TILE_PX = 384
 _DEFAULT_LABEL_FONT_PX = 14
 _DEFAULT_OPEN_TIMEOUT_S = 300

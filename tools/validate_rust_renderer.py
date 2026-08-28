@@ -469,7 +469,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertIn("style_epoch=3", commands[0])
             self.assertIn("round_paths=1", commands[0])
             self.assertIn("jobs=3 decode_jobs=4 tile_px=384", commands[0])
-            self.assertIn("round_pages=1024", commands[0])
+            self.assertIn("round_pages=%d" % (1 << 30), commands[0])
             self.assertIn("frame_cache=1", commands[0])
             self.assertIn("labels=0", commands[0])
             self.assertIn("font_px=22", commands[0])

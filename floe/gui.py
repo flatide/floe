@@ -2507,7 +2507,13 @@ class Viewer:
         # GLib drop the poll source and silently freeze the viewer.
         try:
             w = self.worker
+            # NOT while start_async is still spawning the daemon: the
+            # Rust worker has no process yet in that window, so this
+            # check used to flash a false "died (exit None)" right
+            # after loading a layout (field report 2026-08-28); a real
+            # startup failure is reported by _worker_start_finished.
             if w is not None and not w.alive() \
+                    and not getattr(self, "_worker_starting", False) \
                     and not getattr(w, "_died_reported", False):
                 w._died_reported = True
                 self._clear_pending()

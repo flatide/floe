@@ -500,7 +500,7 @@ def make_parser():
         "--detail", choices=DETAIL_LEVELS,
         default=DETAIL_LEVELS[DEFAULT_DETAIL])
     parser.add_argument("--budget-mb", type=positive_int, default=1024)
-    parser.add_argument("--round-pages", type=positive_int, default=1024)
+    parser.add_argument("--round-pages", type=positive_int, default=1 << 30)
     parser.add_argument("--tile-px", type=positive_int,
                         help="image tile size (default 128; --serial "
                         "defaults to max(width, height))")
