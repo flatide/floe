@@ -679,6 +679,80 @@ def main():
     print("D9 OK: autosave save-as/load + refusal + read-only "
           "pack/folder + corrupt-aside + seed migration")
 
+    # D10: per-reviewer error notes (flateyes .fe sidecar) - a shared
+    # note across errors, single/group clear, reopen persistence,
+    # flateyes readability, export/import round-trip + foreign refusal
+    from floe import fe_embed
+    os.environ["FLOE_REVIEWER"] = "gate"
+    try:
+        npk = drc.IcePack(gp)
+        g0, g1 = npk.error_gid(3, 0), npk.error_gid(3, 1)
+        g2 = npk.error_gid(4, 0)
+        npk.set_note([g0, g1], "공유 노트 shared")
+        if npk.get_note_gid(g0) != "공유 노트 shared" \
+                or npk.get_note_gid(g1) != "공유 노트 shared":
+            fail("shared note not attached to both members")
+        if npk.get_note_gid(g2) is not None:
+            fail("note leaked to an unrelated error")
+        if npk.notes_list() != [("공유 노트 shared", sorted([g0, g1]))]:
+            fail("notes_list wrong: %r" % (npk.notes_list(),))
+        nside = drc.notes_autosave_path(gp)
+        if not os.path.isfile(nside) \
+                or os.path.dirname(nside) != os.path.dirname(gp):
+            fail("note autosave not beside the pack: %s" % nside)
+        # the autosave IS a valid flateyes sidecar (fe_embed reads it)
+        with open(nside, encoding="utf-8") as f:
+            fannos = fe_embed.parse_metadata(f.read())[0]
+        if [a["text"] for a in fannos if a["kind"] == "text"] \
+                .count("공유 노트 shared") != 2:
+            fail("flateyes cannot read the note as text annotations")
+        npk.close()
+        # persists across reopen
+        re3 = drc.IcePack(gp)
+        if re3.get_note_gid(g0) != "공유 노트 shared" \
+                or re3.notes_list() != [("공유 노트 shared",
+                                         sorted([g0, g1]))]:
+            fail("notes did not persist across reopen")
+        # single-member clear keeps the note for the other member
+        re3.clear_note([g0])
+        if re3.get_note_gid(g0) is not None \
+                or re3.get_note_gid(g1) != "공유 노트 shared":
+            fail("single-member clear wrong")
+        # group clear drops every note and removes the file
+        re3.set_note([g0, g2], "second")
+        re3.clear_note([g1, g0, g2])
+        if re3.notes_list() or os.path.exists(nside):
+            fail("group clear left notes/file behind")
+        # export -> clear -> import round-trip
+        re3.set_note([g0, g1], "exported")
+        exp = os.path.join(tmp, "notes_export.fe")
+        re3.note_export(exp)
+        re3.clear_note([g0, g1])
+        if re3.note_import(exp) != 1 \
+                or re3.get_note_gid(g0) != "exported":
+            fail("note export/import round-trip failed")
+        # a file recorded against another pack is refused, state kept
+        with open(exp, encoding="utf-8") as f:
+            blob = f.read()
+        bad = os.path.join(tmp, "notes_bad.fe")
+        with open(bad, "w", encoding="utf-8") as f:
+            f.write(blob.replace("floe_pack=", "floe_pack=9,9,"))
+        try:
+            re3.note_import(bad)
+            fail("foreign-pack note file accepted")
+        except ValueError:
+            pass
+        if re3.get_note_gid(g0) != "exported":
+            fail("refused import disturbed the notes")
+        re3.clear_note([g0, g1])
+        re3.close()
+    finally:
+        os.environ.pop("FLOE_REVIEWER", None)
+    if sha(gp) != gh0:
+        fail("D10 modified the pack")
+    print("D10 OK: per-reviewer notes + flateyes .fe + share/clear/"
+          "export/import")
+
     print("DRC ICE VALIDATION: ALL OK")
 
 

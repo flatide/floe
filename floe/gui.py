@@ -2953,11 +2953,14 @@ class Viewer:
                 ci, ei = hit
                 try:
                     e = self._drc.checks[ci].errors[ei]
-                    tip = "%s #%d(%d)%s" % (
+                    noted = (hasattr(self._drc, "get_note")
+                             and self._drc.get_note(ci, ei))
+                    tip = "%s #%d(%d)%s%s" % (
                         self._drc.checks[ci].name, ei + 1, e.num,
                         " · waived"
                         if self._drc_waived(self._drc, ci, ei)
-                        else "")
+                        else "",
+                        " · note" if noted else "")
                 except Exception:
                     tip = None
         if tip != self._drc_tip:
@@ -3128,9 +3131,11 @@ class Viewer:
         elif name == "w":
             self._drc_waive_key()
         elif name == "n":
-            self._drc_step(1)
-        elif name == "p":
-            self._drc_step(-1)
+            self._drc_note_key()
+        elif name in ("period", "KP_Decimal"):
+            self._drc_step(1)     # next error (n freed for notes)
+        elif name == "comma":
+            self._drc_step(-1)    # previous error
         elif name == "q":
             self._confirm_quit()
         elif len(name) == 1 and name.isdigit():
@@ -3840,12 +3845,17 @@ class Viewer:
         item(m, "open results .db…", self._drc_open_dialog)
         item(m, "load SVRF rules…", self._drc_rules_dialog)
         sep(m)
-        item(m, "next error\tn", lambda: self._drc_step(1))
-        item(m, "previous error\tp", lambda: self._drc_step(-1))
+        item(m, "next error\t.", lambda: self._drc_step(1))
+        item(m, "previous error\t,", lambda: self._drc_step(-1))
         item(m, "waive/unwaive current error\tw",
              self._drc_waive_key)
         item(m, "save waives as…", self._drc_waive_save_dialog)
         item(m, "load waives…", self._drc_waive_load_dialog)
+        sep(m)
+        item(m, "note (add/edit)\tn", self._drc_note_key)
+        item(m, "clear note of selection", self._drc_note_clear)
+        item(m, "save notes as…", self._drc_note_save_dialog)
+        item(m, "load notes…", self._drc_note_load_dialog)
         sep(m)
         check(m, "error box-select mode\te", self._esel_toggle,
               lambda: self.mode == "esel")
@@ -5151,6 +5161,214 @@ class Viewer:
         self._drc_set_waived(ci, [ei],
                              not self._drc_waived(db, ci, ei))
 
+    def _drc_current_target(self):
+        """(ci, [ei,...]) for the gold selection, else the current or
+        jumped error, else None - the target of note/waive actions."""
+        sel = self._drc_sel
+        if sel is not None and sel[1]:
+            return sel[0], list(sel[1])
+        db = self._drc
+        ci = ei = None
+        f = self._drc_focus
+        if f is not None:
+            ci, ei = f[0], f[1]
+        elif self._drc_pos >= 0 and self._drc_cum:
+            ci = bisect.bisect_right(self._drc_cum, self._drc_pos) - 1
+            ei = self._drc_pos - self._drc_cum[ci]
+        if ci is None or db is None \
+                or ei >= len(db.checks[ci].errors):
+            return None
+        return ci, [ei]
+
+    def _drc_note_key(self):
+        """n: add/edit a note SHARED by the selected errors (or the
+        current/jumped one); empty text clears it. Notes autosave to
+        a per-reviewer flateyes .fe sidecar beside the pack."""
+        db = self._drc
+        if db is None:
+            return
+        if not hasattr(db, "set_note"):
+            self._set_live_status(
+                "note needs a packed index: floe-index drc <db> --pack")
+            return
+        target = self._drc_current_target()
+        if target is None:
+            self._set_live_status(
+                "note는 선택/현재 에러 대상입니다: 먼저 선택·클릭·점프하세요")
+            return
+        ci, eis = target
+        texts = set(db.get_note(ci, e) for e in eis)
+        prefill = (texts.pop() if len(texts) == 1 and None not in texts
+                   else "")
+        text = self._drc_note_dialog(prefill, len(eis))
+        if text is None or (prefill and text == prefill):
+            return
+        db.set_note([db.error_gid(ci, e) for e in eis], text)
+        self._drc_note_refresh(ci, eis)
+        self._set_live_status(
+            ("note set on %d error(s)" % len(eis)) if text
+            else ("note cleared on %d error(s)" % len(eis)))
+
+    def _drc_note_clear(self):
+        """Clear the note(s) on the selected/current error(s) - the
+        group-clear path (select the noted errors, then this)."""
+        db = self._drc
+        if db is None or not hasattr(db, "clear_note"):
+            return
+        target = self._drc_current_target()
+        if target is None:
+            self._set_live_status("먼저 note 있는 에러를 선택하세요")
+            return
+        ci, eis = target
+        db.clear_note([db.error_gid(ci, e) for e in eis])
+        self._drc_note_refresh(ci, eis)
+        self._set_live_status("note cleared on %d error(s)" % len(eis))
+
+    def _drc_note_refresh(self, ci, eis):
+        """Repaint after a note change: refresh the detail pane if it
+        shows one of these errors, and the canvas (tooltip re-reads on
+        hover). Note membership never changes the list, so no refill."""
+        self._drc_hl_res = None
+        shown = None
+        f = self._drc_focus
+        if f is not None and f[0] == ci:
+            shown = f[1]
+        elif self._drc_pos >= 0 and self._drc_cum:
+            c2 = bisect.bisect_right(self._drc_cum, self._drc_pos) - 1
+            if c2 == ci:
+                shown = self._drc_pos - self._drc_cum[ci]
+        self._drc_show_detail(ci, shown if shown is not None else eis[0])
+        self._display()
+
+    def _drc_note_dialog(self, prefill, count):
+        """Modal note editor (flateyes-style): multi-line text with
+        OK/Cancel. Returns the text (empty string = clear) or None on
+        cancel. Korean relies on the host input method (no bundled
+        composer, matching the rest of floe's text entry)."""
+        title = "Edit Note" if prefill else "Note"
+        if count > 1:
+            title += "  (%d errors)" % count
+        dlg = Gtk.Dialog(title=title, transient_for=self.window,
+                         modal=True)
+        dlg.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dlg.add_button("OK", Gtk.ResponseType.OK)
+        dlg.set_default_response(Gtk.ResponseType.OK)
+        self._center_on_parent(dlg)
+        view = Gtk.TextView()
+        view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        buf = view.get_buffer()
+        if prefill:
+            buf.set_text(prefill)
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.AUTOMATIC,
+                          Gtk.PolicyType.AUTOMATIC)
+        scroll.set_shadow_type(Gtk.ShadowType.IN)
+        scroll.set_size_request(360, 100)
+        scroll.add(view)
+
+        def on_key(_w, ev):
+            name = Gdk.keyval_name(ev.keyval)
+            if name == "Escape":
+                dlg.response(Gtk.ResponseType.CANCEL)
+                return True
+            if name in ("Return", "KP_Enter") \
+                    and (ev.state & Gdk.ModifierType.CONTROL_MASK):
+                dlg.response(Gtk.ResponseType.OK)
+                return True
+            return False
+        view.connect("key-press-event", on_key)
+        hint = Gtk.Label()
+        hint.set_markup("<small>Ctrl+Enter: OK · Esc: cancel · "
+                        "empty removes the note</small>")
+        hint.set_halign(Gtk.Align.START)
+        box = dlg.get_content_area()
+        box.set_border_width(10)
+        box.set_spacing(6)
+        box.pack_start(scroll, True, True, 0)
+        box.pack_start(hint, False, False, 0)
+        dlg.show_all()
+        ok = dlg.run() == Gtk.ResponseType.OK
+        s, e = buf.get_bounds()
+        text = buf.get_text(s, e, False).strip()
+        dlg.destroy()
+        self.window.present()
+        return text if ok else None
+
+    def _drc_note_save_dialog(self):
+        """DRC > save notes as… : snapshot the per-reviewer note state
+        to a picked flateyes .fe (share a review / keep a record)."""
+        db = self._drc
+        if db is None or not hasattr(db, "note_export"):
+            self._set_live_status(
+                "notes need a packed index: floe-index drc <db> --pack")
+            return
+        dlg = Gtk.FileChooserDialog(title="save notes as",
+                                    parent=self.window,
+                                    action=Gtk.FileChooserAction.SAVE)
+        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                        "Save", Gtk.ResponseType.OK)
+        self._only_close_button(dlg)
+        self._center_on_parent(dlg)
+        dlg.set_do_overwrite_confirmation(True)
+        dlg.set_current_folder(
+            os.path.dirname(os.path.abspath(db.path)))
+        base = os.path.basename(db.path)
+        if base.endswith(".ice"):
+            base = base[:-4]
+        dlg.set_current_name(base + ".notes.fe")
+        out = dlg.get_filename() \
+            if dlg.run() == Gtk.ResponseType.OK else None
+        dlg.destroy()
+        self.window.present()
+        if not out:
+            return
+        try:
+            db.note_export(out)
+        except OSError as exc:
+            self._set_live_status("note save failed (%s)" % exc)
+            return
+        self._set_live_status("notes saved: %s" % out)
+
+    def _drc_note_load_dialog(self):
+        """DRC > load notes… : REPLACE the notes from a saved .fe
+        (save your own first). Files from a different pack are refused."""
+        db = self._drc
+        if db is None or not hasattr(db, "note_import"):
+            self._set_live_status(
+                "notes need a packed index: floe-index drc <db> --pack")
+            return
+        dlg = Gtk.FileChooserDialog(title="load notes",
+                                    parent=self.window,
+                                    action=Gtk.FileChooserAction.OPEN)
+        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                        "Open", Gtk.ResponseType.OK)
+        self._only_close_button(dlg)
+        self._center_on_parent(dlg)
+        dlg.set_current_folder(
+            os.path.dirname(os.path.abspath(db.path)))
+        for name, pats in (("flateyes notes (*.fe)", ("*.fe",)),
+                           ("all files", ("*",))):
+            ff = Gtk.FileFilter()
+            ff.set_name(name)
+            for p in pats:
+                ff.add_pattern(p)
+            dlg.add_filter(ff)
+        path = dlg.get_filename() \
+            if dlg.run() == Gtk.ResponseType.OK else None
+        dlg.destroy()
+        self.window.present()
+        if not path:
+            return
+        try:
+            n = db.note_import(path)
+        except (OSError, ValueError) as exc:
+            self._set_live_status("note load failed: %s" % exc)
+            return
+        self._drc_hl_res = None
+        self._display()
+        self._set_live_status(
+            "notes loaded: %d (%s)" % (n, os.path.basename(path)))
+
     def _drc_waive_save_dialog(self):
         """DRC > save waives as… (user call 2026-08-28): snapshot
         the auto-saved per-user waive state (~/.cache/floe/waive)
@@ -5368,6 +5586,10 @@ class Viewer:
                       2: "reserved"}.get(s, "status %d" % s)
         lines = ["#%d(%d)  [%s]" % (ei + 1, e.num, status),
                  "rule: %s" % c.name]
+        if hasattr(db, "get_note"):
+            note = db.get_note(ci, ei)
+            if note:
+                lines.append("note: %s" % note.replace("\n", "\n      "))
         if c.desc:
             # pathname/title already show in the RULE info (user
             # call 2026-08-15)

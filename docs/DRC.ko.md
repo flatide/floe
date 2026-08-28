@@ -115,6 +115,21 @@ python -m floe render chip.oas --drc results.db \
   내장 status는 시드로 승계. 결과 폴더가 읽기 전용이면 시스템 임시
   디렉터리로 폴백(stderr 안내 — 이때는 save as로 남길 것), 그마저
   안 되면 구-방식(pack 제자리 기록) 최후 폴백.
+- **에러 note = 리뷰어별 flateyes `.fe` 사이드카**(2026-08-28,
+  D10): `n`으로 선택/현재 에러에 **공유 note** 입력. 저장 위치 =
+  pack 옆 `.<db>.notes.<리뷰어>.fe`(waive와 같은 siting·리뷰어
+  태그·읽기전용→임시 폴백). 파일은 **유효한 flateyes 주석
+  사이드카** — note마다 멤버 에러의 um 중심에 `text=` 주석(ppu=1
+  unit=um)을 써서 flateyes와 미래 drawing이 그대로 렌더하고,
+  flateyes가 무시하는 floe 전용 두 줄이 나머지를 담는다:
+  `floe_pack=<size>,<mtime>,<err_total>`(지문),
+  `floe_note=<gid,gid,…>|<escaped 텍스트>`(공유 note+멤버). floe는
+  `floe_note=`(전역 에러 id 키)로 정본 복원, `text=`는 렌더 미러.
+  삭제 = 빈 내용 입력 또는 "clear note of selection"(그룹 선택
+  일괄). **영속 기록은 명시적**: `save notes as…`/`load notes…`(같은
+  `.fe` 포맷, load=전체 대체·타-pack 거부). `notes_list()`가 미래
+  note-list 조회 표면(각 note의 텍스트+멤버 gid). drawing 기능
+  추가 시 같은 `.fe`에 flateyes 주석으로 합류.
 - **손상 방어**: 절단·오염 pack은 전부 "corrupt .ice → 재-pack
   안내" ValueError로 정규화(섹션 경계·체크 범위 검증), 사이드
   pack이면 ASCII 폴백. 인덱서는 시작 시 잔존 `<out>.tmp*` 청소.
@@ -157,14 +172,16 @@ python -m floe render chip.oas --drc results.db \
 |---|---|
 | 단클릭 | 상세 + 셀 마킹만 (뷰 불변) |
 | 더블클릭 | 점프(에러가 화면 30% 프레이밍) + 자동 CD 룰러 + **레이어 격리**(rules.json의 원천 레이어만 켬, Esc 복원) |
-| n / p | 보이는 목록(selected ∧ in view ∧ waive) 안에서 순환, 페이지 자동 이동. **점프 활성 시**(더블클릭/마커 클릭 후) = 프레이밍 줌+CD 룰러 동반, **Esc 완전 복원 후** = 번호 단일클릭과 동일(디테일+셀 마크만, 뷰 불변) |
-| 캔버스 마커 hover | 툴팁: 룰명 #로컬(전역) · waived 여부 |
+| . / , | 다음/이전 에러(구 n/p — `n`은 note로 이동, 2026-08-28). 보이는 목록(selected ∧ in view ∧ waive) 안에서 순환, 페이지 자동 이동. **점프 활성 시**(더블클릭/마커 클릭 후) = 프레이밍 줌+CD 룰러 동반, **Esc 완전 복원 후** = 번호 단일클릭과 동일(디테일+셀 마크만, 뷰 불변) |
+| `n` | **note 추가/편집** — gold 선택(또는 현재/점프 에러)에 **공유 note** 입력(여러 에러가 한 note 공유), 빈 내용 = 삭제. 기존 공유 note는 프리필. 저장 = 리뷰어별 flateyes `.fe` 자동 저장(아래) |
+| 캔버스 마커 hover | 툴팁: 룰명 #로컬(전역) · waived 여부 · note 여부 |
 | 캔버스 마커 클릭 | **번호 단일클릭과 동일** — 현재 에러 선택(셀 마크·디테일·포커스), 뷰 불변. Ctrl/Shift 클릭은 디자인 선택 유지 |
 | 캔버스 마커 더블클릭 | **번호 더블클릭과 동일** — 점프(30% 프레이밍)+CD 룰러+레이어 격리, 그리드 동행 |
 | `e` + 두 클릭 | 박스 선택(Esc까지 유지; Shift 추가, Ctrl 토글; 보이는 에러만; 룰별 보존; gold 표시) |
 | Ctrl/Shift + 셀 클릭 | 선택 추가/토글 |
 | 우클릭 | waive/unwaive 메뉴(gold 선택 시 일괄) — [status] 제자리 기록, 카운트·색·필터 즉시 연동 |
-| `w` | **waive 토글** — gold 선택이 있으면 선택 전체 일괄(전부 waived → 해제, 혼합/미waive → 전부 waive), 없으면 현재 에러(단클릭/n·p 포커스 우선, 없으면 점프 위치). 우클릭 메뉴와 동일 경로로 기록·갱신, v1은 pack 안내 |
+| `w` | **waive 토글** — gold 선택이 있으면 선택 전체 일괄(전부 waived → 해제, 혼합/미waive → 전부 waive), 없으면 현재 에러(단클릭/./, 포커스 우선, 없으면 점프 위치). 우클릭 메뉴와 동일 경로로 기록·갱신, v1은 pack 안내 |
+| 더블클릭 상세 | note 있는 에러는 하단 상세 패널에 `note:` 줄 표시 |
 | 체크박스 | in view(공간 쿼리, 뷰 추적) · selected(선택만) |
 | `b` | 레이어 흑백 토글(시인성) |
 | Esc | 단계 해제(…에러 박스선택 → 격리 레이어 복원 → DRC 마크) |

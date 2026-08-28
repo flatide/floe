@@ -399,6 +399,10 @@ _ICE2_BLOCK = 64
 # waived counts and touch at most ONE chunk of status bytes
 _STATUS_CHUNK = 1 << 22
 
+# colour of the flateyes text annotation a note contributes (yellow,
+# distinct from the red/green review-status stamps)
+DRC_NOTE_COLOR = "#FFD819"
+
 # ---- per-user waive autosave --------------------------------------------
 # Review status lives OUTSIDE the pack (user call 2026-08-28): the
 # pack sits on shared storage, so in-pack pwrites made one review
@@ -482,6 +486,46 @@ def _waive_tmp_fallback(pack_path):
         ".%s.waive.%s-%s" % (name, _waive_user(), tag))
 
 
+# ---- per-reviewer error notes (flateyes .fe sidecar) --------------------
+# Review notes live next to the pack as a per-reviewer flateyes sidecar
+# (.<db>.notes.<reviewer>.fe), so a note works on read-only/shared packs
+# and never collides between reviewers - the same siting and reviewer tag
+# as the waive autosave. The file is a valid flateyes annotation sidecar:
+# each noted error contributes a `text=` annotation at the error's um
+# centre (ppu=1 unit=um), which flateyes (and a future drawing pass)
+# renders verbatim. Two floe-namespaced lines carry what flateyes has no
+# slot for and skips as unknown keys:
+#   floe_pack=<src_size>,<src_mtime>,<err_total>   pack fingerprint
+#   floe_note=<gid,gid,...>|<escaped text>         one shared note + members
+# floe reloads the notes from `floe_note=` (authoritative, keyed by the
+# global error id), never from the `text=` mirror.
+
+def notes_autosave_path(pack_path):
+    """Per-reviewer note sidecar beside the pack, flateyes .fe format."""
+    name = os.path.basename(pack_path)
+    if name.endswith(".ice"):
+        name = name[:-4]
+    return os.path.join(
+        os.path.dirname(os.path.abspath(pack_path)),
+        ".%s.notes.%s.fe" % (name, _waive_user()))
+
+
+def _notes_tmp_fallback(pack_path):
+    """Note sidecar in the system temp dir when the results folder is
+    read-only (path-hashed, like the waive fallback)."""
+    import hashlib
+    import tempfile
+    ap = os.path.abspath(pack_path)
+    name = os.path.basename(pack_path)
+    if name.endswith(".ice"):
+        name = name[:-4]
+    tag = hashlib.sha1(ap.encode("utf-8", "surrogateescape")) \
+        .hexdigest()[:12]
+    return os.path.join(
+        tempfile.gettempdir(),
+        ".%s.notes.%s-%s.fe" % (name, _waive_user(), tag))
+
+
 def _uv(buf, pos):
     val = 0
     shift = 0
@@ -530,7 +574,9 @@ class IcePack(object):
                  "_ecnt", "_cbb", "_cache", "_order",
                  "_status", "_status_off", "_wfd",
                  "_wcount", "_wcount_off", "_wchunk",
-                 "_waive_path", "_waive_hdr")
+                 "_waive_path", "_waive_hdr",
+                 "_notes", "_note_of", "_note_next", "_note_path",
+                 "_note_tag")
 
     def __init__(self, path, src_path=None, verify_src=False):
         self._wfd = None
@@ -710,6 +756,13 @@ class IcePack(object):
                         np.zeros(0, dtype="<u4"))
         self._wcount_off = wwcount_off
         self._wfd = None
+        # per-reviewer error notes (flateyes .fe sidecar beside the pack)
+        self._note_tag = "%d,%d,%d" % (src_size, src_mtime, err_total)
+        self._notes = {}      # note_id -> {"text": str, "members": set(gid)}
+        self._note_of = {}    # gid -> note_id
+        self._note_next = 1
+        self._note_path = notes_autosave_path(path)
+        self._load_notes(err_total)
         self.checks = []
         drefs = struct.unpack("<%dI" % descref_cnt, descbuf)
         es, bs, ec = [], [], []
@@ -915,6 +968,217 @@ class IcePack(object):
     def status_counts(self, ci):
         """(waived, total) of one rule - O(1) via [wcount]."""
         return (int(self._wcount[ci]), int(self._ecnt[ci]))
+
+    # ---- error notes (per-reviewer flateyes .fe sidecar) --------------
+
+    def error_gid(self, ci, ei):
+        """Global 0-based error id (same key as the status byte)."""
+        return int(self._dir_es[ci]) + ei
+
+    def get_note(self, ci, ei):
+        """Note text shared by this error, or None."""
+        return self.get_note_gid(self.error_gid(ci, ei))
+
+    def get_note_gid(self, gid):
+        nid = self._note_of.get(gid)
+        return self._notes[nid]["text"] if nid else None
+
+    def set_note(self, gids, text):
+        """Attach ONE shared note to `gids` (global ids). Each id is
+        detached from any prior note first, so a new selection forms a
+        fresh shared note; empty text just clears. Autosaves the .fe."""
+        gids = [g for g in gids if 0 <= g < self.total]
+        self._note_detach(gids)
+        text = (text or "").strip()
+        if text and gids:
+            nid = self._note_next
+            self._note_next += 1
+            self._notes[nid] = {"text": text, "members": set(gids)}
+            for g in gids:
+                self._note_of[g] = nid
+        self._note_write()
+
+    def clear_note(self, gids):
+        """Remove `gids` from their notes (a note with no members left
+        disappears). Autosaves the .fe."""
+        self._note_detach([g for g in gids if 0 <= g < self.total])
+        self._note_write()
+
+    def notes_list(self):
+        """[(text, sorted member gids)] for every note - the query
+        surface a future note-list panel reads."""
+        return [(n["text"], sorted(n["members"]))
+                for _, n in sorted(self._notes.items())
+                if n["members"]]
+
+    def _note_detach(self, gids):
+        for g in gids:
+            nid = self._note_of.pop(g, None)
+            if nid is None:
+                continue
+            self._notes[nid]["members"].discard(g)
+            if not self._notes[nid]["members"]:
+                del self._notes[nid]
+
+    def _note_center(self, gid):
+        """(x, y) um centre of one error, for the flateyes text anchor."""
+        try:
+            return self._perr(gid).center()
+        except Exception:
+            return (0.0, 0.0)
+
+    def _serialize_notes(self):
+        """flateyes .fe text for the current notes, or None when empty.
+        Standard `text=` annotations (one per member, at its um centre)
+        render in flateyes; floe-namespaced lines carry the pack
+        fingerprint and the gid membership floe reloads from."""
+        from . import fe_embed
+        floe_lines, annos = [], []
+        for _, note in sorted(self._notes.items()):
+            members = sorted(note["members"])
+            if not members:
+                continue
+            floe_lines.append(
+                "floe_note=%s|%s"
+                % (",".join(str(g) for g in members),
+                   fe_embed.escape_meta(note["text"])))
+            for g in members:
+                cx, cy = self._note_center(g)
+                annos.append(fe_embed.text(cx, cy, note["text"],
+                                           color=DRC_NOTE_COLOR))
+        if not floe_lines:
+            return None
+        lines = ["# flateyes annotations",
+                 "floe_pack=%s" % self._note_tag,
+                 "ppu=1", "unit=um"]
+        lines.extend(floe_lines)
+        lines.extend(fe_embed.serialize_anno(a) for a in annos)
+        return "\n".join(lines) + "\n"
+
+    def _note_atomic_write(self, path, text):
+        d = os.path.dirname(os.path.abspath(path)) or "."
+        tmp = os.path.join(d, ".%s.tmp-%d"
+                           % (os.path.basename(path), os.getpid()))
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(text)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+        except OSError:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
+
+    def _note_write(self):
+        """Persist the notes autosave; remove it when no notes remain.
+        Results folder read-only -> fall back to the system temp dir
+        once (same as the waive autosave)."""
+        text = self._serialize_notes()
+        if text is None:
+            try:
+                os.remove(self._note_path)
+            except OSError:
+                pass
+            return
+        try:
+            self._note_atomic_write(self._note_path, text)
+        except OSError:
+            beside = notes_autosave_path(self.path)
+            if self._note_path == beside:
+                self._note_path = _notes_tmp_fallback(self.path)
+                self._note_atomic_write(self._note_path, text)
+                sys.stderr.write(
+                    "[drc] results folder not writable; note autosave "
+                    "in %s (save notes explicitly to keep them)\n"
+                    % self._note_path)
+            else:
+                raise
+
+    def _load_notes(self, err_total):
+        """Load the autosave (beside the pack, else the temp fallback).
+        A pack-fingerprint mismatch moves the file aside instead of
+        applying stale gids; malformed lines are skipped."""
+        for cand in (notes_autosave_path(self.path),
+                     _notes_tmp_fallback(self.path)):
+            try:
+                with open(cand, "r", encoding="utf-8") as f:
+                    text = f.read()
+            except OSError:
+                continue
+            if self._parse_notes(text, err_total):
+                self._note_path = cand
+            else:
+                aside = "%s.stale-%d" % (cand, int(time.time()))
+                try:
+                    os.replace(cand, aside)
+                    sys.stderr.write(
+                        "[drc] note sidecar does not match this pack "
+                        "(DRC re-run?); moved aside: %s\n" % aside)
+                except OSError:
+                    pass
+                self._notes, self._note_of, self._note_next = {}, {}, 1
+            return
+
+    def _parse_notes(self, text, err_total):
+        """Rebuild notes from floe_note= lines. Returns False when the
+        floe_pack fingerprint is present and mismatches (caller asides
+        the file); True otherwise (incl. no fingerprint / no notes)."""
+        from . import fe_embed
+        notes, note_of, nid = {}, {}, 1
+        tag_ok = True
+        for raw in text.splitlines():
+            line = raw.strip()
+            if line.startswith("floe_pack="):
+                tag_ok = line[len("floe_pack="):] == self._note_tag
+            elif line.startswith("floe_note="):
+                body = line[len("floe_note="):]
+                ids, sep, txt = body.partition("|")
+                if not sep:
+                    continue
+                members = set()
+                for tok in ids.split(","):
+                    tok = tok.strip()
+                    if tok.isdigit() and 0 <= int(tok) < err_total:
+                        members.add(int(tok))
+                txt = fe_embed.unescape_meta(txt).strip()
+                if not members or not txt:
+                    continue
+                notes[nid] = {"text": txt, "members": members}
+                for g in members:
+                    note_of[g] = nid
+                nid += 1
+        if not tag_ok:
+            return False
+        self._notes, self._note_of, self._note_next = notes, note_of, nid
+        return True
+
+    def note_export(self, dst):
+        """Save the notes to `dst` (flateyes .fe format); an empty note
+        set removes dst. Atomic write."""
+        text = self._serialize_notes()
+        if text is None:
+            try:
+                os.remove(dst)
+            except OSError:
+                pass
+            return
+        self._note_atomic_write(dst, text)
+
+    def note_import(self, src):
+        """REPLACE the notes from a saved .fe. Refuses a file recorded
+        against a different pack (mismatched fingerprint). Returns the
+        note count."""
+        with open(src, "r", encoding="utf-8") as f:
+            text = f.read()
+        if not self._parse_notes(text, self.total):
+            raise ValueError(
+                "%s: note file does not match this pack "
+                "(different DRC run / re-packed db?)" % src)
+        self._note_write()
+        return len(self._notes)
 
     def status_eis(self, ci, waived):
         """Rule-local error indices whose waived-ness matches.
