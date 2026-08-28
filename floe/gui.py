@@ -2659,7 +2659,10 @@ class Viewer:
                             res["png_ms"], res.get("publish_ms", 0.0))
                         if res.get("frame_cache_hit"):
                             text += ", frame-cache"
-                        text += ", rust %dj/%dt@%spx %sx%s" % (
+                        # NNtiles is CUMULATIVE over the refinement
+                        # rounds (9 tiles x 5 rounds = 45), not a
+                        # thread count - raster threads are the Nj
+                        text += ", rust %dj %dtiles@%spx %sx%s" % (
                             res.get("raster_jobs", 0),
                             res.get("render_tiles", 0),
                             res.get("tile_px", 0),
