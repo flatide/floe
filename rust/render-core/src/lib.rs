@@ -35,7 +35,8 @@ pub use query::{
 };
 pub use raster::{
     render_geometry_occupancy, render_geometry_occupancy_cancellable, render_geometry_styled,
-    render_geometry_styled_cancellable, GeometryRasterReport, GeometryRasterRequest, LayerFill,
+    render_geometry_styled_cancellable, render_geometry_styled_unbinned,
+    render_geometry_styled_unbinned_cancellable, GeometryRasterReport, GeometryRasterRequest, LayerFill,
     LayerStyle, RasterViewBox, RgbaFrame, StyledGeometryRasterRequest, DEFAULT_TILE_SIZE,
     MAX_TILE_SIZE,
 };

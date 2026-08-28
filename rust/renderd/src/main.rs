@@ -1,5 +1,6 @@
 use floe_render_core::{
     pick_scene, render_geometry_occupancy_cancellable, render_geometry_styled_cancellable,
+    render_geometry_styled_unbinned_cancellable,
     snap_scene, validate_font_px, Cache, CacheLayer, ClipGeometry, DecodedPageCache, FrameScene,
     GeometryRasterRequest, LayerFill, LayerStyle, PlanRequest, RasterViewBox, RenderCancellation,
     SceneQueryLayer, SceneQueryRequest, SceneSnapKind, StyledGeometryRasterRequest, ViewBox,
@@ -717,6 +718,7 @@ struct FramePixels {
     frame_cache_hit: bool,
     raster_us: u64,
     raster_tile_max_us: u64,
+    work_bin_items: u64,
     png_us: u64,
     workers_used: u16,
     tiles: u32,
@@ -1423,6 +1425,7 @@ fn run_render(
                 frame_cache_hit: true,
                 raster_us: 0,
                 raster_tile_max_us: 0,
+                work_bin_items: 0,
                 png_us: 0,
                 workers_used: 0,
                 tiles: 0,
@@ -1448,17 +1451,29 @@ fn run_render(
                     cancellation,
                 )?
             } else {
-                render_geometry_styled_cancellable(
-                    &scene,
-                    &StyledGeometryRasterRequest {
-                        raster: raster_request,
-                        layers: styles.clone(),
-                        hierarchy_frames: command.frames,
-                        mono: command.mono,
-                    },
-                    command.generation,
-                    cancellation,
-                )?
+                let styled = StyledGeometryRasterRequest {
+                    raster: raster_request,
+                    layers: styles.clone(),
+                    hierarchy_frames: command.frames,
+                    mono: command.mono,
+                };
+                // FLOE_RUST_WORK_BIN=off: field kill switch back to the
+                // per-tile walk (identical pixels, F2R-03b 2c).
+                if std::env::var("FLOE_RUST_WORK_BIN").as_deref() == Ok("off") {
+                    render_geometry_styled_unbinned_cancellable(
+                        &scene,
+                        &styled,
+                        command.generation,
+                        cancellation,
+                    )?
+                } else {
+                    render_geometry_styled_cancellable(
+                        &scene,
+                        &styled,
+                        command.generation,
+                        cancellation,
+                    )?
+                }
             };
             check_generation(cancellation, command.generation)?;
             let png_started = Instant::now();
@@ -1469,6 +1484,7 @@ fn run_render(
                 frame_cache_hit: false,
                 raster_us: report.stats.raster_us,
                 raster_tile_max_us: report.stats.raster_tile_max_us,
+                work_bin_items: report.stats.work_bin_items,
                 png_us,
                 workers_used: report.stats.workers_used,
                 tiles: report.stats.tiles,
@@ -1530,7 +1546,7 @@ fn run_render(
         respond(
             responses,
             format!(
-                "frame gen={} round={} final={} png={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={}",
+                "frame gen={} round={} final={} png={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} bin_items={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={}",
                 command.generation,
                 round_index + 1,
                 final_round as u8,
@@ -1563,6 +1579,7 @@ fn run_render(
                 scene.mask_bytes(),
                 pixels.raster_us,
                 pixels.raster_tile_max_us,
+                pixels.work_bin_items,
                 pixels.png_us,
                 publish_stats.write_us,
                 publish_stats.sync_us,

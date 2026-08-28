@@ -539,7 +539,7 @@ per-member로는 KLayout ~175ns/member(12.9M/2252ms) vs floe2 추정
 |---|---:|---|---|---|
 | F2R-01 | P1 | `DONE` | cache hit까지 128-page refine | cache-aware batch/unit+현장 gate 완료 |
 | F2R-02 | P1 | `DONE` | 128px tile의 반복 hierarchy 순회 | 제품 기본 384px 승인 |
-| F2R-03 | P1 | `DOING` | tile x layer x hierarchy 총 CPU 작업량 | 03a~03b-2b 완료(deep-zoom 439→22ms). **2c 재개 확정** — mid-zoom 실측 hier 300M gate/round×45tile 곱(§3.15) |
+| F2R-03 | P1 | `DOING` | tile x layer x hierarchy 총 CPU 작업량 | 03a~03b-**2c까지 완료** — 2c work bin으로 tile×plane 곱 제거(§3.15 후속). 남음: 실칩 재측정, 03c(1bpp plane) |
 | F2R-04 | P1 | `DONE` | total에서 사라진 PNG/publish 37~44ms | write/sync/rename/handoff 계측 완료 |
 | F2R-05 | P2 | `DONE` | jobs=8의 CPU/전력 비용 | decode 8/raster 4 분리 승인 |
 | F2R-06 | P3 | `BLOCKED` | render마다 OS thread 생성 | startup_us가 병목일 때만 pool |
@@ -746,6 +746,26 @@ prune과 큰 tile은 중복을 줄이는 완화책일 뿐이다. jobs=1도 tile=
   - gate: bin on/off PNG byte 동일(jobs 1/4/8 × tile 128/384/858),
     hotspot 회귀 없음 + 실칩 mid-zoom 개선, bin 구성 중 취소를 포함한
     cancellation soak stale publish 0.
+
+  **2c 완료(2026-08-28)**: FrameScene 확정 후 round당 1회의 취소
+  가능한 수집 walk이 DFS 순서로 (page, transform)·wash·frame item을
+  모으고, tile worker는 hierarchy 없이 자기 plane의 item을 tile bbox로
+  걸러 기존 record-index 질의를 그대로 실행한다. 조상 bbox culling이
+  보수적 superset 필터이고 plane별 item 순서가 walk의 DFS 순서라 tile
+  별 paint 시퀀스가 walk과 동일 — **byte 동일 oracle**(scene 3종 ×
+  jobs {1,4} × tile {8, 기본})로 고정했다. 설계 편차 1건: item을
+  (plane, tile)로 counting-sort binning하는 대신 plane별 평면 리스트를
+  tile마다 bbox 필터한다 — §3.15 규모(45 tile × ~수만 item)에서 스캔
+  비용이 무시 가능해서이며, world-tile 확장 키(F2R-10/11)는 이 지점에
+  그대로 남는다. 2b gate는 수집 walk의 **결합 질의**(styled layer 합
+  ∪ frames)로 이동해 plane별 gate 3억 회(§3.15)가 walk 1회분으로
+  줄어든다. 한도: item 상한 768k(≈64MB, frame 수명) 초과 시 기존
+  per-tile walk 폴백(`work_bin_items=0` telemetry, pixel 불변). kill
+  switch `FLOE_RUST_WORK_BIN=off`, render-cli `--work-bin`. 실측:
+  deephier(8 layer × 49 tile, j1) hier 방문 17,808→2,729(-85%)·PNG
+  md5 동일, sample9 제품 r4/384 raster 20.3→16.0ms(-21%). occupancy
+  경로는 oracle 기준이라 walk 유지. 대형 실칩 mid-zoom 개선 폭은
+  재측정으로 판정한다.
 
   **착수 판정과 순서**: 실칩 bench의 wc_cells/inst_edges/render_tiles/
   layer 수로 traversal 곱셈 비중을 추정해 2b·2c의 기대 이득을 정한다.
@@ -1002,15 +1022,13 @@ KLayout의 95% 처리 성능을 먼저 달성하고 병렬 raster를 latency 가
 3. F2R-10 fixed-scale pan sweep은 sample9에서 완료(§3.12): 인접 pan 열세가
    재현되지 않았고 floe2가 전 구간 우세였다. 관찰이 나온 실칩 trace에서 같은
    `--pan-sweep`을 재측정한 뒤 world-tile 착수를 판정한다.
-4. F2R-03b 2단계: 2a Pts chunk 완료(-95% member 테스트), 2b layer
-   mask 완료(deep-zoom draw 439→22ms — §3.13). **실칩 mid-zoom
-   판정(§3.15)으로 우선순위 확정**: ① F2R-09 cost-aware round —
-   대형 cold 뷰의 rounds 5가 draw를 ~3배로 만들며, 단발이면 이미
-   floe보다 빠르다(추정 4.3 vs 6.2초). ② **2c work bin 재개** —
-   round×45tile×plane 곱이 mask gate 검사만 3억 회를 만든다(부수:
-   gate의 wcells 이진탐색을 사전 해석 index로). load 축 후보들
-   (lazy-index·인코드 캐시·budget)은 이 뷰에서 전부 비병목으로
-   판정돼 후순위.
+4. F2R-03b 완료: 2a Pts chunk(-95% member 테스트), 2b layer mask
+   (deep-zoom 439→22ms), **2c work bin**(tile×plane walk 곱 제거,
+   deephier hier -85%, sample9 제품 raster -21%, byte 동일 oracle).
+   F2R-09 cost-aware round(rounds 5→2)와 함께 §3.15 문제 뷰의 두
+   곱셈을 모두 제거 — 실칩 재측정으로 남은 격차(예상: per-member
+   상수, F2R-03c 1bpp plane 영역)를 판정한다. load 축 후보들
+   (lazy-index·인코드 캐시·budget)은 §3.15에서 비병목 판정, 후순위.
 5. 같은 work bin 위에서 F2R-10 world-aligned tile LRU를 작게 prototype하고 field trace
    20% gate를 넘을 때만 제품화한다.
 6. 1024-page를 넘는 장시간 cold fixture로 F2R-11 final-tile streaming의 first/settled

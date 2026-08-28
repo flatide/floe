@@ -223,7 +223,7 @@ pub fn render_geometry_occupancy(
     request: &GeometryRasterRequest,
 ) -> Result<GeometryRasterReport, String> {
     request.validate()?;
-    render_geometry(scene, request, RenderMode::Occupancy, None)
+    render_geometry(scene, request, RenderMode::Occupancy, None, false)
 }
 
 pub fn render_geometry_occupancy_cancellable(
@@ -241,6 +241,7 @@ pub fn render_geometry_occupancy_cancellable(
             generation,
             cancellation,
         }),
+        false,
     )
 }
 
@@ -249,7 +250,17 @@ pub fn render_geometry_styled(
     request: &StyledGeometryRasterRequest,
 ) -> Result<GeometryRasterReport, String> {
     request.validate()?;
-    render_geometry(scene, &request.raster, RenderMode::Styled(request), None)
+    render_geometry(scene, &request.raster, RenderMode::Styled(request), None, true)
+}
+
+/// Styled render with the work bin disabled — the per-tile walk
+/// reference path (kill switch and the bin-equality oracle).
+pub fn render_geometry_styled_unbinned(
+    scene: &FrameScene,
+    request: &StyledGeometryRasterRequest,
+) -> Result<GeometryRasterReport, String> {
+    request.validate()?;
+    render_geometry(scene, &request.raster, RenderMode::Styled(request), None, false)
 }
 
 pub fn render_geometry_styled_cancellable(
@@ -267,6 +278,28 @@ pub fn render_geometry_styled_cancellable(
             generation,
             cancellation,
         }),
+        true,
+    )
+}
+
+/// `render_geometry_styled_cancellable` with the work bin disabled
+/// (FLOE_RUST_WORK_BIN=off kill switch in the daemon).
+pub fn render_geometry_styled_unbinned_cancellable(
+    scene: &FrameScene,
+    request: &StyledGeometryRasterRequest,
+    generation: u64,
+    cancellation: &RenderCancellation,
+) -> Result<GeometryRasterReport, String> {
+    request.validate()?;
+    render_geometry(
+        scene,
+        &request.raster,
+        RenderMode::Styled(request),
+        Some(RenderGuard {
+            generation,
+            cancellation,
+        }),
+        false,
     )
 }
 
@@ -471,6 +504,7 @@ fn render_geometry(
     request: &GeometryRasterRequest,
     mode: RenderMode<'_>,
     guard: Option<RenderGuard<'_>>,
+    work_bin: bool,
 ) -> Result<GeometryRasterReport, String> {
     check_cancelled(guard)?;
     let (prepared_labels, labels_truncated) = match mode {
@@ -492,6 +526,23 @@ fn render_geometry(
         ..RenderStats::default()
     };
     let started = Instant::now();
+    // F2R-03b 2c: one collection walk replaces the per-tile x
+    // per-plane hierarchy walks. Falls back to the walk (None) when
+    // the item cap is exceeded; occupancy always walks.
+    let bin = match mode {
+        RenderMode::Styled(styled) if work_bin => {
+            let stroke_pixels = styled
+                .layers
+                .iter()
+                .map(|layer| layer.outline_width)
+                .max()
+                .unwrap_or(1);
+            collect_work_bin(scene, request, styled, stroke_pixels, guard, &mut stats)?
+        }
+        _ => None,
+    };
+    stats.work_bin_items = bin.as_ref().map(|bin| bin.items).unwrap_or(0);
+    let bin = bin.as_ref();
     let next_tile = AtomicUsize::new(0);
     let tiles = std::thread::scope(|scope| {
         let mut handles = Vec::with_capacity(worker_count);
@@ -516,6 +567,7 @@ fn render_geometry(
                         scene,
                         request,
                         mode,
+                        bin,
                         prepared_labels,
                         guard,
                         col0,
@@ -642,11 +694,528 @@ struct RasterTileOutput {
     counters: RasterCounters,
 }
 
+/// F2R-03b 2c: frame-level work bin. One cancellable traversal per
+/// round collects every visible page/wash/frame item in DFS order;
+/// tile workers then serve their planes from the bin instead of
+/// re-walking the hierarchy per tile x plane. Ancestor bbox culling
+/// is a conservative superset filter and the per-plane item order is
+/// the walk's DFS order, so the per-tile paint sequence - and every
+/// output byte - matches the walk exactly. Styled mode only.
+struct WorkBin {
+    /// Per styled-plane items (page queries and washes), DFS order.
+    planes: Vec<Vec<PlaneItem>>,
+    /// Frame-carrying cell visits, DFS order; band-filtered at paint.
+    frames: Vec<FrameItem>,
+    items: u64,
+}
+
+enum PlaneItem {
+    Page {
+        world_bbox: BBox,
+        transform: OrthoTransform,
+        inverse: OrthoTransform,
+        page_id: u32,
+    },
+    Wash {
+        world_bbox: BBox,
+    },
+}
+
+struct FrameItem {
+    world_bbox: BBox,
+    transform: OrthoTransform,
+    inverse: OrthoTransform,
+    cell: WsKey,
+}
+
+/// Item cap (~64MB of items); past it the round falls back to the
+/// per-tile walk (`work_bin_items=0` telemetry), pixels unchanged.
+const WORK_BIN_MAX_ITEMS: u64 = 768 * 1024;
+
+/// Internal marker: the collection walk aborts through the normal
+/// error channel when the cap is hit and the caller turns it into
+/// the fallback instead of a render error.
+const WORK_BIN_OVERFLOW: &str = "work-bin item cap exceeded";
+
+impl WorkBin {
+    fn charge(&mut self) -> Result<(), String> {
+        self.items += 1;
+        if self.items > WORK_BIN_MAX_ITEMS {
+            return Err(WORK_BIN_OVERFLOW.to_string());
+        }
+        Ok(())
+    }
+}
+
+fn collect_work_bin(
+    scene: &FrameScene,
+    request: &GeometryRasterRequest,
+    styled: &StyledGeometryRasterRequest,
+    stroke_pixels: u8,
+    guard: Option<RenderGuard<'_>>,
+    stats: &mut RenderStats,
+) -> Result<Option<WorkBin>, String> {
+    let cull_view = tile_world_view(request, 0, request.width, 0, request.height, stroke_pixels)?;
+    let mut plane_of = std::collections::HashMap::new();
+    for (plane, layer) in styled.layers.iter().enumerate() {
+        plane_of.insert(layer.layer_idx, plane);
+    }
+    let layer_indices: Vec<u32> = styled.layers.iter().map(|layer| layer.layer_idx).collect();
+    let query = scene.layer_query_words(&layer_indices);
+    let mut bin = WorkBin {
+        planes: (0..styled.layers.len()).map(|_| Vec::new()).collect(),
+        frames: Vec::new(),
+        items: 0,
+    };
+    let mut path = Vec::new();
+    let walk = collect_cell(
+        scene,
+        &mut bin,
+        &plane_of,
+        &query,
+        styled.hierarchy_frames,
+        cull_view,
+        guard,
+        scene.top(),
+        OrthoTransform::identity(),
+        &mut path,
+        stats,
+    );
+    match walk {
+        Ok(()) => Ok(Some(bin)),
+        Err(error) if error == WORK_BIN_OVERFLOW => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_cell(
+    scene: &FrameScene,
+    bin: &mut WorkBin,
+    plane_of: &std::collections::HashMap<u32, usize>,
+    query: &[u64],
+    want_frames: bool,
+    cull_view: BBox,
+    guard: Option<RenderGuard<'_>>,
+    key: WsKey,
+    world_transform: OrthoTransform,
+    path: &mut Vec<WsKey>,
+    stats: &mut RenderStats,
+) -> Result<(), String> {
+    check_cancelled(guard)?;
+    if path.contains(&key) {
+        return Err(format!("invalid plan: hierarchy cycle at {:?}", key));
+    }
+    let cell = scene
+        .cell(key)
+        .ok_or_else(|| format!("invalid plan: missing working cell {:?}", key))?;
+    stats.hier_cells_visited = stats.hier_cells_visited.saturating_add(1);
+    path.push(key);
+    let inverse = world_transform.invert()?;
+    let local_view = inverse.apply_bbox(cull_view)?;
+
+    for &page_id in &cell.pages {
+        let Some(page) = scene.page(page_id) else {
+            continue;
+        };
+        let Some(&plane) = plane_of.get(&page.layer_idx) else {
+            continue;
+        };
+        if !page.bbox.intersects(&local_view) {
+            continue;
+        }
+        bin.charge()?;
+        let world_bbox = world_transform.apply_bbox(page.bbox)?;
+        bin.planes[plane].push(PlaneItem::Page {
+            world_bbox,
+            transform: world_transform,
+            inverse,
+            page_id,
+        });
+    }
+    for &(layer_idx, wash) in &cell.washes {
+        let Some(&plane) = plane_of.get(&layer_idx) else {
+            continue;
+        };
+        let world_bbox = world_transform.apply_bbox(wash)?;
+        if !world_bbox.intersects(&cull_view) {
+            continue;
+        }
+        bin.charge()?;
+        bin.planes[plane].push(PlaneItem::Wash { world_bbox });
+    }
+    if want_frames && !cell.frames.is_empty() {
+        // The walk reaches a non-top cell only when its bbox meets the
+        // view, so the item filter mirrors that; the top cell is
+        // always visited and gets the whole-frame bbox.
+        let world_bbox = if path.len() == 1 {
+            cull_view
+        } else {
+            let cell_bbox = scene
+                .cell_bbox(key)
+                .ok_or_else(|| format!("invalid scene: bbox for working cell {:?} is missing", key))?;
+            world_transform.apply_bbox(cell_bbox)?
+        };
+        bin.charge()?;
+        bin.frames.push(FrameItem {
+            world_bbox,
+            transform: world_transform,
+            inverse,
+            cell: key,
+        });
+    }
+
+    for instance in &cell.insts {
+        check_cancelled(guard)?;
+        let child_bbox = scene
+            .cell_bbox(instance.child)
+            .ok_or_else(|| format!("invalid plan: missing bbox for child {:?}", instance.child))?;
+        if child_bbox.is_empty() {
+            continue;
+        }
+        // Combined 2b gate: one pass serves every plane, so a child is
+        // pruned only when its subtree holds NONE of the styled layers
+        // and (when frames are on) no hierarchy frames.
+        if !scene.subtree_intersects(instance.child, query, want_frames) {
+            stats.subtrees_pruned = stats.subtrees_pruned.saturating_add(1);
+            continue;
+        }
+        let base_place =
+            OrthoTransform::place(instance.x, instance.y, instance.rot, instance.flip)?;
+        let base_bbox = base_place.apply_bbox(child_bbox)?;
+        let mut cancel_member = 0u16;
+        let visit = for_each_visible_offset(
+            &instance.rep,
+            base_bbox,
+            local_view,
+            |offset_x, offset_y| {
+                check_member_cancelled(guard, &mut cancel_member)?;
+                let x = checked_add(instance.x, offset_x, "instance x")?;
+                let y = checked_add(instance.y, offset_y, "instance y")?;
+                let local = OrthoTransform::place(x, y, instance.rot, instance.flip)?;
+                let child_world = world_transform.compose(&local)?;
+                collect_cell(
+                    scene,
+                    bin,
+                    plane_of,
+                    query,
+                    want_frames,
+                    cull_view,
+                    guard,
+                    instance.child,
+                    child_world,
+                    path,
+                    stats,
+                )
+            },
+        )?;
+        stats.rep_members_tested = stats.rep_members_tested.saturating_add(visit.tested);
+    }
+    path.pop();
+    Ok(())
+}
+
+/// Serves one tile from the bin: same plane order, same per-plane DFS
+/// item order, same record queries as the walk.
+#[allow(clippy::too_many_arguments)]
+fn raster_tile_from_bin(
+    scene: &FrameScene,
+    request: &GeometryRasterRequest,
+    styled: &StyledGeometryRasterRequest,
+    bin: &WorkBin,
+    labels: Option<&PreparedLabels>,
+    band: &mut RasterBand,
+    cull_view: BBox,
+    stats: &mut RenderStats,
+    counters: &mut RasterCounters,
+    guard: Option<RenderGuard<'_>>,
+    record_scratch: &mut RecordSet,
+) -> Result<(), String> {
+    let walk_frames = styled.hierarchy_frames && !bin.frames.is_empty();
+    if styled.hierarchy_frames {
+        if walk_frames {
+            for frame_band in [2, 3, 1] {
+                check_cancelled(guard)?;
+                bin_frames(
+                    scene,
+                    request,
+                    bin,
+                    band,
+                    cull_view,
+                    frame_band,
+                    frame_paint(frame_band),
+                    stats,
+                    counters,
+                    guard,
+                )?;
+            }
+        }
+        render_prepared_labels(
+            labels,
+            band,
+            LabelSelection::Block { white: false },
+            [128, 128, 128, 255],
+            counters,
+            guard,
+        )?;
+    }
+    for (plane, layer) in styled.layers.iter().enumerate() {
+        check_cancelled(guard)?;
+        let color = if styled.mono {
+            monochrome(layer.color)
+        } else {
+            layer.color
+        };
+        let paint = PaintStyle {
+            color,
+            fill: layer.fill,
+            stroke: StrokeStyle::Solid,
+            stroke_width: layer.outline_width,
+        };
+        for item in &bin.planes[plane] {
+            match item {
+                PlaneItem::Page {
+                    world_bbox,
+                    transform,
+                    inverse,
+                    page_id,
+                } => {
+                    if !world_bbox.intersects(&cull_view) {
+                        continue;
+                    }
+                    let page = scene.page(*page_id).ok_or_else(|| {
+                        format!("internal error: binned page {page_id} left the scene")
+                    })?;
+                    let local_view = inverse.apply_bbox(cull_view)?;
+                    raster_page_records(
+                        band,
+                        request,
+                        page,
+                        *page_id,
+                        local_view,
+                        *transform,
+                        stats,
+                        counters,
+                        paint,
+                        guard,
+                        record_scratch,
+                    )?;
+                }
+                PlaneItem::Wash { world_bbox } => {
+                    if !world_bbox.intersects(&cull_view) {
+                        continue;
+                    }
+                    counters.rect_records = counters.rect_records.saturating_add(1);
+                    stats.primitives_tested = stats.primitives_tested.saturating_add(1);
+                    stats.rep_members_tested = stats.rep_members_tested.saturating_add(1);
+                    if paint_world_rect(band, request, *world_bbox, paint)? {
+                        counters.rectangle_members_drawn =
+                            counters.rectangle_members_drawn.saturating_add(1);
+                        stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(1);
+                        stats.primitives_drawn = stats.primitives_drawn.saturating_add(1);
+                    }
+                }
+            }
+        }
+        render_prepared_labels(
+            labels,
+            band,
+            LabelSelection::Layer(layer.layer_idx),
+            color,
+            counters,
+            guard,
+        )?;
+    }
+    if styled.hierarchy_frames {
+        check_cancelled(guard)?;
+        if walk_frames {
+            bin_frames(
+                scene,
+                request,
+                bin,
+                band,
+                cull_view,
+                0,
+                frame_paint(0),
+                stats,
+                counters,
+                guard,
+            )?;
+        }
+        render_prepared_labels(
+            labels,
+            band,
+            LabelSelection::Block { white: true },
+            [255, 255, 255, 255],
+            counters,
+            guard,
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bin_frames(
+    scene: &FrameScene,
+    request: &GeometryRasterRequest,
+    bin: &WorkBin,
+    band: &mut RasterBand,
+    cull_view: BBox,
+    selected_band: u8,
+    paint: PaintStyle,
+    stats: &mut RenderStats,
+    counters: &mut RasterCounters,
+    guard: Option<RenderGuard<'_>>,
+) -> Result<(), String> {
+    for item in &bin.frames {
+        if !item.world_bbox.intersects(&cull_view) {
+            continue;
+        }
+        let cell = scene.cell(item.cell).ok_or_else(|| {
+            format!("internal error: binned cell {:?} left the scene", item.cell)
+        })?;
+        let local_view = item.inverse.apply_bbox(cull_view)?;
+        raster_cell_frames(
+            band,
+            request,
+            cell,
+            selected_band,
+            local_view,
+            item.transform,
+            stats,
+            counters,
+            paint,
+            guard,
+        )?;
+    }
+    Ok(())
+}
+
+
+/// The pre-2c styled tile path: per-plane hierarchy walks. Kept
+/// verbatim as the work-bin fallback and byte-equality reference.
+#[allow(clippy::too_many_arguments)]
+fn raster_tile_walk_styled(
+    scene: &FrameScene,
+    request: &GeometryRasterRequest,
+    styled: &StyledGeometryRasterRequest,
+    labels: Option<&PreparedLabels>,
+    band: &mut RasterBand,
+    cull_view: BBox,
+    stats: &mut RenderStats,
+    counters: &mut RasterCounters,
+    guard: Option<RenderGuard<'_>>,
+    path: &mut Vec<WsKey>,
+    record_scratch: &mut RecordSet,
+) -> Result<(), String> {
+    // The masks are subtree-cumulative, so a frame-free plan
+    // skips all four band walks in one test (labels still run).
+    let walk_frames = styled.hierarchy_frames && scene.subtree_has_frames(scene.top());
+    if styled.hierarchy_frames {
+        if walk_frames {
+            for frame_band in [2, 3, 1] {
+                check_cancelled(guard)?;
+                render_frame_band(
+                    scene,
+                    request,
+                    band,
+                    cull_view,
+                    stats,
+                    counters,
+                    frame_band,
+                    frame_paint(frame_band),
+                    guard,
+                    scene.top(),
+                    OrthoTransform::identity(),
+                    path,
+                )?;
+            }
+        }
+        render_prepared_labels(
+            labels,
+            band,
+            LabelSelection::Block { white: false },
+            [128, 128, 128, 255],
+            counters,
+            guard,
+        )?;
+    }
+    for layer in &styled.layers {
+        check_cancelled(guard)?;
+        render_cell(
+            scene,
+            request,
+            band,
+            cull_view,
+            stats,
+            counters,
+            GeometrySelection::Layer(layer.layer_idx),
+            SubtreePrune::Layer(scene.layer_mask_bit(layer.layer_idx)),
+            PaintStyle {
+                color: if styled.mono {
+                    monochrome(layer.color)
+                } else {
+                    layer.color
+                },
+                fill: layer.fill,
+                stroke: StrokeStyle::Solid,
+                stroke_width: layer.outline_width,
+            },
+            guard,
+            scene.top(),
+            OrthoTransform::identity(),
+            path,
+            record_scratch,
+        )?;
+        render_prepared_labels(
+            labels,
+            band,
+            LabelSelection::Layer(layer.layer_idx),
+            if styled.mono {
+                monochrome(layer.color)
+            } else {
+                layer.color
+            },
+            counters,
+            guard,
+        )?;
+    }
+    if styled.hierarchy_frames {
+        check_cancelled(guard)?;
+        if walk_frames {
+            render_frame_band(
+                scene,
+                request,
+                band,
+                cull_view,
+                stats,
+                counters,
+                0,
+                frame_paint(0),
+                guard,
+                scene.top(),
+                OrthoTransform::identity(),
+                path,
+            )?;
+        }
+        render_prepared_labels(
+            labels,
+            band,
+            LabelSelection::Block { white: true },
+            [255, 255, 255, 255],
+            counters,
+            guard,
+        )?;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn raster_tile(
     scene: &FrameScene,
     request: &GeometryRasterRequest,
     mode: RenderMode<'_>,
+    bin: Option<&WorkBin>,
     labels: Option<&PreparedLabels>,
     guard: Option<RenderGuard<'_>>,
     col0: u32,
@@ -690,103 +1259,33 @@ fn raster_tile(
             )?;
         }
         RenderMode::Styled(styled) => {
-            // The masks are subtree-cumulative, so a frame-free plan
-            // skips all four band walks in one test (labels still run).
-            let walk_frames = styled.hierarchy_frames && scene.subtree_has_frames(scene.top());
-            if styled.hierarchy_frames {
-                if walk_frames {
-                    for frame_band in [2, 3, 1] {
-                        check_cancelled(guard)?;
-                        render_frame_band(
-                            scene,
-                            request,
-                            &mut band,
-                            cull_view,
-                            &mut stats,
-                            &mut counters,
-                            frame_band,
-                            frame_paint(frame_band),
-                            guard,
-                            scene.top(),
-                            OrthoTransform::identity(),
-                            &mut path,
-                        )?;
-                    }
-                }
-                render_prepared_labels(
-                    labels,
-                    &mut band,
-                    LabelSelection::Block { white: false },
-                    [128, 128, 128, 255],
-                    &mut counters,
-                    guard,
-                )?;
-            }
-            for layer in &styled.layers {
-                check_cancelled(guard)?;
-                render_cell(
+            if let Some(bin) = bin {
+                raster_tile_from_bin(
                     scene,
                     request,
+                    styled,
+                    bin,
+                    labels,
                     &mut band,
                     cull_view,
                     &mut stats,
                     &mut counters,
-                    GeometrySelection::Layer(layer.layer_idx),
-                    SubtreePrune::Layer(scene.layer_mask_bit(layer.layer_idx)),
-                    PaintStyle {
-                        color: if styled.mono {
-                            monochrome(layer.color)
-                        } else {
-                            layer.color
-                        },
-                        fill: layer.fill,
-                        stroke: StrokeStyle::Solid,
-                        stroke_width: layer.outline_width,
-                    },
                     guard,
-                    scene.top(),
-                    OrthoTransform::identity(),
-                    &mut path,
                     &mut record_scratch,
                 )?;
-                render_prepared_labels(
+            } else {
+                raster_tile_walk_styled(
+                    scene,
+                    request,
+                    styled,
                     labels,
                     &mut band,
-                    LabelSelection::Layer(layer.layer_idx),
-                    if styled.mono {
-                        monochrome(layer.color)
-                    } else {
-                        layer.color
-                    },
+                    cull_view,
+                    &mut stats,
                     &mut counters,
                     guard,
-                )?;
-            }
-            if styled.hierarchy_frames {
-                check_cancelled(guard)?;
-                if walk_frames {
-                    render_frame_band(
-                        scene,
-                        request,
-                        &mut band,
-                        cull_view,
-                        &mut stats,
-                        &mut counters,
-                        0,
-                        frame_paint(0),
-                        guard,
-                        scene.top(),
-                        OrthoTransform::identity(),
-                        &mut path,
-                    )?;
-                }
-                render_prepared_labels(
-                    labels,
-                    &mut band,
-                    LabelSelection::Block { white: true },
-                    [255, 255, 255, 255],
-                    &mut counters,
-                    guard,
+                    &mut path,
+                    &mut record_scratch,
                 )?;
             }
         }
@@ -1152,6 +1651,205 @@ fn add_stats(total: &mut RenderStats, worker: &RenderStats) {
     total.raster_tile_max_us = total.raster_tile_max_us.max(worker.raster_tile_max_us);
 }
 
+/// Queries one decoded page's record index against a tile-local view
+/// and paints the intersecting records. Shared verbatim by the
+/// hierarchy walk and the work-bin tile path (F2R-03b 2c) so the two
+/// produce identical paint sequences.
+#[allow(clippy::too_many_arguments)]
+fn raster_page_records(
+    band: &mut RasterBand,
+    request: &GeometryRasterRequest,
+    page: &crate::DecodedPage,
+    page_id: u32,
+    local_view: BBox,
+    world_transform: OrthoTransform,
+    stats: &mut RenderStats,
+    counters: &mut RasterCounters,
+    paint: PaintStyle,
+    guard: Option<RenderGuard<'_>>,
+    record_scratch: &mut RecordSet,
+) -> Result<(), String> {
+    let geometry = page
+        .doc
+        .cells
+        .get(page.doc.top)
+        .ok_or_else(|| format!("corrupt page {}: invalid top cell", page_id))?;
+    if !geometry.places.is_empty() || !geometry.texts.is_empty() {
+        return Err(format!(
+            "corrupt page {}: geometry page contains placements or text",
+            page_id
+        ));
+    }
+    // Record enumeration is driven by the page's decode-time extent
+    // index: records whose full repetition extent cannot reach this
+    // tile's local view are never visited (F2R-03b). Corrupt or
+    // overflowing records are indexed as always-visible, so the
+    // validation errors below stay reachable.
+    page.index
+        .rects()
+        .for_each_intersecting(local_view, record_scratch, |record| {
+            let rect = geometry
+                .rects
+                .get(record as usize)
+                .ok_or_else(|| format!("corrupt page {}: stale record index", page_id))?;
+            counters.rect_records = counters.rect_records.saturating_add(1);
+            stats.primitives_tested = stats.primitives_tested.saturating_add(1);
+            if rect.w < 0 || rect.h < 0 {
+                return Err(format!(
+                    "corrupt page {}: negative rectangle size {}x{}",
+                    page_id, rect.w, rect.h
+                ));
+            }
+            if rect.w == 0 || rect.h == 0 {
+                return Ok(());
+            }
+            let x1 = rect
+                .x
+                .checked_add(rect.w)
+                .ok_or_else(|| format!("rectangle x overflow in page {}", page_id))?;
+            let y1 = rect
+                .y
+                .checked_add(rect.h)
+                .ok_or_else(|| format!("rectangle y overflow in page {}", page_id))?;
+            let base = BBox {
+                x0: rect.x,
+                y0: rect.y,
+                x1,
+                y1,
+            };
+            let mut drawn = 0u64;
+            let mut cancel_member = 0u16;
+            let visit = for_each_visible_offset_chunked(
+                &rect.rep,
+                page.index.pts_chunks(&rect.rep),
+                base,
+                local_view,
+                |offset_x, offset_y| {
+                    check_member_cancelled(guard, &mut cancel_member)?;
+                    let local = translate_bbox(base, offset_x, offset_y)?;
+                    let world = world_transform.apply_bbox(local)?;
+                    if paint_world_rect(band, request, world, paint)? {
+                        drawn = drawn.saturating_add(1);
+                    }
+                    Ok(())
+                },
+            )?;
+            stats.rep_members_tested = stats.rep_members_tested.saturating_add(visit.tested);
+            stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(drawn);
+            stats.primitives_drawn = stats.primitives_drawn.saturating_add(drawn);
+            counters.rectangle_members_drawn =
+                counters.rectangle_members_drawn.saturating_add(drawn);
+            Ok(())
+        })?;
+
+    page.index
+        .polys()
+        .for_each_intersecting(local_view, record_scratch, |record| {
+            let polygon = geometry
+                .polys
+                .get(record as usize)
+                .ok_or_else(|| format!("corrupt page {}: stale record index", page_id))?;
+            counters.polygon_records = counters.polygon_records.saturating_add(1);
+            stats.primitives_tested = stats.primitives_tested.saturating_add(1);
+            let base = polygon_bbox(&polygon.pts).ok_or_else(|| {
+                format!(
+                    "corrupt page {}: polygon has fewer than 3 vertices",
+                    page_id
+                )
+            })?;
+            let mut drawn = 0u64;
+            let mut cancel_member = 0u16;
+            // One scratch per record, reused by every repetition member.
+            let mut world_points = Vec::with_capacity(polygon.pts.len());
+            let visit = for_each_visible_offset_chunked(
+                &polygon.rep,
+                page.index.pts_chunks(&polygon.rep),
+                base,
+                local_view,
+                |offset_x, offset_y| {
+                    check_member_cancelled(guard, &mut cancel_member)?;
+                    world_points.clear();
+                    for &(x, y) in &polygon.pts {
+                        let x = checked_add(x, offset_x, "polygon x")?;
+                        let y = checked_add(y, offset_y, "polygon y")?;
+                        world_points.push(world_transform.apply(x, y)?);
+                    }
+                    if paint_world_polygon(band, request, &world_points, paint)? {
+                        drawn = drawn.saturating_add(1);
+                    }
+                    Ok(())
+                },
+            )?;
+            stats.rep_members_tested = stats.rep_members_tested.saturating_add(visit.tested);
+            stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(drawn);
+            stats.primitives_drawn = stats.primitives_drawn.saturating_add(drawn);
+            counters.polygon_members_drawn =
+                counters.polygon_members_drawn.saturating_add(drawn);
+            Ok(())
+        })?;
+
+    page.index
+        .paths()
+        .for_each_intersecting(local_view, record_scratch, |record| {
+            let path_record = geometry
+                .paths
+                .get(record as usize)
+                .ok_or_else(|| format!("corrupt page {}: stale record index", page_id))?;
+            counters.path_records = counters.path_records.saturating_add(1);
+            stats.primitives_tested = stats.primitives_tested.saturating_add(1);
+            let outline = checked_path_outline(
+                &path_record.pts,
+                path_record.hw,
+                path_record.es,
+                path_record.ee,
+            )
+            .map_err(|error| format!("page {}: {}", page_id, error))?;
+            let centerline = checked_path_centerline(&path_record.pts)?
+                .ok_or_else(|| format!("corrupt page {}: path spine is degenerate", page_id))?;
+            let base = polygon_bbox(&outline).ok_or_else(|| {
+                format!("corrupt page {}: path outline is degenerate", page_id)
+            })?;
+            let mut drawn = 0u64;
+            let mut cancel_member = 0u16;
+            // One outline/centerline scratch pair per record, reused by
+            // every repetition member.
+            let mut world_points = Vec::with_capacity(outline.len());
+            let mut world_centerline = Vec::with_capacity(centerline.len());
+            let visit = for_each_visible_offset_chunked(
+                &path_record.rep,
+                page.index.pts_chunks(&path_record.rep),
+                base,
+                local_view,
+                |offset_x, offset_y| {
+                    check_member_cancelled(guard, &mut cancel_member)?;
+                    world_points.clear();
+                    for &(x, y) in &outline {
+                        let x = checked_add(x, offset_x, "path x")?;
+                        let y = checked_add(y, offset_y, "path y")?;
+                        world_points.push(world_transform.apply(x, y)?);
+                    }
+                    world_centerline.clear();
+                    for &(x, y) in &centerline {
+                        let x = checked_add(x, offset_x, "path centerline x")?;
+                        let y = checked_add(y, offset_y, "path centerline y")?;
+                        world_centerline.push(world_transform.apply(x, y)?);
+                    }
+                    if paint_world_path(band, request, &world_points, &world_centerline, paint)?
+                    {
+                        drawn = drawn.saturating_add(1);
+                    }
+                    Ok(())
+                },
+            )?;
+            stats.rep_members_tested = stats.rep_members_tested.saturating_add(visit.tested);
+            stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(drawn);
+            stats.primitives_drawn = stats.primitives_drawn.saturating_add(drawn);
+            counters.path_members_drawn = counters.path_members_drawn.saturating_add(drawn);
+            Ok(())
+        })?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_cell(
     scene: &FrameScene,
@@ -1193,186 +1891,20 @@ fn render_cell(
         if !selection.includes(page.layer_idx) || !page.bbox.intersects(&local_view) {
             continue;
         }
-        let geometry = page
-            .doc
-            .cells
-            .get(page.doc.top)
-            .ok_or_else(|| format!("corrupt page {}: invalid top cell", page_id))?;
-        if !geometry.places.is_empty() || !geometry.texts.is_empty() {
-            return Err(format!(
-                "corrupt page {}: geometry page contains placements or text",
-                page_id
-            ));
-        }
-        // Record enumeration is driven by the page's decode-time extent
-        // index: records whose full repetition extent cannot reach this
-        // tile's local view are never visited (F2R-03b). Corrupt or
-        // overflowing records are indexed as always-visible, so the
-        // validation errors below stay reachable.
-        page.index
-            .rects()
-            .for_each_intersecting(local_view, record_scratch, |record| {
-                let rect = geometry
-                    .rects
-                    .get(record as usize)
-                    .ok_or_else(|| format!("corrupt page {}: stale record index", page_id))?;
-                counters.rect_records = counters.rect_records.saturating_add(1);
-                stats.primitives_tested = stats.primitives_tested.saturating_add(1);
-                if rect.w < 0 || rect.h < 0 {
-                    return Err(format!(
-                        "corrupt page {}: negative rectangle size {}x{}",
-                        page_id, rect.w, rect.h
-                    ));
-                }
-                if rect.w == 0 || rect.h == 0 {
-                    return Ok(());
-                }
-                let x1 = rect
-                    .x
-                    .checked_add(rect.w)
-                    .ok_or_else(|| format!("rectangle x overflow in page {}", page_id))?;
-                let y1 = rect
-                    .y
-                    .checked_add(rect.h)
-                    .ok_or_else(|| format!("rectangle y overflow in page {}", page_id))?;
-                let base = BBox {
-                    x0: rect.x,
-                    y0: rect.y,
-                    x1,
-                    y1,
-                };
-                let mut drawn = 0u64;
-                let mut cancel_member = 0u16;
-                let visit = for_each_visible_offset_chunked(
-                    &rect.rep,
-                    page.index.pts_chunks(&rect.rep),
-                    base,
-                    local_view,
-                    |offset_x, offset_y| {
-                        check_member_cancelled(guard, &mut cancel_member)?;
-                        let local = translate_bbox(base, offset_x, offset_y)?;
-                        let world = world_transform.apply_bbox(local)?;
-                        if paint_world_rect(band, request, world, paint)? {
-                            drawn = drawn.saturating_add(1);
-                        }
-                        Ok(())
-                    },
-                )?;
-                stats.rep_members_tested = stats.rep_members_tested.saturating_add(visit.tested);
-                stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(drawn);
-                stats.primitives_drawn = stats.primitives_drawn.saturating_add(drawn);
-                counters.rectangle_members_drawn =
-                    counters.rectangle_members_drawn.saturating_add(drawn);
-                Ok(())
-            })?;
-
-        page.index
-            .polys()
-            .for_each_intersecting(local_view, record_scratch, |record| {
-                let polygon = geometry
-                    .polys
-                    .get(record as usize)
-                    .ok_or_else(|| format!("corrupt page {}: stale record index", page_id))?;
-                counters.polygon_records = counters.polygon_records.saturating_add(1);
-                stats.primitives_tested = stats.primitives_tested.saturating_add(1);
-                let base = polygon_bbox(&polygon.pts).ok_or_else(|| {
-                    format!(
-                        "corrupt page {}: polygon has fewer than 3 vertices",
-                        page_id
-                    )
-                })?;
-                let mut drawn = 0u64;
-                let mut cancel_member = 0u16;
-                // One scratch per record, reused by every repetition member.
-                let mut world_points = Vec::with_capacity(polygon.pts.len());
-                let visit = for_each_visible_offset_chunked(
-                    &polygon.rep,
-                    page.index.pts_chunks(&polygon.rep),
-                    base,
-                    local_view,
-                    |offset_x, offset_y| {
-                        check_member_cancelled(guard, &mut cancel_member)?;
-                        world_points.clear();
-                        for &(x, y) in &polygon.pts {
-                            let x = checked_add(x, offset_x, "polygon x")?;
-                            let y = checked_add(y, offset_y, "polygon y")?;
-                            world_points.push(world_transform.apply(x, y)?);
-                        }
-                        if paint_world_polygon(band, request, &world_points, paint)? {
-                            drawn = drawn.saturating_add(1);
-                        }
-                        Ok(())
-                    },
-                )?;
-                stats.rep_members_tested = stats.rep_members_tested.saturating_add(visit.tested);
-                stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(drawn);
-                stats.primitives_drawn = stats.primitives_drawn.saturating_add(drawn);
-                counters.polygon_members_drawn =
-                    counters.polygon_members_drawn.saturating_add(drawn);
-                Ok(())
-            })?;
-
-        page.index
-            .paths()
-            .for_each_intersecting(local_view, record_scratch, |record| {
-                let path_record = geometry
-                    .paths
-                    .get(record as usize)
-                    .ok_or_else(|| format!("corrupt page {}: stale record index", page_id))?;
-                counters.path_records = counters.path_records.saturating_add(1);
-                stats.primitives_tested = stats.primitives_tested.saturating_add(1);
-                let outline = checked_path_outline(
-                    &path_record.pts,
-                    path_record.hw,
-                    path_record.es,
-                    path_record.ee,
-                )
-                .map_err(|error| format!("page {}: {}", page_id, error))?;
-                let centerline = checked_path_centerline(&path_record.pts)?
-                    .ok_or_else(|| format!("corrupt page {}: path spine is degenerate", page_id))?;
-                let base = polygon_bbox(&outline).ok_or_else(|| {
-                    format!("corrupt page {}: path outline is degenerate", page_id)
-                })?;
-                let mut drawn = 0u64;
-                let mut cancel_member = 0u16;
-                // One outline/centerline scratch pair per record, reused by
-                // every repetition member.
-                let mut world_points = Vec::with_capacity(outline.len());
-                let mut world_centerline = Vec::with_capacity(centerline.len());
-                let visit = for_each_visible_offset_chunked(
-                    &path_record.rep,
-                    page.index.pts_chunks(&path_record.rep),
-                    base,
-                    local_view,
-                    |offset_x, offset_y| {
-                        check_member_cancelled(guard, &mut cancel_member)?;
-                        world_points.clear();
-                        for &(x, y) in &outline {
-                            let x = checked_add(x, offset_x, "path x")?;
-                            let y = checked_add(y, offset_y, "path y")?;
-                            world_points.push(world_transform.apply(x, y)?);
-                        }
-                        world_centerline.clear();
-                        for &(x, y) in &centerline {
-                            let x = checked_add(x, offset_x, "path centerline x")?;
-                            let y = checked_add(y, offset_y, "path centerline y")?;
-                            world_centerline.push(world_transform.apply(x, y)?);
-                        }
-                        if paint_world_path(band, request, &world_points, &world_centerline, paint)?
-                        {
-                            drawn = drawn.saturating_add(1);
-                        }
-                        Ok(())
-                    },
-                )?;
-                stats.rep_members_tested = stats.rep_members_tested.saturating_add(visit.tested);
-                stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(drawn);
-                stats.primitives_drawn = stats.primitives_drawn.saturating_add(drawn);
-                counters.path_members_drawn = counters.path_members_drawn.saturating_add(drawn);
-                Ok(())
-            })?;
+        raster_page_records(
+            band,
+            request,
+            page,
+            page_id,
+            local_view,
+            world_transform,
+            stats,
+            counters,
+            paint,
+            guard,
+            record_scratch,
+        )?;
     }
-
     for &(layer_idx, wash) in &cell.washes {
         check_cancelled(guard)?;
         if !selection.includes(layer_idx) {
@@ -1449,6 +1981,55 @@ fn render_cell(
     Ok(())
 }
 
+/// Paints one visited cell's hierarchy-frame records for a band.
+/// Shared verbatim by the band walk and the work-bin tile path
+/// (F2R-03b 2c).
+#[allow(clippy::too_many_arguments)]
+fn raster_cell_frames(
+    band: &mut RasterBand,
+    request: &GeometryRasterRequest,
+    cell: &floe_vfs::hier::WsCell,
+    selected_band: u8,
+    local_view: BBox,
+    world_transform: OrthoTransform,
+    stats: &mut RenderStats,
+    counters: &mut RasterCounters,
+    paint: PaintStyle,
+    guard: Option<RenderGuard<'_>>,
+) -> Result<(), String> {
+for (bbox, repetition, frame_band) in &cell.frames {
+    check_cancelled(guard)?;
+    if *frame_band > 3 {
+        return Err(format!(
+            "invalid plan: hierarchy frame band {} is outside 0..=3",
+            frame_band
+        ));
+    }
+    if *frame_band != selected_band {
+        continue;
+    }
+    counters.frame_records = counters.frame_records.saturating_add(1);
+    stats.primitives_tested = stats.primitives_tested.saturating_add(1);
+    let mut drawn = 0u64;
+    let mut cancel_member = 0u16;
+    let visit =
+        for_each_visible_offset(repetition, *bbox, local_view, |offset_x, offset_y| {
+            check_member_cancelled(guard, &mut cancel_member)?;
+            let local = translate_bbox(*bbox, offset_x, offset_y)?;
+            let world = world_transform.apply_bbox(local)?;
+            if paint_world_rect(band, request, world, paint)? {
+                drawn = drawn.saturating_add(1);
+            }
+            Ok(())
+        })?;
+    stats.rep_members_tested = stats.rep_members_tested.saturating_add(visit.tested);
+    stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(drawn);
+    stats.primitives_drawn = stats.primitives_drawn.saturating_add(drawn);
+    counters.frame_members_drawn = counters.frame_members_drawn.saturating_add(drawn);
+}
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_frame_band(
     scene: &FrameScene,
@@ -1475,37 +2056,18 @@ fn render_frame_band(
     path.push(key);
     let local_view = world_transform.invert()?.apply_bbox(cull_view)?;
 
-    for (bbox, repetition, frame_band) in &cell.frames {
-        check_cancelled(guard)?;
-        if *frame_band > 3 {
-            return Err(format!(
-                "invalid plan: hierarchy frame band {} is outside 0..=3",
-                frame_band
-            ));
-        }
-        if *frame_band != selected_band {
-            continue;
-        }
-        counters.frame_records = counters.frame_records.saturating_add(1);
-        stats.primitives_tested = stats.primitives_tested.saturating_add(1);
-        let mut drawn = 0u64;
-        let mut cancel_member = 0u16;
-        let visit =
-            for_each_visible_offset(repetition, *bbox, local_view, |offset_x, offset_y| {
-                check_member_cancelled(guard, &mut cancel_member)?;
-                let local = translate_bbox(*bbox, offset_x, offset_y)?;
-                let world = world_transform.apply_bbox(local)?;
-                if paint_world_rect(band, request, world, paint)? {
-                    drawn = drawn.saturating_add(1);
-                }
-                Ok(())
-            })?;
-        stats.rep_members_tested = stats.rep_members_tested.saturating_add(visit.tested);
-        stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(drawn);
-        stats.primitives_drawn = stats.primitives_drawn.saturating_add(drawn);
-        counters.frame_members_drawn = counters.frame_members_drawn.saturating_add(drawn);
-    }
-
+    raster_cell_frames(
+        band,
+        request,
+        cell,
+        selected_band,
+        local_view,
+        world_transform,
+        stats,
+        counters,
+        paint,
+        guard,
+    )?;
     for instance in &cell.insts {
         check_cancelled(guard)?;
         let child_bbox = scene
@@ -4199,6 +4761,84 @@ mod tests {
     }
 
     #[test]
+    fn work_bin_matches_the_walk_byte_for_byte() {
+        // The 2c gate: for hierarchy scenes with reps, masks, frames,
+        // washes and hairlines, the binned render must equal the
+        // per-tile walk in pixels and member paints across worker and
+        // tile-size combinations.
+        let with_config = |styled: &StyledGeometryRasterRequest, workers: u16, tile: u16| {
+            let mut request = styled.clone();
+            request.raster.workers = workers;
+            request.raster.tile_size = tile;
+            request
+        };
+        let masked = masked_request();
+        let scenes: Vec<(FrameScene, StyledGeometryRasterRequest)> = vec![
+            (masked_scene(false), masked.clone()),
+            (
+                masked_scene(false),
+                StyledGeometryRasterRequest {
+                    hierarchy_frames: true,
+                    ..masked.clone()
+                },
+            ),
+            (
+                hairline_scene(
+                    vec![RectRec {
+                        layer: 1,
+                        dt: 0,
+                        x: 24,
+                        y: 304,
+                        w: 5,
+                        h: 5,
+                        rep: Rep::Grid {
+                            na: 4,
+                            nb: 3,
+                            va: (40, 0),
+                            vb: (0, 40),
+                        },
+                    }],
+                    vec![PolyRec {
+                        layer: 1,
+                        dt: 0,
+                        pts: vec![(10, 10), (200, 40), (90, 260)],
+                        rep: Rep::One,
+                    }],
+                    vec![PathRec {
+                        layer: 1,
+                        dt: 0,
+                        pts: vec![(20, 200), (300, 200), (300, 60)],
+                        hw: 8,
+                        es: 0,
+                        ee: 0,
+                        rep: Rep::One,
+                    }],
+                ),
+                hairline_request(),
+            ),
+        ];
+        for (scene, styled) in &scenes {
+            for &workers in &[1u16, 4] {
+                for &tile in &[8u16, DEFAULT_TILE_SIZE] {
+                    let request = with_config(styled, workers, tile);
+                    let walk = render_geometry_styled_unbinned(scene, &request).unwrap();
+                    let bin = render_geometry_styled(scene, &request).unwrap();
+                    assert!(bin.stats.work_bin_items > 0, "bin must engage");
+                    assert_eq!(walk.stats.work_bin_items, 0);
+                    assert_eq!(bin.frame.pixels(), walk.frame.pixels());
+                    assert_eq!(
+                        bin.rectangle_member_paints,
+                        walk.rectangle_member_paints
+                    );
+                    assert_eq!(bin.polygon_member_paints, walk.polygon_member_paints);
+                    assert_eq!(bin.path_member_paints, walk.path_member_paints);
+                    assert_eq!(bin.frame_member_paints, walk.frame_member_paints);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn subtree_mask_pruning_matches_full_mask_pixels() {
         let request = masked_request();
         let masked = render_geometry_styled(&masked_scene(false), &request).unwrap();
@@ -4321,8 +4961,12 @@ mod tests {
             hierarchy_frames: true,
             ..masked_request()
         };
-        let masked = render_geometry_styled(&make_scene(), &request).unwrap();
-        let full = render_geometry_styled(&make_scene().with_full_masks(), &request).unwrap();
+        // The per-plane WALK prunes the frame-free subtree; the work
+        // bin's combined gate rightly keeps it (child B holds styled
+        // geometry), so the prune assertions pin the unbinned path.
+        let masked = render_geometry_styled_unbinned(&make_scene(), &request).unwrap();
+        let full =
+            render_geometry_styled_unbinned(&make_scene().with_full_masks(), &request).unwrap();
         assert_eq!(masked.frame.pixels(), full.frame.pixels());
         assert_eq!(masked.frame_member_paints, full.frame_member_paints);
         assert!(masked.frame_member_paints > 0, "frame must still paint");
@@ -4331,6 +4975,9 @@ mod tests {
             masked.stats.subtrees_pruned > 0,
             "band walk must skip the frame-free subtree"
         );
+        let binned = render_geometry_styled(&make_scene(), &request).unwrap();
+        assert_eq!(binned.frame.pixels(), masked.frame.pixels());
+        assert_eq!(binned.frame_member_paints, masked.frame_member_paints);
     }
 
     #[test]

@@ -376,6 +376,48 @@ impl FrameScene {
         self.masks.bits[row + bit / 64] & (1u64 << (bit % 64)) != 0
     }
 
+    /// Dense query words covering a set of styled layers, for the
+    /// work-bin collection walk's combined gate (F2R-03b 2c). All
+    /// zeros under FULL masks — `subtree_intersects` answers true
+    /// there regardless.
+    pub fn layer_query_words(&self, layers: &[u32]) -> Vec<u64> {
+        let mut words = vec![0u64; self.masks.words];
+        if self.masks.full {
+            return words;
+        }
+        for &layer_idx in layers {
+            if let Ok(bit) = self.masks.layers.binary_search(&layer_idx) {
+                words[bit / 64] |= 1u64 << (bit % 64);
+            }
+        }
+        words
+    }
+
+    /// Whether the subtree rooted at `key` can paint ANY queried layer
+    /// or (when `want_frames`) holds hierarchy frames — the one-pass
+    /// gate of the work-bin collection walk. Unknown cells answer true
+    /// so the walk's own validation errors stay reachable.
+    pub fn subtree_intersects(&self, key: WsKey, query: &[u64], want_frames: bool) -> bool {
+        if self.masks.full {
+            return true;
+        }
+        let Ok(index) = self
+            .plan
+            .wcells
+            .binary_search_by_key(&key, |cell| cell.key)
+        else {
+            return true;
+        };
+        if want_frames && self.masks.frames[index] {
+            return true;
+        }
+        let row = index * self.masks.words;
+        self.masks.bits[row..row + self.masks.words]
+            .iter()
+            .zip(query)
+            .any(|(word, wanted)| word & wanted != 0)
+    }
+
     /// Whether the subtree rooted at `key` holds any hierarchy frame.
     pub fn subtree_has_frames(&self, key: WsKey) -> bool {
         if self.masks.full {

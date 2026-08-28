@@ -1,5 +1,5 @@
 use floe_render_core::{
-    render_geometry_occupancy, render_geometry_styled, Cache, CacheLayer, DecodedPageCache,
+    render_geometry_occupancy, render_geometry_styled, render_geometry_styled_unbinned, Cache, CacheLayer, DecodedPageCache,
     FrameScene, GeometryRasterRequest, LayerFill, LayerStyle, PlanRequest, RasterViewBox,
     StyledGeometryRasterRequest, ViewBox, DEFAULT_TILE_SIZE, MAX_TILE_SIZE,
 };
@@ -10,7 +10,7 @@ const USAGE: &str = "usage: floe-render-cli CACHE --view x0,y0,x1,y1 \
     --width PX --height PX [--depth full|N] [--cut-px N] \
     [--layers L/D,...] [--decode-pages N] [--budget-mb N] [--jobs N] [--tile-px N] \
     [--style 'L/D,#RRGGBB,solid|speckle|clear|pat:HEX64[,1..8]'] \
-    [--frames on|off] [--mono on|off] \
+    [--frames on|off] [--mono on|off] [--work-bin on|off] \
     [--out FILE]\n\
     --view coordinates are microns; --out writes geometry-fill occupancy PNG";
 const MAX_JOBS: u16 = 256;
@@ -31,6 +31,7 @@ struct Args {
     styles: Vec<String>,
     frames: bool,
     mono: bool,
+    work_bin: bool,
     out: Option<String>,
 }
 
@@ -142,22 +143,24 @@ fn run(raw: Vec<String>) -> Result<(), String> {
                 .iter()
                 .map(|style| parse_style(style, &cache_layers))
                 .collect::<Result<Vec<_>, _>>()?;
+            let styled = StyledGeometryRasterRequest {
+                raster: raster_request,
+                layers: styles,
+                hierarchy_frames: args.frames,
+                mono: args.mono,
+            };
             (
                 "geometry-styled",
-                render_geometry_styled(
-                    &scene,
-                    &StyledGeometryRasterRequest {
-                        raster: raster_request,
-                        layers: styles,
-                        hierarchy_frames: args.frames,
-                        mono: args.mono,
-                    },
-                )?,
+                if args.work_bin {
+                    render_geometry_styled(&scene, &styled)?
+                } else {
+                    render_geometry_styled_unbinned(&scene, &styled)?
+                },
             )
         };
         raster.frame.write_png(path)?;
         println!(
-            "raster\tmode={}\tpartial={}\tworkers={}\ttiles={}\trect_record_tests={}\trect_member_paints={}\tpolygon_record_tests={}\tpolygon_member_paints={}\tpath_record_tests={}\tpath_member_paints={}\tframe_record_tests={}\tframe_member_paints={}\tdeferred_frame_tests={}\trep_members_tested={}\trep_members_drawn={}\thier_cells_visited={}\tsubtrees_pruned={}\traster_us={}\traster_tile_max_us={}\tout={}",
+            "raster\tmode={}\tpartial={}\tworkers={}\ttiles={}\trect_record_tests={}\trect_member_paints={}\tpolygon_record_tests={}\tpolygon_member_paints={}\tpath_record_tests={}\tpath_member_paints={}\tframe_record_tests={}\tframe_member_paints={}\tdeferred_frame_tests={}\trep_members_tested={}\trep_members_drawn={}\thier_cells_visited={}\tsubtrees_pruned={}\traster_us={}\traster_tile_max_us={}\twork_bin_items={}\tout={}",
             mode,
             raster.partial as u8,
             raster.stats.workers_used,
@@ -177,6 +180,7 @@ fn run(raw: Vec<String>) -> Result<(), String> {
             raster.stats.subtrees_pruned,
             raster.stats.raster_us,
             raster.stats.raster_tile_max_us,
+            raster.stats.work_bin_items,
             path,
         );
     }
@@ -244,6 +248,7 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
     let mut styles = Vec::new();
     let mut frames = true;
     let mut mono = false;
+    let mut work_bin = true;
     let mut out = None;
     let mut i = 1;
     while i < raw.len() {
@@ -309,6 +314,7 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
             "--style" => styles.push(value.clone()),
             "--frames" => frames = parse_on_off(value, "frames")?,
             "--mono" => mono = parse_on_off(value, "mono")?,
+            "--work-bin" => work_bin = parse_on_off(value, "work-bin")?,
             "--out" => out = Some(value.clone()),
             _ => return Err(format!("unknown option: {flag}")),
         }
@@ -329,6 +335,7 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
         styles,
         frames,
         mono,
+        work_bin,
         out,
     })
 }
