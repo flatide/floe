@@ -96,6 +96,7 @@ class _dprof(object):
                 sys.stderr.flush()
         return False
 DRC_GOLD = 0xFFD700FF      # box-selected errors (canvas + grid)
+DRC_NOTE_BG = "#FFD819"    # on-canvas note chip background (yellow)
 
 
 class _DrcPanel(object):
@@ -1040,6 +1041,7 @@ class Viewer:
         self._mono_saved = False    # mono state before highlight
         self._drc_hl_res = None     # (view key, [(kind, pts dbu)])
         self._labels = []           # Gtk.Label pool for ruler distances
+        self._note_labels = []      # Gtk.Label pool for DRC error notes
 
         self.window = Gtk.Window(title=APP)
         self.window.set_default_size(1280, 860)
@@ -1934,6 +1936,7 @@ class Viewer:
         # labels place BEFORE the pixbuf is handed over: their dotted
         # leaders are stamped into this frame
         self._update_labels(obox, ospp, disp)
+        self._update_note_labels(obox, ospp)
         self.image.set_from_pixbuf(disp)
         self._update_minimap(bbox)
 
@@ -2285,6 +2288,80 @@ class Viewer:
             for end, foot in leaders:
                 stamp_dotted(disp, end, foot, None, RULER_CORE)
         for lbl in self._labels[len(vis):]:
+            lbl.hide()
+
+    def _update_note_labels(self, obox, ospp):
+        """On-canvas note chips: a yellow Gtk.Label at each noted
+        error currently painted on the canvas. Like the ruler chips
+        these are WIDGETS, so they need their own overlay-mode gate -
+        the FIRST Tab (mode 0 -> 1) hides them along with the other
+        error markers (user call 2026-08-28)."""
+        pool = self._note_labels
+        db = self._drc
+        if db is None or not hasattr(db, "get_note") \
+                or self.overlay_mode != 0 or self._drc_open is None:
+            for lbl in pool:
+                lbl.hide()
+            return
+
+        def sx(v):
+            return (v - obox[0]) / ospp
+
+        def sy(v):
+            return (obox[3] - v) / ospp
+
+        w, h = self._viewport_size()
+        # the errors drawn on the canvas at mode 0: the current grid
+        # page plus the gold box-selection (same sources as
+        # _drc_stamp_errs), so a note chip tracks its marker
+        marks = list(self._drc_page_marks or [])
+        if self._drc_sel is not None:
+            sci = self._drc_sel[0]
+            marks += [(sci, ei_, kind, spts)
+                      for ei_, kind, spts in self._drc_sel[2]]
+        items, seen = [], set()
+        for ci_, ei_, _kind, spts in marks:
+            key = (ci_, ei_)
+            if key in seen or not spts:
+                continue
+            note = db.get_note(ci_, ei_)
+            if not note:
+                continue
+            xs = [p[0] for p in spts]
+            ys = [p[1] for p in spts]
+            px = sx((min(xs) + max(xs)) / 2.0)
+            py = sy((min(ys) + max(ys)) / 2.0)
+            if not (-40 <= px <= w and -20 <= py <= h):
+                continue
+            seen.add(key)
+            # one line on the chip; the detail pane keeps the full text
+            flat = " / ".join(note.split("\n"))
+            if len(flat) > 48:
+                flat = flat[:47] + "…"
+            items.append((px, py, flat))
+        while len(pool) < len(items):
+            lbl = Gtk.Label()
+            lbl.set_halign(Gtk.Align.START)
+            lbl.set_valign(Gtk.Align.START)
+            self.overlay.add_overlay(lbl)
+            pool.append(lbl)
+        placed = []
+        for idx, (px, py, flat) in enumerate(items):
+            lbl = pool[idx]
+            lbl.set_markup('<span background="%s" foreground="#101010">'
+                           ' %s </span>'
+                           % (DRC_NOTE_BG,
+                              GLib.markup_escape_text(flat)))
+            lbl.show()
+            _, nat = lbl.get_preferred_size()
+            tw = nat.width - lbl.get_margin_start()
+            th = nat.height - lbl.get_margin_top()
+            x, y = shove_label(px + 8, py - th - 6, tw, th,
+                               placed, w, h)
+            lbl.set_margin_start(int(x))
+            lbl.set_margin_top(int(y))
+            placed.append((x, y, x + tw, y + th))
+        for lbl in pool[len(items):]:
             lbl.hide()
 
     # ---- drawing / rendering ------------------------------------------------

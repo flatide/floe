@@ -126,7 +126,10 @@ python -m floe render chip.oas --drc results.db \
   `floe_note=<gid,gid,…>|<escaped 텍스트>`(공유 note+멤버). floe는
   `floe_note=`(전역 에러 id 키)로 정본 복원, `text=`는 렌더 미러.
   삭제 = 빈 내용 입력 또는 "clear note of selection"(그룹 선택
-  일괄). **영속 기록은 명시적**: `save notes as…`/`load notes…`(같은
+  일괄). **캔버스 표시**: note 있는 에러는 마커 옆 노란 칩으로
+  내용을 보이며(1줄 축약), 룰러 거리칩과 같은 위젯이라 Tab 순환
+  첫 단계(overlay_mode 1)에서 다른 마커와 함께 숨는다. **영속
+  기록은 명시적**: `save notes as…`/`load notes…`(같은
   `.fe` 포맷, load=전체 대체·타-pack 거부). `notes_list()`가 미래
   note-list 조회 표면(각 note의 텍스트+멤버 gid). drawing 기능
   추가 시 같은 `.fe`에 flateyes 주석으로 합류.
@@ -174,6 +177,7 @@ python -m floe render chip.oas --drc results.db \
 | 더블클릭 | 점프(에러가 화면 30% 프레이밍) + 자동 CD 룰러 + **레이어 격리**(rules.json의 원천 레이어만 켬, Esc 복원) |
 | . / , | 다음/이전 에러(구 n/p — `n`은 note로 이동, 2026-08-28). 보이는 목록(selected ∧ in view ∧ waive) 안에서 순환, 페이지 자동 이동. **점프 활성 시**(더블클릭/마커 클릭 후) = 프레이밍 줌+CD 룰러 동반, **Esc 완전 복원 후** = 번호 단일클릭과 동일(디테일+셀 마크만, 뷰 불변) |
 | `n` | **note 추가/편집** — gold 선택(또는 현재/점프 에러)에 **공유 note** 입력(여러 에러가 한 note 공유), 빈 내용 = 삭제. 기존 공유 note는 프리필. 저장 = 리뷰어별 flateyes `.fe` 자동 저장(아래) |
+| note 캔버스 표시 | note 있는 에러는 마커 옆에 **노란 칩**으로 note 내용 표시(1줄, 48자↑ 생략). 룰러 거리칩처럼 위젯이므로 **Tab 첫 단계(overlay_mode 1)에서 다른 마커와 함께 숨김** |
 | 캔버스 마커 hover | 툴팁: 룰명 #로컬(전역) · waived 여부 · note 여부 |
 | 캔버스 마커 클릭 | **번호 단일클릭과 동일** — 현재 에러 선택(셀 마크·디테일·포커스), 뷰 불변. Ctrl/Shift 클릭은 디자인 선택 유지 |
 | 캔버스 마커 더블클릭 | **번호 더블클릭과 동일** — 점프(30% 프레이밍)+CD 룰러+레이어 격리, 그리드 동행 |
