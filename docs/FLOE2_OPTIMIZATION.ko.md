@@ -841,7 +841,7 @@ CLI/UI/request/Rust worker에서 제거했으며 공유 cache의 `design.ovc`는
 - gate: exact 두 번째 generation의 PNG bytes 동일, raster/png 0,
   `frame_cache_hit=1`, 복원 뒤 KLayout pick/snap parity 유지
 
-### F2R-09 — interactive cold-miss round (`DONE`, cost-aware 확장 2026-08-28)
+### F2R-09 — interactive cold-miss round (`DONE`, 기본 refinement 해제 2026-08-28)
 
 - 원인: 128-page decode round마다 지금까지의 누적 scene 전체를 다시 raster/PNG 게시
 - 제품 정책: 1024 miss pages까지 single settled frame. 그 이상에서만 progressive
@@ -858,8 +858,16 @@ CLI/UI/request/Rust worker에서 제거했으며 공유 cache의 `design.ovc`는
   round 8 강제 시 rounds 5 유지), 넘는 순간 정확히 한 번의 최종
   raster만 남긴다(예산 강제 축소 e2e: rounds 5→2, 누적 raster
   55→21ms). "500ms 이하 작업에 refinement를 만들지 않는다" 규칙의
-  쌍대다. §3.15 뷰 예상: draw 10.9→~4.3초, total floe 역전.
-  실칩 재측정 대기.
+  쌍대다. §3.15 뷰 예상: draw 10.9→~4.3초, total floe 역전 — 실측
+  5.0초로 확인(§3.15 후속).
+- **기본 refinement 해제(2026-08-28, 사용자 결정)**: cost-aware 2
+  round(5.0초, floe 6.2초 역전)조차 단발 대비 손해라는 실칩 판정에
+  따라 제품 기본을 **중간 frame 없음**(adapter wire
+  `round_pages=2^30`)으로 바꿨다 — floe도 view당 draw 1회다. bench
+  `--round-pages` 기본도 동일. 스트리밍 round는
+  `FLOE_RUST_ROUND_PAGES`로 복원 가능하며 그 경우 500ms cost-aware
+  collapse가 안전망으로 남는다. §3.15 뷰 기대: round1 재raster까지
+  제거돼 draw 추가 감소.
 
 ### F2R-10 — same-scale 인접 viewport retained 재사용 (`OPEN`)
 
