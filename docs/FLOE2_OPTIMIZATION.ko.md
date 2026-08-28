@@ -830,7 +830,14 @@ prune과 큰 tile은 중복을 줄이는 완화책일 뿐이다. jobs=1도 tile=
   실칩 decode에서 병목으로 나타나면(§3.11: sample9 decode +70%) index를
   첫 raster 사용 시 lazy 구축하는 변형을 2a와 함께 검토한다. OVP에
   사전 계산 index를 저장하는 안은 포맷 변경이라 별도 결정으로 남긴다.
-- **F2R-03c (`DESIGN`)** — fill 파이프라인 재설계: 2-phase를 단일 edge walk
+- **F2R-03c (`DESIGN`, 착수 기준 확정 2026-08-28)** — 착수 조건:
+  대표 실칩 p50/p95에서 **paint가 draw를 지배하면서 KLayout 대비
+  1.5배 이상 느린 뷰가 실측될 때만** 진행한다. 2c 이후 실측(§3.15
+  4차)에서 paint 몫은 KLayout과 동률(~1.1s vs 1.10s)이라 현재 기대
+  수익(≤0.2s)이 재작업 규모(전체 paint 프리미티브 + 픽셀 계약 +
+  oracle 재정비)에 크게 못 미친다. 먼저 소진할 지렛대: deferred
+  subtree tile-binning, 패턴 fill 지배 뷰 존재 여부 실측.
+  본래 설계 — fill 파이프라인 재설계: 2-phase를 단일 edge walk
   통합, 장기적으로 layer별 1bpp plane + 최종 word 합성. paint 순서 계약
   (PLAN §8.3 "레이어 병렬 합성 금지")의 재개정이 필요할 수 있어 F2R-03a/b
   측정 뒤 별도 승인으로만 진행한다.
