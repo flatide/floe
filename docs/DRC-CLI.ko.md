@@ -99,6 +99,7 @@ floe render chip.oas --drc results.db --drc-rule M1.SPACE.1 \
 | `--depth N` | full | 계층 깊이 (기본 = 전체 전개, 뷰어 "99") |
 | `--layers ...` | 자동 | 명시하면 svrf 격리보다 우선 |
 | `--drc-rules RULES.json` | 자동 탐색 | svrf 사이드카 직접 지정 |
+| `--floe-reviewer NAME` | DISPLAY/SSH 유도 | waive 자동 저장의 리뷰어 태그 (`floe drc`/`view`에도 있음; FLOE_REVIEWER env 동치) |
 
 - **픽셀 = 뷰어와 동일**: 뷰어의 렌더 서비스 경로(상주 vfsd
   세션 + detail medium 컷/헤어라인/LOD/커버리지) 그대로, depth만

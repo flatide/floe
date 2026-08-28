@@ -1302,6 +1302,18 @@ def cmd_view(args):
                render_debug=args.render_debug)
 
 
+def _add_reviewer_option(p):
+    """Commands that open DRC packs (view/drc/render) take the
+    reviewer tag as a parameter: the shared server account cannot
+    distinguish reviewers, and launcher scripts prefer an explicit
+    argument over exporting FLOE_REVIEWER (which stays honored)."""
+    p.add_argument("--floe-reviewer", default=None, metavar="NAME",
+                   help="reviewer tag for the per-reviewer waive "
+                        "autosave next to the DRC pack (overrides "
+                        "the DISPLAY/SSH-derived tag; sets "
+                        "FLOE_REVIEWER - the env var still works)")
+
+
 def main(argv=None, *, prog=None, rust_only=None):
     prog = prog or APP
     rust_only = (prog == "floe2") if rust_only is None else bool(rust_only)
@@ -1510,6 +1522,7 @@ def main(argv=None, *, prog=None, rust_only=None):
                         "deck path, <db>.rules.json). Snapshots "
                         "then keep only the rule's source GDS "
                         "layers on; an explicit --layers wins")
+    _add_reviewer_option(p)
     p.set_defaults(fn=cmd_render)
 
     p = sub.add_parser("clip", help="save a region as a new OASIS file")
@@ -1566,6 +1579,7 @@ def main(argv=None, *, prog=None, rust_only=None):
                    help="machine-readable error list of ONE rule "
                         "as JSON: [{local, global, kind, status, "
                         "bbox um}, ...] (streamed)")
+    _add_reviewer_option(p)
     p.set_defaults(fn=cmd_drc)
 
     p = sub.add_parser("svrf", help="parse a Calibre SVRF rule deck "
@@ -1708,9 +1722,17 @@ def main(argv=None, *, prog=None, rust_only=None):
                    help="save display-path debug dumps to /tmp/%s_*.png "
                         "(XQuartz black-view diagnosis; new instance only)"
                         % prog)
+    _add_reviewer_option(p)
     p.set_defaults(fn=cmd_view)
 
     args = ap.parse_args(argv)
+    reviewer = getattr(args, "floe_reviewer", None)
+    if reviewer is not None:
+        reviewer = reviewer.strip()
+        if not reviewer:
+            raise SystemExit(
+                "%s: --floe-reviewer must not be empty" % prog)
+        os.environ["FLOE_REVIEWER"] = reviewer
     if rust_only and args.cmd == "index":
         legacy_flags = _legacy_index_options(args)
         if args.legacy or legacy_flags:

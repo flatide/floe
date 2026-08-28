@@ -557,6 +557,20 @@ def main():
                 env.pop(k, None)
             else:
                 env[k] = v
+    # the --floe-reviewer CLI parameter keys the autosave (launcher
+    # scripts pass an argument instead of exporting FLOE_REVIEWER)
+    root = os.path.join(os.path.dirname(__file__), "..")
+    r = subprocess.run(
+        [sys.executable, "-m", "floe", "drc", db, "--rules",
+         "--floe-reviewer", "gatecli"],
+        capture_output=True, text=True, cwd=root)
+    if r.returncode != 0:
+        fail("floe drc --floe-reviewer rc=%d: %s"
+             % (r.returncode, r.stderr.strip()))
+    cliside = os.path.join(tmp, ".results.db.waive.gatecli")
+    if not os.path.isfile(cliside):
+        fail("--floe-reviewer did not key the autosave: %s"
+             % cliside)
     # export -> clear -> import round-trip (wcount recomputed,
     # chunk cache reset)
     re2.set_status(4, 2, drc.STATUS_WAIVED)

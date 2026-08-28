@@ -96,7 +96,8 @@ python -m floe render chip.oas --drc results.db \
   floe를 실행해 화면만 사용자 DISPLAY로 보내는 운용에서는 홈
   접근이 보장되지 않으므로, 모든 리뷰어가 닿는 결과 폴더가 저장
   위치다. **리뷰어 태그**: 공유 서버 계정이라 계정명은 유일하지
-  않음 → `FLOE_REVIEWER` 환경변수(런처 스크립트용 명시 지정) >
+  않음 → `--floe-reviewer NAME` 파라미터(view/drc/render, 런처
+  스크립트용 명시 지정 — `FLOE_REVIEWER` 환경변수도 유지) >
   DISPLAY 호스트부(직결 X, `ws-kim:0` → `ws-kim`; localhost류
   포워딩 번호는 로그인마다 바뀌므로 무시) > SSH 접속원
   IP(`SSH_CONNECTION` — 포워딩이어도 자리 머신 IP는 안정) >
