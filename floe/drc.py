@@ -420,13 +420,38 @@ _WAIVE_VERSION = 1
 
 
 def _waive_user():
-    import getpass
-    try:
-        user = getpass.getuser()
-    except Exception:
-        user = "uid%d" % os.getuid()
+    """Per-REVIEWER tag for the autosave name. Reviewers share ONE
+    server account (floe runs on the server, only the screen goes
+    to their DISPLAY), so the account name cannot distinguish
+    them. Most-stable-first:
+      1. FLOE_REVIEWER   - explicit override for launcher scripts
+      2. DISPLAY host    - direct X (ws-kim:0 -> ws-kim); empty or
+                           local hosts mean X forwarding, whose
+                           :N varies per login - skip those
+      3. SSH client IP   - ssh -X: the desk machine's IP is stable
+                           across logins while DISPLAY=localhost:N
+                           is not
+      4. account name    - single-user fallback (original setups)
+    """
+    tag = os.environ.get("FLOE_REVIEWER", "").strip()
+    if not tag:
+        host = os.environ.get("DISPLAY", "").rsplit(":", 1)[0]
+        if host and not host.startswith("/") \
+                and host not in ("localhost", "127.0.0.1",
+                                 "::1", "unix"):
+            tag = host
+    if not tag:
+        conn = os.environ.get("SSH_CONNECTION") \
+            or os.environ.get("SSH_CLIENT") or ""
+        tag = conn.split()[0] if conn.split() else ""
+    if not tag:
+        import getpass
+        try:
+            tag = getpass.getuser()
+        except Exception:
+            tag = "uid%d" % os.getuid()
     return "".join(c if c.isalnum() or c in "._-" else "_"
-                   for c in user) or "user"
+                   for c in tag) or "user"
 
 
 def waive_autosave_path(pack_path):

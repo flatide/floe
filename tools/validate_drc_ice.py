@@ -38,9 +38,12 @@ pack; D2 keeps the retirement honest.)
   D8  diagonal closest endpoints of a parallel edge pair retain the
       true minimum first and add deterministic horizontal + vertical
       component rulers; facing and non-parallel pairs stay single.
-  D9  waive autosave (user calls 2026-08-28: per-user dotfile
+  D9  waive autosave (user calls 2026-08-28: per-reviewer dotfile
       BESIDE the pack - server-side floe forwards the display, so
-      $HOME may be absent; durable records = explicit save-as):
+      $HOME may be absent; durable records = explicit save-as; the
+      shared server account makes the account name non-unique, so
+      the reviewer tag prefers FLOE_REVIEWER > DISPLAY host >
+      SSH client IP > account name):
       export -> clear -> import round-trips statuses with wcount
       recomputed and the chunk cache reset; tampered and
       foreign-pack files are refused; a READ-ONLY pack stays
@@ -523,8 +526,37 @@ def main():
         fail("non-parallel pair gained component rulers")
     print("D8 OK: diagonal parallel gap + X/Y component rulers")
 
-    # D9: waive sidecar - save-as/load, refusal, read-only pack,
+    # D9: waive autosave - save-as/load, refusal, read-only pack,
     # corrupt-aside, in-pack seed migration
+    # reviewer tag: the shared server account means the account
+    # name is NOT unique (user call 2026-08-28) - the tag prefers
+    # FLOE_REVIEWER > DISPLAY host (direct X) > SSH client IP >
+    # account name, and local/forwarded DISPLAYs are skipped
+    env = os.environ
+    saved = {k: env.pop(k, None) for k in
+             ("FLOE_REVIEWER", "DISPLAY", "SSH_CONNECTION",
+              "SSH_CLIENT")}
+    try:
+        env["DISPLAY"] = "ws-kim:0.0"
+        if drc._waive_user() != "ws-kim":
+            fail("DISPLAY host not used for the reviewer tag")
+        env["DISPLAY"] = "localhost:10.0"
+        env["SSH_CONNECTION"] = "192.168.1.50 55555 10.0.0.1 22"
+        if drc._waive_user() != "192.168.1.50":
+            fail("SSH client IP not used under X forwarding")
+        env["FLOE_REVIEWER"] = "kim review!"
+        if drc._waive_user() != "kim_review_":
+            fail("FLOE_REVIEWER override not honoured/sanitized")
+        for k in ("FLOE_REVIEWER", "DISPLAY", "SSH_CONNECTION"):
+            del env[k]
+        if not drc._waive_user():
+            fail("no-signal fallback produced an empty tag")
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                env.pop(k, None)
+            else:
+                env[k] = v
     # export -> clear -> import round-trip (wcount recomputed,
     # chunk cache reset)
     re2.set_status(4, 2, drc.STATUS_WAIVED)
