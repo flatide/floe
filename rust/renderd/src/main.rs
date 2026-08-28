@@ -19,6 +19,11 @@ const DEFAULT_JOBS: u16 = 1;
 const DEFAULT_ROUND_PAGES: usize = 128;
 const MAX_JOBS: u16 = 256;
 const MAX_CACHED_FRAMES: usize = 3;
+/// A refinement round whose raster ran past this stops the stream:
+/// the remaining page batches merge into one final round (§3.15 —
+/// five ~2.2s intermediate rasters were the draw time of a large
+/// cold view). Cheap rounds keep streaming below it.
+const REFINEMENT_RASTER_BUDGET_US: u64 = 500_000;
 const MAX_FRAME_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const SNAP_SHAPE_CAP: usize = 400;
 const PICK_CANDIDATE_CAP: usize = 64;
@@ -1373,16 +1378,18 @@ fn run_render(
         .as_ref()
         .map(|planned| Arc::from(planned.rows.clone()))
         .unwrap_or_else(|| Arc::from([]));
-    let rounds = refinement_batches(&selected, command.round_pages, |page_id| {
+    let mut rounds = refinement_batches(&selected, command.round_pages, |page_id| {
         state.page_cache.contains(page_id)
     })?;
     let mut decoded_pages = Vec::with_capacity(selected.len());
     let mut generation_bytes = 0u64;
-    for (round_index, round_page_ids) in rounds.iter().enumerate() {
+    let mut round_index = 0usize;
+    while round_index < rounds.len() {
+        let round_page_ids = std::mem::take(&mut rounds[round_index]);
         check_generation(cancellation, command.generation)?;
         let (mut round_pages, decode_stats) = state.page_cache.load_cancellable(
             cache,
-            round_page_ids,
+            &round_page_ids,
             decode_workers,
             command.generation,
             cancellation,
@@ -1583,8 +1590,37 @@ fn run_render(
                 pixels.subtrees_pruned,
             ),
         );
+        // Cost-aware refinement (F2R-09 REOPEN, §3.15): every round
+        // re-rasterizes the whole accumulated scene, so on a large
+        // cold view the intermediate frames themselves became the
+        // draw time (measured rounds 5 -> ~3x a single draw). Once a
+        // round's raster exceeds the budget the remaining batches
+        // merge into one final round: the user keeps the frames that
+        // were cheap enough to stream, and pays exactly one more
+        // raster for the settled frame. The dual of the F2R-01 rule
+        // that sub-500ms jobs get no refinement at all.
+        if round_index + 1 < rounds.len() && pixels.raster_us > refinement_raster_budget_us() {
+            collapse_refinement_tail(&mut rounds, round_index);
+        }
+        round_index += 1;
     }
     Ok(())
+}
+
+/// Merges every batch after `round_index` into one final round.
+fn collapse_refinement_tail(rounds: &mut Vec<Vec<u32>>, round_index: usize) {
+    let merged: Vec<u32> = rounds[round_index + 1..].concat();
+    rounds.truncate(round_index + 1);
+    rounds.push(merged);
+}
+
+/// FLOE_RUST_REFINE_BUDGET_US overrides the collapse threshold —
+/// primarily so tests can force the collapse on a small fixture.
+fn refinement_raster_budget_us() -> u64 {
+    std::env::var("FLOE_RUST_REFINE_BUDGET_US")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(REFINEMENT_RASTER_BUDGET_US)
 }
 
 fn refinement_batches(
@@ -2112,6 +2148,17 @@ mod tests {
         let pattern = format!("pat:{}x", "한".repeat(21));
         assert_eq!(pattern[4..].len(), 64);
         assert!(parse_fill(&pattern).is_err());
+    }
+
+    #[test]
+    fn expensive_round_collapses_the_refinement_tail() {
+        let mut rounds = vec![vec![1, 2], vec![3, 4], vec![5], vec![6, 7]];
+        collapse_refinement_tail(&mut rounds, 1);
+        assert_eq!(rounds, vec![vec![1, 2], vec![3, 4], vec![5, 6, 7]]);
+        // right before the final round the collapse changes nothing
+        let mut two = vec![vec![1], vec![2, 3]];
+        collapse_refinement_tail(&mut two, 0);
+        assert_eq!(two, vec![vec![1], vec![2, 3]]);
     }
 
     #[test]

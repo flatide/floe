@@ -545,7 +545,7 @@ per-member로는 KLayout ~175ns/member(12.9M/2252ms) vs floe2 추정
 | F2R-06 | P3 | `BLOCKED` | render마다 OS thread 생성 | startup_us가 병목일 때만 pool |
 | F2R-07 | P1 | `DONE` | OVC coverage post-composite 회귀 | 제품 경로 제거 gate 유지 |
 | F2R-08 | P1 | `DONE` | exact 재방문도 full raster/PNG 반복 | bounded PNG+scene 복원 gate 완료 |
-| F2R-09 | P1 | `REOPEN` | 대형 cold 뷰에서 refinement 왕복이 draw를 ~3배로 | round 1024 유지하되 cost-aware 변형 필요 — §3.15 실측 rounds 5 = draw 10.9s의 주인 |
+| F2R-09 | P1 | `DONE` | 대형 cold 뷰에서 refinement 왕복이 draw를 ~3배로 | cost-aware collapse 구현(500ms 예산, §3.15) — 실칩 재측정 대기 |
 | F2R-10 | P1 | `OPEN` | exact 밖 인접 pan은 full viewport raster | 실체는 load 재사용(관찰 갱신); 실칩 sweep의 load 축으로 판정 |
 | F2R-11 | P2 | `DESIGN` | page-round refinement가 누적 full PNG 반복 | final-tile streaming 채택 여부 결정 |
 | F2R-12 | P1 | `DOING` | KLayout single-core parity와 Rust serial 기준선 | sample9 gate 통과 124%(§3.12); 실칩 p50/p95 남음 |
@@ -821,7 +821,7 @@ CLI/UI/request/Rust worker에서 제거했으며 공유 cache의 `design.ovc`는
 - gate: exact 두 번째 generation의 PNG bytes 동일, raster/png 0,
   `frame_cache_hit=1`, 복원 뒤 KLayout pick/snap parity 유지
 
-### F2R-09 — interactive cold-miss round (`DONE`)
+### F2R-09 — interactive cold-miss round (`DONE`, cost-aware 확장 2026-08-28)
 
 - 원인: 128-page decode round마다 지금까지의 누적 scene 전체를 다시 raster/PNG 게시
 - 제품 정책: 1024 miss pages까지 single settled frame. 그 이상에서만 progressive
@@ -829,6 +829,17 @@ CLI/UI/request/Rust worker에서 제거했으며 공유 cache의 `design.ovc`는
   sub-second 작업의 partial PNG가 검은 화면을 막아 주는 역할을 하지 않음
 - gate: adapter 기본 wire `round_pages=1024`, benchmark `--round-pages` 기본과 일치,
   1024 초과 unit/cancellation progressive 계약 유지
+- **cost-aware collapse(2026-08-28, §3.15 재개분)**: 대형 cold 뷰에서
+  round당 재raster가 draw 자체가 됐다(실측 rounds 5 = 단발 draw의
+  ~3배, 11.7초 중 10.9초). 이제 어떤 round의 raster가
+  `REFINEMENT_RASTER_BUDGET_US`(500ms; env
+  `FLOE_RUST_REFINE_BUDGET_US` override)를 넘으면 남은 batch를 최종
+  1 round로 병합한다 — 싼 round는 그대로 스트리밍하고(sample9
+  round 8 강제 시 rounds 5 유지), 넘는 순간 정확히 한 번의 최종
+  raster만 남긴다(예산 강제 축소 e2e: rounds 5→2, 누적 raster
+  55→21ms). "500ms 이하 작업에 refinement를 만들지 않는다" 규칙의
+  쌍대다. §3.15 뷰 예상: draw 10.9→~4.3초, total floe 역전.
+  실칩 재측정 대기.
 
 ### F2R-10 — same-scale 인접 viewport retained 재사용 (`OPEN`)
 
