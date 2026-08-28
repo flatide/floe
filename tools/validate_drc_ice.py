@@ -29,7 +29,7 @@ pack; D2 keeps the retirement honest.)
       cap (regression: a capped post-filter lost matches hiding
       past `cap` non-matching errors).
   D7  [status] byte: zero at build, set/get via pwrite into the
-      per-user waive sidecar (the PACK bytes stay untouched),
+      per-user waive autosave (the PACK bytes stay untouched),
       persists across reopen, neighbours untouched; the [wcount]
       per-rule waived counter stays in sync (incl. idempotent sets
       and reserved-status writes) so filter counts are O(1); the
@@ -38,15 +38,18 @@ pack; D2 keeps the retirement honest.)
   D8  diagonal closest endpoints of a parallel edge pair retain the
       true minimum first and add deterministic horizontal + vertical
       component rulers; facing and non-parallel pairs stay single.
-  D9  waive sidecar (user call 2026-08-28: per-user review in
-      $XDG_CACHE_HOME/floe/waive): export -> clear -> import
-      round-trips statuses with wcount recomputed and the chunk
-      cache reset; tampered and foreign-pack files are refused;
-      a READ-ONLY pack stays reviewable (fresh sidecar included);
-      a corrupt sidecar is moved aside (review work preserved)
-      and replaced fresh; embedded in-pack statuses from the
-      retired scheme seed the first sidecar; the pack bytes are
-      identical before/after everything above.
+  D9  waive autosave (user calls 2026-08-28: per-user dotfile
+      BESIDE the pack - server-side floe forwards the display, so
+      $HOME may be absent; durable records = explicit save-as):
+      export -> clear -> import round-trips statuses with wcount
+      recomputed and the chunk cache reset; tampered and
+      foreign-pack files are refused; a READ-ONLY pack stays
+      reviewable (fresh autosave included); a read-only results
+      FOLDER falls back to the system temp dir; a corrupt autosave
+      is moved aside (review work preserved) and replaced fresh;
+      embedded in-pack statuses from the retired scheme seed the
+      first autosave; the pack bytes are identical before/after
+      everything above.
 
 usage: .venv/bin/python tools/validate_drc_ice.py [floe-index-bin]
 """
@@ -178,8 +181,6 @@ def compare(ref, ice):
 
 def main():
     tmp = tempfile.mkdtemp(prefix="floe-drcice-")
-    # hermetic per-user waive store: never touch the real ~/.cache
-    os.environ["XDG_CACHE_HOME"] = os.path.join(tmp, "xdg")
     db = os.path.join(tmp, "results.db")
     # CRLF stretch: rewrite one whole check block with \r\n line ends
     text = DB.replace("e 1 1\n-1 -2 -3 -4\n",
@@ -400,12 +401,13 @@ def main():
             or gpk.get_status(3, 3) != drc.STATUS_RESERVED:
         fail("status set/get mismatch")
     if sha(gp) != gh0:
-        fail("waive wrote into the PACK (must go to the sidecar)")
-    gside = drc.waive_sidecar_path(gp)
+        fail("waive wrote into the PACK (must go to the autosave)")
+    gside = drc.waive_autosave_path(gp)
     if not os.path.isfile(gside) \
-            or not gside.startswith(os.environ["XDG_CACHE_HOME"]):
-        fail("waive sidecar missing / outside XDG_CACHE_HOME: %s"
-             % gside)
+            or os.path.dirname(gside) != os.path.dirname(gp) \
+            or not os.path.basename(gside).startswith("."):
+        fail("waive autosave missing / not a dotfile beside the "
+             "pack: %s" % gside)
     re2 = drc.IcePack(os.path.join(tmp, "gen.j1.ice"))
     if re2.get_status(3, 2) != drc.STATUS_WAIVED \
             or re2.get_status(3, 3) != drc.STATUS_RESERVED \
@@ -580,16 +582,39 @@ def main():
         fail("corrupt sidecar not replaced fresh")
     x.close()
     wdir = os.path.dirname(gside)
-    if not any(".waive.stale-" in p for p in os.listdir(wdir)):
-        fail("corrupt sidecar was not preserved aside")
+    gbase = os.path.basename(gside)
+    if not any(p.startswith(gbase) and ".stale-" in p
+               for p in os.listdir(wdir)):
+        fail("corrupt autosave was not preserved aside")
+    # read-only results FOLDER: autosave falls back to the system
+    # temp dir and review still works
+    import shutil
+    rodir = os.path.join(tmp, "ro")
+    os.makedirs(rodir)
+    rp = os.path.join(rodir, "gen.j1.ice")
+    shutil.copyfile(gp, rp)
+    os.chmod(rodir, 0o555)
+    try:
+        rf = drc.IcePack(rp)
+        if os.path.dirname(rf._waive_path) != tempfile.gettempdir():
+            fail("read-only folder: autosave not in the temp dir "
+                 "(%s)" % rf._waive_path)
+        rf.set_status(3, 0, drc.STATUS_WAIVED)
+        if rf.get_status(3, 0) != drc.STATUS_WAIVED:
+            fail("read-only folder: waive did not stick")
+        tmpside = rf._waive_path
+        rf.close()
+    finally:
+        os.chmod(rodir, 0o755)
+    os.remove(tmpside)
     # migration: embedded in-pack statuses (retired scheme) seed
-    # the first sidecar; pack restored byte-identical afterwards
+    # the first autosave; pack restored byte-identical afterwards
     with open(gp, "rb") as f:
         f.seek(os.path.getsize(gp) - drc._ICE2_FOOTER.size)
         foot = drc._ICE2_FOOTER.unpack(f.read(drc._ICE2_FOOTER.size))
     soff, woff = foot[4], foot[5]
     gid = int(x._dir_es[3])   # check 3, error 0
-    os.remove(drc.waive_sidecar_path(gp))
+    os.remove(drc.waive_autosave_path(gp))
     fd = os.open(gp, os.O_RDWR)
     try:
         os.pwrite(fd, bytes((drc.STATUS_WAIVED,)), soff + gid)
@@ -605,8 +630,8 @@ def main():
         os.close(fd)
     if sha(gp) != gh0:
         fail("D9 left the pack modified")
-    print("D9 OK: sidecar save-as/load + refusal + read-only pack "
-          "+ corrupt-aside + seed migration")
+    print("D9 OK: autosave save-as/load + refusal + read-only "
+          "pack/folder + corrupt-aside + seed migration")
 
     print("DRC ICE VALIDATION: ALL OK")
 

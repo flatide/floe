@@ -399,11 +399,15 @@ _ICE2_BLOCK = 64
 # waived counts and touch at most ONE chunk of status bytes
 _STATUS_CHUNK = 1 << 22
 
-# ---- per-user waive sidecar ---------------------------------------------
+# ---- per-user waive autosave --------------------------------------------
 # Review status lives OUTSIDE the pack (user call 2026-08-28): the
 # pack sits on shared storage, so in-pack pwrites made one review
-# global and required write permission. The sidecar mirrors the
-# pack's two mutable sections behind a small header:
+# global and required write permission. The WORKING state is a
+# per-user temp dotfile NEXT TO the pack - floe runs on the server
+# with the screen forwarded to the user's DISPLAY, so $HOME may be
+# absent or shared while the results folder is the one place every
+# reviewer reaches. Durable records are the files the user saves
+# EXPLICITLY (DRC menu save waives as…, same format). Layout:
 #   header | status[err_total] u8 | wcount[check_cnt] u32
 # header: magic | u32 version | u64 src_size | u64 src_mtime
 #         | u64 err_total | u32 check_cnt
@@ -415,25 +419,42 @@ _WAIVE_HEADER = struct.Struct("<8sIQQQI")
 _WAIVE_VERSION = 1
 
 
-def waive_dir():
-    """Per-user waive store: $XDG_CACHE_HOME/floe/waive (fallback
-    ~/.cache/floe/waive)."""
-    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(
-        os.path.expanduser("~"), ".cache")
-    return os.path.join(base, "floe", "waive")
+def _waive_user():
+    import getpass
+    try:
+        user = getpass.getuser()
+    except Exception:
+        user = "uid%d" % os.getuid()
+    return "".join(c if c.isalnum() or c in "._-" else "_"
+                   for c in user) or "user"
 
 
-def waive_sidecar_path(pack_path):
-    """Sidecar file for one pack: db basename for the human, a hash
-    of the absolute pack path so equal-named dbs never collide."""
+def waive_autosave_path(pack_path):
+    """Working review state beside the pack: .<db>.waive.<user>
+    (the directory itself disambiguates equal db names)."""
+    name = os.path.basename(pack_path)
+    if name.endswith(".ice"):
+        name = name[:-4]
+    return os.path.join(
+        os.path.dirname(os.path.abspath(pack_path)),
+        ".%s.waive.%s" % (name, _waive_user()))
+
+
+def _waive_tmp_fallback(pack_path):
+    """When the results folder is not writable: same file in the
+    system temp dir, with a path hash (one shared dir now holds
+    autosaves of equal-named dbs from different folders)."""
     import hashlib
+    import tempfile
     ap = os.path.abspath(pack_path)
     name = os.path.basename(pack_path)
     if name.endswith(".ice"):
         name = name[:-4]
     tag = hashlib.sha1(ap.encode("utf-8", "surrogateescape")) \
         .hexdigest()[:12]
-    return os.path.join(waive_dir(), "%s-%s.waive" % (name, tag))
+    return os.path.join(
+        tempfile.gettempdir(),
+        ".%s.waive.%s-%s" % (name, _waive_user(), tag))
 
 
 def _uv(buf, pos):
@@ -614,26 +635,37 @@ class IcePack(object):
                                 shape=(err_total, 4), dtype=np.uint8)
                       if err_total else
                       np.zeros((0, 4), dtype=np.uint8))
-        # review status: per-user sidecar under ~/.cache (the pack
-        # itself is never written again - shared/read-only packs
-        # stay reviewable, each user keeps their own state). If the
-        # cache dir is unusable, fall back to the legacy in-pack
-        # sections so the viewer still opens.
+        # review status: per-user autosave dotfile BESIDE the pack
+        # (the pack itself is never written again - shared and
+        # read-only packs stay reviewable, each user keeps their
+        # own working state). Results folder not writable -> same
+        # file in the system temp dir; that too unusable -> legacy
+        # in-pack sections so the viewer still opens.
         self._waive_hdr = _WAIVE_HEADER.pack(
             _WAIVE_MAGIC, _WAIVE_VERSION, src_size, src_mtime,
             err_total, check_cnt)
+        wstatus_off = _WAIVE_HEADER.size
+        wwcount_off = _WAIVE_HEADER.size + err_total
         try:
-            wpath = self._ensure_waive_sidecar(
-                path, err_total, check_cnt, status_off, wcount_off)
-            wstatus_off = _WAIVE_HEADER.size
-            wwcount_off = _WAIVE_HEADER.size + err_total
-        except OSError as exc:
-            sys.stderr.write(
-                "[drc] waive sidecar unavailable (%s); statuses "
-                "fall back INTO the pack (shared, needs write "
-                "permission)\n" % exc)
-            wpath, wstatus_off, wwcount_off = \
-                path, status_off, wcount_off
+            wpath = self._ensure_waive_autosave(
+                waive_autosave_path(path), path, err_total,
+                check_cnt, status_off, wcount_off)
+        except OSError:
+            try:
+                wpath = self._ensure_waive_autosave(
+                    _waive_tmp_fallback(path), path, err_total,
+                    check_cnt, status_off, wcount_off)
+                sys.stderr.write(
+                    "[drc] results folder not writable; waive "
+                    "autosave in %s (save waives as… to keep the "
+                    "review)\n" % wpath)
+            except OSError as exc:
+                sys.stderr.write(
+                    "[drc] waive autosave unavailable (%s); "
+                    "statuses fall back INTO the pack (shared, "
+                    "needs write permission)\n" % exc)
+                wpath, wstatus_off, wwcount_off = \
+                    path, status_off, wcount_off
         self._waive_path = wpath
         # shared read mapping stays coherent with in-place pwrite
         # updates (set_status)
@@ -688,14 +720,13 @@ class IcePack(object):
         self._order = []
         self._wchunk = {}      # ci -> per-chunk waived counts
 
-    def _ensure_waive_sidecar(self, path, err_total, check_cnt,
-                              status_off, wcount_off):
-        """Create/validate the per-user sidecar; returns its path.
+    def _ensure_waive_autosave(self, side, path, err_total,
+                               check_cnt, status_off, wcount_off):
+        """Create/validate the autosave at `side`; returns it.
         A fingerprint mismatch (re-run DRC = renumbered errors)
         moves the old file ASIDE rather than deleting review work.
         First creation seeds from the pack's embedded sections so
         waives made under the retired in-pack scheme survive."""
-        side = waive_sidecar_path(path)
         want = self._waive_hdr
         size = _WAIVE_HEADER.size + err_total + 4 * check_cnt
         try:
@@ -708,11 +739,10 @@ class IcePack(object):
             aside = "%s.stale-%d" % (side, int(time.time()))
             os.replace(side, aside)
             sys.stderr.write(
-                "[drc] waive sidecar does not match this pack "
+                "[drc] waive autosave does not match this pack "
                 "(DRC re-run?); moved aside: %s\n" % aside)
         except FileNotFoundError:
             pass
-        os.makedirs(os.path.dirname(side), exist_ok=True)
         with open(path, "rb") as f:
             f.seek(status_off)
             st = f.read(err_total)

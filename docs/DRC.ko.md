@@ -90,20 +90,24 @@ python -m floe render chip.oas --drc results.db \
   `[wcount]` 카운터를 set_status가 증분 유지 → 필터 카운트 O(1);
   필터 상태 n/p·페이지 점프는 룰당 4M-청크 카운트 캐시로 최대 한
   청크만 스캔.
-- **waive 저장 = 사용자별 사이드카**(2026-08-28, D7/D9): 리뷰
-  상태는 pack이 아니라 `$XDG_CACHE_HOME/floe/waive/`(기본
-  `~/.cache/floe/waive/`)의 `<db명>-<경로해시>.waive`에 기록 —
+- **waive 저장 = 사용자별 자동 저장 + 명시적 save/load**
+  (2026-08-28, D7/D9): 작업 상태는 pack **옆의** 사용자별 임시
+  dotfile `.<db명>.waive.<사용자>`에 자동 기록 — 서버에서 floe를
+  실행해 화면만 사용자 DISPLAY로 보내는 운용에서는 홈 접근이
+  보장되지 않으므로, 모든 리뷰어가 닿는 결과 폴더가 저장 위치다.
   pack은 다시는 쓰지 않으므로 **공유/읽기 전용 pack도 사용자마다
-  독립 리뷰** 가능. 파일 = 헤더(매직+버전+pack 지문: 소스
-  size/mtime·err_total·check_cnt) + status + wcount. 지문 불일치
-  (DRC 재실행 = 에러 번호 재부여)면 기존 파일을 `.stale-<시각>`로
-  옆에 치우고 새로 시작(리뷰 기록을 지우지 않음). 첫 생성 시
-  pack에 남은 구-방식 내장 status가 있으면 시드로 승계. 캐시
-  디렉터리를 못 쓰는 환경에서만 구-방식(pack 제자리 기록)으로
-  폴백. **DRC 메뉴 save waives as…/load waives…** = 같은 포맷의
-  스냅숏 저장/불러오기(리뷰 공유·라운드 기록용) — load는 전체
-  대체(내 리뷰는 먼저 save)이고 다른 pack에서 기록된 파일은 거부,
-  wcount는 파일을 믿지 않고 재계산.
+  독립 리뷰** 가능. **영속 기록은 명시적**: DRC 메뉴 `save waives
+  as…`/`load waives…`가 같은 포맷의 스냅숏 저장/불러오기(리뷰
+  공유·라운드 기록용) — load는 전체 대체(내 리뷰는 먼저 save)이고
+  다른 pack에서 기록된 파일은 거부, wcount는 파일을 믿지 않고
+  재계산. 파일 = 헤더(매직+버전+pack 지문: 소스
+  size/mtime·err_total·check_cnt) + status + wcount. 같은 DB의
+  재-pack에는 리뷰가 유지되고, 지문 불일치(DRC 재실행 = 에러 번호
+  재부여)면 기존 자동 저장을 `.stale-<시각>`로 옆에 치우고 새로
+  시작(리뷰 기록을 지우지 않음). 첫 생성 시 pack에 남은 구-방식
+  내장 status는 시드로 승계. 결과 폴더가 읽기 전용이면 시스템 임시
+  디렉터리로 폴백(stderr 안내 — 이때는 save as로 남길 것), 그마저
+  안 되면 구-방식(pack 제자리 기록) 최후 폴백.
 - **손상 방어**: 절단·오염 pack은 전부 "corrupt .ice → 재-pack
   안내" ValueError로 정규화(섹션 경계·체크 범위 검증), 사이드
   pack이면 ASCII 폴백. 인덱서는 시작 시 잔존 `<out>.tmp*` 청소.

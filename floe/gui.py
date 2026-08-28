@@ -5170,6 +5170,8 @@ class Viewer:
         self._only_close_button(dlg)
         self._center_on_parent(dlg)
         dlg.set_do_overwrite_confirmation(True)
+        dlg.set_current_folder(
+            os.path.dirname(os.path.abspath(db.path)))
         base = os.path.basename(db.path)
         if base.endswith(".ice"):
             base = base[:-4]
@@ -5205,6 +5207,8 @@ class Viewer:
                         "Open", Gtk.ResponseType.OK)
         self._only_close_button(dlg)
         self._center_on_parent(dlg)
+        dlg.set_current_folder(
+            os.path.dirname(os.path.abspath(db.path)))
         for name, pats in (("floe waives (*.waive)", ("*.waive",)),
                            ("all files", ("*",))):
             ff = Gtk.FileFilter()
