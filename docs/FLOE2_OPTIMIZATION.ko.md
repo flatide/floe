@@ -495,19 +495,57 @@ sample9 hotspot(r4/384, detail high) 첫 판독: decode pool 가동률
 근거), raster 19.8ms 중 **tile-max 17.7ms(wall의 90%)** — r4 tail
 imbalance의 첫 실측 신호(F2R-06 재개 조건 충족 여부는 실칩에서 확인).
 
+### 3.15 실칩 문제 뷰 판정 — mid-zoom 100µm cold (2026-08-28)
+
+§3.13의 "load 10초+/draw 5초+" 지점을 0.12.19 telemetry로 실측한
+결과 (view 100.0×96.6µm, 824x796, cut<0.122µm, 5698 pages/+5616
+miss, 207k text places, labels partial):
+
+| | total | load | draw |
+|---|---:|---:|---:|
+| floe/KLayout | 6220ms | 3967 (plan 1092+apply 2860) | 2252 (~12.9M drawn) |
+| floe2 | 11656ms | **417** (plan 217+read 27+apply 173) | **10918** |
+
+**load 축은 이 뷰에서도 floe2 완승(9.5배)** — 5616 page decode CPU
+합 654ms(8w wall ≈82ms), straggler 없음(max 29ms), **index build는
+16%(107ms)로 병목 아님** — lazy-index·인코드 캐시·budget 이슈 전부
+이 뷰에선 해당 없음. read 27ms → OS page cache 가설도 무해 확인.
+
+**draw 10.9초의 분해 — 두 개의 곱셈**:
+
+1. **refinement 왕복 ×~3**: +5616 miss > round_pages 1024 → rounds
+   5. 각 round가 누적 scene 전체를 재raster하므로 총 raster 작업량은
+   단발 draw의 약 (1+…+5)/5 ≈ 3배. 단발이면 draw ≈3.6초, total
+   ≈4.3초로 **floe(6.2초)보다 빨랐을 일**이다. round당 ~2.2초짜리
+   중간 frame은 진행 표시 가치보다 비용이 크다 — F2R-09 정책(1024)의
+   실칩 재조정 필요: raster 비용을 본 뒤 중간 round를 접는 cost-aware
+   변형이 1순위 지렛대.
+2. **tile×plane traversal ×45**: `hier 7.5M visited / 295.7M
+   pruned` — 2b mask가 에지의 97.5%를 자르고 있음에도 gate 검사
+   자체가 ~3억 회다. round×tile(45)×plane 곱 때문이며, 단일 walk당
+   에지는 ~수만 개로 추정된다. **2c work bin 재개 조건이 이 뷰에서
+   충족**됐다(§F2R-03 2c: mid-zoom에서 draw가 다시 불거지면 재개).
+   부수: mask gate의 wcells 이진탐색을 인스턴스별 사전 해석 index로
+   바꾸면 2c 이전에도 gate 상수를 줄일 수 있다.
+
+잔여 신호: tile-max 979ms(r4 tail, F2R-06 관찰 지속), png 206ms.
+per-member로는 KLayout ~175ns/member(12.9M/2252ms) vs floe2 추정
+~280ns(누적 ~39M member-paint/10918ms) — round 정리 후 남는 격차는
+2c·F2R-03c(1bpp plane) 영역이다.
+
 ## 4. 이슈 목록
 
 | ID | 우선순위 | 상태 | 요약 | 다음 판정 |
 |---|---:|---|---|---|
 | F2R-01 | P1 | `DONE` | cache hit까지 128-page refine | cache-aware batch/unit+현장 gate 완료 |
 | F2R-02 | P1 | `DONE` | 128px tile의 반복 hierarchy 순회 | 제품 기본 384px 승인 |
-| F2R-03 | P1 | `DOING` | tile x layer x hierarchy 총 CPU 작업량 | 03a~03b-2b 완료. 실칩 deep-zoom draw 439→22ms(§3.13), 2c는 F2R-11 시점까지 보류 |
+| F2R-03 | P1 | `DOING` | tile x layer x hierarchy 총 CPU 작업량 | 03a~03b-2b 완료(deep-zoom 439→22ms). **2c 재개 확정** — mid-zoom 실측 hier 300M gate/round×45tile 곱(§3.15) |
 | F2R-04 | P1 | `DONE` | total에서 사라진 PNG/publish 37~44ms | write/sync/rename/handoff 계측 완료 |
 | F2R-05 | P2 | `DONE` | jobs=8의 CPU/전력 비용 | decode 8/raster 4 분리 승인 |
 | F2R-06 | P3 | `BLOCKED` | render마다 OS thread 생성 | startup_us가 병목일 때만 pool |
 | F2R-07 | P1 | `DONE` | OVC coverage post-composite 회귀 | 제품 경로 제거 gate 유지 |
 | F2R-08 | P1 | `DONE` | exact 재방문도 full raster/PNG 반복 | bounded PNG+scene 복원 gate 완료 |
-| F2R-09 | P1 | `DONE` | 744-page pan에서 6회 full raster/PNG | 제품 round 1024 승인 |
+| F2R-09 | P1 | `REOPEN` | 대형 cold 뷰에서 refinement 왕복이 draw를 ~3배로 | round 1024 유지하되 cost-aware 변형 필요 — §3.15 실측 rounds 5 = draw 10.9s의 주인 |
 | F2R-10 | P1 | `OPEN` | exact 밖 인접 pan은 full viewport raster | 실체는 load 재사용(관찰 갱신); 실칩 sweep의 load 축으로 판정 |
 | F2R-11 | P2 | `DESIGN` | page-round refinement가 누적 full PNG 반복 | final-tile streaming 채택 여부 결정 |
 | F2R-12 | P1 | `DOING` | KLayout single-core parity와 Rust serial 기준선 | sample9 gate 통과 124%(§3.12); 실칩 p50/p95 남음 |
@@ -953,12 +991,15 @@ KLayout의 95% 처리 성능을 먼저 달성하고 병렬 raster를 latency 가
 3. F2R-10 fixed-scale pan sweep은 sample9에서 완료(§3.12): 인접 pan 열세가
    재현되지 않았고 floe2가 전 구간 우세였다. 관찰이 나온 실칩 trace에서 같은
    `--pan-sweep`을 재측정한 뒤 world-tile 착수를 판정한다.
-4. F2R-03b 2단계: 2a Pts chunk 완료(-95% member 테스트, KLayout
-   y-sort 자연 적중), 2b layer mask 완료(실칩 deep-zoom draw
-   439→22ms(-95%), KLayout 대비 6.5배 우위 반전 — §3.13). 2c work
-   bin은 draw 잔량 22ms로 근거를 잃어 **F2R-11 채택 시점까지 보류**;
-   mid-zoom에서 draw가 다시 불거질 때만 재개한다. 다음 우선 축은
-   load(신규 page read+decode)와 재방문 load(F2R-10 pan-sweep)다.
+4. F2R-03b 2단계: 2a Pts chunk 완료(-95% member 테스트), 2b layer
+   mask 완료(deep-zoom draw 439→22ms — §3.13). **실칩 mid-zoom
+   판정(§3.15)으로 우선순위 확정**: ① F2R-09 cost-aware round —
+   대형 cold 뷰의 rounds 5가 draw를 ~3배로 만들며, 단발이면 이미
+   floe보다 빠르다(추정 4.3 vs 6.2초). ② **2c work bin 재개** —
+   round×45tile×plane 곱이 mask gate 검사만 3억 회를 만든다(부수:
+   gate의 wcells 이진탐색을 사전 해석 index로). load 축 후보들
+   (lazy-index·인코드 캐시·budget)은 이 뷰에서 전부 비병목으로
+   판정돼 후순위.
 5. 같은 work bin 위에서 F2R-10 world-aligned tile LRU를 작게 prototype하고 field trace
    20% gate를 넘을 때만 제품화한다.
 6. 1024-page를 넘는 장시간 cold fixture로 F2R-11 final-tile streaming의 first/settled
