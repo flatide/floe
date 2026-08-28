@@ -543,6 +543,16 @@ floe ~5.1s로 여전히 우세). 이 1,101ms는 §3.15 분해의 floe2 paint
 나눠 자기 그룹만 순회한다(그룹 내 순서 = row 순서 → byte 불변).
 labels on 뷰의 label 비용이 크게 줄어든다.
 
+**실칩 4차 — bin 적중 확인(0.12.25)**: `bin 137k items`,
+**1,667ms = 236 load + 1,296 draw**. draw 2,496→1,296ms(-48%)로
+예측(~1.2초)과 일치하고, frames-off floe draw 1,101ms와 18% 이내다.
+잔여 hier 1.6M/23.5M은 weight-gate가 지연한 heavy subtree들의
+per-tile walk 몫. 이 뷰의 최종 경과: **11,656 → 5,001 → 2,919 →
+1,667ms** (동일 토글 floe ~5.1s 대비 3.1배, 원점 대비 7배). 남은
+draw 격차 ~0.2초의 다음 지렛대는 F2R-03c(1bpp plane)와 deferred
+subtree의 tile binning이며, 우선순위는 다른 축(F2R-10 재방문
+sweep 등) 실측 후 판단한다.
+
 §3.13의 "load 10초+/draw 5초+" 지점을 0.12.19 telemetry로 실측한
 결과 (view 100.0×96.6µm, 824x796, cut<0.122µm, 5698 pages/+5616
 miss, 207k text places, labels partial):
@@ -585,7 +595,7 @@ per-member로는 KLayout ~175ns/member(12.9M/2252ms) vs floe2 추정
 |---|---:|---|---|---|
 | F2R-01 | P1 | `DONE` | cache hit까지 128-page refine | cache-aware batch/unit+현장 gate 완료 |
 | F2R-02 | P1 | `DONE` | 128px tile의 반복 hierarchy 순회 | 제품 기본 384px 승인 |
-| F2R-03 | P1 | `DOING` | tile x layer x hierarchy 총 CPU 작업량 | 03a~03b-**2c까지 완료** — 2c work bin으로 tile×plane 곱 제거(§3.15 후속). 남음: 실칩 재측정, 03c(1bpp plane) |
+| F2R-03 | P1 | `DOING` | tile x layer x hierarchy 총 CPU 작업량 | 03b 전체 완료·실칩 적중(§3.15: 11.7s→1.67s, floe 대비 3.1배). 남음: 03c(1bpp plane) |
 | F2R-04 | P1 | `DONE` | total에서 사라진 PNG/publish 37~44ms | write/sync/rename/handoff 계측 완료 |
 | F2R-05 | P2 | `DONE` | jobs=8의 CPU/전력 비용 | decode 8/raster 4 분리 승인 |
 | F2R-06 | P3 | `BLOCKED` | render마다 OS thread 생성 | startup_us가 병목일 때만 pool |
