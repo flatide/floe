@@ -5688,12 +5688,16 @@ class Viewer:
 
         db = self._drc
 
+        has_note = hasattr(db, "get_note")
+
         def cell_at(r, c_, current):
             k2 = r * self._drc_gridw + c_
             if k2 >= len(gmap):
                 return ""
             ei = gmap[k2]
             t = "%d" % (ei + 1)
+            if has_note and db.get_note(ci, ei):
+                t = "*" + t   # note present (keep the grid prefix)
             if current:
                 return ("<span background='#3465a4' "
                         "foreground='#ffffff'>%s</span>" % t)
