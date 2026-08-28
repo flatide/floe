@@ -547,7 +547,18 @@ labels on 뷰의 label 비용이 크게 줄어든다.
 **1,667ms = 236 load + 1,296 draw**. draw 2,496→1,296ms(-48%)로
 예측(~1.2초)과 일치하고, frames-off floe draw 1,101ms와 18% 이내다.
 잔여 hier 1.6M/23.5M은 weight-gate가 지연한 heavy subtree들의
-per-tile walk 몫. 이 뷰의 최종 경과: **11,656 → 5,001 → 2,919 →
+per-tile walk 몫.
+
+**frames 경로 감사(2026-08-28, 사용자 요청)**: full depth에서 frame
+on의 잔여 비용은 plan +22ms(vfsd frontier 계산, floe 공통)뿐 — band
+walk 4회는 2b `subtree_has_frames(top)` gate가 스킵하고 bin frames는
+빈 리스트, block label은 labels 전용 + 0.12.25 그룹화. **frame off
+테스트 습관은 이제 불필요**(격차가 크게 나오면 버그 신호). depth
+제한 뷰도 planner의 frame fusion(flatfan 10만 자식 → frame record
+1개)·thin lattice가 폭발을 막는다(sample9 depth 4/6: +70µs).
+이론적 잔여 2건 — bin FrameItem의 4-band 전수 스캔, band-3 dotted
+hairline의 per-pixel stroke — 는 **depth 제한 실칩 뷰에서 frames
+on/off draw 격차가 유의미할 때만** 착수한다. 이 뷰의 최종 경과: **11,656 → 5,001 → 2,919 →
 1,667ms** (동일 토글 floe ~5.1s 대비 3.1배, 원점 대비 7배). 남은
 draw 격차 ~0.2초의 다음 지렛대는 F2R-03c(1bpp plane)와 deferred
 subtree의 tile binning이며, 우선순위는 다른 축(F2R-10 재방문
