@@ -753,6 +753,41 @@ def main():
     print("D10 OK: per-reviewer notes + flateyes .fe + share/clear/"
           "export/import")
 
+    # D11: bundled dubeolsik hangul composer for the note editor
+    # (flateyes port; GTK-free, so unit-testable here). Feed a
+    # keystroke string through the same path the key handler uses.
+    from floe.hangul import HangulComposer
+
+    def compose(keys):
+        c = HangulComposer()
+        out = ""
+        for ch in keys:
+            jamo = (HangulComposer.KEYMAP.get(ch)
+                    or HangulComposer.KEYMAP.get(ch.lower()))
+            if jamo is None:
+                out += c.preedit()
+                c.reset()
+                out += ch
+                continue
+            committed, _preedit = c.feed(jamo)
+            out += committed
+        return out + c.preedit()
+
+    for keys, want in (("dkssud", "안녕"), ("gksrmf", "한글"),
+                       ("rks", "간"), ("dhkd", "왕"),
+                       ("gksrmf dkssud", "한글 안녕")):
+        got = compose(keys)
+        if got != want:
+            fail("hangul compose %r -> %r != %r" % (keys, got, want))
+    # backspace decomposes a syllable one component at a time
+    c = HangulComposer()
+    for j in ("ㅎ", "ㅏ", "ㄴ"):
+        c.feed(j)
+    if c.preedit() != "한" or c.backspace() != "하" \
+            or c.backspace() != "ㅎ" or c.backspace() != "":
+        fail("hangul backspace decomposition wrong")
+    print("D11 OK: bundled hangul composer (compose + backspace)")
+
     print("DRC ICE VALIDATION: ALL OK")
 
 

@@ -23,6 +23,7 @@ from . import __version__
 from . import cache as cache_mod
 from . import drc as drc_mod
 from . import fillpat
+from .hangul import HangulComposer, TextViewEditable
 from .product import name as product_name
 from .service import (make_render_worker, DETAIL_PX, DETAIL_LEVELS,
                       DEFAULT_DETAIL)
@@ -5298,9 +5299,9 @@ class Viewer:
 
     def _drc_note_dialog(self, prefill, count):
         """Modal note editor (flateyes-style): multi-line text with
-        OK/Cancel. Returns the text (empty string = clear) or None on
-        cancel. Korean relies on the host input method (no bundled
-        composer, matching the rest of floe's text entry)."""
+        OK/Cancel and a built-in dubeolsik hangul composer for hosts
+        without an input method (Shift+Space toggles it). Returns the
+        text (empty string = clear) or None on cancel."""
         title = "Edit Note" if prefill else "Note"
         if count > 1:
             title += "  (%d errors)" % count
@@ -5312,15 +5313,21 @@ class Viewer:
         self._center_on_parent(dlg)
         view = Gtk.TextView()
         view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
-        buf = view.get_buffer()
+        editable = TextViewEditable(view)
         if prefill:
-            buf.set_text(prefill)
+            editable.set_text(prefill)
+            editable.set_position(len(prefill))
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.AUTOMATIC,
                           Gtk.PolicyType.AUTOMATIC)
         scroll.set_shadow_type(Gtk.ShadowType.IN)
         scroll.set_size_request(360, 100)
         scroll.add(view)
+        # built-in hangul input for hosts with no IME (flateyes port)
+        hangul = Gtk.CheckButton(label="Hangul (Shift+Space)")
+        state = {"composer": HangulComposer(), "check": hangul,
+                 "anchor": None}
+        hangul.connect("toggled", lambda *a: state["composer"].reset())
 
         def on_key(_w, ev):
             name = Gdk.keyval_name(ev.keyval)
@@ -5331,24 +5338,87 @@ class Viewer:
                     and (ev.state & Gdk.ModifierType.CONTROL_MASK):
                 dlg.response(Gtk.ResponseType.OK)
                 return True
-            return False
+            return self._note_entry_key(editable, ev, state)
         view.connect("key-press-event", on_key)
         hint = Gtk.Label()
         hint.set_markup("<small>Ctrl+Enter: OK · Esc: cancel · "
-                        "empty removes the note</small>")
+                        "Shift+Space: 한글 · empty removes the note"
+                        "</small>")
         hint.set_halign(Gtk.Align.START)
         box = dlg.get_content_area()
         box.set_border_width(10)
         box.set_spacing(6)
         box.pack_start(scroll, True, True, 0)
+        box.pack_start(hangul, False, False, 0)
         box.pack_start(hint, False, False, 0)
         dlg.show_all()
         ok = dlg.run() == Gtk.ResponseType.OK
-        s, e = buf.get_bounds()
-        text = buf.get_text(s, e, False).strip()
+        text = editable.get_text().strip()
         dlg.destroy()
         self.window.present()
         return text if ok else None
+
+    def _note_entry_key(self, entry, event, state):
+        """Dubeolsik hangul composition for the note editor (port of
+        flateyes on_text_entry_key). Returns True when it consumed the
+        key, False to let the TextView handle it."""
+        name = Gdk.keyval_name(event.keyval)
+        shift = event.state & Gdk.ModifierType.SHIFT_MASK
+        if name in ("Hangul", "Hangul_Hanja") \
+                or (name == "space" and shift):
+            state["check"].set_active(not state["check"].get_active())
+            return True
+        if not state["check"].get_active():
+            return False
+        composer = state["composer"]
+        if event.state & (Gdk.ModifierType.CONTROL_MASK
+                          | Gdk.ModifierType.MOD1_MASK):
+            composer.reset()   # keep Ctrl+A/C/V working
+            state["anchor"] = None
+            return False
+        # a cursor that left the preedit span (click, arrows) finishes
+        # that syllable; composition restarts wherever the cursor is
+        if composer.pending() and entry.get_position() != \
+                state["anchor"] + len(composer.preedit()):
+            composer.reset()
+            state["anchor"] = None
+        if name == "BackSpace":
+            if not composer.pending():
+                return False
+            old_len = len(composer.preedit())
+            self._note_entry_replace(entry, state["anchor"], old_len,
+                                     composer.backspace())
+            if not composer.pending():
+                state["anchor"] = None
+            return True
+        code = Gdk.keyval_to_unicode(event.keyval)
+        if not code:
+            # modifiers/arrows/F-keys carry no character: never end the
+            # syllable (Shift for a double jamo must not break it)
+            return False
+        char = chr(code)
+        jamo = HangulComposer.KEYMAP.get(char) \
+            or HangulComposer.KEYMAP.get(char.lower())
+        if jamo is None:
+            composer.reset()   # syllable done; the entry handles the key
+            state["anchor"] = None
+            return False
+        if not composer.pending():
+            entry.delete_selection()   # type over a selection, like an IME
+            state["anchor"] = entry.get_position()
+            old_len = 0
+        else:
+            old_len = len(composer.preedit())
+        committed, preedit = composer.feed(jamo)
+        self._note_entry_replace(entry, state["anchor"], old_len,
+                                 committed + preedit)
+        state["anchor"] += len(committed)
+        return True
+
+    @staticmethod
+    def _note_entry_replace(entry, anchor, old_len, new):
+        """Replace the preedit span at anchor, cursor after it."""
+        entry.replace_span(anchor, old_len, new)
 
     def _drc_note_save_dialog(self):
         """DRC > save notes as… : snapshot the per-reviewer note state
