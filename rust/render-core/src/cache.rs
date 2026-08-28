@@ -446,7 +446,7 @@ impl Cache {
         // phase wall exposes worker idle time, the max exposes stragglers.
         let timed_decode = |payload: &PagePayload| {
             let page_started = Instant::now();
-            let result = decode_payload(payload);
+            let result = decode_payload(payload, guard);
             (result, elapsed_us(page_started))
         };
         let mut indexed = if worker_count <= 1 {
@@ -549,7 +549,10 @@ impl Cache {
 /// Decodes one page payload; the second value is the time spent
 /// building the record index alone (the lazy-index decision input —
 /// §3.11 measured it at +70% of raw decode on sample9).
-fn decode_payload(payload: &PagePayload) -> Result<(DecodedPage, u64), String> {
+fn decode_payload(
+    payload: &PagePayload,
+    guard: Option<(u64, &RenderCancellation)>,
+) -> Result<(DecodedPage, u64), String> {
     let doc = floe_oasis::doc::parse_doc(&payload.bytes)
         .map_err(|error| format!("decode page {}: {error}", payload.page_id))?;
     if doc.cells.len() != 1 {
@@ -559,8 +562,12 @@ fn decode_payload(payload: &PagePayload) -> Result<(DecodedPage, u64), String> {
             doc.cells.len()
         ));
     }
+    // The build probes the guard every few thousand records so a
+    // stale generation stops burning CPU inside a large page.
     let index_started = Instant::now();
-    let index = crate::PageIndex::build(&doc);
+    let index = crate::PageIndex::build_cancellable(&doc, &mut || {
+        check_decode_cancelled(guard)
+    })?;
     let index_us = elapsed_us(index_started);
     Ok((
         DecodedPage {
@@ -643,7 +650,7 @@ mod tests {
             },
             bytes: w.out,
         };
-        let error = match decode_payload(&payload) {
+        let error = match decode_payload(&payload, None) {
             Ok(_) => panic!("corrupt page decoded successfully"),
             Err(error) => error,
         };

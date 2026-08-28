@@ -31,12 +31,40 @@ struct SceneMasks {
     words: usize,
     bits: Vec<u64>,
     frames: Vec<bool>,
-    #[cfg(test)]
+    /// FULL masks: every subtree answers "paints everything", so the
+    /// walk never prunes. Used when the bit matrix would outgrow
+    /// `MASK_BUDGET_BYTES` (review 2026-08-28: wcells × layer words
+    /// is otherwise an unbounded allocation outside the decoded-page
+    /// budget) and by the test oracle. Pixels are identical either
+    /// way — masks only ever skip provably empty work.
     full: bool,
 }
 
+/// Cap on the subtree bit matrix. 16MiB covers a million working
+/// cells at 128 decoded layers; a plan past that renders unpruned
+/// rather than spiking memory the LRU budget never sees.
+const MASK_BUDGET_BYTES: usize = 16 << 20;
+
 impl SceneMasks {
     fn build(plan: &HierPlan, pages: &BTreeMap<u32, Arc<DecodedPage>>) -> Self {
+        Self::build_bounded(plan, pages, MASK_BUDGET_BYTES)
+    }
+
+    fn full_masks() -> Self {
+        Self {
+            layers: Vec::new(),
+            words: 0,
+            bits: Vec::new(),
+            frames: Vec::new(),
+            full: true,
+        }
+    }
+
+    fn build_bounded(
+        plan: &HierPlan,
+        pages: &BTreeMap<u32, Arc<DecodedPage>>,
+        cap_bytes: usize,
+    ) -> Self {
         let cells = &plan.wcells;
         let mut layers: Vec<u32> = pages.values().map(|page| page.layer_idx).collect();
         for cell in cells {
@@ -45,7 +73,17 @@ impl SceneMasks {
         layers.sort_unstable();
         layers.dedup();
         let words = layers.len().div_ceil(64).max(1);
-        let mut bits = vec![0u64; cells.len() * words];
+        let Some(bit_words) = cells.len().checked_mul(words) else {
+            return Self::full_masks();
+        };
+        let mask_bytes = bit_words
+            .checked_mul(std::mem::size_of::<u64>())
+            .and_then(|bytes| bytes.checked_add(cells.len()));
+        match mask_bytes {
+            Some(bytes) if bytes <= cap_bytes => {}
+            _ => return Self::full_masks(),
+        }
+        let mut bits = vec![0u64; bit_words];
         let mut frames = vec![false; cells.len()];
         for (index, cell) in cells.iter().enumerate() {
             frames[index] = !cell.frames.is_empty();
@@ -118,7 +156,6 @@ impl SceneMasks {
             words,
             bits,
             frames,
-            #[cfg(test)]
             full: false,
         }
     }
@@ -312,7 +349,6 @@ impl FrameScene {
     /// Dense mask bit for a styled layer, or None when no decoded page
     /// or wash in this round can paint it (F2R-03b 2b).
     pub fn layer_mask_bit(&self, layer_idx: u32) -> Option<usize> {
-        #[cfg(test)]
         if self.masks.full {
             return Some(usize::MAX);
         }
@@ -323,7 +359,6 @@ impl FrameScene {
     /// layer bit this round. A cell missing from the plan answers true:
     /// pruning must never outrun the walk's own missing-cell errors.
     pub fn subtree_paints(&self, key: WsKey, bit: Option<usize>) -> bool {
-        #[cfg(test)]
         if self.masks.full {
             return true;
         }
@@ -343,7 +378,6 @@ impl FrameScene {
 
     /// Whether the subtree rooted at `key` holds any hierarchy frame.
     pub fn subtree_has_frames(&self, key: WsKey) -> bool {
-        #[cfg(test)]
         if self.masks.full {
             return true;
         }
@@ -560,6 +594,20 @@ mod tests {
         assert!(scene.subtree_has_frames(top), "child frames union up");
         assert!(scene.subtree_has_frames(child));
         assert!(scene.mask_bytes() > 0);
+
+        // A bit matrix past the byte cap falls back to FULL masks:
+        // nothing prunes, nothing allocates, pixels are unchanged.
+        let mut scene = scene;
+        let plan = Arc::clone(&scene.plan);
+        let capped = SceneMasks::build_bounded(&plan, &scene.pages, 1);
+        assert!(capped.full);
+        assert!(capped.bits.is_empty());
+        scene.masks = capped;
+        assert_eq!(scene.mask_bytes(), 0);
+        assert_eq!(scene.layer_mask_bit(9), Some(usize::MAX),
+                   "full masks never declare a layer absent");
+        assert!(scene.subtree_paints(child, None), "full masks never prune");
+        assert!(scene.subtree_has_frames(top));
     }
 
     #[test]

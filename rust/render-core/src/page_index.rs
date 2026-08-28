@@ -34,24 +34,84 @@ pub struct PageIndex {
     pts: PtsChunkIndex,
 }
 
+/// How many records/point-chunks pass between cancellation probes
+/// during index construction.
+const BUILD_CANCEL_STRIDE: usize = 4096;
+
+/// Periodic cancellation probe for the index build (review
+/// 2026-08-28): the index is ~41% of decode CPU and a large page was
+/// an uninterruptible span, so a stale generation kept burning CPU
+/// after a pan. The stride keeps the probe off the per-record fast
+/// path.
+pub struct BuildTicker<'a> {
+    check: &'a mut dyn FnMut() -> Result<(), String>,
+    countdown: usize,
+}
+
+impl<'a> BuildTicker<'a> {
+    pub fn new(check: &'a mut dyn FnMut() -> Result<(), String>) -> Self {
+        Self {
+            check,
+            countdown: BUILD_CANCEL_STRIDE,
+        }
+    }
+
+    fn tick(&mut self) -> Result<(), String> {
+        self.countdown -= 1;
+        if self.countdown == 0 {
+            self.countdown = BUILD_CANCEL_STRIDE;
+            (self.check)()?;
+        }
+        Ok(())
+    }
+}
+
 impl PageIndex {
     /// Indexes the page's single geometry cell. A malformed document (which
     /// the decode/render paths reject separately) gets an empty index.
     pub fn build(doc: &Doc) -> Self {
+        Self::build_cancellable(doc, &mut || Ok(()))
+            .expect("index build cannot fail without a cancellation check")
+    }
+
+    /// `build` with a periodic cancellation probe between records and
+    /// Pts chunks; the extent loops (path outline construction
+    /// included) dominate the build, the BVH partition after them is
+    /// comparatively cheap and runs unprobed.
+    pub fn build_cancellable(
+        doc: &Doc,
+        check: &mut dyn FnMut() -> Result<(), String>,
+    ) -> Result<Self, String> {
         let Some(cell) = doc.cells.get(doc.top) else {
-            return Self {
+            return Ok(Self {
                 rects: RecordTree::default(),
                 polys: RecordTree::default(),
                 paths: RecordTree::default(),
                 pts: PtsChunkIndex::default(),
-            };
+            });
         };
-        Self {
-            rects: RecordTree::build(cell.rects.iter().map(rect_extent).collect()),
-            polys: RecordTree::build(cell.polys.iter().map(poly_extent).collect()),
-            paths: RecordTree::build(cell.paths.iter().map(path_extent).collect()),
-            pts: PtsChunkIndex::build(cell),
+        let mut ticker = BuildTicker::new(check);
+        let mut rect_extents = Vec::with_capacity(cell.rects.len());
+        for rect in &cell.rects {
+            ticker.tick()?;
+            rect_extents.push(rect_extent(rect));
         }
+        let mut poly_extents = Vec::with_capacity(cell.polys.len());
+        for polygon in &cell.polys {
+            ticker.tick()?;
+            poly_extents.push(poly_extent(polygon));
+        }
+        let mut path_extents = Vec::with_capacity(cell.paths.len());
+        for path in &cell.paths {
+            ticker.tick()?;
+            path_extents.push(path_extent(path));
+        }
+        Ok(Self {
+            rects: RecordTree::build(rect_extents),
+            polys: RecordTree::build(poly_extents),
+            paths: RecordTree::build(path_extents),
+            pts: PtsChunkIndex::build(cell, &mut ticker)?,
+        })
     }
 
     /// Reference index that never prunes; the oracle for equivalence tests.
@@ -110,7 +170,7 @@ pub(crate) struct PtsChunkIndex {
 }
 
 impl PtsChunkIndex {
-    fn build(cell: &Cell) -> Self {
+    fn build(cell: &Cell, ticker: &mut BuildTicker<'_>) -> Result<Self, String> {
         let mut large: Vec<&[(i64, i64)]> = Vec::new();
         for rep in cell
             .rects
@@ -127,28 +187,28 @@ impl PtsChunkIndex {
         }
         large.sort_by_key(|points| points.as_ptr() as usize);
         large.dedup_by_key(|points| points.as_ptr() as usize);
-        let tables = large
-            .into_iter()
-            .filter_map(|points| {
-                let chunks: Box<[BBox]> = points
-                    .chunks(PTS_CHUNK_POINTS)
-                    .map(|chunk| {
-                        let mut bbox = BBox::EMPTY;
-                        for &(x, y) in chunk {
-                            bbox.grow(&BBox {
-                                x0: x,
-                                y0: y,
-                                x1: x,
-                                y1: y,
-                            });
-                        }
-                        bbox
-                    })
-                    .collect();
-                Self::chunks_are_selective(&chunks).then_some((points.as_ptr() as usize, chunks))
-            })
-            .collect();
-        Self { tables }
+        let mut tables = Vec::new();
+        for points in large {
+            let mut chunks = Vec::with_capacity(points.len().div_ceil(PTS_CHUNK_POINTS));
+            for chunk in points.chunks(PTS_CHUNK_POINTS) {
+                ticker.tick()?;
+                let mut bbox = BBox::EMPTY;
+                for &(x, y) in chunk {
+                    bbox.grow(&BBox {
+                        x0: x,
+                        y0: y,
+                        x1: x,
+                        y1: y,
+                    });
+                }
+                chunks.push(bbox);
+            }
+            let chunks: Box<[BBox]> = chunks.into();
+            if Self::chunks_are_selective(&chunks) {
+                tables.push((points.as_ptr() as usize, chunks));
+            }
+        }
+        Ok(Self { tables })
     }
 
     /// File-order chunks only pay off while they stay spatially tight on at
@@ -549,6 +609,53 @@ mod tests {
     }
 
     #[test]
+    fn index_build_probes_cancellation_between_records() {
+        // 3 * stride rects guarantee at least two probes; a failing
+        // check must abort the build instead of finishing the page.
+        let doc = Doc {
+            unit: 1000.0,
+            cells: vec![Cell {
+                name: "BIG".to_string(),
+                rects: (0..3 * super::BUILD_CANCEL_STRIDE as i64)
+                    .map(|i| RectRec {
+                        layer: 1,
+                        dt: 0,
+                        x: i,
+                        y: i,
+                        w: 1,
+                        h: 1,
+                        rep: Rep::One,
+                    })
+                    .collect(),
+                ..Cell::default()
+            }],
+            top: 0,
+            layer_order: vec![(1, 0)],
+            norm_s: 0.0,
+            layer_names: std::collections::HashMap::new(),
+            layer_aliases: std::collections::HashMap::new(),
+        };
+        let mut probes = 0usize;
+        let built = PageIndex::build_cancellable(&doc, &mut || {
+            probes += 1;
+            Ok(())
+        });
+        assert!(built.is_ok());
+        assert!(probes >= 2, "expected periodic probes, saw {probes}");
+
+        let mut calls = 0usize;
+        let cancelled = PageIndex::build_cancellable(&doc, &mut || {
+            calls += 1;
+            Err("render cancelled: stale generation".to_string())
+        });
+        assert_eq!(
+            cancelled.err().as_deref(),
+            Some("render cancelled: stale generation")
+        );
+        assert_eq!(calls, 1, "first probe must abort the build");
+    }
+
+    #[test]
     fn pts_chunk_tables_are_deduplicated_and_thresholded() {
         let shared: Arc<[(i64, i64)]> = (0..PTS_CHUNK_MIN_POINTS as i64).map(|i| (i, -i)).collect();
         let small: Arc<[(i64, i64)]> = Arc::from([(0i64, 0i64), (5, 5)]);
@@ -570,7 +677,7 @@ mod tests {
             ],
             ..Cell::default()
         };
-        let index = PtsChunkIndex::build(&cell);
+        let index = PtsChunkIndex::build(&cell, &mut BuildTicker::new(&mut || Ok(()))).unwrap();
         assert_eq!(index.tables.len(), 1, "shared arc builds one table");
         let chunks = index
             .chunks_for(&cell.rects[0].rep)
@@ -612,7 +719,7 @@ mod tests {
             }],
             ..Cell::default()
         };
-        let index = PtsChunkIndex::build(&cell);
+        let index = PtsChunkIndex::build(&cell, &mut BuildTicker::new(&mut || Ok(()))).unwrap();
         assert!(index.chunks_for(&cell.rects[0].rep).is_none());
     }
 

@@ -480,6 +480,14 @@ regime의 member당 비용도 제거하므로 mid-zoom draw 열세(위 관측)�
 | `raster_tile_max_ms` | 최다 소요 image tile = r4 tail imbalance (e; F2R-06 gate) |
 | `hier_cells_visited`/`subtrees_pruned` | traversal 규모/2b 절감 (d; 2c 재개 판정) |
 | `rep_members_tested/drawn` | member 스캔 vs 실제 paint (d) |
+| `mask_mb` | 2b subtree mask 실크기 (16MiB 상한 초과 시 full-mask 폴백 = prune 없음·pixel 불변; 리뷰 2026-08-28) |
+
+리뷰 보강 2건(2026-08-28): (1) 2b mask 행렬(wcells × layer word)은
+예산 밖 무제한 할당이었다 — checked 산술 + 16MiB 상한, 초과 시
+full-mask 폴백(prune만 잃고 pixel 불변), `mask_mb`로 계측. (2)
+record-index build(decode CPU의 41%)가 비취소 구간이었다 — 4096
+record/chunk마다 취소 probe를 넣어 pan 후 stale generation이 큰
+page 안에서 CPU를 계속 태우지 않는다.
 
 sample9 hotspot(r4/384, detail high) 첫 판독: decode pool 가동률
 92%(232.2 sum / 31.4 wall × 8w), straggler 없음(max 12.0ms),

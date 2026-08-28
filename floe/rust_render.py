@@ -468,7 +468,7 @@ class RustRenderWorker:
             # utilization/stragglers, index-build share, raster tail,
             # traversal counters (sum over rounds; maxes keep max)
             "rounds": 0, "decode_sum_us": 0, "decode_max_us": 0,
-            "index_us": 0, "raster_tile_max_us": 0,
+            "index_us": 0, "raster_tile_max_us": 0, "mask_bytes": 0,
             "rep_tested": 0, "rep_drawn": 0,
             "hier_cells": 0, "subtree_prunes": 0,
         }
@@ -902,6 +902,8 @@ class RustRenderWorker:
         state["raster_tile_max_us"] = max(
             state["raster_tile_max_us"],
             _wire_int(fields, "raster_tile_max_us"))
+        state["mask_bytes"] = max(
+            state["mask_bytes"], _wire_int(fields, "mask_bytes"))
         state["rep_tested"] += _wire_int(fields, "rep_tested")
         state["rep_drawn"] += _wire_int(fields, "rep_drawn")
         state["hier_cells"] += _wire_int(fields, "hier_cells")
@@ -979,6 +981,7 @@ class RustRenderWorker:
             "decode_max_ms": state["decode_max_us"] / 1000.0,
             "index_ms": state["index_us"] / 1000.0,
             "raster_tile_max_ms": state["raster_tile_max_us"] / 1000.0,
+            "mask_mb": state["mask_bytes"] / (1024.0 * 1024.0),
             "rep_members_tested": state["rep_tested"],
             "rep_members_drawn": state["rep_drawn"],
             "hier_cells_visited": state["hier_cells"],
