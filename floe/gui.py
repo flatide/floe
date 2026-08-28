@@ -3913,11 +3913,10 @@ class Viewer:
         return mb
 
     def _load_layout_dialog(self):
-        """File > load layout… (user call 2026-08-22): open an
-        INDEXED source in place - the same open_file path an
-        instance-forwarded `floe view <file>` takes; the viewer
-        never builds a VFS cache itself, so an unindexed pick gets
-        the floe-index hint."""
+        """File > load layout… (user call 2026-08-22): open a source
+        in place, the same open_file path an instance-forwarded
+        `floe view <file>` takes. When the pick has no VFS cache it
+        ASKS to build one and indexes on Yes (user call 2026-08-28)."""
         dlg = Gtk.FileChooserDialog(title="load layout",
                                     parent=self.window,
                                     action=Gtk.FileChooserAction.OPEN)
@@ -3943,6 +3942,17 @@ class Viewer:
             return
         path = dlg.get_filename()
         dlg.destroy()
+        # no cache yet: offer to build the VFS index, then load
+        if path and not cache_mod.Cache(path).exists():
+            if not self._ask_yes_no(
+                    "No VFS index for\n%s\n\nBuild it now?"
+                    % os.path.basename(path)):
+                self._set_live_status(
+                    "VFS index needed: %s index %s"
+                    % (APP, os.path.basename(path)))
+                return
+            self._vfs_index_and_load(path)
+            return
         try:
             err = self.open_file(path)
         except Exception as exc:
@@ -3958,6 +3968,30 @@ class Viewer:
             info.run()
             info.destroy()
             self.window.present()
+
+    def _vfs_index_and_load(self, src):
+        """Build the VFS cache for `src` (floe-index vfs) with its log
+        in a modal dialog, then open it in place."""
+        from .vfsclient import find_binary
+        try:
+            bin_ = find_binary()
+        except RuntimeError as exc:
+            self._set_live_status("VFS indexing failed: %s" % exc)
+            return
+        outdir = src + ".floe"
+
+        def on_success():
+            try:
+                err = self.open_file(src)
+            except Exception as exc:
+                err = "ERR %s" % exc
+            if err:
+                self._set_live_status(
+                    err[4:] if err.startswith("ERR ") else err)
+
+        self._index_modal("indexing layout…",
+                          [bin_, "vfs", src, outdir],
+                          on_success, "VFS indexing")
 
     def _about_dialog(self):
         """Help > About (flateyes show_about parity): plain-text
@@ -4327,9 +4361,9 @@ class Viewer:
 
     def _drc_open_db(self, path):
         """Dialog flow (user call 2026-08-14): the user PICKS the
-        ASCII .db, floe LOADS only its packed .ice - building the
-        pack first (modal log dialog) when it is missing, stale or
-        an old layout/v1 sidecar."""
+        ASCII .db, floe LOADS only its packed .ice. When no usable
+        pack exists (missing, stale or an old layout/v1 sidecar) it
+        ASKS before building one (user call 2026-08-28)."""
         from . import drc as drc_mod
         side = path + ".ice"
         if os.path.exists(side):
@@ -4341,21 +4375,63 @@ class Viewer:
             else:
                 self.load_drc(path, db=db)  # adopt the fresh pack
                 return
+        if not self._ask_yes_no(
+                "No DRC index for\n%s\n\nBuild it now?"
+                % os.path.basename(path)):
+            self._set_live_status(
+                "DRC index needed: floe-index drc %s"
+                % os.path.basename(path))
+            return
         self._drc_pack_and_load(path)
 
     def _drc_pack_and_load(self, path):
         """Run `floe-index drc <db> --pack` with its log in a MODAL
         dialog, then load the pack."""
-        import subprocess
-        import threading
+        from . import drc as drc_mod
         from .vfsclient import find_binary
         try:
             bin_ = find_binary()
         except RuntimeError as exc:
             self._set_live_status("DRC indexing failed: %s" % exc)
             return
-        dlg = Gtk.Dialog(title="indexing DRC results…",
-                         transient_for=self.window, modal=True)
+
+        def on_success():
+            self.load_drc(path)
+            if not isinstance(self._drc, drc_mod.IcePack):
+                # the indexer that just ran wrote a layout the reader
+                # refuses: it is an OUTDATED binary
+                self._set_live_status(
+                    "DRC pack from %s is an old layout - rebuild it: "
+                    "cd rust && cargo build --release" % bin_)
+
+        self._index_modal("indexing DRC results…",
+                          [bin_, "drc", path, "--pack"],
+                          on_success, "DRC indexing")
+
+    def _ask_yes_no(self, text, default_yes=True):
+        """Modal Yes/No question, centered on the parent; returns
+        True for Yes. Refocuses the parent on close (quartz)."""
+        dlg = Gtk.MessageDialog(
+            transient_for=self.window, modal=True,
+            message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.YES_NO, text=text)
+        self._center_on_parent(dlg)
+        self._only_close_button(dlg)
+        dlg.set_default_response(Gtk.ResponseType.YES if default_yes
+                                 else Gtk.ResponseType.NO)
+        resp = dlg.run()
+        dlg.destroy()
+        self.window.present()
+        return resp == Gtk.ResponseType.YES
+
+    def _index_modal(self, title, argv, on_success, fail):
+        """Run an indexer subprocess with its log streamed into a
+        MODAL dialog (cancel terminates it); call on_success() on a
+        clean exit. Shared by the DRC pack and the VFS index builds."""
+        import subprocess
+        import threading
+        dlg = Gtk.Dialog(title=title, transient_for=self.window,
+                         modal=True)
         dlg.set_default_size(600, 340)
         tv = Gtk.TextView()
         tv.set_editable(False)
@@ -4368,15 +4444,15 @@ class Viewer:
         sc.add(tv)
         dlg.get_content_area().pack_start(sc, True, True, 4)
         dlg.add_button("cancel", Gtk.ResponseType.CANCEL)
+        self._center_on_parent(dlg)
         dlg.show_all()
         try:
             proc = subprocess.Popen(
-                [bin_, "drc", path, "--pack"],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1)
+                argv, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True, bufsize=1)
         except OSError as exc:
             dlg.destroy()
-            self._set_live_status("DRC indexing failed: %s" % exc)
+            self._set_live_status("%s failed: %s" % (fail, exc))
             return
         state = {"cancelled": False}
 
@@ -4397,20 +4473,13 @@ class Viewer:
 
         def done(rc):
             dlg.destroy()
+            self.window.present()
             if state["cancelled"]:
-                self._set_live_status("DRC indexing cancelled")
+                self._set_live_status("%s cancelled" % fail)
             elif rc == 0:
-                self.load_drc(path)
-                if not isinstance(self._drc, drc_mod.IcePack):
-                    # the indexer that just ran wrote a layout the
-                    # reader refuses: it is an OUTDATED binary
-                    self._set_live_status(
-                        "DRC pack from %s is an old layout - "
-                        "rebuild it: cd rust && cargo build "
-                        "--release" % bin_)
+                on_success()
             else:
-                self._set_live_status(
-                    "DRC indexing failed (rc %d)" % rc)
+                self._set_live_status("%s failed (rc %d)" % (fail, rc))
             return False
 
         def pump():

@@ -161,7 +161,8 @@ python -m floe render chip.oas --drc results.db \
 ## 3. 뷰어 DRC 브라우저 (왼쪽 pane 상시 내장)
 
 **열기** — open .db… 다이얼로그(.db만 표시, 로딩은 pack만; 부재/
-스테일/구 레이아웃이면 자동 인덱싱 + 모달 로그), `--drc` 시작
+스테일/구 레이아웃이면 **"Build it now?" 확인 후** 인덱싱 + 모달
+로그 — load layout의 VFS 인덱싱과 같은 흐름), `--drc` 시작
 옵션. 로드 직후 = 무선택 상태. 정보줄:
 `파일명 [pack v4] — cell · 표시/전체 룰 · 에러 · svrf N/M`.
 

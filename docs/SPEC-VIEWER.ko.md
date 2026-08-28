@@ -133,10 +133,14 @@
   `floe`(= view)는 레이아웃 없이 뜬다 — `_apply_cache(None)` =
   meta None·worker None·레이어 패널 빈 상태·타이틀 APP·상태줄
   "no layout"; redraw/fit/_clamp_view/미니맵/캔버스·미니맵 입력
-  핸들러가 cache None에서 조기 반환. **File > load layout…** =
-  `open_file()`(인스턴스 포워딩과 동일 경로: 인덱스 필수, 없으면
-  floe-index vfs 안내 모달) → `_apply_cache(c)`가 워커 기동·패널
-  재구축, 창이 이미 실현돼 있으면(_did_fit) 즉시 fit. 실행 중
+  핸들러가 cache None에서 조기 반환. **File > load layout…**: 픽에
+  **VFS 캐시가 없으면 "Build it now?" Yes/No** → Yes면
+  `_vfs_index_and_load`가 `floe-index vfs <src> <src>.floe`를 모달
+  로그(`_index_modal`, cancel=terminate)로 돌린 뒤 `open_file()`로
+  로드(2026-08-28); 캐시가 있으면 곧장 `open_file()`(인스턴스
+  포워딩과 동일 경로) → `_apply_cache(c)`가 워커 기동·패널 재구축,
+  창이 이미 실현돼 있으면(_did_fit) 즉시 fit. 인스턴스 포워딩 경로
+  자체는 여전히 인덱스 필수(다이얼로그만 인덱싱 제안). 실행 중
   인스턴스에 빈 요청("")이 포워딩되면 창만 present(옵션 무시).
 - **메뉴 바**(2026-08-22, `_build_menubar`): File(**load layout**·
   clip·copy·quit) /
@@ -176,11 +180,12 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
 - **open .db… 다이얼로그**(2026-08-14): 파일 타입은 `*.db`만.
   선택한 .db는 직접 파스하지 않고 **오직 `<db>.ice`(pack)만
   로딩** — 신선한 현-레이아웃 pack이 없으면(부재/스테일/v1/구
-  레이아웃)
-  `floe-index drc <db> --pack`을 실행하고 로그를 **모달
-  다이얼로그**에 실시간 표시(cancel = terminate) 후 로딩
-  (`_drc_open_db`/`_drc_pack_and_load`, 바이너리는
-  vfsclient.find_binary).
+  레이아웃) **"Build it now?" Yes/No로 물은 뒤**(2026-08-28,
+  `_ask_yes_no`) Yes면 `floe-index drc <db> --pack`을 실행하고
+  로그를 공용 **모달 다이얼로그**(`_index_modal`, cancel =
+  terminate)에 실시간 표시 후 로딩(`_drc_open_db`/
+  `_drc_pack_and_load`, 바이너리는 vfsclient.find_binary). load
+  layout의 VFS 인덱싱과 같은 헬퍼를 공유.
 - **룰 검색**(2026-08-15/18): 검색 박스는 **룰 목록 상단**(구
   prev/next 버튼 자리 nav 행에서 이동 — n/p 키는 유지). 룰 이름
   부분일치(대소문자 무관) 실시간 필터. TreeView 내장 typeahead
