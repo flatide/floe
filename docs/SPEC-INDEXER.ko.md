@@ -14,6 +14,11 @@
 `--profile-snapshot`/`--profile-snapshot-refresh`를 같은 이름의 Rust
 옵션으로 전달한다.
 coverage는 viewer 기본값과 맞춰 opt-in이다.
+**기본값(2026-08-28)**: `--jobs`는 **12**(구 host parallelism — raw
+`floe-index vfs` 바이너리 자체 기본은 여전히 CPU 코어), LOD는 **끔**
+— `floe index`는 항상 `--no-lod`를 전달하고 `--lod`로만 다시 켠다(LOD
+퇴출 방향; raw 바이너리 기본은 아직 LOD 포함). 뷰어의 load-layout /
+open .db 인덱싱도 동일하게 `--jobs 12`(+VFS는 `--no-lod`)로 실행한다.
 
 정상 VFS cache의 cache version과 source size/mtime fingerprint가 맞고,
 `floe-index vfsd`의 `Vfs::open` 검증(OVM 구조 + OVP/OVT committed length)을

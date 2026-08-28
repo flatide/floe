@@ -289,7 +289,8 @@ def _run_rust_index(args, binary, coverage_only=False):
             command += ["--page-target-mb", str(args.page_target_mb)]
         if args.coverage:
             command.append("--coverage")
-        if args.no_lod:
+        # LOD off by default (retirement, 2026-08-28); --lod opts back in
+        if not getattr(args, "lod", False):
             command.append("--no-lod")
         if args.slow_cell_s is not None:
             command += ["--slow-cell-s", str(args.slow_cell_s)]
@@ -1347,9 +1348,8 @@ def main(argv=None, *, prog=None, rust_only=None):
                    help="allow replacement of an existing <src>.floe "
                         "cache (without this flag a current cache is "
                         "reused and a stale/incomplete cache is refused)")
-    p.add_argument("--jobs", type=_positive_int, default=None, metavar="N",
-                   help="Rust parser/planner worker count (default: host "
-                        "parallelism)")
+    p.add_argument("--jobs", type=_positive_int, default=12, metavar="N",
+                   help="Rust parser/planner worker count (default: 12)")
     rust = p.add_argument_group("Rust VFS options (default backend)")
     rust.add_argument("--page-target-mb", type=_positive_int, default=None,
                       metavar="N", help="encoded page target in MiB "
@@ -1365,7 +1365,11 @@ def main(argv=None, *, prog=None, rust_only=None):
             "--coverage-only", action="store_true",
             help="add design.ovc to a current cache without rebuilding it")
     rust.add_argument("--no-lod", action="store_true",
-                      help="do not generate merged LOD page variants")
+                      help="do not generate merged LOD page variants "
+                           "(default; LOD is being retired)")
+    rust.add_argument("--lod", action="store_true",
+                      help="keep merged LOD page variants (opt back in; "
+                           "off by default since 2026-08-28)")
     rust.add_argument("--slow-cell-s", type=_nonnegative_float,
                       default=None, metavar="S",
                       help="slow-cell log threshold in seconds (default: "

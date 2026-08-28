@@ -314,6 +314,7 @@ print(json.dumps([_renderer_backend(), instance.APP,
         check(delegated.returncode == 0, "floe2 Rust index delegation failed")
         check(json.loads(log.read_text()) == [
             "vfs", str(source), str(source) + ".floe", "--jobs", "2",
+            "--no-lod",
         ], "floe2 changed the canonical Rust index argv")
 
     if fixture is not None:

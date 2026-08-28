@@ -3989,8 +3989,10 @@ class Viewer:
                 self._set_live_status(
                     err[4:] if err.startswith("ERR ") else err)
 
+        # jobs 12 default, LOD off (retirement) - user call 2026-08-28
         self._index_modal("indexing layout…",
-                          [bin_, "vfs", src, outdir],
+                          [bin_, "vfs", src, outdir,
+                           "--jobs", "12", "--no-lod"],
                           on_success, "VFS indexing")
 
     def _about_dialog(self):
@@ -4405,7 +4407,7 @@ class Viewer:
                     "cd rust && cargo build --release" % bin_)
 
         self._index_modal("indexing DRC results…",
-                          [bin_, "drc", path, "--pack"],
+                          [bin_, "drc", path, "--pack", "--jobs", "12"],
                           on_success, "DRC indexing")
 
     def _ask_yes_no(self, text, default_yes=True):

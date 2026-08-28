@@ -151,7 +151,7 @@ else:
         run(env, additive, "--coverage")
         check(build_calls(log)[-1] == [
             "vfs", str(additive), str(additive) + ".floe",
-            "--coverage-only",
+            "--jobs", "12", "--coverage-only",
         ], "coverage was not added non-destructively")
 
         before = len(build_calls(log))
