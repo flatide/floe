@@ -497,6 +497,18 @@ imbalance의 첫 실측 신호(F2R-06 재개 조건 충족 여부는 실칩에�
 
 ### 3.15 실칩 문제 뷰 판정 — mid-zoom 100µm cold (2026-08-28)
 
+**최종 재측정(같은 날, 0.12.22 기본 no-refinement)**: floe2
+**2,919ms = 326 load + 2,473 draw** — 최초 11,656ms에서 4배, floe
+6,220ms 대비 **2.1배 빠름**. draw 2,473 vs KLayout 2,252로 사실상
+동률까지 수렴했다. 남은 신호: `bin off(cap@786k)` — work bin이 item
+상한(768k)에 걸려 walk 폴백(수집 도달치 표시가 상한과 같아 실제
+총량은 미지), tile-max 949ms(r4 tail — wall의 38%, F2R-06),
+hier 1.8M/60.5M(walk 폴백의 per-tile gate). 잔여 후보의 기대 이득:
+① dense-rep 지연 전개로 bin 적중(추정 −0.3~0.6초), ② tile 크기
+축소로 tail 완화(FLOE_RUST_TILE_PX 실측으로 판정), ③ F2R-03c 1bpp
+plane(구조적 per-member 상수). 경과 요약:
+11.66s → 5.00s(cost-aware 2 round) → **2.92s**(단발 round).
+
 §3.13의 "load 10초+/draw 5초+" 지점을 0.12.19 telemetry로 실측한
 결과 (view 100.0×96.6µm, 824x796, cut<0.122µm, 5698 pages/+5616
 miss, 207k text places, labels partial):
