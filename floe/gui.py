@@ -1193,23 +1193,22 @@ class Viewer:
             b".floe-layers-bg { background-color: #000000; } "
             b".floe-layer-selected, .floe-layer-selected * "
             b"{ background-color: #31566d; } "
-            # scrollbars: a raised grey pill on a near-black trough -
-            # the old flat-white slider was hard to read and too wide.
-            # opacity:1 keeps it from auto-hiding on the macOS GTK theme.
+            # scrollbars: a plain rectangular grey slider on a
+            # near-black trough - traditional square corners, solid
+            # fill (no gradient), narrow. opacity:1 keeps it from
+            # auto-hiding on the macOS GTK theme.
             b".floe-layers-frame scrollbar trough "
             b"{ background-color: #0a0a0a; background-image: none; "
             b"border: none; padding: 0; } "
             b".floe-layers-frame scrollbar slider "
-            b"{ background-image: linear-gradient(to bottom, "
-            b"#c8c8c8, #6e6e6e); border: 1px solid #2a2a2a; "
-            b"border-radius: 6px; min-width: 9px; min-height: 9px; "
-            b"margin: 1px; opacity: 1; } "
+            b"{ background-image: none; background-color: #9a9a9a; "
+            b"border: 1px solid #2a2a2a; border-radius: 0; "
+            b"min-width: 9px; min-height: 9px; margin: 1px; "
+            b"opacity: 1; } "
             b".floe-layers-frame scrollbar slider:hover "
-            b"{ background-image: linear-gradient(to bottom, "
-            b"#e2e2e2, #8c8c8c); } "
+            b"{ background-color: #c0c0c0; } "
             b".floe-layers-frame scrollbar slider:active "
-            b"{ background-image: linear-gradient(to bottom, "
-            b"#ffffff, #a6a6a6); } "
+            b"{ background-color: #e0e0e0; } "
             # DRC note panel: flateyes-style translucent top-left chip
             b".floe-note-panel { background-color: rgba(0,0,0,0.6); "
             b"color: #f0f0f0; padding: 4px 10px; border-radius: 4px; "
