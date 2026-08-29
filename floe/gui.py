@@ -180,6 +180,10 @@ LAYER_NAME_MARGIN_CHARS = 1.2     # swatch -> name: over a full glyph
 LAYER_STRIKE_RGB = (242, 242, 242)  # hidden-layer strike: bright,
                                     # readable over dimmed text/swatch
 LAYER_SWATCH_WH = (31, 14)  # layer-row color/fill box, fixed px
+LAYER_PICK_BG = "#FFD819"   # object-pick: opaque yellow box behind the
+                            # layer id (number column), drawn over the
+                            # blue row selection with dark text on top
+LAYER_PICK_FG = "#101010"   # id text on the yellow pick box (contrast)
 
 
 def import_gtk():
@@ -775,9 +779,13 @@ class LayerRow(object):
             width, height, width * 3)
 
     def _paint(self):
-        # a geometry pick no longer tints the text - it draws a
-        # white outline box instead (2026-08-22: the filled pick
-        # highlight was mistaken for layer SELECTION)
+        # a geometry pick marks the layer ID column (the number in
+        # FRONT of the fill swatch) with an opaque yellow box behind
+        # the digits (2026-08-29): Pango's background draws it under
+        # the glyphs, so the row-selection blue underneath is covered
+        # yet the id text stays readable in dark ink on top. Smaller
+        # than the full-row selection (id column only), and on top of
+        # it because the label paints after the row's CSS background.
         fg = "#d9f2ff" if self._selected else "#ffffff"
         # hidden = ONE bright line cairo-drawn edge to edge by
         # _draw_strike (no per-span pango strike: it vanished in
@@ -793,10 +801,17 @@ class LayerRow(object):
             '<span face="monospace" size="small" '
             'foreground="%s">%s</span>'
             % (fg, GLib.markup_escape_text(self._marker)))
-        self._nlbl.set_markup(
-            '<span face="monospace" size="small" '
-            'foreground="%s">%s</span>'
-            % (fg, GLib.markup_escape_text(self._num)))
+        if self._picked:
+            self._nlbl.set_markup(
+                '<span face="monospace" size="small" '
+                'foreground="%s" background="%s">%s</span>'
+                % (LAYER_PICK_FG, LAYER_PICK_BG,
+                   GLib.markup_escape_text(self._num)))
+        else:
+            self._nlbl.set_markup(
+                '<span face="monospace" size="small" '
+                'foreground="%s">%s</span>'
+                % (fg, GLib.markup_escape_text(self._num)))
         self._lbl.set_markup(
             '<span face="monospace" size="small" '
             'foreground="%s">%s</span>'
@@ -806,17 +821,11 @@ class LayerRow(object):
 
     def _draw_strike(self, widget, cr):
         """Hidden layer: one continuous bright line across the FULL
-        row - text, swatch, margins and trailing space alike.
-        A geometry PICK outlines the row with a white 1px box
-        (no fill - 2026-08-22, the filled highlight read as layer
-        selection)."""
+        row - text, swatch, margins and trailing space alike. (The
+        geometry-pick highlight is the yellow id box painted by the
+        number label's Pango background - see _paint, 2026-08-29 -
+        not a row outline.)"""
         alloc = widget.get_allocation()
-        if self._picked:
-            cr.set_source_rgb(1.0, 1.0, 1.0)
-            cr.set_line_width(1)
-            cr.rectangle(0.5, 0.5, alloc.width - 1,
-                         alloc.height - 1)
-            cr.stroke()
         if self._active:
             return False
         y = max(0, (alloc.height - self._row_pad) // 2)
@@ -834,7 +843,7 @@ class LayerRow(object):
         if on == self._picked:
             return
         self._picked = on
-        self.widget.queue_draw()   # outline drawn by _draw_strike
+        self._paint()   # yellow id box via the number-label markup
 
     def set_color(self, color):
         """Palette recolor: rebuild the swatch in place."""
