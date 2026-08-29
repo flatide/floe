@@ -568,12 +568,25 @@ def _remote_x_scroll_repaint(scroller):
     shrink from the top and bottom as you scroll. Invalidating the
     scroller per adjustment tick forces a full repaint of what is
     on screen - the panels hold at most a few dozen visible rows,
-    so the cost is negligible on any display path."""
+    so the cost is negligible on any display path.
+
+    queue_draw alone only SCHEDULES the repaint, and while a
+    scrollbar slider is held the pending redraw can sit behind the
+    drag: after a horizontal offset a vertical drag then looked
+    frozen until the next event (a wheel tick) flushed it. Force the
+    invalidation to paint synchronously so each step lands at once."""
+    def repaint(*_a):
+        scroller.queue_draw()
+        win = scroller.get_window()
+        if win is not None:
+            try:
+                win.process_updates(True)  # paint now, not at idle
+            except (AttributeError, TypeError):
+                pass  # removed in some GTK3 builds; queue_draw stands
     for adj in (scroller.get_vadjustment(),
                 scroller.get_hadjustment()):
         if adj is not None:
-            adj.connect("value-changed",
-                        lambda *_a: scroller.queue_draw())
+            adj.connect("value-changed", repaint)
     try:
         scroller.set_kinetic_scrolling(False)
     except AttributeError:
