@@ -211,6 +211,18 @@ def import_gtk():
             "%s: cannot open display %s (X session not reachable)\n"
             % (APP, os.environ.get("DISPLAY", "")))
         sys.exit(3)
+    # Pin the theme so the UI looks the same on the dev Mac and the
+    # remote-X deployment: HighContrast draws solid, clearly outlined,
+    # always-visible (non-overlay) scrollbars/widgets - far more legible
+    # than the default flat theme (user call 2026-08-29). GTK_THEME= in
+    # the environment still overrides this for anyone who wants another.
+    if not os.environ.get("GTK_THEME"):
+        try:
+            settings = Gtk.Settings.get_default()
+            if settings is not None:
+                settings.set_property("gtk-theme-name", "HighContrast")
+        except (AttributeError, TypeError):
+            pass
 
 
 def fill_rect(buf, x, y, w, h, rgba):
@@ -574,15 +586,29 @@ def _remote_x_scroll_repaint(scroller):
     scrollbar slider is held the pending redraw can sit behind the
     drag: after a horizontal offset a vertical drag then looked
     frozen until the next event (a wheel tick) flushed it. Force the
-    invalidation to paint synchronously so each step lands at once."""
-    def repaint(*_a):
-        scroller.queue_draw()
-        win = scroller.get_window()
+    invalidation to paint synchronously so each step lands at once.
+
+    The scrollbars have their OWN GdkWindows, so the scroller's
+    queue_draw does not repaint the SLIDER: wheeling the content to
+    the very top/bottom left the slider stranded mid-track until the
+    pointer entered the scrollbar and triggered its own redraw.
+    Invalidate the scrollbar widgets explicitly too, and flush each
+    window."""
+    def _flush(widget):
+        if widget is None:
+            return
+        widget.queue_draw()
+        win = widget.get_window()
         if win is not None:
             try:
                 win.process_updates(True)  # paint now, not at idle
             except (AttributeError, TypeError):
                 pass  # removed in some GTK3 builds; queue_draw stands
+
+    def repaint(*_a):
+        _flush(scroller)
+        _flush(scroller.get_vscrollbar())
+        _flush(scroller.get_hscrollbar())
     for adj in (scroller.get_vadjustment(),
                 scroller.get_hadjustment()):
         if adj is not None:
