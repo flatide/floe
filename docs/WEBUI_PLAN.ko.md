@@ -17,6 +17,10 @@
 - 2026-08-28: 폐쇄망에 Firefox는 있다(버전은 감사 필요, §7).
 - 2026-08-29: **데스크톱 앱도 서버-클라이언트 패키징**으로 만든다 —
   같은 스택을 한 머신에 묶은 형태.
+- 2026-08-29: **floe(KLayout backend)에도 적용한다** — gateway 경계를
+  renderd wire가 아니라 GUI-중립 worker 계약(`make_render_worker`
+  job/result)에 두어 두 제품이 같은 웹 셸을 공유한다(§3.1a). rollback
+  스토리(FLOE_PRODUCT 전환)가 웹 셸에서도 유지된다.
 
 ## 1. 목표와 비목표
 
@@ -43,10 +47,11 @@
 ## 2. 아키텍처: 한 스택, 세 배포형
 
 ```
-[공통 스택]   floe-gatewayd ──(기존 wire)── floe-renderd
-                   │ 정적 UI 서빙 + WS + 세션/토큰
-                   ▼
-               HTML UI (canvas 2D)
+[공통 스택]   gateway ──[worker 계약]── RustRenderWorker → floe-renderd   (floe2)
+                 │            └──────── RenderWorker → KLayout+vfsd        (floe)
+                 │ 정적 UI 서빙 + WS + 세션/토큰
+                 ▼
+             HTML UI (canvas 2D)
 
 배포 A  데스크톱 패키징: launcher가 gatewayd+renderd를 함께 기동,
         UI는 로컬 브라우저(firefox --kiosk)로 loopback 접속.
@@ -64,12 +69,27 @@
 
 ## 3. 컴포넌트
 
-### 3.1 floe-gatewayd (신규, Rust)
+### 3.1 gateway (신규)
 
-- 역할: 정적 UI 자산 서빙, WS ↔ renderd wire 프록시, 세션·토큰,
+- 역할: 정적 UI 자산 서빙, WS ↔ **worker 계약** 브리지, 세션·토큰,
   수명주기. **얇게 유지한다** — 뷰 로직을 넣지 않는다.
-- 의존성은 전부 `vendor/` 동봉(기존 빌드 정책: 빌드 중 네트워크 0).
-  HTTP/WS는 최소 구현 크레이트를 vendored로 선정한다.
+- **경계는 `make_render_worker`의 job/result 계약이다**(3.1a). 이
+  계약은 GTK gui.py가 두 backend를 구분 없이 구동해 온 검증된
+  GUI-중립 인터페이스로, 여기 두면 floe/floe2가 같은 웹 셸을 쓰고
+  T0 전송은 양쪽 모두 무수정으로 성립한다.
+
+#### 3.1a 단계별 구현체
+
+- **M1~M2: Python gateway**(floe 패키지 내부, stdlib만 — WS는 RFC6455
+  최소 구현). worker 계약 직결이라 두 제품 동시 지원이 즉시 성립하고
+  vendored HTTP 크레이트 선정이 불필요하다. T0/T1(PNG 셔틀)에는 성능
+  충분.
+- **T2/T3 시점: Rust gatewayd**로 이관(floe2 전용 구간). 의존성은
+  전부 `vendor/` 동봉(기존 빌드 정책: 빌드 중 네트워크 0), HTTP/WS는
+  최소 구현 크레이트를 vendored로 선정한다.
+- backend별 capability는 handshake로 협상한다: T2 raw RGBA와 T3
+  world-tile은 floe2 전용(KLayout LayoutView는 전체 viewport 렌더라
+  T3 불가), floe는 T0/T1로 동작.
 - 버전은 floe/cli/renderd와 동일 스탬프 체계로 묶고(`--version`,
   시작 스탬프), **UI 자산은 반드시 자기 번들의 것만 서빙**해 UI ↔
   gateway ↔ renderd 버전 skew를 원천 차단한다.
@@ -112,8 +132,11 @@
 |---|---|---|
 | T0 | 현행 PNG 파일 publish를 gateway가 읽어 WS로 전달 | renderd 무변경, M1 범위 |
 | T1 | renderd→gateway 직접 스트림(PNG) | 파일 publish/fsync 제거 |
-| T2 | loopback 한정 raw RGBA | PNG encode(실측 24~206ms) 생략, 배포 A/B 이득 |
-| T3 | world-tile 단위 delta + 클라이언트 tile 캐시 | F2R-10/11 합류 지점. 인접 pan의 draw 재지불을 클라이언트 합성으로 흡수 |
+| T2 | loopback 한정 raw RGBA | PNG encode(실측 24~206ms) 생략, 배포 A/B 이득. **floe2 전용** |
+| T3 | world-tile 단위 delta + 클라이언트 tile 캐시 | F2R-10/11 합류 지점. 인접 pan의 draw 재지불을 클라이언트 합성으로 흡수. **floe2 전용** |
+
+- T0은 floe(KLayout `save_image` PNG)와 floe2 모두 무수정 동작 —
+  backend 중립의 기준선.
 
 - T0→T1→T2는 배포형별 협상(capability handshake)으로 공존 가능하게.
 - T3의 tile key는 F2R-03b 2c 설계가 남겨둔 world/scale 정렬 키를
