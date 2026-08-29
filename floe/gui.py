@@ -589,11 +589,18 @@ def _remote_x_scroll_repaint(scroller):
     invalidation to paint synchronously so each step lands at once.
 
     The scrollbars have their OWN GdkWindows, so the scroller's
-    queue_draw does not repaint the SLIDER: wheeling the content to
-    the very top/bottom left the slider stranded mid-track until the
-    pointer entered the scrollbar and triggered its own redraw.
-    Invalidate the scrollbar widgets explicitly too, and flush each
-    window."""
+    queue_draw does not repaint the SLIDER. And a synchronous flush
+    on EVERY tick backfires on a fast wheel burst: the content
+    (adjustment value) lands correctly but the rapid per-tick paints
+    coalesce and the slider's FINAL frame is dropped - it freezes
+    mid-track until the pointer enters the scrollbar (user report
+    2026-08-29, GTK3-Quartz). So each tick only INVALIDATES cheaply,
+    and a short debounce forces one authoritative synchronous repaint
+    once the burst settles, which always lands the final slider."""
+    bars = (lambda: (scroller, scroller.get_vscrollbar(),
+                     scroller.get_hscrollbar()))
+    settle = {"id": 0}
+
     def _flush(widget):
         if widget is None:
             return
@@ -605,10 +612,23 @@ def _remote_x_scroll_repaint(scroller):
             except (AttributeError, TypeError):
                 pass  # removed in some GTK3 builds; queue_draw stands
 
+    def _settled():
+        settle["id"] = 0
+        for w in bars():
+            _flush(w)
+        return False  # one-shot
+
     def repaint(*_a):
-        _flush(scroller)
-        _flush(scroller.get_vscrollbar())
-        _flush(scroller.get_hscrollbar())
+        # cheap per-tick invalidation keeps slow scrolling smooth
+        for w in bars():
+            if w is not None:
+                w.queue_draw()
+        # ...and a debounced synchronous repaint guarantees the final
+        # slider position after a fast burst, without hammering
+        # process_updates on every tick (which drops the last frame)
+        if settle["id"]:
+            GLib.source_remove(settle["id"])
+        settle["id"] = GLib.timeout_add(40, _settled)
     for adj in (scroller.get_vadjustment(),
                 scroller.get_hadjustment()):
         if adj is not None:
