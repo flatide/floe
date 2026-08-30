@@ -235,13 +235,26 @@ print(json.dumps([_renderer_backend(), instance.APP,
           "portable permits a mismatched Rust binary override")
     package_version = run(
         base, "-c", "import floe; print(floe.__version__)").stdout.strip()
+    renderd_expected = run(
+        base, "-c",
+        "import floe; print(floe.RENDERD_VERSION)").stdout.strip()
     index_version = cargo_package_version(ROOT / "rust" / "cli" /
                                           "Cargo.toml")
     renderd_version = cargo_package_version(ROOT / "rust" / "renderd" /
                                             "Cargo.toml")
-    check(package_version == index_version == renderd_version,
-          "floe/index/renderd version mismatch: %s/%s/%s" %
-          (package_version, index_version, renderd_version))
+    # the renderd handshake guard compares RENDERD_VERSION to the built
+    # binary, so it must equal both Rust package versions (2026-08-30)
+    check(renderd_expected == index_version == renderd_version,
+          "RENDERD_VERSION/index/renderd mismatch: %s/%s/%s" %
+          (renderd_expected, index_version, renderd_version))
+
+    def _ver(s):
+        return tuple(int(p) for p in s.split(".") if p.isdigit())
+    # __version__ is the display version (bumped every push); it must
+    # never regress below the Rust binary version
+    check(_ver(package_version) >= _ver(renderd_expected),
+          "__version__ %s is behind RENDERD_VERSION %s" %
+          (package_version, renderd_expected))
     portable_name = subprocess.run(
         ["bash", str(portable), "--print-name"], cwd=ROOT, env=base,
         capture_output=True, text=True, timeout=10)

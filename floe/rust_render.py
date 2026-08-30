@@ -15,7 +15,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import __version__
+from . import RENDERD_VERSION
 
 
 _DEFAULT_JOBS = max(1, min(8, os.cpu_count() or 1))
@@ -638,11 +638,11 @@ class RustRenderWorker:
     def _handle_line(self, kind, fields, line):
         if kind == "ready":
             renderd_version = fields.get("version")
-            if renderd_version != __version__:
+            if renderd_version != RENDERD_VERSION:
                 self._set_startup_error(
                     "floe-renderd version mismatch: expected %s, got %s "
                     "(%s); rebuild or replace the Rust binaries" % (
-                        __version__, renderd_version or "missing",
+                        RENDERD_VERSION, renderd_version or "missing",
                         self._binary))
                 return
             with self._condition:
