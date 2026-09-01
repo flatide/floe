@@ -251,6 +251,10 @@ struct RenderCommand {
     decode_pages: Option<usize>,
     round_pages: usize,
     unique_round_paths: bool,
+    /// Publish the frame as raw RGBA (`FLOERAW1` header) instead of PNG.
+    /// The interactive GUI path skips both the encode here and the decode
+    /// on its side; PNG stays the default for export/oracle consumers.
+    raw_frame: bool,
     style_epoch: Option<u64>,
     out: String,
 }
@@ -348,6 +352,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                     "decode_pages",
                     "round_pages",
                     "round_paths",
+                    "frame_format",
                     "style_epoch",
                     "out",
                 ],
@@ -394,6 +399,13 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
             if round_pages == 0 {
                 return Err("round_pages must be positive".to_string());
             }
+            let raw_frame = match fields.get("frame_format").map(String::as_str) {
+                None | Some("png") => false,
+                Some("raw") => true,
+                Some(other) => {
+                    return Err(format!("frame_format must be png or raw: {other}"));
+                }
+            };
             Ok(Some(InputCommand::Worker(WorkerCommand::Render(
                 RenderCommand {
                     generation: required_parse(&fields, "gen")?,
@@ -415,6 +427,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                     decode_pages: optional_parse(&fields, "decode_pages")?,
                     round_pages,
                     unique_round_paths: optional_bool(&fields, "round_paths")?.unwrap_or(false),
+                    raw_frame,
                     style_epoch: optional_parse(&fields, "style_epoch")?,
                     out: required(&fields, "out")?.to_string(),
                 },
@@ -607,7 +620,7 @@ fn validate_jobs(jobs: u16) -> Result<(), String> {
 struct WorkerState {
     cache: Option<Cache>,
     page_cache: DecodedPageCache,
-    frame_cache: FramePngCache,
+    frame_cache: FrameCache,
     jobs: u16,
     styles: Vec<LayerStyle>,
     style_epoch: Option<u64>,
@@ -618,7 +631,7 @@ impl Default for WorkerState {
         Self {
             cache: None,
             page_cache: DecodedPageCache::new(DEFAULT_BUDGET_MB * 1024 * 1024),
-            frame_cache: FramePngCache::default(),
+            frame_cache: FrameCache::default(),
             jobs: DEFAULT_JOBS,
             styles: Vec::new(),
             style_epoch: None,
@@ -640,6 +653,8 @@ struct FrameCacheKey {
     label_font_px: u32,
     mono: bool,
     decode_pages: Option<usize>,
+    /// Raw and PNG payloads are not interchangeable on a hit.
+    raw_frame: bool,
     style_epoch: Option<u64>,
 }
 
@@ -658,25 +673,28 @@ impl FrameCacheKey {
             label_font_px: command.label_font_px.to_bits(),
             mono: command.mono,
             decode_pages: command.decode_pages,
+            raw_frame: command.raw_frame,
             style_epoch,
         }
     }
 }
 
+/// One settled published frame payload: PNG bytes or a `FLOERAW1` raw
+/// RGBA payload, exactly as published (the cache key records which).
 #[derive(Clone)]
-struct CachedFramePng {
-    png: Arc<Vec<u8>>,
+struct CachedFrame {
+    payload: Arc<Vec<u8>>,
     labels_truncated: bool,
 }
 
 #[derive(Default)]
-struct FramePngCache {
-    entries: Vec<(FrameCacheKey, CachedFramePng)>,
+struct FrameCache {
+    entries: Vec<(FrameCacheKey, CachedFrame)>,
     bytes: usize,
 }
 
-impl FramePngCache {
-    fn get(&mut self, key: &FrameCacheKey) -> Option<CachedFramePng> {
+impl FrameCache {
+    fn get(&mut self, key: &FrameCacheKey) -> Option<CachedFrame> {
         let index = self
             .entries
             .iter()
@@ -687,8 +705,8 @@ impl FramePngCache {
         Some(value)
     }
 
-    fn insert(&mut self, key: FrameCacheKey, value: CachedFramePng) {
-        if value.png.len() > MAX_FRAME_CACHE_BYTES {
+    fn insert(&mut self, key: FrameCacheKey, value: CachedFrame) {
+        if value.payload.len() > MAX_FRAME_CACHE_BYTES {
             return;
         }
         if let Some(index) = self
@@ -697,13 +715,13 @@ impl FramePngCache {
             .position(|(candidate, _)| candidate == &key)
         {
             let (_, old) = self.entries.remove(index);
-            self.bytes = self.bytes.saturating_sub(old.png.len());
+            self.bytes = self.bytes.saturating_sub(old.payload.len());
         }
-        self.bytes = self.bytes.saturating_add(value.png.len());
+        self.bytes = self.bytes.saturating_add(value.payload.len());
         self.entries.push((key, value));
         while self.entries.len() > MAX_CACHED_FRAMES || self.bytes > MAX_FRAME_CACHE_BYTES {
             let (_, evicted) = self.entries.remove(0);
-            self.bytes = self.bytes.saturating_sub(evicted.png.len());
+            self.bytes = self.bytes.saturating_sub(evicted.payload.len());
         }
     }
 
@@ -714,7 +732,7 @@ impl FramePngCache {
 }
 
 struct FramePixels {
-    png: Arc<Vec<u8>>,
+    payload: Arc<Vec<u8>>,
     frame_cache_hit: bool,
     raster_us: u64,
     raster_tile_max_us: u64,
@@ -1422,7 +1440,7 @@ fn run_render(
 
         let pixels = if let Some(cached) = cached_frame.as_ref() {
             FramePixels {
-                png: Arc::clone(&cached.png),
+                payload: Arc::clone(&cached.payload),
                 frame_cache_hit: true,
                 raster_us: 0,
                 raster_tile_max_us: 0,
@@ -1479,10 +1497,18 @@ fn run_render(
             };
             check_generation(cancellation, command.generation)?;
             let png_started = Instant::now();
-            let png = Arc::new(report.frame.png_bytes()?);
+            let payload = if command.raw_frame {
+                Arc::new(raw_frame_payload(
+                    report.frame.width(),
+                    report.frame.height(),
+                    report.frame.pixels(),
+                ))
+            } else {
+                Arc::new(report.frame.png_bytes()?)
+            };
             let png_us = elapsed_us(png_started);
             FramePixels {
-                png,
+                payload,
                 frame_cache_hit: false,
                 raster_us: report.stats.raster_us,
                 raster_tile_max_us: report.stats.raster_tile_max_us,
@@ -1509,18 +1535,19 @@ fn run_render(
         let final_round = round_index + 1 == rounds.len();
         let published_output = if command.unique_round_paths && !final_round {
             format!(
-                "{}.gen-{}.round-{}.partial.png",
+                "{}.gen-{}.round-{}.partial.{}",
                 command.out,
                 command.generation,
-                round_index + 1
+                round_index + 1,
+                if command.raw_frame { "raw" } else { "png" }
             )
         } else {
             command.out.clone()
         };
-        let publish_stats = publish_png(
+        let publish_stats = publish_frame(
             &published_output,
             command.generation,
-            pixels.png.as_slice(),
+            pixels.payload.as_slice(),
             cancellation,
         )?;
         // A successful rename is the generation's linearization point. A
@@ -1539,8 +1566,8 @@ fn run_render(
         if final_round && command.frame_cache && !pixels.frame_cache_hit {
             state.frame_cache.insert(
                 frame_cache_key.clone(),
-                CachedFramePng {
-                    png: Arc::clone(&pixels.png),
+                CachedFrame {
+                    payload: Arc::clone(&pixels.payload),
                     labels_truncated: pixels.labels_truncated,
                 },
             );
@@ -1549,11 +1576,12 @@ fn run_render(
         respond(
             responses,
             format!(
-                "frame gen={} round={} final={} png={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} bin_items={} bin_overflow={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={}",
+                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} bin_items={} bin_overflow={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={}",
                 command.generation,
                 round_index + 1,
                 final_round as u8,
                 published_output,
+                if command.raw_frame { "raw" } else { "png" },
                 pixels.partial as u8,
                 scene.deferred_pages().len(),
                 pixels.frame_cache_hit as u8,
@@ -1816,7 +1844,21 @@ struct PublishStats {
     rename_us: u64,
 }
 
-fn publish_png(
+/// Wire header of a raw published frame: magic, then width and height as
+/// little-endian u32. The pixels follow as tightly packed RGBA rows.
+const RAW_FRAME_MAGIC: &[u8; 8] = b"FLOERAW1";
+
+fn raw_frame_payload(width: u32, height: u32, pixels: &[u8]) -> Vec<u8> {
+    debug_assert_eq!(pixels.len(), width as usize * height as usize * 4);
+    let mut payload = Vec::with_capacity(RAW_FRAME_MAGIC.len() + 8 + pixels.len());
+    payload.extend_from_slice(RAW_FRAME_MAGIC);
+    payload.extend_from_slice(&width.to_le_bytes());
+    payload.extend_from_slice(&height.to_le_bytes());
+    payload.extend_from_slice(pixels);
+    payload
+}
+
+fn publish_frame(
     output: &str,
     generation: u64,
     bytes: &[u8],
@@ -2215,11 +2257,11 @@ mod tests {
             .unwrap(),
         );
         let base = FrameCacheKey::new(&command, Some(7));
-        let value = |byte| CachedFramePng {
-            png: Arc::new(vec![byte; 8]),
+        let value = |byte| CachedFrame {
+            payload: Arc::new(vec![byte; 8]),
             labels_truncated: false,
         };
-        let mut cache = FramePngCache::default();
+        let mut cache = FrameCache::default();
         let mut keys = Vec::new();
         for offset in 0..3 {
             let mut key = base.clone();
@@ -2241,6 +2283,44 @@ mod tests {
         other_font.label_font_px = 15.0f32.to_bits();
         assert_ne!(base, other_font);
         assert_ne!(base, FrameCacheKey::new(&command, Some(8)));
+
+        // A raw payload must never satisfy a PNG request or vice versa.
+        let mut raw_command = command;
+        raw_command.raw_frame = true;
+        assert_ne!(base, FrameCacheKey::new(&raw_command, Some(7)));
+    }
+
+    #[test]
+    fn frame_format_selects_raw_payloads_and_rejects_unknown_values() {
+        let command = render(
+            parse_command(
+                "render gen=1 view=0,0,1,1 w=4 h=3 frames=off frame_format=raw out=/tmp/a.raw",
+            )
+            .unwrap()
+            .unwrap(),
+        );
+        assert!(command.raw_frame);
+        let default_command = render(
+            parse_command("render gen=1 view=0,0,1,1 w=4 h=3 frames=off out=/tmp/a.png")
+                .unwrap()
+                .unwrap(),
+        );
+        assert!(!default_command.raw_frame);
+        assert!(parse_command(
+            "render gen=1 view=0,0,1,1 w=4 h=3 frames=off frame_format=bmp out=/tmp/a.bmp"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn raw_frame_payload_is_header_plus_packed_rgba() {
+        let pixels: Vec<u8> = (0..4u32 * 3 * 4).map(|value| value as u8).collect();
+        let payload = raw_frame_payload(4, 3, &pixels);
+        assert_eq!(&payload[..8], RAW_FRAME_MAGIC);
+        assert_eq!(u32::from_le_bytes(payload[8..12].try_into().unwrap()), 4);
+        assert_eq!(u32::from_le_bytes(payload[12..16].try_into().unwrap()), 3);
+        assert_eq!(&payload[16..], pixels.as_slice());
+        assert_eq!(payload.len(), 16 + 4 * 3 * 4);
     }
 
     #[test]
@@ -2300,7 +2380,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let output = dir.join("frame.png");
         let cancellation = RenderCancellation::new();
-        publish_png(output.to_str().unwrap(), 4, b"png-bytes", &cancellation).unwrap();
+        publish_frame(output.to_str().unwrap(), 4, b"png-bytes", &cancellation).unwrap();
         assert_eq!(std::fs::read(&output).unwrap(), b"png-bytes");
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         std::fs::remove_file(output).unwrap();
@@ -2319,7 +2399,7 @@ mod tests {
         std::fs::remove_file(clip_output).unwrap();
 
         cancellation.cancel_before(5);
-        assert!(publish_png(
+        assert!(publish_frame(
             dir.join("stale.png").to_str().unwrap(),
             4,
             b"must-not-publish",

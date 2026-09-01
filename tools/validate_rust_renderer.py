@@ -20,6 +20,8 @@ from floe.rust_render import (  # noqa: E402
     RustRenderWorker,
     _parse_wire_line,
     _pattern_fill,
+    _RAW_HEADER_LEN,
+    _RAW_SIGNATURE,
 )
 
 
@@ -473,16 +475,29 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertIn("frame_cache=1", commands[0])
             self.assertIn("labels=0", commands[0])
             self.assertIn("font_px=22", commands[0])
+            # the interactive default skips the PNG codec on both sides
+            self.assertIn("frame_format=raw", commands[0])
             fallback_job = dict(job, gen=8)
             fallback_job.pop("label_font_px")
             worker._submit_render(fallback_job)
             self.assertIn("font_px=18", commands[1])
+            # headless consumers (CLI export, DRC sheets) pin real PNG
+            # bytes per job over the interactive raw default
+            worker._submit_render(dict(job, gen=10, frame_format="png"))
+            self.assertIn("frame_format=png", commands[2])
+            self.assertIn("frame-10.png", commands[2])
+            with self.assertRaisesRegex(ValueError, "raw or png"):
+                worker._submit_render(dict(job, gen=11, frame_format="bmp"))
 
-            png_path = os.path.join(directory, "frame-7.png")
-            with open(png_path, "wb") as frame:
-                frame.write(b"\x89PNG\r\n\x1a\nfixture")
+            raw_pixels = b"\x12\x34\x56\xff" * (20 * 10)
+            raw_path = os.path.join(directory, "frame-7.raw")
+            with open(raw_path, "wb") as frame:
+                frame.write(_RAW_SIGNATURE)
+                frame.write((20).to_bytes(4, "little"))
+                frame.write((10).to_bytes(4, "little"))
+                frame.write(raw_pixels)
             worker._emit_frame({
-                "gen": "7", "png": png_path, "partial": "0",
+                "gen": "7", "png": raw_path, "format": "raw", "partial": "0",
                 "deferred": "0", "final": "1", "plan_pages": "2",
                 "pages": "2", "cache_miss": "2", "plan_us": "1000",
                 "read_us": "2000", "decode_us": "3000",
@@ -503,6 +518,9 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             })
             result = worker.res.get_nowait()
             self.assertEqual(result["kind"], "frame")
+            self.assertEqual(result["frame_format"], "raw")
+            self.assertEqual(result["rgba"], raw_pixels)
+            self.assertNotIn("png", result)
             self.assertEqual(result["bbox"], job["bbox"])
             self.assertEqual(result["tiles"], 2)
             self.assertEqual(result["new"], 2)
@@ -536,22 +554,93 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertNotIn("labels_truncated", result)
             self.assertNotIn("drawn", result)
             self.assertNotIn("refining", result)
-            self.assertFalse(os.path.exists(png_path))
+            self.assertFalse(os.path.exists(raw_path))
 
             partial_job = dict(job, gen=9)
             worker._submit_render(partial_job)
             partial_path = os.path.join(
-                directory, "frame-9.png.gen-9.round-1.partial.png")
+                directory, "frame-9.raw.gen-9.round-1.partial.raw")
             with open(partial_path, "wb") as frame:
-                frame.write(b"\x89PNG\r\n\x1a\npartial")
+                frame.write(_RAW_SIGNATURE)
+                frame.write((20).to_bytes(4, "little"))
+                frame.write((10).to_bytes(4, "little"))
+                frame.write(raw_pixels)
             worker._emit_frame({
-                "gen": "9", "png": partial_path, "partial": "1",
+                "gen": "9", "png": partial_path, "format": "raw",
+                "partial": "1",
                 "deferred": "0", "final": "0", "pages": "1",
             })
             partial = worker.res.get_nowait()
             self.assertEqual(partial["refining"], 1)
             self.assertIn(9, worker._jobs)
             self.assertFalse(os.path.exists(partial_path))
+
+    def test_raw_frame_kill_switch_restores_png_frames(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = os.path.join(directory, "floe-renderd")
+            with open(binary, "w", encoding="ascii") as script:
+                script.write("#!/bin/sh\n")
+            os.chmod(binary, 0o755)
+            with mock.patch.dict(os.environ, {
+                "FLOE_RENDERD_BIN": binary,
+                "FLOE_RUST_RAW_FRAME": "off",
+            }, clear=False):
+                worker = RustRenderWorker(FakeCache(directory))
+            worker._work_dir = directory
+            commands = []
+            worker._send = commands.append
+            worker._submit_render({
+                "kind": "render", "gen": 7, "bbox": (0.0, 0.0, 4.0, 2.0),
+                "w": 4, "h": 2, "depth": None, "cut_px": 0.0,
+                "visible": None, "frames": False, "labels": False,
+            })
+            self.assertIn("frame_format=png", commands[0])
+            png_path = os.path.join(directory, "frame-7.png")
+            with open(png_path, "wb") as frame:
+                frame.write(b"\x89PNG\r\n\x1a\nfixture")
+            worker._emit_frame({
+                "gen": "7", "png": png_path, "format": "png",
+                "partial": "0", "deferred": "0", "final": "1",
+                "pages": "1",
+            })
+            result = worker.res.get_nowait()
+            self.assertEqual(result["frame_format"], "png")
+            self.assertEqual(result["png"], b"\x89PNG\r\n\x1a\nfixture")
+            self.assertNotIn("rgba", result)
+            self.assertFalse(os.path.exists(png_path))
+
+    def test_truncated_raw_frame_is_reported_as_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = os.path.join(directory, "floe-renderd")
+            with open(binary, "w", encoding="ascii") as script:
+                script.write("#!/bin/sh\n")
+            os.chmod(binary, 0o755)
+            with mock.patch.dict(os.environ, {
+                "FLOE_RENDERD_BIN": binary,
+            }, clear=False):
+                worker = RustRenderWorker(FakeCache(directory))
+            worker._work_dir = directory
+            worker._send = lambda command: None
+            worker._submit_render({
+                "kind": "render", "gen": 3, "bbox": (0.0, 0.0, 4.0, 2.0),
+                "w": 4, "h": 2, "depth": None, "cut_px": 0.0,
+                "visible": None, "frames": False, "labels": False,
+            })
+            raw_path = os.path.join(directory, "frame-3.raw")
+            with open(raw_path, "wb") as frame:
+                frame.write(_RAW_SIGNATURE)
+                frame.write((4).to_bytes(4, "little"))
+                frame.write((2).to_bytes(4, "little"))
+                frame.write(b"\x00" * (4 * 2 * 4 - 1))
+            worker._emit_frame({
+                "gen": "3", "png": raw_path, "format": "raw",
+                "partial": "0", "deferred": "0", "final": "1",
+            })
+            result = worker.res.get_nowait()
+            self.assertEqual(result["kind"], "error")
+            self.assertIn("truncated", result["msg"])
+            self.assertNotIn(3, worker._jobs)
+            self.assertFalse(os.path.exists(raw_path))
 
     def test_refinement_off_overrides_rust_round_tuning(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -811,18 +900,19 @@ class RealDaemonIntegrationTests(unittest.TestCase):
             self.assertTrue(first_frames[0].get("refining"))
             self.assertNotIn("refining", first_frames[-1])
             self.assertGreater(first_frames[-1]["tiles"], 4)
-            first_png = first_frames[-1]["png"]
+            first_payload = self._frame_payload(first_frames[-1])
 
             # An exact revisit rebuilds/publishes the query scene from the
-            # decoded-page LRU but reuses the bounded final PNG. Raster and
-            # PNG encode must both disappear without weakening pick/snap.
+            # decoded-page LRU but reuses the bounded final payload. Raster
+            # and encode must both disappear without weakening pick/snap.
             worker.submit(dict(base_job, gen=2))
             revisited = self._frames_through_settled(worker, 2)
             self.assertEqual(len(revisited), 1)
             self.assertEqual(revisited[0].get("frame_cache_hit"), 1)
             self.assertEqual(revisited[0].get("raster_ms"), 0.0)
             self.assertEqual(revisited[0].get("png_ms"), 0.0)
-            self.assertEqual(revisited[0]["png"], first_png)
+            self.assertEqual(self._frame_payload(revisited[0]),
+                             first_payload)
             self._assert_query_parity(cache, worker, bbox)
             self._assert_clip_parity(cache, worker, bbox)
 
@@ -833,7 +923,8 @@ class RealDaemonIntegrationTests(unittest.TestCase):
             self.assertEqual(len(uncached), 1)
             self.assertEqual(uncached[0].get("frame_cache_hit"), 0)
             self.assertGreater(uncached[0].get("raster_ms", 0.0), 0.0)
-            self.assertEqual(uncached[0]["png"], first_png)
+            self.assertEqual(self._frame_payload(uncached[0]),
+                             first_payload)
 
             solid = "\n".join(["*" * 16] * 16)
             worker.submit({
@@ -850,7 +941,8 @@ class RealDaemonIntegrationTests(unittest.TestCase):
                 base_job, gen=4, depth=3, frames=True, labels=True)
             worker.submit(second_job)
             second_frames = self._frames_through_settled(worker, 4)
-            self.assertNotEqual(second_frames[-1]["png"], first_png)
+            self.assertNotEqual(self._frame_payload(second_frames[-1]),
+                                first_payload)
             self.assertIn("labels", second_frames[-1])
             self.assertNotIn("labels_truncated", second_frames[-1])
             if second_frames[-1]["labels"]:
@@ -878,6 +970,8 @@ class RealDaemonIntegrationTests(unittest.TestCase):
             self.assertTrue(burst_frames)
             self.assertFalse(list(Path(worker._work_dir).glob(
                 "*.partial.png")))
+            self.assertFalse(list(Path(worker._work_dir).glob(
+                "*.partial.raw")))
             self.assertFalse(worker._jobs)
         finally:
             worker.stop()
@@ -979,6 +1073,14 @@ class RealDaemonIntegrationTests(unittest.TestCase):
                 int.from_bytes(png[20:24], "big"), expected_height)
             self.assertFalse(list(Path(directory).glob(
                 ".*.floe-render-*")))
+
+    def _frame_payload(self, frame):
+        """Frame bytes independent of the raw/png transport default."""
+        payload = frame.get("rgba")
+        if payload is None:
+            payload = frame.get("png")
+        self.assertTrue(payload)
+        return payload
 
     @staticmethod
     def _frames_through_settled(worker, generation,

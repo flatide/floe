@@ -21,6 +21,14 @@
   renderd wire가 아니라 GUI-중립 worker 계약(`make_render_worker`
   job/result)에 두어 두 제품이 같은 웹 셸을 공유한다(§3.1a). rollback
   스토리(FLOE_PRODUCT 전환)가 웹 셸에서도 유지된다.
+- 2026-09-02: **T2의 raw RGBA payload가 제품 GTK 경로에 선구현됨** —
+  F2R-13(FLOE2_OPTIMIZATION §3.16/§F2R-13, 0.12.26): renderd
+  `frame_format=raw`가 `FLOERAW1`(magic+u32le w/h+packed RGBA)를
+  기존 원자적 publish 계약으로 게시하고 GTK가 무디코드 표시. T2
+  gateway는 이 payload를 재인코드 없이 스트리밍하면 된다. 별개로
+  T3의 전제였던 F2R-10 world-tile은 **조건부 보류**(fill 위상이
+  device-anchored라 byte-exact tile 재사용은 F2R-03c 1bpp plane
+  선행 — §3.16 판정).
 
 ## 1. 목표와 비목표
 
@@ -132,8 +140,8 @@
 |---|---|---|
 | T0 | 현행 PNG 파일 publish를 gateway가 읽어 WS로 전달 | renderd 무변경, M1 범위 |
 | T1 | renderd→gateway 직접 스트림(PNG) | 파일 publish/fsync 제거 |
-| T2 | loopback 한정 raw RGBA | PNG encode(실측 24~206ms) 생략, 배포 A/B 이득. **floe2 전용** |
-| T3 | world-tile 단위 delta + 클라이언트 tile 캐시 | F2R-10/11 합류 지점. 인접 pan의 draw 재지불을 클라이언트 합성으로 흡수. **floe2 전용** |
+| T2 | loopback 한정 raw RGBA | PNG encode(실측 24~206ms) 생략, 배포 A/B 이득. **floe2 전용**. payload는 F2R-13의 `FLOERAW1`(0.12.26 제품 구현) 재사용 |
+| T3 | world-tile 단위 delta + 클라이언트 tile 캐시 | F2R-10/11 합류 지점. 인접 pan의 draw 재지불을 클라이언트 합성으로 흡수. **floe2 전용, 조건부 보류**(F2R-03c 선행 — FLOE2_OPTIMIZATION §3.16) |
 
 - T0은 floe(KLayout `save_image` PNG)와 floe2 모두 무수정 동작 —
   backend 중립의 기준선.

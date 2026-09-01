@@ -600,6 +600,42 @@ per-member로는 KLayout ~175ns/member(12.9M/2252ms) vs floe2 추정
 ~280ns(누적 ~39M member-paint/10918ms) — round 정리 후 남는 격차는
 2c·F2R-03c(1bpp plane) 영역이다.
 
+### 3.16 실칩 pan 실측 — F2R-10 종결과 F2R-13 착수 (2026-09-01~02)
+
+**실칩 pan 실측(2026-09-01, 사용자)**: 같은 뷰에서 상하좌우로 화면의
+20%씩 이동하는 pan에서 **floe2 draw가 floe보다 약간 빠름**. §3.12
+sample9 sweep과 부호가 일치하며, 이것으로 F2R-10의 두 판정 축이 모두
+실칩에서 닫혔다 — load 축은 §3.15(9.5배 우세), draw 축은 이 실측.
+최초 현장 관찰("인접 pan 열세")의 재현 실패가 실칩에서 확정됐다.
+
+**world-tile LRU 기각(2026-09-01 코드 판정)**: 경쟁 축이 닫힌 뒤
+남는 동기는 절대 지연(20% pan에서 픽셀의 ~80%가 재사용 가능한데
+전체 viewport를 다시 raster)뿐인데, 구현 검토 결과 RGBA tile 캐시는
+**자체 수용 gate(byte 동일)를 통과할 수 없다** — fill 위상이
+device-anchored라(checkerboard는 device (x+y) parity, KLayout stipple
+은 framebuffer height·device row로 위상화 — `LayerFill` 계약) 임의
+pan 뒤 재사용 tile은 fresh raster와 stipple 위상이 어긋난다.
+byte-exact 재사용은 world-순수 중간 표현(plane별 1bpp coverage/
+outline mask)을 캐시하고 합성 시 device 위상 fill을 다시 적용하는
+구조여야 하며, 이는 **F2R-03c(1bpp plane) 재작업이 선행**이라는
+뜻이다. F2R-03c 착수 기준이 미충족이므로 world-tile도 함께 보류.
+재개 조건: F2R-03c가 실측 기준으로 착수되고 pan 절대 지연이 실칩
+UX 문제로 지목될 때. WEBUI_PLAN의 T3(world-tile delta 전송)도 같은
+조건에 묶인다.
+
+**F2R-13 착수(2026-09-02)**: 남은 무조건부 지렛대 중 최대는
+인터랙티브 frame 왕복의 PNG 코덱이다. §3.15 최종 라인(1,667ms)의
+분해에서 raster(~1.1s)는 이미 frames-off floe draw(1,101ms)와
+동률이고, 잔여 ~135ms(png 인코드+publish+adapter read)와 GUI 주
+스레드의 PixbufLoader PNG 디코드(미계측, 수십 ms급)가 매 인터랙티브
+frame의 고정 비용이다(0.12.19 최초 계측에선 png 인코드만 206ms).
+구현(0.12.26): renderd가 `frame_format=raw`에서 PNG 인코드 대신
+`FLOERAW1` 헤더(magic+u32le w/h)+packed RGBA를 같은 원자적 publish
+계약으로 게시하고, GUI는 `Pixbuf.new_from_bytes`로 디코드 없이
+표시한다. 상세와 gate는 §F2R-13. 기대: 매 pan/zoom/style frame에서
+~0.1~0.2초 절감 + 주 스레드 디코드 제거. **실칩 재측정 대기** —
+perf 라인이 `png` 대신 `raw N.Nms`를 찍으면 새 경로다.
+
 ## 4. 이슈 목록
 
 | ID | 우선순위 | 상태 | 요약 | 다음 판정 |
@@ -613,9 +649,10 @@ per-member로는 KLayout ~175ns/member(12.9M/2252ms) vs floe2 추정
 | F2R-07 | P1 | `DONE` | OVC coverage post-composite 회귀 | 제품 경로 제거 gate 유지 |
 | F2R-08 | P1 | `DONE` | exact 재방문도 full raster/PNG 반복 | bounded PNG+scene 복원 gate 완료 |
 | F2R-09 | P1 | `DONE` | 대형 cold 뷰에서 refinement 왕복이 draw를 ~3배로 | cost-aware collapse 구현(500ms 예산, §3.15) — 실칩 재측정 대기 |
-| F2R-10 | P1 | `OPEN` | exact 밖 인접 pan은 full viewport raster | 실체는 load 재사용(관찰 갱신); 실칩 sweep의 load 축으로 판정 |
-| F2R-11 | P2 | `DESIGN` | page-round refinement가 누적 full PNG 반복 | final-tile streaming 채택 여부 결정 |
+| F2R-10 | P1 | `CLOSED` | exact 밖 인접 pan은 full viewport raster | 실칩 pan 실측으로 경쟁 축 해소(§3.16); world-tile은 F2R-03c 선행 조건부 |
+| F2R-11 | P2 | `DESIGN` | page-round refinement가 누적 full PNG 반복 | 기본 no-refinement로 동기 약화; final-tile streaming은 보류 |
 | F2R-12 | P1 | `DOING` | KLayout single-core parity와 Rust serial 기준선 | sample9 gate 통과 124%(§3.12); 실칩 p50/p95 남음 |
+| F2R-13 | P1 | `DONE` | 인터랙티브 frame의 PNG 인코드/디코드 왕복 | raw RGBA handoff 구현(0.12.26, §3.16) — 실칩 재측정 대기 |
 
 ## 5. 상세 이슈와 수용 기준
 
@@ -943,7 +980,7 @@ CLI/UI/request/Rust worker에서 제거했으며 공유 cache의 `design.ovc`는
   collapse가 안전망으로 남는다. §3.15 뷰 기대: round1 재raster까지
   제거돼 draw 추가 감소.
 
-### F2R-10 — same-scale 인접 viewport retained 재사용 (`OPEN`)
+### F2R-10 — same-scale 인접 viewport retained 재사용 (`CLOSED` 2026-09-01)
 
 확정된 현재 경계:
 
@@ -993,6 +1030,14 @@ opt-in한다. budget 초과 재방문은 OS page cache가 인코드 .floe
 **lazy-index 변형**이 1순위이고, 실칩 `read_ms`가 유의미하게 나오면
 (네트워크 저장소) 인코드 victim cache를 재검토한다. 세션 시작
 `[perf] backend=rust renderd=… budget-mb=…` 라인이 유효값을 찍는다.
+
+**종결(2026-09-01, §3.16)**: 실칩 pan 실측(상하좌우 20% 이동)에서
+floe2 draw가 floe보다 약간 빠른 것으로 확인 — load 축(§3.15 9.5배)
+에 이어 draw 축까지 실칩에서 닫혔다. 아래 world-tile 구현 후보는
+**기각/보류**: fill 위상이 device-anchored라 RGBA tile 재사용은 byte
+동일 gate를 통과할 수 없고, byte-exact 재사용은 F2R-03c(1bpp plane)
+선행이 필요하다. 재개 조건과 판정 근거는 §3.16. 이하 절차·gate
+기술은 기록용으로 유지한다.
 
 먼저 같은 zoom/detail/depth/layer에서 warm settle 후 X/Y로 화면 폭의
 `1/16, 1/8, 1/4`만큼 이동하고 되돌아오는 trace를 각각 3회 측정한다
@@ -1094,6 +1139,42 @@ KLayout의 95% 처리 성능을 먼저 달성하고 병렬 raster를 latency 가
 - gate 통과 뒤에도 raster=1 기본과 adaptive 1/4 전환은 total latency와 CPU-seconds를
   함께 비교해 별도 승인함.
 
+### F2R-13 — 인터랙티브 frame handoff의 PNG 제거 (`DONE` 2026-09-02, 0.12.26)
+
+문제: 인터랙티브 경로의 frame 전달이 renderd PNG 인코드(§3.15 실칩
+206ms/824x796, 최종 라인 잔여 ~135ms) → 파일 publish → adapter 파일
+read → **GUI 주 스레드의 PixbufLoader PNG 디코드** 순서라, raster가
+KLayout과 동률이 된 뒤에도 매 pan/zoom/style frame이 양쪽 코덱
+비용을 고정으로 지불한다. floe(KLayout)는 화면 pixel buffer를 직접
+쓰므로 이 왕복이 없다.
+
+구현(0.12.26): render 명령에 `frame_format=raw|png`(renderd 기본
+png — wire 하위호환). raw는 PNG 인코드 대신 `FLOERAW1` magic +
+u32le width/height + packed RGBA payload를 **같은 원자적
+publish/generation 계약**으로 게시한다. adapter는 헤더/크기를 job과
+대조 검증 후 `rgba`로 전달하고, GUI는 `Pixbuf.new_from_bytes`로
+디코드 없이 표시한다(카피 2회, ~2ms). exact frame cache는 payload
+포맷을 key에 포함해(`FrameCacheKey.raw_frame`) 교차 히트를 막고,
+raw hit는 GUI 디코드까지 사라진다. 인터랙티브 기본은 raw
+(`FLOE_RUST_RAW_FRAME=off` kill switch), headless 소비자(CLI export,
+DRC error sheet)는 job별 `frame_format=png`으로 실제 PNG 바이트를
+유지한다. perf 라인은 `png N.Nms` 대신 `raw N.Nms`를 찍는다.
+
+수용 gate:
+
+- raw payload가 `RgbaFrame.pixels()`와 byte 동일(renderd unit), 크기
+  검증은 adapter가 job 크기와 대조(validator unit — 손상 payload는
+  error 응답).
+- exact 재방문/frame_cache off/round partial 경로가 raw에서 동작
+  (실daemon integration이 payload 동등으로 검증, partial 파일 잔존 0).
+- PNG 소비자(export/DRC/probe/goldens)는 job override로 불변 —
+  PX/STYLE golden과 KLayout oracle 무회귀.
+- 실칩 perf 라인에서 raw 인코드+publish+read 합이 기존 png 대비
+  감소, GUI 응답성 개선 확인(재측정 대기).
+
+WEBUI_PLAN 수렴: T2(loopback raw RGBA)의 payload가 이 포맷 그대로다
+— gateway는 renderd의 raw 산출물을 재인코드 없이 스트리밍한다.
+
 ## 6. 남은 착수 순서
 
 1. 완료(2026-08-26): F2R-12 worker pin·bench split·serial preset과 F2R-03a
@@ -1101,9 +1182,8 @@ KLayout의 95% 처리 성능을 먼저 달성하고 병렬 raster를 latency 가
    머신 KLayout GUI 재측정과 대표 실칩 trace.
 2. 완료(2026-08-26): F2R-03b 1단계 sub-page record index. 제품 raster
    26.0→20.4ms, 128px tile -32%, serial 동률(§3.11).
-3. F2R-10 fixed-scale pan sweep은 sample9에서 완료(§3.12): 인접 pan 열세가
-   재현되지 않았고 floe2가 전 구간 우세였다. 관찰이 나온 실칩 trace에서 같은
-   `--pan-sweep`을 재측정한 뒤 world-tile 착수를 판정한다.
+3. 완료(2026-09-01): F2R-10 pan 판정 — sample9(§3.12)에 이어 실칩
+   pan 실측(상하좌우 20%)에서도 floe2 draw 우세(§3.16). 경쟁 축 종결.
 4. F2R-03b 완료: 2a Pts chunk(-95% member 테스트), 2b layer mask
    (deep-zoom 439→22ms), **2c work bin**(tile×plane walk 곱 제거,
    deephier hier -85%, sample9 제품 raster -21%, byte 동일 oracle).
@@ -1111,12 +1191,16 @@ KLayout의 95% 처리 성능을 먼저 달성하고 병렬 raster를 latency 가
    곱셈을 모두 제거 — 실칩 재측정으로 남은 격차(예상: per-member
    상수, F2R-03c 1bpp plane 영역)를 판정한다. load 축 후보들
    (lazy-index·인코드 캐시·budget)은 §3.15에서 비병목 판정, 후순위.
-5. 같은 work bin 위에서 F2R-10 world-aligned tile LRU를 작게 prototype하고 field trace
-   20% gate를 넘을 때만 제품화한다.
-6. 1024-page를 넘는 장시간 cold fixture로 F2R-11 final-tile streaming의 first/settled
+5. 기각/보류(2026-09-01, §3.16): F2R-10 world-aligned tile LRU —
+   device-anchored fill 위상 때문에 RGBA 캐시는 byte gate 불통과.
+   F2R-03c(1bpp plane) 착수 + pan 절대 지연의 실칩 UX 지목이 재개
+   조건이며, 그때 WEBUI T3와 함께 재설계한다.
+6. 완료(2026-09-02): F2R-13 raw RGBA frame handoff(0.12.26, §3.16).
+   남은 확인: 실칩 perf 라인 재측정(`raw N.Nms` + 총시간).
+7. 1024-page를 넘는 장시간 cold fixture로 F2R-11 final-tile streaming의 first/settled
    이득을 측정한 뒤 protocol 변경 여부를 결정한다. 500~700ms 이하 작업에는 refinement를
-   만들지 않는다.
-7. F2R-06은 thread startup 실측이 frame의 5%를 넘을 때만 수행한다. 대표 실칩에서
+   만들지 않는다. 기본 no-refinement 채택 후 동기가 약해져 후순위다.
+8. F2R-06은 thread startup 실측이 frame의 5%를 넘을 때만 수행한다. 대표 실칩에서
    4-worker tail imbalance가 확인될 때만 bounded adaptive tile/jobs를 다시 연다.
 
 각 완료 항목은 이 표의 상태, before/after 중앙값, 실행 명령, 적용 커밋과 자동 gate를

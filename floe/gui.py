@@ -2581,10 +2581,21 @@ class Viewer:
                     self._refining = False
                     self.rstatus.set_text("rendering done.")
             if res["gen"] == self.gen:
-                loader = GdkPixbuf.PixbufLoader.new_with_type("png")
-                loader.write(res["png"])
-                loader.close()
-                pix = loader.get_pixbuf()
+                if res.get("rgba") is not None:
+                    # raw RGBA handoff (F2R-13): neither side runs a PNG
+                    # codec on the interactive path. new_from_bytes keeps
+                    # its own reference on the GBytes copy.
+                    fw = int(res.get("frame_width", 0))
+                    fh = int(res.get("frame_height", 0))
+                    pix = GdkPixbuf.Pixbuf.new_from_bytes(
+                        GLib.Bytes.new(res["rgba"]),
+                        GdkPixbuf.Colorspace.RGB, True, 8,
+                        fw, fh, fw * 4)
+                else:
+                    loader = GdkPixbuf.PixbufLoader.new_with_type("png")
+                    loader.write(res["png"])
+                    loader.close()
+                    pix = loader.get_pixbuf()
                 if self.dump:
                     # diagnosis: the frame as received from the service
                     pix.savev("/tmp/%s_frame.png" % APP, "png", [], [])
@@ -2661,7 +2672,9 @@ class Viewer:
                             res["text_plan_ms"],
                             fmt_count(res.get("text_place_records", 0)))
                     if res.get("png_ms") is not None:
-                        text += ", png %.1fms/pub %.1fms" % (
+                        text += ", %s %.1fms/pub %.1fms" % (
+                            "raw" if res.get("frame_format") == "raw"
+                            else "png",
                             res["png_ms"], res.get("publish_ms", 0.0))
                         if res.get("frame_cache_hit"):
                             text += ", frame-cache"

@@ -40,6 +40,12 @@ _DEFAULT_LABEL_FONT_PX = 14
 _DEFAULT_OPEN_TIMEOUT_S = 300
 _DEFAULT_CLIP_TIMEOUT_S = 300
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+# floe-renderd raw frame payload: magic, u32le width, u32le height,
+# then tightly packed RGBA rows. The interactive path defaults to raw
+# so neither side pays a PNG codec per frame (F2R-13); the
+# FLOE_RUST_RAW_FRAME=off kill switch restores PNG frames.
+_RAW_SIGNATURE = b"FLOERAW1"
+_RAW_HEADER_LEN = 16
 _OASIS_SIGNATURE = b"%SEMI-OASIS\r\n"
 
 
@@ -240,6 +246,8 @@ class RustRenderWorker:
         self._clip_timeout_s = _env_int(
             "FLOE_RUST_CLIP_TIMEOUT_S", _DEFAULT_CLIP_TIMEOUT_S,
             1, 24 * 60 * 60)
+        self._raw_frames = os.environ.get(
+            "FLOE_RUST_RAW_FRAME", "on") != "off"
         self._init_styles()
 
     def _init_styles(self):
@@ -459,7 +467,17 @@ class RustRenderWorker:
         depth_value = job.get("depth")
         depth = "full" if depth_value is None or int(depth_value) >= 999 \
             else str(max(0, int(depth_value)))
-        output = os.path.join(self._work_dir, "frame-%d.png" % generation)
+        # headless consumers (CLI export, DRC error sheets) need real PNG
+        # bytes and override the interactive raw default per job
+        frame_format = job.get("frame_format")
+        if frame_format is None:
+            raw = self._raw_frames
+        elif frame_format in ("raw", "png"):
+            raw = frame_format == "raw"
+        else:
+            raise ValueError("frame_format must be raw or png")
+        output = os.path.join(self._work_dir, "frame-%d.%s" % (
+            generation, "raw" if raw else "png"))
         state = {
             "job": dict(job), "output": output,
             "started": time.monotonic(), "new": 0,
@@ -486,7 +504,8 @@ class RustRenderWorker:
             "layers=%s frames=%s labels=%s font_px=%d mono=%s "
             "frame_cache=%s "
             "jobs=%d decode_jobs=%d tile_px=%d "
-            "round_pages=%d round_paths=1 style_epoch=%d out=%s" % (
+            "round_pages=%d round_paths=1 frame_format=%s "
+            "style_epoch=%d out=%s" % (
                 generation, ",".join(repr(value) for value in bbox),
                 int(job["w"]), int(job["h"]), depth,
                 repr(max(0.0, float(job.get("cut_px") or 0.0))), layers,
@@ -496,7 +515,9 @@ class RustRenderWorker:
                 _bool_wire(job.get("frame_cache", True)),
                 self._raster_jobs_count,
                 self._jobs_count, self._tile_px,
-                self._round_pages, self._style_epoch, output))
+                self._round_pages,
+                "raw" if raw else "png",
+                self._style_epoch, output))
         self._send(command)
 
     def _submit_recolor(self, job):
@@ -857,11 +878,25 @@ class RustRenderWorker:
         if state is None:
             return
         path = fields.get("png")
+        frame_format = fields.get("format", "png")
         read_started = time.monotonic()
         try:
             with open(path, "rb") as frame_file:
-                png = frame_file.read()
-            if not png.startswith(_PNG_SIGNATURE):
+                payload = frame_file.read()
+            if frame_format == "raw":
+                if not payload.startswith(_RAW_SIGNATURE):
+                    raise ValueError("Rust frame is not a raw payload")
+                raw_w = int.from_bytes(payload[8:12], "little")
+                raw_h = int.from_bytes(payload[12:16], "little")
+                if len(payload) != _RAW_HEADER_LEN + raw_w * raw_h * 4:
+                    raise ValueError("raw Rust frame is truncated")
+                job_size = (int(state["job"].get("w", raw_w)),
+                            int(state["job"].get("h", raw_h)))
+                if (raw_w, raw_h) != job_size:
+                    raise ValueError(
+                        "raw Rust frame is %dx%d, expected %dx%d" % (
+                            raw_w, raw_h, job_size[0], job_size[1]))
+            elif not payload.startswith(_PNG_SIGNATURE):
                 raise ValueError("Rust frame is not a PNG")
         except (OSError, TypeError, ValueError) as exc:
             self.res.put({"kind": "error", "gen": generation,
@@ -930,7 +965,8 @@ class RustRenderWorker:
         job = state["job"]
         deferred = _wire_int(fields, "deferred")
         output = {
-            "kind": "frame", "png": png, "bbox": job["bbox"],
+            "kind": "frame", "frame_format": frame_format,
+            "bbox": job["bbox"],
             "gen": generation, "tiles": _wire_int(
                 fields, "plan_pages",
                 _wire_int(fields, "pages") + deferred),
@@ -999,6 +1035,12 @@ class RustRenderWorker:
             "hier_cells_visited": state["hier_cells"],
             "subtrees_pruned": state["subtree_prunes"],
         }
+        if frame_format == "raw":
+            # header-stripped, tightly packed RGBA rows; the frame size
+            # was validated against the job above
+            output["rgba"] = payload[_RAW_HEADER_LEN:]
+        else:
+            output["png"] = payload
         if refining:
             output["refining"] = refining
         if self._max_depth is not None:

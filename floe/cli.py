@@ -643,7 +643,8 @@ def _render_drc_errors(args, c):
             w.submit({"kind": "render", "gen": gen,
                       "scope": "live", "bbox": bx, "view": None,
                       "w": args.px, "h": args.px,
-                      "depth": depth, "visible": layers})
+                      "depth": depth, "visible": layers,
+                      "frame_format": "png"})
             png = None
             while True:
                 try:
@@ -716,6 +717,7 @@ def _cmd_render_rust(args, c, bbox, layers):
             "label_font_px": args.label_font_px,
             "abstract": False,
             "visible": layers,
+            "frame_format": "png",
         })
         while True:
             try:
@@ -927,8 +929,9 @@ def cmd_probe(args):
             if res.get("kind") == "frame" and (res.get("preview")
                                                or res.get("bg")):
                 sub = "preview" if res.get("preview") else "margin"
+                size = len(res.get("rgba") or res.get("png") or b"")
                 print(f"[probe] {label}: {sub} frame "
-                      f"{len(res.get('png', b'')):,} bytes, "
+                      f"{size:,} bytes, "
                       f"{res.get('ms')} ms")
                 continue
             break
@@ -938,14 +941,22 @@ def cmd_probe(args):
             failed = True
             break
         if res.get("kind") == "frame":
-            png = res.get("png", b"")
-            ok = png[:4] == b"\x89PNG"
+            rgba = res.get("rgba")
+            if rgba is not None:
+                # raw handoff (F2R-13): the adapter already validated the
+                # FLOERAW1 header/size, so a well-sized payload is the check
+                payload, kind_label = rgba, "raw rgba"
+                ok = len(rgba) == (int(res.get("frame_width", 0)) *
+                                   int(res.get("frame_height", 0)) * 4)
+            else:
+                payload, kind_label = res.get("png", b""), "png"
+                ok = payload[:4] == b"\x89PNG"
             cut = (f", cut<{res['cut_um']}um" if res.get("cut_um")
                    else "")
             drawn = ("" if res.get("drawn") is None
                      else f", ~{res['drawn']:,} drawn")
-            print(f"[probe] {label}: frame OK  {len(png):,} bytes png "
-                  f"(magic {'OK' if ok else 'BAD'}), "
+            print(f"[probe] {label}: frame OK  {len(payload):,} bytes "
+                  f"{kind_label} ({'size OK' if ok else 'BAD'}), "
                   f"{res.get('ms')} ms, tiles {res.get('tiles')}"
                   f"{cut}{drawn}")
             failed = failed or not ok

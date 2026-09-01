@@ -34,6 +34,7 @@ from floe.service import DEFAULT_DETAIL, DETAIL_LEVELS, DETAIL_PX  # noqa: E402
 
 PHASE_FIELDS = (
     "ms", "plan_ms", "read_ms", "decode_ms", "scene_ms", "raster_ms",
+    "frame_format",
     "png_ms", "publish_write_ms", "publish_sync_ms", "publish_rename_ms",
     "publish_ms", "adapter_read_ms", "text_plan_ms", "cache_hit",
     "cache_miss", "frame_cache_hit", "resident_mb",
@@ -297,6 +298,13 @@ def wait_frame(worker, generation, timeout):
         if result.get("preview") or result.get("bg") or \
                 result.get("refining"):
             continue
+        rgba = result.pop("rgba", None)
+        if rgba is not None:
+            expected = int(result.get("frame_width", 0)) * \
+                int(result.get("frame_height", 0)) * 4
+            if len(rgba) != expected:
+                raise RuntimeError("renderer returned a truncated raw frame")
+            return result
         png = result.pop("png", b"")
         if not png.startswith(b"\x89PNG\r\n\x1a\n"):
             raise RuntimeError("renderer returned an invalid PNG")
