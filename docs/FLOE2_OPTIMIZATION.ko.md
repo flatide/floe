@@ -636,6 +636,35 @@ frame의 고정 비용이다(0.12.19 최초 계측에선 png 인코드만 206ms)
 ~0.1~0.2초 절감 + 주 스레드 디코드 제거. **실칩 재측정 대기** —
 perf 라인이 `png` 대신 `raw N.Nms`를 찍으면 새 경로다.
 
+**F2R-13 실칩 검증(2026-09-02, 0.12.26)**: 같은 문제 뷰 cold —
+**1,729ms = 341 load [207 plan+24 delta+110 apply] + 1,284 draw,
+`raw 0.8ms/pub 8.4ms`**, text 73.5ms/207k places, tile-max 580ms,
+bin 137k, hier 1.6M/23.5M. raw 경로 확정(인코드 0.8ms), draw
+1,296→1,284로 raster 무회귀. 총시간이 1,667 대비 +62ms인 것은 load
++105ms(plan 207ms, 실행별 변동)이고 draw+잔여는 −43ms.
+
+이 라인으로 잔여 산식이 풀렸다 — **기대치 정정**: 위 착수 문단의
+"잔여 ~135ms(png+publish+read)"는 과대였다. 잔여의 대부분은 label
+**text plan(~74ms — load_ms에 불포함, wall에는 포함)**이었고, 이전
+png 인코드는 0.12.19의 206ms가 5-round 누적이라 단발 round 기준
+~41ms + pub ~10ms였다. 따라서 renderd측 wall 절감은 frame당
+**~50ms**이고, 나머지 몫(GUI 주 스레드 PixbufLoader 디코드 제거,
+824x796에서 수십 ms급)은 wire 숫자에 보이지 않는 응답성 개선이다.
+남은 draw 격차(1,284 vs floe frames-off 1,101)는 raster 자체
+(draw_ms는 순수 raster)로, 문서대로 F2R-03c 영역이 맞다.
+
+**pan 1步 실측(같은 날, ctrl+커서 1회)**: 1,512ms = 182 load
+[149 plan+2 delta+32 apply] + 1,177 draw, **+1 new**(dec sum 17ms),
+text 88ms/192k places, tile-max 520ms, bin 137k. 판정: decoded LRU가
+인접 pan에서 완벽 적중(+1 page)하므로 pan 비용의 실체는 ① 전체
+viewport 재raster ~1.18초(137k item, F2R-10 종결 판정대로 byte-exact
+재사용은 F2R-03c 선행), ② **plan+text plan 재실행 ~237ms**(총시간의
+16%)다. floe와 동률 유지(사용자 선행 실측 "약간 빠름")이므로 현재
+gated 항목의 트리거는 여전히 미발화. pan UX를 절대 기준으로 더
+줄이라는 요구가 생기면 착수 순서는 ②(인접 뷰의 plan/text-plan
+재사용 — F2R-03c보다 훨씬 작은 작업) → ①(F2R-03c+world-tile mask)
+순이다. tile-max 580/520ms(wall의 45%)는 F2R-06 tail 관찰 지속.
+
 ## 4. 이슈 목록
 
 | ID | 우선순위 | 상태 | 요약 | 다음 판정 |
@@ -652,7 +681,7 @@ perf 라인이 `png` 대신 `raw N.Nms`를 찍으면 새 경로다.
 | F2R-10 | P1 | `CLOSED` | exact 밖 인접 pan은 full viewport raster | 실칩 pan 실측으로 경쟁 축 해소(§3.16); world-tile은 F2R-03c 선행 조건부 |
 | F2R-11 | P2 | `DESIGN` | page-round refinement가 누적 full PNG 반복 | 기본 no-refinement로 동기 약화; final-tile streaming은 보류 |
 | F2R-12 | P1 | `DOING` | KLayout single-core parity와 Rust serial 기준선 | sample9 gate 통과 124%(§3.12); 실칩 p50/p95 남음 |
-| F2R-13 | P1 | `DONE` | 인터랙티브 frame의 PNG 인코드/디코드 왕복 | raw RGBA handoff 구현(0.12.26, §3.16) — 실칩 재측정 대기 |
+| F2R-13 | P1 | `DONE` | 인터랙티브 frame의 PNG 인코드/디코드 왕복 | 실칩 확인(§3.16): raw 0.8ms/pub 8.4ms, raster 무회귀 — wall ~50ms/frame + 주 스레드 디코드 제거 |
 
 ## 5. 상세 이슈와 수용 기준
 
@@ -1170,7 +1199,9 @@ DRC error sheet)는 job별 `frame_format=png`으로 실제 PNG 바이트를
 - PNG 소비자(export/DRC/probe/goldens)는 job override로 불변 —
   PX/STYLE golden과 KLayout oracle 무회귀.
 - 실칩 perf 라인에서 raw 인코드+publish+read 합이 기존 png 대비
-  감소, GUI 응답성 개선 확인(재측정 대기).
+  감소, GUI 응답성 개선 확인 — **확인(2026-09-02, §3.16)**: raw
+  0.8ms/pub 8.4ms(이전 단발 round png ~41ms+pub ~10ms), draw
+  1,296→1,284 무회귀. wall 절감 ~50ms/frame + 주 스레드 디코드 제거.
 
 WEBUI_PLAN 수렴: T2(loopback raw RGBA)의 payload가 이 포맷 그대로다
 — gateway는 renderd의 raw 산출물을 재인코드 없이 스트리밍한다.
@@ -1195,8 +1226,11 @@ WEBUI_PLAN 수렴: T2(loopback raw RGBA)의 payload가 이 포맷 그대로다
    device-anchored fill 위상 때문에 RGBA 캐시는 byte gate 불통과.
    F2R-03c(1bpp plane) 착수 + pan 절대 지연의 실칩 UX 지목이 재개
    조건이며, 그때 WEBUI T3와 함께 재설계한다.
-6. 완료(2026-09-02): F2R-13 raw RGBA frame handoff(0.12.26, §3.16).
-   남은 확인: 실칩 perf 라인 재측정(`raw N.Nms` + 총시간).
+6. 완료(2026-09-02): F2R-13 raw RGBA frame handoff(0.12.26). 실칩
+   확인 완료(§3.16): raw 0.8ms/pub 8.4ms, raster 무회귀, wall
+   ~50ms/frame + 주 스레드 디코드 제거. 같은 실측에서 pan 1步의
+   잔여 비용 순서도 확정 — 재raster ~1.18s(gated), plan+text plan
+   ~237ms(비gated 후보, pan UX 요구 발생 시 1순위).
 7. 1024-page를 넘는 장시간 cold fixture로 F2R-11 final-tile streaming의 first/settled
    이득을 측정한 뒤 protocol 변경 여부를 결정한다. 500~700ms 이하 작업에는 refinement를
    만들지 않는다. 기본 no-refinement 채택 후 동기가 약해져 후순위다.
