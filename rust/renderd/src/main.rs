@@ -151,6 +151,8 @@ fn serve() -> Result<(), String> {
                 let frontier = cancellation.cancel_before(before_generation);
                 respond(&response_tx, format!("cancelled before_gen={frontier}"));
             }
+            InputCommand::Snap(command) => handle_snap(&published_scene, command, &response_tx),
+            InputCommand::Pick(command) => handle_pick(&published_scene, command, &response_tx),
             InputCommand::Quit => break,
         }
     }
@@ -198,6 +200,8 @@ fn respond(responses: &Sender<String>, response: String) {
 enum InputCommand {
     Worker(WorkerCommand),
     Cancel(u64),
+    Snap(SnapCommand),
+    Pick(PickCommand),
     Quit,
 }
 
@@ -206,12 +210,6 @@ enum WorkerCommand {
     Style(StyleCommand),
     Render(RenderCommand),
     Clip(ClipCommand),
-    // Queries run on the worker so they can re-plan a cut-free micro
-    // scene around the query point (§3.19): the published display
-    // scene omits sub-cut geometry (washes), which made picking miss
-    // almost everything at detail medium.
-    Snap(SnapCommand),
-    Pick(PickCommand),
     Info,
     Shutdown,
 }
@@ -437,24 +435,24 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
         }
         "snap" => {
             reject_unknown(&fields, &["seq", "x", "y", "r", "layers"])?;
-            Ok(Some(InputCommand::Worker(WorkerCommand::Snap(SnapCommand {
+            Ok(Some(InputCommand::Snap(SnapCommand {
                 sequence: optional_parse(&fields, "seq")?.unwrap_or(-1),
                 x: required_parse(&fields, "x")?,
                 y: required_parse(&fields, "y")?,
                 radius: required_parse::<i64>(&fields, "r")?.max(1),
                 visible_layers: parse_layers(fields.get("layers"))?,
-            }))))
+            })))
         }
         "pick" => {
             reject_unknown(&fields, &["seq", "x", "y", "r", "nth", "layers"])?;
-            Ok(Some(InputCommand::Worker(WorkerCommand::Pick(PickCommand {
+            Ok(Some(InputCommand::Pick(PickCommand {
                 sequence: optional_parse(&fields, "seq")?.unwrap_or(-1),
                 x: required_parse(&fields, "x")?,
                 y: required_parse(&fields, "y")?,
                 radius: required_parse::<i64>(&fields, "r")?.max(1),
                 nth: optional_parse(&fields, "nth")?.unwrap_or(0),
                 visible_layers: parse_layers(fields.get("layers"))?,
-            }))))
+            })))
         }
         "clip" => {
             reject_unknown(
@@ -619,15 +617,6 @@ fn validate_jobs(jobs: u16) -> Result<(), String> {
     Ok(())
 }
 
-/// Plan shape of the last render (§3.19): when it carried a detail
-/// cut, the published display scene omits sub-cut geometry (drawn as
-/// washes), so pick/snap must re-plan their query neighborhood
-/// without the cut to reach what the user sees.
-struct QueryContext {
-    depth: u32,
-    cut_active: bool,
-}
-
 struct WorkerState {
     cache: Option<Cache>,
     page_cache: DecodedPageCache,
@@ -635,7 +624,6 @@ struct WorkerState {
     jobs: u16,
     styles: Vec<LayerStyle>,
     style_epoch: Option<u64>,
-    query_context: Option<QueryContext>,
 }
 
 impl Default for WorkerState {
@@ -647,7 +635,6 @@ impl Default for WorkerState {
             jobs: DEFAULT_JOBS,
             styles: Vec::new(),
             style_epoch: None,
-            query_context: None,
         }
     }
 }
@@ -793,12 +780,6 @@ fn render_worker(
             ),
             WorkerCommand::Clip(command) => {
                 handle_clip(&mut state, command, &responses, &cancellation)
-            }
-            WorkerCommand::Snap(command) => {
-                handle_snap(&mut state, &published_scene, command, &responses)
-            }
-            WorkerCommand::Pick(command) => {
-                handle_pick(&mut state, &published_scene, command, &responses)
             }
             WorkerCommand::Info => handle_info(&state, &responses),
             WorkerCommand::Shutdown => break,
@@ -1073,83 +1054,9 @@ fn handle_info(state: &WorkerState, responses: &Sender<String>) {
     }
 }
 
-/// The scene a query runs against: the published display scene, or -
-/// when the last render carried a detail cut - a cut-free micro plan
-/// of the query neighborhood (§3.19). The display scene replaces
-/// sub-cut geometry with washes, so its pixels are visible but its
-/// query would miss them; the micro plan restores full fidelity at
-/// the same depth for a few pages' worth of decode.
-fn query_scene(
-    state: &mut WorkerState,
-    shared: &SharedPublishedScene,
-    x: i64,
-    y: i64,
-    radius: i64,
-) -> Result<Option<Arc<PublishedScene>>, String> {
-    let cut_active = state
-        .query_context
-        .as_ref()
-        .is_some_and(|context| context.cut_active);
-    if !cut_active {
-        return current_scene(shared);
-    }
-    let Some(cache) = state.cache.as_ref() else {
-        return current_scene(shared);
-    };
-    let depth = state
-        .query_context
-        .as_ref()
-        .map(|context| context.depth)
-        .unwrap_or(u32::MAX);
-    let pad = radius.saturating_mul(2).saturating_add(4);
-    let view = ViewBox::new(
-        x.saturating_sub(pad),
-        y.saturating_sub(pad),
-        x.saturating_add(pad),
-        y.saturating_add(pad),
-    )?;
-    let span = (pad as f64) * 2.0;
-    // Fine device scale so the planner takes the full-detail LOD; the
-    // zero cut disables the wash substitution outright.
-    let px_per_dbu = (256.0 / span).clamp(1.0, 1024.0);
-    let request = PlanRequest {
-        view,
-        cut_dbu: 0,
-        visible_layers: None,
-        depth,
-        px_per_dbu,
-        exact: false,
-    };
-    request.validate()?;
-    let planned = cache.plan(&request)?;
-    let page_ids: Vec<u32> = planned.plan.pages.clone();
-    let (pages, _stats) = state
-        .page_cache
-        .load_parallel(cache, &page_ids, state.jobs)?;
-    let plan = Arc::new(planned.plan);
-    let mut cell_names = BTreeMap::new();
-    for cell in &plan.wcells {
-        if let std::collections::btree_map::Entry::Vacant(entry) = cell_names.entry(cell.key.0) {
-            entry.insert(cache.cell_name(cell.key.0)?);
-        }
-    }
-    let scene = Arc::new(FrameScene::new_shared(cache, plan, pages)?);
-    Ok(Some(Arc::new(PublishedScene {
-        scene,
-        layers: Arc::from(cache.layers()),
-        cell_names: Arc::new(cell_names),
-    })))
-}
-
-fn handle_snap(
-    state: &mut WorkerState,
-    shared: &SharedPublishedScene,
-    command: SnapCommand,
-    responses: &Sender<String>,
-) {
+fn handle_snap(shared: &SharedPublishedScene, command: SnapCommand, responses: &Sender<String>) {
     let result: Result<Option<floe_render_core::SceneSnap>, String> = (|| {
-        let Some(published) = query_scene(state, shared, command.x, command.y, command.radius)?
-        else {
+        let Some(published) = current_scene(shared)? else {
             return Ok(None);
         };
         let request = scene_query_request(
@@ -1197,15 +1104,9 @@ fn handle_snap(
     }
 }
 
-fn handle_pick(
-    state: &mut WorkerState,
-    shared: &SharedPublishedScene,
-    command: PickCommand,
-    responses: &Sender<String>,
-) {
+fn handle_pick(shared: &SharedPublishedScene, command: PickCommand, responses: &Sender<String>) {
     let result: Result<Option<PickWireResponse>, String> = (|| {
-        let Some(published) = query_scene(state, shared, command.x, command.y, command.radius)?
-        else {
+        let Some(published) = current_scene(shared)? else {
             return Ok(None);
         };
         let request = scene_query_request(
@@ -1390,12 +1291,7 @@ fn handle_render(
     }
     let result = run_render(state, &command, responses, cancellation, published_scene);
     match result {
-        Ok(()) => {
-            state.query_context = Some(QueryContext {
-                depth: command.depth,
-                cut_active: command.cut_px > 0.0,
-            });
-        }
+        Ok(()) => {}
         Err(error)
             if cancellation.is_cancelled(generation) && is_render_cancelled_error(&error) =>
         {
@@ -2165,14 +2061,14 @@ mod tests {
 
     fn snap(command: InputCommand) -> SnapCommand {
         match command {
-            InputCommand::Worker(WorkerCommand::Snap(snap)) => snap,
+            InputCommand::Snap(snap) => snap,
             _ => panic!("expected snap command"),
         }
     }
 
     fn pick(command: InputCommand) -> PickCommand {
         match command {
-            InputCommand::Worker(WorkerCommand::Pick(pick)) => pick,
+            InputCommand::Pick(pick) => pick,
             _ => panic!("expected pick command"),
         }
     }

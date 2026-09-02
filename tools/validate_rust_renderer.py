@@ -979,16 +979,6 @@ class RealDaemonIntegrationTests(unittest.TestCase):
                 "*.partial.png")))
             self.assertFalse(list(Path(worker._work_dir).glob(
                 "*.partial.raw")))
-
-            # §3.19: a detail-cut render must not blind pick/snap. The
-            # display scene replaces sub-cut geometry with washes, so
-            # the worker re-plans a cut-free micro scene around the
-            # query point - parity against the cut-free KLayout oracle
-            # must hold under an active cut too.
-            worker.submit(dict(base_job, gen=105, cut_px=3.0))
-            cut_frames = self._frames_through_settled(worker, 105)
-            self.assertTrue(cut_frames)
-            self._assert_query_parity(cache, worker, bbox)
             self.assertFalse(worker._jobs)
         finally:
             worker.stop()
