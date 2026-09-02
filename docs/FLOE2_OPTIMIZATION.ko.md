@@ -910,8 +910,8 @@ oracle(터치/재삽입/축출/budget 축소 churn에서 색인-엔트리 동기
   있다. detail이 굵은 뷰에서 가늘고 긴 도형은 여전히 pick 불가로
   남는다.
 
-**실칩 재확인**: 문제였던 뷰(모든 layer 켠 상태)에서 클릭 —
-막대들이 잡히는지, "no object here" 빈도가 정상화됐는지.
+**실칩 확인(2026-09-02, 사용자)**: "모든 layer 켠 상태에서 막대들
+모두 pick 됨" — 결함 A 수정 확정. 결함 B(cut 실명)만 보류로 남는다.
 
 ## 4. 이슈 목록
 
@@ -931,7 +931,7 @@ oracle(터치/재삽입/축출/budget 축소 churn에서 색인-엔트리 동기
 | F2R-12 | P1 | `DOING` | KLayout single-core parity와 Rust serial 기준선 | sample9 gate 통과 124%(§3.12); 실칩 p50/p95 남음 |
 | F2R-13 | P1 | `DONE` | 인터랙티브 frame의 PNG 인코드/디코드 왕복 | 실칩 확인(§3.16): raw 0.8ms/pub 8.4ms, raster 무회귀 — wall ~50ms/frame + 주 스레드 디코드 제거 |
 | F2R-14 | P1 | `DONE` | 장시간 세션에서 load 증가(미니맵 이동, fresh 뷰어보다 느림) | LRU 축출 전수 스캔 → O(log n) 색인(0.12.33, §3.18) + `evict N` telemetry — 실칩 장기 세션 재확인 대기 |
-| F2R-15 | P1 | `DOING` | pick/snap이 대부분 "no object here" | 주범=질의 예산 기아 수정: 가시-only 계상+chunk prune+상한 4,096(0.12.35, §3.19 결함 A) 실칩 재확인 대기. cut 실명(결함 B)은 실재하나 원복·보류(219259c) |
+| F2R-15 | P1 | `DONE` | pick/snap이 대부분 "no object here" | 질의 예산 기아 수정(0.12.35, §3.19 결함 A) — 실칩 확인 완료(전 layer에서 pick 정상). cut 실명(결함 B)은 실재하나 보류(설계는 219259c) |
 
 ## 5. 상세 이슈와 수용 기준
 
