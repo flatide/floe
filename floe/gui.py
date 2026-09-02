@@ -2664,7 +2664,14 @@ class Viewer:
                         lod = ", lod %d" % res["lod"]
                     text = ""
                     if res.get("plan_ms") is not None:
-                        text += ", plan %.1fms/%s frames" % (
+                        # "frontier", not "frames": the planner's
+                        # depth-cut record count. floe2 computes it
+                        # regardless of the frames toggle (the depth
+                        # frontier is plan-integral, +2.4ms measured),
+                        # so it stays non-zero with frames off - that
+                        # is not geometry being drawn (field question
+                        # 2026-09-02).
+                        text += ", plan %.1fms/%s frontier" % (
                             res["plan_ms"],
                             fmt_count(res.get("frame_rects", 0)))
                     if res.get("text_plan_ms") is not None:

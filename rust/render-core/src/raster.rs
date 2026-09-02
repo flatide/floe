@@ -975,14 +975,26 @@ fn collect_cell(
             stats.subtrees_pruned = stats.subtrees_pruned.saturating_add(1);
             continue;
         }
-        let deferred_weight = instance
-            .rep
-            .members()
-            .saturating_mul(scene.subtree_item_weight(instance.child));
-        if deferred_weight > WORK_BIN_DEFER_MEMBERS {
-            // Dense repetition: keep it unexpanded, one deferred item
-            // per plane the subtree can actually paint (the walk's own
-            // per-plane descent gate), plus one for the band walks.
+        let members = instance.rep.members();
+        let weight = scene.subtree_item_weight(instance.child);
+        let expand = if members > 1 {
+            // Dense repetition: expanding multiplies the walk by the
+            // member count, so the product gate bounds collection time.
+            members.saturating_mul(weight) <= WORK_BIN_DEFER_MEMBERS
+        } else {
+            // A single placement is walked exactly once here versus
+            // once per tile (x planes) when deferred - §3.17 measured
+            // that re-walk at 9x the cover on a depth-limited chip
+            // view. Only the remaining item budget gates it: a visit
+            // can emit a few per-plane items, hence the safety factor;
+            // past the budget it defers instead of tripping the
+            // whole-frame walk fallback.
+            weight.saturating_mul(4) <= WORK_BIN_MAX_ITEMS.saturating_sub(bin.items)
+        };
+        if !expand {
+            // One deferred item per plane the subtree can actually
+            // paint (the walk's own per-plane descent gate), plus one
+            // for the band walks.
             for (plane, bit) in plane_bits.iter().enumerate() {
                 if scene.subtree_paints(instance.child, *bit) {
                     bin.charge()?;
@@ -5192,6 +5204,113 @@ mod tests {
         );
         assert_eq!(bin.frame_member_paints, walk.frame_member_paints);
         assert!(bin.rectangle_member_paints > 1000, "grid must paint");
+    }
+
+    #[test]
+    fn work_bin_expands_heavy_single_placements_instead_of_deferring() {
+        // A single placement (members=1) of a wide flat block: its
+        // subtree weight (4,550) is far past WORK_BIN_DEFER_MEMBERS,
+        // but deferring it makes every tile re-walk the block (§3.17
+        // field: 9x the cover on a depth-limited chip view). The bin
+        // must expand it - one collection walk, items independent of
+        // tile count - within the item budget.
+        let top = (0, REM_FULL);
+        let mid = (1, REM_FULL);
+        let leaf = (2, REM_FULL);
+        let unit = BBox {
+            x0: 0,
+            y0: 0,
+            x1: 2,
+            y1: 2,
+        };
+        let span = BBox {
+            x0: 0,
+            y0: 0,
+            x1: 320,
+            y1: 320,
+        };
+        let bounds = BTreeMap::from([(top, span), (mid, span), (leaf, unit)]);
+        let make_scene = || {
+            let leaf_insts: Vec<WsInst> = (0..4550)
+                .map(|index| WsInst {
+                    child: leaf,
+                    x: 2 + (index % 70) * 4,
+                    y: 2 + (index / 70) * 4,
+                    rot: 0,
+                    flip: false,
+                    rep: Rep::One,
+                })
+                .collect();
+            let plan = HierPlan {
+                top,
+                wcells: vec![
+                    WsCell {
+                        key: top,
+                        pages: Vec::new(),
+                        insts: vec![WsInst {
+                            child: mid,
+                            x: 0,
+                            y: 0,
+                            rot: 0,
+                            flip: false,
+                            rep: Rep::One,
+                        }],
+                        frames: Vec::new(),
+                        washes: Vec::new(),
+                    },
+                    WsCell {
+                        key: mid,
+                        pages: Vec::new(),
+                        insts: leaf_insts,
+                        frames: Vec::new(),
+                        washes: Vec::new(),
+                    },
+                    WsCell {
+                        key: leaf,
+                        pages: vec![0],
+                        insts: Vec::new(),
+                        frames: vec![(unit, Rep::One, 1)],
+                        washes: Vec::new(),
+                    },
+                ],
+                pages: vec![0],
+                page_prio: vec![0],
+                stats: HierStats::default(),
+            };
+            FrameScene::from_test_parts(
+                plan,
+                vec![styled_page(0, 1, unit)],
+                bounds.clone(),
+            )
+            .unwrap()
+        };
+        let mut request = StyledGeometryRasterRequest {
+            hierarchy_frames: true,
+            ..hairline_request()
+        };
+        // Many small tiles: a deferred block would multiply its walk by
+        // the tile count, an expanded one is collected exactly once.
+        request.raster.tile_size = 8;
+        let walk = render_geometry_styled_unbinned(&make_scene(), &request).unwrap();
+        let bin = render_geometry_styled(&make_scene(), &request).unwrap();
+        assert!(
+            bin.stats.work_bin_items > 4096,
+            "single placement must expand into the bin: {} items",
+            bin.stats.work_bin_items
+        );
+        assert_eq!(bin.stats.work_bin_overflow_items, 0, "no cap fallback");
+        assert!(
+            bin.stats.hier_cells_visited < walk.stats.hier_cells_visited / 4,
+            "expanded bin must not re-walk the block per tile: {} vs walk {}",
+            bin.stats.hier_cells_visited,
+            walk.stats.hier_cells_visited
+        );
+        assert_eq!(bin.frame.pixels(), walk.frame.pixels());
+        assert_eq!(
+            bin.rectangle_member_paints,
+            walk.rectangle_member_paints
+        );
+        assert_eq!(bin.frame_member_paints, walk.frame_member_paints);
     }
 
     #[test]

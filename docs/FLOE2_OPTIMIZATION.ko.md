@@ -665,13 +665,57 @@ gated 항목의 트리거는 여전히 미발화. pan UX를 절대 기준으로 
 재사용 — F2R-03c보다 훨씬 작은 작업) → ①(F2R-03c+world-tile mask)
 순이다. tile-max 580/520ms(wall의 45%)는 F2R-06 tail 관찰 지속.
 
+### 3.17 실칩 depth 제한 뷰 — deferred-subtree 지렛대 발화 (2026-09-02)
+
+측정(detail high, depth 3, goto 3092,2013, view 100µm, 2,591 pages
+cold, 사용자):
+
+| | frames on | frames off |
+|---|---|---|
+| floe | 5,384 = 3,639 load + 1,745 draw (plan 822.5ms/19k) | 4,602 = 3,609 load + 993 draw (plan 665.6ms/0) |
+| floe2 | 2,630 = 457 load + 2,050 draw (plan 320.9ms/18k) | 2,413 = 455 load + 1,929 draw (plan 318.5ms/18k) |
+
+판정 5건:
+
+1. **total은 floe2 1.9배 우세 유지**(양 토글 공통). load 축 8배.
+2. **frames(+labels) 비용 감사 재확인**: floe2 draw +121ms/plan
+   +2.4ms vs floe draw +752ms/plan +157ms — depth 제한 뷰에서도
+   frames on이 사실상 공짜다(+121ms의 대부분은 467k-place label).
+   frames off 테스트 습관 불필요 결론이 depth 제한에서도 성립.
+3. **draw 축 1.94배 열세(1,929 vs 993) — deferred-subtree 지렛대
+   발화**: bin이 3,018 item뿐인데 hier 930k/60.8M(mid-zoom 23.5M의
+   2.6배). scene은 이미 depth-3로 잘려 있으므로 이것은 depth 과대
+   추정이 아니라, **members=1 대형 블록(scene 기준 weight>4096)이
+   지연되어 tile마다 per-plane 재walk를 반복**(≈9 커버)한 것.
+   §F2R-03c에 적힌 "먼저 소진할 지렛대"의 실측 조건 충족.
+4. **조치(0.12.27)**: 지연 gate를 분리 — 반복(members>1)은 기존
+   `members×weight>4096`(수집 시간 보호) 유지, **단일 배치
+   (members=1)는 잔여 item 예산(×4 안전계수) 안에서 항상 전개** —
+   수집 walk 1회가 tile-walk ×tiles×planes보다 항상 싸다. 예산
+   초과 시 지연(전 frame walk 폴백 방지). byte 동일은 정책 변경이라
+   기존 oracle이 그대로 보증하며, 신규 정책 테스트(4,550-inst 단일
+   배치 블록: 전개, hier가 tile 수 무관, cap 미달, pixel 동일)로
+   고정. 기대: 이 뷰 hier 930k→~10만(1 커버), draw 감소. mid-zoom
+   full-depth 뷰의 잔여 hier 1.6M/23.5M도 같은 경로로 준다. 실칩
+   재측정 후 잔여 격차가 paint 지배면 F2R-03c 트리거를 재판정한다.
+5. **"frames off인데 18k frames" 질문**: 그 숫자는 그려진 frame이
+   아니라 **planner의 depth-frontier record 수**다 — floe2 planner는
+   frames 토글과 무관하게 depth cut 계산의 산출물로 얻는다(on/off
+   plan 차이 +2.4ms가 증거). floe는 frames off에서 frontier 계산을
+   생략해 0을 찍는다(plan 665 vs 822ms). GUI 라벨을 `frames` →
+   `frontier`로 바꿔 혼동을 제거했다(그리기 여부는 여전히 frames
+   토글이 결정).
+
+잔여 신호: tile-max 714ms(draw wall의 37%, F2R-06 관찰 지속),
+dec sum 776/idx 125ms(decode 비병목 유지).
+
 ## 4. 이슈 목록
 
 | ID | 우선순위 | 상태 | 요약 | 다음 판정 |
 |---|---:|---|---|---|
 | F2R-01 | P1 | `DONE` | cache hit까지 128-page refine | cache-aware batch/unit+현장 gate 완료 |
 | F2R-02 | P1 | `DONE` | 128px tile의 반복 hierarchy 순회 | 제품 기본 384px 승인 |
-| F2R-03 | P1 | `DOING` | tile x layer x hierarchy 총 CPU 작업량 | 03b 전체 완료·실칩 적중(§3.15: 11.7s→1.67s, floe 대비 3.1배). 남음: 03c(1bpp plane) |
+| F2R-03 | P1 | `DOING` | tile x layer x hierarchy 총 CPU 작업량 | 03b 완료 + 2c 지연 gate 재조정(§3.17, 0.12.27) 실칩 재측정 대기. 남음: 03c(1bpp plane) |
 | F2R-04 | P1 | `DONE` | total에서 사라진 PNG/publish 37~44ms | write/sync/rename/handoff 계측 완료 |
 | F2R-05 | P2 | `DONE` | jobs=8의 CPU/전력 비용 | decode 8/raster 4 분리 승인 |
 | F2R-06 | P3 | `BLOCKED` | render마다 OS thread 생성 | startup_us가 병목일 때만 pool |
@@ -900,6 +944,13 @@ prune과 큰 tile은 중복을 줄이는 완화책일 뿐이다. jobs=1도 tile=
   경로는 oracle 기준이라 walk 유지. 대형 실칩 mid-zoom 개선 폭은
   재측정으로 판정한다.
 
+  **2c 지연 gate 재조정(2026-09-02, 0.12.27, §3.17)**: 실칩 depth
+  제한 뷰에서 members=1 대형 블록의 지연이 tile별 재walk(hier
+  930k/60.8M)로 나타나 gate를 분리했다 — 반복(members>1)은 기존
+  `members×weight>4096`, 단일 배치는 잔여 item 예산(×4) 안에서 항상
+  전개. 정책 변경이라 pixel 불변이 자동이며 신규 정책 테스트로
+  고정(93 tests).
+
   **착수 판정과 순서**: 실칩 bench의 wc_cells/inst_edges/render_tiles/
   layer 수로 traversal 곱셈 비중을 추정해 2b·2c의 기대 이득을 정한다.
   구현 순서는 2a → 2b → (실칩 판정 후) 2c. record 수 대비 traversal
@@ -913,7 +964,8 @@ prune과 큰 tile은 중복을 줄이는 완화책일 뿐이다. jobs=1도 tile=
   4차)에서 paint 몫은 KLayout과 동률(~1.1s vs 1.10s)이라 현재 기대
   수익(≤0.2s)이 재작업 규모(전체 paint 프리미티브 + 픽셀 계약 +
   oracle 재정비)에 크게 못 미친다. 먼저 소진할 지렛대: deferred
-  subtree tile-binning, 패턴 fill 지배 뷰 존재 여부 실측.
+  subtree tile-binning(**소진 2026-09-02** — §3.17의 members=1 전개
+  gate, 실칩 재측정 대기), 패턴 fill 지배 뷰 존재 여부 실측.
   본래 설계 — fill 파이프라인 재설계: 2-phase를 단일 edge walk
   통합, 장기적으로 layer별 1bpp plane + 최종 word 합성. paint 순서 계약
   (PLAN §8.3 "레이어 병렬 합성 금지")의 재개정이 필요할 수 있어 F2R-03a/b
