@@ -1068,7 +1068,14 @@ fn collect_cell(
         let mut trial: Option<(WorkBinCheckpoint, usize, Option<u64>)> = None;
         let mut deferred = false;
         if !fast_expand {
-            let headroom = WORK_BIN_MAX_ITEMS.saturating_sub(bin.items) / 2;
+            // 7/8 of the remaining cap: the eighth is the sibling
+            // reserve, and the limit stays strictly below the
+            // whole-frame fallback cap. The half-cap first cut blocked
+            // a measured ~400k-item edge (§3.17: ~100k visits x ~4
+            // planes) that fits the cap comfortably, and every frame
+            // then re-paid its doomed trial.
+            let remaining = WORK_BIN_MAX_ITEMS.saturating_sub(bin.items);
+            let headroom = remaining.saturating_sub(remaining / 8);
             // subtree_intersects guaranteed queried content below this
             // edge, so every visible member emits at least one item:
             // more visible members than the soft cap is a certain
@@ -5430,8 +5437,8 @@ mod tests {
 
     #[test]
     fn work_bin_trial_rolls_back_edges_that_truly_overrun() {
-        // A 100x70 grid of weight-64 subtrees really emits 448k items -
-        // past the trial's soft limit (half the 768k cap) - so the
+        // A 110x100 grid of weight-64 subtrees really emits 704k items
+        // - past the trial's soft limit (7/8 of the 768k cap) - so the
         // trial must stop, roll the bin and DFS path back exactly, and
         // defer that one edge, still byte-identical to the walk.
         let top = (0, REM_FULL);
@@ -5480,10 +5487,10 @@ mod tests {
                             rot: 0,
                             flip: false,
                             rep: Rep::Grid {
-                                na: 100,
-                                nb: 70,
+                                na: 110,
+                                nb: 100,
                                 va: (2, 0),
-                                vb: (0, 4),
+                                vb: (0, 2),
                             },
                         }],
                         frames: Vec::new(),

@@ -766,13 +766,31 @@ item이 보장되므로 보수적으로 성립). 수집은 단일 스레드·DFS
 규모라는 뜻이며, 그때는 예산 조정이 아니라 tile-side 결합
 walk(지연 에지의 plane 곱 제거)로 간다.
 
+**재측정 3차(0.12.30) — 구조 확정**: `bin 7,521 items (defer 0r+1s
+w610k), hier 1.0M, draw 2,067`. 배열 에지는 trial로 **전개
+성공**(0r, bin 3,017→7,521). 남은 지연은 **members=1 단일 배치
+하나** — 정적 weight 610k, trial이 soft limit(잔여의 1/2 ≈ 38만
+item)까지 실제로 걷고 초과로 롤백했다. hier(~11.5만 visit/커버)와
+대조하면 이 에지의 실체는 **~10만 visit × plane당 item 팽창
+~4배 ≈ 40만 item** — 전체 cap(768k)에는 충분히 들어가는데 절반
+soft limit이 막은 것이다. draw +89ms는 매 frame 반복되는 실패
+trial의 낭비이며, 동시에 이 40만-item walk 자체가 ~100ms짜리로
+싸다는 실측이기도 하다(수집 visit은 paint 없이 stamp 스캔뿐).
+**조치(0.12.31)**: soft limit을 잔여의 1/2 → **7/8**(1/8은 형제
+에지 예약, 전-frame 폴백 cap보다 항상 아래)로 상향. 이 에지가
+커밋되고 실패-trial 낭비도 사라진다. 롤백 안전성 테스트는 704k
+실측 grid로 재고정(95 tests). 기대: `defer 0r+0s`, hier
+1.0M→~11.5만(수집 1커버), draw 2,067→**~0.7-1.1s**(paint 몫
+~0.1s + 수집 ~0.2s + item 소비/decode). floe 993 동률권 진입 여부
+확인.
+
 ## 4. 이슈 목록
 
 | ID | 우선순위 | 상태 | 요약 | 다음 판정 |
 |---|---:|---|---|---|
 | F2R-01 | P1 | `DONE` | cache hit까지 128-page refine | cache-aware batch/unit+현장 gate 완료 |
 | F2R-02 | P1 | `DONE` | 128px tile의 반복 hierarchy 순회 | 제품 기본 384px 승인 |
-| F2R-03 | P1 | `DOING` | tile x layer x hierarchy 총 CPU 작업량 | 투영 gate 2연속 null → trial 전개+롤백(0.12.30, §3.17) 실칩 재측정 대기. 03c는 이 뷰 무관 확정(paints 1.2M) |
+| F2R-03 | P1 | `DOING` | tile x layer x hierarchy 총 CPU 작업량 | 구조 확정: 배열 전개 성공, 40만-item 단일 에지가 1/2 soft limit에 걸림 → 7/8 상향(0.12.31, §3.17) 재측정 대기. 03c는 이 뷰 무관(paints 1.2M) |
 | F2R-04 | P1 | `DONE` | total에서 사라진 PNG/publish 37~44ms | write/sync/rename/handoff 계측 완료 |
 | F2R-05 | P2 | `DONE` | jobs=8의 CPU/전력 비용 | decode 8/raster 4 분리 승인 |
 | F2R-06 | P3 | `BLOCKED` | render마다 OS thread 생성 | startup_us가 병목일 때만 pool |
