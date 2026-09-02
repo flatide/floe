@@ -725,13 +725,33 @@ tile-parallel 트레이드오프 포함), s 지배 → 예산 계수 조정(즉�
 둘 다 소수인데 paints가 크면(floe ~12.9M급 이상) → F2R-03c 트리거
 재판정.
 
+**원인 확정(2026-09-02, 0.12.28 라인)**: `defer 1r+0s w0, paints
+1.2M` — **r 지배, 그것도 단 1개의 반복 배열 에지**가 depth-3
+콘텐츠 전체를 들고 있고, 그 하나의 per-tile×plane 재전개가 hier
+923k/60.8M의 전부다. paints 1.2M은 draw의 ~0.1s 몫 — **이 뷰의
+1.94배 열세는 paint가 아니라 순수 traversal**이므로 F2R-03c는 이
+뷰와 무관 확정.
+
+**조치(0.12.29) — 지연 gate 통합**: 판정을 "**보이는 member 수 ×
+weight ×4(다중 plane 안전계수) ≤ 잔여 item 예산**" 하나로
+단일화했다. 100만-member 배열이라도 화면에 3개면 3개로 계산하고,
+member 카운트는 예산을 넘는 순간 조기 중단해 거대 가시 배열도
+O(예산)으로 판정한다. members>1 특례(4096 곱 gate)는 제거 — 전개는
+수집에서 1회 걷는 반면 지연은 tile×plane마다 다시 걷므로, item
+예산 안에서는 전개가 무조건 싸다. 예산 초과 시에만 지연(전-frame
+walk 폴백 방지). 순수 정책이라 byte 불변이 기존 oracle로 보증되며
+테스트를 재고정(94개): 70×70 dense grid는 이제 **전개**(예산 내),
+60×60×weight-64(투영 230k)는 **지연**(예산 초과, 조기 중단 카운트).
+기대: 이 뷰의 배열이 전개되어 hier 923k→~10만(수집 1커버), draw
+1,978→~1.0-1.2s(floe 993 동률권). 실칩 재측정 대기.
+
 ## 4. 이슈 목록
 
 | ID | 우선순위 | 상태 | 요약 | 다음 판정 |
 |---|---:|---|---|---|
 | F2R-01 | P1 | `DONE` | cache hit까지 128-page refine | cache-aware batch/unit+현장 gate 완료 |
 | F2R-02 | P1 | `DONE` | 128px tile의 반복 hierarchy 순회 | 제품 기본 384px 승인 |
-| F2R-03 | P1 | `DOING` | tile x layer x hierarchy 총 CPU 작업량 | 2c 재조정(0.12.27) 실칩 null → 지연 원인 telemetry(0.12.28)로 판정 대기(§3.17). 남음: 03c(1bpp plane) |
+| F2R-03 | P1 | `DOING` | tile x layer x hierarchy 총 CPU 작업량 | 원인 확정(defer 1r, paints 1.2M) → 가시-member 예산 gate로 통합(0.12.29, §3.17) 실칩 재측정 대기. 03c는 이 뷰 무관 확정 |
 | F2R-04 | P1 | `DONE` | total에서 사라진 PNG/publish 37~44ms | write/sync/rename/handoff 계측 완료 |
 | F2R-05 | P2 | `DONE` | jobs=8의 CPU/전력 비용 | decode 8/raster 4 분리 승인 |
 | F2R-06 | P3 | `BLOCKED` | render마다 OS thread 생성 | startup_us가 병목일 때만 pool |

@@ -787,7 +787,35 @@ enum FrameItem {
 /// Instances whose members x subtree item weight exceed this stay
 /// unexpanded in the bin and are walked per tile instead — the guard
 /// covers dense reps, deep multiplications, and their mix alike.
-const WORK_BIN_DEFER_MEMBERS: u64 = 4096;
+/// Sentinel error for the visible-member count pass: enumeration
+/// stopped because the count already exceeds the expansion budget.
+const WORK_BIN_COUNT_STOP: &str = "work-bin visible-member count stop";
+
+/// True when the repetition places at most `limit` members inside the
+/// view. Enumerates via the same visibility pruning the expansion (and
+/// the deferred tile path) would use, stopping right past the limit so
+/// a huge visible array costs O(limit), not O(members). Enumeration
+/// errors conservatively defer - the tile path re-runs the same
+/// enumeration and surfaces the real error.
+fn visible_members_within(
+    rep: &floe_oasis::doc::Rep,
+    base_bbox: BBox,
+    local_view: BBox,
+    limit: u64,
+) -> bool {
+    let mut count = 0u64;
+    let walk = for_each_visible_offset(rep, base_bbox, local_view, |_, _| {
+        count += 1;
+        if count > limit {
+            return Err(WORK_BIN_COUNT_STOP.to_string());
+        }
+        Ok(())
+    });
+    match walk {
+        Ok(_) => count <= limit,
+        Err(_) => false,
+    }
+}
 
 /// Item cap (~64MB of items); past it the round falls back to the
 /// per-tile walk (`work_bin_items=0` telemetry), pixels unchanged.
@@ -977,20 +1005,26 @@ fn collect_cell(
         }
         let members = instance.rep.members();
         let weight = scene.subtree_item_weight(instance.child);
-        let expand = if members > 1 {
-            // Dense repetition: expanding multiplies the walk by the
-            // member count, so the product gate bounds collection time.
-            members.saturating_mul(weight) <= WORK_BIN_DEFER_MEMBERS
-        } else {
-            // A single placement is walked exactly once here versus
-            // once per tile (x planes) when deferred - §3.17 measured
-            // that re-walk at 9x the cover on a depth-limited chip
-            // view. Only the remaining item budget gates it: a visit
-            // can emit a few per-plane items, hence the safety factor;
-            // past the budget it defers instead of tripping the
-            // whole-frame walk fallback.
-            weight.saturating_mul(4) <= WORK_BIN_MAX_ITEMS.saturating_sub(bin.items)
-        };
+        let base_place =
+            OrthoTransform::place(instance.x, instance.y, instance.rot, instance.flip)?;
+        let base_bbox = base_place.apply_bbox(child_bbox)?;
+        // §3.17 uniform deferral gate: expansion is walked once here
+        // versus once per tile x plane when deferred (the depth-3 field
+        // view re-walked one deferred array at 9x the cover, 60.8M edge
+        // gates), so an instance defers only when its projected VISIBLE
+        // expansion - on-screen members x subtree item weight, with a
+        // x4 multi-plane safety factor - overruns the remaining item
+        // budget. A 1M-member array with three members on screen counts
+        // as three; the member count enumeration early-stops right past
+        // the budget, so huge visible arrays defer without a full scan.
+        // Past the budget it defers rather than tripping the
+        // whole-frame walk fallback, and the choice is pure policy:
+        // both paths paint identical pixels.
+        let budget = WORK_BIN_MAX_ITEMS.saturating_sub(bin.items) / 4;
+        let member_limit = budget / weight.max(1);
+        let expand = weight <= budget
+            && (members <= member_limit
+                || visible_members_within(&instance.rep, base_bbox, local_view, member_limit));
         if !expand {
             if members > 1 {
                 stats.work_bin_defer_rep = stats.work_bin_defer_rep.saturating_add(1);
@@ -1025,9 +1059,6 @@ fn collect_cell(
             }
             continue;
         }
-        let base_place =
-            OrthoTransform::place(instance.x, instance.y, instance.rot, instance.flip)?;
-        let base_bbox = base_place.apply_bbox(child_bbox)?;
         let mut cancel_member = 0u16;
         let visit = for_each_visible_offset(
             &instance.rep,
@@ -5129,11 +5160,12 @@ mod tests {
     }
 
     #[test]
-    fn work_bin_defers_dense_repetitions_instead_of_capping() {
-        // A 70x70 instance grid (4,900 members) crosses the deferral
-        // threshold: the bin must stay tiny (deferred items, no member
-        // expansion) and the pixels must still match the walk - the
-        // field failure mode was this shape blowing the 768k cap.
+    fn work_bin_expands_dense_repetitions_within_budget() {
+        // A 70x70 instance grid (4,900 members, weight 1) projects
+        // well inside the item budget, so the uniform §3.17 gate
+        // expands it - per-(visit,plane) items keep the volume linear
+        // in visible members, nowhere near the 768k cap - and the
+        // pixels must still match the walk.
         let top = (0, REM_FULL);
         let child = (1, REM_FULL);
         let unit = BBox {
@@ -5197,15 +5229,14 @@ mod tests {
         };
         let walk = render_geometry_styled_unbinned(&make_scene(), &request).unwrap();
         let bin = render_geometry_styled(&make_scene(), &request).unwrap();
-        assert!(bin.stats.work_bin_items > 0, "bin must engage");
         assert!(
-            bin.stats.work_bin_items < 100,
-            "dense grid must defer, not expand: {} items",
+            bin.stats.work_bin_items > 4000,
+            "dense grid within budget must expand: {} items",
             bin.stats.work_bin_items
         );
         assert_eq!(bin.stats.work_bin_overflow_items, 0, "no cap fallback");
-        assert!(bin.stats.work_bin_defer_rep > 0, "cause telemetry: rep");
-        assert_eq!(bin.stats.work_bin_defer_single, 0);
+        assert_eq!(bin.stats.work_bin_defer_rep, 0, "nothing deferred");
+        assert_eq!(bin.stats.work_bin_defer_single, 0, "nothing deferred");
         assert_eq!(bin.frame.pixels(), walk.frame.pixels());
         assert_eq!(
             bin.rectangle_member_paints,
@@ -5213,6 +5244,114 @@ mod tests {
         );
         assert_eq!(bin.frame_member_paints, walk.frame_member_paints);
         assert!(bin.rectangle_member_paints > 1000, "grid must paint");
+    }
+
+    #[test]
+    fn work_bin_defers_repetitions_past_the_visible_budget() {
+        // A 60x60 grid whose child weighs 64 projects 3,600 x 64 =
+        // 230k emitting visits - past the 192k member budget - with
+        // every member on screen, so the early-stopping visible count
+        // must defer it (one deferred edge, tiny bin) while the pixels
+        // still match the walk.
+        let top = (0, REM_FULL);
+        let mid = (1, REM_FULL);
+        let leaf = (2, REM_FULL);
+        let unit = BBox {
+            x0: 0,
+            y0: 0,
+            x1: 2,
+            y1: 2,
+        };
+        let mid_span = BBox {
+            x0: 0,
+            y0: 0,
+            x1: 32,
+            y1: 32,
+        };
+        let span = BBox {
+            x0: 0,
+            y0: 0,
+            x1: 320,
+            y1: 320,
+        };
+        let bounds = BTreeMap::from([(top, span), (mid, mid_span), (leaf, unit)]);
+        let make_scene = || {
+            let leaf_insts: Vec<WsInst> = (0..64)
+                .map(|index| WsInst {
+                    child: leaf,
+                    x: (index % 8) * 4,
+                    y: (index / 8) * 4,
+                    rot: 0,
+                    flip: false,
+                    rep: Rep::One,
+                })
+                .collect();
+            let plan = HierPlan {
+                top,
+                wcells: vec![
+                    WsCell {
+                        key: top,
+                        pages: Vec::new(),
+                        insts: vec![WsInst {
+                            child: mid,
+                            x: 2,
+                            y: 2,
+                            rot: 0,
+                            flip: false,
+                            rep: Rep::Grid {
+                                na: 60,
+                                nb: 60,
+                                va: (4, 0),
+                                vb: (0, 4),
+                            },
+                        }],
+                        frames: Vec::new(),
+                        washes: Vec::new(),
+                    },
+                    WsCell {
+                        key: mid,
+                        pages: Vec::new(),
+                        insts: leaf_insts,
+                        frames: Vec::new(),
+                        washes: Vec::new(),
+                    },
+                    WsCell {
+                        key: leaf,
+                        pages: vec![0],
+                        insts: Vec::new(),
+                        frames: Vec::new(),
+                        washes: Vec::new(),
+                    },
+                ],
+                pages: vec![0],
+                page_prio: vec![0],
+                stats: HierStats::default(),
+            };
+            FrameScene::from_test_parts(
+                plan,
+                vec![styled_page(0, 1, unit)],
+                bounds.clone(),
+            )
+            .unwrap()
+        };
+        let request = StyledGeometryRasterRequest {
+            hierarchy_frames: false,
+            ..hairline_request()
+        };
+        let walk = render_geometry_styled_unbinned(&make_scene(), &request).unwrap();
+        let bin = render_geometry_styled(&make_scene(), &request).unwrap();
+        assert_eq!(bin.stats.work_bin_defer_rep, 1, "one deferred edge");
+        assert!(
+            bin.stats.work_bin_items < 100,
+            "past-budget grid must defer: {} items",
+            bin.stats.work_bin_items
+        );
+        assert_eq!(bin.stats.work_bin_overflow_items, 0, "no cap fallback");
+        assert_eq!(bin.frame.pixels(), walk.frame.pixels());
+        assert_eq!(
+            bin.rectangle_member_paints,
+            walk.rectangle_member_paints
+        );
     }
 
     #[test]
