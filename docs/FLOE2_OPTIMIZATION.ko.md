@@ -784,13 +784,33 @@ trial의 낭비이며, 동시에 이 40만-item walk 자체가 ~100ms짜리로
 ~0.1s + 수집 ~0.2s + item 소비/decode). floe 993 동률권 진입 여부
 확인.
 
+**재측정 4차(0.12.31) — 상한 확정, 분기 실행**: `defer 0r+1s
+w610k` 불변 — 7/8(≈68.8만 item)까지 실제로 걷고도 초과. 이
+에지의 실제 item은 ~70만+로 **정적 weight(610k)보다 크고**(frontier
+cell이 여러 plane에 걸치는 per-(visit,plane) item 팽창), 전체
+cap(768k)으로도 못 담는 규모다. 예산 게임은 여기서 끝 — 문서에
+박아둔 분기대로 **tile-side 결합 walk를 구현했다(0.12.32)**:
+수집이 지연 에지를 `DeferredEdge` 레코드로 공유하고, tile은 자기
+view로 cull된 **mini 수집 walk를 에지당 1회**(기존 collect_cell
+재사용, trial 없음) 실행해 per-plane/frame 소비 시 mini의 DFS
+목록을 지연 item의 슬롯에서 재생한다 — plane별 hierarchy
+재walk(×planes)가 사라지고, tile 간 중복은 view culling으로 top
+하강부만 남는다. mini가 자체 cap을 넘거나 내부 재지연이 남으면
+기존 per-plane walk 폴백(byte 불변). trial soft limit은 1/2로
+환원(지연이 싸져 긴 헛trial이 손해). 검증: 95 tests — 롤백
+oracle을 2-layer+frames+tile8 구성으로 강화(다중 plane 재생 순서,
+frame band 재생, hier 감소 assert 포함 byte 동일). 기대: 이 뷰
+hier 923k(plane-곱 재walk) → 결합 1커버+top 하강(~15-25만),
+draw 감소 — 폭은 다음 라인으로 판정하고, 남은 격차는
+paints/decode 축으로 재분해한다.
+
 ## 4. 이슈 목록
 
 | ID | 우선순위 | 상태 | 요약 | 다음 판정 |
 |---|---:|---|---|---|
 | F2R-01 | P1 | `DONE` | cache hit까지 128-page refine | cache-aware batch/unit+현장 gate 완료 |
 | F2R-02 | P1 | `DONE` | 128px tile의 반복 hierarchy 순회 | 제품 기본 384px 승인 |
-| F2R-03 | P1 | `DOING` | tile x layer x hierarchy 총 CPU 작업량 | 구조 확정: 배열 전개 성공, 40만-item 단일 에지가 1/2 soft limit에 걸림 → 7/8 상향(0.12.31, §3.17) 재측정 대기. 03c는 이 뷰 무관(paints 1.2M) |
+| F2R-03 | P1 | `DOING` | tile x layer x hierarchy 총 CPU 작업량 | 에지 실측 ~70만+ item(cap 초과 확정) → tile-side 결합 mini walk(0.12.32, §3.17) 재측정 대기. 03c는 이 뷰 무관(paints 1.2M) |
 | F2R-04 | P1 | `DONE` | total에서 사라진 PNG/publish 37~44ms | write/sync/rename/handoff 계측 완료 |
 | F2R-05 | P2 | `DONE` | jobs=8의 CPU/전력 비용 | decode 8/raster 4 분리 승인 |
 | F2R-06 | P3 | `BLOCKED` | render마다 OS thread 생성 | startup_us가 병목일 때만 pool |
