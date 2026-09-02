@@ -739,6 +739,10 @@ struct WorkBin {
     /// Frame-carrying cell visits, DFS order; band-filtered at paint.
     frames: Vec<FrameItem>,
     items: u64,
+    /// Soft cap while a trial expansion runs (§3.17): charging past it
+    /// raises WORK_BIN_TRIAL_STOP so the edge rolls back and defers,
+    /// never the whole-frame fallback.
+    trial_limit: Option<u64>,
 }
 
 enum PlaneItem {
@@ -826,13 +830,47 @@ const WORK_BIN_MAX_ITEMS: u64 = 768 * 1024;
 /// the fallback instead of a render error.
 const WORK_BIN_OVERFLOW: &str = "work-bin item cap exceeded";
 
+/// Internal marker: a trial expansion ran past its soft item limit;
+/// the caller rolls the bin back and defers that one edge (§3.17 —
+/// static weights overcount nested full-member products, so the gate
+/// measures the real expansion instead of predicting it).
+const WORK_BIN_TRIAL_STOP: &str = "work-bin trial expansion stop";
+
+/// Bin state to restore when a trial expansion overruns its limit.
+struct WorkBinCheckpoint {
+    items: u64,
+    plane_lens: Vec<usize>,
+    frames_len: usize,
+}
+
 impl WorkBin {
     fn charge(&mut self) -> Result<(), String> {
         self.items += 1;
+        if let Some(limit) = self.trial_limit {
+            if self.items > limit {
+                return Err(WORK_BIN_TRIAL_STOP.to_string());
+            }
+        }
         if self.items > WORK_BIN_MAX_ITEMS {
             return Err(WORK_BIN_OVERFLOW.to_string());
         }
         Ok(())
+    }
+
+    fn checkpoint(&self) -> WorkBinCheckpoint {
+        WorkBinCheckpoint {
+            items: self.items,
+            plane_lens: self.planes.iter().map(Vec::len).collect(),
+            frames_len: self.frames.len(),
+        }
+    }
+
+    fn rollback(&mut self, checkpoint: &WorkBinCheckpoint) {
+        for (plane, &len) in self.planes.iter_mut().zip(&checkpoint.plane_lens) {
+            plane.truncate(len);
+        }
+        self.frames.truncate(checkpoint.frames_len);
+        self.items = checkpoint.items;
     }
 }
 
@@ -860,6 +898,7 @@ fn collect_work_bin(
         planes: (0..styled.layers.len()).map(|_| Vec::new()).collect(),
         frames: Vec::new(),
         items: 0,
+        trial_limit: None,
     };
     let mut path = Vec::new();
     // Stamped per-plane scratch: one row per plane, valid only while
@@ -1008,87 +1047,121 @@ fn collect_cell(
         let base_place =
             OrthoTransform::place(instance.x, instance.y, instance.rot, instance.flip)?;
         let base_bbox = base_place.apply_bbox(child_bbox)?;
-        // §3.17 uniform deferral gate: expansion is walked once here
-        // versus once per tile x plane when deferred (the depth-3 field
-        // view re-walked one deferred array at 9x the cover, 60.8M edge
-        // gates), so an instance defers only when its projected VISIBLE
-        // expansion - on-screen members x subtree item weight, with a
-        // x4 multi-plane safety factor - overruns the remaining item
-        // budget. A 1M-member array with three members on screen counts
-        // as three; the member count enumeration early-stops right past
-        // the budget, so huge visible arrays defer without a full scan.
-        // Past the budget it defers rather than tripping the
-        // whole-frame walk fallback, and the choice is pure policy:
-        // both paths paint identical pixels.
+        // §3.17 deferral gate, third iteration: expansion is walked
+        // once here versus once per tile x plane when deferred (the
+        // depth-3 field view re-walked one deferred array at 9x the
+        // cover, 60.8M edge gates). The static projection - visible
+        // members x subtree weight - overcounts nested repetitions
+        // (child weights multiply FULL member counts while the walk
+        // culls by view), so a fast-gate failure does not defer: it
+        // runs the REAL expansion against a soft item limit (half the
+        // remaining cap, always below the whole-frame fallback cap)
+        // and only an edge that truly overruns rolls back and defers.
+        // Deterministic in DFS order and collection is single-threaded,
+        // so jobs/tile counts cannot change the outcome, and either
+        // outcome paints identical pixels.
         let budget = WORK_BIN_MAX_ITEMS.saturating_sub(bin.items) / 4;
         let member_limit = budget / weight.max(1);
-        let expand = weight <= budget
+        let fast_expand = weight <= budget
             && (members <= member_limit
                 || visible_members_within(&instance.rep, base_bbox, local_view, member_limit));
-        if !expand {
-            if members > 1 {
-                stats.work_bin_defer_rep = stats.work_bin_defer_rep.saturating_add(1);
+        let mut trial: Option<(WorkBinCheckpoint, usize, Option<u64>)> = None;
+        let mut deferred = false;
+        if !fast_expand {
+            let headroom = WORK_BIN_MAX_ITEMS.saturating_sub(bin.items) / 2;
+            // subtree_intersects guaranteed queried content below this
+            // edge, so every visible member emits at least one item:
+            // more visible members than the soft cap is a certain
+            // overrun - defer without paying a doomed trial walk.
+            if members > headroom
+                && !visible_members_within(&instance.rep, base_bbox, local_view, headroom)
+            {
+                deferred = true;
             } else {
-                stats.work_bin_defer_single = stats.work_bin_defer_single.saturating_add(1);
-                stats.work_bin_defer_single_weight_max =
-                    stats.work_bin_defer_single_weight_max.max(weight);
+                let limit = bin
+                    .items
+                    .saturating_add(headroom)
+                    .min(bin.trial_limit.unwrap_or(u64::MAX));
+                trial = Some((bin.checkpoint(), path.len(), bin.trial_limit.replace(limit)));
             }
-            // One deferred item per plane the subtree can actually
-            // paint (the walk's own per-plane descent gate), plus one
-            // for the band walks.
-            for (plane, bit) in plane_bits.iter().enumerate() {
-                if scene.subtree_paints(instance.child, *bit) {
-                    bin.charge()?;
-                    bin.planes[plane].push(PlaneItem::Deferred {
-                        transform: world_transform,
-                        inverse,
-                        cell: key,
-                        inst: inst_index,
-                        bit: *bit,
-                    });
+        }
+        if !deferred {
+            let mut cancel_member = 0u16;
+            let attempt = for_each_visible_offset(
+                &instance.rep,
+                base_bbox,
+                local_view,
+                |offset_x, offset_y| {
+                    check_member_cancelled(guard, &mut cancel_member)?;
+                    let x = checked_add(instance.x, offset_x, "instance x")?;
+                    let y = checked_add(instance.y, offset_y, "instance y")?;
+                    let local = OrthoTransform::place(x, y, instance.rot, instance.flip)?;
+                    let child_world = world_transform.compose(&local)?;
+                    collect_cell(
+                        scene,
+                        bin,
+                        plane_of,
+                        query,
+                        plane_bits,
+                        want_frames,
+                        cull_view,
+                        guard,
+                        instance.child,
+                        child_world,
+                        path,
+                        plane_scratch,
+                        visit_seq,
+                        stats,
+                    )
+                },
+            );
+            if let Some((checkpoint, path_len, outer_limit)) = trial {
+                bin.trial_limit = outer_limit;
+                if matches!(&attempt, Err(error) if error.as_str() == WORK_BIN_TRIAL_STOP) {
+                    // The edge measured past its soft limit: restore
+                    // the bin and the DFS path exactly and defer it.
+                    bin.rollback(&checkpoint);
+                    path.truncate(path_len);
+                    deferred = true;
                 }
             }
-            if want_frames && scene.subtree_has_frames(instance.child) {
+            if !deferred {
+                let visit = attempt?;
+                stats.rep_members_tested =
+                    stats.rep_members_tested.saturating_add(visit.tested);
+                continue;
+            }
+        }
+        if members > 1 {
+            stats.work_bin_defer_rep = stats.work_bin_defer_rep.saturating_add(1);
+        } else {
+            stats.work_bin_defer_single = stats.work_bin_defer_single.saturating_add(1);
+        }
+        stats.work_bin_defer_weight_max = stats.work_bin_defer_weight_max.max(weight);
+        // One deferred item per plane the subtree can actually paint
+        // (the walk's own per-plane descent gate), plus one for the
+        // band walks.
+        for (plane, bit) in plane_bits.iter().enumerate() {
+            if scene.subtree_paints(instance.child, *bit) {
                 bin.charge()?;
-                bin.frames.push(FrameItem::Deferred {
+                bin.planes[plane].push(PlaneItem::Deferred {
                     transform: world_transform,
                     inverse,
                     cell: key,
                     inst: inst_index,
+                    bit: *bit,
                 });
             }
-            continue;
         }
-        let mut cancel_member = 0u16;
-        let visit = for_each_visible_offset(
-            &instance.rep,
-            base_bbox,
-            local_view,
-            |offset_x, offset_y| {
-                check_member_cancelled(guard, &mut cancel_member)?;
-                let x = checked_add(instance.x, offset_x, "instance x")?;
-                let y = checked_add(instance.y, offset_y, "instance y")?;
-                let local = OrthoTransform::place(x, y, instance.rot, instance.flip)?;
-                let child_world = world_transform.compose(&local)?;
-                collect_cell(
-                    scene,
-                    bin,
-                    plane_of,
-                    query,
-                    plane_bits,
-                    want_frames,
-                    cull_view,
-                    guard,
-                    instance.child,
-                    child_world,
-                    path,
-                    plane_scratch,
-                    visit_seq,
-                    stats,
-                )
-            },
-        )?;
-        stats.rep_members_tested = stats.rep_members_tested.saturating_add(visit.tested);
+        if want_frames && scene.subtree_has_frames(instance.child) {
+            bin.charge()?;
+            bin.frames.push(FrameItem::Deferred {
+                transform: world_transform,
+                inverse,
+                cell: key,
+                inst: inst_index,
+            });
+        }
     }
     path.pop();
     Ok(())
@@ -5247,12 +5320,12 @@ mod tests {
     }
 
     #[test]
-    fn work_bin_defers_repetitions_past_the_visible_budget() {
+    fn work_bin_trial_expands_past_pessimistic_projection() {
         // A 60x60 grid whose child weighs 64 projects 3,600 x 64 =
-        // 230k emitting visits - past the 192k member budget - with
-        // every member on screen, so the early-stopping visible count
-        // must defer it (one deferred edge, tiny bin) while the pixels
-        // still match the walk.
+        // 230k - past the x4-factored fast gate - but its real
+        // expansion (234k items) fits the trial's soft limit (half the
+        // cap), so the measured trial must expand it instead of
+        // trusting the pessimistic projection (§3.17 third iteration).
         let top = (0, REM_FULL);
         let mid = (1, REM_FULL);
         let leaf = (2, REM_FULL);
@@ -5340,12 +5413,121 @@ mod tests {
         };
         let walk = render_geometry_styled_unbinned(&make_scene(), &request).unwrap();
         let bin = render_geometry_styled(&make_scene(), &request).unwrap();
-        assert_eq!(bin.stats.work_bin_defer_rep, 1, "one deferred edge");
+        assert_eq!(bin.stats.work_bin_defer_rep, 0, "trial must expand");
+        assert_eq!(bin.stats.work_bin_defer_single, 0);
         assert!(
-            bin.stats.work_bin_items < 100,
-            "past-budget grid must defer: {} items",
+            bin.stats.work_bin_items > 200_000,
+            "the measured expansion must land in the bin: {} items",
             bin.stats.work_bin_items
         );
+        assert_eq!(bin.stats.work_bin_overflow_items, 0, "no cap fallback");
+        assert_eq!(bin.frame.pixels(), walk.frame.pixels());
+        assert_eq!(
+            bin.rectangle_member_paints,
+            walk.rectangle_member_paints
+        );
+    }
+
+    #[test]
+    fn work_bin_trial_rolls_back_edges_that_truly_overrun() {
+        // A 100x70 grid of weight-64 subtrees really emits 448k items -
+        // past the trial's soft limit (half the 768k cap) - so the
+        // trial must stop, roll the bin and DFS path back exactly, and
+        // defer that one edge, still byte-identical to the walk.
+        let top = (0, REM_FULL);
+        let mid = (1, REM_FULL);
+        let leaf = (2, REM_FULL);
+        let unit = BBox {
+            x0: 0,
+            y0: 0,
+            x1: 2,
+            y1: 2,
+        };
+        let mid_span = BBox {
+            x0: 0,
+            y0: 0,
+            x1: 32,
+            y1: 32,
+        };
+        let span = BBox {
+            x0: 0,
+            y0: 0,
+            x1: 320,
+            y1: 320,
+        };
+        let bounds = BTreeMap::from([(top, span), (mid, mid_span), (leaf, unit)]);
+        let make_scene = || {
+            let leaf_insts: Vec<WsInst> = (0..64)
+                .map(|index| WsInst {
+                    child: leaf,
+                    x: (index % 8) * 4,
+                    y: (index / 8) * 4,
+                    rot: 0,
+                    flip: false,
+                    rep: Rep::One,
+                })
+                .collect();
+            let plan = HierPlan {
+                top,
+                wcells: vec![
+                    WsCell {
+                        key: top,
+                        pages: Vec::new(),
+                        insts: vec![WsInst {
+                            child: mid,
+                            x: 2,
+                            y: 2,
+                            rot: 0,
+                            flip: false,
+                            rep: Rep::Grid {
+                                na: 100,
+                                nb: 70,
+                                va: (2, 0),
+                                vb: (0, 4),
+                            },
+                        }],
+                        frames: Vec::new(),
+                        washes: Vec::new(),
+                    },
+                    WsCell {
+                        key: mid,
+                        pages: Vec::new(),
+                        insts: leaf_insts,
+                        frames: Vec::new(),
+                        washes: Vec::new(),
+                    },
+                    WsCell {
+                        key: leaf,
+                        pages: vec![0],
+                        insts: Vec::new(),
+                        frames: Vec::new(),
+                        washes: Vec::new(),
+                    },
+                ],
+                pages: vec![0],
+                page_prio: vec![0],
+                stats: HierStats::default(),
+            };
+            FrameScene::from_test_parts(
+                plan,
+                vec![styled_page(0, 1, unit)],
+                bounds.clone(),
+            )
+            .unwrap()
+        };
+        let request = StyledGeometryRasterRequest {
+            hierarchy_frames: false,
+            ..hairline_request()
+        };
+        let walk = render_geometry_styled_unbinned(&make_scene(), &request).unwrap();
+        let bin = render_geometry_styled(&make_scene(), &request).unwrap();
+        assert_eq!(bin.stats.work_bin_defer_rep, 1, "one rolled-back edge");
+        assert!(
+            bin.stats.work_bin_items < 100,
+            "rollback must leave a tiny bin: {} items",
+            bin.stats.work_bin_items
+        );
+        assert!(bin.stats.work_bin_defer_weight_max >= 64);
         assert_eq!(bin.stats.work_bin_overflow_items, 0, "no cap fallback");
         assert_eq!(bin.frame.pixels(), walk.frame.pixels());
         assert_eq!(
@@ -5449,7 +5631,7 @@ mod tests {
         assert_eq!(bin.stats.work_bin_overflow_items, 0, "no cap fallback");
         assert_eq!(bin.stats.work_bin_defer_rep, 0, "nothing deferred");
         assert_eq!(bin.stats.work_bin_defer_single, 0, "nothing deferred");
-        assert_eq!(bin.stats.work_bin_defer_single_weight_max, 0);
+        assert_eq!(bin.stats.work_bin_defer_weight_max, 0);
         assert!(
             bin.stats.hier_cells_visited < walk.stats.hier_cells_visited / 4,
             "expanded bin must not re-walk the block per tile: {} vs walk {}",

@@ -24,14 +24,12 @@ pub struct RenderStats {
     /// Items reached when the bin hit its cap and fell back to the
     /// per-tile walk (0 = no overflow).
     pub work_bin_overflow_items: u64,
-    /// Deferral edges by cause (§3.17 diagnosis): repetitions past the
-    /// member-product gate, single placements past the remaining item
-    /// budget, and the largest single-placement weight so deferred -
-    /// tells whether the next lever is rep expansion or a budget
-    /// factor change.
+    /// Deferral edges by cause (§3.17 diagnosis): repetition edges vs
+    /// single placements that measured past the trial item budget,
+    /// with the largest static weight among them.
     pub work_bin_defer_rep: u64,
     pub work_bin_defer_single: u64,
-    pub work_bin_defer_single_weight_max: u64,
+    pub work_bin_defer_weight_max: u64,
     pub png_us: u64,
     pub tiles: u32,
     pub workers_used: u16,

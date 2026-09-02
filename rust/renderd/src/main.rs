@@ -740,7 +740,7 @@ struct FramePixels {
     work_bin_overflow_items: u64,
     work_bin_defer_rep: u64,
     work_bin_defer_single: u64,
-    work_bin_defer_single_weight_max: u64,
+    work_bin_defer_weight_max: u64,
     png_us: u64,
     workers_used: u16,
     tiles: u32,
@@ -1451,7 +1451,7 @@ fn run_render(
                 work_bin_overflow_items: 0,
                 work_bin_defer_rep: 0,
                 work_bin_defer_single: 0,
-                work_bin_defer_single_weight_max: 0,
+                work_bin_defer_weight_max: 0,
                 png_us: 0,
                 workers_used: 0,
                 tiles: 0,
@@ -1522,9 +1522,9 @@ fn run_render(
                 work_bin_overflow_items: report.stats.work_bin_overflow_items,
                 work_bin_defer_rep: report.stats.work_bin_defer_rep,
                 work_bin_defer_single: report.stats.work_bin_defer_single,
-                work_bin_defer_single_weight_max: report
+                work_bin_defer_weight_max: report
                     .stats
-                    .work_bin_defer_single_weight_max,
+                    .work_bin_defer_weight_max,
                 png_us,
                 workers_used: report.stats.workers_used,
                 tiles: report.stats.tiles,
@@ -1625,7 +1625,7 @@ fn run_render(
                 pixels.work_bin_overflow_items,
                 pixels.work_bin_defer_rep,
                 pixels.work_bin_defer_single,
-                pixels.work_bin_defer_single_weight_max,
+                pixels.work_bin_defer_weight_max,
                 pixels.png_us,
                 publish_stats.write_us,
                 publish_stats.sync_us,

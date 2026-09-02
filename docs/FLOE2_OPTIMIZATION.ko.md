@@ -745,13 +745,34 @@ walk 폴백 방지). 순수 정책이라 byte 불변이 기존 oracle로 보증�
 기대: 이 뷰의 배열이 전개되어 hier 923k→~10만(수집 1커버), draw
 1,978→~1.0-1.2s(floe 993 동률권). 실칩 재측정 대기.
 
+**재측정 2차(0.12.29) — 다시 null, 원인은 투영 자체**: `defer
+1r+0s`, hier 923k 불변 — 가시-member×weight 투영조차 예산 초과로
+판정됐다. weight 계산(§F2R-03 2b SceneMasks)은 post-order로 전
+cell을 덮는 정상 구현이므로, 남는 설명은 **중첩 반복의 구조적
+과대계상**이다: weight는 하위 rep의 **전체** member 수를 곱해
+올라가는 반면 실제 walk는 view-cull로 그 일부만 걷는다(×4 안전계수
+과보수 가능성 중첩). 두 번의 예측 실패로 **예측을 버리고 측정으로
+전환했다(0.12.30)**: fast gate가 실패해도 즉시 지연하지 않고 **soft
+limit(잔여 cap의 절반, 전-frame 폴백 cap보다 항상 아래)을 건 실제
+전개(trial)**를 수행하고, 정말 초과한 에지만 bin과 DFS 경로를
+정확히 롤백한 뒤 지연한다. 가시 member 수 자체가 soft cap을 넘는
+확실-초과는 trial 없이 지연(조기 중단 카운트, member당 최소 1
+item이 보장되므로 보수적으로 성립). 수집은 단일 스레드·DFS 순서
+결정적이라 결과가 jobs/tile 수와 무관하고 byte 동일이 유지된다.
+테스트 95개: 투영 230k/실측 234k grid는 trial로 **전개**, 실측
+448k grid는 **롤백 후 지연**(둘 다 byte 동일). 기대: 실칩 배열의
+실측 item이 soft cap(≈38만) 이하라면 전개 — perf 라인 `defer
+0r+0s` 확인. **그래도 `1r`이면** 실제 전개가 38만 item을 넘는
+규모라는 뜻이며, 그때는 예산 조정이 아니라 tile-side 결합
+walk(지연 에지의 plane 곱 제거)로 간다.
+
 ## 4. 이슈 목록
 
 | ID | 우선순위 | 상태 | 요약 | 다음 판정 |
 |---|---:|---|---|---|
 | F2R-01 | P1 | `DONE` | cache hit까지 128-page refine | cache-aware batch/unit+현장 gate 완료 |
 | F2R-02 | P1 | `DONE` | 128px tile의 반복 hierarchy 순회 | 제품 기본 384px 승인 |
-| F2R-03 | P1 | `DOING` | tile x layer x hierarchy 총 CPU 작업량 | 원인 확정(defer 1r, paints 1.2M) → 가시-member 예산 gate로 통합(0.12.29, §3.17) 실칩 재측정 대기. 03c는 이 뷰 무관 확정 |
+| F2R-03 | P1 | `DOING` | tile x layer x hierarchy 총 CPU 작업량 | 투영 gate 2연속 null → trial 전개+롤백(0.12.30, §3.17) 실칩 재측정 대기. 03c는 이 뷰 무관 확정(paints 1.2M) |
 | F2R-04 | P1 | `DONE` | total에서 사라진 PNG/publish 37~44ms | write/sync/rename/handoff 계측 완료 |
 | F2R-05 | P2 | `DONE` | jobs=8의 CPU/전력 비용 | decode 8/raster 4 분리 승인 |
 | F2R-06 | P3 | `BLOCKED` | render마다 OS thread 생성 | startup_us가 병목일 때만 pool |
