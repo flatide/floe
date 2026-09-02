@@ -804,13 +804,30 @@ hier 923k(plane-곱 재walk) → 결합 1커버+top 하강(~15-25만),
 draw 감소 — 폭은 다음 라인으로 판정하고, 남은 격차는
 paints/decode 축으로 재분해한다.
 
+**최종 판정(2026-09-02, 0.12.32 실칩)**: **833ms = 475 load + 332
+draw**, bin 7,521, defer 0r+1s(설계대로 — cap 초과 에지는 mini가
+소화), paints 1.2M 불변, **hier 424k/276k pruned** — gate 검사
+60.8M→276k(220배), draw 2,067→**332ms(6.2배)**. 이 depth-3 뷰의
+경과: draw 1,929~2,115 → 332ms로 **floe(993ms) 대비 3.0배 우세**,
+total 2,413~2,496 → 833ms로 **floe(4,602ms) 대비 5.5배 우세**.
+F2R-03 2c의 deferred-subtree 지렛대는 이것으로 **소진 완료**다.
+
+남은 신호 두 가지(둘 다 비긴급): ① 실패 trial ~90ms/frame(1/2
+limit까지 걷고 롤백하는 수집 몫 — draw 332의 ~27%)은 trial limit
+축소로 줄일 수 있으나 mid-size 에지의 전개 이득과 상충해 실측
+요구가 생길 때만 조정. ② 이제 이 뷰의 최대 단일 성분은 **plan
+~350ms**(load 475의 대부분) — pan 실측(§3.16)의 plan+text 재실행
+~237ms와 같은 축이며, 인접 뷰 plan 재사용이 다음 후보라는 판정을
+재확인한다. 별개로 mid-zoom full-depth 뷰(§3.15, hier 1.6M
+잔여)도 mini walk의 수혜가 예상되므로 재측정 1회 권장.
+
 ## 4. 이슈 목록
 
 | ID | 우선순위 | 상태 | 요약 | 다음 판정 |
 |---|---:|---|---|---|
 | F2R-01 | P1 | `DONE` | cache hit까지 128-page refine | cache-aware batch/unit+현장 gate 완료 |
 | F2R-02 | P1 | `DONE` | 128px tile의 반복 hierarchy 순회 | 제품 기본 384px 승인 |
-| F2R-03 | P1 | `DOING` | tile x layer x hierarchy 총 CPU 작업량 | 에지 실측 ~70만+ item(cap 초과 확정) → tile-side 결합 mini walk(0.12.32, §3.17) 재측정 대기. 03c는 이 뷰 무관(paints 1.2M) |
+| F2R-03 | P1 | `DOING` | tile x layer x hierarchy 총 CPU 작업량 | 2c 완결(§3.17 최종): depth-3 뷰 draw 2,067→332ms, gate 220배 감소, floe 대비 draw 3배·total 5.5배. 남음: 03c(트리거 미발화 유지) |
 | F2R-04 | P1 | `DONE` | total에서 사라진 PNG/publish 37~44ms | write/sync/rename/handoff 계측 완료 |
 | F2R-05 | P2 | `DONE` | jobs=8의 CPU/전력 비용 | decode 8/raster 4 분리 승인 |
 | F2R-06 | P3 | `BLOCKED` | render마다 OS thread 생성 | startup_us가 병목일 때만 pool |
@@ -1378,10 +1395,17 @@ WEBUI_PLAN 수렴: T2(loopback raw RGBA)의 payload가 이 포맷 그대로다
    ~50ms/frame + 주 스레드 디코드 제거. 같은 실측에서 pan 1步의
    잔여 비용 순서도 확정 — 재raster ~1.18s(gated), plan+text plan
    ~237ms(비gated 후보, pan UX 요구 발생 시 1순위).
-7. 1024-page를 넘는 장시간 cold fixture로 F2R-11 final-tile streaming의 first/settled
+7. 완료(2026-09-02): F2R-03 2c deferred-subtree 지렛대 소진
+   (0.12.27~32, §3.17) — 실칩 5회 왕복으로 원인 축차 확정(투영
+   과대계상 → trial 실측 → cap 초과 확정) 후 tile-side 결합 mini
+   walk로 종결. depth-3 실칩 뷰 draw 2,067→332ms(gate 220배 감소),
+   floe 대비 draw 3.0배·total 5.5배. 남은 비긴급 신호: 실패 trial
+   ~90ms/frame, plan ~350ms(이제 최대 단일 성분 — pan plan 재사용
+   후보와 동일 축). mid-zoom 뷰(§3.15) 재측정 1회 권장.
+8. 1024-page를 넘는 장시간 cold fixture로 F2R-11 final-tile streaming의 first/settled
    이득을 측정한 뒤 protocol 변경 여부를 결정한다. 500~700ms 이하 작업에는 refinement를
    만들지 않는다. 기본 no-refinement 채택 후 동기가 약해져 후순위다.
-8. F2R-06은 thread startup 실측이 frame의 5%를 넘을 때만 수행한다. 대표 실칩에서
+9. F2R-06은 thread startup 실측이 frame의 5%를 넘을 때만 수행한다. 대표 실칩에서
    4-worker tail imbalance가 확인될 때만 bounded adaptive tile/jobs를 다시 연다.
 
 각 완료 항목은 이 표의 상태, before/after 중앙값, 실행 명령, 적용 커밋과 자동 gate를
