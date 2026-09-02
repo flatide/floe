@@ -505,6 +505,8 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "png_us": "6000", "publish_write_us": "7000",
                 "publish_sync_us": "8000", "publish_rename_us": "9000",
                 "cache_hit": "14", "frame_cache_hit": "1",
+                "bin_defer_rep": "2", "bin_defer_single": "1",
+                "bin_defer_wmax": "5000",
                 "resident_bytes": str(15 * 1024 * 1024),
                 "decode_workers": "3", "workers": "4", "tiles": "16",
                 "tile_px": "128",
@@ -551,6 +553,11 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertEqual(result["text_place_records"], 13)
             self.assertEqual(result["labels"], 2)
             self.assertEqual(result["label_pixel_paints"], 40)
+            self.assertEqual(result["work_bin_defer_rep"], 2)
+            self.assertEqual(result["work_bin_defer_single"], 1)
+            self.assertEqual(result["work_bin_defer_wmax"], 5000)
+            # rect 6 + polygon 7 + path 8 + frame 9
+            self.assertEqual(result["member_paints"], 30)
             self.assertNotIn("labels_truncated", result)
             self.assertNotIn("drawn", result)
             self.assertNotIn("refining", result)

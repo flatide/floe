@@ -42,6 +42,8 @@ PHASE_FIELDS = (
     "frame_width", "frame_height", "tiles",
     "wc_cells", "inst_edges", "frame_rects", "text_place_records",
     "labels", "label_tile_paints", "label_pixel_paints",
+    "work_bin_defer_rep", "work_bin_defer_single", "work_bin_defer_wmax",
+    "member_paints",
     # F2R diagnostics: refinement rounds, decode pool utilization and
     # stragglers, record-index build share, raster tail, traversal size
     "rounds", "decode_sum_ms", "decode_max_ms", "index_ms",

@@ -494,6 +494,8 @@ class RustRenderWorker:
             "rounds": 0, "decode_sum_us": 0, "decode_max_us": 0,
             "index_us": 0, "raster_tile_max_us": 0, "mask_bytes": 0,
             "bin_items": 0, "bin_overflow": 0,
+            "defer_rep": 0, "defer_single": 0, "defer_wmax": 0,
+            "member_paints": 0,
             "rep_tested": 0, "rep_drawn": 0,
             "hier_cells": 0, "subtree_prunes": 0,
         }
@@ -949,6 +951,15 @@ class RustRenderWorker:
         state["bin_items"] += _wire_int(fields, "bin_items")
         state["bin_overflow"] = max(
             state["bin_overflow"], _wire_int(fields, "bin_overflow"))
+        state["defer_rep"] += _wire_int(fields, "bin_defer_rep")
+        state["defer_single"] += _wire_int(fields, "bin_defer_single")
+        state["defer_wmax"] = max(
+            state["defer_wmax"], _wire_int(fields, "bin_defer_wmax"))
+        state["member_paints"] += (
+            _wire_int(fields, "rect_paints") +
+            _wire_int(fields, "polygon_paints") +
+            _wire_int(fields, "path_paints") +
+            _wire_int(fields, "frame_paints"))
         state["rep_tested"] += _wire_int(fields, "rep_tested")
         state["rep_drawn"] += _wire_int(fields, "rep_drawn")
         state["hier_cells"] += _wire_int(fields, "hier_cells")
@@ -1030,6 +1041,14 @@ class RustRenderWorker:
             "mask_mb": state["mask_bytes"] / (1024.0 * 1024.0),
             "work_bin_items": state["bin_items"],
             "work_bin_overflow_items": state["bin_overflow"],
+            # deferral cause split (§3.17): repetition-gate vs
+            # single-placement budget, with the largest single weight
+            "work_bin_defer_rep": state["defer_rep"],
+            "work_bin_defer_single": state["defer_single"],
+            "work_bin_defer_wmax": state["defer_wmax"],
+            # geometry member paints (rect+polygon+path+frame) - the
+            # paint-domination axis for the F2R-03c verdict
+            "member_paints": state["member_paints"],
             "rep_members_tested": state["rep_tested"],
             "rep_members_drawn": state["rep_drawn"],
             "hier_cells_visited": state["hier_cells"],

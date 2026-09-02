@@ -992,6 +992,13 @@ fn collect_cell(
             weight.saturating_mul(4) <= WORK_BIN_MAX_ITEMS.saturating_sub(bin.items)
         };
         if !expand {
+            if members > 1 {
+                stats.work_bin_defer_rep = stats.work_bin_defer_rep.saturating_add(1);
+            } else {
+                stats.work_bin_defer_single = stats.work_bin_defer_single.saturating_add(1);
+                stats.work_bin_defer_single_weight_max =
+                    stats.work_bin_defer_single_weight_max.max(weight);
+            }
             // One deferred item per plane the subtree can actually
             // paint (the walk's own per-plane descent gate), plus one
             // for the band walks.
@@ -5197,6 +5204,8 @@ mod tests {
             bin.stats.work_bin_items
         );
         assert_eq!(bin.stats.work_bin_overflow_items, 0, "no cap fallback");
+        assert!(bin.stats.work_bin_defer_rep > 0, "cause telemetry: rep");
+        assert_eq!(bin.stats.work_bin_defer_single, 0);
         assert_eq!(bin.frame.pixels(), walk.frame.pixels());
         assert_eq!(
             bin.rectangle_member_paints,
@@ -5299,6 +5308,9 @@ mod tests {
             bin.stats.work_bin_items
         );
         assert_eq!(bin.stats.work_bin_overflow_items, 0, "no cap fallback");
+        assert_eq!(bin.stats.work_bin_defer_rep, 0, "nothing deferred");
+        assert_eq!(bin.stats.work_bin_defer_single, 0, "nothing deferred");
+        assert_eq!(bin.stats.work_bin_defer_single_weight_max, 0);
         assert!(
             bin.stats.hier_cells_visited < walk.stats.hier_cells_visited / 4,
             "expanded bin must not re-walk the block per tile: {} vs walk {}",

@@ -709,13 +709,29 @@ cold, 사용자):
 잔여 신호: tile-max 714ms(draw wall의 37%, F2R-06 관찰 지속),
 dec sum 776/idx 125ms(decode 비병목 유지).
 
+**재측정(2026-09-02, 0.12.27) — null**: 2,496ms = 490 load + 1,978
+draw, bin 3,017 items, hier 923k/60.8M — 항목 4의 members=1 전개
+gate가 이 뷰에서 **전혀 발화하지 않았다**(bin/hier/draw 불변). 남은
+가설 두 가지: (a) 지연 원인이 반복 배열(members>1 — 기존 gate가
+그대로 지연), (b) 단일 블록이지만 weight×4가 잔여 예산을 초과(예산
+계수 과보수). 추측으로 정책을 재변경하는 대신 **지연 원인
+telemetry(0.12.28)**를 추가했다: perf 라인 bin 세그먼트가
+`(defer Nr+Ns wNNN)` — r=반복 gate 지연 에지 수, s=단일 예산 지연
+에지 수, w=지연된 최대 단일 weight — 를 찍고, 새 `paints N`(rect+
+polygon+path+frame member paint 합)이 paint 지배 여부(F2R-03c 축)를
+같은 라인에서 보여준다. **다음 한 줄로 판정한다**: defer가 r
+지배 → 반복 전개를 예산 gate로 통합하는 설계(수집 serial 대
+tile-parallel 트레이드오프 포함), s 지배 → 예산 계수 조정(즉시),
+둘 다 소수인데 paints가 크면(floe ~12.9M급 이상) → F2R-03c 트리거
+재판정.
+
 ## 4. 이슈 목록
 
 | ID | 우선순위 | 상태 | 요약 | 다음 판정 |
 |---|---:|---|---|---|
 | F2R-01 | P1 | `DONE` | cache hit까지 128-page refine | cache-aware batch/unit+현장 gate 완료 |
 | F2R-02 | P1 | `DONE` | 128px tile의 반복 hierarchy 순회 | 제품 기본 384px 승인 |
-| F2R-03 | P1 | `DOING` | tile x layer x hierarchy 총 CPU 작업량 | 03b 완료 + 2c 지연 gate 재조정(§3.17, 0.12.27) 실칩 재측정 대기. 남음: 03c(1bpp plane) |
+| F2R-03 | P1 | `DOING` | tile x layer x hierarchy 총 CPU 작업량 | 2c 재조정(0.12.27) 실칩 null → 지연 원인 telemetry(0.12.28)로 판정 대기(§3.17). 남음: 03c(1bpp plane) |
 | F2R-04 | P1 | `DONE` | total에서 사라진 PNG/publish 37~44ms | write/sync/rename/handoff 계측 완료 |
 | F2R-05 | P2 | `DONE` | jobs=8의 CPU/전력 비용 | decode 8/raster 4 분리 승인 |
 | F2R-06 | P3 | `BLOCKED` | render마다 OS thread 생성 | startup_us가 병목일 때만 pool |

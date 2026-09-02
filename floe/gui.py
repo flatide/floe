@@ -2712,11 +2712,30 @@ class Viewer:
                     if res.get("work_bin_items"):
                         text += ", bin %s items" % fmt_count(
                             res["work_bin_items"])
+                        # deferral causes: Nr = repetition edges past
+                        # the member-product gate, Ns = single
+                        # placements past the item budget (wNNN = the
+                        # heaviest such subtree weight) - names the
+                        # next 2c lever without a diagnostic build
+                        if res.get("work_bin_defer_rep") or \
+                                res.get("work_bin_defer_single"):
+                            text += " (defer %sr+%ss w%s)" % (
+                                fmt_count(res.get(
+                                    "work_bin_defer_rep", 0)),
+                                fmt_count(res.get(
+                                    "work_bin_defer_single", 0)),
+                                fmt_count(res.get(
+                                    "work_bin_defer_wmax", 0)))
                     elif res.get("work_bin_overflow_items"):
                         # bin hit its item cap and fell back to the
                         # per-tile walk (pixels identical, slower)
                         text += ", bin off(cap@%s)" % fmt_count(
                             res["work_bin_overflow_items"])
+                    if res.get("member_paints"):
+                        # geometry member paints - the paint-vs-
+                        # traversal split for the F2R-03c judgment
+                        text += ", paints %s" % fmt_count(
+                            res["member_paints"])
                     if res.get("hier_cells_visited"):
                         text += ", hier %s/%s pruned" % (
                             fmt_count(res["hier_cells_visited"]),
