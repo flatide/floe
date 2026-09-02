@@ -562,7 +562,10 @@ on/off draw 격차가 유의미할 때만** 착수한다. 이 뷰의 최종 경�
 1,667ms** (동일 토글 floe ~5.1s 대비 3.1배, 원점 대비 7배). 남은
 draw 격차 ~0.2초의 다음 지렛대는 F2R-03c(1bpp plane)와 deferred
 subtree의 tile binning이며, 우선순위는 다른 축(F2R-10 재방문
-sweep 등) 실측 후 판단한다.
+sweep 등) 실측 후 판단한다. **[갱신 2026-09-02: deferred-subtree
+지렛대(§3.17, 0.12.32)로 이 뷰는 894ms까지 내려갔다 — 원점 대비
+13배, floe 대비 5.7배, draw는 498ms로 frames-off floe(1,101ms)의
+2.2배 우세. 잔여 격차는 소멸.]**
 
 §3.13의 "load 10초+/draw 5초+" 지점을 0.12.19 telemetry로 실측한
 결과 (view 100.0×96.6µm, 824x796, cut<0.122µm, 5698 pages/+5616
@@ -821,13 +824,30 @@ limit까지 걷고 롤백하는 수집 몫 — draw 332의 ~27%)은 trial limit
 재확인한다. 별개로 mid-zoom full-depth 뷰(§3.15, hier 1.6M
 잔여)도 mini walk의 수혜가 예상되므로 재측정 1회 권장.
 
+**spillover 확인 — §3.15 문제 뷰(2026-09-02, 0.12.32)**: 같은
+빌드로 mid-zoom full-depth 뷰 재측정 —
+
+| | total | load | draw | 신호 |
+|---|---:|---:|---:|---|
+| frames off | 894ms | 364 | **498** | bin 154k, defer 2r(w447k, mini 소화), paints 1.9M, hier 331k/**8,951** |
+| frames on | 964ms | 351 | 507 | 동일 (draw +9ms — frames 무료 재확인) |
+
+hier 1.6M/23.5M → 331k/8,951(gate 2,600배 감소), draw
+1,284→498ms(2.6배). **원점 11,656 → 894ms(13배)**; 동일 토글 floe
+~5.1s 대비 **5.7배**, draw는 frames-off floe 1,101ms 대비 **2.2배
+우세**(0.12.25 시점의 "18% 열세"는 우세로 반전). frames on도
+964ms로 floe 6,220 대비 6.5배. 이로써 추적한 두 실칩 뷰(mid-zoom
+full-depth·depth-3)와 pan 축 전부에서 floe 대비 우세가 확정됐고,
+2c는 두 뷰 모두에서 완결이다. 남은 공통 최대 성분은 plan
+(216~350ms) — 인접 뷰 plan 재사용 후보 하나로 수렴.
+
 ## 4. 이슈 목록
 
 | ID | 우선순위 | 상태 | 요약 | 다음 판정 |
 |---|---:|---|---|---|
 | F2R-01 | P1 | `DONE` | cache hit까지 128-page refine | cache-aware batch/unit+현장 gate 완료 |
 | F2R-02 | P1 | `DONE` | 128px tile의 반복 hierarchy 순회 | 제품 기본 384px 승인 |
-| F2R-03 | P1 | `DOING` | tile x layer x hierarchy 총 CPU 작업량 | 2c 완결(§3.17 최종): depth-3 뷰 draw 2,067→332ms, gate 220배 감소, floe 대비 draw 3배·total 5.5배. 남음: 03c(트리거 미발화 유지) |
+| F2R-03 | P1 | `DOING` | tile x layer x hierarchy 총 CPU 작업량 | 2c 완결(§3.17): depth-3 draw 332ms(3배 우세)·mid-zoom draw 498ms(2.2배 우세), 원점 11.7s→894ms(13배). 남음: 03c(트리거 미발화 유지) |
 | F2R-04 | P1 | `DONE` | total에서 사라진 PNG/publish 37~44ms | write/sync/rename/handoff 계측 완료 |
 | F2R-05 | P2 | `DONE` | jobs=8의 CPU/전력 비용 | decode 8/raster 4 분리 승인 |
 | F2R-06 | P3 | `BLOCKED` | render마다 OS thread 생성 | startup_us가 병목일 때만 pool |
@@ -1399,9 +1419,11 @@ WEBUI_PLAN 수렴: T2(loopback raw RGBA)의 payload가 이 포맷 그대로다
    (0.12.27~32, §3.17) — 실칩 5회 왕복으로 원인 축차 확정(투영
    과대계상 → trial 실측 → cap 초과 확정) 후 tile-side 결합 mini
    walk로 종결. depth-3 실칩 뷰 draw 2,067→332ms(gate 220배 감소),
-   floe 대비 draw 3.0배·total 5.5배. 남은 비긴급 신호: 실패 trial
-   ~90ms/frame, plan ~350ms(이제 최대 단일 성분 — pan plan 재사용
-   후보와 동일 축). mid-zoom 뷰(§3.15) 재측정 1회 권장.
+   floe 대비 draw 3.0배·total 5.5배. spillover 확인 완료: mid-zoom
+   문제 뷰(§3.15)도 894ms(원점 13배, floe 대비 5.7배, draw 2.2배
+   우세). 남은 비긴급 신호: 실패 trial ~90ms/frame(depth-3), plan
+   216~350ms(두 뷰 공통 최대 단일 성분 — 인접 뷰 plan 재사용
+   후보로 수렴).
 8. 1024-page를 넘는 장시간 cold fixture로 F2R-11 final-tile streaming의 first/settled
    이득을 측정한 뒤 protocol 변경 여부를 결정한다. 500~700ms 이하 작업에는 refinement를
    만들지 않는다. 기본 no-refinement 채택 후 동기가 약해져 후순위다.
