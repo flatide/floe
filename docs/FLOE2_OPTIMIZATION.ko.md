@@ -874,6 +874,40 @@ oracle(터치/재삽입/축출/budget 축소 churn에서 색인-엔트리 동기
 크게 찍히는 위치는 budget 초과 재decode가 본체이므로 그건 수정
 대상이 아니라 budget 정책 영역이다.
 
+### 3.19 detail cut 아래에서 pick이 실패 — 질의를 cut-free micro plan으로 (2026-09-02)
+
+**관찰(사용자)**: "오브젝트 picking이 거의 되지 않음." detail
+medium 사용과 동시 보고.
+
+**진단(valmini 재현)**: pick/snap은 **마지막 render의 published
+scene**을 검색하는데, detail cut(medium=3px) 아래 geometry는 plan이
+wash로 대체해 **화면에는 칠해지지만 scene에 존재하지 않는다**.
+같은 polygon 꼭짓점(oracle로 좌표 확보)에서 —
+
+| render | pick 결과 |
+|---|---|
+| cut=0.0 | found=True (cell DEEPB, layer 8) |
+| cut=3.0 | **found=False** |
+
+mid-zoom + detail medium이면 대부분 객체가 sub-cut → "거의 안
+됨"; 깊은 zoom에선 객체가 cut을 넘어 pick됨 → "거의". floe는
+KLayout DB 전체를 질의하므로 이 격차가 없다. 오늘 회귀가 아니라
+**pick 도입 시점부터의 구조 결함**이 detail medium 사용으로 드러난
+것이다(기존 parity 테스트는 cut=0 render 아래에서만 pick했다).
+
+**수정(0.12.34, F2R-15)**: pick/snap을 input 스레드에서 **worker로
+이동**하고, 마지막 render가 cut>0이면 질의 지점 주변(반경×2+4pad)을
+**cut=0·같은 depth·fine scale로 micro plan**해 그 장면에서 질의한다
+— "보이는 것을 집는다": wash로 보이는 것도 실제 geometry로 잡히고,
+depth 제한으로 안 보이는 것은 여전히 안 잡힌다. 비용은 pick당
+수 page plan+decode(~수십 ms, decoded LRU 공유). cut=0 render에선
+기존 published-scene 경로 그대로(무비용). 부수 변화: 질의가 render
+큐 뒤에 서므로 render 중 pick은 그 render 후 응답(현재 render가
+sub-second라 무해). 검증: valmini 재현이 cut=3.0에서 found=True로
+반전, integration parity에 **cut render 아래 pick/snap parity**(회귀
+고정)를 추가 — oracle이 cut-free mosaic이므로 결함이 재발하면
+배터리가 잡는다.
+
 ## 4. 이슈 목록
 
 | ID | 우선순위 | 상태 | 요약 | 다음 판정 |
@@ -892,6 +926,7 @@ oracle(터치/재삽입/축출/budget 축소 churn에서 색인-엔트리 동기
 | F2R-12 | P1 | `DOING` | KLayout single-core parity와 Rust serial 기준선 | sample9 gate 통과 124%(§3.12); 실칩 p50/p95 남음 |
 | F2R-13 | P1 | `DONE` | 인터랙티브 frame의 PNG 인코드/디코드 왕복 | 실칩 확인(§3.16): raw 0.8ms/pub 8.4ms, raster 무회귀 — wall ~50ms/frame + 주 스레드 디코드 제거 |
 | F2R-14 | P1 | `DONE` | 장시간 세션에서 load 증가(미니맵 이동, fresh 뷰어보다 느림) | LRU 축출 전수 스캔 → O(log n) 색인(0.12.33, §3.18) + `evict N` telemetry — 실칩 장기 세션 재확인 대기 |
+| F2R-15 | P1 | `DONE` | detail cut 아래 geometry가 pick/snap에서 실종 | cut-free micro-plan 질의(0.12.34, §3.19), cut-render parity 회귀 고정 — 실칩 재확인 대기 |
 
 ## 5. 상세 이슈와 수용 기준
 
