@@ -47,6 +47,28 @@ pub(crate) fn for_each_visible_offset_chunked(
     for_each_visible_offset_impl(rep, pts_chunks, base_bbox, local_view, None, None, visit)
 }
 
+/// The query walk's enumeration (§3.19): chunk-pruned Pts scans, a
+/// visible-member budget, and cancellation in one call.
+pub(crate) fn for_each_visible_offset_query(
+    rep: &Rep,
+    pts_chunks: Option<&[BBox]>,
+    base_bbox: BBox,
+    local_view: BBox,
+    budget: Option<(&Cell<usize>, &str)>,
+    cancellation: Option<(u64, &RenderCancellation)>,
+    visit: impl FnMut(i64, i64) -> Result<(), String>,
+) -> Result<RepVisit, String> {
+    for_each_visible_offset_impl(
+        rep,
+        pts_chunks,
+        base_bbox,
+        local_view,
+        budget,
+        cancellation,
+        visit,
+    )
+}
+
 pub(crate) fn for_each_visible_offset_bounded(
     rep: &Rep,
     base_bbox: BBox,
@@ -103,9 +125,14 @@ fn for_each_visible_offset_impl(
     let offsets = offset_region(local_view, base_bbox);
     match rep {
         Rep::One => {
-            charge_member(&mut budget, cancellation, &mut cancel_member)?;
+            // §3.19: the budget charges only members inside the query
+            // region. Charging every tested member let a couple of
+            // record-dense pages starve the shared query budget before
+            // the walk ever reached the clicked shape.
+            member_heartbeat(cancellation, &mut cancel_member)?;
             let visible = offsets.contains_pt(0, 0);
             if visible {
+                charge_member(&mut budget, cancellation, &mut cancel_member)?;
                 visit(0, 0)?;
             }
             Ok(RepVisit {
@@ -164,9 +191,10 @@ fn for_each_visible_offset_impl(
                         continue;
                     }
                     for &(x, y) in chunk {
-                        charge_member(&mut budget, cancellation, &mut cancel_member)?;
+                        member_heartbeat(cancellation, &mut cancel_member)?;
                         tested = tested.saturating_add(1);
                         if offsets.contains_pt(x, y) {
+                            charge_member(&mut budget, cancellation, &mut cancel_member)?;
                             visit(x, y)?;
                             visible = visible.saturating_add(1);
                         }
@@ -175,8 +203,9 @@ fn for_each_visible_offset_impl(
                 return Ok(RepVisit { tested, visible });
             }
             for &(x, y) in points.iter() {
-                charge_member(&mut budget, cancellation, &mut cancel_member)?;
+                member_heartbeat(cancellation, &mut cancel_member)?;
                 if offsets.contains_pt(x, y) {
+                    charge_member(&mut budget, cancellation, &mut cancel_member)?;
                     visit(x, y)?;
                     visible = visible.saturating_add(1);
                 }
@@ -201,6 +230,16 @@ fn charge_member(
         }
         remaining.set(value - 1);
     }
+    member_heartbeat(cancellation, cancel_member)
+}
+
+/// Periodic cancellation check for scans that no longer charge the
+/// query budget (§3.19: out-of-region members are free but must stay
+/// cancellable).
+fn member_heartbeat(
+    cancellation: Option<(u64, &RenderCancellation)>,
+    cancel_member: &mut u16,
+) -> Result<(), String> {
     if *cancel_member == 0 {
         check_repetition_cancelled(cancellation)?;
     }
@@ -326,11 +365,14 @@ mod tests {
     }
 
     #[test]
-    fn bounded_pts_counts_non_visible_members() {
+    fn bounded_pts_charges_only_visible_members() {
+        // §3.19: out-of-region points are scanned (and stay
+        // cancellable) but no longer charge the budget - charging
+        // tested members starved cross-layer queries on dense chips.
         let rep = Rep::Pts(Arc::from([(100, 100), (200, 200), (0, 0)]));
         let remaining = Cell::new(2);
         let mut visits = 0;
-        let error = for_each_visible_offset_bounded(
+        for_each_visible_offset_bounded(
             &rep,
             bbox(0, 0, 1, 1),
             bbox(0, 0, 1, 1),
@@ -341,10 +383,29 @@ mod tests {
                 Ok(())
             },
         )
+        .unwrap();
+        assert_eq!(remaining.get(), 1, "only the visible member charges");
+        assert_eq!(visits, 1);
+
+        // The budget still binds on VISIBLE members.
+        let dense = Rep::Pts(Arc::from([(0, 0), (1, 0), (0, 1)]));
+        let remaining = Cell::new(2);
+        let mut visits = 0;
+        let error = for_each_visible_offset_bounded(
+            &dense,
+            bbox(0, 0, 1, 1),
+            bbox(0, 0, 4, 4),
+            &remaining,
+            "member cap",
+            |_, _| {
+                visits += 1;
+                Ok(())
+            },
+        )
         .unwrap_err();
         assert_eq!(error, "member cap");
         assert_eq!(remaining.get(), 0);
-        assert_eq!(visits, 0);
+        assert_eq!(visits, 2);
     }
 
     fn chunk_bboxes(points: &[(i64, i64)]) -> Vec<BBox> {

@@ -1,6 +1,6 @@
 use crate::raster::checked_path_outline;
 use crate::repetition::{
-    for_each_visible_offset, for_each_visible_offset_bounded, for_each_visible_offset_cancellable,
+    for_each_visible_offset_query,
 };
 use crate::scene::FrameScene;
 use crate::transform::OrthoTransform;
@@ -388,6 +388,7 @@ fn visit_cell_layer(
                 };
                 for_each_query_offset(
                     &rect.rep,
+                    page.index.pts_chunks(&rect.rep),
                     base,
                     local_view,
                     member_budget,
@@ -429,6 +430,7 @@ fn visit_cell_layer(
                 })?;
                 for_each_query_offset(
                     &polygon.rep,
+                    page.index.pts_chunks(&polygon.rep),
                     base,
                     local_view,
                     member_budget,
@@ -464,6 +466,7 @@ fn visit_cell_layer(
                 })?;
                 for_each_query_offset(
                     &path_record.rep,
+                    page.index.pts_chunks(&path_record.rep),
                     base,
                     local_view,
                     member_budget,
@@ -506,6 +509,7 @@ fn visit_cell_layer(
         let base_bbox = base_place.apply_bbox(child_bbox)?;
         for_each_query_offset(
             &instance.rep,
+            None,
             base_bbox,
             local_view,
             member_budget,
@@ -541,32 +545,22 @@ fn check_visit_cancelled(cancellation: Option<(u64, &RenderCancellation)>) -> Re
 
 fn for_each_query_offset(
     rep: &floe_oasis::doc::Rep,
+    pts_chunks: Option<&[BBox]>,
     base_bbox: BBox,
     local_view: BBox,
     member_budget: Option<&Cell<usize>>,
     cancellation: Option<(u64, &RenderCancellation)>,
     visit: impl FnMut(i64, i64) -> Result<(), String>,
 ) -> Result<(), String> {
-    match (member_budget, cancellation) {
-        (Some(remaining), _) => {
-            for_each_visible_offset_bounded(
-                rep, base_bbox, local_view, remaining, QUERY_STOP, visit,
-            )?;
-        }
-        (None, Some((generation, cancellation))) => {
-            for_each_visible_offset_cancellable(
-                rep,
-                base_bbox,
-                local_view,
-                generation,
-                cancellation,
-                visit,
-            )?;
-        }
-        (None, None) => {
-            for_each_visible_offset(rep, base_bbox, local_view, visit)?;
-        }
-    }
+    for_each_visible_offset_query(
+        rep,
+        pts_chunks,
+        base_bbox,
+        local_view,
+        member_budget.map(|remaining| (remaining, QUERY_STOP)),
+        cancellation,
+        visit,
+    )?;
     Ok(())
 }
 
@@ -986,7 +980,11 @@ mod tests {
     }
 
     #[test]
-    fn pick_member_cap_counts_non_visible_explicit_offsets() {
+    fn pick_member_budget_charges_only_visible_members() {
+        // §3.19: members outside the query region are free. Charging
+        // every tested member let dense pages starve the shared budget
+        // before the walk reached the clicked shape (field: bars
+        // unpickable with all layers on, pickable with three).
         let scene = single_page_scene(page_with_rect(
             0,
             0,
@@ -1000,13 +998,74 @@ mod tests {
             Rep::Pts(Arc::from([(100, 100), (200, 200), (500, 500)])),
         ));
         let mut capped = request(505, 505);
-        capped.member_cap = 2;
-        let missed = pick_scene(&scene, &capped, 0).unwrap();
-        assert_eq!((missed.count, missed.shapes_tested), (0, 0));
-
-        capped.member_cap = 3;
+        capped.member_cap = 1;
         let found = pick_scene(&scene, &capped, 0).unwrap();
         assert_eq!((found.count, found.shapes_tested), (1, 1));
+    }
+
+    #[test]
+    fn dense_far_layer_does_not_starve_the_pick_budget() {
+        // Walk order visits the dense layer first: its 600 members sit
+        // far from the click, so under visible-only charging the
+        // second layer's bar at the click must still be found with the
+        // default 400 budget (the old tested-member charge starved the
+        // whole query on the first layer).
+        let far: Vec<(i64, i64)> = (0..600).map(|index| (index * 3, 0)).collect();
+        let top = (0, REM_FULL);
+        let dense = page_with_rect(
+            0,
+            0,
+            BBox {
+                x0: 0,
+                y0: 0,
+                x1: 1810,
+                y1: 10,
+            },
+            (0, 0),
+            Rep::Pts(Arc::from(far.as_slice())),
+        );
+        let bar = page_with_rect(
+            1,
+            1,
+            BBox {
+                x0: 1000,
+                y0: 500,
+                x1: 1010,
+                y1: 510,
+            },
+            (1000, 500),
+            Rep::One,
+        );
+        let plan = HierPlan {
+            top,
+            wcells: vec![WsCell {
+                key: top,
+                pages: vec![0, 1],
+                insts: Vec::new(),
+                frames: Vec::new(),
+                washes: Vec::new(),
+            }],
+            pages: vec![0, 1],
+            page_prio: vec![0, 1],
+            stats: HierStats::default(),
+        };
+        let mut bounds = BTreeMap::new();
+        bounds.insert(
+            top,
+            BBox {
+                x0: 0,
+                y0: 0,
+                x1: 1810,
+                y1: 510,
+            },
+        );
+        let scene = FrameScene::from_test_parts(plan, vec![dense, bar], bounds).unwrap();
+        let query = request(1005, 505);
+        assert_eq!(query.member_cap, 400, "test rides the product default");
+        let found = pick_scene(&scene, &query, 0).unwrap();
+        let candidate = found.candidate.expect("bar must be reachable");
+        assert_eq!(candidate.layer_idx, 1);
+        assert_eq!(found.count, 1);
     }
 
     #[test]

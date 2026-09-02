@@ -874,6 +874,45 @@ oracle(터치/재삽입/축출/budget 축소 churn에서 색인-엔트리 동기
 크게 찍히는 위치는 budget 초과 재decode가 본체이므로 그건 수정
 대상이 아니라 budget 정책 영역이다.
 
+### 3.19 pick이 거의 안 됨 — 질의 예산 기아 (2026-09-02)
+
+**관찰(사용자)**: "오브젝트 picking이 거의 되지 않음 — 큰
+오브젝트도 대부분 안 잡히고 'no object here'." 결정적 재현
+(sample9, depth 9, view 8318×7775µm): layer 36/38의 긴 막대는 pick
+불가, layer 39의 두 막대는 가능; **모든 layer를 끄고 36/38/39만
+켜면 전부 pick됨**.
+
+경과: 1차 진단(detail cut 아래 geometry가 scene에서 실종 —
+0.12.34의 cut-free micro-plan 질의)은 실재하는 결함이지만 주
+증상이 아니었고 사용자 지시로 **원복**(0.12.35). sample9로 두 축을
+분리 재현한 결과 **서로 다른 결함 2건**이 겹쳐 있었다:
+
+- **결함 A — 질의 예산 기아(주범, 0.12.35에서 수정)**: pick/snap의
+  member 예산(400)이 켜진 **모든 layer의 walk에 전역 공유**되고,
+  `Rep::One`·Pts 스캔이 **가시성 검사 전에** 예산을 소모했다 —
+  record 밀집 page 한두 개만 방문해도 클릭 근처도 아닌 도형들이
+  400을 소진하고, 소진 시 QUERY_STOP이 **조용히 빈 결과로
+  변환**되어 뒤 순서 layer의 막대는 검사조차 안 됐다. layer를 3개만
+  켜면 walk가 작아 예산이 살아남는다 — 사용자의 토글 관찰과 정확히
+  일치. sample9 재현: **같은 cut=0 scene에서 pick layers=all은 0/3,
+  subset은 3/3 → 수정 후 양쪽 3/3.** 수정: ① 예산을 **query 영역
+  안에 실제로 들어온 member만** 계상(영역 밖 스캔은 무료, 취소
+  heartbeat 분리 유지), ② record Pts에 2a chunk index를 query
+  경로에도 연결(스캔 자체를 prune), ③ 상한 400→4,096
+  (SNAP_SHAPE_CAP 동일). 회귀 테스트 2건(visible-only 계상,
+  밀집-원거리 layer가 예산을 굶기지 못함) 고정, render-core 97
+  tests.
+- **결함 B — detail cut 실명(실재, 보류)**: sample9에서도 확인 —
+  layer 36 막대가 같은 좌표·같은 layer에서 cut=0이면 잡히고
+  cut=3px(≈30µm)면 안 잡힌다(sub-cut 폭 도형은 wash로 그려질 뿐
+  scene에 없음). 0.12.34가 이걸 고치는 수정이었으나 원복했고, 재론
+  시 커밋 219259c에 설계·검증(micro-plan + cut-render parity)이
+  있다. detail이 굵은 뷰에서 가늘고 긴 도형은 여전히 pick 불가로
+  남는다.
+
+**실칩 재확인**: 문제였던 뷰(모든 layer 켠 상태)에서 클릭 —
+막대들이 잡히는지, "no object here" 빈도가 정상화됐는지.
+
 ## 4. 이슈 목록
 
 | ID | 우선순위 | 상태 | 요약 | 다음 판정 |
@@ -892,6 +931,7 @@ oracle(터치/재삽입/축출/budget 축소 churn에서 색인-엔트리 동기
 | F2R-12 | P1 | `DOING` | KLayout single-core parity와 Rust serial 기준선 | sample9 gate 통과 124%(§3.12); 실칩 p50/p95 남음 |
 | F2R-13 | P1 | `DONE` | 인터랙티브 frame의 PNG 인코드/디코드 왕복 | 실칩 확인(§3.16): raw 0.8ms/pub 8.4ms, raster 무회귀 — wall ~50ms/frame + 주 스레드 디코드 제거 |
 | F2R-14 | P1 | `DONE` | 장시간 세션에서 load 증가(미니맵 이동, fresh 뷰어보다 느림) | LRU 축출 전수 스캔 → O(log n) 색인(0.12.33, §3.18) + `evict N` telemetry — 실칩 장기 세션 재확인 대기 |
+| F2R-15 | P1 | `DOING` | pick/snap이 대부분 "no object here" | 주범=질의 예산 기아 수정: 가시-only 계상+chunk prune+상한 4,096(0.12.35, §3.19 결함 A) 실칩 재확인 대기. cut 실명(결함 B)은 실재하나 원복·보류(219259c) |
 
 ## 5. 상세 이슈와 수용 기준
 
