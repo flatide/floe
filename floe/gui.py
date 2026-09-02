@@ -2736,6 +2736,11 @@ class Viewer:
                         # traversal split for the F2R-03c judgment
                         text += ", paints %s" % fmt_count(
                             res["member_paints"])
+                    if res.get("cache_evicted"):
+                        # decoded-LRU churn: the working set no longer
+                        # fits FLOE_RUST_BUDGET_MB this session (§3.18)
+                        text += ", evict %s" % fmt_count(
+                            res["cache_evicted"])
                     if res.get("hier_cells_visited"):
                         text += ", hier %s/%s pruned" % (
                             fmt_count(res["hier_cells_visited"]),

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::{Cache, DecodedPage, RenderStats};
@@ -18,7 +18,15 @@ pub struct DecodedPageCache {
     budget_bytes: u64,
     resident_bytes: u64,
     clock: u64,
+    /// Cumulative eviction count; loads report their delta.
+    evictions: u64,
     entries: HashMap<u32, Entry>,
+    /// `(last_used, page_id)` mirror of `entries` so the eviction
+    /// victim is an O(log n) first-key lookup. The full-map
+    /// `min_by_key` scan it replaces cost O(misses x resident) per
+    /// load - a long session at a full budget paid seconds for a
+    /// minimap jump that a fresh viewer served in 200ms (§3.18).
+    lru: BTreeMap<(u64, u32), ()>,
 }
 
 impl DecodedPageCache {
@@ -27,7 +35,9 @@ impl DecodedPageCache {
             budget_bytes,
             resident_bytes: 0,
             clock: 0,
+            evictions: 0,
             entries: HashMap::new(),
+            lru: BTreeMap::new(),
         }
     }
 
@@ -58,13 +68,17 @@ impl DecodedPageCache {
 
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.lru.clear();
         self.resident_bytes = 0;
     }
 
     pub fn get(&mut self, page_id: u32) -> Option<Arc<DecodedPage>> {
         self.clock = self.clock.saturating_add(1);
         let tick = self.clock;
+        let lru = &mut self.lru;
         self.entries.get_mut(&page_id).map(|entry| {
+            lru.remove(&(entry.last_used, page_id));
+            lru.insert((tick, page_id), ());
             entry.last_used = tick;
             Arc::clone(&entry.page)
         })
@@ -75,6 +89,8 @@ impl DecodedPageCache {
         self.clock = self.clock.saturating_add(1);
         let tick = self.clock;
         if let Some(entry) = self.entries.get_mut(&page_id) {
+            self.lru.remove(&(entry.last_used, page_id));
+            self.lru.insert((tick, page_id), ());
             entry.last_used = tick;
             return true;
         }
@@ -93,6 +109,7 @@ impl DecodedPageCache {
                 last_used: tick,
             },
         );
+        self.lru.insert((tick, page_id), ());
         true
     }
 
@@ -147,6 +164,7 @@ impl DecodedPageCache {
             }
         }
 
+        let evictions_before = self.evictions;
         let (decoded, mut stats) = match guard {
             Some((generation, cancellation)) => {
                 source.decode_pages_cancellable(&missing, workers, generation, cancellation)?
@@ -162,6 +180,11 @@ impl DecodedPageCache {
         check_load_cancelled(guard)?;
         stats.decoded_cache_hit = cache_hits;
         stats.decoded_cache_miss = missing.len().try_into().unwrap_or(u32::MAX);
+        stats.decoded_cache_evicted = self
+            .evictions
+            .saturating_sub(evictions_before)
+            .try_into()
+            .unwrap_or(u32::MAX);
         stats.decoded_cache_bytes = self.resident_bytes;
 
         let mut pages = Vec::with_capacity(page_ids.len());
@@ -176,16 +199,15 @@ impl DecodedPageCache {
 
     fn evict_to_fit(&mut self, incoming: u64) {
         while self.resident_bytes.saturating_add(incoming) > self.budget_bytes {
-            let victim = self
-                .entries
-                .iter()
-                .min_by_key(|(page_id, entry)| (entry.last_used, **page_id))
-                .map(|(page_id, _)| *page_id);
-            let Some(victim) = victim else {
+            // Same deterministic order as the old full scan:
+            // least-recently-used first, then lowest page id.
+            let Some((&(last_used, victim), ())) = self.lru.first_key_value() else {
                 break;
             };
+            self.lru.remove(&(last_used, victim));
             if let Some(entry) = self.entries.remove(&victim) {
                 self.resident_bytes = self.resident_bytes.saturating_sub(entry.charge);
+                self.evictions = self.evictions.saturating_add(1);
             }
         }
     }
@@ -261,5 +283,47 @@ mod tests {
         assert!(!cache.insert(page));
         assert!(cache.is_empty());
         assert_eq!(cache.resident_bytes(), 0);
+    }
+
+    #[test]
+    fn lru_index_stays_consistent_under_touch_and_churn() {
+        // The O(log n) lru mirror (§3.18) must agree with the entry
+        // map through interleaved touches, re-inserts, evictions, and
+        // budget shrinks - the victim order is (last_used, page_id),
+        // exactly like the full scan it replaced.
+        let charge = page(0).estimated_bytes();
+        let mut cache = DecodedPageCache::new(charge * 8);
+        for id in 0..8 {
+            assert!(cache.insert(page(id)));
+        }
+        assert_eq!(cache.lru.len(), cache.entries.len());
+        // Touch a spread of pages (get) and re-insert one (insert on a
+        // resident page must retouch, not duplicate).
+        for &id in &[0u32, 2, 4, 6, 0, 2] {
+            assert!(cache.get(id).is_some());
+        }
+        assert!(cache.insert(page(4)));
+        assert_eq!(cache.lru.len(), cache.entries.len());
+        // Untouched pages leave first, oldest touch next.
+        cache.set_budget_bytes(charge * 4);
+        for id in [1u32, 3, 5, 7] {
+            assert!(!cache.contains(id), "untouched page {id} must evict");
+        }
+        cache.set_budget_bytes(charge * 2);
+        assert!(!cache.contains(6), "oldest touch must evict next");
+        assert!(!cache.contains(0));
+        assert!(cache.contains(2));
+        assert!(cache.contains(4), "re-inserted page is the newest");
+        assert_eq!(cache.lru.len(), cache.entries.len());
+        assert_eq!(cache.resident_bytes(), charge * 2);
+        // Churn through fresh ids at the tight budget: the index must
+        // track every insert/evict pair.
+        for id in 100..200 {
+            assert!(cache.insert(page(id)));
+            assert_eq!(cache.lru.len(), cache.entries.len());
+            assert!(cache.resident_bytes() <= cache.budget_bytes());
+        }
+        assert_eq!(cache.entries.len(), 2);
+        assert!(cache.contains(198) && cache.contains(199));
     }
 }

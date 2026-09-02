@@ -841,6 +841,39 @@ full-depth·depth-3)와 pan 축 전부에서 floe 대비 우세가 확정됐고,
 2c는 두 뷰 모두에서 완결이다. 남은 공통 최대 성분은 plan
 (216~350ms) — 인접 뷰 plan 재사용 후보 하나로 수렴.
 
+### 3.18 장시간 세션의 load 증가 — LRU 축출 전수 스캔 (2026-09-02)
+
+**관찰(사용자)**: detail medium에서 depth/zoom 무관 대부분 뷰가
+300~800ms(load 지배)로 끝나는데, **미니맵으로 불규칙하게 이동**하다
+보면 ~1,000ms까지 늘고(대부분 load 증가) 드물게 2,000ms+도 발생.
+**같은 위치를 새 뷰어로 열어 바로 가면 200~300ms.**
+
+**진단**: 새 뷰어가 더 빠르다는 게 결정적 — 신규 뷰어도 cold
+decode를 전부 지불하므로 LRU miss/재decode만으로는 설명 불가, 즉
+**세션 크기에 비례하는 오버헤드**다. 코드 확인 결과
+`DecodedPageCache::evict_to_fit`이 **축출 1회당 HashMap 전수
+min-스캔**을 돌았다: 예산(1024MB)이 가득 찬 세션에서 miss가 m개인
+load는 O(m × 상주 n). 구조 시뮬레이션(상주 4만 page, miss 3천):
+전수 스캔 **237ms** vs 색인 0.24ms — 관측된 +0.7~1.7초와 부합하고,
+미니맵 불규칙 이동(m 큼)·만석 세션(n 큼)·fresh 뷰어(n≈0)의 세
+증상을 모두 설명한다.
+
+**수정(0.12.33)**: `(last_used, page_id)` BTreeMap 색인을
+entries와 병행 유지해 축출을 **O(log n)** first-key로 바꿨다.
+피해자 선정 순서는 기존 전수 스캔과 완전 동일(LRU→page id
+tie-break)이라 상주 집합·telemetry·픽셀 전부 불변. 일관성
+oracle(터치/재삽입/축출/budget 축소 churn에서 색인-엔트리 동기)
+추가, render-core 96 tests. **telemetry**: perf 라인에 `evict N`
+(이번 frame에 축출된 page 수, 0이면 생략) 추가 — nonzero가 계속
+찍히면 working set이 budget을 넘는 세션이라는 신호로,
+`FLOE_RUST_BUDGET_MB` opt-in 판단 자료가 된다(§F2R-10 운영 정책
+유지: 기본 1024 고정).
+
+**재확인 요청**: 오래 쓴 세션에서 미니맵 이동 시 load가 새 뷰어
+수준으로 유지되는지, 2,000ms+ 스파이크가 사라지는지. `evict`가
+크게 찍히는 위치는 budget 초과 재decode가 본체이므로 그건 수정
+대상이 아니라 budget 정책 영역이다.
+
 ## 4. 이슈 목록
 
 | ID | 우선순위 | 상태 | 요약 | 다음 판정 |
@@ -858,6 +891,7 @@ full-depth·depth-3)와 pan 축 전부에서 floe 대비 우세가 확정됐고,
 | F2R-11 | P2 | `DESIGN` | page-round refinement가 누적 full PNG 반복 | 기본 no-refinement로 동기 약화; final-tile streaming은 보류 |
 | F2R-12 | P1 | `DOING` | KLayout single-core parity와 Rust serial 기준선 | sample9 gate 통과 124%(§3.12); 실칩 p50/p95 남음 |
 | F2R-13 | P1 | `DONE` | 인터랙티브 frame의 PNG 인코드/디코드 왕복 | 실칩 확인(§3.16): raw 0.8ms/pub 8.4ms, raster 무회귀 — wall ~50ms/frame + 주 스레드 디코드 제거 |
+| F2R-14 | P1 | `DONE` | 장시간 세션에서 load 증가(미니맵 이동, fresh 뷰어보다 느림) | LRU 축출 전수 스캔 → O(log n) 색인(0.12.33, §3.18) + `evict N` telemetry — 실칩 장기 세션 재확인 대기 |
 
 ## 5. 상세 이슈와 수용 기준
 

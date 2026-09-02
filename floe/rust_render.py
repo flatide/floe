@@ -485,7 +485,7 @@ class RustRenderWorker:
             "draw_us": 0, "png_us": 0, "plan_us": 0,
             "publish_write_us": 0, "publish_sync_us": 0,
             "publish_rename_us": 0, "adapter_read_us": 0,
-            "cache_hit": 0, "render_tiles": 0,
+            "cache_hit": 0, "cache_evicted": 0, "render_tiles": 0,
             "frame_cache_hit": 0,
             "resident_bytes": 0, "decode_workers": 0,
             # F2R diagnostics: refinement rounds, decode pool
@@ -966,6 +966,7 @@ class RustRenderWorker:
         state["subtree_prunes"] += _wire_int(fields, "subtree_prunes")
         state["new"] += _wire_int(fields, "cache_miss")
         state["cache_hit"] += _wire_int(fields, "cache_hit")
+        state["cache_evicted"] += _wire_int(fields, "cache_evict")
         state["frame_cache_hit"] += _wire_int(
             fields, "frame_cache_hit")
         state["render_tiles"] += _wire_int(fields, "tiles")
@@ -1007,6 +1008,9 @@ class RustRenderWorker:
             "adapter_read_ms": state["adapter_read_us"] / 1000.0,
             "cache_hit": state["cache_hit"],
             "cache_miss": state["new"],
+            # decoded-LRU churn (§3.18): nonzero means the session's
+            # working set is cycling past FLOE_RUST_BUDGET_MB
+            "cache_evicted": state["cache_evicted"],
             "frame_cache_hit": state["frame_cache_hit"],
             "resident_mb": state["resident_bytes"] / (1024.0 * 1024.0),
             "decode_workers": state["decode_workers"],

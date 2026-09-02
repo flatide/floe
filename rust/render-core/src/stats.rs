@@ -44,6 +44,10 @@ pub struct RenderStats {
     pub subtrees_pruned: u64,
     pub decoded_cache_hit: u32,
     pub decoded_cache_miss: u32,
+    /// Pages evicted from the decoded LRU while serving this load -
+    /// nonzero means the working set is churning past the budget
+    /// (§3.18 long-session diagnosis).
+    pub decoded_cache_evicted: u32,
     pub decoded_cache_bytes: u64,
     pub cancelled: bool,
 }

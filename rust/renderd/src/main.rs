@@ -1587,7 +1587,7 @@ fn run_render(
         respond(
             responses,
             format!(
-                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={}",
+                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={}",
                 command.generation,
                 round_index + 1,
                 final_round as u8,
@@ -1637,6 +1637,7 @@ fn run_render(
                 planned.summary.pages,
                 decode_stats.decoded_cache_hit,
                 decode_stats.decoded_cache_miss,
+                decode_stats.decoded_cache_evicted,
                 state.page_cache.resident_bytes(),
                 planned.summary.wc_cells,
                 planned.summary.inst_edges,
