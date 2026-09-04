@@ -979,6 +979,43 @@ class RealDaemonIntegrationTests(unittest.TestCase):
                 "*.partial.png")))
             self.assertFalse(list(Path(worker._work_dir).glob(
                 "*.partial.raw")))
+
+            # §F2R-16: a pan by an exact multiple of 16 device pixels
+            # reuses the previous geometry frame's overlap and must be
+            # byte-identical to a cold render of the same view (labels
+            # and frames on - the on-top label pass is part of the
+            # contract).
+            q = max(1, int(bbox[2] - bbox[0]) // 800)
+            pan_a = (int(bbox[0]), int(bbox[1]),
+                     int(bbox[0]) + 800 * q, int(bbox[1]) + 768 * q)
+            pan_b = (pan_a[0] + 32 * q, pan_a[1],
+                     pan_a[2] + 32 * q, pan_a[3])
+            pan_job = dict(base_job, w=800, h=768, frames=True,
+                           labels=True)
+            worker.submit(dict(pan_job, gen=105, bbox=pan_a))
+            self._frames_through_settled(worker, 105)
+            worker.submit(dict(pan_job, gen=106, bbox=pan_b))
+            pan_frames = self._frames_through_settled(worker, 106)
+            self.assertGreater(
+                pan_frames[-1].get("tiles_reused", 0), 100,
+                "the snapped pan must reuse the overlap tiles")
+            cold = make_render_worker(cache)
+            cold.start()
+            try:
+                # mirror the style state the warm worker accumulated
+                cold.submit({"kind": "recolor",
+                             "colors": [[[1, 0], "#ff0000"]]})
+                cold.submit({"kind": "repattern",
+                             "fills": [[[1, 0], solid]],
+                             "widths": [[[1, 0], 2]]})
+                cold.submit({"kind": "mono", "on": True})
+                cold.submit(dict(pan_job, gen=1, bbox=pan_b))
+                cold_frames = self._frames_through_settled(cold, 1)
+            finally:
+                cold.stop()
+            self.assertEqual(cold_frames[-1].get("tiles_reused", 0), 0)
+            self.assertEqual(self._frame_payload(pan_frames[-1]),
+                             self._frame_payload(cold_frames[-1]))
             self.assertFalse(worker._jobs)
         finally:
             worker.stop()

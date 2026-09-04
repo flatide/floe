@@ -492,7 +492,8 @@ class RustRenderWorker:
             # utilization/stragglers, index-build share, raster tail,
             # traversal counters (sum over rounds; maxes keep max)
             "rounds": 0, "decode_sum_us": 0, "decode_max_us": 0,
-            "index_us": 0, "raster_tile_max_us": 0, "mask_bytes": 0,
+            "index_us": 0, "raster_tile_max_us": 0, "tiles_reused": 0,
+            "mask_bytes": 0,
             "bin_items": 0, "bin_overflow": 0,
             "defer_rep": 0, "defer_single": 0, "defer_wmax": 0,
             "member_paints": 0,
@@ -946,6 +947,7 @@ class RustRenderWorker:
         state["raster_tile_max_us"] = max(
             state["raster_tile_max_us"],
             _wire_int(fields, "raster_tile_max_us"))
+        state["tiles_reused"] += _wire_int(fields, "tiles_reused")
         state["mask_bytes"] = max(
             state["mask_bytes"], _wire_int(fields, "mask_bytes"))
         state["bin_items"] += _wire_int(fields, "bin_items")
@@ -1042,6 +1044,9 @@ class RustRenderWorker:
             "decode_max_ms": state["decode_max_us"] / 1000.0,
             "index_ms": state["index_us"] / 1000.0,
             "raster_tile_max_ms": state["raster_tile_max_us"] / 1000.0,
+            # §F2R-16: tiles served from the shifted previous geometry
+            # frame on a 16px-snapped pan
+            "tiles_reused": state["tiles_reused"],
             "mask_mb": state["mask_bytes"] / (1024.0 * 1024.0),
             "work_bin_items": state["bin_items"],
             "work_bin_overflow_items": state["bin_overflow"],

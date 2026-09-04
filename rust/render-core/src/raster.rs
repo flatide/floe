@@ -177,6 +177,27 @@ pub struct RgbaFrame {
 }
 
 impl RgbaFrame {
+    /// §F2R-16: lets the daemon rebuild a shifted copy of a retained
+    /// geometry frame for pan reuse.
+    pub fn from_pixels(width: u32, height: u32, pixels: Vec<u8>) -> Result<Self, String> {
+        let expected = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|value| value.checked_mul(4))
+            .ok_or_else(|| "image byte length overflow".to_string())?;
+        if pixels.len() != expected {
+            return Err(format!(
+                "pixel buffer is {} bytes, expected {}",
+                pixels.len(),
+                expected
+            ));
+        }
+        Ok(Self {
+            width,
+            height,
+            pixels,
+        })
+    }
+
     pub fn width(&self) -> u32 {
         self.width
     }
@@ -202,6 +223,9 @@ impl RgbaFrame {
 
 pub struct GeometryRasterReport {
     pub frame: RgbaFrame,
+    /// The label-free frame (§F2R-16), kept when the caller asked to
+    /// retain it for pan reuse.
+    pub geometry_frame: Option<RgbaFrame>,
     pub stats: RenderStats,
     pub rect_record_tests: u64,
     pub rectangle_member_paints: u64,
@@ -279,6 +303,44 @@ pub fn render_geometry_styled_cancellable(
             cancellation,
         }),
         true,
+    )
+}
+
+/// §F2R-16 pan reuse: a previous geometry-only frame, pre-shifted by
+/// the caller into this request's device coordinates. Tiles fully
+/// inside `valid` are copied instead of rastered - byte-exact only
+/// when the pan delta was a multiple of the 16px fill-phase period
+/// (the caller's contract).
+pub struct FrameReuse {
+    pub base: RgbaFrame,
+    /// Valid device-pixel region of `base`: x0, y0, x1, y1.
+    pub valid: [u32; 4],
+}
+
+/// `render_geometry_styled_cancellable` plus pan reuse (§F2R-16):
+/// tiles inside `reuse.valid` come from the shifted previous geometry
+/// frame, and `keep_geometry` returns this render's own label-free
+/// frame for the next pan.
+pub fn render_geometry_styled_cancellable_reuse(
+    scene: &FrameScene,
+    request: &StyledGeometryRasterRequest,
+    generation: u64,
+    cancellation: &RenderCancellation,
+    reuse: Option<&FrameReuse>,
+    keep_geometry: bool,
+) -> Result<GeometryRasterReport, String> {
+    request.validate()?;
+    render_geometry_impl(
+        scene,
+        &request.raster,
+        RenderMode::Styled(request),
+        Some(RenderGuard {
+            generation,
+            cancellation,
+        }),
+        true,
+        reuse,
+        keep_geometry,
     )
 }
 
@@ -538,7 +600,29 @@ fn render_geometry(
     guard: Option<RenderGuard<'_>>,
     work_bin: bool,
 ) -> Result<GeometryRasterReport, String> {
+    render_geometry_impl(scene, request, mode, guard, work_bin, None, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_geometry_impl(
+    scene: &FrameScene,
+    request: &GeometryRasterRequest,
+    mode: RenderMode<'_>,
+    guard: Option<RenderGuard<'_>>,
+    work_bin: bool,
+    reuse: Option<&FrameReuse>,
+    keep_geometry: bool,
+) -> Result<GeometryRasterReport, String> {
     check_cancelled(guard)?;
+    if let Some(reuse) = reuse {
+        if reuse.base.width != request.width || reuse.base.height != request.height {
+            return Err("pan reuse frame size mismatch".to_string());
+        }
+        let [vx0, vy0, vx1, vy1] = reuse.valid;
+        if vx0 > vx1 || vy0 > vy1 || vx1 > request.width || vy1 > request.height {
+            return Err("pan reuse valid region out of bounds".to_string());
+        }
+    }
     let (prepared_labels, labels_truncated) = match mode {
         RenderMode::Occupancy => (None, false),
         RenderMode::Styled(_) => PreparedLabels::build(scene, request)?,
@@ -594,17 +678,29 @@ fn render_geometry(
                     let row0 = tile_boundary(request.height, tile_y, tile_size);
                     let row1 = tile_boundary(request.height, tile_y + 1, tile_size);
                     let tile_started = Instant::now();
-                    let mut output = raster_tile(
-                        scene,
-                        request,
-                        mode,
-                        bin,
-                        guard,
-                        col0,
-                        col1,
-                        row0,
-                        row1,
-                    )?;
+                    // §F2R-16: a tile fully inside the shifted previous
+                    // frame's valid region copies its pixels instead of
+                    // rastering - byte-exact under the 16px snap.
+                    let reused = reuse.and_then(|reuse| {
+                        let [vx0, vy0, vx1, vy1] = reuse.valid;
+                        (col0 >= vx0 && col1 <= vx1 && row0 >= vy0 && row1 <= vy1).then(|| {
+                            reused_tile_output(request, &reuse.base, col0, col1, row0, row1)
+                        })
+                    });
+                    let mut output = match reused {
+                        Some(output) => output?,
+                        None => raster_tile(
+                            scene,
+                            request,
+                            mode,
+                            bin,
+                            guard,
+                            col0,
+                            col1,
+                            row0,
+                            row1,
+                        )?,
+                    };
                     output.stats.raster_tile_max_us = tile_started
                         .elapsed()
                         .as_micros()
@@ -643,6 +739,7 @@ fn render_geometry(
     check_cancelled(guard)?;
     let mut frame = assemble_tiles(request, tiles, tile_columns, tile_rows)?;
     check_cancelled(guard)?;
+    let geometry_frame = keep_geometry.then(|| frame.clone());
     // §F2R-16 (user call 2026-09-04): labels paint LAST, over every
     // geometry plane, in one full-frame pass - a deliberate deviation
     // from the KLayout between-plane order so a pan-reused geometry
@@ -654,6 +751,7 @@ fn render_geometry(
     stats.raster_us = started.elapsed().as_micros().try_into().unwrap_or(u64::MAX);
     Ok(GeometryRasterReport {
         frame,
+        geometry_frame,
         stats,
         rect_record_tests: counters.rect_records,
         rectangle_member_paints: counters.rectangle_members_drawn,
@@ -730,6 +828,35 @@ struct RasterTileOutput {
     tile: RasterBand,
     stats: RenderStats,
     counters: RasterCounters,
+}
+
+/// §F2R-16: a tile served from the shifted previous geometry frame.
+fn reused_tile_output(
+    request: &GeometryRasterRequest,
+    base: &RgbaFrame,
+    col0: u32,
+    col1: u32,
+    row0: u32,
+    row1: u32,
+) -> Result<RasterTileOutput, String> {
+    let mut band = RasterBand::new_tile(request, col0, col1, row0, row1)?;
+    let tile_row_bytes = ((col1 - col0) as usize) * 4;
+    let frame_row_bytes = (base.width as usize) * 4;
+    for local_row in 0..(row1 - row0) as usize {
+        let source = (row0 as usize + local_row) * frame_row_bytes + (col0 as usize) * 4;
+        let target = local_row * tile_row_bytes;
+        band.pixels[target..target + tile_row_bytes]
+            .copy_from_slice(&base.pixels[source..source + tile_row_bytes]);
+    }
+    let stats = RenderStats {
+        tiles_reused: 1,
+        ..RenderStats::default()
+    };
+    Ok(RasterTileOutput {
+        tile: band,
+        stats,
+        counters: RasterCounters::default(),
+    })
 }
 
 /// F2R-03b 2c: frame-level work bin. One cancellable traversal per
@@ -2281,6 +2408,7 @@ fn add_stats(total: &mut RenderStats, worker: &RenderStats) {
         .saturating_add(worker.hier_cells_visited);
     total.subtrees_pruned = total.subtrees_pruned.saturating_add(worker.subtrees_pruned);
     total.raster_tile_max_us = total.raster_tile_max_us.max(worker.raster_tile_max_us);
+    total.tiles_reused = total.tiles_reused.saturating_add(worker.tiles_reused);
 }
 
 /// Queries one decoded page's record index against a tile-local view
@@ -5901,6 +6029,150 @@ mod tests {
             walk.rectangle_member_paints
         );
         assert_eq!(bin.frame_member_paints, walk.frame_member_paints);
+    }
+
+    #[test]
+    fn pan_reuse_matches_a_full_render_at_the_16px_snap() {
+        // §F2R-16: views A and B differ by exactly 16 device pixels
+        // (the fill-phase period), so tiles copied from A's shifted
+        // geometry frame must be byte-identical to a cold render of B
+        // - speckle parity, stipple phase, frames, and the on-top
+        // label pass included.
+        let top = (0, REM_FULL);
+        let world = BBox {
+            x0: 0,
+            y0: 0,
+            x1: 640,
+            y1: 320,
+        };
+        let make_scene = || {
+            let plan = HierPlan {
+                top,
+                wcells: vec![WsCell {
+                    key: top,
+                    pages: vec![0, 1],
+                    insts: Vec::new(),
+                    frames: vec![(
+                        BBox {
+                            x0: 40,
+                            y0: 40,
+                            x1: 600,
+                            y1: 280,
+                        },
+                        Rep::One,
+                        1,
+                    )],
+                    washes: Vec::new(),
+                }],
+                pages: vec![0, 1],
+                page_prio: vec![0, 0],
+                stats: HierStats::default(),
+            };
+            FrameScene::from_test_parts(
+                plan,
+                vec![
+                    styled_page(
+                        0,
+                        1,
+                        BBox {
+                            x0: 5,
+                            y0: 5,
+                            x1: 610,
+                            y1: 200,
+                        },
+                    ),
+                    styled_page(
+                        1,
+                        2,
+                        BBox {
+                            x0: 100,
+                            y0: 120,
+                            x1: 540,
+                            y1: 310,
+                        },
+                    ),
+                ],
+                BTreeMap::from([(top, world)]),
+            )
+            .unwrap()
+        };
+        let styled = |x0: f64| StyledGeometryRasterRequest {
+            raster: GeometryRasterRequest {
+                view: RasterViewBox::new(x0, 0.0, x0 + 320.0, 320.0).unwrap(),
+                width: 32,
+                height: 32,
+                workers: 2,
+                tile_size: 8,
+                ..request()
+            },
+            layers: vec![
+                LayerStyle {
+                    layer_idx: 1,
+                    color: [40, 200, 90, 255],
+                    fill: LayerFill::Speckle,
+                    outline_width: 1,
+                },
+                LayerStyle {
+                    layer_idx: 2,
+                    color: [220, 80, 40, 255],
+                    fill: LayerFill::Pattern([0x8421; 16]),
+                    outline_width: 2,
+                },
+            ],
+            hierarchy_frames: true,
+            mono: false,
+        };
+        let cancellation = RenderCancellation::new();
+        let scene = make_scene();
+        let a = render_geometry_styled_cancellable_reuse(
+            &scene,
+            &styled(0.0),
+            1,
+            &cancellation,
+            None,
+            true,
+        )
+        .unwrap();
+        let b_full = render_geometry_styled_cancellable_reuse(
+            &scene,
+            &styled(160.0),
+            1,
+            &cancellation,
+            None,
+            true,
+        )
+        .unwrap();
+        // Shift A's geometry frame left by 16 px: B[x, y] = A[x+16, y].
+        let geometry_a = a.geometry_frame.expect("geometry frame kept");
+        let mut base = vec![0u8; 32 * 32 * 4];
+        for row in 0..32usize {
+            for col in 0..16usize {
+                let source = (row * 32 + col + 16) * 4;
+                let target = (row * 32 + col) * 4;
+                base[target..target + 4]
+                    .copy_from_slice(&geometry_a.pixels()[source..source + 4]);
+            }
+        }
+        let reuse = FrameReuse {
+            base: RgbaFrame::from_pixels(32, 32, base).unwrap(),
+            valid: [0, 0, 16, 32],
+        };
+        let b_reused = render_geometry_styled_cancellable_reuse(
+            &scene,
+            &styled(160.0),
+            1,
+            &cancellation,
+            Some(&reuse),
+            true,
+        )
+        .unwrap();
+        assert_eq!(b_reused.stats.tiles_reused, 8, "2 columns x 4 rows");
+        assert_eq!(b_reused.frame.pixels(), b_full.frame.pixels());
+        assert_eq!(
+            b_reused.geometry_frame.unwrap().pixels(),
+            b_full.geometry_frame.unwrap().pixels()
+        );
+        assert!(b_full.stats.tiles_reused == 0);
     }
 
     #[test]

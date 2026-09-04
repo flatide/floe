@@ -18,6 +18,9 @@ pub struct RenderStats {
     pub raster_us: u64,
     /// Slowest single image tile (tail imbalance across raster workers).
     pub raster_tile_max_us: u64,
+    /// Tiles served from the shifted previous geometry frame instead
+    /// of rastering (§F2R-16 pan reuse).
+    pub tiles_reused: u32,
     /// Items collected by the 2c work bin (0 = walk fallback or
     /// occupancy mode).
     pub work_bin_items: u64,

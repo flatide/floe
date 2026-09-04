@@ -2192,7 +2192,14 @@ class Viewer:
         point = self._minimap_world_point(event.x - ox, event.y - oy)
         if point is None:
             return True
-        self.cx, self.cy = point
+        # §F2R-16: the minimap keeps the zoom, so round the jump onto
+        # the 16-device-px grid of the current view - a same-scale
+        # move within a viewport's reach then reuses the previous
+        # frame's overlap (the <=8px placement shift is invisible at
+        # minimap-jump scale).
+        step = 16 * self.spp
+        self.cx += round((point[0] - self.cx) / step) * step
+        self.cy += round((point[1] - self.cy) / step) * step
         self.redraw(immediate=True)
         return True
 
@@ -2709,6 +2716,10 @@ class Viewer:
                     if res.get("raster_tile_max_ms"):
                         text += ", tile-max %.0fms" % (
                             res["raster_tile_max_ms"])
+                    if res.get("tiles_reused"):
+                        # §F2R-16 pan reuse engaged for this frame
+                        text += ", pan-reuse %d tiles" % (
+                            res["tiles_reused"])
                     if res.get("work_bin_items"):
                         text += ", bin %s items" % fmt_count(
                             res["work_bin_items"])
@@ -3146,12 +3157,19 @@ class Viewer:
         self.spp *= factor
         self.redraw()
 
+    def _snap_pan_px(self, pixels):
+        """§F2R-16: pan deltas snap to multiples of 16 device pixels -
+        the renderer's fill-phase period - so the service can reuse
+        the previous frame's overlap byte-exactly. The step changes by
+        at most 8px (<1% of a viewport), never below one period."""
+        return max(16, int(round(pixels / 16.0)) * 16)
+
     def _pan_view(self, direction, frac=KEY_PAN_FRACTION):
         """Move the viewport by a fraction of its visible extent
         (arrows: half; Ctrl+arrows: the fine tenth - Calibre)."""
         width, height = self._viewport_size()
-        dx = width * self.spp * frac
-        dy = height * self.spp * frac
+        dx = self._snap_pan_px(width * frac) * self.spp
+        dy = self._snap_pan_px(height * frac) * self.spp
         if direction == "Left":
             self.cx -= dx
         elif direction == "Right":

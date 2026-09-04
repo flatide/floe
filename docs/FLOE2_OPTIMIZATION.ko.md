@@ -967,10 +967,32 @@ block, 라벨 간 상대 순서 불변)로 이동. 부수 이득: 라벨 작업�
 배터리 통과**(밸미니 fixture 허용 범위 내 — 실칩에서 라벨이 더 잘
 보이는 방향의 변화만 있음).
 
-**2단계(진행 중)**: renderd retained geometry frame + GUI pan
-16px-스냅 + 노출 띠만 재raster. 기대: 20% pan draw ~1.2s→~0.35s,
-50%→~0.65s(이동량 비례 회복). kill switch `FLOE_RUST_PAN_REUSE=off`.
-드래그 settle은 v1에서 full raster 유지.
+**2단계 완료(0.12.38)**: 구현 —
+
+- **GUI**: 키보드 pan(50%/Ctrl 10%)과 미니맵 recenter의 이동량을
+  **16 device px 배수로 스냅**(최대 8px 오차, 시각 무영향). 드래그
+  settle은 임의 delta라 v1에선 full raster 유지.
+- **renderd**: 마지막 final render의 **label-제외 geometry frame을
+  retained**로 보관(zoom/depth/cut/layer/style epoch가 key, 라벨
+  상태는 의도적으로 제외 — 라벨은 매 frame 위에 새로 그림). 요청이
+  retained view의 16px-배수 pan이면 요청 view를 retained 격자에
+  **정확히 재스냅**(클라이언트 float 오차 제거)하고, shift된
+  retained를 base로 넘긴다.
+- **render-core**: base의 유효 영역에 완전히 포함되는 tile은
+  raster 대신 **memcpy**(`tiles_reused` 계측). reuse 발화 시 tile을
+  64px로 축소(픽셀은 tile 크기 불변 — 기존 oracle — 이라 안전;
+  384px에선 완전 포함 tile이 거의 없어 재사용율이 명목뿐이라서).
+- kill switch `FLOE_RUST_PAN_REUSE=off`. perf 라인에
+  `pan-reuse N tiles`.
+
+검증: render-core 단위 oracle(speckle+stipple+frames+label 포함
+16px-shift 재사용 = cold render와 byte 동일, 99 tests), 실daemon
+integration(스냅 pan 렌더가 recolor/mono 상태까지 동일한 cold
+worker 렌더와 **payload byte 동일**, 재사용 tile >100), 전체 배터리.
+기대: 20% pan draw ~1.2s→**~0.3-0.4s**, 50%→~0.65s — 드디어
+이동량에 비례. plan+text plan ~237ms는 별도 후속(비gated 후보)으로
+남는다. **실칩 재측정 대기** — pan 시 perf 라인의
+`pan-reuse N tiles` 표기가 발화 신호다.
 
 ## 4. 이슈 목록
 
@@ -991,7 +1013,7 @@ block, 라벨 간 상대 순서 불변)로 이동. 부수 이득: 라벨 작업�
 | F2R-13 | P1 | `DONE` | 인터랙티브 frame의 PNG 인코드/디코드 왕복 | 실칩 확인(§3.16): raw 0.8ms/pub 8.4ms, raster 무회귀 — wall ~50ms/frame + 주 스레드 디코드 제거 |
 | F2R-14 | P1 | `DONE` | 장시간 세션에서 load 증가(미니맵 이동, fresh 뷰어보다 느림) | LRU 축출 전수 스캔 → O(log n) 색인(0.12.33, §3.18) + `evict N` telemetry — 실칩 장기 세션 재확인 대기 |
 | F2R-15 | P1 | `DONE` | pick/snap이 대부분 "no object here" | 예산 모델 폐기·floe 정렬(0.12.36, §3.19) — 9.8G 실칩 확인 완료. cut 실명(결함 B)은 보류(설계 219259c) |
-| F2R-16 | P1 | `DOING` | pan이 이동량과 무관하게 전체 재raster | 1단계 라벨 최상단(0.12.37, 사용자 승인) 완료. 2단계 retained+16px-스냅 띠 재사용 진행 중(§3.20) |
+| F2R-16 | P1 | `DONE` | pan이 이동량과 무관하게 전체 재raster | 라벨 최상단(0.12.37) + retained/16px-스냅 띠 재사용(0.12.38, §3.20) — byte oracle·integration parity 고정, 실칩 재측정 대기 |
 
 ## 5. 상세 이슈와 수용 기준
 

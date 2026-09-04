@@ -1,6 +1,7 @@
 use floe_render_core::{
-    pick_scene, render_geometry_occupancy_cancellable, render_geometry_styled_cancellable,
-    render_geometry_styled_unbinned_cancellable,
+    pick_scene, render_geometry_occupancy_cancellable,
+    render_geometry_styled_cancellable_reuse,
+    render_geometry_styled_unbinned_cancellable, FrameReuse,
     snap_scene, validate_font_px, Cache, CacheLayer, ClipGeometry, DecodedPageCache, FrameScene,
     GeometryRasterRequest, LayerFill, LayerStyle, PlanRequest, RasterViewBox, RenderCancellation,
     SceneQueryLayer, SceneQueryRequest, SceneSnapKind, StyledGeometryRasterRequest, ViewBox,
@@ -227,7 +228,7 @@ struct StyleCommand {
     path: String,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct RenderCommand {
     generation: u64,
     view: [f64; 4],
@@ -617,6 +618,44 @@ fn validate_jobs(jobs: u16) -> Result<(), String> {
     Ok(())
 }
 
+/// §F2R-16: identity of a retained geometry frame. Labels are drawn
+/// on top per render, so label state is deliberately absent.
+#[derive(PartialEq)]
+struct RetainedKey {
+    width: u32,
+    height: u32,
+    depth: u32,
+    cut_px: u64,
+    visible_layers: Option<Vec<String>>,
+    frames: bool,
+    mono: bool,
+    decode_pages: Option<usize>,
+    style_epoch: Option<u64>,
+}
+
+impl RetainedKey {
+    fn new(command: &RenderCommand, style_epoch: Option<u64>) -> Self {
+        Self {
+            width: command.width,
+            height: command.height,
+            depth: command.depth,
+            cut_px: command.cut_px.to_bits(),
+            visible_layers: command.visible_layers.clone(),
+            frames: command.frames,
+            mono: command.mono,
+            decode_pages: command.decode_pages,
+            style_epoch,
+        }
+    }
+}
+
+/// The last final render's label-free frame, for §F2R-16 pan reuse.
+struct RetainedFrame {
+    key: RetainedKey,
+    view: [f64; 4],
+    frame: floe_render_core::RgbaFrame,
+}
+
 struct WorkerState {
     cache: Option<Cache>,
     page_cache: DecodedPageCache,
@@ -624,6 +663,7 @@ struct WorkerState {
     jobs: u16,
     styles: Vec<LayerStyle>,
     style_epoch: Option<u64>,
+    retained: Option<RetainedFrame>,
 }
 
 impl Default for WorkerState {
@@ -635,6 +675,7 @@ impl Default for WorkerState {
             jobs: DEFAULT_JOBS,
             styles: Vec::new(),
             style_epoch: None,
+            retained: None,
         }
     }
 }
@@ -741,6 +782,7 @@ struct FramePixels {
     work_bin_defer_rep: u64,
     work_bin_defer_single: u64,
     work_bin_defer_weight_max: u64,
+    tiles_reused: u32,
     png_us: u64,
     workers_used: u16,
     tiles: u32,
@@ -1315,6 +1357,12 @@ fn run_render(
     cancellation: &RenderCancellation,
     published_scene: &SharedPublishedScene,
 ) -> Result<(), String> {
+    // §F2R-16: the exact-revisit cache keys on the view the CLIENT
+    // asked for; the pan snap below may adjust it by float epsilons.
+    let frame_cache_key = FrameCacheKey::new(command, state.style_epoch);
+    let mut command = command.clone();
+    let pan_reuse = prepare_pan_reuse(state, &mut command);
+    let command = &command;
     let cache = state
         .cache
         .as_ref()
@@ -1343,7 +1391,6 @@ fn run_render(
         .take(command.decode_pages.unwrap_or(usize::MAX))
         .map(|(_, page_id)| page_id)
         .collect();
-    let frame_cache_key = FrameCacheKey::new(command, state.style_epoch);
     // A cached PNG is useful only when the matching query scene can be
     // reconstructed entirely from resident decoded pages. This keeps the
     // displayed frame and pick/snap snapshot synchronized without retaining
@@ -1371,7 +1418,15 @@ fn run_render(
         background: [0, 0, 0, 255],
         foreground: [255, 255, 255, 255],
         workers: raster_workers,
-        tile_size: command.tile_size,
+        // §F2R-16: pixels are tile-size invariant (a pinned oracle), so
+        // a reusing render drops to 64px tiles - at 384px almost no
+        // tile sits fully inside the shifted overlap and the reuse
+        // would be nominal.
+        tile_size: if pan_reuse.is_some() {
+            command.tile_size.min(64)
+        } else {
+            command.tile_size
+        },
     };
     let styles = if state.styles.is_empty() && (command.frames || command.labels) {
         cache
@@ -1441,6 +1496,7 @@ fn run_render(
         let scene_us = elapsed_us(scene_started);
         check_generation(cancellation, command.generation)?;
 
+        let mut retained_geometry = None;
         let pixels = if let Some(cached) = cached_frame.as_ref() {
             FramePixels {
                 payload: Arc::clone(&cached.payload),
@@ -1452,6 +1508,7 @@ fn run_render(
                 work_bin_defer_rep: 0,
                 work_bin_defer_single: 0,
                 work_bin_defer_weight_max: 0,
+                tiles_reused: 0,
                 png_us: 0,
                 workers_used: 0,
                 tiles: 0,
@@ -1493,15 +1550,23 @@ fn run_render(
                         cancellation,
                     )?
                 } else {
-                    render_geometry_styled_cancellable(
+                    // §F2R-16: a snapped pan reuses the previous
+                    // geometry frame's overlap; only the final round
+                    // keeps its own geometry for the next pan.
+                    let is_final = round_index + 1 == rounds.len();
+                    render_geometry_styled_cancellable_reuse(
                         &scene,
                         &styled,
                         command.generation,
                         cancellation,
+                        if is_final { pan_reuse.as_ref() } else { None },
+                        is_final,
                     )?
                 }
             };
             check_generation(cancellation, command.generation)?;
+            let mut report = report;
+            retained_geometry = report.geometry_frame.take();
             let png_started = Instant::now();
             let payload = if command.raw_frame {
                 Arc::new(raw_frame_payload(
@@ -1525,6 +1590,7 @@ fn run_render(
                 work_bin_defer_weight_max: report
                     .stats
                     .work_bin_defer_weight_max,
+                tiles_reused: report.stats.tiles_reused,
                 png_us,
                 workers_used: report.stats.workers_used,
                 tiles: report.stats.tiles,
@@ -1583,11 +1649,20 @@ fn run_render(
                 },
             );
         }
+        if final_round {
+            if let Some(frame) = retained_geometry.take() {
+                state.retained = Some(RetainedFrame {
+                    key: RetainedKey::new(command, state.style_epoch),
+                    view: command.view,
+                    frame,
+                });
+            }
+        }
 
         respond(
             responses,
             format!(
-                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={}",
+                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={}",
                 command.generation,
                 round_index + 1,
                 final_round as u8,
@@ -1621,6 +1696,7 @@ fn run_render(
                 scene.mask_bytes(),
                 pixels.raster_us,
                 pixels.raster_tile_max_us,
+                pixels.tiles_reused,
                 pixels.work_bin_items,
                 pixels.work_bin_overflow_items,
                 pixels.work_bin_defer_rep,
@@ -1745,6 +1821,88 @@ fn checked_generation_bytes(current: u64, incoming: u64, budget: u64) -> Result<
         ));
     }
     Ok(next)
+}
+
+/// §F2R-16: when the request is the retained frame's view panned by an
+/// exact multiple of 16 device pixels (the fill-phase period), snap the
+/// request onto the retained view's grid - eliminating client float
+/// drift - and hand back the shifted geometry frame with its valid
+/// region. Any mismatch (zoom, size, style, off-grid delta) falls back
+/// to the full raster. FLOE_RUST_PAN_REUSE=off is the kill switch.
+fn prepare_pan_reuse(state: &WorkerState, command: &mut RenderCommand) -> Option<FrameReuse> {
+    if std::env::var("FLOE_RUST_PAN_REUSE").as_deref() == Ok("off") {
+        return None;
+    }
+    if command.exact {
+        return None;
+    }
+    let retained = state.retained.as_ref()?;
+    if retained.key != RetainedKey::new(command, state.style_epoch) {
+        return None;
+    }
+    let [ox0, oy0, ox1, oy1] = retained.view;
+    let [nx0, ny0, nx1, ny1] = command.view;
+    let width = f64::from(command.width);
+    let height = f64::from(command.height);
+    let span_x = ox1 - ox0;
+    let span_y = oy1 - oy0;
+    if span_x <= 0.0 || span_y <= 0.0 {
+        return None;
+    }
+    let same_span = |new: f64, old: f64| (new - old).abs() <= old.abs() * 1e-9;
+    if !same_span(nx1 - nx0, span_x) || !same_span(ny1 - ny0, span_y) {
+        return None;
+    }
+    let sppx = span_x / width;
+    let sppy = span_y / height;
+    let dx = (nx0 - ox0) / sppx;
+    let dy = (ny0 - oy0) / sppy;
+    if (dx - dx.round()).abs() > 1e-6 || (dy - dy.round()).abs() > 1e-6 {
+        return None;
+    }
+    let kx = dx.round() as i64;
+    let ky = dy.round() as i64;
+    if kx % 16 != 0 || ky % 16 != 0 {
+        return None;
+    }
+    if kx == 0 && ky == 0 {
+        // The exact frame cache owns identical revisits.
+        return None;
+    }
+    let w = i64::from(command.width);
+    let h = i64::from(command.height);
+    if kx.abs() >= w || ky.abs() >= h {
+        return None;
+    }
+    let vx0 = ox0 + kx as f64 * sppx;
+    let vy0 = oy0 + ky as f64 * sppy;
+    command.view = [vx0, vy0, vx0 + span_x, vy0 + span_y];
+    // new[x, y] = old[x + kx, y + ky] where in bounds.
+    let valid_x0 = (-kx).max(0);
+    let valid_y0 = (-ky).max(0);
+    let valid_x1 = (w - kx).min(w);
+    let valid_y1 = (h - ky).min(h);
+    let mut pixels = vec![0u8; (w as usize) * (h as usize) * 4];
+    let old = retained.frame.pixels();
+    let row_bytes = (w as usize) * 4;
+    for y in valid_y0..valid_y1 {
+        let src_row = (y + ky) as usize;
+        let src = src_row * row_bytes + ((valid_x0 + kx) as usize) * 4;
+        let dst = (y as usize) * row_bytes + (valid_x0 as usize) * 4;
+        let len = ((valid_x1 - valid_x0) as usize) * 4;
+        pixels[dst..dst + len].copy_from_slice(&old[src..src + len]);
+    }
+    let base = floe_render_core::RgbaFrame::from_pixels(command.width, command.height, pixels)
+        .ok()?;
+    Some(FrameReuse {
+        base,
+        valid: [
+            valid_x0 as u32,
+            valid_y0 as u32,
+            valid_x1 as u32,
+            valid_y1 as u32,
+        ],
+    })
 }
 
 fn make_plan_request(cache: &Cache, command: &RenderCommand) -> Result<PlanRequest, String> {
