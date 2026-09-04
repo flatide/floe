@@ -627,20 +627,8 @@ fn render_geometry_impl(
         RenderMode::Occupancy => (None, false),
         RenderMode::Styled(_) => PreparedLabels::build(scene, request)?,
     };
-    let tile_size = u32::from(request.tile_size);
-    let tile_columns = request.width.div_ceil(tile_size);
-    let tile_rows = request.height.div_ceil(tile_size);
-    let tile_count_u64 = u64::from(tile_columns) * u64::from(tile_rows);
-    let tile_count: usize = tile_count_u64
-        .try_into()
-        .map_err(|_| format!("raster tile count limit exceeded: {tile_count_u64}"))?;
-    let worker_count = usize::from(request.workers).min(tile_count).max(1);
     let mut counters = RasterCounters::default();
-    let mut stats = RenderStats {
-        workers_used: worker_count.try_into().unwrap_or(u16::MAX),
-        tiles: tile_count.try_into().unwrap_or(u32::MAX),
-        ..RenderStats::default()
-    };
+    let mut stats = RenderStats::default();
     let started = Instant::now();
     // F2R-03b 2c: one collection walk replaces the per-tile x
     // per-plane hierarchy walks. Falls back to the walk (None) when
@@ -658,6 +646,37 @@ fn render_geometry_impl(
         _ => None,
     };
     stats.work_bin_items = bin.as_ref().map(|bin| bin.items).unwrap_or(0);
+    // §3.21: deferred edges concentrate mini-walk work in whichever
+    // tiles cover them - the field view put 87% of its wall in one
+    // 384px tile, whose mini also overran the cap (built, discarded,
+    // then re-walked by the legacy path). Smaller tiles spread that
+    // work across the raster workers and keep each tile's mini under
+    // the cap; pixels are tile-size invariant (a pinned oracle), so
+    // the shrink is pure scheduling.
+    let shrunk_request;
+    let request = if request.tile_size > 128
+        && bin
+            .as_ref()
+            .is_some_and(|bin| !bin.deferred_edges.is_empty())
+    {
+        shrunk_request = GeometryRasterRequest {
+            tile_size: 128,
+            ..*request
+        };
+        &shrunk_request
+    } else {
+        request
+    };
+    let tile_size = u32::from(request.tile_size);
+    let tile_columns = request.width.div_ceil(tile_size);
+    let tile_rows = request.height.div_ceil(tile_size);
+    let tile_count_u64 = u64::from(tile_columns) * u64::from(tile_rows);
+    let tile_count: usize = tile_count_u64
+        .try_into()
+        .map_err(|_| format!("raster tile count limit exceeded: {tile_count_u64}"))?;
+    let worker_count = usize::from(request.workers).min(tile_count).max(1);
+    stats.workers_used = worker_count.try_into().unwrap_or(u16::MAX);
+    stats.tiles = tile_count.try_into().unwrap_or(u32::MAX);
     let bin = bin.as_ref();
     let next_tile = AtomicUsize::new(0);
     let tiles = std::thread::scope(|scope| {

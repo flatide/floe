@@ -994,13 +994,43 @@ worker 렌더와 **payload byte 동일**, 재사용 tile >100), 전체 배터리
 남는다. **실칩 재측정 대기** — pan 시 perf 라인의
 `pan-reuse N tiles` 표기가 발화 신호다.
 
+### 3.21 "draw 회귀" 보고 판정 — 한-tile mini 집중 (2026-09-04)
+
+**보고(사용자)**: 새 뷰 라인 — 2,183ms = 255 load + **1,822 draw**,
+**tile-max 1,583ms(draw의 87%)**, bin 426k(defer 2r **w1.6M**),
+paints 4.5M, hier **5.1M**/814k, evict 1,542. "draw 회귀 같음."
+
+**A/B 판정(같은 날)**: 0.12.36 renderd를 별도 빌드해 같은 sample9
+trace로 HEAD와 비교 — raster 0.4~0.6 vs 0.7~1.0ms로 **구조적 회귀
+없음**(차이는 retained geometry clone ~0.3ms 상수, frame 크기
+비례·내용 무관). 라벨 최상단(labels off인 이 라인과 무관)·pan
+reuse(미발화)도 이 frame 경로를 건드리지 않는다.
+
+**실체**: 0.12.32 mini walk 이후 처음 관측된 **초대형 지연 에지의
+한-tile 집중** 체제다. w1.6M짜리 지연 에지 2개의 콘텐츠가 소수
+384px tile에 몰리면 ① 그 tile의 mini가 거대해지고(≤786k cap), ②
+cap을 넘으면 **mini를 다 짓고 버린 뒤 legacy per-plane 재walk까지
+이중 지불**하며(hier 5.1M의 정체), ③ 나머지 worker는 논다(tile-max
+= wall의 87%). 뷰 클래스 문제지 37/38 회귀가 아니다 — 다만 실재
+결함이다.
+
+**조치(0.12.39)**: bin에 지연 에지가 있으면 render-core가 tile을
+**128px로 축소**(수집 후 grid 결정으로 재배치). 픽셀은 tile 크기
+불변(고정 oracle)이라 순수 스케줄링 변경 — 무거운 tile이 쪼개져
+4-worker가 나눠 갖고, per-tile mini도 cap 아래로 내려가 overflow
+이중낭비가 사라진다. 비용: per-tile item 필터 증가(이 뷰 426k×
+~40 tiles ≈ +수십 ms) ≪ tail 해소. 기대: 이 뷰 draw 1,822 →
+**~0.6-0.9s**(tile-max ~1.6s → 수백 ms). §3.15 tile-sweep의 "작은
+tile 기각"은 walk-폴백 체제의 판정이었고 bin+mini 체제에는 적용되지
+않는다. 실칩 재측정 대기 — 같은 뷰의 tile-max가 판정 지표다.
+
 ## 4. 이슈 목록
 
 | ID | 우선순위 | 상태 | 요약 | 다음 판정 |
 |---|---:|---|---|---|
 | F2R-01 | P1 | `DONE` | cache hit까지 128-page refine | cache-aware batch/unit+현장 gate 완료 |
 | F2R-02 | P1 | `DONE` | 128px tile의 반복 hierarchy 순회 | 제품 기본 384px 승인 |
-| F2R-03 | P1 | `DOING` | tile x layer x hierarchy 총 CPU 작업량 | 2c 완결(§3.17): depth-3 draw 332ms(3배 우세)·mid-zoom draw 498ms(2.2배 우세), 원점 11.7s→894ms(13배). 남음: 03c(트리거 미발화 유지) |
+| F2R-03 | P1 | `DOING` | tile x layer x hierarchy 총 CPU 작업량 | 2c 완결(§3.17, 원점 13배) + 지연-에지 tile 128 축소(0.12.39, §3.21 한-tile 집중 해소) 재측정 대기. 남음: 03c(트리거 미발화 유지) |
 | F2R-04 | P1 | `DONE` | total에서 사라진 PNG/publish 37~44ms | write/sync/rename/handoff 계측 완료 |
 | F2R-05 | P2 | `DONE` | jobs=8의 CPU/전력 비용 | decode 8/raster 4 분리 승인 |
 | F2R-06 | P3 | `BLOCKED` | render마다 OS thread 생성 | startup_us가 병목일 때만 pool |
