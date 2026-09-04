@@ -994,6 +994,20 @@ worker 렌더와 **payload byte 동일**, 재사용 tile >100), 전체 배터리
 남는다. **실칩 재측정 대기** — pan 시 perf 라인의
 `pan-reuse N tiles` 표기가 발화 신호다.
 
+**실칩 확인(2026-09-04, w1.5M 지연 에지가 있는 무거운 뷰)**:
+
+| pan | total | draw | pan-reuse | paints |
+|---|---:|---:|---:|---:|
+| Ctrl+커서(10%) | 620ms | **378** | 143/~156 tiles (92%) | 198k |
+| 커서(50%) | 1,054ms | **845** | 78/~156 tiles (50%) | 2.9M |
+
+재사용율이 이동량과 정확히 비례하고(92%/50%), paints(198k vs
+2.9M)가 띠만 칠함을 증명한다. 이동량 무관 ~1.5-2s였던 pan이 종결.
+**남은 pan 바닥**(이동량 비례하지 않는 고정 몫): ① collection
+재실행(bin 365-458k 재수집 + w1.5M 에지 2개의 실패 trial ~0.2s —
+trial 결과 캐시 후보), ② plan+text plan ~150-200ms(인접 뷰 plan
+재사용 후보). 요구 발생 시 이 순서로 착수.
+
 ### 3.21 "draw 회귀" 보고 판정 — 한-tile mini 집중 (2026-09-04)
 
 **보고(사용자)**: 새 뷰 라인 — 2,183ms = 255 load + **1,822 draw**,
@@ -1051,7 +1065,7 @@ per-tile item 필터(519k×~40 tiles — 2c 설계의 counting-sort binning
 | F2R-13 | P1 | `DONE` | 인터랙티브 frame의 PNG 인코드/디코드 왕복 | 실칩 확인(§3.16): raw 0.8ms/pub 8.4ms, raster 무회귀 — wall ~50ms/frame + 주 스레드 디코드 제거 |
 | F2R-14 | P1 | `DONE` | 장시간 세션에서 load 증가(미니맵 이동, fresh 뷰어보다 느림) | LRU 축출 전수 스캔 → O(log n) 색인(0.12.33, §3.18) + `evict N` telemetry — 실칩 장기 세션 재확인 대기 |
 | F2R-15 | P1 | `DONE` | pick/snap이 대부분 "no object here" | 예산 모델 폐기·floe 정렬(0.12.36, §3.19) — 9.8G 실칩 확인 완료. cut 실명(결함 B)은 보류(설계 219259c) |
-| F2R-16 | P1 | `DONE` | pan이 이동량과 무관하게 전체 재raster | 라벨 최상단(0.12.37) + retained/16px-스냅 띠 재사용(0.12.38, §3.20) — byte oracle·integration parity 고정, 실칩 재측정 대기 |
+| F2R-16 | P1 | `DONE` | pan이 이동량과 무관하게 전체 재raster | 실칩 확인(§3.20): 10% pan draw 378ms(재사용 92%)·50% 845ms(50%) — 이동량 비례 회복. 남은 pan 바닥: collection/trial ~0.3s, plan ~0.2s(비gated 후보) |
 
 ## 5. 상세 이슈와 수용 기준
 
