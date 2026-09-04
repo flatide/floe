@@ -1017,8 +1017,11 @@ trial 결과 캐시 후보), ② plan+text plan ~150-200ms(인접 뷰 plan
 덮으면 재렌더 생략)와 bg-frame 수신 경로("silent margin upgrade")를
 되살려 결합했다 —
 
-- **GUI**: settle 후 300ms 유휴 시 **±50%(16px-격자 스냅) 확장,
-  2w×2h**의 margin render를 bg=True·다음 generation으로 제출.
+- **GUI**: settle 후 300ms 유휴 시 margin render를 bg=True·다음
+  generation으로 제출. 확장 폭은 **화살표 한 스텝(50%, 16px 스냅) +
+  `_covered`의 10% 여유 pad**(≈사방 60%, 총 ~2.2w×2.2h) — 한 번의
+  50% 이동이 정확히 가장자리에 닿아 재렌더되던 것을 실측으로 교정
+  (2026-09-04).
   margin frame이 오면 last_frame이 커지고 이후 ±50% 내 pan은
   `_covered()`가 **재렌더 자체를 생략(즉시 crop)**. margin 안을
   돌아다니다 중심을 벗어나면(0.35·vw 기준) margin을 재보충한다.

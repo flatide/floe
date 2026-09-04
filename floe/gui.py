@@ -2465,16 +2465,22 @@ class Viewer:
             self._margin_debug("submit skipped")
             return False
         bbox = self.view_bbox()
-        w, h = self._viewport_size()
+        vw, vh = self._viewport_size()
         spp2 = 2.0 * self.spp
         rx0 = math.floor(bbox[0] / spp2) * spp2
         ry1 = math.ceil(bbox[3] / spp2) * spp2
-        w, h = int(w) + 2, int(h) + 2
+        w, h = int(vw) + 2, int(vh) + 2
         # Margin offsets snap to the 16px fill-phase grid so the
         # margin render reuses the just-drawn viewport as its center
-        # and later pans reuse the margin (§F2R-16 contract).
-        ex = max(16, int(round(w / 2.0 / 16)) * 16)
-        ey = max(16, int(round(h / 2.0 / 16)) * 16)
+        # and later pans reuse the margin (§F2R-16 contract). Each side
+        # holds ONE full arrow step (50%, snapped) PLUS _covered()'s
+        # 10% comfort pad, so a single half-viewport pan stays covered
+        # and renders nothing (field call 2026-09-04: a lone 50% step
+        # landed exactly on the margin edge and re-rendered).
+        ex = self._snap_pan_px(vw * KEY_PAN_FRACTION) \
+            + int(math.ceil(0.1 * vw / 16.0)) * 16
+        ey = self._snap_pan_px(vh * KEY_PAN_FRACTION) \
+            + int(math.ceil(0.1 * vh / 16.0)) * 16
         mw, mh = w + 2 * ex, h + 2 * ey
         eb = (rx0 - ex * self.spp,
               ry1 - (h + ey) * self.spp,
