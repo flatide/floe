@@ -909,26 +909,28 @@ class RealDaemonIntegrationTests(unittest.TestCase):
             self.assertGreater(first_frames[-1]["tiles"], 4)
             first_payload = self._frame_payload(first_frames[-1])
 
-            # An exact revisit rebuilds/publishes the query scene from the
-            # decoded-page LRU but reuses the bounded final payload. Raster
-            # and encode must both disappear without weakening pick/snap.
+            # §F2R-18: an exact revisit reuses every retained tile
+            # (the payload cache is retired) - the raster collapses to
+            # memcpys and the payload stays byte-identical.
             worker.submit(dict(base_job, gen=2))
             revisited = self._frames_through_settled(worker, 2)
             self.assertEqual(len(revisited), 1)
-            self.assertEqual(revisited[0].get("frame_cache_hit"), 1)
-            self.assertEqual(revisited[0].get("raster_ms"), 0.0)
-            self.assertEqual(revisited[0].get("png_ms"), 0.0)
+            self.assertEqual(revisited[0].get("frame_cache_hit", 0), 0)
+            self.assertGreater(revisited[0].get("tiles_reused", 0), 0)
+            self.assertEqual(revisited[0]["tiles_reused"],
+                             revisited[0]["render_tiles"],
+                             "an exact revisit reuses every tile")
             self.assertEqual(self._frame_payload(revisited[0]),
                              first_payload)
             self._assert_query_parity(cache, worker, bbox)
             self._assert_clip_parity(cache, worker, bbox)
 
-            # Backend-neutral timing can explicitly bypass only the exact
-            # final-frame cache while retaining the decoded-page warm set.
+            # Backend-neutral timing bypasses retained reuse via the
+            # frame_cache flag while keeping the decoded warm set.
             worker.submit(dict(base_job, gen=3, frame_cache=False))
             uncached = self._frames_through_settled(worker, 3)
             self.assertEqual(len(uncached), 1)
-            self.assertEqual(uncached[0].get("frame_cache_hit"), 0)
+            self.assertEqual(uncached[0].get("tiles_reused", 0), 0)
             self.assertGreater(uncached[0].get("raster_ms", 0.0), 0.0)
             self.assertEqual(self._frame_payload(uncached[0]),
                              first_payload)
@@ -1024,8 +1026,7 @@ class RealDaemonIntegrationTests(unittest.TestCase):
                            pan_b[2] + 64 * q, pan_b[3] + 64 * q)
             worker.submit(dict(pan_job, gen=107, bg=True,
                                bbox=margin_bbox,
-                               w=800 + 128, h=768 + 128,
-                               frame_cache=False))
+                               w=800 + 128, h=768 + 128))
             margin_frames = self._frames_through_settled(worker, 107)
             self.assertTrue(margin_frames[-1].get("bg"))
             self.assertGreater(

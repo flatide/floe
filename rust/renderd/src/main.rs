@@ -20,13 +20,14 @@ const DEFAULT_BUDGET_MB: u64 = 1024;
 const DEFAULT_JOBS: u16 = 1;
 const DEFAULT_ROUND_PAGES: usize = 128;
 const MAX_JOBS: u16 = 256;
-const MAX_CACHED_FRAMES: usize = 3;
+/// §F2R-18: retained label-free geometry frames (one per render
+/// state x scale) - they serve exact revisits, pans, and margins.
+const RETAINED_FRAMES: usize = 3;
 /// A refinement round whose raster ran past this stops the stream:
 /// the remaining page batches merge into one final round (§3.15 —
 /// five ~2.2s intermediate rasters were the draw time of a large
 /// cold view). Cheap rounds keep streaming below it.
 const REFINEMENT_RASTER_BUDGET_US: u64 = 500_000;
-const MAX_FRAME_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const SNAP_SHAPE_CAP: usize = 1_048_576;
 const PICK_CANDIDATE_CAP: usize = 64;
 const QUERY_MEMBER_CAP: usize = 4_194_304;
@@ -658,11 +659,14 @@ struct RetainedFrame {
 struct WorkerState {
     cache: Option<Cache>,
     page_cache: DecodedPageCache,
-    frame_cache: FrameCache,
+    /// §F2R-18: up to RETAINED_FRAMES label-free geometry frames,
+    /// newest last, one per (render state, scale) - they serve exact
+    /// revisits (k=0 full reuse), pans, and margins alike, replacing
+    /// the retired exact frame cache.
+    retained: Vec<RetainedFrame>,
     jobs: u16,
     styles: Vec<LayerStyle>,
     style_epoch: Option<u64>,
-    retained: Option<RetainedFrame>,
 }
 
 impl Default for WorkerState {
@@ -670,104 +674,11 @@ impl Default for WorkerState {
         Self {
             cache: None,
             page_cache: DecodedPageCache::new(DEFAULT_BUDGET_MB * 1024 * 1024),
-            frame_cache: FrameCache::default(),
+            retained: Vec::new(),
             jobs: DEFAULT_JOBS,
             styles: Vec::new(),
             style_epoch: None,
-            retained: None,
         }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct FrameCacheKey {
-    view: [u64; 4],
-    width: u32,
-    height: u32,
-    depth: u32,
-    cut_px: u64,
-    exact: bool,
-    visible_layers: Option<Vec<String>>,
-    frames: bool,
-    labels: bool,
-    label_font_px: u32,
-    mono: bool,
-    decode_pages: Option<usize>,
-    /// Raw and PNG payloads are not interchangeable on a hit.
-    raw_frame: bool,
-    style_epoch: Option<u64>,
-}
-
-impl FrameCacheKey {
-    fn new(command: &RenderCommand, style_epoch: Option<u64>) -> Self {
-        Self {
-            view: command.view.map(f64::to_bits),
-            width: command.width,
-            height: command.height,
-            depth: command.depth,
-            cut_px: command.cut_px.to_bits(),
-            exact: command.exact,
-            visible_layers: command.visible_layers.clone(),
-            frames: command.frames,
-            labels: command.labels,
-            label_font_px: command.label_font_px.to_bits(),
-            mono: command.mono,
-            decode_pages: command.decode_pages,
-            raw_frame: command.raw_frame,
-            style_epoch,
-        }
-    }
-}
-
-/// One settled published frame payload: PNG bytes or a `FLOERAW1` raw
-/// RGBA payload, exactly as published (the cache key records which).
-#[derive(Clone)]
-struct CachedFrame {
-    payload: Arc<Vec<u8>>,
-    labels_truncated: bool,
-}
-
-#[derive(Default)]
-struct FrameCache {
-    entries: Vec<(FrameCacheKey, CachedFrame)>,
-    bytes: usize,
-}
-
-impl FrameCache {
-    fn get(&mut self, key: &FrameCacheKey) -> Option<CachedFrame> {
-        let index = self
-            .entries
-            .iter()
-            .position(|(candidate, _)| candidate == key)?;
-        let entry = self.entries.remove(index);
-        let value = entry.1.clone();
-        self.entries.push(entry);
-        Some(value)
-    }
-
-    fn insert(&mut self, key: FrameCacheKey, value: CachedFrame) {
-        if value.payload.len() > MAX_FRAME_CACHE_BYTES {
-            return;
-        }
-        if let Some(index) = self
-            .entries
-            .iter()
-            .position(|(candidate, _)| candidate == &key)
-        {
-            let (_, old) = self.entries.remove(index);
-            self.bytes = self.bytes.saturating_sub(old.payload.len());
-        }
-        self.bytes = self.bytes.saturating_add(value.payload.len());
-        self.entries.push((key, value));
-        while self.entries.len() > MAX_CACHED_FRAMES || self.bytes > MAX_FRAME_CACHE_BYTES {
-            let (_, evicted) = self.entries.remove(0);
-            self.bytes = self.bytes.saturating_sub(evicted.payload.len());
-        }
-    }
-
-    fn clear(&mut self) {
-        self.entries.clear();
-        self.bytes = 0;
     }
 }
 
@@ -1003,7 +914,7 @@ fn handle_open(
             let info = cache.info();
             state.cache = Some(cache);
             state.page_cache = DecodedPageCache::new(budget_bytes);
-            state.frame_cache.clear();
+            state.retained.clear();
             state.jobs = command.jobs;
             state.styles.clear();
             state.style_epoch = None;
@@ -1045,7 +956,7 @@ fn handle_style(state: &mut WorkerState, command: StyleCommand, responses: &Send
         Ok(styles) => {
             state.styles = styles;
             state.style_epoch = Some(command.epoch);
-            state.frame_cache.clear();
+            state.retained.clear();
             respond(
                 responses,
                 format!(
@@ -1356,9 +1267,6 @@ fn run_render(
     cancellation: &RenderCancellation,
     published_scene: &SharedPublishedScene,
 ) -> Result<(), String> {
-    // §F2R-16: the exact-revisit cache keys on the view the CLIENT
-    // asked for; the pan snap below may adjust it by float epsilons.
-    let frame_cache_key = FrameCacheKey::new(command, state.style_epoch);
     let mut command = command.clone();
     let pan_reuse = prepare_pan_reuse(state, &mut command);
     let command = &command;
@@ -1390,19 +1298,6 @@ fn run_render(
         .take(command.decode_pages.unwrap_or(usize::MAX))
         .map(|(_, page_id)| page_id)
         .collect();
-    // A cached PNG is useful only when the matching query scene can be
-    // reconstructed entirely from resident decoded pages. This keeps the
-    // displayed frame and pick/snap snapshot synchronized without retaining
-    // old FrameScene Arcs outside the decoded-page budget.
-    let cached_frame = if command.frame_cache
-        && selected
-            .iter()
-            .all(|page_id| state.page_cache.contains(*page_id))
-    {
-        state.frame_cache.get(&frame_cache_key)
-    } else {
-        None
-    };
     let raster_workers = command.jobs.unwrap_or(state.jobs);
     let decode_workers = command.decode_jobs.or(command.jobs).unwrap_or(state.jobs);
     let raster_request = GeometryRasterRequest {
@@ -1496,35 +1391,7 @@ fn run_render(
         check_generation(cancellation, command.generation)?;
 
         let mut retained_geometry = None;
-        let pixels = if let Some(cached) = cached_frame.as_ref() {
-            FramePixels {
-                payload: Arc::clone(&cached.payload),
-                frame_cache_hit: true,
-                raster_us: 0,
-                raster_tile_max_us: 0,
-                work_bin_items: 0,
-                work_bin_overflow_items: 0,
-                work_bin_defer_rep: 0,
-                work_bin_defer_single: 0,
-                work_bin_defer_weight_max: 0,
-                tiles_reused: 0,
-                png_us: 0,
-                workers_used: 0,
-                tiles: 0,
-                partial: scene.is_partial(),
-                labels_truncated: cached.labels_truncated,
-                rectangle_member_paints: 0,
-                polygon_member_paints: 0,
-                path_member_paints: 0,
-                frame_member_paints: 0,
-                label_tile_paints: 0,
-                label_pixel_paints: 0,
-                rep_members_tested: 0,
-                rep_members_drawn: 0,
-                hier_cells_visited: 0,
-                subtrees_pruned: 0,
-            }
-        } else {
+        let pixels = {
             let report = if styles.is_empty() && !command.frames {
                 render_geometry_occupancy_cancellable(
                     &scene,
@@ -1579,6 +1446,8 @@ fn run_render(
             let png_us = elapsed_us(png_started);
             FramePixels {
                 payload,
+                // §F2R-18: the payload cache is retired; the wire
+                // field stays 0 for adapter compatibility.
                 frame_cache_hit: false,
                 raster_us: report.stats.raster_us,
                 raster_tile_max_us: report.stats.raster_tile_max_us,
@@ -1639,22 +1508,16 @@ fn run_render(
                 cell_names: Arc::clone(&query_cell_names),
             }));
         }
-        if final_round && command.frame_cache && !pixels.frame_cache_hit {
-            state.frame_cache.insert(
-                frame_cache_key.clone(),
-                CachedFrame {
-                    payload: Arc::clone(&pixels.payload),
-                    labels_truncated: pixels.labels_truncated,
-                },
-            );
-        }
         if final_round {
             if let Some(frame) = retained_geometry.take() {
-                state.retained = Some(RetainedFrame {
-                    key: RetainedKey::new(command, state.style_epoch),
-                    view: command.view,
-                    frame,
-                });
+                store_retained(
+                    &mut state.retained,
+                    RetainedFrame {
+                        key: RetainedKey::new(command, state.style_epoch),
+                        view: command.view,
+                        frame,
+                    },
+                );
             }
         }
 
@@ -1822,6 +1685,30 @@ fn checked_generation_bytes(current: u64, incoming: u64, budget: u64) -> Result<
     Ok(next)
 }
 
+/// §F2R-18: keep one retained frame per (render state, scale),
+/// newest last, bounded at RETAINED_FRAMES - zoom round-trips find
+/// their scale again while pans keep reusing the current one.
+fn store_retained(retained: &mut Vec<RetainedFrame>, entry: RetainedFrame) {
+    let same_scale = |a: &RetainedFrame| {
+        let span = |frame: &RetainedFrame| {
+            (
+                (frame.view[2] - frame.view[0]) / f64::from(frame.frame.width()),
+                (frame.view[3] - frame.view[1]) / f64::from(frame.frame.height()),
+            )
+        };
+        let (ax, ay) = span(a);
+        let (bx, by) = span(&entry);
+        a.key == entry.key
+            && (ax - bx).abs() <= bx.abs() * 1e-9
+            && (ay - by).abs() <= by.abs() * 1e-9
+    };
+    retained.retain(|candidate| !same_scale(candidate));
+    retained.push(entry);
+    if retained.len() > RETAINED_FRAMES {
+        retained.remove(0);
+    }
+}
+
 /// §F2R-16/§F2R-17: when the request shares the retained frame's
 /// render state and scale and sits on its 16-device-px grid (the fill
 /// phase period), snap the request onto that exact grid - eliminating
@@ -1837,10 +1724,17 @@ fn prepare_pan_reuse(state: &WorkerState, command: &mut RenderCommand) -> Option
     if command.exact {
         return None;
     }
-    let retained = state.retained.as_ref()?;
-    if retained.key != RetainedKey::new(command, state.style_epoch) {
+    // The frame_cache flag keeps its meaning as the revisit-reuse
+    // switch (perf baselines turn it off for backend-neutral timing).
+    if !command.frame_cache {
         return None;
     }
+    let key = RetainedKey::new(command, state.style_epoch);
+    let retained = state
+        .retained
+        .iter()
+        .rev()
+        .find(|candidate| candidate.key == key)?;
     let [ox0, oy0, ox1, oy1] = retained.view;
     let [nx0, ny0, nx1, ny1] = command.view;
     let rw = f64::from(retained.frame.width());
@@ -1875,10 +1769,8 @@ fn prepare_pan_reuse(state: &WorkerState, command: &mut RenderCommand) -> Option
     let rh_px = i64::from(retained.frame.height());
     let w = i64::from(command.width);
     let h = i64::from(command.height);
-    if kx == 0 && ky == 0 && w == rw_px && h == rh_px {
-        // The exact frame cache owns identical revisits.
-        return None;
-    }
+    // kx == ky == 0 with equal sizes is the exact revisit: with the
+    // payload cache retired (§F2R-18) it reuses every tile here.
     // request pixel (x, y) = retained pixel (x + kx, y + ky).
     let valid_x0 = (-kx).max(0);
     let valid_y0 = (-ky).max(0);
@@ -2431,46 +2323,47 @@ mod tests {
     }
 
     #[test]
-    fn frame_png_cache_is_bounded_lru_and_keys_exact_pixels() {
+    fn retained_frames_are_bounded_per_state_and_scale() {
+        // §F2R-18: one retained frame per (render state, scale),
+        // newest last, capped - a zoom round-trip finds its scale
+        // again while re-renders at one scale replace in place.
         let command = render(
             parse_command(
-                "render gen=1 view=0,0,10,10 w=20 h=20 depth=full cut=0 frames=on labels=on font_px=14 jobs=4 tile_px=384 out=/tmp/a.png",
+                "render gen=1 view=0,0,320,320 w=32 h=32 frames=off out=/tmp/a.raw",
             )
             .unwrap()
             .unwrap(),
         );
-        let base = FrameCacheKey::new(&command, Some(7));
-        let value = |byte| CachedFrame {
-            payload: Arc::new(vec![byte; 8]),
-            labels_truncated: false,
+        let frame = |scale: f64| RetainedFrame {
+            key: RetainedKey::new(&command, Some(7)),
+            view: [0.0, 0.0, 320.0 * scale, 320.0 * scale],
+            frame: floe_render_core::RgbaFrame::from_pixels(
+                32,
+                32,
+                vec![0u8; 32 * 32 * 4],
+            )
+            .unwrap(),
         };
-        let mut cache = FrameCache::default();
-        let mut keys = Vec::new();
-        for offset in 0..3 {
-            let mut key = base.clone();
-            key.view[0] = (offset as f64).to_bits();
-            cache.insert(key.clone(), value(offset as u8));
-            keys.push(key);
-        }
-        assert_eq!(cache.entries.len(), MAX_CACHED_FRAMES);
-        assert!(cache.get(&keys[0]).is_some());
+        let mut retained = Vec::new();
+        store_retained(&mut retained, frame(1.0));
+        store_retained(&mut retained, frame(2.0));
+        store_retained(&mut retained, frame(1.0));
+        assert_eq!(retained.len(), 2, "same scale replaces in place");
+        store_retained(&mut retained, frame(4.0));
+        store_retained(&mut retained, frame(8.0));
+        assert_eq!(retained.len(), RETAINED_FRAMES, "bounded");
+        // the oldest scale (2.0) was evicted; 1.0 was refreshed later
+        let spans: Vec<f64> = retained
+            .iter()
+            .map(|entry| entry.view[2] - entry.view[0])
+            .collect();
+        assert_eq!(spans, vec![320.0, 320.0 * 4.0, 320.0 * 8.0]);
 
-        let mut newest = base.clone();
-        newest.view[0] = 3.0f64.to_bits();
-        cache.insert(newest.clone(), value(3));
-        assert!(cache.get(&keys[1]).is_none());
-        assert!(cache.get(&keys[0]).is_some());
-        assert!(cache.get(&newest).is_some());
-
-        let mut other_font = base.clone();
-        other_font.label_font_px = 15.0f32.to_bits();
-        assert_ne!(base, other_font);
-        assert_ne!(base, FrameCacheKey::new(&command, Some(8)));
-
-        // A raw payload must never satisfy a PNG request or vice versa.
-        let mut raw_command = command;
-        raw_command.raw_frame = true;
-        assert_ne!(base, FrameCacheKey::new(&raw_command, Some(7)));
+        // A different style epoch never matches.
+        let mut other = frame(1.0);
+        other.key = RetainedKey::new(&command, Some(8));
+        store_retained(&mut retained, other);
+        assert_eq!(retained.len(), RETAINED_FRAMES);
     }
 
     #[test]
@@ -2523,11 +2416,11 @@ mod tests {
         let pixels: Vec<u8> = (0..32u32 * 32)
             .flat_map(|index| [(index % 251) as u8, 1, 2, 255])
             .collect();
-        state.retained = Some(RetainedFrame {
+        state.retained = vec![RetainedFrame {
             key: RetainedKey::new(&retained_cmd, None),
             view: [0.0, 0.0, 320.0, 320.0],
             frame: floe_render_core::RgbaFrame::from_pixels(32, 32, pixels.clone()).unwrap(),
-        });
+        }];
         let mut margin = render(
             parse_command(
                 "render gen=1 view=-160,-160,480,480 w=64 h=64 frames=off out=/tmp/a.raw",
@@ -2542,11 +2435,11 @@ mod tests {
         assert_eq!(margin.view, [-160.0, -160.0, 480.0, 480.0]);
 
         let margin_pixels = vec![7u8; 64 * 64 * 4];
-        state.retained = Some(RetainedFrame {
+        state.retained = vec![RetainedFrame {
             key: RetainedKey::new(&retained_cmd, None),
             view: [-160.0, -160.0, 480.0, 480.0],
             frame: floe_render_core::RgbaFrame::from_pixels(64, 64, margin_pixels).unwrap(),
-        });
+        }];
         let mut inside = render(
             parse_command(
                 "render gen=2 view=0,0,320,320 w=32 h=32 frames=off out=/tmp/c.raw",

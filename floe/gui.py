@@ -2487,7 +2487,7 @@ class Viewer:
             "frames": self.frames_on,
             "labels": self.labels_on,
             "label_font_px": self.label_font_px,
-            "frame_cache": False,
+            "frame_cache": self.frame_cache_on,
             "abstract": self.abstract,
             "visible": self._layers_arg()})
         return False
@@ -2770,8 +2770,6 @@ class Viewer:
                             "raw" if res.get("frame_format") == "raw"
                             else "png",
                             res["png_ms"], res.get("publish_ms", 0.0))
-                        if res.get("frame_cache_hit"):
-                            text += ", frame-cache"
                         # NNtiles is CUMULATIVE over the refinement
                         # rounds (9 tiles x 5 rounds = 45), not a
                         # thread count - raster threads are the Nj

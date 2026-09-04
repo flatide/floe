@@ -1047,6 +1047,31 @@ crop-only(라인 없음, 0ms) 경로다. 실칩 재확인 항목: ① margin 완
 margin 진행 중 클릭/줌이 즉시 반응하는지, ③ 백그라운드 margin의
 CPU 사용이 거슬리지 않는지(뷰당 최대 ~3× viewport raster).
 
+### 3.23 F2R-18 — exact frame cache 제거, retained LRU로 통합 (2026-09-04, 사용자 결정)
+
+**결정(사용자)**: "지금 만든 기능으로 기존 캐시는 크게 의미가
+없으므로 제거." — F2R-08의 exact frame cache(최종 payload 3장,
+64MB 상한)를 제거하고 retained geometry frame으로 통합했다
+(0.12.41):
+
+- **retained가 3-entry LRU로 승격** — (render state × scale)당 1장,
+  최신 우선. frame cache의 유일한 우위였던 **zoom 왕복 복원**을
+  scale별 retained가 흡수한다: 왕복 복귀 = k=0 전량 재사용(전 tile
+  memcpy + 라벨 재도색, ~10-20ms — 기존 cache hit과 동급이며 그
+  scale의 margin까지 함께 살아 돌아온다).
+- k=0 동일-뷰 재사용 허용(기존 "frame cache 소관" 제외 삭제),
+  FrameCache/FrameCacheKey/CachedFrame 및 상한 삭제(−64MB).
+- **`frame_cache` 플래그는 의미 유지** — off = 재방문/pan 재사용
+  비활성(perf-baseline의 backend-중립 타이밍 계약 그대로). wire의
+  `frame_cache_hit` 필드는 호환용으로 0 고정, GUI의 "frame-cache"
+  표시는 제거. margin job도 이제 이 플래그를 따른다(payload cache
+  오염 예외가 소멸했으므로).
+
+검증: retained LRU 단위(scale별 교체·상한·epoch 격리), integration
+재고정 — exact 재방문이 `tiles_reused == render_tiles`(전량 재사용)
+로 **payload byte 동일**, frame_cache=off는 tiles_reused 0의 진짜
+cold 재raster로 동일 byte. F2R-08의 수용 gate는 이 형태로 승계된다.
+
 ### 3.21 "draw 회귀" 보고 판정 — 한-tile mini 집중 (2026-09-04)
 
 **보고(사용자)**: 새 뷰 라인 — 2,183ms = 255 load + **1,822 draw**,
@@ -1096,7 +1121,7 @@ per-tile item 필터(519k×~40 tiles — 2c 설계의 counting-sort binning
 | F2R-05 | P2 | `DONE` | jobs=8의 CPU/전력 비용 | decode 8/raster 4 분리 승인 |
 | F2R-06 | P3 | `BLOCKED` | render마다 OS thread 생성 | startup_us가 병목일 때만 pool |
 | F2R-07 | P1 | `DONE` | OVC coverage post-composite 회귀 | 제품 경로 제거 gate 유지 |
-| F2R-08 | P1 | `DONE` | exact 재방문도 full raster/PNG 반복 | bounded PNG+scene 복원 gate 완료 |
+| F2R-08 | P1 | `DONE` | exact 재방문도 full raster/PNG 반복 | payload cache는 §3.23에서 제거·retained LRU로 승계(0.12.41, 사용자 결정) — 재방문 = k=0 전량 재사용 |
 | F2R-09 | P1 | `DONE` | 대형 cold 뷰에서 refinement 왕복이 draw를 ~3배로 | cost-aware collapse 구현(500ms 예산, §3.15) — 실칩 재측정 대기 |
 | F2R-10 | P1 | `CLOSED` | exact 밖 인접 pan은 full viewport raster | 실칩 pan 실측으로 경쟁 축 해소(§3.16); world-tile은 F2R-03c 선행 조건부 |
 | F2R-11 | P2 | `DESIGN` | page-round refinement가 누적 full PNG 반복 | 기본 no-refinement로 동기 약화; final-tile streaming은 보류 |
@@ -1105,7 +1130,8 @@ per-tile item 필터(519k×~40 tiles — 2c 설계의 counting-sort binning
 | F2R-14 | P1 | `DONE` | 장시간 세션에서 load 증가(미니맵 이동, fresh 뷰어보다 느림) | LRU 축출 전수 스캔 → O(log n) 색인(0.12.33, §3.18) + `evict N` telemetry — 실칩 장기 세션 재확인 대기 |
 | F2R-15 | P1 | `DONE` | pick/snap이 대부분 "no object here" | 예산 모델 폐기·floe 정렬(0.12.36, §3.19) — 9.8G 실칩 확인 완료. cut 실명(결함 B)은 보류(설계 219259c) |
 | F2R-16 | P1 | `DONE` | pan이 이동량과 무관하게 전체 재raster | 실칩 확인(§3.20): 10% pan draw 378ms(재사용 92%)·50% 845ms(50%) — 이동량 비례 회복. 남은 pan 바닥: collection/trial ~0.3s, plan ~0.2s(비gated 후보) |
-| F2R-17 | P1 | `DONE` | pan 대비 배경 margin prefetch(사용자 제안) | ±50% margin bg 렌더 + _covered 즉시 crop + generation 취소(0.12.40, §3.22) — 실칩 재확인 대기 |
+| F2R-17 | P1 | `DONE` | pan 대비 배경 margin prefetch(사용자 제안) | ±50% margin bg 렌더 + _covered 즉시 crop + generation 취소(0.12.40, §3.22) — 로컬 GUI 확인(pan 9-14ms), 실칩 재확인 대기 |
+| F2R-18 | P2 | `DONE` | exact frame cache가 retained와 중복(사용자 결정) | payload cache 제거, retained 3-entry LRU(scale별)로 통합(0.12.41, §3.23) — zoom 왕복은 k=0 전량 재사용으로 승계 |
 
 ## 5. 상세 이슈와 수용 기준
 
