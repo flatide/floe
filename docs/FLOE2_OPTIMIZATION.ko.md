@@ -1035,7 +1035,14 @@ trial 결과 캐시 후보), ② plan+text plan ~150-200ms(인접 뷰 plan
 검증: renderd 단위(viewport↔margin 양방향 매핑·격자 스냅),
 실daemon integration(margin이 viewport를 중앙 재사용, margin 내부
 pan이 **156/156 tile 재사용 + cold render와 payload byte 동일**),
-전체 배터리. 실칩 재확인 항목: ① margin 완성 후 ±50% 내 pan이
+전체 배터리.
+
+**로컬 GUI 확인(2026-09-04, 사용자 Mac)**: 20%/50% pan 모두
+**pan-reuse 182/182 tiles, draw 1ms, total 9~14ms** — margin이 새
+뷰를 전부 덮어 전량 memcpy. 잔여 9~14ms의 지배 성분은 publish
+fsync(~4-7ms)+handoff로, pan 비용이 raster에서 게시 오버헤드로
+이동했다(비긴급: raw frame의 fsync 생략 후보). margin 심부 이동은
+crop-only(라인 없음, 0ms) 경로다. 실칩 재확인 항목: ① margin 완성 후 ±50% 내 pan이
 즉시인지(재렌더 자체가 없어 perf 라인이 안 찍히는 게 정상), ②
 margin 진행 중 클릭/줌이 즉시 반응하는지, ③ 백그라운드 margin의
 CPU 사용이 거슬리지 않는지(뷰당 최대 ~3× viewport raster).
