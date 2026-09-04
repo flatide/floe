@@ -6243,6 +6243,11 @@ class Viewer:
         if not res.get("found"):
             if mode == "replace":
                 self._clear_selection()
+            if res.get("err"):
+                # a query-side failure is not "no object here" (§3.19:
+                # the silent-empty path hid a starvation defect)
+                self._set_live_status("pick error: %s" % res["err"])
+                return
             self._set_live_status("no object here")
         elif mode == "replace":
             self.selections = [res]

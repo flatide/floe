@@ -913,6 +913,32 @@ oracle(터치/재삽입/축출/budget 축소 churn에서 색인-엔트리 동기
 **실칩 확인(2026-09-02, 사용자)**: "모든 layer 켠 상태에서 막대들
 모두 pick 됨" — 결함 A 수정 확정. 결함 B(cut 실명)만 보류로 남는다.
 
+**2차 반복(2026-09-04) — 예산 모델 자체를 폐기**: 9.8G 실칩(객체
+수 극대)에서 여전히 pick 실패. 원인: 가시-only 계상으로 바꿔도
+**밀집 fill 위 클릭은 반경 안 가시 member만 수만 개**라 상한
+4,096이 다시 굶는다 — 예산으로 열거를 제한하는 모델 자체가
+틀렸다. **floe 비교**: `_svc_pick`은 KLayout
+RecursiveShapeIterator + 탐색 box — cell별 공간 색인이 box 안
+도형만 자연 열거하고 member 예산이 없으며, 상한은 containment
+후보 수(_PICK_CAP)뿐이다. floe 모델로 정렬(0.12.36):
+
+- **member 예산을 작업 제한에서 제거** — 열거는 box 컬링(grid
+  해석 범위·Pts chunk·bbox)으로 자연 제한. 상한은 4,096→**4.2M
+  안전밸브**로만 남기고, **소진 시 조용한 빈 결과가 아니라
+  에러**(`query member limit exceeded`)로 응답 — GUI가 "no object
+  here" 대신 "pick error: …"를 표시한다(silent-empty 클래스 제거).
+- SNAP_SHAPE_CAP 4,096→1M(최근접 탐색이 밀집 box에서 잘리지 않게).
+- **2b subtree layer mask를 query walk에도 적용** — 해당 layer가
+  없는 subtree는 layer별 walk에서 하강 자체를 생략(40-layer 칩의
+  무익한 하강 제거; raster와 같은 gate라 오류 도달성 규칙 동일).
+- pick 후보 상한 64는 floe의 _PICK_CAP과 같은 의미론으로 유지.
+
+비용: 열거는 클릭 box 크기에 비례(밀집 60µm box × 40 layer ≈
+수십만 member ≈ 수-수십 ms/클릭 — floe와 같은 차수). 검증:
+sample9 재현 3/3 유지, 소진-은-에러 회귀 테스트 추가(98 tests),
+KLayout query parity 배터리 유지. 실칩 재확인 대기 — 이제 실패가
+남는다면 화면에 원인이 찍힌다.
+
 ## 4. 이슈 목록
 
 | ID | 우선순위 | 상태 | 요약 | 다음 판정 |
@@ -931,7 +957,7 @@ oracle(터치/재삽입/축출/budget 축소 churn에서 색인-엔트리 동기
 | F2R-12 | P1 | `DOING` | KLayout single-core parity와 Rust serial 기준선 | sample9 gate 통과 124%(§3.12); 실칩 p50/p95 남음 |
 | F2R-13 | P1 | `DONE` | 인터랙티브 frame의 PNG 인코드/디코드 왕복 | 실칩 확인(§3.16): raw 0.8ms/pub 8.4ms, raster 무회귀 — wall ~50ms/frame + 주 스레드 디코드 제거 |
 | F2R-14 | P1 | `DONE` | 장시간 세션에서 load 증가(미니맵 이동, fresh 뷰어보다 느림) | LRU 축출 전수 스캔 → O(log n) 색인(0.12.33, §3.18) + `evict N` telemetry — 실칩 장기 세션 재확인 대기 |
-| F2R-15 | P1 | `DONE` | pick/snap이 대부분 "no object here" | 질의 예산 기아 수정(0.12.35, §3.19 결함 A) — 실칩 확인 완료(전 layer에서 pick 정상). cut 실명(결함 B)은 실재하나 보류(설계는 219259c) |
+| F2R-15 | P1 | `DOING` | pick/snap이 대부분 "no object here" | 9.8G 실칩 재발 → 예산 모델 폐기, floe 정렬(0.12.36, §3.19 2차): box-컬링 열거+안전밸브 에러화+mask gate — 실칩 재확인 대기. cut 실명(결함 B)은 보류(219259c) |
 
 ## 5. 상세 이슈와 수용 기준
 

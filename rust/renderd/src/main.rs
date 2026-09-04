@@ -26,9 +26,9 @@ const MAX_CACHED_FRAMES: usize = 3;
 /// cold view). Cheap rounds keep streaming below it.
 const REFINEMENT_RASTER_BUDGET_US: u64 = 500_000;
 const MAX_FRAME_CACHE_BYTES: usize = 64 * 1024 * 1024;
-const SNAP_SHAPE_CAP: usize = 4096;
+const SNAP_SHAPE_CAP: usize = 1_048_576;
 const PICK_CANDIDATE_CAP: usize = 64;
-const QUERY_MEMBER_CAP: usize = 4096;
+const QUERY_MEMBER_CAP: usize = 4_194_304;
 
 struct PublishedScene {
     scene: Arc<FrameScene>,

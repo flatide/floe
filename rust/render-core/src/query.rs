@@ -12,6 +12,16 @@ use std::collections::BTreeSet;
 
 const QUERY_STOP: &str = "__floe_query_cap__";
 
+/// §3.19 second iteration: the member budget is a SAFETY VALVE, not a
+/// work limiter - enumeration is naturally bounded by the query box
+/// (grid ranges, Pts chunks, bbox culling), matching floe's
+/// RecursiveShapeIterator model where only the candidate count is
+/// capped. Exhausting it therefore surfaces as a real error (the GUI
+/// shows it) instead of the silent empty result that made dense chips
+/// "no object here" everywhere.
+const QUERY_MEMBER_LIMIT: &str =
+    "query member limit exceeded: overly dense query region";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SceneQueryRequest {
     pub x: i64,
@@ -297,10 +307,14 @@ fn visit_scene_shapes_impl(
     check_visit_cancelled(cancellation)?;
     for &layer in layers {
         check_visit_cancelled(cancellation)?;
+        // 2b subtree mask (§3.19): skip whole subtrees that cannot
+        // hold this layer, exactly like the raster's per-plane gate.
+        let layer_bit = scene.layer_mask_bit(layer.index);
         visit_cell_layer(
             scene,
             view,
             layer,
+            layer_bit,
             scene.top(),
             OrthoTransform::identity(),
             &mut Vec::new(),
@@ -317,6 +331,7 @@ fn visit_cell_layer(
     scene: &FrameScene,
     view: BBox,
     layer: SceneQueryLayer,
+    layer_bit: Option<usize>,
     key: WsKey,
     world_transform: OrthoTransform,
     path: &mut Vec<WsKey>,
@@ -504,6 +519,9 @@ fn visit_cell_layer(
         if child_bbox.is_empty() {
             continue;
         }
+        if !scene.subtree_paints(instance.child, layer_bit) {
+            continue;
+        }
         let base_place =
             OrthoTransform::place(instance.x, instance.y, instance.rot, instance.flip)?;
         let base_bbox = base_place.apply_bbox(child_bbox)?;
@@ -522,6 +540,7 @@ fn visit_cell_layer(
                     scene,
                     view,
                     layer,
+                    layer_bit,
                     instance.child,
                     world_transform.compose(&local)?,
                     path,
@@ -557,7 +576,7 @@ fn for_each_query_offset(
         pts_chunks,
         base_bbox,
         local_view,
-        member_budget.map(|remaining| (remaining, QUERY_STOP)),
+        member_budget.map(|remaining| (remaining, QUERY_MEMBER_LIMIT)),
         cancellation,
         visit,
     )?;
@@ -1001,6 +1020,29 @@ mod tests {
         capped.member_cap = 1;
         let found = pick_scene(&scene, &capped, 0).unwrap();
         assert_eq!((found.count, found.shapes_tested), (1, 1));
+    }
+
+    #[test]
+    fn member_limit_exhaustion_is_an_error_not_an_empty_result() {
+        // §3.19: the safety valve must be VISIBLE - a silent empty
+        // result reads as "no object here" in the GUI and hides the
+        // defect class this section documents.
+        let scene = single_page_scene(page_with_rect(
+            0,
+            0,
+            BBox {
+                x0: 0,
+                y0: 0,
+                x1: 20,
+                y1: 20,
+            },
+            (0, 0),
+            Rep::Pts(Arc::from([(0, 0), (1, 1), (2, 2)])),
+        ));
+        let mut capped = request(5, 5);
+        capped.member_cap = 2;
+        let error = pick_scene(&scene, &capped, 0).unwrap_err();
+        assert!(error.contains("member limit"), "{error}");
     }
 
     #[test]
