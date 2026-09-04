@@ -1044,7 +1044,9 @@ trial 결과 캐시 후보), ② plan+text plan ~150-200ms(인접 뷰 plan
 pan이 **156/156 tile 재사용 + cold render와 payload byte 동일**),
 전체 배터리.
 
-**로컬 GUI 확인(2026-09-04, 사용자 Mac)**: 20%/50% pan 모두
+**최종 확인(2026-09-04, 사용자)**: margin 폭 교정(한 스텝+pad)과
+즉시 제출 적용 후 "**연속 패닝이 거의 무음으로 잘 됨**" — F2R-17
+종결. 이전 중간 확인: 20%/50% pan 모두
 **pan-reuse 182/182 tiles, draw 1ms, total 9~14ms** — margin이 새
 뷰를 전부 덮어 전량 memcpy. 잔여 9~14ms의 지배 성분은 publish
 fsync(~4-7ms)+handoff로, pan 비용이 raster에서 게시 오버헤드로
@@ -1159,7 +1161,7 @@ per-tile item 필터(519k×~40 tiles — 2c 설계의 counting-sort binning
 | F2R-14 | P1 | `DONE` | 장시간 세션에서 load 증가(미니맵 이동, fresh 뷰어보다 느림) | LRU 축출 전수 스캔 → O(log n) 색인(0.12.33, §3.18) + `evict N` telemetry — 실칩 장기 세션 재확인 대기 |
 | F2R-15 | P1 | `DONE` | pick/snap이 대부분 "no object here" | 예산 모델 폐기·floe 정렬(0.12.36, §3.19) — 9.8G 실칩 확인 완료. cut 실명(결함 B)은 보류(설계 219259c) |
 | F2R-16 | P1 | `DONE` | pan이 이동량과 무관하게 전체 재raster | 실칩 확인(§3.20): 10% pan draw 378ms(재사용 92%)·50% 845ms(50%) — 이동량 비례 회복. 남은 pan 바닥: collection/trial ~0.3s, plan ~0.2s(비gated 후보) |
-| F2R-17 | P1 | `DONE` | pan 대비 배경 margin prefetch(사용자 제안) | ±50% margin bg 렌더 + _covered 즉시 crop + generation 취소(0.12.40, §3.22) — 로컬 GUI 확인(pan 9-14ms), 실칩 재확인 대기 |
+| F2R-17 | P1 | `DONE` | pan 대비 배경 margin prefetch(사용자 제안) | 한 스텝+pad margin·즉시 제출·비행 가드(§3.22) — 사용자 확인 완료: 연속 패닝 거의 무음. 실칩(폐쇄망) 확인만 남음 |
 | F2R-18 | P2 | `DONE` | exact frame cache가 retained와 중복(사용자 결정) | payload cache 제거, retained 3-entry LRU(scale별)로 통합(0.12.41, §3.23) — zoom 왕복은 k=0 전량 재사용으로 승계 |
 | F2R-19 | P1 | `DONE` | 수직 pan에서 가장자리 깨짐 | 재사용 row 매핑 부호 교정 + height mod-16 guard(0.12.42, §3.24) — 8방향 pixel-diff 재확인, 실칩 재확인 대기 |
 
