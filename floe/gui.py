@@ -117,9 +117,6 @@ WHEEL_ZOOM_STEP = 0.96  # at most 4% per wheel event (was 10%)
 # span (zoom in 50%), Shift+Z doubles it back.
 KEY_PAN_FRACTION = 0.50
 KEY_PAN_FRACTION_FINE = 0.10
-# §F2R-17: idle delay before the background margin prefetch fires -
-# long enough that a pan burst never queues margins behind itself.
-MARGIN_PREFETCH_MS = 300
 
 # Help > Open Source Licenses (license names surveyed 2026-08-22;
 # the full texts travel with each component's own distribution -
@@ -2419,11 +2416,6 @@ class Viewer:
             1 if immediate else DEBOUNCE_MS, self._submit_render)
         self._set_status(bbox, mode)
 
-    def _cancel_margin_timer(self):
-        if getattr(self, "_margin_timer", None) is not None:
-            GLib.source_remove(self._margin_timer)
-            self._margin_timer = None
-
     def _margin_debug(self, message):
         if os.environ.get("FLOE_MARGIN_DEBUG"):
             sys.stderr.write("[margin] %s\n" % message)
@@ -2434,7 +2426,6 @@ class Viewer:
         pure crops (_covered) or full tile reuse. Any user render that
         follows preempts it through the generation frontier - renderd
         cancels the margin raster mid-flight."""
-        self._cancel_margin_timer()
         if self.cache is None or self._drag is not None:
             return
         if self._pending is not None:
@@ -2453,12 +2444,19 @@ class Viewer:
                 and fb[3] >= bbox[3] + 0.35 * vh):
             self._margin_debug("skip: already margined")
             return
-        self._margin_debug("timer armed")
-        self._margin_timer = GLib.timeout_add(
-            MARGIN_PREFETCH_MS, self._submit_margin)
+        # §F2R-17 (user call 2026-09-04): submit IMMEDIATELY - any user
+        # render cancels the margin mid-flight anyway, and an instant
+        # margin is what keeps continuous stepping silent. The in-flight
+        # guard stops a pan burst from superseding its own margins
+        # forever (a livelock where none ever completes).
+        pending = getattr(self, "_margin_pending", None)
+        if pending is not None and abs(self.cx - pending[1]) <= 0.35 * vw \
+                and abs(self.cy - pending[2]) <= 0.35 * vh:
+            self._margin_debug("skip: margin in flight for this area")
+            return
+        self._submit_margin()
 
     def _submit_margin(self):
-        self._margin_timer = None
         if (self.cache is None or self.worker is None
                 or not self.worker.alive() or self._drag is not None
                 or self._pending is not None):
@@ -2505,12 +2503,16 @@ class Viewer:
             "frame_cache": self.frame_cache_on,
             "abstract": self.abstract,
             "visible": self._layers_arg()})
+        self._margin_pending = (self.gen, self.cx, self.cy)
         self._margin_debug("submitted gen=%d %dx%d" % (self.gen, mw, mh))
         return False
 
     def _submit_render(self):
         self._debounce = None
-        self._cancel_margin_timer()
+        # a user render supersedes any in-flight margin (the generation
+        # frontier cancels its raster) - forget it so the next settle
+        # schedules a fresh one
+        self._margin_pending = None
         scope = self._pending_scope
         bbox = self.view_bbox()
         w, h = self._viewport_size()
@@ -2735,6 +2737,9 @@ class Viewer:
                 self.last_frame = (pix, fb, fspp, key)
                 self._display()
                 if res.get("bg"):
+                    pending = getattr(self, "_margin_pending", None)
+                    if pending is not None and pending[0] == res["gen"]:
+                        self._margin_pending = None
                     self._margin_debug("landed gen=%d" % res["gen"])
                     return  # silent margin upgrade
                 self._depth_used = used
