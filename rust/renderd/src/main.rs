@@ -1755,13 +1755,18 @@ fn prepare_pan_reuse(state: &WorkerState, command: &mut RenderCommand) -> Option
     if !same_scale(nx1 - nx0, width, sppx) || !same_scale(ny1 - ny0, height, sppy) {
         return None;
     }
+    // Columns anchor at x0 (row 0 is the TOP of the frame, world y1):
+    // request column c is retained column c + kx, request ROW r is
+    // retained row r + k_row with k_row derived from the TOP edges.
+    // Deriving rows from y0 flips the sign on pans (and only cancels
+    // out on symmetric margins) - the §3.24 vertical-pan corruption.
     let dx = (nx0 - ox0) / sppx;
-    let dy = (ny0 - oy0) / sppy;
-    if (dx - dx.round()).abs() > 1e-6 || (dy - dy.round()).abs() > 1e-6 {
+    let d_row = (oy1 - ny1) / sppy;
+    if (dx - dx.round()).abs() > 1e-6 || (d_row - d_row.round()).abs() > 1e-6 {
         return None;
     }
     let kx = dx.round() as i64;
-    let ky = dy.round() as i64;
+    let ky = d_row.round() as i64;
     if kx % 16 != 0 || ky % 16 != 0 {
         return None;
     }
@@ -1769,6 +1774,13 @@ fn prepare_pan_reuse(state: &WorkerState, command: &mut RenderCommand) -> Option
     let rh_px = i64::from(retained.frame.height());
     let w = i64::from(command.width);
     let h = i64::from(command.height);
+    // The stipple row phase carries the frame HEIGHT (row + height - 1),
+    // so reuse is byte-exact only when the heights agree modulo the
+    // 16px pattern period (margins differ by 2 x 16-multiples; a window
+    // resize does not).
+    if (h - rh_px) % 16 != 0 {
+        return None;
+    }
     // kx == ky == 0 with equal sizes is the exact revisit: with the
     // payload cache retired (§F2R-18) it reuses every tile here.
     // request pixel (x, y) = retained pixel (x + kx, y + ky).
@@ -1780,10 +1792,11 @@ fn prepare_pan_reuse(state: &WorkerState, command: &mut RenderCommand) -> Option
         return None;
     }
     // Snap the request onto the retained grid so world->pixel sampling
-    // is the exact translate of the retained frame.
+    // is the exact translate of the retained frame (x from the left
+    // edge, y from the TOP edge).
     let vx0 = ox0 + kx as f64 * sppx;
-    let vy0 = oy0 + ky as f64 * sppy;
-    command.view = [vx0, vy0, vx0 + width * sppx, vy0 + height * sppy];
+    let vy1 = oy1 - ky as f64 * sppy;
+    command.view = [vx0, vy1 - height * sppy, vx0 + width * sppx, vy1];
     let mut pixels = vec![0u8; (w as usize) * (h as usize) * 4];
     let old = retained.frame.pixels();
     let src_row_bytes = (rw_px as usize) * 4;
@@ -2449,6 +2462,32 @@ mod tests {
         );
         let reuse = prepare_pan_reuse(&state, &mut inside).expect("viewport maps out");
         assert_eq!(reuse.valid, [0, 0, 32, 32], "fully covered by the margin");
+
+        // Vertical pan: row 0 is the TOP (world y1), so a pan UP in
+        // world coordinates pulls retained rows DOWN in the base -
+        // §3.24 pinned a sign flip here that corrupted every pan with
+        // a y component.
+        let row_coded: Vec<u8> = (0..32u32 * 32)
+            .flat_map(|index| [(index / 32) as u8, 0, 0, 255])
+            .collect();
+        state.retained = vec![RetainedFrame {
+            key: RetainedKey::new(&retained_cmd, None),
+            view: [0.0, 0.0, 320.0, 320.0],
+            frame: floe_render_core::RgbaFrame::from_pixels(32, 32, row_coded).unwrap(),
+        }];
+        let mut panned_up = render(
+            parse_command(
+                "render gen=3 view=0,160,320,480 w=32 h=32 frames=off out=/tmp/d.raw",
+            )
+            .unwrap()
+            .unwrap(),
+        );
+        let reuse = prepare_pan_reuse(&state, &mut panned_up).expect("vertical pan maps");
+        // request y1 = 480 sits 16 rows above retained y1 = 320:
+        // request rows 16..32 hold retained rows 0..16.
+        assert_eq!(reuse.valid, [0, 16, 32, 32]);
+        assert_eq!(reuse.base.pixels()[16 * 32 * 4], 0, "row 16 = old row 0");
+        assert_eq!(reuse.base.pixels()[31 * 32 * 4], 15, "row 31 = old row 15");
     }
 
     #[test]

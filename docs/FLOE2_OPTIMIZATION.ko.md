@@ -1047,6 +1047,28 @@ crop-only(라인 없음, 0ms) 경로다. 실칩 재확인 항목: ① margin 완
 margin 진행 중 클릭/줌이 즉시 반응하는지, ③ 백그라운드 margin의
 CPU 사용이 거슬리지 않는지(뷰당 최대 ~3× viewport raster).
 
+### 3.24 수직 pan 가장자리 깨짐 — row 매핑 부호 버그 (2026-09-04)
+
+**보고(사용자)**: "팬을 하다 보면 가장자리 이미지가 비정상적으로
+그려짐."
+
+**재현·원인**: 8방향 pan을 cold render와 pixel-diff한 결과 —
+x-전용 pan은 전부 일치, **y가 포함된 모든 pan에서 십수만 px
+불일치**. raster의 row 0은 화면 위(=world y1)인데 `prepare_pan_reuse`
+가 row offset을 **y0 기준(+ky)**으로 계산해 부호가 뒤집혀 있었다.
+기존 oracle이 못 잡은 이유: render-core 단위는 x-이동만, integration
+pan도 x-전용, margin은 상하 대칭 확장이라 **부호 오류가 우연히
+상쇄**되는 유일한 y-케이스였다.
+
+**수정(0.12.42)**: row offset을 top-edge 기준 `(old_y1 − new_y1)/spp`
+으로 교정하고 view 스냅도 y1 기준으로 재구성. 부수 발견 수정 1건:
+stipple row 위상이 frame **height**를 포함하므로(`row+height−1`)
+재사용은 height가 mod 16으로 일치할 때만 byte-exact — 창 크기 변경
+직후의 잘못된 재사용을 막는 guard 추가(margin의 2×16k 차이는 통과).
+회귀 고정: ① renderd 단위에 row-내용 검증 수직 pan 케이스(부호가
+뒤집히면 즉시 실패), ② integration pan을 **양축 이동**으로 강화,
+③ 8방향 probe 전부 cold와 pixel 동일 재확인.
+
 ### 3.23 F2R-18 — exact frame cache 제거, retained LRU로 통합 (2026-09-04, 사용자 결정)
 
 **결정(사용자)**: "지금 만든 기능으로 기존 캐시는 크게 의미가
@@ -1132,6 +1154,7 @@ per-tile item 필터(519k×~40 tiles — 2c 설계의 counting-sort binning
 | F2R-16 | P1 | `DONE` | pan이 이동량과 무관하게 전체 재raster | 실칩 확인(§3.20): 10% pan draw 378ms(재사용 92%)·50% 845ms(50%) — 이동량 비례 회복. 남은 pan 바닥: collection/trial ~0.3s, plan ~0.2s(비gated 후보) |
 | F2R-17 | P1 | `DONE` | pan 대비 배경 margin prefetch(사용자 제안) | ±50% margin bg 렌더 + _covered 즉시 crop + generation 취소(0.12.40, §3.22) — 로컬 GUI 확인(pan 9-14ms), 실칩 재확인 대기 |
 | F2R-18 | P2 | `DONE` | exact frame cache가 retained와 중복(사용자 결정) | payload cache 제거, retained 3-entry LRU(scale별)로 통합(0.12.41, §3.23) — zoom 왕복은 k=0 전량 재사용으로 승계 |
+| F2R-19 | P1 | `DONE` | 수직 pan에서 가장자리 깨짐 | 재사용 row 매핑 부호 교정 + height mod-16 guard(0.12.42, §3.24) — 8방향 pixel-diff 재확인, 실칩 재확인 대기 |
 
 ## 5. 상세 이슈와 수용 기준
 

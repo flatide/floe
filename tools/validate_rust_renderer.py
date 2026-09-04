@@ -990,8 +990,8 @@ class RealDaemonIntegrationTests(unittest.TestCase):
             q = max(1, int(bbox[2] - bbox[0]) // 800)
             pan_a = (int(bbox[0]), int(bbox[1]),
                      int(bbox[0]) + 800 * q, int(bbox[1]) + 768 * q)
-            pan_b = (pan_a[0] + 32 * q, pan_a[1],
-                     pan_a[2] + 32 * q, pan_a[3])
+            pan_b = (pan_a[0] + 32 * q, pan_a[1] + 32 * q,
+                     pan_a[2] + 32 * q, pan_a[3] + 32 * q)
             pan_job = dict(base_job, w=800, h=768, frames=True,
                            labels=True)
             worker.submit(dict(pan_job, gen=105, bbox=pan_a))
@@ -1032,8 +1032,8 @@ class RealDaemonIntegrationTests(unittest.TestCase):
             self.assertGreater(
                 margin_frames[-1].get("tiles_reused", 0), 0,
                 "the margin must reuse the viewport as its center")
-            pan_c = (pan_b[0] + 64 * q, pan_b[1],
-                     pan_b[2] + 64 * q, pan_b[3])
+            pan_c = (pan_b[0] + 64 * q, pan_b[1] - 64 * q,
+                     pan_b[2] + 64 * q, pan_b[3] - 64 * q)
             worker.submit(dict(pan_job, gen=108, bbox=pan_c))
             inside_frames = self._frames_through_settled(worker, 108)
             self.assertGreater(
