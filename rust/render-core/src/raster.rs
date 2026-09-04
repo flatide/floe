@@ -580,7 +580,6 @@ fn render_geometry(
         let mut handles = Vec::with_capacity(worker_count);
         for _ in 0..worker_count {
             let next_tile = &next_tile;
-            let prepared_labels = prepared_labels.as_ref();
             handles.push(scope.spawn(move || {
                 let mut outputs = Vec::new();
                 loop {
@@ -600,7 +599,6 @@ fn render_geometry(
                         request,
                         mode,
                         bin,
-                        prepared_labels,
                         guard,
                         col0,
                         col1,
@@ -643,7 +641,15 @@ fn render_geometry(
         Ok(tiles)
     })?;
     check_cancelled(guard)?;
-    let frame = assemble_tiles(request, tiles, tile_columns, tile_rows)?;
+    let mut frame = assemble_tiles(request, tiles, tile_columns, tile_rows)?;
+    check_cancelled(guard)?;
+    // §F2R-16 (user call 2026-09-04): labels paint LAST, over every
+    // geometry plane, in one full-frame pass - a deliberate deviation
+    // from the KLayout between-plane order so a pan-reused geometry
+    // frame can take fresh viewport-planned labels on top.
+    if let (Some(labels), RenderMode::Styled(styled)) = (prepared_labels.as_ref(), mode) {
+        frame = apply_label_passes(request, styled, labels, frame, &mut counters, guard)?;
+    }
     check_cancelled(guard)?;
     stats.raster_us = started.elapsed().as_micros().try_into().unwrap_or(u64::MAX);
     Ok(GeometryRasterReport {
@@ -1311,7 +1317,6 @@ fn raster_tile_from_bin(
     request: &GeometryRasterRequest,
     styled: &StyledGeometryRasterRequest,
     bin: &WorkBin,
-    labels: Option<&PreparedLabels>,
     band: &mut RasterBand,
     cull_view: BBox,
     stats: &mut RenderStats,
@@ -1353,14 +1358,6 @@ fn raster_tile_from_bin(
                 )?;
             }
         }
-        render_prepared_labels(
-            labels,
-            band,
-            LabelSelection::Block { white: false },
-            [128, 128, 128, 255],
-            counters,
-            guard,
-        )?;
     }
     for (plane, layer) in styled.layers.iter().enumerate() {
         check_cancelled(guard)?;
@@ -1390,14 +1387,6 @@ fn raster_tile_from_bin(
             &bin.planes[plane],
             Some(&minis),
         )?;
-        render_prepared_labels(
-            labels,
-            band,
-            LabelSelection::Layer(layer.layer_idx),
-            color,
-            counters,
-            guard,
-        )?;
     }
     if styled.hierarchy_frames {
         check_cancelled(guard)?;
@@ -1416,14 +1405,6 @@ fn raster_tile_from_bin(
                 Some(&minis),
             )?;
         }
-        render_prepared_labels(
-            labels,
-            band,
-            LabelSelection::Block { white: true },
-            [255, 255, 255, 255],
-            counters,
-            guard,
-        )?;
     }
     Ok(())
 }
@@ -1709,7 +1690,6 @@ fn raster_tile_walk_styled(
     scene: &FrameScene,
     request: &GeometryRasterRequest,
     styled: &StyledGeometryRasterRequest,
-    labels: Option<&PreparedLabels>,
     band: &mut RasterBand,
     cull_view: BBox,
     stats: &mut RenderStats,
@@ -1741,14 +1721,6 @@ fn raster_tile_walk_styled(
                 )?;
             }
         }
-        render_prepared_labels(
-            labels,
-            band,
-            LabelSelection::Block { white: false },
-            [128, 128, 128, 255],
-            counters,
-            guard,
-        )?;
     }
     for layer in &styled.layers {
         check_cancelled(guard)?;
@@ -1777,18 +1749,6 @@ fn raster_tile_walk_styled(
             path,
             record_scratch,
         )?;
-        render_prepared_labels(
-            labels,
-            band,
-            LabelSelection::Layer(layer.layer_idx),
-            if styled.mono {
-                monochrome(layer.color)
-            } else {
-                layer.color
-            },
-            counters,
-            guard,
-        )?;
     }
     if styled.hierarchy_frames {
         check_cancelled(guard)?;
@@ -1808,14 +1768,6 @@ fn raster_tile_walk_styled(
                 path,
             )?;
         }
-        render_prepared_labels(
-            labels,
-            band,
-            LabelSelection::Block { white: true },
-            [255, 255, 255, 255],
-            counters,
-            guard,
-        )?;
     }
     Ok(())
 }
@@ -1826,7 +1778,6 @@ fn raster_tile(
     request: &GeometryRasterRequest,
     mode: RenderMode<'_>,
     bin: Option<&WorkBin>,
-    labels: Option<&PreparedLabels>,
     guard: Option<RenderGuard<'_>>,
     col0: u32,
     col1: u32,
@@ -1875,7 +1826,6 @@ fn raster_tile(
                     request,
                     styled,
                     bin,
-                    labels,
                     &mut band,
                     cull_view,
                     &mut stats,
@@ -1888,7 +1838,6 @@ fn raster_tile(
                     scene,
                     request,
                     styled,
-                    labels,
                     &mut band,
                     cull_view,
                     &mut stats,
@@ -2046,6 +1995,70 @@ fn tile_world_view(
         y0: checked_rounded_bound((lower - stroke_margin_y).floor(), "raster tile lower y")?,
         x1: checked_rounded_bound((right + stroke_margin_x).ceil(), "raster tile x1")?,
         y1: checked_rounded_bound((upper + stroke_margin_y).ceil(), "raster tile upper y")?,
+    })
+}
+
+/// One full-frame label pass over the assembled geometry (§F2R-16):
+/// gray block labels, per-plane layer labels in plane order, white
+/// block labels - the same label-vs-label order the per-tile passes
+/// used, now unconditionally above all geometry.
+fn apply_label_passes(
+    request: &GeometryRasterRequest,
+    styled: &StyledGeometryRasterRequest,
+    labels: &PreparedLabels,
+    frame: RgbaFrame,
+    counters: &mut RasterCounters,
+    guard: Option<RenderGuard<'_>>,
+) -> Result<RgbaFrame, String> {
+    let mut band = RasterBand {
+        width: frame.width,
+        height: frame.height,
+        col0: 0,
+        col1: frame.width,
+        row0: 0,
+        row1: frame.height,
+        pixels: frame.pixels,
+    };
+    if styled.hierarchy_frames {
+        render_prepared_labels(
+            Some(labels),
+            &mut band,
+            LabelSelection::Block { white: false },
+            [128, 128, 128, 255],
+            counters,
+            guard,
+        )?;
+    }
+    for layer in &styled.layers {
+        check_cancelled(guard)?;
+        let color = if styled.mono {
+            monochrome(layer.color)
+        } else {
+            layer.color
+        };
+        render_prepared_labels(
+            Some(labels),
+            &mut band,
+            LabelSelection::Layer(layer.layer_idx),
+            color,
+            counters,
+            guard,
+        )?;
+    }
+    if styled.hierarchy_frames {
+        render_prepared_labels(
+            Some(labels),
+            &mut band,
+            LabelSelection::Block { white: true },
+            [255, 255, 255, 255],
+            counters,
+            guard,
+        )?;
+    }
+    Ok(RgbaFrame {
+        width: request.width,
+        height: request.height,
+        pixels: band.pixels,
     })
 }
 
@@ -6669,7 +6682,9 @@ mod tests {
         let parallel = render(8, 13);
         assert_eq!(serial.frame, parallel.frame);
         assert_eq!(serial.label_pixel_paints, parallel.label_pixel_paints);
-        assert!(parallel.label_tile_paints > serial.label_tile_paints);
+        // §F2R-16: labels paint once in a full-frame pass, so the tile
+        // grid no longer multiplies label work.
+        assert_eq!(parallel.label_tile_paints, serial.label_tile_paints);
     }
 
     #[test]

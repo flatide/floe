@@ -942,6 +942,36 @@ KLayout query parity 배터리 유지.
 확인함" — 예산 모델 폐기로 종결. 남은 것은 결함 B(cut 실명,
 보류)뿐이다.
 
+### 3.20 pan 재사용 — F2R-16 (2026-09-04)
+
+**관찰(사용자)**: "pan 20% 이동과 50% 이동이 큰 차이가 없음.
+로딩된 것과 그려진 것을 재활용하지 않는 것 같다." 진단: decode는
+LRU가 재활용 중(+1 new)이지만 plan+text plan(~237ms)과 raster
+전체(~1.2s)가 겹침과 무관하게 전체 뷰 기준으로 재실행된다. 표적은
+"그려진 것의 재사용"이며, §3.16의 제약(fill 위상이 framebuffer
+기준, 주기 16px) 때문에 **16px 배수 이동만 byte-exact 재사용이
+가능**하다.
+
+**사용자 결정(2026-09-04)**: 라벨을 **항상 최상단**에 그리도록
+z-순서 변경 승인(옵션 a) — retained frame은 geometry 전용으로 두고
+라벨은 매 frame 위에 새로 그려, labels on에서도 pan 재사용이
+작동하게 한다. KLayout의 between-plane 라벨 순서와의 의도적 편차
+1건(상위 plane geometry가 하위 layer 라벨을 더 이상 가리지 않음).
+
+**1단계 완료(0.12.37)**: 라벨을 per-tile interleave에서 **조립 후
+full-frame 단일 pass**(gray block → plane 순 layer 라벨 → white
+block, 라벨 간 상대 순서 불변)로 이동. 부수 이득: 라벨 작업이 tile
+수와 무관해짐(`label_tile_paints` 의미 변경). bin/walk 두 경로에서
+라벨 배관 제거로 단순화. 검증: render-core 98 tests(라벨 결정성
+테스트를 새 불변식으로 재고정), **KLayout STYLE oracle 포함 전체
+배터리 통과**(밸미니 fixture 허용 범위 내 — 실칩에서 라벨이 더 잘
+보이는 방향의 변화만 있음).
+
+**2단계(진행 중)**: renderd retained geometry frame + GUI pan
+16px-스냅 + 노출 띠만 재raster. 기대: 20% pan draw ~1.2s→~0.35s,
+50%→~0.65s(이동량 비례 회복). kill switch `FLOE_RUST_PAN_REUSE=off`.
+드래그 settle은 v1에서 full raster 유지.
+
 ## 4. 이슈 목록
 
 | ID | 우선순위 | 상태 | 요약 | 다음 판정 |
@@ -961,6 +991,7 @@ KLayout query parity 배터리 유지.
 | F2R-13 | P1 | `DONE` | 인터랙티브 frame의 PNG 인코드/디코드 왕복 | 실칩 확인(§3.16): raw 0.8ms/pub 8.4ms, raster 무회귀 — wall ~50ms/frame + 주 스레드 디코드 제거 |
 | F2R-14 | P1 | `DONE` | 장시간 세션에서 load 증가(미니맵 이동, fresh 뷰어보다 느림) | LRU 축출 전수 스캔 → O(log n) 색인(0.12.33, §3.18) + `evict N` telemetry — 실칩 장기 세션 재확인 대기 |
 | F2R-15 | P1 | `DONE` | pick/snap이 대부분 "no object here" | 예산 모델 폐기·floe 정렬(0.12.36, §3.19) — 9.8G 실칩 확인 완료. cut 실명(결함 B)은 보류(설계 219259c) |
+| F2R-16 | P1 | `DOING` | pan이 이동량과 무관하게 전체 재raster | 1단계 라벨 최상단(0.12.37, 사용자 승인) 완료. 2단계 retained+16px-스냅 띠 재사용 진행 중(§3.20) |
 
 ## 5. 상세 이슈와 수용 기준
 
