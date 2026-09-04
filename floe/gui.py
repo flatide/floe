@@ -113,7 +113,7 @@ FIT_ZOOM_OUT = 16.0  # max zoom-out: 16x beyond the fit view. The size
                      # fit; the die stays centered out there.
 WHEEL_ZOOM_STEP = 0.96  # at most 4% per wheel event (was 10%)
 # Calibre-parity keys (user call 2026-08-10): arrows pan half the
-# viewport, Ctrl+arrows the old fine tenth; Ctrl+Z halves the view
+# viewport, Shift+arrows the old fine tenth; Ctrl+Z halves the view
 # span (zoom in 50%), Shift+Z doubles it back.
 KEY_PAN_FRACTION = 0.50
 KEY_PAN_FRACTION_FINE = 0.10
@@ -3256,7 +3256,8 @@ class Viewer:
 
     def _pan_view(self, direction, frac=KEY_PAN_FRACTION):
         """Move the viewport by a fraction of its visible extent
-        (arrows: half; Ctrl+arrows: the fine tenth - Calibre)."""
+        (arrows: half; Shift+arrows: the fine tenth - user call
+        2026-09-04, moved off Ctrl)."""
         width, height = self._viewport_size()
         dx = self._snap_pan_px(width * frac) * self.spp
         dy = self._snap_pan_px(height * frac) * self.spp
@@ -3307,6 +3308,7 @@ class Viewer:
             return False  # typing in the depth spinbox etc.
         name = self._command_key(ev)
         ctrl = bool(ev.state & Gdk.ModifierType.CONTROL_MASK)
+        shift = bool(ev.state & Gdk.ModifierType.SHIFT_MASK)
         # Calibre-parity chords first, so Ctrl+A never falls through
         # to the plain-letter branches below
         if ctrl and name in ("z", "Z"):
@@ -3322,10 +3324,10 @@ class Viewer:
         elif name == "f":
             self._set_frames(not self.frames_on)
         elif name in ("Left", "Right", "Up", "Down"):
-            self._pan_view(name, KEY_PAN_FRACTION_FINE if ctrl
+            self._pan_view(name, KEY_PAN_FRACTION_FINE if shift
                            else KEY_PAN_FRACTION)
         elif name in ("KP_Left", "KP_Right", "KP_Up", "KP_Down"):
-            self._pan_view(name[3:], KEY_PAN_FRACTION_FINE if ctrl
+            self._pan_view(name[3:], KEY_PAN_FRACTION_FINE if shift
                            else KEY_PAN_FRACTION)
         elif name in ("plus", "equal", "KP_Add"):
             self._zoom_center(1 / 1.25)
