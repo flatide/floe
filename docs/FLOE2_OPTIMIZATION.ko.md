@@ -936,8 +936,11 @@ RecursiveShapeIterator + 탐색 box — cell별 공간 색인이 box 안
 비용: 열거는 클릭 box 크기에 비례(밀집 60µm box × 40 layer ≈
 수십만 member ≈ 수-수십 ms/클릭 — floe와 같은 차수). 검증:
 sample9 재현 3/3 유지, 소진-은-에러 회귀 테스트 추가(98 tests),
-KLayout query parity 배터리 유지. 실칩 재확인 대기 — 이제 실패가
-남는다면 화면에 원인이 찍힌다.
+KLayout query parity 배터리 유지.
+
+**실칩 확인(2026-09-04, 사용자)**: 9.8G 칩에서 "pick 잘 되는 것
+확인함" — 예산 모델 폐기로 종결. 남은 것은 결함 B(cut 실명,
+보류)뿐이다.
 
 ## 4. 이슈 목록
 
@@ -957,7 +960,7 @@ KLayout query parity 배터리 유지. 실칩 재확인 대기 — 이제 실패
 | F2R-12 | P1 | `DOING` | KLayout single-core parity와 Rust serial 기준선 | sample9 gate 통과 124%(§3.12); 실칩 p50/p95 남음 |
 | F2R-13 | P1 | `DONE` | 인터랙티브 frame의 PNG 인코드/디코드 왕복 | 실칩 확인(§3.16): raw 0.8ms/pub 8.4ms, raster 무회귀 — wall ~50ms/frame + 주 스레드 디코드 제거 |
 | F2R-14 | P1 | `DONE` | 장시간 세션에서 load 증가(미니맵 이동, fresh 뷰어보다 느림) | LRU 축출 전수 스캔 → O(log n) 색인(0.12.33, §3.18) + `evict N` telemetry — 실칩 장기 세션 재확인 대기 |
-| F2R-15 | P1 | `DOING` | pick/snap이 대부분 "no object here" | 9.8G 실칩 재발 → 예산 모델 폐기, floe 정렬(0.12.36, §3.19 2차): box-컬링 열거+안전밸브 에러화+mask gate — 실칩 재확인 대기. cut 실명(결함 B)은 보류(219259c) |
+| F2R-15 | P1 | `DONE` | pick/snap이 대부분 "no object here" | 예산 모델 폐기·floe 정렬(0.12.36, §3.19) — 9.8G 실칩 확인 완료. cut 실명(결함 B)은 보류(설계 219259c) |
 
 ## 5. 상세 이슈와 수용 기준
 
