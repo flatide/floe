@@ -1016,6 +1016,43 @@ class RealDaemonIntegrationTests(unittest.TestCase):
             self.assertEqual(cold_frames[-1].get("tiles_reused", 0), 0)
             self.assertEqual(self._frame_payload(pan_frames[-1]),
                              self._frame_payload(cold_frames[-1]))
+
+            # §F2R-17: a margin prefetch reuses the viewport frame as
+            # its center, and a pan fully inside the margin reuses
+            # every tile - byte-identical to a cold render.
+            margin_bbox = (pan_b[0] - 64 * q, pan_b[1] - 64 * q,
+                           pan_b[2] + 64 * q, pan_b[3] + 64 * q)
+            worker.submit(dict(pan_job, gen=107, bg=True,
+                               bbox=margin_bbox,
+                               w=800 + 128, h=768 + 128,
+                               frame_cache=False))
+            margin_frames = self._frames_through_settled(worker, 107)
+            self.assertTrue(margin_frames[-1].get("bg"))
+            self.assertGreater(
+                margin_frames[-1].get("tiles_reused", 0), 0,
+                "the margin must reuse the viewport as its center")
+            pan_c = (pan_b[0] + 64 * q, pan_b[1],
+                     pan_b[2] + 64 * q, pan_b[3])
+            worker.submit(dict(pan_job, gen=108, bbox=pan_c))
+            inside_frames = self._frames_through_settled(worker, 108)
+            self.assertGreater(
+                inside_frames[-1].get("tiles_reused", 0), 150,
+                "a pan inside the margin must reuse every tile")
+            cold2 = make_render_worker(cache)
+            cold2.start()
+            try:
+                cold2.submit({"kind": "recolor",
+                              "colors": [[[1, 0], "#ff0000"]]})
+                cold2.submit({"kind": "repattern",
+                              "fills": [[[1, 0], solid]],
+                              "widths": [[[1, 0], 2]]})
+                cold2.submit({"kind": "mono", "on": True})
+                cold2.submit(dict(pan_job, gen=1, bbox=pan_c))
+                cold2_frames = self._frames_through_settled(cold2, 1)
+            finally:
+                cold2.stop()
+            self.assertEqual(self._frame_payload(inside_frames[-1]),
+                             self._frame_payload(cold2_frames[-1]))
             self.assertFalse(worker._jobs)
         finally:
             worker.stop()

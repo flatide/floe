@@ -985,7 +985,9 @@ class RustRenderWorker:
                 fields, "plan_pages",
                 _wire_int(fields, "pages") + deferred),
             "new": state["new"], "scope": job.get("scope", "live"),
-            "bg": False,
+            # §F2R-17: margin prefetch frames ride the normal render
+            # path with bg=True - the GUI absorbs them silently
+            "bg": bool(job.get("bg")),
             "load_ms": round((state["plan_us"] + state["read_us"] +
                               state["decode_us"] + state["scene_us"]) /
                              1000),

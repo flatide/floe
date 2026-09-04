@@ -1008,6 +1008,38 @@ worker 렌더와 **payload byte 동일**, 재사용 tile >100), 전체 배터리
 trial 결과 캐시 후보), ② plan+text plan ~150-200ms(인접 뷰 plan
 재사용 후보). 요구 발생 시 이 순서로 착수.
 
+### 3.22 F2R-17 — 배경 margin prefetch (2026-09-04, 사용자 제안)
+
+**요청**: "pan 대비 현재 뷰의 상하좌우 50%씩을 백그라운드로 그리고,
+클릭/줌으로 전혀 다른 뷰 이동 시 즉시 중단."
+
+**구현(0.12.40)**: GUI의 휴면 코드였던 `_covered()`(frame이 뷰를
+덮으면 재렌더 생략)와 bg-frame 수신 경로("silent margin upgrade")를
+되살려 결합했다 —
+
+- **GUI**: settle 후 300ms 유휴 시 **±50%(16px-격자 스냅) 확장,
+  2w×2h**의 margin render를 bg=True·다음 generation으로 제출.
+  margin frame이 오면 last_frame이 커지고 이후 ±50% 내 pan은
+  `_covered()`가 **재렌더 자체를 생략(즉시 crop)**. margin 안을
+  돌아다니다 중심을 벗어나면(0.35·vw 기준) margin을 재보충한다.
+- **즉시 중단**: margin도 일반 generation이므로 이후의 어떤 사용자
+  render(클릭·줌·pan)든 renderd generation frontier가 **mid-flight
+  취소**한다(수집·raster의 세밀한 cancel check). pick/snap은 input
+  스레드라 margin 진행 중에도 막히지 않는다.
+- **renderd**: retained 재사용을 **크기 상이 frame 간**으로 일반화
+  (RetainedKey에서 w/h 제거, per-axis scale 동일성+16px 격자 검사) —
+  margin render는 직전 viewport frame을 **중앙에 memcpy**하고 ring만
+  raster(4×→3× 비용), margin 이후의 큰 pan도 겹침만큼 재사용한다.
+- margin은 exact frame cache를 오염하지 않게 frame_cache=off.
+
+검증: renderd 단위(viewport↔margin 양방향 매핑·격자 스냅),
+실daemon integration(margin이 viewport를 중앙 재사용, margin 내부
+pan이 **156/156 tile 재사용 + cold render와 payload byte 동일**),
+전체 배터리. 실칩 재확인 항목: ① margin 완성 후 ±50% 내 pan이
+즉시인지(재렌더 자체가 없어 perf 라인이 안 찍히는 게 정상), ②
+margin 진행 중 클릭/줌이 즉시 반응하는지, ③ 백그라운드 margin의
+CPU 사용이 거슬리지 않는지(뷰당 최대 ~3× viewport raster).
+
 ### 3.21 "draw 회귀" 보고 판정 — 한-tile mini 집중 (2026-09-04)
 
 **보고(사용자)**: 새 뷰 라인 — 2,183ms = 255 load + **1,822 draw**,
@@ -1066,6 +1098,7 @@ per-tile item 필터(519k×~40 tiles — 2c 설계의 counting-sort binning
 | F2R-14 | P1 | `DONE` | 장시간 세션에서 load 증가(미니맵 이동, fresh 뷰어보다 느림) | LRU 축출 전수 스캔 → O(log n) 색인(0.12.33, §3.18) + `evict N` telemetry — 실칩 장기 세션 재확인 대기 |
 | F2R-15 | P1 | `DONE` | pick/snap이 대부분 "no object here" | 예산 모델 폐기·floe 정렬(0.12.36, §3.19) — 9.8G 실칩 확인 완료. cut 실명(결함 B)은 보류(설계 219259c) |
 | F2R-16 | P1 | `DONE` | pan이 이동량과 무관하게 전체 재raster | 실칩 확인(§3.20): 10% pan draw 378ms(재사용 92%)·50% 845ms(50%) — 이동량 비례 회복. 남은 pan 바닥: collection/trial ~0.3s, plan ~0.2s(비gated 후보) |
+| F2R-17 | P1 | `DONE` | pan 대비 배경 margin prefetch(사용자 제안) | ±50% margin bg 렌더 + _covered 즉시 crop + generation 취소(0.12.40, §3.22) — 실칩 재확인 대기 |
 
 ## 5. 상세 이슈와 수용 기준
 

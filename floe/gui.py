@@ -117,6 +117,9 @@ WHEEL_ZOOM_STEP = 0.96  # at most 4% per wheel event (was 10%)
 # span (zoom in 50%), Shift+Z doubles it back.
 KEY_PAN_FRACTION = 0.50
 KEY_PAN_FRACTION_FINE = 0.10
+# §F2R-17: idle delay before the background margin prefetch fires -
+# long enough that a pan burst never queues margins behind itself.
+MARGIN_PREFETCH_MS = 300
 
 # Help > Open Source Licenses (license names surveyed 2026-08-22;
 # the full texts travel with each component's own distribution -
@@ -2405,6 +2408,9 @@ class Viewer:
                 GLib.source_remove(self._debounce)
                 self._debounce = None
             self._set_status(bbox, mode)
+            # §F2R-17: roaming inside the margin - top the margin up
+            # once the view drifts off its center
+            self._schedule_margin()
             return
         if self._debounce is not None:
             GLib.source_remove(self._debounce)
@@ -2413,8 +2419,82 @@ class Viewer:
             1 if immediate else DEBOUNCE_MS, self._submit_render)
         self._set_status(bbox, mode)
 
+    def _cancel_margin_timer(self):
+        if getattr(self, "_margin_timer", None) is not None:
+            GLib.source_remove(self._margin_timer)
+            self._margin_timer = None
+
+    def _schedule_margin(self):
+        """§F2R-17: after a settled live frame, prefetch a 2wx2h frame
+        around the view in the background so pans inside +-50% become
+        pure crops (_covered) or full tile reuse. Any user render that
+        follows preempts it through the generation frontier - renderd
+        cancels the margin raster mid-flight."""
+        self._cancel_margin_timer()
+        if self.cache is None or self._drag is not None:
+            return
+        if self._pending is not None:
+            return  # a user render is in flight; its settle reschedules
+        lf = self.last_frame
+        if lf is None or lf[3] != self._render_key("live"):
+            return
+        bbox = self.view_bbox()
+        vw, vh = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        fb = lf[1]
+        # Already margined and roughly centered: nothing to do.
+        if (fb[0] <= bbox[0] - 0.35 * vw and fb[1] <= bbox[1] - 0.35 * vh
+                and fb[2] >= bbox[2] + 0.35 * vw
+                and fb[3] >= bbox[3] + 0.35 * vh):
+            return
+        self._margin_timer = GLib.timeout_add(
+            MARGIN_PREFETCH_MS, self._submit_margin)
+
+    def _submit_margin(self):
+        self._margin_timer = None
+        if (self.cache is None or self.worker is None
+                or not self.worker.alive() or self._drag is not None
+                or self._pending is not None):
+            return False
+        bbox = self.view_bbox()
+        w, h = self._viewport_size()
+        spp2 = 2.0 * self.spp
+        rx0 = math.floor(bbox[0] / spp2) * spp2
+        ry1 = math.ceil(bbox[3] / spp2) * spp2
+        w, h = int(w) + 2, int(h) + 2
+        # Margin offsets snap to the 16px fill-phase grid so the
+        # margin render reuses the just-drawn viewport as its center
+        # and later pans reuse the margin (§F2R-16 contract).
+        ex = max(16, int(round(w / 2.0 / 16)) * 16)
+        ey = max(16, int(round(h / 2.0 / 16)) * 16)
+        mw, mh = w + 2 * ex, h + 2 * ey
+        eb = (rx0 - ex * self.spp,
+              ry1 - (h + ey) * self.spp,
+              rx0 + (w + ex) * self.spp,
+              ry1 + ey * self.spp)
+        depth = self._depth()
+        self.gen += 1
+        self._job_keys[self.gen] = self._render_key("live")
+        self._job_depth[self.gen] = depth
+        self.worker.submit({
+            "kind": "render", "gen": self.gen, "scope": "live",
+            "bg": True, "t_sub": time.time(),
+            "bbox": tuple(float(v) for v in eb),
+            "view": tuple(float(v) for v in bbox),
+            "w": int(mw), "h": int(mh),
+            "depth": depth,
+            "cut_px": self._effective_cut_px(),
+            "lod": self.lod_on,
+            "frames": self.frames_on,
+            "labels": self.labels_on,
+            "label_font_px": self.label_font_px,
+            "frame_cache": False,
+            "abstract": self.abstract,
+            "visible": self._layers_arg()})
+        return False
+
     def _submit_render(self):
         self._debounce = None
+        self._cancel_margin_timer()
         scope = self._pending_scope
         bbox = self.view_bbox()
         w, h = self._viewport_size()
@@ -2775,6 +2855,7 @@ class Viewer:
                     print("%s  view %.1f x %.1f um"
                           % (mode, (b[2] - b[0]) * self.dbu,
                              (b[3] - b[1]) * self.dbu), flush=True)
+                    self._schedule_margin()
                 self._set_status(self.view_bbox(), mode)
         elif kind == "snap":
             if res["seq"] == self._snap_seq \

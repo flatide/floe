@@ -622,8 +622,9 @@ fn validate_jobs(jobs: u16) -> Result<(), String> {
 /// on top per render, so label state is deliberately absent.
 #[derive(PartialEq)]
 struct RetainedKey {
-    width: u32,
-    height: u32,
+    // §F2R-17: frame sizes are NOT part of the key - a margin frame
+    // serves viewport-sized pans and vice versa; scale equality is
+    // checked per axis in prepare_pan_reuse.
     depth: u32,
     cut_px: u64,
     visible_layers: Option<Vec<String>>,
@@ -636,8 +637,6 @@ struct RetainedKey {
 impl RetainedKey {
     fn new(command: &RenderCommand, style_epoch: Option<u64>) -> Self {
         Self {
-            width: command.width,
-            height: command.height,
             depth: command.depth,
             cut_px: command.cut_px.to_bits(),
             visible_layers: command.visible_layers.clone(),
@@ -1823,12 +1822,14 @@ fn checked_generation_bytes(current: u64, incoming: u64, budget: u64) -> Result<
     Ok(next)
 }
 
-/// §F2R-16: when the request is the retained frame's view panned by an
-/// exact multiple of 16 device pixels (the fill-phase period), snap the
-/// request onto the retained view's grid - eliminating client float
-/// drift - and hand back the shifted geometry frame with its valid
-/// region. Any mismatch (zoom, size, style, off-grid delta) falls back
-/// to the full raster. FLOE_RUST_PAN_REUSE=off is the kill switch.
+/// §F2R-16/§F2R-17: when the request shares the retained frame's
+/// render state and scale and sits on its 16-device-px grid (the fill
+/// phase period), snap the request onto that exact grid - eliminating
+/// client float drift - and hand back the overlap of the retained
+/// geometry frame. Sizes may differ: a 2wx2h margin frame (§F2R-17)
+/// serves viewport pans and a viewport frame seeds the margin ring.
+/// Any mismatch falls back to the full raster;
+/// FLOE_RUST_PAN_REUSE=off is the kill switch.
 fn prepare_pan_reuse(state: &WorkerState, command: &mut RenderCommand) -> Option<FrameReuse> {
     if std::env::var("FLOE_RUST_PAN_REUSE").as_deref() == Ok("off") {
         return None;
@@ -1842,19 +1843,24 @@ fn prepare_pan_reuse(state: &WorkerState, command: &mut RenderCommand) -> Option
     }
     let [ox0, oy0, ox1, oy1] = retained.view;
     let [nx0, ny0, nx1, ny1] = command.view;
+    let rw = f64::from(retained.frame.width());
+    let rh = f64::from(retained.frame.height());
     let width = f64::from(command.width);
     let height = f64::from(command.height);
-    let span_x = ox1 - ox0;
-    let span_y = oy1 - oy0;
-    if span_x <= 0.0 || span_y <= 0.0 {
+    let span_rx = ox1 - ox0;
+    let span_ry = oy1 - oy0;
+    if span_rx <= 0.0 || span_ry <= 0.0 {
         return None;
     }
-    let same_span = |new: f64, old: f64| (new - old).abs() <= old.abs() * 1e-9;
-    if !same_span(nx1 - nx0, span_x) || !same_span(ny1 - ny0, span_y) {
+    let sppx = span_rx / rw;
+    let sppy = span_ry / rh;
+    // Same device scale on both axes (relative epsilon).
+    let same_scale = |new_span: f64, pixels: f64, spp: f64| {
+        (new_span - pixels * spp).abs() <= (pixels * spp).abs() * 1e-9
+    };
+    if !same_scale(nx1 - nx0, width, sppx) || !same_scale(ny1 - ny0, height, sppy) {
         return None;
     }
-    let sppx = span_x / width;
-    let sppy = span_y / height;
     let dx = (nx0 - ox0) / sppx;
     let dy = (ny0 - oy0) / sppy;
     if (dx - dx.round()).abs() > 1e-6 || (dy - dy.round()).abs() > 1e-6 {
@@ -1865,31 +1871,35 @@ fn prepare_pan_reuse(state: &WorkerState, command: &mut RenderCommand) -> Option
     if kx % 16 != 0 || ky % 16 != 0 {
         return None;
     }
-    if kx == 0 && ky == 0 {
+    let rw_px = i64::from(retained.frame.width());
+    let rh_px = i64::from(retained.frame.height());
+    let w = i64::from(command.width);
+    let h = i64::from(command.height);
+    if kx == 0 && ky == 0 && w == rw_px && h == rh_px {
         // The exact frame cache owns identical revisits.
         return None;
     }
-    let w = i64::from(command.width);
-    let h = i64::from(command.height);
-    if kx.abs() >= w || ky.abs() >= h {
-        return None;
-    }
-    let vx0 = ox0 + kx as f64 * sppx;
-    let vy0 = oy0 + ky as f64 * sppy;
-    command.view = [vx0, vy0, vx0 + span_x, vy0 + span_y];
-    // new[x, y] = old[x + kx, y + ky] where in bounds.
+    // request pixel (x, y) = retained pixel (x + kx, y + ky).
     let valid_x0 = (-kx).max(0);
     let valid_y0 = (-ky).max(0);
-    let valid_x1 = (w - kx).min(w);
-    let valid_y1 = (h - ky).min(h);
+    let valid_x1 = (rw_px - kx).min(w);
+    let valid_y1 = (rh_px - ky).min(h);
+    if valid_x0 >= valid_x1 || valid_y0 >= valid_y1 {
+        return None;
+    }
+    // Snap the request onto the retained grid so world->pixel sampling
+    // is the exact translate of the retained frame.
+    let vx0 = ox0 + kx as f64 * sppx;
+    let vy0 = oy0 + ky as f64 * sppy;
+    command.view = [vx0, vy0, vx0 + width * sppx, vy0 + height * sppy];
     let mut pixels = vec![0u8; (w as usize) * (h as usize) * 4];
     let old = retained.frame.pixels();
-    let row_bytes = (w as usize) * 4;
+    let src_row_bytes = (rw_px as usize) * 4;
+    let dst_row_bytes = (w as usize) * 4;
+    let len = ((valid_x1 - valid_x0) as usize) * 4;
     for y in valid_y0..valid_y1 {
-        let src_row = (y + ky) as usize;
-        let src = src_row * row_bytes + ((valid_x0 + kx) as usize) * 4;
-        let dst = (y as usize) * row_bytes + (valid_x0 as usize) * 4;
-        let len = ((valid_x1 - valid_x0) as usize) * 4;
+        let src = ((y + ky) as usize) * src_row_bytes + ((valid_x0 + kx) as usize) * 4;
+        let dst = (y as usize) * dst_row_bytes + (valid_x0 as usize) * 4;
         pixels[dst..dst + len].copy_from_slice(&old[src..src + len]);
     }
     let base = floe_render_core::RgbaFrame::from_pixels(command.width, command.height, pixels)
@@ -2494,6 +2504,58 @@ mod tests {
         assert_eq!(u32::from_le_bytes(payload[12..16].try_into().unwrap()), 3);
         assert_eq!(&payload[16..], pixels.as_slice());
         assert_eq!(payload.len(), 16 + 4 * 3 * 4);
+    }
+
+    #[test]
+    fn pan_reuse_maps_between_viewport_and_margin_frames() {
+        // §F2R-17: sizes differ but the scale and the 16px grid match,
+        // so a margin request maps the retained viewport into its
+        // center, and a viewport request inside a margin frame maps
+        // out fully covered.
+        let mut state = WorkerState::default();
+        let retained_cmd = render(
+            parse_command(
+                "render gen=0 view=0,0,320,320 w=32 h=32 frames=off out=/tmp/b.raw",
+            )
+            .unwrap()
+            .unwrap(),
+        );
+        let pixels: Vec<u8> = (0..32u32 * 32)
+            .flat_map(|index| [(index % 251) as u8, 1, 2, 255])
+            .collect();
+        state.retained = Some(RetainedFrame {
+            key: RetainedKey::new(&retained_cmd, None),
+            view: [0.0, 0.0, 320.0, 320.0],
+            frame: floe_render_core::RgbaFrame::from_pixels(32, 32, pixels.clone()).unwrap(),
+        });
+        let mut margin = render(
+            parse_command(
+                "render gen=1 view=-160,-160,480,480 w=64 h=64 frames=off out=/tmp/a.raw",
+            )
+            .unwrap()
+            .unwrap(),
+        );
+        let reuse = prepare_pan_reuse(&state, &mut margin).expect("margin maps the center");
+        assert_eq!(reuse.valid, [16, 16, 48, 48]);
+        // margin pixel (16,16) is retained pixel (0,0)
+        assert_eq!(&reuse.base.pixels()[(16 * 64 + 16) * 4..][..4], &pixels[..4]);
+        assert_eq!(margin.view, [-160.0, -160.0, 480.0, 480.0]);
+
+        let margin_pixels = vec![7u8; 64 * 64 * 4];
+        state.retained = Some(RetainedFrame {
+            key: RetainedKey::new(&retained_cmd, None),
+            view: [-160.0, -160.0, 480.0, 480.0],
+            frame: floe_render_core::RgbaFrame::from_pixels(64, 64, margin_pixels).unwrap(),
+        });
+        let mut inside = render(
+            parse_command(
+                "render gen=2 view=0,0,320,320 w=32 h=32 frames=off out=/tmp/c.raw",
+            )
+            .unwrap()
+            .unwrap(),
+        );
+        let reuse = prepare_pan_reuse(&state, &mut inside).expect("viewport maps out");
+        assert_eq!(reuse.valid, [0, 0, 32, 32], "fully covered by the margin");
     }
 
     #[test]
