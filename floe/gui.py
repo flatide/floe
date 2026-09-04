@@ -2424,6 +2424,10 @@ class Viewer:
             GLib.source_remove(self._margin_timer)
             self._margin_timer = None
 
+    def _margin_debug(self, message):
+        if os.environ.get("FLOE_MARGIN_DEBUG"):
+            sys.stderr.write("[margin] %s\n" % message)
+
     def _schedule_margin(self):
         """§F2R-17: after a settled live frame, prefetch a 2wx2h frame
         around the view in the background so pans inside +-50% become
@@ -2434,9 +2438,11 @@ class Viewer:
         if self.cache is None or self._drag is not None:
             return
         if self._pending is not None:
+            self._margin_debug("skip: render pending")
             return  # a user render is in flight; its settle reschedules
         lf = self.last_frame
         if lf is None or lf[3] != self._render_key("live"):
+            self._margin_debug("skip: no frame or key mismatch")
             return
         bbox = self.view_bbox()
         vw, vh = bbox[2] - bbox[0], bbox[3] - bbox[1]
@@ -2445,7 +2451,9 @@ class Viewer:
         if (fb[0] <= bbox[0] - 0.35 * vw and fb[1] <= bbox[1] - 0.35 * vh
                 and fb[2] >= bbox[2] + 0.35 * vw
                 and fb[3] >= bbox[3] + 0.35 * vh):
+            self._margin_debug("skip: already margined")
             return
+        self._margin_debug("timer armed")
         self._margin_timer = GLib.timeout_add(
             MARGIN_PREFETCH_MS, self._submit_margin)
 
@@ -2454,6 +2462,7 @@ class Viewer:
         if (self.cache is None or self.worker is None
                 or not self.worker.alive() or self._drag is not None
                 or self._pending is not None):
+            self._margin_debug("submit skipped")
             return False
         bbox = self.view_bbox()
         w, h = self._viewport_size()
@@ -2490,6 +2499,7 @@ class Viewer:
             "frame_cache": self.frame_cache_on,
             "abstract": self.abstract,
             "visible": self._layers_arg()})
+        self._margin_debug("submitted gen=%d %dx%d" % (self.gen, mw, mh))
         return False
 
     def _submit_render(self):
@@ -2719,6 +2729,7 @@ class Viewer:
                 self.last_frame = (pix, fb, fspp, key)
                 self._display()
                 if res.get("bg"):
+                    self._margin_debug("landed gen=%d" % res["gen"])
                     return  # silent margin upgrade
                 self._depth_used = used
                 self.dstatus.set_text(self._depth_label())
