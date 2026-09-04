@@ -1024,6 +1024,14 @@ cap을 넘으면 **mini를 다 짓고 버린 뒤 legacy per-plane 재walk까지
 tile 기각"은 walk-폴백 체제의 판정이었고 bin+mini 체제에는 적용되지
 않는다. 실칩 재측정 대기 — 같은 뷰의 tile-max가 판정 지표다.
 
+**실칩 확인(2026-09-04)**: 같은 뷰 — 393 load + **1,028 draw**,
+**tile-max 189ms**(1,583→8.4배 붕괴, wall이 tail-bound→sum-bound로
+전환), hier 5.1M→**1.2M**(overflow 이중낭비 소멸), paints 4.5M
+불변. draw −44%. 이 뷰 계열의 잔여 비긴급 항목: 실패 trial
+~0.2s(w1.5M 에지 2개가 매 frame 헛trial — trial 결과 캐시 후보),
+per-tile item 필터(519k×~40 tiles — 2c 설계의 counting-sort binning
+후보). 둘 다 요구 발생 시 착수.
+
 ## 4. 이슈 목록
 
 | ID | 우선순위 | 상태 | 요약 | 다음 판정 |
