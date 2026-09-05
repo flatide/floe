@@ -1239,6 +1239,11 @@ class RealDaemonIntegrationTests(unittest.TestCase):
                              "full cover skips the page plan entirely")
             self.assertGreater(inside_frames[-1].get("labels", 0), 0,
                                "labels are planned for the viewport")
+            # §F2R-21 review (MEDIUM): the viewport frame of that pan
+            # is contained in the margin, so the margin stays retained
+            # (the residency does not shrink to the viewport frame)
+            self.assertEqual(inside_frames[-1]["retained_mb"],
+                             margin_frames[-1]["retained_mb"])
             cold2 = make_render_worker(cache)
             cold2.start()
             try:
@@ -1266,6 +1271,8 @@ class RealDaemonIntegrationTests(unittest.TestCase):
                     pan_b[2] + 32 * q, pan_b[3] + 48 * q)
             worker.submit(dict(pan_job, gen=109, bbox=crop, labels=False))
             crop_frames = self._frames_through_settled(worker, 109)
+            self.assertEqual(crop_frames[-1]["tiles"], 0,
+                             "a second pan inside the margin stays fast")
             margin_rgba = margin_frames[-1].get("rgba")
             self.assertIsNotNone(margin_rgba, "raw transport expected")
             self.assertEqual(
@@ -1311,6 +1318,30 @@ class RealDaemonIntegrationTests(unittest.TestCase):
                                  first_payload)
             finally:
                 baseline.stop()
+
+            # §F2R-21 review (HIGH): a render served entirely from a
+            # retained frame must not leave a query scene of a
+            # DIFFERENT layer set published. All layers -> one other
+            # layer -> all layers again reuses every tile and stays
+            # byte-identical, and pick/snap on the first layer set must
+            # still answer: the scene is republished whenever the
+            # published one does not serve the request.
+            worker.submit(dict(base_job, gen=200, visible=None))
+            all_first = self._frames_through_settled(worker, 200)
+            selected = self._assert_query_parity(cache, worker, bbox)
+            other = [pair for pair in (
+                (int(layer["layer"]), int(layer["datatype"]))
+                for layer in cache.meta["layers"]) if pair not in selected]
+            self.assertTrue(other, "the fixture needs a second layer")
+            worker.submit(dict(base_job, gen=201, visible=other[:1]))
+            self._frames_through_settled(worker, 201)
+            worker.submit(dict(base_job, gen=202, visible=None))
+            all_again = self._frames_through_settled(worker, 202)
+            self.assertEqual(all_again[-1]["tiles_reused"],
+                             all_again[-1]["render_tiles"])
+            self.assertEqual(self._frame_payload(all_again[-1]),
+                             self._frame_payload(all_first[-1]))
+            self._assert_query_parity(cache, worker, bbox)
             self.assertFalse(worker._jobs)
         finally:
             worker.stop()
@@ -1485,7 +1516,7 @@ class RealDaemonIntegrationTests(unittest.TestCase):
             mosaic.apply_hier(
                 response["delta"], response["top"], response["evict"],
                 gen=1)
-            self._assert_query_parity_with_mosaic(
+            return self._assert_query_parity_with_mosaic(
                 cache, worker, box, mosaic, _iter_global_polys,
                 _svc_snap, _svc_pick)
         finally:
@@ -1622,6 +1653,7 @@ class RealDaemonIntegrationTests(unittest.TestCase):
         worker.submit(pick_job)
         actual_pick = self._query_result(worker, "pick", 701)
         self.assertEqual(actual_pick, expected_pick)
+        return selected
 
     @staticmethod
     def _query_result(worker, kind, sequence):

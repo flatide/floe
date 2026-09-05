@@ -1301,6 +1301,22 @@ budget truncation — 4× 면적의 margin이 같은 cap을 먼저 소진할 수
   band" 판정(64px → `label_extent_px`)은 계약이 아니었으므로 필드와
   함께 제거했다.
 
+**리뷰 후속(0.12.49)**: ① HIGH — 레이어 A→B→A 토글 뒤 그림은 byte
+동일하지만 A 전용 레이어의 pick/snap이 실패했다. 전량 재사용 fast path
+가 published scene 갱신을 생략해 B 전용 scene으로 질의했기 때문.
+`PublishedScene`에 계획 당시의 render key(RetainedKey)와 view를 넣고,
+fast path는 published scene이 **요청을 그대로 서비스할 때만**(key 동일
+AND view 포함) 탄다; 아니면 일반 경로로 계획·재게시한다. ② MEDIUM —
+margin 안 첫 pan의 viewport 프레임이 같은 배율의 margin을 **교체**해
+retained가 4MiB→1MiB로 줄고 두 번째 pan은 56/64 재사용 + page plan
+재실행, GUI는 margin이 남은 줄 알고 재예약하지 않았다. `store_retained`
+는 새 프레임을 **완전히 포함하는** 같은 상태·배율의 프레임이 있으면
+그것을 최신으로 touch만 하고 새 프레임을 저장하지 않는다(같은 상태 =
+겹치는 픽셀 동일). 검증: renderd 단위(포함 유지·포함하는 새 프레임은
+교체·LRU touch), 실daemon — 전체→다른 레이어 하나→전체 순서에서 전량
+재사용 + byte 동일 + snap/pick parity 재통과; margin 안 pan 뒤
+`retained_mb` 불변, 두 번째 pan도 page plan 0.
+
 경위: valmini 진단(0.12.46)에서는 차이가 왼쪽 가장자리 29px의 "crop
 에만 잉크"뿐이어서 꼬리를 수용 편차로 기록했으나, 리뷰의 합성 입력
 (화면 안 빨간 라벨 + 화면 밖 위 레이어의 파란 200자 라벨)이 꼬리가
@@ -1350,7 +1366,7 @@ snap/pick 스키마 비교 유지.
 | F2R-18 | P2 | `DONE` | exact frame cache가 retained와 중복(사용자 결정) | payload cache 제거, retained 3-entry LRU(scale별)로 통합(0.12.41, §3.23) — zoom 왕복은 k=0 전량 재사용으로 승계 |
 | F2R-19 | P1 | `DONE` | 수직 pan에서 가장자리 깨짐 | 재사용 row 매핑 부호 교정 + height mod-16 guard(0.12.42, §3.24) — 8방향 pixel-diff 재확인, 실칩 재확인 대기 |
 | F2R-20 | P1 | `DONE` | retained frame byte 예산·margin 픽셀 캡·전체 복제 제거(리뷰 HIGH) | `FLOE_RUST_RETAINED_MB`(256)·`FLOE_MARGIN_MAX_MPIX`(16)·raw 2-part 게시·레이블 없는 clone 생략·Python slice 복제 삭제(§3.25). 0.12.47: frame-cache off는 keep/clone/store도 안 함. 4K 실측 없음 |
-| F2R-21 | P2 | `DONE` | margin crop 라벨 정확도(리뷰 MEDIUM ×2) | margin은 geometry 전용, 라벨 on이면 crop 없이 renderd 라벨 재합성 fast path(page plan·decode 생략), 라벨 off만 crop; bin-정렬 declutter 유지; oracle: 라벨 off crop byte 동일 + 라벨 on 전량 재사용 pan byte 동일(§3.26a, 0.12.48). 실칩 체감 확인 남음 |
+| F2R-21 | P2 | `DONE` | margin crop 라벨 정확도(리뷰 MEDIUM ×2) | margin은 geometry 전용, 라벨 on이면 crop 없이 renderd 라벨 재합성 fast path(page plan·decode 생략), 라벨 off만 crop; bin-정렬 declutter 유지; oracle: 라벨 off crop byte 동일 + 라벨 on 전량 재사용 pan byte 동일(§3.26a, 0.12.48). 0.12.49: fast path는 published scene이 요청을 서비스할 때만(레이어 토글 pick 회귀), 포함하는 margin은 교체 대신 유지. 실칩 체감 확인 남음 |
 | F2R-22 | P2 | `DONE` | pick/snap의 renderd 입력 스레드 점유(리뷰 MEDIUM) | 질의 스레드+kind별 seq frontier(superseded 중단), `FLOE_RUST_QUERY_INLINE=1` 킬 스위치(§3.26b) |
 
 ## 5. 상세 이슈와 수용 기준

@@ -52,7 +52,7 @@ dependencies = [
 
 [[package]]
 name = "floe-index"
-version = "0.12.48"
+version = "0.12.49"
 dependencies = [
  "floe-oasis",
  "floe-ovm",
@@ -98,7 +98,7 @@ dependencies = [
 
 [[package]]
 name = "floe-renderd"
-version = "0.12.48"
+version = "0.12.49"
 dependencies = [
  "floe-render-core",
 ]

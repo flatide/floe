@@ -41,6 +41,11 @@ struct PublishedScene {
     scene: Arc<FrameScene>,
     layers: Arc<[CacheLayer]>,
     cell_names: Arc<BTreeMap<u32, String>>,
+    /// §F2R-21 review: the render state and view this scene was
+    /// planned for - a label-only render (geometry reused in full)
+    /// may leave it published only when it still serves the request.
+    key: RetainedKey,
+    view: [f64; 4],
 }
 
 type SharedPublishedScene = Arc<RwLock<Option<Arc<PublishedScene>>>>;
@@ -701,7 +706,7 @@ fn validate_jobs(jobs: u16) -> Result<(), String> {
 
 /// §F2R-16: identity of a retained geometry frame. Labels are drawn
 /// on top per render, so label state is deliberately absent.
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 struct RetainedKey {
     // §F2R-17: frame sizes are NOT part of the key - a margin frame
     // serves viewport-sized pans and vice versa; scale equality is
@@ -1433,10 +1438,17 @@ fn run_render(
     // The GUI never crops a margin while labels are on (an off-frame
     // label's tail could overwrite in-view labels), so this is what a
     // pan inside the margin costs with labels: text plan + label pass.
-    let full_cover = pan_reuse
+    // §F2R-21 review (HIGH): the fast path leaves the published query
+    // scene untouched, so it may run only when that scene already
+    // serves this request (same render state - layer set, depth, cut,
+    // decode pages, style - and a view containing this one). A layer
+    // toggle A -> B -> A reuses A's retained frame in full but must
+    // replan and republish, or picks on A-only layers would fail.
+    let label_only = pan_reuse
         .as_ref()
-        .is_some_and(|reuse| reuse.valid == [0, 0, command.width, command.height]);
-    let planned = if full_cover {
+        .is_some_and(|reuse| reuse.valid == [0, 0, command.width, command.height])
+        && published_scene_serves(published_scene, command, state.style_epoch)?;
+    let planned = if label_only {
         cache.empty_plan()
     } else {
         cache.plan(&request)?
@@ -1680,7 +1692,7 @@ fn run_render(
         // cancelled response or leave a reported-less partial file behind.
         // a full-cover label re-synthesis carries no working set: the
         // covering render's published scene spans this view and stays
-        if !full_cover {
+        if !label_only {
             let mut published = published_scene
                 .write()
                 .map_err(|_| "published scene lock poisoned".to_string())?;
@@ -1688,6 +1700,8 @@ fn run_render(
                 scene: Arc::clone(&scene),
                 layers: Arc::clone(&query_layers),
                 cell_names: Arc::clone(&query_cell_names),
+                key: RetainedKey::new(command, state.style_epoch),
+                view: command.view,
             }));
         }
         if final_round {
@@ -1885,6 +1899,30 @@ fn checked_generation_bytes(current: u64, incoming: u64, budget: u64) -> Result<
 /// §F2R-18: keep one retained frame per (render state, scale),
 /// newest last, bounded at RETAINED_FRAMES - zoom round-trips find
 /// their scale again while pans keep reusing the current one.
+/// `outer` contains `inner` (world boxes), within float slack.
+fn view_contains(outer: &[f64; 4], inner: &[f64; 4]) -> bool {
+    let eps = 1e-9 * (inner[2] - inner[0]).abs().max((inner[3] - inner[1]).abs());
+    outer[0] <= inner[0] + eps
+        && outer[1] <= inner[1] + eps
+        && outer[2] >= inner[2] - eps
+        && outer[3] >= inner[3] - eps
+}
+
+/// §F2R-21 review (HIGH): whether the published query scene already
+/// serves `command` - same render state and a view containing the
+/// request - so a label-only render may leave it in place.
+fn published_scene_serves(
+    shared: &SharedPublishedScene,
+    command: &RenderCommand,
+    style_epoch: Option<u64>,
+) -> Result<bool, String> {
+    let Some(published) = current_scene(shared)? else {
+        return Ok(false);
+    };
+    Ok(published.key == RetainedKey::new(command, style_epoch)
+        && view_contains(&published.view, &command.view))
+}
+
 fn store_retained(retained: &mut Vec<RetainedFrame>, entry: RetainedFrame, budget_bytes: usize) {
     let same_scale = |a: &RetainedFrame| {
         let span = |frame: &RetainedFrame| {
@@ -1899,6 +1937,21 @@ fn store_retained(retained: &mut Vec<RetainedFrame>, entry: RetainedFrame, budge
             && (ax - bx).abs() <= bx.abs() * 1e-9
             && (ay - by).abs() <= by.abs() * 1e-9
     };
+    // §F2R-21 review (MEDIUM): a same-state, same-scale frame that
+    // already CONTAINS the new one - the margin around a viewport pan
+    // - stays as it is: replacing it with the smaller frame ended the
+    // pan series' full reuse after one step while the GUI, remembering
+    // the margin, did not prefetch again. Same state means identical
+    // pixels over the overlap, so nothing is lost by not storing.
+    if let Some(index) = retained
+        .iter()
+        .position(|candidate| same_scale(candidate) && view_contains(&candidate.view, &entry.view))
+    {
+        // it just served this render: touch it to newest (LRU order)
+        let kept = retained.remove(index);
+        retained.push(kept);
+        return;
+    }
     retained.retain(|candidate| !same_scale(candidate));
     if entry.bytes() > budget_bytes {
         // §F2R-20: a frame that alone exceeds the byte budget is not
@@ -2686,6 +2739,32 @@ mod tests {
         let mut none = Vec::new();
         store_retained(&mut none, frame(1.0), 0);
         assert!(none.is_empty(), "FLOE_RUST_RETAINED_MB=0 retains nothing");
+
+        // §F2R-21 review: a contained same-scale frame (a viewport pan
+        // inside the retained margin) leaves the margin in place; a
+        // containing one (a new margin) replaces the viewport frame.
+        let sized = |px: u32, view: [f64; 4]| RetainedFrame {
+            key: RetainedKey::new(&command, Some(7)),
+            view,
+            frame: floe_render_core::RgbaFrame::from_pixels(
+                px,
+                px,
+                vec![0u8; (px * px * 4) as usize],
+            )
+            .unwrap(),
+        };
+        let mut retained = Vec::new();
+        store_retained(&mut retained, sized(64, [0.0, 0.0, 640.0, 640.0]), roomy);
+        store_retained(&mut retained, sized(32, [160.0, 160.0, 480.0, 480.0]), roomy);
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].frame.width(), 64, "the containing margin stays");
+        store_retained(&mut retained, sized(128, [-320.0, -320.0, 960.0, 960.0]), roomy);
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].frame.width(), 128, "a containing frame replaces");
+        assert!(view_contains(&[0.0, 0.0, 10.0, 10.0], &[0.0, 0.0, 10.0, 10.0]));
+        assert!(!view_contains(&[0.0, 0.0, 10.0, 10.0], &[0.0, 0.0, 10.0, 11.0]));
+        let shared: SharedPublishedScene = Arc::new(RwLock::new(None));
+        assert!(!published_scene_serves(&shared, &command, Some(7)).unwrap());
     }
 
     #[test]
