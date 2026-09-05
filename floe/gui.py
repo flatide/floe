@@ -1428,6 +1428,10 @@ class Viewer:
         self.scroller = Gtk.ScrolledWindow()
         self.scroller.set_policy(Gtk.PolicyType.AUTOMATIC,
                                  Gtk.PolicyType.AUTOMATIC)
+        # the canvas is the keyboard home: key commands are handled on
+        # the window, but a deterministic non-entry focus widget keeps
+        # menus/dialogs from parking focus somewhere that swallows keys
+        self.scroller.set_can_focus(True)
         self.image = Gtk.Image()
         self.image.set_halign(Gtk.Align.START)
         self.image.set_valign(Gtk.Align.START)
@@ -3159,9 +3163,38 @@ class Viewer:
         return self.scroller.drag_check_threshold(
             int(ox), int(oy), int(x), int(y))
 
+    def _focus_view(self):
+        """Put keyboard focus back on the canvas: deactivate the
+        menubar (a menu item can stay selected after a click on some
+        backends, taking every key) and focus the scroller so no entry
+        holds the keys. Synchronous; see _restore_keys for the
+        deferred form used after menus and dialogs."""
+        menubar = getattr(self, "_menubar", None)
+        if menubar is not None:
+            menubar.deactivate()
+        scroller = getattr(self, "scroller", None)
+        if scroller is not None and scroller.get_can_focus():
+            scroller.grab_focus()
+        elif getattr(self, "window", None) is not None:
+            self.window.set_focus(None)
+
+    def _restore_keys(self):
+        """Hand key commands back to the view after a menu closes or
+        a transient dialog goes away (field 2026-09-05: after using a
+        menu, g and the other keys stayed dead until a canvas click).
+        Some backends - macOS quartz, XQuartz/remote X menu grabs -
+        leave the menubar active or the window without a usable focus
+        widget. Deferred to idle so GTK's own teardown runs first."""
+        def _later():
+            self.window.present()
+            self._focus_view()
+            return False
+        GLib.idle_add(_later)
+
     def _on_press(self, _w, ev):
         if self.cache is None:
             return False
+        self._focus_view()
         if self._pending is not None:
             return True  # render in flight: mouse input waits
         if ev.type == Gdk.EventType.DOUBLE_BUTTON_PRESS \
@@ -3834,7 +3867,7 @@ class Viewer:
             # hand the keyboard back: some backends (macOS quartz
             # notably) fail to refocus the parent when a transient
             # closes, leaving every key command dead until a click
-            self.window.present()
+            self._restore_keys()
         dlg.connect("destroy", _gone)
         self._dialog_show(dlg, spin)
 
@@ -3901,7 +3934,7 @@ class Viewer:
 
         def _gone(*_a):
             self._cdlg = None
-            self.window.present()
+            self._restore_keys()
         dlg.connect("destroy", _gone)
         self._dialog_show(dlg, btns[self.detail])
 
@@ -3953,7 +3986,7 @@ class Viewer:
 
         def _gone(*_a):
             self._fontdlg = None
-            self.window.present()
+            self._restore_keys()
         dlg.connect("destroy", _gone)
         self._dialog_show(dlg, spin)
 
@@ -4013,7 +4046,7 @@ class Viewer:
 
         def _gone(*_a):
             self._gdlg = None
-            self.window.present()
+            self._restore_keys()
         dlg.connect("destroy", _gone)
         self._dialog_show(dlg, entries[0])
 
@@ -4187,6 +4220,8 @@ class Viewer:
             menu = Gtk.Menu()
             root.set_submenu(menu)
             menu.connect("show", lambda *_: self._menu_sync())
+            # keys go back to the canvas whenever a menu closes
+            menu.connect("deactivate", lambda *_: self._restore_keys())
             mb.append(root)
             return menu
 
@@ -4256,6 +4291,7 @@ class Viewer:
         m = top("Help")
         item(m, "About %s" % APP, self._about_dialog)
         item(m, "Open Source Licenses", self._licenses_dialog)
+        self._menubar = mb
         return mb
 
     def _load_layout_dialog(self):
@@ -4303,7 +4339,7 @@ class Viewer:
             self._center_on_parent(info)
             info.run()
             info.destroy()
-            self.window.present()
+            self._restore_keys()
 
     def _about_dialog(self):
         """Help > About (flateyes show_about parity): plain-text
@@ -4320,7 +4356,7 @@ class Viewer:
         dlg.destroy()
         # quartz fails to refocus the parent when a transient
         # closes (same as _confirm_quit)
-        self.window.present()
+        self._restore_keys()
 
     def _licenses_dialog(self):
         """Help > Open Source Licenses: the components floe links,
@@ -7267,7 +7303,7 @@ class Viewer:
         out = dlg.get_filename() if dlg.run() == Gtk.ResponseType.OK \
             else None
         dlg.destroy()
-        self.window.present()  # quartz: refocus parent after the dialog
+        self._restore_keys()  # quartz: refocus parent after the dialog
         if not out:
             return
         self.worker.submit({"kind": "clip",
@@ -7295,7 +7331,7 @@ class Viewer:
         dlg.destroy()
         # quartz fails to refocus the parent when a transient closes,
         # leaving key commands dead until a click (same as _gone)
-        self.window.present()
+        self._restore_keys()
         if resp == Gtk.ResponseType.YES:
             self._quit()
 

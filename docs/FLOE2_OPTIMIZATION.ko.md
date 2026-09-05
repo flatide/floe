@@ -1405,6 +1405,20 @@ raster는 pick/snap이 PublishedScene의 페이지에 의존하므로 페이지
 해제를 자동 해결하지 않고, mask도 plane 수에 비례(4K×200 plane ≈
 198MiB)한다. 착수 순서는 F2R-23~27(§5, §6 10~14).
 
+### 3.28 GUI — 메뉴/다이얼로그 뒤 키 명령이 죽는 문제 (2026-09-05, 0.12.51)
+
+사용자 보고: 메뉴를 사용한 뒤 포커스가 뷰로 돌아오지 않아 `g` 같은 키
+명령이 듣지 않음. 키 명령은 window의 key-press 핸들러가 받으므로
+포커스 위치와 무관해야 하지만, 메뉴가 닫힌 뒤 메뉴바가 활성 상태로
+남거나(일부 백엔드의 grab) window에 쓸 만한 포커스 위젯이 없으면
+키가 캔버스까지 오지 않았다. 수정: 캔버스(scroller)를 포커스 가능한
+키보드 홈으로 두고, `_focus_view`(메뉴바 deactivate + scroller
+grab_focus, 없으면 window 포커스 해제)를 캔버스 클릭 시 동기로, 메뉴
+`deactivate`와 모든 transient 다이얼로그 종료 뒤에는 idle로
+(`_restore_keys`: present 후 `_focus_view`) 호출한다. 검증: 단위
+테스트(메뉴바 deactivate → scroller 포커스, 포커스 불가 시 window
+포커스 해제). 대화형 재현은 사용자 확인 대기.
+
 ## 4. 이슈 목록
 
 | ID | 우선순위 | 상태 | 요약 | 다음 판정 |

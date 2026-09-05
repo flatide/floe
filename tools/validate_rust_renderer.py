@@ -571,6 +571,29 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         pixels, stride = disp.get_pixels(), disp.get_rowstride()
         self.assertEqual(rgb(63, 32), (0, 0, 0))
 
+    def test_menus_and_dialogs_hand_the_keys_back_to_the_canvas(self):
+        """Field 2026-09-05: after using a menu, g and the other key
+        commands stayed dead until a canvas click. _focus_view puts the
+        menubar out of its active state and focuses the scroller (a
+        non-entry focus widget the window key handler never yields
+        to); a canvas click does the same synchronously."""
+        from floe.gui import Viewer
+
+        events = []
+        v = Viewer.__new__(Viewer)
+        v._menubar = SimpleNamespace(deactivate=lambda: events.append("mb"))
+        v.scroller = SimpleNamespace(get_can_focus=lambda: True,
+                                     grab_focus=lambda: events.append("focus"))
+        v.window = SimpleNamespace(set_focus=lambda w: events.append(("set", w)))
+        Viewer._focus_view(v)
+        self.assertEqual(events, ["mb", "focus"])
+        # a scroller that cannot take focus falls back to clearing the
+        # window focus (still no entry left holding the keys)
+        events.clear()
+        v.scroller = SimpleNamespace(get_can_focus=lambda: False)
+        Viewer._focus_view(v)
+        self.assertEqual(events, ["mb", ("set", None)])
+
     def test_parses_wire_fields(self):
         kind, fields = _parse_wire_line(
             "frame gen=7 png=/tmp/f.png partial=1 deferred=9")
