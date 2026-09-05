@@ -2500,6 +2500,18 @@ class Viewer:
                 and abs(self.cy - pending[2]) <= 0.35 * vh:
             self._margin_debug("skip: margin in flight for this area")
             return
+        # §F2R-21: with labels on the landed margin is not last_frame
+        # (never shown), yet renderd retains its geometry - a settle
+        # inside it (a full-reuse pan) must not prefetch again until
+        # the view drifts off the margin's center
+        landed = getattr(self, "_margin_landed", None)
+        if landed is not None and landed[0] == lf[3] \
+                and landed[4] is self.cache \
+                and abs(landed[1] - self.spp) <= 1e-9 * self.spp \
+                and abs(self.cx - landed[2]) <= 0.35 * vw \
+                and abs(self.cy - landed[3]) <= 0.35 * vh:
+            self._margin_debug("skip: margin retained for this area")
+            return
         self._submit_margin()
 
     def _submit_margin(self):
@@ -2563,7 +2575,13 @@ class Viewer:
             "cut_px": self._effective_cut_px(),
             "lod": self.lod_on,
             "frames": self.frames_on,
-            "labels": self.labels_on,
+            # §F2R-21: the margin is GEOMETRY ONLY. Its labels would be
+            # planned for the enlarged box, and an off-frame label's
+            # tail can overwrite in-view labels, so a labelled margin
+            # is never shown; renderd retains the label-free geometry
+            # either way and a pan inside it re-synthesizes labels for
+            # the current viewport over the reused geometry.
+            "labels": False,
             "label_font_px": self.label_font_px,
             "frame_cache": self.frame_cache_on,
             "abstract": self.abstract,
@@ -2803,20 +2821,24 @@ class Viewer:
                     pending = getattr(self, "_margin_pending", None)
                     if pending is not None and pending[0] == res["gen"]:
                         self._margin_pending = None
-                    if res.get("labels_truncated"):
-                        # §F2R-21: a margin whose label plan hit a
-                        # budget (dense view) is NOT crop-safe. The
-                        # margin plans with the viewport's own budgets
-                        # (never scaled), so a COMPLETE margin plan
-                        # implies every viewport inside it is complete
-                        # and, with bin-aligned declutter, selects the
-                        # same labels; only then is a crop exact.
-                        # renderd still retains the geometry for tile
-                        # reuse; the GUI keeps the settled frame and
-                        # pans render (fast: memcpy + fresh labels).
+                        center = (pending[1], pending[2])
+                    else:
+                        center = ((fb[0] + fb[2]) / 2.0,
+                                  (fb[1] + fb[3]) / 2.0)
+                    # remember the retained margin so settles inside
+                    # it do not re-prefetch (renderd keeps its geometry
+                    # for full-reuse pans whether or not it is shown)
+                    self._margin_landed = (key, fspp, center[0],
+                                           center[1], self.cache)
+                    if self.labels_on:
+                        # §F2R-21: with labels on a margin is never
+                        # shown or cropped - it is label-free geometry
+                        # for renderd's tile reuse; pans re-synthesize
+                        # this viewport's labels over it (fast path:
+                        # no page plan, memcpy + label pass).
                         self._margin_debug(
-                            "landed gen=%d: labels truncated - reuse "
-                            "only, not adopted for crops" % res["gen"])
+                            "landed gen=%d: labels on - reuse only"
+                            % res["gen"])
                         return
                     self.last_frame = (pix, fb, fspp, key)
                     self._display()

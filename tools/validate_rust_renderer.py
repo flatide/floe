@@ -374,10 +374,11 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         # pinned below)
         self.assertGreaterEqual(job["w"], 2 * 858)
         self.assertGreaterEqual(job["h"], 2 * 802)
-        # §F2R-21: the margin plans labels with the viewport's own
-        # budgets - never scaled - so a complete margin plan implies a
-        # complete viewport plan (the crop-exactness invariant)
-        self.assertNotIn("label_budget", job)
+        # §F2R-21: the margin is geometry only - its labels would be
+        # planned for the enlarged box and could overwrite in-view
+        # labels when cropped; pans re-synthesize labels instead
+        self.assertFalse(job["labels"])
+        self.assertTrue(job["frames"], "hierarchy outlines are geometry")
         self.assertEqual(v._margin_pending[0], job["gen"])
 
         # exact fit (user call 2026-09-05): the landed margin covers
@@ -696,7 +697,6 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "bin_defer_wmax": "5000",
                 "resident_bytes": str(15 * 1024 * 1024),
                 "retained_bytes": str(3 * 1024 * 1024),
-                "label_extent_px": "37",
                 "decode_workers": "3", "workers": "4", "tiles": "16",
                 "tile_px": "128",
                 "rect_paints": "6", "polygon_paints": "7",
@@ -732,7 +732,6 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertEqual(result["frame_cache_hit"], 1)
             self.assertEqual(result["resident_mb"], 15.0)
             self.assertEqual(result["retained_mb"], 3.0)
-            self.assertEqual(result["label_extent_px"], 37)
             self.assertEqual(result["decode_workers"], 3)
             self.assertEqual(result["workers"], 4)
             self.assertEqual(result["render_tiles"], 16)
@@ -1212,12 +1211,15 @@ class RealDaemonIntegrationTests(unittest.TestCase):
             self.assertEqual(self._frame_payload(pan_frames[-1]),
                              self._frame_payload(cold_frames[-1]))
 
-            # §F2R-17: a margin prefetch reuses the viewport frame as
-            # its center, and a pan fully inside the margin reuses
-            # every tile - byte-identical to a cold render.
+            # §F2R-17/21: a margin prefetch (geometry only, as the GUI
+            # submits it) reuses the viewport frame as its center, and
+            # a pan fully inside the margin WITH LABELS ON reuses every
+            # tile through the label re-synthesis fast path - no page
+            # plan, no pages, labels planned for this viewport - and is
+            # byte-identical to a cold render.
             margin_bbox = (pan_b[0] - 64 * q, pan_b[1] - 64 * q,
                            pan_b[2] + 64 * q, pan_b[3] + 64 * q)
-            worker.submit(dict(pan_job, gen=107, bg=True,
+            worker.submit(dict(pan_job, gen=107, bg=True, labels=False,
                                bbox=margin_bbox,
                                w=800 + 128, h=768 + 128))
             margin_frames = self._frames_through_settled(worker, 107)
@@ -1229,9 +1231,14 @@ class RealDaemonIntegrationTests(unittest.TestCase):
                      pan_b[2] + 64 * q, pan_b[3] - 64 * q)
             worker.submit(dict(pan_job, gen=108, bbox=pan_c))
             inside_frames = self._frames_through_settled(worker, 108)
-            self.assertGreater(
-                inside_frames[-1].get("tiles_reused", 0), 150,
+            self.assertEqual(
+                inside_frames[-1].get("tiles_reused", 0),
+                inside_frames[-1]["render_tiles"],
                 "a pan inside the margin must reuse every tile")
+            self.assertEqual(inside_frames[-1]["tiles"], 0,
+                             "full cover skips the page plan entirely")
+            self.assertGreater(inside_frames[-1].get("labels", 0), 0,
+                               "labels are planned for the viewport")
             cold2 = make_render_worker(cache)
             cold2.start()
             try:
@@ -1248,47 +1255,23 @@ class RealDaemonIntegrationTests(unittest.TestCase):
             self.assertEqual(self._frame_payload(inside_frames[-1]),
                              self._frame_payload(cold2_frames[-1]))
 
-            # §F2R-20b crop oracle: the GUI shows a pan inside the
-            # margin as a pure CROP of the margin frame - no render at
-            # all. Label selection and declutter are bin-aligned (a
-            # function of world position, not of the request box), so
-            # every label a direct render of that view shows must be in
-            # the crop pixel-identically: no missing, no shifted label.
-            # The one admitted difference is EXTRA ink from tails: a
-            # label anchored outside the direct frame's aligned box is
-            # omitted there (texts are point objects, as in KLayout)
-            # while the margin drew it and the crop shows the part that
-            # reaches in. Such ink lies within the margin's largest
-            # label extent of an edge (label_extent_px on the wire) -
-            # a 200-character label can reach far, so the band is the
-            # measured extent, never a fixed number. The crop sits
-            # 96 px in, 16 px down in the 928x896 margin.
+            # §F2R-21 crop oracle: the GUI crops a margin only while
+            # labels are OFF (a labelled margin's off-frame label tails
+            # could overwrite in-view labels - review 2026-09-05). A
+            # geometry-only crop is byte-exact under the 16 px fill
+            # contract: it must equal a direct label-free render of the
+            # same view exactly. The crop sits 96 px in, 16 px down in
+            # the 928x896 margin.
             crop = (pan_b[0] + 32 * q, pan_b[1] + 48 * q,
                     pan_b[2] + 32 * q, pan_b[3] + 48 * q)
-            worker.submit(dict(pan_job, gen=109, bbox=crop))
+            worker.submit(dict(pan_job, gen=109, bbox=crop, labels=False))
             crop_frames = self._frames_through_settled(worker, 109)
-            worker.submit(dict(pan_job, gen=110, bbox=crop, labels=False))
-            bare_frames = self._frames_through_settled(worker, 110)
-            self.assertFalse(margin_frames[-1].get("labels_truncated"))
-            self.assertFalse(crop_frames[-1].get("labels_truncated"))
-            self.assertGreater(crop_frames[-1].get("labels", 0), 0,
-                               "the oracle view must carry labels")
             margin_rgba = margin_frames[-1].get("rgba")
             self.assertIsNotNone(margin_rgba, "raw transport expected")
-            cropped = self._crop_rgba(margin_rgba, 800 + 128, 96, 16,
-                                      800, 768)
-            direct = crop_frames[-1]["rgba"]
-            bare = bare_frames[-1]["rgba"]
-            self.assertNotEqual(direct, bare, "labels must paint")
-            extra = self._label_crop_differences(
-                cropped, direct, bare, 800, 768)
-            band = int(margin_frames[-1].get("label_extent_px", 0))
-            self.assertGreater(band, 0, "the margin drew labels")
-            for row, col in extra:
-                self.assertTrue(
-                    min(row, 768 - 1 - row, col, 800 - 1 - col) < band,
-                    "extra crop ink beyond any label's reach at (%d,%d)"
-                    % (row, col))
+            self.assertEqual(
+                self._crop_rgba(margin_rgba, 800 + 128, 96, 16, 800, 768),
+                crop_frames[-1]["rgba"],
+                "a label-free margin crop must equal a direct render")
 
             # §F2R-20: FLOE_RUST_RETAINED_MB=0 retains nothing, so an
             # exact revisit re-rasters in full (pan reuse kill switch
@@ -1429,28 +1412,6 @@ class RealDaemonIntegrationTests(unittest.TestCase):
                 int.from_bytes(png[20:24], "big"), expected_height)
             self.assertFalse(list(Path(directory).glob(
                 ".*.floe-render-*")))
-
-    def _label_crop_differences(self, cropped, direct, bare, w, h):
-        """Pixels where a margin crop differs from the direct render
-        of the same view. Fails on any pixel where the direct render
-        carries label ink (direct != bare) that the crop does not
-        reproduce; returns the (row, col) of the remaining differences,
-        which are by construction extra ink in the crop."""
-        if cropped == direct:
-            return []
-        extra = []
-        for i in range(w * h):
-            a = cropped[i * 4:i * 4 + 4]
-            b = direct[i * 4:i * 4 + 4]
-            if a == b:
-                continue
-            row, col = divmod(i, w)
-            self.assertEqual(
-                b, bare[i * 4:i * 4 + 4],
-                "direct-render label ink missing or moved in the margin "
-                "crop at (%d,%d)" % (row, col))
-            extra.append((row, col))
-        return extra
 
     @staticmethod
     def _crop_rgba(rgba, width, x0, y0, w, h):

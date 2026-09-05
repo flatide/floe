@@ -498,7 +498,6 @@ class RustRenderWorker:
             "publish_rename_us": 0, "adapter_read_us": 0,
             "cache_hit": 0, "cache_evicted": 0, "render_tiles": 0,
             "frame_cache_hit": 0, "retained_bytes": 0,
-            "label_extent_px": 0,
             "resident_bytes": 0, "decode_workers": 0,
             # F2R diagnostics: refinement rounds, decode pool
             # utilization/stragglers, index-build share, raster tail,
@@ -991,9 +990,6 @@ class RustRenderWorker:
         # §F2R-20: bytes of retained geometry frames resident in
         # renderd after this frame (a level, not a running sum)
         state["retained_bytes"] = _wire_int(fields, "retained_bytes")
-        # §F2R-21: largest label extent drawn (device px) - bounds how
-        # far an off-frame label's tail can reach into a margin crop
-        state["label_extent_px"] = _wire_int(fields, "label_extent_px")
         state["frame_cache_hit"] += _wire_int(
             fields, "frame_cache_hit")
         state["render_tiles"] += _wire_int(fields, "tiles")
@@ -1042,7 +1038,6 @@ class RustRenderWorker:
             "cache_evicted": state["cache_evicted"],
             "frame_cache_hit": state["frame_cache_hit"],
             "retained_mb": state["retained_bytes"] / (1024.0 * 1024.0),
-            "label_extent_px": state["label_extent_px"],
             "resident_mb": state["resident_bytes"] / (1024.0 * 1024.0),
             "decode_workers": state["decode_workers"],
             "workers": _wire_int(fields, "workers"),

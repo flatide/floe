@@ -53,6 +53,7 @@ pub struct PlannedView {
     pub stats: RenderStats,
 }
 
+
 /// Display label selected by the parent VFS planner and resolved to the
 /// renderer's stable OVM layer index. Block labels have no design layer.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -291,6 +292,31 @@ impl Cache {
                 ..RenderStats::default()
             },
         })
+    }
+
+    /// §F2R-21: the plan of a render whose geometry is reused in full
+    /// from a retained frame - no page plan, no pages, and a working
+    /// set of just the (empty) top cell so the scene validates; the
+    /// scene built on it carries labels only.
+    pub fn empty_plan(&self) -> PlannedView {
+        let top = (self.vfs.ovm.top, floe_vfs::hier::REM_FULL);
+        PlannedView {
+            plan: HierPlan {
+                top,
+                wcells: vec![floe_vfs::hier::WsCell {
+                    key: top,
+                    pages: Vec::new(),
+                    insts: Vec::new(),
+                    frames: Vec::new(),
+                    washes: Vec::new(),
+                }],
+                pages: Vec::new(),
+                page_prio: Vec::new(),
+                stats: Default::default(),
+            },
+            summary: PlanSummary::default(),
+            stats: RenderStats::default(),
+        }
     }
 
     /// Uses the same request-scoped VFS walk as the KLayout backend, without

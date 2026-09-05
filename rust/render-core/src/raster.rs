@@ -243,8 +243,6 @@ pub struct GeometryRasterReport {
     pub label_tile_paints: u64,
     pub label_pixel_paints: u64,
     pub labels_truncated: bool,
-    /// §F2R-21: largest device-pixel extent of any drawn label.
-    pub label_extent_px: u32,
     pub partial: bool,
 }
 
@@ -387,10 +385,6 @@ struct PreparedLabels {
     by_layer: std::collections::HashMap<u32, Vec<u32>>,
     block_gray: Vec<u32>,
     block_white: Vec<u32>,
-    /// Largest device-pixel extent (width or height) of any prepared
-    /// label: how far a label anchored outside a frame can reach into
-    /// it (§F2R-21 - the crop oracle's admitted edge band).
-    max_extent_px: u32,
 }
 
 struct PreparedLabel {
@@ -505,12 +499,6 @@ impl PreparedLabels {
                 by_layer.entry(layer_idx).or_default().push(index);
             }
         }
-        let max_extent_px = rows
-            .iter()
-            .map(|row| (row.bbox.2 - row.bbox.0).max(row.bbox.3 - row.bbox.1).max(0))
-            .max()
-            .unwrap_or(0)
-            .min(i64::from(u32::MAX)) as u32;
         Ok((
             Some(Self {
                 atlas,
@@ -518,7 +506,6 @@ impl PreparedLabels {
                 by_layer,
                 block_gray,
                 block_white,
-                max_extent_px,
             }),
             labels_truncated,
         ))
@@ -811,9 +798,6 @@ fn render_geometry_impl(
         label_tile_paints: counters.label_tiles_drawn,
         label_pixel_paints: counters.label_pixels_drawn,
         labels_truncated,
-        label_extent_px: prepared_labels
-            .as_ref()
-            .map_or(0, |labels| labels.max_extent_px),
         partial: scene.is_partial(),
     })
 }

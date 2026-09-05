@@ -810,7 +810,6 @@ struct FramePixels {
     tiles: u32,
     partial: bool,
     labels_truncated: bool,
-    label_extent_px: u32,
     rectangle_member_paints: u64,
     polygon_member_paints: u64,
     path_member_paints: u64,
@@ -1427,7 +1426,21 @@ fn run_render(
         .ok_or_else(|| "cache not open".to_string())?;
     check_generation(cancellation, command.generation)?;
     let request = make_plan_request(cache, command)?;
-    let planned = cache.plan(&request)?;
+    // §F2R-21 label re-synthesis: when a retained frame (the margin
+    // prefetch) covers the WHOLE request, its geometry is a pure
+    // memcpy - skip the page plan and decode entirely, plan only the
+    // labels of THIS viewport and paint them over the reused geometry.
+    // The GUI never crops a margin while labels are on (an off-frame
+    // label's tail could overwrite in-view labels), so this is what a
+    // pan inside the margin costs with labels: text plan + label pass.
+    let full_cover = pan_reuse
+        .as_ref()
+        .is_some_and(|reuse| reuse.valid == [0, 0, command.width, command.height]);
+    let planned = if full_cover {
+        cache.empty_plan()
+    } else {
+        cache.plan(&request)?
+    };
     check_generation(cancellation, command.generation)?;
     let planned_labels = if command.labels {
         Some(cache.plan_labels(&request, command.frames, command.label_font_px)?)
@@ -1621,7 +1634,6 @@ fn run_render(
                 tiles: report.stats.tiles,
                 partial: report.partial,
                 labels_truncated: report.labels_truncated,
-                label_extent_px: report.label_extent_px,
                 rectangle_member_paints: report.rectangle_member_paints,
                 polygon_member_paints: report.polygon_member_paints,
                 path_member_paints: report.path_member_paints,
@@ -1666,7 +1678,9 @@ fn run_render(
         // A successful rename is the generation's linearization point. A
         // later cancellation must not turn an already-published frame into a
         // cancelled response or leave a reported-less partial file behind.
-        {
+        // a full-cover label re-synthesis carries no working set: the
+        // covering render's published scene spans this view and stays
+        if !full_cover {
             let mut published = published_scene
                 .write()
                 .map_err(|_| "published scene lock poisoned".to_string())?;
@@ -1706,7 +1720,7 @@ fn run_render(
         respond(
             responses,
             format!(
-                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} label_extent_px={}",
+                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={}",
                 command.generation,
                 round_index + 1,
                 final_round as u8,
@@ -1773,7 +1787,6 @@ fn run_render(
                 pixels.hier_cells_visited,
                 pixels.subtrees_pruned,
                 retained_bytes(&state.retained),
-                pixels.label_extent_px,
             ),
         );
         // Cost-aware refinement (F2R-09 REOPEN, §3.15): every round

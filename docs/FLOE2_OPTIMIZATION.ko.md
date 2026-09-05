@@ -1271,44 +1271,45 @@ budget truncation — 4× 면적의 margin이 같은 cap을 먼저 소진할 수
   되게 했다. 직접 렌더도 경계 bin의 승자를 앵커가 프레임 밖이어도
   선택하고 clip해 그린다(KLayout 동작). raw 모드(oracle XOR)는 정확
   요청 박스를 유지.
-- **margin은 뷰포트와 같은 budget으로 계획한다(스케일 없음)**. 처음
-  구현(0.12.46)은 margin에 `4096 × 면적비`의 budget을 주었는데, 리뷰
-  재검증에서 뷰포트는 4,096 cap에 걸리고 margin은 4,875개를 모두 담아
-  margin 착지 시 **같은 화면의 라벨이 바뀌는** 사례(합성 입력 12,464px
-  차이, 11,056px가 가장자리 밖)가 나왔다. budget을 스케일하지 않으면
-  불변식이 성립한다: margin 계획이 완전(untruncated)하면 그 안의 모든
-  뷰포트 계획도 완전하고(멤버·bin 모두 부분집합), bin-정렬 declutter로
-  같은 라벨을 고른다. 0.12.47에서 `label_budget` 필드를 제거했다.
-  대가: 2×2 면적에 라벨이 4,096개를 넘는 dense 뷰에서는 margin이
-  truncated로 판정돼 crop 경로가 닫히고 pan은 foreground 렌더(tile
-  memcpy + 새 라벨 pass)로 처리된다 — 정확성이 우선.
-- **truncation 게이트**(GUI): `labels_truncated`인 margin은 crop
-  소스로 채택하지 않는다(reuse-only). renderd는 geometry를 그대로
-  retained에 두므로 pan은 memcpy+새 라벨의 빠른 foreground 렌더가
-  된다. 다음 settle에서 margin을 다시 시도한다(라벨 계획만 반복).
-- **oracle 2단**: floe-vfs 단위 — 큰 박스 계획을 bin-정렬 뷰포트로
-  제한하면 텍스트는 뷰포트 계획과 **정확히 같고** block은 부분집합
-  (5개 뷰/깊이/배율 조합, 경계 bin 승자 앵커-밖 선택 포함); 실daemon
-  통합 — margin 프레임의 crop 영역(96px, 16px 오프셋)과 같은 뷰의
-  직접 렌더(라벨·frame on)를 픽셀 단위로 대조해 **직접 렌더의 라벨
-  잉크는 crop에 빠짐·이동 없이 동일**해야 하고, 나머지 차이(추가
-  잉크)는 margin이 그린 **가장 긴 라벨의 extent**(frame line
-  `label_extent_px`, 0.12.47) 안의 가장자리 band에만 허용. 리뷰
-  재검증대로 200자 라벨 하나가 3,965px(그중 2,970px가 64px 밖)를 만들
-  수 있으므로 고정 64px band는 일반적으로 성립하지 않는다 — band는
-  측정된 extent이지 상수가 아니다.
+- **margin은 geometry 전용이다**(GUI가 `labels=off`로 제출, 0.12.48).
+  두 번의 중간안 — 면적비 budget(0.12.46: 뷰포트 4,096 cap vs margin
+  4,875개로 착지 시 화면 라벨이 바뀜), 같은 budget + truncation 게이트
+  (0.12.47) — 은 리뷰 재현으로 무너졌다: 화면 밖에 앵커된 위 레이어의
+  200자 라벨 꼬리가 margin에서 화면 안 라벨 **위에** 칠해져(238px 변경,
+  235px 빨간 성분 감소) "꼬리를 더 보여줄 뿐 기존 라벨은 보존"이라는
+  계약이 성립하지 않았다. 라벨이 있는 한 crop은 안전할 수 없다.
+- **라벨 on이면 margin을 화면에 쓰지 않는다**(reuse-only). 착지해도
+  `last_frame`을 바꾸지 않고 renderd의 retained geometry로만 쓴다.
+  대신 margin 안의 pan은 renderd **라벨 재합성 fast path**를 탄다:
+  retained 프레임이 요청 전체를 덮으면(`valid == 전체`) page plan·
+  decode·working set을 모두 생략하고(`PlannedView::empty`), 이
+  뷰포트의 라벨만 계획해 memcpy된 geometry 위에 칠한다. 질의용
+  published scene은 margin 렌더의 것(이 뷰를 포함)을 유지한다.
+  GUI는 착지한 margin의 중심을 기억해 그 안의 settle에서 재예약하지
+  않는다. 비용: text plan + label pass + publish — 실칩 기준 수십 ms,
+  perf 라인은 찍힌다("0 tiles, +0 new, pan-reuse 전량").
+- **라벨 off면 crop**: geometry-only 프레임은 16px 계약으로 byte
+  정확하므로 이전처럼 0ms crop 경로를 유지한다(perf-baseline, frame
+  off 모드).
+- **oracle**: floe-vfs 단위 — bin-정렬로 큰 박스 계획을 뷰포트로
+  제한하면 텍스트는 뷰포트 계획과 정확히 같고 block은 부분집합(pan 중
+  경계 bin 라벨이 재배열되지 않는 효과는 유지); 실daemon 통합 —
+  ① 라벨 off margin의 crop 영역(96px, 16px 오프셋)은 같은 뷰의 라벨
+  off 직접 렌더와 **byte 동일**(엄격 비교), ② 라벨 on으로 margin 안을
+  pan하면 tiles_reused == render_tiles, `tiles`(page plan) == 0,
+  labels > 0, 그리고 cold 렌더와 **byte 동일**. 이전의 "추가 잉크
+  band" 판정(64px → `label_extent_px`)은 계약이 아니었으므로 필드와
+  함께 제거했다.
 
-진단 결과(valmini, 800×768 crop): 차이 29px, 전부 "crop에만 잉크"
-(rows 11..20, cols 0..3 — 왼쪽 가장자리), 직접 렌더의 잉크가 crop에서
-빠지거나 이동한 픽셀 **0**. 즉 선택·declutter는 정확하고, 남는 차이는
-직접 프레임의 bin-정렬 박스 밖에 앵커된 라벨의 **꼬리**뿐이다 — 직접
-렌더는 KLayout처럼 텍스트를 점 객체로 취급해 그 라벨을 뽑지 않고,
-margin은 앵커를 품어 그렸다. 꼬리 길이는 라벨 문자열 길이에 비례해
-무한정일 수 있다(리뷰: 200자 라벨). 정확 일치를 위해 계획 박스를 최대
-라벨 폭만큼 넓히는 안은 계획 면적(~2.5× 이상, 상한은 문자열 길이)과
-직접 렌더의 가장자리 표시 변화를 대가로 하므로 채택하지 않았다 —
-**수용 편차**: crop은 직접 렌더보다 라벨 꼬리를 더 보여줄 수 있고,
-덜 보여주지는 않는다.
+경위: valmini 진단(0.12.46)에서는 차이가 왼쪽 가장자리 29px의 "crop
+에만 잉크"뿐이어서 꼬리를 수용 편차로 기록했으나, 리뷰의 합성 입력
+(화면 안 빨간 라벨 + 화면 밖 위 레이어의 파란 200자 라벨)이 꼬리가
+기존 라벨을 **덮는** 경우를 보였다. 라벨 pass는 plane 순서로 칠하므로
+위 레이어의 꼬리는 아래 레이어 라벨 위에 놓인다 — 직접 렌더에서는
+그 라벨이 선택되지 않아 빨간 라벨이 온전하다. 어느 crop 오프셋에서도
+성립하는 판정을 한 장의 margin 이미지에서 얻을 수 없으므로 "라벨은
+뷰포트 기준 재합성"으로 결론지었다. 실칩 확인 항목: 라벨 on 연속
+패닝의 체감(라인당 수십 ms, 라인 찍힘)과 라벨 off의 무음 crop.
 
 **(b) pick/snap이 renderd 입력 스레드를 점유.** stdin 디스패처가
 snap/pick을 인라인 실행해 최악의 dense repetition 질의(member cap
@@ -1349,7 +1350,7 @@ snap/pick 스키마 비교 유지.
 | F2R-18 | P2 | `DONE` | exact frame cache가 retained와 중복(사용자 결정) | payload cache 제거, retained 3-entry LRU(scale별)로 통합(0.12.41, §3.23) — zoom 왕복은 k=0 전량 재사용으로 승계 |
 | F2R-19 | P1 | `DONE` | 수직 pan에서 가장자리 깨짐 | 재사용 row 매핑 부호 교정 + height mod-16 guard(0.12.42, §3.24) — 8방향 pixel-diff 재확인, 실칩 재확인 대기 |
 | F2R-20 | P1 | `DONE` | retained frame byte 예산·margin 픽셀 캡·전체 복제 제거(리뷰 HIGH) | `FLOE_RUST_RETAINED_MB`(256)·`FLOE_MARGIN_MAX_MPIX`(16)·raw 2-part 게시·레이블 없는 clone 생략·Python slice 복제 삭제(§3.25). 0.12.47: frame-cache off는 keep/clone/store도 안 함. 4K 실측 없음 |
-| F2R-21 | P2 | `DONE` | margin crop 라벨 정확도 게이트(리뷰 MEDIUM) | bin-정렬 declutter 박스·margin은 뷰포트와 같은 budget(불변식)·truncated margin은 reuse-only·2단 oracle, 꼬리 band=`label_extent_px`(§3.26a, 0.12.47) |
+| F2R-21 | P2 | `DONE` | margin crop 라벨 정확도(리뷰 MEDIUM ×2) | margin은 geometry 전용, 라벨 on이면 crop 없이 renderd 라벨 재합성 fast path(page plan·decode 생략), 라벨 off만 crop; bin-정렬 declutter 유지; oracle: 라벨 off crop byte 동일 + 라벨 on 전량 재사용 pan byte 동일(§3.26a, 0.12.48). 실칩 체감 확인 남음 |
 | F2R-22 | P2 | `DONE` | pick/snap의 renderd 입력 스레드 점유(리뷰 MEDIUM) | 질의 스레드+kind별 seq frontier(superseded 중단), `FLOE_RUST_QUERY_INLINE=1` 킬 스위치(§3.26b) |
 
 ## 5. 상세 이슈와 수용 기준
