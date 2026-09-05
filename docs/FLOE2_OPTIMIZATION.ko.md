@@ -1439,7 +1439,8 @@ grab_focus, 없으면 window 포커스 해제)를 캔버스 클릭 시 동기로
 다이얼로그의 `run()` 종료 경로(취소·열기 모두)와 `open_file`(패널
 재구성·worker 재시작 뒤)에 `_restore_keys`가 없었다 — quartz는
 미처리 keyDown에 비프를 낸다. 두 곳에 추가. instance-forward 로드도
-`open_file`을 지나므로 함께 해결.
+`open_file`을 지나므로 함께 해결. **사용자 확인 완료(2026-09-05)**:
+메뉴·다이얼로그·파일 로드 뒤 키 명령 정상.
 
 ## 4. 이슈 목록
 
