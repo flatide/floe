@@ -24,6 +24,7 @@ from . import cache as cache_mod
 from . import drc as drc_mod
 from . import fillpat
 from .product import name as product_name
+from .rust_render import _env_int
 from .service import (make_render_worker, DETAIL_PX, DETAIL_LEVELS,
                       DEFAULT_DETAIL)
 from .view_policy import live_caps
@@ -117,6 +118,12 @@ WHEEL_ZOOM_STEP = 0.96  # at most 4% per wheel event (was 10%)
 # span (zoom in 50%), Shift+Z doubles it back.
 KEY_PAN_FRACTION = 0.50
 KEY_PAN_FRACTION_FINE = 0.10
+# §F2R-20: a margin frame (§F2R-17) is at most this many megapixels
+# (RGBA: 16 Mpx = 64 MiB). Windows up to ~2560x1440 keep the full
+# one-step-per-side margin; a 4K window's margin shrinks so renderd's
+# retained set, the publish file and the GUI pixbuf stay bounded on
+# shared hosts. FLOE_MARGIN_MAX_MPIX overrides.
+MARGIN_MAX_MPIX = 16
 
 # Help > Open Source Licenses (license names surveyed 2026-08-22;
 # the full texts travel with each component's own distribution -
@@ -979,6 +986,8 @@ class Viewer:
         # Exact settled-frame reuse is a Rust optimization.  Stable floe
         # accepts the same control so A/B command lines remain identical.
         self.frame_cache_on = bool(frame_cache)
+        self._margin_max_px = _env_int(
+            "FLOE_MARGIN_MAX_MPIX", MARGIN_MAX_MPIX, 1, 4096) << 20
         self.stream_kb = stream_kb
         self.stream_target_ms = int(stream_target_ms)
         self.render_debug = bool(render_debug)
@@ -2467,10 +2476,18 @@ class Viewer:
         bbox = self.view_bbox()
         vw, vh = bbox[2] - bbox[0], bbox[3] - bbox[1]
         fb = lf[1]
-        # Already margined and roughly centered: nothing to do.
-        if (fb[0] <= bbox[0] - 0.35 * vw and fb[1] <= bbox[1] - 0.35 * vh
-                and fb[2] >= bbox[2] + 0.35 * vw
-                and fb[3] >= bbox[3] + 0.35 * vh):
+        # Already margined and roughly centered: nothing to do. "Roughly"
+        # is relative to the frame's OWN extension (>= 70% of it left on
+        # both sides) so a pixel-capped narrower margin (§F2R-20) is not
+        # topped up after every pan; an axis without a real margin
+        # (under one 16 px period, e.g. the exact viewport frame) never
+        # counts as margined.
+        period = 16.0 * self.spp
+        axes = ((bbox[0] - fb[0], fb[2] - bbox[2], ((fb[2] - fb[0]) - vw) / 2.0),
+                (bbox[1] - fb[1], fb[3] - bbox[3], ((fb[3] - fb[1]) - vh) / 2.0))
+        if any(ext >= period for _, _, ext in axes) and all(
+                ext < period or (lo >= 0.7 * ext and hi >= 0.7 * ext)
+                for lo, hi, ext in axes):
             self._margin_debug("skip: already margined")
             return
         # §F2R-17 (user call 2026-09-04): submit IMMEDIATELY - any user
@@ -2508,6 +2525,25 @@ class Viewer:
         # in margin mode, which is what made the pad necessary).
         ex = self._snap_pan_px(vw * KEY_PAN_FRACTION)
         ey = self._snap_pan_px(vh * KEY_PAN_FRACTION)
+        cap = getattr(self, "_margin_max_px", MARGIN_MAX_MPIX << 20)
+        if (w + 2 * ex) * (h + 2 * ey) > cap:
+            # §F2R-20: shrink both extensions by one factor s so the
+            # margin holds at most `cap` pixels: (w+2s.ex)(h+2s.ey)=cap,
+            # then floor each to the 16 px period (area stays <= cap).
+            qa = 4.0 * ex * ey
+            qb = 2.0 * (w * ey + h * ex)
+            qc = float(w * h - cap)
+            s = 0.0 if qc >= 0 else \
+                (-qb + math.sqrt(qb * qb - 4.0 * qa * qc)) / (2.0 * qa)
+            ex, ey = (int(math.floor(s * ex / 16.0)) * 16,
+                      int(math.floor(s * ey / 16.0)) * 16)
+            if ex == 0 and ey == 0:
+                self._margin_debug(
+                    "skip: viewport %dx%d leaves no room under the "
+                    "%d Mpx margin cap" % (w, h, cap >> 20))
+                return False
+            self._margin_debug("capped margin to +%d/+%d px per side"
+                               % (ex, ey))
         mw, mh = w + 2 * ex, h + 2 * ey
         eb = (rx0 - ex * self.spp,
               ry1 - (h + ey) * self.spp,
@@ -2881,6 +2917,11 @@ class Viewer:
                         # fits FLOE_RUST_BUDGET_MB this session (§3.18)
                         text += ", evict %s" % fmt_count(
                             res["cache_evicted"])
+                    if res.get("retained_mb"):
+                        # §F2R-20: geometry frames renderd holds for
+                        # pan reuse (bounded by FLOE_RUST_RETAINED_MB)
+                        text += ", retained %dMB" % round(
+                            res["retained_mb"])
                     if res.get("hier_cells_visited"):
                         text += ", hier %s/%s pruned" % (
                             fmt_count(res["hier_cells_visited"]),

@@ -38,6 +38,44 @@ class FakeCache:
         }
 
 
+_MARGIN_KEY = ("live", (), 999, 3.0, True, True, True, 0)
+
+
+def _stub_margin_viewer(worker, frame_cache, viewport=(858, 802)):
+    """A Viewer shell with just the state the margin path reads,
+    holding a settled exact frame (viewport + 1 px per side)."""
+    from floe.gui import Viewer
+
+    v = Viewer.__new__(Viewer)
+    v.cache = object()
+    v._drag = v._pending = None
+    v.worker = worker
+    v.spp, v.cx, v.cy = 10.0, 100000.0, 100000.0
+    v.gen = 5
+    v._job_keys, v._job_depth = {}, {}
+    v._render_key = lambda scope: _MARGIN_KEY
+    v._depth = lambda: 999
+    v._effective_cut_px = lambda: 3.0
+    v.lod_on = v.frames_on = v.labels_on = True
+    v.label_font_px = 14
+    v.frame_cache_on = frame_cache
+    v.abstract = False
+    v._layers_arg = lambda: None
+    v._viewport_size = lambda: viewport
+    v._margin_pending = None
+
+    def view_bbox():
+        w, h = v._viewport_size()
+        return (v.cx - w / 2 * v.spp, v.cy - h / 2 * v.spp,
+                v.cx + w / 2 * v.spp, v.cy + h / 2 * v.spp)
+    v.view_bbox = view_bbox
+    b = view_bbox()
+    # _covered wants >= 0.25 of the extra on every side
+    v.last_frame = (None, (b[0] - v.spp, b[1] - v.spp,
+                           b[2] + v.spp, b[3] + v.spp), v.spp, _MARGIN_KEY)
+    return v
+
+
 class WorkerContractTests(unittest.TestCase):
     def test_single_instance_forwards_effective_detail_and_depth(self):
         from floe import cli, instance
@@ -306,40 +344,9 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         self.assertTrue(RustRenderWorker.supports_margin_prefetch)
         self.assertFalse(service.RenderWorker.supports_margin_prefetch)
 
-        key = ("live", (), 999, 3.0, True, True, True, 0)
+        key = _MARGIN_KEY
         submitted = []
-
-        def make(worker, frame_cache):
-            v = Viewer.__new__(Viewer)
-            v.cache = object()
-            v._drag = v._pending = None
-            v.worker = worker
-            v.spp, v.cx, v.cy = 10.0, 100000.0, 100000.0
-            v.gen = 5
-            v._job_keys, v._job_depth = {}, {}
-            v._render_key = lambda scope: key
-            v._depth = lambda: 999
-            v._effective_cut_px = lambda: 3.0
-            v.lod_on = v.frames_on = v.labels_on = True
-            v.label_font_px = 14
-            v.frame_cache_on = frame_cache
-            v.abstract = False
-            v._layers_arg = lambda: None
-            v._viewport_size = lambda: (858, 802)
-            v._margin_pending = None
-
-            def view_bbox():
-                w, h = v._viewport_size()
-                return (v.cx - w / 2 * v.spp, v.cy - h / 2 * v.spp,
-                        v.cx + w / 2 * v.spp, v.cy + h / 2 * v.spp)
-            v.view_bbox = view_bbox
-            b = view_bbox()
-            # the settled exact frame: viewport + 2 px snap slack
-            # (1 px each side here; _covered wants >= 0.25 of the
-            # extra on every side)
-            v.last_frame = (None, (b[0] - v.spp, b[1] - v.spp,
-                                   b[2] + v.spp, b[3] + v.spp), v.spp, key)
-            return v
+        make = _stub_margin_viewer
 
         rust = SimpleNamespace(supports_margin_prefetch=True,
                                alive=lambda: True,
@@ -407,6 +414,66 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                                    b[2] + vw, b[3] + vh), v.spp, key)
             shifted = (b[0] + 0.3 * vw, b[1], b[2] + 0.3 * vw, b[3])
             self.assertEqual(Viewer._covered(v, shifted, "live"), crops)
+
+    def test_margin_prefetch_caps_pixels_for_large_viewports(self):
+        """§F2R-20: a margin frame is bounded in pixels so renderd's
+        retained set, the publish file and the GUI pixbuf stay small
+        on shared hosts. Ordinary windows keep the exact one-step
+        margin; a 4K window shrinks both extensions (16 px multiples)
+        to fit; a window that fills the cap alone gets no margin. A
+        capped margin still counts as "already margined" once landed
+        and centered, so it is not topped up after every pan."""
+        from floe.gui import MARGIN_MAX_MPIX, Viewer
+
+        submitted = []
+        rust = SimpleNamespace(supports_margin_prefetch=True,
+                               alive=lambda: True,
+                               submit=lambda job: submitted.append(job))
+        cap = MARGIN_MAX_MPIX << 20
+
+        v = _stub_margin_viewer(rust, True, viewport=(2560, 1440))
+        v._margin_max_px = cap
+        self.assertTrue(Viewer._submit_margin(v) is False and submitted)
+        job = submitted[-1]
+        self.assertEqual((job["w"], job["h"]),
+                         (2560 + 2 + 2 * 1280, 1440 + 2 + 2 * 720),
+                         "a QHD window keeps the full one-step margin")
+        self.assertLessEqual(job["w"] * job["h"], cap)
+
+        v = _stub_margin_viewer(rust, True, viewport=(3840, 2160))
+        v._margin_max_px = cap
+        Viewer._submit_margin(v)
+        job = submitted[-1]
+        self.assertLessEqual(job["w"] * job["h"], cap, "capped")
+        ex = (job["w"] - 3842) // 2
+        ey = (job["h"] - 2162) // 2
+        self.assertEqual((job["w"] - 3842) % 32, 0)
+        self.assertEqual((job["h"] - 2162) % 32, 0)
+        self.assertGreater(ex, 0)
+        self.assertGreater(ey, 0)
+        self.assertLess(ex, 1920)
+        self.assertLess(ey, 1080)
+        # tight: one more 16 px period on both axes would break the
+        # cap (each axis is floored to the period from one common
+        # shrink factor, so a single axis may keep sub-period slack)
+        self.assertGreater((job["w"] + 32) * (job["h"] + 32), cap)
+        # landed and centered: no top-up; drift past 30% of the
+        # (smaller) extension: top-up
+        v.last_frame = (None, tuple(job["bbox"]), v.spp, _MARGIN_KEY)
+        v._margin_pending = None
+        before = len(submitted)
+        Viewer._schedule_margin(v)
+        self.assertEqual(len(submitted), before, "centered: no top-up")
+        v.cx += 0.5 * ex * v.spp
+        Viewer._schedule_margin(v)
+        self.assertEqual(len(submitted), before + 1, "drifted: top-up")
+
+        v = _stub_margin_viewer(rust, True, viewport=(3840, 2160))
+        v._margin_max_px = 3842 * 2162
+        before = len(submitted)
+        self.assertFalse(Viewer._submit_margin(v))
+        self.assertEqual(len(submitted), before,
+                         "no room under the cap: no margin at all")
 
     def test_parses_wire_fields(self):
         kind, fields = _parse_wire_line(
@@ -624,6 +691,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "bin_defer_rep": "2", "bin_defer_single": "1",
                 "bin_defer_wmax": "5000",
                 "resident_bytes": str(15 * 1024 * 1024),
+                "retained_bytes": str(3 * 1024 * 1024),
                 "decode_workers": "3", "workers": "4", "tiles": "16",
                 "tile_px": "128",
                 "rect_paints": "6", "polygon_paints": "7",
@@ -658,6 +726,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertEqual(result["cache_miss"], 2)
             self.assertEqual(result["frame_cache_hit"], 1)
             self.assertEqual(result["resident_mb"], 15.0)
+            self.assertEqual(result["retained_mb"], 3.0)
             self.assertEqual(result["decode_workers"], 3)
             self.assertEqual(result["workers"], 4)
             self.assertEqual(result["render_tiles"], 16)
@@ -1033,6 +1102,8 @@ class RealDaemonIntegrationTests(unittest.TestCase):
             self.assertEqual(len(revisited), 1)
             self.assertEqual(revisited[0].get("frame_cache_hit", 0), 0)
             self.assertGreater(revisited[0].get("tiles_reused", 0), 0)
+            # §F2R-20: the retained geometry is reported as a level
+            self.assertGreater(revisited[0].get("retained_mb", 0.0), 0.0)
             self.assertEqual(revisited[0]["tiles_reused"],
                              revisited[0]["render_tiles"],
                              "an exact revisit reuses every tile")
@@ -1170,6 +1241,26 @@ class RealDaemonIntegrationTests(unittest.TestCase):
                 cold2.stop()
             self.assertEqual(self._frame_payload(inside_frames[-1]),
                              self._frame_payload(cold2_frames[-1]))
+
+            # §F2R-20: FLOE_RUST_RETAINED_MB=0 retains nothing, so an
+            # exact revisit re-rasters in full (pan reuse kill switch
+            # by budget) while pixels stay identical.
+            with mock.patch.dict(os.environ,
+                                 {"FLOE_RUST_RETAINED_MB": "0"},
+                                 clear=False):
+                noretain = make_render_worker(cache)
+                noretain.start()
+            try:
+                noretain.submit(dict(base_job, gen=1))
+                self._frames_through_settled(noretain, 1)
+                noretain.submit(dict(base_job, gen=2))
+                again = self._frames_through_settled(noretain, 2)
+                self.assertEqual(again[-1].get("tiles_reused", 0), 0)
+                self.assertEqual(again[-1].get("retained_mb", 0.0), 0.0)
+                self.assertEqual(self._frame_payload(again[-1]),
+                                 first_payload)
+            finally:
+                noretain.stop()
             self.assertFalse(worker._jobs)
         finally:
             worker.stop()

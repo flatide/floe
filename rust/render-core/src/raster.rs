@@ -224,8 +224,12 @@ impl RgbaFrame {
 pub struct GeometryRasterReport {
     pub frame: RgbaFrame,
     /// The label-free frame (§F2R-16), kept when the caller asked to
-    /// retain it for pan reuse.
+    /// retain it for pan reuse AND a label pass painted over `frame`.
     pub geometry_frame: Option<RgbaFrame>,
+    /// §F2R-20: the caller asked to keep the geometry but no label
+    /// pass touched `frame`, so `frame` IS the label-free geometry -
+    /// retain it directly instead of a full-frame copy.
+    pub geometry_is_frame: bool,
     pub stats: RenderStats,
     pub rect_record_tests: u64,
     pub rectangle_member_paints: u64,
@@ -758,7 +762,16 @@ fn render_geometry_impl(
     check_cancelled(guard)?;
     let mut frame = assemble_tiles(request, tiles, tile_columns, tile_rows)?;
     check_cancelled(guard)?;
-    let geometry_frame = keep_geometry.then(|| frame.clone());
+    // §F2R-20: the retained copy exists only because labels paint over
+    // the geometry below; with no label rows the published frame is
+    // the geometry frame and the caller retains it without a copy
+    // (a 4K margin frame is ~130 MiB - one copy fewer per settle).
+    let label_pass = matches!(
+        (prepared_labels.as_ref(), mode),
+        (Some(labels), RenderMode::Styled(_)) if !labels.rows.is_empty()
+    );
+    let geometry_frame = (keep_geometry && label_pass).then(|| frame.clone());
+    let geometry_is_frame = keep_geometry && !label_pass;
     // §F2R-16 (user call 2026-09-04): labels paint LAST, over every
     // geometry plane, in one full-frame pass - a deliberate deviation
     // from the KLayout between-plane order so a pan-reused geometry
@@ -771,6 +784,7 @@ fn render_geometry_impl(
     Ok(GeometryRasterReport {
         frame,
         geometry_frame,
+        geometry_is_frame,
         stats,
         rect_record_tests: counters.rect_records,
         rectangle_member_paints: counters.rectangle_members_drawn,
@@ -6050,6 +6064,16 @@ mod tests {
         assert_eq!(bin.frame_member_paints, walk.frame_member_paints);
     }
 
+    /// The label-free frame a caller would retain (§F2R-20): the copy
+    /// when labels painted over the frame, else the frame itself.
+    fn retained_geometry(report: &GeometryRasterReport) -> &RgbaFrame {
+        if report.geometry_is_frame {
+            &report.frame
+        } else {
+            report.geometry_frame.as_ref().expect("geometry frame kept")
+        }
+    }
+
     #[test]
     fn pan_reuse_matches_a_full_render_at_the_16px_snap() {
         // §F2R-16: views A and B differ by exactly 16 device pixels
@@ -6162,7 +6186,11 @@ mod tests {
         )
         .unwrap();
         // Shift A's geometry frame left by 16 px: B[x, y] = A[x+16, y].
-        let geometry_a = a.geometry_frame.expect("geometry frame kept");
+        // §F2R-20: this scene carries no labels, so the raster reports
+        // the published frame itself as the geometry (no copy made)
+        assert!(a.geometry_is_frame, "label-free render keeps no copy");
+        assert!(a.geometry_frame.is_none());
+        let geometry_a = retained_geometry(&a);
         let mut base = vec![0u8; 32 * 32 * 4];
         for row in 0..32usize {
             for col in 0..16usize {
@@ -6188,8 +6216,8 @@ mod tests {
         assert_eq!(b_reused.stats.tiles_reused, 8, "2 columns x 4 rows");
         assert_eq!(b_reused.frame.pixels(), b_full.frame.pixels());
         assert_eq!(
-            b_reused.geometry_frame.unwrap().pixels(),
-            b_full.geometry_frame.unwrap().pixels()
+            retained_geometry(&b_reused).pixels(),
+            retained_geometry(&b_full).pixels()
         );
         assert!(b_full.stats.tiles_reused == 0);
     }

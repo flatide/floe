@@ -38,6 +38,7 @@ PHASE_FIELDS = (
     "png_ms", "publish_write_ms", "publish_sync_ms", "publish_rename_ms",
     "publish_ms", "adapter_read_ms", "text_plan_ms", "cache_hit",
     "cache_miss", "cache_evicted", "frame_cache_hit", "resident_mb",
+    "retained_mb",
     "decode_workers", "workers", "raster_jobs", "render_tiles", "tile_px",
     "frame_width", "frame_height", "tiles",
     "wc_cells", "inst_edges", "frame_rects", "text_place_records",

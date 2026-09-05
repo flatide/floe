@@ -26,6 +26,10 @@ _DEFAULT_JOBS = max(1, min(8, os.cpu_count() or 1))
 # pages, so a miss costs decode only (read was 0.6% of decode on
 # sample9). Sessions that want floe-scale retention opt in with
 # FLOE_RUST_BUDGET_MB.
+# Retained geometry frames (pan reuse / margin, §F2R-16/17) live
+# OUTSIDE that budget: renderd bounds them to 3 frames AND
+# FLOE_RUST_RETAINED_MB (default 256; 0 retains nothing). The GUI in
+# turn caps a margin at FLOE_MARGIN_MAX_MPIX megapixels (§F2R-20).
 _DEFAULT_BUDGET_MB = 1024
 _NO_REFINEMENT_ROUND_PAGES = 1 << 30
 # User call 2026-08-28: floe draws each view once, and floe2's
@@ -493,7 +497,7 @@ class RustRenderWorker:
             "publish_write_us": 0, "publish_sync_us": 0,
             "publish_rename_us": 0, "adapter_read_us": 0,
             "cache_hit": 0, "cache_evicted": 0, "render_tiles": 0,
-            "frame_cache_hit": 0,
+            "frame_cache_hit": 0, "retained_bytes": 0,
             "resident_bytes": 0, "decode_workers": 0,
             # F2R diagnostics: refinement rounds, decode pool
             # utilization/stragglers, index-build share, raster tail,
@@ -892,22 +896,29 @@ class RustRenderWorker:
         read_started = time.monotonic()
         try:
             with open(path, "rb") as frame_file:
-                payload = frame_file.read()
-            if frame_format == "raw":
-                if not payload.startswith(_RAW_SIGNATURE):
-                    raise ValueError("Rust frame is not a raw payload")
-                raw_w = int.from_bytes(payload[8:12], "little")
-                raw_h = int.from_bytes(payload[12:16], "little")
-                if len(payload) != _RAW_HEADER_LEN + raw_w * raw_h * 4:
-                    raise ValueError("raw Rust frame is truncated")
-                job_size = (int(state["job"].get("w", raw_w)),
-                            int(state["job"].get("h", raw_h)))
-                if (raw_w, raw_h) != job_size:
-                    raise ValueError(
-                        "raw Rust frame is %dx%d, expected %dx%d" % (
-                            raw_w, raw_h, job_size[0], job_size[1]))
-            elif not payload.startswith(_PNG_SIGNATURE):
-                raise ValueError("Rust frame is not a PNG")
+                if frame_format == "raw":
+                    # §F2R-20: read the 16-byte header on its own so
+                    # the pixel bytes arrive already header-free - no
+                    # second full-frame copy to strip it (a 4K margin
+                    # is ~130 MiB)
+                    header = frame_file.read(_RAW_HEADER_LEN)
+                    if not header.startswith(_RAW_SIGNATURE):
+                        raise ValueError("Rust frame is not a raw payload")
+                    raw_w = int.from_bytes(header[8:12], "little")
+                    raw_h = int.from_bytes(header[12:16], "little")
+                    payload = frame_file.read()
+                    if len(payload) != raw_w * raw_h * 4:
+                        raise ValueError("raw Rust frame is truncated")
+                    job_size = (int(state["job"].get("w", raw_w)),
+                                int(state["job"].get("h", raw_h)))
+                    if (raw_w, raw_h) != job_size:
+                        raise ValueError(
+                            "raw Rust frame is %dx%d, expected %dx%d" % (
+                                raw_w, raw_h, job_size[0], job_size[1]))
+                else:
+                    payload = frame_file.read()
+                    if not payload.startswith(_PNG_SIGNATURE):
+                        raise ValueError("Rust frame is not a PNG")
         except (OSError, TypeError, ValueError) as exc:
             self.res.put({"kind": "error", "gen": generation,
                           "msg": "read Rust frame: %s" % exc})
@@ -976,6 +987,9 @@ class RustRenderWorker:
         state["new"] += _wire_int(fields, "cache_miss")
         state["cache_hit"] += _wire_int(fields, "cache_hit")
         state["cache_evicted"] += _wire_int(fields, "cache_evict")
+        # §F2R-20: bytes of retained geometry frames resident in
+        # renderd after this frame (a level, not a running sum)
+        state["retained_bytes"] = _wire_int(fields, "retained_bytes")
         state["frame_cache_hit"] += _wire_int(
             fields, "frame_cache_hit")
         state["render_tiles"] += _wire_int(fields, "tiles")
@@ -1023,6 +1037,7 @@ class RustRenderWorker:
             # working set is cycling past FLOE_RUST_BUDGET_MB
             "cache_evicted": state["cache_evicted"],
             "frame_cache_hit": state["frame_cache_hit"],
+            "retained_mb": state["retained_bytes"] / (1024.0 * 1024.0),
             "resident_mb": state["resident_bytes"] / (1024.0 * 1024.0),
             "decode_workers": state["decode_workers"],
             "workers": _wire_int(fields, "workers"),
@@ -1073,9 +1088,9 @@ class RustRenderWorker:
             "subtrees_pruned": state["subtree_prunes"],
         }
         if frame_format == "raw":
-            # header-stripped, tightly packed RGBA rows; the frame size
-            # was validated against the job above
-            output["rgba"] = payload[_RAW_HEADER_LEN:]
+            # tightly packed RGBA rows (the header was consumed on
+            # read); the frame size was validated against the job above
+            output["rgba"] = payload
         else:
             output["png"] = payload
         if refining:

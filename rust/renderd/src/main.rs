@@ -23,6 +23,11 @@ const MAX_JOBS: u16 = 256;
 /// §F2R-18: retained label-free geometry frames (one per render
 /// state x scale) - they serve exact revisits, pans, and margins.
 const RETAINED_FRAMES: usize = 3;
+/// §F2R-20: retained geometry frames are bounded in BYTES as well as
+/// count - a 4K margin frame is ~130 MiB, three of them ~400 MiB on a
+/// shared host outside the decoded page budget. FLOE_RUST_RETAINED_MB
+/// overrides (0 retains nothing = pan reuse off).
+const RETAINED_BUDGET_MB_DEFAULT: u64 = 256;
 /// A refinement round whose raster ran past this stops the stream:
 /// the remaining page batches merge into one final round (§3.15 —
 /// five ~2.2s intermediate rasters were the draw time of a large
@@ -656,6 +661,29 @@ struct RetainedFrame {
     frame: floe_render_core::RgbaFrame,
 }
 
+impl RetainedFrame {
+    fn bytes(&self) -> usize {
+        self.frame.pixels().len()
+    }
+}
+
+fn retained_bytes(retained: &[RetainedFrame]) -> usize {
+    retained.iter().map(RetainedFrame::bytes).sum()
+}
+
+/// FLOE_RUST_RETAINED_MB: the byte budget shared by every retained
+/// geometry frame (§F2R-20). Unparseable values fall back to the
+/// default; 0 disables retention.
+fn retained_budget_bytes() -> usize {
+    let mb = std::env::var("FLOE_RUST_RETAINED_MB")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(RETAINED_BUDGET_MB_DEFAULT);
+    mb.saturating_mul(1024 * 1024)
+        .try_into()
+        .unwrap_or(usize::MAX)
+}
+
 struct WorkerState {
     cache: Option<Cache>,
     page_cache: DecodedPageCache,
@@ -683,7 +711,16 @@ impl Default for WorkerState {
 }
 
 struct FramePixels {
-    payload: Arc<Vec<u8>>,
+    /// PNG bytes (headless/export jobs); raw frames publish straight
+    /// from `frame` - header and pixels are two writes, no concatenated
+    /// payload copy (§F2R-20).
+    png: Option<Vec<u8>>,
+    /// The rendered frame. Raw publish source; after publish it is the
+    /// retained geometry itself when `geometry_is_frame` (no copy).
+    frame: Option<floe_render_core::RgbaFrame>,
+    /// The label-free copy when a label pass painted over `frame`.
+    geometry: Option<floe_render_core::RgbaFrame>,
+    geometry_is_frame: bool,
     frame_cache_hit: bool,
     raster_us: u64,
     raster_tile_max_us: u64,
@@ -1390,8 +1427,7 @@ fn run_render(
         let scene_us = elapsed_us(scene_started);
         check_generation(cancellation, command.generation)?;
 
-        let mut retained_geometry = None;
-        let pixels = {
+        let mut pixels = {
             let report = if styles.is_empty() && !command.frames {
                 render_geometry_occupancy_cancellable(
                     &scene,
@@ -1432,20 +1468,23 @@ fn run_render(
             };
             check_generation(cancellation, command.generation)?;
             let mut report = report;
-            retained_geometry = report.geometry_frame.take();
+            let geometry = report.geometry_frame.take();
+            let geometry_is_frame = report.geometry_is_frame;
             let png_started = Instant::now();
-            let payload = if command.raw_frame {
-                Arc::new(raw_frame_payload(
-                    report.frame.width(),
-                    report.frame.height(),
-                    report.frame.pixels(),
-                ))
+            let png = if command.raw_frame {
+                None
             } else {
-                Arc::new(report.frame.png_bytes()?)
+                Some(report.frame.png_bytes()?)
             };
             let png_us = elapsed_us(png_started);
+            // a PNG job keeps its frame only when it is the retained
+            // geometry; the raw path publishes from it either way
+            let frame = (command.raw_frame || geometry_is_frame).then_some(report.frame);
             FramePixels {
-                payload,
+                png,
+                frame,
+                geometry,
+                geometry_is_frame,
                 // §F2R-18: the payload cache is retired; the wire
                 // field stays 0 for adapter compatibility.
                 frame_cache_hit: false,
@@ -1489,10 +1528,20 @@ fn run_render(
         } else {
             command.out.clone()
         };
+        let raw_header = pixels
+            .frame
+            .as_ref()
+            .filter(|_| command.raw_frame)
+            .map(|frame| raw_frame_header(frame.width(), frame.height()));
+        let parts: Vec<&[u8]> = match (&raw_header, &pixels.frame, &pixels.png) {
+            (Some(header), Some(frame), _) => vec![header.as_slice(), frame.pixels()],
+            (None, _, Some(png)) => vec![png.as_slice()],
+            _ => return Err("frame has neither raw pixels nor PNG bytes".to_string()),
+        };
         let publish_stats = publish_frame(
             &published_output,
             command.generation,
-            pixels.payload.as_slice(),
+            &parts,
             cancellation,
         )?;
         // A successful rename is the generation's linearization point. A
@@ -1509,7 +1558,16 @@ fn run_render(
             }));
         }
         if final_round {
-            if let Some(frame) = retained_geometry.take() {
+            // §F2R-20: the label-free copy when labels painted, else
+            // the published frame itself (no copy was made)
+            let geometry = pixels.geometry.take().or_else(|| {
+                if pixels.geometry_is_frame {
+                    pixels.frame.take()
+                } else {
+                    None
+                }
+            });
+            if let Some(frame) = geometry {
                 store_retained(
                     &mut state.retained,
                     RetainedFrame {
@@ -1517,14 +1575,19 @@ fn run_render(
                         view: command.view,
                         frame,
                     },
+                    retained_budget_bytes(),
                 );
             }
         }
+        // the published frame's buffers are done: free them before the
+        // status line so a large margin does not linger past its use
+        pixels.frame = None;
+        pixels.png = None;
 
         respond(
             responses,
             format!(
-                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={}",
+                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={}",
                 command.generation,
                 round_index + 1,
                 final_round as u8,
@@ -1590,6 +1653,7 @@ fn run_render(
                 pixels.rep_members_drawn,
                 pixels.hier_cells_visited,
                 pixels.subtrees_pruned,
+                retained_bytes(&state.retained),
             ),
         );
         // Cost-aware refinement (F2R-09 REOPEN, §3.15): every round
@@ -1688,7 +1752,7 @@ fn checked_generation_bytes(current: u64, incoming: u64, budget: u64) -> Result<
 /// §F2R-18: keep one retained frame per (render state, scale),
 /// newest last, bounded at RETAINED_FRAMES - zoom round-trips find
 /// their scale again while pans keep reusing the current one.
-fn store_retained(retained: &mut Vec<RetainedFrame>, entry: RetainedFrame) {
+fn store_retained(retained: &mut Vec<RetainedFrame>, entry: RetainedFrame, budget_bytes: usize) {
     let same_scale = |a: &RetainedFrame| {
         let span = |frame: &RetainedFrame| {
             (
@@ -1703,8 +1767,13 @@ fn store_retained(retained: &mut Vec<RetainedFrame>, entry: RetainedFrame) {
             && (ay - by).abs() <= by.abs() * 1e-9
     };
     retained.retain(|candidate| !same_scale(candidate));
+    if entry.bytes() > budget_bytes {
+        // §F2R-20: a frame that alone exceeds the byte budget is not
+        // retained at all (its pan reuse is not worth the residency)
+        return;
+    }
     retained.push(entry);
-    if retained.len() > RETAINED_FRAMES {
+    while retained.len() > RETAINED_FRAMES || retained_bytes(retained) > budget_bytes {
         retained.remove(0);
     }
 }
@@ -1936,20 +2005,29 @@ struct PublishStats {
 /// little-endian u32. The pixels follow as tightly packed RGBA rows.
 const RAW_FRAME_MAGIC: &[u8; 8] = b"FLOERAW1";
 
+fn raw_frame_header(width: u32, height: u32) -> [u8; 16] {
+    let mut header = [0u8; 16];
+    header[..8].copy_from_slice(RAW_FRAME_MAGIC);
+    header[8..12].copy_from_slice(&width.to_le_bytes());
+    header[12..16].copy_from_slice(&height.to_le_bytes());
+    header
+}
+
+#[cfg(test)]
 fn raw_frame_payload(width: u32, height: u32, pixels: &[u8]) -> Vec<u8> {
     debug_assert_eq!(pixels.len(), width as usize * height as usize * 4);
-    let mut payload = Vec::with_capacity(RAW_FRAME_MAGIC.len() + 8 + pixels.len());
-    payload.extend_from_slice(RAW_FRAME_MAGIC);
-    payload.extend_from_slice(&width.to_le_bytes());
-    payload.extend_from_slice(&height.to_le_bytes());
+    let mut payload = raw_frame_header(width, height).to_vec();
     payload.extend_from_slice(pixels);
     payload
 }
 
+/// Writes `parts` back to back into a private temporary file and renames
+/// it into place at the generation's linearization point. A raw frame
+/// arrives as [header, pixels] so no concatenated copy is ever built.
 fn publish_frame(
     output: &str,
     generation: u64,
-    bytes: &[u8],
+    parts: &[&[u8]],
     cancellation: &RenderCancellation,
 ) -> Result<PublishStats, String> {
     check_generation(cancellation, generation)?;
@@ -1969,9 +2047,11 @@ fn publish_frame(
     let mut file = options
         .open(&temporary)
         .map_err(|error| format!("create {}: {}", temporary.display(), error))?;
-    if let Err(error) = file.write_all(bytes) {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(format!("write {}: {}", temporary.display(), error));
+    for part in parts {
+        if let Err(error) = file.write_all(part) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(format!("write {}: {}", temporary.display(), error));
+        }
     }
     let write_us = elapsed_us(write_started);
     let sync_started = Instant::now();
@@ -2357,13 +2437,14 @@ mod tests {
             )
             .unwrap(),
         };
+        let roomy = usize::MAX;
         let mut retained = Vec::new();
-        store_retained(&mut retained, frame(1.0));
-        store_retained(&mut retained, frame(2.0));
-        store_retained(&mut retained, frame(1.0));
+        store_retained(&mut retained, frame(1.0), roomy);
+        store_retained(&mut retained, frame(2.0), roomy);
+        store_retained(&mut retained, frame(1.0), roomy);
         assert_eq!(retained.len(), 2, "same scale replaces in place");
-        store_retained(&mut retained, frame(4.0));
-        store_retained(&mut retained, frame(8.0));
+        store_retained(&mut retained, frame(4.0), roomy);
+        store_retained(&mut retained, frame(8.0), roomy);
         assert_eq!(retained.len(), RETAINED_FRAMES, "bounded");
         // the oldest scale (2.0) was evicted; 1.0 was refreshed later
         let spans: Vec<f64> = retained
@@ -2375,8 +2456,29 @@ mod tests {
         // A different style epoch never matches.
         let mut other = frame(1.0);
         other.key = RetainedKey::new(&command, Some(8));
-        store_retained(&mut retained, other);
+        store_retained(&mut retained, other, roomy);
         assert_eq!(retained.len(), RETAINED_FRAMES);
+
+        // §F2R-20: the byte budget evicts oldest-first past the count
+        // cap, and a frame that alone exceeds it is never retained.
+        let one = 32 * 32 * 4;
+        let mut retained = Vec::new();
+        store_retained(&mut retained, frame(1.0), 2 * one + 1);
+        store_retained(&mut retained, frame(2.0), 2 * one + 1);
+        store_retained(&mut retained, frame(4.0), 2 * one + 1);
+        assert_eq!(retained.len(), 2, "two frames fit the byte budget");
+        assert_eq!(retained_bytes(&retained), 2 * one);
+        let spans: Vec<f64> = retained
+            .iter()
+            .map(|entry| entry.view[2] - entry.view[0])
+            .collect();
+        assert_eq!(spans, vec![320.0 * 2.0, 320.0 * 4.0], "oldest evicted");
+        store_retained(&mut retained, frame(8.0), one - 1);
+        assert_eq!(retained.len(), 2, "an over-budget frame is dropped, not stored");
+        assert!(!retained.iter().any(|entry| entry.view[2] == 320.0 * 8.0));
+        let mut none = Vec::new();
+        store_retained(&mut none, frame(1.0), 0);
+        assert!(none.is_empty(), "FLOE_RUST_RETAINED_MB=0 retains nothing");
     }
 
     #[test]
@@ -2547,7 +2649,13 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let output = dir.join("frame.png");
         let cancellation = RenderCancellation::new();
-        publish_frame(output.to_str().unwrap(), 4, b"png-bytes", &cancellation).unwrap();
+        publish_frame(
+            output.to_str().unwrap(),
+            4,
+            &[b"png-".as_slice(), b"bytes".as_slice()],
+            &cancellation,
+        )
+        .unwrap();
         assert_eq!(std::fs::read(&output).unwrap(), b"png-bytes");
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         std::fs::remove_file(output).unwrap();
@@ -2569,7 +2677,7 @@ mod tests {
         assert!(publish_frame(
             dir.join("stale.png").to_str().unwrap(),
             4,
-            b"must-not-publish",
+            &[b"must-not-publish".as_slice()],
             &cancellation,
         )
         .is_err());

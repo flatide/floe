@@ -1188,6 +1188,56 @@ tile 기각"은 walk-폴백 체제의 판정이었고 bin+mini 체제에는 적�
 per-tile item 필터(519k×~40 tiles — 2c 설계의 counting-sort binning
 후보). 둘 다 요구 발생 시 착수.
 
+### 3.25 F2R-20 — retained frame byte 예산·margin 픽셀 캡·전체 복제 제거 (2026-09-05, 리뷰 지적 HIGH)
+
+**지적**: 페이지 캐시는 1GiB로 고정돼 있지만 retained geometry frame은
+**개수(3)만** 제한하고 바이트는 제한하지 않았다. 최대 프레임은 ~1GiB
+RGBA까지 허용되고, retained용 geometry frame 전체 복제(raster),
+raw 게시 payload 연결 복제(renderd), header 제거 slice 복제(Python)가
+겹쳤다. 860×804 창에서는 작지만 4K 창의 margin은 한 장 ~133MiB,
+retained 3장만 ~400MiB — 공유 서버에서 페이지 예산 밖의 메모리 압박.
+
+**수정(0.12.45)**:
+1. **renderd retained byte 예산**: `FLOE_RUST_RETAINED_MB`(기본 256,
+   0 = 보관 없음 = pan 재사용 off). 개수 3 **AND** 바이트 예산을 함께
+   만족할 때까지 오래된 것부터 축출하고, 단독으로 예산을 넘는 프레임은
+   보관하지 않는다. frame line `retained_bytes` → 어댑터 `retained_mb`
+   → GUI perf 라인 `retained NMB`(잔류 수준, 누적 아님).
+2. **GUI margin 픽셀 캡**: `MARGIN_MAX_MPIX=16`(64MiB RGBA),
+   `FLOE_MARGIN_MAX_MPIX` 오버라이드. QHD(2560×1440)까지는 온전한 한
+   스텝 margin(5122×2882, 56MB)이 그대로이고, 4K는
+   양축을 하나의 비율로 비례 축소해 16px 배수로 내린다
+   (5442×3058, +800/+448px/변, 63MB). 뷰포트가
+   단독으로 캡을 채우면 margin을 만들지 않는다. "already margined"
+   판정은 프레임 **자체 확장의 70%**로 상대화해 축소된 margin이 매 pan
+   마다 재제출되지 않게 했다(일반 margin에서는 기존 0.35·뷰포트와 동치).
+3. **복제 제거**: (a) raw 게시는 header(16B)+pixels **2회 write** —
+   연결 payload 복제 삭제. (b) 레이블 행이 없는 렌더(frame off,
+   `--perf-baseline`, labels off)는 geometry clone을 생략하고 **게시
+   프레임 자체를 보관**(`geometry_is_frame`). 레이블이 있으면 위에
+   칠해지므로 clone 1회는 남는다. (c) Python raw 읽기는 header를 따로
+   읽어 pixels가 header-free로 도착 — slice 복제 삭제. 게시 직후
+   프레임/PNG 버퍼를 즉시 해제.
+
+RGBA 상한(창 크기별):
+
+| 창 | viewport | margin(이전) | margin(캡 후) |
+|---|---|---|---|
+| 858×802 | 2.8MB | 11MB | 11MB |
+| 2560×1440 | 14.7MB | 56MB | 56MB |
+| 3840×2160 | 33MB | 133MB | 63MB |
+
+retained 합계 ≤ min(3장, 256MiB); 픽셀 경로는 바뀌지 않아 byte
+동일성은 그대로다(oracle 배터리).
+
+검증: renderd 단위(byte 예산 축출 순서·초과 프레임 미보관·0 = 없음·
+2-part 게시), render-core(레이블 없는 render는 `geometry_is_frame`이고
+copy 없음, pan 재사용 byte 동일 유지), validator(QHD 온전·4K 캡
+tight·top-up 판정·`retained_mb` wire·실daemon: 재방문 `retained_mb`>0,
+`FLOE_RUST_RETAINED_MB=0`이면 tiles_reused 0 + 첫 렌더와 byte 동일),
+전체 배터리. 한계: 4K 창 실측은 없음(정책 검증만); 레이블 on 경로의
+clone 1회는 설계상 필요.
+
 ## 4. 이슈 목록
 
 | ID | 우선순위 | 상태 | 요약 | 다음 판정 |
@@ -1211,6 +1261,7 @@ per-tile item 필터(519k×~40 tiles — 2c 설계의 counting-sort binning
 | F2R-17 | P1 | `DONE` | pan 대비 배경 margin prefetch(사용자 제안) | 한 스텝+pad margin·즉시 제출·비행 가드(§3.22) — 사용자 확인 완료: 연속 패닝 거의 무음. P0 리뷰 수정(0.12.43): Rust capability+frame-cache 게이트로 floe(KLayout)에는 적용되지 않음. 0.12.44: margin 폭 정확히 한 스텝/변(−20% raster, 사용자 지적). 실칩(폐쇄망) 확인만 남음 |
 | F2R-18 | P2 | `DONE` | exact frame cache가 retained와 중복(사용자 결정) | payload cache 제거, retained 3-entry LRU(scale별)로 통합(0.12.41, §3.23) — zoom 왕복은 k=0 전량 재사용으로 승계 |
 | F2R-19 | P1 | `DONE` | 수직 pan에서 가장자리 깨짐 | 재사용 row 매핑 부호 교정 + height mod-16 guard(0.12.42, §3.24) — 8방향 pixel-diff 재확인, 실칩 재확인 대기 |
+| F2R-20 | P1 | `DONE` | retained frame byte 예산·margin 픽셀 캡·전체 복제 제거(리뷰 HIGH) | `FLOE_RUST_RETAINED_MB`(256)·`FLOE_MARGIN_MAX_MPIX`(16)·raw 2-part 게시·레이블 없는 clone 생략·Python slice 복제 삭제(§3.25). 4K 실측 없음 |
 
 ## 5. 상세 이슈와 수용 기준
 
