@@ -300,7 +300,6 @@ impl Cache {
         request: &PlanRequest,
         hierarchy_blocks: bool,
         font_px: f32,
-        label_budget: Option<usize>,
     ) -> Result<PlannedLabels, String> {
         let req = self.view_request(request)?;
         let metrics = label_planner_metrics(font_px)?;
@@ -313,16 +312,13 @@ impl Cache {
             block_pad_px: metrics.block_pad_px,
             ..LabelOpts::default()
         };
-        // §F2R-20b: a margin frame covers several viewports of area;
-        // the client scales the per-view label budget with that ratio
-        // so the margin keeps the viewport's label DENSITY (a capped
-        // margin plan is never cropped - the GUI gates on truncation).
-        // The placement-member budget scales alongside.
-        if let Some(budget) = label_budget {
-            let scale = (budget as f64 / opts.view_budget as f64).max(1.0);
-            opts.member_budget = (opts.member_budget as f64 * scale) as u64;
-            opts.view_budget = budget;
-        }
+        // §F2R-21: a margin frame plans with the SAME budgets as a
+        // viewport, deliberately. A complete (untruncated) margin plan
+        // then implies every viewport inside it is complete too, and
+        // with bin-aligned declutter the two select identical labels;
+        // scaling the margin's budget broke that (a viewport capped at
+        // 4096 while the margin held 4875 changed the labels on screen
+        // when the margin landed). A truncated margin is never cropped.
         // Exact geometry renders are archival/probe operations. Their planner
         // scale is deliberately zero and therefore produces no display text.
         if request.exact {

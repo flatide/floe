@@ -28,10 +28,6 @@ const RETAINED_FRAMES: usize = 3;
 /// shared host outside the decoded page budget. FLOE_RUST_RETAINED_MB
 /// overrides (0 retains nothing = pan reuse off).
 const RETAINED_BUDGET_MB_DEFAULT: u64 = 256;
-/// §F2R-20b: upper bound of the per-view label budget a client may ask
-/// for (16x the planner default of 4096 - a margin is at most ~4-5
-/// viewports of area under the GUI's pixel cap).
-const MAX_LABEL_BUDGET: usize = 65_536;
 /// A refinement round whose raster ran past this stops the stream:
 /// the remaining page batches merge into one final round (§3.15 —
 /// five ~2.2s intermediate rasters were the draw time of a large
@@ -326,9 +322,6 @@ struct RenderCommand {
     frames: bool,
     labels: bool,
     label_font_px: f32,
-    /// §F2R-20b: per-view label budget override (a margin frame scales
-    /// it with its area ratio so label density matches the viewport).
-    label_budget: Option<usize>,
     mono: bool,
     /// Allow exact settled PNG reuse. Page/decode caching is independent.
     frame_cache: bool,
@@ -433,7 +426,6 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                     "frames",
                     "labels",
                     "font_px",
-                    "label_budget",
                     "mono",
                     "frame_cache",
                     "jobs",
@@ -481,14 +473,6 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
             let label_font_px =
                 optional_parse(&fields, "font_px")?.unwrap_or(DEFAULT_LABEL_FONT_PX);
             validate_font_px(label_font_px)?;
-            let label_budget: Option<usize> = optional_parse(&fields, "label_budget")?;
-            if let Some(budget) = label_budget {
-                if budget == 0 || budget > MAX_LABEL_BUDGET {
-                    return Err(format!(
-                        "label_budget must be in 1..={MAX_LABEL_BUDGET}: {budget}"
-                    ));
-                }
-            }
             if exact && (cut_px != 0.0 || depth != u32::MAX || frames) {
                 return Err("exact render requires cut=0 depth=full frames=off".to_string());
             }
@@ -517,7 +501,6 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                     frames,
                     labels,
                     label_font_px,
-                    label_budget,
                     mono: optional_bool(&fields, "mono")?.unwrap_or(false),
                     frame_cache: optional_bool(&fields, "frame_cache")?.unwrap_or(true),
                     jobs,
@@ -827,6 +810,7 @@ struct FramePixels {
     tiles: u32,
     partial: bool,
     labels_truncated: bool,
+    label_extent_px: u32,
     rectangle_member_paints: u64,
     polygon_member_paints: u64,
     path_member_paints: u64,
@@ -1446,12 +1430,7 @@ fn run_render(
     let planned = cache.plan(&request)?;
     check_generation(cancellation, command.generation)?;
     let planned_labels = if command.labels {
-        Some(cache.plan_labels(
-            &request,
-            command.frames,
-            command.label_font_px,
-            command.label_budget,
-        )?)
+        Some(cache.plan_labels(&request, command.frames, command.label_font_px)?)
     } else {
         None
     };
@@ -1589,15 +1568,19 @@ fn run_render(
                 } else {
                     // §F2R-16: a snapped pan reuses the previous
                     // geometry frame's overlap; only the final round
-                    // keeps its own geometry for the next pan.
+                    // keeps its own geometry for the next pan - and
+                    // only when retention is on at all (§F2R-20
+                    // review: frame_cache=0 must neither clone nor
+                    // retain, decided BEFORE the raster runs).
                     let is_final = round_index + 1 == rounds.len();
+                    let keep_geometry = is_final && retention_enabled(command);
                     render_geometry_styled_cancellable_reuse(
                         &scene,
                         &styled,
                         command.generation,
                         cancellation,
                         if is_final { pan_reuse.as_ref() } else { None },
-                        is_final,
+                        keep_geometry,
                     )?
                 }
             };
@@ -1638,6 +1621,7 @@ fn run_render(
                 tiles: report.stats.tiles,
                 partial: report.partial,
                 labels_truncated: report.labels_truncated,
+                label_extent_px: report.label_extent_px,
                 rectangle_member_paints: report.rectangle_member_paints,
                 polygon_member_paints: report.polygon_member_paints,
                 path_member_paints: report.path_member_paints,
@@ -1722,7 +1706,7 @@ fn run_render(
         respond(
             responses,
             format!(
-                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={}",
+                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} label_extent_px={}",
                 command.generation,
                 round_index + 1,
                 final_round as u8,
@@ -1789,6 +1773,7 @@ fn run_render(
                 pixels.hier_cells_visited,
                 pixels.subtrees_pruned,
                 retained_bytes(&state.retained),
+                pixels.label_extent_px,
             ),
         );
         // Cost-aware refinement (F2R-09 REOPEN, §3.15): every round
@@ -1921,16 +1906,20 @@ fn store_retained(retained: &mut Vec<RetainedFrame>, entry: RetainedFrame, budge
 /// serves viewport pans and a viewport frame seeds the margin ring.
 /// Any mismatch falls back to the full raster;
 /// FLOE_RUST_PAN_REUSE=off is the kill switch.
+/// Whether this render takes part in geometry retention at all: the
+/// FLOE_RUST_PAN_REUSE kill switch, exact (archival) renders, the
+/// frame_cache flag (perf baselines turn it off for backend-neutral
+/// timing) and a zero retained budget all switch BOTH the reuse lookup
+/// and the keep/clone/store of the new frame off (§F2R-20 review).
+fn retention_enabled(command: &RenderCommand) -> bool {
+    std::env::var("FLOE_RUST_PAN_REUSE").as_deref() != Ok("off")
+        && !command.exact
+        && command.frame_cache
+        && retained_budget_bytes() > 0
+}
+
 fn prepare_pan_reuse(state: &WorkerState, command: &mut RenderCommand) -> Option<FrameReuse> {
-    if std::env::var("FLOE_RUST_PAN_REUSE").as_deref() == Ok("off") {
-        return None;
-    }
-    if command.exact {
-        return None;
-    }
-    // The frame_cache flag keeps its meaning as the revisit-reuse
-    // switch (perf baselines turn it off for backend-neutral timing).
-    if !command.frame_cache {
+    if !retention_enabled(command) {
         return None;
     }
     let key = RetainedKey::new(command, state.style_epoch);
@@ -2341,18 +2330,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn render_parses_and_bounds_the_label_budget() {
-        let base = "render gen=1 view=0,0,320,320 w=32 h=32 labels=1 out=/tmp/a.raw";
-        assert_eq!(render(parse_command(base).unwrap().unwrap()).label_budget, None);
-        let scaled = render(
-            parse_command(&format!("{base} label_budget=16384"))
+    fn retention_is_decided_before_the_raster() {
+        // §F2R-20 review: frame_cache=0 and exact renders take no part
+        // in retention (no keep, no clone, no store, no lookup).
+        let on = render(
+            parse_command("render gen=1 view=0,0,320,320 w=32 h=32 out=/tmp/a.raw")
                 .unwrap()
                 .unwrap(),
         );
-        assert_eq!(scaled.label_budget, Some(16_384));
-        assert!(parse_command(&format!("{base} label_budget=0")).is_err());
-        assert!(parse_command(&format!("{base} label_budget=65537")).is_err());
-        assert!(parse_command(&format!("{base} label_budget=x")).is_err());
+        let off = render(
+            parse_command("render gen=1 view=0,0,320,320 w=32 h=32 frame_cache=0 out=/tmp/a.raw")
+                .unwrap()
+                .unwrap(),
+        );
+        let exact = render(
+            parse_command(
+                "render gen=1 view=0,0,320,320 w=32 h=32 exact=1 frames=off out=/tmp/a.raw",
+            )
+            .unwrap()
+            .unwrap(),
+        );
+        assert!(retention_enabled(&on));
+        assert!(!retention_enabled(&off));
+        assert!(!retention_enabled(&exact));
     }
 
     #[test]

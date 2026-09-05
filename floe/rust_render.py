@@ -464,16 +464,6 @@ class RustRenderWorker:
             raise ValueError("label_font_px must be an integer") from exc
         if label_font_px < 6 or label_font_px > 96:
             raise ValueError("label_font_px must be in 6..96")
-        # §F2R-20b: a margin frame scales the per-view label budget by
-        # its area ratio so its label density matches the viewport
-        label_budget = job.get("label_budget")
-        if label_budget is not None:
-            try:
-                label_budget = int(label_budget)
-            except (TypeError, ValueError) as exc:
-                raise ValueError("label_budget must be an integer") from exc
-            if label_budget < 1 or label_budget > 65536:
-                raise ValueError("label_budget must be in 1..65536")
         bbox = tuple(float(value) for value in job["bbox"])
         if len(bbox) != 4:
             raise ValueError("render bbox must have four coordinates")
@@ -508,6 +498,7 @@ class RustRenderWorker:
             "publish_rename_us": 0, "adapter_read_us": 0,
             "cache_hit": 0, "cache_evicted": 0, "render_tiles": 0,
             "frame_cache_hit": 0, "retained_bytes": 0,
+            "label_extent_px": 0,
             "resident_bytes": 0, "decode_workers": 0,
             # F2R diagnostics: refinement rounds, decode pool
             # utilization/stragglers, index-build share, raster tail,
@@ -525,7 +516,7 @@ class RustRenderWorker:
             self._jobs[generation] = state
         command = (
             "render gen=%d view=%s w=%d h=%d depth=%s cut=%s exact=0 "
-            "layers=%s frames=%s labels=%s font_px=%d%s mono=%s "
+            "layers=%s frames=%s labels=%s font_px=%d mono=%s "
             "frame_cache=%s "
             "jobs=%d decode_jobs=%d tile_px=%d "
             "round_pages=%d round_paths=1 frame_format=%s "
@@ -535,8 +526,6 @@ class RustRenderWorker:
                 repr(max(0.0, float(job.get("cut_px") or 0.0))), layers,
                 _bool_wire(job.get("frames", True)),
                 _bool_wire(job.get("labels", True)), label_font_px,
-                (" label_budget=%d" % label_budget
-                 if label_budget is not None else ""),
                 _bool_wire(self._mono),
                 _bool_wire(job.get("frame_cache", True)),
                 self._raster_jobs_count,
@@ -1002,6 +991,9 @@ class RustRenderWorker:
         # §F2R-20: bytes of retained geometry frames resident in
         # renderd after this frame (a level, not a running sum)
         state["retained_bytes"] = _wire_int(fields, "retained_bytes")
+        # §F2R-21: largest label extent drawn (device px) - bounds how
+        # far an off-frame label's tail can reach into a margin crop
+        state["label_extent_px"] = _wire_int(fields, "label_extent_px")
         state["frame_cache_hit"] += _wire_int(
             fields, "frame_cache_hit")
         state["render_tiles"] += _wire_int(fields, "tiles")
@@ -1050,6 +1042,7 @@ class RustRenderWorker:
             "cache_evicted": state["cache_evicted"],
             "frame_cache_hit": state["frame_cache_hit"],
             "retained_mb": state["retained_bytes"] / (1024.0 * 1024.0),
+            "label_extent_px": state["label_extent_px"],
             "resident_mb": state["resident_bytes"] / (1024.0 * 1024.0),
             "decode_workers": state["decode_workers"],
             "workers": _wire_int(fields, "workers"),

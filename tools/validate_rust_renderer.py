@@ -374,10 +374,10 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         # pinned below)
         self.assertGreaterEqual(job["w"], 2 * 858)
         self.assertGreaterEqual(job["h"], 2 * 802)
-        # §F2R-20b: the label budget scales with the area ratio so the
-        # margin keeps the viewport's label density (1724x1604 over
-        # 860x804 is 4.0 viewports -> 4 x 4096)
-        self.assertEqual(job["label_budget"], 4 * 4096)
+        # §F2R-21: the margin plans labels with the viewport's own
+        # budgets - never scaled - so a complete margin plan implies a
+        # complete viewport plan (the crop-exactness invariant)
+        self.assertNotIn("label_budget", job)
         self.assertEqual(v._margin_pending[0], job["gen"])
 
         # exact fit (user call 2026-09-05): the landed margin covers
@@ -478,35 +478,6 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         self.assertFalse(Viewer._submit_margin(v))
         self.assertEqual(len(submitted), before,
                          "no room under the cap: no margin at all")
-
-    def test_label_budget_travels_on_the_wire_and_is_bounded(self):
-        """§F2R-20b: an explicit per-view label budget reaches renderd
-        after font_px; absent it stays off the wire; out-of-range or
-        non-integer values are rejected before anything is sent."""
-        with tempfile.TemporaryDirectory() as directory:
-            binary = os.path.join(directory, "floe-renderd")
-            with open(binary, "w", encoding="ascii") as script:
-                script.write("#!/bin/sh\n")
-            os.chmod(binary, 0o755)
-            with mock.patch.dict(os.environ, {
-                "FLOE_RENDERD_BIN": binary,
-            }, clear=False):
-                worker = RustRenderWorker(FakeCache(directory))
-            worker._work_dir = directory
-            commands = []
-            worker._send = commands.append
-            job = {"kind": "render", "gen": 3, "scope": "live",
-                   "bbox": (0, 0, 640, 480), "w": 64, "h": 48,
-                   "depth": 2, "cut_px": 1.0, "visible": None,
-                   "frames": True, "labels": True, "label_font_px": 14}
-            worker._submit_render(dict(job, label_budget=16384))
-            self.assertIn(" font_px=14 label_budget=16384 mono=", commands[0])
-            worker._submit_render(dict(job, gen=4))
-            self.assertNotIn("label_budget", commands[1])
-            for bad in (0, 65537, "x"):
-                with self.assertRaisesRegex(ValueError, "label_budget"):
-                    worker._submit_render(dict(job, gen=5, label_budget=bad))
-            self.assertEqual(len(commands), 2)
 
     def test_parses_wire_fields(self):
         kind, fields = _parse_wire_line(
@@ -725,6 +696,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "bin_defer_wmax": "5000",
                 "resident_bytes": str(15 * 1024 * 1024),
                 "retained_bytes": str(3 * 1024 * 1024),
+                "label_extent_px": "37",
                 "decode_workers": "3", "workers": "4", "tiles": "16",
                 "tile_px": "128",
                 "rect_paints": "6", "polygon_paints": "7",
@@ -760,6 +732,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertEqual(result["frame_cache_hit"], 1)
             self.assertEqual(result["resident_mb"], 15.0)
             self.assertEqual(result["retained_mb"], 3.0)
+            self.assertEqual(result["label_extent_px"], 37)
             self.assertEqual(result["decode_workers"], 3)
             self.assertEqual(result["workers"], 4)
             self.assertEqual(result["render_tiles"], 16)
@@ -1281,11 +1254,15 @@ class RealDaemonIntegrationTests(unittest.TestCase):
             # function of world position, not of the request box), so
             # every label a direct render of that view shows must be in
             # the crop pixel-identically: no missing, no shifted label.
-            # The one admitted difference is EXTRA ink at the frame
-            # edge: a label anchored outside the direct frame's aligned
-            # box is omitted there (texts are point objects, as in
-            # KLayout) while the margin drew it and the crop shows its
-            # tail. The crop sits 96 px in, 16 px down in the 928x896.
+            # The one admitted difference is EXTRA ink from tails: a
+            # label anchored outside the direct frame's aligned box is
+            # omitted there (texts are point objects, as in KLayout)
+            # while the margin drew it and the crop shows the part that
+            # reaches in. Such ink lies within the margin's largest
+            # label extent of an edge (label_extent_px on the wire) -
+            # a 200-character label can reach far, so the band is the
+            # measured extent, never a fixed number. The crop sits
+            # 96 px in, 16 px down in the 928x896 margin.
             crop = (pan_b[0] + 32 * q, pan_b[1] + 48 * q,
                     pan_b[2] + 32 * q, pan_b[3] + 48 * q)
             worker.submit(dict(pan_job, gen=109, bbox=crop))
@@ -1305,13 +1282,12 @@ class RealDaemonIntegrationTests(unittest.TestCase):
             self.assertNotEqual(direct, bare, "labels must paint")
             extra = self._label_crop_differences(
                 cropped, direct, bare, 800, 768)
-            # tails of edge labels only: within a short edge band
-            self.assertLessEqual(len(extra), 800 * 768 // 1000)
-            band = 64
+            band = int(margin_frames[-1].get("label_extent_px", 0))
+            self.assertGreater(band, 0, "the margin drew labels")
             for row, col in extra:
                 self.assertTrue(
                     min(row, 768 - 1 - row, col, 800 - 1 - col) < band,
-                    "extra crop ink away from the edge at (%d,%d)"
+                    "extra crop ink beyond any label's reach at (%d,%d)"
                     % (row, col))
 
             # §F2R-20: FLOE_RUST_RETAINED_MB=0 retains nothing, so an
@@ -1333,6 +1309,25 @@ class RealDaemonIntegrationTests(unittest.TestCase):
                                  first_payload)
             finally:
                 noretain.stop()
+
+            # §F2R-20 (review): --frame-cache off must neither clone nor
+            # retain geometry - the decision is made before the raster
+            # runs - so a fresh daemon under the baseline flag reports
+            # retained 0 on every frame while pixels stay identical.
+            baseline = make_render_worker(cache)
+            baseline.start()
+            try:
+                baseline.submit(dict(base_job, gen=1, frame_cache=False))
+                b1 = self._frames_through_settled(baseline, 1)
+                baseline.submit(dict(base_job, gen=2, frame_cache=False))
+                b2 = self._frames_through_settled(baseline, 2)
+                for frame in (b1[-1], b2[-1]):
+                    self.assertEqual(frame.get("retained_mb", 0.0), 0.0)
+                    self.assertEqual(frame.get("tiles_reused", 0), 0)
+                self.assertEqual(self._frame_payload(b2[-1]),
+                                 first_payload)
+            finally:
+                baseline.stop()
             self.assertFalse(worker._jobs)
         finally:
             worker.stop()

@@ -124,11 +124,6 @@ KEY_PAN_FRACTION_FINE = 0.10
 # retained set, the publish file and the GUI pixbuf stay bounded on
 # shared hosts. FLOE_MARGIN_MAX_MPIX overrides.
 MARGIN_MAX_MPIX = 16
-# §F2R-20b: renderd's per-view label budget (floe-vfs LabelOpts
-# default). A margin covers several viewports of area, so its request
-# scales this by the area ratio - same label DENSITY as the viewport.
-# A margin whose plan still hit a budget is never cropped (reuse-only).
-LABEL_VIEW_BUDGET = 4096
 
 # Help > Open Source Licenses (license names surveyed 2026-08-22;
 # the full texts travel with each component's own distribution -
@@ -2550,9 +2545,6 @@ class Viewer:
             self._margin_debug("capped margin to +%d/+%d px per side"
                                % (ex, ey))
         mw, mh = w + 2 * ex, h + 2 * ey
-        label_budget = min(
-            65536, LABEL_VIEW_BUDGET * int(math.ceil(
-                (mw * mh) / float(max(1, w * h)))))
         eb = (rx0 - ex * self.spp,
               ry1 - (h + ey) * self.spp,
               rx0 + (w + ex) * self.spp,
@@ -2573,7 +2565,6 @@ class Viewer:
             "frames": self.frames_on,
             "labels": self.labels_on,
             "label_font_px": self.label_font_px,
-            "label_budget": label_budget,
             "frame_cache": self.frame_cache_on,
             "abstract": self.abstract,
             "visible": self._layers_arg()})
@@ -2813,10 +2804,14 @@ class Viewer:
                     if pending is not None and pending[0] == res["gen"]:
                         self._margin_pending = None
                     if res.get("labels_truncated"):
-                        # §F2R-20b: a margin whose label plan hit a
-                        # budget (dense view) is NOT crop-safe - a
-                        # direct render could show labels it lacks.
-                        # renderd still retains its geometry for tile
+                        # §F2R-21: a margin whose label plan hit a
+                        # budget (dense view) is NOT crop-safe. The
+                        # margin plans with the viewport's own budgets
+                        # (never scaled), so a COMPLETE margin plan
+                        # implies every viewport inside it is complete
+                        # and, with bin-aligned declutter, selects the
+                        # same labels; only then is a crop exact.
+                        # renderd still retains the geometry for tile
                         # reuse; the GUI keeps the settled frame and
                         # pans render (fast: memcpy + fresh labels).
                         self._margin_debug(
