@@ -290,7 +290,9 @@ def _svc_render(cache, mosaic, renderer, lod, tmp, job,
     t0 = time.perf_counter()
     x0, y0, x1, y1 = job["bbox"]
     scope = job.get("scope", "live")
-    bg = False
+    # echo the request's bg flag: the GUI handles a background frame
+    # silently (no perf line, no status) and must recognize it as such
+    bg = bool(job.get("bg"))
     t_load = t_draw = 0.0
     cut_kv = {}
     # how long the job waited behind earlier service work (same host,
@@ -403,7 +405,7 @@ def _svc_render_vfs(cache, mosaic, renderer, tmp, job, req, res,
                # across its stream rounds); tiles is the plan total
                # including already-resident pages
                "new": r.get("new_total", 0),
-               "scope": "live", "bg": False,
+               "scope": "live", "bg": bool(job.get("bg")),
                "load_ms": round(t_load * 1000),
                # load phases (cumulative ms; plan+delta+apply ~= load)
                "phase_plan": round(plan_total * 1000),
@@ -877,6 +879,10 @@ class RenderWorker:
     """Runs the klayout render service in a separate process."""
 
     supports_abstract = True
+    # no background margin prefetch (§F2R-17 is Rust-only: KLayout
+    # cannot cancel or reuse an in-flight enlarged frame, so it would
+    # just be a ~4.8x foreground render per settled view)
+    supports_margin_prefetch = False
 
     def __init__(self, cache, stream_kb=None, stream_target_ms=500,
                  debug=False):

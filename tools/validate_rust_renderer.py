@@ -292,6 +292,96 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         self.assertTrue(item.sensitive)
         self.assertEqual(redraws, [True])
 
+    def test_margin_prefetch_is_a_rust_only_reuse_capability(self):
+        """P0 review (2026-09-05): the F2R-17 margin prefetch lives in
+        the shared GUI and used to fire for ANY backend - stable
+        floe/KLayout would have rendered ~4.8x the pixels of every
+        settled view as foreground work (its service also dropped the
+        bg flag). The GUI now gates on the worker capability AND on
+        --frame-cache (off under --perf-baseline), and _covered() only
+        crops an oversize frame while the margin is enabled."""
+        from floe import service
+        from floe.gui import Viewer
+
+        self.assertTrue(RustRenderWorker.supports_margin_prefetch)
+        self.assertFalse(service.RenderWorker.supports_margin_prefetch)
+
+        key = ("live", (), 999, 3.0, True, True, True, 0)
+        submitted = []
+
+        def make(worker, frame_cache):
+            v = Viewer.__new__(Viewer)
+            v.cache = object()
+            v._drag = v._pending = None
+            v.worker = worker
+            v.spp, v.cx, v.cy = 10.0, 100000.0, 100000.0
+            v.gen = 5
+            v._job_keys, v._job_depth = {}, {}
+            v._render_key = lambda scope: key
+            v._depth = lambda: 999
+            v._effective_cut_px = lambda: 3.0
+            v.lod_on = v.frames_on = v.labels_on = True
+            v.label_font_px = 14
+            v.frame_cache_on = frame_cache
+            v.abstract = False
+            v._layers_arg = lambda: None
+            v._viewport_size = lambda: (858, 802)
+            v._margin_pending = None
+
+            def view_bbox():
+                w, h = v._viewport_size()
+                return (v.cx - w / 2 * v.spp, v.cy - h / 2 * v.spp,
+                        v.cx + w / 2 * v.spp, v.cy + h / 2 * v.spp)
+            v.view_bbox = view_bbox
+            b = view_bbox()
+            # the settled exact frame: viewport + 2 px snap slack
+            # (1 px each side here; _covered wants >= 0.25 of the
+            # extra on every side)
+            v.last_frame = (None, (b[0] - v.spp, b[1] - v.spp,
+                                   b[2] + v.spp, b[3] + v.spp), v.spp, key)
+            return v
+
+        rust = SimpleNamespace(supports_margin_prefetch=True,
+                               alive=lambda: True,
+                               submit=lambda job: submitted.append(job))
+        klayout = SimpleNamespace(supports_abstract=True,
+                                  alive=lambda: True,
+                                  submit=lambda job: submitted.append(job))
+
+        v = make(klayout, True)
+        Viewer._schedule_margin(v)
+        self.assertFalse(Viewer._submit_margin(v))
+        self.assertEqual(submitted, [], "KLayout must never get a margin")
+        self.assertIsNone(v._margin_pending)
+
+        v = make(rust, False)
+        Viewer._schedule_margin(v)
+        self.assertEqual(submitted, [], "--frame-cache off disables it")
+
+        v = make(rust, True)
+        Viewer._schedule_margin(v)
+        self.assertEqual(len(submitted), 1)
+        job = submitted[0]
+        self.assertTrue(job["bg"])
+        self.assertGreater(job["w"], 2 * 858)
+        self.assertGreater(job["h"], 2 * 802)
+        self.assertEqual(v._margin_pending[0], job["gen"])
+
+        # _covered(): an oversize (margin) frame serves a shifted view
+        # only while the margin is enabled; the exact frame keeps
+        # serving the unchanged view either way
+        for worker, frame_cache, crops in ((rust, True, True),
+                                           (rust, False, False),
+                                           (klayout, True, False)):
+            v = make(worker, frame_cache)
+            b = v.view_bbox()
+            self.assertTrue(Viewer._covered(v, b, "live"))
+            vw, vh = b[2] - b[0], b[3] - b[1]
+            v.last_frame = (None, (b[0] - vw, b[1] - vh,
+                                   b[2] + vw, b[3] + vh), v.spp, key)
+            shifted = (b[0] + 0.3 * vw, b[1], b[2] + 0.3 * vw, b[3])
+            self.assertEqual(Viewer._covered(v, shifted, "live"), crops)
+
     def test_parses_wire_fields(self):
         kind, fields = _parse_wire_line(
             "frame gen=7 png=/tmp/f.png partial=1 deferred=9")

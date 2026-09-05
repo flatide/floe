@@ -1056,6 +1056,32 @@ crop-only(라인 없음, 0ms) 경로다. 실칩 재확인 항목: ① margin 완
 margin 진행 중 클릭/줌이 즉시 반응하는지, ③ 백그라운드 margin의
 CPU 사용이 거슬리지 않는지(뷰당 최대 ~3× viewport raster).
 
+**P0 리뷰 지적 수정(2026-09-05, 0.12.43)**: margin 예약/제출이 공용
+GUI(`gui.py`)에 있으면서 백엔드를 확인하지 않아 **기존 floe(KLayout)
+에도 적용**되고 있었다 — settled 뷰마다 ~4.84× 픽셀의 확대 렌더를
+KLayout 서비스가 일반 foreground 작업으로 수행하고(취소·재사용 없음),
+서비스는 요청의 `bg=True`를 버리고 `bg=False`로 돌려줘 GUI가 그
+결과를 보통 프레임처럼 처리했다(perf 라인·상태 갱신). floe/floe2
+비교 측정도 오염될 수 있었다. 수정:
+- `RustRenderWorker.supports_margin_prefetch = True`,
+  `service.RenderWorker.supports_margin_prefetch = False`(명시적 롤백).
+- GUI `_margin_enabled()` = worker capability **AND** `frame_cache_on`
+  — `_schedule_margin`/`_submit_margin` 모두 이 게이트를 지난다.
+  `--frame-cache off`/`--perf-baseline`은 F2R-16 pan 재사용과 함께
+  margin도 끈다(백엔드 중립 타이밍 유지).
+- `_covered()`는 margin이 꺼진 상태에서 정확 viewport 프레임(축당
+  ≤2px 스냅 여유)만 인정 — 어떤 경로로든 남아 있는 큰 프레임의 crop을
+  쓰지 않는다.
+- 방어적으로 KLayout 서비스도 요청의 `bg`를 그대로 되돌린다.
+- `--frame-cache`/`--perf-baseline` 도움말을 F2R-18 이후 실제 의미
+  (retained pan 재사용 + margin prefetch)로 갱신.
+
+검증: validator에 `test_margin_prefetch_is_a_rust_only_reuse_capability`
+추가 — KLayout worker에는 margin이 절대 제출되지 않음, frame-cache off
+에서도 제출되지 않음, Rust+on에서만 bg=True 확대 프레임 제출,
+`_covered()` 큰 프레임 crop은 margin 활성 시에만. 한계: KLayout
+서비스의 bg 에코는 실KLayout 배터리가 없어 코드 검토로만 확인.
+
 ### 3.24 수직 pan 가장자리 깨짐 — row 매핑 부호 버그 (2026-09-04)
 
 **보고(사용자)**: "팬을 하다 보면 가장자리 이미지가 비정상적으로
@@ -1161,7 +1187,7 @@ per-tile item 필터(519k×~40 tiles — 2c 설계의 counting-sort binning
 | F2R-14 | P1 | `DONE` | 장시간 세션에서 load 증가(미니맵 이동, fresh 뷰어보다 느림) | LRU 축출 전수 스캔 → O(log n) 색인(0.12.33, §3.18) + `evict N` telemetry — 실칩 장기 세션 재확인 대기 |
 | F2R-15 | P1 | `DONE` | pick/snap이 대부분 "no object here" | 예산 모델 폐기·floe 정렬(0.12.36, §3.19) — 9.8G 실칩 확인 완료. cut 실명(결함 B)은 보류(설계 219259c) |
 | F2R-16 | P1 | `DONE` | pan이 이동량과 무관하게 전체 재raster | 실칩 확인(§3.20): 10% pan draw 378ms(재사용 92%)·50% 845ms(50%) — 이동량 비례 회복. 남은 pan 바닥: collection/trial ~0.3s, plan ~0.2s(비gated 후보) |
-| F2R-17 | P1 | `DONE` | pan 대비 배경 margin prefetch(사용자 제안) | 한 스텝+pad margin·즉시 제출·비행 가드(§3.22) — 사용자 확인 완료: 연속 패닝 거의 무음. 실칩(폐쇄망) 확인만 남음 |
+| F2R-17 | P1 | `DONE` | pan 대비 배경 margin prefetch(사용자 제안) | 한 스텝+pad margin·즉시 제출·비행 가드(§3.22) — 사용자 확인 완료: 연속 패닝 거의 무음. P0 리뷰 수정(0.12.43): Rust capability+frame-cache 게이트로 floe(KLayout)에는 적용되지 않음. 실칩(폐쇄망) 확인만 남음 |
 | F2R-18 | P2 | `DONE` | exact frame cache가 retained와 중복(사용자 결정) | payload cache 제거, retained 3-entry LRU(scale별)로 통합(0.12.41, §3.23) — zoom 왕복은 k=0 전량 재사용으로 승계 |
 | F2R-19 | P1 | `DONE` | 수직 pan에서 가장자리 깨짐 | 재사용 row 매핑 부호 교정 + height mod-16 guard(0.12.42, §3.24) — 8방향 pixel-diff 재확인, 실칩 재확인 대기 |
 

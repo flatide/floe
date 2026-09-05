@@ -1613,13 +1613,15 @@ def main(argv=None, *, prog=None, rust_only=None):
                         "on); off waits for one settled frame in both floe "
                         "and floe2 and opens an independent instance")
     p.add_argument("--frame-cache", choices=("on", "off"), default="on",
-                   help="allow exact settled-frame reuse (default on; Rust "
-                        "renderer only); off is useful for backend-neutral "
-                        "render timing and opens an independent instance")
+                   help="allow settled-frame reuse: retained-frame pan "
+                        "reuse and the background margin prefetch (default "
+                        "on; Rust renderer only); off is useful for "
+                        "backend-neutral render timing and opens an "
+                        "independent instance")
     p.add_argument("--perf-baseline", action="store_true",
-                   help="backend-neutral timing preset: refinement, exact "
-                        "frame cache, LOD, hierarchy frames and labels off; "
-                        "detail and depth remain explicit")
+                   help="backend-neutral timing preset: refinement, frame "
+                        "reuse/margin prefetch, LOD, hierarchy frames and "
+                        "labels off; detail and depth remain explicit")
     p.add_argument("--frames", choices=("on", "off"), default="on",
                    help="starting hierarchy FRAME_LAYER state (default "
                         "on; the viewer button/`h` changes it live)")

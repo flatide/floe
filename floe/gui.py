@@ -2347,6 +2347,16 @@ class Viewer:
             lbl.hide()
 
     # ---- drawing / rendering ------------------------------------------------
+    def _margin_enabled(self):
+        """§F2R-17 margin prefetch is a Rust-only reuse optimization:
+        the backend must declare it (stable floe/KLayout would render
+        the enlarged frame as ~4.8x plain foreground work per settled
+        view and could not cancel it), and --frame-cache off /
+        --perf-baseline switch every frame-reuse path off together so
+        backend-neutral timings stay comparable."""
+        return bool(self.frame_cache_on) and bool(getattr(
+            self.worker, "supports_margin_prefetch", False))
+
     def _covered(self, bbox, scope):
         """True when the current frame still serves this view: same
         render state AND the viewport sits inside the frame with some
@@ -2359,6 +2369,14 @@ class Viewer:
             return False  # zoom changed: frame is scaled preview only
         fb = lf[1]
         vw, vh = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        if not self._margin_enabled():
+            # reuse is off (baseline timing) or the backend has no
+            # margin: only an exact viewport frame (<= 2 px snap slack
+            # per axis, see _submit_render) may serve - never a crop
+            # of some oversize frame
+            slack = 4.0 * self.spp
+            if (fb[2] - fb[0]) > vw + slack or (fb[3] - fb[1]) > vh + slack:
+                return False
         pad_x = min(0.1 * vw, 0.25 * max(0.0, (fb[2] - fb[0]) - vw))
         pad_y = min(0.1 * vh, 0.25 * max(0.0, (fb[3] - fb[1]) - vh))
         return (fb[0] <= bbox[0] - pad_x and fb[1] <= bbox[1] - pad_y and
@@ -2428,6 +2446,8 @@ class Viewer:
         cancels the margin raster mid-flight."""
         if self.cache is None or self._drag is not None:
             return
+        if not self._margin_enabled():
+            return  # KLayout backend or --frame-cache off / --perf-baseline
         if self._pending is not None:
             self._margin_debug("skip: render pending")
             return  # a user render is in flight; its settle reschedules
@@ -2459,7 +2479,7 @@ class Viewer:
     def _submit_margin(self):
         if (self.cache is None or self.worker is None
                 or not self.worker.alive() or self._drag is not None
-                or self._pending is not None):
+                or self._pending is not None or not self._margin_enabled()):
             self._margin_debug("submit skipped")
             return False
         bbox = self.view_bbox()

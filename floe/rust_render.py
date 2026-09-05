@@ -185,6 +185,13 @@ class RustRenderWorker:
 
     supports_label_font_px = True
     supports_abstract = False
+    # §F2R-17: the GUI's background margin prefetch (an enlarged frame
+    # around the view whose crops serve later pans) is a Rust-only
+    # optimization: renderd honors bg=True, cancels it at the
+    # generation frontier and reuses its tiles. Stable floe/KLayout
+    # must never receive one (it would render ~4.8x the pixels of
+    # every settled view as plain foreground work).
+    supports_margin_prefetch = True
 
     def __init__(self, cache, stream_kb=None, stream_target_ms=500,
                  debug=False):
