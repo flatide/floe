@@ -480,6 +480,97 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         self.assertEqual(len(submitted), before,
                          "no room under the cap: no margin at all")
 
+    def test_pan_inside_a_landed_margin_submits_without_debounce(self):
+        """§F2R-21 field: with labels on the landed margin is display
+        base + renderd reuse only; an arrow pan that stays inside it
+        submits immediately (fast path), one that leaves it debounces."""
+        from floe.gui import Viewer
+
+        rust = SimpleNamespace(supports_margin_prefetch=True,
+                               alive=lambda: True, submit=lambda job: None)
+        v = _stub_margin_viewer(rust, True)
+        calls = []
+        v.redraw = lambda immediate=False: calls.append(immediate)
+        b = v.view_bbox()
+        vw, vh = b[2] - b[0], b[3] - b[1]
+        # a margin 1.5 viewports wide on each side: two snapped 50%
+        # steps (2 x 432 px) stay inside, the third (1296 px) leaves
+        v._margin_frame = (object(), (b[0] - 1.5 * vw, b[1] - 1.5 * vh,
+                                      b[2] + 1.5 * vw, b[3] + 1.5 * vh),
+                           v.spp, _MARGIN_KEY)
+        Viewer._pan_view(v, "Right")
+        Viewer._pan_view(v, "Right")
+        Viewer._pan_view(v, "Right")
+        self.assertEqual(calls, [True, True, False])
+        v._margin_frame = None
+        Viewer._pan_view(v, "Left")
+        self.assertEqual(calls[-1], False)
+        # a margin of another render state or scale is no base
+        v._margin_frame = (object(), (b[0] - vw, b[1] - vh,
+                                      b[2] + vw, b[3] + vh),
+                           v.spp * 2, _MARGIN_KEY)
+        self.assertIsNone(Viewer._margin_base(v))
+
+    def test_margin_geometry_fills_the_strip_a_pan_uncovers(self):
+        """§F2R-21 field (2026-09-05): a pan used to show the incoming
+        strip BLACK until the fast-path frame landed. The display now
+        blits the landed margin's geometry first and the labelled frame
+        over its overlap, so no black strip appears."""
+        try:
+            from floe import gui
+            gui.import_gtk()
+            GdkPixbuf = gui.GdkPixbuf
+        except Exception as exc:  # pragma: no cover - headless hosts
+            self.skipTest("GTK unavailable: %s" % exc)
+        from floe.gui import Viewer
+
+        def solid(size, rgb):
+            pix = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, False, 8,
+                                       size, size)
+            pix.fill((rgb[0] << 24) | (rgb[1] << 16) | (rgb[2] << 8) | 0xff)
+            return pix
+
+        shown = []
+        v = _stub_margin_viewer(
+            SimpleNamespace(supports_margin_prefetch=True), True,
+            viewport=(64, 64))
+        v.spp = 1.0
+        v.visible = [(1, 0)]
+        v._structure_visible = lambda: True
+        v._frame_anchor = None
+        v._draw_overlays = lambda disp, obox, ospp: None
+        v._update_labels = lambda obox, ospp, disp: None
+        v._update_minimap = lambda bbox: None
+        v.dump = False
+        v.image = SimpleNamespace(set_from_pixbuf=shown.append)
+        # last (labelled) frame: green, world x 32..96; the landed
+        # margin: red, world x 0..128; the view pans 16 px right of
+        # the last frame, so its right 16 columns are margin-only
+        v.last_frame = (solid(64, (0, 255, 0)), (32.0, 32.0, 96.0, 96.0),
+                        1.0, _MARGIN_KEY)
+        v._margin_frame = (solid(128, (255, 0, 0)),
+                           (0.0, 0.0, 128.0, 128.0), 1.0, _MARGIN_KEY)
+        v.cx, v.cy = 80.0, 64.0     # view x 48..112, y 32..96
+        Viewer._display(v)
+        disp = shown[-1]
+        pixels, stride = disp.get_pixels(), disp.get_rowstride()
+
+        def rgb(x, y):
+            i = y * stride + x * 3
+            return tuple(pixels[i:i + 3])
+
+        self.assertEqual(rgb(0, 32), (0, 255, 0), "overlap: labelled frame")
+        self.assertEqual(rgb(47, 32), (0, 255, 0))
+        self.assertEqual(rgb(48, 32), (255, 0, 0), "strip: margin geometry")
+        self.assertEqual(rgb(63, 32), (255, 0, 0))
+        # without the margin the strip would be black
+        v._margin_frame = None
+        Viewer._display(v)
+        self.assertEqual(rgb(63, 32), (255, 0, 0))  # previous disp object
+        disp = shown[-1]
+        pixels, stride = disp.get_pixels(), disp.get_rowstride()
+        self.assertEqual(rgb(63, 32), (0, 0, 0))
+
     def test_parses_wire_fields(self):
         kind, fields = _parse_wire_line(
             "frame gen=7 png=/tmp/f.png partial=1 deferred=9")

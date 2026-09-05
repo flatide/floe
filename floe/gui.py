@@ -932,6 +932,10 @@ class Viewer:
         self.gen = 0
         self.last_frame = None      # (pixbuf, bbox, dbu_per_px, key)
         self._frame_anchor = None   # view center the frame was shown at
+        # §F2R-21: the last landed margin (label-free geometry) as a
+        # display base for the strip a pan uncovers before the fresh
+        # frame lands; (pixbuf, bbox, dbu_per_px, key) like last_frame
+        self._margin_frame = None
         self._job_keys = {}         # gen -> render key of submitted job
         self._job_depth = {}        # gen -> depth the job rendered at
         self._pending_scope = "live"
@@ -1555,6 +1559,7 @@ class Viewer:
         self._apply_props_visibility(rows)
         self._refresh_row_fills()
         self.last_frame = None
+        self._margin_frame = None
         self._frame_anchor = None
         self._depth_used = "?"
         self._job_keys.clear()
@@ -1952,11 +1957,37 @@ class Viewer:
         return (frame[3] is not None and frame[2] > 0 and
                 (bool(self.visible) or self._structure_visible()))
 
+    def _margin_base(self):
+        """The landed margin frame when it can serve as the display
+        base right now: same render state and scale as the live view,
+        and not already the frame being shown (labels off adopts the
+        margin as last_frame itself)."""
+        margin = getattr(self, "_margin_frame", None)
+        if margin is None or margin[2] <= 0:
+            return None
+        if margin[3] != self._render_key("live") \
+                or abs(self.spp / margin[2] - 1.0) >= 0.001:
+            return None
+        if self.last_frame is not None and margin[0] is self.last_frame[0]:
+            return None
+        return margin
+
     def _display(self):
         w, h = self._viewport_size()
         disp = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, False, 8, w, h)
         disp.fill(BLACK)
         bbox = self.view_bbox()
+        base = self._margin_base()
+        if base is not None:
+            # §F2R-21 (field 2026-09-05): with labels on the landed
+            # margin never becomes last_frame, yet its label-free
+            # geometry is exactly what belongs under the strip a pan
+            # uncovers - that strip used to stay BLACK for the debounce
+            # plus the render round trip (50% of the screen on an
+            # arrow step). Blit the margin first at the live center;
+            # the labelled frame paints over its overlap and the
+            # fast-path frame replaces everything moments later.
+            self._composite_world(disp, base[0], base[1], bbox, self.spp)
         if self.last_frame is not None and \
                 self._frame_compatible(self.last_frame):
             # the stale frame is never rescaled (a blurry zoomed base
@@ -2830,6 +2861,9 @@ class Viewer:
                     # for full-reuse pans whether or not it is shown)
                     self._margin_landed = (key, fspp, center[0],
                                            center[1], self.cache)
+                    # kept for display either way: the base under a
+                    # pan's incoming strip (see _display)
+                    self._margin_frame = (pix, fb, fspp, key)
                     if self.labels_on:
                         # §F2R-21: with labels on a margin is never
                         # shown or cropped - it is label-free geometry
@@ -3389,7 +3423,16 @@ class Viewer:
             self.cy += dy
         elif direction == "Down":
             self.cy -= dy
-        self.redraw()
+        # §F2R-21: inside a landed margin the render is the label
+        # re-synthesis fast path (memcpy + labels), so skip the pan
+        # debounce - the geometry shows at once from the margin base
+        # and the labels follow as soon as renderd answers
+        base = self._margin_base()
+        bbox = self.view_bbox()
+        inside = base is not None and (
+            base[1][0] <= bbox[0] and base[1][1] <= bbox[1]
+            and base[1][2] >= bbox[2] and base[1][3] >= bbox[3])
+        self.redraw(immediate=inside)
 
     # ---- keys ----------------------------------------------------------------
     def _command_key(self, ev):
