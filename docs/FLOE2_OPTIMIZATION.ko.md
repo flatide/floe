@@ -1342,6 +1342,52 @@ render-core(초과된 seq는 member를 만지기 전 중단, 현재 seq는 일�
 경로와 동일 결과), renderd(스레드 왕복·Shutdown), 실daemon 통합의
 snap/pick 스키마 비교 유지.
 
+### 3.27 budget 사용처 검토와 계획 (2026-09-05, 41ee53a 기준)
+
+사용자 요청으로 floe2의 budget/cap 사용처를 전수 조사하고, 외부 분석
+의견 두 건과 대조해 합의한 결과다. 코드 변경은 없다.
+
+**분류**
+- 출력 불변 fallback(소진 시 비용만 변함): decoded LRU 1GiB, retained
+  3장·256MiB, margin 16Mpx, work-bin 768k items·trial 잔여/2, subtree
+  mask 16MiB, hier `pts_enum_budget` 200k·`k_boxes` 4, refinement
+  500ms(제품 기본 refinement off라 평시 무관).
+- 표시 생략, 표시됨(`labels partial`): 라벨 `view_budget` 4,096(bin
+  유계라 텍스트로는 사실상 도달 불가, block 이름에서 도달)·
+  `member_budget` 200k·`cand_cap` 65,536·`MAX_LABEL_GLYPHS` 262k.
+- **조용히 출력에 영향**: snap 도형 cap(1.05M, 검사한 부분의 최선을
+  정상 반환), `frame_cap` 200k(이후 경계 프레임 생략, 레코드 단위),
+  경계 프레임 Pts > `pts_full_rep` 8,192는 footprint 박스 하나로
+  융합(개수 임계값에 따른 표현 변경, 통계 필드 없음).
+- 명시 오류: `QUERY_MEMBER_CAP` 4.19M(F2R-15 이후 안전밸브), 뷰당
+  decoded 합 > 1GiB(`decoded generation budget exceeded`), 축퇴 grid
+  1.05M, 이미지 268Mpx. pick 64는 floe parity(사용자 결정).
+- 문서화된 근사 정책(별도 관리): detail cut, wash 2px, LOD `lod_k`,
+  hairline, thin lattice, declutter bin.
+- 제외: CTX 2M·중첩 rep 4M·비축 배열 8M은 구 flat/band tiler 경로의
+  cap이다. 현재 `floe index`는 `floe-index vfs`로 진입하며 이 경로를
+  쓰지 않으므로 floe2 인덱싱의 파일 한계 목록에서 뺀다.
+
+**메모리 회계(수정)**: 1GiB는 decoded LRU 잔류량과 뷰당 decoded
+합의 상한이고 판정은 decode **뒤**에 이루어져 순간 증가를 막지 못한다.
+회계 밖: PublishedScene이 핀한 페이지(Arc, LRU 축출 후에도 상주),
+mini-bin 합계(edge×tile×worker, item cap은 bin당), clip 누적(128
+페이지씩 읽지만 geometry와 OASIS bytes를 한꺼번에 보유), 프레임 버퍼
+복제, Python/GTK. `resident_bytes`는 LRU 잔류량이지 RSS가 아니므로
+이것으로 여유를 판단하지 않는다. wire에 없는 fallback 계측: mini-bin
+overflow 횟수, 실패 trial 시간, Pts fallback 횟수, mask fallback
+플래그(`mask_bytes`는 full mask 시 크기만 줄어 명시적이지 않음).
+
+**대안 검토(합의)**: 라벨을 화면 공간별로 균등 선택하는 방향은 우선
+검토하되 안전 cap은 유지한 채 축정렬 규칙 Grid fast path부터 검증하고,
+일반 Pts(bin별 후보 검색, chunk 단위 skip은 승자 규칙 변경)와 block
+이름(계약 테스트가 "같은 bin의 독립 block 이름 전부 유지"를 고정),
+긴 문자열(glyph 무계)은 별도 설계한다. frame 수의 화면 면적 상한은
+겹침 때문에 성립하지 않으므로 cap 제거 근거가 아니다. 1bpp streaming
+raster는 pick/snap이 PublishedScene의 페이지에 의존하므로 페이지
+해제를 자동 해결하지 않고, mask도 plane 수에 비례(4K×200 plane ≈
+198MiB)한다. 착수 순서는 F2R-23~27(§5, §6 10~14).
+
 ## 4. 이슈 목록
 
 | ID | 우선순위 | 상태 | 요약 | 다음 판정 |
@@ -1368,6 +1414,11 @@ snap/pick 스키마 비교 유지.
 | F2R-20 | P1 | `DONE` | retained frame byte 예산·margin 픽셀 캡·전체 복제 제거(리뷰 HIGH) | `FLOE_RUST_RETAINED_MB`(256)·`FLOE_MARGIN_MAX_MPIX`(16)·raw 2-part 게시·레이블 없는 clone 생략·Python slice 복제 삭제(§3.25). 0.12.47: frame-cache off는 keep/clone/store도 안 함. 4K 실측 없음 |
 | F2R-21 | P2 | `DONE` | margin crop 라벨 정확도(리뷰 MEDIUM ×2) | margin은 geometry 전용, 라벨 on이면 crop 없이 renderd 라벨 재합성 fast path(page plan·decode 생략), 라벨 off만 crop; bin-정렬 declutter 유지; oracle: 라벨 off crop byte 동일 + 라벨 on 전량 재사용 pan byte 동일(§3.26a, 0.12.48). 0.12.49: fast path는 published scene이 요청을 서비스할 때만(레이어 토글 pick 회귀), 포함하는 margin은 교체 대신 유지. 실칩 체감 확인 남음 |
 | F2R-22 | P2 | `DONE` | pick/snap의 renderd 입력 스레드 점유(리뷰 MEDIUM) | 질의 스레드+kind별 seq frontier(superseded 중단), `FLOE_RUST_QUERY_INLINE=1` 킬 스위치(§3.26b) |
+| F2R-23 | P1 | `TODO` | 불완전 결과·fallback 관측성(§3.27) | snap partial 표시/오류, frame 생략·footprint 융합 플래그, mini-bin overflow·실패 trial 시간·Pts fallback·mask fallback 계측, renderd RSS를 frame line에 |
+| F2R-24 | P2 | `TODO` | decode 전 byte admission(§3.27) | 페이지 메타 크기 추정으로 뷰당 상한을 decode 전에 판정. 03c와 별개 |
+| F2R-25 | P2 | `TODO` | 라벨 bin 기반 선택의 제한적 검증(§3.27) | 축정렬 규칙 Grid fast path만, cap 유지, 새 승자 규칙·block/Pts/긴 문자열 계약 문서화 후 |
+| F2R-26 | P3 | `GATED` | 실측 기반 fallback 개선(§3.27) | F2R-23 계측으로 work-bin continuation·Pts 과포함·mask 전역 해제 중 실제 병목을 선택 |
+| F2R-27 | P3 | `DESIGN` | generation streaming/1bpp + 질의 경로 분리(§3.27) | 실칩에서 뷰당 1GiB 오류 또는 peak 메모리 압박이 확인될 때, 03c와 pick/snap의 페이지 의존 구조를 함께 설계 |
 
 ## 5. 상세 이슈와 수용 기준
 
@@ -1900,6 +1951,73 @@ DRC error sheet)는 job별 `frame_format=png`으로 실제 PNG 바이트를
 WEBUI_PLAN 수렴: T2(loopback raw RGBA)의 payload가 이 포맷 그대로다
 — gateway는 renderd의 raw 산출물을 재인코드 없이 스트리밍한다.
 
+### F2R-23 — 불완전 결과·fallback 관측성 (`TODO`)
+
+문제: §3.27의 "조용히 출력에 영향" 항목(snap 부분 결과, frame_cap
+생략, 경계 프레임 Pts 융합)이 사용자와 perf 라인에 드러나지 않고,
+출력 불변 fallback(mini-bin overflow, 실패 trial, Pts chunk 과포함,
+mask 전역 해제)도 wire에 없어 성능 절벽의 원인을 실칩에서 특정할 수
+없다. `resident_bytes`만으로는 peak 메모리를 알 수 없다.
+
+계획: ① snap 응답에 partial 표시(또는 member cap처럼 오류) — GUI는
+현재 seq의 응답에만 상태를 띄운다. ② frame line에
+`frames_truncated`, `frames_fused` 카운트. ③ frame line에
+`bin_mini_overflow`, `bin_trial_us`, `pts_fallback`, `mask_full` 추가,
+adapter/bench/GUI perf 라인 전파. ④ renderd 현재 RSS(`rss_bytes`,
+표준 라이브러리로 /proc 또는 mach 조회)를 frame line에 실어 peak
+회계를 계측한다.
+
+수용 gate: validator wire fixture에 새 필드 파싱, 합성 입력으로 각
+플래그가 1회 이상 발화하는 단위 테스트, 실칩 perf 라인에서 필드 확인.
+픽셀 경로 무변경(oracle 배터리).
+
+### F2R-24 — decode 전 byte admission (`TODO`)
+
+문제: 뷰당 decoded 상한 판정이 라운드 decode **뒤**에 이루어져
+(제품 기본은 단일 라운드라 뷰 전체 decode 뒤) 낭비와 순간 메모리
+증가를 막지 못한다.
+
+계획: 페이지 메타(encoded 크기, 레코드·멤버 수)로 decoded 크기를
+보수적으로 추정해 decode 전에 합산·판정한다. 추정이 실측보다 작을 수
+있으므로 decode 후 검사는 안전망으로 유지한다.
+
+수용 gate: 합성 입력에서 상한 초과 뷰가 decode 없이 즉시 오류, 정상
+뷰의 결과 byte 동일, 추정치/실측치 비율을 frame line에 기록.
+
+### F2R-25 — 라벨 bin 기반 선택의 제한적 검증 (`TODO`)
+
+문제: 라벨 budget 소진 시 걷기 순서의 prefix만 표시돼 dense 뷰에서
+라벨이 비는 영역이 생긴다. 승자는 bin당 하나라 유계지만 비용은 멤버
+열거에 있다.
+
+계획(cap 유지): 축정렬 규칙 Grid의 pitch가 bin보다 작을 때 bin마다
+중심 최근접 멤버를 닫힌 식으로 선택하는 fast path만 먼저 구현·검증
+한다. 승자 규칙 변경(hash 우선순위 → 중심 근접)을 문서화하고, skew·
+축퇴·유한 경계·계층 변환은 기존 경로를 유지한다. 일반 Pts(bin별 후보
+검색, chunk skip), block 이름(계약 테스트: 같은 bin의 독립 block 이름
+전부 유지), 긴 문자열(glyph 정책)은 계약을 먼저 정한 뒤 별도 이슈로
+연다.
+
+수용 gate: 축정렬 Grid 합성 입력에서 bin당 라벨 존재율 100%와 멤버
+수 무관 계획 시간, 기존 declutter 결정성 테스트 통과, `labels
+partial` 발화율 감소를 실칩에서 확인.
+
+### F2R-26 — 실측 기반 fallback 개선 (`GATED`)
+
+F2R-23 계측이 실칩에서 실제 병목을 가리킬 때만 착수한다. 후보:
+work-bin continuation(실패 trial의 결과를 버리지 않고 남은 작업만
+넘기는 부분 bin, DFS·plane 순서 보존, mini-bin 합계 byte 상한),
+Pts 과포함 축소(chunk bbox 사다리 세분화), mask 공유·sparse 표현.
+
+### F2R-27 — generation streaming/1bpp와 질의 경로 분리 (`DESIGN`)
+
+뷰당 decoded 합 1GiB 오류 또는 peak 메모리 압박이 실칩에서 확인될
+때 착수한다. plane별 1bpp mask에 페이지별로 누적한 뒤 페이지를
+버리는 방향은 유효하지만, pick/snap이 PublishedScene의 decoded
+페이지에 의존하므로 질의 경로가 필요 시 페이지를 다시 읽는 구조로
+분리해야 하며, mask 메모리는 plane 수에 비례한다(4K×200 plane ≈
+198MiB). F2R-03c와 함께 설계한다.
+
 ## 6. 남은 착수 순서
 
 1. 완료(2026-08-26): F2R-12 worker pin·bench split·serial preset과 F2R-03a
@@ -1939,6 +2057,15 @@ WEBUI_PLAN 수렴: T2(loopback raw RGBA)의 payload가 이 포맷 그대로다
    만들지 않는다. 기본 no-refinement 채택 후 동기가 약해져 후순위다.
 9. F2R-06은 thread startup 실측이 frame의 5%를 넘을 때만 수행한다. 대표 실칩에서
    4-worker tail imbalance가 확인될 때만 bounded adaptive tile/jobs를 다시 연다.
+
+10. F2R-23 관측성(P1): snap partial, frame 생략·융합 플래그, mini/
+    trial/Pts/mask 계측, RSS — 이후 모든 budget 판단의 근거.
+11. F2R-24 decode 전 byte admission(P2): 작은 변경, 03c와 별개.
+12. F2R-25 라벨 bin 선택 제한 검증(P2): 축정렬 Grid fast path, cap
+    유지, 계약 문서화 후 확장.
+13. F2R-26 실측 기반 fallback 개선(GATED): 10번 계측으로 병목 선택.
+14. F2R-27 generation streaming/1bpp(DESIGN): 실칩 필요성 확인 후
+    질의 경로 분리와 함께.
 
 각 완료 항목은 이 표의 상태, before/after 중앙값, 실행 명령, 적용 커밋과 자동 gate를
 같이 갱신한다.
