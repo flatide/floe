@@ -1301,6 +1301,21 @@ budget truncation — 4× 면적의 margin이 같은 cap을 먼저 소진할 수
   band" 판정(64px → `label_extent_px`)은 계약이 아니었으므로 필드와
   함께 제거했다.
 
+**사용자 결정(2026-09-05, 0.12.53) — 라벨 포함 margin 복귀**: 라벨
+on에서 pan마다 라벨만 fast path로 뒤늦게 그려져 깜빡이는 것처럼
+보인다는 지적. margin을 다시 라벨 포함으로 그리고(margin 박스 기준
+bin-정렬 계획, 뷰포트와 같은 budget) GUI가 crop 소스로 채택해 pan이
+라벨 포함 0ms crop이 되게 했다. 표시 규약으로 받아들인 것: 뷰포트
+밖·margin 안에 앵커된 라벨은 글리프가 닿는 부분이 crop에 보이고 다른
+라벨과 겹칠 수 있다(직접 렌더에서도 라벨 겹침은 가능; 선택이
+world-anchored라 같은 자리는 항상 같은 라벨). budget에 걸린
+margin(`labels_truncated`)은 crop하지 않고 geometry base + renderd
+재사용에만 쓴다. margin 착지 시 뷰포트 계획 라벨 → margin 계획
+라벨로 바뀌며 가장자리 꼬리가 나타날 수 있다(1회, pan마다는 아님).
+fast path는 margin 밖 pan에 그대로 남는다. 검증: 라벨 포함 margin
+두 번 렌더 byte 동일·labels>0·미truncated, 라벨 off crop 엄격 oracle
+유지.
+
 **리뷰 후속(0.12.49)**: ① HIGH — 레이어 A→B→A 토글 뒤 그림은 byte
 동일하지만 A 전용 레이어의 pick/snap이 실패했다. 전량 재사용 fast path
 가 published scene 갱신을 생략해 B 전용 scene으로 질의했기 때문.
@@ -1449,7 +1464,7 @@ grab_focus, 없으면 window 포커스 해제)를 캔버스 클릭 시 동기로
 | F2R-18 | P2 | `DONE` | exact frame cache가 retained와 중복(사용자 결정) | payload cache 제거, retained 3-entry LRU(scale별)로 통합(0.12.41, §3.23) — zoom 왕복은 k=0 전량 재사용으로 승계 |
 | F2R-19 | P1 | `DONE` | 수직 pan에서 가장자리 깨짐 | 재사용 row 매핑 부호 교정 + height mod-16 guard(0.12.42, §3.24) — 8방향 pixel-diff 재확인, 실칩 재확인 대기 |
 | F2R-20 | P1 | `DONE` | retained frame byte 예산·margin 픽셀 캡·전체 복제 제거(리뷰 HIGH) | `FLOE_RUST_RETAINED_MB`(256)·`FLOE_MARGIN_MAX_MPIX`(16)·raw 2-part 게시·레이블 없는 clone 생략·Python slice 복제 삭제(§3.25). 0.12.47: frame-cache off는 keep/clone/store도 안 함. 4K 실측 없음 |
-| F2R-21 | P2 | `DONE` | margin crop 라벨 정확도(리뷰 MEDIUM ×2) | margin은 geometry 전용, 라벨 on이면 crop 없이 renderd 라벨 재합성 fast path(page plan·decode 생략), 라벨 off만 crop; bin-정렬 declutter 유지; oracle: 라벨 off crop byte 동일 + 라벨 on 전량 재사용 pan byte 동일(§3.26a, 0.12.48). 0.12.49: fast path는 published scene이 요청을 서비스할 때만(레이어 토글 pick 회귀), 포함하는 margin은 교체 대신 유지. 0.12.50: 착지 margin을 표시 base로 blit해 pan 새 영역 검정 제거 + margin 안 커서 pan은 즉시 제출 — 사용자 확인 완료. 실칩(폐쇄망) 체감 확인 남음 |
+| F2R-21 | P2 | `DONE` | margin crop 라벨 정확도(리뷰 MEDIUM ×2) | margin은 geometry 전용, 라벨 on이면 crop 없이 renderd 라벨 재합성 fast path(page plan·decode 생략), 라벨 off만 crop; bin-정렬 declutter 유지; oracle: 라벨 off crop byte 동일 + 라벨 on 전량 재사용 pan byte 동일(§3.26a, 0.12.48). 0.12.49: fast path는 published scene이 요청을 서비스할 때만(레이어 토글 pick 회귀), 포함하는 margin은 교체 대신 유지. 0.12.50: 착지 margin을 표시 base로 blit해 pan 새 영역 검정 제거 — 사용자 확인 완료. 0.12.53(사용자 결정): 라벨 포함 margin 복귀, pan은 라벨 포함 0ms crop, 꼬리 겹침은 표시 규약으로 수용, truncated margin만 crop 제외. 실칩(폐쇄망) 체감 확인 남음 |
 | F2R-22 | P2 | `DONE` | pick/snap의 renderd 입력 스레드 점유(리뷰 MEDIUM) | 질의 스레드+kind별 seq frontier(superseded 중단), `FLOE_RUST_QUERY_INLINE=1` 킬 스위치(§3.26b) |
 | F2R-23 | P1 | `TODO` | 불완전 결과·fallback 관측성(§3.27) | snap partial 표시/오류, frame 생략·footprint 융합 플래그, mini-bin overflow·실패 trial 시간·Pts fallback·mask fallback 계측, renderd RSS를 frame line에 |
 | F2R-24 | P2 | `TODO` | decode 전 byte admission(§3.27) | 페이지 메타 크기 추정으로 뷰당 상한을 decode 전에 판정. 03c와 별개 |

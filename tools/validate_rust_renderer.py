@@ -374,10 +374,10 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         # pinned below)
         self.assertGreaterEqual(job["w"], 2 * 858)
         self.assertGreaterEqual(job["h"], 2 * 802)
-        # §F2R-21: the margin is geometry only - its labels would be
-        # planned for the enlarged box and could overwrite in-view
-        # labels when cropped; pans re-synthesize labels instead
-        self.assertFalse(job["labels"])
+        # §F2R-21 (user call): the margin carries the labels of its
+        # own box so a pan inside it is a labelled crop
+        self.assertEqual(job["labels"], v.labels_on)
+        self.assertTrue(job["labels"])
         self.assertTrue(job["frames"], "hierarchy outlines are geometry")
         self.assertEqual(v._margin_pending[0], job["gen"])
 
@@ -1393,6 +1393,24 @@ class RealDaemonIntegrationTests(unittest.TestCase):
                 self._crop_rgba(margin_rgba, 800 + 128, 96, 16, 800, 768),
                 crop_frames[-1]["rgba"],
                 "a label-free margin crop must equal a direct render")
+
+            # §F2R-21 (user call): the GUI crops a LABELLED margin too.
+            # Its labels are planned over the margin box (bin-aligned,
+            # same budgets as a viewport), so the crop is deterministic:
+            # two labelled margin renders are byte-identical and carry
+            # labels; a truncated plan would be refused by the GUI.
+            worker.submit(dict(pan_job, gen=111, bg=True, bbox=margin_bbox,
+                               w=800 + 128, h=768 + 128))
+            labelled_a = self._frames_through_settled(worker, 111)
+            worker.submit(dict(pan_job, gen=112, bg=True, bbox=margin_bbox,
+                               w=800 + 128, h=768 + 128))
+            labelled_b = self._frames_through_settled(worker, 112)
+            self.assertGreater(labelled_a[-1].get("labels", 0), 0)
+            self.assertFalse(labelled_a[-1].get("labels_truncated"))
+            self.assertEqual(self._frame_payload(labelled_a[-1]),
+                             self._frame_payload(labelled_b[-1]))
+            self.assertNotEqual(self._frame_payload(labelled_a[-1]),
+                                margin_rgba, "labels paint on the margin")
 
             # §F2R-20: FLOE_RUST_RETAINED_MB=0 retains nothing, so an
             # exact revisit re-rasters in full (pan reuse kill switch

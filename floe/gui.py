@@ -2614,13 +2614,17 @@ class Viewer:
             "cut_px": self._effective_cut_px(),
             "lod": self.lod_on,
             "frames": self.frames_on,
-            # §F2R-21: the margin is GEOMETRY ONLY. Its labels would be
-            # planned for the enlarged box, and an off-frame label's
-            # tail can overwrite in-view labels, so a labelled margin
-            # is never shown; renderd retains the label-free geometry
-            # either way and a pan inside it re-synthesizes labels for
-            # the current viewport over the reused geometry.
-            "labels": False,
+            # §F2R-21 (user call 2026-09-05): the margin carries its
+            # labels, planned over the margin box, so a pan inside it
+            # is a pure crop WITH labels - nothing is drawn late. The
+            # display convention that buys this: a label anchored
+            # outside the viewport but inside the margin shows the
+            # part of its glyphs that reaches in and may overlap other
+            # labels, as overlapping labels already can; the selection
+            # is bin-aligned, so the same spot always shows the same
+            # labels. A margin whose label plan hit a budget is never
+            # cropped (reuse-only, geometry base under the pan strip).
+            "labels": self.labels_on,
             "label_font_px": self.label_font_px,
             "frame_cache": self.frame_cache_on,
             "abstract": self.abstract,
@@ -2872,15 +2876,17 @@ class Viewer:
                     # kept for display either way: the base under a
                     # pan's incoming strip (see _display)
                     self._margin_frame = (pix, fb, fspp, key)
-                    if self.labels_on:
-                        # §F2R-21: with labels on a margin is never
-                        # shown or cropped - it is label-free geometry
-                        # for renderd's tile reuse; pans re-synthesize
-                        # this viewport's labels over it (fast path:
-                        # no page plan, memcpy + label pass).
+                    if res.get("labels_truncated"):
+                        # §F2R-21: a margin whose label plan hit a
+                        # budget is not crop-safe - the same budgets
+                        # as a viewport mean a complete margin plan
+                        # implies complete viewport plans, and only
+                        # then does a crop show what a direct render
+                        # would. Keep it as the geometry base and for
+                        # renderd's tile reuse; pans render (fast path).
                         self._margin_debug(
-                            "landed gen=%d: labels on - reuse only"
-                            % res["gen"])
+                            "landed gen=%d: labels truncated - reuse "
+                            "only" % res["gen"])
                         return
                     self.last_frame = (pix, fb, fspp, key)
                     self._display()
