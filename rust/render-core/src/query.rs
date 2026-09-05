@@ -128,12 +128,32 @@ pub fn snap_scene(
     scene: &FrameScene,
     request: &SceneQueryRequest,
 ) -> Result<Option<SceneSnap>, String> {
+    snap_scene_impl(scene, request, None)
+}
+
+/// §F2R-20b: a snap that a newer snap (higher sequence) supersedes
+/// aborts at its next member heartbeat instead of running to the
+/// member cap - the daemon's query thread stays responsive.
+pub fn snap_scene_cancellable(
+    scene: &FrameScene,
+    request: &SceneQueryRequest,
+    sequence: u64,
+    cancellation: &RenderCancellation,
+) -> Result<Option<SceneSnap>, String> {
+    snap_scene_impl(scene, request, Some((sequence, cancellation)))
+}
+
+fn snap_scene_impl(
+    scene: &FrameScene,
+    request: &SceneQueryRequest,
+    cancellation: Option<(u64, &RenderCancellation)>,
+) -> Result<Option<SceneSnap>, String> {
     request.validate()?;
     let radius2 = request.radius as f64 * request.radius as f64;
     let mut best_vertex = None::<(f64, i64, i64)>;
     let mut best_edge = None::<(f64, f64, f64)>;
     let mut tested = 0usize;
-    visit_query_shapes(scene, request, |shape| {
+    visit_query_shapes(scene, request, cancellation, |shape| {
         if tested >= request.shape_cap {
             return Err(QUERY_STOP.to_string());
         }
@@ -195,10 +215,30 @@ pub fn pick_scene(
     request: &SceneQueryRequest,
     nth: i64,
 ) -> Result<ScenePick, String> {
+    pick_scene_impl(scene, request, nth, None)
+}
+
+/// §F2R-20b: see `snap_scene_cancellable`.
+pub fn pick_scene_cancellable(
+    scene: &FrameScene,
+    request: &SceneQueryRequest,
+    nth: i64,
+    sequence: u64,
+    cancellation: &RenderCancellation,
+) -> Result<ScenePick, String> {
+    pick_scene_impl(scene, request, nth, Some((sequence, cancellation)))
+}
+
+fn pick_scene_impl(
+    scene: &FrameScene,
+    request: &SceneQueryRequest,
+    nth: i64,
+    cancellation: Option<(u64, &RenderCancellation)>,
+) -> Result<ScenePick, String> {
     request.validate()?;
     let mut candidates = Vec::<(f64, u32, u32, usize, ScenePickCandidate)>::new();
     let mut tested = 0usize;
-    visit_query_shapes(scene, request, |shape| {
+    visit_query_shapes(scene, request, cancellation, |shape| {
         tested += 1;
         if point_inclusive(&shape.points, request.x, request.y)? {
             let area2 = polygon_area2(&shape.points)?;
@@ -253,6 +293,7 @@ pub fn pick_scene(
 fn visit_query_shapes(
     scene: &FrameScene,
     request: &SceneQueryRequest,
+    cancellation: Option<(u64, &RenderCancellation)>,
     visit: impl FnMut(SceneShape) -> Result<(), String>,
 ) -> Result<(), String> {
     let member_budget = Cell::new(request.member_cap);
@@ -261,7 +302,7 @@ fn visit_query_shapes(
         request.view(),
         &request.layers,
         Some(&member_budget),
-        None,
+        cancellation,
         visit,
     ) {
         Err(error) if error == QUERY_STOP => Ok(()),
@@ -976,6 +1017,20 @@ mod tests {
     fn scene_pick_is_boundary_inclusive_and_sorts_by_layer_numbers() {
         let scene = query_scene();
         let first = pick_scene(&scene, &request(10, 5), 0).unwrap();
+        // §F2R-20b: a superseded pick aborts before touching members;
+        // the current one answers exactly like the plain entry point
+        let frontier = RenderCancellation::new();
+        frontier.cancel_before(2);
+        let stale = pick_scene_cancellable(&scene, &request(10, 5), 0, 1, &frontier)
+            .unwrap_err();
+        assert!(stale.contains("cancelled"), "{stale}");
+        let current =
+            pick_scene_cancellable(&scene, &request(10, 5), 0, 2, &frontier).unwrap();
+        assert_eq!(current.count, first.count);
+        assert_eq!(current.candidate, first.candidate);
+        assert!(snap_scene_cancellable(&scene, &request(1, 1), 1, &frontier)
+            .unwrap_err()
+            .contains("cancelled"));
         assert_eq!((first.count, first.index), (2, 0));
         let first = first.candidate.unwrap();
         assert_eq!((first.layer_idx, first.cell_id, first.area), (1, 0, 100.0));

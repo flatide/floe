@@ -374,6 +374,10 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         # pinned below)
         self.assertGreaterEqual(job["w"], 2 * 858)
         self.assertGreaterEqual(job["h"], 2 * 802)
+        # §F2R-20b: the label budget scales with the area ratio so the
+        # margin keeps the viewport's label density (1724x1604 over
+        # 860x804 is 4.0 viewports -> 4 x 4096)
+        self.assertEqual(job["label_budget"], 4 * 4096)
         self.assertEqual(v._margin_pending[0], job["gen"])
 
         # exact fit (user call 2026-09-05): the landed margin covers
@@ -474,6 +478,35 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         self.assertFalse(Viewer._submit_margin(v))
         self.assertEqual(len(submitted), before,
                          "no room under the cap: no margin at all")
+
+    def test_label_budget_travels_on_the_wire_and_is_bounded(self):
+        """§F2R-20b: an explicit per-view label budget reaches renderd
+        after font_px; absent it stays off the wire; out-of-range or
+        non-integer values are rejected before anything is sent."""
+        with tempfile.TemporaryDirectory() as directory:
+            binary = os.path.join(directory, "floe-renderd")
+            with open(binary, "w", encoding="ascii") as script:
+                script.write("#!/bin/sh\n")
+            os.chmod(binary, 0o755)
+            with mock.patch.dict(os.environ, {
+                "FLOE_RENDERD_BIN": binary,
+            }, clear=False):
+                worker = RustRenderWorker(FakeCache(directory))
+            worker._work_dir = directory
+            commands = []
+            worker._send = commands.append
+            job = {"kind": "render", "gen": 3, "scope": "live",
+                   "bbox": (0, 0, 640, 480), "w": 64, "h": 48,
+                   "depth": 2, "cut_px": 1.0, "visible": None,
+                   "frames": True, "labels": True, "label_font_px": 14}
+            worker._submit_render(dict(job, label_budget=16384))
+            self.assertIn(" font_px=14 label_budget=16384 mono=", commands[0])
+            worker._submit_render(dict(job, gen=4))
+            self.assertNotIn("label_budget", commands[1])
+            for bad in (0, 65537, "x"):
+                with self.assertRaisesRegex(ValueError, "label_budget"):
+                    worker._submit_render(dict(job, gen=5, label_budget=bad))
+            self.assertEqual(len(commands), 2)
 
     def test_parses_wire_fields(self):
         kind, fields = _parse_wire_line(
@@ -1242,6 +1275,45 @@ class RealDaemonIntegrationTests(unittest.TestCase):
             self.assertEqual(self._frame_payload(inside_frames[-1]),
                              self._frame_payload(cold2_frames[-1]))
 
+            # §F2R-20b crop oracle: the GUI shows a pan inside the
+            # margin as a pure CROP of the margin frame - no render at
+            # all. Label selection and declutter are bin-aligned (a
+            # function of world position, not of the request box), so
+            # every label a direct render of that view shows must be in
+            # the crop pixel-identically: no missing, no shifted label.
+            # The one admitted difference is EXTRA ink at the frame
+            # edge: a label anchored outside the direct frame's aligned
+            # box is omitted there (texts are point objects, as in
+            # KLayout) while the margin drew it and the crop shows its
+            # tail. The crop sits 96 px in, 16 px down in the 928x896.
+            crop = (pan_b[0] + 32 * q, pan_b[1] + 48 * q,
+                    pan_b[2] + 32 * q, pan_b[3] + 48 * q)
+            worker.submit(dict(pan_job, gen=109, bbox=crop))
+            crop_frames = self._frames_through_settled(worker, 109)
+            worker.submit(dict(pan_job, gen=110, bbox=crop, labels=False))
+            bare_frames = self._frames_through_settled(worker, 110)
+            self.assertFalse(margin_frames[-1].get("labels_truncated"))
+            self.assertFalse(crop_frames[-1].get("labels_truncated"))
+            self.assertGreater(crop_frames[-1].get("labels", 0), 0,
+                               "the oracle view must carry labels")
+            margin_rgba = margin_frames[-1].get("rgba")
+            self.assertIsNotNone(margin_rgba, "raw transport expected")
+            cropped = self._crop_rgba(margin_rgba, 800 + 128, 96, 16,
+                                      800, 768)
+            direct = crop_frames[-1]["rgba"]
+            bare = bare_frames[-1]["rgba"]
+            self.assertNotEqual(direct, bare, "labels must paint")
+            extra = self._label_crop_differences(
+                cropped, direct, bare, 800, 768)
+            # tails of edge labels only: within a short edge band
+            self.assertLessEqual(len(extra), 800 * 768 // 1000)
+            band = 64
+            for row, col in extra:
+                self.assertTrue(
+                    min(row, 768 - 1 - row, col, 800 - 1 - col) < band,
+                    "extra crop ink away from the edge at (%d,%d)"
+                    % (row, col))
+
             # §F2R-20: FLOE_RUST_RETAINED_MB=0 retains nothing, so an
             # exact revisit re-rasters in full (pan reuse kill switch
             # by budget) while pixels stay identical.
@@ -1362,6 +1434,38 @@ class RealDaemonIntegrationTests(unittest.TestCase):
                 int.from_bytes(png[20:24], "big"), expected_height)
             self.assertFalse(list(Path(directory).glob(
                 ".*.floe-render-*")))
+
+    def _label_crop_differences(self, cropped, direct, bare, w, h):
+        """Pixels where a margin crop differs from the direct render
+        of the same view. Fails on any pixel where the direct render
+        carries label ink (direct != bare) that the crop does not
+        reproduce; returns the (row, col) of the remaining differences,
+        which are by construction extra ink in the crop."""
+        if cropped == direct:
+            return []
+        extra = []
+        for i in range(w * h):
+            a = cropped[i * 4:i * 4 + 4]
+            b = direct[i * 4:i * 4 + 4]
+            if a == b:
+                continue
+            row, col = divmod(i, w)
+            self.assertEqual(
+                b, bare[i * 4:i * 4 + 4],
+                "direct-render label ink missing or moved in the margin "
+                "crop at (%d,%d)" % (row, col))
+            extra.append((row, col))
+        return extra
+
+    @staticmethod
+    def _crop_rgba(rgba, width, x0, y0, w, h):
+        """Rows [y0, y0+h) x cols [x0, x0+w) of a packed RGBA frame
+        (row 0 = top), as one packed RGBA bytes object."""
+        stride = width * 4
+        return b"".join(
+            rgba[(y0 + row) * stride + x0 * 4:
+                 (y0 + row) * stride + (x0 + w) * 4]
+            for row in range(h))
 
     def _frame_payload(self, frame):
         """Frame bytes independent of the raw/png transport default."""

@@ -1,8 +1,8 @@
 use floe_render_core::{
-    pick_scene, render_geometry_occupancy_cancellable,
+    pick_scene, pick_scene_cancellable, render_geometry_occupancy_cancellable,
     render_geometry_styled_cancellable_reuse,
     render_geometry_styled_unbinned_cancellable, FrameReuse,
-    snap_scene, validate_font_px, Cache, CacheLayer, ClipGeometry, DecodedPageCache, FrameScene,
+    snap_scene, snap_scene_cancellable, validate_font_px, Cache, CacheLayer, ClipGeometry, DecodedPageCache, FrameScene,
     GeometryRasterRequest, LayerFill, LayerStyle, PlanRequest, RasterViewBox, RenderCancellation,
     SceneQueryLayer, SceneQueryRequest, SceneSnapKind, StyledGeometryRasterRequest, ViewBox,
     DEFAULT_LABEL_FONT_PX, DEFAULT_TILE_SIZE, FULL_DEPTH, MAX_TILE_SIZE,
@@ -28,6 +28,10 @@ const RETAINED_FRAMES: usize = 3;
 /// shared host outside the decoded page budget. FLOE_RUST_RETAINED_MB
 /// overrides (0 retains nothing = pan reuse off).
 const RETAINED_BUDGET_MB_DEFAULT: u64 = 256;
+/// §F2R-20b: upper bound of the per-view label budget a client may ask
+/// for (16x the planner default of 4096 - a margin is at most ~4-5
+/// viewports of area under the GUI's pixel cap).
+const MAX_LABEL_BUDGET: usize = 65_536;
 /// A refinement round whose raster ran past this stops the stream:
 /// the remaining page batches merge into one final round (§3.15 —
 /// five ~2.2s intermediate rasters were the draw time of a large
@@ -114,6 +118,17 @@ fn serve() -> Result<(), String> {
         )
     });
 
+    let query_inline = std::env::var("FLOE_RUST_QUERY_INLINE").as_deref() == Ok("1");
+    let snap_frontier = RenderCancellation::new();
+    let pick_frontier = RenderCancellation::new();
+    let (query_tx, query_rx) = mpsc::channel::<QueryCommand>();
+    let query = {
+        let responses = response_tx.clone();
+        let scene = Arc::clone(&published_scene);
+        let (snap_frontier, pick_frontier) = (snap_frontier.clone(), pick_frontier.clone());
+        thread::spawn(move || query_worker(query_rx, responses, scene, snap_frontier, pick_frontier))
+    };
+
     let stdin = io::stdin();
     let mut latest_generation = None;
     let mut main_error = None;
@@ -158,10 +173,35 @@ fn serve() -> Result<(), String> {
                 let frontier = cancellation.cancel_before(before_generation);
                 respond(&response_tx, format!("cancelled before_gen={frontier}"));
             }
-            InputCommand::Snap(command) => handle_snap(&published_scene, command, &response_tx),
-            InputCommand::Pick(command) => handle_pick(&published_scene, command, &response_tx),
+            InputCommand::Snap(command) if query_inline => {
+                handle_snap(&published_scene, command, &response_tx, None)
+            }
+            InputCommand::Pick(command) if query_inline => {
+                handle_pick(&published_scene, command, &response_tx, None)
+            }
+            InputCommand::Snap(command) => {
+                snap_frontier.cancel_before(query_generation(command.sequence));
+                if query_tx.send(QueryCommand::Snap(command)).is_err() {
+                    main_error = Some("query worker stopped".to_string());
+                    break;
+                }
+            }
+            InputCommand::Pick(command) => {
+                pick_frontier.cancel_before(query_generation(command.sequence));
+                if query_tx.send(QueryCommand::Pick(command)).is_err() {
+                    main_error = Some("query worker stopped".to_string());
+                    break;
+                }
+            }
             InputCommand::Quit => break,
         }
+    }
+    snap_frontier.cancel_before(u64::MAX);
+    pick_frontier.cancel_before(u64::MAX);
+    let _ = query_tx.send(QueryCommand::Shutdown);
+    drop(query_tx);
+    if query.join().is_err() {
+        main_error.get_or_insert_with(|| "query worker panicked".to_string());
     }
 
     // EOF and stdin read failures are process shutdown requests just like
@@ -212,6 +252,45 @@ enum InputCommand {
     Quit,
 }
 
+/// §F2R-20b: snap/pick run on their own thread so a worst-case dense
+/// query (up to QUERY_MEMBER_CAP members) never blocks the stdin
+/// dispatcher - render generations keep arriving and the render
+/// cancellation frontier keeps moving. A newer query of the same kind
+/// supersedes an older one in flight through that kind's own
+/// sequence frontier. FLOE_RUST_QUERY_INLINE=1 restores the inline
+/// dispatch (field kill switch).
+enum QueryCommand {
+    Snap(SnapCommand),
+    Pick(PickCommand),
+    Shutdown,
+}
+
+fn query_generation(sequence: i64) -> u64 {
+    sequence.max(0) as u64
+}
+
+fn query_worker(
+    commands: Receiver<QueryCommand>,
+    responses: Sender<String>,
+    scene: SharedPublishedScene,
+    snap_frontier: RenderCancellation,
+    pick_frontier: RenderCancellation,
+) {
+    for command in commands {
+        match command {
+            QueryCommand::Snap(command) => {
+                let sequence = query_generation(command.sequence);
+                handle_snap(&scene, command, &responses, Some((sequence, &snap_frontier)));
+            }
+            QueryCommand::Pick(command) => {
+                let sequence = query_generation(command.sequence);
+                handle_pick(&scene, command, &responses, Some((sequence, &pick_frontier)));
+            }
+            QueryCommand::Shutdown => break,
+        }
+    }
+}
+
 enum WorkerCommand {
     Open(OpenCommand),
     Style(StyleCommand),
@@ -247,6 +326,9 @@ struct RenderCommand {
     frames: bool,
     labels: bool,
     label_font_px: f32,
+    /// §F2R-20b: per-view label budget override (a margin frame scales
+    /// it with its area ratio so label density matches the viewport).
+    label_budget: Option<usize>,
     mono: bool,
     /// Allow exact settled PNG reuse. Page/decode caching is independent.
     frame_cache: bool,
@@ -351,6 +433,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                     "frames",
                     "labels",
                     "font_px",
+                    "label_budget",
                     "mono",
                     "frame_cache",
                     "jobs",
@@ -398,6 +481,14 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
             let label_font_px =
                 optional_parse(&fields, "font_px")?.unwrap_or(DEFAULT_LABEL_FONT_PX);
             validate_font_px(label_font_px)?;
+            let label_budget: Option<usize> = optional_parse(&fields, "label_budget")?;
+            if let Some(budget) = label_budget {
+                if budget == 0 || budget > MAX_LABEL_BUDGET {
+                    return Err(format!(
+                        "label_budget must be in 1..={MAX_LABEL_BUDGET}: {budget}"
+                    ));
+                }
+            }
             if exact && (cut_px != 0.0 || depth != u32::MAX || frames) {
                 return Err("exact render requires cut=0 depth=full frames=off".to_string());
             }
@@ -426,6 +517,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                     frames,
                     labels,
                     label_font_px,
+                    label_budget,
                     mono: optional_bool(&fields, "mono")?.unwrap_or(false),
                     frame_cache: optional_bool(&fields, "frame_cache")?.unwrap_or(true),
                     jobs,
@@ -1043,7 +1135,24 @@ fn handle_info(state: &WorkerState, responses: &Sender<String>) {
     }
 }
 
-fn handle_snap(shared: &SharedPublishedScene, command: SnapCommand, responses: &Sender<String>) {
+/// A query superseded by a newer one of its kind answers with this
+/// error; the GUI only reads the response of its latest sequence.
+const QUERY_SUPERSEDED: &str = "superseded by a newer query";
+
+fn superseded(error: String) -> String {
+    if error.starts_with("render cancelled") {
+        QUERY_SUPERSEDED.to_string()
+    } else {
+        error
+    }
+}
+
+fn handle_snap(
+    shared: &SharedPublishedScene,
+    command: SnapCommand,
+    responses: &Sender<String>,
+    cancellation: Option<(u64, &RenderCancellation)>,
+) {
     let result: Result<Option<floe_render_core::SceneSnap>, String> = (|| {
         let Some(published) = current_scene(shared)? else {
             return Ok(None);
@@ -1057,7 +1166,13 @@ fn handle_snap(shared: &SharedPublishedScene, command: SnapCommand, responses: &
             SNAP_SHAPE_CAP,
             QUERY_MEMBER_CAP,
         )?;
-        snap_scene(&published.scene, &request)
+        match cancellation {
+            Some((sequence, frontier)) => {
+                snap_scene_cancellable(&published.scene, &request, sequence, frontier)
+                    .map_err(superseded)
+            }
+            None => snap_scene(&published.scene, &request),
+        }
     })();
     match result {
         Ok(Some(snap)) => respond(
@@ -1093,7 +1208,12 @@ fn handle_snap(shared: &SharedPublishedScene, command: SnapCommand, responses: &
     }
 }
 
-fn handle_pick(shared: &SharedPublishedScene, command: PickCommand, responses: &Sender<String>) {
+fn handle_pick(
+    shared: &SharedPublishedScene,
+    command: PickCommand,
+    responses: &Sender<String>,
+    cancellation: Option<(u64, &RenderCancellation)>,
+) {
     let result: Result<Option<PickWireResponse>, String> = (|| {
         let Some(published) = current_scene(shared)? else {
             return Ok(None);
@@ -1107,7 +1227,17 @@ fn handle_pick(shared: &SharedPublishedScene, command: PickCommand, responses: &
             PICK_CANDIDATE_CAP,
             QUERY_MEMBER_CAP,
         )?;
-        let pick = pick_scene(&published.scene, &request, command.nth)?;
+        let pick = match cancellation {
+            Some((sequence, frontier)) => pick_scene_cancellable(
+                &published.scene,
+                &request,
+                command.nth,
+                sequence,
+                frontier,
+            )
+            .map_err(superseded)?,
+            None => pick_scene(&published.scene, &request, command.nth)?,
+        };
         let Some(candidate) = pick.candidate else {
             return Ok(None);
         };
@@ -1316,7 +1446,12 @@ fn run_render(
     let planned = cache.plan(&request)?;
     check_generation(cancellation, command.generation)?;
     let planned_labels = if command.labels {
-        Some(cache.plan_labels(&request, command.frames, command.label_font_px)?)
+        Some(cache.plan_labels(
+            &request,
+            command.frames,
+            command.label_font_px,
+            command.label_budget,
+        )?)
     } else {
         None
     };
@@ -2204,6 +2339,65 @@ fn wire_escape(message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn render_parses_and_bounds_the_label_budget() {
+        let base = "render gen=1 view=0,0,320,320 w=32 h=32 labels=1 out=/tmp/a.raw";
+        assert_eq!(render(parse_command(base).unwrap().unwrap()).label_budget, None);
+        let scaled = render(
+            parse_command(&format!("{base} label_budget=16384"))
+                .unwrap()
+                .unwrap(),
+        );
+        assert_eq!(scaled.label_budget, Some(16_384));
+        assert!(parse_command(&format!("{base} label_budget=0")).is_err());
+        assert!(parse_command(&format!("{base} label_budget=65537")).is_err());
+        assert!(parse_command(&format!("{base} label_budget=x")).is_err());
+    }
+
+    #[test]
+    fn query_worker_answers_off_the_input_thread_and_shuts_down() {
+        // §F2R-20b: queries flow through their own thread; without a
+        // published scene they answer found=0, and Shutdown ends it.
+        let (tx, rx) = mpsc::channel();
+        let (responses, answers) = mpsc::channel();
+        let scene: SharedPublishedScene = Arc::new(RwLock::new(None));
+        let worker = thread::spawn(move || {
+            query_worker(
+                rx,
+                responses,
+                scene,
+                RenderCancellation::new(),
+                RenderCancellation::new(),
+            )
+        });
+        tx.send(QueryCommand::Pick(PickCommand {
+            sequence: 5,
+            x: 1,
+            y: 2,
+            radius: 3,
+            nth: 0,
+            visible_layers: None,
+        }))
+        .unwrap();
+        tx.send(QueryCommand::Snap(SnapCommand {
+            sequence: 6,
+            x: 1,
+            y: 2,
+            radius: 3,
+            visible_layers: None,
+        }))
+        .unwrap();
+        let pick = answers.recv().unwrap();
+        assert!(pick.starts_with("pick seq=5 found=0"), "{pick}");
+        let snap = answers.recv().unwrap();
+        assert!(snap.starts_with("snap seq=6 found=0"), "{snap}");
+        tx.send(QueryCommand::Shutdown).unwrap();
+        worker.join().unwrap();
+        assert_eq!(query_generation(-7), 0);
+        assert_eq!(superseded("render cancelled: generation 1 is before 2".into()), QUERY_SUPERSEDED);
+        assert_eq!(superseded("other".into()), "other");
+    }
 
     fn render(command: InputCommand) -> RenderCommand {
         match command {

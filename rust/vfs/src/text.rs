@@ -719,6 +719,29 @@ impl crate::Vfs {
     }
 }
 
+/// §F2R-20b: declutter bins are world-anchored, but a candidate only
+/// reaches its bin when its anchor lies inside the request box - so
+/// two requests cutting the same bin at different edges could crown
+/// different winners. Widening a (non-raw) request to whole bins
+/// makes every bin's winner a pure function of world position: a
+/// crop out of a larger frame (the margin prefetch) then shows
+/// exactly the labels a direct render of the crop would. A winner
+/// anchored just outside the frame is drawn clipped, as KLayout does.
+fn align_to_bins(view: &BBox, bin: i64) -> BBox {
+    let lo = |v: i64| v.div_euclid(bin).saturating_mul(bin);
+    let hi = |v: i64| {
+        v.div_euclid(bin)
+            .saturating_mul(bin)
+            .saturating_add(bin - 1)
+    };
+    BBox {
+        x0: lo(view.x0),
+        y0: lo(view.y0),
+        x1: hi(view.x1),
+        y1: hi(view.y1),
+    }
+}
+
 pub fn plan_labels(
     v: &Ovm,
     ovt: &[u8],
@@ -736,6 +759,12 @@ pub fn plan_labels(
         ((opts.cell_px / px).ceil() as i64).max(1)
     } else {
         1
+    };
+    // raw mode (oracle XOR comparisons) keeps the exact request box
+    let view = if opts.raw || px <= 0.0 {
+        req.view
+    } else {
+        align_to_bins(&req.view, bin)
     };
     let mut w = LWalk {
         v,
@@ -758,7 +787,7 @@ pub fn plan_labels(
         top,
         if req.depth == u32::MAX { REM_FULL } else { req.depth },
     );
-    let seed = req.view.intersect(&tc.rbbox);
+    let seed = view.intersect(&tc.rbbox);
     let mut stack: Vec<(u32, u32, Xf, BBox)> = Vec::new();
     if !seed.is_empty() {
         stack.push((top, r0, Xf::identity(), seed));
@@ -1244,6 +1273,80 @@ mod tests {
         // +X upward (quarter-turn 1). The glyph itself is not mirrored.
         assert!(pins.contains(&(2020, 110, 1)), "{pins:?}");
         assert!(pins.iter().all(|(_, _, rot)| *rot < 4));
+    }
+
+    /// §F2R-20b crop oracle: a plan for a LARGER box (the margin
+    /// prefetch), restricted to the bin-aligned viewport, is exactly
+    /// the viewport's own plan for texts, and every viewport block
+    /// name is in the margin plan unchanged - so a GUI crop out of the
+    /// margin frame shows the labels a direct render would.
+    #[test]
+    fn margin_plan_restricted_to_the_viewport_is_the_viewport_plan() {
+        let (v, ovt) = fixture();
+        let opts = LabelOpts::default();
+        // the viewport edge cuts through bins on every side; px 1.0
+        // at depth 0 is the block-name regime (SUB = 400 px)
+        let mut blocks_seen = 0usize;
+        for (viewport, depth, px) in [
+            (bx(30, 30, 2500, 2500), u32::MAX, 0.05),
+            (bx(30, 30, 2500, 2500), 1, 0.05),
+            (bx(-350, 40, 3100, 5900), 2, 0.05),
+            (bx(30, 30, 2500, 2500), 0, 1.0),
+            (bx(-350, 40, 3100, 5900), 0, 1.0),
+        ] {
+            let bin = ((opts.cell_px / px).ceil() as i64).max(1);
+            let margin = bx(
+                viewport.x0 - 2500,
+                viewport.y0 - 2500,
+                viewport.x1 + 2500,
+                viewport.y1 + 2500,
+            );
+            let a = plan_labels(&v, &ovt, &rq(viewport, 0, depth, px), &opts)
+                .unwrap();
+            let m = plan_labels(&v, &ovt, &rq(margin, 0, depth, px), &opts)
+                .unwrap();
+            assert!(!a.stats.truncated && !m.stats.truncated);
+            assert!(!a.rows.is_empty(), "viewport {viewport:?} has labels");
+            let key = |r: &LabelRow| {
+                (r.block, r.layer, r.dt, r.x, r.y, r.rot, r.s.clone())
+            };
+            let aligned = align_to_bins(&viewport, bin);
+            let mut expect: Vec<LabelRow> = m
+                .rows
+                .iter()
+                .filter(|r| !r.block && aligned.contains_pt(r.x, r.y))
+                .cloned()
+                .collect();
+            let mut got: Vec<LabelRow> =
+                a.rows.iter().filter(|r| !r.block).cloned().collect();
+            expect.sort_by_key(key);
+            got.sort_by_key(key);
+            assert_eq!(got, expect, "texts at depth {depth}");
+            for block in a.rows.iter().filter(|r| r.block) {
+                blocks_seen += 1;
+                assert!(
+                    m.rows.iter().any(|r| key(r) == key(block)),
+                    "viewport block {block:?} missing from the margin plan"
+                );
+            }
+        }
+        assert!(blocks_seen > 0, "the fixture must exercise block names");
+        // the aligned request selects the winner of an edge bin even
+        // when its anchor sits outside the request box: bin (0,0) at
+        // px 0.05 spans 0..959 and its winner is the "p" member at
+        // (55,120); a request starting at (100,200) still lists it
+        let edge = plan_labels(
+            &v,
+            &ovt,
+            &rq(bx(100, 200, 2500, 2500), 0, u32::MAX, 0.05),
+            &opts,
+        )
+        .unwrap();
+        assert!(
+            edge.rows.iter().any(|r| (r.x, r.y, r.s.as_str()) == (55, 120, "p")),
+            "{:?}",
+            edge.rows
+        );
     }
 
     /// declutter: budget respected, selected is a subset of raw,

@@ -464,6 +464,16 @@ class RustRenderWorker:
             raise ValueError("label_font_px must be an integer") from exc
         if label_font_px < 6 or label_font_px > 96:
             raise ValueError("label_font_px must be in 6..96")
+        # §F2R-20b: a margin frame scales the per-view label budget by
+        # its area ratio so its label density matches the viewport
+        label_budget = job.get("label_budget")
+        if label_budget is not None:
+            try:
+                label_budget = int(label_budget)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("label_budget must be an integer") from exc
+            if label_budget < 1 or label_budget > 65536:
+                raise ValueError("label_budget must be in 1..65536")
         bbox = tuple(float(value) for value in job["bbox"])
         if len(bbox) != 4:
             raise ValueError("render bbox must have four coordinates")
@@ -515,7 +525,7 @@ class RustRenderWorker:
             self._jobs[generation] = state
         command = (
             "render gen=%d view=%s w=%d h=%d depth=%s cut=%s exact=0 "
-            "layers=%s frames=%s labels=%s font_px=%d mono=%s "
+            "layers=%s frames=%s labels=%s font_px=%d%s mono=%s "
             "frame_cache=%s "
             "jobs=%d decode_jobs=%d tile_px=%d "
             "round_pages=%d round_paths=1 frame_format=%s "
@@ -525,6 +535,8 @@ class RustRenderWorker:
                 repr(max(0.0, float(job.get("cut_px") or 0.0))), layers,
                 _bool_wire(job.get("frames", True)),
                 _bool_wire(job.get("labels", True)), label_font_px,
+                (" label_budget=%d" % label_budget
+                 if label_budget is not None else ""),
                 _bool_wire(self._mono),
                 _bool_wire(job.get("frame_cache", True)),
                 self._raster_jobs_count,

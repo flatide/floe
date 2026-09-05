@@ -30,8 +30,8 @@ pub use font::{validate_font_px, DEFAULT_LABEL_FONT_PX, MAX_LABEL_FONT_PX, MIN_L
 pub use page_cache::DecodedPageCache;
 pub use page_index::PageIndex;
 pub use query::{
-    pick_scene, snap_scene, ScenePick, ScenePickCandidate, SceneQueryLayer, SceneQueryRequest,
-    SceneSnap, SceneSnapKind,
+    pick_scene, pick_scene_cancellable, snap_scene, snap_scene_cancellable, ScenePick,
+    ScenePickCandidate, SceneQueryLayer, SceneQueryRequest, SceneSnap, SceneSnapKind,
 };
 pub use raster::{
     render_geometry_occupancy, render_geometry_occupancy_cancellable, render_geometry_styled,
