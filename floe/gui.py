@@ -1782,6 +1782,10 @@ class Viewer:
                     % (path, APP, path))
         c.load()
         self._apply_cache(c)
+        # the rebuilt layer panel and the restarted worker must not
+        # leave the keyboard parked away from the canvas (field
+        # 2026-09-05: after a load, d/g beeped instead of acting)
+        self._restore_keys()
         return None
 
     def _on_incoming(self, _source, _cond):
@@ -4322,9 +4326,14 @@ class Viewer:
             dlg.add_filter(ff)
         if dlg.run() != Gtk.ResponseType.OK:
             dlg.destroy()
+            self._restore_keys()
             return
         path = dlg.get_filename()
         dlg.destroy()
+        # a modal run() on quartz does not hand the keys back to the
+        # parent by itself: restore now, and again after the load
+        # rebuilds the panels (open_file)
+        self._restore_keys()
         try:
             err = self.open_file(path)
         except Exception as exc:
