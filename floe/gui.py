@@ -2369,7 +2369,16 @@ class Viewer:
             return False  # zoom changed: frame is scaled preview only
         fb = lf[1]
         vw, vh = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        if not self._margin_enabled():
+        if self._margin_enabled():
+            # §F2R-17: the margin is sized to EXACTLY one snapped 50%
+            # arrow step per side (user call 2026-09-05: the earlier
+            # step+10% pad felt wasteful), so a view whose edge lands
+            # on the frame edge is still a pure crop. No comfort pad:
+            # the proactive re-margin in _schedule_margin (leading room
+            # < 0.35 viewport) replaced its role. The tolerance only
+            # absorbs float rounding of the pan arithmetic (1e-3 px).
+            pad_x = pad_y = -1e-3 * self.spp
+        else:
             # reuse is off (baseline timing) or the backend has no
             # margin: only an exact viewport frame (<= 2 px snap slack
             # per axis, see _submit_render) may serve - never a crop
@@ -2377,8 +2386,8 @@ class Viewer:
             slack = 4.0 * self.spp
             if (fb[2] - fb[0]) > vw + slack or (fb[3] - fb[1]) > vh + slack:
                 return False
-        pad_x = min(0.1 * vw, 0.25 * max(0.0, (fb[2] - fb[0]) - vw))
-        pad_y = min(0.1 * vh, 0.25 * max(0.0, (fb[3] - fb[1]) - vh))
+            pad_x = min(0.1 * vw, 0.25 * max(0.0, (fb[2] - fb[0]) - vw))
+            pad_y = min(0.1 * vh, 0.25 * max(0.0, (fb[3] - fb[1]) - vh))
         return (fb[0] <= bbox[0] - pad_x and fb[1] <= bbox[1] - pad_y and
                 fb[2] >= bbox[2] + pad_x and fb[3] >= bbox[3] + pad_y)
 
@@ -2491,14 +2500,14 @@ class Viewer:
         # Margin offsets snap to the 16px fill-phase grid so the
         # margin render reuses the just-drawn viewport as its center
         # and later pans reuse the margin (§F2R-16 contract). Each side
-        # holds ONE full arrow step (50%, snapped) PLUS _covered()'s
-        # 10% comfort pad, so a single half-viewport pan stays covered
-        # and renders nothing (field call 2026-09-04: a lone 50% step
-        # landed exactly on the margin edge and re-rendered).
-        ex = self._snap_pan_px(vw * KEY_PAN_FRACTION) \
-            + int(math.ceil(0.1 * vw / 16.0)) * 16
-        ey = self._snap_pan_px(vh * KEY_PAN_FRACTION) \
-            + int(math.ceil(0.1 * vh / 16.0)) * 16
+        # holds EXACTLY one arrow step (50%, snapped by the same
+        # _snap_pan_px the arrow keys use), so any pan up to a single
+        # half-viewport step is a pure crop and nothing more is drawn
+        # (user call 2026-09-05: the earlier step+10% pad was ~20% more
+        # raster than needed; _covered() no longer wants comfort room
+        # in margin mode, which is what made the pad necessary).
+        ex = self._snap_pan_px(vw * KEY_PAN_FRACTION)
+        ey = self._snap_pan_px(vh * KEY_PAN_FRACTION)
         mw, mh = w + 2 * ex, h + 2 * ey
         eb = (rx0 - ex * self.spp,
               ry1 - (h + ey) * self.spp,

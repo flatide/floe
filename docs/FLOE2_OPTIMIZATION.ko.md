@@ -1082,6 +1082,27 @@ KLayout 서비스가 일반 foreground 작업으로 수행하고(취소·재사�
 `_covered()` 큰 프레임 crop은 margin 활성 시에만. 한계: KLayout
 서비스의 bg 에코는 실KLayout 배터리가 없어 코드 검토로만 확인.
 
+**margin 폭 정밀화(2026-09-05, 사용자 지적, 0.12.44)**: "50% pan 재드로잉
+때문에 준 여유가 너무 많아 불필요하게 느껴짐 — 50%까지 재드로잉 안
+되게 딱 맞게 계산". 원인 재진단: 50% 스텝이 재렌더된 이유는 margin
+폭이 아니라 `_covered()`가 매 변마다 **10% 안락 여유**를 요구했기
+때문이었고(스텝 432px가 정확히 가장자리에 닿으면 여유 0 → 거부),
+이전 수정은 그 요구를 margin 폭(+ceil16(10%)=+96px/변)으로 메꾼
+것이었다. 이번 수정:
+- margin 폭 = **정확히 한 스냅 스텝/변** (`_snap_pan_px(0.5·vw)`,
+  화살표 키와 같은 함수). 858×802 뷰포트: 1916×1796 → **1724×1604**
+  (raster 픽셀 3.44M → 2.77M, **−20%**).
+- `_covered()`는 margin 모드에서 안락 여유를 요구하지 않는다(뷰가
+  프레임 안에 있으면 crop; float 반올림만 1e-3px 흡수). 선제
+  re-margin은 이미 `_schedule_margin`의 "선두 여유 < 0.35 뷰포트"
+  규칙이 맡고 있어 안락 여유의 역할은 없어졌다. margin 비활성
+  경로(KLayout·frame-cache off)는 main의 pad 의미를 그대로 둔다.
+- 덮이는 스텝 수는 동일(한 스텝)이므로 연속 패닝 동작은 변하지
+  않는다 — 다음 margin은 각 스텝 직후 재제출된다.
+
+검증: validator 확장 — 착지한 margin 위에서 6방향(축 4 + 대각 2)
+한 스텝 pan은 crop, 한 스텝+16px는 재렌더로 픽셀 단위 핀.
+
 ### 3.24 수직 pan 가장자리 깨짐 — row 매핑 부호 버그 (2026-09-04)
 
 **보고(사용자)**: "팬을 하다 보면 가장자리 이미지가 비정상적으로
@@ -1187,7 +1208,7 @@ per-tile item 필터(519k×~40 tiles — 2c 설계의 counting-sort binning
 | F2R-14 | P1 | `DONE` | 장시간 세션에서 load 증가(미니맵 이동, fresh 뷰어보다 느림) | LRU 축출 전수 스캔 → O(log n) 색인(0.12.33, §3.18) + `evict N` telemetry — 실칩 장기 세션 재확인 대기 |
 | F2R-15 | P1 | `DONE` | pick/snap이 대부분 "no object here" | 예산 모델 폐기·floe 정렬(0.12.36, §3.19) — 9.8G 실칩 확인 완료. cut 실명(결함 B)은 보류(설계 219259c) |
 | F2R-16 | P1 | `DONE` | pan이 이동량과 무관하게 전체 재raster | 실칩 확인(§3.20): 10% pan draw 378ms(재사용 92%)·50% 845ms(50%) — 이동량 비례 회복. 남은 pan 바닥: collection/trial ~0.3s, plan ~0.2s(비gated 후보) |
-| F2R-17 | P1 | `DONE` | pan 대비 배경 margin prefetch(사용자 제안) | 한 스텝+pad margin·즉시 제출·비행 가드(§3.22) — 사용자 확인 완료: 연속 패닝 거의 무음. P0 리뷰 수정(0.12.43): Rust capability+frame-cache 게이트로 floe(KLayout)에는 적용되지 않음. 실칩(폐쇄망) 확인만 남음 |
+| F2R-17 | P1 | `DONE` | pan 대비 배경 margin prefetch(사용자 제안) | 한 스텝+pad margin·즉시 제출·비행 가드(§3.22) — 사용자 확인 완료: 연속 패닝 거의 무음. P0 리뷰 수정(0.12.43): Rust capability+frame-cache 게이트로 floe(KLayout)에는 적용되지 않음. 0.12.44: margin 폭 정확히 한 스텝/변(−20% raster, 사용자 지적). 실칩(폐쇄망) 확인만 남음 |
 | F2R-18 | P2 | `DONE` | exact frame cache가 retained와 중복(사용자 결정) | payload cache 제거, retained 3-entry LRU(scale별)로 통합(0.12.41, §3.23) — zoom 왕복은 k=0 전량 재사용으로 승계 |
 | F2R-19 | P1 | `DONE` | 수직 pan에서 가장자리 깨짐 | 재사용 row 매핑 부호 교정 + height mod-16 guard(0.12.42, §3.24) — 8방향 pixel-diff 재확인, 실칩 재확인 대기 |
 

@@ -363,9 +363,35 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         self.assertEqual(len(submitted), 1)
         job = submitted[0]
         self.assertTrue(job["bg"])
-        self.assertGreater(job["w"], 2 * 858)
-        self.assertGreater(job["h"], 2 * 802)
+        # ~2x2 viewports: one snapped half-step per side (exact sizes
+        # pinned below)
+        self.assertGreaterEqual(job["w"], 2 * 858)
+        self.assertGreaterEqual(job["h"], 2 * 802)
         self.assertEqual(v._margin_pending[0], job["gen"])
+
+        # exact fit (user call 2026-09-05): the landed margin covers
+        # one snapped 50% arrow step per side to the pixel - the step
+        # itself is a crop, one more 16 px period is not
+        v = make(rust, True)
+        Viewer._submit_margin(v)
+        job = submitted[-1]
+        v.last_frame = (None, tuple(job["bbox"]), v.spp, key)
+        w_px, h_px = v._viewport_size()
+        step_x = Viewer._snap_pan_px(v, w_px * 0.5)
+        step_y = Viewer._snap_pan_px(v, h_px * 0.5)
+        self.assertEqual(job["w"], w_px + 2 + 2 * step_x)
+        self.assertEqual(job["h"], h_px + 2 + 2 * step_y)
+        cx, cy = v.cx, v.cy
+        for sx, sy in ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, -1)):
+            v.cx = cx + sx * step_x * v.spp
+            v.cy = cy + sy * step_y * v.spp
+            self.assertTrue(Viewer._covered(v, v.view_bbox(), "live"),
+                            "one 50%% step (%d,%d) must be a crop" % (sx, sy))
+            v.cx = cx + sx * (step_x + 16) * v.spp
+            v.cy = cy + sy * (step_y + 16) * v.spp
+            self.assertFalse(Viewer._covered(v, v.view_bbox(), "live"),
+                             "a step plus one period must re-render")
+        v.cx, v.cy = cx, cy
 
         # _covered(): an oversize (margin) frame serves a shifted view
         # only while the margin is enabled; the exact frame keeps
