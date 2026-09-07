@@ -63,6 +63,10 @@ def _stub_margin_viewer(worker, frame_cache, viewport=(858, 802)):
     v._layers_arg = lambda: None
     v._viewport_size = lambda: viewport
     v._margin_pending = None
+    v._margin_frame = None
+    v._pan_vector = None
+    v._margin_vector = None
+    v._frame_anchor = None
 
     def view_bbox():
         w, h = v._viewport_size()
@@ -333,11 +337,12 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
     def test_margin_prefetch_is_a_rust_only_reuse_capability(self):
         """P0 review (2026-09-05): the F2R-17 margin prefetch lives in
         the shared GUI and used to fire for ANY backend - stable
-        floe/KLayout would have rendered ~4.8x the pixels of every
-        settled view as foreground work (its service also dropped the
-        bg flag). The GUI now gates on the worker capability AND on
-        --frame-cache (off under --perf-baseline), and _covered() only
-        crops an oversize frame while the margin is enabled."""
+        floe/KLayout would have rendered the enlarged frame as
+        foreground work (its service also dropped the bg flag). The
+        GUI gates on the worker capability AND on --frame-cache (off
+        under --perf-baseline), and _covered() only crops an oversize
+        frame while the margin is enabled. Since 2026-09-07 the margin
+        extends one arrow step along the LAST PAN DIRECTION only."""
         from floe import service
         from floe.gui import Viewer
 
@@ -356,54 +361,63 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                                   submit=lambda job: submitted.append(job))
 
         v = make(klayout, True)
-        Viewer._schedule_margin(v)
-        self.assertFalse(Viewer._submit_margin(v))
+        Viewer._schedule_margin(v, (1, 0))
+        self.assertFalse(Viewer._submit_margin(v, (1, 0)))
         self.assertEqual(submitted, [], "KLayout must never get a margin")
         self.assertIsNone(v._margin_pending)
 
         v = make(rust, False)
-        Viewer._schedule_margin(v)
+        Viewer._schedule_margin(v, (1, 0))
         self.assertEqual(submitted, [], "--frame-cache off disables it")
 
         v = make(rust, True)
-        Viewer._schedule_margin(v)
+        Viewer._schedule_margin(v, None)
+        self.assertEqual(submitted, [], "no pan direction: no prefetch")
+        Viewer._schedule_margin(v, (1, 0))
         self.assertEqual(len(submitted), 1)
         job = submitted[0]
         self.assertTrue(job["bg"])
-        # ~2x2 viewports: one snapped half-step per side (exact sizes
-        # pinned below)
-        self.assertGreaterEqual(job["w"], 2 * 858)
-        self.assertGreaterEqual(job["h"], 2 * 802)
-        # §F2R-21 (user call): the margin carries the labels of its
-        # own box so a pan inside it is a labelled crop
         self.assertEqual(job["labels"], v.labels_on)
-        self.assertTrue(job["labels"])
         self.assertTrue(job["frames"], "hierarchy outlines are geometry")
         self.assertEqual(v._margin_pending[0], job["gen"])
+        self.assertEqual(v._margin_pending[3], (1, 0))
 
-        # exact fit (user call 2026-09-05): the landed margin covers
-        # one snapped 50% arrow step per side to the pixel - the step
-        # itself is a crop, one more 16 px period is not
-        v = make(rust, True)
-        Viewer._submit_margin(v)
-        job = submitted[-1]
-        v.last_frame = (None, tuple(job["bbox"]), v.spp, key)
+        # exact fit along the vector: the landed margin covers one
+        # snapped 50% step to the RIGHT to the pixel and nothing else
         w_px, h_px = v._viewport_size()
         step_x = Viewer._snap_pan_px(v, w_px * 0.5)
         step_y = Viewer._snap_pan_px(v, h_px * 0.5)
-        self.assertEqual(job["w"], w_px + 2 + 2 * step_x)
-        self.assertEqual(job["h"], h_px + 2 + 2 * step_y)
+        self.assertEqual((job["w"], job["h"]), (w_px + 2 + step_x, h_px + 2))
+        b = v.view_bbox()
+        self.assertLessEqual(job["bbox"][0], b[0])
+        self.assertGreaterEqual(job["bbox"][2], b[2] + step_x * v.spp)
+        v.last_frame = (None, tuple(job["bbox"]), v.spp, key)
         cx, cy = v.cx, v.cy
-        for sx, sy in ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, -1)):
+        for sx, sy, crop in ((1, 0, True), (-1, 0, False), (0, 1, False),
+                             (0, -1, False), (1, 1, False)):
             v.cx = cx + sx * step_x * v.spp
             v.cy = cy + sy * step_y * v.spp
-            self.assertTrue(Viewer._covered(v, v.view_bbox(), "live"),
-                            "one 50%% step (%d,%d) must be a crop" % (sx, sy))
-            v.cx = cx + sx * (step_x + 16) * v.spp
-            v.cy = cy + sy * (step_y + 16) * v.spp
-            self.assertFalse(Viewer._covered(v, v.view_bbox(), "live"),
-                             "a step plus one period must re-render")
+            self.assertEqual(Viewer._covered(v, v.view_bbox(), "live"), crop,
+                             "step (%d,%d)" % (sx, sy))
         v.cx, v.cy = cx, cy
+        # the next step in the same direction is drawn: no re-prefetch;
+        # after taking that step the following one is not: prefetch
+        Viewer._schedule_margin(v, (1, 0))
+        self.assertEqual(len(submitted), 1, "next step already drawn")
+        v.cx = cx + step_x * v.spp
+        v._margin_pending = None
+        Viewer._schedule_margin(v, (1, 0))
+        self.assertEqual(len(submitted), 2)
+        self.assertEqual(submitted[-1]["w"], w_px + 2 + step_x)
+        v.cx = cx
+        # a DOWN prefetch extends the frame below the view (y0 lower)
+        v = make(rust, True)
+        Viewer._submit_margin(v, (0, -1))
+        job = submitted[-1]
+        b = v.view_bbox()
+        self.assertEqual((job["w"], job["h"]), (w_px + 2, h_px + 2 + step_y))
+        self.assertLessEqual(job["bbox"][1], b[1] - step_y * v.spp)
+        self.assertGreaterEqual(job["bbox"][3], b[3])
 
         # _covered(): an oversize (margin) frame serves a shifted view
         # only while the margin is enabled; the exact frame keeps
@@ -419,15 +433,13 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                                    b[2] + vw, b[3] + vh), v.spp, key)
             shifted = (b[0] + 0.3 * vw, b[1], b[2] + 0.3 * vw, b[3])
             self.assertEqual(Viewer._covered(v, shifted, "live"), crops)
-
     def test_margin_prefetch_caps_pixels_for_large_viewports(self):
-        """§F2R-20: a margin frame is bounded in pixels so renderd's
-        retained set, the publish file and the GUI pixbuf stay small
-        on shared hosts. Ordinary windows keep the exact one-step
-        margin; a 4K window shrinks both extensions (16 px multiples)
-        to fit; a window that fills the cap alone gets no margin. A
-        capped margin still counts as "already margined" once landed
-        and centered, so it is not topped up after every pan."""
+        """§F2R-20: a margin frame is bounded in pixels. The directional
+        margin (one step along the last pan) is viewport + 50% on one
+        axis, so ordinary and QHD windows keep the exact step; a 4K
+        window still fits under 16 Mpx; a tighter cap shrinks the
+        extension to 16 px multiples; no room under the cap = no
+        margin."""
         from floe.gui import MARGIN_MAX_MPIX, Viewer
 
         submitted = []
@@ -438,52 +450,41 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
 
         v = _stub_margin_viewer(rust, True, viewport=(2560, 1440))
         v._margin_max_px = cap
-        self.assertTrue(Viewer._submit_margin(v) is False and submitted)
+        Viewer._submit_margin(v, (1, 0))
         job = submitted[-1]
-        self.assertEqual((job["w"], job["h"]),
-                         (2560 + 2 + 2 * 1280, 1440 + 2 + 2 * 720),
-                         "a QHD window keeps the full one-step margin")
+        self.assertEqual((job["w"], job["h"]), (2560 + 2 + 1280, 1440 + 2))
         self.assertLessEqual(job["w"] * job["h"], cap)
 
         v = _stub_margin_viewer(rust, True, viewport=(3840, 2160))
         v._margin_max_px = cap
-        Viewer._submit_margin(v)
+        Viewer._submit_margin(v, (1, 0))
         job = submitted[-1]
-        self.assertLessEqual(job["w"] * job["h"], cap, "capped")
-        ex = (job["w"] - 3842) // 2
-        ey = (job["h"] - 2162) // 2
-        self.assertEqual((job["w"] - 3842) % 32, 0)
-        self.assertEqual((job["h"] - 2162) % 32, 0)
-        self.assertGreater(ex, 0)
+        self.assertEqual((job["w"], job["h"]), (3840 + 2 + 1920, 2160 + 2),
+                         "one-sided 4K margin fits under 16 Mpx")
+
+        v = _stub_margin_viewer(rust, True, viewport=(3840, 2160))
+        v._margin_max_px = 3842 * 2162 + 3842 * 2162 // 5   # room for ~20%
+        Viewer._submit_margin(v, (0, 1))
+        job = submitted[-1]
+        ey = job["h"] - 2162
+        self.assertEqual(job["w"], 3842)
         self.assertGreater(ey, 0)
-        self.assertLess(ex, 1920)
         self.assertLess(ey, 1080)
-        # tight: one more 16 px period on both axes would break the
-        # cap (each axis is floored to the period from one common
-        # shrink factor, so a single axis may keep sub-period slack)
-        self.assertGreater((job["w"] + 32) * (job["h"] + 32), cap)
-        # landed and centered: no top-up; drift past 30% of the
-        # (smaller) extension: top-up
-        v.last_frame = (None, tuple(job["bbox"]), v.spp, _MARGIN_KEY)
-        v._margin_pending = None
-        before = len(submitted)
-        Viewer._schedule_margin(v)
-        self.assertEqual(len(submitted), before, "centered: no top-up")
-        v.cx += 0.5 * ex * v.spp
-        Viewer._schedule_margin(v)
-        self.assertEqual(len(submitted), before + 1, "drifted: top-up")
+        self.assertEqual(ey % 16, 0)
+        self.assertLessEqual(job["w"] * job["h"], v._margin_max_px)
+        self.assertGreater(job["w"] * (job["h"] + 16), v._margin_max_px)
 
         v = _stub_margin_viewer(rust, True, viewport=(3840, 2160))
         v._margin_max_px = 3842 * 2162
         before = len(submitted)
-        self.assertFalse(Viewer._submit_margin(v))
+        self.assertFalse(Viewer._submit_margin(v, (1, 0)))
         self.assertEqual(len(submitted), before,
                          "no room under the cap: no margin at all")
-
-    def test_pan_inside_a_landed_margin_submits_without_debounce(self):
-        """§F2R-21 field: with labels on the landed margin is display
-        base + renderd reuse only; an arrow pan that stays inside it
-        submits immediately (fast path), one that leaves it debounces."""
+    def test_arrow_pans_submit_at_once_and_record_their_direction(self):
+        """User call 2026-09-07: an arrow pan submits immediately (the
+        frozen picture is replaced as soon as renderd draws the new
+        view) and records its direction for the directional prefetch;
+        the render in flight captures it, a crop consumes it."""
         from floe.gui import Viewer
 
         rust = SimpleNamespace(supports_margin_prefetch=True,
@@ -491,26 +492,22 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         v = _stub_margin_viewer(rust, True)
         calls = []
         v.redraw = lambda immediate=False: calls.append(immediate)
+        for direction, vector in (("Right", (1, 0)), ("Left", (-1, 0)),
+                                  ("Up", (0, 1)), ("Down", (0, -1))):
+            Viewer._pan_view(v, direction)
+            self.assertEqual(v._pan_vector, vector)
+        self.assertEqual(calls, [True] * 4)
+        # a margin of another render state or scale is no display base
         b = v.view_bbox()
         vw, vh = b[2] - b[0], b[3] - b[1]
-        # a margin 1.5 viewports wide on each side: two snapped 50%
-        # steps (2 x 432 px) stay inside, the third (1296 px) leaves
-        v._margin_frame = (object(), (b[0] - 1.5 * vw, b[1] - 1.5 * vh,
-                                      b[2] + 1.5 * vw, b[3] + 1.5 * vh),
-                           v.spp, _MARGIN_KEY)
-        Viewer._pan_view(v, "Right")
-        Viewer._pan_view(v, "Right")
-        Viewer._pan_view(v, "Right")
-        self.assertEqual(calls, [True, True, False])
-        v._margin_frame = None
-        Viewer._pan_view(v, "Left")
-        self.assertEqual(calls[-1], False)
-        # a margin of another render state or scale is no base
         v._margin_frame = (object(), (b[0] - vw, b[1] - vh,
                                       b[2] + vw, b[3] + vh),
                            v.spp * 2, _MARGIN_KEY)
         self.assertIsNone(Viewer._margin_base(v))
-
+        v._margin_frame = (object(), (b[0] - vw, b[1] - vh,
+                                      b[2] + vw, b[3] + vh),
+                           v.spp, _MARGIN_KEY)
+        self.assertIsNotNone(Viewer._margin_base(v))
     def test_margin_geometry_fills_the_strip_a_pan_uncovers(self):
         """§F2R-21 field (2026-09-05): a pan used to show the incoming
         strip BLACK until the fast-path frame landed. The display now
@@ -543,32 +540,52 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         v._update_minimap = lambda bbox: None
         v.dump = False
         v.image = SimpleNamespace(set_from_pixbuf=shown.append)
-        # last (labelled) frame: green, world x 32..96; the landed
-        # margin: red, world x 0..128; the view pans 16 px right of
-        # the last frame, so its right 16 columns are margin-only
+        # last (labelled) frame: green, world x 32..96, shown once at
+        # its own center so the anchor is set
         v.last_frame = (solid(64, (0, 255, 0)), (32.0, 32.0, 96.0, 96.0),
                         1.0, _MARGIN_KEY)
-        v._margin_frame = (solid(128, (255, 0, 0)),
-                           (0.0, 0.0, 128.0, 128.0), 1.0, _MARGIN_KEY)
-        v.cx, v.cy = 80.0, 64.0     # view x 48..112, y 32..96
+        v.cx, v.cy = 64.0, 64.0
         Viewer._display(v)
-        disp = shown[-1]
-        pixels, stride = disp.get_pixels(), disp.get_rowstride()
 
         def rgb(x, y):
+            disp = shown[-1]
+            pixels, stride = disp.get_pixels(), disp.get_rowstride()
             i = y * stride + x * 3
             return tuple(pixels[i:i + 3])
 
+        self.assertEqual(rgb(63, 32), (0, 255, 0))
+        # pan 16 px right with nothing drawn there yet (user call
+        # 2026-09-07): the picture stays PUT - no black strip - until
+        # the fresh frame lands
+        v.cx = 80.0     # view x 48..112
+        Viewer._display(v)
+        self.assertEqual(rgb(0, 32), (0, 255, 0))
+        self.assertEqual(rgb(63, 32), (0, 255, 0), "frozen, not shifted")
+        self.assertEqual(v._frame_anchor, (64.0, 64.0))
+        # a landed margin (red, world x 0..128) covers the new view:
+        # the picture moves at once, the strip shows margin geometry
+        v._margin_frame = (solid(128, (255, 0, 0)),
+                           (0.0, 0.0, 128.0, 128.0), 1.0, _MARGIN_KEY)
+        Viewer._display(v)
+        self.assertEqual(v._frame_anchor, (80.0, 64.0))
         self.assertEqual(rgb(0, 32), (0, 255, 0), "overlap: labelled frame")
         self.assertEqual(rgb(47, 32), (0, 255, 0))
         self.assertEqual(rgb(48, 32), (255, 0, 0), "strip: margin geometry")
         self.assertEqual(rgb(63, 32), (255, 0, 0))
-        # without the margin the strip would be black
+        # the fresh frame for the new view lands: it covers the view
+        # and is shown at the live center
+        v.last_frame = (solid(64, (0, 0, 255)), (48.0, 32.0, 112.0, 96.0),
+                        1.0, _MARGIN_KEY)
         v._margin_frame = None
+        v.cx = 96.0     # pan again, nothing drawn: frozen at 80
         Viewer._display(v)
-        self.assertEqual(rgb(63, 32), (255, 0, 0))  # previous disp object
-        disp = shown[-1]
-        pixels, stride = disp.get_pixels(), disp.get_rowstride()
+        self.assertEqual(v._frame_anchor, (80.0, 64.0))
+        self.assertEqual(rgb(63, 32), (0, 0, 255))
+        # a drag tracks 1:1 even without coverage (its own feedback)
+        v._drag = object()
+        Viewer._display(v)
+        v._drag = None
+        self.assertEqual(v._frame_anchor, (96.0, 64.0))
         self.assertEqual(rgb(63, 32), (0, 0, 0))
 
     def test_menus_and_dialogs_hand_the_keys_back_to_the_canvas(self):

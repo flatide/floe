@@ -936,6 +936,11 @@ class Viewer:
         # display base for the strip a pan uncovers before the fresh
         # frame lands; (pixbuf, bbox, dbu_per_px, key) like last_frame
         self._margin_frame = None
+        # §F2R-17 (user call 2026-09-07): the last arrow-pan direction
+        # (sx, sy in {-1,0,1}); the prefetch extends the view by one
+        # step along it only. None = no directional prefetch.
+        self._pan_vector = None
+        self._margin_vector = None   # vector captured by the render in flight
         self._job_keys = {}         # gen -> render key of submitted job
         self._job_depth = {}        # gen -> depth the job rendered at
         self._pending_scope = "live"
@@ -1980,43 +1985,62 @@ class Viewer:
             return None
         return margin
 
+    def _view_drawn(self, bbox, fb, base):
+        """True when every pixel of `bbox` is already drawn: inside
+        the displayed frame `fb` or inside the landed margin `base`."""
+        eps = 1e-3 * self.spp
+
+        def contains(box):
+            return (box[0] <= bbox[0] + eps and box[1] <= bbox[1] + eps
+                    and box[2] >= bbox[2] - eps and box[3] >= bbox[3] - eps)
+        return contains(fb) or (base is not None and contains(base[1]))
+
     def _display(self):
         w, h = self._viewport_size()
         disp = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, False, 8, w, h)
         disp.fill(BLACK)
         bbox = self.view_bbox()
         base = self._margin_base()
-        if base is not None:
-            # §F2R-21 (field 2026-09-05): with labels on the landed
-            # margin never becomes last_frame, yet its label-free
-            # geometry is exactly what belongs under the strip a pan
-            # uncovers - that strip used to stay BLACK for the debounce
-            # plus the render round trip (50% of the screen on an
-            # arrow step). Blit the margin first at the live center;
-            # the labelled frame paints over its overlap and the
-            # fast-path frame replaces everything moments later.
-            self._composite_world(disp, base[0], base[1], bbox, self.spp)
         if self.last_frame is not None and \
                 self._frame_compatible(self.last_frame):
             # the stale frame is never rescaled (a blurry zoomed base
             # reads as a glitch): it stays frozen at its own resolution
-            # until the fresh frame lands. While the scale matches, the
-            # anchor tracks the center so pans move 1:1; once a zoom
-            # changes the scale the anchor stays put - zoom-at-cursor
-            # center compensation must not slide the frozen image.
+            # until the fresh frame lands. Once a zoom changes the
+            # scale the anchor stays put - zoom-at-cursor center
+            # compensation must not slide the frozen image.
             frame, fb, fspp, _key = self.last_frame
-            if self._frame_anchor is None or \
-                    abs(self.spp / fspp - 1.0) < 0.001:
+            same_scale = abs(self.spp / fspp - 1.0) < 0.001
+            if self._frame_anchor is None:
+                self._frame_anchor = (self.cx, self.cy)
+            elif same_scale and (self._drag is not None
+                                 or self._view_drawn(bbox, fb, base)):
+                # §F2R-21 (user call 2026-09-07, real chip): the
+                # picture moves only when every pixel of the new view
+                # is already drawn - by this frame or by the landed
+                # margin (a crop). A pan the render has not caught up
+                # with keeps the old picture in place instead of
+                # exposing a black strip, and jumps when the fresh
+                # frame lands. A drag still tracks 1:1 (its own
+                # feedback; the strip is expected there).
                 self._frame_anchor = (self.cx, self.cy)
             ax, ay = self._frame_anchor
             vb = (ax - w / 2 * fspp, ay - h / 2 * fspp,
                   ax + w / 2 * fspp, ay + h / 2 * fspp)
+            if base is not None and same_scale:
+                # §F2R-21 (field 2026-09-05): the landed margin's
+                # geometry under the strip a pan uncovers, at the same
+                # anchor as the frame; the labelled frame paints over
+                # its overlap
+                self._composite_world(disp, base[0], base[1], vb, fspp)
             self._composite_world(disp, frame, fb, vb, fspp)
             # world-anchored overlays (rulers, selection, snap) stay
             # glued to the frozen base and jump together with it when
             # the fresh frame lands; the minimap keeps the real view
             obox, ospp = vb, fspp
         else:
+            if base is not None:
+                self._composite_world(disp, base[0], base[1], bbox,
+                                      self.spp)
             obox, ospp = bbox, self.spp
         self._draw_overlays(disp, obox, ospp)
         if self.dump:
@@ -2480,9 +2504,10 @@ class Viewer:
                 GLib.source_remove(self._debounce)
                 self._debounce = None
             self._set_status(bbox, mode)
-            # §F2R-17: roaming inside the margin - top the margin up
-            # once the view drifts off its center
-            self._schedule_margin()
+            # §F2R-17: a crop served this pan - prefetch the next step
+            # along the same direction
+            self._schedule_margin(self._pan_vector)
+            self._pan_vector = None
             return
         if self._debounce is not None:
             GLib.source_remove(self._debounce)
@@ -2495,13 +2520,22 @@ class Viewer:
         if os.environ.get("FLOE_MARGIN_DEBUG"):
             sys.stderr.write("[margin] %s\n" % message)
 
-    def _schedule_margin(self):
-        """§F2R-17: after a settled live frame, prefetch a 2wx2h frame
-        around the view in the background so pans inside +-50% become
-        pure crops (_covered) or full tile reuse. Any user render that
-        follows preempts it through the generation frontier - renderd
-        cancels the margin raster mid-flight."""
-        if self.cache is None or self._drag is not None:
+    def _next_step_view(self, bbox, vector):
+        """The view one arrow step along `vector` from `bbox`."""
+        w_px, h_px = self._viewport_size()
+        dx = vector[0] * self._snap_pan_px(w_px * KEY_PAN_FRACTION) * self.spp
+        dy = vector[1] * self._snap_pan_px(h_px * KEY_PAN_FRACTION) * self.spp
+        return (bbox[0] + dx, bbox[1] + dy, bbox[2] + dx, bbox[3] + dy)
+
+    def _schedule_margin(self, vector):
+        """§F2R-17 (user call 2026-09-07): after a settled live frame
+        or a crop, prefetch ONE arrow step along the last pan direction
+        in the background so the next step in that direction is a pure
+        crop. The earlier 2wx2h ring prefetched all four directions -
+        several seconds of draw on the real chip, most of it never
+        used. No direction (goto, zoom, drag) = no prefetch. Any user
+        render preempts it through the generation frontier."""
+        if self.cache is None or self._drag is not None or not vector:
             return
         if not self._margin_enabled():
             return  # KLayout backend or --frame-cache off / --perf-baseline
@@ -2513,50 +2547,23 @@ class Viewer:
             self._margin_debug("skip: no frame or key mismatch")
             return
         bbox = self.view_bbox()
-        vw, vh = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        fb = lf[1]
-        # Already margined and roughly centered: nothing to do. "Roughly"
-        # is relative to the frame's OWN extension (>= 70% of it left on
-        # both sides) so a pixel-capped narrower margin (§F2R-20) is not
-        # topped up after every pan; an axis without a real margin
-        # (under one 16 px period, e.g. the exact viewport frame) never
-        # counts as margined.
-        period = 16.0 * self.spp
-        axes = ((bbox[0] - fb[0], fb[2] - bbox[2], ((fb[2] - fb[0]) - vw) / 2.0),
-                (bbox[1] - fb[1], fb[3] - bbox[3], ((fb[3] - fb[1]) - vh) / 2.0))
-        if any(ext >= period for _, _, ext in axes) and all(
-                ext < period or (lo >= 0.7 * ext and hi >= 0.7 * ext)
-                for lo, hi, ext in axes):
-            self._margin_debug("skip: already margined")
+        nxt = self._next_step_view(bbox, vector)
+        base = self._margin_base()
+        if self._view_drawn(nxt, lf[1], base):
+            self._margin_debug("skip: next step already drawn")
             return
-        # §F2R-17 (user call 2026-09-04): submit IMMEDIATELY - any user
-        # render cancels the margin mid-flight anyway, and an instant
-        # margin is what keeps continuous stepping silent. The in-flight
-        # guard stops a pan burst from superseding its own margins
-        # forever (a livelock where none ever completes).
         pending = getattr(self, "_margin_pending", None)
-        if pending is not None and abs(self.cx - pending[1]) <= 0.35 * vw \
-                and abs(self.cy - pending[2]) <= 0.35 * vh:
-            self._margin_debug("skip: margin in flight for this area")
+        if pending is not None and pending[3] == tuple(vector) \
+                and self._view_drawn(nxt, pending[4], None):
+            self._margin_debug("skip: margin in flight for the next step")
             return
-        # §F2R-21: with labels on the landed margin is not last_frame
-        # (never shown), yet renderd retains its geometry - a settle
-        # inside it (a full-reuse pan) must not prefetch again until
-        # the view drifts off the margin's center
-        landed = getattr(self, "_margin_landed", None)
-        if landed is not None and landed[0] == lf[3] \
-                and landed[4] is self.cache \
-                and abs(landed[1] - self.spp) <= 1e-9 * self.spp \
-                and abs(self.cx - landed[2]) <= 0.35 * vw \
-                and abs(self.cy - landed[3]) <= 0.35 * vh:
-            self._margin_debug("skip: margin retained for this area")
-            return
-        self._submit_margin()
+        self._submit_margin(vector)
 
-    def _submit_margin(self):
+    def _submit_margin(self, vector):
         if (self.cache is None or self.worker is None
                 or not self.worker.alive() or self._drag is not None
-                or self._pending is not None or not self._margin_enabled()):
+                or self._pending is not None or not self._margin_enabled()
+                or not vector):
             self._margin_debug("submit skipped")
             return False
         bbox = self.view_bbox()
@@ -2566,26 +2573,29 @@ class Viewer:
         ry1 = math.ceil(bbox[3] / spp2) * spp2
         w, h = int(vw) + 2, int(vh) + 2
         # Margin offsets snap to the 16px fill-phase grid so the
-        # margin render reuses the just-drawn viewport as its center
-        # and later pans reuse the margin (§F2R-16 contract). Each side
-        # holds EXACTLY one arrow step (50%, snapped by the same
-        # _snap_pan_px the arrow keys use), so any pan up to a single
-        # half-viewport step is a pure crop and nothing more is drawn
-        # (user call 2026-09-05: the earlier step+10% pad was ~20% more
-        # raster than needed; _covered() no longer wants comfort room
-        # in margin mode, which is what made the pad necessary).
-        ex = self._snap_pan_px(vw * KEY_PAN_FRACTION)
-        ey = self._snap_pan_px(vh * KEY_PAN_FRACTION)
+        # margin render reuses the just-drawn viewport and later pans
+        # reuse the margin (§F2R-16 contract). The frame extends by
+        # EXACTLY one arrow step (50%, snapped by the same _snap_pan_px
+        # the arrow keys use) on the side the last pan moved toward,
+        # and by nothing elsewhere (user call 2026-09-07: the four-way
+        # ring cost seconds on the real chip).
+        sx, sy = vector
+        ex = self._snap_pan_px(vw * KEY_PAN_FRACTION) if sx else 0
+        ey = self._snap_pan_px(vh * KEY_PAN_FRACTION) if sy else 0
         cap = getattr(self, "_margin_max_px", MARGIN_MAX_MPIX << 20)
-        if (w + 2 * ex) * (h + 2 * ey) > cap:
-            # §F2R-20: shrink both extensions by one factor s so the
-            # margin holds at most `cap` pixels: (w+2s.ex)(h+2s.ey)=cap,
-            # then floor each to the 16 px period (area stays <= cap).
-            qa = 4.0 * ex * ey
-            qb = 2.0 * (w * ey + h * ex)
+        if (w + ex) * (h + ey) > cap:
+            # §F2R-20: shrink the extension(s) by one factor s so the
+            # frame holds at most `cap` pixels: (w+s.ex)(h+s.ey)=cap,
+            # then floor to the 16 px period (area stays <= cap).
+            qa = float(ex * ey)
+            qb = float(w * ey + h * ex)
             qc = float(w * h - cap)
-            s = 0.0 if qc >= 0 else \
-                (-qb + math.sqrt(qb * qb - 4.0 * qa * qc)) / (2.0 * qa)
+            if qc >= 0:
+                s = 0.0
+            elif qa > 0:
+                s = (-qb + math.sqrt(qb * qb - 4.0 * qa * qc)) / (2.0 * qa)
+            else:
+                s = -qc / qb
             ex, ey = (int(math.floor(s * ex / 16.0)) * 16,
                       int(math.floor(s * ey / 16.0)) * 16)
             if ex == 0 and ey == 0:
@@ -2593,13 +2603,14 @@ class Viewer:
                     "skip: viewport %dx%d leaves no room under the "
                     "%d Mpx margin cap" % (w, h, cap >> 20))
                 return False
-            self._margin_debug("capped margin to +%d/+%d px per side"
-                               % (ex, ey))
-        mw, mh = w + 2 * ex, h + 2 * ey
-        eb = (rx0 - ex * self.spp,
-              ry1 - (h + ey) * self.spp,
-              rx0 + (w + ex) * self.spp,
-              ry1 + ey * self.spp)
+            self._margin_debug("capped margin to +%d/+%d px" % (ex, ey))
+        exl, exr = (ex, 0) if sx < 0 else (0, ex)
+        eyb, eyt = (ey, 0) if sy < 0 else (0, ey)
+        mw, mh = w + ex, h + ey
+        eb = (rx0 - exl * self.spp,
+              ry1 - (h + eyb) * self.spp,
+              rx0 + (w + exr) * self.spp,
+              ry1 + eyt * self.spp)
         depth = self._depth()
         self.gen += 1
         self._job_keys[self.gen] = self._render_key("live")
@@ -2629,16 +2640,21 @@ class Viewer:
             "frame_cache": self.frame_cache_on,
             "abstract": self.abstract,
             "visible": self._layers_arg()})
-        self._margin_pending = (self.gen, self.cx, self.cy)
-        self._margin_debug("submitted gen=%d %dx%d" % (self.gen, mw, mh))
+        self._margin_pending = (self.gen, self.cx, self.cy, tuple(vector),
+                                tuple(float(v) for v in eb))
+        self._margin_debug("submitted gen=%d %dx%d toward %s"
+                           % (self.gen, mw, mh, tuple(vector)))
         return False
 
     def _submit_render(self):
         self._debounce = None
         # a user render supersedes any in-flight margin (the generation
         # frontier cancels its raster) - forget it so the next settle
-        # schedules a fresh one
+        # schedules a fresh one. The pan direction that caused this
+        # render (if any) is what its settle prefetches along.
         self._margin_pending = None
+        self._margin_vector = self._pan_vector
+        self._pan_vector = None
         scope = self._pending_scope
         bbox = self.view_bbox()
         w, h = self._viewport_size()
@@ -2864,15 +2880,6 @@ class Viewer:
                     pending = getattr(self, "_margin_pending", None)
                     if pending is not None and pending[0] == res["gen"]:
                         self._margin_pending = None
-                        center = (pending[1], pending[2])
-                    else:
-                        center = ((fb[0] + fb[2]) / 2.0,
-                                  (fb[1] + fb[3]) / 2.0)
-                    # remember the retained margin so settles inside
-                    # it do not re-prefetch (renderd keeps its geometry
-                    # for full-reuse pans whether or not it is shown)
-                    self._margin_landed = (key, fspp, center[0],
-                                           center[1], self.cache)
                     # kept for display either way: the base under a
                     # pan's incoming strip (see _display)
                     self._margin_frame = (pix, fb, fspp, key)
@@ -3032,7 +3039,7 @@ class Viewer:
                     print("%s  view %.1f x %.1f um"
                           % (mode, (b[2] - b[0]) * self.dbu,
                              (b[3] - b[1]) * self.dbu), flush=True)
-                    self._schedule_margin()
+                    self._schedule_margin(self._margin_vector)
                 self._set_status(self.view_bbox(), mode)
         elif kind == "snap":
             if res["seq"] == self._snap_seq \
@@ -3466,16 +3473,13 @@ class Viewer:
             self.cy += dy
         elif direction == "Down":
             self.cy -= dy
-        # §F2R-21: inside a landed margin the render is the label
-        # re-synthesis fast path (memcpy + labels), so skip the pan
-        # debounce - the geometry shows at once from the margin base
-        # and the labels follow as soon as renderd answers
-        base = self._margin_base()
-        bbox = self.view_bbox()
-        inside = base is not None and (
-            base[1][0] <= bbox[0] and base[1][1] <= bbox[1]
-            and base[1][2] >= bbox[2] and base[1][3] >= bbox[3])
-        self.redraw(immediate=inside)
+        # §F2R-17 (user call 2026-09-07): remember the direction - the
+        # settle (or the crop) prefetches one step along it - and skip
+        # the pan debounce so the frozen picture (see _display) is
+        # replaced as soon as renderd can draw the new view
+        self._pan_vector = {"Left": (-1, 0), "Right": (1, 0),
+                            "Up": (0, 1), "Down": (0, -1)}.get(direction)
+        self.redraw(immediate=True)
 
     # ---- keys ----------------------------------------------------------------
     def _command_key(self, ev):
