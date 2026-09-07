@@ -1317,30 +1317,17 @@ fast path는 margin 밖 pan에 그대로 남는다. 검증: 라벨 포함 margin
 유지. **사용자 확인 완료(2026-09-05)**: 라벨 on pan에서 라벨이 즉시
 함께 보임.
 
-**사용자 결정(2026-09-07, 0.12.54) — 다 그려진 뒤 이동**: 실칩에서는
-draw가 길어 margin이 착지하기 전에 pan하면 검은 strip이 여전히 자주
-보였다. 그림은 새 뷰의 모든 픽셀이 이미 그려져 있을 때(표시 중인
-프레임 또는 착지 margin이 뷰를 덮을 때 = crop)만 움직이고, 아니면
-이전 그림을 제자리에 둔 채(`_frame_anchor` 동결) 새 프레임이 착지할
-때 한 번에 이동한다. 드래그는 자체 피드백이 필요하므로 그대로 1:1
-추적(strip 노출 허용). 오버레이는 동결 프레임에, 미니맵·상태줄은
-실제 뷰에 붙는다. 검증: GTK 합성 테스트(미커버 pan은 동결, margin
-커버 시 즉시 이동 + strip은 margin, 새 프레임 착지 시 이동, 드래그는
-이동).
-
-**사용자 결정(2026-09-07, 0.12.54) — 네 방향 margin 폐기, 이동 방향
-한 스텝만 prefetch**: 2w×2h ring은 실칩에서 그리는 데 수초가 걸려
-착지 전에 pan이 일어나므로 실효성이 없었다. 이제 배경 prefetch는
-마지막 커서 pan 방향으로 **한 스텝(50%)만** 확장한 프레임이며(면적
-1.5×, 종전 ~4×), goto·줌·드래그 뒤에는 prefetch하지 않는다. 커서 pan은
-debounce 없이 즉시 제출하고, 그림은 위 "다 그려진 뒤 이동" 규칙으로
-새 프레임이 오기 전까지 제자리를 지킨다. 같은 방향으로 한 번 더
-누르면 crop(0ms)이고 그 즉시 다음 스텝을 다시 prefetch한다. 연속
-이동 최적화는 이번 범위 밖(사용자 지시). 검증: 방향별 프레임 크기·
-위치(Right는 오른쪽으로만 +step, Down은 아래로만), 같은 방향 한 스텝만
-crop, 다음 스텝이 이미 그려져 있으면 재prefetch 없음, 방향 없으면
-prefetch 없음, 4K 한쪽 확장은 16Mpx 안, 커서 pan 즉시 제출 + 방향
-기록.
+**실칩 판정 후 원복(2026-09-07, 0.12.55)**: 0.12.54는 "새 뷰가 다
+그려진 뒤 이동"과 "마지막 pan 방향 한 스텝만 prefetch"를 넣었으나,
+실칩 detail high에서는 렌더가 길어 그림이 멈춰 있는 시간이 조작감을
+해쳤다(사용자 판정: "조작감이 좋지 않아서 그리 좋지 않음"). 사용자
+지시로 `ffb9528`을 되돌려 0.12.53 동작(네 방향 라벨 포함 margin,
+pan 즉시 이동, 착지 margin을 새 strip의 base로 blit)으로 복귀했다.
+따라서 실칩에서 margin 착지 전 pan의 검은 strip은 **미해결**로 남는다.
+남은 선택지(사용자 결정 대기): ① 방향 prefetch만 적용(동결 없이, 첫
+pan은 여전히 strip), ② strip을 검정 대신 이전 프레임의 가장자리
+확장이나 회색으로 채우는 시각 완화, ③ detail high의 draw 자체 단축
+(F2R-03c 등 성능 축).
 
 **리뷰 후속(0.12.49)**: ① HIGH — 레이어 A→B→A 토글 뒤 그림은 byte
 동일하지만 A 전용 레이어의 pick/snap이 실패했다. 전량 재사용 fast path
@@ -1487,11 +1474,11 @@ grab_focus, 없으면 window 포커스 해제)를 캔버스 클릭 시 동기로
 | F2R-14 | P1 | `DONE` | 장시간 세션에서 load 증가(미니맵 이동, fresh 뷰어보다 느림) | LRU 축출 전수 스캔 → O(log n) 색인(0.12.33, §3.18) + `evict N` telemetry — 실칩 장기 세션 재확인 대기 |
 | F2R-15 | P1 | `DONE` | pick/snap이 대부분 "no object here" | 예산 모델 폐기·floe 정렬(0.12.36, §3.19) — 9.8G 실칩 확인 완료. cut 실명(결함 B)은 보류(설계 219259c) |
 | F2R-16 | P1 | `DONE` | pan이 이동량과 무관하게 전체 재raster | 실칩 확인(§3.20): 10% pan draw 378ms(재사용 92%)·50% 845ms(50%) — 이동량 비례 회복. 남은 pan 바닥: collection/trial ~0.3s, plan ~0.2s(비gated 후보) |
-| F2R-17 | P1 | `DONE` | pan 대비 배경 margin prefetch(사용자 제안) | 한 스텝+pad margin·즉시 제출·비행 가드(§3.22) — 사용자 확인 완료: 연속 패닝 거의 무음. P0 리뷰 수정(0.12.43): Rust capability+frame-cache 게이트로 floe(KLayout)에는 적용되지 않음. 0.12.44: margin 폭 정확히 한 스텝/변(−20% raster, 사용자 지적). 실칩(폐쇄망) 확인만 남음 0.12.54(사용자 결정): 네 방향 ring 폐기 → 마지막 pan 방향 한 스텝만 prefetch(실칩 수초 draw), 미커버 pan은 그림 동결 후 착지 시 이동 |
+| F2R-17 | P1 | `DONE` | pan 대비 배경 margin prefetch(사용자 제안) | 한 스텝+pad margin·즉시 제출·비행 가드(§3.22) — 사용자 확인 완료: 연속 패닝 거의 무음. P0 리뷰 수정(0.12.43): Rust capability+frame-cache 게이트로 floe(KLayout)에는 적용되지 않음. 0.12.44: margin 폭 정확히 한 스텝/변(−20% raster, 사용자 지적). 실칩(폐쇄망) 확인만 남음 0.12.55: 0.12.54(방향 prefetch+동결) 실칩 detail high 조작감 저하로 원복, 검은 strip 미해결 |
 | F2R-18 | P2 | `DONE` | exact frame cache가 retained와 중복(사용자 결정) | payload cache 제거, retained 3-entry LRU(scale별)로 통합(0.12.41, §3.23) — zoom 왕복은 k=0 전량 재사용으로 승계 |
 | F2R-19 | P1 | `DONE` | 수직 pan에서 가장자리 깨짐 | 재사용 row 매핑 부호 교정 + height mod-16 guard(0.12.42, §3.24) — 8방향 pixel-diff 재확인, 실칩 재확인 대기 |
 | F2R-20 | P1 | `DONE` | retained frame byte 예산·margin 픽셀 캡·전체 복제 제거(리뷰 HIGH) | `FLOE_RUST_RETAINED_MB`(256)·`FLOE_MARGIN_MAX_MPIX`(16)·raw 2-part 게시·레이블 없는 clone 생략·Python slice 복제 삭제(§3.25). 0.12.47: frame-cache off는 keep/clone/store도 안 함. 4K 실측 없음 |
-| F2R-21 | P2 | `DONE` | margin crop 라벨 정확도(리뷰 MEDIUM ×2) | margin은 geometry 전용, 라벨 on이면 crop 없이 renderd 라벨 재합성 fast path(page plan·decode 생략), 라벨 off만 crop; bin-정렬 declutter 유지; oracle: 라벨 off crop byte 동일 + 라벨 on 전량 재사용 pan byte 동일(§3.26a, 0.12.48). 0.12.49: fast path는 published scene이 요청을 서비스할 때만(레이어 토글 pick 회귀), 포함하는 margin은 교체 대신 유지. 0.12.50: 착지 margin을 표시 base로 blit해 pan 새 영역 검정 제거 — 사용자 확인 완료. 0.12.53(사용자 결정): 라벨 포함 margin 복귀, pan은 라벨 포함 0ms crop, 꼬리 겹침은 표시 규약으로 수용, truncated margin만 crop 제외 — 사용자 확인 완료. 0.12.54(사용자 결정): 미커버 pan은 그림 동결, 새 프레임 착지 시 이동(실칩 검은 strip 대응). 실칩 확인 남음 |
+| F2R-21 | P2 | `DONE` | margin crop 라벨 정확도(리뷰 MEDIUM ×2) | margin은 geometry 전용, 라벨 on이면 crop 없이 renderd 라벨 재합성 fast path(page plan·decode 생략), 라벨 off만 crop; bin-정렬 declutter 유지; oracle: 라벨 off crop byte 동일 + 라벨 on 전량 재사용 pan byte 동일(§3.26a, 0.12.48). 0.12.49: fast path는 published scene이 요청을 서비스할 때만(레이어 토글 pick 회귀), 포함하는 margin은 교체 대신 유지. 0.12.50: 착지 margin을 표시 base로 blit해 pan 새 영역 검정 제거 — 사용자 확인 완료. 0.12.53(사용자 결정): 라벨 포함 margin 복귀, pan은 라벨 포함 0ms crop, 꼬리 겹침은 표시 규약으로 수용, truncated margin만 crop 제외 — 사용자 확인 완료. 실칩(폐쇄망) 체감 확인 남음 |
 | F2R-22 | P2 | `DONE` | pick/snap의 renderd 입력 스레드 점유(리뷰 MEDIUM) | 질의 스레드+kind별 seq frontier(superseded 중단), `FLOE_RUST_QUERY_INLINE=1` 킬 스위치(§3.26b) |
 | F2R-23 | P1 | `TODO` | 불완전 결과·fallback 관측성(§3.27) | snap partial 표시/오류, frame 생략·footprint 융합 플래그, mini-bin overflow·실패 trial 시간·Pts fallback·mask fallback 계측, renderd RSS를 frame line에 |
 | F2R-24 | P2 | `TODO` | decode 전 byte admission(§3.27) | 페이지 메타 크기 추정으로 뷰당 상한을 decode 전에 판정. 03c와 별개 |
