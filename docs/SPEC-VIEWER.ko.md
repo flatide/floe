@@ -27,12 +27,14 @@
 - **Tab = 오버레이 3-상태 순환**(2026-08-21, 구 2-상태 토글에서
   변경): `overlay_mode` 0→1→2→0. **0 = 모두 표시**. **1 = 현재
   (점프된) 에러 외 에러 숨김** — 페이지 마커·gold 선택 스탬프만
-  스킵(점프 마크·CD/수동 룰러·칩·디자인 선택·스냅 유지),
-  `_drc_hits`가 비어 숨은 마커는 pick/툴팁 불가. **2 = 전부
+  스킵(점프 마크·그 **note 패널**·CD/수동 룰러·칩·디자인 선택·스냅
+  유지), `_drc_hits`가 비어 숨은 마커는 pick/툴팁 불가. **2 = 전부
   숨김**(2026-08-19 flateyes 패리티 상태) — `_draw_overlays` 조기
-  종료(**줌 밴드만 유지**), `_drc_hits` 비움, **룰러 거리 칩도
-  숨김**(`_update_labels` — 칩은 위젯이라 페인트 게이트와 별도,
-  잔존 실사고). 상태줄로 현 상태 표기. ISO_Left_Tab 포함.
+  종료(**줌 밴드만 유지**), `_drc_hits` 비움, **룰러 거리 칩·note
+  패널도 숨김**(`_update_labels`/`_update_note_labels` — 위젯이라
+  페인트 게이트와 별도, 잔존 실사고). note 패널은 `overlay_mode!=2`
+  이고 점프 마크가 살아있는 동안만 표시. 룰러는 **Esc로 제거**(Tab
+  아님). 상태줄로 현 상태 표기. ISO_Left_Tab 포함.
 - `redraw()` → `_clamp_view()`: spp ∈ [MIN_SPP=0.01, fit_spp×FIT_ZOOM_OUT
   (16)]; 팬 한계 = 다이 bbox를 **변당 10% 확장**한 박스(2026-08-18:
   다이 가장자리에 붙박이면 외곽 피처 밴드 줌 드래그 공간이 없음);
@@ -131,10 +133,14 @@
   `floe`(= view)는 레이아웃 없이 뜬다 — `_apply_cache(None)` =
   meta None·worker None·레이어 패널 빈 상태·타이틀 APP·상태줄
   "no layout"; redraw/fit/_clamp_view/미니맵/캔버스·미니맵 입력
-  핸들러가 cache None에서 조기 반환. **File > load layout…** =
-  `open_file()`(인스턴스 포워딩과 동일 경로: 인덱스 필수, 없으면
-  floe-index vfs 안내 모달) → `_apply_cache(c)`가 워커 기동·패널
-  재구축, 창이 이미 실현돼 있으면(_did_fit) 즉시 fit. 실행 중
+  핸들러가 cache None에서 조기 반환. **File > load layout…**: 픽에
+  **VFS 캐시가 없으면 "Build it now?" Yes/No** → Yes면
+  `_vfs_index_and_load`가 `floe-index vfs <src> <src>.floe`를 모달
+  로그(`_index_modal`, cancel=terminate)로 돌린 뒤 `open_file()`로
+  로드(2026-08-28); 캐시가 있으면 곧장 `open_file()`(인스턴스
+  포워딩과 동일 경로) → `_apply_cache(c)`가 워커 기동·패널 재구축,
+  창이 이미 실현돼 있으면(_did_fit) 즉시 fit. 인스턴스 포워딩 경로
+  자체는 여전히 인덱스 필수(다이얼로그만 인덱싱 제안). 실행 중
   인스턴스에 빈 요청("")이 포워딩되면 창만 present(옵션 무시).
 - **메뉴 바**(2026-08-22, `_build_menubar`): File(**load layout**·
   clip·copy·quit) /
@@ -174,11 +180,13 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
 - **open .db… 다이얼로그**(2026-08-14): 파일 타입은 `*.db`만.
   선택한 .db는 직접 파스하지 않고 **오직 `<db>.ice`(pack)만
   로딩** — 신선한 현-레이아웃 pack이 없으면(부재/스테일/v1/구
-  레이아웃)
-  `floe-index drc <db> --pack`을 실행하고 로그를 **모달
-  다이얼로그**에 실시간 표시(cancel = terminate) 후 로딩
-  (`_drc_open_db`/`_drc_pack_and_load`, 바이너리는
-  vfsclient.find_binary).
+  레이아웃) **"Build it now?" Yes/No로 물은 뒤**(2026-08-28,
+  `_ask_yes_no`) Yes면 `floe-index drc <db>`(--pack은 no-op이라
+  생략)를 실행하고
+  로그를 공용 **모달 다이얼로그**(`_index_modal`, cancel =
+  terminate)에 실시간 표시 후 로딩(`_drc_open_db`/
+  `_drc_pack_and_load`, 바이너리는 vfsclient.find_binary). load
+  layout의 VFS 인덱싱과 같은 헬퍼를 공유.
 - **룰 검색**(2026-08-15/18): 검색 박스는 **룰 목록 상단**(구
   prev/next 버튼 자리 nav 행에서 이동 — n/p 키는 유지). 룰 이름
   부분일치(대소문자 무관) 실시간 필터. TreeView 내장 typeahead

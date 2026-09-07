@@ -23,6 +23,7 @@ from . import __version__
 from . import cache as cache_mod
 from . import drc as drc_mod
 from . import fillpat
+from .hangul import HangulComposer, TextViewEditable
 from .product import name as product_name
 from .rust_render import _env_int
 from .service import (make_render_worker, DETAIL_PX, DETAIL_LEVELS,
@@ -186,6 +187,10 @@ LAYER_NAME_MARGIN_CHARS = 1.2     # swatch -> name: over a full glyph
 LAYER_STRIKE_RGB = (242, 242, 242)  # hidden-layer strike: bright,
                                     # readable over dimmed text/swatch
 LAYER_SWATCH_WH = (31, 14)  # layer-row color/fill box, fixed px
+LAYER_PICK_BG = "#FFD819"   # object-pick: opaque yellow box behind the
+                            # layer id (number column), drawn over the
+                            # blue row selection with dark text on top
+LAYER_PICK_FG = "#101010"   # id text on the yellow pick box (contrast)
 
 
 def import_gtk():
@@ -217,6 +222,18 @@ def import_gtk():
             "%s: cannot open display %s (X session not reachable)\n"
             % (APP, os.environ.get("DISPLAY", "")))
         sys.exit(3)
+    # Pin the theme so the UI looks the same on the dev Mac and the
+    # remote-X deployment: HighContrast draws solid, clearly outlined,
+    # always-visible (non-overlay) scrollbars/widgets - far more legible
+    # than the default flat theme (user call 2026-08-29). GTK_THEME= in
+    # the environment still overrides this for anyone who wants another.
+    if not os.environ.get("GTK_THEME"):
+        try:
+            settings = Gtk.Settings.get_default()
+            if settings is not None:
+                settings.set_property("gtk-theme-name", "HighContrast")
+        except (AttributeError, TypeError):
+            pass
 
 
 def fill_rect(buf, x, y, w, h, rgba):
@@ -626,12 +643,59 @@ def _remote_x_scroll_repaint(scroller):
     shrink from the top and bottom as you scroll. Invalidating the
     scroller per adjustment tick forces a full repaint of what is
     on screen - the panels hold at most a few dozen visible rows,
-    so the cost is negligible on any display path."""
+    so the cost is negligible on any display path.
+
+    queue_draw alone only SCHEDULES the repaint, and while a
+    scrollbar slider is held the pending redraw can sit behind the
+    drag: after a horizontal offset a vertical drag then looked
+    frozen until the next event (a wheel tick) flushed it. Force the
+    invalidation to paint synchronously so each step lands at once.
+
+    The scrollbars have their OWN GdkWindows, so the scroller's
+    queue_draw does not repaint the SLIDER. And a synchronous flush
+    on EVERY tick backfires on a fast wheel burst: the content
+    (adjustment value) lands correctly but the rapid per-tick paints
+    coalesce and the slider's FINAL frame is dropped - it freezes
+    mid-track until the pointer enters the scrollbar (user report
+    2026-08-29, GTK3-Quartz). So each tick only INVALIDATES cheaply,
+    and a short debounce forces one authoritative synchronous repaint
+    once the burst settles, which always lands the final slider."""
+    bars = (lambda: (scroller, scroller.get_vscrollbar(),
+                     scroller.get_hscrollbar()))
+    settle = {"id": 0}
+
+    def _flush(widget):
+        if widget is None:
+            return
+        widget.queue_draw()
+        win = widget.get_window()
+        if win is not None:
+            try:
+                win.process_updates(True)  # paint now, not at idle
+            except (AttributeError, TypeError):
+                pass  # removed in some GTK3 builds; queue_draw stands
+
+    def _settled():
+        settle["id"] = 0
+        for w in bars():
+            _flush(w)
+        return False  # one-shot
+
+    def repaint(*_a):
+        # cheap per-tick invalidation keeps slow scrolling smooth
+        for w in bars():
+            if w is not None:
+                w.queue_draw()
+        # ...and a debounced synchronous repaint guarantees the final
+        # slider position after a fast burst, without hammering
+        # process_updates on every tick (which drops the last frame)
+        if settle["id"]:
+            GLib.source_remove(settle["id"])
+        settle["id"] = GLib.timeout_add(40, _settled)
     for adj in (scroller.get_vadjustment(),
                 scroller.get_hadjustment()):
         if adj is not None:
-            adj.connect("value-changed",
-                        lambda *_a: scroller.queue_draw())
+            adj.connect("value-changed", repaint)
     try:
         scroller.set_kinetic_scrolling(False)
     except AttributeError:
@@ -774,9 +838,13 @@ class LayerRow(object):
             width, height, width * 3)
 
     def _paint(self):
-        # a geometry pick no longer tints the text - it draws a
-        # white outline box instead (2026-08-22: the filled pick
-        # highlight was mistaken for layer SELECTION)
+        # a geometry pick marks the layer ID column (the number in
+        # FRONT of the fill swatch) with an opaque yellow box behind
+        # the digits (2026-08-29): Pango's background draws it under
+        # the glyphs, so the row-selection blue underneath is covered
+        # yet the id text stays readable in dark ink on top. Smaller
+        # than the full-row selection (id column only), and on top of
+        # it because the label paints after the row's CSS background.
         fg = "#d9f2ff" if self._selected else "#ffffff"
         # hidden = ONE bright line cairo-drawn edge to edge by
         # _draw_strike (no per-span pango strike: it vanished in
@@ -792,10 +860,17 @@ class LayerRow(object):
             '<span face="monospace" size="small" '
             'foreground="%s">%s</span>'
             % (fg, GLib.markup_escape_text(self._marker)))
-        self._nlbl.set_markup(
-            '<span face="monospace" size="small" '
-            'foreground="%s">%s</span>'
-            % (fg, GLib.markup_escape_text(self._num)))
+        if self._picked:
+            self._nlbl.set_markup(
+                '<span face="monospace" size="small" '
+                'foreground="%s" background="%s">%s</span>'
+                % (LAYER_PICK_FG, LAYER_PICK_BG,
+                   GLib.markup_escape_text(self._num)))
+        else:
+            self._nlbl.set_markup(
+                '<span face="monospace" size="small" '
+                'foreground="%s">%s</span>'
+                % (fg, GLib.markup_escape_text(self._num)))
         self._lbl.set_markup(
             '<span face="monospace" size="small" '
             'foreground="%s">%s</span>'
@@ -805,17 +880,11 @@ class LayerRow(object):
 
     def _draw_strike(self, widget, cr):
         """Hidden layer: one continuous bright line across the FULL
-        row - text, swatch, margins and trailing space alike.
-        A geometry PICK outlines the row with a white 1px box
-        (no fill - 2026-08-22, the filled highlight read as layer
-        selection)."""
+        row - text, swatch, margins and trailing space alike. (The
+        geometry-pick highlight is the yellow id box painted by the
+        number label's Pango background - see _paint, 2026-08-29 -
+        not a row outline.)"""
         alloc = widget.get_allocation()
-        if self._picked:
-            cr.set_source_rgb(1.0, 1.0, 1.0)
-            cr.set_line_width(1)
-            cr.rectangle(0.5, 0.5, alloc.width - 1,
-                         alloc.height - 1)
-            cr.stroke()
         if self._active:
             return False
         y = max(0, (alloc.height - self._row_pad) // 2)
@@ -833,7 +902,7 @@ class LayerRow(object):
         if on == self._picked:
             return
         self._picked = on
-        self.widget.queue_draw()   # outline drawn by _draw_strike
+        self._paint()   # yellow id box via the number-label markup
 
     def set_color(self, color):
         """Palette recolor: rebuild the swatch in place."""
@@ -1105,6 +1174,7 @@ class Viewer:
         self._mono_saved = False    # mono state before highlight
         self._drc_hl_res = None     # (view key, [(kind, pts dbu)])
         self._labels = []           # Gtk.Label pool for ruler distances
+        self._note_panel = None     # top-left translucent DRC note panel
 
         self.window = Gtk.Window(title=APP)
         self.window.set_default_size(1280, 860)
@@ -1197,13 +1267,26 @@ class Viewer:
             b".floe-layers-bg { background-color: #000000; } "
             b".floe-layer-selected, .floe-layer-selected * "
             b"{ background-color: #31566d; } "
+            # scrollbars: a plain rectangular grey slider on a
+            # near-black trough - traditional square corners, solid
+            # fill (no gradient), narrow. opacity:1 keeps it from
+            # auto-hiding on the macOS GTK theme.
             b".floe-layers-frame scrollbar trough "
-            b"{ background-color: #000000; background-image: none; } "
-            b".floe-layers-frame scrollbar slider, "
-            b".floe-layers-frame scrollbar slider:hover, "
+            b"{ background-color: #0a0a0a; background-image: none; "
+            b"border: none; padding: 0; } "
+            b".floe-layers-frame scrollbar slider "
+            b"{ background-image: none; background-color: #9a9a9a; "
+            b"border: 1px solid #2a2a2a; border-radius: 0; "
+            b"min-width: 9px; min-height: 9px; margin: 1px; "
+            b"opacity: 1; } "
+            b".floe-layers-frame scrollbar slider:hover "
+            b"{ background-color: #c0c0c0; } "
             b".floe-layers-frame scrollbar slider:active "
-            b"{ background-color: #ffffff; background-image: none; "
-            b"border-color: #ffffff; opacity: 1; }")
+            b"{ background-color: #e0e0e0; } "
+            # DRC note panel: flateyes-style translucent top-left chip
+            b".floe-note-panel { background-color: rgba(0,0,0,0.6); "
+            b"color: #f0f0f0; padding: 4px 10px; border-radius: 4px; "
+            b"font-size: 12px; }")
         Gtk.StyleContext.add_provider_for_screen(
             Gdk.Screen.get_default(), css,
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
@@ -2034,6 +2117,7 @@ class Viewer:
         # labels place BEFORE the pixbuf is handed over: their dotted
         # leaders are stamped into this frame
         self._update_labels(obox, ospp, disp)
+        self._update_note_labels(obox, ospp)
         self.image.set_from_pixbuf(disp)
         self._update_minimap(bbox)
 
@@ -2393,6 +2477,46 @@ class Viewer:
                 stamp_dotted(disp, end, foot, None, RULER_CORE)
         for lbl in self._labels[len(vis):]:
             lbl.hide()
+
+    def _update_note_labels(self, obox, ospp):
+        """The DOUBLE-CLICKED error's note as a translucent panel at
+        the canvas top-left (flateyes note style). Shows while a jump
+        mark is live (double-click / .,-step) and the jumped error is
+        still on screen (overlay_mode 0/1); it disappears only when Tab
+        turns ALL overlays off (mode 2) (user calls 2026-08-28)."""
+        panel = self._note_panel
+        db = self._drc
+        note = None
+        if db is not None and hasattr(db, "get_note") \
+                and self.overlay_mode != 2 and self.drc_mark is not None \
+                and self._drc_pos >= 0 and self._drc_cum:
+            jci = bisect.bisect_right(self._drc_cum, self._drc_pos) - 1
+            if 0 <= jci < len(db.checks):
+                jei = self._drc_pos - self._drc_cum[jci]
+                if 0 <= jei < len(db.checks[jci].errors):
+                    note = db.get_note(jci, jei)
+        if not note:
+            if panel is not None:
+                panel.hide()
+            return
+        if panel is None:
+            panel = self._note_panel = Gtk.Label()
+            panel.set_halign(Gtk.Align.START)
+            panel.set_valign(Gtk.Align.START)
+            panel.set_margin_top(10)
+            panel.set_margin_start(10)
+            panel.set_line_wrap(True)
+            panel.set_max_width_chars(44)
+            panel.set_xalign(0)
+            panel.set_no_show_all(True)
+            panel.get_style_context().add_class("floe-note-panel")
+            self.overlay.add_overlay(panel)
+            try:
+                self.overlay.set_overlay_pass_through(panel, True)
+            except AttributeError:  # GTK < 3.18
+                pass
+        panel.set_text(note)
+        panel.show()
 
     # ---- drawing / rendering ------------------------------------------------
     def _margin_enabled(self):
@@ -3383,11 +3507,14 @@ class Viewer:
                 ci, ei = hit
                 try:
                     e = self._drc.checks[ci].errors[ei]
-                    tip = "%s #%d(%d)%s" % (
+                    noted = (hasattr(self._drc, "get_note")
+                             and self._drc.get_note(ci, ei))
+                    tip = "%s #%d(%d)%s%s" % (
                         self._drc.checks[ci].name, ei + 1, e.num,
                         " · waived"
                         if self._drc_waived(self._drc, ci, ei)
-                        else "")
+                        else "",
+                        " · note" if noted else "")
                 except Exception:
                     tip = None
         if tip != self._drc_tip:
@@ -3576,9 +3703,11 @@ class Viewer:
         elif name == "w":
             self._drc_waive_key()
         elif name == "n":
-            self._drc_step(1)
-        elif name == "p":
-            self._drc_step(-1)
+            self._drc_note_key()
+        elif name in ("period", "KP_Decimal"):
+            self._drc_step(1)     # next error (n freed for notes)
+        elif name == "comma":
+            self._drc_step(-1)    # previous error
         elif name == "q":
             self._confirm_quit()
         elif len(name) == 1 and name.isdigit():
@@ -4290,10 +4419,17 @@ class Viewer:
         item(m, "open results .db…", self._drc_open_dialog)
         item(m, "load SVRF rules…", self._drc_rules_dialog)
         sep(m)
-        item(m, "next error\tn", lambda: self._drc_step(1))
-        item(m, "previous error\tp", lambda: self._drc_step(-1))
+        item(m, "next error\t.", lambda: self._drc_step(1))
+        item(m, "previous error\t,", lambda: self._drc_step(-1))
         item(m, "waive/unwaive current error\tw",
              self._drc_waive_key)
+        item(m, "save waives as…", self._drc_waive_save_dialog)
+        item(m, "load waives…", self._drc_waive_load_dialog)
+        sep(m)
+        item(m, "note (add/edit)\tn", self._drc_note_key)
+        item(m, "clear note of selection", self._drc_note_clear)
+        item(m, "save notes as…", self._drc_note_save_dialog)
+        item(m, "load notes…", self._drc_note_load_dialog)
         sep(m)
         check(m, "error box-select mode\te", self._esel_toggle,
               lambda: self.mode == "esel")
@@ -4305,11 +4441,10 @@ class Viewer:
         return mb
 
     def _load_layout_dialog(self):
-        """File > load layout… (user call 2026-08-22): open an
-        INDEXED source in place - the same open_file path an
-        instance-forwarded `floe view <file>` takes; the viewer
-        never builds a VFS cache itself, so an unindexed pick gets
-        the floe-index hint."""
+        """File > load layout… (user call 2026-08-22): open a source
+        in place, the same open_file path an instance-forwarded
+        `floe view <file>` takes. When the pick has no VFS cache it
+        ASKS to build one and indexes on Yes (user call 2026-08-28)."""
         dlg = Gtk.FileChooserDialog(title="load layout",
                                     parent=self.window,
                                     action=Gtk.FileChooserAction.OPEN)
@@ -4340,6 +4475,18 @@ class Viewer:
         # parent by itself: restore now, and again after the load
         # rebuilds the panels (open_file)
         self._restore_keys()
+        # no cache yet: offer to build the VFS index, then load
+        if path and not cache_mod.Cache(path).exists():
+            if not self._ask_yes_no(
+                    "No VFS index for\n%s\n\nBuild it now?"
+                    % os.path.basename(path)):
+                self._set_live_status(
+                    "VFS index needed: %s index %s"
+                    % (APP, os.path.basename(path)))
+                self._restore_keys()
+                return
+            self._vfs_index_and_load(path)
+            return
         try:
             err = self.open_file(path)
         except Exception as exc:
@@ -4355,6 +4502,32 @@ class Viewer:
             info.run()
             info.destroy()
             self._restore_keys()
+
+    def _vfs_index_and_load(self, src):
+        """Build the VFS cache for `src` (floe-index vfs) with its log
+        in a modal dialog, then open it in place."""
+        from .vfsclient import find_binary
+        try:
+            bin_ = find_binary()
+        except RuntimeError as exc:
+            self._set_live_status("VFS indexing failed: %s" % exc)
+            return
+        outdir = src + ".floe"
+
+        def on_success():
+            try:
+                err = self.open_file(src)
+            except Exception as exc:
+                err = "ERR %s" % exc
+            if err:
+                self._set_live_status(
+                    err[4:] if err.startswith("ERR ") else err)
+
+        # jobs 12 default, LOD off (retirement) - user call 2026-08-28
+        self._index_modal("indexing layout…",
+                          [bin_, "vfs", src, outdir,
+                           "--jobs", "12", "--no-lod"],
+                          on_success, "VFS indexing")
 
     def _about_dialog(self):
         """Help > About (flateyes show_about parity): plain-text
@@ -4619,7 +4792,7 @@ class Viewer:
             btn.set_active(False)
             self._set_live_status(
                 "the in-view filter needs a packed index: "
-                "floe-index drc <db> --pack")
+                "floe-index drc <db>")
             return
         self._drc_hl = on
         self._drc_hl_res = None
@@ -4725,9 +4898,9 @@ class Viewer:
 
     def _drc_open_db(self, path):
         """Dialog flow (user call 2026-08-14): the user PICKS the
-        ASCII .db, floe LOADS only its packed .ice - building the
-        pack first (modal log dialog) when it is missing, stale or
-        an old layout/v1 sidecar."""
+        ASCII .db, floe LOADS only its packed .ice. When no usable
+        pack exists (missing, stale or an old layout/v1 sidecar) it
+        ASKS before building one (user call 2026-08-28)."""
         from . import drc as drc_mod
         side = path + ".ice"
         if os.path.exists(side):
@@ -4739,21 +4912,63 @@ class Viewer:
             else:
                 self.load_drc(path, db=db)  # adopt the fresh pack
                 return
+        if not self._ask_yes_no(
+                "No DRC index for\n%s\n\nBuild it now?"
+                % os.path.basename(path)):
+            self._set_live_status(
+                "DRC index needed: floe-index drc %s"
+                % os.path.basename(path))
+            return
         self._drc_pack_and_load(path)
 
     def _drc_pack_and_load(self, path):
-        """Run `floe-index drc <db> --pack` with its log in a MODAL
+        """Run `floe-index drc <db>` with its log in a MODAL
         dialog, then load the pack."""
-        import subprocess
-        import threading
+        from . import drc as drc_mod
         from .vfsclient import find_binary
         try:
             bin_ = find_binary()
         except RuntimeError as exc:
             self._set_live_status("DRC indexing failed: %s" % exc)
             return
-        dlg = Gtk.Dialog(title="indexing DRC results…",
-                         transient_for=self.window, modal=True)
+
+        def on_success():
+            self.load_drc(path)
+            if not isinstance(self._drc, drc_mod.IcePack):
+                # the indexer that just ran wrote a layout the reader
+                # refuses: it is an OUTDATED binary
+                self._set_live_status(
+                    "DRC pack from %s is an old layout - rebuild it: "
+                    "cd rust && cargo build --release" % bin_)
+
+        self._index_modal("indexing DRC results…",
+                          [bin_, "drc", path, "--jobs", "12"],
+                          on_success, "DRC indexing")
+
+    def _ask_yes_no(self, text, default_yes=True):
+        """Modal Yes/No question, centered on the parent; returns
+        True for Yes. Refocuses the parent on close (quartz)."""
+        dlg = Gtk.MessageDialog(
+            transient_for=self.window, modal=True,
+            message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.YES_NO, text=text)
+        self._center_on_parent(dlg)
+        self._only_close_button(dlg)
+        dlg.set_default_response(Gtk.ResponseType.YES if default_yes
+                                 else Gtk.ResponseType.NO)
+        resp = dlg.run()
+        dlg.destroy()
+        self.window.present()
+        return resp == Gtk.ResponseType.YES
+
+    def _index_modal(self, title, argv, on_success, fail):
+        """Run an indexer subprocess with its log streamed into a
+        MODAL dialog (cancel terminates it); call on_success() on a
+        clean exit. Shared by the DRC pack and the VFS index builds."""
+        import subprocess
+        import threading
+        dlg = Gtk.Dialog(title=title, transient_for=self.window,
+                         modal=True)
         dlg.set_default_size(600, 340)
         tv = Gtk.TextView()
         tv.set_editable(False)
@@ -4766,15 +4981,15 @@ class Viewer:
         sc.add(tv)
         dlg.get_content_area().pack_start(sc, True, True, 4)
         dlg.add_button("cancel", Gtk.ResponseType.CANCEL)
+        self._center_on_parent(dlg)
         dlg.show_all()
         try:
             proc = subprocess.Popen(
-                [bin_, "drc", path, "--pack"],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1)
+                argv, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True, bufsize=1)
         except OSError as exc:
             dlg.destroy()
-            self._set_live_status("DRC indexing failed: %s" % exc)
+            self._set_live_status("%s failed: %s" % (fail, exc))
             return
         state = {"cancelled": False}
 
@@ -4795,20 +5010,13 @@ class Viewer:
 
         def done(rc):
             dlg.destroy()
+            self.window.present()
             if state["cancelled"]:
-                self._set_live_status("DRC indexing cancelled")
+                self._set_live_status("%s cancelled" % fail)
             elif rc == 0:
-                self.load_drc(path)
-                if not isinstance(self._drc, drc_mod.IcePack):
-                    # the indexer that just ran wrote a layout the
-                    # reader refuses: it is an OUTDATED binary
-                    self._set_live_status(
-                        "DRC pack from %s is an old layout - "
-                        "rebuild it: cd rust && cargo build "
-                        "--release" % bin_)
+                on_success()
             else:
-                self._set_live_status(
-                    "DRC indexing failed (rc %d)" % rc)
+                self._set_live_status("%s failed (rc %d)" % (fail, rc))
             return False
 
         def pump():
@@ -5332,10 +5540,14 @@ class Viewer:
         sel = self._drc_sel
         eset = (sel[3] if sel is not None and sel[0] == ci
                 else frozenset())
-        # cell width follows the page's widest LOCAL number
+        # errors carrying a note get a "*" prefix in the grid
+        noted = ({ei for ei in eis if db.get_note(ci, ei)}
+                 if hasattr(db, "get_note") else set())
+        # cell width follows the page's widest LOCAL number (+1 for
+        # the "*" when any cell on the page is noted)
         maxloc = (max(eis) + 1) if eis else 1
         probe = win._grid.create_pango_layout(
-            "0" * max(2, len(str(maxloc))))
+            "0" * (max(2, len(str(maxloc))) + (1 if noted else 0)))
         self._drc_cellw = probe.get_pixel_size()[0] + 18
         avail = win._grid.get_allocation().width
         n = max(1, min(24, avail // max(24, self._drc_cellw)))
@@ -5346,6 +5558,8 @@ class Viewer:
 
         def cellfmt(ei):
             t = "%d" % (ei + 1)      # rule-local numbering
+            if ei in noted:
+                t = "*" + t          # note present (user call 2026-08-28)
             fg = ("#00e676" if self._drc_waived(db, ci, ei)
                   else "#ff5252")    # waived green / not-waived red
             if ei in eset:
@@ -5461,7 +5675,7 @@ class Viewer:
         if not hasattr(db, "set_status"):
             self._set_live_status(
                 "waive needs a packed index: "
-                "floe-index drc <db> --pack")
+                "floe-index drc <db>")
             return True
         self._drc_cell_mark(row, j)
         self._drc_show_detail(ci, ei)
@@ -5505,8 +5719,8 @@ class Viewer:
             for ei in eis:
                 db.set_status(ci, ei, val)
         except OSError as exc:
-            self._set_live_status("waive failed (%s) - is the .ice "
-                                  "writable?" % exc)
+            self._set_live_status("waive failed (%s) - is the "
+                                  "waive store writable?" % exc)
             return
         self._drc_hl_res = None
         # the jump mark stores a RESOLVED color: re-derive it for
@@ -5582,7 +5796,7 @@ class Viewer:
         if not hasattr(db, "set_status"):
             self._set_live_status(
                 "waive needs a packed index: "
-                "floe-index drc <db> --pack")
+                "floe-index drc <db>")
             return
         sel = self._drc_sel
         if sel is not None and sel[1]:
@@ -5606,6 +5820,393 @@ class Viewer:
         self._drc_set_waived(ci, [ei],
                              not self._drc_waived(db, ci, ei))
 
+    def _drc_current_target(self):
+        """(ci, [ei,...]) for the gold selection, else the current or
+        jumped error, else None - the target of note/waive actions."""
+        sel = self._drc_sel
+        if sel is not None and sel[1]:
+            return sel[0], list(sel[1])
+        db = self._drc
+        ci = ei = None
+        f = self._drc_focus
+        if f is not None:
+            ci, ei = f[0], f[1]
+        elif self._drc_pos >= 0 and self._drc_cum:
+            ci = bisect.bisect_right(self._drc_cum, self._drc_pos) - 1
+            ei = self._drc_pos - self._drc_cum[ci]
+        if ci is None or db is None \
+                or ei >= len(db.checks[ci].errors):
+            return None
+        return ci, [ei]
+
+    def _drc_note_key(self):
+        """n: add/edit a note SHARED by the selected errors (or the
+        current/jumped one); empty text clears it. Notes autosave to
+        a per-reviewer flateyes .fe sidecar beside the pack."""
+        db = self._drc
+        if db is None:
+            return
+        if not hasattr(db, "set_note"):
+            self._set_live_status(
+                "note needs a packed index: floe-index drc <db>")
+            return
+        target = self._drc_current_target()
+        if target is None:
+            self._set_live_status(
+                "note는 선택/현재 에러 대상입니다: 먼저 선택·클릭·점프하세요")
+            return
+        ci, eis = target
+        texts = set(db.get_note(ci, e) for e in eis)
+        prefill = (texts.pop() if len(texts) == 1 and None not in texts
+                   else "")
+        text = self._drc_note_dialog(prefill, len(eis))
+        if text is None or (prefill and text == prefill):
+            return
+        db.set_note([db.error_gid(ci, e) for e in eis], text)
+        self._drc_note_refresh(ci, eis)
+        self._set_live_status(
+            ("note set on %d error(s)" % len(eis)) if text
+            else ("note cleared on %d error(s)" % len(eis)))
+
+    def _drc_note_clear(self):
+        """Clear the note(s) on the selected/current error(s) - the
+        group-clear path (select the noted errors, then this)."""
+        db = self._drc
+        if db is None or not hasattr(db, "clear_note"):
+            return
+        target = self._drc_current_target()
+        if target is None:
+            self._set_live_status("먼저 note 있는 에러를 선택하세요")
+            return
+        ci, eis = target
+        db.clear_note([db.error_gid(ci, e) for e in eis])
+        self._drc_note_refresh(ci, eis)
+        self._set_live_status("note cleared on %d error(s)" % len(eis))
+
+    def _drc_note_refresh(self, ci, eis):
+        """Repaint after a note change: the grid (the "*" prefix), the
+        detail pane if it shows one of these errors, and the canvas.
+        Note membership never changes the list, so the grid keeps its
+        page/selection - only the cell text is rebuilt."""
+        self._drc_hl_res = None
+        if getattr(self, "_drc_grid_ci", None) == ci \
+                and self._drcwin is not None:
+            self._drc_grid_fill(ci)
+        shown = None
+        f = self._drc_focus
+        if f is not None and f[0] == ci:
+            shown = f[1]
+        elif self._drc_pos >= 0 and self._drc_cum:
+            c2 = bisect.bisect_right(self._drc_cum, self._drc_pos) - 1
+            if c2 == ci:
+                shown = self._drc_pos - self._drc_cum[ci]
+        self._drc_show_detail(ci, shown if shown is not None else eis[0])
+        self._display()
+
+    def _drc_note_dialog(self, prefill, count):
+        """Modal note editor (flateyes-style): multi-line text with
+        OK/Cancel and a built-in dubeolsik hangul composer for hosts
+        without an input method (Shift+Space toggles it). Returns the
+        text (empty string = clear) or None on cancel."""
+        title = "Edit Note" if prefill else "Note"
+        if count > 1:
+            title += "  (%d errors)" % count
+        dlg = Gtk.Dialog(title=title, transient_for=self.window,
+                         modal=True)
+        dlg.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dlg.add_button("OK", Gtk.ResponseType.OK)
+        dlg.set_default_response(Gtk.ResponseType.OK)
+        self._center_on_parent(dlg)
+        view = Gtk.TextView()
+        view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        editable = TextViewEditable(view)
+        if prefill:
+            editable.set_text(prefill)
+            editable.set_position(len(prefill))
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.AUTOMATIC,
+                          Gtk.PolicyType.AUTOMATIC)
+        scroll.set_shadow_type(Gtk.ShadowType.IN)
+        scroll.set_size_request(360, 100)
+        scroll.add(view)
+        # built-in hangul input for hosts with no IME (flateyes port)
+        hangul = Gtk.CheckButton(label="Hangul (Shift+Space)")
+        state = {"composer": HangulComposer(), "check": hangul,
+                 "anchor": None}
+        hangul.connect("toggled", lambda *a: state["composer"].reset())
+
+        def on_key(_w, ev):
+            name = Gdk.keyval_name(ev.keyval)
+            if name == "Escape":
+                dlg.response(Gtk.ResponseType.CANCEL)
+                return True
+            if name in ("Return", "KP_Enter") \
+                    and (ev.state & Gdk.ModifierType.CONTROL_MASK):
+                dlg.response(Gtk.ResponseType.OK)
+                return True
+            return self._note_entry_key(editable, ev, state)
+        view.connect("key-press-event", on_key)
+        hint = Gtk.Label()
+        hint.set_markup("<small>Ctrl+Enter: OK · Esc: cancel · "
+                        "Shift+Space: 한글 · empty removes the note"
+                        "</small>")
+        hint.set_halign(Gtk.Align.START)
+        box = dlg.get_content_area()
+        box.set_border_width(10)
+        box.set_spacing(6)
+        box.pack_start(scroll, True, True, 0)
+        box.pack_start(hangul, False, False, 0)
+        box.pack_start(hint, False, False, 0)
+        dlg.show_all()
+        ok = dlg.run() == Gtk.ResponseType.OK
+        text = editable.get_text().strip()
+        dlg.destroy()
+        self.window.present()
+        return text if ok else None
+
+    def _note_entry_key(self, entry, event, state):
+        """Dubeolsik hangul composition for the note editor (port of
+        flateyes on_text_entry_key). Returns True when it consumed the
+        key, False to let the TextView handle it."""
+        name = Gdk.keyval_name(event.keyval)
+        shift = event.state & Gdk.ModifierType.SHIFT_MASK
+        if name in ("Hangul", "Hangul_Hanja") \
+                or (name == "space" and shift):
+            state["check"].set_active(not state["check"].get_active())
+            return True
+        if not state["check"].get_active():
+            return False
+        composer = state["composer"]
+        if event.state & (Gdk.ModifierType.CONTROL_MASK
+                          | Gdk.ModifierType.MOD1_MASK):
+            composer.reset()   # keep Ctrl+A/C/V working
+            state["anchor"] = None
+            return False
+        # a cursor that left the preedit span (click, arrows) finishes
+        # that syllable; composition restarts wherever the cursor is
+        if composer.pending() and entry.get_position() != \
+                state["anchor"] + len(composer.preedit()):
+            composer.reset()
+            state["anchor"] = None
+        if name == "BackSpace":
+            if not composer.pending():
+                return False
+            old_len = len(composer.preedit())
+            self._note_entry_replace(entry, state["anchor"], old_len,
+                                     composer.backspace())
+            if not composer.pending():
+                state["anchor"] = None
+            return True
+        code = Gdk.keyval_to_unicode(event.keyval)
+        if not code:
+            # modifiers/arrows/F-keys carry no character: never end the
+            # syllable (Shift for a double jamo must not break it)
+            return False
+        char = chr(code)
+        jamo = HangulComposer.KEYMAP.get(char) \
+            or HangulComposer.KEYMAP.get(char.lower())
+        if jamo is None:
+            composer.reset()   # syllable done; the entry handles the key
+            state["anchor"] = None
+            return False
+        if not composer.pending():
+            entry.delete_selection()   # type over a selection, like an IME
+            state["anchor"] = entry.get_position()
+            old_len = 0
+        else:
+            old_len = len(composer.preedit())
+        committed, preedit = composer.feed(jamo)
+        self._note_entry_replace(entry, state["anchor"], old_len,
+                                 committed + preedit)
+        state["anchor"] += len(committed)
+        return True
+
+    @staticmethod
+    def _note_entry_replace(entry, anchor, old_len, new):
+        """Replace the preedit span at anchor, cursor after it."""
+        entry.replace_span(anchor, old_len, new)
+
+    def _drc_note_save_dialog(self):
+        """DRC > save notes as… : snapshot the per-reviewer note state
+        to a picked flateyes .fe (share a review / keep a record)."""
+        db = self._drc
+        if db is None or not hasattr(db, "note_export"):
+            self._set_live_status(
+                "notes need a packed index: floe-index drc <db>")
+            return
+        dlg = Gtk.FileChooserDialog(title="save notes as",
+                                    parent=self.window,
+                                    action=Gtk.FileChooserAction.SAVE)
+        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                        "Save", Gtk.ResponseType.OK)
+        self._only_close_button(dlg)
+        self._center_on_parent(dlg)
+        dlg.set_do_overwrite_confirmation(True)
+        dlg.set_current_folder(
+            os.path.dirname(os.path.abspath(db.path)))
+        base = os.path.basename(db.path)
+        if base.endswith(".ice"):
+            base = base[:-4]
+        dlg.set_current_name(base + ".notes.fe")
+        out = dlg.get_filename() \
+            if dlg.run() == Gtk.ResponseType.OK else None
+        dlg.destroy()
+        self.window.present()
+        if not out:
+            return
+        try:
+            db.note_export(out)
+        except OSError as exc:
+            self._set_live_status("note save failed (%s)" % exc)
+            return
+        self._set_live_status("notes saved: %s" % out)
+
+    def _drc_note_load_dialog(self):
+        """DRC > load notes… : REPLACE the notes from a saved .fe
+        (save your own first). Files from a different pack are refused."""
+        db = self._drc
+        if db is None or not hasattr(db, "note_import"):
+            self._set_live_status(
+                "notes need a packed index: floe-index drc <db>")
+            return
+        dlg = Gtk.FileChooserDialog(title="load notes",
+                                    parent=self.window,
+                                    action=Gtk.FileChooserAction.OPEN)
+        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                        "Open", Gtk.ResponseType.OK)
+        self._only_close_button(dlg)
+        self._center_on_parent(dlg)
+        dlg.set_current_folder(
+            os.path.dirname(os.path.abspath(db.path)))
+        for name, pats in (("flateyes notes (*.fe)", ("*.fe",)),
+                           ("all files", ("*",))):
+            ff = Gtk.FileFilter()
+            ff.set_name(name)
+            for p in pats:
+                ff.add_pattern(p)
+            dlg.add_filter(ff)
+        path = dlg.get_filename() \
+            if dlg.run() == Gtk.ResponseType.OK else None
+        dlg.destroy()
+        self.window.present()
+        if not path:
+            return
+        try:
+            n = db.note_import(path)
+        except (OSError, ValueError) as exc:
+            self._set_live_status("note load failed: %s" % exc)
+            return
+        self._drc_hl_res = None
+        gci = getattr(self, "_drc_grid_ci", None)
+        if gci is not None and self._drcwin is not None:
+            self._drc_grid_fill(gci)   # refresh the "*" prefixes
+        self._display()
+        self._set_live_status(
+            "notes loaded: %d (%s)" % (n, os.path.basename(path)))
+
+    def _drc_waive_save_dialog(self):
+        """DRC > save waives as… (user call 2026-08-28): snapshot
+        the auto-saved per-user waive state (~/.cache/floe/waive)
+        to a picked file - for sharing a review or keeping a
+        round's record. Same format as the auto sidecar."""
+        db = self._drc
+        if db is None or not hasattr(db, "waive_export"):
+            self._set_live_status(
+                "waive save needs a packed index: "
+                "floe-index drc <db>")
+            return
+        dlg = Gtk.FileChooserDialog(title="save waives as",
+                                    parent=self.window,
+                                    action=Gtk.FileChooserAction.SAVE)
+        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                        "Save", Gtk.ResponseType.OK)
+        self._only_close_button(dlg)
+        self._center_on_parent(dlg)
+        dlg.set_do_overwrite_confirmation(True)
+        dlg.set_current_folder(
+            os.path.dirname(os.path.abspath(db.path)))
+        base = os.path.basename(db.path)
+        if base.endswith(".ice"):
+            base = base[:-4]
+        dlg.set_current_name(base + ".waive")
+        out = dlg.get_filename() \
+            if dlg.run() == Gtk.ResponseType.OK else None
+        dlg.destroy()
+        self.window.present()
+        if not out:
+            return
+        try:
+            db.waive_export(out)
+        except OSError as exc:
+            self._set_live_status("waive save failed (%s)" % exc)
+            return
+        self._set_live_status("waives saved: %s" % out)
+
+    def _drc_waive_load_dialog(self):
+        """DRC > load waives… (user call 2026-08-28): REPLACE the
+        current review state with a saved waive file (save your own
+        first to keep it). Refused when the file was recorded
+        against a different pack."""
+        db = self._drc
+        if db is None or not hasattr(db, "waive_import"):
+            self._set_live_status(
+                "waive load needs a packed index: "
+                "floe-index drc <db>")
+            return
+        dlg = Gtk.FileChooserDialog(title="load waives",
+                                    parent=self.window,
+                                    action=Gtk.FileChooserAction.OPEN)
+        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                        "Open", Gtk.ResponseType.OK)
+        self._only_close_button(dlg)
+        self._center_on_parent(dlg)
+        dlg.set_current_folder(
+            os.path.dirname(os.path.abspath(db.path)))
+        for name, pats in (("floe waives (*.waive)", ("*.waive",)),
+                           ("all files", ("*",))):
+            ff = Gtk.FileFilter()
+            ff.set_name(name)
+            for p in pats:
+                ff.add_pattern(p)
+            dlg.add_filter(ff)
+        path = dlg.get_filename() \
+            if dlg.run() == Gtk.ResponseType.OK else None
+        dlg.destroy()
+        self.window.present()
+        if not path:
+            return
+        try:
+            waived = db.waive_import(path)
+        except (OSError, ValueError) as exc:
+            self._set_live_status("waive load failed: %s" % exc)
+            return
+        # the whole status array changed: reset every dependent
+        # surface, exactly like a waive-filter switch
+        self._drc_hl_res = None
+        self._drc_sel = None
+        self._drc_sels = {}
+        self._drc_focus = None
+        if self.drc_mark is not None and self._drc_pos >= 0 \
+                and self._drc_cum:
+            mci = bisect.bisect_right(self._drc_cum,
+                                      self._drc_pos) - 1
+            mei = self._drc_pos - self._drc_cum[mci]
+            self.drc_mark["color"] = (
+                DRC_GREEN if self._drc_waived(db, mci, mei)
+                else DRC_RED)
+        keep = self._drc_open
+        self._drc_fill()
+        if keep is not None:
+            for r in self._drcwin._rstore:
+                if r[2] == keep:
+                    self._drcwin._rules.set_cursor(r.path, None,
+                                                   False)
+                    break
+        self._display()
+        self._set_live_status(
+            "waives loaded: %d waived (%s)"
+            % (waived, os.path.basename(path)))
+
     def _drc_cell_mark(self, row, j):
         """Mark ONE grid cell as current: the previous cell reverts
         through the shared formatter (local number, gold when
@@ -5622,12 +6223,16 @@ class Viewer:
 
         db = self._drc
 
+        has_note = hasattr(db, "get_note")
+
         def cell_at(r, c_, current):
             k2 = r * self._drc_gridw + c_
             if k2 >= len(gmap):
                 return ""
             ei = gmap[k2]
             t = "%d" % (ei + 1)
+            if has_note and db.get_note(ci, ei):
+                t = "*" + t   # note present (keep the grid prefix)
             if current:
                 return ("<span background='#3465a4' "
                         "foreground='#ffffff'>%s</span>" % t)
@@ -5720,6 +6325,10 @@ class Viewer:
                       2: "reserved"}.get(s, "status %d" % s)
         lines = ["#%d(%d)  [%s]" % (ei + 1, e.num, status),
                  "rule: %s" % c.name]
+        if hasattr(db, "get_note"):
+            note = db.get_note(ci, ei)
+            if note:
+                lines.append("note: %s" % note.replace("\n", "\n      "))
         if c.desc:
             # pathname/title already show in the RULE info (user
             # call 2026-08-15)
@@ -6385,9 +6994,10 @@ class Viewer:
 
     def _toggle_overlays(self):
         """Tab cycles THREE states (user call 2026-08-21): all
-        shown -> other errors hidden (the jumped error, rulers and
-        chips stay) -> everything hidden (the old flateyes-parity
-        clean look) -> all shown."""
+        shown -> other errors hidden (the jumped error, its note,
+        rulers and chips stay) -> everything hidden (the old
+        flateyes-parity clean look) -> all shown. (Rulers are removed
+        with Esc, not Tab.)"""
         self.overlay_mode = (self.overlay_mode + 1) % 3
         self._set_live_status(
             {0: "overlays shown",

@@ -1,4 +1,15 @@
 """floe - fast viewer/clipper for large OASIS files backed by a spatial tile cache."""
 
-__version__ = "0.12.55"  # keep in step with rust/{cli,renderd}/Cargo.toml
-# (the About dialog and the portable bundle name read this)
+# floe app/display version - bumped on EVERY push (the About dialog,
+# --version and the portable bundle name read this), 2026-08-30.
+__version__ = "0.12.56"
+
+# Expected version of the bundled Rust binaries. floe-renderd reports
+# its CARGO_PKG_VERSION in the ready handshake and the adapter refuses a
+# mismatch (rust_render.py), so this MUST equal the built binaries; keep
+# it == rust/{cli,renderd,render-cli}/Cargo.toml. Bumped ONLY on pushes
+# that rebuild the Rust binaries - that decoupling lets a Python-only
+# push advance __version__ without tripping the renderd version guard
+# (no rebuild needed on the deploy host). The floe2 review branch has
+# rebuilt on every push so far, so both move together there.
+RENDERD_VERSION = "0.12.56"

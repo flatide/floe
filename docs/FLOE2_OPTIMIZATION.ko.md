@@ -1454,6 +1454,24 @@ grab_focus, 없으면 window 포커스 해제)를 캔버스 클릭 시 동기로
 `open_file`을 지나므로 함께 해결. **사용자 확인 완료(2026-09-05)**:
 메뉴·다이얼로그·파일 로드 뒤 키 명령 정상.
 
+### 3.29 main 병합 (2026-09-07, 0.12.56)
+
+사용자 요청("floe에 추가된 DRC note 기능이 floe2에 없음")으로
+`origin/main`의 24개 커밋을 review/floe2에 병합했다. 두 제품은 같은
+GUI(gui.py)를 쓰므로 floe2 전용 작업이 아니라 분기점(b0343b8) 이후
+main에 쌓인 기능이 이 브랜치에 없었던 것이다. 들어온 것: DRC 검토
+note(flateyes `.fe` per-reviewer sidecar, 좌상단 반투명 note 패널,
+grid의 note 표시, 번들 두벌식 한글 입력), reviewer별 waive autosave와
+`--floe-reviewer`, 미인덱스 소스 로드 시 인덱스 빌드 제안, 뷰어
+UX(스크롤바·HighContrast 테마·object-pick 표시·Tab/룰러 동작), index
+기본값(jobs 12, LOD off)과 monster-cell profile 재사용, 버전 정책
+분리(`__version__`은 매 push, `RENDERD_VERSION`은 바이너리 재빌드
+push에만 — 이 브랜치는 매번 재빌드하므로 둘을 함께 0.12.56으로).
+충돌 5개 파일(버전 4 + gui.py의 load 다이얼로그: 키 복구와 인덱스
+제안을 둘 다 유지). 검증: 전체 배터리(FLOE2 PRODUCT의 버전 게이트,
+DRC ICE, index CLI, oracle) 통과, validator는 병합 후 note 패널
+stub과 `__version__` import 보강.
+
 ## 4. 이슈 목록
 
 | ID | 우선순위 | 상태 | 요약 | 다음 판정 |

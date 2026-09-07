@@ -453,6 +453,7 @@ EOF
 mkdir -p "$B/etc/gtk-3.0"
 cat > "$B/etc/gtk-3.0/settings.ini" <<'EOF'
 [Settings]
+gtk-theme-name = HighContrast
 gtk-font-name = Ubuntu 10
 gtk-xft-antialias = 1
 gtk-xft-hinting = 1

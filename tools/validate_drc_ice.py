@@ -28,7 +28,8 @@ pack; D2 keeps the retirement honest.)
       D6b: the waived= filter applies INSIDE the query, before the
       cap (regression: a capped post-filter lost matches hiding
       past `cap` non-matching errors).
-  D7  [status] byte: zero at build, in-place set/get via pwrite,
+  D7  [status] byte: zero at build, set/get via pwrite into the
+      per-user waive autosave (the PACK bytes stay untouched),
       persists across reopen, neighbours untouched; the [wcount]
       per-rule waived counter stays in sync (incl. idempotent sets
       and reserved-status writes) so filter counts are O(1); the
@@ -37,11 +38,27 @@ pack; D2 keeps the retirement honest.)
   D8  diagonal closest endpoints of a parallel edge pair retain the
       true minimum first and add deterministic horizontal + vertical
       component rulers; facing and non-parallel pairs stay single.
+  D9  waive autosave (user calls 2026-08-28: per-reviewer dotfile
+      BESIDE the pack - server-side floe forwards the display, so
+      $HOME may be absent; durable records = explicit save-as; the
+      shared server account makes the account name non-unique, so
+      the reviewer tag prefers FLOE_REVIEWER > DISPLAY host >
+      SSH client IP > account name):
+      export -> clear -> import round-trips statuses with wcount
+      recomputed and the chunk cache reset; tampered and
+      foreign-pack files are refused; a READ-ONLY pack stays
+      reviewable (fresh autosave included); a read-only results
+      FOLDER falls back to the system temp dir; a corrupt autosave
+      is moved aside (review work preserved) and replaced fresh;
+      embedded in-pack statuses from the retired scheme seed the
+      first autosave; the pack bytes are identical before/after
+      everything above.
 
 usage: .venv/bin/python tools/validate_drc_ice.py [floe-index-bin]
 """
 
 import os
+import struct
 import subprocess
 import sys
 import tempfile
@@ -371,6 +388,14 @@ def main():
     print("D6 OK: query_rect == brute force on 12 random rects")
 
     # D7: per-error review status byte
+    import hashlib
+
+    def sha(p):
+        with open(p, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+
+    gp = os.path.join(tmp, "gen.j1.ice")
+    gh0 = sha(gp)
     if any(int(v) for v in gpk._status):
         fail("status section not zero at build")
     gpk.set_status(3, 2, drc.STATUS_WAIVED)
@@ -378,6 +403,14 @@ def main():
     if gpk.get_status(3, 2) != drc.STATUS_WAIVED \
             or gpk.get_status(3, 3) != drc.STATUS_RESERVED:
         fail("status set/get mismatch")
+    if sha(gp) != gh0:
+        fail("waive wrote into the PACK (must go to the autosave)")
+    gside = drc.waive_autosave_path(gp)
+    if not os.path.isfile(gside) \
+            or os.path.dirname(gside) != os.path.dirname(gp) \
+            or not os.path.basename(gside).startswith("."):
+        fail("waive autosave missing / not a dotfile beside the "
+             "pack: %s" % gside)
     re2 = drc.IcePack(os.path.join(tmp, "gen.j1.ice"))
     if re2.get_status(3, 2) != drc.STATUS_WAIVED \
             or re2.get_status(3, 3) != drc.STATUS_RESERVED \
@@ -492,6 +525,268 @@ def main():
     if len(drc.cd_segments(skew)) != 1:
         fail("non-parallel pair gained component rulers")
     print("D8 OK: diagonal parallel gap + X/Y component rulers")
+
+    # D9: waive autosave - save-as/load, refusal, read-only pack,
+    # corrupt-aside, in-pack seed migration
+    # reviewer tag: the shared server account means the account
+    # name is NOT unique (user call 2026-08-28) - the tag prefers
+    # FLOE_REVIEWER > DISPLAY host (direct X) > SSH client IP >
+    # account name, and local/forwarded DISPLAYs are skipped
+    env = os.environ
+    saved = {k: env.pop(k, None) for k in
+             ("FLOE_REVIEWER", "DISPLAY", "SSH_CONNECTION",
+              "SSH_CLIENT")}
+    try:
+        env["DISPLAY"] = "ws-kim:0.0"
+        if drc._waive_user() != "ws-kim":
+            fail("DISPLAY host not used for the reviewer tag")
+        env["DISPLAY"] = "localhost:10.0"
+        env["SSH_CONNECTION"] = "192.168.1.50 55555 10.0.0.1 22"
+        if drc._waive_user() != "192.168.1.50":
+            fail("SSH client IP not used under X forwarding")
+        env["FLOE_REVIEWER"] = "kim review!"
+        if drc._waive_user() != "kim_review_":
+            fail("FLOE_REVIEWER override not honoured/sanitized")
+        for k in ("FLOE_REVIEWER", "DISPLAY", "SSH_CONNECTION"):
+            del env[k]
+        if not drc._waive_user():
+            fail("no-signal fallback produced an empty tag")
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                env.pop(k, None)
+            else:
+                env[k] = v
+    # the --floe-reviewer CLI parameter keys the autosave (launcher
+    # scripts pass an argument instead of exporting FLOE_REVIEWER)
+    root = os.path.join(os.path.dirname(__file__), "..")
+    r = subprocess.run(
+        [sys.executable, "-m", "floe", "drc", db, "--rules",
+         "--floe-reviewer", "gatecli"],
+        capture_output=True, text=True, cwd=root)
+    if r.returncode != 0:
+        fail("floe drc --floe-reviewer rc=%d: %s"
+             % (r.returncode, r.stderr.strip()))
+    cliside = os.path.join(tmp, ".results.db.waive.gatecli")
+    if not os.path.isfile(cliside):
+        fail("--floe-reviewer did not key the autosave: %s"
+             % cliside)
+    # export -> clear -> import round-trip (wcount recomputed,
+    # chunk cache reset)
+    re2.set_status(4, 2, drc.STATUS_WAIVED)
+    re2.set_status(4, 5, drc.STATUS_WAIVED)
+    wsave = os.path.join(tmp, "review.waive")
+    re2.waive_export(wsave)
+    re2.set_status(4, 2, drc.STATUS_NONE)
+    re2.set_status(4, 5, drc.STATUS_NONE)
+    if re2.waive_import(wsave) != 2:
+        fail("import waived-count wrong")
+    if re2.get_status(4, 2) != drc.STATUS_WAIVED \
+            or re2.get_status(4, 5) != drc.STATUS_WAIVED \
+            or re2.status_counts(4) != (2, n4):
+        fail("import did not restore statuses/wcount")
+    if re2.status_page(4, True, 0, 10 ** 9) != [2, 5]:
+        fail("chunk cache stale after import")
+    # tampered and foreign-pack files are refused, state untouched
+    with open(wsave, "rb") as f:
+        blob = bytearray(f.read())
+    blob[9] ^= 0xFF   # version field
+    bad = os.path.join(tmp, "bad.waive")
+    with open(bad, "wb") as f:
+        f.write(bytes(blob))
+    try:
+        re2.waive_import(bad)
+        fail("tampered waive file accepted")
+    except ValueError:
+        pass
+    try:
+        ice.waive_import(wsave)
+        fail("foreign pack accepted another pack's waive file")
+    except ValueError:
+        pass
+    if re2.status_counts(4) != (2, n4):
+        fail("refused import disturbed the state")
+    re2.set_status(4, 2, drc.STATUS_NONE)
+    re2.set_status(4, 5, drc.STATUS_NONE)
+    # READ-ONLY pack: reviewable, including fresh sidecar creation
+    os.remove(gside)
+    mode = os.stat(gp).st_mode
+    os.chmod(gp, 0o444)
+    try:
+        ro = drc.IcePack(gp)
+        ro.set_status(3, 0, drc.STATUS_WAIVED)
+        if ro.get_status(3, 0) != drc.STATUS_WAIVED:
+            fail("read-only pack: waive did not stick")
+        ro.close()
+    finally:
+        os.chmod(gp, mode)
+    # corrupt sidecar: moved ASIDE (not deleted) + fresh start
+    with open(gside, "r+b") as f:
+        f.write(b"JUNKJUNK")
+    x = drc.IcePack(gp)
+    if x.get_status(3, 0) != drc.STATUS_NONE:
+        fail("corrupt sidecar not replaced fresh")
+    x.close()
+    wdir = os.path.dirname(gside)
+    gbase = os.path.basename(gside)
+    if not any(p.startswith(gbase) and ".stale-" in p
+               for p in os.listdir(wdir)):
+        fail("corrupt autosave was not preserved aside")
+    # read-only results FOLDER: autosave falls back to the system
+    # temp dir and review still works
+    import shutil
+    rodir = os.path.join(tmp, "ro")
+    os.makedirs(rodir)
+    rp = os.path.join(rodir, "gen.j1.ice")
+    shutil.copyfile(gp, rp)
+    os.chmod(rodir, 0o555)
+    try:
+        rf = drc.IcePack(rp)
+        if os.path.dirname(rf._waive_path) != tempfile.gettempdir():
+            fail("read-only folder: autosave not in the temp dir "
+                 "(%s)" % rf._waive_path)
+        rf.set_status(3, 0, drc.STATUS_WAIVED)
+        if rf.get_status(3, 0) != drc.STATUS_WAIVED:
+            fail("read-only folder: waive did not stick")
+        tmpside = rf._waive_path
+        rf.close()
+    finally:
+        os.chmod(rodir, 0o755)
+    os.remove(tmpside)
+    # migration: embedded in-pack statuses (retired scheme) seed
+    # the first autosave; pack restored byte-identical afterwards
+    with open(gp, "rb") as f:
+        f.seek(os.path.getsize(gp) - drc._ICE2_FOOTER.size)
+        foot = drc._ICE2_FOOTER.unpack(f.read(drc._ICE2_FOOTER.size))
+    soff, woff = foot[4], foot[5]
+    gid = int(x._dir_es[3])   # check 3, error 0
+    os.remove(drc.waive_autosave_path(gp))
+    fd = os.open(gp, os.O_RDWR)
+    try:
+        os.pwrite(fd, bytes((drc.STATUS_WAIVED,)), soff + gid)
+        os.pwrite(fd, struct.pack("<I", 1), woff + 4 * 3)
+        mig = drc.IcePack(gp)
+        if mig.get_status(3, 0) != drc.STATUS_WAIVED \
+                or mig.status_counts(3)[0] != 1:
+            fail("in-pack statuses did not seed the sidecar")
+        mig.close()
+    finally:
+        os.pwrite(fd, bytes((drc.STATUS_NONE,)), soff + gid)
+        os.pwrite(fd, struct.pack("<I", 0), woff + 4 * 3)
+        os.close(fd)
+    if sha(gp) != gh0:
+        fail("D9 left the pack modified")
+    print("D9 OK: autosave save-as/load + refusal + read-only "
+          "pack/folder + corrupt-aside + seed migration")
+
+    # D10: per-reviewer error notes (flateyes .fe sidecar) - a shared
+    # note across errors, single/group clear, reopen persistence,
+    # flateyes readability, export/import round-trip + foreign refusal
+    from floe import fe_embed
+    os.environ["FLOE_REVIEWER"] = "gate"
+    try:
+        npk = drc.IcePack(gp)
+        g0, g1 = npk.error_gid(3, 0), npk.error_gid(3, 1)
+        g2 = npk.error_gid(4, 0)
+        npk.set_note([g0, g1], "공유 노트 shared")
+        if npk.get_note_gid(g0) != "공유 노트 shared" \
+                or npk.get_note_gid(g1) != "공유 노트 shared":
+            fail("shared note not attached to both members")
+        if npk.get_note_gid(g2) is not None:
+            fail("note leaked to an unrelated error")
+        if npk.notes_list() != [("공유 노트 shared", sorted([g0, g1]))]:
+            fail("notes_list wrong: %r" % (npk.notes_list(),))
+        nside = drc.notes_autosave_path(gp)
+        if not os.path.isfile(nside) \
+                or os.path.dirname(nside) != os.path.dirname(gp):
+            fail("note autosave not beside the pack: %s" % nside)
+        # the autosave IS a valid flateyes sidecar (fe_embed reads it)
+        with open(nside, encoding="utf-8") as f:
+            fannos = fe_embed.parse_metadata(f.read())[0]
+        if [a["text"] for a in fannos if a["kind"] == "text"] \
+                .count("공유 노트 shared") != 2:
+            fail("flateyes cannot read the note as text annotations")
+        npk.close()
+        # persists across reopen
+        re3 = drc.IcePack(gp)
+        if re3.get_note_gid(g0) != "공유 노트 shared" \
+                or re3.notes_list() != [("공유 노트 shared",
+                                         sorted([g0, g1]))]:
+            fail("notes did not persist across reopen")
+        # single-member clear keeps the note for the other member
+        re3.clear_note([g0])
+        if re3.get_note_gid(g0) is not None \
+                or re3.get_note_gid(g1) != "공유 노트 shared":
+            fail("single-member clear wrong")
+        # group clear drops every note and removes the file
+        re3.set_note([g0, g2], "second")
+        re3.clear_note([g1, g0, g2])
+        if re3.notes_list() or os.path.exists(nside):
+            fail("group clear left notes/file behind")
+        # export -> clear -> import round-trip
+        re3.set_note([g0, g1], "exported")
+        exp = os.path.join(tmp, "notes_export.fe")
+        re3.note_export(exp)
+        re3.clear_note([g0, g1])
+        if re3.note_import(exp) != 1 \
+                or re3.get_note_gid(g0) != "exported":
+            fail("note export/import round-trip failed")
+        # a file recorded against another pack is refused, state kept
+        with open(exp, encoding="utf-8") as f:
+            blob = f.read()
+        bad = os.path.join(tmp, "notes_bad.fe")
+        with open(bad, "w", encoding="utf-8") as f:
+            f.write(blob.replace("floe_pack=", "floe_pack=9,9,"))
+        try:
+            re3.note_import(bad)
+            fail("foreign-pack note file accepted")
+        except ValueError:
+            pass
+        if re3.get_note_gid(g0) != "exported":
+            fail("refused import disturbed the notes")
+        re3.clear_note([g0, g1])
+        re3.close()
+    finally:
+        os.environ.pop("FLOE_REVIEWER", None)
+    if sha(gp) != gh0:
+        fail("D10 modified the pack")
+    print("D10 OK: per-reviewer notes + flateyes .fe + share/clear/"
+          "export/import")
+
+    # D11: bundled dubeolsik hangul composer for the note editor
+    # (flateyes port; GTK-free, so unit-testable here). Feed a
+    # keystroke string through the same path the key handler uses.
+    from floe.hangul import HangulComposer
+
+    def compose(keys):
+        c = HangulComposer()
+        out = ""
+        for ch in keys:
+            jamo = (HangulComposer.KEYMAP.get(ch)
+                    or HangulComposer.KEYMAP.get(ch.lower()))
+            if jamo is None:
+                out += c.preedit()
+                c.reset()
+                out += ch
+                continue
+            committed, _preedit = c.feed(jamo)
+            out += committed
+        return out + c.preedit()
+
+    for keys, want in (("dkssud", "안녕"), ("gksrmf", "한글"),
+                       ("rks", "간"), ("dhkd", "왕"),
+                       ("gksrmf dkssud", "한글 안녕")):
+        got = compose(keys)
+        if got != want:
+            fail("hangul compose %r -> %r != %r" % (keys, got, want))
+    # backspace decomposes a syllable one component at a time
+    c = HangulComposer()
+    for j in ("ㅎ", "ㅏ", "ㄴ"):
+        c.feed(j)
+    if c.preedit() != "한" or c.backspace() != "하" \
+            or c.backspace() != "ㅎ" or c.backspace() != "":
+        fail("hangul backspace decomposition wrong")
+    print("D11 OK: bundled hangul composer (compose + backspace)")
 
     print("DRC ICE VALIDATION: ALL OK")
 

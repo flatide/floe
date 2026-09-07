@@ -15,7 +15,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from floe import __version__  # noqa: E402
+from floe import RENDERD_VERSION, __version__  # noqa: E402
 from floe.rust_render import (  # noqa: E402
     RustRenderWorker,
     _parse_wire_line,
@@ -540,6 +540,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         v._frame_anchor = None
         v._draw_overlays = lambda disp, obox, ospp: None
         v._update_labels = lambda obox, ospp, disp: None
+        v._update_note_labels = lambda obox, ospp: None
         v._update_minimap = lambda bbox: None
         v.dump = False
         v.image = SimpleNamespace(set_from_pixbuf=shown.append)
@@ -617,13 +618,13 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertFalse(stale._ready)
             self.assertIsNone(stale._renderd_version)
             self.assertIn(
-                "expected %s, got 0.1.0" % __version__,
+                "expected %s, got 0.1.0" % RENDERD_VERSION,
                 stale._startup_error)
 
             current._handle_line(
-                "ready", {"version": __version__}, "")
+                "ready", {"version": RENDERD_VERSION}, "")
             self.assertTrue(current._ready)
-            self.assertEqual(current._renderd_version, __version__)
+            self.assertEqual(current._renderd_version, RENDERD_VERSION)
             self.assertIsNone(current._startup_error)
             # a bare pre-stamp ready line still yields a usable build
             self.assertEqual(current.renderd_build(), __version__)

@@ -92,6 +92,22 @@ def _nonnegative_int(value):
     return parsed
 
 
+def _positive_int_list(value):
+    values = value.split(",")
+    if not values or any(not item for item in values):
+        raise argparse.ArgumentTypeError(
+            "expected comma-separated positive integers")
+    try:
+        parsed = [int(item) for item in values]
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "expected comma-separated positive integers") from None
+    if any(item <= 0 for item in parsed):
+        raise argparse.ArgumentTypeError(
+            "expected comma-separated positive integers")
+    return ",".join(str(item) for item in parsed)
+
+
 def _nonnegative_float(value):
     try:
         parsed = float(value)
@@ -273,7 +289,8 @@ def _run_rust_index(args, binary, coverage_only=False):
             command += ["--page-target-mb", str(args.page_target_mb)]
         if args.coverage:
             command.append("--coverage")
-        if args.no_lod:
+        # LOD off by default (retirement, 2026-08-28); --lod opts back in
+        if not getattr(args, "lod", False):
             command.append("--no-lod")
         if args.slow_cell_s is not None:
             command += ["--slow-cell-s", str(args.slow_cell_s)]
@@ -284,8 +301,17 @@ def _run_rust_index(args, binary, coverage_only=False):
             command += ["--profile-cell", args.profile_cell]
         if args.profile_cell_ci is not None:
             command += ["--profile-cell-ci", str(args.profile_cell_ci)]
-    # The cell profiler reserves stdout for one JSON object so callers can
-    # redirect it directly to a repeatable measurement artifact.
+        if args.profile_jobs is not None:
+            command += ["--profile-jobs", args.profile_jobs]
+        if args.profile_repeat != 1:
+            command += ["--profile-repeat", str(args.profile_repeat)]
+        if args.profile_snapshot is not None:
+            command += ["--profile-snapshot",
+                        os.path.abspath(args.profile_snapshot)]
+        if args.profile_snapshot_refresh:
+            command.append("--profile-snapshot-refresh")
+    # The cell profiler reserves stdout for one JSON object, or an array for
+    # a jobs/repeat series, so it can be redirected to a measurement artifact.
     print("[floe] " + shlex.join(command),
           file=sys.stderr if profiling else sys.stdout)
     try:
@@ -306,10 +332,26 @@ def cmd_index(args):
              "is a" if len(legacy_options) == 1 else "are"))
     profiling = (args.profile_cell is not None or
                  args.profile_cell_ci is not None)
+    profile_tuning = (args.profile_jobs is not None or
+                      args.profile_repeat != 1 or
+                      args.profile_snapshot is not None or
+                      args.profile_snapshot_refresh)
+    if profile_tuning and not profiling:
+        raise SystemExit(
+            "floe: profile jobs/repeat/snapshot options require "
+            "--profile-cell or --profile-cell-ci")
+    if args.profile_snapshot_refresh and args.profile_snapshot is None:
+        raise SystemExit(
+            "floe: --profile-snapshot-refresh requires "
+            "--profile-snapshot")
     rust_options = any((args.page_target_mb is not None, args.coverage,
                         args.coverage_only, args.no_lod,
                         args.slow_cell_s is not None,
-                        args.p2_shard_limit_mb is not None, profiling))
+                        args.p2_shard_limit_mb is not None, profiling,
+                        args.profile_jobs is not None,
+                        args.profile_repeat != 1,
+                        args.profile_snapshot is not None,
+                        args.profile_snapshot_refresh))
     if args.legacy:
         if rust_options:
             raise SystemExit(
@@ -1272,6 +1314,18 @@ def cmd_view(args):
                render_debug=args.render_debug)
 
 
+def _add_reviewer_option(p):
+    """Commands that open DRC packs (view/drc/render) take the
+    reviewer tag as a parameter: the shared server account cannot
+    distinguish reviewers, and launcher scripts prefer an explicit
+    argument over exporting FLOE_REVIEWER (which stays honored)."""
+    p.add_argument("--floe-reviewer", default=None, metavar="NAME",
+                   help="reviewer tag for the per-reviewer waive "
+                        "autosave next to the DRC pack (overrides "
+                        "the DISPLAY/SSH-derived tag; sets "
+                        "FLOE_REVIEWER - the env var still works)")
+
+
 def main(argv=None, *, prog=None, rust_only=None):
     prog = prog or APP
     rust_only = (prog == "floe2") if rust_only is None else bool(rust_only)
@@ -1305,9 +1359,8 @@ def main(argv=None, *, prog=None, rust_only=None):
                    help="allow replacement of an existing <src>.floe "
                         "cache (without this flag a current cache is "
                         "reused and a stale/incomplete cache is refused)")
-    p.add_argument("--jobs", type=_positive_int, default=None, metavar="N",
-                   help="Rust parser/planner worker count (default: host "
-                        "parallelism)")
+    p.add_argument("--jobs", type=_positive_int, default=12, metavar="N",
+                   help="Rust parser/planner worker count (default: 12)")
     rust = p.add_argument_group("Rust VFS options (default backend)")
     rust.add_argument("--page-target-mb", type=_positive_int, default=None,
                       metavar="N", help="encoded page target in MiB "
@@ -1323,7 +1376,11 @@ def main(argv=None, *, prog=None, rust_only=None):
             "--coverage-only", action="store_true",
             help="add design.ovc to a current cache without rebuilding it")
     rust.add_argument("--no-lod", action="store_true",
-                      help="do not generate merged LOD page variants")
+                      help="do not generate merged LOD page variants "
+                           "(default; LOD is being retired)")
+    rust.add_argument("--lod", action="store_true",
+                      help="keep merged LOD page variants (opt back in; "
+                           "off by default since 2026-08-28)")
     rust.add_argument("--slow-cell-s", type=_nonnegative_float,
                       default=None, metavar="S",
                       help="slow-cell log threshold in seconds (default: "
@@ -1341,6 +1398,22 @@ def main(argv=None, *, prog=None, rust_only=None):
         "--profile-cell-ci", type=_nonnegative_int, metavar="N",
         help="like --profile-cell, selecting the zero-based parsed cell "
              "index shown by slow-cell logs")
+    rust.add_argument(
+        "--profile-jobs", type=_positive_int_list, metavar="N,N,...",
+        help="run the selected cell sequentially at each planner job count "
+             "after one parse/prepare (for example 8,12,16)")
+    rust.add_argument(
+        "--profile-repeat", type=_positive_int, default=1, metavar="N",
+        help="repeat every selected-cell planner job count N times while "
+             "reusing parse/prepare (default: 1)")
+    rust.add_argument(
+        "--profile-snapshot", metavar="PATH",
+        help="load or atomically save an explicit selected-cell profile "
+             "snapshot; never modifies the normal .floe cache")
+    rust.add_argument(
+        "--profile-snapshot-refresh", action="store_true",
+        help="replace the explicit profile snapshot after parsing; required "
+             "when its schema, source fingerprint, or cell differs")
     legacy = p.add_argument_group(
         "Python/KLayout legacy options (require --legacy)")
     legacy.add_argument(
@@ -1464,6 +1537,7 @@ def main(argv=None, *, prog=None, rust_only=None):
                         "deck path, <db>.rules.json). Snapshots "
                         "then keep only the rule's source GDS "
                         "layers on; an explicit --layers wins")
+    _add_reviewer_option(p)
     p.set_defaults(fn=cmd_render)
 
     p = sub.add_parser("clip", help="save a region as a new OASIS file")
@@ -1520,6 +1594,7 @@ def main(argv=None, *, prog=None, rust_only=None):
                    help="machine-readable error list of ONE rule "
                         "as JSON: [{local, global, kind, status, "
                         "bbox um}, ...] (streamed)")
+    _add_reviewer_option(p)
     p.set_defaults(fn=cmd_drc)
 
     p = sub.add_parser("svrf", help="parse a Calibre SVRF rule deck "
@@ -1664,9 +1739,17 @@ def main(argv=None, *, prog=None, rust_only=None):
                    help="save display-path debug dumps to /tmp/%s_*.png "
                         "(XQuartz black-view diagnosis; new instance only)"
                         % prog)
+    _add_reviewer_option(p)
     p.set_defaults(fn=cmd_view)
 
     args = ap.parse_args(argv)
+    reviewer = getattr(args, "floe_reviewer", None)
+    if reviewer is not None:
+        reviewer = reviewer.strip()
+        if not reviewer:
+            raise SystemExit(
+                "%s: --floe-reviewer must not be empty" % prog)
+        os.environ["FLOE_REVIEWER"] = reviewer
     if rust_only and args.cmd == "index":
         legacy_flags = _legacy_index_options(args)
         if args.legacy or legacy_flags:
