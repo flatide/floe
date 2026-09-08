@@ -161,8 +161,14 @@ floe2 index  deck.jb --jobs 8           # 덱이 참조하는 모든 TC 소스�
 floe2 view   deck.jb                    # 뷰어에서 열기; Jobdeck 메뉴로 identifier/layer/CHIP 색 모드
 floe2 info   deck.jb                    # 덱 요약 + 뷰 레이어 표
 floe2 render deck.jb --bbox 40000,80000,60000,95000 --px 1200 --out deck.png
+floe2 render deck.jb --at 53.02mm,92.61mm --size 32mm,25.6mm --px 1200x900 --out a.png
+floe2 render deck.jb --corners 40000,80000,60000,95000 --size 4mm,3mm --px 600x450 --out quad.png  # 4장 mosaic
+floe2 render deck.jb --batch shots.txt --out shots/ --report shots/report.json     # 한 번 열고 여러 장
 floe2 jobdeck deck.jb --id 2 --mode chip --placements --report r.json   # 분석·보고
 ```
+
+`render`의 `--at/--size/--anchor`, 단위 접미사(nm/um/mm/cm/m), `--px WxH`,
+mosaic, `--batch`는 레이아웃(.oas/.gds)에도 그대로 쓰인다.
 
 renderd가 소스 캐시들을 그대로 열어 합성하며(배율은 씬 루트에만), 포맷의
 확정/미확정 사항과 단계별 설계는 `docs/JOBDECK.ko.md`에 있다. 실제 jobdeck과
@@ -941,7 +947,8 @@ sh rust/build-linux.sh
    인덱싱 + 손계산 gate. M2 ✅ renderd 다중 캐시 합성(`open deck=`, 배율은
    씬 루트에만, KLayout 평탄화 오라클과 바이트 동일, `--render`).
    M3 ✅ 뷰어(`floe2 view deck.jb`, 색 모드 메뉴, view/info/index/render가
-   .jb를 직접 받음). M4 headless shot(mosaic/anchor), M5 KLayout 툴을 oracle로.
+   .jb를 직접 받음). M4 ✅ `floe2 render` shot 확장(at/size/anchor·단위·
+   WxH·mosaic·batch). M5 ✅ KLayout LayoutView 독립 오라클 gate.
 9. **Calibre 팔레트 임포트** (사용자 결정 2026-08-02, 안정화 후):
    실무자 전원이 Calibre 사용자이므로 뷰어 경험을 동일하게 —
    Calibre layer properties(색·채움 패턴·선 스타일)를 읽어 floe

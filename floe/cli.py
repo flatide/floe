@@ -744,7 +744,7 @@ def _render_drc_errors(args, c):
             gen += 1
             w.submit({"kind": "render", "gen": gen,
                       "scope": "live", "bbox": bx, "view": None,
-                      "w": args.px, "h": args.px,
+                      "w": _px_width(args), "h": _px_width(args),
                       "depth": depth, "visible": layers,
                       "frame_format": "png"})
             png = None
@@ -775,91 +775,63 @@ def _render_drc_errors(args, c):
                 f.write(png)
             waived = (has_st and d.get_status(ci, k)
                       == drc_mod.STATUS_WAIVED)
-            _embed_error_png(path, e, bb_um, args.px, waived,
+            _embed_error_png(path, e, bb_um, _px_width(args), waived,
                              ch.name, k + 1, legend=legend)
             print("%d\t%d\t%s" % (k + 1, e.num, path))
     finally:
         w.stop()
 
 
-def _cmd_render_rust(args, c, bbox, layers):
-    """Render one archival PNG through the persistent Rust worker."""
-    import queue as _queue
-    import tempfile as _tempfile
-    from .service import make_render_worker
+def _px_width(args):
+    from .shots import parse_pixel
+    try:
+        return parse_pixel(args.px)[0]
+    except ValueError as exc:
+        raise SystemExit("floe: %s" % exc)
 
+
+def _render_shots(args, c):
+    """`floe render` on the Rust backend (jobdeck M4, any source): one
+    open, one or many shots - --bbox / --at --size / --mosaic-at /
+    --corners on the command line, or a --batch file of named shots -
+    written by floe.shots with the archival solid fills."""
+    from . import shots as shots_mod
     if not 6 <= args.label_font_px <= 96:
         raise SystemExit("floe: --label-font-px must be 6..96")
-    x0, y0, x1, y1 = bbox
-    width = args.px
-    height = max(1, round(width * (y1 - y0) / (x1 - x0)))
-    depth = None if args.depth is None or args.depth >= 999 else args.depth
-    # The legacy headless renderer uses solid archival fills regardless of
-    # the interactive layer-property pattern.  Preserve that output policy
-    # while routing geometry and optional text through Rust.
-    solid = "\n".join(["*" * 16] * 16)
-    style_keys = [
-        (int(layer["layer"]), int(layer["datatype"]))
-        for layer in c.meta["layers"]
-    ]
-    worker = make_render_worker(c)
-    worker.start()
+    defaults = {
+        "bbox": args.bbox, "at": args.at, "size": args.size,
+        "anchor": args.anchor, "px": args.px, "stretch": args.stretch,
+        "layers": args.layers, "depth": args.depth, "mosaic": args.mosaic_at,
+        "corners": args.corners, "line": args.line,
+        "linecolor": args.line_color, "keep_tiles": args.keep_tiles,
+    }
+    defaults = {k: v for k, v in defaults.items()
+                if v is not None and v is not False}
     try:
-        worker.submit({
-            "kind": "repattern",
-            "fills": [(key, solid) for key in style_keys],
-            "widths": [(key, 1) for key in style_keys],
-        })
-        worker.submit({
-            "kind": "render", "gen": 1, "scope": "headless",
-            "bbox": tuple(float(value) for value in bbox),
-            "view": None, "w": width, "h": height,
-            "depth": depth, "cut_px": 0.0, "lod": False,
-            "frames": args.frames, "labels": args.labels,
-            "label_font_px": args.label_font_px,
-            "abstract": False,
-            "visible": layers,
-            "frame_format": "png",
-        })
-        while True:
+        if args.batch:
+            if args.out.lower().endswith(".png"):
+                raise SystemExit(
+                    "floe: with --batch, --out is a directory")
+            text = (sys.stdin.read() if args.batch == "-"
+                    else open(args.batch).read())
+            shots = shots_mod.parse_batch(text, defaults)
+        else:
+            stem = os.path.splitext(os.path.basename(args.out))[0] or "view"
+            shots = [shots_mod.shot_from_fields(stem, defaults)]
+    except (OSError, ValueError) as exc:
+        raise SystemExit("floe: %s" % exc)
+    for shot in shots:
+        if shot.layers:
             try:
-                result = worker.res.get(timeout=300)
-            except _queue.Empty:
-                raise SystemExit("floe: Rust render service timeout")
-            if result.get("kind") == "error":
-                raise SystemExit("floe: Rust render service: %s" %
-                                 result.get("msg", "render failed"))
-            if result.get("kind") != "frame" or result.get("gen") != 1:
-                continue
-            if result.get("preview") or result.get("bg") or \
-                    result.get("refining"):
-                continue
-            png = result.get("png", b"")
-            if not png.startswith(b"\x89PNG\r\n\x1a\n"):
-                raise SystemExit("floe: Rust renderer returned invalid PNG")
-            break
-    finally:
-        worker.stop()
-
-    destination = os.path.abspath(args.out)
-    parent = os.path.dirname(destination) or "."
-    descriptor, staged = _tempfile.mkstemp(
-        prefix=".%s.floe-render-" %
-        (os.path.basename(destination) or "view"), dir=parent)
+                c.resolve_layers(shot.layers)
+            except ValueError as exc:
+                raise SystemExit("floe: %s" % exc)
     try:
-        with os.fdopen(descriptor, "wb") as output:
-            output.write(png)
-            output.flush()
-            os.fsync(output.fileno())
-        os.replace(staged, destination)
-    except Exception:
-        try:
-            os.unlink(staged)
-        except OSError:
-            pass
-        raise
-    print(f"[floe] rendered {args.out} ({width}x{height}) "
-          f"in {result.get('ms', 0) / 1000:.2f}s")
+        shots_mod.run_shots(c, shots, args.out, report=args.report,
+                            frames=args.frames, labels=args.labels,
+                            label_font_px=args.label_font_px, log=print)
+    except RuntimeError as exc:
+        raise SystemExit("floe: Rust render service: %s" % exc)
 
 
 def cmd_render(args):
@@ -870,15 +842,18 @@ def cmd_render(args):
                 "floe: --drc and --drc-rule go together")
         _render_drc_errors(args, c)
         return
+    rust_backend = _renderer_backend() == "rust"
+    if rust_backend:
+        return _render_shots(args, c)
+    if args.batch or args.at or args.mosaic_at or args.corners:
+        raise SystemExit("floe: --batch/--at/--mosaic-at/--corners "
+                         "require FLOE_RENDERER=rust")
     if not args.bbox:
         raise SystemExit("floe: --bbox is required (or use "
                          "--drc/--drc-rule)")
     dbu = c.meta["dbu"]
     x0, y0, x1, y1 = parse_bbox_um(args.bbox, dbu)
     layers = c.resolve_layers(args.layers)
-    rust_backend = _renderer_backend() == "rust"
-    if rust_backend:
-        return _cmd_render_rust(args, c, (x0, y0, x1, y1), layers)
     if args.frames or args.labels or args.label_font_px != 14:
         raise SystemExit("floe: --frames/--labels/--label-font-px "
                          "require FLOE_RENDERER=rust")
@@ -891,7 +866,7 @@ def cmd_render(args):
         # exports keep solid archival fills; the speckle is a live-
         # viewer presentation choice (README documents it as such)
         r = Renderer(ly, top, colors, hier_offset=0, speckle=False)
-        w = args.px
+        w = _px_width(args)
         h = max(1, round(w * (y1 - y0) / (x1 - x0)))
         depth = (None if args.depth is None or args.depth >= 999
                  else args.depth)
@@ -1681,14 +1656,59 @@ def main(argv=None, *, prog=None, rust_only=None):
     p.set_defaults(fn=cmd_info)
 
     p = sub.add_parser("render", help="render a region to PNG "
-                                      "(or DRC errors via --drc)")
+                                      "(or DRC errors via --drc); "
+                                      "a .jb jobdeck renders its composite")
     p.add_argument("src")
     p.add_argument("--bbox", default=None, help="X0,Y0,X1,Y1 in um "
-                   "(omit when using --drc/--drc-rule)")
+                   "(lengths take nm/um/mm/cm/m suffixes; omit for the "
+                   "whole source, or when using --drc/--drc-rule)")
     p.add_argument("--layers", default=None,
                    help="comma list: names or layer/datatype (default all)")
-    p.add_argument("--px", type=int, default=1200, help="output width px")
-    p.add_argument("--out", default="view.png")
+    p.add_argument("--px", default="1200", metavar="W|WxH",
+                   help="output width px (height follows the region "
+                        "aspect), or WxH: the region is expanded to that "
+                        "aspect about its anchor (default 1200)")
+    p.add_argument("--out", default="view.png",
+                   help="PNG path; with --batch a directory")
+    region = p.add_argument_group("region forms (Rust backend)")
+    region.add_argument("--at", default=None, metavar="X,Y",
+                        help="region position in um, read by --anchor; "
+                             "needs --size")
+    region.add_argument("--size", default=None, metavar="W,H",
+                        help="region size in um for --at / --mosaic-at / "
+                             "--corners")
+    region.add_argument("--anchor", choices=("center", "lb"),
+                        default="center",
+                        help="X,Y is the middle of the region (default) "
+                             "or its lower-left corner (the region "
+                             "extends right and up; expansion keeps the "
+                             "corner)")
+    region.add_argument("--stretch", action="store_true",
+                        help="with --px WxH: fill the pixels with the "
+                             "region as given instead of expanding it")
+    mosaic = p.add_argument_group("mosaic: four captures in one image")
+    mosaic.add_argument("--mosaic-at", default=None,
+                        metavar="X,Y;X,Y;X,Y;X,Y",
+                        help="four points clockwise from top-left, each "
+                             "read with --size and --anchor like --at; "
+                             "tiles tl,tr / bl,br, image twice --px")
+    mosaic.add_argument("--corners", default=None, metavar="X1,Y1,X2,Y2",
+                        help="a region whose four W,H corners are the "
+                             "tiles")
+    mosaic.add_argument("--line", type=float, default=2.0, metavar="W",
+                        help="separator width in px drawn over the tile "
+                             "edges (default 2; 0 = none)")
+    mosaic.add_argument("--line-color", default="#ffffff", metavar="COLOR")
+    mosaic.add_argument("--keep-tiles", action="store_true",
+                        help="also write <out>_tl/_tr/_bl/_br.png")
+    batch = p.add_argument_group("read once, shoot many")
+    batch.add_argument("--batch", default=None, metavar="FILE",
+                       help="one shot per line: NAME key=value ... (keys "
+                            "bbox at size anchor px stretch layers depth "
+                            "mosaic corners line linecolor keep_tiles; "
+                            "'-' = stdin); --out is the directory")
+    batch.add_argument("--report", default=None, metavar="FILE",
+                       help="JSON: every shot's region, pixels and time")
     p.add_argument("--depth", type=int, default=None,
                    help="hierarchy depth (0=top only, 999/omit=full)")
     p.add_argument("--frames", action="store_true",

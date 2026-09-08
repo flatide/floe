@@ -19,6 +19,7 @@ data never enter the repository.
 import gzip
 import itertools
 import json
+import zlib
 import os
 import shutil
 import subprocess
@@ -844,6 +845,324 @@ class GuiSmokeTests(unittest.TestCase):
         res = run_floe2("view", "--multi", CLI / "test.jb", env=env, ok=0,
                         timeout=120)
         self.assertNotIn("no GUI frame", res.stderr + res.stdout)
+
+
+class ShotTests(unittest.TestCase):
+    """floe.shots (jobdeck M4, generic for any source): units, anchors,
+    aspect fitting, mosaic seams, batch files, and `floe2 render` with
+    the new region forms on a deck and on a plain layout."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.env = {"FLOE_INDEX_BIN": str(ROOT / "rust" / "target" /
+                                         "release" / "floe-index"),
+                   "FLOE_RENDERD_BIN": str(ROOT / "rust" / "target" /
+                                           "release" / "floe-renderd")}
+        run_floe2("index", CLI / "test.jb", "--jobs", "2", env=cls.env,
+                  ok=0)
+
+    def test_units_regions_and_aspect(self):
+        from floe import shots as sh
+        self.assertEqual(sh.parse_length("8mm"), 8000.0)
+        self.assertEqual(sh.parse_length("500nm"), 0.5)
+        self.assertEqual(sh.parse_length("32µm"), 32.0)
+        self.assertEqual(sh.parse_length("32μm"), 32.0)
+        self.assertEqual(sh.parse_length("1cm"), 10000.0)
+        self.assertEqual(sh.parse_length(" 7 "), 7.0)
+        self.assertEqual(sh.parse_lengths("53.02mm,92.61mm", 2, "at"),
+                         (53020.0, 92610.0))
+        self.assertEqual(sh.region_from((100, 200), (40, 20)),
+                         (80.0, 190.0, 120.0, 210.0))
+        self.assertEqual(sh.region_from((100, 200), (40, 20), "lb"),
+                         (100.0, 200.0, 140.0, 220.0))
+        # expand, never stretch: centre held / lb corner held
+        self.assertEqual(sh.fit_aspect((0, 0, 100, 100), 200, 100),
+                         (-50.0, 0.0, 150.0, 100.0))
+        self.assertEqual(sh.fit_aspect((0, 0, 100, 100), 200, 100, "lb"),
+                         (0.0, 0.0, 200.0, 100.0))
+        self.assertEqual(sh.fit_aspect((0, 0, 100, 100), 100, 200),
+                         (0.0, -50.0, 100.0, 150.0))
+        self.assertEqual(sh.fit_aspect((0, 0, 100, 100), 200, 100,
+                                       stretch=True),
+                         (0.0, 0.0, 100.0, 100.0))
+        self.assertEqual(sh.pixel_size((0, 0, 400, 300), 800, None),
+                         (800, 600))
+        self.assertEqual(sh.parse_pixel("1200x900"), (1200, 900))
+        self.assertEqual(sh.parse_pixel("640"), (640, None))
+        with self.assertRaises(ValueError):
+            sh.parse_points("1,2;3,4")
+        # a shot's tiles: corners form, clockwise from top-left
+        shot = sh.Shot("m", corners=(0, 0, 100, 60), size=(10, 5),
+                       px=(20, 10))
+        boxes, (w, h) = shot.tile_boxes((0, 0, 1, 1))
+        self.assertEqual((w, h), (20, 10))
+        self.assertEqual(boxes[0], (-5.0, 57.5, 5.0, 62.5))   # tl
+        self.assertEqual(boxes[3], (95.0, -2.5, 105.0, 2.5))  # br
+        with self.assertRaises(ValueError):
+            sh.Shot("x", bbox=(0, 0, 1, 1), at=(0, 0), size=(1, 1))
+        with self.assertRaises(ValueError):
+            sh.Shot("x", at=(0, 0))
+
+    def test_mosaic_lines_and_png(self):
+        from floe import shots as sh
+        self.assertEqual(sh.line_spans(100, 2, 200), [(99, 1.0), (100, 1.0)])
+        self.assertEqual(sh.line_spans(100, 3, 200),
+                         [(99, 1.0), (100, 1.0), (98, 0.5), (101, 0.5)])
+        self.assertEqual(sh.line_spans(100, 0, 200), [])
+        self.assertEqual(sh.line_spans(1, 4, 3), [(0, 1.0), (1, 1.0),
+                                                   (2, 1.0)])
+        red = bytes([255, 0, 0, 255]) * 4          # 2x2 tiles
+        blue = bytes([0, 0, 255, 255]) * 4
+        canvas, info = sh.compose_mosaic([red, blue, blue, red], 2, 2,
+                                         line=1.0, color="#00ff00")
+        self.assertEqual((info["width"], info["height"]), (4, 4))
+        self.assertEqual(info["line_pixels"], "1 at 50% on each side")
+        px = lambda x, y: tuple(canvas[(y * 4 + x) * 4:(y * 4 + x) * 4 + 3])
+        self.assertEqual(px(0, 0), (255, 0, 0))
+        self.assertEqual(px(3, 0), (0, 0, 255))
+        self.assertEqual(px(3, 3), (255, 0, 0))
+        # seam columns 1 and 2 blend 50% green over the tiles; row 1/2 too
+        self.assertEqual(px(1, 0), (128, 128, 0))
+        self.assertEqual(px(2, 0), (0, 128, 128))
+        self.assertEqual(px(0, 1), (128, 128, 0))
+        png = sh.png_encode(4, 4, canvas)
+        self.assertTrue(png.startswith(b"\x89PNG\r\n\x1a\n"))
+        import struct
+        self.assertEqual(struct.unpack(">II", png[16:24]), (4, 4))
+        idat = png.index(b"IDAT")
+        length = struct.unpack(">I", png[idat - 4:idat])[0]
+        raw = zlib.decompress(png[idat + 4:idat + 4 + length])
+        self.assertEqual(len(raw), 4 * (1 + 16))
+        self.assertEqual(raw[1:5], bytes([255, 0, 0, 255]))
+
+    def test_batch_parsing(self):
+        from floe import shots as sh
+        text = """
+        # comment
+        left  at=40mm,85mm size=8000,6000 px=400x300 layers="$1 METAL1"
+        right at=60mm,85mm size=8000,6000 anchor=lb depth=0
+        quad  corners=40000,80000,60000,95000 size=4000,3000 line=3 keep_tiles=1
+        """
+        shots = sh.parse_batch(text, {"px": "200", "bbox": "1,2,3,4"})
+        self.assertEqual([x.name for x in shots], ["left", "right", "quad"])
+        self.assertEqual(shots[0].px, (400, 300))
+        self.assertEqual(shots[0].layers, "$1 METAL1")
+        self.assertIsNone(shots[0].bbox, "a line's own form drops bbox")
+        self.assertEqual(shots[1].anchor, "lb")
+        self.assertEqual(shots[1].depth, 0)
+        self.assertEqual(shots[1].px, (200, None))
+        self.assertTrue(shots[2].is_mosaic)
+        self.assertTrue(shots[2].keep_tiles)
+        self.assertEqual(shots[2].line, 3.0)
+        with self.assertRaises(ValueError):
+            sh.parse_batch("a bbox=1,2,3,4\na bbox=1,2,3,4")
+        with self.assertRaises(ValueError):
+            sh.parse_batch("a rot=1")
+        with self.assertRaises(ValueError):
+            sh.parse_batch("")
+
+    def _png_size(self, path):
+        import struct
+        data = Path(path).read_bytes()
+        self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"), path)
+        return struct.unpack(">II", data[16:24])
+
+    def test_cli_region_forms_on_a_deck(self):
+        out = CLI / "at.png"
+        res = run_floe2("render", CLI / "test.jb", "--at", "53.02mm,92.61mm",
+                        "--size", "20mm,10mm", "--px", "400x200", "--out",
+                        out, env=self.env, ok=0)
+        self.assertEqual(self._png_size(out), (400, 200))
+        self.assertIn("43020.0000,87610.0000,63020.0000,97610.0000 um",
+                      res.stdout)
+        # lb anchor + expansion keeps the corner: 100x100 um in 200x100 px
+        res = run_floe2("render", CLI / "test.jb", "--at", "41020,80020",
+                        "--size", "100,100", "--anchor", "lb", "--px",
+                        "200x100", "--out", out, env=self.env, ok=0)
+        self.assertIn("41020.0000,80020.0000,41220.0000,80120.0000 um",
+                      res.stdout)
+        # no region: the whole deck at the bbox aspect
+        res = run_floe2("render", CLI / "test.jb", "--px", "320", "--out",
+                        out, env=self.env, ok=0)
+        w, h = self._png_size(out)
+        self.assertEqual(w, 320)
+        self.assertEqual(h, round(320 * (105200 - 80020) / (69020 - 37020)))
+        # mosaic: four corners of a region, seams over the tile edges
+        out = CLI / "quad.png"
+        res = run_floe2("render", CLI / "test.jb", "--corners",
+                        "40000,80000,60000,95000", "--size", "4000,3000",
+                        "--px", "200x150", "--line", "3", "--keep-tiles",
+                        "--out", out, "--report", CLI / "quad.json",
+                        env=self.env, ok=0)
+        self.assertEqual(self._png_size(out), (400, 300))
+        for tag in ("tl", "tr", "bl", "br"):
+            self.assertEqual(self._png_size(CLI / ("quad_%s.png" % tag)),
+                             (200, 150))
+        rep = json.loads((CLI / "quad.json").read_text())
+        self.assertEqual(rep["shots"][0]["mosaic"]["line_pixels"],
+                         "1 solid + 1 at 50% on each side")
+        self.assertEqual(rep["shots"][0]["tiles"]["tl"],
+                         [38000.0, 93500.0, 42000.0, 96500.0])
+        # exclusive forms and a bad layer are refused
+        run_floe2("render", CLI / "test.jb", "--bbox", "1,2,3,4", "--at",
+                  "1,2", "--size", "1,1", env=self.env, ok=1)
+        run_floe2("render", CLI / "test.jb", "--layers", "nope", "--out",
+                  out, env=self.env, ok=1)
+
+    def test_cli_batch_and_plain_layout(self):
+        batch = CLI / "shots.txt"
+        batch.write_text(
+            "left  at=45020,86000 size=8mm,6mm layers=\"$1 METAL1\"\n"
+            "mark  bbox=45000,85100,45040,85140 px=64x64\n"
+            "quad  corners=40000,80000,60000,95000 size=4mm,3mm\n")
+        outdir = CLI / "shots"
+        res = run_floe2("render", CLI / "test.jb", "--batch", batch, "--px",
+                        "200x150", "--out", outdir, "--report",
+                        outdir / "report.json", env=self.env, ok=0)
+        self.assertEqual(self._png_size(outdir / "left.png"), (200, 150))
+        self.assertEqual(self._png_size(outdir / "mark.png"), (64, 64))
+        self.assertEqual(self._png_size(outdir / "quad.png"), (400, 300))
+        rep = json.loads((outdir / "report.json").read_text())
+        self.assertEqual([r["name"] for r in rep["shots"]],
+                         ["left", "mark", "quad"])
+        self.assertEqual(rep["shots"][0]["layers"], "$1 METAL1")
+        self.assertIn("3 shot(s)", res.stdout)
+        run_floe2("render", CLI / "test.jb", "--batch", batch, "--out",
+                  CLI / "x.png", env=self.env, ok=1)
+        # a plain layout renders through the same path (the floe rule:
+        # height from the bbox aspect)
+        out = CLI / "chipA.png"
+        run_floe2("render", CLI / "chipA.oas", "--bbox", "0,0,2000,2550",
+                  "--px", "200", "--layers", "123/43", "--out", out,
+                  env=self.env, ok=0)
+        self.assertEqual(self._png_size(out), (200, 255))
+
+
+class KLayoutOracleTests(unittest.TestCase):
+    """M5: KLayout as the independent oracle of the composite. The deck
+    is built the reference tool's way - every source cell copied into
+    one KLayout layout on an int32-safe grid and instantiated with a
+    magnifying ICplxTrans - and drawn by KLayout's own LayoutView through
+    the frozen shell's Renderer; floe2's composite of the same viewport
+    must match under the battery's pixel policy (validate_render_goldens
+    P-a/b/c per colour: differences only inside the 1px edge band, no
+    vanished component, bounded area drift)."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import klayout.db  # noqa: F401
+            import numpy  # noqa: F401
+            from PIL import Image  # noqa: F401
+        except ImportError as exc:
+            raise unittest.SkipTest("oracle needs klayout, numpy, Pillow: "
+                                    "%s" % exc)
+        cls.env = {"FLOE_INDEX_BIN": str(ROOT / "rust" / "target" /
+                                         "release" / "floe-index"),
+                   "FLOE_RENDERD_BIN": str(ROOT / "rust" / "target" /
+                                           "release" / "floe-renderd")}
+        os.environ["FLOE_RENDERD_BIN"] = cls.env["FLOE_RENDERD_BIN"]
+        run_floe2("index", CLI / "test.jb", "--jobs", "2", env=cls.env,
+                  ok=0)
+
+    def _goldens_module(self):
+        import importlib.util
+        path = ROOT / "tools" / "validate_render_goldens.py"
+        spec = importlib.util.spec_from_file_location("floe_goldens", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_composite_matches_klayout_layoutview(self):
+        import klayout.db as db
+        import numpy as np
+        from PIL import Image
+        from floe.render import Renderer
+        from floe.jobdeck.viewer import DeckCache
+        goldens = self._goldens_module()
+
+        cache = DeckCache(str(CLI / "test.jb"))
+        cache.load()
+        try:
+            rows = cache.view_rows()
+            out_of = jrender.view_out_of(rows, cache.scheme)
+            # --- the KLayout deck: int32-safe 1e-4 um grid, source cells
+            # copied verbatim (their own dbu), instantiated with the
+            # magnification deck-dbu-per-source-dbu and the deck offset
+            oracle_dbu = 1e-4
+            lay = db.Layout()
+            lay.dbu = oracle_dbu
+            top = lay.create_cell("DECK")
+            srcs = {}
+            cells = {}
+            colors = {}
+            for p in cache.placements:
+                info = cache.catalog.infos[p.tc]
+                if p.tc not in srcs:
+                    s = db.Layout()
+                    s.read(str(CLI / p.tc))
+                    srcs[p.tc] = s
+                s = srcs[p.tc]
+                out = out_of(p)
+                key = (p.tc, p.ly, p.dt, out)
+                if key not in cells:
+                    cell = lay.create_cell("P%d" % len(cells))
+                    dst = lay.layer(1000 + out, 0)
+                    src_cell = s.top_cell()
+                    for sh in src_cell.shapes(s.layer(p.ly, p.dt)).each():
+                        cell.shapes(dst).insert(sh)
+                    cells[key] = cell.cell_index()
+                    colors[(1000 + out, 0)] = rows[out]["color"]
+                scale = p.mag * float(info.dbu) / oracle_dbu
+                disp = db.Vector(int(round(p.dx_um / oracle_dbu)),
+                                 int(round(p.dy_um / oracle_dbu)))
+                top.insert(db.CellInstArray(
+                    cells[key], db.ICplxTrans(scale, 0.0, False, disp)))
+            bbox_um = jrender.fit_bbox_to_pixels(
+                (36000.37, 79000.61, 70000.37, 106000.61), 1024, 800)
+            golden_png = CLI / "oracle-klayout.png"
+            renderer = Renderer(lay, top, colors, speckle=False)
+            try:
+                renderer.set_line_widths({k: 1 for k in colors})
+                renderer.render_png(
+                    str(golden_png), *(v / oracle_dbu for v in bbox_um),
+                    1024, 800, visible=None, depth=None)
+            finally:
+                renderer.lv._destroy()
+            golden = np.asarray(Image.open(golden_png).convert("RGB"))
+            # --- floe2's composite of the same viewport
+            worker = jrender.DeckRenderWorker(cache)
+            worker.start()
+            try:
+                rgba = _render_raw(worker, tuple(v / cache.meta["dbu"]
+                                                 for v in bbox_um),
+                                   1024, 800)
+            finally:
+                worker.stop()
+            candidate = np.frombuffer(rgba, dtype=np.uint8).reshape(
+                800, 1024, 4)[:, :, :3]
+        finally:
+            cache.close()
+        self.assertEqual(golden.shape, candidate.shape)
+        # per colour: the battery's mask policy (P-a/b/c)
+        band = goldens._edge_band(np.any(golden != 0, axis=2))[0]
+        for row in rows:
+            rgb = np.array(_rgb(row["color"]), dtype=np.uint8)
+            g = np.all(golden == rgb, axis=2)
+            c = np.all(candidate == rgb, axis=2)
+            self.assertGreater(int(g.sum()), 0, row["name"])
+            ok, reason = goldens.compare(g, c)
+            self.assertTrue(ok, "%s: %s" % (row["name"], reason))
+            # a colour's edge is a boundary too where it meets another
+            # colour (a mark over a chip), not only where it meets black
+            band |= goldens._edge_band(g)[0]
+        # and nothing but edge-band pixels may differ at all
+        bad = np.any(golden != candidate, axis=2) & ~band
+        if bad.any():
+            y, x = np.argwhere(bad)[0]
+            Image.fromarray(candidate, "RGB").save(CLI / "oracle-floe2.png")
+            self.fail("%d px differ outside the 1px edge bands (first y=%d "
+                      "x=%d); see %s" % (int(bad.sum()), y, x, CLI))
 
 
 def run_floe2(*args, env=None, ok=None, timeout=600):

@@ -77,8 +77,8 @@ KLayout 툴은 "소스 → 하나의 flat-ish layout 재작성" 구조였다. fl
 | M1 | Python 포팅(`floe/jobdeck/`), `floe2 jobdeck` CLI, 일괄 인덱싱, 손계산 gate | ✅ 2026-09-08 (main) |
 | M2 | renderd 다중 캐시 합성(`open deck=`), 루트 배율/오프셋, headless 렌더, 오라클 gate | ✅ 2026-09-08 (`feature/jobdeck`) |
 | M3 | 뷰어에서 덱 열기(`floe2 view deck.jb`), 색 모드 메뉴, `view/info/index/render`가 .jb를 직접 받음 | ✅ 2026-09-09 (`feature/jobdeck`) |
-| M4 | headless shot/mosaic (KLayout 툴 cli-spec 대응) | 예정 |
-| M5 | KLayout 툴을 oracle로: 같은 뷰포트 byte/픽셀 비교 gate | 예정 |
+| M4 | `floe2 render`의 헤드리스 shot: `--at/--size/--anchor`, 단위 접미사, `--px WxH`(확장/`--stretch`), mosaic, `--batch`(한 번 열고 여러 장), `--report` | ✅ 2026-09-09 (`feature/jobdeck`) |
+| M5 | KLayout LayoutView를 독립 오라클로: 배율 인스턴스로 만든 덱을 KLayout이 직접 그린 그림과 합성 프레임을 배터리 픽셀 정책으로 비교하는 gate | ✅ 2026-09-09 (`feature/jobdeck`) |
 
 M2 전에 확인할 것: 실덱의 `mag` 분포(1이 아닌 값이 흔한지), 소스 자체에
 배율 배치가 들어 있는지(있으면 인덱스 단계에서 거부되므로 정책 필요).
@@ -215,7 +215,50 @@ gate: `ViewerCacheTests`(meta·세 모드의 레이어 표와 색·resolve_layer
 기동 → 워커 open → 첫 합성 프레임 표시), `test_5_ordinary_commands_take_a_deck`
 (`render/info/index/view`의 .jb 처리와 종료 코드).
 
-## 7. 미결·후속
+## 7. M4 상세 — 헤드리스 shot (`floe2 render`, 소스 종류 무관)
+
+참조 툴의 cli-spec에서 결정된 규칙을 floe2의 기존 명령에 얹었다. 덱 전용
+플래그가 아니라 `floe2 render`의 일반 옵션이며 레이아웃에도 그대로 쓰인다
+(`floe/shots.py`).
+
+```sh
+floe2 render deck.jb --at 53.02mm,92.61mm --size 32mm,25.6mm --px 1200x900 --out a.png
+floe2 render deck.jb --at 40000,82000 --size 32000,24000 --anchor lb --px 1200x900 --out b.png
+floe2 render deck.jb --corners 40000,80000,60000,95000 --size 4mm,3mm --px 600x450 \
+             --line 3 --keep-tiles --out quad.png          # 4장 mosaic, 1200x900
+floe2 render deck.jb --mosaic-at "X,Y;X,Y;X,Y;X,Y" --size W,H --out quad.png
+floe2 render deck.jb --batch shots.txt --out shots/ --report shots/report.json
+```
+
+- 영역: `--bbox` | `--at X,Y --size W,H [--anchor center|lb]` | (없음) 소스 전체.
+  모든 길이에 `nm`/`um`/`µm`/`μm`/`mm`/`cm`/`m` 접미사 허용(없으면 um).
+- 픽셀: `--px W`는 기존 floe 규칙(높이는 영역 종횡비에서), `--px WxH`는 영역을
+  그 종횡비로 **확장**(center는 중심 고정, lb는 꼭짓점 고정; `--stretch`면
+  확장 없이 그대로).
+- mosaic: 네 점(시계방향, 좌상부터) 또는 `--corners` 영역의 네 꼭짓점, 각 타일이
+  `--px`, 결과는 가로세로 2배. 구분선은 타일 위에 그린다: 이음매 중심으로
+  `floor(W/2)`px는 양쪽 불투명, 나머지는 양쪽 1px 혼합(`--line 0`은 없음).
+  `--keep-tiles`로 `<out>_tl/_tr/_bl/_br.png`도 남긴다.
+- `--batch FILE`(`-`=stdin): 줄마다 `NAME key=value …`(bbox at size anchor px
+  stretch layers depth mosaic corners line linecolor keep_tiles; 빈 키는 명령행
+  값). 워커를 한 번만 열고 모두 찍는다(`--out`은 디렉터리). `--report`는 shot별
+  영역·픽셀·시간(mosaic은 타일 영역과 선 규칙) JSON.
+- 출력은 보관용이므로 solid 채움(뷰어의 speckle은 표시용). 단일 shot은 renderd의
+  PNG 그대로, mosaic은 raw 타일을 stdlib zlib으로 PNG 인코딩(Pillow 불필요).
+
+## 8. M5 상세 — KLayout 독립 오라클
+
+gate `KLayoutOracleTests`: 참조 툴과 같은 방식으로 덱을 KLayout 레이아웃으로
+만든다(int32 안전 1e-4 um 그리드, 소스 셀을 자기 dbu 정수 좌표 그대로 복사,
+`ICplxTrans(scale = mag·source_dbu/oracle_dbu, dx, dy)` 인스턴스). 그것을
+KLayout `LayoutView`가 동결 셸의 `Renderer`(solid, 선폭 1)로 직접 그린 그림과
+floe2 합성 프레임(같은 뷰포트 1024×800)을 배터리 픽셀 정책
+(`validate_render_goldens` P-a/b/c: 색마다 1px 경계 밴드 밖 차이 0, 성분 소실
+없음, 면적 드리프트 한도)으로 비교하고, 전체 RGB는 색별 경계 밴드 합집합 밖에서
+차이 0이어야 한다. 참조 툴 자체를 gate에서 실행하지는 않는다(저장소 밖,
+사용자 결정: 구현 참고용).
+
+## 9. 미결·후속
 - LY/DT cross vs zip, 회전/미러: 실덱 사례가 나오면 확정.
 - 실덱에서 M2 성능 확인: 배치 수 × 패스 비용(플랜+디코드+라스터 각 1회).
   전체 뷰에서 수천 패스가 되면 (a) 같은 소스·같은 scale의 배치를 한 패스로

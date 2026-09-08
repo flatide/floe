@@ -2,7 +2,7 @@
 
 # floe app/display version - bumped on EVERY push (the About dialog,
 # --version and the portable bundle name read this), 2026-08-30.
-__version__ = "0.12.68"
+__version__ = "0.12.69"
 
 # Expected version of the bundled Rust binaries. floe-renderd reports
 # its CARGO_PKG_VERSION in the ready handshake and the adapter refuses a
