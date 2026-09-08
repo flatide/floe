@@ -30,6 +30,10 @@ from .service import (make_render_worker, DETAIL_PX, DETAIL_LEVELS,
                       DEFAULT_DETAIL)
 from .view_policy import live_caps
 
+
+def _is_deck_path(path):
+    return bool(path) and str(path).lower().endswith(".jb")
+
 Gtk = Gdk = GdkPixbuf = GLib = Pango = None
 
 APP = product_name()
@@ -1624,6 +1628,10 @@ class Viewer:
         # its caller immediately supplies a goto (goto() cancels this flag).
         self._fit_after_worker_start = bool(cache is not None and
                                             self._did_fit)
+        previous = getattr(self, "cache", None)
+        if previous is not None and previous is not cache \
+                and hasattr(previous, "close"):
+            previous.close()     # a jobdeck's spec work directory
         self.cache = cache
         if cache is None:
             # EMPTY START (user call 2026-08-22): the viewer opens
@@ -1729,6 +1737,12 @@ class Viewer:
         if cache is None:
             self.window.set_title(
                 "%s - no layout (File > load layout…)" % APP)
+        elif self.meta.get("jobdeck"):
+            jb = self.meta["jobdeck"]
+            self.window.set_title(
+                "%s - %s · jobdeck %d CHIPs · %d placements · colours "
+                "by %s" % (APP, os.path.basename(self.meta["src"]["path"]),
+                           jb["chips"], jb["placements"], jb["mode"]))
         else:
             src = self.meta["src"]
             self.window.set_title(
@@ -1888,11 +1902,24 @@ class Viewer:
         if self.cache is not None and path == self.cache.src \
                 and not self.cache.is_stale():
             return None
-        c = cache_mod.Cache(path)
-        if not c.exists():
-            return ("ERR no VFS cache for %s; run: %s index %s"
-                    % (path, APP, path))
-        c.load()
+        if _is_deck_path(path):
+            # a jobdeck (docs/JOBDECK.ko.md M3): every source's
+            # <src>.floe must exist; renderd composites them
+            from .jobdeck.viewer import DeckCache
+            c = DeckCache(path)
+            missing = c.unindexed()
+            if missing:
+                return ("ERR no VFS cache for %d jobdeck source(s) of %s; "
+                        "run: %s index %s"
+                        % (len(missing), os.path.basename(path), APP,
+                           path))
+            c.load()
+        else:
+            c = cache_mod.Cache(path)
+            if not c.exists():
+                return ("ERR no VFS cache for %s; run: %s index %s"
+                        % (path, APP, path))
+            c.load()
         self._apply_cache(c)
         # the rebuilt layer panel and the restarted worker must not
         # leave the keyboard parked away from the canvas (field
@@ -4533,6 +4560,14 @@ class Viewer:
         check(m, "error box-select mode\te", self._esel_toggle,
               lambda: self.mode == "esel")
 
+        m = top("Jobdeck")
+        for mode, label in (("identifier", "colour by identifier ($n)"),
+                            ("layer", "colour by layer (LY/DT)"),
+                            ("chip", "colour by CHIP block")):
+            check(m, label,
+                  (lambda mode=mode: self._jobdeck_set_mode(mode)),
+                  (lambda mode=mode: self._jobdeck_mode() == mode))
+
         m = top("Help")
         item(m, "About %s" % APP, self._about_dialog)
         item(m, "Open Source Licenses", self._licenses_dialog)
@@ -4558,6 +4593,7 @@ class Viewer:
         for name, pats in (("layouts (*.oas, *.gds)",
                             ("*.oas", "*.oas.gz", "*.gds",
                              "*.gds.gz")),
+                           ("jobdecks (*.jb)", ("*.jb",)),
                            ("all files", ("*",))):
             ff = Gtk.FileFilter()
             ff.set_name(name)
@@ -4574,8 +4610,23 @@ class Viewer:
         # parent by itself: restore now, and again after the load
         # rebuilds the panels (open_file)
         self._restore_keys()
+        # a jobdeck whose sources are not all indexed: offer to index
+        # them (one `index` run per source), then load
+        if path and _is_deck_path(path):
+            from .jobdeck.viewer import deck_ready
+            if not deck_ready(path):
+                if not self._ask_yes_no(
+                        "Not every source of\n%s\nhas a VFS index.\n\n"
+                        "Index them now?" % os.path.basename(path)):
+                    self._set_live_status(
+                        "VFS index needed: %s index %s"
+                        % (APP, os.path.basename(path)))
+                    self._restore_keys()
+                    return
+                self._jobdeck_index_and_load(path)
+                return
         # no cache yet: offer to build the VFS index, then load
-        if path and not cache_mod.Cache(path).exists():
+        elif path and not cache_mod.Cache(path).exists():
             if not self._ask_yes_no(
                     "No VFS index for\n%s\n\nBuild it now?"
                     % os.path.basename(path)):
@@ -4627,6 +4678,57 @@ class Viewer:
                           [bin_, "vfs", src, outdir,
                            "--jobs", "12", "--no-lod"],
                           on_success, "VFS indexing")
+
+    def _jobdeck_index_and_load(self, path):
+        """`<APP> index deck.jb` (every source the deck names) with its
+        log in the modal dialog, then open the deck in place."""
+        def on_success():
+            try:
+                err = self.open_file(path)
+            except Exception as exc:
+                err = "ERR %s" % exc
+            if err:
+                self._set_live_status(
+                    err[4:] if err.startswith("ERR ") else err)
+
+        self._index_modal("indexing jobdeck sources…",
+                          [sys.executable, "-B", "-m", APP, "index", path,
+                           "--jobs", "12"],
+                          on_success, "jobdeck indexing")
+
+    def _jobdeck_mode(self):
+        """The loaded jobdeck's colour mode, None for a layout."""
+        cache = self.cache
+        if getattr(cache, "is_jobdeck", False):
+            return cache.mode
+        return None
+
+    def _jobdeck_set_mode(self, mode):
+        """Jobdeck > colour by …: re-plan the deck under the mode (the
+        view layer table and the composite spec change), rebuild the
+        layer panel and restart the worker on the new spec, keeping
+        the current view."""
+        cache = self.cache
+        if not getattr(cache, "is_jobdeck", False):
+            self._set_live_status(
+                "not a jobdeck (File > load layout… a .jb)")
+            self._restore_keys()
+            return
+        if cache.mode == mode:
+            self._restore_keys()
+            return
+        view = (self.cx, self.cy, self.spp)
+        try:
+            cache.set_mode(mode)
+        except Exception as exc:
+            self._set_live_status("jobdeck colour mode: %s" % exc)
+            self._restore_keys()
+            return
+        self._apply_cache(cache)
+        self.cx, self.cy, self.spp = view
+        self._fit_after_worker_start = False
+        self._set_live_status("jobdeck colours by %s" % mode)
+        self._restore_keys()
 
     def _about_dialog(self):
         """Help > About (flateyes show_about parity): plain-text

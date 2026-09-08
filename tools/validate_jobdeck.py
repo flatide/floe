@@ -441,7 +441,7 @@ class CliTests(unittest.TestCase):
                       res.stdout)
         self.assertIn("CHIP:ID001 blue, $2 yellow, CHIP:ID002 red",
                       res.stdout)
-        self.assertIn("no .floe cache yet; add --index", res.stdout)
+        self.assertIn("no .floe cache yet; run: floe2 index", res.stdout)
         r = json.loads(rep.read_text())
         self.assertEqual(r["plan"]["instances"], 5)
         self.assertEqual(len(r["placements"]), 5)
@@ -466,8 +466,8 @@ class CliTests(unittest.TestCase):
         binary = ROOT / "rust" / "target" / "release" / "floe-index"
         self.assertTrue(binary.is_file(), "release floe-index is not built")
         env = {"FLOE_INDEX_BIN": str(binary)}
-        res = run_cli(CLI / "test.jb", "--index", "--jobs", "2", env=env,
-                      ok=0)
+        res = run_floe2("index", CLI / "test.jb", "--jobs", "2", env=env,
+                        ok=0)
         self.assertIn("index     : 3 built, 0 failed, 0 kept", res.stdout)
         for name in ("chipA.oas", "chipB.oas", "mark.oas"):
             c = Cache(str(CLI / name))
@@ -475,7 +475,7 @@ class CliTests(unittest.TestCase):
             c.load()
             self.assertTrue(c.meta.get("vfs"), name)
             self.assertFalse(c.is_stale(), name)
-        res = run_cli(CLI / "test.jb", "--index", env=env, ok=0)
+        res = run_floe2("index", CLI / "test.jb", env=env, ok=0)
         self.assertIn("3 source(s) already indexed", res.stdout)
         self.assertIn("index     : 0 built, 0 failed, 3 kept", res.stdout)
         res = run_cli(CLI / "test.jb", env=env, ok=0)
@@ -505,7 +505,8 @@ def _rgb(hexcolor):
 _GEN = itertools.count(1)
 
 
-def _render_raw(worker, bbox_dbu, width, height, visible=None):
+def _render_raw(worker, bbox_dbu, width, height, visible=None,
+                depth=None, cut_px=0.0):
     """One settled raw frame through a started worker: RGBA bytes.
     Generations must increase per daemon: a repeated one is dropped."""
     gen = next(_GEN)
@@ -518,7 +519,7 @@ def _render_raw(worker, bbox_dbu, width, height, visible=None):
     worker.submit({
         "kind": "render", "gen": gen, "scope": "headless",
         "bbox": tuple(float(v) for v in bbox_dbu), "view": None,
-        "w": width, "h": height, "depth": None, "cut_px": 0.0,
+        "w": width, "h": height, "depth": depth, "cut_px": cut_px,
         "lod": False, "frames": False, "labels": False,
         "abstract": False, "visible": visible, "frame_format": "raw",
     })
@@ -555,8 +556,8 @@ class CompositeTests(unittest.TestCase):
                                          "release" / "floe-index"),
                    "FLOE_RENDERD_BIN": str(cls.binary)}
         os.environ["FLOE_RENDERD_BIN"] = str(cls.binary)
-        run_cli(CLI / "test.jb", "--index", "--jobs", "2", env=cls.env,
-                ok=0)
+        run_floe2("index", CLI / "test.jb", "--jobs", "2", env=cls.env,
+                  ok=0)
         deck, cat, pl, st, scheme, cm = jd.plan_deck(str(CLI / "test.jb"))
         cls.deck, cls.catalog, cls.placements = deck, cat, pl
         cls.stats, cls.scheme, cls.colormap = st, scheme, cm
@@ -566,14 +567,22 @@ class CompositeTests(unittest.TestCase):
         cls.spec = CLI / "deck.spec"
         cls.ledger = jrender.write_deck_spec(
             str(cls.spec), deck, pl, st, scheme, cm, cat)
-        cls.layers = jrender.deck_layers_meta(st, scheme, cm)
-        worker = jrender.DeckRenderWorker(str(cls.spec), str(CLI / "test.jb"),
-                                          cls.dbu, cls.layers)
+        cls.layers = jrender.deck_layers_meta(deck, st, scheme, cm, pl)
+        cls.rows = jrender.view_layers(deck, st, scheme, cm)
+        cls.out_of = staticmethod(jrender.view_out_of(cls.rows, scheme))
+        worker = jrender.DeckRenderWorker(jrender._DeckCacheShim(
+            str(cls.spec), str(CLI / "test.jb"), cls.dbu, cls.layers))
         worker.start()
         try:
             cls.composite = _render_raw(worker, cls.bbox_dbu, cls.W, cls.H)
             cls.only_2 = _render_raw(worker, cls.bbox_dbu, cls.W, cls.H,
                                      visible=[(1, 0)])
+            # the viewer's defaults (depth 0, detail medium = 3px cut):
+            # the 20 um mark is below the cut on a full-deck view, so
+            # the planner drops that source - an empty pass, not an
+            # error (field: the first GUI frame failed on this)
+            cls.gui_defaults = _render_raw(worker, cls.bbox_dbu, cls.W,
+                                           cls.H, depth=0, cut_px=3.0)
         finally:
             worker.stop()
 
@@ -584,8 +593,7 @@ class CompositeTests(unittest.TestCase):
             sx0, sy0, sx1, sy1 = FIXTURE_BOXES[(p.tc, p.ly, p.dt)]
             box = (p.mag * sx0 + p.dx_um, p.mag * sy0 + p.dy_um,
                    p.mag * sx1 + p.dx_um, p.mag * sy1 + p.dy_um)
-            out = self.stats["out_of"][(p.chip, p.idx, p.ly, p.dt)]
-            rows.append((out, box, _rgb(self.colormap[p.idx])))
+            rows.append((self.out_of(p), box, _rgb(self.colormap[p.idx])))
         rows.sort(key=lambda r: r[0])
         return rows
 
@@ -644,6 +652,14 @@ class CompositeTests(unittest.TestCase):
                    for o in range(0, len(self.only_2), 4)}
         self.assertEqual(colours, {(0, 0, 0), (255, 255, 0)})
 
+    def test_3b_viewer_defaults_drop_sub_cut_sources_quietly(self):
+        colours = {tuple(self.gui_defaults[o:o + 3])
+                   for o in range(0, len(self.gui_defaults), 4)}
+        self.assertIn((0, 0, 255), colours)      # $1 chips are drawn
+        self.assertIn((255, 255, 0), colours)    # $2
+        self.assertIn((255, 192, 203), colours)  # $5
+        self.assertNotIn((255, 0, 0), colours)   # the sub-cut mark is not
+
     def test_4_composite_equals_flattened_single_cache_render(self):
         import klayout.db as db
         flat = CLI / "deck_flat.oas"
@@ -662,8 +678,7 @@ class CompositeTests(unittest.TestCase):
                 s.read(str(CLI / p.tc))
                 srcs[p.tc] = s
             s = srcs[p.tc]
-            out = self.stats["out_of"][(p.chip, p.idx, p.ly, p.dt)]
-            dst = lay.layer(1000 + out, 0)
+            dst = lay.layer(1000 + self.out_of(p), 0)
             cell = s.top_cell()
             for sh in cell.shapes(s.layer(p.ly, p.dt)).each():
                 b = sh.dbbox()          # source um
@@ -683,10 +698,8 @@ class CompositeTests(unittest.TestCase):
         worker = RustRenderWorker(c)
         worker.start()
         try:
-            colours = []
-            for row in self.stats["layer_table"]:
-                colours.append(((1000 + row["out"], 0),
-                                self.colormap[row["idx"]]))
+            colours = [((1000 + row["out"], 0), row["color"])
+                       for row in self.rows]
             worker.submit({"kind": "recolor", "colors": colours})
             oracle = _render_raw(worker,
                                  tuple(v / oracle_dbu for v in self.bbox_um),
@@ -699,23 +712,153 @@ class CompositeTests(unittest.TestCase):
             self.fail("composite differs from the flattened oracle in %d "
                       "of %d pixels" % (diff, self.W * self.H))
 
-    def test_5_cli_render(self):
+    def test_5_ordinary_commands_take_a_deck(self):
+        # floe2 render deck.jb: the standard --bbox (um) / --px / --out
         out = CLI / "deck.png"
-        res = run_cli(CLI / "test.jb", "--render", out, "--bbox",
-                      "40000,80000,60000,95000", "--pixel", "300x200",
-                      "--mode", "chip", env=self.env, ok=0)
-        self.assertIn("rendered  :", res.stdout)
+        res = run_floe2("render", CLI / "test.jb", "--bbox",
+                        "40000,80000,60000,95000", "--px", "300",
+                        "--layers", "$1 METAL1,$3 ALIGN", "--out", out,
+                        env=self.env, ok=0)
+        self.assertIn("rendered", res.stdout)
         data = out.read_bytes()
         self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"))
         import struct
         w, h = struct.unpack(">II", data[16:24])
-        self.assertEqual((w, h), (300, 200))
-        # a deck naming an unindexed source cannot be rendered: exit 3
-        # with the ledger, and the spec still lists what could be drawn
+        self.assertEqual((w, h), (300, 225))
+        # floe2 info deck.jb
+        res = run_floe2("info", CLI / "test.jb", env=self.env, ok=0)
+        self.assertIn("[jobdeck] chips     : 3", res.stdout)
+        self.assertIn("$1 METAL1", res.stdout)
+        self.assertIn("bbox       : (37020.0, 80020.0)", res.stdout)
+        # floe2 index deck.jb: every source, current caches kept
+        res = run_floe2("index", CLI / "test.jb", "--jobs", "2",
+                        env=self.env, ok=0)
+        self.assertIn("index     : 0 built, 0 failed, 3 kept", res.stdout)
+        # a deck naming an unindexed source: exit 3 with the ledger, and
+        # the spec still lists what could be drawn
         res = run_cli(CLI / "test_formats.jb", "--id", "1,2", "--spec",
                       CLI / "formats.spec", env=self.env, ok=3)
         self.assertIn("chipA.gds: not_indexed", res.stdout)
         self.assertIn("1 placement(s), 1 skipped", res.stdout)
+        res = run_floe2("view", CLI / "test_formats.jb", "--multi",
+                        env=self.env, ok=1)
+        self.assertIn("no VFS cache for", res.stderr)
+
+
+class ViewerCacheTests(unittest.TestCase):
+    """floe.jobdeck.viewer.DeckCache: the Cache the viewer opens."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.env = {"FLOE_INDEX_BIN": str(ROOT / "rust" / "target" /
+                                         "release" / "floe-index")}
+        run_floe2("index", CLI / "test.jb", "--jobs", "2", env=cls.env,
+                  ok=0)
+
+    def test_meta_and_modes(self):
+        from floe.jobdeck.viewer import DeckCache, deck_ready, is_deck_path
+        self.assertTrue(is_deck_path("a/b.JB"))
+        self.assertFalse(is_deck_path("a/b.oas"))
+        self.assertTrue(deck_ready(str(CLI / "test.jb")))
+        self.assertFalse(deck_ready(str(CLI / "test_formats.jb")))
+        c = DeckCache(str(CLI / "test.jb"))
+        self.assertTrue(c.is_jobdeck)
+        self.assertEqual(c.unindexed(), [])
+        try:
+            meta = c.load()
+            self.assertEqual(meta["dbu"], 2.5e-05)
+            self.assertEqual(meta["bbox"], [int(37020 / 2.5e-5),
+                                            int(80020 / 2.5e-5),
+                                            int(69020 / 2.5e-5),
+                                            int(105200 / 2.5e-5)])
+            self.assertEqual([l["name"] for l in meta["layers"]],
+                             ["$1 METAL1", "$2 VIA1", "$3 ALIGN", "$5"])
+            self.assertEqual([l["color"] for l in meta["layers"]],
+                             ["#0000ff", "#ffff00", "#ff0000", "#ffc0cb"])
+            self.assertEqual([l["stored_shapes"] for l in meta["layers"]],
+                             [6, 5, 3, 3])
+            self.assertEqual(meta["grid"]["nx"], 1)
+            self.assertTrue(meta["vfs"])
+            self.assertEqual(meta["jobdeck"]["placements"], 17)
+            self.assertEqual(meta["jobdeck"]["skipped"], [])
+            self.assertTrue(os.path.isfile(c.dir))
+            self.assertFalse(c.is_stale())
+            self.assertEqual(c.resolve_layers("$2 VIA1,3/0"),
+                             [(1, 0), (3, 0)])
+            self.assertIsNone(c.resolve_layers("all"))
+            with self.assertRaises(ValueError):
+                c.resolve_layers("nope")
+            # chip mode: one row per CHIP in deck order, MDPView colours
+            meta = c.set_mode("chip")
+            self.assertEqual([l["name"] for l in meta["layers"]],
+                             ["CHIP ID001", "CHIP ID002", "CHIP ID003"])
+            self.assertEqual([l["color"] for l in meta["layers"]],
+                             ["#ffff00", "#ffc0cb", "#ffffff"])
+            self.assertEqual([l["stored_shapes"] for l in meta["layers"]],
+                             [6, 9, 2])
+            self.assertTrue(c.dir.endswith("deck-chip.spec"))
+            meta = c.set_mode("layer")
+            self.assertEqual([l["name"] for l in meta["layers"]],
+                             ["LY7.DT2", "LY123.DT43", "LY456.DT0",
+                              "LY999.DT0"])
+            with self.assertRaises(ValueError):
+                c.set_mode("rainbow")
+        finally:
+            c.close()
+        self.assertFalse(os.path.exists(c.dir))
+
+    def test_worker_factory_routes_a_deck(self):
+        from floe.jobdeck.viewer import DeckCache
+        from floe.service import make_render_worker
+        c = DeckCache(str(CLI / "test.jb"))
+        c.load()
+        try:
+            os.environ["FLOE_RENDERER"] = "rust"
+            worker = make_render_worker(c)
+            self.assertFalse(worker.supports_margin_prefetch)
+            self.assertIn("open deck=", worker._open_command())
+        finally:
+            c.close()
+
+
+class GuiSmokeTests(unittest.TestCase):
+    """`floe2 view deck.jb` really opens: GTK start, deck worker open,
+    first composite frame displayed (FLOE_GUI_SMOKE_MS)."""
+
+    def test_view_smoke(self):
+        try:
+            import gi
+            gi.require_version("Gtk", "3.0")
+            from gi.repository import Gtk  # noqa: F401
+        except (ImportError, ValueError):
+            raise unittest.SkipTest("PyGObject/GTK is not importable")
+        if sys.platform.startswith("linux") and not os.environ.get(
+                "DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+            raise unittest.SkipTest("no display")
+        env = {"FLOE_INDEX_BIN": str(ROOT / "rust" / "target" / "release" /
+                                     "floe-index"),
+               "FLOE_RENDERD_BIN": str(ROOT / "rust" / "target" /
+                                       "release" / "floe-renderd"),
+               "FLOE_GUI_SMOKE_MS": "8000"}
+        run_floe2("index", CLI / "test.jb", "--jobs", "2", env=env, ok=0)
+        res = run_floe2("view", "--multi", CLI / "test.jb", env=env, ok=0,
+                        timeout=120)
+        self.assertNotIn("no GUI frame", res.stderr + res.stdout)
+
+
+def run_floe2(*args, env=None, ok=None, timeout=600):
+    e = os.environ.copy()
+    e.update({"PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": str(ROOT)})
+    if env:
+        e.update(env)
+    res = subprocess.run(
+        [sys.executable, "-B", "-m", "floe2", *map(str, args)],
+        cwd=ROOT, env=e, capture_output=True, text=True, timeout=timeout)
+    if ok is not None and res.returncode != ok:
+        raise AssertionError(
+            "floe2 %s: exit %d, wanted %d\nstdout:\n%s\nstderr:\n%s"
+            % (args, res.returncode, ok, res.stdout, res.stderr))
+    return res
 
 
 if __name__ == "__main__":

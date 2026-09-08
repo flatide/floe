@@ -847,6 +847,16 @@ def make_render_worker(cache, stream_kb=None, stream_target_ms=500,
     backend = os.environ.get(
         "FLOE_RENDERER", default_renderer()).strip().lower()
     backend = backend or default_renderer()
+    if getattr(cache, "is_jobdeck", False):
+        # a jobdeck (floe.jobdeck.viewer.DeckCache) is a renderd
+        # composite of several caches: Rust only, opened by spec
+        if backend != "rust":
+            raise RuntimeError(
+                "a jobdeck needs the Rust renderer (floe2)")
+        from .jobdeck.render import DeckRenderWorker
+        return DeckRenderWorker(cache, stream_kb=stream_kb,
+                                stream_target_ms=stream_target_ms,
+                                debug=debug)
     if backend == "klayout":
         worker_type = RenderWorker
     elif backend == "rust":

@@ -154,17 +154,19 @@ floe view data/testchip_1g5.oas            # 개발용 KLayout 셸 (동결, 비�
 
 ### Jobdeck (Calibre MDPView `.jb`)
 
+덱은 레이아웃과 같은 명령으로 다룬다:
+
 ```sh
-floe2 jobdeck deck.jb                      # 파싱·소스 probe·배치 계획·색 순서 요약
-floe2 jobdeck deck.jb --index --jobs 8     # 덱이 참조하는 모든 TC 소스를 일괄 인덱싱
-floe2 jobdeck deck.jb --id 2 --mode chip --placements --report r.json
-floe2 jobdeck deck.jb --render deck.png --bbox 40000,80000,60000,95000 --pixel 1200x900
+floe2 index  deck.jb --jobs 8           # 덱이 참조하는 모든 TC 소스를 인덱싱(최신 캐시는 유지)
+floe2 view   deck.jb                    # 뷰어에서 열기; Jobdeck 메뉴로 identifier/layer/CHIP 색 모드
+floe2 info   deck.jb                    # 덱 요약 + 뷰 레이어 표
+floe2 render deck.jb --bbox 40000,80000,60000,95000 --px 1200 --out deck.png
+floe2 jobdeck deck.jb --id 2 --mode chip --placements --report r.json   # 분석·보고
 ```
 
-포맷은 비공개라 실측으로 확정한 부분과 미확정 부분을 `docs/JOBDECK.ko.md`에
-분리해 적었다. M1(파서·배치·색·일괄 인덱싱, 렌더러 무변경)이 들어왔고
-합성 렌더(M2+)는 별도 브랜치에서 진행한다. 실제 jobdeck과 마스크 데이터는
-저장소에 넣지 않는다 (`jobdecks_klayout/`는 gitignore).
+renderd가 소스 캐시들을 그대로 열어 합성하며(배율은 씬 루트에만), 포맷의
+확정/미확정 사항과 단계별 설계는 `docs/JOBDECK.ko.md`에 있다. 실제 jobdeck과
+마스크 데이터는 저장소에 넣지 않는다 (`jobdecks_klayout/`는 gitignore).
 
 ### Python/KLayout 레거시 인덱서 (개발 전용)
 
@@ -938,7 +940,8 @@ sh rust/build-linux.sh
    M1 ✅ 파서·배치·MDPView 색 순서·헤더 probe·`floe2 jobdeck`·일괄
    인덱싱 + 손계산 gate. M2 ✅ renderd 다중 캐시 합성(`open deck=`, 배율은
    씬 루트에만, KLayout 평탄화 오라클과 바이트 동일, `--render`).
-   M3 GUI, M4 headless shot(mosaic/anchor), M5 KLayout 툴을 oracle로.
+   M3 ✅ 뷰어(`floe2 view deck.jb`, 색 모드 메뉴, view/info/index/render가
+   .jb를 직접 받음). M4 headless shot(mosaic/anchor), M5 KLayout 툴을 oracle로.
 9. **Calibre 팔레트 임포트** (사용자 결정 2026-08-02, 안정화 후):
    실무자 전원이 Calibre 사용자이므로 뷰어 경험을 동일하게 —
    Calibre layer properties(색·채움 패턴·선 스타일)를 읽어 floe

@@ -508,6 +508,20 @@ impl Deck {
             stats.plan_us = stats.plan_us.saturating_add(planned.stats.plan_us);
             plan_pages = plan_pages.saturating_add(planned.summary.pages);
             check_generation(cancellation, generation)?;
+            if planned
+                .plan
+                .wcells
+                .binary_search_by_key(&planned.plan.top, |cell| cell.key)
+                .is_err()
+            {
+                // The planner dropped the whole source: its top cell is
+                // below the cut at this scale (a mark placed at 0.2x on
+                // a full-deck view). A single cache never sees this - its
+                // top is the chip - so the scene would reject the plan;
+                // for a deck it is an empty pass, like any sub-cut cell.
+                passes_skipped += 1;
+                continue;
+            }
             let mut prioritized: Vec<(u64, u32)> = planned
                 .plan
                 .page_prio

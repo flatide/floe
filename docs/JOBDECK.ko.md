@@ -75,8 +75,8 @@ KLayout 툴은 "소스 → 하나의 flat-ish layout 재작성" 구조였다. fl
 | 단계 | 내용 | 상태 |
 |---|---|---|
 | M1 | Python 포팅(`floe/jobdeck/`), `floe2 jobdeck` CLI, 일괄 인덱싱, 손계산 gate | ✅ 2026-09-08 (main) |
-| M2 | renderd 다중 캐시 합성(`open deck=`), 루트 배율/오프셋, headless `--render`, 오라클 gate | ✅ 2026-09-08 (`feature/jobdeck`) |
-| M3 | GUI: 덱 열기, identifier/chip/layer 색 모드, 선택 | 예정 |
+| M2 | renderd 다중 캐시 합성(`open deck=`), 루트 배율/오프셋, headless 렌더, 오라클 gate | ✅ 2026-09-08 (`feature/jobdeck`) |
+| M3 | 뷰어에서 덱 열기(`floe2 view deck.jb`), 색 모드 메뉴, `view/info/index/render`가 .jb를 직접 받음 | ✅ 2026-09-09 (`feature/jobdeck`) |
 | M4 | headless shot/mosaic (KLayout 툴 cli-spec 대응) | 예정 |
 | M5 | KLayout 툴을 oracle로: 같은 뷰포트 byte/픽셀 비교 gate | 예정 |
 
@@ -133,7 +133,11 @@ Gate `tools/validate_jobdeck.py` (배터리 편입, 20 tests):
   정수 그대로다. world→device 사상 `(x − x0)·W·2³² / span`이 배율 전후에 같은
   식이라 픽셀은 평탄화한 단일 레이아웃 렌더와 **바이트 동일**하다(gate 4).
 - 컬링: 소스 top cell bbox를 덱 좌표로 변환해 뷰와 교차하지 않는 배치는
-  건너뛴다(`passes_skipped`). 가시 레이어(`layers=`)는 out 단위.
+  건너뛴다(`passes_skipped`). 가시 레이어(`layers=`)는 out 단위. 플래너가
+  소스 전체를 cut 아래로 판정해 top cell을 버린 경우(전체 뷰에서 0.2× 마크
+  같은 것; 단일 캐시에서는 top이 칩이라 없던 상황)도 오류가 아니라 빈 패스로
+  건너뛴다 — 2026-09-09 뷰어 기본값(depth 0, detail medium = cut 3px)의 첫
+  프레임이 이 오류로 비어 있던 것을 gate에 고정(`test_3b`).
 - 페이지 예산: 덱 전체에 **하나의 예산**(서버 고정 1024MB). 소스마다 LRU를
   두되, 디코드 직전 `share_budget`: 다른 소스들의 상주량이 예산의 절반을
   넘으면 비례 축소하고, 현재 소스에 나머지를 준다 → 합계 ≤ 예산, 현재 소스
@@ -171,7 +175,47 @@ pick/snap/clip(덱에서는 오류 응답), 배치별 회전/미러(포맷 미�
    뷰포트는 소수점 오프셋을 줘서 경계 정합 반올림 차이를 배제.)
 5. `--render` PNG 크기, 인덱스 없는 소스의 exit 3 + ledger.
 
-## 6. 미결·후속
+## 6. M3 상세 — 뷰어 (사용자 결정 2026-09-09: 출력용 CLI가 아니라 뷰어에서 봐야 한다)
+
+덱은 **레이아웃과 같은 명령으로** 다룬다. 전용 플래그를 두지 않고 기존 floe2
+규칙을 그대로 쓴다:
+
+```sh
+floe2 index  deck.jb                 # 덱이 참조하는 모든 TC 소스를 인덱싱(최신 캐시는 유지)
+floe2 view   deck.jb                 # 뷰어에서 열기 (단일 인스턴스 포워딩·File > load layout… 동일)
+floe2 info   deck.jb                 # 덱 요약 + 뷰 레이어 표
+floe2 render deck.jb --bbox X0,Y0,X1,Y1 --px 1200 --out d.png [--layers "$1 METAL1,$3 ALIGN"]
+floe2 jobdeck deck.jb [--report r.json] [--spec s.spec]   # 분석·보고만
+```
+
+- `floe/jobdeck/viewer.py` `DeckCache` — 뷰어·CLI가 `Cache`에서 읽는 것을 그대로
+  제공한다: `src`(덱 경로), `dir`(renderd가 여는 스펙), `meta`(`dbu`, `bbox`,
+  `layers`, `src`, `grid`(1×1), `vfs`, `jobdeck{mode, chips, placements,
+  skipped, colour_order}`), `exists/load/is_stale/resolve_layers`. "캐시"는
+  소스들의 `<src>.floe` 전부이며 `deck_ready()`가 그 존재를 답한다.
+  `service.make_render_worker`는 `is_jobdeck`을 보고 `DeckRenderWorker`를 만든다.
+- **뷰 레이어 = 색 대상**(`render.view_layers`): identifier 모드는 identifier당
+  한 줄(`$1 METAL1`), layer 모드는 (LY,DT)당 한 줄(`LY123.DT43`), chip 모드는
+  CHIP당 한 줄(`CHIP ID001`). 레이어 패널의 토글·색 변경·layerprops 저장이 그
+  단위로 동작하고, 스펙의 `out`·painter 순서도 이 표를 따른다. (M1 리포트의
+  `layer_table`은 분석용 (idx,ly,dt) 세분을 유지.)
+- 메뉴 **Jobdeck > colour by identifier / layer / CHIP block**: `DeckCache.
+  set_mode()`로 재플랜·스펙 재작성 후 레이어 패널을 다시 만들고 워커를 새
+  스펙으로 재시작한다(현재 뷰 유지). 창 제목은 `deck.jb · jobdeck N CHIPs · M
+  placements · colours by …`.
+- File > load layout… 에 `jobdecks (*.jb)` 필터. 소스 중 인덱스 없는 것이
+  있으면 "지금 인덱싱할까요?" → `floe2 index deck.jb`를 모달 로그로 실행 후 연다.
+  `floe2 view deck.jb`는 인덱스가 없으면 터미널에서 exit 1로 알린다.
+- 덱에서 동작하지 않는 것(오류 상태 메시지로 답함): pick/snap, clip, 라벨,
+  계층 프레임, margin prefetch. depth/detail/fit/goto/ruler/DRC 좌표 점프는
+  덱 좌표(um) 그대로 동작한다.
+
+gate: `ViewerCacheTests`(meta·세 모드의 레이어 표와 색·resolve_layers·close),
+`GuiSmokeTests`(`FLOE_GUI_SMOKE_MS`로 `floe2 view --multi deck.jb` 실제 GTK
+기동 → 워커 open → 첫 합성 프레임 표시), `test_5_ordinary_commands_take_a_deck`
+(`render/info/index/view`의 .jb 처리와 종료 코드).
+
+## 7. 미결·후속
 - LY/DT cross vs zip, 회전/미러: 실덱 사례가 나오면 확정.
 - 실덱에서 M2 성능 확인: 배치 수 × 패스 비용(플랜+디코드+라스터 각 1회).
   전체 뷰에서 수천 패스가 되면 (a) 같은 소스·같은 scale의 배치를 한 패스로

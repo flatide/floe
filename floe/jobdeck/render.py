@@ -28,16 +28,54 @@ def _hex(text: str) -> str:
     return text.encode("utf-8").hex()
 
 
-def deck_layer_name(deck, row: dict, mode: str) -> str:
-    """The name a deck output layer shows in a layer list."""
-    tag = "%s " % row["chip"] if row.get("chip") else ""
-    if mode == MODE_CHIP:
-        return "%s$%d%s" % (tag, row["idx"],
-                            " " + row["title"] if row["title"] else "")
+def view_layers(deck, stats, scheme, colormap):
+    """The deck layers a VIEW shows - one row per colour target of the
+    mode, in paint order, keyed the way the colour map is:
+
+        identifier  one row per identifier ($1 METAL1, ...), ascending
+        layer       one row per (LY, DT) placed, ascending
+        chip        one row per CHIP block, deck order
+
+    Rows: {"out", "key", "name", "color"}; `out` is the spec/style/
+    visibility index. Placements map to a row with `view_out_of`.
+    (The M1 report's `layer_table` keeps the finer (idx, ly, dt) rows
+    for analysis; a viewer lists what it colours.)"""
+    rows = []
+    mode = scheme.mode
     if mode == MODE_IDENTIFIER:
-        return "%s$%d%s" % (tag, row["idx"],
-                            " " + row["title"] if row["title"] else "")
-    return "%sLY%d.DT%d" % (tag, row["ly"], row["dt"])
+        for idx in deck.identifiers():
+            title = deck.title(idx)
+            rows.append({"key": idx, "name": "$%d%s" % (
+                idx, " " + title if title else "")})
+    elif mode == MODE_CHIP:
+        seen = []
+        for c in deck.chips:
+            if c.id not in seen:
+                seen.append(c.id)
+        for cid in seen:
+            rows.append({"key": cid, "name": "CHIP %s" % cid})
+    else:
+        pairs = sorted({(r["ly"], r["dt"]) for r in stats["layer_table"]})
+        for ly, dt in pairs:
+            rows.append({"key": (ly, dt), "name": "LY%d.DT%d" % (ly, dt)})
+    for out, row in enumerate(rows):
+        row["out"] = out
+        row["color"] = colormap.get(row["key"], scheme.fallback)
+    return rows
+
+
+def view_out_of(rows, scheme):
+    """placement -> `out` of its view row."""
+    by_key = {r["key"]: r["out"] for r in rows}
+    mode = scheme.mode
+
+    def out_of(p):
+        if mode == MODE_IDENTIFIER:
+            return by_key[p.idx]
+        if mode == MODE_CHIP:
+            return by_key[p.chip]
+        return by_key[(p.ly, p.dt)]
+    return out_of
 
 
 def _source_layers(cache_dir_src: str):
@@ -53,8 +91,8 @@ def deck_spec_lines(deck, placements, stats, scheme, colormap, catalog):
     cache without the entry's LY/DT (`empty_layer`). Nothing is
     silently thinner: the ledger goes to the report and the summary."""
     dbu = float(stats["dbu"])
-    out_of = stats["out_of"]
-    table = stats["layer_table"]
+    rows = view_layers(deck, stats, scheme, colormap)
+    out_of = view_out_of(rows, scheme)
     sources: list[str] = []
     source_index: dict = {}
     source_layers: dict = {}
@@ -89,31 +127,20 @@ def deck_spec_lines(deck, placements, stats, scheme, colormap, catalog):
                     "cache has no layer %d/%d" % (p.ly, p.dt), "spec",
                     [(p.jx, p.jy)], ly=p.ly, dt=p.dt))
             continue
-        out = out_of[(p.chip, p.idx, p.ly, p.dt)]
+        out = out_of(p)
         used_outs.add(out)
         scale = p.mag * float(info.dbu) / dbu
         placement_lines.append(
             "placement source=%d layer=%d/%d out=%d scale=%r dx=%d dy=%d "
             "order=%d" % (source_index[p.tc], p.ly, p.dt, out, scale,
                           p.ix, p.iy, out))
-    for row in table:
+    for row in rows:
         if row["out"] not in used_outs:
             continue
-        color = _row_color(row, scheme, colormap)
         lines.append("layer out=%d name_hex=%s color=%s fill=solid width=1"
-                     % (row["out"], _hex(deck_layer_name(deck, row,
-                                                         scheme.mode)),
-                        color))
+                     % (row["out"], _hex(row["name"]), row["color"]))
     lines.extend(placement_lines)
     return lines, ledger
-
-
-def _row_color(row, scheme, colormap) -> str:
-    if scheme.mode == MODE_IDENTIFIER:
-        return colormap.get(row["idx"], scheme.fallback)
-    if scheme.mode == MODE_CHIP:
-        return colormap.get(row["chip"], scheme.fallback)
-    return colormap.get((row["ly"], row["dt"]), scheme.fallback)
 
 
 def write_deck_spec(path, deck, placements, stats, scheme, colormap,
@@ -129,15 +156,19 @@ def write_deck_spec(path, deck, placements, stats, scheme, colormap,
     return ledger
 
 
-def deck_layers_meta(stats, scheme, colormap):
-    """The `meta["layers"]` rows the Rust worker keys its styles on:
-    one per deck output layer, as layer=<out> datatype=0."""
-    rows = []
-    for row in stats["layer_table"]:
-        rows.append({"layer": int(row["out"]), "datatype": 0,
-                     "name": "out%d" % row["out"],
-                     "color": _row_color(row, scheme, colormap)})
-    return rows
+def deck_layers_meta(deck, stats, scheme, colormap, placements=None):
+    """The `meta["layers"]` rows a viewer and the Rust worker key on:
+    one per view layer, as layer=<out> datatype=0, with the row's name
+    and colour (and, like a cache, a stored_shapes count = placements)."""
+    rows = view_layers(deck, stats, scheme, colormap)
+    counts = {}
+    if placements is not None:
+        out_of = view_out_of(rows, scheme)
+        for p in placements:
+            counts[out_of(p)] = counts.get(out_of(p), 0) + 1
+    return [{"layer": int(r["out"]), "datatype": 0, "name": r["name"],
+             "color": r["color"], "stored_shapes": counts.get(r["out"], 0)}
+            for r in rows]
 
 
 class _DeckCacheShim:
@@ -153,9 +184,13 @@ class _DeckCacheShim:
 
 
 class DeckRenderWorker:
-    """Factory: a RustRenderWorker that opens `open deck=<spec>`."""
+    """Factory: a RustRenderWorker that opens `open deck=<spec>`.
 
-    def __new__(cls, spec_path, deck_path, dbu, layers, **kw):
+    `cache` is anything cache-shaped for a deck (`floe.jobdeck.viewer.
+    DeckCache`, or the shim below): `.dir` is the spec path, `.src` the
+    deck, `.meta` carries dbu and the view layers."""
+
+    def __new__(cls, cache, **kw):
         from ..rust_render import RustRenderWorker
 
         class _Worker(RustRenderWorker):
@@ -175,8 +210,7 @@ class DeckRenderWorker:
             def _submit_clip(self, job):
                 raise RuntimeError("clip is not available for a jobdeck yet")
 
-        return _Worker(_DeckCacheShim(spec_path, deck_path, dbu, layers),
-                       **kw)
+        return _Worker(cache, **kw)
 
 
 def render_deck_png(spec_path, deck_path, dbu, layers, bbox_dbu, width,
@@ -184,7 +218,8 @@ def render_deck_png(spec_path, deck_path, dbu, layers, bbox_dbu, width,
                     timeout_s=600):
     """Headless composite: one PNG of `bbox_dbu` (deck dbu) at
     width x height through renderd. Solid fills, no labels/frames."""
-    worker = DeckRenderWorker(spec_path, deck_path, dbu, layers)
+    worker = DeckRenderWorker(
+        _DeckCacheShim(spec_path, deck_path, dbu, layers))
     worker.start()
     try:
         # archival output keeps solid fills (the viewer's speckle is a

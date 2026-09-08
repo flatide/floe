@@ -122,6 +122,31 @@ def open_cache(src, args):
     # the viewer is VFS-only: it opens <src>.floe (built by
     # `floe index`, backed by `floe-index vfs`) and never auto-builds a cache.
     from . import cache as cache_mod
+    if _is_deck(src):
+        # a jobdeck (docs/JOBDECK.ko.md M3): its "cache" is every
+        # source's <src>.floe; renderd composites them (floe2 only)
+        from .jobdeck.viewer import DeckCache
+        if _renderer_backend() != "rust":
+            raise SystemExit(
+                f"floe: a jobdeck needs the Rust renderer: floe2 view {src}")
+        c = DeckCache(src)
+        if not c.exists():
+            raise SystemExit(f"floe: no such file: {src}")
+        try:
+            missing = c.unindexed()
+        except ValueError as exc:
+            raise SystemExit("floe: %s" % exc)
+        if missing:
+            raise SystemExit(
+                "no VFS cache for %d jobdeck source(s) (%s%s); run: "
+                "floe index %s" % (len(missing), ", ".join(missing[:3]),
+                                   ", ..." if len(missing) > 3 else "",
+                                   src))
+        try:
+            c.load()
+        except ValueError as exc:
+            raise SystemExit("floe: %s" % exc)
+        return c
     c = cache_mod.Cache(src)
     c.layout_mode = getattr(args, "layout_mode", None)
     if not c.exists():
@@ -323,6 +348,28 @@ def _run_rust_index(args, binary, coverage_only=False):
 
 
 def cmd_index(args):
+    if _is_deck(args.src):
+        # `floe2 index deck.jb`: one `index` run per source the deck
+        # names (each parallel with --jobs); current caches are kept
+        from .jobdeck import parse_jobdeck, SourceCatalog
+        from .jobdeck.viewer import deck_sources_dir
+        if args.legacy or _legacy_index_options(args):
+            raise SystemExit("floe: a jobdeck indexes through the Rust "
+                             "VFS path only")
+        try:
+            deck = parse_jobdeck(args.src, strict=True)
+        except (OSError, ValueError) as exc:
+            raise SystemExit("floe: %s" % exc)
+        catalog = SourceCatalog(deck_sources_dir(args.src))
+        catalog.probe_all(deck.sources())
+        for info in catalog.infos.values():
+            if not info.ok():
+                print("[jobdeck] source    : %s %s (%s)" % (
+                    info.tc, info.status.upper(), info.error))
+        rc = _jobdeck_index(args, catalog)
+        if rc:
+            raise SystemExit(rc)
+        return 0
     legacy_options = _legacy_index_options(args)
     if legacy_options and not args.legacy:
         raise SystemExit(
@@ -417,6 +464,19 @@ def cmd_info(args):
     m = c.meta
     dbu = m["dbu"]
     bb = m["bbox"]
+    if getattr(c, "is_jobdeck", False):
+        from .jobdeck.plan import deck_summary
+        for line in deck_summary(c.deck, c.catalog, c.placements, c.stats,
+                                 c.scheme):
+            print("[jobdeck] " + line)
+        print(f"bbox       : ({bb[0] * dbu:.1f}, {bb[1] * dbu:.1f}) - "
+              f"({bb[2] * dbu:.1f}, {bb[3] * dbu:.1f}) um")
+        print(f"{'layer':>8}  {'name':<20} {'placements':>11}")
+        for l in m["layers"]:
+            print(f"{l['layer']:>5}/{l['datatype']:<2} {l['name']:<20} "
+                  f"{l['stored_shapes']:>11,}")
+        c.close()
+        return
 
     def _du(path):
         tot = 0
@@ -922,9 +982,16 @@ def cmd_clip(args):
           f"in {time.perf_counter() - t0:.2f}s")
 
 
+def _is_deck(src):
+    return bool(src) and str(src).lower().endswith(".jb")
+
+
 def _cache_ready(src):
     """Lightweight cache check without importing klayout: a VFS
     cache at <src>.floe with a matching source fingerprint."""
+    if _is_deck(src):
+        from .jobdeck.viewer import deck_ready
+        return deck_ready(src)
     try:
         with open(src + ".floe/meta.json") as f:
             meta = json.load(f)
@@ -1344,8 +1411,9 @@ def _id_list(value):
 
 def cmd_jobdeck(args):
     """Parse a Calibre MDPView jobdeck, probe its sources, place every
-    entry on the deck grid and report; optionally index every source
-    (`--index`) so the M2 composite view can open them."""
+    entry on the deck grid and report. Viewing, indexing and headless
+    rendering are the ordinary commands: `floe2 view|index|render
+    deck.jb` (docs/JOBDECK.ko.md)."""
     from . import jobdeck as jd
 
     scheme = None
@@ -1382,39 +1450,11 @@ def cmd_jobdeck(args):
               % (len(stats["skipped"]),
                  "y" if len(stats["skipped"]) == 1 else "ies"))
         rc = 3
-    if args.index:
-        rc = max(rc, _jobdeck_index(args, catalog))
-        # the probe ran before the caches existed: refresh for the spec
-        catalog.infos.clear()
-        catalog.probe_all(deck.sources())
-    elif catalog.unindexed() and not (args.spec or args.render):
-        print("[jobdeck] %d source(s) have no .floe cache yet; "
-              "add --index to build them" % len(catalog.unindexed()))
-    if args.spec or args.render:
-        rc = max(rc, _jobdeck_composite(args, deck, placements, stats,
-                                        scheme, colormap, catalog))
-    if rc:
-        raise SystemExit(rc)
-    return 0
-
-
-def _jobdeck_composite(args, deck, placements, stats, scheme, colormap,
-                       catalog):
-    """--spec / --render: the M2 composite through renderd."""
-    import tempfile
-    from .jobdeck import render as jrender
-
-    if args.render and not args.bbox:
-        raise SystemExit("floe: --render needs --bbox X0,Y0,X1,Y1 (um)")
-    work = None
-    spec_path = args.spec
-    if spec_path is None:
-        work = tempfile.mkdtemp(prefix="floe-jobdeck-")
-        spec_path = os.path.join(work, "deck.spec")
-    try:
+    if args.spec:
+        from .jobdeck import render as jrender
         try:
             ledger = jrender.write_deck_spec(
-                spec_path, deck, placements, stats, scheme, colormap,
+                args.spec, deck, placements, stats, scheme, colormap,
                 catalog)
         except ValueError as exc:
             raise SystemExit("floe: %s" % exc)
@@ -1422,45 +1462,19 @@ def _jobdeck_composite(args, deck, placements, stats, scheme, colormap,
             print("[jobdeck] skipped   : CHIP %s $%d %s: %s (%s)" % (
                 rec["chip"], rec["idx"], rec["tc"], rec["reason"],
                 rec["detail"]))
-        n_place = sum(1 for _ in open(spec_path) if _.startswith("placement "))
+        with open(args.spec) as fh:
+            n_place = sum(1 for line in fh if line.startswith("placement "))
         print("[jobdeck] spec      : %s (%d placement(s)%s)" % (
-            spec_path, n_place,
+            args.spec, n_place,
             ", %d skipped" % len(ledger) if ledger else ""))
-        rc = 3 if ledger else 0
-        if not args.render:
-            return rc
-        try:
-            width, height = (int(v) for v in args.pixel.lower().split("x"))
-        except ValueError:
-            raise SystemExit("floe: --pixel must be WxH")
-        if width <= 0 or height <= 0:
-            raise SystemExit("floe: --pixel must be positive")
-        try:
-            bbox_um = tuple(float(v) for v in args.bbox.split(","))
-            if len(bbox_um) != 4:
-                raise ValueError
-        except ValueError:
-            raise SystemExit("floe: --bbox must be X0,Y0,X1,Y1 in um")
-        dbu = float(stats["dbu"])
-        bbox_um = jrender.fit_bbox_to_pixels(bbox_um, width, height)
-        bbox_dbu = tuple(v / dbu for v in bbox_um)
-        layers = jrender.deck_layers_meta(stats, scheme, colormap)
-        t0 = time.time()
-        try:
-            result = jrender.render_deck_png(
-                spec_path, args.deck, dbu, layers, bbox_dbu, width, height,
-                args.render)
-        except RuntimeError as exc:
-            raise SystemExit("floe: composite render: %s" % exc)
-        print("[jobdeck] rendered  : %s (%dx%d, bbox um %.4f %.4f %.4f "
-              "%.4f, %.2fs, draw %d ms)" % (
-                  args.render, width, height, *bbox_um, time.time() - t0,
-                  int(result.get("ms", 0))))
-        return rc
-    finally:
-        if work is not None:
-            import shutil
-            shutil.rmtree(work, ignore_errors=True)
+        if ledger:
+            rc = max(rc, 3)
+    elif catalog.unindexed():
+        print("[jobdeck] %d source(s) have no .floe cache yet; run: "
+              "floe index %s" % (len(catalog.unindexed()), args.deck))
+    if rc:
+        raise SystemExit(rc)
+    return 0
 
 
 def _jobdeck_index(args, catalog):
@@ -1523,7 +1537,8 @@ def main(argv=None, *, prog=None, rust_only=None):
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser(
-        "index", help="build the Rust VFS spatial cache (one-time)")
+        "index", help="build the Rust VFS spatial cache (one-time); a "
+                      ".jb jobdeck indexes every source it names")
     p.add_argument("src")
     p.add_argument("--force", action="store_true",
                    help="allow replacement of an existing <src>.floe "
@@ -1535,7 +1550,8 @@ def main(argv=None, *, prog=None, rust_only=None):
     rust.add_argument("--page-target-mb", type=_positive_int, default=None,
                       metavar="N", help="encoded page target in MiB "
                       "(default: 1)")
-    p.set_defaults(coverage=False, coverage_only=False)
+    p.set_defaults(coverage=False, coverage_only=False,
+                   index_module="floe2" if rust_only else "floe")
     if not rust_only:
         coverage = rust.add_mutually_exclusive_group()
         coverage.add_argument(
@@ -1913,8 +1929,9 @@ def main(argv=None, *, prog=None, rust_only=None):
     p.set_defaults(fn=cmd_view)
 
     p = sub.add_parser(
-        "jobdeck", help="parse a Calibre MDPView jobdeck (.jb), place and "
-                        "colour its entries, and index its sources")
+        "jobdeck", help="analyse a Calibre MDPView jobdeck (.jb): parse, "
+                        "probe sources, place and colour, report "
+                        "(view/index/render take a .jb directly)")
     p.add_argument("deck", help="the .jb file")
     p.add_argument("--sources", metavar="DIR", default=None,
                    help="directory TC paths resolve against (default: the "
@@ -1947,24 +1964,7 @@ def main(argv=None, *, prog=None, rust_only=None):
     p.add_argument("--spec", metavar="FILE", default=None,
                    help="write the composite spec renderd opens "
                         "(sources, deck layers, placements)")
-    p.add_argument("--render", metavar="PNG", default=None,
-                   help="render the composite headlessly to PNG "
-                        "(needs --bbox; sources must be indexed)")
-    p.add_argument("--bbox", metavar="X0,Y0,X1,Y1", default=None,
-                   help="with --render: region in um, expanded about its "
-                        "centre to the --pixel aspect")
-    p.add_argument("--pixel", metavar="WxH", default="1200x900",
-                   help="with --render: image size (default 1200x900)")
-    p.add_argument("--index", action="store_true",
-                   help="build the <src>.floe cache of every source the "
-                        "deck names (skips current caches)")
-    p.add_argument("--force", action="store_true",
-                   help="with --index: rebuild caches that already exist")
-    p.add_argument("--jobs", type=_positive_int, default=12, metavar="N",
-                   help="with --index: worker count per source "
-                        "(default: 12)")
-    p.set_defaults(fn=cmd_jobdeck,
-                   index_module="floe2" if rust_only else "floe")
+    p.set_defaults(fn=cmd_jobdeck)
 
     args = ap.parse_args(argv)
     reviewer = getattr(args, "floe_reviewer", None)
