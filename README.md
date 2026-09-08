@@ -122,15 +122,15 @@ python3 -m venv --system-site-packages .venv
 | 5/1, 7/1, 9/1, 11/1, 13/1, 15/1 | M*_FILL | 더미필 (용량 대부분) |
 | 63/63 | MARKER | 검증용 마커/라벨 |
 
-## floe2 / floe 사용법
+## floe2 사용법
 
 OASIS에는 공간 인덱스가 없어 어떤 조회든 파일 전체 파싱이 필요하다.
-두 제품은 **최초 1회 인덱싱**으로 이 비용을 지불하고, 이후 모든 조회는
+floe2는 **최초 1회 인덱싱**으로 이 비용을 지불하고, 이후 모든 조회는
 관심 영역과 교차하는 타일만 로딩해 ms~초 단위로 응답한다.
 
 ```sh
-alias floe2=".venv/bin/python -m floe2"  # Rust-only 개발 제품
-alias floe=".venv/bin/python -m floe"
+alias floe2=".venv/bin/python -m floe2"  # 제품 (Rust renderer)
+alias floe=".venv/bin/python -m floe"    # 개발 전용: 동결된 KLayout 셸 (oracle·선행 검증)
 
 floe2 index data/testchip_1g5.oas          # 1회: 공유 <src>.floe/ 생성
 floe2 index data/testchip_1g5.oas --jobs 1 # 병렬 끄기
@@ -141,7 +141,7 @@ floe2 render data/testchip_1g5.oas --bbox 5000,5000,5200,5200 \
           --layers M2,M3,VIA2 --out view.png
 floe2 clip data/testchip_1g5.oas --bbox 5000,5000,5100,5100 --out region.oas
 
-floe view data/testchip_1g5.oas            # 안정판 KLayout 화면
+floe view data/testchip_1g5.oas            # 개발용 KLayout 셸 (동결, 비교·선행 검증)
 ```
 
 - `--bbox`는 µm 단위 `X0,Y0,X1,Y1`. `--layers`는 이름 또는 `layer/datatype` 목록.
@@ -152,10 +152,11 @@ floe view data/testchip_1g5.oas            # 안정판 KLayout 화면
   생성·표시하지 않으며 공유 cache에 남은 `design.ovc`도 읽지 않는다. 안정판
   `floe`의 KLayout 화면만 `--coverage`/`--coverage-only`를 계속 제공한다.
 
-### Python/KLayout 레거시 인덱서
+### Python/KLayout 레거시 인덱서 (개발 전용)
 
 동결된 `.tiles` 인덱서는 명시적 `floe index --legacy <src>`에서만 사용한다.
-`floe2`에서는 명령과 옵션을 노출하지 않는다.
+`floe2`에서는 명령과 옵션을 노출하지 않는다. floe 자체가 동결된 뒤로 이 절은
+개발 참고용이다(oracle의 meta-parity `.tiles`를 만드는 데 배터리가 쓴다).
 아래의 read mode, band, skeleton/text cap, merge, memory governor 옵션은 모두
 `--legacy` 전용이다.
 
@@ -590,6 +591,9 @@ python3 -m venv --system-site-packages .venv               # gi가 보이게
   동일한 접속 형태). macOS 개발 환경 설정은 위 [환경 설정](#환경-설정) 참고.
 
 ### floe2 / floe-portable: 완전 자립 번들 (PyGObject 없는 호스트용)
+
+릴리즈 산출물은 `floe2-portable`뿐이다. `floe-portable`(KLayout 동봉)은
+동결된 셸을 폐쇄망에서 oracle·선행 검증용으로 쓸 때만 만드는 개발 번들이다.
 
 호스트에 `python3-gobject`(gi)조차 없거나 파이썬 버전이 안 맞는 경우,
 flateyes-portable과 동일하게 필요한 걸 전부 싸서 가져간다. Python +

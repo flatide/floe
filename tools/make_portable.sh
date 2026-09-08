@@ -1,10 +1,12 @@
 #!/bin/bash
-# Build a self-contained floe2/floe runtime bundle for hosts without PyGObject.
+# Build a self-contained floe2 runtime bundle for hosts without PyGObject.
 # Adapted from flateyes' make_portable.sh - the GTK3 stack is pulled from
 # conda-forge (relocatable) exactly as flateyes does; floe additionally
-# needs NumPy + Pillow wheels. The default product is Rust-only floe2;
-# FLOE_PORTABLE_KLAYOUT=1 builds the KLayout floe bundle with both `floe`
-# (stable/KLayout) and `floe2` (Rust) launchers.
+# needs NumPy + Pillow wheels. The product (release artifact) is Rust-only
+# floe2. FLOE_PORTABLE_KLAYOUT=1 builds the DEVELOPMENT bundle with the
+# frozen KLayout shell `floe` next to `floe2` - oracle / pre-validation use
+# on closed networks only, never a release (floe is frozen since
+# 2026-09-08, branch floe-legacy).
 #
 #   ./make_portable.sh [output-dir]     # -> floe2-portable-<ver>-<date>.tar.gz
 #   ./make_portable.sh --print-name     # print the artifact name and stop
@@ -46,9 +48,12 @@ if [ -z "$FLOE_PORTABLE_PRODUCT" ]; then
 fi
 case "$FLOE_PORTABLE_PRODUCT" in
     floe)
-        # The stable product owns the KLayout renderer. Keep the historical
-        # FLOE_PORTABLE_KLAYOUT=1 spelling as a compatible product selector.
+        # The frozen KLayout shell: a development/oracle bundle, not a
+        # release. Keep the historical FLOE_PORTABLE_KLAYOUT=1 spelling as
+        # a compatible selector.
         FLOE_PORTABLE_KLAYOUT=1
+        echo "NOTE: building the DEVELOPMENT bundle (frozen KLayout shell floe + floe2);" >&2
+        echo "      the release artifact is the default floe2-only bundle." >&2
         ;;
     floe2)
         if [ "$FLOE_PORTABLE_KLAYOUT" = 1 ]; then

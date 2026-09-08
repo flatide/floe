@@ -9,6 +9,13 @@
 #   sh tools/validate_rust.sh                # valmini (generated on
 #                                            # first use under $TMPDIR)
 #   sh tools/validate_rust.sh path/to.oas    # any indexed asset
+#
+# KLayout is a DEVELOPMENT dependency of this battery only: it generates
+# the fixtures, builds the legacy .tiles meta-parity oracle and serves as
+# the pixel/query accuracy oracle. The shipped product (floe2) needs none
+# of it - validate_floe2.py pins the KLayout-free import and the product
+# shell; the frozen KLayout shell floe is exercised here purely as the
+# oracle (floe-legacy, 2026-09-08).
 set -e
 cd "$(dirname "$0")/.."
 SRC=${1:-}
@@ -39,6 +46,7 @@ if [ "$SRC" = "$FLOE2_SMOKE_SRC" ]; then
 fi
 (cd rust && PATH="$HOME/.cargo/bin:$PATH" \
     cargo build --release 2>/dev/null >/dev/null)
+echo "== floe2 product + accuracy gates (KLayout = oracle/generator only)"
 (cd rust && PATH="$HOME/.cargo/bin:$PATH" cargo test --workspace)
 .venv/bin/python tools/validate_index_cli.py
 .venv/bin/python tools/validate_vfs_profile.py "$FLOE2_SMOKE_SRC"
@@ -94,6 +102,7 @@ rm -f "$VOUT.buildlog"
 PYTHONDONTWRITEBYTECODE=1 FLOE_RENDERER=rust FLOE_RUST_ROUND_PAGES=4 \
     FLOE_INTEGRATION_SOURCE="$SRC" FLOE_INTEGRATION_CACHE="$VOUT" \
     .venv/bin/python tools/validate_rust_renderer.py
+echo "== KLayout pixel oracle (frozen shell as reference)"
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python tools/validate_klayout_oracle.py --jobs 1
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python tools/validate_klayout_oracle.py --jobs 8
 echo "RUST VALIDATION: ALL OK ($SRC)"
