@@ -1191,6 +1191,10 @@ class Viewer:
         self._drc = None            # drc.DrcDb or drc.IcePack
         self._drcwin = None
         self.drc_mark = None        # {"kind": 'p'|'e', "pts": [(dbu)]}
+        # scale right after the last error jump: a zoom the user makes
+        # while viewing errors sticks across n/p and clicks (2026-09-08)
+        self._drc_jump_spp = None
+        self._drc_zoom_lock = False  # a user zoom is being kept this session
         self._drc_hits = []         # frame's painted markers:
                                     # (px, py, ci, ei) for hover/pick
         self._drc_tip = None        # last tooltip text set
@@ -6344,6 +6348,12 @@ class Viewer:
                 bool(ev.state & Gdk.ModifierType.SHIFT_MASK))
             return False
         self._drc_cell_mark(row, j)
+        if self.drc_mark is not None:
+            # user call 2026-09-08: while an error is being viewed
+            # (double-click jump live) a plain click on another
+            # number behaves like n/p - it jumps there
+            self._drc_jump(ci, ei)
+            return False
         e = db.checks[ci].errors[ei]
         self._drc_focus = (ci, ei, e.kind,
                            [(x / self.dbu, y / self.dbu)
@@ -6413,6 +6423,25 @@ class Viewer:
         db = self._drc
         check = db.checks[ci]
         e = check.errors[ei]
+        # user call 2026-09-08: a framing jump shrinks the in-view
+        # list to this one error and every other number vanishes -
+        # release the filter first (the button's handler refills the
+        # grid), then put the mark back on this error's cell
+        win_ = self._drcwin
+        if self._drc_hl and win_ is not None:
+            win_._hl.set_active(False)
+            self._drc_goto_cell(ci, ei)
+        # user call 2026-09-08: a zoom made while an error is being
+        # viewed sticks - n/p and list clicks only recenter. A fresh
+        # double-click (isolate) or a new session (mark cleared by
+        # Esc) frames at the default fraction again.
+        changed = (self._drc_jump_spp is not None
+                   and abs(self.spp / self._drc_jump_spp - 1.0) > 1e-6)
+        if isolate or self.drc_mark is None:
+            self._drc_zoom_lock = False      # a new viewing session
+        elif changed:
+            self._drc_zoom_lock = True       # the user's zoom sticks
+        keep_zoom = self._drc_zoom_lock
         self._drc_pos = self._drc_cum[ci] + ei
         self._drc_focus = None    # the jump mark supersedes it
         iso = None
@@ -6421,16 +6450,21 @@ class Viewer:
         b = e.bbox()
         w_um, h_um = b[2] - b[0], b[3] - b[1]
         cx, cy = e.center()
-        # zoom so the whole violation spans ~DRC_VIEW_FRACTION of
-        # the view on BOTH axes (goto sets the view WIDTH, so the
-        # vertical requirement converts through the canvas aspect)
-        vw, vh = self._viewport_size()
-        win = w_um / DRC_VIEW_FRACTION
-        if vh > 0:
-            win = max(win, h_um / DRC_VIEW_FRACTION * (vw / float(vh)))
-        if win <= 0:
-            win = 0.1   # degenerate (point-like) violation
-        self.goto(cx, cy, win)
+        if keep_zoom:
+            self.goto(cx, cy, None)   # recenter at the user's zoom
+        else:
+            # zoom so the whole violation spans ~DRC_VIEW_FRACTION of
+            # the view on BOTH axes (goto sets the view WIDTH, so the
+            # vertical requirement converts through the canvas aspect)
+            vw, vh = self._viewport_size()
+            win = w_um / DRC_VIEW_FRACTION
+            if vh > 0:
+                win = max(win,
+                          h_um / DRC_VIEW_FRACTION * (vw / float(vh)))
+            if win <= 0:
+                win = 0.1   # degenerate (point-like) violation
+            self.goto(cx, cy, win)
+        self._drc_jump_spp = self.spp
         self.drc_mark = {"kind": e.kind,
                          "pts": [(x / self.dbu, y / self.dbu)
                                  for x, y in e.pts],

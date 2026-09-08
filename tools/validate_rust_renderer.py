@@ -643,6 +643,109 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         provider = Gtk.CssProvider()
         provider.load_from_data(gui.PANEL_CSS)   # raises on a syntax error
 
+    def test_drc_error_viewing_releases_in_view_keeps_zoom_and_click_steps(self):
+        """User call 2026-09-08: (1) a framing jump switches the in-view
+        filter off first, else the list collapses to that one error;
+        (2) a zoom made while viewing sticks across n/p and list
+        clicks (recenter only) until a fresh double-click; (3) a plain
+        click on another number while viewing jumps like n/p."""
+        from floe.gui import DRC_VIEW_FRACTION, Viewer
+
+        class Err:
+            kind, num, pts = "p", 7, [(0, 0), (1000, 0), (1000, 500), (0, 500)]
+
+            def bbox(self):
+                return (0.0, 0.0, 1.0, 0.5)
+
+            def center(self):
+                return (0.5, 0.25)
+
+        errors = [Err(), Err(), Err()]
+        db = SimpleNamespace(checks=[SimpleNamespace(name="R1", errors=errors)])
+        v = Viewer.__new__(Viewer)
+        v._drc, v._drc_cum, v._drc_pos = db, [0], -1
+        v._drc_focus = None
+        v.drc_mark = None
+        v._drc_jump_spp = None
+        v._drc_zoom_lock = False
+        v.dbu, v.spp = 0.001, 1.0
+        v._viewport_size = lambda: (800, 400)
+        v.rulers, v._drc_ruler = [], []
+        v._drc_cd_ruler = lambda e: []
+        v._drc_waived = lambda db_, ci, ei: False
+        v._drc_isolate_layers = lambda name: None
+        v._drc_show_detail = lambda ci, ei: None
+        v._display = lambda: None
+        v._set_live_status = lambda msg: None
+        v._drc_grid_ci, v._drc_grid_base, v._drc_page = 0, None, 0
+        hl_calls, goto_calls, cell_calls = [], [], []
+        v._drcwin = SimpleNamespace(
+            _hl=SimpleNamespace(set_active=lambda on: hl_calls.append(on)))
+        v._drc_goto_cell = lambda ci, ei: cell_calls.append((ci, ei))
+
+        def goto(x, y, window_um=None):
+            goto_calls.append((x, y, window_um))
+            if window_um:
+                v.spp = (window_um / v.dbu) / 800.0
+        v.goto = goto
+
+        # (1) in view on + double-click jump: the filter releases and
+        # the mark returns to the jumped cell before the view moves
+        v._drc_hl = True
+        Viewer._drc_jump(v, 0, 0, isolate=True)
+        self.assertEqual(hl_calls, [False])
+        self.assertEqual(cell_calls, [(0, 0)])
+        default_win = max(1.0 / DRC_VIEW_FRACTION,
+                          0.5 / DRC_VIEW_FRACTION * 2.0)
+        self.assertAlmostEqual(goto_calls[-1][2], default_win)
+        spp_default = v.spp
+        v._drc_hl = False
+
+        # (2) n/p without a zoom change frames at the default again;
+        # after the user zooms in 2x, n/p only recenters
+        Viewer._drc_jump(v, 0, 1)
+        self.assertAlmostEqual(goto_calls[-1][2], default_win)
+        v.spp = spp_default * 0.5          # user wheel-zoomed in
+        Viewer._drc_jump(v, 0, 2)
+        self.assertIsNone(goto_calls[-1][2], "recenter only")
+        self.assertAlmostEqual(v.spp, spp_default * 0.5)
+        Viewer._drc_jump(v, 0, 0)
+        self.assertIsNone(goto_calls[-1][2], "the zoom keeps sticking")
+        # a fresh double-click frames at the default fraction again
+        Viewer._drc_jump(v, 0, 1, isolate=True)
+        self.assertAlmostEqual(goto_calls[-1][2], default_win)
+        # Esc (mark cleared) ends the session: the next jump reframes
+        v.spp = spp_default * 0.5
+        v.drc_mark = None
+        Viewer._drc_jump(v, 0, 2)
+        self.assertAlmostEqual(goto_calls[-1][2], default_win)
+
+        # (3) a plain click while viewing jumps like n/p; with no
+        # error being viewed it only marks + details
+        try:
+            from floe import gui
+            gui.import_gtk()
+            Gdk = gui.Gdk
+        except Exception as exc:  # pragma: no cover - headless hosts
+            self.skipTest("GTK unavailable: %s" % exc)
+        jumps = []
+        v._drc_jump = lambda ci, ei, isolate=False: jumps.append((ci, ei, isolate))
+        v._drc_cell_mark = lambda row, j: None
+        v._drc_grid_rows, v._drc_gridw, v._drc_grid_map = 1, 3, [0, 1, 2]
+        col = object()
+        path = SimpleNamespace(get_indices=lambda: [0])
+        tree = SimpleNamespace(get_path_at_pos=lambda x, y: (path, col, 0, 0),
+                               get_columns=lambda: [None, col, None])
+        ev = SimpleNamespace(button=1, type=Gdk.EventType.BUTTON_PRESS,
+                             state=0, x=0, y=0)
+        v.drc_mark = {"kind": "p"}
+        Viewer._on_drc_grid_click(v, tree, ev)
+        self.assertEqual(jumps, [(0, 1, False)])
+        v.drc_mark = None
+        Viewer._on_drc_grid_click(v, tree, ev)
+        self.assertEqual(jumps, [(0, 1, False)], "no viewing: no jump")
+        self.assertEqual(v._drc_focus[:2], (0, 1))
+
     def test_parses_wire_fields(self):
         kind, fields = _parse_wire_line(
             "frame gen=7 png=/tmp/f.png partial=1 deferred=9")
