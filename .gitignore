@@ -8,3 +8,6 @@ __pycache__/
 floe-portable-*.tar.gz
 AGENTS.md
 floe_research/
+
+# local jobdeck (Calibre MDPView) analysis tooling - not part of the product
+jobdecks_klayout/
