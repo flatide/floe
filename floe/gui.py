@@ -1667,7 +1667,8 @@ class Viewer:
         self._layer_patterns = {}
         self._layer_widths = {}
         rows = ([] if cache is None else
-                cache_mod.load_layer_props(self.cache.src)[0])
+                cache_mod.load_layer_props(
+                    getattr(self.cache, "props_src", self.cache.src))[0])
         for key, _color, fill, _name, _f1, f2 in rows:
             i = fillpat.fill_index(fill)
             if i is not None:
@@ -7974,7 +7975,7 @@ class Viewer:
         it - and it seeds their personal cache on first open."""
         try:
             path = cache_mod.save_shared_props(
-                self.cache.src,
+                getattr(self.cache, "props_src", self.cache.src),
                 fillpat.format_layerprops(self._props_rows()))
             self._set_live_status(
                 "design default layerprops saved: %s" % path)

@@ -249,7 +249,7 @@ def render_deck_png(spec_path, deck_path, dbu, layers, bbox_dbu, width,
         # archival output keeps solid fills (the viewer's speckle is a
         # live-view presentation choice), as `floe2 render` does
         solid = "\n".join(["*" * 16] * 16)
-        keys = [(int(l["layer"]), 0) for l in layers]
+        keys = [(int(l["layer"]), int(l["datatype"])) for l in layers]
         worker.submit({"kind": "repattern",
                        "fills": [(k, solid) for k in keys],
                        "widths": [(k, 1) for k in keys]})

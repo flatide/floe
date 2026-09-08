@@ -493,6 +493,18 @@ impl Deck {
         for pixel in composite.chunks_exact_mut(4) {
             pixel[3] = 255;
         }
+        // Review 2026-09-09 (2nd) P1-1: the single-cache raster paints
+        // the gray frame bands under the design and the white band over
+        // it, for the WHOLE scene. A deck must keep that order across
+        // placements - every gray band first, then every placement's
+        // geometry, then every white band - or a later placement's
+        // geometry buries an earlier placement's white frame. With
+        // frames on, each placement is rastered twice on its scene
+        // (frames only, geometry only) and the frame pass is split by
+        // its structural colours into an under plane and an over plane
+        // that are laid down in three phases at the end.
+        let mut frames_under = request.frames.then(|| vec![0u8; byte_len]);
+        let mut frames_over = request.frames.then(|| vec![0u8; byte_len]);
         let mut stats = RenderStats::default();
         let mut passes = 0u32;
         let mut passes_skipped = 0u32;
@@ -602,18 +614,33 @@ impl Deck {
             partial |= scene.is_partial();
             pages = pages.saturating_add(scene.available_pages().try_into().unwrap_or(u32::MAX));
             check_generation(cancellation, generation)?;
+            let raster = GeometryRasterRequest {
+                view: source_view,
+                width: request.width,
+                height: request.height,
+                background: [0, 0, 0, 0],
+                foreground: [255, 255, 255, 255],
+                workers: request.workers,
+                tile_size: request.tile_size,
+            };
+            if let (Some(under), Some(over)) = (frames_under.as_mut(), frames_over.as_mut()) {
+                let frames_only = StyledGeometryRasterRequest {
+                    raster,
+                    layers: Vec::new(),
+                    hierarchy_frames: true,
+                    mono: request.mono,
+                };
+                let report =
+                    render_geometry_styled_cancellable(&scene, &frames_only, generation, cancellation)?;
+                split_frame_planes(report.frame.pixels(), under, over);
+                accumulate_raster(&mut stats, &report.stats);
+                frame_member_paints = frame_member_paints.saturating_add(report.frame_member_paints);
+                check_generation(cancellation, generation)?;
+            }
             let styled = StyledGeometryRasterRequest {
-                raster: GeometryRasterRequest {
-                    view: source_view,
-                    width: request.width,
-                    height: request.height,
-                    background: [0, 0, 0, 0],
-                    foreground: [255, 255, 255, 255],
-                    workers: request.workers,
-                    tile_size: request.tile_size,
-                },
+                raster,
                 layers: vec![style],
-                hierarchy_frames: request.frames,
+                hierarchy_frames: false,
                 mono: request.mono,
             };
             let report = render_geometry_styled_cancellable(&scene, &styled, generation, cancellation)?;
@@ -623,8 +650,19 @@ impl Deck {
                 rectangle_member_paints.saturating_add(report.rectangle_member_paints);
             polygon_member_paints = polygon_member_paints.saturating_add(report.polygon_member_paints);
             path_member_paints = path_member_paints.saturating_add(report.path_member_paints);
-            frame_member_paints = frame_member_paints.saturating_add(report.frame_member_paints);
             passes += 1;
+        }
+        if let (Some(under), Some(over)) = (frames_under, frames_over) {
+            // gray bands of every placement go UNDER all geometry, the
+            // white band of every placement OVER it
+            let mut layered = vec![0u8; byte_len];
+            for pixel in layered.chunks_exact_mut(4) {
+                pixel[3] = 255;
+            }
+            overlay(&mut layered, &under);
+            overlay(&mut layered, &composite_geometry_only(&composite));
+            overlay(&mut layered, &over);
+            composite = layered;
         }
         Ok(DeckRenderReport {
             frame: RgbaFrame::from_pixels(request.width, request.height, composite)?,
@@ -686,6 +724,47 @@ fn accumulate_raster(stats: &mut RenderStats, raster: &RenderStats) {
     stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(raster.rep_members_drawn);
     stats.hier_cells_visited = stats.hier_cells_visited.saturating_add(raster.hier_cells_visited);
     stats.subtrees_pruned = stats.subtrees_pruned.saturating_add(raster.subtrees_pruned);
+}
+
+/// A frames-only pass paints nothing but the raster's structural
+/// colours: gray bands (solid wash, dotted, hollow) that a single-cache
+/// render lays UNDER the design and the white hollow band it lays OVER
+/// it. Split the pass into those two planes so a deck can keep that
+/// order across every placement.
+pub fn split_frame_planes(pass: &[u8], under: &mut [u8], over: &mut [u8]) {
+    for ((src, u), o) in pass
+        .chunks_exact(4)
+        .zip(under.chunks_exact_mut(4))
+        .zip(over.chunks_exact_mut(4))
+    {
+        if src[3] == 0 {
+            continue;
+        }
+        if src[0] == 255 && src[1] == 255 && src[2] == 255 {
+            o.copy_from_slice(src);
+        } else {
+            u.copy_from_slice(src);
+        }
+    }
+}
+
+/// The geometry composite as an overlay source: its black opaque
+/// background must not cover the under plane, so background pixels
+/// become alpha 0 (a design pixel that is itself black opaque is
+/// indistinguishable and stays transparent - the under plane there is
+/// the gray wash the design would have covered; the single-cache
+/// raster paints the wash first and the black design over it, and a
+/// black-on-gray pixel reads as gray either way only if the design
+/// pixel is transparent, so this keeps the wash visible under pure
+/// black design pixels: accepted, black design colours are not used).
+fn composite_geometry_only(composite: &[u8]) -> Vec<u8> {
+    let mut out = composite.to_vec();
+    for pixel in out.chunks_exact_mut(4) {
+        if pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0 {
+            pixel[3] = 0;
+        }
+    }
+    out
 }
 
 /// Opaque-over: every pass pixel the raster touched (alpha != 0)
@@ -995,6 +1074,24 @@ mod tests {
         assert_eq!(plan.cut_dbu, 1);
         assert_eq!(plan.visible_layers, Some(vec!["1/0".to_string()]));
         assert_eq!((plan.view.x0, plan.view.y0, plan.view.x1, plan.view.y1), (0, 0, 200, 100));
+    }
+
+    #[test]
+    fn frame_planes_split_white_over_gray() {
+        // gray hollow, white hollow, untouched, gray wash
+        let pass = [128, 128, 128, 255, 255, 255, 255, 255, 0, 0, 0, 0, 128, 128, 128, 255];
+        let mut under = vec![0u8; 16];
+        let mut over = vec![0u8; 16];
+        split_frame_planes(&pass, &mut under, &mut over);
+        assert_eq!(under, vec![128, 128, 128, 255, 0, 0, 0, 0, 0, 0, 0, 0, 128, 128, 128, 255]);
+        assert_eq!(over, vec![0, 0, 0, 0, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0]);
+        // geometry laid between them: a placement's design covers the
+        // gray wash but never the white frame
+        let mut layered = vec![0, 0, 0, 255].repeat(4);
+        overlay(&mut layered, &under);
+        overlay(&mut layered, &composite_geometry_only(&[0, 0, 0, 255, 9, 9, 9, 255, 0, 0, 0, 255, 9, 9, 9, 255]));
+        overlay(&mut layered, &over);
+        assert_eq!(layered, vec![128, 128, 128, 255, 255, 255, 255, 255, 0, 0, 0, 255, 9, 9, 9, 255]);
     }
 
     #[test]

@@ -25,6 +25,7 @@ from .geom import MISSING_SKIP
 from .parser import parse_jobdeck
 from .plan import plan_deck
 from .render import deck_layers_meta, view_layers, write_deck_spec
+from ..cache import apply_personal_colors
 from .sources import SourceCatalog
 
 DECK_SUFFIXES = (".jb",)
@@ -99,6 +100,10 @@ class DeckCache:
             self.colormap, self.catalog)
         self.dir = spec
         self.meta = self._build_meta()
+        # the saved <props_src>.layerprops colours overlay the view's
+        # palette exactly as Cache.load does for a layout (review
+        # 2026-09-09 P2-3: widths came back, colours did not)
+        apply_personal_colors(self.meta, self.props_src)
         self._loaded_mtime = int(os.stat(self.src).st_mtime)
         return self.meta
 
@@ -108,25 +113,57 @@ class DeckCache:
         except OSError:
             return True
 
+    @property
+    def props_src(self) -> str:
+        """The path layerprops are keyed by. Each view has its own key
+        space (level view n/0, chip view pos/level, source layer view
+        LY/DT), so each view keeps its own <key>.layerprops: the level
+        view's is the deck's (<deck>.jb.layerprops), the others are
+        <deck>.chip.jb / <deck>.layer.jb - a name whose <stem>.layerprops
+        fallback cannot land on another view's file."""
+        if self.mode == MODE_LEVEL:
+            return self.src
+        stem, ext = os.path.splitext(self.src)
+        return "%s.%s%s" % (stem, self.mode, ext)
+
     def resolve_layers(self, spec):
-        """'$1,CHIP ID001,2/0' -> [(out, 0), ...]; None = all."""
+        """'$1 METAL1,CHIP ID001,2/0' -> [(layer, datatype), ...]; None
+        = all. Like Cache.resolve_layers a name selects EVERY row that
+        carries it (chip view: "$1 METAL1" in every CHIP that places
+        it), and a group head - a CHIP row, an LY with several DTs -
+        expands to its whole group (review 2026-09-09 P2-2: the head
+        alone holds no placement and drew a black screen)."""
         if not spec or spec == "all":
             return None
-        byname = {l["name"]: (l["layer"], l["datatype"])
-                  for l in self.meta["layers"]}
+        rows = self.meta["layers"]
+        byname = {}
+        for l in rows:
+            byname.setdefault(l["name"], []).append((l["layer"],
+                                                     l["datatype"]))
         out = []
         for tok in spec.split(","):
             tok = tok.strip()
             if not tok:
                 continue
             if tok in byname:
-                out.append(byname[tok])
+                keys = list(byname[tok])
             elif "/" in tok:
                 l, d = tok.split("/")
-                out.append((int(l), int(d)))
+                keys = [(int(l), int(d))]
+                if keys[0] not in {(r["layer"], r["datatype"])
+                                   for r in rows}:
+                    raise ValueError("unknown deck layer: %r (known: %s)"
+                                     % (tok, sorted(byname)))
             else:
                 raise ValueError("unknown deck layer: %r (known: %s)"
                                  % (tok, sorted(byname)))
+            for key in keys:
+                out.append(key)
+                if key[1] == 0:
+                    # a group head (CHIP row, or an LY's datatype 0)
+                    # stands for the group
+                    out.extend((r["layer"], r["datatype"]) for r in rows
+                               if r["layer"] == key[0] and r["datatype"] != 0)
         return list(dict.fromkeys(out))
 
     def close(self):

@@ -122,6 +122,23 @@ ROWS 1000.0/1000.0
 END
 """
 
+# review 2026-09-09 (2nd) P1-1: two overlapping placements of a source
+# that has a top-level box AND a child cell - at depth 0 the child is
+# a white frame that the later placement's box must not bury
+FRAMES_DECK = """* frames.jb
+MTITLE 1,A
+MTITLE 2,B
+*PLACE-INFO
+CHIP A
+$ (1, A, AD=0.00020, SF=1, TC=hier2.oas, LY={1}, DT={0}, BX=0.0, BY=0.0, UX=2000.0, UY=2000.0 )
+ROWS 0.0/0.0
+CHIP B
+$ (2, B, AD=0.00020, SF=1, TC=hier2.oas, LY={1}, DT={0}, BX=0.0, BY=0.0, UX=2000.0, UY=2000.0 )
+ROWS 0.0/1600.0
+*END-PLACE
+END
+"""
+
 # review 2026-09-09 P1-3: the shapes live in a child cell only
 HIER_DECK = """* hier.jb
 MTITLE 1,KID
@@ -180,8 +197,28 @@ def build_fixtures(d: Path):
     (d / "test_missing_layer.jb").write_text(MISSING_LAYER_DECK)
     (d / "dense.jb").write_text(DENSE_DECK)
     (d / "hier.jb").write_text(HIER_DECK)
+    (d / "frames.jb").write_text(FRAMES_DECK)
     build_dense_oas(d / "dense.oas")
     build_hier_oas(d / "hier.oas")
+    build_hier2_oas(d / "hier2.oas")
+
+
+def build_hier2_oas(path, dbu=0.00005):
+    """TOP: a 2000 um box on 1/0 and an instance of KID (a 200 um box
+    on 1/0 at 500,500) - depth 0 draws the box and KID's frame."""
+    import klayout.db as db
+    ly = db.Layout()
+    ly.dbu = dbu
+    li = ly.layer(1, 0)
+    kid = ly.create_cell("KID")
+    k = int(round(200.0 / dbu))
+    kid.shapes(li).insert(db.Box(0, 0, k, k))
+    top = ly.create_cell("TOP")
+    w = int(round(2000.0 / dbu))
+    top.shapes(li).insert(db.Box(0, 0, w, w))
+    off = int(round(500.0 / dbu))
+    top.insert(db.CellInstArray(kid.cell_index(), db.Trans(db.Vector(off, off))))
+    ly.write(str(path))
 
 
 def build_dense_oas(path, dbu=0.00005, count=60000, extent_um=2000.0):
@@ -590,7 +627,7 @@ _GEN = itertools.count(1)
 
 
 def _render_raw(worker, bbox_dbu, width, height, visible=None,
-                depth=None, cut_px=0.0):
+                depth=None, cut_px=0.0, frames=False):
     """One settled raw frame through a started worker: RGBA bytes.
     Generations must increase per daemon: a repeated one is dropped."""
     gen = next(_GEN)
@@ -604,7 +641,7 @@ def _render_raw(worker, bbox_dbu, width, height, visible=None,
         "kind": "render", "gen": gen, "scope": "headless",
         "bbox": tuple(float(v) for v in bbox_dbu), "view": None,
         "w": width, "h": height, "depth": depth, "cut_px": cut_px,
-        "lod": False, "frames": False, "labels": False,
+        "lod": False, "frames": frames, "labels": False,
         "abstract": False, "visible": visible, "frame_format": "raw",
     })
     while True:
@@ -896,7 +933,7 @@ class ViewerCacheTests(unittest.TestCase):
                              [0, 2, 2, 2, 0, 3, 3, 3, 0, 1, 1])
             self.assertTrue(c.dir.endswith("deck-chip.spec"))
             self.assertEqual(c.resolve_layers("CHIP ID002,3/1"),
-                             [(2, 0), (3, 1)])
+                             [(2, 0), (2, 1), (2, 2), (2, 5), (3, 1)])
             spec = open(c.dir).read()
             self.assertIn("layer out=0 key=1/0 name_hex=", spec)
             self.assertEqual(spec.count("\nlayer "), 11)
@@ -1314,15 +1351,13 @@ class ReviewFixTests(unittest.TestCase):
                 worker.stop()
         finally:
             c.close()
-        # `floe2 render hier.jb` (depth default full) is not black
+        # `floe2 render hier.jb` (depth default full) is not black -
+        # decoded, RGB only (review 2026-09-09 (2nd) P2-4: the raw IDAT
+        # check counted alpha bytes and passed an all-black PNG)
         out = CLI / "hier.png"
         run_floe2("render", CLI / "hier.jb", "--px", "32", "--out", out,
                   env=self.env, ok=0)
-        data = out.read_bytes()
-        idat = data.index(b"IDAT")
-        length = struct.unpack(">I", data[idat - 4:idat])[0]
-        raw = zlib.decompress(data[idat + 4:idat + 4 + length])
-        self.assertTrue(any(b for b in raw[1:]), "the PNG is all black")
+        self.assertGreater(_png_lit_pixels(out), 0, "the PNG is all black")
 
     def test_p2_6_one_line_batch_writes_into_a_directory(self):
         batch = CLI / "one.txt"
@@ -1333,6 +1368,157 @@ class ReviewFixTests(unittest.TestCase):
                   outdir, env=self.env, ok=0)
         self.assertTrue(outdir.is_dir())
         self.assertTrue((outdir / "only.png").is_file())
+
+
+def _png_lit_pixels(path):
+    """Non-black RGB pixels of a PNG (Pillow; the battery's dev env)."""
+    from PIL import Image
+    img = Image.open(path).convert("RGB")
+    return sum(1 for px in img.getdata() if px != (0, 0, 0))
+
+
+def _lit(rgba):
+    return sum(1 for o in range(0, len(rgba), 4) if rgba[o:o + 3] != b"\0\0\0")
+
+
+def _white(rgba):
+    return sum(1 for o in range(0, len(rgba), 4)
+               if rgba[o:o + 3] == b"\xff\xff\xff")
+
+
+class ReviewFixTests2(unittest.TestCase):
+    """Review 2026-09-09, second pass (five findings): each pinned."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.env = {"FLOE_INDEX_BIN": str(ROOT / "rust" / "target" /
+                                         "release" / "floe-index"),
+                   "FLOE_RENDERD_BIN": str(ROOT / "rust" / "target" /
+                                           "release" / "floe-renderd")}
+        os.environ["FLOE_RENDERD_BIN"] = cls.env["FLOE_RENDERD_BIN"]
+        for deck in ("test.jb", "frames.jb"):
+            run_floe2("index", CLI / deck, "--jobs", "2", env=cls.env, ok=0)
+
+    def test_p1_1_frame_order_is_kept_across_placements(self):
+        from floe.jobdeck.viewer import DeckCache
+        c = DeckCache(str(CLI / "frames.jb"))
+        c.load()
+        try:
+            worker = jrender.DeckRenderWorker(c)
+            worker.start()
+            try:
+                bb = tuple(c.meta["bbox"])
+                # placement A alone: its child's white frame at depth 0
+                a_only = _render_raw(worker, bb, 400, 400, depth=0,
+                                     frames=True, visible=[(1, 0)])
+                both = _render_raw(worker, bb, 400, 400, depth=0,
+                                   frames=True)
+                no_frames = _render_raw(worker, bb, 400, 400, depth=0)
+            finally:
+                worker.stop()
+        finally:
+            c.close()
+        self.assertGreater(_white(a_only), 0)
+        self.assertEqual(_white(no_frames), 0)
+        # B's box covers A's child region: A's white frame must still be
+        # on top (every white pixel of A survives, B adds its own)
+        self.assertGreaterEqual(_white(both), _white(a_only),
+                                "a later placement's geometry buried an "
+                                "earlier placement's white frame")
+        self.assertGreater(_lit(both), _lit(a_only))
+
+    def test_p2_2_group_names_select_their_levels(self):
+        from floe.jobdeck.viewer import DeckCache
+        c = DeckCache(str(CLI / "test.jb"), mode="chip")
+        c.load()
+        try:
+            # a CHIP row stands for its levels ...
+            self.assertEqual(c.resolve_layers("CHIP ID002"),
+                             [(2, 0), (2, 1), (2, 2), (2, 5)])
+            self.assertEqual(c.resolve_layers("2/0"),
+                             [(2, 0), (2, 1), (2, 2), (2, 5)])
+            # ... a level name selects it in EVERY CHIP that places it
+            self.assertEqual(c.resolve_layers("$1 METAL1"),
+                             [(1, 1), (2, 1), (3, 1)])
+            self.assertEqual(c.resolve_layers("$5"), [(2, 5)])
+            with self.assertRaises(ValueError):
+                c.resolve_layers("9/9")
+            worker = jrender.DeckRenderWorker(c)
+            worker.start()
+            try:
+                bb = tuple(c.meta["bbox"])
+                head = _render_raw(worker, bb, 200, 160,
+                                   visible=c.resolve_layers("CHIP ID002"))
+            finally:
+                worker.stop()
+            self.assertGreater(_lit(head), 1000, "CHIP ID002 drew nothing")
+        finally:
+            c.close()
+        # the level view: unique names, no groups
+        c = DeckCache(str(CLI / "test.jb"))
+        c.load()
+        try:
+            self.assertEqual(c.resolve_layers("$1 METAL1,$5"),
+                             [(1, 0), (5, 0)])
+        finally:
+            c.close()
+
+    def test_p2_3_saved_colours_come_back_per_view(self):
+        from floe import fillpat
+        from floe.jobdeck.viewer import DeckCache
+        from floe.rust_render import RustRenderWorker
+        props = CLI / "test.jb.layerprops"
+        props.write_text(fillpat.format_layerprops(
+            [((1, 0), "#123456", "solid", "$1 METAL1", "1", "3")]))
+        try:
+            c = DeckCache(str(CLI / "test.jb"))
+            c.load()
+            try:
+                self.assertEqual(c.props_src, str(CLI / "test.jb"))
+                colours = {(l["layer"], l["datatype"]): l["color"]
+                           for l in c.meta["layers"]}
+                self.assertEqual(colours[(1, 0)], "#123456")
+                self.assertEqual(colours[(2, 0)], "#ffff00")
+                # the worker keys its styles on the same meta: colour
+                # and width both come back
+                worker = jrender.DeckRenderWorker(c)
+                self.assertEqual(worker._colors[(1, 0)], "#123456")
+                self.assertEqual(worker._widths[(1, 0)], 3)
+                # chip view keeps its own key space and file
+                c.set_mode("chip")
+                self.assertEqual(c.props_src, str(CLI / "test.chip.jb"))
+                colours = {(l["layer"], l["datatype"]): l["color"]
+                           for l in c.meta["layers"]}
+                self.assertEqual(colours[(1, 0)], "#ffff00",
+                                 "the level view's file leaked into "
+                                 "the chip view")
+            finally:
+                c.close()
+        finally:
+            props.unlink()
+
+    def test_p3_5_render_deck_png_keys_every_row(self):
+        from PIL import Image
+        from floe.jobdeck.viewer import DeckCache
+        c = DeckCache(str(CLI / "test.jb"), mode="chip")
+        c.load()
+        try:
+            bb = tuple(c.meta["bbox"])
+            out = CLI / "chip-helper.png"
+            jrender.render_deck_png(c.dir, c.src, c.meta["dbu"],
+                                    c.meta["layers"], bb, 200, 160, str(out))
+            worker = jrender.DeckRenderWorker(c)
+            worker.start()
+            try:
+                raw = _render_raw(worker, bb, 200, 160)
+            finally:
+                worker.stop()
+        finally:
+            c.close()
+        png = Image.open(out).convert("RGB").tobytes()
+        rgb = bytes(b for o in range(0, len(raw), 4) for b in raw[o:o + 3])
+        self.assertEqual(png, rgb, "the helper's fills differ from the "
+                                   "solid archival render")
 
 
 class KLayoutOracleTests(unittest.TestCase):

@@ -269,7 +269,8 @@ class RustRenderWorker:
         try:
             from floe import cache as cache_mod
             from floe import fillpat
-            rows, _path = cache_mod.load_layer_props(self.cache.src)
+            rows, _path = cache_mod.load_layer_props(
+                getattr(self.cache, "props_src", self.cache.src))
             patterns = fillpat.default_patterns()
             for key, _color, fill, _name, _f1, width in rows:
                 key = _layer_key(key)

@@ -306,6 +306,18 @@ floe2 합성 프레임(같은 뷰포트 1024×800)을 배터리 픽셀 정책
 
 RENDERD_VERSION 0.12.60, `__version__` 0.12.71.
 
+### 2차 (5건)
+
+| # | 지적 | 조치 | gate |
+|---|---|---|---|
+| P1-1 | 계층 프레임 합성 순서: 배치마다 프레임+도형을 완성해 덮으니 앞 배치의 흰 테두리가 뒤 배치의 도형에 가려짐(일반 렌더 240px 유지, 덱 0px) | 단일 캐시 라스터의 순서(회색 밴드 → 도형 → 흰 밴드)를 **덱 전체**에서 지킨다: frames가 켜지면 배치마다 같은 scene을 두 번 라스터(프레임만 / 도형만)하고, 프레임 패스를 구조색으로 갈라(회색 = under 평면, 흰색 = over 평면) 끝에서 under → 모든 도형 → over 순으로 얹는다(`split_frame_planes`). 라스터·플랜·디코드는 그대로. | `test_p1_1_frame_order_is_kept_across_placements`: 겹치는 두 배치, A만 켰을 때의 흰 픽셀이 둘 다 켰을 때도 모두 남음 |
+| P2-2 | chip view 이름 선택: `resolve_layers("CHIP ID002")`가 배치 없는 그룹 머리(2,0)만 돌려 검은 화면; 여러 CHIP의 `$1 METAL1`은 마지막 하나만 | `Cache.resolve_layers`처럼 이름은 **모든** 일치 행을, 그룹 머리(CHIP 행, LY의 datatype 0)는 그룹 전체로 확장. `L/D`는 정확히 그 키(+머리면 그룹). 없는 키는 오류. | `test_p2_2` |
+| P2-3 | 저장한 덱 색상 미복원(선폭만 복원) | `DeckCache.load()`가 `apply_personal_colors(meta, props_src)`를 적용. 뷰마다 키 공간이 다르므로 `props_src`는 level view = `<deck>.jb`, chip/layer view = `<deck>.chip.jb` / `<deck>.layer.jb`(stem 폴백이 다른 뷰 파일에 닿지 않는 이름); GUI·워커의 layerprops 로드/저장은 `props_src`를 쓴다. | `test_p2_3` |
+| P2-4 | 검은 PNG 방지 테스트가 alpha 바이트까지 세어 검은 PNG도 통과 | PNG를 복원(Pillow)해 RGB만 검사 | `_png_lit_pixels` |
+| P3-5 | `render_deck_png()`의 solid 채움이 `(layer, 0)` 키라 chip/source-layer view의 datatype≠0 행은 speckle | `(layer, datatype)` 키 | `test_p3_5`: 헬퍼 PNG == 보관용 raw 렌더 |
+
+RENDERD_VERSION 0.12.61, `__version__` 0.12.72.
+
 ## 10. 미결·후속
 - LY/DT cross vs zip, 회전/미러: 실덱 사례가 나오면 확정.
 - 실덱에서 M2 성능 확인: 배치 수 × 패스 비용(플랜+디코드+라스터 각 1회).
