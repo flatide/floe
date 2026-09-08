@@ -615,11 +615,14 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         noted = Viewer._drc_cell_markup(v, db, 0, 1, True, frozenset())
         self.assertIn(">*2<", noted)
         chosen = Viewer._drc_cell_markup(v, db, 0, 1, False, frozenset([1]))
-        # selection background reads against red AND green (dark
-        # violet, not the canvas gold - user call 2026-09-08)
-        self.assertIn("background='#4a1f6b'", chosen)
-        self.assertNotIn("#ffd700", chosen)
-        self.assertIn("#00e676", chosen)
+        # a selected cell is gold like the canvas marker; its number
+        # darkens to stay readable (user call 2026-09-08)
+        self.assertIn("background='#ffd700'", chosen)
+        self.assertIn("foreground='#006b3c'", chosen)
+        self.assertNotIn("#00e676", chosen)
+        chosen_red = Viewer._drc_cell_markup(v, db, 0, 2, False,
+                                             frozenset([2]))
+        self.assertIn("foreground='#b00020'", chosen_red)
         current = Viewer._drc_cell_markup(v, db, 0, 1, False, frozenset(),
                                           current=True)
         self.assertIn("background='#3465a4'", current)
@@ -634,7 +637,8 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         from floe import gui
 
         # only the two lists are dark (user call): no pane-wide rules
-        self.assertIn(b".floe-drc-list, .floe-drc-list.view", gui.PANEL_CSS)
+        self.assertIn(b".floe-drc-list, .floe-drc-list.view "
+                      b"{ background-color: #2b2b2b", gui.PANEL_CSS)
         self.assertIn(b".floe-drc-list:selected", gui.PANEL_CSS)
         self.assertNotIn(b".floe-drc {", gui.PANEL_CSS)
         self.assertNotIn(b".floe-drc textview", gui.PANEL_CSS)
@@ -750,6 +754,27 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         Viewer._on_drc_grid_click(v, tree, ev)
         self.assertEqual(jumps, [(0, 1, False)], "no viewing: no jump")
         self.assertEqual(v._drc_focus[:2], (0, 1))
+
+    def test_poll_catches_a_resize_the_signal_path_missed(self):
+        """Field 2026-09-08: a title-bar double-click zoom left the view
+        unrefreshed. The poll compares the live canvas allocation with
+        the last one seen and runs the allocation handler on a change."""
+        from floe.gui import Viewer
+
+        v = Viewer.__new__(Viewer)
+        calls = []
+        v._alloc_size = (800, 600)
+        v._on_allocate = lambda w, alloc: calls.append((alloc.width, alloc.height))
+        v.scroller = SimpleNamespace(
+            get_allocation=lambda: SimpleNamespace(width=800, height=600))
+        self.assertFalse(Viewer._sync_allocation(v))
+        v.scroller = SimpleNamespace(
+            get_allocation=lambda: SimpleNamespace(width=1600, height=1000))
+        self.assertTrue(Viewer._sync_allocation(v))
+        self.assertEqual(calls, [(1600, 1000)])
+        v.scroller = SimpleNamespace(
+            get_allocation=lambda: SimpleNamespace(width=1, height=1))
+        self.assertFalse(Viewer._sync_allocation(v), "unrealized: ignored")
 
     def test_parses_wire_fields(self):
         kind, fields = _parse_wire_line(

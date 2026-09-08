@@ -97,11 +97,13 @@ class _dprof(object):
                                  % (self.tag, dt))
                 sys.stderr.flush()
         return False
-DRC_GOLD = 0xFFD700FF      # box-selected errors on the CANVAS
-# grid cell background of a box-selected error (user call 2026-09-08):
-# a dark violet reads against BOTH the red and the waived-green number
-# on the black grid (gold drowned the green: contrast ~1.1 vs ~7)
-DRC_SEL_BG = 0x4A1F6BFF
+DRC_GOLD = 0xFFD700FF      # box-selected errors (canvas marker + grid cell)
+# numbers ON a gold selected cell (user call 2026-09-08): the bright
+# red/green of the dark list are unreadable on gold (contrast ~1.0),
+# so a selected cell shows the same hues darkened - red ~4.8, green
+# ~4.9 against gold - while the canvas marker colours stay as they are
+DRC_RED_ON_GOLD = 0xB00020FF
+DRC_GREEN_ON_GOLD = 0x006B3CFF
 
 
 class _DrcPanel(object):
@@ -158,13 +160,14 @@ PANEL_CSS = (
     b".floe-layers-frame scrollbar slider:active "
     b"{ background-color: #e0e0e0; } "
     # DRC pane (user calls 2026-09-08): ONLY the rules list and the
-    # error-number grid are black with white text, like the layer
-    # pane; the detail text, search entry, buttons and filters keep
-    # the theme. The grid keeps its markup colours (waived green /
-    # red, dark violet selection, blue current cell) on the black
-    # ground; the selected rule row uses the layer pane's blue.
+    # error-number grid are dark - a deep grey rather than the layer
+    # pane's black, which read too dark here - with white text; the
+    # detail text, search entry, buttons and filters keep the theme.
+    # The grid keeps its markup colours (waived green / red, gold
+    # selection with darkened numbers, blue current cell); the
+    # selected rule row uses the layer pane's blue.
     b".floe-drc-list, .floe-drc-list.view "
-    b"{ background-color: #000000; color: #ffffff; } "
+    b"{ background-color: #2b2b2b; color: #ffffff; } "
     b".floe-drc-list:selected, .floe-drc-list.view:selected "
     b"{ background-color: #31566d; color: #ffffff; } "
     # DRC note panel: flateyes-style translucent top-left chip
@@ -2877,9 +2880,31 @@ class Viewer:
         self._set_cursor("move" if self._drag is not None
                          else self._idle_cursor())
 
+    def _sync_allocation(self):
+        """Resize fallback (field 2026-09-08): a title-bar double-click
+        zoom on macOS quartz can resize the window without a
+        size-allocate reaching the canvas, leaving the old picture in
+        the corner until the next pan. The poll compares the live
+        allocation with the last one the signal path saw and runs the
+        same handler on a real change (a redraw at the new size)."""
+        try:
+            alloc = self.scroller.get_allocation()
+        except Exception:
+            return False
+        if alloc.width <= 1 or alloc.height <= 1:
+            return False
+        if (alloc.width, alloc.height) == self._alloc_size:
+            return False
+        self._on_allocate(self.scroller, alloc)
+        return True
+
     def _poll(self):
         if self._quitting:
             return False
+        try:
+            self._sync_allocation()
+        except Exception:
+            pass
         # watchdog: a render-service child that died (spawn failure,
         # crash, OOM kill) would otherwise leave a silent black view
         # with "rendering…" forever. Guarded like everything else in this
@@ -6252,11 +6277,15 @@ class Viewer:
         if current:
             return ("<span background='#3465a4' "
                     "foreground='#ffffff'>%s</span>" % t)
-        fg = self._rgb_hex(DRC_GREEN if self._drc_waived(db, ci, ei)
-                           else DRC_RED)   # waived green / not-waived red
+        waived = self._drc_waived(db, ci, ei)
         if ei in eset:
+            # gold like the canvas marker of a box-selected error, the
+            # number in the darkened hue that reads on it
+            fg = self._rgb_hex(DRC_GREEN_ON_GOLD if waived
+                               else DRC_RED_ON_GOLD)
             return ("<span background='%s' foreground='%s'>%s</span>"
-                    % (self._rgb_hex(DRC_SEL_BG), fg, t))
+                    % (self._rgb_hex(DRC_GOLD), fg, t))
+        fg = self._rgb_hex(DRC_GREEN if waived else DRC_RED)
         return "<span foreground='%s'>%s</span>" % (fg, t)
 
     def _drc_cell_mark(self, row, j):
