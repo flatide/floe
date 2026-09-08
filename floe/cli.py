@@ -1326,6 +1326,105 @@ def _add_reviewer_option(p):
                         "FLOE_REVIEWER - the env var still works)")
 
 
+def _id_list(value):
+    out = []
+    for tok in value.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            out.append(int(tok))
+        except ValueError:
+            raise argparse.ArgumentTypeError(
+                "identifier list must be integers, got %r" % tok)
+    if not out:
+        raise argparse.ArgumentTypeError("identifier list is empty")
+    return out
+
+
+def cmd_jobdeck(args):
+    """Parse a Calibre MDPView jobdeck, probe its sources, place every
+    entry on the deck grid and report; optionally index every source
+    (`--index`) so the M2 composite view can open them."""
+    from . import jobdeck as jd
+
+    scheme = None
+    if args.colors:
+        scheme = jd.ColorScheme.load(args.colors)
+    missing = jd.MISSING_RAISE if args.on_missing == "fail" \
+        else jd.MISSING_SKIP
+    try:
+        deck, catalog, placements, stats, scheme, colormap = jd.plan_deck(
+            args.deck, sources_dir=args.sources, ids=args.id,
+            mode=args.mode, missing=missing, scheme=scheme,
+            cross=(args.ly_dt == "cross"), strict=not args.lenient)
+    except ValueError as exc:
+        raise SystemExit("floe: %s" % exc)
+    except KeyError as exc:
+        print(_brand("floe: %s (a selected entry names a source without a "
+                     "dbu; --on-missing skip lists it instead)  [exit 2]"
+                     % exc), file=sys.stderr)
+        raise SystemExit(2)
+    for line in jd.deck_summary(deck, catalog, placements, stats, scheme):
+        print("[jobdeck] " + line)
+    if args.placements:
+        from .jobdeck.plan import placement_lines
+        for line in placement_lines(placements, scheme, colormap):
+            print(line)
+    if args.report:
+        from .jobdeck.plan import write_report
+        write_report(args.report, deck, placements, stats)
+        print("[jobdeck] report    : %s" % args.report)
+    rc = 0
+    if stats["skipped"]:
+        print("[jobdeck] %d entr%s of the selection could not be placed "
+              "(see 'skipped' above)  [exit 3]"
+              % (len(stats["skipped"]),
+                 "y" if len(stats["skipped"]) == 1 else "ies"))
+        rc = 3
+    if args.index:
+        rc = max(rc, _jobdeck_index(args, catalog))
+    elif catalog.unindexed():
+        print("[jobdeck] %d source(s) have no .floe cache yet; "
+              "add --index to build them" % len(catalog.unindexed()))
+    if rc:
+        raise SystemExit(rc)
+    return 0
+
+
+def _jobdeck_index(args, catalog):
+    """Index every probed-ok source the deck names, one `index` run each
+    (each run parallelises internally with --jobs)."""
+    import subprocess
+    todo = [tc for tc, info in sorted(catalog.infos.items())
+            if info.ok() and (args.force or not info.indexed)]
+    kept = sum(1 for info in catalog.infos.values()
+               if info.ok() and info.indexed and not args.force)
+    if kept:
+        print("[jobdeck] index     : %d source(s) already indexed" % kept)
+    failed = 0
+    for n, tc in enumerate(todo, 1):
+        info = catalog.infos[tc]
+        cmd = [sys.executable, "-B", "-m", args.index_module, "index",
+               info.path, "--jobs", str(args.jobs)]
+        if args.force:
+            cmd.append("--force")
+        print("[jobdeck] index     : (%d/%d) %s" % (n, len(todo), tc),
+              flush=True)
+        t0 = time.time()
+        res = subprocess.run(cmd)
+        if res.returncode != 0:
+            failed += 1
+            print("[jobdeck] index     : FAILED %s (exit %d)"
+                  % (tc, res.returncode))
+        else:
+            print("[jobdeck] index     : ok %s (%.1fs)"
+                  % (tc, time.time() - t0))
+    print("[jobdeck] index     : %d built, %d failed, %d kept"
+          % (len(todo) - failed, failed, kept))
+    return 2 if failed else 0
+
+
 def main(argv=None, *, prog=None, rust_only=None):
     prog = prog or APP
     rust_only = (prog == "floe2") if rust_only is None else bool(rust_only)
@@ -1741,6 +1840,49 @@ def main(argv=None, *, prog=None, rust_only=None):
                         % prog)
     _add_reviewer_option(p)
     p.set_defaults(fn=cmd_view)
+
+    p = sub.add_parser(
+        "jobdeck", help="parse a Calibre MDPView jobdeck (.jb), place and "
+                        "colour its entries, and index its sources")
+    p.add_argument("deck", help="the .jb file")
+    p.add_argument("--sources", metavar="DIR", default=None,
+                   help="directory TC paths resolve against (default: the "
+                        "deck's directory)")
+    p.add_argument("--id", type=_id_list, default=None, metavar="N[,N...]",
+                   help="restrict placements to these identifiers "
+                        "(default: all); the grid and identifier/layer "
+                        "colours never move with the selection")
+    p.add_argument("--mode", choices=("identifier", "layer", "chip"),
+                   default="identifier",
+                   help="colour rule: one colour per identifier "
+                        "(default), per LY, or per CHIP block")
+    p.add_argument("--colors", metavar="FILE", default=None,
+                   help="ColorScheme JSON with pinned colours / palette")
+    p.add_argument("--ly-dt", choices=("cross", "zip"), default="cross",
+                   help="how multi-value LY and DT combine (unconfirmed; "
+                        "default cross)")
+    p.add_argument("--on-missing", choices=("skip", "fail"), default="skip",
+                   help="a selected entry whose TC is missing or "
+                        "unreadable: leave it out and list it (exit 3), "
+                        "or stop with exit 2")
+    p.add_argument("--lenient", action="store_true",
+                   help="return a deck despite structural errors "
+                        "(default: refuse; the errors are listed)")
+    p.add_argument("--placements", action="store_true",
+                   help="print every placement (mag, dx, dy, colour)")
+    p.add_argument("--report", metavar="FILE", default=None,
+                   help="write the JSON report (deck, plan statistics, "
+                        "placements, sources, colour order)")
+    p.add_argument("--index", action="store_true",
+                   help="build the <src>.floe cache of every source the "
+                        "deck names (skips current caches)")
+    p.add_argument("--force", action="store_true",
+                   help="with --index: rebuild caches that already exist")
+    p.add_argument("--jobs", type=_positive_int, default=12, metavar="N",
+                   help="with --index: worker count per source "
+                        "(default: 12)")
+    p.set_defaults(fn=cmd_jobdeck,
+                   index_module="floe2" if rust_only else "floe")
 
     args = ap.parse_args(argv)
     reviewer = getattr(args, "floe_reviewer", None)

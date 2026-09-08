@@ -97,6 +97,9 @@ rm -f "$VOUT.buildlog"
 # SVRF subset parser: preprocessing / derivation closure / check
 # extraction / end-to-end vs gen_drcdb --svrf
 .venv/bin/python tools/validate_svrf.py
+# Calibre MDPView jobdeck (.jb): parser / hand-computed placements /
+# MDPView colour order / header probe / CLI / batch index
+.venv/bin/python tools/validate_jobdeck.py
 # in-tree CPU renderer: Python queue contract plus independent
 # KLayout pixel oracle at deterministic serial/parallel settings
 PYTHONDONTWRITEBYTECODE=1 FLOE_RENDERER=rust FLOE_RUST_ROUND_PAGES=4 \

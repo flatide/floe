@@ -152,6 +152,19 @@ floe view data/testchip_1g5.oas            # 개발용 KLayout 셸 (동결, 비�
   생성·표시하지 않으며 공유 cache에 남은 `design.ovc`도 읽지 않는다. 안정판
   `floe`의 KLayout 화면만 `--coverage`/`--coverage-only`를 계속 제공한다.
 
+### Jobdeck (Calibre MDPView `.jb`)
+
+```sh
+floe2 jobdeck deck.jb                      # 파싱·소스 probe·배치 계획·색 순서 요약
+floe2 jobdeck deck.jb --index --jobs 8     # 덱이 참조하는 모든 TC 소스를 일괄 인덱싱
+floe2 jobdeck deck.jb --id 2 --mode chip --placements --report r.json
+```
+
+포맷은 비공개라 실측으로 확정한 부분과 미확정 부분을 `docs/JOBDECK.ko.md`에
+분리해 적었다. M1(파서·배치·색·일괄 인덱싱, 렌더러 무변경)이 들어왔고
+합성 렌더(M2+)는 별도 브랜치에서 진행한다. 실제 jobdeck과 마스크 데이터는
+저장소에 넣지 않는다 (`jobdecks_klayout/`는 gitignore).
+
 ### Python/KLayout 레거시 인덱서 (개발 전용)
 
 동결된 `.tiles` 인덱서는 명시적 `floe index --legacy <src>`에서만 사용한다.
@@ -920,6 +933,10 @@ sh rust/build-linux.sh
    모달 인코딩 ✅ — 5단계 검증 스위트 통과, 뷰어 호환 확인. 남은 것:
    9.8G 실칩 모달 라이터 재측정(서버), 사이드카 스트리밍 쓰기+진행
    하트비트, 컷오버 전 대형 자산 일회 게이트 후 python 인덱서 은퇴.
+10. **Jobdeck (Calibre MDPView)** (2026-09-08 착수, `docs/JOBDECK.ko.md`):
+   M1 ✅ 파서·배치·MDPView 색 순서·헤더 probe·`floe2 jobdeck`·일괄
+   인덱싱 + 손계산 gate. M2 renderd 다중 캐시 합성 씬(루트 배율),
+   M3 GUI, M4 headless shot, M5 KLayout 툴을 oracle로.
 9. **Calibre 팔레트 임포트** (사용자 결정 2026-08-02, 안정화 후):
    실무자 전원이 Calibre 사용자이므로 뷰어 경험을 동일하게 —
    Calibre layer properties(색·채움 패턴·선 스타일)를 읽어 floe
