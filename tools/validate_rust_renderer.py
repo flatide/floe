@@ -615,7 +615,10 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         noted = Viewer._drc_cell_markup(v, db, 0, 1, True, frozenset())
         self.assertIn(">*2<", noted)
         chosen = Viewer._drc_cell_markup(v, db, 0, 1, False, frozenset([1]))
-        self.assertIn("background='#ffd700'", chosen)
+        # selection background reads against red AND green (dark
+        # violet, not the canvas gold - user call 2026-09-08)
+        self.assertIn("background='#4a1f6b'", chosen)
+        self.assertNotIn("#ffd700", chosen)
         self.assertIn("#00e676", chosen)
         current = Viewer._drc_cell_markup(v, db, 0, 1, False, frozenset(),
                                           current=True)
@@ -630,10 +633,12 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         the DRC selectors must be present."""
         from floe import gui
 
-        self.assertIn(b".floe-drc {", gui.PANEL_CSS)
-        self.assertIn(b".floe-drc treeview", gui.PANEL_CSS)
-        self.assertIn(b".floe-drc textview", gui.PANEL_CSS)
-        self.assertIn(b".floe-drc entry", gui.PANEL_CSS)
+        # only the two lists are dark (user call): no pane-wide rules
+        self.assertIn(b".floe-drc-list, .floe-drc-list.view", gui.PANEL_CSS)
+        self.assertIn(b".floe-drc-list:selected", gui.PANEL_CSS)
+        self.assertNotIn(b".floe-drc {", gui.PANEL_CSS)
+        self.assertNotIn(b".floe-drc textview", gui.PANEL_CSS)
+        self.assertNotIn(b".floe-drc entry", gui.PANEL_CSS)
         self.assertIn(b".floe-layers-frame scrollbar", gui.PANEL_CSS)
         try:
             gui.import_gtk()

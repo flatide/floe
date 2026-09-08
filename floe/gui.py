@@ -97,7 +97,11 @@ class _dprof(object):
                                  % (self.tag, dt))
                 sys.stderr.flush()
         return False
-DRC_GOLD = 0xFFD700FF      # box-selected errors (canvas + grid)
+DRC_GOLD = 0xFFD700FF      # box-selected errors on the CANVAS
+# grid cell background of a box-selected error (user call 2026-09-08):
+# a dark violet reads against BOTH the red and the waived-green number
+# on the black grid (gold drowned the green: contrast ~1.1 vs ~7)
+DRC_SEL_BG = 0x4A1F6BFF
 
 
 class _DrcPanel(object):
@@ -153,35 +157,16 @@ PANEL_CSS = (
     b"{ background-color: #c0c0c0; } "
     b".floe-layers-frame scrollbar slider:active "
     b"{ background-color: #e0e0e0; } "
-    # DRC pane (user call 2026-09-08): black background, white text,
-    # like the layer pane. Scoped per widget type; the rules list and
-    # the number grid keep their markup colours (waived green, red,
-    # gold selection, blue current cell) on the black ground, the
-    # selected rule row uses the layer pane's blue.
-    b".floe-drc { background-color: #000000; } "
-    b".floe-drc-bg { background-color: #000000; } "
-    b".floe-drc treeview, .floe-drc treeview.view "
+    # DRC pane (user calls 2026-09-08): ONLY the rules list and the
+    # error-number grid are black with white text, like the layer
+    # pane; the detail text, search entry, buttons and filters keep
+    # the theme. The grid keeps its markup colours (waived green /
+    # red, dark violet selection, blue current cell) on the black
+    # ground; the selected rule row uses the layer pane's blue.
+    b".floe-drc-list, .floe-drc-list.view "
     b"{ background-color: #000000; color: #ffffff; } "
-    b".floe-drc treeview:selected, .floe-drc treeview.view:selected "
+    b".floe-drc-list:selected, .floe-drc-list.view:selected "
     b"{ background-color: #31566d; color: #ffffff; } "
-    b".floe-drc textview, .floe-drc textview text "
-    b"{ background-color: #000000; color: #ffffff; } "
-    b".floe-drc entry { background-color: #000000; color: #ffffff; "
-    b"caret-color: #ffffff; border: 1px solid #555555; } "
-    b".floe-drc label { color: #ffffff; } "
-    b".floe-drc checkbutton, .floe-drc checkbutton label "
-    b"{ color: #ffffff; } "
-    b".floe-drc flowboxchild { background-color: #000000; } "
-    b".floe-drc button, .floe-drc combobox button "
-    b"{ background-image: none; background-color: #202020; "
-    b"color: #ffffff; border: 1px solid #555555; } "
-    b".floe-drc button:hover, .floe-drc combobox button:hover "
-    b"{ background-color: #303030; } "
-    b".floe-drc button:disabled, .floe-drc combobox button:disabled "
-    b"{ color: #808080; } "
-    b".floe-drc paned > separator "
-    b"{ background-image: none; background-color: #333333; "
-    b"min-width: 3px; min-height: 3px; } "
     # DRC note panel: flateyes-style translucent top-left chip
     b".floe-note-panel { background-color: rgba(0,0,0,0.6); "
     b"color: #f0f0f0; padding: 4px 10px; border-radius: 4px; "
@@ -4632,9 +4617,6 @@ class Viewer:
         available; formerly a separate window)."""
         win = _DrcPanel()
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        # black ground / white text like the layer pane (PANEL_CSS
-        # `.floe-drc` rules, user call 2026-09-08)
-        box.get_style_context().add_class("floe-drc")
         top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         box.pack_start(top, False, False, 2)
         # open .db…/rules… buttons retired 2026-08-22: the DRC menu
@@ -4826,14 +4808,15 @@ class Viewer:
         win._rules, win._rstore = rules, rstore
         win._grid, win._gstore = grid, gstore
         win._plabel, win._pprev, win._pnext = plabel, pprev, pnext
-        # the three scrollers share the layer pane's scrollbar look
-        # and paint their scrolled child black (class on the CHILD,
-        # never on the ScrolledWindow subtree - retina clip note)
-        for sc in (rsc, gsc, dsc):
+        # the rules list and the error grid are black with white
+        # text like the layer pane (PANEL_CSS `.floe-drc-list`; the
+        # class sits on the tree views themselves, never on a
+        # ScrolledWindow subtree - retina clip note) and their
+        # scrollers share the layer pane's scrollbar look; the detail
+        # text and the controls keep the theme (user call 2026-09-08)
+        for tv, sc in ((rules, rsc), (grid, gsc)):
+            tv.get_style_context().add_class("floe-drc-list")
             sc.get_style_context().add_class("floe-layers-frame")
-            child = sc.get_child()
-            if child is not None:
-                child.get_style_context().add_class("floe-drc-bg")
         self._drcwin = win
         return box
 
@@ -6273,7 +6256,7 @@ class Viewer:
                            else DRC_RED)   # waived green / not-waived red
         if ei in eset:
             return ("<span background='%s' foreground='%s'>%s</span>"
-                    % (self._rgb_hex(DRC_GOLD), fg, t))
+                    % (self._rgb_hex(DRC_SEL_BG), fg, t))
         return "<span foreground='%s'>%s</span>" % (fg, t)
 
     def _drc_cell_mark(self, row, j):
