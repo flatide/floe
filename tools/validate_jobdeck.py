@@ -576,8 +576,9 @@ class CompositeTests(unittest.TestCase):
         worker.start()
         try:
             cls.composite = _render_raw(worker, cls.bbox_dbu, cls.W, cls.H)
+            # level view keys rows by level number: level 2 ($2) alone
             cls.only_2 = _render_raw(worker, cls.bbox_dbu, cls.W, cls.H,
-                                     visible=[(1, 0)])
+                                     visible=[(2, 0)])
             # the viewer's defaults (depth 0, detail medium = 3px cut):
             # the 20 um mark is below the cut on a full-deck view, so
             # the planner drops that source - an empty pass, not an
@@ -648,7 +649,7 @@ class CompositeTests(unittest.TestCase):
         self.assertGreaterEqual(len(colours), 4)
 
     def test_3_visible_layers_cull_placements(self):
-        # only deck layer 1 ($2): yellow and black, nothing else
+        # only level 2 ($2): yellow and black, nothing else
         colours = {tuple(self.only_2[o:o + 3])
                    for o in range(0, len(self.only_2), 4)}
         self.assertEqual(colours, {(0, 0, 0), (255, 255, 0)})
@@ -785,23 +786,48 @@ class ViewerCacheTests(unittest.TestCase):
             self.assertTrue(os.path.isfile(c.dir))
             self.assertFalse(c.is_stale())
             self.assertEqual(c.resolve_layers("$2 VIA1,3/0"),
-                             [(1, 0), (3, 0)])
+                             [(2, 0), (3, 0)])
             self.assertIsNone(c.resolve_layers("all"))
             with self.assertRaises(ValueError):
                 c.resolve_layers("nope")
-            # chip mode: one row per CHIP in deck order, MDPView colours
+            self.assertEqual(c.mode, "level")
+            self.assertEqual([(l["layer"], l["datatype"])
+                              for l in meta["layers"]],
+                             [(1, 0), (2, 0), (3, 0), (5, 0)])
+            # chip view: the CHIPs in deck order, each expanding into
+            # the levels it places (<pos>/<level>), MDPView chip colours
             meta = c.set_mode("chip")
             self.assertEqual([l["name"] for l in meta["layers"]],
-                             ["CHIP ID001", "CHIP ID002", "CHIP ID003"])
+                             ["CHIP ID001", "$1 METAL1", "$2 VIA1",
+                              "$3 ALIGN", "CHIP ID002", "$1 METAL1",
+                              "$2 VIA1", "$5", "CHIP ID003", "$1 METAL1",
+                              "$3 ALIGN"])
+            self.assertEqual([(l["layer"], l["datatype"])
+                              for l in meta["layers"]],
+                             [(1, 0), (1, 1), (1, 2), (1, 3), (2, 0), (2, 1),
+                              (2, 2), (2, 5), (3, 0), (3, 1), (3, 3)])
             self.assertEqual([l["color"] for l in meta["layers"]],
-                             ["#ffff00", "#ffc0cb", "#ffffff"])
+                             ["#ffff00"] * 4 + ["#ffc0cb"] * 4
+                             + ["#ffffff"] * 3)
             self.assertEqual([l["stored_shapes"] for l in meta["layers"]],
-                             [6, 9, 2])
+                             [0, 2, 2, 2, 0, 3, 3, 3, 0, 1, 1])
             self.assertTrue(c.dir.endswith("deck-chip.spec"))
+            self.assertEqual(c.resolve_layers("CHIP ID002,3/1"),
+                             [(2, 0), (3, 1)])
+            spec = open(c.dir).read()
+            self.assertIn("layer out=0 key=1/0 name_hex=", spec)
+            self.assertEqual(spec.count("\nlayer "), 11)
+            # our source-layer view: LY groups with DT children
             meta = c.set_mode("layer")
             self.assertEqual([l["name"] for l in meta["layers"]],
                              ["LY7.DT2", "LY123.DT43", "LY456.DT0",
                               "LY999.DT0"])
+            self.assertEqual([(l["layer"], l["datatype"])
+                              for l in meta["layers"]],
+                             [(7, 2), (123, 43), (456, 0), (999, 0)])
+            # the old name still opens the level view
+            meta = c.set_mode("identifier")
+            self.assertEqual(c.mode, "level")
             with self.assertRaises(ValueError):
                 c.set_mode("rainbow")
         finally:

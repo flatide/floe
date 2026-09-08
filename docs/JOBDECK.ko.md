@@ -46,14 +46,46 @@ END
 - 회전/미러 필드의 존재 여부 (실덱에서 본 적 없음).
 - OPTION의 AA/BA/SA 의미.
 
+## 1a. MDPView 용어 — level view / chip view (사용자 지적 2026-09-09)
+
+MDPView 매뉴얼은 jobdeck을 **level view**와 **chip view**로 본다. 공개된 매뉴얼
+원문은 이 세션에서 확보하지 못했다: manualzz / manualzilla의 "Calibre DESIGNrev
+Layout Viewer User's Manual" 사본은 봇 차단(사람 확인 요구, 자동 통과시키지 않음)
+또는 비공개(403)이고, Siemens 문서 포털은 로그인 뒤에 있다. 대신 공개된 MEBES
+jobdeck 문법 자료로 용어의 실체를 확정했다:
+
+- Artwork Conversion의 "MEBES Job Deck Syntax Summary"(artwork.com/gdsii/
+  job_array/page6.htm): `CHIP 1-1,(1,SCNX01Y-01-MB,AD=0.5)` — 괄호 안 첫 숫자가
+  **level**, 이어서 pattern file과 AD. 즉 우리 파서의 `$ (idx, …)`의 `idx`는
+  **mask level 번호**이고 `MTITLE n,name`은 그 level의 이름이다.
+- KLayout 포럼(Matthias, 2015/2021): jobdeck은 여러 MEBES pattern을 x/y로
+  배치하는 합성 계층이며 포맷은 비공개.
+
+따라서 매뉴얼의 두 뷰는 다음과 대응하며, 코드·CLI·GUI 용어를 이에 맞췄다:
+
+| MDPView | floe2 | 내용 |
+|---|---|---|
+| **Level view** | `--mode level` (구 `identifier`, 별칭 유지) / 메뉴 "level view" | mask level(`$n`, MTITLE 이름)마다 한 줄·한 색. 모든 CHIP의 해당 level 배치가 그 색으로 그려진다. 키 `n/0`. |
+| **Chip view** | `--mode chip` / 메뉴 "chip view" | CHIP 블록을 덱 순서대로 나열하고 각 CHIP은 자기가 배치하는 level들로 **펼쳐진다**: 패널의 `+CHIP ID001` 아래 `$1 METAL1`, `$2 VIA1`…. 키 `<CHIP 순번>/<level>`; CHIP 줄(`/0`)은 자체 배치 없이 그룹 머리이며 접힌 채 토글하면 하위 level이 함께 토글된다. 색은 CHIP 색. |
+| (없음) | `--mode layer` / 메뉴 "source layer view" | 소스 LY/DT별(우리 확장, 매뉴얼 용어 아님). |
+
+chip view에서 level을 "선택"하면 그 level이 `k−1`개의 CHIP 뒤 색 슬롯을 차지한다는
+2026-09-07 실측(§2)은 CLI `floe2 jobdeck --mode chip --level k`의 색 순서에
+반영돼 있다. 뷰어에서 그 "선택"이 어떤 조작(하이라이트/펼침)인지는 매뉴얼로
+확인한 뒤 붙인다 — 현재 뷰어 chip view는 CHIP 색만 쓴다.
+
+렌더 쪽 변화: 덱 스펙의 `layer` 줄이 `key=L/D`(뷰가 쓰는 키 쌍)를 가진다
+(`DeckLayer.layer/datatype`; 없으면 `out/0`). renderd의 `style`·`layers=`는 그
+쌍으로 해석한다. RENDERD_VERSION 0.12.59.
+
 ## 2. 색 규칙 (MDPView 실측 2026-09-07)
 
 열 가지 색이 순환한다(Tk 색 이름 그대로: blue, yellow, red, pink, orange,
 white, purple, cyan, magenta, green). 대상의 **순서 목록**을 만들고 i번째에
 `palette[i % 10]`을 준다.
-- identifier 모드: identifier 오름차순. 선택(`--id`)이 색을 바꾸지 않는다.
+- level 모드(level view): level 오름차순. 선택(`--level`)이 색을 바꾸지 않는다.
 - layer 모드: LY 오름차순, LY/DT 핀 가능.
-- chip 모드: CHIP은 덱 순서, 선택된 identifier k는 k−1개의 CHIP 뒤에 끼워
+- chip 모드(chip view): CHIP은 덱 순서, 선택된 level k는 k−1개의 CHIP 뒤에 끼워
   넣는다(`--id 2` → CHIP1, $2, CHIP2, …). 따라서 chip 모드의 CHIP 색은 선택에
   따라 움직인다. 여러 identifier 동시 선택은 추정(MDPView는 하나씩 펼침).
 
@@ -194,15 +226,16 @@ floe2 jobdeck deck.jb [--report r.json] [--spec s.spec]   # 분석·보고만
   skipped, colour_order}`), `exists/load/is_stale/resolve_layers`. "캐시"는
   소스들의 `<src>.floe` 전부이며 `deck_ready()`가 그 존재를 답한다.
   `service.make_render_worker`는 `is_jobdeck`을 보고 `DeckRenderWorker`를 만든다.
-- **뷰 레이어 = 색 대상**(`render.view_layers`): identifier 모드는 identifier당
-  한 줄(`$1 METAL1`), layer 모드는 (LY,DT)당 한 줄(`LY123.DT43`), chip 모드는
-  CHIP당 한 줄(`CHIP ID001`). 레이어 패널의 토글·색 변경·layerprops 저장이 그
-  단위로 동작하고, 스펙의 `out`·painter 순서도 이 표를 따른다. (M1 리포트의
-  `layer_table`은 분석용 (idx,ly,dt) 세분을 유지.)
-- 메뉴 **Jobdeck > colour by identifier / layer / CHIP block**: `DeckCache.
+- **뷰 레이어 = 색 대상**(`render.view_layers`, §1a): level view는 level당 한
+  줄(`$1 METAL1`, 키 `n/0`), chip view는 CHIP 줄(`CHIP ID001`, `pos/0`) 아래
+  그 CHIP의 level 줄들(`pos/level`), source layer view는 (LY,DT)당 한 줄. 레이어
+  패널의 토글·색 변경·layerprops 저장이 그 단위로 동작하고, 스펙의 `out`·painter
+  순서도 이 표를 따른다. (M1 리포트의 `layer_table`은 분석용 (level,ly,dt)
+  세분을 유지.)
+- 메뉴 **Jobdeck > level view / chip view / source layer view**(§1a): `DeckCache.
   set_mode()`로 재플랜·스펙 재작성 후 레이어 패널을 다시 만들고 워커를 새
   스펙으로 재시작한다(현재 뷰 유지). 창 제목은 `deck.jb · jobdeck N CHIPs · M
-  placements · colours by …`.
+  placements · level view`.
 - File > load layout… 에 `jobdecks (*.jb)` 필터. 소스 중 인덱스 없는 것이
   있으면 "지금 인덱싱할까요?" → `floe2 index deck.jb`를 모달 로그로 실행 후 연다.
   `floe2 view deck.jb`는 인덱스가 없으면 터미널에서 exit 1로 알린다.

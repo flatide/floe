@@ -20,7 +20,7 @@ import queue
 import tempfile
 
 from ..cache import Cache
-from .color import MODE_CHIP, MODE_IDENTIFIER
+from .color import MODE_CHIP, MODE_IDENTIFIER, MODE_LEVEL
 from .geom import SKIP_EMPTY_LAYER, SKIP_NOT_INDEXED, skip_record
 
 
@@ -29,38 +29,57 @@ def _hex(text: str) -> str:
 
 
 def view_layers(deck, stats, scheme, colormap):
-    """The deck layers a VIEW shows - one row per colour target of the
-    mode, in paint order, keyed the way the colour map is:
+    """The deck layers a VIEW shows, in paint order - MDPView's two
+    jobdeck views plus our source-layer view:
 
-        identifier  one row per identifier ($1 METAL1, ...), ascending
-        layer       one row per (LY, DT) placed, ascending
-        chip        one row per CHIP block, deck order
+        level   one row per mask level ($1 METAL1, ...), ascending;
+                keyed level/0
+        chip    the CHIP blocks in deck order, each expanding into the
+                levels it places: the CHIP row is keyed <pos>/0 and
+                holds nothing itself, its levels are <pos>/<level> in
+                the CHIP's colour - the viewer's layer panel shows
+                "+CHIP ID001" with "$1 METAL1", "$2 VIA1" underneath
+                and a collapsed CHIP toggles them all
+        layer   one row per (LY, DT) placed, keyed LY/DT (LY groups)
 
-    Rows: {"out", "key", "name", "color"}; `out` is the spec/style/
-    visibility index. Placements map to a row with `view_out_of`.
-    (The M1 report's `layer_table` keeps the finer (idx, ly, dt) rows
-    for analysis; a viewer lists what it colours.)"""
+    Rows: {"out", "key", "layer", "datatype", "name", "color"}; `out`
+    is the spec/style index, layer/datatype the key a viewer and the
+    style file use. Placements map to a row with `view_out_of`. (The
+    M1 report's `layer_table` keeps the finer (level, ly, dt) rows for
+    analysis; a viewer lists what it colours.)"""
     rows = []
     mode = scheme.mode
-    if mode == MODE_IDENTIFIER:
+    if mode == MODE_LEVEL:
         for idx in deck.identifiers():
             title = deck.title(idx)
-            rows.append({"key": idx, "name": "$%d%s" % (
-                idx, " " + title if title else "")})
+            rows.append({"key": idx, "layer": idx, "datatype": 0,
+                         "name": "$%d%s" % (idx, " " + title if title
+                                            else "")})
     elif mode == MODE_CHIP:
         seen = []
         for c in deck.chips:
             if c.id not in seen:
                 seen.append(c.id)
-        for cid in seen:
-            rows.append({"key": cid, "name": "CHIP %s" % cid})
+        for pos, cid in enumerate(seen, 1):
+            rows.append({"key": ("chip", cid), "layer": pos, "datatype": 0,
+                         "name": "CHIP %s" % cid, "color_key": cid})
+            levels = sorted({e.idx for c in deck.chips if c.id == cid
+                             for e in c.entries})
+            for idx in levels:
+                title = deck.title(idx)
+                rows.append({"key": (cid, idx), "layer": pos,
+                             "datatype": idx, "color_key": cid,
+                             "name": "$%d%s" % (idx, " " + title if title
+                                                else "")})
     else:
         pairs = sorted({(r["ly"], r["dt"]) for r in stats["layer_table"]})
         for ly, dt in pairs:
-            rows.append({"key": (ly, dt), "name": "LY%d.DT%d" % (ly, dt)})
+            rows.append({"key": (ly, dt), "layer": ly, "datatype": dt,
+                         "name": "LY%d.DT%d" % (ly, dt)})
     for out, row in enumerate(rows):
         row["out"] = out
-        row["color"] = colormap.get(row["key"], scheme.fallback)
+        row["color"] = colormap.get(row.pop("color_key", row["key"]),
+                                    scheme.fallback)
     return rows
 
 
@@ -70,10 +89,10 @@ def view_out_of(rows, scheme):
     mode = scheme.mode
 
     def out_of(p):
-        if mode == MODE_IDENTIFIER:
+        if mode == MODE_LEVEL:
             return by_key[p.idx]
         if mode == MODE_CHIP:
-            return by_key[p.chip]
+            return by_key[(p.chip, p.idx)]
         return by_key[(p.ly, p.dt)]
     return out_of
 
@@ -135,10 +154,16 @@ def deck_spec_lines(deck, placements, stats, scheme, colormap, catalog):
             "order=%d" % (source_index[p.tc], p.ly, p.dt, out, scale,
                           p.ix, p.iy, out))
     for row in rows:
-        if row["out"] not in used_outs:
+        # chip view keeps its CHIP rows (they hold no placement but
+        # head the expandable group); other views list what is drawn
+        if row["out"] not in used_outs and row["datatype"] != 0 \
+                or (row["out"] not in used_outs
+                    and scheme.mode != MODE_CHIP):
             continue
-        lines.append("layer out=%d name_hex=%s color=%s fill=solid width=1"
-                     % (row["out"], _hex(row["name"]), row["color"]))
+        lines.append("layer out=%d key=%d/%d name_hex=%s color=%s "
+                     "fill=solid width=1"
+                     % (row["out"], row["layer"], row["datatype"],
+                        _hex(row["name"]), row["color"]))
     lines.extend(placement_lines)
     return lines, ledger
 
@@ -166,8 +191,9 @@ def deck_layers_meta(deck, stats, scheme, colormap, placements=None):
         out_of = view_out_of(rows, scheme)
         for p in placements:
             counts[out_of(p)] = counts.get(out_of(p), 0) + 1
-    return [{"layer": int(r["out"]), "datatype": 0, "name": r["name"],
-             "color": r["color"], "stored_shapes": counts.get(r["out"], 0)}
+    return [{"layer": int(r["layer"]), "datatype": int(r["datatype"]),
+             "name": r["name"], "color": r["color"],
+             "stored_shapes": counts.get(r["out"], 0)}
             for r in rows]
 
 
@@ -232,7 +258,9 @@ def render_deck_png(spec_path, deck_path, dbu, layers, bbox_dbu, width,
         if visible_outs is None:
             visible = None
         else:
-            visible = [(int(o), 0) for o in visible_outs]
+            visible = [(int(l["layer"]), int(l["datatype"]))
+                       for l in layers if l["name"] in visible_outs
+                       or (l["layer"], l["datatype"]) in visible_outs]
         worker.submit({
             "kind": "render", "gen": 1, "scope": "headless",
             "bbox": tuple(float(v) for v in bbox_dbu),

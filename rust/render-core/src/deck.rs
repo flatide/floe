@@ -45,9 +45,14 @@ pub struct DeckPlacement {
 }
 
 /// One deck output layer: the visibility/style key of its placements.
+/// `layer/datatype` is the pair the viewer keys it by (level view: the
+/// level number/0; chip view: CHIP position/level, so a CHIP expands
+/// into its levels in the layer panel); it defaults to `out/0`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DeckLayer {
     pub out: u32,
+    pub layer: u32,
+    pub datatype: u32,
     pub name: String,
     pub color: [u8; 4],
     pub fill: LayerFill,
@@ -59,7 +64,7 @@ pub struct DeckLayer {
 /// ```text
 /// deck unit=2.5e-05
 /// source path_hex=<hex utf-8 path of a .floe cache>
-/// layer out=0 name_hex=<hex> color=#0000ff fill=solid width=1
+/// layer out=0 key=1/0 name_hex=<hex> color=#0000ff fill=solid width=1
 /// placement source=0 layer=123/43 out=0 scale=8 dx=1640800000 dy=3200800000 order=0
 /// ```
 #[derive(Clone, Debug, PartialEq)]
@@ -107,10 +112,27 @@ impl DeckSpec {
                     sources.push(path);
                 }
                 "layer" => {
-                    reject_unknown(&fields, &["out", "name_hex", "color", "fill", "width"], line_no)?;
+                    reject_unknown(
+                        &fields,
+                        &["out", "key", "name_hex", "color", "fill", "width"],
+                        line_no,
+                    )?;
                     let out: u32 = required_parse(&fields, "out", line_no)?;
                     if layers.iter().any(|layer| layer.out == out) {
                         return Err(format!("line {line_no}: duplicate deck layer {out}"));
+                    }
+                    let (layer, datatype) = match fields.get("key") {
+                        Some(value) => parse_layer_pair(value)
+                            .map_err(|error| format!("line {line_no}: {error}"))?,
+                        None => (out, 0),
+                    };
+                    if layers
+                        .iter()
+                        .any(|l| l.layer == layer && l.datatype == datatype)
+                    {
+                        return Err(format!(
+                            "line {line_no}: duplicate deck layer key {layer}/{datatype}"
+                        ));
                     }
                     let name = match fields.get("name_hex") {
                         Some(value) => unhex(value, "name_hex")
@@ -127,6 +149,8 @@ impl DeckSpec {
                     }
                     layers.push(DeckLayer {
                         out,
+                        layer,
+                        datatype,
                         name,
                         color: parse_color(fields.get("color").map(String::as_str).unwrap_or("#ffffff"))
                             .map_err(|error| format!("line {line_no}: {error}"))?,
@@ -345,14 +369,15 @@ impl Deck {
     }
 
     /// Synthetic cache-layer view of the deck layers so the daemon's
-    /// style file parser (`out/0`, name, `idx:out`) applies unchanged.
+    /// style file parser and `layers=` lists (`L/D`, name, `idx:out`)
+    /// apply unchanged; the index is the `out`, the pair is the view's.
     pub fn style_layers(&self) -> Vec<CacheLayer> {
         self.layers
             .values()
             .map(|layer| CacheLayer {
                 index: layer.out,
-                layer: layer.out,
-                datatype: 0,
+                layer: layer.layer,
+                datatype: layer.datatype,
                 name: layer.name.clone(),
             })
             .collect()
@@ -834,7 +859,7 @@ mod tests {
              source path_hex={}\n\
              source path_hex={}\n\
              layer out=0 name_hex={} color=#0000ff fill=solid width=1\n\
-             layer out=1 name_hex={} color=#ffff00 fill=speckle width=2\n\
+             layer out=1 key=2/7 name_hex={} color=#ffff00 fill=speckle width=2\n\
              placement source=1 layer=456/0 out=1 scale=2 dx=100 dy=200 order=1\n\
              placement source=0 layer=123/43 out=0 scale=8 dx=-8 dy=16 order=0\n",
             hex("/a/chipA.oas.floe"),
@@ -853,6 +878,8 @@ mod tests {
         assert_eq!(spec.layers[1].fill, LayerFill::Speckle);
         assert_eq!(spec.layers[1].outline_width, 2);
         assert_eq!(spec.layers[0].color, [0, 0, 255, 255]);
+        assert_eq!((spec.layers[0].layer, spec.layers[0].datatype), (0, 0), "key defaults to out/0");
+        assert_eq!((spec.layers[1].layer, spec.layers[1].datatype), (2, 7));
         let ordered = spec.ordered_placements();
         assert_eq!(ordered[0].index, 1, "order 0 paints first");
         assert_eq!(ordered[0].scale, 8.0);
@@ -873,6 +900,8 @@ mod tests {
         assert!(DeckSpec::parse(&unknown).unwrap_err().contains("unknown field rot"));
         let dup = spec_text().replace("layer out=1", "layer out=0");
         assert!(DeckSpec::parse(&dup).unwrap_err().contains("duplicate deck layer 0"));
+        let dup_key = spec_text().replace("key=2/7", "key=0/0");
+        assert!(DeckSpec::parse(&dup_key).unwrap_err().contains("duplicate deck layer key 0/0"));
     }
 
     fn placement(scale: f64, dx: f64, dy: f64) -> DeckPlacement {

@@ -86,6 +86,11 @@ class Entry:
     lineno: int = -1
 
     @property
+    def level(self) -> int:
+        """The `$n` number is the MASK LEVEL (MDPView: level view)."""
+        return self.idx
+
+    @property
     def cx(self) -> float:
         return (self.bx + self.ux) / 2.0
 
@@ -224,6 +229,10 @@ class JobDeck:
                 "mtitle_keys": sorted(titled),
                 "missing_title": sorted(ids - titled),
                 "unused_title": sorted(titled - ids)}
+
+    def levels(self) -> list[int]:
+        """Mask levels placed (the `$n` numbers) - MDPView's level view."""
+        return self.identifiers()
 
     def identifiers(self) -> list[int]:
         seen = []

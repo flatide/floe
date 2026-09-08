@@ -158,13 +158,13 @@ floe view data/testchip_1g5.oas            # 개발용 KLayout 셸 (동결, 비�
 
 ```sh
 floe2 index  deck.jb --jobs 8           # 덱이 참조하는 모든 TC 소스를 인덱싱(최신 캐시는 유지)
-floe2 view   deck.jb                    # 뷰어에서 열기; Jobdeck 메뉴로 identifier/layer/CHIP 색 모드
+floe2 view   deck.jb                    # 뷰어에서 열기; Jobdeck 메뉴로 level view / chip view (MDPView 용어)
 floe2 info   deck.jb                    # 덱 요약 + 뷰 레이어 표
 floe2 render deck.jb --bbox 40000,80000,60000,95000 --px 1200 --out deck.png
 floe2 render deck.jb --at 53.02mm,92.61mm --size 32mm,25.6mm --px 1200x900 --out a.png
 floe2 render deck.jb --corners 40000,80000,60000,95000 --size 4mm,3mm --px 600x450 --out quad.png  # 4장 mosaic
 floe2 render deck.jb --batch shots.txt --out shots/ --report shots/report.json     # 한 번 열고 여러 장
-floe2 jobdeck deck.jb --id 2 --mode chip --placements --report r.json   # 분석·보고
+floe2 jobdeck deck.jb --level 2 --mode chip --placements --report r.json   # 분석·보고
 ```
 
 `render`의 `--at/--size/--anchor`, 단위 접미사(nm/um/mm/cm/m), `--px WxH`,

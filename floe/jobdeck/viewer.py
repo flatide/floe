@@ -20,7 +20,7 @@ import os
 import shutil
 import tempfile
 
-from .color import MODES, MODE_IDENTIFIER
+from .color import MODES, MODE_LEVEL, normalize_mode
 from .geom import MISSING_SKIP
 from .parser import parse_jobdeck
 from .plan import plan_deck
@@ -56,13 +56,10 @@ class DeckCache:
 
     is_jobdeck = True
 
-    def __init__(self, path, mode: str = MODE_IDENTIFIER, sources_dir=None,
+    def __init__(self, path, mode: str = MODE_LEVEL, sources_dir=None,
                  ids=None):
-        if mode not in MODES:
-            raise ValueError("jobdeck colour mode must be one of %s" % (
-                MODES,))
         self.src = os.path.abspath(path)
-        self.mode = mode
+        self.mode = normalize_mode(mode)
         self.ids = ids
         self.sources_dir = deck_sources_dir(self.src, sources_dir)
         self.work = None
@@ -139,10 +136,9 @@ class DeckCache:
 
     # ---- deck-specific --------------------------------------------------
     def set_mode(self, mode: str):
-        if mode not in MODES:
-            raise ValueError("jobdeck colour mode must be one of %s" % (
-                MODES,))
-        self.mode = mode
+        """Switch between MDPView's level view and chip view (and our
+        source layer view); re-plans and rewrites the spec."""
+        self.mode = normalize_mode(mode)
         return self.load()
 
     def view_rows(self):

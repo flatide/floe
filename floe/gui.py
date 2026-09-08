@@ -1740,9 +1740,10 @@ class Viewer:
         elif self.meta.get("jobdeck"):
             jb = self.meta["jobdeck"]
             self.window.set_title(
-                "%s - %s · jobdeck %d CHIPs · %d placements · colours "
-                "by %s" % (APP, os.path.basename(self.meta["src"]["path"]),
-                           jb["chips"], jb["placements"], jb["mode"]))
+                "%s - %s · jobdeck %d CHIPs · %d placements · %s view"
+                % (APP, os.path.basename(self.meta["src"]["path"]),
+                   jb["chips"], jb["placements"],
+                   {"layer": "source layer"}.get(jb["mode"], jb["mode"])))
         else:
             src = self.meta["src"]
             self.window.set_title(
@@ -4561,9 +4562,12 @@ class Viewer:
               lambda: self.mode == "esel")
 
         m = top("Jobdeck")
-        for mode, label in (("identifier", "colour by identifier ($n)"),
-                            ("layer", "colour by layer (LY/DT)"),
-                            ("chip", "colour by CHIP block")):
+        # MDPView's two jobdeck views (its manual: level view / chip
+        # view) plus our source-layer view
+        for mode, label in (("level", "level view (mask levels $n)"),
+                            ("chip", "chip view (CHIP blocks, expand "
+                                     "to levels)"),
+                            ("layer", "source layer view (LY/DT)")):
             check(m, label,
                   (lambda mode=mode: self._jobdeck_set_mode(mode)),
                   (lambda mode=mode: self._jobdeck_mode() == mode))
@@ -4727,7 +4731,7 @@ class Viewer:
         self._apply_cache(cache)
         self.cx, self.cy, self.spp = view
         self._fit_after_worker_start = False
-        self._set_live_status("jobdeck colours by %s" % mode)
+        self._set_live_status("jobdeck %s view" % mode)
         self._restore_keys()
 
     def _about_dialog(self):

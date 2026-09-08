@@ -1956,14 +1956,18 @@ def main(argv=None, *, prog=None, rust_only=None):
     p.add_argument("--sources", metavar="DIR", default=None,
                    help="directory TC paths resolve against (default: the "
                         "deck's directory)")
-    p.add_argument("--id", type=_id_list, default=None, metavar="N[,N...]",
-                   help="restrict placements to these identifiers "
-                        "(default: all); the grid and identifier/layer "
-                        "colours never move with the selection")
-    p.add_argument("--mode", choices=("identifier", "layer", "chip"),
-                   default="identifier",
-                   help="colour rule: one colour per identifier "
-                        "(default), per LY, or per CHIP block")
+    p.add_argument("--level", "--id", dest="id", type=_id_list,
+                   default=None, metavar="N[,N...]",
+                   help="restrict placements to these mask levels (the "
+                        "$n entries; default: all); the grid and level/"
+                        "layer colours never move with the selection")
+    p.add_argument("--mode", choices=("level", "chip", "layer",
+                                      "identifier"),
+                   default="level",
+                   help="MDPView view: level view (one colour per mask "
+                        "level, default), chip view (one colour per CHIP "
+                        "block), or our source layer view (per LY); "
+                        "'identifier' is the old name of level")
     p.add_argument("--colors", metavar="FILE", default=None,
                    help="ColorScheme JSON with pinned colours / palette")
     p.add_argument("--ly-dt", choices=("cross", "zip"), default="cross",

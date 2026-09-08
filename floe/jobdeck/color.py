@@ -31,10 +31,30 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
-MODE_IDENTIFIER = "identifier"
+# MDPView's two jobdeck views (manual terms, user 2026-09-09): the LEVEL
+# view lists the mask levels - the `$n` entries, MTITLE n naming them -
+# and the CHIP view lists the CHIP blocks. The `$n` number is the mask
+# level number (Artwork's MEBES job deck syntax: `CHIP name,(1,PATTERN,
+# AD=...)`, "1" = level), so what the port called "identifier" is the
+# level; "identifier" stays accepted as an alias. The LY/DT view is an
+# extra of ours (source layer/datatype), not a manual term.
+MODE_LEVEL = "level"
+MODE_IDENTIFIER = MODE_LEVEL
 MODE_LAYER = "layer"
 MODE_CHIP = "chip"
-MODES = (MODE_IDENTIFIER, MODE_LAYER, MODE_CHIP)
+MODES = (MODE_LEVEL, MODE_LAYER, MODE_CHIP)
+MODE_ALIASES = {"identifier": MODE_LEVEL, "id": MODE_LEVEL,
+                "levels": MODE_LEVEL, "chips": MODE_CHIP,
+                "layers": MODE_LAYER}
+
+
+def normalize_mode(mode) -> str:
+    """'identifier' -> 'level'; validates against MODES."""
+    m = MODE_ALIASES.get(str(mode).lower(), str(mode).lower())
+    if m not in MODES:
+        raise ValueError("jobdeck view must be one of %s, got %r"
+                         % (MODES, mode))
+    return m
 
 JOBDECK_PALETTE = [
     "#0000ff", "#ffff00", "#ff0000", "#ffc0cb", "#ffa500",
@@ -253,9 +273,10 @@ class ColorScheme:
             d = json.load(fh)
         if "palette" in d:
             d["palette"] = resolve_palette(d["palette"])
-        if d.get("mode") not in MODES:
-            raise ValueError("colour file %s: mode must be one of %s"
-                             % (path, MODES))
+        try:
+            d["mode"] = normalize_mode(d.get("mode", MODE_LEVEL))
+        except ValueError as exc:
+            raise ValueError("colour file %s: %s" % (path, exc))
         return cls(**d)
 
 

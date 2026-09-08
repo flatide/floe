@@ -12,7 +12,7 @@ import json
 import os
 from dataclasses import asdict
 
-from .color import ColorScheme, MODE_IDENTIFIER, order_text
+from .color import ColorScheme, MODE_IDENTIFIER, normalize_mode, order_text
 from .geom import MISSING_RAISE, plan
 from .parser import parse_jobdeck
 from .sources import SourceCatalog
@@ -29,6 +29,7 @@ def plan_deck(deck_path: str, sources_dir=None, ids=None,
     relative to it). `ids` restricts the placements; the grid and the
     colours of identifier/layer mode never move with the selection.
     """
+    mode = normalize_mode(mode)
     deck = parse_jobdeck(deck_path, strict=strict)
     if sources_dir is None:
         sources_dir = os.path.dirname(os.path.abspath(deck_path)) or "."
@@ -92,8 +93,8 @@ def deck_summary(deck, catalog, placements, stats, scheme) -> list[str]:
     lines = [
         "deck      : %s%s" % (deck.path,
                               "  (%s)" % deck.jb_name if deck.jb_name else ""),
-        "chips     : %d  identifiers %s  (%d complete, %d partial)"
-        % (len(deck.chips), deck.identifiers(), cov["complete"],
+        "chips     : %d  levels %s  (%d complete, %d partial)"
+        % (len(deck.chips), deck.levels(), cov["complete"],
            cov["partial"]),
         "sources   : %d probed, %d ok, %d indexed (.floe)  dir %s"
         % (src["probed"], src["ok"], src["indexed"], catalog.dir),
@@ -110,8 +111,12 @@ def deck_summary(deck, catalog, placements, stats, scheme) -> list[str]:
         "bbox um   : %s" % (
             "none" if stats["bbox_um"] is None else
             "%.4f %.4f %.4f %.4f" % tuple(stats["bbox_um"])),
-        "colours   : %s -> %s" % (scheme.mode,
-                                  order_text(stats["colors"]["order"])),
+        "view      : %s -> %s" % (
+            {"level": "level view (by mask level)",
+             "chip": "chip view (by CHIP block)",
+             "layer": "source layer view (LY/DT)"}.get(scheme.mode,
+                                                        scheme.mode),
+            order_text(stats["colors"]["order"])),
     ]
     for info in src["files"]:
         if info["status"] != "ok":
