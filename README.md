@@ -12,19 +12,23 @@
 
 ## 제품 경계와 환경 설정
 
-한 저장소에서 두 제품을 개발한다. 안정판 `floe`는 KLayout renderer를 기본으로
-유지하고, `floe2`는 번들 글꼴을 사용하는 멀티코어 Rust renderer만 허용한다.
-두 제품은 같은 `rust/` workspace, `floe-index`/`floe-renderd`, `<src>.floe`
-VFS 캐시 규약과 공통 Python 구현을 사용하지만 GUI 제목과 single-instance
-소켓은 분리된다. 상세 경계는 [`docs/FLOE2.md`](docs/FLOE2.md)에 있다.
+**`floe2`가 유일한 제품 라인이다(2026-09-08 브랜치 승격).** 번들 글꼴을
+사용하는 멀티코어 Rust renderer(`rust/` workspace, `floe-index`/
+`floe-renderd`, `<src>.floe` VFS 캐시)만 허용한다. KLayout 기반 셸 `floe`는
+시장에 릴리즈된 적이 없고 `floe-legacy` 브랜치(`floe-frozen-2026-09-08`
+태그)에 동결됐다. KLayout은 이 저장소에서 **개발용으로만** 쓴다: 정확도
+oracle, 테스트 데이터 생성기, 그리고 새 기능을 Rust에 넣기 전 KLayout
+경로로 선행 검증하는 용도(`FLOE_PRODUCT=floe`의 KLayout 셸은 그 목적으로만
+남아 있으며 GUI 제목과 single-instance 소켓이 분리된다). 상세 경계는
+[`docs/FLOE2.md`](docs/FLOE2.md)에 있다.
 
 GUI 셸은 시스템 PyGObject/GTK3다. **`gi`(PyGObject)는 pip으로 설치하지 않는다** —
 OS 패키지로 설치하고, venv를 그 gi가 보이는 파이썬으로
 `--system-site-packages` 옵션과 함께 만든다. CLI 전용
 (`info/render/clip`)이면 GTK 없이 동작한다. `floe2`만 실행할 때 KLayout은
-필요하지 않다. 안정판 `floe` renderer, Python legacy indexer와 개발 정확도
-oracle에는 KLayout pip 모듈이 필요하다. `floe`의 명시적 A/B에서만
-`FLOE_RENDERER=rust`를 사용할 수 있고 `floe2`는 다른 backend를 거부한다.
+필요하지 않다. 개발 정확도 oracle, 테스트 데이터 생성기, Python legacy
+indexer, KLayout 선행 검증 셸에는 KLayout pip 모듈이 필요하다. `floe2`는
+다른 backend를 거부한다.
 
 Python 3.14 + klayout 0.30.9 확인됨.
 

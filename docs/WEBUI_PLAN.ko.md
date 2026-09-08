@@ -29,6 +29,11 @@
   T3의 전제였던 F2R-10 world-tile은 **조건부 보류**(fill 위상이
   device-anchored라 byte-exact tile 재사용은 F2R-03c 1bpp plane
   선행 — §3.16 판정).
+- 2026-09-08: **브랜치 승격 — floe2가 유일한 제품 라인.** 웹 셸은
+  **floe2에만 적용**한다. 2026-08-29의 "floe(KLayout backend)에도
+  적용" 결정은 철회하고, §3.1a의 두 제품 동시 지원은 요구사항에서
+  뺀다(worker 계약 경계 자체는 GUI 중립 인터페이스로서 유지 — KLayout
+  worker는 개발 선행 검증용으로만 존재). floe는 `floe-legacy`에 동결.
 - 2026-09-06: 설계 리뷰(HIGH 5·MEDIUM 1 + 문구) 반영. 뷰 세션 모델
   (§4), 프레임 봉투·취소·backpressure·재접속 계약(§5), 보안 기본값
   (§8), Firefox 격리·`--kiosk` 하한(§3.3/§7, M0 신설), GTK의 margin
