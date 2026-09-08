@@ -623,6 +623,26 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         self.assertNotIn("#00ffff", inspect.getsource(gui),
                          "no second waived colour anywhere in the GUI")
 
+    def test_panel_css_parses_and_styles_the_drc_pane(self):
+        """User call 2026-09-08: the DRC pane is black with white text
+        like the layer pane. The pane CSS is a module constant so a
+        syntax slip cannot hide until startup: GTK must parse it, and
+        the DRC selectors must be present."""
+        from floe import gui
+
+        self.assertIn(b".floe-drc {", gui.PANEL_CSS)
+        self.assertIn(b".floe-drc treeview", gui.PANEL_CSS)
+        self.assertIn(b".floe-drc textview", gui.PANEL_CSS)
+        self.assertIn(b".floe-drc entry", gui.PANEL_CSS)
+        self.assertIn(b".floe-layers-frame scrollbar", gui.PANEL_CSS)
+        try:
+            gui.import_gtk()
+            Gtk = gui.Gtk
+        except Exception as exc:  # pragma: no cover - headless hosts
+            self.skipTest("GTK unavailable: %s" % exc)
+        provider = Gtk.CssProvider()
+        provider.load_from_data(gui.PANEL_CSS)   # raises on a syntax error
+
     def test_parses_wire_fields(self):
         kind, fields = _parse_wire_line(
             "frame gen=7 png=/tmp/f.png partial=1 deferred=9")

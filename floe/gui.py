@@ -119,6 +119,74 @@ WHEEL_ZOOM_STEP = 0.96  # at most 4% per wheel event (was 10%)
 # span (zoom in 50%), Shift+Z doubles it back.
 KEY_PAN_FRACTION = 0.50
 KEY_PAN_FRACTION_FINE = 0.10
+
+# Application CSS for the side panes (one provider, installed once the
+# GTK screen exists). Kept as a constant so its syntax is testable
+# without a window - a parse error here would surface only at startup.
+PANEL_CSS = (
+    # combo popups as a LIST, not a menu: GTK menu grabs misfire under
+    # XQuartz/remote X (field report 2026-08-18 - the popup closed on
+    # the slightest pointer move during the click). List mode selects
+    # on a plain row click and never times out.
+    b"combobox { -GtkComboBox-appears-as-list: true; } "
+    # Calibre-style layer panel: black background, white text (scoped
+    # hooks, never a universal `*` on a ScrolledWindow subtree - see
+    # the retina clip note where the classes are attached).
+    b".floe-layers, .floe-layers * "
+    b"{ background-color: #000000; } "
+    b".floe-layers-bg { background-color: #000000; } "
+    b".floe-layer-selected, .floe-layer-selected * "
+    b"{ background-color: #31566d; } "
+    # scrollbars: a plain rectangular grey slider on a near-black
+    # trough - traditional square corners, solid fill (no gradient),
+    # narrow. opacity:1 keeps it from auto-hiding on the macOS GTK
+    # theme. Shared by the layer and DRC panes.
+    b".floe-layers-frame scrollbar trough "
+    b"{ background-color: #0a0a0a; background-image: none; "
+    b"border: none; padding: 0; } "
+    b".floe-layers-frame scrollbar slider "
+    b"{ background-image: none; background-color: #9a9a9a; "
+    b"border: 1px solid #2a2a2a; border-radius: 0; "
+    b"min-width: 9px; min-height: 9px; margin: 1px; "
+    b"opacity: 1; } "
+    b".floe-layers-frame scrollbar slider:hover "
+    b"{ background-color: #c0c0c0; } "
+    b".floe-layers-frame scrollbar slider:active "
+    b"{ background-color: #e0e0e0; } "
+    # DRC pane (user call 2026-09-08): black background, white text,
+    # like the layer pane. Scoped per widget type; the rules list and
+    # the number grid keep their markup colours (waived green, red,
+    # gold selection, blue current cell) on the black ground, the
+    # selected rule row uses the layer pane's blue.
+    b".floe-drc { background-color: #000000; } "
+    b".floe-drc-bg { background-color: #000000; } "
+    b".floe-drc treeview, .floe-drc treeview.view "
+    b"{ background-color: #000000; color: #ffffff; } "
+    b".floe-drc treeview:selected, .floe-drc treeview.view:selected "
+    b"{ background-color: #31566d; color: #ffffff; } "
+    b".floe-drc textview, .floe-drc textview text "
+    b"{ background-color: #000000; color: #ffffff; } "
+    b".floe-drc entry { background-color: #000000; color: #ffffff; "
+    b"caret-color: #ffffff; border: 1px solid #555555; } "
+    b".floe-drc label { color: #ffffff; } "
+    b".floe-drc checkbutton, .floe-drc checkbutton label "
+    b"{ color: #ffffff; } "
+    b".floe-drc flowboxchild { background-color: #000000; } "
+    b".floe-drc button, .floe-drc combobox button "
+    b"{ background-image: none; background-color: #202020; "
+    b"color: #ffffff; border: 1px solid #555555; } "
+    b".floe-drc button:hover, .floe-drc combobox button:hover "
+    b"{ background-color: #303030; } "
+    b".floe-drc button:disabled, .floe-drc combobox button:disabled "
+    b"{ color: #808080; } "
+    b".floe-drc paned > separator "
+    b"{ background-image: none; background-color: #333333; "
+    b"min-width: 3px; min-height: 3px; } "
+    # DRC note panel: flateyes-style translucent top-left chip
+    b".floe-note-panel { background-color: rgba(0,0,0,0.6); "
+    b"color: #f0f0f0; padding: 4px 10px; border-radius: 4px; "
+    b"font-size: 12px; }"
+)
 # §F2R-20: a margin frame (§F2R-17) is at most this many megapixels
 # (RGBA: 16 Mpx = 64 MiB). Windows up to ~2560x1440 keep the full
 # one-step-per-side margin; a 4K window's margin shrinks so renderd's
@@ -1255,38 +1323,7 @@ class Viewer:
         # below the rows stays black), `.floe-layers-frame` on the
         # scroller solely for the scrollbar selectors.
         css = Gtk.CssProvider()
-        css.load_from_data(
-            # combo popups as a LIST, not a menu: GTK menu grabs
-            # misfire under XQuartz/remote X (field report
-            # 2026-08-18 - the popup closed on the slightest
-            # pointer move during the click). List mode selects on
-            # a plain row click and never times out.
-            b"combobox { -GtkComboBox-appears-as-list: true; } "
-            b".floe-layers, .floe-layers * "
-            b"{ background-color: #000000; } "
-            b".floe-layers-bg { background-color: #000000; } "
-            b".floe-layer-selected, .floe-layer-selected * "
-            b"{ background-color: #31566d; } "
-            # scrollbars: a plain rectangular grey slider on a
-            # near-black trough - traditional square corners, solid
-            # fill (no gradient), narrow. opacity:1 keeps it from
-            # auto-hiding on the macOS GTK theme.
-            b".floe-layers-frame scrollbar trough "
-            b"{ background-color: #0a0a0a; background-image: none; "
-            b"border: none; padding: 0; } "
-            b".floe-layers-frame scrollbar slider "
-            b"{ background-image: none; background-color: #9a9a9a; "
-            b"border: 1px solid #2a2a2a; border-radius: 0; "
-            b"min-width: 9px; min-height: 9px; margin: 1px; "
-            b"opacity: 1; } "
-            b".floe-layers-frame scrollbar slider:hover "
-            b"{ background-color: #c0c0c0; } "
-            b".floe-layers-frame scrollbar slider:active "
-            b"{ background-color: #e0e0e0; } "
-            # DRC note panel: flateyes-style translucent top-left chip
-            b".floe-note-panel { background-color: rgba(0,0,0,0.6); "
-            b"color: #f0f0f0; padding: 4px 10px; border-radius: 4px; "
-            b"font-size: 12px; }")
+        css.load_from_data(PANEL_CSS)
         Gtk.StyleContext.add_provider_for_screen(
             Gdk.Screen.get_default(), css,
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
@@ -4591,6 +4628,9 @@ class Viewer:
         available; formerly a separate window)."""
         win = _DrcPanel()
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        # black ground / white text like the layer pane (PANEL_CSS
+        # `.floe-drc` rules, user call 2026-09-08)
+        box.get_style_context().add_class("floe-drc")
         top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         box.pack_start(top, False, False, 2)
         # open .db…/rules… buttons retired 2026-08-22: the DRC menu
@@ -4782,6 +4822,14 @@ class Viewer:
         win._rules, win._rstore = rules, rstore
         win._grid, win._gstore = grid, gstore
         win._plabel, win._pprev, win._pnext = plabel, pprev, pnext
+        # the three scrollers share the layer pane's scrollbar look
+        # and paint their scrolled child black (class on the CHILD,
+        # never on the ScrolledWindow subtree - retina clip note)
+        for sc in (rsc, gsc, dsc):
+            sc.get_style_context().add_class("floe-layers-frame")
+            child = sc.get_child()
+            if child is not None:
+                child.get_style_context().add_class("floe-drc-bg")
         self._drcwin = win
         return box
 

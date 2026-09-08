@@ -1485,6 +1485,19 @@ stub과 `__version__` import 보강.
 검증: formatter 단위 테스트 + GUI 소스에 두 번째 waived 색이 없음을
 단언.
 
+### 3.31 GUI — DRC pane 검은 바탕·흰 글씨 (2026-09-08, 0.12.58)
+
+사용자 요청: DRC pane도 레이어 pane처럼 기본을 검은 바탕에 흰 글씨로.
+레이어 pane의 교훈(mac/retina에서 ScrolledWindow 하위 전체에 `*`
+배경을 걸면 클립 밴드가 깨짐)을 따라 위젯 종류별로 범위를 좁힌
+`.floe-drc` CSS 규칙을 두고, 세 스크롤러에는 레이어 pane의 스크롤바
+클래스를, 스크롤되는 자식에는 `.floe-drc-bg`를 붙였다. 규칙 목록·
+번호 그리드는 markup 색(waived 녹색·빨강·선택 금색·현재 셀 파랑)을
+검은 바탕 위에 유지하고 선택 행은 레이어 pane과 같은 파랑이다.
+pane CSS 전체를 모듈 상수 `PANEL_CSS`로 빼서 GTK 파싱 테스트로 문법
+오류를 시작 전에 잡는다. Python-only(`__version__` 0.12.58). 대화형
+확인은 사용자 몫.
+
 ## 4. 이슈 목록
 
 | ID | 우선순위 | 상태 | 요약 | 다음 판정 |
