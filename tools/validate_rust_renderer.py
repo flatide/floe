@@ -655,7 +655,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertEqual(current._renderd_version, RENDERD_VERSION)
             self.assertIsNone(current._startup_error)
             # a bare pre-stamp ready line still yields a usable build
-            self.assertEqual(current.renderd_build(), __version__)
+            self.assertEqual(current.renderd_build(), RENDERD_VERSION)
 
     def test_ready_build_stamp_reaches_about(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -669,16 +669,16 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 stamped = RustRenderWorker(FakeCache(directory))
                 unstamped = RustRenderWorker(FakeCache(directory))
             stamped._handle_line("ready", {
-                "version": __version__, "git": "abc123+",
+                "version": RENDERD_VERSION, "git": "abc123+",
                 "flavor": "gnu"}, "")
             self.assertEqual(stamped.renderd_build(),
-                             "%s abc123+ (gnu)" % __version__)
+                             "%s abc123+ (gnu)" % RENDERD_VERSION)
             # an unknown git hash is noise, not identity - omitted
             unstamped._handle_line("ready", {
-                "version": __version__, "git": "unknown",
+                "version": RENDERD_VERSION, "git": "unknown",
                 "flavor": "native"}, "")
             self.assertEqual(unstamped.renderd_build(),
-                             "%s (native)" % __version__)
+                             "%s (native)" % RENDERD_VERSION)
             # opened carries the GUI depth cap; a pre-0.12.16 renderd
             # omits it and the display keeps its "?" fallback
             stamped._handle_line("opened", {"max_depth": "7"}, "")
