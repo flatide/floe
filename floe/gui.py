@@ -3321,7 +3321,22 @@ class Viewer:
                         % (alloc.width, alloc.height, source,
                            self._alloc_size))
         self._alloc_size = size
-        if not self._did_fit and alloc.width > 50:
+        # field 2026-09-08 (Linux): redrawing INSIDE the size-allocate
+        # handler put a new, bigger pixbuf on the image in the middle
+        # of GTK's layout pass; that pass did not pick the new size
+        # request up and the old picture stayed until the next event
+        # (one click) re-laid the canvas. Run the fit/redraw after the
+        # pass, from idle, keyed to this size so a newer allocation
+        # supersedes it.
+        self._defer_allocation(size)
+
+    def _defer_allocation(self, size):
+        GLib.idle_add(self._after_allocate, size)
+
+    def _after_allocate(self, size):
+        if size != self._alloc_size:
+            return False   # a newer allocation took over
+        if not self._did_fit and size[0] > 50:
             self._did_fit = True
             if self.cache is None:
                 pass   # empty start: _apply_cache fits on first load
@@ -3333,9 +3348,10 @@ class Viewer:
                 self.fit()
         else:
             self.redraw()
-        # field 2026-09-08 (Linux/remote X): the picture updates but
-        # the server may drop the expose of the resized canvas
+        # remote-X belt: the server may still drop the expose of the
+        # resized canvas - paint it explicitly a moment later
         self._schedule_repaint()
+        return False
 
     def _idle_cursor(self):
         # plain arrow at rest; the crosshair belongs to the ruler

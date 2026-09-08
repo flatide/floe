@@ -776,16 +776,23 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         v.scroller = SimpleNamespace(
             get_allocation=lambda: SimpleNamespace(width=1, height=1))
         self.assertFalse(Viewer._sync_allocation(v), "unrealized: ignored")
-        # the handler itself: a real change redraws and forces a paint
-        # (remote-X belt); a repeat of the same size does nothing
+        # the handler itself defers the redraw out of GTK's layout
+        # pass (Linux: a redraw inside size-allocate did not land
+        # until the next click); a repeat of the same size does
+        # nothing, a superseded deferred size does nothing
         events = []
         v._alloc_size = (800, 600)
         v._did_fit = True
         v.redraw = lambda immediate=False: events.append("redraw")
         v._schedule_repaint = lambda: events.append("repaint")
+        v._defer_allocation = lambda size: events.append(("defer", size))
         Viewer._on_allocate(v, None, SimpleNamespace(width=1600, height=1000))
         Viewer._on_allocate(v, None, SimpleNamespace(width=1600, height=1000))
-        self.assertEqual(events, ["redraw", "repaint"])
+        self.assertEqual(events, [("defer", (1600, 1000))])
+        self.assertFalse(Viewer._after_allocate(v, (1600, 1000)))
+        self.assertEqual(events[1:], ["redraw", "repaint"])
+        self.assertFalse(Viewer._after_allocate(v, (800, 600)))
+        self.assertEqual(events[1:], ["redraw", "repaint"], "superseded")
 
     def test_parses_wire_fields(self):
         kind, fields = _parse_wire_line(

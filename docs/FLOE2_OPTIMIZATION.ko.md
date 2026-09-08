@@ -1549,6 +1549,15 @@ repaint`)와 같은 계열의 "그림은 바뀌었는데 expose가 떨어지지 
 동작하는지 보려면 `FLOE_GUI_DEBUG=1`로 실행 — "allocation WxH via
 signal|poll" 라인이 찍힌다. 리눅스에서 0.12.62로 재확인 요청.
 
+실측(리눅스, 0.12.62): allocation 라인은 **찍히고**(signal 경로 정상),
+창 크기 변경 뒤 마우스를 한 번 클릭하면 정상이 됨. 즉 신호도 repaint
+도 문제가 아니라, `size-allocate` 핸들러 **안에서** 동기적으로 새
+크기의 pixbuf를 image에 올린 것이 GTK의 layout 패스 도중 크기 요청을
+바꾸는 셈이어서 그 패스가 반영하지 못하고, 다음 이벤트(클릭 → 포커스/
+pick → 재배치)에서야 새 배치가 잡힌 것이다. 0.12.63: allocation
+핸들러는 크기만 기록하고 fit/redraw는 idle에서(`_after_allocate`,
+더 새 allocation이 오면 무효) 실행한다. 강제 repaint는 그 뒤에 유지.
+
 ## 4. 이슈 목록
 
 | ID | 우선순위 | 상태 | 요약 | 다음 판정 |
