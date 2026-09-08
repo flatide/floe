@@ -146,6 +146,13 @@ def open_cache(src, args):
             c.load()
         except ValueError as exc:
             raise SystemExit("floe: %s" % exc)
+        # what the deck asked for that will NOT be drawn (a source
+        # without dbu, a cache without the entry's LY/DT): said here,
+        # at every open, and again by render's exit code
+        for rec in _deck_skipped(c):
+            print("[jobdeck] skipped   : CHIP %s $%d %s: %s (%s)" % (
+                rec["chip"], rec["idx"], rec["tc"], rec["reason"],
+                rec["detail"]))
         return c
     c = cache_mod.Cache(src)
     c.layout_mode = getattr(args, "layout_mode", None)
@@ -469,6 +476,13 @@ def cmd_info(args):
         for line in deck_summary(c.deck, c.catalog, c.placements, c.stats,
                                  c.scheme):
             print("[jobdeck] " + line)
+        for rec in c.ledger:
+            print("[jobdeck] skipped   : CHIP %s $%d %s: %s (%s)" % (
+                rec["chip"], rec["idx"], rec["tc"], rec["reason"],
+                rec["detail"]))
+        if _deck_skipped(c):
+            print("[jobdeck] INCOMPLETE: %d placement(s) will not be "
+                  "drawn" % len(_deck_skipped(c)))
         print(f"bbox       : ({bb[0] * dbu:.1f}, {bb[1] * dbu:.1f}) - "
               f"({bb[2] * dbu:.1f}, {bb[3] * dbu:.1f}) um")
         print(f"{'layer':>8}  {'name':<20} {'placements':>11}")
@@ -829,9 +843,15 @@ def _render_shots(args, c):
     try:
         shots_mod.run_shots(c, shots, args.out, report=args.report,
                             frames=args.frames, labels=args.labels,
-                            label_font_px=args.label_font_px, log=print)
-    except RuntimeError as exc:
+                            label_font_px=args.label_font_px, log=print,
+                            batch=bool(args.batch))
+    except (RuntimeError, ValueError) as exc:
         raise SystemExit("floe: Rust render service: %s" % exc)
+    skipped = _deck_skipped(c)
+    if skipped:
+        print("floe: rendered with %d jobdeck placement(s) missing (see "
+              "'skipped' above)  [exit 3]" % len(skipped), file=sys.stderr)
+        raise SystemExit(3)
 
 
 def cmd_render(args):
@@ -959,6 +979,13 @@ def cmd_clip(args):
 
 def _is_deck(src):
     return bool(src) and str(src).lower().endswith(".jb")
+
+
+def _deck_skipped(cache):
+    """The ledger of a loaded jobdeck (empty for a layout)."""
+    if not getattr(cache, "is_jobdeck", False):
+        return []
+    return list((cache.meta.get("jobdeck") or {}).get("skipped") or [])
 
 
 def _cache_ready(src):
@@ -1291,7 +1318,11 @@ def cmd_view(args):
     detail = ("low", "medium", "high").index(detail_name)
     depth = args.depth
     if depth is None:
-        depth = 999 if (goto is not None or args.drc) else 0
+        # a jobdeck opens at full depth: the deck itself is the thing
+        # viewed, and a source whose shapes live in child cells drew
+        # nothing at depth 0 (review 2026-09-09 P1-3)
+        depth = 999 if (goto is not None or args.drc
+                        or _is_deck(src)) else 0
     depth = max(0, min(999, int(depth)))
 
     # Render-process construction parameters cannot be retrofitted into

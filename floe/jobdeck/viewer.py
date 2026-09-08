@@ -144,6 +144,17 @@ class DeckCache:
     def view_rows(self):
         return view_layers(self.deck, self.stats, self.scheme, self.colormap)
 
+    @property
+    def skipped(self):
+        """Every placement the deck asked for that is not drawn: plan-
+        time skips (missing/unreadable source) and spec-time ones
+        (not_indexed, empty_layer)."""
+        return list(self.stats["skipped"]) + list(self.ledger)
+
+    @property
+    def incomplete(self) -> bool:
+        return bool(self.skipped)
+
     def _build_meta(self):
         st = self.stats
         dbu = float(st["dbu"])

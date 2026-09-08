@@ -14,9 +14,11 @@ reference tool's cli-spec, decisions kept):
                its anchor (lb keeps the pinned corner), or used exactly
                with --stretch
   mosaic       --mosaic-at "X,Y;X,Y;X,Y;X,Y" --size W,H   four points,
-               clockwise from top-left, each read like --at
-               --corners X1,Y1,X2,Y2 --size W,H            a region's four
-               W,H corners
+               clockwise from top-left (tl, tr, br, bl), each read like
+               --at; composed tl,tr / bl,br
+               --corners X1,Y1,X2,Y2 --size W,H            the region's four
+               W,H corner rectangles, INSIDE the region (the tl tile's
+               top-left corner is the region's top-left corner)
                --line W (px, centred on the seam: floor(W/2) solid each
                side, the remainder one blended pixel each side; 0 = none)
                --line-color COLOR, --keep-tiles (<out>_tl/_tr/_bl/_br.png)
@@ -184,14 +186,24 @@ class Shot:
         aspect: one for a plain shot, four (tl, tr, bl, br) for a
         mosaic. Returns (boxes, (w, h) per tile)."""
         if self.mosaic is not None:
-            points = self.mosaic
+            # input is clockwise from top-left (tl, tr, br, bl); the
+            # canvas is row-major (tl, tr, bl, br) - review 2026-09-09
+            # P2-4: passing the points through swapped the bottom row
+            tl, tr, br, bl = self.mosaic
+            boxes = [region_from(p, self.size, self.anchor)
+                     for p in (tl, tr, bl, br)]
         elif self.corners is not None:
+            # the region's four W,H corner rectangles, inside it (the
+            # reference tool's rule; review 2026-09-09 P2-5: centring
+            # the tiles on the corners shot half outside the region)
             x0, y0, x1, y1 = normalize_box(self.corners)
-            points = [(x0, y1), (x1, y1), (x0, y0), (x1, y0)]
-        else:
-            points = None
-        if points is not None:
-            boxes = [region_from(p, self.size, self.anchor) for p in points]
+            w, h = self.size
+            if w <= 0 or h <= 0:
+                raise ValueError("--size must be positive")
+            boxes = [(x0, y1 - h, x0 + w, y1),          # tl
+                     (x1 - w, y1 - h, x1, y1),          # tr
+                     (x0, y0, x0 + w, y0 + h),          # bl
+                     (x1 - w, y0, x1, y0 + h)]          # br
         elif self.at is not None:
             boxes = [region_from(self.at, self.size, self.anchor)]
         elif self.bbox is not None:
@@ -478,12 +490,16 @@ class ShotRunner:
 
 
 def run_shots(cache, shots, out, report=None, frames=False, labels=False,
-              label_font_px=14, log=print):
-    """Render every shot through one open. `out` is the PNG path for a
-    single shot, else a directory (<out>/<name>.png). Returns the report
-    rows (also written as JSON to `report` when given)."""
-    single = len(shots) == 1 and (out.lower().endswith(".png")
-                                  or not os.path.isdir(out))
+              label_font_px=14, log=print, batch=False):
+    """Render every shot through one open. `out` is the PNG path of the
+    one shot, or with `batch` a directory (<out>/<name>.png) - stated
+    by the caller, never inferred from the shot count or from whether
+    the directory already exists (review 2026-09-09 P2-6: a one-line
+    batch into a new directory wrote a PNG named like the directory).
+    Returns the report rows (also written as JSON to `report`)."""
+    single = not batch
+    if single and len(shots) != 1:
+        raise ValueError("a single --out PNG takes exactly one shot")
     if not single:
         os.makedirs(out, exist_ok=True)
     dbu = float(cache.meta["dbu"])
@@ -540,10 +556,25 @@ def run_shots(cache, shots, out, report=None, frames=False, labels=False,
                                           row["ms"] / 1000))
     finally:
         runner.stop()
+    # a jobdeck that could not draw every placement says so in the
+    # report and the log, and the caller exits non-zero (review
+    # 2026-09-09 P1-1: a thinner PNG must never look complete)
+    skipped = list((cache.meta.get("jobdeck") or {}).get("skipped") or [])
+    if skipped and log:
+        log("[floe] WARNING: %d jobdeck placement(s) not drawn: %s"
+            % (len(skipped), "; ".join(
+                "CHIP %s $%d %s %s" % (r["chip"], r["idx"], r["tc"],
+                                       r["reason"]) for r in skipped[:5])
+               + (" ..." if len(skipped) > 5 else "")))
     if report:
+        doc = {"source": cache.src, "dbu": dbu, "shots": rows}
+        if cache.meta.get("jobdeck"):
+            doc["jobdeck"] = {"complete": not skipped, "skipped": skipped,
+                              "view": cache.meta["jobdeck"].get("mode")}
         with open(report, "w") as fh:
-            json.dump({"source": cache.src, "dbu": dbu, "shots": rows},
-                      fh, indent=1)
+            json.dump(doc, fh, indent=1)
         if log:
-            log("[floe] report %s (%d shot(s))" % (report, len(rows)))
+            log("[floe] report %s (%d shot(s)%s)" % (
+                report, len(rows),
+                ", INCOMPLETE" if skipped else ""))
     return rows

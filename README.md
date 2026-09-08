@@ -162,7 +162,7 @@ floe2 view   deck.jb                    # 뷰어에서 열기; Jobdeck 메뉴로
 floe2 info   deck.jb                    # 덱 요약 + 뷰 레이어 표
 floe2 render deck.jb --bbox 40000,80000,60000,95000 --px 1200 --out deck.png
 floe2 render deck.jb --at 53.02mm,92.61mm --size 32mm,25.6mm --px 1200x900 --out a.png
-floe2 render deck.jb --corners 40000,80000,60000,95000 --size 4mm,3mm --px 600x450 --out quad.png  # 4장 mosaic
+floe2 render deck.jb --corners 40000,80000,60000,95000 --size 4mm,3mm --px 600x450 --out quad.png  # 영역 안쪽 네 꼭짓점 4장 mosaic
 floe2 render deck.jb --batch shots.txt --out shots/ --report shots/report.json     # 한 번 열고 여러 장
 floe2 jobdeck deck.jb --level 2 --mode chip --placements --report r.json   # 분석·보고
 ```

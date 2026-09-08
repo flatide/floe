@@ -19,6 +19,7 @@ data never enter the repository.
 import gzip
 import itertools
 import json
+import struct
 import zlib
 import os
 import shutil
@@ -97,6 +98,41 @@ ROWS 90000.0/45020.0
 END
 """
 
+# review 2026-09-09 P1-1: level 2 names a layer chipA does not have
+MISSING_LAYER_DECK = """* test_missing_layer.jb
+MTITLE 1,METAL1
+MTITLE 2,GHOST
+*PLACE-INFO
+CHIP ID001, * MAIN 1.0000
+$ (1, METAL1, AD=0.00020, SF=1, TC=chipA.oas, LY={123}, DT={43}, BX=0.0, BY=0.0, UX=2000.0, UY=2550.0 )
+$ (2, GHOST, AD=0.00020, SF=1, TC=chipA.oas, LY={987}, DT={43}, BX=0.0, BY=0.0, UX=2000.0, UY=2550.0 )
+ROWS 85120.0/45020.0
+*END-PLACE
+END
+"""
+
+# review 2026-09-09 P1-2: a source whose one pass decodes past 1 MiB
+DENSE_DECK = """* dense.jb
+MTITLE 1,DENSE
+*PLACE-INFO
+CHIP D1
+$ (1, DENSE, AD=0.00020, SF=1, TC=dense.oas, LY={1}, DT={0}, BX=0.0, BY=0.0, UX=2003.0, UY=2003.0 )
+ROWS 1000.0/1000.0
+*END-PLACE
+END
+"""
+
+# review 2026-09-09 P1-3: the shapes live in a child cell only
+HIER_DECK = """* hier.jb
+MTITLE 1,KID
+*PLACE-INFO
+CHIP H1
+$ (1, KID, AD=0.00020, SF=1, TC=hier.oas, LY={1}, DT={0}, BX=0.0, BY=0.0, UX=2000.0, UY=2000.0 )
+ROWS 1000.0/1000.0
+*END-PLACE
+END
+"""
+
 BROKEN_DECK = """* broken.jb
 *PLACE-INFO
 CHIP ID001
@@ -141,6 +177,53 @@ def build_fixtures(d: Path):
     (d / "test.jb").write_text(DECK)
     (d / "test_formats.jb").write_text(FORMAT_DECK)
     (d / "broken.jb").write_text(BROKEN_DECK)
+    (d / "test_missing_layer.jb").write_text(MISSING_LAYER_DECK)
+    (d / "dense.jb").write_text(DENSE_DECK)
+    (d / "hier.jb").write_text(HIER_DECK)
+    build_dense_oas(d / "dense.oas")
+    build_hier_oas(d / "hier.oas")
+
+
+def build_dense_oas(path, dbu=0.00005, count=60000, extent_um=2000.0):
+    """`count` rectangles at pseudo-random positions and sizes in one
+    cell (a deterministic LCG): nothing regular enough for the OASIS
+    writer or the indexer to fold into repetitions, so the decode really
+    holds 60k rectangles - well over the 1 MiB budget the review's
+    memory test used."""
+    import klayout.db as db
+    ly = db.Layout()
+    ly.dbu = dbu
+    top = ly.create_cell("DENSE")
+    li = ly.layer(1, 0)
+    unit = int(round(1.0 / dbu))
+    span = int(round(extent_um * unit))
+    shapes = top.shapes(li)
+    state = 0x2545F491
+    def rnd():
+        nonlocal state
+        state = (state * 1103515245 + 12345) & 0x7fffffff
+        return state
+    for _ in range(count):
+        x = rnd() % span
+        y = rnd() % span
+        w = unit + rnd() % (3 * unit)
+        h = unit + rnd() % (3 * unit)
+        shapes.insert(db.Box(x, y, x + w, y + h))
+    ly.write(str(path))
+
+
+def build_hier_oas(path, dbu=0.00005):
+    """TOP holds only an instance of KID; KID holds the box."""
+    import klayout.db as db
+    ly = db.Layout()
+    ly.dbu = dbu
+    kid = ly.create_cell("KID")
+    li = ly.layer(1, 0)
+    w = int(round(2000.0 / dbu))
+    kid.shapes(li).insert(db.Box(0, 0, w, w))
+    top = ly.create_cell("TOP")
+    top.insert(db.CellInstArray(kid.cell_index(), db.Trans()))
+    ly.write(str(path))
 
 
 TMP = None      # library tests: never indexed
@@ -917,13 +1000,26 @@ class ShotTests(unittest.TestCase):
         self.assertEqual(sh.parse_pixel("640"), (640, None))
         with self.assertRaises(ValueError):
             sh.parse_points("1,2;3,4")
-        # a shot's tiles: corners form, clockwise from top-left
-        shot = sh.Shot("m", corners=(0, 0, 100, 60), size=(10, 5),
+        # corners: the region's four W,H corner rectangles, inside it
+        # (review 2026-09-09 P2-5: tiles centred on the corners shot
+        # half outside the region; the reference tool's tl of
+        # corners=0,0,100,100 size=20,10 is (0,90,20,100))
+        shot = sh.Shot("m", corners=(0, 0, 100, 100), size=(20, 10),
                        px=(20, 10))
         boxes, (w, h) = shot.tile_boxes((0, 0, 1, 1))
         self.assertEqual((w, h), (20, 10))
-        self.assertEqual(boxes[0], (-5.0, 57.5, 5.0, 62.5))   # tl
-        self.assertEqual(boxes[3], (95.0, -2.5, 105.0, 2.5))  # br
+        self.assertEqual(boxes, [(0.0, 90.0, 20.0, 100.0),    # tl
+                                 (80.0, 90.0, 100.0, 100.0),  # tr
+                                 (0.0, 0.0, 20.0, 10.0),      # bl
+                                 (80.0, 0.0, 100.0, 10.0)])   # br
+        # mosaic-at: clockwise input tl, tr, br, bl -> canvas rows
+        # tl, tr / bl, br (review 2026-09-09 P2-4: the bottom row was
+        # swapped)
+        shot = sh.Shot("m", mosaic=[(10, 90), (90, 90), (90, 10), (10, 10)],
+                       size=(20, 10), px=(20, 10))
+        boxes, _ = shot.tile_boxes((0, 0, 1, 1))
+        self.assertEqual(boxes[2], (0.0, 5.0, 20.0, 15.0))    # bl = 4th point
+        self.assertEqual(boxes[3], (80.0, 5.0, 100.0, 15.0))  # br = 3rd point
         with self.assertRaises(ValueError):
             sh.Shot("x", bbox=(0, 0, 1, 1), at=(0, 0), size=(1, 1))
         with self.assertRaises(ValueError):
@@ -1028,7 +1124,21 @@ class ShotTests(unittest.TestCase):
         self.assertEqual(rep["shots"][0]["mosaic"]["line_pixels"],
                          "1 solid + 1 at 50% on each side")
         self.assertEqual(rep["shots"][0]["tiles"]["tl"],
-                         [38000.0, 93500.0, 42000.0, 96500.0])
+                         [40000.0, 92000.0, 44000.0, 95000.0])
+        self.assertEqual(rep["shots"][0]["tiles"]["br"],
+                         [56000.0, 80000.0, 60000.0, 83000.0])
+        # --mosaic-at: the third point is the bottom-RIGHT tile
+        res = run_floe2("render", CLI / "test.jb", "--mosaic-at",
+                        "42000,94000;58000,94000;58000,82000;42000,82000",
+                        "--size", "4000,3000", "--px", "40x30",
+                        "--keep-tiles", "--out", CLI / "quad2.png",
+                        "--report", CLI / "quad2.json", env=self.env, ok=0)
+        rep = json.loads((CLI / "quad2.json").read_text())
+        self.assertEqual(rep["shots"][0]["tiles"]["br"],
+                         [56000.0, 80500.0, 60000.0, 83500.0])
+        self.assertEqual(rep["shots"][0]["tiles"]["bl"],
+                         [40000.0, 80500.0, 44000.0, 83500.0])
+        self.assertEqual(rep["jobdeck"]["complete"], True)
         # exclusive forms and a bad layer are refused
         run_floe2("render", CLI / "test.jb", "--bbox", "1,2,3,4", "--at",
                   "1,2", "--size", "1,1", env=self.env, ok=1)
@@ -1062,6 +1172,167 @@ class ShotTests(unittest.TestCase):
                   "--px", "200", "--layers", "123/43", "--out", out,
                   env=self.env, ok=0)
         self.assertEqual(self._png_size(out), (200, 255))
+
+
+class ReviewFixTests(unittest.TestCase):
+    """Review 2026-09-09 (six findings): each one pinned."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.env = {"FLOE_INDEX_BIN": str(ROOT / "rust" / "target" /
+                                         "release" / "floe-index"),
+                   "FLOE_RENDERD_BIN": str(ROOT / "rust" / "target" /
+                                           "release" / "floe-renderd")}
+        os.environ["FLOE_RENDERD_BIN"] = cls.env["FLOE_RENDERD_BIN"]
+        for deck in ("test.jb", "dense.jb", "hier.jb"):
+            run_floe2("index", CLI / deck, "--jobs", "2", env=cls.env, ok=0)
+
+    def test_p1_1_incomplete_render_is_said_and_exits_3(self):
+        out = CLI / "ghost.png"
+        rep = CLI / "ghost.json"
+        res = run_floe2("render", CLI / "test_missing_layer.jb", "--px",
+                        "100", "--out", out, "--report", rep, env=self.env,
+                        ok=3)
+        self.assertIn("skipped   : CHIP ID001 $2 chipA.oas: empty_layer",
+                      res.stdout)
+        self.assertIn("WARNING: 1 jobdeck placement(s) not drawn",
+                      res.stdout)
+        self.assertIn("rendered with 1 jobdeck placement(s) missing",
+                      res.stderr)
+        self.assertTrue(out.is_file(), "the partial PNG is still written")
+        doc = json.loads(rep.read_text())
+        self.assertFalse(doc["jobdeck"]["complete"])
+        self.assertEqual(doc["jobdeck"]["skipped"][0]["reason"],
+                         "empty_layer")
+        self.assertEqual(doc["jobdeck"]["skipped"][0]["ly"], 987)
+        res = run_floe2("info", CLI / "test_missing_layer.jb", env=self.env,
+                        ok=0)
+        self.assertIn("INCOMPLETE: 1 placement(s) will not be drawn",
+                      res.stdout)
+        # a complete deck: exit 0 and complete=true
+        res = run_floe2("render", CLI / "test.jb", "--px", "50", "--out",
+                        out, "--report", rep, env=self.env, ok=0)
+        self.assertNotIn("WARNING", res.stdout)
+        self.assertTrue(json.loads(rep.read_text())["jobdeck"]["complete"])
+        from floe.jobdeck.viewer import DeckCache
+        c = DeckCache(str(CLI / "test_missing_layer.jb"))
+        c.load()
+        try:
+            self.assertTrue(c.incomplete)
+            self.assertEqual(len(c.skipped), 1)
+            self.assertEqual(len(c.meta["jobdeck"]["skipped"]), 1)
+        finally:
+            c.close()
+
+    def test_p1_2_deck_pass_is_charged_against_the_page_budget(self):
+        from floe.rust_render import RustRenderWorker
+        from floe.jobdeck.viewer import DeckCache
+        os.environ["FLOE_RUST_BUDGET_MB"] = "1"
+        try:
+            # the plain layout is refused at 1 MiB ...
+            c = Cache(str(CLI / "dense.oas"))
+            c.load()
+            worker = RustRenderWorker(c)
+            worker.start()
+            try:
+                with self.assertRaises(AssertionError) as cm:
+                    _render_raw(worker, (0, 0, 2003 / 5e-5, 2003 / 5e-5),
+                                200, 200)
+                self.assertIn("decoded generation budget exceeded",
+                              str(cm.exception))
+            finally:
+                worker.stop()
+            # ... and so is the deck placing it (it used to render)
+            d = DeckCache(str(CLI / "dense.jb"))
+            d.load()
+            try:
+                worker = jrender.DeckRenderWorker(d)
+                worker.start()
+                try:
+                    bb = d.meta["bbox"]
+                    with self.assertRaises(AssertionError) as cm:
+                        _render_raw(worker, tuple(bb), 200, 200)
+                    self.assertIn("decoded generation budget exceeded",
+                                  str(cm.exception))
+                finally:
+                    worker.stop()
+            finally:
+                d.close()
+        finally:
+            del os.environ["FLOE_RUST_BUDGET_MB"]
+        # with the normal budget both render
+        c = DeckCache(str(CLI / "dense.jb"))
+        c.load()
+        try:
+            worker = jrender.DeckRenderWorker(c)
+            worker.start()
+            try:
+                rgba = _render_raw(worker, tuple(c.meta["bbox"]), 200, 200)
+            finally:
+                worker.stop()
+        finally:
+            c.close()
+        self.assertTrue(any(rgba[o:o + 3] != b"\0\0\0"
+                            for o in range(0, len(rgba), 4)))
+
+    def test_p1_3_hierarchical_source_shows_at_the_defaults(self):
+        from floe.jobdeck.viewer import DeckCache
+        c = DeckCache(str(CLI / "hier.jb"))
+        c.load()
+        try:
+            worker = jrender.DeckRenderWorker(c)
+            worker.start()
+            try:
+                bb = tuple(c.meta["bbox"])
+
+                def lit(rgba):
+                    return sum(1 for o in range(0, len(rgba), 4)
+                               if rgba[o:o + 3] != b"\0\0\0")
+                # full depth (the render default, and now the deck's view
+                # default): the child's box is drawn
+                self.assertGreater(lit(_render_raw(worker, bb, 64, 64)), 1000)
+                # depth 0 without frames was the black screen ...
+                self.assertEqual(lit(_render_raw(worker, bb, 64, 64,
+                                                 depth=0)), 0)
+                # ... and with the viewer's frames on, depth 0 now shows
+                # the child cell's hierarchy frame instead of nothing
+                worker.submit({"kind": "render", "gen": 999, "bbox": bb,
+                               "view": None, "w": 64, "h": 64, "depth": 0,
+                               "cut_px": 0.0, "lod": False, "frames": True,
+                               "labels": False, "abstract": False,
+                               "visible": None, "frame_format": "raw",
+                               "scope": "headless"})
+                while True:
+                    r = worker.res.get(timeout=120)
+                    if r.get("kind") == "error":
+                        self.fail(r.get("msg"))
+                    if r.get("kind") == "frame" and r.get("gen") == 999 \
+                            and not r.get("refining"):
+                        break
+                self.assertGreater(lit(r["rgba"]), 0)
+            finally:
+                worker.stop()
+        finally:
+            c.close()
+        # `floe2 render hier.jb` (depth default full) is not black
+        out = CLI / "hier.png"
+        run_floe2("render", CLI / "hier.jb", "--px", "32", "--out", out,
+                  env=self.env, ok=0)
+        data = out.read_bytes()
+        idat = data.index(b"IDAT")
+        length = struct.unpack(">I", data[idat - 4:idat])[0]
+        raw = zlib.decompress(data[idat + 4:idat + 4 + length])
+        self.assertTrue(any(b for b in raw[1:]), "the PNG is all black")
+
+    def test_p2_6_one_line_batch_writes_into_a_directory(self):
+        batch = CLI / "one.txt"
+        batch.write_text("only bbox=45000,85000,46000,86000 px=16x16\n")
+        outdir = CLI / "one-shot-dir"
+        self.assertFalse(outdir.exists())
+        run_floe2("render", CLI / "test.jb", "--batch", batch, "--out",
+                  outdir, env=self.env, ok=0)
+        self.assertTrue(outdir.is_dir())
+        self.assertTrue((outdir / "only.png").is_file())
 
 
 class KLayoutOracleTests(unittest.TestCase):

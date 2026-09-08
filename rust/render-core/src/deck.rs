@@ -286,6 +286,10 @@ pub struct DeckRenderRequest {
     pub exact: bool,
     /// Visible deck layers (`out`); None = all.
     pub visible: Option<BTreeSet<u32>>,
+    /// Hierarchy frames of each source beyond `depth` (review 2026-09-09
+    /// P1-3: a deck at depth 0 without them drew nothing for a source
+    /// whose shapes live in child cells).
+    pub frames: bool,
     pub mono: bool,
     pub workers: u16,
     pub decode_workers: u16,
@@ -306,6 +310,10 @@ pub struct DeckRenderReport {
     pub rectangle_member_paints: u64,
     pub polygon_member_paints: u64,
     pub path_member_paints: u64,
+    pub frame_member_paints: u64,
+    /// Largest one-pass decoded working set (bytes) - the deck's
+    /// counterpart of the single-cache generation charge.
+    pub pass_bytes_max: u64,
 }
 
 impl Deck {
@@ -494,6 +502,8 @@ impl Deck {
         let mut rectangle_member_paints = 0u64;
         let mut polygon_member_paints = 0u64;
         let mut path_member_paints = 0u64;
+        let mut frame_member_paints = 0u64;
+        let mut pass_bytes_max = 0u64;
         let view = [request.view.x0, request.view.y0, request.view.x1, request.view.y1];
         for placed_index in 0..self.placements.len() {
             let (out, source_index) = {
@@ -568,6 +578,26 @@ impl Deck {
                 cancellation,
             )?;
             accumulate_decode(&mut stats, &decode_stats);
+            // Review 2026-09-09 P1-2: the scene's Arcs keep every page
+            // of this pass alive whatever the LRU evicted, so one pass
+            // is charged against the shared budget exactly as the
+            // single-cache path charges a generation (renderd
+            // checked_generation_bytes) - a deck must not decode past
+            // the budget where a plain layout is refused.
+            let pass_bytes = decoded.iter().try_fold(0u64, |total, page| {
+                total
+                    .checked_add(page.estimated_bytes())
+                    .ok_or_else(|| "decoded generation byte charge overflow".to_string())
+            })?;
+            if pass_bytes > self.budget_bytes {
+                return Err(format!(
+                    "decoded generation budget exceeded: {pass_bytes} > {} bytes (placement {} of source {})",
+                    self.budget_bytes,
+                    self.placements[placed_index].spec.index,
+                    self.source_paths[source_index]
+                ));
+            }
+            pass_bytes_max = pass_bytes_max.max(pass_bytes);
             let scene = FrameScene::new_shared(&source.cache, Arc::new(planned.plan), decoded)?;
             partial |= scene.is_partial();
             pages = pages.saturating_add(scene.available_pages().try_into().unwrap_or(u32::MAX));
@@ -583,7 +613,7 @@ impl Deck {
                     tile_size: request.tile_size,
                 },
                 layers: vec![style],
-                hierarchy_frames: false,
+                hierarchy_frames: request.frames,
                 mono: request.mono,
             };
             let report = render_geometry_styled_cancellable(&scene, &styled, generation, cancellation)?;
@@ -593,6 +623,7 @@ impl Deck {
                 rectangle_member_paints.saturating_add(report.rectangle_member_paints);
             polygon_member_paints = polygon_member_paints.saturating_add(report.polygon_member_paints);
             path_member_paints = path_member_paints.saturating_add(report.path_member_paints);
+            frame_member_paints = frame_member_paints.saturating_add(report.frame_member_paints);
             passes += 1;
         }
         Ok(DeckRenderReport {
@@ -607,6 +638,8 @@ impl Deck {
             rectangle_member_paints,
             polygon_member_paints,
             path_member_paints,
+            frame_member_paints,
+            pass_bytes_max,
         })
     }
 }
@@ -947,6 +980,7 @@ mod tests {
             cut_px: 2.0,
             exact: false,
             visible: None,
+            frames: false,
             mono: false,
             workers: 1,
             decode_workers: 1,

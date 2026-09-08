@@ -268,10 +268,12 @@ floe2 render deck.jb --batch shots.txt --out shots/ --report shots/report.json
 - 픽셀: `--px W`는 기존 floe 규칙(높이는 영역 종횡비에서), `--px WxH`는 영역을
   그 종횡비로 **확장**(center는 중심 고정, lb는 꼭짓점 고정; `--stretch`면
   확장 없이 그대로).
-- mosaic: 네 점(시계방향, 좌상부터) 또는 `--corners` 영역의 네 꼭짓점, 각 타일이
-  `--px`, 결과는 가로세로 2배. 구분선은 타일 위에 그린다: 이음매 중심으로
-  `floor(W/2)`px는 양쪽 불투명, 나머지는 양쪽 1px 혼합(`--line 0`은 없음).
-  `--keep-tiles`로 `<out>_tl/_tr/_bl/_br.png`도 남긴다.
+- mosaic: `--mosaic-at`는 네 점(시계방향, 좌상부터: tl, tr, br, bl; 각 점을
+  `--at`처럼 `--size`/`--anchor`로 읽음), `--corners`는 영역의 네 W×H 꼭짓점
+  직사각형(영역 **안쪽**: tl 타일의 좌상 꼭짓점 = 영역의 좌상 꼭짓점). 각 타일이
+  `--px`, 결과는 가로세로 2배(tl,tr / bl,br). 구분선은 타일 위에 그린다: 이음매
+  중심으로 `floor(W/2)`px는 양쪽 불투명, 나머지는 양쪽 1px 혼합(`--line 0`은
+  없음). `--keep-tiles`로 `<out>_tl/_tr/_bl/_br.png`도 남긴다.
 - `--batch FILE`(`-`=stdin): 줄마다 `NAME key=value …`(bbox at size anchor px
   stretch layers depth mosaic corners line linecolor keep_tiles; 빈 키는 명령행
   값). 워커를 한 번만 열고 모두 찍는다(`--out`은 디렉터리). `--report`는 shot별
@@ -291,7 +293,20 @@ floe2 합성 프레임(같은 뷰포트 1024×800)을 배터리 픽셀 정책
 차이 0이어야 한다. 참조 툴 자체를 gate에서 실행하지는 않는다(저장소 밖,
 사용자 결정: 구현 참고용).
 
-## 9. 미결·후속
+## 9. 리뷰 2026-09-09 반영 (6건)
+
+| # | 지적 | 조치 | gate |
+|---|---|---|---|
+| P1-1 | 없는 LY/DT를 지정한 배치가 빠진 PNG를 정상(exit 0)으로 내보내고 `--report`에도 기록이 없음 | ledger가 렌더까지 흐른다: `open_cache`가 덱을 열 때 `skipped` 줄을 출력, `run_shots`가 `WARNING: N placement(s) not drawn`을 찍고 report에 `jobdeck{complete, skipped, view}`를 넣으며, `floe2 render`는 **exit 3**(`floe2 jobdeck`과 같은 뜻: 결과가 불완전). `floe2 info`는 `INCOMPLETE` 줄, 뷰어는 제목에 `· N NOT DRAWN`과 상태 메시지. 스펙은 뷰 레이어를 모두 나열한다(그려지지 않는 level도 레이어; 스타일 파일이 그 이름을 쓴다). | `test_p1_1` |
+| P1-2 | 덱 렌더가 단일 캐시의 generation 예산 검사를 우회(LRU에서 축출돼도 scene의 Arc가 페이지를 붙들고 있음) | `Deck::render`가 패스마다 디코드된 페이지 바이트를 합산해 예산을 넘으면 단일 캐시와 같은 오류(`decoded generation budget exceeded: N > B bytes`)로 거부. 프레임 줄에 `pass_bytes_max=`. | `test_p1_2`: 무작위 6만 사각형 소스(반복 압축 불가), 예산 1MiB에서 단일 캐시·덱 모두 거부, 기본 예산에서 둘 다 렌더 |
+| P1-3 | 자식 셀에만 도형이 있는 소스가 기본 depth 0에서 검게 나옴(덱은 계층 프레임도 안 그림) | 덱은 **full depth로 연다**(`floe2 view deck.jb` 기본, 뷰어 `open_file`의 .jb도 `_set_depth(999)`); 그리고 `frames=`를 덱 패스에 전달해 depth를 줄이면 소스의 계층 프레임이 그려진다(`frame_paints=`). | `test_p1_3`: full depth 그림 있음, depth 0·frames off는 검정(재현), depth 0·frames on은 프레임, `floe2 render hier.jb` 비검정 |
+| P2-4 | `--mosaic-at`의 아래 두 타일이 뒤바뀜(시계방향 입력을 행 우선으로 그대로 넘김) | tl, tr, br, bl 입력을 tl, tr, bl, br로 재배열해 합성·`_bl/_br` 파일·report 태그가 맞음 | `test_units_regions_and_aspect`, `test_cli_region_forms_on_a_deck` |
+| P2-5 | `--corners`가 꼭짓점을 중심으로 잡아 기준 도구와 다른 영역(절반이 영역 밖) | 타일은 영역 **안쪽** 꼭짓점 직사각형: `corners=0,0,100,100 size=20,10`의 tl = (0,90,20,100) | 같은 테스트(기대값 교정) |
+| P2-6 | 한 줄짜리 batch가 새 `--out` 디렉터리 대신 그 이름의 PNG 파일을 만듦(shot 수·디렉터리 존재로 추론) | `run_shots(batch=…)`를 명시적으로 받는다: batch면 항상 디렉터리, 아니면 단일 PNG(shot 1개 강제) | `test_p2_6` |
+
+RENDERD_VERSION 0.12.60, `__version__` 0.12.71.
+
+## 10. 미결·후속
 - LY/DT cross vs zip, 회전/미러: 실덱 사례가 나오면 확정.
 - 실덱에서 M2 성능 확인: 배치 수 × 패스 비용(플랜+디코드+라스터 각 1회).
   전체 뷰에서 수천 패스가 되면 (a) 같은 소스·같은 scale의 배치를 한 패스로

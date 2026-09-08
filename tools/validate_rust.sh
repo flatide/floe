@@ -26,8 +26,16 @@ mkdir -p "$(dirname "$FLOE2_SMOKE_SRC")"
 # merely to test the product shell would be both destructive to time and RAM.
 if [ ! -f "$FLOE2_SMOKE_SRC" ] || \
    [ tools/gen_valmini.py -nt "$FLOE2_SMOKE_SRC" ]; then
+    # a regenerated source invalidates EVERY derived artefact: the
+    # legacy .tiles, both .floe caches (one may be a symlink to the
+    # other on a long-lived host), the .ice sidecars. Leaving a stale
+    # .floe behind made `floe index --legacy` refuse the .tiles rebuild
+    # and `floe2 index` refuse the stale cache (2026-09-09, after the
+    # temp fixture vanished from a long-lived $TMPDIR)
     rm -rf "$FLOE2_SMOKE_SRC" "$FLOE2_SMOKE_SRC.tiles" \
-        "${FLOE2_SMOKE_SRC%.oas}_rust.tiles"
+        "${FLOE2_SMOKE_SRC%.oas}_rust.tiles" \
+        "$FLOE2_SMOKE_SRC.floe" "${FLOE2_SMOKE_SRC%.oas}_rust.floe" \
+        "$FLOE2_SMOKE_SRC.ice" "${FLOE2_SMOKE_SRC%.oas}_rust.ice"
     .venv/bin/python tools/gen_valmini.py "$FLOE2_SMOKE_SRC"
 fi
 if [ -z "$SRC" ]; then
@@ -41,7 +49,14 @@ if [ "$SRC" = "$FLOE2_SMOKE_SRC" ]; then
     if [ ! -f "$SRC.tiles/meta.json" ] || \
        [ floe/cache.py -nt "$SRC.tiles/meta.json" ]; then
         rm -rf "$SRC.tiles"
-        PYTHONPATH=. .venv/bin/python -m floe index --legacy "$SRC" >/dev/null
+        # the legacy indexer refuses to build .tiles beside a .floe of
+        # the same source: step the VFS cache aside for the build
+        if [ -e "$SRC.floe" ]; then mv "$SRC.floe" "$SRC.floe.aside"; fi
+        PYTHONPATH=. .venv/bin/python -m floe index --legacy "$SRC" \
+            >/dev/null || {
+            [ -e "$SRC.floe.aside" ] && mv "$SRC.floe.aside" "$SRC.floe"
+            echo "FAIL: legacy .tiles oracle build"; exit 1; }
+        if [ -e "$SRC.floe.aside" ]; then mv "$SRC.floe.aside" "$SRC.floe"; fi
     fi
 fi
 (cd rust && PATH="$HOME/.cargo/bin:$PATH" \

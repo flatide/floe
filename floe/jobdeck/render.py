@@ -154,12 +154,10 @@ def deck_spec_lines(deck, placements, stats, scheme, colormap, catalog):
             "order=%d" % (source_index[p.tc], p.ly, p.dt, out, scale,
                           p.ix, p.iy, out))
     for row in rows:
-        # chip view keeps its CHIP rows (they hold no placement but
-        # head the expandable group); other views list what is drawn
-        if row["out"] not in used_outs and row["datatype"] != 0 \
-                or (row["out"] not in used_outs
-                    and scheme.mode != MODE_CHIP):
-            continue
+        # every view row, drawn or not: the viewer's style file and
+        # layers= lists name them all (a CHIP row heads its group and
+        # holds nothing; a level whose placements were all skipped is
+        # still a level of the deck)
         lines.append("layer out=%d key=%d/%d name_hex=%s color=%s "
                      "fill=solid width=1"
                      % (row["out"], row["layer"], row["datatype"],

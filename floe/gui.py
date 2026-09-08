@@ -1740,10 +1740,18 @@ class Viewer:
         elif self.meta.get("jobdeck"):
             jb = self.meta["jobdeck"]
             self.window.set_title(
-                "%s - %s · jobdeck %d CHIPs · %d placements · %s view"
+                "%s - %s · jobdeck %d CHIPs · %d placements · %s view%s"
                 % (APP, os.path.basename(self.meta["src"]["path"]),
                    jb["chips"], jb["placements"],
-                   {"layer": "source layer"}.get(jb["mode"], jb["mode"])))
+                   {"layer": "source layer"}.get(jb["mode"], jb["mode"]),
+                   " · %d NOT DRAWN" % len(jb["skipped"])
+                   if jb.get("skipped") else ""))
+            if jb.get("skipped"):
+                first = jb["skipped"][0]
+                self._set_live_status(
+                    "jobdeck: %d placement(s) not drawn - CHIP %s $%d %s: "
+                    "%s" % (len(jb["skipped"]), first["chip"],
+                            first["idx"], first["tc"], first["reason"]))
         else:
             src = self.meta["src"]
             self.window.set_title(
@@ -1915,6 +1923,10 @@ class Viewer:
                         % (len(missing), os.path.basename(path), APP,
                            path))
             c.load()
+            # the deck is the thing viewed: full depth, or a source
+            # whose shapes live in child cells shows nothing (review
+            # 2026-09-09 P1-3)
+            self._set_depth(999, redraw=False)
         else:
             c = cache_mod.Cache(path)
             if not c.exists():
