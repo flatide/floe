@@ -158,6 +158,7 @@ floe view data/testchip_1g5.oas            # 개발용 KLayout 셸 (동결, 비�
 floe2 jobdeck deck.jb                      # 파싱·소스 probe·배치 계획·색 순서 요약
 floe2 jobdeck deck.jb --index --jobs 8     # 덱이 참조하는 모든 TC 소스를 일괄 인덱싱
 floe2 jobdeck deck.jb --id 2 --mode chip --placements --report r.json
+floe2 jobdeck deck.jb --render deck.png --bbox 40000,80000,60000,95000 --pixel 1200x900
 ```
 
 포맷은 비공개라 실측으로 확정한 부분과 미확정 부분을 `docs/JOBDECK.ko.md`에
@@ -935,8 +936,9 @@ sh rust/build-linux.sh
    하트비트, 컷오버 전 대형 자산 일회 게이트 후 python 인덱서 은퇴.
 10. **Jobdeck (Calibre MDPView)** (2026-09-08 착수, `docs/JOBDECK.ko.md`):
    M1 ✅ 파서·배치·MDPView 색 순서·헤더 probe·`floe2 jobdeck`·일괄
-   인덱싱 + 손계산 gate. M2 renderd 다중 캐시 합성 씬(루트 배율),
-   M3 GUI, M4 headless shot, M5 KLayout 툴을 oracle로.
+   인덱싱 + 손계산 gate. M2 ✅ renderd 다중 캐시 합성(`open deck=`, 배율은
+   씬 루트에만, KLayout 평탄화 오라클과 바이트 동일, `--render`).
+   M3 GUI, M4 headless shot(mosaic/anchor), M5 KLayout 툴을 oracle로.
 9. **Calibre 팔레트 임포트** (사용자 결정 2026-08-02, 안정화 후):
    실무자 전원이 Calibre 사용자이므로 뷰어 경험을 동일하게 —
    Calibre layer properties(색·채움 패턴·선 스타일)를 읽어 floe

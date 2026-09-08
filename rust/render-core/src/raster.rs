@@ -48,7 +48,7 @@ impl RasterViewBox {
         }
     }
 
-    fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self) -> Result<(), String> {
         if !self.x0.is_finite()
             || !self.y0.is_finite()
             || !self.x1.is_finite()

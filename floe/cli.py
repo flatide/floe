@@ -1384,12 +1384,83 @@ def cmd_jobdeck(args):
         rc = 3
     if args.index:
         rc = max(rc, _jobdeck_index(args, catalog))
-    elif catalog.unindexed():
+        # the probe ran before the caches existed: refresh for the spec
+        catalog.infos.clear()
+        catalog.probe_all(deck.sources())
+    elif catalog.unindexed() and not (args.spec or args.render):
         print("[jobdeck] %d source(s) have no .floe cache yet; "
               "add --index to build them" % len(catalog.unindexed()))
+    if args.spec or args.render:
+        rc = max(rc, _jobdeck_composite(args, deck, placements, stats,
+                                        scheme, colormap, catalog))
     if rc:
         raise SystemExit(rc)
     return 0
+
+
+def _jobdeck_composite(args, deck, placements, stats, scheme, colormap,
+                       catalog):
+    """--spec / --render: the M2 composite through renderd."""
+    import tempfile
+    from .jobdeck import render as jrender
+
+    if args.render and not args.bbox:
+        raise SystemExit("floe: --render needs --bbox X0,Y0,X1,Y1 (um)")
+    work = None
+    spec_path = args.spec
+    if spec_path is None:
+        work = tempfile.mkdtemp(prefix="floe-jobdeck-")
+        spec_path = os.path.join(work, "deck.spec")
+    try:
+        try:
+            ledger = jrender.write_deck_spec(
+                spec_path, deck, placements, stats, scheme, colormap,
+                catalog)
+        except ValueError as exc:
+            raise SystemExit("floe: %s" % exc)
+        for rec in ledger:
+            print("[jobdeck] skipped   : CHIP %s $%d %s: %s (%s)" % (
+                rec["chip"], rec["idx"], rec["tc"], rec["reason"],
+                rec["detail"]))
+        n_place = sum(1 for _ in open(spec_path) if _.startswith("placement "))
+        print("[jobdeck] spec      : %s (%d placement(s)%s)" % (
+            spec_path, n_place,
+            ", %d skipped" % len(ledger) if ledger else ""))
+        rc = 3 if ledger else 0
+        if not args.render:
+            return rc
+        try:
+            width, height = (int(v) for v in args.pixel.lower().split("x"))
+        except ValueError:
+            raise SystemExit("floe: --pixel must be WxH")
+        if width <= 0 or height <= 0:
+            raise SystemExit("floe: --pixel must be positive")
+        try:
+            bbox_um = tuple(float(v) for v in args.bbox.split(","))
+            if len(bbox_um) != 4:
+                raise ValueError
+        except ValueError:
+            raise SystemExit("floe: --bbox must be X0,Y0,X1,Y1 in um")
+        dbu = float(stats["dbu"])
+        bbox_um = jrender.fit_bbox_to_pixels(bbox_um, width, height)
+        bbox_dbu = tuple(v / dbu for v in bbox_um)
+        layers = jrender.deck_layers_meta(stats, scheme, colormap)
+        t0 = time.time()
+        try:
+            result = jrender.render_deck_png(
+                spec_path, args.deck, dbu, layers, bbox_dbu, width, height,
+                args.render)
+        except RuntimeError as exc:
+            raise SystemExit("floe: composite render: %s" % exc)
+        print("[jobdeck] rendered  : %s (%dx%d, bbox um %.4f %.4f %.4f "
+              "%.4f, %.2fs, draw %d ms)" % (
+                  args.render, width, height, *bbox_um, time.time() - t0,
+                  int(result.get("ms", 0))))
+        return rc
+    finally:
+        if work is not None:
+            import shutil
+            shutil.rmtree(work, ignore_errors=True)
 
 
 def _jobdeck_index(args, catalog):
@@ -1873,6 +1944,17 @@ def main(argv=None, *, prog=None, rust_only=None):
     p.add_argument("--report", metavar="FILE", default=None,
                    help="write the JSON report (deck, plan statistics, "
                         "placements, sources, colour order)")
+    p.add_argument("--spec", metavar="FILE", default=None,
+                   help="write the composite spec renderd opens "
+                        "(sources, deck layers, placements)")
+    p.add_argument("--render", metavar="PNG", default=None,
+                   help="render the composite headlessly to PNG "
+                        "(needs --bbox; sources must be indexed)")
+    p.add_argument("--bbox", metavar="X0,Y0,X1,Y1", default=None,
+                   help="with --render: region in um, expanded about its "
+                        "centre to the --pixel aspect")
+    p.add_argument("--pixel", metavar="WxH", default="1200x900",
+                   help="with --render: image size (default 1200x900)")
     p.add_argument("--index", action="store_true",
                    help="build the <src>.floe cache of every source the "
                         "deck names (skips current caches)")

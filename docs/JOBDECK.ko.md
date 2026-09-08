@@ -75,7 +75,7 @@ KLayout 툴은 "소스 → 하나의 flat-ish layout 재작성" 구조였다. fl
 | 단계 | 내용 | 상태 |
 |---|---|---|
 | M1 | Python 포팅(`floe/jobdeck/`), `floe2 jobdeck` CLI, 일괄 인덱싱, 손계산 gate | ✅ 2026-09-08 (main) |
-| M2 | renderd 다중 캐시 씬 + 루트 배율/오프셋, 합성 프레임 | 예정, `feature/jobdeck` |
+| M2 | renderd 다중 캐시 합성(`open deck=`), 루트 배율/오프셋, headless `--render`, 오라클 gate | ✅ 2026-09-08 (`feature/jobdeck`) |
 | M3 | GUI: 덱 열기, identifier/chip/layer 색 모드, 선택 | 예정 |
 | M4 | headless shot/mosaic (KLayout 툴 cli-spec 대응) | 예정 |
 | M5 | KLayout 툴을 oracle로: 같은 뷰포트 byte/픽셀 비교 gate | 예정 |
@@ -122,8 +122,60 @@ Gate `tools/validate_jobdeck.py` (배터리 편입, 20 tests):
   layer 핀), 스킴 JSON 왕복, CLI 종료 코드, `--index` 후 `Cache.exists()` +
   `meta.vfs` + 비-stale.
 
-## 5. 미결·후속
+## 5. M2 상세 — 합성 렌더 (renderd)
+
+### 구조
+- `rust/render-core/src/deck.rs` — `DeckSpec`(파서), `Deck`(열린 덱),
+  `Deck::render`. **배치 하나 = 단일 캐시 렌더 한 번**: 덱 뷰포트를 그 소스의
+  dbu로 사상한 뷰 `(v − d) / scale`로 보통의 plan → decode → raster를 돌리되
+  배경을 alpha 0으로 칠하고, 결과를 덱 레이어 순서(`order` = out)로
+  opaque-over 합성한다. 배율은 이 사상에만 존재하므로 캐시·플랜·라스터는
+  정수 그대로다. world→device 사상 `(x − x0)·W·2³² / span`이 배율 전후에 같은
+  식이라 픽셀은 평탄화한 단일 레이아웃 렌더와 **바이트 동일**하다(gate 4).
+- 컬링: 소스 top cell bbox를 덱 좌표로 변환해 뷰와 교차하지 않는 배치는
+  건너뛴다(`passes_skipped`). 가시 레이어(`layers=`)는 out 단위.
+- 페이지 예산: 덱 전체에 **하나의 예산**(서버 고정 1024MB). 소스마다 LRU를
+  두되, 디코드 직전 `share_budget`: 다른 소스들의 상주량이 예산의 절반을
+  넘으면 비례 축소하고, 현재 소스에 나머지를 준다 → 합계 ≤ 예산, 현재 소스
+  ≥ 절반 보장.
+- 스펙 파일(줄 단위, Python이 씀; 경로/이름은 hex):
+  ```
+  deck unit=2.5e-05
+  source path_hex=<.floe 디렉터리>
+  layer out=0 name_hex=<"$1 METAL1"> color=#0000ff fill=solid width=1
+  placement source=0 layer=123/43 out=0 scale=8.0 dx=1640800000 dy=3200800000 order=0
+  ```
+  `scale = mag · source_dbu / deck_dbu`, `dx/dy`는 덱 그리드 정수(M1의 ix/iy).
+- renderd 와이어: `open deck=<spec> budget_mb= jobs=` (cache와 배타),
+  `style`은 `<out>/0 COLOR FILL WIDTH` 행으로 덱 레이어 색을 바꾼다, `render`는
+  좌표가 덱 dbu·`layers=`가 `<out>/0`인 것 외에 동일하며 `frame …` 응답은
+  단일 캐시 경로의 모든 필드를 유지(없는 단계는 0)하고 `passes=`,
+  `passes_skipped=`를 덧붙인다. `info`는 `deck=1 sources= placements=`.
+- Python: `floe/jobdeck/render.py` — `write_deck_spec`(인덱스 없는 소스
+  `not_indexed`, 캐시에 없는 LY/DT `empty_layer`는 ledger), `DeckRenderWorker`
+  (`RustRenderWorker`의 `_open_command`만 바꿈), `render_deck_png`,
+  `fit_bbox_to_pixels`(늘리지 않고 확장). CLI: `floe2 jobdeck deck.jb --render
+  out.png --bbox X0,Y0,X1,Y1 [--pixel WxH] [--spec FILE]`.
+
+### M2에서 제외(M3~)
+라벨, 계층 프레임, refinement 라운드, pan/margin 재사용(retained frame),
+pick/snap/clip(덱에서는 오류 응답), 배치별 회전/미러(포맷 미확정).
+
+### gate (`tools/validate_jobdeck.py` CompositeTests)
+1. 스펙: 3 source · 4 layer · 17 placement, `scale=8.0 dx=… dy=…` 손계산값.
+2. 합성 프레임 vs **손으로 배치한 박스**: 1024×800 전 픽셀(모서리 1px 제외)의
+   색이 painter 순서대로 일치.
+3. `layers=` 컬링: $2만 켜면 노랑·검정만 남음.
+4. 합성 vs **KLayout 평탄화 단일 레이아웃**을 단일 캐시 경로로 렌더한 프레임:
+   바이트 동일. (KLayout은 int32라 오라클 레이아웃은 1e-4 um 그리드로 만든다;
+   뷰포트는 소수점 오프셋을 줘서 경계 정합 반올림 차이를 배제.)
+5. `--render` PNG 크기, 인덱스 없는 소스의 exit 3 + ledger.
+
+## 6. 미결·후속
 - LY/DT cross vs zip, 회전/미러: 실덱 사례가 나오면 확정.
-- 실덱 `mag` 분포 확인 후 M2 설계 확정(배율 1이 대부분이면 정수 `Xf` 경로로
-  충분, 아니면 renderd에 실수 배율 배치 도입).
+- 실덱에서 M2 성능 확인: 배치 수 × 패스 비용(플랜+디코드+라스터 각 1회).
+  전체 뷰에서 수천 패스가 되면 (a) 같은 소스·같은 scale의 배치를 한 패스로
+  묶기, (b) 뷰 밖 컬링 외에 픽셀 미만 배치 스킵, (c) 패스 병렬화 순으로 검토.
+- 실덱의 `mag` 분포·소스 내부 배율 배치 유무는 M3 전에 확인(인덱서는
+  OASIS 배율 PLACEMENT를 거부하므로 정책 필요).
 - M4의 mosaic/anchor/unit 규칙은 KLayout 툴 cli-spec을 그대로 따른다.

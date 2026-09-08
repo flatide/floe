@@ -316,14 +316,18 @@ class RustRenderWorker:
                 self._reader.start()
                 self._stderr_reader.start()
             self._wait_for(lambda: self._ready, "ready")
-            self._send("open cache=%s budget_mb=%d jobs=%d" %
-                       (self._cache_path, self._budget_mb,
-                        self._jobs_count))
+            self._send(self._open_command())
             self._wait_for(lambda: self._opened, "open")
             self._publish_style(wait=True)
         except Exception:
             self.stop()
             raise
+
+    def _open_command(self):
+        """The daemon `open` line; a jobdeck worker opens a deck spec
+        instead of one cache (floe.jobdeck.render)."""
+        return "open cache=%s budget_mb=%d jobs=%d" % (
+            self._cache_path, self._budget_mb, self._jobs_count)
 
     def start_async(self, callback):
         """Run the potentially cold cache open without blocking GTK."""

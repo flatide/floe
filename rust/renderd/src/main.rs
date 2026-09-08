@@ -2,7 +2,8 @@ use floe_render_core::{
     pick_scene, pick_scene_cancellable, render_geometry_occupancy_cancellable,
     render_geometry_styled_cancellable_reuse,
     render_geometry_styled_unbinned_cancellable, FrameReuse,
-    snap_scene, snap_scene_cancellable, validate_font_px, Cache, CacheLayer, ClipGeometry, DecodedPageCache, FrameScene,
+    snap_scene, snap_scene_cancellable, validate_font_px, Cache, CacheLayer, ClipGeometry, Deck,
+    DeckRenderRequest, DeckSpec, DecodedPageCache, FrameScene,
     GeometryRasterRequest, LayerFill, LayerStyle, PlanRequest, RasterViewBox, RenderCancellation,
     SceneQueryLayer, SceneQueryRequest, SceneSnapKind, StyledGeometryRasterRequest, ViewBox,
     DEFAULT_LABEL_FONT_PX, DEFAULT_TILE_SIZE, FULL_DEPTH, MAX_TILE_SIZE,
@@ -303,7 +304,11 @@ enum WorkerCommand {
 
 #[derive(Debug, PartialEq, Eq)]
 struct OpenCommand {
-    cache: String,
+    /// One `.floe` cache (the viewer's normal open) ...
+    cache: Option<String>,
+    /// ... or a jobdeck spec (docs/JOBDECK.ko.md M2): several caches
+    /// composited through `floe_render_core::Deck`.
+    deck: Option<String>,
     budget_mb: u64,
     jobs: u16,
 }
@@ -396,12 +401,18 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
     let fields = parse_fields(tokens)?;
     match command {
         "open" => {
-            reject_unknown(&fields, &["cache", "budget_mb", "jobs"])?;
+            reject_unknown(&fields, &["cache", "deck", "budget_mb", "jobs"])?;
             let jobs = optional_parse(&fields, "jobs")?.unwrap_or(DEFAULT_JOBS);
             validate_jobs(jobs)?;
+            let cache = fields.get("cache").cloned();
+            let deck = fields.get("deck").cloned();
+            if cache.is_some() == deck.is_some() {
+                return Err("open requires exactly one of cache= or deck=".to_string());
+            }
             Ok(Some(InputCommand::Worker(WorkerCommand::Open(
                 OpenCommand {
-                    cache: required(&fields, "cache")?.to_string(),
+                    cache,
+                    deck,
                     budget_mb: optional_parse(&fields, "budget_mb")?.unwrap_or(DEFAULT_BUDGET_MB),
                     jobs,
                 },
@@ -766,6 +777,9 @@ fn retained_budget_bytes() -> usize {
 
 struct WorkerState {
     cache: Option<Cache>,
+    /// A jobdeck composite (M2) opened instead of a single cache. The
+    /// deck owns its per-source page LRUs under the shared budget.
+    deck: Option<Deck>,
     page_cache: DecodedPageCache,
     /// §F2R-18: up to RETAINED_FRAMES label-free geometry frames,
     /// newest last, one per (render state, scale) - they serve exact
@@ -781,6 +795,7 @@ impl Default for WorkerState {
     fn default() -> Self {
         Self {
             cache: None,
+            deck: None,
             page_cache: DecodedPageCache::new(DEFAULT_BUDGET_MB * 1024 * 1024),
             retained: Vec::new(),
             jobs: DEFAULT_JOBS,
@@ -863,6 +878,16 @@ fn handle_clip(
     cancellation: &RenderCancellation,
 ) {
     let started = Instant::now();
+    if state.deck.is_some() {
+        respond(
+            responses,
+            format!(
+                "error code=clip seq={} message=deck_clip_unsupported",
+                command.sequence
+            ),
+        );
+        return;
+    }
     let generation = cancellation.before_generation();
     let result = run_clip(state, &command, generation, cancellation);
     match result {
@@ -1009,7 +1034,7 @@ fn handle_open(
     responses: &Sender<String>,
     published_scene: &SharedPublishedScene,
 ) {
-    if state.cache.is_some() {
+    if state.cache.is_some() || state.deck.is_some() {
         respond(
             responses,
             "error code=state message=cache_already_open".to_string(),
@@ -1026,7 +1051,54 @@ fn handle_open(
             return;
         }
     };
-    match Cache::open(&command.cache) {
+    if let Some(spec_path) = command.deck.as_deref() {
+        let opened = std::fs::read_to_string(spec_path)
+            .map_err(|error| format!("read deck spec {spec_path}: {error}"))
+            .and_then(|text| DeckSpec::parse(&text))
+            .and_then(|spec| Deck::open(spec, budget_bytes));
+        match opened {
+            Ok(deck) => {
+                let info = deck.info();
+                state.deck = Some(deck);
+                state.cache = None;
+                state.page_cache = DecodedPageCache::new(0);
+                state.retained.clear();
+                state.jobs = command.jobs;
+                state.styles.clear();
+                state.style_epoch = None;
+                if let Ok(mut published) = published_scene.write() {
+                    *published = None;
+                }
+                let bbox = info
+                    .bbox
+                    .map(|b| format!("{},{},{},{}", b[0], b[1], b[2], b[3]))
+                    .unwrap_or_else(|| "none".to_string());
+                respond(
+                    responses,
+                    format!(
+                        "opened unit={} top=0 layers={} cells={} pages={} ovp_bytes=0 max_depth={} budget_bytes={} jobs={} deck=1 sources={} placements={} bbox={}",
+                        info.unit,
+                        info.layers,
+                        info.sources,
+                        info.placements,
+                        info.max_depth,
+                        budget_bytes,
+                        command.jobs,
+                        info.sources,
+                        info.placements,
+                        bbox
+                    ),
+                );
+            }
+            Err(error) => respond(
+                responses,
+                format!("error code=open message={}", wire_escape(&error)),
+            ),
+        }
+        return;
+    }
+    let cache_path = command.cache.as_deref().unwrap_or_default();
+    match Cache::open(cache_path) {
         Ok(cache) => {
             let info = cache.info();
             state.cache = Some(cache);
@@ -1062,6 +1134,28 @@ fn handle_open(
 }
 
 fn handle_style(state: &mut WorkerState, command: StyleCommand, responses: &Sender<String>) {
+    if let Some(deck) = state.deck.as_mut() {
+        let applied = load_styles(&command.path, &deck.style_layers())
+            .and_then(|styles| deck.set_styles(&styles).map(|_| styles.len()));
+        match applied {
+            Ok(count) => {
+                state.style_epoch = Some(command.epoch);
+                respond(
+                    responses,
+                    format!("styled epoch={} layers={}", command.epoch, count),
+                );
+            }
+            Err(error) => respond(
+                responses,
+                format!(
+                    "error code=style epoch={} message={}",
+                    command.epoch,
+                    wire_escape(&error)
+                ),
+            ),
+        }
+        return;
+    }
     let Some(cache) = state.cache.as_ref() else {
         respond(
             responses,
@@ -1095,6 +1189,28 @@ fn handle_style(state: &mut WorkerState, command: StyleCommand, responses: &Send
 }
 
 fn handle_info(state: &WorkerState, responses: &Sender<String>) {
+    if let Some(deck) = state.deck.as_ref() {
+        let info = deck.info();
+        respond(
+            responses,
+            format!(
+                "info unit={} top=0 layers={} cells={} pages={} ovp_bytes=0 resident_bytes={} style_epoch={} deck=1 sources={} placements={} budget_bytes={}",
+                info.unit,
+                info.layers,
+                info.sources,
+                info.placements,
+                deck.resident_bytes(),
+                state
+                    .style_epoch
+                    .map(|epoch| epoch.to_string())
+                    .unwrap_or_else(|| "none".to_string()),
+                info.sources,
+                info.placements,
+                deck.budget_bytes()
+            ),
+        );
+        return;
+    }
     match state.cache.as_ref() {
         Some(cache) => {
             let info = cache.info();
@@ -1396,7 +1512,11 @@ fn handle_render(
         );
         return;
     }
-    let result = run_render(state, &command, responses, cancellation, published_scene);
+    let result = if state.deck.is_some() {
+        run_deck_render(state, &command, responses, cancellation)
+    } else {
+        run_render(state, &command, responses, cancellation, published_scene)
+    };
     match result {
         Ok(()) => {}
         Err(error)
@@ -1413,6 +1533,128 @@ fn handle_render(
             ),
         ),
     }
+}
+
+/// Jobdeck composite frame (docs/JOBDECK.ko.md M2): one pass per
+/// visible placement inside the view, overlaid in deck layer order by
+/// `floe_render_core::Deck`. No refinement rounds, labels, hierarchy
+/// frames, pan reuse or published query scene yet - the frame line
+/// keeps every field of the single-cache path (zeros where a phase
+/// does not exist) so the adapter parses it unchanged, plus
+/// `passes=`/`passes_skipped=`.
+fn run_deck_render(
+    state: &mut WorkerState,
+    command: &RenderCommand,
+    responses: &Sender<String>,
+    cancellation: &RenderCancellation,
+) -> Result<(), String> {
+    check_generation(cancellation, command.generation)?;
+    let deck = state
+        .deck
+        .as_mut()
+        .ok_or_else(|| "deck not open".to_string())?;
+    let visible = match command.visible_layers.as_deref() {
+        None => None,
+        Some(specs) => {
+            let layers = deck.style_layers();
+            let mut outs = BTreeSet::new();
+            for spec in specs {
+                let layer = resolve_layer(spec, &layers)
+                    .ok_or_else(|| format!("deck layer not found: {spec}"))?;
+                outs.insert(layer.index);
+            }
+            Some(outs)
+        }
+    };
+    let request = DeckRenderRequest {
+        view: RasterViewBox::new(
+            command.view[0],
+            command.view[1],
+            command.view[2],
+            command.view[3],
+        )?,
+        width: command.width,
+        height: command.height,
+        depth: command.depth,
+        cut_px: command.cut_px,
+        exact: command.exact,
+        visible,
+        mono: command.mono,
+        workers: command.jobs.unwrap_or(state.jobs),
+        decode_workers: command.decode_jobs.or(command.jobs).unwrap_or(state.jobs),
+        tile_size: command.tile_size,
+        decode_pages: command.decode_pages,
+    };
+    let report = deck.render(&request, command.generation, cancellation)?;
+    check_generation(cancellation, command.generation)?;
+    let png_started = Instant::now();
+    let png = if command.raw_frame {
+        None
+    } else {
+        Some(report.frame.png_bytes()?)
+    };
+    let png_us = elapsed_us(png_started);
+    let raw_header = command
+        .raw_frame
+        .then(|| raw_frame_header(report.frame.width(), report.frame.height()));
+    let parts: Vec<&[u8]> = match (&raw_header, &png) {
+        (Some(header), _) => vec![header.as_slice(), report.frame.pixels()],
+        (None, Some(png)) => vec![png.as_slice()],
+        _ => return Err("frame has neither raw pixels nor PNG bytes".to_string()),
+    };
+    let publish_stats = publish_frame(&command.out, command.generation, &parts, cancellation)?;
+    let stats = &report.stats;
+    respond(
+        responses,
+        format!(
+            "frame gen={} round=1 final=1 png={} format={} partial={} deferred=0 frame_cache_hit=0 style_epoch={} plan_us={} text_plan_us=0 labels=0 labels_truncated=0 text_place_records=0 read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us=0 mask_bytes=0 raster_us={} raster_tile_max_us={} tiles_reused=0 bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells=0 inst_edges=0 frame_rects=0 rect_paints={} polygon_paints={} path_paints={} frame_paints=0 label_tile_paints=0 label_pixel_paints=0 rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes=0 passes={} passes_skipped={}",
+            command.generation,
+            command.out,
+            if command.raw_frame { "raw" } else { "png" },
+            report.partial as u8,
+            state
+                .style_epoch
+                .map(|epoch| epoch.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            stats.plan_us,
+            stats.page_read_us,
+            stats.page_decode_us,
+            stats.page_decode_sum_us,
+            stats.page_decode_max_us,
+            stats.page_index_us,
+            stats.decode_workers_used,
+            stats.raster_us,
+            stats.raster_tile_max_us,
+            stats.work_bin_items,
+            stats.work_bin_overflow_items,
+            stats.work_bin_defer_rep,
+            stats.work_bin_defer_single,
+            stats.work_bin_defer_weight_max,
+            png_us,
+            publish_stats.write_us,
+            publish_stats.sync_us,
+            publish_stats.rename_us,
+            stats.workers_used,
+            stats.tiles,
+            command.tile_size,
+            report.pages,
+            report.plan_pages,
+            stats.decoded_cache_hit,
+            stats.decoded_cache_miss,
+            stats.decoded_cache_evicted,
+            report.resident_bytes,
+            report.rectangle_member_paints,
+            report.polygon_member_paints,
+            report.path_member_paints,
+            stats.rep_members_tested,
+            stats.rep_members_drawn,
+            stats.hier_cells_visited,
+            stats.subtrees_pruned,
+            report.passes,
+            report.passes_skipped,
+        ),
+    );
+    Ok(())
 }
 
 fn run_render(
@@ -2503,7 +2745,8 @@ mod tests {
                 assert_eq!(
                     open,
                     OpenCommand {
-                        cache: "/tmp/a.floe".to_string(),
+                        cache: Some("/tmp/a.floe".to_string()),
+                        deck: None,
                         budget_mb: 64,
                         jobs: 8,
                     }
@@ -2511,6 +2754,15 @@ mod tests {
             }
             _ => panic!("expected open command"),
         }
+        match parse_command("open deck=/tmp/d.spec").unwrap().unwrap() {
+            InputCommand::Worker(WorkerCommand::Open(open)) => {
+                assert_eq!(open.deck.as_deref(), Some("/tmp/d.spec"));
+                assert_eq!(open.cache, None);
+            }
+            _ => panic!("expected deck open command"),
+        }
+        assert!(parse_command("open budget_mb=1").is_err());
+        assert!(parse_command("open cache=/a deck=/b").is_err());
 
         let parsed_render = render(
             parse_command(

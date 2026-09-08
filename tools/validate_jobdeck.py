@@ -17,6 +17,7 @@ data never enter the repository.
 """
 
 import gzip
+import itertools
 import json
 import os
 import shutil
@@ -34,6 +35,7 @@ from floe.jobdeck import color as jcolor             # noqa: E402
 from floe.jobdeck import geom as jgeom               # noqa: E402
 from floe.jobdeck.sources import file_header         # noqa: E402
 from floe.cache import Cache                         # noqa: E402
+from floe.jobdeck import render as jrender           # noqa: E402
 
 EXPECTED = json.loads((ROOT / "tools" / "jobdeck_expected.json").read_text())
 
@@ -478,6 +480,242 @@ class CliTests(unittest.TestCase):
         self.assertIn("index     : 0 built, 0 failed, 3 kept", res.stdout)
         res = run_cli(CLI / "test.jb", env=env, ok=0)
         self.assertIn("3 probed, 3 ok, 3 indexed", res.stdout)
+
+
+# ---------------------------------------------------------------------
+# M2: the composite through renderd
+# ---------------------------------------------------------------------
+
+# the fixture geometry per (source, ly, dt) in source um: a full-extent
+# box on the first layer, a 10% inset box on the others (build_oas)
+FIXTURE_BOXES = {
+    ("chipA.oas", 123, 43): (0.0, 0.0, 2000.0, 2550.0),
+    ("chipA.oas", 456, 0): (200.0, 200.0, 1800.0, 2350.0),
+    ("chipB.oas", 456, 0): (0.0, 0.0, 1000.0, 1000.0),
+    ("chipB.oas", 7, 2): (100.0, 100.0, 900.0, 900.0),
+    ("mark.oas", 999, 0): (0.0, 0.0, 100.0, 100.0),
+}
+
+
+def _rgb(hexcolor):
+    h = hexcolor.lstrip("#")
+    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+
+_GEN = itertools.count(1)
+
+
+def _render_raw(worker, bbox_dbu, width, height, visible=None):
+    """One settled raw frame through a started worker: RGBA bytes.
+    Generations must increase per daemon: a repeated one is dropped."""
+    gen = next(_GEN)
+    solid = "\n".join(["*" * 16] * 16)
+    keys = [(int(l["layer"]), int(l["datatype"]))
+            for l in worker.cache.meta["layers"]]
+    worker.submit({"kind": "repattern",
+                   "fills": [(k, solid) for k in keys],
+                   "widths": [(k, 1) for k in keys]})
+    worker.submit({
+        "kind": "render", "gen": gen, "scope": "headless",
+        "bbox": tuple(float(v) for v in bbox_dbu), "view": None,
+        "w": width, "h": height, "depth": None, "cut_px": 0.0,
+        "lod": False, "frames": False, "labels": False,
+        "abstract": False, "visible": visible, "frame_format": "raw",
+    })
+    while True:
+        result = worker.res.get(timeout=300)
+        if result.get("kind") == "error":
+            raise AssertionError("renderd: %s" % result.get("msg"))
+        if result.get("kind") != "frame" or result.get("gen") != gen:
+            continue
+        if result.get("refining"):
+            continue
+        rgba = result["rgba"]
+        if len(rgba) != width * height * 4:
+            raise AssertionError("raw frame size mismatch")
+        return rgba
+
+
+class CompositeTests(unittest.TestCase):
+    """renderd `open deck=`: the composite of the three fixture caches
+    against (1) the boxes placed by hand and (2) a KLayout-flattened
+    single layout rendered through the ordinary single-cache path."""
+
+    W, H = 1024, 800
+    # fractional um offsets so no box edge sits on a device boundary,
+    # where the two f64 mappings could legitimately round apart
+    BBOX_UM = (36000.37, 79000.61, 70000.37, 106000.61)
+
+    @classmethod
+    def setUpClass(cls):
+        cls.binary = ROOT / "rust" / "target" / "release" / "floe-renderd"
+        if not cls.binary.is_file():
+            raise unittest.SkipTest("release floe-renderd is not built")
+        cls.env = {"FLOE_INDEX_BIN": str(ROOT / "rust" / "target" /
+                                         "release" / "floe-index"),
+                   "FLOE_RENDERD_BIN": str(cls.binary)}
+        os.environ["FLOE_RENDERD_BIN"] = str(cls.binary)
+        run_cli(CLI / "test.jb", "--index", "--jobs", "2", env=cls.env,
+                ok=0)
+        deck, cat, pl, st, scheme, cm = jd.plan_deck(str(CLI / "test.jb"))
+        cls.deck, cls.catalog, cls.placements = deck, cat, pl
+        cls.stats, cls.scheme, cls.colormap = st, scheme, cm
+        cls.dbu = float(st["dbu"])
+        cls.bbox_um = jrender.fit_bbox_to_pixels(cls.BBOX_UM, cls.W, cls.H)
+        cls.bbox_dbu = tuple(v / cls.dbu for v in cls.bbox_um)
+        cls.spec = CLI / "deck.spec"
+        cls.ledger = jrender.write_deck_spec(
+            str(cls.spec), deck, pl, st, scheme, cm, cat)
+        cls.layers = jrender.deck_layers_meta(st, scheme, cm)
+        worker = jrender.DeckRenderWorker(str(cls.spec), str(CLI / "test.jb"),
+                                          cls.dbu, cls.layers)
+        worker.start()
+        try:
+            cls.composite = _render_raw(worker, cls.bbox_dbu, cls.W, cls.H)
+            cls.only_2 = _render_raw(worker, cls.bbox_dbu, cls.W, cls.H,
+                                     visible=[(1, 0)])
+        finally:
+            worker.stop()
+
+    def _expected_boxes(self):
+        """(out, deck box um, rgb) per placement, in paint order."""
+        rows = []
+        for p in self.placements:
+            sx0, sy0, sx1, sy1 = FIXTURE_BOXES[(p.tc, p.ly, p.dt)]
+            box = (p.mag * sx0 + p.dx_um, p.mag * sy0 + p.dy_um,
+                   p.mag * sx1 + p.dx_um, p.mag * sy1 + p.dy_um)
+            out = self.stats["out_of"][(p.chip, p.idx, p.ly, p.dt)]
+            rows.append((out, box, _rgb(self.colormap[p.idx])))
+        rows.sort(key=lambda r: r[0])
+        return rows
+
+    def test_1_spec_and_ledger(self):
+        self.assertEqual(self.ledger, [])
+        text = self.spec.read_text()
+        self.assertEqual(text.count("\nsource "), 3)
+        self.assertEqual(text.count("\nplacement "), 17)
+        self.assertEqual(text.count("\nlayer "), 4)
+        # scale = mag * source_dbu / deck_dbu: $1 in ID001 is 4 * 2 = 8
+        self.assertIn("layer=123/43 out=0 scale=8.0 dx=1640800000 "
+                      "dy=3200800000 order=0", text)
+        self.assertIn("layer=999/0 out=2 scale=8.0", text)   # mag 0.2 * 40
+        self.assertIn("color=#0000ff", text)
+
+    def test_2_composite_matches_hand_placed_boxes(self):
+        x0, y0, x1, y1 = self.bbox_um
+        sx = (x1 - x0) / self.W
+        sy = (y1 - y0) / self.H
+        boxes = self._expected_boxes()
+        self.assertEqual(len(boxes), 17)
+        checked = 0
+        mismatches = []
+        px = self.composite
+        for j in range(self.H):
+            y = y1 - (j + 0.5) * sy
+            for i in range(self.W):
+                x = x0 + (i + 0.5) * sx
+                want = (0, 0, 0)
+                near_edge = False
+                for _out, (bx0, by0, bx1, by1), rgb in boxes:
+                    if (abs(x - bx0) < sx or abs(x - bx1) < sx or
+                            abs(y - by0) < sy or abs(y - by1) < sy):
+                        if by0 - sy <= y <= by1 + sy and \
+                                bx0 - sx <= x <= bx1 + sx:
+                            near_edge = True
+                            break
+                    if bx0 <= x <= bx1 and by0 <= y <= by1:
+                        want = rgb          # later out paints over
+                if near_edge:
+                    continue
+                o = (j * self.W + i) * 4
+                got = (px[o], px[o + 1], px[o + 2])
+                checked += 1
+                if got != want and len(mismatches) < 5:
+                    mismatches.append((i, j, got, want))
+        self.assertGreater(checked, self.W * self.H // 2)
+        self.assertEqual(mismatches, [], "first mismatching pixels")
+        # something was actually drawn, in more than one colour
+        colours = {tuple(px[o:o + 3]) for o in range(0, len(px), 4 * 97)}
+        self.assertGreaterEqual(len(colours), 4)
+
+    def test_3_visible_layers_cull_placements(self):
+        # only deck layer 1 ($2): yellow and black, nothing else
+        colours = {tuple(self.only_2[o:o + 3])
+                   for o in range(0, len(self.only_2), 4)}
+        self.assertEqual(colours, {(0, 0, 0), (255, 255, 0)})
+
+    def test_4_composite_equals_flattened_single_cache_render(self):
+        import klayout.db as db
+        flat = CLI / "deck_flat.oas"
+        # KLayout holds int32 coordinates: at the deck's 2.5e-5 um grid
+        # the deck (105 mm) overflows, so the oracle layout uses 1e-4 um
+        # (every fixture edge is a multiple of it). The renderer maps
+        # um the same way at either grid, so the pixels must agree.
+        oracle_dbu = 1e-4
+        lay = db.Layout()
+        lay.dbu = oracle_dbu
+        top = lay.create_cell("DECK")
+        srcs = {}
+        for p in self.placements:
+            if p.tc not in srcs:
+                s = db.Layout()
+                s.read(str(CLI / p.tc))
+                srcs[p.tc] = s
+            s = srcs[p.tc]
+            out = self.stats["out_of"][(p.chip, p.idx, p.ly, p.dt)]
+            dst = lay.layer(1000 + out, 0)
+            cell = s.top_cell()
+            for sh in cell.shapes(s.layer(p.ly, p.dt)).each():
+                b = sh.dbbox()          # source um
+                top.shapes(dst).insert(db.DBox(
+                    p.mag * b.left + p.dx_um, p.mag * b.bottom + p.dy_um,
+                    p.mag * b.right + p.dx_um, p.mag * b.top + p.dy_um))
+        lay.write(str(flat))
+        res = subprocess.run(
+            [sys.executable, "-B", "-m", "floe2", "index", str(flat),
+             "--jobs", "2"], cwd=ROOT, capture_output=True, text=True,
+            env={**os.environ, **self.env, "PYTHONPATH": str(ROOT)})
+        self.assertEqual(res.returncode, 0, res.stderr)
+        from floe.rust_render import RustRenderWorker
+        c = Cache(str(flat))
+        self.assertTrue(c.exists())
+        c.load()
+        worker = RustRenderWorker(c)
+        worker.start()
+        try:
+            colours = []
+            for row in self.stats["layer_table"]:
+                colours.append(((1000 + row["out"], 0),
+                                self.colormap[row["idx"]]))
+            worker.submit({"kind": "recolor", "colors": colours})
+            oracle = _render_raw(worker,
+                                 tuple(v / oracle_dbu for v in self.bbox_um),
+                                 self.W, self.H)
+        finally:
+            worker.stop()
+        if oracle != self.composite:
+            diff = sum(1 for o in range(0, len(oracle), 4)
+                       if oracle[o:o + 4] != self.composite[o:o + 4])
+            self.fail("composite differs from the flattened oracle in %d "
+                      "of %d pixels" % (diff, self.W * self.H))
+
+    def test_5_cli_render(self):
+        out = CLI / "deck.png"
+        res = run_cli(CLI / "test.jb", "--render", out, "--bbox",
+                      "40000,80000,60000,95000", "--pixel", "300x200",
+                      "--mode", "chip", env=self.env, ok=0)
+        self.assertIn("rendered  :", res.stdout)
+        data = out.read_bytes()
+        self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"))
+        import struct
+        w, h = struct.unpack(">II", data[16:24])
+        self.assertEqual((w, h), (300, 200))
+        # a deck naming an unindexed source cannot be rendered: exit 3
+        # with the ledger, and the spec still lists what could be drawn
+        res = run_cli(CLI / "test_formats.jb", "--id", "1,2", "--spec",
+                      CLI / "formats.spec", env=self.env, ok=3)
+        self.assertIn("chipA.gds: not_indexed", res.stdout)
+        self.assertIn("1 placement(s), 1 skipped", res.stdout)
 
 
 if __name__ == "__main__":
