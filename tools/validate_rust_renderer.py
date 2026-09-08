@@ -764,17 +764,28 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         v = Viewer.__new__(Viewer)
         calls = []
         v._alloc_size = (800, 600)
-        v._on_allocate = lambda w, alloc: calls.append((alloc.width, alloc.height))
+        v._on_allocate = lambda w, alloc, source="signal": calls.append(
+            (alloc.width, alloc.height, source))
         v.scroller = SimpleNamespace(
             get_allocation=lambda: SimpleNamespace(width=800, height=600))
         self.assertFalse(Viewer._sync_allocation(v))
         v.scroller = SimpleNamespace(
             get_allocation=lambda: SimpleNamespace(width=1600, height=1000))
         self.assertTrue(Viewer._sync_allocation(v))
-        self.assertEqual(calls, [(1600, 1000)])
+        self.assertEqual(calls, [(1600, 1000, "poll")])
         v.scroller = SimpleNamespace(
             get_allocation=lambda: SimpleNamespace(width=1, height=1))
         self.assertFalse(Viewer._sync_allocation(v), "unrealized: ignored")
+        # the handler itself: a real change redraws and forces a paint
+        # (remote-X belt); a repeat of the same size does nothing
+        events = []
+        v._alloc_size = (800, 600)
+        v._did_fit = True
+        v.redraw = lambda immediate=False: events.append("redraw")
+        v._schedule_repaint = lambda: events.append("repaint")
+        Viewer._on_allocate(v, None, SimpleNamespace(width=1600, height=1000))
+        Viewer._on_allocate(v, None, SimpleNamespace(width=1600, height=1000))
+        self.assertEqual(events, ["redraw", "repaint"])
 
     def test_parses_wire_fields(self):
         kind, fields = _parse_wire_line(

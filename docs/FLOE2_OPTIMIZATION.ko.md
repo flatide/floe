@@ -1540,6 +1540,15 @@ pan까지 남는다. 25ms 폴링 틱에서 스크롤러의 실제 allocation을 
 같아 아무 일도 하지 않는다. 대화형 재현은 불가해 단위 테스트(변화
 없음/변화/미실현 allocation)로 고정, 사용자 확인 대기.
 
+정정(0.12.62): 문제는 **리눅스(원격 X)**에서 관측된 것이고 맥은
+미확인. 원격 X에서는 신호 누락보다 스크롤 blit 문제(`_remote_x_scroll_
+repaint`)와 같은 계열의 "그림은 바뀌었는데 expose가 떨어지지 않음"일
+가능성이 있어, allocation 변경 뒤 40ms에 캔버스 image·scroller의
+`queue_draw` + `process_updates(True)`로 동기 repaint를 강제하는 두
+번째 안전장치를 넣었다(폴링 fallback은 그대로). 어느 경로가 실제로
+동작하는지 보려면 `FLOE_GUI_DEBUG=1`로 실행 — "allocation WxH via
+signal|poll" 라인이 찍힌다. 리눅스에서 0.12.62로 재확인 요청.
+
 ## 4. 이슈 목록
 
 | ID | 우선순위 | 상태 | 요약 | 다음 판정 |

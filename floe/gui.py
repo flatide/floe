@@ -2895,7 +2895,7 @@ class Viewer:
             return False
         if (alloc.width, alloc.height) == self._alloc_size:
             return False
-        self._on_allocate(self.scroller, alloc)
+        self._on_allocate(self.scroller, alloc, source="poll")
         return True
 
     def _poll(self):
@@ -3283,7 +3283,33 @@ class Viewer:
         else:
             self.cy = min(max(self.cy, bb[1] + hy), bb[3] - hy)
 
-    def _on_allocate(self, _w, alloc):
+    def _gui_debug(self, message):
+        if os.environ.get("FLOE_GUI_DEBUG"):
+            sys.stderr.write("[gui] %s\n" % message)
+
+    def _repaint_canvas(self):
+        """Force the canvas to paint now (remote-X belt, same family
+        as _remote_x_scroll_repaint): queue_draw only schedules, and a
+        dropped expose after a resize leaves the previous picture on
+        screen until the next event."""
+        for widget in (getattr(self, "image", None),
+                       getattr(self, "scroller", None)):
+            if widget is None:
+                continue
+            widget.queue_draw()
+            win = widget.get_window()
+            if win is not None:
+                try:
+                    win.process_updates(True)
+                except AttributeError:
+                    pass  # removed in some GTK3 builds; queue_draw stands
+        return False
+
+    def _schedule_repaint(self):
+        # after GTK's own allocation pass has settled
+        GLib.timeout_add(40, self._repaint_canvas)
+
+    def _on_allocate(self, _w, alloc, source="signal"):
         # GTK emits size-allocate on every set_from_pixbuf; reacting to
         # all of them would loop redraw -> allocate -> redraw forever
         # (visible as an endlessly re-submitted render). Only a real
@@ -3291,6 +3317,9 @@ class Viewer:
         size = (alloc.width, alloc.height)
         if size == self._alloc_size:
             return
+        self._gui_debug("allocation %dx%d via %s (was %s)"
+                        % (alloc.width, alloc.height, source,
+                           self._alloc_size))
         self._alloc_size = size
         if not self._did_fit and alloc.width > 50:
             self._did_fit = True
@@ -3304,6 +3333,9 @@ class Viewer:
                 self.fit()
         else:
             self.redraw()
+        # field 2026-09-08 (Linux/remote X): the picture updates but
+        # the server may drop the expose of the resized canvas
+        self._schedule_repaint()
 
     def _idle_cursor(self):
         # plain arrow at rest; the crosshair belongs to the ruler
