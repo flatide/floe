@@ -595,6 +595,34 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         Viewer._focus_view(v)
         self.assertEqual(events, ["mb", ("set", None)])
 
+    def test_drc_grid_cells_use_one_formatter(self):
+        """Field 2026-09-08: a waived error number turned green -> cyan
+        once the current-cell mark moved elsewhere, because the page
+        fill and the mark repaint formatted cells separately and the
+        mark path kept the old cyan. One formatter now serves both."""
+        import inspect
+        from floe import gui
+        from floe.gui import Viewer
+
+        v = Viewer.__new__(Viewer)
+        v._drc_waived = lambda db, ci, ei: ei == 1
+        db = object()
+        waived = Viewer._drc_cell_markup(v, db, 0, 1, False, frozenset())
+        plain = Viewer._drc_cell_markup(v, db, 0, 2, False, frozenset())
+        self.assertIn("#00e676", waived)
+        self.assertIn("#ff5252", plain)
+        self.assertIn(">2<", waived)
+        noted = Viewer._drc_cell_markup(v, db, 0, 1, True, frozenset())
+        self.assertIn(">*2<", noted)
+        chosen = Viewer._drc_cell_markup(v, db, 0, 1, False, frozenset([1]))
+        self.assertIn("background='#ffd700'", chosen)
+        self.assertIn("#00e676", chosen)
+        current = Viewer._drc_cell_markup(v, db, 0, 1, False, frozenset(),
+                                          current=True)
+        self.assertIn("background='#3465a4'", current)
+        self.assertNotIn("#00ffff", inspect.getsource(gui),
+                         "no second waived colour anywhere in the GUI")
+
     def test_parses_wire_fields(self):
         kind, fields = _parse_wire_line(
             "frame gen=7 png=/tmp/f.png partial=1 deferred=9")

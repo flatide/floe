@@ -1472,6 +1472,19 @@ push에만 — 이 브랜치는 매번 재빌드하므로 둘을 함께 0.12.56�
 DRC ICE, index CLI, oracle) 통과, validator는 병합 후 note 패널
 stub과 `__version__` import 보강.
 
+### 3.30 GUI — DRC 그리드 waived 색 불일치 (2026-09-08, 0.12.57)
+
+사용자 보고: waived 번호(녹색)를 클릭한 뒤 다른 번호를 클릭하면 앞
+번호가 하늘색으로 바뀜. 상태 변화가 아니라 색 규칙 불일치였다:
+2026-08-17(90dec4d)에 waived 색을 cyan→green으로 바꿀 때 페이지 전체
+채우기(`_drc_grid_fill`)만 고치고, 현재 셀 표시가 옮겨갈 때 이전 셀을
+되돌리는 경로(`_drc_cell_mark`)는 `#00ffff`를 유지했다. 두 경로를
+하나의 formatter(`_drc_cell_markup`, 팔레트 상수 `DRC_GREEN`/
+`DRC_RED`/`DRC_GOLD`에서 색 도출)로 합쳤다. Python-only 변경이라
+`__version__`만 0.12.57(`RENDERD_VERSION` 0.12.56 유지, 재빌드 불필요).
+검증: formatter 단위 테스트 + GUI 소스에 두 번째 waived 색이 없음을
+단언.
+
 ## 4. 이슈 목록
 
 | ID | 우선순위 | 상태 | 요약 | 다음 판정 |

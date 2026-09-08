@@ -5557,15 +5557,7 @@ class Viewer:
         W = self._drc_gridw
 
         def cellfmt(ei):
-            t = "%d" % (ei + 1)      # rule-local numbering
-            if ei in noted:
-                t = "*" + t          # note present (user call 2026-08-28)
-            fg = ("#00e676" if self._drc_waived(db, ci, ei)
-                  else "#ff5252")    # waived green / not-waived red
-            if ei in eset:
-                return ("<span background='#ffd700' "
-                        "foreground='%s'>%s</span>" % (fg, t))
-            return "<span foreground='%s'>%s</span>" % (fg, t)
+            return self._drc_cell_markup(db, ci, ei, ei in noted, eset)
 
         for b2 in range(0, len(eis), W):
             cells = [cellfmt(ei) for ei in eis[b2:b2 + W]]
@@ -6207,6 +6199,31 @@ class Viewer:
             "waives loaded: %d waived (%s)"
             % (waived, os.path.basename(path)))
 
+    @staticmethod
+    def _rgb_hex(rgba):
+        """'#rrggbb' of a 0xRRGGBBAA palette constant (Pango markup)."""
+        return "#%06x" % ((rgba >> 8) & 0xFFFFFF)
+
+    def _drc_cell_markup(self, db, ci, ei, noted, eset, current=False):
+        """Pango markup of ONE error-grid cell - the single formatter
+        the page fill and the current-cell mark both use, so a cell
+        looks the same whichever path repainted it last. Field
+        2026-09-08: the mark path still carried the pre-90dec4d cyan
+        for waived errors, so a waived number went green -> cyan the
+        moment the mark moved to another cell."""
+        t = "%d" % (ei + 1)          # rule-local numbering
+        if noted:
+            t = "*" + t              # note present (user call 2026-08-28)
+        if current:
+            return ("<span background='#3465a4' "
+                    "foreground='#ffffff'>%s</span>" % t)
+        fg = self._rgb_hex(DRC_GREEN if self._drc_waived(db, ci, ei)
+                           else DRC_RED)   # waived green / not-waived red
+        if ei in eset:
+            return ("<span background='%s' foreground='%s'>%s</span>"
+                    % (self._rgb_hex(DRC_GOLD), fg, t))
+        return "<span foreground='%s'>%s</span>" % (fg, t)
+
     def _drc_cell_mark(self, row, j):
         """Mark ONE grid cell as current: the previous cell reverts
         through the shared formatter (local number, gold when
@@ -6230,18 +6247,8 @@ class Viewer:
             if k2 >= len(gmap):
                 return ""
             ei = gmap[k2]
-            t = "%d" % (ei + 1)
-            if has_note and db.get_note(ci, ei):
-                t = "*" + t   # note present (keep the grid prefix)
-            if current:
-                return ("<span background='#3465a4' "
-                        "foreground='#ffffff'>%s</span>" % t)
-            fg = ("#00ffff" if self._drc_waived(db, ci, ei)
-                  else "#ff5252")
-            if ei in eset:
-                return ("<span background='#ffd700' "
-                        "foreground='%s'>%s</span>" % (fg, t))
-            return "<span foreground='%s'>%s</span>" % (fg, t)
+            noted = bool(has_note and db.get_note(ci, ei))
+            return self._drc_cell_markup(db, ci, ei, noted, eset, current)
 
         old = self._drc_cell
         if old is not None and old != (row, j):
