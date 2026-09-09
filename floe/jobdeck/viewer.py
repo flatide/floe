@@ -130,9 +130,11 @@ class DeckCache:
         """'$1 METAL1,CHIP ID001,2/0' -> [(layer, datatype), ...]; None
         = all. Like Cache.resolve_layers a name selects EVERY row that
         carries it (chip view: "$1 METAL1" in every CHIP that places
-        it), and a group head - a CHIP row, an LY with several DTs -
-        expands to its whole group (review 2026-09-09 P2-2: the head
-        alone holds no placement and drew a black screen)."""
+        it). Only the chip view's virtual CHIP rows are group heads and
+        expand to the level rows under them (review 2026-09-09 P2-2:
+        the head alone holds no placement and drew a black screen; 3rd
+        pass P2-2: a source-layer DT0 row is a real layer, never a
+        head)."""
         if not spec or spec == "all":
             return None
         rows = self.meta["layers"]
@@ -157,11 +159,11 @@ class DeckCache:
             else:
                 raise ValueError("unknown deck layer: %r (known: %s)"
                                  % (tok, sorted(byname)))
+            heads = {(r["layer"], r["datatype"]) for r in rows
+                     if r.get("jobdeck_head")}
             for key in keys:
                 out.append(key)
-                if key[1] == 0:
-                    # a group head (CHIP row, or an LY's datatype 0)
-                    # stands for the group
+                if key in heads:
                     out.extend((r["layer"], r["datatype"]) for r in rows
                                if r["layer"] == key[0] and r["datatype"] != 0)
         return list(dict.fromkeys(out))

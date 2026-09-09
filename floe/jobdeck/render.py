@@ -61,8 +61,11 @@ def view_layers(deck, stats, scheme, colormap):
             if c.id not in seen:
                 seen.append(c.id)
         for pos, cid in enumerate(seen, 1):
+            # the CHIP row is a virtual group head: it holds nothing
+            # itself and stands for the level rows under it
             rows.append({"key": ("chip", cid), "layer": pos, "datatype": 0,
-                         "name": "CHIP %s" % cid, "color_key": cid})
+                         "name": "CHIP %s" % cid, "color_key": cid,
+                         "head": True})
             levels = sorted({e.idx for c in deck.chips if c.id == cid
                              for e in c.entries})
             for idx in levels:
@@ -191,7 +194,8 @@ def deck_layers_meta(deck, stats, scheme, colormap, placements=None):
             counts[out_of(p)] = counts.get(out_of(p), 0) + 1
     return [{"layer": int(r["layer"]), "datatype": int(r["datatype"]),
              "name": r["name"], "color": r["color"],
-             "stored_shapes": counts.get(r["out"], 0)}
+             "stored_shapes": counts.get(r["out"], 0),
+             "jobdeck_head": bool(r.get("head"))}
             for r in rows]
 
 

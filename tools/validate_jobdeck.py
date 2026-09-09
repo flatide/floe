@@ -139,6 +139,18 @@ ROWS 0.0/1600.0
 END
 """
 
+# review 2026-09-09 (3rd) P2-2: one LY with datatypes 0 and 1 - in the
+# source-layer view DT0 is a real layer, not a group head
+DT_DECK = """* dt.jb
+MTITLE 1,DT
+*PLACE-INFO
+CHIP D
+$ (1, DT, AD=0.00020, SF=1, TC=dt.oas, LY={7}, DT={0,1}, BX=0.0, BY=0.0, UX=2000.0, UY=2000.0 )
+ROWS 0.0/0.0
+*END-PLACE
+END
+"""
+
 # review 2026-09-09 P1-3: the shapes live in a child cell only
 HIER_DECK = """* hier.jb
 MTITLE 1,KID
@@ -198,6 +210,8 @@ def build_fixtures(d: Path):
     (d / "dense.jb").write_text(DENSE_DECK)
     (d / "hier.jb").write_text(HIER_DECK)
     (d / "frames.jb").write_text(FRAMES_DECK)
+    (d / "dt.jb").write_text(DT_DECK)
+    build_oas(d / "dt.oas", 0.00005, 2000.0, 2000.0, [(7, 0), (7, 1)], "DT")
     build_dense_oas(d / "dense.oas")
     build_hier_oas(d / "hier.oas")
     build_hier2_oas(d / "hier2.oas")
@@ -1519,6 +1533,90 @@ class ReviewFixTests2(unittest.TestCase):
         rgb = bytes(b for o in range(0, len(raw), 4) for b in raw[o:o + 3])
         self.assertEqual(png, rgb, "the helper's fills differ from the "
                                    "solid archival render")
+
+
+def _gray(rgba):
+    return sum(1 for o in range(0, len(rgba), 4)
+               if rgba[o:o + 3] == b"\x80\x80\x80")
+
+
+class ReviewFixTests3(unittest.TestCase):
+    """Review 2026-09-09, third pass (two findings)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.env = {"FLOE_INDEX_BIN": str(ROOT / "rust" / "target" /
+                                         "release" / "floe-index"),
+                   "FLOE_RENDERD_BIN": str(ROOT / "rust" / "target" /
+                                           "release" / "floe-renderd")}
+        os.environ["FLOE_RENDERD_BIN"] = cls.env["FLOE_RENDERD_BIN"]
+        for deck in ("frames.jb", "dt.jb"):
+            run_floe2("index", CLI / deck, "--jobs", "2", env=cls.env, ok=0)
+
+    def test_p2_1_black_design_covers_the_gray_frame_wash(self):
+        from floe.jobdeck.viewer import DeckCache
+        c = DeckCache(str(CLI / "frames.jb"))
+        c.load()
+        try:
+            worker = jrender.DeckRenderWorker(c)
+            worker.start()
+            try:
+                bb = tuple(c.meta["bbox"])
+                before = _render_raw(worker, bb, 400, 400, depth=0,
+                                     frames=True)
+                worker.submit({"kind": "recolor",
+                               "colors": [[[1, 0], "#000000"],
+                                          [[2, 0], "#000000"]]})
+                black = _render_raw(worker, bb, 400, 400, depth=0,
+                                    frames=True)
+            finally:
+                worker.stop()
+        finally:
+            c.close()
+        # the children's gray wash sits under the top-level boxes in a
+        # plain render (0 gray px); black boxes must hide it just the
+        # same, and the white frames stay on top
+        self.assertEqual(_gray(black), 0)
+        self.assertEqual(_white(black), _white(before))
+        self.assertGreater(_white(black), 0)
+
+    def test_p2_2_source_layer_dt0_is_a_layer_not_a_head(self):
+        from floe.jobdeck.viewer import DeckCache
+        c = DeckCache(str(CLI / "dt.jb"), mode="layer")
+        c.load()
+        try:
+            self.assertEqual([(l["layer"], l["datatype"], l["jobdeck_head"])
+                              for l in c.meta["layers"]],
+                             [(7, 0, False), (7, 1, False)])
+            self.assertEqual(c.resolve_layers("7/0"), [(7, 0)])
+            self.assertEqual(c.resolve_layers("LY7.DT0"), [(7, 0)])
+            self.assertEqual(c.resolve_layers("LY7.DT1"), [(7, 1)])
+            worker = jrender.DeckRenderWorker(c)
+            worker.start()
+            try:
+                bb = tuple(c.meta["bbox"])
+                only_dt0 = _render_raw(worker, bb, 100, 100, visible=[(7, 0)])
+                both = _render_raw(worker, bb, 100, 100)
+            finally:
+                worker.stop()
+        finally:
+            c.close()
+        # DT0 is the full box, DT1 the 10% inset: painted over DT0 in
+        # its own colour... both share LY7's colour here, so compare
+        # the two selections by the layer-1 inset being absent/present
+        self.assertGreater(_lit(only_dt0), 0)
+        self.assertEqual(_lit(both), _lit(only_dt0),
+                         "DT1 lies inside DT0: selecting DT0 alone must "
+                         "not add DT1")
+        # and a CHIP head in chip view still expands
+        c = DeckCache(str(CLI / "dt.jb"), mode="chip")
+        c.load()
+        try:
+            self.assertEqual([l["jobdeck_head"] for l in c.meta["layers"]],
+                             [True, False])
+            self.assertEqual(c.resolve_layers("CHIP D"), [(1, 0), (1, 1)])
+        finally:
+            c.close()
 
 
 class KLayoutOracleTests(unittest.TestCase):

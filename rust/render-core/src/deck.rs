@@ -489,10 +489,12 @@ impl Deck {
             .checked_mul(request.height as usize)
             .and_then(|value| value.checked_mul(4))
             .ok_or_else(|| "image byte length overflow".to_string())?;
+        // The geometry composite keeps alpha 0 wherever no pass painted
+        // (review 2026-09-09 (3rd) P2-1: turning black pixels
+        // transparent at the end treated black DESIGN as background and
+        // let the gray frame wash show through it); the opaque black
+        // background goes underneath only at the very end.
         let mut composite = vec![0u8; byte_len];
-        for pixel in composite.chunks_exact_mut(4) {
-            pixel[3] = 255;
-        }
         // Review 2026-09-09 (2nd) P1-1: the single-cache raster paints
         // the gray frame bands under the design and the white band over
         // it, for the WHOLE scene. A deck must keep that order across
@@ -652,20 +654,22 @@ impl Deck {
             path_member_paints = path_member_paints.saturating_add(report.path_member_paints);
             passes += 1;
         }
-        if let (Some(under), Some(over)) = (frames_under, frames_over) {
-            // gray bands of every placement go UNDER all geometry, the
-            // white band of every placement OVER it
-            let mut layered = vec![0u8; byte_len];
-            for pixel in layered.chunks_exact_mut(4) {
-                pixel[3] = 255;
-            }
-            overlay(&mut layered, &under);
-            overlay(&mut layered, &composite_geometry_only(&composite));
-            overlay(&mut layered, &over);
-            composite = layered;
+        // opaque black ground, then (with frames) the gray bands of every
+        // placement UNDER all geometry and the white band of every
+        // placement OVER it
+        let mut layered = vec![0u8; byte_len];
+        for pixel in layered.chunks_exact_mut(4) {
+            pixel[3] = 255;
+        }
+        if let Some(under) = frames_under.as_ref() {
+            overlay(&mut layered, under);
+        }
+        overlay(&mut layered, &composite);
+        if let Some(over) = frames_over.as_ref() {
+            overlay(&mut layered, over);
         }
         Ok(DeckRenderReport {
-            frame: RgbaFrame::from_pixels(request.width, request.height, composite)?,
+            frame: RgbaFrame::from_pixels(request.width, request.height, layered)?,
             stats,
             passes,
             passes_skipped,
@@ -746,25 +750,6 @@ pub fn split_frame_planes(pass: &[u8], under: &mut [u8], over: &mut [u8]) {
             u.copy_from_slice(src);
         }
     }
-}
-
-/// The geometry composite as an overlay source: its black opaque
-/// background must not cover the under plane, so background pixels
-/// become alpha 0 (a design pixel that is itself black opaque is
-/// indistinguishable and stays transparent - the under plane there is
-/// the gray wash the design would have covered; the single-cache
-/// raster paints the wash first and the black design over it, and a
-/// black-on-gray pixel reads as gray either way only if the design
-/// pixel is transparent, so this keeps the wash visible under pure
-/// black design pixels: accepted, black design colours are not used).
-fn composite_geometry_only(composite: &[u8]) -> Vec<u8> {
-    let mut out = composite.to_vec();
-    for pixel in out.chunks_exact_mut(4) {
-        if pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0 {
-            pixel[3] = 0;
-        }
-    }
-    out
 }
 
 /// Opaque-over: every pass pixel the raster touched (alpha != 0)
@@ -1086,12 +1071,14 @@ mod tests {
         assert_eq!(under, vec![128, 128, 128, 255, 0, 0, 0, 0, 0, 0, 0, 0, 128, 128, 128, 255]);
         assert_eq!(over, vec![0, 0, 0, 0, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0]);
         // geometry laid between them: a placement's design covers the
-        // gray wash but never the white frame
+        // gray wash but never the white frame - and BLACK design covers
+        // the wash too (the geometry buffer keeps alpha 0 only where no
+        // pass painted; review 3rd P2-1)
         let mut layered = vec![0, 0, 0, 255].repeat(4);
         overlay(&mut layered, &under);
-        overlay(&mut layered, &composite_geometry_only(&[0, 0, 0, 255, 9, 9, 9, 255, 0, 0, 0, 255, 9, 9, 9, 255]));
+        overlay(&mut layered, &[0, 0, 0, 255, 9, 9, 9, 255, 0, 0, 0, 0, 0, 0, 0, 255]);
         overlay(&mut layered, &over);
-        assert_eq!(layered, vec![128, 128, 128, 255, 255, 255, 255, 255, 0, 0, 0, 255, 9, 9, 9, 255]);
+        assert_eq!(layered, vec![0, 0, 0, 255, 255, 255, 255, 255, 0, 0, 0, 255, 0, 0, 0, 255]);
     }
 
     #[test]

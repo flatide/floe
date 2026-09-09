@@ -318,6 +318,15 @@ RENDERD_VERSION 0.12.60, `__version__` 0.12.71.
 
 RENDERD_VERSION 0.12.61, `__version__` 0.12.72.
 
+### 3차 (2건)
+
+| # | 지적 | 조치 | gate |
+|---|---|---|---|
+| P2-1 | 검은 도형 위로 회색 계층 프레임이 비침: 도형 합성 버퍼의 검은 픽셀을 모두 투명으로 바꿔서 실제 검은 도형도 배경 취급(일반 렌더 회색 0px, 덱 48px) | 도형 합성 버퍼는 처음부터 alpha 0(칠한 픽셀만 불투명)으로 두고, 마지막에 검은 바탕 → under 평면 → 도형 → over 평면 순으로 얹는다. `composite_geometry_only()` 제거. frames가 꺼진 경우도 같은 경로(바탕 + 도형)라 픽셀 동일. | `test_p2_1`: 두 level을 검정으로 recolor해도 회색 0px, 흰 프레임은 그대로 |
+| P2-2 | source-layer view에서 DT0 선택에 다른 datatype이 섞임(모든 datatype 0을 그룹 머리로 간주) | 그룹 머리는 chip view의 가상 CHIP 행뿐: 뷰 행에 `head` 플래그(meta `jobdeck_head`)를 두고 그 행만 확장. `7/0`·`LY7.DT0`은 (7,0) 하나. | `test_p2_2`: dt.oas(7/0, 7/1) 덱에서 DT0 단독 선택의 픽셀 수가 둘 다 켠 것과 같음(DT1은 DT0 안쪽) |
+
+RENDERD_VERSION 0.12.62, `__version__` 0.12.73.
+
 ## 10. 미결·후속
 - LY/DT cross vs zip, 회전/미러: 실덱 사례가 나오면 확정.
 - 실덱에서 M2 성능 확인: 배치 수 × 패스 비용(플랜+디코드+라스터 각 1회).
