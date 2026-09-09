@@ -736,15 +736,11 @@ fn render_geometry_impl(
                     let row0 = tile_boundary(request.height, tile_y, tile_size);
                     let row1 = tile_boundary(request.height, tile_y + 1, tile_size);
                     let tile_started = Instant::now();
-                    // a tile outside the device window stays background
-                    // (jobdeck step 2): no walk, no paint, same pixels
+                    // a tile outside the device window is not rastered
+                    // at all (jobdeck step 2): the frame comes back
+                    // window-sized, so no band is made for it either
                     if let Some([wc0, wr0, wc1, wr1]) = window {
                         if col1 <= wc0 || col0 >= wc1 || row1 <= wr0 || row0 >= wr1 {
-                            outputs.push(RasterTileOutput {
-                                tile: RasterBand::new_tile(request, col0, col1, row0, row1)?,
-                                stats: RenderStats::default(),
-                                counters: RasterCounters::default(),
-                            });
                             continue;
                         }
                     }
@@ -807,6 +803,37 @@ fn render_geometry_impl(
         Ok(tiles)
     })?;
     check_cancelled(guard)?;
+    if let Some(window) = window {
+        // a windowed render returns the window's pixels only (no label
+        // pass, no retained geometry: the jobdeck composite draws the
+        // labels itself, later)
+        if let (Some(labels), RenderMode::Styled(_)) = (prepared_labels.as_ref(), mode) {
+            if !labels.rows.is_empty() {
+                return Err("a windowed render takes no labels".to_string());
+            }
+        }
+        let frame = assemble_window(request, tiles, window)?;
+        stats.raster_us = started.elapsed().as_micros().try_into().unwrap_or(u64::MAX);
+        return Ok(GeometryRasterReport {
+            frame,
+            geometry_frame: None,
+            geometry_is_frame: false,
+            stats,
+            rect_record_tests: counters.rect_records,
+            rectangle_member_paints: counters.rectangle_members_drawn,
+            polygon_record_tests: counters.polygon_records,
+            polygon_member_paints: counters.polygon_members_drawn,
+            path_record_tests: counters.path_records,
+            path_member_paints: counters.path_members_drawn,
+            frame_record_tests: counters.frame_records,
+            frame_member_paints: counters.frame_members_drawn,
+            deferred_frame_tests: counters.deferred_frame_records,
+            label_tile_paints: 0,
+            label_pixel_paints: 0,
+            labels_truncated,
+            partial: scene.is_partial(),
+        });
+    }
     let mut frame = assemble_tiles(request, tiles, tile_columns, tile_rows)?;
     check_cancelled(guard)?;
     // §F2R-20: the retained copy exists only because labels paint over
@@ -2269,6 +2296,47 @@ fn apply_label_passes(
         height: request.height,
         pixels: band.pixels,
     })
+}
+
+/// The rastered tiles that intersect `window` copied into a frame of
+/// the window's size (the tiles' own pixels are the full frame's, so
+/// the copy is a crop: byte-equal to the full render's window).
+fn assemble_window(
+    request: &GeometryRasterRequest,
+    tiles: Vec<RasterBand>,
+    window: [u32; 4],
+) -> Result<RgbaFrame, String> {
+    let [wc0, wr0, wc1, wr1] = window;
+    let (w, h) = (wc1 - wc0, wr1 - wr0);
+    let byte_len = (w as usize)
+        .checked_mul(h as usize)
+        .and_then(|value| value.checked_mul(4))
+        .ok_or_else(|| "image byte length overflow".to_string())?;
+    let mut pixels = vec![0u8; byte_len];
+    for pixel in pixels.chunks_exact_mut(4) {
+        pixel.copy_from_slice(&request.background);
+    }
+    let stride = w as usize * 4;
+    for tile in tiles {
+        if tile.width != request.width || tile.height != request.height {
+            return Err("raster worker returned an invalid tile".to_string());
+        }
+        let c0 = tile.col0.max(wc0);
+        let c1 = tile.col1.min(wc1);
+        let r0 = tile.row0.max(wr0);
+        let r1 = tile.row1.min(wr1);
+        if c0 >= c1 || r0 >= r1 {
+            continue;
+        }
+        let tile_stride = (tile.col1 - tile.col0) as usize * 4;
+        for row in r0..r1 {
+            let src = (row - tile.row0) as usize * tile_stride + (c0 - tile.col0) as usize * 4;
+            let dst = (row - wr0) as usize * stride + (c0 - wc0) as usize * 4;
+            let len = (c1 - c0) as usize * 4;
+            pixels[dst..dst + len].copy_from_slice(&tile.pixels[src..src + len]);
+        }
+    }
+    RgbaFrame::from_pixels(w, h, pixels)
 }
 
 fn assemble_tiles(
@@ -6657,6 +6725,70 @@ mod tests {
         assert_eq!(report.frame_record_tests, 4);
         assert_eq!(report.frame_member_paints, 4);
         assert_eq!(report.deferred_frame_tests, 0);
+    }
+
+    /// jobdeck step 2: a windowed render is the full render's window,
+    /// byte for byte, whatever the tile size - and its frame is the
+    /// window's size.
+    #[test]
+    fn windowed_render_is_the_crop_of_the_full_render() {
+        let scene = styled_scene(vec![
+            (BBox { x0: 3, y0: 3, x1: 7, y1: 7 }, Rep::One, 0),
+            (BBox { x0: 0, y0: 8, x1: 2, y1: 10 }, Rep::One, 3),
+        ]);
+        let cancellation = RenderCancellation::new();
+        for tile_size in [2u16, 3, 10] {
+            let raster = GeometryRasterRequest {
+                tile_size,
+                ..request()
+            };
+            let styled = StyledGeometryRasterRequest {
+                raster,
+                layers: vec![LayerStyle {
+                    layer_idx: 0,
+                    color: [255, 0, 0, 255],
+                    fill: LayerFill::Speckle,
+                    outline_width: 1,
+                }],
+                hierarchy_frames: true,
+                mono: false,
+            };
+            let full = render_geometry_styled(&scene, &styled).unwrap();
+            for window in [[2u32, 3, 8, 9], [0, 0, 10, 10], [7, 0, 10, 4]] {
+                let part = render_geometry_styled_cancellable_windowed(
+                    &scene,
+                    &styled,
+                    1,
+                    &cancellation,
+                    window,
+                )
+                .unwrap();
+                let [c0, r0, c1, r1] = window;
+                assert_eq!((part.frame.width(), part.frame.height()), (c1 - c0, r1 - r0));
+                for y in r0..r1 {
+                    for x in c0..c1 {
+                        assert_eq!(
+                            pixel(&part.frame, (x - c0) as usize, (y - r0) as usize),
+                            pixel(&full.frame, x as usize, y as usize),
+                            "tile {tile_size} window {window:?} at {x},{y}"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(render_geometry_styled_cancellable_windowed(
+            &scene,
+            &StyledGeometryRasterRequest {
+                raster: request(),
+                layers: Vec::new(),
+                hierarchy_frames: false,
+                mono: false,
+            },
+            1,
+            &cancellation,
+            [5, 5, 12, 6],
+        )
+        .is_err(), "a window past the frame is refused");
     }
 
     #[test]

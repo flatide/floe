@@ -286,26 +286,27 @@ pub fn subwindow(bbox: &[f64; 4], view: &RasterViewBox, width: u32, height: u32)
     Some((c0, r0, c1 - c0, r1 - r0))
 }
 
-/// The window `(col0, row0, w, h)` of a full-frame `pass` laid
-/// opaque-over onto `composite` (both `width` wide).
+/// A window-sized `pass` (`w` x `h`, the raster's windowed frame) laid
+/// opaque-over onto the `width`-wide `composite` at `(col0, row0)`.
 pub fn overlay_window(composite: &mut [u8], width: u32, pass: &[u8], window: (u32, u32, u32, u32)) {
     let (col0, row0, w, h) = window;
     let stride = width as usize * 4;
     let len = w as usize * 4;
-    for row in row0 as usize..(row0 + h) as usize {
-        let at = row * stride + col0 as usize * 4;
-        overlay(&mut composite[at..at + len], &pass[at..at + len]);
+    for row in 0..h as usize {
+        let at = (row0 as usize + row) * stride + col0 as usize * 4;
+        overlay(&mut composite[at..at + len], &pass[row * len..(row + 1) * len]);
     }
 }
 
-/// `split_frame_planes` over the window of a full-frame pass.
+/// `split_frame_planes` of a window-sized pass into the full-frame
+/// under/over planes.
 pub fn split_frame_planes_window(pass: &[u8], width: u32, under: &mut [u8], over: &mut [u8], window: (u32, u32, u32, u32)) {
     let (col0, row0, w, h) = window;
     let stride = width as usize * 4;
     let len = w as usize * 4;
-    for row in row0 as usize..(row0 + h) as usize {
-        let at = row * stride + col0 as usize * 4;
-        split_frame_planes(&pass[at..at + len], &mut under[at..at + len], &mut over[at..at + len]);
+    for row in 0..h as usize {
+        let at = (row0 as usize + row) * stride + col0 as usize * 4;
+        split_frame_planes(&pass[row * len..(row + 1) * len], &mut under[at..at + len], &mut over[at..at + len]);
     }
 }
 
@@ -1479,26 +1480,20 @@ mod tests {
     }
 
     #[test]
-    fn window_overlays_touch_the_window_only() {
+    fn window_overlays_place_a_window_sized_pass() {
         let mut composite = vec![0u8; 4 * 4 * 4]; // 4x4 frame
-        let mut pass = vec![0u8; 64];
-        for y in 0..4 {
-            for x in 0..4 {
-                pass[(y * 4 + x) * 4..(y * 4 + x) * 4 + 4].copy_from_slice(&[9, 9, 9, 255]);
-            }
-        }
+        let pass = vec![9, 9, 9, 255].repeat(4);   // a 2x2 window pass
         overlay_window(&mut composite, 4, &pass, (1, 2, 2, 2));
         let px = |x: usize, y: usize| composite[(y * 4 + x) * 4];
         assert_eq!((px(1, 2), px(2, 3), px(0, 2), px(3, 3), px(1, 1)), (9, 9, 0, 0, 0));
         let mut under = vec![0u8; 64];
         let mut over = vec![0u8; 64];
-        let mut frames = vec![0u8; 64];
-        frames[(0 * 4 + 2) * 4..(0 * 4 + 3) * 4].copy_from_slice(&[128, 128, 128, 255]);
-        frames[(0 * 4 + 3) * 4..(0 * 4 + 4) * 4].copy_from_slice(&[255, 255, 255, 255]);
-        frames[(1 * 4 + 0) * 4..(1 * 4 + 1) * 4].copy_from_slice(&[128, 128, 128, 255]); // outside
+        // 2x2 window pass: gray, white / nothing, gray
+        let frames = vec![128, 128, 128, 255, 255, 255, 255, 255, 0, 0, 0, 0, 128, 128, 128, 255];
         split_frame_planes_window(&frames, 4, &mut under, &mut over, (2, 0, 2, 2));
         assert_eq!(&under[(0 * 4 + 2) * 4..(0 * 4 + 3) * 4], &[128, 128, 128, 255]);
         assert_eq!(&over[(0 * 4 + 3) * 4..(0 * 4 + 4) * 4], &[255, 255, 255, 255]);
+        assert_eq!(&under[(1 * 4 + 3) * 4..(1 * 4 + 4) * 4], &[128, 128, 128, 255]);
         assert_eq!(&under[(1 * 4 + 0) * 4..(1 * 4 + 1) * 4], &[0, 0, 0, 0], "outside the window");
     }
 
