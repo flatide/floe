@@ -238,7 +238,9 @@ floe2 jobdeck deck.jb [--report r.json] [--spec s.spec]   # 분석·보고만
   placements · level view`.
 - File > load layout… 에 `jobdecks (*.jb)` 필터. 소스 중 인덱스 없는 것이
   있으면 "지금 인덱싱할까요?" → `floe2 index deck.jb`를 모달 로그로 실행 후 연다.
-  `floe2 view deck.jb`는 인덱스가 없으면 터미널에서 exit 1로 알린다.
+  `floe2 view deck.jb`도 같다(2026-09-09: 인덱스 없는 파일은 레이아웃·덱·DRC db
+  모두 뷰어가 묻고 인덱싱한 뒤 연다 — `Viewer._open_or_index`,
+  `FLOE_INDEX_ON_OPEN=yes|no`로 자동 응답).
 - 덱에서 동작하지 않는 것(오류 상태 메시지로 답함): pick/snap, clip, 라벨,
   계층 프레임, margin prefetch. depth/detail/fit/goto/ruler/DRC 좌표 점프는
   덱 좌표(um) 그대로 동작한다.

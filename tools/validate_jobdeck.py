@@ -876,9 +876,15 @@ class CompositeTests(unittest.TestCase):
                       CLI / "formats.spec", env=self.env, ok=3)
         self.assertIn("chipA.gds: not_indexed", res.stdout)
         self.assertIn("1 placement(s), 1 skipped", res.stdout)
+        # `floe2 view` on a deck whose sources lack an index no longer
+        # fails in the terminal: the viewer starts and asks (user call
+        # 2026-09-09). Under the gate the question is answered "no",
+        # and the smoke reports that nothing was opened.
         res = run_floe2("view", CLI / "test_formats.jb", "--multi",
-                        env=self.env, ok=1)
-        self.assertIn("no VFS cache for", res.stderr)
+                        env=dict(self.env, FLOE_INDEX_ON_OPEN="no",
+                                 FLOE_GUI_SMOKE_MS="3000"), ok=1,
+                        timeout=120)
+        self.assertIn("pending open never landed", res.stderr + res.stdout)
 
 
 class ViewerCacheTests(unittest.TestCase):
@@ -948,7 +954,8 @@ class ViewerCacheTests(unittest.TestCase):
             self.assertTrue(c.dir.endswith("deck-chip.spec"))
             self.assertEqual(c.resolve_layers("CHIP ID002,3/1"),
                              [(2, 0), (2, 1), (2, 2), (2, 5), (3, 1)])
-            spec = open(c.dir).read()
+            with open(c.dir) as fh:
+                spec = fh.read()
             self.assertIn("layer out=0 key=1/0 name_hex=", spec)
             self.assertEqual(spec.count("\nlayer "), 11)
             # our source-layer view: LY groups with DT children
@@ -1005,6 +1012,54 @@ class GuiSmokeTests(unittest.TestCase):
         res = run_floe2("view", "--multi", CLI / "test.jb", env=env, ok=0,
                         timeout=120)
         self.assertNotIn("no GUI frame", res.stderr + res.stdout)
+
+
+class IndexOnOpenSmokeTests(unittest.TestCase):
+    """`floe2 view <file>` without an index starts the viewer, asks
+    (FLOE_INDEX_ON_OPEN answers for the gate), indexes in the modal
+    log, opens and shows a frame - for a layout and for a jobdeck."""
+
+    def _env(self, policy):
+        return {"FLOE_INDEX_BIN": str(ROOT / "rust" / "target" / "release" /
+                                      "floe-index"),
+                "FLOE_RENDERD_BIN": str(ROOT / "rust" / "target" /
+                                        "release" / "floe-renderd"),
+                "FLOE_GUI_SMOKE_MS": "20000",
+                "FLOE_INDEX_ON_OPEN": policy}
+
+    def _gtk(self):
+        try:
+            import gi
+            gi.require_version("Gtk", "3.0")
+            from gi.repository import Gtk  # noqa: F401
+        except (ImportError, ValueError):
+            raise unittest.SkipTest("PyGObject/GTK is not importable")
+        if sys.platform.startswith("linux") and not os.environ.get(
+                "DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+            raise unittest.SkipTest("no display")
+
+    def test_unindexed_layout_and_deck_open_after_indexing(self):
+        self._gtk()
+        fresh = CLI / "fresh"
+        fresh.mkdir(exist_ok=True)
+        for name in ("chipA.oas", "chipB.oas", "mark.oas", "test.jb"):
+            shutil.copy2(CLI / name, fresh / name)
+        self.assertFalse((fresh / "chipA.oas.floe").exists())
+        # declined (policy no): the viewer stays empty, the smoke says so
+        res = run_floe2("view", "--multi", fresh / "chipA.oas",
+                        env=self._env("no"), ok=1, timeout=120)
+        self.assertIn("pending open never landed", res.stderr + res.stdout)
+        self.assertFalse((fresh / "chipA.oas.floe").exists())
+        # accepted: indexed, opened, a frame shown
+        run_floe2("view", "--multi", fresh / "chipA.oas", "--goto",
+                  "1000,1000,500", env=self._env("yes"), ok=0, timeout=120)
+        self.assertTrue((fresh / "chipA.oas.floe" / "meta.json").is_file())
+        # a jobdeck: every source indexed through `floe2 index deck.jb`
+        run_floe2("view", "--multi", fresh / "test.jb", env=self._env("yes"),
+                  ok=0, timeout=180)
+        for name in ("chipB.oas", "mark.oas"):
+            self.assertTrue((fresh / (name + ".floe") / "meta.json").is_file(),
+                            name)
 
 
 class ShotTests(unittest.TestCase):

@@ -349,8 +349,14 @@ floe는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델을 
   DISPLAY 없이 'aqua' 키로 동일하게 동작.
 - 종료 코드: 0 = 정상/전달됨, 1 = DISPLAY 미설정·소켓 실패,
   **3 = X 디스플레이 접속 불가** (죽은 세션, xauth 불일치 등).
-- 전달 대상 파일의 인덱스가 없으면 **forward 전에 이 터미널에서** 먼저
-  인덱싱한다 (GUI 프로세스가 몇 분씩 멈추는 것 방지).
+- 인덱스가 없는 파일(.oas/.gds, 덱 .jb, DRC .db)을 열면 — `floe2 view
+  <file>`로 처음 열든, 실행 중인 창에 forward되든, File > load layout…이나
+  DRC > open results로 고르든 — 뷰어가 **먼저 묻고**(Yes/No) 승낙하면 인덱스를
+  모달 로그 창에서 만든 뒤 연다(사용자 결정 2026-09-09; 전에는 터미널에서
+  `floe2 index …`를 안내하며 실패했다). `--goto`·detail·depth 등 요청 옵션은
+  열린 뒤 적용된다. 스크립트·gate용으로 `FLOE_INDEX_ON_OPEN=yes|no`가 질문을
+  대신 답한다(기본 `ask`). 인덱싱 자체는 여전히 `floe-index` 프로세스가 하며
+  GUI는 로그만 보여 준다.
 
 ### 네이티브 뷰어 (`floe view`) — GTK3/PyGObject (flateyes와 동일 제약)
 

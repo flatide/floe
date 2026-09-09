@@ -1340,12 +1340,9 @@ def cmd_view(args):
         if display is None:
             print("floe: DISPLAY is not set", file=sys.stderr)
             raise SystemExit(1)
-        # the viewer is VFS-only and never builds a cache: fail here, in
-        # this terminal, rather than forwarding an unopenable file to the
-        # GUI instance
-        if src and not _cache_ready(src):
-            raise SystemExit(f"no VFS cache for {src}; "
-                             f"run: floe index {src}")
+        # a file without an index is forwarded as is: the running
+        # window asks the user and builds the index in its log dialog
+        # (user call 2026-09-09; it used to fail here in the terminal)
         addr = instance.socket_address(display)
         # no src: an empty path forwards as a present-only request
         # (raise the running window; open nothing)
@@ -1373,7 +1370,22 @@ def cmd_view(args):
             import atexit
             atexit.register(lambda: os.path.exists(addr) and os.unlink(addr))
 
-    c = open_cache(src, args=args) if src else None
+    # no index yet: the viewer starts empty, asks, indexes and opens
+    # (the request options - goto included - apply after the open)
+    pending_open = None
+    pending_fields = ()
+    if src and not _cache_ready(src):
+        pending_open = src
+        pending_fields = tuple(
+            (["goto=" + ",".join(repr(v) for v in goto)] if goto else [])
+            + ["detail=%s" % detail_name, "depth=%d" % depth,
+               "lod=%s" % args.lod, "frames=%s" % args.frames,
+               "labels=%s" % args.labels,
+               "labelpx=%d" % args.label_font_px])
+        c = None
+        goto = None
+    else:
+        c = open_cache(src, args=args) if src else None
     # PyGObject/GTK3 problems are reported inside import_gtk (exit 3)
     from .gui import run_viewer
     run_viewer(c, server, goto=goto, drc=args.drc,
@@ -1384,7 +1396,8 @@ def cmd_view(args):
                frame_cache=args.frame_cache == "on",
                stream_kb=stream_kb,
                stream_target_ms=args.stream_target_ms,
-               render_debug=args.render_debug)
+               render_debug=args.render_debug,
+               pending_open=pending_open, pending_fields=pending_fields)
 
 
 def _add_reviewer_option(p):

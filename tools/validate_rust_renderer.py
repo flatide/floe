@@ -1375,6 +1375,89 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 })
 
 
+class IndexOnOpenTests(unittest.TestCase):
+    """Viewer._open_or_index (user call 2026-09-09): a layout or
+    jobdeck without an index is ASKED about, indexed in the modal log,
+    opened, and the request's options applied - from the load dialog,
+    a forwarded `floe2 view`, and a fresh start alike."""
+
+    def _shell(self, ready, answer=True):
+        from floe.gui import Viewer
+        v = Viewer.__new__(Viewer)
+        calls = []
+        v._index_ready = lambda path: ready
+        v._ask_yes_no = lambda text: (calls.append(("ask", text)), answer)[1]
+        v.open_file = lambda path: (calls.append(("open", path)), None)[1]
+        v._forwarded_view_options = lambda fields: (
+            calls.append(("options", list(fields))), True)[1]
+        v._forwarded_goto = lambda fields: (
+            calls.append(("goto", list(fields))),
+            any(f.startswith("goto=") for f in fields))[1]
+        v.redraw = lambda immediate=False: calls.append(("redraw", immediate))
+        v._present = lambda: calls.append(("present",))
+        v._set_live_status = lambda msg: calls.append(("status", msg))
+        v._restore_keys = lambda: calls.append(("keys",))
+
+        # like the real helpers: index, open, then report to `after`
+        def index_and_load(path, after=None):
+            calls.append(("vfs-index", path))
+            after(v.open_file(path))
+        v._vfs_index_and_load = index_and_load
+
+        def deck_index_and_load(path, after=None):
+            calls.append(("deck-index", path))
+            after(v.open_file(path))
+        v._jobdeck_index_and_load = deck_index_and_load
+        return v, calls
+
+    def test_ready_opens_and_applies_options(self):
+        from floe.gui import Viewer
+        v, calls = self._shell(ready=True)
+        self.assertFalse(Viewer._open_or_index(
+            v, "/x/chip.oas", ["detail=high", "depth=3"]))
+        self.assertEqual([c[0] for c in calls],
+                         ["open", "options", "goto", "redraw", "present"])
+        self.assertEqual(calls[0][1], "/x/chip.oas")
+
+    def test_missing_index_asks_then_indexes_then_opens(self):
+        from floe.gui import Viewer
+        v, calls = self._shell(ready=False, answer=True)
+        os.environ.pop("FLOE_INDEX_ON_OPEN", None)
+        Viewer._open_or_index(v, "/x/chip.oas", ["goto=1,2,3"])
+        self.assertEqual([c[0] for c in calls],
+                         ["ask", "vfs-index", "open", "options", "goto",
+                          "present"], "a goto owns the one redraw")
+        self.assertIn("No VFS index for", calls[0][1])
+        self.assertIn("chip.oas", calls[0][1])
+        # a jobdeck asks about its sources and indexes them all
+        v, calls = self._shell(ready=False, answer=True)
+        Viewer._open_or_index(v, "/x/deck.jb")
+        self.assertEqual([c[0] for c in calls[:3]],
+                         ["ask", "deck-index", "open"])
+        self.assertIn("Not every source of", calls[0][1])
+
+    def test_declined_or_forbidden_leaves_the_file_unopened(self):
+        from floe.gui import Viewer
+        v, calls = self._shell(ready=False, answer=False)
+        os.environ.pop("FLOE_INDEX_ON_OPEN", None)
+        Viewer._open_or_index(v, "/x/chip.oas")
+        self.assertEqual([c[0] for c in calls], ["ask", "status", "keys"])
+        self.assertIn("index chip.oas", calls[1][1])
+        # FLOE_INDEX_ON_OPEN=no never asks, =yes never asks either
+        os.environ["FLOE_INDEX_ON_OPEN"] = "no"
+        try:
+            v, calls = self._shell(ready=False, answer=True)
+            Viewer._open_or_index(v, "/x/chip.oas")
+            self.assertEqual([c[0] for c in calls], ["status", "keys"])
+            os.environ["FLOE_INDEX_ON_OPEN"] = "yes"
+            v, calls = self._shell(ready=False, answer=False)
+            Viewer._open_or_index(v, "/x/chip.oas")
+            self.assertEqual([c[0] for c in calls[:2]],
+                             ["vfs-index", "open"])
+        finally:
+            del os.environ["FLOE_INDEX_ON_OPEN"]
+
+
 @unittest.skipUnless(os.environ.get("FLOE_INTEGRATION_SOURCE"),
                      "set FLOE_INTEGRATION_SOURCE for the real daemon test")
 class RealDaemonIntegrationTests(unittest.TestCase):

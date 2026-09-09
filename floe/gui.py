@@ -1941,6 +1941,60 @@ class Viewer:
         self._restore_keys()
         return None
 
+    def _index_ready(self, path):
+        """Whether `path` can be opened as is: a layout with a VFS cache,
+        or a jobdeck whose sources all have one."""
+        if _is_deck_path(path):
+            from .jobdeck.viewer import deck_ready
+            return deck_ready(path)
+        return cache_mod.Cache(path).exists()
+
+    def _open_or_index(self, path, fields=(), ask=True):
+        """Open a layout or a jobdeck; when its index is missing ASK
+        the user first (user call 2026-09-09: floe2 too), build it in
+        the modal log, then open, then apply the CLI/forwarded options
+        in `fields` (goto=, detail=, depth=, ...). FLOE_INDEX_ON_OPEN=
+        yes|no|ask (default ask) answers the question for scripts and
+        the GUI smoke gate. Returns False (usable from GLib.idle_add)."""
+        path = os.path.abspath(path)
+        fields = [f for f in fields if f]
+
+        def after_open(err):
+            if err:
+                msg = err[4:] if err.startswith("ERR ") else err
+                self._set_live_status(msg)
+                return
+            changed = self._forwarded_view_options(fields)
+            jumped = self._forwarded_goto(fields)
+            if changed and not jumped:
+                self.redraw(immediate=True)
+            self._present()
+
+        if self._index_ready(path):
+            try:
+                err = self.open_file(path)
+            except Exception as exc:
+                err = "ERR %s" % exc
+            after_open(err)
+            return False
+        policy = os.environ.get("FLOE_INDEX_ON_OPEN", "ask").strip().lower()
+        if policy not in ("yes", "no"):
+            policy = "ask"
+        name = os.path.basename(path)
+        if policy == "no" or (policy == "ask" and ask and not self._ask_yes_no(
+                ("Not every source of\n%s\nhas a VFS index.\n\n"
+                 "Index them now?" if _is_deck_path(path) else
+                 "No VFS index for\n%s\n\nBuild it now?") % name)):
+            self._set_live_status("VFS index needed: %s index %s"
+                                  % (APP, name))
+            self._restore_keys()
+            return False
+        if _is_deck_path(path):
+            self._jobdeck_index_and_load(path, after=after_open)
+        else:
+            self._vfs_index_and_load(path, after=after_open)
+        return False
+
     def _on_incoming(self, _source, _cond):
         # like _poll: any exception here would make GLib drop the watch,
         # silently killing single-instance forwarding for the session
@@ -1959,12 +2013,20 @@ class Viewer:
             line = data.decode("utf-8", "replace").strip()
             fields = line.split("\t")
             path = fields[0].strip()
+            deferred = None
             if not path:
                 # bare `floe` with an instance already running:
                 # present the window, change nothing else (the
                 # request's option fields are ignored on purpose -
                 # they are only the sender's defaults)
                 error = None
+                fields = [path]
+            elif not self._index_ready(os.path.abspath(path)):
+                # no index yet: answer the sender now (its wait is
+                # short) and ask the user in the window; the index
+                # build, the open and the request's options follow
+                error = None
+                deferred = [path, fields[1:]]
                 fields = [path]
             else:
                 try:
@@ -1975,7 +2037,10 @@ class Viewer:
                 conn.sendall((error or "OK").encode("utf-8") + b"\n")
             except OSError:
                 pass
-            if not error:
+            if deferred:
+                self._present()
+                GLib.idle_add(self._open_or_index, deferred[0], deferred[1])
+            elif not error:
                 changed = self._forwarded_view_options(fields[1:])
                 jumped = self._forwarded_goto(fields[1:])
                 if changed and not jumped:
@@ -4627,32 +4692,11 @@ class Viewer:
         # parent by itself: restore now, and again after the load
         # rebuilds the panels (open_file)
         self._restore_keys()
-        # a jobdeck whose sources are not all indexed: offer to index
-        # them (one `index` run per source), then load
-        if path and _is_deck_path(path):
-            from .jobdeck.viewer import deck_ready
-            if not deck_ready(path):
-                if not self._ask_yes_no(
-                        "Not every source of\n%s\nhas a VFS index.\n\n"
-                        "Index them now?" % os.path.basename(path)):
-                    self._set_live_status(
-                        "VFS index needed: %s index %s"
-                        % (APP, os.path.basename(path)))
-                    self._restore_keys()
-                    return
-                self._jobdeck_index_and_load(path)
-                return
-        # no cache yet: offer to build the VFS index, then load
-        elif path and not cache_mod.Cache(path).exists():
-            if not self._ask_yes_no(
-                    "No VFS index for\n%s\n\nBuild it now?"
-                    % os.path.basename(path)):
-                self._set_live_status(
-                    "VFS index needed: %s index %s"
-                    % (APP, os.path.basename(path)))
-                self._restore_keys()
-                return
-            self._vfs_index_and_load(path)
+        # no index yet (a layout's VFS cache, a jobdeck's sources):
+        # ask, build in the modal log, then load - the same path a
+        # `floe2 view <file>` without an index takes
+        if path and not self._index_ready(path):
+            self._open_or_index(path)
             return
         try:
             err = self.open_file(path)
@@ -4670,9 +4714,10 @@ class Viewer:
             info.destroy()
             self._restore_keys()
 
-    def _vfs_index_and_load(self, src):
+    def _vfs_index_and_load(self, src, after=None):
         """Build the VFS cache for `src` (floe-index vfs) with its log
-        in a modal dialog, then open it in place."""
+        in a modal dialog, then open it in place; `after(err)` runs
+        once the open settled (err None on success)."""
         from .vfsclient import find_binary
         try:
             bin_ = find_binary()
@@ -4686,7 +4731,9 @@ class Viewer:
                 err = self.open_file(src)
             except Exception as exc:
                 err = "ERR %s" % exc
-            if err:
+            if after is not None:
+                after(err)
+            elif err:
                 self._set_live_status(
                     err[4:] if err.startswith("ERR ") else err)
 
@@ -4696,15 +4743,18 @@ class Viewer:
                            "--jobs", "12", "--no-lod"],
                           on_success, "VFS indexing")
 
-    def _jobdeck_index_and_load(self, path):
+    def _jobdeck_index_and_load(self, path, after=None):
         """`<APP> index deck.jb` (every source the deck names) with its
-        log in the modal dialog, then open the deck in place."""
+        log in the modal dialog, then open the deck in place; `after
+        (err)` runs once the open settled."""
         def on_success():
             try:
                 err = self.open_file(path)
             except Exception as exc:
                 err = "ERR %s" % exc
-            if err:
+            if after is not None:
+                after(err)
+            elif err:
                 self._set_live_status(
                     err[4:] if err.startswith("ERR ") else err)
 
@@ -8249,7 +8299,11 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
                label_font_px=DEFAULT_LABEL_FONT_PX,
                frame_cache=True,
                stream_kb=None, stream_target_ms=500,
-               render_debug=False):
+               render_debug=False, pending_open=None, pending_fields=()):
+    """`pending_open`: a layout/jobdeck given on the command line that
+    has no index yet - the viewer starts empty, asks, indexes and
+    opens it (user call 2026-09-09), then applies `pending_fields`
+    (the request options as `key=value` strings, goto included)."""
     import_gtk()
     viewer = Viewer(cache, server_sock, goto=goto, detail=detail,
                     dump=dump, depth=depth, lod=lod, frames=frames,
@@ -8271,8 +8325,10 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
                 "%s: FLOE_GUI_SMOKE_MS must be 100..60000" % APP)
 
         def finish_smoke():
-            if cache is not None:
-                if viewer._worker_starting:
+            if cache is not None or pending_open is not None:
+                if viewer.cache is None:
+                    smoke_error.append("the pending open never landed")
+                elif viewer._worker_starting:
                     smoke_error.append("Rust render cache is still opening")
                 elif viewer.worker is None or not viewer.worker.alive():
                     smoke_error.append("Rust render worker is not alive")
@@ -8282,13 +8338,21 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
             return False
 
         GLib.timeout_add(smoke_ms, finish_smoke)
+    if pending_open is not None:
+        # the window is up; the question, the index log and the open
+        # need the main loop
+        GLib.idle_add(viewer._open_or_index, pending_open,
+                      list(pending_fields))
     if drc:
         # NO _drc_window() here: its grab_focus made the BROWSE
         # TreeView auto-select row 0 on focus-in, so --drc startups
         # showed the first rule selected (field reports 2026-08-18;
         # a db must open with no rule selected). The embedded panel
         # is always visible - there is nothing to focus.
-        viewer.load_drc(os.path.abspath(drc))
+        # A db without a usable .ice pack is ASKED about and packed
+        # first, as the DRC > open dialog does (user call 2026-09-09).
+        drc_path = os.path.abspath(drc)
+        GLib.idle_add(lambda: (viewer._drc_open_db(drc_path), False)[1])
     try:
         import signal as _signal
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, _signal.SIGINT,
