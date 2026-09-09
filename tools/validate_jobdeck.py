@@ -235,12 +235,14 @@ def build_hier2_oas(path, dbu=0.00005):
     ly.write(str(path))
 
 
-def build_dense_oas(path, dbu=0.00005, count=60000, extent_um=2000.0):
-    """`count` rectangles at pseudo-random positions and sizes in one
-    cell (a deterministic LCG): nothing regular enough for the OASIS
-    writer or the indexer to fold into repetitions, so the decode really
-    holds 60k rectangles - well over the 1 MiB budget the review's
-    memory test used."""
+def build_dense_oas(path, dbu=0.00005, count=60000, extent_um=2000.0,
+                    cells=4):
+    """`count` rectangles at pseudo-random positions and sizes (a
+    deterministic LCG) spread over `cells` child cells of TOP: nothing
+    regular enough for the OASIS writer or the indexer to fold into
+    repetitions, so the decode really holds 60k rectangles - well over
+    the 1 MiB budget the review's memory test used - and the index has
+    several pages, so a budget-capped pass has pages left to defer."""
     import klayout.db as db
     ly = db.Layout()
     ly.dbu = dbu
@@ -248,18 +250,21 @@ def build_dense_oas(path, dbu=0.00005, count=60000, extent_um=2000.0):
     li = ly.layer(1, 0)
     unit = int(round(1.0 / dbu))
     span = int(round(extent_um * unit))
-    shapes = top.shapes(li)
     state = 0x2545F491
     def rnd():
         nonlocal state
         state = (state * 1103515245 + 12345) & 0x7fffffff
         return state
-    for _ in range(count):
-        x = rnd() % span
-        y = rnd() % span
-        w = unit + rnd() % (3 * unit)
-        h = unit + rnd() % (3 * unit)
-        shapes.insert(db.Box(x, y, x + w, y + h))
+    for c in range(cells):
+        kid = ly.create_cell("D%d" % c)
+        shapes = kid.shapes(li)
+        for _ in range(count // cells):
+            x = rnd() % span
+            y = rnd() % span
+            w = unit + rnd() % (3 * unit)
+            h = unit + rnd() % (3 * unit)
+            shapes.insert(db.Box(x, y, x + w, y + h))
+        top.insert(db.CellInstArray(kid.cell_index(), db.Trans()))
     ly.write(str(path))
 
 
@@ -644,7 +649,7 @@ _GEN = itertools.count(1)
 
 
 def _render_raw(worker, bbox_dbu, width, height, visible=None,
-                depth=None, cut_px=0.0, frames=False):
+                depth=None, cut_px=0.0, frames=False, with_result=False):
     """One settled raw frame through a started worker: RGBA bytes.
     Generations must increase per daemon: a repeated one is dropped."""
     gen = next(_GEN)
@@ -672,7 +677,7 @@ def _render_raw(worker, bbox_dbu, width, height, visible=None,
         rgba = result["rgba"]
         if len(rgba) != width * height * 4:
             raise AssertionError("raw frame size mismatch")
-        return rgba
+        return (rgba, result) if with_result else rgba
 
 
 class CompositeTests(unittest.TestCase):
@@ -1392,7 +1397,10 @@ class ReviewFixTests(unittest.TestCase):
                               str(cm.exception))
             finally:
                 worker.stop()
-            # ... and so is the deck placing it (it used to render)
+            # ... the deck placing it stops the pass at the budget and
+            # draws what fits, saying how many pages it could not decode
+            # (field 2026-09-09: a mid-zoom pass wanted 2 GB and the
+            # refusal left the viewer with an error)
             d = DeckCache(str(CLI / "dense.jb"))
             d.load()
             try:
@@ -1400,28 +1408,30 @@ class ReviewFixTests(unittest.TestCase):
                 worker.start()
                 try:
                     bb = d.meta["bbox"]
-                    with self.assertRaises(AssertionError) as cm:
-                        _render_raw(worker, tuple(bb), 200, 200)
-                    self.assertIn("decoded generation budget exceeded",
-                                  str(cm.exception))
+                    rgba, result = _render_raw(worker, tuple(bb), 200, 200,
+                                               with_result=True)
+                    self.assertGreater(result.get("over_budget_pages", 0), 0)
+                    self.assertFalse(result.get("refining"))
                 finally:
                     worker.stop()
             finally:
                 d.close()
         finally:
             del os.environ["FLOE_RUST_BUDGET_MB"]
-        # with the normal budget both render
+        # with the normal budget the deck renders everything
         c = DeckCache(str(CLI / "dense.jb"))
         c.load()
         try:
             worker = jrender.DeckRenderWorker(c)
             worker.start()
             try:
-                rgba = _render_raw(worker, tuple(c.meta["bbox"]), 200, 200)
+                rgba, result = _render_raw(worker, tuple(c.meta["bbox"]),
+                                           200, 200, with_result=True)
             finally:
                 worker.stop()
         finally:
             c.close()
+        self.assertEqual(result.get("over_budget_pages", 0), 0)
         self.assertTrue(any(rgba[o:o + 3] != b"\0\0\0"
                             for o in range(0, len(rgba), 4)))
 

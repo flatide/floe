@@ -1100,6 +1100,11 @@ class RustRenderWorker:
             output["png"] = payload
         if refining:
             output["refining"] = refining
+        elif deferred:
+            # a settled frame that could not decode everything: the
+            # jobdeck composite stops a pass at the page budget and
+            # draws what fits (the single-cache path refuses instead)
+            output["over_budget_pages"] = deferred
         if self._max_depth is not None:
             # parent-schema parity: the KLayout worker forwards the VFS
             # daemon's max_depth on every frame (gui learns the cap)

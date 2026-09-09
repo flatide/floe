@@ -252,6 +252,33 @@ struct Placed {
     bbox: [f64; 4],
 }
 
+/// Pages decoded per budget check inside one pass, cut by their
+/// encoded size (budget / DECODE_CHUNK_DIV each, one page at least, at
+/// most DECODE_CHUNK_PAGES): a chunk may overshoot the budget by at
+/// most its own decoded size.
+const DECODE_CHUNK_PAGES: usize = 64;
+const DECODE_CHUNK_DIV: u64 = 32;
+
+/// Split the prioritized page list into decode chunks by encoded size.
+fn decode_chunks(cache: &Cache, selected: &[u32], budget_bytes: u64) -> Vec<Vec<u32>> {
+    let limit = (budget_bytes / DECODE_CHUNK_DIV).max(1);
+    let mut chunks: Vec<Vec<u32>> = Vec::new();
+    let mut chunk: Vec<u32> = Vec::new();
+    let mut bytes = 0u64;
+    for &page_id in selected {
+        chunk.push(page_id);
+        bytes = bytes.saturating_add(cache.page_encoded_bytes(page_id));
+        if bytes >= limit || chunk.len() >= DECODE_CHUNK_PAGES {
+            chunks.push(std::mem::take(&mut chunk));
+            bytes = 0;
+        }
+    }
+    if !chunk.is_empty() {
+        chunks.push(chunk);
+    }
+    chunks
+}
+
 /// An opened deck: caches, per-source decoded-page LRUs under one
 /// budget, and the resolved placements in paint order.
 pub struct Deck {
@@ -306,6 +333,9 @@ pub struct DeckRenderReport {
     pub pages: u32,
     pub plan_pages: u32,
     pub partial: bool,
+    /// Pages the passes left undecoded because the budget was reached
+    /// (field 2026-09-09: a mid-zoom pass wanted 2 GB against 1 GiB).
+    pub deferred: u32,
     pub resident_bytes: u64,
     pub rectangle_member_paints: u64,
     pub polygon_member_paints: u64,
@@ -513,6 +543,7 @@ impl Deck {
         let mut pages = 0u32;
         let mut plan_pages = 0u32;
         let mut partial = false;
+        let mut deferred = 0u32;
         let mut rectangle_member_paints = 0u64;
         let mut polygon_member_paints = 0u64;
         let mut path_member_paints = 0u64;
@@ -584,32 +615,41 @@ impl Deck {
                 .take(request.decode_pages.unwrap_or(usize::MAX))
                 .map(|(_, page_id)| page_id)
                 .collect();
-            let (decoded, decode_stats) = source.pages.load_cancellable(
-                &source.cache,
-                &selected,
-                request.decode_workers,
-                generation,
-                cancellation,
-            )?;
-            accumulate_decode(&mut stats, &decode_stats);
             // Review 2026-09-09 P1-2: the scene's Arcs keep every page
             // of this pass alive whatever the LRU evicted, so one pass
-            // is charged against the shared budget exactly as the
-            // single-cache path charges a generation (renderd
-            // checked_generation_bytes) - a deck must not decode past
-            // the budget where a plain layout is refused.
-            let pass_bytes = decoded.iter().try_fold(0u64, |total, page| {
-                total
-                    .checked_add(page.estimated_bytes())
-                    .ok_or_else(|| "decoded generation byte charge overflow".to_string())
-            })?;
-            if pass_bytes > self.budget_bytes {
-                return Err(format!(
-                    "decoded generation budget exceeded: {pass_bytes} > {} bytes (placement {} of source {})",
-                    self.budget_bytes,
-                    self.placements[placed_index].spec.index,
-                    self.source_paths[source_index]
-                ));
+            // is charged against the shared budget like a single-cache
+            // generation. Field 2026-09-09: refusing the frame outright
+            // ("2040099526 > 1073741824 bytes") left the viewer with an
+            // error at a mid zoom; instead the pass decodes its pages
+            // in priority order, chunk by chunk, and STOPS at the
+            // budget - the frame is drawn from what fits and reports
+            // the rest as deferred (partial), memory stays bounded.
+            let mut decoded = Vec::with_capacity(selected.len());
+            let mut pass_bytes = 0u64;
+            let mut over = false;
+            for chunk in decode_chunks(&source.cache, &selected, self.budget_bytes) {
+                if over {
+                    deferred = deferred.saturating_add(chunk.len() as u32);
+                    continue;
+                }
+                let (chunk_pages, decode_stats) = source.pages.load_cancellable(
+                    &source.cache,
+                    &chunk,
+                    request.decode_workers,
+                    generation,
+                    cancellation,
+                )?;
+                accumulate_decode(&mut stats, &decode_stats);
+                for page in chunk_pages {
+                    pass_bytes = pass_bytes
+                        .checked_add(page.estimated_bytes())
+                        .ok_or_else(|| "decoded generation byte charge overflow".to_string())?;
+                    decoded.push(page);
+                }
+                if pass_bytes >= self.budget_bytes {
+                    over = true;
+                }
+                check_generation(cancellation, generation)?;
             }
             pass_bytes_max = pass_bytes_max.max(pass_bytes);
             let scene = FrameScene::new_shared(&source.cache, Arc::new(planned.plan), decoded)?;
@@ -676,6 +716,7 @@ impl Deck {
             pages,
             plan_pages,
             partial,
+            deferred,
             resident_bytes: self.resident_bytes(),
             rectangle_member_paints,
             polygon_member_paints,

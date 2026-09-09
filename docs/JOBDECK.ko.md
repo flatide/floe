@@ -340,6 +340,16 @@ RENDERD_VERSION 0.12.62, `__version__` 0.12.73.
 
 `__version__` 0.12.75 (Python·gate만; renderd 0.12.62 유지).
 
+### 현장 2026-09-09: 확대 시 `decoded generation budget exceeded: 2040099526 > 1073741824`
+
+리뷰 P1-2로 넣은 패스별 예산 검사가 실칩 중간 배율에서 프레임 자체를 거부했다.
+이제 패스는 페이지를 **우선순위 순으로 32개씩 디코드하며 예산에 닿으면 멈추고**,
+디코드된 페이지로 프레임을 그린다(`partial=1 deferred=N`, 메모리 상한 유지).
+어댑터는 settled 프레임의 `deferred`를 `over_budget_pages`로 올리고 상태줄에
+`N pages over budget (not drawn)`으로 표시한다. 단일 캐시 경로는 종전대로 거부한다.
+RENDERD_VERSION 0.12.64. 근본 해결(뷰 수준 LOD/wash가 덱 패스에도 같은 강도로
+걸리는지, 페이지 우선순위가 화면 기여도 순인지)은 실칩 측정 뒤 §10.
+
 ### 현장 2026-09-09: 누락 소스 3개 때문에 인덱싱 완료된 덱이 열리지 않음
 
 `deck_ready`/`DeckCache.unindexed()`가 누락·읽기불가 소스도 "인덱스 없음"으로 세어

@@ -3310,6 +3310,9 @@ class Viewer:
                             fmt_count(res.get("subtrees_pruned", 0)))
                     if res.get("labels_truncated"):
                         text += ", labels partial"
+                    if res.get("over_budget_pages"):
+                        text += ", %d pages over budget (not drawn)" % (
+                            res["over_budget_pages"])
                     # tiles = plan total (resident pages included);
                     # +new = pages actually shipped for this view
                     # (cache misses, summed over its stream rounds)

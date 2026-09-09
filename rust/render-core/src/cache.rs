@@ -229,6 +229,16 @@ impl Cache {
             .collect()
     }
 
+    /// Encoded (stored) size of one page - what a decode of it will
+    /// cost, roughly, before it is decoded (the deck's budget-aware
+    /// decode chunking).
+    pub fn page_encoded_bytes(&self, page_id: u32) -> u64 {
+        if page_id >= self.vfs.ovm.n_pages {
+            return 0;
+        }
+        self.vfs.ovm.page(page_id).usize_ as u64
+    }
+
     /// Original design-cell name for query/pick provenance.
     pub fn cell_name(&self, cell_id: u32) -> Result<String, String> {
         if cell_id >= self.vfs.ovm.n_cells {
