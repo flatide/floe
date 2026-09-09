@@ -1105,6 +1105,21 @@ class RustRenderWorker:
             # jobdeck composite stops a pass at the page budget and
             # draws what fits (the single-cache path refuses instead)
             output["over_budget_pages"] = deferred
+        if "passes" in fields:
+            # jobdeck composite counters (analysis 2026-09-09: the
+            # per-placement loop's cost was invisible in the line)
+            output["deck"] = {
+                "passes": _wire_int(fields, "passes"),
+                "passes_skipped": _wire_int(fields, "passes_skipped"),
+                "frame_passes": _wire_int(fields, "frame_passes"),
+                "unique_pages": _wire_int(fields, "unique_pages"),
+                "pages_summed": _wire_int(fields, "pages"),
+                "pass_bytes_max": _wire_int(fields, "pass_bytes_max"),
+                "scene_us": _wire_int(fields, "scene_us"),
+                "frame_raster_us": _wire_int(fields, "frame_raster_us"),
+                "composite_us": _wire_int(fields, "composite_us"),
+                "over_budget_pages": deferred,
+            }
         if self._max_depth is not None:
             # parent-schema parity: the KLayout worker forwards the VFS
             # daemon's max_depth on every frame (gui learns the cap)

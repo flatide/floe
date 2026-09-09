@@ -1352,7 +1352,7 @@ class ReviewFixTests(unittest.TestCase):
                       res.stdout)
         self.assertIn("WARNING: 1 jobdeck placement(s) not drawn",
                       res.stdout)
-        self.assertIn("rendered with 1 jobdeck placement(s) missing",
+        self.assertIn("rendered incomplete - 1 jobdeck placement(s) missing",
                       res.stderr)
         self.assertTrue(out.is_file(), "the partial PNG is still written")
         doc = json.loads(rep.read_text())
@@ -1757,6 +1757,75 @@ class ReviewFixTests3(unittest.TestCase):
             self.assertEqual(c.resolve_layers("CHIP D"), [(1, 0), (1, 1)])
         finally:
             c.close()
+
+
+class PerfAnalysisTests(unittest.TestCase):
+    """Analysis 2026-09-09 step 1 (pixel-neutral): empty frame passes
+    are skipped, the deck's per-pass costs are reported, and a capture
+    that stopped at the page budget is never a complete result."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.env = {"FLOE_INDEX_BIN": str(ROOT / "rust" / "target" /
+                                         "release" / "floe-index"),
+                   "FLOE_RENDERD_BIN": str(ROOT / "rust" / "target" /
+                                           "release" / "floe-renderd")}
+        os.environ["FLOE_RENDERD_BIN"] = cls.env["FLOE_RENDERD_BIN"]
+        for deck in ("test.jb", "hier.jb", "dense.jb"):
+            run_floe2("index", CLI / deck, "--jobs", "2", env=cls.env, ok=0)
+
+    def _deck_counters(self, deck, depth, frames):
+        from floe.jobdeck.viewer import DeckCache
+        c = DeckCache(str(CLI / deck))
+        c.load()
+        try:
+            worker = jrender.DeckRenderWorker(c)
+            worker.start()
+            try:
+                _, result = _render_raw(worker, tuple(c.meta["bbox"]), 200,
+                                        200, depth=depth, frames=frames,
+                                        with_result=True)
+            finally:
+                worker.stop()
+        finally:
+            c.close()
+        return result["deck"]
+
+    def test_frame_passes_only_where_frames_exist(self):
+        flat = self._deck_counters("test.jb", 0, True)
+        self.assertEqual(flat["passes"], 17)
+        self.assertEqual(flat["frame_passes"], 0,
+                         "flat sources have no hierarchy frame to raster")
+        # 17 passes over three one-page caches: the summed count is
+        # per pass, the unique count is what was really decoded
+        # (pages are per cell and layer: the 17 passes share a handful)
+        self.assertGreater(flat["pages_summed"], flat["unique_pages"])
+        self.assertGreaterEqual(flat["unique_pages"], 3)
+        self.assertGreater(flat["pass_bytes_max"], 0)
+        hier = self._deck_counters("hier.jb", 0, True)
+        self.assertEqual(hier["frame_passes"], 1)
+        off = self._deck_counters("hier.jb", 0, False)
+        self.assertEqual(off["frame_passes"], 0)
+
+    def test_over_budget_capture_is_incomplete(self):
+        out = CLI / "dense-budget.png"
+        rep = CLI / "dense-budget.json"
+        res = run_floe2("render", CLI / "dense.jb", "--px", "120", "--out",
+                        out, "--report", rep,
+                        env=dict(self.env, FLOE_RUST_BUDGET_MB="1"), ok=3)
+        self.assertIn("stopped at the page budget", res.stdout)
+        self.assertIn("over the decode budget", res.stderr)
+        doc = json.loads(rep.read_text())
+        self.assertFalse(doc["complete"])
+        self.assertFalse(doc["jobdeck"]["complete"])
+        self.assertGreater(doc["shots"][0]["over_budget_pages"], 0)
+        self.assertFalse(doc["shots"][0]["complete"])
+        # the default budget: complete, exit 0
+        res = run_floe2("render", CLI / "dense.jb", "--px", "120", "--out",
+                        out, "--report", rep, env=self.env, ok=0)
+        doc = json.loads(rep.read_text())
+        self.assertTrue(doc["complete"])
+        self.assertEqual(doc["shots"][0]["over_budget_pages"], 0)
 
 
 class KLayoutOracleTests(unittest.TestCase):

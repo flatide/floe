@@ -344,6 +344,16 @@ pub struct DeckRenderReport {
     /// Largest one-pass decoded working set (bytes) - the deck's
     /// counterpart of the single-cache generation charge.
     pub pass_bytes_max: u64,
+    /// Frames-only passes actually rastered (a plan without hierarchy
+    /// frames skips its pass; analysis 2026-09-09).
+    pub frame_passes: u32,
+    /// Distinct pages decoded this frame vs the per-pass sum `pages`.
+    pub unique_pages: u32,
+    /// Time in scene assembly, frame-pass rasters and the overlay /
+    /// final layering - the phases the frame line used to hide.
+    pub scene_us: u64,
+    pub frame_raster_us: u64,
+    pub composite_us: u64,
 }
 
 impl Deck {
@@ -549,6 +559,11 @@ impl Deck {
         let mut path_member_paints = 0u64;
         let mut frame_member_paints = 0u64;
         let mut pass_bytes_max = 0u64;
+        let mut frame_passes = 0u32;
+        let mut unique_pages: BTreeSet<(usize, u32)> = BTreeSet::new();
+        let mut scene_us = 0u64;
+        let mut frame_raster_us = 0u64;
+        let mut composite_us = 0u64;
         let view = [request.view.x0, request.view.y0, request.view.x1, request.view.y1];
         for placed_index in 0..self.placements.len() {
             let (out, source_index) = {
@@ -652,7 +667,12 @@ impl Deck {
                 check_generation(cancellation, generation)?;
             }
             pass_bytes_max = pass_bytes_max.max(pass_bytes);
+            for page in &decoded {
+                unique_pages.insert((source_index, page.page_id));
+            }
+            let scene_started = std::time::Instant::now();
             let scene = FrameScene::new_shared(&source.cache, Arc::new(planned.plan), decoded)?;
+            scene_us = scene_us.saturating_add(scene_started.elapsed().as_micros() as u64);
             partial |= scene.is_partial();
             pages = pages.saturating_add(scene.available_pages().try_into().unwrap_or(u32::MAX));
             check_generation(cancellation, generation)?;
@@ -665,7 +685,14 @@ impl Deck {
                 workers: request.workers,
                 tile_size: request.tile_size,
             };
-            if let (Some(under), Some(over)) = (frames_under.as_mut(), frames_over.as_mut()) {
+            // a frames-only pass only when this placement's plan holds
+            // a hierarchy frame at all (analysis 2026-09-09: the pass
+            // ran, and composited a full frame, for every placement)
+            if let (Some(under), Some(over), true) = (
+                frames_under.as_mut(),
+                frames_over.as_mut(),
+                scene.subtree_has_frames(scene.top()),
+            ) {
                 let frames_only = StyledGeometryRasterRequest {
                     raster,
                     layers: Vec::new(),
@@ -674,9 +701,13 @@ impl Deck {
                 };
                 let report =
                     render_geometry_styled_cancellable(&scene, &frames_only, generation, cancellation)?;
+                frame_raster_us = frame_raster_us.saturating_add(report.stats.raster_us);
+                let split_started = std::time::Instant::now();
                 split_frame_planes(report.frame.pixels(), under, over);
+                composite_us = composite_us.saturating_add(split_started.elapsed().as_micros() as u64);
                 accumulate_raster(&mut stats, &report.stats);
                 frame_member_paints = frame_member_paints.saturating_add(report.frame_member_paints);
+                frame_passes += 1;
                 check_generation(cancellation, generation)?;
             }
             let styled = StyledGeometryRasterRequest {
@@ -686,7 +717,9 @@ impl Deck {
                 mono: request.mono,
             };
             let report = render_geometry_styled_cancellable(&scene, &styled, generation, cancellation)?;
+            let overlay_started = std::time::Instant::now();
             overlay(&mut composite, report.frame.pixels());
+            composite_us = composite_us.saturating_add(overlay_started.elapsed().as_micros() as u64);
             accumulate_raster(&mut stats, &report.stats);
             rectangle_member_paints =
                 rectangle_member_paints.saturating_add(report.rectangle_member_paints);
@@ -697,6 +730,7 @@ impl Deck {
         // opaque black ground, then (with frames) the gray bands of every
         // placement UNDER all geometry and the white band of every
         // placement OVER it
+        let layering_started = std::time::Instant::now();
         let mut layered = vec![0u8; byte_len];
         for pixel in layered.chunks_exact_mut(4) {
             pixel[3] = 255;
@@ -708,6 +742,7 @@ impl Deck {
         if let Some(over) = frames_over.as_ref() {
             overlay(&mut layered, over);
         }
+        composite_us = composite_us.saturating_add(layering_started.elapsed().as_micros() as u64);
         Ok(DeckRenderReport {
             frame: RgbaFrame::from_pixels(request.width, request.height, layered)?,
             stats,
@@ -723,6 +758,11 @@ impl Deck {
             path_member_paints,
             frame_member_paints,
             pass_bytes_max,
+            frame_passes,
+            unique_pages: unique_pages.len().try_into().unwrap_or(u32::MAX),
+            scene_us,
+            frame_raster_us,
+            composite_us,
         })
     }
 }

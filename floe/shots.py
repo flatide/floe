@@ -436,6 +436,7 @@ class ShotRunner:
         self.timeout_s = timeout_s
         self.worker = make_render_worker(cache)
         self._gen = 0
+        self.over_budget_pages = 0
         self.worker.start()
         # archival output keeps solid fills: the viewer's speckle is a
         # live-view presentation choice (as `floe render` always did)
@@ -486,6 +487,10 @@ class ShotRunner:
                 if not data.startswith(b"\x89PNG\r\n\x1a\n"):
                     raise RuntimeError("render service returned an "
                                        "invalid PNG")
+            # analysis 2026-09-09: a capture that stopped at the page
+            # budget is not a complete image; the caller records it
+            self.over_budget_pages = int(result.get("over_budget_pages", 0)
+                                         or 0)
             return data, result
 
 
@@ -517,11 +522,13 @@ def run_shots(cache, shots, out, report=None, frames=False, labels=False,
             boxes, (w, h) = shot.tile_boxes(default_box)
             row = {"name": shot.name, "out": path, "pixel": [w, h],
                    "layers": shot.layers, "depth": shot.depth}
+            over_budget = 0
             if shot.is_mosaic:
                 tiles = []
                 for box in boxes:
                     rgba, _ = runner.capture(box, w, h, layers, shot.depth,
                                              fmt="raw")
+                    over_budget += runner.over_budget_pages
                     tiles.append(rgba)
                 canvas, info = compose_mosaic(tiles, w, h, shot.line,
                                               shot.line_color)
@@ -539,9 +546,15 @@ def run_shots(cache, shots, out, report=None, frames=False, labels=False,
                             "pixel": [info["width"], info["height"]]})
             else:
                 png, _ = runner.capture(boxes[0], w, h, layers, shot.depth)
+                over_budget += runner.over_budget_pages
                 _write_atomic(path, png)
                 row["bbox_um"] = list(boxes[0])
             row["ms"] = round((time.perf_counter() - t0) * 1000)
+            row["over_budget_pages"] = over_budget
+            row["complete"] = over_budget == 0
+            if over_budget and log:
+                log("[floe] WARNING: %s stopped at the page budget: %d "
+                    "page(s) not drawn" % (path, over_budget))
             rows.append(row)
             if log:
                 if shot.is_mosaic:
@@ -567,9 +580,13 @@ def run_shots(cache, shots, out, report=None, frames=False, labels=False,
                                        r["reason"]) for r in skipped[:5])
                + (" ..." if len(skipped) > 5 else "")))
     if report:
-        doc = {"source": cache.src, "dbu": dbu, "shots": rows}
+        doc = {"source": cache.src, "dbu": dbu, "shots": rows,
+               "complete": not skipped and all(r["complete"] for r in rows)}
         if cache.meta.get("jobdeck"):
-            doc["jobdeck"] = {"complete": not skipped, "skipped": skipped,
+            doc["jobdeck"] = {"complete": doc["complete"],
+                              "skipped": skipped,
+                              "over_budget_pages": sum(
+                                  r["over_budget_pages"] for r in rows),
                               "view": cache.meta["jobdeck"].get("mode")}
         with open(report, "w") as fh:
             json.dump(doc, fh, indent=1)

@@ -368,6 +368,47 @@ INCOMPLETE)로 보고하며 덱은 열린다. 인덱싱이 일부 실패해도 �
 같이 고친 것: 뷰어의 인덱싱 모달 로그가 실패·취소 시 바로 닫히지 않고
 `close` 버튼으로 남아 오류 메시지를 읽을 수 있다. RENDERD_VERSION 0.12.63.
 
+## 11. 성능 분석 2026-09-09 — 판정과 계획
+
+리뷰어의 분석(광역뷰 누락 = cut 정책, 다중 level 지연 = 배치별 전체 화면 반복,
+budget = 패스별 디코드 보유)을 코드와 대조했다. 모두 사실이다.
+
+| 주장 | 판정 | 근거 |
+|---|---|---|
+| detail high도 1px cut이며 no-cut이 아니다 | 사실 | `DETAIL_PX = (5, 3, 1)` |
+| 페이지 크기 cull이 wash보다 앞서 적용돼 작은 도형의 넓은 반복이 통째로 사라진다 | 사실 | `hier.rs` 페이지 `max_w/max_h < cut` cull, BVH `max_dim < cut` prune; 1×1 dbu 500×500 반복이 high에서 0px |
+| 배치마다 전체 화면 plan→scene→raster→합성을 반복하고, 프레임이 없어도 프레임 패스를 돈다 | 사실 | `deck.rs` 배치 루프; 프레임 패스는 무조건 실행이었음 |
+| `10008tiles`는 누적 작업량이며 병목은 로딩이 아니라 반복 | 사실 | 합성 fixture: 6 level ON 385 ms / 1 level OFF 38 ms, 픽셀 동일 |
+| 응답의 `scene_us=0`·합성 시간 미계측으로 ~457 ms가 설명되지 않는다 | 사실 | 프레임 줄이 단일 캐시 필드를 0으로 채움 |
+| budget 상한은 한 배치 패스에서도 넘을 수 있고, 최신 변경은 오류 대신 partial을 남기지만 완전한 화면을 보장하지 않으며 스크린샷·보고서는 그 partial을 버린다 | 사실 | `deck.rs` 청크 디코드; `shots.py`는 `refining`만 봄 |
+
+### 1단계 — 픽셀을 바꾸지 않는 것 (이 커밋, RENDERD 0.12.65)
+- 프레임 패스는 그 배치의 plan에 계층 프레임이 있을 때만(`subtree_has_frames`).
+- 계측: 프레임 줄에 `scene_us`(실측), `frame_passes`, `unique_pages`(합산 `pages`와
+  별도), `pass_bytes_max`, `frame_raster_us`, `composite_us`(overlay+최종 layering);
+  어댑터는 `result["deck"]`으로 올리고 상태줄에 `deck N passes (F frame, S
+  skipped) U/P pages, scene+frame+composite ms, pass max MB`.
+- 스크린샷: 캡처의 `over_budget_pages`를 shot 행과 보고서(`complete`,
+  `jobdeck.over_budget_pages`)에 기록, `floe2 render`는 exit 3.
+- gate `PerfAnalysisTests`.
+
+### 2단계 — 배치별 전체 화면 구조 (다음)
+- 배치의 화면상 bbox로 raster·합성 영역을 제한(타일 단위 컬링; 픽셀 불변).
+- 화면 타일을 한 번 소유하고 기여 배치·레이어를 순서대로 처리; 같은 소스·같은
+  변환의 plan/scene 재사용; 이미지 버퍼·worker pool 재사용.
+- 순서 규칙(레이어, 프레임 앞뒤, 패턴 위상)은 그대로.
+
+### 3단계 — 페이지를 버리지 않는 유한 메모리 렌더
+- 페이지를 일정량씩 디코드해 타일/레이어 마스크에 누적하고 해제(scene 전체 보유
+  금지). outline/fill 순서를 지키는 합성 규칙 설계가 선행.
+
+### 4단계 — jobdeck 전용 광역 표시 정책
+- "작은 멤버 제외"를 덱에 그대로 쓰지 않음; 반복 구조의 화면상 존재를 보존하는
+  방식 검토(coverage/LOD 복구가 아님). cut 전면 해제는 geometry·메모리 비용을
+  같은 뷰·level 조건으로 측정한 뒤 결정.
+
+측정은 실덱의 같은 뷰·같은 level 조건에서 1단계 계측 값으로 한다.
+
 ## 10. 미결·후속
 
 - **배율/임의각 PLACEMENT(OASIS 18)**: 2026-09-09 현재 실제 소스에서 아직 관측되지

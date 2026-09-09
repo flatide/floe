@@ -834,16 +834,18 @@ def _render_shots(args, c):
             except ValueError as exc:
                 raise SystemExit("floe: %s" % exc)
     try:
-        shots_mod.run_shots(c, shots, args.out, report=args.report,
-                            frames=args.frames, labels=args.labels,
-                            label_font_px=args.label_font_px, log=print,
-                            batch=bool(args.batch))
+        rows = shots_mod.run_shots(c, shots, args.out, report=args.report,
+                                   frames=args.frames, labels=args.labels,
+                                   label_font_px=args.label_font_px,
+                                   log=print, batch=bool(args.batch))
     except (RuntimeError, ValueError) as exc:
         raise SystemExit("floe: Rust render service: %s" % exc)
     skipped = _deck_skipped(c)
-    if skipped:
-        print("floe: rendered with %d jobdeck placement(s) missing (see "
-              "'skipped' above)  [exit 3]" % len(skipped), file=sys.stderr)
+    over_budget = sum(r.get("over_budget_pages", 0) for r in rows)
+    if skipped or over_budget:
+        print("floe: rendered incomplete - %d jobdeck placement(s) missing, "
+              "%d page(s) over the decode budget (see above)  [exit 3]"
+              % (len(skipped), over_budget), file=sys.stderr)
         raise SystemExit(3)
 
 

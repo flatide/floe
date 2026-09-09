@@ -3313,6 +3313,18 @@ class Viewer:
                     if res.get("over_budget_pages"):
                         text += ", %d pages over budget (not drawn)" % (
                             res["over_budget_pages"])
+                    if res.get("deck"):
+                        d = res["deck"]
+                        text += (", deck %d passes (%d frame, %d skipped) "
+                                 "%d/%d pages, scene %d + frame %d + "
+                                 "composite %d ms, pass max %dMB" % (
+                                     d["passes"], d["frame_passes"],
+                                     d["passes_skipped"], d["unique_pages"],
+                                     d["pages_summed"],
+                                     round(d["scene_us"] / 1000),
+                                     round(d["frame_raster_us"] / 1000),
+                                     round(d["composite_us"] / 1000),
+                                     round(d["pass_bytes_max"] / 1e6)))
                     # tiles = plan total (resident pages included);
                     # +new = pages actually shipped for this view
                     # (cache misses, summed over its stream rounds)
