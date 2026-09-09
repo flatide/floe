@@ -2102,6 +2102,43 @@ class ReviewFixTests5(unittest.TestCase):
         self.assertEqual(_lit(full), 73 * 73)
         self.assertEqual(sub, full, "the sub-window path draws the same")
 
+    def test_p2_4_offscreen_placement_does_not_fail_the_frame(self):
+        # Review 2026-09-09 (6th): chipB placed normally plus the same
+        # source at dx = 1e16, scale 0.001 - outside the frame. The
+        # off-screen placement's source view (-1e19 dbu) overflowed the
+        # integer conversion and the whole frame failed with
+        # "coordinate overflow: source view x0"; it must be an empty
+        # pass, and the frame equals the deck without it.
+        hexs = lambda t: t.encode().hex()
+        cache = str(CLI / "chipB.oas.floe")
+        head = ("deck unit=1e-06\n"
+                "source path_hex=%s\n"
+                "layer out=0 name_hex=%s color=#ffffff fill=solid width=1\n"
+                "placement source=0 layer=7/2 out=0 scale=0.05 dx=0 dy=0 "
+                "order=0\n" % (hexs(cache), hexs("$1 X")))
+        extra = ("placement source=0 layer=7/2 out=0 scale=0.001 "
+                 "dx=1e16 dy=1e16 order=1\n")
+        layers = [{"layer": 0, "datatype": 0, "name": "$1 X",
+                   "color": "#ffffff", "stored_shapes": 2,
+                   "jobdeck_head": False}]
+        # chipB's 7/2 box (2e6..1.8e7 dbu) at scale 0.05 is deck
+        # 1e5..9e5: the view holds the whole placement
+        view = (-1e5, -1e5, 1.1e6, 1.1e6)
+        frames = []
+        for name, text in (("plain.spec", head),
+                           ("offscreen.spec", head + extra)):
+            spec = CLI / name
+            spec.write_text(text)
+            shim = jrender._DeckCacheShim(str(spec), str(CLI / "test.jb"),
+                                          1e-6, layers)
+            rgba, result = self._render(shim, view, (300, 300), {})
+            frames.append((rgba, result["deck"]))
+        (plain, d0), (with_extra, d1) = frames
+        self.assertGreater(_lit(plain), 0)
+        self.assertEqual(with_extra, plain)
+        self.assertEqual((d0["passes"], d0["passes_skipped"]), (1, 0))
+        self.assertEqual((d1["passes"], d1["passes_skipped"]), (1, 1))
+
     def test_p2_3_wall_clock_and_pass_parallelism(self):
         c = self._deck()
         bb = tuple(c.meta["bbox"])

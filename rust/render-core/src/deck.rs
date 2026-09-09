@@ -710,25 +710,27 @@ impl Deck {
                 }
             };
             let source_view = source_view(&request.view, &self.placements[placed_index].spec)?;
-            let mut plan_request = source_plan_request(
+            // the plan view is the source view clipped to the source's
+            // own bounds (in f64, BEFORE any integer conversion - review
+            // 2026-09-09 (6th): a placement far outside the frame, dx =
+            // 1e16, overflowed i64 in its source view and failed the
+            // whole frame; the plan clip is also the exact source-space
+            // cull that replaced the deck-space one). Pages and cells
+            // are selected by intersection, so two placements showing
+            // the whole source ask the planner the same question - and
+            // share its answer (scene reuse below).
+            let plan_request = match source_plan_request(
                 &source_view,
                 request,
                 &self.placements[placed_index].spec,
-            )?;
-            // the plan view clipped to the source's own bounds: pages
-            // and cells are selected by intersection, so two placements
-            // showing the whole source ask the planner the same
-            // question - and share its answer (scene reuse below)
-            {
-                let b = &self.sources[source_index].top_bbox;
-                let v = plan_request.view;
-                let (x0, y0, x1, y1) = (v.x0.max(b.x0), v.y0.max(b.y0), v.x1.min(b.x1), v.y1.min(b.y1));
-                if x0 > x1 || y0 > y1 {
+                &self.sources[source_index].top_bbox,
+            )? {
+                Some(plan_request) => plan_request,
+                None => {
                     passes_skipped += 1;
                     continue;
                 }
-                plan_request.view = ViewBox::new(x0, y0, x1, y1)?;
-            }
+            };
             // the device sub-window this placement can touch (step 2):
             // the raster and the overlays run on it alone; the plan
             // keeps the whole source view so page selection is
@@ -1241,11 +1243,30 @@ fn source_view_of(view: &RasterViewBox, placement: &DeckPlacement) -> Result<Ras
     )
 }
 
+/// The plan request of a placement: None when its source view misses
+/// the source's bounds (`top_bbox`, source dbu) - decided in f64 on
+/// the whole-dbu view, so no coordinate is converted to an integer
+/// before it is known to lie inside the source's (i64) bounds.
 fn source_plan_request(
     source_view: &RasterViewBox,
     request: &DeckRenderRequest,
     placement: &DeckPlacement,
-) -> Result<PlanRequest, String> {
+    top_bbox: &BBox,
+) -> Result<Option<PlanRequest>, String> {
+    if top_bbox.is_empty() {
+        return Ok(None);
+    }
+    let (x0, y0) = (source_view.x0.floor(), source_view.y0.floor());
+    let (x1, y1) = (source_view.x1.ceil(), source_view.y1.ceil());
+    if !(x0 <= x1 && y0 <= y1) {
+        return Ok(None);
+    }
+    let (bx0, by0, bx1, by1) = (top_bbox.x0 as f64, top_bbox.y0 as f64, top_bbox.x1 as f64, top_bbox.y1 as f64);
+    // strict misses only: a view edge that rounds onto the bound stays
+    if x1 < bx0 || x0 > bx1 || y1 < by0 || y0 > by1 {
+        return Ok(None);
+    }
+    let (x0, y0, x1, y1) = (x0.max(bx0), y0.max(by0), x1.min(bx1), y1.min(by1));
     // the source span from the DECK span divided once: every placement
     // of one scale gets the same px_per_dbu (and cut), so their plan
     // requests compare equal for the frame's scene reuse - a
@@ -1266,10 +1287,10 @@ fn source_plan_request(
     };
     let plan = PlanRequest {
         view: ViewBox::new(
-            checked_bound(source_view.x0.floor(), "source view x0")?,
-            checked_bound(source_view.y0.floor(), "source view y0")?,
-            checked_bound(source_view.x1.ceil(), "source view x1")?,
-            checked_bound(source_view.y1.ceil(), "source view y1")?,
+            checked_bound(x0, "source view x0")?.max(top_bbox.x0),
+            checked_bound(y0, "source view y0")?.max(top_bbox.y0),
+            checked_bound(x1, "source view x1")?.min(top_bbox.x1),
+            checked_bound(y1, "source view y1")?.min(top_bbox.y1),
         )?,
         cut_dbu,
         visible_layers: Some(vec![format!("{}/{}", placement.layer, placement.datatype)]),
@@ -1278,7 +1299,7 @@ fn source_plan_request(
         exact: request.exact,
     };
     plan.validate()?;
-    Ok(plan)
+    Ok(Some(plan))
 }
 
 fn checked_bound(value: f64, name: &str) -> Result<i64, String> {
@@ -1526,12 +1547,51 @@ mod tests {
         };
         let p = placement(4.0, 0.0, 0.0);
         let sv = source_view(&request.view, &p).unwrap();
-        let plan = source_plan_request(&sv, &request, &p).unwrap();
+        let big = bbox(-1000, -1000, 1000, 1000);
+        let plan = source_plan_request(&sv, &request, &p, &big).unwrap().unwrap();
         // 400 px over 200 source dbu: 2 px per source dbu, 0.5 deck-dbu per px
         assert_eq!(plan.px_per_dbu, 2.0);
         assert_eq!(plan.cut_dbu, 1);
         assert_eq!(plan.visible_layers, Some(vec!["1/0".to_string()]));
         assert_eq!((plan.view.x0, plan.view.y0, plan.view.x1, plan.view.y1), (0, 0, 200, 100));
+        // clipped to the source bounds
+        let plan = source_plan_request(&sv, &request, &p, &bbox(50, 20, 300, 300)).unwrap().unwrap();
+        assert_eq!((plan.view.x0, plan.view.y0, plan.view.x1, plan.view.y1), (50, 20, 200, 100));
+        // a view edge on the bound is still an intersection
+        assert!(source_plan_request(&sv, &request, &p, &bbox(200, 100, 300, 300)).unwrap().is_some());
+        // beside the source: no plan
+        assert!(source_plan_request(&sv, &request, &p, &bbox(201, 0, 300, 300)).unwrap().is_none());
+        assert!(source_plan_request(&sv, &request, &p, &BBox::EMPTY).unwrap().is_none());
+    }
+
+    #[test]
+    fn offscreen_placement_at_a_huge_offset_is_skipped_not_an_error() {
+        // Review 2026-09-09 (6th): a placement at dx = 1e16, scale 0.001
+        // seen from a view near the origin has the source view
+        // -1e19 .. -1e19, beyond i64 - it used to overflow the integer
+        // conversion and fail the WHOLE frame. It misses the source's
+        // bounds, decided in f64: an empty pass.
+        let request = DeckRenderRequest {
+            view: RasterViewBox::new(0.0, 0.0, 800.0, 400.0).unwrap(),
+            width: 400,
+            height: 200,
+            depth: u32::MAX,
+            cut_px: 1.0,
+            exact: false,
+            visible: None,
+            frames: false,
+            mono: false,
+            subwindow: true,
+            workers: 1,
+            decode_workers: 1,
+            tile_size: 64,
+            decode_pages: None,
+        };
+        let p = placement(0.001, 1e16, 1e16);
+        let sv = source_view(&request.view, &p).unwrap();
+        assert!(sv.x0 < i64::MIN as f64);
+        let plan = source_plan_request(&sv, &request, &p, &bbox(0, 0, 20_000_000, 20_000_000)).unwrap();
+        assert!(plan.is_none());
     }
 
     #[test]
