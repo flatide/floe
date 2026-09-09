@@ -1916,14 +1916,16 @@ class Viewer:
             # a jobdeck (docs/JOBDECK.ko.md M3): every source's
             # <src>.floe must exist; renderd composites them
             from .jobdeck.viewer import DeckCache
+            # sources without a cache (an index that failed, a
+            # container floe-index cannot read) are skipped placements
+            # the title and status report - never a reason to stay
+            # closed (field 2026-09-09: three missing files kept a
+            # fully indexed deck from opening)
             c = DeckCache(path)
-            missing = c.unindexed()
-            if missing:
-                return ("ERR no VFS cache for %d jobdeck source(s) of %s; "
-                        "run: %s index %s"
-                        % (len(missing), os.path.basename(path), APP,
-                           path))
-            c.load()
+            try:
+                c.load()
+            except ValueError as exc:
+                return "ERR %s; run: %s index %s" % (exc, APP, path)
             # the deck is the thing viewed: full depth, or a source
             # whose shapes live in child cells shows nothing (review
             # 2026-09-09 P1-3)
@@ -4781,10 +4783,13 @@ class Viewer:
                 self._set_live_status(
                     err[4:] if err.startswith("ERR ") else err)
 
+        # a source that failed to index is a skipped placement: open
+        # the deck with the rest (the log stays up with the error)
         self._index_modal("indexing jobdeck sources…",
                           [sys.executable, "-B", "-m", APP, "index", path,
                            "--jobs", "12"],
-                          on_success, "jobdeck indexing")
+                          on_success, "jobdeck indexing",
+                          on_failure=lambda rc: on_success())
 
     def _jobdeck_mode(self):
         """The loaded jobdeck's colour mode, None for a layout."""
@@ -5261,10 +5266,12 @@ class Viewer:
         self.window.present()
         return resp == Gtk.ResponseType.YES
 
-    def _index_modal(self, title, argv, on_success, fail):
+    def _index_modal(self, title, argv, on_success, fail, on_failure=None):
         """Run an indexer subprocess with its log streamed into a
         MODAL dialog (cancel terminates it); call on_success() on a
-        clean exit. Shared by the DRC pack and the VFS index builds."""
+        clean exit, on_failure(rc) on a failed (not cancelled) one - a
+        jobdeck opens with what did index. Shared by the DRC pack and
+        the VFS index builds."""
         import subprocess
         import threading
         dlg = Gtk.Dialog(title=title, transient_for=self.window,
@@ -5325,6 +5332,8 @@ class Viewer:
                 self._set_live_status(
                     "%s cancelled" % fail if state["cancelled"]
                     else "%s failed (rc %d)" % (fail, rc))
+                if not state["cancelled"] and on_failure is not None:
+                    on_failure(rc)
                 return False
             dlg.destroy()
             self.window.present()

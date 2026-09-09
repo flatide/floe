@@ -25,6 +25,10 @@ STATUS_OK = "ok"
 STATUS_MISSING = "missing"
 STATUS_UNREADABLE = "unreadable"
 STATUS_UNKNOWN = "unknown_format"
+# the header is understood but floe-index cannot read the container:
+# GDS and gzip streams (plain OASIS only, 2026-09-09) - a skipped
+# placement with its dbu still known, never asked about
+STATUS_UNSUPPORTED = "unsupported"
 
 PROBE_OASIS_HEADER = "oasis-start-record"
 PROBE_GDS_HEADER = "gds-units-record"
@@ -209,6 +213,11 @@ class SourceCatalog:
                     info.dbu, info.version = dbu, version
                     info.probe = (PROBE_OASIS_HEADER if fmt == FORMAT_OASIS
                                   else PROBE_GDS_HEADER)
+                    if fmt != FORMAT_OASIS or gz:
+                        info.status = STATUS_UNSUPPORTED
+                        info.error = ("floe-index reads plain OASIS only "
+                                      "(%s%s)" % (fmt, ", gzip" if gz
+                                                   else ""))
                 else:
                     info.status = STATUS_UNKNOWN
                     info.error = "no OASIS or GDS header" + \

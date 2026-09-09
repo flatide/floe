@@ -172,7 +172,8 @@ mosaic, `--batch`는 레이아웃(.oas/.gds)에도 그대로 쓰인다.
 
 renderd가 소스 캐시들을 그대로 열어 합성하며(배율은 씬 루트에만), 포맷의
 확정/미확정 사항과 단계별 설계는 `docs/JOBDECK.ko.md`에 있다. 실제 jobdeck과
-마스크 데이터는 저장소에 넣지 않는다 (`jobdecks_klayout/`는 gitignore).
+마스크 데이터는 저장소에 넣지 않는다 (`jobdecks_klayout/`는 gitignore). 덱의 소스는 plain OASIS여야
+한다(GDS·gzip은 `unsupported`로 skip; 누락·읽기불가 소스도 skip으로 보고하고 덱은 열린다).
 
 ### Python/KLayout 레거시 인덱서 (개발 전용)
 

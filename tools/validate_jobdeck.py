@@ -408,13 +408,17 @@ class ProbeTests(unittest.TestCase):
         cat = jd.SourceCatalog(str(TMP))
         cat.probe_all(deck.sources())
         st = {tc: i.status for tc, i in cat.infos.items()}
+        # GDS and gzip containers probe (dbu known) but floe-index
+        # reads plain OASIS only: unsupported, a skipped placement
         self.assertEqual(st, {
-            "chipA.oas": "ok", "chipA.gds": "ok", "chipA.oas.gz": "ok",
-            "chipA.gds.gz": "ok", "junk.bin": "unknown_format",
-            "absent.oas": "missing"})
-        self.assertEqual(sorted(cat.dbus()), [
-            "chipA.gds", "chipA.gds.gz", "chipA.oas", "chipA.oas.gz"])
-        self.assertEqual(sorted(cat.bad()), ["absent.oas", "junk.bin"])
+            "chipA.oas": "ok", "chipA.gds": "unsupported",
+            "chipA.oas.gz": "unsupported", "chipA.gds.gz": "unsupported",
+            "junk.bin": "unknown_format", "absent.oas": "missing"})
+        self.assertAlmostEqual(cat.infos["chipA.gds"].dbu, 5e-05, places=12)
+        self.assertEqual(sorted(cat.dbus()), ["chipA.oas"])
+        self.assertEqual(sorted(cat.bad()), ["absent.oas", "chipA.gds",
+                                             "chipA.gds.gz", "chipA.oas.gz",
+                                             "junk.bin"])
         self.assertFalse(any(i.indexed for i in cat.infos.values()))
 
 
@@ -477,26 +481,24 @@ class PlacementTests(unittest.TestCase):
             jgeom.plan(deck, cat.dbus(), bad=cat.bad())
         pl, st = jgeom.plan(deck, cat.dbus(), missing=jgeom.MISSING_SKIP,
                             bad=cat.bad())
-        self.assertEqual(len(pl), 4)
+        self.assertEqual(len(pl), 1)
         self.assertEqual(st["skip_counts"],
-                         {"missing": 1, "unknown_format": 1})
+                         {"missing": 1, "unknown_format": 1,
+                          "unsupported": 3})
         reasons = {(r["chip"], r["idx"]): r["reason"] for r in st["skipped"]}
-        self.assertEqual(reasons, {("ID001", 6): "unknown_format",
+        self.assertEqual(reasons, {("ID001", 2): "unsupported",
+                                   ("ID001", 3): "unsupported",
+                                   ("ID001", 4): "unsupported",
+                                   ("ID001", 6): "unknown_format",
                                    ("ID002", 8): "missing"})
         self.assertEqual(st["skipped"][0]["anchors"], [[45020.0, 85120.0]])
         # outside the selection a bad source is information, not a skip
-        pl, st = jgeom.plan(deck, cat.dbus(), ids=[1, 2], bad=cat.bad())
-        self.assertEqual(len(pl), 2)
+        pl, st = jgeom.plan(deck, cat.dbus(), ids=[1], bad=cat.bad())
+        self.assertEqual(len(pl), 1)
         self.assertEqual(st["skipped"], [])
         self.assertEqual(st["deck_issue_counts"],
-                         {"missing": 1, "unknown_format": 1})
-        # the four containers of the same geometry place identically
-        by = {p.idx: p for p in jgeom.plan(deck, cat.dbus(),
-                                            missing=jgeom.MISSING_SKIP,
-                                            bad=cat.bad())[0]}
-        for i in (2, 3, 4):
-            self.assertEqual((by[i].mag, by[i].dx_um, by[i].dy_um),
-                             (by[1].mag, by[1].dx_um, by[1].dy_um))
+                         {"missing": 1, "unknown_format": 1,
+                          "unsupported": 3})
 
     def test_choose_dbu_coarsens_only_past_the_limit(self):
         dbu, why = jgeom.choose_dbu([5e-5], [2e-4], extent_um=1e6)
@@ -591,8 +593,9 @@ class CliTests(unittest.TestCase):
         self.assertIn("skipped   : CHIP ID002 $8 absent.oas: missing",
                       res.stdout)
         self.assertIn("junk.bin: unknown_format", res.stdout)
+        self.assertIn("chipA.gds: unsupported", res.stdout)
         run_cli(CLI / "test_formats.jb", "--on-missing", "fail", ok=2)
-        run_cli(CLI / "test_formats.jb", "--id", "1,2", ok=0)
+        run_cli(CLI / "test_formats.jb", "--id", "1", ok=0)
         res = run_cli(CLI / "broken.jb", ok=1)
         self.assertIn("structural error", res.stderr)
 
@@ -874,8 +877,27 @@ class CompositeTests(unittest.TestCase):
         # the spec still lists what could be drawn
         res = run_cli(CLI / "test_formats.jb", "--id", "1,2", "--spec",
                       CLI / "formats.spec", env=self.env, ok=3)
-        self.assertIn("chipA.gds: not_indexed", res.stdout)
-        self.assertIn("1 placement(s), 1 skipped", res.stdout)
+        self.assertIn("chipA.gds: unsupported", res.stdout)
+        self.assertIn("1 placement(s)", res.stdout)
+        # a deck with missing / unsupported sources OPENS once its
+        # OASIS sources are indexed (field 2026-09-09: three 'file not
+        # found' sources kept a fully indexed deck closed)
+        from floe.jobdeck.viewer import DeckCache, deck_ready
+        self.assertTrue(deck_ready(str(CLI / "test_formats.jb")))
+        c = DeckCache(str(CLI / "test_formats.jb"))
+        self.assertEqual(c.unindexed(), [])
+        c.load()
+        try:
+            self.assertTrue(c.incomplete)
+            self.assertEqual(sorted(r["reason"] for r in c.skipped),
+                             ["missing", "unknown_format", "unsupported",
+                              "unsupported", "unsupported"])
+            self.assertEqual(c.meta["jobdeck"]["placements"], 1)
+        finally:
+            c.close()
+        res = run_floe2("info", CLI / "test_formats.jb", env=self.env, ok=0)
+        self.assertIn("INCOMPLETE: 5 placement(s) will not be drawn",
+                      res.stdout)
         # (`floe2 view` on a deck without an index starts the viewer
         # and asks - a GUI path, checked by IndexOnOpenSmokeTests under
         # its display guard; review 2026-09-09 (4th) P2-3)
@@ -896,7 +918,9 @@ class ViewerCacheTests(unittest.TestCase):
         self.assertTrue(is_deck_path("a/b.JB"))
         self.assertFalse(is_deck_path("a/b.oas"))
         self.assertTrue(deck_ready(str(CLI / "test.jb")))
-        self.assertFalse(deck_ready(str(CLI / "test_formats.jb")))
+        # formats: its one OASIS source is indexed (CliTests), the rest
+        # are skips - ready
+        self.assertTrue(deck_ready(str(CLI / "test_formats.jb")))
         c = DeckCache(str(CLI / "test.jb"))
         self.assertTrue(c.is_jobdeck)
         self.assertEqual(c.unindexed(), [])
@@ -1045,12 +1069,19 @@ class IndexOnOpenSmokeTests(unittest.TestCase):
                         env=self._env("no"), ok=1, timeout=120)
         self.assertIn("pending open never landed", res.stderr + res.stdout)
         self.assertFalse((fresh / "chipA.oas.floe").exists())
-        # the same for a deck whose sources lack an index (it used to
-        # be refused in the terminal)
+        # the same for a deck whose OASIS source lacks an index (it
+        # used to be refused in the terminal)
         res = run_floe2("view", "--multi", fresh / "test_formats.jb",
                         env=dict(self._env("no"), FLOE_GUI_SMOKE_MS="3000"),
                         ok=1, timeout=120)
         self.assertIn("pending open never landed", res.stderr + res.stdout)
+        # once that source is indexed the deck opens although three of
+        # its sources are unsupported containers and one is missing
+        run_floe2("index", fresh / "test_formats.jb", "--jobs", "2",
+                  env=self._env("no"), ok=0)
+        run_floe2("view", "--multi", fresh / "test_formats.jb",
+                  env=dict(self._env("no"), FLOE_GUI_SMOKE_MS="8000"),
+                  ok=0, timeout=120)
         # accepted, with a --drc db beside an unindexed layout: indexed,
         # opened, a frame shown, and the DRC results still loaded after
         # the open (review 2026-09-09 (4th) P2-1: they were reset by it)

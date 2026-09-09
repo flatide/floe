@@ -132,20 +132,13 @@ def open_cache(src, args):
         c = DeckCache(src)
         if not c.exists():
             raise SystemExit(f"floe: no such file: {src}")
-        try:
-            missing = c.unindexed()
-        except ValueError as exc:
-            raise SystemExit("floe: %s" % exc)
-        if missing:
-            raise SystemExit(
-                "no VFS cache for %d jobdeck source(s) (%s%s); run: "
-                "floe index %s" % (len(missing), ", ".join(missing[:3]),
-                                   ", ..." if len(missing) > 3 else "",
-                                   src))
+        # sources without a cache are skipped placements (listed
+        # below, exit 3 from render); only a deck with NOTHING to draw
+        # is refused
         try:
             c.load()
         except ValueError as exc:
-            raise SystemExit("floe: %s" % exc)
+            raise SystemExit("floe: %s; run: floe index %s" % (exc, src))
         # what the deck asked for that will NOT be drawn (a source
         # without dbu, a cache without the entry's LY/DT): said here,
         # at every open, and again by render's exit code

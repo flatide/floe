@@ -40,16 +40,21 @@ def deck_sources_dir(path, sources_dir=None) -> str:
 
 
 def deck_ready(path, sources_dir=None) -> bool:
-    """True when every source the deck names probes ok and has a fresh
-    <src>.floe cache - the deck's equivalent of `<src>.floe` existing."""
+    """True when every source the deck names that CAN be drawn (probes
+    ok) has a fresh <src>.floe cache - the deck's equivalent of
+    `<src>.floe` existing. A missing, unreadable or unknown-format
+    source is a skipped placement in the ledger, not a reason to keep
+    the deck closed (field 2026-09-09: three 'file not found' sources
+    blocked the viewer after everything else was indexed); at least one
+    drawable source is required."""
     try:
         deck = parse_jobdeck(path, strict=True)
     except (OSError, ValueError):
         return False
     catalog = SourceCatalog(deck_sources_dir(path, sources_dir))
     catalog.probe_all(deck.sources())
-    infos = catalog.infos.values()
-    return bool(infos) and all(i.ok() and i.indexed for i in infos)
+    drawable = [i for i in catalog.infos.values() if i.ok()]
+    return bool(drawable) and all(i.indexed for i in drawable)
 
 
 class DeckCache:
@@ -81,11 +86,14 @@ class DeckCache:
         return os.path.isfile(self.src)
 
     def unindexed(self):
+        """Sources that could be drawn but have no fresh cache yet; a
+        missing/unreadable source is not listed (it is a skipped
+        placement, reported when the deck opens)."""
         deck = parse_jobdeck(self.src, strict=True)
         catalog = SourceCatalog(self.sources_dir)
         catalog.probe_all(deck.sources())
         return [tc for tc, i in sorted(catalog.infos.items())
-                if not (i.ok() and i.indexed)]
+                if i.ok() and not i.indexed]
 
     def load(self):
         if self.work is None:

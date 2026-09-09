@@ -340,6 +340,16 @@ RENDERD_VERSION 0.12.62, `__version__` 0.12.73.
 
 `__version__` 0.12.75 (Python·gate만; renderd 0.12.62 유지).
 
+### 현장 2026-09-09: 누락 소스 3개 때문에 인덱싱 완료된 덱이 열리지 않음
+
+`deck_ready`/`DeckCache.unindexed()`가 누락·읽기불가 소스도 "인덱스 없음"으로 세어
+열기를 막았다. 이제 **그릴 수 있는(probe ok) 소스만** 인덱스를 요구하고, 누락·
+읽기불가·미지원 소스는 skipped ledger(제목 `N NOT DRAWN`, 상태줄, `info`의
+INCOMPLETE)로 보고하며 덱은 열린다. 인덱싱이 일부 실패해도 성공한 소스로 연다
+(로그는 close 버튼으로 남음). 그릴 것이 하나도 없을 때만 거부한다.
+`floe-index`는 **plain OASIS만** 읽으므로 GDS·gzip 소스는 probe에서 `unsupported`
+로 분류돼(dbu는 알지만) 묻지 않고 skip된다 — 미리 OASIS로 변환해 둘 것.
+
 ### 현장 2026-09-09: 소스 인덱싱 실패 `TRAPEZOID: out of spike scope`
 
 실제 덱의 소스(마스크 데이터)에 OASIS TRAPEZOID/CTRAPEZOID 레코드가 있어 인덱서가
@@ -349,6 +359,15 @@ RENDERD_VERSION 0.12.62, `__version__` 0.12.73.
 `close` 버튼으로 남아 오류 메시지를 읽을 수 있다. RENDERD_VERSION 0.12.63.
 
 ## 10. 미결·후속
+
+- **배율/임의각 PLACEMENT(OASIS 18)**: 2026-09-09 현재 실제 소스에서 아직 관측되지
+  않아 보류(사용자 확인). 나타나면 계층 변환을 실수화하지 않고 **인덱싱 시
+  평탄화**로 구현한다: 파서 뒤 단계에서 배율≠1 또는 각도가 90° 배수가 아닌
+  배치의 자식 도형을 변환해 부모 셀로 복사(꼭짓점은 dbu 반올림 = KLayout
+  flatten 규칙, PATH 반폭도 배율 적용, 텍스트는 위치만), 배치의 repetition은
+  복사된 도형의 `rep`로 유지, 중첩은 재귀·순환은 오류, 평탄화 도형 수 상한
+  초과는 명확한 오류. gate는 KLayout flatten과 꼭짓점 집합 대조. 현재 오류
+  문구: `magnified/angled placement: out of spike scope`.
 - LY/DT cross vs zip, 회전/미러: 실덱 사례가 나오면 확정.
 - 실덱에서 M2 성능 확인: 배치 수 × 패스 비용(플랜+디코드+라스터 각 1회).
   전체 뷰에서 수천 패스가 되면 (a) 같은 소스·같은 scale의 배치를 한 패스로
