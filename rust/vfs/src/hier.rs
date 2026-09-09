@@ -113,6 +113,13 @@ pub struct HierOpts {
     /// row, 4 corners in a 2D array) to a single one - the observed
     /// Calibre 2 -> 1 -> 0 ladder. px_per_dbu == 0 never demotes.
     pub thin_demote_px: f64,
+    /// Sub-cut wash (ViewReq::sub_cut_wash): child-BVH nodes the size
+    /// cut prunes are still WALKED to their placements (exact
+    /// per-child layer masks) while this many nodes remain in the
+    /// plan's budget; beyond it a pruned node washes as one coarse
+    /// box on the owning cell's visible layers. Bounds the wide-view
+    /// walk the rev 43 prune exists for (184M placements).
+    pub sub_cut_walk_budget: u64,
 }
 
 impl Default for HierOpts {
@@ -127,6 +134,7 @@ impl Default for HierOpts {
             hairline: 0.5,
             thin_lattice_um: 7.0,
             thin_demote_px: 14.0,
+            sub_cut_walk_budget: 200_000,
         }
     }
 }
@@ -174,6 +182,10 @@ pub struct HierStats {
     pub cull_layer: u64,
     pub cull_size: u64,
     pub cull_page_size: u64,
+    /// sub-cut washes emitted (pages, page-BVH nodes, child
+    /// placements) and the coarse child-BVH node washes among them
+    pub sub_cut_washes: u64,
+    pub sub_cut_coarse: u64,
     pub culled_page_layer_roots: u64,
     pub culled_page_bvh_bbox: u64,
     pub culled_page_bvh_cut: u64,
@@ -468,6 +480,9 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
         px_per_dbu: req.px_per_dbu,
         lod_k: opts.lod_k,
         wash_px: opts.wash_px,
+        sub_cut_wash: req.sub_cut_wash && req.cut_dbu > 0,
+        wash_walk_budget: opts.sub_cut_walk_budget,
+        wash_nodes: HashSet::new(),
         hair: (req.cut_dbu.max(0) as f64 * opts.hairline) as u64,
         thin_dbu: if opts.thin_lattice_um > 0.0 {
             (opts.thin_lattice_um * v.unit).max(1.0) as u64
@@ -495,7 +510,7 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
         if ((r0 != REM_FULL && structural_frontier)
             || masks_intersect(v.bitset(tc.lmask_rec), &req.vis))
             && !tc.rbbox.is_empty()
-            && (r0 != REM_FULL || !(w < h.cut && hh < h.cut))
+            && (r0 != REM_FULL || h.sub_cut_wash || !(w < h.cut && hh < h.cut))
         {
             let seed = req.view.intersect(&tc.rbbox);
             h.contribute((top_ci, r0), seed);
@@ -736,6 +751,11 @@ struct Hier<'a> {
     /// one lattice pitch is under thin_demote_px on screen: keep a
     /// single representative per bin instead of the interval bounds
     thin_demote: bool,
+    /// ViewReq::sub_cut_wash and its remaining walk budget
+    sub_cut_wash: bool,
+    wash_walk_budget: u64,
+    /// child-BVH nodes already washed coarsely (per expand)
+    wash_nodes: HashSet<u32>,
     /// (child ci, bin x, bin y) bins already owning a representative
     /// - One/Pts thin frames dedupe here; cleared per expand (bins
     /// are WC-local coordinates)
@@ -806,6 +826,12 @@ impl<'a> Hier<'a> {
                         || p.max_min < self.hair
                     {
                         self.st.cull_page_size += 1;
+                        if self.sub_cut_wash
+                            && boxes.iter().any(|b| p.bbox.intersects(b))
+                        {
+                            wc.washes.push((p.layer_idx, p.bbox));
+                            self.st.sub_cut_washes += 1;
+                        }
                         continue;
                     }
                     if boxes.iter().any(|b| p.bbox.intersects(b)) {
@@ -814,7 +840,13 @@ impl<'a> Hier<'a> {
                 }
             } else {
                 for b in &boxes {
-                    self.walk_pbvh(pr.pbvh_root, b, &mut psel);
+                    self.walk_pbvh(
+                        pr.pbvh_root,
+                        b,
+                        &mut psel,
+                        pr.layer_idx,
+                        &mut wc.washes,
+                    );
                 }
             }
         }
@@ -921,6 +953,7 @@ impl<'a> Hier<'a> {
                 self.hair
             };
             self.thin_bins.clear();
+            self.wash_nodes.clear();
             let mut edges: BTreeSet<u64> = BTreeSet::new();
             let mut framed: HashSet<u64> = HashSet::new();
             for b in &boxes {
@@ -938,7 +971,31 @@ impl<'a> Hier<'a> {
                         || (node.max_min as u64) < hair_prune
                     {
                         self.st.culled_bvh_size += 1;
-                        continue;
+                        if !self.sub_cut_wash || !node.bbox.intersects(b) {
+                            continue;
+                        }
+                        // sub-cut wash (jobdeck wide view): walk the
+                        // pruned subtree to its placements while the
+                        // budget lasts - each washes its footprint on
+                        // the layers its child really holds - and
+                        // beyond it wash the node's whole extent on
+                        // this cell's visible layers (coarse). At
+                        // r == 0 the children are outlines only
+                        // (depth exhausted): no wash either way.
+                        if r == 0 {
+                            continue;
+                        }
+                        if self.wash_walk_budget > 0 {
+                            self.wash_walk_budget -= 1;
+                        } else {
+                            if self.wash_nodes.insert(ni) {
+                                let fp = node.bbox;
+                                let mask = self.v.cell_lmask_rec(ci);
+                                self.wash_layers(&mut wc, mask, fp);
+                                self.st.sub_cut_coarse += 1;
+                            }
+                            continue;
+                        }
                     }
                     if !node.bbox.intersects(b) {
                         continue;
@@ -1013,6 +1070,11 @@ impl<'a> Hier<'a> {
                                 // rule.
                                 self.st.cull_size += 1;
                                 framed.insert(pli);
+                                if self.sub_cut_wash {
+                                    self.wash_sub_cut_child(
+                                        &mut wc, pli, &h, &rb, &boxes,
+                                    );
+                                }
                                 continue;
                             }
                             if self.opts.frame_cap != 0
@@ -1060,6 +1122,11 @@ impl<'a> Hier<'a> {
                             || cw.min(chh) < self.hair
                         {
                             self.st.cull_size += 1;
+                            if self.sub_cut_wash {
+                                self.wash_sub_cut_child(
+                                    &mut wc, pli, &h, &rb, &boxes,
+                                );
+                            }
                             continue;
                         }
                         edges.insert(pli);
@@ -1073,11 +1140,62 @@ impl<'a> Hier<'a> {
         self.out.insert(key, wc);
     }
 
+    /// Sub-cut wash of one child placement the size cut dropped: its
+    /// whole footprint (the repetition extent, one rect) on every
+    /// visible layer of the child's recursive layer mask, when the
+    /// footprint meets a view box.
+    fn wash_sub_cut_child(
+        &mut self,
+        wc: &mut WsCell,
+        pli: u64,
+        h: &floe_ovm::PlaceHead,
+        rb: &BBox,
+        boxes: &[BBox],
+    ) {
+        let t0 = Xf::place(h.x, h.y, h.rot, h.flip);
+        let b0 = xf_bbox(&t0, rb);
+        let fp = match h.kind {
+            0 => b0,
+            1 => grow_by_offsets(
+                &b0,
+                &grid_ovis(0, h.na as i64 - 1, 0, h.nb as i64 - 1, h.va, h.vb),
+            ),
+            _ => match self.v.pts_ref(pli) {
+                Some(pr) => grow_by_offsets(&b0, &pr.extent()),
+                None => b0,
+            },
+        };
+        if fp.is_empty() || !boxes.iter().any(|b| fp.intersects(b)) {
+            return;
+        }
+        let mask = self.v.cell_lmask_rec(h.child);
+        self.wash_layers(wc, mask, fp);
+    }
+
+    /// One wash rect `fp` per visible layer in bitset `mask`.
+    fn wash_layers(&mut self, wc: &mut WsCell, mask: u32, fp: BBox) {
+        let bits = self.v.bitset(mask);
+        for (byte_index, (&m, &vis)) in bits.iter().zip(self.req.vis.iter()).enumerate() {
+            let both = m & vis;
+            if both == 0 {
+                continue;
+            }
+            for bit in 0..8 {
+                if both & (1 << bit) != 0 {
+                    wc.washes.push(((byte_index * 8 + bit) as u32, fp));
+                    self.st.sub_cut_washes += 1;
+                }
+            }
+        }
+    }
+
     fn walk_pbvh(
         &mut self,
         root: u32,
         b: &BBox,
         psel: &mut BTreeSet<u32>,
+        layer_idx: u32,
+        washes: &mut Vec<(u32, BBox)>,
     ) {
         let mut stack = vec![root];
         while let Some(ni) = stack.pop() {
@@ -1085,6 +1203,12 @@ impl<'a> Hier<'a> {
             self.st.visited_page_bvh += 1;
             if n.max_w < self.cut && n.max_h < self.cut {
                 self.st.culled_page_bvh_cut += 1;
+                // sub-cut wash: the pruned node's whole extent, on
+                // the range's layer (a page BVH is per (cell, layer))
+                if self.sub_cut_wash && n.bbox.intersects(b) {
+                    washes.push((layer_idx, n.bbox));
+                    self.st.sub_cut_washes += 1;
+                }
                 continue;
             }
             if !n.bbox.intersects(b) {
@@ -1100,6 +1224,10 @@ impl<'a> Hier<'a> {
                         || p.max_min < self.hair
                     {
                         self.st.cull_page_size += 1;
+                        if self.sub_cut_wash && p.bbox.intersects(b) {
+                            washes.push((layer_idx, p.bbox));
+                            self.st.sub_cut_washes += 1;
+                        }
                         continue;
                     }
                     if p.bbox.intersects(b) {
@@ -1829,6 +1957,7 @@ mod tests {
             vis: vec![0xff],
             depth,
             px_per_dbu,
+            sub_cut_wash: false,
         }
     }
 
@@ -2068,6 +2197,7 @@ mod tests {
             vis: vec![0b10],
             depth: 0,
             px_per_dbu: 0.0,
+                    sub_cut_wash: false,
         };
         let plan = plan_hier(&v, &req, &HierOpts::default());
         assert_eq!(plan.pages, vec![1]);
@@ -2837,6 +2967,7 @@ mod tests {
             vis: vec![0xff],
             depth,
             px_per_dbu: 0.0,
+            sub_cut_wash: false,
         }
     }
 
@@ -3351,6 +3482,7 @@ mod tests {
             vis: vec![0xff],
             depth: u32::MAX,
             px_per_dbu: 0.0,
+                    sub_cut_wash: false,
         };
         // brute equality needs the corner windows, not the whole
         // spanning box - use two-box behavior via narrow checks

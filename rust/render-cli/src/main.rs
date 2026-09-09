@@ -219,6 +219,7 @@ fn make_request(args: &Args, unit: f64) -> Result<PlanRequest, String> {
         depth: args.depth,
         px_per_dbu,
         exact: args.cut_px == 0.0,
+        sub_cut_wash: false,
     })
 }
 

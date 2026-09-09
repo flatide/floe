@@ -406,6 +406,7 @@ impl Cache {
             } else {
                 request.px_per_dbu
             },
+            sub_cut_wash: request.sub_cut_wash && !request.exact,
         })
     }
 

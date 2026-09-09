@@ -1126,6 +1126,11 @@ class RustRenderWorker:
                 "pass_workers": _wire_int(fields, "pass_workers"),
                 "batches": _wire_int(fields, "batches"),
                 "batch_bytes_max": _wire_int(fields, "batch_bytes_max"),
+                # step 3: passes rastered slice by slice instead of
+                # being cut off at the budget; step 4: sub-cut washes
+                "streamed_passes": _wire_int(fields, "streamed_passes"),
+                "slices": _wire_int(fields, "slices"),
+                "wide_washes": _wire_int(fields, "wide_washes"),
                 "over_budget_pages": deferred,
             }
         if self._max_depth is not None:

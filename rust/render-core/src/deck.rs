@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use floe_ovm::BBox;
 
+use crate::cache::DecodedPage;
 use crate::{
     render_geometry_styled_cancellable_windowed, Cache,
     CacheLayer, DecodedPageCache, FrameScene,
@@ -417,6 +418,14 @@ pub struct DeckRenderRequest {
     pub decode_workers: u16,
     pub tile_size: u16,
     pub decode_pages: Option<usize>,
+    /// Step 4 (JOBDECK.ko.md section 11): the jobdeck wide-view
+    /// policy - what the size cut would drop keeps its on-screen
+    /// existence as a footprint wash (PlanRequest::sub_cut_wash).
+    pub wide: bool,
+    /// Step 3: a pass over the slice limit streams slice by slice
+    /// (true) instead of stopping at the budget with a partial frame
+    /// (false, the pre-step-3 behaviour kept as the kill switch).
+    pub stream: bool,
 }
 
 pub struct DeckRenderReport {
@@ -462,6 +471,12 @@ pub struct DeckRenderReport {
     pub batches: u32,
     /// Largest batch charge: newly decoded pages plus window images.
     pub batch_bytes_max: u64,
+    /// Step 3: passes whose pages did not fit the slice limit and
+    /// were rastered slice by slice, and their slices in total.
+    pub streamed_passes: u32,
+    pub slices: u32,
+    /// Step 4: sub-cut washes the planner emitted across the passes.
+    pub wide_washes: u64,
 }
 
 impl Deck {
@@ -687,6 +702,7 @@ impl Deck {
         let mut batch: Vec<PreparedPass> = Vec::new();
         let mut batch_bytes = 0u64;
         let mut batch_bytes_max = 0u64;
+        let mut wide_washes = 0u64;
         for placed_index in 0..self.placements.len() {
             let (out, source_index) = {
                 let placed = &self.placements[placed_index];
@@ -767,6 +783,7 @@ impl Deck {
                     let planned = source.cache.plan(&plan_request)?;
                     stats.plan_us = stats.plan_us.saturating_add(planned.stats.plan_us);
                     plan_pages = plan_pages.saturating_add(planned.summary.pages);
+                    wide_washes = wide_washes.saturating_add(planned.plan.stats.sub_cut_washes);
                     check_generation(cancellation, generation)?;
                     if planned
                         .plan
@@ -799,16 +816,24 @@ impl Deck {
                     // Review 2026-09-09 P1-2: the scene's Arcs keep every
                     // page of this pass alive whatever the LRU evicted,
                     // so one pass is charged against the shared budget
-                    // like a single-cache generation. Field 2026-09-09:
-                    // refusing the frame outright left the viewer with an
-                    // error at a mid zoom; instead the pass decodes its
-                    // pages in priority order, chunk by chunk, and STOPS
-                    // at the budget - the frame is drawn from what fits
-                    // and reports the rest as deferred (partial).
+                    // like a single-cache generation. Step 3 (analysis
+                    // 2026-09-09): a pass whose pages do not fit the
+                    // slice limit (half the budget) is no longer cut
+                    // off at the budget (partial frame, pages "over
+                    // budget (not drawn)") - it is STREAMED: its pages
+                    // are rastered slice by slice on its window, each
+                    // slice's scene dropped before the next is decoded
+                    // (`stream_pass`). Every pass paints only its own
+                    // layer in one colour, so the union of the slices
+                    // is the whole-scene raster pixel for pixel.
+                    let plan = Arc::new(planned.plan);
+                    let slice_limit = (self.budget_bytes / STREAM_SLICE_DIV).max(1);
+                    let mut chunks = decode_chunks(&source.cache, &selected, self.budget_bytes).into_iter();
                     let mut decoded = Vec::with_capacity(selected.len());
                     let mut pass_bytes = 0u64;
+                    let mut streamed = false;
                     let mut over = false;
-                    for chunk in decode_chunks(&source.cache, &selected, self.budget_bytes) {
+                    while let Some(chunk) = chunks.next() {
                         if over {
                             deferred = deferred.saturating_add(chunk.len() as u32);
                             continue;
@@ -825,23 +850,68 @@ impl Deck {
                             pass_bytes = pass_bytes
                                 .checked_add(page.estimated_bytes())
                                 .ok_or_else(|| "decoded generation byte charge overflow".to_string())?;
+                            unique_pages.insert((source_index, page.page_id));
                             decoded.push(page);
                         }
-                        if pass_bytes >= self.budget_bytes {
+                        check_generation(cancellation, generation)?;
+                        if request.stream {
+                            if pass_bytes >= slice_limit && chunks.len() > 0 {
+                                streamed = true;
+                                break;
+                            }
+                        } else if pass_bytes >= self.budget_bytes {
+                            // FLOE_RUST_DECK_STREAM=off: stop at the
+                            // budget, defer the rest (partial frame)
                             over = true;
                         }
-                        check_generation(cancellation, generation)?;
                     }
                     pass_bytes_max = pass_bytes_max.max(pass_bytes);
-                    for page in &decoded {
-                        unique_pages.insert((source_index, page.page_id));
+                    if streamed {
+                        // the passes prepared so far composite first
+                        // (placement order), then this pass streams
+                        // straight onto the composite
+                        raster_batch(
+                            &batch,
+                            request,
+                            generation,
+                            cancellation,
+                            &mut composite,
+                            frames_under.as_deref_mut(),
+                            frames_over.as_deref_mut(),
+                            &mut tally,
+                        )?;
+                        batch.clear();
+                        batch_bytes = 0;
+                        let streamed = stream_pass(
+                            source,
+                            source_index,
+                            Arc::clone(&plan),
+                            decoded,
+                            pass_bytes,
+                            chunks.collect(),
+                            slice_limit,
+                            StreamTarget {
+                                style,
+                                window,
+                                source_view,
+                                request,
+                                generation,
+                                cancellation,
+                            },
+                            &mut composite,
+                            frames_under.as_deref_mut(),
+                            frames_over.as_deref_mut(),
+                            &mut tally,
+                            &mut stats,
+                            &mut unique_pages,
+                        )?;
+                        pass_bytes_max = pass_bytes_max.max(streamed.pass_bytes_max);
+                        pages = pages.saturating_add(streamed.pages);
+                        scene_us = scene_us.saturating_add(streamed.scene_us);
+                        continue;
                     }
                     let scene_started = std::time::Instant::now();
-                    let scene = Arc::new(FrameScene::new_shared(
-                        &source.cache,
-                        Arc::new(planned.plan),
-                        decoded,
-                    )?);
+                    let scene = Arc::new(FrameScene::new_shared(&source.cache, plan, decoded)?);
                     scene_us = scene_us.saturating_add(scene_started.elapsed().as_micros() as u64);
                     partial |= scene.is_partial();
                     pages = pages.saturating_add(scene.available_pages().try_into().unwrap_or(u32::MAX));
@@ -962,6 +1032,9 @@ impl Deck {
             pass_workers,
             batches,
             batch_bytes_max,
+            streamed_passes: tally.streamed_passes,
+            slices: tally.slices,
+            wide_washes,
         })
     }
 }
@@ -978,6 +1051,169 @@ fn pass_image_bytes(window: (u32, u32, u32, u32), frames: bool) -> u64 {
 /// Passes rastered together at most (a batch is also bounded by half
 /// the page budget of newly decoded pages).
 const MAX_BATCH_PASSES: usize = 64;
+
+/// Step 3: a pass whose decoded pages exceed budget / this streams in
+/// slices of at most that size (a slice may overshoot by one decode
+/// chunk, at most budget / DECODE_CHUNK_DIV of encoded bytes).
+const STREAM_SLICE_DIV: u64 = 2;
+
+/// Where a streamed pass paints: its style, device window and source
+/// view, with the frame's request and cancellation.
+struct StreamTarget<'a> {
+    style: LayerStyle,
+    window: (u32, u32, u32, u32),
+    source_view: RasterViewBox,
+    request: &'a DeckRenderRequest,
+    generation: u64,
+    cancellation: &'a RenderCancellation,
+}
+
+struct StreamReport {
+    pass_bytes_max: u64,
+    pages: u32,
+    scene_us: u64,
+}
+
+/// Raster one placement slice by slice (step 3). `first` is the
+/// slice decoded so far, `rest` the remaining decode chunks in
+/// priority order; slices are cut at `slice_limit` decoded bytes. The
+/// frames-only pass (hierarchy frames come from the plan, not from
+/// pages) runs once on a page-less scene; each geometry slice is
+/// laid opaque-over onto the composite in turn and dropped.
+#[allow(clippy::too_many_arguments)]
+fn stream_pass(
+    source: &mut DeckSource,
+    source_index: usize,
+    plan: Arc<floe_vfs::hier::HierPlan>,
+    first: Vec<Arc<DecodedPage>>,
+    first_bytes: u64,
+    rest: Vec<Vec<u32>>,
+    slice_limit: u64,
+    target: StreamTarget<'_>,
+    composite: &mut [u8],
+    mut frames_under: Option<&mut [u8]>,
+    mut frames_over: Option<&mut [u8]>,
+    tally: &mut Tally,
+    stats: &mut RenderStats,
+    unique_pages: &mut BTreeSet<(usize, u32)>,
+) -> Result<StreamReport, String> {
+    let request = target.request;
+    let (col0, row0, win_w, win_h) = target.window;
+    let device_window = [col0, row0, col0 + win_w, row0 + win_h];
+    let raster = GeometryRasterRequest {
+        view: target.source_view,
+        width: request.width,
+        height: request.height,
+        background: [0, 0, 0, 0],
+        foreground: [255, 255, 255, 255],
+        workers: request.workers.max(1),
+        tile_size: request.tile_size,
+    };
+    let mut report = StreamReport {
+        pass_bytes_max: first_bytes,
+        pages: 0,
+        scene_us: 0,
+    };
+    if request.frames {
+        let scene_started = std::time::Instant::now();
+        let empty = FrameScene::new_shared(&source.cache, Arc::clone(&plan), Vec::new())?;
+        report.scene_us = report.scene_us.saturating_add(scene_started.elapsed().as_micros() as u64);
+        if empty.subtree_has_frames(empty.top()) {
+            let frames_only = StyledGeometryRasterRequest {
+                raster,
+                layers: Vec::new(),
+                hierarchy_frames: true,
+                mono: request.mono,
+            };
+            let out = render_geometry_styled_cancellable_windowed(
+                &empty,
+                &frames_only,
+                target.generation,
+                target.cancellation,
+                device_window,
+            )?;
+            tally.frame_raster_us = tally.frame_raster_us.saturating_add(out.stats.raster_us);
+            let split_started = std::time::Instant::now();
+            if let (Some(under), Some(over)) = (frames_under.as_deref_mut(), frames_over.as_deref_mut()) {
+                split_frame_planes_window(out.frame.pixels(), request.width, under, over, target.window);
+            }
+            tally.composite_us = tally.composite_us.saturating_add(split_started.elapsed().as_micros() as u64);
+            accumulate_raster(&mut tally.stats, &out.stats);
+            tally.frame_member_paints = tally.frame_member_paints.saturating_add(out.frame_member_paints);
+            tally.frame_passes += 1;
+        }
+    }
+    let styled = StyledGeometryRasterRequest {
+        raster,
+        layers: vec![target.style],
+        hierarchy_frames: false,
+        mono: request.mono,
+    };
+    let mut slice = first;
+    let mut slice_bytes = first_bytes;
+    let mut rest = rest.into_iter();
+    loop {
+        let scene_started = std::time::Instant::now();
+        let scene = FrameScene::new_shared(&source.cache, Arc::clone(&plan), std::mem::take(&mut slice))?;
+        report.scene_us = report.scene_us.saturating_add(scene_started.elapsed().as_micros() as u64);
+        report.pages = report
+            .pages
+            .saturating_add(scene.available_pages().try_into().unwrap_or(u32::MAX));
+        let raster_started = std::time::Instant::now();
+        let out = render_geometry_styled_cancellable_windowed(
+            &scene,
+            &styled,
+            target.generation,
+            target.cancellation,
+            device_window,
+        )?;
+        tally.raster_wall_us = tally
+            .raster_wall_us
+            .saturating_add(raster_started.elapsed().as_micros() as u64);
+        drop(scene);
+        let overlay_started = std::time::Instant::now();
+        overlay_window(composite, request.width, out.frame.pixels(), target.window);
+        tally.composite_us = tally.composite_us.saturating_add(overlay_started.elapsed().as_micros() as u64);
+        accumulate_raster(&mut tally.stats, &out.stats);
+        tally.rectangle_member_paints =
+            tally.rectangle_member_paints.saturating_add(out.rectangle_member_paints);
+        tally.polygon_member_paints = tally.polygon_member_paints.saturating_add(out.polygon_member_paints);
+        tally.path_member_paints = tally.path_member_paints.saturating_add(out.path_member_paints);
+        tally.slices += 1;
+        drop(out);
+        check_generation(target.cancellation, target.generation)?;
+        // the next slice
+        slice_bytes = 0;
+        while slice_bytes < slice_limit {
+            let Some(chunk) = rest.next() else { break };
+            let (chunk_pages, decode_stats) = source.pages.load_cancellable(
+                &source.cache,
+                &chunk,
+                request.decode_workers,
+                target.generation,
+                target.cancellation,
+            )?;
+            accumulate_decode(stats, &decode_stats);
+            for page in chunk_pages {
+                slice_bytes = slice_bytes
+                    .checked_add(page.estimated_bytes())
+                    .ok_or_else(|| "decoded generation byte charge overflow".to_string())?;
+                unique_pages.insert((source_index, page.page_id));
+                slice.push(page);
+            }
+            check_generation(target.cancellation, target.generation)?;
+        }
+        if slice.is_empty() {
+            break;
+        }
+        report.pass_bytes_max = report.pass_bytes_max.max(slice_bytes);
+    }
+    tally.passes += 1;
+    tally.streamed_passes += 1;
+    tally.pass_workers = tally.pass_workers.max(1);
+    tally.batches += 1;
+    Ok(report)
+}
 
 /// A placement ready to raster: its scene (possibly shared with other
 /// placements of the same source and plan), style, device window and
@@ -1010,6 +1246,8 @@ struct Tally {
     /// Passes rastered at once, at most.
     pass_workers: u16,
     batches: u32,
+    streamed_passes: u32,
+    slices: u32,
     rectangle_member_paints: u64,
     polygon_member_paints: u64,
     path_member_paints: u64,
@@ -1297,6 +1535,7 @@ fn source_plan_request(
         depth: request.depth,
         px_per_dbu,
         exact: request.exact,
+        sub_cut_wash: request.wide,
     };
     plan.validate()?;
     Ok(Some(plan))
@@ -1571,6 +1810,8 @@ mod tests {
             decode_workers: 1,
             tile_size: 64,
             decode_pages: None,
+            wide: false,
+            stream: true,
         };
         let p = placement(4.0, 0.0, 0.0);
         let sv = source_view(&request.view, &p).unwrap();
@@ -1613,6 +1854,8 @@ mod tests {
             decode_workers: 1,
             tile_size: 64,
             decode_pages: None,
+            wide: false,
+            stream: true,
         };
         let p = placement(0.001, 1e16, 1e16);
         let sv = source_view(&request.view, &p).unwrap();
@@ -1643,6 +1886,8 @@ mod tests {
             decode_workers: 1,
             tile_size: 64,
             decode_pages: None,
+            wide: false,
+            stream: true,
         };
         let big = 1i64 << 60;
         // the placement puts the deck view's origin at the source's

@@ -122,6 +122,21 @@ ROWS 1000.0/1000.0
 END
 """
 
+# step 4 (2026-09-10): a source whose content is all under the size
+# cut at a full-deck view - a page of 1 um boxes (level 1) and an
+# array of a 1 um child cell (level 2)
+TINY_DECK = """* tiny.jb
+MTITLE 1,DOTS
+MTITLE 2,BITS
+*PLACE-INFO
+CHIP T1
+$ (1, DOTS, AD=0.00020, SF=1, TC=tiny.oas, LY={1}, DT={0}, BX=0.0, BY=0.0, UX=2000.0, UY=2000.0 )
+$ (2, BITS, AD=0.00020, SF=1, TC=tiny.oas, LY={2}, DT={0}, BX=0.0, BY=0.0, UX=2000.0, UY=2000.0 )
+ROWS 0.0/0.0
+*END-PLACE
+END
+"""
+
 # review 2026-09-09 (2nd) P1-1: two overlapping placements of a source
 # that has a top-level box AND a child cell - at depth 0 the child is
 # a white frame that the later placement's box must not bury
@@ -211,8 +226,10 @@ def build_fixtures(d: Path):
     (d / "hier.jb").write_text(HIER_DECK)
     (d / "frames.jb").write_text(FRAMES_DECK)
     (d / "dt.jb").write_text(DT_DECK)
+    (d / "tiny.jb").write_text(TINY_DECK)
     build_oas(d / "dt.oas", 0.00005, 2000.0, 2000.0, [(7, 0), (7, 1)], "DT")
     build_dense_oas(d / "dense.oas")
+    build_tiny_oas(d / "tiny.oas")
     build_hier_oas(d / "hier.oas")
     build_hier2_oas(d / "hier2.oas")
 
@@ -265,6 +282,30 @@ def build_dense_oas(path, dbu=0.00005, count=60000, extent_um=2000.0,
             h = unit + rnd() % (3 * unit)
             shapes.insert(db.Box(x, y, x + w, y + h))
         top.insert(db.CellInstArray(kid.cell_index(), db.Trans()))
+    ly.write(str(path))
+
+
+def build_tiny_oas(path, dbu=0.00005, pitch_um=10.0, n=200, box_um=1.0):
+    """TINY: layer 1/0 holds an n x n field of 1 um boxes (own page),
+    layer 2/0 the same field as an array of a 1 um child cell BIT -
+    both entirely under a full-deck view's size cut."""
+    import klayout.db as db
+    ly = db.Layout()
+    ly.dbu = dbu
+    top = ly.create_cell("TINY")
+    bit = ly.create_cell("BIT")
+    unit = int(round(1.0 / dbu))
+    b = int(round(box_um * unit))
+    p = int(round(pitch_um * unit))
+    l1 = ly.layer(1, 0)
+    l2 = ly.layer(2, 0)
+    dots = top.shapes(l1)
+    for i in range(n):
+        for j in range(n):
+            dots.insert(db.Box(i * p, j * p, i * p + b, j * p + b))
+    bit.shapes(l2).insert(db.Box(0, 0, b, b))
+    top.insert(db.CellInstArray(bit.cell_index(), db.Trans(),
+                                db.Vector(p, 0), db.Vector(0, p), n, n))
     ly.write(str(path))
 
 
@@ -806,13 +847,17 @@ class CompositeTests(unittest.TestCase):
                    for o in range(0, len(self.only_2), 4)}
         self.assertEqual(colours, {(0, 0, 0), (255, 255, 0)})
 
-    def test_3b_viewer_defaults_drop_sub_cut_sources_quietly(self):
+    def test_3b_viewer_defaults_keep_sub_cut_sources_as_washes(self):
+        # the sub-cut mark used to vanish quietly (an empty pass);
+        # since step 4 (2026-09-10) the jobdeck wide-view policy keeps
+        # its existence as a footprint wash in its own colour - the
+        # off-switch case is WideViewTests
         colours = {tuple(self.gui_defaults[o:o + 3])
                    for o in range(0, len(self.gui_defaults), 4)}
         self.assertIn((0, 0, 255), colours)      # $1 chips are drawn
         self.assertIn((255, 255, 0), colours)    # $2
         self.assertIn((255, 192, 203), colours)  # $5
-        self.assertNotIn((255, 0, 0), colours)   # the sub-cut mark is not
+        self.assertIn((255, 0, 0), colours)      # the sub-cut mark too
 
     def test_4_composite_equals_flattened_single_cache_render(self):
         import klayout.db as db
@@ -1413,10 +1458,12 @@ class ReviewFixTests(unittest.TestCase):
                               str(cm.exception))
             finally:
                 worker.stop()
-            # ... the deck placing it stops the pass at the budget and
-            # draws what fits, saying how many pages it could not decode
-            # (field 2026-09-09: a mid-zoom pass wanted 2 GB and the
-            # refusal left the viewer with an error)
+            # ... the deck placing it is charged the same way, but
+            # (step 3, 2026-09-10) a pass over the slice limit is no
+            # longer cut off: it streams its pages slice by slice and
+            # the frame is complete (field 2026-09-09: a mid-zoom pass
+            # wanted 2 GB and the refusal left the viewer with an
+            # error; the partial frame that replaced it drew a part)
             d = DeckCache(str(CLI / "dense.jb"))
             d.load()
             try:
@@ -1424,9 +1471,11 @@ class ReviewFixTests(unittest.TestCase):
                 worker.start()
                 try:
                     bb = d.meta["bbox"]
-                    rgba, result = _render_raw(worker, tuple(bb), 200, 200,
-                                               with_result=True)
-                    self.assertGreater(result.get("over_budget_pages", 0), 0)
+                    small, result = _render_raw(worker, tuple(bb), 200, 200,
+                                                with_result=True)
+                    self.assertEqual(result.get("over_budget_pages", 0), 0)
+                    self.assertGreater(result["deck"]["streamed_passes"], 0)
+                    self.assertGreater(result["deck"]["slices"], 1)
                     self.assertFalse(result.get("refining"))
                 finally:
                     worker.stop()
@@ -1434,7 +1483,8 @@ class ReviewFixTests(unittest.TestCase):
                 d.close()
         finally:
             del os.environ["FLOE_RUST_BUDGET_MB"]
-        # with the normal budget the deck renders everything
+        # with the normal budget the deck renders everything in one
+        # scene - the same pixels
         c = DeckCache(str(CLI / "dense.jb"))
         c.load()
         try:
@@ -1448,8 +1498,10 @@ class ReviewFixTests(unittest.TestCase):
         finally:
             c.close()
         self.assertEqual(result.get("over_budget_pages", 0), 0)
+        self.assertEqual(result["deck"]["streamed_passes"], 0)
         self.assertTrue(any(rgba[o:o + 3] != b"\0\0\0"
                             for o in range(0, len(rgba), 4)))
+        self.assertEqual(small, rgba, "streamed slices = the whole scene")
 
     def test_p1_3_hierarchical_source_shows_at_the_defaults(self):
         from floe.jobdeck.viewer import DeckCache
@@ -1823,27 +1875,32 @@ class PerfAnalysisTests(unittest.TestCase):
         off = self._deck_counters("hier.jb", 0, False)
         self.assertEqual(off["frame_passes"], 0)
 
-    def test_over_budget_capture_is_incomplete(self):
+    def test_over_budget_capture_is_complete_by_streaming(self):
+        # step 1 pinned "a capture that stopped at the page budget is
+        # incomplete (exit 3)"; since step 3 (2026-09-10) a pass over
+        # the slice limit streams instead of stopping, so the same
+        # capture at a 1 MiB budget is complete and identical to the
+        # default-budget one. The incomplete path stays for skipped
+        # placements (ReviewFixTests).
         out = CLI / "dense-budget.png"
         rep = CLI / "dense-budget.json"
         res = run_floe2("render", CLI / "dense.jb", "--px", "120", "--out",
                         out, "--report", rep,
-                        env=dict(self.env, FLOE_RUST_BUDGET_MB="1"), ok=3)
-        self.assertIn("stopped at the page budget", res.stdout)
-        self.assertIn("over the decode budget", res.stderr)
+                        env=dict(self.env, FLOE_RUST_BUDGET_MB="1"), ok=0)
+        self.assertNotIn("stopped at the page budget", res.stdout)
         doc = json.loads(rep.read_text())
-        self.assertFalse(doc["complete"])
-        self.assertFalse(doc["jobdeck"]["complete"])
-        self.assertGreater(doc["shots"][0]["over_budget_pages"], 0)
-        self.assertFalse(doc["shots"][0]["complete"])
-        self.assertIn("INCOMPLETE", res.stdout,
-                      "the report log names an over-budget capture too")
+        self.assertTrue(doc["complete"])
+        self.assertTrue(doc["jobdeck"]["complete"])
+        self.assertEqual(doc["shots"][0]["over_budget_pages"], 0)
+        streamed = out.read_bytes()
         # the default budget: complete, exit 0
         res = run_floe2("render", CLI / "dense.jb", "--px", "120", "--out",
                         out, "--report", rep, env=self.env, ok=0)
         doc = json.loads(rep.read_text())
         self.assertTrue(doc["complete"])
         self.assertEqual(doc["shots"][0]["over_budget_pages"], 0)
+        self.assertEqual(out.read_bytes(), streamed,
+                         "the streamed capture is the whole-scene one")
 
 
 class SubwindowTests(unittest.TestCase):
@@ -1984,6 +2041,177 @@ class ReuseAndBatchTests(unittest.TestCase):
             self.assertEqual(parallel, serial, "%s jobs 1 vs 4" % deck)
             self.assertEqual(full, serial, "%s full-frame path" % deck)
             self.assertGreater(_lit(serial), 0)
+
+
+class StreamTests(unittest.TestCase):
+    """Step 3 (2026-09-10): a pass over the slice limit is rastered
+    slice by slice on its window - no page is dropped, and the union
+    of the slices is the whole-scene raster byte for byte (every pass
+    paints one layer in one colour). Frames come from the plan and
+    are rastered once on a page-less scene."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.env = {"FLOE_INDEX_BIN": str(ROOT / "rust" / "target" /
+                                         "release" / "floe-index"),
+                   "FLOE_RENDERD_BIN": str(ROOT / "rust" / "target" /
+                                           "release" / "floe-renderd")}
+        os.environ["FLOE_RENDERD_BIN"] = cls.env["FLOE_RENDERD_BIN"]
+        run_floe2("index", CLI / "dense.jb", "--jobs", "2", env=cls.env,
+                  ok=0)
+
+    def _render(self, env, size, bbox=None, **kw):
+        from floe.jobdeck.viewer import DeckCache
+        for k, v in env.items():
+            os.environ[k] = v
+        try:
+            c = DeckCache(str(CLI / "dense.jb"))
+            c.load()
+            try:
+                worker = jrender.DeckRenderWorker(c)
+                worker.start()
+                try:
+                    return _render_raw(worker, bbox or tuple(c.meta["bbox"]),
+                                       size[0], size[1], with_result=True,
+                                       **kw)
+                finally:
+                    worker.stop()
+            finally:
+                c.close()
+        finally:
+            for k in env:
+                os.environ.pop(k, None)
+
+    def test_streamed_pass_equals_the_whole_scene(self):
+        # (case, does the geometry stream): at depth 0 dense.jb's four
+        # child cells are frames and TOP owns no page - a frames-only
+        # pass on a page-less scene, nothing to stream
+        cases = [
+            (dict(depth=None, frames=False, fill="speckle"), True),
+            (dict(depth=None, frames=True, fill="speckle"), True),
+            (dict(depth=0, frames=True, fill="speckle"), False),
+            (dict(depth=None, frames=False, fill=PATTERN_ROWS, width_px=2),
+             True),
+        ]
+        for kw, streams in cases:
+            whole, r0 = self._render({}, (301, 237), **kw)
+            self.assertEqual(r0["deck"]["streamed_passes"], 0, kw)
+            streamed, r1 = self._render({"FLOE_RUST_BUDGET_MB": "1"},
+                                        (301, 237), **kw)
+            d = r1["deck"]
+            self.assertEqual(d["streamed_passes"], 1 if streams else 0, d)
+            if streams:
+                self.assertGreater(d["slices"], 1, d)
+            self.assertEqual(r1.get("over_budget_pages", 0), 0)
+            self.assertEqual(d["frame_passes"], r0["deck"]["frame_passes"])
+            self.assertEqual(streamed, whole, kw)
+            self.assertGreater(_lit(whole), 0)
+        # a zoomed view: the pass streams on its sub-window
+        from floe.jobdeck.viewer import DeckCache
+        c = DeckCache(str(CLI / "dense.jb"))
+        c.load()
+        bb = c.meta["bbox"]
+        c.close()
+        zoom = (bb[0] + (bb[2] - bb[0]) * 0.3, bb[1] - (bb[3] - bb[1]) * 0.2,
+                bb[2] + (bb[2] - bb[0]) * 0.1, bb[1] + (bb[3] - bb[1]) * 0.6)
+        whole, _ = self._render({}, (263, 301), bbox=zoom)
+        streamed, r1 = self._render({"FLOE_RUST_BUDGET_MB": "1"},
+                                    (263, 301), bbox=zoom)
+        self.assertEqual(streamed, whole, "zoomed")
+        self.assertEqual(r1["deck"]["streamed_passes"], 1)
+        # the kill switch restores the partial frame
+        partial, r2 = self._render({"FLOE_RUST_BUDGET_MB": "1",
+                                    "FLOE_RUST_DECK_STREAM": "off"},
+                                   (301, 237))
+        self.assertGreater(r2.get("over_budget_pages", 0), 0)
+        self.assertEqual(r2["deck"]["streamed_passes"], 0)
+        self.assertNotEqual(partial, whole)
+
+
+class WideViewTests(unittest.TestCase):
+    """Step 4 (2026-09-10): the jobdeck wide-view policy. What the
+    size cut would drop keeps its on-screen existence as a footprint
+    wash on its own layer: a page of sub-cut shapes as the page's
+    bbox, an array of sub-cut child cells as the placement footprint
+    on the child's visible layers. Kill switch FLOE_RUST_DECK_WIDE=off
+    restores the silent omission."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.env = {"FLOE_INDEX_BIN": str(ROOT / "rust" / "target" /
+                                         "release" / "floe-index"),
+                   "FLOE_RENDERD_BIN": str(ROOT / "rust" / "target" /
+                                           "release" / "floe-renderd")}
+        os.environ["FLOE_RENDERD_BIN"] = cls.env["FLOE_RENDERD_BIN"]
+        for deck in ("tiny.jb", "test.jb"):
+            run_floe2("index", CLI / deck, "--jobs", "2", env=cls.env,
+                      ok=0)
+
+    def _render(self, deck, env, visible, cut_px, size=(200, 200)):
+        from floe.jobdeck.viewer import DeckCache
+        for k, v in env.items():
+            os.environ[k] = v
+        try:
+            c = DeckCache(str(CLI / deck))
+            c.load()
+            try:
+                worker = jrender.DeckRenderWorker(c)
+                worker.start()
+                try:
+                    return _render_raw(worker, tuple(c.meta["bbox"]),
+                                       size[0], size[1], visible=visible,
+                                       cut_px=cut_px, with_result=True)
+                finally:
+                    worker.stop()
+            finally:
+                c.close()
+        finally:
+            for k in env:
+                os.environ.pop(k, None)
+
+    def test_sub_cut_pages_and_children_keep_their_existence(self):
+        # 2000 um on 200 px, cut 3 px = 30 um: the 1 um dots (level 1,
+        # an own page) and the 1 um BIT array (level 2, sub-cut child
+        # placements) are both below the cut
+        for level in (1, 2):
+            gone, r_off = self._render("tiny.jb", {"FLOE_RUST_DECK_WIDE": "off"},
+                                       [(level, 0)], 3.0)
+            self.assertEqual(_lit(gone), 0, "level %d is culled" % level)
+            self.assertEqual(r_off["deck"]["wide_washes"], 0)
+            kept, r_on = self._render("tiny.jb", {}, [(level, 0)], 3.0)
+            self.assertGreater(_lit(kept), 0, "level %d washed" % level)
+            self.assertGreater(r_on["deck"]["wide_washes"], 0)
+            # the wash covers the field: its corners are lit
+            w = 200
+            corners = [(2, 2), (2, w - 3), (w - 3, 2), (w - 3, w - 3)]
+            for x, y in corners:
+                at = (y * w + x) * 4
+                self.assertNotEqual(kept[at:at + 3], b"\0\0\0",
+                                    "level %d corner %d,%d" % (level, x, y))
+            # exact (no cut) draws the real geometry in the same colour
+            exact, _ = self._render("tiny.jb", {}, [(level, 0)], 0.0)
+            self.assertGreater(_lit(exact), 0)
+            lit_colours = {tuple(kept[o:o + 3])
+                           for o in range(0, len(kept), 4)
+                           if kept[o:o + 3] != b"\0\0\0"}
+            exact_colours = {tuple(exact[o:o + 3])
+                             for o in range(0, len(exact), 4)
+                             if exact[o:o + 3] != b"\0\0\0"}
+            self.assertEqual(lit_colours, exact_colours)
+
+    def test_wide_policy_is_a_no_op_above_the_cut(self):
+        # test.jb's chips (levels 1 and 2) are far above the cut: the
+        # policy adds no wash and changes no pixel there; the whole
+        # deck holds exactly one sub-cut source, the 0.2x mark
+        for visible in ([(1, 0)], [(2, 0)]):
+            on, r_on = self._render("test.jb", {}, visible, 3.0, (301, 237))
+            off, r_off = self._render("test.jb", {"FLOE_RUST_DECK_WIDE": "off"},
+                                      visible, 3.0, (301, 237))
+            self.assertEqual(r_on["deck"]["wide_washes"], 0)
+            self.assertEqual(on, off)
+            self.assertGreater(_lit(on), 0)
+        _, r_all = self._render("test.jb", {}, None, 3.0, (301, 237))
+        self.assertEqual(r_all["deck"]["wide_washes"], 1)
 
 
 class ReviewFixTests5(unittest.TestCase):

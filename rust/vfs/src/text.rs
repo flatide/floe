@@ -1040,6 +1040,7 @@ mod tests {
             vis: vec![0xff],
             depth,
             px_per_dbu: px,
+            sub_cut_wash: false,
         }
     }
 

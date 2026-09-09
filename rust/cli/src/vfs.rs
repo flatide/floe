@@ -1779,6 +1779,7 @@ fn frontier_json_planned(v: &floe_ovm::Ovm) -> String {
             vis: vis.clone(),
             depth: d,
             px_per_dbu,
+            sub_cut_wash: false,
         };
         let plan = floe_vfs::hier::plan_hier(v, &req, &opts);
         let (boxes, truncated) = floe_vfs::hier::frontier_boxes(
@@ -6060,6 +6061,7 @@ fn make_req(
         vis: v.layer_mask(layers).expect("layers"),
         depth,
         px_per_dbu: px_per_um / s,
+        sub_cut_wash: false,
     }
 }
 

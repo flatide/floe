@@ -451,16 +451,55 @@ budget = 패스별 디코드 보유)을 코드와 대조했다. 모두 사실이
 - (5차 리뷰, RENDERD 0.12.69) 묶음 예산에 창 이미지 청구, 소스 좌표 서브윈도,
   `raster wall`/`pass_workers`/`batches` 계측 — §9 5차 표.
 
-### 3단계 — 페이지를 버리지 않는 유한 메모리 렌더
-- 페이지를 일정량씩 디코드해 타일/레이어 마스크에 누적하고 해제(scene 전체 보유
-  금지). outline/fill 순서를 지키는 합성 규칙 설계가 선행.
+### 3단계 — 페이지를 버리지 않는 유한 메모리 렌더 ✅ (2026-09-10, RENDERD 0.12.72, 실측 없이 사용자 결정)
+- **슬라이스 스트리밍**(`stream_pass`): 한 패스의 decoded 합이 슬라이스 한도
+  (예산의 1/2, `STREAM_SLICE_DIV`)에 이르고 아직 디코드할 청크가 남으면 그
+  패스는 scene 전체를 보유하지 않는다. 지금까지의 슬라이스를 scene으로 만들어
+  창에 raster하고 합성에 겹친 뒤 버리고, 다음 슬라이스를 디코드해 반복한다.
+  "예산 초과 → partial(`N pages over budget`)"은 사라지고 프레임은 완전하다.
+- **픽셀 불변의 근거**: 덱 패스는 한 레이어를 한 색으로만 칠하고(프레임은 별도
+  패스), 합성은 opaque-over이므로 칠해진 픽셀의 **합집합**만 결과를 정한다 →
+  슬라이스 순서·개수와 무관하게 whole-scene raster와 바이트 동일. 프레임 패스는
+  플랜에서 나오므로 페이지 없는 scene으로 한 번만 raster.
+- 순서: 스트리밍 패스 앞의 준비된 묶음을 먼저 합성(배치 순서 유지)하고, 스트리밍
+  패스는 합성 버퍼에 직접 겹친다. 프레임 scene 캐시에는 넣지 않는다(같은 소스의
+  다른 배치는 LRU 적중으로 다시 디코드).
+- 상태줄 `N streamed in K slices`, 프레임 줄 `streamed_passes= slices=`. 킬 스위치
+  `FLOE_RUST_DECK_STREAM=off`(예산에서 멈추는 partial 프레임으로 복귀).
+- 왜 타일/레이어 마스크 누적이 아닌가: 단색 단일 레이어 패스에서는 창 크기 RGBA
+  겹침이 곧 마스크 누적과 같고(같은 픽셀 집합), 별도 마스크 자료구조와 합성 규칙이
+  필요 없다. 메모리 상한 = 슬라이스(예산/2) + LRU 잔류 + 창 이미지.
+- gate `StreamTests`: dense.jb 1 MiB 예산(스트리밍, 2+ 슬라이스) vs 기본 예산
+  (whole scene) 바이트 동일 — speckle·패턴·프레임 on·줌 뷰(서브윈도); 킬 스위치는
+  partial을 되돌린다. `ReviewFixTests.test_p1_2`·`PerfAnalysisTests`도 새 계약으로
+  재고정(1 MiB 캡처가 완전·exit 0).
 
-### 4단계 — jobdeck 전용 광역 표시 정책
-- "작은 멤버 제외"를 덱에 그대로 쓰지 않음; 반복 구조의 화면상 존재를 보존하는
-  방식 검토(coverage/LOD 복구가 아님). cut 전면 해제는 geometry·메모리 비용을
-  같은 뷰·level 조건으로 측정한 뒤 결정.
+### 4단계 — jobdeck 전용 광역 표시 정책 ✅ (2026-09-10, RENDERD 0.12.72, 실측 없이 사용자 결정)
+- **sub-cut wash**(`ViewReq::sub_cut_wash`, 덱 플랜 요청에만 켬): 크기 cut이
+  **버리던** 것을 자기 레이어의 footprint wash(렉트, 보통 채움 → 뷰어 speckle이
+  얇게 함)로 남긴다.
+  - 자체 페이지: cut(양축 < cut, 또는 hairline)에 걸린 페이지 → `(layer, page
+    bbox)`; 페이지 BVH 노드가 통째로 잘리면 `(prange layer, node bbox)`(페이지
+    BVH는 (cell, layer)별이라 레이어가 정확).
+  - 하위 셀 배치(depth-full 생략·유한 깊이 fold): 배치 footprint(반복 extent
+    한 렉트)를 자식 `lmask_rec ∩ vis`의 각 레이어에 → 반복 구조의 존재가 한
+    렉트로 남는다.
+  - 자식 BVH 노드가 크기로 잘리면: 플랜당 `sub_cut_walk_budget`(200k 노드) 안에서는
+    잎까지 걸어 배치별 정확한 레이어로, 넘으면 노드 bbox를 현재 셀의 가시 레이어에
+    **coarse** wash(`sub_cut_coarse`). rev 43의 prune이 막던 O(가시 배치) 폭주를
+    예산으로 막는다. r == 0(깊이 소진, 자식은 outline뿐)에서는 wash 없음.
+  - top 셀이 통째로 sub-cut이면(덱 뷰의 0.2× 마크) 플랜을 버리지 않고 위 규칙으로
+    wash → 마크의 색이 남는다(`CompositeTests.test_3b` 재고정).
+- 한계(문서화): wash는 페이지/배치 bbox이므로 30% 채움의 콘택 배열이 100%
+  블록으로 보인다(speckle이 완화). 뷰어의 일반 레이아웃 경로는 바뀌지 않는다
+  (`sub_cut_wash=false`). 킬 스위치 `FLOE_RUST_DECK_WIDE=off`. 상태줄 `N sub-cut
+  washes`, 프레임 줄 `wide_washes=`.
+- gate `WideViewTests`: tiny.jb(1 µm 점 4만 개의 자체 페이지 + 1 µm 자식 셀
+  200×200 배열)를 200 px 전체 뷰·cut 3 px에서 — off면 두 level 모두 0 px, on이면
+  네 모서리까지 칠해지고 색은 exact 렌더와 같다; test.jb(cut 위)는 wash 0·픽셀
+  동일.
 
-측정은 실덱의 같은 뷰·같은 level 조건에서 1단계 계측 값과 5차 리뷰의 `raster wall`·`pass_workers`·`batches`로 한다.
+측정은 실덱의 같은 뷰·같은 level 조건에서 1단계 계측 값과 5차 리뷰의 `raster wall`·`pass_workers`·`batches`, 3·4단계의 `streamed/slices`·`sub-cut washes`로 한다. 3·4단계는 실측 없이 구현했으므로 실덱 확인 항목: 광역 뷰에서 wash 블록이 MDPView의 표시와 비슷한지, 스트리밍 패스의 슬라이스 수와 raster wall.
 
 ## 10. 미결·후속
 

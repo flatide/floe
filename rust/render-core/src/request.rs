@@ -49,6 +49,9 @@ pub struct PlanRequest {
     pub px_per_dbu: f64,
     /// Exact requests disable planner LOD/wash and all size culling.
     pub exact: bool,
+    /// Jobdeck wide-view policy: what the size cut drops keeps its
+    /// on-screen existence as a footprint wash (floe_vfs::ViewReq).
+    pub sub_cut_wash: bool,
 }
 
 impl PlanRequest {
@@ -83,6 +86,7 @@ mod tests {
             depth: FULL_DEPTH,
             px_per_dbu: f64::NAN,
             exact: true,
+            sub_cut_wash: false,
         };
         assert!(req.validate().is_err());
     }

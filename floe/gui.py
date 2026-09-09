@@ -3341,6 +3341,12 @@ class Viewer:
                                      round(d["pass_bytes_max"] / 1e6),
                                      round(d.get("batch_bytes_max", 0)
                                            / 1e6)))
+                        if d.get("streamed_passes"):
+                            text += ", %d streamed in %d slices" % (
+                                d["streamed_passes"], d["slices"])
+                        if d.get("wide_washes"):
+                            text += ", %s sub-cut washes" % fmt_count(
+                                d["wide_washes"])
                     # tiles = plan total (resident pages included);
                     # +new = pages actually shipped for this view
                     # (cache misses, summed over its stream rounds)

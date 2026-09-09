@@ -34,6 +34,15 @@ pub struct ViewReq {
     /// screen scale (pixels per dbu) for the M7 LOD density rule;
     /// 0.0 disables the rule (probes, kill switch)
     pub px_per_dbu: f64,
+    /// Jobdeck wide-view policy (JOBDECK.ko.md section 11 step 4):
+    /// what the size cut would DROP keeps its on-screen existence as
+    /// a footprint wash on its own layer(s) - sub-cut pages (and
+    /// page-BVH nodes) as their bbox, sub-cut child placements as the
+    /// placement footprint on the visible layers of the child's
+    /// recursive mask, pruned child-BVH nodes beyond the walk budget
+    /// as the node bbox (coarse). false keeps the plain viewer rule
+    /// (a size cut is a silent detail omission).
+    pub sub_cut_wash: bool,
 }
 
 /// one placement of a page cell in the working-set top. na/nb/va/vb
