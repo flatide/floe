@@ -41,6 +41,7 @@ pub use query::{
 pub use raster::{
     render_geometry_occupancy, render_geometry_occupancy_cancellable, render_geometry_styled,
     render_geometry_styled_cancellable, render_geometry_styled_cancellable_reuse,
+    render_geometry_styled_cancellable_windowed,
     render_geometry_styled_unbinned,
     render_geometry_styled_unbinned_cancellable, FrameReuse, GeometryRasterReport,
     GeometryRasterRequest, LayerFill,

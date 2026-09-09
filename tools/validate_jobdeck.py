@@ -648,17 +648,27 @@ def _rgb(hexcolor):
 _GEN = itertools.count(1)
 
 
+SPECKLE_ROWS = None      # the viewer's default: no repattern
+PATTERN_ROWS = "\n".join(("*.*." * 4, ".*.*" * 4, "**.." * 4, "..**" * 4) * 4)
+
+
 def _render_raw(worker, bbox_dbu, width, height, visible=None,
-                depth=None, cut_px=0.0, frames=False, with_result=False):
+                depth=None, cut_px=0.0, frames=False, with_result=False,
+                fill="solid", width_px=1):
     """One settled raw frame through a started worker: RGBA bytes.
-    Generations must increase per daemon: a repeated one is dropped."""
+    Generations must increase per daemon: a repeated one is dropped.
+    `fill`: "solid" (archival), "speckle" (the viewer's default) or a
+    16x16 pattern rows string."""
     gen = next(_GEN)
     solid = "\n".join(["*" * 16] * 16)
     keys = [(int(l["layer"]), int(l["datatype"]))
             for l in worker.cache.meta["layers"]]
+    rows = solid if fill == "solid" else (None if fill == "speckle"
+                                          else fill)
+    # speckle is the worker's default fill: only the widths are sent
     worker.submit({"kind": "repattern",
-                   "fills": [(k, solid) for k in keys],
-                   "widths": [(k, 1) for k in keys]})
+                   "fills": [] if rows is None else [(k, rows) for k in keys],
+                   "widths": [(k, width_px) for k in keys]})
     worker.submit({
         "kind": "render", "gen": gen, "scope": "headless",
         "bbox": tuple(float(v) for v in bbox_dbu), "view": None,
@@ -1834,6 +1844,82 @@ class PerfAnalysisTests(unittest.TestCase):
         doc = json.loads(rep.read_text())
         self.assertTrue(doc["complete"])
         self.assertEqual(doc["shots"][0]["over_budget_pages"], 0)
+
+
+class SubwindowTests(unittest.TestCase):
+    """Step 2 (analysis 2026-09-09): every placement is rastered and
+    composited only on the phase-aligned sub-window it can touch. The
+    pixels must equal the full-frame path (FLOE_RUST_DECK_SUBWINDOW=off)
+    byte for byte - solid, the viewer's speckle and a 16x16 pattern,
+    outline width 3, frames on at depth 0 - on the odd-sized frames the
+    phase rule depends on."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.env = {"FLOE_INDEX_BIN": str(ROOT / "rust" / "target" /
+                                         "release" / "floe-index"),
+                   "FLOE_RENDERD_BIN": str(ROOT / "rust" / "target" /
+                                           "release" / "floe-renderd")}
+        os.environ["FLOE_RENDERD_BIN"] = cls.env["FLOE_RENDERD_BIN"]
+        for deck in ("test.jb", "frames.jb"):
+            run_floe2("index", CLI / deck, "--jobs", "2", env=cls.env, ok=0)
+
+    def _frames(self, deck, switch, size, fill, width_px, frames, depth,
+                bbox=None):
+        from floe.jobdeck.viewer import DeckCache
+        os.environ["FLOE_RUST_DECK_SUBWINDOW"] = switch
+        try:
+            c = DeckCache(str(CLI / deck))
+            c.load()
+            try:
+                worker = jrender.DeckRenderWorker(c)
+                worker.start()
+                try:
+                    bb = bbox or tuple(c.meta["bbox"])
+                    rgba, result = _render_raw(
+                        worker, bb, size[0], size[1], depth=depth,
+                        frames=frames, with_result=True, fill=fill,
+                        width_px=width_px)
+                finally:
+                    worker.stop()
+            finally:
+                c.close()
+        finally:
+            del os.environ["FLOE_RUST_DECK_SUBWINDOW"]
+        return rgba, result
+
+    def test_subwindow_pixels_equal_the_full_frame(self):
+        cases = [
+            ("test.jb", (301, 237), "solid", 1, False, None),
+            ("test.jb", (301, 237), "speckle", 1, False, None),
+            ("test.jb", (263, 301), PATTERN_ROWS, 3, False, None),
+            ("frames.jb", (333, 211), "speckle", 1, True, 0),
+            ("frames.jb", (211, 333), PATTERN_ROWS, 2, True, 0),
+        ]
+        for deck, size, fill, width_px, frames, depth in cases:
+            full, _ = self._frames(deck, "off", size, fill, width_px,
+                                   frames, depth)
+            sub, result = self._frames(deck, "on", size, fill, width_px,
+                                       frames, depth)
+            self.assertEqual(sub, full, "%s %s fill=%s w=%d frames=%s"
+                             % (deck, size, fill[:8], width_px, frames))
+            self.assertGreater(_lit(sub), 0)
+        # a zoomed view where placements lie partly outside the frame
+        from floe.jobdeck.viewer import DeckCache
+        c = DeckCache(str(CLI / "test.jb"))
+        c.load()
+        bb = c.meta["bbox"]
+        c.close()
+        cx, cy = (bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2
+        w4, h4 = (bb[2] - bb[0]) / 4, (bb[3] - bb[1]) / 4
+        zoom = (cx - w4 * 0.7, cy - h4 * 0.3, cx + w4 * 1.1, cy + h4 * 0.9)
+        full, _ = self._frames("test.jb", "off", (317, 251), "speckle", 1,
+                               False, None, bbox=zoom)
+        sub, result = self._frames("test.jb", "on", (317, 251), "speckle", 1,
+                                   False, None, bbox=zoom)
+        self.assertEqual(sub, full, "zoomed view")
+        self.assertGreater(result["deck"]["passes_skipped"], 0,
+                           "placements outside the frame are skipped")
 
 
 class KLayoutOracleTests(unittest.TestCase):

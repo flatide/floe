@@ -22,7 +22,8 @@ use std::sync::Arc;
 use floe_ovm::BBox;
 
 use crate::{
-    render_geometry_styled_cancellable, Cache, CacheLayer, DecodedPageCache, FrameScene,
+    render_geometry_styled_cancellable, render_geometry_styled_cancellable_windowed, Cache,
+    CacheLayer, DecodedPageCache, FrameScene,
     GeometryRasterRequest, LayerFill, LayerStyle, PlanRequest, RasterViewBox,
     RenderCancellation, RenderStats, RgbaFrame, StyledGeometryRasterRequest, ViewBox,
 };
@@ -252,6 +253,62 @@ struct Placed {
     bbox: [f64; 4],
 }
 
+/// Device pixels of slack around a placement's bounds: the widest
+/// outline stroke (8) plus the half-pixel coverage rule.
+const WINDOW_SLACK: f64 = 9.0;
+
+/// The device window `(col0, row0, width, height)` of a placement whose
+/// deck bounds are `bbox` inside `view` (deck units); None when the
+/// placement misses the frame. The raster then runs on the FULL frame's
+/// mapping and tile grid, only skipping tiles outside the window, so
+/// the pixels are the full render's byte for byte.
+pub fn subwindow(bbox: &[f64; 4], view: &RasterViewBox, width: u32, height: u32) -> Option<(u32, u32, u32, u32)> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let span_x = view.x1 - view.x0;
+    let span_y = view.y1 - view.y0;
+    if !(span_x > 0.0) || !(span_y > 0.0) || bbox.iter().any(|v| !v.is_finite()) {
+        return None;
+    }
+    // device columns grow with x, rows grow DOWN (device y = y1 - y)
+    let px_x = |x: f64| (x - view.x0) * width as f64 / span_x;
+    let px_y = |y: f64| (view.y1 - y) * height as f64 / span_y;
+    let (x0, x1) = (px_x(bbox[0]), px_x(bbox[2]));
+    let (y0, y1) = (px_y(bbox[3]), px_y(bbox[1]));
+    let c0 = (x0 - WINDOW_SLACK).floor().max(0.0) as u32;
+    let c1 = ((x1 + WINDOW_SLACK).ceil().max(0.0) as u32).min(width);
+    let r0 = (y0 - WINDOW_SLACK).floor().max(0.0) as u32;
+    let r1 = ((y1 + WINDOW_SLACK).ceil().max(0.0) as u32).min(height);
+    if c0 >= c1 || r0 >= r1 {
+        return None;
+    }
+    Some((c0, r0, c1 - c0, r1 - r0))
+}
+
+/// The window `(col0, row0, w, h)` of a full-frame `pass` laid
+/// opaque-over onto `composite` (both `width` wide).
+pub fn overlay_window(composite: &mut [u8], width: u32, pass: &[u8], window: (u32, u32, u32, u32)) {
+    let (col0, row0, w, h) = window;
+    let stride = width as usize * 4;
+    let len = w as usize * 4;
+    for row in row0 as usize..(row0 + h) as usize {
+        let at = row * stride + col0 as usize * 4;
+        overlay(&mut composite[at..at + len], &pass[at..at + len]);
+    }
+}
+
+/// `split_frame_planes` over the window of a full-frame pass.
+pub fn split_frame_planes_window(pass: &[u8], width: u32, under: &mut [u8], over: &mut [u8], window: (u32, u32, u32, u32)) {
+    let (col0, row0, w, h) = window;
+    let stride = width as usize * 4;
+    let len = w as usize * 4;
+    for row in row0 as usize..(row0 + h) as usize {
+        let at = row * stride + col0 as usize * 4;
+        split_frame_planes(&pass[at..at + len], &mut under[at..at + len], &mut over[at..at + len]);
+    }
+}
+
 /// Pages decoded per budget check inside one pass, cut by their
 /// encoded size (budget / DECODE_CHUNK_DIV each, one page at least, at
 /// most DECODE_CHUNK_PAGES): a chunk may overshoot the budget by at
@@ -318,6 +375,11 @@ pub struct DeckRenderRequest {
     /// whose shapes live in child cells).
     pub frames: bool,
     pub mono: bool,
+    /// Step 2 (analysis 2026-09-09): raster and composite only the
+    /// sub-window of the frame a placement can touch, instead of the
+    /// whole W x H per pass. Off = the full-frame path (kill switch
+    /// FLOE_RUST_DECK_SUBWINDOW=off); pixels are identical either way.
+    pub subwindow: bool,
     pub workers: u16,
     pub decode_workers: u16,
     pub tile_size: u16,
@@ -597,6 +659,23 @@ impl Deck {
                 request,
                 &self.placements[placed_index].spec,
             )?;
+            // the device sub-window this placement can touch (step 2):
+            // the raster and the overlays run on it alone; the plan
+            // keeps the whole source view so page selection is
+            // unchanged
+            let window = if request.subwindow {
+                match subwindow(&self.placements[placed_index].bbox, &request.view, request.width, request.height) {
+                    Some(window) => window,
+                    None => {
+                        passes_skipped += 1;
+                        continue;
+                    }
+                }
+            } else {
+                (0, 0, request.width, request.height)
+            };
+            let (col0, row0, win_w, win_h) = window;
+            let device_window = [col0, row0, col0 + win_w, row0 + win_h];
             self.share_budget(source_index);
             let source = &mut self.sources[source_index];
             let planned = source.cache.plan(&plan_request)?;
@@ -699,11 +778,16 @@ impl Deck {
                     hierarchy_frames: true,
                     mono: request.mono,
                 };
-                let report =
-                    render_geometry_styled_cancellable(&scene, &frames_only, generation, cancellation)?;
+                let report = render_geometry_styled_cancellable_windowed(
+                    &scene,
+                    &frames_only,
+                    generation,
+                    cancellation,
+                    device_window,
+                )?;
                 frame_raster_us = frame_raster_us.saturating_add(report.stats.raster_us);
                 let split_started = std::time::Instant::now();
-                split_frame_planes(report.frame.pixels(), under, over);
+                split_frame_planes_window(report.frame.pixels(), request.width, under, over, window);
                 composite_us = composite_us.saturating_add(split_started.elapsed().as_micros() as u64);
                 accumulate_raster(&mut stats, &report.stats);
                 frame_member_paints = frame_member_paints.saturating_add(report.frame_member_paints);
@@ -716,9 +800,15 @@ impl Deck {
                 hierarchy_frames: false,
                 mono: request.mono,
             };
-            let report = render_geometry_styled_cancellable(&scene, &styled, generation, cancellation)?;
+            let report = render_geometry_styled_cancellable_windowed(
+                &scene,
+                &styled,
+                generation,
+                cancellation,
+                device_window,
+            )?;
             let overlay_started = std::time::Instant::now();
-            overlay(&mut composite, report.frame.pixels());
+            overlay_window(&mut composite, request.width, report.frame.pixels(), window);
             composite_us = composite_us.saturating_add(overlay_started.elapsed().as_micros() as u64);
             accumulate_raster(&mut stats, &report.stats);
             rectangle_member_paints =
@@ -846,6 +936,10 @@ pub fn overlay(composite: &mut [u8], pass: &[u8]) {
 
 /// The deck viewport in one placement's source units: `(v - d) / scale`.
 pub fn source_view(view: &RasterViewBox, placement: &DeckPlacement) -> Result<RasterViewBox, String> {
+    source_view_of(view, placement)
+}
+
+fn source_view_of(view: &RasterViewBox, placement: &DeckPlacement) -> Result<RasterViewBox, String> {
     let map = |v: f64, d: f64| (v - d) / placement.scale;
     RasterViewBox::new(
         map(view.x0, placement.dx),
@@ -1127,6 +1221,7 @@ mod tests {
             visible: None,
             frames: false,
             mono: false,
+            subwindow: true,
             workers: 1,
             decode_workers: 1,
             tile_size: 64,
@@ -1160,6 +1255,45 @@ mod tests {
         overlay(&mut layered, &[0, 0, 0, 255, 9, 9, 9, 255, 0, 0, 0, 0, 0, 0, 0, 255]);
         overlay(&mut layered, &over);
         assert_eq!(layered, vec![0, 0, 0, 255, 255, 255, 255, 255, 0, 0, 0, 255, 0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn subwindows_cover_the_placement_plus_slack() {
+        let view = RasterViewBox::new(0.0, 0.0, 1000.0, 1000.0).unwrap();
+        // a placement in the middle of a 100x100 frame: 30..40 px plus
+        // 9 px of slack each side (device rows grow down)
+        let w = subwindow(&[300.0, 300.0, 400.0, 400.0], &view, 100, 100).unwrap();
+        assert_eq!(w, (21, 51, 28, 28));
+        // the whole frame when the placement covers it
+        assert_eq!(subwindow(&[-1.0, -1.0, 2000.0, 2000.0], &view, 100, 100), Some((0, 0, 100, 100)));
+        // outside the view: no window
+        assert_eq!(subwindow(&[2000.0, 2000.0, 3000.0, 3000.0], &view, 100, 100), None);
+        // clamped at the frame edge
+        assert_eq!(subwindow(&[0.0, 0.0, 1000.0, 50.0], &view, 100, 100), Some((0, 86, 100, 14)));
+    }
+
+    #[test]
+    fn window_overlays_touch_the_window_only() {
+        let mut composite = vec![0u8; 4 * 4 * 4]; // 4x4 frame
+        let mut pass = vec![0u8; 64];
+        for y in 0..4 {
+            for x in 0..4 {
+                pass[(y * 4 + x) * 4..(y * 4 + x) * 4 + 4].copy_from_slice(&[9, 9, 9, 255]);
+            }
+        }
+        overlay_window(&mut composite, 4, &pass, (1, 2, 2, 2));
+        let px = |x: usize, y: usize| composite[(y * 4 + x) * 4];
+        assert_eq!((px(1, 2), px(2, 3), px(0, 2), px(3, 3), px(1, 1)), (9, 9, 0, 0, 0));
+        let mut under = vec![0u8; 64];
+        let mut over = vec![0u8; 64];
+        let mut frames = vec![0u8; 64];
+        frames[(0 * 4 + 2) * 4..(0 * 4 + 3) * 4].copy_from_slice(&[128, 128, 128, 255]);
+        frames[(0 * 4 + 3) * 4..(0 * 4 + 4) * 4].copy_from_slice(&[255, 255, 255, 255]);
+        frames[(1 * 4 + 0) * 4..(1 * 4 + 1) * 4].copy_from_slice(&[128, 128, 128, 255]); // outside
+        split_frame_planes_window(&frames, 4, &mut under, &mut over, (2, 0, 2, 2));
+        assert_eq!(&under[(0 * 4 + 2) * 4..(0 * 4 + 3) * 4], &[128, 128, 128, 255]);
+        assert_eq!(&over[(0 * 4 + 3) * 4..(0 * 4 + 4) * 4], &[255, 255, 255, 255]);
+        assert_eq!(&under[(1 * 4 + 0) * 4..(1 * 4 + 1) * 4], &[0, 0, 0, 0], "outside the window");
     }
 
     #[test]

@@ -345,6 +345,7 @@ pub fn render_geometry_styled_cancellable_reuse(
         true,
         reuse,
         keep_geometry,
+        None,
     )
 }
 
@@ -604,7 +605,40 @@ fn render_geometry(
     guard: Option<RenderGuard<'_>>,
     work_bin: bool,
 ) -> Result<GeometryRasterReport, String> {
-    render_geometry_impl(scene, request, mode, guard, work_bin, None, false)
+    render_geometry_impl(scene, request, mode, guard, work_bin, None, false, None)
+}
+
+/// A styled render restricted to the device window `[col0, row0, col1,
+/// row1)` of the full `request` frame (jobdeck step 2, 2026-09-09):
+/// the world-to-device mapping, the tile grid and every fill phase
+/// are those of the full frame, so the window's pixels are byte-equal
+/// to a full render; tiles outside it are left as background and the
+/// work-bin collection is culled to the window.
+pub fn render_geometry_styled_cancellable_windowed(
+    scene: &FrameScene,
+    request: &StyledGeometryRasterRequest,
+    generation: u64,
+    cancellation: &RenderCancellation,
+    window: [u32; 4],
+) -> Result<GeometryRasterReport, String> {
+    request.validate()?;
+    let [c0, r0, c1, r1] = window;
+    if c0 >= c1 || r0 >= r1 || c1 > request.raster.width || r1 > request.raster.height {
+        return Err(format!("raster window out of bounds: {window:?}"));
+    }
+    render_geometry_impl(
+        scene,
+        &request.raster,
+        RenderMode::Styled(request),
+        Some(RenderGuard {
+            generation,
+            cancellation,
+        }),
+        true,
+        None,
+        false,
+        Some(window),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -616,6 +650,7 @@ fn render_geometry_impl(
     work_bin: bool,
     reuse: Option<&FrameReuse>,
     keep_geometry: bool,
+    window: Option<[u32; 4]>,
 ) -> Result<GeometryRasterReport, String> {
     check_cancelled(guard)?;
     if let Some(reuse) = reuse {
@@ -645,7 +680,7 @@ fn render_geometry_impl(
                 .map(|layer| layer.outline_width)
                 .max()
                 .unwrap_or(1);
-            collect_work_bin(scene, request, styled, stroke_pixels, guard, &mut stats)?
+            collect_work_bin(scene, request, styled, stroke_pixels, guard, &mut stats, window)?
         }
         _ => None,
     };
@@ -701,6 +736,18 @@ fn render_geometry_impl(
                     let row0 = tile_boundary(request.height, tile_y, tile_size);
                     let row1 = tile_boundary(request.height, tile_y + 1, tile_size);
                     let tile_started = Instant::now();
+                    // a tile outside the device window stays background
+                    // (jobdeck step 2): no walk, no paint, same pixels
+                    if let Some([wc0, wr0, wc1, wr1]) = window {
+                        if col1 <= wc0 || col0 >= wc1 || row1 <= wr0 || row0 >= wr1 {
+                            outputs.push(RasterTileOutput {
+                                tile: RasterBand::new_tile(request, col0, col1, row0, row1)?,
+                                stats: RenderStats::default(),
+                                counters: RasterCounters::default(),
+                            });
+                            continue;
+                        }
+                    }
                     // §F2R-16: a tile fully inside the shifted previous
                     // frame's valid region copies its pixels instead of
                     // rastering - byte-exact under the 16px snap.
@@ -1160,8 +1207,10 @@ fn collect_work_bin(
     stroke_pixels: u8,
     guard: Option<RenderGuard<'_>>,
     stats: &mut RenderStats,
+    window: Option<[u32; 4]>,
 ) -> Result<Option<WorkBin>, String> {
-    let cull_view = tile_world_view(request, 0, request.width, 0, request.height, stroke_pixels)?;
+    let [wc0, wr0, wc1, wr1] = window.unwrap_or([0, 0, request.width, request.height]);
+    let cull_view = tile_world_view(request, wc0, wc1, wr0, wr1, stroke_pixels)?;
     let mut plane_of = std::collections::HashMap::new();
     for (plane, layer) in styled.layers.iter().enumerate() {
         plane_of.insert(layer.layer_idx, plane);

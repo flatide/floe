@@ -1581,6 +1581,9 @@ fn run_deck_render(
         visible,
         frames: command.frames,
         mono: command.mono,
+        // FLOE_RUST_DECK_SUBWINDOW=off: field kill switch back to the
+        // full-frame pass per placement (identical pixels)
+        subwindow: std::env::var("FLOE_RUST_DECK_SUBWINDOW").as_deref() != Ok("off"),
         workers: command.jobs.unwrap_or(state.jobs),
         decode_workers: command.decode_jobs.or(command.jobs).unwrap_or(state.jobs),
         tile_size: command.tile_size,
