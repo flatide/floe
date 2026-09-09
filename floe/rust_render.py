@@ -1117,6 +1117,10 @@ class RustRenderWorker:
                 "pass_bytes_max": _wire_int(fields, "pass_bytes_max"),
                 "scene_us": _wire_int(fields, "scene_us"),
                 "frame_raster_us": _wire_int(fields, "frame_raster_us"),
+                # the per-raster SUM over every pass, slice and frames
+                # pass (the line's raster_us); serial frames satisfy
+                # raster_wall_us >= raster_us
+                "raster_us": _wire_int(fields, "raster_us"),
                 "composite_us": _wire_int(fields, "composite_us"),
                 "scene_reuses": _wire_int(fields, "scene_reuses"),
                 # review 2026-09-09 (5th): raster_us above is the SUM

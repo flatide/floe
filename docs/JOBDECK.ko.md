@@ -393,7 +393,7 @@ INCOMPLETE)로 보고하며 덱은 열린다. 인덱싱이 일부 실패해도 �
 | # | 지적 | 판정 | 조치 |
 |---|---|---|---|
 | P2-1 | 스트리밍에서 `decode_pages` 제한으로 빠진 페이지가 정상 완료로 보고됨(4페이지 플랜, `decode_pages=2` → 2페이지만 그리고 `partial=0 deferred=0`, 전체 렌더와 15,984 px 차이). 기본 GUI 요청(제한 없음)에는 없음 | 사실 | 선택 단계에서 제외된 페이지 수를 **두 경로에 공통으로** `deferred`에 더하고 `partial`을 세운다(whole-scene 경로는 scene의 deferred로 partial만 잡고 수는 세지 않았고, 스트리밍 경로는 슬라이스 scene이 구조상 partial이라 아무것도 보고하지 않았다). gate `ReviewFixTests8.test_p2_1`: dense.jb 1 MiB·`decode_pages=2`(render 명령에 삽입)에서 `over_budget_pages`>0·전체 렌더와 다름, 제한 없으면 0·동일 |
-| P2-2 | 스트리밍 경로의 `raster_wall_us`에 계층 프레임 raster 시간이 빠짐(직렬 구간) | 사실 | `stream_pass`의 프레임 raster도 벽시계에 더한다. gate `StreamTests` depth 1 케이스(dense.oas D0에 손자 셀 K 추가: D 페이지는 스트리밍, K는 프레임): `frame_passes` 1·스트리밍 1·`raster_wall_us` ≥ `frame_raster_us`·픽셀 동일 |
+| P2-2 | 스트리밍 경로의 `raster_wall_us`에 계층 프레임 raster 시간이 빠짐(직렬 구간) | 사실 | `stream_pass`의 프레임 raster도 벽시계에 더한다. gate `StreamTests` depth 1 케이스(dense.oas D0에 손자 셀 K 추가: D 페이지는 스트리밍, K는 프레임): `frame_passes` 1·스트리밍 1·픽셀 동일; 리뷰 보완(비차단)으로 직렬 fixture의 모든 케이스에서 `raster_wall_us` ≥ `raster_us`(geometry 슬라이스 + 프레임 합, deck 카운터에 노출)를 검사한다 — wall ≥ frame만으로는 이전 버그(11.97 < 13.84 ms)도 통과했다 |
 
 
 패스 수만큼 부풀어 있다.

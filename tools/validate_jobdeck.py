@@ -2118,8 +2118,14 @@ class StreamTests(unittest.TestCase):
             if kw["depth"] == 1:
                 self.assertEqual(d["frame_passes"], 1, d)
                 self.assertGreater(d["frame_raster_us"], 0, d)
-                self.assertGreaterEqual(d["raster_wall_us"],
-                                        d["frame_raster_us"], d)
+            # one pass, so every raster (geometry slices and the frames
+            # pass) ran serially: the wall-clock covers their SUM (the
+            # line's raster_us), not only the frames or only the
+            # geometry (review 2026-09-10: wall >= frame alone let the
+            # geometry-only wall of 11.97 ms pass a 13.84 ms sum)
+            self.assertEqual(d["passes"], 1, d)
+            self.assertGreaterEqual(d["raster_us"], d["frame_raster_us"], d)
+            self.assertGreaterEqual(d["raster_wall_us"], d["raster_us"], d)
             self.assertEqual(streamed, whole, kw)
             self.assertGreater(_lit(whole), 0)
         # a zoomed view: the pass streams on its sub-window
