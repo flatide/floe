@@ -340,6 +340,14 @@ RENDERD_VERSION 0.12.62, `__version__` 0.12.73.
 
 `__version__` 0.12.75 (Python·gate만; renderd 0.12.62 유지).
 
+### 현장 2026-09-09: 소스 인덱싱 실패 `TRAPEZOID: out of spike scope`
+
+실제 덱의 소스(마스크 데이터)에 OASIS TRAPEZOID/CTRAPEZOID 레코드가 있어 인덱서가
+거부했다. `floe-oasis` 파서가 23–26 레코드를 KLayout과 같은 꼭짓점 규칙으로
+폴리곤화한다(README의 인덱서 지원 레코드, `tools/validate_oasis_shapes.py`).
+같이 고친 것: 뷰어의 인덱싱 모달 로그가 실패·취소 시 바로 닫히지 않고
+`close` 버튼으로 남아 오류 메시지를 읽을 수 있다. RENDERD_VERSION 0.12.63.
+
 ## 10. 미결·후속
 - LY/DT cross vs zip, 회전/미러: 실덱 사례가 나오면 확정.
 - 실덱에서 M2 성능 확인: 배치 수 × 패스 비용(플랜+디코드+라스터 각 1회).

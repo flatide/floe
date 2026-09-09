@@ -2,9 +2,11 @@
 //! record-level document - rectangles, polygons and placements with
 //! their repetitions intact. Scope is the record inventory measured
 //! on the target assets (RECTANGLE / POLYGON / PLACEMENT id 17 /
-//! TEXT / tables); PATH, TRAPEZOID, CTRAPEZOID, CIRCLE, XGEOMETRY
-//! and magnified/arbitrary-angle placements raise a clear error so
-//! the production version grows deliberately, not silently.
+//! TEXT / tables) plus PATH, CIRCLE and - since mask data (jobdeck
+//! sources, 2026-09-09) is full of them - TRAPEZOID and CTRAPEZOID,
+//! materialized as PolyRec; XGEOMETRY and magnified/arbitrary-angle
+//! placements raise a clear error so the production version grows
+//! deliberately, not silently.
 
 use crate::{err, Cur, OasisError, Result};
 use std::collections::HashMap;
@@ -154,6 +156,85 @@ const COS64: [f64; 17] = [
     0.0,
 ];
 
+/// TRAPEZOID (records 23-25) vertices relative to the anchor, as
+/// KLayout reads them (the oracle; hand-built records, 2026-09-09):
+/// horizontal - the parallel sides are the bottom and top edges,
+/// delta-a shifts the west end (top edge right for +, bottom edge
+/// right for -), delta-b the east end (bottom edge left for +, top
+/// edge left for -); vertical - the parallel sides are west and
+/// east, delta-a shifts the south end, delta-b the north end.
+fn trapezoid_points(vertical: bool, w: i64, h: i64, da: i64, db: i64) -> Vec<(i64, i64)> {
+    if vertical {
+        vec![
+            (0, da.max(0)),
+            (0, h - (-db).max(0)),
+            (w, h - db.max(0)),
+            (w, (-da).max(0)),
+        ]
+    } else {
+        vec![
+            ((-da).max(0), 0),
+            (da.max(0), h),
+            (w - (-db).max(0), h),
+            (w - db.max(0), 0),
+        ]
+    }
+}
+
+/// CTRAPEZOID (record 26) vertices relative to the anchor for the 26
+/// types, as KLayout reads them (the oracle; every type checked at two
+/// sizes, 2026-09-09). Returns the points and the dimensions the type
+/// implies (KLayout writes those back into the geometry-w/h modals: a
+/// following record without W/H sees them).
+fn ctrapezoid_points(t: u64, w: i64, h: i64) -> Option<(Vec<(i64, i64)>, Option<i64>, Option<i64>)> {
+    let pts = match t {
+        0 => vec![(0, 0), (0, h), (w - h, h), (w, 0)],
+        1 => vec![(0, 0), (0, h), (w, h), (w - h, 0)],
+        2 => vec![(0, 0), (h, h), (w, h), (w, 0)],
+        3 => vec![(h, 0), (0, h), (w, h), (w, 0)],
+        4 => vec![(0, 0), (h, h), (w - h, h), (w, 0)],
+        5 => vec![(h, 0), (0, h), (w, h), (w - h, 0)],
+        6 => vec![(0, 0), (h, h), (w, h), (w - h, 0)],
+        7 => vec![(h, 0), (0, h), (w - h, h), (w, 0)],
+        8 => vec![(0, 0), (0, h), (w, h - w), (w, 0)],
+        9 => vec![(0, 0), (0, h - w), (w, h), (w, 0)],
+        10 => vec![(0, 0), (0, h), (w, h), (w, w)],
+        11 => vec![(w, 0), (0, w), (0, h), (w, h)],
+        12 => vec![(0, 0), (0, h), (w, h - w), (w, w)],
+        13 => vec![(w, 0), (0, w), (0, h - w), (w, h)],
+        14 => vec![(0, 0), (0, h - w), (w, h), (w, w)],
+        15 => vec![(w, 0), (0, w), (0, h), (w, h - w)],
+        16 => return Some((vec![(0, 0), (0, w), (w, 0)], None, Some(w))),
+        17 => return Some((vec![(0, 0), (0, w), (w, w)], None, Some(w))),
+        18 => return Some((vec![(0, 0), (w, w), (w, 0)], None, Some(w))),
+        19 => return Some((vec![(w, 0), (0, w), (w, w)], None, Some(w))),
+        20 => return Some((vec![(0, 0), (h, h), (2 * h, 0)], Some(2 * h), None)),
+        21 => return Some((vec![(h, 0), (0, h), (2 * h, h)], Some(2 * h), None)),
+        22 => return Some((vec![(0, 0), (0, 2 * w), (w, w)], None, Some(2 * w))),
+        23 => return Some((vec![(w, 0), (0, w), (w, 2 * w)], None, Some(2 * w))),
+        24 => vec![(0, 0), (0, h), (w, h), (w, 0)],
+        25 => return Some((vec![(0, 0), (0, w), (w, w), (w, 0)], None, Some(w))),
+        _ => return None,
+    };
+    Some((pts, None, None))
+}
+
+/// Drop consecutive duplicate vertices (a zero-length side of a
+/// degenerate trapezoid) so the polygon path never sees a repeated
+/// point; fewer than three left means no area.
+fn dedupe_ring(pts: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
+    let mut out: Vec<(i64, i64)> = Vec::with_capacity(pts.len());
+    for p in pts {
+        if out.last() != Some(&p) {
+            out.push(p);
+        }
+    }
+    while out.len() > 1 && out.first() == out.last() {
+        out.pop();
+    }
+    out
+}
+
 /// CIRCLE materialization: inscribed 64-gon, vertex 0 on +x, CCW.
 /// The four axis vertices are exact, so the polygon bbox equals
 /// the circle's. Consecutive duplicates collapse (a radius under
@@ -203,6 +284,7 @@ struct Modal {
     geo_w: Option<i64>,
     geo_h: Option<i64>,
     circle_r: Option<i64>,
+    ctrap_type: Option<u64>,
     poly_pts: Option<Vec<(i64, i64)>>, // deltas from anchor
     path_pts: Option<Vec<(i64, i64)>>, // separate modal per spec
     path_hw: Option<i64>,
@@ -928,7 +1010,118 @@ fn parse_records(
                     rep,
                 });
             }
-            23..=26 => return err(c.here(), "TRAPEZOID: out of spike scope"),
+            23..=25 => {
+                // TRAPEZOID: OWHXYRDL; 23 carries delta-a and delta-b,
+                // 24 delta-a only, 25 delta-b only
+                let info = c.byte()?;
+                let cur = match b.cur {
+                    Some(i) => i,
+                    None => return err(c.here(), "shape outside cell"),
+                };
+                if info & 0x01 != 0 {
+                    m.layer = Some(c.uint()?);
+                }
+                if info & 0x02 != 0 {
+                    m.datatype = Some(c.uint()?);
+                }
+                if info & 0x40 != 0 {
+                    m.geo_w = Some(c.uint()? as i64);
+                }
+                if info & 0x20 != 0 {
+                    m.geo_h = Some(c.uint()? as i64);
+                }
+                let w = m.geo_w
+                    .ok_or_else(|| OasisError::Format("no width".into()))?;
+                let h = m.geo_h
+                    .ok_or_else(|| OasisError::Format("no height".into()))?;
+                let da = if id == 25 { 0 } else { c.sint()? };
+                let db = if id == 24 { 0 } else { c.sint()? };
+                if info & 0x10 != 0 {
+                    coord(c, &mut m.geo_x, m.relative)?;
+                }
+                if info & 0x08 != 0 {
+                    coord(c, &mut m.geo_y, m.relative)?;
+                }
+                let rep = if info & 0x04 != 0 {
+                    read_rep(c, &mut m.rep)?
+                } else {
+                    Rep::One
+                };
+                let (l, d) = match (m.layer, m.datatype) {
+                    (Some(l), Some(d)) => (l as u32, d as u32),
+                    _ => return err(c.here(), "trapezoid before layer modal"),
+                };
+                b.reg_layer(l, d);
+                let pts = dedupe_ring(trapezoid_points(info & 0x80 != 0, w, h, da, db));
+                if pts.len() >= 3 {
+                    let pts = pts.into_iter().map(|(dx, dy)| (m.geo_x + dx, m.geo_y + dy)).collect();
+                    b.cells[cur].polys.push(PolyRec { layer: l, dt: d, pts, rep });
+                }
+            }
+            26 => {
+                // CTRAPEZOID: TWHXYRDL, one of 26 fixed shapes
+                let info = c.byte()?;
+                let cur = match b.cur {
+                    Some(i) => i,
+                    None => return err(c.here(), "shape outside cell"),
+                };
+                if info & 0x01 != 0 {
+                    m.layer = Some(c.uint()?);
+                }
+                if info & 0x02 != 0 {
+                    m.datatype = Some(c.uint()?);
+                }
+                if info & 0x80 != 0 {
+                    m.ctrap_type = Some(c.uint()?);
+                }
+                if info & 0x40 != 0 {
+                    m.geo_w = Some(c.uint()? as i64);
+                }
+                if info & 0x20 != 0 {
+                    m.geo_h = Some(c.uint()? as i64);
+                }
+                let t = m.ctrap_type
+                    .ok_or_else(|| OasisError::Format("ctrapezoid without type".into()))?;
+                // the types that imply one dimension read only the other
+                let w = match t {
+                    20 | 21 => m.geo_w.unwrap_or(0),
+                    _ => m.geo_w.ok_or_else(|| OasisError::Format("no width".into()))?,
+                };
+                let h = match t {
+                    16..=19 | 22 | 23 | 25 => m.geo_h.unwrap_or(0),
+                    _ => m.geo_h.ok_or_else(|| OasisError::Format("no height".into()))?,
+                };
+                if info & 0x10 != 0 {
+                    coord(c, &mut m.geo_x, m.relative)?;
+                }
+                if info & 0x08 != 0 {
+                    coord(c, &mut m.geo_y, m.relative)?;
+                }
+                let rep = if info & 0x04 != 0 {
+                    read_rep(c, &mut m.rep)?
+                } else {
+                    Rep::One
+                };
+                let (l, d) = match (m.layer, m.datatype) {
+                    (Some(l), Some(d)) => (l as u32, d as u32),
+                    _ => return err(c.here(), "ctrapezoid before layer modal"),
+                };
+                let Some((pts, implied_w, implied_h)) = ctrapezoid_points(t, w, h) else {
+                    return err(c.here(), &format!("CTRAPEZOID type {} is outside 0..=25", t));
+                };
+                if let Some(iw) = implied_w {
+                    m.geo_w = Some(iw);
+                }
+                if let Some(ih) = implied_h {
+                    m.geo_h = Some(ih);
+                }
+                b.reg_layer(l, d);
+                let pts = dedupe_ring(pts);
+                if pts.len() >= 3 {
+                    let pts = pts.into_iter().map(|(dx, dy)| (m.geo_x + dx, m.geo_y + dy)).collect();
+                    b.cells[cur].polys.push(PolyRec { layer: l, dt: d, pts, rep });
+                }
+            }
             27 => {
                 // CIRCLE (00rXYRDL) - materialized as an inscribed
                 // 64-gon PolyRec so it rides the existing polygon
@@ -1668,6 +1861,241 @@ mod tests {
         assert_eq!(names[&(15, 192)], "bbb");
         assert!(!aliases.contains_key(&(15, 0)));
         assert_eq!(aliases[&(16, 192)], ["ccc"]);
+    }
+
+    fn shape_fixture(body: impl FnOnce(&mut crate::write::W)) -> Doc {
+        use crate::write::W;
+        let mut w = W::new();
+        w.out.extend_from_slice(b"%SEMI-OASIS\r\n");
+        w.uint(1);
+        w.string(b"1.0");
+        w.real_f64(1000.0);
+        w.uint(0);
+        for _ in 0..12 {
+            w.uint(0);
+        }
+        w.uint(14);
+        w.string(b"TOP");
+        body(&mut w);
+        w.uint(2);
+        parse_doc(&w.out).expect("fixture parses")
+    }
+
+    fn point_set(pts: &[(i64, i64)], x0: i64) -> Vec<(i64, i64)> {
+        let mut v: Vec<(i64, i64)> = pts.iter().map(|&(x, y)| (x - x0, y)).collect();
+        v.sort();
+        v.dedup();
+        v
+    }
+
+    fn sorted(mut v: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
+        v.sort();
+        v.dedup();
+        v
+    }
+
+    /// TRAPEZOID records 23/24/25, both orientations, every delta sign
+    /// combination: the vertex sets KLayout reads from the same bytes
+    /// (hand-built fixture, 2026-09-09).
+    #[test]
+    fn trapezoid_records_match_klayout() {
+        let cases: Vec<(u64, u8, i64, i64, Vec<(i64, i64)>)> = vec![
+            (23, 0, 20, -10, vec![(0, 0), (20, 40), (90, 40), (100, 0)]),
+            (23, 0, -20, 10, vec![(20, 0), (0, 40), (100, 40), (90, 0)]),
+            (23, 0, 20, 10, vec![(0, 0), (20, 40), (100, 40), (90, 0)]),
+            (23, 0, -20, -10, vec![(20, 0), (0, 40), (90, 40), (100, 0)]),
+            (23, 0, 0, 30, vec![(0, 0), (0, 40), (100, 40), (70, 0)]),
+            (23, 0, 30, 0, vec![(0, 0), (30, 40), (100, 40), (100, 0)]),
+            (23, 1, 20, -10, vec![(100, 0), (0, 20), (0, 30), (100, 40)]),
+            (23, 1, -20, 10, vec![(0, 0), (0, 40), (100, 30), (100, 20)]),
+            (23, 1, 20, 10, vec![(100, 0), (0, 20), (0, 40), (100, 30)]),
+            (23, 1, -20, -10, vec![(0, 0), (0, 30), (100, 40), (100, 20)]),
+            (23, 1, 0, 30, vec![(0, 0), (0, 40), (100, 10), (100, 0)]),
+            (23, 1, 30, 0, vec![(100, 0), (0, 30), (0, 40), (100, 40)]),
+            (24, 0, 30, 0, vec![(0, 0), (30, 40), (100, 40), (100, 0)]),
+            (24, 0, -30, 0, vec![(30, 0), (0, 40), (100, 40), (100, 0)]),
+            (25, 0, 0, 30, vec![(0, 0), (0, 40), (100, 40), (70, 0)]),
+            (25, 0, 0, -30, vec![(0, 0), (0, 40), (70, 40), (100, 0)]),
+            (24, 1, 30, 0, vec![(100, 0), (0, 30), (0, 40), (100, 40)]),
+            (24, 1, -30, 0, vec![(0, 0), (0, 40), (100, 40), (100, 30)]),
+            (25, 1, 0, 30, vec![(0, 0), (0, 40), (100, 10), (100, 0)]),
+            (25, 1, 0, -30, vec![(0, 0), (0, 10), (100, 40), (100, 0)]),
+        ];
+        let expected: Vec<Vec<(i64, i64)>> = cases.iter().map(|c| sorted(c.4.clone())).collect();
+        let doc = shape_fixture(|w| {
+            for (i, (rec, o, da, db, _)) in cases.iter().enumerate() {
+                let x = i as i64 * 400;
+                w.uint(*rec);
+                w.byte((o << 7) | 0x78 | if i == 0 { 0x03 } else { 0 });
+                if i == 0 {
+                    w.uint(1);
+                    w.uint(0);
+                }
+                w.uint(100);
+                w.uint(40);
+                if *rec != 25 {
+                    w.sint(*da);
+                }
+                if *rec != 24 {
+                    w.sint(*db);
+                }
+                w.sint(x);
+                w.sint(0);
+            }
+        });
+        let top = &doc.cells[doc.top];
+        assert_eq!(top.polys.len(), cases.len());
+        for (i, p) in top.polys.iter().enumerate() {
+            assert_eq!((p.layer, p.dt), (1, 0));
+            assert_eq!(point_set(&p.pts, i as i64 * 400), expected[i], "case {i}");
+        }
+    }
+
+    /// CTRAPEZOID record 26: all 26 types at two sizes (w,h) = (100,30)
+    /// and (60,100), the vertex sets KLayout reads; degenerate sides
+    /// collapse; the implied dimension is written back into the
+    /// geometry-w/h modals like KLayout does.
+    #[test]
+    fn ctrapezoid_types_match_klayout() {
+        let a: Vec<Vec<(i64, i64)>> = vec![
+            vec![(0, 0), (0, 30), (70, 30), (100, 0)],
+            vec![(0, 0), (0, 30), (100, 30), (70, 0)],
+            vec![(0, 0), (30, 30), (100, 30), (100, 0)],
+            vec![(30, 0), (0, 30), (100, 30), (100, 0)],
+            vec![(0, 0), (30, 30), (70, 30), (100, 0)],
+            vec![(30, 0), (0, 30), (100, 30), (70, 0)],
+            vec![(0, 0), (30, 30), (100, 30), (70, 0)],
+            vec![(30, 0), (0, 30), (70, 30), (100, 0)],
+            vec![(100, -70), (0, 30), (0, 0), (100, 0)],
+            vec![(0, -70), (0, 0), (100, 0), (100, 30)],
+            vec![(0, 0), (100, 100), (100, 30), (0, 30)],
+            vec![(100, 0), (100, 30), (0, 30), (0, 100)],
+            vec![(100, -70), (0, 30), (0, 0), (100, 100)],
+            vec![(0, -70), (0, 100), (100, 0), (100, 30)],
+            vec![(0, -70), (0, 0), (100, 100), (100, 30)],
+            vec![(100, -70), (0, 30), (0, 100), (100, 0)],
+            vec![(0, 0), (0, 100), (100, 0)],
+            vec![(0, 0), (0, 100), (100, 100)],
+            vec![(0, 0), (100, 100), (100, 0)],
+            vec![(100, 0), (0, 100), (100, 100)],
+            vec![(0, 0), (30, 30), (60, 0)],
+            vec![(30, 0), (0, 30), (60, 30)],
+            vec![(0, 0), (0, 200), (100, 100)],
+            vec![(100, 0), (0, 100), (100, 200)],
+            vec![(0, 0), (0, 30), (100, 30), (100, 0)],
+            vec![(0, 0), (0, 100), (100, 100), (100, 0)],
+        ];
+        let b: Vec<Vec<(i64, i64)>> = vec![
+            vec![(0, 0), (0, 100), (-40, 100), (60, 0)],
+            vec![(-40, 0), (0, 0), (0, 100), (60, 100)],
+            vec![(0, 0), (100, 100), (60, 100), (60, 0)],
+            vec![(60, 0), (100, 0), (0, 100), (60, 100)],
+            vec![(0, 0), (60, 0), (-40, 100), (100, 100)],
+            vec![(-40, 0), (60, 100), (0, 100), (100, 0)],
+            vec![(-40, 0), (60, 100), (100, 100), (0, 0)],
+            vec![(60, 0), (-40, 100), (0, 100), (100, 0)],
+            vec![(0, 0), (0, 100), (60, 40), (60, 0)],
+            vec![(0, 0), (0, 40), (60, 100), (60, 0)],
+            vec![(0, 0), (0, 100), (60, 100), (60, 60)],
+            vec![(60, 0), (0, 60), (0, 100), (60, 100)],
+            vec![(0, 0), (0, 100), (60, 40), (60, 60)],
+            vec![(60, 0), (0, 60), (0, 40), (60, 100)],
+            vec![(0, 0), (0, 40), (60, 100), (60, 60)],
+            vec![(60, 0), (0, 60), (0, 100), (60, 40)],
+            vec![(0, 0), (0, 60), (60, 0)],
+            vec![(0, 0), (0, 60), (60, 60)],
+            vec![(0, 0), (60, 60), (60, 0)],
+            vec![(60, 0), (0, 60), (60, 60)],
+            vec![(0, 0), (100, 100), (200, 0)],
+            vec![(100, 0), (0, 100), (200, 100)],
+            vec![(0, 0), (0, 120), (60, 60)],
+            vec![(60, 0), (0, 60), (60, 120)],
+            vec![(0, 0), (0, 100), (60, 100), (60, 0)],
+            vec![(0, 0), (0, 60), (60, 60), (60, 0)],
+        ];
+        for (wd, ht, expected) in [(100u64, 30u64, &a), (60, 100, &b)] {
+            let doc = shape_fixture(|w| {
+                for t in 0..26u64 {
+                    w.uint(26);
+                    w.byte(0xF8 | if t == 0 { 0x03 } else { 0 });
+                    if t == 0 {
+                        w.uint(1);
+                        w.uint(0);
+                    }
+                    w.uint(t);
+                    w.uint(wd);
+                    w.uint(ht);
+                    w.sint(t as i64 * 1000);
+                    w.sint(0);
+                }
+            });
+            let top = &doc.cells[doc.top];
+            assert_eq!(top.polys.len(), 26, "every type yields a polygon at {wd}x{ht}");
+            for (t, p) in top.polys.iter().enumerate() {
+                assert_eq!(
+                    point_set(&p.pts, t as i64 * 1000),
+                    sorted(expected[t].clone()),
+                    "type {t} at {wd}x{ht}"
+                );
+            }
+        }
+        // the 2:1 size collapses type 4's top side to a point and type
+        // 5 to a triangle; both still parse (KLayout keeps 4/3 points)
+        let doc = shape_fixture(|w| {
+            for t in [4u64, 5] {
+                w.uint(26);
+                w.byte(0xF8 | if t == 4 { 0x03 } else { 0 });
+                if t == 4 {
+                    w.uint(1);
+                    w.uint(0);
+                }
+                w.uint(t);
+                w.uint(100);
+                w.uint(50);
+                w.sint(t as i64 * 1000);
+                w.sint(0);
+            }
+        });
+        let top = &doc.cells[doc.top];
+        assert_eq!(top.polys.len(), 2);
+        assert_eq!(point_set(&top.polys[1].pts, 5000), sorted(vec![(50, 0), (0, 50), (100, 50)]));
+        // implied dimensions update the modals: a rectangle after a
+        // type-16 triangle (h := w) and after a type-20 triangle
+        // (w := 2h) takes them, as KLayout does
+        let doc = shape_fixture(|w| {
+            w.uint(20);
+            w.byte(0x7B);
+            w.uint(1);
+            w.uint(0);
+            w.uint(100);
+            w.uint(30);
+            w.sint(0);
+            w.sint(0);
+            w.uint(26);
+            w.byte(0xD8); // T W X Y
+            w.uint(16);
+            w.uint(100);
+            w.sint(1000);
+            w.sint(0);
+            w.uint(20);
+            w.byte(0x18); // X Y only: modal w/h
+            w.sint(2000);
+            w.sint(0);
+            w.uint(26);
+            w.byte(0xB8); // T H X Y
+            w.uint(20);
+            w.uint(30);
+            w.sint(3000);
+            w.sint(0);
+            w.uint(20);
+            w.byte(0x18);
+            w.sint(4000);
+            w.sint(0);
+        });
+        let top = &doc.cells[doc.top];
+        assert_eq!(top.rects.len(), 3);
+        assert_eq!((top.rects[1].w, top.rects[1].h), (100, 100), "h := w after type 16");
+        assert_eq!((top.rects[2].w, top.rects[2].h), (60, 30), "w := 2h after type 20");
     }
 
     /// CIRCLE (record 27) parses into an inscribed 64-gon PolyRec:

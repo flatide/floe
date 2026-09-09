@@ -851,6 +851,12 @@ PATH를 조용히 누락하지 않고 명시적 오류로 반환한다.
 
 ## Rust 인덱서 (floe-index)
 
+지원 레코드: RECTANGLE, POLYGON, PATH, CIRCLE(64각형), **TRAPEZOID(23–25)·CTRAPEZOID(26)**
+(2026-09-09: 마스크 데이터(jobdeck 소스)에 흔해 추가; 꼭짓점 규칙은 KLayout이
+같은 바이트를 읽은 결과와 동일하게 두었고 `tools/validate_oasis_shapes.py`가
+배터리에서 모든 타입을 KLayout과 대조), PLACEMENT(id 17, 정수 변환), TEXT.
+배율/임의각 PLACEMENT(18)와 XGEOMETRY(33)는 명확한 오류로 거부한다.
+
 `rust/` 워크스페이스의 KLayout-free 네이티브 인덱서다. 사용자 명령
 `floe index`가 `floe-index vfs`로 위임하여 `<src>.floe`의 mmap OVM/OVP/OVT
 캐시를 만든다. Python `.tiles` 인덱서는 `--legacy`에만 남아 있다.

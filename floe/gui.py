@@ -5309,14 +5309,26 @@ class Viewer:
             return False
 
         def done(rc):
+            if state["cancelled"] or rc != 0:
+                # keep the log on screen (user call 2026-09-09: it
+                # closed at once and the indexer's error could not be
+                # read); the cancel button becomes close
+                append("\n== %s %s\n" % (
+                    fail, "cancelled" if state["cancelled"]
+                    else "failed (rc %d) - see the message above" % rc))
+                for button in dlg.get_action_area().get_children():
+                    button.set_label("close")
+                dlg.disconnect_by_func(on_response)
+                dlg.connect("response", lambda *_: (dlg.destroy(),
+                                                    self.window.present(),
+                                                    self._restore_keys()))
+                self._set_live_status(
+                    "%s cancelled" % fail if state["cancelled"]
+                    else "%s failed (rc %d)" % (fail, rc))
+                return False
             dlg.destroy()
             self.window.present()
-            if state["cancelled"]:
-                self._set_live_status("%s cancelled" % fail)
-            elif rc == 0:
-                on_success()
-            else:
-                self._set_live_status("%s failed (rc %d)" % (fail, rc))
+            on_success()
             return False
 
         def pump():
