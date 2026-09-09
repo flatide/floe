@@ -1436,6 +1436,53 @@ class IndexOnOpenTests(unittest.TestCase):
                          ["ask", "deck-index", "open"])
         self.assertIn("Not every source of", calls[0][1])
 
+    def test_then_runs_after_a_successful_open_only(self):
+        """A --drc load must follow the (possibly indexed) layout open:
+        an in-place open resets the DRC state (review 4th P2-1)."""
+        from floe.gui import Viewer
+        os.environ["FLOE_INDEX_ON_OPEN"] = "yes"
+        try:
+            v, calls = self._shell(ready=False)
+            Viewer._open_or_index(v, "/x/chip.oas", [],
+                                  then=lambda: calls.append(("then",)))
+            # no goto: the changed options own one redraw, then the
+            # follow-up runs
+            self.assertEqual([c[0] for c in calls],
+                             ["vfs-index", "open", "options", "goto",
+                              "redraw", "present", "then"])
+            v, calls = self._shell(ready=True)
+            v.open_file = lambda path: "ERR no such layout"
+            Viewer._open_or_index(v, "/x/chip.oas", [],
+                                  then=lambda: calls.append(("then",)))
+            self.assertEqual([c[0] for c in calls], ["status"])
+        finally:
+            del os.environ["FLOE_INDEX_ON_OPEN"]
+
+    def test_drc_pack_shares_the_consent_policy(self):
+        """DRC > open / --drc honour FLOE_INDEX_ON_OPEN like layouts
+        and jobdecks (review 4th P2-2)."""
+        from floe.gui import Viewer
+        with tempfile.TemporaryDirectory() as td:
+            db = os.path.join(td, "chip.db")
+            open(db, "w").close()          # no .ice pack beside it
+            for policy, asked, packed in (("yes", 0, 1), ("no", 0, 0),
+                                          ("ask", 1, 1)):
+                v = Viewer.__new__(Viewer)
+                calls = []
+                v._ask_yes_no = lambda text: (calls.append("ask"), True)[1]
+                v._drc_pack_and_load = lambda path: calls.append("pack")
+                v._set_live_status = lambda msg: calls.append("status")
+                v.load_drc = lambda path, db=None: calls.append("load")
+                os.environ["FLOE_INDEX_ON_OPEN"] = policy
+                try:
+                    Viewer._drc_open_db(v, db)
+                finally:
+                    del os.environ["FLOE_INDEX_ON_OPEN"]
+                self.assertEqual(calls.count("ask"), asked, policy)
+                self.assertEqual(calls.count("pack"), packed, policy)
+                if not packed:
+                    self.assertIn("status", calls)
+
     def test_declined_or_forbidden_leaves_the_file_unopened(self):
         from floe.gui import Viewer
         v, calls = self._shell(ready=False, answer=False)

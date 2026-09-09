@@ -876,15 +876,9 @@ class CompositeTests(unittest.TestCase):
                       CLI / "formats.spec", env=self.env, ok=3)
         self.assertIn("chipA.gds: not_indexed", res.stdout)
         self.assertIn("1 placement(s), 1 skipped", res.stdout)
-        # `floe2 view` on a deck whose sources lack an index no longer
-        # fails in the terminal: the viewer starts and asks (user call
-        # 2026-09-09). Under the gate the question is answered "no",
-        # and the smoke reports that nothing was opened.
-        res = run_floe2("view", CLI / "test_formats.jb", "--multi",
-                        env=dict(self.env, FLOE_INDEX_ON_OPEN="no",
-                                 FLOE_GUI_SMOKE_MS="3000"), ok=1,
-                        timeout=120)
-        self.assertIn("pending open never landed", res.stderr + res.stdout)
+        # (`floe2 view` on a deck without an index starts the viewer
+        # and asks - a GUI path, checked by IndexOnOpenSmokeTests under
+        # its display guard; review 2026-09-09 (4th) P2-3)
 
 
 class ViewerCacheTests(unittest.TestCase):
@@ -1042,7 +1036,8 @@ class IndexOnOpenSmokeTests(unittest.TestCase):
         self._gtk()
         fresh = CLI / "fresh"
         fresh.mkdir(exist_ok=True)
-        for name in ("chipA.oas", "chipB.oas", "mark.oas", "test.jb"):
+        for name in ("chipA.oas", "chipB.oas", "mark.oas", "test.jb",
+                     "test_formats.jb", "chipA.gds"):
             shutil.copy2(CLI / name, fresh / name)
         self.assertFalse((fresh / "chipA.oas.floe").exists())
         # declined (policy no): the viewer stays empty, the smoke says so
@@ -1050,10 +1045,28 @@ class IndexOnOpenSmokeTests(unittest.TestCase):
                         env=self._env("no"), ok=1, timeout=120)
         self.assertIn("pending open never landed", res.stderr + res.stdout)
         self.assertFalse((fresh / "chipA.oas.floe").exists())
-        # accepted: indexed, opened, a frame shown
+        # the same for a deck whose sources lack an index (it used to
+        # be refused in the terminal)
+        res = run_floe2("view", "--multi", fresh / "test_formats.jb",
+                        env=dict(self._env("no"), FLOE_GUI_SMOKE_MS="3000"),
+                        ok=1, timeout=120)
+        self.assertIn("pending open never landed", res.stderr + res.stdout)
+        # accepted, with a --drc db beside an unindexed layout: indexed,
+        # opened, a frame shown, and the DRC results still loaded after
+        # the open (review 2026-09-09 (4th) P2-1: they were reset by it)
+        db = fresh / "chipA.db"
+        res = subprocess.run(
+            [sys.executable, "-B", str(ROOT / "tools" / "gen_drc_db.py"),
+             str(fresh / "chipA.oas"), str(db), "--checks", "2", "--per",
+             "3"], cwd=ROOT, capture_output=True, text=True,
+            env={**os.environ, "PYTHONPATH": str(ROOT)})
+        self.assertEqual(res.returncode, 0, res.stderr)
         run_floe2("view", "--multi", fresh / "chipA.oas", "--goto",
-                  "1000,1000,500", env=self._env("yes"), ok=0, timeout=120)
+                  "1000,1000,500", "--drc", db, env=self._env("yes"),
+                  ok=0, timeout=180)
         self.assertTrue((fresh / "chipA.oas.floe" / "meta.json").is_file())
+        self.assertTrue((fresh / "chipA.db.ice").exists(),
+                        "the DRC pack was built without asking (policy yes)")
         # a jobdeck: every source indexed through `floe2 index deck.jb`
         run_floe2("view", "--multi", fresh / "test.jb", env=self._env("yes"),
                   ok=0, timeout=180)
@@ -1605,35 +1618,66 @@ class ReviewFixTests3(unittest.TestCase):
                    "FLOE_RENDERD_BIN": str(ROOT / "rust" / "target" /
                                            "release" / "floe-renderd")}
         os.environ["FLOE_RENDERD_BIN"] = cls.env["FLOE_RENDERD_BIN"]
-        for deck in ("frames.jb", "dt.jb"):
+        for deck in ("frames.jb", "dt.jb", "hier.jb"):
             run_floe2("index", CLI / deck, "--jobs", "2", env=cls.env, ok=0)
 
-    def test_p2_1_black_design_covers_the_gray_frame_wash(self):
+    def _gray_scale_view(self, cache, child_um, px=400, child_px=13.0):
+        """A viewport where a child frame of `child_um` (deck um) is
+        ~13 px on screen: the gray outline band (9..25 px), not the
+        white one (>= 25 px)."""
+        bb = cache.meta["bbox"]
+        dbu = cache.meta["dbu"]
+        span_um = child_um * px / child_px
+        cx = (bb[0] + bb[2]) / 2.0
+        cy = (bb[1] + bb[3]) / 2.0
+        half = span_um / dbu / 2.0
+        return (cx - half, cy - half, cx + half, cy + half), px
+
+    def test_p2_1_black_design_covers_the_gray_frame(self):
+        """Review 2026-09-09 (4th) P3-4: at the earlier scale the child
+        frame was white, so the check proved nothing about gray. Here
+        it is a gray band: with no design over it the gray shows
+        (hier.jb: the child alone), with BLACK design over it the gray
+        must be hidden exactly as a coloured design hides it."""
         from floe.jobdeck.viewer import DeckCache
-        c = DeckCache(str(CLI / "frames.jb"))
+        c = DeckCache(str(CLI / "hier.jb"))
         c.load()
         try:
+            # hier.oas: KID is a 2000 um box, x4 on the deck
+            view, px = self._gray_scale_view(c, 8000.0)
             worker = jrender.DeckRenderWorker(c)
             worker.start()
             try:
-                bb = tuple(c.meta["bbox"])
-                before = _render_raw(worker, bb, 400, 400, depth=0,
-                                     frames=True)
+                bare = _render_raw(worker, view, px, px, depth=0, frames=True)
+            finally:
+                worker.stop()
+        finally:
+            c.close()
+        self.assertGreater(_gray(bare), 0, "no gray band at this scale")
+        self.assertEqual(_white(bare), 0)
+        c = DeckCache(str(CLI / "frames.jb"))
+        c.load()
+        try:
+            # hier2.oas: KID is a 200 um box, x4 on the deck, under the
+            # top-level box of each placement
+            view, px = self._gray_scale_view(c, 800.0)
+            worker = jrender.DeckRenderWorker(c)
+            worker.start()
+            try:
+                coloured = _render_raw(worker, view, px, px, depth=0,
+                                       frames=True)
                 worker.submit({"kind": "recolor",
                                "colors": [[[1, 0], "#000000"],
                                           [[2, 0], "#000000"]]})
-                black = _render_raw(worker, bb, 400, 400, depth=0,
+                black = _render_raw(worker, view, px, px, depth=0,
                                     frames=True)
             finally:
                 worker.stop()
         finally:
             c.close()
-        # the children's gray wash sits under the top-level boxes in a
-        # plain render (0 gray px); black boxes must hide it just the
-        # same, and the white frames stay on top
-        self.assertEqual(_gray(black), 0)
-        self.assertEqual(_white(black), _white(before))
-        self.assertGreater(_white(black), 0)
+        self.assertGreater(_lit(coloured), 0)
+        self.assertEqual(_gray(coloured), 0, "a coloured box hides the gray")
+        self.assertEqual(_gray(black), 0, "a black box must hide it too")
 
     def test_p2_2_source_layer_dt0_is_a_layer_not_a_head(self):
         from floe.jobdeck.viewer import DeckCache

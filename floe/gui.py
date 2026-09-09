@@ -1949,13 +1949,26 @@ class Viewer:
             return deck_ready(path)
         return cache_mod.Cache(path).exists()
 
-    def _open_or_index(self, path, fields=(), ask=True):
+    def _index_consent(self, question):
+        """Whether an index may be built now: FLOE_INDEX_ON_OPEN=yes|no
+        answers for scripts and the GUI smoke gate, anything else asks
+        the user (default). One policy for layouts, jobdecks and DRC
+        packs (review 2026-09-09 (4th) P2-2)."""
+        policy = os.environ.get("FLOE_INDEX_ON_OPEN", "ask").strip().lower()
+        if policy == "yes":
+            return True
+        if policy == "no":
+            return False
+        return self._ask_yes_no(question)
+
+    def _open_or_index(self, path, fields=(), then=None):
         """Open a layout or a jobdeck; when its index is missing ASK
         the user first (user call 2026-09-09: floe2 too), build it in
         the modal log, then open, then apply the CLI/forwarded options
-        in `fields` (goto=, detail=, depth=, ...). FLOE_INDEX_ON_OPEN=
-        yes|no|ask (default ask) answers the question for scripts and
-        the GUI smoke gate. Returns False (usable from GLib.idle_add)."""
+        in `fields` (goto=, detail=, depth=, ...), then call `then()`
+        - what must follow a successful open, such as a --drc load
+        that an in-place open would otherwise reset (review 2026-09-09
+        (4th) P2-1). Returns False (usable from GLib.idle_add)."""
         path = os.path.abspath(path)
         fields = [f for f in fields if f]
 
@@ -1969,6 +1982,8 @@ class Viewer:
             if changed and not jumped:
                 self.redraw(immediate=True)
             self._present()
+            if then is not None:
+                then()
 
         if self._index_ready(path):
             try:
@@ -1977,14 +1992,11 @@ class Viewer:
                 err = "ERR %s" % exc
             after_open(err)
             return False
-        policy = os.environ.get("FLOE_INDEX_ON_OPEN", "ask").strip().lower()
-        if policy not in ("yes", "no"):
-            policy = "ask"
         name = os.path.basename(path)
-        if policy == "no" or (policy == "ask" and ask and not self._ask_yes_no(
+        if not self._index_consent(
                 ("Not every source of\n%s\nhas a VFS index.\n\n"
                  "Index them now?" if _is_deck_path(path) else
-                 "No VFS index for\n%s\n\nBuild it now?") % name)):
+                 "No VFS index for\n%s\n\nBuild it now?") % name):
             self._set_live_status("VFS index needed: %s index %s"
                                   % (APP, name))
             self._restore_keys()
@@ -5189,7 +5201,7 @@ class Viewer:
             else:
                 self.load_drc(path, db=db)  # adopt the fresh pack
                 return
-        if not self._ask_yes_no(
+        if not self._index_consent(
                 "No DRC index for\n%s\n\nBuild it now?"
                 % os.path.basename(path)):
             self._set_live_status(
@@ -8334,24 +8346,33 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
                     smoke_error.append("Rust render worker is not alive")
                 elif viewer.last_frame is None:
                     smoke_error.append("no GUI frame was displayed")
+            if drc and not smoke_error and viewer._drc_total == 0:
+                # the --drc results must still be loaded once the
+                # layout (possibly indexed first) is up
+                smoke_error.append("the --drc results did not load")
             viewer._quit()
             return False
 
         GLib.timeout_add(smoke_ms, finish_smoke)
+    # NO _drc_window() here: its grab_focus made the BROWSE TreeView
+    # auto-select row 0 on focus-in, so --drc startups showed the first
+    # rule selected (field reports 2026-08-18; a db must open with no
+    # rule selected). The embedded panel is always visible - there is
+    # nothing to focus. A db without a usable .ice pack is ASKED about
+    # and packed first, as the DRC > open dialog does (user call
+    # 2026-09-09).
+    drc_path = os.path.abspath(drc) if drc else None
     if pending_open is not None:
         # the window is up; the question, the index log and the open
-        # need the main loop
+        # need the main loop. The --drc load runs AFTER that open: an
+        # in-place open resets the DRC state, so a db loaded first was
+        # gone once the indexed layout arrived (review 2026-09-09
+        # (4th) P2-1)
         GLib.idle_add(viewer._open_or_index, pending_open,
-                      list(pending_fields))
-    if drc:
-        # NO _drc_window() here: its grab_focus made the BROWSE
-        # TreeView auto-select row 0 on focus-in, so --drc startups
-        # showed the first rule selected (field reports 2026-08-18;
-        # a db must open with no rule selected). The embedded panel
-        # is always visible - there is nothing to focus.
-        # A db without a usable .ice pack is ASKED about and packed
-        # first, as the DRC > open dialog does (user call 2026-09-09).
-        drc_path = os.path.abspath(drc)
+                      list(pending_fields),
+                      (lambda: viewer._drc_open_db(drc_path))
+                      if drc_path else None)
+    elif drc_path:
         GLib.idle_add(lambda: (viewer._drc_open_db(drc_path), False)[1])
     try:
         import signal as _signal

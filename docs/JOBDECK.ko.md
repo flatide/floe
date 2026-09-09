@@ -329,6 +329,17 @@ RENDERD_VERSION 0.12.61, `__version__` 0.12.72.
 
 RENDERD_VERSION 0.12.62, `__version__` 0.12.73.
 
+### 4차 (4건, 인덱스 없는 파일 열기 흐름)
+
+| # | 지적 | 조치 | gate |
+|---|---|---|---|
+| P2-1 | 자동 인덱싱 뒤 `--drc`가 사라짐: 레이아웃 인덱싱과 DRC 열기를 따로 예약해 DRC가 먼저 실리면 이후 `_apply_cache()`가 초기화(1건 → 0건) | `_open_or_index(..., then=)`: DRC 열기를 레이아웃 열기 **성공 콜백 뒤**에 연결. GUI smoke가 `--drc` 지정 시 `_drc_total > 0`을 요구 | `test_then_runs_after_a_successful_open_only`, `IndexOnOpenSmokeTests`(인덱스 없는 chipA + 생성한 chipA.db, 정책 yes → 인덱싱·열기·DRC 유지·pack 생성) |
+| P2-2 | DRC에는 `FLOE_INDEX_ON_OPEN`이 적용되지 않음 | `_index_consent(question)` 하나로 레이아웃·덱·DRC pack이 같은 정책(yes/no/ask)을 쓴다 | `test_drc_pack_shares_the_consent_policy` |
+| P2-3 | headless 검증(`test_5`)이 디스플레이 확인 없이 GUI를 실행 | 그 검사는 디스플레이 가드가 있는 `IndexOnOpenSmokeTests`로 이동 | 같은 클래스 |
+| P3-4 | 검은 도형 회귀 테스트가 흰 프레임만 생기는 배율이라 회색을 검사하지 않음 | 자식 프레임이 9~25px(회색 outline 밴드)이 되는 배율로 계산(`_gray_scale_view(child_um)`): 도형 없음(hier.jb) → 회색 있음, 색 도형·검은 도형(frames.jb) → 회색 0 | `test_p2_1_black_design_covers_the_gray_frame` |
+
+`__version__` 0.12.75 (Python·gate만; renderd 0.12.62 유지).
+
 ## 10. 미결·후속
 - LY/DT cross vs zip, 회전/미러: 실덱 사례가 나오면 확정.
 - 실덱에서 M2 성능 확인: 배치 수 × 패스 비용(플랜+디코드+라스터 각 1회).
