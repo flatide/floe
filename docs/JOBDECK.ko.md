@@ -236,7 +236,7 @@ floe2 jobdeck deck.jb [--report r.json] [--spec s.spec]   # 분석·보고만
   set_mode()`로 재플랜·스펙 재작성 후 레이어 패널을 다시 만들고 워커를 새
   스펙으로 재시작한다(현재 뷰 유지). 창 제목은 `deck.jb · jobdeck N CHIPs · M
   placements · level view`.
-- File > load layout… 에 `jobdecks (*.jb)` 필터. 소스 중 인덱스 없는 것이
+- File > **load jobdeck…**(2026-09-09; `.jb` 필터가 앞에 오는 같은 대화상자) 또는 File > load layout… 의 `jobdecks (*.jb)` 필터. 소스 중 인덱스 없는 것이
   있으면 "지금 인덱싱할까요?" → `floe2 index deck.jb`를 모달 로그로 실행 후 연다.
   `floe2 view deck.jb`도 같다(2026-09-09: 인덱스 없는 파일은 레이아웃·덱·DRC db
   모두 뷰어가 묻고 인덱싱한 뒤 연다 — `Viewer._open_or_index`,

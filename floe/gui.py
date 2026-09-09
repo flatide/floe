@@ -4583,6 +4583,7 @@ class Viewer:
 
         m = top("File")
         item(m, "load layout…", self._load_layout_dialog)
+        item(m, "load jobdeck…", self._load_jobdeck_dialog)
         item(m, "clip region…", self._clip_dialog)
         item(m, "copy view to clipboard\tCtrl+C", self._copy_view)
         sep(m)
@@ -4668,12 +4669,20 @@ class Viewer:
         self._menubar = mb
         return mb
 
-    def _load_layout_dialog(self):
+    def _load_jobdeck_dialog(self):
+        """File > load jobdeck… (user call 2026-09-09): the load dialog
+        with the jobdeck filter first."""
+        self._load_layout_dialog(jobdeck=True)
+
+    def _load_layout_dialog(self, jobdeck=False):
         """File > load layout… (user call 2026-08-22): open a source
         in place, the same open_file path an instance-forwarded
         `floe view <file>` takes. When the pick has no VFS cache it
-        ASKS to build one and indexes on Yes (user call 2026-08-28)."""
-        dlg = Gtk.FileChooserDialog(title="load layout",
+        ASKS to build one and indexes on Yes (user call 2026-08-28).
+        `jobdeck`: File > load jobdeck… - same dialog, .jb filter
+        first (a .jb picked either way opens as a deck)."""
+        dlg = Gtk.FileChooserDialog(title="load jobdeck" if jobdeck
+                                    else "load layout",
                                     parent=self.window,
                                     action=Gtk.FileChooserAction.OPEN)
         dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
@@ -4684,11 +4693,13 @@ class Viewer:
         dlg.set_current_folder(
             self._launch_dir if self.meta is None
             else os.path.dirname(self.meta["src"]["path"]))
-        for name, pats in (("layouts (*.oas, *.gds)",
-                            ("*.oas", "*.oas.gz", "*.gds",
-                             "*.gds.gz")),
-                           ("jobdecks (*.jb)", ("*.jb",)),
-                           ("all files", ("*",))):
+        filters = [("layouts (*.oas, *.gds)",
+                    ("*.oas", "*.oas.gz", "*.gds", "*.gds.gz")),
+                   ("jobdecks (*.jb)", ("*.jb",)),
+                   ("all files", ("*",))]
+        if jobdeck:
+            filters[0], filters[1] = filters[1], filters[0]
+        for name, pats in filters:
             ff = Gtk.FileFilter()
             ff.set_name(name)
             for p in pats:

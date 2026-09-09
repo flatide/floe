@@ -158,7 +158,7 @@ floe view data/testchip_1g5.oas            # 개발용 KLayout 셸 (동결, 비�
 
 ```sh
 floe2 index  deck.jb --jobs 8           # 덱이 참조하는 모든 TC 소스를 인덱싱(최신 캐시는 유지)
-floe2 view   deck.jb                    # 뷰어에서 열기; Jobdeck 메뉴로 level view / chip view (MDPView 용어)
+floe2 view   deck.jb                    # 뷰어에서 열기(File > load jobdeck… 도 동일); Jobdeck 메뉴로 level view / chip view
 floe2 info   deck.jb                    # 덱 요약 + 뷰 레이어 표
 floe2 render deck.jb --bbox 40000,80000,60000,95000 --px 1200 --out deck.png
 floe2 render deck.jb --at 53.02mm,92.61mm --size 32mm,25.6mm --px 1200x900 --out a.png
