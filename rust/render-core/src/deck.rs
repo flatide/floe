@@ -1256,17 +1256,22 @@ fn source_plan_request(
     if top_bbox.is_empty() {
         return Ok(None);
     }
-    let (x0, y0) = (source_view.x0.floor(), source_view.y0.floor());
-    let (x1, y1) = (source_view.x1.ceil(), source_view.y1.ceil());
-    if !(x0 <= x1 && y0 <= y1) {
+    // Review 2026-09-09 (7th): the clip never passes the source's
+    // bounds through f64 - at 2^60 both ends of a 1 dbu wide bound
+    // round to the same f64 and the view came back inverted. A bound
+    // the view reaches past is used as its exact i64; only a view edge
+    // strictly inside the bounds is converted.
+    let (Some(x0), Some(x1), Some(y0), Some(y1)) = (
+        clip_low(source_view.x0.floor(), top_bbox.x0, "source view x0")?,
+        clip_high(source_view.x1.ceil(), top_bbox.x1, "source view x1")?,
+        clip_low(source_view.y0.floor(), top_bbox.y0, "source view y0")?,
+        clip_high(source_view.y1.ceil(), top_bbox.y1, "source view y1")?,
+    ) else {
+        return Ok(None);
+    };
+    if x0 > x1 || y0 > y1 {
         return Ok(None);
     }
-    let (bx0, by0, bx1, by1) = (top_bbox.x0 as f64, top_bbox.y0 as f64, top_bbox.x1 as f64, top_bbox.y1 as f64);
-    // strict misses only: a view edge that rounds onto the bound stays
-    if x1 < bx0 || x0 > bx1 || y1 < by0 || y0 > by1 {
-        return Ok(None);
-    }
-    let (x0, y0, x1, y1) = (x0.max(bx0), y0.max(by0), x1.min(bx1), y1.min(by1));
     // the source span from the DECK span divided once: every placement
     // of one scale gets the same px_per_dbu (and cut), so their plan
     // requests compare equal for the frame's scene reuse - a
@@ -1286,12 +1291,7 @@ fn source_plan_request(
         checked_bound((request.cut_px / px_per_dbu).ceil(), "cut dbu")?
     };
     let plan = PlanRequest {
-        view: ViewBox::new(
-            checked_bound(x0, "source view x0")?.max(top_bbox.x0),
-            checked_bound(y0, "source view y0")?.max(top_bbox.y0),
-            checked_bound(x1, "source view x1")?.min(top_bbox.x1),
-            checked_bound(y1, "source view y1")?.min(top_bbox.y1),
-        )?,
+        view: ViewBox::new(x0, y0, x1, y1)?,
         cut_dbu,
         visible_layers: Some(vec![format!("{}/{}", placement.layer, placement.datatype)]),
         depth: request.depth,
@@ -1300,6 +1300,33 @@ fn source_plan_request(
     };
     plan.validate()?;
     Ok(Some(plan))
+}
+
+/// The lower bound of a plan view axis: the view's whole-dbu edge `v`
+/// clipped to the source's bound `b`. The bound is returned as its
+/// exact i64 whenever the view reaches it (compared in f64, where `b`
+/// may have rounded either way - `.max(b)` after a conversion covers
+/// the other direction); None when the view edge lies beyond every
+/// i64 on the far side, i.e. the view misses the source.
+fn clip_low(v: f64, b: i64, name: &str) -> Result<Option<i64>, String> {
+    if v <= b as f64 {
+        return Ok(Some(b));
+    }
+    if v > i64::MAX as f64 {
+        return Ok(None);
+    }
+    Ok(Some(checked_bound(v, name)?.max(b)))
+}
+
+/// The upper bound: see `clip_low`.
+fn clip_high(v: f64, b: i64, name: &str) -> Result<Option<i64>, String> {
+    if v >= b as f64 {
+        return Ok(Some(b));
+    }
+    if v < i64::MIN as f64 {
+        return Ok(None);
+    }
+    Ok(Some(checked_bound(v, name)?.min(b)))
 }
 
 fn checked_bound(value: f64, name: &str) -> Result<i64, String> {
@@ -1592,6 +1619,55 @@ mod tests {
         assert!(sv.x0 < i64::MIN as f64);
         let plan = source_plan_request(&sv, &request, &p, &bbox(0, 0, 20_000_000, 20_000_000)).unwrap();
         assert!(plan.is_none());
+    }
+
+    #[test]
+    fn plan_clip_keeps_exact_bounds_at_huge_coordinates() {
+        // Review 2026-09-09 (7th): a source 1 dbu wide at 2^60 + 1 ..
+        // 2^60 + 2 - both ends round to 2^60 in f64, and a clip that
+        // went through f64 came back as x0 = 2^60 + 1 > x1 = 2^60, an
+        // invalid view that failed the frame. The bounds the view
+        // reaches past are used as their exact i64.
+        let request = DeckRenderRequest {
+            view: RasterViewBox::new(0.0, 0.0, 800.0, 400.0).unwrap(),
+            width: 400,
+            height: 200,
+            depth: u32::MAX,
+            cut_px: 1.0,
+            exact: false,
+            visible: None,
+            frames: false,
+            mono: false,
+            subwindow: true,
+            workers: 1,
+            decode_workers: 1,
+            tile_size: 64,
+            decode_pages: None,
+        };
+        let big = 1i64 << 60;
+        // the placement puts the deck view's origin at the source's
+        // 2^60 - 100 (the view then spans 2^60 - 100 .. 2^60 + 700)
+        let p = placement(1.0, -((big - 100) as f64), 0.0);
+        let sv = source_view(&request.view, &p).unwrap();
+        let source = bbox(big + 1, 0, big + 2, 1000);
+        let plan = source_plan_request(&sv, &request, &p, &source).unwrap().unwrap();
+        assert_eq!((plan.view.x0, plan.view.x1), (big + 1, big + 2));
+        assert_eq!((plan.view.y0, plan.view.y1), (0, 400));
+        // the view edge strictly inside a bound converts, and the
+        // exact bound wins over a converted edge that rounded past it
+        let source = bbox(big - 200, 0, big + 2, 1000);
+        let plan = source_plan_request(&sv, &request, &p, &source).unwrap().unwrap();
+        assert!(plan.view.x0 >= big - 200 && plan.view.x0 <= big - 100 + 256, "{}", plan.view.x0);
+        assert_eq!(plan.view.x1, big + 2);
+        // a source at the other end of i64 space is a miss, not an error
+        assert!(source_plan_request(&sv, &request, &p, &bbox(-big, 0, -big + 5, 1000)).unwrap().is_none());
+        // the axis helpers themselves
+        assert_eq!(clip_low(5.0, 7, "t").unwrap(), Some(7));
+        assert_eq!(clip_low(9.0, 7, "t").unwrap(), Some(9));
+        assert_eq!(clip_low(1e19, 7, "t").unwrap(), None);
+        assert_eq!(clip_high(9.0, 7, "t").unwrap(), Some(7));
+        assert_eq!(clip_high(5.0, 7, "t").unwrap(), Some(5));
+        assert_eq!(clip_high(-1e19, 7, "t").unwrap(), None);
     }
 
     #[test]

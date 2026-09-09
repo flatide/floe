@@ -382,6 +382,12 @@ INCOMPLETE)로 보고하며 덱은 열린다. 인덱싱이 일부 실패해도 �
 |---|---|---|---|
 | P2 | 화면 밖 배치 때문에 전체 렌더 실패: 5차에서 덱 좌표 사전 컬링을 없애자 `dx`=10¹⁶·`scale`=0.001의 화면 밖 배치가 소스 뷰 −10¹⁹ dbu를 i64로 바꾸다 `coordinate overflow: source view x0`로 프레임 전체를 실패시킴(회귀) | 사실 | `source_plan_request`가 소스 bbox 클리핑을 **f64에서 정수 변환보다 먼저** 한다: 소스 뷰의 floor/ceil을 소스 bbox(i64→f64)와 비교해 엄격히 벗어나면 `None`(빈 패스, `passes_skipped`), 겹치면 클리핑한 값(항상 bbox 안, 즉 i64 안)만 `checked_bound`로 변환. 덱 좌표 검사는 복구하지 않음(정밀도 문제). 단위 테스트 `offscreen_placement_at_a_huge_offset_is_skipped_not_an_error`, gate `ReviewFixTests5.test_p2_4`: 정상 배치 + 화면 밖 10¹⁶ 배치가 정상 배치만 있는 덱과 바이트 동일, `passes 1 / skipped 1` |
 
+### 7차 (1건, 6차 반영 리뷰 2026-09-09, RENDERD 0.12.71)
+
+| # | 지적 | 판정 | 조치 |
+|---|---|---|---|
+| P2 | bbox 반올림으로 유효한 뷰가 뒤집힘: 6차의 클리핑이 정수 bbox를 f64로 바꿔 클리핑한 뒤 다시 정수로 보정해, 소스 bbox x = 2⁶⁰+1..2⁶⁰+2(양끝이 f64에서 모두 2⁶⁰)에서 x0 = 2⁶⁰+1 > x1 = 2⁶⁰가 되어 invalid view로 프레임 실패(합성 OASIS 재현; 실칩 좌표는 아님) | 사실 | 축별 `clip_low`/`clip_high`: 뷰 경계(f64)가 bbox 경계에 닿거나 넘으면 **원래 i64 bbox 값**을 그대로 쓰고, 엄격히 안쪽인 뷰 경계만 정수로 변환(변환 뒤 `max/min`으로 bbox가 반대로 반올림된 경우 보정). 뷰 경계가 i64 범위 밖 먼 쪽이면 미스(None, 빈 패스). bbox 값은 f64를 거치지 않는다. 단위 테스트 `plan_clip_keeps_exact_bounds_at_huge_coordinates`: 2⁶⁰+1..2⁶⁰+2 소스가 (2⁶⁰+1, 2⁶⁰+2)로 플랜되고, 반대편 i64 끝의 소스는 오류 없이 미스. gate 재현은 없음 — fixture 생성기(KLayout)가 32비트 좌표라 2⁶⁰ 소스를 만들 수 없다 |
+
 실덱 계측을 읽을 때: 실제 raster 시간은 `raster wall`, 합계 `draw/raster ms`는
 패스 수만큼 부풀어 있다.
 
