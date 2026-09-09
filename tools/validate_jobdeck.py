@@ -1922,6 +1922,70 @@ class SubwindowTests(unittest.TestCase):
                            "placements outside the frame are skipped")
 
 
+class ReuseAndBatchTests(unittest.TestCase):
+    """Step 2b: placements of the same source at the same scale share
+    one plan and scene within a frame, and prepared passes are rastered
+    in parallel batches - pixels unchanged (1 vs 4 raster jobs, and
+    against the full-frame path)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.env = {"FLOE_INDEX_BIN": str(ROOT / "rust" / "target" /
+                                         "release" / "floe-index"),
+                   "FLOE_RENDERD_BIN": str(ROOT / "rust" / "target" /
+                                           "release" / "floe-renderd")}
+        os.environ["FLOE_RENDERD_BIN"] = cls.env["FLOE_RENDERD_BIN"]
+        for deck in ("test.jb", "frames.jb"):
+            run_floe2("index", CLI / deck, "--jobs", "2", env=cls.env, ok=0)
+
+    def _render(self, deck, size, jobs, fill="speckle", frames=False,
+                depth=None, subwindow="on", bbox=None):
+        from floe.jobdeck.viewer import DeckCache
+        os.environ["FLOE_RUST_RASTER_JOBS"] = str(jobs)
+        os.environ["FLOE_RUST_JOBS"] = str(jobs)
+        os.environ["FLOE_RUST_DECK_SUBWINDOW"] = subwindow
+        try:
+            c = DeckCache(str(CLI / deck))
+            c.load()
+            try:
+                worker = jrender.DeckRenderWorker(c)
+                worker.start()
+                try:
+                    bb = bbox or tuple(c.meta["bbox"])
+                    return _render_raw(worker, bb, size[0], size[1],
+                                       depth=depth, frames=frames,
+                                       with_result=True, fill=fill)
+                finally:
+                    worker.stop()
+            finally:
+                c.close()
+        finally:
+            for k in ("FLOE_RUST_RASTER_JOBS", "FLOE_RUST_JOBS",
+                      "FLOE_RUST_DECK_SUBWINDOW"):
+                os.environ.pop(k, None)
+
+    def test_same_source_placements_share_a_scene(self):
+        rgba, result = self._render("test.jb", (301, 237), 4)
+        d = result["deck"]
+        # chipA at x4 appears in five placements of level 1 and two of
+        # level 2 fully inside the view, chipB in six: one plan each
+        self.assertGreaterEqual(d["scene_reuses"], 8, d)
+        self.assertEqual(d["passes"], 17)
+
+    def test_parallel_batches_and_reuse_keep_the_pixels(self):
+        for deck, size, fill, frames, depth in (
+                ("test.jb", (301, 237), "speckle", False, None),
+                ("test.jb", (263, 301), PATTERN_ROWS, False, None),
+                ("frames.jb", (333, 211), "speckle", True, 0)):
+            serial, _ = self._render(deck, size, 1, fill, frames, depth)
+            parallel, _ = self._render(deck, size, 4, fill, frames, depth)
+            full, _ = self._render(deck, size, 4, fill, frames, depth,
+                                   subwindow="off")
+            self.assertEqual(parallel, serial, "%s jobs 1 vs 4" % deck)
+            self.assertEqual(full, serial, "%s full-frame path" % deck)
+            self.assertGreater(_lit(serial), 0)
+
+
 class KLayoutOracleTests(unittest.TestCase):
     """M5: KLayout as the independent oracle of the composite. The deck
     is built the reference tool's way - every source cell copied into

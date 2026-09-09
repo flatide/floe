@@ -1118,6 +1118,7 @@ class RustRenderWorker:
                 "scene_us": _wire_int(fields, "scene_us"),
                 "frame_raster_us": _wire_int(fields, "frame_raster_us"),
                 "composite_us": _wire_int(fields, "composite_us"),
+                "scene_reuses": _wire_int(fields, "scene_reuses"),
                 "over_budget_pages": deferred,
             }
         if self._max_depth is not None:

@@ -3315,11 +3315,14 @@ class Viewer:
                             res["over_budget_pages"])
                     if res.get("deck"):
                         d = res["deck"]
-                        text += (", deck %d passes (%d frame, %d skipped) "
+                        text += (", deck %d passes (%d frame, %d skipped, "
+                                 "%d scene reuses) "
                                  "%d/%d pages, scene %d + frame %d + "
                                  "composite %d ms, pass max %dMB" % (
                                      d["passes"], d["frame_passes"],
-                                     d["passes_skipped"], d["unique_pages"],
+                                     d["passes_skipped"],
+                                     d.get("scene_reuses", 0),
+                                     d["unique_pages"],
                                      d["pages_summed"],
                                      round(d["scene_us"] / 1000),
                                      round(d["frame_raster_us"] / 1000),
