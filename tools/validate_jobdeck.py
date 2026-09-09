@@ -1986,6 +1986,141 @@ class ReuseAndBatchTests(unittest.TestCase):
             self.assertGreater(_lit(serial), 0)
 
 
+class ReviewFixTests5(unittest.TestCase):
+    """Review 2026-09-09 (5th, after step 2): a batch's window images
+    are charged to its budget; the sub-window is computed in source
+    units like the raster (a huge deck offset no longer hides a
+    placement); the frame line separates the batches' wall-clock from
+    the per-pass sum and reports the pass parallelism."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.env = {"FLOE_INDEX_BIN": str(ROOT / "rust" / "target" /
+                                         "release" / "floe-index"),
+                   "FLOE_RENDERD_BIN": str(ROOT / "rust" / "target" /
+                                           "release" / "floe-renderd")}
+        os.environ["FLOE_RENDERD_BIN"] = cls.env["FLOE_RENDERD_BIN"]
+        run_floe2("index", CLI / "test.jb", "--jobs", "2", env=cls.env,
+                  ok=0)
+
+    def _render(self, cache, bbox, size, env, **kw):
+        for k, v in env.items():
+            os.environ[k] = v
+        try:
+            worker = jrender.DeckRenderWorker(cache)
+            worker.start()
+            try:
+                return _render_raw(worker, bbox, size[0], size[1],
+                                   with_result=True, **kw)
+            finally:
+                worker.stop()
+        finally:
+            for k in env:
+                os.environ.pop(k, None)
+
+    def _deck(self):
+        from floe.jobdeck.viewer import DeckCache
+        c = DeckCache(str(CLI / "test.jb"))
+        c.load()
+        self.addCleanup(c.close)
+        return c
+
+    def test_p1_1_pass_images_bound_the_batch(self):
+        # 17 full-frame passes of a 1024x1024 frame: 4 MiB of image
+        # each. At a 1 MiB budget (half of it per batch) every pass is
+        # a batch of its own; at the default budget they fit one batch
+        # (the review measured 306 MB RSS for 64 such passes at 1 MiB)
+        c = self._deck()
+        bb = tuple(c.meta["bbox"])
+        env = {"FLOE_RUST_BUDGET_MB": "1", "FLOE_RUST_DECK_SUBWINDOW": "off",
+               "FLOE_RUST_JOBS": "4", "FLOE_RUST_RASTER_JOBS": "4"}
+        small, result = self._render(c, bb, (1024, 1024), env)
+        d = result["deck"]
+        self.assertEqual(d["batches"], d["passes"], d)
+        self.assertEqual(d["passes"], 17)
+        self.assertLessEqual(d["batch_bytes_max"], 4 * 2 ** 20 + 2 ** 20,
+                             "a lone pass at most")
+        self.assertGreaterEqual(d["batch_bytes_max"], 1024 * 1024 * 4)
+        env.pop("FLOE_RUST_BUDGET_MB")
+        big, result = self._render(c, bb, (1024, 1024), env)
+        d = result["deck"]
+        self.assertEqual(d["batches"], 1, d)
+        self.assertGreaterEqual(d["batch_bytes_max"], 17 * 1024 * 1024 * 4)
+        self.assertEqual(small, big, "batching never changes the pixels")
+        self.assertGreater(_lit(big), 0)
+        # with sub-windows the charge is the window, not the frame
+        env["FLOE_RUST_DECK_SUBWINDOW"] = "on"
+        env["FLOE_RUST_BUDGET_MB"] = "1"
+        sub, result = self._render(c, bb, (1024, 1024), env)
+        self.assertEqual(sub, big)
+        self.assertLess(result["deck"]["batch_bytes_max"], 4 * 2 ** 20,
+                        "window images are smaller than the frame")
+
+    def test_p2_2_huge_offset_keeps_the_placement(self):
+        # The review's reproduction: dx = 1e16. chipB's top cell is
+        # 0..2e7 dbu; at scale 4.5e-8 its right edge is deck 1e16 + 0.9,
+        # which f64 rounds to 1e16 - in the view 1e16-10 .. 1e16+10 on
+        # 2000 px (100 px per deck unit) the deck-space window ended at
+        # column 1009 (1000 + slack) while the raster, mapping source
+        # dbu through the source view (-10/4.5e-8 .. +10/4.5e-8), draws
+        # the 7/2 box (2e6..1.8e7 dbu) on columns 1009..1081 and rows
+        # 918..990 (73 x 73 px): the sub-window path drew NONE of it
+        # (0 lit pixels). The window is now computed in source units
+        # like the raster.
+        spec = CLI / "huge-offset.spec"
+        cache = str(CLI / "chipB.oas.floe")
+        hexs = lambda t: t.encode().hex()
+        dx = 1e16
+        spec.write_text(
+            "deck unit=1e-06\n"
+            "source path_hex=%s\n"
+            "layer out=0 name_hex=%s color=#ffffff fill=solid width=1\n"
+            "placement source=0 layer=7/2 out=0 scale=4.5e-08 dx=%r dy=%r "
+            "order=0\n" % (hexs(cache), hexs("$1 X"), dx, dx))
+        layers = [{"layer": 0, "datatype": 0, "name": "$1 X",
+                   "color": "#ffffff", "stored_shapes": 1,
+                   "jobdeck_head": False}]
+        shim = jrender._DeckCacheShim(str(spec), str(CLI / "test.jb"),
+                                      1e-6, layers)
+        view = (1e16 - 10.0, 1e16 - 10.0, 1e16 + 10.0, 1e16 + 10.0)
+        full, _ = self._render(shim, view, (2000, 2000),
+                               {"FLOE_RUST_DECK_SUBWINDOW": "off"})
+        sub, result = self._render(shim, view, (2000, 2000),
+                                   {"FLOE_RUST_DECK_SUBWINDOW": "on"})
+        self.assertEqual(result["deck"]["passes"], 1)
+        black, white = b"\0\0\0\xff", b"\xff\xff\xff\xff"
+
+        def px(frame, col, row):
+            at = (row * 2000 + col) * 4
+            return frame[at:at + 4]
+        for col, want in ((1008, black), (1009, white), (1081, white),
+                          (1082, black)):
+            self.assertEqual(px(full, col, 950), want, "column %d" % col)
+        for row, want in ((917, black), (918, white), (990, white),
+                          (991, black)):
+            self.assertEqual(px(full, 1040, row), want, "row %d" % row)
+        self.assertEqual(_lit(full), 73 * 73)
+        self.assertEqual(sub, full, "the sub-window path draws the same")
+
+    def test_p2_3_wall_clock_and_pass_parallelism(self):
+        c = self._deck()
+        bb = tuple(c.meta["bbox"])
+        for jobs, expect in ((1, 1), (4, 4)):
+            env = {"FLOE_RUST_JOBS": str(jobs),
+                   "FLOE_RUST_RASTER_JOBS": str(jobs)}
+            rgba, result = self._render(c, bb, (301, 237), env)
+            d = result["deck"]
+            self.assertEqual(d["pass_workers"], expect, d)
+            self.assertGreaterEqual(d["batches"], 1)
+            self.assertGreater(d["raster_wall_us"], 0)
+            # the summed per-pass time (draw_ms) is not the wall time:
+            # with 4 passes at once the wall is at most the sum (plus
+            # the spawn), never presented as it
+            if jobs == 4:
+                self.assertLessEqual(d["raster_wall_us"],
+                                     result["draw_ms"] * 1000 + 20000)
+
+
 class KLayoutOracleTests(unittest.TestCase):
     """M5: KLayout as the independent oracle of the composite. The deck
     is built the reference tool's way - every source cell copied into

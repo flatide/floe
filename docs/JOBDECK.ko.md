@@ -368,6 +368,17 @@ INCOMPLETE)로 보고하며 덱은 열린다. 인덱싱이 일부 실패해도 �
 같이 고친 것: 뷰어의 인덱싱 모달 로그가 실패·취소 시 바로 닫히지 않고
 `close` 버튼으로 남아 오류 메시지를 읽을 수 있다. RENDERD_VERSION 0.12.63.
 
+### 5차 (3건, 2단계 이후 리뷰 2026-09-09, RENDERD 0.12.69)
+
+| # | 지적 | 판정 | 조치 |
+|---|---|---|---|
+| P1-1 | 병렬 묶음의 이미지 메모리가 예산 밖: 묶음은 새 decoded 바이트·64패스로만 끊는데 패스 결과(창 이미지)는 묶음이 끝날 때까지 보관되고, scene 재사용 패스는 새 바이트가 0이라 1024² 64패스가 1 MiB 예산에서 306 MB RSS | 사실 | 패스의 창 이미지(geometry, 프레임 패스가 있으면 ×2)를 `pass_image_bytes`로 묶음에 **페이지와 함께 청구**한다. 묶음은 다음 패스가 예산의 절반을 넘기기 **전에** 닫힌다(단독 패스는 항상 실행). 프레임 줄 `batches=`·`batch_bytes_max=`. gate `ReviewFixTests5.test_p1_1`: 1024² 전체 프레임 17패스가 1 MiB 예산에서 17묶음(최대 청구 = 한 패스), 기본 예산에서 1묶음, 픽셀 동일; 창 모드의 청구는 프레임보다 작다 |
+| P2-2 | 서브윈도 좌표 정밀도: `dx`=10¹⁶·`scale`=0.001에서 OFF 20,800 px, ON 0 px | 사실 | 창을 **덱 좌표가 아니라 소스 좌표**(정수 dbu bbox + raster가 쓰는 `source_view`)에서 raster와 같은 식 `(x − view.x0)·width/span`으로 계산한다(`subwindow(&BBox, &RasterViewBox, w, h) → Window::{Part, Outside, Full}`). 덱 좌표 10¹⁶은 f64에서 2 단위로 반올림되지만 raster는 소스 dbu를 소스 뷰로 사상하므로 창이 배치 옆에 놓였던 것. 유한하지 않으면 `Full`(전체 프레임)로 복귀, 밖이면 `Outside`. 덱 좌표의 사전 컬링(`boxes_intersect`)도 제거(플랜 뷰의 소스 bbox 클리핑이 같은 판정을 정확히 한다). 단위 테스트 `subwindow_at_a_huge_deck_offset_follows_the_raster`(덱 좌표식은 열 1200, raster는 1140), gate `test_p2_2`: `dx`=10¹⁶·`scale`=7e‑7에서 OFF/ON 바이트 동일(2000² 뷰, 상자 왼쪽 변 열 1140·아래 변 행 859 확인) |
+| P2-3 | 병렬 이후 `raster_us`는 패스 합이라 실제 경과(66 ms)보다 크게(130 ms) 보이고 `workers=1`은 패스 내부 타일 워커뿐 | 사실 | 묶음의 병렬 raster 구간 **벽시계** `raster_wall_us`(묶음은 직렬이므로 합 = 프레임의 실제 raster 시간), 동시 패스 수 `pass_workers`, `batches`를 프레임 줄에 추가. `raster_us`(합)·`workers`(타일 워커)는 의미를 유지. 상태줄: `scene S + frame sum F + composite C ms, raster wall W ms Pp x Tt, B batches, pass max MB, batch max MB`. gate `test_p2_3`: jobs 1 → `pass_workers` 1, jobs 4 → 4, wall ≤ 합 |
+
+실덱 계측을 읽을 때: 실제 raster 시간은 `raster wall`, 합계 `draw/raster ms`는
+패스 수만큼 부풀어 있다.
+
 ## 11. 성능 분석 2026-09-09 — 판정과 계획
 
 리뷰어의 분석(광역뷰 누락 = cut 정책, 다중 level 지연 = 배치별 전체 화면 반복,
@@ -423,8 +434,10 @@ budget = 패스별 디코드 보유)을 코드와 대조했다. 모두 사실이
 - 타일 소유 합성과 worker pool: 창·묶음 병렬·scene 재사용으로 목적(배치당 전체
   화면 반복 제거)은 달성했으므로 별도 구조는 두지 않는다. 남는 배치당 고정
   비용은 패스마다 한 번의 work-bin 수집(창으로 컬링)과 묶음당 스레드 spawn이며,
-  실칩 계측(`passes`, `composite ms`, `scene reuses`)에서 그 비중이 크게 나오면
-  그때 다시 본다.
+  실칩 계측(`passes`, `raster wall`, `composite ms`, `scene reuses`)에서 그
+  비중이 크게 나오면 그때 다시 본다.
+- (5차 리뷰, RENDERD 0.12.69) 묶음 예산에 창 이미지 청구, 소스 좌표 서브윈도,
+  `raster wall`/`pass_workers`/`batches` 계측 — §9 5차 표.
 
 ### 3단계 — 페이지를 버리지 않는 유한 메모리 렌더
 - 페이지를 일정량씩 디코드해 타일/레이어 마스크에 누적하고 해제(scene 전체 보유
@@ -435,7 +448,7 @@ budget = 패스별 디코드 보유)을 코드와 대조했다. 모두 사실이
   방식 검토(coverage/LOD 복구가 아님). cut 전면 해제는 geometry·메모리 비용을
   같은 뷰·level 조건으로 측정한 뒤 결정.
 
-측정은 실덱의 같은 뷰·같은 level 조건에서 1단계 계측 값으로 한다.
+측정은 실덱의 같은 뷰·같은 level 조건에서 1단계 계측 값과 5차 리뷰의 `raster wall`·`pass_workers`·`batches`로 한다.
 
 ## 10. 미결·후속
 

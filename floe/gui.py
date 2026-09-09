@@ -3315,10 +3315,16 @@ class Viewer:
                             res["over_budget_pages"])
                     if res.get("deck"):
                         d = res["deck"]
+                        # raster/frame ms are SUMS over passes; "wall"
+                        # is the batches' real elapsed time, and the
+                        # pass parallelism (x tile workers) beside it
+                        # (review 2026-09-09 (5th))
                         text += (", deck %d passes (%d frame, %d skipped, "
                                  "%d scene reuses) "
-                                 "%d/%d pages, scene %d + frame %d + "
-                                 "composite %d ms, pass max %dMB" % (
+                                 "%d/%d pages, scene %d + frame sum %d + "
+                                 "composite %d ms, raster wall %d ms "
+                                 "%dp x %dt, %d batches, pass max %dMB, "
+                                 "batch max %dMB" % (
                                      d["passes"], d["frame_passes"],
                                      d["passes_skipped"],
                                      d.get("scene_reuses", 0),
@@ -3327,7 +3333,14 @@ class Viewer:
                                      round(d["scene_us"] / 1000),
                                      round(d["frame_raster_us"] / 1000),
                                      round(d["composite_us"] / 1000),
-                                     round(d["pass_bytes_max"] / 1e6)))
+                                     round(d.get("raster_wall_us", 0)
+                                           / 1000),
+                                     d.get("pass_workers", 0),
+                                     res.get("workers", 0),
+                                     d.get("batches", 0),
+                                     round(d["pass_bytes_max"] / 1e6),
+                                     round(d.get("batch_bytes_max", 0)
+                                           / 1e6)))
                     # tiles = plan total (resident pages included);
                     # +new = pages actually shipped for this view
                     # (cache misses, summed over its stream rounds)

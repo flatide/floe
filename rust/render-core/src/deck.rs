@@ -257,33 +257,65 @@ struct Placed {
 /// outline stroke (8) plus the half-pixel coverage rule.
 const WINDOW_SLACK: f64 = 9.0;
 
-/// The device window `(col0, row0, width, height)` of a placement whose
-/// deck bounds are `bbox` inside `view` (deck units); None when the
-/// placement misses the frame. The raster then runs on the FULL frame's
-/// mapping and tile grid, only skipping tiles outside the window, so
-/// the pixels are the full render's byte for byte.
-pub fn subwindow(bbox: &[f64; 4], view: &RasterViewBox, width: u32, height: u32) -> Option<(u32, u32, u32, u32)> {
-    if width == 0 || height == 0 {
-        return None;
+/// What a placement's device window is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Window {
+    /// The placement can touch only `(col0, row0, width, height)`.
+    Part(u32, u32, u32, u32),
+    /// The placement misses the frame.
+    Outside,
+    /// The window could not be bounded (a coordinate overflowed): the
+    /// placement takes the full frame.
+    Full,
+}
+
+/// The device window of a placement whose SOURCE bounds are `bbox`
+/// (source dbu, exact integers) seen through `source_view` (the same
+/// source-unit view the raster maps with). Review 2026-09-09 (5th)
+/// P2-2: the first version mapped the DECK bounds through the deck
+/// view; at a large offset (`dx` = 1e16, `scale` 0.001) the deck
+/// coordinates round to multiples of 2 while the raster, which maps
+/// source dbu through the source view, does not - the window landed
+/// beside the placement and the shape vanished under the optimization
+/// (the full-frame path drew it). The window now uses the raster's own
+/// quantities and formula `(x - view.x0) * width / span`, so it agrees
+/// with the raster up to the last-bit rounding the 9 px slack covers.
+/// The raster runs on the FULL frame's mapping and tile grid, only
+/// skipping tiles outside the window, so the pixels are the full
+/// render's byte for byte.
+pub fn subwindow(bbox: &BBox, source_view: &RasterViewBox, width: u32, height: u32) -> Window {
+    if width == 0 || height == 0 || bbox.is_empty() {
+        return Window::Outside;
     }
+    let view = source_view;
     let span_x = view.x1 - view.x0;
     let span_y = view.y1 - view.y0;
-    if !(span_x > 0.0) || !(span_y > 0.0) || bbox.iter().any(|v| !v.is_finite()) {
-        return None;
+    if !(span_x > 0.0) || !(span_y > 0.0) {
+        return Window::Full;
     }
     // device columns grow with x, rows grow DOWN (device y = y1 - y)
-    let px_x = |x: f64| (x - view.x0) * width as f64 / span_x;
-    let px_y = |y: f64| (view.y1 - y) * height as f64 / span_y;
-    let (x0, x1) = (px_x(bbox[0]), px_x(bbox[2]));
-    let (y0, y1) = (px_y(bbox[3]), px_y(bbox[1]));
-    let c0 = (x0 - WINDOW_SLACK).floor().max(0.0) as u32;
-    let c1 = ((x1 + WINDOW_SLACK).ceil().max(0.0) as u32).min(width);
-    let r0 = (y0 - WINDOW_SLACK).floor().max(0.0) as u32;
-    let r1 = ((y1 + WINDOW_SLACK).ceil().max(0.0) as u32).min(height);
-    if c0 >= c1 || r0 >= r1 {
-        return None;
+    let px_x = |x: i64| (x as f64 - view.x0) * width as f64 / span_x;
+    let px_y = |y: i64| (view.y1 - y as f64) * height as f64 / span_y;
+    let (x0, x1) = (px_x(bbox.x0), px_x(bbox.x1));
+    let (y0, y1) = (px_y(bbox.y1), px_y(bbox.y0));
+    if [x0, x1, y0, y1].iter().any(|v| !v.is_finite()) {
+        return Window::Full;
     }
-    Some((c0, r0, c1 - c0, r1 - r0))
+    // beyond the frame on either side: outside (the comparisons are
+    // made before any cast, which would saturate)
+    let w = width as f64;
+    let h = height as f64;
+    if x1 + WINDOW_SLACK <= 0.0 || x0 - WINDOW_SLACK >= w || y1 + WINDOW_SLACK <= 0.0 || y0 - WINDOW_SLACK >= h {
+        return Window::Outside;
+    }
+    let c0 = (x0 - WINDOW_SLACK).floor().max(0.0).min(w) as u32;
+    let c1 = (x1 + WINDOW_SLACK).ceil().max(0.0).min(w) as u32;
+    let r0 = (y0 - WINDOW_SLACK).floor().max(0.0).min(h) as u32;
+    let r1 = (y1 + WINDOW_SLACK).ceil().max(0.0).min(h) as u32;
+    if c0 >= c1 || r0 >= r1 {
+        return Window::Outside;
+    }
+    Window::Part(c0, r0, c1 - c0, r1 - r0)
 }
 
 /// A window-sized `pass` (`w` x `h`, the raster's windowed frame) laid
@@ -415,11 +447,21 @@ pub struct DeckRenderReport {
     /// Time in scene assembly, frame-pass rasters and the overlay /
     /// final layering - the phases the frame line used to hide.
     pub scene_us: u64,
+    /// Sum of the frames-only passes' raster times.
     pub frame_raster_us: u64,
     pub composite_us: u64,
     /// Placements that reused another placement's plan and scene
     /// (same source, same plan request) this frame.
     pub scene_reuses: u32,
+    /// Wall-clock time of the raster batches (their sum: they run one
+    /// after another); `stats.raster_us` is the sum over passes.
+    pub raster_wall_us: u64,
+    /// Passes rastered in parallel at most (`stats.workers_used` is the
+    /// tile workers of one pass).
+    pub pass_workers: u16,
+    pub batches: u32,
+    /// Largest batch charge: newly decoded pages plus window images.
+    pub batch_bytes_max: u64,
 }
 
 impl Deck {
@@ -630,7 +672,6 @@ impl Deck {
         let mut scene_us = 0u64;
         let mut frame_raster_us = 0u64;
         let mut composite_us = 0u64;
-        let view = [request.view.x0, request.view.y0, request.view.x1, request.view.y1];
         let mut tally = Tally::default();
         // Step 2b (analysis 2026-09-09, no measurement at hand): two
         // repetitions dominate a multi-placement frame - the plan and
@@ -645,16 +686,13 @@ impl Deck {
         let mut cache_bytes = 0u64;
         let mut batch: Vec<PreparedPass> = Vec::new();
         let mut batch_bytes = 0u64;
+        let mut batch_bytes_max = 0u64;
         for placed_index in 0..self.placements.len() {
             let (out, source_index) = {
                 let placed = &self.placements[placed_index];
                 (placed.spec.out, placed.spec.source)
             };
             if request.visible.as_ref().is_some_and(|visible| !visible.contains(&out)) {
-                passes_skipped += 1;
-                continue;
-            }
-            if !boxes_intersect(&self.placements[placed_index].bbox, &view) {
                 passes_skipped += 1;
                 continue;
             }
@@ -696,9 +734,15 @@ impl Deck {
             // keeps the whole source view so page selection is
             // unchanged
             let window = if request.subwindow {
-                match subwindow(&self.placements[placed_index].bbox, &request.view, request.width, request.height) {
-                    Some(window) => window,
-                    None => {
+                match subwindow(
+                    &self.sources[source_index].top_bbox,
+                    &source_view,
+                    request.width,
+                    request.height,
+                ) {
+                    Window::Part(c0, r0, w, h) => (c0, r0, w, h),
+                    Window::Full => (0, 0, request.width, request.height),
+                    Window::Outside => {
                         passes_skipped += 1;
                         continue;
                     }
@@ -813,15 +857,18 @@ impl Deck {
             };
             check_generation(cancellation, generation)?;
             let frames = request.frames && scene.subtree_has_frames(scene.top());
-            batch.push(PreparedPass {
-                scene,
-                style,
-                window,
-                source_view,
-                frames,
-            });
-            batch_bytes = batch_bytes.saturating_add(new_bytes);
-            if batch_bytes >= self.budget_bytes / 2 || batch.len() >= MAX_BATCH_PASSES {
+            // Review 2026-09-09 (5th) P1-1: a batch holds every pass's
+            // window image (geometry, and the frames plane) until it
+            // is composited, and a reused scene costs no new decoded
+            // bytes - so 64 screen-sized passes piled up 300 MB at a
+            // 1 MiB budget. The images are charged to the batch like
+            // the pages; a batch closes BEFORE a pass would push it
+            // past half the budget (a lone pass always runs).
+            let charge = new_bytes.saturating_add(pass_image_bytes(window, frames));
+            if !batch.is_empty()
+                && (batch_bytes.saturating_add(charge) > self.budget_bytes / 2
+                    || batch.len() >= MAX_BATCH_PASSES)
+            {
                 raster_batch(
                     &batch,
                     request,
@@ -835,6 +882,15 @@ impl Deck {
                 batch.clear();
                 batch_bytes = 0;
             }
+            batch.push(PreparedPass {
+                scene,
+                style,
+                window,
+                source_view,
+                frames,
+            });
+            batch_bytes = batch_bytes.saturating_add(charge);
+            batch_bytes_max = batch_bytes_max.max(batch_bytes);
         }
         if !batch.is_empty() {
             raster_batch(
@@ -860,6 +916,9 @@ impl Deck {
         path_member_paints = path_member_paints.saturating_add(tally.path_member_paints);
         frame_member_paints = frame_member_paints.saturating_add(tally.frame_member_paints);
         let scene_reuses = tally.scene_reuses;
+        let raster_wall_us = tally.raster_wall_us;
+        let pass_workers = tally.pass_workers;
+        let batches = tally.batches;
         // opaque black ground, then (with frames) the gray bands of every
         // placement UNDER all geometry and the white band of every
         // placement OVER it
@@ -897,8 +956,21 @@ impl Deck {
             frame_raster_us,
             composite_us,
             scene_reuses,
+            raster_wall_us,
+            pass_workers,
+            batches,
+            batch_bytes_max,
         })
     }
+}
+
+/// Bytes a pass's window images occupy until the batch composites
+/// them: the geometry image, and the frames plane when the pass has
+/// one.
+fn pass_image_bytes(window: (u32, u32, u32, u32), frames: bool) -> u64 {
+    let (_, _, w, h) = window;
+    let image = (w as u64).saturating_mul(h as u64).saturating_mul(4);
+    image.saturating_mul(if frames { 2 } else { 1 })
 }
 
 /// Passes rastered together at most (a batch is also bounded by half
@@ -929,6 +1001,13 @@ struct Tally {
     scene_reuses: u32,
     frame_raster_us: u64,
     composite_us: u64,
+    /// Wall-clock time of the batches' parallel raster phases (the
+    /// batches run one after another, so their sum is the frame's
+    /// real raster time); `stats.raster_us` is the SUM over passes.
+    raster_wall_us: u64,
+    /// Passes rastered at once, at most.
+    pass_workers: u16,
+    batches: u32,
     rectangle_member_paints: u64,
     polygon_member_paints: u64,
     path_member_paints: u64,
@@ -1013,6 +1092,11 @@ fn raster_batch(
     let next = AtomicUsize::new(0);
     let results: Vec<Mutex<Option<Result<PassOutput, String>>>> =
         (0..passes.len()).map(|_| Mutex::new(None)).collect();
+    // Review 2026-09-09 (5th) P2-3: the per-pass raster times are
+    // summed into `raster_us` (4 parallel passes read as twice the
+    // frame's real time); the batch's wall-clock and its pass
+    // parallelism are reported beside it.
+    let raster_started = std::time::Instant::now();
     std::thread::scope(|scope| {
         for _ in 0..concurrency {
             let next = &next;
@@ -1029,6 +1113,11 @@ fn raster_batch(
             });
         }
     });
+    tally.raster_wall_us = tally
+        .raster_wall_us
+        .saturating_add(raster_started.elapsed().as_micros() as u64);
+    tally.pass_workers = tally.pass_workers.max(concurrency.try_into().unwrap_or(u16::MAX));
+    tally.batches += 1;
     for (index, pass) in passes.iter().enumerate() {
         let out = results[index]
             .lock()
@@ -1212,6 +1301,7 @@ pub fn transform_bbox(bbox: &BBox, placement: &DeckPlacement) -> [f64; 4] {
     ]
 }
 
+#[cfg(test)]
 fn boxes_intersect(a: &[f64; 4], b: &[f64; 4]) -> bool {
     // a NaN box (empty source) never intersects
     a[0] <= b[2] && a[2] >= b[0] && a[1] <= b[3] && a[3] >= b[1]
@@ -1464,19 +1554,59 @@ mod tests {
         assert_eq!(layered, vec![0, 0, 0, 255, 255, 255, 255, 255, 0, 0, 0, 255, 0, 0, 0, 255]);
     }
 
+    fn bbox(x0: i64, y0: i64, x1: i64, y1: i64) -> BBox {
+        BBox { x0, y0, x1, y1 }
+    }
+
     #[test]
     fn subwindows_cover_the_placement_plus_slack() {
-        let view = RasterViewBox::new(0.0, 0.0, 1000.0, 1000.0).unwrap();
-        // a placement in the middle of a 100x100 frame: 30..40 px plus
+        // the window is computed in SOURCE units through the source
+        // view, like the raster: a 4x placement at (100, 200) seen
+        // through the deck view 100..1100 x 200..1200 is the source
+        // view 0..250 x 0..250
+        let view = RasterViewBox::new(0.0, 0.0, 250.0, 250.0).unwrap();
+        // a source in the middle of a 100x100 frame: 30..40 px plus
         // 9 px of slack each side (device rows grow down)
-        let w = subwindow(&[300.0, 300.0, 400.0, 400.0], &view, 100, 100).unwrap();
-        assert_eq!(w, (21, 51, 28, 28));
-        // the whole frame when the placement covers it
-        assert_eq!(subwindow(&[-1.0, -1.0, 2000.0, 2000.0], &view, 100, 100), Some((0, 0, 100, 100)));
+        let w = subwindow(&bbox(75, 75, 100, 100), &view, 100, 100);
+        assert_eq!(w, Window::Part(21, 51, 28, 28));
+        // the whole frame when the source covers it
+        assert_eq!(subwindow(&bbox(-1, -1, 500, 500), &view, 100, 100), Window::Part(0, 0, 100, 100));
         // outside the view: no window
-        assert_eq!(subwindow(&[2000.0, 2000.0, 3000.0, 3000.0], &view, 100, 100), None);
+        assert_eq!(subwindow(&bbox(500, 500, 750, 750), &view, 100, 100), Window::Outside);
+        assert_eq!(subwindow(&BBox::EMPTY, &view, 100, 100), Window::Outside);
         // clamped at the frame edge
-        assert_eq!(subwindow(&[0.0, 0.0, 1000.0, 50.0], &view, 100, 100), Some((0, 86, 100, 14)));
+        assert_eq!(subwindow(&bbox(0, 0, 250, 12), &view, 100, 100), Window::Part(0, 86, 100, 14));
+        // far outside: no saturating cast decides it
+        assert_eq!(subwindow(&bbox(i64::MIN / 2, 0, i64::MIN / 4, 10), &view, 100, 100), Window::Outside);
+    }
+
+    #[test]
+    fn subwindow_at_a_huge_deck_offset_follows_the_raster() {
+        // Review 2026-09-09 (5th) P2-2: dx = 1e16 - 1234 at scale 0.001,
+        // a 100 dbu wide source at 1235400.. seen through the deck view
+        // 1e16-10 .. 1e16+10 on 2000 px (100 px per deck unit). The
+        // deck-space window of the first version put the source at
+        // 1e16 + 1.4 .. 1.5, which f64 rounds to 1e16 + 2 both -
+        // device 1200 with a 9 px slack, while the raster (source
+        // space: 1224000 .. 1244000 over 2000 px) draws it at
+        // 1140..1150. The window must contain the raster's pixels.
+        let p = placement(0.001, 1e16 - 1234.0, 1e16 - 1234.0);
+        let deck_view = RasterViewBox::new(1e16 - 10.0, 1e16 - 10.0, 1e16 + 10.0, 1e16 + 10.0).unwrap();
+        let sv = source_view(&deck_view, &p).unwrap();
+        assert_eq!((sv.x0, sv.x1), (1224000.0, 1244000.0));
+        let source = bbox(1235400, 1235400, 1235500, 1235500);
+        let w = subwindow(&source, &sv, 2000, 2000);
+        assert_eq!(w, Window::Part(1131, 841, 28, 28));
+        // and the deck-space mapping the review reproduced does miss it
+        let deck_bbox = transform_bbox(&source, &p);
+        let px = (deck_bbox[0] - deck_view.x0) * 2000.0 / (deck_view.x1 - deck_view.x0);
+        assert!(px >= 1190.0, "deck-space column {px} is off by the f64 ulp at 1e16");
+    }
+
+    #[test]
+    fn pass_images_are_charged_to_the_batch() {
+        assert_eq!(pass_image_bytes((0, 0, 100, 50), false), 20_000);
+        assert_eq!(pass_image_bytes((3, 4, 100, 50), true), 40_000);
     }
 
     #[test]

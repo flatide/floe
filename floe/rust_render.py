@@ -1119,6 +1119,13 @@ class RustRenderWorker:
                 "frame_raster_us": _wire_int(fields, "frame_raster_us"),
                 "composite_us": _wire_int(fields, "composite_us"),
                 "scene_reuses": _wire_int(fields, "scene_reuses"),
+                # review 2026-09-09 (5th): raster_us above is the SUM
+                # over passes; the batches' wall-clock and the pass
+                # parallelism say what the frame really took
+                "raster_wall_us": _wire_int(fields, "raster_wall_us"),
+                "pass_workers": _wire_int(fields, "pass_workers"),
+                "batches": _wire_int(fields, "batches"),
+                "batch_bytes_max": _wire_int(fields, "batch_bytes_max"),
                 "over_budget_pages": deferred,
             }
         if self._max_depth is not None:
