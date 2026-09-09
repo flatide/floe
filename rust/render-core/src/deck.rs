@@ -808,11 +808,24 @@ impl Deck {
                         .zip(planned.plan.pages.iter().copied())
                         .collect();
                     prioritized.sort_unstable();
+                    let planned_pages = prioritized.len();
                     let selected: Vec<u32> = prioritized
                         .into_iter()
                         .take(request.decode_pages.unwrap_or(usize::MAX))
                         .map(|(_, page_id)| page_id)
                         .collect();
+                    // Review 2026-09-10 (8th) P2-1: pages the request's
+                    // decode_pages limit leaves out are missing from the
+                    // frame whichever way the pass is rastered - the
+                    // whole-scene path saw them as the scene's deferred
+                    // pages, the streamed path (every slice scene is
+                    // partial by construction) reported nothing. They
+                    // are counted here, before either path.
+                    let excluded = planned_pages.saturating_sub(selected.len());
+                    if excluded > 0 {
+                        deferred = deferred.saturating_add(excluded.try_into().unwrap_or(u32::MAX));
+                        partial = true;
+                    }
                     // Review 2026-09-09 P1-2: the scene's Arcs keep every
                     // page of this pass alive whatever the LRU evicted,
                     // so one pass is charged against the shared budget
@@ -1125,6 +1138,9 @@ fn stream_pass(
                 hierarchy_frames: true,
                 mono: request.mono,
             };
+            // review 2026-09-10 (8th) P2-2: the frames raster is part
+            // of the streamed pass's wall-clock like the geometry
+            let raster_started = std::time::Instant::now();
             let out = render_geometry_styled_cancellable_windowed(
                 &empty,
                 &frames_only,
@@ -1132,6 +1148,9 @@ fn stream_pass(
                 target.cancellation,
                 device_window,
             )?;
+            tally.raster_wall_us = tally
+                .raster_wall_us
+                .saturating_add(raster_started.elapsed().as_micros() as u64);
             tally.frame_raster_us = tally.frame_raster_us.saturating_add(out.stats.raster_us);
             let split_started = std::time::Instant::now();
             if let (Some(under), Some(over)) = (frames_under.as_deref_mut(), frames_over.as_deref_mut()) {

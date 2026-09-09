@@ -388,7 +388,14 @@ INCOMPLETE)로 보고하며 덱은 열린다. 인덱싱이 일부 실패해도 �
 |---|---|---|---|
 | P2 | bbox 반올림으로 유효한 뷰가 뒤집힘: 6차의 클리핑이 정수 bbox를 f64로 바꿔 클리핑한 뒤 다시 정수로 보정해, 소스 bbox x = 2⁶⁰+1..2⁶⁰+2(양끝이 f64에서 모두 2⁶⁰)에서 x0 = 2⁶⁰+1 > x1 = 2⁶⁰가 되어 invalid view로 프레임 실패(합성 OASIS 재현; 실칩 좌표는 아님) | 사실 | 축별 `clip_low`/`clip_high`: 뷰 경계(f64)가 bbox 경계에 닿거나 넘으면 **원래 i64 bbox 값**을 그대로 쓰고, 엄격히 안쪽인 뷰 경계만 정수로 변환(변환 뒤 `max/min`으로 bbox가 반대로 반올림된 경우 보정). 뷰 경계가 i64 범위 밖 먼 쪽이면 미스(None, 빈 패스). bbox 값은 f64를 거치지 않는다. 단위 테스트 `plan_clip_keeps_exact_bounds_at_huge_coordinates`: 2⁶⁰+1..2⁶⁰+2 소스가 (2⁶⁰+1, 2⁶⁰+2)로 플랜되고, 반대편 i64 끝의 소스는 오류 없이 미스. gate 재현은 없음 — fixture 생성기(KLayout)가 32비트 좌표라 2⁶⁰ 소스를 만들 수 없다 |
 
-실덱 계측을 읽을 때: 실제 raster 시간은 `raster wall`, 합계 `draw/raster ms`는
+### 8차 (2건, 3·4단계 리뷰 2026-09-10, RENDERD 0.12.73)
+
+| # | 지적 | 판정 | 조치 |
+|---|---|---|---|
+| P2-1 | 스트리밍에서 `decode_pages` 제한으로 빠진 페이지가 정상 완료로 보고됨(4페이지 플랜, `decode_pages=2` → 2페이지만 그리고 `partial=0 deferred=0`, 전체 렌더와 15,984 px 차이). 기본 GUI 요청(제한 없음)에는 없음 | 사실 | 선택 단계에서 제외된 페이지 수를 **두 경로에 공통으로** `deferred`에 더하고 `partial`을 세운다(whole-scene 경로는 scene의 deferred로 partial만 잡고 수는 세지 않았고, 스트리밍 경로는 슬라이스 scene이 구조상 partial이라 아무것도 보고하지 않았다). gate `ReviewFixTests8.test_p2_1`: dense.jb 1 MiB·`decode_pages=2`(render 명령에 삽입)에서 `over_budget_pages`>0·전체 렌더와 다름, 제한 없으면 0·동일 |
+| P2-2 | 스트리밍 경로의 `raster_wall_us`에 계층 프레임 raster 시간이 빠짐(직렬 구간) | 사실 | `stream_pass`의 프레임 raster도 벽시계에 더한다. gate `StreamTests` depth 1 케이스(dense.oas D0에 손자 셀 K 추가: D 페이지는 스트리밍, K는 프레임): `frame_passes` 1·스트리밍 1·`raster_wall_us` ≥ `frame_raster_us`·픽셀 동일 |
+
+
 패스 수만큼 부풀어 있다.
 
 ## 11. 성능 분석 2026-09-09 — 판정과 계획

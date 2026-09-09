@@ -272,6 +272,10 @@ def build_dense_oas(path, dbu=0.00005, count=60000, extent_um=2000.0,
         nonlocal state
         state = (state * 1103515245 + 12345) & 0x7fffffff
         return state
+    # D0 also holds a grandchild K (a 100 um box): at depth 1 the D
+    # cells' pages stream while K is a hierarchy frame (StreamTests)
+    grand = ly.create_cell("K")
+    grand.shapes(li).insert(db.Box(0, 0, 100 * unit, 100 * unit))
     for c in range(cells):
         kid = ly.create_cell("D%d" % c)
         shapes = kid.shapes(li)
@@ -281,6 +285,9 @@ def build_dense_oas(path, dbu=0.00005, count=60000, extent_um=2000.0,
             w = unit + rnd() % (3 * unit)
             h = unit + rnd() % (3 * unit)
             shapes.insert(db.Box(x, y, x + w, y + h))
+        if c == 0:
+            kid.insert(db.CellInstArray(grand.cell_index(),
+                                        db.Trans(span // 2, span // 2)))
         top.insert(db.CellInstArray(kid.cell_index(), db.Trans()))
     ly.write(str(path))
 
@@ -2090,6 +2097,10 @@ class StreamTests(unittest.TestCase):
             (dict(depth=None, frames=False, fill="speckle"), True),
             (dict(depth=None, frames=True, fill="speckle"), True),
             (dict(depth=0, frames=True, fill="speckle"), False),
+            # depth 1: the D cells' pages stream while D0's grandchild
+            # K is a hierarchy frame (review 2026-09-10 (8th) P2-2:
+            # the frames raster is part of the streamed wall-clock)
+            (dict(depth=1, frames=True, fill="speckle"), True),
             (dict(depth=None, frames=False, fill=PATTERN_ROWS, width_px=2),
              True),
         ]
@@ -2104,6 +2115,11 @@ class StreamTests(unittest.TestCase):
                 self.assertGreater(d["slices"], 1, d)
             self.assertEqual(r1.get("over_budget_pages", 0), 0)
             self.assertEqual(d["frame_passes"], r0["deck"]["frame_passes"])
+            if kw["depth"] == 1:
+                self.assertEqual(d["frame_passes"], 1, d)
+                self.assertGreater(d["frame_raster_us"], 0, d)
+                self.assertGreaterEqual(d["raster_wall_us"],
+                                        d["frame_raster_us"], d)
             self.assertEqual(streamed, whole, kw)
             self.assertGreater(_lit(whole), 0)
         # a zoomed view: the pass streams on its sub-window
@@ -2212,6 +2228,75 @@ class WideViewTests(unittest.TestCase):
             self.assertGreater(_lit(on), 0)
         _, r_all = self._render("test.jb", {}, None, 3.0, (301, 237))
         self.assertEqual(r_all["deck"]["wide_washes"], 1)
+
+
+class ReviewFixTests8(unittest.TestCase):
+    """Review 2026-09-10 (8th, after steps 3 and 4): pages the request's
+    decode_pages limit leaves out are reported as missing (deferred,
+    partial) whether the pass streams or not."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.env = {"FLOE_INDEX_BIN": str(ROOT / "rust" / "target" /
+                                         "release" / "floe-index"),
+                   "FLOE_RENDERD_BIN": str(ROOT / "rust" / "target" /
+                                           "release" / "floe-renderd")}
+        os.environ["FLOE_RENDERD_BIN"] = cls.env["FLOE_RENDERD_BIN"]
+        run_floe2("index", CLI / "dense.jb", "--jobs", "2", env=cls.env,
+                  ok=0)
+
+    def _render(self, env, decode_pages):
+        from floe.jobdeck.viewer import DeckCache
+        for k, v in env.items():
+            os.environ[k] = v
+        try:
+            c = DeckCache(str(CLI / "dense.jb"))
+            c.load()
+            try:
+                worker = jrender.DeckRenderWorker(c)
+                worker.start()
+                if decode_pages is not None:
+                    # the protocol's page limit, which the viewer's
+                    # command never sets: spliced into the render line
+                    send = worker._send
+
+                    def limited(command):
+                        if command.startswith("render "):
+                            command = command.replace(
+                                " out=", " decode_pages=%d out=" % decode_pages,
+                                1)
+                        return send(command)
+                    worker._send = limited
+                try:
+                    return _render_raw(worker, tuple(c.meta["bbox"]), 200,
+                                       200, with_result=True)
+                finally:
+                    worker.stop()
+            finally:
+                c.close()
+        finally:
+            for k in env:
+                os.environ.pop(k, None)
+
+    def test_p2_1_decode_pages_limit_is_reported_when_streaming(self):
+        whole, r_all = self._render({}, None)
+        self.assertEqual(r_all.get("over_budget_pages", 0), 0)
+        total = r_all["deck"]["pages_summed"]
+        self.assertGreater(total, 2)
+        streamed_cases = 0
+        for env in ({}, {"FLOE_RUST_BUDGET_MB": "1"}):
+            for limit in (2, total - 1):
+                cut, r = self._render(env, limit)
+                d = r["deck"]
+                if not env:
+                    self.assertEqual(d["streamed_passes"], 0, d)
+                streamed_cases += d["streamed_passes"]
+                self.assertEqual(r.get("over_budget_pages", 0), total - limit,
+                                 "excluded pages are missing pages: %s" % d)
+                self.assertNotEqual(cut, whole)
+                self.assertGreater(_lit(cut), 0)
+        self.assertGreater(streamed_cases, 0,
+                           "a limited pass streamed at 1 MiB too")
 
 
 class ReviewFixTests5(unittest.TestCase):
