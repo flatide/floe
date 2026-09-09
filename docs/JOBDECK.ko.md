@@ -389,7 +389,10 @@ budget = 패스별 디코드 보유)을 코드와 대조했다. 모두 사실이
   어댑터는 `result["deck"]`으로 올리고 상태줄에 `deck N passes (F frame, S
   skipped) U/P pages, scene+frame+composite ms, pass max MB`.
 - 스크린샷: 캡처의 `over_budget_pages`를 shot 행과 보고서(`complete`,
-  `jobdeck.over_budget_pages`)에 기록, `floe2 render`는 exit 3.
+  `jobdeck.over_budget_pages`)에 기록, `floe2 render`는 exit 3. shot 행의
+  `complete`는 덱의 누락 배치(`skipped_placements`)와 예산 초과를 **둘 다**
+  반영해 전체 보고서와 같은 판정을 낸다(리뷰 2026-09-09: shot만 읽는 배치
+  처리가 누락 이미지를 완전한 것으로 봤음); 마지막 `INCOMPLETE` 로그도 같다.
 - gate `PerfAnalysisTests`.
 
 ### 2단계 — 배치별 전체 화면 구조 (다음)

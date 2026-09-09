@@ -510,6 +510,12 @@ def run_shots(cache, shots, out, report=None, frames=False, labels=False,
     dbu = float(cache.meta["dbu"])
     bb = cache.meta["bbox"]
     default_box = (bb[0] * dbu, bb[1] * dbu, bb[2] * dbu, bb[3] * dbu)
+    # a jobdeck's skipped placements (missing source, absent layer,
+    # unsupported container) are absent from EVERY capture: each shot
+    # row carries them so a per-shot reader sees the same verdict as
+    # the report (review 2026-09-09: complete=true rows under an
+    # incomplete report)
+    skipped = list((cache.meta.get("jobdeck") or {}).get("skipped") or [])
     rows = []
     runner = ShotRunner(cache, frames=frames, labels=labels,
                         label_font_px=label_font_px)
@@ -551,7 +557,8 @@ def run_shots(cache, shots, out, report=None, frames=False, labels=False,
                 row["bbox_um"] = list(boxes[0])
             row["ms"] = round((time.perf_counter() - t0) * 1000)
             row["over_budget_pages"] = over_budget
-            row["complete"] = over_budget == 0
+            row["skipped_placements"] = len(skipped)
+            row["complete"] = over_budget == 0 and not skipped
             if over_budget and log:
                 log("[floe] WARNING: %s stopped at the page budget: %d "
                     "page(s) not drawn" % (path, over_budget))
@@ -572,26 +579,25 @@ def run_shots(cache, shots, out, report=None, frames=False, labels=False,
     # a jobdeck that could not draw every placement says so in the
     # report and the log, and the caller exits non-zero (review
     # 2026-09-09 P1-1: a thinner PNG must never look complete)
-    skipped = list((cache.meta.get("jobdeck") or {}).get("skipped") or [])
     if skipped and log:
         log("[floe] WARNING: %d jobdeck placement(s) not drawn: %s"
             % (len(skipped), "; ".join(
                 "CHIP %s $%d %s %s" % (r["chip"], r["idx"], r["tc"],
                                        r["reason"]) for r in skipped[:5])
                + (" ..." if len(skipped) > 5 else "")))
+    over_budget_total = sum(r["over_budget_pages"] for r in rows)
     if report:
         doc = {"source": cache.src, "dbu": dbu, "shots": rows,
-               "complete": not skipped and all(r["complete"] for r in rows)}
+               "complete": all(r["complete"] for r in rows)}
         if cache.meta.get("jobdeck"):
             doc["jobdeck"] = {"complete": doc["complete"],
                               "skipped": skipped,
-                              "over_budget_pages": sum(
-                                  r["over_budget_pages"] for r in rows),
+                              "over_budget_pages": over_budget_total,
                               "view": cache.meta["jobdeck"].get("mode")}
         with open(report, "w") as fh:
             json.dump(doc, fh, indent=1)
         if log:
             log("[floe] report %s (%d shot(s)%s)" % (
                 report, len(rows),
-                ", INCOMPLETE" if skipped else ""))
+                ", INCOMPLETE" if (skipped or over_budget_total) else ""))
     return rows

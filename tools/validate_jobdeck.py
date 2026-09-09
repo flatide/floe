@@ -1357,6 +1357,12 @@ class ReviewFixTests(unittest.TestCase):
         self.assertTrue(out.is_file(), "the partial PNG is still written")
         doc = json.loads(rep.read_text())
         self.assertFalse(doc["jobdeck"]["complete"])
+        # the shot row agrees with the report (review 2026-09-09: a
+        # per-shot reader saw complete=true under an incomplete report)
+        self.assertFalse(doc["complete"])
+        self.assertFalse(doc["shots"][0]["complete"])
+        self.assertEqual(doc["shots"][0]["skipped_placements"], 1)
+        self.assertIn("INCOMPLETE", res.stdout)
         self.assertEqual(doc["jobdeck"]["skipped"][0]["reason"],
                          "empty_layer")
         self.assertEqual(doc["jobdeck"]["skipped"][0]["ly"], 987)
@@ -1820,6 +1826,8 @@ class PerfAnalysisTests(unittest.TestCase):
         self.assertFalse(doc["jobdeck"]["complete"])
         self.assertGreater(doc["shots"][0]["over_budget_pages"], 0)
         self.assertFalse(doc["shots"][0]["complete"])
+        self.assertIn("INCOMPLETE", res.stdout,
+                      "the report log names an over-budget capture too")
         # the default budget: complete, exit 0
         res = run_floe2("render", CLI / "dense.jb", "--px", "120", "--out",
                         out, "--report", rep, env=self.env, ok=0)
