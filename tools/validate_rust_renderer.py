@@ -637,9 +637,20 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         from floe import gui
 
         # only the two lists are dark (user call): no pane-wide rules
+        # black again (user call 2026-09-10; the deep grey of
+        # 2026-09-08 is withdrawn)
         self.assertIn(b".floe-drc-list, .floe-drc-list.view "
-                      b"{ background-color: #2b2b2b", gui.PANEL_CSS)
+                      b"{ background-color: #000000", gui.PANEL_CSS)
         self.assertIn(b".floe-drc-list:selected", gui.PANEL_CSS)
+        # and a visible rule between the error detail and the buttons
+        self.assertIn(b".floe-drc-rule { background-color: #808080; "
+                      b"min-height: 1px;", gui.PANEL_CSS)
+        import inspect
+        src = inspect.getsource(gui.Viewer._build_drc_panel)
+        self.assertIn('add_class("floe-drc-rule")', src)
+        self.assertLess(src.index('add_class("floe-drc-rule")'),
+                        src.index("nav = Gtk.FlowBox()"),
+                        "the rule sits between the detail and the buttons")
         self.assertNotIn(b".floe-drc {", gui.PANEL_CSS)
         self.assertNotIn(b".floe-drc textview", gui.PANEL_CSS)
         self.assertNotIn(b".floe-drc entry", gui.PANEL_CSS)

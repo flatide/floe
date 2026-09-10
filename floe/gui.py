@@ -163,17 +163,24 @@ PANEL_CSS = (
     b"{ background-color: #c0c0c0; } "
     b".floe-layers-frame scrollbar slider:active "
     b"{ background-color: #e0e0e0; } "
-    # DRC pane (user calls 2026-09-08): ONLY the rules list and the
-    # error-number grid are dark - a deep grey rather than the layer
-    # pane's black, which read too dark here - with white text; the
-    # detail text, search entry, buttons and filters keep the theme.
-    # The grid keeps its markup colours (waived green / red, gold
-    # selection with darkened numbers, blue current cell); the
-    # selected rule row uses the layer pane's blue.
+    # DRC pane (user calls 2026-09-08, 2026-09-10): ONLY the rules
+    # list and the error-number grid are dark - black like the layer
+    # pane (the deep grey of 2026-09-08 was revised back to black on
+    # 2026-09-10) - with white text; the detail text, search entry,
+    # buttons and filters keep the theme. The grid keeps its markup
+    # colours (waived green / red, gold selection with darkened
+    # numbers, blue current cell); the selected rule row uses the
+    # layer pane's blue.
     b".floe-drc-list, .floe-drc-list.view "
-    b"{ background-color: #2b2b2b; color: #ffffff; } "
+    b"{ background-color: #000000; color: #ffffff; } "
     b".floe-drc-list:selected, .floe-drc-list.view:selected "
     b"{ background-color: #31566d; color: #ffffff; } "
+    # the rule between the error detail and the filter buttons under
+    # it (user call 2026-09-10: nothing marked that boundary) - an
+    # explicit colour and height, since the macOS GTK theme draws a
+    # bare Gtk.Separator nearly invisible
+    b".floe-drc-rule { background-color: #808080; min-height: 1px; "
+    b"margin: 2px 0; } "
     # DRC note panel: flateyes-style translucent top-left chip
     b".floe-note-panel { background-color: rgba(0,0,0,0.6); "
     b"color: #f0f0f0; padding: 4px 10px; border-radius: 4px; "
@@ -5237,6 +5244,11 @@ class Viewer:
         paned.set_position(420)
         box.pack_start(paned, True, True, 0)
         win._detail = detail.get_buffer()
+        # a visible rule between the detail text and the buttons
+        # (user call 2026-09-10)
+        rule = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+        rule.get_style_context().add_class("floe-drc-rule")
+        box.pack_start(rule, False, False, 0)
         # filter controls in a FlowBox: on a narrow pane they WRAP
         # onto extra rows instead of clipping (user call 2026-08-18)
         nav = Gtk.FlowBox()
