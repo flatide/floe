@@ -606,6 +606,60 @@ def component_versions(worker):
     return lines
 
 
+# what the load dialog's browser never lists (user call 2026-09-10):
+# a layout's <src>.floe cache directory and a DRC db's .ice sidecar -
+# GTK's own chooser applies no filter to folders, so .floe caches
+# cluttered every data directory
+BROWSE_HIDDEN_SUFFIXES = (".floe", ".ice")
+
+
+def list_browse_entries(folder, patterns):
+    """(folders, files) of `folder` for the load dialog's browser.
+    Folders are names; files are (name, size, mtime) admitted by one
+    of the fnmatch `patterns` (case-insensitive). Dotfiles, *.floe
+    and *.ice are never listed; both lists sort case-insensitively.
+    An unreadable folder lists nothing."""
+    import fnmatch
+    folders, files = [], []
+    try:
+        it = os.scandir(folder)
+    except OSError:
+        return [], []
+    lowered = [p.lower() for p in patterns]
+    with it:
+        for e in it:
+            name = e.name
+            if name.startswith(".") or name.lower().endswith(
+                    BROWSE_HIDDEN_SUFFIXES):
+                continue
+            try:
+                is_dir = e.is_dir()
+            except OSError:
+                continue
+            if is_dir:
+                folders.append(name)
+                continue
+            if not any(fnmatch.fnmatch(name.lower(), p) for p in lowered):
+                continue
+            try:
+                st = e.stat()
+                files.append((name, st.st_size, st.st_mtime))
+            except OSError:
+                files.append((name, -1, 0))
+    folders.sort(key=str.lower)
+    files.sort(key=lambda t: t[0].lower())
+    return folders, files
+
+
+def fmt_bytes(n):
+    """1023 B, 4.2 KB, 1.3 MB, 2.0 GB."""
+    n = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return ("%d %s" if unit == "B" else "%.1f %s") % (n, unit)
+        n /= 1024
+
+
 def fmt_count(n):
     """Human shape count: 950 / 12k / 3.4M / 1.2G."""
     if n >= 1e9:
@@ -4873,42 +4927,164 @@ class Viewer:
         `floe view <file>` takes. When the pick has no VFS cache it
         ASKS to build one and indexes on Yes (user call 2026-08-28).
         `jobdeck`: File > load jobdeck… - same dialog, .jb filter
-        first (a .jb picked either way opens as a deck)."""
-        dlg = Gtk.FileChooserDialog(title="load jobdeck" if jobdeck
-                                    else "load layout",
-                                    parent=self.window,
-                                    action=Gtk.FileChooserAction.OPEN)
-        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
-                        "Open", Gtk.ResponseType.OK)
+        first (a .jb picked either way opens as a deck). The dialog is
+        our own browser (user call 2026-09-10): GTK's file chooser
+        lists every folder whatever the filter says, so a data
+        directory showed each layout's <src>.floe cache and every
+        .ice sidecar next to the layouts."""
         # initial base = the folder floe was launched from (user
         # call 2026-08-22); once a layout is loaded, its own folder
         # (sibling layouts live together, same as the DRC dialog)
-        dlg.set_current_folder(
-            self._launch_dir if self.meta is None
-            else os.path.dirname(self.meta["src"]["path"]))
+        folder = (self._launch_dir if self.meta is None
+                  else os.path.dirname(self.meta["src"]["path"]))
         filters = [("layouts (*.oas, *.gds)",
                     ("*.oas", "*.oas.gz", "*.gds", "*.gds.gz")),
                    ("jobdecks (*.jb)", ("*.jb",)),
                    ("all files", ("*",))]
         if jobdeck:
             filters[0], filters[1] = filters[1], filters[0]
-        for name, pats in filters:
-            ff = Gtk.FileFilter()
-            ff.set_name(name)
-            for p in pats:
-                ff.add_pattern(p)
-            dlg.add_filter(ff)
-        if dlg.run() != Gtk.ResponseType.OK:
-            dlg.destroy()
-            self._restore_keys()
-            return
-        path = dlg.get_filename()
-        dlg.destroy()
+        path = self._browse_file_dialog(
+            "load jobdeck" if jobdeck else "load layout", folder, filters)
         # a modal run() on quartz does not hand the keys back to the
         # parent by itself: restore now, and again after the load
         # rebuilds the panels (open_file)
         self._restore_keys()
+        if not path:
+            return
         self._load_picked(path)
+
+    def _browse_file_dialog(self, title, folder, filters, first=0):
+        """A file browser of our own: folder list first, then the files
+        the current filter admits; `list_browse_entries` hides dotfiles,
+        <src>.floe caches and .ice sidecars (user call 2026-09-10 -
+        GTK's chooser applies no filter to folders). Up / home buttons,
+        an editable path (Enter navigates to a folder or accepts a
+        file), type-ahead on the name column, a filter combo. Returns
+        the picked path, or None."""
+        dlg = Gtk.Dialog(title=title, transient_for=self.window, modal=True)
+        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                        "Open", Gtk.ResponseType.OK)
+        dlg.set_default_response(Gtk.ResponseType.OK)
+        dlg.set_default_size(760, 520)
+        box = dlg.get_content_area()
+        box.set_spacing(4)
+        box.set_border_width(6)
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        up = Gtk.Button(label="\u2191")
+        up.set_tooltip_text("parent folder")
+        home = Gtk.Button(label="~")
+        home.set_tooltip_text("home folder")
+        entry = Gtk.Entry()
+        entry.set_hexpand(True)
+        bar.pack_start(up, False, False, 0)
+        bar.pack_start(home, False, False, 0)
+        bar.pack_start(entry, True, True, 0)
+        box.pack_start(bar, False, False, 0)
+        # name, size, modified, is_dir
+        store = Gtk.ListStore(str, str, str, bool)
+        view = Gtk.TreeView(model=store)
+        for j, (label, expand) in enumerate((("name", True), ("size", False),
+                                             ("modified", False))):
+            cell = Gtk.CellRendererText()
+            if expand:
+                cell.set_property("ellipsize", Pango.EllipsizeMode.MIDDLE)
+            col = Gtk.TreeViewColumn(label, cell, text=j)
+            col.set_expand(expand)
+            view.append_column(col)
+        view.set_enable_search(True)
+        view.set_search_column(0)
+        sc = Gtk.ScrolledWindow()
+        # no sideways scrolling: the name column ellipsizes instead, so
+        # size and modified stay in view
+        sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sc.add(view)
+        box.pack_start(sc, True, True, 0)
+        combo = Gtk.ComboBoxText()
+        for name, _pats in filters:
+            combo.append_text(name)
+        combo.set_active(max(0, min(first, len(filters) - 1)))
+        box.pack_start(combo, False, False, 0)
+        state = {"folder": os.path.abspath(folder or os.getcwd()),
+                 "picked": None}
+
+        def fill():
+            store.clear()
+            pats = filters[combo.get_active()][1]
+            folders, files = list_browse_entries(state["folder"], pats)
+            for name in folders:
+                store.append([name + "/", "", "", True])
+            for name, size, mtime in files:
+                store.append([name, fmt_bytes(size) if size >= 0 else "",
+                              time.strftime("%Y-%m-%d %H:%M",
+                                            time.localtime(mtime)), False])
+            entry.set_text(state["folder"])
+            if len(store):
+                view.get_selection().select_path(Gtk.TreePath.new_first())
+            view.grab_focus()
+
+        def go(path):
+            state["folder"] = os.path.abspath(path)
+            fill()
+
+        def selected():
+            """(path, is_dir) of the selected row, or None."""
+            model, it = view.get_selection().get_selected()
+            if it is None:
+                return None
+            name = model[it][0].rstrip("/")
+            return os.path.join(state["folder"], name), bool(model[it][3])
+
+        def activate(*_args):
+            row = selected()
+            if row is None:
+                return
+            path, is_dir = row
+            if is_dir:
+                go(path)
+            else:
+                state["picked"] = path
+                dlg.response(Gtk.ResponseType.OK)
+
+        def on_entry(*_args):
+            text = os.path.expanduser(entry.get_text().strip())
+            if os.path.isdir(text):
+                go(text)
+            elif os.path.isfile(text):
+                state["picked"] = os.path.abspath(text)
+                dlg.response(Gtk.ResponseType.OK)
+
+        view.connect("row-activated", activate)
+        entry.connect("activate", on_entry)
+        up.connect("clicked", lambda *_: go(os.path.dirname(state["folder"])
+                                            or state["folder"]))
+        home.connect("clicked", lambda *_: go(os.path.expanduser("~")))
+        combo.connect("changed", lambda *_: fill())
+        fill()
+        self._center_on_parent(dlg)
+        dlg.set_keep_above(True)
+        dlg.show_all()
+        dlg.present()
+        try:
+            while True:
+                resp = dlg.run()
+                if resp != Gtk.ResponseType.OK:
+                    return None
+                if state["picked"]:
+                    return state["picked"]
+                row = selected()
+                if row is not None and row[1]:
+                    go(row[0])           # Open on a folder enters it
+                    continue
+                if row is not None:
+                    return row[0]
+                text = os.path.expanduser(entry.get_text().strip())
+                if os.path.isfile(text):
+                    return os.path.abspath(text)
+                if os.path.isdir(text):
+                    go(text)
+        finally:
+            dlg.destroy()
+            self.window.present()
 
     def _load_picked(self, path):
         """Open the file the load dialog picked. A jobdeck ALWAYS goes

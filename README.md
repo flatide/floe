@@ -360,6 +360,12 @@ floe는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델을 
   열린 뒤 적용된다. 스크립트·gate용으로 `FLOE_INDEX_ON_OPEN=yes|no`가 질문을
   대신 답한다(기본 `ask`). 인덱싱 자체는 여전히 `floe-index` 프로세스가 하며
   GUI는 로그만 보여 준다.
+- **로드 대화상자**(File > load layout… / load jobdeck…, 2026-09-10)는 자체
+  파일 브라우저다: 폴더 먼저·필터에 맞는 파일 다음, 위/홈 버튼, 경로 입력
+  (Enter로 폴더 이동 또는 파일 열기), 이름 타이핑 검색, 필터 콤보. 레이아웃의
+  `<src>.floe` 캐시 디렉터리와 DRC db의 `.ice` 사이드카, 점 파일은 목록에
+  나오지 않는다(GTK 파일 선택기는 폴더에 필터를 적용하지 않아 `.floe`가 데이터
+  폴더를 어지럽혔다). 다른 대화상자(DRC open, notes/waives)는 아직 GTK 선택기.
 
 ### 네이티브 뷰어 (`floe view`) — GTK3/PyGObject (flateyes와 동일 제약)
 

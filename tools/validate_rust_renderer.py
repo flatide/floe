@@ -1476,6 +1476,41 @@ class IndexOnOpenTests(unittest.TestCase):
         self.assertEqual(calls[0], ("open", "/x/deck.jb", None))
         self.assertNotIn("levels", [c[0] for c in calls])
 
+    def test_load_browser_hides_caches_and_sidecars(self):
+        """User call 2026-09-10: the load dialog's folder listing never
+        shows a layout's <src>.floe cache or a DRC db's .ice sidecar
+        (nor dotfiles); folders come first, files follow the filter."""
+        import tempfile
+        from floe import gui
+        with tempfile.TemporaryDirectory() as d:
+            os.mkdir(os.path.join(d, "a.oas.floe"))
+            os.mkdir(os.path.join(d, "Sub"))
+            os.mkdir(os.path.join(d, ".git"))
+            for name in ("a.oas", "b.GDS", "x.db", "x.db.ice", ".hidden",
+                         "deck.jb", "notes.txt"):
+                with open(os.path.join(d, name), "w") as fh:
+                    fh.write("x")
+            folders, files = gui.list_browse_entries(
+                d, ("*.oas", "*.oas.gz", "*.gds", "*.gds.gz"))
+            self.assertEqual(folders, ["Sub"])
+            self.assertEqual([f[0] for f in files], ["a.oas", "b.GDS"])
+            self.assertEqual(files[0][1], 1)
+            folders, files = gui.list_browse_entries(d, ("*.jb",))
+            self.assertEqual([f[0] for f in files], ["deck.jb"])
+            folders, files = gui.list_browse_entries(d, ("*",))
+            self.assertEqual([f[0] for f in files],
+                             ["a.oas", "b.GDS", "deck.jb", "notes.txt", "x.db"],
+                             "all files: still no .ice, no dotfile")
+            self.assertEqual(gui.list_browse_entries(
+                os.path.join(d, "nope"), ("*",)), ([], []))
+        self.assertEqual(gui.fmt_bytes(1023), "1023 B")
+        self.assertEqual(gui.fmt_bytes(4300), "4.2 KB")
+        self.assertEqual(gui.fmt_bytes(1.3 * 1024 ** 2), "1.3 MB")
+        import inspect
+        src = inspect.getsource(gui.Viewer._load_layout_dialog)
+        self.assertIn("_browse_file_dialog(", src)
+        self.assertNotIn("FileChooserDialog", src)
+
     def test_load_dialog_routes_a_deck_through_the_level_question(self):
         """File > load jobdeck… (field 2026-09-10): an INDEXED deck
         opened straight away, so the level dialog never showed; every
