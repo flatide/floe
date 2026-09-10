@@ -3379,8 +3379,17 @@ mod tests {
 
     // ---- brute reference: every rep member expanded, exact
     // per-path local view, same cut/layer/depth predicates - the
-    // correctness oracle. hier must NEVER select fewer pages.
+    // correctness oracle. hier must NEVER select fewer pages. The
+    // page predicate follows HierOpts::page_hairline like the
+    // planner (review 2026-09-11: the oracle still culled thin pages
+    // after the default changed, so a planner that dropped one would
+    // have passed); `brute` is the default policy, `brute_with` any.
     fn brute(v: &Ovm, req: &ViewReq) -> BTreeSet<u32> {
+        brute_with(v, req, &HierOpts::default())
+    }
+
+    fn brute_with(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> BTreeSet<u32> {
+        #[allow(clippy::too_many_arguments)]
         fn walk(
             v: &Ovm,
             ci: u32,
@@ -3388,6 +3397,8 @@ mod tests {
             r: u32,
             req: &ViewReq,
             cut: u64,
+            hair: u64,
+            page_hair: u64,
             out: &mut BTreeSet<u32>,
         ) {
             let cell = v.cell(ci);
@@ -3399,7 +3410,6 @@ mod tests {
             }
             let w = (cell.rbbox.x1 - cell.rbbox.x0).max(0) as u64;
             let h = (cell.rbbox.y1 - cell.rbbox.y0).max(0) as u64;
-            let hair = cut / 2; // HierOpts::default().hairline
             if (w < cut && h < cut) || w.min(h) < hair {
                 return;
             }
@@ -3417,7 +3427,7 @@ mod tests {
                     continue;
                 }
                 if (p.max_w < cut && p.max_h < cut)
-                    || p.max_min < cut / 2
+                    || p.max_min < page_hair
                 {
                     continue;
                 }
@@ -3457,7 +3467,7 @@ mod tests {
                         pl.rot,
                         pl.flip,
                     ));
-                    walk(v, pl.child, &m, cr, req, cut, out);
+                    walk(v, pl.child, &m, cr, req, cut, hair, page_hair, out);
                 }
             }
         }
@@ -3467,13 +3477,19 @@ mod tests {
         } else {
             req.depth
         };
+        let cut = req.cut_dbu.max(0) as u64;
+        // the planner's rounding of both thresholds
+        let hair = (cut as f64 * opts.hairline) as u64;
+        let page_hair = if opts.page_hairline { hair } else { 0 };
         walk(
             v,
             v.top,
             &Xf::identity(),
             r0,
             req,
-            req.cut_dbu.max(0) as u64,
+            cut,
+            hair,
+            page_hair,
             &mut out,
         );
         out
@@ -4240,6 +4256,103 @@ mod tests {
             &HierOpts::default(),
         );
         assert_eq!(pc.stats.frame_rects, 0);
+    }
+
+    /// Review 2026-09-11: the page hairline option through the page-
+    /// BVH leaf path (walk_pbvh) and the linear run, on and off, each
+    /// EQUAL to the oracle under the same option - a planner that
+    /// dropped a thin page with the option off would now fail here.
+    #[test]
+    fn page_hairline_option_on_the_pbvh_leaf_path_matches_the_oracle() {
+        // 20 pages in a row, every other one thin (90 x 5: min side 5)
+        let mk = |with_tree: bool| -> Ovm {
+            let mut b = Builder::new(1000.0, 0, 0, 1);
+            b.top = 0;
+            b.layer(1, 0, "L1", 0, 0);
+            let m1 = b.bitset(&[1]);
+            for k in 0..20u32 {
+                let x = k as i64 * 100;
+                let h = if k % 2 == 1 { 5 } else { 50 };
+                b.page(
+                    0,
+                    0,
+                    k,
+                    &bx(x, 0, x + 90, h),
+                    0,
+                    0,
+                    0,
+                    1,
+                    1,
+                    90,
+                    h as u64,
+                    floe_ovm::LOD_EXACT,
+                    floe_ovm::LOD_PAGE_NONE,
+                );
+            }
+            let root = if with_tree {
+                let l0 = b.pbvh_node(&bx(0, 0, 990, 50), 0, 10, true, 90, 50);
+                let _l1 =
+                    b.pbvh_node(&bx(1000, 0, 1990, 50), 10, 10, true, 90, 50);
+                b.pbvh_node(&bx(0, 0, 1990, 50), l0, 2, false, 90, 50)
+            } else {
+                PBVH_NONE
+            };
+            let pr = b.prange(0, 0, 20, root);
+            b.cell(
+                "T",
+                0,
+                0,
+                &bx(0, 0, 1990, 50),
+                &bx(0, 0, 1990, 50),
+                0,
+                0,
+                0,
+                20,
+                0,
+                0,
+                pr,
+                1,
+                m1,
+                m1,
+                1,
+                0,
+                0,
+                m1,
+            );
+            Ovm::from_bytes(b.finish(0, 0)).unwrap()
+        };
+        let lin = mk(false);
+        let tree = mk(true);
+        // cut 20 -> hair 10: the thin pages' min side 5 is under it,
+        // their long side 90 is not (never a size cull)
+        let req = rq(bx(0, 0, 1990, 50), 20, u32::MAX);
+        for page_hairline in [false, true] {
+            let mut o = HierOpts::default();
+            o.page_hairline = page_hairline;
+            o.explain = true;
+            let pl = plan_hier(&lin, &req, &o);
+            let pt = plan_hier(&tree, &req, &o);
+            assert!(pt.stats.visited_page_bvh > 0, "the tree path was walked");
+            let oracle = brute_with(&lin, &req, &o);
+            assert_eq!(hier_pages(&pl), oracle, "linear, page_hairline={page_hairline}");
+            assert_eq!(hier_pages(&pt), oracle, "pbvh leaf, page_hairline={page_hairline}");
+            let thin: BTreeSet<u32> = (0..20u32).filter(|k| k % 2 == 1).collect();
+            if page_hairline {
+                assert_eq!(oracle.len(), 10);
+                assert!(oracle.is_disjoint(&thin));
+                assert_eq!(pt.stats.cull_page_size, 10);
+                assert_eq!(pt.stats.thin_pages_kept, 0);
+                assert_eq!(pt.explain.iter().filter(|r| r.verdict == "cull_hair").count(), 10);
+            } else {
+                assert_eq!(oracle.len(), 20);
+                assert!(oracle.is_superset(&thin));
+                assert_eq!(pt.stats.cull_page_size, 0);
+                assert_eq!(pt.stats.thin_pages_kept, 10);
+                assert_eq!(pt.explain.iter().filter(|r| r.verdict == "exact_thin").count(), 10);
+            }
+        }
+        // the default oracle IS the default policy: it keeps thin pages
+        assert_eq!(brute(&lin, &req).len(), 20);
     }
 
     #[test]
