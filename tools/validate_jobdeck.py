@@ -1099,6 +1099,62 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertNotIn("no GUI frame", res.stderr + res.stdout)
 
 
+class JobdeckShortcutTests(unittest.TestCase):
+    """Ctrl+, (user call 2026-09-10) flips level view <-> chip view; the
+    source layer view goes back to the level view; on a plain layout
+    it only posts the menu's status note. Driven through the viewer's
+    key handler with a GDK event on a stub viewer (no window)."""
+
+    def setUp(self):
+        try:
+            import gi
+            gi.require_version("Gtk", "3.0")
+            gi.require_version("Gdk", "3.0")
+            from gi.repository import Gdk  # noqa: F401
+        except (ImportError, ValueError):
+            raise unittest.SkipTest("PyGObject/GTK is not importable")
+
+    def _press_ctrl_comma(self, mode, jobdeck=True):
+        import types
+        from gi.repository import Gdk
+        from floe import gui
+        gui.import_gtk()   # the module binds Gtk/Gdk lazily (exit 3 path)
+        calls, notes = [], []
+        stub = types.SimpleNamespace(
+            _gdlg=None,
+            window=types.SimpleNamespace(get_focus=lambda: None),
+            cache=types.SimpleNamespace(is_jobdeck=jobdeck, mode=mode),
+            _jobdeck_mode=lambda: mode,
+            _jobdeck_set_mode=calls.append,
+            _set_live_status=notes.append,
+        )
+        stub._command_key = lambda ev: gui.Viewer._command_key(stub, ev)
+        stub._jobdeck_toggle_view = (
+            lambda: gui.Viewer._jobdeck_toggle_view(stub))
+        ev = types.SimpleNamespace(keyval=Gdk.KEY_comma,
+                                   state=Gdk.ModifierType.CONTROL_MASK,
+                                   hardware_keycode=0)
+        gui.Viewer._on_key(stub, None, ev)
+        return calls, notes
+
+    def test_ctrl_comma_toggles_level_and_chip_view(self):
+        self.assertEqual(self._press_ctrl_comma("level")[0], ["chip"])
+        self.assertEqual(self._press_ctrl_comma("chip")[0], ["level"])
+        self.assertEqual(self._press_ctrl_comma("layer")[0], ["level"])
+        calls, notes = self._press_ctrl_comma("level", jobdeck=False)
+        self.assertEqual(calls, [])
+        self.assertEqual(len(notes), 1)
+        self.assertIn("not a jobdeck", notes[0])
+
+    def test_menu_names_the_shortcut(self):
+        import inspect
+        from floe import gui
+        src = inspect.getsource(gui.Viewer._build_menubar) \
+            if hasattr(gui.Viewer, "_build_menubar") else \
+            inspect.getsource(gui)
+        self.assertIn("toggle level view / chip view\\tCtrl+,", src)
+
+
 class IndexOnOpenSmokeTests(unittest.TestCase):
     """`floe2 view <file>` without an index starts the viewer, asks
     (FLOE_INDEX_ON_OPEN answers for the gate), indexes in the modal

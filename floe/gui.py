@@ -3908,6 +3908,8 @@ class Viewer:
             self.fit()                          # zoom all
         elif ctrl and name == "period":
             self._goto_dialog()                 # Ctrl+.
+        elif ctrl and name == "comma":
+            self._jobdeck_toggle_view()         # Ctrl+, level <-> chip
         elif ctrl and name in ("c", "C"):
             self._copy_view()                   # view -> clipboard
         elif name == "f":
@@ -4701,6 +4703,9 @@ class Viewer:
             check(m, label,
                   (lambda mode=mode: self._jobdeck_set_mode(mode)),
                   (lambda mode=mode: self._jobdeck_mode() == mode))
+        sep(m)
+        item(m, "toggle level view / chip view\tCtrl+,",
+             self._jobdeck_toggle_view)
 
         m = top("Help")
         item(m, "About %s" % APP, self._about_dialog)
@@ -4834,6 +4839,18 @@ class Viewer:
         if getattr(cache, "is_jobdeck", False):
             return cache.mode
         return None
+
+    def _jobdeck_toggle_view(self):
+        """Ctrl+, (user call 2026-09-10): flip between MDPView's two
+        jobdeck views - level view <-> chip view. From the source
+        layer view it goes to the level view. Not a jobdeck: the same
+        status note as the menu."""
+        if not getattr(self.cache, "is_jobdeck", False):
+            self._set_live_status(
+                "not a jobdeck (File > load jobdeck… a .jb)")
+            return
+        self._jobdeck_set_mode(
+            "chip" if self._jobdeck_mode() == "level" else "level")
 
     def _jobdeck_set_mode(self, mode):
         """Jobdeck > colour by …: re-plan the deck under the mode (the
