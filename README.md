@@ -163,6 +163,7 @@ floe2 view   deck.jb                    # 뷰어에서 열기(File > load jobdec
 floe2 view   deck.jb --level 1,3        # 묻지 않고 level 1,3만 로드(스크립트는 FLOE_JOBDECK_LEVELS=all|N,N… 로 답할 수도 있다)
 floe2 info   deck.jb                    # 덱 요약 + 뷰 레이어 표
 floe2 render deck.jb --bbox 40000,80000,60000,95000 --px 1200 --out deck.png
+floe2 render chip.oas --bbox 0,0,2000,2000 --px 800 --out a.png --detail high   # 뷰어와 같은 1 px cut으로 캡처(기본 exact = cut 없음; low/medium/high = 5/3/1 px)
 floe2 render deck.jb --at 53.02mm,92.61mm --size 32mm,25.6mm --px 1200x900 --out a.png
 floe2 render deck.jb --corners 40000,80000,60000,95000 --size 4mm,3mm --px 600x450 --out quad.png  # 영역 안쪽 네 꼭짓점 4장 mosaic
 floe2 render deck.jb --batch shots.txt --out shots/ --report shots/report.json     # 한 번 열고 여러 장

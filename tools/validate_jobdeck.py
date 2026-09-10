@@ -2649,6 +2649,33 @@ class WideViewTests(unittest.TestCase):
                              if exact[o:o + 3] != b"\0\0\0"}
             self.assertEqual(lit_colours, exact_colours)
 
+    def test_render_detail_reproduces_the_viewer_cut(self):
+        # field 2026-09-10: a region the viewer dropped past a zoom
+        # rendered fine in `floe2 render` because captures are exact;
+        # --detail high captures with the viewer's 1 px cut. tiny.oas
+        # at 200 px over 2000 um: 1 px = 10 um, the 1 um dots page is
+        # culled by size and the 1 um BIT array is pruned - nothing
+        # lit; exact (the default) draws them
+        src = CLI / "tiny.oas"
+        for detail, lit in (("exact", True), ("high", False)):
+            out = CLI / ("tiny-%s.png" % detail)
+            rep = CLI / ("tiny-%s.json" % detail)
+            argv = ["render", src, "--bbox", "0,0,2000,2000", "--px", "200",
+                    "--out", out, "--report", rep]
+            if detail != "exact":
+                argv += ["--detail", detail]
+            run_floe2(*argv, env=self.env, ok=0)
+            doc = json.loads(rep.read_text())
+            self.assertEqual(doc["cut_px"], 0.0 if detail == "exact" else 1.0)
+            self.assertEqual(_png_lit_pixels(out) > 0, lit, detail)
+        # a deck capture with the viewer's cut keeps the wide policy's
+        # washes (the deck's own behaviour at that detail)
+        out = CLI / "tiny-deck-high.png"
+        run_floe2("render", CLI / "tiny.jb", "--bbox", "0,0,2000,2000",
+                  "--px", "200", "--out", out, "--detail", "high",
+                  env=self.env, ok=0)
+        self.assertGreater(_png_lit_pixels(out), 0)
+
     def test_wide_policy_is_a_no_op_above_the_cut(self):
         # test.jb's chips (levels 1 and 2) are far above the cut: the
         # policy adds no wash and changes no pixel there; the whole

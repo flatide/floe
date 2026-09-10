@@ -590,6 +590,12 @@ budget = 패스별 디코드 보유)을 코드와 대조했다. 모두 사실이
   설계 논의(밀도 사다리: 크기 cut 대신 exact/LOD 점유, hairline은 전체 길이의
   1 px 선, 자식 bbox+rep 방출; 격자 솎아내기는 프레임에만)는 판정이 나온 뒤
   착수한다. LOD 쌍은 `floe2 index --force --lod` 재인덱싱이 필요하다(기본 끔).
+  사용자 실측 2: 안 보이는 뷰(210.7 × 203.5 µm, cut 0.256 µm)에서 선택 페이지 0·
+  hier 1/1 → 플랜 단계에서 전부 제거; 보이는 뷰는 cut 0.747 µm에서도 1페이지가
+  살아남음(판정 크기 역전 = 저장 구조가 다름). 사용자 실측 3: `floe2 render`
+  캡처는 두 영역 모두 나옴 → render는 `cut_px 0`(exact)이라 원인이 플랜 cut임을
+  확정. 이를 GUI 없이 재현하도록 `floe2 render --detail low|medium|high|exact`
+  (기본 exact)를 두었다(gate `test_render_detail_reproduces_the_viewer_cut`).
 
 - **배율/임의각 PLACEMENT(OASIS 18)**: 2026-09-09 현재 실제 소스에서 아직 관측되지
   않아 보류(사용자 확인). 나타나면 계층 변환을 실수화하지 않고 **인덱싱 시

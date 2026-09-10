@@ -846,11 +846,17 @@ def _render_shots(args, c):
                 c.resolve_layers(shot.layers)
             except ValueError as exc:
                 raise SystemExit("floe: %s" % exc)
+    # --detail: the viewer's size cut (low/medium/high = 5/3/1 px);
+    # exact (default) captures with no cut, as `floe render` always did
+    from .service import DETAIL_PX
+    cut_px = {"exact": 0.0, "low": DETAIL_PX[0], "medium": DETAIL_PX[1],
+              "high": DETAIL_PX[2]}[args.detail]
     try:
         rows = shots_mod.run_shots(c, shots, args.out, report=args.report,
                                    frames=args.frames, labels=args.labels,
                                    label_font_px=args.label_font_px,
-                                   log=print, batch=bool(args.batch))
+                                   log=print, batch=bool(args.batch),
+                                   cut_px=cut_px)
     except (RuntimeError, ValueError) as exc:
         raise SystemExit("floe: Rust render service: %s" % exc)
     skipped = _deck_skipped(c)
@@ -876,6 +882,8 @@ def cmd_render(args):
     if args.batch or args.at or args.mosaic_at or args.corners:
         raise SystemExit("floe: --batch/--at/--mosaic-at/--corners "
                          "require FLOE_RENDERER=rust")
+    if args.detail != "exact":
+        raise SystemExit("floe: --detail requires FLOE_RENDERER=rust")
     if not args.bbox:
         raise SystemExit("floe: --bbox is required (or use "
                          "--drc/--drc-rule)")
@@ -1786,6 +1794,11 @@ def main(argv=None, *, prog=None, rust_only=None):
                        help="JSON: every shot's region, pixels and time")
     p.add_argument("--depth", type=int, default=None,
                    help="hierarchy depth (0=top only, 999/omit=full)")
+    p.add_argument("--detail", choices=("exact", "low", "medium", "high"),
+                   default="exact",
+                   help="planner size cut: exact = none (archival "
+                        "default); low/medium/high = the viewer's 5/3/1 "
+                        "px cut, to capture what the viewer shows")
     p.add_argument("--frames", action="store_true",
                    help="Rust backend: draw hierarchy frontier frames")
     p.add_argument("--labels", action="store_true",
