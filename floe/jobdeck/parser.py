@@ -242,10 +242,16 @@ class JobDeck:
                     seen.append(e.idx)
         return sorted(seen)
 
-    def sources(self) -> list[str]:
+    def sources(self, ids=None) -> list[str]:
+        """Source paths (as written), in first-use order; `ids` keeps
+        only the sources the given mask levels place (loading a deck
+        with a level selection indexes and opens those alone)."""
+        want = None if ids is None else {int(i) for i in ids}
         seen = []
         for c in self.chips:
             for e in c.entries:
+                if want is not None and e.idx not in want:
+                    continue
                 if e.tc not in seen:
                     seen.append(e.tc)
         return seen

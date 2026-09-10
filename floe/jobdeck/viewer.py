@@ -39,7 +39,37 @@ def deck_sources_dir(path, sources_dir=None) -> str:
     return sources_dir or os.path.dirname(os.path.abspath(path)) or "."
 
 
-def deck_ready(path, sources_dir=None) -> bool:
+def normalize_levels(ids):
+    """A level selection as a sorted list of distinct ints, None for
+    all levels (an empty selection is None too)."""
+    if ids is None:
+        return None
+    out = sorted({int(i) for i in ids})
+    return out or None
+
+
+def level_rows(deck):
+    """What a Calibre-style load dialog lists: one row per mask level
+    with its name, the CHIPs placing it, its placed instances and its
+    sources."""
+    rows = []
+    for idx in deck.levels():
+        chips, instances, sources = [], 0, []
+        for c in deck.chips:
+            entries = [e for e in c.entries if e.idx == idx]
+            if not entries:
+                continue
+            chips.append(c.id)
+            instances += len(entries) * max(1, len(c.rows))
+            for e in entries:
+                if e.tc not in sources:
+                    sources.append(e.tc)
+        rows.append({"level": idx, "name": deck.title(idx), "chips": chips,
+                     "instances": instances, "sources": sources})
+    return rows
+
+
+def deck_ready(path, sources_dir=None, ids=None) -> bool:
     """True when every source the deck names that CAN be drawn (probes
     ok) has a fresh <src>.floe cache - the deck's equivalent of
     `<src>.floe` existing. A missing, unreadable or unknown-format
@@ -52,7 +82,7 @@ def deck_ready(path, sources_dir=None) -> bool:
     except (OSError, ValueError):
         return False
     catalog = SourceCatalog(deck_sources_dir(path, sources_dir))
-    catalog.probe_all(deck.sources())
+    catalog.probe_all(deck.sources(normalize_levels(ids)))
     drawable = [i for i in catalog.infos.values() if i.ok()]
     return bool(drawable) and all(i.indexed for i in drawable)
 
@@ -66,7 +96,9 @@ class DeckCache:
                  ids=None):
         self.src = os.path.abspath(path)
         self.mode = normalize_mode(mode)
-        self.ids = ids
+        # the mask levels loaded (Calibre-style level selection at
+        # load, user call 2026-09-10); None = every level
+        self.ids = normalize_levels(ids)
         self.sources_dir = deck_sources_dir(self.src, sources_dir)
         self.work = None
         self.dir = None            # the spec renderd opens
@@ -91,13 +123,22 @@ class DeckCache:
         placement, reported when the deck opens)."""
         deck = parse_jobdeck(self.src, strict=True)
         catalog = SourceCatalog(self.sources_dir)
-        catalog.probe_all(deck.sources())
+        catalog.probe_all(deck.sources(self.ids))
         return [tc for tc, i in sorted(catalog.infos.items())
                 if i.ok() and not i.indexed]
 
     def load(self):
         if self.work is None:
             self.work = tempfile.mkdtemp(prefix="floe-jobdeck-")
+        if self.ids is not None:
+            have = parse_jobdeck(self.src, strict=True).levels()
+            unknown = [i for i in self.ids if i not in have]
+            if unknown:
+                raise ValueError(
+                    "level%s %s not in the deck (it places %s)" % (
+                        "s" if len(unknown) > 1 else "",
+                        ",".join(str(i) for i in unknown),
+                        ",".join(str(i) for i in have)))
         (self.deck, self.catalog, self.placements, self.stats,
          self.scheme, self.colormap) = plan_deck(
             self.src, sources_dir=self.sources_dir, ids=self.ids,
@@ -188,6 +229,12 @@ class DeckCache:
         self.mode = normalize_mode(mode)
         return self.load()
 
+    def set_levels(self, ids):
+        """Load another level selection (None = all); re-plans and
+        rewrites the spec like set_mode."""
+        self.ids = normalize_levels(ids)
+        return self.load()
+
     def view_rows(self):
         return view_layers(self.deck, self.stats, self.scheme, self.colormap)
 
@@ -229,7 +276,9 @@ class DeckCache:
                 "mode": self.mode,
                 "chips": len(self.deck.chips),
                 "identifiers": self.deck.identifiers(),
-                "sources": len(self.deck.sources()),
+                # the level selection this load carries (None = all)
+                "levels": self.ids,
+                "sources": len(self.deck.sources(self.ids)),
                 "placements": len(self.placements),
                 "skipped": list(st["skipped"]) + list(self.ledger),
                 "colour_order": st["colors"]["order"],

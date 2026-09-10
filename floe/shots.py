@@ -593,7 +593,8 @@ def run_shots(cache, shots, out, report=None, frames=False, labels=False,
             doc["jobdeck"] = {"complete": doc["complete"],
                               "skipped": skipped,
                               "over_budget_pages": over_budget_total,
-                              "view": cache.meta["jobdeck"].get("mode")}
+                              "view": cache.meta["jobdeck"].get("mode"),
+                              "levels": cache.meta["jobdeck"].get("levels")}
         with open(report, "w") as fh:
             json.dump(doc, fh, indent=1)
         if log:

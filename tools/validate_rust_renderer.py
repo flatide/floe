@@ -1385,9 +1385,14 @@ class IndexOnOpenTests(unittest.TestCase):
         from floe.gui import Viewer
         v = Viewer.__new__(Viewer)
         calls = []
-        v._index_ready = lambda path: ready
+        v._index_ready = lambda path, ids=None: ready
         v._ask_yes_no = lambda text: (calls.append(("ask", text)), answer)[1]
-        v.open_file = lambda path: (calls.append(("open", path)), None)[1]
+        v.open_file = lambda path, ids=None: (
+            calls.append(("open", path, ids)), None)[1]
+        # the level question (user call 2026-09-10): the shell answers
+        # "every level" unless a test installs its own
+        v._jobdeck_pick_levels = lambda path, current=None, force=False: (
+            calls.append(("levels", path)), None)[1]
         v._forwarded_view_options = lambda fields: (
             calls.append(("options", list(fields))), True)[1]
         v._forwarded_goto = lambda fields: (
@@ -1404,9 +1409,9 @@ class IndexOnOpenTests(unittest.TestCase):
             after(v.open_file(path))
         v._vfs_index_and_load = index_and_load
 
-        def deck_index_and_load(path, after=None):
-            calls.append(("deck-index", path))
-            after(v.open_file(path))
+        def deck_index_and_load(path, after=None, ids=None):
+            calls.append(("deck-index", path, ids))
+            after(v.open_file(path, ids))
         v._jobdeck_index_and_load = deck_index_and_load
         return v, calls
 
@@ -1419,6 +1424,35 @@ class IndexOnOpenTests(unittest.TestCase):
                          ["open", "options", "goto", "redraw", "present"])
         self.assertEqual(calls[0][1], "/x/chip.oas")
 
+    def test_deck_asks_levels_then_opens_them(self):
+        """User call 2026-09-10 (Calibre-style load): a jobdeck asks
+        which mask levels to load before anything else; a `levels=`
+        field (floe2 view --level) or an explicit `ids` answers it;
+        the readiness check, the index run and the open carry the
+        selection; Cancel opens nothing."""
+        from floe.gui import Viewer
+        v, calls = self._shell(ready=True)
+        Viewer._open_or_index(v, "/x/deck.jb", ["depth=999"])
+        self.assertEqual(calls[0], ("levels", "/x/deck.jb"))
+        self.assertEqual(calls[1], ("open", "/x/deck.jb", None),
+                         "every level")
+        v, calls = self._shell(ready=True)
+        Viewer._open_or_index(v, "/x/deck.jb", ["levels=3,1", "depth=999"])
+        self.assertEqual(calls[0], ("open", "/x/deck.jb", [1, 3]),
+                         "levels= answers the question, unasked")
+        self.assertEqual(calls[1], ("options", ["depth=999"]),
+                         "levels= is not a view option")
+        v, calls = self._shell(ready=False, answer=True)
+        Viewer._open_or_index(v, "/x/deck.jb", ids=[2])
+        self.assertEqual(calls[0][0], "ask")
+        self.assertEqual(calls[1], ("deck-index", "/x/deck.jb", [2]))
+        self.assertEqual(calls[2], ("open", "/x/deck.jb", [2]))
+        v, calls = self._shell(ready=True)
+        v._jobdeck_pick_levels = lambda path, current=None, force=False: False
+        Viewer._open_or_index(v, "/x/deck.jb")
+        self.assertEqual([c[0] for c in calls], ["status", "keys"])
+        self.assertIn("cancelled", calls[0][1])
+
     def test_missing_index_asks_then_indexes_then_opens(self):
         from floe.gui import Viewer
         v, calls = self._shell(ready=False, answer=True)
@@ -1429,12 +1463,13 @@ class IndexOnOpenTests(unittest.TestCase):
                           "present"], "a goto owns the one redraw")
         self.assertIn("No VFS index for", calls[0][1])
         self.assertIn("chip.oas", calls[0][1])
-        # a jobdeck asks about its sources and indexes them all
+        # a jobdeck asks which levels to load (user call 2026-09-10),
+        # then about its sources, and indexes them
         v, calls = self._shell(ready=False, answer=True)
         Viewer._open_or_index(v, "/x/deck.jb")
-        self.assertEqual([c[0] for c in calls[:3]],
-                         ["ask", "deck-index", "open"])
-        self.assertIn("Not every source of", calls[0][1])
+        self.assertEqual([c[0] for c in calls[:4]],
+                         ["levels", "ask", "deck-index", "open"])
+        self.assertIn("Not every source of", calls[1][1])
 
     def test_then_runs_after_a_successful_open_only(self):
         """A --drc load must follow the (possibly indexed) layout open:

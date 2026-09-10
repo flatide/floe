@@ -239,6 +239,21 @@ floe2 jobdeck deck.jb [--report r.json] [--spec s.spec]   # 분석·보고만
   사용자 요청 2026-09-10)는 level view ↔ chip view를 바로 바꾼다(source layer
   view에서는 level view로; 덱이 아니면 상태줄 안내만). gate
   `JobdeckShortcutTests`.
+- **레벨 선택 로드**(사용자 요청 2026-09-10, Calibre MDPView처럼): 덱을 열 때
+  먼저 "load jobdeck levels" 대화상자가 mask level마다 한 줄(`$n 이름`, CHIP 수,
+  인스턴스 수, 소스)을 체크 목록으로 보여 주고(all/none), 고른 level만 플랜·
+  인덱싱·표시한다. File > load jobdeck…, `floe2 view deck.jb`(항상 창을 거쳐
+  연다), 실행 중인 창으로 forward된 열기 모두 같다. `floe2 view deck.jb --level
+  1,3`은 묻지 않고 그 level로 열고, 스크립트·gate는 `FLOE_JOBDECK_LEVELS=all|
+  N[,N...]`로 답한다(기본 `ask`; level이 하나뿐인 덱은 묻지 않음). 선택은
+  `DeckCache(ids=…)`로 들어가 뷰 레이어 표(level/chip/source layer view 모두)와
+  스펙이 그 level만 담고, 색은 전체 덱 기준으로 고정된다(선택이 색을 옮기지
+  않음). 인덱싱도 그 level의 소스만(`floe2 index deck.jb --level 1,3`), 준비
+  판정(`deck_ready(ids=)`)도 같다. 창 제목 `· levels 1,3 of 4`. Jobdeck 메뉴
+  **select levels to load…**로 열린 덱의 선택을 바꾸면(필요한 소스는 인덱싱 후)
+  뷰를 유지한 채 다시 연다. CLI `--level`은 index/info/render/view에 있다
+  (`render`의 보고서 `jobdeck.levels`). gate `LevelSelectTests`,
+  `IndexOnOpenTests.test_deck_asks_levels_then_opens_them`.
 - File > **load jobdeck…**(2026-09-09; `.jb` 필터가 앞에 오는 같은 대화상자) 또는 File > load layout… 의 `jobdecks (*.jb)` 필터. 소스 중 인덱스 없는 것이
   있으면 "지금 인덱싱할까요?" → `floe2 index deck.jb`를 모달 로그로 실행 후 연다.
   `floe2 view deck.jb`도 같다(2026-09-09: 인덱스 없는 파일은 레이아웃·덱·DRC db

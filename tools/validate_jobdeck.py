@@ -1092,10 +1092,21 @@ class GuiSmokeTests(unittest.TestCase):
                                      "floe-index"),
                "FLOE_RENDERD_BIN": str(ROOT / "rust" / "target" /
                                        "release" / "floe-renderd"),
-               "FLOE_GUI_SMOKE_MS": "8000"}
+               "FLOE_GUI_SMOKE_MS": "8000",
+               # the Calibre-style level question (user call
+               # 2026-09-10) is answered for the gate
+               "FLOE_JOBDECK_LEVELS": "all"}
         run_floe2("index", CLI / "test.jb", "--jobs", "2", env=env, ok=0)
         res = run_floe2("view", "--multi", CLI / "test.jb", env=env, ok=0,
                         timeout=120)
+        self.assertNotIn("no GUI frame", res.stderr + res.stdout)
+        # a level selection from the environment, and from --level
+        res = run_floe2("view", "--multi", CLI / "test.jb",
+                        env=dict(env, FLOE_JOBDECK_LEVELS="2"), ok=0,
+                        timeout=120)
+        self.assertNotIn("no GUI frame", res.stderr + res.stdout)
+        res = run_floe2("view", "--multi", CLI / "test.jb", "--level", "1,3",
+                        env=env, ok=0, timeout=120)
         self.assertNotIn("no GUI frame", res.stderr + res.stdout)
 
 
@@ -1155,6 +1166,126 @@ class JobdeckShortcutTests(unittest.TestCase):
         self.assertIn("toggle level view / chip view\\tCtrl+,", src)
 
 
+class LevelSelectTests(unittest.TestCase):
+    """User call 2026-09-10: like Calibre, a jobdeck loads a CHOSEN set
+    of mask levels. DeckCache(ids=...) plans, lists and draws those
+    levels alone (colours keyed by the full deck), indexes only their
+    sources, and the CLI takes --level on index/info/render/view."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.env = {"FLOE_INDEX_BIN": str(ROOT / "rust" / "target" /
+                                         "release" / "floe-index"),
+                   "FLOE_RENDERD_BIN": str(ROOT / "rust" / "target" /
+                                           "release" / "floe-renderd")}
+        os.environ["FLOE_RENDERD_BIN"] = cls.env["FLOE_RENDERD_BIN"]
+        run_floe2("index", CLI / "test.jb", "--jobs", "2", env=cls.env,
+                  ok=0)
+
+    def test_deck_cache_loads_the_selected_levels(self):
+        from floe.jobdeck.viewer import DeckCache, level_rows, normalize_levels
+        from floe.jobdeck import parse_jobdeck
+        self.assertEqual(normalize_levels((3, "1", 3)), [1, 3])
+        self.assertIsNone(normalize_levels([]))
+        rows = level_rows(parse_jobdeck(str(CLI / "test.jb"), strict=True))
+        self.assertEqual([r["level"] for r in rows], [1, 2, 3, 5])
+        by = {r["level"]: r for r in rows}
+        self.assertEqual(by[3]["name"], "ALIGN")
+        self.assertEqual(by[3]["chips"], ["ID001", "ID003"])
+        self.assertEqual(by[3]["sources"], ["mark.oas"])
+        self.assertEqual(by[1]["instances"], 2 + 3 + 1)
+        full = DeckCache(str(CLI / "test.jb"))
+        full.load()
+        self.addCleanup(full.close)
+        c = DeckCache(str(CLI / "test.jb"), ids=[3, 1])
+        c.load()
+        self.addCleanup(c.close)
+        self.assertEqual(c.ids, [1, 3])
+        self.assertEqual([l["layer"] for l in c.meta["layers"]], [1, 3])
+        self.assertEqual(c.meta["jobdeck"]["levels"], [1, 3])
+        self.assertEqual(c.meta["jobdeck"]["identifiers"], [1, 2, 3, 5])
+        self.assertEqual(c.meta["jobdeck"]["sources"], 2)   # chipA, mark
+        self.assertEqual(len(c.placements),
+                         len([p for p in full.placements if p.idx in (1, 3)]))
+        # colours never move with the selection
+        colour = {l["layer"]: l["color"] for l in full.meta["layers"]}
+        for l in c.meta["layers"]:
+            self.assertEqual(l["color"], colour[l["layer"]])
+        # chip view: CHIPs expand to the loaded levels only; ID002
+        # places level 1 (kept) - every CHIP survives here
+        c.set_mode("chip")
+        names = [l["name"] for l in c.meta["layers"]]
+        self.assertNotIn("$2 VIA1", names)
+        self.assertIn("$3 ALIGN", names)
+        self.assertEqual(names.count("$1 METAL1"), 3)
+        c.set_mode("level")
+        only5 = DeckCache(str(CLI / "test.jb"), ids=[5], mode="chip")
+        only5.load()
+        self.addCleanup(only5.close)
+        # (level 5 has no MTITLE: its row is "$5")
+        self.assertEqual([l["name"] for l in only5.meta["layers"]],
+                         ["CHIP ID002", "$5"], "CHIPs placing no "
+                         "loaded level are not listed")
+        # source layer view follows the selection too
+        only5.set_mode("layer")
+        self.assertEqual([l["name"] for l in only5.meta["layers"]],
+                         ["LY7.DT2"])
+        # re-selection in place
+        c.set_levels(None)
+        self.assertEqual([l["layer"] for l in c.meta["layers"]],
+                         [1, 2, 3, 5])
+        with self.assertRaises(ValueError) as cm:
+            DeckCache(str(CLI / "test.jb"), ids=[4, 9]).load()
+        self.assertIn("levels 4,9 not in the deck", str(cm.exception))
+
+    def test_selected_levels_index_and_open_their_sources_only(self):
+        from floe.jobdeck.viewer import DeckCache, deck_ready
+        fresh = CLI / "levels"
+        fresh.mkdir(exist_ok=True)
+        for name in ("chipA.oas", "chipB.oas", "mark.oas", "test.jb"):
+            shutil.copy2(CLI / name, fresh / name)
+        deck = fresh / "test.jb"
+        # level 3 places mark.oas alone
+        self.assertFalse(deck_ready(str(deck), ids=[3]))
+        res = run_floe2("index", deck, "--level", "3", "--jobs", "2",
+                        env=self.env, ok=0)
+        self.assertIn("[jobdeck] levels    : 3 of 1,2,3,5", res.stdout)
+        self.assertTrue((fresh / "mark.oas.floe" / "meta.json").is_file())
+        self.assertFalse((fresh / "chipA.oas.floe").exists())
+        self.assertFalse((fresh / "chipB.oas.floe").exists())
+        self.assertTrue(deck_ready(str(deck), ids=[3]))
+        self.assertFalse(deck_ready(str(deck), ids=[1, 3]))
+        self.assertFalse(deck_ready(str(deck)))
+        self.assertEqual(DeckCache(str(deck), ids=[3]).unindexed(), [])
+        self.assertEqual(DeckCache(str(deck), ids=[1, 3]).unindexed(),
+                         ["chipA.oas"])
+        run_floe2("index", deck, "--level", "9", env=self.env, ok=1)
+        # the deck opens on level 3 alone with nothing skipped
+        c = DeckCache(str(deck), ids=[3])
+        c.load()
+        self.addCleanup(c.close)
+        self.assertEqual(c.skipped, [])
+        self.assertEqual([l["layer"] for l in c.meta["layers"]], [3])
+
+    def test_cli_level_option_on_info_and_render(self):
+        res = run_floe2("info", CLI / "test.jb", "--level", "5",
+                        env=self.env, ok=0)
+        self.assertIn("selection [5]", res.stdout)
+        out = CLI / "level2.png"
+        rep = CLI / "level2.json"
+        run_floe2("render", CLI / "test.jb", "--level", "2", "--px", "160",
+                  "--out", out, "--report", rep, env=self.env, ok=0)
+        doc = json.loads(rep.read_text())
+        self.assertEqual(doc["jobdeck"]["levels"], [2])
+        self.assertTrue(doc["complete"])
+        from PIL import Image
+        colours = set(Image.open(out).convert("RGB").getdata())
+        self.assertEqual(colours, {(0, 0, 0), (255, 255, 0)},
+                         "level 2 (yellow) alone")
+        run_floe2("render", CLI / "test.jb", "--level", "7", "--px", "160",
+                  "--out", out, env=self.env, ok=1)
+
+
 class IndexOnOpenSmokeTests(unittest.TestCase):
     """`floe2 view <file>` without an index starts the viewer, asks
     (FLOE_INDEX_ON_OPEN answers for the gate), indexes in the modal
@@ -1166,7 +1297,8 @@ class IndexOnOpenSmokeTests(unittest.TestCase):
                 "FLOE_RENDERD_BIN": str(ROOT / "rust" / "target" /
                                         "release" / "floe-renderd"),
                 "FLOE_GUI_SMOKE_MS": "20000",
-                "FLOE_INDEX_ON_OPEN": policy}
+                "FLOE_INDEX_ON_OPEN": policy,
+                "FLOE_JOBDECK_LEVELS": "all"}
 
     def _gtk(self):
         try:

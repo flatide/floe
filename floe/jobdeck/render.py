@@ -49,8 +49,18 @@ def view_layers(deck, stats, scheme, colormap):
     analysis; a viewer lists what it colours.)"""
     rows = []
     mode = scheme.mode
+    # a level selection (loading some levels only, user call
+    # 2026-09-10): the view lists the loaded levels alone; colours stay
+    # keyed by the full deck (a selection never moves them)
+    sel = stats.get("selection")
+    sel = None if sel is None else {int(i) for i in sel}
+
+    def kept(idx):
+        return sel is None or idx in sel
     if mode == MODE_LEVEL:
         for idx in deck.identifiers():
+            if not kept(idx):
+                continue
             title = deck.title(idx)
             rows.append({"key": idx, "layer": idx, "datatype": 0,
                          "name": "$%d%s" % (idx, " " + title if title
@@ -67,7 +77,10 @@ def view_layers(deck, stats, scheme, colormap):
                          "name": "CHIP %s" % cid, "color_key": cid,
                          "head": True})
             levels = sorted({e.idx for c in deck.chips if c.id == cid
-                             for e in c.entries})
+                             for e in c.entries if kept(e.idx)})
+            if not levels:
+                rows.pop()   # a CHIP placing no loaded level
+                continue
             for idx in levels:
                 title = deck.title(idx)
                 rows.append({"key": (cid, idx), "layer": pos,
@@ -75,7 +88,8 @@ def view_layers(deck, stats, scheme, colormap):
                              "name": "$%d%s" % (idx, " " + title if title
                                                 else "")})
     else:
-        pairs = sorted({(r["ly"], r["dt"]) for r in stats["layer_table"]})
+        pairs = sorted({(r["ly"], r["dt"]) for r in stats["layer_table"]
+                        if kept(r["idx"])})
         for ly, dt in pairs:
             rows.append({"key": (ly, dt), "layer": ly, "datatype": dt,
                          "name": "LY%d.DT%d" % (ly, dt)})

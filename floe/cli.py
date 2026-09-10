@@ -129,7 +129,7 @@ def open_cache(src, args):
         if _renderer_backend() != "rust":
             raise SystemExit(
                 f"floe: a jobdeck needs the Rust renderer: floe2 view {src}")
-        c = DeckCache(src)
+        c = DeckCache(src, ids=getattr(args, "level", None))
         if not c.exists():
             raise SystemExit(f"floe: no such file: {src}")
         # sources without a cache are skipped placements (listed
@@ -361,7 +361,20 @@ def cmd_index(args):
         except (OSError, ValueError) as exc:
             raise SystemExit("floe: %s" % exc)
         catalog = SourceCatalog(deck_sources_dir(args.src))
-        catalog.probe_all(deck.sources())
+        # --level: only the sources the selected levels place (a
+        # Calibre-style partial load indexes what it opens)
+        levels = getattr(args, "level", None)
+        if levels:
+            unknown = [i for i in levels if i not in deck.levels()]
+            if unknown:
+                raise SystemExit("floe: level(s) %s not in the deck (it "
+                                 "places %s)" % (
+                                     ",".join(map(str, unknown)),
+                                     ",".join(map(str, deck.levels()))))
+            print("[jobdeck] levels    : %s of %s" % (
+                ",".join(map(str, levels)),
+                ",".join(map(str, deck.levels()))))
+        catalog.probe_all(deck.sources(levels))
         for info in catalog.infos.values():
             if not info.ok():
                 print("[jobdeck] source    : %s %s (%s)" % (
@@ -983,12 +996,12 @@ def _deck_skipped(cache):
     return list((cache.meta.get("jobdeck") or {}).get("skipped") or [])
 
 
-def _cache_ready(src):
+def _cache_ready(src, ids=None):
     """Lightweight cache check without importing klayout: a VFS
     cache at <src>.floe with a matching source fingerprint."""
     if _is_deck(src):
         from .jobdeck.viewer import deck_ready
-        return deck_ready(src)
+        return deck_ready(src, ids=ids)
     try:
         with open(src + ".floe/meta.json") as f:
             meta = json.load(f)
@@ -1349,6 +1362,9 @@ def cmd_view(args):
                     "\tlabels=%s\tlabelpx=%d" % (
                         detail_name, depth, args.lod, args.frames,
                         args.labels, args.label_font_px))
+        levels = getattr(args, "level", None)
+        if levels:
+            request += "\tlevels=" + ",".join(str(i) for i in levels)
         for _ in range(5):
             code = instance.try_forward(addr, request)
             if code is not None:
@@ -1369,14 +1385,21 @@ def cmd_view(args):
     # (the request options - goto included - apply after the open)
     pending_open = None
     pending_fields = ()
-    if src and not _cache_ready(src):
+    levels = getattr(args, "level", None)
+    # a jobdeck always opens through the window (user call 2026-09-10:
+    # like Calibre it asks which mask levels to load first, unless
+    # --level or FLOE_JOBDECK_LEVELS says; then indexes what those
+    # levels need, then opens)
+    if src and (_is_deck(src) or not _cache_ready(src)):
         pending_open = src
         pending_fields = tuple(
             (["goto=" + ",".join(repr(v) for v in goto)] if goto else [])
             + ["detail=%s" % detail_name, "depth=%d" % depth,
                "lod=%s" % args.lod, "frames=%s" % args.frames,
                "labels=%s" % args.labels,
-               "labelpx=%d" % args.label_font_px])
+               "labelpx=%d" % args.label_font_px]
+            + (["levels=" + ",".join(str(i) for i in levels)]
+               if levels else []))
         c = None
         goto = None
     else:
@@ -1393,6 +1416,16 @@ def cmd_view(args):
                stream_target_ms=args.stream_target_ms,
                render_debug=args.render_debug,
                pending_open=pending_open, pending_fields=pending_fields)
+
+
+def _add_level_option(p):
+    """Commands that open a jobdeck take a mask-level selection (user
+    call 2026-09-10, Calibre-style partial load): only those levels'
+    placements are planned, indexed and drawn."""
+    p.add_argument("--level", dest="level", type=_id_list, default=None,
+                   metavar="N[,N...]",
+                   help="jobdeck: load only these mask levels ($n; "
+                        "default: all - the viewer asks, like Calibre)")
 
 
 def _add_reviewer_option(p):
@@ -1554,6 +1587,7 @@ def main(argv=None, *, prog=None, rust_only=None):
         "index", help="build the Rust VFS spatial cache (one-time); a "
                       ".jb jobdeck indexes every source it names")
     p.add_argument("src")
+    _add_level_option(p)
     p.add_argument("--force", action="store_true",
                    help="allow replacement of an existing <src>.floe "
                         "cache (without this flag a current cache is "
@@ -1692,12 +1726,14 @@ def main(argv=None, *, prog=None, rust_only=None):
 
     p = sub.add_parser("info", help="show cache/layout summary")
     p.add_argument("src")
+    _add_level_option(p)
     p.set_defaults(fn=cmd_info)
 
     p = sub.add_parser("render", help="render a region to PNG "
                                       "(or DRC errors via --drc); "
                                       "a .jb jobdeck renders its composite")
     p.add_argument("src")
+    _add_level_option(p)
     p.add_argument("--bbox", default=None, help="X0,Y0,X1,Y1 in um "
                    "(lengths take nm/um/mm/cm/m suffixes; omit for the "
                    "whole source, or when using --drc/--drc-rule)")
@@ -1889,6 +1925,7 @@ def main(argv=None, *, prog=None, rust_only=None):
     p.add_argument("src", nargs="?", default=None,
                    help="OASIS source (omit to start empty and use "
                         "File > load layout…)")
+    _add_level_option(p)
     p.add_argument("--multi", action="store_true",
                    help="always open an independent window (skip the "
                         "single-instance socket)")

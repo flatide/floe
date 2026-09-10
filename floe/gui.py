@@ -1741,10 +1741,14 @@ class Viewer:
         elif self.meta.get("jobdeck"):
             jb = self.meta["jobdeck"]
             self.window.set_title(
-                "%s - %s · jobdeck %d CHIPs · %d placements · %s view%s"
+                "%s - %s · jobdeck %d CHIPs · %d placements · %s view%s%s"
                 % (APP, os.path.basename(self.meta["src"]["path"]),
                    jb["chips"], jb["placements"],
                    {"layer": "source layer"}.get(jb["mode"], jb["mode"]),
+                   " · levels %s of %d" % (
+                       ",".join(str(i) for i in jb["levels"]),
+                       len(jb.get("identifiers") or []))
+                   if jb.get("levels") else "",
                    " · %d NOT DRAWN" % len(jb["skipped"])
                    if jb.get("skipped") else ""))
             if jb.get("skipped"):
@@ -1904,13 +1908,14 @@ class Viewer:
     def _collapse_all(self):
         self._expand_all(False)
 
-    def open_file(self, path):
+    def open_file(self, path, ids=None):
         """Open another OASIS file (instance-forwarded request or
         File > load layout…; also the FIRST layout of an empty
-        start)."""
+        start). `ids`: a jobdeck's mask levels to load (None = all)."""
         path = os.path.abspath(path)
         if self.cache is not None and path == self.cache.src \
-                and not self.cache.is_stale():
+                and not self.cache.is_stale() \
+                and getattr(self.cache, "ids", None) == ids:
             return None
         if _is_deck_path(path):
             # a jobdeck (docs/JOBDECK.ko.md M3): every source's
@@ -1921,7 +1926,7 @@ class Viewer:
             # the title and status report - never a reason to stay
             # closed (field 2026-09-09: three missing files kept a
             # fully indexed deck from opening)
-            c = DeckCache(path)
+            c = DeckCache(path, ids=ids)
             try:
                 c.load()
             except ValueError as exc:
@@ -1943,13 +1948,109 @@ class Viewer:
         self._restore_keys()
         return None
 
-    def _index_ready(self, path):
+    def _index_ready(self, path, ids=None):
         """Whether `path` can be opened as is: a layout with a VFS cache,
-        or a jobdeck whose sources all have one."""
+        or a jobdeck whose sources (of the levels `ids`, None = all)
+        all have one."""
         if _is_deck_path(path):
             from .jobdeck.viewer import deck_ready
-            return deck_ready(path)
+            return deck_ready(path, ids=ids)
         return cache_mod.Cache(path).exists()
+
+    def _jobdeck_pick_levels(self, path, current=None, force=False):
+        """Which mask levels to load (user call 2026-09-10: Calibre
+        asks this when a jobdeck is loaded). Returns a sorted list of
+        levels, None for every level, or False when the user cancelled.
+        FLOE_JOBDECK_LEVELS=all|ask|N[,N...] answers for scripts and the
+        gate (default ask); `force` shows the dialog regardless (the
+        Jobdeck menu's re-selection). A deck with one level asks
+        nothing."""
+        if not force:
+            policy = os.environ.get("FLOE_JOBDECK_LEVELS", "ask").strip()
+            if policy.lower() == "all":
+                return None
+            if policy and policy.lower() != "ask":
+                try:
+                    return sorted({int(t) for t in policy.split(",")
+                                   if t.strip()}) or None
+                except ValueError:
+                    self._set_live_status(
+                        "FLOE_JOBDECK_LEVELS must be all, ask or "
+                        "N[,N...]: %r ignored" % policy)
+                    return None
+        from .jobdeck import parse_jobdeck
+        from .jobdeck.viewer import level_rows
+        try:
+            rows = level_rows(parse_jobdeck(path, strict=True))
+        except (OSError, ValueError) as exc:
+            self._set_live_status("jobdeck: %s" % exc)
+            return False
+        if len(rows) <= 1:
+            return None
+        return self._jobdeck_levels_dialog(path, rows, current)
+
+    def _jobdeck_levels_dialog(self, path, rows, current):
+        """The level-selection dialog: one check row per mask level
+        (number, MTITLE name, CHIPs, instances, sources), all / none
+        buttons, Open / Cancel. Returns the selection (None = all
+        levels) or False for Cancel."""
+        dlg = Gtk.Dialog(title="load jobdeck levels", transient_for=self.window,
+                         modal=True)
+        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                        "Open", Gtk.ResponseType.OK)
+        dlg.set_default_response(Gtk.ResponseType.OK)
+        box = dlg.get_content_area()
+        box.set_spacing(6)
+        box.set_border_width(8)
+        head = Gtk.Label()
+        head.set_markup("<b>%s</b>\nmask levels to load (%d)" % (
+            GLib.markup_escape_text(os.path.basename(path)), len(rows)))
+        head.set_xalign(0.0)
+        box.pack_start(head, False, False, 0)
+        want = None if current is None else set(current)
+        checks = []
+        grid = Gtk.Grid(column_spacing=12, row_spacing=2)
+        for r, row in enumerate(rows):
+            chk = Gtk.CheckButton(label="$%d %s" % (row["level"],
+                                                   row["name"] or ""))
+            chk.set_active(want is None or row["level"] in want)
+            checks.append((row["level"], chk))
+            grid.attach(chk, 0, r, 1, 1)
+            info = Gtk.Label(label="%d CHIP%s · %d instance%s · %s" % (
+                len(row["chips"]), "" if len(row["chips"]) == 1 else "s",
+                row["instances"], "" if row["instances"] == 1 else "s",
+                ", ".join(os.path.basename(s) for s in row["sources"])))
+            info.set_xalign(0.0)
+            info.get_style_context().add_class("dim-label")
+            grid.attach(info, 1, r, 1, 1)
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroller.set_min_content_height(min(400, 26 * len(rows) + 8))
+        scroller.add(grid)
+        box.pack_start(scroller, True, True, 0)
+        buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        ok_button = dlg.get_widget_for_response(Gtk.ResponseType.OK)
+
+        def refresh(*_):
+            ok_button.set_sensitive(any(c.get_active() for _, c in checks))
+        for _, chk in checks:
+            chk.connect("toggled", refresh)
+        for label, state in (("all", True), ("none", False)):
+            b = Gtk.Button(label=label)
+            b.connect("clicked", lambda _b, state=state: [
+                c.set_active(state) for _, c in checks])
+            buttons.pack_start(b, False, False, 0)
+        box.pack_start(buttons, False, False, 0)
+        refresh()
+        self._center_on_parent(dlg)
+        dlg.show_all()
+        resp = dlg.run()
+        picked = sorted(lv for lv, c in checks if c.get_active())
+        dlg.destroy()
+        self.window.present()
+        if resp != Gtk.ResponseType.OK:
+            return False
+        return None if len(picked) == len(checks) else picked
 
     def _index_consent(self, question):
         """Whether an index may be built now: FLOE_INDEX_ON_OPEN=yes|no
@@ -1963,16 +2064,32 @@ class Viewer:
             return False
         return self._ask_yes_no(question)
 
-    def _open_or_index(self, path, fields=(), then=None):
+    def _open_or_index(self, path, fields=(), then=None, ids=None):
         """Open a layout or a jobdeck; when its index is missing ASK
         the user first (user call 2026-09-09: floe2 too), build it in
         the modal log, then open, then apply the CLI/forwarded options
         in `fields` (goto=, detail=, depth=, ...), then call `then()`
         - what must follow a successful open, such as a --drc load
         that an in-place open would otherwise reset (review 2026-09-09
-        (4th) P2-1). Returns False (usable from GLib.idle_add)."""
+        (4th) P2-1). A jobdeck first asks which mask levels to load
+        (user call 2026-09-10, Calibre-style) unless `ids` or a
+        `levels=` field (floe2 view --level) says; only those levels'
+        sources are indexed and opened. Returns False (usable from
+        GLib.idle_add)."""
         path = os.path.abspath(path)
         fields = [f for f in fields if f]
+        if ids is None:
+            for f in fields:
+                if f.startswith("levels="):
+                    ids = sorted({int(t) for t in f[7:].split(",")
+                                  if t.strip()}) or None
+        fields = [f for f in fields if not f.startswith("levels=")]
+        if _is_deck_path(path) and ids is None:
+            ids = self._jobdeck_pick_levels(path)
+            if ids is False:
+                self._set_live_status("jobdeck load cancelled")
+                self._restore_keys()
+                return False
 
         def after_open(err):
             if err:
@@ -1987,9 +2104,9 @@ class Viewer:
             if then is not None:
                 then()
 
-        if self._index_ready(path):
+        if self._index_ready(path, ids):
             try:
-                err = self.open_file(path)
+                err = self.open_file(path, ids)
             except Exception as exc:
                 err = "ERR %s" % exc
             after_open(err)
@@ -2004,7 +2121,7 @@ class Viewer:
             self._restore_keys()
             return False
         if _is_deck_path(path):
-            self._jobdeck_index_and_load(path, after=after_open)
+            self._jobdeck_index_and_load(path, after=after_open, ids=ids)
         else:
             self._vfs_index_and_load(path, after=after_open)
         return False
@@ -2035,10 +2152,14 @@ class Viewer:
                 # they are only the sender's defaults)
                 error = None
                 fields = [path]
-            elif not self._index_ready(os.path.abspath(path)):
+            elif _is_deck_path(path) or not self._index_ready(
+                    os.path.abspath(path)):
                 # no index yet: answer the sender now (its wait is
                 # short) and ask the user in the window; the index
-                # build, the open and the request's options follow
+                # build, the open and the request's options follow.
+                # A jobdeck always takes this path: it asks which
+                # levels to load first (or reads levels= from the
+                # forwarded --level)
                 error = None
                 deferred = [path, fields[1:]]
                 fields = [path]
@@ -4706,6 +4827,8 @@ class Viewer:
         sep(m)
         item(m, "toggle level view / chip view\tCtrl+,",
              self._jobdeck_toggle_view)
+        sep(m)
+        item(m, "select levels to load…", self._jobdeck_reselect_levels)
 
         m = top("Help")
         item(m, "About %s" % APP, self._about_dialog)
@@ -4810,13 +4933,14 @@ class Viewer:
                            "--jobs", "12", "--no-lod"],
                           on_success, "VFS indexing")
 
-    def _jobdeck_index_and_load(self, path, after=None):
-        """`<APP> index deck.jb` (every source the deck names) with its
-        log in the modal dialog, then open the deck in place; `after
-        (err)` runs once the open settled."""
+    def _jobdeck_index_and_load(self, path, after=None, ids=None):
+        """`<APP> index deck.jb [--level N,..]` (every source the deck's
+        loaded levels name) with its log in the modal dialog, then
+        open the deck in place; `after(err)` runs once the open
+        settled."""
         def on_success():
             try:
-                err = self.open_file(path)
+                err = self.open_file(path, ids)
             except Exception as exc:
                 err = "ERR %s" % exc
             if after is not None:
@@ -4827,11 +4951,35 @@ class Viewer:
 
         # a source that failed to index is a skipped placement: open
         # the deck with the rest (the log stays up with the error)
-        self._index_modal("indexing jobdeck sources…",
-                          [sys.executable, "-B", "-m", APP, "index", path,
-                           "--jobs", "12"],
+        argv = [sys.executable, "-B", "-m", APP, "index", path,
+                "--jobs", "12"]
+        if ids:
+            argv += ["--level", ",".join(str(i) for i in ids)]
+        self._index_modal("indexing jobdeck sources…", argv,
                           on_success, "jobdeck indexing",
                           on_failure=lambda rc: on_success())
+
+    def _jobdeck_reselect_levels(self):
+        """Jobdeck > select levels to load… (user call 2026-09-10):
+        the load dialog again on the open deck; the new selection is
+        indexed as needed and opened in place, keeping the view."""
+        cache = self.cache
+        if not getattr(cache, "is_jobdeck", False):
+            self._set_live_status(
+                "not a jobdeck (File > load jobdeck… a .jb)")
+            return
+        ids = self._jobdeck_pick_levels(cache.src, current=cache.ids,
+                                        force=True)
+        if ids is False or ids == cache.ids:
+            self._restore_keys()
+            return
+        view = (self.cx, self.cy, self.spp)
+
+        def keep_view():
+            self.cx, self.cy, self.spp = view
+            self._fit_after_worker_start = False
+            self.redraw(immediate=True)
+        self._open_or_index(cache.src, then=keep_view, ids=ids)
 
     def _jobdeck_mode(self):
         """The loaded jobdeck's colour mode, None for a layout."""
