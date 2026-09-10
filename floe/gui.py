@@ -2055,11 +2055,19 @@ class Viewer:
         box.pack_start(buttons, False, False, 0)
         refresh()
         self._center_on_parent(dlg)
+        # over the parent whatever presents it meanwhile (a deferred
+        # _restore_keys from the load dialog, a forwarded open's
+        # present): a modal dialog hidden behind the window would
+        # look like "no dialog" with every key dead
+        dlg.set_keep_above(True)
         dlg.show_all()
+        dlg.present()
         resp = dlg.run()
         picked = sorted(lv for lv, c in checks if c.get_active())
         dlg.destroy()
-        self.window.present()
+        # quartz does not hand the keys back by itself (same as the
+        # load dialog): restore now; the open restores again
+        self._restore_keys()
         if resp != Gtk.ResponseType.OK:
             return False
         return None if len(picked) == len(checks) else picked
@@ -4900,10 +4908,17 @@ class Viewer:
         # parent by itself: restore now, and again after the load
         # rebuilds the panels (open_file)
         self._restore_keys()
-        # no index yet (a layout's VFS cache, a jobdeck's sources):
-        # ask, build in the modal log, then load - the same path a
-        # `floe2 view <file>` without an index takes
-        if path and not self._index_ready(path):
+        self._load_picked(path)
+
+    def _load_picked(self, path):
+        """Open the file the load dialog picked. A jobdeck ALWAYS goes
+        through _open_or_index - it asks which levels to load first
+        (field 2026-09-10: an indexed deck picked from File > load
+        jobdeck… opened straight away without the level dialog); so
+        does a layout without an index (ask, build in the modal log,
+        then load - the same path a `floe2 view <file>` without an
+        index takes). An indexed layout opens in place."""
+        if path and (_is_deck_path(path) or not self._index_ready(path)):
             self._open_or_index(path)
             return
         try:

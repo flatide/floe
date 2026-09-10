@@ -1476,6 +1476,27 @@ class IndexOnOpenTests(unittest.TestCase):
         self.assertEqual(calls[0], ("open", "/x/deck.jb", None))
         self.assertNotIn("levels", [c[0] for c in calls])
 
+    def test_load_dialog_routes_a_deck_through_the_level_question(self):
+        """File > load jobdeck… (field 2026-09-10): an INDEXED deck
+        opened straight away, so the level dialog never showed; every
+        picked deck now goes through _open_or_index, an indexed layout
+        still opens in place, an unindexed one asks."""
+        from floe.gui import Viewer
+        import types
+        for path, ready, expect in (("/x/deck.jb", True, "open_or_index"),
+                                    ("/x/deck.jb", False, "open_or_index"),
+                                    ("/x/chip.oas", True, "open_file"),
+                                    ("/x/chip.oas", False, "open_or_index")):
+            calls = []
+            v = Viewer.__new__(Viewer)
+            v._index_ready = lambda p, ids=None: ready
+            v._open_or_index = lambda p, fields=(), then=None, ids=None, \
+                ask_levels=True: calls.append(("open_or_index", p))
+            v.open_file = lambda p, ids=None: (calls.append(("open_file", p)),
+                                               None)[1]
+            Viewer._load_picked(v, path)
+            self.assertEqual(calls, [(expect, path)], (path, ready))
+
     def test_reselecting_every_level_is_final(self):
         """Jobdeck > select levels to load…: the dialog's answer goes
         to the open as is - None (all levels) included - and the same

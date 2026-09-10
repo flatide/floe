@@ -245,7 +245,12 @@ floe2 jobdeck deck.jb [--report r.json] [--spec s.spec]   # 분석·보고만
   인덱싱·표시한다. File > load jobdeck…, `floe2 view deck.jb`(항상 창을 거쳐
   연다), 실행 중인 창으로 forward된 열기 모두 같다. `floe2 view deck.jb --level
   1,3`은 묻지 않고 그 level로 열고, 스크립트·gate는 `FLOE_JOBDECK_LEVELS=all|
-  N[,N...]`로 답한다(기본 `ask`; level이 하나뿐인 덱은 묻지 않음). 선택은
+  N[,N...]`로 답한다(기본 `ask`; level이 하나뿐인 덱은 묻지 않음). 현장
+  2026-09-10: File > load jobdeck…에서 고른 덱이 인덱스가 있으면 `open_file`로
+  직행해 대화상자가 안 떴다 → `_load_picked`가 덱을 항상 `_open_or_index`로
+  보낸다(gate `test_load_dialog_routes_a_deck_through_the_level_question`);
+  대화상자는 `keep_above`+`present`로 부모 위에 머물고 닫힌 뒤 `_restore_keys`로
+  키를 돌려준다(숨은 모달은 "대화상자 없음 + 키 먹통"으로 보인다). 선택은
   `DeckCache(ids=…)`로 들어가 뷰 레이어 표(level/chip/source layer view 모두)와
   스펙이 그 level만 담고, 색은 세 뷰 모두 전체 덱 기준으로 고정된다(로드
   선택이 색을 옮기지 않음 — `plan_deck(load_ids=)`; 분석 CLI의 `--level`
