@@ -596,6 +596,18 @@ budget = 패스별 디코드 보유)을 코드와 대조했다. 모두 사실이
   캡처는 두 영역 모두 나옴 → render는 `cut_px 0`(exact)이라 원인이 플랜 cut임을
   확정. 이를 GUI 없이 재현하도록 `floe2 render --detail low|medium|high|exact`
   (기본 exact)를 두었다(gate `test_render_detail_reproduces_the_viewer_cut`).
+  실측 4(perf 카운터): `cut pages 4/pbvh 0/cbvh 0/cells 0` → 페이지 판정.
+  실측 5(`--explain`): 4페이지 모두 `cull_hair` — ICV_3641/ICV_3640, 레이어 3/0·
+  3/300, max_w 11.4/118.6 µm, max_h 0.08/4.3 µm, max_min 0.081/0.124 µm, 멤버
+  약 2만 9천. 모든 레코드가 hair 문턱 0.128 µm 아래인 가는 선 페이지(한 페이지는
+  4 nm 차이). 리뷰어 정정: max_min/max_w는 최댓값이지 전 레코드 값이 아님, 3/0과
+  3/300의 동일성은 미확정(930/931 지표가 다름), 이전 0.747 µm 뷰의 hair 문턱은
+  0.374 µm라 "130 nm 레코드 하나로 통과" 설명은 성립하지 않음, 비용 추정 1,300만은
+  930 한 페이지(합 2,910만)이며 32 × 페이지 면적은 픽셀당 겹침 상한이 아님. 조치:
+  리뷰어 권고대로 **페이지 hairline 규칙만 기본 해제**(FLOE2_OPTIMIZATION "결함 B
+  1차 해제", 킬 스위치 `FLOE_RUST_PAGE_HAIRLINE=cull`), 기존 raster 그대로. LOD run
+  1 px 접기·밀도 사다리·크기 cut 제거·재인덱싱은 실칩의 `thin pages N kept`
+  비용 측정 뒤로 분리.
 
 - **배율/임의각 PLACEMENT(OASIS 18)**: 2026-09-09 현재 실제 소스에서 아직 관측되지
   않아 보류(사용자 확인). 나타나면 계층 변환을 실수화하지 않고 **인덱싱 시

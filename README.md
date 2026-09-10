@@ -367,7 +367,11 @@ floe는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델을 
   노드 수, 크기로 생략·폴드된 자식 셀 수, 레이어 불일치로 건너뛴 배치 수, wash로
   붕괴한 페이지 수, LOD 교체 수, thin 프레임 수다(덱은 패스 합). 특정 줌부터
   사라지는 영역이 어느 규칙에 잘렸는지 이 수로 먼저 보고, 어느 셀·페이지인지는
-  `floe-index plan --explain 1`(SPEC-INDEXER §6)로 확정한다.
+  `floe-index plan --explain 1`(SPEC-INDEXER §6)로 확정한다. 2026-09-10부터
+  **페이지 hairline 규칙은 기본 해제**다(모든 레코드가 가는 페이지를 통째로
+  버리던 규칙; 실칩에서 81~124 nm 선 영역이 210 µm 뷰부터 사라졌다). 남긴
+  페이지는 `thin pages N kept`로 표시되고, 킬 스위치 `FLOE_RUST_PAGE_HAIRLINE=cull`이
+  이전 동작을 되돌린다.
 - **로드 대화상자**(File > load layout… / load jobdeck…, 2026-09-10)는 자체
   파일 브라우저다: 폴더 먼저·필터에 맞는 파일 다음, 위/홈 버튼, 경로 입력
   (Enter로 폴더 이동 또는 파일 열기), 이름 타이핑 검색, 필터 콤보. 레이아웃의

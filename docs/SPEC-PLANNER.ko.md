@@ -32,8 +32,14 @@
 
 ## 3. 컷/생략 사다리 (정확한 술어)
 
-- 페이지: `(max_w<cut && max_h<cut) || max_min<hair` (v6 필드; 선형·
-  pbvh 리프 동일).
+- 페이지: `(max_w<cut && max_h<cut) || max_min<page_hair` (v6 필드; 선형·
+  pbvh 리프 동일). **page_hair는 2026-09-10부터 기본 0**(`page_hairline`
+  옵션 off): 모든 레코드가 가는 페이지를 통째로 버리던 hairline 규칙은 실칩에서
+  81~124 nm 폭·최대 119 µm 길이의 선 영역을 210 µm 뷰부터 지웠다(4페이지 모두
+  `cull_hair`, 문턱 0.128 µm에 4 nm 차이). raster가 그런 레코드를 전체 길이의
+  1 px 선으로 그리므로(KLayout hairline parity) 페이지는 남기고 `thin_pages_kept`
+  로 센다. 킬 스위치 `FLOE_RUST_PAGE_HAIRLINE=cull`, `floe-index plan
+  --page-hairline 1`. 자식 폴드·생략, BVH 프루닝, 프레임의 hairline은 그대로.
 - 인스턴스 BVH 노드(rev 43): `(max_dim<cut) || (max_min<hair_prune)`,
   단 **hair_prune은 r==0 && thin_dbu>0이면 0**(rev 45 — thin 서브트리를
   방문해야 격자 샘플 가능; 양변 프루닝은 유지).

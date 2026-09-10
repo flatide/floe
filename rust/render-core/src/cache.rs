@@ -63,6 +63,8 @@ pub struct PlanCullCounts {
     pub washed: u64,
     pub lod_swapped: u64,
     pub thin_frames: u64,
+    /// thin pages kept (the page hairline rule off, 2026-09-10)
+    pub thin_pages: u64,
 }
 
 impl PlanCullCounts {
@@ -76,6 +78,7 @@ impl PlanCullCounts {
             washed: st.washed_pages,
             lod_swapped: st.lod_swapped,
             thin_frames: st.thin_frames,
+            thin_pages: st.thin_pages_kept,
         }
     }
 
@@ -88,6 +91,7 @@ impl PlanCullCounts {
         self.washed = self.washed.saturating_add(other.washed);
         self.lod_swapped = self.lod_swapped.saturating_add(other.lod_swapped);
         self.thin_frames = self.thin_frames.saturating_add(other.thin_frames);
+        self.thin_pages = self.thin_pages.saturating_add(other.thin_pages);
     }
 }
 

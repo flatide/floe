@@ -950,6 +950,18 @@ KLayout query parity 배터리 유지.
 확인함" — 예산 모델 폐기로 종결. 남은 것은 결함 B(cut 실명,
 보류)뿐이다.
 
+**결함 B 1차 해제(2026-09-10)**: 실칩(35.8 × 34.6 mm)에서 81~124 nm 폭·최대
+119 µm 길이의 선 영역이 detail high의 210 µm 뷰부터 사라짐. `floe-index plan
+--explain 1`로 4페이지 모두 `cull_hair`(max_min 0.081/0.124 µm < hair 0.128 µm;
+한 페이지는 4 nm 차이) 확정, `floe2 render`(exact)는 그림. 페이지 hairline 규칙만
+기본 해제(`HierOpts::page_hairline=false`, 킬 스위치
+`FLOE_RUST_PAGE_HAIRLINE=cull`): raster가 이미 그런 레코드를 전체 길이의 1 px
+선으로 그리므로 새 근사 표현 없이 복구된다. 검증(리뷰어 3항목): gate
+`ThinPageTests` — 가는 선 페이지의 cut 1 px 이미지 = exact 이미지, 굵은 레코드
+하나를 더해도 선의 가시성 불변, 남긴 페이지 수(`thin pages N kept`)가 perf 줄에
+표시. 실칩의 decode·raster 비용 실측은 이 카운터로 한다. 크기 cut 제거·밀도
+사다리·LOD hair 모드·재인덱싱은 그 측정 뒤로 분리(리뷰어 권고).
+
 ### 3.20 pan 재사용 — F2R-16 (2026-09-04)
 
 **관찰(사용자)**: "pan 20% 이동과 50% 이동이 큰 차이가 없음.

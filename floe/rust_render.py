@@ -1069,6 +1069,8 @@ class RustRenderWorker:
                 "washed": _wire_int(fields, "washed"),
                 "lod_swapped": _wire_int(fields, "lod_swapped"),
                 "thin_frames": _wire_int(fields, "thin_frames"),
+                # thin pages kept (page hairline cull off, 2026-09-10)
+                "thin_pages": _wire_int(fields, "thin_pages"),
             },
             "text_plan_ms": _wire_int(fields, "text_plan_us") / 1000.0,
             "text_place_records": _wire_int(fields, "text_place_records"),

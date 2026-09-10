@@ -3564,6 +3564,13 @@ class Viewer:
                                      "pages_size", "page_bvh", "child_bvh",
                                      "children_size", "layer", "washed",
                                      "lod_swapped", "thin_frames")))
+                        if culls.get("thin_pages"):
+                            # all-thin pages the page hairline rule
+                            # would have dropped (2026-09-10): their
+                            # decode / raster cost is what the field
+                            # measurement of the lifted rule reads
+                            text += ", thin pages %s kept" % fmt_count(
+                                culls["thin_pages"])
                     if res.get("labels_truncated"):
                         text += ", labels partial"
                     if res.get("over_budget_pages"):

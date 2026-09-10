@@ -230,6 +230,8 @@ def build_fixtures(d: Path):
     build_oas(d / "dt.oas", 0.00005, 2000.0, 2000.0, [(7, 0), (7, 1)], "DT")
     build_dense_oas(d / "dense.oas")
     build_tiny_oas(d / "tiny.oas")
+    build_thin_oas(d / "thin.oas")
+    build_thin_oas(d / "thinmix.oas", box_um=20.0)
     build_hier_oas(d / "hier.oas")
     build_hier2_oas(d / "hier2.oas")
 
@@ -313,6 +315,38 @@ def build_tiny_oas(path, dbu=0.00005, pitch_um=10.0, n=200, box_um=1.0):
     bit.shapes(l2).insert(db.Box(0, 0, b, b))
     top.insert(db.CellInstArray(bit.cell_index(), db.Trans(),
                                 db.Vector(p, 0), db.Vector(0, p), n, n))
+    ly.write(str(path))
+
+
+def build_thin_oas(path, dbu=0.00005, n=300, extent_um=2000.0,
+                   width_um=0.1, length_um=40.0, box_um=None):
+    """THIN: one page of `n` horizontal hairlines (width_um x
+    length_um) at deterministic pseudo-random positions - every record
+    thin, so the rev 41 page hairline rule drops the page whole at any
+    cut above 2 x width_um. `box_um`: also one box_um square at the
+    top-right corner (a thicker record that lifts the page's max_min)."""
+    import klayout.db as db
+    ly = db.Layout()
+    ly.dbu = dbu
+    top = ly.create_cell("THIN")
+    li = ly.layer(1, 0)
+    unit = int(round(1.0 / dbu))
+    span = int(round(extent_um * unit))
+    w = max(1, int(round(width_um * unit)))
+    ln = int(round(length_um * unit))
+    state = 0x1234ABCD
+    def rnd():
+        nonlocal state
+        state = (state * 1103515245 + 12345) & 0x7fffffff
+        return state
+    shapes = top.shapes(li)
+    for _ in range(n):
+        x = rnd() % (span - ln)
+        y = rnd() % (span - w)
+        shapes.insert(db.Box(x, y, x + ln, y + w))
+    if box_um:
+        b = int(round(box_um * unit))
+        shapes.insert(db.Box(span - b, span - b, span, span))
     ly.write(str(path))
 
 
@@ -2576,6 +2610,95 @@ class StreamTests(unittest.TestCase):
         self.assertGreater(r2.get("over_budget_pages", 0), 0)
         self.assertEqual(r2["deck"]["streamed_passes"], 0)
         self.assertNotEqual(partial, whole)
+
+
+class ThinPageTests(unittest.TestCase):
+    """Field 2026-09-10: a region of 81-124 nm lines up to 119 um long
+    vanished from a 210 um view because its pages were ALL-thin and the
+    rev 41 page hairline rule dropped them whole; `floe2 render`
+    (exact) drew them. The page rule is off by default: the raster
+    draws such lines as 1 px hairlines of their full length. The
+    reviewer's three checks (2026-09-10): (1) a thin-line page at
+    cut > 0 equals the cut = 0 image, (2) a thicker record in the page
+    changes nothing about the lines, (3) the kept pages are counted
+    for the field measurement; FLOE_RUST_PAGE_HAIRLINE=cull is the
+    A/B kill switch."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.env = {"FLOE_INDEX_BIN": str(ROOT / "rust" / "target" /
+                                         "release" / "floe-index"),
+                   "FLOE_RENDERD_BIN": str(ROOT / "rust" / "target" /
+                                           "release" / "floe-renderd")}
+        os.environ["FLOE_RENDERD_BIN"] = cls.env["FLOE_RENDERD_BIN"]
+        for name in ("thin.oas", "thinmix.oas"):
+            run_floe2("index", CLI / name, "--jobs", "2", env=cls.env, ok=0)
+
+    def _rgb(self, src, detail, env=None):
+        from PIL import Image
+        out = CLI / ("%s-%s.png" % (src.split(".")[0], detail))
+        argv = ["render", CLI / src, "--bbox", "0,0,2000,2000", "--px",
+                "200", "--out", out]
+        if detail != "exact":
+            argv += ["--detail", detail]
+        run_floe2(*argv, env=dict(self.env, **(env or {})), ok=0)
+        return list(Image.open(out).convert("RGB").getdata())
+
+    def test_thin_page_at_a_cut_equals_the_exact_image(self):
+        # 200 px over 2000 um: 1 px = 10 um, hair = 5 um; the 0.1 um
+        # lines (40 um long) are all-thin
+        exact = self._rgb("thin.oas", "exact")
+        lit = sum(1 for p in exact if p != (0, 0, 0))
+        self.assertGreater(lit, 100)
+        high = self._rgb("thin.oas", "high")
+        self.assertEqual(high, exact, "cut 1 px draws the thin page as exact does")
+        # the kill switch restores the rev 41 cull: the page vanishes
+        culled = self._rgb("thin.oas", "high",
+                           {"FLOE_RUST_PAGE_HAIRLINE": "cull"})
+        self.assertEqual(sum(1 for p in culled if p != (0, 0, 0)), 0)
+
+    def test_a_thicker_record_changes_nothing_about_the_lines(self):
+        thin = self._rgb("thin.oas", "high")
+        mix = self._rgb("thinmix.oas", "high")
+        # the 20 um box sits in the top-right corner: px 198..200,
+        # rows 0..2 (plus the hairline halo) - compare everything else
+        w = 200
+        diff = [(i % w, i // w) for i, (a, b) in enumerate(zip(thin, mix))
+                if a != b]
+        outside = [(x, y) for x, y in diff if not (x >= 194 and y <= 5)]
+        self.assertEqual(outside, [], "lines identical away from the box")
+        self.assertTrue(diff, "the box itself is drawn")
+        # with the rule on, the thicker record used to decide the fate
+        # of every line in the page
+        thin_c = self._rgb("thin.oas", "high", {"FLOE_RUST_PAGE_HAIRLINE": "cull"})
+        mix_c = self._rgb("thinmix.oas", "high", {"FLOE_RUST_PAGE_HAIRLINE": "cull"})
+        self.assertEqual(sum(1 for p in thin_c if p != (0, 0, 0)), 0)
+        self.assertGreater(sum(1 for p in mix_c if p != (0, 0, 0)), 100)
+
+    def test_kept_thin_pages_are_counted(self):
+        from floe.rust_render import RustRenderWorker
+        for env, thin_pages, culled in (({}, 1, 0),
+                                        ({"FLOE_RUST_PAGE_HAIRLINE": "cull"},
+                                         0, 1)):
+            for k, v in env.items():
+                os.environ[k] = v
+            try:
+                c = Cache(str(CLI / "thin.oas"))
+                c.load()
+                worker = RustRenderWorker(c)
+                worker.start()
+                try:
+                    _, result = _render_raw(worker, (0, 0, 2000 / 5e-5,
+                                                     2000 / 5e-5), 200, 200,
+                                            cut_px=1.0, with_result=True)
+                finally:
+                    worker.stop()
+            finally:
+                for k in env:
+                    os.environ.pop(k, None)
+            culls = result["plan_culls"]
+            self.assertEqual(culls["thin_pages"], thin_pages, culls)
+            self.assertEqual(culls["pages_size"], culled, culls)
 
 
 class WideViewTests(unittest.TestCase):

@@ -242,7 +242,7 @@ frontier를 재계산하고 meta.json의 해당 객체만 brace-balanced splice�
 ```
 floe-index plan <cachedir> --view x0,y0,x1,y1(µm) [--px-per-um F]
     [--cut-px F] [--depth N|full] [--layers ...] [--lod 0]
-    [--wash-px F] [--hairline-f F] [--thin-um F] [--inspect]
+    [--wash-px F] [--hairline-f F] [--thin-um F] [--page-hairline 1] [--inspect]
 ```
 JSON 출력: pages/bytes/records/members + 플래너 stats 전체
 (frame_rects, culled_*, lod_pages, washed_pages, culled_bvh_size,
@@ -255,7 +255,9 @@ thin_frames, plan_ms …). 실칩 병목 확정용(“플랜 vs 파스 vs 드로
 explain  header  cut_px=3  cut_um=30.0000  hair_um=15.0000  px_per_um=0.1  rows=N
 explain  <kind>  <verdict>  <cell>  <layer L/D | ->  <id>  <bbox um x0,y0,x1,y1>  <w um>  <h um>  <min um>  <members>
 ```
-- kind/verdict: `top` keep|cull_size · `page` exact|lod|wash|cull_size|cull_hair ·
+- kind/verdict: `top` keep|cull_size 
+  · `page` exact|exact_thin|lod|lod_thin|wash|cull_size|cull_hair(`_thin` =
+  모든 레코드가 hair 미만인데 남긴 페이지; `cull_hair`는 `--page-hairline 1`일 때만) ·
   `pbvh` cull_size(페이지 BVH 노드째) · `cbvh` prune_size(자식 BVH 노드째, w/h =
   max_dim, min = max_min) · `child` expand|omit_size|omit_hair(full depth 생략)|
   fold_size(유한 깊이 폴드)|cull_layer · `frame`(r==0) keep|thin_lattice|cull_size|

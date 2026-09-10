@@ -120,6 +120,19 @@ pub struct HierOpts {
     /// box on the owning cell's visible layers. Bounds the wide-view
     /// walk the rev 43 prune exists for (184M placements).
     pub sub_cut_walk_budget: u64,
+    /// Whether the rev 41 hairline rule culls PAGES (a page whose
+    /// every record has min side < hairline x cut is dropped whole).
+    /// Field 2026-09-10 (JOBDECK.ko.md section 10): a region of
+    /// 81-124 nm lines up to 119 um long vanished from a 210 um view -
+    /// its four pages were all-thin (max_min 0.081 / 0.124 um against
+    /// a 0.128 um threshold) and were dropped whole, while `floe2
+    /// render` (exact) drew them and Calibre draws them. Off by
+    /// default: the raster draws such records as 1 px hairlines of
+    /// their full length (KLayout parity), which is the wanted
+    /// picture; FLOE_RUST_PAGE_HAIRLINE=cull restores the cull for an
+    /// A/B. The rule stays for child folds / omissions, child-BVH
+    /// prunes and frames (their own fields).
+    pub page_hairline: bool,
     /// Field diagnosis (2026-09-10): record one ExplainRow per page,
     /// page-BVH node, child placement / child-BVH node and frame the
     /// walk judged INSIDE the view - kept, culled by size, hairline,
@@ -163,6 +176,7 @@ impl Default for HierOpts {
             thin_demote_px: 14.0,
             sub_cut_walk_budget: 200_000,
             explain: false,
+            page_hairline: false,
         }
     }
 }
@@ -214,6 +228,9 @@ pub struct HierStats {
     /// placements) and the coarse child-BVH node washes among them
     pub sub_cut_washes: u64,
     pub sub_cut_coarse: u64,
+    /// pages selected whose every record is thin (max_min < hairline
+    /// x cut): what the page hairline rule would have dropped
+    pub thin_pages_kept: u64,
     pub culled_page_layer_roots: u64,
     pub culled_page_bvh_bbox: u64,
     pub culled_page_bvh_cut: u64,
@@ -516,6 +533,11 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
         wash_walk_budget: opts.sub_cut_walk_budget,
         wash_nodes: HashSet::new(),
         hair: (req.cut_dbu.max(0) as f64 * opts.hairline) as u64,
+        page_hair: if opts.page_hairline {
+            (req.cut_dbu.max(0) as f64 * opts.hairline) as u64
+        } else {
+            0
+        },
         thin_dbu: if opts.thin_lattice_um > 0.0 {
             (opts.thin_lattice_um * v.unit).max(1.0) as u64
         } else {
@@ -783,6 +805,8 @@ struct Hier<'a> {
     wash_px: f64,
     /// hairline threshold in dbu (hairline * cut_dbu)
     hair: u64,
+    /// the same threshold for PAGES, 0 unless HierOpts::page_hairline
+    page_hair: u64,
     /// rev 45 thin-frame lattice pitch in dbu (0 = lattice off,
     /// frames fall back to the rev 41 hairline cull)
     thin_dbu: u64,
@@ -864,7 +888,7 @@ impl<'a> Hier<'a> {
                     let p = self.v.page(pi);
                     if (p.max_w < self.cut
                         && p.max_h < self.cut)
-                        || p.max_min < self.hair
+                        || p.max_min < self.page_hair
                     {
                         self.st.cull_page_size += 1;
                         let in_view = boxes.iter().any(|b| p.bbox.intersects(b));
@@ -964,7 +988,23 @@ impl<'a> Hier<'a> {
                     self.st.lod_swapped += 1;
                 }
             }
-            self.note_page(if eff == pi { "exact" } else { "lod" }, ci, &p, pi);
+            // a thin page (every record under the hairline threshold)
+            // that the page hairline rule would have dropped
+            let thin = self.hair > 0 && p.max_min < self.hair;
+            if thin {
+                self.st.thin_pages_kept += 1;
+            }
+            self.note_page(
+                match (eff == pi, thin) {
+                    (true, false) => "exact",
+                    (true, true) => "exact_thin",
+                    (false, false) => "lod",
+                    (false, true) => "lod_thin",
+                },
+                ci,
+                &p,
+                pi,
+            );
             sel.insert(eff);
         }
         for &pi in &sel {
@@ -1357,7 +1397,7 @@ impl<'a> Hier<'a> {
                     let p = self.v.page(pi);
                     if (p.max_w < self.cut
                         && p.max_h < self.cut)
-                        || p.max_min < self.hair
+                        || p.max_min < self.page_hair
                     {
                         self.st.cull_page_size += 1;
                         if p.bbox.intersects(b) {
@@ -1962,9 +2002,15 @@ pub fn ws_name(gen: u64, key: WsKey) -> String {
 }
 
 impl crate::Vfs {
-    /// V4 hierarchy-preserving plan (default knobs)
+    /// V4 hierarchy-preserving plan (default knobs;
+    /// FLOE_RUST_PAGE_HAIRLINE=cull restores the page hairline cull -
+    /// the field kill switch, see HierOpts::page_hairline)
     pub fn plan_hier(&self, req: &ViewReq) -> HierPlan {
-        plan_hier(&self.ovm, req, &HierOpts::default())
+        let mut opts = HierOpts::default();
+        if std::env::var("FLOE_RUST_PAGE_HAIRLINE").as_deref() == Ok("cull") {
+            opts.page_hairline = true;
+        }
+        plan_hier(&self.ovm, req, &opts)
     }
 
     /// hier delta (par.3.2): ONE OASIS = new pages spliced verbatim
@@ -2570,6 +2616,7 @@ mod tests {
         let view = bx(-10, -10, 11_000, 1000);
         let mut o = HierOpts::default();
         o.explain = true;
+        o.page_hairline = true;
         let p = plan_hier(&v, &rq(view, 300, u32::MAX), &o);
         let name = |ci: u32| v.cell(ci).name.clone();
         let rows: Vec<(String, &str, &str)> = p
@@ -2579,6 +2626,17 @@ mod tests {
             .collect();
         assert!(rows.contains(&("MIX".to_string(), "page", "cull_hair")), "{:?}", rows);
         assert!(rows.contains(&("MIX".to_string(), "page", "exact")), "{:?}", rows);
+        // the default keeps the thin page and says so
+        let mut od = HierOpts::default();
+        od.explain = true;
+        let pd = plan_hier(&v, &rq(view, 300, u32::MAX), &od);
+        let rows_d: Vec<(String, &str, &str)> = pd
+            .explain
+            .iter()
+            .map(|r| (name(r.cell), r.kind, r.verdict))
+            .collect();
+        assert!(rows_d.contains(&("MIX".to_string(), "page", "exact_thin")), "{:?}", rows_d);
+        assert!(!rows_d.iter().any(|r| r.2 == "cull_hair"));
         assert!(rows.contains(&("TINY".to_string(), "child", "omit_size")), "{:?}", rows);
         assert!(rows.contains(&("MIX".to_string(), "child", "expand")), "{:?}", rows);
         assert!(rows.iter().any(|r| r.1 == "top" && r.2 == "keep"));
@@ -2621,29 +2679,34 @@ mod tests {
         // cut 300 -> hair 150: MIX's hairline page (max_min 100)
         // culled by the v6 field even though its long side is far
         // above the cut AND the cell rbbox is fat; MIX's fat page
-        // and FAT survive
-        let p = plan_hier(
-            &v,
-            &rq(view, 300, u32::MAX),
-            &HierOpts::default(),
-        );
+        // and FAT survive - WITH the page hairline rule on (the
+        // rev 41 behaviour, FLOE_RUST_PAGE_HAIRLINE=cull)
+        let mut cull = HierOpts::default();
+        cull.page_hairline = true;
+        let p = plan_hier(&v, &rq(view, 300, u32::MAX), &cull);
         assert_eq!(p.pages.len(), 2);
         assert!(p.pages.iter().all(
             |&pi| v.page(pi).max_min >= 150
         ));
         assert!(p.stats.cull_page_size >= 1);
+        assert_eq!(p.stats.thin_pages_kept, 0);
+        // the default since 2026-09-10 (field: 81-124 nm lines up to
+        // 119 um long vanished with their pages): the thin page is
+        // KEPT and counted; the raster draws its lines as 1 px
+        // hairlines of their full length
+        let pd = plan_hier(&v, &rq(view, 300, u32::MAX), &HierOpts::default());
+        assert_eq!(pd.pages.len(), 3);
+        assert_eq!(pd.stats.thin_pages_kept, 1);
+        assert_eq!(pd.stats.cull_page_size, 0);
         // hairline 0 restores the pure both-dims rule
         let mut off = HierOpts::default();
         off.hairline = 0.0;
+        off.page_hairline = true;
         let p0 = plan_hier(&v, &rq(view, 300, u32::MAX), &off);
         assert_eq!(p0.pages.len(), 3);
         // boundary: hair == max_min exactly (cut 200 -> hair 100)
         // is NOT below - the thin page stays
-        let pb = plan_hier(
-            &v,
-            &rq(view, 200, u32::MAX),
-            &HierOpts::default(),
-        );
+        let pb = plan_hier(&v, &rq(view, 200, u32::MAX), &cull);
         assert_eq!(pb.pages.len(), 3);
         // fold + frame follow: THIN placed one level down folds at
         // r>0 (min side 100 < 150) and gets no boundary box at r==0

@@ -6339,6 +6339,12 @@ pub fn plan_cmd(args: &[String]) {
         // diagnosis 2026-09-10: which rule dropped a region)
         let explain = rest.iter().any(|(k, _)| k == "--explain");
         popts.explain = explain;
+        // --page-hairline 1: the rev 41 page hairline cull (off by
+        // default since 2026-09-10; the viewer's kill switch is
+        // FLOE_RUST_PAGE_HAIRLINE=cull)
+        if rest.iter().any(|(k, val)| k == "--page-hairline" && val != "0") {
+            popts.page_hairline = true;
+        }
         let plan = floe_vfs::hier::plan_hier(&v.ovm, &req, &popts);
         let ms = t0.elapsed().as_secs_f64() * 1e3;
         let (mut cbytes, mut ubytes) = (0u64, 0u64);
