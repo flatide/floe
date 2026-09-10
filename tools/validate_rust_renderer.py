@@ -987,6 +987,9 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertIn("round_pages=%d" % (1 << 30), commands[0])
             self.assertIn("frame_cache=1", commands[0])
             self.assertIn("labels=0", commands[0])
+            # the page hairline policy rides with every frame; a plain
+            # worker's default is the performance policy
+            self.assertIn("thin=cull", commands[0])
             self.assertIn("font_px=22", commands[0])
             # the interactive default skips the PNG codec on both sides
             self.assertIn("frame_format=raw", commands[0])

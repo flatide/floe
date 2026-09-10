@@ -52,6 +52,10 @@ pub struct PlanRequest {
     /// Jobdeck wide-view policy: what the size cut drops keeps its
     /// on-screen existence as a footprint wash (floe_vfs::ViewReq).
     pub sub_cut_wash: bool,
+    /// The page hairline policy (floe_vfs::ViewReq::page_hairline):
+    /// true culls all-thin pages (plain layout performance policy),
+    /// false keeps them (mask / jobdeck policy).
+    pub page_hairline: bool,
 }
 
 impl PlanRequest {
@@ -87,6 +91,7 @@ mod tests {
             px_per_dbu: f64::NAN,
             exact: true,
             sub_cut_wash: false,
+            page_hairline: true,
         };
         assert!(req.validate().is_err());
     }

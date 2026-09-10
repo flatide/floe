@@ -457,6 +457,7 @@ impl Cache {
                 request.px_per_dbu
             },
             sub_cut_wash: request.sub_cut_wash && !request.exact,
+            page_hairline: request.page_hairline,
         })
     }
 

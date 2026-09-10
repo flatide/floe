@@ -137,6 +137,18 @@ ROWS 0.0/0.0
 END
 """
 
+# 2026-09-11: a mask deck of the thin-line source (its default keeps
+# the all-thin pages; a plain layout culls them)
+THIN_DECK = """* thin.jb
+MTITLE 1,HAIR
+*PLACE-INFO
+CHIP H1
+$ (1, HAIR, AD=0.00020, SF=1, TC=thin.oas, LY={1}, DT={0}, BX=0.0, BY=0.0, UX=2000.0, UY=2000.0 )
+ROWS 0.0/0.0
+*END-PLACE
+END
+"""
+
 # review 2026-09-09 (2nd) P1-1: two overlapping placements of a source
 # that has a top-level box AND a child cell - at depth 0 the child is
 # a white frame that the later placement's box must not bury
@@ -227,6 +239,7 @@ def build_fixtures(d: Path):
     (d / "frames.jb").write_text(FRAMES_DECK)
     (d / "dt.jb").write_text(DT_DECK)
     (d / "tiny.jb").write_text(TINY_DECK)
+    (d / "thin.jb").write_text(THIN_DECK)
     build_oas(d / "dt.oas", 0.00005, 2000.0, 2000.0, [(7, 0), (7, 1)], "DT")
     build_dense_oas(d / "dense.oas")
     build_tiny_oas(d / "tiny.oas")
@@ -736,7 +749,7 @@ PATTERN_ROWS = "\n".join(("*.*." * 4, ".*.*" * 4, "**.." * 4, "..**" * 4) * 4)
 
 def _render_raw(worker, bbox_dbu, width, height, visible=None,
                 depth=None, cut_px=0.0, frames=False, with_result=False,
-                fill="solid", width_px=1):
+                fill="solid", width_px=1, thin=None):
     """One settled raw frame through a started worker: RGBA bytes.
     Generations must increase per daemon: a repeated one is dropped.
     `fill`: "solid" (archival), "speckle" (the viewer's default) or a
@@ -751,13 +764,16 @@ def _render_raw(worker, bbox_dbu, width, height, visible=None,
     worker.submit({"kind": "repattern",
                    "fills": [] if rows is None else [(k, rows) for k in keys],
                    "widths": [(k, width_px) for k in keys]})
-    worker.submit({
+    job = {
         "kind": "render", "gen": gen, "scope": "headless",
         "bbox": tuple(float(v) for v in bbox_dbu), "view": None,
         "w": width, "h": height, "depth": depth, "cut_px": cut_px,
         "lod": False, "frames": frames, "labels": False,
         "abstract": False, "visible": visible, "frame_format": "raw",
-    })
+    }
+    if thin is not None:
+        job["thin"] = thin   # the page hairline policy (keep / cull)
+    worker.submit(job)
     while True:
         result = worker.res.get(timeout=300)
         if result.get("kind") == "error":
@@ -2616,13 +2632,16 @@ class ThinPageTests(unittest.TestCase):
     """Field 2026-09-10: a region of 81-124 nm lines up to 119 um long
     vanished from a 210 um view because its pages were ALL-thin and the
     rev 41 page hairline rule dropped them whole; `floe2 render`
-    (exact) drew them. The page rule is off by default: the raster
-    draws such lines as 1 px hairlines of their full length. The
-    reviewer's three checks (2026-09-10): (1) a thin-line page at
-    cut > 0 equals the cut = 0 image, (2) a thicker record in the page
-    changes nothing about the lines, (3) the kept pages are counted
-    for the field measurement; FLOE_RUST_PAGE_HAIRLINE=cull is the
-    A/B kill switch."""
+    (exact) drew them. Review 2026-09-11: the policy is per request,
+    not a shared default - a plain layout keeps the performance
+    policy (thin pages culled at wide views, `thin:cull`), a jobdeck
+    keeps them (`thin:keep`), and a mask source opened on its own can
+    ask for the mask policy (--thin keep, View > keep thin shapes).
+    The reviewer's three checks: (1) a thin-line page at cut > 0 under
+    the mask policy equals the cut = 0 image, (2) a thicker record in
+    the page changes nothing about the lines, (3) the kept pages are
+    counted; FLOE_RUST_PAGE_HAIRLINE=cull|keep is the diagnostic
+    override."""
 
     @classmethod
     def setUpClass(cls):
@@ -2631,35 +2650,47 @@ class ThinPageTests(unittest.TestCase):
                    "FLOE_RENDERD_BIN": str(ROOT / "rust" / "target" /
                                            "release" / "floe-renderd")}
         os.environ["FLOE_RENDERD_BIN"] = cls.env["FLOE_RENDERD_BIN"]
-        for name in ("thin.oas", "thinmix.oas"):
+        for name in ("thin.oas", "thinmix.oas", "thin.jb"):
             run_floe2("index", CLI / name, "--jobs", "2", env=cls.env, ok=0)
 
-    def _rgb(self, src, detail, env=None):
+    def _rgb(self, src, detail, env=None, thin=None):
         from PIL import Image
-        out = CLI / ("%s-%s.png" % (src.split(".")[0], detail))
+        out = CLI / ("%s-%s-%s.png" % (src.split(".")[0], detail,
+                                       thin or "auto"))
         argv = ["render", CLI / src, "--bbox", "0,0,2000,2000", "--px",
                 "200", "--out", out]
         if detail != "exact":
             argv += ["--detail", detail]
+        if thin:
+            argv += ["--thin", thin]
         run_floe2(*argv, env=dict(self.env, **(env or {})), ok=0)
         return list(Image.open(out).convert("RGB").getdata())
 
-    def test_thin_page_at_a_cut_equals_the_exact_image(self):
+    @staticmethod
+    def _lit(rgb):
+        return sum(1 for p in rgb if p != (0, 0, 0))
+
+    def test_layout_culls_by_default_and_keeps_under_the_mask_policy(self):
         # 200 px over 2000 um: 1 px = 10 um, hair = 5 um; the 0.1 um
         # lines (40 um long) are all-thin
         exact = self._rgb("thin.oas", "exact")
-        lit = sum(1 for p in exact if p != (0, 0, 0))
-        self.assertGreater(lit, 100)
-        high = self._rgb("thin.oas", "high")
-        self.assertEqual(high, exact, "cut 1 px draws the thin page as exact does")
-        # the kill switch restores the rev 41 cull: the page vanishes
-        culled = self._rgb("thin.oas", "high",
-                           {"FLOE_RUST_PAGE_HAIRLINE": "cull"})
-        self.assertEqual(sum(1 for p in culled if p != (0, 0, 0)), 0)
+        self.assertGreater(self._lit(exact), 100)
+        # the plain layout's default: the performance policy culls
+        self.assertEqual(self._lit(self._rgb("thin.oas", "high")), 0)
+        # the mask policy on the same file: identical to exact
+        self.assertEqual(self._rgb("thin.oas", "high", thin="keep"), exact)
+        # explicit cull is the default; the diagnostic override wins
+        # over the request either way
+        self.assertEqual(self._lit(self._rgb("thin.oas", "high", thin="cull")), 0)
+        self.assertEqual(self._rgb("thin.oas", "high",
+                                   {"FLOE_RUST_PAGE_HAIRLINE": "keep"}), exact)
+        self.assertEqual(self._lit(self._rgb(
+            "thin.oas", "high", {"FLOE_RUST_PAGE_HAIRLINE": "cull"},
+            thin="keep")), 0)
 
     def test_a_thicker_record_changes_nothing_about_the_lines(self):
-        thin = self._rgb("thin.oas", "high")
-        mix = self._rgb("thinmix.oas", "high")
+        thin = self._rgb("thin.oas", "high", thin="keep")
+        mix = self._rgb("thinmix.oas", "high", thin="keep")
         # the 20 um box sits in the top-right corner: px 198..200,
         # rows 0..2 (plus the hairline halo) - compare everything else
         w = 200
@@ -2668,37 +2699,62 @@ class ThinPageTests(unittest.TestCase):
         outside = [(x, y) for x, y in diff if not (x >= 194 and y <= 5)]
         self.assertEqual(outside, [], "lines identical away from the box")
         self.assertTrue(diff, "the box itself is drawn")
-        # with the rule on, the thicker record used to decide the fate
-        # of every line in the page
-        thin_c = self._rgb("thin.oas", "high", {"FLOE_RUST_PAGE_HAIRLINE": "cull"})
-        mix_c = self._rgb("thinmix.oas", "high", {"FLOE_RUST_PAGE_HAIRLINE": "cull"})
-        self.assertEqual(sum(1 for p in thin_c if p != (0, 0, 0)), 0)
-        self.assertGreater(sum(1 for p in mix_c if p != (0, 0, 0)), 100)
+        # under the plain policy the thicker record decides the fate
+        # of every line in its page - the documented omission
+        self.assertEqual(self._lit(self._rgb("thin.oas", "high")), 0)
+        self.assertGreater(self._lit(self._rgb("thinmix.oas", "high")), 100)
+
+    def test_deck_keeps_thin_pages_by_default(self):
+        exact = self._rgb("thin.jb", "exact")
+        self.assertGreater(self._lit(exact), 100)
+        kept = self._rgb("thin.jb", "high")
+        self.assertEqual(kept, exact, "a mask deck keeps its hairlines")
+        # --thin cull on a deck: the page is culled and the deck's wide
+        # policy paints its bbox wash instead of the lines (a block,
+        # not the exact image); with the wide policy off it vanishes
+        culled = self._rgb("thin.jb", "high", thin="cull")
+        self.assertNotEqual(culled, exact)
+        self.assertEqual(self._lit(self._rgb(
+            "thin.jb", "high", {"FLOE_RUST_DECK_WIDE": "off"}, thin="cull")), 0)
+        rep = CLI / "thin-deck.json"
+        run_floe2("render", CLI / "thin.jb", "--bbox", "0,0,2000,2000",
+                  "--px", "200", "--out", CLI / "thin-deck.png",
+                  "--report", rep, "--detail", "high", env=self.env, ok=0)
+        self.assertEqual(json.loads(rep.read_text())["thin"], "auto")
 
     def test_kept_thin_pages_are_counted(self):
         from floe.rust_render import RustRenderWorker
-        for env, thin_pages, culled in (({}, 1, 0),
-                                        ({"FLOE_RUST_PAGE_HAIRLINE": "cull"},
-                                         0, 1)):
-            for k, v in env.items():
-                os.environ[k] = v
+        for thin, thin_pages, culled in (("keep", 1, 0), ("cull", 0, 1),
+                                         (None, 0, 1)):
+            c = Cache(str(CLI / "thin.oas"))
+            c.load()
+            worker = RustRenderWorker(c)
+            worker.start()
             try:
-                c = Cache(str(CLI / "thin.oas"))
-                c.load()
-                worker = RustRenderWorker(c)
-                worker.start()
-                try:
-                    _, result = _render_raw(worker, (0, 0, 2000 / 5e-5,
-                                                     2000 / 5e-5), 200, 200,
-                                            cut_px=1.0, with_result=True)
-                finally:
-                    worker.stop()
+                _, result = _render_raw(worker, (0, 0, 2000 / 5e-5,
+                                                 2000 / 5e-5), 200, 200,
+                                        cut_px=1.0, with_result=True,
+                                        thin=thin)
             finally:
-                for k in env:
-                    os.environ.pop(k, None)
+                worker.stop()
             culls = result["plan_culls"]
-            self.assertEqual(culls["thin_pages"], thin_pages, culls)
-            self.assertEqual(culls["pages_size"], culled, culls)
+            self.assertEqual(culls["thin_pages"], thin_pages, (thin, culls))
+            self.assertEqual(culls["pages_size"], culled, (thin, culls))
+        # the deck worker's default is keep
+        from floe.jobdeck.viewer import DeckCache
+        d = DeckCache(str(CLI / "thin.jb"))
+        d.load()
+        try:
+            worker = jrender.DeckRenderWorker(d)
+            worker.start()
+            try:
+                _, result = _render_raw(worker, tuple(d.meta["bbox"]), 200,
+                                        200, cut_px=1.0, with_result=True)
+            finally:
+                worker.stop()
+        finally:
+            d.close()
+        self.assertEqual(result["plan_culls"]["thin_pages"], 1)
 
 
 class WideViewTests(unittest.TestCase):

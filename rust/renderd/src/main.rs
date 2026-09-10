@@ -349,6 +349,11 @@ struct RenderCommand {
     raw_frame: bool,
     style_epoch: Option<u64>,
     out: String,
+    /// `thin=keep|cull`: the page hairline policy of this frame's
+    /// plans - keep (mask / jobdeck: all-thin pages stay and raster
+    /// as 1 px hairlines) or cull (plain layout: dropped whole, the
+    /// performance policy). Absent = cull.
+    thin_keep: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -453,8 +458,14 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                     "frame_format",
                     "style_epoch",
                     "out",
+                    "thin",
                 ],
             )?;
+            let thin_keep = match fields.get("thin").map(|s| s.as_str()) {
+                None | Some("cull") => false,
+                Some("keep") => true,
+                Some(other) => return Err(format!("thin must be keep or cull: {other}")),
+            };
             let jobs = optional_parse(&fields, "jobs")?;
             if let Some(jobs) = jobs {
                 validate_jobs(jobs)?;
@@ -528,6 +539,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                     raw_frame,
                     style_epoch: optional_parse(&fields, "style_epoch")?,
                     out: required(&fields, "out")?.to_string(),
+                    thin_keep,
                 },
             ))))
         }
@@ -944,6 +956,7 @@ fn run_clip(
         px_per_dbu: 0.0,
         exact: true,
         sub_cut_wash: false,
+        page_hairline: true,
     };
     let plan_started = Instant::now();
     let planned = cache.plan(&request)?;
@@ -1595,6 +1608,7 @@ fn run_deck_render(
         // FLOE_RUST_DECK_STREAM=off: stop a pass at the budget again
         // (partial frame, pages "over budget (not drawn)")
         stream: std::env::var("FLOE_RUST_DECK_STREAM").as_deref() != Ok("off"),
+        thin_keep: command.thin_keep,
     };
     let report = deck.render(&request, command.generation, cancellation)?;
     check_generation(cancellation, command.generation)?;
@@ -2388,6 +2402,7 @@ fn make_plan_request(cache: &Cache, command: &RenderCommand) -> Result<PlanReque
         px_per_dbu,
         exact: command.exact,
         sub_cut_wash: false,
+        page_hairline: !command.thin_keep,
     };
     request.validate()?;
     if cache.unit() <= 0.0 {

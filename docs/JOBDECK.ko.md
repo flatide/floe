@@ -604,10 +604,13 @@ budget = 패스별 디코드 보유)을 코드와 대조했다. 모두 사실이
   3/300의 동일성은 미확정(930/931 지표가 다름), 이전 0.747 µm 뷰의 hair 문턱은
   0.374 µm라 "130 nm 레코드 하나로 통과" 설명은 성립하지 않음, 비용 추정 1,300만은
   930 한 페이지(합 2,910만)이며 32 × 페이지 면적은 픽셀당 겹침 상한이 아님. 조치:
-  리뷰어 권고대로 **페이지 hairline 규칙만 기본 해제**(FLOE2_OPTIMIZATION "결함 B
-  1차 해제", 킬 스위치 `FLOE_RUST_PAGE_HAIRLINE=cull`), 기존 raster 그대로. LOD run
-  1 px 접기·밀도 사다리·크기 cut 제거·재인덱싱은 실칩의 `thin pages N kept`
-  비용 측정 뒤로 분리.
+  리뷰어 권고대로 **페이지 hairline 규칙만 해제**(FLOE2_OPTIMIZATION "결함 B
+  1차 해제"), 기존 raster 그대로. LOD run 1 px 접기·밀도 사다리·크기 cut 제거·
+  재인덱싱은 실칩의 `thin pages N kept` 비용 측정 뒤로 분리. **정책 분리
+  (2026-09-11)**: 마스크는 hairline이 많으므로 덱은 keep이 기본, 일반 레이아웃은
+  기존 성능 정책(cull)을 유지하고, 단독 마스크 OASIS는 `--thin keep`/View > keep
+  thin shapes로 선택한다. 요청별 `thin=keep|cull`로 전달되며 공유 기본값이 아니다.
+  gate `ThinPageTests`(덱 기본 keep, 레이아웃 기본 cull, `--thin`, 진단 override).
 
 - **배율/임의각 PLACEMENT(OASIS 18)**: 2026-09-09 현재 실제 소스에서 아직 관측되지
   않아 보류(사용자 확인). 나타나면 계층 변환을 실수화하지 않고 **인덱싱 시

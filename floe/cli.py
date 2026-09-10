@@ -851,12 +851,13 @@ def _render_shots(args, c):
     from .service import DETAIL_PX
     cut_px = {"exact": 0.0, "low": DETAIL_PX[0], "medium": DETAIL_PX[1],
               "high": DETAIL_PX[2]}[args.detail]
+    thin = None if args.thin == "auto" else args.thin
     try:
         rows = shots_mod.run_shots(c, shots, args.out, report=args.report,
                                    frames=args.frames, labels=args.labels,
                                    label_font_px=args.label_font_px,
                                    log=print, batch=bool(args.batch),
-                                   cut_px=cut_px)
+                                   cut_px=cut_px, thin=thin)
     except (RuntimeError, ValueError) as exc:
         raise SystemExit("floe: Rust render service: %s" % exc)
     skipped = _deck_skipped(c)
@@ -1373,6 +1374,8 @@ def cmd_view(args):
         levels = getattr(args, "level", None)
         if levels:
             request += "\tlevels=" + ",".join(str(i) for i in levels)
+        if getattr(args, "thin", "auto") != "auto":
+            request += "\tthin=" + args.thin
         for _ in range(5):
             code = instance.try_forward(addr, request)
             if code is not None:
@@ -1394,6 +1397,7 @@ def cmd_view(args):
     pending_open = None
     pending_fields = ()
     levels = getattr(args, "level", None)
+    thin_mode = getattr(args, "thin", "auto")
     # a jobdeck always opens through the window (user call 2026-09-10:
     # like Calibre it asks which mask levels to load first, unless
     # --level or FLOE_JOBDECK_LEVELS says; then indexes what those
@@ -1407,7 +1411,8 @@ def cmd_view(args):
                "labels=%s" % args.labels,
                "labelpx=%d" % args.label_font_px]
             + (["levels=" + ",".join(str(i) for i in levels)]
-               if levels else []))
+               if levels else [])
+            + (["thin=" + thin_mode] if thin_mode != "auto" else []))
         c = None
         goto = None
     else:
@@ -1423,7 +1428,21 @@ def cmd_view(args):
                stream_kb=stream_kb,
                stream_target_ms=args.stream_target_ms,
                render_debug=args.render_debug,
-               pending_open=pending_open, pending_fields=pending_fields)
+               pending_open=pending_open, pending_fields=pending_fields,
+               thin=thin_mode)
+
+
+def _add_thin_option(p):
+    """The page hairline policy (review 2026-09-11): a plain layout
+    culls all-thin pages at wide views for speed, a jobdeck keeps them
+    (mask data is hairlines); a mask source opened on its own can ask
+    for the mask policy with --thin keep."""
+    p.add_argument("--thin", choices=("auto", "keep", "cull"),
+                   default="auto",
+                   help="thin shapes at wide views: auto = keep for a "
+                        "jobdeck, cull for a layout (the performance "
+                        "policy); keep = mask policy (all-thin pages stay "
+                        "as 1 px hairlines); cull = drop them")
 
 
 def _add_level_option(p):
@@ -1794,6 +1813,7 @@ def main(argv=None, *, prog=None, rust_only=None):
                        help="JSON: every shot's region, pixels and time")
     p.add_argument("--depth", type=int, default=None,
                    help="hierarchy depth (0=top only, 999/omit=full)")
+    _add_thin_option(p)
     p.add_argument("--detail", choices=("exact", "low", "medium", "high"),
                    default="exact",
                    help="planner size cut: exact = none (archival "
@@ -1972,6 +1992,7 @@ def main(argv=None, *, prog=None, rust_only=None):
                         "--goto jumps to an inspection point. "
                         "Digits / the `d` dialog change it at runtime. "
                         "Forwarded to a running instance")
+    _add_thin_option(p)
     p.add_argument("--lod", choices=("on", "off"), default="on",
                    help="starting merged geometry LOD state (default on - "
                         "the live first view needs merged variants without "

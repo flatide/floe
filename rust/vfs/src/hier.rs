@@ -120,19 +120,6 @@ pub struct HierOpts {
     /// box on the owning cell's visible layers. Bounds the wide-view
     /// walk the rev 43 prune exists for (184M placements).
     pub sub_cut_walk_budget: u64,
-    /// Whether the rev 41 hairline rule culls PAGES (a page whose
-    /// every record has min side < hairline x cut is dropped whole).
-    /// Field 2026-09-10 (JOBDECK.ko.md section 10): a region of
-    /// 81-124 nm lines up to 119 um long vanished from a 210 um view -
-    /// its four pages were all-thin (max_min 0.081 / 0.124 um against
-    /// a 0.128 um threshold) and were dropped whole, while `floe2
-    /// render` (exact) drew them and Calibre draws them. Off by
-    /// default: the raster draws such records as 1 px hairlines of
-    /// their full length (KLayout parity), which is the wanted
-    /// picture; FLOE_RUST_PAGE_HAIRLINE=cull restores the cull for an
-    /// A/B. The rule stays for child folds / omissions, child-BVH
-    /// prunes and frames (their own fields).
-    pub page_hairline: bool,
     /// Field diagnosis (2026-09-10): record one ExplainRow per page,
     /// page-BVH node, child placement / child-BVH node and frame the
     /// walk judged INSIDE the view - kept, culled by size, hairline,
@@ -176,7 +163,6 @@ impl Default for HierOpts {
             thin_demote_px: 14.0,
             sub_cut_walk_budget: 200_000,
             explain: false,
-            page_hairline: false,
         }
     }
 }
@@ -533,7 +519,7 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
         wash_walk_budget: opts.sub_cut_walk_budget,
         wash_nodes: HashSet::new(),
         hair: (req.cut_dbu.max(0) as f64 * opts.hairline) as u64,
-        page_hair: if opts.page_hairline {
+        page_hair: if req.page_hairline {
             (req.cut_dbu.max(0) as f64 * opts.hairline) as u64
         } else {
             0
@@ -805,7 +791,7 @@ struct Hier<'a> {
     wash_px: f64,
     /// hairline threshold in dbu (hairline * cut_dbu)
     hair: u64,
-    /// the same threshold for PAGES, 0 unless HierOpts::page_hairline
+    /// the same threshold for PAGES, 0 unless ViewReq::page_hairline
     page_hair: u64,
     /// rev 45 thin-frame lattice pitch in dbu (0 = lattice off,
     /// frames fall back to the rev 41 hairline cull)
@@ -2002,15 +1988,18 @@ pub fn ws_name(gen: u64, key: WsKey) -> String {
 }
 
 impl crate::Vfs {
-    /// V4 hierarchy-preserving plan (default knobs;
-    /// FLOE_RUST_PAGE_HAIRLINE=cull restores the page hairline cull -
-    /// the field kill switch, see HierOpts::page_hairline)
+    /// V4 hierarchy-preserving plan (default knobs). The page
+    /// hairline policy is the request's (ViewReq::page_hairline);
+    /// FLOE_RUST_PAGE_HAIRLINE=cull|keep overrides it for diagnosis.
     pub fn plan_hier(&self, req: &ViewReq) -> HierPlan {
-        let mut opts = HierOpts::default();
-        if std::env::var("FLOE_RUST_PAGE_HAIRLINE").as_deref() == Ok("cull") {
-            opts.page_hairline = true;
+        match std::env::var("FLOE_RUST_PAGE_HAIRLINE").as_deref() {
+            Ok("cull") | Ok("keep") => {
+                let mut req = req.clone();
+                req.page_hairline = std::env::var("FLOE_RUST_PAGE_HAIRLINE").as_deref() == Ok("cull");
+                plan_hier(&self.ovm, &req, &HierOpts::default())
+            }
+            _ => plan_hier(&self.ovm, req, &HierOpts::default()),
         }
-        plan_hier(&self.ovm, req, &opts)
     }
 
     /// hier delta (par.3.2): ONE OASIS = new pages spliced verbatim
@@ -2161,6 +2150,7 @@ mod tests {
             depth,
             px_per_dbu,
             sub_cut_wash: false,
+                    page_hairline: false,
         }
     }
 
@@ -2401,6 +2391,7 @@ mod tests {
             depth: 0,
             px_per_dbu: 0.0,
                     sub_cut_wash: false,
+                    page_hairline: false,
         };
         let plan = plan_hier(&v, &req, &HierOpts::default());
         assert_eq!(plan.pages, vec![1]);
@@ -2616,8 +2607,9 @@ mod tests {
         let view = bx(-10, -10, 11_000, 1000);
         let mut o = HierOpts::default();
         o.explain = true;
-        o.page_hairline = true;
-        let p = plan_hier(&v, &rq(view, 300, u32::MAX), &o);
+        let mut cull_req = rq(view, 300, u32::MAX);
+        cull_req.page_hairline = true;
+        let p = plan_hier(&v, &cull_req, &o);
         let name = |ci: u32| v.cell(ci).name.clone();
         let rows: Vec<(String, &str, &str)> = p
             .explain
@@ -2681,9 +2673,9 @@ mod tests {
         // above the cut AND the cell rbbox is fat; MIX's fat page
         // and FAT survive - WITH the page hairline rule on (the
         // rev 41 behaviour, FLOE_RUST_PAGE_HAIRLINE=cull)
-        let mut cull = HierOpts::default();
-        cull.page_hairline = true;
-        let p = plan_hier(&v, &rq(view, 300, u32::MAX), &cull);
+        let mut cull_req = rq(view, 300, u32::MAX);
+        cull_req.page_hairline = true;
+        let p = plan_hier(&v, &cull_req, &HierOpts::default());
         assert_eq!(p.pages.len(), 2);
         assert!(p.pages.iter().all(
             |&pi| v.page(pi).max_min >= 150
@@ -2701,12 +2693,13 @@ mod tests {
         // hairline 0 restores the pure both-dims rule
         let mut off = HierOpts::default();
         off.hairline = 0.0;
-        off.page_hairline = true;
-        let p0 = plan_hier(&v, &rq(view, 300, u32::MAX), &off);
+        let p0 = plan_hier(&v, &cull_req, &off);
         assert_eq!(p0.pages.len(), 3);
         // boundary: hair == max_min exactly (cut 200 -> hair 100)
         // is NOT below - the thin page stays
-        let pb = plan_hier(&v, &rq(view, 200, u32::MAX), &cull);
+        let mut pb_req = rq(view, 200, u32::MAX);
+        pb_req.page_hairline = true;
+        let pb = plan_hier(&v, &pb_req, &HierOpts::default());
         assert_eq!(pb.pages.len(), 3);
         // fold + frame follow: THIN placed one level down folds at
         // r>0 (min side 100 < 150) and gets no boundary box at r==0
@@ -3241,6 +3234,7 @@ mod tests {
             depth,
             px_per_dbu: 0.0,
             sub_cut_wash: false,
+                    page_hairline: false,
         }
     }
 
@@ -3478,9 +3472,10 @@ mod tests {
             req.depth
         };
         let cut = req.cut_dbu.max(0) as u64;
-        // the planner's rounding of both thresholds
+        // the planner's rounding of both thresholds; the page policy
+        // is the request's, like the planner
         let hair = (cut as f64 * opts.hairline) as u64;
-        let page_hair = if opts.page_hairline { hair } else { 0 };
+        let page_hair = if req.page_hairline { hair } else { 0 };
         walk(
             v,
             v.top,
@@ -3772,6 +3767,7 @@ mod tests {
             depth: u32::MAX,
             px_per_dbu: 0.0,
                     sub_cut_wash: false,
+                    page_hairline: false,
         };
         // brute equality needs the corner windows, not the whole
         // spanning box - use two-box behavior via narrow checks
@@ -4328,8 +4324,9 @@ mod tests {
         let req = rq(bx(0, 0, 1990, 50), 20, u32::MAX);
         for page_hairline in [false, true] {
             let mut o = HierOpts::default();
-            o.page_hairline = page_hairline;
             o.explain = true;
+            let mut req = req.clone();
+            req.page_hairline = page_hairline;
             let pl = plan_hier(&lin, &req, &o);
             let pt = plan_hier(&tree, &req, &o);
             assert!(pt.stats.visited_page_bvh > 0, "the tree path was walked");
@@ -4351,8 +4348,12 @@ mod tests {
                 assert_eq!(pt.explain.iter().filter(|r| r.verdict == "exact_thin").count(), 10);
             }
         }
-        // the default oracle IS the default policy: it keeps thin pages
+        // the request decides: a plain-policy request culls, a mask-
+        // policy request keeps - in the oracle as in the planner
         assert_eq!(brute(&lin, &req).len(), 20);
+        let mut cull = req.clone();
+        cull.page_hairline = true;
+        assert_eq!(brute(&lin, &cull).len(), 10);
     }
 
     #[test]

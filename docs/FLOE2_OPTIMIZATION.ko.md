@@ -962,6 +962,16 @@ KLayout query parity 배터리 유지.
 표시. 실칩의 decode·raster 비용 실측은 이 카운터로 한다. 크기 cut 제거·밀도
 사다리·LOD hair 모드·재인덱싱은 그 측정 뒤로 분리(리뷰어 권고).
 
+**정책 분리(2026-09-11, 사용자·리뷰어)**: 마스크(jobdeck)는 hairline이 많을 수밖에
+없고 일반 레이아웃을 같은 기준에 맞추면 광역 뷰가 느려진다. 그래서 위 해제는
+공유 기본값(`HierOpts::default()` 변경, 6134456)이 아니라 **요청별 정책**으로
+바꿨다: renderd 프레임의 `thin=keep|cull`, 플래너 `ViewReq::page_hairline`. 일반
+레이아웃 = cull(기존 성능 정책, 가는 도형이 광역 뷰에서 생략될 수 있음을 상태줄
+`thin:cull`로 표시), jobdeck = keep, 단독 마스크 OASIS도 `--thin keep`/View > keep
+thin shapes로 마스크 정책 선택 가능(같은 파일이 여는 방식에 따라 달라지지 않게).
+양변 모두 작은 도형의 cut과 자식 셀·BVH의 hairline은 두 정책 공통(별도 실측 뒤
+결정). 환경변수는 진단 override로만 남김.
+
 ### 3.20 pan 재사용 — F2R-16 (2026-09-04)
 
 **관찰(사용자)**: "pan 20% 이동과 50% 이동이 큰 차이가 없음.

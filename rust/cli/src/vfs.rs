@@ -1780,6 +1780,7 @@ fn frontier_json_planned(v: &floe_ovm::Ovm) -> String {
             depth: d,
             px_per_dbu,
             sub_cut_wash: false,
+                    page_hairline: true,
         };
         let plan = floe_vfs::hier::plan_hier(v, &req, &opts);
         let (boxes, truncated) = floe_vfs::hier::frontier_boxes(
@@ -6062,6 +6063,7 @@ fn make_req(
         depth,
         px_per_dbu: px_per_um / s,
         sub_cut_wash: false,
+            page_hairline: true,
     }
 }
 
@@ -6339,11 +6341,11 @@ pub fn plan_cmd(args: &[String]) {
         // diagnosis 2026-09-10: which rule dropped a region)
         let explain = rest.iter().any(|(k, _)| k == "--explain");
         popts.explain = explain;
-        // --page-hairline 1: the rev 41 page hairline cull (off by
-        // default since 2026-09-10; the viewer's kill switch is
-        // FLOE_RUST_PAGE_HAIRLINE=cull)
-        if rest.iter().any(|(k, val)| k == "--page-hairline" && val != "0") {
-            popts.page_hairline = true;
+        // --page-hairline 0|1: the page hairline policy of the request
+        // (1 = the plain layout's cull, the default here; 0 = the
+        // mask / jobdeck policy that keeps thin pages)
+        if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--page-hairline") {
+            req.page_hairline = val != "0";
         }
         let plan = floe_vfs::hier::plan_hier(&v.ovm, &req, &popts);
         let ms = t0.elapsed().as_secs_f64() * 1e3;

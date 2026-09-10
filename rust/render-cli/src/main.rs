@@ -220,6 +220,7 @@ fn make_request(args: &Args, unit: f64) -> Result<PlanRequest, String> {
         px_per_dbu,
         exact: args.cut_px == 0.0,
         sub_cut_wash: false,
+        page_hairline: true,
     })
 }
 

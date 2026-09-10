@@ -43,6 +43,16 @@ pub struct ViewReq {
     /// as the node bbox (coarse). false keeps the plain viewer rule
     /// (a size cut is a silent detail omission).
     pub sub_cut_wash: bool,
+    /// Whether the rev 41 hairline rule culls PAGES (a page whose every
+    /// record has min side < hairline x cut is dropped whole). true is
+    /// the plain layout's performance policy (thin shapes may be
+    /// omitted at wide views); false is the mask / jobdeck policy
+    /// (long thin shapes are kept and rastered as 1 px hairlines).
+    /// Decided per request (review 2026-09-11: never a shared
+    /// default - a mask source opened on its own must be able to
+    /// choose it too); FLOE_RUST_PAGE_HAIRLINE=cull|keep overrides
+    /// for diagnosis.
+    pub page_hairline: bool,
 }
 
 /// one placement of a page cell in the working-set top. na/nb/va/vb

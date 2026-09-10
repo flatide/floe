@@ -426,7 +426,7 @@ class ShotRunner:
     """One started render worker; `capture` as many times as needed."""
 
     def __init__(self, cache, frames=False, labels=False, label_font_px=14,
-                 timeout_s=600, cut_px=0.0):
+                 timeout_s=600, cut_px=0.0, thin=None):
         from .service import make_render_worker
         self.cache = cache
         self.dbu = float(cache.meta["dbu"])
@@ -441,6 +441,10 @@ class ShotRunner:
         # because captures are exact, which pinned the cause to the
         # plan-stage cut
         self.cut_px = max(0.0, float(cut_px or 0.0))
+        # the page hairline policy: None = the source's default (a
+        # jobdeck keeps thin pages, a layout culls them), or an
+        # explicit "keep" / "cull"
+        self.thin = thin
         self.worker = make_render_worker(cache)
         self._gen = 0
         self.over_budget_pages = 0
@@ -470,6 +474,7 @@ class ShotRunner:
             "depth": depth, "cut_px": self.cut_px,
             # the viewer's density gate (LOD) rides with its cut
             "lod": self.cut_px > 0,
+            "thin": self.thin,
             "frames": self.frames, "labels": self.labels,
             "label_font_px": self.label_font_px, "abstract": False,
             "visible": layers, "frame_format": fmt,
@@ -504,7 +509,8 @@ class ShotRunner:
 
 
 def run_shots(cache, shots, out, report=None, frames=False, labels=False,
-              label_font_px=14, log=print, batch=False, cut_px=0.0):
+              label_font_px=14, log=print, batch=False, cut_px=0.0,
+              thin=None):
     """Render every shot through one open. `out` is the PNG path of the
     one shot, or with `batch` a directory (<out>/<name>.png) - stated
     by the caller, never inferred from the shot count or from whether
@@ -527,7 +533,7 @@ def run_shots(cache, shots, out, report=None, frames=False, labels=False,
     skipped = list((cache.meta.get("jobdeck") or {}).get("skipped") or [])
     rows = []
     runner = ShotRunner(cache, frames=frames, labels=labels,
-                        label_font_px=label_font_px, cut_px=cut_px)
+                        label_font_px=label_font_px, cut_px=cut_px, thin=thin)
     try:
         for shot in shots:
             t0 = time.perf_counter()
@@ -597,7 +603,7 @@ def run_shots(cache, shots, out, report=None, frames=False, labels=False,
     over_budget_total = sum(r["over_budget_pages"] for r in rows)
     if report:
         doc = {"source": cache.src, "dbu": dbu, "shots": rows,
-               "cut_px": cut_px,
+               "cut_px": cut_px, "thin": thin or "auto",
                "complete": all(r["complete"] for r in rows)}
         if cache.meta.get("jobdeck"):
             doc["jobdeck"] = {"complete": doc["complete"],

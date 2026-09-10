@@ -1041,6 +1041,7 @@ mod tests {
             depth,
             px_per_dbu: px,
             sub_cut_wash: false,
+                    page_hairline: false,
         }
     }
 

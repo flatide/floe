@@ -242,7 +242,7 @@ frontier를 재계산하고 meta.json의 해당 객체만 brace-balanced splice�
 ```
 floe-index plan <cachedir> --view x0,y0,x1,y1(µm) [--px-per-um F]
     [--cut-px F] [--depth N|full] [--layers ...] [--lod 0]
-    [--wash-px F] [--hairline-f F] [--thin-um F] [--page-hairline 1] [--inspect]
+    [--wash-px F] [--hairline-f F] [--thin-um F] [--page-hairline 0|1] [--inspect]
 ```
 JSON 출력: pages/bytes/records/members + 플래너 stats 전체
 (frame_rects, culled_*, lod_pages, washed_pages, culled_bvh_size,
@@ -257,7 +257,9 @@ explain  <kind>  <verdict>  <cell>  <layer L/D | ->  <id>  <bbox um x0,y0,x1,y1>
 ```
 - kind/verdict: `top` keep|cull_size 
   · `page` exact|exact_thin|lod|lod_thin|wash|cull_size|cull_hair(`_thin` =
-  모든 레코드가 hair 미만인데 남긴 페이지; `cull_hair`는 `--page-hairline 1`일 때만) ·
+  모든 레코드가 hair 미만인데 남긴 페이지; `cull_hair`는 페이지 hairline 정책이
+  cull일 때 — `--page-hairline 1`, 이 명령의 기본 = 일반 레이아웃 정책; `0`이
+  마스크/jobdeck 정책) ·
   `pbvh` cull_size(페이지 BVH 노드째) · `cbvh` prune_size(자식 BVH 노드째, w/h =
   max_dim, min = max_min) · `child` expand|omit_size|omit_hair(full depth 생략)|
   fold_size(유한 깊이 폴드)|cull_layer · `frame`(r==0) keep|thin_lattice|cull_size|

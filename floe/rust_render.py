@@ -225,6 +225,12 @@ class RustRenderWorker:
         self._clip_seq = 0
         self._clip_jobs = {}
         self._mono = False
+        # the page hairline policy sent with every frame (`thin=`):
+        # "cull" is the plain layout's performance policy (all-thin
+        # pages dropped at wide views), "keep" the mask / jobdeck
+        # policy (long thin shapes stay as 1 px hairlines). A job's
+        # "thin" overrides; the deck worker defaults to keep
+        self._thin_default = "cull"
         self._style_epoch = 0
         self._colors = {}
         self._fills = {}
@@ -494,6 +500,9 @@ class RustRenderWorker:
             raise ValueError("frame_format must be raw or png")
         output = os.path.join(self._work_dir, "frame-%d.%s" % (
             generation, "raw" if raw else "png"))
+        thin = job.get("thin") or self._thin_default
+        if thin not in ("keep", "cull"):
+            raise ValueError("thin must be keep or cull")
         state = {
             "job": dict(job), "output": output,
             "started": time.monotonic(), "new": 0,
@@ -524,7 +533,7 @@ class RustRenderWorker:
             "frame_cache=%s "
             "jobs=%d decode_jobs=%d tile_px=%d "
             "round_pages=%d round_paths=1 frame_format=%s "
-            "style_epoch=%d out=%s" % (
+            "thin=%s style_epoch=%d out=%s" % (
                 generation, ",".join(repr(value) for value in bbox),
                 int(job["w"]), int(job["h"]), depth,
                 repr(max(0.0, float(job.get("cut_px") or 0.0))), layers,
@@ -536,7 +545,7 @@ class RustRenderWorker:
                 self._jobs_count, self._tile_px,
                 self._round_pages,
                 "raw" if raw else "png",
-                self._style_epoch, output))
+                thin, self._style_epoch, output))
         self._send(command)
 
     def _submit_recolor(self, job):

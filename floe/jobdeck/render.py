@@ -228,6 +228,12 @@ class DeckRenderWorker:
             supports_margin_prefetch = False
             supports_label_font_px = False
 
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                # a mask deck keeps its all-thin pages (2026-09-11: the
+                # mask policy; a plain layout culls them for speed)
+                self._thin_default = "keep"
+
             def _init_styles(self):
                 super()._init_styles()
                 heads = {r["layer"] for r in self.cache.meta["layers"]

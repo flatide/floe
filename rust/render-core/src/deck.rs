@@ -426,6 +426,10 @@ pub struct DeckRenderRequest {
     /// (true) instead of stopping at the budget with a partial frame
     /// (false, the pre-step-3 behaviour kept as the kill switch).
     pub stream: bool,
+    /// Keep all-thin pages (the mask policy, the deck's default): the
+    /// page hairline rule is off for the passes' plans. false is the
+    /// plain layout's cull.
+    pub thin_keep: bool,
 }
 
 pub struct DeckRenderReport {
@@ -1559,6 +1563,7 @@ fn source_plan_request(
         px_per_dbu,
         exact: request.exact,
         sub_cut_wash: request.wide,
+        page_hairline: !request.thin_keep,
     };
     plan.validate()?;
     Ok(Some(plan))
@@ -1835,6 +1840,7 @@ mod tests {
             decode_pages: None,
             wide: false,
             stream: true,
+            thin_keep: true,
         };
         let p = placement(4.0, 0.0, 0.0);
         let sv = source_view(&request.view, &p).unwrap();
@@ -1879,6 +1885,7 @@ mod tests {
             decode_pages: None,
             wide: false,
             stream: true,
+            thin_keep: true,
         };
         let p = placement(0.001, 1e16, 1e16);
         let sv = source_view(&request.view, &p).unwrap();
@@ -1911,6 +1918,7 @@ mod tests {
             decode_pages: None,
             wide: false,
             stream: true,
+            thin_keep: true,
         };
         let big = 1i64 << 60;
         // the placement puts the deck view's origin at the source's

@@ -1121,7 +1121,7 @@ class Viewer:
                  label_font_px=DEFAULT_LABEL_FONT_PX,
                  frame_cache=True,
                  stream_kb=None, stream_target_ms=500,
-                 render_debug=False):
+                 render_debug=False, thin="auto"):
         self.server_sock = server_sock
         self.cx = self.cy = 0
         self.spp = 1.0              # dbu per screen pixel
@@ -1177,6 +1177,10 @@ class Viewer:
             self.coverage_on = False
         # Explicit request controls; no shell environment is consulted.
         self.lod_on = bool(lod)
+        # the page hairline policy (review 2026-09-11): "auto" = keep
+        # for a jobdeck, cull for a layout; "keep" / "cull" explicit
+        # (View > keep thin shapes, --thin, a forwarded thin=)
+        self.thin_mode = thin if thin in ("auto", "keep", "cull") else "auto"
         self.frames_on = bool(frames)
         # Frame is the normal UI control for both hierarchy outlines and
         # texts. An explicit --labels off remains available as a startup/
@@ -2318,7 +2322,8 @@ class Viewer:
                 key, value = field.split("=", 1)
                 opts[key] = value
         before = (self.detail, self.depth_value, self.lod_on,
-                  self.frames_on, self.labels_on, self.label_font_px)
+                  self.frames_on, self.labels_on, self.label_font_px,
+                  getattr(self, "thin_mode", "auto"))
         detail = opts.get("detail")
         if detail in DETAIL_LEVELS:
             self._set_detail(DETAIL_LEVELS.index(detail), redraw=False)
@@ -2330,6 +2335,8 @@ class Viewer:
                 pass
         if opts.get("lod") in ("on", "off"):
             self._set_lod(opts["lod"] == "on", redraw=False)
+        if opts.get("thin") in ("auto", "keep", "cull"):
+            self._set_thin(opts["thin"], redraw=False)
         frames = opts.get("frames")
         labels = opts.get("labels")
         if frames in ("on", "off"):
@@ -2351,7 +2358,8 @@ class Viewer:
                 self._set_label_font_px(label_px, redraw=False)
         changed = before != (
             self.detail, self.depth_value, self.lod_on,
-            self.frames_on, self.labels_on, self.label_font_px)
+            self.frames_on, self.labels_on, self.label_font_px,
+            getattr(self, "thin_mode", "auto"))
         if changed:
             self.dstatus.set_text(self._depth_label())
         return changed
@@ -3128,6 +3136,7 @@ class Viewer:
             "depth": depth,
             "cut_px": self._effective_cut_px(),
             "lod": self.lod_on,
+            "thin": self._effective_thin(),
             "frames": self.frames_on,
             # §F2R-21 (user call 2026-09-05): the margin carries its
             # labels, planned over the margin box, so a pan inside it
@@ -3196,6 +3205,7 @@ class Viewer:
             "depth": depth,
             "cut_px": self._effective_cut_px(),
             "lod": self.lod_on,
+            "thin": self._effective_thin(),
             "frames": self.frames_on,
             "labels": self.labels_on,
             "label_font_px": self.label_font_px,
@@ -4281,6 +4291,9 @@ class Viewer:
                 lbl += " · cov:%s" % (
                     "on" if self.coverage_on else "off")
             lbl += " · lod:%s" % ("on" if self.lod_on else "off")
+            # the page hairline policy in force: cull = thin shapes
+            # may be omitted at wide views (plain layout default)
+            lbl += " · thin:%s" % self._effective_thin()
             lbl += " · frame:%s" % (
                 "on" if self.frames_on else "off")
         if self.abstract:
@@ -4341,6 +4354,30 @@ class Viewer:
         self.lod_on = enabled
         if changed and redraw:
             self._on_depth()
+
+    def _effective_thin(self):
+        """The page hairline policy in force: the explicit mode, or
+        for auto the source's default - a jobdeck keeps its all-thin
+        pages (mask data is hairlines), a layout culls them at wide
+        views (the performance policy)."""
+        mode = getattr(self, "thin_mode", "auto")
+        if mode in ("keep", "cull"):
+            return mode
+        cache = getattr(self, "cache", None)
+        return "keep" if getattr(cache, "is_jobdeck", False) else "cull"
+
+    def _set_thin(self, mode, redraw=True):
+        """View > keep thin shapes / --thin / a forwarded thin=: switch
+        the page hairline policy for this source (review 2026-09-11: a
+        mask OASIS opened on its own can ask for the mask policy)."""
+        if mode not in ("auto", "keep", "cull"):
+            return
+        before = self._effective_thin()
+        self.thin_mode = mode
+        if before != self._effective_thin():
+            self.dstatus.set_text(self._depth_label())
+            if redraw:
+                self._on_depth()
 
     def _set_frames(self, enabled, labels=None, redraw=True):
         """Set hierarchy frames and their text as one normal UI state.
@@ -4921,6 +4958,13 @@ class Viewer:
                   lambda: self.coverage_on)
         check(m, "LOD\tl", lambda: self._set_lod(not self.lod_on),
               lambda: self.lod_on)
+        # the page hairline policy (review 2026-09-11): a plain layout
+        # may omit thin shapes at wide views for speed; the mask
+        # policy keeps them (a jobdeck's default)
+        check(m, "keep thin shapes (mask detail)",
+              lambda: self._set_thin(
+                  "cull" if self._effective_thin() == "keep" else "keep"),
+              lambda: self._effective_thin() == "keep")
         check(m, "grayscale layers\tb",
               lambda: self._set_mono(not self._mono),
               lambda: self._mono)
@@ -8855,7 +8899,8 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
                label_font_px=DEFAULT_LABEL_FONT_PX,
                frame_cache=True,
                stream_kb=None, stream_target_ms=500,
-               render_debug=False, pending_open=None, pending_fields=()):
+               render_debug=False, pending_open=None, pending_fields=(),
+               thin="auto"):
     """`pending_open`: a layout/jobdeck given on the command line that
     has no index yet - the viewer starts empty, asks, indexes and
     opens it (user call 2026-09-09), then applies `pending_fields`
@@ -8867,7 +8912,7 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
                     frame_cache=frame_cache,
                     stream_kb=stream_kb,
                     stream_target_ms=stream_target_ms,
-                    render_debug=render_debug)
+                    render_debug=render_debug, thin=thin)
     smoke_ms = os.environ.get("FLOE_GUI_SMOKE_MS")
     smoke_error = []
     if smoke_ms is not None:
