@@ -467,6 +467,14 @@ INCOMPLETE)로 보고하며 덱은 열린다. 인덱싱이 일부 실패해도 �
 | P2-3 | 부분 로드여도 준비 단계가 전체 소스·전체 배치를 처리(전체 소스의 헤더+캐시 상태 조회, 17배치 생성 후 3개로 필터) | 사실 | 그리드 계약(전체 덱의 extent와 모든 소스 dbu)은 유지하되, 로드한 level의 소스만 전체 probe(캐시 상태 포함)하고 나머지는 `header_dbu`로 헤더의 dbu만 읽는다(`infos`에 등록 안 함); `plan()`은 선택 밖 엔트리의 extent·개수만 세고 배치는 만들지 않는다. gate: level 3 로드 시 `catalog.infos`는 mark.oas뿐, `instances_total` 17·`instances` 3·dbu는 전체 덱 값 |
 | P2-4 | chip view 색이 선택에 따라 바뀜(ID001이 전체 로드에선 노랑, level 3만 로드하면 파랑): `scheme.build(deck, ids)`가 분석 CLI의 splice 규칙을 그대로 씀 | 사실 | `plan_deck(load_ids=)`를 분석 선택 `ids`와 분리: 로드 선택은 배치·행·probe 범위만 줄이고 색은 전체 덱 기준(세 뷰 모두), `floe2 jobdeck --level`의 splice 규칙은 그대로. Calibre의 실제 색 정책은 샘플 관찰 후 확정. gate `test_load_selection_moves_no_colour_in_any_view` |
 
+### 10차 (3건, thin 정책 분리 리뷰 2026-09-11, RENDERD 0.12.78)
+
+| # | 지적 | 판정 | 조치 |
+|---|---|---|---|
+| P1-1 | GUI 프레임 캐시 키(`_render_key`)에 thin 정책이 없어 메뉴 토글 뒤 `_covered()`가 옛 화면을 유효로 보고 렌더를 내지 않음(상태줄만 바뀜) | 사실 | 키에 `_effective_thin()` 포함(margin 프레임도 같은 키). gate `test_render_key_carries_the_thin_policy`(auto/cull/keep, 덱 auto = keep) |
+| P1-2 | renderd `RetainedKey`에 `thin_keep`이 없어 다른 정책의 프레임을 재사용(cull→keep 0 px 유지, keep→cull 1,176 px 유지, 타일 16개 재사용); published query scene도 같은 키라 pick/snap도 옛 정책 | 사실 | `RetainedKey.thin_keep` 추가. renderd 단위 테스트 `retained_key_tracks_the_thin_policy`(keep≠cull, 생략=cull, 잘못된 값 거부) |
+| P2-3 | `--thin auto`가 실행 중인 창에 전달되지 않아 keep 상태의 창을 기본으로 되돌릴 수 없음 | 사실 | `--thin` 기본을 None으로 두고 명시된 값은 auto 포함 전달(`thin=auto`). gate `test_single_instance_forwards_effective_detail_and_depth` 확장 |
+
 ## 11. 성능 분석 2026-09-09 — 판정과 계획
 
 리뷰어의 분석(광역뷰 누락 = cut 정책, 다중 level 지연 = 배치별 전체 화면 반복,

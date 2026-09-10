@@ -729,7 +729,7 @@ fn validate_jobs(jobs: u16) -> Result<(), String> {
 
 /// §F2R-16: identity of a retained geometry frame. Labels are drawn
 /// on top per render, so label state is deliberately absent.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct RetainedKey {
     // §F2R-17: frame sizes are NOT part of the key - a margin frame
     // serves viewport-sized pans and vice versa; scale equality is
@@ -741,6 +741,11 @@ struct RetainedKey {
     mono: bool,
     decode_pages: Option<usize>,
     style_epoch: Option<u64>,
+    /// the page hairline policy the frame was planned under (review
+    /// 2026-09-11 P1-2: a keep frame was reused for a cull request
+    /// and vice versa - 16 tiles reused, the thin lines stayed or
+    /// stayed missing; the published query scene shares this key)
+    thin_keep: bool,
 }
 
 impl RetainedKey {
@@ -753,6 +758,7 @@ impl RetainedKey {
             mono: command.mono,
             decode_pages: command.decode_pages,
             style_epoch,
+            thin_keep: command.thin_keep,
         }
     }
 }
@@ -2773,6 +2779,38 @@ mod tests {
             InputCommand::Worker(WorkerCommand::Render(render)) => render,
             _ => panic!("expected render command"),
         }
+    }
+
+    /// Review 2026-09-11 P1-2: a retained frame (and the published
+    /// query scene, which shares the key) is never reused across the
+    /// thin policy - a keep frame served a cull request and vice versa.
+    #[test]
+    fn retained_key_tracks_the_thin_policy() {
+        let parse = |thin: &str| {
+            render(
+                parse_command(&format!(
+                    "render gen=1 view=0,0,320,320 w=32 h=32 frames=off thin={thin} out=/tmp/a.raw"
+                ))
+                .unwrap()
+                .unwrap(),
+            )
+        };
+        let keep = parse("keep");
+        let cull = parse("cull");
+        assert!(keep.thin_keep && !cull.thin_keep);
+        assert_ne!(RetainedKey::new(&keep, Some(1)), RetainedKey::new(&cull, Some(1)));
+        assert_eq!(RetainedKey::new(&keep, Some(1)), RetainedKey::new(&parse("keep"), Some(1)));
+        // absent = cull, the plain layout's policy
+        let absent = render(
+            parse_command("render gen=1 view=0,0,320,320 w=32 h=32 frames=off out=/tmp/a.raw")
+                .unwrap()
+                .unwrap(),
+        );
+        assert_eq!(RetainedKey::new(&absent, Some(1)), RetainedKey::new(&cull, Some(1)));
+        assert!(parse_command(
+            "render gen=1 view=0,0,320,320 w=32 h=32 frames=off thin=maybe out=/tmp/a.raw"
+        )
+        .is_err());
     }
 
     fn snap(command: InputCommand) -> SnapCommand {

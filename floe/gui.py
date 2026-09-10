@@ -2424,10 +2424,13 @@ class Viewer:
 
     # ---- display composition (no cairo: pixbuf ops only) -------------------
     def _render_key(self, scope):
-        """Identity of a frame: what state it was rendered for."""
+        """Identity of a frame: what state it was rendered for. The
+        thin policy is part of it (review 2026-09-11 P1-1: toggling
+        View > keep thin shapes changed only the status label while
+        _covered() kept the old frame; margin frames share the key)."""
         return (scope, tuple(sorted(self.visible)), self._depth_key(),
                 self._effective_cut_px(), self.lod_on, self.frames_on,
-                self.labels_on, self._color_epoch)
+                self.labels_on, self._color_epoch, self._effective_thin())
 
     def _effective_cut_px(self):
         """Screen-space detail cut is independent of merged LOD."""

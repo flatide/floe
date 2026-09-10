@@ -851,7 +851,7 @@ def _render_shots(args, c):
     from .service import DETAIL_PX
     cut_px = {"exact": 0.0, "low": DETAIL_PX[0], "medium": DETAIL_PX[1],
               "high": DETAIL_PX[2]}[args.detail]
-    thin = None if args.thin == "auto" else args.thin
+    thin = None if args.thin in (None, "auto") else args.thin
     try:
         rows = shots_mod.run_shots(c, shots, args.out, report=args.report,
                                    frames=args.frames, labels=args.labels,
@@ -1374,7 +1374,10 @@ def cmd_view(args):
         levels = getattr(args, "level", None)
         if levels:
             request += "\tlevels=" + ",".join(str(i) for i in levels)
-        if getattr(args, "thin", "auto") != "auto":
+        # an explicit --thin (auto included) reaches the running window
+        # (review 2026-09-11 P2-3: auto was dropped, so a window left on
+        # keep could not be told to return to its default)
+        if getattr(args, "thin", None) is not None:
             request += "\tthin=" + args.thin
         for _ in range(5):
             code = instance.try_forward(addr, request)
@@ -1397,7 +1400,7 @@ def cmd_view(args):
     pending_open = None
     pending_fields = ()
     levels = getattr(args, "level", None)
-    thin_mode = getattr(args, "thin", "auto")
+    thin_mode = getattr(args, "thin", None) or "auto"
     # a jobdeck always opens through the window (user call 2026-09-10:
     # like Calibre it asks which mask levels to load first, unless
     # --level or FLOE_JOBDECK_LEVELS says; then indexes what those
@@ -1438,7 +1441,7 @@ def _add_thin_option(p):
     (mask data is hairlines); a mask source opened on its own can ask
     for the mask policy with --thin keep."""
     p.add_argument("--thin", choices=("auto", "keep", "cull"),
-                   default="auto",
+                   default=None,
                    help="thin shapes at wide views: auto = keep for a "
                         "jobdeck, cull for a layout (the performance "
                         "policy); keep = mask policy (all-thin pages stay "

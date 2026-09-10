@@ -80,7 +80,7 @@ class WorkerContractTests(unittest.TestCase):
     def test_single_instance_forwards_effective_detail_and_depth(self):
         from floe import cli, instance
 
-        def forward(detail, depth):
+        def forward(detail, depth, thin=None):
             args = SimpleNamespace(
                 src="/tmp/forwarded.oas", hairline=None, thin_um=None,
                 goto="1,2,700", stream_kb=None, stream_target_ms=500,
@@ -88,6 +88,7 @@ class WorkerContractTests(unittest.TestCase):
                 frames="on", labels="on", refinement="on",
                 frame_cache="on", render_debug=False, multi=False,
                 drc=None, detail=detail, depth=depth, dump=False,
+                thin=thin,
             )
             with mock.patch.object(cli.os.path, "isfile", return_value=True), \
                     mock.patch.object(cli, "_cache_ready", return_value=True), \
@@ -106,6 +107,46 @@ class WorkerContractTests(unittest.TestCase):
         self.assertIn("\tdetail=high\tdepth=7\t", explicit)
         implicit = forward(None, None)
         self.assertIn("\tdetail=medium\tdepth=999\t", implicit)
+        # review 2026-09-11 P2-3: an explicit --thin reaches the window,
+        # auto included (a window left on keep returns to its default);
+        # an unspecified one is not sent
+        self.assertNotIn("thin=", implicit)
+        self.assertIn("\tthin=auto", forward("high", 7, "auto"))
+        self.assertIn("\tthin=keep", forward("high", 7, "keep"))
+
+    def test_render_key_carries_the_thin_policy(self):
+        """Review 2026-09-11 P1-1: toggling View > keep thin shapes must
+        invalidate the displayed frame (and the margin frame, which
+        shares the key) - the key differs by the effective policy."""
+        from types import SimpleNamespace
+        from floe import gui
+        v = gui.Viewer.__new__(gui.Viewer)
+        v.visible = {(1, 0)}
+        v._depth_key = lambda: ("d", 3)
+        v.cut_px = 1.0
+        v.lod_on = True
+        v.frames_on = False
+        v.labels_on = False
+        v._color_epoch = 5
+        v.cache = SimpleNamespace(is_jobdeck=False)
+        v.thin_mode = "auto"
+        auto = gui.Viewer._render_key(v, "live")
+        v.thin_mode = "cull"
+        self.assertEqual(gui.Viewer._render_key(v, "live"), auto,
+                         "auto on a layout is cull")
+        v.thin_mode = "keep"
+        keep = gui.Viewer._render_key(v, "live")
+        self.assertNotEqual(keep, auto)
+        v.thin_mode = "auto"
+        v.cache = SimpleNamespace(is_jobdeck=True)
+        self.assertEqual(gui.Viewer._render_key(v, "live"), keep,
+                         "auto on a deck is keep")
+        # the displayed frame and the margin frame are judged by the
+        # same key
+        import inspect
+        self.assertIn("_render_key(", inspect.getsource(gui.Viewer._covered))
+        self.assertIn('margin[3] != self._render_key("live")',
+                      inspect.getsource(gui))
 
     def test_forwarded_view_options_batch_before_one_goto(self):
         from floe import gui
