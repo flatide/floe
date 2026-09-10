@@ -477,6 +477,8 @@ pub struct DeckRenderReport {
     pub slices: u32,
     /// Step 4: sub-cut washes the planner emitted across the passes.
     pub wide_washes: u64,
+    /// Planner culls summed over the passes' plans (perf line).
+    pub culls: crate::cache::PlanCullCounts,
 }
 
 impl Deck {
@@ -703,6 +705,7 @@ impl Deck {
         let mut batch_bytes = 0u64;
         let mut batch_bytes_max = 0u64;
         let mut wide_washes = 0u64;
+        let mut culls = crate::cache::PlanCullCounts::default();
         for placed_index in 0..self.placements.len() {
             let (out, source_index) = {
                 let placed = &self.placements[placed_index];
@@ -784,6 +787,7 @@ impl Deck {
                     stats.plan_us = stats.plan_us.saturating_add(planned.stats.plan_us);
                     plan_pages = plan_pages.saturating_add(planned.summary.pages);
                     wide_washes = wide_washes.saturating_add(planned.plan.stats.sub_cut_washes);
+                    culls.add(&planned.summary.culls);
                     check_generation(cancellation, generation)?;
                     if planned
                         .plan
@@ -1048,6 +1052,7 @@ impl Deck {
             streamed_passes: tally.streamed_passes,
             slices: tally.slices,
             wide_washes,
+            culls,
         })
     }
 }

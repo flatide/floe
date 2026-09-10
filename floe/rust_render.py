@@ -1057,6 +1057,19 @@ class RustRenderWorker:
             "wc_cells": _wire_int(fields, "wc_cells"),
             "inst_edges": _wire_int(fields, "inst_edges"),
             "frame_rects": _wire_int(fields, "frame_rects"),
+            # what the planner dropped or degraded (field diagnosis
+            # 2026-09-10: where a vanished region went); a deck sums
+            # its passes' plans
+            "plan_culls": {
+                "pages_size": _wire_int(fields, "cull_pages"),
+                "page_bvh": _wire_int(fields, "cull_pbvh"),
+                "child_bvh": _wire_int(fields, "cull_cbvh"),
+                "children_size": _wire_int(fields, "cull_children"),
+                "layer": _wire_int(fields, "cull_layer"),
+                "washed": _wire_int(fields, "washed"),
+                "lod_swapped": _wire_int(fields, "lod_swapped"),
+                "thin_frames": _wire_int(fields, "thin_frames"),
+            },
             "text_plan_ms": _wire_int(fields, "text_plan_us") / 1000.0,
             "text_place_records": _wire_int(fields, "text_place_records"),
             "labels": _wire_int(fields, "labels"),

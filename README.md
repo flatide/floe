@@ -360,6 +360,13 @@ floe는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델을 
   열린 뒤 적용된다. 스크립트·gate용으로 `FLOE_INDEX_ON_OPEN=yes|no`가 질문을
   대신 답한다(기본 `ask`). 인덱싱 자체는 여전히 `floe-index` 프로세스가 하며
   GUI는 로그만 보여 준다.
+- **perf 로그의 플래너 판정**(2026-09-10): 상태줄과 터미널 perf 줄에 `cut pages
+  P/pbvh Q/cbvh R/cells S, layer L, washed W, lod X, thin T`가 붙는다. 크기·hairline
+  cut에 잘린 페이지 수, 통째로 잘린 페이지 BVH 노드 수, 크기로 프루닝된 자식 BVH
+  노드 수, 크기로 생략·폴드된 자식 셀 수, 레이어 불일치로 건너뛴 배치 수, wash로
+  붕괴한 페이지 수, LOD 교체 수, thin 프레임 수다(덱은 패스 합). 특정 줌부터
+  사라지는 영역이 어느 규칙에 잘렸는지 이 수로 먼저 보고, 어느 셀·페이지인지는
+  `floe-index plan --explain 1`(SPEC-INDEXER §6)로 확정한다.
 - **로드 대화상자**(File > load layout… / load jobdeck…, 2026-09-10)는 자체
   파일 브라우저다: 폴더 먼저·필터에 맞는 파일 다음, 위/홈 버튼, 경로 입력
   (Enter로 폴더 이동 또는 파일 열기), 이름 타이핑 검색, 필터 콤보. 레이아웃의

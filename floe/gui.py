@@ -3552,6 +3552,18 @@ class Viewer:
                         text += ", hier %s/%s pruned" % (
                             fmt_count(res["hier_cells_visited"]),
                             fmt_count(res.get("subtrees_pruned", 0)))
+                    culls = res.get("plan_culls") or {}
+                    if any(culls.values()):
+                        # planner verdicts (field 2026-09-10): pages
+                        # culled by size/hairline, page-BVH nodes,
+                        # child-BVH nodes pruned, child cells omitted,
+                        # layer skips, washes, LOD swaps, thin frames
+                        text += (", cut pages %s/pbvh %s/cbvh %s/cells %s"
+                                 ", layer %s, washed %s, lod %s, thin %s"
+                                 % tuple(fmt_count(culls.get(k, 0)) for k in (
+                                     "pages_size", "page_bvh", "child_bvh",
+                                     "children_size", "layer", "washed",
+                                     "lod_swapped", "thin_frames")))
                     if res.get("labels_truncated"):
                         text += ", labels partial"
                     if res.get("over_budget_pages"):

@@ -1031,9 +1031,17 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "text_plan_us": "250", "text_place_records": "13",
                 "labels": "2", "labels_truncated": "0",
                 "label_tile_paints": "3", "label_pixel_paints": "40",
+                # planner verdict counters (field diagnosis 2026-09-10)
+                "cull_pages": "21", "cull_pbvh": "22", "cull_cbvh": "23",
+                "cull_children": "24", "cull_layer": "25", "washed": "26",
+                "lod_swapped": "27", "thin_frames": "28",
             })
             result = worker.res.get_nowait()
             self.assertEqual(result["kind"], "frame")
+            self.assertEqual(result["plan_culls"], {
+                "pages_size": 21, "page_bvh": 22, "child_bvh": 23,
+                "children_size": 24, "layer": 25, "washed": 26,
+                "lod_swapped": 27, "thin_frames": 28})
             self.assertEqual(result["frame_format"], "raw")
             self.assertEqual(result["rgba"], raw_pixels)
             self.assertNotIn("png", result)

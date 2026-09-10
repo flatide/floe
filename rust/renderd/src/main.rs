@@ -1618,7 +1618,7 @@ fn run_deck_render(
     respond(
         responses,
         format!(
-            "frame gen={} round=1 final=1 png={} format={} partial={} deferred={} frame_cache_hit=0 style_epoch={} plan_us={} text_plan_us=0 labels=0 labels_truncated=0 text_place_records=0 read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes=0 raster_us={} raster_tile_max_us={} tiles_reused=0 bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells=0 inst_edges=0 frame_rects=0 rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints=0 label_pixel_paints=0 rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes=0 passes={} passes_skipped={} pass_bytes_max={} frame_passes={} unique_pages={} frame_raster_us={} composite_us={} scene_reuses={} raster_wall_us={} pass_workers={} batches={} batch_bytes_max={} streamed_passes={} slices={} wide_washes={}",
+            "frame gen={} round=1 final=1 png={} format={} partial={} deferred={} frame_cache_hit=0 style_epoch={} plan_us={} text_plan_us=0 labels=0 labels_truncated=0 text_place_records=0 read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes=0 raster_us={} raster_tile_max_us={} tiles_reused=0 bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells=0 inst_edges=0 frame_rects=0 rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints=0 label_pixel_paints=0 rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes=0 passes={} passes_skipped={} pass_bytes_max={} frame_passes={} unique_pages={} frame_raster_us={} composite_us={} scene_reuses={} raster_wall_us={} pass_workers={} batches={} batch_bytes_max={} streamed_passes={} slices={} wide_washes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={}",
             command.generation,
             command.out,
             if command.raw_frame { "raw" } else { "png" },
@@ -1679,6 +1679,14 @@ fn run_deck_render(
             report.streamed_passes,
             report.slices,
             report.wide_washes,
+            report.culls.pages_size,
+            report.culls.page_bvh,
+            report.culls.child_bvh,
+            report.culls.children_size,
+            report.culls.layer,
+            report.culls.washed,
+            report.culls.lod_swapped,
+            report.culls.thin_frames,
         ),
     );
     Ok(())
@@ -2003,7 +2011,7 @@ fn run_render(
         respond(
             responses,
             format!(
-                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={}",
+                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={}",
                 command.generation,
                 round_index + 1,
                 final_round as u8,
@@ -2070,6 +2078,14 @@ fn run_render(
                 pixels.hier_cells_visited,
                 pixels.subtrees_pruned,
                 retained_bytes(&state.retained),
+                planned.summary.culls.pages_size,
+                planned.summary.culls.page_bvh,
+                planned.summary.culls.child_bvh,
+                planned.summary.culls.children_size,
+                planned.summary.culls.layer,
+                planned.summary.culls.washed,
+                planned.summary.culls.lod_swapped,
+                planned.summary.culls.thin_frames,
             ),
         );
         // Cost-aware refinement (F2R-09 REOPEN, §3.15): every round

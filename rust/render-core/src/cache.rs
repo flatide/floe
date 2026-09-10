@@ -45,6 +45,50 @@ pub struct PlanSummary {
     pub wc_variants: u64,
     pub inst_edges: u64,
     pub frame_rects: u64,
+    pub culls: PlanCullCounts,
+}
+
+/// What the planner dropped or degraded for one plan (field diagnosis
+/// 2026-09-10: the viewer's perf line shows where a vanished region
+/// went): pages culled by size / hairline, page-BVH nodes culled,
+/// child-BVH nodes pruned, child placements omitted or folded by size,
+/// placements skipped by layer, pages washed, LOD swaps, thin frames.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PlanCullCounts {
+    pub pages_size: u64,
+    pub page_bvh: u64,
+    pub child_bvh: u64,
+    pub children_size: u64,
+    pub layer: u64,
+    pub washed: u64,
+    pub lod_swapped: u64,
+    pub thin_frames: u64,
+}
+
+impl PlanCullCounts {
+    pub fn from_stats(st: &floe_vfs::hier::HierStats) -> Self {
+        PlanCullCounts {
+            pages_size: st.cull_page_size,
+            page_bvh: st.culled_page_bvh_cut,
+            child_bvh: st.culled_bvh_size,
+            children_size: st.cull_size,
+            layer: st.cull_layer,
+            washed: st.washed_pages,
+            lod_swapped: st.lod_swapped,
+            thin_frames: st.thin_frames,
+        }
+    }
+
+    pub fn add(&mut self, other: &PlanCullCounts) {
+        self.pages_size = self.pages_size.saturating_add(other.pages_size);
+        self.page_bvh = self.page_bvh.saturating_add(other.page_bvh);
+        self.child_bvh = self.child_bvh.saturating_add(other.child_bvh);
+        self.children_size = self.children_size.saturating_add(other.children_size);
+        self.layer = self.layer.saturating_add(other.layer);
+        self.washed = self.washed.saturating_add(other.washed);
+        self.lod_swapped = self.lod_swapped.saturating_add(other.lod_swapped);
+        self.thin_frames = self.thin_frames.saturating_add(other.thin_frames);
+    }
 }
 
 pub struct PlannedView {
@@ -272,6 +316,7 @@ impl Cache {
             wc_variants: plan.stats.wc_variants,
             inst_edges: plan.stats.inst_edges,
             frame_rects: plan.stats.frame_rects,
+            culls: PlanCullCounts::from_stats(&plan.stats),
             ..PlanSummary::default()
         };
         for &page_id in &plan.pages {
