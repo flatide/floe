@@ -235,6 +235,27 @@ class SourceCatalog:
             self.probe(tc)
         return self.infos
 
+    def header_dbu(self, tc: str):
+        """The dbu of a source from its header alone - no cache-state
+        lookup, nothing registered in `infos` (review 2026-09-10 (9th)
+        P2-3: a partial load keeps the whole deck's grid contract, so
+        it needs every source's dbu, but only the loaded levels'
+        sources are probed in full). None when the source is missing,
+        unreadable, or not plain OASIS (what `ok()` would refuse)."""
+        if tc in self.infos:
+            info = self.infos[tc]
+            return info.dbu if info.ok() else None
+        path = self.resolve(tc)
+        if not os.path.isfile(path):
+            return None
+        try:
+            fmt, dbu, _version, gz = file_header(path)
+        except Exception:
+            return None
+        if fmt != FORMAT_OASIS or gz:
+            return None
+        return dbu
+
     def dbus(self) -> dict:
         return {tc: i.dbu for tc, i in self.infos.items() if i.ok()}
 

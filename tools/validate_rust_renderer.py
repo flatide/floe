@@ -1463,6 +1463,43 @@ class IndexOnOpenTests(unittest.TestCase):
         Viewer._open_or_index(v, "/x/deck.jb")
         self.assertEqual([c[0] for c in calls], ["status", "keys"])
         self.assertIn("cancelled", calls[0][1])
+        # review 2026-09-10 (9th) P2-1: an answered "every level"
+        # (ask_levels=False, ids None) is final - not asked again, not
+        # replaced by the environment's list
+        v, calls = self._shell(ready=True)
+        os.environ["FLOE_JOBDECK_LEVELS"] = "3"
+        try:
+            Viewer._open_or_index(v, "/x/deck.jb", ids=None,
+                                  ask_levels=False)
+        finally:
+            del os.environ["FLOE_JOBDECK_LEVELS"]
+        self.assertEqual(calls[0], ("open", "/x/deck.jb", None))
+        self.assertNotIn("levels", [c[0] for c in calls])
+
+    def test_reselecting_every_level_is_final(self):
+        """Jobdeck > select levels to load…: the dialog's answer goes
+        to the open as is - None (all levels) included - and the same
+        selection again does nothing (review 2026-09-10 (9th) P2-1)."""
+        from floe.gui import Viewer
+        import types
+        calls = []
+        v = Viewer.__new__(Viewer)
+        v.cache = types.SimpleNamespace(is_jobdeck=True, ids=[3],
+                                        src="/x/deck.jb")
+        v.cx, v.cy, v.spp = 1.0, 2.0, 3.0
+        v._restore_keys = lambda: calls.append(("keys",))
+        v._set_live_status = lambda msg: calls.append(("status", msg))
+        v._open_or_index = lambda path, fields=(), then=None, ids=None, \
+            ask_levels=True: calls.append(("open", path, ids, ask_levels))
+        v._jobdeck_pick_levels = lambda path, current=None, force=False: (
+            calls.append(("pick", current, force)), None)[1]
+        Viewer._jobdeck_reselect_levels(v)
+        self.assertEqual(calls, [("pick", [3], True),
+                                 ("open", "/x/deck.jb", None, False)])
+        calls.clear()
+        v._jobdeck_pick_levels = lambda path, current=None, force=False: [3]
+        Viewer._jobdeck_reselect_levels(v)
+        self.assertEqual(calls, [("keys",)], "the same selection: no reload")
 
     def test_missing_index_asks_then_indexes_then_opens(self):
         from floe.gui import Viewer

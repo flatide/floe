@@ -69,6 +69,24 @@ def level_rows(deck):
     return rows
 
 
+def level_row_text(row, keep: int = 3):
+    """(summary, full) for one level row of the load dialog: the
+    summary names at most `keep` sources and counts the rest (review
+    2026-09-10 (9th) P2-2: 250 file names in one label made the dialog
+    26,000 px wide); `full` lists them all for the tooltip."""
+    names = [os.path.basename(s) for s in row["sources"]]
+    shown = ", ".join(names[:keep])
+    if len(names) > keep:
+        shown += ", +%d more" % (len(names) - keep)
+    summary = "%d CHIP%s · %d instance%s · %d source%s: %s" % (
+        len(row["chips"]), "" if len(row["chips"]) == 1 else "s",
+        row["instances"], "" if row["instances"] == 1 else "s",
+        len(names), "" if len(names) == 1 else "s", shown)
+    full = "CHIPs: %s\nsources:\n  %s" % (
+        ", ".join(row["chips"]), "\n  ".join(names))
+    return summary, full
+
+
 def deck_ready(path, sources_dir=None, ids=None) -> bool:
     """True when every source the deck names that CAN be drawn (probes
     ok) has a fresh <src>.floe cache - the deck's equivalent of
@@ -141,7 +159,7 @@ class DeckCache:
                         ",".join(str(i) for i in have)))
         (self.deck, self.catalog, self.placements, self.stats,
          self.scheme, self.colormap) = plan_deck(
-            self.src, sources_dir=self.sources_dir, ids=self.ids,
+            self.src, sources_dir=self.sources_dir, load_ids=self.ids,
             mode=self.mode, missing=MISSING_SKIP)
         spec = os.path.join(self.work, "deck-%s.spec" % self.mode)
         self.ledger = write_deck_spec(

@@ -187,6 +187,12 @@ def plan(deck, source_dbu: dict, safety: int = 2, cross: bool = True,
     skipped = []
     deck_issues = []
     seen_skip = set()
+    # review 2026-09-10 (9th) P2-3: the whole deck still decides the
+    # grid (its extent and every source dbu), but only the SELECTED
+    # entries materialize placements - the rest contribute their
+    # extent and their count and nothing else
+    extent = None
+    total = 0
     for c in deck.chips:
         for row, (jy, jx) in enumerate(c.rows):
             for e in c.entries:
@@ -215,19 +221,18 @@ def plan(deck, source_dbu: dict, safety: int = 2, cross: bool = True,
                 mag, dx, dy = e.placement(jy, jx, sdbu)
                 bbox = (dx + mag * e.bx, dy + mag * e.by,
                         dx + mag * e.ux, dy + mag * e.uy)
-                for (l, d) in entry_pairs(e, cross):
+                reach = max(abs(v) for v in bbox + (dx, dy))
+                extent = reach if extent is None else max(extent, reach)
+                pairs = entry_pairs(e, cross)
+                total += len(pairs)
+                if want is not None and e.idx not in want:
+                    continue
+                for (l, d) in pairs:
                     raw.append((c.id, e.idx, row, e.tc, l, d, mag, dx, dy,
                                 bbox, jx, jy))
 
-    extent = max([abs(v) for r in raw for v in r[9]]
-                 + [abs(r[7]) for r in raw] + [abs(r[8]) for r in raw]) \
-        if raw else None
     ads = [e.ad for c in deck.chips for e in c.entries]
     dbu, why = choose_dbu(source_dbu.values(), ads, extent, safety)
-
-    total = len(raw)
-    if want is not None:
-        raw = [r for r in raw if r[1] in want]
 
     placements = []
     for (cid, idx, row, tc, l, d, mag, dx, dy, bbox, jx, jy) in raw:

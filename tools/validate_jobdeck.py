@@ -1238,6 +1238,49 @@ class LevelSelectTests(unittest.TestCase):
             DeckCache(str(CLI / "test.jb"), ids=[4, 9]).load()
         self.assertIn("levels 4,9 not in the deck", str(cm.exception))
 
+    def test_load_selection_moves_no_colour_in_any_view(self):
+        # review 2026-09-10 (9th) P2-4: the chip view spliced the loaded
+        # level into the colour order (ID001 yellow with every level,
+        # blue with level 3 alone); a LOAD selection keeps the full
+        # deck's colours in every view - the analysis CLI's --level
+        # (floe2 jobdeck) keeps its splice rule (CliTests)
+        from floe.jobdeck.viewer import DeckCache
+        for mode in ("level", "chip", "layer"):
+            full = DeckCache(str(CLI / "test.jb"), mode=mode)
+            full.load()
+            self.addCleanup(full.close)
+            part = DeckCache(str(CLI / "test.jb"), ids=[3], mode=mode)
+            part.load()
+            self.addCleanup(part.close)
+            colour = {(l["layer"], l["datatype"]): l["color"]
+                      for l in full.meta["layers"]}
+            self.assertTrue(part.meta["layers"], mode)
+            for l in part.meta["layers"]:
+                self.assertEqual(l["color"], colour[(l["layer"],
+                                                     l["datatype"])],
+                                 "%s view %s" % (mode, l["name"]))
+            if mode == "chip":
+                self.assertEqual([l["name"] for l in part.meta["layers"]],
+                                 ["CHIP ID001", "$3 ALIGN",
+                                  "CHIP ID003", "$3 ALIGN"])
+
+    def test_load_dialog_rows_are_bounded(self):
+        # review 2026-09-10 (9th) P2-2: 250 source names in one label
+        # made the dialog 26,000 px wide
+        from floe.jobdeck.viewer import level_row_text
+        row = {"level": 7, "name": "M7", "chips": ["A", "B"],
+               "instances": 12,
+               "sources": ["/d/src%03d.oas" % i for i in range(250)]}
+        summary, full = level_row_text(row)
+        self.assertLess(len(summary), 120)
+        self.assertIn("250 sources: src000.oas, src001.oas, src002.oas, "
+                      "+247 more", summary)
+        self.assertEqual(full.count(".oas"), 250)
+        summary, full = level_row_text({"level": 1, "name": "", "chips": ["A"],
+                                        "instances": 1,
+                                        "sources": ["mark.oas"]})
+        self.assertEqual(summary, "1 CHIP · 1 instance · 1 source: mark.oas")
+
     def test_selected_levels_index_and_open_their_sources_only(self):
         from floe.jobdeck.viewer import DeckCache, deck_ready
         fresh = CLI / "levels"
@@ -1266,6 +1309,16 @@ class LevelSelectTests(unittest.TestCase):
         self.addCleanup(c.close)
         self.assertEqual(c.skipped, [])
         self.assertEqual([l["layer"] for l in c.meta["layers"]], [3])
+        # review 2026-09-10 (9th) P2-3: only the loaded level's source
+        # is probed in full (cache state); the others lend their dbu
+        # from the header alone, so the grid is the whole deck's and
+        # every placement is still counted - but only the loaded ones
+        # are built
+        self.assertEqual(sorted(c.catalog.infos), ["mark.oas"])
+        self.assertEqual(c.stats["instances_total"], 17)
+        self.assertEqual(c.stats["instances"], 3)
+        self.assertEqual(c.stats["dbu"], 2.5e-05, "the full deck's grid "
+                         "(chipA/chipB's 5e-5 um dbu still counts)")
 
     def test_cli_level_option_on_info_and_render(self):
         res = run_floe2("info", CLI / "test.jb", "--level", "5",

@@ -21,27 +21,48 @@ from .sources import SourceCatalog
 def plan_deck(deck_path: str, sources_dir=None, ids=None,
               mode: str = MODE_IDENTIFIER, missing: str = MISSING_RAISE,
               scheme: ColorScheme | None = None, cross: bool = True,
-              safety: int = 2, strict: bool = True):
+              safety: int = 2, strict: bool = True, load_ids=None):
     """Parse, probe, place and colour one deck.
 
     Returns (deck, catalog, placements, stats, scheme, colormap).
     `sources_dir` defaults to the deck's directory (TC paths are
-    relative to it). `ids` restricts the placements; the grid and the
-    colours of identifier/layer mode never move with the selection.
+    relative to it). `ids` is the ANALYSIS selection (`floe2 jobdeck
+    --level`): it restricts the placements and, in chip mode, splices
+    the selected levels into the colour order (section 2). `load_ids`
+    is the LOAD selection (the viewer, `floe2 view/index/render
+    --level`): it restricts the placements, the rows and the sources
+    probed in full, and moves NO colour - review 2026-09-10 (9th)
+    P2-4: a CHIP loaded with one level kept its full-deck colour
+    only in the level view. The grid never moves with either: the
+    whole deck's extent and every source's dbu (header only for the
+    sources a load selection leaves out) decide it.
     """
     mode = normalize_mode(mode)
     deck = parse_jobdeck(deck_path, strict=strict)
     if sources_dir is None:
         sources_dir = os.path.dirname(os.path.abspath(deck_path)) or "."
     catalog = SourceCatalog(sources_dir)
-    catalog.probe_all(deck.sources())
+    if load_ids is not None:
+        load_ids = sorted({int(i) for i in load_ids}) or None
+    catalog.probe_all(deck.sources(load_ids))
+    dbus = dict(catalog.dbus())
+    if load_ids is not None:
+        # the grid contract: every source's dbu, from the header alone
+        # for the sources the load leaves out (no cache-state lookup,
+        # not registered as probed)
+        for tc in deck.sources():
+            if tc not in catalog.infos:
+                dbu = catalog.header_dbu(tc)
+                if dbu:
+                    dbus[tc] = dbu
     if scheme is None:
         scheme = ColorScheme(mode=mode, cross_ly_dt=cross)
     else:
         scheme.mode = mode
     by_chip = scheme.mode == "chip"
-    placements, stats = plan(deck, catalog.dbus(), safety=safety,
-                             cross=scheme.cross_ly_dt, ids=ids,
+    placements, stats = plan(deck, dbus, safety=safety,
+                             cross=scheme.cross_ly_dt,
+                             ids=load_ids if load_ids is not None else ids,
                              missing=missing, by_chip=by_chip,
                              bad=catalog.bad())
     colormap = scheme.build(deck, ids)

@@ -247,9 +247,12 @@ floe2 jobdeck deck.jb [--report r.json] [--spec s.spec]   # 분석·보고만
   1,3`은 묻지 않고 그 level로 열고, 스크립트·gate는 `FLOE_JOBDECK_LEVELS=all|
   N[,N...]`로 답한다(기본 `ask`; level이 하나뿐인 덱은 묻지 않음). 선택은
   `DeckCache(ids=…)`로 들어가 뷰 레이어 표(level/chip/source layer view 모두)와
-  스펙이 그 level만 담고, 색은 전체 덱 기준으로 고정된다(선택이 색을 옮기지
-  않음). 인덱싱도 그 level의 소스만(`floe2 index deck.jb --level 1,3`), 준비
-  판정(`deck_ready(ids=)`)도 같다. 창 제목 `· levels 1,3 of 4`. Jobdeck 메뉴
+  스펙이 그 level만 담고, 색은 세 뷰 모두 전체 덱 기준으로 고정된다(로드
+  선택이 색을 옮기지 않음 — `plan_deck(load_ids=)`; 분석 CLI의 `--level`
+  splice 규칙과 별개). 인덱싱도 그 level의 소스만(`floe2 index deck.jb --level
+  1,3`), 준비 판정(`deck_ready(ids=)`)도 같다. 준비 단계도 로드한 level의
+  소스만 전체 probe하고, 나머지 소스는 그리드 계약을 위해 헤더의 dbu만 읽으며
+  선택 밖 배치는 세기만 하고 만들지 않는다(9차 리뷰). 창 제목 `· levels 1,3 of 4`. Jobdeck 메뉴
   **select levels to load…**로 열린 덱의 선택을 바꾸면(필요한 소스는 인덱싱 후)
   뷰를 유지한 채 다시 연다. CLI `--level`은 index/info/render/view에 있다
   (`render`의 보고서 `jobdeck.levels`). gate `LevelSelectTests`,
@@ -413,8 +416,17 @@ INCOMPLETE)로 보고하며 덱은 열린다. 인덱싱이 일부 실패해도 �
 | P2-1 | 스트리밍에서 `decode_pages` 제한으로 빠진 페이지가 정상 완료로 보고됨(4페이지 플랜, `decode_pages=2` → 2페이지만 그리고 `partial=0 deferred=0`, 전체 렌더와 15,984 px 차이). 기본 GUI 요청(제한 없음)에는 없음 | 사실 | 선택 단계에서 제외된 페이지 수를 **두 경로에 공통으로** `deferred`에 더하고 `partial`을 세운다(whole-scene 경로는 scene의 deferred로 partial만 잡고 수는 세지 않았고, 스트리밍 경로는 슬라이스 scene이 구조상 partial이라 아무것도 보고하지 않았다). gate `ReviewFixTests8.test_p2_1`: dense.jb 1 MiB·`decode_pages=2`(render 명령에 삽입)에서 `over_budget_pages`>0·전체 렌더와 다름, 제한 없으면 0·동일 |
 | P2-2 | 스트리밍 경로의 `raster_wall_us`에 계층 프레임 raster 시간이 빠짐(직렬 구간) | 사실 | `stream_pass`의 프레임 raster도 벽시계에 더한다. gate `StreamTests` depth 1 케이스(dense.oas D0에 손자 셀 K 추가: D 페이지는 스트리밍, K는 프레임): `frame_passes` 1·스트리밍 1·픽셀 동일; 리뷰 보완(비차단)으로 직렬 fixture의 모든 케이스에서 `raster_wall_us` ≥ `raster_us`(geometry 슬라이스 + 프레임 합, deck 카운터에 노출)를 검사한다 — wall ≥ frame만으로는 이전 버그(11.97 < 13.84 ms)도 통과했다 |
 
-
+실덱 계측을 읽을 때: 실제 raster 시간은 `raster wall`, 합계 `draw/raster ms`는
 패스 수만큼 부풀어 있다.
+
+### 9차 (4건, 레벨 선택 로드 리뷰 2026-09-10)
+
+| # | 지적 | 판정 | 조치 |
+|---|---|---|---|
+| P2-1 | 전체 level 재선택이 다시 묻거나 다른 선택이 됨: `_open_or_index(ids=None)`이 "전체"와 "아직 안 물음"을 같이 뜻해, 일부만 연 뒤 메뉴에서 전체를 고르면 ask 정책은 대화상자가 두 번, `FLOE_JOBDECK_LEVELS=3`이면 [3]만 열림 | 사실 | `ask_levels` 인자 분리: `ids`가 주어지거나 `levels=` 필드가 있거나 `ask_levels=False`면 묻지 않는다. 메뉴 재선택은 대화상자의 답(None = 전체)을 `ask_levels=False`로 넘긴다. gate `IndexOnOpenTests`(ask_levels=False·env=3에서 None 그대로 열림; `test_reselecting_every_level_is_final`) |
+| P2-2 | 소스가 많으면 대화상자가 화면보다 넓어짐(줄바꿈·말줄임 없는 Label, 250개 이름에서 26,741 px) | 사실 | `level_row_text`: 요약은 소스 이름 3개 + "+N more", 전체 목록은 툴팁; Label `ellipsize END`·`max_width_chars 56`, 대화상자 기본 폭 640. gate `test_load_dialog_rows_are_bounded` |
+| P2-3 | 부분 로드여도 준비 단계가 전체 소스·전체 배치를 처리(전체 소스의 헤더+캐시 상태 조회, 17배치 생성 후 3개로 필터) | 사실 | 그리드 계약(전체 덱의 extent와 모든 소스 dbu)은 유지하되, 로드한 level의 소스만 전체 probe(캐시 상태 포함)하고 나머지는 `header_dbu`로 헤더의 dbu만 읽는다(`infos`에 등록 안 함); `plan()`은 선택 밖 엔트리의 extent·개수만 세고 배치는 만들지 않는다. gate: level 3 로드 시 `catalog.infos`는 mark.oas뿐, `instances_total` 17·`instances` 3·dbu는 전체 덱 값 |
+| P2-4 | chip view 색이 선택에 따라 바뀜(ID001이 전체 로드에선 노랑, level 3만 로드하면 파랑): `scheme.build(deck, ids)`가 분석 CLI의 splice 규칙을 그대로 씀 | 사실 | `plan_deck(load_ids=)`를 분석 선택 `ids`와 분리: 로드 선택은 배치·행·probe 범위만 줄이고 색은 전체 덱 기준(세 뷰 모두), `floe2 jobdeck --level`의 splice 규칙은 그대로. Calibre의 실제 색 정책은 샘플 관찰 후 확정. gate `test_load_selection_moves_no_colour_in_any_view` |
 
 ## 11. 성능 분석 2026-09-09 — 판정과 계획
 

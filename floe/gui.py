@@ -2001,10 +2001,14 @@ class Viewer:
         (number, MTITLE name, CHIPs, instances, sources), all / none
         buttons, Open / Cancel. Returns the selection (None = all
         levels) or False for Cancel."""
+        from .jobdeck.viewer import level_row_text
         dlg = Gtk.Dialog(title="load jobdeck levels", transient_for=self.window,
                          modal=True)
         dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
                         "Open", Gtk.ResponseType.OK)
+        # a bounded width whatever the deck names (review 2026-09-10
+        # (9th) P2-2: 250 source names made the dialog 26,000 px wide)
+        dlg.set_default_size(640, -1)
         dlg.set_default_response(Gtk.ResponseType.OK)
         box = dlg.get_content_area()
         box.set_spacing(6)
@@ -2023,11 +2027,12 @@ class Viewer:
             chk.set_active(want is None or row["level"] in want)
             checks.append((row["level"], chk))
             grid.attach(chk, 0, r, 1, 1)
-            info = Gtk.Label(label="%d CHIP%s · %d instance%s · %s" % (
-                len(row["chips"]), "" if len(row["chips"]) == 1 else "s",
-                row["instances"], "" if row["instances"] == 1 else "s",
-                ", ".join(os.path.basename(s) for s in row["sources"])))
+            summary, full = level_row_text(row)
+            info = Gtk.Label(label=summary)
             info.set_xalign(0.0)
+            info.set_ellipsize(Pango.EllipsizeMode.END)
+            info.set_max_width_chars(56)
+            info.set_tooltip_text(full)   # the whole source list
             info.get_style_context().add_class("dim-label")
             grid.attach(info, 1, r, 1, 1)
         scroller = Gtk.ScrolledWindow()
@@ -2071,7 +2076,8 @@ class Viewer:
             return False
         return self._ask_yes_no(question)
 
-    def _open_or_index(self, path, fields=(), then=None, ids=None):
+    def _open_or_index(self, path, fields=(), then=None, ids=None,
+                       ask_levels=True):
         """Open a layout or a jobdeck; when its index is missing ASK
         the user first (user call 2026-09-09: floe2 too), build it in
         the modal log, then open, then apply the CLI/forwarded options
@@ -2080,18 +2086,23 @@ class Viewer:
         that an in-place open would otherwise reset (review 2026-09-09
         (4th) P2-1). A jobdeck first asks which mask levels to load
         (user call 2026-09-10, Calibre-style) unless `ids` or a
-        `levels=` field (floe2 view --level) says; only those levels'
-        sources are indexed and opened. Returns False (usable from
-        GLib.idle_add)."""
+        `levels=` field (floe2 view --level) says, or `ask_levels` is
+        False (the menu's re-selection passes its answer, where None
+        means EVERY level - review 2026-09-10 (9th) P2-1: None stood for
+        "not asked yet" too, so choosing all levels asked again or fell
+        back to the environment's list); only those levels' sources are
+        indexed and opened. Returns False (usable from GLib.idle_add)."""
         path = os.path.abspath(path)
         fields = [f for f in fields if f]
-        if ids is None:
-            for f in fields:
-                if f.startswith("levels="):
-                    ids = sorted({int(t) for t in f[7:].split(",")
-                                  if t.strip()}) or None
+        if ids is not None:
+            ask_levels = False
+        for f in fields:
+            if f.startswith("levels="):
+                ids = sorted({int(t) for t in f[7:].split(",")
+                              if t.strip()}) or None
+                ask_levels = False
         fields = [f for f in fields if not f.startswith("levels=")]
-        if _is_deck_path(path) and ids is None:
+        if _is_deck_path(path) and ask_levels:
             ids = self._jobdeck_pick_levels(path)
             if ids is False:
                 self._set_live_status("jobdeck load cancelled")
@@ -4986,7 +4997,9 @@ class Viewer:
             self.cx, self.cy, self.spp = view
             self._fit_after_worker_start = False
             self.redraw(immediate=True)
-        self._open_or_index(cache.src, then=keep_view, ids=ids)
+        # the dialog's answer is final: None here means every level
+        self._open_or_index(cache.src, then=keep_view, ids=ids,
+                            ask_levels=False)
 
     def _jobdeck_mode(self):
         """The loaded jobdeck's colour mode, None for a layout."""
