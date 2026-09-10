@@ -130,6 +130,7 @@ class DeckCache:
         self.ledger = []
         self._loaded_mtime = None
         self.layout_mode = None    # KLayout worker option, unused
+        self._visibility = {}      # session only; level/chip share leaf keys
 
     # ---- Cache protocol ---------------------------------------------
     def exists(self) -> bool:
@@ -171,6 +172,11 @@ class DeckCache:
         # palette exactly as Cache.load does for a layout (review
         # 2026-09-09 P2-3: widths came back, colours did not)
         apply_personal_colors(self.meta, self.props_src)
+        if self.mode == MODE_LEVEL:
+            colors = {r["layer"]: r["color"] for r in self.meta["layers"]
+                      if r.get("jobdeck_head")}
+            for row in self.meta["layers"]:
+                row["color"] = colors[row["layer"]]
         self._loaded_mtime = int(os.stat(self.src).st_mtime)
         return self.meta
 
@@ -183,25 +189,25 @@ class DeckCache:
     @property
     def props_src(self) -> str:
         """The path layerprops are keyed by. Each view has its own key
-        space (level view n/0, chip view pos/level, source layer view
+        space (level/chip view level/source, source layer view
         LY/DT), so each view keeps its own <key>.layerprops: the level
         view's is the deck's (<deck>.jb.layerprops), the others are
-        <deck>.chip.jb / <deck>.layer.jb - a name whose <stem>.layerprops
+        <deck>.chip-by-level.jb / <deck>.layer.jb - a name whose <stem>.layerprops
         fallback cannot land on another view's file."""
         if self.mode == MODE_LEVEL:
             return self.src
         stem, ext = os.path.splitext(self.src)
-        return "%s.%s%s" % (stem, self.mode, ext)
+        # Old chip props use CHIP-position/level keys. Never silently
+        # apply them to the new level/source key space.
+        mode_key = "chip-by-level" if self.mode == "chip" else self.mode
+        return "%s.%s%s" % (stem, mode_key, ext)
 
     def resolve_layers(self, spec):
-        """'$1 METAL1,CHIP ID001,2/0' -> [(layer, datatype), ...]; None
-        = all. Like Cache.resolve_layers a name selects EVERY row that
-        carries it (chip view: "$1 METAL1" in every CHIP that places
-        it). Only the chip view's virtual CHIP rows are group heads and
-        expand to the level rows under them (review 2026-09-09 P2-2:
-        the head alone holds no placement and drew a black screen; 3rd
-        pass P2-2: a source-layer DT0 row is a real layer, never a
-        head)."""
+        """Names or L/D keys, with level heads expanded to their chips.
+        A source name selects all matching rows, even across levels.
+        Legacy '$n TITLE'/'$n' level selectors remain accepted; source
+        layer DT0 is a real layer, never a virtual group head.
+        """
         if not spec or spec == "all":
             return None
         rows = self.meta["layers"]
@@ -209,6 +215,12 @@ class DeckCache:
         for l in rows:
             byname.setdefault(l["name"], []).append((l["layer"],
                                                      l["datatype"]))
+            if l.get("jobdeck_head"):
+                idx = l["layer"]
+                title = self.deck.title(idx)
+                for alias in {"$%d" % idx,
+                              "$%d%s" % (idx, " " + title if title else "")}:
+                    byname.setdefault(alias, []).append((idx, 0))
         out = []
         for tok in spec.split(","):
             tok = tok.strip()
@@ -241,11 +253,30 @@ class DeckCache:
             self.work = None
 
     # ---- deck-specific --------------------------------------------------
+    def save_visibility(self, visible):
+        """Remember exact leaf choices, independent of panel mode."""
+        scope = "layer" if self.mode == "layer" else "deck"
+        self._visibility[scope] = {
+            (r["layer"], r["datatype"]):
+            (r["layer"], r["datatype"]) in visible
+            for r in self.meta["layers"]}
+
+    def restore_visibility(self, default):
+        scope = "layer" if self.mode == "layer" else "deck"
+        saved = self._visibility.get(scope, {})
+        keys = {(r["layer"], r["datatype"]) for r in self.meta["layers"]}
+        return {key for key in keys if saved.get(key, key in default)}
+
     def set_mode(self, mode: str):
         """Switch between MDPView's level view and chip view (and our
         source layer view); re-plans and rewrites the spec."""
+        previous = self.__dict__.copy()
         self.mode = normalize_mode(mode)
-        return self.load()
+        try:
+            return self.load()
+        except Exception:
+            self.__dict__.update(previous)
+            raise
 
     def set_levels(self, ids):
         """Load another level selection (None = all); re-plans and

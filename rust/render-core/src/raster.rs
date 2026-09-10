@@ -4868,6 +4868,7 @@ mod tests {
             pages: vec![0, 1],
             page_prio: vec![0, 1],
             stats: HierStats::default(),
+                    explain: Vec::new(),
         };
         let mut bounds = BTreeMap::new();
         bounds.insert(
@@ -4946,6 +4947,7 @@ mod tests {
             pages: vec![0, 1],
             page_prio: vec![0, 1],
             stats: HierStats::default(),
+                    explain: Vec::new(),
         };
         let mut bounds = BTreeMap::new();
         bounds.insert(
@@ -5010,6 +5012,7 @@ mod tests {
             pages: vec![page_id],
             page_prio: vec![0],
             stats: HierStats::default(),
+                    explain: Vec::new(),
         };
         let doc = Doc {
             unit: 1.0,
@@ -5192,6 +5195,7 @@ mod tests {
                 pages: vec![0],
                 page_prio: vec![0],
                 stats: HierStats::default(),
+                            explain: Vec::new(),
             };
             FrameScene::from_test_parts(plan, vec![decoded], BTreeMap::from([(top, bbox)])).unwrap()
         };
@@ -5295,6 +5299,7 @@ mod tests {
             pages: vec![0, 1, 2, 3],
             page_prio: vec![0, 1, 2, 3],
             stats: HierStats::default(),
+                    explain: Vec::new(),
         };
         let page_b = if corrupt_b {
             let doc = Doc {
@@ -5433,6 +5438,7 @@ mod tests {
             pages: vec![0],
             page_prio: vec![0],
             stats: HierStats::default(),
+                    explain: Vec::new(),
         };
         FrameScene::from_test_parts(plan, vec![decoded], BTreeMap::from([(top, bbox)])).unwrap()
     }
@@ -5804,6 +5810,7 @@ mod tests {
                 pages: vec![0],
                 page_prio: vec![0],
                 stats: HierStats::default(),
+                            explain: Vec::new(),
             };
             FrameScene::from_test_parts(
                 plan,
@@ -5915,6 +5922,7 @@ mod tests {
                 pages: vec![0],
                 page_prio: vec![0],
                 stats: HierStats::default(),
+                            explain: Vec::new(),
             };
             FrameScene::from_test_parts(
                 plan,
@@ -6027,6 +6035,7 @@ mod tests {
                 pages: vec![0, 1],
                 page_prio: vec![0, 0],
                 stats: HierStats::default(),
+                            explain: Vec::new(),
             };
             FrameScene::from_test_parts(
                 plan,
@@ -6141,6 +6150,7 @@ mod tests {
                 pages: vec![0],
                 page_prio: vec![0],
                 stats: HierStats::default(),
+                            explain: Vec::new(),
             };
             FrameScene::from_test_parts(
                 plan,
@@ -6227,6 +6237,7 @@ mod tests {
                 pages: vec![0, 1],
                 page_prio: vec![0, 0],
                 stats: HierStats::default(),
+                            explain: Vec::new(),
             };
             FrameScene::from_test_parts(
                 plan,
@@ -6441,6 +6452,7 @@ mod tests {
                 pages: vec![0],
                 page_prio: vec![0],
                 stats: HierStats::default(),
+                            explain: Vec::new(),
             };
             let span = BBox {
                 x0: 0,
@@ -6520,6 +6532,7 @@ mod tests {
             pages: vec![0],
             page_prio: vec![0],
             stats: HierStats::default(),
+                    explain: Vec::new(),
         };
         let bounds = BTreeMap::from([(top, unit), (child, unit)]);
         let scene =
@@ -6933,6 +6946,7 @@ mod tests {
             pages: vec![0],
             page_prio: vec![0],
             stats: HierStats::default(),
+                    explain: Vec::new(),
         };
         let decoded_doc = Doc {
             unit: 1000.0,

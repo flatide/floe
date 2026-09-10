@@ -248,6 +248,27 @@ JSON 출력: pages/bytes/records/members + 플래너 stats 전체
 (frame_rects, culled_*, lod_pages, washed_pages, culled_bvh_size,
 thin_frames, plan_ms …). 실칩 병목 확정용(“플랜 vs 파스 vs 드로우”).
 
+`--explain 1`(현장 진단 2026-09-10: 특정 줌부터 사라지는 영역이 **어느 규칙에**
+잘렸는지 확정): JSON 뒤에 뷰 안에서 내린 판정을 한 줄씩 TSV로 찍는다.
+
+```
+explain  header  cut_px=3  cut_um=30.0000  hair_um=15.0000  px_per_um=0.1  rows=N
+explain  <kind>  <verdict>  <cell>  <layer L/D | ->  <id>  <bbox um x0,y0,x1,y1>  <w um>  <h um>  <min um>  <members>
+```
+- kind/verdict: `top` keep|cull_size · `page` exact|lod|wash|cull_size|cull_hair ·
+  `pbvh` cull_size(페이지 BVH 노드째) · `cbvh` prune_size(자식 BVH 노드째, w/h =
+  max_dim, min = max_min) · `child` expand|omit_size|omit_hair(full depth 생략)|
+  fold_size(유한 깊이 폴드)|cull_layer · `frame`(r==0) keep|thin_lattice|cull_size|
+  cull_hair.
+- 페이지의 w/h/min은 색인 필드 max_w/max_h/max_min, bbox는 셀 로컬 dbu를 µm로;
+  배치는 첫 멤버의 월드 박스, members는 반복 멤버 수. 뷰 박스와 겹치는 것만
+  기록되므로 fit 뷰에서도 수천 줄 규모다.
+- 읽는 법: `cull_size`는 w,h 모두 cut_um 미만, `cull_hair`는 min이 hair_um 미만
+  (긴 변은 커도 잘림), `omit_size`/`prune_size`는 자식 셀 박스가 cut 미만이라
+  그 아래 페이지를 보지도 않은 경우다. 실칩에서는 사라지는 뷰의 `--view`·
+  `--px-per-um`(창 px / 뷰 µm)·detail의 `--cut-px`(low/medium/high = 5/3/1)로 한
+  번, 보이는 뷰로 한 번 찍어 같은 셀·레이어의 판정을 비교한다.
+
 ## 7. 알려진 미결
 
 - 파스·rbbox 직렬(수용), split 재귀 병렬화(#60 2-B: PtsArena order

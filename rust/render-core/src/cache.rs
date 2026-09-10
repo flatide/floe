@@ -323,6 +323,7 @@ impl Cache {
                 pages: Vec::new(),
                 page_prio: Vec::new(),
                 stats: Default::default(),
+                            explain: Vec::new(),
             },
             summary: PlanSummary::default(),
             stats: RenderStats::default(),

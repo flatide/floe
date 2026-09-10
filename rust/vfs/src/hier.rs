@@ -120,6 +120,33 @@ pub struct HierOpts {
     /// box on the owning cell's visible layers. Bounds the wide-view
     /// walk the rev 43 prune exists for (184M placements).
     pub sub_cut_walk_budget: u64,
+    /// Field diagnosis (2026-09-10): record one ExplainRow per page,
+    /// page-BVH node, child placement / child-BVH node and frame the
+    /// walk judged INSIDE the view - kept, culled by size, hairline,
+    /// washed, LOD-swapped, folded, omitted - so a vanished region
+    /// can be traced to the rule that dropped it. Off by default
+    /// (`floe-index plan --explain 1`).
+    pub explain: bool,
+}
+
+/// One verdict of the walk (HierOpts::explain): what was judged
+/// (`kind`: top / page / pbvh / cbvh / child / frame), the verdict,
+/// the owning cell, the layer for pages, the record id (page id, BVH
+/// node, placement index), the box in cell-local dbu, its size
+/// metrics (page max_w / max_h / max_min, a box's w / h / min side)
+/// and the member count for pages.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExplainRow {
+    pub kind: &'static str,
+    pub verdict: &'static str,
+    pub cell: u32,
+    pub layer_idx: Option<u32>,
+    pub id: u64,
+    pub bbox: BBox,
+    pub w: u64,
+    pub h: u64,
+    pub min: u64,
+    pub members: u64,
 }
 
 impl Default for HierOpts {
@@ -135,6 +162,7 @@ impl Default for HierOpts {
             thin_lattice_um: 7.0,
             thin_demote_px: 14.0,
             sub_cut_walk_budget: 200_000,
+            explain: false,
         }
     }
 }
@@ -227,6 +255,8 @@ pub struct HierPlan {
     /// orders "center first" correctly under placement/rotation.
     pub page_prio: Vec<u64>,
     pub stats: HierStats,
+    /// HierOpts::explain rows (empty otherwise).
+    pub explain: Vec<ExplainRow>,
 }
 
 // ------------------------------------------------- K-box localview
@@ -480,6 +510,8 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
         px_per_dbu: req.px_per_dbu,
         lod_k: opts.lod_k,
         wash_px: opts.wash_px,
+        explain: Vec::new(),
+        explain_on: opts.explain,
         sub_cut_wash: req.sub_cut_wash && req.cut_dbu > 0,
         wash_walk_budget: opts.sub_cut_walk_budget,
         wash_nodes: HashSet::new(),
@@ -504,6 +536,11 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
         let tc = v.cell(top_ci);
         let w = (tc.rbbox.x1 - tc.rbbox.x0).max(0) as u64;
         let hh = (tc.rbbox.y1 - tc.rbbox.y0).max(0) as u64;
+        if h.explain_on {
+            let sub_cut = r0 == REM_FULL && !h.sub_cut_wash && w < h.cut && hh < h.cut;
+            let rb = tc.rbbox;
+            h.note("top", if sub_cut { "cull_size" } else { "keep" }, top_ci, None, 0, rb, w, hh, w.min(hh), 0);
+        }
         // A finite, non-folded depth has a structural frontier even
         // when no design layer is selected. Full depth (including a
         // finite depth folded past the cell height) remains geometry-only.
@@ -539,6 +576,7 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
         pages,
         page_prio,
         stats: st,
+        explain: std::mem::take(&mut h.explain),
     }
 }
 
@@ -751,6 +789,9 @@ struct Hier<'a> {
     /// one lattice pitch is under thin_demote_px on screen: keep a
     /// single representative per bin instead of the interval bounds
     thin_demote: bool,
+    /// HierOpts::explain: the rows, and whether to record them
+    explain: Vec<ExplainRow>,
+    explain_on: bool,
     /// ViewReq::sub_cut_wash and its remaining walk budget
     sub_cut_wash: bool,
     wash_walk_budget: u64,
@@ -826,9 +867,16 @@ impl<'a> Hier<'a> {
                         || p.max_min < self.hair
                     {
                         self.st.cull_page_size += 1;
-                        if self.sub_cut_wash
-                            && boxes.iter().any(|b| p.bbox.intersects(b))
-                        {
+                        let in_view = boxes.iter().any(|b| p.bbox.intersects(b));
+                        if in_view {
+                            let verdict = if p.max_w < self.cut && p.max_h < self.cut {
+                                "cull_size"
+                            } else {
+                                "cull_hair"
+                            };
+                            self.note_page(verdict, ci, &p, pi);
+                        }
+                        if self.sub_cut_wash && in_view {
                             wc.washes.push((p.layer_idx, p.bbox));
                             self.st.sub_cut_washes += 1;
                         }
@@ -844,6 +892,7 @@ impl<'a> Hier<'a> {
                         pr.pbvh_root,
                         b,
                         &mut psel,
+                        ci,
                         pr.layer_idx,
                         &mut wc.washes,
                     );
@@ -879,6 +928,7 @@ impl<'a> Hier<'a> {
                 if pw <= self.wash_px && ph <= self.wash_px {
                     wc.washes.push((p.layer_idx, p.bbox));
                     self.st.washed_pages += 1;
+                    self.note_page("wash", ci, &p, pi);
                     continue;
                 }
             }
@@ -914,6 +964,7 @@ impl<'a> Hier<'a> {
                     self.st.lod_swapped += 1;
                 }
             }
+            self.note_page(if eff == pi { "exact" } else { "lod" }, ci, &p, pi);
             sel.insert(eff);
         }
         for &pi in &sel {
@@ -971,6 +1022,11 @@ impl<'a> Hier<'a> {
                         || (node.max_min as u64) < hair_prune
                     {
                         self.st.culled_bvh_size += 1;
+                        if self.explain_on && node.bbox.intersects(b) {
+                            let nb = node.bbox;
+                            let (md, mm) = (node.max_dim as u64, node.max_min as u64);
+                            self.note("cbvh", "prune_size", ci, None, ni as u64, nb, md, md, mm, node.count as u64);
+                        }
                         if !self.sub_cut_wash || !node.bbox.intersects(b) {
                             continue;
                         }
@@ -1070,6 +1126,7 @@ impl<'a> Hier<'a> {
                                 // rule.
                                 self.st.cull_size += 1;
                                 framed.insert(pli);
+                                self.note_child("fold_size", pli, &h, &rb, &boxes);
                                 if self.sub_cut_wash {
                                     self.wash_sub_cut_child(
                                         &mut wc, pli, &h, &rb, &boxes,
@@ -1096,8 +1153,10 @@ impl<'a> Hier<'a> {
                                 // survive to depth 2, field
                                 // decision).
                                 edges.insert(pli);
+                                self.note_child("expand", pli, &h, &rb, &boxes);
                             } else {
                                 self.st.cull_layer += 1;
+                                self.note_child("cull_layer", pli, &h, &rb, &boxes);
                             }
                             continue;
                         }
@@ -1108,6 +1167,7 @@ impl<'a> Hier<'a> {
                             &self.req.vis,
                         ) {
                             self.st.cull_layer += 1;
+                            self.note_child("cull_layer", pli, &h, &rb, &boxes);
                             continue;
                         }
                         // A size cut is a detail omission, not a
@@ -1122,6 +1182,10 @@ impl<'a> Hier<'a> {
                             || cw.min(chh) < self.hair
                         {
                             self.st.cull_size += 1;
+                            self.note_child(
+                                if cw < cut && chh < cut { "omit_size" } else { "omit_hair" },
+                                pli, &h, &rb, &boxes,
+                            );
                             if self.sub_cut_wash {
                                 self.wash_sub_cut_child(
                                     &mut wc, pli, &h, &rb, &boxes,
@@ -1129,6 +1193,7 @@ impl<'a> Hier<'a> {
                             }
                             continue;
                         }
+                        self.note_child("expand", pli, &h, &rb, &boxes);
                         edges.insert(pli);
                     }
                 }
@@ -1189,11 +1254,77 @@ impl<'a> Hier<'a> {
         }
     }
 
+    /// One explain row (HierOpts::explain); a no-op otherwise.
+    #[allow(clippy::too_many_arguments)]
+    fn note(
+        &mut self,
+        kind: &'static str,
+        verdict: &'static str,
+        cell: u32,
+        layer_idx: Option<u32>,
+        id: u64,
+        bbox: BBox,
+        w: u64,
+        h: u64,
+        min: u64,
+        members: u64,
+    ) {
+        if self.explain_on {
+            self.explain.push(ExplainRow {
+                kind,
+                verdict,
+                cell,
+                layer_idx,
+                id,
+                bbox,
+                w,
+                h,
+                min,
+                members,
+            });
+        }
+    }
+
+    fn note_page(&mut self, verdict: &'static str, cell: u32, p: &floe_ovm::PageV, pi: u32) {
+        if self.explain_on {
+            self.note("page", verdict, cell, Some(p.layer_idx), pi as u64, p.bbox, p.max_w, p.max_h, p.max_min, p.members);
+        }
+    }
+
+    /// A child placement's verdict, when its (first member's) box
+    /// meets a view box.
+    fn note_child(
+        &mut self,
+        verdict: &'static str,
+        pli: u64,
+        h: &floe_ovm::PlaceHead,
+        rb: &BBox,
+        boxes: &[BBox],
+    ) {
+        if !self.explain_on {
+            return;
+        }
+        let wb = xf_bbox(&Xf::place(h.x, h.y, h.rot, h.flip), rb);
+        if !boxes.iter().any(|b| wb.intersects(b)) {
+            return;
+        }
+        let cw = (rb.x1 - rb.x0).max(0) as u64;
+        let chh = (rb.y1 - rb.y0).max(0) as u64;
+        let members = match h.kind {
+            1 => h.na as u64 * h.nb as u64,
+            0 => 1,
+            _ => self.v.pts_ref(pli).map(|pr| pr.count as u64).unwrap_or(1),
+        };
+        self.note("child", verdict, h.child, None, pli, wb, cw, chh, cw.min(chh), members);
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn walk_pbvh(
         &mut self,
         root: u32,
         b: &BBox,
         psel: &mut BTreeSet<u32>,
+        cell: u32,
         layer_idx: u32,
         washes: &mut Vec<(u32, BBox)>,
     ) {
@@ -1203,6 +1334,11 @@ impl<'a> Hier<'a> {
             self.st.visited_page_bvh += 1;
             if n.max_w < self.cut && n.max_h < self.cut {
                 self.st.culled_page_bvh_cut += 1;
+                if self.explain_on && n.bbox.intersects(b) {
+                    let nb = n.bbox;
+                    let (mw, mh) = (n.max_w, n.max_h);
+                    self.note("pbvh", "cull_size", cell, Some(layer_idx), ni as u64, nb, mw, mh, mw.min(mh), n.count as u64);
+                }
                 // sub-cut wash: the pruned node's whole extent, on
                 // the range's layer (a page BVH is per (cell, layer))
                 if self.sub_cut_wash && n.bbox.intersects(b) {
@@ -1224,6 +1360,14 @@ impl<'a> Hier<'a> {
                         || p.max_min < self.hair
                     {
                         self.st.cull_page_size += 1;
+                        if p.bbox.intersects(b) {
+                            let verdict = if p.max_w < self.cut && p.max_h < self.cut {
+                                "cull_size"
+                            } else {
+                                "cull_hair"
+                            };
+                            self.note_page(verdict, cell, &p, pi);
+                        }
                         if self.sub_cut_wash && p.bbox.intersects(b) {
                             washes.push((layer_idx, p.bbox));
                             self.st.sub_cut_washes += 1;
@@ -1273,8 +1417,12 @@ impl<'a> Hier<'a> {
         // before any offset work)
         let bw = (b0.x1 - b0.x0).max(0) as u64;
         let bh = (b0.y1 - b0.y0).max(0) as u64;
+        let in_view = self.explain_on && boxes.iter().any(|b| b0.intersects(b));
         if bw < self.cut && bh < self.cut {
             self.st.cull_size += 1;
+            if in_view {
+                self.note("frame", "cull_size", h.child, None, pli, b0, bw, bh, bw.min(bh), 0);
+            }
             return;
         }
         if bw.min(bh) < self.cut {
@@ -1285,14 +1433,23 @@ impl<'a> Hier<'a> {
             // existing ladder) until BOTH sides go under the cut.
             if self.thin_dbu > 0 {
                 self.st.thin_frames += 1;
+                if in_view {
+                    self.note("frame", "thin_lattice", h.child, None, pli, b0, bw, bh, bw.min(bh), 0);
+                }
                 self.frame_thin_lattice(wc, pli, h, &b0, boxes);
                 return;
             }
             // lattice off: the rev 41 hairline cull
             if bw.min(bh) < self.hair {
                 self.st.cull_size += 1;
+                if in_view {
+                    self.note("frame", "cull_hair", h.child, None, pli, b0, bw, bh, bw.min(bh), 0);
+                }
                 return;
             }
+        }
+        if in_view {
+            self.note("frame", "keep", h.child, None, pli, b0, bw, bh, bw.min(bh), 0);
         }
         let (rect, rep, fp) = match h.kind {
             0 => (b0, Rep::One, b0),
@@ -2379,6 +2536,59 @@ mod tests {
     /// the v6 max_min field, folds and frames via the box min side.
     /// A sub-hair wire is a 1px stroke however long it is; at wide
     /// views it only builds walls the speckle cannot thin.
+    #[test]
+    fn explain_rows_name_the_rule_that_dropped_a_region() {
+        // field diagnosis 2026-09-10: which rule dropped what, in
+        // the view - a hairline page (cull_hair), a fat page kept
+        // exact, a sub-cut child cell omitted at full depth
+        let v = fixture(
+            &[
+                FCell {
+                    name: "TINY",
+                    pages: vec![(bx(0, 0, 50, 50), 50, 50)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "MIX",
+                    pages: vec![
+                        (bx(0, 0, 4000, 100), 4000, 100),
+                        (bx(0, 300, 500, 800), 500, 500),
+                    ],
+                    places: vec![],
+                },
+                FCell {
+                    name: "TOP",
+                    pages: vec![],
+                    places: vec![
+                        (0, 0, 0, 0, false, Rep::One),
+                        (1, 6000, 0, 0, false, Rep::One),
+                    ],
+                },
+            ],
+            2,
+        );
+        let view = bx(-10, -10, 11_000, 1000);
+        let mut o = HierOpts::default();
+        o.explain = true;
+        let p = plan_hier(&v, &rq(view, 300, u32::MAX), &o);
+        let name = |ci: u32| v.cell(ci).name.clone();
+        let rows: Vec<(String, &str, &str)> = p
+            .explain
+            .iter()
+            .map(|r| (name(r.cell), r.kind, r.verdict))
+            .collect();
+        assert!(rows.contains(&("MIX".to_string(), "page", "cull_hair")), "{:?}", rows);
+        assert!(rows.contains(&("MIX".to_string(), "page", "exact")), "{:?}", rows);
+        assert!(rows.contains(&("TINY".to_string(), "child", "omit_size")), "{:?}", rows);
+        assert!(rows.contains(&("MIX".to_string(), "child", "expand")), "{:?}", rows);
+        assert!(rows.iter().any(|r| r.1 == "top" && r.2 == "keep"));
+        let hair = p.explain.iter().find(|r| r.verdict == "cull_hair").unwrap();
+        assert_eq!((hair.w, hair.h, hair.min), (4000, 100, 100));
+        // off by default: no rows
+        let q = plan_hier(&v, &rq(view, 300, u32::MAX), &HierOpts::default());
+        assert!(q.explain.is_empty());
+    }
+
     #[test]
     fn hairline_min_side_cut() {
         let v = fixture(

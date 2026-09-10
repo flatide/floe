@@ -65,14 +65,47 @@ jobdeck 문법 자료로 용어의 실체를 확정했다:
 
 | MDPView | floe2 | 내용 |
 |---|---|---|
-| **Level view** | `--mode level` (구 `identifier`, 별칭 유지) / 메뉴 "level view" | mask level(`$n`, MTITLE 이름)마다 한 줄·한 색. 모든 CHIP의 해당 level 배치가 그 색으로 그려진다. 키 `n/0`. |
-| **Chip view** | `--mode chip` / 메뉴 "chip view" | CHIP 블록을 덱 순서대로 나열하고 각 CHIP은 자기가 배치하는 level들로 **펼쳐진다**: 패널의 `+CHIP ID001` 아래 `$1 METAL1`, `$2 VIA1`…. 키 `<CHIP 순번>/<level>`; CHIP 줄(`/0`)은 자체 배치 없이 그룹 머리이며 접힌 채 토글하면 하위 level이 함께 토글된다. 색은 CHIP 색. |
+| **Level view** | `--mode level` (구 `identifier`, 별칭 유지) / 메뉴 "level view" | mask level마다 한 줄·한 색. 이름은 MTITLE 그대로(`LEVEL-1` 등), 없으면 `LEVELn`. 내부의 칩별 가시성은 유지한다. |
+| **Chip view** | `--mode chip` / 메뉴 "chip view" | **레벨 → 소스 칩** 트리. `LEVEL-1` 아래 `PATTERN01.TE`처럼 TC의 파일 이름을 표시한다. 부모 키 `level/0`, 칩 키 `level/source순번`. 부모는 자체 도형 없는 그룹이며 펼침 여부와 무관하게 하위 칩 전체를 토글한다. |
 | (없음) | `--mode layer` / 메뉴 "source layer view" | 소스 LY/DT별(우리 확장, 매뉴얼 용어 아님). |
 
-chip view에서 level을 "선택"하면 그 level이 `k−1`개의 CHIP 뒤 색 슬롯을 차지한다는
-2026-09-07 실측(§2)은 CLI `floe2 jobdeck --mode chip --level k`의 색 순서에
-반영돼 있다. 뷰어에서 그 "선택"이 어떤 조작(하이라이트/펼침)인지는 매뉴얼로
-확인한 뒤 붙인다 — 현재 뷰어 chip view는 CHIP 색만 쓴다.
+### 2026-09-10 추가 관찰 및 제품 결정
+
+사용자의 Calibre 관찰: 칩뷰는 `0 JOBDECK`, 레벨 6행, 소스 칩 약 138행의
+평면 목록이었다. 레벨뷰에서 레벨을 전부 끈 뒤 칩뷰로 가면 레벨 행은 꺼져
+있지만 칩 행은 켜져 도형이 다시 나타났다. 이 평면 목록과 가시성 동작을
+그대로 복제하지 않고, **표시 명칭은 맞추되 floe의 계층형 제어를 사용**한다.
+
+- 같은 레벨에서 같은 TC의 반복 ROWS/CHIP 배치는 한 칩 행으로 묶는다.
+  같은 TC가 여러 레벨에 쓰이면 각 레벨 아래 독립 행으로 둔다. 식별은
+  정규화한 전체 TC 경로이며 basename이 같아도 경로가 다르면 합치지 않는다.
+  툴팁에 TC 경로와 관련 CHIP 식별자를 표시한다.
+- 부모 토글은 하위 전체에 적용된다. 일부만 켜져 있으면 `[partial]`을
+  표시한다. 레벨뷰↔칩뷰 전환은 정확한 칩별 가시성을 보존하므로 숨긴
+  도형이 다시 나타나지 않는다. 레벨뷰는 내부 칩 행을 패널에서 숨길 뿐,
+  렌더 선택은 동일한 leaf 키를 사용한다. source layer view는 별도 상태다.
+- 소스 순번·기본 색은 전체 덱 기준으로 고정한다. 로드 레벨을 줄여도
+  달라지지 않는다. 칩뷰 팔레트는 레벨 다음 소스 등장 순서이며, 실제
+  Calibre 색 배정과의 완전 일치는 아직 검증하지 않았다.
+- 기존 `--layers '$1 TITLE'`/`'$1'`은 별칭으로 유지한다. `level/0`은 해당
+  레벨의 칩 전체를 선택한다. 소스 이름으로 선택하면 모든 일치 행을
+  선택한다. 기존 `CHIP C01` 선택은 새 목록의 제어 단위가 아니므로 오류다.
+- 기존 칩뷰 layerprops는 다른 키 공간이므로 적용하지 않는다. 새 파일은
+  `<deck>.chip-by-level.jb.layerprops`; 옛 파일을 삭제하거나 덮어쓰지 않는다.
+  레벨뷰의 기존 부모 색·채움·선폭·숨김 설정은 하위 칩에 적용된다.
+- `0 JOBDECK` 행과 Calibre depth 대응은 이번 변경에 포함하지 않는다.
+  관찰상 TOP에서 depth 2는 박스, 3은 도형이지만 추가 관찰 후 결정한다.
+
+§2의 CHIP-block 색 splice는 기존 분석 CLI `floe2 jobdeck --mode chip --level`
+규칙으로 남으며, 뷰어의 소스 칩 트리/색 정책과 구별한다. 검증:
+`JobdeckChipHierarchyTests`(반복·경로 충돌, 그룹 토글, 부분 선택, 모드 왕복,
+동일 가시성의 렌더 픽셀 일치, 기존 레벨 속성).
+
+실제 GUI 연속 전환 검사에서 발견한 경합도 함께 차단했다. 레이어 토글의
+debounce가 모드 전환 뒤까지 남으면 새 워커의 open/style 준비 전에
+`style_epoch=0` 렌더를 보내 시작이 실패했다. 캐시 재바인딩 때 이전
+debounce를 취소하고, open 중에는 제출하지 않으며 준비 완료 콜백에서
+현재 뷰를 그린다. 실제 Viewer 왕복·가시성·뷰포트·최종 프레임 게이트를 추가했다.
 
 렌더 쪽 변화: 덱 스펙의 `layer` 줄이 `key=L/D`(뷰가 쓰는 키 쌍)를 가진다
 (`DeckLayer.layer/datatype`; 없으면 `out/0`). renderd의 `style`·`layers=`는 그
@@ -227,8 +260,9 @@ floe2 jobdeck deck.jb [--report r.json] [--spec s.spec]   # 분석·보고만
   소스들의 `<src>.floe` 전부이며 `deck_ready()`가 그 존재를 답한다.
   `service.make_render_worker`는 `is_jobdeck`을 보고 `DeckRenderWorker`를 만든다.
 - **뷰 레이어 = 색 대상**(`render.view_layers`, §1a): level view는 level당 한
-  줄(`$1 METAL1`, 키 `n/0`), chip view는 CHIP 줄(`CHIP ID001`, `pos/0`) 아래
-  그 CHIP의 level 줄들(`pos/level`), source layer view는 (LY,DT)당 한 줄. 레이어
+  줄(MTITLE 이름, 키 `n/0`), chip view는 level 줄 아래 소스 칩 줄들
+  (`level/source순번`), source layer view는 (LY,DT)당 한 줄. 두 jobdeck 뷰는
+  같은 내부 칩 행을 사용하고 level view에서만 패널의 칩 행을 숨긴다. 레이어
   패널의 토글·색 변경·layerprops 저장이 그 단위로 동작하고, 스펙의 `out`·painter
   순서도 이 표를 따른다. (M1 리포트의 `layer_table`은 분석용 (level,ly,dt)
   세분을 유지.)
@@ -544,6 +578,18 @@ budget = 패스별 디코드 보유)을 코드와 대조했다. 모두 사실이
 측정은 실덱의 같은 뷰·같은 level 조건에서 1단계 계측 값과 5차 리뷰의 `raster wall`·`pass_workers`·`batches`, 3·4단계의 `streamed/slices`·`sub-cut washes`로 한다. 3·4단계는 실측 없이 구현했으므로 실덱 확인 항목: 광역 뷰에서 wash 블록이 MDPView의 표시와 비슷한지, 스트리밍 패스의 슬라이스 수와 raster wall.
 
 ## 10. 미결·후속
+
+- **현장 2026-09-10: 특정 줌부터 사라지는 반복 도형.** 35.8 × 34.6 mm 소스에서
+  우하단 영역만 남고 연결된 동일 형태 반복이 약 229 µm 뷰부터 사라짐(덱 모드에선
+  4단계 sub-cut wash 블록으로 남음 — `FLOE_RUST_DECK_WIDE=off` 실측으로 확정).
+  우하단은 Calibre와 유사하게 동작하므로(뭉침이 빠른 건 cut 차이, Calibre는 0.5 px
+  추정) 원인 확정이 먼저다. 후보는 페이지 크기 cut(`max_w/max_h < cut`), hairline
+  (`max_min < 0.5 cut`), 자식 셀 생략/BVH 프루닝이며, 어느 것인지는 `floe-index
+  plan <src>.floe --view … --px-per-um … --cut-px … --explain 1`(SPEC-INDEXER §6)로
+  사라지는 뷰와 보이는 뷰를 각각 찍어 같은 셀·레이어의 판정을 비교해 정한다.
+  설계 논의(밀도 사다리: 크기 cut 대신 exact/LOD 점유, hairline은 전체 길이의
+  1 px 선, 자식 bbox+rep 방출; 격자 솎아내기는 프레임에만)는 판정이 나온 뒤
+  착수한다. LOD 쌍은 `floe2 index --force --lod` 재인덱싱이 필요하다(기본 끔).
 
 - **배율/임의각 PLACEMENT(OASIS 18)**: 2026-09-09 현재 실제 소스에서 아직 관측되지
   않아 보류(사용자 확인). 나타나면 계층 변환을 실수화하지 않고 **인덱싱 시

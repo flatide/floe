@@ -1169,7 +1169,6 @@ fn stream_pass(
         mono: request.mono,
     };
     let mut slice = first;
-    let mut slice_bytes = first_bytes;
     let mut rest = rest.into_iter();
     loop {
         let scene_started = std::time::Instant::now();
@@ -1202,7 +1201,7 @@ fn stream_pass(
         drop(out);
         check_generation(target.cancellation, target.generation)?;
         // the next slice
-        slice_bytes = 0;
+        let mut slice_bytes = 0u64;
         while slice_bytes < slice_limit {
             let Some(chunk) = rest.next() else { break };
             let (chunk_pages, decode_stats) = source.pages.load_cancellable(

@@ -20,7 +20,7 @@ import queue
 import tempfile
 
 from ..cache import Cache
-from .color import MODE_CHIP, MODE_IDENTIFIER, MODE_LEVEL
+from .color import MODE_CHIP, MODE_LEVEL, palette_color
 from .geom import SKIP_EMPTY_LAYER, SKIP_NOT_INDEXED, skip_record
 
 
@@ -29,24 +29,15 @@ def _hex(text: str) -> str:
 
 
 def view_layers(deck, stats, scheme, colormap):
-    """The deck layers a VIEW shows, in paint order - MDPView's two
-    jobdeck views plus our source-layer view:
+    """Render rows, with level -> source-chip groups in both deck views.
 
-        level   one row per mask level ($1 METAL1, ...), ascending;
-                keyed level/0
-        chip    the CHIP blocks in deck order, each expanding into the
-                levels it places: the CHIP row is keyed <pos>/0 and
-                holds nothing itself, its levels are <pos>/<level> in
-                the CHIP's colour - the viewer's layer panel shows
-                "+CHIP ID001" with "$1 METAL1", "$2 VIA1" underneath
-                and a collapsed CHIP toggles them all
-        layer   one row per (LY, DT) placed, keyed LY/DT (LY groups)
-
-    Rows: {"out", "key", "layer", "datatype", "name", "color"}; `out`
-    is the spec/style index, layer/datatype the key a viewer and the
-    style file use. Placements map to a row with `view_out_of`. (The
-    M1 report's `layer_table` keeps the finer (level, ly, dt) rows for
-    analysis; a viewer lists what it colours.)"""
+    Level heads (n/0) contain no geometry. Leaves (n/source ordinal)
+    are identical in level and chip view, so changing modes cannot
+    reveal a hidden chip. Level view hides the leaves in the panel
+    and gives them the level colour; chip view exposes them and uses
+    source colours. Ordinals/colours use the FULL deck, not load_ids.
+    The analysis CLI's historical CHIP-block colour scheme is separate.
+    """
     rows = []
     mode = scheme.mode
     # a level selection (loading some levels only, user call
@@ -57,36 +48,34 @@ def view_layers(deck, stats, scheme, colormap):
 
     def kept(idx):
         return sel is None or idx in sel
-    if mode == MODE_LEVEL:
-        for idx in deck.identifiers():
+    if mode in (MODE_LEVEL, MODE_CHIP):
+        sources, by_level = {}, {}
+        for c in deck.chips:
+            for e in c.entries:
+                tc = os.path.normpath(e.tc)
+                sources.setdefault(tc, len(sources) + 1)
+                chips = by_level.setdefault(e.idx, {}).setdefault(tc, [])
+                if c.id not in chips:
+                    chips.append(c.id)
+        levels = deck.identifiers()
+        for pos, idx in enumerate(levels):
             if not kept(idx):
                 continue
-            title = deck.title(idx)
+            name = deck.title(idx) or "LEVEL%d" % idx
+            level_color = (colormap[idx] if mode == MODE_LEVEL else
+                           palette_color(scheme.palette, pos))
             rows.append({"key": idx, "layer": idx, "datatype": 0,
-                         "name": "$%d%s" % (idx, " " + title if title
-                                            else "")})
-    elif mode == MODE_CHIP:
-        seen = []
-        for c in deck.chips:
-            if c.id not in seen:
-                seen.append(c.id)
-        for pos, cid in enumerate(seen, 1):
-            # the CHIP row is a virtual group head: it holds nothing
-            # itself and stands for the level rows under it
-            rows.append({"key": ("chip", cid), "layer": pos, "datatype": 0,
-                         "name": "CHIP %s" % cid, "color_key": cid,
-                         "head": True})
-            levels = sorted({e.idx for c in deck.chips if c.id == cid
-                             for e in c.entries if kept(e.idx)})
-            if not levels:
-                rows.pop()   # a CHIP placing no loaded level
-                continue
-            for idx in levels:
-                title = deck.title(idx)
-                rows.append({"key": (cid, idx), "layer": pos,
-                             "datatype": idx, "color_key": cid,
-                             "name": "$%d%s" % (idx, " " + title if title
-                                                else "")})
+                         "name": name, "head": True, "color": level_color})
+            for tc, chips in by_level.get(idx, {}).items():
+                ordinal = sources[tc]
+                rows.append({
+                    "key": (idx, tc), "layer": idx, "datatype": ordinal,
+                    "name": os.path.basename(tc), "source": tc,
+                    "hidden": mode == MODE_LEVEL,
+                    "tooltip": "source: %s\nCHIP: %s" % (tc, ", ".join(chips)),
+                    "color": level_color if mode == MODE_LEVEL else
+                    palette_color(scheme.palette,
+                                  len(levels) + ordinal - 1)})
     else:
         pairs = sorted({(r["ly"], r["dt"]) for r in stats["layer_table"]
                         if kept(r["idx"])})
@@ -95,8 +84,7 @@ def view_layers(deck, stats, scheme, colormap):
                          "name": "LY%d.DT%d" % (ly, dt)})
     for out, row in enumerate(rows):
         row["out"] = out
-        row["color"] = colormap.get(row.pop("color_key", row["key"]),
-                                    scheme.fallback)
+        row.setdefault("color", colormap.get(row["key"], scheme.fallback))
     return rows
 
 
@@ -106,10 +94,8 @@ def view_out_of(rows, scheme):
     mode = scheme.mode
 
     def out_of(p):
-        if mode == MODE_LEVEL:
-            return by_key[p.idx]
-        if mode == MODE_CHIP:
-            return by_key[(p.chip, p.idx)]
+        if mode in (MODE_LEVEL, MODE_CHIP):
+            return by_key[(p.idx, os.path.normpath(p.tc))]
         return by_key[(p.ly, p.dt)]
     return out_of
 
@@ -172,7 +158,7 @@ def deck_spec_lines(deck, placements, stats, scheme, colormap, catalog):
                           p.ix, p.iy, out))
     for row in rows:
         # every view row, drawn or not: the viewer's style file and
-        # layers= lists name them all (a CHIP row heads its group and
+        # layers= lists name them all (a level row heads its group and
         # holds nothing; a level whose placements were all skipped is
         # still a level of the deck)
         lines.append("layer out=%d key=%d/%d name_hex=%s color=%s "
@@ -197,9 +183,9 @@ def write_deck_spec(path, deck, placements, stats, scheme, colormap,
 
 
 def deck_layers_meta(deck, stats, scheme, colormap, placements=None):
-    """The `meta["layers"]` rows a viewer and the Rust worker key on:
-    one per view layer, as layer=<out> datatype=0, with the row's name
-    and colour (and, like a cache, a stored_shapes count = placements)."""
+    """Display metadata for the spec's L/D keys, including virtual heads.
+    stored_shapes counts placements on leaves, not on virtual heads.
+    """
     rows = view_layers(deck, stats, scheme, colormap)
     counts = {}
     if placements is not None:
@@ -209,7 +195,10 @@ def deck_layers_meta(deck, stats, scheme, colormap, placements=None):
     return [{"layer": int(r["layer"]), "datatype": int(r["datatype"]),
              "name": r["name"], "color": r["color"],
              "stored_shapes": counts.get(r["out"], 0),
-             "jobdeck_head": bool(r.get("head"))}
+             "jobdeck_head": bool(r.get("head")),
+             "jobdeck_hidden": bool(r.get("hidden")),
+             "jobdeck_source": r.get("source"),
+             "tooltip": r.get("tooltip", "")}
             for r in rows]
 
 
@@ -238,6 +227,41 @@ class DeckRenderWorker:
         class _Worker(RustRenderWorker):
             supports_margin_prefetch = False
             supports_label_font_px = False
+
+            def _init_styles(self):
+                super()._init_styles()
+                heads = {r["layer"] for r in self.cache.meta["layers"]
+                         if r.get("jobdeck_head")}
+                for row in self.cache.meta["layers"]:
+                    key = row["layer"], row["datatype"]
+                    head = key[0], 0
+                    if key[1] and key[0] in heads:
+                        for styles in (self._fills, self._widths):
+                            if head in styles:
+                                styles.setdefault(key, styles[head])
+
+            def submit(self, job):
+                # Public layer selections/styles may name a virtual level
+                # head. The GUI sends leaves only for a partial selection.
+                rows = cache.meta["layers"]
+                heads = {r["layer"] for r in rows if r.get("jobdeck_head")}
+
+                def expand(key):
+                    key = tuple(key)
+                    if key[1] == 0 and key[0] in heads:
+                        return [(r["layer"], r["datatype"]) for r in rows
+                                if r["layer"] == key[0]]
+                    return [key]
+
+                job = dict(job)
+                if job.get("visible") is not None:
+                    job["visible"] = list(dict.fromkeys(
+                        k for key in job["visible"] for k in expand(key)))
+                for field in ("colors", "fills", "widths"):
+                    if field in job:
+                        job[field] = [(k, value) for key, value in job[field]
+                                      for k in expand(key)]
+                return super().submit(job)
 
             def _open_command(self):
                 return "open deck=%s budget_mb=%d jobs=%d" % (

@@ -868,6 +868,7 @@ mod tests {
             pages: vec![page_id],
             page_prio: vec![0],
             stats: HierStats::default(),
+                    explain: Vec::new(),
         };
         let mut bounds = BTreeMap::new();
         bounds.insert(top, page.bbox);
@@ -888,6 +889,7 @@ mod tests {
             pages: vec![0, 1],
             page_prio: vec![0, 1],
             stats: HierStats::default(),
+                    explain: Vec::new(),
         };
         let mut bounds = BTreeMap::new();
         bounds.insert(
@@ -1145,6 +1147,7 @@ mod tests {
             pages: vec![0, 1],
             page_prio: vec![0, 1],
             stats: HierStats::default(),
+                    explain: Vec::new(),
         };
         let mut bounds = BTreeMap::new();
         bounds.insert(

@@ -804,11 +804,11 @@ class CompositeTests(unittest.TestCase):
         text = self.spec.read_text()
         self.assertEqual(text.count("\nsource "), 3)
         self.assertEqual(text.count("\nplacement "), 17)
-        self.assertEqual(text.count("\nlayer "), 4)
+        self.assertEqual(text.count("\nlayer "), 9)
         # scale = mag * source_dbu / deck_dbu: $1 in ID001 is 4 * 2 = 8
-        self.assertIn("layer=123/43 out=0 scale=8.0 dx=1640800000 "
-                      "dy=3200800000 order=0", text)
-        self.assertIn("layer=999/0 out=2 scale=8.0", text)   # mag 0.2 * 40
+        self.assertIn("layer=123/43 out=1 scale=8.0 dx=1640800000 "
+                      "dy=3200800000 order=1", text)
+        self.assertIn("layer=999/0 out=6 scale=8.0", text)   # mag 0.2 * 40
         self.assertIn("color=#0000ff", text)
 
     def test_2_composite_matches_hand_placed_boxes(self):
@@ -905,7 +905,7 @@ class CompositeTests(unittest.TestCase):
         worker.start()
         try:
             colours = [((1000 + row["out"], 0), row["color"])
-                       for row in self.rows]
+                       for row in self.rows if not row.get("head")]
             worker.submit({"kind": "recolor", "colors": colours})
             oracle = _render_raw(worker,
                                  tuple(v / oracle_dbu for v in self.bbox_um),
@@ -934,7 +934,7 @@ class CompositeTests(unittest.TestCase):
         # floe2 info deck.jb
         res = run_floe2("info", CLI / "test.jb", env=self.env, ok=0)
         self.assertIn("[jobdeck] chips     : 3", res.stdout)
-        self.assertIn("$1 METAL1", res.stdout)
+        self.assertIn("METAL1", res.stdout)
         self.assertIn("bbox       : (37020.0, 80020.0)", res.stdout)
         # floe2 index deck.jb: every source, current caches kept
         res = run_floe2("index", CLI / "test.jb", "--jobs", "2",
@@ -999,11 +999,14 @@ class ViewerCacheTests(unittest.TestCase):
                                             int(69020 / 2.5e-5),
                                             int(105200 / 2.5e-5)])
             self.assertEqual([l["name"] for l in meta["layers"]],
-                             ["$1 METAL1", "$2 VIA1", "$3 ALIGN", "$5"])
+                             ["METAL1", "chipA.oas", "VIA1", "chipA.oas",
+                              "chipB.oas", "ALIGN", "mark.oas",
+                              "LEVEL5", "chipB.oas"])
             self.assertEqual([l["color"] for l in meta["layers"]],
-                             ["#0000ff", "#ffff00", "#ff0000", "#ffc0cb"])
+                             ["#0000ff"] * 2 + ["#ffff00"] * 3 +
+                             ["#ff0000"] * 2 + ["#ffc0cb"] * 2)
             self.assertEqual([l["stored_shapes"] for l in meta["layers"]],
-                             [6, 5, 3, 3])
+                             [0, 6, 0, 2, 3, 0, 3, 0, 3])
             self.assertEqual(meta["grid"]["nx"], 1)
             self.assertTrue(meta["vfs"])
             self.assertEqual(meta["jobdeck"]["placements"], 17)
@@ -1011,38 +1014,39 @@ class ViewerCacheTests(unittest.TestCase):
             self.assertTrue(os.path.isfile(c.dir))
             self.assertFalse(c.is_stale())
             self.assertEqual(c.resolve_layers("$2 VIA1,3/0"),
-                             [(2, 0), (3, 0)])
+                             [(2, 0), (2, 1), (2, 3), (3, 0), (3, 2)])
             self.assertIsNone(c.resolve_layers("all"))
             with self.assertRaises(ValueError):
                 c.resolve_layers("nope")
             self.assertEqual(c.mode, "level")
             self.assertEqual([(l["layer"], l["datatype"])
                               for l in meta["layers"]],
-                             [(1, 0), (2, 0), (3, 0), (5, 0)])
-            # chip view: the CHIPs in deck order, each expanding into
-            # the levels it places (<pos>/<level>), MDPView chip colours
+                             [(1, 0), (1, 1), (2, 0), (2, 1), (2, 3),
+                              (3, 0), (3, 2), (5, 0), (5, 3)])
+            # Chip view exposes the same leaves: repeated ROWS/CHIP
+            # definitions of a source within a level share one toggle.
             meta = c.set_mode("chip")
             self.assertEqual([l["name"] for l in meta["layers"]],
-                             ["CHIP ID001", "$1 METAL1", "$2 VIA1",
-                              "$3 ALIGN", "CHIP ID002", "$1 METAL1",
-                              "$2 VIA1", "$5", "CHIP ID003", "$1 METAL1",
-                              "$3 ALIGN"])
+                             ["METAL1", "chipA.oas", "VIA1", "chipA.oas",
+                              "chipB.oas", "ALIGN", "mark.oas",
+                              "LEVEL5", "chipB.oas"])
             self.assertEqual([(l["layer"], l["datatype"])
                               for l in meta["layers"]],
-                             [(1, 0), (1, 1), (1, 2), (1, 3), (2, 0), (2, 1),
-                              (2, 2), (2, 5), (3, 0), (3, 1), (3, 3)])
+                             [(1, 0), (1, 1), (2, 0), (2, 1), (2, 3),
+                              (3, 0), (3, 2), (5, 0), (5, 3)])
             self.assertEqual([l["color"] for l in meta["layers"]],
-                             ["#ffff00"] * 4 + ["#ffc0cb"] * 4
-                             + ["#ffffff"] * 3)
+                             ["#0000ff", "#ffa500", "#ffff00", "#ffa500",
+                              "#a020f0", "#ff0000", "#ffffff", "#ffc0cb",
+                              "#a020f0"])
             self.assertEqual([l["stored_shapes"] for l in meta["layers"]],
-                             [0, 2, 2, 2, 0, 3, 3, 3, 0, 1, 1])
+                             [0, 6, 0, 2, 3, 0, 3, 0, 3])
             self.assertTrue(c.dir.endswith("deck-chip.spec"))
-            self.assertEqual(c.resolve_layers("CHIP ID002,3/1"),
-                             [(2, 0), (2, 1), (2, 2), (2, 5), (3, 1)])
+            self.assertEqual(c.resolve_layers("VIA1,3/2"),
+                             [(2, 0), (2, 1), (2, 3), (3, 2)])
             with open(c.dir) as fh:
                 spec = fh.read()
             self.assertIn("layer out=0 key=1/0 name_hex=", spec)
-            self.assertEqual(spec.count("\nlayer "), 11)
+            self.assertEqual(spec.count("\nlayer "), 9)
             # our source-layer view: LY groups with DT children
             meta = c.set_mode("layer")
             self.assertEqual([l["name"] for l in meta["layers"]],
@@ -1108,6 +1112,188 @@ class GuiSmokeTests(unittest.TestCase):
         res = run_floe2("view", "--multi", CLI / "test.jb", "--level", "1,3",
                         env=env, ok=0, timeout=120)
         self.assertNotIn("no GUI frame", res.stderr + res.stdout)
+
+
+class JobdeckChipHierarchyTests(unittest.TestCase):
+    """Level -> source chips, not CHIP definitions -> levels (2026-09-10).
+    Real GTK rows + persistent renderd exercise the visible pixel contract.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.env = {"FLOE_INDEX_BIN": str(ROOT / "rust/target/release/floe-index"),
+                   "FLOE_RENDERD_BIN": str(ROOT / "rust/target/release/floe-renderd")}
+        os.environ.update(cls.env)
+        run_floe2("index", CLI / "test.jb", "--jobs", "2", env=cls.env, ok=0)
+
+    def _cache(self, mode="chip"):
+        from floe.jobdeck.viewer import DeckCache
+        c = DeckCache(str(CLI / "test.jb"), mode=mode)
+        c.load()
+        self.addCleanup(c.close)
+        return c
+
+    def _panel(self, cache):
+        from floe import gui
+        gui.import_gtk()
+        v = gui.Viewer.__new__(gui.Viewer)
+        v.cache, v.meta = cache, cache.meta
+        v.visible = {(r["layer"], r["datatype"]) for r in v.meta["layers"]}
+        v._layers_box = gui.Gtk.Box(orientation=gui.Gtk.Orientation.VERTICAL)
+        v._layer_patterns, v._fill_patterns = {}, []
+        v.selections = []
+        v.redraw = lambda **kw: None
+        v._build_layer_panel()
+        self.addCleanup(v._layers_box.destroy)
+        return v
+
+    def test_source_identity_and_repeated_placements(self):
+        c = self._cache()
+        rows = c.meta["layers"]
+        a = next(r for r in rows if (r["layer"], r["datatype"]) == (1, 1))
+        self.assertEqual(a["name"], "chipA.oas")
+        self.assertEqual(a["stored_shapes"], 6)
+        self.assertIn("ID001, ID002, ID003", a["tooltip"])
+        self.assertEqual(c.resolve_layers("chipA.oas"), [(1, 1), (2, 1)])
+        # Different full paths must never merge merely by basename.
+        from dataclasses import replace
+        deck = jd.parse_jobdeck(str(CLI / "test.jb"))
+        for chip in deck.chips:
+            chip.entries = [replace(e, tc={"chipA.oas": "left/PATTERN01.TE",
+                                           "chipB.oas": "right/PATTERN01.TE"}
+                                     .get(e.tc, e.tc)) for e in chip.entries]
+        rows = jrender.view_layers(deck, c.stats, c.scheme, c.colormap)
+        via = [r for r in rows if r["layer"] == 2 and not r.get("head")]
+        self.assertEqual([r["name"] for r in via], ["PATTERN01.TE"] * 2)
+        self.assertNotEqual(via[0]["key"], via[1]["key"])
+
+    def test_parent_controls_expanded_and_collapsed_children(self):
+        v = self._panel(self._cache())
+        self.assertIn((2, 0), v._layer_expanded)
+        v._layer_rows[(2, 0)].set_active(False)
+        self.assertFalse({(2, 0), (2, 1), (2, 3)} & v.visible)
+        self.assertIn((1, 1), v.visible, "same source in another level stays on")
+        v._on_group_expand(v._layer_rows[(2, 0)])
+        v._layer_rows[(2, 0)].set_active(True)
+        self.assertTrue({(2, 0), (2, 1), (2, 3)} <= v.visible)
+
+    def test_partial_and_batch_actions(self):
+        v = self._panel(self._cache())
+        v._layer_rows[(2, 1)].set_active(False)
+        self.assertTrue(v._layer_rows[(2, 0)]._partial)
+        self.assertNotIn((2, 0), v._layers_arg(), "head would unhide its chips")
+        self.assertIn((2, 3), v._layers_arg())
+        v._selected_layers = {(2, 0)}
+        v._set_selected_layers("show")
+        self.assertFalse(v._layer_rows[(2, 0)]._partial)
+        self.assertIn((2, 1), v.visible)
+        v._no_layers()
+        self.assertEqual(v._layers_arg(), [])
+        v._all_layers()
+        self.assertIsNone(v._layers_arg())
+
+    def test_roundtrip_preserves_hidden_and_partial_levels(self):
+        c = self._cache()
+        v = self._panel(c)
+        v._layer_rows[(1, 0)].set_active(False)
+        v._layer_rows[(2, 1)].set_active(False)
+        wanted = set(v.visible)
+        for mode in ("level", "chip", "level"):
+            c.save_visibility(v.visible)
+            c.set_mode(mode)
+            v.meta = c.meta
+            v._build_layer_panel()
+            v.visible = c.restore_visibility(set(v._layer_rows))
+            for k, row in v._layer_rows.items():
+                row.set_group_state(k in v.visible)
+            v._sync_jobdeck_groups()
+            self.assertEqual(v.visible, wanted)
+            self.assertTrue(v._layer_rows[(2, 0)]._partial)
+            if mode == "level":
+                self.assertFalse(v._layer_rows[(2, 1)].widget.get_visible())
+                v._expand_all()
+                self.assertFalse(v._layer_rows[(2, 1)].widget.get_visible())
+            else:
+                self.assertTrue(v._layer_rows[(2, 1)].widget.get_visible())
+
+    def test_partial_geometry_is_identical_across_modes(self):
+        c = self._cache()
+        v = self._panel(c)
+        v._no_layers()
+        v._layer_rows[(2, 1)].set_active(True)
+        frames = []
+        for mode in ("chip", "level", "chip"):
+            c.save_visibility(v.visible)
+            c.set_mode(mode)
+            v.meta = c.meta
+            v.visible = c.restore_visibility(set(v._layer_rows))
+            worker = jrender.DeckRenderWorker(c)
+            worker.start()
+            try:
+                worker.submit({"kind": "recolor", "colors":
+                               [((r["layer"], r["datatype"]), "#ffffff")
+                                for r in c.meta["layers"]]})
+                image = _render_raw(worker, tuple(c.meta["bbox"]), 200, 160,
+                                    visible=v._visible_list())
+                empty = _render_raw(worker, tuple(c.meta["bbox"]), 200, 160,
+                                    visible=[])
+            finally:
+                worker.stop()
+            self.assertEqual(_lit(empty), 0)
+            self.assertGreater(_lit(image), 0)
+            frames.append(image)
+        self.assertEqual(frames[0], frames[1])
+        self.assertEqual(frames[1], frames[2])
+
+    def test_old_level_props_cascade_without_overriding_explicit_children(self):
+        v = self._panel(self._cache("level"))
+        v._apply_props_visibility([
+            ((2, 0), "#ffffff", "solid", "VIA1", "0", "1"),
+            ((2, 3), "#ffffff", "solid", "chipB.oas", "1", "1")])
+        self.assertNotIn((2, 1), v.visible)
+        self.assertIn((2, 3), v.visible)
+        self.assertTrue(v._layer_rows[(2, 0)]._partial)
+
+    def test_real_viewer_switch_cancels_queued_render(self):
+        """A pre-switch debounce must not submit with style_epoch=0
+        while the new worker is still opening (kills its handshake).
+        Exercise _apply_cache too, not just the panel/state helpers.
+        """
+        import time
+        from unittest.mock import patch
+        from floe import gui
+        gui.import_gtk()
+        c = self._cache()
+        with patch.dict(os.environ, {"FLOE_RENDERER": "rust"}):
+            v = gui.Viewer(c, depth=999, frames=False, labels=False)
+            try:
+                def landed():
+                    end = time.monotonic() + 15
+                    while time.monotonic() < end:
+                        while gui.Gtk.events_pending():
+                            gui.Gtk.main_iteration_do(False)
+                        if v.last_frame is not None and not v._worker_starting:
+                            return
+                        time.sleep(0.01)
+                    self.fail("no frame after jobdeck mode switch")
+
+                landed()
+                v._layer_rows[(1, 0)].set_active(False)
+                v._layer_rows[(2, 1)].set_active(False)
+                wanted = set(v.visible)
+                pose = v.cx, v.cy, v.spp
+                self.assertIsNotNone(v._debounce)
+                for mode in ("level", "chip"):
+                    v._jobdeck_set_mode(mode)
+                    self.assertIsNone(v._debounce)
+                    landed()
+                    self.assertEqual(v.visible, wanted)
+                    self.assertEqual((v.cx, v.cy, v.spp), pose)
+                    self.assertTrue(v._layer_rows[(2, 0)]._partial)
+                    self.assertTrue(v.worker.alive())
+            finally:
+                v._quit()
+                v.window.destroy()
 
 
 class JobdeckShortcutTests(unittest.TestCase):
@@ -1201,7 +1387,8 @@ class LevelSelectTests(unittest.TestCase):
         c.load()
         self.addCleanup(c.close)
         self.assertEqual(c.ids, [1, 3])
-        self.assertEqual([l["layer"] for l in c.meta["layers"]], [1, 3])
+        self.assertEqual([l["layer"] for l in c.meta["layers"]
+                          if l["jobdeck_head"]], [1, 3])
         self.assertEqual(c.meta["jobdeck"]["levels"], [1, 3])
         self.assertEqual(c.meta["jobdeck"]["identifiers"], [1, 2, 3, 5])
         self.assertEqual(c.meta["jobdeck"]["sources"], 2)   # chipA, mark
@@ -1211,28 +1398,27 @@ class LevelSelectTests(unittest.TestCase):
         colour = {l["layer"]: l["color"] for l in full.meta["layers"]}
         for l in c.meta["layers"]:
             self.assertEqual(l["color"], colour[l["layer"]])
-        # chip view: CHIPs expand to the loaded levels only; ID002
-        # places level 1 (kept) - every CHIP survives here
+        # Only loaded levels and their deduplicated source chips.
         c.set_mode("chip")
         names = [l["name"] for l in c.meta["layers"]]
-        self.assertNotIn("$2 VIA1", names)
-        self.assertIn("$3 ALIGN", names)
-        self.assertEqual(names.count("$1 METAL1"), 3)
+        self.assertNotIn("VIA1", names)
+        self.assertIn("ALIGN", names)
+        self.assertEqual(names.count("chipA.oas"), 1)
         c.set_mode("level")
         only5 = DeckCache(str(CLI / "test.jb"), ids=[5], mode="chip")
         only5.load()
         self.addCleanup(only5.close)
-        # (level 5 has no MTITLE: its row is "$5")
+        # A missing MTITLE gets a readable LEVELn fallback.
         self.assertEqual([l["name"] for l in only5.meta["layers"]],
-                         ["CHIP ID002", "$5"], "CHIPs placing no "
-                         "loaded level are not listed")
+                         ["LEVEL5", "chipB.oas"])
         # source layer view follows the selection too
         only5.set_mode("layer")
         self.assertEqual([l["name"] for l in only5.meta["layers"]],
                          ["LY7.DT2"])
         # re-selection in place
         c.set_levels(None)
-        self.assertEqual([l["layer"] for l in c.meta["layers"]],
+        self.assertEqual([l["layer"] for l in c.meta["layers"]
+                          if l["jobdeck_head"]],
                          [1, 2, 3, 5])
         with self.assertRaises(ValueError) as cm:
             DeckCache(str(CLI / "test.jb"), ids=[4, 9]).load()
@@ -1261,8 +1447,7 @@ class LevelSelectTests(unittest.TestCase):
                                  "%s view %s" % (mode, l["name"]))
             if mode == "chip":
                 self.assertEqual([l["name"] for l in part.meta["layers"]],
-                                 ["CHIP ID001", "$3 ALIGN",
-                                  "CHIP ID003", "$3 ALIGN"])
+                                 ["ALIGN", "mark.oas"])
 
     def test_load_dialog_rows_are_bounded(self):
         # review 2026-09-10 (9th) P2-2: 250 source names in one label
@@ -1308,7 +1493,8 @@ class LevelSelectTests(unittest.TestCase):
         c.load()
         self.addCleanup(c.close)
         self.assertEqual(c.skipped, [])
-        self.assertEqual([l["layer"] for l in c.meta["layers"]], [3])
+        self.assertEqual([l["layer"] for l in c.meta["layers"]
+                          if l["jobdeck_head"]], [3])
         # review 2026-09-10 (9th) P2-3: only the loaded level's source
         # is probed in full (cache state); the others lend their dbu
         # from the header alone, so the grid is the whole deck's and
@@ -1866,20 +2052,21 @@ class ReviewFixTests2(unittest.TestCase):
                                 "earlier placement's white frame")
         self.assertGreater(_lit(both), _lit(a_only))
 
-    def test_p2_2_group_names_select_their_levels(self):
+    def test_p2_2_group_names_select_their_chips(self):
         from floe.jobdeck.viewer import DeckCache
         c = DeckCache(str(CLI / "test.jb"), mode="chip")
         c.load()
         try:
-            # a CHIP row stands for its levels ...
-            self.assertEqual(c.resolve_layers("CHIP ID002"),
-                             [(2, 0), (2, 1), (2, 2), (2, 5)])
+            # A level row stands for its source chips ...
+            self.assertEqual(c.resolve_layers("VIA1"),
+                             [(2, 0), (2, 1), (2, 3)])
             self.assertEqual(c.resolve_layers("2/0"),
-                             [(2, 0), (2, 1), (2, 2), (2, 5)])
-            # ... a level name selects it in EVERY CHIP that places it
+                             [(2, 0), (2, 1), (2, 3)])
+            # ... a source name selects it in EVERY level that uses it.
+            self.assertEqual(c.resolve_layers("chipA.oas"), [(1, 1), (2, 1)])
             self.assertEqual(c.resolve_layers("$1 METAL1"),
-                             [(1, 1), (2, 1), (3, 1)])
-            self.assertEqual(c.resolve_layers("$5"), [(2, 5)])
+                             [(1, 0), (1, 1)])
+            self.assertEqual(c.resolve_layers("$5"), [(5, 0), (5, 3)])
             with self.assertRaises(ValueError):
                 c.resolve_layers("9/9")
             worker = jrender.DeckRenderWorker(c)
@@ -1887,10 +2074,10 @@ class ReviewFixTests2(unittest.TestCase):
             try:
                 bb = tuple(c.meta["bbox"])
                 head = _render_raw(worker, bb, 200, 160,
-                                   visible=c.resolve_layers("CHIP ID002"))
+                                   visible=c.resolve_layers("VIA1"))
             finally:
                 worker.stop()
-            self.assertGreater(_lit(head), 1000, "CHIP ID002 drew nothing")
+            self.assertGreater(_lit(head), 1000, "VIA1 drew nothing")
         finally:
             c.close()
         # the level view: unique names, no groups
@@ -1898,7 +2085,7 @@ class ReviewFixTests2(unittest.TestCase):
         c.load()
         try:
             self.assertEqual(c.resolve_layers("$1 METAL1,$5"),
-                             [(1, 0), (5, 0)])
+                             [(1, 0), (1, 1), (5, 0), (5, 3)])
         finally:
             c.close()
 
@@ -1925,10 +2112,10 @@ class ReviewFixTests2(unittest.TestCase):
                 self.assertEqual(worker._widths[(1, 0)], 3)
                 # chip view keeps its own key space and file
                 c.set_mode("chip")
-                self.assertEqual(c.props_src, str(CLI / "test.chip.jb"))
+                self.assertEqual(c.props_src, str(CLI / "test.chip-by-level.jb"))
                 colours = {(l["layer"], l["datatype"]): l["color"]
                            for l in c.meta["layers"]}
-                self.assertEqual(colours[(1, 0)], "#ffff00",
+                self.assertEqual(colours[(1, 0)], "#0000ff",
                                  "the level view's file leaked into "
                                  "the chip view")
             finally:
@@ -2064,13 +2251,13 @@ class ReviewFixTests3(unittest.TestCase):
         self.assertEqual(_lit(both), _lit(only_dt0),
                          "DT1 lies inside DT0: selecting DT0 alone must "
                          "not add DT1")
-        # and a CHIP head in chip view still expands
+        # and a virtual level head in chip view still expands
         c = DeckCache(str(CLI / "dt.jb"), mode="chip")
         c.load()
         try:
             self.assertEqual([l["jobdeck_head"] for l in c.meta["layers"]],
                              [True, False])
-            self.assertEqual(c.resolve_layers("CHIP D"), [(1, 0), (1, 1)])
+            self.assertEqual(c.resolve_layers("DT"), [(1, 0), (1, 1)])
         finally:
             c.close()
 
@@ -2826,7 +3013,11 @@ class KLayoutOracleTests(unittest.TestCase):
         self.assertEqual(golden.shape, candidate.shape)
         # per colour: the battery's mask policy (P-a/b/c)
         band = goldens._edge_band(np.any(golden != 0, axis=2))[0]
+        checked_colors = set()
         for row in rows:
+            if row.get("head") or row["color"] in checked_colors:
+                continue
+            checked_colors.add(row["color"])
             rgb = np.array(_rgb(row["color"]), dtype=np.uint8)
             g = np.all(golden == rgb, axis=2)
             c = np.all(candidate == rgb, axis=2)

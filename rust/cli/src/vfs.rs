@@ -6335,6 +6335,10 @@ pub fn plan_cmd(args: &[String]) {
         {
             popts.thin_lattice_um = val.parse().expect("thin-um");
         }
+        // --explain 1: one line per verdict inside the view (field
+        // diagnosis 2026-09-10: which rule dropped a region)
+        let explain = rest.iter().any(|(k, _)| k == "--explain");
+        popts.explain = explain;
         let plan = floe_vfs::hier::plan_hier(&v.ovm, &req, &popts);
         let ms = t0.elapsed().as_secs_f64() * 1e3;
         let (mut cbytes, mut ubytes) = (0u64, 0u64);
@@ -6408,7 +6412,63 @@ pub fn plan_cmd(args: &[String]) {
         if rest.iter().any(|(k, _)| k == "--inspect") {
             inspect_plan(&dir, &v, &req, &plan, &rest);
         }
+        if explain {
+            print_explain(&v, &req, &plan, cut, px);
+        }
         return;
+    }
+}
+
+/// `floe-index plan --explain 1`: after the JSON, one TSV line per
+/// verdict the walk made inside the view. Columns: kind, verdict,
+/// cell, layer (L/D, "-" for boxes), id (page / BVH node / placement
+/// index), bbox um (cell-local for pages, world for placements),
+/// w um, h um, min um, members. The header line carries the cut in
+/// px and um and the hairline threshold so a "cull_size" row can be
+/// read against them.
+fn print_explain(
+    v: &floe_vfs::Vfs,
+    req: &floe_vfs::ViewReq,
+    plan: &floe_vfs::hier::HierPlan,
+    cut_px: f64,
+    px_per_um: f64,
+) {
+    let unit = v.ovm.unit;
+    let um = |d: i64| d as f64 / unit;
+    let umu = |d: u64| d as f64 / unit;
+    println!(
+        "explain\theader\tcut_px={}\tcut_um={:.4}\thair_um={:.4}\tpx_per_um={}\trows={}",
+        cut_px,
+        um(req.cut_dbu),
+        umu((req.cut_dbu.max(0) as f64 * floe_vfs::hier::HierOpts::default().hairline) as u64),
+        px_per_um,
+        plan.explain.len()
+    );
+    for r in &plan.explain {
+        let cell = v.ovm.cell(r.cell).name;
+        let layer = match r.layer_idx {
+            Some(li) => {
+                let l = v.ovm.layer(li);
+                format!("{}/{}", l.layer, l.dt)
+            }
+            None => "-".to_string(),
+        };
+        println!(
+            "explain\t{}\t{}\t{}\t{}\t{}\t{:.4},{:.4},{:.4},{:.4}\t{:.4}\t{:.4}\t{:.4}\t{}",
+            r.kind,
+            r.verdict,
+            crate::tsv_esc(&cell),
+            layer,
+            r.id,
+            um(r.bbox.x0),
+            um(r.bbox.y0),
+            um(r.bbox.x1),
+            um(r.bbox.y1),
+            umu(r.w),
+            umu(r.h),
+            umu(r.min),
+            r.members
+        );
     }
 }
 

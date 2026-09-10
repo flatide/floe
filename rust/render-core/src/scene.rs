@@ -577,6 +577,7 @@ mod tests {
             pages: vec![2, 4],
             page_prio: vec![0, 1],
             stats: HierStats::default(),
+                    explain: Vec::new(),
         }
     }
 
@@ -659,6 +660,7 @@ mod tests {
             pages: vec![2, 4],
             page_prio: vec![0, 1],
             stats: HierStats::default(),
+                    explain: Vec::new(),
         };
         let bounds = BTreeMap::from([(top, bbox), (child, bbox)]);
         let scene =

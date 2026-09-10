@@ -858,6 +858,7 @@ class LayerRow(object):
         self._on_select = on_select
         self._on_expand = on_expand
         self._active = True
+        self._partial = False
         self._picked = False
         self._selected = False
         self._fill_rows = None      # None = default speckle checker
@@ -995,7 +996,8 @@ class LayerRow(object):
         self._lbl.set_markup(
             '<span face="monospace" size="small" '
             'foreground="%s">%s</span>'
-            % (fg, GLib.markup_escape_text(self._name)))
+            % (fg, GLib.markup_escape_text(
+                self._name + (" [partial]" if self._partial else ""))))
         self._clbl.set_from_pixbuf(self._swatch_on)
         self.widget.queue_draw()
 
@@ -1096,6 +1098,12 @@ class LayerRow(object):
 
     def get_active(self):
         return self._active
+
+    def set_group_state(self, on, partial=False):
+        """Reflect child state without firing a parent toggle."""
+        self._active = bool(on)
+        self._partial = bool(partial)
+        self._paint()
 
     def set_active(self, on):
         on = bool(on)
@@ -1684,6 +1692,12 @@ class Viewer:
 
     # ---- cache binding / instance requests --------------------------------
     def _apply_cache(self, cache):
+        # A layer toggle may have queued a render immediately before a
+        # jobdeck mode switch. It must not fire against the replacement
+        # worker before its open/style handshake (style_epoch=0).
+        if self._debounce is not None:
+            GLib.source_remove(self._debounce)
+            self._debounce = None
         # Initial construction is fitted/goto'd by _on_allocate.  An in-place
         # layout load happens after allocation and needs a deferred fit unless
         # its caller immediately supplies a goto (goto() cancels this flag).
@@ -1742,7 +1756,6 @@ class Viewer:
                 pass
         for w in self._fill_slots:
             w.queue_draw()
-        self._apply_props_visibility(rows)
         self._refresh_row_fills()
         self.last_frame = None
         self._margin_frame = None
@@ -1826,6 +1839,16 @@ class Viewer:
                    src["size"] / 1e9, self.meta["grid"]["nx"],
                    self.meta["grid"]["ny"]))
         self._build_layer_panel()
+        self._apply_props_visibility(rows)
+        if getattr(cache, "is_jobdeck", False):
+            self.visible = cache.restore_visibility(self.visible)
+            self._layers_batch = True
+            try:
+                for key, row in self._layer_rows.items():
+                    row.set_active(key in self.visible)
+            finally:
+                self._layers_batch = False
+            self._sync_jobdeck_groups()
         if self.worker is not None:
             self.worker.stop()
             self.worker = None
@@ -1904,6 +1927,8 @@ class Viewer:
              for l in self.meta["layers"]])
 
         def add_row(l, marker, tooltip, on_expand=None):
+            if l.get("tooltip"):
+                tooltip = l["tooltip"] + "\n" + tooltip
             row = LayerRow(l, marker, num_width, tooltip,
                            self._on_layer_toggled, self._on_layer_clicked,
                            on_expand)
@@ -1923,13 +1948,17 @@ class Viewer:
                 continue
             ls = sorted(ls, key=lambda e: e["datatype"])
             head, rest = ls[0], ls[1:]
+            jobdeck_head = head.get("jobdeck_head")
+            hidden = jobdeck_head and all(l.get("jobdeck_hidden") for l in rest)
             pkey = add_row(
                 head, "+",
-                "%d.%d  %s\n+/-: expand/collapse %d more datatypes\n"
+                "%d.%d  %s\n+/-: expand/collapse %d children\n"
                 "click: select; double-click: show/hide layer %d group; "
                 "right-click: actions"
                 % (lnum, head["datatype"], head["name"], len(rest), lnum),
-                self._on_group_expand)
+                None if hidden else self._on_group_expand)
+            if hidden:
+                self._layer_rows[pkey].set_marker(" ")
             self._layer_groups[pkey] = [
                 add_row(l, " ", "%d.%d  %s\nclick: select; "
                         "double-click: show/hide; right-click: actions"
@@ -1939,15 +1968,23 @@ class Viewer:
         # groups start EXPANDED (field request); no_show_all is
         # still set so a later window-level show_all cannot reveal
         # children the user collapses
+        hidden = {(l["layer"], l["datatype"])
+                  for l in self.meta["layers"] if l.get("jobdeck_hidden")}
         for pkey, ckeys in self._layer_groups.items():
-            self._layer_expanded.add(pkey)
-            self._layer_rows[pkey].set_marker("-")
+            if not all(k in hidden for k in ckeys):
+                self._layer_expanded.add(pkey)
+                self._layer_rows[pkey].set_marker("-")
             for k in ckeys:
                 self._layer_rows[k].widget.set_no_show_all(True)
+                if k in hidden:
+                    self._layer_rows[k].widget.hide()
         self._refresh_row_fills()
 
     def _on_group_expand(self, row):
         """'+'/'-' marker click on a group parent."""
+        if any(l.get("jobdeck_hidden") and l["layer"] == row.key[0]
+               for l in self.meta["layers"]):
+            return  # level view deliberately lists only the level heads
         expand = row.key not in self._layer_expanded
         if expand:
             self._layer_expanded.add(row.key)
@@ -2366,7 +2403,11 @@ class Viewer:
         return (c1 - c0 + 1) * (r1 - r0 + 1)
 
     def _visible_list(self):
-        return sorted(self.visible)
+        heads = {(l["layer"], l["datatype"]) for l in
+                 (self.meta or {}).get("layers", []) if l.get("jobdeck_head")}
+        # A head in the wire selection means ALL its children; omit it
+        # here to retain exact partial selections in either panel mode.
+        return sorted(self.visible - heads)
 
     def _layers_arg(self):
         if len(self.visible) != len(self._layer_rows):
@@ -3109,6 +3150,8 @@ class Viewer:
 
     def _submit_render(self):
         self._debounce = None
+        if self.cache is None or self._worker_starting:
+            return False  # the successful open callback submits the view
         # a user render supersedes any in-flight margin (the generation
         # frontier cancels its raster) - forget it so the next settle
         # schedules a fresh one
@@ -5226,6 +5269,7 @@ class Viewer:
             self._restore_keys()
             return
         view = (self.cx, self.cy, self.spp)
+        cache.save_visibility(self.visible)
         try:
             cache.set_mode(mode)
         except Exception as exc:
@@ -8200,6 +8244,10 @@ class Viewer:
         toggle handler, which maintains self.visible)."""
         self._layers_batch = True
         try:
+            explicit = {tuple(r[0]) for r in rows if r[4] in ("0", "1")}
+            heads = {(l["layer"], l["datatype"]) for l in
+                     (self.meta or {}).get("layers", [])
+                     if l.get("jobdeck_head")}
             for key, _c, _f, _n, f1, _f2 in rows:
                 row = self._layer_rows.get(tuple(key))
                 if row is None or f1 not in ("0", "1"):
@@ -8207,8 +8255,13 @@ class Viewer:
                 want = f1 == "1"
                 if row.get_active() != want:
                     row.set_active(want)
+                if tuple(key) in heads:
+                    for child in self._layer_groups.get(tuple(key), []):
+                        if child not in explicit:
+                            self._layer_rows[child].set_active(want)
         finally:
             self._layers_batch = False
+        self._sync_jobdeck_groups()
 
     def _selected_with_folded(self):
         """Selection for palette-style actions: a COLLAPSED group
@@ -8625,7 +8678,8 @@ class Viewer:
                 else action == "show"
             affected = [key]
             kids = self._layer_groups.get(key)
-            if kids and key not in self._layer_expanded:
+            if kids and (key not in self._layer_expanded or
+                         self._is_jobdeck_head(key)):
                 affected.extend(kids)
             for affected_key in affected:
                 changes[affected_key] = on
@@ -8639,7 +8693,25 @@ class Viewer:
                 self._layer_rows[key].set_active(on)
         finally:
             self._layers_batch = False
+        self._sync_jobdeck_groups()
         self.redraw(immediate=True)
+
+    def _is_jobdeck_head(self, key):
+        return any(l.get("jobdeck_head") and
+                   (l["layer"], l["datatype"]) == key
+                   for l in (self.meta or {}).get("layers", []))
+
+    def _sync_jobdeck_groups(self):
+        for key, children in self._layer_groups.items():
+            if not self._is_jobdeck_head(key):
+                continue
+            count = sum(k in self.visible for k in children)
+            if count:
+                self.visible.add(key)
+            else:
+                self.visible.discard(key)
+            self._layer_rows[key].set_group_state(
+                count > 0, 0 < count < len(children))
 
     def _on_layer_toggled(self, row, key):
         if row.get_active():
@@ -8659,7 +8731,8 @@ class Viewer:
         if self._layers_batch:
             return  # group/all/none toggle: one redraw at the end
         kids = self._layer_groups.get(key)
-        if kids and key not in self._layer_expanded:
+        if kids and (key not in self._layer_expanded or
+                     self._is_jobdeck_head(key)):
             # A collapsed group acts as one row, so its parent drags every
             # datatype with it. Once expanded, every visible row (including
             # the parent datatype) toggles independently.
@@ -8672,6 +8745,7 @@ class Viewer:
                     self._layer_rows[k].set_active(on)
             finally:
                 self._layers_batch = False
+        self._sync_jobdeck_groups()
         self.redraw(immediate=True)
 
     def _set_all_layers(self, on):
@@ -8681,6 +8755,7 @@ class Viewer:
                 row.set_active(on)
         finally:
             self._layers_batch = False
+        self._sync_jobdeck_groups()
         self.redraw(immediate=True)
 
     def _all_layers(self):
