@@ -475,6 +475,15 @@ INCOMPLETE)로 보고하며 덱은 열린다. 인덱싱이 일부 실패해도 �
 | P1-2 | renderd `RetainedKey`에 `thin_keep`이 없어 다른 정책의 프레임을 재사용(cull→keep 0 px 유지, keep→cull 1,176 px 유지, 타일 16개 재사용); published query scene도 같은 키라 pick/snap도 옛 정책 | 사실 | `RetainedKey.thin_keep` 추가. renderd 단위 테스트 `retained_key_tracks_the_thin_policy`(keep≠cull, 생략=cull, 잘못된 값 거부) |
 | P2-3 | `--thin auto`가 실행 중인 창에 전달되지 않아 keep 상태의 창을 기본으로 되돌릴 수 없음 | 사실 | `--thin` 기본을 None으로 두고 명시된 값은 auto 포함 전달(`thin=auto`). gate `test_single_instance_forwards_effective_detail_and_depth` 확장 |
 
+### 11차 (7건, 점유 요약 구현 계획 리뷰 2026-09-11, 문서만)
+
+`docs/OCCUPANCY_PLAN.ko.md` 1차 계획에 대한 리뷰. 판정과 반영은 그 문서 §11에
+기록했다. 요지: bbox 기반 점유 생성 폐기(도형 교차 마킹을 M1 필수로), 적용 조건에
+exact·depth full·top 일치 추가, 전용 마스크 경로와 레이어 순서 유지, 오차 계약을
+2셀 규칙으로 정정하고 독립 도형 오라클·빈 공간·pan 위상 gate 추가, `.ovo`
+유효성·게시·자체 버전(`CACHE_VERSION` 불변), jobdeck 래퍼 옵션 명시 전달, M5까지
+opt-in과 자원 상한, pick/snap 제외.
+
 ## 11. 성능 분석 2026-09-09 — 판정과 계획
 
 리뷰어의 분석(광역뷰 누락 = cut 정책, 다중 level 지연 = 배치별 전체 화면 반복,
