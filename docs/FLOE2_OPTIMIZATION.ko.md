@@ -977,7 +977,10 @@ thin shapes로 마스크 정책 선택 가능(같은 파일이 여는 방식에 
 근접뷰 exact keep은 유지하되, 광역뷰는 빈 공간 위치를 보존하는 다중 해상도 점유
 요약이 디코드를 **대체**해야 한다(리뷰어). bbox 채움·밀도 숫자 방식은 제외, 기존
 LOD는 verbatim 경로 때문에 단정 불가. 결정용 실험 도구
-`tools/occupancy_experiment.py`(JOBDECK.ko.md §10 실측 6).
+`tools/occupancy_experiment.py`(JOBDECK.ko.md §10 실측 6). **실측 7 결과**: 요약
+방식 성립 — 생성 4.3 s(26 × 33 mm 영역), 저장 레이어당 약 15 MB(4 µm 기준 셀),
+광역뷰 페인트 9.3만 셀; exact keep은 예산 초과로 불가, cull은 81 px. 표시 오차
+기준은 셀 ≤ 1 px(2 px 셀부터 빈 공간이 16 % 메워짐).
 
 ### 3.20 pan 재사용 — F2R-16 (2026-09-04)
 
