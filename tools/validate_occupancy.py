@@ -552,6 +552,48 @@ class GenerationContractTests(unittest.TestCase):
             ovo.write_bytes(keep)
         self.listing(cache)
 
+    def test_the_synthetic_mask_chip_reproduces_the_field_symptom(self):
+        # tools/gen_maskchip.py: the 35.8 x 34.6 mm stand-in for the
+        # field source. Under the plain cull policy the corner cell
+        # (a thick record) survives while its connected hairline
+        # neighbours vanish; under keep they stay (exact pixels); the
+        # whole-chip fit view summarizes every layer.
+        from PIL import Image
+        d = TMP / "maskchip"
+        d.mkdir()
+        src = d / "chip.oas"
+        res = subprocess.run([sys.executable, "-B", str(ROOT / "tools" /
+                              "gen_maskchip.py"), str(src), "--cells", "6",
+                              "--pitch", "2.0", "--clusters", "1", "--jb"],
+                             capture_output=True, text=True, cwd=ROOT)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertTrue((d / "chip.jb").is_file())
+        cache = Path(str(src) + ".floe")
+        floe_index("vfs", src, cache, "--occupancy", "--no-lod",
+                   "--slow-cell-s", "999", "--jobs", "2")
+        ovo = read_ovo(cache / "design.ovo")
+        self.assertEqual({l["key"] for l in ovo["layers"]},
+                         {(1, 0), (3, 0), (3, 300), (4, 0)})
+        self.assertTrue(all(l["status"] == "ok" for l in ovo["layers"]))
+        x0, y0, x1, y1 = ovo["bbox"]
+        self.assertAlmostEqual((x1 - x0) * 0.0001, 35838.4, places=3)
+        self.assertAlmostEqual((y1 - y0) * 0.0001, 34617.6, places=3)
+
+        def lit(detail, thin):
+            out = d / ("corner-%s-%s.png" % (detail, thin))
+            floe2("render", src, "--bbox", "17300,-17309,17919,-16700",
+                  "--px", "300", "--detail", detail, "--thin", thin,
+                  "--layers", "3/0", "--out", out)
+            im = Image.open(out).convert("RGB")
+            return sum(1 for p in im.getdata() if p != (0, 0, 0))
+        exact = lit("exact", "keep")
+        cull = lit("high", "cull")
+        keep = lit("high", "keep")
+        self.assertGreater(exact, 10000)
+        self.assertEqual(keep, exact)
+        self.assertGreater(cull, 0)
+        self.assertLess(cull, exact // 2)
+
     def test_limits_are_recorded_as_none_never_approximated(self):
         floe_index("vfs", self.src, self.cache, "--occupancy-only",
                    "--occupancy-max-cells", "10")

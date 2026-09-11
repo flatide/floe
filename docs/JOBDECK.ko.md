@@ -668,7 +668,13 @@ budget = 패스별 디코드 보유)을 코드와 대조했다. 모두 사실이
   2026-09-11**(RENDERD 0.12.80): 단독 마스크 OASIS의 keep 광역뷰가 요약으로
   그려진다. **M3(플래너 프루닝·explain)·M4(덱 pass 요약) 완료 2026-09-11**
   (RENDERD 0.12.81): 덱 perf 줄 `summary P passes C cells (not pickable)`,
-  `N passes without summary`. 남은 것은 실칩 실측(M5).
+  `N passes without summary`. 남은 것은 실칩 실측(M5). 실칩을 쓸 수 없을 때는
+  `tools/gen_maskchip.py OUT.oas [--jb]`가 같은 크기(35838.4 × 34617.6 µm)에
+  실측 5·7의 ICV 셀(167.7 × 535 µm, 11.38 × 0.0806 µm 선 약 2만 9천 멤버, 118.6 µm
+  선·4.3 µm 바 변형, 3/300 쌍둥이, 2 × 3쌍 클러스터로 26 × 33 mm 영역의 7.4 %)과
+  hairline cull에서 살아남는 우하단 `ICV_BR`을 합성한다(gate
+  `test_the_synthetic_mask_chip_reproduces_the_field_symptom`: cull에서 이웃
+  소실·ICV_BR 잔존, keep = exact).
 
 - **배율/임의각 PLACEMENT(OASIS 18)**: 2026-09-09 현재 실제 소스에서 아직 관측되지
   않아 보류(사용자 확인). 나타나면 계층 변환을 실수화하지 않고 **인덱싱 시
