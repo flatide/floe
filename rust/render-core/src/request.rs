@@ -56,6 +56,9 @@ pub struct PlanRequest {
     /// true culls all-thin pages (plain layout performance policy),
     /// false keeps them (mask / jobdeck policy).
     pub page_hairline: bool,
+    /// Cache layer indices drawn from the occupancy summary (M2):
+    /// their pages are not planned (floe_vfs::ViewReq::page_skip).
+    pub summary_layers: Vec<u32>,
 }
 
 impl PlanRequest {
@@ -92,6 +95,7 @@ mod tests {
             exact: true,
             sub_cut_wash: false,
             page_hairline: true,
+            summary_layers: Vec::new(),
         };
         assert!(req.validate().is_err());
     }

@@ -16,6 +16,9 @@ pub struct FrameScene {
     labels: Arc<[RenderLabel]>,
     label_font_px: f32,
     masks: SceneMasks,
+    /// occupancy summary planes painted in place of the layers'
+    /// pages (docs/OCCUPANCY_PLAN.ko.md M2); empty = none
+    summaries: Vec<crate::summary::SummaryPlane>,
 }
 
 /// Bottom-up subtree content masks over the plan hierarchy (F2R-03b
@@ -330,7 +333,22 @@ impl FrameScene {
             labels,
             label_font_px,
             masks,
+            summaries: Vec::new(),
         })
+    }
+
+    /// Attach the request's summary planes (renderd, after the page
+    /// plan excluded their layers).
+    pub fn set_summaries(&mut self, planes: Vec<crate::summary::SummaryPlane>) {
+        self.summaries = planes;
+    }
+
+    pub fn summary_for(&self, layer_idx: u32) -> Option<&crate::summary::SummaryPlane> {
+        self.summaries.iter().find(|p| p.layer_idx == layer_idx)
+    }
+
+    pub fn has_summaries(&self) -> bool {
+        !self.summaries.is_empty()
     }
 
     pub fn top(&self) -> WsKey {

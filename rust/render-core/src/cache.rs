@@ -65,6 +65,8 @@ pub struct PlanCullCounts {
     pub thin_frames: u64,
     /// thin pages kept (the page hairline rule off, 2026-09-10)
     pub thin_pages: u64,
+    /// pages of summarized layers left unselected (M2)
+    pub summary_pages: u64,
 }
 
 impl PlanCullCounts {
@@ -79,6 +81,7 @@ impl PlanCullCounts {
             lod_swapped: st.lod_swapped,
             thin_frames: st.thin_frames,
             thin_pages: st.thin_pages_kept,
+            summary_pages: st.summary_pages,
         }
     }
 
@@ -92,6 +95,7 @@ impl PlanCullCounts {
         self.lod_swapped = self.lod_swapped.saturating_add(other.lod_swapped);
         self.thin_frames = self.thin_frames.saturating_add(other.thin_frames);
         self.thin_pages = self.thin_pages.saturating_add(other.thin_pages);
+        self.summary_pages = self.summary_pages.saturating_add(other.summary_pages);
     }
 }
 
@@ -228,6 +232,18 @@ fn rep_heap_bytes(rep: &Rep) -> u64 {
 /// here.
 pub struct Cache {
     vfs: Vfs,
+    dir: String,
+    /// design.ovo, opened on first use and re-opened when its size or
+    /// mtime changes (a rename publish from --occupancy-only while the
+    /// viewer is up; docs/OCCUPANCY_PLAN.ko.md §4)
+    occupancy: std::sync::Mutex<OccupancySlot>,
+}
+
+#[derive(Default)]
+struct OccupancySlot {
+    stat: Option<(u64, u64)>,
+    file: Option<std::sync::Arc<floe_vfs::occupancy::OvoFile>>,
+    error: Option<String>,
 }
 
 impl Cache {
@@ -237,7 +253,161 @@ impl Cache {
             .to_str()
             .ok_or_else(|| format!("cache path is not UTF-8: {}", path.display()))?;
         let vfs = Vfs::open(dir)?;
-        Ok(Self { vfs })
+        Ok(Self {
+            vfs,
+            dir: dir.to_string(),
+            occupancy: std::sync::Mutex::new(OccupancySlot::default()),
+        })
+    }
+
+    /// The cache's design.ovo if present and valid for THIS cache
+    /// (structure and identity), with its (size, mtime) stamp; the
+    /// error text says why not. Re-read when the file changes.
+    fn occupancy_file(
+        &self,
+    ) -> (
+        Option<std::sync::Arc<floe_vfs::occupancy::OvoFile>>,
+        Option<String>,
+        (u64, u64),
+    ) {
+        let path = format!("{}/design.ovo", self.dir);
+        let stat = std::fs::metadata(&path).ok().map(|m| {
+            let mtime = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() * 1_000_000_000 + d.subsec_nanos() as u64)
+                .unwrap_or(0);
+            (m.len(), mtime)
+        });
+        let mut slot = match self.occupancy.lock() {
+            Ok(slot) => slot,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if slot.stat != stat || (slot.file.is_none() && slot.error.is_none()) {
+            slot.stat = stat;
+            slot.file = None;
+            slot.error = None;
+            match stat {
+                None => slot.error = Some("no design.ovo".to_string()),
+                Some(_) => match floe_vfs::occupancy::OvoFile::open(&path) {
+                    Ok(file) => match file.validate_against(&self.vfs.ovm) {
+                        Ok(()) => slot.file = Some(std::sync::Arc::new(file)),
+                        Err(e) => slot.error = Some(e),
+                    },
+                    Err(e) => slot.error = Some(e),
+                },
+            }
+            if let Some(e) = &slot.error {
+                if stat.is_some() {
+                    eprintln!("[render-core] occupancy {}: none ({})", path, e);
+                }
+            }
+        }
+        (slot.file.clone(), slot.error.clone(), stat.unwrap_or((0, 0)))
+    }
+
+    /// Resolves visible-layer specs (names or L/D, as `layer_mask`) to
+    /// cache layer indices; None = every layer.
+    fn visible_indices(&self, specs: Option<&[String]>) -> Result<Vec<u32>, String> {
+        let layers = self.layers();
+        match specs {
+            None => Ok(layers.iter().map(|l| l.index).collect()),
+            Some(list) => {
+                let mut out: Vec<u32> = Vec::new();
+                for spec in list {
+                    let mut hit = false;
+                    for l in &layers {
+                        if l.name == *spec || format!("{}/{}", l.layer, l.datatype) == *spec {
+                            if !out.contains(&l.index) {
+                                out.push(l.index);
+                            }
+                            hit = true;
+                        }
+                    }
+                    if !hit {
+                        return Err(format!("layer {:?} not found", spec));
+                    }
+                }
+                out.sort_unstable();
+                Ok(out)
+            }
+        }
+    }
+
+    /// The summary decision of one request (docs/OCCUPANCY_PLAN.ko.md
+    /// §3, §6): every condition must hold or the request draws no
+    /// summary; per layer, only a file status of ok qualifies.
+    pub fn summary_selection(
+        &self,
+        request: &PlanRequest,
+        thin_keep: bool,
+        disabled: bool,
+    ) -> Result<crate::summary::SummarySelection, String> {
+        use crate::summary::{self, SummarySelection};
+        if !thin_keep {
+            return Ok(SummarySelection::none(summary::NONE_POLICY));
+        }
+        // a cut of 0 is the archival "exact" of `floe2 render
+        // --detail exact` (the wire keeps exact=0 there): no summary
+        if request.exact || request.cut_dbu == 0 {
+            return Ok(SummarySelection::none(summary::NONE_EXACT));
+        }
+        if request.depth != crate::request::FULL_DEPTH {
+            return Ok(SummarySelection::none(summary::NONE_DEPTH));
+        }
+        if disabled {
+            return Ok(SummarySelection::none(summary::NONE_OFF));
+        }
+        let (file, error, stamp) = self.occupancy_file();
+        let Some(file) = file else {
+            let reason = match error.as_deref() {
+                Some("no design.ovo") => summary::NONE_NOFILE,
+                _ => summary::NONE_INVALID,
+            };
+            return Ok(SummarySelection::none(reason));
+        };
+        let Some(level) = summary::level_for(file.cell_dbu, request.px_per_dbu, file.n_levels) else {
+            let mut none = SummarySelection::none(summary::NONE_NEAR);
+            none.base_cell_dbu = file.cell_dbu;
+            none.unit = file.unit;
+            none.stamp = stamp;
+            return Ok(none);
+        };
+        let visible = self.visible_indices(request.visible_layers.as_deref())?;
+        let planes = summary::planes_for(
+            &file,
+            level,
+            visible.iter().map(|&idx| (idx, idx as usize)),
+        );
+        let none = if planes.is_empty() { Some(summary::NONE_LAYERS) } else { None };
+        Ok(SummarySelection {
+            planes,
+            level,
+            base_cell_dbu: file.cell_dbu,
+            unit: file.unit,
+            none,
+            stamp,
+        })
+    }
+
+    /// The page plan of a request whose summary layers are drawn from
+    /// design.ovo: their pages are not planned (ViewReq::page_skip),
+    /// so nothing of theirs is decoded or rastered; the walk keeps
+    /// the visible set (frames, the other layers) - M3 may prune the
+    /// summary-only subtrees when no frames are wanted.
+    pub fn page_plan_request(
+        &self,
+        request: &PlanRequest,
+        selection: &crate::summary::SummarySelection,
+    ) -> Result<PlanRequest, String> {
+        if !selection.is_active() {
+            return Ok(request.clone());
+        }
+        Ok(PlanRequest {
+            summary_layers: selection.layer_indices(),
+            ..request.clone()
+        })
     }
 
     pub fn info(&self) -> CacheInfo {
@@ -458,6 +628,17 @@ impl Cache {
             },
             sub_cut_wash: request.sub_cut_wash && !request.exact,
             page_hairline: request.page_hairline,
+            page_skip: if request.summary_layers.is_empty() {
+                Vec::new()
+            } else {
+                let mut skip = vec![0u8; self.vfs.ovm.bs_width];
+                for &idx in &request.summary_layers {
+                    if idx < self.vfs.ovm.n_layers {
+                        floe_ovm::bit_set(&mut skip, idx as usize);
+                    }
+                }
+                skip
+            },
         })
     }
 

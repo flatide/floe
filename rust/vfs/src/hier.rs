@@ -202,6 +202,8 @@ pub struct WsCell {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct HierStats {
+    /// pages of summarized layers left unselected (ViewReq::page_skip)
+    pub summary_pages: u64,
     pub wc_cells: u64,
     pub wc_variants: u64,
     pub inst_edges: u64,
@@ -866,6 +868,15 @@ impl<'a> Hier<'a> {
             let pr = self.v.prange(pri);
             if !bit_test(&self.req.vis, pr.layer_idx as usize) {
                 self.st.culled_page_layer_roots += 1;
+                continue;
+            }
+            // an occupancy summary draws this layer (M2): its pages
+            // are neither selected nor decoded; the walk goes on for
+            // frames and the other layers
+            if !self.req.page_skip.is_empty()
+                && bit_test(&self.req.page_skip, pr.layer_idx as usize)
+            {
+                self.st.summary_pages += pr.page_count as u64;
                 continue;
             }
             if pr.pbvh_root == PBVH_NONE {
@@ -2151,6 +2162,7 @@ mod tests {
             px_per_dbu,
             sub_cut_wash: false,
                     page_hairline: false,
+                    page_skip: Vec::new(),
         }
     }
 
@@ -2392,6 +2404,7 @@ mod tests {
             px_per_dbu: 0.0,
                     sub_cut_wash: false,
                     page_hairline: false,
+                    page_skip: Vec::new(),
         };
         let plan = plan_hier(&v, &req, &HierOpts::default());
         assert_eq!(plan.pages, vec![1]);
@@ -3235,6 +3248,7 @@ mod tests {
             px_per_dbu: 0.0,
             sub_cut_wash: false,
                     page_hairline: false,
+                    page_skip: Vec::new(),
         }
     }
 
@@ -3418,6 +3432,11 @@ mod tests {
             {
                 let p = v.page(pi);
                 if !bit_test(&req.vis, p.layer_idx as usize) {
+                    continue;
+                }
+                if !req.page_skip.is_empty()
+                    && bit_test(&req.page_skip, p.layer_idx as usize)
+                {
                     continue;
                 }
                 if (p.max_w < cut && p.max_h < cut)
@@ -3768,6 +3787,7 @@ mod tests {
             px_per_dbu: 0.0,
                     sub_cut_wash: false,
                     page_hairline: false,
+                    page_skip: Vec::new(),
         };
         // brute equality needs the corner windows, not the whole
         // spanning box - use two-box behavior via narrow checks

@@ -1042,6 +1042,7 @@ mod tests {
             px_per_dbu: px,
             sub_cut_wash: false,
                     page_hairline: false,
+                    page_skip: Vec::new(),
         }
     }
 

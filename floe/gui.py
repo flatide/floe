@@ -3584,6 +3584,19 @@ class Viewer:
                             # measurement of the lifted rule reads
                             text += ", thin pages %s kept" % fmt_count(
                                 culls["thin_pages"])
+                    summ = res.get("summary") or {}
+                    if summ.get("layers"):
+                        # occupancy summary (M2): these layers were
+                        # drawn from design.ovo, not their pages -
+                        # pick/snap do not see them in this view
+                        text += (", summary %d layers %s cells (level %d,"
+                                 " %g um; not pickable)" % (
+                                     summ["layers"], fmt_count(summ["cells"]),
+                                     summ["level"], summ["cell_um"]))
+                    elif (summ.get("none") not in (None, "-", "policy",
+                                                   "exact")
+                          and self._effective_thin() == "keep"):
+                        text += ", summary: none (%s)" % summ["none"]
                     if res.get("labels_truncated"):
                         text += ", labels partial"
                     if res.get("over_budget_pages"):

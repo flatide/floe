@@ -2048,6 +2048,7 @@ fn frontier_json_planned(v: &floe_ovm::Ovm) -> String {
             px_per_dbu,
             sub_cut_wash: false,
                     page_hairline: true,
+                    page_skip: Vec::new(),
         };
         let plan = floe_vfs::hier::plan_hier(v, &req, &opts);
         let (boxes, truncated) = floe_vfs::hier::frontier_boxes(
@@ -6331,6 +6332,7 @@ fn make_req(
         px_per_dbu: px_per_um / s,
         sub_cut_wash: false,
             page_hairline: true,
+            page_skip: Vec::new(),
     }
 }
 

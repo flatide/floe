@@ -244,6 +244,10 @@ pub struct GeometryRasterReport {
     pub label_pixel_paints: u64,
     pub labels_truncated: bool,
     pub partial: bool,
+    /// occupancy summary (docs/OCCUPANCY_PLAN.ko.md M2): cells of the
+    /// chosen level that met the frame, and the pixels they painted
+    pub summary_cell_paints: u64,
+    pub summary_pixel_paints: u64,
 }
 
 pub fn render_geometry_occupancy(
@@ -832,6 +836,8 @@ fn render_geometry_impl(
             label_pixel_paints: 0,
             labels_truncated,
             partial: scene.is_partial(),
+            summary_cell_paints: counters.summary_cells_drawn,
+            summary_pixel_paints: counters.summary_pixels_drawn,
         });
     }
     let mut frame = assemble_tiles(request, tiles, tile_columns, tile_rows)?;
@@ -873,6 +879,8 @@ fn render_geometry_impl(
         label_pixel_paints: counters.label_pixels_drawn,
         labels_truncated,
         partial: scene.is_partial(),
+        summary_cell_paints: counters.summary_cells_drawn,
+        summary_pixel_paints: counters.summary_pixels_drawn,
     })
 }
 
@@ -1608,6 +1616,11 @@ fn raster_tile_from_bin(
             stroke: StrokeStyle::Solid,
             stroke_width: layer.outline_width,
         };
+        // an occupancy summary paints in the layer's own slot (M2):
+        // the plane's page items are empty for a summarized layer
+        if let Some(summary) = scene.summary_for(layer.layer_idx) {
+            paint_summary_plane(band, request, summary, paint, counters)?;
+        }
         replay_plane_items(
             scene,
             request,
@@ -1960,6 +1973,19 @@ fn raster_tile_walk_styled(
     }
     for layer in &styled.layers {
         check_cancelled(guard)?;
+        let paint = PaintStyle {
+            color: if styled.mono {
+                monochrome(layer.color)
+            } else {
+                layer.color
+            },
+            fill: layer.fill,
+            stroke: StrokeStyle::Solid,
+            stroke_width: layer.outline_width,
+        };
+        if let Some(summary) = scene.summary_for(layer.layer_idx) {
+            paint_summary_plane(band, request, summary, paint, counters)?;
+        }
         render_cell(
             scene,
             request,
@@ -1969,16 +1995,7 @@ fn raster_tile_walk_styled(
             counters,
             GeometrySelection::Layer(layer.layer_idx),
             SubtreePrune::Layer(scene.layer_mask_bit(layer.layer_idx)),
-            PaintStyle {
-                color: if styled.mono {
-                    monochrome(layer.color)
-                } else {
-                    layer.color
-                },
-                fill: layer.fill,
-                stroke: StrokeStyle::Solid,
-                stroke_width: layer.outline_width,
-            },
+            paint,
             guard,
             scene.top(),
             OrthoTransform::identity(),
@@ -2401,10 +2418,16 @@ struct RasterCounters {
     deferred_frame_records: u64,
     label_tiles_drawn: u64,
     label_pixels_drawn: u64,
+    summary_cells_drawn: u64,
+    summary_pixels_drawn: u64,
 }
 
 impl RasterCounters {
     fn add(&mut self, other: &Self) {
+        self.summary_cells_drawn = self.summary_cells_drawn.saturating_add(other.summary_cells_drawn);
+        self.summary_pixels_drawn = self
+            .summary_pixels_drawn
+            .saturating_add(other.summary_pixels_drawn);
         self.rect_records = self.rect_records.saturating_add(other.rect_records);
         self.rectangle_members_drawn = self
             .rectangle_members_drawn
@@ -3580,6 +3603,134 @@ fn fill_world_polygon(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Per-pixel interior fill rule (the span forms in `fill_span` match
+/// it pixel for pixel); the summary mask paints pixel by pixel.
+fn fill_pixel_on(fill: LayerFill, row: u32, col: u32, height: u32) -> bool {
+    match fill {
+        LayerFill::Solid => true,
+        LayerFill::Clear => false,
+        LayerFill::Speckle => (row + col) & 1 == 0,
+        LayerFill::Pattern(rows) => {
+            let source_row = row.wrapping_add(height - 1) & 15;
+            let word = rows[source_row as usize];
+            word & (1 << (15 - (col & 15))) != 0
+        }
+    }
+}
+
+/// Occupancy summary of one layer into one tile (docs/OCCUPANCY_PLAN
+/// .ko.md §3, §6 step 4): the level's occupied cells that meet the
+/// tile (plus a one-pixel halo) are projected to a device mask - a
+/// pixel is lit when its square meets an occupied cell, the plain
+/// floor/ceil mapping, not the hairline parity - and the mask is
+/// styled: a lit pixel with an unlit 4-neighbour is boundary and takes
+/// the colour solid (one pixel, whatever the stroke width), an
+/// interior pixel takes the layer's fill rule (solid / speckle /
+/// pattern / clear). The halo makes the boundary decision independent
+/// of the tile grid, so pixels stay tile-size invariant.
+fn paint_summary_plane(
+    band: &mut RasterBand,
+    request: &GeometryRasterRequest,
+    summary: &crate::summary::SummaryPlane,
+    paint: PaintStyle,
+    counters: &mut RasterCounters,
+) -> Result<(), String> {
+    let view = request.view;
+    let width = request.width as f64;
+    let height = request.height as f64;
+    let span_x = view.x1 - view.x0;
+    let span_y = view.y1 - view.y0;
+    // the halo window in device pixels (columns/rows may be -1 or the
+    // frame size; a pixel outside the frame still gets its mask value
+    // from the cells, so the boundary test at the frame edge is real)
+    let hc0 = band.col0 as i64 - 1;
+    let hc1 = band.col1 as i64 + 1;
+    let hr0 = band.row0 as i64 - 1;
+    let hr1 = band.row1 as i64 + 1;
+    let hw = (hc1 - hc0) as usize;
+    let hh = (hr1 - hr0) as usize;
+    let mut mask = vec![false; hw * hh];
+    // world bounds of the halo window
+    let wx0 = view.x0 + hc0 as f64 * span_x / width;
+    let wx1 = view.x0 + hc1 as f64 * span_x / width;
+    let wy0 = view.y1 - hr1 as f64 * span_y / height;
+    let wy1 = view.y1 - hr0 as f64 * span_y / height;
+    let cell = summary.cell_dbu as f64;
+    let (ox, oy) = (summary.x0 as f64, summary.y0 as f64);
+    if summary.w == 0 || summary.h == 0 || !(cell > 0.0) {
+        return Ok(());
+    }
+    let i0 = ((wx0 - ox) / cell).floor().max(0.0) as i64;
+    let i1 = (((wx1 - ox) / cell).ceil() as i64 - 1).min(summary.w as i64 - 1);
+    let j0 = ((wy0 - oy) / cell).floor().max(0.0) as i64;
+    let j1 = (((wy1 - oy) / cell).ceil() as i64 - 1).min(summary.h as i64 - 1);
+    if i1 < i0 || j1 < j0 {
+        return Ok(());
+    }
+    let bits = summary.bits();
+    let row_bytes = summary.row_bytes();
+    let mut cells = 0u64;
+    for j in j0..=j1 {
+        let row = &bits[j as usize * row_bytes..(j as usize + 1) * row_bytes];
+        let mut i = i0;
+        while i <= i1 {
+            let byte = row[(i / 8) as usize];
+            if byte == 0 {
+                // eight empty cells at once
+                i = (i / 8 + 1) * 8;
+                continue;
+            }
+            if (byte >> (i % 8)) & 1 == 1 {
+                cells += 1;
+                let cx0 = ox + i as f64 * cell;
+                let cx1 = cx0 + cell;
+                let cy0 = oy + j as f64 * cell;
+                let cy1 = cy0 + cell;
+                // pixels whose square meets the cell (open on the far
+                // side: a cell ending on a pixel boundary stops there)
+                let pc0 = ((cx0 - view.x0) * width / span_x).floor() as i64;
+                let pc1 = ((cx1 - view.x0) * width / span_x).ceil() as i64 - 1;
+                let pr0 = ((view.y1 - cy1) * height / span_y).floor() as i64;
+                let pr1 = ((view.y1 - cy0) * height / span_y).ceil() as i64 - 1;
+                let pc0 = pc0.max(hc0);
+                let pc1 = pc1.min(hc1 - 1);
+                let pr0 = pr0.max(hr0);
+                let pr1 = pr1.min(hr1 - 1);
+                for r in pr0..=pr1 {
+                    let base = (r - hr0) as usize * hw;
+                    for c in pc0..=pc1 {
+                        mask[base + (c - hc0) as usize] = true;
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+    counters.summary_cells_drawn = counters.summary_cells_drawn.saturating_add(cells);
+    let tile_width = band.tile_width() as usize;
+    let mut painted = 0u64;
+    for r in band.row0..band.row1 {
+        let mr = (r as i64 - hr0) as usize;
+        for c in band.col0..band.col1 {
+            let mc = (c as i64 - hc0) as usize;
+            if !mask[mr * hw + mc] {
+                continue;
+            }
+            let boundary = !mask[mr * hw + mc - 1]
+                || !mask[mr * hw + mc + 1]
+                || !mask[(mr - 1) * hw + mc]
+                || !mask[(mr + 1) * hw + mc];
+            if boundary || fill_pixel_on(paint.fill, r, c, request.height) {
+                let offset = ((r - band.row0) as usize * tile_width + (c - band.col0) as usize) * 4;
+                band.pixels[offset..offset + 4].copy_from_slice(&paint.color);
+                painted += 1;
+            }
+        }
+    }
+    counters.summary_pixels_drawn = counters.summary_pixels_drawn.saturating_add(painted);
+    Ok(())
+}
+
 fn fill_device_rect_with_phase(
     band: &mut RasterBand,
     request: &GeometryRasterRequest,

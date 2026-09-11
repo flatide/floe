@@ -104,6 +104,13 @@ def _wire_int(fields, name, default=0):
         return default
 
 
+def _wire_float(fields, name, default=0.0):
+    try:
+        return float(fields.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
 def _wire_hex(fields, name):
     value = fields.get(name)
     if value is None:
@@ -1080,6 +1087,21 @@ class RustRenderWorker:
                 "thin_frames": _wire_int(fields, "thin_frames"),
                 # thin pages kept (page hairline cull off, 2026-09-10)
                 "thin_pages": _wire_int(fields, "thin_pages"),
+            },
+            # occupancy summary (docs/OCCUPANCY_PLAN.ko.md M2): layers
+            # drawn from design.ovo instead of their pages, the cells
+            # and pixels painted, the pyramid level and its cell, or
+            # why there was none (policy/exact/depth/off/nofile/
+            # invalid/near/layers; "-" when active)
+            "summary": {
+                "layers": _wire_int(fields, "summary_layers"),
+                "cells": _wire_int(fields, "summary_cells"),
+                "pixels": _wire_int(fields, "summary_pixels"),
+                "level": _wire_int(fields, "summary_level"),
+                "cell_um": _wire_float(fields, "summary_cell_um"),
+                "none": fields.get("summary_none", "-"),
+                # pages of the summarized layers the plan left out
+                "pages_skipped": _wire_int(fields, "summary_pages"),
             },
             "text_plan_ms": _wire_int(fields, "text_plan_us") / 1000.0,
             "text_place_records": _wire_int(fields, "text_place_records"),

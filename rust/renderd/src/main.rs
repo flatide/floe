@@ -746,10 +746,34 @@ struct RetainedKey {
     /// and vice versa - 16 tiles reused, the thin lines stayed or
     /// stayed missing; the published query scene shares this key)
     thin_keep: bool,
+    /// the occupancy summary the frame was drawn with (M2): its level
+    /// and the file's identity, so a frame drawn from an older
+    /// design.ovo (or without one) is never reused after a rebuild
+    summary: SummaryKey,
+}
+
+/// What of the summary decision a retained frame depends on.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct SummaryKey {
+    level: Option<u32>,
+    stamp: (u64, u64),
+}
+
+impl SummaryKey {
+    fn of(selection: &floe_render_core::SummarySelection) -> Self {
+        SummaryKey {
+            level: selection.is_active().then_some(selection.level),
+            stamp: selection.stamp,
+        }
+    }
 }
 
 impl RetainedKey {
     fn new(command: &RenderCommand, style_epoch: Option<u64>) -> Self {
+        Self::with_summary(command, style_epoch, SummaryKey::default())
+    }
+
+    fn with_summary(command: &RenderCommand, style_epoch: Option<u64>, summary: SummaryKey) -> Self {
         Self {
             depth: command.depth,
             cut_px: command.cut_px.to_bits(),
@@ -759,6 +783,7 @@ impl RetainedKey {
             decode_pages: command.decode_pages,
             style_epoch,
             thin_keep: command.thin_keep,
+            summary,
         }
     }
 }
@@ -858,6 +883,8 @@ struct FramePixels {
     rep_members_drawn: u64,
     hier_cells_visited: u64,
     subtrees_pruned: u64,
+    summary_cells: u64,
+    summary_pixels: u64,
 }
 
 fn render_worker(
@@ -963,6 +990,7 @@ fn run_clip(
         exact: true,
         sub_cut_wash: false,
         page_hairline: true,
+        summary_layers: Vec::new(),
     };
     let plan_started = Instant::now();
     let planned = cache.plan(&request)?;
@@ -1721,14 +1749,26 @@ fn run_render(
     published_scene: &SharedPublishedScene,
 ) -> Result<(), String> {
     let mut command = command.clone();
-    let pan_reuse = prepare_pan_reuse(state, &mut command);
-    let command = &command;
     let cache = state
         .cache
         .as_ref()
         .ok_or_else(|| "cache not open".to_string())?;
+    // occupancy summary (docs/OCCUPANCY_PLAN.ko.md M2): decided per
+    // request before any reuse, since the retained-frame and published-
+    // scene keys carry it; FLOE_RUST_OCCUPANCY=off is the kill switch
+    let summary = cache.summary_selection(
+        &make_plan_request(cache, &command)?,
+        command.thin_keep,
+        std::env::var("FLOE_RUST_OCCUPANCY").as_deref() == Ok("off"),
+    )?;
+    let summary_key = SummaryKey::of(&summary);
+    let pan_reuse = prepare_pan_reuse(state, &mut command, &summary_key);
+    let command = &command;
     check_generation(cancellation, command.generation)?;
     let request = make_plan_request(cache, command)?;
+    // the summarized layers leave the page plan (§6 step 3): no page
+    // selection, page BVH or child walk for them
+    let page_request = cache.page_plan_request(&request, &summary)?;
     // §F2R-21 label re-synthesis: when a retained frame (the margin
     // prefetch) covers the WHOLE request, its geometry is a pure
     // memcpy - skip the page plan and decode entirely, plan only the
@@ -1745,11 +1785,11 @@ fn run_render(
     let label_only = pan_reuse
         .as_ref()
         .is_some_and(|reuse| reuse.valid == [0, 0, command.width, command.height])
-        && published_scene_serves(published_scene, command, state.style_epoch)?;
+        && published_scene_serves(published_scene, command, state.style_epoch, &summary_key)?;
     let planned = if label_only {
         cache.empty_plan()
     } else {
-        cache.plan(&request)?
+        cache.plan(&page_request)?
     };
     check_generation(cancellation, command.generation)?;
     let planned_labels = if command.labels {
@@ -1854,13 +1894,17 @@ fn run_render(
         decoded_pages.append(&mut round_pages);
         check_generation(cancellation, command.generation)?;
         let scene_started = Instant::now();
-        let scene = Arc::new(FrameScene::new_shared_with_labels(
+        let mut scene = FrameScene::new_shared_with_labels(
             cache,
             Arc::clone(&plan),
             decoded_pages.clone(),
             Arc::clone(&labels),
             command.label_font_px,
-        )?);
+        )?;
+        if summary.is_active() {
+            scene.set_summaries(summary.planes.clone());
+        }
+        let scene = Arc::new(scene);
         let scene_us = elapsed_us(scene_started);
         check_generation(cancellation, command.generation)?;
 
@@ -1954,6 +1998,8 @@ fn run_render(
                 rep_members_drawn: report.stats.rep_members_drawn,
                 hier_cells_visited: report.stats.hier_cells_visited,
                 subtrees_pruned: report.stats.subtrees_pruned,
+                summary_cells: report.summary_cell_paints,
+                summary_pixels: report.summary_pixel_paints,
             }
         };
         check_generation(cancellation, command.generation)?;
@@ -1998,7 +2044,7 @@ fn run_render(
                 scene: Arc::clone(&scene),
                 layers: Arc::clone(&query_layers),
                 cell_names: Arc::clone(&query_cell_names),
-                key: RetainedKey::new(command, state.style_epoch),
+                key: RetainedKey::with_summary(command, state.style_epoch, summary_key.clone()),
                 view: command.view,
             }));
         }
@@ -2016,7 +2062,7 @@ fn run_render(
                 store_retained(
                     &mut state.retained,
                     RetainedFrame {
-                        key: RetainedKey::new(command, state.style_epoch),
+                        key: RetainedKey::with_summary(command, state.style_epoch, summary_key.clone()),
                         view: command.view,
                         frame,
                     },
@@ -2032,7 +2078,7 @@ fn run_render(
         respond(
             responses,
             format!(
-                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={}",
+                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={}",
                 command.generation,
                 round_index + 1,
                 final_round as u8,
@@ -2108,6 +2154,13 @@ fn run_render(
                 planned.summary.culls.lod_swapped,
                 planned.summary.culls.thin_frames,
                 planned.summary.culls.thin_pages,
+                summary.planes.len(),
+                pixels.summary_cells,
+                pixels.summary_pixels,
+                summary.level,
+                summary.cell_um(),
+                summary.none.unwrap_or("-"),
+                planned.summary.culls.summary_pages,
             ),
         );
         // Cost-aware refinement (F2R-09 REOPEN, §3.15): every round
@@ -2222,11 +2275,12 @@ fn published_scene_serves(
     shared: &SharedPublishedScene,
     command: &RenderCommand,
     style_epoch: Option<u64>,
+    summary: &SummaryKey,
 ) -> Result<bool, String> {
     let Some(published) = current_scene(shared)? else {
         return Ok(false);
     };
-    Ok(published.key == RetainedKey::new(command, style_epoch)
+    Ok(published.key == RetainedKey::with_summary(command, style_epoch, summary.clone())
         && view_contains(&published.view, &command.view))
 }
 
@@ -2291,11 +2345,15 @@ fn retention_enabled(command: &RenderCommand) -> bool {
         && retained_budget_bytes() > 0
 }
 
-fn prepare_pan_reuse(state: &WorkerState, command: &mut RenderCommand) -> Option<FrameReuse> {
+fn prepare_pan_reuse(
+    state: &WorkerState,
+    command: &mut RenderCommand,
+    summary: &SummaryKey,
+) -> Option<FrameReuse> {
     if !retention_enabled(command) {
         return None;
     }
-    let key = RetainedKey::new(command, state.style_epoch);
+    let key = RetainedKey::with_summary(command, state.style_epoch, summary.clone());
     let retained = state
         .retained
         .iter()
@@ -2409,6 +2467,7 @@ fn make_plan_request(cache: &Cache, command: &RenderCommand) -> Result<PlanReque
         exact: command.exact,
         sub_cut_wash: false,
         page_hairline: !command.thin_keep,
+        summary_layers: Vec::new(),
     };
     request.validate()?;
     if cache.unit() <= 0.0 {
@@ -3115,7 +3174,7 @@ mod tests {
         assert!(view_contains(&[0.0, 0.0, 10.0, 10.0], &[0.0, 0.0, 10.0, 10.0]));
         assert!(!view_contains(&[0.0, 0.0, 10.0, 10.0], &[0.0, 0.0, 10.0, 11.0]));
         let shared: SharedPublishedScene = Arc::new(RwLock::new(None));
-        assert!(!published_scene_serves(&shared, &command, Some(7)).unwrap());
+        assert!(!published_scene_serves(&shared, &command, Some(7), &SummaryKey::default()).unwrap());
     }
 
     #[test]
@@ -3180,7 +3239,7 @@ mod tests {
             .unwrap()
             .unwrap(),
         );
-        let reuse = prepare_pan_reuse(&state, &mut margin).expect("margin maps the center");
+        let reuse = prepare_pan_reuse(&state, &mut margin, &SummaryKey::default()).expect("margin maps the center");
         assert_eq!(reuse.valid, [16, 16, 48, 48]);
         // margin pixel (16,16) is retained pixel (0,0)
         assert_eq!(&reuse.base.pixels()[(16 * 64 + 16) * 4..][..4], &pixels[..4]);
@@ -3199,7 +3258,7 @@ mod tests {
             .unwrap()
             .unwrap(),
         );
-        let reuse = prepare_pan_reuse(&state, &mut inside).expect("viewport maps out");
+        let reuse = prepare_pan_reuse(&state, &mut inside, &SummaryKey::default()).expect("viewport maps out");
         assert_eq!(reuse.valid, [0, 0, 32, 32], "fully covered by the margin");
 
         // Vertical pan: row 0 is the TOP (world y1), so a pan UP in
@@ -3221,7 +3280,7 @@ mod tests {
             .unwrap()
             .unwrap(),
         );
-        let reuse = prepare_pan_reuse(&state, &mut panned_up).expect("vertical pan maps");
+        let reuse = prepare_pan_reuse(&state, &mut panned_up, &SummaryKey::default()).expect("vertical pan maps");
         // request y1 = 480 sits 16 rows above retained y1 = 320:
         // request rows 16..32 hold retained rows 0..16.
         assert_eq!(reuse.valid, [0, 16, 32, 32]);

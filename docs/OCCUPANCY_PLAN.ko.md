@@ -230,7 +230,7 @@ level L  cell = base_cell_dbu × 2^L, grid (w, h) = ceil(span/cell),
 | 단계 | 내용 | 판정 |
 |---|---|---|
 | M1 | `design.ovo` 형식·유효성·atomic 게시, 도형 교차 마킹(rect/polygon/path/반복), 처리 한계·취소, `--occupancy`(opt-in)·`--occupancy-um`·`--occupancy-only`, jobdeck 래퍼 전달, gate 1·5(생성 부분) | **완료 2026-09-11(RENDERD 0.12.79, §12)**: fixture·valmini 오라클 완전 일치. 실칩 생성 시간·크기는 사용자 실측 대기 |
-| M2 | renderd 전용 마스크 경로(단일 소스), 5개 조건, 레벨 선택, 레이어 순서, pick/snap 제외, 킬 스위치, gate 2·3·5 | 단일 소스 keep 광역뷰가 요약으로 그려짐, cull·근접뷰·exact·depth 제한 불변 |
+| M2 | renderd 전용 마스크 경로(단일 소스), 5개 조건, 레벨 선택, 레이어 순서, pick/snap 제외, 킬 스위치, gate 2·3·5 | **완료 2026-09-11(RENDERD 0.12.80, §12)**: 단일 소스 keep 광역뷰가 요약으로 그려짐, cull·근접뷰·exact·depth 제한·킬 스위치 픽셀 불변 |
 | M3 | 플래너에서 요약 레이어의 페이지·계층 생략, `--explain summary`, 카운터 | 광역뷰 플랜의 페이지 선택·cbvh가 요약 레이어에서 0 |
 | M4 | 덱 통합(소스 뷰 레벨, pass 대체, wash 억제, depth/exact 조건), gate 4 | 덱 fit 뷰 시간 |
 | M5 | 실칩 실측 8, base cell·기본 on/off 확정, 문서(JOBDECK §10·FLOE2_OPTIMIZATION 결함 B) | 목표 시간·지표 달성 여부로 기본값 결정 |
@@ -295,6 +295,42 @@ extra 0). 상위 레벨 == OR 풀링. valmini 색인 + 요약 0.5 s.
 남은 M1 판정: 실칩 생성 시간·크기·상한 도달·`paths_skipped`(사용자가 `floe2
 index <src> --occupancy-only`로 실행해 `[vfs] occupancy …` 줄과 `floe-index
 occupancy <cache>` 첫 줄을 기록).
+
+### M2 구현 기록 (2026-09-11, RENDERD 0.12.80)
+
+구현: `render-core/src/summary.rs`(SummaryPlane·SummarySelection·레벨 선택),
+`Cache::summary_selection`(조건 판정, `.ovo`를 첫 사용 때 열고 size·mtime이
+바뀌면 다시 염), `Cache::page_plan_request`, `FrameScene::set_summaries`,
+raster `paint_summary_plane`(타일 밴드마다 1 px 후광을 포함한 화면 마스크 →
+경계 solid/내부 채움), renderd `run_render`(요청마다 결정, RetainedKey에 요약
+레벨·파일 stamp, 프레임 줄 `summary_layers/cells/pixels/level/cell_um/none/
+pages`), 어댑터 `summary` 딕셔너리, 뷰어 상태줄 `summary N layers … (level k,
+x um; not pickable)` 또는 keep 정책에서 `summary: none (<이유>)`. 킬 스위치
+`FLOE_RUST_OCCUPANCY=off`. gate `RenderTests`(7건).
+
+검증(2000 × 2000 µm fixture, 200 px = 10 µm/px, 4 µm 셀 → level 1 = 8 µm =
+0.8 px): 화면 마스크 == Python으로 투영한 level 1(pan 위상 0/¼/½/¾ px, 250 px에서
+level 1 = 1.0 px, 260 px에서 level 0, 600 px에서 `near`로 페이지 경로와 픽셀
+동일); exact(cut 0) 대비 missed_far(1 px 이웃 없는 exact 픽셀) 0, extra_far(2 px
+안에 exact 없는 요약 픽셀) 0, L자의 7 px 빈 모서리 보존; `thin=cull`·cut 0·
+depth 0·킬 스위치·파일 없음·잘린 파일 모두 페이지 경로와 픽셀 동일(`none=
+policy|exact|depth|off|nofile|invalid`); `none:work` 레이어는 페이지 경로로 자기
+순서에 그려져 요약 레이어 위를 덮음; speckle 채움에서 내부 체커·경계 solid,
+선폭 3에서도 경계 1 px; `--occupancy-only`로 바꾼 파일을 열린 데몬이 같은 뷰의
+다음 프레임에 반영(retained 프레임 재사용 안 함).
+
+계획과 다른 점:
+- **적용 조건의 exact**: 어댑터의 `--detail exact`는 wire에서 `cut=0 exact=0`
+  이므로 `cut_dbu == 0`도 exact로 본다(`none=exact`).
+- **§6 3단계(vis에서 제외)** 대신 플래너 `ViewReq::page_skip`(요약 레이어의
+  페이지만 선택·디코드 생략, `summary_pages` 카운터). vis에서 빼면 모든 가시
+  레이어가 요약될 때 top 셀·프레임까지 사라져 scene이 무효가 됐다. 순회는
+  그대로이므로 요약 전용 서브트리의 걷기 비용은 남는다(M3 후보: 프레임이 꺼진
+  요청에서 프루닝).
+- pick/snap 제외는 별도 코드가 아니라 결과다: 게시 scene에 요약 레이어의 페이지가
+  없으므로 found=0. 상태줄이 `not pickable`을 말한다.
+- 요약 pass 순서: 레이어 루프의 자기 슬롯에서 페이지 항목(비어 있음) 직전에
+  칠한다(덱은 M4).
 
 ## 11. 1차 계획 리뷰(7건, 2026-09-11) 반영
 

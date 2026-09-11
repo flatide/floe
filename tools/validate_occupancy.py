@@ -560,6 +560,309 @@ sys.exit(9)
         self.assertEqual(read_ovo(caches[1] / "design.ovo")["cell"], 4000)
 
 
+
+# ------------------------------------------------------- M2: rendering
+
+def write_thinwide(path):
+    """2000 x 2000 um: 1/0 all-thin lines (0.1 x 40 um on a 100 um
+    grid), 2/0 a solid block and an L with a 70 um empty corner, 3/0
+    one 1500 um square (over the gate's work limit -> none:work, so it
+    keeps the page path and sits ABOVE the summary layers)."""
+    ly = db.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell("THINWIDE")
+    l1, l2, l3 = ly.layer(1, 0), ly.layer(2, 0), ly.layer(3, 0)
+    for x in range(50, 2000, 100):
+        for y in range(50, 2000, 100):
+            top.shapes(l1).insert(db.Box(x * UM, y * UM, x * UM + 100,
+                                         (y + 40) * UM))
+    top.shapes(l2).insert(db.Box(1200 * UM, 1200 * UM, 1400 * UM, 1400 * UM))
+    top.shapes(l2).insert(db.Polygon([
+        P(200 * UM, 1200 * UM), P(300 * UM, 1200 * UM), P(300 * UM, 1230 * UM),
+        P(230 * UM, 1230 * UM), P(230 * UM, 1300 * UM), P(200 * UM, 1300 * UM)]))
+    top.shapes(l3).insert(db.Box(100 * UM, 100 * UM, 1600 * UM, 1600 * UM))
+    ly.write(str(path))
+    ly._destroy()
+
+
+def expected_mask(level, bbox_dbu, width, height, halo=0):
+    """Pixels whose square meets an occupied cell of `level` under the
+    render's view (the plain floor/ceil projection the summary path
+    uses, mirrored operation by operation); `halo` extends the pixel
+    range beyond the frame for boundary tests."""
+    w, h, bits = level["w"], level["h"], level["bits"]
+    cell, x0, y0 = level["cell"], level["x0"], level["y0"]
+    vx0, vy0, vx1, vy1 = (float(v) for v in bbox_dbu)
+    span_x, span_y = vx1 - vx0, vy1 - vy0
+    lit = set()
+    rb = (w + 7) // 8
+    for j in range(h):
+        row = bits[j * rb:(j + 1) * rb]
+        if not any(row):
+            continue
+        for i in range(w):
+            if not (row[i // 8] >> (i % 8)) & 1:
+                continue
+            cx0 = x0 + i * cell
+            cx1 = cx0 + cell
+            cy0 = y0 + j * cell
+            cy1 = cy0 + cell
+            import math
+            pc0 = math.floor((cx0 - vx0) * width / span_x)
+            pc1 = math.ceil((cx1 - vx0) * width / span_x) - 1
+            pr0 = math.floor((vy1 - cy1) * height / span_y)
+            pr1 = math.ceil((vy1 - cy0) * height / span_y) - 1
+            for r in range(max(pr0, -halo), min(pr1, height - 1 + halo) + 1):
+                for c in range(max(pc0, -halo), min(pc1, width - 1 + halo) + 1):
+                    lit.add((c, r))
+    return lit
+
+
+def ovo_level(ovo, key, lv):
+    layer = next(l for l in ovo["layers"] if l["key"] == key)
+    w, h, bits = layer["levels"][lv]
+    return dict(w=w, h=h, bits=bits, cell=ovo["cell"] << lv,
+                x0=ovo["bbox"][0], y0=ovo["bbox"][1])
+
+
+def lit_pixels(rgba, width, height):
+    return {(i % width, i // width) for i in range(width * height)
+            if rgba[4 * i] or rgba[4 * i + 1] or rgba[4 * i + 2]}
+
+
+def near(pixel, pixels, d):
+    x, y = pixel
+    return any((x + dx, y + dy) in pixels for dx in range(-d, d + 1)
+               for dy in range(-d, d + 1))
+
+
+class RenderTests(unittest.TestCase):
+    """M2 (docs/OCCUPANCY_PLAN.ko.md gates 2, 3 and the render half of
+    5): the wide-view mask equals the projected level at every pan
+    phase, the level follows the pixel size, the mask is conservative
+    against the exact render and keeps the empty space, cull / exact /
+    limited-depth requests are untouched, the kill switch works, a
+    none:work layer keeps the page path in its own slot above the
+    summary, and a rebuilt design.ovo is picked up by a running daemon
+    (no stale retained frame)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.src = TMP / "thinwide.oas"
+        write_thinwide(cls.src)
+        cls.cache = Path(str(cls.src) + ".floe")
+        floe_index("vfs", cls.src, cls.cache, "--occupancy", "--occupancy-um",
+                   "4", "--occupancy-max-work", "100000", "--no-lod",
+                   "--slow-cell-s", "999", "--jobs", "2")
+        rows = [l for l in floe_index("occupancy", cls.cache).stdout.splitlines()
+                if l.startswith("layer ")]
+        assert any("ld=3/0 status=none:work" in r for r in rows), rows
+        assert sum("status=ok" in r for r in rows) == 2, rows
+        os.environ["FLOE_RENDERD_BIN"] = str(
+            ROOT / "rust" / "target" / "release" / "floe-renderd")
+        os.environ.pop("FLOE_RUST_OCCUPANCY", None)
+        cls.worker = cls._start_worker()
+        os.environ["FLOE_RUST_OCCUPANCY"] = "off"
+        cls.worker_off = cls._start_worker()
+        del os.environ["FLOE_RUST_OCCUPANCY"]
+        cls.gen = 100
+
+    @classmethod
+    def tearDownClass(cls):
+        for w in (cls.worker, cls.worker_off):
+            try:
+                w.stop()
+            except Exception:
+                pass
+
+    @classmethod
+    def _start_worker(cls):
+        sys.path.insert(0, str(ROOT))
+        from floe.cache import Cache
+        from floe.rust_render import RustRenderWorker
+        cache = Cache(str(cls.src))
+        cache.load()
+        worker = RustRenderWorker(cache)
+        worker.start()
+        return worker
+
+    @classmethod
+    def _render(cls, worker, bbox_um=(0, 0, 2000, 2000), px=200, cut_px=1.0,
+                thin="keep", visible=None, depth=None, fill="solid",
+                width_px=1):
+        cls.gen += 1
+        gen = cls.gen
+        solid = "\n".join(["*" * 16] * 16)
+        keys = [(int(l["layer"]), int(l["datatype"]))
+                for l in worker.cache.meta["layers"]]
+        # speckle is the worker's default fill: only the widths are sent
+        worker.submit({"kind": "repattern",
+                       "fills": [] if fill == "speckle"
+                       else [(k, solid) for k in keys],
+                       "widths": [(k, width_px) for k in keys]})
+        bbox = tuple(float(v * UM) for v in bbox_um)
+        job = {"kind": "render", "gen": gen, "scope": "headless",
+               "bbox": bbox, "view": None, "w": px, "h": px, "depth": depth,
+               "cut_px": cut_px, "lod": False, "frames": False,
+               "labels": False, "abstract": False, "visible": visible,
+               "frame_format": "raw", "thin": thin}
+        worker.submit(job)
+        while True:
+            res = worker.res.get(timeout=60)
+            if res.get("kind") == "error":
+                raise AssertionError("renderd: %s" % res.get("msg"))
+            if res.get("kind") != "frame" or res.get("gen") != gen:
+                continue
+            if res.get("refining"):
+                continue
+            return lit_pixels(res["rgba"], px, px), res["summary"], bbox
+
+    def test_the_wide_view_mask_equals_the_projected_level_at_every_pan_phase(self):
+        ovo = read_ovo(self.cache / "design.ovo")
+        # 10 um/px: 4 um cells are 0.4 px, 8 um 0.8 px, 16 um 1.6 px -> level 1
+        for shift in (0.0, 2.5, 5.0, 7.5):
+            bbox_um = (shift, shift, 2000 + shift, 2000 + shift)
+            lit, summ, bbox = self._render(self.worker, bbox_um=bbox_um,
+                                           visible=[(1, 0)])
+            self.assertEqual((summ["layers"], summ["level"], summ["cell_um"],
+                              summ["none"]), (1, 1, 8.0, "-"), summ)
+            self.assertGreater(summ["cells"], 0)
+            self.assertEqual(summ["pixels"], len(lit))
+            expect = expected_mask(ovo_level(ovo, (1, 0), 1), bbox, 200, 200)
+            self.assertEqual(lit, expect, "pan phase %s um" % shift)
+
+    def test_the_level_follows_the_pixel_size(self):
+        ovo = read_ovo(self.cache / "design.ovo")
+        for px, level, cell_um in ((250, 1, 8.0), (260, 0, 4.0)):
+            lit, summ, bbox = self._render(self.worker, px=px, visible=[(1, 0)])
+            self.assertEqual((summ["level"], summ["cell_um"], summ["none"]),
+                             (level, cell_um, "-"), (px, summ))
+            self.assertEqual(lit, expected_mask(ovo_level(ovo, (1, 0), level),
+                                                bbox, px, px), px)
+        # 3.33 um/px: even level 0 is 1.2 px -> near view, the page path
+        lit, summ, _ = self._render(self.worker, px=600, visible=[(1, 0)])
+        self.assertEqual((summ["layers"], summ["none"]), (0, "near"), summ)
+        off, _, _ = self._render(self.worker_off, px=600, visible=[(1, 0)])
+        self.assertEqual(lit, off)
+
+    def test_the_summary_is_conservative_against_exact_and_keeps_empty_space(self):
+        exact, s_exact, _ = self._render(self.worker, cut_px=0.0, visible=[(1, 0)])
+        self.assertEqual(s_exact["none"], "exact")
+        lit, summ, _ = self._render(self.worker, visible=[(1, 0)])
+        self.assertEqual(summ["layers"], 1)
+        # every exact pixel has a summary pixel within one pixel, every
+        # summary pixel an exact pixel within two (cells <= 1 px)
+        missed_far = [p for p in exact if not near(p, lit, 1)]
+        extra_far = [p for p in lit if not near(p, exact, 2)]
+        self.assertEqual((missed_far[:5], extra_far[:5]), ([], []),
+                         "missed %d extra %d" % (len(missed_far), len(extra_far)))
+        # the L's 70 um (7 px) empty corner stays empty away from the edges
+        lit2, summ2, _ = self._render(self.worker, visible=[(2, 0)])
+        self.assertEqual(summ2["layers"], 1)
+        corner = {(x, y) for x in range(24, 29) for y in range(71, 76)}
+        self.assertEqual(corner & lit2, set())
+        self.assertTrue((21, 78) in lit2 and (28, 79) in lit2, "the L's arms")
+
+    def test_cull_exact_and_limited_depth_requests_are_untouched(self):
+        for kw, reason in (({"thin": "cull"}, "policy"),
+                           ({"cut_px": 0.0}, "exact"),
+                           ({"depth": 0}, "depth")):
+            lit, summ, _ = self._render(self.worker, visible=[(1, 0)], **kw)
+            off, s_off, _ = self._render(self.worker_off, visible=[(1, 0)], **kw)
+            self.assertEqual((summ["layers"], summ["none"]), (0, reason), kw)
+            self.assertEqual(lit, off, kw)
+        # the kill switch: same pixels as a cache without the file
+        off, s_off, _ = self._render(self.worker_off, visible=[(1, 0)])
+        self.assertEqual(s_off["none"], "off")
+        ovo = self.cache / "design.ovo"
+        keep = ovo.read_bytes()
+        try:
+            ovo.unlink()
+            nofile, s_no, _ = self._render(self.worker, visible=[(1, 0)])
+            self.assertEqual(s_no["none"], "nofile")
+            self.assertEqual(nofile, off)
+            ovo.write_bytes(keep[:-9])
+            _, s_bad, _ = self._render(self.worker, visible=[(1, 0)])
+            self.assertEqual(s_bad["none"], "invalid")
+        finally:
+            ovo.write_bytes(keep)
+        _, s_back, _ = self._render(self.worker, visible=[(1, 0)])
+        self.assertEqual(s_back["none"], "-")
+
+    def test_a_none_layer_keeps_the_page_path_in_its_own_slot(self):
+        # 1/0 and 2/0 summarized, 3/0 (none:work) exact; 3/0 is later
+        # in the paint order, so its solid square covers the lines
+        lit, summ, _ = self._render(self.worker, visible=None)
+        self.assertEqual(summ["layers"], 2)
+        # a pixel with only the 3/0 square vs one where a 1/0 line
+        # also lies: same colour (the square is on top)
+        RenderTests.gen += 1
+        gen = RenderTests.gen
+        px = 200
+        worker = self.worker
+        worker.submit({"kind": "render", "gen": gen, "scope": "headless",
+                       "bbox": (0.0, 0.0, 2000.0 * UM, 2000.0 * UM),
+                       "view": None, "w": px, "h": px, "depth": None,
+                       "cut_px": 1.0, "lod": False, "frames": False,
+                       "labels": False, "abstract": False, "visible": None,
+                       "frame_format": "raw", "thin": "keep"})
+        while True:
+            res = worker.res.get(timeout=60)
+            if res.get("kind") == "frame" and res.get("gen") == gen \
+                    and not res.get("refining"):
+                break
+        rgba = res["rgba"]
+
+        def rgb(x, y):
+            i = 4 * (y * px + x)
+            return tuple(rgba[i:i + 3])
+        only_square = rgb(70, 100)
+        square_over_line = rgb(25, 173)
+        self.assertNotEqual(only_square, (0, 0, 0))
+        self.assertEqual(square_over_line, only_square)
+        # a line outside the square shows the 1/0 colour
+        line_only = rgb(185, 23)
+        self.assertNotEqual(line_only, (0, 0, 0))
+        self.assertNotEqual(line_only, only_square)
+
+    def test_the_mask_is_styled_boundary_solid_and_interior_by_the_fill(self):
+        # the viewer's speckle fill: interior pixels follow the
+        # checkerboard, a lit pixel with an unlit 4-neighbour is solid;
+        # the stroke width does not widen the boundary (fixed 1 px)
+        ovo = read_ovo(self.cache / "design.ovo")
+        for width_px in (1, 3):
+            lit, summ, bbox = self._render(self.worker, visible=[(2, 0)],
+                                           fill="speckle", width_px=width_px)
+            self.assertEqual(summ["layers"], 1)
+            mask = expected_mask(ovo_level(ovo, (2, 0), 1), bbox, 200, 200,
+                                 halo=1)
+            expect = set()
+            for (x, y) in mask:
+                if not (0 <= x < 200 and 0 <= y < 200):
+                    continue
+                boundary = any((x + dx, y + dy) not in mask
+                               for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)))
+                if boundary or (x + y) % 2 == 0:
+                    expect.add((x, y))
+            self.assertEqual(lit, expect, "stroke width %d" % width_px)
+            # the block's interior really is speckled (not solid)
+            inside = {(x, y) for x in range(125, 135) for y in range(65, 75)}
+            self.assertEqual(len(inside & lit), 50)
+
+    def test_a_rebuilt_file_reaches_a_running_daemon(self):
+        _, summ, _ = self._render(self.worker, visible=[(1, 0)])
+        self.assertEqual(summ["cell_um"], 8.0)
+        floe_index("vfs", self.src, self.cache, "--occupancy-only",
+                   "--occupancy-um", "3", "--occupancy-max-work", "100000")
+        # the same view again: no stale retained frame, the new file
+        _, summ, _ = self._render(self.worker, visible=[(1, 0)])
+        self.assertEqual((summ["level"], summ["cell_um"]), (1, 6.0), summ)
+        floe_index("vfs", self.src, self.cache, "--occupancy-only",
+                   "--occupancy-um", "4", "--occupancy-max-work", "100000")
+        _, summ, _ = self._render(self.worker, visible=[(1, 0)])
+        self.assertEqual(summ["cell_um"], 8.0)
+
+
 def main():
     if not BIN.is_file():
         print("FAIL: release floe-index is not built")

@@ -54,6 +54,11 @@ pub struct ViewReq {
     /// choose it too); FLOE_RUST_PAGE_HAIRLINE=cull|keep overrides
     /// for diagnosis.
     pub page_hairline: bool,
+    /// Layers whose PAGES are not selected (bitset like `vis`, or
+    /// empty = none): an occupancy summary draws them instead
+    /// (docs/OCCUPANCY_PLAN.ko.md M2). The walk itself still uses
+    /// `vis` (frames, other layers), only the page selection skips.
+    pub page_skip: Vec<u8>,
 }
 
 /// one placement of a page cell in the working-set top. na/nb/va/vb

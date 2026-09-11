@@ -1564,6 +1564,7 @@ fn source_plan_request(
         exact: request.exact,
         sub_cut_wash: request.wide,
         page_hairline: !request.thin_keep,
+        summary_layers: Vec::new(),
     };
     plan.validate()?;
     Ok(Some(plan))
