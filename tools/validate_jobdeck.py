@@ -2731,6 +2731,9 @@ class ThinPageTests(unittest.TestCase):
         res = subprocess.run(
             [sys.executable, "-B", str(ROOT / "tools" / "occupancy_experiment.py"),
              str(CLI / "thin.oas"), "--layer", "1/0", "--fine-um", "5",
+             # a negative origin: passed as --bbox= (field 2026-09-11:
+             # argparse read a negative first coordinate as an option)
+             "--bbox=-10,-10,1990,1990",
              "--tile-px", "100", "--fit-px", "100", "--out", str(out)],
             cwd=str(ROOT), env=dict(os.environ, **self.env),
             capture_output=True, text=True)

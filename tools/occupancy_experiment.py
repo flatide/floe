@@ -14,8 +14,12 @@ are excluded (they lose where the empty space is).
     floe2-style usage (from the repo root, the venv's python):
 
     .venv/bin/python tools/occupancy_experiment.py SRC.oas --layer L/D \\
-        [--bbox x0,y0,x1,y1] [--fine-um 4] [--tile-px 2048] [--fit-px 800] \\
+        [--bbox=x0,y0,x1,y1] [--fine-um 4] [--tile-px 2048] [--fit-px 800] \\
         --out DIR
+
+(write --bbox=... with the equals sign: a region whose first coordinate
+is negative would otherwise be read as an option, here and in `floe2
+render --bbox=`)
 
 Steps and what each number means:
   1. fine exact render: the layer at `fine-um` per pixel, tiled through
@@ -118,7 +122,8 @@ def main():
     ap.add_argument("src")
     ap.add_argument("--layer", required=True, help="L/D")
     ap.add_argument("--bbox", default=None,
-                    help="x0,y0,x1,y1 um (default: the source's bbox)")
+                    help="x0,y0,x1,y1 um (default: the source's bbox); "
+                         "write --bbox=... when x0 is negative")
     ap.add_argument("--fine-um", type=float, default=4.0,
                     help="level-0 cell (um per pixel of the fine render)")
     ap.add_argument("--tile-px", type=int, default=2048)
@@ -222,7 +227,9 @@ def main():
         png = os.path.join(args.out, "fit-%s.png" % name)
         # px=W: the height follows the aspect, the region is not
         # expanded, so the image grid is the summary's fit level
-        dt, res = _floe2("render", args.src, "--bbox", fit_bbox, "--px",
+        # --bbox=... : a region starting with a negative coordinate
+        # would otherwise be taken for an option (argparse)
+        dt, res = _floe2("render", args.src, "--bbox=" + fit_bbox, "--px",
                          str(args.fit_px), "--out", png,
                          "--layers", args.layer, "--detail", "high",
                          "--thin", thin)
