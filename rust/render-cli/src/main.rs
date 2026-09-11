@@ -222,6 +222,7 @@ fn make_request(args: &Args, unit: f64) -> Result<PlanRequest, String> {
         sub_cut_wash: false,
         page_hairline: true,
         summary_layers: Vec::new(),
+        prune_summary: false,
     })
 }
 

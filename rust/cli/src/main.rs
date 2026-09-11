@@ -103,7 +103,8 @@ fn main() {
              [--profile-snapshot PATH] [--profile-snapshot-refresh]\n       \
              floe-index plan <outdir> --view x0,y0,x1,y1 \
              [--px-per-um N] [--cut-px N] [--layers a/b,..] \
-             [--depth N]\n       \
+             [--depth N] [--explain 1] [--page-hairline 0|1] \
+             [--summary-layers a/b,..] [--prune-summary 0|1]\n       \
              floe-index occupancy <outdir> [--layer L/D] [--level N] \
              [--dump]\n       \
              floe-index drc <results.db> [out.ice] \

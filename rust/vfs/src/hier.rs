@@ -498,6 +498,28 @@ fn minkowski_neg(b: &BBox, o: &BBox) -> BBox {
 
 // ------------------------------------------------------ the sweep
 
+/// `vis` with the summarized layers removed (ViewReq::page_skip).
+pub fn vis_minus_skip(req: &ViewReq) -> Vec<u8> {
+    if req.page_skip.is_empty() {
+        return req.vis.clone();
+    }
+    req.vis
+        .iter()
+        .zip(req.page_skip.iter().chain(std::iter::repeat(&0u8)))
+        .map(|(v, s)| v & !s)
+        .collect()
+}
+
+/// The subtree mask of a request: `vis` minus `page_skip` when it
+/// prunes summarized subtrees, else `vis`.
+pub fn walk_vis(req: &ViewReq) -> Vec<u8> {
+    if req.prune_skipped {
+        vis_minus_skip(req)
+    } else {
+        req.vis.clone()
+    }
+}
+
 pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
     let structural_frontier = opts.frame_cap != 0;
     let mut h = Hier {
@@ -526,6 +548,8 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
         } else {
             0
         },
+        walk_vis: walk_vis(req),
+        wash_vis: vis_minus_skip(req),
         thin_dbu: if opts.thin_lattice_um > 0.0 {
             (opts.thin_lattice_um * v.unit).max(1.0) as u64
         } else {
@@ -555,7 +579,7 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
         // when no design layer is selected. Full depth (including a
         // finite depth folded past the cell height) remains geometry-only.
         if ((r0 != REM_FULL && structural_frontier)
-            || masks_intersect(v.bitset(tc.lmask_rec), &req.vis))
+            || masks_intersect(v.bitset(tc.lmask_rec), &h.walk_vis))
             && !tc.rbbox.is_empty()
             && (r0 != REM_FULL || h.sub_cut_wash || !(w < h.cut && hh < h.cut))
         {
@@ -795,6 +819,12 @@ struct Hier<'a> {
     hair: u64,
     /// the same threshold for PAGES, 0 unless ViewReq::page_hairline
     page_hair: u64,
+    /// `vis` for subtree decisions: minus `page_skip` when the request
+    /// prunes summarized subtrees (M3), else `vis` itself
+    walk_vis: Vec<u8>,
+    /// `vis` minus `page_skip` always: a summarized layer never gets a
+    /// sub-cut wash (its summary already says where it is)
+    wash_vis: Vec<u8>,
     /// rev 45 thin-frame lattice pitch in dbu (0 = lattice off,
     /// frames fall back to the rev 41 hairline cull)
     thin_dbu: u64,
@@ -877,6 +907,14 @@ impl<'a> Hier<'a> {
                 && bit_test(&self.req.page_skip, pr.layer_idx as usize)
             {
                 self.st.summary_pages += pr.page_count as u64;
+                if self.explain_on {
+                    for pi in pr.page_lo..pr.page_lo + pr.page_count {
+                        let p = self.v.page(pi);
+                        if boxes.iter().any(|b| p.bbox.intersects(b)) {
+                            self.note_page("summary", ci, &p, pi);
+                        }
+                    }
+                }
                 continue;
             }
             if pr.pbvh_root == PBVH_NONE {
@@ -1176,7 +1214,7 @@ impl<'a> Hier<'a> {
                                     self.v.bitset(
                                         self.v.cell_lmask_rec(h.child),
                                     ),
-                                    &self.req.vis,
+                                    &self.walk_vis,
                                 )
                             {
                                 // rev 37 (final contract): a box
@@ -1201,7 +1239,7 @@ impl<'a> Hier<'a> {
                             self.v.bitset(
                                 self.v.cell_lmask_rec(h.child),
                             ),
-                            &self.req.vis,
+                            &self.walk_vis,
                         ) {
                             self.st.cull_layer += 1;
                             self.note_child("cull_layer", pli, &h, &rb, &boxes);
@@ -1277,7 +1315,7 @@ impl<'a> Hier<'a> {
     /// One wash rect `fp` per visible layer in bitset `mask`.
     fn wash_layers(&mut self, wc: &mut WsCell, mask: u32, fp: BBox) {
         let bits = self.v.bitset(mask);
-        for (byte_index, (&m, &vis)) in bits.iter().zip(self.req.vis.iter()).enumerate() {
+        for (byte_index, (&m, &vis)) in bits.iter().zip(self.wash_vis.iter()).enumerate() {
             let both = m & vis;
             if both == 0 {
                 continue;
@@ -1704,7 +1742,7 @@ impl<'a> Hier<'a> {
         if !structural
             && !masks_intersect(
                 self.v.bitset(child.lmask_rec),
-                &self.req.vis,
+                &self.walk_vis,
             )
         {
             self.st.cull_layer += 1;
@@ -2163,6 +2201,7 @@ mod tests {
             sub_cut_wash: false,
                     page_hairline: false,
                     page_skip: Vec::new(),
+                    prune_skipped: false,
         }
     }
 
@@ -2405,6 +2444,7 @@ mod tests {
                     sub_cut_wash: false,
                     page_hairline: false,
                     page_skip: Vec::new(),
+                    prune_skipped: false,
         };
         let plan = plan_hier(&v, &req, &HierOpts::default());
         assert_eq!(plan.pages, vec![1]);
@@ -3249,6 +3289,7 @@ mod tests {
             sub_cut_wash: false,
                     page_hairline: false,
                     page_skip: Vec::new(),
+                    prune_skipped: false,
         }
     }
 
@@ -3410,7 +3451,7 @@ mod tests {
             out: &mut BTreeSet<u32>,
         ) {
             let cell = v.cell(ci);
-            if !masks_intersect(v.bitset(cell.lmask_rec), &req.vis) {
+            if !masks_intersect(v.bitset(cell.lmask_rec), &walk_vis(req)) {
                 return;
             }
             if cell.rbbox.is_empty() {
@@ -3788,6 +3829,7 @@ mod tests {
                     sub_cut_wash: false,
                     page_hairline: false,
                     page_skip: Vec::new(),
+                    prune_skipped: false,
         };
         // brute equality needs the corner windows, not the whole
         // spanning box - use two-box behavior via narrow checks

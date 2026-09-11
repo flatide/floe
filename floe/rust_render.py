@@ -1181,6 +1181,12 @@ class RustRenderWorker:
                 "streamed_passes": _wire_int(fields, "streamed_passes"),
                 "slices": _wire_int(fields, "slices"),
                 "wide_washes": _wire_int(fields, "wide_washes"),
+                # occupancy summary (M4): passes drawn from design.ovo,
+                # keep-policy passes that wanted one and had none, cells
+                "summary_passes": _wire_int(fields, "summary_passes"),
+                "summary_none_passes": _wire_int(fields,
+                                                 "summary_none_passes"),
+                "summary_cells": _wire_int(fields, "summary_cells"),
                 "over_budget_pages": deferred,
             }
         if self._max_depth is not None:

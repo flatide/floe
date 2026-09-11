@@ -59,6 +59,11 @@ pub struct ViewReq {
     /// (docs/OCCUPANCY_PLAN.ko.md M2). The walk itself still uses
     /// `vis` (frames, other layers), only the page selection skips.
     pub page_skip: Vec<u8>,
+    /// Subtrees whose recursive layers are all in `page_skip` may be
+    /// pruned (nothing of theirs is drawn from pages): renderd sets it
+    /// when no hierarchy frames are wanted; with frames the walk keeps
+    /// `vis` so a summarized layer's cells still frame.
+    pub prune_skipped: bool,
 }
 
 /// one placement of a page cell in the working-set top. na/nb/va/vb

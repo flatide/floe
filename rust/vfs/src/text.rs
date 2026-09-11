@@ -1043,6 +1043,7 @@ mod tests {
             sub_cut_wash: false,
                     page_hairline: false,
                     page_skip: Vec::new(),
+                    prune_skipped: false,
         }
     }
 

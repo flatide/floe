@@ -42,7 +42,11 @@
   길이의 1 px 선으로 그리고(KLayout hairline parity) `thin_pages_kept`로 센다.
   **점유 요약 레이어**(`ViewReq::page_skip`, OCCUPANCY_PLAN M2): 비트셋에 든
   레이어는 페이지 범위(prange)에서 통째로 건너뛰어 선택·디코드가 없고
-  `summary_pages`로 센다. 순회(자식·프레임·다른 레이어)는 `vis` 그대로다.
+  `summary_pages`로 센다. 순회(자식·프레임·다른 레이어)는 `vis` 그대로이되,
+  `ViewReq::prune_skipped`(renderd·덱: 프레임 없는 요청)면 서브트리 판정에
+  `vis − page_skip`을 써서 요약 전용 서브트리를 걷지 않는다(`walk_vis`). wash
+  마스크는 언제나 `vis − page_skip`(`wash_vis`). 오라클 `brute_with`도 같은
+  마스크를 쓴다.
   기본: renderd 프레임의 `thin=keep|cull`(덱 worker keep, 일반 worker cull;
   뷰어 `--thin`/View 메뉴, `floe2 render --thin`), `floe-index plan
   --page-hairline 0|1`(기본 1). 진단 override `FLOE_RUST_PAGE_HAIRLINE=cull|keep`.

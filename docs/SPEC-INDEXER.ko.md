@@ -269,6 +269,10 @@ explain  <kind>  <verdict>  <cell>  <layer L/D | ->  <id>  <bbox um x0,y0,x1,y1>
 - 페이지의 w/h/min은 색인 필드 max_w/max_h/max_min, bbox는 셀 로컬 dbu를 µm로;
   배치는 첫 멤버의 월드 박스, members는 반복 멤버 수. 뷰 박스와 겹치는 것만
   기록되므로 fit 뷰에서도 수천 줄 규모다.
+- `--summary-layers a/b,..`(OCCUPANCY_PLAN M3): 그 레이어의 페이지를 요약이
+  대신 그린다고 보고 선택에서 건너뛴다(verdict `summary`, `summary_pages`).
+  `--prune-summary 1`은 그 레이어만 가진 서브트리도 걷지 않는다(renderd가
+  프레임 없는 요청에 쓰는 마스크). 요약 레이어는 sub-cut wash를 내지 않는다.
 - 읽는 법: `cull_size`는 w,h 모두 cut_um 미만, `cull_hair`는 min이 hair_um 미만
   (긴 변은 커도 잘림), `omit_size`/`prune_size`는 자식 셀 박스가 cut 미만이라
   그 아래 페이지를 보지도 않은 경우다. 실칩에서는 사라지는 뷰의 `--view`·

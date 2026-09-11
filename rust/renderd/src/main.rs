@@ -991,6 +991,7 @@ fn run_clip(
         sub_cut_wash: false,
         page_hairline: true,
         summary_layers: Vec::new(),
+        prune_summary: false,
     };
     let plan_started = Instant::now();
     let planned = cache.plan(&request)?;
@@ -1666,7 +1667,7 @@ fn run_deck_render(
     respond(
         responses,
         format!(
-            "frame gen={} round=1 final=1 png={} format={} partial={} deferred={} frame_cache_hit=0 style_epoch={} plan_us={} text_plan_us=0 labels=0 labels_truncated=0 text_place_records=0 read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes=0 raster_us={} raster_tile_max_us={} tiles_reused=0 bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells=0 inst_edges=0 frame_rects=0 rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints=0 label_pixel_paints=0 rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes=0 passes={} passes_skipped={} pass_bytes_max={} frame_passes={} unique_pages={} frame_raster_us={} composite_us={} scene_reuses={} raster_wall_us={} pass_workers={} batches={} batch_bytes_max={} streamed_passes={} slices={} wide_washes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={}",
+            "frame gen={} round=1 final=1 png={} format={} partial={} deferred={} frame_cache_hit=0 style_epoch={} plan_us={} text_plan_us=0 labels=0 labels_truncated=0 text_place_records=0 read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes=0 raster_us={} raster_tile_max_us={} tiles_reused=0 bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells=0 inst_edges=0 frame_rects=0 rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints=0 label_pixel_paints=0 rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes=0 passes={} passes_skipped={} pass_bytes_max={} frame_passes={} unique_pages={} frame_raster_us={} composite_us={} scene_reuses={} raster_wall_us={} pass_workers={} batches={} batch_bytes_max={} streamed_passes={} slices={} wide_washes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} summary_passes={} summary_none_passes={} summary_cells={}",
             command.generation,
             command.out,
             if command.raw_frame { "raw" } else { "png" },
@@ -1736,6 +1737,9 @@ fn run_deck_render(
             report.culls.lod_swapped,
             report.culls.thin_frames,
             report.culls.thin_pages,
+            report.summary_passes,
+            report.summary_none_passes,
+            report.summary_cells,
         ),
     );
     Ok(())
@@ -1768,7 +1772,7 @@ fn run_render(
     let request = make_plan_request(cache, command)?;
     // the summarized layers leave the page plan (§6 step 3): no page
     // selection, page BVH or child walk for them
-    let page_request = cache.page_plan_request(&request, &summary)?;
+    let page_request = cache.page_plan_request(&request, &summary, !command.frames)?;
     // §F2R-21 label re-synthesis: when a retained frame (the margin
     // prefetch) covers the WHOLE request, its geometry is a pure
     // memcpy - skip the page plan and decode entirely, plan only the
@@ -2468,6 +2472,7 @@ fn make_plan_request(cache: &Cache, command: &RenderCommand) -> Result<PlanReque
         sub_cut_wash: false,
         page_hairline: !command.thin_keep,
         summary_layers: Vec::new(),
+        prune_summary: false,
     };
     request.validate()?;
     if cache.unit() <= 0.0 {

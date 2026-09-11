@@ -59,6 +59,9 @@ pub struct PlanRequest {
     /// Cache layer indices drawn from the occupancy summary (M2):
     /// their pages are not planned (floe_vfs::ViewReq::page_skip).
     pub summary_layers: Vec<u32>,
+    /// Prune subtrees that hold only summarized layers (no frames
+    /// wanted): floe_vfs::ViewReq::prune_skipped.
+    pub prune_summary: bool,
 }
 
 impl PlanRequest {
@@ -96,6 +99,7 @@ mod tests {
             sub_cut_wash: false,
             page_hairline: true,
             summary_layers: Vec::new(),
+            prune_summary: false,
         };
         assert!(req.validate().is_err());
     }

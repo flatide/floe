@@ -863,6 +863,197 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(summ["cell_um"], 8.0)
 
 
+
+WIDE_DECK = """SLICE 1,17
+RETICLE
+* wide.jb
+OPTION PA, AA=0.0200, BA=0.002000, SA=80
+MTITLE 1,THIN
+*PLACE-INFO
+*
+CHIP ID001, * MAIN 1.0000
+*
+$ (1, THIN, AD=0.00020, SF=1, TC=thinwide.oas, LY={1}, DT={0}, BX=0.0, BY=0.0, UX=2000.0, UY=2000.0 )
+ROWS 100.0/100.0
+*END-PLACE
+END
+"""
+
+
+def render_settled(worker, gen, bbox_dbu, px, cut_px=1.0, thin="keep",
+                   visible=None, depth=None, frames=False):
+    solid = "\n".join(["*" * 16] * 16)
+    keys = [(int(l["layer"]), int(l["datatype"]))
+            for l in worker.cache.meta["layers"]]
+    worker.submit({"kind": "repattern", "fills": [(k, solid) for k in keys],
+                   "widths": [(k, 1) for k in keys]})
+    worker.submit({"kind": "render", "gen": gen, "scope": "headless",
+                   "bbox": tuple(float(v) for v in bbox_dbu), "view": None,
+                   "w": px, "h": px, "depth": depth, "cut_px": cut_px,
+                   "lod": False, "frames": frames, "labels": False,
+                   "abstract": False, "visible": visible,
+                   "frame_format": "raw", "thin": thin})
+    while True:
+        res = worker.res.get(timeout=60)
+        if res.get("kind") == "error":
+            raise AssertionError("renderd: %s" % res.get("msg"))
+        if res.get("kind") != "frame" or res.get("gen") != gen:
+            continue
+        if res.get("refining"):
+            continue
+        return lit_pixels(res["rgba"], px, px), res
+
+
+class DeckRenderTests(unittest.TestCase):
+    """M4 (gate 4): a deck pass under the keep policy draws its
+    source's summary on the source view, composites in pass order,
+    counts its passes and cells on the frame line; the kill switch and
+    a limited depth take the page path; frames still come."""
+
+    gen = 500
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = TMP / "deckwide"
+        cls.dir.mkdir()
+        write_thinwide(cls.dir / "thinwide.oas")
+        (cls.dir / "wide.jb").write_text(WIDE_DECK)
+        floe2("index", cls.dir / "wide.jb", "--occupancy", "--occupancy-um",
+              "4", "--jobs", "2")
+        os.environ["FLOE_RENDERD_BIN"] = str(
+            ROOT / "rust" / "target" / "release" / "floe-renderd")
+        sys.path.insert(0, str(ROOT))
+        os.environ.pop("FLOE_RUST_OCCUPANCY", None)
+        cls.deck, cls.single = cls._workers()
+        os.environ["FLOE_RUST_OCCUPANCY"] = "off"
+        cls.deck_off, cls.single_off = cls._workers()
+        del os.environ["FLOE_RUST_OCCUPANCY"]
+        cls.bbox = tuple(cls.deck.cache.meta["bbox"])
+        cls.dbu = float(cls.deck.cache.meta["dbu"])
+
+    @classmethod
+    def _workers(cls):
+        from floe.jobdeck.viewer import DeckCache
+        from floe.jobdeck import render as jrender
+        from floe.cache import Cache
+        from floe.rust_render import RustRenderWorker
+        dc = DeckCache(str(cls.dir / "wide.jb"), mode="level")
+        dc.load()
+        deck = jrender.DeckRenderWorker(dc)
+        deck.start()
+        c = Cache(str(cls.dir / "thinwide.oas"))
+        c.load()
+        single = RustRenderWorker(c)
+        single.start()
+        return deck, single
+
+    @classmethod
+    def tearDownClass(cls):
+        for w in (cls.deck, cls.single, cls.deck_off, cls.single_off):
+            try:
+                w.stop()
+            except Exception:
+                pass
+
+    def _next(self):
+        DeckRenderTests.gen += 1
+        return DeckRenderTests.gen
+
+    def test_a_keep_pass_draws_the_summary_on_the_source_view(self):
+        # the placement is the 2000 um source at mag 0.2 (a 400 um deck
+        # box): the source view of the deck fit is the source's 0..2000
+        # um box at the same pixel size, so the deck's pixels are the
+        # single cache's summary pixels of that box (level chosen on
+        # the source view, scale included - plan §7)
+        x0, y0, x1, y1 = self.bbox
+        self.assertAlmostEqual((x1 - x0) * self.dbu, 400.0, places=3)
+        lit, res = render_settled(self.deck, self._next(), self.bbox, 200)
+        d = res["deck"]
+        self.assertEqual((d["summary_passes"], d["summary_none_passes"]),
+                         (1, 0), d)
+        self.assertGreater(d["summary_cells"], 0)
+        src_box = (0.0, 0.0, 2000.0 * UM, 2000.0 * UM)
+        single, sres = render_settled(self.single, self._next(), src_box,
+                                      200, visible=[(1, 0)])
+        self.assertEqual(sres["summary"]["layers"], 1)
+        self.assertEqual(lit, single)
+        # frames wanted: the summary still draws (no pruning), frames come
+        lit_f, res_f = render_settled(self.deck, self._next(), self.bbox,
+                                      200, frames=True)
+        self.assertEqual(res_f["deck"]["summary_passes"], 1)
+        self.assertTrue(lit <= lit_f)
+
+    def test_the_kill_switch_and_a_limited_depth_take_the_page_path(self):
+        off, res = render_settled(self.deck_off, self._next(), self.bbox, 200)
+        self.assertEqual(res["deck"]["summary_passes"], 0)
+        src_box = (0.0, 0.0, 2000.0 * UM, 2000.0 * UM)
+        single_off, _ = render_settled(self.single_off, self._next(), src_box,
+                                       200, visible=[(1, 0)])
+        self.assertEqual(off, single_off)
+        on, _ = render_settled(self.deck, self._next(), self.bbox, 200)
+        self.assertNotEqual(on, off)
+        shallow, res = render_settled(self.deck, self._next(), self.bbox,
+                                      200, depth=0)
+        self.assertEqual((res["deck"]["summary_passes"],
+                          res["deck"]["summary_none_passes"]), (0, 0), res["deck"])
+
+    def test_a_source_without_the_file_counts_as_none(self):
+        ovo = self.dir / "thinwide.oas.floe" / "design.ovo"
+        keep = ovo.read_bytes()
+        try:
+            ovo.unlink()
+            _, res = render_settled(self.deck, self._next(), self.bbox, 200)
+            self.assertEqual((res["deck"]["summary_passes"],
+                              res["deck"]["summary_none_passes"]), (0, 1))
+        finally:
+            ovo.write_bytes(keep)
+        _, res = render_settled(self.deck, self._next(), self.bbox, 200)
+        self.assertEqual(res["deck"]["summary_passes"], 1)
+
+
+class PlanCliTests(unittest.TestCase):
+    """M3: `floe-index plan --summary-layers` skips the pages (verdict
+    `summary` under --explain) and `--prune-summary 1` drops the
+    subtrees that hold nothing else."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.src = TMP / "plancli.oas"
+        write_thinwide(cls.src)
+        cls.cache = index_with_occupancy(cls.src, 4)
+
+    def plan(self, *extra):
+        res = floe_index("plan", self.cache, "--view", "0,0,2000,2000",
+                         "--px-per-um", "0.1", "--cut-px", "1",
+                         "--page-hairline", "0", *extra)
+        return res.stdout
+
+    def test_summary_layers_skip_pages_and_explain_names_the_verdict(self):
+        plain = self.plan("--layers", "1/0")
+        self.assertIn('"pages": ', plain)
+        self.assertNotIn('"pages": 0,', plain)
+        skipped = self.plan("--layers", "1/0", "--summary-layers", "1/0",
+                            "--explain", "1")
+        self.assertIn('"pages": 0,', skipped)
+        rows = [l for l in skipped.splitlines() if l.startswith("explain\t")]
+        verdicts = {l.split("\t")[2] for l in rows if l.split("\t")[1] == "page"}
+        self.assertIn("summary", verdicts)
+        self.assertNotIn("exact", verdicts)
+
+    def test_prune_summary_drops_the_summary_only_subtrees(self):
+        import re
+        kept = self.plan("--layers", "1/0", "--summary-layers", "1/0")
+        pruned = self.plan("--layers", "1/0", "--summary-layers", "1/0",
+                           "--prune-summary", "1")
+        wc = lambda s: int(re.search(r'"wc_cells": (\d+)', s).group(1))
+        self.assertGreater(wc(kept), 0)
+        self.assertEqual(wc(pruned), 0)
+        # another visible layer keeps the walk alive
+        both = self.plan("--layers", "1/0,2/0", "--summary-layers", "1/0",
+                         "--prune-summary", "1")
+        self.assertGreater(wc(both), 0)
+
+
 def main():
     if not BIN.is_file():
         print("FAIL: release floe-index is not built")

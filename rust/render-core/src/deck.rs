@@ -483,6 +483,13 @@ pub struct DeckRenderReport {
     pub wide_washes: u64,
     /// Planner culls summed over the passes' plans (perf line).
     pub culls: crate::cache::PlanCullCounts,
+    /// Occupancy summary (docs/OCCUPANCY_PLAN.ko.md M4): passes drawn
+    /// from their source's design.ovo, passes under the keep policy
+    /// that wanted one and had none (no file / invalid / near /
+    /// layers), and the summary cells painted.
+    pub summary_passes: u32,
+    pub summary_none_passes: u32,
+    pub summary_cells: u64,
 }
 
 impl Deck {
@@ -710,6 +717,10 @@ impl Deck {
         let mut batch_bytes_max = 0u64;
         let mut wide_washes = 0u64;
         let mut culls = crate::cache::PlanCullCounts::default();
+        let mut summary_passes = 0u32;
+        let mut summary_none_passes = 0u32;
+        // FLOE_RUST_OCCUPANCY=off: the field kill switch of the summary
+        let occupancy_off = std::env::var("FLOE_RUST_OCCUPANCY").as_deref() == Ok("off");
         for placed_index in 0..self.placements.len() {
             let (out, source_index) = {
                 let placed = &self.placements[placed_index];
@@ -754,6 +765,33 @@ impl Deck {
                     continue;
                 }
             };
+            // occupancy summary per pass (M4): decided on the SOURCE
+            // view (its px_per_dbu carries the placement scale), the
+            // same conditions as a single cache; a summarized pass
+            // plans no pages and paints its planes in the pass raster
+            let summary = self.sources[source_index].cache.summary_selection(
+                &plan_request,
+                request.thin_keep,
+                occupancy_off,
+            )?;
+            let plan_request = self.sources[source_index].cache.page_plan_request(
+                &plan_request,
+                &summary,
+                !request.frames,
+            )?;
+            if summary.is_active() {
+                summary_passes += 1;
+            } else if request.thin_keep
+                && matches!(
+                    summary.none,
+                    Some(crate::summary::NONE_NOFILE)
+                        | Some(crate::summary::NONE_INVALID)
+                        | Some(crate::summary::NONE_NEAR)
+                        | Some(crate::summary::NONE_LAYERS)
+                )
+            {
+                summary_none_passes += 1;
+            }
             // the device sub-window this placement can touch (step 2):
             // the raster and the overlays run on it alone; the plan
             // keeps the whole source view so page selection is
@@ -932,7 +970,11 @@ impl Deck {
                         continue;
                     }
                     let scene_started = std::time::Instant::now();
-                    let scene = Arc::new(FrameScene::new_shared(&source.cache, plan, decoded)?);
+                    let mut scene = FrameScene::new_shared(&source.cache, plan, decoded)?;
+                    if summary.is_active() {
+                        scene.set_summaries(summary.planes.clone());
+                    }
+                    let scene = Arc::new(scene);
                     scene_us = scene_us.saturating_add(scene_started.elapsed().as_micros() as u64);
                     partial |= scene.is_partial();
                     pages = pages.saturating_add(scene.available_pages().try_into().unwrap_or(u32::MAX));
@@ -1057,6 +1099,9 @@ impl Deck {
             slices: tally.slices,
             wide_washes,
             culls,
+            summary_passes,
+            summary_none_passes,
+            summary_cells: tally.summary_cells,
         })
     }
 }
@@ -1279,6 +1324,7 @@ struct Tally {
     polygon_member_paints: u64,
     path_member_paints: u64,
     frame_member_paints: u64,
+    summary_cells: u64,
 }
 
 fn raster_pass(
@@ -1411,6 +1457,7 @@ fn raster_batch(
         tally.polygon_member_paints =
             tally.polygon_member_paints.saturating_add(out.geometry.polygon_member_paints);
         tally.path_member_paints = tally.path_member_paints.saturating_add(out.geometry.path_member_paints);
+        tally.summary_cells = tally.summary_cells.saturating_add(out.geometry.summary_cell_paints);
         tally.passes += 1;
     }
     check_generation(cancellation, generation)
@@ -1565,6 +1612,7 @@ fn source_plan_request(
         sub_cut_wash: request.wide,
         page_hairline: !request.thin_keep,
         summary_layers: Vec::new(),
+        prune_summary: false,
     };
     plan.validate()?;
     Ok(Some(plan))

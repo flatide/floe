@@ -400,12 +400,14 @@ impl Cache {
         &self,
         request: &PlanRequest,
         selection: &crate::summary::SummarySelection,
+        prune: bool,
     ) -> Result<PlanRequest, String> {
         if !selection.is_active() {
             return Ok(request.clone());
         }
         Ok(PlanRequest {
             summary_layers: selection.layer_indices(),
+            prune_summary: prune,
             ..request.clone()
         })
     }
@@ -481,8 +483,20 @@ impl Cache {
     pub fn plan(&self, request: &PlanRequest) -> Result<PlannedView, String> {
         let req = self.view_request(request)?;
         let started = Instant::now();
-        let plan = self.vfs.plan_hier(&req);
+        let mut plan = self.vfs.plan_hier(&req);
         let plan_us = elapsed_us(started);
+        // a request whose every visible layer is summarized (and
+        // pruned) plans no working cell at all; the scene still needs
+        // the top so the summary planes have a frame to paint into
+        if plan.wcells.is_empty() && !request.summary_layers.is_empty() {
+            plan.wcells.push(floe_vfs::hier::WsCell {
+                key: plan.top,
+                pages: Vec::new(),
+                insts: Vec::new(),
+                frames: Vec::new(),
+                washes: Vec::new(),
+            });
+        }
 
         let mut summary = PlanSummary {
             pages: plan.pages.len().try_into().unwrap_or(u32::MAX),
@@ -628,6 +642,7 @@ impl Cache {
             },
             sub_cut_wash: request.sub_cut_wash && !request.exact,
             page_hairline: request.page_hairline,
+            prune_skipped: request.prune_summary,
             page_skip: if request.summary_layers.is_empty() {
                 Vec::new()
             } else {

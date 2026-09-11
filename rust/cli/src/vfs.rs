@@ -2049,6 +2049,7 @@ fn frontier_json_planned(v: &floe_ovm::Ovm) -> String {
             sub_cut_wash: false,
                     page_hairline: true,
                     page_skip: Vec::new(),
+                    prune_skipped: false,
         };
         let plan = floe_vfs::hier::plan_hier(v, &req, &opts);
         let (boxes, truncated) = floe_vfs::hier::frontier_boxes(
@@ -6333,6 +6334,7 @@ fn make_req(
         sub_cut_wash: false,
             page_hairline: true,
             page_skip: Vec::new(),
+            prune_skipped: false,
     }
 }
 
@@ -6615,6 +6617,20 @@ pub fn plan_cmd(args: &[String]) {
         // mask / jobdeck policy that keeps thin pages)
         if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--page-hairline") {
             req.page_hairline = val != "0";
+        }
+        // --summary-layers a/b,..: layers an occupancy summary draws
+        // (OCCUPANCY_PLAN M3): their pages are skipped (verdict
+        // `summary` under --explain); --prune-summary 1 also prunes
+        // the subtrees that hold nothing else (renderd: frames off)
+        if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--summary-layers") {
+            let specs: Vec<String> = val.split(',').map(|s| s.to_string()).collect();
+            req.page_skip = v.layer_mask(Some(&specs)).unwrap_or_else(|e| {
+                eprintln!("--summary-layers: {}", e);
+                std::process::exit(2);
+            });
+        }
+        if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--prune-summary") {
+            req.prune_skipped = val != "0";
         }
         let plan = floe_vfs::hier::plan_hier(&v.ovm, &req, &popts);
         let ms = t0.elapsed().as_secs_f64() * 1e3;

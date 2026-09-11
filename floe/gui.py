@@ -3636,6 +3636,15 @@ class Viewer:
                         if d.get("wide_washes"):
                             text += ", %s sub-cut washes" % fmt_count(
                                 d["wide_washes"])
+                        if d.get("summary_passes"):
+                            # passes drawn from their source's design.ovo
+                            # (M4); pick/snap do not see those layers
+                            text += ", summary %d passes %s cells (not pickable)" % (
+                                d["summary_passes"],
+                                fmt_count(d.get("summary_cells", 0)))
+                        if d.get("summary_none_passes"):
+                            text += ", %d passes without summary" % (
+                                d["summary_none_passes"])
                     # tiles = plan total (resident pages included);
                     # +new = pages actually shipped for this view
                     # (cache misses, summed over its stream rounds)

@@ -386,8 +386,10 @@ floe는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델을 
   대신 셀 ≤ 1 px인 피라미드 레벨의 점유 마스크로 그려진다(경계 solid, 내부
   채움). 상태줄 `summary N layers C cells (level k, x um; not pickable)` —
   이 뷰에서 pick/snap은 그 레이어를 보지 못한다. keep인데 요약이 없으면
-  `summary: none (nofile|invalid|near|off|depth|layers)`. 킬 스위치
-  `FLOE_RUST_OCCUPANCY=off`. 일반 레이아웃(`thin:cull`)은 변화 없음.
+  `summary: none (nofile|invalid|near|off|depth|layers)`. 덱은 pass마다
+  소스 뷰에서 같은 판정을 하며 상태줄 `summary P passes C cells (not
+  pickable)`·`N passes without summary`. 킬 스위치 `FLOE_RUST_OCCUPANCY=off`.
+  일반 레이아웃(`thin:cull`)은 변화 없음.
 - **로드 대화상자**(File > load layout… / load jobdeck…, 2026-09-10)는 자체
   파일 브라우저다: 폴더 먼저·필터에 맞는 파일 다음, 위/홈 버튼, 경로 입력
   (Enter로 폴더 이동 또는 파일 열기), 이름 타이핑 검색, 필터 콤보. 레이아웃의

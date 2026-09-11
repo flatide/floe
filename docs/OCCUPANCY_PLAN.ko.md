@@ -231,8 +231,8 @@ level L  cell = base_cell_dbu × 2^L, grid (w, h) = ceil(span/cell),
 |---|---|---|
 | M1 | `design.ovo` 형식·유효성·atomic 게시, 도형 교차 마킹(rect/polygon/path/반복), 처리 한계·취소, `--occupancy`(opt-in)·`--occupancy-um`·`--occupancy-only`, jobdeck 래퍼 전달, gate 1·5(생성 부분) | **완료 2026-09-11(RENDERD 0.12.79, §12)**: fixture·valmini 오라클 완전 일치. 실칩 생성 시간·크기는 사용자 실측 대기 |
 | M2 | renderd 전용 마스크 경로(단일 소스), 5개 조건, 레벨 선택, 레이어 순서, pick/snap 제외, 킬 스위치, gate 2·3·5 | **완료 2026-09-11(RENDERD 0.12.80, §12)**: 단일 소스 keep 광역뷰가 요약으로 그려짐, cull·근접뷰·exact·depth 제한·킬 스위치 픽셀 불변 |
-| M3 | 플래너에서 요약 레이어의 페이지·계층 생략, `--explain summary`, 카운터 | 광역뷰 플랜의 페이지 선택·cbvh가 요약 레이어에서 0 |
-| M4 | 덱 통합(소스 뷰 레벨, pass 대체, wash 억제, depth/exact 조건), gate 4 | 덱 fit 뷰 시간 |
+| M3 | 플래너에서 요약 레이어의 페이지·계층 생략, `--explain summary`, 카운터 | **완료 2026-09-11(RENDERD 0.12.81, §12)**: 요약 레이어의 페이지 0, 프레임 없는 요청은 요약 전용 서브트리 프루닝(wc_cells 0) |
+| M4 | 덱 통합(소스 뷰 레벨, pass 대체, wash 억제, depth/exact 조건), gate 4 | **완료 2026-09-11(RENDERD 0.12.81, §12)**: mag 0.2 덱의 fit 뷰 픽셀 == 단일 소스 요약 픽셀. 덱 fit 뷰 시간은 실칩 실측 대기 |
 | M5 | 실칩 실측 8, base cell·기본 on/off 확정, 문서(JOBDECK §10·FLOE2_OPTIMIZATION 결함 B) | 목표 시간·지표 달성 여부로 기본값 결정 |
 
 각 단계는 킬 스위치와 gate를 갖추고 배터리 통과 뒤 커밋한다. 버전: Rust 변경 단계는
@@ -331,6 +331,34 @@ policy|exact|depth|off|nofile|invalid`); `none:work` 레이어는 페이지 경�
   없으므로 found=0. 상태줄이 `not pickable`을 말한다.
 - 요약 pass 순서: 레이어 루프의 자기 슬롯에서 페이지 항목(비어 있음) 직전에
   칠한다(덱은 M4).
+
+### M3·M4 구현 기록 (2026-09-11, RENDERD 0.12.81)
+
+M3(플래너): `ViewReq::page_skip`(M2) 위에 `ViewReq::prune_skipped` — 서브트리
+판정(top 조건·자식 BVH·배치의 `masks_intersect`)에 `vis − page_skip`을 쓰고,
+페이지 선택은 `vis`를 그대로 쓴다. renderd·덱은 프레임이 꺼진 요청에서 켠다
+(프레임이 켜지면 요약 레이어의 셀도 프레임을 내야 하므로 순회 유지). wash
+마스크는 언제나 `vis − page_skip`: 요약 레이어는 sub-cut wash를 내지 않는다.
+모든 가시 레이어가 요약·프루닝되면 플랜에 셀이 없으므로 `Cache::plan`이 top
+working cell을 합성한다(요약 평면이 그려질 프레임). `--explain 1`은 건너뛴
+페이지를 verdict `summary`로 적고, `floe-index plan --summary-layers a/b,..
+[--prune-summary 1]`이 진단 입구다. gate `PlanCliTests`: 요약 레이어의 pages 0,
+explain `summary`, 프루닝 시 wc_cells 0(다른 가시 레이어가 있으면 유지).
+
+M4(덱): pass마다 소스 뷰의 PlanRequest(`(v − d)/scale`의 px_per_dbu)로
+`summary_selection` → `page_plan_request(prune = !frames)` → scene에 평면 부착.
+pass = 배치 하나 = 레이어 하나이므로 순서는 그대로다. 조건은 단일 소스와 같다
+(덱 exact/cut 0·depth 제한·thin cull은 페이지 경로). 덱 프레임 줄
+`summary_passes= summary_none_passes=(keep인데 nofile/invalid/near/layers)
+summary_cells=`, 어댑터 `deck.summary_*`, 상태줄 `summary P passes C cells (not
+pickable)`·`N passes without summary`. 킬 스위치는 같은 환경변수. gate
+`DeckRenderTests`: mag 0.2 배치(2000 µm 소스 → 400 µm 덱 상자)의 fit 뷰 픽셀이
+단일 소스의 0..2000 µm 요약 픽셀과 동일(레벨을 소스 뷰에서 고름), 킬 스위치
+픽셀 == 단일 소스 페이지 경로, depth 0 → 요약 없음(none_passes 0), 파일 없음 →
+`summary_none_passes` 1, frames on에서도 요약 유지.
+
+남은 M4 판정: 덱 fit 뷰 프레임 시간(실칩, 사용자 실측: `floe2 index deck.jb
+--occupancy` 뒤 뷰어 perf 줄의 `summary … passes`와 ms).
 
 ## 11. 1차 계획 리뷰(7건, 2026-09-11) 반영
 
