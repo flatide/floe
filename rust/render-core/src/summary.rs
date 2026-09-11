@@ -142,12 +142,18 @@ pub const DEFAULT_MAX_CELL_PX: f64 = 1.0;
 
 /// The bound in force: FLOE_RUST_OCCUPANCY_PX (diagnostic, e.g. 0.5
 /// for the M5 A/B - finer cells close fewer gaps at 4x the paint
-/// work) or the default.
+/// work) or the default. A value above one pixel is ignored: the
+/// cell-centre projection lights one pixel per cell, so a wider cell
+/// would leave a lattice of false holes inside filled shapes (review
+/// 2026-09-11 (2nd, follow-up) P2: 2 px filled 1,600 of 4,096 pixels).
 pub fn max_cell_px() -> f64 {
-    std::env::var("FLOE_RUST_OCCUPANCY_PX")
-        .ok()
+    parse_max_cell_px(std::env::var("FLOE_RUST_OCCUPANCY_PX").ok().as_deref())
+}
+
+pub fn parse_max_cell_px(value: Option<&str>) -> f64 {
+    value
         .and_then(|v| v.trim().parse::<f64>().ok())
-        .filter(|v| *v > 0.0 && *v <= 4.0)
+        .filter(|v| *v > 0.0 && *v <= 1.0)
         .unwrap_or(DEFAULT_MAX_CELL_PX)
 }
 
@@ -188,5 +194,18 @@ mod tests {
         // a half-pixel bound picks the finer level and narrows the near view
         assert_eq!(level_for(4000, 0.0001, 4, 0.5), Some(0));
         assert_eq!(level_for(4000, 0.00013, 4, 0.5), None);
+    }
+
+    #[test]
+    fn the_pixel_bound_knob_never_exceeds_one_pixel() {
+        assert_eq!(parse_max_cell_px(None), 1.0);
+        assert_eq!(parse_max_cell_px(Some("0.5")), 0.5);
+        assert_eq!(parse_max_cell_px(Some(" 1 ")), 1.0);
+        // wider cells would punch holes through filled shapes
+        assert_eq!(parse_max_cell_px(Some("2")), 1.0);
+        assert_eq!(parse_max_cell_px(Some("4")), 1.0);
+        assert_eq!(parse_max_cell_px(Some("0")), 1.0);
+        assert_eq!(parse_max_cell_px(Some("nan")), 1.0);
+        assert_eq!(parse_max_cell_px(Some("x")), 1.0);
     }
 }

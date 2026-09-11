@@ -216,11 +216,12 @@ level L  cell = base_cell_dbu × 2^L, grid (w, h) = ceil(span/cell),
    fixture: L자, 테두리(링), 대각선 polygon·path, 멀리 떨어진 Pts 두 집단, 대각
    벡터 Grid(리뷰 반례), 축 정렬 Grid의 간격 < 셀 / ≥ 셀, 회전·미러 배치, thin.oas·
    thinmix.oas. 상위 레벨 == 하위의 OR-풀링. bbox 교차를 정답으로 쓰지 않는다.
-2. **렌더**: (a) 마스크 투영 == Python 기대 마스크(셀 → 픽셀 교차), pan 위상 0/¼/½/¾
-   px, 피라미드 전환 직전·직후 배율, 레벨 선택이 배율마다 맞는지. (b) exact 대비
-   품질: 같은 뷰의 exact 렌더(fixture는 작아 가능)와 비교해 missed(exact 점유 픽셀이
-   비점유) = 0, extra ≤ exact 점유 픽셀의 1 px 이웃 밴드(요약 ⊆ exact의 1 px
-   팽창, pan 위상마다), 3 px 이상 빈 간격의 가운데 픽셀 보존,
+2. **렌더**: (a) 마스크 투영 == Python 기대 마스크(셀 중심 투영: 셀 중심이 놓인
+   픽셀 하나), pan 위상 0/¼/½/¾ px, 피라미드 전환 직전·직후 배율, 레벨 선택이
+   배율마다 맞는지. (b) exact 대비 품질: 같은 뷰의 exact 렌더(fixture는 작아 가능)와
+   비교해 1 px 이웃에도 대응 요약 픽셀이 없는 exact 픽셀 = 0, 1 px 이웃에 exact
+   픽셀이 없는 요약 픽셀 = 0(요약 ⊆ exact의 1 px 팽창, 그 역도, pan 위상마다),
+   3 px 이상 빈 간격의 가운데 픽셀 보존,
    큰 rect의 채움·외곽선이 exact와 경계 1 px 이내. (c) 레이어 순서: 아래 요약 + 위
    exact fixture에서 위 레이어가 보인다.
 3. 정책 불변: `thin=cull` 픽셀 불변(A/B), keep 근접뷰·exact·depth 0/1 픽셀 불변,
@@ -379,6 +380,8 @@ pickable)`·`N passes without summary`. 킬 스위치는 같은 환경변수. ga
 | 2 P1 | hull이 거부된 PATH를 세기만 하고 레이어를 `ok`로 게시 → 요약 렌더가 도형 없이 정상 프레임 | 사실 | 거부된 path가 하나라도 있으면 그 레이어는 `none:unsupported`(비트맵 없음) → 페이지 경로(exact가 같은 path를 거부하면 그 오류가 보인다). 단위 테스트 + gate(U-turn fixture 상태·파일) |
 | 3 P1 | "2 px 이상 빈 간격 보존"이 깨짐(도형→셀, 셀→픽셀 두 번 확장); gate가 빈 런을 직접 보지 않음 | 사실 | 투영을 **셀 중심 → 픽셀 하나**로 바꿈(floor/ceil은 exact의 중심 표본화와 겹쳐 2 px까지 벌어졌다 — 새 gate가 실제로 잡음). 계약을 1 px 팽창 규칙으로 정정(§3: 요약 ⊆ exact의 8-이웃 팽창이고 그 역도 성립, 3 px 이상 간격은 ≥ 1 px 보존, 2 px는 위상 의존). gate: 간격 2/3/4/5 px·세 위상 fixture를 pan 위상 4개에서 픽셀 단위로 검사(양방향 1 px, 3 px 간격 가운데 픽셀 보존). `FLOE_RUST_OCCUPANCY_PX`(진단)로 0.5 px 레벨 A/B 가능 |
 | 4 P2 | 비트맵 오프셋이 헤더/테이블을 가리켜도 정상 파일로 읽힘(identity=ok, 잘못된 화면) | 사실 | 로더가 `off ≥ 테이블 끝`과 테이블 순서대로 겹침 없이 이어짐을 검사(위반 시 `inside the header`/`overlaps`로 거부 → 요약 없음). 단위 테스트 + gate |
+| 후속 5 P2 | `FLOE_RUST_OCCUPANCY_PX`가 4까지 허용되는데 중심 투영은 셀마다 픽셀 하나만 켜므로 1 px 초과 셀에서 채워진 도형 내부가 격자처럼 뚫림(2 px: 4,096 중 1,600, 4 px: 400) | 사실 | 허용 범위를 0 < 값 ≤ 1로 제한(초과·비정상 값은 기본 1). 단위 테스트 `the_pixel_bound_knob_never_exceeds_one_pixel` |
+| 후속 6 P3 | §8 gate 2의 "셀 → 픽셀 교차", "missed = 0" 표현이 새 구현과 다름 | 사실 | "셀 중심 투영", "1 px 이웃에도 대응 요약 픽셀이 없는 exact 픽셀 = 0(그 역도)"으로 정정 |
 
 ## 11. 1차 계획 리뷰(7건, 2026-09-11) 반영
 
