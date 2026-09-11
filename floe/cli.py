@@ -1571,6 +1571,8 @@ def _jobdeck_index(args, catalog):
                info.path, "--jobs", str(args.jobs)]
         if args.force:
             cmd.append("--force")
+        if getattr(args, "lod", False):
+            cmd.append("--lod")
         print("[jobdeck] index     : (%d/%d) %s" % (n, len(todo), tc),
               flush=True)
         t0 = time.time()
