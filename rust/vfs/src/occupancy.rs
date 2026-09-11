@@ -54,6 +54,10 @@ pub const STATUS_OK: u8 = 0;
 pub const STATUS_NONE_CELLS: u8 = 1;
 pub const STATUS_NONE_WORK: u8 = 2;
 pub const STATUS_NONE_SIZE: u8 = 3;
+/// a path the hull refuses (degenerate spine, U-turn): the layer has
+/// no summary rather than one with a shape silently missing (review
+/// 2026-09-11 (2nd) P1-2)
+pub const STATUS_NONE_UNSUPPORTED: u8 = 4;
 
 pub fn status_text(status: u8) -> &'static str {
     match status {
@@ -61,6 +65,7 @@ pub fn status_text(status: u8) -> &'static str {
         STATUS_NONE_CELLS => "none:cells",
         STATUS_NONE_WORK => "none:work",
         STATUS_NONE_SIZE => "none:size",
+        STATUS_NONE_UNSUPPORTED => "none:unsupported",
         _ => "none:unknown",
     }
 }
@@ -667,31 +672,31 @@ impl<'a> Marker<'a> {
                         return false;
                     }
                 }
-                rep => {
+                Rep::Grid { na, nb, va, vb } => {
                     // member offsets live in the parent frame: place
-                    // the child at (x + dx, y + dy) under the parent's xf
-                    let offsets: Vec<(i64, i64)> = match rep {
-                        Rep::Grid { na, nb, va, vb } => {
-                            if !self.charge(na.saturating_mul(*nb)) {
+                    // the child at (x + dx, y + dy) under the parent's
+                    // xf. Members are walked as they are enumerated and
+                    // charged one by one (review 2026-09-11 (2nd) P1-1:
+                    // an offset vector of every member reached 32 GiB
+                    // inside the work budget)
+                    for j in 0..*nb as i64 {
+                        for i in 0..*na as i64 {
+                            if !self.charge(1) {
                                 return false;
                             }
-                            let mut v = Vec::with_capacity((na * nb) as usize);
-                            for j in 0..*nb as i64 {
-                                for i in 0..*na as i64 {
-                                    v.push((i * va.0 + j * vb.0, i * va.1 + j * vb.1));
-                                }
-                            }
-                            v
-                        }
-                        Rep::Pts(p) => {
-                            if !self.charge(p.len() as u64) {
+                            let (dx, dy) = (i * va.0 + j * vb.0, i * va.1 + j * vb.1);
+                            let base = xf.compose(&Xf::place(pl.x + dx, pl.y + dy, pl.rot, pl.flip));
+                            if !self.walk(pl.cell, &base) {
                                 return false;
                             }
-                            p.to_vec()
                         }
-                        Rep::One => unreachable!(),
-                    };
-                    for (dx, dy) in offsets {
+                    }
+                }
+                Rep::Pts(p) => {
+                    for &(dx, dy) in p.iter() {
+                        if !self.charge(1) {
+                            return false;
+                        }
                         let base = xf.compose(&Xf::place(pl.x + dx, pl.y + dy, pl.rot, pl.flip));
                         if !self.walk(pl.cell, &base) {
                             return false;
@@ -731,6 +736,15 @@ fn build_layer(
     if !ok || m.over {
         return (
             Layer { layer: key.0, dt: key.1, status: STATUS_NONE_WORK, work: m.work, levels: Vec::new() },
+            m.paths_skipped,
+        );
+    }
+    if m.paths_skipped > 0 {
+        // a shape the summary cannot represent: no summary for the
+        // layer (the page path draws it, or refuses it loudly), never
+        // a summary with the shape missing
+        return (
+            Layer { layer: key.0, dt: key.1, status: STATUS_NONE_UNSUPPORTED, work: m.work, levels: Vec::new() },
             m.paths_skipped,
         );
     }
@@ -1020,6 +1034,11 @@ impl OvoFile {
         if len < o + table {
             return Err("truncated occupancy file (layer table)".to_string());
         }
+        // bitmaps start after the layer table and follow each other in
+        // table order without overlap (review 2026-09-11 (2nd) P2-4: an
+        // offset into the header read as a plausible bitmap)
+        let body_start = (o + table) as u64;
+        let mut prev_end = body_start;
         let mut layers = Vec::with_capacity(n_layers as usize);
         let (mut w, mut h) = (0u32, 0u32);
         for k in 0..n_layers as usize {
@@ -1059,6 +1078,17 @@ impl OvoFile {
                             k, lv, end, len
                         ));
                     }
+                    if e.off < prev_end {
+                        return Err(format!(
+                            "corrupt occupancy layer {} level {}: bitmap offset {} {} {}",
+                            k,
+                            lv,
+                            e.off,
+                            if e.off < body_start { "inside the header/table ending at" } else { "overlaps the previous bitmap ending at" },
+                            prev_end
+                        ));
+                    }
+                    prev_end = end;
                     if lv == 0 {
                         w = e.w;
                         h = e.h;
@@ -1383,6 +1413,84 @@ mod tests {
         assert!(cellf(5, 55) && cellf(25, 75) && !cellf(5, 75));
         assert!(!cellf(85, 85) && !cellf(85, 5) && !cellf(65, 65));
         assert_eq!(occ.paths_skipped, 0);
+    }
+
+    #[test]
+    fn a_huge_placement_array_is_charged_member_by_member_without_an_offset_vector() {
+        // review 2026-09-11 (2nd) P1-1: 100k x 100k members (10^10)
+        // stay inside a large budget's pre-charge, so the offset
+        // vector alone asked for 160 GB; now each member is charged
+        // and walked as it is enumerated, so the over-budget stop
+        // lands within one member of the budget
+        let mut child = cell("C");
+        child.rects.push(rect(1, 0, 0, 5, 5, Rep::One));
+        let mut top = cell("T");
+        top.places.push(PlaceRec {
+            cell: 1,
+            x: 0,
+            y: 0,
+            rot: 0,
+            flip: false,
+            rep: Rep::Grid { na: 100_000, nb: 100_000, va: (1, 0), vb: (0, 0) },
+        });
+        let d = doc_with(vec![top, child], 0, vec![(1, 0)]);
+        let budget = 5_000u64;
+        let occ = build(&d, 0, 0, &Opts { base_um: 0.01, max_work: budget, ..Opts::default() }).unwrap();
+        assert_eq!(occ.layers[0].status, STATUS_NONE_WORK);
+        assert!(occ.layers[0].work <= budget + 2, "charged {} for a budget of {}", occ.layers[0].work, budget);
+        let pts: Vec<(i64, i64)> = (0..20_000).map(|k| (k * 10, 0)).collect();
+        let mut top = cell("T");
+        top.places.push(PlaceRec { cell: 1, x: 0, y: 0, rot: 0, flip: false, rep: Rep::Pts(Arc::from(pts)) });
+        let mut child = cell("C");
+        child.rects.push(rect(1, 0, 0, 5, 5, Rep::One));
+        let d = doc_with(vec![top, child], 0, vec![(1, 0)]);
+        let occ = build(&d, 0, 0, &Opts { base_um: 0.01, max_work: budget, ..Opts::default() }).unwrap();
+        assert_eq!(occ.layers[0].status, STATUS_NONE_WORK);
+        assert!(occ.layers[0].work <= budget + 2);
+    }
+
+    #[test]
+    fn a_refused_path_leaves_the_layer_without_a_summary() {
+        // review 2026-09-11 (2nd) P1-2: a U-turn path was counted and
+        // dropped, and the layer published as ok - a summary with a
+        // shape missing. The layer is none:unsupported instead.
+        let mut top = cell("T");
+        top.paths.push(PathRec { layer: 1, dt: 0, pts: vec![(0, 0), (100, 0), (0, 0)], hw: 5, es: 0, ee: 0, rep: Rep::One });
+        top.rects.push(rect(1, 0, 50, 40, 40, Rep::One));
+        top.rects.push(RectRec { layer: 2, dt: 0, x: 0, y: 0, w: 40, h: 40, rep: Rep::One });
+        let d = doc_with(vec![top], 0, vec![(1, 0), (2, 0)]);
+        let occ = build(&d, 0, 0, &opts(0.01)).unwrap();
+        assert_eq!(occ.layers[0].status, STATUS_NONE_UNSUPPORTED);
+        assert!(occ.layers[0].levels.is_empty());
+        assert_eq!(occ.layers[1].status, STATUS_OK);
+        assert_eq!(occ.paths_skipped, 1);
+        let f = OvoFile::from_bytes(write_ovo(&occ)).unwrap();
+        assert_eq!(f.layers[0].status, STATUS_NONE_UNSUPPORTED);
+        assert!(f.level(0, 0).is_none() && f.level(1, 0).is_some());
+        assert_eq!(status_text(STATUS_NONE_UNSUPPORTED), "none:unsupported");
+    }
+
+    #[test]
+    fn bitmap_offsets_inside_the_table_or_overlapping_are_refused() {
+        // review 2026-09-11 (2nd) P2-4: an offset of 0 pointed a level
+        // at the header and read as a valid bitmap
+        let mut top = cell("T");
+        top.rects.push(rect(1, 0, 0, 2000, 2000, Rep::One));
+        let d = doc_with(vec![top], 0, vec![(1, 0)]);
+        let occ = build(&d, 0, 0, &opts(0.01)).unwrap();
+        assert!(occ.n_levels >= 2);
+        let bytes = write_ovo(&occ);
+        let table = HEADER_FIXED + 1 + LAYER_FIXED;
+        let off0 = table + 8;
+        let off1 = table + LEVEL_ENTRY + 8;
+        let level0_off = u64::from_le_bytes(bytes[off0..off0 + 8].try_into().unwrap());
+        let mut header = bytes.clone();
+        header[off0..off0 + 8].copy_from_slice(&0u64.to_le_bytes());
+        assert!(OvoFile::from_bytes(header).unwrap_err().contains("inside the header"));
+        let mut overlap = bytes.clone();
+        overlap[off1..off1 + 8].copy_from_slice(&level0_off.to_le_bytes());
+        assert!(OvoFile::from_bytes(overlap).unwrap_err().contains("overlaps"));
+        assert!(OvoFile::from_bytes(bytes).is_ok());
     }
 
     #[test]

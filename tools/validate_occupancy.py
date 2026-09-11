@@ -100,7 +100,8 @@ def sha(path):
 HDR = "<8sIdQQq4qII"     # magic version unit size mtime cell bbox levels layers
 LAYER = "<IIBQ"           # layer dt status work
 LEVEL = "<IIQQ"           # w h off len
-STATUS = {0: "ok", 1: "none:cells", 2: "none:work", 3: "none:size"}
+STATUS = {0: "ok", 1: "none:cells", 2: "none:work", 3: "none:size",
+          4: "none:unsupported"}
 
 
 def read_ovo(path):
@@ -266,6 +267,49 @@ def write_reps(path):
     opt.oasis_compression_level = 10
     opt.oasis_recompress = True
     ly.write(str(path), opt)
+    ly._destroy()
+
+
+def write_uturn(path):
+    """1/0 holds a U-turn path the hull refuses (the raster refuses it
+    too) beside a box; 2/0 a plain box."""
+    ly = db.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell("UTURN")
+    l1, l2 = ly.layer(1, 0), ly.layer(2, 0)
+    top.shapes(l1).insert(db.Path([P(2 * UM, 2 * UM), P(20 * UM, 2 * UM),
+                                   P(2 * UM, 2 * UM)], 1000))
+    top.shapes(l1).insert(db.Box(2 * UM, 10 * UM, 20 * UM, 20 * UM))
+    top.shapes(l2).insert(db.Box(2 * UM, 2 * UM, 20 * UM, 20 * UM))
+    ly.write(str(path))
+    ly._destroy()
+
+
+def write_gaps(path):
+    """2000 x 2000 um, 1/0: columns of 100 um boxes whose gaps are 2, 3,
+    4 and 5 px at 10 um/px, at three sub-pixel phases; rows of the same
+    along y (the empty-run gate)."""
+    ly = db.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell("GAPS")
+    l1 = ly.layer(1, 0)
+    y = 100
+    for phase in (0, 3, 7):
+        x = 100 + phase
+        for gap in (20, 30, 40, 50, 30, 20):
+            top.shapes(l1).insert(db.Box(x * UM, y * UM, (x + 100) * UM,
+                                         (y + 150) * UM))
+            x += 100 + gap
+        y += 250
+    x = 1300
+    for phase in (0, 4, 9):
+        yy = 100 + phase
+        for gap in (20, 30, 40, 50, 30, 20):
+            top.shapes(l1).insert(db.Box(x * UM, yy * UM, (x + 150) * UM,
+                                         (yy + 100) * UM))
+            yy += 100 + gap
+        x += 200
+    ly.write(str(path))
     ly._destroy()
 
 
@@ -463,6 +507,51 @@ class GenerationContractTests(unittest.TestCase):
         floe2("index", self.src, "--occupancy-only", "--occupancy-um", "1")
         self.assertEqual(read_ovo(self.cache / "design.ovo")["cell"], 1000)
 
+    def test_a_refused_path_leaves_the_layer_without_a_summary(self):
+        # review 2026-09-11 (2nd) P1-2: the U-turn path was dropped and
+        # the layer published ok; now the layer is none:unsupported and
+        # the page path draws it (or refuses it loudly)
+        src = TMP / "uturn.oas"
+        write_uturn(src)
+        cache = index_with_occupancy(src, 1)
+        rows = [l for l in self.listing(cache).stdout.splitlines()
+                if l.startswith("layer ")]
+        self.assertTrue(any("ld=1/0 status=none:unsupported" in r for r in rows), rows)
+        self.assertTrue(any("ld=2/0 status=ok" in r for r in rows), rows)
+        ovo = read_ovo(cache / "design.ovo")
+        by_key = {l["key"]: l for l in ovo["layers"]}
+        self.assertEqual(by_key[(1, 0)]["status"], "none:unsupported")
+        self.assertTrue(all(lv[2] == b"" for lv in by_key[(1, 0)]["levels"]))
+
+    def test_corrupt_bitmap_offsets_are_refused(self):
+        # review 2026-09-11 (2nd) P2-4: an offset into the header read as
+        # a plausible bitmap (identity=ok, 3,275 wrong pixels)
+        src = TMP / "offsets.oas"
+        write_thinwide(src)
+        cache = index_with_occupancy(src, 4)
+        ovo = cache / "design.ovo"
+        keep = ovo.read_bytes()
+        hdr = struct.calcsize(HDR)
+        top_len = struct.unpack_from("<H", keep, hdr)[0]
+        first_entry = hdr + 2 + top_len + struct.calcsize(LAYER)
+        off0 = first_entry + 8
+        off1 = first_entry + struct.calcsize(LEVEL) + 8
+        level0_off = struct.unpack_from("<Q", keep, off0)[0]
+        try:
+            bad = bytearray(keep)
+            struct.pack_into("<Q", bad, off0, 0)
+            ovo.write_bytes(bytes(bad))
+            res = self.listing(cache, ok=1)
+            self.assertIn("inside the header", res.stderr)
+            bad = bytearray(keep)
+            struct.pack_into("<Q", bad, off1, level0_off)
+            ovo.write_bytes(bytes(bad))
+            res = self.listing(cache, ok=1)
+            self.assertIn("overlaps", res.stderr)
+        finally:
+            ovo.write_bytes(keep)
+        self.listing(cache)
+
     def test_limits_are_recorded_as_none_never_approximated(self):
         floe_index("vfs", self.src, self.cache, "--occupancy-only",
                    "--occupancy-max-cells", "10")
@@ -586,10 +675,11 @@ def write_thinwide(path):
 
 
 def expected_mask(level, bbox_dbu, width, height, halo=0):
-    """Pixels whose square meets an occupied cell of `level` under the
-    render's view (the plain floor/ceil projection the summary path
-    uses, mirrored operation by operation); `halo` extends the pixel
-    range beyond the frame for boundary tests."""
+    """Pixels holding the centre of an occupied cell of `level` under
+    the render's view (the summary path's projection, mirrored
+    operation by operation); `halo` admits pixels just outside the
+    frame for boundary tests."""
+    import math
     w, h, bits = level["w"], level["h"], level["bits"]
     cell, x0, y0 = level["cell"], level["x0"], level["y0"]
     vx0, vy0, vx1, vy1 = (float(v) for v in bbox_dbu)
@@ -603,18 +693,12 @@ def expected_mask(level, bbox_dbu, width, height, halo=0):
         for i in range(w):
             if not (row[i // 8] >> (i % 8)) & 1:
                 continue
-            cx0 = x0 + i * cell
-            cx1 = cx0 + cell
-            cy0 = y0 + j * cell
-            cy1 = cy0 + cell
-            import math
-            pc0 = math.floor((cx0 - vx0) * width / span_x)
-            pc1 = math.ceil((cx1 - vx0) * width / span_x) - 1
-            pr0 = math.floor((vy1 - cy1) * height / span_y)
-            pr1 = math.ceil((vy1 - cy0) * height / span_y) - 1
-            for r in range(max(pr0, -halo), min(pr1, height - 1 + halo) + 1):
-                for c in range(max(pc0, -halo), min(pc1, width - 1 + halo) + 1):
-                    lit.add((c, r))
+            mx = x0 + (i + 0.5) * cell
+            my = y0 + (j + 0.5) * cell
+            pc = math.floor((mx - vx0) * width / span_x)
+            pr = math.floor((vy1 - my) * height / span_y)
+            if -halo <= pc < width + halo and -halo <= pr < height + halo:
+                lit.add((pc, pr))
     return lit
 
 
@@ -824,6 +908,58 @@ class RenderTests(unittest.TestCase):
         line_only = rgb(185, 23)
         self.assertNotEqual(line_only, (0, 0, 0))
         self.assertNotEqual(line_only, only_square)
+
+    def test_the_summary_stays_within_one_pixel_of_exact_in_every_direction(self):
+        # review 2026-09-11 (2nd) P1-3: the shape -> cell and cell ->
+        # pixel projections each widen by up to a pixel, so "2 px empty
+        # runs survive" was false. The contract that holds (plan §3):
+        # every summary pixel lies within the 8-neighbourhood of an
+        # exact pixel - an empty region keeps every pixel two or more
+        # pixels away from exact geometry, a gap of g px keeps g - 2,
+        # 3 px gaps always keep one. Checked pixel by pixel on a gap
+        # fixture at four pan phases (the grid origin shifts against
+        # the pixels with the view).
+        src = TMP / "gaps.oas"
+        write_gaps(src)
+        cache = index_with_occupancy(src, 4)
+        os.environ.pop("FLOE_RUST_OCCUPANCY", None)
+        sys.path.insert(0, str(ROOT))
+        from floe.cache import Cache
+        from floe.rust_render import RustRenderWorker
+        c = Cache(str(src))
+        c.load()
+        worker = RustRenderWorker(c)
+        worker.start()
+        try:
+            widened = 0
+            for shift in (0.0, 2.5, 5.0, 7.5):
+                bbox = tuple(float(v * UM) for v in
+                             (shift, shift, 2000 + shift, 2000 + shift))
+                RenderTests.gen += 1
+                exact, sres = render_settled(worker, RenderTests.gen, bbox,
+                                             200, cut_px=0.0,
+                                             visible=[(1, 0)])
+                self.assertEqual(sres["summary"]["none"], "exact")
+                RenderTests.gen += 1
+                summ, res = render_settled(worker, RenderTests.gen, bbox,
+                                           200, visible=[(1, 0)])
+                self.assertEqual(res["summary"]["layers"], 1)
+                far = sorted(p for p in summ if not near(p, exact, 1))
+                self.assertEqual(far[:8], [], "shift %s: %d summary pixels "
+                                 "farther than 1 px from exact" % (shift, len(far)))
+                missed = sorted(p for p in exact if not near(p, summ, 1))
+                self.assertEqual(missed[:8], [], "shift %s: %d exact pixels "
+                                 "without a summary pixel within 1 px" % (shift, len(missed)))
+                widened += len(summ - exact)
+                if shift == 0.0:
+                    # the 3 px gap between the first row's boxes at x
+                    # 320..350 um keeps its middle pixel (33) clear
+                    self.assertTrue((32, 180) in exact or (31, 180) in exact)
+                    self.assertNotIn((33, 180), summ)
+                    self.assertNotIn((33, 180), exact)
+            self.assertGreater(widened, 0)
+        finally:
+            worker.stop()
 
     def test_the_mask_is_styled_boundary_solid_and_interior_by_the_fill(self):
         # the viewer's speckle fill: interior pixels follow the

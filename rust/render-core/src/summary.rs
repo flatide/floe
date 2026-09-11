@@ -136,18 +136,33 @@ pub(crate) fn planes_for(
     planes
 }
 
-/// The coarsest level whose cell is at most one screen pixel, or None
-/// when even level 0 is wider than a pixel (near view).
-pub fn level_for(base_cell_dbu: i64, px_per_dbu: f64, n_levels: u32) -> Option<u32> {
-    if base_cell_dbu <= 0 || !(px_per_dbu > 0.0) || n_levels == 0 {
+/// The default bound of a summary cell on screen (pixels): the
+/// coarsest level whose cell is at most this is painted.
+pub const DEFAULT_MAX_CELL_PX: f64 = 1.0;
+
+/// The bound in force: FLOE_RUST_OCCUPANCY_PX (diagnostic, e.g. 0.5
+/// for the M5 A/B - finer cells close fewer gaps at 4x the paint
+/// work) or the default.
+pub fn max_cell_px() -> f64 {
+    std::env::var("FLOE_RUST_OCCUPANCY_PX")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|v| *v > 0.0 && *v <= 4.0)
+        .unwrap_or(DEFAULT_MAX_CELL_PX)
+}
+
+/// The coarsest level whose cell is at most `max_px` screen pixels,
+/// or None when even level 0 is wider (near view).
+pub fn level_for(base_cell_dbu: i64, px_per_dbu: f64, n_levels: u32, max_px: f64) -> Option<u32> {
+    if base_cell_dbu <= 0 || !(px_per_dbu > 0.0) || n_levels == 0 || !(max_px > 0.0) {
         return None;
     }
     let cell_px = base_cell_dbu as f64 * px_per_dbu;
-    if cell_px > 1.0 {
+    if cell_px > max_px {
         return None;
     }
     let mut level = 0u32;
-    while level + 1 < n_levels && cell_px * (1u64 << (level + 1)) as f64 <= 1.0 {
+    while level + 1 < n_levels && cell_px * (1u64 << (level + 1)) as f64 <= max_px {
         level += 1;
     }
     Some(level)
@@ -160,15 +175,18 @@ mod tests {
     #[test]
     fn the_level_is_the_coarsest_cell_at_most_one_pixel() {
         // 4 um cells at 10 um/px: 0.4 px -> 8 um 0.8 px -> 16 um 1.6 px
-        assert_eq!(level_for(4000, 0.0001, 4), Some(1));
+        assert_eq!(level_for(4000, 0.0001, 4, 1.0), Some(1));
         // exactly one pixel counts
-        assert_eq!(level_for(4000, 0.000125, 4), Some(1));
+        assert_eq!(level_for(4000, 0.000125, 4, 1.0), Some(1));
         // just over: back to level 0 (0.52 px)
-        assert_eq!(level_for(4000, 0.00013, 4), Some(0));
+        assert_eq!(level_for(4000, 0.00013, 4, 1.0), Some(0));
         // near view: level 0 wider than a pixel
-        assert_eq!(level_for(4000, 0.0003, 4), None);
+        assert_eq!(level_for(4000, 0.0003, 4, 1.0), None);
         // the pyramid's top caps the level
-        assert_eq!(level_for(4000, 0.000001, 3), Some(2));
-        assert_eq!(level_for(0, 0.1, 3), None);
+        assert_eq!(level_for(4000, 0.000001, 3, 1.0), Some(2));
+        assert_eq!(level_for(0, 0.1, 3, 1.0), None);
+        // a half-pixel bound picks the finer level and narrows the near view
+        assert_eq!(level_for(4000, 0.0001, 4, 0.5), Some(0));
+        assert_eq!(level_for(4000, 0.00013, 4, 0.5), None);
     }
 }

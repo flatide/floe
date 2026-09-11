@@ -383,8 +383,10 @@ floe는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델을 
 - **점유 요약**(`thin:keep`의 광역뷰, 2026-09-11, docs/OCCUPANCY_PLAN.ko.md):
   캐시에 `design.ovo`(`floe2 index --occupancy-only`)가 있고 요청이 keep·
   exact 아님·depth full이며 기준 셀이 화면 1 px 이하이면, 그 레이어는 페이지
-  대신 셀 ≤ 1 px인 피라미드 레벨의 점유 마스크로 그려진다(경계 solid, 내부
-  채움). 상태줄 `summary N layers C cells (level k, x um; not pickable)` —
+  대신 셀 ≤ 1 px인 피라미드 레벨의 점유 마스크로 그려진다(셀 중심이 놓인
+  픽셀; 경계 solid, 내부 채움). 오차 계약: 요약과 exact는 서로 1 px 팽창 안에
+  있다(3 px 이상 빈 간격은 항상 보존, 2 px는 위상에 따라 닫힐 수 있음; 진단
+  `FLOE_RUST_OCCUPANCY_PX=0.5`로 더 가는 레벨). 상태줄 `summary N layers C cells (level k, x um; not pickable)` —
   이 뷰에서 pick/snap은 그 레이어를 보지 못한다. keep인데 요약이 없으면
   `summary: none (nofile|invalid|near|off|depth|layers)`. 덱은 pass마다
   소스 뷰에서 같은 판정을 하며 상태줄 `summary P passes C cells (not

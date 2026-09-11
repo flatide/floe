@@ -293,10 +293,12 @@ floe-index occupancy <outdir> [--layer L/D] [--level N] [--dump]  # 검사
   보수적 스캔 변환(변이 지나는 열린 셀 + 행 중심 parity 내부), path는 raster와
   같은 hull(`floe_tiler::path_outline_any`, render-core가 parity를 테스트로
   고정)을 polygon으로. 면적 0(폭 0 rect·path, 퇴화 polygon)은 아무 셀도 켜지
-  않는다(KLayout region 판정). hull이 거부되는 path(퇴화 spine·U-turn)는
-  건너뛰고 `paths_skipped`로 로그한다.
+  않는다(KLayout region 판정). hull이 거부되는 path(퇴화 spine·U-turn)가 있는
+  레이어는 `none:unsupported`로 게시되어 페이지 경로가 그린다(2차 리뷰 P1-2:
+  건너뛰고 ok로 두면 도형이 조용히 사라진다); 개수는 `paths_skipped`로 로그.
 - 레이어 병렬(`--jobs`): 레이어마다 재귀 레이어 존재 집합으로 가지치기한 순회
-  한 번. 상위 레벨은 OR 풀링, 격자가 64 × 64 이하가 될 때까지.
+  한 번. 배치 반복의 멤버는 열거하면서 하나씩 charge·walk한다(오프셋 벡터 없음,
+  2차 리뷰 P1-1). 상위 레벨은 OR 풀링, 격자가 64 × 64 이하가 될 때까지.
 - 상한(레이어 단위, 근사 저장 없음): level 0 셀 수 > `--occupancy-max-cells`
   (기본 2^30)면 모든 레이어 `none:cells`(파일은 만들어져 이유를 남김);
   마킹 작업(켠 셀 + 멤버 + 변 행) > `--occupancy-max-work`(기본 2^31)면 그

@@ -3620,14 +3620,18 @@ fn fill_pixel_on(fill: LayerFill, row: u32, col: u32, height: u32) -> bool {
 
 /// Occupancy summary of one layer into one tile (docs/OCCUPANCY_PLAN
 /// .ko.md §3, §6 step 4): the level's occupied cells that meet the
-/// tile (plus a one-pixel halo) are projected to a device mask - a
-/// pixel is lit when its square meets an occupied cell, the plain
-/// floor/ceil mapping, not the hairline parity - and the mask is
-/// styled: a lit pixel with an unlit 4-neighbour is boundary and takes
-/// the colour solid (one pixel, whatever the stroke width), an
-/// interior pixel takes the layer's fill rule (solid / speckle /
-/// pattern / clear). The halo makes the boundary decision independent
-/// of the tile grid, so pixels stay tile-size invariant.
+/// tile (plus a one-pixel halo) are projected to a device mask - an
+/// occupied cell lights the ONE pixel holding its centre (review
+/// 2026-09-11 (2nd) P1-3: lighting every pixel a cell touched, on top
+/// of the exact raster's centre sampling, reached two pixels past an
+/// exact edge; with cells <= 1 px the centre rule keeps the summary
+/// within one pixel of exact in every direction and never drops a
+/// cell) - and the mask is styled: a lit pixel with an unlit
+/// 4-neighbour is boundary and takes the colour solid (one pixel,
+/// whatever the stroke width), an interior pixel takes the layer's
+/// fill rule (solid / speckle / pattern / clear). The halo makes the
+/// boundary decision independent of the tile grid, so pixels stay
+/// tile-size invariant.
 fn paint_summary_plane(
     band: &mut RasterBand,
     request: &GeometryRasterRequest,
@@ -3682,25 +3686,13 @@ fn paint_summary_plane(
             }
             if (byte >> (i % 8)) & 1 == 1 {
                 cells += 1;
-                let cx0 = ox + i as f64 * cell;
-                let cx1 = cx0 + cell;
-                let cy0 = oy + j as f64 * cell;
-                let cy1 = cy0 + cell;
-                // pixels whose square meets the cell (open on the far
-                // side: a cell ending on a pixel boundary stops there)
-                let pc0 = ((cx0 - view.x0) * width / span_x).floor() as i64;
-                let pc1 = ((cx1 - view.x0) * width / span_x).ceil() as i64 - 1;
-                let pr0 = ((view.y1 - cy1) * height / span_y).floor() as i64;
-                let pr1 = ((view.y1 - cy0) * height / span_y).ceil() as i64 - 1;
-                let pc0 = pc0.max(hc0);
-                let pc1 = pc1.min(hc1 - 1);
-                let pr0 = pr0.max(hr0);
-                let pr1 = pr1.min(hr1 - 1);
-                for r in pr0..=pr1 {
-                    let base = (r - hr0) as usize * hw;
-                    for c in pc0..=pc1 {
-                        mask[base + (c - hc0) as usize] = true;
-                    }
+                // the pixel holding the cell's centre
+                let mx = ox + (i as f64 + 0.5) * cell;
+                let my = oy + (j as f64 + 0.5) * cell;
+                let pc = ((mx - view.x0) * width / span_x).floor() as i64;
+                let pr = ((view.y1 - my) * height / span_y).floor() as i64;
+                if pc >= hc0 && pc < hc1 && pr >= hr0 && pr < hr1 {
+                    mask[(pr - hr0) as usize * hw + (pc - hc0) as usize] = true;
                 }
             }
             i += 1;

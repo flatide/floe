@@ -367,7 +367,7 @@ impl Cache {
             };
             return Ok(SummarySelection::none(reason));
         };
-        let Some(level) = summary::level_for(file.cell_dbu, request.px_per_dbu, file.n_levels) else {
+        let Some(level) = summary::level_for(file.cell_dbu, request.px_per_dbu, file.n_levels, summary::max_cell_px()) else {
             let mut none = SummarySelection::none(summary::NONE_NEAR);
             none.base_cell_dbu = file.cell_dbu;
             none.unit = file.unit;
