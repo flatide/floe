@@ -40,6 +40,8 @@ error다. 전체 누락도 빌드/설치 지침을 포함한 hard error다. 동�
 floe-index vfs <src.oas> [outdir=.floe] [--jobs N] [--plan-batch N]
     [--encode-batch N] [--page-target-mb N] [--no-lod]
     [--coverage | --coverage-only] [--frontier-only] [--kill-at P]
+    [--occupancy | --occupancy-only] [--occupancy-um F]
+    [--occupancy-max-cells N] [--occupancy-max-work N] [--occupancy-max-bytes N]
     [--slow-cell-s S] [--p2-shard-limit-mb N]
     [--profile-cell NAME | --profile-cell-ci N]
     [--profile-jobs N,N,...] [--profile-repeat N]
@@ -272,6 +274,47 @@ explain  <kind>  <verdict>  <cell>  <layer L/D | ->  <id>  <bbox um x0,y0,x1,y1>
   그 아래 페이지를 보지도 않은 경우다. 실칩에서는 사라지는 뷰의 `--view`·
   `--px-per-um`(창 px / 뷰 µm)·detail의 `--cut-px`(low/medium/high = 5/3/1)로 한
   번, 보이는 뷰로 한 번 찍어 같은 셀·레이어의 판정을 비교한다.
+
+## 6.5 occupancy — 점유 피라미드(design.ovo, docs/OCCUPANCY_PLAN.ko.md M1)
+
+```
+floe-index vfs <src> [outdir] --occupancy [--occupancy-um F]      # 색인과 함께
+floe-index vfs <src> [outdir] --occupancy-only [--occupancy-um F] # 기존 캐시에 추가·교체
+floe-index occupancy <outdir> [--layer L/D] [--level N] [--dump]  # 검사
+```
+
+- 생성: 소스·레이어별로 top을 평탄화해 셀 비트맵을 만든다. rect는 셀 범위,
+  축 정렬 Grid 반복은 각 축의 간격(피치 − 멤버 폭)이 셀보다 좁을 때만 footprint
+  한 번에(멤버별 결과와 동일), 그 외 반복은 멤버마다. polygon은 셀 격자 위
+  보수적 스캔 변환(변이 지나는 열린 셀 + 행 중심 parity 내부), path는 raster와
+  같은 hull(`floe_tiler::path_outline_any`, render-core가 parity를 테스트로
+  고정)을 polygon으로. 면적 0(폭 0 rect·path, 퇴화 polygon)은 아무 셀도 켜지
+  않는다(KLayout region 판정). hull이 거부되는 path(퇴화 spine·U-turn)는
+  건너뛰고 `paths_skipped`로 로그한다.
+- 레이어 병렬(`--jobs`): 레이어마다 재귀 레이어 존재 집합으로 가지치기한 순회
+  한 번. 상위 레벨은 OR 풀링, 격자가 64 × 64 이하가 될 때까지.
+- 상한(레이어 단위, 근사 저장 없음): level 0 셀 수 > `--occupancy-max-cells`
+  (기본 2^30)면 모든 레이어 `none:cells`(파일은 만들어져 이유를 남김);
+  마킹 작업(켠 셀 + 멤버 + 변 행) > `--occupancy-max-work`(기본 2^31)면 그
+  레이어 `none:work`; 누적 비트맵 바이트가 `--occupancy-max-bytes`(기본 1 GiB)를
+  넘는 순서부터 `none:size`. 세 옵션은 게이트용 명시 CLI 상태다(`--kill-at`과
+  같은 규칙, 환경변수 없음).
+- 게시: `design.ovo.tmp` 작성·fsync 뒤 rename. `--kill-at occupancy-tmp`는 rename
+  직전에 죽는 게이트 훅(이전 파일 보존, tmp 잔존). 다음 실행은 시작 시 tmp를
+  지우고, Python 래퍼(`floe2 index`)는 자식이 실패·중단되면 tmp를 지운다.
+  로더는 tmp를 읽지 않는다.
+- `--occupancy-only`: 기존 design.ovm의 src_size·src_mtime·top이 지금 읽은
+  소스와 다르면 거부(재색인 안내). ovm/ovp/meta는 건드리지 않는다.
+- `occupancy` 명령 출력(줄 단위): `occupancy file= version= unit= cell_dbu=
+  base_um= bbox= grid=WxH levels= layers= src_size= src_mtime= identity=ok|mismatch
+  top=NAME`(mismatch면 `identity_error=` 줄과 exit 1), 레이어마다 `layer idx=
+  ld=L/D status= work= level0=WxH set=n0,n1,…`, `--dump`는 `dump ld= level= w= h=`
+  뒤에 h줄의 0/1. 잘린 파일·헤더 불일치는 stderr 메시지와 exit 1.
+- 게이트 `tools/validate_occupancy.py`: fixture(L자·구멍 링·대각 띠·삼각형·
+  확장 path·대각 path·U 경로·격자선 위 박스·면적 0·회전/미러/중첩 배치·간격 <
+  셀 / ≥ 셀 축 배열·대각 벡터 배열·떨어진 두 집단)와 valmini(4 µm 셀)의 level 0
+  모든 셀을 KLayout `begin_shapes_touching` + `Region & box` 면적 > 0 오라클과
+  완전 대조, 상위 레벨 == OR 풀링, 위 CLI 계약 전부.
 
 ## 7. 알려진 미결
 

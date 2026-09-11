@@ -78,6 +78,8 @@
 
 ## 4. 데이터: `design.ovo`
 
+(계획 원문. 구현된 형식은 SPEC-FORMATS `design.ovo`, 계획과 다른 세부는 §12.)
+
 캐시 디렉터리(`<src>.floe/`)의 선택적 sidecar. 소스 좌표계(world dbu, 캐시의 top 셀
 기준으로 전체 계층을 평탄화)에서 레이어마다 피라미드.
 
@@ -116,6 +118,8 @@ level L  cell = base_cell_dbu × 2^L, grid (w, h) = ceil(span/cell),
   관리하는 선택적 sidecar이며, 없거나 무효하면 요약 없음.
 
 ## 5. 생성기(`floe-index vfs`)
+
+(계획 원문. 구현된 규칙·상한·명령은 SPEC-INDEXER §6.5, 계획과 다른 세부는 §12.)
 
 - 입력: 파싱된 `Doc`(셀·레코드·배치·반복, `Doc.layer_order`). 기존 `coverage.rs`의
   순회 골격(`SplatCtx`, `world_bbox`, `splat_place`의 배치 재귀와 `tiler::Xf` 합성,
@@ -225,7 +229,7 @@ level L  cell = base_cell_dbu × 2^L, grid (w, h) = ceil(span/cell),
 
 | 단계 | 내용 | 판정 |
 |---|---|---|
-| M1 | `design.ovo` 형식·유효성·atomic 게시, 도형 교차 마킹(rect/polygon/path/반복), 처리 한계·취소, `--occupancy`(opt-in)·`--occupancy-um`·`--occupancy-only`, jobdeck 래퍼 전달, gate 1·5(생성 부분) | fixture 오라클 완전 일치, 실칩 생성 시간·크기·상한 기록 |
+| M1 | `design.ovo` 형식·유효성·atomic 게시, 도형 교차 마킹(rect/polygon/path/반복), 처리 한계·취소, `--occupancy`(opt-in)·`--occupancy-um`·`--occupancy-only`, jobdeck 래퍼 전달, gate 1·5(생성 부분) | **완료 2026-09-11(RENDERD 0.12.79, §12)**: fixture·valmini 오라클 완전 일치. 실칩 생성 시간·크기는 사용자 실측 대기 |
 | M2 | renderd 전용 마스크 경로(단일 소스), 5개 조건, 레벨 선택, 레이어 순서, pick/snap 제외, 킬 스위치, gate 2·3·5 | 단일 소스 keep 광역뷰가 요약으로 그려짐, cull·근접뷰·exact·depth 제한 불변 |
 | M3 | 플래너에서 요약 레이어의 페이지·계층 생략, `--explain summary`, 카운터 | 광역뷰 플랜의 페이지 선택·cbvh가 요약 레이어에서 0 |
 | M4 | 덱 통합(소스 뷰 레벨, pass 대체, wash 억제, depth/exact 조건), gate 4 | 덱 fit 뷰 시간 |
@@ -251,6 +255,46 @@ RENDERD_VERSION. `CACHE_VERSION`은 불변, `.ovo`는 자체 형식 버전.
   화면이 바뀌므로 별도 결정.
 - 실험 도구의 미세 렌더는 hairline parity의 y 편향을 포함하므로 도형 기준 생성기와
   1 px 정도 다를 수 있다. gate 오라클은 KLayout 도형 교차로 만든다.
+
+## 12. M1 구현 기록 (2026-09-11, RENDERD 0.12.79)
+
+구현: `rust/vfs/src/occupancy.rs`(생성기·직렬화·로더·유효성), `floe_tiler::
+path_outline_any`(raster hull의 이식, render-core 테스트가 parity 고정),
+`floe-index vfs --occupancy | --occupancy-only [--occupancy-um F]`, `floe-index
+occupancy <cache>`, `floe2 index --occupancy | --occupancy-only | --occupancy-um`,
+jobdeck 래퍼 전달, gate `tools/validate_occupancy.py`(배터리 포함). 형식은
+SPEC-FORMATS `design.ovo`, 명령·상한·게시 규칙은 SPEC-INDEXER §6.5.
+
+검증: fixture 3종(도형·반복·덱)과 valmini(4 µm 셀, 101 × 112 격자, 9레이어,
+점유 22,353셀)의 level 0 **모든 셀**이 KLayout 도형 교차 오라클과 일치(missing 0,
+extra 0). 상위 레벨 == OR 풀링. valmini 색인 + 요약 0.5 s.
+
+계획과 다른 점(모두 이 문서의 계약 안에서 더 좁게 정한 것):
+- identity는 `design.ovm`의 size·mtime이 아니라 **소스 size·mtime + top 이름 +
+  레이어 테이블**(전체 색인에서는 `.ovo`를 쓸 때 ovm이 아직 없고, ovm 헤더가
+  같은 소스 identity를 갖는다). `--occupancy-only`는 쓰기 전에 ovm과 대조한다.
+- `meta.json`에 `occupancy` 항목을 두지 않는다. 판정은 `.ovo` 헤더뿐이며 확인은
+  `floe-index occupancy`. (M2의 상태줄도 파일을 직접 읽는다.)
+- 면적 0 도형(폭 0 rect·path, 공선 polygon)은 셀을 켜지 않는다(KLayout region
+  판정과 일치). 면적이 양수인 polygon의 폭 0 돌기는 변 규칙으로 셀이 켜진다
+  (보수적).
+- hull이 거부되는 path(퇴화 spine, U-turn)는 건너뛰고 로그한다(raster도 같은
+  spine을 거부). 실칩 로그에 `paths_skipped`가 0이 아니면 M2 전에 확인.
+- Grid 닫힌형은 rect 반복에만 적용(polygon/path는 멤버마다).
+- 작업 예산의 단위 = 켠 셀 + 반복 멤버 + polygon 변의 행 방문(레이어별).
+  `--occupancy-max-cells/-work/-bytes`는 게이트용 명시 CLI 옵션.
+- 취소: Rust는 시그널을 잡지 않는다. 게시가 rename이므로 죽어도 이전 파일은
+  남고, 다음 실행이 시작 시 tmp를 지우며 `floe2 index` 래퍼가 자식 실패·중단 뒤
+  tmp를 지운다. 로더는 tmp를 읽지 않는다.
+- jobdeck 래퍼: `--occupancy`는 요약이 없는 색인된 소스에 `--occupancy-only`,
+  색인 안 된 소스는 `--occupancy`로 색인; `--occupancy-only`는 색인된 소스마다
+  재생성(색인 안 된 소스는 요약과 함께 색인). 있는 요약은 그대로("kept").
+- 빈 레이어도 0 비트맵을 전부 저장한다(레이어가 많은 레이아웃의 저장량 후속
+  최적화 후보).
+
+남은 M1 판정: 실칩 생성 시간·크기·상한 도달·`paths_skipped`(사용자가 `floe2
+index <src> --occupancy-only`로 실행해 `[vfs] occupancy …` 줄과 `floe-index
+occupancy <cache>` 첫 줄을 기록).
 
 ## 11. 1차 계획 리뷰(7건, 2026-09-11) 반영
 

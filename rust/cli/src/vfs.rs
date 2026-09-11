@@ -66,6 +66,13 @@ pub fn vfs_cmd(args: &[String]) {
     // include, --coverage-only to add design.ovc to an existing cache
     let mut coverage = false;
     let mut coverage_only = false;
+    // occupancy pyramid (docs/OCCUPANCY_PLAN.ko.md M1): opt-in until
+    // the M5 measurement; --occupancy-only adds design.ovo to an
+    // existing cache. The limits are gate-only knobs (explicit CLI
+    // state, never the environment - same rule as --kill-at).
+    let mut occupancy = false;
+    let mut occupancy_only = false;
+    let mut occ_opts = floe_vfs::occupancy::Opts::default();
     // rev 46b: recompute the meta.json minimap frontier from an
     // existing cache's design.ovm - no source parse, seconds even
     // on the 9.8G class
@@ -137,6 +144,35 @@ pub fn vfs_cmd(args: &[String]) {
             "--coverage-only" => {
                 coverage_only = true;
                 i += 1;
+            }
+            "--occupancy" => {
+                occupancy = true;
+                i += 1;
+            }
+            "--occupancy-only" => {
+                occupancy_only = true;
+                i += 1;
+            }
+            "--occupancy-um" => {
+                let um: f64 = args[i + 1].parse().expect("occupancy cell um");
+                if !(um > 0.0) || !um.is_finite() {
+                    eprintln!("--occupancy-um must be a positive number of microns");
+                    std::process::exit(2);
+                }
+                occ_opts.base_um = um;
+                i += 2;
+            }
+            "--occupancy-max-cells" => {
+                occ_opts.max_cells = args[i + 1].parse().expect("occupancy max cells");
+                i += 2;
+            }
+            "--occupancy-max-work" => {
+                occ_opts.max_work = args[i + 1].parse().expect("occupancy max work");
+                i += 2;
+            }
+            "--occupancy-max-bytes" => {
+                occ_opts.max_bytes = args[i + 1].parse().expect("occupancy max bytes");
+                i += 2;
             }
             "--no-lod" => {
                 lod = false;
@@ -272,14 +308,21 @@ pub fn vfs_cmd(args: &[String]) {
     if profiling
         && (coverage
             || coverage_only
+            || occupancy
+            || occupancy_only
             || frontier_only
             || kill_at.is_some())
     {
         eprintln!(
-            "cell profiling cannot be combined with coverage, frontier-only, or kill-at"
+            "cell profiling cannot be combined with coverage, occupancy, frontier-only, or kill-at"
         );
         std::process::exit(2);
     }
+    if coverage_only && occupancy_only {
+        eprintln!("--coverage-only and --occupancy-only are separate additive runs");
+        std::process::exit(2);
+    }
+    occ_opts.jobs = jobs;
     if frontier_only {
         let t0 = std::time::Instant::now();
         let v = floe_vfs::Vfs::open(&outdir).unwrap_or_else(|e| {
@@ -511,6 +554,35 @@ pub fn vfs_cmd(args: &[String]) {
             std::process::exit(1);
         }
         write_coverage(&doc, &outdir, jobs);
+    } else if occupancy_only {
+        // add design.ovo to an existing cache (additive, outside the
+        // marker protocol). The file carries the cache's identity, so
+        // a cache built from other source bytes or another top is
+        // refused here instead of producing a file the reader rejects.
+        let ovm_path = format!("{}/design.ovm", outdir);
+        let ovm = floe_ovm::Ovm::open(&ovm_path).unwrap_or_else(|e| {
+            eprintln!("--occupancy-only: {} (build the cache first)", e);
+            std::process::exit(1);
+        });
+        if ovm.src_size != size || ovm.src_mtime != mtime {
+            eprintln!(
+                "--occupancy-only: {} was built for source {}/{} but the \
+                 source is now {}/{}; re-index it",
+                ovm_path, ovm.src_size, ovm.src_mtime, size, mtime
+            );
+            std::process::exit(1);
+        }
+        let top = ovm.cell(ovm.top).name;
+        if top != doc.cells[doc.top].name {
+            eprintln!(
+                "--occupancy-only: cache top {:?} differs from the parsed top {:?}",
+                top,
+                doc.cells[doc.top].name
+            );
+            std::process::exit(1);
+        }
+        drop(ovm);
+        write_occupancy(&doc, &outdir, size, mtime, &occ_opts, kill_at.as_deref());
     } else {
         // marker protocol (VFS_HIER.md par.3.6): design.ovm is the
         // commit marker. Kill it FIRST, delete the other outputs,
@@ -524,6 +596,8 @@ pub fn vfs_cmd(args: &[String]) {
             "design.ovp",
             "design.ovt",
             "design.ovc",
+            "design.ovo",
+            "design.ovo.tmp",
             "labels.tsv",
             // legacy (pre-0.10) viewer file: scrub on rebuild so a
             // re-index actually reclaims the skeleton's bytes
@@ -576,6 +650,9 @@ pub fn vfs_cmd(args: &[String]) {
                          &lmems, &tstats, &frontier);
         if coverage {
             write_coverage(&doc, &outdir, jobs);
+        }
+        if occupancy {
+            write_occupancy(&doc, &outdir, size, mtime, &occ_opts, kill_at.as_deref());
         }
         if kill_at.as_deref() == Some("ovm-partial") {
             std::fs::write(
@@ -1723,6 +1800,196 @@ fn profile_cell_run(
     }
     writeln!(&mut out, "  ]\n}}").unwrap();
     out
+}
+
+/// occupancy pyramid (docs/OCCUPANCY_PLAN.ko.md M1): design.ovo,
+/// published by tmp + rename so a failed or killed build never leaves
+/// a partial file under the name and an earlier file survives until
+/// the new one is complete. A layer over a limit is recorded inside
+/// the file as none:<reason> (never approximated); the file is still
+/// published so the viewer can say why there is no summary.
+fn write_occupancy(
+    doc: &Doc,
+    outdir: &str,
+    size: u64,
+    mtime: u64,
+    opts: &floe_vfs::occupancy::Opts,
+    kill_at: Option<&str>,
+) {
+    use floe_vfs::occupancy as occ;
+    use std::io::Write;
+    let t = std::time::Instant::now();
+    let tmp = format!("{}/design.ovo.tmp", outdir);
+    let path = format!("{}/design.ovo", outdir);
+    let _ = std::fs::remove_file(&tmp);
+    let built = occ::build(doc, size, mtime, opts).unwrap_or_else(|e| {
+        eprintln!("[vfs] occupancy: {}", e);
+        std::process::exit(1);
+    });
+    let bytes = occ::write_ovo(&built);
+    {
+        let mut f = std::fs::File::create(&tmp).expect("create ovo tmp");
+        f.write_all(&bytes).expect("write ovo tmp");
+        f.sync_all().expect("sync ovo tmp");
+    }
+    if kill_at == Some("occupancy-tmp") {
+        eprintln!("[vfs] --kill-at occupancy-tmp");
+        std::process::exit(9);
+    }
+    std::fs::rename(&tmp, &path).expect("publish ovo");
+    let ok = built.layers.iter().filter(|l| l.status == occ::STATUS_OK).count();
+    eprintln!(
+        "[vfs] occupancy cell={}um ({} dbu) grid={}x{} levels={} layers={} ok={} {} ({:.1}s)",
+        opts.base_um,
+        built.cell_dbu,
+        built.w,
+        built.h,
+        built.n_levels,
+        built.layers.len(),
+        ok,
+        fmt_size(bytes.len() as u64),
+        t.elapsed().as_secs_f64()
+    );
+    for l in &built.layers {
+        if l.status != occ::STATUS_OK {
+            eprintln!(
+                "[vfs] occupancy layer {}/{} {} (work {})",
+                l.layer,
+                l.dt,
+                occ::status_text(l.status),
+                l.work
+            );
+        }
+    }
+    if built.paths_skipped > 0 {
+        eprintln!(
+            "[vfs] occupancy: {} path(s) skipped (hull refused: degenerate spine or U-turn)",
+            built.paths_skipped
+        );
+    }
+}
+
+/// `floe-index occupancy <cache> [--layer L/D --level N --dump]`:
+/// header, identity against design.ovm, per-layer statuses and set
+/// counts; --dump prints one level as rows of 0/1 (gates)
+pub fn occupancy_cmd(args: &[String]) {
+    use floe_vfs::occupancy as occ;
+    let mut dir: Option<String> = None;
+    let mut layer: Option<(u32, u32)> = None;
+    let mut level = 0usize;
+    let mut dump = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--layer" => {
+                let v = &args[i + 1];
+                let (l, d) = v.split_once('/').unwrap_or_else(|| {
+                    eprintln!("--layer wants L/D");
+                    std::process::exit(2);
+                });
+                layer = Some((l.parse().expect("layer"), d.parse().expect("datatype")));
+                i += 2;
+            }
+            "--level" => {
+                level = args[i + 1].parse().expect("level");
+                i += 2;
+            }
+            "--dump" => {
+                dump = true;
+                i += 1;
+            }
+            a => {
+                dir = Some(a.to_string());
+                i += 1;
+            }
+        }
+    }
+    let dir = dir.unwrap_or_else(|| {
+        eprintln!("usage: floe-index occupancy <cache> [--layer L/D] [--level N] [--dump]");
+        std::process::exit(2);
+    });
+    let path = format!("{}/design.ovo", dir);
+    let f = occ::OvoFile::open(&path).unwrap_or_else(|e| {
+        eprintln!("occupancy: {}", e);
+        std::process::exit(1);
+    });
+    let identity = match floe_ovm::Ovm::open(&format!("{}/design.ovm", dir)) {
+        Ok(ovm) => f.validate_against(&ovm),
+        Err(e) => Err(format!("design.ovm: {}", e)),
+    };
+    println!(
+        "occupancy file={} version={} unit={} cell_dbu={} base_um={} bbox={},{},{},{} \
+         grid={}x{} levels={} layers={} src_size={} src_mtime={} identity={} top={}",
+        path,
+        occ::VERSION,
+        f.unit,
+        f.cell_dbu,
+        f.base_um(),
+        f.bbox.0,
+        f.bbox.1,
+        f.bbox.2,
+        f.bbox.3,
+        f.w,
+        f.h,
+        f.n_levels,
+        f.layers.len(),
+        f.src_size,
+        f.src_mtime,
+        if identity.is_ok() { "ok" } else { "mismatch" },
+        f.top
+    );
+    if let Err(e) = &identity {
+        println!("identity_error={}", e);
+    }
+    for (k, l) in f.layers.iter().enumerate() {
+        let sets: Vec<String> = (0..f.n_levels as usize).map(|lv| f.count(k, lv).to_string()).collect();
+        let (w0, h0) = l.levels.first().map(|e| (e.w, e.h)).unwrap_or((0, 0));
+        println!(
+            "layer idx={} ld={}/{} status={} work={} level0={}x{} set={}",
+            k,
+            l.layer,
+            l.dt,
+            occ::status_text(l.status),
+            l.work,
+            w0,
+            h0,
+            sets.join(",")
+        );
+    }
+    if dump {
+        let Some(key) = layer else {
+            eprintln!("--dump needs --layer L/D");
+            std::process::exit(2);
+        };
+        let Some(k) = f.layers.iter().position(|l| (l.layer, l.dt) == key) else {
+            eprintln!("occupancy: layer {}/{} not in the file", key.0, key.1);
+            std::process::exit(1);
+        };
+        let Some((w, h, bits)) = f.level(k, level) else {
+            eprintln!(
+                "occupancy: layer {}/{} level {} has no bitmap ({})",
+                key.0,
+                key.1,
+                level,
+                occ::status_text(f.layers[k].status)
+            );
+            std::process::exit(1);
+        };
+        println!("dump ld={}/{} level={} w={} h={}", key.0, key.1, level, w, h);
+        let rb = occ::Level::row_bytes(w);
+        let mut row = String::with_capacity(w as usize);
+        for j in 0..h as usize {
+            row.clear();
+            for i in 0..w as usize {
+                let b = bits[j * rb + i / 8] >> (i % 8) & 1;
+                row.push(if b == 1 { '1' } else { '0' });
+            }
+            println!("{}", row);
+        }
+    }
+    if identity.is_err() {
+        std::process::exit(1);
+    }
 }
 
 /// coverage bitplanes (V3b): optional density overview

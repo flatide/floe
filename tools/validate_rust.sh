@@ -90,6 +90,9 @@ rm -f "$VOUT.buildlog"
 .venv/bin/python tools/validate_vfs.py "$SRC" "$VOUT"
 .venv/bin/python tools/validate_vfs_render.py "$SRC" "$VOUT"
 .venv/bin/python tools/validate_vfs_coverage.py "$SRC" "$VOUT"
+# occupancy pyramid (design.ovo): every level-0 bit vs KLayout's shape
+# intersection on fixtures + the asset at a coarse cell; CLI contract
+.venv/bin/python tools/validate_occupancy.py "$SRC"
 .venv/bin/python tools/validate_vfs_hier.py "$SRC" "$VOUT"
 .venv/bin/python tools/validate_vfs_lifecycle.py "$SRC" "$VOUT"
 .venv/bin/python tools/validate_vfs_marker.py "$SRC"

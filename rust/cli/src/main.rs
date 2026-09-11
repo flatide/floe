@@ -76,6 +76,9 @@ fn main() {
     if args.len() >= 3 && args[1] == "plan" {
         return vfs::plan_cmd(&args[2..]);
     }
+    if args.len() >= 3 && args[1] == "occupancy" {
+        return vfs::occupancy_cmd(&args[2..]);
+    }
     if args.len() >= 3 && args[1] == "vfsd" {
         return vfs::vfsd_cmd(&args[2..]);
     }
@@ -93,6 +96,7 @@ fn main() {
              [--plan-batch N] [--encode-batch N] \
              [--page-target-mb N] \
              [--coverage | --coverage-only] [--no-lod] [--frontier-only] \
+             [--occupancy | --occupancy-only] [--occupancy-um F] \
              [--slow-cell-s S] [--p2-shard-limit-mb N] \
              [--profile-cell NAME | --profile-cell-ci N] \
              [--profile-jobs N,N,...] [--profile-repeat N] \
@@ -100,6 +104,8 @@ fn main() {
              floe-index plan <outdir> --view x0,y0,x1,y1 \
              [--px-per-um N] [--cut-px N] [--layers a/b,..] \
              [--depth N]\n       \
+             floe-index occupancy <outdir> [--layer L/D] [--level N] \
+             [--dump]\n       \
              floe-index drc <results.db> [out.ice] \
              [--pack] [--jobs N]"
         );

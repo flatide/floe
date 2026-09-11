@@ -7314,3 +7314,41 @@ mod tests {
         assert_eq!(white_max, 255);
     }
 }
+
+#[cfg(test)]
+mod hull_parity_tests {
+    /// The occupancy builder (docs/OCCUPANCY_PLAN.ko.md M1) marks the
+    /// hull floe-tiler computes; it has to be the hull this raster
+    /// paints. render-core keeps its checked copy for the pinned
+    /// goldens, so the two are pinned equal here instead.
+    #[test]
+    fn tiler_path_outline_any_matches_the_raster_hull() {
+        let spines: Vec<(Vec<(i64, i64)>, i64, i64, i64)> = vec![
+            (vec![(0, 0), (100, 0), (100, 80)], 5, 0, 0),
+            (vec![(0, 0), (100, 0), (100, 80)], 5, 3, -2),
+            (vec![(0, 0), (60, 70)], 4, 0, 0),
+            (vec![(0, 0), (50, 50), (100, 0)], 6, 2, 2),
+            (vec![(0, 0), (80, 10), (160, 0), (240, 30)], 3, 0, 0),
+            (vec![(0, 0), (50, 50), (60, 0)], 7, 0, 0),
+            (vec![(0, 0), (0, 0), (50, 50), (100, 100), (150, 90)], 5, 1, 1),
+            (vec![(10, 10), (10, 60), (40, 60), (40, 20)], 4, 2, 0),
+        ];
+        for (pts, hw, es, ee) in spines {
+            let ours = super::checked_path_outline(&pts, hw, es, ee);
+            let theirs = floe_tiler::path_outline_any(&pts, hw, es, ee);
+            assert_eq!(ours, theirs, "spine {:?}", pts);
+        }
+        for pts in [
+            vec![(0, 0)],
+            vec![(0, 0), (50, 50), (0, 0)],
+            vec![(0, 0), (10, 0), (0, 0)],
+        ] {
+            assert_eq!(
+                super::checked_path_outline(&pts, 3, 0, 0).is_err(),
+                floe_tiler::path_outline_any(&pts, 3, 0, 0).is_err(),
+                "{:?}",
+                pts
+            );
+        }
+    }
+}

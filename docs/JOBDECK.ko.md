@@ -654,7 +654,10 @@ budget = 패스별 디코드 보유)을 코드와 대조했다. 모두 사실이
   단계(착수는 사용자 결정): 색인 시 도형 기준 점유 피라미드 `design.ovo`, keep
   정책에서 µm/px ≥ 기준 셀이면 요약으로 대체(페이지 디코드·계층 순회 생략),
   renderd 요약 pass, 덱 합성 통과, gate·킬 스위치. 구현 계획(형식·생성기·선택
-  규칙·덱 통합·gate·단계·위험)은 `docs/OCCUPANCY_PLAN.ko.md`.
+  규칙·덱 통합·gate·단계·위험)은 `docs/OCCUPANCY_PLAN.ko.md`. **M1(생성기·
+  `design.ovo`·CLI·gate) 완료 2026-09-11**(RENDERD 0.12.79; 계획 §12): `floe2
+  index <src> --occupancy-only`로 기존 캐시에 추가(opt-in), `floe2 index deck.jb
+  --occupancy`로 덱 소스 전체.
 
 - **배율/임의각 PLACEMENT(OASIS 18)**: 2026-09-09 현재 실제 소스에서 아직 관측되지
   않아 보류(사용자 확인). 나타나면 계층 변환을 실수화하지 않고 **인덱싱 시

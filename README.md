@@ -151,6 +151,10 @@ floe view data/testchip_1g5.oas            # 개발용 KLayout 셸 (동결, 비�
   `--p2-shard-limit-mb`는 Rust 빌드 옵션이다. floe2는 density coverage를
   생성·표시하지 않으며 공유 cache에 남은 `design.ovc`도 읽지 않는다. 안정판
   `floe`의 KLayout 화면만 `--coverage`/`--coverage-only`를 계속 제공한다.
+- `--occupancy`(opt-in)는 마스크 정책 광역뷰용 점유 피라미드 `design.ovo`를
+  함께 만들고, `--occupancy-only`는 현재 캐시에 추가·교체한다(`--occupancy-um`
+  기준 셀, 기본 4 µm; 덱에도 적용). 확인은 `floe-index occupancy <src>.floe`.
+  뷰어 사용(M2)은 아직이며 형식·규칙은 docs/OCCUPANCY_PLAN.ko.md.
 
 ### Jobdeck (Calibre MDPView `.jb`)
 

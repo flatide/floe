@@ -108,6 +108,16 @@ def _positive_int_list(value):
     return ",".join(str(item) for item in parsed)
 
 
+def _positive_float(value):
+    try:
+        number = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("expected a positive number")
+    if not (number > 0) or number != number or number in (float("inf"),):
+        raise argparse.ArgumentTypeError("expected a positive number")
+    return number
+
+
 def _nonnegative_float(value):
     try:
         parsed = float(value)
@@ -295,7 +305,29 @@ def _current_vfs_cache(src, outdir, binary):
     return True, "current"
 
 
-def _run_rust_index(args, binary, coverage_only=False):
+def _discard_occupancy_tmp(outdir):
+    """An interrupted or failed occupancy build leaves design.ovo.tmp
+    (floe-index publishes by rename, so the previous design.ovo is
+    intact); the wrapper removes the temp file so a cache never carries
+    a half-written summary (docs/OCCUPANCY_PLAN.ko.md §4)."""
+    tmp = os.path.join(outdir, "design.ovo.tmp")
+    try:
+        os.remove(tmp)
+        print(f"[floe] discarded {tmp}", file=sys.stderr)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        print(f"[floe] cannot remove {tmp}: {exc}", file=sys.stderr)
+
+
+def _occupancy_args(args):
+    """`--occupancy-um` for floe-index (the base cell in microns)."""
+    um = getattr(args, "occupancy_um", None)
+    return [] if um is None else ["--occupancy-um", repr(float(um))]
+
+
+def _run_rust_index(args, binary, coverage_only=False,
+                    occupancy_only=False):
     import shlex
     import subprocess
 
@@ -309,11 +341,17 @@ def _run_rust_index(args, binary, coverage_only=False):
         command += ["--jobs", str(args.jobs)]
     if coverage_only:
         command.append("--coverage-only")
+    elif occupancy_only:
+        command.append("--occupancy-only")
+        command += _occupancy_args(args)
     else:
         if args.page_target_mb is not None:
             command += ["--page-target-mb", str(args.page_target_mb)]
         if args.coverage:
             command.append("--coverage")
+        if getattr(args, "occupancy", False):
+            command.append("--occupancy")
+            command += _occupancy_args(args)
         # LOD off by default (retirement, 2026-08-28); --lod opts back in
         if not getattr(args, "lod", False):
             command.append("--no-lod")
@@ -341,9 +379,15 @@ def _run_rust_index(args, binary, coverage_only=False):
           file=sys.stderr if profiling else sys.stdout)
     try:
         result = subprocess.run(command, check=False)
+    except KeyboardInterrupt:
+        if not profiling:
+            _discard_occupancy_tmp(outdir)
+        raise SystemExit(130)
     except OSError as exc:
         raise SystemExit(f"floe: cannot run floe-index: {exc}")
     if result.returncode:
+        if not profiling:
+            _discard_occupancy_tmp(outdir)
         raise SystemExit(result.returncode)
 
 
@@ -383,6 +427,9 @@ def cmd_index(args):
         if rc:
             raise SystemExit(rc)
         return 0
+    # --occupancy-um names the cell of a summary, so it asks for one
+    if getattr(args, "occupancy_um", None) is not None:
+        args.occupancy = True
     legacy_options = _legacy_index_options(args)
     if legacy_options and not args.legacy:
         raise SystemExit(
@@ -406,6 +453,7 @@ def cmd_index(args):
             "--profile-snapshot")
     rust_options = any((args.page_target_mb is not None, args.coverage,
                         args.coverage_only, args.no_lod,
+                        args.occupancy, args.occupancy_only,
                         args.slow_cell_s is not None,
                         args.p2_shard_limit_mb is not None, profiling,
                         args.profile_jobs is not None,
@@ -438,6 +486,10 @@ def cmd_index(args):
             incompatible.append("--coverage")
         if args.coverage_only:
             incompatible.append("--coverage-only")
+        if args.occupancy:
+            incompatible.append("--occupancy")
+        if args.occupancy_only:
+            incompatible.append("--occupancy-only")
         if args.slow_cell_s is not None:
             incompatible.append("--slow-cell-s")
         if incompatible:
@@ -458,10 +510,25 @@ def cmd_index(args):
             print(f"[floe] coverage already present: {outdir}/design.ovc")
             return
         return _run_rust_index(args, binary, coverage_only=True)
+    if args.occupancy_only:
+        # add or REBUILD the summary (a new --occupancy-um is the usual
+        # reason); the cache itself is untouched
+        if not current:
+            raise SystemExit(
+                f"floe: --occupancy-only needs a current cache at {outdir} "
+                f"({reason})")
+        return _run_rust_index(args, binary, occupancy_only=True)
     if current and not args.force:
         if args.coverage and not os.path.isfile(
                 os.path.join(outdir, "design.ovc")):
             return _run_rust_index(args, binary, coverage_only=True)
+        if args.occupancy:
+            ovo = os.path.join(outdir, "design.ovo")
+            if not os.path.isfile(ovo):
+                return _run_rust_index(args, binary, occupancy_only=True)
+            print(f"[floe] occupancy already present: {ovo} "
+                  "(use --occupancy-only to rebuild it)")
+            return
         print(f"[floe] cache up to date: {outdir} "
               "(use --force to rebuild with new options)")
         return
@@ -1556,32 +1623,60 @@ def cmd_jobdeck(args):
 
 def _jobdeck_index(args, catalog):
     """Index every probed-ok source the deck names, one `index` run each
-    (each run parallelises internally with --jobs)."""
+    (each run parallelises internally with --jobs). The occupancy
+    options are forwarded explicitly (the wrapper builds its own argv
+    - review 2026-09-11 P2-6): --occupancy adds design.ovo to indexed
+    sources that lack it, --occupancy-only rebuilds it on every indexed
+    source (an unindexed source is indexed with the summary)."""
     import subprocess
-    todo = [tc for tc, info in sorted(catalog.infos.items())
-            if info.ok() and (args.force or not info.indexed)]
+    occupancy = (getattr(args, "occupancy", False)
+                 or getattr(args, "occupancy_um", None) is not None)
+    occupancy_only = getattr(args, "occupancy_only", False)
+
+    def mode(info):
+        if args.force or not info.indexed:
+            return "index"
+        if occupancy_only:
+            return "occupancy"
+        if occupancy and not os.path.isfile(
+                os.path.join(info.cache_dir, "design.ovo")):
+            return "occupancy"
+        return None
+
+    todo = [(tc, mode(info)) for tc, info in sorted(catalog.infos.items())
+            if info.ok()]
+    todo = [(tc, m) for tc, m in todo if m]
     kept = sum(1 for info in catalog.infos.values()
-               if info.ok() and info.indexed and not args.force)
+               if info.ok() and info.indexed and not args.force) - sum(
+                   1 for _, m in todo if m == "occupancy")
     if kept:
         print("[jobdeck] index     : %d source(s) already indexed" % kept)
     failed = 0
-    for n, tc in enumerate(todo, 1):
+    for n, (tc, m) in enumerate(todo, 1):
         info = catalog.infos[tc]
         cmd = [sys.executable, "-B", "-m", args.index_module, "index",
                info.path, "--jobs", str(args.jobs)]
-        if args.force:
-            cmd.append("--force")
-        print("[jobdeck] index     : (%d/%d) %s" % (n, len(todo), tc),
+        if m == "occupancy":
+            cmd.append("--occupancy-only")
+            cmd += _occupancy_args(args)
+        else:
+            if args.force:
+                cmd.append("--force")
+            if occupancy or occupancy_only:
+                cmd.append("--occupancy")
+                cmd += _occupancy_args(args)
+        label = "occupancy" if m == "occupancy" else "index    "
+        print("[jobdeck] %s : (%d/%d) %s" % (label, n, len(todo), tc),
               flush=True)
         t0 = time.time()
         res = subprocess.run(cmd)
         if res.returncode != 0:
             failed += 1
-            print("[jobdeck] index     : FAILED %s (exit %d)"
-                  % (tc, res.returncode))
+            print("[jobdeck] %s : FAILED %s (exit %d)"
+                  % (label, tc, res.returncode))
         else:
-            print("[jobdeck] index     : ok %s (%.1fs)"
-                  % (tc, time.time() - t0))
+            print("[jobdeck] %s : ok %s (%.1fs)"
+                  % (label, tc, time.time() - t0))
     print("[jobdeck] index     : %d built, %d failed, %d kept"
           % (len(todo) - failed, failed, kept))
     return 2 if failed else 0
@@ -1639,6 +1734,21 @@ def main(argv=None, *, prog=None, rust_only=None):
         coverage.add_argument(
             "--coverage-only", action="store_true",
             help="add design.ovc to a current cache without rebuilding it")
+    occ = rust.add_mutually_exclusive_group()
+    occ.add_argument(
+        "--occupancy", action="store_true",
+        help="build the design.ovo occupancy pyramid (the mask-policy "
+             "wide view summary; opt-in until it is measured); when a "
+             "current cache lacks it, add it without replacing the cache")
+    occ.add_argument(
+        "--occupancy-only", action="store_true",
+        help="add or rebuild design.ovo on a current cache without "
+             "re-indexing (the cache's other files are untouched)")
+    rust.add_argument(
+        "--occupancy-um", type=_positive_float, default=None, metavar="UM",
+        help="occupancy base cell in microns (default: 4); implies "
+             "--occupancy")
+    p.set_defaults(occupancy=False, occupancy_only=False)
     rust.add_argument("--no-lod", action="store_true",
                       help="do not generate merged LOD page variants "
                            "(default; LOD is being retired)")

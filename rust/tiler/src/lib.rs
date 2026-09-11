@@ -873,3 +873,241 @@ pub fn clip_poly(pts: &[(i64, i64)], t: (i64, i64, i64, i64)) -> Vec<(i64, i64)>
     }
     cur
 }
+
+// ------------------------------------------------- any-angle path hull
+
+/// Path hull for ANY spine, with the raster's rules: consecutive
+/// duplicate vertices dropped, colinear same-direction runs merged,
+/// a U-turn join refused. Manhattan spines take `path_outline`
+/// (square miter joins, KLayout parity); non-manhattan spines take
+/// the KLayout polyline hull (miter joins, the outer side of an acute
+/// corner clipped to the touching square-cap corners). A port of
+/// render-core's `checked_path_outline` so the occupancy builder
+/// (docs/OCCUPANCY_PLAN.ko.md M1) marks the same polygon the raster
+/// paints; render-core pins the parity in its own test.
+pub fn path_outline_any(
+    pts: &[(i64, i64)],
+    hw: i64,
+    es: i64,
+    ee: i64,
+) -> Result<Vec<(i64, i64)>, String> {
+    if hw < 0 {
+        return Err(format!("corrupt path: negative half-width {}", hw));
+    }
+    let mut spine: Vec<(i64, i64)> = Vec::with_capacity(pts.len());
+    for &point in pts {
+        if spine.last() == Some(&point) {
+            continue;
+        }
+        if spine.len() >= 2 {
+            let a = spine[spine.len() - 2];
+            let b = spine[spine.len() - 1];
+            let first = hull_vector(a, b)?;
+            let second = hull_vector(b, point)?;
+            if hull_cross(first, second) == 0
+                && (first.0.signum(), first.1.signum())
+                    == (second.0.signum(), second.1.signum())
+            {
+                spine.pop();
+            }
+        }
+        spine.push(point);
+    }
+    if spine.len() < 2 {
+        return Err(
+            "unsupported path: spine has fewer than two distinct vertices"
+                .to_string(),
+        );
+    }
+    let mut manhattan = true;
+    for segment in spine.windows(2) {
+        let d = hull_vector(segment[0], segment[1])?;
+        if d.0 != 0 && d.1 != 0 {
+            manhattan = false;
+        }
+    }
+    if manhattan {
+        return path_outline(&spine, hw, es, ee)
+            .ok_or_else(|| "unsupported path: U-turn join".to_string());
+    }
+    for triple in spine.windows(3) {
+        let first = hull_vector(triple[0], triple[1])?;
+        let second = hull_vector(triple[1], triple[2])?;
+        if hull_cross(first, second) == 0
+            && (first.0.signum(), first.1.signum())
+                == (-second.0.signum(), -second.1.signum())
+        {
+            return Err("unsupported path: U-turn join".to_string());
+        }
+    }
+    polyline_hull(&spine, hw, es, ee)
+}
+
+fn polyline_hull(
+    spine: &[(i64, i64)],
+    hw: i64,
+    es: i64,
+    ee: i64,
+) -> Result<Vec<(i64, i64)>, String> {
+    let mut units = Vec::with_capacity(spine.len() - 1);
+    for segment in spine.windows(2) {
+        let (dx, dy) = hull_vector(segment[0], segment[1])?;
+        let length = (dx as f64).hypot(dy as f64);
+        if !length.is_finite() || length == 0.0 {
+            return Err("invalid non-Manhattan path length".to_string());
+        }
+        units.push((dx as f64 / length, dy as f64 / length));
+    }
+    let width = hw as f64;
+    let first = units[0];
+    let last = units[units.len() - 1];
+    let mut left = Vec::with_capacity(spine.len() * 2);
+    let mut right = Vec::with_capacity(spine.len() * 2);
+    hull_push(
+        &mut left,
+        spine[0],
+        (
+            -first.0 * es as f64 - first.1 * width,
+            -first.1 * es as f64 + first.0 * width,
+        ),
+    )?;
+    hull_push(
+        &mut right,
+        spine[0],
+        (
+            -first.0 * es as f64 + first.1 * width,
+            -first.1 * es as f64 - first.0 * width,
+        ),
+    )?;
+    for index in 1..spine.len() - 1 {
+        let before = units[index - 1];
+        let after = units[index];
+        let turn = before.0 * after.1 - before.1 * after.0;
+        if !turn.is_finite() || turn == 0.0 {
+            return Err("invalid non-Manhattan path join".to_string());
+        }
+        hull_join(&mut left, spine[index], before, after, turn, width, 1.0)?;
+        hull_join(&mut right, spine[index], before, after, turn, width, -1.0)?;
+    }
+    let end = spine[spine.len() - 1];
+    hull_push(
+        &mut left,
+        end,
+        (
+            last.0 * ee as f64 - last.1 * width,
+            last.1 * ee as f64 + last.0 * width,
+        ),
+    )?;
+    hull_push(
+        &mut right,
+        end,
+        (
+            last.0 * ee as f64 + last.1 * width,
+            last.1 * ee as f64 - last.0 * width,
+        ),
+    )?;
+    let mut outline = Vec::with_capacity(left.len() + right.len());
+    hull_distinct(&mut outline, right[0]);
+    for point in left {
+        hull_distinct(&mut outline, point);
+    }
+    for point in right.into_iter().skip(1).rev() {
+        hull_distinct(&mut outline, point);
+    }
+    if outline.len() > 1 && outline.first() == outline.last() {
+        outline.pop();
+    }
+    Ok(outline)
+}
+
+fn hull_join(
+    side: &mut Vec<(i64, i64)>,
+    vertex: (i64, i64),
+    before: (f64, f64),
+    after: (f64, f64),
+    turn: f64,
+    half_width: f64,
+    sign: f64,
+) -> Result<(), String> {
+    let before_normal = (-before.1 * half_width * sign, before.0 * half_width * sign);
+    let after_normal = (-after.1 * half_width * sign, after.0 * half_width * sign);
+    let normal_delta = (
+        after_normal.0 - before_normal.0,
+        after_normal.1 - before_normal.1,
+    );
+    let along_before = (normal_delta.0 * after.1 - normal_delta.1 * after.0) / turn;
+    let outer = turn * sign < 0.0;
+    let tolerance = f64::EPSILON * half_width.abs().max(1.0) * 16.0;
+    if outer && along_before.abs() > half_width + tolerance {
+        hull_push(
+            side,
+            vertex,
+            (
+                before_normal.0 + before.0 * half_width,
+                before_normal.1 + before.1 * half_width,
+            ),
+        )?;
+        hull_push(
+            side,
+            vertex,
+            (
+                after_normal.0 - after.0 * half_width,
+                after_normal.1 - after.1 * half_width,
+            ),
+        )?;
+    } else {
+        hull_push(
+            side,
+            vertex,
+            (
+                before_normal.0 + before.0 * along_before,
+                before_normal.1 + before.1 * along_before,
+            ),
+        )?;
+    }
+    Ok(())
+}
+
+fn hull_push(
+    points: &mut Vec<(i64, i64)>,
+    base: (i64, i64),
+    delta: (f64, f64),
+) -> Result<(), String> {
+    let dx = hull_round(delta.0)?;
+    let dy = hull_round(delta.1)?;
+    let x = (base.0 as i128 + dx as i128)
+        .try_into()
+        .map_err(|_| "coordinate overflow: path outline x".to_string())?;
+    let y = (base.1 as i128 + dy as i128)
+        .try_into()
+        .map_err(|_| "coordinate overflow: path outline y".to_string())?;
+    hull_distinct(points, (x, y));
+    Ok(())
+}
+
+fn hull_distinct(points: &mut Vec<(i64, i64)>, point: (i64, i64)) {
+    if points.last() != Some(&point) {
+        points.push(point);
+    }
+}
+
+fn hull_round(value: f64) -> Result<i64, String> {
+    if !value.is_finite() || value < i64::MIN as f64 || value > i64::MAX as f64 {
+        return Err(format!("coordinate overflow: path outline delta = {}", value));
+    }
+    Ok(value.round() as i64)
+}
+
+fn hull_vector(a: (i64, i64), b: (i64, i64)) -> Result<(i64, i64), String> {
+    let dx: i64 = (b.0 as i128 - a.0 as i128)
+        .try_into()
+        .map_err(|_| "coordinate overflow: path segment dx".to_string())?;
+    let dy: i64 = (b.1 as i128 - a.1 as i128)
+        .try_into()
+        .map_err(|_| "coordinate overflow: path segment dy".to_string())?;
+    Ok((dx, dy))
+}
+
+fn hull_cross(first: (i64, i64), second: (i64, i64)) -> i128 {
+    first.0 as i128 * second.1 as i128 - first.1 as i128 * second.0 as i128
+}

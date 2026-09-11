@@ -58,6 +58,32 @@ v5 텍스트 인덱스의 문자열/좌표 풀. 빈 파일 허용(mmap 0 예외 
 레이어별 밀도 비트플레인. 뷰어 `floe/coverage.py`가 컷 활성+텍셀
 ≤COV_MAX_TEXEL_PX(160) 시 빈 픽셀에만 팔레트 틴트 합성.
 
+## design.ovo — 점유 피라미드 (선택, FLOEOVO1)
+
+마스크 정책 광역뷰의 요약(docs/OCCUPANCY_PLAN.ko.md). `floe-index vfs
+--occupancy`(`floe2 index --occupancy`, opt-in)가 만들고 `--occupancy-only`가
+기존 캐시에 추가·교체한다. `design.ovo.tmp`에 쓰고 rename으로 게시하므로 이름
+아래에 부분 파일이 놓이지 않는다. 자체 버전(`FLOEOVO1`)의 sidecar이며
+CACHE_VERSION과 무관하다(없거나 무효하면 "요약 없음").
+
+```
+header  magic "FLOEOVO1" | version u32 | unit f64 | src_size u64 | src_mtime u64
+        | cell_dbu i64 | bbox x0 y0 x1 y1 i64 | n_levels u32 | n_layers u32
+        | top_len u16 | top utf8
+layer k layer u32 | dt u32 | status u8 (0 ok, 1 none:cells, 2 none:work,
+        3 none:size) | work u64 | n_levels × (w u32 | h u32 | off u64 | len u64)
+body    레벨 비트맵: row-major, 행은 바이트 패딩, 행의 i번째 셀 = byte i/8 의
+        bit i%8. level L 셀 = cell_dbu × 2^L, 원점 = bbox x0/y0, grid =
+        ceil(span / cell). 격자가 64 × 64 이하가 될 때까지 2배 레벨.
+```
+
+비트 = "셀의 열린 상자가 도형 내부와 양의 면적으로 만남"(KLayout `Region & box`
+판정). 도형 교차로만 만들며 bbox 대체가 없다(리뷰 2026-09-11 P1-1). 로더는
+magic·버전·레벨 격자·`(w+7)/8 × h == len`·오프셋 범위(잘린 파일 거부)를
+검사하고, `identity`(src_size·src_mtime·top·레이어 테이블)가 design.ovm과
+다르면 파일 전체를 거부한다. `floe-index occupancy <cache>`가 헤더·identity·
+레이어 status·레벨별 set 수를 줄 단위로 출력한다(SPEC-INDEXER §6.5).
+
 ## meta.json (CACHE_VERSION = 8)
 
 ```json
