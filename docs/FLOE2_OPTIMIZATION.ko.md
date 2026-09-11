@@ -972,6 +972,13 @@ thin shapes로 마스크 정책 선택 가능(같은 파일이 여는 방식에 
 양변 모두 작은 도형의 cut과 자식 셀·BVH의 hairline은 두 정책 공통(별도 실측 뒤
 결정). 환경변수는 진단 override로만 남김.
 
+**keep 정책의 광역뷰 실측(2026-09-11)**: 덱 fit 뷰(1 px = 202 µm)에서 thin 25k
+페이지를 전부 디코드·raster해 32 s(decode 합 30.9 s, draw 22.2 s, paints 4,170만).
+근접뷰 exact keep은 유지하되, 광역뷰는 빈 공간 위치를 보존하는 다중 해상도 점유
+요약이 디코드를 **대체**해야 한다(리뷰어). bbox 채움·밀도 숫자 방식은 제외, 기존
+LOD는 verbatim 경로 때문에 단정 불가. 결정용 실험 도구
+`tools/occupancy_experiment.py`(JOBDECK.ko.md §10 실측 6).
+
 ### 3.20 pan 재사용 — F2R-16 (2026-09-04)
 
 **관찰(사용자)**: "pan 20% 이동과 50% 이동이 큰 차이가 없음.

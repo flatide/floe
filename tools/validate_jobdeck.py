@@ -2722,6 +2722,34 @@ class ThinPageTests(unittest.TestCase):
                   "--report", rep, "--detail", "high", env=self.env, ok=0)
         self.assertEqual(json.loads(rep.read_text())["thin"], "auto")
 
+    def test_occupancy_experiment_tool_runs(self):
+        """The wide-view occupancy experiment (review 2026-09-11) runs
+        end to end on the thin fixture and reports the numbers the
+        decision needs: fine build cost, per-level storage, the two fit
+        renders, and per-cell-size empty-space loss."""
+        out = CLI / "occupancy"
+        res = subprocess.run(
+            [sys.executable, "-B", str(ROOT / "tools" / "occupancy_experiment.py"),
+             str(CLI / "thin.oas"), "--layer", "1/0", "--fine-um", "5",
+             "--tile-px", "100", "--fit-px", "100", "--out", str(out)],
+            cwd=str(ROOT), env=dict(os.environ, **self.env),
+            capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr[-2000:])
+        doc = json.loads((out / "report.json").read_text())
+        self.assertEqual(doc["fine_render"]["exit"], 0)
+        self.assertGreater(len(doc["levels"]), 2)
+        self.assertGreater(doc["levels"][0]["occupied"], 0)
+        self.assertGreater(doc["fit_renders"]["keep"]["lit"], 100)
+        self.assertEqual(doc["fit_renders"]["cull"]["lit"], 0)
+        cells = doc["comparison"]["coarser_cells"]
+        self.assertEqual([c["cell_px"] for c in cells], [2, 4, 8])
+        for c in cells:
+            self.assertEqual(c["missed"], 0, "a coarser cell never loses lit pixels")
+        self.assertGreater(cells[2]["extra"], cells[0]["extra"],
+                           "coarser cells fill more empty space")
+        for name in ("summary-fit.png", "diff-fit.png", "fit-keep.png"):
+            self.assertTrue((out / name).is_file(), name)
+
     def test_kept_thin_pages_are_counted(self):
         from floe.rust_render import RustRenderWorker
         for thin, thin_pages, culled in (("keep", 1, 0), ("cull", 0, 1),

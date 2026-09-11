@@ -619,6 +619,19 @@ budget = 패스별 디코드 보유)을 코드와 대조했다. 모두 사실이
   기존 성능 정책(cull)을 유지하고, 단독 마스크 OASIS는 `--thin keep`/View > keep
   thin shapes로 선택한다. 요청별 `thin=keep|cull`로 전달되며 공유 기본값이 아니다.
   gate `ThinPageTests`(덱 기본 keep, 레이아웃 기본 cull, `--thin`, 진단 override).
+  **실측 6(2026-09-11, 덱 fit 뷰 165 × 160 mm, 1 px = 202 µm)**: keep 정책으로
+  25,138페이지(그중 thin 25k)를 전부 디코드(합 30.9 s)하고 4,170만 hairline을
+  칠해(draw 22.2 s) 프레임 32 s → 광역 뷰에서는 쓸 수 없음. 이 줌에서 선
+  하나하나는 1 px 미만이라 페이지 점유 덩어리만 남는데 그 비용을 전부 치른다.
+  리뷰어 방향(동의): 근접뷰는 exact keep, 광역뷰는 **빈 공간의 위치를 보존하는
+  다중 해상도 점유 요약**이 원본 디코드·raster를 대체해야 한다. bbox 채움과 bbox당
+  밀도 숫자 하나는 제외(빈 공간 위치 소실; 제가 낸 밀집 bbox wash 안도 철회).
+  기존 LOD는 긴 path/polygon을 verbatim으로 남겨(`vfs.rs` 3265행) 처리량이 충분히
+  줄지 않을 수 있음. 먼저 소스 하나·레이어 하나로 요약 생성 비용, 광역뷰 시간,
+  빈 공간 보존을 재는 실험: `tools/occupancy_experiment.py SRC.oas --layer L/D
+  --out DIR`(미세 exact 렌더로 만든 점유 피라미드의 생성 비용·저장량, keep/cull
+  fit 렌더 시간, fit 해상도 exact를 기준으로 2/4/8 px 셀이 채우는 빈 영역을
+  크기별로 집계). 전체 재인덱싱 여부는 그 결과로 결정.
 
 - **배율/임의각 PLACEMENT(OASIS 18)**: 2026-09-09 현재 실제 소스에서 아직 관측되지
   않아 보류(사용자 확인). 나타나면 계층 변환을 실수화하지 않고 **인덱싱 시
