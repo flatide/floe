@@ -56,16 +56,19 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 
-def _floe2(*argv, env=None):
+def _floe2(*argv, env=None, allow_fail=False):
     cmd = [sys.executable, "-B", "-m", "floe2"] + [str(a) for a in argv]
     t0 = time.perf_counter()
     res = subprocess.run(cmd, cwd=ROOT, env=dict(os.environ, **(env or {})),
                          capture_output=True, text=True)
     dt = time.perf_counter() - t0
-    if res.returncode not in (0, 3):
+    if res.returncode not in (0, 3) and not allow_fail:
         raise SystemExit("floe2 %s failed (rc %d):\n%s" % (
             argv[0], res.returncode, res.stderr[-2000:]))
     return dt, res
+
+
+BUDGET_TEXT = "decoded generation budget exceeded"
 
 
 def _lit(png):
@@ -158,40 +161,59 @@ def main():
               "bbox_um": [x0, y0, x1, y1], "fine_um": fine,
               "fine_um_requested": args.fine_um, "fit_levels_below": k}
 
-    # ---- 1. fine exact render, tiled
-    tile_um = args.tile_px * fine
-    nx = max(1, int(-(-span_x // tile_um)))
-    ny = max(1, int(-(-span_y // tile_um)))
-    lines = []
-    for r in range(ny):
-        for cc in range(nx):
-            tx0 = x0 + cc * tile_um
-            ty0 = y0 + r * tile_um
-            # a square region at px=W: the height follows the aspect,
-            # so the tile is W x W without any region expansion
-            lines.append("t_%d_%d bbox=%r,%r,%r,%r px=%d" % (
-                r, cc, tx0, ty0, tx0 + tile_um, ty0 + tile_um,
-                args.tile_px))
-    batch = os.path.join(args.out, "fine.batch")
-    with open(batch, "w") as fh:
-        fh.write("\n".join(lines) + "\n")
-    tiles = os.path.join(args.out, "fine")
-    t_fine, res = _floe2("render", args.src, "--batch", batch, "--out",
-                         tiles, "--layers", args.layer, "--detail", "exact",
-                         "--report", os.path.join(args.out, "fine.json"))
-    report["fine_render"] = {"tiles": nx * ny, "tile_px": args.tile_px,
+    # ---- 1. fine exact render, tiled. A tile whose exact pages exceed
+    # the decode budget (a plain layout refuses instead of streaming)
+    # halves the tile until it fits - the tile size used is reported
+    tile_px = args.tile_px
+    attempts = []
+    while True:
+        tile_um = tile_px * fine
+        nx = max(1, int(-(-span_x // tile_um)))
+        ny = max(1, int(-(-span_y // tile_um)))
+        lines = []
+        for r in range(ny):
+            for cc in range(nx):
+                tx0 = x0 + cc * tile_um
+                ty0 = y0 + r * tile_um
+                # a square region at px=W: the height follows the
+                # aspect, so the tile is W x W without any expansion
+                lines.append("t_%d_%d bbox=%r,%r,%r,%r px=%d" % (
+                    r, cc, tx0, ty0, tx0 + tile_um, ty0 + tile_um,
+                    tile_px))
+        batch = os.path.join(args.out, "fine.batch")
+        with open(batch, "w") as fh:
+            fh.write("\n".join(lines) + "\n")
+        tiles = os.path.join(args.out, "fine")
+        t_fine, res = _floe2("render", args.src, "--batch", batch, "--out",
+                             tiles, "--layers", args.layer, "--detail",
+                             "exact", "--report",
+                             os.path.join(args.out, "fine.json"),
+                             allow_fail=True)
+        attempts.append({"tile_px": tile_px, "tiles": nx * ny,
+                         "seconds": round(t_fine, 2),
+                         "exit": res.returncode})
+        if res.returncode in (0, 3):
+            break
+        if BUDGET_TEXT in res.stderr and tile_px > 128:
+            print("[occupancy] tile %d px: %s - halving" % (
+                tile_px, BUDGET_TEXT), file=sys.stderr)
+            tile_px //= 2
+            continue
+        raise SystemExit("floe2 render (fine tiles, %d px) failed (rc %d):"
+                         "\n%s" % (tile_px, res.returncode, res.stderr[-2000:]))
+    report["fine_render"] = {"tiles": nx * ny, "tile_px": tile_px,
                              "seconds": round(t_fine, 2),
-                             "exit": res.returncode}
-    W = nx * args.tile_px
-    H = ny * args.tile_px
+                             "exit": res.returncode, "attempts": attempts}
+    W = nx * tile_px
+    H = ny * tile_px
     mask = np.zeros((H, W), dtype=bool)
     for r in range(ny):
         for cc in range(nx):
             t = _lit(os.path.join(tiles, "t_%d_%d.png" % (r, cc)))
             # image rows run top-down: tile row r covers y from the
             # bottom, so it lands at the bottom of the stack
-            ry = (ny - 1 - r) * args.tile_px
-            mask[ry:ry + t.shape[0], cc * args.tile_px:cc * args.tile_px
+            ry = (ny - 1 - r) * tile_px
+            mask[ry:ry + t.shape[0], cc * tile_px:cc * tile_px
                  + t.shape[1]] = t
     # crop to the bbox (the tile grid may overhang)
     W_used = int(round(span_x / fine))
@@ -226,15 +248,23 @@ def main():
     for name, thin in (("keep", "keep"), ("cull", "cull")):
         png = os.path.join(args.out, "fit-%s.png" % name)
         # px=W: the height follows the aspect, the region is not
-        # expanded, so the image grid is the summary's fit level
+        # expanded, so the image grid is the summary's fit level.
         # --bbox=... : a region starting with a negative coordinate
-        # would otherwise be taken for an option (argparse)
+        # would otherwise be taken for an option (argparse). A keep
+        # render that exceeds the decode budget is itself a finding
+        # (the plain path refuses rather than streams): recorded, not
+        # fatal
         dt, res = _floe2("render", args.src, "--bbox=" + fit_bbox, "--px",
                          str(args.fit_px), "--out", png,
                          "--layers", args.layer, "--detail", "high",
-                         "--thin", thin)
-        fit[name] = {"seconds": round(dt, 2), "png": png,
-                     "lit": int(_lit(png).sum())}
+                         "--thin", thin, allow_fail=True)
+        if res.returncode in (0, 3):
+            fit[name] = {"seconds": round(dt, 2), "png": png,
+                         "lit": int(_lit(png).sum())}
+        else:
+            fit[name] = {"seconds": round(dt, 2), "png": None,
+                         "error": res.stderr.strip().splitlines()[-1]
+                         if res.stderr.strip() else "rc %d" % res.returncode}
     report["fit_renders"] = fit
 
     # ---- 4. fidelity. The reference is the exact keep render at the fit
@@ -249,7 +279,15 @@ def main():
     # it differs from the fit render by the hairline parity's y bias,
     # which scales with the pixel, not by summary error.)
     fit_level = min(k, len(level_masks) - 1)
-    exact = _lit(fit["keep"]["png"])
+    if fit["keep"].get("png"):
+        exact = _lit(fit["keep"]["png"])
+        reference_what = "exact keep render at the fit scale"
+    else:
+        # the keep render did not fit the budget: the fine pyramid's
+        # fit level stands in (see the parity note below)
+        exact = level_masks[fit_level]
+        reference_what = ("fine pyramid at the fit level (the keep render "
+                          "exceeded the decode budget)")
     fh, fw = exact.shape
 
     def compare(ref, mask):
@@ -276,7 +314,7 @@ def main():
             for k_, v in buckets.items()}
         return row, missed, extra
 
-    comparison = {"reference": {"what": "exact keep render at the fit scale",
+    comparison = {"reference": {"what": reference_what,
                                 "grid": [fw, fh], "lit": int(exact.sum())},
                   "fit_um_per_px": round(fit_um, 3)}
     coarser = []
