@@ -11,6 +11,10 @@ M1b-2a의 `app-core/managed`·`view`에는 process-local lease/admission과
 스트림은 [M1b 기록 §6](WEBUI_M1B.ko.md#6-m1b-2b--인증된-제어이미지-스트림)을 따른다.
 M1b-2c1의 등록 scope/index supervisor는 M1b 기록 §7, M1b-2c2의 owner
 catalog/open/index 작업 API는 §8을 따른다(통합 `/operations` seq 계약).
+M1b-3의 실행/정적 자산·startup과 브라우저 계약은 §9를 따른다. 단일 layer
+checkbox는 `view.set`의 `layer_change:{pair:[layer_u32,datatype_u32],visible:bool}`로
+처리하고 서버에서 head/child 의미를 적용한다. `layers` 전체 선택과 같은 요청이면
+전체 선택을 먼저 적용한다. 잘못된 pair나 선택 수 상한은 오류이며 조용히 자르지 않는다.
 2026-09-13 M1a-1 `rust/worker-client`와 M1a-2a/b `app/app-core`의 일반 index·info/단일 render/probe를
 구현했다. 현재 호출 계약은 [worker README](../rust/worker-client/README.md),
 [M1a 기록](WEBUI_M1A.ko.md)을 따르며 아래 서비스 전체가 존재하는 것은 아니다.

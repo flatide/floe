@@ -1,8 +1,9 @@
-# floe-web — M1b authenticated owner service
+# floe-web — M1b local browser viewer
 
-Internal Rust library; **not yet a runnable layout web viewer**. The application
-CLI and existing Python/GTK launcher are unchanged. No UI assets, file upload,
-remote binding or share grants exist yet.
+Internal Rust library used by `floe2-web view`. An embedded HTML/Canvas client
+shows native PNG/raw frames and controls registered layouts/jobdecks. The existing
+Python/GTK launcher is unchanged. File upload, remote binding and share grants do
+not exist yet; layout margin and further interaction parity are still pending.
 
 `Gateway::new(listener.local_addr())` returns a loopback-only gate and one-use
 bootstrap secret. `transport::serve(listener, gate, shutdown)` runs bounded
@@ -26,6 +27,8 @@ Catalog/level/layer pages, progress, close/cancel and revocation are authenticat
 cargo test --offline --locked -p floe-web
 cargo clippy --offline -p floe-web --all-targets --no-deps -- -D warnings
 cargo fmt -p floe-web -- --check
+# From the repository root; Node >=18 is a development/test dependency only
+node tools/validate_web_ui.cjs
 ```
 
 The tests bind only ephemeral loopback listeners and shut them down. They test

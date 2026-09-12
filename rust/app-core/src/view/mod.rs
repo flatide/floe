@@ -170,6 +170,8 @@ pub struct Patch {
     pub detail: Option<Detail>,
     pub thin: Option<Thin>,
     pub layers: Option<Layers>,
+    /// A panel checkbox is a bounded delta, not a round-trip of all layer IDs.
+    pub layer_change: Option<((u32, u32), bool)>,
     pub frames: Option<bool>,
     pub labels: Option<bool>,
     pub font_px: Option<u32>,
@@ -305,6 +307,41 @@ impl ViewState {
         if let Some(layers) = patch.layers {
             s.layers = model.layers(&layers)?;
         }
+        if let Some((pair, visible)) = patch.layer_change {
+            let target = model.layers(&Layers::Only(vec![pair]))?;
+            let Layers::Only(target) = target else {
+                return Err(Error::input("layer group has no renderable children"));
+            };
+            let mut selected: BTreeSet<_> = match &s.layers {
+                Layers::All => s
+                    .styles
+                    .iter()
+                    .map(|r| r.layer)
+                    .filter(|p| !model.groups.contains_key(p))
+                    .collect(),
+                Layers::None => BTreeSet::new(),
+                Layers::Only(pairs) => pairs.iter().copied().collect(),
+            };
+            for pair in target {
+                if visible {
+                    selected.insert(pair);
+                } else {
+                    selected.remove(&pair);
+                }
+            }
+            let render_pairs = s
+                .styles
+                .iter()
+                .filter(|s| !model.groups.contains_key(&s.layer))
+                .count();
+            s.layers = if selected.len() == render_pairs {
+                Layers::All
+            } else if selected.is_empty() {
+                Layers::None
+            } else {
+                model.layers(&Layers::Only(selected.into_iter().collect()))?
+            };
+        }
         if let Some(v) = patch.frames {
             s.frames = v;
         }
@@ -407,6 +444,74 @@ impl ViewState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn layer_checkbox_delta_expands_groups_without_losing_other_selections() {
+        let styles = Arc::new(
+            vec![(1, 0), (1, 1), (1, 2), (2, 0)]
+                .into_iter()
+                .map(|layer| Style {
+                    layer,
+                    color: [255; 4],
+                    fill: floe_worker_client::Fill::Solid,
+                    width: 1,
+                })
+                .collect::<Vec<_>>(),
+        );
+        let model = Model {
+            dataset_revision: 1,
+            dbu: 1.,
+            bbox: [0., 0., 100., 100.],
+            deck: true,
+            skipped: 0,
+            source_stale: false,
+            pairs: [(1, 0), (1, 1), (1, 2), (2, 0)].into(),
+            groups: [((1, 0), vec![(1, 1), (1, 2)])].into(),
+            styles,
+        };
+        let all = ViewState::initial(&model, 100, 100).unwrap();
+        let partial = all
+            .edit(
+                &model,
+                Patch {
+                    layer_change: Some(((1, 1), false)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(partial.layers, Layers::Only(vec![(1, 2), (2, 0)]));
+        let group = partial
+            .edit(
+                &model,
+                Patch {
+                    layer_change: Some(((1, 0), false)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(group.layers, Layers::Only(vec![(2, 0)]));
+        assert_eq!(
+            group
+                .edit(
+                    &model,
+                    Patch {
+                        layer_change: Some(((1, 0), true)),
+                        ..Default::default()
+                    }
+                )
+                .unwrap()
+                .layers,
+            Layers::All
+        );
+        assert!(all
+            .edit(
+                &model,
+                Patch {
+                    layer_change: Some(((9, 9), false)),
+                    ..Default::default()
+                }
+            )
+            .is_err());
+    }
     #[test]
     fn pan_phase_zoom_anchor_and_resize_stay_server_side() {
         let v = Viewport::new([-100., -50., 700., 550.], 800, 600).unwrap();

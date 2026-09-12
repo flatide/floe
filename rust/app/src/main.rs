@@ -3,6 +3,7 @@
 mod deck_analysis;
 mod deck_index;
 mod read;
+mod web_view;
 use floe_app_core::{
     index::{Action, IndexOptions, PreparedIndex, ProfileCell},
     jobdeck::index::{is_deck, parse_levels},
@@ -18,9 +19,10 @@ use std::sync::{
 };
 use std::time::Duration;
 
-const HELP: &str = "floe2-web — Rust application migration CLI (M1a, not yet a web server)
+const HELP: &str = "floe2-web — Rust application migration CLI (M1a services + M1b web preview)
 
 Usage: floe2-web index SOURCE [OPTIONS]
+       floe2-web view SOURCE [OPTIONS]
        floe2-web info SOURCE [--json]
        floe2-web render SOURCE [OPTIONS]
        floe2-web probe SOURCE
@@ -29,7 +31,8 @@ Usage: floe2-web index SOURCE [OPTIONS]
 
 Implemented: layout/jobdeck index/info/render/probe, occupancy, profiling,
 and jobdeck analysis/spec + source indexing with level selection.
-Not yet ported: view, clip, drc, svrf, gtktest, batch/mosaic/DRC exports.
+Web preview: isolated Firefox or --no-open; no GTK launcher replacement yet.
+Not yet ported: clip, drc, svrf, gtktest, batch/mosaic/DRC exports.
 Use the existing floe2 for those commands; there is no Python fallback.
 Run floe2-web index --help for indexing options.";
 const INDEX_HELP: &str = "Usage: floe2-web index SOURCE [OPTIONS]
@@ -65,6 +68,7 @@ enum Cli {
     Index(PathBuf, Box<IndexOptions>, Option<BTreeSet<i64>>),
     Read(Box<read::Command>),
     Jobdeck(Box<deck_analysis::Command>),
+    View(Box<web_view::Command>),
 }
 fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
     let args: Vec<String> = args
@@ -77,7 +81,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
     if args.is_empty() {
         return Err(Error::new(
             ErrorKind::Unsupported,
-            "view is not yet ported; run existing floe2, or floe2-web --help",
+            "a command/source is required; run floe2-web --help",
         ));
     }
     match args[0].as_str() {
@@ -86,7 +90,8 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
         "index" => (),
         "info" | "render" | "probe" => return read::parse(&args).map(|c| Cli::Read(Box::new(c))),
         "jobdeck" => return deck_analysis::parse(&args).map(|c| Cli::Jobdeck(Box::new(c))),
-        "view" | "clip" | "drc" | "svrf" | "gtktest" => {
+        "view" => return web_view::parse(&args).map(|c| Cli::View(Box::new(c))),
+        "clip" | "drc" | "svrf" | "gtktest" => {
             return Err(Error::new(
                 ErrorKind::Unsupported,
                 format!(
@@ -250,6 +255,7 @@ impl Drop for Signals {
 }
 fn run(cli: Cli, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
     match cli {
+        Cli::View(command) => return web_view::run(*command, cancelled),
         Cli::Read(command) => return read::run(*command, cancelled),
         Cli::Jobdeck(command) => return deck_analysis::run(*command, cancelled),
         Cli::Help(index) => println!("{}", if index { INDEX_HELP } else { HELP }),
@@ -392,7 +398,7 @@ mod tests {
                 "0",
             ],
             &["index", "x", "--occupancy", "--occupancy-only"],
-            &["view", "x"],
+            &["view"],
             &[],
         ] {
             assert!(parsed(args).is_err(), "{args:?}");

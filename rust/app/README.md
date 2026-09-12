@@ -1,7 +1,7 @@
 # floe2-web — Rust 애플리케이션 CLI (개발 중)
 
-현재 **일반 레이아웃/잡덱 `index/info/render/probe`와 분석 `jobdeck`을 지원**한다. 이름에 web이 있지만 HTTP 서버나
-브라우저 UI는 아직 없다. 기존 Python `floe2`/GTK와 병행 개발하는 별도 실행 파일이다.
+현재 **일반 레이아웃/잡덱 `index/info/render/probe`, 분석 `jobdeck`, 기본 웹 `view`를 지원**한다.
+기존 Python `floe2`/GTK와 병행 개발하는 별도 실행 파일이며 제품 전환은 아직 완료되지 않았다.
 
 ```sh
 cd rust
@@ -23,6 +23,9 @@ cargo build --offline --locked --release -p floe-app -p floe-index -p floe-rende
 ./target/release/floe2-web render /path/to/deck.jb --level 1,3 --px 800x800 \
   --detail high --out /path/to/deck.png --report /path/to/deck.json
 ./target/release/floe2-web probe /path/to/deck.jb
+./target/release/floe2-web view /path/to/design.oas --goto 13600,8600,700 \
+  --depth full --detail high --jobs 8 --raster-jobs 4
+./target/release/floe2-web view /path/to/deck.jb --level 1,3 --mode chip
 ```
 
 `cargo`는 `rust/`에서 실행해야 그 안의 `.cargo/config.toml`(vendor, musl linker)이
@@ -54,7 +57,14 @@ cargo build --offline --locked --release -p floe-app -p floe-index -p floe-rende
   `--lenient`, `--placements`를 지원한다. spec은 current 캐시만 참조하며 누락은 exit 3,
   그릴 배치가 전혀 없으면 오류다. report/spec은 각각 원자적으로 저장하지만 쌍의 트랜잭션은 아니다.
   분석 CHIP-block 색상과 뷰어용 level/source-chip 색상은 기존처럼 구분한다.
-- `view/clip/...`와 batch/mosaic/DRC export는 미이관 오류를 낸다.
+- `view`는 127.0.0.1만 열고 전용 임시 Firefox 프로필을 실행한다. 기존 사용자
+  프로필을 건드리지 않으며 창/프로세스 종료·End session·Ctrl+C에 worker와 세션을 수거한다.
+  Firefox가 없으면 `--firefox PATH`를 지정하거나 `--no-open`으로 private session
+  JSON의 일회용 URL을 사용한다. 이 파일은 0600이며 링크를 공유/로그에 남기면 안 된다.
+  소스 경로는 CLI에서만 등록한다(최대 32개). 웹의 open은 자동으로 색인하지 않는다.
+  GTK launcher/portable은 그대로다. refinement와 이 단계의 margin은 off다.
+- `clip/...`와 batch/mosaic/DRC export는 미이관 오류를 낸다.
   자동 Python fallback이나 기존 launcher/portable 교체는 없다.
 
 범위·차이·검증·다음 단계는 [M1a 기록](../../docs/WEBUI_M1A.ko.md)에 있다.
+웹 실행·브라우저 검증/남은 범위는 [M1b §9](../../docs/WEBUI_M1B.ko.md#9-m1b-3--기본-canvas-뷰어와-rust-실행-명령)를 따른다.

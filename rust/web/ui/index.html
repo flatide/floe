@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="floe-bundle" content="@@BUNDLE@@">
+  <title>floe2 · Layout workspace</title>
+  <link rel="stylesheet" href="/assets/@@BUNDLE@@/app.css">
+  <script defer src="/assets/@@BUNDLE@@/protocol.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">floe<span>2</span><small>WEB PREVIEW</small></div>
+    <div id="document-title" class="document-title">Layout workspace</div>
+    <span id="connection" class="connection">Connecting</span>
+    <button id="logout" class="quiet" title="End this session and stop its workers">End session</button>
+  </header>
+  <div class="workspace">
+    <aside class="sidebar" aria-label="Layout controls">
+      <section class="source-panel">
+        <h2>Source</h2>
+        <label for="source" class="sr-only">Registered source</label>
+        <select id="source"><option>Loading catalog…</option></select>
+        <div class="source-mode"><label for="mode">View mode</label><select id="mode"><option value="level">Level view</option><option value="chip">Chip view</option></select></div>
+        <details id="level-options"><summary>Levels to load</summary><label class="check"><input id="levels-all" type="checkbox" checked> All levels</label><div id="level-list"></div><button id="level-more" hidden>More levels</button></details>
+        <div class="button-row"><button id="open" class="primary">Open layout</button><button id="close" disabled>Close</button></div>
+        <p id="source-note" class="note">Sources are registered by the local launcher.</p>
+      </section>
+      <section class="display-panel">
+        <h2>Display</h2>
+        <div class="form-row"><label for="depth">Depth <span id="max-depth"></span></label><input id="depth" value="full" title="full or a nonnegative depth" class="short" disabled></div>
+        <div class="form-row"><label for="detail">Detail</label><select id="detail" disabled><option value="low">Low · 5 px</option><option value="medium" selected>Medium · 3 px</option><option value="high">High · 1 px</option><option value="exact">Exact · no cut</option></select></div>
+        <div class="form-row"><label for="thin">Thin shapes</label><select id="thin" disabled><option value="auto">Auto</option><option value="keep">Keep · mask</option><option value="cull">Cull · layout</option></select></div>
+        <div class="check-row"><label class="check"><input id="frames" type="checkbox" disabled> Frames</label><label class="check"><input id="labels" type="checkbox" disabled> Labels</label><label class="check"><input id="mono" type="checkbox" disabled> Mono</label></div>
+      </section>
+      <section class="layers-panel">
+        <div class="section-title"><h2>Layers</h2><div><button id="layers-all" class="text-button" disabled>All</button><button id="layers-none" class="text-button" disabled>None</button></div></div>
+        <div id="layers" class="layers"><p class="empty-list">Open a layout to see its layers.</p></div>
+        <div class="pagination"><button id="layers-prev" disabled aria-label="Previous layer page">←</button><span id="layers-count">0 layers</span><button id="layers-next" disabled aria-label="Next layer page">→</button></div>
+      </section>
+      <details class="index-panel"><summary>Index this source</summary>
+        <p class="note">Explicit operation. Close the view before rebuilding its cache.</p>
+        <div class="form-row"><label for="index-jobs">Index jobs</label><input id="index-jobs" class="short" type="number" min="1" max="16" value="12"></div>
+        <label class="check"><input id="index-lod" type="checkbox"> Include LOD</label>
+        <label class="check"><input id="index-occupancy" type="checkbox"> Include occupancy summary</label>
+        <label class="check"><input id="index-force" type="checkbox"> Force replacement of existing cache</label>
+        <div class="button-row"><button id="index">Run index</button><button id="cancel-job" disabled>Cancel</button></div>
+        <p id="operation" class="note" role="status">No active operation.</p>
+      </details>
+    </aside>
+    <main class="main">
+      <form id="goto-form" class="toolbar">
+        <button id="fit" type="button" disabled title="Fit layout (F)">Fit</button>
+        <div class="zoom-buttons"><button id="zoom-out" type="button" disabled title="Zoom out (−)">−</button><button id="zoom-in" type="button" disabled title="Zoom in (+)">+</button></div>
+        <div class="goto-fields"><label>X <input id="goto-x" value="0" inputmode="decimal" aria-label="Center X in micrometres"></label><label>Y <input id="goto-y" value="0" inputmode="decimal" aria-label="Center Y in micrometres"></label><label>View <input id="goto-width" value="700" inputmode="decimal" aria-label="View width in micrometres"></label><span>µm</span><button id="goto" disabled>Go</button></div>
+      </form>
+      <div id="notice" class="notice" role="alert" hidden></div>
+      <div id="viewport" class="viewport" tabindex="0" aria-label="Layout canvas. Arrow keys pan; Shift plus arrow pans ten percent; plus and minus zoom; F fits.">
+        <canvas id="canvas" width="1" height="1" aria-label="Rendered layout"></canvas>
+        <div id="empty" class="empty"><div class="empty-mark">＋</div><h1>Layout workspace</h1><p id="empty-message">Connecting to the local Rust renderer…</p></div>
+        <div id="rendering" class="rendering" hidden>Rendering</div>
+        <div class="viewport-hint">↑ ↓ ← → pan <span>Shift · 10%</span> <span>+ / − zoom</span></div>
+      </div>
+      <footer class="statusbar"><span id="status">Waiting for session</span><span id="viewport-info">Native pixels · Canvas 2D</span></footer>
+      <div id="perf" class="perf">Rust renderer · no automatic indexing · refinement off</div>
+    </main>
+  </div>
+  <noscript>This workspace requires JavaScript. All assets are served locally.</noscript>
+</body>
+</html>

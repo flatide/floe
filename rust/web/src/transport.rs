@@ -36,7 +36,7 @@ use tokio::{
 };
 
 pub const PROTOCOL: &str = "floe.v1";
-pub const BUNDLE: &str = "m1b-transport-1";
+pub const BUNDLE: &str = env!("FLOE_WEB_BUNDLE");
 const BODY_BYTES: usize = 16 * 1024;
 const CONTROL_BYTES: usize = 8 * 1024;
 const CONNECTIONS: u32 = 32;
@@ -51,6 +51,7 @@ pub(crate) struct Attachment {
     pub rows: crate::layer_catalog::LayerCatalog,
     pub source_id: String,
     pub mode: &'static str,
+    pub levels: Option<Vec<String>>,
     activity: Mutex<Activity>,
 }
 impl Attachment {
@@ -73,6 +74,7 @@ impl Attachment {
             controller,
             source_id: String::new(),
             mode: "level",
+            levels: None,
             activity: Mutex::new(Activity {
                 connected: 0,
                 seen: false,
@@ -125,6 +127,7 @@ pub struct Gateway {
     pub(crate) stopping: watch::Sender<bool>,
     pub(crate) view: Option<Arc<Attachment>>,
     pub(crate) service: Option<Arc<crate::service::Service>>,
+    startup: Option<serde_json::Value>,
     pub(crate) output_bytes: Arc<Semaphore>,
     pub(crate) encoders: Arc<Semaphore>,
 }
@@ -148,6 +151,7 @@ impl Gateway {
                 stopping,
                 view: None,
                 service: None,
+                startup: None,
                 output_bytes: Arc::new(Semaphore::new(crate::view::OUTPUT_BUDGET)),
                 encoders: Arc::new(Semaphore::new(2)),
             }),
@@ -183,6 +187,42 @@ impl Gateway {
             .as_ref()
             .and_then(|s| s.current())
             .or_else(|| self.view.clone())
+    }
+    /// Only a local launcher supplies startup preferences. The browser adds its
+    /// measured device dimensions before the FIRST open, not a second render.
+    pub fn with_startup(
+        addr: SocketAddr,
+        service: Arc<crate::service::Service>,
+        request: serde_json::Value,
+    ) -> Result<(Gate, Secret), String> {
+        if request.to_string().len() > BODY_BYTES {
+            return Err("startup request limit".into());
+        }
+        let parsed: crate::service::OperationDto =
+            serde_json::from_value(request.clone()).map_err(|_| "invalid startup request")?;
+        match parsed {
+            crate::service::OperationDto::Open {
+                seq,
+                source_id,
+                body,
+                ..
+            } => {
+                if seq != "1"
+                    || !service.catalog()["sources"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|r| r["source_id"] == source_id)
+                {
+                    return Err("invalid startup source/sequence".into());
+                }
+                body.core().map_err(str::to_owned)?;
+            }
+            _ => return Err("startup must be an open, never an index".into()),
+        }
+        let (mut gate, secret) = Self::with_service(addr, service)?;
+        Arc::get_mut(&mut gate).expect("new gateway").startup = Some(request);
+        Ok((gate, secret))
     }
     fn stop_services(&self) {
         if let Some(service) = &self.service {
@@ -222,7 +262,9 @@ pub fn router(gate: Gate) -> Router {
         .route("/api/v1/capabilities", get(capabilities))
         .route("/api/v1/events", get(upgrade))
         .route("/api/v1/view", get(current_view))
+        .route("/api/v1/startup", get(startup))
         .merge(crate::owner::routes())
+        .merge(crate::assets::routes())
         .fallback(|| async { error(StatusCode::NOT_FOUND) })
         .layer(DefaultBodyLimit::max(BODY_BYTES))
         .layer(middleware::from_fn_with_state(Arc::clone(&gate), guard))
@@ -251,13 +293,17 @@ async fn guard(State(gate): State<Gate>, request: Request, next: Next) -> Respon
         ("referrer-policy", "no-referrer"),
         ("x-content-type-options", "nosniff"),
         ("x-frame-options", "DENY"),
-        (
-            "content-security-policy",
-            "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
-        ),
     ] {
         headers.insert(key, HeaderValue::from_static(value));
     }
+    // Explicit ws origin also covers Firefox versions that don't include a
+    // websocket scheme in connect-src 'self'. No inline/eval/third-party code.
+    let csp = format!("default-src 'none'; script-src 'self'; style-src 'self'; img-src blob:; connect-src {} {}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+        gate.origin.url(), gate.origin.url().replacen("http:", "ws:", 1));
+    headers.insert(
+        "content-security-policy",
+        HeaderValue::from_str(&csp).expect("literal loopback origin"),
+    );
     response
 }
 #[derive(Deserialize)]
@@ -333,8 +379,14 @@ async fn current_view(State(gate): State<Gate>, headers: HeaderMap) -> Response 
         &view.id,
         "",
     );
-    Json(json!({"title":view.title,"source_id":view.source_id,"mode":view.mode,"view":snapshot}))
+    Json(json!({"title":view.title,"source_id":view.source_id,"mode":view.mode,"levels":view.levels,"view":snapshot}))
         .into_response()
+}
+async fn startup(State(gate): State<Gate>, headers: HeaderMap) -> Response {
+    if let Err(e) = http_session(&gate, &headers) {
+        return error(e);
+    }
+    Json(json!({"request":gate.startup})).into_response()
 }
 async fn logout(State(gate): State<Gate>, headers: HeaderMap) -> Response {
     let id = match http_session(&gate, &headers) {

@@ -177,11 +177,18 @@ pub struct PatchDto {
     pub detail: Field<DetailDto>,
     pub thin: Field<ThinDto>,
     pub layers: Field<Selection>,
+    pub layer_change: Field<LayerChange>,
     pub frames: Field<bool>,
     pub labels: Field<bool>,
     pub font_px: Field<u32>,
     pub mono: Field<bool>,
     pub styles: Field<Vec<StyleDto>>,
+}
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct LayerChange {
+    pair: (u32, u32),
+    visible: bool,
 }
 impl PatchDto {
     pub fn core(self) -> Result<Patch, &'static str> {
@@ -227,6 +234,7 @@ impl PatchDto {
                 Selection::None {} => Layers::None,
                 Selection::Only { pairs } => Layers::Only(pairs),
             }),
+            layer_change: self.layer_change.optional().map(|c| (c.pair, c.visible)),
             frames: self.frames.optional(),
             labels: self.labels.optional(),
             font_px: self.font_px.optional(),

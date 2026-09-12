@@ -432,6 +432,9 @@ fn execute(inner: &Inner, work: Work) -> Result<Value> {
                 false,
             );
             source.validate(&stop)?;
+            let selected_levels = levels
+                .as_ref()
+                .map(|ids| ids.iter().map(i64::to_string).collect());
             let data = ManagedDataset::open(&inner.resources, source.path(), levels, mode, &stop)?;
             let model = Model::new(&data)?;
             let (width, height) = patch.pixels.unwrap_or((1024, 768));
@@ -446,6 +449,7 @@ fn execute(inner: &Inner, work: Work) -> Result<Value> {
             let mut view = Attachment::with_rows(controller, &source.title, rows)
                 .map_err(|_| Error::new(ErrorKind::Io, "entropy unavailable"))?;
             view.source_id = source_id;
+            view.levels = selected_levels;
             view.mode = match mode {
                 Mode::Level => "level",
                 Mode::Chip => "chip",

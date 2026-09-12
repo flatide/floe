@@ -28,6 +28,43 @@ use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream,
 };
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+#[tokio::test]
+async fn embedded_assets_are_content_identified_and_never_serve_files() {
+    let server = Server::start().await;
+    let page = server.request("GET", "/", &[], "").await;
+    assert_eq!(page.status, 200);
+    assert!(page.body.contains(&format!("/assets/{BUNDLE}/app.js")));
+    assert!(!page.body.contains("@@BUNDLE@@"));
+    assert!(page.headers["content-security-policy"].contains("script-src 'self'"));
+    assert!(page.headers["content-security-policy"].contains(&format!("ws://{}", server.addr)));
+    assert!(!page.headers["content-security-policy"].contains("unsafe-inline"));
+    for (name, mime) in [
+        ("app.js", "text/javascript"),
+        ("protocol.js", "text/javascript"),
+        ("app.css", "text/css"),
+    ] {
+        let r = server
+            .request("GET", &format!("/assets/{BUNDLE}/{name}"), &[], "")
+            .await;
+        assert_eq!(r.status, 200);
+        assert!(r.headers["content-type"].starts_with(mime));
+    }
+    for path in [
+        "/assets/wrong/app.js",
+        "/assets/wrong/../../etc/passwd",
+        "/etc/passwd",
+    ] {
+        assert_eq!(server.request("GET", path, &[], "").await.status, 404);
+    }
+    assert_eq!(
+        server
+            .request("GET", "/api/v1/startup", &[], "")
+            .await
+            .status,
+        401
+    );
+    server.shutdown().await;
+}
 struct Server {
     addr: SocketAddr,
     bootstrap: Secret,

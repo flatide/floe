@@ -11,23 +11,22 @@ managed read lease·admission과 latest-only view controller를 추가했고**(�
 **M1b-2b에서 신뢰된 launcher가 등록한 view의 인증된 제어/프레임 스트림을
 연결했다**(§6). M1b-2c1은 등록된 소스 범위와 관리형 색인 supervisor다(§7).
 M1b-2c2에서 인증된 catalog·view 생성/재open·색인 작업 API를 연결했다(§8).
-아직 웹 뷰어 실행 명령과 정적 UI는 없다.
-`floe2-web view`가 동작한다거나 M1/G1/G4가 완료됐다는 뜻이 아니다.
+M1b-3에서 `floe2-web view`와 번들 HTML/Canvas 기본 뷰어를 연결했다(§9).
+M1/G1/G4 전체 완료는 아니며 margin과 현장 Firefox/ETX 검증은 남아 있다.
 
 다음 단계:
 
-1. M1b-3: 번들 HTML/Canvas와 실행 명령, open/goto/pan/zoom, layer/level/chip,
-   depth/detail/thin·스타일·상태줄, DPR/y축/half-DBU/늦은 decode 필터.
-2. M1b-4: layout margin prefetch/착지 base/crop/16px 위상, 실제 UI 게이트와
+1. M1b-4: layout margin prefetch/착지 base/crop/16px 위상, 실제 UI 게이트와
    G1/읽기 G4. deck margin/labels/query는 capability=false를 유지한다.
+2. 추가 스타일 편집(fill/width/font), drag 및 이후 DRC/query/export parity.
 
 기존 CLI·GTK/Python 제품, jobdeck 실측 브랜치·렌더링 정책은 변경하지 않았다.
 임의 파일 경로나 renderd wire를 HTTP/WS로 직접 실행하는 통로도 없다.
 
 ## 2. 실제 제공하는 transport 계약
 
-현재는 library `Gateway::new(bound_addr)`, `transport::serve(listener, gate,
-shutdown)`를 테스트 하네스가 호출한다. 랜덤 포트의 loopback TCP만 허용한다.
+library `Gateway::new(bound_addr)`, `transport::serve(listener, gate, shutdown)`를
+테스트 하네스와 Rust 실행 명령이 호출한다. loopback TCP만 허용한다.
 listener의 실제 주소와 생성 시 주소가 달라도 거부한다. 한 Gateway 인스턴스는
 한 번 실행/종료하는 용도이며 재시작할 때 새 인증 상태를 만든다.
 
@@ -43,8 +42,8 @@ view가 없는 transport 하네스는 `hello`와 `{"type":"ping","seq":"1"}` →
 seq는 양의 u64를 표현하는 정규 10진 문자열이며 연결 내 엄격 증가한다.
 중복/역전/미정의 필드·타입/클라이언트 binary는 연결을 종료한다. view가 등록된
 연결의 generation·connection epoch·view ID·frame credit는 §6을 따른다.
-지금의 bundle ID `m1b-transport-1`은 transport 하네스용이다. UI를 편입할 때
-자산 내용에 종속된 bundle ID로 바꾸고 실제 asset skew 게이트를 추가해야 한다.
+bundle ID는 M1b-3에서 자산·wire 코드 내용에 종속된 40자리 ID로 교체했다.
+잘못된 번들 교환은 426, 이전 ID의 asset URL은 404다(§9).
 
 ### 2.1 인증과 노출 경계
 
@@ -62,8 +61,8 @@ seq는 양의 u64를 표현하는 정규 10진 문자열이며 연결 내 엄격
   프록시 허용 Origin, guest/share 범위는 M2의 별도 배포 정책이다. bind 주소만
   바꿔 외부에 열 수 없으며 동일 UID 악성 프로세스를 격리하는 sandbox가 아니다.
 - 모든 응답은 no-store/no-referrer/nosniff/frame 금지/CSP. CORS는 열지 않는다.
-  요청 원문·cookie·CSRF·bootstrap을 로깅하지 않는다. URL fragment 수신·교환 후
-  주소 제거는 아직 launcher/UI 미구현 범위이며 완료로 표시하지 않는다.
+  요청 원문·cookie·CSRF·bootstrap을 로깅하지 않는다. UI는 bootstrap fragment를
+  교환 전에 주소에서 제거한다. launcher의 secret 전달/격리는 §9를 따른다.
 
 ### 2.2 자원/종료
 
@@ -394,3 +393,77 @@ browser 자체의 입력·decode·Canvas 검증과 실행 명령은 다음 단�
 통과했다(`RUST VALIDATION: ALL OK`, 기존 KLayout oracle 포함). Rust 1.89.0의
 빈 registry + `--offline --locked` 테스트와 Linux musl release 테스트 실행 파일
 빌드도 통과했다. Linux/Firefox/ETX 실행 검증으로 대신 세지는 않는다.
+
+## 9. M1b-3 — 기본 Canvas 뷰어와 Rust 실행 명령
+
+`floe2-web view SOURCE [SOURCE ...]`는 loopback gateway와 기본 뷰어를 실행한다.
+사용법은 [Rust CLI README](../rust/app/README.md), 전체 옵션은 `view --help`다.
+일반/잡덱 source(최대 32개)는 로컬 CLI가 등록하고, 웹은 opaque ID만 사용한다.
+source/level 선택, level/chip mode, 명시 index·진행·취소·close/reopen, goto/fit/
+커서 pan·wheel/버튼 zoom, depth/detail/thin, label/frame/mono, layer checkbox/
+색상, native perf·미완료 상태를 연결했다. close 뒤 mode/level을 바꿔 재open한다.
+웹의 현재 explicit layer selection 상한은 4096이다. All-minus-one도 이 상한을
+넘으면 명시 오류이며 큰 목록을 조용히 축약하지 않는다.
+
+### 9.1 시작·번들·브라우저 수명
+
+- CLI의 초기 goto/depth/detail/thin/level 등은 인증된 `GET /api/v1/startup`의
+  한 open request다. UI가 실제 viewport device px를 추가하고 seq=1로 보낸다.
+  고정 크기의 숨은 fit render를 먼저 실행하지 않는다. 재접속은 current view를
+  복원하고 초기 상대 이동을 다시 적용하지 않는다. open은 자동 index를 하지 않는다.
+- HTML/CSS/JS를 Rust 바이너리에 내장한다. build.rs의 source/관련 wire 내용 hash가
+  bundle ID와 `/assets/<id>/...` URL을 결정한다. hash는 cache/skew 식별자이지
+  보안 서명이 아니다. 이전/미정의 asset은 404, 번들 불일치 교환은 426이다.
+  CSP에 inline/eval/CDN은 없고 connect-src는 실제 loopback HTTP/WS origin뿐이다.
+- 기본 실행은 [Firefox의 전용 프로필/독립 인스턴스 옵션](https://firefox-source-docs.mozilla.org/browser/CommandLineParameters.html)을
+  쓴다. 기존 프로필·보안 설정·인증서를 변경하지 않는다. bootstrap URL을 argv에
+  넣지 않고 0700 전용 디렉터리의 0600 `launch.html`로 전달한다(프로세스 목록 노출 방지).
+  session JSON도 0600/create_new이며 기존 파일/심볼릭 링크는 덮어쓰지 않는다.
+  `--no-open`에서는 그 private JSON의 일회용 링크를 사용한다. 링크 공유는 금지다.
+- 전용 process group만 TERM→KILL/reap 후 프로필을 제거한다. 자식의 종료 확인은
+  waitid(WNOWAIT)로 PID를 보유해 재사용 race를 피한다. macOS의 zombie-only group
+  EPERM은 libproc으로 같은 그룹의 살아 있는 프로세스가 없음을 확인한 경우만
+  허용한다([XNU 구현](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_sig.c)).
+  실제 cleanup 실패는 오류/프로필 보존이다. 기존 사용자 Firefox를 종료하지 않는다.
+  Ctrl+C/SIGTERM, End session, 소유 브라우저 프로세스 종료가 native worker 수거로 이어진다.
+
+### 9.2 표시·입력 경계
+
+raw는 FLOERAW1 RGBA를 `putImageData`, PNG는 크기 검증 후 Canvas에 1:1로 blit한다.
+canvas backing store는 device px, CSS 배치는 device-pixel 정렬이다. 서버가 좌표/
+pan·zoom 계산을 담당하고, 브라우저는 그 좌표를 표시용 숫자로만 변환한다. resize는
+새 프레임 전까지 이전 화면을 unscaled frozen base로 보관한다. margin crop은 아직 없다.
+
+u64 seq/revision은 10진 문자열로 비교한다. header/payload/좌표/크기 검증 뒤에도
+비동기 PNG decode 완료 시 dataset/view/connection/worker epoch·render revision/
+key·bbox·pixel size를 다시 검사한다. 다음 상태가 accepted만 되고 snapshot이 아직
+안 온 경우에도 이전 PNG를 폐기한다. hidden tab/늦은 callback은 credit를 반환하고
+표시하지 않는다. Blob URL/timer/callback은 성공/오류/재접속 모두 정리한다.
+입력은 bounded queue(64)·한 요청 in-flight·약 15회/s로 제한한다. 불확실한 상대
+입력은 재접속 때 재생하지 않고 notice를 표시한다. 과대 좌표/치수도 명시 오류다.
+
+### 9.3 검증·남은 범위
+
+- app 5/app-core 34/web 13 단위 + 실제 HTTP/WS 8, crate fmt/strict clippy 통과.
+  full `sh tools/validate_rust.sh`에서 기존 native/KLayout oracle와 모든 앱 게이트를
+  포함해 `RUST VALIDATION: ALL OK`. 실제 native 통합의 ignored Rust 테스트는
+  해당 Python driver로 필수 실행하며 단위 테스트 skip을 통과로 세지 않는다.
+- `validate_web_cli.py`: PATH empty, 명시 색인 후 초기 gen=1/goto/치수, private
+  Firefox argv/profile, logout/SIGINT, source/기존 session 보존, native child 수거.
+  Firefox 프로세스 수명 테스트는 제어된 fake binary다. Firefox UI 검증이 아니다.
+- `validate_web_ui.cjs`: production JS를 ES2017로 파싱하고 malformed packet/u64/
+  늦은 PNG·hidden tab·epoch/credit/URL 정리를 테스트한다. **개발 검증에는 Node>=18**이
+  필요하며 설치된 앱/`cargo build`에는 Node/npm/Python이 필요 없다. npm 설치 없이
+  test-only Acorn 8.15.0(MIT)을 공식 tarball·integrity와 함께 고정했다
+  (`tools/vendor/acorn-8.15.0/README.floe.md`). 이 VM 테스트는 browser pixel oracle가 아니다.
+- 실제 macOS Chrome에서 합성 valmini 첫 화면(raw/PNG), zoom, layer toggle,
+  재접속을 확인했다. raw/PNG 첫 화면은 gen=1, backing 2312×1651(DPR 2)이며
+  native geometry가 표시되는 스크린샷을 작업 기록에 남겼다. GTK/native의 기존
+  half-phase oracle를 Browser/Firefox G1이 완료된 것으로 대체하지 않는다.
+- Rust 1.89 + 빈 registry `--offline --locked` 동일 단위/HTTP 테스트, Linux musl
+  release link 성공. Linux 실행/현장 Firefox·ETX는 아직 미검증이다.
+
+이 단계는 외부 Sites hosting·외부 로그인/CDN을 사용하지 않는다. 기존 폐쇄망
+Rust 앱의 작업 화면을 우선 연결했으며 Python/GTK 제품·jobdeck 실측 브랜치는
+유지한다. layout margin/라벨 crop, 추가 스타일(fill/width/font) 편집, drag, G1/G4
+및 DRC/query/export/배포 전환은 다음 단계다. refinement 기본 off도 그대로다.
