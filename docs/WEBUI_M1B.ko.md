@@ -6,15 +6,16 @@
 ## 1. 현재 단계와 남은 일
 
 **M1b-1은 인증된 loopback HTTP/WS transport 라이브러리 기반**이다.
-`rust/web`의 `floe-web` crate를 추가했다. 아직 웹 뷰어 실행 명령, 정적 UI,
-렌더/색인 endpoint, 프레임 스트리밍은 아직 없다. **M1b-2a에서 앱 코어의
-managed read lease·admission과 latest-only view controller를 추가했다**(§5).
+`rust/web`의 `floe-web` crate를 추가했다. **M1b-2a에서 앱 코어의
+managed read lease·admission과 latest-only view controller를 추가했고**(§5),
+**M1b-2b에서 신뢰된 launcher가 등록한 view의 인증된 제어/프레임 스트림을
+연결했다**(§6). 아직 웹 뷰어 실행 명령, 정적 UI, catalog·view 생성/색인 API는 없다.
 `floe2-web view`가 동작한다거나 M1/G1/G4가 완료됐다는 뜻이 아니다.
 
 다음 단계:
 
-1. M1b-2b: 인증 세션/허가된 dataset handle과 controller 연결, index 진행 이벤트,
-   connection epoch·프레임 봉투·subscriber credit·유계 복원 상태.
+1. M1b-2c: 허가된 source catalog·view 생성/재open, index 진행 이벤트와
+   managed write lease의 실제 작업 수명 연결.
 2. M1b-3: 번들 HTML/Canvas와 실행 명령, open/goto/pan/zoom, layer/level/chip,
    depth/detail/thin·스타일·상태줄, DPR/y축/half-DBU/늦은 decode 필터.
 3. M1b-4: layout margin prefetch/착지 base/crop/16px 위상, 실제 UI 게이트와
@@ -33,14 +34,15 @@ listener의 실제 주소와 생성 시 주소가 달라도 거부한다. 한 Ga
 | 경로 | 조건/결과 |
 |---|---|
 | `POST /api/v1/session/exchange` | 정확한 Origin, JSON `{bootstrap, protocol:1, bundle}`. 일회용 token → HttpOnly cookie + CSRF secret + opaque session ID |
-| `GET /api/v1/capabilities` | cookie **및** X-Floe-CSRF. protocol/bundle과 현재 `render:false, shares:false, uploads:false` 반환 |
+| `GET /api/v1/capabilities` | cookie **및** X-Floe-CSRF. protocol/bundle, 등록된 view가 있으면 `render:true`; shares/uploads는 false |
+| `GET /api/v1/view` | cookie **및** X-Floe-CSRF. 등록된 view의 현재 snapshot, 없으면 404 |
 | `DELETE /api/v1/session` | 정확한 Origin + cookie/CSRF. grant 폐기·cookie 만료·열린 WS 종료 |
 | `GET /api/v1/events` | 정확한 Origin + cookie + subprotocol `floe.v1`, `bundle.<bundle>`, `csrf.<secret>` |
 
-WS는 현재 `hello`와 `{"type":"ping","seq":"1"}` → `pong`만 지원한다.
+view가 없는 transport 하네스는 `hello`와 `{"type":"ping","seq":"1"}` → `pong`을 지원한다.
 seq는 양의 u64를 표현하는 정규 10진 문자열이며 연결 내 엄격 증가한다.
-중복/역전/미정의 필드·타입/클라이언트 binary는 연결을 종료한다. 렌더 generation,
-connection_epoch, view_id와 frame credit는 다음 controller 단계에서 추가한다.
+중복/역전/미정의 필드·타입/클라이언트 binary는 연결을 종료한다. view가 등록된
+연결의 generation·connection epoch·view ID·frame credit는 §6을 따른다.
 지금의 bundle ID `m1b-transport-1`은 transport 하네스용이다. UI를 편입할 때
 자산 내용에 종속된 bundle ID로 바꾸고 실제 asset skew 게이트를 추가해야 한다.
 
@@ -67,14 +69,16 @@ connection_epoch, view_id와 frame credit는 다음 controller 단계에서 추�
 
 HTTP 연결 32개, header 16KiB/64개, JSON body 16KiB, header/handler 5초,
 HTTP 연결 전체 10초(keep-alive/unused-body drain 포함). WS는 별도 8연결,
-control frame/누적 message 8KiB, read buffer 8KiB, write buffer 상한 16KiB다.
+control frame/누적 message 8KiB, read buffer 8KiB다. control-only write buffer
+상한은 16KiB이며 이미지가 있는 연결의 전송 상한은 §6을 따른다.
 입력은 고정 1초 창당 60메시지이며 ping/pong도 센다. 이 값들은 현재 작은
 control 하네스 기준이고 전체 프레임 바이트/큐 상한을 대신하지 않는다.
 
 WS 인증은 메시지마다/250ms tick에 재검사한다. idle 30초, send 1초,
 close 100ms. 서버 종료는 신규 accept를 닫고 HTTP task를 수거한 뒤 WS permit
 회수를 최대 2초 기다린다. 실패는 명시 오류다. 브라우저가 메시지를 보내야만
-로그아웃/종료를 감지하는 구조가 아니다. 아직 native worker watchdog은 없다.
+로그아웃/종료를 감지하는 구조가 아니다. native worker의 별도 poll/watchdog과
+view 연결 해제 수명은 §5·§6을 따른다.
 
 ## 3. HTTP/WS 의존성 게이트
 
@@ -184,8 +188,8 @@ key도 바꾼다. stale base revision은 상태를 바꾸지 않고 conflict. �
 변경 즉시 무효화한다. 늦은 frame과 실제 IO 오류는 각각 discard/명시 오류이며
 서로를 cancelled 또는 성공으로 바꾸지 않는다.
 
-서버 좌표 계산은 기존 f64 DBU 경계를 유지한다. 전달 DTO의 10진 문자열 변환은
-다음 단계다. pan은 선택 시 16 device px 위상 스냅, zoom anchor는 화면 좌상단
+서버 좌표 계산은 기존 f64 DBU 경계를 유지한다. 전달 DTO는 §6의 10진 문자열을
+쓴다. pan은 선택 시 16 device px 위상 스냅, zoom anchor는 화면 좌상단
 기준, resize는 중심/배율 보존이다. 1..8192 px/축, 합 16 Mpx, 유한·양의 bbox,
 native 스타일 폭 1..8·색/레이어/덱 라벨 capability를 상태 반영 전에 검증한다.
 덱 head 선택은 자식 pair로 확장하고, head 스타일은 자식에 전파하되 같은 요청의
@@ -210,3 +214,55 @@ Rust 1.89.0/빈 registry `CARGO_HOME`/`--offline --locked` 단위 29개와 Linux
 musl release 테스트 실행 파일의 정적 링크도 확인했다. Linux에서 실제 실행한
 결과는 아니며, 기존 workspace 전역 fmt/clippy 차이는 §4와 동일하게 보존한다.
 이 단계에는 웹 프레임 전송/GUI/ETX 측정이 없으며 G1/G4 또는 M1 전체 완료가 아니다.
+
+## 6. M1b-2b — 인증된 제어/이미지 스트림
+
+`Gateway::with_view(addr, controller, title)`에 신뢰된 로컬 호출자가 연 view를
+등록한다. owner grant 하나/view 하나의 slice이며 HTTP에 source 경로·native 명령을
+받지 않는다. catalog·재open·index endpoint는 다음 단계다. title은 256문자로
+제한하고 오류는 허용된 code만 내보낸다. native 경로/원문 오류/통계 전체를 보내지 않는다.
+
+- WS마다 독립 무작위 `connection_epoch`; `hello` 다음 authoritative `snapshot`.
+  재접속은 새 epoch/seq와 현재 snapshot/최신 frame을 받고 끊긴 상대 입력을 재생하지 않는다.
+  `view.set`은 seq/epoch/view_id/base_state_rev/body를 받는다. base 충돌은
+  `stale_state` + 현재 snapshot, 잘못된 값은 `invalid_request`이고 상태 불변이다.
+  알 수 없는 필드/JSON null/잘못된 타입은 거부한다. world DBU/µm 좌표와 모든 u64
+  ID/revision은 10진 **문자열**, 픽셀 크기와 제한된 비율은 JSON number다.
+- 하나의 binary message = `u32 LE header_bytes + UTF-8 JSON + native PNG/raw`.
+  header에는 view/dataset/connection/worker/render identity, generation/round,
+  bbox/해상도/row0=top/format/길이와 final/partial/deferred/skips/approximate를 싣는다.
+  PNG/raw의 원본 바이트를 바꾸지 않는다. raw magic/stride·길이, PNG IHDR 크기와
+  bbox/최대 해상도를 검증하며 쿼리는 아직 capability=false다.
+- 이미지 credit는 구독자당 **1**이다. `frame.ack`(displayed/discarded)와 실제
+  socket write 완료가 **모두** 있어야 해제한다. 추측한 조기 ACK로 복사/전송
+  한도를 우회할 수 없다. 대기 중 최신 frame은 controller Arc 한 장으로 합친다.
+  별도의 구독자별 이미지 backlog를 만들지 않는다. native poll/cancel은 구독/ACK와 독립이다.
+- header 64KiB, native payload 80MiB, 이미지 write buffer는 전체 packet+16KiB.
+  packet encoder 최대 2개, 전체 전송 예약 256MiB(원본·packet·socket 복사를
+  보수적으로 3배 계산), 전부 try-admission이며 무제한 waiter가 없다.
+  별도 reader와 writer를 두고 control queue 4개/응답 256KiB를 제한한다.
+  한계 초과·5s write timeout·10s image ACK timeout은 **해당 연결**을 닫는다.
+  이는 RSS hard cap 또는 느린 망에서 끊김이 없다는 보장이 아니다.
+- server ping 10s, 수신 idle 30s. 모든 입력과 tick에서 auth를 재검증한다.
+  logout/server shutdown은 native close를 요청하고 비동기로 최대 4s 수거를 기다린다.
+  구독자가 없어도 backend는 drain한다. 한 번도 연결하지 않으면 120s,
+  마지막 구독 해제 후에는 60s 동안 복원을 허용한 뒤 worker를 닫는다.
+  현 slice는 closed view를 재open할 API가 없어 다시 실행해야 한다. ETX 현장 정책은 미확정이다.
+- CPU reserve 계산도 보완했다. foreground 4 + index 12는 **어느 요청이 먼저 와도**
+  승인된다. reserve는 index 단독 예약을 제한하며 이미 foreground가 쓰는 slot을
+  이중 차감하지 않는다. 총 16/동시 index 1 제한은 그대로다. worker 수명 전체를
+  예약하므로 유휴 worker도 slot을 점유한다(실제 순간 CPU 사용률 제한과 다름).
+
+검증: app-core 30개, web 12개 단위 + 실제 HTTP/WS 7개. 새 필수 게이트
+`validate_view_stream.py`는 private Unicode/공백 valmini를 색인한 뒤 **PATH가 빈
+환경**에서 native PNG/raw를 실제 인증 WS로 보내 원본과 바이트 대조한다.
+format별 100회 pan, ACK 보류 중 단일 credit/latest-only, 빠른 두 번째 수신자의
+독립 진행, stale base/잘못된 depth, epoch 재사용/binary 입력 거부, 재접속,
+10s ACK timeout, logout 후 worker·임시파일·전송 예약 회수를 검증한다.
+캐시 byte/mtime 불변도 필수다. browser decode 완료 시 stale 필터·Canvas 픽셀·
+숨긴 탭/ETX는 아직 이 테스트의 범위가 아니며 M1b-3/4에서 별도로 검증한다.
+
+위 게이트, 변경 패키지 fmt/strict clippy(`--no-deps`) 및 전체 배터리
+`RUST VALIDATION: ALL OK` 통과. 기존 KLayout 13 PX + 2 phase-exact + 14 style을
+유지했다. Rust 1.89.0·빈 registry·`--offline --locked`의 core/web 테스트와
+Linux musl release 테스트 실행 파일의 static-pie 링크도 확인했다(Linux 실행은 아님).

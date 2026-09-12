@@ -140,6 +140,7 @@ fn model(deck: bool) -> Arc<Model> {
         bbox: [0., 0., 800., 640.],
         deck,
         skipped: 0,
+        source_stale: false,
         styles,
         pairs: BTreeSet::from([(1, 0)]),
         groups: BTreeMap::new(),

@@ -7,7 +7,8 @@
 현재 상태: **M0 로컬 조사/API 초안 + M1a worker client·공유 서비스 + 일반/잡덱 index·info/render/probe·분석/spec CLI**.
 M1b-1에서 의존성 선정과 인증된 loopback HTTP/WS transport 기반을 추가했다.
 M1b-2a에서 managed lease/admission과 native view controller를 추가했다.
-세션/렌더 연결·브라우저 UI와 M0 현장 검증은 아직 완료되지 않았다.
+M1b-2b에서 사전 등록한 view의 인증된 제어/프레임 스트림을 연결했다.
+catalog·색인 API·브라우저 UI와 M0 현장 검증은 아직 완료되지 않았다.
 상세 범위는 [M1b 기록](WEBUI_M1B.ko.md). 여기의 M0~M5는 **웹 전환 단계**이며
 jobdeck/occupancy의 같은 이름 단계와 별개다. 개발 기준과 합류 규칙은 §11.
 로컬 산출물: [기능/CLI 대조표](WEBUI_M0.ko.md),
@@ -446,5 +447,6 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
   M1a-3c/d에서 덱 색/레이어·spec·분석/읽기 CLI와 공통 Dataset을 연결했다.
   M1b-1에서 vendored HTTP/WS 의존성·loopback 인증/제한을 검증했다.
   M1b-2a에서 managed lease/admission·view controller를 검증했다.
-  다음은 인증 세션 연결·진행 이벤트·frame credit·gateway/Canvas다.
+  M1b-2b에서 실제 PNG/raw 스트림·frame credit·재접속/취소/종료를 검증했다.
+  다음은 catalog·색인 진행 이벤트·gateway/Canvas다.
   CLI 전체/gateway/웹 UI 완료가 아니며 GTK/실측 브랜치는 유지한다.

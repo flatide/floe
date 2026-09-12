@@ -44,6 +44,7 @@ pub struct Snapshot {
     pub render_key: u64,
     pub worker_epoch: u64,
     pub phase: Phase,
+    pub max_depth: Option<u64>,
     pub submitted: u64,
     pub consumed: u64,
     pub discarded: u64,
@@ -68,8 +69,14 @@ trait Engine: Send {
     fn styles(&mut self, styles: &[Style]) -> Result<()>;
     fn base(&self) -> RenderRequest;
     fn close(&mut self) -> Result<()>;
+    fn max_depth(&self) -> Option<u64> {
+        None
+    }
 }
 impl Engine for RenderSession {
+    fn max_depth(&self) -> Option<u64> {
+        Some(self.max_depth())
+    }
     fn submit(&mut self, r: RenderRequest) -> Result<u64> {
         self.submit(r)
     }
@@ -127,6 +134,7 @@ impl ViewController {
                 render_key: 1,
                 worker_epoch: epoch,
                 phase: Phase::Opening,
+                max_depth: None,
                 submitted: 0,
                 consumed: 0,
                 discarded: 0,
@@ -142,6 +150,7 @@ impl ViewController {
                 let _permit = permit;
                 let result = (|| {
                     let (mut engine, lease) = open(Arc::clone(&flag))?;
+                    state.lock().unwrap().snapshot.max_depth = engine.max_depth();
                     let result = run(engine.as_mut(), &state, &flag, &model2, &resources);
                     let close = engine.close();
                     drop(engine);
@@ -218,6 +227,9 @@ impl ViewController {
     /// Non-blocking; interrupts ready/open/style and worker polling too.
     pub fn request_close(&self) {
         self.stop.store(1, Ordering::Relaxed);
+    }
+    pub fn is_finished(&self) -> bool {
+        self.thread.as_ref().is_none_or(|t| t.is_finished())
     }
     /// Join on a service/control thread, NOT the HTTP reactor. The worker owns
     /// its bounded terminate/reap path; no subscriber can prolong this wait.

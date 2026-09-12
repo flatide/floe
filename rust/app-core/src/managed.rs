@@ -133,17 +133,18 @@ impl Resources {
     ) -> Result<Permit> {
         let mut s = self.state.lock().unwrap();
         let u = s.usage;
-        let cpu_limit = if write {
-            self.limits.cpu_slots - self.limits.foreground_reserve
-        } else {
-            self.limits.cpu_slots
-        };
+        // At most one index job is admitted. Limit that job's reservation,
+        // not the total including foreground work already using its reserve.
+        // Otherwise render->index and index->render have different outcomes.
+        let index_borrows_reserve =
+            write && use_.cpu_slots > self.limits.cpu_slots - self.limits.foreground_reserve;
         let leases_conflict = keys.iter().any(|key| {
             s.leases
                 .get(key)
                 .is_some_and(|h| h.writer || (write && h.readers > 0))
         });
-        if u.cpu_slots + use_.cpu_slots > cpu_limit
+        if u.cpu_slots + use_.cpu_slots > self.limits.cpu_slots
+            || index_borrows_reserve
             || u.workers + use_.workers > self.limits.workers
             || use_.decoded_mb > self.limits.decoded_mb.saturating_sub(u.decoded_mb)
             || u.index_jobs + use_.index_jobs > 1
@@ -359,5 +360,44 @@ mod tests {
         drop(render);
         assert_eq!(r.usage(), Usage::default());
         assert_ne!(r.next_id().unwrap(), r.next_id().unwrap());
+    }
+    #[test]
+    fn foreground_reserve_is_independent_of_admission_order() {
+        for (foreground, indexing) in [(4, 12), (12, 4)] {
+            for index_first in [true, false] {
+                let r = Resources::new(Limits::default()).unwrap();
+                let render = || {
+                    r.acquire(
+                        Usage {
+                            cpu_slots: foreground,
+                            workers: 1,
+                            ..Usage::default()
+                        },
+                        BTreeSet::new(),
+                        false,
+                    )
+                    .unwrap()
+                };
+                let index = || r.index([], indexing).unwrap();
+                let (a, b) = if index_first {
+                    (index(), render())
+                } else {
+                    (render(), index())
+                };
+                assert_eq!(r.usage().cpu_slots, 16);
+                assert!(r.index([], 1).is_err());
+                drop((a, b));
+                assert_eq!(r.usage(), Usage::default());
+            }
+        }
+        let r = Resources::new(Limits {
+            foreground_reserve: 0,
+            ..Limits::default()
+        })
+        .unwrap();
+        let index = r.index([], 16).unwrap();
+        assert_eq!(r.usage().cpu_slots, 16);
+        drop(index);
+        assert_eq!(r.usage(), Usage::default());
     }
 }

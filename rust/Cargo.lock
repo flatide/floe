@@ -270,6 +270,9 @@ name = "floe-web"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "bytes",
+ "floe-app-core",
+ "floe-worker-client",
  "futures-util",
  "getrandom",
  "hyper",

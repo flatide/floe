@@ -54,6 +54,7 @@ impl RenderOptions {
 }
 pub struct RenderSession {
     worker: WorkerClient,
+    max_depth: u64,
     options: RenderOptions,
     cancelled: Arc<AtomicUsize>,
 }
@@ -96,12 +97,16 @@ impl RenderSession {
         worker.set_styles(&styles)?;
         Ok(Self {
             worker,
+            max_depth: opened.max_depth,
             options,
             cancelled,
         })
     }
     pub fn pid(&self) -> Option<u32> {
         self.worker.pid()
+    }
+    pub fn max_depth(&self) -> u64 {
+        self.max_depth
     }
     pub fn submit(&mut self, request: RenderRequest) -> Result<u64> {
         self.worker.render(request).map_err(Into::into)

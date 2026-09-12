@@ -5,9 +5,10 @@
 
 **아래 endpoint/message는 전체 서비스 설계안이다.** M1b-1의 일부 transport API
 (exchange/capabilities/logout/WS ping)는 [M1b 기록](WEBUI_M1B.ko.md)에 명세/구현했다.
-view/index/render/공유 endpoint 전체가 존재하는 것은 아니다.
+catalog/index/공유 endpoint 전체가 존재하는 것은 아니다.
 M1b-2a의 `app-core/managed`·`view`에는 process-local lease/admission과
-독립 worker controller가 구현됐으나 HTTP/WS 세션 연결은 후속 단계다.
+독립 worker controller를 구현했다. M1b-2b의 사전 등록 view용 제어/이미지
+스트림은 [M1b 기록 §6](WEBUI_M1B.ko.md#6-m1b-2b--인증된-제어이미지-스트림)을 따른다.
 2026-09-13 M1a-1 `rust/worker-client`와 M1a-2a/b `app/app-core`의 일반 index·info/단일 render/probe를
 구현했다. 현재 호출 계약은 [worker README](../rust/worker-client/README.md),
 [M1a 기록](WEBUI_M1A.ko.md)을 따르며 아래 서비스 전체가 존재하는 것은 아니다.

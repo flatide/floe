@@ -45,6 +45,11 @@ impl fmt::Debug for Secret {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionId(String);
+/// Public, non-credential identities use independent entropy, never a cookie
+/// or bootstrap value reused as a view/connection identifier.
+pub(crate) fn public_id() -> Result<String, AuthError> {
+    Ok(Secret::generate()?.expose())
+}
 impl SessionId {
     pub fn as_str(&self) -> &str {
         &self.0
