@@ -1,0 +1,293 @@
+# 웹 전환 M0 — 기능 대조표와 착수 게이트
+
+작성 2026-09-12. 기준: `feature/webui`, `6c33a48` (`feature/jobdeck` 분기점).
+상위 계획: [WEBUI_PLAN.ko.md](WEBUI_PLAN.ko.md).
+서비스 계약 초안: [WEBUI_SERVICE_API.ko.md](WEBUI_SERVICE_API.ko.md).
+
+**로컬 조사/설계 결과이며 이관 완료표가 아니다.** 아래 Rust 서비스와 웹 UI는
+아직 전체 미구현이다. 2026-09-13에 M1a-1 worker client만 추가했으며 §8에서
+추적한다. 기존 Rust parser/VFS/raster/occupancy 구현과 새 서비스의
+완료 상태를 구별한다. 실칩 jobdeck/occupancy 판정은 실측 브랜치에서 계속한다.
+
+## 1. 기준과 조사 방법
+
+- `floe2/cli.py` → `floe/cli.py:main(..., rust_only=True)`의 실제 argparse
+  객체를 명령 실행 직전에 읽었다. 공개 subcommand **10개**, 공통 help를
+  제외한 subcommand 옵션 action **93개**다. 별칭은 한 action으로 센다.
+- 실제 기본값은 argparse만으로 결정하지 않는다. `cmd_view`,
+  `RustRenderWorker`, `DeckRenderWorker`, `gui.py`까지 확인했다.
+- 이전 `SPEC-VIEWER.ko.md`, `RUST_RENDERER.md`의 KLayout 시절 설명이나
+  과거 refinement/쿼리 cap 수치는 현재 코드보다 우선하지 않는다. 덱의
+  hierarchy frames도 오래된 소개 주석과 달리 현재 frames-only pass로 지원한다.
+- 아래 표의 단계는 **목표 단계**다. 모든 행은 신규 Rust 셸 기준 미구현.
+  앞으로 행별로 구현 커밋·회귀 게이트·실행 결과를 붙여 완료로 바꾼다.
+- CLI 이름/옵션/단위/기본값/오류/종료 코드와 JSON·파일 형식을 계약으로 삼는다.
+  시간·PID·임시 경로만 정규화해 비교하고, 결정적 픽셀/clip은 기존 오라클을 쓴다.
+  알려진 결함이나 무효 옵션까지 새 기능인 것처럼 복제하지 않고 §4에서 추적한다.
+
+## 2. CLI 대조표
+
+모든 명령의 `-h`/`--help`, 최상위 `--version`을 유지한다. 인자 없는 실행은
+빈 뷰어 열기/기존 뷰어 앞으로 가져오기다. 개발 중 새 Rust 실행 파일 이름은
+기존 Python `floe2`와 충돌하지 않게 분리한다(API 문서 §1).
+
+### 2.1 index — M1a (17개 옵션)
+
+필수 위치 인자 `src`: 레이아웃 또는 `.jb`. 담당: index/cache 서비스.
+
+| 옵션 | 현재 의미와 보존할 조건 |
+|---|---|
+| `--level N[,N...]` | 덱 선택 레벨에 필요한 소스만 색인. 생략 시 전체. 이 명령에는 `--id` 별칭 없음 |
+| `--force` | 기존 캐시 교체 허용. 생략 시 current 재사용, stale/incomplete는 거부. 자동 파괴적 재색인 금지 |
+| `--jobs N` | 양수, 기본 12. 덱 전체의 동시 소스 수와 소스 내부 jobs를 곱하지 않기 |
+| `--page-target-mb N` | 양수 MiB, 생략 시 native 기본(현재 1 MiB) |
+| `--occupancy`, `--occupancy-only` | 상호 배타. 전자는 색인+요약/기존 캐시에 추가, 후자는 fresh 캐시에 요약만 생성·교체 |
+| `--occupancy-um UM` | 양수, 요약 생성 요청을 포함. 생략 시 기준 셀 4 µm. occupancy-only와 병용 시 원본 캐시 보존 |
+| `--lod`, `--no-lod` | 생성은 기본 off, `--lod` opt-in. 덱 소스 색인에도 전달. occupancy-only에서 OVM/OVP 재생성 금지 |
+| `--slow-cell-s S` | 0 이상, native 기본 5초. 0은 모든 셀 기록 |
+| `--p2-shard-limit-mb N` | 0 이상, shard 복사 한도 전달 |
+| `--profile-cell NAME`, `--profile-cell-ci N` | 상호 배타. 특정 셀 계획 계측, 일반 인덱스 산출물 쓰기 없음 |
+| `--profile-jobs LIST`, `--profile-repeat N` | 양수 jobs 목록/반복 수(기본 1); 결과 순서·계측 필드 보존 |
+| `--profile-snapshot FILE`, `--profile-snapshot-refresh` | parse/prepare 재사용용 명시 파일. fingerprint/버전/옵션 검사, refresh만 재생성 허용 |
+
+필수 회귀: 공백·한글 경로, 잘못된 바이너리 override, source별 중복 제거,
+`--level`/`--lod --occupancy` 조합, occupancy-only 전후 OVM/OVP 불변,
+불완전 marker/버전 불일치, Ctrl+C와 실패한 요약 임시파일 정리, progress 스트리밍.
+덱 source 순차 처리와 각 source의 jobs는 별개다. 공유 서버 자원 정책은 API §7.
+
+### 2.2 info — M1a (1개 옵션)
+
+`src`, `--level`. top cell, DBU, bbox, 레이어 이름/별칭/개수, 캐시 정보를 유지.
+덱에서는 선택·소스·배치·skip ledger와 INCOMPLETE 정보를 보존한다.
+CLI의 사람용 출력과 HTTP용 구조화 DTO는 같은 서비스 결과에서 별도로 직렬화한다.
+
+### 2.3 render — 기본 M1a, batch/DRC/export 전체 M4 (29개 옵션)
+
+필수 위치 인자 `src`. headless PNG export는 브라우저나 GTK를 실행하지 않는다.
+
+| 옵션 | 현재 기본값/조건 |
+|---|---|
+| `--level` | 덱 선택 레벨 |
+| `--bbox`, `--at`, `--size`, `--anchor`, `--stretch` | 영역 지정/중심·좌하단 anchor(`center` 기본)/종횡비. 단위 suffix 처리와 조합 오류 보존 |
+| `--layers` | 이름·별칭 또는 `L/D` 목록. all/none 구분과 순서 보존 |
+| `--px`, `--out` | 기본 `1200`(W 또는 WxH), `view.png` |
+| `--mosaic-at`, `--corners` | 다점 mosaic 및 코너 캡처 |
+| `--line`, `--line-color`, `--keep-tiles` | mosaic 구분선 기본 2.0 / `#ffffff`, 중간 PNG 보관 opt-in |
+| `--batch`, `--report` | batch 파일/`-` stdin, JSON 결과 보고서 |
+| `--depth`, `--detail` | depth 생략/full, 0=top. detail 기본 `exact`, 그 외 low/medium/high |
+| `--thin` | `auto/keep/cull`, 생략과 명시 auto는 구별. auto=layout cull / deck keep |
+| `--frames`, `--labels`, `--label-font-px` | 두 표시 기본 off, 폰트 14px(6..96). 덱 capability에 따라 제한 |
+| `--drc`, `--drc-rule`, `--drc-err` | overlay DB/룰/오류 선택. err 기본 `all` |
+| `--drc-cap`, `--drc-frac`, `--drc-rules` | 기본 200 / 0.3 / 미지정. 명시 오류 번호·범위와 자동 all의 cap 의미 구별 |
+| `--floe-reviewer` | 공백 제거 후 빈 이름 거부, 환경의 reviewer보다 우선 |
+
+`floe/shots.py`의 좌표→캡처 영역, batch 우선순위, mosaic 조립, report,
+`floe/fe_embed.py`의 PNG metadata 연계까지 포함한다. 한 장 render만 옮기고
+CLI 전체가 Python-free라고 판정하지 않는다. 파일 교체는 최종 성공 시 원자적으로.
+
+### 2.4 clip — M4 (5개 옵션)
+
+`src`, 필수 `--bbox`, 선택 `--layers`, `--out`(clip.oas),
+`--cell-name`(FLOE_CLIP), `--exact`(Rust는 이미 exact인 호환 플래그).
+현재 jobdeck worker는 clip 미지원. 레이아웃은 cut/full-depth 표시 정책과
+독립된 exact geometry 출력이며 기존 Region XOR/바이트 결정성 게이트 유지.
+
+### 2.5 probe — M1a (공개 옵션 없음)
+
+`src`. GUI 없이 동일 worker를 열어 fit/근접 요청을 실행하는 진단.
+Rust 전환 후 handshake/open/frame/error/timeout/종료까지 headless로 검사한다.
+성공과 무관한 stderr 로그, 배경 margin/preview, 최종 프레임을 구별한다.
+
+### 2.6 drc — 조회 M2, 쓰기 연계 M4 (4개 옵션)
+
+`db`, `--list`, `--rules`, `--errs RULE`, `--floe-reviewer`.
+ASCII DB와 fresh ICE pack 선택, rule/error JSON, declared/실제 count,
+좌표 단위·waive 표시를 보존한다. 기존 `rust/cli/src/drcice.rs`, `drcpack.rs`의
+Rust 구현은 재사용 대상이나 Python `IcePack`과 GUI의 읽기·쓰기 전체 대체는 아니다.
+
+### 2.7 svrf — M4 (6개 옵션)
+
+`deck`, `-o/--out`(기본 `<deck>.rules.json`), `--scan`,
+`-D/--define`(반복), `-I/--include-dir`(반복), `--follow-verbatim`,
+`--no-env-switches`.
+현 parser의 subset/진단을 보존하고 임의 Tcl 실행기를 만들지 않는다.
+CLI 환경 분기 호환과 서버의 include/환경 접근 통제는 구별한다(API §8).
+
+### 2.8 gtktest — M4에서 진단 대체 (공개 옵션 없음)
+
+선택 위치 인자 `png`. GTK 전용 진단을 웹 제품에 끌고 오지 않는다.
+전환 중 기존 명령은 GTK 비교 패키지에 남기고, Rust 셸은 명시적인 안내/오류를
+제공한다. 웹용 PNG/raw/Canvas 표시 진단과 대체 명령 이름을 정한 뒤 폐기 승인.
+
+### 2.9 view — M1b/M4 (21개 옵션)
+
+선택 위치 인자 `src`. 빈 창→파일 선택, 미색인 파일→동의→색인→열기도 범위다.
+
+| 옵션 | 실제 경로에서 보존할 조건 |
+|---|---|
+| `--level` | 덱 레벨 선택. 미지정 GUI는 질문, 환경 `FLOE_JOBDECK_LEVELS` 반영 |
+| `--multi` | 독립 창/뷰 생성. 웹은 동일 worker에 독립 viewport를 섞지 않기 |
+| `--goto` | X,Y[,W] µm. detail/depth와 한 번에 적용 후 첫 렌더. 포워딩도 같은 순서 |
+| `--drc` | 결과 함께 열기. 현재 새 인스턴스 경로와 포워딩 차이 확인 필요 |
+| `--detail`, `--depth` | 기본 medium; 일반 파일 depth 0, goto/DRC/덱은 full, 명시 depth 우선(0..999 정규화) |
+| `--thin` | 생략=None, 명시 auto 포함 포워딩. resolved keep/cull은 모든 frame/margin/query key에 포함 |
+| `--lod` | parser/UI 기본 on. **Rust worker render wire에는 lod 필드가 전달되지 않음**(§4) |
+| `--refinement` | parser 기본 on이나 Rust 기본 round_pages=2^30, 실질 중간 렌더 off. 명시 off는 환경 round 설정보다 우선 |
+| `--frame-cache` | on 기본. off는 frame 재사용 우회이지 decoded LRU 비활성화가 아님 |
+| `--perf-baseline` | lod/refinement/frame-cache/frames/labels off. cold/warm page cache 자체는 유지 |
+| `--frames`, `--labels`, `--label-font-px` | 표시 기본 on, 14px(6..96); GTK의 frames/labels 연동과 덱 capability를 별도 시험 |
+| `--stream-kb`, `--stream-target-ms` | 0=refinement off; off와 nonzero 충돌 오류. target 기본 500(100..2000), Rust는 target 값을 사용하지 않음 |
+| `--render-debug` | worker 진단. 외부 공유 로그에는 경로·원본 문자열 비노출 |
+| `--hairline`, `--thin-um` | 프레임 정책 환경 override. 현재 이미 실행 중인 프로세스로는 소급되지 않음 |
+| `--dump` | 진단 옵션. 웹에서는 범위를 명시하고 무효 옵션으로 조용히 수용하지 않기 |
+| `--floe-reviewer` | 표시 태그이지 인증 주체가 아님. 공유 계정에서 임의 reviewer 이름이 쓰기 권한을 만들면 안 됨 |
+
+단일 인스턴스: 현재 `(product, uid, DISPLAY)`와 프로세스 생성 옵션에 따라
+포워딩/독립 실행을 고른다. 웹은 launcher의 세션 레지스트리와 `--multi`로
+의도를 보존하되 DISPLAY를 인터넷 인증키로 사용하지 않는다. 웹 경로는
+DISPLAY가 없어도 동작해야 한다(기존 GTK 오류까지 이식하지 않는다).
+
+### 2.10 jobdeck — M1a (10개 옵션)
+
+`deck`, `--sources`, `--level/--id`, `--mode`(level/chip/layer/identifier,
+기본 level), `--colors`, `--ly-dt`(cross 기본/zip),
+`--on-missing`(skip 기본/fail), `--lenient`, `--placements`, `--report`, `--spec`.
+
+명령은 분석·report/spec 생성이다. `.jb`를 view/index/render로 여는 기능과
+혼동하지 않는다. CLI의 과거 CHIP-block color와 GUI의 **레벨→TC 소스 칩**
+행 모델도 별개다. 다음 게이트를 고정한다.
+
+- 파서: 미정의 필드/행 번호/structural error, strict/lenient, 누락 TC ledger.
+  실제 Calibre 비공개 포맷을 임의로 일반화하거나 미지원 옵션을 성공 처리하지 않기.
+- 기하: AD/SF/좌표 변환·deck DBU·LY/DT·row/repetition·overflow 검증.
+- 소스: 경로 해석, TC 이름, 선택 레벨만 색인, 중복 소스 재사용, cache freshness.
+- GUI 행: LEVEL 타이틀/TC basename, 부모-자식 visibility, mode 변경 시 숨긴 칩
+  재출현 금지. 전체 덱 기준 ordinal/color 고정으로 부분 로드에도 색 유지.
+- 실패 의미: 분석 명령 missing skip은 ledger와 exit 3, fail은 exit 2.
+  다른 덱 명령의 현 종료 코드는 별도 golden으로 고정하고 전부 3으로 바꾸지 않기.
+- occupancy 사용 여부/미지원 레이어/누락 소스/partial을 서로 구별해 노출.
+
+## 3. CLI 밖 기능과 폐기 경계
+
+| ID / 목표 | 현재 코드 | 이관·검증 단위 |
+|---|---|---|
+| UI-01 / M1b | gui, viewport | 열기/레벨 선택/색인 동의, fit/goto/history, resize·wheel·drag·키 pan·zoom·depth/detail |
+| UI-02 / M1b | gui margin 경로 | 16px fill 위상 pan, 착지 margin, crop, 라벨 잘림 시 crop 제외, 새 strip 검정 방지. 덱은 현재 미지원 |
+| UI-03 / M1b→M4 | gui, fillpat, `.def` | 레이어 접기/선택/격리/전체 on/off·색·fill·width·mono, `.layerprops` load/save/설계 기본값. 이름/순서/alias 유지 |
+| UI-04 / M4 | gui query/ruler | pick overlap 순환, snap, 측정·삭제·clear, Escape, 선택 레이어 추적. summary/미완료 scene에서 질의 제한 표시 |
+| UI-05 / M4 | gui | 단축키/포커스/IME 입력·한글 주석, copy view PNG, overlay all/errors/none, quit/닫기/복원 |
+| DRC-01 / M2 | drc, gui DRC 패널 | 대형 결과 lazy paging, 검색·룰/타입/waive 필터·선택/box-select·다음/이전·goto·layer isolate·측정 overlay |
+| DRC-02 / M4 | drc, gui 저장 핸들러 | waive/unwaive·note·import/export·자동 저장·reviewer 구분·동시 수정 충돌. DB 교체 시 잘못된 오류에 적용 금지 |
+| EXPORT-01 / M4 | shots, fe_embed | batch/mosaic·DRC 캡처·PNG iTXt metadata/legend/ruler. raster pixels와 metadata 각각 round-trip |
+| SYS-01 / M1a→M4 | instance, cli, cache | 바이너리 발견/버전, index freshness, 취소/타임아웃/자식 수거, 개인·설계 설정 구분 |
+| SYS-02 / M4 | portable 도구 | Rust+정적 자산만으로 실행, offline build, GLIBC/아키텍처 확인, licenses/About, 브라우저 실행/프로필 격리 |
+
+`python -m floe.fe_embed` 보조 CLI도 범위에 포함한다: 위치 인자 PNG들,
+`--box`, `--ellipse`, `--line`, `--path`, `--polygon`, `--ruler`, `--text`,
+`--json`, `--legend`, `--note`, `--ppu`, `--unit`, `--append`, `--dump`,
+`--strip`, `--selftest`. Rust의 최종 명령 이름은 M4에서 호환 안내와 함께 확정.
+`floe.fillpat`의 색/패턴·Calibre layerprops와 `floe.hangul`의 주석 입력 연계도
+누락하지 않는다. GTK 위젯 구현을 Rust로 직역하지 않고 동작은 웹 입력으로 이관한다.
+
+이관하지 않는 것:
+
+- `floe` KLayout renderer, legacy `.tiles` 생성·skeleton/merge 재구축,
+  `floe.coverage`/`design.ovc`, Rust에서 미지원인 abstract. **새 `.ovo`
+  occupancy는 폐기한 coverage와 달리 이관 범위**다.
+- floe2에 등록되지 않은 최상위 `profile`과 `--coverage/--coverage-only`.
+  `index --profile-cell*`은 반대로 반드시 유지한다.
+- 숨겨진 index legacy 옵션 `--legacy`, `--tile-mb`, `--skeleton-only`,
+  `--texts-only`, `--merge-only`, `--merge`, `--mem`, `--mem-floor`, `--no-gov`,
+  `--text-cap`, `--text-tile-cap`, `--skel-texts`, `--tile-tgt`, `--bands`,
+  `--read-mode` 및 view/probe의 `--layout-mode`: 기존 명시 거부 경로 유지.
+- 개발 fixture/오라클의 Python/KLayout은 제품 런타임과 구분. 개발 도구 전체의
+  Rust 전환은 별도 범위 결정 전까지 완료 조건에 넣거나 임의로 삭제하지 않는다.
+
+## 4. 조사에서 드러난 이관 결정 항목
+
+| ID | 확인 사실 | 처리 기준 |
+|---|---|---|
+| M0-D1 | view `--lod` 값은 Python job/UI에는 있지만 `_submit_render` wire에 없음 | 현 동작을 기록한 회귀를 먼저 만들고, Rust CLI에서 실제 정책 연결/안내 중 결정. 이름만 보고 on/off 기능을 새로 활성화하지 않기 |
+| M0-D2 | refinement parser on ≠ Rust 실제 기본 off, stream-target 무시 | 실제 off를 기본 기준으로 고정. 명시 on/페이지 라운드·시간 옵션의 새 의미는 별도 결정 |
+| M0-D3 | deck pick/snap/clip/margin/label size 미지원 | capability=false + 이유. 웹 이관 완료와 신규 덱 기능 추가를 구별 |
+| M0-D4 | query wire는 seq만 있고 조회 scene generation/round가 없음 | 웹 query 개방 전 expected/actual scene identity 추가. 단순 응답 seq 필터로 안전하다고 하지 않기 |
+| M0-D5 | `.ovo` 교체와 열린 GUI 캐시 수명주기 | 사용자 합의대로 현 실측 blocker 아님. 서버 revision 설계는 초안, hot reload 구현은 별도 승인 |
+| M0-D6 | `FLOE_RENDERD_BIN`은 무효여도 다음 후보, `FLOE_INDEX_BIN`은 hard error | 차이를 재현한 뒤 새 Rust 셸에서는 명시 override 실패를 오류로 정규화하는 변경을 기록 |
+
+## 5. 로컬/현장 완료 게이트
+
+| ID | 결과/산출물 | 상태 |
+|---|---|---|
+| M0-L1 | 10개 명령/93개 옵션과 보조 기능 대조표 | 로컬 조사 완료(이 문서), 이관 미구현 |
+| M0-L2 | 서비스·wire 경계/자원·revision/API 초안 | 로컬 초안 작성, 상세 값/미결 항목은 API 문서 |
+| M0-L3 | HTTP/WS 후보와 offline 의존성 | Axum/Tokio 후보 검토. vendor/lock/MSRV/라이선스/빌드 검증 전, 선정 게이트 미완료 |
+| M0-F1 | TeeBox·대표 데스크톱 Firefox/OS/표시 환경 | 미측정. `sh tools/audit_webui_env.sh`로 기본 정보 수집 |
+| M0-F2 | ETX 프로필 격리/인스턴스 분리/Canvas·WS 기능/키 입력 | 미측정. 버전 수집만으로 통과 불가 |
+| M0-F3 | portal 전달·직접 접속/TLS·공유 서버 권한/자원 배분 | 현장 정책 확인 필요 |
+
+감사 도구는 브라우저를 열거나 프로필을 만들지 않고, 접속/속도 테스트도 하지
+않는다. hostname/사용자/설계 경로/환경 전체/토큰을 수집하지 않는다. 예:
+
+```sh
+sh tools/audit_webui_env.sh
+sh tools/audit_webui_env.sh --firefox /opt/firefox/firefox
+```
+
+현장에서는 별도로 두 ETX 세션에서 창이 엉뚱한 세션으로 합쳐지지 않는지,
+기존 Firefox 프로필을 건드리지 않는지, 키/IME/클립보드 제약을 기록한다.
+스크립트의 `not_measured`를 버전만 보고 PASS로 바꾸지 않는다.
+XQuartz 경유 Linux 실행은 GTK 기동·입력 진단에는 도움이 되지만 Firefox-in-ETX
+지연/프로필 격리/네트워크 접근의 대체 실험은 아니다.
+
+M1 회귀 기반은 기존 `tools/validate_rust.sh`, `validate_rust_renderer.py`,
+`validate_jobdeck.py`, `validate_occupancy.py`, `validate_drc_ice.py`,
+`validate_svrf.py`와 synthetic valmini/jobdeck/DRC fixture를 재사용한다.
+실칩 데이터·파생 프로파일을 새 브랜치에 커밋하지 않는다.
+
+## 6. 다음 구현 순서
+
+1. M1a-1: worker client의 handshake/open/style/frame/cancel/cleanup과
+   fake worker 오류 게이트 → valmini PNG/raw headless 비교. 구현됨(§8).
+2. M1a-2: Rust CLI/cache/index/프로파일·occupancy orchestration, 기존 옵션
+   golden. 미구현 명령은 명시 거부하고 Python으로 우회하지 않기.
+3. M1a-3: jobdeck parser/source/좌표/선택/색·ledger와 composite spec 이관.
+   실측 브랜치에서 들어오는 수정은 Rust 쪽 회귀에도 반영.
+4. M1b: dependency gate 후 gateway+Canvas+margin+세대/큐 계약,
+   loopback G1 및 읽기 범위 Python-free 검증. 이후 현장 M0/G2 측정.
+
+현장 미측정이 1~3의 로컬 개발을 막지는 않지만, 웹 전환이나 GTK 은퇴 승인을
+대신하지도 않는다. 먼저 렌더러를 다시 쓰거나 occupancy 정책을 바꾸지 않는다.
+
+## 7. 이번 로컬 검증 기록 (2026-09-12)
+
+- 실제 argparse 객체와 §2의 command별 옵션·별칭·위치 인자를 대조:
+  10개 명령, 93개 공개 옵션 action 누락 없음. fe_embed 보조 옵션도 대조.
+- 문서의 상대 링크/코드 fence/후행 공백 검사 통과, `git diff --check` 통과.
+- `sh -n tools/audit_webui_env.sh` 및 help/무효 옵션·경로/버전 명령 실패
+  8개 검사 통과. 기본 실행은 Darwin/arm64, Firefox not_found,
+  나머지 현장 항목 not_measured를 출력했다. 현장 호환성 판정이 아니다.
+- 제품 코드는 바꾸지 않았으므로 Rust/렌더러 전체 배터리를 새로 실행하지
+  않았다. 분기점의 기존 green 결과는 웹 이관 검증과 별개다.
+
+## 8. M1a-1 진행 (2026-09-13)
+
+`rust/worker-client` library와 fake/실제 daemon 게이트를 추가했다.
+CLI 10개 명령 이관은 아직 아니므로 §2의 완료 상태를 올리지 않는다.
+기존 protocol/renderer·jobdeck/occupancy 정책과 실행 기본 제품은 변경하지 않았다.
+
+- 구현/제약: [worker-client README](../rust/worker-client/README.md).
+- 실제 검증: `tools/validate_worker_client.sh`가 기존 Python adapter와 Rust
+  client의 PNG 바이트 및 raw 픽셀, 라벨·스타일·재방문·20세대 취소를 대조.
+  `tools/validate_rust.sh`에서 필수 실행한다.
+- macOS/arm64: `cargo fmt --check`, worker-client 엄격 clippy, protocol 3개와
+  fake-worker lifecycle 8개 그룹, 실제 daemon 게이트 통과. cold worker에서
+  `round_pages=1`이 실제 여러 라운드가 되는지 단언하고 최종 raw 일치도 확인.
+- 전체 `sh tools/validate_rust.sh`: `RUST VALIDATION: ALL OK`, exit 0.
+  새 작업 트리에 기존 index CLI 테스트용 `data/m1/valmini.oas`가 없어 첫 실행은
+  중단되었고, 합성 fixture 생성 후 재실행했다. 기존 dependency 경고는 남아
+  있지만 새 crate의 clippy 경고는 없다. 배터리의 큰 입력 옵션을 쓰더라도
+  새 client 게이트는 작은 valmini만 렌더하도록 제한했다.
+- Linux: `cargo check --offline -p floe-worker-client --lib
+  --target x86_64-unknown-linux-musl` 통과. **교차 컴파일 검사이며 Linux 실행·
+  동시 사용자 부하·실칩 성능 검증은 아니다.**
+- 다음: M1a-2 CLI/cache/index 서비스. M0 현장/HTTP 의존성 게이트는 별도 대기.

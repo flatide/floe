@@ -90,6 +90,22 @@ rm -f "$VOUT.buildlog"
 .venv/bin/python tools/validate_vfs.py "$SRC" "$VOUT"
 .venv/bin/python tools/validate_vfs_render.py "$SRC" "$VOUT"
 .venv/bin/python tools/validate_vfs_coverage.py "$SRC" "$VOUT"
+# Rust web migration M1a: same native frames through the Rust client and the
+# existing Python adapter, including raw/PNG, labels, styles and cancel soak.
+# A milestone $SRC can be enormous (or only one page). This process-lifecycle
+# gate must always use the small multi-page valmini, like validate_floe2 above.
+if [ "$SRC" = "$FLOE2_SMOKE_SRC" ]; then
+    sh tools/validate_worker_client.sh "$FLOE2_SMOKE_SRC" "$VOUT"
+else
+    (
+        worker_gate_dir=$(mktemp -d "${TMPDIR:-/tmp}/floe-worker-gate.XXXXXX")
+        trap 'rm -rf "$worker_gate_dir"' EXIT HUP INT TERM
+        rust/target/release/floe-index vfs "$FLOE2_SMOKE_SRC" \
+            "$worker_gate_dir/valmini.floe" --jobs 2 >/dev/null
+        sh tools/validate_worker_client.sh "$FLOE2_SMOKE_SRC" \
+            "$worker_gate_dir/valmini.floe"
+    )
+fi
 # occupancy pyramid (design.ovo): every level-0 bit vs KLayout's shape
 # intersection on fixtures + the asset at a coarse cell; CLI contract
 .venv/bin/python tools/validate_occupancy.py "$SRC"

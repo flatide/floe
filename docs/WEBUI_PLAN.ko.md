@@ -1,7 +1,15 @@
 # floe2 웹 셸 / 서버-클라이언트 계획 (정본)
 
-작성 2026-08-29. 관련 정본: `FLOE2_OPTIMIZATION.ko.md`(F2R-10/11),
+작성 2026-08-29, 갱신 2026-09-12(Rust-only 실행 경로·브랜치 분리).
+관련 정본: `FLOE2_OPTIMIZATION.ko.md`(F2R-10/11),
 `RUST_RENDERER_PLAN.ko.md`, `SPEC-VIEWER.ko.md`, `rust/BUILD.md`.
+
+현재 상태: **M0 로컬 기능 조사/API 초안 + M1a-1 Rust worker client 구현**.
+웹 gateway/프론트엔드 구현, 의존성 선정 게이트 및 M0 현장 검증은 아직
+완료되지 않았다. 여기의 M0~M5는 **웹 전환 단계**이며
+jobdeck/occupancy의 같은 이름 단계와 별개다. 개발 기준과 합류 규칙은 §11.
+로컬 산출물: [기능/CLI 대조표](WEBUI_M0.ko.md),
+[Rust 서비스/API 초안](WEBUI_SERVICE_API.ko.md).
 
 ## 0. 결정 로그 (사용자 확정 사항)
 
@@ -45,19 +53,32 @@
   착지 margin을 새 strip의 표시 base로 blit, renderd 질의 스레드
   (F2R-22: pick/snap이 렌더와 독립 — gateway가 질의를 병렬로 보낼 수
   있음).
+- 2026-09-12: **Python이 맡은 제품 실행 기능도 Rust로 이관**한다.
+  Python gateway 선행·Rust gateway 조건부 이관안을 폐기하고 처음부터
+  Rust gateway/CLI/서비스로 개발한다. 완료 제품의 실행에는 Python,
+  PyGObject, Python 어댑터가 필요 없어야 한다. GTK 코드를 Rust GTK로
+  번역하지 않고 표시·입력은 웹 UI로 대체한다. HTML/Canvas UI 계획은
+  유지하며 구체적인 프론트엔드 언어·도구 선택은 §10에서 구분한다.
+- 2026-09-12: **jobdeck 실측과 웹 전환을 브랜치로 분리**한다.
+  `feature/jobdeck`은 실측·수정용으로 유지하고, 해당 브랜치의
+  `6c33a48`(LOD 전달 머지 포함)에서 `feature/webui`를 생성한다.
+  분기했다고 jobdeck/occupancy의 현장 성능·화질 검증을 완료로 보지 않는다.
 
 ## 1. 목표와 비목표
 
 목표:
 
 1. HTML/canvas 기반 뷰어 UI 하나로 세 배포형을 커버한다(§2).
-2. 렌더·플랜 성능 자산(F2R 계열)은 그대로 재사용한다 — 무거운 일은
-   전부 renderd가 하고, 셸 교체는 "마지막 수십 ms + 상호작용 체감"의
-   문제다.
+2. Rust 렌더·플랜 성능 자산(F2R 계열)은 그대로 재사용한다. decode/raster
+   코어 재작성은 하지 않는다. Python의 제어·데이터 기능 이관과 웹 표시
+   비용은 각각 검증하며, 언어 전환만으로 렌더 시간이 줄어든다고 가정하지 않는다.
 3. 서버 세션 설계로 "브라우저 리프레시 = 상태 소실" 위험을 제거한다.
 4. F2R-10(world-tile) / F2R-11(streaming)과 합류 가능한 전송 계층을
    설계한다 — 클라이언트 tile 합성이 world-tile LRU의 자연스러운
    구현처가 된다.
+5. CLI·서버·배포 실행 경로에서 Python 의존성을 없앤다. jobdeck, DRC,
+   설정·캐시·인덱싱 제어를 포함하며, 웹 UI만 바꾸고 Python 서비스를
+   뒤에 남긴 상태는 완료로 보지 않는다(이관 목록 §3.1b).
 
 비목표:
 
@@ -68,15 +89,22 @@
   해당 ETX 구성에서 실측되지 않았고, Firefox도 배포 B에서는 결국
   ETX 화면 전송을 거치므로 기술적 단정이 아니라 우선순위 결정이다.
 - 초기 단계의 편집·계측 고급 기능 parity. M1~M2는 읽기 중심이다.
+- 동결된 floe/KLayout·legacy indexer·폐기된 coverage 코드의 Rust 복제.
+  현재 floe2가 제공하는 기능 계약을 기준으로 이관한다.
+- 이 브랜치 생성 시점의 제품 코드 일괄 삭제. 기존 GTK/Python은 단계별
+  비교 기준으로 남기되 최종 웹 제품의 실행·배포 의존성과 분리한다.
+  개발용 Python 오라클/생성기까지 없앨지는 별도 범위 결정(§10).
 
 ## 2. 아키텍처: 한 스택, 세 배포형
 
 ```
-[공통 스택]   gateway ──[worker 계약]── RustRenderWorker → floe-renderd   (floe2)
-                 │            └──────── RenderWorker → KLayout+vfsd        (floe)
-                 │ 정적 UI 서빙 + WS + 세션/토큰
+[공통 스택]   Rust CLI / launcher
+                 │
+             Rust gateway ──[Rust worker client / renderd wire]── floe-renderd
+                 │     └── Rust 공통 서비스(jobdeck·DRC·캐시·인덱싱 제어)
+                 │ 정적 UI 서빙 + WS + 뷰 세션/토큰
                  ▼
-             HTML UI (canvas 2D)
+             HTML UI (canvas 2D; Python 런타임 없음)
 
 배포 A  데스크톱 패키징: launcher가 gatewayd+renderd를 함께 기동,
         UI는 로컬 브라우저(firefox --kiosk)로 loopback 접속.
@@ -87,8 +115,10 @@
         브라우저가 네트워크로 접속. 픽셀은 로컬에서 그려진다.
 ```
 
-- B가 A의 특수형이므로 **데스크톱 패키징을 만들면 ETX 흐름은 공짜**.
-- C는 바인딩 주소/토큰 전달만 다르다.
+- B는 A의 실행 구성을 재사용하되 Firefox 프로필 격리·ETX 성능은 별도
+  검증한다. DISPLAY 상속만으로 G2 통과를 보장하지 않는다.
+- C는 같은 서비스 계약을 쓰되 TLS·게스트 권한·전송 상한·다중 사용자
+  자원 정책이 추가된다. 단순한 바인딩 주소 변경만으로 배포 완료가 아니다.
 - 향후 로컬 Electron 셸은 "C에 붙는 선택적 데스크톱 래퍼"로 분리
   판단한다(§8) — TeeBox 실행 모델과 무관한 사용자측 배포 정책 문제.
 
@@ -96,35 +126,56 @@
 
 ### 3.1 gateway (신규)
 
-- 역할: 정적 UI 자산 서빙, WS ↔ **worker 계약** 브리지, 세션·토큰,
-  수명주기. **얇게 유지한다** — 뷰 로직을 넣지 않는다.
-- **경계는 `make_render_worker`의 job/result 계약이다**(3.1a). 이
-  계약은 GTK gui.py가 두 backend를 구분 없이 구동해 온 검증된
-  GUI-중립 인터페이스로, 여기 두면 floe/floe2가 같은 웹 셸을 쓰고
-  T0 전송은 양쪽 모두 무수정으로 성립한다.
+- 역할: 정적 UI 자산 서빙, WS 명령 검증, 세션·권한·큐 관리, Rust
+  서비스/worker 호출. HTTP/WS 처리와 도메인 기능을 분리해 CLI도 같은
+  Rust 서비스를 사용하게 한다. geometry 플랜·raster는 renderd에 남긴다.
+- 기존 `make_render_worker`의 job/result는 **호환 계약의 기준**이지
+  Python 함수를 호출하라는 뜻이 아니다. `RustRenderWorker`와
+  `DeckRenderWorker`의 정책·응답 의미를 Rust 타입과 worker client로
+  이관하고 renderd wire에 연결한다. 초기에는 독립 renderd 프로세스와
+  현재 취소·게시 경계를 유지한다.
 
 #### 3.1a 단계별 구현체
 
-- **M1~M2: Python gateway**(floe 패키지 내부). worker 계약 직결이라
-  두 제품 동시 지원이 즉시 성립한다. WS는 **검증된 라이브러리를
-  오프라인 번들**(vendored wheel, 빌드·실행 중 네트워크 0)로 쓴다 —
-  RFC6455 자체 구현은 이 범위에 비해 위험(프레임 길이·fragmentation·
-  제어 프레임·비정상 종료)을 늘린다. 자체 구현을 유지해야 한다면 위
-  네 항목의 적합성 검증을 별도 CI 게이트로 둔다.
-- **Rust gatewayd 이관은 조건부**: raw RGBA 전달(T2)은 Python에서도
-  가능하므로 현재 worker 경계를 유지한 채 측정하고, gateway 자체가
-  병목으로 실측될 때만 이관한다(두 제품 지원·유지보수에 유리). 이관
-  시 의존성은 전부 `vendor/` 동봉, HTTP/WS는 최소 구현 크레이트를
-  vendored로 선정한다.
-- backend별 capability는 handshake로 협상한다: T2 raw RGBA와 T3
-  world-tile은 floe2 전용(KLayout LayoutView는 전체 viewport 렌더라
-  T3 불가), floe는 T0/T1로 동작.
+- **M1부터 Rust gateway**. Python 서버·subprocess 어댑터를 임시 제품
+  경로로 추가하지 않는다. 기존 Rust workspace에 서비스/CLI/gateway를
+  분리하며 크레이트 이름과 라이브러리는 M0에서 확정한다.
+- HTTP/WS는 검증된 Rust 라이브러리를 선정하고 오프라인 빌드용 의존성을
+  동봉한다. RFC6455 자체 구현은 하지 않는다. 프레임 길이·fragmentation·
+  제어 프레임·비정상 종료·느린 수신자 검증을 게이트에 포함한다.
+- capability는 **레이아웃/잡덱 및 전송 기능별**로 협상한다. 현재
+  `DeckRenderWorker`는 `supports_margin_prefetch=False`,
+  `supports_label_font_px=False`이므로 일반 레이아웃 기능을 그대로
+  노출하지 않는다. T3는 구현·검증 전까지 지원한다고 광고하지 않는다.
 - 버전은 floe/cli/renderd와 동일 스탬프 체계로 묶고(`--version`,
   시작 스탬프), **UI 자산은 반드시 자기 번들의 것만 서빙**한다. 번들
   일치만으로 skew가 사라지지는 않으므로 추가로: handshake에 프로토콜
   버전을 싣고 불일치는 명시 거부, 이미 열린 구버전 탭의 재접속은
   "새로고침 필요" 안내 후 차단, UI 갱신 정책(gateway 재기동 시 열린
   탭 강제 리로드 여부)을 명시한다.
+
+#### 3.1b Python 기능 이관 범위
+
+파일별 기계적 번역이 아니라 사용자에게 보이는 기능과 입출력 계약을
+기준으로 이관한다. 아래는 현재 코드에서 확인한 출발 목록이며 M0에서
+공개 명령/옵션별 수용 기준과 연결한다.
+
+| 현재 영역 | 목적지·검증 |
+|---|---|
+| `floe/cli.py`, `floe2/cli.py`, `instance.py` | Rust CLI/launcher: 명령·종료 코드·로그·옵션 전달·단일 인스턴스/뷰 세션 의미 유지 |
+| `cache.py`의 현행 VFS 경로, `vfsclient.py` | Rust 캐시/인덱싱 서비스: freshness·비파괴 재사용·`--force`·jobs·LOD/occupancy·프로파일 옵션, legacy 코드는 제외 |
+| `jobdeck/{parser,sources,geom,color,plan,viewer}.py` | Rust jobdeck 라이브러리: 문법·오류/skip ledger·좌표·레이어 순서·레벨/칩 뷰·소스 선택·보고서 parity |
+| `rust_render.py`, `service.py`의 Rust 경로, `jobdeck/render.py` | Rust worker client: 명령/응답·취소·타임아웃·프레임 파일 소비/정리·scene/query 유효성 |
+| `drc.py`, `svrf.py`, `shots.py`, `fe_embed.py` 및 GUI 안의 저장 로직 | Rust 조회/저장/내보내기 서비스: DRC·waive·주석·룰/레이어 매핑·스크린샷·설정, 기존 Rust drcice/drcpack 재사용 |
+| `gui.py`, `view_policy.py`의 UI/상호작용 | HTML/Canvas 입력·표시와 Rust 상태/정책으로 분리: pan/margin·goto·depth/detail/thin·레이어/스타일·단축키·상태줄 |
+
+- Rust에 이미 있는 파서·인덱서·플래너·occupancy·raster·pick/snap·clip은
+  재사용한다. `floe-index`/`floe-renderd`를 Python으로 재포장하지 않는다.
+- 초기 읽기 전용 범위 밖의 DRC 저장·내보내기·보조 CLI도 이관 목록에서
+  추적하며, 빠졌다면 M4의 Python-free 제품 전환은 완료가 아니다.
+- jobdeck 정책은 실측 브랜치의 것을 기준으로 한다: 레벨 선택, 레벨/칩
+  모드와 부모-자식 목록, `thin=auto|keep|cull`, occupancy 사용/없음 이유,
+  요약 레이어의 pick/snap 제한을 웹에서도 숨기지 않는다.
 
 ### 3.2 HTML UI
 
@@ -149,7 +200,7 @@
 
 ### 3.3 launcher 통합
 
-- `floe2 view <src> --web`(가칭): gatewayd+renderd 기동 → 토큰 URL
+- Rust `floe2 view <src> --web`(명령 이름 가칭): gatewayd+renderd 기동 → 토큰 URL
   생성 → Firefox 실행(배포 A/B 공용). DISPLAY는 호출측 환경을 그대로
   따르므로 TeeBox launcher 수정이 불필요하다. 다만 DISPLAY 상속만으로
   독립 인스턴스가 보장되지 않는다: 같은 TeeBox 계정에서 여러 작업을
@@ -165,7 +216,8 @@
 
 - **복원 대상인 사용자 상태는 전부 서버(gateway 세션)에 둔다**:
   viewport, depth, detail, layer 가시성, style epoch, DRC 선택/waive
-  (파일 기반 기존 체계 재사용), goto 히스토리.
+  (파일 기반 기존 체계 재사용), goto 히스토리, thin 정책, jobdeck의
+  선택 레벨·level/chip 모드. 일반 레이아웃과 덱의 기본 정책 차이를 보존한다.
 - 새로고침/재접속 = 세션 재부착 후 완전 복원. "클라이언트 전용 상태
   금지" 원칙은 **복원할 사용자 상태**에 한정한다 — 마지막 프레임,
   착지 margin, 즉시 pan 표시 같은 **일시 표시 상태는 브라우저에
@@ -180,6 +232,9 @@
   전체의 동시 렌더 수·메모리·linger 상한이 함께 필요하다 — worker별
   budget(`FLOE_RUST_BUDGET_MB` 등)만으로는 여러 사용자의 총부하를
   제한하지 못한다(§10-4와 정합).
+- 인덱싱 작업까지 포함한 서버 전체 jobs·동시 worker·메모리 입장 정책은
+  M0에서 설계한다. 사용자 요구인 인덱싱 16스레드 이내 목표와 렌더
+  응답성을 함께 평가하며, worker 수만 줄여 전체 부하가 제한됐다고 보지 않는다.
 - UI 종료 후 gateway/renderd는 **linger**(기본 수 분) — 재열기 즉시
   복원 + decoded LRU 보존(F2R-10 보존 스토리와 합류). linger 상한과
   명시 종료 경로를 둔다(고아 방지: renderd의 start_new_session,
@@ -188,20 +243,37 @@
   구분한다(게스트 = 읽기 전용). "같은 scene"의 의미는 위 뷰 세션
   모델을 따른다.
 
+### 4.1 인덱스 수명주기 (설계 필요, 이번 분기로 구현 완료 처리하지 않음)
+
+열린 GUI가 `.ovo` 교체를 즉시 감지하지 않는 기존 항목은 사용자 합의대로
+jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 별도 계약을 정한다.
+
+- 소스 식별자·인덱스 revision·뷰 상태 revision·render generation을
+  구분한다. 한 세션/프레임이 서로 다른 revision의 OVM/OVP/OVT/OVO를
+  섞어 쓰지 않아야 한다. 덱은 참조 소스별 revision 집합도 식별한다.
+- 재인덱싱 중 기존 세션 유지, 새 세션의 버전 선택, 명시적 reopen/전환,
+  사용 중인 파일의 보존·회수 책임을 Rust 서비스 계약으로 정한다.
+- revision 전환 시 frame/margin/retained/query 캐시의 무효화 범위를
+  함께 정한다. mtime 감지만으로 일관된 snapshot이 보장된다고 가정하지 않는다.
+- 구현 방식(불변 revision 디렉터리/manifest 등)은 M0 설계에서 비교해
+  결정한다. 그 전에는 인덱싱 완료 후 열기·재인덱싱 후 재열기를 전제로
+  개발하며 hot reload를 지원한다고 표시하지 않는다.
+
 ## 5. 전송 계층 (진화 단계)
 
 | 단계 | 프레임 경로 | 비고 |
 |---|---|---|
-| T0 | worker 계약의 result(`png` 또는 `rgba`)를 gateway가 WS로 전달 | renderd 무변경, M1 범위. adapter가 publish 파일을 읽은 뒤 삭제하므로 gateway는 파일을 읽지 않는다. Rust 기본이 raw이므로 T0 job은 `frame_format="png"`를 명시 |
+| T0 | renderd의 원자적 publish → Rust worker client가 파일을 소비 → gateway가 WS로 전달 | renderd wire 유지, Python 어댑터 없음. PNG는 기준 경로, loopback raw(T2)도 M1에서 비교. 파일 검증·읽기·정리는 Rust client가 소유 |
 | T1 | renderd→gateway 직접 스트림(PNG) | 파일 publish/fsync 제거 |
-| T2 | loopback 한정 raw RGBA | PNG encode(실측 24~206ms) 생략, 배포 A/B 이득. **floe2 전용**. payload는 F2R-13의 `FLOERAW1`(0.12.26 제품 구현) 재사용 |
+| T2 | loopback 한정 raw RGBA | 기존 F2R-13 `FLOERAW1` 재사용. M1에서 PNG와 A/B; 웹 UI·전송 복사까지 포함해 G1 평가. raw 지원을 위해 T1 완료를 기다릴 필요 없음 |
 | T3 | world-tile 단위 delta + 클라이언트 tile 캐시 | F2R-10/11 합류 지점. 인접 pan의 draw 재지불을 클라이언트 합성으로 흡수. **floe2 전용, 조건부 보류**(F2R-03c 선행 — FLOE2_OPTIMIZATION §3.16) |
 
-- T0은 floe(KLayout `save_image` PNG)와 floe2 모두 무수정 동작 —
-  backend 중립의 기준선.
+- T0/T2의 프레임 형식·치수·길이 검증, 취소 시 파일 정리, raw/PNG 선택,
+  오류 응답은 기존 Python 어댑터와 동등하게 검증한다. 브라우저가 서버의
+  파일 경로를 지정하거나 publish 디렉터리에 직접 접근하는 API는 제공하지 않는다.
 - **프레임 봉투와 취소 계약**(원자적 파일 publish가 보장하던 것을
   네트워크에서 보존): 프레임마다 session/view id, 요청 순번,
-  generation, render-state revision(layer/depth/style epoch), bbox,
+  generation, 인덱스 revision(§4.1), render-state revision(layer/depth/style epoch), bbox,
   크기·포맷, 완료 여부(final/refining/bg)를 결합한다. 클라이언트는
   수신 시와 **디코드 완료 시** 두 번 최신 요청인지 재검사하고 stale은
   버린다. 서버는 뷰 세션당 전송 중 프레임 1 + 대기 1로 제한하고
@@ -214,7 +286,9 @@
   클라이언트 viewport 기준 margin 크기와 뷰 세션별 전송 중 바이트
   상한을 두고, 원격(C)에는 PNG/T1을 기본으로 한다.
 
-- T0→T1→T2는 배포형별 협상(capability handshake)으로 공존 가능하게.
+- T0/T1/T2는 배포형별 협상(capability handshake)으로 공존 가능하게.
+  T1의 직접 스트림은 별도 성능 작업이며 T0/T2의 파일 publish 계약을
+  먼저 이관·검증한다.
 - T3의 tile key는 F2R-03b 2c 설계가 남겨둔 world/scale 정렬 키를
   사용한다(`FLOE2_OPTIMIZATION.ko.md` §F2R-03 2c 확장 키).
 
@@ -228,7 +302,7 @@
   미통과 시 주 작업자는 GTK 유지, 웹은 배포 C 전용으로 축소 — 이
   경우에도 투자 손실이 없다(C는 확정 수요).
 - **G3 (원격, 배포 C)**: LAN 기준 goto→settle이 ETX 대비 동급 이상.
-- **GTK의 margin 계약을 M1부터 이관**한다(G1의 전제). "이전 viewport
+- **일반 레이아웃의 GTK margin 계약을 M1부터 이관**한다(G1의 전제). "이전 viewport
   이미지를 이동시키고 새 프레임 요청"만 구현하면 GTK가 이미 해결한
   새 strip 검정·라벨 지연·불필요한 왕복이 웹에서 다시 생긴다. 현재
   GTK 계약: 배경 margin 요청(뷰포트 ±한 스텝, 라벨 포함,
@@ -238,19 +312,26 @@
   요청·표시 제어에 있으므로 worker 재사용만으로는 따라오지 않는다 —
   브라우저 측 일시 상태(§4)로 옮긴다. G1 판정에는 지연·pacing과 함께
   "새 strip 검정 0, 라벨 지연 0(margin 안)"을 포함한다.
+- jobdeck에는 현재 없는 margin 기능을 전제하지 않는다. 덱은 현재 GTK
+  덱 경로와 별도로 비교하고, prefetch 추가는 실측 후 별도 변경으로 다룬다.
+- **G4 (Python-free/기능 parity)**: Python/PyGObject/KLayout이 없는
+  실행 환경에서 Rust CLI→open/index/occupancy→layout/deck render→query/
+  clip→DRC 조회·저장/내보내기를 검증한다. 단계별로 구현된 범위만 통과로
+  표시하며 최종 판정은 §3.1b 전체 목록을 만족해야 한다. 개발 검증은
+  기존 Python/KLayout 게이트를 비교 기준으로 쓸 수 있지만 제품 의존성은 아니다.
 
 ## 7. 브라우저 하한 (감사 선행)
 
 - **step 0**: TeeBox `firefox --version` + 동료 데스크톱 대표 버전
   감사. 결과를 이 문서에 기록하고 browserslist 하한으로 박는다.
-- 코어 요구는 보수적으로 설계되어 ESR 52/60(2017~18)급이면 충분:
-  canvas 2D, binary WebSocket, putImageData/drawImage, PNG,
-  ES2017(transpile 산출), flex/grid. 단 **`--kiosk`는 Firefox 71+**
-  이므로 하한이 그 아래면 launcher는 일반 창으로 실행한다(§3.3).
+- 코어 요구는 canvas 2D, binary WebSocket, putImageData/drawImage, PNG와
+  현장 브라우저에 맞춘 정적 자산이다. 기존 ESR 52/60 추정은 **지원 확정이나
+  안전한 배포 버전 권고가 아니다**. 버전/feature probe/실행 게이트로 하한을
+  정하고 유지보수·보안 정책도 확인한다. kiosk 미지원이면 일반 창으로 실행한다.
 - 버전 감사와 간단한 ETX 실행 실험(프로필 격리·인스턴스 분리 포함)은
   M3가 아니라 **M0**에서 한다(§9).
-- 금지 목록(구버전 파손원): OffscreenCanvas(105+), WebP(65+)/AVIF,
-  원본 신문법 배포, WebGL2 의존.
+- M1 필수 의존에서 제외: OffscreenCanvas, WebP/AVIF, 원본 신문법 배포,
+  WebGL2. 최적화를 넣더라도 현장 하한에서 동작하는 기본 경로를 유지한다.
 - 접속 첫 페이지에서 필요 API를 feature-detect — 미달이면 필요 버전
   안내를 명시 표출(조용한 오동작 금지).
 - 주 작업자 경로(B)는 TeeBox의 Firefox 하나만 문제되므로 하한 협상이
@@ -258,8 +339,10 @@
 
 ## 8. 배포·라이선스
 
-- 번들: make_portable.sh 체계에 gatewayd 바이너리 + 정적 UI 자산
-  추가. 폐쇄망 반입은 기존 zip/버전 스탬프 절차 그대로.
+- 번들: 기존 portable의 오프라인 빌드·호스트 호환성 검증을 재사용하되
+  웹 제품은 Rust CLI/gateway/renderd/indexer + 정적 UI 자산으로 구성한다.
+  Python/venv/PyGObject를 웹 제품 실행에 포함하지 않는다. 이관 중 GTK
+  검증용 패키지는 구분한다. 브라우저 제공 방식은 M0 환경 감사에서 확정한다.
 - Electron(선택, 후순위): 사용자 로컬 셸로만 검토, **현장 검증 전
   제외**(§1). 라이선스는 파일 동봉으로 단정하지 않고 **배포 조건
   체크리스트**로 확인한다: 실제 번들의 Chromium/FFmpeg 빌드 구성,
@@ -281,20 +364,30 @@
 ## 9. 마일스톤
 
 0. **M0 — 감사·실험**: TeeBox/대표 데스크톱 Firefox 버전 감사(§7),
-   ETX에서 세션별 프로필·새 인스턴스 실행 실험(§3.3), WS 라이브러리
-   vendored 선정(§3.1a). 결과를 이 문서에 기록.
-1. **M1 — gateway 스켈레톤 + 읽기 전용 뷰어 (배포 A)**: 정적 서빙,
-   WS 프록시(T0: worker result 전달, `frame_format="png"`), 프레임
-   봉투·취소·큐 상한(§5), 토큰(§8 기본값), open/goto/pan/zoom/layer
-   toggle, **GTK margin 계약 이관**(§6: margin 요청·착지 보관·crop·
-   16px 스냅 pan·표시 base). 게이트 G1 측정까지.
+   ETX에서 세션별 프로필·새 인스턴스 실행 실험(§3.3), Rust HTTP/WS
+   라이브러리·오프라인 의존성 선정. Python 기능 목록/CLI parity 표,
+   Rust 서비스 경계·자원 정책·인덱스 수명주기 초안을 확정한다. 현장
+   실험과 로컬 설계 항목은 구분해 기록하고, 원격 환경 확인이 안 됐다고
+   로컬 기능 목록·프로토콜 설계까지 멈추지는 않는다.
+1. **M1 — Rust 기반 + 읽기 전용 웹 뷰어 (배포 A)**:
+
+   - **M1a**: Rust CLI/공통 서비스·worker client. 레이아웃과 jobdeck
+     파싱/소스/레벨 선택·캐시 검사·인덱싱 옵션·렌더 제어를 이관한다.
+     기존 Python 구현과 CLI 출력/파일/오류·픽셀을 대조한다.
+   - **M1b**: Rust gateway 정적 서빙·WS·토큰·프레임 봉투/취소/큐 상한,
+     open/goto/pan/zoom/layer·level/chip·thin 상태, PNG/raw 비교.
+     지원되는 일반 레이아웃의 margin 요청·착지 보관·crop·16px 스냅
+     pan·표시 base를 이관한다. G1 및 읽기 경로 G4 측정까지.
+
 2. **M2 — DRC 공유 뷰어 (배포 C)**: DRC 결과 목록/이동/waive 표시
    (읽기 전용), 게스트 토큰 URL 발급. 확정 수요 대응.
-3. **M3 — ETX 게이트 (배포 B)**: TeeBox Firefox 버전 감사 + G2 실측.
+3. **M3 — ETX 게이트 (배포 B)**: M0의 TeeBox 환경/버전을 재확인하고 G2 실측.
    통과 시 launcher를 `--web`으로 전환할 준비, 미통과 시 원인
    분석(전송 단계 상향) 후 재시도.
-4. **M4 — 조작 parity**: pick/snap/룰러/clip/label 토글/단축키.
-   GTK 셸 은퇴 판정은 이 단계 완료 + 현장 검증 후.
+4. **M4 — 조작 parity + Python-free 제품 전환**: pick/snap/룰러/clip/
+   label 토글/단축키, DRC waive·주석·설정 저장, 내보내기·보조 CLI까지
+   §3.1b 전체를 검증한다. GTK 셸 은퇴 판정은 이 단계의 G4 완료 + 현장
+   검증 후이며, 라이브러리/빌드가 Rust라는 이유만으로 완료 처리하지 않는다.
 5. **M5 — T3 전송(world-tile)**: F2R-10 본안과 통합 설계. 인접 pan
    클라이언트 합성 실측으로 world-tile LRU 착수 판정을 겸한다.
 
@@ -308,3 +401,40 @@
 3. portal → TeeBox launcher에 세션 URL/토큰 전달 채널의 형태.
 4. linger 기본값과 공유 서버 자원 정책(§4, FLOE_RUST_BUDGET_MB 고정
    결정과 정합 필요).
+5. 인덱스 revision 게시·기존 세션 유지·명시 전환·보존/회수 정책(§4.1).
+6. 프론트엔드 언어/빌드 도구. 현재 HTML/Canvas 계획은 유지하되 Rust/WASM
+   사용까지 사용자 요구로 확정된 것은 아니다. 서버/CLI의 Python 제거와
+   구분한다. 개발용 Python 테스트·생성기까지 제거할 범위와 시점도 미확정.
+
+## 11. 브랜치 운영과 착수 기준 (2026-09-12)
+
+- **실측 기준**: `feature/jobdeck`, 작업 트리
+  `/Users/journey/Flatide/floe2_review`. 실칩 jobdeck/occupancy의 화질·속도·
+  메모리·재인덱싱 관찰과 그 수정은 이 브랜치에서 계속한다.
+- **웹 전환**: `feature/webui`, 작업 트리
+  `/Users/journey/Flatide/floe2_webui`. 시작 커밋은
+  `6c33a482dab2649fa1c62ad135e63577c6301581`이며, `--lod` 전달과 occupancy
+  병용 게이트가 포함된 시점이다. 머지 커밋 직전의 전체 검증은 통과했지만
+  이것이 실칩 수용 판정을 대체하지 않는다.
+- 실측 후 수정은 **`feature/jobdeck` → `feature/webui` 정방향 머지**로
+  주기적으로 가져온다. 공통 수정은 가능한 한 실측 브랜치에서 먼저 고치고
+  각 머지마다 기준 커밋·검증 결과를 기록한다. 공개된 작업 이력을 임의로
+  rebase하지 않는다. 파일 복사나 반복 cherry-pick을 기본 동기화 방법으로
+  삼지 않는다.
+- 충돌 시 jobdeck 정책/렌더 정확도/캐시 형식은 실측 브랜치의 최신 계약을
+  기준으로 보존한다. Python 쪽에 수정이 들어왔으면 이미 이관한 Rust
+  서비스와 회귀 테스트에도 반영한다. 단순히 어느 한쪽 파일 전체를
+  선택해 머지 완료로 보지 않는다.
+- 웹 전환 미완성 코드를 실측 브랜치로 역머지하지 않는다. GTK/Python
+  제거·공통 포맷 변경·배포 기본값 전환은 각 수용 기준을 통과한 뒤 별도
+  합류 판정으로 진행한다. 원본 OASIS/실칩 프로파일은 커밋하지 않는다.
+- **M0 로컬 산출물**: `WEBUI_M0.ko.md`에 10개 명령/93개 공개 옵션과 보조
+  기능, `WEBUI_SERVICE_API.ko.md`에 서비스/전송/자원/revision 초안을 작성했다.
+  `tools/audit_webui_env.sh`는 현장 기본 정보용 읽기 전용 도구다. 실제 브라우저
+  기능·ETX·접속 측정과 dependency gate는 미완료이며 M0 전체 PASS가 아니다.
+- **M1a-1 구현(2026-09-13)**: `rust/worker-client`에 handshake/open/style/
+  frame/cancel/cleanup, bounded I/O와 오류/타임아웃을 추가했다. fake worker와
+  실제 valmini의 Python 어댑터 PNG/raw 대조 게이트가 있다. 상세 호출 계약과
+  poll/메모리 경계는 [worker-client README](../rust/worker-client/README.md).
+- **다음 구현은 M1a-2 Rust CLI/cache/index 서비스**다. worker library만으로
+  CLI 전체나 gateway/웹 UI가 구현됐다고 하지 않는다. GTK/실측 브랜치는 유지.

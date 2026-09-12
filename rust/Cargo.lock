@@ -121,6 +121,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "floe-worker-client"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
+ "flate2",
+ "floe-render-core",
+ "libc",
+]
+
+[[package]]
 name = "fontdue"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
