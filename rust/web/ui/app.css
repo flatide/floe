@@ -47,6 +47,11 @@ details > summary { cursor: pointer; font-size: 12px; color: #b4c3d8; }
 .layer-row { display: flex; align-items: center; gap: 7px; min-height: 34px; border-bottom: 1px solid #2d3542; }
 .layer-row.child { padding-left: 15px; }
 .layer-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.layer-edit { min-height: 22px; padding: 0 4px; border-color: transparent; background: transparent; color: #8194af; }
+.style-editor { padding: 10px; margin: 6px 0; border: 1px solid #42526a; border-radius: 4px; }
+.style-editor > strong { display: block; font-size: 12px; margin-bottom: 8px; }
+.style-editor textarea { width: 100%; resize: vertical; color: #dce3ec; background: #171b23; border: 1px solid #42526a; font: 12px monospace; }
+.style-editor > label { display: block; font-size: 11px; color: #9badc5; margin-bottom: 5px; }
 .layer-row.head { font-weight: 650; }
 .layer-fill { width: 32px; padding: 2px; font-size: 11px; }
 .pagination { display: flex; align-items: center; justify-content: space-between; font-size: 11px; color: #93a3b9; margin-top: 9px; }

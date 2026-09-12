@@ -425,6 +425,7 @@ async fn authenticated_catalog_index_open_reopen_and_logout() {
         .await;
     assert_eq!(status, 200);
     assert!(!rows["rows"].as_array().unwrap().is_empty());
+    assert_eq!(rows["render_key"], first["render_key"]);
     assert!(rows["rows"].as_array().unwrap().len() <= 64);
     assert_eq!(h.call(&login,"POST","/api/v1/operations",json!({"kind":"index","seq":"4","source_id":layout_id,"options":{"jobs":2,"force":true}})).await.0,202);
     assert_eq!(h.finished(&login, 4).await["error"], "busy");

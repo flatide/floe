@@ -118,7 +118,7 @@ impl LayerCatalog {
             json!({"pair":r.pair,"name":r.name,"aliases":r.aliases,"head":r.head,"parent":r.parent,"visible":visible,"color":color,"fill":fill,"width":style.map_or(1,|s|s.width)})
         }).collect();
         Some(
-            json!({"state_rev":snapshot.state_rev.to_string(),"total":self.rows.len(),"start":start,"next":if end<self.rows.len(){Some(end)}else{None},"rows":rows}),
+            json!({"state_rev":snapshot.state_rev.to_string(),"render_key":snapshot.render_key.to_string(),"total":self.rows.len(),"start":start,"next":if end<self.rows.len(){Some(end)}else{None},"rows":rows}),
         )
     }
 }

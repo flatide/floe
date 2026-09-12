@@ -38,6 +38,8 @@ const HELP: &str = "Usage: floe2-web view SOURCE [SOURCE ...] [OPTIONS]
   --mode level|chip        Jobdeck view mode (default level)
   --level N,N,...          Initial jobdeck levels (default all)
   --no-labels / --frames   Initial display switches
+  --labels / --no-frames   Explicit display overrides
+  --label-font-px N        Label size (6..96 device px, default 14)
   --mono                   Initial monochrome display
   --jobs N                 Decode workers (environment/default up to 8)
   --raster-jobs N          Raster workers (environment/default up to 4)
@@ -141,6 +143,17 @@ pub fn parse(args: &[String]) -> Result<Command> {
             "--no-labels" => {
                 flag()?;
                 c.initial["labels"] = json!(false);
+            }
+            "--labels" => {
+                flag()?;
+                c.initial["labels"] = json!(true);
+            }
+            "--no-frames" => {
+                flag()?;
+                c.initial["frames"] = json!(false);
+            }
+            "--label-font-px" => {
+                c.initial["font_px"] = json!(number(value()?, 6, 96, key)?);
             }
             "--frames" => {
                 flag()?;
@@ -389,12 +402,15 @@ mod tests {
     }
     #[test]
     fn initial_settings_form_one_bounded_patch() {
-        let c=parse(&args("view source.oas --goto -10.9375,20,700 --depth 99 --detail high --thin keep --jobs 8 --raster-jobs 4 --no-open")).unwrap();
+        let c=parse(&args("view source.oas --goto -10.9375,20,700 --depth 99 --detail high --thin keep --jobs 8 --raster-jobs 4 --no-open --label-font-px 18 --no-frames --labels")).unwrap();
         assert_eq!(c.initial["navigation"]["center_um"][0], "-10.9375");
         assert_eq!(c.initial["navigation"]["width_um"], "700");
         assert_eq!(c.initial["depth"], "99");
         assert_eq!(c.initial["detail"], "high");
         assert!(c.no_open);
+        assert_eq!(c.initial["font_px"], 18);
+        assert_eq!(c.initial["labels"], true);
+        assert_eq!(c.initial["frames"], false);
         for s in [
             "view",
             "view a --jobs 0",
@@ -404,6 +420,8 @@ mod tests {
             "view a --thin bad",
             "view a --listen 0.0.0.0",
             "view a --no-open=yes",
+            "view a --label-font-px 97",
+            "view a --label-font-px 5",
         ] {
             assert!(parse(&args(s)).is_err(), "{s}");
         }

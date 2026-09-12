@@ -9,13 +9,15 @@
     const marginCanvas = el('margin-canvas'), marginContext = marginCanvas.getContext('2d', {alpha: false});
     marginCanvas.hidden = true;
     let foregroundFrame = null, marginFrame = null, inflightBody = null, foregroundPerf = '';
+    let gesture = null, dragShift = null, lastPlacement = null;
     const sessionKey = 'floe-session:' + location.origin;
     let auth = null, stopped = false, socket = null, epoch = '', state = null;
     let seq = '0', queue = [], inflight = null, accepted = null, lastSend = 0;
     let socketSerial = 0, decode = null, reconnectTimer = null, reconnectDelay = 500;
     let catalog = [], currentId = '', currentSource = '', ownerBusy = false, submitting = false;
-    let layerStart = 0, layerNext = null, layerLoad = 0, layerRev = '';
-    let levelNext = null, levelSource = '', levelIds = new Set();
+    let layerStart = 0, layerNext = null, layerLoad = 0, layerKey = '', selectedStyle = null;
+    let levelNext = null, levelSource = '', levelIds = new Set(), levelLoad = 0, levelBusy = false;
+    let lastDigit = '', lastDigitAt = 0;
     let operationTimer = null, resizeTimer = null, displayed = false;
     const errors = {
         index_unavailable: 'A current index is required. Use “Index this source”; opening never indexes automatically.',
@@ -78,10 +80,12 @@
         const items = (inflightBody ? [inflightBody] : []).concat(queue), delta = [0, 0];
         for (let i = 0; i < items.length; ++i) {
             const n = items[i].navigation;
-            if (Object.keys(items[i]).length !== 1 || !n || n.kind !== 'pan' || !n.snap) { return null; }
-            delta[0] += P.roundEven(n.x * state.pixels[0] / 16) * 16;
-            delta[1] -= P.roundEven(n.y * state.pixels[1] / 16) * 16;
+            if (Object.keys(items[i]).length !== 1 || !n || n.kind !== 'pan') { return null; }
+            const period = n.snap ? 16 : 1;
+            delta[0] += P.roundEven(n.x * state.pixels[0] / period) * period;
+            delta[1] -= P.roundEven(n.y * state.pixels[1] / period) * period;
         }
+        if (dragShift) { delta[0] += dragShift[0]; delta[1] += dragShift[1]; }
         return delta;
     }
     function present() {
@@ -95,8 +99,10 @@
             mp[0] + size.pixels[0] <= marginCanvas.width && mp[1] + size.pixels[1] <= marginCanvas.height;
         canvas.hidden = !!full;
         if (fp) { positionBuffer(canvas, size, fp); } else { positionCanvas(size); }
+        lastPlacement = {pixels: size.pixels, margin: mp, full: !!full,
+            foreground: fp || [-Math.round((size.pixels[0] - canvas.width) / 2), -Math.round((size.pixels[1] - canvas.height) / 2)]};
         if (full) {
-            const pending = !!inflightBody || queue.length > 0;
+            const pending = !!inflightBody || queue.length > 0 || !!dragShift;
             el('status').textContent = (pending ? 'Pan preview' : 'Live') + ' · margin crop · gen ' + marginFrame.generation;
         }
         el('perf').textContent = foregroundPerf + (full ? ' · crop (no foreground render)' : '');
@@ -106,21 +112,33 @@
             (marginFrame && marginFrame.labels_truncated ? ' · labels partial' : '') + (state.margin_failure ? ' · prefetch failed' : '') : '';
     }
     function freezeMargin() {
-        // Non-pan edits keep the current viewport frozen, not an old centre
-        // frame which may have been hidden behind a landed margin for many pans.
-        if (!marginCanvas.hidden && canvas.hidden) {
-            const size = dims(), p = P.placement(marginFrame, state), d = pendingPan();
-            if (p && d) {
-                canvas.width = state.pixels[0]; canvas.height = state.pixels[1];
-                context.imageSmoothingEnabled = false;
-                context.drawImage(marginCanvas, p[0]+d[0], p[1]+d[1], canvas.width, canvas.height, 0, 0, canvas.width, canvas.height);
-                foregroundFrame = null; canvas.hidden = false; positionCanvas(size);
+        // Freeze the actual composite, including a truncated margin's incoming
+        // strip. A non-period mouse release must not recenter the previous image.
+        const p = lastPlacement;
+        if (displayed && p) {
+            const [w, h] = p.pixels, mp = p.margin, fp = p.foreground;
+            const copy = !!mp || fp[0] !== 0 || fp[1] !== 0 || canvas.width !== w || canvas.height !== h;
+            if (copy) {
+                if (p.full && mp) {
+                    canvas.width = w; canvas.height = h; context.imageSmoothingEnabled = false;
+                    context.drawImage(marginCanvas, mp[0], mp[1], w, h, 0, 0, w, h);
+                } else {
+                    const temp = document.createElement('canvas'); temp.width = w; temp.height = h;
+                    const ctx = temp.getContext('2d', {alpha: false}); ctx.imageSmoothingEnabled = false;
+                    if (mp) { ctx.drawImage(marginCanvas, -mp[0], -mp[1]); }
+                    if (!canvas.hidden) { ctx.drawImage(canvas, -fp[0], -fp[1]); }
+                    canvas.width = w; canvas.height = h; context.imageSmoothingEnabled = false;
+                    context.drawImage(temp, 0, 0); temp.width = 1; temp.height = 1;
+                }
             }
+            foregroundFrame = null; canvas.hidden = false; positionCanvas(dims());
+            lastPlacement = {pixels: p.pixels, margin: null, full: false, foreground: [0, 0]};
         }
         marginCanvas.hidden = true;
     }
     function clearBuffers() {
         foregroundFrame = null; marginFrame = null; inflightBody = null; foregroundPerf = '';
+        lastPlacement = null; dragShift = null;
         canvas.hidden = false; canvas.width = 1; canvas.height = 1;
         marginCanvas.hidden = true; marginCanvas.width = 1; marginCanvas.height = 1;
     }
@@ -129,6 +147,7 @@
         const enabled = live() && socket && socket.readyState === WebSocket.OPEN && !!epoch;
         ['fit', 'zoom-in', 'zoom-out', 'goto', 'depth', 'detail', 'thin', 'frames', 'labels', 'mono', 'layers-all', 'layers-none'].forEach(function (id) { el(id).disabled = !enabled; });
         el('labels').disabled = !enabled || !state.capabilities.labels;
+        el('font-px').disabled = !enabled || !state.capabilities.labels;
         el('open').disabled = submitting || ownerBusy || !!live();
         el('close').disabled = !currentId || submitting || ownerBusy;
         el('index').disabled = submitting || ownerBusy;
@@ -163,6 +182,7 @@
     function statusSnapshot(s) {
         if (s.view_id !== currentId || s.connection_epoch !== epoch) { return; }
         if (state && state.connection_epoch === epoch && P.compare(s.state_rev, state.state_rev) < 0) { return; }
+        if (gesture && gesture.active() && state && (s.state_rev !== state.state_rev || s.connection_epoch !== state.connection_epoch)) { gesture.cancel(); }
         if (marginFrame && !P.placement(marginFrame, s)) {
             freezeMargin(); marginFrame = null; marginCanvas.width = 1; marginCanvas.height = 1;
         }
@@ -175,12 +195,13 @@
         el('max-depth').textContent = s.max_depth === null ? '' : '/ ' + s.max_depth;
         ['detail', 'thin'].forEach(function (id) { el(id).value = s[id]; });
         ['frames', 'labels', 'mono'].forEach(function (id) { el(id).checked = s[id]; });
+        if (document.activeElement !== el('font-px')) { el('font-px').value = s.font_px; }
         const b = s.bbox_dbu.map(Number), dbu = Number(s.dbu_um);
         el('viewport-info').textContent = ((b[2] - b[0]) * dbu).toPrecision(6) + ' × ' + ((b[3] - b[1]) * dbu).toPrecision(6) + ' µm';
         el('status').textContent = s.status + ' · depth ' + s.depth + ' · thin:' + s.effective_thin + (s.source_stale ? ' · SOURCE STALE' : '');
         if (accepted && P.compare(s.state_rev, accepted.rev) >= 0) { accepted = null; inflight = null; inflightBody = null; pump(); }
         present();
-        if (s.state_rev !== layerRev) { loadLayers().catch(report); }
+        if (s.render_key !== layerKey) { loadLayers().catch(report); }
     }
     function finishDecode() { if (decode) { decode(); decode = null; } }
     function acknowledge(h, disposition, ws, serial) {
@@ -244,6 +265,7 @@
         }
     }
     function disconnect() {
+        if (gesture) { gesture.cancel(); }
         freezeMargin();
         ++socketSerial; finishDecode();
         if (socket) { socket.onclose = null; socket.close(); socket = null; }
@@ -277,6 +299,7 @@
         };
         ws.onclose = function () {
             if (socket !== ws || serial !== socketSerial) { return; }
+            if (gesture) { gesture.cancel(); }
             const uncertain = !!inflight || queue.length > 0;
             freezeMargin(); epoch = ''; socket = null; finishDecode(); queue = []; inflight = null; inflightBody = null; accepted = null;
             controls(); connection('Disconnected', false);
@@ -292,7 +315,7 @@
         const current = await http('GET', '/api/v1/view', undefined, true);
         if (!current) { currentId = ''; state = null; controls(); return; }
         const changed = currentId !== current.view.view_id;
-        if (changed) { displayed = false; clearBuffers(); el('empty').hidden = false; layerStart = 0; layerRev = ''; }
+        if (changed) { displayed = false; clearBuffers(); el('empty').hidden = false; layerStart = 0; layerKey = ''; selectedStyle = null; el('style-editor').hidden = true; }
         currentId = current.view.view_id; currentSource = current.source_id; state = current.view;
         el('document-title').textContent = current.title; document.title = current.title + ' · floe2';
         el('source').value = currentSource; el('mode').value = current.mode;
@@ -305,27 +328,45 @@
     }
     async function loadLayers() {
         if (!state || !currentId) { return; }
-        const id = currentId, rev = state.state_rev, start = layerStart, ticket = ++layerLoad;
-        layerRev = rev;
-        const page = await http('GET', '/api/v1/views/' + id + '/layers/' + start);
-        if (ticket !== layerLoad || id !== currentId || start !== layerStart || !state || page.state_rev !== state.state_rev) { return; }
+        const id = currentId, key = state.render_key, start = layerStart, ticket = ++layerLoad;
+        layerKey = key;
+        let page;
+        try { page = await http('GET', '/api/v1/views/' + id + '/layers/' + start); }
+        catch (e) { if (ticket === layerLoad) { layerKey = ''; } throw e; }
+        if (ticket !== layerLoad || id !== currentId || start !== layerStart || !state || page.render_key !== state.render_key) { return; }
         layerNext = page.next; el('layers').textContent = '';
         page.rows.forEach(function (r) {
             const row = document.createElement('div'); row.className = 'layer-row' + (r.parent ? ' child' : '') + (r.head ? ' head' : '');
             const check = document.createElement('input'); check.type = 'checkbox'; check.checked = r.visible;
             check.setAttribute('aria-label', 'Show ' + r.name); check.onchange = function () { edit({layer_change: {pair: r.pair, visible: check.checked}}); };
             const color = document.createElement('input'); color.type = 'color'; color.value = r.color; color.setAttribute('aria-label', 'Color ' + r.name);
-            color.onchange = function () { edit({styles: [{pair: r.pair, color: color.value, fill: r.fill, width: r.width}]}); };
+            color.onchange = function () {
+                if (!state || state.render_key !== page.render_key) { notice('Layer styles changed. Select the layer again.'); return; }
+                edit({styles: [{pair: r.pair, color: color.value, fill: r.fill, width: r.width}]});
+            };
             const name = document.createElement('span'); name.className = 'layer-name'; name.textContent = r.name || r.pair.join('/'); name.title = r.name + (r.aliases.length ? ' · ' + r.aliases.join(', ') : '');
-            row.appendChild(check); row.appendChild(color); row.appendChild(name); el('layers').appendChild(row);
+            const style = document.createElement('button'); style.className = 'layer-edit'; style.textContent = '⋯';
+            style.setAttribute('aria-label', 'Edit style ' + r.name);
+            style.onclick = function () {
+                selectedStyle = {row: r, key: page.render_key, view: id};
+                el('style-title').textContent = r.name; el('style-fill').value = r.fill.kind; el('style-width').value = r.width;
+                el('style-pattern').value = (r.fill.rows || new Array(16).fill(0xaaaa)).map(function (n) { return n.toString(16).padStart(4, '0'); }).join(' ');
+                el('style-editor').hidden = false; patternControls(); el('style-fill').focus();
+            };
+            row.appendChild(check); row.appendChild(color); row.appendChild(name); row.appendChild(style); el('layers').appendChild(row);
         });
         if (!page.rows.length) { el('layers').textContent = 'No visible layer rows.'; }
         el('layers-count').textContent = (page.total ? (start + 1) + '–' + (start + page.rows.length) + ' / ' : '') + page.total;
         el('layers-prev').disabled = start === 0; el('layers-next').disabled = page.next === null;
     }
     async function moreLevels() {
-        const source = el('source').value, page = await http('GET', '/api/v1/catalog/' + source + '/levels/' + (levelNext || 0));
-        if (source !== el('source').value) { return; }
+        if (levelBusy) { return; }
+        const source = el('source').value, ticket = ++levelLoad;
+        levelBusy = true; el('level-more').disabled = true;
+        let page;
+        try { page = await http('GET', '/api/v1/catalog/' + source + '/levels/' + (levelNext || 0)); }
+        finally { if (ticket === levelLoad) { levelBusy = false; el('level-more').disabled = false; } }
+        if (source !== el('source').value || ticket !== levelLoad) { return; }
         page.levels.forEach(function (r) {
             const label = document.createElement('label'); label.className = 'check';
             const box = document.createElement('input'); box.type = 'checkbox'; box.value = r.id; box.checked = levelIds.has(r.id); box.disabled = el('levels-all').checked;
@@ -340,6 +381,7 @@
         el('mode').disabled = !source.deck; el('level-options').hidden = !source.deck;
         if (!source.deck) { el('mode').value = 'level'; }
         if (levelSource !== source.source_id) {
+            ++levelLoad; levelBusy = false;
             levelSource = source.source_id; levelNext = null; levelIds = new Set(); el('level-list').textContent = ''; el('levels-all').checked = true;
             if (source.deck) { moreLevels().catch(report); }
         }
@@ -388,6 +430,11 @@
     async function start() {
         const fragment = location.hash;
         if (fragment) { history.replaceState(null, '', location.pathname); }
+        if (!context || !marginContext || typeof WebSocket !== 'function' || typeof TextEncoder !== 'function' ||
+            typeof TextDecoder !== 'function' || typeof ImageData !== 'function' || typeof URL.createObjectURL !== 'function' ||
+            typeof window.requestAnimationFrame !== 'function' || typeof window.cancelAnimationFrame !== 'function') {
+            throw new Error('This browser lacks Canvas 2D/binary WebSocket/UTF-8 image APIs. Use a supported Firefox and restart the local session.');
+        }
         if (/^#bootstrap=[0-9a-f]{64}$/.test(fragment)) {
             auth = await http('POST', '/api/v1/session/exchange', {bootstrap: fragment.slice(11), protocol: 1, bundle: bundle});
             try { sessionStorage.setItem(sessionKey, JSON.stringify(auth)); } catch (_) { notice('Session storage unavailable. Reloading requires a new local session.'); }
@@ -434,6 +481,27 @@
     el('layers-none').onclick = function () { edit({layers: {mode: 'none'}}); };
     ['depth', 'detail', 'thin'].forEach(function (id) { el(id).onchange = function () { const body = {}; body[id] = el(id).value; edit(body); }; });
     ['frames', 'labels', 'mono'].forEach(function (id) { el(id).onchange = function () { const body = {}; body[id] = el(id).checked; edit(body); }; });
+    el('font-px').onchange = function () {
+        const n = Number(el('font-px').value);
+        if (!Number.isInteger(n) || n < 6 || n > 96) { notice('Label size must be 6–96 device pixels.'); return; }
+        edit({font_px: n});
+    };
+    function patternControls() { el('style-pattern').hidden = el('pattern-label').hidden = el('style-fill').value !== 'pattern'; }
+    el('style-fill').onchange = patternControls;
+    el('style-cancel').onclick = function () { selectedStyle = null; el('style-editor').hidden = true; };
+    el('style-editor').onsubmit = function (event) {
+        event.preventDefault();
+        if (!selectedStyle || !state || selectedStyle.view !== currentId || selectedStyle.key !== state.render_key) { notice('Layer styles changed. Select the layer again before applying.'); return; }
+        const fill = {kind: el('style-fill').value}, width = Number(el('style-width').value);
+        if (!Number.isInteger(width) || width < 1 || width > 8) { notice('Line width must be 1–8 device pixels.'); return; }
+        if (fill.kind === 'pattern') {
+            const rows = el('style-pattern').value.trim().split(/\s+/);
+            if (rows.length !== 16 || !rows.every(function (s) { return /^[0-9a-f]{4}$/i.test(s); })) { notice('A pattern needs exactly 16 four-digit hex rows.'); return; }
+            fill.rows = rows.map(function (s) { return parseInt(s, 16); });
+        }
+        edit({styles: [{pair: selectedStyle.row.pair, color: selectedStyle.row.color, fill: fill, width: width}]});
+        selectedStyle = null; el('style-editor').hidden = true;
+    };
     const nav = function (n) { edit({navigation: n}); };
     const zoom = function (factor, anchor) { nav({kind: 'zoom', factor: factor, anchor: anchor || [0.5, 0.5]}); };
     el('fit').onclick = function () { nav({kind: 'fit'}); };
@@ -446,19 +514,45 @@
     };
     viewport.addEventListener('mousedown', function () { viewport.focus(); });
     viewport.addEventListener('keydown', function (event) {
-        if (event.ctrlKey || event.metaKey || event.altKey) { return; }
-        const amount = event.shiftKey ? 0.1 : 0.5, key = event.key;
+        if (!live()) { return; }
+        if (gesture && gesture.active()) { if (event.key === 'Escape') { event.preventDefault(); gesture.cancel(); } return; }
+        if (event.metaKey || event.altKey || event.isComposing) { return; }
+        let key = event.key;
+        if (key.length === 1 && key.charCodeAt(0) > 127 && /^Key[A-Z]$/.test(event.code || '')) { key = event.shiftKey ? event.code.slice(3) : event.code.slice(3).toLowerCase(); }
+        if (event.ctrlKey) {
+            if (key.toLowerCase() === 'a') { event.preventDefault(); nav({kind: 'fit'}); }
+            else if (key.toLowerCase() === 'z') { event.preventDefault(); zoom(0.5); }
+            else if (key === '.') { event.preventDefault(); el('goto-x').focus(); el('goto-x').select(); }
+            return;
+        }
+        const amount = event.shiftKey ? 0.1 : 0.5;
         const directions = {ArrowLeft: [-amount, 0], ArrowRight: [amount, 0], ArrowUp: [0, amount], ArrowDown: [0, -amount]};
         if (directions[key]) { event.preventDefault(); nav({kind: 'pan', x: directions[key][0], y: directions[key][1], snap: true}); }
         else if (key === '+' || key === '=') { event.preventDefault(); zoom(0.8); }
         else if (key === '-') { event.preventDefault(); zoom(1.25); }
-        else if (key.toLowerCase() === 'f') { event.preventDefault(); nav({kind: 'fit'}); }
+        else if (key === 'f' || key === 'C') { event.preventDefault(); edit({frames: !state.frames}); }
+        else if (key === 'b') { event.preventDefault(); edit({mono: !state.mono}); }
+        else if (key === 'Z') { event.preventDefault(); zoom(2); }
+        else if (key === 'g') { event.preventDefault(); el('goto-x').focus(); el('goto-x').select(); }
+        else if (key === 'd') { event.preventDefault(); el('detail').focus(); }
+        else if (/^[0-9]$/.test(key)) {
+            event.preventDefault(); const depth = key === '9' && lastDigit === '9' && Date.now() - lastDigitAt < 1000 ? 'full' : key;
+            lastDigit = depth === 'full' ? '' : key; lastDigitAt = Date.now(); edit({depth: depth});
+        }
     });
     viewport.addEventListener('wheel', function (event) {
         if (!live()) { return; } event.preventDefault();
+        if ((gesture && gesture.active()) || event.buttons) { return; }
         const rect = viewport.getBoundingClientRect();
         zoom(event.deltaY < 0 ? 0.8 : 1.25, [Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)), Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height))]);
     }, {passive: false});
+    gesture = window.FloeGestures.bind({viewport: viewport, window: window, document: document,
+        dimensions: dims, ready: function () { return live() && displayed && !!epoch && !inflight && queue.length === 0; },
+        stamp: function () { return currentId + ':' + epoch + ':' + (state ? state.state_rev : ''); },
+        requestAnimationFrame: function (fn) { return window.requestAnimationFrame(fn); },
+        cancelAnimationFrame: function (id) { window.cancelAnimationFrame(id); },
+        preview: function (p, paint) { dragShift = p; if (paint) { present(); } },
+        cursor: function (active) { viewport.style.cursor = active ? 'grabbing' : ''; }, pan: nav});
     el('index').onclick = function () {
         try { submitOperation({kind: 'index', source_id: el('source').value, levels: levels(), options: {jobs: Number(el('index-jobs').value), force: el('index-force').checked, lod: el('index-lod').checked, occupancy: el('index-occupancy').checked}}).catch(report); }
         catch (e) { report(e); }

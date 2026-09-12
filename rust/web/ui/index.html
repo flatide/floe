@@ -7,6 +7,7 @@
   <title>floe2 · Layout workspace</title>
   <link rel="stylesheet" href="/assets/@@BUNDLE@@/app.css">
   <script defer src="/assets/@@BUNDLE@@/protocol.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/gestures.js"></script>
   <script defer src="/assets/@@BUNDLE@@/app.js"></script>
 </head>
 <body>
@@ -33,11 +34,20 @@
         <div class="form-row"><label for="detail">Detail</label><select id="detail" disabled><option value="low">Low · 5 px</option><option value="medium" selected>Medium · 3 px</option><option value="high">High · 1 px</option><option value="exact">Exact · no cut</option></select></div>
         <div class="form-row"><label for="thin">Thin shapes</label><select id="thin" disabled><option value="auto">Auto</option><option value="keep">Keep · mask</option><option value="cull">Cull · layout</option></select></div>
         <div class="check-row"><label class="check"><input id="frames" type="checkbox" disabled> Frames</label><label class="check"><input id="labels" type="checkbox" disabled> Labels</label><label class="check"><input id="mono" type="checkbox" disabled> Mono</label></div>
+        <div class="form-row"><label for="font-px">Label px</label><input id="font-px" class="short" type="number" min="6" max="96" value="14" disabled></div>
       </section>
       <section class="layers-panel">
         <div class="section-title"><h2>Layers</h2><div><button id="layers-all" class="text-button" disabled>All</button><button id="layers-none" class="text-button" disabled>None</button></div></div>
         <div id="layers" class="layers"><p class="empty-list">Open a layout to see its layers.</p></div>
         <div class="pagination"><button id="layers-prev" disabled aria-label="Previous layer page">←</button><span id="layers-count">0 layers</span><button id="layers-next" disabled aria-label="Next layer page">→</button></div>
+        <form id="style-editor" class="style-editor" hidden>
+          <strong id="style-title">Layer style</strong>
+          <div class="form-row"><label for="style-fill">Fill</label><select id="style-fill"><option value="solid">Solid</option><option value="clear">Outline</option><option value="speckle">Speckle</option><option value="pattern">16×16 pattern</option></select></div>
+          <label id="pattern-label" for="style-pattern" hidden>16 rows, four hex digits each</label>
+          <textarea id="style-pattern" rows="3" maxlength="95" spellcheck="false" hidden></textarea>
+          <div class="form-row"><label for="style-width">Line px</label><input id="style-width" class="short" type="number" min="1" max="8" value="1"></div>
+          <div class="button-row"><button type="submit">Apply style</button><button id="style-cancel" type="button">Cancel</button></div>
+        </form>
       </section>
       <details class="index-panel"><summary>Index this source</summary>
         <p class="note">Explicit operation. Close the view before rebuilding its cache.</p>
@@ -51,17 +61,17 @@
     </aside>
     <main class="main">
       <form id="goto-form" class="toolbar">
-        <button id="fit" type="button" disabled title="Fit layout (F)">Fit</button>
+        <button id="fit" type="button" disabled title="Fit layout (Ctrl+A)">Fit</button>
         <div class="zoom-buttons"><button id="zoom-out" type="button" disabled title="Zoom out (−)">−</button><button id="zoom-in" type="button" disabled title="Zoom in (+)">+</button></div>
         <div class="goto-fields"><label>X <input id="goto-x" value="0" inputmode="decimal" aria-label="Center X in micrometres"></label><label>Y <input id="goto-y" value="0" inputmode="decimal" aria-label="Center Y in micrometres"></label><label>View <input id="goto-width" value="700" inputmode="decimal" aria-label="View width in micrometres"></label><span>µm</span><button id="goto" disabled>Go</button></div>
       </form>
       <div id="notice" class="notice" role="alert" hidden></div>
-      <div id="viewport" class="viewport" tabindex="0" aria-label="Layout canvas. Arrow keys pan; Shift plus arrow pans ten percent; plus and minus zoom; F fits.">
+      <div id="viewport" class="viewport" tabindex="0" aria-label="Layout canvas. Drag or arrow keys pan; Shift plus arrow pans ten percent; plus and minus zoom; Ctrl+A fits; F toggles frames.">
         <canvas id="margin-canvas" width="1" height="1" aria-hidden="true" hidden></canvas>
         <canvas id="canvas" width="1" height="1" aria-label="Rendered layout"></canvas>
         <div id="empty" class="empty"><div class="empty-mark">＋</div><h1>Layout workspace</h1><p id="empty-message">Connecting to the local Rust renderer…</p></div>
         <div id="rendering" class="rendering" hidden>Rendering</div>
-        <div class="viewport-hint">↑ ↓ ← → pan <span>Shift · 10%</span> <span>+ / − zoom</span></div>
+        <div class="viewport-hint">Drag / arrows · pan <span>Shift · 10%</span> <span>+ / − zoom</span> <span>Ctrl+A · fit</span></div>
       </div>
       <footer class="statusbar"><span id="status">Waiting for session</span><span id="margin-info"></span><span id="viewport-info">Native pixels · Canvas 2D</span></footer>
       <div id="perf" class="perf">Rust renderer · no automatic indexing · refinement off</div>

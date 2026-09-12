@@ -13,13 +13,14 @@ managed read lease·admission과 latest-only view controller를 추가했고**(�
 M1b-2c2에서 인증된 catalog·view 생성/재open·색인 작업 API를 연결했다(§8).
 M1b-3에서 `floe2-web view`와 번들 HTML/Canvas 기본 뷰어를 연결했다(§9).
 M1b-4a에서 일반 layout margin prefetch/착지/crop을 연결했다(§10).
-M1/G1/G4 전체 완료는 아니며 drag·현장 Firefox/ETX 성능 검증은 남아 있다.
+M1b-4b에서 mouse drag·fill/width/font 편집·기본 GTK 단축키를 연결했다(§11).
+M1/G1/G4 전체 완료는 아니며 현장 Firefox/ETX 성능 검증은 남아 있다.
 
 다음 단계:
 
-1. M1b-4b: drag·추가 스타일 편집(fill/width/font)과 실제 UI 게이트, G1/읽기 G4.
-   deck margin/labels/query는 capability=false를 유지한다.
-2. 이후 DRC/query/export parity와 현장 Firefox/ETX 성능 검증.
+1. DRC 읽기/공유 기능과 이후 query/export parity. deck margin/labels/query는
+   구현·검증 전까지 capability=false를 유지한다.
+2. 현장 Firefox/ETX 성능 검증과 G1/읽기 G4의 남은 항목.
 
 기존 CLI·GTK/Python 제품, jobdeck 실측 브랜치·렌더링 정책은 변경하지 않았다.
 임의 파일 경로나 renderd wire를 HTTP/WS로 직접 실행하는 통로도 없다.
@@ -551,3 +552,43 @@ query capability는 계속 false다.
 M4의 expected/actual scene ID는 이제 foreground뿐 아니라 **실제 표시된 margin
 generation**도 식별해야 한다. crop에서 render_rev만으로 native query scene을
 추정해서는 안 된다.
+
+## 11. M1b-4b — drag·표시 편집·기본 단축키
+
+- 왼쪽/가운데 mouse drag는 8 CSS px jitter를 넘을 때 시작한다. 이동 중에는
+  requestAnimationFrame당 최대 한 번 정수 device px 위치만 바꾸며 서버 요청은
+  없다. release에 상대 pan 하나를 보낸다. mouse는 커서와 달리 16px 스냅을
+  하지 않으며 off-phase 위치는 새 native foreground로 그린다. 한 gesture의
+  이동 범위는 서버와 같은 ±한 viewport/축이다.
+- blur·resize·hidden·pagehide·buttons 상실·view revision 교체는 gesture와 예약된
+  animation을 취소한다. 늦은 mouseup으로 이동을 실행하지 않는다. 서버에 보내는
+  것은 pan 비율뿐이며 좌표 계산의 정본은 계속 Rust다.
+- off-phase release 전에 **지금 표시된 composite**를 frozen viewport로 보존한다.
+  완전 margin은 직접 crop, partial margin + 기존 foreground 또는 이동된 foreground는
+  임시 Canvas 한 장에 합성한다. 새 프레임 대기 중 원래 중심으로 튀지 않는다.
+  임시 합성의 추가 peak는 최대 64 MiB(RGBA 16 Mpx); §10의 두 상주 Canvas나
+  전송/브라우저/native 메모리와 별개이고 RSS hard cap이 아니다. 사용 직후 회수한다.
+- 레이어 `⋯`에서 solid/outline/speckle/16×16 pattern과 1..8 px 선폭을 편집한다.
+  pattern은 4자리 ASCII hex 16행을 검증하고 기존 색상은 유지한다. 편집을 여는
+  순간의 view/render_key가 달라지면 덮어쓰지 않고 다시 선택하도록 알린다.
+  layer page는 render_key를 반환하고 순수 pan/zoom에서 다시 읽지 않는다.
+  level 페이지의 중복 요청과 늦은 다른 source 응답도 배제한다.
+- layout Label px는 6..96 device px. CLI `--labels`, `--no-frames`,
+  `--label-font-px`도 초기 상태에 묶어 한 번만 적용한다. deck은 font/label 편집을
+  계속 막는다. refine/LOD 기본값이나 native raster/wire는 바꾸지 않았다.
+- canvas에 포커스가 있을 때 GTK 기본 매핑을 쓴다: `f`/`Shift+C` 프레임,
+  `Ctrl+A` 전체 보기, `Ctrl+Z`/`Shift+Z` 2배 확대/축소, `g`/`Ctrl+.` goto,
+  `d` detail 포커스, `b` mono, 숫자 depth(`99` full), 화살표/Shift/±.
+  기존 웹 임시 `f=fit`은 제거했다. query/ruler/셀 트리 등 전체 단축키 parity는 M4다.
+- 필요한 Canvas/WS/텍스트·이미지 API가 없으면 startup 오류를 표시한다.
+  ES2017 구문 검사는 개발 gate이며 구형 Firefox의 실제 지원 판정은 아니다.
+
+검증: 앱 5·core 40·웹 13 단위 + HTTP 8, ES2017/JS protocol/client/gesture,
+strict clippy, `sh tools/validate_rust.sh` 전체 `RUST VALIDATION: ALL OK`.
+JS는 100 move→한 animation/단일 release, 잘못된 style/font 거부, pan 중 layer
+재조회 0, non-period release composite 보존, blur 뒤 late mouseup 무효를 단언한다.
+실제 macOS Chrome/DPR 2에서 119×33 CSS px drag 후 새 foreground/margin 착지,
+pattern/4px 폭 재조회, 실제 키 입력의 18px font, `f`와 `Ctrl+A`를 확인했다.
+native geometry 화면을 작업 대화에 캡처했고 console error/warn은 없었다.
+Rust 1.89/빈 registry/offline 테스트 및 Linux musl release link도 통과했다.
+Firefox/ETX, input-to-photon ±10%, Linux 실행 또는 M1 전체 완료를 뜻하지 않는다.

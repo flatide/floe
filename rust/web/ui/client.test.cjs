@@ -6,6 +6,7 @@ const vm = require('node:vm');
 const P = require('./protocol.js');
 const nodes = new Map(), images = [], sockets = [], urls = new Set(), draws = [], requests = [];
 const listeners = {}, docListeners = {};
+function listen(target,k,fn){const old=target[k];target[k]=old?(event)=>{old(event);fn(event);}:fn;}
 let clock = 10000;
 class Element {
     constructor(id, tag='div') { Object.assign(this, {id, tag, value:'', checked:false, disabled:false, hidden:false,
@@ -13,10 +14,13 @@ class Element {
     appendChild(child) { this.children.push(child); if (child.tag==='option'&&!this.value) {this.value=child.value;} return child; }
     setAttribute(k,v) {this[k]=v;}
     querySelectorAll(tag) {return this.children.flatMap(c=>[...(c.tag===tag?[c]:[]), ...c.querySelectorAll(tag)]);}
-    addEventListener(k,f) {this[k]=f;}
+    addEventListener(k,f) {listen(this,k,f);}
     getBoundingClientRect() {return {left:0,top:0,right:100,bottom:80,width:100,height:80};}
     getContext() {return ctx;}
     focus() {}
+    select() {}
+    get textContent(){return this._text||'';}
+    set textContent(v){this._text=v;this.children=[];}
 }
 const ctx = {imageSmoothingEnabled:true, putImageData(data,x,y) {draws.push({kind:'raw',data:[...data.data],x,y});},
     drawImage(image,x,y) {draws.push({kind:'png',x,y});}};
@@ -32,10 +36,11 @@ const snapshot={type:'snapshot',view_id:viewId,connection_epoch:epoch,dataset_re
     layers:{mode:'all'},frames:false,labels:false,font_px:14,mono:false,status:'idle',source_stale:false,
     deck_skipped:'0',failure:null,submitted:'1',consumed:'1',discarded:'0',capabilities:{labels:true}};
 let open=false, lastSeq='0';
+const layerRow={pair:[7,0],name:'MASK',aliases:[],parent:null,head:false,visible:true,color:'#ffffff',fill:{kind:'solid'},width:1};
 const document={hidden:false,activeElement:null,title:'',
     getElementById:node,querySelector:()=>({content:bundle}),createElement:tag=>new Element('',tag),
     createTextNode:text=>Object.assign(new Element(''),{textContent:text}),
-    addEventListener:(k,f)=>{docListeners[k]=f;}};
+    addEventListener:(k,f)=>listen(docListeners,k,f)};
 class XHR {
     open(method,path){this.method=method;this.path=path;}
     setRequestHeader() {}
@@ -44,12 +49,13 @@ class XHR {
         let value, status=200;
         if (this.path==='/api/v1/session/exchange') {value={csrf:'c'.repeat(64),bundle,protocol:1};}
         else if(this.path==='/api/v1/capabilities') {value={protocol:1,bundle};}
-        else if(this.path==='/api/v1/catalog') {value={sources:[{source_id:'src',title:'synthetic',deck:false,levels:0}]};}
+        else if(this.path==='/api/v1/catalog') {value={sources:[{source_id:'src',title:'synthetic',deck:false,levels:0},{source_id:'deck',title:'synthetic deck',deck:true,levels:2}]};}
+        else if(this.path==='/api/v1/catalog/deck/levels/0') {value={levels:[{id:'1',title:'Level 1'},{id:'2',title:'Level 2'}],next:null};}
         else if(this.path==='/api/v1/startup') {value={request:{kind:'open',seq:'1',source_id:'src',mode:'level',levels:{mode:'all'},body:{detail:'high'}}};}
         else if(this.path==='/api/v1/operations'&&this.method==='POST') {open=true;lastSeq=body.seq;value={seq:lastSeq,kind:'open',phase:'succeeded',view_id:viewId};status=202;}
         else if(this.path==='/api/v1/operations') {value={last_seq:lastSeq,active:null,history:open?[{seq:lastSeq,kind:'open',phase:'succeeded',view_id:viewId}]:[]};}
         else if(this.path==='/api/v1/view') {status=open?200:404;value=open?{title:'synthetic',source_id:'src',mode:'level',levels:null,view:{...snapshot,connection_epoch:''}}:null;}
-        else if(this.path.endsWith('/layers/0')) {value={state_rev:snapshot.state_rev,total:0,start:0,next:null,rows:[]};}
+        else if(this.path.endsWith('/layers/0')) {value={state_rev:snapshot.state_rev,render_key:snapshot.render_key,total:1,start:0,next:null,rows:[layerRow]};}
         else {throw new Error('Unexpected HTTP '+this.path);}
         this.status=status;this.responseText=JSON.stringify(value);
         setImmediate(()=>this.onload());
@@ -65,7 +71,8 @@ class Socket {
 class Image {
     constructor(){this.naturalWidth=100;this.naturalHeight=80;images.push(this);}
 }
-const window={FloeProtocol:P,devicePixelRatio:1,addEventListener:(k,f)=>{listeners[k]=f;},setTimeout};
+const window={FloeProtocol:P,FloeGestures:require('./gestures.js'),devicePixelRatio:1,
+    addEventListener:(k,f)=>listen(listeners,k,f),setTimeout,requestAnimationFrame:fn=>setTimeout(fn,0),cancelAnimationFrame:clearTimeout};
 const storage=new Map();
 const sandbox={window,document,XMLHttpRequest:XHR,WebSocket:Socket,Image,ImageData:class {constructor(data,w,h){this.data=data;this.width=w;this.height=h;}},
     location:{origin:'http://127.0.0.1:1234',hash:'#bootstrap='+'e'.repeat(64),pathname:'/'},
@@ -132,6 +139,7 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     assert(node('perf').textContent.includes('100 × 80 px'));
     assert(!node('perf').textContent.includes('196 × 176 px'));
     const painted=draws.length;
+    const listRequests=requests.filter(r=>r.path.endsWith('/layers/0')).length;
     node('viewport').keydown({key:'ArrowRight',preventDefault(){},shiftKey:false});
     assert.equal(draws.length,painted);assert.equal(node('margin-canvas').style.left,'-96px');
     assert.equal(node('canvas').hidden,true);
@@ -141,6 +149,7 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     snapshot.margin.origin_px=[96,48];second.receive(snapshot);
     assert.equal(node('margin-canvas').style.left,'-96px');
     assert(node('status').textContent.includes('Live · margin crop'));
+    assert.equal(requests.filter(r=>r.path.endsWith('/layers/0')).length,listRequests,'pan refreshed the layer panel');
     // Truncated labels are base only, not a completed replacement for foreground.
     snapshot.margin={frame_id:'9',origin_px:[96,48],crop_safe:false};second.receive(snapshot);
     second.receive(packet('raw','9','3',nextEpoch,{...margin,complete:false,labels_truncated:true}));
@@ -155,7 +164,57 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     assert.equal(draws.length,beforeLate);assert.equal(node('margin-canvas').hidden,true);
     assert.equal(node('margin-canvas').width,1);
     assert.equal(second.sent.at(-1).disposition,'discarded');assert.equal(urls.size,0);
+    await wait(()=>node('layers').children.length===1);
+    const submitEvent={preventDefault(){}};
+    node('font-px').value='999';const beforeInvalid=second.sent.length;node('font-px').onchange();
+    assert.equal(second.sent.length,beforeInvalid);
+    node('layers').children[0].children.at(-1).onclick();
+    node('style-fill').value='pattern';node('style-fill').onchange();
+    node('style-pattern').value='ffff';node('style-editor').onsubmit(submitEvent);
+    assert.equal(second.sent.length,beforeInvalid);
+    node('style-pattern').value=new Array(16).fill('a55a').join(' ');node('style-width').value='4';
+    node('style-editor').onsubmit(submitEvent);
+    let sent=second.sent.at(-1);assert.equal(sent.type,'view.set');
+    assert.deepEqual(sent.body.styles,[{pair:[7,0],color:'#ffffff',fill:{kind:'pattern',rows:new Array(16).fill(0xa55a)},width:4}]);
+    async function applied(policy=true){
+        const s=second.sent.filter(m=>m.type==='view.set').at(-1);
+        snapshot.state_rev=P.next(snapshot.state_rev);snapshot.render_rev=P.next(snapshot.render_rev);
+        if(policy){snapshot.render_key=P.next(snapshot.render_key);}
+        second.receive({type:'accepted',seq:s.seq,state_rev:snapshot.state_rev,render_rev:snapshot.render_rev});second.receive(snapshot);
+        await new Promise(setImmediate);
+    }
+    await applied();
+    node('font-px').value='18';node('font-px').onchange();assert.equal(second.sent.at(-1).body.font_px,18);await applied();
+    node('viewport').keydown({key:'f',preventDefault(){}});assert.deepEqual(second.sent.at(-1).body,{frames:true});await applied();
+    node('viewport').keydown({key:'a',ctrlKey:true,preventDefault(){}});assert.equal(second.sent.at(-1).body.navigation.kind,'fit');await applied(false);
+    node('viewport').keydown({key:'9',preventDefault(){}});assert.equal(second.sent.at(-1).body.depth,'9');await applied();
+    node('viewport').keydown({key:'9',preventDefault(){}});assert.equal(second.sent.at(-1).body.depth,'full');await applied();
+    // Free mouse pan has no network traffic while moving and preserves the
+    // translated foreground until its new (non-16px) native phase arrives.
+    second.receive(packet('raw','11',snapshot.render_rev,nextEpoch));
+    const dragEdits=()=>second.sent.filter(m=>m.type==='view.set').length;
+    const beforeDrag=dragEdits(),beforeDragDraws=draws.length;
+    const mouse=(x,y)=>({button:0,buttons:1,clientX:x,clientY:y,preventDefault(){}});
+    node('viewport').mousedown(mouse(20,20));listeners.mousemove(mouse(33,31));
+    await wait(()=>node('canvas').style.left==='13px');
+    assert.equal(dragEdits(),beforeDrag);assert.equal(draws.length,beforeDragDraws);
+    listeners.mouseup(mouse(33,31));
+    assert.equal(dragEdits(),beforeDrag+1);
+    assert.deepEqual(second.sent.at(-1).body.navigation,{kind:'pan',x:-0.13,y:0.1375,snap:false});
+    assert.deepEqual(draws.slice(beforeDragDraws).map(d=>[d.x,d.y]),[[13,11],[0,0]],'preview composite jumped before native reply');
+    assert.equal(node('canvas').style.left,'0px');
+    snapshot.bbox_dbu=['24.0625','11','124.0625','91'];await applied(false);
+    assert.equal(node('canvas').style.left,'0px');
+    assert.equal(draws.length,beforeDragDraws+2,'snapshot redrew the frozen preview');
+    second.receive(packet('raw','12',snapshot.render_rev,nextEpoch));
+    node('viewport').mousedown(mouse(20,20));listeners.mousemove(mouse(42,41));
+    await wait(()=>node('canvas').style.left==='22px');listeners.blur();
+    assert.equal(node('canvas').style.left,'0px');assert.equal(dragEdits(),beforeDrag+1);
+    listeners.mouseup(mouse(42,41));assert.equal(dragEdits(),beforeDrag+1,'blur left a late mouseup edit');
+    node('source').value='deck';node('source').onchange();node('level-more').onclick();node('level-more').onclick();
+    await wait(()=>node('level-list').children.length===2);
+    assert.equal(requests.filter(r=>r.path.includes('/catalog/deck/levels/')).length,1,'duplicate level page');
     for(const s of sockets){for(let i=1;i<s.sent.length;i++){assert(P.compare(s.sent[i-1].seq,s.sent[i].seq)<0);}}
     listeners.pagehide();
-    console.log('WEB CLIENT: ALL OK (startup, raw/PNG, late decode/epochs/credit, margin pan/base/truncation, cleanup)');
+    console.log('WEB CLIENT: ALL OK (startup/frames/epochs, margin/free-pan, cached layer pages, styles/font/keys, level paging, cleanup)');
 })().catch(e=>{console.error(e);process.exitCode=1;});

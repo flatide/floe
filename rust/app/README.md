@@ -65,6 +65,10 @@ cargo build --offline --locked --release -p floe-app -p floe-index -p floe-rende
   GTK launcher/portable은 그대로다. refinement는 off, 일반 layout margin은 on이다.
   `--frame-cache off`로 native retained frame 재사용과 margin을 함께 끄고 측정할 수 있다.
   잡덱 margin은 미지원이다.
+- 웹 canvas는 왼쪽/가운데 drag(놓을 때 한 번 제출), 화살표 50%/Shift 10% pan,
+  ± zoom, `Ctrl+A` fit, `f` frames를 지원한다. 레이어 `⋯`는 fill/pattern/선폭 편집,
+  Label px는 6..96 device px다. `--labels`, `--no-frames`, `--label-font-px`는
+  초기 표시 옵션이다. 전체 GTK 단축키·query/ruler parity는 아직 개발 중이다.
 - `clip/...`와 batch/mosaic/DRC export는 미이관 오류를 낸다.
   자동 Python fallback이나 기존 launcher/portable 교체는 없다.
 

@@ -33,6 +33,10 @@ async fn asset(Path((bundle, name)): Path<(String, String)>) -> Response {
             "text/javascript; charset=utf-8",
             include_str!("../ui/app.js"),
         ),
+        "gestures.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("../ui/gestures.js"),
+        ),
         _ => return transport::error(StatusCode::NOT_FOUND),
     };
     ([(header::CONTENT_TYPE, mime)], body).into_response()
