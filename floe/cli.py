@@ -1662,6 +1662,8 @@ def _jobdeck_index(args, catalog):
         else:
             if args.force:
                 cmd.append("--force")
+            if getattr(args, "lod", False):
+                cmd.append("--lod")
             if occupancy or occupancy_only:
                 cmd.append("--occupancy")
                 cmd += _occupancy_args(args)

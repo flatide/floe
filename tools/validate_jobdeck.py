@@ -720,6 +720,75 @@ class CliTests(unittest.TestCase):
         self.assertIn("3 probed, 3 ok, 3 indexed", res.stdout)
 
 
+class JobdeckIndexLodTests(unittest.TestCase):
+    def test_lod_reaches_each_source_and_preserves_force_and_level_selection(self):
+        from validate_vfs import read_ovm
+
+        binary = ROOT / "rust" / "target" / "release" / "floe-index"
+        self.assertTrue(binary.is_file(), "release floe-index is not built")
+        env = {"FLOE_INDEX_BIN": str(binary)}
+        with tempfile.TemporaryDirectory(prefix="jobdeck lod ") as td:
+            work = Path(td)
+            names = ("chipA.oas", "chipB.oas", "mark.oas")
+            # Each source must contain enough small members to produce a
+            # merged page. A one-box fixture cannot expose a lost --lod.
+            for name in names:
+                build_thin_oas(work / name)
+            deck = work / "test.jb"
+            deck.write_text(DECK, encoding="utf-8")
+
+            def marker(name):
+                return work / (name + ".floe") / "design.ovm"
+
+            def lod_sources():
+                return {name for name in names
+                        if any(page[-1] != 0 for page in
+                               read_ovm(str(marker(name)))["pages"])}
+
+            # The default still omits LOD, and --lod alone must not
+            # overwrite a current cache; --force owns that permission.
+            first = run_floe2("index", deck, "--jobs", "2", env=env, ok=0)
+            self.assertIn("3 built, 0 failed, 0 kept", first.stdout)
+            self.assertEqual(lod_sources(), set())
+            before = {name: marker(name).read_bytes() for name in names}
+            kept = run_floe2("index", deck, "--lod", "--jobs", "2",
+                             env=env, ok=0)
+            self.assertIn("0 built, 0 failed, 3 kept", kept.stdout)
+            self.assertEqual(before, {name: marker(name).read_bytes()
+                                      for name in names})
+
+            rebuilt = run_floe2("index", deck, "--force", "--lod",
+                                "--jobs", "2", env=env, ok=0)
+            self.assertIn("3 built, 0 failed, 0 kept", rebuilt.stdout)
+            self.assertEqual(lod_sources(), set(names))
+
+            run_floe2("index", deck, "--force", "--no-lod", "--jobs",
+                      "2", env=env, ok=0)
+            self.assertEqual(lod_sources(), set())
+            selected = run_floe2("index", deck, "--force", "--lod",
+                                 "--level", "3", "--jobs", "2",
+                                 env=env, ok=0)
+            self.assertIn("1 built, 0 failed, 0 kept", selected.stdout)
+            self.assertEqual(lod_sources(), {"mark.oas"})
+
+            # Keep feature/jobdeck's occupancy modes when merging the
+            # LOD forwarding: both can be built, and occupancy-only
+            # must not rebuild exact or LOD pages even with --lod.
+            run_floe2("index", deck, "--force", "--lod", "--occupancy",
+                      "--jobs", "2", env=env, ok=0)
+            self.assertEqual(lod_sources(), set(names))
+            for name in names:
+                self.assertTrue((marker(name).parent / "design.ovo").is_file())
+            pages = [marker(name).parent / filename for name in names
+                     for filename in ("design.ovm", "design.ovp")]
+            before = {path: path.read_bytes() for path in pages}
+            summary = run_floe2("index", deck, "--occupancy-only", "--lod",
+                               "--occupancy-um", "8", "--jobs", "2",
+                               env=env, ok=0)
+            self.assertIn("3 built, 0 failed, 0 kept", summary.stdout)
+            self.assertEqual(before, {path: path.read_bytes() for path in pages})
+
+
 # ---------------------------------------------------------------------
 # M2: the composite through renderd
 # ---------------------------------------------------------------------

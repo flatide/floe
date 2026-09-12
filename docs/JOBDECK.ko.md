@@ -253,6 +253,18 @@ floe2 render deck.jb --bbox X0,Y0,X1,Y1 --px 1200 --out d.png [--layers "$1 META
 floe2 jobdeck deck.jb [--report r.json] [--spec s.spec]   # 분석·보고만
 ```
 
+LOD를 포함해 덱의 모든 소스 캐시를 다시 만들려면:
+
+```sh
+floe2 index deck.jb --force --lod --jobs 16
+```
+
+소스 파일은 순차 처리하고, 각 파일 내부에서 `--jobs`만큼 병렬화한다.
+`--level 1,3`을 추가하면 그 레벨이 참조하는 소스만 처리한다. `--lod`는
+각 소스의 인덱싱 명령에 전달되며, 생략하면 기존 기본값인 LOD 미생성을
+유지한다. 현재 캐시는 `--lod`만으로 교체하지 않으므로 LOD 없이 만든
+캐시를 갱신하려면 `--force`가 필요하다. 원본 OASIS는 변경하지 않는다.
+
 - `floe/jobdeck/viewer.py` `DeckCache` — 뷰어·CLI가 `Cache`에서 읽는 것을 그대로
   제공한다: `src`(덱 경로), `dir`(renderd가 여는 스펙), `meta`(`dbu`, `bbox`,
   `layers`, `src`, `grid`(1×1), `vfs`, `jobdeck{mode, chips, placements,
