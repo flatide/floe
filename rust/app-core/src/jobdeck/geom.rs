@@ -68,7 +68,7 @@ pub struct Skipped {
     pub chip: String,
     pub idx: i64,
     pub tc: String,
-    pub line: usize,
+    pub line: i64,
     pub rows: usize,
     pub reason: String,
     pub detail: String,
@@ -372,7 +372,7 @@ pub fn plan(
                             chip: c.id.clone(),
                             idx: e.idx,
                             tc: e.tc.clone(),
-                            line: e.lineno,
+                            line: e.lineno as i64,
                             rows: c.rows.len(),
                             reason: reason.into(),
                             detail: issue

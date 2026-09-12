@@ -15,7 +15,8 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from floe.jobdeck import parser, geom
+from floe.jobdeck import parser, geom, color, render
+from floe.jobdeck.viewer import DeckCache, level_rows
 import validate_jobdeck as fixtures
 
 
@@ -35,7 +36,18 @@ def main():
                    "chips": [asdict(c) for c in deck.chips],
                    "sources": deck.sources(),
                    "instance_count": sum(len(c.rows) * len(c.entries) for c in deck.chips),
-                   "plans": []}
+                   "plans": [], "colors": [], "level_rows": level_rows(deck)}
+            for mode in ("level", "chip", "layer"):
+                for palette, ids in (("jobdeck", None), ("reserve", [1, 3]), (["#AbCdEf", "#fff000"], [])):
+                    saved = {"mode": mode, "palette": palette,
+                             "overrides": {"1": "#123456", "123": "#789abc", "123/43": "#654321",
+                                           "ID001": "#ABCDEF", "C1": "#f00baa", "7": ""},
+                             "cross_ly_dt": palette != "reserve"}
+                    scheme = color.ColorScheme(**dict(saved, palette=color.resolve_palette(palette)))
+                    row["colors"].append({"scheme": saved, "ids": ids,
+                                          "report": {"mode": mode, "order": scheme.order_table(deck, ids),
+                                                     "map": {"%d/%d" % k if isinstance(k, tuple) else str(k): v
+                                                             for k, v in scheme.build(deck, ids).items()}}})
             if hand:
                 row["hand"] = fixtures.EXPECTED
             if dbus is not None:
@@ -53,6 +65,33 @@ def main():
                             lookup = st.pop("out_of")
                             options.update(error=False, placements=[asdict(p) for p in pl],
                                            stats=st, outputs=[lookup[p.chip, p.idx, p.ly, p.dt] for p in pl])
+                            options["views"] = []
+                            for mode in ("level", "chip", "layer"):
+                                scheme = color.ColorScheme(mode=mode, cross_ly_dt=cross,
+                                                           overrides={"1": "#123456", "C1": "#f00baa"})
+                                colors = scheme.build(deck)
+                                rows = render.view_layers(deck, st, scheme, colors)
+                                meta = render.deck_layers_meta(deck, st, scheme, colors, pl)
+                                shim = object.__new__(DeckCache)
+                                shim.deck, shim.meta = deck, {"layers": meta}
+                                # Prevent __del__ from touching an uninitialized workspace.
+                                shim.work = None
+                                selectors = [None, "all", "", ",", "no such layer", "4294967295/42"]
+                                for r in rows[:4]:
+                                    selectors.extend([r["name"], "%d/%d" % (r["layer"], r["datatype"])])
+                                    if r.get("head"):
+                                        selectors.extend(["$%d" % r["layer"], "$%d %s" % (r["layer"], deck.title(r["layer"]))])
+                                resolved = []
+                                for selector in selectors:
+                                    try:
+                                        value = shim.resolve_layers(selector)
+                                    except ValueError:
+                                        resolved.append({"spec": selector, "error": True})
+                                    else:
+                                        resolved.append({"spec": selector, "error": False, "value": value})
+                                options["views"].append({"mode": mode, "rows": rows, "meta": meta,
+                                                         "outputs": [render.view_out_of(rows, scheme)(p) for p in pl],
+                                                         "resolved": resolved})
                         row["plans"].append(options)
             cases.append(row)
 

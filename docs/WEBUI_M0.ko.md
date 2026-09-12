@@ -316,4 +316,5 @@ render의 batch/mosaic/DRC·주석 export는 M4, 덱은 M1a-3이므로 해당 �
 잡덱 문법·좌표·ledger 모델과 bounded source header/catalog, 덱 index의 레벨 선택·
 LOD·occupancy·순차 job 실행을 Rust로 이관했다. 문법/배치 모델의 Python+손계산
 대조, real OASIS 캐시 바이트 대조, 취소/오류 게이트를 배터리에 연결했다.
-덱 색/레이어 행·spec·info/render와 `jobdeck` 분석 CLI는 다음 단계다.
+M1a-3c에서 덱 색/레이어 행·spec·`jobdeck` 분석 CLI까지 이관하고 Python 대조와
+실제 daemon 합성 PNG 검사를 추가했다. 덱 info/render/probe 연결은 다음 단계다.

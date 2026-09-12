@@ -4,7 +4,7 @@
 관련 정본: `FLOE2_OPTIMIZATION.ko.md`(F2R-10/11),
 `RUST_RENDERER_PLAN.ko.md`, `SPEC-VIEWER.ko.md`, `rust/BUILD.md`.
 
-현재 상태: **M0 로컬 조사/API 초안 + M1a-1 worker client + M1a-2a/b 일반 index·info/render/probe CLI + M1a-3a/b 잡덱 모델·index**.
+현재 상태: **M0 로컬 조사/API 초안 + M1a-1 worker client + M1a-2a/b 일반 index·info/render/probe CLI + M1a-3a/b/c 잡덱 모델·index·분석/spec**.
 웹 gateway/프론트엔드 구현, 의존성 선정 게이트 및 M0 현장 검증은 아직
 완료되지 않았다. 여기의 M0~M5는 **웹 전환 단계**이며
 jobdeck/occupancy의 같은 이름 단계와 별개다. 개발 기준과 합류 규칙은 §11.

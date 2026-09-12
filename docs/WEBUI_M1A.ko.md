@@ -13,8 +13,9 @@
 - M1a-2b: `d985f44`, 일반 레이아웃 info/단일 PNG render/probe. 상세 계약은 §7.
 - M0-D7: `cc98ce5`, native 빈 plan 보완(§8).
 - M1a-3a: `4ad0f28`, 잡덱 문법·순수 배치 모델(§9).
-- M1a-3b: source header/catalog와 덱 index(§10).
-- **M1a 전체 완료가 아니다.** jobdeck 색/레이어/spec·읽기 CLI와
+- M1a-3b: `75f1917`, source header/catalog와 덱 index(§10).
+- M1a-3c: jobdeck 색/레이어/spec·분석 CLI(§11).
+- **M1a 전체 완료가 아니다.** 덱 info/render/probe CLI와
   서버 진행 이벤트·view lease는 아직 없다. HTTP/WS/브라우저 UI도 미구현이다.
 
 기하 raster·인덱싱 알고리즘, LOD/occupancy 표현 정책, 캐시 포맷은 변경하지
@@ -288,7 +289,7 @@ release 빌드도 통과했다. 실칩/Calibre의 새 관찰 결과를 검증한
   미인식/손상/누락은 각각 `unknown_format`/`unreadable`/`missing`이다.
   unselected source는 DBU만 조회하며 캐시 상태를 읽거나 catalog에 등록하지 않는다.
 - selected source의 indexed 판정은 canonical VFS 검증을 재사용한다. 옛 cache
-  constructor의 미생성 `.tiles` 경로 표시는 `.floe`로 정규화했다. 오류의 상세
+  constructor의 미생성 `.tiles`/손상 시 빈 경로 표시는 `.floe` 대상으로 정규화했다. 오류의 상세
   문구는 native byte 위치를 포함할 수 있으며 status/필드 의미가 호환 경계다.
 - 레벨에 포함된 source만 TC 순서로 처리한다. 같은 어휘 정규화 **cache destination**을
   가리키는 `a`/`./a`는 한 번만 실행하되 별도 source symlink 옆 캐시는 합치지 않는다.
@@ -315,3 +316,44 @@ oasis 9 / app-core 14 단위 테스트, app/app-core strict clippy 및 fmt,
 offline/locked Linux musl release 빌드 통과. 전체 `sh tools/validate_rust.sh`도
 `RUST VALIDATION: ALL OK`, exit 0이다. 소스 디렉터리 alias를 `canonicalize`하지
 않으므로 symlink별 캐시 경계를 보존하며, 실칩/동시 서버 부하 측정은 포함하지 않았다.
+
+## 11. M1a-3c — 색상·뷰 목록·분석·합성 spec
+
+`floe2-web jobdeck deck.jb --sources DIR --level 1,3 --mode chip --placements
+--report report.json --spec composite.spec`가 Python 없이 분석한다. 기존 색상 JSON,
+cross/zip, missing skip/fail, strict/lenient를 공유 `Analysis` 서비스로 옮겼다.
+
+- 10색 회전·49색 reserve·핀 우선순위, 분석 CLI의 CHIP-block 색상 삽입 순서를
+  보존한다. GUI용 목록은 별도로 level head → 정규화 TC leaf 구조다. 동일
+  소스의 global ordinal과 색상은 전체 덱에서 정하므로 load selection으로 바뀌지 않는다.
+- analysis `ids`는 배치와 CHIP 색상 삽입을 제한하지만 모든 source를 probe한다.
+  load `load_ids`는 source/cache probe와 표시 행을 제한하고, 나머지 source는
+  header DBU만 본다. 두 선택 모두 전체 덱 기준 좌표계를 유지한다.
+- 레이어명/동명 소스/숫자 L/D/옛 `$n TITLE` 선택, level head 확장, load dialog
+  행과 leaf별 placement 수를 이관했다. 아직 브라우저 패널을 만든 것은 아니다.
+- spec은 현재 캐시의 LY/DT만 참조한다. not_indexed/empty_layer는 기존과 같은
+  line=-1, stage=spec ledger; source/placement 순서·scale·정수 dx/dy·색상 동일.
+  float의 지수 0 패딩은 달라도 f64 값은 같다. 캐시/header DBU 불일치나 probe 후
+  source 변경은 오류로 거부한다(열린 뷰 hot reload/managed read lease는 아님).
+- source metadata의 모든 layer를 소스마다 상주시켜 곱하지 않는다. 실제 참조
+  LY/DT만 보관하며 lookup 추정 64MiB, view table/row text 각각 128MiB/65,536행,
+  spec/JSON artifact 128MiB 상한은 명시 오류다. 합계 RSS 상한이나 truncation이 아니다.
+- `--report`/`--spec`은 source/덱/색상 JSON/캐시/lock을 출력으로 쓰지 못한다.
+  미선택·누락 source와 directory alias도 보호한다. 같은 디렉터리 임시파일+
+  sync+rename을 재사용하며 두 artifact는 **개별 원자적**이다. 모든 사전 검사를
+  마친 뒤 report부터 게시한다. 그 뒤 spec I/O가 실패하면 report 게시 사실을 알린다.
+- 의도된 오류 정리: 문법·옵션/그릴 배치 없음은 exit 2, I/O는 1, skip 결과는 3.
+  기존 Python의 일부 `SystemExit(string)`=1과 구분된다. lenient 구조 오류도
+  console과 JSON에 노출한다. 분석 color token의 제어문자, native spec의 non-hex
+  색상은 명시 거부한다. 런타임에 index/renderd나 Python을 실행하지 않는다.
+
+`validate_app_jobdeck.py`는 123개 문법/630개 플랜에 3모드 palette·pins·선택,
+load dialog·뷰 행·색상·selector oracle를 더했다. `validate_app_jobdeck_plan.py`는
+24개 분석/load 모델, 20개 CLI report, 17개 spec 및 실제 daemon 3모드 PNG 쌍을
+대조한다. header-only unselected 손상 cache, selected not_indexed, 빈 레이어,
+skip/fail, 경로 alias 보호, 산출물 보존을 포함하며 배터리에서 필수 실행한다.
+
+2026-09-13 검증: app 4/app-core 16 단위, strict clippy/fmt,
+offline/locked Linux musl release 빌드 통과. 전체 배터리의 신규 oracle와
+기존 jobdeck·renderer·KLayout 검사를 포함해 `RUST VALIDATION: ALL OK`, exit 0.
+실칩·ETX·브라우저 수용 검증을 완료한 것은 아니다.

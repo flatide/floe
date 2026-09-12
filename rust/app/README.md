@@ -1,6 +1,6 @@
 # floe2-web — Rust 애플리케이션 CLI (개발 중)
 
-현재 **일반 레이아웃 `index/info/render/probe`와 잡덱 `index`를 지원**한다. 이름에 web이 있지만 HTTP 서버나
+현재 **일반 레이아웃 `index/info/render/probe`와 잡덱 `index`·분석 `jobdeck`을 지원**한다. 이름에 web이 있지만 HTTP 서버나
 브라우저 UI는 아직 없다. 기존 Python `floe2`/GTK와 병행 개발하는 별도 실행 파일이다.
 
 ```sh
@@ -9,6 +9,8 @@ cargo build --offline --locked --release -p floe-app -p floe-index -p floe-rende
 ./target/release/floe2-web index --help
 ./target/release/floe2-web index /path/to/design.oas --jobs 12
 ./target/release/floe2-web index /path/to/deck.jb --level 1,3 --lod --jobs 12
+./target/release/floe2-web jobdeck /path/to/deck.jb --level 1,3 --mode chip \
+  --report /path/to/analysis.json --spec /path/to/composite.spec
 ./target/release/floe2-web index /path/to/design.oas --occupancy-only --occupancy-um 4
 ./target/release/floe2-web index /path/to/design.oas --profile-cell TOP \
   --profile-jobs 8,12,16 --profile-snapshot /path/to/scratch/profile.bin
@@ -41,7 +43,12 @@ cargo build --offline --locked --release -p floe-app -p floe-index -p floe-rende
   missing/unsupported source는 명시 후 skip, 실행 실패가 있으면 exit 2다.
   Ctrl+C/SIGTERM은 현재 child를 수거하고 다음 소스를 시작하지 않는다.
   덱 cell profile은 거부하므로 해당 source OASIS를 직접 지정한다.
-- 덱 `info/render/probe`, `view/clip/jobdeck/...`와 batch/mosaic/DRC export는 미이관 오류를 낸다.
+- `jobdeck`은 source header·좌표·색상/skip ledger를 분석하며 색인/렌더를 실행하지 않는다.
+  `--sources DIR`, `--colors FILE`, `--ly-dt cross|zip`, `--on-missing skip|fail`,
+  `--lenient`, `--placements`를 지원한다. spec은 current 캐시만 참조하며 누락은 exit 3,
+  그릴 배치가 전혀 없으면 오류다. report/spec은 각각 원자적으로 저장하지만 쌍의 트랜잭션은 아니다.
+  분석 CHIP-block 색상과 뷰어용 level/source-chip 색상은 기존처럼 구분한다.
+- 덱 `info/render/probe`, `view/clip/...`와 batch/mosaic/DRC export는 미이관 오류를 낸다.
   자동 Python fallback이나 기존 launcher/portable 교체는 없다.
 
 범위·차이·검증·다음 단계는 [M1a 기록](../../docs/WEBUI_M1A.ko.md)에 있다.

@@ -1,5 +1,6 @@
 //! Development CLI: deliberately distinct from the Python floe2 launcher.
 #![forbid(unsafe_code)]
+mod deck_analysis;
 mod deck_index;
 mod read;
 use floe_app_core::{
@@ -23,11 +24,12 @@ Usage: floe2-web index SOURCE [OPTIONS]
        floe2-web info SOURCE [--json]
        floe2-web render SOURCE [OPTIONS]
        floe2-web probe SOURCE
+       floe2-web jobdeck DECK.jb [OPTIONS]
        floe2-web --version
 
 Implemented: ordinary layout index/info/render/probe, occupancy, profiling,
-and jobdeck source indexing with level selection.
-Not yet ported: view, clip, jobdeck, drc, svrf, gtktest, batch/mosaic/DRC exports.
+and jobdeck analysis/spec + source indexing with level selection.
+Not yet ported: view, clip, drc, svrf, gtktest, deck rendering, batch/mosaic/DRC exports.
 Use the existing floe2 for those commands; there is no Python fallback.
 Run floe2-web index --help for indexing options.";
 const INDEX_HELP: &str = "Usage: floe2-web index SOURCE [OPTIONS]
@@ -62,6 +64,7 @@ enum Cli {
     Version,
     Index(PathBuf, Box<IndexOptions>, Option<BTreeSet<i64>>),
     Read(Box<read::Command>),
+    Jobdeck(Box<deck_analysis::Command>),
 }
 fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
     let args: Vec<String> = args
@@ -82,7 +85,8 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
         "--version" if args.len() == 1 => return Ok(Cli::Version),
         "index" => (),
         "info" | "render" | "probe" => return read::parse(&args).map(|c| Cli::Read(Box::new(c))),
-        "view" | "clip" | "jobdeck" | "drc" | "svrf" | "gtktest" => {
+        "jobdeck" => return deck_analysis::parse(&args).map(|c| Cli::Jobdeck(Box::new(c))),
+        "view" | "clip" | "drc" | "svrf" | "gtktest" => {
             return Err(Error::new(
                 ErrorKind::Unsupported,
                 format!(
@@ -247,6 +251,7 @@ impl Drop for Signals {
 fn run(cli: Cli, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
     match cli {
         Cli::Read(command) => return read::run(*command, cancelled),
+        Cli::Jobdeck(command) => return deck_analysis::run(*command, cancelled),
         Cli::Help(index) => println!("{}", if index { INDEX_HELP } else { HELP }),
         Cli::Version => println!(
             "floe2-web {} (development M1a; floe-index {})",
