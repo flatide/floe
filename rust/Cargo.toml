@@ -11,6 +11,8 @@ members = [
     "render-cli",
     "renderd",
     "worker-client",
+    "app-core",
+    "app",
 ]
 
 [workspace.package]

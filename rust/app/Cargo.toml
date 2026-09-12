@@ -1,0 +1,15 @@
+[package]
+name = "floe-app"
+version = "0.1.0"
+rust-version = "1.89"
+edition.workspace = true
+license.workspace = true
+description = "Development Rust-only floe2 application CLI (M1a)"
+
+[[bin]]
+name = "floe2-web"
+path = "src/main.rs"
+
+[dependencies]
+floe-app-core = { path = "../app-core" }
+signal-hook = { version = "=0.4.4", default-features = false }

@@ -4,8 +4,9 @@
 [상위 계획](WEBUI_PLAN.ko.md) · [M0 기능 대조표](WEBUI_M0.ko.md).
 
 **아래 endpoint/message는 설계안이며 아직 존재하는 HTTP/WS API가 아니다.**
-2026-09-13 M1a-1의 `rust/worker-client`만 구현했다. 현재 Rust 호출 계약/제약은
-[README](../rust/worker-client/README.md)를 따르며 나머지 crate는 제안이다.
+2026-09-13 M1a-1 `rust/worker-client`와 M1a-2a `app/app-core`의 일반 index만
+구현했다. 현재 호출 계약은 [worker README](../rust/worker-client/README.md),
+[M1a 기록](WEBUI_M1A.ko.md)을 따르며 아래 서비스 전체가 존재하는 것은 아니다.
 M1 구현 때 명세/테스트를 함께 고정한다. 렌더/인덱스 포맷을 새로 만들거나
 Python gateway를 중간 단계로 두지 않는다. 현 jobdeck 실측과 별도 분기다.
 
@@ -47,7 +48,8 @@ reader/정책을 이관한다. 복제 구현이나 `python -m floe ...` fallback
 [WS 모듈](https://docs.rs/axum/latest/axum/extract/ws/index.html),
 [Tokio의 동기/비동기 연결](https://tokio.rs/tokio/topics/bridging).
 
-현재 workspace vendor는 12개 crate이며 이 네트워크/직렬화 stack은 없다.
+M0 조사 때 vendor는 12개 crate였다. M1a-2a에서 Serde/JSON/Unix signal용
+16개를 추가했지만 Axum/Tokio 네트워크 stack은 아직 없다.
 후보를 검토한 것과 폐쇄망 빌드 가능 판정은 다르다. M1b 전에:
 
 1. 최소 feature 집합(HTTP/1, WS, JSON, 필요한 process/io/time/sync)을 시험하고
@@ -59,8 +61,8 @@ reader/정책을 이관한다. 복제 구현이나 `python -m floe ...` fallback
    Cargo의 [vendor/source replacement](https://doc.rust-lang.org/cargo/commands/cargo-vendor.html)
    방식과 기존 `.cargo/config.toml`을 정합하게 유지한다.
 
-이 초안은 Cargo.toml/lock/vendor를 변경하지 않는다. 후보 확정과 의존성 게이트는
-아직 미완료다. M1a의 기존 wire client 개발은 HTTP 의존성 선정과 분리 가능하다.
+이 절의 HTTP 후보는 아직 Cargo.toml/lock/vendor에 추가하지 않았다. 네트워크
+후보 확정과 게이트는 미완료다. M1a의 wire client/JSON 이관은 이와 분리한다.
 
 ## 2. 서비스의 책임과 자료형
 

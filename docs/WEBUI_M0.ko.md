@@ -5,8 +5,8 @@
 서비스 계약 초안: [WEBUI_SERVICE_API.ko.md](WEBUI_SERVICE_API.ko.md).
 
 **로컬 조사/설계 결과이며 이관 완료표가 아니다.** 아래 Rust 서비스와 웹 UI는
-아직 전체 미구현이다. 2026-09-13에 M1a-1 worker client만 추가했으며 §8에서
-추적한다. 기존 Rust parser/VFS/raster/occupancy 구현과 새 서비스의
+아직 전체 미구현이다. 2026-09-13에 M1a-1 worker client와 M1a-2a 일반 index
+경로를 추가했으며 §8~9에서 추적한다. 기존 Rust parser/VFS/raster/occupancy 구현과 새 서비스의
 완료 상태를 구별한다. 실칩 jobdeck/occupancy 판정은 실측 브랜치에서 계속한다.
 
 ## 1. 기준과 조사 방법
@@ -19,7 +19,7 @@
 - 이전 `SPEC-VIEWER.ko.md`, `RUST_RENDERER.md`의 KLayout 시절 설명이나
   과거 refinement/쿼리 cap 수치는 현재 코드보다 우선하지 않는다. 덱의
   hierarchy frames도 오래된 소개 주석과 달리 현재 frames-only pass로 지원한다.
-- 아래 표의 단계는 **목표 단계**다. 모든 행은 신규 Rust 셸 기준 미구현.
+- 아래 표의 단계는 **목표 단계**다. 일반 index의 부분 구현만 §9에 기록했다.
   앞으로 행별로 구현 커밋·회귀 게이트·실행 결과를 붙여 완료로 바꾼다.
 - CLI 이름/옵션/단위/기본값/오류/종료 코드와 JSON·파일 형식을 계약으로 삼는다.
   시간·PID·임시 경로만 정규화해 비교하고, 결정적 픽셀/clip은 기존 오라클을 쓴다.
@@ -290,4 +290,12 @@ CLI 10개 명령 이관은 아직 아니므로 §2의 완료 상태를 올리지
 - Linux: `cargo check --offline -p floe-worker-client --lib
   --target x86_64-unknown-linux-musl` 통과. **교차 컴파일 검사이며 Linux 실행·
   동시 사용자 부하·실칩 성능 검증은 아니다.**
-- 다음: M1a-2 CLI/cache/index 서비스. M0 현장/HTTP 의존성 게이트는 별도 대기.
+- 다음: M1a-2 CLI/cache/index 서비스(§9). M0 현장/HTTP 의존성 게이트는 별도 대기.
+
+## 9. M1a-2a 진행 (2026-09-13)
+
+`floe2-web index`의 일반 레이아웃 경로를 추가했다. 옵션/캐시 보호, LOD/
+occupancy, 셀 프로파일과 snapshot을 Rust `app-core`에서 처리한다.
+잡덱/`--level`은 아직 M1a-3이므로 명시 거부한다. CLI 대조표의 index 전체를
+완료로 올리지 않는다. [실행 방법](../rust/app/README.md),
+[상세 계약·검증·제약](WEBUI_M1A.ko.md)을 따른다.

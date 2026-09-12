@@ -5,6 +5,7 @@ __pycache__/
 .DS_Store
 *.oas
 *.oas.ice/
+*.floe.index.lock
 floe-portable-*.tar.gz
 AGENTS.md
 floe_research/

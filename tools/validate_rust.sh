@@ -66,6 +66,9 @@ echo "== floe2 product + accuracy gates (KLayout = oracle/generator only)"
 .venv/bin/python tools/validate_index_cli.py
 .venv/bin/python tools/validate_vfs_profile.py "$FLOE2_SMOKE_SRC"
 .venv/bin/python tools/validate_floe2.py "$FLOE2_SMOKE_SRC"
+# Rust application shell migration: private valmini copies, never the
+# caller's possibly huge/proprietary milestone source.
+.venv/bin/python tools/validate_app_cli.py "$FLOE2_SMOKE_SRC"
 OUT="${SRC%.oas}_rust.tiles"
 .venv/bin/python tools/validate_rust_scan.py "$SRC"
 .venv/bin/python tools/validate_rust_tiles.py "$SRC" "$OUT"
