@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 mod deck_analysis;
 mod deck_index;
+mod drc;
 mod read;
 mod web_view;
 use floe_app_core::{
@@ -27,12 +28,14 @@ Usage: floe2-web index SOURCE [OPTIONS]
        floe2-web render SOURCE [OPTIONS]
        floe2-web probe SOURCE
        floe2-web jobdeck DECK.jb [OPTIONS]
+       floe2-web drc RESULTS.ice [OPTIONS]
        floe2-web --version
 
 Implemented: layout/jobdeck index/info/render/probe, occupancy, profiling,
 and jobdeck analysis/spec + source indexing with level selection.
 Web preview: isolated Firefox or --no-open; no GTK launcher replacement yet.
-Not yet ported: clip, drc, svrf, gtktest, batch/mosaic/DRC exports.
+DRC read-only CLI: existing fresh ICE packs and waive sidecars.
+Not yet ported: clip, svrf, gtktest, batch/mosaic/DRC exports, ASCII DRC fallback.
 Use the existing floe2 for those commands; there is no Python fallback.
 Run floe2-web index --help for indexing options.";
 const INDEX_HELP: &str = "Usage: floe2-web index SOURCE [OPTIONS]
@@ -69,6 +72,7 @@ enum Cli {
     Read(Box<read::Command>),
     Jobdeck(Box<deck_analysis::Command>),
     View(Box<web_view::Command>),
+    Drc(Box<drc::Command>),
 }
 fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
     let args: Vec<String> = args
@@ -91,7 +95,8 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
         "info" | "render" | "probe" => return read::parse(&args).map(|c| Cli::Read(Box::new(c))),
         "jobdeck" => return deck_analysis::parse(&args).map(|c| Cli::Jobdeck(Box::new(c))),
         "view" => return web_view::parse(&args).map(|c| Cli::View(Box::new(c))),
-        "clip" | "drc" | "svrf" | "gtktest" => {
+        "drc" => return drc::parse(&args).map(|c| Cli::Drc(Box::new(c))),
+        "clip" | "svrf" | "gtktest" => {
             return Err(Error::new(
                 ErrorKind::Unsupported,
                 format!(
@@ -256,6 +261,7 @@ impl Drop for Signals {
 fn run(cli: Cli, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
     match cli {
         Cli::View(command) => return web_view::run(*command, cancelled),
+        Cli::Drc(command) => return drc::run(*command, cancelled),
         Cli::Read(command) => return read::run(*command, cancelled),
         Cli::Jobdeck(command) => return deck_analysis::run(*command, cancelled),
         Cli::Help(index) => println!("{}", if index { INDEX_HELP } else { HELP }),

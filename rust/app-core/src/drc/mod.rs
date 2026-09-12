@@ -1,0 +1,33 @@
+//! Read-only, bounded queries over the existing native DRC pack (layout 4).
+//! No mmap: truncation of a shared file is an I/O error rather than SIGBUS.
+mod local;
+mod pack;
+pub use local::{open_current, reviewer_tag, waive_paths};
+pub use pack::{Check, Cursor, Hit, Pack, Page, Violation};
+
+use crate::{Error, ErrorKind};
+pub const MAGIC: &[u8; 8] = b"FLOEICE\0";
+pub const VERSION: u32 = 4;
+pub const META_BYTES: usize = 64 * 1024 * 1024;
+pub const BLOCK_BYTES: usize = 16 * 1024 * 1024;
+pub const BLOCK_POINTS: usize = 1024 * 1024;
+pub const RECORD_POINTS: usize = 262_144;
+pub const CACHE_BYTES: usize = 32 * 1024 * 1024;
+pub const PAGE_ITEMS: usize = 2000;
+pub const SCAN_ITEMS: u64 = 262_144;
+
+fn corrupt(what: &str) -> Error {
+    Error::new(
+        ErrorKind::Cache,
+        format!("corrupt DRC pack: {what}; rebuild with floe-index drc <db>"),
+    )
+}
+fn limit(what: &str) -> Error {
+    Error::new(
+        ErrorKind::Incomplete,
+        format!("DRC {what} exceeds the read limit; no partial geometry returned"),
+    )
+}
+
+#[cfg(test)]
+mod tests;

@@ -142,6 +142,7 @@ fi
 .venv/bin/python tools/validate_render_frames.py
 # DRC .ice index sidecar: reading through the index == ASCII parse
 .venv/bin/python tools/validate_drc_ice.py
+.venv/bin/python -B tools/validate_app_drc.py
 # SVRF subset parser: preprocessing / derivation closure / check
 # extraction / end-to-end vs gen_drcdb --svrf
 .venv/bin/python tools/validate_svrf.py

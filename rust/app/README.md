@@ -1,6 +1,6 @@
 # floe2-web — Rust 애플리케이션 CLI (개발 중)
 
-현재 **일반 레이아웃/잡덱 `index/info/render/probe`, 분석 `jobdeck`, 기본 웹 `view`를 지원**한다.
+현재 **일반 레이아웃/잡덱 `index/info/render/probe`, 분석 `jobdeck`, 기본 웹 `view`, packed `drc` 조회를 지원**한다.
 기존 Python `floe2`/GTK와 병행 개발하는 별도 실행 파일이며 제품 전환은 아직 완료되지 않았다.
 
 ```sh
@@ -26,6 +26,8 @@ cargo build --offline --locked --release -p floe-app -p floe-index -p floe-rende
 ./target/release/floe2-web view /path/to/design.oas --goto 13600,8600,700 \
   --depth full --detail high --jobs 8 --raster-jobs 4
 ./target/release/floe2-web view /path/to/deck.jb --level 1,3 --mode chip
+./target/release/floe2-web drc /path/to/results.db.ice --rules
+./target/release/floe2-web drc /path/to/results.db --errs M1.WIDTH --floe-reviewer reviewer1
 ```
 
 `cargo`는 `rust/`에서 실행해야 그 안의 `.cargo/config.toml`(vendor, musl linker)이
@@ -69,6 +71,9 @@ cargo build --offline --locked --release -p floe-app -p floe-index -p floe-rende
   ± zoom, `Ctrl+A` fit, `f` frames를 지원한다. 레이어 `⋯`는 fill/pattern/선폭 편집,
   Label px는 6..96 device px다. `--labels`, `--no-frames`, `--label-font-px`는
   초기 표시 옵션이다. 전체 GTK 단축키·query/ruler parity는 아직 개발 중이다.
+- `drc`는 기존 pack(또는 .db 옆의 fresh pack)의 `--rules`/`--errs`/`--list`를
+  스트리밍한다. 기존 per-reviewer waive를 읽되 source/pack/autosave를 생성·수정하지 않는다.
+  ASCII fallback·DRC 웹/공유·편집/notes는 아직 미이관이다([M2 기록](../../docs/WEBUI_M2.ko.md)).
 - `clip/...`와 batch/mosaic/DRC export는 미이관 오류를 낸다.
   자동 Python fallback이나 기존 launcher/portable 교체는 없다.
 

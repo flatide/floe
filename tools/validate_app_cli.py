@@ -62,7 +62,7 @@ def main(fixture):
         assert version in run("--version", env=env).stdout
         assert "--no-open" in run("view", "--help", env=env).stdout
         run("view", env=env, code=2)
-        for cmd in ("clip", "drc", "svrf", "gtktest"):
+        for cmd in ("clip", "svrf", "gtktest"):
             assert "not yet ported" in run(cmd, env=env, code=2).stderr
         for option in ("--coverage", "--legacy", "--tile-mb", "--level"):
             run("index", source, option, env=env, code=2)

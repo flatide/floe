@@ -9,6 +9,7 @@ pub mod browser;
 pub mod cache;
 pub mod catalog;
 pub mod dataset;
+pub mod drc;
 pub mod index;
 pub mod index_progress;
 pub mod jobdeck;

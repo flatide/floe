@@ -14,3 +14,4 @@ floe-worker-client = { path = "../worker-client" }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = { version = "=1.0.151", features = ["float_roundtrip"] }
 libc = "0.2"
+sha1 = "=0.10.7"
