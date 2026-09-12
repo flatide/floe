@@ -142,10 +142,8 @@ cargo build --offline --locked --release -p floe-app --target x86_64-unknown-lin
 
 ## 6. 다음 단계
 
-1. M1a-2b 후속: 빈 visible layer plan의 native 오류를 별도 수정/검증.
-   모두 off인 웹 레이어 제어 전에 해결할 항목(M0-D7).
-2. M1a-3: jobdeck parser/catalog/선택/ledger/spec 및 덱 index 이관.
-3. M1b: 네트워크 의존성 게이트, controller/진행 이벤트/lease → gateway/Canvas.
+1. M1a-3: jobdeck parser/catalog/선택/ledger/spec 및 덱 index 이관.
+2. M1b: 네트워크 의존성 게이트, controller/진행 이벤트/lease → gateway/Canvas.
 
 ## 7. M1a-2b — 일반 레이아웃 읽기와 단일 캡처
 
@@ -212,3 +210,19 @@ HTTP 서버, GTK 실행은 없다. PNG는 renderd의 원본 바이트를 그대�
   occupancy·jobdeck·renderer 및 KLayout oracle 회귀도 통과했다.
 - vendor만 사용하는 `--offline --locked` Linux x86_64 musl release 빌드 통과.
   실제 Linux 실행/ETX 화면/실칩 성능은 이 결과에 포함하지 않는다.
+
+## 8. M0-D7 — 전체 레이어 off의 빈 프레임
+
+VFS는 가시 레이어가 없거나 뷰에 아무것도 없으면 빈 working set을 반환한다.
+렌더 scene은 root가 필수인데 기존에는 occupancy summary만 이 경우를 보완했다.
+`Cache::plan`에서 working cells와 pages가 **둘 다 빈 경우만** 빈 root를 추가한다.
+잘못된 비어 있지 않은 plan의 missing-root 검증, 페이지/cut 정책, 기존 구조
+프레임은 그대로다. 데이터/인덱스 포맷 변경이나 재인덱싱은 없다.
+
+- CLI Python/Rust oracle: 모든 레이어 off와 뷰 바깥은 검은 PNG 성공,
+  depth 0 + frames on은 레이어가 모두 off여도 구조 경계를 유지.
+- 실제 persistent worker: retained cache on에서 on→off→on의 픽셀 복원 확인.
+- native compatibility 버전 0.12.84. `floe-renderd` 재빌드가 필요하다.
+- 2026-09-13: render-core 116개, worker protocol 3개·lifecycle 9개 및
+  실제 worker gate 통과. CLI PNG/report 비교는 빈 뷰 3건을 추가해 15건이다.
+  전체 `validate_rust.sh`도 `RUST VALIDATION: ALL OK`, exit 0.

@@ -213,7 +213,7 @@ DISPLAY가 없어도 동작해야 한다(기존 GTK 오류까지 이식하지 �
 | M0-D4 | query wire는 seq만 있고 조회 scene generation/round가 없음 | 웹 query 개방 전 expected/actual scene identity 추가. 단순 응답 seq 필터로 안전하다고 하지 않기 |
 | M0-D5 | `.ovo` 교체와 열린 GUI 캐시 수명주기 | 사용자 합의대로 현 실측 blocker 아님. 서버 revision 설계는 초안, hot reload 구현은 별도 승인 |
 | M0-D6 | `FLOE_RENDERD_BIN`은 무효여도 다음 후보, `FLOE_INDEX_BIN`은 hard error | 차이를 재현한 뒤 새 Rust 셸에서는 명시 override 실패를 오류로 정규화하는 변경을 기록 |
-| M0-D7 | 단일 render에서 visible layers가 비면 native plan에 top이 없어 오류(Python/Rust 양쪽 재현) | 이관 gate에서 명시 실패로 고정. 웹 전체 off 제어 전에 별도 native fix + blank-frame gate |
+| M0-D7 | 단일 render에서 visible layers가 비면 native plan에 top이 없어 오류(Python/Rust 양쪽 재현) | 수정: 실제로 비어 있는 plan만 빈 root로 정규화. all-off/바깥 뷰 blank, 구조 frame 유지, retained off→on 회귀 |
 
 ## 5. 로컬/현장 완료 게이트
 

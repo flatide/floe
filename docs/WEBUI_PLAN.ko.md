@@ -439,5 +439,5 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
 - **M1a-2a 구현(2026-09-13)**: 개발용 `floe2-web index`의 일반 레이아웃
   경로(캐시/LOD/occupancy/프로파일). [M1a 기록](WEBUI_M1A.ko.md)에 범위와
   차이·회귀 게이트를 둔다. M1a-2b에서 info/단일 PNG render/probe도 이관했고,
-  다음은 빈 가시 레이어 native plan 보완과 M1a-3 덱 이관이다.
+  빈 가시 레이어 native plan도 별도 보완했다(M0-D7). 다음은 M1a-3 덱 이관이다.
   CLI 전체/gateway/웹 UI 완료가 아니며 GTK/실측 브랜치는 유지한다.

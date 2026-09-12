@@ -485,10 +485,11 @@ impl Cache {
         let started = Instant::now();
         let mut plan = self.vfs.plan_hier(&req);
         let plan_us = elapsed_us(started);
-        // a request whose every visible layer is summarized (and
-        // pruned) plans no working cell at all; the scene still needs
-        // the top so the summary planes have a frame to paint into
-        if plan.wcells.is_empty() && !request.summary_layers.is_empty() {
+        // All layers off, an empty viewport, or fully summarized geometry
+        // legitimately selects no working cells. The renderer still requires
+        // a root, including for summary planes. Normalize only the empty plan;
+        // keep real structural frames and missing-root validation unchanged.
+        if plan.wcells.is_empty() && plan.pages.is_empty() {
             plan.wcells.push(floe_vfs::hier::WsCell {
                 key: plan.top,
                 pages: Vec::new(),

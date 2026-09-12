@@ -174,12 +174,15 @@ def main(fixture):
         first = meta["layers"][0]
         key = f'{first["layer"]}/{first["datatype"]}'
         compare(source, work, env, "selected", ["--px", "96x96", "--layers", key + "," + key])
-        # Existing native defect: an empty visible plan has no top record.
-        # Record parity as an explicit failure, never a successful blank PNG;
-        # the web all-off control needs a separate native regression/fix.
-        for python in (False, True):
-            run(["render", source, "--px", "96x96", "--layers", ",", "--out", work / "none.png"], env, code=1, python=python)
-        assert not (work / "none.png").exists()
+        # A legitimate empty plan must publish a complete blank image. Turning
+        # design layers off must not hide the independent structural frontier.
+        from PIL import Image
+        blank = compare(source, work, env, "none", ["--px", "96x96", "--layers", ","])
+        assert Image.open(blank).convert("RGB").getbbox() is None
+        framed = compare(source, work, env, "none-frames", ["--px", "96x96", "--layers", ",", "--depth", "0", "--frames"])
+        assert Image.open(framed).convert("RGB").getbbox() is not None
+        outside = compare(source, work, env, "outside", ["--px", "96x96", "--bbox", "1000000,1000000,1000100,1000100"])
+        assert Image.open(outside).convert("RGB").getbbox() is None
         # Design colour wins over old cached colour, but archival fill/width
         # remain solid/1 regardless of live personalization.
         props = Path(str(source) + ".layerprops")

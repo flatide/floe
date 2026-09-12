@@ -100,8 +100,9 @@ must not contain whitespace. Unlike the CLI, daemon `view` coordinates are raw
 DBU.
 
 The initial `ready version=...` handshake is an exact compatibility boundary.
-Its Cargo package version must match the Python product and `floe-index` version;
-the adapter rejects a missing or stale version before opening the cache. This is
+Its Cargo package version must match Python's `RENDERD_VERSION` and `floe-index`;
+the display-only `__version__` and developer `floe-render-cli` version are separate.
+The adapter rejects a missing or stale version before opening the cache. This is
 also a field diagnostic: an old daemon cannot masquerade as current code when a
 repetition rule changes.
 

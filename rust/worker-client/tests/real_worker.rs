@@ -104,6 +104,31 @@ fn native_frames_match_python_adapter_and_raw() {
     let gen = worker.render(request.clone()).unwrap();
     assert_ne!(final_frame(&mut worker, gen).bytes, raw.bytes);
     worker.set_styles(&styles).unwrap();
+    // M0-D7: all-off is a complete blank frame, not an invalid-plan error.
+    // A retained on -> off -> on sequence must not reuse the wrong visibility.
+    request.frame_cache = true;
+    let gen = worker.render(request.clone()).unwrap();
+    assert_eq!(final_frame(&mut worker, gen).bytes, raw.bytes);
+    request.layers = Layers::None;
+    let gen = worker.render(request.clone()).unwrap();
+    let blank = final_frame(&mut worker, gen);
+    assert!(blank.bytes[16..]
+        .chunks_exact(4)
+        .all(|p| p == [0, 0, 0, 255]));
+    // Structural depth-frontier frames do not belong to design layers.
+    request.depth = Some(0);
+    request.frames = true;
+    let gen = worker.render(request.clone()).unwrap();
+    let frames = final_frame(&mut worker, gen);
+    assert!(frames.bytes[16..]
+        .chunks_exact(4)
+        .any(|p| p[..3] != [0, 0, 0]));
+    request.depth = None;
+    request.frames = false;
+    request.layers = Layers::All;
+    let gen = worker.render(request.clone()).unwrap();
+    assert_eq!(final_frame(&mut worker, gen).bytes, raw.bytes);
+    request.frame_cache = false;
     request.format = FrameFormat::Png;
     request.frames = true;
     request.labels = true;
