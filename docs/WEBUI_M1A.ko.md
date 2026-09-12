@@ -14,9 +14,11 @@
 - M0-D7: `cc98ce5`, native 빈 plan 보완(§8).
 - M1a-3a: `4ad0f28`, 잡덱 문법·순수 배치 모델(§9).
 - M1a-3b: `75f1917`, source header/catalog와 덱 index(§10).
-- M1a-3c: jobdeck 색/레이어/spec·분석 CLI(§11).
-- **M1a 전체 완료가 아니다.** 덱 info/render/probe CLI와
-  서버 진행 이벤트·view lease는 아직 없다. HTTP/WS/브라우저 UI도 미구현이다.
+- M1a-3c: `18822b5`, jobdeck 색/레이어/spec·분석 CLI(§11).
+- M1a-3d: 잡덱 info/render/probe와 공통 Dataset 경계(§12).
+- M1a의 기본 CLI/읽기 경로를 이관했다. 서버 진행 이벤트·view lease는
+  M1b에서 연결해야 하며 HTTP/WS/브라우저 UI는 아직 미구현이다.
+  batch/mosaic/DRC/clip 등 보조 명령까지 제품 전체를 이관한 것은 아니다.
 
 기하 raster·인덱싱 알고리즘, LOD/occupancy 표현 정책, 캐시 포맷은 변경하지
 않았다. 빈 플랜 오류만 §8에서 별도 수정했다. `feature/jobdeck` 실측 브랜치와
@@ -147,8 +149,8 @@ cargo build --offline --locked --release -p floe-app --target x86_64-unknown-lin
 
 ## 6. 다음 단계
 
-1. M1a-3c: jobdeck 색·UI 레이어, spec 및 덱 분석/읽기 CLI 이관.
-2. M1b: 네트워크 의존성 게이트, controller/진행 이벤트/lease → gateway/Canvas.
+1. M1b: 네트워크 의존성 게이트, controller/진행 이벤트/lease → gateway/Canvas.
+2. M2/M4: DRC 조회·공유, query/clip·설정·batch/mosaic/보조 CLI parity.
 
 ## 7. M1a-2b — 일반 레이아웃 읽기와 단일 캡처
 
@@ -357,3 +359,54 @@ skip/fail, 경로 alias 보호, 산출물 보존을 포함하며 배터리에서
 offline/locked Linux musl release 빌드 통과. 전체 배터리의 신규 oracle와
 기존 jobdeck·renderer·KLayout 검사를 포함해 `RUST VALIDATION: ALL OK`, exit 0.
 실칩·ETX·브라우저 수용 검증을 완료한 것은 아니다.
+
+## 12. M1a-3d — 잡덱 읽기·렌더와 Dataset 경계
+
+`floe2-web info deck.jb [--level 1,3] [--json]`, `render deck.jb ...`,
+`probe deck.jb`를 기존 Rust worker에 직접 연결한다. Python은 개발용 오라클뿐이다.
+
+- `Dataset::Layout/Deck`은 다른 입력을 구별한다. `DeckSnapshot`에는 모델·
+  가상 layer metadata·spec·전체 skip ledger가 있고, `info --json`은 `cache:null`이다.
+  metadata를 읽기 위해 daemon이나 임시 spec 파일을 만들지 않는다.
+- `--level`은 load selection이다. 미선택 소스 header가 정한 DBU/배치 좌표계,
+  전체 덱 기준 색·source ordinal, level head 확장 및 동명 소스 선택을 유지한다.
+  headless CLI는 기존처럼 level mode이고 Chip/Layer mode는 공유 API에서 검증했다.
+- live 속성은 mode별 `.layerprops` namespace를 쓰고 color/fill/width를 독립 상속한다.
+  leaf의 width=1이나 무효 fill이 head의 유효 설정을 지우지 않는다. archival PNG는
+  같은 색에 solid/width=1이다. 속성 색상 매핑은 키 조회로 처리한다.
+- spec은 worker 소유 0700 workspace에만 staging하고 close/오류/취소에서 제거한다.
+  native `opened unit`은 layout에서 DBU/µm, deck에서 µm/DBU인 기존 차이를
+  구분해 검증한다. 좌표와 native wire/기하 코드는 바꾸지 않는다.
+- `thin auto`는 layout cull/deck keep, depth/detail/frames/occupancy와 pass streaming
+  정책은 그대로다. deck label 요청은 worker 실행 전에 거부한다.
+- source/spec 단계 누락이나 native 예산 deferral은 **표시된 부분 PNG + report
+  complete=false + exit 3**으로 기존 덱 CLI를 보존한다. 원인 없는 final-partial,
+  glyph 잘림, 실패/취소는 기존 PNG를 보존한다. report는 PNG와 별개 원자적 게시이며
+  report 실패 시 PNG가 이미 저장됐는지 명시한다. 입력/캐시/lock/props 경로는 출력 금지.
+- `info`의 skip은 metadata/console에 노출하되 기존 exit 0을 유지한다. `probe`는
+  두 프레임이 그려져도 source skip이 있으면 **exit 3, OK 없음**으로 개선했다(M0-D9).
+  snapshot 개방 도중 deck 변경은 오류지만 외부 색인/OVO hot reload는 여전히 별도 범위다.
+
+필수 게이트 `tools/validate_app_deck_render.py`:
+
+- synthetic 23개 CLI PNG/report 쌍: 선택·이름/leaf/head·all/none/outside,
+  fractional view·thin·finite hierarchy frames, missing layer/source,
+  1MiB streaming 동일 픽셀 및 streaming off 부분 결과.
+- 6개 API 모델(level/chip/layer × 전체/부분 load)의 metadata/live styles,
+  archival PNG 바이트 오라클. 원본·캐시 내용/mtime 무변경 단언.
+- 실패/잘못된 unit/final partial/glyph 보존, known deferral 표시,
+  ready/open/style/render × SIGINT/SIGTERM에서 child reap/임시파일 회수.
+- 일반 레이아웃 게이트도 재실행하며 `--layers all` 정규화 비교를 추가했다.
+
+기존 Python oracle는 TMPDIR에 공백이 있으면 내부 wire 경로를 표현하지 못하며,
+새 worker client도 해당 root를 명시 거부한다. 공백 없는 private root에서 대조하되
+소스·산출물의 공백/한글은 지원/검증한다. Python의 CLI 임시 deck spec과 Rust의
+정리 검사는 별도 temp root로 분리한다.
+
+2026-09-13 검증: fmt/strict clippy, app 4/app-core 16 단위, 신규 deck/read oracle,
+전체 `validate_rust.sh`(jobdeck·occupancy·renderer·KLayout 포함) exit 0,
+`RUST VALIDATION: ALL OK`. offline/locked Linux musl release와 선언 MSRV인
+Rust 1.89의 앱 check도 통과했다. Linux 실행/ETX/실칩 수용은 미측정이다.
+최초 배터리에서는 macOS의 기존 KLayout fork fixture 생성이 대기 상태에
+멈췄다. 해당 검사만 종료하고 동일 fixture를 legacy `--jobs 1`로 생성(4초),
+전체 배터리를 처음부터 재실행해 통과했다. 비교 geometry/게이트는 생략하지 않았다.

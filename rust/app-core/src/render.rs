@@ -1,11 +1,11 @@
 //! Synchronous controller API for CLI and a future bounded server controller.
 //! No raster implementation lives here; only policy and worker lifecycle.
 use crate::{
-    catalog::Layout,
-    check_cancelled,
+    artifact, check_cancelled,
+    dataset::Dataset,
     native::Discovery,
     shots::{Shot, MAX_PIXELS},
-    styles, Error, ErrorKind, Result,
+    Error, ErrorKind, Result,
 };
 use floe_worker_client::{Config, Event, Frame, FrameFormat, RenderRequest, Source, WorkerClient};
 use std::path::PathBuf;
@@ -59,24 +59,35 @@ pub struct RenderSession {
 }
 impl RenderSession {
     pub fn open(
-        layout: &Layout,
+        dataset: &Dataset,
         options: RenderOptions,
         archival: bool,
         cancelled: Arc<AtomicUsize>,
     ) -> Result<Self> {
         check_cancelled(&cancelled)?;
-        let styles = styles::layout_styles(layout, archival)?;
+        let styles = dataset.styles(archival)?;
         let mut config = Config::new(&options.binary);
         config.open_timeout = Duration::from_secs(options.open_timeout_s);
         config.max_pixels = MAX_PIXELS;
         config.shutdown_requested = Some(Arc::clone(&cancelled));
         let mut worker = WorkerClient::spawn(config)?;
-        let opened = worker.open(
-            Source::Layout(layout.directory.clone()),
-            options.budget_mb,
-            options.decode_jobs,
-        )?;
-        if (opened.unit * layout.metadata.dbu - 1.).abs() > 1e-12 {
+        let source = match dataset {
+            Dataset::Layout(layout) => Source::Layout(layout.directory.clone()),
+            Dataset::Deck(deck) => {
+                let path = worker.work_dir().join("deck.spec");
+                artifact::publish(&path, deck.spec.text.as_bytes(), &cancelled)?;
+                Source::Deck(path)
+            }
+        };
+        let opened = worker.open(source, options.budget_mb, options.decode_jobs)?;
+        // Native layout replies use DBU/um; deck replies use um/deck-DBU.
+        // Preserve this existing wire distinction without changing coordinates.
+        let unit_ratio = if dataset.is_deck() {
+            opened.unit / dataset.dbu()
+        } else {
+            opened.unit * dataset.dbu()
+        };
+        if (unit_ratio - 1.).abs() > 1e-12 {
             return Err(Error::new(
                 ErrorKind::Cache,
                 "metadata and worker units differ",
@@ -124,9 +135,15 @@ impl RenderSession {
             }
         }
     }
-    pub fn shot_request(&self, layout: &Layout, shot: &Shot) -> Result<RenderRequest> {
-        let (box_um, w, h) = shot.fitted(layout.bbox_um())?;
-        let view = box_um.map(|v| v / layout.metadata.dbu);
+    pub fn shot_request(&self, dataset: &Dataset, shot: &Shot) -> Result<RenderRequest> {
+        if dataset.is_deck() && shot.labels {
+            return Err(Error::new(
+                ErrorKind::Unsupported,
+                "jobdeck labels are not supported",
+            ));
+        }
+        let (box_um, w, h) = shot.fitted(dataset.bbox_um())?;
+        let view = box_um.map(|v| v / dataset.dbu());
         if !view.iter().all(|v| v.is_finite()) {
             return Err(Error::input("DBU conversion overflow"));
         }
@@ -136,11 +153,11 @@ impl RenderSession {
             height: h,
             depth: shot.depth,
             cut_px: shot.detail.cut_px(),
-            layers: layout.resolve_layers(shot.layers.as_deref())?,
+            layers: dataset.resolve_layers(shot.layers.as_deref())?,
             frames: shot.frames,
             labels: shot.labels,
             font_px: shot.font_px,
-            thin: shot.thin.effective(false),
+            thin: shot.thin.effective(dataset.is_deck()),
             format: FrameFormat::Png,
             ..self.base_request()
         })

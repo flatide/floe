@@ -1,6 +1,6 @@
 # floe2-web — Rust 애플리케이션 CLI (개발 중)
 
-현재 **일반 레이아웃 `index/info/render/probe`와 잡덱 `index`·분석 `jobdeck`을 지원**한다. 이름에 web이 있지만 HTTP 서버나
+현재 **일반 레이아웃/잡덱 `index/info/render/probe`와 분석 `jobdeck`을 지원**한다. 이름에 web이 있지만 HTTP 서버나
 브라우저 UI는 아직 없다. 기존 Python `floe2`/GTK와 병행 개발하는 별도 실행 파일이다.
 
 ```sh
@@ -19,6 +19,10 @@ cargo build --offline --locked --release -p floe-app -p floe-index -p floe-rende
 ./target/release/floe2-web render /path/to/design.oas --at 100,200 --size 50,50 \
   --px 800x800 --thin keep --out /path/to/shot.png
 ./target/release/floe2-web probe /path/to/design.oas
+./target/release/floe2-web info /path/to/deck.jb --level 1,3 --json
+./target/release/floe2-web render /path/to/deck.jb --level 1,3 --px 800x800 \
+  --detail high --out /path/to/deck.png --report /path/to/deck.json
+./target/release/floe2-web probe /path/to/deck.jb
 ```
 
 `cargo`는 `rust/`에서 실행해야 그 안의 `.cargo/config.toml`(vendor, musl linker)이
@@ -35,7 +39,9 @@ cargo build --offline --locked --release -p floe-app -p floe-index -p floe-rende
   기존 Python/native CLI와 열린 뷰어까지 보호하는 서버 lease는 아니다.
 - render 기본은 full depth/cut=0, solid fill이다. `--detail`/`--thin`/라벨·프레임은
   명시 선택하며 좌표 suffix와 단일 JSON report를 지원한다. 전체 옵션은 `render --help`.
-  final partial/glyph truncation은 exit 3으로 PNG를 보존한다.
+  원인 없는 final partial/glyph truncation은 exit 3으로 기존 PNG를 보존한다.
+  덱 source skip/예산 deferral은 표시된 부분 PNG와 complete=false report를 저장하고
+  exit 3을 반환한다. `probe`도 덱 skip이 있으면 OK 대신 exit 3이다.
 - `FLOE_RENDERD_BIN` 조회도 명시 override 실패를 거부한다. 기존
   `FLOE_RUST_JOBS`/`FLOE_RUST_RASTER_JOBS` 등 렌더 환경 옵션을 지원한다.
 - 덱 index는 선택된 레벨의 plain OASIS 소스를 하나씩 실행한다. `--jobs`는
@@ -48,7 +54,7 @@ cargo build --offline --locked --release -p floe-app -p floe-index -p floe-rende
   `--lenient`, `--placements`를 지원한다. spec은 current 캐시만 참조하며 누락은 exit 3,
   그릴 배치가 전혀 없으면 오류다. report/spec은 각각 원자적으로 저장하지만 쌍의 트랜잭션은 아니다.
   분석 CHIP-block 색상과 뷰어용 level/source-chip 색상은 기존처럼 구분한다.
-- 덱 `info/render/probe`, `view/clip/...`와 batch/mosaic/DRC export는 미이관 오류를 낸다.
+- `view/clip/...`와 batch/mosaic/DRC export는 미이관 오류를 낸다.
   자동 Python fallback이나 기존 launcher/portable 교체는 없다.
 
 범위·차이·검증·다음 단계는 [M1a 기록](../../docs/WEBUI_M1A.ko.md)에 있다.

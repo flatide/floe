@@ -36,13 +36,14 @@ def digest(cache):
             for p in cache.iterdir() if p.is_file()}
 
 
-def compare(source, work, env, tag, args):
+def compare(source, work, env, tag, args, code=0, python_env=None):
     out = work / (tag + " rust.png")
     ref = work / (tag + " python.png")
     report = work / (tag + " rust.json")
     ref_report = work / (tag + " python.json")
-    run(["render", source, *args, "--out", ref, "--report", ref_report], env, python=True)
-    run(["render", source, *args, "--out", out, "--report", report], env)
+    run(["render", source, *args, "--out", ref, "--report", ref_report],
+        env if python_env is None else python_env, code=code, python=True)
+    run(["render", source, *args, "--out", out, "--report", report], env, code=code)
     if out.read_bytes() != ref.read_bytes():
         from PIL import Image, ImageChops
         import collections
@@ -69,7 +70,7 @@ def wait_marker(marker, proc):
         time.sleep(0.01)
 
 
-def fake_worker_tests(source, work, env, png, unit):
+def fake_worker_tests(source, work, env, png, unit, deck=False):
     version = subprocess.check_output([str(RENDERD), "--version"], text=True).split()[1]
     fake = work / "fake-renderd"
     fake.write_text(f'''#!{sys.executable}
@@ -87,14 +88,14 @@ for line in sys.stdin:
     kind = parts[0]
     d = dict(p.split("=", 1) for p in parts[1:])
     ready(kind)
-    if kind == "open": print("opened unit={unit} max_depth=6", flush=True)
+    if kind == "open": print("opened unit=" + str({unit} * (2 if mode == "unit" else 1)) + " max_depth=6", flush=True)
     elif kind == "style": print("styled epoch=" + d["epoch"], flush=True)
     elif kind == "render":
         if mode == "failure":
             print("error gen=" + d["gen"] + " code=render message=ENOSPC", flush=True)
             continue
         pathlib.Path(d["out"]).write_bytes(pathlib.Path(os.environ["FAKE_PNG"]).read_bytes())
-        print("frame gen=" + d["gen"] + " round=1 final=1 partial=" + ("1" if mode == "partial" else "0") + " deferred=0 labels_truncated=" + ("1" if mode == "labels" else "0") + " style_epoch=" + d["style_epoch"] + " format=png png=" + d["out"], flush=True)
+        print("frame gen=" + d["gen"] + " round=1 final=1 partial=" + ("1" if mode in ("partial", "deferred") else "0") + " deferred=" + ("2" if mode == "deferred" else "0") + " labels_truncated=" + ("1" if mode == "labels" else "0") + " style_epoch=" + d["style_epoch"] + " format=png png=" + d["out"], flush=True)
     elif kind == "quit": break
 ''')
     fake.chmod(0o700)
@@ -102,11 +103,21 @@ for line in sys.stdin:
     marker = work / "fake-phase"
     fake_env = dict(env, FLOE_RENDERD_BIN=str(fake), FAKE_MARKER=str(marker), FAKE_PNG=str(png))
     args = ["render", source, "--px", "128x128", "--out", target]
-    for mode, code in [("failure", 1), ("partial", 3), ("labels", 3)]:
+    for mode, code in [("failure", 1), ("unit", 1), ("partial", 3), ("labels", 3)]:
         target.write_bytes(b"keep previous successful export")
         result = run(args, dict(fake_env, FAKE_MODE=mode), code=code)
         assert target.read_bytes() == b"keep previous successful export"
-        assert ("ENOSPC" if mode == "failure" else "incomplete") in result.stderr
+        expected = {"failure": "ENOSPC", "unit": "units differ"}.get(mode, "incomplete")
+        assert expected in result.stderr
+    if deck:
+        report = work / "fake-partial.json"
+        result = run([*args, "--report", report], dict(fake_env, FAKE_MODE="deferred"), code=3)
+        assert target.read_bytes() == png.read_bytes()
+        doc = json.loads(report.read_text())
+        assert not doc["complete"] and not doc["jobdeck"]["complete"]
+        assert doc["jobdeck"]["over_budget_pages"] == 2
+        assert "INCOMPLETE" in result.stderr
+        target.write_bytes(b"keep previous successful export")
     for phase in ("ready", "open", "style", "render"):
         for sig in (signal.SIGINT, signal.SIGTERM):
             marker.unlink(missing_ok=True)
@@ -132,7 +143,7 @@ for line in sys.stdin:
                 if proc.poll() is None:
                     proc.kill()
                     proc.communicate()
-            assert not list(Path(env["TMPDIR"]).iterdir()), "private frame workspace leaked"
+            assert not list(Path(env["TMPDIR"]).iterdir()), ("private frame workspace leaked", list(Path(env["TMPDIR"]).iterdir()))
 
 
 def main(fixture):
@@ -165,6 +176,7 @@ def main(fixture):
         bb = [n * meta["dbu"] for n in meta["bbox"]]
         box = ",".join(map(str, bb))
         default_png = compare(source, work, env, "fit", ["--px", "128x128"])
+        compare(source, work, env, "all", ["--px", "128x128", "--layers", "all"])
         compare(source, work, env, "width", ["--px", "123", "--bbox", box])
         compare(source, work, env, "units", ["--px", "97x81", "--at", "5um,3000nm", "--size", "12µm,9μm", "--anchor", "lb"])
         compare(source, work, env, "stretch", ["--px", "101x67", "--bbox", "12,10,-2,-4", "--stretch"])

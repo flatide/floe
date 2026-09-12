@@ -27,9 +27,9 @@ Usage: floe2-web index SOURCE [OPTIONS]
        floe2-web jobdeck DECK.jb [OPTIONS]
        floe2-web --version
 
-Implemented: ordinary layout index/info/render/probe, occupancy, profiling,
+Implemented: layout/jobdeck index/info/render/probe, occupancy, profiling,
 and jobdeck analysis/spec + source indexing with level selection.
-Not yet ported: view, clip, drc, svrf, gtktest, deck rendering, batch/mosaic/DRC exports.
+Not yet ported: view, clip, drc, svrf, gtktest, batch/mosaic/DRC exports.
 Use the existing floe2 for those commands; there is no Python fallback.
 Run floe2-web index --help for indexing options.";
 const INDEX_HELP: &str = "Usage: floe2-web index SOURCE [OPTIONS]

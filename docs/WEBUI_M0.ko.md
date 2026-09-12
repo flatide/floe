@@ -215,6 +215,7 @@ DISPLAY가 없어도 동작해야 한다(기존 GTK 오류까지 이식하지 �
 | M0-D6 | `FLOE_RENDERD_BIN`은 무효여도 다음 후보, `FLOE_INDEX_BIN`은 hard error | 차이를 재현한 뒤 새 Rust 셸에서는 명시 override 실패를 오류로 정규화하는 변경을 기록 |
 | M0-D7 | 단일 render에서 visible layers가 비면 native plan에 top이 없어 오류(Python/Rust 양쪽 재현) | 수정: 실제로 비어 있는 plan만 빈 root로 정규화. all-off/바깥 뷰 blank, 구조 frame 유지, retained off→on 회귀 |
 | M0-D8 | 기존 덱 index wrapper는 page-target/slow-cell/P2 tuning 및 profile 인자를 전달하지 않음 | Rust는 일반 index 서비스를 재사용해 tuning을 전달. 덱 profile은 source를 직접 지정하도록 명시 거부. 선택·LOD·occupancy는 동일 유지 |
+| M0-D9 | 기존 덱 probe는 source skip이 있어도 두 렌더 완료만으로 OK/exit 0 | Rust probe는 skip ledger가 남으면 exit 3과 incomplete를 보고하고 OK를 출력하지 않음. info의 exit 0과 render의 부분 PNG/exit 3은 기존 유지 |
 
 ## 5. 로컬/현장 완료 게이트
 

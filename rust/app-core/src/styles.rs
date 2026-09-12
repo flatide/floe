@@ -104,7 +104,7 @@ pub fn load_props(source: &Path) -> Result<Vec<LayerProps>> {
     }
     Ok(vec![])
 }
-fn pattern(name: &str) -> Option<Fill> {
+pub(crate) fn pattern(name: &str) -> Option<Fill> {
     for line in PATTERNS.lines() {
         let mut parts = line.split_whitespace();
         if !parts.next().is_some_and(|s| s.eq_ignore_ascii_case(name)) {

@@ -283,7 +283,7 @@ fn directory_size(path: &Path, cancelled: &AtomicUsize) -> Result<u64> {
     }
     Ok(bytes)
 }
-fn comma(n: u64) -> String {
+pub(crate) fn comma(n: u64) -> String {
     let text = n.to_string();
     let mut out = String::new();
     for (i, c) in text.chars().enumerate() {

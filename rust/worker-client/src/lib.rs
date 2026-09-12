@@ -114,7 +114,8 @@ pub enum Source {
 
 #[derive(Clone, Debug)]
 pub struct Opened {
-    /// Native database units per micron (inverse of Python meta["dbu"]).
+    /// Layout: DBU per micron (inverse of metadata dbu). Deck: microns per
+    /// deck DBU (the spec's unit). This preserves the native wire distinction.
     pub unit: f64,
     pub max_depth: u64,
     pub is_deck: bool,

@@ -73,6 +73,7 @@ echo "== floe2 product + accuracy gates (KLayout = oracle/generator only)"
 .venv/bin/python -B tools/validate_app_jobdeck.py
 .venv/bin/python -B tools/validate_app_jobdeck_sources.py
 .venv/bin/python -B tools/validate_app_jobdeck_plan.py
+.venv/bin/python -B tools/validate_app_deck_render.py
 OUT="${SRC%.oas}_rust.tiles"
 .venv/bin/python tools/validate_rust_scan.py "$SRC"
 .venv/bin/python tools/validate_rust_tiles.py "$SRC" "$OUT"
