@@ -8,6 +8,7 @@ pub mod artifact;
 pub mod cache;
 pub mod catalog;
 pub mod index;
+pub mod jobdeck;
 pub mod native;
 pub mod render;
 pub mod shots;

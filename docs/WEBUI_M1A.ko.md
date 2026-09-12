@@ -10,13 +10,16 @@
 - M1a-2a: `b3a95d7`, **일반 OASIS `index` CLI 경로**. `rust/app`의 `floe2-web` 실행 파일,
   `rust/app-core`의 바이너리 조회·캐시 검증·옵션 정책·프로세스 수명주기.
   기존 `floe-index`를 직접 실행하며 Python에 위임하지 않는다.
-- M1a-2b: 일반 레이아웃 info/단일 PNG render/probe. 상세 계약은 §7.
-- **M1a 전체 완료가 아니다.** jobdeck/parser/catalog와
+- M1a-2b: `d985f44`, 일반 레이아웃 info/단일 PNG render/probe. 상세 계약은 §7.
+- M0-D7: `cc98ce5`, native 빈 plan 보완(§8).
+- M1a-3a: 잡덱 문법·순수 배치 모델(§9).
+- **M1a 전체 완료가 아니다.** jobdeck source catalog/spec/CLI와
   서버 진행 이벤트·view lease는 아직 없다. HTTP/WS/브라우저 UI도 미구현이다.
 
-Rust renderer, 인덱싱 알고리즘, LOD/occupancy 표현 정책, 캐시 포맷은 변경하지
-않았다. `feature/jobdeck` 실측 브랜치와 기존 Python 제품/portable도 그대로다.
-내부 개발 crate 버전은 0.1.0이며 기존 indexer/renderd 호환 버전 0.12.83과 다르다.
+기하 raster·인덱싱 알고리즘, LOD/occupancy 표현 정책, 캐시 포맷은 변경하지
+않았다. 빈 플랜 오류만 §8에서 별도 수정했다. `feature/jobdeck` 실측 브랜치와
+기존 Python 제품/portable은 유지한다. 내부 개발 crate 버전은 0.1.0이며
+indexer/renderd 호환 버전 0.12.84와 다르다.
 
 ## 2. index 계약
 
@@ -142,7 +145,7 @@ cargo build --offline --locked --release -p floe-app --target x86_64-unknown-lin
 
 ## 6. 다음 단계
 
-1. M1a-3: jobdeck parser/catalog/선택/ledger/spec 및 덱 index 이관.
+1. M1a-3b: jobdeck source catalog/헤더 probe, 색·UI 레이어, spec 및 덱 CLI/index 이관.
 2. M1b: 네트워크 의존성 게이트, controller/진행 이벤트/lease → gateway/Canvas.
 
 ## 7. M1a-2b — 일반 레이아웃 읽기와 단일 캡처
@@ -226,3 +229,44 @@ VFS는 가시 레이어가 없거나 뷰에 아무것도 없으면 빈 working s
 - 2026-09-13: render-core 116개, worker protocol 3개·lifecycle 9개 및
   실제 worker gate 통과. CLI PNG/report 비교는 빈 뷰 3건을 추가해 15건이다.
   전체 `validate_rust.sh`도 `RUST VALIDATION: ALL OK`, exit 0.
+
+## 9. M1a-3a — 잡덱 문법·좌표 모델
+
+`app-core::jobdeck::{parser,geom}`에 순수 Rust 모델을 추가했다. 아직 새 CLI의
+`.jb`/`--level` 거부는 풀지 않는다. 실제 source probe·색상/레이어 tree·native spec
+생성·덱 index/render 연결은 다음 단계이며 이 단계에서 완료로 표시하지 않는다.
+
+- 관찰된 한 줄 `$ (...)`, CHIP tail, Y/X 순서 ROWS, MTITLE/OPTION,
+  독립 AD/SF/TC, LY/DT, 미정의 필드·위치 인자·unparsed/warning을 보존한다.
+  명칭 변환 규칙이나 미확인 directive의 배치 효과를 새로 추론하지 않는다.
+- strict 구조 오류 거부, lenient 오류 ledger와 잘린 항목 제외를 지원한다.
+  UTF-8 손상 바이트는 기존 `errors="replace"`와 같다. 더 엄격해진 경계는
+  괄호 불균형/짝 오류, NaN/Inf·i64 밖 식별자, 잘못된 ROWS 줄의 부분 적용 금지다.
+  이 경우도 lenient에서 잘못된 배치를 성공으로 내보내지 않는다.
+- `ratio=AD/source_dbu`, `mag=SF×ratio`, `dx=jx−cx×ratio`를 동일 연산 순서로
+  계산한다. `SF`는 정렬 offset에 곱하지 않는다. 전체 덱 DBU/extent가 격자를
+  정하고 선택된 배치만 생성한다. half-even 반올림·±2^62 범위·잔여 오차도 보존.
+  양수가 아닌 AD/SF와 좌표 산술 overflow/underflow는 명시 오류다.
+- LY×DT(default), zip(last datatype 반복), source 문제의 selected skip과
+  outside-selection ledger, CHIP별/공유 layer table 및 보고서를 보존한다.
+  `out_of`의 내부 CHIPs×모든 레이어 복제는 없애고 공유 키로 같은 출력 번호를
+  조회한다. 보고서 형식이나 실제 배치 순서는 바뀌지 않는다.
+- 신규 서비스 안전 경계: 입력 64MiB/한 줄 1MiB/괄호 64중첩, 보고서 CHIP×level
+  4M 항목, 플랜 기본 visits 4M·배치 2M·LY/DT 및 layer table 65,536·출력 모델
+  추정 메모리 256MiB. **초과는 전체 오류이지 부분 성공/픽셀 생략이 아니다.**
+  긴 이름·반복 skip anchor도 할당 전에 회계한다. 모델 예산은 프로세스 전체 RSS
+  상한이 아니며 parser 입력/임시 자료구조/JSON 보고서는 별도다. PlanOptions로
+  조정 가능한 라이브러리 경계이고 서버 전체 admission은 M1b에서 관리한다.
+
+게이트 `tools/validate_app_jobdeck.py`는 고객 파일 없이 기존 synthetic DECK와
+seed 고정 100개 덱으로 Python oracle을 만들고 Rust 통합 테스트가 소비한다.
+보고서/모든 entry/ROWS/source 순서와 630개 cross·zip·선택·색상 grouping용 플랜을
+정수/float 값을 포함해 대조한다. `tools/jobdeck_expected.json`의 독립 손계산
+17개 배치도 별도로 확인한다. 일반 Cargo test의 ignored test는 이 스크립트가
+필수 실행하고 fixture 누락은 실패한다. 전체 배터리에 연결했다.
+
+2026-09-13 결과: app-core 단위 13개와 strict clippy/fmt 통과. 모델 gate는
+최종 123개 문법 사례와 630개 플랜에서 `RUST APP JOBDECK MODEL: ALL OK`.
+전체 배터리도 `RUST VALIDATION: ALL OK`, exit 0이며 마지막 진단 숫자 표기
+7건 추가 후에는 모델 gate와 clippy를 재실행했다. Offline/locked Linux musl
+release 빌드도 통과했다. 실칩/Calibre의 새 관찰 결과를 검증한 것은 아니다.
