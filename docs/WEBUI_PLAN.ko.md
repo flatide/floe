@@ -5,8 +5,9 @@
 `RUST_RENDERER_PLAN.ko.md`, `SPEC-VIEWER.ko.md`, `rust/BUILD.md`.
 
 현재 상태: **M0 로컬 조사/API 초안 + M1a worker client·공유 서비스 + 일반/잡덱 index·info/render/probe·분석/spec CLI**.
-웹 gateway/프론트엔드 구현, 의존성 선정 게이트 및 M0 현장 검증은 아직
-완료되지 않았다. 여기의 M0~M5는 **웹 전환 단계**이며
+M1b-1에서 의존성 선정과 인증된 loopback HTTP/WS transport 기반을 추가했다.
+세션/렌더 연결·브라우저 UI와 M0 현장 검증은 아직 완료되지 않았다.
+상세 범위는 [M1b 기록](WEBUI_M1B.ko.md). 여기의 M0~M5는 **웹 전환 단계**이며
 jobdeck/occupancy의 같은 이름 단계와 별개다. 개발 기준과 합류 규칙은 §11.
 로컬 산출물: [기능/CLI 대조표](WEBUI_M0.ko.md),
 [Rust 서비스/API 초안](WEBUI_SERVICE_API.ko.md).
@@ -442,5 +443,6 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
   빈 가시 레이어 native plan도 별도 보완했다(M0-D7). M1a-3a에서 잡덱 문법·
   좌표·skip ledger 모델, M1a-3b에서 source catalog와 덱 index를 이관했다.
   M1a-3c/d에서 덱 색/레이어·spec·분석/읽기 CLI와 공통 Dataset을 연결했다.
-  다음은 M1b의 네트워크 의존성·세션 controller·진행 이벤트/lease·gateway/Canvas다.
+  M1b-1에서 vendored HTTP/WS 의존성·loopback 인증/제한을 검증했다.
+  다음은 세션 controller·진행 이벤트/lease·gateway/Canvas다.
   CLI 전체/gateway/웹 UI 완료가 아니며 GTK/실측 브랜치는 유지한다.

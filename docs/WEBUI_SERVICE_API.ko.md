@@ -3,7 +3,9 @@
 작성 2026-09-12, 기준 `feature/webui@6c33a48`.
 [상위 계획](WEBUI_PLAN.ko.md) · [M0 기능 대조표](WEBUI_M0.ko.md).
 
-**아래 endpoint/message는 설계안이며 아직 존재하는 HTTP/WS API가 아니다.**
+**아래 endpoint/message는 전체 서비스 설계안이다.** M1b-1의 일부 transport API
+(exchange/capabilities/logout/WS ping)는 [M1b 기록](WEBUI_M1B.ko.md)에 명세/구현했다.
+view/index/render/공유 endpoint 전체가 존재하는 것은 아니다.
 2026-09-13 M1a-1 `rust/worker-client`와 M1a-2a/b `app/app-core`의 일반 index·info/단일 render/probe를
 구현했다. 현재 호출 계약은 [worker README](../rust/worker-client/README.md),
 [M1a 기록](WEBUI_M1A.ko.md)을 따르며 아래 서비스 전체가 존재하는 것은 아니다.
@@ -41,16 +43,17 @@ reader/정책을 이관한다. 복제 구현이나 `python -m floe ...` fallback
 
 ### 1.1 HTTP/WS 의존성 후보와 도입 게이트
 
-우선 후보는 **Axum + Tokio + Serde/serde_json**. Axum의 HTTP routing과
+선정은 **Axum + Tokio + Serde/serde_json**. Axum의 HTTP routing과
 `ws` feature를 사용하고 RFC6455를 직접 구현하지 않는다. Tokio는 transport와
 프로세스 I/O에 한정하고 기존 동기 도메인과 경계를 둔다.
 근거: [Axum 문서](https://docs.rs/axum/latest/axum/),
 [WS 모듈](https://docs.rs/axum/latest/axum/extract/ws/index.html),
 [Tokio의 동기/비동기 연결](https://tokio.rs/tokio/topics/bridging).
 
-M0 조사 때 vendor는 12개 crate였다. M1a-2a에서 Serde/JSON/Unix signal용
-16개를 추가했지만 Axum/Tokio 네트워크 stack은 아직 없다.
-후보를 검토한 것과 폐쇄망 빌드 가능 판정은 다르다. M1b 전에:
+M0의 vendor 12개에 M1a-2a에서 Serde/JSON/Unix signal용 16개,
+M1b-1에서 네트워크 stack용 59개를 추가했다. 버전·feature·라이선스·보안·
+offline/MSRV 결과는 [M1b 기록 §3](WEBUI_M1B.ko.md#3-httpws-의존성-게이트).
+의존성 갱신 때 다음 게이트를 계속 적용한다:
 
 1. 최소 feature 집합(HTTP/1, WS, JSON, 필요한 process/io/time/sync)을 시험하고
    정확한 버전·MSRV·전이 의존성을 lock에 고정. 무심코 `full`을 켜지 않는다.
@@ -61,8 +64,8 @@ M0 조사 때 vendor는 12개 crate였다. M1a-2a에서 Serde/JSON/Unix signal�
    Cargo의 [vendor/source replacement](https://doc.rust-lang.org/cargo/commands/cargo-vendor.html)
    방식과 기존 `.cargo/config.toml`을 정합하게 유지한다.
 
-이 절의 HTTP 후보는 아직 Cargo.toml/lock/vendor에 추가하지 않았다. 네트워크
-후보 확정과 게이트는 미완료다. M1a의 wire client/JSON 이관은 이와 분리한다.
+M1b-1의 Cargo.toml/lock/vendor와 transport 검증은 구현됐다. 원격 배포/TLS,
+실제 Linux/Firefox/ETX 수용 검증까지 완료했다는 뜻은 아니다.
 
 ## 2. 서비스의 책임과 자료형
 

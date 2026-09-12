@@ -15,9 +15,10 @@
 - M1a-3a: `4ad0f28`, 잡덱 문법·순수 배치 모델(§9).
 - M1a-3b: `75f1917`, source header/catalog와 덱 index(§10).
 - M1a-3c: `18822b5`, jobdeck 색/레이어/spec·분석 CLI(§11).
-- M1a-3d: 잡덱 info/render/probe와 공통 Dataset 경계(§12).
+- M1a-3d: `742ef5a`, 잡덱 info/render/probe와 공통 Dataset 경계(§12).
 - M1a의 기본 CLI/읽기 경로를 이관했다. 서버 진행 이벤트·view lease는
-  M1b에서 연결해야 하며 HTTP/WS/브라우저 UI는 아직 미구현이다.
+  M1b에서 연결해야 한다. [M1b 기록](WEBUI_M1B.ko.md)의 transport 기반과
+  웹 뷰어 전체 완료를 구분한다. 브라우저 UI는 아직 미구현이다.
   batch/mosaic/DRC/clip 등 보조 명령까지 제품 전체를 이관한 것은 아니다.
 
 기하 raster·인덱싱 알고리즘, LOD/occupancy 표현 정책, 캐시 포맷은 변경하지

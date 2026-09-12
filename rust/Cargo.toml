@@ -13,6 +13,7 @@ members = [
     "worker-client",
     "app-core",
     "app",
+    "web",
 ]
 
 [workspace.package]
