@@ -312,6 +312,11 @@ impl WorkerClient {
     pub fn pid(&self) -> Option<u32> {
         self.child.as_ref().map(Child::id)
     }
+    /// Includes cancelled generations until their terminal response/file has
+    /// been consumed. A cancel acknowledgement alone does not drain work.
+    pub fn pending_generations(&self) -> usize {
+        self.issued.len()
+    }
     pub fn work_dir(&self) -> &Path {
         &self.workspace.0
     }

@@ -1,15 +1,18 @@
 use floe_app_core::{
     dataset::Dataset,
     jobdeck::color::Mode,
+    managed::{Limits, ManagedDataset, Resources},
     render::{require_complete, RenderOptions, RenderSession},
     shots::Shot,
     styles,
+    view::{Model, Phase, ViewController, ViewState, Viewport},
 };
 use floe_worker_client::Fill;
 use serde_json::{json, Value};
 use std::{
     path::Path,
     sync::{atomic::AtomicUsize, Arc},
+    time::{Duration, Instant},
 };
 
 fn fill_text(fill: &Fill) -> String {
@@ -88,6 +91,44 @@ fn snapshots_styles_and_native_frames_match_python() {
             case["mode"]
         );
         session.close().unwrap();
+        let resources = Resources::new(Limits::default()).unwrap();
+        let managed = ManagedDataset::open(
+            &resources,
+            Path::new(case["source"].as_str().unwrap()),
+            serde_json::from_value(case["levels"].clone()).unwrap(),
+            Mode::parse(case["mode"].as_str().unwrap()).unwrap(),
+            &flag,
+        )
+        .unwrap();
+        let model = Model::new(&managed).unwrap();
+        let mut state = ViewState::initial(&model, 103, 91).unwrap();
+        let bounds: [f64; 4] = serde_json::from_value(case["bbox"].clone()).unwrap();
+        state.viewport = Viewport::new(bounds.map(|n| n / model.dbu), 103, 91).unwrap();
+        state.detail = floe_app_core::shots::Detail::Exact;
+        state.styles = Arc::new(managed.dataset.styles(true).unwrap());
+        let mut options = RenderOptions::local().unwrap();
+        options.decode_jobs = 2;
+        options.raster_jobs = 2;
+        options.raw = false;
+        let mut controller = ViewController::start(&resources, managed, options, state).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let frame = loop {
+            let snapshot = controller.snapshot();
+            assert_ne!(snapshot.phase, Phase::Failed, "{:?}", snapshot.failure);
+            if let Some(f) = controller.latest().filter(|f| f.frame.final_frame) {
+                break f;
+            }
+            assert!(Instant::now() < deadline, "deck controller deadline");
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        assert_eq!(
+            frame.frame.bytes,
+            std::fs::read(case["png"].as_str().unwrap()).unwrap(),
+            "managed deck PNG {}",
+            case["mode"]
+        );
+        assert_eq!(frame.state_rev, 1);
+        controller.close().unwrap();
     }
-    println!("RUST APP DECK DATASET: ALL OK (6 cases)");
+    println!("RUST APP DECK DATASET: ALL OK (6 cases) + 6 managed controllers");
 }

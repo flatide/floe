@@ -10,10 +10,12 @@ pub mod catalog;
 pub mod dataset;
 pub mod index;
 pub mod jobdeck;
+pub mod managed;
 pub mod native;
 pub mod render;
 pub mod shots;
 pub mod styles;
+pub mod view;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorKind {

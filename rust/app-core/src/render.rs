@@ -1,4 +1,4 @@
-//! Synchronous controller API for CLI and a future bounded server controller.
+//! Synchronous application API for the CLI and dedicated view-control thread.
 //! No raster implementation lives here; only policy and worker lifecycle.
 use crate::{
     artifact, check_cancelled,
@@ -102,6 +102,24 @@ impl RenderSession {
     }
     pub fn pid(&self) -> Option<u32> {
         self.worker.pid()
+    }
+    pub fn submit(&mut self, request: RenderRequest) -> Result<u64> {
+        self.worker.render(request).map_err(Into::into)
+    }
+    pub fn cancel(&mut self) -> Result<u64> {
+        self.worker.cancel().map_err(Into::into)
+    }
+    pub fn pending_generations(&self) -> usize {
+        self.worker.pending_generations()
+    }
+    pub fn poll(&mut self, timeout: Duration) -> Result<Option<Event>> {
+        self.worker.poll(timeout).map_err(Into::into)
+    }
+    pub fn set_styles(&mut self, styles: &[floe_worker_client::Style]) -> Result<()> {
+        self.worker
+            .set_styles(styles)
+            .map(|_| ())
+            .map_err(Into::into)
     }
     pub fn close(&mut self) -> Result<()> {
         self.worker.close().map_err(Into::into)

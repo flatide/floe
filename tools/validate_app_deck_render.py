@@ -144,6 +144,7 @@ def main():
                            text=True, capture_output=True, timeout=90)
         assert p.returncode == 0, p.stdout + p.stderr
         assert "RUST APP DECK DATASET: ALL OK (6 cases)" in p.stdout
+        assert "+ 6 managed controllers" in p.stdout
         for props in work.glob("*.layerprops"):
             props.unlink()
 

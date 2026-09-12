@@ -7,13 +7,14 @@
 
 **M1b-1은 인증된 loopback HTTP/WS transport 라이브러리 기반**이다.
 `rust/web`의 `floe-web` crate를 추가했다. 아직 웹 뷰어 실행 명령, 정적 UI,
-렌더/색인 endpoint, 프레임 스트리밍, 세션 controller가 없다.
+렌더/색인 endpoint, 프레임 스트리밍은 아직 없다. **M1b-2a에서 앱 코어의
+managed read lease·admission과 latest-only view controller를 추가했다**(§5).
 `floe2-web view`가 동작한다거나 M1/G1/G4가 완료됐다는 뜻이 아니다.
 
 다음 단계:
 
-1. M1b-2: managed catalog/read-write lease, 작업/worker admission, 상태/epoch,
-   latest-only render controller·프레임 봉투·credit와 독립 watchdog.
+1. M1b-2b: 인증 세션/허가된 dataset handle과 controller 연결, index 진행 이벤트,
+   connection epoch·프레임 봉투·subscriber credit·유계 복원 상태.
 2. M1b-3: 번들 HTML/Canvas와 실행 명령, open/goto/pan/zoom, layer/level/chip,
    depth/detail/thin·스타일·상태줄, DPR/y축/half-DBU/늦은 decode 필터.
 3. M1b-4: layout margin prefetch/착지 base/crop/16px 위상, 실제 UI 게이트와
@@ -142,3 +143,70 @@ workspace 전체 `cargo fmt --all -- --check`는 기존 native 코드의 포맷 
 
 실제 Linux 실행, Firefox/ETX, 프레임 지연/메모리, 다중 사용자 admission은
 아직 미측정이다. 네트워크 보안 감사의 범위와 기존 font 경고는 §3.1을 따른다.
+
+## 5. M1b-2a — 관리형 캐시/자원과 view controller
+
+`app-core/managed.rs`와 `app-core/view/`는 HTTP를 모르는 앱 서비스다. 신뢰된
+로컬 source 등록 → `ManagedDataset::open` → 초기 `ViewState`의 정책/goto 일괄
+검증 → `ViewController::start` 순서다. 첫 제출은 그 초기 상태이며 숨은 fit
+render를 먼저 실행하지 않는다. open 대기 중 입력도 최신 상태에 누적한다.
+
+- source별 캐시 키를 실제 부모 디렉터리 기준으로 정규화해 read/write lease를
+  한 번에 획득하거나 전부 거부한다. 잡덱은 선택된 모든 TC 캐시를 pin하며,
+  누락 TC의 키도 포함한다. 실제 open 후 source 집합을 다시 대조한다.
+  재open은 새 dataset revision이며 외부 `.ovo` 자동 감지/hot reload는 없다.
+- `Resources` 기본 예약은 CPU 16 slot, index가 빌려 쓸 수 없는 foreground 4,
+  worker 2, decoded budget 합 2048 MiB다. render는 **decode+raster 합**으로
+  보수적으로 예약한다. index 요청은 1..16 jobs를 검증하되 기본 reserve 때문에
+  한 번에 최대 12가 승인된다. 16을 쓰려면 관리자가 reserve=0 등 명시 설정해야
+  한다. 초과는 Busy이고 조용히 jobs를 줄이지 않는다. 대기 queue는 아직 없다.
+- 이 제한과 lease는 **동일 Resources/gateway의 관리형 작업에만** 유효하다.
+  외부 GTK/CLI/다른 gateway의 재색인을 차단하지 않는다. 원래 `PreparedIndex`
+  exclusive OS lock은 유지한다. 실제 index endpoint는 후속 단계에서 lease를
+  native child reap까지 소유하도록 연결한다. 단순 permit API가 이미 index
+  endpoint나 server-wide supervisor를 완성했다는 뜻이 아니다.
+- decoded 합은 RSS hard cap이 아니다. generation/retained/mask/mmap 및
+  전송 복사, native 제어/heartbeat 스레드는 별도다. 실행 중 index를 선점하거나
+  다중 사용자 응답 시간을 보장하지 않는다. 예약값은 현장 측정 전 로컬 기본치다.
+
+view별 제어 스레드는 native worker 하나를 소유하며 브라우저 구독/ack와
+무관하게 20ms poll로 응답 파일·deadline을 처리한다. foreground active 최대 1,
+pending은 최신 상태 1개다. 취소는 한 번만 보내고 `pending_generations()==0`
+(terminal 응답/파일 소비)까지 다음 작업을 제출하지 않는다. stdin의 cancel ack는
+작업 종료와 다르다. 취소 후에도 별도 5s drain deadline을 유지하고 초과 시
+명시 실패/worker close·reap. startup/close는 공유 종료 flag로 중단 가능하다.
+
+`state_rev`(복원 상태), `render_rev`(뷰포트 또는 유효 픽셀 정책), `render_key`
+(pan과 무관한 정책), `worker_epoch`와 native generation/round는 별개다.
+예를 들어 layout auto→cull은 state_rev만, pan은 render_rev만, keep/style 변경은
+key도 바꾼다. stale base revision은 상태를 바꾸지 않고 conflict. 상대 pan 100개는
+100개 모두 적용하며 렌더만 합친다. 최신 frame Arc 하나를 보관하고 정책/뷰포트
+변경 즉시 무효화한다. 늦은 frame과 실제 IO 오류는 각각 discard/명시 오류이며
+서로를 cancelled 또는 성공으로 바꾸지 않는다.
+
+서버 좌표 계산은 기존 f64 DBU 경계를 유지한다. 전달 DTO의 10진 문자열 변환은
+다음 단계다. pan은 선택 시 16 device px 위상 스냅, zoom anchor는 화면 좌상단
+기준, resize는 중심/배율 보존이다. 1..8192 px/축, 합 16 Mpx, 유한·양의 bbox,
+native 스타일 폭 1..8·색/레이어/덱 라벨 capability를 상태 반영 전에 검증한다.
+덱 head 선택은 자식 pair로 확장하고, head 스타일은 자식에 전파하되 같은 요청의
+명시 child 스타일이 우선한다. 일반 layout/deck의 cut/occupancy 규칙은 그대로다.
+
+검증: 단위 테스트의 100회 입력, startup 단일 transaction, cancel ack/terminal
+순서, 취소 drain timeout, 무구독 진행/이전 Arc 회수, revision/key, 오류·종료·
+자원 반납과 alias/atomic lease를 고정했다. `validate_view_controller.py`는
+Unicode/공백 source의 private valmini를 색인하고 **PATH가 빈 환경**에서 Rust
+controller의 13개 실제 PNG를 기존 동기 RenderSession과 바이트 대조한다.
+cache 바이트/mtime 불변, worker 임시파일 0, lease 충돌/재open revision과
+startup 실패 후 자원 회수도 필수 단언이다. 전체 배터리에 연결했다.
+
+잡덱 dataset 게이트도 level/chip/layer × 전체/선택 로드 6개를 managed
+controller로 다시 렌더해 Python 오라클 PNG와 대조한다. 첫 state_rev=1과
+캐시 lease/단위 변환/초기 스타일을 포함한 경로다.
+
+검증 완료: app-core 단위 **29개**, worker-client 전체, 위 **13+6개 PNG 대조**,
+변경 패키지 fmt/strict clippy(`--no-deps`), 전체 `sh tools/validate_rust.sh`
+(`RUST VALIDATION: ALL OK`, jobdeck 80·renderer 46·기존 KLayout 오라클 포함).
+Rust 1.89.0/빈 registry `CARGO_HOME`/`--offline --locked` 단위 29개와 Linux
+musl release 테스트 실행 파일의 정적 링크도 확인했다. Linux에서 실제 실행한
+결과는 아니며, 기존 workspace 전역 fmt/clippy 차이는 §4와 동일하게 보존한다.
+이 단계에는 웹 프레임 전송/GUI/ETX 측정이 없으며 G1/G4 또는 M1 전체 완료가 아니다.

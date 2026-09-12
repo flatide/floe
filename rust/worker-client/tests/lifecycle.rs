@@ -173,6 +173,7 @@ fn stale() {
     no_outputs(&w);
     w.render(request(FrameFormat::Raw)).unwrap();
     let frontier = w.cancel().unwrap();
+    assert_eq!(w.pending_generations(), 1);
     loop {
         match w.poll(Duration::from_millis(50)).unwrap() {
             Some(Event::CancelAcknowledged { before_generation }) => {
@@ -186,6 +187,9 @@ fn stale() {
     no_outputs(&w);
     w.render(request(FrameFormat::Raw)).unwrap();
     assert!(frame(&mut w).complete());
+    while w.pending_generations() > 0 {
+        w.poll(Duration::from_millis(20)).unwrap();
+    }
 }
 fn startup_errors() {
     let tmp = Temp::new();

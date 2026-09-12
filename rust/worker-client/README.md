@@ -42,7 +42,12 @@ poll은 frame 파일 소비와 render deadline 판정을 수행한다. 브라우
 poll을 멈추면 내부 line queue가 유계여도 기존 renderd의 `round_paths=1`
 게시 파일/daemon 내부 response queue까지 유계가 되는 것은 아니다. M1b의
 latest-frame mailbox/WS credit은 이 controller의 downstream에 둔다.
-watchdog/서버 전체 admission이 구현되었다고 보지 않는다.
+`app-core/view`의 M1b-2a controller는 이 독립 poll과 취소 후 drain deadline을
+구현했다. WS credit 및 서버 전체 admission이 구현되었다고 보지는 않는다.
+
+`pending_generations()`는 취소한 세대도 terminal 응답/파일 소비까지 센다.
+`CancelAcknowledged`만 받고 0이라고 가정하지 않는다. M1b controller는 이 값이
+0일 때만 다음 렌더/스타일 변경을 제출한다.
 
 style 변경은 idle 또는 cancel 이후에 가능하고 ack까지 기다린다. 남아 있는
 stale frame은 이 대기 중에도 회수한다. `poll(None 결과)`는 대기 시간 만료일

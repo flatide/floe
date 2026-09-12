@@ -135,7 +135,7 @@ impl Layers {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Fill {
     Solid,
     Speckle,
@@ -143,7 +143,7 @@ pub enum Fill {
     Pattern([u16; 16]),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Style {
     pub layer: (u32, u32),
     pub color: [u8; 4],

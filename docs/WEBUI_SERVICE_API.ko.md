@@ -6,6 +6,8 @@
 **아래 endpoint/message는 전체 서비스 설계안이다.** M1b-1의 일부 transport API
 (exchange/capabilities/logout/WS ping)는 [M1b 기록](WEBUI_M1B.ko.md)에 명세/구현했다.
 view/index/render/공유 endpoint 전체가 존재하는 것은 아니다.
+M1b-2a의 `app-core/managed`·`view`에는 process-local lease/admission과
+독립 worker controller가 구현됐으나 HTTP/WS 세션 연결은 후속 단계다.
 2026-09-13 M1a-1 `rust/worker-client`와 M1a-2a/b `app/app-core`의 일반 index·info/단일 render/probe를
 구현했다. 현재 호출 계약은 [worker README](../rust/worker-client/README.md),
 [M1a 기록](WEBUI_M1A.ko.md)을 따르며 아래 서비스 전체가 존재하는 것은 아니다.
@@ -295,7 +297,11 @@ open마다 계산하는 방식으로 대형 파일 비용을 늘리지 않는다
 사용자가 미룬 열린 GUI `.ovo` 자동 감지는 이 설계만으로 해결 처리하지 않는다.
 revision의 디스크 형식/보존량/무중단 업데이트는 별도 설계 판정 항목이다.
 
-## 7. 공유 서버 자원 — 숫자는 운영 제안, 아직 적용 아님
+## 7. 공유 서버 자원 — 로컬 예약 구현과 운영 제안
+
+M1b-2a는 같은 Resources 객체의 worker/index 예약과 cache lease를 구현했다.
+실제 기본값·적용 범위는 [M1b 기록 §5](WEBUI_M1B.ko.md#5-m1b-2a--관리형-캐시자원과-view-controller).
+아래의 server-wide 감독·현장 응답성 정책까지 구현/검증한 것은 아니다.
 
 **gateway별 semaphore는 서버 전체 제한이 아니다.** launcher마다 gateway가
 생기면 각각의 한도가 곱해진다. 배포 B/C는 한 공용 supervisor/admission service
