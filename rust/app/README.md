@@ -62,7 +62,9 @@ cargo build --offline --locked --release -p floe-app -p floe-index -p floe-rende
   Firefox가 없으면 `--firefox PATH`를 지정하거나 `--no-open`으로 private session
   JSON의 일회용 URL을 사용한다. 이 파일은 0600이며 링크를 공유/로그에 남기면 안 된다.
   소스 경로는 CLI에서만 등록한다(최대 32개). 웹의 open은 자동으로 색인하지 않는다.
-  GTK launcher/portable은 그대로다. refinement와 이 단계의 margin은 off다.
+  GTK launcher/portable은 그대로다. refinement는 off, 일반 layout margin은 on이다.
+  `--frame-cache off`로 native retained frame 재사용과 margin을 함께 끄고 측정할 수 있다.
+  잡덱 margin은 미지원이다.
 - `clip/...`와 batch/mosaic/DRC export는 미이관 오류를 낸다.
   자동 Python fallback이나 기존 launcher/portable 교체는 없다.
 

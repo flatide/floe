@@ -195,3 +195,133 @@ fn actual_worker_frames_and_leases() {
     );
     println!("RUST VIEW CONTROLLER: ALL OK (13 PNG pairs, leases, startup failure)");
 }
+
+#[test]
+#[ignore = "run tools/validate_view_controller.py with a private valmini fixture"]
+fn native_margin_pixels_match_direct_views_without_geometry_changes() {
+    use floe_app_core::view::{margin, ControllerOptions};
+    let source = PathBuf::from(std::env::var_os("FLOE_VIEW_FIXTURE").unwrap());
+    for pattern in [false, true] {
+        let resources = Resources::new(Limits::default()).unwrap();
+        let stop = Arc::new(AtomicUsize::new(0));
+        let data = ManagedDataset::open(&resources, &source, None, Mode::Level, &stop).unwrap();
+        let model = Model::new(&data).unwrap();
+        let mut options = RenderOptions::local().unwrap();
+        options.decode_jobs = 1;
+        options.raster_jobs = 1;
+        options.budget_mb = 64;
+        options.raw = true;
+        let mut initial = ViewState::initial(&model, 257, 191).unwrap();
+        initial.labels = false;
+        initial.detail = Detail::High;
+        initial.viewport.bbox[0] += 0.0625;
+        initial.viewport.bbox[2] += 0.0625;
+        initial.viewport.bbox[1] -= 0.0625;
+        initial.viewport.bbox[3] -= 0.0625;
+        if pattern {
+            initial.styles = Arc::new(
+                initial
+                    .styles
+                    .iter()
+                    .cloned()
+                    .map(|mut s| {
+                        s.fill = Fill::Pattern([0xa55a; 16]);
+                        s
+                    })
+                    .collect(),
+            );
+        }
+        let mut reference =
+            RenderSession::open(&data.dataset, options.clone(), false, Arc::clone(&stop)).unwrap();
+        reference.set_styles(&initial.styles).unwrap();
+        let mut v = ViewController::start_configured(
+            &resources,
+            Arc::clone(&data),
+            options,
+            initial.clone(),
+            ControllerOptions {
+                margin_prefetch: true,
+                frame_cache: true,
+            },
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let retained = loop {
+            assert!(Instant::now() < deadline, "{:?}", v.snapshot().failure);
+            if let Some(f) = v.margin() {
+                break f;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert!(retained.frame.complete());
+        assert_eq!(retained.frame.generation, 2);
+        assert!(retained.frame.bytes[16..]
+            .chunks_exact(4)
+            .any(|c| c[0] > 0 || c[1] > 0 || c[2] > 0));
+        for (x, y) in [
+            (0., 0.),
+            (0.1, 0.),
+            (-0.1, 0.),
+            (0., 0.1),
+            (0., -0.1),
+            (0.5, 0.),
+            (-0.5, 0.),
+            (0., 0.5),
+            (0., -0.5),
+        ] {
+            let s = initial
+                .edit(
+                    &model,
+                    Patch {
+                        navigation: Some(Navigation::Pan { x, y, snap: true }),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let expected = reference
+                .capture(s.request(&model, reference.base_request()))
+                .unwrap();
+            assert!(expected.complete());
+            let [ox, oy] = margin::origin(retained.viewport(), s.viewport).unwrap();
+            assert!(margin::covers(retained.viewport(), s.viewport));
+            for row in 0..s.viewport.height as usize {
+                let src = 16
+                    + ((row + oy as usize) * retained.frame.request.width as usize + ox as usize)
+                        * 4;
+                let dst = 16 + row * s.viewport.width as usize * 4;
+                let n = s.viewport.width as usize * 4;
+                assert_eq!(
+                    &retained.frame.bytes[src..src + n],
+                    &expected.bytes[dst..dst + n],
+                    "margin/direct mismatch pattern={pattern} pan={x},{y} row={row}"
+                );
+            }
+        }
+        let accepted = v
+            .edit(
+                1,
+                Patch {
+                    navigation: Some(Navigation::Pan {
+                        x: 0.1,
+                        y: 0.,
+                        snap: true,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(accepted.margin.unwrap().crop_safe);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while v.snapshot().crop_hits != 1 {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        std::thread::sleep(Duration::from_millis(30));
+        assert_eq!(v.snapshot().submitted - v.snapshot().margin_submitted, 1);
+        reference.close().unwrap();
+        v.close().unwrap();
+        drop(data);
+        assert_eq!(resources.usage(), Usage::default());
+    }
+    println!("RUST VIEW MARGIN: ALL OK (18 raw crop/direct pixel pairs, half phase, speckle/pattern, no foreground pan)");
+}

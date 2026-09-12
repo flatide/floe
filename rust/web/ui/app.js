@@ -6,6 +6,9 @@
     const el = function (id) { return document.getElementById(id); };
     const canvas = el('canvas'), viewport = el('viewport');
     const context = canvas.getContext('2d', {alpha: false});
+    const marginCanvas = el('margin-canvas'), marginContext = marginCanvas.getContext('2d', {alpha: false});
+    marginCanvas.hidden = true;
+    let foregroundFrame = null, marginFrame = null, inflightBody = null, foregroundPerf = '';
     const sessionKey = 'floe-session:' + location.origin;
     let auth = null, stopped = false, socket = null, epoch = '', state = null;
     let seq = '0', queue = [], inflight = null, accepted = null, lastSend = 0;
@@ -67,6 +70,60 @@
         canvas.style.left = (size.left + Math.round((size.pixels[0] - canvas.width) / 2) / size.dpr) + 'px';
         canvas.style.top = (size.top + Math.round((size.pixels[1] - canvas.height) / 2) / size.dpr) + 'px';
     }
+    function positionBuffer(target, size, p) {
+        target.style.width = (target.width / size.dpr) + 'px'; target.style.height = (target.height / size.dpr) + 'px';
+        target.style.left = (size.left - p[0] / size.dpr) + 'px'; target.style.top = (size.top - p[1] / size.dpr) + 'px';
+    }
+    function pendingPan() {
+        const items = (inflightBody ? [inflightBody] : []).concat(queue), delta = [0, 0];
+        for (let i = 0; i < items.length; ++i) {
+            const n = items[i].navigation;
+            if (Object.keys(items[i]).length !== 1 || !n || n.kind !== 'pan' || !n.snap) { return null; }
+            delta[0] += P.roundEven(n.x * state.pixels[0] / 16) * 16;
+            delta[1] -= P.roundEven(n.y * state.pixels[1] / 16) * 16;
+        }
+        return delta;
+    }
+    function present() {
+        const size = dims(), delta = state && pendingPan();
+        const sameSize = state && size.pixels[0] === state.pixels[0] && size.pixels[1] === state.pixels[1];
+        const at = function (h) { const p = sameSize && delta && P.placement(h, state); return p && [p[0] + delta[0], p[1] + delta[1]]; };
+        const mp = at(marginFrame), fp = at(foregroundFrame);
+        marginCanvas.hidden = !mp;
+        if (mp) { positionBuffer(marginCanvas, size, mp); }
+        const full = mp && marginFrame.complete && mp[0] >= 0 && mp[1] >= 0 &&
+            mp[0] + size.pixels[0] <= marginCanvas.width && mp[1] + size.pixels[1] <= marginCanvas.height;
+        canvas.hidden = !!full;
+        if (fp) { positionBuffer(canvas, size, fp); } else { positionCanvas(size); }
+        if (full) {
+            const pending = !!inflightBody || queue.length > 0;
+            el('status').textContent = (pending ? 'Pan preview' : 'Live') + ' · margin crop · gen ' + marginFrame.generation;
+        }
+        el('perf').textContent = foregroundPerf + (full ? ' · crop (no foreground render)' : '');
+        el('margin-info').textContent = state && state.capabilities.margin ?
+            (state.margin_working ? 'Prefetching' : (mp ? 'Margin ready' : 'Margin pending')) +
+            (marginFrame ? ' · ' + (Number((marginFrame.perf || {}).raster_us || 0) / 1000).toFixed(1) + ' ms bg' : '') +
+            (marginFrame && marginFrame.labels_truncated ? ' · labels partial' : '') + (state.margin_failure ? ' · prefetch failed' : '') : '';
+    }
+    function freezeMargin() {
+        // Non-pan edits keep the current viewport frozen, not an old centre
+        // frame which may have been hidden behind a landed margin for many pans.
+        if (!marginCanvas.hidden && canvas.hidden) {
+            const size = dims(), p = P.placement(marginFrame, state), d = pendingPan();
+            if (p && d) {
+                canvas.width = state.pixels[0]; canvas.height = state.pixels[1];
+                context.imageSmoothingEnabled = false;
+                context.drawImage(marginCanvas, p[0]+d[0], p[1]+d[1], canvas.width, canvas.height, 0, 0, canvas.width, canvas.height);
+                foregroundFrame = null; canvas.hidden = false; positionCanvas(size);
+            }
+        }
+        marginCanvas.hidden = true;
+    }
+    function clearBuffers() {
+        foregroundFrame = null; marginFrame = null; inflightBody = null; foregroundPerf = '';
+        canvas.hidden = false; canvas.width = 1; canvas.height = 1;
+        marginCanvas.hidden = true; marginCanvas.width = 1; marginCanvas.height = 1;
+    }
     function live() { return state && !['closed', 'failed'].includes(state.status); }
     function controls() {
         const enabled = live() && socket && socket.readyState === WebSocket.OPEN && !!epoch;
@@ -91,19 +148,24 @@
         if (wait > 0) { window.setTimeout(pump, wait); return; }
         try {
             const body = queue.shift();
+            inflightBody = body;
             inflight = send({type: 'view.set', connection_epoch: epoch, view_id: currentId,
                 base_state_rev: state.state_rev, body: body});
             lastSend = Date.now();
-        } catch (e) { inflight = null; queue = []; report(e); }
+        } catch (e) { inflight = null; inflightBody = null; queue = []; report(e); }
     }
     function edit(body) {
         if (!live() || !epoch) { notice('Open a connected view first.'); return; }
         if (queue.length >= 64) { notice('Input queue is full. This input was not applied.'); return; }
-        queue.push(body); pump();
+        if (!body.navigation || body.navigation.kind !== 'pan' || !body.navigation.snap) { freezeMargin(); }
+        queue.push(body); pump(); present();
     }
     function statusSnapshot(s) {
         if (s.view_id !== currentId || s.connection_epoch !== epoch) { return; }
         if (state && state.connection_epoch === epoch && P.compare(s.state_rev, state.state_rev) < 0) { return; }
+        if (marginFrame && !P.placement(marginFrame, s)) {
+            freezeMargin(); marginFrame = null; marginCanvas.width = 1; marginCanvas.height = 1;
+        }
         state = s; controls();
         el('rendering').hidden = !['opening', 'rendering', 'cancelling'].includes(s.status);
         el('rendering').textContent = s.status === 'opening' ? 'Opening index' : 'Rendering';
@@ -116,7 +178,8 @@
         const b = s.bbox_dbu.map(Number), dbu = Number(s.dbu_um);
         el('viewport-info').textContent = ((b[2] - b[0]) * dbu).toPrecision(6) + ' × ' + ((b[3] - b[1]) * dbu).toPrecision(6) + ' µm';
         el('status').textContent = s.status + ' · depth ' + s.depth + ' · thin:' + s.effective_thin + (s.source_stale ? ' · SOURCE STALE' : '');
-        if (accepted && P.compare(s.state_rev, accepted.rev) >= 0) { accepted = null; inflight = null; pump(); }
+        if (accepted && P.compare(s.state_rev, accepted.rev) >= 0) { accepted = null; inflight = null; inflightBody = null; pump(); }
+        present();
         if (s.state_rev !== layerRev) { loadLayers().catch(report); }
     }
     function finishDecode() { if (decode) { decode(); decode = null; } }
@@ -130,7 +193,7 @@
         try { packet = P.packet(buffer); } catch (e) { report(e); ws.close(); return; }
         const h = packet.header;
         const valid = function () { return ws === socket && serial === socketSerial && P.matches(h, state) &&
-            (!accepted || P.compare(h.render_rev, accepted.render) >= 0) && !document.hidden; };
+            (!accepted || (h.purpose === 'foreground' && P.compare(h.render_rev, accepted.render) >= 0)) && !document.hidden; };
         if (!valid()) { acknowledge(h, 'discarded', ws, serial); return; }
         if (decode) { notice('Frame credit violation'); ws.close(); return; }
         let done = false, image = null, url = null, timer = null;
@@ -140,18 +203,23 @@
             let disposition = 'discarded';
             try {
                 if (draw && valid()) {
-                    if (canvas.width !== h.width || canvas.height !== h.height) { canvas.width = h.width; canvas.height = h.height; }
-                    positionCanvas(dims()); context.imageSmoothingEnabled = false;
-                    draw();
+                    const target = h.purpose === 'margin' ? marginCanvas : canvas;
+                    const ctx = h.purpose === 'margin' ? marginContext : context;
+                    if (target.width !== h.width || target.height !== h.height) { target.width = h.width; target.height = h.height; }
+                    ctx.imageSmoothingEnabled = false; draw(ctx);
+                    if (h.purpose === 'margin') { marginFrame = h; } else { foregroundFrame = h; }
                     if (!displayed && document.activeElement === document.body) { viewport.focus(); }
                     displayed = true; el('empty').hidden = true; disposition = 'displayed';
-                    canvas.dataset.frameId = h.frame_id; canvas.dataset.renderRev = h.render_rev;
-                    canvas.dataset.bboxDbu = JSON.stringify(h.bbox_dbu);
+                    target.dataset.frameId = h.frame_id; target.dataset.renderRev = h.render_rev;
+                    target.dataset.bboxDbu = JSON.stringify(h.bbox_dbu);
                     el('status').textContent = (h.complete ? 'Live' : 'INCOMPLETE') + (h.approximate ? ' · summary/LOD' : '') +
                         (h.labels_truncated ? ' · labels partial' : '') + (h.deck_skipped !== '0' ? ' · skipped ' + h.deck_skipped : '') + ' · gen ' + h.generation;
                     const perf = h.perf || {}, ms = function (name) { return perf[name] ? (Number(perf[name]) / 1000).toFixed(1) : '0'; };
-                    el('perf').textContent = 'Rust · plan ' + ms('plan_us') + ' ms · decode ' + ms('decode_us') + ' ms · draw ' + ms('raster_us') +
-                        ' ms · ' + (perf.pages || '0') + ' pages · ' + h.width + ' × ' + h.height + ' px · ' + h.format + ' · refinement off';
+                    if (h.purpose === 'foreground') {
+                        foregroundPerf = 'Rust foreground · plan ' + ms('plan_us') + ' ms · decode ' + ms('decode_us') + ' ms · draw ' + ms('raster_us') +
+                            ' ms · ' + (perf.pages || '0') + ' pages · ' + h.width + ' × ' + h.height + ' px · ' + h.format + ' · refinement off';
+                    }
+                    present();
                 }
             } catch (e) { report(e); }
             if (image) { image.onload = null; image.onerror = null; image.src = ''; }
@@ -160,15 +228,15 @@
         }
         decode = function () { finish(null); };
         if (h.format === 'raw') {
-            finish(function () {
+            finish(function (ctx) {
                 const rgba = new Uint8ClampedArray(packet.data.buffer, packet.data.byteOffset + 16, h.width * h.height * 4);
-                context.putImageData(new ImageData(rgba, h.width, h.height), 0, 0);
+                ctx.putImageData(new ImageData(rgba, h.width, h.height), 0, 0);
             });
         } else {
             image = new Image(); url = URL.createObjectURL(new Blob([packet.data], {type: 'image/png'}));
             image.onload = function () {
                 if (image.naturalWidth !== h.width || image.naturalHeight !== h.height) { notice('Decoded PNG dimensions mismatch'); finish(null); return; }
-                finish(function () { context.drawImage(image, 0, 0); });
+                finish(function (ctx) { ctx.drawImage(image, 0, 0); });
             };
             image.onerror = function () { notice('PNG decode failed'); finish(null); };
             timer = setTimeout(function () { notice('PNG decode timeout'); finish(null); }, 5000);
@@ -176,9 +244,10 @@
         }
     }
     function disconnect() {
+        freezeMargin();
         ++socketSerial; finishDecode();
         if (socket) { socket.onclose = null; socket.close(); socket = null; }
-        epoch = ''; inflight = null; accepted = null; queue = [];
+        epoch = ''; inflight = null; inflightBody = null; accepted = null; queue = [];
         if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     }
     function connect() {
@@ -209,7 +278,7 @@
         ws.onclose = function () {
             if (socket !== ws || serial !== socketSerial) { return; }
             const uncertain = !!inflight || queue.length > 0;
-            epoch = ''; socket = null; finishDecode(); queue = []; inflight = null; accepted = null;
+            freezeMargin(); epoch = ''; socket = null; finishDecode(); queue = []; inflight = null; inflightBody = null; accepted = null;
             controls(); connection('Disconnected', false);
             if (uncertain) { notice('Connection interrupted. Pending input was not replayed; the restored view is authoritative.'); }
             if (!stopped && live()) {
@@ -223,7 +292,7 @@
         const current = await http('GET', '/api/v1/view', undefined, true);
         if (!current) { currentId = ''; state = null; controls(); return; }
         const changed = currentId !== current.view.view_id;
-        if (changed) { displayed = false; canvas.width = 1; canvas.height = 1; el('empty').hidden = false; layerStart = 0; layerRev = ''; }
+        if (changed) { displayed = false; clearBuffers(); el('empty').hidden = false; layerStart = 0; layerRev = ''; }
         currentId = current.view.view_id; currentSource = current.source_id; state = current.view;
         el('document-title').textContent = current.title; document.title = current.title + ' · floe2';
         el('source').value = currentSource; el('mode').value = current.mode;
@@ -348,7 +417,7 @@
     el('open').onclick = function () { openSource(null).catch(report); };
     el('close').onclick = async function () {
         if (!currentId) { return; }
-        try { await http('DELETE', '/api/v1/views/' + currentId); disconnect(); state = null; currentId = ''; controls(); displayed = false; canvas.width = 1; canvas.height = 1; el('empty').hidden = false; el('empty-message').textContent = 'View closed. Choose a source to reopen.'; el('rendering').hidden = true; el('layers').textContent = ''; }
+        try { await http('DELETE', '/api/v1/views/' + currentId); disconnect(); state = null; currentId = ''; controls(); displayed = false; clearBuffers(); el('empty').hidden = false; el('empty-message').textContent = 'View closed. Choose a source to reopen.'; el('rendering').hidden = true; el('layers').textContent = ''; }
         catch (e) { report(e); }
     };
     el('logout').onclick = async function () {
@@ -398,7 +467,7 @@
     window.addEventListener('resize', function () {
         clearTimeout(resizeTimer); resizeTimer = setTimeout(function () {
             if (!live()) { return; }
-            try { const size = dims(); positionCanvas(size); if (size.pixels[0] !== state.pixels[0] || size.pixels[1] !== state.pixels[1]) { edit({pixels: size.pixels}); } }
+            try { const size = dims(); freezeMargin(); positionCanvas(size); if (size.pixels[0] !== state.pixels[0] || size.pixels[1] !== state.pixels[1]) { edit({pixels: size.pixels}); } }
             catch (e) { report(e); }
         }, 120);
     });

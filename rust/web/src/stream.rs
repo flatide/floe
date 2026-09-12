@@ -24,6 +24,7 @@ const ACK_TIMEOUT: Duration = Duration::from_secs(10);
 struct Packet {
     id: u64,
     render_rev: u64,
+    margin: bool,
     bytes: Bytes,
     _reservation: Arc<OwnedSemaphorePermit>,
 }
@@ -102,8 +103,16 @@ fn reply(tx: &mpsc::Sender<Out>, value: Value) -> Result<(), ()> {
     tx.try_send(Out::Control(Message::Text(text.into())))
         .map_err(|_| ())
 }
-fn state_marker(s: &floe_app_core::view::Snapshot) -> (u64, floe_app_core::view::Phase, u64, u64) {
-    (s.state_rev, s.phase, s.submitted, s.consumed)
+fn state_marker(
+    s: &floe_app_core::view::Snapshot,
+) -> (u64, floe_app_core::view::Phase, u64, u64, bool) {
+    (
+        s.state_rev,
+        s.phase,
+        s.submitted,
+        s.consumed,
+        s.margin_working,
+    )
 }
 
 pub(crate) async fn socket(
@@ -165,7 +174,7 @@ pub(crate) async fn socket(
         return;
     }
     let mut last_state = state_marker(&initial);
-    let (mut seq, mut last_frame) = (0u64, 0u64);
+    let (mut seq, mut last_frame, mut last_margin) = (0u64, 0u64, 0u64);
     let mut flight: Option<Flight> = None;
     let mut encoding: Option<JoinHandle<Result<Packet, &'static str>>> = None;
     let mut tick = tokio::time::interval(Duration::from_millis(20));
@@ -187,7 +196,9 @@ pub(crate) async fn socket(
                 encoding=None;
                 match result {
                     Ok(Ok(packet))=>{
-                        if packet.render_rev!=controller.snapshot().render_rev {flight=None;continue;}
+                        let state=controller.snapshot();
+                        let current=if packet.margin {state.margin.is_some_and(|m|m.frame_id==packet.id)} else {packet.render_rev==state.render_rev};
+                        if !current {flight=None;continue;}
                         if tx.try_send(Out::Frame(packet)).is_err(){break;}
                     }
                     _=>break,
@@ -211,7 +222,8 @@ pub(crate) async fn socket(
                     last_state=marker;
                 }
                 if flight.is_none() {
-                    if let Some(frame)=controller.latest().filter(|f|f.id!=last_frame && f.render_rev==state.render_rev) {
+                    if let Some(frame)=controller.latest().filter(|f|f.id!=last_frame && f.matches(&state))
+                        .or_else(||controller.margin().filter(|f|f.id!=last_margin && f.matches(&state))) {
                         // All admission is try-only: there is no accumulating
                         // waiter/encode queue when another browser is slow.
                         let Ok(encoder)=Arc::clone(&gate.encoders).try_acquire_owned() else {continue;};
@@ -222,11 +234,12 @@ pub(crate) async fn socket(
                         let Ok(reservation)=Arc::clone(&gate.output_bytes).try_acquire_many_owned(cost as u32) else {continue;};
                         let reservation=Arc::new(reservation);let owned=Arc::clone(&reservation);let frame_id=frame.id;
                         flight=Some(Flight{id:frame_id,since:Instant::now(),written:false,acked:false,_reservation:reservation});
-                        last_frame=frame_id;
+                        let margin=frame.purpose==floe_app_core::view::Purpose::Margin;
+                        if margin {last_margin=frame_id;} else {last_frame=frame_id;}
                         encoding=Some(tokio::task::spawn_blocking(move || {
                             let _encoder=encoder;
                             let bytes=view::packet(&header,&frame.frame.bytes)?;
-                            Ok(Packet{id:frame_id,render_rev:frame.render_rev,bytes:Bytes::from(bytes),_reservation:owned})
+                            Ok(Packet{id:frame_id,render_rev:frame.render_rev,margin,bytes:Bytes::from(bytes),_reservation:owned})
                         }));
                     }
                 }

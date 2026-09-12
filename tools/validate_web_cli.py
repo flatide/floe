@@ -99,6 +99,8 @@ def main(fixture):
                     "--goto", "-10.9375,20,700", "--depth", "99", "--detail", "high",
                     "--thin", "keep", "--no-labels", "--jobs", "2", "--raster-jobs", "1"]
             args += ["--no-open"] if manual else ["--firefox", str(fake)]
+            if manual:
+                args += ["--frame-cache", "off"]
             proc = subprocess.Popen(args, env=env, stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE, text=True)
             try:
@@ -141,7 +143,13 @@ def main(fixture):
                     assert first["phase"] == "succeeded"
                 view = wait(lambda: (lambda v: v if v["status"] == "idle" else None)(
                     client.call("GET", "/api/v1/view")["view"]), proc)
-                assert view["submitted"] == "1", "hidden initial fit render"
+                assert int(view["submitted"]) - int(view["margin_submitted"]) == 1, "hidden initial fit render"
+                assert view["capabilities"]["margin"] is (not manual)
+                if not manual:
+                    margined = wait(lambda: (lambda v: v if v["margin"] else None)(
+                        client.call("GET", "/api/v1/view")["view"]), proc)
+                    assert margined["margin"]["crop_safe"]
+                    assert margined["margin_submitted"] == "1"
                 assert view["pixels"] == [1001, 733]
                 assert view["detail"] == "high" and view["depth"] == "99"
                 assert view["effective_thin"] == "keep"

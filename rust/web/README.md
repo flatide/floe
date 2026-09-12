@@ -3,7 +3,8 @@
 Internal Rust library used by `floe2-web view`. An embedded HTML/Canvas client
 shows native PNG/raw frames and controls registered layouts/jobdecks. The existing
 Python/GTK launcher is unchanged. File upload, remote binding and share grants do
-not exist yet; layout margin and further interaction parity are still pending.
+not exist yet. Layout margin/crop is opt-in through ControllerOptions (on in
+the `view` CLI); drag and further interaction parity are still pending.
 
 `Gateway::new(listener.local_addr())` returns a loopback-only gate and one-use
 bootstrap secret. `transport::serve(listener, gate, shutdown)` runs bounded

@@ -76,14 +76,15 @@ const sandbox={window,document,XMLHttpRequest:XHR,WebSocket:Socket,Image,ImageDa
 vm.runInNewContext(fs.readFileSync(__dirname+'/app.js','utf8'),sandbox,{filename:'app.js'});
 async function wait(test){for(let i=0;i<1000;i++){if(test()){return;}await new Promise(setImmediate);}throw new Error('client did not progress');}
 function hello(ws,ep=epoch){ws.receive({type:'hello',protocol:1,bundle,view_id:viewId,connection_epoch:ep});ws.receive({...snapshot,connection_epoch:ep});}
-function packet(format,id,rev='1',ep=epoch){
-    const data=new Uint8Array(format==='raw'?16+100*80*4:33),d=new DataView(data.buffer);
-    if(format==='raw'){data.set(new TextEncoder().encode('FLOERAW1'));d.setUint32(8,100,true);d.setUint32(12,80,true);
+function packet(format,id,rev='1',ep=epoch,extra={}){
+    const width=extra.width||100,height=extra.height||80;
+    const data=new Uint8Array(format==='raw'?16+width*height*4:33),d=new DataView(data.buffer);
+    if(format==='raw'){data.set(new TextEncoder().encode('FLOERAW1'));d.setUint32(8,width,true);d.setUint32(12,height,true);
         for(let i=16;i<data.length;i+=4){data.set([i%256,((i-16)/400)|0,127,255],i);}
-    }else{data.set([137,80,78,71,13,10,26,10]);d.setUint32(8,13);d.setUint32(12,0x49484452);d.setUint32(16,100);d.setUint32(20,80);}
+    }else{data.set([137,80,78,71,13,10,26,10]);d.setUint32(8,13);d.setUint32(12,0x49484452);d.setUint32(16,width);d.setUint32(20,height);}
     const header={...snapshot,type:'frame',protocol:1,connection_epoch:ep,state_rev:rev,render_rev:rev,frame_id:id,
-        generation:id,round:'1',purpose:'foreground',width:100,height:80,row0:'top',format,payload_length:String(data.length),
-        final:true,partial:false,deferred:'0',labels_truncated:false,complete:true,approximate:false,query:false,perf:{}};
+        generation:id,round:'1',purpose:'foreground',width,height,row0:'top',format,payload_length:String(data.length),
+        final:true,partial:false,deferred:'0',labels_truncated:false,complete:true,approximate:false,query:false,perf:{},...extra};
     const text=new TextEncoder().encode(JSON.stringify(header)),out=new Uint8Array(4+text.length+data.length);
     new DataView(out.buffer).setUint32(0,text.length,true);out.set(text,4);out.set(data,4+text.length);
     return out.buffer;
@@ -119,7 +120,42 @@ function packet(format,id,rev='1',ep=epoch){
     // Decode errors release the URL and credit exactly once.
     second.receive(packet('png','7','2',nextEpoch));images.at(-1).onerror();
     assert.equal(urls.size,0);assert.equal(second.sent.at(-1).disposition,'discarded');
+    // A landed complete margin supplies the incoming half-screen immediately:
+    // no new pixel draw or network reply is needed for the CSS crop.
+    const margin={purpose:'margin',width:196,height:176,bbox_dbu:['-58.9375','-48','137.0625','128']};
+    snapshot.connection_epoch=nextEpoch;snapshot.capabilities.margin=true;
+    snapshot.margin={frame_id:'8',origin_px:[48,48],crop_safe:true};
+    second.receive(snapshot);second.receive(packet('raw','8','1',nextEpoch,margin));
+    assert.equal(second.sent.at(-1).disposition,'displayed');
+    assert.equal(node('canvas').hidden,true);assert.equal(node('margin-canvas').hidden,false);
+    assert.equal(node('margin-canvas').style.left,'-48px');
+    assert(node('perf').textContent.includes('100 × 80 px'));
+    assert(!node('perf').textContent.includes('196 × 176 px'));
+    const painted=draws.length;
+    node('viewport').keydown({key:'ArrowRight',preventDefault(){},shiftKey:false});
+    assert.equal(draws.length,painted);assert.equal(node('margin-canvas').style.left,'-96px');
+    assert.equal(node('canvas').hidden,true);
+    const panEdit=second.sent.filter(m=>m.type==='view.set').at(-1);
+    second.receive({type:'accepted',seq:panEdit.seq,state_rev:'3',render_rev:'3'});
+    snapshot.state_rev='3';snapshot.render_rev='3';snapshot.bbox_dbu=['37.0625','0','137.0625','80'];
+    snapshot.margin.origin_px=[96,48];second.receive(snapshot);
+    assert.equal(node('margin-canvas').style.left,'-96px');
+    assert(node('status').textContent.includes('Live · margin crop'));
+    // Truncated labels are base only, not a completed replacement for foreground.
+    snapshot.margin={frame_id:'9',origin_px:[96,48],crop_safe:false};second.receive(snapshot);
+    second.receive(packet('raw','9','3',nextEpoch,{...margin,complete:false,labels_truncated:true}));
+    assert.equal(node('canvas').hidden,false);assert.equal(node('margin-canvas').hidden,false);
+    assert.equal(node('canvas').style.left,'-48px');
+    // A policy change during slow margin decoding cannot land the stale image.
+    snapshot.margin.frame_id='10';second.receive(snapshot);
+    second.receive(packet('png','10','3',nextEpoch,margin));const staleMargin=images.at(-1);
+    staleMargin.naturalWidth=196;staleMargin.naturalHeight=176;
+    snapshot.state_rev='4';snapshot.render_rev='4';snapshot.render_key='2';snapshot.margin=null;
+    second.receive(snapshot);const beforeLate=draws.length;staleMargin.onload();
+    assert.equal(draws.length,beforeLate);assert.equal(node('margin-canvas').hidden,true);
+    assert.equal(node('margin-canvas').width,1);
+    assert.equal(second.sent.at(-1).disposition,'discarded');assert.equal(urls.size,0);
     for(const s of sockets){for(let i=1;i<s.sent.length;i++){assert(P.compare(s.sent[i-1].seq,s.sent[i].seq)<0);}}
     listeners.pagehide();
-    console.log('WEB CLIENT: ALL OK (single startup, raw/PNG, stale decode, epochs, hidden-tab credit, URL cleanup)');
+    console.log('WEB CLIENT: ALL OK (startup, raw/PNG, late decode/epochs/credit, margin pan/base/truncation, cleanup)');
 })().catch(e=>{console.error(e);process.exitCode=1;});

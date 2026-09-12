@@ -11,7 +11,8 @@ M1b-2b에서 사전 등록한 view의 인증된 제어/프레임 스트림을 �
 M1b-2c1에서 로컬 등록 scope·관리형 색인/진행·취소 수명을 연결했다.
 M1b-2c2에서 인증된 catalog·view 생성/재open·색인 작업 API를 연결했다.
 M1b-3에서 Rust `view` 실행 명령과 번들 Canvas 기본 뷰어를 연결했다.
-margin·추가 조작 parity와 M0/Firefox/ETX 현장 검증은 아직 완료되지 않았다.
+M1b-4a에서 layout margin prefetch/crop과 라벨 포함 pan 재사용을 연결했다.
+drag·추가 조작 parity와 M0/Firefox/ETX 현장 검증은 아직 완료되지 않았다.
 상세 범위는 [M1b 기록](WEBUI_M1B.ko.md). 여기의 M0~M5는 **웹 전환 단계**이며
 jobdeck/occupancy의 같은 이름 단계와 별개다. 개발 기준과 합류 규칙은 §11.
 로컬 산출물: [기능/CLI 대조표](WEBUI_M0.ko.md),
@@ -454,5 +455,6 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
   M1b-2c1에서 등록 범위와 실제 관리형 색인/진행/취소를 연결했다.
   M1b-2c2에서 catalog·재open·색인 작업의 HTTP/WS 경로를 연결했다.
   M1b-3에서 실행 명령·번들 Canvas 기본 UI, private Firefox launcher와
-  PNG/raw·최초 한 번의 설정 적용·재접속/종료를 검증했다. 다음은 layout margin이다.
+  PNG/raw·최초 한 번의 설정 적용·재접속/종료를 검증했다. M1b-4a에서 layout
+  margin의 픽셀 parity·16px pan·라벨/실패 fallback을 검증했다. 다음은 drag/추가 UI다.
   CLI 전체/웹 전환 완료가 아니며 GTK/실측 브랜치는 유지한다.

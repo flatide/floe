@@ -51,6 +51,7 @@ def main(fixture):
                              text=True, capture_output=True, timeout=90)
         assert run.returncode == 0, (run.stdout, run.stderr)
         assert "13 PNG pairs" in run.stdout, run.stdout
+        assert "RUST VIEW MARGIN: ALL OK" in run.stdout, run.stdout
         assert digest(cache) == before, "view modified cache bytes/mtime"
         assert not list(workers.iterdir()), "worker temporary files leaked"
         print(run.stdout.strip())

@@ -1,4 +1,4 @@
-/* ES2017, dependency-free wire validation. No world-coordinate arithmetic. */
+/* ES2017 wire validation + display-only pixel projection. Never sends world math. */
 (function (root) {
     'use strict';
     const MAX_U64 = '18446744073709551615';
@@ -54,11 +54,30 @@
             a.every(function (v, i) { return v === b[i]; });
     }
     function matches(h, s) {
+        if (h.purpose === 'margin') {
+            return !!s && !!s.margin && s.margin.frame_id === h.frame_id && h.final && placement(h, s) !== null;
+        }
         return !!s && ['view_id', 'connection_epoch', 'dataset_revision',
             'worker_epoch', 'render_rev', 'render_key'].every(function (k) {
             return h[k] === s[k];
         }) && h.width === s.pixels[0] && h.height === s.pixels[1] &&
             equal(h.bbox_dbu, s.bbox_dbu);
+    }
+    function roundEven(n) {
+        const lo = Math.floor(n), f = n - lo;
+        return f < 0.5 ? lo : (f > 0.5 ? lo + 1 : (lo % 2 === 0 ? lo : lo + 1));
+    }
+    // Only unscaled, integer-device-pixel placement. Rust independently checks
+    // the same condition before suppressing a foreground render.
+    function placement(h, s) {
+        if (!s || !h || !['view_id', 'connection_epoch', 'dataset_revision', 'worker_epoch', 'render_key'].every(function (k) { return h[k] === s[k]; })) { return null; }
+        const a = h.bbox_dbu.map(Number), b = s.bbox_dbu.map(Number);
+        const sx = (a[2] - a[0]) / h.width, sy = (a[3] - a[1]) / h.height;
+        if (!(sx > 0 && sy > 0) || Math.abs((b[2] - b[0]) / s.pixels[0] / sx - 1) > 1e-9 ||
+            Math.abs((b[3] - b[1]) / s.pixels[1] / sy - 1) > 1e-9) { return null; }
+        const p = [(b[0] - a[0]) / sx, (a[3] - b[3]) / sy], out = p.map(roundEven);
+        if (out.some(function (v, i) { return !Number.isFinite(v) || Math.abs(v) > 2147483647 || Math.abs(v - p[i]) > 1e-3 || v % 16 !== 0; })) { return null; }
+        return out;
     }
     function packet(buffer) {
         if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < 4 ||
@@ -71,7 +90,7 @@
         const h = JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(
             new Uint8Array(buffer, 4, length)));
         if (!h || h.type !== 'frame' || h.protocol !== 1 || h.row0 !== 'top' ||
-            h.purpose !== 'foreground' || !['raw', 'png'].includes(h.format)) {
+            !['foreground', 'margin'].includes(h.purpose) || !['raw', 'png'].includes(h.format)) {
             fail('Unsupported frame protocol');
         }
         ['view_id', 'connection_epoch'].forEach(function (k) {
@@ -108,7 +127,8 @@
         return {header: h, data: data};
     }
     const api = Object.freeze({counter: counter, compare: compare, next: next,
-        decimal: decimal, bbox: bbox, pixels: pixels, pair: pair, matches: matches, packet: packet});
+        decimal: decimal, bbox: bbox, pixels: pixels, pair: pair, matches: matches, packet: packet,
+        placement: placement, roundEven: roundEven});
     if (typeof module !== 'undefined' && module.exports) { module.exports = api; }
     else { root.FloeProtocol = api; }
 }(typeof window === 'undefined' ? this : window));

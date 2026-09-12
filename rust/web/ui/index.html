@@ -57,12 +57,13 @@
       </form>
       <div id="notice" class="notice" role="alert" hidden></div>
       <div id="viewport" class="viewport" tabindex="0" aria-label="Layout canvas. Arrow keys pan; Shift plus arrow pans ten percent; plus and minus zoom; F fits.">
+        <canvas id="margin-canvas" width="1" height="1" aria-hidden="true" hidden></canvas>
         <canvas id="canvas" width="1" height="1" aria-label="Rendered layout"></canvas>
         <div id="empty" class="empty"><div class="empty-mark">＋</div><h1>Layout workspace</h1><p id="empty-message">Connecting to the local Rust renderer…</p></div>
         <div id="rendering" class="rendering" hidden>Rendering</div>
         <div class="viewport-hint">↑ ↓ ← → pan <span>Shift · 10%</span> <span>+ / − zoom</span></div>
       </div>
-      <footer class="statusbar"><span id="status">Waiting for session</span><span id="viewport-info">Native pixels · Canvas 2D</span></footer>
+      <footer class="statusbar"><span id="status">Waiting for session</span><span id="margin-info"></span><span id="viewport-info">Native pixels · Canvas 2D</span></footer>
       <div id="perf" class="perf">Rust renderer · no automatic indexing · refinement off</div>
     </main>
   </div>

@@ -15,6 +15,9 @@ struct Control {
     frame: AtomicBool,
     drain: AtomicBool,
     fail: AtomicBool,
+    margin_frame: AtomicBool,
+    margin_truncated: AtomicBool,
+    margin_fail: AtomicBool,
     requests: Mutex<Vec<RenderRequest>>,
     styles: Mutex<Vec<Vec<Style>>>,
     cancels: AtomicUsize,
@@ -28,6 +31,9 @@ impl Default for Control {
             frame: AtomicBool::new(true),
             drain: AtomicBool::new(true),
             fail: AtomicBool::new(false),
+            margin_frame: AtomicBool::new(true),
+            margin_truncated: AtomicBool::new(false),
+            margin_fail: AtomicBool::new(false),
             requests: Mutex::new(Vec::new()),
             styles: Mutex::new(Vec::new()),
             cancels: AtomicUsize::new(0),
@@ -63,7 +69,10 @@ impl Engine for Fake {
     }
     fn poll(&mut self, _: Duration) -> Result<Option<Event>> {
         thread::sleep(Duration::from_millis(1));
-        if self.control.fail.load(Ordering::Relaxed) && self.active.is_some() {
+        if (self.control.fail.load(Ordering::Relaxed)
+            || (self.gen == 2 && self.control.margin_fail.load(Ordering::Relaxed)))
+            && self.active.is_some()
+        {
             let (generation, _) = self.active.take().unwrap();
             return Ok(Some(Event::Failed {
                 generation: Some(generation),
@@ -84,7 +93,9 @@ impl Engine for Fake {
                 self.cancelled = false;
                 return Ok(Some(Event::Cancelled { generation }));
             }
-        } else if self.control.frame.load(Ordering::Relaxed) {
+        } else if self.control.frame.load(Ordering::Relaxed)
+            && (self.gen != 2 || self.control.margin_frame.load(Ordering::Relaxed))
+        {
             if let Some((generation, request)) = self.active.take() {
                 let mut bytes = b"FLOERAW1".to_vec();
                 bytes.extend(request.width.to_le_bytes());
@@ -99,7 +110,8 @@ impl Engine for Fake {
                     final_frame: true,
                     partial: false,
                     deferred: 0,
-                    labels_truncated: false,
+                    labels_truncated: self.gen == 2
+                        && self.control.margin_truncated.load(Ordering::Relaxed),
                     request,
                     bytes,
                     fields: Fields(BTreeMap::new()),
@@ -160,22 +172,38 @@ fn options() -> RenderOptions {
     }
 }
 fn start(r: &Arc<Resources>, m: Arc<Model>, initial: ViewState, c: Arc<Control>) -> ViewController {
-    ViewController::spawn(r, m, initial, r.render(&options()).unwrap(), move |stop| {
-        while !c.open.load(Ordering::Relaxed) {
-            crate::check_cancelled(&stop)?;
-            thread::sleep(Duration::from_millis(1));
-        }
-        Ok((
-            Box::new(Fake {
-                control: c,
-                active: None,
-                gen: 0,
-                cancelled: false,
-                ack: false,
-            }),
-            None,
-        ))
-    })
+    start_configured(r, m, initial, c, ControllerOptions::default())
+}
+fn start_configured(
+    r: &Arc<Resources>,
+    m: Arc<Model>,
+    initial: ViewState,
+    c: Arc<Control>,
+    configuration: ControllerOptions,
+) -> ViewController {
+    ViewController::spawn(
+        r,
+        m,
+        initial,
+        r.render(&options()).unwrap(),
+        configuration,
+        move |stop| {
+            while !c.open.load(Ordering::Relaxed) {
+                crate::check_cancelled(&stop)?;
+                thread::sleep(Duration::from_millis(1));
+            }
+            Ok((
+                Box::new(Fake {
+                    control: c,
+                    active: None,
+                    gen: 0,
+                    cancelled: false,
+                    ack: false,
+                }),
+                None,
+            ))
+        },
+    )
     .unwrap()
 }
 fn wait(check: impl Fn() -> bool) {
@@ -517,4 +545,148 @@ fn deck_groups_and_capabilities_are_validated_before_mutating_state() {
     assert_eq!(s.layers, Layers::Only(vec![(1, 1), (1, 2)]));
     assert!(s.styles.iter().all(|s| s.color == [255, 0, 0, 255]));
     assert!(Viewport::fit([0.; 4], 80, 64).is_err());
+}
+
+fn margin_options() -> ControllerOptions {
+    ControllerOptions {
+        margin_prefetch: true,
+        frame_cache: true,
+    }
+}
+#[test]
+fn complete_margin_crops_pan_without_another_foreground_and_invalidates_policy() {
+    let r = Resources::new(Limits::default()).unwrap();
+    let m = model(false);
+    let c = Arc::new(Control::default());
+    let initial = ViewState::initial(&m, 800, 640).unwrap();
+    let mut v = start_configured(&r, m, initial, Arc::clone(&c), margin_options());
+    wait(|| v.margin().is_some());
+    let margin = v.margin().unwrap();
+    assert_eq!(margin.purpose, Purpose::Margin);
+    assert_eq!(margin.frame.generation, 2);
+    assert!(margin.frame.request.labels);
+    assert_eq!(
+        (margin.frame.request.width, margin.frame.request.height),
+        (1600, 1280)
+    );
+    let mut p = pan();
+    p.navigation = Some(Navigation::Pan {
+        x: 0.1,
+        y: 0.,
+        snap: true,
+    });
+    let accepted = v.edit(1, p).unwrap();
+    assert!(accepted.margin.unwrap().crop_safe);
+    wait(|| v.snapshot().crop_hits == 1);
+    thread::sleep(Duration::from_millis(30));
+    assert_eq!(c.requests.lock().unwrap().len(), 2);
+    assert!(v.latest().is_none());
+    assert!(margin.matches(&v.snapshot()));
+    let changed = v
+        .edit(
+            2,
+            Patch {
+                thin: Some(Thin::Keep),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(changed.margin.is_none());
+    assert!(!margin.matches(&changed));
+    v.close().unwrap();
+    assert_eq!(r.usage(), Usage::default());
+}
+#[test]
+fn margin_cancel_ack_is_not_terminal_and_never_delays_new_foreground() {
+    let r = Resources::new(Limits::default()).unwrap();
+    let m = model(false);
+    let c = Arc::new(Control::default());
+    c.margin_frame.store(false, Ordering::Relaxed);
+    c.drain.store(false, Ordering::Relaxed);
+    let mut v = start_configured(
+        &r,
+        Arc::clone(&m),
+        ViewState::initial(&m, 80, 64).unwrap(),
+        Arc::clone(&c),
+        margin_options(),
+    );
+    wait(|| c.requests.lock().unwrap().len() == 2);
+    assert_eq!(v.latest().unwrap().frame.generation, 1);
+    v.edit(1, pan()).unwrap();
+    wait(|| c.acks.load(Ordering::Relaxed) == 1);
+    assert_eq!(c.requests.lock().unwrap().len(), 2);
+    c.drain.store(true, Ordering::Relaxed);
+    wait(|| v.latest().is_some_and(|f| f.render_rev == 2));
+    assert_eq!(c.cancels.load(Ordering::Relaxed), 1);
+    assert_eq!(c.requests.lock().unwrap()[2].width, 80);
+    v.close().unwrap();
+}
+#[test]
+fn truncated_or_failed_margin_never_claims_complete_or_retries_in_a_loop() {
+    for fail in [false, true] {
+        let r = Resources::new(Limits::default()).unwrap();
+        let m = model(false);
+        let c = Arc::new(Control::default());
+        c.margin_truncated.store(!fail, Ordering::Relaxed);
+        c.margin_fail.store(fail, Ordering::Relaxed);
+        let mut v = start_configured(
+            &r,
+            Arc::clone(&m),
+            ViewState::initial(&m, 800, 640).unwrap(),
+            Arc::clone(&c),
+            margin_options(),
+        );
+        wait(|| {
+            let s = v.snapshot();
+            s.margin_submitted == 1 && !s.margin_working
+        });
+        let s = v.snapshot();
+        assert_eq!(s.phase, Phase::Idle);
+        assert_eq!(v.latest().unwrap().frame.generation, 1);
+        if fail {
+            assert!(s.margin_failure.is_some());
+            assert!(s.margin.is_none());
+        } else {
+            assert!(!s.margin.unwrap().crop_safe);
+        }
+        thread::sleep(Duration::from_millis(30));
+        assert_eq!(c.requests.lock().unwrap().len(), 2);
+        let p = Patch {
+            navigation: Some(Navigation::Pan {
+                x: 0.1,
+                y: 0.,
+                snap: true,
+            }),
+            ..Default::default()
+        };
+        v.edit(1, p).unwrap();
+        wait(|| v.latest().is_some_and(|f| f.render_rev == 2));
+        assert_eq!(v.snapshot().crop_hits, 0);
+        assert_eq!(c.requests.lock().unwrap().len(), 3);
+        v.close().unwrap();
+    }
+}
+#[test]
+fn deck_or_frame_cache_off_never_prefetches() {
+    for (deck, cache) in [(true, true), (false, false)] {
+        let r = Resources::new(Limits::default()).unwrap();
+        let m = model(deck);
+        let c = Arc::new(Control::default());
+        let mut v = start_configured(
+            &r,
+            Arc::clone(&m),
+            ViewState::initial(&m, 80, 64).unwrap(),
+            Arc::clone(&c),
+            ControllerOptions {
+                margin_prefetch: true,
+                frame_cache: cache,
+            },
+        );
+        wait(|| v.latest().is_some());
+        thread::sleep(Duration::from_millis(30));
+        assert!(!v.snapshot().margin_enabled);
+        assert_eq!(c.requests.lock().unwrap().len(), 1);
+        assert_eq!(c.requests.lock().unwrap()[0].frame_cache, cache);
+        v.close().unwrap();
+    }
 }

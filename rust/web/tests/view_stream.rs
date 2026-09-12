@@ -46,6 +46,9 @@ struct Login {
 }
 impl Harness {
     async fn start(raw: bool) -> Self {
+        Self::start_configured(raw, false, false).await
+    }
+    async fn start_configured(raw: bool, margin: bool, labels: bool) -> Self {
         let resources = Resources::new(Limits::default()).unwrap();
         let source =
             PathBuf::from(std::env::var_os("FLOE_VIEW_FIXTURE").expect("private fixture required"));
@@ -54,14 +57,26 @@ impl Harness {
                 .unwrap();
         let model = Model::new(&data).unwrap();
         let mut state = ViewState::initial(&model, 257, 191).unwrap();
-        state.labels = false;
+        state.labels = labels;
         state.detail = Detail::High;
         let mut options = RenderOptions::local().unwrap();
         options.decode_jobs = 1;
         options.raster_jobs = 1;
         options.budget_mb = 64;
         options.raw = raw;
-        let controller = Arc::new(ViewController::start(&resources, data, options, state).unwrap());
+        let controller = Arc::new(
+            ViewController::start_configured(
+                &resources,
+                data,
+                options,
+                state,
+                floe_app_core::view::ControllerOptions {
+                    margin_prefetch: margin,
+                    frame_cache: true,
+                },
+            )
+            .unwrap(),
+        );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (gate, bootstrap) =
@@ -362,4 +377,62 @@ async fn native_frames_reconnect_credit_errors_and_shutdown() {
         h.shutdown().await;
     }
     println!("RUST VIEW STREAM: ALL OK (PNG/raw, 2x100 inputs, slow subscriber, reconnect, stale epoch, logout)");
+}
+
+#[tokio::test]
+#[ignore = "run tools/validate_view_stream.py with a private synthetic fixture"]
+async fn native_margin_stream_keeps_foreground_credit_and_reconnect_identity() {
+    for raw in [true, false] {
+        let h = Harness::start_configured(raw, true, true).await;
+        let login = h.login().await;
+        let (mut ws, hello, _) = h.connect(&login).await;
+        let (fg, _) = frame(&mut ws).await;
+        assert_eq!(fg["purpose"], "foreground");
+        assert_eq!(fg["generation"], "1");
+        ack(&mut ws, &hello, 1, &fg).await;
+        let (margin, bytes) = frame(&mut ws).await;
+        assert_eq!(margin["purpose"], "margin");
+        assert_eq!(margin["complete"], true);
+        assert_eq!(margin["generation"], "2");
+        assert_eq!(bytes, h.controller.margin().unwrap().frame.bytes);
+        assert!(h.controller.margin().unwrap().frame.request.labels);
+        assert!(h.controller.snapshot().margin.unwrap().crop_safe);
+        ack(&mut ws, &hello, 2, &margin).await;
+        ws.send(Message::Text(
+            json!({"type":"view.set","seq":"3","view_id":hello["view_id"],
+            "connection_epoch":hello["connection_epoch"],"base_state_rev":"1",
+            "body":{"navigation":{"kind":"pan","x":0.1,"y":0.0,"snap":true}}})
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(until_reply(&mut ws, 3, "accepted").await["render_rev"], "2");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while h.controller.snapshot().crop_hits != 1 {
+            assert!(Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(h.controller.snapshot().submitted, 2);
+        assert!(h.controller.latest().is_none());
+        let (mut resumed, rhello, state) = h.connect(&login).await;
+        assert_eq!(state["render_rev"], "2");
+        assert_eq!(state["margin"]["crop_safe"], true);
+        let (restored, _) = frame(&mut resumed).await;
+        assert_eq!(restored["purpose"], "margin");
+        assert_eq!(restored["render_rev"], "1"); // Valid crop, not a stale foreground.
+        assert_eq!(restored["frame_id"], margin["frame_id"]);
+        assert_ne!(restored["connection_epoch"], margin["connection_epoch"]);
+        ack(&mut resumed, &rhello, 1, &restored).await;
+        resumed.send(Message::Text(json!({"type":"view.set","seq":"2","view_id":rhello["view_id"],
+            "connection_epoch":rhello["connection_epoch"],"base_state_rev":"2","body":{"thin":"keep"}}).to_string().into())).await.unwrap();
+        until_reply(&mut resumed, 2, "accepted").await;
+        let (changed, _) = frame(&mut resumed).await;
+        assert_eq!(changed["purpose"], "foreground");
+        assert_eq!(changed["render_key"], "2");
+        assert_eq!(changed["render_rev"], "3");
+        ack(&mut resumed, &rhello, 3, &changed).await;
+        h.shutdown().await;
+    }
+    println!("RUST MARGIN STREAM: ALL OK (PNG/raw + labels, credit, crop without foreground, reconnect, policy invalidation)");
 }

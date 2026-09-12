@@ -1,13 +1,16 @@
 //! Server-authoritative view state. Relative inputs are applied in order;
 //! only rendering is coalesced. No HTTP or browser floating-point world math.
 mod controller;
+pub mod margin;
 use crate::{
     dataset::Dataset,
     managed::ManagedDataset,
     shots::{Detail, Thin, MAX_PIXELS},
     Error, Result,
 };
-pub use controller::{DisplayFrame, Phase, Snapshot, ViewController};
+pub use controller::{
+    ControllerOptions, DisplayFrame, MarginStatus, Phase, Purpose, Snapshot, ViewController,
+};
 use floe_worker_client::{Layers, RenderRequest, Style};
 use std::{
     collections::{BTreeMap, BTreeSet},

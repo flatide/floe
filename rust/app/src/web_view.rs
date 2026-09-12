@@ -6,7 +6,9 @@ use floe_app_core::{
     native::{Discovery, Indexer},
     registered::{AccessScope, RegisteredSource},
     render::RenderOptions,
-    shots, Error, Result,
+    shots,
+    view::ControllerOptions,
+    Error, Result,
 };
 use floe_web::{
     service::Service,
@@ -41,6 +43,7 @@ const HELP: &str = "Usage: floe2-web view SOURCE [SOURCE ...] [OPTIONS]
   --raster-jobs N          Raster workers (environment/default up to 4)
   --budget-mb N            Decoded page budget (default 1024)
   --png / --raw            Frame transfer (default raw)
+  --frame-cache on|off      Retained frame reuse + layout margin (default on)
   --root DIRECTORY         Additional approved dependency root, repeatable
   --port N                 Loopback port (default random)
   --no-open                Do not launch a browser; use the private session file
@@ -52,7 +55,7 @@ This development command does not replace the GTK floe2 launcher.
 No automatic indexing or Python fallback. Paths are local-launcher inputs only.
 Binds only 127.0.0.1; stops on Ctrl+C or End session.
 Managed capacity: 16 CPU slots, 4 reserved for foreground; index jobs <=12.
-Decode+raster reservation must fit 16 slots. Refinement/margin off in this slice.
+Decode+raster reservation must fit 16 slots. Refinement off; deck margin unsupported.
 The session link is a one-time credential; do not share or log it.";
 
 #[derive(Debug)]
@@ -67,6 +70,7 @@ pub struct Command {
     raster: Option<u16>,
     budget: Option<u64>,
     raw: Option<bool>,
+    frame_cache: bool,
     port: u16,
     no_open: bool,
     session_file: Option<PathBuf>,
@@ -84,6 +88,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
         raster: None,
         budget: None,
         raw: None,
+        frame_cache: true,
         port: 0,
         no_open: false,
         session_file: None,
@@ -159,6 +164,13 @@ pub fn parse(args: &[String]) -> Result<Command> {
                     return Err(Error::input("goto width must be positive"));
                 }
                 c.initial["navigation"] = json!({"kind":"goto","center_um":[x.to_string(),y.to_string()],"width_um":w.to_string()});
+            }
+            "--frame-cache" => {
+                c.frame_cache = match value()? {
+                    "on" => true,
+                    "off" => false,
+                    _ => return Err(Error::input("frame-cache must be on or off")),
+                };
             }
             "--depth" => {
                 let v = value()?;
@@ -305,7 +317,16 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
         return Err(Error::input("chip mode requires a jobdeck"));
     }
     let indexer = Indexer::discover(&Discovery::local()?)?;
-    let service = Service::start(sources, resources, options, indexer)?;
+    let service = Service::start_configured(
+        sources,
+        resources,
+        options,
+        indexer,
+        ControllerOptions {
+            margin_prefetch: c.frame_cache,
+            frame_cache: c.frame_cache,
+        },
+    )?;
     let request = json!({"kind":"open","seq":"1","source_id":service.catalog()["sources"][0]["source_id"],"mode":c.mode,
         "levels":c.levels.map_or_else(||json!({"mode":"all"}),|ids|json!({"mode":"only","ids":ids.iter().map(i64::to_string).collect::<Vec<_>>()})),"body":c.initial});
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, c.port))?;

@@ -17,7 +17,7 @@ use floe_app_core::{
     native::Indexer,
     registered::{RegisteredSource, MAX_SOURCES},
     render::RenderOptions,
-    view::{Model, Patch, ViewController, ViewState},
+    view::{ControllerOptions, Model, Patch, ViewController, ViewState},
     Error, ErrorKind, Result,
 };
 use serde::Deserialize;
@@ -168,6 +168,7 @@ struct Inner {
     resources: Arc<Resources>,
     options: RenderOptions,
     indexer: Indexer,
+    view_options: ControllerOptions,
     state: Mutex<State>,
     wake: Condvar,
 }
@@ -183,6 +184,21 @@ impl Service {
         resources: Arc<Resources>,
         options: RenderOptions,
         indexer: Indexer,
+    ) -> Result<Arc<Self>> {
+        Self::start_configured(
+            sources,
+            resources,
+            options,
+            indexer,
+            ControllerOptions::default(),
+        )
+    }
+    pub fn start_configured(
+        sources: Vec<Arc<RegisteredSource>>,
+        resources: Arc<Resources>,
+        options: RenderOptions,
+        indexer: Indexer,
+        view_options: ControllerOptions,
     ) -> Result<Arc<Self>> {
         if sources.is_empty() || sources.len() > MAX_SOURCES {
             return Err(Error::input("catalog requires 1..32 sources"));
@@ -202,6 +218,7 @@ impl Service {
             resources,
             options,
             indexer,
+            view_options,
             state: Mutex::new(State {
                 ledger: Ledger::default(),
                 pending: None,
@@ -440,11 +457,12 @@ fn execute(inner: &Inner, work: Work) -> Result<Value> {
             let (width, height) = patch.pixels.unwrap_or((1024, 768));
             let initial = ViewState::initial(&model, width, height)?.edit(&model, *patch)?;
             let rows = LayerCatalog::dataset(&data.dataset, &model);
-            let controller = Arc::new(ViewController::start(
+            let controller = Arc::new(ViewController::start_configured(
                 &inner.resources,
                 data,
                 inner.options.clone(),
                 initial,
+                inner.view_options,
             )?);
             let mut view = Attachment::with_rows(controller, &source.title, rows)
                 .map_err(|_| Error::new(ErrorKind::Io, "entropy unavailable"))?;

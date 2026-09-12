@@ -270,7 +270,10 @@ pub fn snapshot(s: &Snapshot, m: &Model, view_id: &str, connection_epoch: &str) 
         "status":phase(s.phase),"source_stale":m.source_stale,"deck_skipped":m.skipped.to_string(),
         "failure":s.failure.as_ref().map(|(kind,_)|safe_error(*kind)),
         "submitted":s.submitted.to_string(),"consumed":s.consumed.to_string(),"discarded":s.discarded.to_string(),
-        "capabilities":{"labels":!m.deck,"frames":true,"margin":false,"query":false,"clip":false,"edit_source":false}})
+        "margin":s.margin.map(|v|json!({"frame_id":v.frame_id.to_string(),"origin_px":v.origin_px,"crop_safe":v.crop_safe})),
+        "margin_working":s.margin_working,"margin_submitted":s.margin_submitted.to_string(),"crop_hits":s.crop_hits.to_string(),
+        "margin_failure":s.margin_failure.as_ref().map(|(kind,_)|safe_error(*kind)),
+        "capabilities":{"labels":!m.deck,"frames":true,"margin":s.margin_enabled,"query":false,"clip":false,"edit_source":false}})
 }
 pub fn safe_error(kind: floe_app_core::ErrorKind) -> &'static str {
     use floe_app_core::ErrorKind as K;
@@ -404,7 +407,7 @@ pub fn frame_header(
     let value = json!({"type":"frame","protocol":1,"view_id":view_id,"connection_epoch":epoch,"frame_id":frame.id.to_string(),
         "dataset_revision":frame.dataset_revision.to_string(),"state_rev":frame.state_rev.to_string(),"render_rev":frame.render_rev.to_string(),
         "render_key":frame.render_key.to_string(),"worker_epoch":frame.worker_epoch.to_string(),"generation":f.generation.to_string(),"round":f.round.to_string(),
-        "purpose":"foreground","bbox_dbu":r.view.map(|n|n.to_string()),"width":r.width,"height":r.height,"row0":"top",
+        "purpose":match frame.purpose {floe_app_core::view::Purpose::Foreground=>"foreground",_=>"margin"},"bbox_dbu":r.view.map(|n|n.to_string()),"width":r.width,"height":r.height,"row0":"top",
         "format":match r.format {FrameFormat::Raw=>"raw",FrameFormat::Png=>"png"},"payload_length":f.bytes.len().to_string(),
         "final":f.final_frame,"partial":f.partial,"deferred":f.deferred.to_string(),"labels_truncated":f.labels_truncated,
         "deck_skipped":frame.deck_skipped.to_string(),"complete":f.complete()&&frame.deck_skipped==0,"approximate":approximate,"query":false,"perf":perf});
@@ -478,6 +481,7 @@ mod tests {
         bytes.extend(2u32.to_le_bytes());
         bytes.resize(40, 255);
         DisplayFrame {
+            purpose: floe_app_core::view::Purpose::Foreground,
             id: u64::MAX,
             dataset_revision: u64::MAX - 1,
             state_rev: 7,

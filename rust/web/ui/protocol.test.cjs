@@ -59,4 +59,14 @@ pv.setUint32(8, 13); pv.setUint32(12, 0x49484452); pv.setUint32(16, 2); pv.setUi
 p.packet(frame(Object.assign({}, h, {format: 'png', payload_length: '33'}), png));
 pv.setUint32(20, 2);
 assert.throws(() => p.packet(frame(Object.assign({}, h, {format: 'png', payload_length: '33'}), png)));
-console.log('WEB PROTOCOL: ALL OK (u64, malformed frames, dimensions, stale identity)');
+assert.equal(p.roundEven(2.5),2);assert.equal(p.roundEven(3.5),4);
+assert.equal(p.roundEven(-2.5),-2);assert.equal(p.roundEven(-3.5),-4);
+const mh={...h,purpose:'margin',width:196,height:176,bbox_dbu:['-58.9375','-48','137.0625','128']};
+const ms={...state,pixels:[100,80],bbox_dbu:['-10.9375','0','89.0625','80'],margin:{frame_id:'1'}};
+assert.deepEqual(p.placement(mh,ms),[48,48]);
+assert(p.matches(mh,{...ms,render_rev:'99'}));
+for(const change of [{render_key:'2'},{connection_epoch:'x'},{margin:null},
+    {bbox_dbu:['-9.9375','0','90.0625','80']},{pixels:[101,80]}]) {
+    assert(!p.matches(mh,{...ms,...change}));
+}
+console.log('WEB PROTOCOL: ALL OK (u64, frames, stale identity, margin phase/scale)');

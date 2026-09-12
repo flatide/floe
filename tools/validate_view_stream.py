@@ -39,6 +39,7 @@ def main(fixture):
                               text=True, capture_output=True, timeout=90)
         assert test.returncode == 0, (test.stdout, test.stderr)
         assert "RUST VIEW STREAM: ALL OK" in test.stdout
+        assert "RUST MARGIN STREAM: ALL OK" in test.stdout
         assert digest(cache) == before, "stream modified cache bytes/mtime"
         assert not list(workers.iterdir()), "stream worker files leaked"
         print(test.stdout.strip())

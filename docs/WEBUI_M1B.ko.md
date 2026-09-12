@@ -12,13 +12,14 @@ managed read lease·admission과 latest-only view controller를 추가했고**(�
 연결했다**(§6). M1b-2c1은 등록된 소스 범위와 관리형 색인 supervisor다(§7).
 M1b-2c2에서 인증된 catalog·view 생성/재open·색인 작업 API를 연결했다(§8).
 M1b-3에서 `floe2-web view`와 번들 HTML/Canvas 기본 뷰어를 연결했다(§9).
-M1/G1/G4 전체 완료는 아니며 margin과 현장 Firefox/ETX 검증은 남아 있다.
+M1b-4a에서 일반 layout margin prefetch/착지/crop을 연결했다(§10).
+M1/G1/G4 전체 완료는 아니며 drag·현장 Firefox/ETX 성능 검증은 남아 있다.
 
 다음 단계:
 
-1. M1b-4: layout margin prefetch/착지 base/crop/16px 위상, 실제 UI 게이트와
-   G1/읽기 G4. deck margin/labels/query는 capability=false를 유지한다.
-2. 추가 스타일 편집(fill/width/font), drag 및 이후 DRC/query/export parity.
+1. M1b-4b: drag·추가 스타일 편집(fill/width/font)과 실제 UI 게이트, G1/읽기 G4.
+   deck margin/labels/query는 capability=false를 유지한다.
+2. 이후 DRC/query/export parity와 현장 Firefox/ETX 성능 검증.
 
 기존 CLI·GTK/Python 제품, jobdeck 실측 브랜치·렌더링 정책은 변경하지 않았다.
 임의 파일 경로나 renderd wire를 HTTP/WS로 직접 실행하는 통로도 없다.
@@ -467,3 +468,86 @@ key·bbox·pixel size를 다시 검사한다. 다음 상태가 accepted만 되�
 Rust 앱의 작업 화면을 우선 연결했으며 Python/GTK 제품·jobdeck 실측 브랜치는
 유지한다. layout margin/라벨 crop, 추가 스타일(fill/width/font) 편집, drag, G1/G4
 및 DRC/query/export/배포 전환은 다음 단계다. refinement 기본 off도 그대로다.
+
+## 10. M1b-4a — 일반 레이아웃 margin/crop
+
+`view`의 frame-cache는 기본 on이다. `--frame-cache off`는 native retained frame
+재사용과 margin prefetch를 함께 끈다(decoded page LRU를 끄는 옵션은 아니다).
+기존 `ViewController::start`/`Service::start`는 prefetch 없는 하네스 계약을 유지하고,
+웹 launcher가 `start_configured(ControllerOptions)`로 명시 활성화한다. 잡덱은
+요청이 on이어도 margin capability=false이며 추가 렌더를 하지 않는다.
+
+### 10.1 생성·스케줄·수명
+
+- 첫 foreground final 이후 idle 때 ±50% 커서 한 스텝만큼 확장한 프레임을
+  같은 worker에 제출한다. 확장은 양축 16 device px 배수다. 8192 px/축·16 Mpx
+  한도에 걸리면 같은 비율로 축소/16px 내림, 여유가 없거나 지원 좌표 경계를
+  넘으면 prefetch를 생략한다. viewport 요청 자체를 확대하거나 숨은 fit을 만들지 않는다.
+- margin은 라벨을 포함하고 foreground와 같은 depth/detail/thin/style/mono/frames
+  정책을 쓴다. 라벨 잘림·partial/deferred가 있으면 crop 완료로 인정하지 않는다.
+  실패한 optional prefetch는 기존 정상 foreground를 지우지 않고 `margin_failure`와
+  상태줄에 표시한다. 같은 영역을 계속 재시도하지 않는다. worker 자체의 I/O/종료
+  실패는 여전히 hard error이며 취소로 위장하지 않는다.
+- foreground 요청은 진행 중 margin보다 우선한다. cancel ack가 아니라 terminal
+  drain 후 다음 native 작업을 제출하며 기존 5s drain deadline을 유지한다. 이미
+  완전한 margin이 새 viewport를 덮으면 foreground를 생략한다. 배율·정책이 맞는
+  진행 중 margin은 가능한 완료시켜 반복 pan이 prefetch를 영원히 취소하지 않게 한다.
+- 착지 프레임 양쪽 여유가 원래 extension의 70% 이상이면 그대로 사용한다.
+  벗어나면 현 중심으로 보충한다. 상주 foreground 1 + margin 1, native active 1,
+  pending은 계산된 최신 상태뿐이다. 전송은 두 슬롯 중 foreground 우선, 연결당
+  encoding/write/ACK flight 1과 기존 byte/encoder admission을 그대로 적용한다.
+
+### 10.2 표시·무효화
+
+frame 봉투의 `purpose=foreground|margin`, snapshot의 `margin={frame_id,origin_px,
+crop_safe}`로 용도를 구분한다. margin은 과거 render_rev여도 같은 dataset/view/
+worker·render_key·배율과 16px 위상을 만족하면 유효하다. reconnect는 새 connection
+epoch를 붙여 필요한 margin을 다시 전송한다. foreground에는 기존 최신 revision
+검사를 그대로 적용한다. 늦은 margin decode도 설치 전에 다시 검사한다.
+
+브라우저는 foreground Canvas와 margin Canvas 두 장만 유지한다. margin을
+배경에 놓고 CSS 위치를 정수 device px로 이동시켜 viewport에서 clip하므로 pan마다
+전체 RGBA를 복사하지 않는다. 완전한 margin 안에서는 foreground를 숨기고 라벨까지
+같이 crop한다. 잘린 라벨이 있는 margin은 새 strip의 base로만 쓰고, 겹치는 기존
+foreground를 위에 유지한 채 새 foreground를 받는다. 새 정책·zoom·resize는 현재
+crop을 frozen viewport로 보관한 뒤 이전 margin을 재사용하지 않는다.
+
+커서 입력의 임시 위치는 화면 px만으로 즉시 이동한다. 상태/세계 좌표는 Rust
+응답이 정본이고, 불확실한 입력을 재접속 뒤 다시 실행하지 않는다. buffer→viewport
+투영은 표시 전용 f64이며 재샘플하지 않는다. 양축 배율 1e-9, 정수 오차 1e-3 px
+범위를 벗어나면 재사용하지 않는다. `displayed` ACK는 Canvas 설치/credit 완료를
+뜻하며 input-to-photon 측정값은 아니다.
+perf에는 마지막 foreground 비용과 background margin 비용을 분리해 표시한다.
+crop hit를 새 foreground 렌더로 오인하거나 큰 background 치수를 viewport로
+비교하지 않도록 `crop (no foreground render)`를 명시한다.
+
+각 Canvas는 최대 RGBA 64 MiB, 두 장 합 128 MiB다. decode packet/임시 RGBA/브라우저
+내부 surface와 native retained/decoded 메모리는 별도다. RSS 128 MiB 보장으로
+해석하지 않는다. 캐시/배율/정책이 바뀌거나 close하면 불필요한 buffer를 폐기한다.
+
+### 10.3 검증
+
+- core: half-DBU/50%·10% 양방향 pan, 16px phase, 4K/16Mpx/좌표 끝, crop-hit,
+  정책 변경, label truncation, prefetch 실패 반복 억제, cancel ack/terminal,
+  deck 및 frame-cache off. app-core 단위 40개 통과.
+- 실제 native `validate_view_controller.py`: 원본 foreground와 margin crop
+  **18개 raw 픽셀 대조**(반 DBU 위상·speckle/16×16 pattern·양축 10/50%) 완전 일치.
+  10% pan은 추가 foreground 제출 0. 기존 13 PNG/lease 게이트도 유지한다.
+- 실제 HTTP/WS `validate_view_stream.py`: PNG/raw + 라벨, foreground 우선 credit,
+  crop 뒤 foreground 없이 재접속, 과거 margin render_rev/새 epoch, thin 정책
+  변경의 강제 무효화, 원래 2×100입력·slow subscriber·종료 게이트 유지.
+- JS: 즉시 50% pan에 추가 draw 호출 0, 정수 위치·truncated base/foreground 겹침,
+  느린 PNG decode 중 key 변경, URL/ACK 정리. CLI는 on/off 모두 PATH-empty 검증.
+- 실제 macOS Chrome/DPR 2: 2312×1651 viewport에 4616×3315 raw margin이 착지하고
+  라벨 on에서 Shift+Right 입력 후 같은 frame ID/generation 2를 유지하며 위치만
+  224 device px 이동했다. 화면과 DOM 상태를 확인했다. Firefox/ETX G1/G2 성능
+  ±10% 또는 모든 사용자 파일의 무결성을 이 실험만으로 주장하지 않는다.
+
+`sh tools/validate_rust.sh` 전체가 `RUST VALIDATION: ALL OK`로 통과했다. 마지막
+표시/버퍼 회수 수정 뒤 JS 게이트·release CLI·strict clippy를 다시 확인했다.
+Rust 1.89/빈 registry/`--offline --locked` 단위·HTTP 테스트 및 최종 번들의 Linux
+musl release link도 성공했다(Linux 실행 검증은 아님). 기존 native 경고는 보존했다.
+query capability는 계속 false다.
+M4의 expected/actual scene ID는 이제 foreground뿐 아니라 **실제 표시된 margin
+generation**도 식별해야 한다. crop에서 render_rev만으로 native query scene을
+추정해서는 안 된다.
