@@ -87,6 +87,15 @@ pub struct Auth {
     session_ttl: Duration,
 }
 impl Auth {
+    pub(crate) fn expired(&self, now: Instant) -> bool {
+        if let Some(session) = &self.session {
+            now >= session.expires
+        } else {
+            self.bootstrap
+                .as_ref()
+                .is_none_or(|(_, deadline)| now >= *deadline)
+        }
+    }
     /// M1 local owner session only. Shares and independent identities are a
     /// later service; do not infer guest grants from possession of a view ID.
     pub fn new(
@@ -175,8 +184,12 @@ mod tests {
     fn bootstrap_is_one_use_and_has_a_deadline() {
         let now = Instant::now();
         let (mut a, b) = Auth::new(now, Duration::from_secs(2), Duration::from_secs(5)).unwrap();
+        assert!(!a.expired(now));
+        assert!(a.expired(now + Duration::from_secs(2)));
         assert!(a.exchange(&"0".repeat(64), now).is_err());
         let c = a.exchange(&b.expose(), now).unwrap();
+        assert!(!a.expired(now + Duration::from_secs(2)));
+        assert!(a.expired(now + Duration::from_secs(5)));
         assert!(a.exchange(&b.expose(), now).is_err());
         assert_eq!(
             a.authenticate(&c.cookie.expose(), &c.csrf.expose(), now)
@@ -211,6 +224,7 @@ mod tests {
             )
             .is_err());
         a.revoke(&c.id);
+        assert!(a.expired(now));
         assert!(!a.alive(&c.id, now));
         assert!(a
             .authenticate(&c.cookie.expose(), &c.csrf.expose(), now)

@@ -106,10 +106,12 @@ fn state_marker(s: &floe_app_core::view::Snapshot) -> (u64, floe_app_core::view:
     (s.state_rev, s.phase, s.submitted, s.consumed)
 }
 
-pub(crate) async fn socket(ws: WebSocket, gate: Gate, id: SessionId) {
-    let Some(attached) = &gate.view else {
-        return;
-    };
+pub(crate) async fn socket(
+    ws: WebSocket,
+    gate: Gate,
+    id: SessionId,
+    attached: Arc<crate::transport::Attachment>,
+) {
     let Ok(epoch) = public_id() else {
         return;
     };
@@ -117,7 +119,7 @@ pub(crate) async fn socket(ws: WebSocket, gate: Gate, id: SessionId) {
     if !gate.alive(&id) || *stop.borrow() {
         return;
     }
-    let _subscriber = gate.subscribe();
+    let _subscriber = attached.subscribe();
     let (mut sink, mut input) = ws.split();
     let (tx, mut output) = mpsc::channel::<Out>(4);
     let (sent_tx, mut sent_rx) = mpsc::channel::<u64>(1);
@@ -172,6 +174,7 @@ pub(crate) async fn socket(ws: WebSocket, gate: Gate, id: SessionId) {
         (Instant::now(), Instant::now(), Instant::now());
     let mut messages = 0u32;
     let mut writer_finished = false;
+    let mut closed_since: Option<Instant> = None;
     loop {
         tokio::select! {
             _=stop.changed()=>break,
@@ -197,6 +200,11 @@ pub(crate) async fn socket(ws: WebSocket, gate: Gate, id: SessionId) {
                     heartbeat=Instant::now();
                 }
                 let state=controller.snapshot();
+                if matches!(state.phase,floe_app_core::view::Phase::Closed|floe_app_core::view::Phase::Failed) {
+                    // Let the last snapshot flush, then release this view's
+                    // metadata instead of keeping closed views alive forever.
+                    if closed_since.get_or_insert_with(Instant::now).elapsed()>Duration::from_millis(100){break;}
+                }
                 let marker=state_marker(&state);
                 if marker!=last_state {
                     if reply(&tx,view::snapshot(&state,&controller.model,&attached.id,&epoch)).is_err(){break;}

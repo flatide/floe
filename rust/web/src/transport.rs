@@ -48,7 +48,44 @@ pub(crate) struct Attachment {
     pub id: String,
     pub title: String,
     pub controller: Arc<ViewController>,
+    pub rows: crate::layer_catalog::LayerCatalog,
+    pub source_id: String,
+    pub mode: &'static str,
     activity: Mutex<Activity>,
+}
+impl Attachment {
+    pub(crate) fn new(
+        controller: Arc<ViewController>,
+        title: &str,
+    ) -> Result<Self, crate::auth::AuthError> {
+        let rows = crate::layer_catalog::LayerCatalog::model(&controller.model);
+        Self::with_rows(controller, title, rows)
+    }
+    pub(crate) fn with_rows(
+        controller: Arc<ViewController>,
+        title: &str,
+        rows: crate::layer_catalog::LayerCatalog,
+    ) -> Result<Self, crate::auth::AuthError> {
+        Ok(Self {
+            id: crate::auth::public_id()?,
+            title: title.chars().take(256).collect(),
+            rows,
+            controller,
+            source_id: String::new(),
+            mode: "level",
+            activity: Mutex::new(Activity {
+                connected: 0,
+                seen: false,
+                since: Instant::now(),
+            }),
+        })
+    }
+    pub(crate) fn subscribe(self: &Arc<Self>) -> Subscriber {
+        let mut a = self.activity.lock().unwrap();
+        a.connected += 1;
+        a.seen = true;
+        Subscriber(Arc::clone(self))
+    }
 }
 struct Activity {
     connected: usize,
@@ -62,15 +99,13 @@ impl Activity {
                 >= Duration::from_secs(if self.seen { 60 } else { 120 })
     }
 }
-pub(crate) struct Subscriber(Gate);
+pub(crate) struct Subscriber(Arc<Attachment>);
 impl Drop for Subscriber {
     fn drop(&mut self) {
-        if let Some(view) = &self.0.view {
-            let mut a = view.activity.lock().unwrap();
-            a.connected -= 1;
-            if a.connected == 0 {
-                a.since = Instant::now();
-            }
+        let mut a = self.0.activity.lock().unwrap();
+        a.connected -= 1;
+        if a.connected == 0 {
+            a.since = Instant::now();
         }
     }
 }
@@ -88,7 +123,8 @@ pub struct Gateway {
     auth: Mutex<Auth>,
     sockets: Arc<Semaphore>,
     pub(crate) stopping: watch::Sender<bool>,
-    pub(crate) view: Option<Attachment>,
+    pub(crate) view: Option<Arc<Attachment>>,
+    pub(crate) service: Option<Arc<crate::service::Service>>,
     pub(crate) output_bytes: Arc<Semaphore>,
     pub(crate) encoders: Arc<Semaphore>,
 }
@@ -111,6 +147,7 @@ impl Gateway {
                 sockets: Arc::new(Semaphore::new(SOCKETS as usize)),
                 stopping,
                 view: None,
+                service: None,
                 output_bytes: Arc::new(Semaphore::new(crate::view::OUTPUT_BUDGET)),
                 encoders: Arc::new(Semaphore::new(2)),
             }),
@@ -128,18 +165,32 @@ impl Gateway {
         title: &str,
     ) -> Result<(Gate, Secret), String> {
         let (mut gate, secret) = Self::new(addr)?;
-        let id = crate::auth::public_id().map_err(|e| e.to_string())?;
-        Arc::get_mut(&mut gate).expect("new gateway").view = Some(Attachment {
-            id,
-            title: title.chars().take(256).collect(),
-            controller,
-            activity: Mutex::new(Activity {
-                connected: 0,
-                seen: false,
-                since: Instant::now(),
-            }),
-        });
+        Arc::get_mut(&mut gate).expect("new gateway").view = Some(Arc::new(
+            Attachment::new(controller, title).map_err(|e| e.to_string())?,
+        ));
         Ok((gate, secret))
+    }
+    pub fn with_service(
+        addr: SocketAddr,
+        service: Arc<crate::service::Service>,
+    ) -> Result<(Gate, Secret), String> {
+        let (mut gate, secret) = Self::new(addr)?;
+        Arc::get_mut(&mut gate).expect("new gateway").service = Some(service);
+        Ok((gate, secret))
+    }
+    pub(crate) fn active_view(&self) -> Option<Arc<Attachment>> {
+        self.service
+            .as_ref()
+            .and_then(|s| s.current())
+            .or_else(|| self.view.clone())
+    }
+    fn stop_services(&self) {
+        if let Some(service) = &self.service {
+            service.request_stop();
+        }
+        if let Some(view) = &self.view {
+            view.controller.request_close();
+        }
     }
     pub fn transport_usage(&self) -> TransportUsage {
         TransportUsage {
@@ -148,18 +199,6 @@ impl Gateway {
             encoders: 2 - self.encoders.available_permits(),
             sockets: SOCKETS as usize - self.sockets.available_permits(),
         }
-    }
-    pub(crate) fn subscribe(self: &Arc<Self>) -> Subscriber {
-        let mut a = self
-            .view
-            .as_ref()
-            .expect("view attached")
-            .activity
-            .lock()
-            .unwrap();
-        a.connected += 1;
-        a.seen = true;
-        Subscriber(Arc::clone(self))
     }
     fn authenticate(&self, headers: &HeaderMap, csrf: &str) -> Result<SessionId, StatusCode> {
         let cookie = origin::cookie(headers, &self.cookie_name).ok_or(StatusCode::UNAUTHORIZED)?;
@@ -173,7 +212,7 @@ impl Gateway {
         self.auth.lock().is_ok_and(|a| a.alive(id, Instant::now()))
     }
 }
-fn error(status: StatusCode) -> Response {
+pub(crate) fn error(status: StatusCode) -> Response {
     (status, Json(json!({"error":status.as_u16()}))).into_response()
 }
 pub fn router(gate: Gate) -> Router {
@@ -183,6 +222,7 @@ pub fn router(gate: Gate) -> Router {
         .route("/api/v1/capabilities", get(capabilities))
         .route("/api/v1/events", get(upgrade))
         .route("/api/v1/view", get(current_view))
+        .merge(crate::owner::routes())
         .fallback(|| async { error(StatusCode::NOT_FOUND) })
         .layer(DefaultBodyLimit::max(BODY_BYTES))
         .layer(middleware::from_fn_with_state(Arc::clone(&gate), guard))
@@ -264,7 +304,7 @@ async fn exchange(
     );
     response
 }
-fn http_session(gate: &Gateway, headers: &HeaderMap) -> Result<SessionId, StatusCode> {
+pub(crate) fn http_session(gate: &Gateway, headers: &HeaderMap) -> Result<SessionId, StatusCode> {
     gate.authenticate(
         headers,
         origin::single(headers, "x-floe-csrf").ok_or(StatusCode::UNAUTHORIZED)?,
@@ -274,8 +314,9 @@ async fn capabilities(State(gate): State<Gate>, headers: HeaderMap) -> Response 
     if let Err(e) = http_session(&gate, &headers) {
         return error(e);
     }
-    Json(json!({"protocol":1,"bundle":BUNDLE,"stage":if gate.view.is_some(){"view-stream"}else{"transport"},
-        "render":gate.view.is_some(),"shares":false,"uploads":false,"control_bytes":CONTROL_BYTES,
+    let render = gate.service.is_some() || gate.view.is_some();
+    Json(json!({"protocol":1,"bundle":BUNDLE,"stage":if gate.service.is_some(){"owner-service"}else if render{"view-stream"}else{"transport"},
+        "render":render,"catalog":gate.service.is_some(),"index":gate.service.is_some(),"shares":false,"uploads":false,"control_bytes":CONTROL_BYTES,
         "frame_bytes":crate::view::PACKET_BYTES,"frame_credit":1,"pending_frames":1}))
     .into_response()
 }
@@ -283,7 +324,7 @@ async fn current_view(State(gate): State<Gate>, headers: HeaderMap) -> Response 
     if let Err(e) = http_session(&gate, &headers) {
         return error(e);
     }
-    let Some(view) = &gate.view else {
+    let Some(view) = gate.active_view() else {
         return error(StatusCode::NOT_FOUND);
     };
     let snapshot = crate::view::snapshot(
@@ -292,7 +333,8 @@ async fn current_view(State(gate): State<Gate>, headers: HeaderMap) -> Response 
         &view.id,
         "",
     );
-    Json(json!({"title":view.title,"view":snapshot})).into_response()
+    Json(json!({"title":view.title,"source_id":view.source_id,"mode":view.mode,"view":snapshot}))
+        .into_response()
 }
 async fn logout(State(gate): State<Gate>, headers: HeaderMap) -> Response {
     let id = match http_session(&gate, &headers) {
@@ -303,9 +345,7 @@ async fn logout(State(gate): State<Gate>, headers: HeaderMap) -> Response {
         Ok(mut a) => a.revoke(&id),
         Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE),
     }
-    if let Some(view) = &gate.view {
-        view.controller.request_close();
-    }
+    gate.stop_services();
     let mut r = StatusCode::NO_CONTENT.into_response();
     r.headers_mut().insert(
         "set-cookie",
@@ -342,20 +382,23 @@ async fn upgrade(State(gate): State<Gate>, headers: HeaderMap, ws: WebSocketUpgr
         Ok(p) => p,
         Err(_) => return error(StatusCode::TOO_MANY_REQUESTS),
     };
+    // Pin the view along with this handshake's buffer limits. A concurrent
+    // open must not turn a control-only upgrade into an 80 MiB frame stream.
+    let attached = gate.active_view();
     ws.protocols([PROTOCOL])
         .max_message_size(CONTROL_BYTES)
         .max_frame_size(CONTROL_BYTES)
         .read_buffer_size(CONTROL_BYTES)
         .write_buffer_size(0)
-        .max_write_buffer_size(if gate.view.is_some() {
+        .max_write_buffer_size(if attached.is_some() {
             crate::view::PACKET_BYTES + 2 * CONTROL_BYTES
         } else {
             2 * CONTROL_BYTES
         })
         .on_upgrade(move |socket| async move {
             let _permit = permit;
-            if gate.view.is_some() {
-                crate::stream::socket(socket, gate, id).await;
+            if let Some(attached) = attached {
+                crate::stream::socket(socket, gate, id, attached).await;
             } else {
                 control_socket(socket, gate, id).await;
             }
@@ -434,7 +477,8 @@ pub async fn serve(
         tokio::select! {
             _ = &mut shutdown => break Ok(()),
             _ = maintenance.tick()=>{
-                if let Some(view)=&gate.view {
+                if gate.auth.lock().is_ok_and(|a|a.expired(Instant::now())) {gate.stop_services();}
+                if let Some(view)=gate.active_view() {
                     if view.activity.lock().unwrap().expired(Instant::now()) {view.controller.request_close();}
                 }
             },
@@ -456,9 +500,7 @@ pub async fn serve(
         }
     };
     gate.stopping.send_replace(true);
-    if let Some(view) = &gate.view {
-        view.controller.request_close();
-    }
+    gate.stop_services();
     drop(listener);
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
@@ -470,7 +512,7 @@ pub async fn serve(
     if drained.is_err() {
         return Err(io::Error::other("WebSocket shutdown deadline exceeded"));
     }
-    if let Some(view) = &gate.view {
+    if let Some(view) = gate.active_view() {
         let stopped = timeout(Duration::from_secs(4), async {
             while !view.controller.is_finished() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -479,6 +521,17 @@ pub async fn serve(
         .await;
         if stopped.is_err() {
             return Err(io::Error::other("view shutdown deadline exceeded"));
+        }
+    }
+    if let Some(service) = &gate.service {
+        let stopped = timeout(Duration::from_secs(4), async {
+            while !service.is_finished() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        if stopped.is_err() {
+            return Err(io::Error::other("owner service shutdown deadline exceeded"));
         }
     }
     result

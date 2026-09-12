@@ -10,15 +10,15 @@
 managed read lease·admission과 latest-only view controller를 추가했고**(§5),
 **M1b-2b에서 신뢰된 launcher가 등록한 view의 인증된 제어/프레임 스트림을
 연결했다**(§6). M1b-2c1은 등록된 소스 범위와 관리형 색인 supervisor다(§7).
-아직 웹 뷰어 실행 명령, 정적 UI, catalog·view 생성/색인 API는 없다.
+M1b-2c2에서 인증된 catalog·view 생성/재open·색인 작업 API를 연결했다(§8).
+아직 웹 뷰어 실행 명령과 정적 UI는 없다.
 `floe2-web view`가 동작한다거나 M1/G1/G4가 완료됐다는 뜻이 아니다.
 
 다음 단계:
 
-1. M1b-2c2: 허가된 source catalog·view 생성/재open·index 진행 상태의 HTTP 연결.
-2. M1b-3: 번들 HTML/Canvas와 실행 명령, open/goto/pan/zoom, layer/level/chip,
+1. M1b-3: 번들 HTML/Canvas와 실행 명령, open/goto/pan/zoom, layer/level/chip,
    depth/detail/thin·스타일·상태줄, DPR/y축/half-DBU/늦은 decode 필터.
-3. M1b-4: layout margin prefetch/착지 base/crop/16px 위상, 실제 UI 게이트와
+2. M1b-4: layout margin prefetch/착지 base/crop/16px 위상, 실제 UI 게이트와
    G1/읽기 G4. deck margin/labels/query는 capability=false를 유지한다.
 
 기존 CLI·GTK/Python 제품, jobdeck 실측 브랜치·렌더링 정책은 변경하지 않았다.
@@ -321,3 +321,76 @@ fmt/strict clippy와 전체 `sh tools/validate_rust.sh`의 `RUST VALIDATION: ALL
 기존 KLayout 13 PX + 2 phase-exact + 14 style 포함. Rust 1.89.0/빈 registry의
 `--offline --locked` 테스트와 Linux musl release 테스트 실행 파일도 빌드했다.
 폐쇄망 Linux/동시 viewer 부하 측정이나 HTTP index API 검증을 대신하지 않는다.
+
+## 8. M1b-2c2 — owner catalog/open/index API
+
+`Service::start`에 로컬에서 허가/등록한 source 최대 32개와 고정 native 설정을
+넣고 `Gateway::with_service`로 연결한다. browser에는 독립 무작위 source ID만
+보낸다. 임의 경로/실행파일/env/upload/profile 옵션은 없다. 아직 owner 한 명의
+현재 view **1개**, 동시 오래 걸리는 open/index 작업 **1개**다. M2의 따라보기/
+독립 탐색/공유 권한과 공용 supervisor를 완성한 것은 아니다.
+
+다음 API는 모두 cookie + X-Floe-CSRF, 변경 요청은 정확한 Origin까지 요구한다:
+
+| 경로 | 동작 |
+|---|---|
+| `GET /api/v1/catalog` | source ID·basename title·deck 여부·level 수. 파일 경로 없음 |
+| `GET /api/v1/catalog/{id}/levels/{start}` | level ID(10진 문자열)/title, 64행 페이지 |
+| `POST /api/v1/operations` | kind=open/index, 엄격한 DTO, owner 작업 seq → 202 |
+| `GET /api/v1/operations` | 마지막 수락 seq·active와 최근 32개 작업의 최신 상태 |
+| `GET /api/v1/operations/{seq}` | 자기 작업의 진행/결과, 축출된 이력은 410 |
+| `POST /api/v1/operations/{seq}/cancel` | 해당 작업만 취소. 이미 끝난 작업에는 재실행/다른 작업 취소 없음 |
+| `GET /api/v1/view` | 현재 source ID·mode와 authoritative view snapshot |
+| `GET /api/v1/views/{id}/layers/{start}` | 가시 UI 행 64개, pair/name/style/가시성/덱 head-parent. 원본 tooltip/path 없음 |
+| `DELETE /api/v1/views/{id}` | 명시 view close. 이전 ID의 재전송으로 새 view를 닫지 않음 |
+
+`open` body에는 source_id/mode/levels와 §6의 초기 view patch를 받는다.
+depth/detail/thin/goto/pixels/style을 한 번에 적용한 뒤 controller를 시작한다.
+open 성공은 dataset/worker controller 생성이지 첫 프레임 완료가 아니다.
+실제 open/render 오류는 snapshot의 실패 상태를 따른다. 캐시가 없으면 명시
+index_unavailable이며 자동 색인/force는 없다. 다른 view를 열려면 이전 view를
+닫고 worker 종료를 기다린다. mode/선택을 바꾼 재open에는 새 dataset/worker/view
+ID를 부여한다. 현 단계의 재open은 초기 patch를 적용하며 이전 스타일/이력의
+자동 이관을 구현했다고 주장하지 않는다.
+
+`index`는 jobs/force/LOD/occupancy/occupancy-only/occupancy-um만 허용한다.
+등록 의존 집합의 managed lease/CPU 예약은 §7과 같고 열린 view와 충돌하면
+작업은 Busy로 실패한다. core JSON/원문 로그가 아니라 허용된 진행 카운터만
+snapshot으로 전달한다. index를 묵시적으로 다시 시도하지 않는다.
+
+작업 seq는 owner 서비스 수명의 양의 u64 10진 문자열, 새 작업은 마지막+1이다.
+동일 seq·동일 typed payload의 재전송은 보관된 상태를 반환하며 native를 다시
+실행하지 않는다. payload가 다르면 409. 최근 32개 밖의 오래된 seq도 high-water
+때문에 **410이고 재실행하지 않는다**. busy로 아직 수락하지 않은 요청은 seq를
+소비하지 않는다. WS 편집 seq/connection epoch와 별개이며 재접속 후 먼저 작업
+상태를 조회해야 한다. 취소와 완료가 경합하면 최종 실제 결과를 확인한다.
+
+filesystem/prepare/native wait는 HTTP thread가 아니라 전용 owner thread에서
+실행한다. pending+active 합 1, 무제한 thread/spawn_blocking/operation queue가
+없다. HTTP 진행 조회가 없어도 native를 drain한다. close/cancel은 긴 index
+뒤에 줄 서지 않고 종료 flag를 보낸다. logout·auth/bootstrap 만료·서버 종료도
+service/index/view를 중단한다. shutdown의 비동기 대기 실패는 오류이며 느린
+외부 filesystem syscall 자체에 hard deadline/OS 격리를 보장하지 않는다.
+
+WS upgrade는 그 시점의 view Arc와 write-buffer 한도를 함께 고정한다. open
+전 control-only 연결이 나중에 큰 이미지 스트림으로 변하는 경합은 없다.
+명시 종료/실패한 view의 WS는 마지막 snapshot을 보낼 짧은 유예 뒤 닫아 이전
+model/목록을 계속 붙들지 않는다. 일반 연결 해제의 60s linger는 그대로다.
+
+레이어 목록은 128문자 name/최대 4개 alias로 표시 메타데이터를 제한한다.
+원래 pair/서버 렌더·선택 의미는 유지한다. level 모드의 숨긴 렌더 자식이 선택되어
+있으면 표시된 부모도 켜진 것으로 보고, chip 모드는 level-parent/source-child다.
+목록 페이지의 state_rev로 비동기 응답이 최신 상태인지 판정할 수 있다.
+
+필수 `validate_owner_service.py`: private valmini, 빈 PATH, 실제 HTTP/WS/native로
+무인증/미정의 옵션/경로 거부, 자동 색인 금지, index 중복 요청/다른 payload 충돌,
+열린 cache의 재색인 거부, 초기 generation=1, layout→chip→level 재open과 새 revision,
+가시 head/숨김 자식, 이전 close ID 거부, 살아 있는 WS 및 index의 logout/서버 종료
+후 PID/lease/전송 예약 회수를 검증한다. 기존 PNG/raw 100-input 스트림 gate도 유지한다.
+browser 자체의 입력·decode·Canvas 검증과 실행 명령은 다음 단계다.
+
+검증 결과: web 단위 13 + 실제 TCP/WS 7, 위 실제 native owner gate와 PNG/raw
+스트림 gate, strict clippy/해당 crate fmt, `sh tools/validate_rust.sh` 전체가
+통과했다(`RUST VALIDATION: ALL OK`, 기존 KLayout oracle 포함). Rust 1.89.0의
+빈 registry + `--offline --locked` 테스트와 Linux musl release 테스트 실행 파일
+빌드도 통과했다. Linux/Firefox/ETX 실행 검증으로 대신 세지는 않는다.
