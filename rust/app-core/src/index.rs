@@ -378,7 +378,13 @@ impl PreparedIndex {
             cleanup_occupancy: !profiling && (options.wants_occupancy() || options.occupancy_only),
         })
     }
-    pub fn start(mut self, cancelled: &AtomicUsize) -> Result<IndexJob> {
+    pub fn start(self, cancelled: &AtomicUsize) -> Result<IndexJob> {
+        self.start_io(cancelled, false)
+    }
+    pub fn start_captured(self, cancelled: &AtomicUsize) -> Result<IndexJob> {
+        self.start_io(cancelled, true)
+    }
+    fn start_io(mut self, cancelled: &AtomicUsize, capture: bool) -> Result<IndexJob> {
         if matches!(self.action, Action::Reuse | Action::OccupancyPresent) {
             return Err(Error::input("a reused cache does not launch an indexer"));
         }
@@ -388,13 +394,26 @@ impl PreparedIndex {
                 "index cancelled before launch",
             ));
         }
-        let child = self.indexer.spawn(&self.args)?;
+        let mut child = self.indexer.spawn(&self.args, capture)?;
+        let capture = if capture {
+            match crate::index_progress::Capture::take(&mut child) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(e);
+                }
+            }
+        } else {
+            None
+        };
         Ok(IndexJob {
             child: Some(child),
             lease: self.lease.take(),
             directory: self.directory.clone(),
             cleanup_occupancy: self.cleanup_occupancy,
             finished: None,
+            capture,
         })
     }
 }
@@ -405,14 +424,21 @@ pub struct IndexJob {
     directory: PathBuf,
     cleanup_occupancy: bool,
     finished: Option<i32>,
+    capture: Option<crate::index_progress::Capture>,
 }
 impl IndexJob {
     pub fn pid(&self) -> Option<u32> {
         self.child.as_ref().map(Child::id)
     }
+    pub fn progress(&self) -> Option<&crate::index_progress::Progress> {
+        self.capture.as_ref().map(|c| &c.progress)
+    }
     pub fn poll(&mut self) -> Result<Option<i32>> {
         if self.finished.is_some() {
             return Ok(self.finished);
+        }
+        if let Some(c) = self.capture.as_mut() {
+            c.drain()?;
         }
         if let Some(status) = self.child.as_mut().expect("running child").try_wait()? {
             let code = status
@@ -447,6 +473,11 @@ impl IndexJob {
     }
     fn finish(&mut self, code: i32) {
         self.child.take();
+        // Telemetry is best-effort. Do not turn the native exit status into a
+        // different result because of a late pipe failure during final drain.
+        if let Some(c) = self.capture.as_mut() {
+            let _ = c.finish();
+        }
         self.finished = Some(code);
         if code != 0 {
             if let Err(e) = self.discard_occupancy_tmp() {

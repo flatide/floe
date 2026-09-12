@@ -9,13 +9,13 @@
 `rust/web`의 `floe-web` crate를 추가했다. **M1b-2a에서 앱 코어의
 managed read lease·admission과 latest-only view controller를 추가했고**(§5),
 **M1b-2b에서 신뢰된 launcher가 등록한 view의 인증된 제어/프레임 스트림을
-연결했다**(§6). 아직 웹 뷰어 실행 명령, 정적 UI, catalog·view 생성/색인 API는 없다.
+연결했다**(§6). M1b-2c1은 등록된 소스 범위와 관리형 색인 supervisor다(§7).
+아직 웹 뷰어 실행 명령, 정적 UI, catalog·view 생성/색인 API는 없다.
 `floe2-web view`가 동작한다거나 M1/G1/G4가 완료됐다는 뜻이 아니다.
 
 다음 단계:
 
-1. M1b-2c: 허가된 source catalog·view 생성/재open, index 진행 이벤트와
-   managed write lease의 실제 작업 수명 연결.
+1. M1b-2c2: 허가된 source catalog·view 생성/재open·index 진행 상태의 HTTP 연결.
 2. M1b-3: 번들 HTML/Canvas와 실행 명령, open/goto/pan/zoom, layer/level/chip,
    depth/detail/thin·스타일·상태줄, DPR/y축/half-DBU/늦은 decode 필터.
 3. M1b-4: layout margin prefetch/착지 base/crop/16px 위상, 실제 UI 게이트와
@@ -266,3 +266,58 @@ format별 100회 pan, ACK 보류 중 단일 credit/latest-only, 빠른 두 번�
 `RUST VALIDATION: ALL OK` 통과. 기존 KLayout 13 PX + 2 phase-exact + 14 style을
 유지했다. Rust 1.89.0·빈 registry·`--offline --locked`의 core/web 테스트와
 Linux musl release 테스트 실행 파일의 static-pie 링크도 확인했다(Linux 실행은 아님).
+
+## 7. M1b-2c1 — 소스 등록 범위와 관리형 색인 supervisor
+
+`app-core/registered.rs`는 로컬 launcher가 지정한 디렉터리(최대 32개)에 대해서만
+`RegisteredSource`를 만든다. 파일 경로를 받는 browser API가 아니다. 레이아웃은
+OASIS header만 읽고, 덱은 문법/level/TC 집합을 보존한다. 전체 TC 최대 65,536,
+level 4,096이며 초과는 명시 오류다. 아직 directory 탐색/업로드는 없다.
+
+- 선택하지 않은 TC도 DBU 조사에 쓰이므로 **모든** TC와 cache 목적지의 scope를
+  검사한다. source/header의 원래 경로와 native의 lexical abspath를 모두 검사해
+  `symlink/../file`의 의미 차이를 통한 탈출도 막는다. 없는 TC는 존재하는 가장
+  가까운 부모까지 resolve한다. 루트 `/` 전체 허가는 거부한다.
+- 작업 시작 전에 source size/정밀 mtime과 level/의존 집합·경로를 재검사한다.
+  바뀌었으면 재등록 필요 오류이며 조용히 새 파일을 열거나 색인하지 않는다.
+  이는 원본 전체 hash나 불변 디스크 revision이 아니다. 검사 후 외부 프로세스가
+  source/symlink/cache를 동시 교체하는 경우는 여전히 미지원이고 OS sandbox를
+  대신하지 않는다. 사용자가 미룬 OVO hot reload/보존 정책을 구현한 것도 아니다.
+
+`managed_index.rs`는 전체 관련 cache write lease와 CPU permit을 먼저 받아
+전용 control thread에서 prepare/native 검증/순차 TC 색인을 수행한다.
+읽고 있는 view가 하나라도 겹치면 Busy, 동시 managed index 최대 1, jobs 1..16과
+foreground reserve를 적용한다. 덱 선택 밖 캐시도 등록 의존 집합의 lease에
+포함하는 보수적 초기 정책이다. 일반 CLI의 jobs/경로 호환은 그대로다.
+
+- force/LOD/occupancy는 기존 `PreparedIndex`·`DeckIndexPlan`을 재사용한다.
+  현재 캐시의 무변경 재사용과 occupancy-only의 기본 marker 불변을 유지한다.
+  browser용 profile/snapshot 경로는 열지 않는다. profile은 기존 CLI로 실행한다.
+- snapshot은 준비/실행/취소/성공/일부 누락/실패/취소 완료, 현재 source의 basename,
+  전체·완료·재사용·누락·실패 수, elapsed와 **safe error kind**를 제공한다.
+  덱의 missing/unsupported source가 있으면 Incomplete다. 원문 native 오류나
+  절대경로를 웹 진행 상태로 보관하지 않는다. exact 성공은 native exit code 기준이며
+  텔레메트리 한 줄을 완료 신호로 오인하지 않는다.
+- managed 전용 stdout/stderr는 nonblocking pipe다. 전용 control thread가 각
+  poll마다 pipe당 최대 64KiB를 drain하고 stderr에서 허용된 단계/정수만 추출한다.
+  line 4KiB를 넘으면 그 줄은 버리고 카운터를 올린다. log backlog나 별도 reader
+  thread는 없다. 구독자가 없거나 느려도 색인 진행/취소는 독립이다.
+- SIGTERM→1초 grace→kill/reap까지 write lease를 유지한다. terminal snapshot은
+  child와 permit을 수거한 **뒤**에 표시한다. 취소/실패가 native 색인의 부분 캐시를
+  되돌리는 transaction/backup은 아니다. 다음 색인은 기존 freshness/force 정책을 따른다.
+
+필수 `validate_managed_index.py`는 private Unicode/공백 valmini와 **빈 PATH**로
+실제 build/reuse/occupancy 추가, 열린 Dataset과 index의 lease 충돌, 덱 level
+선택과 missing source의 Incomplete를 검증한다. 제어용 가짜 native는 shell builtin만
+사용해 큰 양방향 pipe 출력 후 SIGSTOP하며, 1초 kill fallback/실제 PID 소멸/자원 반납을
+단언한다. native exit 7/버전 불일치/등록 소스 변경도 명시 실패다. 과거 CLI의
+stdout/stderr 상속은 그대로이며 이 캡처 방식은 managed 호출에만 적용한다.
+
+현재는 앱 코어 API와 테스트 하네스에 연결된 범위다. HTTP 작업 ID/idempotency,
+로그아웃/서버 종료 연동, catalog/open DTO와 유계 operation queue는 M1b-2c2다.
+
+검증 완료: app-core 단위 **32개**, 실제 managed index 필수 게이트, 변경 패키지
+fmt/strict clippy와 전체 `sh tools/validate_rust.sh`의 `RUST VALIDATION: ALL OK`.
+기존 KLayout 13 PX + 2 phase-exact + 14 style 포함. Rust 1.89.0/빈 registry의
+`--offline --locked` 테스트와 Linux musl release 테스트 실행 파일도 빌드했다.
+폐쇄망 Linux/동시 viewer 부하 측정이나 HTTP index API 검증을 대신하지 않는다.

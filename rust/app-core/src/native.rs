@@ -73,7 +73,7 @@ fn executable(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Indexer {
     binary: PathBuf,
 }
@@ -163,15 +163,23 @@ impl Indexer {
         }
         Ok(())
     }
-    pub(crate) fn spawn(&self, args: &[OsString]) -> Result<Child> {
+    pub(crate) fn spawn(&self, args: &[OsString], capture: bool) -> Result<Child> {
         cache::utf8(&self.binary)?;
-        // Native progress/profile JSON stream directly to the caller's file
-        // descriptors. No output() accumulation, no Python/shell fallback.
+        // CLI output still streams to its descriptors. Managed jobs use two
+        // bounded nonblocking pipes, never output() or a shell/Python fallback.
         Ok(Command::new(&self.binary)
             .args(args)
             .stdin(Stdio::null())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
+            .stdout(if capture {
+                Stdio::piped()
+            } else {
+                Stdio::inherit()
+            })
+            .stderr(if capture {
+                Stdio::piped()
+            } else {
+                Stdio::inherit()
+            })
             .process_group(0)
             .spawn()?)
     }
