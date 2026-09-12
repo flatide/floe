@@ -1,6 +1,6 @@
 # floe2-web — Rust 애플리케이션 CLI (개발 중)
 
-현재 **일반 레이아웃 `index/info/render/probe`를 지원**한다. 이름에 web이 있지만 HTTP 서버나
+현재 **일반 레이아웃 `index/info/render/probe`와 잡덱 `index`를 지원**한다. 이름에 web이 있지만 HTTP 서버나
 브라우저 UI는 아직 없다. 기존 Python `floe2`/GTK와 병행 개발하는 별도 실행 파일이다.
 
 ```sh
@@ -8,6 +8,7 @@ cd rust
 cargo build --offline --locked --release -p floe-app -p floe-index -p floe-renderd
 ./target/release/floe2-web index --help
 ./target/release/floe2-web index /path/to/design.oas --jobs 12
+./target/release/floe2-web index /path/to/deck.jb --level 1,3 --lod --jobs 12
 ./target/release/floe2-web index /path/to/design.oas --occupancy-only --occupancy-um 4
 ./target/release/floe2-web index /path/to/design.oas --profile-cell TOP \
   --profile-jobs 8,12,16 --profile-snapshot /path/to/scratch/profile.bin
@@ -35,7 +36,12 @@ cargo build --offline --locked --release -p floe-app -p floe-index -p floe-rende
   final partial/glyph truncation은 exit 3으로 PNG를 보존한다.
 - `FLOE_RENDERD_BIN` 조회도 명시 override 실패를 거부한다. 기존
   `FLOE_RUST_JOBS`/`FLOE_RUST_RASTER_JOBS` 등 렌더 환경 옵션을 지원한다.
-- `.jb`, `--level`, `view/clip/...`와 batch/mosaic/DRC export는 미이관 오류를 낸다.
+- 덱 index는 선택된 레벨의 plain OASIS 소스를 하나씩 실행한다. `--jobs`는
+  파일 내부 worker 수이며 파일 간 곱해지지 않는다. LOD/occupancy를 전달하고,
+  missing/unsupported source는 명시 후 skip, 실행 실패가 있으면 exit 2다.
+  Ctrl+C/SIGTERM은 현재 child를 수거하고 다음 소스를 시작하지 않는다.
+  덱 cell profile은 거부하므로 해당 source OASIS를 직접 지정한다.
+- 덱 `info/render/probe`, `view/clip/jobdeck/...`와 batch/mosaic/DRC export는 미이관 오류를 낸다.
   자동 Python fallback이나 기존 launcher/portable 교체는 없다.
 
 범위·차이·검증·다음 단계는 [M1a 기록](../../docs/WEBUI_M1A.ko.md)에 있다.

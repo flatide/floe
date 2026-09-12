@@ -1,13 +1,16 @@
 //! Development CLI: deliberately distinct from the Python floe2 launcher.
 #![forbid(unsafe_code)]
+mod deck_index;
 mod read;
 use floe_app_core::{
     index::{Action, IndexOptions, PreparedIndex, ProfileCell},
+    jobdeck::index::{is_deck, parse_levels},
     native::{Discovery, Indexer},
     Error, ErrorKind, Result,
 };
+use std::collections::BTreeSet;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -22,13 +25,15 @@ Usage: floe2-web index SOURCE [OPTIONS]
        floe2-web probe SOURCE
        floe2-web --version
 
-Implemented: ordinary layout index/info/render/probe, occupancy and profiling.
+Implemented: ordinary layout index/info/render/probe, occupancy, profiling,
+and jobdeck source indexing with level selection.
 Not yet ported: view, clip, jobdeck, drc, svrf, gtktest, batch/mosaic/DRC exports.
 Use the existing floe2 for those commands; there is no Python fallback.
 Run floe2-web index --help for indexing options.";
 const INDEX_HELP: &str = "Usage: floe2-web index SOURCE [OPTIONS]
 
   --force                    Allow replacement of stale/existing cache
+  --level N,N,...            Jobdeck: index sources of these mask levels only
   --jobs N                   Native parser/planner workers (default 12)
   --page-target-mb N          Encoded page target MiB (native default 1)
   --lod / --no-lod            LOD generation opt-in / default off
@@ -45,7 +50,8 @@ const INDEX_HELP: &str = "Usage: floe2-web index SOURCE [OPTIONS]
   --profile-snapshot-refresh Replace an explicit snapshot
   -h, --help                Show this help
 
---level and .jb sources require the later jobdeck port (M1a-3).
+.jb sources are indexed sequentially; each source uses --jobs workers.
+Deck profiling is unsupported; profile its source OASIS directly.
 Legacy/KLayout and retired coverage options are rejected.
 --force authorizes native replacement, not a transactional backup.
 Current caches keep their build options; use --force to change LOD.
@@ -54,7 +60,7 @@ The source path may contain spaces/Unicode. Use -- for a leading dash.";
 enum Cli {
     Help(bool),
     Version,
-    Index(PathBuf, Box<IndexOptions>),
+    Index(PathBuf, Box<IndexOptions>, Option<BTreeSet<i64>>),
     Read(Box<read::Command>),
 }
 fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
@@ -89,6 +95,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
     }
     let mut options = IndexOptions::default();
     let mut source = None;
+    let mut levels = None;
     let mut positional = false;
     let mut i = 1;
     while i < args.len() {
@@ -187,12 +194,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
             }
             "--profile-repeat" => options.profile_repeat = number(value()?, flag)?,
             "--profile-snapshot" => options.profile_snapshot = Some(PathBuf::from(value()?)),
-            "--level" | "--id" => {
-                return Err(Error::new(
-                    ErrorKind::Unsupported,
-                    "jobdeck level selection is not yet ported (M1a-3)",
-                ))
-            }
+            "--level" => levels = Some(parse_levels(value()?)?),
             _ => {
                 return Err(Error::input(format!(
                     "unsupported index option: {flag}; run floe2-web index --help"
@@ -202,7 +204,13 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
     }
     options.validate()?;
     let source = source.ok_or_else(|| Error::input("index requires SOURCE"))?;
-    Ok(Cli::Index(source, Box::new(options)))
+    if levels.is_some() && !is_deck(&source) {
+        return Err(Error::input("--level requires a .jb source"));
+    }
+    if is_deck(&source) && options.profile_cell.is_some() {
+        return Err(Error::input("profile a jobdeck source OASIS directly"));
+    }
+    Ok(Cli::Index(source, Box::new(options), levels))
 }
 fn number<T: std::str::FromStr>(s: &str, flag: &str) -> Result<T> {
     s.parse()
@@ -245,41 +253,53 @@ fn run(cli: Cli, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
             env!("CARGO_PKG_VERSION"),
             floe_app_core::native::INDEX_VERSION
         ),
-        Cli::Index(source, options) => {
-            let indexer = Indexer::discover(&Discovery::local()?)?;
-            let prepared = PreparedIndex::prepare(&source, &options, indexer, cancelled)?;
-            match prepared.action() {
-                Action::Reuse => {
-                    println!("[floe2-web] cache up to date: {} (use --force to rebuild with new options)", prepared.directory().display());
-                    return Ok(0);
-                }
-                Action::OccupancyPresent => {
-                    println!("[floe2-web] occupancy already present: {} (use --occupancy-only to rebuild it)", prepared.directory().join("design.ovo").display());
-                    return Ok(0);
-                }
-                _ => (),
+        Cli::Index(source, options, levels) => {
+            if is_deck(&source) {
+                return deck_index::run(&source, levels, &options, cancelled);
             }
-            // Always stderr: profile stdout must remain a single native JSON
-            // object/array. This line is diagnostic, never executed by a shell.
-            eprintln!(
-                "[floe2-web] {:?}: {}",
-                prepared.action(),
-                prepared.source().display()
-            );
-            let mut job = prepared.start(cancelled)?;
-            loop {
-                let signal = cancelled.load(Ordering::Relaxed) as i32;
-                if signal != 0 {
-                    return job.cancel(signal);
-                }
-                if let Some(code) = job.poll()? {
-                    return Ok(code);
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
+            return execute_index(&source, &options, cancelled).map(|(code, _)| code);
         }
     }
     Ok(0)
+}
+fn execute_index(
+    source: &Path,
+    options: &IndexOptions,
+    cancelled: &AtomicUsize,
+) -> Result<(i32, Action)> {
+    let indexer = Indexer::discover(&Discovery::local()?)?;
+    let prepared = PreparedIndex::prepare(source, options, indexer, cancelled)?;
+    let action = prepared.action().clone();
+    match action {
+        Action::Reuse => {
+            println!(
+                "[floe2-web] cache up to date: {} (use --force to rebuild with new options)",
+                prepared.directory().display()
+            );
+            return Ok((0, action));
+        }
+        Action::OccupancyPresent => {
+            println!(
+                "[floe2-web] occupancy already present: {} (use --occupancy-only to rebuild it)",
+                prepared.directory().join("design.ovo").display()
+            );
+            return Ok((0, action));
+        }
+        _ => (),
+    }
+    // Stderr only: profile stdout must remain native JSON.
+    eprintln!("[floe2-web] {:?}: {}", action, prepared.source().display());
+    let mut job = prepared.start(cancelled)?;
+    loop {
+        let signal = cancelled.load(Ordering::Relaxed) as i32;
+        if signal != 0 {
+            return job.cancel(signal).map(|code| (code, action));
+        }
+        if let Some(code) = job.poll()? {
+            return Ok((code, action));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 fn main() {
     let cli = match parse(std::env::args_os().skip(1)) {
@@ -320,7 +340,7 @@ mod tests {
     }
     #[test]
     fn parser_keeps_values_and_defaults() {
-        let Cli::Index(p, o) = parsed(&[
+        let Cli::Index(p, o, _) = parsed(&[
             "index",
             "한 글.oas",
             "--jobs=16",
@@ -334,12 +354,19 @@ mod tests {
         assert_eq!(p, PathBuf::from("한 글.oas"));
         assert_eq!(o.jobs, 16);
         assert!(o.lod);
-        let Cli::Index(p, o) = parsed(&["index", "--", "-source.oas"]).unwrap() else {
+        let Cli::Index(p, o, _) = parsed(&["index", "--", "-source.oas"]).unwrap() else {
             panic!()
         };
         assert_eq!(p, PathBuf::from("-source.oas"));
         assert_eq!(o.jobs, 12);
         assert!(!o.lod);
+        let Cli::Index(_, o, levels) =
+            parsed(&["index", "x.JB", "--level", "2,1,2", "--lod"]).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(levels, Some(BTreeSet::from([1, 2])));
+        assert!(o.lod);
     }
     #[test]
     fn invalid_or_unported_requests_never_launch_native() {

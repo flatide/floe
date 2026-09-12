@@ -7,6 +7,8 @@ license.workspace = true
 description = "Shared Rust application policies for the floe2 CLI and future web service"
 
 [dependencies]
+floe-oasis = { path = "../oasis" }
+flate2 = "1"
 floe-vfs = { path = "../vfs" }
 floe-worker-client = { path = "../worker-client" }
 serde = { version = "=1.0.228", features = ["derive"] }

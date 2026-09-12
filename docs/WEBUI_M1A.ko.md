@@ -12,14 +12,15 @@
   기존 `floe-index`를 직접 실행하며 Python에 위임하지 않는다.
 - M1a-2b: `d985f44`, 일반 레이아웃 info/단일 PNG render/probe. 상세 계약은 §7.
 - M0-D7: `cc98ce5`, native 빈 plan 보완(§8).
-- M1a-3a: 잡덱 문법·순수 배치 모델(§9).
-- **M1a 전체 완료가 아니다.** jobdeck source catalog/spec/CLI와
+- M1a-3a: `4ad0f28`, 잡덱 문법·순수 배치 모델(§9).
+- M1a-3b: source header/catalog와 덱 index(§10).
+- **M1a 전체 완료가 아니다.** jobdeck 색/레이어/spec·읽기 CLI와
   서버 진행 이벤트·view lease는 아직 없다. HTTP/WS/브라우저 UI도 미구현이다.
 
 기하 raster·인덱싱 알고리즘, LOD/occupancy 표현 정책, 캐시 포맷은 변경하지
 않았다. 빈 플랜 오류만 §8에서 별도 수정했다. `feature/jobdeck` 실측 브랜치와
 기존 Python 제품/portable은 유지한다. 내부 개발 crate 버전은 0.1.0이며
-indexer/renderd 호환 버전 0.12.84와 다르다.
+indexer/renderd 호환 버전 0.12.85와 다르다.
 
 ## 2. index 계약
 
@@ -145,7 +146,7 @@ cargo build --offline --locked --release -p floe-app --target x86_64-unknown-lin
 
 ## 6. 다음 단계
 
-1. M1a-3b: jobdeck source catalog/헤더 probe, 색·UI 레이어, spec 및 덱 CLI/index 이관.
+1. M1a-3c: jobdeck 색·UI 레이어, spec 및 덱 분석/읽기 CLI 이관.
 2. M1b: 네트워크 의존성 게이트, controller/진행 이벤트/lease → gateway/Canvas.
 
 ## 7. M1a-2b — 일반 레이아웃 읽기와 단일 캡처
@@ -270,3 +271,47 @@ seed 고정 100개 덱으로 Python oracle을 만들고 Rust 통합 테스트가
 전체 배터리도 `RUST VALIDATION: ALL OK`, exit 0이며 마지막 진단 숫자 표기
 7건 추가 후에는 모델 gate와 clippy를 재실행했다. Offline/locked Linux musl
 release 빌드도 통과했다. 실칩/Calibre의 새 관찰 결과를 검증한 것은 아니다.
+
+## 10. M1a-3b — 소스 조회와 덱 인덱싱
+
+`floe2-web index deck.jb --level 1,3 --lod --jobs 12`를 지원한다. 신규 registry
+의존성은 없고 기존 floe-oasis/flate2를 app-core에 직접 연결했다.
+
+- OASIS는 기존 `Cur`를 공유하는 `floe_oasis::header::probe_start`로 최초
+  4KiB에서 START/unit만 읽는다. GDS는 최대 64KiB 안의 UNITS, gzip도 헤더만
+  해제한다(압축 입력 1MiB 상한). geometry/CBLOCK을 순회하지 않는다.
+- 공용 uint cursor가 10개 continuation byte 뒤 shift≥64에서 패닉하던 경계를
+  명시 overflow로 수정했다. 유효 u64 최댓값과 5종 양수 real 인코딩은 유지.
+  zero/NaN/Inf/reciprocal underflow DBU, 과대 문자열 길이, 잘린 헤더도 오류다.
+  native 호환 버전 **0.12.85**, renderd/index 재빌드가 필요하다.
+- plain OASIS만 indexable이다. GDS/gzip은 DBU를 알더라도 `unsupported`,
+  미인식/손상/누락은 각각 `unknown_format`/`unreadable`/`missing`이다.
+  unselected source는 DBU만 조회하며 캐시 상태를 읽거나 catalog에 등록하지 않는다.
+- selected source의 indexed 판정은 canonical VFS 검증을 재사용한다. 옛 cache
+  constructor의 미생성 `.tiles` 경로 표시는 `.floe`로 정규화했다. 오류의 상세
+  문구는 native byte 위치를 포함할 수 있으며 status/필드 의미가 호환 경계다.
+- 레벨에 포함된 source만 TC 순서로 처리한다. 같은 어휘 정규화 **cache destination**을
+  가리키는 `a`/`./a`는 한 번만 실행하되 별도 source symlink 옆 캐시는 합치지 않는다.
+  파일마다 기존 `PreparedIndex`가 lock/freshness/force를 다시 확인하고 동일 child
+  실행기를 쓰므로 동시에 두 파일의 jobs가 곱해지지 않는다.
+- current는 비파괴 재사용, `--force --lod`는 실제 재색인. occupancy-only는
+  indexed source의 summary만, unindexed source는 index+summary로 처리하는 기존
+  덱 의미를 유지한다. `.jb.floe` 합성 캐시는 만들지 않는다.
+- 누락/unsupported source는 명시 skip이며 기존 index CLI처럼 exit 0도 가능하다.
+  실행 실패는 다른 source를 계속 처리한 뒤 exit 2; 부모 SIGINT/SIGTERM은 현재
+  child에 전파·수거·소유 임시파일 정리 후 130/143, 다음 source는 시작하지 않는다.
+- 의도된 개선(M0-D8): 기존 덱 wrapper가 버리던 page-target/slow-cell/P2 tuning을
+  이제 전달한다. 덱 profile은 조용히 일반 index가 되지 않고 명시 거부한다.
+  catalog preflight/읽기 경로의 managed read lease는 아직 M1b 범위다.
+
+`validate_app_jobdeck_sources.py`: plain OASIS/GDS/gzip, malformed/oversize varint,
+FIFO/누락과 indexed 전후 catalog 대조, unselected FIFO meta 무접근; 실제 3-source
+덱의 선택/default/LOD/force/occupancy를 Python 캐시 OVM/OVP/OVT 바이트로 대조한다.
+캐시 재사용 mtime, stale 비파괴 거부, unknown level/profile 거부, alias dedup,
+빈 skip batch, 실패 후 다음 source, 부모에만 보낸 SIGINT/SIGTERM을 검사한다.
+
+검증: source oracle(indexed 전후), 실제 덱 인덱싱 gate 모두 `ALL OK`.
+oasis 9 / app-core 14 단위 테스트, app/app-core strict clippy 및 fmt,
+offline/locked Linux musl release 빌드 통과. 전체 `sh tools/validate_rust.sh`도
+`RUST VALIDATION: ALL OK`, exit 0이다. 소스 디렉터리 alias를 `canonicalize`하지
+않으므로 symlink별 캐시 경계를 보존하며, 실칩/동시 서버 부하 측정은 포함하지 않았다.

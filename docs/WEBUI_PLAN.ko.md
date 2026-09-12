@@ -4,7 +4,7 @@
 관련 정본: `FLOE2_OPTIMIZATION.ko.md`(F2R-10/11),
 `RUST_RENDERER_PLAN.ko.md`, `SPEC-VIEWER.ko.md`, `rust/BUILD.md`.
 
-현재 상태: **M0 로컬 조사/API 초안 + M1a-1 worker client + M1a-2a/b 일반 index·info/render/probe CLI**.
+현재 상태: **M0 로컬 조사/API 초안 + M1a-1 worker client + M1a-2a/b 일반 index·info/render/probe CLI + M1a-3a/b 잡덱 모델·index**.
 웹 gateway/프론트엔드 구현, 의존성 선정 게이트 및 M0 현장 검증은 아직
 완료되지 않았다. 여기의 M0~M5는 **웹 전환 단계**이며
 jobdeck/occupancy의 같은 이름 단계와 별개다. 개발 기준과 합류 규칙은 §11.
@@ -440,5 +440,6 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
   경로(캐시/LOD/occupancy/프로파일). [M1a 기록](WEBUI_M1A.ko.md)에 범위와
   차이·회귀 게이트를 둔다. M1a-2b에서 info/단일 PNG render/probe도 이관했고,
   빈 가시 레이어 native plan도 별도 보완했다(M0-D7). M1a-3a에서 잡덱 문법·
-  좌표·skip ledger 모델을 이관했으며 덱 source/spec/CLI 연결이 다음이다.
+  좌표·skip ledger 모델, M1a-3b에서 source catalog와 덱 index를 이관했다.
+  덱 색/레이어·spec·분석/읽기 CLI 연결이 다음이다.
   CLI 전체/gateway/웹 UI 완료가 아니며 GTK/실측 브랜치는 유지한다.

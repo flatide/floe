@@ -214,6 +214,7 @@ DISPLAY가 없어도 동작해야 한다(기존 GTK 오류까지 이식하지 �
 | M0-D5 | `.ovo` 교체와 열린 GUI 캐시 수명주기 | 사용자 합의대로 현 실측 blocker 아님. 서버 revision 설계는 초안, hot reload 구현은 별도 승인 |
 | M0-D6 | `FLOE_RENDERD_BIN`은 무효여도 다음 후보, `FLOE_INDEX_BIN`은 hard error | 차이를 재현한 뒤 새 Rust 셸에서는 명시 override 실패를 오류로 정규화하는 변경을 기록 |
 | M0-D7 | 단일 render에서 visible layers가 비면 native plan에 top이 없어 오류(Python/Rust 양쪽 재현) | 수정: 실제로 비어 있는 plan만 빈 root로 정규화. all-off/바깥 뷰 blank, 구조 frame 유지, retained off→on 회귀 |
+| M0-D8 | 기존 덱 index wrapper는 page-target/slow-cell/P2 tuning 및 profile 인자를 전달하지 않음 | Rust는 일반 index 서비스를 재사용해 tuning을 전달. 덱 profile은 source를 직접 지정하도록 명시 거부. 선택·LOD·occupancy는 동일 유지 |
 
 ## 5. 로컬/현장 완료 게이트
 
@@ -297,8 +298,8 @@ CLI 10개 명령 이관은 아직 아니므로 §2의 완료 상태를 올리지
 
 `floe2-web index`의 일반 레이아웃 경로를 추가했다. 옵션/캐시 보호, LOD/
 occupancy, 셀 프로파일과 snapshot을 Rust `app-core`에서 처리한다.
-잡덱/`--level`은 아직 M1a-3이므로 명시 거부한다. CLI 대조표의 index 전체를
-완료로 올리지 않는다. [실행 방법](../rust/app/README.md),
+잡덱/`--level`은 이후 M1a-3b에서 추가했다. M1a-2a 자체의 범위는 일반 레이아웃이다.
+[실행 방법](../rust/app/README.md),
 [상세 계약·검증·제약](WEBUI_M1A.ko.md)을 따른다.
 
 ## 10. M1a-2b 진행 (2026-09-13)
@@ -309,3 +310,10 @@ report·메타데이터를 대조하고 오류·취소·파일보호를 검사�
 [M1a §7](WEBUI_M1A.ko.md#7-m1a-2b--일반-레이아웃-읽기와-단일-캡처).
 render의 batch/mosaic/DRC·주석 export는 M4, 덱은 M1a-3이므로 해당 명령 전체
 완료 표시는 하지 않는다. M0-D7은 이 과정에서 드러난 별도 native 결함이다.
+
+## 11. M1a-3a/b 진행 (2026-09-13)
+
+잡덱 문법·좌표·ledger 모델과 bounded source header/catalog, 덱 index의 레벨 선택·
+LOD·occupancy·순차 job 실행을 Rust로 이관했다. 문법/배치 모델의 Python+손계산
+대조, real OASIS 캐시 바이트 대조, 취소/오류 게이트를 배터리에 연결했다.
+덱 색/레이어 행·spec·info/render와 `jobdeck` 분석 CLI는 다음 단계다.

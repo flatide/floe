@@ -65,6 +65,8 @@ dependencies = [
 name = "floe-app-core"
 version = "0.1.0"
 dependencies = [
+ "flate2",
+ "floe-oasis",
  "floe-vfs",
  "floe-worker-client",
  "libc",
@@ -82,7 +84,7 @@ dependencies = [
 
 [[package]]
 name = "floe-index"
-version = "0.12.84"
+version = "0.12.85"
 dependencies = [
  "crc32fast",
  "floe-oasis",
@@ -129,7 +131,7 @@ dependencies = [
 
 [[package]]
 name = "floe-renderd"
-version = "0.12.84"
+version = "0.12.85"
 dependencies = [
  "floe-render-core",
 ]
