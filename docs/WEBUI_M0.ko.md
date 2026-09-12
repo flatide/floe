@@ -5,7 +5,7 @@
 서비스 계약 초안: [WEBUI_SERVICE_API.ko.md](WEBUI_SERVICE_API.ko.md).
 
 **로컬 조사/설계 결과이며 이관 완료표가 아니다.** 아래 Rust 서비스와 웹 UI는
-아직 전체 미구현이다. 2026-09-13에 M1a-1 worker client와 M1a-2a 일반 index
+아직 전체 미구현이다. 2026-09-13에 M1a-1 worker client와 M1a-2a/b 일반 index·info/render/probe
 경로를 추가했으며 §8~9에서 추적한다. 기존 Rust parser/VFS/raster/occupancy 구현과 새 서비스의
 완료 상태를 구별한다. 실칩 jobdeck/occupancy 판정은 실측 브랜치에서 계속한다.
 
@@ -213,6 +213,7 @@ DISPLAY가 없어도 동작해야 한다(기존 GTK 오류까지 이식하지 �
 | M0-D4 | query wire는 seq만 있고 조회 scene generation/round가 없음 | 웹 query 개방 전 expected/actual scene identity 추가. 단순 응답 seq 필터로 안전하다고 하지 않기 |
 | M0-D5 | `.ovo` 교체와 열린 GUI 캐시 수명주기 | 사용자 합의대로 현 실측 blocker 아님. 서버 revision 설계는 초안, hot reload 구현은 별도 승인 |
 | M0-D6 | `FLOE_RENDERD_BIN`은 무효여도 다음 후보, `FLOE_INDEX_BIN`은 hard error | 차이를 재현한 뒤 새 Rust 셸에서는 명시 override 실패를 오류로 정규화하는 변경을 기록 |
+| M0-D7 | 단일 render에서 visible layers가 비면 native plan에 top이 없어 오류(Python/Rust 양쪽 재현) | 이관 gate에서 명시 실패로 고정. 웹 전체 off 제어 전에 별도 native fix + blank-frame gate |
 
 ## 5. 로컬/현장 완료 게이트
 
@@ -299,3 +300,12 @@ occupancy, 셀 프로파일과 snapshot을 Rust `app-core`에서 처리한다.
 잡덱/`--level`은 아직 M1a-3이므로 명시 거부한다. CLI 대조표의 index 전체를
 완료로 올리지 않는다. [실행 방법](../rust/app/README.md),
 [상세 계약·검증·제약](WEBUI_M1A.ko.md)을 따른다.
+
+## 10. M1a-2b 진행 (2026-09-13)
+
+일반 레이아웃 info(기존 text + opt-in JSON), 단일 PNG render/report, probe를
+Rust 서비스로 연결했다. `validate_app_render.py`가 기존 Python과 12종 PNG/
+report·메타데이터를 대조하고 오류·취소·파일보호를 검사한다. 상세는
+[M1a §7](WEBUI_M1A.ko.md#7-m1a-2b--일반-레이아웃-읽기와-단일-캡처).
+render의 batch/mosaic/DRC·주석 export는 M4, 덱은 M1a-3이므로 해당 명령 전체
+완료 표시는 하지 않는다. M0-D7은 이 과정에서 드러난 별도 native 결함이다.

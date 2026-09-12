@@ -4,9 +4,14 @@
 #[cfg(not(unix))]
 compile_error!("floe-app-core currently targets Linux/macOS");
 
+pub mod artifact;
 pub mod cache;
+pub mod catalog;
 pub mod index;
 pub mod native;
+pub mod render;
+pub mod shots;
+pub mod styles;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
@@ -18,6 +23,7 @@ pub enum ErrorKind {
     Version,
     Worker,
     Cancelled,
+    Incomplete,
 }
 
 #[derive(Debug)]
@@ -45,6 +51,26 @@ impl std::error::Error for Error {}
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
         Self::new(ErrorKind::Io, e.to_string())
+    }
+}
+impl From<floe_worker_client::Error> for Error {
+    fn from(e: floe_worker_client::Error) -> Self {
+        use floe_worker_client::ErrorKind as W;
+        let kind = match e.kind {
+            W::InvalidInput => ErrorKind::InvalidInput,
+            W::Cancelled => ErrorKind::Cancelled,
+            W::Busy => ErrorKind::Busy,
+            W::Version => ErrorKind::Version,
+            _ => ErrorKind::Worker,
+        };
+        Self::new(kind, e.message)
+    }
+}
+pub fn check_cancelled(flag: &std::sync::atomic::AtomicUsize) -> Result<()> {
+    if flag.load(std::sync::atomic::Ordering::Relaxed) != 0 {
+        Err(Error::new(ErrorKind::Cancelled, "operation cancelled"))
+    } else {
+        Ok(())
     }
 }
 pub type Result<T> = std::result::Result<T, Error>;

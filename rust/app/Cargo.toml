@@ -11,5 +11,6 @@ name = "floe2-web"
 path = "src/main.rs"
 
 [dependencies]
+serde_json = "=1.0.151"
 floe-app-core = { path = "../app-core" }
 signal-hook = { version = "=0.4.4", default-features = false }

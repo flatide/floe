@@ -110,24 +110,7 @@ pub fn inspect(source: &Path, directory: &Path) -> Result<CacheState> {
         // Canonical structural/pair validator, not a nonzero marker test.
         // Reject FIFOs/devices before the mmap reader opens them. Concurrent
         // external cache replacement remains outside this local lease model.
-        for name in ["design.ovm", "design.ovp", "design.ovt"] {
-            match fs::symlink_metadata(directory.join(name)) {
-                Ok(m) if m.is_file() => (),
-                Err(e) if name == "design.ovt" && e.kind() == std::io::ErrorKind::NotFound => (),
-                _ => {
-                    return Err(Error::new(
-                        ErrorKind::Cache,
-                        format!("{name} is not a regular cache file"),
-                    ))
-                }
-            }
-        }
-        let vfs = floe_vfs::Vfs::open(utf8(directory)?).map_err(|e| {
-            Error::new(
-                ErrorKind::Cache,
-                format!("cache commit validation failed: {e}"),
-            )
-        })?;
+        let vfs = validated_vfs(directory)?;
         if (vfs.ovm.src_size, vfs.ovm.src_mtime) != (size, mtime) {
             return Err(Error::new(
                 ErrorKind::Cache,
@@ -139,5 +122,26 @@ pub fn inspect(source: &Path, directory: &Path) -> Result<CacheState> {
     Ok(match check() {
         Ok(()) => CacheState::Current,
         Err(e) => CacheState::Unusable(e.to_string()),
+    })
+}
+
+pub(crate) fn validated_vfs(directory: &Path) -> Result<floe_vfs::Vfs> {
+    for name in ["design.ovm", "design.ovp", "design.ovt"] {
+        match fs::symlink_metadata(directory.join(name)) {
+            Ok(m) if m.is_file() => (),
+            Err(e) if name == "design.ovt" && e.kind() == std::io::ErrorKind::NotFound => (),
+            _ => {
+                return Err(Error::new(
+                    ErrorKind::Cache,
+                    format!("{name} is not a regular cache file"),
+                ))
+            }
+        }
+    }
+    floe_vfs::Vfs::open(utf8(directory)?).map_err(|e| {
+        Error::new(
+            ErrorKind::Cache,
+            format!("cache commit validation failed: {e}"),
+        )
     })
 }

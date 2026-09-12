@@ -37,6 +37,7 @@ pub enum ErrorKind {
     Worker,
     Exited,
     Timeout,
+    Cancelled,
 }
 #[derive(Debug)]
 pub struct Error {
@@ -83,6 +84,9 @@ pub struct Config {
     pub shutdown_grace: Duration,
     pub max_pixels: u64,
     pub max_frame_bytes: usize,
+    /// Nonzero requests shutdown, including while ready/open/style is waiting.
+    /// Separate from generation cancellation: this ends the worker lifecycle.
+    pub shutdown_requested: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 impl Config {
     pub fn new(binary: impl Into<PathBuf>) -> Self {
@@ -97,6 +101,7 @@ impl Config {
             shutdown_grace: Duration::from_millis(1500),
             max_pixels: 16 * 1024 * 1024,
             max_frame_bytes: 80 * 1024 * 1024,
+            shutdown_requested: None,
         }
     }
 }
@@ -176,6 +181,16 @@ pub struct WorkerClient {
 
 impl WorkerClient {
     pub fn spawn(config: Config) -> Result<Self> {
+        if config
+            .shutdown_requested
+            .as_ref()
+            .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed) != 0)
+        {
+            return Err(Error::new(
+                ErrorKind::Cancelled,
+                "worker operation cancelled",
+            ));
+        }
         if config.max_pixels == 0
             || config.max_frame_bytes < 16
             || config.max_frame_bytes == usize::MAX
@@ -452,6 +467,7 @@ impl WorkerClient {
             .checked_add(timeout)
             .ok_or_else(|| Error::input("poll timeout overflow"))?;
         loop {
+            self.check_shutdown()?;
             let now = Instant::now();
             if self.active.as_ref().is_some_and(|a| now >= a.deadline) {
                 return Err(Error::new(ErrorKind::Timeout, "render deadline exceeded"));
@@ -460,7 +476,14 @@ impl WorkerClient {
                 .active
                 .as_ref()
                 .map_or(deadline, |a| deadline.min(a.deadline));
-            let Some(line) = self.receive(until.saturating_duration_since(now))? else {
+            let interval = until.saturating_duration_since(now);
+            let interval = if self.config.shutdown_requested.is_some() {
+                interval.min(Duration::from_millis(20))
+            } else {
+                interval
+            };
+            let Some(line) = self.receive(interval)? else {
+                self.check_shutdown()?;
                 if self
                     .active
                     .as_ref()
@@ -468,7 +491,10 @@ impl WorkerClient {
                 {
                     return Err(Error::new(ErrorKind::Timeout, "render deadline exceeded"));
                 }
-                return Ok(None);
+                if Instant::now() >= deadline {
+                    return Ok(None);
+                }
+                continue;
             };
             if let Some(event) = self.handle(line)? {
                 return Ok(Some(event));
@@ -515,11 +541,17 @@ impl WorkerClient {
     fn wait_ack(&mut self, kind: &str, timeout: Duration) -> Result<Fields> {
         let deadline = Instant::now() + timeout;
         loop {
-            let line = self
-                .receive(deadline.saturating_duration_since(Instant::now()))?
-                .ok_or_else(|| {
-                    Error::new(ErrorKind::Timeout, format!("{kind} deadline exceeded"))
-                })?;
+            self.check_shutdown()?;
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(Error::new(
+                    ErrorKind::Timeout,
+                    format!("{kind} deadline exceeded"),
+                ));
+            }
+            let Some(line) = self.receive(remaining.min(Duration::from_millis(20)))? else {
+                continue;
+            };
             if line.kind == kind {
                 return Ok(line.fields);
             }
@@ -545,6 +577,22 @@ impl WorkerClient {
                     format!("{kind} deadline exceeded"),
                 ));
             }
+        }
+    }
+
+    fn check_shutdown(&self) -> Result<()> {
+        if self
+            .config
+            .shutdown_requested
+            .as_ref()
+            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed) != 0)
+        {
+            Err(Error::new(
+                ErrorKind::Cancelled,
+                "worker operation cancelled",
+            ))
+        } else {
+            Ok(())
         }
     }
 

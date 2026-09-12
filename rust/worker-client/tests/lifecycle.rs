@@ -23,6 +23,7 @@ fn main() {
         ("daemon_error_is_not_cancelled", worker_error),
         ("bounded_stderr_and_blocked_stdin_shutdown", blocked_io),
         ("deck_open_and_capability", deck),
+        ("shutdown_interrupts_startup_waits", interrupt_startup),
     ];
     for (name, test) in tests {
         test();
@@ -329,6 +330,51 @@ fn deck() {
     assert_eq!(w.render(r).unwrap_err().kind, ErrorKind::InvalidInput);
 }
 
+fn interrupt_startup() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    for mode in [
+        "ready_timeout",
+        "open_timeout",
+        "style_timeout",
+        "render_timeout",
+    ] {
+        let tmp = Temp::new();
+        let flag = Arc::new(AtomicUsize::new(0));
+        let signal = Arc::clone(&flag);
+        let mut config = tmp.config(mode);
+        config.shutdown_requested = Some(flag);
+        config.ready_timeout = Duration::from_secs(30);
+        config.open_timeout = Duration::from_secs(30);
+        config.style_timeout = Duration::from_secs(30);
+        config.render_timeout = Duration::from_secs(30);
+        let start = Instant::now();
+        let trigger = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            signal.store(2, Ordering::Relaxed);
+        });
+        let result = (|| -> Result<()> {
+            let mut w = WorkerClient::spawn(config)?;
+            w.open(Source::Layout(tmp.0.join("cache 한 글")), 32, 1)?;
+            w.set_styles(&[style()])?;
+            w.render(request(FrameFormat::Raw))?;
+            loop {
+                w.poll(Duration::from_millis(20))?;
+            }
+        })();
+        trigger.join().unwrap();
+        assert_eq!(result.unwrap_err().kind, ErrorKind::Cancelled, "{mode}");
+        assert!(start.elapsed() < Duration::from_secs(2), "{mode}");
+        assert!(fs::read_dir(&tmp.0).unwrap().all(|e| !e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("floe-worker-")));
+    }
+}
+
 fn reply(line: &str) {
     println!("{line}");
     std::io::stdout().flush().unwrap();
@@ -382,6 +428,10 @@ fn fixture(mode: &str, root: Option<&String>) {
                 }
             }
             "style" => {
+                if mode == "style_timeout" {
+                    std::thread::sleep(Duration::from_secs(30));
+                    continue;
+                }
                 assert!(fs::read_to_string(fields["path"]).unwrap().contains("1/0"));
                 if mode == "style_error" {
                     reply("error code=style message=bad_style");

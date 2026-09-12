@@ -60,7 +60,7 @@ def main(fixture):
                    PYTHONPATH=str(ROOT), PYTHONDONTWRITEBYTECODE="1")
         assert "M1a" in run("--help", env=env).stdout
         assert version in run("--version", env=env).stdout
-        for cmd in ("view", "info", "render", "probe", "clip", "jobdeck", "drc", "svrf", "gtktest"):
+        for cmd in ("view", "clip", "jobdeck", "drc", "svrf", "gtktest"):
             assert "not yet ported" in run(cmd, env=env, code=2).stderr
         for option in ("--coverage", "--legacy", "--tile-mb", "--level"):
             run("index", source, option, env=env, code=2)

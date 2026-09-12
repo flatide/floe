@@ -1,5 +1,6 @@
 //! Development CLI: deliberately distinct from the Python floe2 launcher.
 #![forbid(unsafe_code)]
+mod read;
 use floe_app_core::{
     index::{Action, IndexOptions, PreparedIndex, ProfileCell},
     native::{Discovery, Indexer},
@@ -16,10 +17,13 @@ use std::time::Duration;
 const HELP: &str = "floe2-web — Rust application migration CLI (M1a, not yet a web server)
 
 Usage: floe2-web index SOURCE [OPTIONS]
+       floe2-web info SOURCE [--json]
+       floe2-web render SOURCE [OPTIONS]
+       floe2-web probe SOURCE
        floe2-web --version
 
-Implemented: ordinary OASIS layout indexing, occupancy and cell profiling.
-Not yet ported: view, info, render, probe, clip, jobdeck, drc, svrf, gtktest.
+Implemented: ordinary layout index/info/render/probe, occupancy and profiling.
+Not yet ported: view, clip, jobdeck, drc, svrf, gtktest, batch/mosaic/DRC exports.
 Use the existing floe2 for those commands; there is no Python fallback.
 Run floe2-web index --help for indexing options.";
 const INDEX_HELP: &str = "Usage: floe2-web index SOURCE [OPTIONS]
@@ -51,6 +55,7 @@ enum Cli {
     Help(bool),
     Version,
     Index(PathBuf, Box<IndexOptions>),
+    Read(Box<read::Command>),
 }
 fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
     let args: Vec<String> = args
@@ -70,7 +75,8 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
         "--help" | "-h" if args.len() == 1 => return Ok(Cli::Help(false)),
         "--version" if args.len() == 1 => return Ok(Cli::Version),
         "index" => (),
-        "view" | "info" | "render" | "probe" | "clip" | "jobdeck" | "drc" | "svrf" | "gtktest" => {
+        "info" | "render" | "probe" => return read::parse(&args).map(|c| Cli::Read(Box::new(c))),
+        "view" | "clip" | "jobdeck" | "drc" | "svrf" | "gtktest" => {
             return Err(Error::new(
                 ErrorKind::Unsupported,
                 format!(
@@ -230,8 +236,9 @@ impl Drop for Signals {
         }
     }
 }
-fn run(cli: Cli, cancelled: &AtomicUsize) -> Result<i32> {
+fn run(cli: Cli, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
     match cli {
+        Cli::Read(command) => return read::run(*command, cancelled),
         Cli::Help(index) => println!("{}", if index { INDEX_HELP } else { HELP }),
         Cli::Version => println!(
             "floe2-web {} (development M1a; floe-index {})",
@@ -296,6 +303,7 @@ fn main() {
             match e.kind {
                 ErrorKind::InvalidInput | ErrorKind::Unsupported => 2,
                 ErrorKind::Cancelled => 128 + signals.flag.load(Ordering::Relaxed).max(2) as i32,
+                ErrorKind::Incomplete => 3,
                 _ => 1,
             }
         }

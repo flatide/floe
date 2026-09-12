@@ -4,7 +4,7 @@
 [상위 계획](WEBUI_PLAN.ko.md) · [M0 기능 대조표](WEBUI_M0.ko.md).
 
 **아래 endpoint/message는 설계안이며 아직 존재하는 HTTP/WS API가 아니다.**
-2026-09-13 M1a-1 `rust/worker-client`와 M1a-2a `app/app-core`의 일반 index만
+2026-09-13 M1a-1 `rust/worker-client`와 M1a-2a/b `app/app-core`의 일반 index·info/단일 render/probe를
 구현했다. 현재 호출 계약은 [worker README](../rust/worker-client/README.md),
 [M1a 기록](WEBUI_M1A.ko.md)을 따르며 아래 서비스 전체가 존재하는 것은 아니다.
 M1 구현 때 명세/테스트를 함께 고정한다. 렌더/인덱스 포맷을 새로 만들거나

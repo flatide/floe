@@ -57,6 +57,7 @@ name = "floe-app"
 version = "0.1.0"
 dependencies = [
  "floe-app-core",
+ "serde_json",
  "signal-hook",
 ]
 
@@ -65,6 +66,7 @@ name = "floe-app-core"
 version = "0.1.0"
 dependencies = [
  "floe-vfs",
+ "floe-worker-client",
  "libc",
  "serde",
  "serde_json",

@@ -7,10 +7,11 @@
 
 - M1a-1: `cf7fbe1`, worker client와 M0 문서. renderd의
   handshake/open/style/render/cancel/cleanup, PNG/raw 오라클.
-- M1a-2a: **일반 OASIS `index` CLI 경로**. `rust/app`의 `floe2-web` 실행 파일,
+- M1a-2a: `b3a95d7`, **일반 OASIS `index` CLI 경로**. `rust/app`의 `floe2-web` 실행 파일,
   `rust/app-core`의 바이너리 조회·캐시 검증·옵션 정책·프로세스 수명주기.
   기존 `floe-index`를 직접 실행하며 Python에 위임하지 않는다.
-- **M1a 전체 완료가 아니다.** info/render/probe, jobdeck/parser/catalog와
+- M1a-2b: 일반 레이아웃 info/단일 PNG render/probe. 상세 계약은 §7.
+- **M1a 전체 완료가 아니다.** jobdeck/parser/catalog와
   서버 진행 이벤트·view lease는 아직 없다. HTTP/WS/브라우저 UI도 미구현이다.
 
 Rust renderer, 인덱싱 알고리즘, LOD/occupancy 표현 정책, 캐시 포맷은 변경하지
@@ -141,7 +142,73 @@ cargo build --offline --locked --release -p floe-app --target x86_64-unknown-lin
 
 ## 6. 다음 단계
 
-1. M1a-2b: 일반 레이아웃 metadata/info → headless render/probe 서비스와
-   CLI 이관. worker-client를 연결하고 PNG/export 정책을 같은 오라클로 검사.
+1. M1a-2b 후속: 빈 visible layer plan의 native 오류를 별도 수정/검증.
+   모두 off인 웹 레이어 제어 전에 해결할 항목(M0-D7).
 2. M1a-3: jobdeck parser/catalog/선택/ledger/spec 및 덱 index 이관.
 3. M1b: 네트워크 의존성 게이트, controller/진행 이벤트/lease → gateway/Canvas.
+
+## 7. M1a-2b — 일반 레이아웃 읽기와 단일 캡처
+
+`floe2-web info SOURCE`, `render SOURCE`, `probe SOURCE`를 추가했다.
+Rust `catalog/styles/shots/render/artifact` 모듈을 CLI가 공유하며 Python fallback,
+HTTP 서버, GTK 실행은 없다. PNG는 renderd의 원본 바이트를 그대로 저장한다.
+
+- info 사람용 출력은 Python과 동일. **새 opt-in `--json`**은 metadata와
+  source_stale를 제공한다. 기존 캐시의 정수/DBU를 유지하는 로컬 JSON이며,
+  큰 정수를 문자열로 보내야 하는 브라우저 wire DTO와는 아직 별개다.
+- 메타의 frontier는 보관하지 않는다. meta≤256MiB, layers≤65,536,
+  DBU/bbox/키 중복, canonical VFS 구조와 meta/OVM identity를 검사한다.
+  Serde `float_roundtrip`을 켜 좌표의 1-ULP 손실을 피한다(신규 vendor 없음).
+- 소스 size/mtime 변경은 기존 읽기 CLI처럼 **경고 후 캐시를 사용**한다.
+  버전/DBU/OVM 쌍 불일치·손상은 hard error다. index의 stale 거부와 구분한다.
+  이 단계의 읽기 경로는 아직 managed read lease가 아니므로 실행 중 외부
+  재색인/summary 교체 금지 전제가 유지된다.
+- `--bbox`, `--at --size`, 단위 suffix, center/lb anchor, WxH aspect 확장과
+  stretch, width-only half-even 높이 계산, fractional DBU를 보존한다.
+  default exact는 **cut=0, wire exact=0**인 기존 캡처 계약이다. headless depth는
+  기본 full, low/medium/high는 5/3/1px, thin auto는 layout cull이다.
+- 레이어 이름/별칭(동일 별칭의 여러 datatype), explicit pair, 중복 제거를
+  보존한다. 메타는 소스 기록 순서, **렌더 스타일은 (L,D) 정렬 순서**다.
+  첫 PNG 대조가 이 차이를 잡았고 수정 후 바이트 일치를 확인했다.
+- 레이어 색을 layer-number palette로 정규화하고 source/stem `.layerprops`
+  기본 색을 적용한다. 색/패턴 `.def`는 compile-time 포함이므로 Python 파일을
+  runtime에 찾지 않는다. PNG export는 속성 파일과 관계없이 solid/width=1,
+  probe는 기존 live 기본 speckle/속성 패턴·width를 사용한다.
+- 기존 render 환경 jobs/raster_jobs/budget/tile/round/open timeout을 읽는다.
+  `FLOE_RENDERD_BIN`은 명시 invalid/empty면 hard error(기존 폴스루 정규화).
+  native manifest 버전 handshake, source alias, frame 파일 소비는 worker-client.
+- `Config.shutdown_requested`가 ready/open/style와 긴 poll 대기를 중단한다.
+  CLI SIGINT/SIGTERM은 이 flag로 연결하고 child 종료/수거 후 130/143을 반환한다.
+  renderer의 generation cancel과 프로세스 전체 종료 요청은 별개다.
+- export는 **final && !partial && deferred=0 && !labels_truncated**만 성공이다.
+  불완전이면 exit 3, 기존 PNG는 보존한다. PNG 한 장≤16Mpx. same-directory
+  create_new 임시파일→write/sync→rename이며 소스·캐시·index lock·symlink target을
+  출력으로 허용하지 않는다. rename 이후 늦은 signal을 미게시로 보고하지 않는다.
+- 단일 `--report` JSON은 기존 필드/단위(시간·출력명 제외)를 보존한다.
+  PNG와 report 각각 원자적이지만 **두 파일 전체 transaction은 아니다**.
+  report 실패 시 PNG가 이미 저장되었다고 명시한다. batch/mosaic/DRC/PNG metadata
+  export와 jobdeck render/--level은 후속 범위이며 조용히 무시하지 않는다.
+- probe는 같은 worker에서 600×600 fit/depth0 → 중앙 tile/full 두 요청의
+  final/complete와 종료를 확인한다. 브라우저 표시·ETX 성능 판정이 아니다.
+
+`tools/validate_app_render.py valmini.oas` 게이트:
+
+- info 출력/typed metadata, **12가지 PNG 바이트 및 report** 대조: 전체/width/
+  단위·anchor/stretch/half-phase/depth·detail·labels/선택/속성/별칭/다중 round.
+- runtime PATH=""에서 실제 index→info/render/probe, 캐시 바이트/mtime 보존.
+- NaN/과대 픽셀/0면적/옵션·경로 오류, stale 경고/손상 실패/override 실패.
+- 가짜 daemon의 ENOSPC·final partial·glyph truncation에서 기존 PNG 보존.
+  ready/open/style/render 각각 부모에만 SIGINT/SIGTERM→8회 취소·reap·temp 정리.
+- 발견한 기존 native 결함 **M0-D7**: `layers=none`이면 빈 plan에 top이 없어
+  오류. Python/Rust 모두 명시 실패하는 회귀로 먼저 고정했으며 빈 PNG 성공으로
+  위장하지 않는다. 별도 native 수정 단계에서 전체 off 표시 gate로 바꾼다.
+
+2026-09-13 실행 결과:
+
+- app/core/worker-client fmt와 strict clippy 통과. 단위 13개와 fake worker
+  lifecycle 9개 통과(real worker는 별도 필수 gate에서 실행).
+- `RUST APP READ: ALL OK`, 12 PNG/report 대조와 signal 8회 포함.
+- `validate_rust.sh`: `RUST VALIDATION: ALL OK`, exit 0. 기존 인덱싱·VFS·
+  occupancy·jobdeck·renderer 및 KLayout oracle 회귀도 통과했다.
+- vendor만 사용하는 `--offline --locked` Linux x86_64 musl release 빌드 통과.
+  실제 Linux 실행/ETX 화면/실칩 성능은 이 결과에 포함하지 않는다.

@@ -32,6 +32,11 @@ HTTP 서버/CLI 전체 이관은 아직 아니다. Linux/macOS 대상, unsafe Ru
 drain하고 최신 목표 상태를 다시 제출한다. 성공한 cancel은 그 시점 이후
 poll에서 이전 frame을 내보내지 않는다.
 
+M1a-2b의 선택적 `Config.shutdown_requested`(공유 AtomicUsize, nonzero)는
+ready/open/style 및 poll 대기를 약 20ms 간격으로 확인해 `Cancelled`로 종료한다.
+종료 유예/kill/reap 시간은 별도다. 이 flag는 프로세스 전체 종료용이며 세대별
+supersede는 계속 `cancel()`을 사용한다. flag 미지정인 기존 호출자는 그대로다.
+
 controller는 연결된 브라우저 속도와 무관하게 **계속 `poll()`**해야 한다.
 poll은 frame 파일 소비와 render deadline 판정을 수행한다. 브라우저를 기다리며
 poll을 멈추면 내부 line queue가 유계여도 기존 renderd의 `round_paths=1`

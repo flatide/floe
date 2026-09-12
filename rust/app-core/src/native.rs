@@ -35,6 +35,39 @@ impl Discovery {
             search_path: std::env::var_os("PATH"),
         })
     }
+    pub fn renderer() -> Result<Self> {
+        let mut d = Self::local()?;
+        d.override_path = std::env::var_os("FLOE_RENDERD_BIN").map(PathBuf::from);
+        Ok(d)
+    }
+    pub fn renderd_path(&self) -> Result<PathBuf> {
+        self.find("floe-renderd", "FLOE_RENDERD_BIN")
+    }
+    fn find(&self, name: &str, variable: &str) -> Result<PathBuf> {
+        if let Some(p) = &self.override_path {
+            if p.as_os_str().is_empty() || !executable(p) {
+                return Err(Error::input(format!(
+                    "{variable} is set but is not an executable file: {}",
+                    p.display()
+                )));
+            }
+            return Ok(fs::canonicalize(p)?);
+        }
+        let mut candidates = Vec::new();
+        if let Some(root) = &self.development_root {
+            candidates.push(root.join("rust/target/release").join(name));
+        }
+        if let Some(parent) = self.executable.parent() {
+            candidates.push(parent.join(name));
+        }
+        if let Some(path) = &self.search_path {
+            candidates.extend(std::env::split_paths(path).map(|p| p.join(name)));
+        }
+        let p = candidates.into_iter().find(|p| executable(p)).ok_or_else(|| Error::input(
+            format!("{name} not found; set {variable}, build the release binary, or install it beside floe2-web/on PATH")
+        ))?;
+        Ok(fs::canonicalize(p)?)
+    }
 }
 fn executable(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
@@ -46,31 +79,8 @@ pub struct Indexer {
 }
 impl Indexer {
     pub fn discover(d: &Discovery) -> Result<Self> {
-        let binary = if let Some(p) = &d.override_path {
-            if p.as_os_str().is_empty() || !executable(p) {
-                return Err(Error::input(format!(
-                    "FLOE_INDEX_BIN is set but is not an executable file: {}",
-                    p.display()
-                )));
-            }
-            p.clone()
-        } else {
-            let mut candidates = Vec::new();
-            if let Some(root) = &d.development_root {
-                candidates.push(root.join("rust/target/release/floe-index"));
-            }
-            if let Some(parent) = d.executable.parent() {
-                candidates.push(parent.join("floe-index"));
-            }
-            if let Some(path) = &d.search_path {
-                candidates.extend(std::env::split_paths(path).map(|p| p.join("floe-index")));
-            }
-            candidates.into_iter().find(|p| executable(p)).ok_or_else(|| Error::input(
-                "floe-index not found; set FLOE_INDEX_BIN, build cargo build --release -p floe-index, or install it beside floe2-web/on PATH"
-            ))?
-        };
         Ok(Self {
-            binary: fs::canonicalize(binary)?,
+            binary: d.find("floe-index", "FLOE_INDEX_BIN")?,
         })
     }
     pub fn path(&self) -> &Path {
