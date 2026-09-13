@@ -1,4 +1,4 @@
-use crate::{check_cancelled, Error, Result};
+use crate::{check_cancelled, format_general as general, Error, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -573,29 +573,6 @@ fn parse_entry(body: &str, lineno: usize) -> Result<Entry> {
         }
     }
     Ok(e)
-}
-/// Legacy `%g` diagnostics (six significant digits), not coordinate wire
-/// serialization. Scientific rounding decides the fixed/scientific switch.
-pub(super) fn general(value: f64) -> String {
-    let scientific = format!("{value:.5e}");
-    let Some((mantissa, exponent)) = scientific.split_once('e') else {
-        return scientific;
-    };
-    let exponent: i32 = exponent.parse().expect("formatted exponent");
-    if !(-4..6).contains(&exponent) {
-        format!(
-            "{}e{exponent:+03}",
-            mantissa.trim_end_matches('0').trim_end_matches('.')
-        )
-    } else {
-        let precision = (5 - exponent) as usize;
-        let fixed = format!("{value:.precision$}");
-        if precision == 0 {
-            fixed
-        } else {
-            fixed.trim_end_matches('0').trim_end_matches('.').into()
-        }
-    }
 }
 fn quoted(s: &str) -> String {
     let q = if s.contains('\'') && !s.contains('"') {

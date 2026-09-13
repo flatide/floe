@@ -1,0 +1,201 @@
+//! CLI-neutral read facade. ASCII retains fractional micrometre coordinates;
+//! packed input keeps the existing i64 path and checked integer measurements.
+use super::{Ascii, Cursor, Pack, BLOCK_POINTS, PAGE_ITEMS};
+use crate::{
+    check_cancelled,
+    svrf::{Comparison, Rule},
+    Error, Result,
+};
+use std::{path::Path, sync::atomic::AtomicUsize};
+
+enum Backend {
+    Pack(Box<Pack>),
+    Ascii(Box<Ascii>),
+}
+pub struct Database {
+    backend: Backend,
+    pub warnings: Vec<String>,
+}
+pub struct ReadCheck<'a> {
+    pub name: &'a str,
+    pub desc: &'a str,
+    pub count: u64,
+}
+enum Points {
+    Dbu(Vec<[i64; 2]>, f64),
+    Um(Vec<[f64; 2]>),
+}
+pub struct ReadViolation {
+    pub kind: char,
+    pub number: u64,
+    pub bbox_um: [f64; 4],
+    points: Points,
+}
+pub struct ReadHit {
+    pub local: u64,
+    pub status: u8,
+    pub violation: ReadViolation,
+}
+pub struct ReadPage {
+    pub hits: Vec<ReadHit>,
+    pub next: Option<Cursor>,
+}
+impl ReadViolation {
+    pub fn comparison<'a>(
+        &self,
+        rule: &'a Rule,
+        stop: &AtomicUsize,
+    ) -> Result<Option<Comparison<'a>>> {
+        match &self.points {
+            Points::Dbu(p, precision) => rule.compare(self.kind, p, *precision, stop),
+            Points::Um(p) => rule.compare_um(self.kind, p, stop),
+        }
+    }
+}
+impl Database {
+    pub(super) fn packed(pack: Pack) -> Self {
+        Self {
+            backend: Backend::Pack(Box::new(pack)),
+            warnings: Vec::new(),
+        }
+    }
+    pub(super) fn ascii(ascii: Ascii, warning: Option<String>) -> Self {
+        let mut warnings: Vec<_> = warning.into_iter().collect();
+        if ascii.truncated_records > 0 {
+            warnings.push(format!(
+                "{} truncated ASCII DRC record(s); the readable prefix matches legacy parsing",
+                ascii.truncated_records
+            ));
+        }
+        Self {
+            backend: Backend::Ascii(Box::new(ascii)),
+            warnings,
+        }
+    }
+    pub fn path(&self) -> &Path {
+        match &self.backend {
+            Backend::Pack(p) => &p.path,
+            Backend::Ascii(p) => &p.path,
+        }
+    }
+    pub fn cell(&self) -> &str {
+        match &self.backend {
+            Backend::Pack(p) => &p.cell,
+            Backend::Ascii(p) => &p.cell,
+        }
+    }
+    pub fn precision(&self) -> f64 {
+        match &self.backend {
+            Backend::Pack(p) => p.precision,
+            Backend::Ascii(p) => p.precision,
+        }
+    }
+    pub fn total(&self) -> u64 {
+        match &self.backend {
+            Backend::Pack(p) => p.total,
+            Backend::Ascii(p) => p.total,
+        }
+    }
+    pub fn check_count(&self) -> usize {
+        match &self.backend {
+            Backend::Pack(p) => p.checks.len(),
+            Backend::Ascii(p) => p.checks.len(),
+        }
+    }
+    pub fn check(&self, i: usize) -> Result<ReadCheck<'_>> {
+        match &self.backend {
+            Backend::Pack(p) => p.checks.get(i).map(|c| ReadCheck {
+                name: &c.name,
+                desc: &c.desc,
+                count: c.count,
+            }),
+            Backend::Ascii(p) => p.checks.get(i).map(|c| ReadCheck {
+                name: &c.name,
+                desc: &c.desc,
+                count: c.count,
+            }),
+        }
+        .ok_or_else(|| Error::input("DRC check index out of range"))
+    }
+    pub fn waived_count(&self, check: usize) -> Result<u64> {
+        self.check(check)?;
+        match &self.backend {
+            Backend::Pack(p) => p.waived_count(check),
+            Backend::Ascii(_) => Ok(0),
+        }
+    }
+    pub fn unchanged(&self) -> Result<()> {
+        match &self.backend {
+            Backend::Pack(p) => p.unchanged(),
+            Backend::Ascii(p) => p.unchanged(),
+        }
+    }
+    pub fn errors(
+        &mut self,
+        check: usize,
+        start: u64,
+        limit: usize,
+        stop: &AtomicUsize,
+    ) -> Result<ReadPage> {
+        match &mut self.backend {
+            Backend::Pack(p) => {
+                let v = p.errors(check, start, limit, stop)?;
+                let mut hits = Vec::with_capacity(v.hits.len());
+                for h in v.hits {
+                    let e = h.violation;
+                    let bbox_um = p.bbox_um(e.bbox)?;
+                    hits.push(ReadHit {
+                        local: h.local,
+                        status: h.status,
+                        violation: ReadViolation {
+                            kind: e.kind,
+                            number: e.number,
+                            bbox_um,
+                            points: Points::Dbu(e.points, p.precision),
+                        },
+                    });
+                }
+                Ok(ReadPage { hits, next: v.next })
+            }
+            Backend::Ascii(p) => {
+                p.unchanged()?;
+                check_cancelled(stop)?;
+                let count = p
+                    .checks
+                    .get(check)
+                    .filter(|c| start <= c.count)
+                    .ok_or_else(|| Error::input("invalid DRC error page"))?
+                    .count;
+                if !(1..=PAGE_ITEMS).contains(&limit) {
+                    return Err(Error::input("invalid DRC page limit"));
+                }
+                let mut hits = Vec::new();
+                let mut points = 0;
+                let mut i = start;
+                while i < count && hits.len() < limit {
+                    let e = p.error(check, i, stop)?;
+                    if points + e.points_um.len() > BLOCK_POINTS {
+                        break;
+                    }
+                    points += e.points_um.len();
+                    hits.push(ReadHit {
+                        local: i,
+                        status: 0,
+                        violation: ReadViolation {
+                            kind: e.kind,
+                            number: e.number,
+                            bbox_um: e.bbox_um,
+                            points: Points::Um(e.points_um),
+                        },
+                    });
+                    i += 1;
+                }
+                p.unchanged()?;
+                Ok(ReadPage {
+                    hits,
+                    next: (i < count).then_some(Cursor { check, error: i }),
+                })
+            }
+        }
+    }
+}

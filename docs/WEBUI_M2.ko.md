@@ -50,8 +50,9 @@ rust/target/release/floe2-web drc results.db.ice --list
 64개 단위로 읽고 stream하며 전체 오류 JSON을 메모리에 모으지 않는다.
 
 직접 `.ice`는 원본 없이 열 수 있고 `.db`는 size/mtime가 같은 인접 `.ice`를 선택한다.
-**이 단계에서 ASCII 직접 fallback은 아직 미이관**이다. missing/stale/corrupt side
-pack이면 `floe-index drc <db>` 안내와 오류를 내며 자동 색인/덮어쓰기하지 않는다.
+M2a-1에서는 ASCII fallback 없이 missing/stale/corrupt side pack을 거부했다.
+**현재 CLI는 §20의 읽기 전용 ASCII fallback을 지원한다.** 자동 색인/덮어쓰기는
+여전히 없으며 웹 actor의 명시 pack 등록은 별도 계약이다.
 
 reviewer 순서: 명시값/FLOE_REVIEWER → 원격 DISPLAY host → SSH client → 계정명.
 기존 `.<db>.waive.<reviewer>`와 temp fallback의 동일 SHA-1 path tag를 쓴다.
@@ -68,8 +69,8 @@ status를 읽는다. **읽기만으로 autosave를 생성하거나 stale 파일�
   + 생성 DB를 기존 native로 색인. **1,931개 좌표/번호/status** 전수 대조,
   **168개 공간 검색**(점 경계·1/7/2000 cap·rule/waive 필터) + error paging 대조.
 - 실제 CLI `--rules`/`--errs`는 Python JSON과 일치하고 PATH-empty 실행한다.
-  전후 source/pack/waive 바이트·mtime 및 파일 목록 불변을 단언한다. stale refusal도
-  source/pack을 변경하지 않는지 확인한다. full battery에 필수 게이트로 연결했다.
+  전후 source/pack/waive 바이트·mtime 및 파일 목록 불변을 단언한다. 당시의 stale
+  refusal gate는 §20에서 readonly ASCII fallback gate로 갱신했다. full battery 필수다.
 - 2026-09-13 검증: DRC 단위 6개, core/app 전체 테스트, strict clippy,
   Rust 1.89/빈 registry/offline 테스트 + Linux musl release link 통과.
   `sh tools/validate_rust.sh`는 `RUST VALIDATION: ALL OK`로 완료했다.
@@ -1083,7 +1084,69 @@ gate가 포함된다. 마지막 UI Escape 취소 순서 보완 후에도 전체 
 clippy, Rust1.89 빈 registry offline 테스트와 Linux musl release link도 통과했다.
 기존 native/Pillow/GLib 경고는 남아 있다. GTK 기본값이나 현장 게이트 판정은 바꾸지 않는다.
 
-## 20. 다음 경계
+## 20. M2a-11a: 읽기 전용 ASCII DRC 코어·CLI fallback
+
+`floe2-web drc results.db [--rules|--errs RULE|--list]`는 fresh 인접 ICE를
+우선한다. 없으면 ASCII, 오래되거나 손상된 side pack이면 **경고 후 ASCII**를
+읽는다. 직접 지정한 magic이 있는 pack은 이전과 같이 검증 오류를 내며 ASCII로
+위장하지 않는다. 선택된 fresh pack의 waive 손상도 fallback 사유가 아니다.
+원본·pack·waive·임시 offset 파일을 생성/수정/삭제하지 않으며, index subprocess나
+Python을 호출하지 않는다. 정수 DBU pack 변환은 명시 작업이고 소수 좌표 입력의
+대체 경로가 아니다.
+
+### 읽기·좌표·한계
+
+- ASCII 파일을 128 KiB pread 버퍼로 한 줄씩 읽는다. 최초 open은 **전체 좌표를
+  스캔하는 O(입력 크기)** 비용이다. 이후 오류별 byte 범위·bbox·점 수만 보관하고,
+  요청한 오류의 좌표만 다시 읽는다. whole-file 문자열/모든 점을 상주시킬 필요는
+  없지만 pack의 block-metadata-only open과 같은 속도를 주장하지 않는다.
+- LF/CRLF/CR·blank description·UTF-8 replacement·중복/빈 규칙·unknown geometry와
+  `__RVE_*__` 제외·빈 `_RDBS` 제외를 기존 Python에 맞췄다. 선언 count는 advisory이고
+  실제 retained 오류를 센다. global 번호는 파일 순서, CLI duplicate는 첫 규칙이다.
+  advisory 정수는 문자열로 보관하여 큰 선언값으로 reserve/할당하지 않는다.
+- 읽을 수 있는 좌표가 있는 부분 레코드는 기존처럼 보존하되 잘린 레코드 수를
+  stderr로 경고한다. 자원 한계에 걸려 일부만 파싱한 결과를 성공으로 반환하지 않는다.
+  non-finite precision/좌표는 명시 오류다. Python이 받아들이는 NaN/Inf까지 호환하는
+  계약은 아니다. 실제 ASCII 수치 토큰의 소수·부호·지수·underscore를 검증했다.
+- ASCII는 소수 DBU/precision의 **f64 µm**를 유지한다. ICE의 i64 DBU 경로로
+  반올림하지 않는다. `--svrf-rules` 측정은 같은 metric/선택 규칙을 따르는 별도
+  float 경로이며 원점 이동·2의 거듭제곱 스케일로 면적의 절대좌표 cancellation을 줄인다.
+  표시 단위와 반올림은 기존 CLI와 같다. 일반 polygon width나 signoff는 추가하지 않는다.
+- 보관 metadata 용량은 64 MiB, raw/decoded 한 줄·description은 각각 1 MiB,
+  한 오류는 262,144점이다. 초과는 `Incomplete` 오류다. 페이지는 최대2,000개/
+  1,048,576점을 continuation으로 나눈다. metadata와 파싱 버퍼·단일 오류·페이지
+  복사는 별도이므로 **64 MiB 전체 RSS cap이 아니다**. cap 제거/임의 자동 색인은 없다.
+- pread는 독립 cursor를 쓰며 열린 fd의 size/mtime/ctime 변화를 검사한다. truncate/
+  변경은 오류, scan/좌표 읽기는 취소 가능하다. NFS syscall 강제 중단이나 외부 인덱스
+  hot-reload 문제를 해결한 것은 아니다. ASCII fallback에는 이전 pack의 waive를
+  적용하지 않고 status=0으로 읽는다. 리뷰 ID가 달라질 수 있는 상태를 합치지 않는다.
+
+### 검증과 남은 연결
+
+- `ascii` 단위5개: 실제 수치/번호·개행·부분 레코드·malformed·한계·취소·외부 변경·
+  offset 조회. float 측정 단위2개: 소수·큰 원점·지원하지 않는 도형/metric·극단값 오류.
+- `validate_app_drc.py`: 5개 합성 ASCII/1,938개 좌표·bbox·번호·메타데이터를 Python과
+  전수 대조한다. `--list`/요약 stdout과 JSON·중복/옵션 우선순위·PATH-empty·
+  stale/corrupt fallback·fresh pack의 손상 waive 거부·readonly·실제 SIGINT/SIGTERM
+  취소를 단언한다. precision 요약의 `%g` 경계10개를 추가하고 기존 잡덱 formatter를
+  동작 변경 없이 공통화했다(좌표 wire에는 미적용). 기존 pack
+  1,931개 오류/168개 공간 검색·waive gate도 유지한다.
+- `validate_app_svrf.py`: 정수 pack과 소수 ASCII를 합쳐2,032개 측정/constraint를
+  기존 Python GUI와 대조한다. ASCII 면적은 파싱된 float의 정확한 유리수 면적을
+  함께 사용해 큰 원점의 기존 shoelace 오차를 그대로 복제하지 않는다.
+
+2026-09-13 `sh tools/validate_rust.sh`가 `RUST VALIDATION: ALL OK`로 완료됐다.
+KLayout13 PX+2 phase-exact+14 style, jobdeck80, renderer46, 전체 웹·DRC/SVRF gate가
+포함된다. 최종 formatter 공통화 후에도 CLI/측정 대조·core74/app6/web27/transport8,
+fmt·전환 패키지 strict clippy, Rust1.89 빈 registry offline 테스트와 Linux musl
+release link를 재확인했다. 기존 native/Pillow/GLib 경고는 남아 있다. Linux 실행·
+현장 Firefox 수용이나 실칩 ASCII 성능을 측정한 것은 아니다.
+
+**이번 단계는 코어·CLI**다.
+웹 actor/API는 여전히 명시 등록한 pack만 읽는다. browser ASCII·명시 pack-build
+승인/진행/취소, read-sharing/notes는 다음 단계이며 GTK 기본값·현장 게이트는 불변이다.
+
+## 21. 다음 경계
 
 1. SVRF sidecar 코어/actor/API·웹 type/상세/비교는 §15~17까지 이관했다.
    일반 레이아웃 layer isolate/복원·한 번의 goto는 §18~19까지 연결했다.
@@ -1091,7 +1154,8 @@ clippy, Rust1.89 빈 registry offline 테스트와 Linux musl release link도 �
    selected/live In view 목록 필터·순회·hover는 §13~14까지 구현했다.
    손으로 그리는 ruler와 그에 따른 Escape 우선순위는 M4에서 확장한다.
    현재 페이지 마커 정책 자체를 전체 pack 마커로 확대하지 않는다.
-2. ASCII/index 흐름·기존 notes·상세 측정/룰 매핑은 각각 parity gate와 함께 확장.
+2. ASCII 읽기 코어/CLI는 §20까지 이관했다. 웹 ASCII/index 승인 흐름·기존 notes·
+   상세 측정/룰 매핑은 각각 parity gate와 함께 확장한다.
 3. 공유는 설계/DRC에 묶인 읽기 capability, 발급/만료/폐기·follow/independent
    state를 별도 구현·검증. 아직 shares=false, loopback-only다.
 4. 외부 HTTPS/WSS·TeeBox 접근/인증 정책은 상위 계획 §10 미결 사항이며 로컬 기반 구현과

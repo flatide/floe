@@ -4,11 +4,11 @@ use super::{
     color::{ColorMap, ColorScheme, Mode},
     geom::{self, PlanOptions, PlannedDeck},
     index::validate_levels,
-    parser::{general, JobDeck},
+    parser::JobDeck,
     sources::SourceCatalog,
     view::ViewRows,
 };
-use crate::{artifact, cache, check_cancelled, Result};
+use crate::{artifact, cache, check_cancelled, format_general as general, Result};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};

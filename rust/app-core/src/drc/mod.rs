@@ -1,13 +1,18 @@
-//! Read-only, bounded queries over the existing native DRC pack (layout 4).
+//! Read-only DRC sources: bounded layout-4 pack queries and a streaming ASCII
+//! fallback for trusted CLI input. Neither path implicitly indexes or writes.
 //! No mmap: truncation of a shared file is an I/O error rather than SIGBUS.
+mod ascii;
+mod database;
 mod filters;
 mod local;
 mod measure;
 mod pack;
 mod selection;
+pub use ascii::{Ascii, AsciiCheck, AsciiViolation};
+pub use database::{Database, ReadCheck, ReadHit, ReadPage, ReadViolation};
 pub use filters::{ListPage, ListRequest};
 pub use local::{open_current, reviewer_tag, waive_paths};
-pub use measure::{cd_segments, measured, CdSegment};
+pub use measure::{cd_segments, measured, measured_um, CdSegment};
 pub use pack::{
     Check, Cursor, Hit, InfoHit, InfoPage, Pack, Page, PointPage, RecordInfo, StepCursor, StepPage,
     StepRequest, Violation,

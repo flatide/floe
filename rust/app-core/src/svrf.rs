@@ -200,6 +200,27 @@ impl Rule {
         precision: f64,
         stop: &AtomicUsize,
     ) -> Result<Option<Comparison<'_>>> {
+        self.compare_using(
+            |metric| measured(kind, points, precision, metric, stop),
+            stop,
+        )
+    }
+    pub fn compare_um(
+        &self,
+        kind: char,
+        points: &[[f64; 2]],
+        stop: &AtomicUsize,
+    ) -> Result<Option<Comparison<'_>>> {
+        self.compare_using(
+            |metric| crate::drc::measured_um(kind, points, metric, stop),
+            stop,
+        )
+    }
+    fn compare_using(
+        &self,
+        mut measure: impl FnMut(&str) -> Result<Option<f64>>,
+        stop: &AtomicUsize,
+    ) -> Result<Option<Comparison<'_>>> {
         let mut values = BTreeMap::new();
         let mut first = None;
         for (i, c) in self.constraints.iter().enumerate() {
@@ -208,7 +229,7 @@ impl Rule {
             let value = match values.get(c.metric.as_str()) {
                 Some(v) => *v,
                 None => {
-                    let v = measured(kind, points, precision, &c.metric, stop)?;
+                    let v = measure(&c.metric)?;
                     values.insert(c.metric.as_str(), v);
                     v
                 }

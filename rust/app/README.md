@@ -74,23 +74,25 @@ cargo build --offline --locked --release -p floe-app -p floe-index -p floe-rende
   ± zoom, `Ctrl+A` fit, `f` frames를 지원한다. 레이어 `⋯`는 fill/pattern/선폭 편집,
   Label px는 6..96 device px다. `--labels`, `--no-frames`, `--label-font-px`는
   초기 표시 옵션이다. 전체 GTK 단축키·query/ruler parity는 아직 개발 중이다.
-- `drc`는 기존 pack(또는 .db 옆의 fresh pack)의 `--rules`/`--errs`/`--list`를
-  스트리밍한다. 기존 per-reviewer waive를 읽되 source/pack/autosave를 생성·수정하지 않는다.
+- `drc`는 기존 pack(또는 .db 옆의 fresh pack)을 우선하며, 없거나 stale/corrupt이면
+  읽기 전용 ASCII로 fallback한다. `--rules`/`--errs`/`--list`·소수 좌표를 지원한다.
+  pack의 per-reviewer waive는 읽되 ASCII fallback에는 적용하지 않는다.
+  source/pack/autosave를 생성·수정하지 않으며 자동 pack-build는 없다.
   웹 `view --drc PACK.ice [--drc-waives FILE]`는 첫 소스에 묶인 읽기 전용 API를
   등록한다(별도 1 CPU + 256 MiB admission). DRC 패널은 읽기·선택·live In view/
   Selected 필터·순회·CD·복원을 지원한다.
-  웹에는 ambient reviewer 조회가 없으며 명시 sidecar만 읽는다. ASCII fallback·
-  공유·편집/notes는 아직 미이관이다([M2 기록](../../docs/WEBUI_M2.ko.md)).
+  웹에는 ambient reviewer 조회가 없으며 명시 sidecar만 읽는다. 웹 ASCII 등록·
+  pack-build 승인·공유·편집/notes는 미이관이다([M2 기록](../../docs/WEBUI_M2.ko.md)).
 - CLI `drc --rules`/`--errs`에 `--svrf-rules FILE`을 명시하면 기존 version1
   sidecar의 규칙 정보/참고 측정값을 JSON에 추가한다. 원본 SVRF를 해석하거나
   경로를 자동 탐색하지 않는다. 일반 polygon width/signoff 판정기가 아니며,
-  원본 parser와 layer isolate는 미이관이다([M2 §15](../../docs/WEBUI_M2.ko.md#15-m2a-10a-svrf-sidecar규칙-메타데이터측정-코어)).
+  원본 parser는 미이관이다([M2 §15](../../docs/WEBUI_M2.ko.md#15-m2a-10a-svrf-sidecar규칙-메타데이터측정-코어)).
 - `view --drc-rules FILE`은 명시한 rules snapshot을 DRC actor에 연결한다. 타입/규칙
   필터·scalar 측정 비교 API와 웹 패널 표시/상태 복원을 지원한다. 추가256 MiB를
   공통 admission에 예약하지만 CPU/worker 수는 늘지 않는다. 원본/include 경로를
   따라가거나 jobdeck TC root를 넓히지 않는다([M2 §16](../../docs/WEBUI_M2.ko.md#16-m2a-10b-svrf-등록타입규칙-필터측정-비교-api)).
-  서버에는 격리+goto 준비/단일 적용 및 최초 가시성 복원 API도 있다. 웹 조작 연결과
-  jobdeck 물리 plane 격리는 다음 단계다([M2 §18](../../docs/WEBUI_M2.ko.md#18-m2a-10d1-레이어-격리복원-코어와-원자적-focus-api)).
+  격리+goto 준비/단일 적용 및 최초 가시성 복원 API와 웹 Restore/Escape를 연결했다.
+  jobdeck 물리 plane 격리는 다음 단계다([M2 §18~19](../../docs/WEBUI_M2.ko.md#18-m2a-10d1-레이어-격리복원-코어와-원자적-focus-api)).
 - `clip/...`와 batch/mosaic/DRC export는 미이관 오류를 낸다.
   자동 Python fallback이나 기존 launcher/portable 교체는 없다.
 

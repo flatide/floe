@@ -1,6 +1,6 @@
 //! Trusted CLI selection only. The web registration path supplies explicit
 //! pack/sidecar handles within its own scope; it does not accept paths from UI.
-use super::{Pack, MAGIC};
+use super::{Ascii, Database, Pack, MAGIC};
 use crate::{cache, Error, ErrorKind, Result};
 use sha1::{Digest, Sha1};
 use std::{
@@ -108,7 +108,8 @@ pub fn open_current(
     source: &Path,
     reviewer: Option<&str>,
     cancelled: &AtomicUsize,
-) -> Result<Pack> {
+) -> Result<Database> {
+    crate::check_cancelled(cancelled)?;
     let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK)
@@ -122,14 +123,34 @@ pub fn open_current(
         Pack::open(source, cancelled)?
     } else {
         let path = PathBuf::from(format!("{}.ice", cache::utf8(source)?));
-        let p=Pack::open(&path,cancelled).map_err(|e|Error::new(e.kind,format!("fresh DRC pack required ({e}); run floe-index drc {} (ASCII fallback is not ported yet)",source.display())))?;
-        if !p.source_matches(source)? {
-            return Err(Error::new(
-                ErrorKind::Cache,
-                "stale DRC pack; run floe-index drc <db> (ASCII fallback is not ported yet)",
-            ));
+        let candidate = match fs::metadata(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Database::ascii(Ascii::open(source, cancelled)?, None));
+            }
+            Err(e) => Err(e.into()),
+            Ok(_) => Pack::open(&path, cancelled).and_then(|p| {
+                if p.source_matches(source)? {
+                    Ok(p)
+                } else {
+                    Err(Error::new(ErrorKind::Cache, "stale DRC pack"))
+                }
+            }),
+        };
+        match candidate {
+            Ok(p) => p,
+            Err(e) if e.kind == ErrorKind::Cancelled => return Err(e),
+            Err(e) => {
+                let warning = format!(
+                    "{}: {e}; parsing ASCII instead (integral-DBU sources can be indexed explicitly: floe-index drc {})",
+                    path.display(),
+                    source.display()
+                );
+                return Ok(Database::ascii(
+                    Ascii::open(source, cancelled)?,
+                    Some(warning),
+                ));
+            }
         }
-        p
     };
     for path in waive_paths(&pack.path, &reviewer_tag(reviewer))? {
         match fs::metadata(&path) {
@@ -142,5 +163,5 @@ pub fn open_current(
         }
     }
     pack.unchanged()?;
-    Ok(pack)
+    Ok(Database::packed(pack))
 }

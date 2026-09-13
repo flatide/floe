@@ -236,9 +236,145 @@ pub fn measured(
     Ok(Some(value))
 }
 
+/// ASCII sources may contain fractional DBU values. Keep their parsed f64
+/// micrometres; never round them into the packed integer measurement path.
+pub fn measured_um(
+    kind: char,
+    points: &[[f64; 2]],
+    metric: &str,
+    stop: &AtomicUsize,
+) -> Result<Option<f64>> {
+    check_cancelled(stop)?;
+    if points.len() > super::RECORD_POINTS {
+        return Err(super::limit("measurement points"));
+    }
+    let supported = match metric {
+        "area" => kind == 'p' && points.len() >= 3,
+        "length" => kind == 'e' && points.len() == 2,
+        "width" | "space" | "enclosure" => matches!(kind, 'p' | 'e') && points.len() == 4,
+        _ => false,
+    };
+    if !supported {
+        return Ok(None);
+    }
+    let mut extent = 0f64;
+    for (i, v) in points.iter().enumerate() {
+        if i % 1024 == 0 {
+            check_cancelled(stop)?;
+        }
+        for &x in v {
+            if !x.is_finite() {
+                return Err(Error::input("non-finite ASCII DRC measurement coordinate"));
+            }
+            extent = extent.max(x.abs());
+        }
+    }
+    let scale = if extent == 0. {
+        1.
+    } else {
+        2f64.powi((extent.log2().floor() as i32).clamp(-1022, 1023))
+    };
+    let origin = points[0].map(|v| v / scale);
+    let mut local = Vec::new();
+    local
+        .try_reserve_exact(points.len())
+        .map_err(|_| super::limit("measurement allocation"))?;
+    for (i, v) in points.iter().enumerate() {
+        if i % 1024 == 0 {
+            check_cancelled(stop)?;
+        }
+        local.push([v[0] / scale - origin[0], v[1] / scale - origin[1]]);
+    }
+    let value = match metric {
+        "area" => {
+            let mut sum = 0.;
+            for i in 0..local.len() {
+                if i % 1024 == 0 {
+                    check_cancelled(stop)?;
+                }
+                let (a, b) = (local[i], local[(i + 1) % local.len()]);
+                sum += a[0] * b[1] - a[1] * b[0];
+            }
+            let area = sum.abs() * 0.5 * scale * scale;
+            if sum != 0. && area == 0. {
+                return Err(Error::input("unrepresentable ASCII DRC area (underflow)"));
+            }
+            area
+        }
+        "length" => distance(local[0], local[1]) * scale,
+        _ => {
+            let s = simple(kind, &local);
+            let Some(first) = s.first() else {
+                return Ok(None);
+            };
+            (if kind == 'e' {
+                distance(first[0], first[1])
+            } else {
+                s.iter()
+                    .map(|v| distance(v[0], v[1]))
+                    .fold(f64::INFINITY, f64::min)
+            }) * scale
+        }
+    };
+    if !value.is_finite() {
+        return Err(Error::input("unrepresentable ASCII DRC measurement"));
+    }
+    Ok(Some(value))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ascii_fractional_measurements_do_not_round_to_integer_dbu() {
+        let stop = AtomicUsize::new(0);
+        for origin in [0., -32.125, 2f64.powi(40)] {
+            let p = [
+                [origin, 0.125],
+                [origin + 0.375, 0.125],
+                [origin + 0.375, 0.625],
+                [origin, 0.625],
+            ];
+            assert_eq!(measured_um('p', &p, "area", &stop).unwrap(), Some(0.1875));
+            assert_eq!(measured_um('p', &p, "width", &stop).unwrap(), Some(0.375));
+            assert_eq!(
+                measured_um('e', &[p[0], p[2]], "length", &stop).unwrap(),
+                Some(0.625)
+            );
+            assert_eq!(measured_um('e', &p, "space", &stop).unwrap(), Some(0.5));
+            assert_eq!(measured_um('p', &p, "density", &stop).unwrap(), None);
+        }
+        assert_eq!(
+            measured_um('e', &[[0.125, 0.125]; 2], "length", &stop).unwrap(),
+            Some(0.)
+        );
+        assert_eq!(
+            measured_um('p', &[[0., 0.]; 3], "width", &stop).unwrap(),
+            None
+        );
+    }
+    #[test]
+    fn ascii_measurement_extremes_limits_and_cancellation_are_explicit() {
+        let stop = AtomicUsize::new(0);
+        for invalid in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            assert!(measured_um('e', &[[0., 0.], [invalid, 1.]], "length", &stop).is_err());
+        }
+        assert!(measured_um('e', &[[-f64::MAX, 0.], [f64::MAX, 0.]], "length", &stop).is_err());
+        for size in [1e200, 1e-200] {
+            assert!(measured_um('p', &[[0., 0.], [size, 0.], [0., size]], "area", &stop).is_err());
+        }
+        let too_many = vec![[0., 0.]; super::super::RECORD_POINTS + 1];
+        assert_eq!(
+            measured_um('p', &too_many, "area", &stop).unwrap_err().kind,
+            ErrorKind::Incomplete
+        );
+        assert_eq!(
+            measured_um('e', &[[0., 0.], [1., 1.]], "length", &AtomicUsize::new(1))
+                .unwrap_err()
+                .kind,
+            ErrorKind::Cancelled
+        );
+    }
     fn ends(kind: char, p: &[[i64; 2]]) -> Vec<Segment> {
         cd_segments(kind, p, 1.)
             .unwrap()

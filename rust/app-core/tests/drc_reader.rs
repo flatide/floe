@@ -3,6 +3,46 @@ use floe_app_core::drc::{cd_segments, Cursor, Pack};
 use serde_json::{json, Value};
 use std::{collections::BTreeSet, path::Path, sync::atomic::AtomicUsize};
 #[test]
+#[ignore = "run tools/validate_app_drc.py with synthetic ASCII cases"]
+fn ascii_metadata_coordinates_and_file_order_match_python() {
+    let input: Value = serde_json::from_slice(
+        &std::fs::read(std::env::var_os("FLOE_DRC_ASCII_ORACLE").expect("private ASCII oracle"))
+            .unwrap(),
+    )
+    .unwrap();
+    let flag = AtomicUsize::new(0);
+    let mut errors = 0;
+    let mut cases = 0;
+    for case in input.as_array().unwrap() {
+        let p = floe_app_core::drc::Ascii::open(Path::new(case["path"].as_str().unwrap()), &flag)
+            .unwrap();
+        assert_eq!(json!(p.cell), case["cell"]);
+        assert_eq!(json!(p.precision), case["precision"]);
+        assert_eq!(p.checks.len(), case["checks"].as_array().unwrap().len());
+        for (ci, c) in case["checks"].as_array().unwrap().iter().enumerate() {
+            assert_eq!(json!(p.checks[ci].name), c["name"]);
+            assert_eq!(json!(p.checks[ci].desc), c["desc"]);
+            assert_eq!(json!(p.checks[ci].declared), c["declared"]);
+            assert_eq!(
+                p.checks[ci].count as usize,
+                c["errors"].as_array().unwrap().len()
+            );
+            for (ei, e) in c["errors"].as_array().unwrap().iter().enumerate() {
+                let v = p.error(ci, ei as u64, &flag).unwrap();
+                assert_eq!(json!(v.kind.to_string()), e["kind"]);
+                assert_eq!(json!(v.number), e["num"]);
+                assert_eq!(json!(v.points_um), e["pts"]);
+                assert_eq!(json!(v.bbox_um), e["bbox"]);
+                errors += 1;
+            }
+        }
+        p.unchanged().unwrap();
+        cases += 1;
+    }
+    assert!(cases >= 4 && errors > 1000);
+    println!("RUST ASCII DRC READER: ALL OK ({cases} sources, {errors} records; exact float coordinates and metadata)");
+}
+#[test]
 #[ignore = "run tools/validate_app_drc.py with synthetic native packs"]
 fn packed_geometry_status_and_paged_queries_match_python() {
     let input: Value = serde_json::from_slice(

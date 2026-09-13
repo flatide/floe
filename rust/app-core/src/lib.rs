@@ -23,6 +23,30 @@ pub mod styles;
 pub mod svrf;
 pub mod view;
 
+/// Legacy `%g` diagnostics (six significant digits), not coordinate wire
+/// serialization. Scientific rounding decides the fixed/scientific switch.
+pub fn format_general(value: f64) -> String {
+    let scientific = format!("{value:.5e}");
+    let Some((mantissa, exponent)) = scientific.split_once('e') else {
+        return scientific;
+    };
+    let exponent: i32 = exponent.parse().expect("formatted exponent");
+    if !(-4..6).contains(&exponent) {
+        format!(
+            "{}e{exponent:+03}",
+            mantissa.trim_end_matches('0').trim_end_matches('.')
+        )
+    } else {
+        let precision = (5 - exponent) as usize;
+        let fixed = format!("{value:.precision$}");
+        if precision == 0 {
+            fixed
+        } else {
+            fixed.trim_end_matches('0').trim_end_matches('.').into()
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
     InvalidInput,

@@ -104,6 +104,9 @@ Rust 전환 후 handshake/open/frame/error/timeout/종료까지 headless로 검�
 ASCII DB와 fresh ICE pack 선택, rule/error JSON, declared/실제 count,
 좌표 단위·waive 표시를 보존한다. 기존 `rust/cli/src/drcice.rs`, `drcpack.rs`의
 Rust 구현은 재사용 대상이나 Python `IcePack`과 GUI의 읽기·쓰기 전체 대체는 아니다.
+M2a-11a에서 CLI의 fresh ICE 우선/readonly ASCII fallback과 소수 좌표·목록·JSON을
+이관했다([M2 §20](WEBUI_M2.ko.md#20-m2a-11a-읽기-전용-ascii-drc-코어cli-fallback)).
+웹 ASCII 등록·명시 pack-build 승인 및 review 쓰기는 여전히 별도 단계다.
 
 ### 2.7 svrf — M4 (6개 옵션)
 

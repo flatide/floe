@@ -23,6 +23,8 @@ snapshot `layers_isolated`는 [M2 §18](WEBUI_M2.ko.md#18-m2a-10d1-레이어-격
 M2a-10d2에서 double-click/Frame error/이동 순회와 Restore/Escape를 연결했다.
 CD·live In view 등 종속 UI는 승인+같은 state_rev의 snapshot 후 반영하며,
 불확실한 입력은 재접속 시 재전송하지 않는다. jobdeck 물리 plane 격리는 아직 미지원이다.
+M2a-11a의 ASCII fallback은 코어/CLI에만 추가했다. 웹 actor는 명시 pack 등록을
+유지하며 브라우저의 임의 경로 입력이나 암묵적 index 실행을 허용하지 않는다(M2 §20).
 2026-09-13 M1a-1 `rust/worker-client`와 M1a-2a/b `app/app-core`의 일반 index·info/단일 render/probe를
 구현했다. 현재 호출 계약은 [worker README](../rust/worker-client/README.md),
 [M1a 기록](WEBUI_M1A.ko.md)을 따르며 아래 서비스 전체가 존재하는 것은 아니다.

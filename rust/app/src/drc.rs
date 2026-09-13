@@ -13,8 +13,9 @@ const HELP: &str = "Usage: floe2-web drc RESULTS.db|RESULTS.ice [OPTIONS]
   --svrf-rules FILE       Explicit rules.json metadata for --rules / --errs
 
 Read-only: no automatic indexing, autosave creation, or in-pack writes.
-This stage requires an existing layout-4 .ice pack (fresh beside a .db).
-ASCII fallback and DRC editing/notes are not ported yet.";
+Uses a fresh layout-4 .ice pack when available, otherwise bounded read-only
+ASCII parsing (including fractional coordinates). Stale/corrupt adjacent
+packs are reported but never overwritten. DRC editing/notes are not ported yet.";
 pub struct Command {
     source: Option<PathBuf>,
     list: bool,
@@ -110,6 +111,9 @@ pub fn run(command: Command, cancelled: &AtomicUsize) -> Result<i32> {
         return Ok(0);
     };
     let mut p = open_current(&source, command.reviewer.as_deref(), cancelled)?;
+    for warning in &p.warnings {
+        eprintln!("[drc] {warning}");
+    }
     let metadata = command
         .svrf_rules
         .as_deref()
@@ -118,27 +122,24 @@ pub fn run(command: Command, cancelled: &AtomicUsize) -> Result<i32> {
     let mut out = io::BufWriter::new(io::stdout().lock());
     if command.rules {
         writeln!(out, "[")?;
-        for (i, c) in p.checks.iter().enumerate() {
+        for i in 0..p.check_count() {
             check_cancelled(cancelled)?;
+            let c = p.check(i)?;
             if i > 0 {
                 writeln!(out, ",")?;
             }
             let mut row =
                 serde_json::json!({"name":c.name,"errors":c.count,"waived":p.waived_count(i)?});
             if let Some(m) = &metadata {
-                row["svrf"] = serde_json::to_value(m.detail(&c.name, cancelled)?)
+                row["svrf"] = serde_json::to_value(m.detail(c.name, cancelled)?)
                     .map_err(|e| Error::input(e.to_string()))?;
             }
             json(&mut out, &row)?;
         }
         writeln!(out, "\n]")?;
     } else if let Some(rule) = command.errs {
-        let hits: Vec<_> = p
-            .checks
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| c.name == rule)
-            .map(|(i, _)| i)
+        let hits: Vec<_> = (0..p.check_count())
+            .filter(|&i| p.check(i).is_ok_and(|c| c.name == rule))
             .collect();
         let ci = *hits
             .first()
@@ -158,11 +159,11 @@ pub fn run(command: Command, cancelled: &AtomicUsize) -> Result<i32> {
                 if hit.local > 0 {
                     writeln!(out, ",")?;
                 }
-                let mut row = serde_json::json!({"local":hit.local+1,"global":e.number,"kind":e.kind.to_string(),"status":hit.status,"bbox":p.bbox_um(e.bbox)?.map(rounded)});
+                let mut row = serde_json::json!({"local":hit.local+1,"global":e.number,"kind":e.kind.to_string(),"status":hit.status,"bbox":e.bbox_um.map(rounded)});
                 if let Some(m) = &metadata {
                     let comparison = m
                         .rule(&rule)
-                        .map(|r| r.compare(e.kind, &e.points, p.precision, cancelled))
+                        .map(|r| e.comparison(r, cancelled))
                         .transpose()?
                         .flatten();
                     row["comparison"] = serde_json::to_value(comparison)
@@ -181,14 +182,14 @@ pub fn run(command: Command, cancelled: &AtomicUsize) -> Result<i32> {
         writeln!(
             out,
             "{}: cell {}, precision {}",
-            p.path.display(),
-            p.cell,
-            p.precision
+            p.path().display(),
+            p.cell(),
+            floe_app_core::format_general(p.precision())
         )?;
-        writeln!(out, "{} checks, {} errors", p.checks.len(), p.total)?;
-        for ci in 0..p.checks.len() {
+        writeln!(out, "{} checks, {} errors", p.check_count(), p.total())?;
+        for ci in 0..p.check_count() {
             check_cancelled(cancelled)?;
-            let c = &p.checks[ci];
+            let c = p.check(ci)?;
             writeln!(
                 out,
                 " {:<28} {:6}  {}",
@@ -202,7 +203,7 @@ pub fn run(command: Command, cancelled: &AtomicUsize) -> Result<i32> {
                     let page = p.errors(ci, start, 64, cancelled)?;
                     for hit in page.hits {
                         let e = hit.violation;
-                        let b = p.bbox_um(e.bbox)?;
+                        let b = e.bbox_um;
                         writeln!(
                             out,
                             "   #{:<5} {:<4} ({:.3}, {:.3}) um  {:.3} x {:.3}",

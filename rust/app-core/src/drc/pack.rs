@@ -156,12 +156,12 @@ impl From<Metadata> for Stamp {
         }
     }
 }
-struct Input {
-    file: File,
+pub(super) struct Input {
+    pub(super) file: File,
     stamp: Stamp,
 }
 impl Input {
-    fn open(path: &Path) -> Result<Self> {
+    pub(super) fn open(path: &Path) -> Result<Self> {
         let file = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NONBLOCK)
@@ -175,7 +175,7 @@ impl Input {
             stamp: meta.into(),
         })
     }
-    fn unchanged(&self) -> Result<()> {
+    pub(super) fn unchanged(&self) -> Result<()> {
         if Stamp::from(self.file.metadata()?) != self.stamp {
             return Err(crate::Error::new(
                 crate::ErrorKind::Cache,
@@ -183,6 +183,9 @@ impl Input {
             ));
         }
         Ok(())
+    }
+    pub(super) fn len(&self) -> u64 {
+        self.stamp.len
     }
     fn read(&self, off: u64, out: &mut [u8]) -> Result<()> {
         if off

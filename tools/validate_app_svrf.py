@@ -7,6 +7,7 @@ geometry implementation. All inputs are private, synthetic, and read-only
 during native tests. Rust runs with PATH empty (no Python fallback).
 """
 import ast
+from fractions import Fraction
 import json
 import math
 import os
@@ -65,8 +66,9 @@ def geometry_cases():
     return cases
 
 
-def custom_fixture(work):
-    deck, db = work / "한 글.svrf", work / "한 글.db"
+def custom_fixture(work, fractional=False):
+    stem = "소수 좌표" if fractional else "한 글"
+    deck, db = work / (stem + ".svrf"), work / (stem + ".db")
     source = "LAYER M1 7\nLAYER MAP 8 DATATYPE 3 108\nLAYER M2 108\n"
     source += "A = M1 OR B\nB = C NOT M2\nC = D AND E\nD = E\nE = F\nF = G\nG = A OR MISSING\n"
     rules = [(m.upper(), [s]) for s, m in svrf.MEAS.items() if s not in ("INT", "EXT", "ENC")]
@@ -81,15 +83,20 @@ def custom_fixture(work):
         source += name + " { @ synthetic " + name + "\n  " + "\n  ".join(stmts) + "\n}\n"
     deck.write_text(source)
     cases = geometry_cases()
+    if fractional:
+        cases = [(k, [(x / 8 + 0.0625, y / 8 - 0.1875) for x, y in pts])
+                 for k, pts in cases]
+    coord = lambda v: format(v, ".17g")
     text = "TEST 1000\n"
     for name in [r[0] for r in rules] + ["UNMATCHED", "RANGE"]:
         text += "%s\n%d %d 1\nsynthetic\n" % (name, len(cases), len(cases))
         for i, (kind, pts) in enumerate(cases):
             text += "%s %d %d\n" % (kind, i+1, len(pts) if kind == "p" else len(pts)//2)
             if kind == "p":
-                text += "".join("%d %d\n" % p for p in pts)
+                text += "".join(" ".join(map(coord, p)) + "\n" for p in pts)
             else:
-                text += "".join("%d %d %d %d\n" % (*pts[j], *pts[j+1]) for j in range(0, len(pts), 2))
+                text += "".join(" ".join(map(coord, (*pts[j], *pts[j+1]))) + "\n"
+                                for j in range(0, len(pts), 2))
     db.write_text(text)
     return db, deck
 
@@ -118,17 +125,19 @@ def main():
         generated, deck = work / "generated.db", work / "generated.svrf"
         run([sys.executable, ROOT / "tools/gen_drcdb.py", generated,
              "--checks", "20", "--max-errors", "8", "--zeros", "2", "--svrf", deck])
-        pairs = [custom_fixture(work), (generated, deck)]
+        pairs = [(*custom_fixture(work), True), (generated, deck, True),
+                 (*custom_fixture(work, fractional=True), False)]
         env = dict(os.environ, PATH="", FLOE_REVIEWER="svrf-oracle", TMPDIR=str(work))
         tested = 0
-        for db, deck in pairs:
-            run([INDEX, "drc", db, "--jobs", "2"])
+        for db, deck, packed in pairs:
+            if packed:
+                run([INDEX, "drc", db, "--jobs", "2"])
             side = Path(str(deck) + ".rules.json")
             svrf.write_json(svrf.parse_deck(str(deck)), str(side))
             meta = svrf.load_rules(str(side))
             legacy = Legacy()
             legacy._drc_rmeta = meta
-            pack = drc.IcePack(str(db) + ".ice")
+            pack = drc.IcePack(str(db) + ".ice") if packed else drc.load_ascii(str(db))
             legacy.dbu = 1.0 / pack.precision
             before = fingerprint(work)
             rows = json.loads(run([APP, "drc", db, "--rules", "--svrf-rules", side], env).stdout)
@@ -164,11 +173,16 @@ def main():
                     if expected is not None and expected["metric"] == "area":
                         # Legacy shoelace multiplies absolute f64 coordinates.
                         # Check its floating-point error envelope separately;
-                        # Rust must match translated integer-DBU area, including
-                        # tiny shapes far from the origin, not reproduce loss.
-                        pts = [(round(x*pack.precision), round(y*pack.precision)) for x, y in error.pts]
+                        # Rust must match the source's area, not reproduce
+                        # cancellation. ASCII floats must NOT be rounded into
+                        # pack integers; use exact rational values of the
+                        # parsed floating-point coordinates as their oracle.
+                        pts = ([(round(x*pack.precision), round(y*pack.precision))
+                                for x, y in error.pts] if packed else
+                               [(Fraction(x), Fraction(y)) for x, y in error.pts])
                         twice = sum(x*y1-x1*y for (x, y), (x1, y1) in zip(pts, pts[1:]+pts[:1]))
-                        exact = abs(twice)*0.5/pack.precision/pack.precision
+                        exact = (abs(twice)*0.5/pack.precision/pack.precision if packed
+                                 else float(abs(twice)/2))
                         products = [abs(x*y1) + abs(x1*y) for (x, y), (x1, y1) in
                                     zip(error.pts, error.pts[1:]+error.pts[:1])]
                         envelope = len(pts)*math.ulp(max(products, default=0.0))*4
@@ -188,10 +202,13 @@ def main():
                     tested += 1
             assert len(rows) == len(pack.checks)
             assert fingerprint(work) == before, "native metadata/measurement modified input files"
-            pack.close()
+            if packed:
+                pack.close()
+            else:
+                assert not Path(str(db) + ".ice").exists(), "ASCII fallback built a pack"
         # Non-regular, large, malformed, missing and future sidecars must fail
         # promptly, without changing any existing input or emitting valid rows.
-        db, _ = pairs[0]
+        db, _, _ = pairs[0]
         bad = work / "bad.rules.json"
         fifo = work / "fifo.rules.json"
         os.mkfifo(fifo)
@@ -209,8 +226,8 @@ def main():
             out.truncate(16*1024*1024+1)
         r = run([APP, "drc", db, "--rules", "--svrf-rules", bad], env, False)
         assert not r.stdout and "16 MiB" in r.stderr
-        assert tested > 900, tested
-        print("RUST SVRF METADATA: ALL OK (%d geometry/constraint comparisons, Python GUI oracle, PATH empty)" % tested)
+        assert tested > 1800, tested
+        print("RUST SVRF METADATA: ALL OK (%d pack/fractional ASCII comparisons, Python GUI oracle, PATH empty)" % tested)
 
 
 if __name__ == "__main__":
