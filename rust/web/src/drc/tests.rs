@@ -55,6 +55,9 @@ fn wire_rejects_paths_noncanonical_counters_and_unbounded_reads() {
         json!({"kind":"step","check":"0","backwards":false,"bbox_um":["0","0","-1","1"]}),
         json!({"kind":"measurements","check":"00","error":"0"}),
         json!({"kind":"measurements","check":"0","error":"-1"}),
+        json!({"kind":"records","check":"00","errors":[]}),
+        json!({"kind":"records","check":"0","errors":["00"]}),
+        json!({"kind":"records","check":"0","errors":vec!["0";65]}),
     ] {
         assert!(serde_json::from_value::<Request>(v)
             .unwrap()
@@ -71,6 +74,8 @@ fn wire_rejects_paths_noncanonical_counters_and_unbounded_reads() {
         json!({"kind":"measurements","check":"0","error":1}),
         json!({"kind":"measurements","check":"0","error":"1","path":"/etc/passwd"}),
         json!({"kind":"measurements","check":"0","error":"1","points":[[0,0],[1,1]]}),
+        json!({"kind":"records","check":"0","errors":[0]}),
+        json!({"kind":"records","check":"0","errors":[],"path":"/etc/passwd"}),
     ] {
         assert!(serde_json::from_value::<Request>(v).is_err());
     }

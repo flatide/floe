@@ -17,15 +17,18 @@ pub(crate) fn routes() -> Router<Gate> {
             "/api/v1/drc/{id}/views/{view}/panel",
             get(panel_get).post(panel_set),
         )
+        .merge(super::selection::routes())
 }
-fn failure(code: super::Failure) -> Response {
+pub(super) fn failure(code: super::Failure) -> Response {
     let status = match code {
         "drc_busy" => StatusCode::TOO_MANY_REQUESTS,
         "drc_closed" => StatusCode::GONE,
         "drc_unavailable" => StatusCode::NOT_FOUND,
         "drc_changed_or_corrupt" | "drc_read_error" => StatusCode::UNPROCESSABLE_ENTITY,
-        "drc_read_limit" => StatusCode::PAYLOAD_TOO_LARGE,
-        "drc_context_changed" | "drc_panel_conflict" => StatusCode::CONFLICT,
+        "drc_read_limit" | "drc_selection_limit" => StatusCode::PAYLOAD_TOO_LARGE,
+        "drc_context_changed" | "drc_panel_conflict" | "drc_selection_conflict" => {
+            StatusCode::CONFLICT
+        }
         "drc_cancelled" => StatusCode::REQUEST_TIMEOUT,
         _ => StatusCode::BAD_REQUEST,
     };

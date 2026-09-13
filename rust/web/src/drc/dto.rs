@@ -42,6 +42,10 @@ pub enum Request {
         check: String,
         error: String,
     },
+    Records {
+        check: String,
+        errors: Vec<String>,
+    },
     Focus {
         check: String,
         error: String,
@@ -70,6 +74,12 @@ pub enum Request {
 }
 pub(super) enum Command {
     ValidatePanel(Box<super::panel::Data>),
+    SelectionCandidates {
+        check: Option<usize>,
+        errors: Vec<u64>,
+        bbox_um: Option<[f64; 4]>,
+        waived: Option<bool>,
+    },
     Step(StepRequest),
     Rules {
         start: usize,
@@ -131,7 +141,7 @@ pub(super) fn number(s: &str) -> Result<u64, Failure> {
     }
     Ok(n)
 }
-fn index(s: &str) -> Result<usize, Failure> {
+pub(super) fn index(s: &str) -> Result<usize, Failure> {
     usize::try_from(number(s)?).map_err(|_| "invalid_drc_request")
 }
 fn cap(n: usize, max: usize) -> Result<usize, Failure> {
@@ -141,7 +151,7 @@ fn cap(n: usize, max: usize) -> Result<usize, Failure> {
         Ok(n)
     }
 }
-fn bbox(strings: [String; 4]) -> Result<[f64; 4], Failure> {
+pub(super) fn bbox(strings: [String; 4]) -> Result<[f64; 4], Failure> {
     let mut b = [0.; 4];
     for (out, s) in b.iter_mut().zip(strings) {
         if s.len() > 80 {
@@ -160,6 +170,17 @@ fn bbox(strings: [String; 4]) -> Result<[f64; 4], Failure> {
 impl Request {
     pub(super) fn core(self) -> Result<Command, Failure> {
         Ok(match self {
+            Self::Records { check, errors } => {
+                if errors.len() > floe_app_core::drc::SELECTION_INPUT {
+                    return Err("invalid_drc_request");
+                }
+                Command::SelectionCandidates {
+                    check: Some(index(&check)?),
+                    errors: errors.iter().map(|s| number(s)).collect::<Result<_, _>>()?,
+                    bbox_um: None,
+                    waived: None,
+                }
+            }
             Self::Step {
                 check,
                 backwards,

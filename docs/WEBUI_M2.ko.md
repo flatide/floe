@@ -513,10 +513,65 @@ core 53/app 6/web 19 및 transport 8 테스트, release 번들의 인증 HTTP �
 재확인했다. Rust 1.89 빈 registry 오프라인 테스트와 Linux musl release link도
 통과했다. 기존 native 의존성 경고는 남아 있으며 Linux 실제 실행 PASS는 아니다.
 
-## 11. 다음 경계
+## 11. M2a-8a: 규칙별 오류 선택 집합 코어/API
 
-1. DRC box-select/전체 공간 마커·hover, SVRF metric/type 필터·layer isolate는
+`app-core::drc::Selections`에 규칙별 replace/add/toggle 집합을 두고, 열린 view의
+서버 메모리에 보관한다. focus/마지막 CD/패널 설정과 독립적이며 pack·waive·notes와
+native view를 변경하지 않는다. **이 단계는 API까지이며 박스 선택 UI는 다음 단계다.**
+
+기존 GTK `_esel_apply`와 SPEC-VIEWER를 재확인했다. 박스 선택 대상은 **현재 필터·
+페이지의 오류**이고, 중심점 포함이 아니라 오류 bbox와 선택 박스의 닫힌 교차다.
+전체 pack을 검색하거나 모든 공간 마커를 표시하는 계약이 아니다. 새 코어도 요청에
+명시한 최대64개 local ID만 검사하고 waive 필터→bbox 교차→집합 연산을 수행한다.
+ID 중복은 한 번만 적용하며 toggle도 두 번 뒤집지 않는다. replace는 해당 규칙만
+대체하고 빈 replace는 그 규칙만 비운다. 다른 규칙의 집합은 유지한다.
+
+인증 URI `GET/POST /api/v1/drc/{id}/views/{view}/selection`:
+
+- GET은 `revision`, `view_id`, `state`를 돌려준다. state는 문자열
+  `selection_rev`/`total`, 상수 `limit:5000`, 숫자순 `rules:[{check,errors}]`다.
+  check/local ID도 문자열이며 2^53 초과 ID를 JS number로 축소하지 않는다.
+- POST는 `revision`, `base_selection_rev`, 선택적 `state_rev`, `body`다.
+  body는 `{kind:"apply",check,errors,mode:"replace"|"add"|"toggle",bbox_um?,waived?}`
+  또는 `{kind:"clear_all"}`이다. bbox는 유한하고 순서가 맞는 µm 문자열4개이며
+  점/선 박스도 허용한다. bbox를 보내면 state_rev가 필수다. 경로/임의 필드는 거부한다.
+- pack/view/source/revision 및 주어진 state_rev를 actor 읽기 전후 확인한다.
+  기존 단일 DRC actor·취소·pending4를 쓰고 HTTP reactor에서 pack을 decode하지 않는다.
+  ID/pack 손상/만료/인증 오류는 집합을 변경하지 않는다. GET은 메모리 상태만 읽는다.
+- selection revision은 commit 락 안에서 다시 검사한다. 성공한 **no-op도** revision을
+  소비한다. 같은 base의 동시 두 요청 중 하나만 성공하고 나머지는409다. panel의
+  전체 스냅샷 저장과 달리 toggle 명령은 재전송하지 않는다. 응답 유실은 GET으로
+  실제 상태를 확인해야 하며 네트워크 단절 후 commit 취소를 보장하지 않는다.
+- 전체 규칙 합계5000개는 명시적인 서비스 자원 한계다. 넘으면413이며 이전 집합과
+  revision을 그대로 보존한다. 조용히 prefix로 자르지 않는다. GTK의 선언된 선택
+  상수가 모든 기존 경로에서 강제됐다는 뜻은 아니다. 빈 규칙 항목도 남기지 않아
+  map과 최대 응답이 유계다(최악 ID/5000규칙 JSON도1MiB 미만 테스트).
+
+기존 읽기 API에 `{kind:"records",check,errors:[...]}`를 추가했다. 명시한 최대64개
+오류의 정렬/중복 제거된 metadata만 반환하므로 다음 UI의 선택 목록 복원에 쓴다.
+containing block은 검사·decode하지만 vertex 배열을 복제/전송하지 않는다.
+큰 5000점 polygon도 point_count/bbox 등만 반환한다. metadata-only를 무I/O나
+전체 RSS 상한으로 해석하지 않는다. 캐시 포맷·native wire/renderd 버전은 그대로다.
+
+검증: Rust 집합/상한 원자성·u64 ID·취소·손상·bbox 경계·동시 CAS 단위 테스트와
+실제 인증 HTTP를 통과했다. Python 오라클은 모드3종×waive3종×bbox4종을 비교하고,
+전체130개 규칙에서도 지정64개만 선택하는지, 규칙별 보존/중복 toggle/no-op retry,
+실제 동시 HTTP의200/409, 새 view 초기화, truncate 시 변경 거부를 단언한다.
+전후 panel/render 상태와 원본 파일 바이트·mtime는 불변이다.
+
+2026-09-13: core56/app6/web23/transport8 테스트, fmt 및 전환 패키지 strict clippy
+(`--no-deps`), release 인증 HTTP·ES2017 UI 회귀 통과. Rust1.89 빈 registry 오프라인
+테스트와 Linux musl release link도 통과했다. 전체 `sh tools/validate_rust.sh`는
+`RUST VALIDATION: ALL OK`이며 KLayout13 PX+2 phase-exact+14 style도 통과했다.
+기존 native 경고는 남아 있다. 새 선택 UI의 브라우저 QA나 현장 G2 완료는 아니다.
+
+## 12. 다음 경계
+
+1. DRC 두 클릭 box-select/Shift·Ctrl/선택 집합 표시·hover와 현재 규칙의 live
+   In view 필터, SVRF metric/type 필터·layer isolate는
    아직 미이관이다. 손으로 그리는 ruler/격리와 Escape 우선순위도 M4에서 확장한다.
+   현재 웹의 In view는 전체 규칙의 고정 시점 검색이며 GTK의 현재 규칙·뷰 추종
+   필터와 다르다. 현재 페이지 마커 정책 자체를 전체 pack 마커로 확대하지 않는다.
 2. ASCII/index 흐름·기존 notes·상세 측정/룰 매핑은 각각 parity gate와 함께 확장.
 3. 공유는 설계/DRC에 묶인 읽기 capability, 발급/만료/폐기·follow/independent
    state를 별도 구현·검증. 아직 shares=false, loopback-only다.

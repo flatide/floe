@@ -136,12 +136,14 @@ impl Data {
 pub(crate) struct Panel {
     revision: u64,
     data: Option<Data>,
+    pub(super) groups: super::selection::Groups,
 }
 impl Default for Panel {
     fn default() -> Self {
         Self {
             revision: 1,
             data: None,
+            groups: super::selection::Groups::default(),
         }
     }
 }

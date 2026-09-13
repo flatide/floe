@@ -14,6 +14,7 @@ import tempfile
 from validate_web_cli import APP, INDEX, RENDERD, ROOT, Client, read_json, wait
 from validate_app_drc import fingerprint
 from validate_drc_ice import DB
+from validate_web_drc_selection import validate_selection
 from floe import drc
 
 
@@ -131,6 +132,8 @@ def main(fixture):
             client.call("POST", "/api/v1/drc/unknown/read", {}, code=401)
             client.call("GET", "/api/v1/drc/unknown/views/unknown/panel", code=401)
             client.call("POST", "/api/v1/drc/unknown/views/unknown/panel", {}, code=401)
+            client.call("GET", "/api/v1/drc/unknown/views/unknown/selection", code=401)
+            client.call("POST", "/api/v1/drc/unknown/views/unknown/selection", {}, code=401)
             client.login()
             assert client.call("GET", "/api/v1/capabilities")["drc"] is True
             catalog = wait(lambda: (lambda d: d if d["phase"] == "ready" else None)(
@@ -207,6 +210,10 @@ def main(fixture):
             read(dict(rules, limit=65), 400)
             view_state = client.call("GET", "/api/v1/view")["view"]
             focused = dict(context, state_rev=view_state["state_rev"])
+            selection_path = panel_path.removesuffix("panel") + "selection"
+            selection_rev = validate_selection(client, selection_path, endpoint, context, expected, view_state)
+            assert client.call("GET", panel_path) == changed, "groups changed panel settings"
+            assert fingerprint(data) == before, "groups changed review files"
             ci = next(i for i, c in enumerate(expected) if c["errors"])
             first_error = expected[ci]["errors"][0]
             focus_request = dict(kind="focus", check=str(ci), error=first_error["local"], fit=True)
@@ -349,12 +356,19 @@ def main(fixture):
             read(rules, 409)
             client.call("GET", panel_path, code=409)
             save_panel(panel, base="3", code=409)
+            client.call("GET", selection_path, code=409)
+            client.call("POST", selection_path, dict(revision=catalog["revision"], base_selection_rev=str(selection_rev), body=dict(kind="clear_all")), 409)
             fresh_path = panel_path.replace(opened["view_id"], reopened["view_id"])
             assert client.call("GET", fresh_path)["state"] == dict(panel_rev="1", body=None), "new view inherited old panel"
+            new_selection = selection_path.replace(opened["view_id"], reopened["view_id"])
+            empty_groups = client.call("GET", new_selection)
+            assert empty_groups["state"] == dict(selection_rev="1", total="0", limit=5000, rules=[])
             context["view_id"] = reopened["view_id"]
             # External truncation gives a safe, path-free error, not SIGBUS.
             packed.write_bytes(b"truncated")
             assert read(dict(kind="rule", check="0"), 422)["error"] == "drc_changed_or_corrupt"
+            client.call("POST", new_selection, dict(revision=catalog["revision"], base_selection_rev="1", body=dict(kind="apply", check=str(chosen), errors=["0"], mode="toggle")), 422)
+            assert client.call("GET", new_selection) == empty_groups, "corrupt-pack selection committed"
             client.call("DELETE", "/api/v1/session", code=204)
             out, err = proc.communicate(timeout=15)
             assert proc.returncode == 0, (out, err)

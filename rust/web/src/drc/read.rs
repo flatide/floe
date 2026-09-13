@@ -60,6 +60,18 @@ pub(super) fn execute(p: &mut Pack, request: Command, stop: &AtomicUsize) -> Res
     check_cancelled(stop)?;
     p.unchanged()?;
     let value = match request {
+        Command::SelectionCandidates {
+            check,
+            errors,
+            bbox_um,
+            waived,
+        } => {
+            let hits = check
+                .map(|ci| p.selection_candidates(ci, &errors, bbox_um, waived, stop))
+                .transpose()?
+                .unwrap_or_default();
+            json!({"rows": hits.iter().map(|h| info_hit(p, h)).collect::<Result<Vec<_>>>()?})
+        }
         Command::ValidatePanel(data) => {
             data.validate_pack(p)?;
             json!({})

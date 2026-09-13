@@ -3,12 +3,14 @@
 mod local;
 mod measure;
 mod pack;
+mod selection;
 pub use local::{open_current, reviewer_tag, waive_paths};
 pub use measure::{cd_segments, CdSegment};
 pub use pack::{
     Check, Cursor, Hit, InfoHit, Pack, Page, PointPage, RecordInfo, StepCursor, StepPage,
     StepRequest, Violation,
 };
+pub use selection::{SelectionMode, Selections, SELECTION_INPUT, SELECTION_ITEMS};
 
 use crate::{Error, ErrorKind};
 pub const MAGIC: &[u8; 8] = b"FLOEICE\0";

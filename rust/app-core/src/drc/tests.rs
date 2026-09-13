@@ -188,6 +188,61 @@ fn large_record_metadata_and_point_pages_do_not_clone_the_whole_record() {
     );
 }
 #[test]
+fn selection_candidates_are_page_bounded_and_do_not_clone_coordinates() {
+    let f = Fixture::new(&bytes(130));
+    let stop = AtomicUsize::new(0);
+    let mut p = Pack::open(&f.path, &stop).unwrap();
+    // One point touches the left bbox corner; its marker center is elsewhere.
+    let hits = p
+        .selection_candidates(
+            1,
+            &[129, 63, 63, 64, 0],
+            Some([0.63, 0., 0.63, 0.]),
+            None,
+            &stop,
+        )
+        .unwrap();
+    assert_eq!(hits.iter().map(|h| h.local).collect::<Vec<_>>(), vec![63]);
+    assert!(p
+        .selection_candidates(1, &[63], Some([0.633, 0., 0.64, 0.003]), None, &stop)
+        .unwrap()
+        .is_empty());
+    // A wide box only returns the provided page members, not the whole rule.
+    assert_eq!(
+        p.selection_candidates(1, &[129, 63, 63, 64, 0], None, None, &stop)
+            .unwrap()
+            .iter()
+            .map(|h| h.local)
+            .collect::<Vec<_>>(),
+        vec![0, 63, 64, 129]
+    );
+    assert!(p
+        .selection_candidates(1, &[0; 65], None, None, &stop)
+        .is_err());
+    assert!(p
+        .selection_candidates(1, &[u64::MAX], None, Some(true), &stop)
+        .is_err());
+    assert!(p.selection_candidates(3, &[], None, None, &stop).is_err());
+    assert!(p
+        .selection_candidates(1, &[0], Some([0., 0., -1., 1.]), None, &stop)
+        .is_err());
+    stop.store(1, Ordering::Relaxed);
+    assert_eq!(
+        p.selection_candidates(1, &[0], None, None, &stop)
+            .unwrap_err()
+            .kind,
+        ErrorKind::Cancelled
+    );
+    stop.store(0, Ordering::Relaxed);
+    fs::write(&f.path, b"truncated").unwrap();
+    assert!(p.selection_candidates(1, &[0], None, None, &stop).is_err());
+    let large = Fixture::new(&geometry_bytes(1, 5000));
+    let mut p = Pack::open(&large.path, &stop).unwrap();
+    let metadata = p.selection_candidates(1, &[0], None, None, &stop).unwrap();
+    assert_eq!(metadata[0].record.points, 5000);
+    assert_eq!(p.decoded_blocks, 1);
+}
+#[test]
 fn circular_step_matches_filtered_file_order_across_blocks_and_resumes() {
     let mut b = bytes(130);
     let offset = b.len() - 136 + 4 * 8;
