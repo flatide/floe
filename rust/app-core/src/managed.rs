@@ -105,6 +105,20 @@ impl Resources {
     pub fn read(self: &Arc<Self>, caches: impl IntoIterator<Item = PathBuf>) -> Result<Permit> {
         self.acquire(Usage::default(), keys(caches)?, false)
     }
+    /// One DRC reader owns metadata, a coordinate LRU and bounded replies.
+    /// Reserve its CPU even while idle, like a render worker. decoded_mb is the
+    /// existing shared read-memory admission pool, NOT a process RSS ceiling.
+    pub fn drc(self: &Arc<Self>, files: impl IntoIterator<Item = PathBuf>) -> Result<Permit> {
+        self.acquire(
+            Usage {
+                cpu_slots: 1,
+                decoded_mb: 256,
+                ..Usage::default()
+            },
+            keys(files)?,
+            false,
+        )
+    }
     /// Hold this permit across prepare/start/poll/cancel AND child reap. The
     /// ordinary PreparedIndex still owns the cross-process exclusive OS lock.
     pub fn index(
@@ -304,6 +318,28 @@ impl ManagedDataset {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn drc_read_reservation_is_symmetric_and_shared_with_render() {
+        let r = Resources::new(Limits::default()).unwrap();
+        let drc = r.drc([]).unwrap();
+        assert_eq!(r.usage().cpu_slots, 1);
+        assert_eq!(r.usage().decoded_mb, 256);
+        assert_eq!(r.usage().workers, 0);
+        assert!(r
+            .acquire(
+                Usage {
+                    cpu_slots: 2,
+                    workers: 1,
+                    decoded_mb: 2048,
+                    ..Usage::default()
+                },
+                BTreeSet::new(),
+                false
+            )
+            .is_err());
+        drop(drc);
+        assert_eq!(r.usage(), Usage::default());
+    }
     #[test]
     fn leases_are_atomic_and_aliases_share_identity() {
         let dir = std::env::temp_dir().join(format!("floe-managed-{}", std::process::id()));

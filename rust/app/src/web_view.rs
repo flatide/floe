@@ -47,6 +47,8 @@ const HELP: &str = "Usage: floe2-web view SOURCE [SOURCE ...] [OPTIONS]
   --png / --raw            Frame transfer (default raw)
   --frame-cache on|off      Retained frame reuse + layout margin (default on)
   --root DIRECTORY         Additional approved dependency root, repeatable
+  --drc PACK.ice           Read-only DRC service bound to the first source
+  --drc-waives FILE        Explicit existing waive sidecar (requires --drc)
   --port N                 Loopback port (default random)
   --no-open                Do not launch a browser; use the private session file
   --firefox PATH           Explicit Firefox binary (or FLOE_FIREFOX_BIN)
@@ -57,7 +59,9 @@ This development command does not replace the GTK floe2 launcher.
 No automatic indexing or Python fallback. Paths are local-launcher inputs only.
 Binds only 127.0.0.1; stops on Ctrl+C or End session.
 Managed capacity: 16 CPU slots, 4 reserved for foreground; index jobs <=12.
-Decode+raster reservation must fit 16 slots. Refinement off; deck margin unsupported.
+Decode+raster reservation must fit 16 slots (DRC reserves 1 extra slot + 256 MiB).
+DRC requires an existing native ICE pack; no implicit review sidecar/ASCII fallback.
+Refinement off; deck margin unsupported.
 The session link is a one-time credential; do not share or log it.";
 
 #[derive(Debug)]
@@ -77,6 +81,8 @@ pub struct Command {
     no_open: bool,
     session_file: Option<PathBuf>,
     firefox: Option<PathBuf>,
+    drc: Option<PathBuf>,
+    drc_waives: Option<PathBuf>,
 }
 pub fn parse(args: &[String]) -> Result<Command> {
     let mut c = Command {
@@ -95,6 +101,8 @@ pub fn parse(args: &[String]) -> Result<Command> {
         no_open: false,
         session_file: None,
         firefox: None,
+        drc: None,
+        drc_waives: None,
     };
     let mut i = 1;
     let mut positional = false;
@@ -221,8 +229,13 @@ pub fn parse(args: &[String]) -> Result<Command> {
             "--root" => c.roots.push(PathBuf::from(value()?)),
             "--session-file" => c.session_file = Some(PathBuf::from(value()?)),
             "--firefox" => c.firefox = Some(PathBuf::from(value()?)),
+            "--drc" => c.drc = Some(PathBuf::from(value()?)),
+            "--drc-waives" => c.drc_waives = Some(PathBuf::from(value()?)),
             _ => return Err(Error::input(format!("unsupported view option: {key}"))),
         }
+    }
+    if c.drc_waives.is_some() && c.drc.is_none() {
+        return Err(Error::input("--drc-waives requires --drc"));
     }
     if c.sources.is_empty() || c.sources.len() > 32 {
         return Err(Error::input("view requires 1..32 registered sources"));
@@ -308,6 +321,7 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
     }
     let resources = Resources::new(Limits::default())?;
     drop(resources.render(&options)?);
+    let mut drc_roots = c.roots.clone();
     let mut roots = c.roots;
     for source in &c.sources {
         roots.push(
@@ -317,9 +331,26 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
                 .to_owned(),
         );
     }
+    for path in c.drc.iter().chain(c.drc_waives.iter()) {
+        drc_roots.push(
+            cache::absolute(path)?
+                .parent()
+                .ok_or_else(|| Error::input("DRC path has no parent"))?
+                .to_owned(),
+        );
+    }
     roots.sort();
     roots.dedup();
     let scope = AccessScope::new(&roots)?;
+    // An explicit review pack must not broaden a deck's TC dependency roots.
+    // Only --root grants extra roots to both registrations.
+    let drc_scope = if c.drc.is_some() {
+        drc_roots.sort();
+        drc_roots.dedup();
+        Some(AccessScope::new(&drc_roots)?)
+    } else {
+        None
+    };
     let sources = c
         .sources
         .iter()
@@ -332,8 +363,8 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
     let indexer = Indexer::discover(&Discovery::local()?)?;
     let service = Service::start_configured(
         sources,
-        resources,
-        options,
+        Arc::clone(&resources),
+        options.clone(),
         indexer,
         ControllerOptions {
             margin_prefetch: c.frame_cache,
@@ -344,9 +375,24 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
         "levels":c.levels.map_or_else(||json!({"mode":"all"}),|ids|json!({"mode":"only","ids":ids.iter().map(i64::to_string).collect::<Vec<_>>()})),"body":c.initial});
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, c.port))?;
     listener.set_nonblocking(true)?;
-    let (gate, secret) =
+    let (mut gate, secret) =
         Gateway::with_startup(listener.local_addr()?, Arc::clone(&service), request)
             .map_err(Error::input)?;
+    if let Some(path) = &c.drc {
+        let drc = floe_web::drc::Service::start(
+            &resources,
+            drc_scope.expect("DRC-specific registration scope"),
+            path,
+            c.drc_waives.as_deref(),
+            service.catalog()["sources"][0]["source_id"]
+                .as_str()
+                .unwrap(),
+        )?;
+        // Check combined capacity before publishing a URL or starting a browser.
+        // The actual view acquires its own reservation when opened by the UI.
+        drop(resources.render(&options)?);
+        Gateway::attach_drc(&mut gate, drc).map_err(Error::input)?;
+    }
     let url = format!("{}/#bootstrap={}", gate.origin(), secret.expose());
     let session = SessionFile::create(
         c.session_file,
@@ -422,9 +468,13 @@ mod tests {
             "view a --no-open=yes",
             "view a --label-font-px 97",
             "view a --label-font-px 5",
+            "view a --drc-waives review",
         ] {
             assert!(parse(&args(s)).is_err(), "{s}");
         }
         assert!(parse(&args("view --help")).unwrap().help);
+        let c = parse(&args("view a --drc b.ice --drc-waives side")).unwrap();
+        assert_eq!(c.drc, Some(PathBuf::from("b.ice")));
+        assert_eq!(c.drc_waives, Some(PathBuf::from("side")));
     }
 }

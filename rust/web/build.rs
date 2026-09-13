@@ -15,6 +15,10 @@ fn main() {
         "src/service.rs",
         "src/owner.rs",
         "src/transport.rs",
+        "src/drc/mod.rs",
+        "src/drc/dto.rs",
+        "src/drc/http.rs",
+        "src/drc/read.rs",
     ] {
         println!("cargo:rerun-if-changed={path}");
         hash.update(path.as_bytes());

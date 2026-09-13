@@ -276,6 +276,26 @@ async fn bootstrap_host_origin_csrf_and_logout() {
         false
     );
     assert!(!r.headers.contains_key("access-control-allow-origin"));
+    assert_eq!(
+        serde_json::from_str::<Value>(&r.body).unwrap()["drc"],
+        false
+    );
+    let empty = s.request("GET", "/api/v1/drc", &h, "").await;
+    assert_eq!(empty.status, 200);
+    assert_eq!(
+        serde_json::from_str::<Value>(&empty.body).unwrap(),
+        json!({"drc":null})
+    );
+    assert_eq!(
+        s.request("POST", "/api/v1/drc/id/read", &h, "{}")
+            .await
+            .status,
+        403
+    );
+    assert_eq!(
+        s.request("GET", "/api/v1/drc", &[h[0]], "").await.status,
+        401
+    );
     let r = s
         .request(
             "GET",

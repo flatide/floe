@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 mod assets;
 pub mod auth;
+pub mod drc;
 mod layer_catalog;
 mod operations;
 pub mod origin;

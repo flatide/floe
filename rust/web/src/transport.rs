@@ -127,6 +127,7 @@ pub struct Gateway {
     pub(crate) stopping: watch::Sender<bool>,
     pub(crate) view: Option<Arc<Attachment>>,
     pub(crate) service: Option<Arc<crate::service::Service>>,
+    pub(crate) drc: Option<Arc<crate::drc::Service>>,
     startup: Option<serde_json::Value>,
     pub(crate) output_bytes: Arc<Semaphore>,
     pub(crate) encoders: Arc<Semaphore>,
@@ -151,6 +152,7 @@ impl Gateway {
                 stopping,
                 view: None,
                 service: None,
+                drc: None,
                 startup: None,
                 output_bytes: Arc::new(Semaphore::new(crate::view::OUTPUT_BUDGET)),
                 encoders: Arc::new(Semaphore::new(2)),
@@ -225,6 +227,9 @@ impl Gateway {
         Ok((gate, secret))
     }
     fn stop_services(&self) {
+        if let Some(drc) = &self.drc {
+            drc.request_stop();
+        }
         if let Some(service) = &self.service {
             service.request_stop();
         }
@@ -239,6 +244,22 @@ impl Gateway {
             encoders: 2 - self.encoders.available_permits(),
             sockets: SOCKETS as usize - self.sockets.available_permits(),
         }
+    }
+    /// Attach a locally authorized read-only pack before publishing the gateway.
+    /// Its source binding must be one of the owner's registered sources.
+    pub fn attach_drc(gate: &mut Gate, drc: Arc<crate::drc::Service>) -> Result<(), String> {
+        let gate = Arc::get_mut(gate).ok_or("gateway already published")?;
+        if gate.drc.is_some()
+            || !gate.service.as_ref().is_some_and(|s| {
+                s.catalog()["sources"]
+                    .as_array()
+                    .is_some_and(|rows| rows.iter().any(|r| r["source_id"] == drc.source_id))
+            })
+        {
+            return Err("invalid DRC source registration".into());
+        }
+        gate.drc = Some(drc);
+        Ok(())
     }
     fn authenticate(&self, headers: &HeaderMap, csrf: &str) -> Result<SessionId, StatusCode> {
         let cookie = origin::cookie(headers, &self.cookie_name).ok_or(StatusCode::UNAUTHORIZED)?;
@@ -264,6 +285,7 @@ pub fn router(gate: Gate) -> Router {
         .route("/api/v1/view", get(current_view))
         .route("/api/v1/startup", get(startup))
         .merge(crate::owner::routes())
+        .merge(crate::drc::routes())
         .merge(crate::assets::routes())
         .fallback(|| async { error(StatusCode::NOT_FOUND) })
         .layer(DefaultBodyLimit::max(BODY_BYTES))
@@ -362,7 +384,7 @@ async fn capabilities(State(gate): State<Gate>, headers: HeaderMap) -> Response 
     }
     let render = gate.service.is_some() || gate.view.is_some();
     Json(json!({"protocol":1,"bundle":BUNDLE,"stage":if gate.service.is_some(){"owner-service"}else if render{"view-stream"}else{"transport"},
-        "render":render,"catalog":gate.service.is_some(),"index":gate.service.is_some(),"shares":false,"uploads":false,"control_bytes":CONTROL_BYTES,
+        "render":render,"catalog":gate.service.is_some(),"index":gate.service.is_some(),"drc":gate.drc.is_some(),"shares":false,"uploads":false,"control_bytes":CONTROL_BYTES,
         "frame_bytes":crate::view::PACKET_BYTES,"frame_credit":1,"pending_frames":1}))
     .into_response()
 }
@@ -584,6 +606,18 @@ pub async fn serve(
         .await;
         if stopped.is_err() {
             return Err(io::Error::other("owner service shutdown deadline exceeded"));
+        }
+    }
+    if let Some(drc) = &gate.drc {
+        if timeout(Duration::from_secs(4), async {
+            while !drc.is_finished() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_err()
+        {
+            return Err(io::Error::other("DRC service shutdown deadline exceeded"));
         }
     }
     result

@@ -28,6 +28,7 @@ cargo build --offline --locked --release -p floe-app -p floe-index -p floe-rende
 ./target/release/floe2-web view /path/to/deck.jb --level 1,3 --mode chip
 ./target/release/floe2-web drc /path/to/results.db.ice --rules
 ./target/release/floe2-web drc /path/to/results.db --errs M1.WIDTH --floe-reviewer reviewer1
+./target/release/floe2-web view /path/to/design.oas --drc /path/to/results.db.ice
 ```
 
 `cargo`는 `rust/`에서 실행해야 그 안의 `.cargo/config.toml`(vendor, musl linker)이
@@ -73,7 +74,10 @@ cargo build --offline --locked --release -p floe-app -p floe-index -p floe-rende
   초기 표시 옵션이다. 전체 GTK 단축키·query/ruler parity는 아직 개발 중이다.
 - `drc`는 기존 pack(또는 .db 옆의 fresh pack)의 `--rules`/`--errs`/`--list`를
   스트리밍한다. 기존 per-reviewer waive를 읽되 source/pack/autosave를 생성·수정하지 않는다.
-  ASCII fallback·DRC 웹/공유·편집/notes는 아직 미이관이다([M2 기록](../../docs/WEBUI_M2.ko.md)).
+  웹 `view --drc PACK.ice [--drc-waives FILE]`는 첫 소스에 묶인 읽기 전용 API를
+  등록한다(별도 1 CPU + 256 MiB admission). 현재 DRC 브라우저 패널은 다음 단계다.
+  웹에는 ambient reviewer 조회가 없으며 명시 sidecar만 읽는다. ASCII fallback·
+  공유·편집/notes는 아직 미이관이다([M2 기록](../../docs/WEBUI_M2.ko.md)).
 - `clip/...`와 batch/mosaic/DRC export는 미이관 오류를 낸다.
   자동 Python fallback이나 기존 launcher/portable 교체는 없다.
 

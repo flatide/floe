@@ -14,6 +14,7 @@ M1b-3에서 Rust `view` 실행 명령과 번들 Canvas 기본 뷰어를 연결�
 M1b-4a에서 layout margin prefetch/crop과 라벨 포함 pan 재사용을 연결했다.
 M1b-4b에서 drag·fill/width/font 편집·기본 GTK 단축키를 연결했다.
 M2a-1에서 기존 DRC ICE pack 읽기·공간 페이지·waive 조회 CLI를 이관했다.
+M2a-2에서 DRC 전용 actor·자원 예약과 등록 ID 기반 인증 읽기 API를 연결했다.
 전체 조작 parity와 M0/Firefox/ETX 현장 검증은 아직 완료되지 않았다.
 상세 범위는 [M1b 기록](WEBUI_M1B.ko.md)과 [M2 기록](WEBUI_M2.ko.md). 여기의 M0~M5는 **웹 전환 단계**이며
 jobdeck/occupancy의 같은 이름 단계와 별개다. 개발 기준과 합류 규칙은 §11.
@@ -22,6 +23,9 @@ jobdeck/occupancy의 같은 이름 단계와 별개다. 개발 기준과 합류 
 
 ## 0. 결정 로그 (사용자 확정 사항)
 
+- 2026-09-13: 현재 TeeBox 현장에서 audit/Firefox·ETX 실행이 불가능하다.
+  M0 현장 감사와 G2는 **보류**로 두고 로컬 구현·회귀 검증은 계속한다.
+  로컬 Chrome 검증을 현장 PASS로 대신하지 않으며 GTK launcher는 유지한다.
 - 2026-08-28: 궁극 목표는 서버-클라이언트 모델. 당장은 데스크톱 앱
   배포가 필요하다.
 - 2026-08-28: 주 작업자 흐름은 **외부망 portal에서 작업 선택 →
@@ -460,5 +464,6 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
   PNG/raw·최초 한 번의 설정 적용·재접속/종료를 검증했다. M1b-4a에서 layout
   margin의 픽셀 parity·16px pan·라벨/실패 fallback을 검증했다. M1b-4b에서
   drag·스타일/글꼴·기본 단축키와 실제 Chrome 조작을 검증했다. M2a-1에서 기존
-  DRC pack/waive 읽기 CLI·페이지 조회를 검증했다. DRC 웹 연결·공유는 다음이다.
+  DRC pack/waive 읽기 CLI·페이지 조회를 검증했다. M2a-2는 DRC actor/인증 API이며
+  DRC 브라우저 패널·공유는 다음이다.
   CLI 전체/웹 전환 완료가 아니며 GTK/실측 브랜치는 유지한다.
