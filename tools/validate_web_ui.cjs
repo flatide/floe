@@ -14,7 +14,7 @@ for (const file of ['protocol.js', 'gestures.js', 'panel-state.js', 'drc.js', 'a
 for (const newer of ['const x = a?.b;', 'const x = 1n;', 'const x = {...a};']) {
     assert.throws(() => acorn.parse(newer, options), 'ES2017 gate accepted newer syntax');
 }
-for (const file of ['protocol.test.cjs', 'gestures.test.cjs', 'client.test.cjs', 'drc.test.cjs', 'drc-navigation.test.cjs', 'panel-state.test.cjs']) {
+for (const file of ['protocol.test.cjs', 'gestures.test.cjs', 'client.test.cjs', 'drc.test.cjs', 'drc-navigation.test.cjs', 'drc-markers.test.cjs', 'panel-state.test.cjs']) {
     const run = spawnSync(process.execPath, [path.join(ui, file)], {stdio: 'inherit', timeout: 15000});
     assert.equal(run.status, 0, file + ': ' + run.error);
 }

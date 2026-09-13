@@ -1,15 +1,34 @@
 'use strict';
 const assert = require('node:assert/strict'), gestures = require('./gestures.js');
 function target() {const listeners={};return {listeners,focus(){},addEventListener(k,fn){(listeners[k] ||= []).push(fn);},emit(k,v={}){for(const fn of listeners[k]||[]){fn(v);}}};}
-const viewport=target(), win=target(), doc=target(), frames=new Map(), previews=[], pans=[];
+const viewport=target(), win=target(), doc=target(), frames=new Map(), previews=[], pans=[], clicks=[];
 let seq=0,stamp='1',ready=true,cursor=false;
 const g=gestures.bind({viewport,window:win,document:doc,stamp:()=>stamp,ready:()=>ready,
     dimensions:()=>({pixels:[800,600],dpr:2}),cursor:v=>{cursor=v;},
-    preview:(p,paint)=>previews.push({p,paint}),pan:n=>pans.push(n),
+    preview:(p,paint)=>previews.push({p,paint}),pan:n=>pans.push(n),click:(...c)=>clicks.push(c),
     requestAnimationFrame:fn=>{frames.set(++seq,fn);return seq;},cancelAnimationFrame:id=>frames.delete(id)});
 function event(x,y,button=0,buttons=1){return {clientX:x,clientY:y,button,buttons,preventDefault(){}};}
-viewport.emit('mousedown',event(100,100));win.emit('mousemove',event(103,102));win.emit('mouseup',event(103,102));
+viewport.emit('mousedown',event(100,100));win.emit('mousemove',event(103,102));win.emit('mouseup',event(103,102,0,0));
 assert.equal(pans.length,0);assert.equal(cursor,false);assert.equal(frames.size,0);
+assert.deepEqual(clicks,[[103,102,false]]);
+viewport.emit('mousedown',event(100,100));win.emit('mouseup',{...event(100,100,0,0),detail:2});
+assert.deepEqual(clicks.at(-1),[100,100,true]);
+for(const modifier of ['ctrlKey','metaKey','altKey','shiftKey']){
+    for(const phase of ['press','release']){
+        const down=event(100,100),up=event(100,100,0,0);(phase==='press'?down:up)[modifier]=true;
+        viewport.emit('mousedown',down);win.emit('mouseup',up);assert.equal(clicks.length,2,modifier+' '+phase);
+    }
+}
+viewport.emit('mousedown',event(100,100,1,4));win.emit('mouseup',event(100,100,1,0));assert.equal(clicks.length,2);
+viewport.emit('mousedown',event(100,100,0,3));win.emit('mouseup',event(100,100,0,0));assert.equal(clicks.length,2);
+viewport.emit('mousedown',event(100,100));win.emit('mouseup',event(100,100,0,4));assert.equal(clicks.length,2);
+viewport.emit('mousedown',event(100,100));viewport.emit('mousedown',event(100,100,1,5));
+win.emit('mouseup',event(100,100,1,1));win.emit('mouseup',event(100,100,0,0));assert.equal(clicks.length,2);
+viewport.emit('mousedown',event(100,100));win.emit('mousemove',event(101,101,0,3));
+win.emit('mouseup',event(101,101,0,0));assert.equal(clicks.length,2);
+// Returning to the origin after crossing the pan threshold is NOT a click.
+viewport.emit('mousedown',event(100,100));win.emit('mousemove',event(110,110));win.emit('mouseup',event(100,100,0,0));
+assert.equal(clicks.length,2);assert.equal(pans.length,0);
 viewport.emit('mousedown',event(100,100));
 for(let i=1;i<=100;i++){win.emit('mousemove',event(100+i,100+i/2));}
 assert.equal(frames.size,1);assert.equal(pans.length,0);
@@ -25,9 +44,10 @@ for(const kind of ['blur','resize','pagehide','stale','buttons','hidden']){
     else {win.emit(kind);}
     assert.equal(g.active(),false,kind);assert.equal(frames.size,0,kind);
     win.emit('mouseup',event(170,180));assert.equal(pans.length,1,kind);
+    assert.equal(clicks.length,2,kind);
 }
 ready=false;viewport.emit('mousedown',event(0,0));assert.equal(g.active(),false);
 ready=true;viewport.emit('mousedown',event(0,0,1,4));win.emit('mouseup',event(20,20,0,0));assert(g.active());
 win.emit('mousemove',event(1000,-1000,1,4));win.emit('mouseup',event(1000,-1000,1,0));
 assert.deepEqual(pans.at(-1),{kind:'pan',x:-1,y:-1,snap:false});
-console.log('WEB GESTURES: ALL OK (rAF pacing, one release input, jitter, bounds, lost capture/stale/hidden)');
+console.log('WEB GESTURES: ALL OK (rAF pacing, one release input, click/double-click/modifiers/chords, jitter, bounds, lost capture/stale/hidden)');

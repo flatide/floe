@@ -26,6 +26,7 @@
         let ruleStart = '0', ruleNext = null, errorStart = '0', errorNext = null, query = null;
         let jumpScale = null, zoomLock = false, painting = null, lastProjection = null, lastSize = null;
         let jumpActive = false, focusVisible = false, stepBusy = false, stepContinuation = null, rowFocus = false;
+        let markerHits = [], hitStamp = '';
         let restoring = false;
         const persistence = o.stateStore.bind({http: o.http, protocol: P,
             setTimeout: function (fn, delay) { return setTimeout(fn, delay); },
@@ -79,28 +80,40 @@
             el('drc-step-continue').disabled = !available || stepBusy || !stepContinuation;
         }
         function paintLater() {
+            markerHits = []; hitStamp = '';
             if (stopped || painting !== null) { return; }
             painting = o.window.requestAnimationFrame(function () { painting = null; paint(lastProjection, lastSize); });
         }
+        function marker(r, xy, side, w, h) {
+            if (!xy.every(Number.isFinite)) { return; }
+            const x = Math.round(xy[0]), y = Math.round(xy[1]), half = Math.floor(side / 2);
+            if (x - half >= w || x + half < 0 || y - half >= h || y + half < 0) { return; }
+            ctx.fillStyle = r.status === 1 ? '#70da9a' : '#ff6969'; ctx.fillRect(x - half, y - half, side, side);
+            markerHits.push({x: x, y: y, row: r});
+        }
         function paint(p, size) {
-            lastProjection = p; lastSize = size;
-            if (!ctx || !p || !size || !current() || !el('drc-markers').checked || (!rows.length && (!selected || !focusVisible))) { overlay.hidden = true; return; }
+            markerHits = []; hitStamp = ''; lastProjection = p; lastSize = size;
+            const c = current();
+            if (!ctx || !p || !size || !c || !el('drc-markers').checked || (!rows.length && (!selected || !focusVisible))) { overlay.hidden = true; return; }
             const w = size.pixels[0], h = size.pixels[1]; P.pixels(w, h);
             if (overlay.width !== w || overlay.height !== h) { overlay.width = w; overlay.height = h; }
             overlay.style.width = w / size.dpr + 'px'; overlay.style.height = h / size.dpr + 'px';
             overlay.style.left = size.left + 'px'; overlay.style.top = size.top + 'px'; overlay.hidden = false;
+            hitStamp = contextKey(c) + ':' + c.state.state_rev;
             ctx.clearRect(0, 0, w, h); ctx.lineWidth = 2;
             rows.forEach(function (r) {
                 if (focusVisible && selected && r.check === selected.check && r.local === selected.local) { return; }
                 const b = bbox(r.bbox_um), xy = point(p, b[0] * .5 + b[2] * .5, b[1] * .5 + b[3] * .5);
-                if (!xy.every(Number.isFinite) || xy[0] < -8 || xy[0] > w + 8 || xy[1] < -8 || xy[1] > h + 8) { return; }
-                ctx.fillStyle = r.status === 1 ? '#70da9a' : '#ff6969'; ctx.fillRect(Math.round(xy[0]) - 3, Math.round(xy[1]) - 3, 7, 7);
+                marker(r, xy, 7, w, h);
             });
             if (!selected || !focusVisible) { return; }
             const b = bbox(selected.bbox_um), a = point(p, b[0], b[3]), z = point(p, b[2], b[1]);
             if (![a[0], a[1], z[0], z[1]].every(Number.isFinite) || z[0] < -9 || a[0] > w + 9 || z[1] < -9 || a[1] > h + 9) { return; }
             const color = selected.status === 1 ? '#70da9a' : '#ff6969'; ctx.strokeStyle = color; ctx.fillStyle = color;
-            if (z[0] - a[0] < 9 && z[1] - a[1] < 9) { ctx.fillRect(Math.round((a[0] + z[0]) / 2) - 4, Math.round((a[1] + z[1]) / 2) - 4, 9, 9); return; }
+            // Keep a visible anchor when selection reveals an outline. The
+            // second release of a double-click must still have a drawn target.
+            marker(selected, [(a[0] + z[0]) / 2, (a[1] + z[1]) / 2], 9, w, h);
+            if (z[0] - a[0] < 9 && z[1] - a[1] < 9) { return; }
             if (!pointsReady) { ctx.setLineDash([4, 3]); ctx.strokeRect(a[0], a[1], z[0] - a[0], z[1] - a[1]); ctx.setLineDash([]); return; }
             ctx.beginPath();
             for (let i = 0; i < points.length; i += 2) {
@@ -109,6 +122,27 @@
             }
             if (selected.kind === 'p') { ctx.closePath(); ctx.globalAlpha = .25; ctx.fill(); ctx.globalAlpha = 1; }
             ctx.stroke();
+        }
+        function click(clientX, clientY, twice) {
+            const c = current();
+            if (!c || !c.connected || c.pending || restoring || overlay.hidden || !el('drc-markers').checked ||
+                hitStamp !== contextKey(c) + ':' + c.state.state_rev || !markerHits.length ||
+                !Number.isFinite(clientX) || !Number.isFinite(clientY)) { return false; }
+            // Use the *painted* overlay's DOM rectangle, including fractional
+            // CSS origins/DPR/margin translations. Do not unproject through a
+            // newer requested viewport or issue an all-error spatial scan.
+            const rect = overlay.getBoundingClientRect();
+            if (!(rect.width > 0 && rect.height > 0) || clientX < rect.left || clientX >= rect.right || clientY < rect.top || clientY >= rect.bottom) { return false; }
+            let best = null, distance = 36 + 1;
+            markerHits.forEach(function (hit) {
+                const dx = (hit.x / overlay.width * rect.width + rect.left) - clientX;
+                const dy = (hit.y / overlay.height * rect.height + rect.top) - clientY, d = dx * dx + dy * dy;
+                if (d <= 36 && d < distance) { best = hit.row; distance = d; }
+            });
+            if (!best) { return false; }
+            // Like GTK's canvas marker pick, a single click only selects,
+            // even in jump mode. A double click explicitly requests focus.
+            cancelStep(); rowFocus = false; select(best, !!twice, !!twice); return true;
         }
         function clearSelection() {
             cancelStep(); jumpActive = focusVisible = rowFocus = false;
@@ -368,6 +402,7 @@
             });
         }
         function contextChanged() {
+            markerHits = []; hitStamp = '';
             const c = current(), key = contextKey(c);
             if (key !== bound) {
                 persistence.close(); cancelAll(); bound = key; restoring = false; rule = null; ruleRows = []; rows = []; ruleStart = errorStart = '0'; query = null;
@@ -414,7 +449,7 @@
         el('drc-markers').onchange = function () { paintLater(); savePanel(); };
         el('drc-toggle').onclick = function () { shown = !shown; el('drc-panel').hidden = !shown; el('drc-toggle').setAttribute('aria-expanded', String(shown)); o.resize(); savePanel(); };
         el('drc-reload').onclick = restoreState;
-        return {init: refresh, contextChanged: contextChanged, paint: paint, clear: clearSelection,
+        return {init: refresh, contextChanged: contextChanged, paint: paint, click: click, clear: clearSelection,
             key: function (key) {
                 if (key === 'Escape') { return endFocus(); }
                 if ((key === 'n' || key === 'p') && rule && current()) { step(key === 'p', false, false); return true; }

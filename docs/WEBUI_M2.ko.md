@@ -365,9 +365,51 @@ Rust 1.89 오프라인 단위/transport 테스트도 통과했다. 최종 버튼
 Chrome에서 Previous error→130번 행 focus→n→1번 행 focus로 재확인했다.
 각 QA 서버는 End session으로 exit0 종료했다. 기존 native 경고는 남아 있다.
 
-## 8. 다음 경계
+## 8. M2a-6: 표시 마커 클릭과 pan 분리
 
-1. marker hit-test/box-select, SVRF metric/type 필터·layer isolate·CD overlay는
+캔버스에 **실제로 그린** 마커의 가까운 중심을 6 CSS px 안에서 고른다.
+현재 페이지 최대64개와 페이지 밖 선택 오류 최대1개만 대상이다. 보이지 않는
+오류를 전수 검색하거나 native geometry pick을 호출하지 않는다. In view의
+전체 규칙 검색/continuation과 마커 클릭은 별개다.
+
+- 마우스 왼쪽 단일 클릭은 선택/상세/outline만 바꾸고, 이미 이동 모드여도
+  native view를 옮기지 않는다. 이는 GTK `_drc_pick`의 캔버스 클릭 계약이다.
+  두 번 클릭하면 기존 Rust focus/goto를 요청한다. 목록 클릭의 이동 모드와
+  다르며, n/p·Escape·zoom-lock 계약은 §7 그대로다.
+- 선택 오류에도 9 device px 중심 표식을 남긴다. 큰 outline이 나타난 뒤에도
+  같은 위치의 두 번째 클릭 대상이 **눈에 보이도록** 하기 위함이다. 큰 jump 오류의
+  중심 표식을 생략하는 GTK와는 이 표현이 다르다. 설계 픽셀은 변경하지 않는다.
+- 표시한 overlay의 실제 DOM 위치/크기로 CSS 좌표를 비교한다. devicePixelRatio,
+  fractional origin, margin crop/free-pan 이동을 반영하며 새 요청의 bbox를 이용해
+  역변환하지 않는다. 가까운 마커가 우선이고 동률은 그린 순서가 우선이다.
+- marker off/화면 밖/소스·revision 변경/복원 중/연결 끊김/미처리 view edit일 때는
+  선택하지 않는다. 목록·선택이 바뀌면 다음 paint까지 이전 hit 목록은 무효다.
+  선택을 바꿀 때 이전 step/geometry/focus를 취소하고 늦은 응답을 버린다.
+- release-only pan이 8 CSS px 문턱을 한 번 넘었으면 원점에 돌아와도 클릭하지
+  않는다. 중간 버튼·복수 버튼·Ctrl/Shift/Alt/Meta 클릭과 blur/resize/취소도
+  마커 선택으로 바꾸지 않는다. browser MouseEvent.detail을 사용하므로 별도의
+  double-click timer는 없으며 드래그 중에는 네트워크 입력을 보내지 않는다.
+
+ES2017/Node 게이트: 가까운 마커/반경 경계/완전히 잘린 마커, 2^53 초과 ID,
+CSS origin·DPR·이동된 crop, 한 번/두 번 클릭과 이동 모드, 보이지 않거나 stale한
+hit 무효화, 늦은 좌표 응답 취소, 공간 검색 0회, app→gesture→panel 연결을 고정한다.
+Chrome/DPR2 실제 QA에서 마커 51 단일 click은 gen4/484.599µm를 유지했고,
+같은 위치 double-click은 gen6/3.70000µm로 이동했다. 10% margin pan에서도
+outline/중심 표식이 함께 이동했다. Fit 후 이동 모드에서 다른 마커를 클릭하면
+선택만 51→39로 바뀌고 gen8/484.599µm를 유지했다. Markers off 후 이전 위치를
+클릭해도 선택은 그대로였다. 콘솔 warn/error는 없었고 End session은 exit0이었다.
+이 결과를 Firefox/ETX/G2 또는 큰 DRC 데이터의 성능 검증으로 대신하지 않는다.
+
+2026-09-13: 전체 `sh tools/validate_rust.sh`는 `RUST VALIDATION: ALL OK`,
+KLayout 13 PX + 2 phase-exact + 14 style도 통과했다. 마지막 복수 버튼 보완까지
+ES2017/JS·전환 패키지 strict clippy(`--no-deps`)·fmt·최종 native build/인증 HTTP를
+재확인했고, Rust 1.89 오프라인 테스트와 최종 Linux musl release link도 통과했다.
+workspace 의존 parser/tiler의 기존 clippy 경고는 별개이며 전체 warning-free를
+주장하지 않는다. pack/캐시 포맷과 renderd wire/버전은 변경하지 않았다.
+
+## 9. 다음 경계
+
+1. DRC box-select/전체 공간 마커·hover, SVRF metric/type 필터·layer isolate·CD overlay는
    아직 미이관이다. Escape의 ruler/격리 우선순위도 해당 기능과 함께 확장한다.
 2. ASCII/index 흐름·기존 notes·상세 측정/룰 매핑은 각각 parity gate와 함께 확장.
 3. 공유는 설계/DRC에 묶인 읽기 capability, 발급/만료/폐기·follow/independent

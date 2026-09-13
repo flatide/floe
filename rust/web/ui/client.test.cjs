@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const P = require('./protocol.js');
-const DRC = require('./drc.js'), drcDisplays = [], observers = [];
+const DRC = require('./drc.js'), drcDisplays = [], drcClicks = [], observers = [];
 const nodes = new Map(), images = [], sockets = [], urls = new Set(), draws = [], requests = [];
 const listeners = {}, docListeners = {};
 function listen(target,k,fn){const old=target[k];target[k]=old?(event)=>{old(event);fn(event);}:fn;}
@@ -74,7 +74,8 @@ class Image {
     constructor(){this.naturalWidth=100;this.naturalHeight=80;images.push(this);}
 }
 const window={FloeProtocol:P,FloeGestures:require('./gestures.js'),FloeDRC:{...DRC,bind(o){
-    const panel=DRC.bind(o),paint=panel.paint;panel.paint=(p,s)=>{drcDisplays.push({p,s});paint(p,s);};return panel;
+    const panel=DRC.bind(o),paint=panel.paint;panel.paint=(p,s)=>{drcDisplays.push({p,s});paint(p,s);};
+    const click=panel.click;panel.click=(...v)=>{drcClicks.push(v);return click(...v);};return panel;
 }},FloePanelState:require('./panel-state.js'),ResizeObserver:class {constructor(fn){this.fn=fn;observers.push(this);}observe(e){this.target=e;}disconnect(){this.target=null;}},devicePixelRatio:1,
     addEventListener:(k,f)=>listen(listeners,k,f),setTimeout,requestAnimationFrame:fn=>setTimeout(fn,0),cancelAnimationFrame:clearTimeout};
 const storage=new Map();
@@ -201,6 +202,9 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     const dragEdits=()=>second.sent.filter(m=>m.type==='view.set').length;
     const beforeDrag=dragEdits(),beforeDragDraws=draws.length;
     const mouse=(x,y)=>({button:0,buttons:1,clientX:x,clientY:y,preventDefault(){}});
+    node('viewport').mousedown(mouse(20,20));listeners.mouseup({...mouse(20,20),buttons:0});
+    node('viewport').mousedown(mouse(20,20));listeners.mouseup({...mouse(20,20),buttons:0,detail:2});
+    assert.deepEqual(drcClicks,[[20,20,false],[20,20,true]]);assert.equal(dragEdits(),beforeDrag);
     node('viewport').mousedown(mouse(20,20));listeners.mousemove(mouse(33,31));
     await wait(()=>node('canvas').style.left==='13px');
     assert.deepEqual(DRC.point(drcDisplays.at(-1).p,0,0),[-24.0625,91]);
@@ -219,6 +223,7 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     await wait(()=>node('canvas').style.left==='22px');listeners.blur();
     assert.equal(node('canvas').style.left,'0px');assert.equal(dragEdits(),beforeDrag+1);
     listeners.mouseup(mouse(42,41));assert.equal(dragEdits(),beforeDrag+1,'blur left a late mouseup edit');
+    assert.equal(drcClicks.length,2,'pan or cancelled drag became a DRC click');
     // Panel/element resize, including a height change without window.resize:
     // keep old pixels/overlay centered, request native dimensions exactly once.
     const beforeResize=dragEdits();viewportSize=[120,90];observers[0].fn();

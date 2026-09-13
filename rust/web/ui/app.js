@@ -576,7 +576,10 @@
         requestAnimationFrame: function (fn) { return window.requestAnimationFrame(fn); },
         cancelAnimationFrame: function (id) { window.cancelAnimationFrame(id); },
         preview: function (p, paint) { dragShift = p; if (paint) { present(); } },
-        cursor: function (active) { viewport.style.cursor = active ? 'grabbing' : ''; }, pan: nav});
+        cursor: function (active) { viewport.style.cursor = active ? 'grabbing' : ''; }, pan: nav,
+        // DRC owns display-space marker hits. Native geometry queries remain
+        // disabled until the expected/actual query-scene contract is wired.
+        click: function (x, y, twice) { if (drcPanel) { drcPanel.click(x, y, twice); } }});
     el('index').onclick = function () {
         try { submitOperation({kind: 'index', source_id: el('source').value, levels: levels(), options: {jobs: Number(el('index-jobs').value), force: el('index-force').checked, lod: el('index-lod').checked, occupancy: el('index-occupancy').checked}}).catch(report); }
         catch (e) { report(e); }

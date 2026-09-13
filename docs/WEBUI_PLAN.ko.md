@@ -20,6 +20,7 @@ M2a-4a에서 view별 DRC 패널 상태의 서버 메모리 보존·revision 충�
 M2a-4b에서 유계 브라우저 저장 큐·새로고침/재접속 복원을 연결했다.
 M2a-5a에서 현재 규칙/필터의 유계 순회 API와 좌표 slice 읽기를 추가했다.
 M2a-5b에서 페이지 횡단 순회·click/이동 모드·Escape와 해당 상태 복원을 연결했다.
+M2a-6에서 표시된 DRC 마커의 단일/이중 클릭을 release-only pan과 분리해 연결했다.
 전체 조작 parity와 M0/Firefox/ETX 현장 검증은 아직 완료되지 않았다.
 상세 범위는 [M1b 기록](WEBUI_M1B.ko.md)과 [M2 기록](WEBUI_M2.ko.md). 여기의 M0~M5는 **웹 전환 단계**이며
 jobdeck/occupancy의 같은 이름 단계와 별개다. 개발 기준과 합류 규칙은 §11.
@@ -471,6 +472,7 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
   drag·스타일/글꼴·기본 단축키와 실제 Chrome 조작을 검증했다. M2a-1에서 기존
   DRC pack/waive 읽기 CLI·페이지 조회를 검증했다. M2a-2는 DRC actor/인증 API,
   M2a-3는 읽기 패널·focus·overlay, M2a-4는 서버 상태 보존·브라우저 복원,
-  M2a-5는 현재 규칙 내 유계 순회 API/UI와 선택/이동 모드다.
+  M2a-5는 현재 규칙 내 유계 순회 API/UI와 선택/이동 모드,
+  M2a-6은 화면에 그린 DRC 마커의 클릭 선택/이동이다.
   공유와 고급 DRC 조작은 남아 있다.
   CLI 전체/웹 전환 완료가 아니며 GTK/실측 브랜치는 유지한다.
