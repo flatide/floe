@@ -4,9 +4,9 @@
 M2 공유 권한 추가와 실제 브라우저 pack-build 승인 클릭은 승인 대기이며,
 M0/G2·M3 현장 Firefox/ETX는 사용자 요청대로 보류다. 이 경계를 우회하지 않고
 독립적인 로컬 native 이관을 진행한다. M4 전체 완료나 GTK 은퇴를 뜻하지 않는다.
-현재는 §5의 **Rust 계산 기반 수동 ruler**까지 연결했다. §1~4의 미연결
-표기는 각 선행 단계 당시의 범위다. 선택 도형 간 자동 gap ruler·통합 CD 순서,
-clip과 전체 조작 수용은 남아 있다.
+현재는 §6의 **선택 bbox 자동 gap과 수동/auto/CD 통합 ruler 순서**까지 연결했다.
+§1~5의 미연결 표기는 각 선행 단계 당시의 범위다. clip/내보내기와 전체 조작
+수용은 남아 있다.
 
 ## 1. M4a-1: 표시 scene에 고정한 native pick/snap
 
@@ -536,3 +536,90 @@ Rust 앱과 embedded UI bundle을 재빌드한다.
 - Rust 1.89.0에서도 app6·core94·web35·transport8을 통과했고 Linux musl
   release 앱의 x86-64 static-pie 교차 빌드를 확인했다. 기존 dependency warning은
   남는다. Linux 실제 실행·브라우저 시각/조작 및 TeeBox 수용은 이 결과에 포함하지 않는다.
+
+## 6. M4a-6: 선택 bbox 자동 gap과 통합 ruler
+
+GTK `_measure_selection`의 nearest-neighbour 규칙을 Rust로 이관했다. 선택한
+두 개 이상의 도형에서 `r`/Ruler로 진입하면 각 bbox의 가장 가까운 이웃을 고르고,
+중복 쌍을 합친 뒤 선택 index 순서·수평→수직 순서로 떨어진 축의 간격만 측정한다.
+동률은 먼저 선택된 이웃, 닿거나 겹친 축은0개다. 겹치는 다른 축은 그 교집합의
+중간점, 겹치지 않으면 두 bbox 중심의 중간점에 치수선을 놓는다. **다각형 윤곽 간
+최단 거리나 union span이 아니다.** UI에 bbox 측정임을 명시한다.
+
+### 계산·표시 경계
+
+- 기존 owner WebSocket `view.measure_selection`의 body는 `anchor`와
+  `boxes_dbu:[[x0,y0,x1,y1],…]`다. 최대64개, 좌표는 canonical i64 문자열이고
+  뒤집힌 bbox·추가 필드·잘못된 타입을 거부한다. 기존 seq/view/connection 검증과
+  표시 ACK+writer receipt·controller current anchor 검증을 동일하게 적용한다.
+- bbox는 **이미 접수한 선택 주석**이다. 서버는 해당 bbox가 원본 도형인지 다시
+  검색하지 않으며 새 geometry 권한을 부여하지 않는다. 브라우저는 Inspector의
+  유효 선택 snapshot만 전송한다. layout pick은 그대로 exact scene 제약을 따른다.
+  jobdeck geometry pick을 새로 지원한다는 뜻이 아니다.
+- `measure_selection.result`는 seq/view/epoch/anchor와 `segments`를 반환한다.
+  각 segment의 endpoints_dbu/Δx·Δy µm/distance_um 문자열 형식은 §5와 같다.
+  최대4032 bbox 비교·128개 segment로 유계이며 새 worker query/render·파일 I/O·
+  서버 주석 history는 없다. owner 인증·listener·공유 권한·native wire도 그대로다.
+- i64 bbox 합과 차이는 i128로 먼저 계산한다. 중간점은 정확한1/4 DBU 정수로
+  저장하고 `.25/.5/.75` 문자열을 보존한다. 따라서2^53 위의1 DBU 간격이나
+  i64 양끝 평균을 절대좌표의 f64 반올림으로 잃지 않는다. 최종 µm 거리와 browser
+  Canvas 투영은 여전히 f64다. 임의 정밀도 화면 투영·contour 측정을 주장하지 않는다.
+
+### 조작과 비동기 순서
+
+- mode에 다시 들어가 선택이2개 이상이면 이전 auto set을 제거하고 새 측정을
+  요청한다. 수동 ruler는 유지한다. 선택이0~1개이면 기존 auto set도 유지한다(GTK).
+  매 hover/pan에서 자동 gap을 다시 계산하지 않는다.
+- 요청은 최신1개·8초 timeout이다. 선택 내용/순서, 표시 anchor, view/connection,
+  모드 종료·취소가 바뀌면 늦은 결과를 폐기한다. 오류/timeout은 명시 안내하며
+  이전 결과를 새 측정처럼 되살리지 않는다. 완료 auto는 수동과 같이 world 주석으로
+  pan/zoom에 남고 view/dataset/worker 변경·종료에서 해제된다.
+- 수동(최대256), auto(최대128), CD(최대3)를 하나의 생성 순서에 둔다. `k`/Undo는
+  가장 나중 항목을 삭제한다. `Shift+K`/Clear와 mode 밖 ruler Escape는 전체를
+  지운다. pending point → ruler mode → 완료 rulers의 Escape 순서는 유지한다.
+  DRC box mode의 Escape와 CD 전용 삭제 버튼은 각각 기존 목적을 유지한다.
+- auto 요청은1개 pending 슬롯, CD jump는 최대3개 pending 슬롯으로 순서를
+  예약한다(상태줄 ruler 수는 이 예약도 포함). 결과가 도착하면 **같은 위치**에서
+  실제 개수로 교체한다. 대기 중 더 나중에 만든 수동 ruler보다 뒤로 옮기지 않는다.
+  pending auto/CD를 삭제하면 해당 요청을 무효화한다. CD 미완료 상태의 `k`는
+  기존 의미대로 그 pending CD 묶음 전체를 취소한다. 복원 중 CD는 기존 보호를
+  유지하고, 복원 완료 후 삭제하도록 명시 안내한다.
+- 수동/auto/CD 및 미리보기를 기존 ruler Canvas의 **한 번의 label 배치**로 그린다.
+  CD의 µm→DBU 투영은 표시 프레임의 DBU를 쓰며14 CSS px offset·DPR/crop·clipping은
+  공통 renderer가 맡는다. DRC canvas는 marker/윤곽/box만 그린다. CD 숨김은 유지한다.
+  작은 창에서 충돌 없는 라벨 자리가 없을 수 있으므로 panel의 텍스트 값도 남긴다.
+- 기존 local UI/theme·인증·정적 자산 구조를 재사용했다. 새 npm/vendor 의존성,
+  hosting, public endpoint, 원본/캐시 변경은 없다. native renderer 버전0.12.87은
+  유지하고 앱/embedded bundle을 재빌드한다.
+
+### 검증과 남은 범위
+
+- 단위: 이웃 동률·중복·순서, 겹침/접촉/축퇴 bbox, 대각선 교차 중간점, 음수,
+  i64 극단의1 DBU 간격·반 DBU, canonical/bounds/count 오류를 고정했다.
+- `validate_worker_queries.py`가 GTK 파일에서 **순수 `_measure_selection` 함수만
+  AST로 추출**해23개 고정·seeded 입력(0~64개 bbox)의 오라클을 생성한다. 실제
+  owner socket/Rust 결과의 모든 치수선 끝점·순서·거리를 비교한다. GTK/Python은
+  개발 gate에서만 사용하고 앱 실행 경로에는 추가하지 않았다.
+- `WEB SELECTION RULERS: ALL OK`를 필수 marker로 추가했다. 표시 ACK 이전·pan
+  이후 stale 요청 거부, 추가 query/render0, 입력 오류, 기존 index/summary bytes·mtime
+  불변과 worker 임시 파일 회수를 함께 검사한다.
+- ES2017/DOM·Canvas 하네스는 auto 교체/보존, 취소·timeout·위조/지연 응답,
+  혼합 생성 순서, CD 비동기/복원 순서·숨김, 한 번의 label pass·단위 투영을 확인한다.
+  실제 DRC 모듈의 독립/공통 history 경로를 모두 실행한다.
+- clip·overlay/export·수동/auto 주석의 새로고침 복원·전체 조작 parity는 아직 남는다.
+  실제 browser 시각/조작, 현장 Firefox/ETX, pack-build 승인 클릭, 공유 권한은
+  별도 보류/승인 대기다. M4 전체 완료나 GTK 기본값 교체를 선언하지 않는다.
+
+검증 결과(2026-09-14): app6·app-core96·web36·transport8, scoped fmt/strict
+clippy, ES2017와 전체 UI 테스트, 실제 native1/controller2/owner WS5개가 통과했다.
+전체 `sh tools/validate_rust.sh`도 `RUST VALIDATION: ALL OK`이며 jobdeck80·renderer46,
+KLayout13 PX +2 phase-exact +14 style의 jobs1/8 검증을 포함한다. 이후 추가한
+실제 app.js의 Inspector→auto gap→공통 history 연결 검사도 전체 UI 재실행으로 통과했다.
+Rust1.89.0에서 app6/core96/web36/transport8을 재검증했고 macOS release와
+Linux x86-64 musl static-pie 교차 빌드도 통과했다. Linux 실행과 실제 브라우저·
+TeeBox 수용은 이 결과에 포함하지 않는다. 기존 의존성 경고는 남는다.
+
+다음 독립 단계는 일반 layout의 exact clip CLI다. 기존 native clip은 full depth·
+cut0이며 jobdeck 미지원이다. Rust process client의 private artifact/timeout·종료,
+앱의 source/cache 경로 보호·원자적 게시를 연결하고 Region XOR·jobs 바이트 게이트로
+검증한다. 이 단계에 웹 download·공유 권한·GTK 기본값 교체를 섞지 않는다.

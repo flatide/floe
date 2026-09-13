@@ -41,7 +41,8 @@ M4a-2에서 표시 frame/worker·revision에 고정한 로컬 controller query�
 M4a-3에서 기존 owner WebSocket에 표시 ACK/연결별 query와 안전한 결과 DTO를 연결했다.
 M4a-4에서 브라우저 도형 선택/overlap 순환·modifier 선택·스냅 프로브와 stale 검사를 연결했다.
 M4a-5에서 Rust 좌표·거리 계산과 두 점 수동 ruler/Shift·snap·미리보기·삭제를 연결했다.
-선택 간 자동 gap ruler·CD 통합 순서, clip과 실제 브라우저 수용은 남아 있다([M4 기록](WEBUI_M4.ko.md)).
+M4a-6에서 Rust 선택 bbox 자동 gap과 수동/auto/CD 생성 순서·삭제·라벨 배치를 통합했다.
+clip/내보내기와 실제 브라우저 수용은 남아 있다([M4 기록](WEBUI_M4.ko.md)).
 전체 조작 parity와 M0/Firefox/ETX 현장 검증은 아직 완료되지 않았다.
 상세 범위는 [M1b 기록](WEBUI_M1B.ko.md)과 [M2 기록](WEBUI_M2.ko.md). 여기의 M0~M5는 **웹 전환 단계**이며
 jobdeck/occupancy의 같은 이름 단계와 별개다. 개발 기준과 합류 규칙은 §11.

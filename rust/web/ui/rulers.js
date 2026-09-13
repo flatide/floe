@@ -1,7 +1,27 @@
-/* ES2017 CD presentation only. Distances/geometry come from Rust; projection
+/* ES2017 ruler history and presentation. Distances/geometry come from Rust; projection
  * uses the displayed frame, never the pending requested viewport. */
 (function (root) {
     'use strict';
+    // A null group reserves an asynchronous action's creation order. Resolving
+    // it in place must not move it above a newer manual annotation.
+    function history() {
+        let entries = [], changed = function () {};
+        function set(kind, values, replace) {
+            const at = replace ? entries.length : entries.findIndex(function (e) { return e.kind === kind; });
+            const before = at < 0 ? entries.length : at;
+            const index = entries.slice(0, before).filter(function (e) { return e.kind !== kind; }).length;
+            entries = entries.filter(function (e) { return e.kind !== kind; });
+            entries.splice.apply(entries, [index, 0].concat(values.map(function (value) { return {kind:kind, value:value}; })));
+            changed();
+        }
+        return {entries:function () { return entries.slice(); }, set:set,
+            push:function (kind, value) { entries.push({kind:kind,value:value}); changed(); },
+            pop:function (kind) {
+                for (let i=entries.length-1;i>=0;--i) { if (!kind || entries[i].kind===kind) { const e=entries.splice(i,1)[0];changed();return e; } } return null;
+            },
+            clear:function (kind) { entries=kind?entries.filter(function (e) { return e.kind!==kind; }):[];changed(); },
+            watch:function (fn) { changed=fn; }};
+    }
     function decode(v, target, P) {
         if (!v || v.check !== target.check || v.local !== target.error || !Array.isArray(v.segments) || v.segments.length > 3) { throw new Error('Invalid CD response'); }
         P.counter(v.global);
@@ -108,6 +128,6 @@
         });
         ctx.restore();
     }
-    const api = {decode: decode, offset: offset, project: project, clipped: clipped, labelSpot: labelSpot, paint: paint};
+    const api = {history: history, decode: decode, offset: offset, project: project, clipped: clipped, labelSpot: labelSpot, paint: paint};
     if (typeof module === 'object' && module.exports) { module.exports = api; } else { root.FloeRulers = api; }
 }(typeof window === 'object' ? window : this));

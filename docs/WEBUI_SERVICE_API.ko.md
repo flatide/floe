@@ -44,8 +44,9 @@ M4a-3은 기존 인증된 owner WebSocket의 `view.query`/`view.query.cancel`에
 layout snapshot query capability는 true, deck은 false다. 표시 ACK+write receipt,
 연결별 결과·정수 문자열 DTO는 M4 §3이 기준이다. REST query·공유 권한은 추가하지 않았다.
 브라우저 pick/snap은 M4a-4, Rust 좌표 계산 기반 수동 ruler와 owner `view.measure`는
-M4a-5에서 연결했다. 자동 gap ruler/clip과 실제 브라우저 수용은 별도이며,
-클라이언트의 표시/DPR/최신 입력 검사는 M4 §4/5를 따른다.
+M4a-5에서 연결했다. M4a-6의 owner `view.measure_selection`은 같은 표시 receipt로
+최대64개 bbox 주석의 자동 gap을 계산한다(geometry 재검색/새 권한 없음).
+clip과 실제 브라우저 수용은 별도이며, 표시/DPR/최신 입력·응답 검사는 M4 §4~6을 따른다.
 2026-09-13 M1a-1 `rust/worker-client`와 M1a-2a/b `app/app-core`의 일반 index·info/단일 render/probe를
 구현했다. 현재 호출 계약은 [worker README](../rust/worker-client/README.md),
 [M1a 기록](WEBUI_M1A.ko.md)을 따르며 아래 서비스 전체가 존재하는 것은 아니다.

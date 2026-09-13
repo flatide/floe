@@ -12,6 +12,7 @@
     let gesture = null, dragShift = null, lastPlacement = null;
     let drcPanel = null, displayProjection = null, frozenProjection = null;
     let inspector = null, measurement = null, pickedPairs = [];
+    const rulerHistory = window.FloeRulers.history();
     let ackedFrames = {foreground: null, margin: null};
     const sessionKey = 'floe-session:' + location.origin;
     let auth = null, stopped = false, socket = null, epoch = '', state = null;
@@ -626,9 +627,7 @@
             return;
         }
         if (key === 'r' && drcPanel && drcPanel.boxActive()) { drcPanel.key('e'); }
-        const measuring = measurement && measurement.active();
         if (measurement && !(drcPanel && drcPanel.boxActive()) && measurement.key(key)) {
-            if ((key === 'K' || (key === 'Escape' && !measuring)) && drcPanel) { drcPanel.key('K'); }
             event.preventDefault(); return;
         }
         if (drcPanel && drcPanel.key(key)) { event.preventDefault(); return; }
@@ -706,6 +705,7 @@
     const sizeObserver = typeof window.ResizeObserver === 'function' ? new window.ResizeObserver(resized) : null;
     if (sizeObserver) { sizeObserver.observe(viewport); }
     drcPanel = window.FloeDRC.bind({document: document, window: window, protocol: P, http: http,
+        history:rulerHistory, rulerKey:function (key) { return measurement && !drcPanel.boxActive() && measurement.key(key); },
         stateStore: window.FloePanelState, rulers: window.FloeRulers, groups: window.FloeDRCGroups, builds: window.FloeDRCBuild, cursor: reviewCursor,
         context: function () { return !stopped && state && currentId ? {id: currentId, source: currentSource, state: state,
             connected: !!epoch && !!socket && socket.readyState === WebSocket.OPEN, pending: !!inflight || queue.length > 0 || !!dragShift} : null; },
@@ -715,6 +715,8 @@
         context: queryContext, send: send, layers: highlightPicked, now: function () { return Date.now(); },
         setTimeout: setTimeout, clearTimeout: clearTimeout});
     measurement = window.FloeMeasure.bind({document: document, window: window, protocol: P, query: window.FloeQuery, rulers: window.FloeRulers,
+        history:rulerHistory, selection:function () { return inspector.selection(); },
+        popCD:function (all) { return drcPanel.key(all?'K':'k'); }, cdBusy:function () { return drcPanel.rulersBusy(); },
         context: queryContext, send: send, now: function () { return Date.now(); }, setTimeout: setTimeout, clearTimeout: clearTimeout,
         modeChanged: function () {
             if (measurement && measurement.active()) { if (drcPanel.boxActive()) { drcPanel.key('e'); } inspector.interrupt(); }

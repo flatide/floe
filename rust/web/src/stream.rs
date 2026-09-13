@@ -126,6 +126,13 @@ enum Control {
         view_id: String,
         body: Box<query::MeasureRequest>,
     },
+    #[serde(rename = "view.measure_selection")]
+    MeasureSelection {
+        seq: String,
+        connection_epoch: String,
+        view_id: String,
+        body: Box<query::MeasureSelectionRequest>,
+    },
 }
 fn try_reply(tx: &mpsc::Sender<Out>, value: Value) -> Result<bool, ()> {
     let text = value.to_string();
@@ -327,7 +334,7 @@ pub(crate) async fn socket(
                     _=>break,
                 };
                 let control=match serde_json::from_str::<Control>(&text){Ok(c)=>c,Err(_)=>break};
-                let value=match &control {Control::Ping{seq}|Control::Set{seq,..}|Control::Apply{seq,..}|Control::Ack{seq,..}|Control::Query{seq,..}|Control::CancelQuery{seq,..}|Control::Measure{seq,..}=>view::counter(seq)};
+                let value=match &control {Control::Ping{seq}|Control::Set{seq,..}|Control::Apply{seq,..}|Control::Ack{seq,..}|Control::Query{seq,..}|Control::CancelQuery{seq,..}|Control::Measure{seq,..}|Control::MeasureSelection{seq,..}=>view::counter(seq)};
                 let Ok(n)=value else {break;};if n<=seq{break;}seq=n;
                 match control {
                     Control::Ping{seq}=>{if reply(&tx,json!({"type":"pong","seq":seq})).is_err(){break;}}
@@ -356,6 +363,11 @@ pub(crate) async fn socket(
                     Control::Measure{seq,connection_epoch,view_id,body}=>{
                         if connection_epoch!=epoch||view_id!=attached.id{break;}
                         let event=queries.measure(&seq,*body,&attached.id,&epoch).unwrap_or_else(|code|json!({"type":"error","seq":seq,"code":code}));
+                        if reply(&tx,event).is_err(){break;}
+                    }
+                    Control::MeasureSelection{seq,connection_epoch,view_id,body}=>{
+                        if connection_epoch!=epoch||view_id!=attached.id{break;}
+                        let event=queries.measure_selection(&seq,*body,&attached.id,&epoch).unwrap_or_else(|code|json!({"type":"error","seq":seq,"code":code}));
                         if reply(&tx,event).is_err(){break;}
                     }
                     Control::Set{seq,connection_epoch,view_id,base_state_rev,body}=>{

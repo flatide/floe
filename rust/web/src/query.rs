@@ -167,6 +167,34 @@ pub(crate) struct MeasureRequest {
     free_angle: bool,
     snap_query: Option<String>,
 }
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MeasureSelectionRequest {
+    anchor: Anchor,
+    boxes_dbu: Vec<[String; 4]>,
+}
+impl MeasureSelectionRequest {
+    fn core(self) -> Result<(QueryAnchor, Vec<[i64; 4]>), &'static str> {
+        if self.boxes_dbu.len() > 64 {
+            return Err("invalid_request");
+        }
+        let mut boxes = Vec::with_capacity(self.boxes_dbu.len());
+        for b in self.boxes_dbu {
+            let mut bounds = [0; 4];
+            for (i, s) in b.into_iter().enumerate() {
+                bounds[i] = s.parse::<i64>().map_err(|_| "invalid_request")?;
+                if bounds[i].to_string() != s {
+                    return Err("invalid_request");
+                }
+            }
+            if bounds[0] > bounds[2] || bounds[1] > bounds[3] {
+                return Err("invalid_request");
+            }
+            boxes.push(bounds);
+        }
+        Ok((self.anchor.core().map_err(|_| "invalid_request")?, boxes))
+    }
+}
 #[derive(Default)]
 struct Receipts([Option<Receipt>; 2]);
 impl Receipts {
@@ -273,6 +301,29 @@ impl<'a> Queries<'a> {
                 "delta_um":s.delta_strings(),"distance_um":s.distance_string()}))}),
         )
     }
+    pub fn measure_selection(
+        &self,
+        sequence: &str,
+        request: MeasureSelectionRequest,
+        view_id: &str,
+        epoch: &str,
+    ) -> Result<Value, &'static str> {
+        let (a, boxes) = request.core()?;
+        if !self.displayed.accepts(a) {
+            return Err("frame_not_displayed");
+        }
+        let segments = self.controller.measure_selection(a, &boxes).map_err(|e| {
+            if e.kind == floe_app_core::ErrorKind::Busy {
+                "stale_frame"
+            } else {
+                view::safe_error(e.kind)
+            }
+        })?;
+        Ok(
+            json!({"type":"measure_selection.result","seq":sequence,"view_id":view_id,
+            "connection_epoch":epoch,"anchor":anchor(a),"segments":segments.iter().map(segment).collect::<Vec<_>>()}),
+        )
+    }
     /// Latest-only results, at most one per kind. A full socket queue leaves
     /// the ticket unsent for retry, never accumulates another response queue.
     pub fn ready(&self, index: usize, view_id: &str, epoch: &str) -> Option<Value> {
@@ -314,6 +365,10 @@ fn anchor(a: QueryAnchor) -> Value {
     json!({"dataset_revision":a.dataset_revision.to_string(),"worker_epoch":a.worker_epoch.to_string(),
         "frame_id":a.frame_id.to_string(),"state_rev":a.state_rev.to_string(),
         "render_rev":a.render_rev.to_string(),"render_key":a.render_key.to_string()})
+}
+fn segment(s: &floe_app_core::view::RulerSegment) -> Value {
+    json!({"endpoints_dbu":s.endpoints.map(|p|p.strings()),
+        "delta_um":s.delta_strings(),"distance_um":s.distance_string()})
 }
 pub(crate) fn scene(s: QueryScene) -> Value {
     json!({"generation":s.id.map(|id|id.generation.to_string()),"round":s.id.map(|id|id.round.to_string()),

@@ -6,23 +6,68 @@ function harness() {
     const c={id:state.view_id,state,frame:{...state,frame_id:'4',width:200,height:160,purpose:'foreground',query:true,query_scene:{generation:'1',round:'1',complete:true,summary_layers:'0'}},
         acked:true,connected:true,pending:false,hidden:false,origin:[0,0],rect:{left:10,top:20},size:{pixels:[200,160],dpr:2,left:.25,top:.125}};
     let time=0,id=0,seq='9007199254740992',paints=0;
-    const nodes=new Map(),timers=new Map(),frames=new Map(),sent=[],lines=[];
+    const nodes=new Map(),timers=new Map(),frames=new Map(),sent=[],lines=[],selection=[],book=R.history();
     const ctx={clearRect(){},save(){},restore(){},beginPath(){},rect(){},clip(){},setTransform(){},setLineDash(){},moveTo(){},lineTo(){},stroke(){},closePath(){},fill(){},fillRect(){},fillText(){},measureText(s){return {width:s.length*6};}};
     function el(id){if(!nodes.has(id)){const n={textContent:'',checked:false,disabled:false,hidden:false,style:{},width:1,height:1,setAttribute(k,v){this[k]=v;},getContext:()=>ctx};
         Object.defineProperty(n,'innerHTML',{set(){throw new Error('HTML injection');}});nodes.set(id,n);}return nodes.get(id);}
     const m=M.bind({document:{getElementById:el},window:{requestAnimationFrame:fn=>{frames.set(++id,fn);return id;},cancelAnimationFrame:id=>frames.delete(id)},
-        protocol:P,query:Q,rulers:{paint(...args){paints++;lines.push(args[1]);R.paint(...args);}},context:()=>c,modeChanged(){},now:()=>time,
+        protocol:P,query:Q,rulers:{paint(...args){paints++;lines.push(args[1]);R.paint(...args);}},history:book,selection:()=>selection,
+        popCD:all=>all?book.clear('cd'):book.pop('cd'),cdBusy:()=>c.cdBusy,context:()=>c,modeChanged(){},now:()=>time,
         send:v=>{v.seq=seq=P.next(seq);sent.push(JSON.parse(JSON.stringify(v)));return seq;},setTimeout:(fn,ms)=>{timers.set(++id,{fn,at:time+ms});return id;},clearTimeout:id=>timers.delete(id)});
     function tick(ms=80){const end=time+ms;while(true){const t=[...timers].sort((a,b)=>a[1].at-b[1].at)[0];if(!t||t[1].at>end)break;time=t[1].at;timers.delete(t[0]);t[1].fn();}time=end;}
-    function paint(){m.paint({bbox:[-100,-80,100,80],step:[1,1],origin:[0,0]},c.size);const fs=[...frames.values()];frames.clear();fs.forEach(fn=>fn());}
+    function paint(){m.paint({bbox:[-100,-80,100,80],step:[1,1],origin:[0,0],dbu:Number(c.state.dbu_um||'.001')},c.size);const fs=[...frames.values()];frames.clear();fs.forEach(fn=>fn());}
     function request(type='view.measure'){return sent.filter(m=>m.type===type).at(-1);}
     function reply(p,seg=null,t=request(),extra={}){const v={type:'measure.result',seq:t.seq,view_id:t.view_id,connection_epoch:t.connection_epoch,anchor:t.body.anchor,point_dbu:p,snap:null,segment:seg,...extra};m.receive(v);paint();return v;}
     function snap(hit,status='ok',t=request('view.query')) {m.receive({type:'query.accepted',seq:t.seq,view_id:t.view_id,connection_epoch:t.connection_epoch,query_id:'9007199254741000'});
         m.receive({type:'query.result',seq:t.seq,view_id:t.view_id,connection_epoch:t.connection_epoch,query_id:'9007199254741000',anchor:t.body.anchor,status,hit,
             scene:{generation:'1',round:'1',complete:true,summary_layers:status==='scene_summary'?'1':'0'},requested_summary_layers:status==='scene_summary'?'1':'0'});}
-    m.changed();paint();return {m,c,el,sent,timers,frames,lines,tick,paint,request,reply,snap,get paints(){return paints;}};
+    m.changed();paint();return {m,c,el,sent,timers,frames,lines,selection,book,tick,paint,request,reply,snap,get paints(){return paints;}};
 }
 const segment=(a,b,d='0.005',delta=['0.003','0.004'])=>({endpoints_dbu:[a,b],distance_um:d,delta_um:delta});
+function gaps(h,segments,t=h.request('view.measure_selection'),extra={}) {
+    h.m.receive({type:'measure_selection.result',seq:t.seq,view_id:t.view_id,connection_epoch:t.connection_epoch,anchor:t.body.anchor,segments,...extra});h.paint();
+}
+const boxes=[['0','0','1','1'],['3','4','5','6']];
+const pair=[segment(['1','2.75'],['3','2.75'],'2',['2','0']),segment(['2.25','1'],['2.25','4'],'3',['0','3'])];
+{
+    const h=harness();h.selection.push(...boxes);h.m.key('r');const t=h.request('view.measure_selection');assert.deepEqual(t.body.boxes_dbu,boxes);
+    assert.equal(h.sent.length,1,'automatic gaps did a native snap/render');gaps(h,pair);assert.equal(h.el('ruler-count').textContent,'2 rulers');
+    assert.match(h.el('ruler-auto').textContent,/BBox gap 2: 3.0000 µm/);assert.match(h.el('ruler-status').textContent,/not contour/);
+    h.m.key('m');h.tick();h.m.click(60,60);h.reply(['0','0']);h.tick();h.m.click(61,60);h.reply(['1','0'],segment(['0','0'],['1','0'],'1',['1','0']));
+    assert.deepEqual(h.book.entries().map(e=>e.kind),['auto','auto','manual']);
+    h.m.key('r');h.m.key('r');gaps(h,pair);assert.deepEqual(h.book.entries().map(e=>e.kind),['manual','auto','auto']);
+    h.m.key('k');assert.equal(h.book.entries().at(-1).value.distance_um,'2');h.m.key('k');assert.equal(h.book.entries().at(-1).kind,'manual');
+    // Fewer than two selections keep the old auto set, as GTK does.
+    h.m.key('r');h.m.key('r');gaps(h,pair);h.m.key('r');h.selection.length=1;const sent=h.sent.length;h.m.key('r');assert.equal(h.sent.length,sent);
+    assert.equal(h.book.entries().length,3);h.m.key('K');assert.equal(h.book.entries().length,0);h.m.stop();
+}
+{
+    const h=harness();h.selection.push(...boxes);h.m.key('r');let t=h.request('view.measure_selection');h.m.key('k');gaps(h,pair,t);
+    assert.equal(h.book.entries().length,0,'deleted pending auto returned');
+    h.m.key('r');h.m.key('r');t=h.request('view.measure_selection');h.c.pending=true;h.m.changed();h.c.pending=false;gaps(h,pair,t);
+    assert.equal(h.book.entries().length,0,'changed frame accepted a late auto result');
+    h.m.key('r');h.m.key('r');t=h.request('view.measure_selection');h.selection.reverse();gaps(h,pair,t);assert.equal(h.book.entries().length,0);
+    h.m.key('r');h.m.key('r');t=h.request('view.measure_selection');gaps(h,pair,t,{connection_epoch:'c'.repeat(64)});
+    assert.match(h.el('ruler-status').textContent,/invalid/);assert.equal(h.book.entries().length,0);
+    h.m.key('r');h.m.key('r');h.tick(8000);assert.equal(h.book.entries().length,0);assert.match(h.el('ruler-status').textContent,/timed out/);
+    h.m.key('r');h.m.key('r');gaps(h,new Array(129).fill(pair[0]));assert.equal(h.book.entries().length,0);
+    h.m.key('r');h.m.key('r');gaps(h,[segment(['0','9223372036854775806.5'],['1','9223372036854775806.5'],'1',['1','0'])]);
+    assert.equal(h.book.entries()[0].value.endpoints_dbu[0][1],'9223372036854775806.5');h.m.stop();assert.equal(h.timers.size,0);assert.equal(h.frames.size,0);
+}
+{
+    const h=harness();h.c.state.dbu_um='0.001';h.el('drc-markers').checked=true;
+    const manual=segment(['0','0'],['30','0'],'0.03',['0.03','0']);
+    const cd={ends:[[0,0],[.03,0]],offset:true,label:'CD 0.03 µm'};
+    h.book.push('manual',manual);h.book.set('cd',[null,null,null],true);h.book.push('manual',manual);
+    h.book.set('cd',[cd,cd]);assert.deepEqual(h.book.entries().map(e=>e.kind),['manual','cd','cd','manual']);
+    h.paint();const lines=h.lines.at(-1);assert.equal(lines.length,4);assert.equal(lines.filter(s=>s.offset).length,2);
+    assert.deepEqual(lines[1].ends,lines[0].ends,'CD unit conversion differs from manual geometry');
+    h.m.key('k');assert.equal(h.book.entries().at(-1).kind,'cd');h.m.key('k');assert.equal(h.book.entries().length,2);
+    h.c.cdBusy=true;h.m.key('K');assert.equal(h.book.entries().length,2);assert.match(h.el('ruler-status').textContent,/restoration/);
+    h.c.cdBusy=false;h.el('drc-markers').checked=false;h.paint();assert.equal(h.lines.at(-1).length,1,'hidden CD still painted');
+    h.m.key('k');assert.equal(h.book.entries().at(-1).kind,'manual');h.m.key('K');assert.equal(h.book.entries().length,0);h.m.stop();
+    h.book.clear('cd');assert.equal(h.frames.size,0,'late CD cleanup scheduled a stopped ruler canvas');
+}
 {
     const h=harness();h.m.key('r');h.m.key('m');h.m.click(60,60);h.reply(['1e-100','0']);
     assert.match(h.el('ruler-details').textContent,/1e-100/);h.tick();h.m.click(61,60);assert.deepEqual(h.request().body.start_dbu,['1e-100','0']);
@@ -67,4 +112,4 @@ const segment=(a,b,d='0.005',delta=['0.003','0.004'])=>({endpoints_dbu:[a,b],dis
     for(let n=0;n<257;n++){h.tick();h.m.click(60,60);h.reply(['0','0']);h.tick();h.m.click(61,60);h.reply(['3','0'],segment(['0','0'],['3','0'],'0.003',['0.003','0']));}
     assert.equal(h.el('ruler-count').textContent,'256 rulers');assert.match(h.el('ruler-status').textContent,/256 rulers/);h.m.key('K');assert.equal(h.el('ruler-count').textContent,'0 rulers');h.m.stop();
 }
-console.log('WEB MANUAL RULERS: ALL OK (two points, snap refs/refusal, Shift, preview, bounded hover, frame lifecycle, cap, Escape/undo/clear, cleanup)');
+console.log('WEB MANUAL RULERS: ALL OK (two points, snap refs, auto bbox gaps, stable mixed CD order, single label pass, late/invalid results, frame lifecycle, caps, cleanup)');

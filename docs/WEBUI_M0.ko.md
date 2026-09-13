@@ -217,7 +217,7 @@ DISPLAY가 없어도 동작해야 한다(기존 GTK 오류까지 이식하지 �
 | M0-D1 | view `--lod` 값은 Python job/UI에는 있지만 `_submit_render` wire에 없음 | 현 동작을 기록한 회귀를 먼저 만들고, Rust CLI에서 실제 정책 연결/안내 중 결정. 이름만 보고 on/off 기능을 새로 활성화하지 않기 |
 | M0-D2 | refinement parser on ≠ Rust 실제 기본 off, stream-target 무시 | 실제 off를 기본 기준으로 고정. 명시 on/페이지 라운드·시간 옵션의 새 의미는 별도 결정 |
 | M0-D3 | deck pick/snap/clip/margin/label size 미지원 | capability=false + 이유. 웹 이관 완료와 신규 덱 기능 추가를 구별 |
-| M0-D4 | M4a-1~4의 scene/표시 anchor·owner receipt·선택/스냅, M4a-5의 Rust 수동 ruler | [M4 기록](WEBUI_M4.ko.md). geometry query는 layout만, cursor-only ruler는 deck/summary도 지원. 실제 브라우저 수용·자동 gap/CD 통합·clip은 남음 |
+| M0-D4 | M4a-1~4의 scene/표시 anchor·owner receipt·선택/스냅, M4a-5/6의 Rust 수동·bbox gap ruler와 CD 순서 통합 | [M4 기록](WEBUI_M4.ko.md). geometry query는 layout만, cursor-only ruler는 deck/summary도 지원. 실제 브라우저 수용·clip/내보내기는 남음 |
 | M0-D5 | `.ovo` 교체와 열린 GUI 캐시 수명주기 | 사용자 합의대로 현 실측 blocker 아님. 서버 revision 설계는 초안, hot reload 구현은 별도 승인 |
 | M0-D6 | `FLOE_RENDERD_BIN`은 무효여도 다음 후보, `FLOE_INDEX_BIN`은 hard error | 차이를 재현한 뒤 새 Rust 셸에서는 명시 override 실패를 오류로 정규화하는 변경을 기록 |
 | M0-D7 | 단일 render에서 visible layers가 비면 native plan에 top이 없어 오류(Python/Rust 양쪽 재현) | 수정: 실제로 비어 있는 plan만 빈 root로 정규화. all-off/바깥 뷰 blank, 구조 frame 유지, retained off→on 회귀 |

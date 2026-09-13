@@ -28,6 +28,8 @@ const inspect = spawnSync(process.execPath, [path.join(ui, 'inspect.test.cjs')],
 assert.equal(inspect.status, 0, 'inspect.test.cjs: ' + inspect.error);
 const measure = spawnSync(process.execPath, [path.join(ui, 'measure.test.cjs')], {stdio:'inherit',timeout:15000});
 assert.equal(measure.status, 0, 'measure.test.cjs: ' + measure.error);
+const shared = spawnSync(process.execPath, [path.join(ui, 'drc-cd.test.cjs')], {stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_SHARED_RULERS:'1'}});
+assert.equal(shared.status, 0, 'shared CD rulers: ' + shared.error);
 const ascii = spawnSync(process.execPath, [path.join(ui, 'drc.test.cjs')], {stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_ASCII:'1'}});
 if (ascii.status !== 0) { process.exit(ascii.status || 1); }
 console.log('WEB UI: ALL OK (ES2017 parse + deterministic client/protocol tests)');

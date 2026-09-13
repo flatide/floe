@@ -1,6 +1,14 @@
 'use strict';
 const assert=require('node:assert/strict'), R=require('./rulers.js'), P=require('./protocol.js'), D=require('./drc.js');
 const target={check:'0',error:'9007199254740993'};
+{
+    const b=R.history();let changes=0;b.watch(()=>++changes);
+    b.push('manual',1);b.set('auto',[null],true);b.push('manual',2);b.set('cd',[null,null,null],true);b.push('manual',3);
+    b.set('auto',[4,5]);b.set('cd',[6,7]);assert.deepEqual(b.entries().map(e=>e.value),[1,4,5,2,6,7,3]);
+    assert.equal(b.pop().value,3);assert.equal(b.pop().value,7);b.set('cd',[6]);
+    b.set('auto',[8],true);assert.deepEqual(b.entries().map(e=>e.value),[1,2,6,8]);b.clear('cd');assert.equal(b.pop().kind,'auto');
+    b.clear();assert.deepEqual(b.entries(),[]);assert.equal(b.pop(),null);assert(changes>8);
+}
 const segment={endpoints_um:[['10','20'],['30','20']],distance_um:'20',offset:true};
 const reply={check:'0',local:target.error,global:'9007199254740994',segments:[segment]};
 const s=R.decode(reply,target,P).segments[0];assert.equal(s.label,'Length 20.0000 µm');assert.equal(s.distance,'20');

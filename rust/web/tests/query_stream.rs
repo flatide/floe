@@ -65,6 +65,127 @@ async fn measure(
     until_reply(ws, seq, reply_type).await
 }
 
+async fn measure_selection(
+    ws: &mut Socket,
+    hello: &Value,
+    seq: u64,
+    anchor: Value,
+    boxes: Value,
+    kind: &str,
+) -> Value {
+    ws.send(Message::Text(
+        json!({"type":"view.measure_selection","seq":seq.to_string(),"view_id":hello["view_id"],
+        "connection_epoch":hello["connection_epoch"],"body":{"anchor":anchor,"boxes_dbu":boxes}})
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    until_reply(ws, seq, kind).await
+}
+
+#[tokio::test]
+#[ignore = "run tools/validate_worker_queries.py with its private fixture"]
+async fn owner_selection_rulers_match_gtk_without_queries_or_redraws() {
+    let h = Harness::start(true).await;
+    let login = h.login().await;
+    let (mut ws, hello, state) = h.connect(&login).await;
+    let (f, _) = frame(&mut ws).await;
+    let a = body(
+        &state,
+        &f,
+        [1., 1.],
+        json!({"kind":"snap"}),
+        json!({"mode":"all"}),
+    )["anchor"]
+        .clone();
+    assert_eq!(
+        measure_selection(&mut ws, &hello, 1, a.clone(), json!([]), "error").await["code"],
+        "frame_not_displayed"
+    );
+    ack(&mut ws, &hello, 2, &f).await;
+    let submitted = h.controller.snapshot().submitted;
+    let queries = h.controller.query_snapshot();
+    let cases: Value =
+        serde_json::from_str(&std::env::var("FLOE_QUERY_GAPS").expect("missing GTK gap oracle"))
+            .unwrap();
+    assert_eq!(cases.as_array().unwrap().len(), 23);
+    let dbu = state["dbu_um"].as_str().unwrap().parse::<f64>().unwrap();
+    let mut seq = 3;
+    for case in cases.as_array().unwrap() {
+        let result = measure_selection(
+            &mut ws,
+            &hello,
+            seq,
+            a.clone(),
+            case["boxes"].clone(),
+            "measure_selection.result",
+        )
+        .await;
+        seq += 1;
+        assert_eq!(result["anchor"], a);
+        assert_eq!(result["view_id"], hello["view_id"]);
+        assert_eq!(result["connection_epoch"], hello["connection_epoch"]);
+        let segments = result["segments"].as_array().unwrap();
+        assert_eq!(segments.len(), case["rulers"].as_array().unwrap().len());
+        assert!(segments.len() <= 128);
+        for (s, r) in segments.iter().zip(case["rulers"].as_array().unwrap()) {
+            let coords: Vec<f64> = s["endpoints_dbu"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|p| p.as_array().unwrap())
+                .map(|n| n.as_str().unwrap().parse().unwrap())
+                .collect();
+            assert_eq!(
+                coords,
+                r.as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|n| n.as_f64().unwrap())
+                    .collect::<Vec<_>>()
+            );
+            let distance = s["distance_um"].as_str().unwrap().parse::<f64>().unwrap();
+            assert!(
+                (distance - (coords[2] - coords[0]).hypot(coords[3] - coords[1]) * dbu).abs()
+                    < 1e-12
+            );
+        }
+        assert!(result.to_string().len() < 256 * 1024);
+    }
+    for boxes in [
+        json!(vec![["0"; 4]; 65]),
+        json!([["1", "0", "0", "1"]]),
+        json!([["0", "0", "NaN", "1"]]),
+    ] {
+        assert_eq!(
+            measure_selection(&mut ws, &hello, seq, a.clone(), boxes, "error").await["code"],
+            "invalid_request"
+        );
+        seq += 1;
+    }
+    assert_eq!(h.controller.snapshot().submitted, submitted);
+    let after = h.controller.query_snapshot();
+    assert_eq!(after.pick_id, queries.pick_id);
+    assert_eq!(after.snap_id, queries.snap_id);
+    edit(
+        &mut ws,
+        &hello,
+        seq,
+        &state,
+        json!({"navigation":{"kind":"pan","x":0.1,"y":0.,"snap":true}}),
+    )
+    .await;
+    seq += 1;
+    assert_eq!(
+        measure_selection(&mut ws, &hello, seq, a, json!([]), "error").await["code"],
+        "stale_frame"
+    );
+    drop(ws);
+    h.shutdown().await;
+    println!("WEB SELECTION RULERS: ALL OK (23 GTK oracle cases, receipt, canonical bounds, no render/query, stale pan)");
+}
+
 #[tokio::test]
 #[ignore = "run tools/validate_worker_queries.py with its private fixture"]
 async fn owner_rulers_use_native_snap_and_rust_coordinates_without_rendering() {

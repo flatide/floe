@@ -2,6 +2,7 @@
 // Simulated asynchronous reads/DOM; actual browser presentation is separate.
 const assert=require('node:assert/strict'), D=require('./drc.js'), P=require('./protocol.js'), R=require('./rulers.js');
 const focus=require('./test-focus.cjs');
+const history=process.env.FLOE_TEST_SHARED_RULERS==='1'?R.history():null;
 const nodes=new Map(), raf=new Map(), requests=[], saves=[], moves=[], drawing=[];
 let serial=0, cdHold=false, focusHold=false, heldCD=null, heldFocus=null, restoreData=null, restoreWait=false, releaseRestore=null, badCD=false;
 const ctx=new Proxy({measureText:s=>({width:s.length*6})},{get:(t,k)=>k in t?t[k]:(...v)=>drawing.push([k,...v])});
@@ -42,6 +43,7 @@ function http(method,path,body,missing,token){
     throw new Error('Unexpected read '+JSON.stringify(q));
 }
 const panel=D.bind({document:{getElementById:el,createElement:()=>new Element()},
+    history,
     window:{requestAnimationFrame:fn=>{raf.set(++serial,fn);return serial;},cancelAnimationFrame:id=>raf.delete(id)},
     protocol:P,rulers:R,groups:require('./drc-groups.js'),http,context:()=>context,navigate:focus.accept(moves),resize(){},stateStore:{bind:o=>{
         let ready=false;return {attach:async()=>{ready=false;if(restoreWait)await new Promise(r=>{releaseRestore=r;});await o.apply(restoreData);ready=true;},
@@ -50,7 +52,8 @@ const panel=D.bind({document:{getElementById:el,createElement:()=>new Element()}
 const count=k=>requests.filter(r=>r.q&&r.q.kind===k).length;
 const last=()=>saves.at(-1),values=()=>el('drc-cd-values').children.map(n=>n.textContent);
 const base=D.projection({bbox_dbu:['0','0','200','160'],width:400,height:320},[0,0],'1'),size={pixels:[400,320],dpr:2,left:0,top:0};
-function paint(p=base){for(const [id,fn] of [...raf]){raf.delete(id);fn();}panel.paint(p,size);}
+function paint(p=base){for(const [id,fn] of [...raf]){raf.delete(id);fn();}panel.paint(p,size);
+    if(history&&el('drc-markers').checked){R.paint(ctx,history.entries().filter(e=>e.kind==='cd'&&e.value).map(e=>e.value),(x,y)=>D.point(p,x,y),size);}}
 async function tick(){for(let i=0;i<70;i++)await Promise.resolve();}
 async function jump(i){el('drc-errors').children[i].ondblclick();await tick();paint();}
 (async()=>{
@@ -66,7 +69,7 @@ async function jump(i){el('drc-errors').children[i].ondblclick();await tick();pa
     paint();assert(panel.click(125,110,false));await tick();paint();assert.equal(moves.length,1);
     assert.equal(last().selected.error,'1');assert.equal(last().cd.target.error,'0');assert.match(el('drc-cd-title').textContent,/global 1/);
     drawing.length=0;
-    panel.paint(D.projection({bbox_dbu:['0','0','80','160'],width:400,height:320},[0,0],'1'),size);
+    paint(D.projection({bbox_dbu:['0','0','80','160'],width:400,height:320},[0,0],'1'));
     assert(drawing.some(v=>v[0]==='fillText'&&v[1]==='Width 60.0000 µm'),'offscreen selected error hid a different visible CD');paint();
     assert(panel.key('k'));assert.deepEqual(values(),['Width 60.0000 µm']);assert.equal(last().cd.remaining,1);
     restoreData=last();await el('drc-reload').onclick();await tick();paint();
@@ -92,6 +95,15 @@ async function jump(i){el('drc-errors').children[i].ondblclick();await tick();pa
     await jump(1);const previous=heldCD;await jump(0);assert(previous.token.cancelled);
     previous.resolve(cd(previous.q));await tick();assert.deepEqual(values(),[]);
     heldCD.resolve(cd(heldCD.q));await tick();assert.equal(values().length,2);cdHold=false;
+    if(history){
+        cdHold=true;await jump(1);const waiting=heldCD;assert.equal(history.entries().filter(e=>e.kind==='cd').length,3);
+        history.push('manual',{test:'later'});waiting.resolve(cd(waiting.q));await tick();
+        assert.deepEqual(history.entries().map(e=>e.kind),['cd','manual'],'CD completion reordered a later manual ruler');
+        assert(panel.key('k'));assert.deepEqual(history.entries().map(e=>e.kind),['manual']);
+        await jump(0);const erased=heldCD;assert(panel.key('K'));erased.resolve(cd(erased.q));await tick();
+        assert.deepEqual(history.entries().map(e=>e.kind),['manual'],'dismissed CD resurrected in the shared book');
+        history.clear('manual');cdHold=false;
+    }
     // Invalid responses have a visible failure, not invented values, and do
     // not discard the outline or turn unsupported geometry into a measurement.
     badCD=true;await jump(1);assert.match(el('drc-cd-title').textContent,/unavailable/);assert.deepEqual(values(),[]);

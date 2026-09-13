@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Scene-pinned native query gate. Synthetic data only; runtime PATH is empty."""
+import ast
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
+import random
 import shutil
 import subprocess
 import tempfile
+from types import SimpleNamespace
 
 import klayout.db as db
 
@@ -16,6 +20,32 @@ ROOT = Path(__file__).resolve().parents[1]
 def fingerprints(directory):
     return {p.name: (hashlib.sha256(p.read_bytes()).hexdigest(), p.stat().st_mtime_ns)
             for p in directory.iterdir() if p.is_file()}
+
+
+def ruler_oracle():
+    # Compile ONLY the GTK pure bbox rule: no GUI import or copied oracle.
+    tree = ast.parse((ROOT / "floe/gui.py").read_text())
+    functions = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                 and n.name == "_measure_selection"]
+    assert len(functions) == 1
+    namespace = {"math": math}
+    exec(compile(ast.Module(body=functions, type_ignores=[]), "gtk-ruler-oracle", "exec"), namespace)
+    rng = random.Random(6746)
+    cases = [[], [[0, 0, 1, 1]], [[0, 0, 2, 2], [2, 0, 4, 2]],
+             [[0, 0, 1, 1], [3, 4, 5, 6]],
+             [[0, 0, 1, 1], [2, 0, 3, 1], [2, 0, 3, 1]]]
+    for count in [2, 3, 8, 16, 32, 64] * 3:
+        boxes = []
+        for _ in range(count):
+            x, y = rng.randrange(-2000, 2000), rng.randrange(-2000, 2000)
+            boxes.append([x, y, x + rng.randrange(0, 80), y + rng.randrange(0, 80)])
+        cases.append(boxes)
+    result = []
+    for boxes in cases:
+        view = SimpleNamespace(selections=[{"bbox": b} for b in boxes], _auto_rulers=[], rulers=[])
+        namespace["_measure_selection"](view)
+        result.append({"boxes": [[str(n) for n in b] for b in boxes], "rulers": view.rulers})
+    return json.dumps(result, separators=(",", ":"))
 
 
 def main():
@@ -79,6 +109,7 @@ def main():
         workers.mkdir()
         before = fingerprints(cache)
         env = dict(os.environ, PATH="", TMPDIR=str(workers), FLOE_QUERY_CACHE=str(cache),
+                   FLOE_QUERY_GAPS=ruler_oracle(),
                    FLOE_QUERY_SOURCE=str(source),
                    FLOE_VIEW_FIXTURE=str(source),
                    FLOE_QUERY_RENDERD=str(ROOT / "rust/target/release/floe-renderd"),
@@ -99,6 +130,7 @@ def main():
                 assert "WEB QUERY LIFECYCLE: ALL OK" in run.stdout
                 assert "WEB QUERY REJECTIONS: ALL OK" in run.stdout
                 assert "WEB MANUAL RULERS: ALL OK" in run.stdout
+                assert "WEB SELECTION RULERS: ALL OK" in run.stdout
             print(run.stdout.strip())
         assert fingerprints(cache) == before, "queries modified index/summary bytes or mtime"
         assert not list(workers.iterdir()), "query workers leaked private files"

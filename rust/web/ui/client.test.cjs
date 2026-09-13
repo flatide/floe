@@ -153,6 +153,19 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     queryClick(20,20);const pendingMarker=queryLast();consumeDRC=true;queryClick(20,20);
     assert.equal(queryLast(),pendingMarker);assert.equal(ws.sent.at(-1).type,'view.query.cancel');
     answerQuery(pendingMarker,geometry);assert.equal(node('pick-details').textContent,'');consumeDRC=false;
+    // Inspector selection -> r -> owner bbox calculation -> shared ruler book.
+    queryClick(20,20);answerQuery(queryLast(),geometry);
+    queryClick(70,20,{shiftKey:true});answerQuery(queryLast(),{...geometry,bbox_dbu:['50','10','80','60'],points_dbu:[['50','10'],['80','10'],['80','60'],['50','60']]});
+    assert.match(node('pick-status').textContent,/2 selected/);
+    node('viewport').keydown({key:'r',preventDefault(){}});
+    const autoRequest=ws.sent.filter(m=>m.type==='view.measure_selection').at(-1);assert(autoRequest);
+    assert.deepEqual(autoRequest.body.boxes_dbu,[geometry.bbox_dbu,['50','10','80','60']]);
+    ws.receive({type:'measure_selection.result',seq:autoRequest.seq,view_id:autoRequest.view_id,connection_epoch:autoRequest.connection_epoch,
+        anchor:autoRequest.body.anchor,segments:[{endpoints_dbu:[['30','35'],['50','35']],delta_um:['20','0'],distance_um:'20'}]});
+    assert.match(node('ruler-auto').textContent,/20.0000/);assert.equal(drcOptions.history.entries()[0].kind,'auto');
+    assert.equal(draws.length,1);assert.equal(requests.length,oldHttp);
+    node('viewport').keydown({key:'k',preventDefault(){}});assert.equal(drcOptions.history.entries().length,0);
+    node('ruler-mode').onclick();node('pick-clear').onclick();
     // Actual app input dispatch: ruler mode owns the click, even over a DRC
     // marker. It uses snap then Rust measurement without native redraw/HTTP.
     node('ruler-mode').onclick();assert.equal(node('ruler-mode')['aria-pressed'],'true');

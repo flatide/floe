@@ -50,6 +50,10 @@ fn manual_measurements_use_display_anchor_without_render_or_query_work() {
     let margin = v.margin().unwrap();
     let before = v.snapshot().submitted;
     let a = v.query_anchor(margin.id).unwrap();
+    let boxes = [[0, 0, 1, 1], [3, 0, 4, 1]];
+    let gaps = v.measure_selection(a, &boxes).unwrap();
+    assert_eq!(gaps[0].endpoints[0].strings(), ["1", "0.5"]);
+    assert_eq!(gaps[0].distance_um, 2. * v.model.dbu);
     let first = v.measure(a, [0.25, 0.5], None, false, None).unwrap();
     assert_eq!(first.point.strings(), ["200", "320"]);
     let second = v
@@ -63,6 +67,10 @@ fn manual_measurements_use_display_anchor_without_render_or_query_work() {
     assert!(c.query_requests.lock().unwrap().is_empty());
     v.edit(v.snapshot().state_rev, pan()).unwrap();
     assert_eq!(
+        v.measure_selection(a, &boxes).unwrap_err().kind,
+        ErrorKind::Busy
+    );
+    assert_eq!(
         v.measure(a, [0.5, 0.5], None, false, None)
             .unwrap_err()
             .kind,
@@ -73,6 +81,7 @@ fn manual_measurements_use_display_anchor_without_render_or_query_work() {
         .measure(a, [0.5, 0.5], Some(first.point), true, None)
         .is_ok());
     v.close().unwrap();
+    assert!(v.measure_selection(a, &boxes).is_err());
     assert!(v.measure(a, [0.5, 0.5], None, false, None).is_err());
     assert_eq!(r.usage(), Usage::default());
 }

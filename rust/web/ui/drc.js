@@ -299,6 +299,7 @@
                     const li = doc.createElement('li'); li.textContent = s.label; li.title = s.role + ': ' + s.distance + ' µm'; list.appendChild(li);
                 });
             }
+            if (o.history) { o.history.set('cd', hasCD() ? cdSegments === null ? new Array(cdRemaining).fill(null) : cdSegments.slice(0,cdRemaining) : []); }
             navigationButtons(); paintLater();
         }
         function resetCD() { cancel('cd'); cdTarget = null; cdGlobal = null; cdSegments = null; cdRemaining = 0; cdError = ''; showCD(); }
@@ -314,6 +315,7 @@
             }
         }
         function jumpCD(r) {
+            if (o.history) { o.history.clear('cd'); }
             const same = cdTarget && cdTarget.check === r.check && cdTarget.error === r.local;
             if (!same || cdSegments === null || cdError) {
                 resetCD(); cdTarget = {check: r.check, error: r.local}; cdGlobal = r.global; cdRemaining = 3; loadCD();
@@ -385,7 +387,7 @@
                 const b = bbox(r.bbox_um); marker(r, point(p, b[0] * .5 + b[2] * .5, b[1] * .5 + b[3] * .5), 7, w, h);
             });
             paintSelected(p, w, h);
-            if (cdSegments && cdRemaining) { o.rulers.paint(ctx, cdSegments.slice(0, cdRemaining), function (x, y) { return point(p, x, y); }, size); }
+            if (!o.history && cdSegments && cdRemaining) { o.rulers.paint(ctx, cdSegments.slice(0, cdRemaining), function (x, y) { return point(p, x, y); }, size); }
             paintBox(p, size.dpr);
         }
         function paintSelected(p, w, h) {
@@ -565,8 +567,8 @@
                     if (e.ctrlKey || e.metaKey || e.altKey || e.isComposing) { return; }
                     if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'n' || e.key === 'p') {
                         e.preventDefault(); step(e.key === 'ArrowUp' || e.key === 'p', false, true);
-                    } else if (e.key === 'Escape' && escape()) { e.preventDefault(); }
-                    else if ((e.key === 'k' || e.key === 'K') && popCD(e.key === 'K')) { e.preventDefault(); }
+                    } else if (e.key === 'Escape' && ((o.rulerKey && o.rulerKey(e.key)) || escape())) { e.preventDefault(); }
+                    else if ((e.key === 'k' || e.key === 'K') && ((o.rulerKey && o.rulerKey(e.key)) || popCD(e.key === 'K'))) { e.preventDefault(); }
                 };
                 el('drc-errors').appendChild(b);
             });
@@ -796,6 +798,7 @@
                     const cd = data.cd;
                     if (!cd || !cd.target || !jumpActive || !Number.isInteger(cd.remaining) || cd.remaining < 0 || cd.remaining > 3) { throw new Error('Invalid saved CD state'); }
                     cdTarget = {check: cursor(cd.target.check), error: cursor(cd.target.error)}; cdRemaining = cd.remaining;
+                    showCD(); // reserve restored CD order before the remaining asynchronous reads
                 }
                 if (jumpScale !== null && !(jumpScale > 0)) { throw new Error('Invalid saved zoom scale'); }
                 if (data.query) { P.bbox(data.query.bbox_um); P.counter(data.query.state_rev);
@@ -916,12 +919,13 @@
         el('drc-clear').onclick = clearSelection;
         el('drc-cd-pop').onclick = function () { popCD(false); };
         el('drc-cd-clear').onclick = function () { popCD(true); };
-        el('drc-markers').onchange = function () { if (!el('drc-markers').checked) { boxReset(true); } paintLater(); navigationButtons(); savePanel(); };
+        el('drc-markers').onchange = function () { if (!el('drc-markers').checked) { boxReset(true); } showCD(); savePanel(); };
         el('drc-box').onclick = toggleBox;
         el('drc-group-clear').onclick = groupClear;
         el('drc-toggle').onclick = function () { shown = !shown; el('drc-panel').hidden = !shown; el('drc-toggle').setAttribute('aria-expanded', String(shown)); o.resize(); savePanel(); };
         el('drc-reload').onclick = restoreState;
         return {init: refresh, refresh: refresh, contextChanged: contextChanged, paint: paint, click: click, clear: clearSelection,
+            rulersBusy:function () { return restoring; },
             boxActive: function () { return boxMode; }, move: move,
             key: function (key) {
                 if (key === 'Escape') { return escape(); }

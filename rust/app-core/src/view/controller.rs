@@ -454,6 +454,18 @@ impl ViewController {
     pub fn cancel_query(&self, kind: QueryKind) {
         self.shared.lock().unwrap().queries.cancel(kind);
     }
+    /// Bounded bbox annotation measurement. No worker query or redraw is made.
+    pub fn measure_selection(
+        &self,
+        anchor: QueryAnchor,
+        boxes: &[[i64; 4]],
+    ) -> Result<Vec<super::RulerSegment>> {
+        let s = self.shared.lock().unwrap();
+        if self.stop.load(Ordering::Relaxed) != 0 || !s.anchor_valid(anchor, &self.model) {
+            return Err(Error::new(ErrorKind::Busy, "measurement frame is stale"));
+        }
+        super::ruler::measure_selection(boxes, self.model.dbu)
+    }
     /// A departing consumer must not cancel a newer consumer's request. The
     /// local query ID is a compare-and-cancel stamp, not an authority token.
     pub fn cancel_query_if_current(&self, kind: QueryKind, id: u64) -> bool {

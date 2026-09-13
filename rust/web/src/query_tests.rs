@@ -44,6 +44,55 @@ fn ruler_dtos_are_fixed_size_and_never_accept_paths_or_numeric_coordinates() {
     assert!(serde_json::from_str::<MeasureRequest>(&duplicate).is_err());
 }
 #[test]
+fn selection_rulers_require_bounded_canonical_boxes_not_geometry_authority() {
+    let valid =
+        json!({"anchor":anchor(stamp()),"boxes_dbu":[["-1","0","9223372036854775807","1"]]});
+    let (_, b) = serde_json::from_value::<MeasureSelectionRequest>(valid.clone())
+        .unwrap()
+        .core()
+        .unwrap();
+    assert_eq!(b, vec![[-1, 0, i64::MAX, 1]]);
+    for boxes in [
+        json!([[0, 0, 1, 1]]),
+        json!([["0", "0", "1"]]),
+        json!([["01", "0", "1", "1"]]),
+        json!([["2", "0", "1", "1"]]),
+        json!([["0", "0", "9223372036854775808", "1"]]),
+        json!([["0", "0", "0.5", "1"]]),
+        json!(vec![["0"; 4]; 65]),
+    ] {
+        let mut v = valid.clone();
+        v["boxes_dbu"] = boxes;
+        assert!(serde_json::from_value::<MeasureSelectionRequest>(v)
+            .ok()
+            .and_then(|r| r.core().ok())
+            .is_none());
+    }
+    let mut extra = valid.clone();
+    extra["path"] = json!("/private/design");
+    assert!(serde_json::from_value::<MeasureSelectionRequest>(extra).is_err());
+    let mut worst = valid;
+    worst["boxes_dbu"] = json!(vec![
+        [
+            i64::MIN.to_string(),
+            i64::MIN.to_string(),
+            i64::MAX.to_string(),
+            i64::MAX.to_string()
+        ];
+        64
+    ]);
+    assert!(worst.to_string().len() < 16 * 1024);
+    assert_eq!(
+        serde_json::from_value::<MeasureSelectionRequest>(worst)
+            .unwrap()
+            .core()
+            .unwrap()
+            .1
+            .len(),
+        64
+    );
+}
+#[test]
 fn query_dtos_require_canonical_strings_and_strict_bounded_input() {
     let parsed: Request = serde_json::from_value(request()).unwrap();
     let core = parsed.core().unwrap();

@@ -135,6 +135,7 @@
         el('pick-next').onclick = function () { next(1); };
         el('snap-probe').onchange = function () { move(NaN, NaN); };
         return {changed: changed, paint: paint, click: click, move: move, receive: function (m) { changed(); return transport.receive(m); },
+            selection:function () { changed(); return selections.map(function (s) { return s.bbox_dbu.slice(); }); },
             interrupt: function () { if (waiting) { info('Selection request cancelled.'); } invalidate(); cycle = null; refresh(); },
             key: function (key) {
                 if (key === 'm') { return toggleSnap(); }
