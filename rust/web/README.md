@@ -35,6 +35,15 @@ One active save and one latest pending state bound browser traffic; ambiguous
 outcomes require an explicit server-state reload. This is session memory, not
 durable review-file storage. Sharing, review writes and further parity remain open.
 
+Optional `--drc-rules FILE` registers an existing version-1 SVRF metadata snapshot
+on the same actor, reserving another 256 MiB (no extra CPU worker). DRC-only roots
+and file leases include this explicit file, never its recorded deck/include paths.
+The authenticated `types`, filtered `rules`, enriched `rule`, and `comparison`
+reads use the same source/view/revision scope. Types are paged; rule filters run
+before the row/scan caps. A large polygon comparison returns only scalars, without
+copying/transferring its vertices. Snapshot replacement is not hot-reloaded. UI
+type/detail/isolation wiring remains next; see [M2 §16](../../docs/WEBUI_M2.ko.md).
+
 ```sh
 # Run in rust/ to use the vendored source configuration
 cargo test --offline --locked -p floe-web

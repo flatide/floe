@@ -804,10 +804,74 @@ Rust1.89 빈 registry 오프라인 테스트와 Linux musl release link도 통�
 native/Pillow 경고는 남아 있다. native wire/캐시·renderd 버전·GTK 기본값은 바꾸지
 않았다. Linux 실행이나 브라우저 기능 추가·현장 Firefox/ETX PASS를 뜻하지 않는다.
 
-## 16. 다음 경계
+## 16. M2a-10b: SVRF 등록·타입/규칙 필터·측정 비교 API
 
-1. SVRF sidecar 코어는 §15까지 이관했다. actor/웹 metric/type 필터·layer isolate는
-   아직 미연결이다. 기존 GTK의 jump 시 In view 해제도 함께 parity 검증해야 한다.
+```sh
+rust/target/release/floe2-web view design.oas --drc results.db.ice \
+  --drc-waives existing.waive --drc-rules deck.rules.json
+```
+
+`--drc-rules`는 `--drc`를 요구한다. 파일 부모는 **DRC 전용** 승인 root에만 추가하며
+일반 source/jobdeck TC root를 넓히지 않는다. 기존 actor 1개가 pack/waive와 함께 읽고
+검증한 rules snapshot을 보관한다. 추가 스레드나 HTTP reactor의 파일 읽기는 없다.
+원본 SVRF/INCLUDE/기록된 path는 따라가지 않으며 브라우저에서 경로/reviewer/임의
+좌표나 다른 규칙의 constraint를 넣는 명령은 없다.
+
+메타데이터 사용 시 **기존1 CPU/256 MiB + 추가256 MiB**를 actor 수명 전체 예약한다.
+JSON input/typed tree/타입 catalog의 일시·상주 비용을 pack/LRU 예약과 구분한다.
+합계는512 MiB, CPU는 여전히1개이며 공통2048 MiB admission에 합산한다. 렌더 예산이
+1537 MiB이면 합산 초과를 세션 URL 게시 전에 거부한다(추가 작업이 없을 때 최대1536).
+이 수치는 RSS ceiling/실측 메모리 보장이 아니다. metadata 파일도 read lease에 포함하고
+cancel/error/logout 뒤 actor가 **실제로 종료할 때** 반환한다.
+
+catalog의 `metadata.svrf`는 미지정이면 null, 지정했다면 `matched/checks/type_count`
+문자열 세 개만 담는다. 모든 타입·원본 deck 경로를 bootstrap 응답에 밀어 넣지 않는다.
+명시한 파일이 invalid/missing이면 DRC phase=error이며 metadata 없이 계속하지 않는다.
+정상 로드 후 파일 교체는 자동 감지·reload하지 않는다. 그 actor/revision은 처음 읽은
+snapshot만 사용하며 새 revision 게시/명시적 전환은 별도 작업이다.
+
+기존 인증 `POST /api/v1/drc/{id}/read`와 view_id/revision 봉투에 추가했다.
+모든 조회 전후 세션·source/view·revision 및 pack/waive 불변 검사는 그대로다.
+
+| body.kind | 추가/변경 계약 |
+| --- | --- |
+| `types` | `start`(0-based canonical 문자열), `limit`1..64. `available`, `rows[{metric,checks}]`, `total`, `next`를 반환한다. 빈 sidecar는 available=true/0개, 미지정은 false/0개다. 65개 이상의 사용자 metric도 명시적 페이지로 나눈다. |
+| `rules` | 기존 start/search/limit에 선택적 `metric`(비어 있지 않은64 bytes 이하 문자열), `waived`(null/boolean)를 추가한다. 생략=null은 기존 All이다. **타입∩이름∩waive를 통과한 행** 최대64개를 반환하며, 입력 순회는 최대4096 rule slot/1 MiB name scan이다. `metric/waived`를 응답에 echo한다. |
+| `rule` | 기존 상세에 `svrf`를 추가한다. 매칭 시 §15의 rule/metrics/derivations/more, 없으면 null이다. |
+| `comparison` | check/error(0-based canonical 문자열). check/local/global 및 참고 comparison 또는 null. constraint index는0-based 문자열, measured/bound/delta/percent는 유한 십진 문자열(percent는 null 가능)이다. 원본 geometry를 전송하지 않는다. |
+
+규칙 필터의 All은0-error 규칙도 포함한다. waived=true는 waived가1개 이상,
+false는 unwaived가1개 이상인 규칙만 포함한다(예약 status도 unwaived). metadata가
+없는데 metric을 명시하면 오류이며 조용히 All로 되돌리지 않는다. 빈 sidecar에 metric을
+지정하면0개다. 필터가 처음4096개를 전부 제외했다면 **빈 rows+next는 계속 검색해야
+하는 미완료**이며 “일치 규칙 없음” 완료가 아니다.
+
+`rule.svrf`의 constraint.value와 source_gds layer/datatype도 문자열/null이다.
+raw 미해석 값·unresolved·6개 이후 derivations_more를 유지한다. 기존1 MiB 응답 한계를
+넘는 metadata는413이며 prefix만 성공으로 반환하지 않는다. comparison은 검증·캐시된
+record에 직접 접근해 계산하고 Arc/대형 polygon 좌표를 복사·전달하지 않는다.
+기존 CD `measurements`는 그대로이며 comparison은 측정/격리/waive 결정을 실행하지 않는다.
+
+게이트: `validate_web_svrf.py`의 실제 native HTTP에서 **4200개 prefix 규칙 뒤의
+필터 결과·117개 규칙 필터 교집합**, 여러 페이지 타입 catalog, **2,943개 비교 응답**,
+16,384점 polygon의 scalar 응답, control 문자로 커진 metadata의413, 없는/빈/정상/미래
+version sidecar, 파일 snapshot 교체, 경로 scope·무인증/오래된 view/revision 거부를
+확인한다. 조회 전후 render 제출/state_rev와 pack/waive 파일 목록·mtime·hash가 같다.
+native actor gate는 metadata lease와512 MiB 예약·open 중 취소/종료·실패 반환도 검증한다.
+
+2026-09-13: 전체 `sh tools/validate_rust.sh` ALL OK, KLayout13 PX+2 phase-exact+
+14 style 통과. core65/app6/web24/transport8, fmt·전환 패키지 strict clippy,
+Rust1.89 빈 registry 오프라인 테스트 및 Linux musl release link를 통과했다.
+기존 native/Pillow 경고는 남아 있다. UI에는 아직 타입 선택/비교값을 연결하지
+않았고, source_gds 기반 격리·jump 시 In view 해제는 다음 단계다. native wire/캐시·
+renderd 버전과 GTK 기본값, loopback/auth 모델은 바꾸지 않았다. Linux 실행이나
+현장 Firefox/ETX PASS를 뜻하지 않는다.
+
+## 17. 다음 경계
+
+1. SVRF sidecar 코어/actor/API는 §15~16까지 이관했다. 웹 패널의 metric/type 필터·
+   비교값 표시·layer isolate는 아직 미연결이다. 기존 GTK의 jump 시 In view 해제도
+   함께 parity 검증해야 한다.
    selected/live In view 목록 필터·순회·hover는 §13~14까지 구현했다.
    손으로 그리는 ruler/격리와 Escape 우선순위도 M4에서 확장한다.
    현재 페이지 마커 정책 자체를 전체 pack 마커로 확대하지 않는다.

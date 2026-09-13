@@ -39,6 +39,12 @@ pub enum Request {
         start: String,
         search: String,
         limit: usize,
+        metric: Option<String>,
+        waived: Option<bool>,
+    },
+    Types {
+        start: String,
+        limit: usize,
     },
     Rule {
         check: String,
@@ -56,6 +62,10 @@ pub enum Request {
         limit: usize,
     },
     Measurements {
+        check: String,
+        error: String,
+    },
+    Comparison {
         check: String,
         error: String,
     },
@@ -113,6 +123,12 @@ pub(super) enum Command {
         start: usize,
         search: String,
         limit: usize,
+        metric: Option<String>,
+        waived: Option<bool>,
+    },
+    Types {
+        start: usize,
+        limit: usize,
     },
     Rule {
         check: usize,
@@ -130,6 +146,10 @@ pub(super) enum Command {
         limit: usize,
     },
     Measurements {
+        check: usize,
+        error: u64,
+    },
+    Comparison {
         check: usize,
         error: u64,
     },
@@ -317,20 +337,36 @@ impl Request {
                 start,
                 search,
                 limit,
+                metric,
+                waived,
             } => {
-                if search.len() > 256 {
+                if search.len() > 256
+                    || metric
+                        .as_ref()
+                        .is_some_and(|m| m.is_empty() || m.len() > 64)
+                {
                     return Err("invalid_drc_request");
                 }
                 Command::Rules {
                     start: index(&start)?,
                     search: search.to_lowercase(),
                     limit: cap(limit, 64)?,
+                    metric,
+                    waived,
                 }
             }
+            Self::Types { start, limit } => Command::Types {
+                start: index(&start)?,
+                limit: cap(limit, 64)?,
+            },
             Self::Rule { check } => Command::Rule {
                 check: index(&check)?,
             },
             Self::Measurements { check, error } => Command::Measurements {
+                check: index(&check)?,
+                error: number(&error)?,
+            },
+            Self::Comparison { check, error } => Command::Comparison {
                 check: index(&check)?,
                 error: number(&error)?,
             },

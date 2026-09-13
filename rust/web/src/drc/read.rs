@@ -1,4 +1,4 @@
-use super::{dto::Command, RESPONSE_BYTES};
+use super::{dto::Command, metadata::Metadata, RESPONSE_BYTES};
 use floe_app_core::{
     check_cancelled,
     drc::{cd_segments, Cursor, Hit, InfoHit, ListRequest, Pack, RecordInfo},
@@ -56,7 +56,12 @@ fn next(c: Option<Cursor>) -> Value {
         |c| json!({"check":c.check.to_string(),"error":c.error.to_string()}),
     )
 }
-pub(super) fn execute(p: &mut Pack, request: Command, stop: &AtomicUsize) -> Result<Vec<u8>> {
+pub(super) fn execute(
+    p: &mut Pack,
+    metadata: Option<&Metadata>,
+    request: Command,
+    stop: &AtomicUsize,
+) -> Result<Vec<u8>> {
     check_cancelled(stop)?;
     p.unchanged()?;
     let value = match request {
@@ -117,7 +122,12 @@ pub(super) fn execute(p: &mut Pack, request: Command, stop: &AtomicUsize) -> Res
             start,
             search,
             limit,
+            metric,
+            waived,
         } => {
+            if metric.is_some() && metadata.is_none() {
+                return Err(Error::input("SVRF metadata required for a type filter"));
+            }
             if start > p.checks.len() {
                 return Err(Error::input("rule cursor"));
             }
@@ -134,15 +144,25 @@ pub(super) fn execute(p: &mut Pack, request: Command, stop: &AtomicUsize) -> Res
                 check_cancelled(stop)?;
                 let c = &p.checks[end];
                 bytes += c.name.len();
-                if search.is_empty() || c.name.to_lowercase().contains(&search) {
+                if metric
+                    .as_ref()
+                    .is_none_or(|m| metadata.is_some_and(|data| data.matches(&c.name, m)))
+                    && (search.is_empty() || c.name.to_lowercase().contains(&search))
+                {
+                    let w = p.waived_count(end)?;
+                    if waived.is_some_and(|only| if only { w == 0 } else { w == c.count }) {
+                        end += 1;
+                        continue;
+                    }
                     let (name, truncated) = short(&c.name);
                     rows.push(json!({"check":end.to_string(),"name":name,"name_truncated":truncated,
-                        "errors":c.count.to_string(),"waived":p.waived_count(end)?.to_string(),"bbox_um":bounds(p,c.bbox)?}));
+                        "errors":c.count.to_string(),"waived":w.to_string(),"bbox_um":bounds(p,c.bbox)?}));
                 }
                 end += 1;
             }
-            json!({"rows":rows,"next":if end<p.checks.len(){Some(end.to_string())}else{None},"scanned":(end-start).to_string()})
+            json!({"rows":rows,"next":if end<p.checks.len(){Some(end.to_string())}else{None},"scanned":(end-start).to_string(),"metric":metric,"waived":waived})
         }
+        Command::Types { start, limit } => Metadata::types(metadata, start, limit)?,
         Command::Rule { check } => {
             let c = p
                 .checks
@@ -155,7 +175,20 @@ pub(super) fn execute(p: &mut Pack, request: Command, stop: &AtomicUsize) -> Res
                 ));
             }
             json!({"check":check.to_string(),"name":c.name,"description":c.desc,"errors":c.count.to_string(),
-                "declared":c.declared.to_string(),"original":c.original.to_string(),"waived":p.waived_count(check)?.to_string(),"bbox_um":bounds(p,c.bbox)?})
+                "declared":c.declared.to_string(),"original":c.original.to_string(),"waived":p.waived_count(check)?.to_string(),"bbox_um":bounds(p,c.bbox)?,
+                "svrf":metadata.map(|m|m.detail(&c.name,stop)).transpose()?})
+        }
+        Command::Comparison { check, error } => {
+            let name = &p
+                .checks
+                .get(check)
+                .ok_or_else(|| Error::input("rule index"))?
+                .name;
+            let rule = metadata.and_then(|m| m.rules.rule(name));
+            let (record, comparison) = p.constraint_comparison(check, error, rule, stop)?;
+            let compared = comparison.map(|c|json!({"constraint":c.constraint.to_string(),"metric":c.metric,"op":c.op,"unit":c.unit,
+                "measured":c.measured.to_string(),"bound":c.bound.to_string(),"delta":c.delta.to_string(),"percent":c.percent.map(|p|p.to_string())}));
+            json!({"check":check.to_string(),"local":error.to_string(),"global":record.number.to_string(),"comparison":compared})
         }
         Command::Errors {
             check,

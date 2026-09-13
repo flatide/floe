@@ -30,6 +30,7 @@ cargo build --offline --locked --release -p floe-app -p floe-index -p floe-rende
 ./target/release/floe2-web drc /path/to/results.db --errs M1.WIDTH --floe-reviewer reviewer1
 ./target/release/floe2-web drc /path/to/results.db --errs M1.WIDTH --svrf-rules /path/to/deck.rules.json
 ./target/release/floe2-web view /path/to/design.oas --drc /path/to/results.db.ice
+./target/release/floe2-web view /path/to/design.oas --drc /path/to/results.db.ice --drc-rules /path/to/deck.rules.json
 ```
 
 `cargo`는 `rust/`에서 실행해야 그 안의 `.cargo/config.toml`(vendor, musl linker)이
@@ -83,7 +84,11 @@ cargo build --offline --locked --release -p floe-app -p floe-index -p floe-rende
 - CLI `drc --rules`/`--errs`에 `--svrf-rules FILE`을 명시하면 기존 version1
   sidecar의 규칙 정보/참고 측정값을 JSON에 추가한다. 원본 SVRF를 해석하거나
   경로를 자동 탐색하지 않는다. 일반 polygon width/signoff 판정기가 아니며,
-  원본 parser와 웹 규칙 타입·격리 연결은 미이관이다([M2 §15](../../docs/WEBUI_M2.ko.md#15-m2a-10a-svrf-sidecar규칙-메타데이터측정-코어)).
+  원본 parser와 웹 패널 타입·격리 연결은 미이관이다([M2 §15](../../docs/WEBUI_M2.ko.md#15-m2a-10a-svrf-sidecar규칙-메타데이터측정-코어)).
+- `view --drc-rules FILE`은 명시한 rules snapshot을 DRC actor에 연결한다. 타입/규칙
+  필터·scalar 측정 비교 API가 추가되며 아직 패널에는 표시하지 않는다. 추가256 MiB를
+  공통 admission에 예약하지만 CPU/worker 수는 늘지 않는다. 원본/include 경로를
+  따라가거나 jobdeck TC root를 넓히지 않는다([M2 §16](../../docs/WEBUI_M2.ko.md#16-m2a-10b-svrf-등록타입규칙-필터측정-비교-api)).
 - `clip/...`와 batch/mosaic/DRC export는 미이관 오류를 낸다.
   자동 Python fallback이나 기존 launcher/portable 교체는 없다.
 

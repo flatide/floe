@@ -96,10 +96,12 @@ def main(fixture):
         p.close()
         assert sum(len(c["errors"]) for c in expected) > 130
         assert any(len(e["pts"]) == 5000 for c in expected for e in c["errors"])
+        rules_path = data / "rules.json"
+        rules_path.write_text(json.dumps(dict(format="floe-svrf-rules", version=1, checks={})))
         temps = work / "temp"
         temps.mkdir()
         env = dict(os.environ, PATH="", TMPDIR=str(temps), FLOE_INDEX_BIN=str(INDEX),
-                   FLOE_RENDERD_BIN=str(RENDERD), FLOE_DRC_WEB_PACK=str(packed))
+                   FLOE_RENDERD_BIN=str(RENDERD), FLOE_DRC_WEB_PACK=str(packed), FLOE_DRC_WEB_RULES=str(rules_path))
         before = fingerprint(data)
         test = subprocess.run([tests[0], "--ignored", "--nocapture"], env=env,
                               capture_output=True, text=True, timeout=20)

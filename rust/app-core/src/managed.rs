@@ -109,10 +109,19 @@ impl Resources {
     /// Reserve its CPU even while idle, like a render worker. decoded_mb is the
     /// existing shared read-memory admission pool, NOT a process RSS ceiling.
     pub fn drc(self: &Arc<Self>, files: impl IntoIterator<Item = PathBuf>) -> Result<Permit> {
+        self.drc_with_rules(files, false)
+    }
+    /// Metadata parsing has its own bounded input/owned allocation peak. Keep
+    /// its reservation separate from pack/LRU/replies; no extra CPU worker.
+    pub fn drc_with_rules(
+        self: &Arc<Self>,
+        files: impl IntoIterator<Item = PathBuf>,
+        rules: bool,
+    ) -> Result<Permit> {
         self.acquire(
             Usage {
                 cpu_slots: 1,
-                decoded_mb: 256,
+                decoded_mb: if rules { 512 } else { 256 },
                 ..Usage::default()
             },
             keys(files)?,
@@ -338,6 +347,32 @@ mod tests {
             )
             .is_err());
         drop(drc);
+        assert_eq!(r.usage(), Usage::default());
+        let with_rules = r.drc_with_rules([], true).unwrap();
+        assert_eq!(r.usage().decoded_mb, 512);
+        assert_eq!(r.usage().cpu_slots, 1);
+        assert_eq!(r.usage().workers, 0);
+        assert!(r
+            .acquire(
+                Usage {
+                    decoded_mb: 1537,
+                    ..Usage::default()
+                },
+                BTreeSet::new(),
+                false
+            )
+            .is_err());
+        let fits = r
+            .acquire(
+                Usage {
+                    decoded_mb: 1536,
+                    ..Usage::default()
+                },
+                BTreeSet::new(),
+                false,
+            )
+            .unwrap();
+        drop((fits, with_rules));
         assert_eq!(r.usage(), Usage::default());
     }
     #[test]

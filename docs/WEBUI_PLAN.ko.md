@@ -484,6 +484,7 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
   M2a-8은 규칙별 선택 집합·박스·금색 마커/복원,
   M2a-9는 Selected/waive/live In view 교집합 목록·순회·hover다.
   M2a-10a는 SVRF sidecar 읽기·타입/derivation·측정 비교 코어/CLI이며,
-  원본 SVRF parser와 웹 연결은 남아 있다.
+  M2a-10b는 등록된 metadata/타입·규칙 필터·scalar 비교 API다.
+  원본 SVRF parser와 웹 패널 연결은 남아 있다.
   공유와 고급 DRC 조작은 남아 있다.
   CLI 전체/웹 전환 완료가 아니며 GTK/실측 브랜치는 유지한다.

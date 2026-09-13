@@ -735,6 +735,25 @@ impl Pack {
     ) -> Result<RecordInfo> {
         self.with_record(check, error, cancelled, |v| Ok(RecordInfo::from(v)))
     }
+    /// Compute against the cached, validated record without copying a large
+    /// selected polygon or exposing its cache Arc to the gateway. The rule is
+    /// matched by the caller to this pack's check name, not chosen by the UI.
+    pub fn constraint_comparison<'a>(
+        &mut self,
+        check: usize,
+        error: u64,
+        rule: Option<&'a crate::svrf::Rule>,
+        cancelled: &AtomicUsize,
+    ) -> Result<(RecordInfo, Option<crate::svrf::Comparison<'a>>)> {
+        let precision = self.precision;
+        self.with_record(check, error, cancelled, |v| {
+            let compared = rule
+                .map(|r| r.compare(v.kind, &v.points, precision, cancelled))
+                .transpose()?
+                .flatten();
+            Ok((RecordInfo::from(v), compared))
+        })
+    }
     /// Copy only the requested coordinate slice. Coordinate-copy cost over
     /// all pages is O(total points), not O(record * pages). Cache eviction
     /// can still require decoding the containing block again.

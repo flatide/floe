@@ -2,6 +2,7 @@
 //! bounded DTOs/tickets. No path/reviewer/native command is accepted on the wire.
 mod dto;
 mod http;
+mod metadata;
 pub(crate) mod panel;
 mod read;
 mod selection;
@@ -75,12 +76,28 @@ impl Service {
         waives: Option<&Path>,
         source_id: &str,
     ) -> Result<Arc<Self>> {
+        Self::start_with_rules(resources, scope, path, waives, None, source_id)
+    }
+    pub fn start_with_rules(
+        resources: &Arc<Resources>,
+        scope: Arc<AccessScope>,
+        path: &Path,
+        waives: Option<&Path>,
+        rules: Option<&Path>,
+        source_id: &str,
+    ) -> Result<Arc<Self>> {
         if source_id.is_empty() || source_id.len() > 128 {
             return Err(Error::input("invalid registered DRC source"));
         }
         let path = scope.check(path)?;
         let waives = waives.map(|p| scope.check(p)).transpose()?;
-        let permit = resources.drc(std::iter::once(path.clone()).chain(waives.clone()))?;
+        let rules = rules.map(|p| scope.check(p)).transpose()?;
+        let permit = resources.drc_with_rules(
+            std::iter::once(path.clone())
+                .chain(waives.clone())
+                .chain(rules.clone()),
+            rules.is_some(),
+        )?;
         let id = crate::auth::public_id()
             .map_err(|_| Error::new(ErrorKind::Io, "entropy unavailable"))?;
         let revision = crate::auth::public_id()
@@ -114,26 +131,34 @@ impl Service {
             .name("floe-drc-read".into())
             .spawn(move || {
                 let _permit = permit;
-                let opened: Result<Pack> = (|| {
+                let opened: Result<(Pack, Option<metadata::Metadata>)> = (|| {
                     scope.check(&path)?;
                     let mut pack = Pack::open(&path, &stop)?;
                     if let Some(p) = &waives {
                         scope.check(p)?;
                         pack.attach_waives(p)?;
                     }
+                    let metadata = rules
+                        .as_ref()
+                        .map(|p| {
+                            scope.check(p)?;
+                            metadata::Metadata::load(p, &pack, &stop)
+                        })
+                        .transpose()?;
                     floe_app_core::check_cancelled(&stop)?;
                     pack.unchanged()?;
-                    Ok(pack)
+                    Ok((pack, metadata))
                 })();
                 match opened {
-                    Ok(mut pack) => {
+                    Ok((mut pack, metadata)) => {
                         inner.state.lock().unwrap().metadata = Some(json!({
                             "cell":pack.cell.chars().take(256).collect::<String>(),
                             "cell_truncated":pack.cell.chars().count()>256,
                             "precision":pack.precision.to_string(),"errors":pack.total.to_string(),
                             "checks":pack.checks.len().to_string(),"waives":waives.is_some(),
+                            "svrf":metadata.as_ref().map(metadata::Metadata::summary),
                         }));
-                        run(&inner, &mut pack);
+                        run(&inner, &mut pack, metadata.as_ref());
                     }
                     Err(e) => {
                         let mut state = inner.state.lock().unwrap();
@@ -243,7 +268,7 @@ impl Drop for Service {
         }
     }
 }
-fn run(inner: &Inner, pack: &mut Pack) {
+fn run(inner: &Inner, pack: &mut Pack, metadata: Option<&metadata::Metadata>) {
     loop {
         let work = {
             let mut s = inner.state.lock().unwrap();
@@ -261,7 +286,7 @@ fn run(inner: &Inner, pack: &mut Pack) {
         if work.stop.load(Ordering::Relaxed) != 0 || work.reply.is_closed() {
             continue;
         }
-        let result = read::execute(pack, work.request, &work.stop).map_err(|e| code(&e));
+        let result = read::execute(pack, metadata, work.request, &work.stop).map_err(|e| code(&e));
         let _ = work.reply.send(result);
     }
 }

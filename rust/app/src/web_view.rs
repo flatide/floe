@@ -49,6 +49,7 @@ const HELP: &str = "Usage: floe2-web view SOURCE [SOURCE ...] [OPTIONS]
   --root DIRECTORY         Additional approved dependency root, repeatable
   --drc PACK.ice           Read-only DRC service bound to the first source
   --drc-waives FILE        Explicit existing waive sidecar (requires --drc)
+  --drc-rules FILE         Explicit existing SVRF rules.json (requires --drc)
   --port N                 Loopback port (default random)
   --no-open                Do not launch a browser; use the private session file
   --firefox PATH           Explicit Firefox binary (or FLOE_FIREFOX_BIN)
@@ -59,7 +60,8 @@ This development command does not replace the GTK floe2 launcher.
 No automatic indexing or Python fallback. Paths are local-launcher inputs only.
 Binds only 127.0.0.1; stops on Ctrl+C or End session.
 Managed capacity: 16 CPU slots, 4 reserved for foreground; index jobs <=12.
-Decode+raster reservation must fit 16 slots (DRC reserves 1 extra slot + 256 MiB).
+Decode+raster reservation must fit 16 slots (DRC reserves 1 extra slot + 256 MiB;
+SVRF metadata reserves another 256 MiB, with no extra CPU worker).
 DRC requires an existing native ICE pack; no implicit review sidecar/ASCII fallback.
 Refinement off; deck margin unsupported.
 The session link is a one-time credential; do not share or log it.";
@@ -83,6 +85,7 @@ pub struct Command {
     firefox: Option<PathBuf>,
     drc: Option<PathBuf>,
     drc_waives: Option<PathBuf>,
+    drc_rules: Option<PathBuf>,
 }
 pub fn parse(args: &[String]) -> Result<Command> {
     let mut c = Command {
@@ -103,6 +106,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
         firefox: None,
         drc: None,
         drc_waives: None,
+        drc_rules: None,
     };
     let mut i = 1;
     let mut positional = false;
@@ -231,11 +235,12 @@ pub fn parse(args: &[String]) -> Result<Command> {
             "--firefox" => c.firefox = Some(PathBuf::from(value()?)),
             "--drc" => c.drc = Some(PathBuf::from(value()?)),
             "--drc-waives" => c.drc_waives = Some(PathBuf::from(value()?)),
+            "--drc-rules" => c.drc_rules = Some(PathBuf::from(value()?)),
             _ => return Err(Error::input(format!("unsupported view option: {key}"))),
         }
     }
-    if c.drc_waives.is_some() && c.drc.is_none() {
-        return Err(Error::input("--drc-waives requires --drc"));
+    if (c.drc_waives.is_some() || c.drc_rules.is_some()) && c.drc.is_none() {
+        return Err(Error::input("--drc-waives / --drc-rules require --drc"));
     }
     if c.sources.is_empty() || c.sources.len() > 32 {
         return Err(Error::input("view requires 1..32 registered sources"));
@@ -331,7 +336,12 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
                 .to_owned(),
         );
     }
-    for path in c.drc.iter().chain(c.drc_waives.iter()) {
+    for path in c
+        .drc
+        .iter()
+        .chain(c.drc_waives.iter())
+        .chain(c.drc_rules.iter())
+    {
         drc_roots.push(
             cache::absolute(path)?
                 .parent()
@@ -379,11 +389,12 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
         Gateway::with_startup(listener.local_addr()?, Arc::clone(&service), request)
             .map_err(Error::input)?;
     if let Some(path) = &c.drc {
-        let drc = floe_web::drc::Service::start(
+        let drc = floe_web::drc::Service::start_with_rules(
             &resources,
             drc_scope.expect("DRC-specific registration scope"),
             path,
             c.drc_waives.as_deref(),
+            c.drc_rules.as_deref(),
             service.catalog()["sources"][0]["source_id"]
                 .as_str()
                 .unwrap(),
@@ -469,9 +480,16 @@ mod tests {
             "view a --label-font-px 97",
             "view a --label-font-px 5",
             "view a --drc-waives review",
+            "view a --drc-rules rules.json",
         ] {
             assert!(parse(&args(s)).is_err(), "{s}");
         }
+        assert!(parse(&args(
+            "view a --drc results.ice --drc-rules rules.json --no-open"
+        ))
+        .unwrap()
+        .drc_rules
+        .is_some());
         assert!(parse(&args("view --help")).unwrap().help);
         let c = parse(&args("view a --drc b.ice --drc-waives side")).unwrap();
         assert_eq!(c.drc, Some(PathBuf::from("b.ice")));

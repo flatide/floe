@@ -46,6 +46,11 @@ fn wire_rejects_paths_noncanonical_counters_and_unbounded_reads() {
         json!({"kind":"rules","start":"00","search":"","limit":1}),
         json!({"kind":"rules","start":"0","search":"","limit":65}),
         json!({"kind":"rules","start":"0","search":"x".repeat(257),"limit":1}),
+        json!({"kind":"rules","start":"0","search":"","limit":1,"metric":""}),
+        json!({"kind":"rules","start":"0","search":"","limit":1,"metric":"x".repeat(65)}),
+        json!({"kind":"types","start":"00","limit":64}),
+        json!({"kind":"types","start":"0","limit":65}),
+        json!({"kind":"comparison","check":"00","error":"0"}),
         json!({"kind":"query","bbox_um":["NaN","0","1","1"],"checks":null,"waived":null,"cursor":{"check":"0","error":"0"},"limit":1}),
         json!({"kind":"geometry","check":"0","error":"0","start":"0","limit":2049}),
         json!({"kind":"errors","check":"0","start":"-1","waived":null,"limit":1}),
@@ -69,6 +74,10 @@ fn wire_rejects_paths_noncanonical_counters_and_unbounded_reads() {
     }
     for v in [
         json!({"kind":"rule","check":0}),
+        json!({"kind":"rules","start":"0","search":"","limit":1,"metric":true}),
+        json!({"kind":"types","start":"0","limit":64,"path":"/etc/passwd"}),
+        json!({"kind":"comparison","check":"0","error":"0","points":[[0,0],[1,1]]}),
+        json!({"kind":"comparison","check":"0","error":"0","rule":"other"}),
         json!({"kind":"rule","check":"0","path":"/etc/passwd"}),
         json!({"kind":"rule","check":"0","reviewer":"other"}),
         json!({"kind":"step","check":"0","backwards":1}),
