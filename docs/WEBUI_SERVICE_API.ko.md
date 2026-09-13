@@ -6,7 +6,7 @@
 **아래 endpoint/message는 전체 서비스 설계안이다.** M1b-1의 일부 transport API
 (exchange/capabilities/logout/WS ping)는 [M1b 기록](WEBUI_M1B.ko.md)에 명세/구현했다.
 아래 전체 URI가 그대로 구현된 것은 아니며 공유 API는 아직 없다.
-M2a의 현재 DRC 등록/읽기 URI·페이지·취소·focus/in_view·패널 상태·순회 계약은 [M2 기록](WEBUI_M2.ko.md) §2~6이
+M2a의 현재 DRC 등록/읽기 URI·페이지·취소·focus/in_view·패널 상태·순회 계약은 [M2 기록](WEBUI_M2.ko.md) §2~7이
 기준이다. read-only actor만 있고 review 저장/공유 endpoint는 아직 없다.
 M1b-2a의 `app-core/managed`·`view`에는 process-local lease/admission과
 독립 worker controller를 구현했다. M1b-2b의 사전 등록 view용 제어/이미지

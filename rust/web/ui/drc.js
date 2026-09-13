@@ -25,6 +25,7 @@
         let rule = null, ruleRows = [], rows = [], selected = null, points = null, pointsReady = false;
         let ruleStart = '0', ruleNext = null, errorStart = '0', errorNext = null, query = null;
         let jumpScale = null, zoomLock = false, painting = null, lastProjection = null, lastSize = null;
+        let jumpActive = false, focusVisible = false, stepBusy = false, stepContinuation = null, rowFocus = false;
         let restoring = false;
         const persistence = o.stateStore.bind({http: o.http, protocol: P,
             setTimeout: function (fn, delay) { return setTimeout(fn, delay); },
@@ -33,6 +34,7 @@
         function info(s) { el('drc-message').textContent = s || ''; }
         function cancel(key) { const t = tasks[key]; if (t) { t.cancelled = true; if (t.abort) { t.abort(); } delete tasks[key]; } }
         function cancelAll() { Object.keys(tasks).forEach(cancel); }
+        function cancelStep() { cancel('step'); stepBusy = false; stepContinuation = null; el('drc-step-continue').hidden = true; }
         function current() {
             const c = o.context();
             return !stopped && registration && registration.phase === 'ready' && c &&
@@ -73,6 +75,8 @@
             el('drc-frame').disabled = !available || !selected;
             el('drc-clear').disabled = restoring || !selected;
             el('drc-reload').disabled = !current();
+            ['drc-step-prev', 'drc-step-next'].forEach(function (id) { el(id).disabled = !available || !rule || stepBusy || !!(query && !query.bbox); });
+            el('drc-step-continue').disabled = !available || stepBusy || !stepContinuation;
         }
         function paintLater() {
             if (stopped || painting !== null) { return; }
@@ -80,19 +84,19 @@
         }
         function paint(p, size) {
             lastProjection = p; lastSize = size;
-            if (!ctx || !p || !size || !current() || !el('drc-markers').checked || (!rows.length && !selected)) { overlay.hidden = true; return; }
+            if (!ctx || !p || !size || !current() || !el('drc-markers').checked || (!rows.length && (!selected || !focusVisible))) { overlay.hidden = true; return; }
             const w = size.pixels[0], h = size.pixels[1]; P.pixels(w, h);
             if (overlay.width !== w || overlay.height !== h) { overlay.width = w; overlay.height = h; }
             overlay.style.width = w / size.dpr + 'px'; overlay.style.height = h / size.dpr + 'px';
             overlay.style.left = size.left + 'px'; overlay.style.top = size.top + 'px'; overlay.hidden = false;
             ctx.clearRect(0, 0, w, h); ctx.lineWidth = 2;
             rows.forEach(function (r) {
-                if (selected && r.check === selected.check && r.local === selected.local) { return; }
+                if (focusVisible && selected && r.check === selected.check && r.local === selected.local) { return; }
                 const b = bbox(r.bbox_um), xy = point(p, b[0] * .5 + b[2] * .5, b[1] * .5 + b[3] * .5);
                 if (!xy.every(Number.isFinite) || xy[0] < -8 || xy[0] > w + 8 || xy[1] < -8 || xy[1] > h + 8) { return; }
                 ctx.fillStyle = r.status === 1 ? '#70da9a' : '#ff6969'; ctx.fillRect(Math.round(xy[0]) - 3, Math.round(xy[1]) - 3, 7, 7);
             });
-            if (!selected) { return; }
+            if (!selected || !focusVisible) { return; }
             const b = bbox(selected.bbox_um), a = point(p, b[0], b[3]), z = point(p, b[2], b[1]);
             if (![a[0], a[1], z[0], z[1]].every(Number.isFinite) || z[0] < -9 || a[0] > w + 9 || z[1] < -9 || a[1] > h + 9) { return; }
             const color = selected.status === 1 ? '#70da9a' : '#ff6969'; ctx.strokeStyle = color; ctx.fillStyle = color;
@@ -107,9 +111,19 @@
             ctx.stroke();
         }
         function clearSelection() {
+            cancelStep(); jumpActive = focusVisible = rowFocus = false;
             cancel('geometry'); cancel('focus'); selected = null; points = null; pointsReady = false;
-            jumpScale = null; zoomLock = false; el('drc-selected').textContent = 'Select an error to inspect and go to it.';
+            jumpScale = null; zoomLock = false; el('drc-selected').textContent = 'Click to inspect · double-click to go to an error.';
             paintLater(); navigationButtons(); renderErrors(); savePanel();
+        }
+        function endFocus() {
+            const hadWork = stepBusy || stepContinuation || (selected && (focusVisible || jumpActive));
+            if (!hadWork) { return false; }
+            cancelStep(); cancel('focus'); cancel('geometry'); points = null; pointsReady = false;
+            jumpActive = focusVisible = rowFocus = false;
+            if (selected) { el('drc-selected').textContent = 'Global ' + selected.global + ' · focus cleared; n/p continues without moving the view.'; }
+            info('Focus cleared · pending error search cancelled.');
+            paintLater(); navigationButtons(); savePanel(); return true;
         }
         function renderRules() {
             el('drc-rules').textContent = '';
@@ -146,23 +160,34 @@
             loadErrors(); savePanel();
         }
         function filter() { return el('drc-waived').value === 'all' ? null : el('drc-waived').value === 'waived'; }
+        function markErrors() {
+            Array.prototype.forEach.call(el('drc-errors').children, function (b, i) {
+                const r = rows[i], active = r && selected && selected.check === r.check && selected.local === r.local;
+                b.className = 'drc-error' + (r && r.status === 1 ? ' waived' : '') + (active ? ' selected' : '');
+                if (active && rowFocus) { rowFocus = false; b.focus(); b.scrollIntoView({block: 'nearest'}); }
+            });
+        }
         function renderErrors() {
+            if (selected && doc.activeElement && el('drc-errors').contains(doc.activeElement)) { rowFocus = true; }
             el('drc-errors').textContent = '';
-            rows.forEach(function (r, i) {
-                const b = doc.createElement('button'), active = selected && selected.check === r.check && selected.local === r.local;
-                b.className = 'drc-error' + (r.status === 1 ? ' waived' : '') + (active ? ' selected' : '');
+            rows.forEach(function (r) {
+                const b = doc.createElement('button');
                 b.disabled = restoring;
                 b.textContent = '#' + P.next(r.local) + '  ·  global ' + r.global + '  ·  ' + (r.kind === 'p' ? 'poly' : 'edge') + (r.status === 1 ? '  ·  waived' : '');
                 b.setAttribute('aria-label', 'Error ' + P.next(r.local) + ', global ' + r.global);
-                b.onclick = function () { select(r, false); }; b.ondblclick = function () { select(r, true); };
-                b.onkeydown = function (e) { if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-                    const j = i + (e.key === 'ArrowDown' ? 1 : -1); if (j >= 0 && j < rows.length) { e.preventDefault(); select(rows[j], false); }
-                } };
+                b.onclick = function () { cancelStep(); select(r, false); };
+                b.ondblclick = function () { cancelStep(); select(r, true); };
+                b.onkeydown = function (e) {
+                    if (e.ctrlKey || e.metaKey || e.altKey || e.isComposing) { return; }
+                    if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'n' || e.key === 'p') {
+                        e.preventDefault(); step(e.key === 'ArrowUp' || e.key === 'p', false, true);
+                    } else if (e.key === 'Escape' && endFocus()) { e.preventDefault(); }
+                };
                 el('drc-errors').appendChild(b);
             });
             if (!rows.length) { el('drc-errors').textContent = errorNext === null ? 'No matching errors.' : 'No match in this scan. Continue to the next page.'; }
             el('drc-result-info').textContent = (query ? 'Viewport query' : 'Rule errors') + ' · ' + rows.length + ' on this page' + (errorNext === null ? ' · end' : ' · more available');
-            navigationButtons(); paintLater();
+            markErrors(); navigationButtons(); paintLater();
         }
         async function loadErrors(strict) {
             const c = current(); if (!c || (!rule && !query)) { return; }
@@ -209,20 +234,80 @@
                 jumpScale = Number(P.decimal(page.navigation.width_um)) / s.pixels[0]; o.navigate(page.navigation); savePanel();
             } catch (e) { failure('focus', t, c, e); }
         }
-        function select(r, frame) {
+        function syncRule(check) {
+            if (rule && rule.check === check) { return; }
+            rule = {check: check, name: 'Rule ' + P.next(check)};
+            renderRules(); el('drc-rule-title').textContent = rule.name; el('drc-description').textContent = '';
+            const c = current(), t = task('description');
+            read('description', t, c, {kind: 'rule', check: check}).then(function (v) {
+                if (!v || !rule || rule.check !== check) { return; }
+                cursor(v.errors); cursor(v.waived); rule = {check: check, name: v.name, errors: v.errors, waived: v.waived};
+                el('drc-rule-title').textContent = v.name; el('drc-description').textContent = v.description; renderRules();
+            }).catch(function (e) { failure('description', t, c, e); });
+        }
+        function select(r, frame, allowFocus) {
             if (!current()) { return; }
+            cancel('focus'); syncRule(r.check);
             const same = selected && selected.check === r.check && selected.local === r.local;
             if (!selected) { jumpScale = null; zoomLock = false; }
-            selected = r;
+            selected = r; focusVisible = true; if (frame) { jumpActive = true; }
             if (!same || !pointsReady) { points = null; pointsReady = false; el('drc-selected').textContent = 'Global ' + r.global + ' · bounding-box preview'; geometry(r); }
-            renderErrors(); focus(r, frame); savePanel();
+            // Keep the button node alive between click and double-click.
+            markErrors(); navigationButtons(); paintLater();
+            if (jumpActive && allowFocus !== false) { focus(r, frame); }
+            savePanel();
+        }
+        async function step(backwards, resume, focusRow) {
+            const c = current(); if (!c || restoring || !rule || stepBusy || (query && !query.bbox)) { return; }
+            let body;
+            if (resume) { if (!stepContinuation) { return; } body = stepContinuation; }
+            else {
+                stepContinuation = null; el('drc-step-continue').hidden = true;
+                let after = selected && selected.check === rule.check && (filter() === null || (selected.status === 1) === filter()) ? selected.local : null;
+                if (after !== null && query) {
+                    const a = bbox(selected.bbox_um), b = bbox(query.bbox);
+                    if (a[0] > b[2] || a[2] < b[0] || a[1] > b[3] || a[3] < b[1]) { after = null; }
+                }
+                body = {kind: 'step', check: rule.check, backwards: backwards, after: after, cursor: null, waived: filter(), bbox_um: query ? query.bbox : null};
+            }
+            cancel('focus'); const t = task('step'); stepBusy = true; rowFocus = false;
+            navigationButtons(); info('Searching the current rule…');
+            try {
+                const page = await read('step', t, c, body); if (!page) { return; }
+                cursor(page.scanned);
+                if (P.compare(page.scanned, '262144') > 0 || page.hit === undefined || page.next === undefined || (page.hit !== null && page.next !== null)) { throw new Error('Invalid DRC step response'); }
+                if (page.next !== null) {
+                    cursor(page.next.next); P.counter(page.next.remaining);
+                    if (page.scanned === '0' || (body.cursor && P.compare(page.next.remaining, body.cursor.remaining) >= 0)) { throw new Error('DRC step cursor did not progress'); }
+                    stepContinuation = Object.assign({}, body, {after: null, cursor: page.next});
+                    el('drc-step-continue').hidden = false;
+                    info('Search incomplete · ' + page.scanned + ' slots checked. Continue search to resume; no error was skipped.');
+                    return;
+                }
+                stepContinuation = null; el('drc-step-continue').hidden = true;
+                if (page.hit === null) { info('No matching errors in the current rule.'); return; }
+                const r = validateRows([page.hit])[0];
+                cursor(r.points);
+                if (r.check !== body.check || (body.waived !== null && (r.status === 1) !== body.waived)) { throw new Error('DRC step filter mismatch'); }
+                const existing = rows.some(function (v) { return v.check === r.check && v.local === r.local; });
+                rowFocus = !!focusRow;
+                if (!existing) {
+                    remember(previousErrors, errorStart); errorStart = query ? {check: r.check, error: r.local} : r.local;
+                    rows = [r]; errorNext = null; renderErrors(); loadErrors();
+                }
+                const allowFocus = !c.pending && !current().pending && current().state.state_rev === c.state.state_rev;
+                select(r, false, allowFocus);
+                info(allowFocus || !jumpActive ? 'Read-only · review files are never changed.' : 'View changed during search; selected without moving.');
+            } catch (e) { failure('step', t, c, e); }
+            finally { if (valid('step', t, c)) { stepBusy = false; navigationButtons(); } }
         }
         function panelData() {
             if (query && !query.bbox) { return null; }
             return {search: el('drc-search').value.trim(), rule_start: ruleStart, check: rule ? rule.check : null,
                 error_start: query ? '0' : errorStart, query: query ? {bbox_um: query.bbox, state_rev: query.rev, cursor: errorStart} : null,
                 waived: filter(), selected: selected ? {check: selected.check, error: selected.local} : null,
-                markers: el('drc-markers').checked, shown: shown, jump_scale: jumpScale === null ? null : String(jumpScale), zoom_lock: zoomLock};
+                markers: el('drc-markers').checked, shown: shown, jump_scale: jumpScale === null ? null : String(jumpScale), zoom_lock: zoomLock,
+                jump_active: jumpActive, focus_visible: focusVisible};
         }
         function savePanel() {
             if (restoring || !current()) { return; }
@@ -239,12 +324,14 @@
                 if (!data) { await loadRules(undefined, true); return; }
                 if (typeof data.search !== 'string' || new TextEncoder().encode(data.search).length > 256 ||
                     (data.waived !== null && typeof data.waived !== 'boolean') ||
-                    !['markers','shown','zoom_lock'].every(function (k) { return typeof data[k] === 'boolean'; })) { throw new Error('Invalid saved review state'); }
+                    !['markers','shown','zoom_lock','jump_active','focus_visible'].every(function (k) { return typeof data[k] === 'boolean'; }) ||
+                    (data.jump_active && !data.focus_visible) || ((data.jump_active || data.focus_visible) && !data.selected)) { throw new Error('Invalid saved review state'); }
                 ruleStart = cursor(data.rule_start); errorStart = cursor(data.error_start);
                 el('drc-search').value = data.search; el('drc-waived').value = data.waived === null ? 'all' : data.waived ? 'waived' : 'unwaived';
                 el('drc-markers').checked = data.markers;
                 if (shown !== data.shown) { shown = data.shown; el('drc-panel').hidden = !shown; el('drc-toggle').setAttribute('aria-expanded', String(shown)); o.resize(); }
                 jumpScale = data.jump_scale === null ? null : Number(P.decimal(data.jump_scale)); zoomLock = data.zoom_lock;
+                jumpActive = data.jump_active; focusVisible = data.focus_visible;
                 if (jumpScale !== null && !(jumpScale > 0)) { throw new Error('Invalid saved zoom scale'); }
                 if (data.query) { P.bbox(data.query.bbox_um); P.counter(data.query.state_rev);
                     cursor(data.query.cursor.check); cursor(data.query.cursor.error);
@@ -262,7 +349,8 @@
                     const ref = data.selected; cursor(ref.check); cursor(ref.error);
                     const page = await read('restore', t, c, {kind: 'geometry', check: ref.check, error: ref.error, start: '0', limit: 1}); if (!page) { return; }
                     selected = validateRows([page])[0]; points = null; pointsReady = false;
-                    el('drc-selected').textContent = 'Global ' + selected.global + ' · bounding-box preview'; geometry(selected);
+                    el('drc-selected').textContent = 'Global ' + selected.global + (focusVisible ? ' · bounding-box preview' : ' · focus cleared; n/p continues without moving the view.');
+                    if (focusVisible) { geometry(selected); }
                 }
             } finally {
                 if (valid('restore', t, c)) { restoring = false; renderRules(); renderErrors(); contextChanged(); }
@@ -270,6 +358,9 @@
         }
         function restoreState() {
             const c = current(); if (!c) { return; }
+            // Cancel immediately, not after the panel GET completes. A slow
+            // previous focus/step must not move the view during restoration.
+            cancelStep(); ['focus', 'geometry', 'rules', 'errors', 'description', 'restore'].forEach(cancel);
             const key = contextKey(c); restoring = true; navigationButtons(); renderRules(); renderErrors();
             return persistence.attach({path: '/api/v1/drc/' + registration.id + '/views/' + c.id + '/panel',
                 revision: registration.revision, view: c.id}).then(function () {
@@ -301,35 +392,33 @@
                     if (registration.phase === 'opening') { timer = setTimeout(refresh, 500); }
                 }
                 contextChanged();
-                if (selected && !pointsReady && current()) { geometry(selected); }
+                if (focusVisible && selected && !pointsReady && current()) { geometry(selected); }
             } catch (e) { if (!t.cancelled) { info(e.message); } }
         }
         el('drc-search-form').onsubmit = function (e) { e.preventDefault(); ruleStart = '0'; previousRules.length = 0; loadRules(); };
         el('drc-rule-prev').onclick = function () { if (previousRules.length) { ruleStart = previousRules.pop(); loadRules(); } };
         el('drc-rule-next').onclick = function () { if (ruleNext !== null) { remember(previousRules, ruleStart); ruleStart = ruleNext; loadRules(); } };
-        el('drc-error-prev').onclick = function () { if (previousErrors.length) { errorStart = previousErrors.pop(); loadErrors(); } };
-        el('drc-error-next').onclick = function () { if (errorNext !== null) { remember(previousErrors, errorStart); errorStart = errorNext; loadErrors(); } };
-        el('drc-first').onclick = function () { previousErrors.length = 0; errorStart = query ? {check: '0', error: '0'} : '0'; loadErrors(); };
+        el('drc-error-prev').onclick = function () { cancelStep(); if (previousErrors.length) { errorStart = previousErrors.pop(); loadErrors(); } };
+        el('drc-error-next').onclick = function () { cancelStep(); if (errorNext !== null) { remember(previousErrors, errorStart); errorStart = errorNext; loadErrors(); } };
+        el('drc-first').onclick = function () { cancelStep(); previousErrors.length = 0; errorStart = query ? {check: '0', error: '0'} : '0'; loadErrors(); };
         el('drc-waived').onchange = function () { clearSelection(); el('drc-first').onclick(); };
         el('drc-in-view').onclick = function () {
             const c = current(); if (!c || c.pending) { info('Wait for the current view edit.'); return; }
             query = {bbox: null, rev: c.state.state_rev}; errorStart = {check: '0', error: '0'}; previousErrors.length = 0; clearSelection(); loadErrors();
         };
-        el('drc-frame').onclick = function () { if (selected) { focus(selected, true); } };
+        el('drc-frame').onclick = function () { if (selected) { cancelStep(); select(selected, true); } };
+        el('drc-step-prev').onclick = function () { step(true, false, true); };
+        el('drc-step-next').onclick = function () { step(false, false, true); };
+        el('drc-step-continue').onclick = function () { step(false, true, true); };
         el('drc-clear').onclick = clearSelection;
         el('drc-markers').onchange = function () { paintLater(); savePanel(); };
         el('drc-toggle').onclick = function () { shown = !shown; el('drc-panel').hidden = !shown; el('drc-toggle').setAttribute('aria-expanded', String(shown)); o.resize(); savePanel(); };
         el('drc-reload').onclick = restoreState;
         return {init: refresh, contextChanged: contextChanged, paint: paint, clear: clearSelection,
             key: function (key) {
-                if (key === 'Escape' && selected) { clearSelection(); return true; }
-                if ((key === 'n' || key === 'p') && selected) {
-                    const i = rows.findIndex(function (r) { return r.check === selected.check && r.local === selected.local; });
-                    const j = i + (key === 'n' ? 1 : -1);
-                    if (i >= 0 && j >= 0 && j < rows.length) { select(rows[j], false); }
-                    else { info('End of this error page. Use the page arrows to continue.'); }
-                    return true;
-                } return false;
+                if (key === 'Escape') { return endFocus(); }
+                if ((key === 'n' || key === 'p') && rule && current()) { step(key === 'p', false, false); return true; }
+                return false;
             },
             stop: function () { stopped = true; persistence.close(); bound = ''; cancelAll(); clearTimeout(timer); if (painting !== null) { o.window.cancelAnimationFrame(painting); painting = null; } overlay.hidden = true; },
             resume: function () { stopped = false; return refresh(); }};

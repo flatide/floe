@@ -25,9 +25,16 @@ pub(super) struct Data {
     pub shown: bool,
     pub jump_scale: Option<String>,
     pub zoom_lock: bool,
+    pub jump_active: bool,
+    pub focus_visible: bool,
 }
 impl Data {
     pub fn validate(&self) -> std::result::Result<(), Failure> {
+        if self.jump_active && !self.focus_visible
+            || (self.jump_active || self.focus_visible) && self.selected.is_none()
+        {
+            return Err("invalid_drc_request");
+        }
         if self.search.len() > 256 {
             return Err("invalid_drc_request");
         }
@@ -146,7 +153,7 @@ impl Panel {
 mod tests {
     use super::*;
     fn data() -> Data {
-        serde_json::from_value(json!({"search":"","rule_start":"0","check":null,"error_start":"0","query":null,"waived":null,"selected":null,"markers":true,"shown":true,"jump_scale":null,"zoom_lock":false})).unwrap()
+        serde_json::from_value(json!({"search":"","rule_start":"0","check":null,"error_start":"0","query":null,"waived":null,"selected":null,"markers":true,"shown":true,"jump_scale":null,"zoom_lock":false,"jump_active":false,"focus_visible":false})).unwrap()
     }
     #[test]
     fn revision_retries_and_conflicting_old_tab_are_not_last_writer_wins() {
@@ -166,6 +173,10 @@ mod tests {
     #[test]
     fn bounded_typed_state_keeps_u64_and_rejects_nonfinite_coordinates() {
         let mut d = data();
+        d.jump_active = true;
+        assert!(d.validate().is_err());
+        d.focus_visible = true;
+        assert!(d.validate().is_err());
         d.selected = Some(CursorDto {
             check: "0".into(),
             error: "9007199254740993".into(),

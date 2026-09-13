@@ -50,7 +50,7 @@ const geom=(r,pts,start,total,next)=>({check:r.check,local:r.local,global:r.glob
     precision:'1000',points_dbu:pts,start:String(start),total:String(total),next});
 (async()=>{
     const initialized=panel.init();
-    reply('catalog',{drc:{id:'drc-id',revision:'r1',source_id:'source',title:'synthetic',phase:'ready',metadata:{checks:'1',errors:'9007199254740996'}}});
+    reply('catalog',{drc:{id:'drc-id',revision:'r1',source_id:'source',title:'synthetic',phase:'ready',metadata:{checks:'2',errors:'9007199254740996'}}});
     await initialized;
     assert.equal(el('drc-panel').hidden,false);
     reply('rules',{rows:[{check:'0',name:'MASK <img src=x>',name_truncated:false,errors:'9007199254740996',waived:'1'}],next:null});
@@ -63,6 +63,8 @@ const geom=(r,pts,start,total,next)=>({check:r.check,local:r.local,global:r.glob
     panel.paint(base,{pixels:[100,80],dpr:2,left:.5,top:0});
     assert.equal(el('drc-canvas').style.width,'50px');
     el('drc-errors').children[0].onclick();
+    assert(!calls.some(c=>!c.done&&c.body&&c.body.body.kind==='focus'),'first click moved the view');
+    el('drc-errors').children[0].ondblclick();
     const first=pending('focus');assert.equal(first.body.state_rev,'1');assert.equal(first.body.body.fit,true);
     reply('geometry',geom(a,new Array(2048).fill(['10000','10000']),0,5000,'2048'));await tick();
     paint();assert(drawing.some(c=>c[0]==='strokeRect'));assert(!drawing.some(c=>c[0]==='closePath'),'incomplete polygon was closed');
@@ -108,7 +110,7 @@ const geom=(r,pts,start,total,next)=>({check:r.check,local:r.local,global:r.glob
     // Restoring server state reloads bounded pages/selected geometry without
     // running a focus/goto or writing the restored state back as a new edit.
     savedPanel={search:'MASK',rule_start:'0',check:'0',error_start:'0',query:null,waived:true,
-        selected:{check:b.check,error:b.local},markers:false,shown:true,jump_scale:'0.2',zoom_lock:true};
+        selected:{check:b.check,error:b.local},markers:false,shown:true,jump_scale:'0.2',zoom_lock:true,jump_active:true,focus_visible:true};
     const beforeRestoreNav=nav.length,beforeRestoreSaves=savedChanges.length;
     view={...view,source:'source',id:'view-c'};panel.contextChanged();
     reply('rules',{rows:[{check:'0',name:'MASK',name_truncated:false,errors:'9007199254740996',waived:'1'}],next:null});await tick();
@@ -125,7 +127,7 @@ const geom=(r,pts,start,total,next)=>({check:r.check,local:r.local,global:r.glob
     el('drc-markers').checked=true;el('drc-markers').onchange();
     assert.deepEqual(savedChanges.at(-1).selected,{check:b.check,error:b.local});
     assert.equal(savedChanges.at(-1).zoom_lock,true);assert.equal(savedChanges.at(-1).jump_scale,'0.2');
-    savedPanel={...savedPanel,selected:null,query:{bbox_um:['1.25','2','60','70'],state_rev:'1',cursor:{check:'0',error:'100'}}};
+    savedPanel={...savedPanel,selected:null,jump_active:false,focus_visible:false,query:{bbox_um:['1.25','2','60','70'],state_rev:'1',cursor:{check:'0',error:'100'}}};
     const queryReload=el('drc-reload').onclick();
     reply('rules',{rows:[],next:null});await tick();
     reply('rule',{name:'MASK',description:'query restoration',errors:'9007199254740996',waived:'1'});await tick();
@@ -134,6 +136,22 @@ const geom=(r,pts,start,total,next)=>({check:r.check,local:r.local,global:r.glob
     reply('query',{rows:[],next:{check:'0',error:'200'}});await queryReload;await tick();
     assert.equal(el('drc-error-next').disabled,false);assert(el('drc-result-info').textContent.includes('earlier viewport'));
     assert.equal(nav.length,beforeRestoreNav);
+    // Selecting another rule from a frozen all-rule query changes the open
+    // rule, but never changes that query's box. n/p then stays in THAT rule.
+    const other={...b,check:'1',local:'0',global:'9007199254740996'};
+    el('drc-error-next').onclick();reply('query',{rows:[other],next:null});await tick();
+    el('drc-errors').children[0].onclick();assert.equal(pending('rule').body.body.check,'1');
+    reply('rule',{name:'OTHER',description:'other rule',errors:'2',waived:'2'});
+    reply('geometry',geom(other,[['40000','10000'],['60000','30000']],0,2,null));await tick();
+    panel.key('n');const stepping=pending('step');
+    assert.equal(stepping.body.body.check,'1');assert.equal(stepping.body.body.after,'0');
+    assert.deepEqual(stepping.body.body.bbox_um,savedPanel.query.bbox_um);
+    const nextOther={...other,local:'1',global:'9007199254740997'};
+    reply('step',{hit:nextOther,next:null,scanned:'1'});await tick();
+    assert.deepEqual(pending('query').body.body.cursor,{check:'1',error:'1'});
+    reply('query',{rows:[nextOther],next:null});
+    reply('geometry',geom(nextOther,[['40000','10000'],['60000','30000']],0,2,null));await tick();
+    assert.equal(el('drc-rule-title').textContent,'OTHER');assert.equal(nav.length,beforeRestoreNav);
     panel.stop();assert.equal(raf.size,0);
     global.setTimeout=nativeSetTimeout;global.clearTimeout=nativeClearTimeout;
     console.log('WEB DRC UI: ALL OK (projection, u64, text safety, stale/cancel, complete geometry, focus/zoom, paging, in-view, cleanup)');

@@ -278,8 +278,8 @@ offline 테스트·Linux musl release link로 재확인했다. QA 세션은 End 
 
 ## 6. M2a-5a: 현재 규칙의 유계 순회와 좌표 읽기 비용
 
-`Pack::step`과 `body.kind=step` 읽기 API를 추가했다. 아직 UI 단축키에는
-연결하지 않은 코어/API 단계이며 §3의 페이지 내 순회 제한은 다음 단계에서 바꾼다.
+`Pack::step`과 `body.kind=step` 읽기 API를 추가했다. 이 커밋은 코어/API 단계이며
+UI 연결과 §3의 페이지 내 순회 제한 변경은 아래 M2a-5b에서 진행했다.
 
 - 요청은 `check`, `backwards`, `after`(없으면 앞/뒤 첫 오류부터), `waived`,
   선택적인 `bbox_um`이다. **한 규칙 안에서** 동일 필터를 만족하는 다음 오류를
@@ -314,13 +314,61 @@ Rust 1.89/빈 registry 오프라인 테스트·Linux musl release link 통과.
 field Firefox/ETX와 새 단축키 UI의 검증을 이 API 단계의 완료에 포함하지 않는다.
 기존 native 경고는 남아 있다.
 
-## 7. 다음 경계
+## 7. M2a-5b: 페이지 횡단 UI와 선택/이동 모드
 
-1. 현재 규칙/필터 안의 페이지 횡단 순회는 별도 작은 단계로 연결한다.
-   GTK의 최초 click=선택/초점, double-click=이동 모드, 이동 모드의 click/n/p=이동,
-   Escape 뒤 n/p=뷰 이동 없이 초점 변경도 조작 parity로 남아 있다
-   (현 M2a-3 click은 항상 선택+goto). Escape는 viewport 복원이 아니라
-   mark/격리 등을 종료하고 순회 위치를 유지하는 동작이다.
+§6의 `step`을 n/p, 오류 행의 위/아래 키, Previous/Next error 버튼에 연결했다.
+기존 페이지 버튼과 오류 순회 버튼을 구별한다. 이 항목이 §3의 click/페이지 내
+순회 한계를 대체하며, 전체 DRC 조작 parity 완료를 뜻하지는 않는다.
+
+- 현재 규칙과 waive 필터 안에서 앞/뒤로 순회하고 끝에서는 처음으로 돌아간다.
+  대상이 현재 페이지 밖이면 그 오류부터 최대64개를 다시 읽는다. 모든 이전
+  페이지를 모아 rank를 계산하지 않으며, 정확히 GTK의 grid page 배치와 같지는 않다.
+  In view 결과에서 다른 규칙의 오류를 선택하면 열린 규칙도 그 규칙으로 바꾸고,
+  n/p는 그 규칙만 순회한다. 공간 조건은 최초 query bbox에 계속 고정된다.
+- 최초 click은 선택/outline만 바꾸며 native view를 이동하지 않는다.
+  double-click 또는 Frame error가 이동 모드를 시작한다. 그 뒤 click/n/p는
+  오류로 이동하며 사용자가 바꾼 zoom은 기존 zoom-lock 규칙으로 유지한다.
+  Escape는 이동 모드와 선택 outline을 끝내지만 순회 위치는 보존한다. 이후 n/p는
+  현재 화면을 옮기지 않고 다음 오류를 선택한다. Clear는 위치까지 초기화한다.
+- 단일 click 때 오류 button DOM을 교체하지 않아 브라우저가 뒤따르는 실제
+  double-click을 같은 대상에 전달할 수 있다. 페이지 경계를 넘는 키 조작과
+  순회 버튼은 결과 오류 행에 focus를 유지한다. viewport의 화살표 pan은 그대로다.
+- 순회 요청은 하나만 진행하며 key repeat를 무제한 대기시키지 않는다.
+  empty+next에는 **Search incomplete / Continue search**를 표시하고 사용자의
+  명시적인 클릭으로만 이어 읽는다. cursor 진행/번호/범위를 검사한다. 이 미완료
+  검색 cursor 자체는 panel state에 저장하지 않으며 reload 시 폐기한다.
+- 필터/규칙/선택/새 query/Escape/종료는 이전 조회를 취소한다. 이동 모드라도
+  검색 동안 더 새 pan/zoom이 적용되면 오류만 선택하고 늦은 goto로 덮어쓰지 않는다.
+  DRC geometry/focus의 이전 응답도 기존 task/view/revision 검사로 버린다.
+  Reload review는 저장 상태 GET을 기다리기 **전에** 진행 중인 요청을 취소한다.
+- 서버의 per-view panel state에 `jump_active`, `focus_visible`을 추가한다.
+  모드와 표시 해제 상태를 복원하지만 복원 자체는 goto하지 않는다.
+  선택 없이 활성화된 모드나 표시 해제+이동 모드 같은 모순은 거부한다.
+  pack/waive/원본 파일이나 native wire는 변경하지 않는다.
+
+게이트: ES2017/대역 DOM에서 63→64·처음↔끝·waive·미완료 수동 재개,
+100회 key repeat의 1요청 상한, 취소 후 늦은 응답, 더 새 pan 우선,
+필터 변경/다른 query 규칙·고정 bbox, 복원의 native 비이동을 검사한다.
+기존 2^53 초과 ID/좌표 paging/overlay 회귀도 유지한다.
+
+실제 Chrome + valmini 기반 260개 합성 오류: 64번 단일 click과 65번 ArrowDown은
+gen2/484.599µm를 유지했고 키보드 focus가 새 행에 남았다. 65번 double-click은
+3.81695µm로 이동했으며 이동 모드의 n은 66번으로 이동했다. Escape 뒤 n은
+67번을 선택하면서 gen6/6.89152µm를 유지했다. 페이지/선택 reload, 첫↔끝 순회,
+waived 무결과, focus cleared 상태 reload도 확인했고 콘솔 warn/error는 없었다.
+브라우저 QA는 현장 Firefox/ETX/G2나 실칩 대형 DRC 응답 시간 검증을 대신하지 않는다.
+
+2026-09-13: 전체 `sh tools/validate_rust.sh`는 `RUST VALIDATION: ALL OK`.
+이후 순회 버튼의 결과 행 focus와 복원 시작 시 즉시 취소 보완까지 ES2017/JS 게이트,
+fmt/strict clippy·최종 native build·Rust 1.89 Linux musl release link로 확인했다.
+Rust 1.89 오프라인 단위/transport 테스트도 통과했다. 최종 버튼 focus는 실제
+Chrome에서 Previous error→130번 행 focus→n→1번 행 focus로 재확인했다.
+각 QA 서버는 End session으로 exit0 종료했다. 기존 native 경고는 남아 있다.
+
+## 8. 다음 경계
+
+1. marker hit-test/box-select, SVRF metric/type 필터·layer isolate·CD overlay는
+   아직 미이관이다. Escape의 ruler/격리 우선순위도 해당 기능과 함께 확장한다.
 2. ASCII/index 흐름·기존 notes·상세 측정/룰 매핑은 각각 parity gate와 함께 확장.
 3. 공유는 설계/DRC에 묶인 읽기 capability, 발급/만료/폐기·follow/independent
    state를 별도 구현·검증. 아직 shares=false, loopback-only다.

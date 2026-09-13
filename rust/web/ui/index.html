@@ -90,8 +90,10 @@
       <div class="drc-actions"><button id="drc-in-view" title="Query all rules in the current viewport">In view</button><button id="drc-first" title="First error page; back history retains 128 pages">First page</button><label class="check"><input id="drc-markers" type="checkbox" checked> Markers</label></div>
       <p id="drc-result-info" class="note">No rule selected.</p>
       <div id="drc-errors" class="drc-errors" aria-label="DRC errors"></div>
-      <div class="pagination"><button id="drc-error-prev" aria-label="Previous error page" disabled>←</button><span>n / p · within page</span><button id="drc-error-next" aria-label="Next error page" disabled>→</button></div>
-      <div class="drc-selection"><p id="drc-selected" class="note">Select an error to inspect and go to it.</p><div class="button-row"><button id="drc-frame" disabled>Frame error</button><button id="drc-clear" disabled>Clear</button></div></div>
+      <div class="pagination"><button id="drc-error-prev" aria-label="Previous error page" disabled>←</button><span>Error pages</span><button id="drc-error-next" aria-label="Next error page" disabled>→</button></div>
+      <div class="button-row"><button id="drc-step-prev" title="Previous matching error in this rule, wrapping (p)" disabled>Previous error</button><button id="drc-step-next" title="Next matching error in this rule, wrapping (n)" disabled>Next error</button></div>
+      <button id="drc-step-continue" hidden>Continue search</button>
+      <div class="drc-selection"><p id="drc-selected" class="note">Click to inspect · double-click to go to an error.</p><div class="button-row"><button id="drc-frame" disabled>Frame error</button><button id="drc-clear" disabled>Clear</button></div></div>
       <p id="drc-message" class="note" role="status">Read-only review</p>
       <p id="drc-sync-status" class="note" role="status"></p>
       <button id="drc-reload" class="quiet" title="Discard unsynchronized local panel changes and restore this view's server state">Reload review</button>
