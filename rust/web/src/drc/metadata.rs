@@ -28,6 +28,9 @@ impl Metadata {
     pub fn summary(&self) -> &Value {
         &self.summary
     }
+    pub fn has_type(&self, metric: &str) -> bool {
+        self.types.iter().any(|(name, _)| name == metric)
+    }
     pub fn matches(&self, name: &str, metric: &str) -> bool {
         // Empty metadata deliberately offers no types, not an "other" match
         // for every check. An unmatched check in nonempty metadata is other.

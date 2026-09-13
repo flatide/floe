@@ -24,6 +24,7 @@ fn main() {
         "src/drc/http.rs",
         "src/drc/read.rs",
         "src/drc/panel.rs",
+        "src/drc/metadata.rs",
         "src/drc/selection.rs",
     ] {
         println!("cargo:rerun-if-changed={path}");

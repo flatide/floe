@@ -85,9 +85,12 @@
     <aside id="drc-panel" class="drc-panel" aria-label="DRC review" hidden>
       <div class="drc-heading"><h2>DRC review <span>READ ONLY</span></h2><strong id="drc-title">DRC results</strong><p id="drc-summary" class="note"></p></div>
       <form id="drc-search-form" class="drc-search"><label for="drc-search" class="sr-only">Search DRC rules</label><input id="drc-search" placeholder="Search rule names" maxlength="256"><button id="drc-search-submit">Search</button></form>
+      <div class="form-row"><label for="drc-type">Rule type</label><select id="drc-type" disabled><option value="">All types</option></select></div>
+      <div class="pagination"><button id="drc-type-prev" aria-label="Previous type page" disabled>←</button><span>Type pages</span><button id="drc-type-next" aria-label="Next type page" disabled>→</button></div>
+      <p id="drc-type-info" class="note" role="status"></p>
       <div id="drc-rules" class="drc-rules" aria-label="DRC rules">Waiting for DRC metadata…</div>
       <div class="pagination"><button id="drc-rule-prev" aria-label="Previous rule page" disabled>←</button><span>Rule pages</span><button id="drc-rule-next" aria-label="Next rule page" disabled>→</button></div>
-      <details class="drc-description"><summary id="drc-rule-title">Choose a rule</summary><pre id="drc-description"></pre></details>
+      <details class="drc-description"><summary id="drc-rule-title">Choose a rule</summary><pre id="drc-description"></pre><pre id="drc-rule-metadata"></pre></details>
       <div class="form-row"><label for="drc-waived">Errors</label><select id="drc-waived"><option value="all">All statuses</option><option value="unwaived">Not waived</option><option value="waived">Waived</option></select></div>
       <div class="drc-actions"><label class="check" title="Only errors of this rule intersecting the live viewport"><input id="drc-in-view" type="checkbox"> In view</label><label class="check" title="Only this rule’s selected errors; an empty selection shows no errors"><input id="drc-selected-only" type="checkbox"> Selected</label><label class="check"><input id="drc-markers" type="checkbox" checked> Markers</label><button id="drc-first" title="First error page; back history retains 128 pages">First page</button></div>
       <p id="drc-result-info" class="note">No rule selected.</p>
@@ -103,6 +106,7 @@
       <div class="button-row"><button id="drc-step-prev" title="Previous matching error in this rule, wrapping (p)" disabled>Previous error</button><button id="drc-step-next" title="Next matching error in this rule, wrapping (n)" disabled>Next error</button></div>
       <button id="drc-step-continue" hidden>Continue search</button>
       <div class="drc-selection"><p id="drc-selected" class="note">Click to inspect · double-click to go to an error.</p><div class="button-row"><button id="drc-frame" disabled>Frame error</button><button id="drc-clear" disabled>Clear</button></div></div>
+      <section class="drc-constraint" aria-label="SVRF constraint comparison"><pre id="drc-comparison" role="status">Select an error to compare its parsed bound.</pre><p class="note">Parsed metadata and geometric measurement only · not a sign-off or waive decision.</p></section>
       <section class="drc-cd" aria-label="Automatic CD measurements">
         <p id="drc-cd-title" class="note" role="status">Go to an error to measure it.</p>
         <ul id="drc-cd-values"></ul>

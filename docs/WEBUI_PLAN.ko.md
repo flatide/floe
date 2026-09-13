@@ -27,6 +27,8 @@ M2a-8a에서 규칙별 DRC 선택 집합과 현재 페이지 후보 bbox 판정�
 M2a-8b에서 두 클릭 박스·Shift/Ctrl/Cmd 선택과 규칙별 금색 마커·세션 복원을 연결했다.
 M2a-9a에서 현재 규칙의 Selected·waive·live viewport 교집합 목록/순회 코어와 인증 API를 추가했다(UI는 다음 단계).
 M2a-9b에서 Selected·현재 규칙 live In view UI, 유계 추종/복원·마커 hover를 연결했다.
+M2a-10a/b에서 SVRF sidecar 읽기·타입/규칙 필터·측정 비교 코어/CLI/API를 연결했다.
+M2a-10c에서 웹 타입 선택/상세/비교와 성공한 오류 이동 시 In view 해제를 연결했다.
 전체 조작 parity와 M0/Firefox/ETX 현장 검증은 아직 완료되지 않았다.
 상세 범위는 [M1b 기록](WEBUI_M1B.ko.md)과 [M2 기록](WEBUI_M2.ko.md). 여기의 M0~M5는 **웹 전환 단계**이며
 jobdeck/occupancy의 같은 이름 단계와 별개다. 개발 기준과 합류 규칙은 §11.
@@ -485,6 +487,7 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
   M2a-9는 Selected/waive/live In view 교집합 목록·순회·hover다.
   M2a-10a는 SVRF sidecar 읽기·타입/derivation·측정 비교 코어/CLI이며,
   M2a-10b는 등록된 metadata/타입·규칙 필터·scalar 비교 API다.
-  원본 SVRF parser와 웹 패널 연결은 남아 있다.
+  M2a-10c는 웹 타입/규칙 상세/측정 비교와 In view 해제다.
+  원본 SVRF parser와 layer isolate는 남아 있다.
   공유와 고급 DRC 조작은 남아 있다.
   CLI 전체/웹 전환 완료가 아니며 GTK/실측 브랜치는 유지한다.

@@ -867,13 +867,72 @@ Rust1.89 빈 registry 오프라인 테스트 및 Linux musl release link를 통�
 renderd 버전과 GTK 기본값, loopback/auth 모델은 바꾸지 않았다. Linux 실행이나
 현장 Firefox/ETX PASS를 뜻하지 않는다.
 
-## 17. 다음 경계
+## 17. M2a-10c: 웹 타입 필터·규칙 상세·측정 비교
 
-1. SVRF sidecar 코어/actor/API는 §15~16까지 이관했다. 웹 패널의 metric/type 필터·
-   비교값 표시·layer isolate는 아직 미연결이다. 기존 GTK의 jump 시 In view 해제도
-   함께 parity 검증해야 한다.
+`view --drc PACK.ice --drc-rules FILE`의 등록 snapshot을 웹 DRC 패널에 연결했다.
+원본 SVRF parsing이나 sidecar 자동 탐색은 추가하지 않았다.
+
+- `Rule type`은 canonical metric 순서와 규칙 수를 보여 준다. 없는/빈 metadata는
+  타입 선택을 비활성화하며 원인을 표시한다. 타입은 32개씩 **수동 페이지 전환**하고,
+  현재 타입이 다른 페이지에 있어도 별도 selected option으로 유지한다. DOM은
+  All+현재 타입+페이지32개로 유계이며 이전 페이지 이력은128개다. 첫 복원은
+  한 페이지만 읽고 전체 타입 catalog를 자동으로 소진하지 않는다.
+- 규칙 목록에 type∩검색∩waive 조건을 함께 보낸다. 서버는 필터 후32개를 반환하고
+  기존4096 input-slot scan 제한에 걸린 empty+next는 계속 페이지가 있음을 표시한다.
+  타입 변경은 GTK처럼 **규칙 목록만** 바꾸며 이미 열린 규칙·규칙별 선택 집합은
+  유지한다(현재 규칙이 필터 목록에 없을 수도 있다). waive 변경은 기존 그룹 해제
+  동작을 유지하며 이제 규칙 목록의 zero-count 숨김에도 적용된다.
+- 규칙 펼침에 원문 constraint, 미해석 bound, layers/GDS wildcard, unresolved,
+  6단계가 아닌 **최대6개 BFS 파생식**과 잔여 표시를 추가했다. 전부 textContent이며
+  HTML/수식/경로를 실행하지 않는다. 1 MiB를 넘는 metadata는 기존413 오류이지
+  일부가 정상인 것처럼 표시하지 않는다.
+- 선택 오류에는 서버의 scalar 비교값(측정값·비교 연산자·기준·Δ·%·단위)을 표시한다.
+  부동소수 값은 서버의 round-trip 문자열을 유지한다. 복잡한 형상/알 수 없는 bound는
+  unsupported 상태이며 sign-off/waive 여부를 판정하지 않는다. 측정 대상은 **선택 오류**;
+  CD 치수선은 §11처럼 **마지막 이동 오류**이므로 둘은 의도적으로 다를 수 있다.
+  pan 시 metadata/comparison을 다시 읽지 않으며 geometry 전송량도 늘리지 않는다.
+- 성공한 오류 이동은 viewport를 바꾸기 **직전** live `In view`를 해제한다.
+  checkbox의 기존 핸들러(선택까지 지움)를 호출하지 않고 현재 선택·그룹·jump mode를
+  보존한 채 그 오류 cursor에서 한 페이지만 다시 읽는다. 단순 선택 또는 거부/취소된
+  오래된 focus 응답은 필터를 바꾸지 않는다. Saved viewport query와는 별도다.
+
+패널 상태에 `metric: string|null`을 추가했다. 생략은 All로 읽고 새 응답/클라이언트
+저장은 null을 명시한다. 1..64 UTF-8 bytes 및 **등록 snapshot에 존재하는 타입**인지
+기존 actor에서 검증한다. 없는 타입/metadata는400이고, 같은 base의 서로 다른 변경은
+409다. view/source/revision 경계, read-only pack/waive 계약, 추가 CPU/메모리 예약량은
+§16 그대로다. 복원은 타입 페이지·규칙·선택 비교를 다시 읽되 navigation을 실행하지
+않는다. 교체된 rule/selection/source의 느린 결과는 취소·무시한다.
+
+검증:
+
+- `drc-svrf.test.cjs`: 70개 타입의 수동 페이지/고정 DOM, 다른 페이지 타입 복원,
+  type/name/waive 요청·그룹 보존, empty scan continuation, metadata HTML 안전성,
+  u64 오류 ID/미지원·잘못된 비교 DTO, 지연 description/comparison/types 취소,
+  In view 성공/실패 jump 순서, pan 무조회, 빈/없는 metadata. ES2017 및 기존
+  필터/선택/측정/마커/복원 테스트도 통과.
+- native `validate_web_svrf.py`에 metric 패널 CAS/retry/없는 타입 거부를 추가했다.
+  기존117개 규칙 필터·2,943개 비교와 HTTP DRC384 list/step 교집합도 재통과했다.
+- 로컬 Chrome 합성 valmini: width(1)/space(1)/other(1), 타입 선택 후 실제 규칙 목록,
+  Global132의 width0.273 µm vs <0.2 µm, 원문/파생식, In view 해제·선택 유지와
+  Reload review 복원(불필요한 goto 없음)을 실제 UI와 스크린샷으로 확인했다.
+  현장 Firefox/ETX 검증의 대체가 아니다.
+- 2026-09-13 전체 `sh tools/validate_rust.sh` ALL OK; KLayout13 PX+2 phase-exact+
+  14 style 통과. core65/app6/web24/transport8, fmt·전환 패키지 strict clippy,
+  Rust1.89 빈 registry offline 테스트·Linux musl release link도 통과했다.
+  브라우저 새로고침 복원 및 End session 후 프로세스 종료/세션 파일 제거도 확인했다.
+  기존 native/Pillow/GLib 경고는 남아 있으며 현장 Linux 실행을 검증한 것은 아니다.
+
+레이어 격리는 아직 미연결이다. 다음 단계에서는 source_gds를 **서버의 전체 레이어
+모델**과 매칭하고(브라우저 현재 페이지로 계산하지 않음), 첫 격리 전 가시성 snapshot을
+한 번만 저장하며 격리+goto를 한 번의 view 변경으로 적용해야 한다. jobdeck의 virtual
+level/TC 번호를 physical GDS 번호로 취급해서는 안 된다.
+
+## 18. 다음 경계
+
+1. SVRF sidecar 코어/actor/API·웹 type/상세/비교는 §15~17까지 이관했다.
+   layer isolate/복원과 한 번의 goto 적용은 다음 단계다.
    selected/live In view 목록 필터·순회·hover는 §13~14까지 구현했다.
-   손으로 그리는 ruler/격리와 Escape 우선순위도 M4에서 확장한다.
+   손으로 그리는 ruler와 그에 따른 Escape 우선순위는 M4에서 확장한다.
    현재 페이지 마커 정책 자체를 전체 pack 마커로 확대하지 않는다.
 2. ASCII/index 흐름·기존 notes·상세 측정/룰 매핑은 각각 parity gate와 함께 확장.
 3. 공유는 설계/DRC에 묶인 읽기 capability, 발급/만료/폐기·follow/independent

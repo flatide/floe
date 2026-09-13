@@ -110,6 +110,13 @@ pub(super) fn execute(
         }
         Command::ValidatePanel(data) => {
             data.validate_pack(p)?;
+            if data
+                .metric
+                .as_ref()
+                .is_some_and(|metric| !metadata.is_some_and(|m| m.has_type(metric)))
+            {
+                return Err(Error::input("unavailable SVRF type filter"));
+            }
             json!({})
         }
         Command::Step(request) => {

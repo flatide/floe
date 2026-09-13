@@ -17,6 +17,42 @@
         return p && {bbox: p.bbox, dbu: p.dbu, step: p.step,
             origin: [p.origin[0] + delta[0], p.origin[1] + delta[1]]};
     }
+    // These formatters never interpret rule text as markup or compute a DRC
+    // measurement in JS. Exact server scalars remain available in the text.
+    function metricName(s) {
+        if (typeof s !== 'string' || !s || new TextEncoder().encode(s).length > 64) { throw new Error('Invalid SVRF type'); }
+        return s;
+    }
+    function metadataText(v) {
+        if (!v) { return 'No SVRF metadata for this rule.'; }
+        const r = v.rule, lines = [], seen = new Set();
+        if (r.desc) { lines.push(r.desc); }
+        r.constraints.forEach(function (c) {
+            if (c.text && !seen.has(c.text)) { seen.add(c.text); lines.push('constraint: ' + c.text); }
+            if (c.value === null && c.raw) { lines.push('unresolved bound: ' + c.raw); }
+        });
+        if (r.layers.length) { lines.push('layers: ' + r.layers.join(', ')); }
+        if (r.source_gds.length) { lines.push('GDS: ' + r.source_gds.map(function (p) { return p[0] + '/' + (p[1] === null ? '*' : p[1]); }).join(', ')); }
+        if (r.unresolved.length) { lines.push('unresolved layers: ' + r.unresolved.join(', ')); }
+        if (v.derivations.length) {
+            lines.push('derivation:'); v.derivations.forEach(function (d) { lines.push('  ' + d.name + ' = ' + d.rhs); });
+            if (v.derivations_more) { lines.push('  … more derivations'); }
+        }
+        return lines.length ? lines.join('\n') : 'Matched SVRF rule has no parsed constraints.';
+    }
+    function comparisonText(v, r, P) {
+        if (!v || v.check !== r.check || v.local !== r.local || v.global !== r.global) { throw new Error('SVRF comparison belongs to another error'); }
+        const c = v.comparison;
+        if (c === null) { return 'No unambiguous measurement for a parsed bound.'; }
+        P.counter(c.constraint, true); metricName(c.metric);
+        if (!['<','<=','==','>','>=','!='].includes(c.op) || !['um','um2'].includes(c.unit)) { throw new Error('Invalid SVRF comparison'); }
+        ['measured','bound','delta'].forEach(function (k) { P.decimal(c[k]); });
+        if (c.percent !== null) { P.decimal(c.percent); }
+        const unit = c.unit === 'um2' ? 'µm²' : 'µm', signed = function (s) { return Number(s) >= 0 ? '+' + s : s; };
+        return 'Global ' + r.global + ' · ' + c.metric + ' · constraint ' + P.next(c.constraint) + '\n' +
+            'Measured ' + c.measured + ' ' + unit + ' vs ' + c.op + ' ' + c.bound + ' ' + unit + '\n' +
+            'Δ ' + signed(c.delta) + ' ' + unit + (c.percent === null ? '' : ' (' + signed(c.percent) + '%)');
+    }
     function bind(o) {
         const P = o.protocol, doc = o.document, el = function (id) { return doc.getElementById(id); };
         const overlay = el('drc-canvas'), ctx = overlay.getContext('2d');
@@ -30,6 +66,8 @@
         let boxMode = false, boxStart = null, boxEnd = null, pageReady = false;
         let groupRows = [], groupStamp = '';
         let filterTimer = null, filterStamp = '', restoreTurn = 0, hoverText = '';
+        let metric = null, typeStart = '0', typeNext = null, typeReady = false, typeBusy = false;
+        const previousTypes = [];
         // A canvas click selects without moving. Auto CD belongs to the last
         // accepted focus navigation, not necessarily the selected row.
         let cdTarget = null, cdGlobal = null, cdSegments = null, cdRemaining = 0, cdError = '';
@@ -62,6 +100,38 @@
         }
         function failure(key, t, c, e) { if (valid(key, t, c)) { info(e.message || String(e)); } }
         function cursor(s) { P.counter(s, true); return s; }
+        function hasMetadata() { return !!(registration && registration.metadata && registration.metadata.svrf); }
+        function renderTypes(list) {
+            const select = el('drc-type'); select.textContent = '';
+            function option(value, label) { const opt = doc.createElement('option'); opt.value = value; opt.textContent = label; select.appendChild(opt); }
+            option('', 'All types');
+            if (metric !== null && !list.some(function (t) { return t.metric === metric; })) { option(metric, metric + ' · selected'); }
+            list.forEach(function (t) { option(t.metric, t.metric + ' (' + t.checks + ')'); });
+            select.value = metric === null ? '' : metric; navigationButtons();
+        }
+        async function loadTypes(strict) {
+            typeReady = false;
+            if (!hasMetadata()) {
+                typeNext = null; el('drc-type-info').textContent = 'No SVRF metadata registered.'; renderTypes([]); return;
+            }
+            const c = current(); if (!c) { return; }
+            const t = task('types'), start = typeStart; typeBusy = true; navigationButtons();
+            try {
+                const v = await read('types', t, c, {kind: 'types', start: start, limit: 32}); if (!v) { return; }
+                cursor(v.total);
+                if (v.available !== true || v.total !== registration.metadata.svrf.type_count || !Array.isArray(v.rows) || v.rows.length > 32) { throw new Error('Invalid SVRF type page'); }
+                let end = start; v.rows.forEach(function () { end = P.next(end); });
+                if (P.compare(end, v.total) > 0 || v.next === null && end !== v.total ||
+                    v.next !== null && (!v.rows.length || cursor(v.next) !== end || P.compare(end, v.total) >= 0)) { throw new Error('Invalid SVRF type cursor'); }
+                const seen = new Set(); v.rows.forEach(function (r) { metricName(r.metric); cursor(r.checks); if (seen.has(r.metric)) { throw new Error('Duplicate SVRF type'); } seen.add(r.metric); });
+                typeNext = v.next; typeReady = v.total !== '0'; renderTypes(v.rows);
+                el('drc-type-info').textContent = v.total === '0' ? 'Metadata has no classified types.' :
+                    v.rows.length + '/' + v.total + ' types on this page · ' + registration.metadata.svrf.matched + '/' + registration.metadata.svrf.checks + ' rules matched';
+            } catch (e) {
+                if (valid('types', t, c)) { typeNext = null; renderTypes([]); el('drc-type-info').textContent = 'Type catalog unavailable · ' + e.message; }
+                if (strict) { throw e; }
+            } finally { if (valid('types', t, c)) { typeBusy = false; navigationButtons(); } }
+        }
         function bbox(b) {
             if (!Array.isArray(b) || b.length !== 4) { throw new Error('Invalid DRC bounds'); }
             const out = b.map(function (s) { return Number(P.decimal(s)); });
@@ -93,6 +163,9 @@
             el('drc-box').disabled = !available || !rule || !pageReady || !groups.ready() || !el('drc-markers').checked;
             el('drc-group-clear').disabled = !available || !rule || !groups.ready() || !groups.ids(rule.check).length;
             el('drc-waived').disabled = !available || !groups.ready();
+            el('drc-type').disabled = !available || !typeReady || typeBusy;
+            el('drc-type-prev').disabled = !available || typeBusy || !previousTypes.length;
+            el('drc-type-next').disabled = !available || typeBusy || typeNext === null;
         }
         function boxReset(off) {
             boxStart = boxEnd = null; if (off) { boxMode = false; }
@@ -315,6 +388,7 @@
             cancelStep(); jumpActive = focusVisible = rowFocus = false;
             resetCD();
             cancel('geometry'); cancel('focus'); selected = null; points = null; pointsReady = false;
+            cancel('comparison'); el('drc-comparison').textContent = 'Select an error to compare its parsed bound.';
             jumpScale = null; zoomLock = false; el('drc-selected').textContent = 'Click to inspect · double-click to go to an error.';
             paintLater(); navigationButtons(); renderErrors(); savePanel();
         }
@@ -342,9 +416,10 @@
         async function loadRules(autoSelect, strict) {
             const c = current(); if (!c) { return; }
             const t = task('rules'), search = el('drc-search').value.trim();
+            ruleRows = []; ruleNext = null; renderRules();
             try {
                 if (new TextEncoder().encode(search).length > 256) { throw new Error('Rule search is limited to 256 UTF-8 bytes.'); }
-                const page = await read('rules', t, c, {kind: 'rules', start: ruleStart, search: search, limit: 32}); if (!page) { return; }
+                const page = await read('rules', t, c, {kind: 'rules', start: ruleStart, search: search, metric: metric, waived: filter(), limit: 32}); if (!page) { return; }
                 if (!Array.isArray(page.rows) || page.rows.length > 32) { throw new Error('DRC rule page limit'); }
                 page.rows.forEach(function (r) { cursor(r.check); cursor(r.errors); cursor(r.waived); if (typeof r.name !== 'string') { throw new Error('Invalid rule name'); } });
                 ruleRows = page.rows; ruleNext = page.next === null ? null : cursor(page.next); renderRules();
@@ -355,12 +430,25 @@
         function chooseRule(r) {
             if (!current()) { return; }
             boxReset(false); rule = r; query = null; errorStart = '0'; previousErrors.length = 0; rows = []; errorNext = null;
-            clearSelection(); renderRules(); el('drc-rule-title').textContent = r.name; el('drc-description').textContent = '';
+            clearSelection(); renderRules(); el('drc-rule-title').textContent = r.name; el('drc-description').textContent = ''; el('drc-rule-metadata').textContent = '';
             const c = current(), t = task('description');
             read('description', t, c, {kind: 'rule', check: r.check}).then(function (page) {
-                if (page) { el('drc-description').textContent = page.description; }
+                if (page) { showDescription(page); }
             }).catch(function (e) { failure('description', t, c, e); });
             loadErrors(); savePanel(); groupsChanged();
+        }
+        function showDescription(page) {
+            el('drc-description').textContent = page.description;
+            el('drc-rule-metadata').textContent = hasMetadata() ? metadataText(page.svrf) : 'No SVRF metadata registered.';
+        }
+        async function loadComparison(r) {
+            cancel('comparison');
+            if (!hasMetadata()) { el('drc-comparison').textContent = 'No SVRF metadata registered.'; return; }
+            const c = current(), t = task('comparison'); el('drc-comparison').textContent = 'Reading constraint comparison…';
+            try {
+                const v = await read('comparison', t, c, {kind: 'comparison', check: r.check, error: r.local});
+                if (v && selected && selected.check === r.check && selected.local === r.local) { el('drc-comparison').textContent = comparisonText(v, r, P); }
+            } catch (e) { if (valid('comparison', t, c)) { el('drc-comparison').textContent = 'Comparison unavailable · ' + e.message; } }
         }
         function filter() { return el('drc-waived').value === 'all' ? null : el('drc-waived').value === 'waived'; }
         function inView() { return !query && el('drc-in-view').checked; }
@@ -508,6 +596,13 @@
             try {
                 const page = await read('focus', t, c, {kind: 'focus', check: r.check, error: r.local, fit: !zoomLock}, true); if (!page) { return; }
                 if (current().pending) { info('View input changed; select the error again to move.'); return; }
+                // Release the live list *before* navigation. Keep this error,
+                // groups and jump mode, and reload one page around its cursor.
+                // Calling the checkbox handler would clear the selection.
+                if (inView()) {
+                    el('drc-in-view').checked = false; resetFilterPage(); filterStamp = '';
+                    errorStart = r.local; loadErrors();
+                }
                 jumpScale = Number(P.decimal(page.navigation.width_um)) / s.pixels[0]; o.navigate(page.navigation); jumpCD(r);
                 info('Read-only · review files are never changed.'); savePanel();
             } catch (e) { failure('focus', t, c, e); }
@@ -517,12 +612,12 @@
             resetCD();
             rule = {check: check, name: 'Rule ' + P.next(check)};
             boxReset(false); groupsChanged();
-            renderRules(); el('drc-rule-title').textContent = rule.name; el('drc-description').textContent = '';
+            renderRules(); el('drc-rule-title').textContent = rule.name; el('drc-description').textContent = ''; el('drc-rule-metadata').textContent = '';
             const c = current(), t = task('description');
             read('description', t, c, {kind: 'rule', check: check}).then(function (v) {
                 if (!v || !rule || rule.check !== check) { return; }
                 cursor(v.errors); cursor(v.waived); rule = {check: check, name: v.name, errors: v.errors, waived: v.waived};
-                el('drc-rule-title').textContent = v.name; el('drc-description').textContent = v.description; renderRules();
+                el('drc-rule-title').textContent = v.name; showDescription(v); renderRules();
             }).catch(function (e) { failure('description', t, c, e); });
         }
         function select(r, frame, allowFocus) {
@@ -531,6 +626,7 @@
             const same = selected && selected.check === r.check && selected.local === r.local;
             if (!selected) { jumpScale = null; zoomLock = false; }
             selected = r; focusVisible = true; if (frame) { jumpActive = true; }
+            if (!same) { loadComparison(r); }
             if (!same || !pointsReady) { points = null; pointsReady = false; el('drc-selected').textContent = 'Global ' + r.global + ' · bounding-box preview'; geometry(r); }
             // Keep the button node alive between click and double-click.
             markErrors(); navigationButtons(); paintLater();
@@ -589,7 +685,7 @@
         }
         function panelData() {
             if (query && !query.bbox) { return null; }
-            return {search: el('drc-search').value.trim(), rule_start: ruleStart, check: rule ? rule.check : null,
+            return {search: el('drc-search').value.trim(), metric: metric, rule_start: ruleStart, check: rule ? rule.check : null,
                 error_start: query ? '0' : errorStart, query: query ? {bbox_um: query.bbox, state_rev: query.rev, cursor: errorStart} : null,
                 waived: filter(), selected: selected ? {check: selected.check, error: selected.local} : null,
                 in_view: inView(), selected_only: selectedOnly(),
@@ -604,19 +700,23 @@
         async function restorePanel(data) {
             const c = current(); if (!c) { return; }
             const t = task('restore'); restoring = true;
-            cancel('rules'); cancel('errors'); cancel('description'); clearSelection(); boxReset(true);
+            cancel('types'); cancel('rules'); cancel('errors'); cancel('description'); clearSelection(); boxReset(true);
+            metric = null; typeStart = '0'; typeNext = null; typeBusy = typeReady = false; previousTypes.length = 0; renderTypes([]);
             rule = null; rows = []; query = null; previousRules.length = previousErrors.length = 0;
             filterStamp = ''; clearTimeout(filterTimer); filterTimer = null;
             el('drc-in-view').checked = el('drc-selected-only').checked = false;
             ruleStart = errorStart = '0'; ruleNext = errorNext = null;
             navigationButtons();
             try {
-                if (!data) { await loadRules(undefined, true); return; }
+                if (!data) { await loadTypes(true); if (valid('restore', t, c)) { await loadRules(undefined, true); } return; }
                 if (typeof data.search !== 'string' || new TextEncoder().encode(data.search).length > 256 ||
                     (data.waived !== null && typeof data.waived !== 'boolean') ||
                     !['markers','shown','zoom_lock','jump_active','focus_visible'].every(function (k) { return typeof data[k] === 'boolean'; }) ||
                     (data.jump_active && !data.focus_visible) || ((data.jump_active || data.focus_visible) && !data.selected)) { throw new Error('Invalid saved review state'); }
                 ruleStart = cursor(data.rule_start); errorStart = cursor(data.error_start);
+                metric = data.metric === undefined || data.metric === null ? null : metricName(data.metric);
+                if (metric !== null && !hasMetadata()) { throw new Error('Saved type filter needs the registered SVRF metadata.'); }
+                await loadTypes(true); if (!valid('restore', t, c)) { return; }
                 ['in_view', 'selected_only'].forEach(function (k) { if (data[k] !== undefined && typeof data[k] !== 'boolean') { throw new Error('Invalid saved filter'); } });
                 if (data.query && (data.in_view || data.selected_only)) { throw new Error('Saved snapshot and live filters conflict'); }
                 el('drc-in-view').checked = data.in_view === true; el('drc-selected-only').checked = data.selected_only === true;
@@ -640,13 +740,14 @@
                     cursor(data.check);
                     const page = await read('restore', t, c, {kind: 'rule', check: data.check}); if (!page) { return; }
                     rule = {check: data.check, name: page.name, errors: page.errors, waived: page.waived};
-                    el('drc-rule-title').textContent = page.name; el('drc-description').textContent = page.description;
-                } else { el('drc-rule-title').textContent = 'Choose a rule'; el('drc-description').textContent = ''; }
+                    el('drc-rule-title').textContent = page.name; showDescription(page);
+                } else { el('drc-rule-title').textContent = 'Choose a rule'; el('drc-description').textContent = ''; el('drc-rule-metadata').textContent = ''; }
                 await loadErrors(true); if (!valid('restore', t, c)) { return; }
                 if (data.selected) {
                     const ref = data.selected; cursor(ref.check); cursor(ref.error);
                     const page = await read('restore', t, c, {kind: 'geometry', check: ref.check, error: ref.error, start: '0', limit: 1}); if (!page) { return; }
                     selected = validateRows([page])[0]; points = null; pointsReady = false;
+                    loadComparison(selected);
                     el('drc-selected').textContent = 'Global ' + selected.global + (focusVisible ? ' · bounding-box preview' : ' · focus cleared; n/p continues without moving the view.');
                     if (focusVisible) { geometry(selected); }
                 }
@@ -659,7 +760,7 @@
             const c = current(); if (!c) { return; }
             // Cancel immediately, not after the panel GET completes. A slow
             // previous focus/step must not move the view during restoration.
-            cancelStep(); ['focus', 'geometry', 'cd', 'rules', 'errors', 'description', 'restore', 'group-metadata'].forEach(cancel);
+            cancelStep(); ['focus', 'geometry', 'cd', 'types', 'comparison', 'rules', 'errors', 'description', 'restore', 'group-metadata'].forEach(cancel);
             boxReset(true); groupRows = []; groupStamp = '';
             clearTimeout(filterTimer); filterTimer = null; filterStamp = '';
             const key = contextKey(c), turn = ++restoreTurn; restoring = true; navigationButtons(); renderRules(); renderErrors();
@@ -680,8 +781,9 @@
                 ++restoreTurn; clearTimeout(filterTimer); filterTimer = null; filterStamp = '';
                 persistence.close(); groups.close(); cancelAll(); boxReset(true); groupRows = []; groupStamp = ''; pageReady = false;
                 bound = key; restoring = false; rule = null; ruleRows = []; rows = []; ruleStart = errorStart = '0'; query = null;
+                metric = null; typeStart = '0'; typeNext = null; typeReady = typeBusy = false; previousTypes.length = 0; renderTypes([]);
                 previousRules.length = previousErrors.length = 0; ruleNext = errorNext = null; clearSelection(); renderRules();
-                el('drc-rule-title').textContent = 'Choose a rule'; el('drc-description').textContent = '';
+                el('drc-rule-title').textContent = 'Choose a rule'; el('drc-description').textContent = ''; el('drc-rule-metadata').textContent = ''; el('drc-type-info').textContent = '';
                 if (c) { restoreState(); }
             }
             groupsChanged();
@@ -707,10 +809,17 @@
         el('drc-search-form').onsubmit = function (e) { e.preventDefault(); ruleStart = '0'; previousRules.length = 0; loadRules(); };
         el('drc-rule-prev').onclick = function () { if (previousRules.length) { ruleStart = previousRules.pop(); loadRules(); } };
         el('drc-rule-next').onclick = function () { if (ruleNext !== null) { remember(previousRules, ruleStart); ruleStart = ruleNext; loadRules(); } };
+        el('drc-type').onchange = function () {
+            if (!current() || restoring || !typeReady || typeBusy) { return; }
+            metric = el('drc-type').value || null; ruleStart = '0'; previousRules.length = 0; loadRules(false); savePanel();
+        };
+        el('drc-type-prev').onclick = function () { if (!typeBusy && previousTypes.length) { typeStart = previousTypes.pop(); loadTypes(); } };
+        el('drc-type-next').onclick = function () { if (!typeBusy && typeNext !== null) { remember(previousTypes, typeStart); typeStart = typeNext; loadTypes(); } };
         el('drc-error-prev').onclick = function () { cancelStep(); if (previousErrors.length) { errorStart = previousErrors.pop(); loadErrors(); } };
         el('drc-error-next').onclick = function () { cancelStep(); if (errorNext !== null) { remember(previousErrors, errorStart); errorStart = errorNext; loadErrors(); } };
         el('drc-first').onclick = function () { cancelStep(); previousErrors.length = 0; errorStart = query ? {check: '0', error: '0'} : '0'; loadErrors(); };
-        el('drc-waived').onchange = function () { boxReset(false); if (groups.total()) { groups.change({kind: 'clear_all'}); } clearSelection(); el('drc-first').onclick(); };
+        el('drc-waived').onchange = function () { boxReset(false); if (groups.total()) { groups.change({kind: 'clear_all'}); } clearSelection();
+            ruleStart = '0'; previousRules.length = 0; loadRules(false); el('drc-first').onclick(); };
         el('drc-in-view').onchange = el('drc-selected-only').onchange = function () {
             if (!current() || restoring) { return; }
             query = null; clearSelection(); resetFilterPage(); filterStamp = ''; loadErrors(); savePanel();
@@ -739,6 +848,6 @@
             stop: function () { stopped = true; ++restoreTurn; clearTimeout(filterTimer); filterTimer = null; persistence.close(); groups.close(); bound = ''; boxReset(true); cancelAll(); clearTimeout(timer); if (painting !== null) { o.window.cancelAnimationFrame(painting); painting = null; } overlay.hidden = true; },
             resume: function () { stopped = false; return refresh(); }};
     }
-    const api = {bind: bind, projection: projection, point: point, shifted: shifted};
+    const api = {bind: bind, projection: projection, point: point, shifted: shifted, metadataText: metadataText, comparisonText: comparisonText};
     if (typeof module === 'object' && module.exports) { module.exports = api; } else { root.FloeDRC = api; }
 }(typeof window === 'object' ? window : this));

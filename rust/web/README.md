@@ -41,8 +41,12 @@ and file leases include this explicit file, never its recorded deck/include path
 The authenticated `types`, filtered `rules`, enriched `rule`, and `comparison`
 reads use the same source/view/revision scope. Types are paged; rule filters run
 before the row/scan caps. A large polygon comparison returns only scalars, without
-copying/transferring its vertices. Snapshot replacement is not hot-reloaded. UI
-type/detail/isolation wiring remains next; see [M2 §16](../../docs/WEBUI_M2.ko.md).
+copying/transferring its vertices. Snapshot replacement is not hot-reloaded.
+The panel shows paged types, rule metadata and the selected error's comparison;
+type/name/waive filters run together on rule reads. Type choice is restored through
+the existing revision-checked panel state. Successful focus navigation releases
+live In view without clearing the selected error. Layer isolation remains next;
+see [M2 §16–17](../../docs/WEBUI_M2.ko.md).
 
 ```sh
 # Run in rust/ to use the vendored source configuration

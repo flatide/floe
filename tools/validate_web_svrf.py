@@ -144,6 +144,26 @@ def main(fixture):
                     assert summary == dict(matched=str(sum(c["name"] in meta["checks"] for c in expected) if chosen == rules else 0), checks=str(len(expected)), type_count=str(len(counts)))
                 else:
                     assert catalog["metadata"]["svrf"] is None
+                # Type choice belongs to this server panel revision. It never
+                # changes the layout view or writes the DRC review sidecar.
+                panel_path = "/api/v1/drc/"+catalog["id"]+"/views/"+opened["view_id"]+"/panel"
+                panel = dict(search="",metric=None,rule_start="0",check=None,error_start="0",query=None,
+                    in_view=False,selected_only=False,waived=None,selected=None,markers=True,shown=True,
+                    jump_scale=None,zoom_lock=False,jump_active=False,focus_visible=False,cd=None)
+                def save_panel(data, base="1", code=200):
+                    return client.call("POST",panel_path,dict(revision=catalog["revision"],base_panel_rev=base,body=data),code)
+                save_panel(dict(panel,metric=""),code=400)
+                save_panel(dict(panel,metric="한"*22),code=400)
+                save_panel(dict(panel,metric="not-a-metric"),code=400)
+                if chosen == rules:
+                    typed = dict(panel,metric="width")
+                    assert save_panel(typed)["state"] == dict(panel_rev="2",body=typed)
+                    assert client.call("GET",panel_path)["state"]["body"] == typed
+                    save_panel(dict(typed,metric="area"),code=409)
+                    assert save_panel(typed)["state"]["panel_rev"] == "2", "ambiguous retry changed revision"
+                    assert save_panel(panel,base="2")["state"]["body"]["metric"] is None
+                else:
+                    save_panel(dict(panel,metric="width"),code=400)
                 for body in [dict(kind="types",start="00",limit=7),dict(kind="types",start="99999",limit=7),
                              dict(kind="types",start="0",limit=65),dict(kind="comparison",check="00",error="0"),
                              dict(kind="comparison",check="0",error="0",path=str(rules)),

@@ -155,7 +155,7 @@ def main(fixture):
             assert fresh_panel == dict(revision=catalog["revision"], view_id=opened["view_id"],
                                        state=dict(panel_rev="1", body=None))
             chosen = next(i for i, c in enumerate(expected) if c["errors"])
-            panel = dict(search="<script>", rule_start="0", check=str(chosen), error_start="0",
+            panel = dict(search="<script>", metric=None, rule_start="0", check=str(chosen), error_start="0",
                          query=None, in_view=True, selected_only=True, waived=False, selected=dict(check=str(chosen), error="0"),
                          markers=True, shown=True, jump_scale=".25", zoom_lock=True,
                          jump_active=True, focus_visible=True,
@@ -186,6 +186,8 @@ def main(fixture):
             save_panel(dict(panel, cd=dict(target=panel["selected"], remaining=True)), code=400)
             save_panel(dict(panel, jump_active=False), code=400)
             save_panel(dict(panel, search="x"*257), code=400)
+            save_panel(dict(panel, metric=""), code=400)
+            save_panel(dict(panel, metric="width"), code=400)
             save_panel(dict(panel, in_view=1), code=400)
             save_panel(dict(panel, selected_only="true"), code=400)
             save_panel(dict(panel, query=dict(bbox_um=["0","0","1","1"], state_rev="1", cursor=dict(check="0",error="0"))), code=400)

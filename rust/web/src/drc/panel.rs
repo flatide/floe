@@ -21,6 +21,7 @@ pub(super) struct CdState {
 #[serde(deny_unknown_fields)]
 pub(super) struct Data {
     pub search: String,
+    pub metric: Option<String>,
     pub rule_start: String,
     pub check: Option<String>,
     pub error_start: String,
@@ -50,6 +51,13 @@ impl Data {
             return Err("invalid_drc_request");
         }
         if self.search.len() > 256 {
+            return Err("invalid_drc_request");
+        }
+        if self
+            .metric
+            .as_ref()
+            .is_some_and(|s| s.is_empty() || s.len() > 64)
+        {
             return Err("invalid_drc_request");
         }
         for s in [&self.rule_start, &self.error_start]
@@ -202,6 +210,14 @@ mod tests {
     fn bounded_typed_state_keeps_u64_and_rejects_nonfinite_coordinates() {
         let mut d = data();
         assert!(!d.in_view && !d.selected_only);
+        assert_eq!(d.metric, None);
+        for bad in [String::new(), "x".repeat(65), "한".repeat(22)] {
+            d.metric = Some(bad);
+            assert!(d.validate().is_err());
+        }
+        d.metric = Some("width".into());
+        d.validate().unwrap();
+        d.metric = None;
         d.in_view = true;
         d.selected_only = true;
         d.validate().unwrap();
