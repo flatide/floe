@@ -25,6 +25,11 @@
         let rule = null, ruleRows = [], rows = [], selected = null, points = null, pointsReady = false;
         let ruleStart = '0', ruleNext = null, errorStart = '0', errorNext = null, query = null;
         let jumpScale = null, zoomLock = false, painting = null, lastProjection = null, lastSize = null;
+        let restoring = false;
+        const persistence = o.stateStore.bind({http: o.http, protocol: P,
+            setTimeout: function (fn, delay) { return setTimeout(fn, delay); },
+            clearTimeout: function (id) { clearTimeout(id); },
+            apply: restorePanel, status: function (s) { el('drc-sync-status').textContent = s; }});
         function info(s) { el('drc-message').textContent = s || ''; }
         function cancel(key) { const t = tasks[key]; if (t) { t.cancelled = true; if (t.abort) { t.abort(); } delete tasks[key]; } }
         function cancelAll() { Object.keys(tasks).forEach(cancel); }
@@ -59,14 +64,15 @@
         }
         function remember(history, value) { if (history.length === 128) { history.shift(); } history.push(value); }
         function navigationButtons() {
-            const available = !!current();
+            const available = !!current() && !restoring;
             el('drc-rule-prev').disabled = !available || !previousRules.length;
             el('drc-rule-next').disabled = !available || ruleNext === null;
             el('drc-error-prev').disabled = !available || !previousErrors.length;
             el('drc-error-next').disabled = !available || errorNext === null;
             ['drc-search', 'drc-search-submit', 'drc-waived', 'drc-in-view', 'drc-first'].forEach(function (id) { el(id).disabled = !available; });
             el('drc-frame').disabled = !available || !selected;
-            el('drc-clear').disabled = !selected;
+            el('drc-clear').disabled = restoring || !selected;
+            el('drc-reload').disabled = !current();
         }
         function paintLater() {
             if (stopped || painting !== null) { return; }
@@ -103,19 +109,20 @@
         function clearSelection() {
             cancel('geometry'); cancel('focus'); selected = null; points = null; pointsReady = false;
             jumpScale = null; zoomLock = false; el('drc-selected').textContent = 'Select an error to inspect and go to it.';
-            paintLater(); navigationButtons(); renderErrors();
+            paintLater(); navigationButtons(); renderErrors(); savePanel();
         }
         function renderRules() {
             el('drc-rules').textContent = '';
             ruleRows.forEach(function (r) {
                 const b = doc.createElement('button'); b.className = 'drc-rule' + (rule && rule.check === r.check ? ' selected' : '');
                 b.textContent = r.name + (r.name_truncated ? '…' : '') + '  ·  ' + r.errors; b.title = r.waived + ' waived';
+                b.disabled = restoring;
                 b.onclick = function () { chooseRule(r); }; el('drc-rules').appendChild(b);
             });
             if (!ruleRows.length) { el('drc-rules').textContent = ruleNext === null ? 'No matching rules.' : 'No match in this scan. Continue to the next page.'; }
             navigationButtons();
         }
-        async function loadRules() {
+        async function loadRules(autoSelect, strict) {
             const c = current(); if (!c) { return; }
             const t = task('rules'), search = el('drc-search').value.trim();
             try {
@@ -124,8 +131,9 @@
                 if (!Array.isArray(page.rows) || page.rows.length > 32) { throw new Error('DRC rule page limit'); }
                 page.rows.forEach(function (r) { cursor(r.check); cursor(r.errors); cursor(r.waived); if (typeof r.name !== 'string') { throw new Error('Invalid rule name'); } });
                 ruleRows = page.rows; ruleNext = page.next === null ? null : cursor(page.next); renderRules();
-                if (!rule && ruleRows.length) { chooseRule(ruleRows[0]); }
-            } catch (e) { failure('rules', t, c, e); }
+                if (autoSelect !== false && !rule && ruleRows.length) { chooseRule(ruleRows[0]); }
+                savePanel();
+            } catch (e) { if (strict) { throw e; } failure('rules', t, c, e); }
         }
         function chooseRule(r) {
             if (!current()) { return; }
@@ -135,7 +143,7 @@
             read('description', t, c, {kind: 'rule', check: r.check}).then(function (page) {
                 if (page) { el('drc-description').textContent = page.description; }
             }).catch(function (e) { failure('description', t, c, e); });
-            loadErrors();
+            loadErrors(); savePanel();
         }
         function filter() { return el('drc-waived').value === 'all' ? null : el('drc-waived').value === 'waived'; }
         function renderErrors() {
@@ -143,6 +151,7 @@
             rows.forEach(function (r, i) {
                 const b = doc.createElement('button'), active = selected && selected.check === r.check && selected.local === r.local;
                 b.className = 'drc-error' + (r.status === 1 ? ' waived' : '') + (active ? ' selected' : '');
+                b.disabled = restoring;
                 b.textContent = '#' + P.next(r.local) + '  ·  global ' + r.global + '  ·  ' + (r.kind === 'p' ? 'poly' : 'edge') + (r.status === 1 ? '  ·  waived' : '');
                 b.setAttribute('aria-label', 'Error ' + P.next(r.local) + ', global ' + r.global);
                 b.onclick = function () { select(r, false); }; b.ondblclick = function () { select(r, true); };
@@ -155,7 +164,7 @@
             el('drc-result-info').textContent = (query ? 'Viewport query' : 'Rule errors') + ' · ' + rows.length + ' on this page' + (errorNext === null ? ' · end' : ' · more available');
             navigationButtons(); paintLater();
         }
-        async function loadErrors() {
+        async function loadErrors(strict) {
             const c = current(); if (!c || (!rule && !query)) { return; }
             const t = task('errors'), body = query ? (query.bbox ? {kind: 'query', bbox_um: query.bbox, checks: null, cursor: errorStart, waived: filter(), limit: 64} :
                 {kind: 'in_view', cursor: errorStart, waived: filter(), limit: 64}) : {kind: 'errors', check: rule.check, start: errorStart, waived: filter(), limit: 64};
@@ -165,8 +174,8 @@
                 rows = validateRows(page.rows); errorNext = page.next;
                 if (errorNext !== null) { if (query) { cursor(errorNext.check); cursor(errorNext.error); } else { cursor(errorNext); } }
                 if (JSON.stringify(errorNext) === JSON.stringify(errorStart)) { throw new Error('DRC cursor did not progress'); }
-                renderErrors(); info('Read-only · review files are never changed.');
-            } catch (e) { failure('errors', t, c, e); }
+                renderErrors(); info('Read-only · review files are never changed.'); savePanel();
+            } catch (e) { if (strict) { throw e; } failure('errors', t, c, e); }
         }
         async function geometry(r) {
             const c = current(), t = task('geometry'); let start = '0', total = null;
@@ -197,7 +206,7 @@
             try {
                 const page = await read('focus', t, c, {kind: 'focus', check: r.check, error: r.local, fit: !zoomLock}, true); if (!page) { return; }
                 if (current().pending) { info('View input changed; select the error again to move.'); return; }
-                jumpScale = Number(P.decimal(page.navigation.width_um)) / s.pixels[0]; o.navigate(page.navigation);
+                jumpScale = Number(P.decimal(page.navigation.width_um)) / s.pixels[0]; o.navigate(page.navigation); savePanel();
             } catch (e) { failure('focus', t, c, e); }
         }
         function select(r, frame) {
@@ -206,15 +215,74 @@
             if (!selected) { jumpScale = null; zoomLock = false; }
             selected = r;
             if (!same || !pointsReady) { points = null; pointsReady = false; el('drc-selected').textContent = 'Global ' + r.global + ' · bounding-box preview'; geometry(r); }
-            renderErrors(); focus(r, frame);
+            renderErrors(); focus(r, frame); savePanel();
+        }
+        function panelData() {
+            if (query && !query.bbox) { return null; }
+            return {search: el('drc-search').value.trim(), rule_start: ruleStart, check: rule ? rule.check : null,
+                error_start: query ? '0' : errorStart, query: query ? {bbox_um: query.bbox, state_rev: query.rev, cursor: errorStart} : null,
+                waived: filter(), selected: selected ? {check: selected.check, error: selected.local} : null,
+                markers: el('drc-markers').checked, shown: shown, jump_scale: jumpScale === null ? null : String(jumpScale), zoom_lock: zoomLock};
+        }
+        function savePanel() {
+            if (restoring || !current()) { return; }
+            const data = panelData(); if (data) { persistence.change(data); }
+        }
+        async function restorePanel(data) {
+            const c = current(); if (!c) { return; }
+            const t = task('restore'); restoring = true;
+            cancel('rules'); cancel('errors'); cancel('description'); clearSelection();
+            rule = null; rows = []; query = null; previousRules.length = previousErrors.length = 0;
+            ruleStart = errorStart = '0'; ruleNext = errorNext = null;
+            navigationButtons();
+            try {
+                if (!data) { await loadRules(undefined, true); return; }
+                if (typeof data.search !== 'string' || new TextEncoder().encode(data.search).length > 256 ||
+                    (data.waived !== null && typeof data.waived !== 'boolean') ||
+                    !['markers','shown','zoom_lock'].every(function (k) { return typeof data[k] === 'boolean'; })) { throw new Error('Invalid saved review state'); }
+                ruleStart = cursor(data.rule_start); errorStart = cursor(data.error_start);
+                el('drc-search').value = data.search; el('drc-waived').value = data.waived === null ? 'all' : data.waived ? 'waived' : 'unwaived';
+                el('drc-markers').checked = data.markers;
+                if (shown !== data.shown) { shown = data.shown; el('drc-panel').hidden = !shown; el('drc-toggle').setAttribute('aria-expanded', String(shown)); o.resize(); }
+                jumpScale = data.jump_scale === null ? null : Number(P.decimal(data.jump_scale)); zoomLock = data.zoom_lock;
+                if (jumpScale !== null && !(jumpScale > 0)) { throw new Error('Invalid saved zoom scale'); }
+                if (data.query) { P.bbox(data.query.bbox_um); P.counter(data.query.state_rev);
+                    cursor(data.query.cursor.check); cursor(data.query.cursor.error);
+                    query = {bbox: data.query.bbox_um, rev: data.query.state_rev}; errorStart = data.query.cursor;
+                }
+                await loadRules(false, true); if (!valid('restore', t, c)) { return; }
+                if (data.check !== null) {
+                    cursor(data.check);
+                    const page = await read('restore', t, c, {kind: 'rule', check: data.check}); if (!page) { return; }
+                    rule = {check: data.check, name: page.name, errors: page.errors, waived: page.waived};
+                    el('drc-rule-title').textContent = page.name; el('drc-description').textContent = page.description;
+                } else { el('drc-rule-title').textContent = 'Choose a rule'; el('drc-description').textContent = ''; }
+                await loadErrors(true); if (!valid('restore', t, c)) { return; }
+                if (data.selected) {
+                    const ref = data.selected; cursor(ref.check); cursor(ref.error);
+                    const page = await read('restore', t, c, {kind: 'geometry', check: ref.check, error: ref.error, start: '0', limit: 1}); if (!page) { return; }
+                    selected = validateRows([page])[0]; points = null; pointsReady = false;
+                    el('drc-selected').textContent = 'Global ' + selected.global + ' · bounding-box preview'; geometry(selected);
+                }
+            } finally {
+                if (valid('restore', t, c)) { restoring = false; renderRules(); renderErrors(); contextChanged(); }
+            }
+        }
+        function restoreState() {
+            const c = current(); if (!c) { return; }
+            const key = contextKey(c); restoring = true; navigationButtons(); renderRules(); renderErrors();
+            return persistence.attach({path: '/api/v1/drc/' + registration.id + '/views/' + c.id + '/panel',
+                revision: registration.revision, view: c.id}).then(function () {
+                if (contextKey(current()) === key) { restoring = false; renderRules(); renderErrors(); contextChanged(); }
+            });
         }
         function contextChanged() {
             const c = current(), key = contextKey(c);
             if (key !== bound) {
-                cancelAll(); bound = key; rule = null; ruleRows = []; rows = []; ruleStart = errorStart = '0'; query = null;
+                persistence.close(); cancelAll(); bound = key; restoring = false; rule = null; ruleRows = []; rows = []; ruleStart = errorStart = '0'; query = null;
                 previousRules.length = previousErrors.length = 0; ruleNext = errorNext = null; clearSelection(); renderRules();
                 el('drc-rule-title').textContent = 'Choose a rule'; el('drc-description').textContent = '';
-                if (c) { loadRules(); }
+                if (c) { restoreState(); }
             }
             navigationButtons();
             if (registration && !c && registration.phase === 'ready') { info('Open the source associated with this DRC pack.'); }
@@ -249,8 +317,9 @@
         };
         el('drc-frame').onclick = function () { if (selected) { focus(selected, true); } };
         el('drc-clear').onclick = clearSelection;
-        el('drc-markers').onchange = paintLater;
-        el('drc-toggle').onclick = function () { shown = !shown; el('drc-panel').hidden = !shown; el('drc-toggle').setAttribute('aria-expanded', String(shown)); o.resize(); };
+        el('drc-markers').onchange = function () { paintLater(); savePanel(); };
+        el('drc-toggle').onclick = function () { shown = !shown; el('drc-panel').hidden = !shown; el('drc-toggle').setAttribute('aria-expanded', String(shown)); o.resize(); savePanel(); };
+        el('drc-reload').onclick = restoreState;
         return {init: refresh, contextChanged: contextChanged, paint: paint, clear: clearSelection,
             key: function (key) {
                 if (key === 'Escape' && selected) { clearSelection(); return true; }
@@ -262,7 +331,7 @@
                     return true;
                 } return false;
             },
-            stop: function () { stopped = true; cancelAll(); clearTimeout(timer); if (painting !== null) { o.window.cancelAnimationFrame(painting); painting = null; } overlay.hidden = true; },
+            stop: function () { stopped = true; persistence.close(); bound = ''; cancelAll(); clearTimeout(timer); if (painting !== null) { o.window.cancelAnimationFrame(painting); painting = null; } overlay.hidden = true; },
             resume: function () { stopped = false; return refresh(); }};
     }
     const api = {bind: bind, projection: projection, point: point, shifted: shifted};

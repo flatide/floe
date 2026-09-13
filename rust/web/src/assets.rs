@@ -41,6 +41,10 @@ async fn asset(Path((bundle, name)): Path<(String, String)>) -> Response {
             "text/javascript; charset=utf-8",
             include_str!("../ui/drc.js"),
         ),
+        "panel-state.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("../ui/panel-state.js"),
+        ),
         _ => return transport::error(StatusCode::NOT_FOUND),
     };
     ([(header::CONTENT_TYPE, mime)], body).into_response()

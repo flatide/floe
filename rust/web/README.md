@@ -29,8 +29,11 @@ source-bound read-only DRC panel: rule search, bounded error/coordinate pages,
 waive filtering, focus and a display-aligned marker overlay. A dedicated actor
 reserves one CPU/256 MiB admission slot and keeps file reads off the HTTP reactor.
 View/revision checks surround each read; focus/in-view additionally require the
-current state revision. Files are not modified. Selection persistence, shared
-review state, review writes and further parity are not included in this stage.
+current state revision. Files are not modified. A per-view revision-checked panel
+snapshot restores filters/selection on reload without moving the native view.
+One active save and one latest pending state bound browser traffic; ambiguous
+outcomes require an explicit server-state reload. This is session memory, not
+durable review-file storage. Sharing, review writes and further parity remain open.
 
 ```sh
 # Run in rust/ to use the vendored source configuration

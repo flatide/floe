@@ -8,13 +8,13 @@ const acorn = require('./vendor/acorn-8.15.0/acorn.js');
 const root = path.resolve(__dirname, '..');
 const ui = path.join(root, 'rust/web/ui');
 const options = {ecmaVersion: 2017, sourceType: 'script'};
-for (const file of ['protocol.js', 'gestures.js', 'drc.js', 'app.js']) {
+for (const file of ['protocol.js', 'gestures.js', 'panel-state.js', 'drc.js', 'app.js']) {
     acorn.parse(fs.readFileSync(path.join(ui, file), 'utf8'), options);
 }
 for (const newer of ['const x = a?.b;', 'const x = 1n;', 'const x = {...a};']) {
     assert.throws(() => acorn.parse(newer, options), 'ES2017 gate accepted newer syntax');
 }
-for (const file of ['protocol.test.cjs', 'gestures.test.cjs', 'client.test.cjs', 'drc.test.cjs']) {
+for (const file of ['protocol.test.cjs', 'gestures.test.cjs', 'client.test.cjs', 'drc.test.cjs', 'panel-state.test.cjs']) {
     const run = spawnSync(process.execPath, [path.join(ui, file)], {stdio: 'inherit', timeout: 15000});
     assert.equal(run.status, 0, file + ': ' + run.error);
 }

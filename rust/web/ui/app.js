@@ -601,6 +601,7 @@
     const sizeObserver = typeof window.ResizeObserver === 'function' ? new window.ResizeObserver(resized) : null;
     if (sizeObserver) { sizeObserver.observe(viewport); }
     drcPanel = window.FloeDRC.bind({document: document, window: window, protocol: P, http: http,
+        stateStore: window.FloePanelState,
         context: function () { return !stopped && state && currentId ? {id: currentId, source: currentSource, state: state,
             connected: !!epoch && !!socket && socket.readyState === WebSocket.OPEN, pending: !!inflight || queue.length > 0 || !!dragShift} : null; },
         navigate: nav, resize: resized});

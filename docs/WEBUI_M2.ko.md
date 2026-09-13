@@ -198,7 +198,8 @@ ResizeObserver가 없어도 기본 경로는 유지하며 현장 지원 판정�
   Rust 1.89 빈 registry/offline 테스트와 Linux musl release link 통과. 기존 native
   경고는 남아 있으며 Linux 실행/현장 브라우저 성능 PASS를 의미하지 않는다.
 
-새로고침은 native view를 복원하지만 **DRC 선택/필터는 아직 초기화**한다.
+M2a-3 시점에는 새로고침 때 DRC 선택/필터가 초기화되었다. 아래 M2a-4b에서
+같은 살아 있는 view에 대한 서버 상태 복원을 연결했다.
 화면 오류 hit-test/box selection, 현재 규칙의 페이지 횡단 순회, SVRF 연동/자동 CD·측정,
 선택 상태의 서버 보존/공유·waive/note 쓰기는 이 단계의 완료 범위가 아니다.
 
@@ -234,10 +235,50 @@ pack/waive/notes 파일에 대한 것이고, 이 API는 열린 view의 메모리
 Rust 1.89/offline 테스트·Linux musl release link 통과. 브라우저 저장 큐 모듈은
 별도로 선행 테스트했지만 이 API 단계의 번들에는 아직 연결하지 않았다.
 
-## 5. 다음 경계
+## 5. M2a-4b: 브라우저 저장 큐와 재접속 복원
 
-1. M2a-4b에서 브라우저의 선택/필터를 위 API에 연결하고 새로고침/재접속을 검증한다.
-   현재 규칙/필터 안의 페이지 횡단 순회는 별도 작은 단계로 연결한다.
+§4의 패널 상태 API를 실제 UI에 연결했다. 규칙 검색/선택·현재 페이지·waive
+필터·선택 오류·marker/패널 가시성·오류 goto 배율 상태를 보관하고, 새로고침과
+page lifecycle 복귀 때 같은 열린 view에서 복원한다. 선택은 bbox/좌표를 다시
+읽어 overlay만 만들며 **자동 focus/goto를 하지 않는다**. 사용자가 선택 뒤에
+zoom/pan한 native view는 독립적으로 복원된다. 이전 페이지 history는 메모리
+128개 한도이고 새로고침 시 초기화하며, 현재 cursor는 유지한다.
+
+- 저장 큐는 진행 1 + 최신 대기 1, 변경을 120 ms 묶는다. 가변 JS 객체를 그대로
+  잡지 않고 4 KiB 이하 snapshot으로 고정한다. 저장 상태가 같으면 새 HTTP 요청을
+  만들지 않는다. Rust JSON map의 key 순서와 JS 삽입 순서 차이는 정규화한다.
+- `panel_rev`를 증가 방향으로 확인하고 같은 state/view/DRC revision 응답만
+  받아들인다. view 변경/종료 때 timer·XHR·최신 대기값을 모두 취소한다.
+- 저장 중/서버 세션 동기화 완료/저장 미확정 상태를 별도로 표시한다. 오류나
+  충돌 뒤에는 pending을 재전송하지 않고 `Reload review`로 서버 상태를 다시
+  읽도록 한다. 이 버튼은 미동기화 로컬 패널 변경을 버린다는 tooltip을 둔다.
+  서버 메모리 저장이며 pack/waive 파일의 영속 save가 아니다.
+- 즉시 reload/닫기 전의 120 ms 변경 또는 결과를 못 받은 요청은 저장을 보장하지
+  않는다. 종료 시 sync XHR/beacon으로 권한·revision 검사를 우회하지 않는다.
+  다음 연결은 실제 서버의 확정 상태만 읽고, 이전 입력을 임의 재생하지 않는다.
+- 복원 동안 DRC 목록 버튼만 잠시 비활성화하고 native 렌더는 독립적으로 계속한다.
+  In view는 최초 bbox/cursor를 복원하며 그 사이 뷰가 바뀌었으면 과거 viewport
+  결과임을 표시한다. 빈 결과+next는 복원 뒤에도 미완료다.
+
+게이트: 저장 중 연속200회 변경→최신1개, 객체 복사/u64, 동일 상태 무전송,
+잘못된 응답·revision 역행·과대 state·읽기 실패·저장 충돌/취소·이전 view 늦은 응답.
+DRC 패널은 선택/waive/페이지/zoom 상태 복원이 goto나 새로운 저장을 만들지 않는지,
+고정 bbox/cursor와 이전 뷰 안내를 유지하는지 검사한다. ES2017 구문 게이트에 포함한다.
+
+실제 Chrome에서 browser timer를 DTO method로 호출하면 `Illegal invocation`으로
+시작/종료가 실패하는 차이를 발견했다. Window timer를 closure로 감싸 receiver를
+보존했고, Node 대역에도 같은 receiver 제약을 넣어 고정했다. 수정 번들에서
+검색어 M2·not-waived·global4 선택 후 zoom/pan→reload, marker off/패널 숨김→reload,
+명시적 Reload review를 확인했다. native 뷰 폭/배율과 선택 후 pan 위치를 유지했고
+콘솔 warn/error는 없었다. 현장 Firefox/ETX·대형 pack 성능 검증은 여전히 별도다.
+2026-09-13: 전체 배터리 `RUST VALIDATION: ALL OK`; 이후 응답 타입/과거 query
+안내 보완까지 JS gate·재빌드 CLI의 native HTTP gate·fmt/strict clippy·Rust 1.89
+offline 테스트·Linux musl release link로 재확인했다. QA 세션은 End session으로
+정상 종료했다. 기존 native 경고는 남아 있다.
+
+## 6. 다음 경계
+
+1. 현재 규칙/필터 안의 페이지 횡단 순회는 별도 작은 단계로 연결한다.
    GTK의 단일 click=선택/초점, double-click=이동, Escape 뒤 n/p=뷰 이동 없이
    초점 변경도 조작 parity로 남아 있다(현 M2a-3 click은 선택+goto).
 2. ASCII/index 흐름·기존 notes·상세 측정/룰 매핑은 각각 parity gate와 함께 확장.

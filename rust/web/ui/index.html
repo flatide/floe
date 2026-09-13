@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="/assets/@@BUNDLE@@/app.css">
   <script defer src="/assets/@@BUNDLE@@/protocol.js"></script>
   <script defer src="/assets/@@BUNDLE@@/gestures.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/panel-state.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc.js"></script>
   <script defer src="/assets/@@BUNDLE@@/app.js"></script>
 </head>
@@ -92,6 +93,8 @@
       <div class="pagination"><button id="drc-error-prev" aria-label="Previous error page" disabled>←</button><span>n / p · within page</span><button id="drc-error-next" aria-label="Next error page" disabled>→</button></div>
       <div class="drc-selection"><p id="drc-selected" class="note">Select an error to inspect and go to it.</p><div class="button-row"><button id="drc-frame" disabled>Frame error</button><button id="drc-clear" disabled>Clear</button></div></div>
       <p id="drc-message" class="note" role="status">Read-only review</p>
+      <p id="drc-sync-status" class="note" role="status"></p>
+      <button id="drc-reload" class="quiet" title="Discard unsynchronized local panel changes and restore this view's server state">Reload review</button>
     </aside>
   </div>
   <noscript>This workspace requires JavaScript. All assets are served locally.</noscript>

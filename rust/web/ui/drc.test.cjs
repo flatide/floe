@@ -28,6 +28,11 @@ const window={requestAnimationFrame:fn=>{raf.set(++serial,fn);return serial;},ca
 let state={state_rev:'1',status:'idle',bbox_dbu:['0','0','100','80'],dbu_um:'1',pixels:[100,80]};
 let view={id:'view-a',source:'source',state,connected:true,pending:false};
 const nav=[];
+let savedPanel=null;const savedChanges=[];
+// Browser timers reject a DTO object as their receiver (Node timers do not).
+const nativeSetTimeout=global.setTimeout,nativeClearTimeout=global.clearTimeout;
+global.setTimeout=function(...args){assert(!this || !this.http,'unbound browser timer receiver');return nativeSetTimeout(...args);};
+global.clearTimeout=function(...args){assert(!this || !this.http,'unbound browser timer receiver');return nativeClearTimeout(...args);};
 function http(method,path,body,missing,token){return new Promise((resolve,reject)=>{
     const req={method,path,body,resolve,reject,token,done:false};calls.push(req);
     if(token)token.abort=()=>{req.done=true;reject(new Error('aborted'));};
@@ -36,7 +41,9 @@ function pending(kind){const call=calls.find(c=>!c.done&&(kind==='catalog'?c.pat
 function reply(kind,value){const c=pending(kind);c.done=true;if(c.token)c.token.abort=null;c.resolve(value);return c;}
 async function tick(){for(let i=0;i<12;i++)await Promise.resolve();}
 function paint(){for(const [id,fn] of [...raf]){raf.delete(id);fn();}}
-const panel=D.bind({document:doc,window,protocol:P,http,context:()=>view,navigate:n=>nav.push(n),resize:()=>resize++});
+const panel=D.bind({document:doc,window,protocol:P,http,context:()=>view,navigate:n=>nav.push(n),resize:()=>resize++,
+    stateStore:{bind:o=>{o.clearTimeout(o.setTimeout(()=>{},0));let ready=false;return {attach:async()=>{ready=false;await o.apply(savedPanel);ready=true;},
+        change:d=>{if(ready)savedChanges.push(d);},close(){ready=false;}};}}});
 const a={check:'0',local:'9007199254740993',global:'9007199254740994',kind:'p',status:0,bbox_um:['10','10','30','30'],points:'5000'};
 const b={check:'0',local:'9007199254740994',global:'9007199254740995',kind:'e',status:1,bbox_um:['40','10','60','30'],points:'2'};
 const geom=(r,pts,start,total,next)=>({check:r.check,local:r.local,global:r.global,kind:r.kind,status:r.status,bbox_um:r.bbox_um,
@@ -98,6 +105,36 @@ const geom=(r,pts,start,total,next)=>({check:r.check,local:r.local,global:r.glob
     el('drc-error-next').onclick();const stale=pending('query');view={...view,source:'other',id:'view-b'};panel.contextChanged();
     assert(stale.token.cancelled);stale.resolve({rows:[a],next:null});await tick();paint();
     assert.equal(el('drc-canvas').hidden,true);assert.equal(el('drc-errors').children.length,0);
+    // Restoring server state reloads bounded pages/selected geometry without
+    // running a focus/goto or writing the restored state back as a new edit.
+    savedPanel={search:'MASK',rule_start:'0',check:'0',error_start:'0',query:null,waived:true,
+        selected:{check:b.check,error:b.local},markers:false,shown:true,jump_scale:'0.2',zoom_lock:true};
+    const beforeRestoreNav=nav.length,beforeRestoreSaves=savedChanges.length;
+    view={...view,source:'source',id:'view-c'};panel.contextChanged();
+    reply('rules',{rows:[{check:'0',name:'MASK',name_truncated:false,errors:'9007199254740996',waived:'1'}],next:null});await tick();
+    reply('rule',{name:'MASK',description:'Restored description',errors:'9007199254740996',waived:'1'});await tick();
+    assert.equal(pending('errors').body.body.waived,true);reply('errors',{rows:[b],next:null});await tick();
+    assert.equal(pending('geometry').body.body.limit,1);
+    reply('geometry',geom(b,[['40000','10000']],0,2,'1'));await tick();
+    reply('geometry',geom(b,[['40000','10000'],['60000','30000']],0,2,null));await tick();paint();
+    assert.equal(el('drc-search').value,'MASK');assert.equal(el('drc-waived').value,'waived');
+    assert.equal(el('drc-selected').textContent,'Global '+b.global+' · 2/2 vertices');
+    assert.equal(el('drc-canvas').hidden,true);assert.equal(el('drc-markers').checked,false);
+    assert.equal(nav.length,beforeRestoreNav,'restore moved the existing viewport');
+    assert.equal(savedChanges.length,beforeRestoreSaves,'restore wrote panel state');
+    el('drc-markers').checked=true;el('drc-markers').onchange();
+    assert.deepEqual(savedChanges.at(-1).selected,{check:b.check,error:b.local});
+    assert.equal(savedChanges.at(-1).zoom_lock,true);assert.equal(savedChanges.at(-1).jump_scale,'0.2');
+    savedPanel={...savedPanel,selected:null,query:{bbox_um:['1.25','2','60','70'],state_rev:'1',cursor:{check:'0',error:'100'}}};
+    const queryReload=el('drc-reload').onclick();
+    reply('rules',{rows:[],next:null});await tick();
+    reply('rule',{name:'MASK',description:'query restoration',errors:'9007199254740996',waived:'1'});await tick();
+    assert.deepEqual(pending('query').body.body.bbox_um,savedPanel.query.bbox_um);
+    assert.deepEqual(pending('query').body.body.cursor,savedPanel.query.cursor);
+    reply('query',{rows:[],next:{check:'0',error:'200'}});await queryReload;await tick();
+    assert.equal(el('drc-error-next').disabled,false);assert(el('drc-result-info').textContent.includes('earlier viewport'));
+    assert.equal(nav.length,beforeRestoreNav);
     panel.stop();assert.equal(raf.size,0);
+    global.setTimeout=nativeSetTimeout;global.clearTimeout=nativeClearTimeout;
     console.log('WEB DRC UI: ALL OK (projection, u64, text safety, stale/cancel, complete geometry, focus/zoom, paging, in-view, cleanup)');
 })().catch(e=>{console.error(e);process.exitCode=1;});
