@@ -8,6 +8,7 @@ pub mod artifact;
 pub mod browser;
 pub mod cache;
 pub mod catalog;
+pub mod clip;
 pub mod dataset;
 pub mod drc;
 pub mod index;

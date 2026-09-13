@@ -1,5 +1,6 @@
 //! Development CLI: deliberately distinct from the Python floe2 launcher.
 #![forbid(unsafe_code)]
+mod clip;
 mod deck_analysis;
 mod deck_index;
 mod drc;
@@ -26,6 +27,7 @@ Usage: floe2-web index SOURCE [OPTIONS]
        floe2-web view SOURCE [OPTIONS]
        floe2-web info SOURCE [--json]
        floe2-web render SOURCE [OPTIONS]
+       floe2-web clip SOURCE --bbox X0,Y0,X1,Y1 [OPTIONS]
        floe2-web probe SOURCE
        floe2-web jobdeck DECK.jb [OPTIONS]
        floe2-web drc RESULTS.db|PACK.ice [OPTIONS]
@@ -35,7 +37,8 @@ Implemented: layout/jobdeck index/info/render/probe, occupancy, profiling,
 and jobdeck analysis/spec + source indexing with level selection.
 Web preview: isolated Firefox or --no-open; no GTK launcher replacement yet.
 DRC: read-only ICE/ASCII queries; explicit --build [--force] for atomic packs.
-Not yet ported: clip, svrf, gtktest, batch/mosaic/DRC exports, review writes.
+Clip: full-depth exact layout OASIS export; jobdeck clip remains unsupported.
+Not yet ported: svrf, gtktest, batch/mosaic/DRC exports, review writes.
 Use the existing floe2 for those commands; there is no Python fallback.
 Run floe2-web index --help for indexing options.";
 const INDEX_HELP: &str = "Usage: floe2-web index SOURCE [OPTIONS]
@@ -70,6 +73,7 @@ enum Cli {
     Version,
     Index(PathBuf, Box<IndexOptions>, Option<BTreeSet<i64>>),
     Read(Box<read::Command>),
+    Clip(Box<clip::Command>),
     Jobdeck(Box<deck_analysis::Command>),
     View(Box<web_view::Command>),
     Drc(Box<drc::Command>),
@@ -96,7 +100,8 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
         "jobdeck" => return deck_analysis::parse(&args).map(|c| Cli::Jobdeck(Box::new(c))),
         "view" => return web_view::parse(&args).map(|c| Cli::View(Box::new(c))),
         "drc" => return drc::parse(&args).map(|c| Cli::Drc(Box::new(c))),
-        "clip" | "svrf" | "gtktest" => {
+        "clip" => return clip::parse(&args).map(|c| Cli::Clip(Box::new(c))),
+        "svrf" | "gtktest" => {
             return Err(Error::new(
                 ErrorKind::Unsupported,
                 format!(
@@ -263,6 +268,7 @@ fn run(cli: Cli, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
         Cli::View(command) => return web_view::run(*command, cancelled),
         Cli::Drc(command) => return drc::run(*command, cancelled),
         Cli::Read(command) => return read::run(*command, cancelled),
+        Cli::Clip(command) => return clip::run(*command, cancelled),
         Cli::Jobdeck(command) => return deck_analysis::run(*command, cancelled),
         Cli::Help(index) => println!("{}", if index { INDEX_HELP } else { HELP }),
         Cli::Version => println!(

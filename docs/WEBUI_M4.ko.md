@@ -4,8 +4,8 @@
 M2 공유 권한 추가와 실제 브라우저 pack-build 승인 클릭은 승인 대기이며,
 M0/G2·M3 현장 Firefox/ETX는 사용자 요청대로 보류다. 이 경계를 우회하지 않고
 독립적인 로컬 native 이관을 진행한다. M4 전체 완료나 GTK 은퇴를 뜻하지 않는다.
-현재는 §6의 **선택 bbox 자동 gap과 수동/auto/CD 통합 ruler 순서**까지 연결했다.
-§1~5의 미연결 표기는 각 선행 단계 당시의 범위다. clip/내보내기와 전체 조작
+현재는 §7의 **일반 layout exact clip CLI**까지 연결했다.
+§1~6의 미연결 표기는 각 선행 단계 당시의 범위다. 웹 clip/나머지 내보내기와 전체 조작
 수용은 남아 있다.
 
 ## 1. M4a-1: 표시 scene에 고정한 native pick/snap
@@ -623,3 +623,85 @@ TeeBox 수용은 이 결과에 포함하지 않는다. 기존 의존성 경고�
 cut0이며 jobdeck 미지원이다. Rust process client의 private artifact/timeout·종료,
 앱의 source/cache 경로 보호·원자적 게시를 연결하고 Region XOR·jobs 바이트 게이트로
 검증한다. 이 단계에 웹 download·공유 권한·GTK 기본값 교체를 섞지 않는다.
+
+## 7. M4b-1: 일반 layout exact clip CLI
+
+### 범위와 사용
+
+```sh
+rust/target/release/floe2-web clip design.oas \
+  --bbox=100,200,150,260 --layers 7/0,8/3 \
+  --cell-name FLOE_CLIP --out '선택 영역.oas'
+```
+
+- 기존 VFS cache에서 **full depth·cut0·exact** geometry를 내보낸다. 현재 화면,
+  detail/thin·LOD/occupancy·frames·labels·raster jobs 설정과 무관하다.
+  `--exact`는 기존 CLI와 같은 호환 플래그다. 인덱스를 자동 생성하지 않는다.
+- `--bbox`는 µm이며 nearest/ties-even DBU, 역방향 꼭짓점 정규화, DBU 반올림 후
+  0면적·비유한 수·i64 overflow 거부. clip 경계와 geometry 교차의 native 반올림
+  규칙은 이 입력 좌표 변환과 별개이며 변경하지 않았다.
+- 레이어 이름/alias와 `layer/datatype`을 지원한다. 생략/`all`/빈 문자열은 전체다.
+  `--layers ','` 같은 빈 토큰 목록도 **기존 clip처럼 전체**다. Python adapter가
+  pick/snap의 `_query_layers`를 공유하는 규칙을 유지하며 render의 `none`과 구별한다.
+  낮은 수준의 Rust `ClipRequest`는 명시 `Layers::None`도 표현할 수 있다.
+- `--out` 기본 `clip.oas`, `--cell-name` 기본 `FLOE_CLIP`. 이름은 공백·한글 허용,
+  UTF-8 1~4096 bytes/control 없음. protocol에는 hex로 보내 shell 해석이 없다.
+- jobdeck clip은 기존처럼 미지원이며 `.jb` 입력에 명시 오류를 낸다.
+  소스 마스크 OASIS를 직접 clip할 수 있다. 웹 download/API/UI는 추가하지 않았다.
+
+### 자원·수명·게시
+
+- `floe-worker-client::clip`은 opened layout·idle worker를 요구한다. render generation과
+  query가 남아 있으면 Busy다. CLI는 별도 worker를 쓰고 style/render 명령을 보내지 않는다.
+- `FLOE_RUST_JOBS`(기본 min(CPUs,8), 1~256)·기존 decode LRU budget을 사용한다.
+  `FLOE_RUST_OPEN_TIMEOUT_S`와 `FLOE_RUST_CLIP_TIMEOUT_S`는 각각 기본 300초,
+  범위 1~86400이다. 이 제한은 native 응답 대기 시간이며 큰 파일의 후속 복사 I/O
+  시간까지 보장하는 deadline은 아니다. SIGINT/SIGTERM을 open/clip 대기와 복사에서 확인한다.
+- 워커가 쓸 수 있는 목적지는 앱이 발급한 private `clip-N.oas`뿐이다. 성공 응답의
+  seq·크기·records=rects+polys·시간 필드를 검증한다. EOF/timeout/손상 응답이면 worker를
+  quit→grace→kill/wait로 종료하고 owned workspace를 정리한다. ENOSPC는 성공/빈 clip으로
+  위장하지 않는다. source alias는 unlink할 뿐 원래 cache를 지우지 않는다.
+- `O_NOFOLLOW|O_NONBLOCK`으로 연 private regular file(nlink=1)의 실제 길이,
+  **버전 고정 native writer의 START/unit/CELL-name/END envelope**를 확인한다.
+  이는 임의 OASIS의 전체 문법/기하 검증이 아니다. 실제 기하는 독립 KLayout XOR gate가 맡는다.
+  descriptor를 소유한 채 이름을 unlink하고 worker를 reaping한 다음 스트리밍 게시한다.
+- 원본·cache 내부·cache lock·symlink 출력·부모 alias를 거부한다. 긴 clip 뒤에도
+  목적지를 재검사하고 같은 디렉터리의 create-new/0600 임시 파일에 최대 1MiB씩 복사한다.
+  선언 길이보다 짧거나 길면 실패하며 이전 출력은 보존한다. sync→취소 확인→rename이
+  commit point이며 rename 성공 뒤 도착한 취소를 미게시 오류로 돌리지 않는다.
+- source가 stale이면 기존 read CLI처럼 경고하고 cache geometry를 사용한다.
+  **현재 소스의 재해석이 아님**을 경고문에 적으며 marker/version 손상은 오류다.
+  인덱스 갱신/외부 summary 교체 수명 문제는 이 단계에서 바꾸지 않는다.
+
+클라이언트는 OASIS 전체를 두 번째 Vec으로 읽지 않지만 native `ClipGeometry`와
+OASIS writer는 여전히 전체 산출 geometry/encoded bytes를 보유한다. 이 구현을
+native clip의 총 RSS 상한/완전 스트리밍 개선으로 해석하면 안 된다. 출력 디스크 여유도
+private 파일+목적지 staging(+교체 전 파일)을 포함해 필요하다.
+
+### 게이트
+
+- worker fake-daemon: style 없이 연속 clip, UTF-8/issued slot, worker 종료 뒤 descriptor,
+  잘못된 seq/count/크기/magic/unit/cell/END, short/symlink/hardlink/directory,
+  오류/EOF/timeout/중단, 원본/외부 sentinel과 workspace 정리.
+- 앱 unit: bbox DBU ties-even/역방향/overflow, 화면 옵션 거부; stream unit:
+  짧음/늘어남/read 오류/복사 중 취소에서 이전 출력·임시 파일 보호와 1MiB 유계 복사.
+- `tools/validate_app_clip.py`: private valmini와 concave/비대칭 path/반복·회전·반사
+  fixture의 Python adapter·jobs1/8 **OASIS 바이트 일치 + 원본 KLayout Region XOR**,
+  half-DBU·긴 UTF-8 셀명·레이어 이름·기본 출력·빈 뷰, source/cache alias 보호,
+  실 process SIGINT/SIGTERM(open/ready/clip)·timeout·ENOSPC·손상 출력·cache·stale 경고.
+  Rust runtime의 PATH는 비우며 Python/KLayout은 개발 오라클에서만 쓴다.
+- 이 gate는 `tools/validate_rust.sh`에 필수 배선했다. 실제 브라우저/현장 TeeBox,
+  Linux 실행을 이 로컬 검증으로 대체하지 않는다. 최종 실행 결과는 아래에 기록한다.
+
+실행 결과(로컬): 전체 `sh tools/validate_rust.sh`가 `RUST VALIDATION: ALL OK`다.
+새 clip 게이트 외 기존 jobdeck80·renderer46, query/owner/웹 UI, KLayout13 PX +
+2 phase-exact +14 style의 jobs1/8 검증도 통과했다. 마지막 스트림 `Interrupted`
+재시도/취소 보강과 기존 PNG 게시의 무복사 경로 유지 후 app7/core99/web36/transport8,
+worker-client unit7/lifecycle14를 재실행했고, 실제 clip·기존 PNG/report 오라클,
+scoped 포맷·strict clippy, Rust1.89.0 테스트·macOS release·Linux x86-64 musl
+static-pie 교차 빌드도 다시 통과했다. native geometry와 renderd wire/version은
+바꾸지 않았다. 기존 의존성/개발 오라클의 warning은 남으며 실 Linux 실행이나
+현장 Firefox 수용을 완료한 것으로 보지 않는다.
+
+다음 독립 단계는 render CLI의 batch/mosaic와 관련 report·PNG metadata 이관이다.
+웹 clip·공유 권한·현장 수용과 구분해 진행한다.

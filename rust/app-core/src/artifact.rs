@@ -1,8 +1,8 @@
-//! Publish only a complete artifact. Failed renders never truncate the user's
-//! old PNG, nor write into the source/cache through a path alias.
+//! Publish only a complete artifact. Failed exports never truncate the user's
+//! old output, nor write into the source/cache through a path alias.
 use crate::{cache, catalog::Layout, check_cancelled, Error, Result};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -139,6 +139,63 @@ pub fn output_path(path: &Path, layout: &Layout) -> Result<PathBuf> {
     Ok(resolved)
 }
 pub fn publish(path: &Path, data: &[u8], cancelled: &AtomicUsize) -> Result<()> {
+    // Keep existing in-memory PNG/report publication free of extra copies.
+    publish_with(path, cancelled, |file| {
+        for chunk in data.chunks(1024 * 1024) {
+            check_cancelled(cancelled)?;
+            file.write_all(chunk)?;
+        }
+        Ok(())
+    })
+}
+
+/// Stream an owned complete artifact without a geometry-sized payload copy.
+/// The advertised byte count must match exactly; short/growing input cannot
+/// replace an old output. As with publish(), rename is the commit point.
+pub fn publish_reader(
+    path: &Path,
+    reader: &mut impl Read,
+    length: u64,
+    cancelled: &AtomicUsize,
+) -> Result<()> {
+    publish_with(path, cancelled, |file| {
+        let mut buffer = vec![0; (1024 * 1024).min(length.max(1)) as usize];
+        let mut remaining = length;
+        while remaining != 0 {
+            let limit = remaining.min(buffer.len() as u64) as usize;
+            let n = read_cancellable(reader, &mut buffer[..limit], cancelled)?;
+            if n == 0 {
+                return Err(Error::input("artifact shorter than advertised"));
+            }
+            file.write_all(&buffer[..n])?;
+            remaining -= n as u64;
+        }
+        if read_cancellable(reader, &mut buffer[..1], cancelled)? != 0 {
+            return Err(Error::input("artifact longer than advertised"));
+        }
+        Ok(())
+    })
+}
+
+fn read_cancellable(
+    reader: &mut impl Read,
+    buffer: &mut [u8],
+    cancelled: &AtomicUsize,
+) -> Result<usize> {
+    loop {
+        check_cancelled(cancelled)?;
+        match reader.read(buffer) {
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => return result.map_err(Into::into),
+        }
+    }
+}
+
+fn publish_with(
+    path: &Path,
+    cancelled: &AtomicUsize,
+    write: impl FnOnce(&mut std::fs::File) -> Result<()>,
+) -> Result<()> {
     check_cancelled(cancelled)?;
     let parent = path
         .parent()
@@ -164,10 +221,7 @@ pub fn publish(path: &Path, data: &[u8], cancelled: &AtomicUsize) -> Result<()> 
     let (temporary, mut file) =
         created.ok_or_else(|| Error::input("cannot allocate output staging file"))?;
     let result = (|| -> Result<()> {
-        for chunk in data.chunks(1024 * 1024) {
-            check_cancelled(cancelled)?;
-            file.write_all(chunk)?;
-        }
+        write(&mut file)?;
         file.sync_all()?;
         check_cancelled(cancelled)?;
         fs::rename(&temporary, path)?;
@@ -179,4 +233,137 @@ pub fn publish(path: &Path, data: &[u8], cancelled: &AtomicUsize) -> Result<()> 
         let _ = fs::remove_file(temporary);
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    struct Temp(PathBuf);
+    impl Temp {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "floe-stream-test-{}-{}",
+                std::process::id(),
+                SERIAL.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&dir).unwrap();
+            Self(dir)
+        }
+    }
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+    #[test]
+    fn stream_is_exact_bounded_and_atomic() {
+        let dir = Temp::new();
+        let output = dir.0.join("clip.oas");
+        let flag = AtomicUsize::new(0);
+        fs::write(&output, b"old export").unwrap();
+        for length in [1, 3] {
+            assert!(publish_reader(&output, &mut Cursor::new(b"ab"), length, &flag).is_err());
+            assert_eq!(fs::read(&output).unwrap(), b"old export");
+            assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 1);
+        }
+        struct Input<'a> {
+            remaining: u64,
+            flag: &'a AtomicUsize,
+            cancel: bool,
+        }
+        impl Read for Input<'_> {
+            fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
+                assert!(b.len() <= 1024 * 1024);
+                let n = self.remaining.min(b.len() as u64) as usize;
+                b[..n].fill(123);
+                self.remaining -= n as u64;
+                if self.cancel {
+                    self.flag.store(2, Ordering::Relaxed);
+                }
+                Ok(n)
+            }
+        }
+        let len = 3 * 1024 * 1024 + 9;
+        let mut input = Input {
+            remaining: len,
+            flag: &flag,
+            cancel: true,
+        };
+        assert_eq!(
+            publish_reader(&output, &mut input, len, &flag)
+                .unwrap_err()
+                .kind,
+            crate::ErrorKind::Cancelled
+        );
+        assert_eq!(fs::read(&output).unwrap(), b"old export");
+        assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 1);
+        flag.store(0, Ordering::Relaxed);
+        let mut input = Input {
+            remaining: len,
+            flag: &flag,
+            cancel: false,
+        };
+        publish_reader(&output, &mut input, len, &flag).unwrap();
+        let bytes = fs::read(&output).unwrap();
+        assert_eq!(bytes.len() as u64, len);
+        assert!(bytes.iter().all(|b| *b == 123));
+        assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 1);
+        struct Failed;
+        impl Read for Failed {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("read failed"))
+            }
+        }
+        assert!(publish_reader(&output, &mut Failed, 5, &flag).is_err());
+        assert_eq!(fs::read(&output).unwrap(), bytes);
+        assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn interrupted_read_retries_or_cancels_without_publishing() {
+        let dir = Temp::new();
+        let output = dir.0.join("out");
+        let flag = AtomicUsize::new(0);
+        struct Interrupted<'a> {
+            first: bool,
+            cancel: bool,
+            flag: &'a AtomicUsize,
+        }
+        impl Read for Interrupted<'_> {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                if self.first {
+                    self.first = false;
+                    if self.cancel {
+                        self.flag.store(2, Ordering::Relaxed);
+                    }
+                    Err(std::io::ErrorKind::Interrupted.into())
+                } else {
+                    Ok(0)
+                }
+            }
+        }
+        let mut input = Interrupted {
+            first: true,
+            cancel: false,
+            flag: &flag,
+        };
+        publish_reader(&output, &mut input, 0, &flag).unwrap();
+        assert!(fs::read(&output).unwrap().is_empty());
+        publish(&output, b"old", &flag).unwrap();
+        let mut input = Interrupted {
+            first: true,
+            cancel: true,
+            flag: &flag,
+        };
+        assert_eq!(
+            publish_reader(&output, &mut input, 0, &flag)
+                .unwrap_err()
+                .kind,
+            crate::ErrorKind::Cancelled
+        );
+        assert_eq!(fs::read(&output).unwrap(), b"old");
+        assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 1);
+    }
 }

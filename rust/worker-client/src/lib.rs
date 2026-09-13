@@ -6,9 +6,11 @@
 #[cfg(not(unix))]
 compile_error!("floe-worker-client currently supports Linux/macOS only");
 
+mod clip;
 mod files;
 mod protocol;
 mod query;
+pub use clip::{ClipArtifact, ClipRequest};
 use files::{wire_path, Workspace};
 use protocol::{parse_line, style_text, Line, MAX_LINE_BYTES};
 pub use protocol::{Fields, Fill, FrameFormat, Layers, RenderRequest, Style, ThinPolicy};
@@ -88,6 +90,7 @@ pub struct Config {
     pub style_timeout: Duration,
     pub render_timeout: Duration,
     pub query_timeout: Duration,
+    pub clip_timeout: Duration,
     pub shutdown_grace: Duration,
     pub max_pixels: u64,
     pub max_frame_bytes: usize,
@@ -106,6 +109,7 @@ impl Config {
             style_timeout: Duration::from_secs(10),
             render_timeout: Duration::from_secs(300),
             query_timeout: Duration::from_secs(5),
+            clip_timeout: Duration::from_secs(300),
             shutdown_grace: Duration::from_millis(1500),
             max_pixels: 16 * 1024 * 1024,
             max_frame_bytes: 80 * 1024 * 1024,
@@ -212,6 +216,7 @@ pub struct WorkerClient {
     issued: BTreeSet<u64>,
     active: Option<Active>,
     query_sequence: u64,
+    clip_sequence: u64,
     queries: BTreeMap<u64, ActiveQuery>,
     query_cancels: BTreeMap<QueryKind, ActiveQueryCancel>,
 }
@@ -245,6 +250,7 @@ impl WorkerClient {
             config.style_timeout,
             config.render_timeout,
             config.query_timeout,
+            config.clip_timeout,
             config.shutdown_grace,
         ] {
             if timeout.is_zero() || timeout > Duration::from_secs(86400) {
@@ -286,6 +292,7 @@ impl WorkerClient {
             issued: BTreeSet::new(),
             active: None,
             query_sequence: 0,
+            clip_sequence: 0,
             queries: BTreeMap::new(),
             query_cancels: BTreeMap::new(),
         };

@@ -24,7 +24,7 @@ pub struct RenderOptions {
     pub label_font_px: u32,
     pub raw: bool,
 }
-fn env_number(name: &str, default: u64, min: u64, max: u64) -> Result<u64> {
+pub(crate) fn env_number(name: &str, default: u64, min: u64, max: u64) -> Result<u64> {
     let Some(value) = std::env::var_os(name) else {
         return Ok(default);
     };

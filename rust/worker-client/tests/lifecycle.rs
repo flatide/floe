@@ -3,7 +3,7 @@
 use floe_worker_client::*;
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::os::unix::fs::symlink;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -23,6 +23,8 @@ fn main() {
         ("daemon_error_is_not_cancelled", worker_error),
         ("bounded_stderr_and_blocked_stdin_shutdown", blocked_io),
         ("deck_open_and_capability", deck),
+        ("exact_clip_private_file_and_no_display_state", clips),
+        ("clip_corruption_errors_and_deadline", clip_errors),
         ("shutdown_interrupts_startup_waits", interrupt_startup),
         (
             "queries_interleave_frames_and_keep_independent_credit",
@@ -70,6 +72,7 @@ impl Temp {
         c.style_timeout = Duration::from_millis(300);
         c.render_timeout = Duration::from_millis(500);
         c.query_timeout = Duration::from_millis(300);
+        c.clip_timeout = Duration::from_millis(300);
         c.shutdown_grace = Duration::from_millis(50);
         c
     }
@@ -548,10 +551,105 @@ fn deck() {
     fs::write(&path, b"fixture").unwrap();
     let mut w = WorkerClient::spawn(tmp.config("normal")).unwrap();
     assert!(w.open(Source::Deck(path), 32, 1).unwrap().is_deck);
+    assert_eq!(
+        w.clip(&clip_request()).unwrap_err().kind,
+        ErrorKind::InvalidInput
+    );
     w.set_styles(&[style()]).unwrap();
     let mut r = request(FrameFormat::Raw);
     r.labels = true;
     assert_eq!(w.render(r).unwrap_err().kind, ErrorKind::InvalidInput);
+}
+
+fn clip_request() -> ClipRequest {
+    ClipRequest {
+        bbox: [-4, -2, 7, 9],
+        layers: Layers::Only(vec![(2, 0), (1, 0), (2, 0)]),
+        jobs: 8,
+        cell_name: "CLIP 한 글".into(),
+    }
+}
+fn clips() {
+    let tmp = Temp::new();
+    let mut w = WorkerClient::spawn(tmp.config("normal")).unwrap();
+    w.open(Source::Layout(tmp.0.join("cache 한 글")), 32, 2)
+        .unwrap();
+    let mut held = Vec::new();
+    for sequence in 1..=2 {
+        let clip = w.clip(&clip_request()).unwrap();
+        assert_eq!(clip.fields.u64("seq").unwrap(), sequence);
+        assert_eq!(clip.fields.u64("records").unwrap(), 0);
+        assert_eq!(clip.file.metadata().unwrap().len(), clip.size_bytes);
+        no_outputs(&w);
+        held.push(clip);
+    }
+    w.close().unwrap();
+    for mut clip in held {
+        let mut bytes = Vec::new();
+        clip.file.read_to_end(&mut bytes).unwrap();
+        assert_eq!(
+            bytes,
+            floe_render_core::ClipGeometry::default()
+                .oasis_bytes_named(1000., "CLIP 한 글")
+                .unwrap()
+        );
+    }
+    assert_eq!(w.clip(&clip_request()).unwrap_err().kind, ErrorKind::State);
+    let mut w = tmp.worker("normal");
+    let mut r = clip_request();
+    for name in [String::new(), "a\nb".into(), "x".repeat(4097)] {
+        r.cell_name = name;
+        assert_eq!(w.clip(&r).unwrap_err().kind, ErrorKind::InvalidInput);
+        assert!(w.pid().is_some());
+    }
+    w.render(request(FrameFormat::Raw)).unwrap();
+    assert_eq!(w.clip(&clip_request()).unwrap_err().kind, ErrorKind::Busy);
+    frame(&mut w);
+    assert!(w.clip(&clip_request()).is_ok());
+}
+fn clip_errors() {
+    let tmp = Temp::new();
+    let outside = tmp.0.join("outside");
+    fs::write(&outside, b"not a clip; keep me").unwrap();
+    for mode in [
+        "clip_seq",
+        "clip_counts",
+        "clip_size",
+        "clip_huge",
+        "clip_magic",
+        "clip_end",
+        "clip_cell",
+        "clip_unit",
+        "clip_short",
+        "clip_symlink",
+        "clip_hardlink",
+        "clip_directory",
+        "clip_timeout",
+        "clip_error",
+        "clip_code",
+        "clip_eof",
+    ] {
+        let mut w = tmp.worker(mode);
+        let workspace = w.work_dir().to_owned();
+        let start = Instant::now();
+        let e = w.clip(&clip_request()).unwrap_err();
+        match mode {
+            "clip_error" => {
+                assert_eq!(e.kind, ErrorKind::Worker);
+                assert!(e.message.contains("ENOSPC"));
+            }
+            "clip_timeout" => assert_eq!(e.kind, ErrorKind::Timeout),
+            "clip_eof" => assert_eq!(e.kind, ErrorKind::Exited),
+            _ => assert!(
+                matches!(e.kind, ErrorKind::Protocol | ErrorKind::Io),
+                "{mode}: {e}"
+            ),
+        }
+        assert!(start.elapsed() < Duration::from_secs(2), "{mode}");
+        assert!(w.pid().is_none(), "{mode}");
+        assert!(!workspace.exists(), "{mode}");
+        assert_eq!(fs::read(&outside).unwrap(), b"not a clip; keep me");
+    }
 }
 
 fn interrupt_startup() {
@@ -564,6 +662,7 @@ fn interrupt_startup() {
         "open_timeout",
         "style_timeout",
         "render_timeout",
+        "clip_timeout",
     ] {
         let tmp = Temp::new();
         let flag = Arc::new(AtomicUsize::new(0));
@@ -574,6 +673,7 @@ fn interrupt_startup() {
         config.open_timeout = Duration::from_secs(30);
         config.style_timeout = Duration::from_secs(30);
         config.render_timeout = Duration::from_secs(30);
+        config.clip_timeout = Duration::from_secs(30);
         let start = Instant::now();
         let trigger = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(150));
@@ -583,6 +683,10 @@ fn interrupt_startup() {
             let mut w = WorkerClient::spawn(config)?;
             w.open(Source::Layout(tmp.0.join("cache 한 글")), 32, 1)?;
             w.set_styles(&[style()])?;
+            if mode == "clip_timeout" {
+                w.clip(&clip_request())?;
+                unreachable!("clip should have been cancelled");
+            }
             w.render(request(FrameFormat::Raw))?;
             loop {
                 w.poll(Duration::from_millis(20))?;
@@ -764,6 +868,71 @@ fn fixture(mode: &str, root: Option<&String>) {
                     }
                     reply(&format!("frame gen={} round={r} final={} partial={} deferred=0 labels_truncated=0 style_epoch={} format={} png={} {scene}", fields["gen"], u8::from(final_frame), u8::from(partial), fields["style_epoch"], fields["frame_format"], path.display()));
                 }
+            }
+            "clip" => {
+                if mode == "clip_timeout" {
+                    std::thread::sleep(Duration::from_secs(30));
+                    continue;
+                }
+                if mode == "clip_eof" {
+                    return;
+                }
+                let seq = fields["seq"].parse::<u64>().unwrap() + u64::from(mode == "clip_seq");
+                if matches!(mode, "clip_error" | "clip_code") {
+                    let code = if mode == "clip_code" {
+                        "render"
+                    } else {
+                        "clip"
+                    };
+                    reply(&format!("error seq={seq} code={code} message=ENOSPC"));
+                    continue;
+                }
+                assert_eq!(fields["box"], "-4,-2,7,9");
+                assert_eq!(fields["layers"], "1/0,2/0");
+                assert_eq!(fields["jobs"], "8");
+                let name: Vec<_> = fields["cell_hex"]
+                    .as_bytes()
+                    .chunks_exact(2)
+                    .map(|p| u8::from_str_radix(std::str::from_utf8(p).unwrap(), 16).unwrap())
+                    .collect();
+                assert_eq!(std::str::from_utf8(&name).unwrap(), "CLIP 한 글");
+                let mut bytes = floe_render_core::ClipGeometry::default()
+                    .oasis_bytes_named(
+                        if mode == "clip_unit" { 2000. } else { 1000. },
+                        if mode == "clip_cell" {
+                            "WRONG"
+                        } else {
+                            "CLIP 한 글"
+                        },
+                    )
+                    .unwrap();
+                if mode == "clip_magic" {
+                    bytes[0] = 0;
+                }
+                if mode == "clip_end" {
+                    *bytes.last_mut().unwrap() = 1;
+                }
+                if mode == "clip_short" {
+                    bytes.truncate(8);
+                }
+                let path = PathBuf::from(fields["out"]);
+                let outside = PathBuf::from(root.unwrap()).join("outside");
+                if mode == "clip_symlink" {
+                    symlink(&outside, &path).unwrap();
+                } else if mode == "clip_hardlink" {
+                    fs::hard_link(&outside, &path).unwrap();
+                } else if mode == "clip_directory" {
+                    fs::create_dir(&path).unwrap();
+                } else {
+                    fs::write(&path, &bytes).unwrap();
+                }
+                let size = if mode == "clip_huge" {
+                    u64::MAX
+                } else {
+                    bytes.len() as u64 + u64::from(mode == "clip_size")
+                };
+                let records = u8::from(mode == "clip_counts");
+                reply(&format!("clip seq={seq} size_bytes={size} records={records} rects=0 polys=0 ms=0 plan_us=0 read_us=0 decode_us=0 clip_us=0 write_us=0"));
             }
             "cancel" => reply(&format!("cancelled before_gen={}", fields["before_gen"])),
             "cancel_query" => {

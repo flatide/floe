@@ -1,6 +1,6 @@
 use crate::{Error, FrameFormat, Result};
 use std::fs::{self, DirBuilder, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -106,6 +106,50 @@ fn frame_file(path: &Path) -> Result<File> {
         return Err(Error::protocol("frame is not a private regular file"));
     }
     Ok(file)
+}
+
+/// Validate the version-pinned native writer's envelope, not arbitrary OASIS
+/// semantics. Geometry correctness is covered by the clip Region XOR oracle.
+/// Only the issued slot is read/unlinked; no response-supplied path is used.
+pub(crate) fn consume_clip(path: &Path, size: u64, unit: f64, name: &str) -> Result<File> {
+    let result = (|| {
+        let mut file = frame_file(path)?;
+        let mut prefix = b"%SEMI-OASIS\r\n\x01\x031.0\x07".to_vec();
+        prefix.extend_from_slice(&unit.to_le_bytes());
+        prefix.extend_from_slice(&[0; 13]);
+        prefix.push(14); // inline CELL name
+        let mut n = name.len() as u64;
+        while n >= 128 {
+            prefix.push((n as u8 & 127) | 128);
+            n >>= 7;
+        }
+        prefix.push(n as u8);
+        prefix.extend_from_slice(name.as_bytes());
+        if file.metadata()?.len() != size || size < prefix.len() as u64 + 257 {
+            return Err(Error::protocol("clip length mismatch"));
+        }
+        let mut actual = vec![0; prefix.len()];
+        file.read_exact(&mut actual)?;
+        if actual != prefix {
+            return Err(Error::protocol("clip magic/unit/cell header mismatch"));
+        }
+        let mut end = [0; 256];
+        file.seek(SeekFrom::End(-256))?;
+        file.read_exact(&mut end)?;
+        if end[..3] != [2, 252, 1] || end[3..].iter().any(|b| *b != 0) {
+            return Err(Error::protocol("clip END envelope mismatch"));
+        }
+        file.rewind()?;
+        Ok(file)
+    })();
+    let removed = fs::remove_file(path).map_err(Error::from);
+    match result {
+        Err(e) => Err(e),
+        Ok(file) => {
+            removed?;
+            Ok(file)
+        }
+    }
 }
 
 pub(crate) fn consume(
