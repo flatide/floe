@@ -23,11 +23,11 @@ pub fn read_from(
             break;
         }
         if bytes.len() + n > MAX_BATCH_BYTES {
-            return Err(Error::input("batch exceeds 16 MiB"));
+            return Err(Error::input("text input exceeds 16 MiB"));
         }
         bytes.extend_from_slice(&buffer[..n]);
     }
-    String::from_utf8(bytes).map_err(|_| Error::input("batch must be UTF-8"))
+    String::from_utf8(bytes).map_err(|_| Error::input("text input must be UTF-8"))
 }
 pub fn read_file(
     path: &std::path::Path,
@@ -36,7 +36,7 @@ pub fn read_file(
     let path = std::fs::canonicalize(path)?;
     let file = crate::catalog::regular_file(&path)?;
     if file.metadata()?.len() > MAX_BATCH_BYTES as u64 {
-        return Err(Error::input("batch exceeds 16 MiB"));
+        return Err(Error::input("text input exceeds 16 MiB"));
     }
     read_from(file, cancelled)
 }

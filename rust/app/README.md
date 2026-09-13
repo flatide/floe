@@ -1,10 +1,12 @@
 # floe2-web — Rust 애플리케이션 CLI (개발 중)
 
-현재 **일반 레이아웃/잡덱 `index/info/render/probe`, 분석 `jobdeck`, 기본 웹 `view`, ICE/ASCII `drc` 조회를 지원**한다.
+현재 **일반 레이아웃/잡덱 `index/info/render/probe`, 분석 `jobdeck`, 기본 웹 `view`, ICE/ASCII `drc` 조회,
+일반 layout exact `clip`, batch/mosaic 캡처와 PNG 주석 `fe-embed`를 지원**한다.
 기존 Python `floe2`/GTK와 병행 개발하는 별도 실행 파일이며 제품 전환은 아직 완료되지 않았다.
 M4a-1/2에서 native scene-pinned pick/snap과 표시 프레임에 고정한 앱 controller를
 추가했고 M4a-3/4에서 owner WebSocket query와 브라우저 선택/스냅 프로브를 연결했다.
-M4a-5는 Rust 계산 기반 수동 ruler를 연결했다. 자동 gap ruler·clip 및 실제 브라우저 조작 수용은 남아 있다
+M4a-5/6은 Rust 계산 기반 수동·선택 bbox gap ruler와 CD 공통 생성 순서를 연결했다.
+M4b-1/2/3은 exact clip·batch/mosaic·PNG metadata CLI다. 웹 clip·DRC 캡처 및 실제 브라우저 조작 수용은 남아 있다
 ([M4 기록](../../docs/WEBUI_M4.ko.md)). native 호환 버전0.12.87로
 `floe-index`와 `floe-renderd`를 함께 재빌드한다. 공유 기능과 현장 Firefox 수용은 별도다.
 
@@ -23,6 +25,12 @@ cargo build --offline --locked --release -p floe-app -p floe-index -p floe-rende
 ./target/release/floe2-web info /path/to/design.oas --json
 ./target/release/floe2-web render /path/to/design.oas --at 100,200 --size 50,50 \
   --px 800x800 --thin keep --out /path/to/shot.png
+./target/release/floe2-web render /path/to/design.oas --batch shots.txt \
+  --out /path/to/captures --report /path/to/captures/report.json
+./target/release/floe2-web clip /path/to/design.oas --bbox=100,200,150,250 \
+  --out /path/to/clip.oas
+./target/release/floe2-web fe-embed --json annotations.json /path/to/shot.png
+./target/release/floe2-web fe-embed --dump /path/to/shot.png
 ./target/release/floe2-web probe /path/to/design.oas
 ./target/release/floe2-web info /path/to/deck.jb --level 1,3 --json
 ./target/release/floe2-web render /path/to/deck.jb --level 1,3 --px 800x800 \
@@ -54,7 +62,8 @@ cargo build --offline --locked --release -p floe-app -p floe-index -p floe-rende
   0바이트 lock inode이며 완료 후 잠금은 풀린다. 실행 중 파일을 지우면 안 된다.
   기존 Python/native CLI와 열린 뷰어까지 보호하는 서버 lease는 아니다.
 - render 기본은 full depth/cut=0, solid fill이다. `--detail`/`--thin`/라벨·프레임은
-  명시 선택하며 좌표 suffix와 단일 JSON report를 지원한다. 전체 옵션은 `render --help`.
+  명시 선택하며 좌표 suffix와 JSON report를 지원한다. batch/모자이크는 한 worker를
+  재사용하고, 구분선·kept tiles와 stdin batch를 지원한다. 전체 옵션은 `render --help`.
   원인 없는 final partial/glyph truncation은 exit 3으로 기존 PNG를 보존한다.
   덱 source skip/예산 deferral은 표시된 부분 PNG와 complete=false report를 저장하고
   exit 3을 반환한다. `probe`도 덱 skip이 있으면 OK 대신 exit 3이다.
@@ -84,7 +93,7 @@ cargo build --offline --locked --release -p floe-app -p floe-index -p floe-rende
   초기 표시 옵션이다. 일반 클릭/반복 클릭은 도형 선택/overlap 순환, Shift는 추가,
   Ctrl/Cmd는 toggle이다. Inspector의 Snap probe(m)는 기본 off인 vertex/edge 조회다.
   DRC marker 일반 클릭은 우선한다. `r`은 두 점 ruler(기본 축 고정, Shift 자유 각도),
-  ruler mode의 `m`은 snap(기본 on), `k`는 마지막 수동 ruler, `Shift+K`는 ruler 전체 삭제다.
+  ruler mode의 `m`은 snap(기본 on), `k`는 최근 수동/auto/CD ruler, `Shift+K`는 ruler 전체 삭제다.
   snap off는 잡덱/summary에서도 커서 좌표를 측정한다. 전체 GTK 조작 parity는 아직 개발 중이다.
 - `drc` 읽기는 기존 pack(또는 .db 옆의 fresh pack)을 우선하며, 없거나 stale/corrupt이면
   읽기 전용 ASCII로 fallback한다. `--rules`/`--errs`/`--list`·소수 좌표를 지원한다.
@@ -123,8 +132,15 @@ cargo build --offline --locked --release -p floe-app -p floe-index -p floe-rende
   따라가거나 jobdeck TC root를 넓히지 않는다([M2 §16](../../docs/WEBUI_M2.ko.md#16-m2a-10b-svrf-등록타입규칙-필터측정-비교-api)).
   격리+goto 준비/단일 적용 및 최초 가시성 복원 API와 웹 Restore/Escape를 연결했다.
   jobdeck 물리 plane 격리는 다음 단계다([M2 §18~19](../../docs/WEBUI_M2.ko.md#18-m2a-10d1-레이어-격리복원-코어와-원자적-focus-api)).
-- `clip/...`와 batch/mosaic/DRC export는 미이관 오류를 낸다.
-  자동 Python fallback이나 기존 launcher/portable 교체는 없다.
+- `clip`은 일반 layout의 기존 cache에서 full-depth/cut0 exact OASIS를 만든다.
+  현재 표시 cut/LOD/thin과 무관하며 jobdeck clip은 미지원이다. 원본/cache를 보호하고
+  private worker 산출물의 검증·종료 후 같은 디렉터리 staging에서 원자 게시한다.
+- `fe-embed`는 `python -m floe.fe_embed`의 대응 명령이다. 일곱 종류 주석·legend·
+  JSON 입력/append/dump/strip을 지원하며 PNG pixels는 재인코딩하지 않는다.
+  파일별 staging/원자 교체, 형식·자원 한계, SIGINT/SIGTERM 원본 보존을 검증한다.
+  자세한 범위와 동시 편집 한계는 [M4 §9](../../docs/WEBUI_M4.ko.md#9-m4b-3-png-주석-metadata와-fe-embed-cli)를 따른다.
+- DRC export 조립과 웹 clip/download·주석 편집은 남아 있다. 자동 Python fallback이나
+  기존 launcher/portable 교체는 없다.
 
-범위·차이·검증·다음 단계는 [M1a 기록](../../docs/WEBUI_M1A.ko.md)에 있다.
+범위·차이·검증·다음 단계는 [M1a 기록](../../docs/WEBUI_M1A.ko.md)과 [M4 기록](../../docs/WEBUI_M4.ko.md)에 있다.
 웹 실행·브라우저 검증/남은 범위는 [M1b §9](../../docs/WEBUI_M1B.ko.md#9-m1b-3--기본-canvas-뷰어와-rust-실행-명령)를 따른다.

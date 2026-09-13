@@ -5,6 +5,7 @@ mod clip;
 mod deck_analysis;
 mod deck_index;
 mod drc;
+mod fe_embed;
 mod read;
 mod web_view;
 use floe_app_core::{
@@ -32,6 +33,7 @@ Usage: floe2-web index SOURCE [OPTIONS]
        floe2-web probe SOURCE
        floe2-web jobdeck DECK.jb [OPTIONS]
        floe2-web drc RESULTS.db|PACK.ice [OPTIONS]
+       floe2-web fe-embed [OPTIONS] PNG...
        floe2-web --version
 
 Implemented: layout/jobdeck index/info/render/probe, occupancy, profiling,
@@ -40,7 +42,8 @@ Web preview: isolated Firefox or --no-open; no GTK launcher replacement yet.
 DRC: read-only ICE/ASCII queries; explicit --build [--force] for atomic packs.
 Clip: full-depth exact layout OASIS export; jobdeck clip remains unsupported.
 Render: batch/mosaic + JSON reports; no Python runtime.
-Not yet ported: svrf, gtktest, DRC/annotation exports, review writes.
+Annotations: fe-embed CLI writes flateyes PNG metadata without changing pixels.
+Not yet ported: svrf, gtktest, DRC overlay exports, review writes.
 Use the existing floe2 for those commands; there is no Python fallback.
 Run floe2-web index --help for indexing options.";
 const INDEX_HELP: &str = "Usage: floe2-web index SOURCE [OPTIONS]
@@ -79,6 +82,7 @@ enum Cli {
     Jobdeck(Box<deck_analysis::Command>),
     View(Box<web_view::Command>),
     Drc(Box<drc::Command>),
+    FeEmbed(Box<fe_embed::Command>),
 }
 fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
     let args: Vec<String> = args
@@ -103,6 +107,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
         "view" => return web_view::parse(&args).map(|c| Cli::View(Box::new(c))),
         "drc" => return drc::parse(&args).map(|c| Cli::Drc(Box::new(c))),
         "clip" => return clip::parse(&args).map(|c| Cli::Clip(Box::new(c))),
+        "fe-embed" => return fe_embed::parse(&args).map(|c| Cli::FeEmbed(Box::new(c))),
         "svrf" | "gtktest" => {
             return Err(Error::new(
                 ErrorKind::Unsupported,
@@ -269,6 +274,7 @@ fn run(cli: Cli, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
     match cli {
         Cli::View(command) => return web_view::run(*command, cancelled),
         Cli::Drc(command) => return drc::run(*command, cancelled),
+        Cli::FeEmbed(command) => return fe_embed::run(*command, cancelled),
         Cli::Read(command) => return read::run(*command, cancelled),
         Cli::Clip(command) => return clip::run(*command, cancelled),
         Cli::Jobdeck(command) => return deck_analysis::run(*command, cancelled),

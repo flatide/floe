@@ -4,8 +4,8 @@
 M2 공유 권한 추가와 실제 브라우저 pack-build 승인 클릭은 승인 대기이며,
 M0/G2·M3 현장 Firefox/ETX는 사용자 요청대로 보류다. 이 경계를 우회하지 않고
 독립적인 로컬 native 이관을 진행한다. M4 전체 완료나 GTK 은퇴를 뜻하지 않는다.
-현재는 §8의 **일반 layout/jobdeck batch·mosaic 캡처 CLI**까지 연결했다.
-§1~7의 미연결 표기는 각 선행 단계 당시의 범위다. 웹 clip/나머지 내보내기와 전체 조작
+현재는 §9의 **PNG 주석 metadata/fe-embed CLI**까지 연결했다.
+§1~8의 미연결 표기는 각 선행 단계 당시의 범위다. 웹 clip/나머지 내보내기와 전체 조작
 수용은 남아 있다.
 
 ## 1. M4a-1: 표시 scene에 고정한 native pick/snap
@@ -800,3 +800,96 @@ musl static-pie 교차 빌드도 통과했다. 기존 의존성/개발 오라클
 다음 독립 단계는 픽셀 chunk를 유지하는 PNG 주석 metadata codec과 `fe_embed`
 보조 CLI다. 이후 DRC overlay/legend/ruler 캡처를 연결하며, 웹 download·공유 권한과
 일반 캡처의 Python 제거 완료를 혼동하지 않는다.
+
+## 9. M4b-3: PNG 주석 metadata와 fe-embed CLI
+
+### 기존 명령의 Rust 대응
+
+```sh
+# python -m floe.fe_embed 대신 사용한다. 이미지 파일은 명시적으로 in-place 편집한다.
+rust/target/release/floe2-web fe-embed --json annotations.json shot.png
+rust/target/release/floe2-web fe-embed --append \
+  --ruler=0,0,100,0 --ppu=8 --unit=um --note='확인\n두 번째 줄' shot.png
+rust/target/release/floe2-web fe-embed --dump shot.png
+rust/target/release/floe2-web fe-embed --strip shot.png
+rust/target/release/floe2-web fe-embed --selftest
+```
+
+- `--box/--ellipse/--line/--path/--polygon/--ruler/--text`, `--json FILE|-`,
+  `--legend`, `--note`, `--ppu/--unit`, `--append/--dump/--strip/--selftest`,
+  여러 위치 인자 PNG와 `--`를 연결했다. 주석 옵션 순서 뒤에 JSON 주석을 붙이며,
+  명시 ppu/unit/note/legend가 JSON metadata보다 우선한다. dump가 strip보다 우선하고
+  둘은 사용하지 않는 JSON/legend 파일을 열지 않는다. shell/glob 확장은 shell의 몫이다.
+- 좌표는 **이미지 중심 원점의 pixels, x 오른쪽/y 아래**다. PNG pixels나 OASIS
+  DBU 좌표를 자동 변환하지 않는다. `ppu`가 ruler scale이며 unit 기본값은 `um`이다.
+  `%.10g` 좌표, 팔레트/hex 대소문자 계약, polygon fill alpha·pattern,
+  casing/dash·text backdrop와 escape, legend 별칭/순서를 Python과 대조했다.
+- `iTXt` keyword `flateyes`와 기존 key=value 형식을 유지한다. 압축/비압축 기존
+  metadata를 읽고 새 것은 비압축 UTF-8로 쓴다. append는 첫 flateyes chunk의
+  알려지지 않은 줄도 보존하되 새 ppu는 기존 ppu/unit, 새 note/legend는 해당 필드만
+  대체한다. 기존 flateyes chunk는 모두 제거하고 IEND 바로 앞에 하나를 넣는다.
+- 픽셀 IDAT·다른 text/ancillary chunk·IEND 뒤 bytes는 그대로 복사한다.
+  strip은 metadata만 제거한다. IDAT를 이미지로 decode하거나 pixels를 재압축하지 않는다.
+  `--selftest`는 일곱 종류·한글·PNG round-trip/strip의 native in-memory 검사이며
+  Python/flateyes import를 시도하지 않는다. 실제 상호 운용 검증은 개발 오라클이 맡는다.
+- `Annotation`은 검증된 metadata 줄, `Document`는 주석/ppu/unit/note/legend다.
+  웹 overlay의 geometry 모델이나 편집 상태 저장 기능이 아니다. 기존 DRC 캡처의
+  marker·CD ruler·레이어 legend 조립과 `render --drc*` 연결은 다음 단계다.
+
+### 파일 수명과 명시적인 한계
+
+- PNG 최대1GiB·65536 chunks, 주석 입력/출력 및 한 PNG의 flateyes **총 해제된 text**
+  최대16MiB,100k annotations, 한 path/polygon 최대1M points, CLI 최대4096 PNG다.
+  메모리 상한을 뜻하는 숫자와 파일/레코드 상한을 혼동하지 않는다(JSON 모델과
+  metadata 문자열은 별도 보관). pixels를 위한 frame-size Vec은 없고 PNG I/O는
+  최대1MiB 블록이다. 추가 후의 PNG도 같은 파일/chunk 상한 안이어야 한다.
+- PNG signature/IHDR 필드·chunk 경계·CRC·IEND·flateyes iTXt/UTF-8를 검사한다.
+  **전체 PNG 이미지 유효성 검사기는 아니다**: IDAT DEFLATE와 실제 image samples는
+  해석하지 않는다. 다른 소유자의 iTXt를 압축 해제하거나 다시 직렬화하지 않는다.
+- Python의 일부 관대한 입력은 의도적으로 거부한다: nonfinite/0 이하 ppu,
+  잘못된 CRC/iTXt, metadata 한계를 넘는 압축/중복 chunk, 조용히 필드를 잘라야 하는
+  잘못된 point 배열, 줄 형식을 깨는 control/U+2028/U+2029. JSON의 text/unit/note/
+  legend 문자는 문자열이어야 한다. 정상 형식의 bytes 계약과 손상 입력 관용을 구별한다.
+- 쓰기 목적지의 symlink/FIFO/directory, hardlink 및 중복/alias 목적지는 거부한다.
+  읽기 전용 dump는 명시한 symlink/중복 경로를 읽을 수 있다.
+  `O_NOFOLLOW|O_NONBLOCK` regular descriptor를 사용하며 기존 PNG의 dev/inode·길이·
+  mtime/ctime·mode/link 수를 읽기 후와 최종 교체 전에 확인한다. 변경되면 현재 파일을
+  덮어쓰지 않는다. 이는 **cross-process compare-and-swap/편집 lock이 아니다**.
+  동시 외부 편집·부모 디렉터리 교체를 조정하는 서버/클라이언트 저장 계약은 남는다.
+- 같은 디렉터리의 create-new staging→스트리밍 복사→sync→취소 확인→rename이다.
+  SIGINT/SIGTERM·입출력 오류·형식 오류는 해당 PNG를 보존하고 owned 임시 파일을
+  제거한다. 기존 Unix rwx mode만 유지하고 setuid/setgid·ACL/xattr는 복제하지 않는다.
+  여러 PNG 전체는 트랜잭션이 아니며 후속 실패 시 이미 갱신한 PNG 수를 명시한다.
+  일반적인 파일 I/O 지연 자체의 절대 deadline을 보장하지는 않는다.
+- EOF 없는 `--json -`도 공유 bounded stdin reader로 취소한다. reader의 process 종료
+  방식은 CLI 전용이다. 명령행 입력 오류는2, 파일/JSON 실행 오류는1,
+  취소는128+signal이다. 기존 `floe2`/GTK·renderd wire/version·인덱스는 변경하지 않는다.
+  새 HTTP/다운로드 endpoint·공유 권한·브라우저 실행 경로는 없다.
+
+### 검증
+
+- 필수 `tools/validate_fe_embed.py`: unchanged Python `fe_embed`가 만든 기대 PNG와
+  **전체 bytes·추출 metadata·Pillow pixels**를 대조한다. 일곱 종류·표시 스타일·
+  250개 seeded 극단 좌표/10자리 반올림·한글·공백·JSON stdin·legend/명시 우선순위·
+  append/strip·압축/중복 metadata·알 수 없는 줄과 ancillary·복수 IDAT·trailer를 검사한다.
+  1/L/P/RGB/RGBA/LA/I;16 PNG도 비교한다. Rust runtime은 PATH-empty이며 native
+  binary override도 무효값으로 두어 renderd/indexer/Python 실행이 필요 없음을 확인한다.
+- 손상 signature/header/chunk/CRC/iTXt/UTF-8·압축 bomb/중복 합산·파일/chunk 상한,
+  option/JSON 오류, symlink/hardlink/FIFO/alias, 후속 PNG 실패를 검사한다.
+  자식의 RLIMIT_FSIZE로 staging 쓰기 실패를 주입하고 원본·임시파일 보호를 확인한다.
+  EOF 없는 stdin 및64MiB ancillary 복사 중 실제 SIGINT/SIGTERM도 검사한다.
+- native unit은 출력 한계 유지, append 순서·metadata 상한, 원본 inode 교체 감지,
+  취소, CRC/round-trip을 고정한다. 기존 batch stdin과 PNG/clip 게시 회귀도 유지한다.
+- 압축 metadata는 zlib StreamEnd(Adler trailer 포함)까지 확인하며 모든 잘린 prefix를
+  거부한다. 일반 Read의 EOF만으로 정상 압축 종료를 판정하지 않는다.
+
+실행 결과(2026-09-14): 전체 `sh tools/validate_rust.sh`가 `RUST VALIDATION: ALL OK`다.
+새 fe-embed·기존 capture/clip, jobdeck80·renderer46, KLayout13 PX +2 phase-exact
++14 style의 jobs1/8 검증을 포함한다. 최종 PNG bytes 오라클과 batch capture 오라클도
+재실행해 통과했다. app8/core108/web36/transport8 및 worker-client unit7/lifecycle14,
+scoped fmt/strict clippy, Rust1.89.0의 같은 테스트, macOS release와 Linux x86-64
+musl static-pie 교차 빌드가 통과했다. 기존 의존성 warning은 남는다.
+현장 Firefox/ETX와 실 Linux 실행은 미검증이며 M4 전체 완료가 아니다.
+
+다음 독립 단계는 DRC marker·CD ruler·레이어 legend metadata 조립과
+`render --drc*` 연결이다. 웹 다운로드/공유 권한이나 review 쓰기까지 완료한 것은 아니다.

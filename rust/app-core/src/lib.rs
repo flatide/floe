@@ -4,6 +4,7 @@
 #[cfg(not(unix))]
 compile_error!("floe-app-core currently targets Linux/macOS");
 
+pub mod annotations;
 pub mod artifact;
 pub mod browser;
 pub mod cache;

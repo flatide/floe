@@ -37,7 +37,8 @@ Lengths: bare/um/µm/μm, nm, mm, cm, m. Fractional DBU is preserved.
 Batch: NAME key=value ...; quotes supported, full-line # comments. Region fields
 override the CLI region. Keys: bbox at size anchor px stretch layers depth mosaic
 corners line linecolor keep_tiles. Limit 16 MiB/4096 shots; no shell expansion.
-DRC/annotation metadata exports require later stages. Jobdeck labels unsupported.
+DRC captures require a later stage; annotate existing PNGs with fe-embed.
+Jobdeck labels unsupported.
 Frames exceeding 16 Mpx are rejected, not silently rescaled.
 Mosaic final image is four tiles (up to 64 Mpx). Outputs must not collide.
 Cancelled/failed frames never replace an existing PNG. Jobdeck known skipped

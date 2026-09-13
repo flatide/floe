@@ -89,7 +89,7 @@ M4b-2: `--batch`/stdin, `--mosaic-at`/`--corners`, 구분선·kept tiles·JSON r
 layout/jobdeck 공통 Rust capture runner로 연결했다([M4 §8](WEBUI_M4.ko.md)).
 Python 픽셀/report·jobs1/8 결정성과 단일 worker/실패·취소 보존을 검증한다.
 파일별 원자 게시이며 batch/여러 kept tile의 일괄 트랜잭션은 아니다.
-DRC overlay 캡처와 `fe_embed` PNG metadata/보조 CLI는 아직 미이관이다.
+DRC overlay 캡처는 남아 있고 PNG metadata/보조 CLI는 M4b-3으로 연결했다.
 
 ### 2.4 clip — M4 (5개 옵션)
 
@@ -204,9 +204,15 @@ DISPLAY가 없어도 동작해야 한다(기존 GTK 오류까지 이식하지 �
 `python -m floe.fe_embed` 보조 CLI도 범위에 포함한다: 위치 인자 PNG들,
 `--box`, `--ellipse`, `--line`, `--path`, `--polygon`, `--ruler`, `--text`,
 `--json`, `--legend`, `--note`, `--ppu`, `--unit`, `--append`, `--dump`,
-`--strip`, `--selftest`. Rust의 최종 명령 이름은 M4에서 호환 안내와 함께 확정.
+`--strip`, `--selftest`. Rust 대응 명령은 M4b-3의 `floe2-web fe-embed`다.
 `floe.fillpat`의 색/패턴·Calibre layerprops와 `floe.hangul`의 주석 입력 연계도
 누락하지 않는다. GTK 위젯 구현을 Rust로 직역하지 않고 동작은 웹 입력으로 이관한다.
+
+M4b-3에서 위 보조 명령을 `floe2-web fe-embed`로 연결했다([M4 §9](WEBUI_M4.ko.md)).
+PNG metadata/옵션·JSON·append/dump/strip은 Rust runtime만 사용한다. 기존 형식의
+전체 PNG bytes와 pixels를 Python/Pillow 개발 오라클로 대조한다. `--selftest`는
+native smoke이며 외부 Python import를 하지 않는다. DRC capture 조립·웹 주석 편집은
+별도 남아 있다. 형식/자원 한계·파일별 원자 게시·동시 편집 한계는 §9에 명시했다.
 
 이관하지 않는 것:
 

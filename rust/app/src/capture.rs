@@ -14,13 +14,13 @@ use std::{
     time::Duration,
 };
 
-fn stdin_text(cancelled: &Arc<AtomicUsize>) -> Result<String> {
+pub(crate) fn stdin_text(cancelled: &Arc<AtomicUsize>) -> Result<String> {
     let flag = Arc::clone(cancelled);
     let (tx, rx) = mpsc::sync_channel(1);
     // CLI only: at most one bounded reader. On cancellation main exits the
     // process, so an EOF-less stdin cannot keep shutdown blocked by join().
     std::thread::Builder::new()
-        .name("floe-batch-stdin".into())
+        .name("floe-text-stdin".into())
         .spawn(move || {
             let _ = tx.send(batch::read_from(std::io::stdin().lock(), &flag));
         })?;
@@ -29,7 +29,7 @@ fn stdin_text(cancelled: &Arc<AtomicUsize>) -> Result<String> {
         match rx.recv_timeout(Duration::from_millis(20)) {
             Ok(result) => return result,
             Err(mpsc::RecvTimeoutError::Timeout) => (),
-            Err(_) => return Err(Error::input("batch stdin reader stopped")),
+            Err(_) => return Err(Error::input("stdin reader stopped")),
         }
     }
 }
