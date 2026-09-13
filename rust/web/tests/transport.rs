@@ -226,6 +226,55 @@ async fn next_json(ws: &mut Socket) -> Value {
         }
     }
 }
+#[tokio::test]
+async fn websocket_upgrade_does_not_inherit_http_idle_deadline() {
+    let s = Server::start().await;
+    let login = s.login().await;
+    let mut ws = s.socket(&login).await;
+    // The transport heartbeat deadline is 30s, not HTTP's 10s idle deadline.
+    tokio::time::sleep(Duration::from_secs(11)).await;
+    ws.send(Message::Text(
+        json!({"type":"ping","seq":"1"}).to_string().into(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(next_json(&mut ws).await["type"], "pong");
+    ws.close(None).await.unwrap();
+    s.shutdown().await;
+}
+#[tokio::test]
+async fn ignored_http_bodies_still_have_size_and_time_limits() {
+    let s = Server::start().await;
+    // Even a static GET must not evade limits by leaving its body unconsumed.
+    assert_eq!(
+        s.request("GET", "/", &[], &"x".repeat(16 * 1024 + 1))
+            .await
+            .status,
+        413
+    );
+    let mut socket = TcpStream::connect(s.addr).await.unwrap();
+    socket
+        .write_all(
+            format!(
+                "GET / HTTP/1.1\r\nHost: {}\r\nContent-Length: 4\r\n\r\nx",
+                s.addr
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    timeout(Duration::from_secs(7), socket.read_to_end(&mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(response.starts_with(b"HTTP/1.1 408"));
+    assert!(std::str::from_utf8(&response)
+        .unwrap()
+        .contains("connection: close"));
+    assert_eq!(s.request("GET", "/", &[], "").await.status, 200);
+    s.shutdown().await;
+}
 async fn closed(ws: &mut Socket) {
     loop {
         match timeout(Duration::from_secs(3), ws.next()).await.unwrap() {

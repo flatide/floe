@@ -54,7 +54,7 @@ enum Operation {
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Anchor {
+pub(crate) struct Anchor {
     dataset_revision: String,
     worker_epoch: String,
     frame_id: String,
@@ -63,7 +63,7 @@ struct Anchor {
     render_key: String,
 }
 impl Anchor {
-    fn core(self) -> Result<QueryAnchor, &'static str> {
+    pub(crate) fn core(self) -> Result<QueryAnchor, &'static str> {
         Ok(QueryAnchor {
             dataset_revision: view::counter(&self.dataset_revision)?,
             worker_epoch: view::counter(&self.worker_epoch)?,
@@ -221,6 +221,27 @@ impl<'a> Queries<'a> {
     /// Caller must have both the matching displayed ACK and writer completion.
     pub fn displayed(&mut self, r: Receipt) {
         self.displayed.displayed(r);
+    }
+    pub fn prepare_clip(
+        &self,
+        request: crate::exports::PrepareDto,
+    ) -> Result<(QueryAnchor, floe_worker_client::ClipRequest), &'static str> {
+        let input = request.core()?;
+        let anchor = input.anchor;
+        if !self.displayed.accepts(anchor) {
+            return Err("frame_not_displayed");
+        }
+        let request = self
+            .controller
+            .prepare_clip(anchor, input.bbox, input.visible, input.request)
+            .map_err(|e| {
+                if e.kind == floe_app_core::ErrorKind::Busy {
+                    "stale_frame"
+                } else {
+                    view::safe_error(e.kind)
+                }
+            })?;
+        Ok((anchor, request))
     }
     pub fn submit(&mut self, sequence: String, request: Request) -> Result<u64, &'static str> {
         let input = request.core().map_err(|_| "invalid_request")?;

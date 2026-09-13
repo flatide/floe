@@ -123,6 +123,16 @@ impl Harness {
         headers: &[(&str, &str)],
         body: &str,
     ) -> (u16, String, String) {
+        let (status, headers, body) = self.raw_bytes(method, path, headers, body).await;
+        (status, headers, String::from_utf8(body).unwrap())
+    }
+    async fn raw_bytes(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: &str,
+    ) -> (u16, String, Vec<u8>) {
         let mut stream = TcpStream::connect(self.addr).await.unwrap();
         let mut request = format!(
             "{method} {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Length: {}\r\n",
@@ -140,12 +150,12 @@ impl Harness {
             .await
             .unwrap()
             .unwrap();
-        let response = String::from_utf8(bytes).unwrap();
-        let (header, body) = response.split_once("\r\n\r\n").unwrap();
+        let split = bytes.windows(4).position(|s| s == b"\r\n\r\n").unwrap();
+        let header = std::str::from_utf8(&bytes[..split]).unwrap();
         (
             header.split_whitespace().nth(1).unwrap().parse().unwrap(),
             header.into(),
-            body.into(),
+            bytes[split + 4..].into(),
         )
     }
     async fn login(&self) -> Login {
@@ -323,6 +333,8 @@ fn open(seq: &str, id: &Value, mode: &str, levels: Value) -> Value {
 
 #[path = "support/drc_isolation.rs"]
 mod drc_isolation;
+#[path = "support/exports.rs"]
+mod exports;
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "run tools/validate_owner_service.py with private source files"]

@@ -164,6 +164,7 @@ struct State {
     closed: bool,
 }
 struct Inner {
+    exports: Arc<crate::exports::Service>,
     sources: Vec<Entry>,
     resources: Arc<Resources>,
     options: RenderOptions,
@@ -214,6 +215,7 @@ impl Service {
             })
             .collect::<Result<Vec<_>>>()?;
         let inner = Arc::new(Inner {
+            exports: crate::exports::Service::start(Arc::clone(&resources), &options)?,
             sources,
             resources,
             options,
@@ -239,6 +241,16 @@ impl Service {
     }
     pub fn catalog(&self) -> Value {
         json!({"sources":self.inner.sources.iter().map(|s|json!({"source_id":s.id,"title":s.source.title,"deck":s.source.deck,"levels":s.source.levels.len()})).collect::<Vec<_>>()})
+    }
+    pub(crate) fn exports(&self) -> &Arc<crate::exports::Service> {
+        &self.inner.exports
+    }
+    pub(crate) fn source(&self, id: &str) -> Option<Arc<RegisteredSource>> {
+        self.inner
+            .sources
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| Arc::clone(&s.source))
     }
     pub fn levels(&self, id: &str, start: usize) -> Option<Value> {
         let source = &self.inner.sources.iter().find(|s| s.id == id)?.source;
@@ -361,6 +373,7 @@ impl Service {
         Ok(())
     }
     pub fn request_stop(&self) {
+        self.inner.exports.request_stop();
         let mut s = self.inner.state.lock().unwrap();
         s.closed = true;
         if let Some(flag) = &s.active_stop {
@@ -372,11 +385,13 @@ impl Service {
         self.inner.wake.notify_one();
     }
     pub fn is_finished(&self) -> bool {
-        self.thread
-            .lock()
-            .unwrap()
-            .as_ref()
-            .is_none_or(|t| t.is_finished())
+        self.inner.exports.is_finished()
+            && self
+                .thread
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_none_or(|t| t.is_finished())
     }
 }
 impl Drop for Service {

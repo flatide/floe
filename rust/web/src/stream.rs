@@ -80,6 +80,13 @@ impl TryFrom<String> for Disposition {
 #[derive(Deserialize)]
 #[serde(tag = "type", deny_unknown_fields)]
 enum Control {
+    #[serde(rename = "view.clip.prepare")]
+    ClipPrepare {
+        seq: String,
+        connection_epoch: String,
+        view_id: String,
+        body: Box<crate::exports::PrepareDto>,
+    },
     #[serde(rename = "ping")]
     Ping { seq: String },
     #[serde(rename = "view.set")]
@@ -334,7 +341,7 @@ pub(crate) async fn socket(
                     _=>break,
                 };
                 let control=match serde_json::from_str::<Control>(&text){Ok(c)=>c,Err(_)=>break};
-                let value=match &control {Control::Ping{seq}|Control::Set{seq,..}|Control::Apply{seq,..}|Control::Ack{seq,..}|Control::Query{seq,..}|Control::CancelQuery{seq,..}|Control::Measure{seq,..}|Control::MeasureSelection{seq,..}=>view::counter(seq)};
+                let value=match &control {Control::Ping{seq}|Control::Set{seq,..}|Control::Apply{seq,..}|Control::Ack{seq,..}|Control::Query{seq,..}|Control::CancelQuery{seq,..}|Control::Measure{seq,..}|Control::MeasureSelection{seq,..}|Control::ClipPrepare{seq,..}=>view::counter(seq)};
                 let Ok(n)=value else {break;};if n<=seq{break;}seq=n;
                 match control {
                     Control::Ping{seq}=>{if reply(&tx,json!({"type":"pong","seq":seq})).is_err(){break;}}
@@ -359,6 +366,12 @@ pub(crate) async fn socket(
                         if connection_epoch!=epoch||view_id!=attached.id{break;}
                         queries.cancel(kind);
                         if reply(&tx,json!({"type":"query.cancelled","seq":seq,"view_id":attached.id,"connection_epoch":epoch,"kind":kind.name()})).is_err(){break;}
+                    }
+                    Control::ClipPrepare{seq,connection_epoch,view_id,body}=>{
+                        if connection_epoch!=epoch||view_id!=attached.id{break;}
+                        let outcome=if gate.service.is_some(){queries.prepare_clip(*body).and_then(|(anchor,request)|attached.clips.lock().unwrap().prepare(anchor,request,&epoch))}else{Err("export_unavailable")};
+                        let event=match outcome {Ok(draft)=>json!({"type":"clip.prepared","seq":seq,"view_id":attached.id,"connection_epoch":epoch,"source_stale":controller.model.source_stale,"draft":draft}),Err(code)=>json!({"type":"error","seq":seq,"code":code})};
+                        if reply(&tx,event).is_err(){break;}
                     }
                     Control::Measure{seq,connection_epoch,view_id,body}=>{
                         if connection_epoch!=epoch||view_id!=attached.id{break;}
@@ -399,6 +412,7 @@ pub(crate) async fn socket(
             }
         }
     }
+    attached.clips.lock().unwrap().revoke(&epoch);
     if let Some(task) = encoding {
         task.abort();
     }

@@ -13,7 +13,7 @@ use floe_worker_client::{Event, Frame, QueryKind, QueryReply, QueryRequest, Rend
 use std::{
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, Weak,
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -183,6 +183,9 @@ impl Shared {
 }
 pub struct ViewController {
     pub model: Arc<Model>,
+    // Does not extend the view's cache lease after its engine exits. An
+    // accepted export explicitly upgrades/pins this before leaving the view.
+    dataset: Weak<ManagedDataset>,
     shared: Arc<Mutex<Shared>>,
     stop: Arc<AtomicUsize>,
     thread: Option<JoinHandle<()>>,
@@ -261,7 +264,8 @@ impl ViewController {
     ) -> Result<Self> {
         let model = Model::new(&dataset)?;
         let permit = resources.render(&options)?;
-        Self::spawn(
+        let weak = Arc::downgrade(&dataset);
+        let mut controller = Self::spawn(
             resources,
             model,
             initial,
@@ -272,7 +276,9 @@ impl ViewController {
                 // Keep the cache read lease until after engine close/drop/reap.
                 Ok((Box::new(engine) as Box<dyn Engine>, Some(dataset)))
             },
-        )
+        )?;
+        controller.dataset = weak;
+        Ok(controller)
     }
     fn spawn(
         resources: &Arc<Resources>,
@@ -350,6 +356,7 @@ impl ViewController {
                 }
             })?;
         Ok(Self {
+            dataset: Weak::new(),
             model,
             shared,
             stop,
@@ -394,6 +401,50 @@ impl ViewController {
     }
     pub fn query_snapshot(&self) -> QuerySnapshot {
         self.shared.lock().unwrap().queries.snapshot()
+    }
+    /// Freeze exact clip bounds and the current visible selection on an
+    /// authenticated displayed receipt. The gateway checks that receipt's
+    /// connection; this method checks its current controller state atomically.
+    /// None bounds means the viewport; explicit bounds are already integer DBU.
+    pub fn prepare_clip(
+        &self,
+        anchor: QueryAnchor,
+        bbox: Option<[i64; 4]>,
+        visible: bool,
+        mut request: floe_worker_client::ClipRequest,
+    ) -> Result<floe_worker_client::ClipRequest> {
+        let s = self.shared.lock().unwrap();
+        self.validate_clip_anchor(&s, anchor)?;
+        request.bbox = match bbox {
+            Some(b) => b,
+            None => crate::clip::bbox_dbu(s.snapshot.state.viewport.bbox, 1.)?,
+        };
+        if visible {
+            request.layers = s.snapshot.state.layers.clone();
+        }
+        request.validate()?;
+        Ok(request)
+    }
+    /// Preparing a browser dialog does not pin a dataset. Only accepting its
+    /// still-current receipt obtains an owning lease for the export lifetime.
+    pub fn pin_clip(&self, anchor: QueryAnchor) -> Result<Arc<ManagedDataset>> {
+        let s = self.shared.lock().unwrap();
+        self.validate_clip_anchor(&s, anchor)?;
+        self.dataset
+            .upgrade()
+            .ok_or_else(|| Error::new(ErrorKind::Busy, "view dataset closed"))
+    }
+    fn validate_clip_anchor(&self, s: &Shared, anchor: QueryAnchor) -> Result<()> {
+        if self.model.deck {
+            return Err(Error::new(
+                ErrorKind::Unsupported,
+                "jobdeck clip is unsupported",
+            ));
+        }
+        if self.stop.load(Ordering::Relaxed) != 0 || !s.anchor_valid(anchor, &self.model) {
+            return Err(Error::new(ErrorKind::Busy, "clip frame is stale"));
+        }
+        Ok(())
     }
     /// Read-only coordinate measurement on a displayed frame. With snap off,
     /// this does not require an exact scene (including deck/summary views).

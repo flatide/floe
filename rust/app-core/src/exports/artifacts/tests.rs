@@ -66,6 +66,9 @@ fn reservations_size_validation_and_failed_commit_release_capacity() {
 fn chunks_have_independent_offsets_and_readers_are_bounded() {
     let s = store();
     reserve(&s, 1).commit(file(b"abcdefgh"), 8).unwrap();
+    assert_eq!(s.info(1).unwrap().size_bytes, 8);
+    assert!(s.info(1).unwrap().expires_in_ms <= 60_000);
+    assert_eq!(s.usage().readers, 0);
     let mut a = s.open(1).unwrap();
     let mut b = s.open(1).unwrap();
     assert!(s.open(1).is_err());
@@ -79,6 +82,8 @@ fn chunks_have_independent_offsets_and_readers_are_bounded() {
     assert_eq!(s.usage().readers, 1);
     assert_eq!(b.read_chunk(5).unwrap(), b"fgh");
     s.release(1);
+    assert!(s.info(1).is_none());
+    assert!(!b.is_available());
     assert_eq!(s.usage().bytes, 8);
     assert!(b.read_chunk(5).is_err());
     drop(b);
@@ -109,6 +114,8 @@ fn expiry_is_automatic_but_active_files_stay_charged() {
     for entry in s.shared.state.lock().unwrap().rows.values_mut() {
         entry.expires = Some(Instant::now());
     }
+    assert!(s.info(1).is_none());
+    assert!(!reader.is_available());
     let end = Instant::now() + Duration::from_secs(3);
     while s.usage().entries == 2 && Instant::now() < end {
         thread::sleep(Duration::from_millis(5));
@@ -118,6 +125,25 @@ fn expiry_is_automatic_but_active_files_stay_charged() {
     assert!(reader.read_chunk(1).is_err());
     drop(reader);
     assert_eq!(s.usage(), Usage::default());
+}
+#[test]
+fn reactor_revocation_is_immediate_and_disposal_is_eventually_reaped() {
+    for close in [false, true] {
+        let s = store();
+        reserve(&s, 1).commit(file(b"artifact"), 8).unwrap();
+        if close {
+            s.request_close();
+        } else {
+            assert!(s.request_release(1));
+        }
+        assert!(s.info(1).is_none());
+        assert!(s.open(1).is_err());
+        let end = Instant::now() + Duration::from_secs(3);
+        while s.usage() != Usage::default() {
+            assert!(Instant::now() < end);
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
 }
 #[test]
 fn named_input_or_open_writer_size_change_cannot_be_served() {

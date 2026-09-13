@@ -4,8 +4,8 @@
 M2 공유 권한 추가와 실제 브라우저 pack-build 승인 클릭은 승인 대기이며,
 M0/G2·M3 현장 Firefox/ETX는 사용자 요청대로 보류다. 이 경계를 우회하지 않고
 독립적인 로컬 native 이관을 진행한다. M4 전체 완료나 GTK 은퇴를 뜻하지 않는다.
-현재는 §11의 **SVRF subset parser/scan CLI**까지 연결했다.
-§1~10의 미연결 표기는 각 선행 단계 당시의 범위다. 웹 clip/나머지 내보내기와 전체 조작
+현재는 §13의 **owner exact clip HTTP/WS·다운로드**까지 연결했다.
+§1~12의 미연결 표기는 각 선행 단계 당시의 범위다. clip UI/나머지 내보내기와 전체 조작
 수용은 남아 있다.
 
 ## 1. M4a-1: 표시 scene에 고정한 native pick/snap
@@ -1145,3 +1145,102 @@ vendor는 변경하지 않았다. 실제 Linux 실행·현장 Firefox/ETX 수용
 다음 M4c 연결은 owner HTTP 작업 ledger·표시/revision receipt·취소·artifact download와
 clip UI다. read-only 공유를 export 허가로 해석하지 않으며 guest endpoint는 추가하지
 않았다. 전체 M4·GTK 기본 launcher 교체·현장 Firefox/ETX 수용은 여전히 미완료다.
+
+## 13. M4c-2: owner clip 승인·취소·파일 다운로드 API
+
+§12의 관리형 코어를 기존 인증된 **owner** 서비스에 연결했다. 별도 guest/export
+권한을 만들지 않았고 임의 경로·명령·업로드를 받지 않는다. 일반 layout만 지원한다.
+이번 단계에 clip 브라우저 버튼/선택 도구는 없으며 `capabilities.exports`는 owner
+서비스의 API 존재, 기존 view snapshot의 `capabilities.clip=false`는 UI 미연결을 뜻한다.
+
+### 준비와 명시 승인
+
+1. 표시 ACK와 실제 write receipt를 가진 WS에서 `view.clip.prepare`를 보낸다.
+   공통 `seq/view_id/connection_epoch`에 `body:{anchor,bounds,layers,jobs,cell_name}`을
+   더한다. anchor는 query와 같은 dataset/worker/frame/state/render revision 식별자다.
+   `bounds`는 `{kind:"viewport"}` 또는 `{kind:"dbu",bbox:[i64문자열4개]}`다.
+   좌표는 canonical 정수만 받고 2^53 이상도 f64로 왕복하지 않는다. viewport는
+   서버의 현재 DBU 범위를 ties-even으로 변환하며 0면적/overflow는 거부한다.
+2. `layers`는 `visible|all|none`. visible은 현재 서버 선택을 복제하므로 빈 선택이
+   전체 레이어로 바뀌지 않는다. jobs는1~16, 이름은 native 검증을 그대로 적용한다.
+   응답 `clip.prepared`는 범위·선택 모드/개수·이름·jobs·revision과 30초 준비 토큰이다.
+   준비 자체로 worker/read lease를 늘리지 않는다. 새 준비가 이전 것을 교체하고,
+   원래 연결 종료 시 미승인 토큰을 폐기한다.
+3. `POST /api/v1/exports`의 `{seq,view_id,token,approve:true}`만 작업을 승인한다.
+   승인 시 view가 열려 있고 receipt가 여전히 현재 상태인지 다시 검사한 뒤 dataset을
+   pin한다. 이후 pan/zoom·view close와 독립적으로 exact/full-depth 작업을 수행한다.
+   display cut/depth/summary는 clip 내용에 영향을 주지 않으며 deck은 명시 거부한다.
+
+준비 토큰은 연결에 묶이지만 승인된 작업은 owner 수명이다. 별도 `/exports` ledger는
+1부터 시작하는 canonical u64 문자열 seq, 이력32개, active1개다. 동일 seq/요청은
+완료·파일 폐기·view close 뒤에도 재실행하지 않는다. 옵션 변경409, 이력 만료410,
+작업 중 새 seq429이며 실패한 사전 검증은 seq를 소비하지 않는다. terminal 게시와
+이전 취소 핸들 해제를 같은 잠금에서 끝낸 뒤 다음 작업을 허용한다.
+
+### 현재 라우트와 수명
+
+| 라우트 | 동작 |
+|---|---|
+| `GET /api/v1/exports` | ledger·한계·사용량 |
+| `POST /api/v1/exports` | 위 준비 토큰의 명시 승인, 202 |
+| `GET /api/v1/exports/{seq}` | queued/preparing/opening/clipping/finishing/cancelling/ready/failed/cancelled |
+| `POST /api/v1/exports/{seq}/cancel` | 취소 요청, 현재 상태와202 |
+| `GET /api/v1/artifacts/{id}` | 크기·남은 TTL·고정 파일명, 만료/미존재410 |
+| `DELETE /api/v1/artifacts/{id}` | 즉시 접근 폐기, 멱등204; 실제 descriptor 회수는 비동기 |
+| `GET /api/v1/artifacts/{id}/download` | cookie+header CSRF로 파일 스트림 |
+| `POST /api/v1/artifacts/{id}/download` | native browser form 다운로드용 고정 body CSRF |
+
+모든 API는 기존 Host/Origin/session 검사를 통과해야 한다. GET도 cookie만으로 읽지
+못한다. download POST만 `Content-Type: application/x-www-form-urlencoded`와
+정확히 `csrf=<소문자 hex64>` 한 필드를 받는다. 중복·인코딩 변형·다른 필드는 거부한다.
+비밀을 URL에 넣지 않고 JS의 전체 Blob 버퍼 없이 브라우저에 attachment를 전달하기
+위한 계약이다. CSP는 `form-action 'self'`로 한정한다. Range/resume는416 미지원이다.
+
+결과명은 서버 고정 `floe-clip-{id}.oas`, 경로·native PID/진단은 응답하지 않는다.
+operation은 파일이 만료돼도 ready 이력을 유지하고 `artifact.available=false`로
+구분한다. 최대4개/개별512MiB/총2GiB/reader2개/ready 후600초는 §12와 같다.
+취소202는 완료 확인이 아니다. 코어에서 게시가 먼저 확정되면 ready가 남으며,
+cancelled/failed는 native 종료·reap와 자원 해제 뒤에만 보인다. logout/context
+종료는 작업을 취소하고 준비/결과 접근을 폐기한다. 이전 accepted 요청을 새 seq로
+자동 재전송하면 안 된다. 불명확한 응답은 GET 조회 후 **같은 요청**의 명시 재확인이다.
+
+### 전송·자원 경계
+
+- native 수집은 별도 actor/worker, 파일 읽기는 blocking executor에서 한다.
+  64KiB chunk·채널1개·reader2개이며 모든 live chunk는 `Bytes::from_owner`로 기존
+  전송 byte credit을 보유한다. Hyper의 slice/clone 뒤에도 credit이 먼저 반환되지 않는다.
+- 각 read/queue 대기 전후 session·만료·폐기를 검사한다. 10초 전송 정체를 중단한다.
+  폐기 전에 전달한 chunk나 OS 네트워크 버퍼는 회수할 수 없으며 이후 읽기부터 막는다.
+  Content-Length와 실제 bytes가 불일치한 전송은 완료된 다운로드로 취급할 수 없다.
+- HTTP 전체10초 제한을 idle10초로 바꿔 활동 중인 긴 전송을 허용한다. 대신 **모든**
+  요청 body를16KiB/5초 안에서 수집해, handler가 무시하는 GET body도 무한 drain하지
+  못한다. 실패 응답은 connection close, header5초/HTTP32개/WS8개 상한은 유지한다.
+  WS upgrade 뒤에는 HTTP 타이머를 해제하고 기존 WS heartbeat/ACK/send 기한을 쓴다.
+- metadata/open/revoke는 메모리 작업이며, 만료/폐기 descriptor close는 reaper 또는
+  마지막 reader의 blocking 스레드가 공유 잠금 밖에서 수행한다. 서버 종료는 native
+  actor·reader·reaper 상태를 확인한다.
+  kernel의 파일 I/O 자체를 강제로 중단하는 deadline이나 native 출력 생성 중 disk/RSS
+  상한은 아니다. §12의 생성 후 크기 검사 한계와 외부 cache hot-reload 보류는 그대로다.
+
+### 검증
+
+`validate_owner_service.py`에 기존3개와 독립 export2개 통합 검증을 연결했다.
+private valmini에서 all/visible/none의 HTTP GET과 visible의 form POST bytes를 기존
+Python/Rust j1/j8 clip + KLayout XOR 오라클과 비교한다. receipt 위조·오래된 view·
+토큰 재사용/연결 종료·중복 승인·인증/Origin/CSRF·Range·파일 폐기/replay를 검증한다.
+주입 워커로 summary 표시와 exact export 독립, clip 대기 중 HTTP/WS 응답성,
+view close 뒤 읽기 lease 유지, cancel/logout의 PID reap·자원 회수·진단 비노출도 확인한다.
+core에는 정수/viewport·선택 스냅샷·stale/deck 거부·비동기 폐기를, transport에는
+긴 Hyper body·11초 idle 뒤 WS·무시되는 request body의 크기/시간 상한을 고정했다.
+
+실행 결과(2026-09-14): 필수 `sh tools/validate_rust.sh`가 `RUST VALIDATION: ALL OK`다.
+새 owner export2개와 기존 owner/DRC3개, managed clip·CLI 기하/바이트 오라클,
+jobdeck80·renderer46·KLayout13 PX +2 phase-exact +14 style jobs1/8을 포함한다.
+최종 app11/core130/web41·transport10·worker-client unit7/lifecycle14,
+scoped fmt/strict clippy, Rust1.89.0의 같은 테스트, macOS release와 Linux x86-64
+musl static-pie 교차 빌드도 통과했다. 기존 dependency/Pillow/GDK warning은 남는다.
+native geometry/wire/renderd 버전0.12.87·vendor·GTK 기본 launcher는 변경하지 않았다.
+실제 Linux 실행이나 현장 Firefox/ETX, 브라우저 다운로드 수용을 대신하는 결과는 아니다.
+
+다음 독립 단계는 이 계약을 사용하는 clip UI다. 다운로드 UI 실브라우저 수용,
+나머지 export/주석 저장/전체 M4·GTK 은퇴·현장 Firefox/ETX 완료와 구분한다.

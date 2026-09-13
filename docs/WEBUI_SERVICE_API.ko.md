@@ -48,9 +48,10 @@ M4a-5에서 연결했다. M4a-6의 owner `view.measure_selection`은 같은 표�
 최대64개 bbox 주석의 자동 gap을 계산한다(geometry 재검색/새 권한 없음).
 clip과 실제 브라우저 수용은 별도이며, 표시/DPR/최신 입력·응답 검사는 M4 §4~6을 따른다.
 M4c-1의 `exports::clip::Job`/`exports::artifacts::Store`는 관리형 exact clip·만료
-파일 소유 코어다. 아직 새 HTTP endpoint, owner receipt/idempotency 연결이나
-브라우저 download가 아니다. 해당 연결 시 인증된 owner/view/revision/선택을 먼저
-확인하고, 기존 작업 ledger와 bounded off-reactor chunk 전송을 적용해야 한다(M4 §12).
+파일 소유 코어다(M4 §12). M4c-2는 owner `view.clip.prepare`와 별도 `/exports`
+ledger, 승인/취소·artifact metadata/폐기·chunk 다운로드를 연결했다(M4 §13).
+다운로드 GET는 cookie+header CSRF, native browser form POST는 cookie+고정 body
+CSRF로 인증한다. 임의 파일·guest 권한·자동 export는 없고 clip UI는 다음 단계다.
 2026-09-13 M1a-1 `rust/worker-client`와 M1a-2a/b `app/app-core`의 일반 index·info/단일 render/probe를
 구현했다. 현재 호출 계약은 [worker README](../rust/worker-client/README.md),
 [M1a 기록](WEBUI_M1A.ko.md)을 따르며 아래 서비스 전체가 존재하는 것은 아니다.

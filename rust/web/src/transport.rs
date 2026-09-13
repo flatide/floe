@@ -54,6 +54,7 @@ pub(crate) struct Attachment {
     pub levels: Option<Vec<String>>,
     pub drc_panel: Mutex<crate::drc::panel::Panel>,
     pub prepared: Mutex<crate::prepared::PreparedEdits>,
+    pub clips: Mutex<crate::exports::Drafts>,
     activity: Mutex<Activity>,
 }
 impl Attachment {
@@ -79,6 +80,7 @@ impl Attachment {
             levels: None,
             drc_panel: Mutex::new(crate::drc::panel::Panel::default()),
             prepared: Mutex::new(crate::prepared::PreparedEdits::default()),
+            clips: Mutex::new(crate::exports::Drafts::default()),
             activity: Mutex::new(Activity {
                 connected: 0,
                 seen: false,
@@ -298,6 +300,7 @@ pub fn router(gate: Gate) -> Router {
         .route("/api/v1/startup", get(startup))
         .merge(crate::owner::routes())
         .merge(crate::drc::routes())
+        .merge(crate::exports::routes())
         .merge(crate::assets::routes())
         .fallback(|| async { error(StatusCode::NOT_FOUND) })
         .layer(DefaultBodyLimit::max(BODY_BYTES))
@@ -317,10 +320,26 @@ async fn guard(State(gate): State<Gate>, request: Request, next: Next) -> Respon
     {
         error(StatusCode::FORBIDDEN)
     } else {
-        timeout(IO_TIMEOUT, next.run(request))
-            .await
-            .unwrap_or_else(|_| error(StatusCode::REQUEST_TIMEOUT))
+        // Bound even bodies an endpoint would ignore. Without the old
+        // connection-wide timeout, trickling an unused GET/denied POST body
+        // must not hold an HTTP slot indefinitely. At most 16KiB is buffered;
+        // response bodies (downloads) remain streamed under the idle deadline.
+        timeout(IO_TIMEOUT, async move {
+            let (parts, body) = request.into_parts();
+            match axum::body::to_bytes(body, BODY_BYTES).await {
+                Ok(bytes) => next.run(Request::from_parts(parts, bytes.into())).await,
+                Err(_) => error(StatusCode::PAYLOAD_TOO_LARGE),
+            }
+        })
+        .await
+        .unwrap_or_else(|_| error(StatusCode::REQUEST_TIMEOUT))
     };
+    if response.status().is_client_error() || response.status().is_server_error() {
+        // Early origin/auth/body failures cannot leave a keep-alive drain.
+        response
+            .headers_mut()
+            .insert("connection", HeaderValue::from_static("close"));
+    }
     let headers = response.headers_mut();
     for (key, value) in [
         ("cache-control", "no-store"),
@@ -332,7 +351,7 @@ async fn guard(State(gate): State<Gate>, request: Request, next: Next) -> Respon
     }
     // Explicit ws origin also covers Firefox versions that don't include a
     // websocket scheme in connect-src 'self'. No inline/eval/third-party code.
-    let csp = format!("default-src 'none'; script-src 'self'; style-src 'self'; img-src blob:; connect-src {} {}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+    let csp = format!("default-src 'none'; script-src 'self'; style-src 'self'; img-src blob:; connect-src {} {}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
         gate.origin.url(), gate.origin.url().replacen("http:", "ws:", 1));
     headers.insert(
         "content-security-policy",
@@ -390,13 +409,22 @@ pub(crate) fn http_session(gate: &Gateway, headers: &HeaderMap) -> Result<Sessio
         origin::single(headers, "x-floe-csrf").ok_or(StatusCode::UNAUTHORIZED)?,
     )
 }
+/// Only the fixed-field download form endpoint uses body CSRF. The outer
+/// guard still requires exact Origin/Host, with the same cookie+CSRF proof.
+pub(crate) fn download_session(
+    gate: &Gateway,
+    headers: &HeaderMap,
+    csrf: &str,
+) -> Result<SessionId, StatusCode> {
+    gate.authenticate(headers, csrf)
+}
 async fn capabilities(State(gate): State<Gate>, headers: HeaderMap) -> Response {
     if let Err(e) = http_session(&gate, &headers) {
         return error(e);
     }
     let render = gate.service.is_some() || gate.view.is_some();
     Json(json!({"protocol":1,"bundle":BUNDLE,"stage":if gate.service.is_some(){"owner-service"}else if render{"view-stream"}else{"transport"},
-        "render":render,"catalog":gate.service.is_some(),"index":gate.service.is_some(),"drc":gate.drc.is_some(),"shares":false,"uploads":false,"control_bytes":CONTROL_BYTES,
+        "render":render,"catalog":gate.service.is_some(),"index":gate.service.is_some(),"drc":gate.drc.is_some(),"exports":gate.service.is_some(),"shares":false,"uploads":false,"control_bytes":CONTROL_BYTES,
         "frame_bytes":crate::view::PACKET_BYTES,"frame_credit":1,"pending_frames":1}))
     .into_response()
 }
@@ -578,9 +606,12 @@ pub async fn serve(
                     let mut builder = hyper::server::conn::http1::Builder::new();
                     builder.timer(TokioTimer::new()).header_read_timeout(IO_TIMEOUT)
                         .max_headers(64).max_buf_size(16 * 1024);
-                    // Also bound unused-body drain/keep-alive, outside the
-                    // handler's timeout. Upgraded WS has its own lifecycle.
-                    let _ = timeout(Duration::from_secs(10),builder.serve_connection(TokioIo::new(stream),service).with_upgrades()).await;
+                    // Bound idle drain/keep-alive while allowing an active
+                    // large download beyond ten seconds. Upgrade gets the
+                    // existing WebSocket deadlines, not the HTTP idle timer.
+                    let (stream,http)=crate::idle_io::IdleIo::new(stream,Duration::from_secs(10));
+                    let _ = builder.serve_connection(TokioIo::new(stream),service).with_upgrades().await;
+                    http.store(false,std::sync::atomic::Ordering::Relaxed);
                 });
             }
         }

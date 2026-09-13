@@ -104,7 +104,10 @@ M4b-1: `floe2-web clip`의 위 옵션은 Rust로 연결했다([M4 §7](WEBUI_M4.
 µm→DBU는 기존 CLI와 같은 nearest/ties-even, 역방향 bbox 정규화다.
 render와 달리 clip의 빈 레이어 토큰 목록은 기존처럼 전체 레이어를 선택한다.
 `--cell-name`은 1~4096 UTF-8 bytes/control 없는 이름으로 제한하며,
-NaN/무한/DBU overflow/반올림 후 0면적은 명시 오류다. 웹 clip UI/API는 아직 없다.
+NaN/무한/DBU overflow/반올림 후 0면적은 명시 오류다.
+M4c-1/2에서 관리형 export와 owner 표시 receipt·승인/취소·다운로드 API를 연결했다
+([M4 §12~13](WEBUI_M4.ko.md)). 웹 clip UI는 다음 단계이며, API의 명시 `none`은
+CLI의 빈 토큰 목록과 달리 빈 레이어 선택을 유지한다.
 
 ### 2.5 probe — M1a (공개 옵션 없음)
 

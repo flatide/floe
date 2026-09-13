@@ -44,6 +44,70 @@ fn result(v: &ViewController, id: u64, kind: QueryKind) -> Arc<ViewQueryResult> 
 }
 
 #[test]
+fn clip_preparation_freezes_integer_bounds_and_visibility_without_native_work() {
+    let (r, c, mut v) = setup(false);
+    let a = v.query_anchor(v.latest().unwrap().id).unwrap();
+    let request = floe_worker_client::ClipRequest {
+        bbox: [0, 0, 1, 1],
+        layers: Layers::None,
+        jobs: 1,
+        cell_name: "CLIP".into(),
+    };
+    let before = v.snapshot().submitted;
+    let visible = v.prepare_clip(a, None, true, request.clone()).unwrap();
+    assert_eq!(visible.bbox, [0, 0, 800, 640]); // viewport is DBU, not µm
+    assert_eq!(visible.layers, Layers::All);
+    let large = [i64::MIN, 0, i64::MAX, 1];
+    let explicit = v
+        .prepare_clip(a, Some(large), false, request.clone())
+        .unwrap();
+    assert_eq!(explicit.bbox, large); // no f64 round-trip above 2^53
+    assert_eq!(explicit.layers, Layers::None);
+    assert_eq!(v.snapshot().submitted, before);
+    assert!(c.query_requests.lock().unwrap().is_empty());
+    v.edit(
+        v.snapshot().state_rev,
+        Patch {
+            layers: Some(Layers::None),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        v.prepare_clip(a, None, true, request.clone())
+            .unwrap_err()
+            .kind,
+        ErrorKind::Busy
+    );
+    wait(|| {
+        v.latest()
+            .is_some_and(|f| f.state_rev == v.snapshot().state_rev)
+    });
+    let a = v.query_anchor(v.latest().unwrap().id).unwrap();
+    assert_eq!(
+        v.prepare_clip(a, None, true, request.clone())
+            .unwrap()
+            .layers,
+        Layers::None
+    );
+    assert_eq!(visible.layers, Layers::All); // no mutation of the prepared value
+    v.close().unwrap();
+    assert!(v.prepare_clip(a, None, true, request.clone()).is_err());
+    assert_eq!(r.usage(), Usage::default());
+
+    let m = model(true);
+    let initial = ViewState::initial(&m, 800, 640).unwrap();
+    let mut deck = start(&r, m, initial, Arc::new(Control::default()));
+    wait(|| deck.latest().is_some());
+    let a = deck.query_anchor(deck.latest().unwrap().id).unwrap();
+    assert_eq!(
+        deck.prepare_clip(a, None, true, request).unwrap_err().kind,
+        ErrorKind::Unsupported
+    );
+    deck.close().unwrap();
+}
+
+#[test]
 fn manual_measurements_use_display_anchor_without_render_or_query_work() {
     let (r, c, mut v) = setup(true);
     wait(|| v.margin().is_some());

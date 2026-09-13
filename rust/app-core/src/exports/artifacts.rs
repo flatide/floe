@@ -42,6 +42,11 @@ pub struct Usage {
     pub pending: usize,
     pub readers: usize,
 }
+#[derive(Clone, Copy, Debug)]
+pub struct Info {
+    pub size_bytes: u64,
+    pub expires_in_ms: u64,
+}
 struct Entry {
     file: Option<Arc<File>>,
     bytes: u64,
@@ -71,7 +76,10 @@ fn unavailable() -> Error {
         "export artifact expired or unavailable",
     )
 }
-fn sweep(s: &mut State, now: Instant) {
+/// Remove accounting under the mutex, close the descriptors AFTER releasing
+/// it. Closing a large unlinked file can block in the filesystem.
+fn sweep(s: &mut State, now: Instant) -> Vec<Arc<File>> {
+    let mut retired = Vec::new();
     for entry in s.rows.values_mut() {
         if entry.expires.is_some_and(|t| now >= t) {
             entry.retired = true;
@@ -81,11 +89,13 @@ fn sweep(s: &mut State, now: Instant) {
         if entry.retired && entry.readers == 0 && entry.file.is_some() {
             s.usage.entries -= 1;
             s.usage.bytes -= entry.bytes;
+            retired.push(entry.file.take().unwrap());
             false
         } else {
             true
         }
     });
+    retired
 }
 impl Store {
     pub fn new(limits: Limits) -> Result<Arc<Self>> {
@@ -114,8 +124,19 @@ impl Store {
             .name("floe-export-expiry".into())
             .spawn(move || {
                 let mut s = sweep_shared.state.lock().unwrap();
-                while !s.closed {
-                    sweep(&mut s, Instant::now());
+                loop {
+                    let retired = sweep(&mut s, Instant::now());
+                    let closed = s.closed;
+                    drop(s);
+                    drop(retired);
+                    if closed {
+                        break;
+                    }
+                    s = sweep_shared.state.lock().unwrap();
+                    // A close during descriptor disposal must not lose its wake.
+                    if s.closed {
+                        continue;
+                    }
                     let wait = sweep_shared.limits.ttl.min(Duration::from_secs(1));
                     s = sweep_shared.changed.wait_timeout(s, wait).unwrap().0;
                 }
@@ -128,6 +149,28 @@ impl Store {
     pub fn usage(&self) -> Usage {
         self.shared.state.lock().unwrap().usage
     }
+    /// Shutdown must also wait for the expiry thread's descriptor disposal.
+    pub fn disposal_finished(&self) -> bool {
+        self.reaper
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_none_or(JoinHandle::is_finished)
+    }
+    /// Bounded in-memory lookup, without a reader reservation or filesystem I/O.
+    pub fn info(&self, id: u64) -> Option<Info> {
+        let s = self.shared.state.lock().unwrap();
+        let now = Instant::now();
+        let e = s.rows.get(&id)?;
+        let until = e.expires?;
+        (!s.closed && !e.retired && e.file.is_some() && now < until).then(|| Info {
+            size_bytes: e.bytes,
+            expires_in_ms: until
+                .duration_since(now)
+                .as_millis()
+                .min(u128::from(u64::MAX)) as u64,
+        })
+    }
     /// Reserve the maximum before native work. Never evict somebody's pending
     /// export or active download to make a new request appear successful.
     pub(super) fn reserve(
@@ -135,8 +178,8 @@ impl Store {
         id: u64,
         stop: Arc<AtomicUsize>,
     ) -> Result<Reservation> {
+        self.collect_expired();
         let mut s = self.shared.state.lock().unwrap();
-        sweep(&mut s, Instant::now());
         if s.closed {
             return Err(unavailable());
         }
@@ -175,7 +218,6 @@ impl Store {
     pub fn open(self: &Arc<Self>, id: u64) -> Result<Download> {
         let now = Instant::now();
         let mut s = self.shared.state.lock().unwrap();
-        sweep(&mut s, now);
         if s.closed {
             return Err(unavailable());
         }
@@ -185,7 +227,7 @@ impl Store {
         let e = s
             .rows
             .get_mut(&id)
-            .filter(|e| !e.retired && e.file.is_some())
+            .filter(|e| !e.retired && e.file.is_some() && e.expires.is_some_and(|t| now < t))
             .ok_or_else(unavailable)?;
         e.readers += 1;
         let download = Download {
@@ -201,13 +243,19 @@ impl Store {
     /// Explicit result dismissal; active readers are revoked, not silently
     /// detached from accounting. A pending native operation is also stopped.
     pub fn release(&self, id: u64) -> bool {
+        let released = self.request_release(id);
+        self.collect_expired();
+        released
+    }
+    /// Reactor-safe dismissal. Revoke immediately; the expiry thread owns
+    /// descriptor disposal. Ready files remain charged until it collects them.
+    pub fn request_release(&self, id: u64) -> bool {
         let mut s = self.shared.state.lock().unwrap();
         let Some(e) = s.rows.get_mut(&id) else {
             return false;
         };
         e.retired = true;
         e.stop.store(1, Ordering::Relaxed);
-        sweep(&mut s, Instant::now());
         self.shared.changed.notify_all();
         true
     }
@@ -215,14 +263,25 @@ impl Store {
     /// handles cannot continue reading, and pending workers see cancellation.
     /// Join job handles separately to guarantee that their workers are reaped.
     pub fn close(&self) {
+        self.request_close();
+        self.collect_expired();
+    }
+    /// Reactor-safe context revocation; no descriptor closes under this call.
+    pub fn request_close(&self) {
         let mut s = self.shared.state.lock().unwrap();
         s.closed = true;
         for e in s.rows.values_mut() {
             e.retired = true;
             e.stop.store(1, Ordering::Relaxed);
         }
-        sweep(&mut s, Instant::now());
         self.shared.changed.notify_all();
+    }
+    fn collect_expired(&self) {
+        let retired = {
+            let mut s = self.shared.state.lock().unwrap();
+            sweep(&mut s, Instant::now())
+        };
+        drop(retired);
     }
     fn valid(&self, id: u64) -> bool {
         let s = self.shared.state.lock().unwrap();
@@ -305,6 +364,9 @@ pub struct Download {
     offset: u64,
 }
 impl Download {
+    pub fn is_available(&self) -> bool {
+        self.store.valid(self.id)
+    }
     pub fn size_bytes(&self) -> u64 {
         self.size
     }
@@ -352,8 +414,10 @@ impl Drop for Download {
             .expect("active artifact reader is charged");
         entry.readers -= 1;
         s.usage.readers -= 1;
-        sweep(&mut s, Instant::now());
+        let retired = sweep(&mut s, Instant::now());
         self.store.shared.changed.notify_all();
+        drop(s);
+        drop(retired);
     }
 }
 
