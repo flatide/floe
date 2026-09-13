@@ -20,6 +20,7 @@ const seg=(a,b,d,offset=false)=>({endpoints_um:[a.map(String),b.map(String)],dis
 function cd(q) {return {check:q.check,local:q.error,global:P.next(q.error),segments:badCD?[{distance_um:'NaN'}]:q.error==='0'?
     [seg([10,30],[70,30],60),seg([40,10],[40,50],40)]:q.error==='1'?[seg([90,50],[160,50],70,true)]:[]};}
 function http(method,path,body,missing,token){
+    if(path.endsWith('/selection'))return Promise.resolve({revision:'r1',view_id:context.id,state:{selection_rev:'1',total:'0',limit:5000,rules:[]}});
     const q=body&&body.body;requests.push({method,path,q,token});
     if(!q)return Promise.resolve({drc:{id:'drc',revision:'r1',source_id:'source',title:'CD test',phase:'ready',metadata:{checks:'1',errors:'3'}}});
     if(q.kind==='rules')return Promise.resolve({rows:[{check:'0',name:'R',errors:'3',waived:'0'}],next:null});
@@ -41,7 +42,7 @@ function http(method,path,body,missing,token){
 }
 const panel=D.bind({document:{getElementById:el,createElement:()=>new Element()},
     window:{requestAnimationFrame:fn=>{raf.set(++serial,fn);return serial;},cancelAnimationFrame:id=>raf.delete(id)},
-    protocol:P,rulers:R,http,context:()=>context,navigate:n=>moves.push(n),resize(){},stateStore:{bind:o=>{
+    protocol:P,rulers:R,groups:require('./drc-groups.js'),http,context:()=>context,navigate:n=>moves.push(n),resize(){},stateStore:{bind:o=>{
         let ready=false;return {attach:async()=>{ready=false;if(restoreWait)await new Promise(r=>{releaseRestore=r;});await o.apply(restoreData);ready=true;},
             change:v=>{if(ready)saves.push(JSON.parse(JSON.stringify(v)));},close(){ready=false;}};
     }}});

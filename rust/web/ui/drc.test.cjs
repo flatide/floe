@@ -34,6 +34,7 @@ const nativeSetTimeout=global.setTimeout,nativeClearTimeout=global.clearTimeout;
 global.setTimeout=function(...args){assert(!this || !this.http,'unbound browser timer receiver');return nativeSetTimeout(...args);};
 global.clearTimeout=function(...args){assert(!this || !this.http,'unbound browser timer receiver');return nativeClearTimeout(...args);};
 function http(method,path,body,missing,token){return new Promise((resolve,reject)=>{
+    if(path.endsWith('/selection')){resolve({revision:'r1',view_id:view.id,state:{selection_rev:'1',total:'0',limit:5000,rules:[]}});return;}
     const req={method,path,body,resolve,reject,token,done:false};calls.push(req);
     if(token)token.abort=()=>{req.done=true;reject(new Error('aborted'));};
 });}
@@ -41,7 +42,7 @@ function pending(kind){const call=calls.find(c=>!c.done&&(kind==='catalog'?c.pat
 function reply(kind,value){const c=pending(kind);c.done=true;if(c.token)c.token.abort=null;c.resolve(value);return c;}
 async function tick(){for(let i=0;i<12;i++)await Promise.resolve();}
 function paint(){for(const [id,fn] of [...raf]){raf.delete(id);fn();}}
-const panel=D.bind({document:doc,window,protocol:P,rulers:require('./rulers.js'),http,context:()=>view,navigate:n=>nav.push(n),resize:()=>resize++,
+const panel=D.bind({document:doc,window,protocol:P,rulers:require('./rulers.js'),groups:require('./drc-groups.js'),http,context:()=>view,navigate:n=>nav.push(n),resize:()=>resize++,
     stateStore:{bind:o=>{o.clearTimeout(o.setTimeout(()=>{},0));let ready=false;return {attach:async()=>{ready=false;await o.apply(savedPanel);ready=true;},
         change:d=>{if(ready)savedChanges.push(d);},close(){ready=false;}};}}});
 const a={check:'0',local:'9007199254740993',global:'9007199254740994',kind:'p',status:0,bbox_um:['10','10','30','30'],points:'5000'};

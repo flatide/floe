@@ -24,6 +24,7 @@ const a=row('9007199254740993',20),b=row('9007199254740994',50,1),c=row('9007199
 const invisible=row('9007199254740996',-4);
 rows=[a,b,c,invisible];
 function http(method,path,body,missing,token){
+    if(path.endsWith('/selection'))return Promise.resolve({revision:'r1',view_id:context.id,state:{selection_rev:'1',total:'0',limit:5000,rules:[]}});
     const q=body&&body.body;requests.push({method,path,body,token});
     if(!q)return Promise.resolve({drc:{id:'drc',revision:'r1',source_id:'source',title:'synthetic',phase:'ready',metadata:{checks:'1',errors:'9007199254740997'}}});
     if(q.kind==='rules')return Promise.resolve({rows:[{check:'0',name:'R',errors:'9007199254740997',waived:'1'}],next:null});
@@ -40,7 +41,7 @@ function http(method,path,body,missing,token){
 }
 const panel=D.bind({document:{getElementById:el,createElement:()=>new Element()},
     window:{requestAnimationFrame:fn=>{raf.set(++serial,fn);return serial;},cancelAnimationFrame:i=>raf.delete(i)},
-    protocol:P,rulers:require('./rulers.js'),http,context:()=>context,navigate:n=>moves.push(n),resize(){},
+    protocol:P,rulers:require('./rulers.js'),groups:require('./drc-groups.js'),http,context:()=>context,navigate:n=>moves.push(n),resize(){},
     stateStore:{bind:o=>{let ready=false;return {attach:async()=>{ready=false;await o.apply(null);ready=true;},change:d=>{if(ready)saves.push(d);},close(){ready=false;}};}}});
 const base=D.projection({bbox_dbu:['-48','-48','148','128'],width:196,height:176},[48,48],'1');
 const size={pixels:[100,80],dpr:2,left:.25,top:.5};

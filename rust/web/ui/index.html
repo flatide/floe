@@ -10,6 +10,7 @@
   <script defer src="/assets/@@BUNDLE@@/gestures.js"></script>
   <script defer src="/assets/@@BUNDLE@@/panel-state.js"></script>
   <script defer src="/assets/@@BUNDLE@@/rulers.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/drc-groups.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc.js"></script>
   <script defer src="/assets/@@BUNDLE@@/app.js"></script>
 </head>
@@ -90,7 +91,13 @@
       <div class="form-row"><label for="drc-waived">Errors</label><select id="drc-waived"><option value="all">All statuses</option><option value="unwaived">Not waived</option><option value="waived">Waived</option></select></div>
       <div class="drc-actions"><button id="drc-in-view" title="Query all rules in the current viewport">In view</button><button id="drc-first" title="First error page; back history retains 128 pages">First page</button><label class="check"><input id="drc-markers" type="checkbox" checked> Markers</label></div>
       <p id="drc-result-info" class="note">No rule selected.</p>
-      <p class="note">Canvas markers: click to inspect · double-click to go. Only the current page and selected error are marked.</p>
+      <p class="note">Canvas markers: click to inspect · double-click to go. Current page and this rule’s selections are marked; only the focused error shows its outline.</p>
+      <section class="drc-groups" aria-label="DRC selection groups">
+        <div class="button-row"><button id="drc-box" aria-pressed="false" title="Two-click box selection (e)" disabled>Box select</button><button id="drc-group-clear" disabled>Clear rule selection</button></div>
+        <p id="drc-group-count" class="note">0 selected</p>
+        <p id="drc-box-status" class="note" role="status">e: two corners · Shift adds · Ctrl/Cmd toggles. Current rule and page only.</p>
+        <p id="drc-group-status" class="note" role="status"></p>
+      </section>
       <div id="drc-errors" class="drc-errors" aria-label="DRC errors"></div>
       <div class="pagination"><button id="drc-error-prev" aria-label="Previous error page" disabled>←</button><span>Error pages</span><button id="drc-error-next" aria-label="Next error page" disabled>→</button></div>
       <div class="button-row"><button id="drc-step-prev" title="Previous matching error in this rule, wrapping (p)" disabled>Previous error</button><button id="drc-step-next" title="Next matching error in this rule, wrapping (n)" disabled>Next error</button></div>

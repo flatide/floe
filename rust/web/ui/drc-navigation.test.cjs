@@ -22,6 +22,7 @@ let context={id:'v1',source:'source',connected:true,pending:false,state:{state_r
 let held=null, holdStep=false, heldPage=null, restoreData=null, waitRestore=false, releaseRestore=null;
 const page=(start,waived)=>{let rows=[];let i=Number(start);for(;i<130&&rows.length<64;i++){const r=row(i);if(waived===null||(r.status===1)===waived)rows.push(r);}return {rows,next:i<130?String(i):null};};
 function http(method,path,body,missing,token){
+    if(path.endsWith('/selection'))return Promise.resolve({revision:'r1',view_id:context.id,state:{selection_rev:'1',total:'0',limit:5000,rules:[]}});
     const b=body&&body.body;requests.push({method,path,body});
     if(!b)return Promise.resolve({drc:{id:'drc',revision:'r1',source_id:'source',title:'test',phase:'ready',metadata:{checks:'1',errors:'130'}}});
     if(b.kind==='rules')return Promise.resolve({rows:[{check:'0',name:'R',name_truncated:false,errors:'130',waived:'44'}],next:null});
@@ -41,7 +42,7 @@ function http(method,path,body,missing,token){
     }
     throw new Error('unexpected request '+JSON.stringify(b));
 }
-const panel=D.bind({document,window:{requestAnimationFrame:()=>1,cancelAnimationFrame(){}},protocol:P,rulers:require('./rulers.js'),http,context:()=>context,navigate:v=>moves.push(v),resize(){},
+const panel=D.bind({document,window:{requestAnimationFrame:()=>1,cancelAnimationFrame(){}},protocol:P,rulers:require('./rulers.js'),groups:require('./drc-groups.js'),http,context:()=>context,navigate:v=>moves.push(v),resize(){},
     stateStore:{bind:o=>{let ready=false;return {attach:async()=>{ready=false;if(waitRestore)await new Promise(r=>{releaseRestore=r;});await o.apply(restoreData);ready=true;},change:d=>{if(ready)saves.push(JSON.parse(JSON.stringify(d)));},close(){ready=false;}};}}});
 async function tick(){for(let i=0;i<60;i++)await Promise.resolve();}
 const count=kind=>requests.filter(r=>r.body&&r.body.body.kind===kind).length;

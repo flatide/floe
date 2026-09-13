@@ -565,9 +565,70 @@ containing block은 검사·decode하지만 vertex 배열을 복제/전송하지
 `RUST VALIDATION: ALL OK`이며 KLayout13 PX+2 phase-exact+14 style도 통과했다.
 기존 native 경고는 남아 있다. 새 선택 UI의 브라우저 QA나 현장 G2 완료는 아니다.
 
-## 12. 다음 경계
+## 12. M2a-8b: 박스 선택·규칙별 금색 마커·복원 UI
 
-1. DRC 두 클릭 box-select/Shift·Ctrl/선택 집합 표시·hover와 현재 규칙의 live
+§11 API를 ES2017 `drc-groups.js`와 DRC 패널에 연결했다. 집합 연산과 bbox 판정은
+Rust가 하고, JS는 **실제로 표시한 프레임**의 좌표 역변환·입력·마커 표시만 한다.
+기존 Rust 내장 정적 자산/loopback 구조를 유지하며 외부 호스팅이나 의존성을 추가하지 않았다.
+
+- `e`/Box select는 두 클릭 모드다. 첫 모서리는 world µm로 보관하고 금색 작은
+  십자로 표시하며, 포인터까지 점선 박스를 그린다. rAF 사이 여러 mousemove도
+  마지막 위치를 남긴다. 완료 뒤에도 다음 박스 대기이며 e로 끈다.
+- 두 번째 클릭이 무수식이면 현재 규칙 집합 대체, Shift는 추가, Ctrl은 토글이다.
+  Mac을 위해 **Cmd도 선택 도구/오류 목록에서만** 토글 별칭으로 허용한다.
+  Ctrl/Cmd가 Shift보다 우선한다. 목록의 Shift/Ctrl/Cmd 클릭은 오류 하나를
+  추가/토글하고 focus/goto/geometry 읽기를 일으키지 않는다. 수정키 더블클릭을
+  별도 goto나 두 번째 명령으로 재해석하지 않는다.
+- 항상 현재 규칙·필터·페이지의 최대64개 ID만 보낸다. 중심 마커가 박스 안에
+  없어도 오류 bbox가 걸치면 선택하는 기존 GTK 의미다. 선택한 그룹을 목록으로
+  대체하지 않으며 행 배경과 마커만 금색으로 바꾼다. 현재 focus의 파란 행 배경이
+  금색보다 우선하고 기존 focus/CD는 별개다. **Selected 목록 필터는 아직 미이관**이다.
+- 포인터 좌표는 overlay DOM rect/DPR·표시 bbox/DBU·margin 원점을 사용한다.
+  첫 클릭 뒤 pan해도 첫 world 모서리는 유지한다. 8 CSS px를 넘긴 드래그는
+  release-only pan이고 원위치로 돌아와도 박스 클릭이 아니다. 복수 버튼/Alt,
+  입력 중 모드 변경·lost capture·stale frame·미처리 view 입력은 선택으로 만들지 않는다.
+- 규칙/페이지/waive 필터 변경은 미완성 박스를 취소한다. Markers off·reload·새
+  view·종료는 모드도 해제한다. Escape는 첫 모서리 취소→선택 모드 종료→CD
+  제거→현재 규칙의 그룹 비우기→focus 종료 순서다(존재하는 단계만 소비).
+  다른 규칙의 그룹은 유지하고 waive 필터 변경은 전체 그룹 clear를 요청한다.
+
+규칙별 집합은 서버 세션에서 복원하고, 현재 규칙의 선택 마커는 다른 페이지로
+가도 표시한다. 복원에 필요한 metadata만 기존 `records`로 최대64개씩 읽고
+vertex 배열은 받지 않는다. 5000개 전부가 선택돼도 최대79개 유계 읽기이며 pan마다
+다시 읽지 않는다. 읽기 실패는 `Selected markers incomplete`로 표시하고 기존
+선택 번호/현재 페이지 강조는 유지한다. 단순 조회/선택으로 설계 프레임은 렌더하지 않는다.
+
+선택 명령은 브라우저에서 **active1·대기열0**이다. 응답의 scope/revision/정렬·중복·
+합계/5000 상한을 확인하며 오래된 view 응답은 버린다. 충돌/timeout/잘못된 응답이면
+GET으로 한 번 확인할 뿐, 토글을 자동 재전송하지 않는다. GET도 실패하면
+`Selection uncertain`과 Reload 안내를 내고 추가 변경을 막는다. 이 상태는 열려 있는
+view 수명까지만 보존되며 pack/waive/notes 파일·native renderer·캐시 포맷은 바꾸지 않는다.
+다중 브라우저의 실시간 push 동기화나 index hot-reload를 구현한 것은 아니다.
+
+검증: 새 JS 게이트는 유실 응답 이후 GET만 수행하는지, 연속 명령 거부, 오래된
+scope, 잘못된/중복/2^53 초과 ID, bbox 경계, DPR2/분수 CSS 원점·margin 역변환,
+Shift/Ctrl/Cmd, 빈 박스/다른 규칙 보존, 페이지 변경·복원·Escape를 단언한다.
+마커 복원에 전체 공간 query/focus/vertex API를 호출하지 않는지도 검사한다.
+기존 pan·마커·CD·패널·전체 ES2017 회귀를 유지했다.
+
+로컬 Chrome/DPR2 합성260오류 QA: 박스로 global **1/38/39/51/54** 다섯 개를 선택해
+금색 마커/행을 확인했고 gen4는 그대로였다. Shift 행 추가 후 새로고침은 여섯 번호와
+기존 뷰를 복원했다. 최종 Cmd 별칭으로 global2를 0→1→0 토글했고 focus/goto는
+없었다. 첫 모서리 후 Shift+Right 10% margin pan 뒤에도 같은 다섯 오류가 선택됐다.
+65번부터 시작하는 다음 페이지에서 reload해도 다섯 선택과 페이지가 복원됐으며
+선택 모드는 안전하게 off였다. 마지막 번들에서 첫 모서리 십자와 Escape의
+모서리 취소→모드 종료도 확인했다. 콘솔 warn/error는 없고 세 QA 세션 모두 exit0이었다.
+이것은 현장 Linux Firefox/ETX 검증이 아니다. G2는 계속 보류다.
+
+2026-09-13: 전체 `sh tools/validate_rust.sh` ALL OK 및 KLayout13 PX+2 phase-exact+
+14 style 통과. core56/app6/web23/transport8 테스트·fmt·전환 패키지 strict clippy와
+release 인증 HTTP 오라클을 재확인했다. Rust1.89 빈 registry 오프라인 테스트와
+Linux musl release link도 통과했으며 마지막 UI 보완은 ES2017/JS 게이트로 재검증했다.
+기존 native 경고는 남아 있고 Linux 실행 PASS로 해석하지 않는다.
+
+## 13. 다음 경계
+
+1. DRC selected 목록 필터·hover와 현재 규칙의 live
    In view 필터, SVRF metric/type 필터·layer isolate는
    아직 미이관이다. 손으로 그리는 ruler/격리와 Escape 우선순위도 M4에서 확장한다.
    현재 웹의 In view는 전체 규칙의 고정 시점 검색이며 GTK의 현재 규칙·뷰 추종

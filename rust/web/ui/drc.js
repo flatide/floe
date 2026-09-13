@@ -27,10 +27,14 @@
         let jumpScale = null, zoomLock = false, painting = null, lastProjection = null, lastSize = null;
         let jumpActive = false, focusVisible = false, stepBusy = false, stepContinuation = null, rowFocus = false;
         let markerHits = [], hitStamp = '';
+        let boxMode = false, boxStart = null, boxEnd = null, pageReady = false;
+        let groupRows = [], groupStamp = '';
         // A canvas click selects without moving. Auto CD belongs to the last
         // accepted focus navigation, not necessarily the selected row.
         let cdTarget = null, cdGlobal = null, cdSegments = null, cdRemaining = 0, cdError = '';
         let restoring = false;
+        const groups = o.groups.bind({http: o.http, protocol: P, changed: groupsChanged,
+            status: function (s) { el('drc-group-status').textContent = s; }});
         const persistence = o.stateStore.bind({http: o.http, protocol: P,
             setTimeout: function (fn, delay) { return setTimeout(fn, delay); },
             clearTimeout: function (id) { clearTimeout(id); },
@@ -82,6 +86,90 @@
             ['drc-step-prev', 'drc-step-next'].forEach(function (id) { el(id).disabled = !available || !rule || stepBusy || !!(query && !query.bbox); });
             el('drc-step-continue').disabled = !available || stepBusy || !stepContinuation;
             ['drc-cd-pop', 'drc-cd-clear'].forEach(function (id) { el(id).disabled = !available || !hasCD(); });
+            el('drc-box').disabled = !available || !rule || !pageReady || !groups.ready() || !el('drc-markers').checked;
+            el('drc-group-clear').disabled = !available || !rule || !groups.ready() || !groups.ids(rule.check).length;
+            el('drc-waived').disabled = !available || !groups.ready();
+        }
+        function boxReset(off) {
+            boxStart = boxEnd = null; if (off) { boxMode = false; }
+            el('drc-box').setAttribute('aria-pressed', String(boxMode));
+            el('drc-box-status').textContent = boxMode ? 'Click the first box corner · drag still pans.' : 'e: two corners · Shift adds · Ctrl/Cmd toggles. Current rule and page only.';
+            if (o.cursor) { o.cursor(); } paintLater();
+        }
+        function toggleBox() {
+            if (boxMode) { boxReset(true); return true; }
+            if (!current() || restoring || !rule || !pageReady || !groups.ready() || !el('drc-markers').checked) {
+                info('Box selection needs a ready rule page with markers on.'); return false;
+            }
+            boxMode = true; boxReset(false); return true;
+        }
+        function groupsChanged() {
+            const count = rule ? groups.ids(rule.check).length : 0;
+            el('drc-group-count').textContent = count + ' selected in this rule · ' + groups.total() + '/5000 across all rules';
+            markErrors(); navigationButtons(); paintLater(); loadGroupMarkers();
+        }
+        async function loadGroupMarkers() {
+            const c = current(), ci = rule && rule.check, ids = ci === null ? [] : groups.ids(ci);
+            const stamp = contextKey(c) + ':' + ci + ':' + ids.join(',');
+            if (!c || !groups.ready() || stamp === groupStamp) { return; }
+            groupStamp = stamp; const t = task('group-metadata');
+            const cache = new Map(); groupRows.concat(rows).forEach(function (r) { if (r.check === ci) { cache.set(r.local, r); } });
+            groupRows = groupRows.filter(function (r) { return r.check === ci && groups.contains(ci, r.local); });
+            const missing = ids.filter(function (id) { return !cache.has(id); });
+            try {
+                for (let i = 0; i < missing.length; i += 64) {
+                    const chunk = missing.slice(i, i + 64), v = await read('group-metadata', t, c, {kind: 'records', check: ci, errors: chunk});
+                    if (!v || groupStamp !== stamp) { return; }
+                    const list = validateRows(v.rows);
+                    if (list.length !== chunk.length || list.some(function (r, j) { return r.check !== ci || r.local !== chunk[j]; })) { throw new Error('Selected marker metadata mismatch'); }
+                    list.forEach(function (r) { cache.set(r.local, r); });
+                }
+                if (valid('group-metadata', t, c) && groupStamp === stamp) { groupRows = ids.map(function (id) { return cache.get(id); }); paintLater(); }
+            } catch (e) {
+                if (valid('group-metadata', t, c)) { el('drc-group-status').textContent = 'Selected markers incomplete · ' + e.message + ' · Reload review to retry.'; }
+            }
+        }
+        function groupApply(ids, mode, bounds) {
+            const c = current(); if (!c || !c.connected || c.pending || restoring || !rule || !groups.ready()) { info('Wait for the view and selection synchronization.'); return false; }
+            const body = {kind: 'apply', check: rule.check, errors: ids, mode: mode};
+            if (bounds) { body.bbox_um = bounds.map(String); body.waived = filter(); }
+            groups.change(body, bounds ? c.state.state_rev : undefined); return true;
+        }
+        function groupClear() { return !!rule && groups.ids(rule.check).length > 0 && groupApply([], 'replace'); }
+        function unproject(clientX, clientY) {
+            const c = current();
+            if (!c || !c.connected || c.pending || restoring || !pageReady || !lastProjection || overlay.hidden ||
+                !el('drc-markers').checked || hitStamp !== contextKey(c) + ':' + c.state.state_rev ||
+                !Number.isFinite(clientX) || !Number.isFinite(clientY)) { return null; }
+            const r = overlay.getBoundingClientRect();
+            if (!(r.width > 0 && r.height > 0) || clientX < r.left || clientX >= r.right || clientY < r.top || clientY >= r.bottom) { return null; }
+            const p = lastProjection, x = (clientX - r.left) / r.width * overlay.width + p.origin[0], y = (clientY - r.top) / r.height * overlay.height + p.origin[1];
+            const xy = [(p.bbox[0] + x * p.step[0]) * p.dbu, (p.bbox[3] - y * p.step[1]) * p.dbu];
+            return xy.every(Number.isFinite) ? xy : null;
+        }
+        function boxClick(x, y, modifiers) {
+            if (!groups.ready()) { return false; }
+            const xy = unproject(x, y); if (!xy) { return false; }
+            if (!boxStart) {
+                boxStart = boxEnd = xy; el('drc-box-status').textContent = 'Click the opposite corner · Shift adds · Ctrl/Cmd toggles · Esc cancels corner.'; paintLater(); return true;
+            }
+            const a = boxStart, b = xy, mode = modifiers && (modifiers.ctrlKey || modifiers.metaKey) ? 'toggle' : modifiers && modifiers.shiftKey ? 'add' : 'replace';
+            const ids = rows.filter(function (r) { return r.check === rule.check; }).map(function (r) { return r.local; });
+            boxReset(false); return groupApply(ids, mode, [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[0], b[0]), Math.max(a[1], b[1])]);
+        }
+        function boxMove(x, y) {
+            if (!boxMode || !boxStart) { return; }
+            const xy = unproject(x, y); if (xy) { boxEnd = xy; paintLater(true); }
+        }
+        function paintBox(p, dpr) {
+            if (!boxMode || !boxStart || !boxEnd) { return; }
+            const a = point(p, boxStart[0], boxStart[1]), b = point(p, boxEnd[0], boxEnd[1]);
+            if (!a.concat(b).every(Number.isFinite)) { return; }
+            ctx.strokeStyle = '#f4cd64'; ctx.lineWidth = dpr; ctx.setLineDash([5 * dpr, 3 * dpr]);
+            ctx.strokeRect(a[0], a[1], b[0] - a[0], b[1] - a[1]); ctx.setLineDash([]);
+            // Make the first world-space corner visible even before movement.
+            const arm = 4 * dpr; ctx.beginPath(); ctx.moveTo(a[0] - arm, a[1]); ctx.lineTo(a[0] + arm, a[1]);
+            ctx.moveTo(a[0], a[1] - arm); ctx.lineTo(a[0], a[1] + arm); ctx.stroke();
         }
         function hasCD() { return !!cdTarget && cdRemaining > 0 && (cdSegments === null || cdSegments.length > 0); }
         function showCD() {
@@ -125,9 +213,12 @@
             cdRemaining = all || cdSegments === null ? 0 : Math.max(0, Math.min(cdRemaining, cdSegments.length) - 1);
             showCD(); savePanel(); return true;
         }
-        function escape() { return popCD(true) || endFocus(); }
-        function paintLater() {
-            markerHits = []; hitStamp = '';
+        function escape() {
+            if (boxMode) { boxReset(!boxStart); return true; }
+            return popCD(true) || groupClear() || endFocus();
+        }
+        function paintLater(keepHits) {
+            if (!keepHits) { markerHits = []; hitStamp = ''; }
             if (stopped || painting !== null) { return; }
             painting = o.window.requestAnimationFrame(function () { painting = null; paint(lastProjection, lastSize); });
         }
@@ -135,13 +226,13 @@
             if (!xy.every(Number.isFinite)) { return; }
             const x = Math.round(xy[0]), y = Math.round(xy[1]), half = Math.floor(side / 2);
             if (x - half >= w || x + half < 0 || y - half >= h || y + half < 0) { return; }
-            ctx.fillStyle = r.status === 1 ? '#70da9a' : '#ff6969'; ctx.fillRect(x - half, y - half, side, side);
+            ctx.fillStyle = groups.contains(r.check, r.local) ? '#f4cd64' : r.status === 1 ? '#70da9a' : '#ff6969'; ctx.fillRect(x - half, y - half, side, side);
             markerHits.push({x: x, y: y, row: r});
         }
         function paint(p, size) {
             markerHits = []; hitStamp = ''; lastProjection = p; lastSize = size;
             const c = current();
-            if (!ctx || !p || !size || !c || !el('drc-markers').checked || (!rows.length && (!selected || !focusVisible) && !hasCD())) { overlay.hidden = true; return; }
+            if (!ctx || !p || !size || !c || !el('drc-markers').checked || (!boxMode && !groupRows.length && !rows.length && (!selected || !focusVisible) && !hasCD())) { overlay.hidden = true; return; }
             const w = size.pixels[0], h = size.pixels[1]; P.pixels(w, h);
             if (overlay.width !== w || overlay.height !== h) { overlay.width = w; overlay.height = h; }
             overlay.style.width = w / size.dpr + 'px'; overlay.style.height = h / size.dpr + 'px';
@@ -153,8 +244,15 @@
                 const b = bbox(r.bbox_um), xy = point(p, b[0] * .5 + b[2] * .5, b[1] * .5 + b[3] * .5);
                 marker(r, xy, 7, w, h);
             });
+            const pageIds = new Set(rows.map(function (r) { return r.check + ':' + r.local; }));
+            groupRows.forEach(function (r) {
+                if (!rule || r.check !== rule.check || !groups.contains(r.check, r.local) || pageIds.has(r.check + ':' + r.local) ||
+                    (filter() !== null && (r.status === 1) !== filter()) || (focusVisible && selected && selected.check === r.check && selected.local === r.local)) { return; }
+                const b = bbox(r.bbox_um); marker(r, point(p, b[0] * .5 + b[2] * .5, b[1] * .5 + b[3] * .5), 7, w, h);
+            });
             paintSelected(p, w, h);
             if (cdSegments && cdRemaining) { o.rulers.paint(ctx, cdSegments.slice(0, cdRemaining), function (x, y) { return point(p, x, y); }, size); }
+            paintBox(p, size.dpr);
         }
         function paintSelected(p, w, h) {
             if (!selected || !focusVisible) { return; }
@@ -174,7 +272,8 @@
             if (selected.kind === 'p') { ctx.closePath(); ctx.globalAlpha = .25; ctx.fill(); ctx.globalAlpha = 1; }
             ctx.stroke();
         }
-        function click(clientX, clientY, twice) {
+        function click(clientX, clientY, twice, modifiers) {
+            if (boxMode) { return boxClick(clientX, clientY, modifiers); }
             const c = current();
             if (!c || !c.connected || c.pending || restoring || overlay.hidden || !el('drc-markers').checked ||
                 hitStamp !== contextKey(c) + ':' + c.state.state_rev || !markerHits.length ||
@@ -238,19 +337,19 @@
         }
         function chooseRule(r) {
             if (!current()) { return; }
-            rule = r; query = null; errorStart = '0'; previousErrors.length = 0; rows = []; errorNext = null;
+            boxReset(false); rule = r; query = null; errorStart = '0'; previousErrors.length = 0; rows = []; errorNext = null;
             clearSelection(); renderRules(); el('drc-rule-title').textContent = r.name; el('drc-description').textContent = '';
             const c = current(), t = task('description');
             read('description', t, c, {kind: 'rule', check: r.check}).then(function (page) {
                 if (page) { el('drc-description').textContent = page.description; }
             }).catch(function (e) { failure('description', t, c, e); });
-            loadErrors(); savePanel();
+            loadErrors(); savePanel(); groupsChanged();
         }
         function filter() { return el('drc-waived').value === 'all' ? null : el('drc-waived').value === 'waived'; }
         function markErrors() {
             Array.prototype.forEach.call(el('drc-errors').children, function (b, i) {
                 const r = rows[i], active = r && selected && selected.check === r.check && selected.local === r.local;
-                b.className = 'drc-error' + (r && r.status === 1 ? ' waived' : '') + (active ? ' selected' : '');
+                b.className = 'drc-error' + (r && r.status === 1 ? ' waived' : '') + (r && groups.contains(r.check, r.local) ? ' grouped' : '') + (active ? ' selected' : '');
                 if (active && rowFocus) { rowFocus = false; b.focus(); b.scrollIntoView({block: 'nearest'}); }
             });
         }
@@ -262,8 +361,12 @@
                 b.disabled = restoring;
                 b.textContent = '#' + P.next(r.local) + '  ·  global ' + r.global + '  ·  ' + (r.kind === 'p' ? 'poly' : 'edge') + (r.status === 1 ? '  ·  waived' : '');
                 b.setAttribute('aria-label', 'Error ' + P.next(r.local) + ', global ' + r.global);
-                b.onclick = function () { cancelStep(); select(r, false); };
-                b.ondblclick = function () { cancelStep(); select(r, true); };
+                b.onclick = function (e) {
+                    if (e && e.altKey) { return; }
+                    if (e && (e.ctrlKey || e.metaKey || e.shiftKey)) { if (!(e.detail > 1) && rule && r.check === rule.check) { groupApply([r.local], e.ctrlKey || e.metaKey ? 'toggle' : 'add'); } return; }
+                    cancelStep(); select(r, false);
+                };
+                b.ondblclick = function (e) { if (e && (e.ctrlKey || e.shiftKey || e.metaKey || e.altKey)) { return; } cancelStep(); select(r, true); };
                 b.onkeydown = function (e) {
                     if (e.ctrlKey || e.metaKey || e.altKey || e.isComposing) { return; }
                     if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'n' || e.key === 'p') {
@@ -279,6 +382,7 @@
         }
         async function loadErrors(strict) {
             const c = current(); if (!c || (!rule && !query)) { return; }
+            pageReady = false; boxReset(false); navigationButtons();
             const t = task('errors'), body = query ? (query.bbox ? {kind: 'query', bbox_um: query.bbox, checks: null, cursor: errorStart, waived: filter(), limit: 64} :
                 {kind: 'in_view', cursor: errorStart, waived: filter(), limit: 64}) : {kind: 'errors', check: rule.check, start: errorStart, waived: filter(), limit: 64};
             try {
@@ -287,8 +391,9 @@
                 rows = validateRows(page.rows); errorNext = page.next;
                 if (errorNext !== null) { if (query) { cursor(errorNext.check); cursor(errorNext.error); } else { cursor(errorNext); } }
                 if (JSON.stringify(errorNext) === JSON.stringify(errorStart)) { throw new Error('DRC cursor did not progress'); }
-                renderErrors(); info('Read-only · review files are never changed.'); savePanel();
+                pageReady = true; renderErrors(); info('Read-only · review files are never changed.'); savePanel();
             } catch (e) { if (strict) { throw e; } failure('errors', t, c, e); }
+            finally { if (valid('errors', t, c)) { navigationButtons(); } }
         }
         async function geometry(r) {
             const c = current(), t = task('geometry'); let start = '0', total = null;
@@ -327,6 +432,7 @@
             if (rule && rule.check === check) { return; }
             resetCD();
             rule = {check: check, name: 'Rule ' + P.next(check)};
+            boxReset(false); groupsChanged();
             renderRules(); el('drc-rule-title').textContent = rule.name; el('drc-description').textContent = '';
             const c = current(), t = task('description');
             read('description', t, c, {kind: 'rule', check: check}).then(function (v) {
@@ -407,7 +513,7 @@
         async function restorePanel(data) {
             const c = current(); if (!c) { return; }
             const t = task('restore'); restoring = true;
-            cancel('rules'); cancel('errors'); cancel('description'); clearSelection();
+            cancel('rules'); cancel('errors'); cancel('description'); clearSelection(); boxReset(true);
             rule = null; rows = []; query = null; previousRules.length = previousErrors.length = 0;
             ruleStart = errorStart = '0'; ruleNext = errorNext = null;
             navigationButtons();
@@ -457,23 +563,26 @@
             const c = current(); if (!c) { return; }
             // Cancel immediately, not after the panel GET completes. A slow
             // previous focus/step must not move the view during restoration.
-            cancelStep(); ['focus', 'geometry', 'cd', 'rules', 'errors', 'description', 'restore'].forEach(cancel);
+            cancelStep(); ['focus', 'geometry', 'cd', 'rules', 'errors', 'description', 'restore', 'group-metadata'].forEach(cancel);
+            boxReset(true); groupRows = []; groupStamp = '';
             const key = contextKey(c); restoring = true; navigationButtons(); renderRules(); renderErrors();
-            return persistence.attach({path: '/api/v1/drc/' + registration.id + '/views/' + c.id + '/panel',
-                revision: registration.revision, view: c.id}).then(function () {
-                if (contextKey(current()) === key) { restoring = false; renderRules(); renderErrors(); contextChanged(); }
+            const path = '/api/v1/drc/' + registration.id + '/views/' + c.id;
+            return Promise.all([persistence.attach({path: path + '/panel', revision: registration.revision, view: c.id}),
+                groups.attach({path: path + '/selection', revision: registration.revision, view: c.id})]).then(function () {
+                if (contextKey(current()) === key) { restoring = false; renderRules(); renderErrors(); contextChanged(); groupsChanged(); }
             });
         }
         function contextChanged() {
             markerHits = []; hitStamp = '';
             const c = current(), key = contextKey(c);
             if (key !== bound) {
-                persistence.close(); cancelAll(); bound = key; restoring = false; rule = null; ruleRows = []; rows = []; ruleStart = errorStart = '0'; query = null;
+                persistence.close(); groups.close(); cancelAll(); boxReset(true); groupRows = []; groupStamp = ''; pageReady = false;
+                bound = key; restoring = false; rule = null; ruleRows = []; rows = []; ruleStart = errorStart = '0'; query = null;
                 previousRules.length = previousErrors.length = 0; ruleNext = errorNext = null; clearSelection(); renderRules();
                 el('drc-rule-title').textContent = 'Choose a rule'; el('drc-description').textContent = '';
                 if (c) { restoreState(); }
             }
-            navigationButtons();
+            groupsChanged();
             if (registration && !c && registration.phase === 'ready') { info('Open the source associated with this DRC pack.'); }
             if (query && c && query.rev !== c.state.state_rev) { el('drc-result-info').textContent = 'Results from an earlier viewport · click In view to refresh.'; }
         }
@@ -499,7 +608,7 @@
         el('drc-error-prev').onclick = function () { cancelStep(); if (previousErrors.length) { errorStart = previousErrors.pop(); loadErrors(); } };
         el('drc-error-next').onclick = function () { cancelStep(); if (errorNext !== null) { remember(previousErrors, errorStart); errorStart = errorNext; loadErrors(); } };
         el('drc-first').onclick = function () { cancelStep(); previousErrors.length = 0; errorStart = query ? {check: '0', error: '0'} : '0'; loadErrors(); };
-        el('drc-waived').onchange = function () { clearSelection(); el('drc-first').onclick(); };
+        el('drc-waived').onchange = function () { boxReset(false); if (groups.total()) { groups.change({kind: 'clear_all'}); } clearSelection(); el('drc-first').onclick(); };
         el('drc-in-view').onclick = function () {
             const c = current(); if (!c || c.pending) { info('Wait for the current view edit.'); return; }
             query = {bbox: null, rev: c.state.state_rev}; errorStart = {check: '0', error: '0'}; previousErrors.length = 0; clearSelection(); loadErrors();
@@ -511,17 +620,21 @@
         el('drc-clear').onclick = clearSelection;
         el('drc-cd-pop').onclick = function () { popCD(false); };
         el('drc-cd-clear').onclick = function () { popCD(true); };
-        el('drc-markers').onchange = function () { paintLater(); savePanel(); };
+        el('drc-markers').onchange = function () { if (!el('drc-markers').checked) { boxReset(true); } paintLater(); navigationButtons(); savePanel(); };
+        el('drc-box').onclick = toggleBox;
+        el('drc-group-clear').onclick = groupClear;
         el('drc-toggle').onclick = function () { shown = !shown; el('drc-panel').hidden = !shown; el('drc-toggle').setAttribute('aria-expanded', String(shown)); o.resize(); savePanel(); };
         el('drc-reload').onclick = restoreState;
         return {init: refresh, contextChanged: contextChanged, paint: paint, click: click, clear: clearSelection,
+            boxActive: function () { return boxMode; }, move: boxMove,
             key: function (key) {
                 if (key === 'Escape') { return escape(); }
                 if (key === 'k' || key === 'K') { return popCD(key === 'K'); }
+                if (key === 'e') { return toggleBox(); }
                 if ((key === 'n' || key === 'p') && rule && current()) { step(key === 'p', false, false); return true; }
                 return false;
             },
-            stop: function () { stopped = true; persistence.close(); bound = ''; cancelAll(); clearTimeout(timer); if (painting !== null) { o.window.cancelAnimationFrame(painting); painting = null; } overlay.hidden = true; },
+            stop: function () { stopped = true; persistence.close(); groups.close(); bound = ''; boxReset(true); cancelAll(); clearTimeout(timer); if (painting !== null) { o.window.cancelAnimationFrame(painting); painting = null; } overlay.hidden = true; },
             resume: function () { stopped = false; return refresh(); }};
     }
     const api = {bind: bind, projection: projection, point: point, shifted: shifted};

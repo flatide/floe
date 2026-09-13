@@ -77,7 +77,10 @@ details > summary { cursor: pointer; font-size: 12px; color: #b4c3d8; }
 .drc-search button, .drc-actions button { font-size: 12px; }
 .drc-rules { max-height: 180px; min-height: 65px; overflow-y: auto; font-size: 12px; color: #9dacc0; }
 .drc-rule, .drc-error { display: block; width: 100%; border-radius: 0; border: 0; border-bottom: 1px solid #30394a; text-align: left; font-size: 12px; background: transparent; padding: 7px 8px; overflow: hidden; text-overflow: ellipsis; }
+.drc-error.grouped { background: #554721; box-shadow: inset 3px 0 #f4cd64; }
 .drc-rule.selected, .drc-error.selected { background: #2c435f; box-shadow: inset 3px 0 #7fb3f6; }
+.drc-groups { border-top: 1px solid #30394a; padding-top: 8px; }
+#drc-box[aria-pressed="true"] { color: #f4cd64; border-color: #f4cd64; }
 .drc-error { color: #efb0b0; }
 .drc-error.waived { color: #a1d7ba; }
 .drc-description { padding: 10px 0; border-bottom: 1px solid #333c4a; }

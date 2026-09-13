@@ -43,6 +43,7 @@ async fn embedded_assets_are_content_identified_and_never_serve_files() {
         ("protocol.js", "text/javascript"),
         ("drc.js", "text/javascript"),
         ("rulers.js", "text/javascript"),
+        ("drc-groups.js", "text/javascript"),
         ("panel-state.js", "text/javascript"),
         ("app.css", "text/css"),
     ] {

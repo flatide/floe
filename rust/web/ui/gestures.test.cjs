@@ -2,10 +2,10 @@
 const assert = require('node:assert/strict'), gestures = require('./gestures.js');
 function target() {const listeners={};return {listeners,focus(){},addEventListener(k,fn){(listeners[k] ||= []).push(fn);},emit(k,v={}){for(const fn of listeners[k]||[]){fn(v);}}};}
 const viewport=target(), win=target(), doc=target(), frames=new Map(), previews=[], pans=[], clicks=[];
-let seq=0,stamp='1',ready=true,cursor=false;
+let seq=0,stamp='1',ready=true,cursor=false,boxMode=false;
 const g=gestures.bind({viewport,window:win,document:doc,stamp:()=>stamp,ready:()=>ready,
     dimensions:()=>({pixels:[800,600],dpr:2}),cursor:v=>{cursor=v;},
-    preview:(p,paint)=>previews.push({p,paint}),pan:n=>pans.push(n),click:(...c)=>clicks.push(c),
+    preview:(p,paint)=>previews.push({p,paint}),pan:n=>pans.push(n),click:(...c)=>clicks.push(c),selectionMode:()=>boxMode,
     requestAnimationFrame:fn=>{frames.set(++seq,fn);return seq;},cancelAnimationFrame:id=>frames.delete(id)});
 function event(x,y,button=0,buttons=1){return {clientX:x,clientY:y,button,buttons,preventDefault(){}};}
 viewport.emit('mousedown',event(100,100));win.emit('mousemove',event(103,102));win.emit('mouseup',event(103,102,0,0));
@@ -50,4 +50,20 @@ ready=false;viewport.emit('mousedown',event(0,0));assert.equal(g.active(),false)
 ready=true;viewport.emit('mousedown',event(0,0,1,4));win.emit('mouseup',event(20,20,0,0));assert(g.active());
 win.emit('mousemove',event(1000,-1000,1,4));win.emit('mouseup',event(1000,-1000,1,0));
 assert.deepEqual(pans.at(-1),{kind:'pan',x:-1,y:-1,snap:false});
-console.log('WEB GESTURES: ALL OK (rAF pacing, one release input, click/double-click/modifiers/chords, jitter, bounds, lost capture/stale/hidden)');
+boxMode=true;
+for(const modifiers of [{ctrlKey:true},{metaKey:true},{shiftKey:true},{ctrlKey:true,shiftKey:true},{}]){
+    viewport.emit('mousedown',{...event(100,100),...modifiers});win.emit('mouseup',{...event(100,100,0,0),...modifiers});
+    assert.deepEqual(clicks.at(-1),[100,100,false,{ctrlKey:!!modifiers.ctrlKey,metaKey:!!modifiers.metaKey,shiftKey:!!modifiers.shiftKey}]);
+}
+const boxClicks=clicks.length, boxPans=pans.length;
+viewport.emit('mousedown',{...event(100,100),ctrlKey:true});win.emit('mousemove',event(120,110));win.emit('mouseup',event(120,110,0,0));
+assert.equal(pans.length,boxPans+1);assert.equal(clicks.length,boxClicks,'box-mode drag became a corner');
+viewport.emit('mousedown',event(100,100));win.emit('mousemove',event(110,110));win.emit('mouseup',event(100,100,0,0));
+assert.equal(clicks.length,boxClicks,'returned drag selected a box');
+for(const modifiers of [{altKey:true}]){
+    viewport.emit('mousedown',{...event(100,100),...modifiers});win.emit('mouseup',{...event(100,100,0,0),...modifiers});assert.equal(clicks.length,boxClicks);
+}
+viewport.emit('mousedown',event(100,100));viewport.emit('mousedown',event(100,100,1,5));win.emit('mouseup',event(100,100,0,0));assert.equal(clicks.length,boxClicks);
+viewport.emit('mousedown',event(100,100));boxMode=false;win.emit('mouseup',event(100,100,0,0));assert.equal(clicks.length,boxClicks,'mode changed during click');
+viewport.emit('mousedown',event(100,100));boxMode=true;win.emit('mouseup',event(100,100,0,0));assert.equal(clicks.length,boxClicks);
+console.log('WEB GESTURES: ALL OK (rAF, release-only pan, clicks/modifiers/chords, opt-in box mode, jitter, bounds, lost capture/stale/hidden)');

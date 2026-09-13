@@ -22,11 +22,13 @@
             drag.dy = Math.max(-drag.height, Math.min(drag.height, Math.round(y * drag.dpr)));
         }
         port.viewport.addEventListener('mousedown', function (event) {
-            if (drag) { drag.plain = false; return; }
-            if ((event.button !== 0 && event.button !== 1) || event.ctrlKey || event.metaKey || event.altKey || !port.ready()) { return; }
+            if (drag) { drag.plain = drag.unchorded = false; return; }
+            const box = !!(port.selectionMode && port.selectionMode());
+            if ((event.button !== 0 && event.button !== 1) || ((event.ctrlKey || event.metaKey) && !box) || event.altKey || !port.ready()) { return; }
             const d = port.dimensions();
             drag = {x: event.clientX, y: event.clientY, button: event.button, stamp: port.stamp(),
                 width: d.pixels[0], height: d.pixels[1], dpr: d.dpr, dx: 0, dy: 0, moved: false,
+                box: box, unchorded: event.buttons === undefined || event.buttons === (event.button === 0 ? 1 : 4),
                 plain: !event.shiftKey && (event.buttons === undefined || event.buttons === 1)};
             event.preventDefault(); port.viewport.focus(); port.cursor(true);
         });
@@ -34,7 +36,7 @@
             if (!drag) { return; }
             const mask = drag.button === 0 ? 1 : 4;
             if (typeof event.buttons === 'number' && (event.buttons & mask) === 0) { cancel(); return; }
-            if (typeof event.buttons === 'number' && event.buttons !== mask) { drag.plain = false; }
+            if (typeof event.buttons === 'number' && event.buttons !== mask) { drag.plain = drag.unchorded = false; }
             update(event);
             if (drag && paint === null) { paint = port.requestAnimationFrame(draw); }
         });
@@ -56,10 +58,11 @@
                 // marker click. Never turn a cancelled or returned drag into
                 // a pick. MouseEvent.detail supplies the browser's double-
                 // click interval; no independent timer races navigation.
-                if (!done.moved && done.button === 0 && done.plain && port.click &&
-                    !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey &&
+                if (!done.moved && done.button === 0 && done.unchorded && port.click &&
+                    done.box === !!(port.selectionMode && port.selectionMode()) && !event.altKey &&
                     (event.buttons === undefined || event.buttons === 0)) {
-                    port.click(event.clientX, event.clientY, event.detail === 2);
+                    if (done.box) { port.click(event.clientX, event.clientY, event.detail === 2, {ctrlKey: !!event.ctrlKey, metaKey: !!event.metaKey, shiftKey: !!event.shiftKey}); }
+                    else if (done.plain && !event.ctrlKey && !event.metaKey && !event.shiftKey) { port.click(event.clientX, event.clientY, event.detail === 2); }
                 }
             }
         });

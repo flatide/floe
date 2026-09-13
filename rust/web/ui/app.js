@@ -38,6 +38,8 @@
         drc_context_changed: 'The view changed while reading DRC. Select the error again.',
         drc_busy: 'The DRC read queue is busy. Retry this page.',
         drc_closed: 'The DRC reader is closed.',
+        drc_selection_conflict: 'Selection changed in another request. Server state will be reloaded; no command is retried.',
+        drc_selection_limit: 'Selection limit reached. The previous selection was preserved.',
         invalid_drc_request: 'Invalid DRC index, cursor, coordinate or page limit.'
     };
     function notice(text) { el('notice').textContent = text || ''; el('notice').hidden = !text; }
@@ -570,16 +572,18 @@
         const rect = viewport.getBoundingClientRect();
         zoom(event.deltaY < 0 ? 0.8 : 1.25, [Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)), Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height))]);
     }, {passive: false});
+    function reviewCursor() { viewport.style.cursor = gesture && gesture.active() ? 'grabbing' : drcPanel && drcPanel.boxActive() ? 'crosshair' : ''; }
+    viewport.addEventListener('mousemove', function (event) { if (drcPanel && (!gesture || !gesture.active())) { drcPanel.move(event.clientX, event.clientY); } });
     gesture = window.FloeGestures.bind({viewport: viewport, window: window, document: document,
         dimensions: dims, ready: function () { return live() && displayed && !!epoch && !inflight && queue.length === 0; },
         stamp: function () { return currentId + ':' + epoch + ':' + (state ? state.state_rev : ''); },
         requestAnimationFrame: function (fn) { return window.requestAnimationFrame(fn); },
         cancelAnimationFrame: function (id) { window.cancelAnimationFrame(id); },
         preview: function (p, paint) { dragShift = p; if (paint) { present(); } },
-        cursor: function (active) { viewport.style.cursor = active ? 'grabbing' : ''; }, pan: nav,
+        cursor: reviewCursor, pan: nav, selectionMode: function () { return !!drcPanel && drcPanel.boxActive(); },
         // DRC owns display-space marker hits. Native geometry queries remain
         // disabled until the expected/actual query-scene contract is wired.
-        click: function (x, y, twice) { if (drcPanel) { drcPanel.click(x, y, twice); } }});
+        click: function (x, y, twice, modifiers) { if (drcPanel) { drcPanel.click(x, y, twice, modifiers); } }});
     el('index').onclick = function () {
         try { submitOperation({kind: 'index', source_id: el('source').value, levels: levels(), options: {jobs: Number(el('index-jobs').value), force: el('index-force').checked, lod: el('index-lod').checked, occupancy: el('index-occupancy').checked}}).catch(report); }
         catch (e) { report(e); }
@@ -604,7 +608,7 @@
     const sizeObserver = typeof window.ResizeObserver === 'function' ? new window.ResizeObserver(resized) : null;
     if (sizeObserver) { sizeObserver.observe(viewport); }
     drcPanel = window.FloeDRC.bind({document: document, window: window, protocol: P, http: http,
-        stateStore: window.FloePanelState, rulers: window.FloeRulers,
+        stateStore: window.FloePanelState, rulers: window.FloeRulers, groups: window.FloeDRCGroups, cursor: reviewCursor,
         context: function () { return !stopped && state && currentId ? {id: currentId, source: currentSource, state: state,
             connected: !!epoch && !!socket && socket.readyState === WebSocket.OPEN, pending: !!inflight || queue.length > 0 || !!dragShift} : null; },
         navigate: nav, resize: resized});
