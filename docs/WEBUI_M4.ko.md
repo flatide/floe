@@ -1065,3 +1065,83 @@ x86-64 musl static-pie 교차 빌드가 통과했다. 기존 의존성·개발 �
 다음 독립 작업은 owner 웹 clip/내보내기 연결이다. review/주석 저장·나머지 조작·
 GTK 진단 대체·패키징/현장 수용은 남는다. 공유 권한·실제 pack-build 승인 클릭은
 보류 경계를 유지하며 M4 전체 완료나 GTK launcher 교체를 뜻하지 않는다.
+
+## 12. M4c-1: 관리형 exact clip·만료 파일 소유 코어
+
+owner 웹 내보내기의 선행 코어를 `floe-app-core::exports`에 추가했다.
+**이번 단계는 HTTP/UI 연결 완료가 아니다.** 기존 CLI clip은 같은 native 수집 코어를
+사용하되 출력 경로 보호·원자 저장·빈 토큰을 all로 해석하는 호환 동작을 유지한다.
+
+### 작업 수명과 정확성
+
+- `exports::clip::Job`은 등록된 source와 `Arc<ManagedDataset>`, canonical i64 DBU
+  bbox, 명시 all/none/실제 layer pair, trusted `ClipOptions`만 받는다. browser 경로나
+  출력 파일명·native argv를 받는 API가 아니다. 요청 jobs는1..16이고 옵션과 같아야 한다.
+  알 수 없는 layer·등록/source 불일치·jobdeck은 native 작업 전에 거부한다.
+- 화면 render와 별도 dedicated worker를 열며 style·viewport·cut·thin·LOD·occupancy와
+  무관한 기존 exact/full-depth clip을 호출한다. 정수 DBU를 다시 반올림하지 않고,
+  명시 `Layers::None`을 전체 레이어로 바꾸지 않는다. stale source의 캐시 export는
+  outcome에 `source_stale`을 남기고 암묵적으로 재인덱싱하지 않는다.
+- CPU jobs·worker1·decoded budget을 공유 `Resources`에 예약한다. pinned dataset의
+  read lease와 예약은 native 종료/reap까지 잡는다. 새 export를 위해 기존 화면이나
+  다른 작업을 취소하지 않고, 부족하면 Busy다. 이 회계는 전체 RSS/OS thread 상한이나
+  viewer latency 보장이 아니며, native ClipGeometry/인코딩 버퍼는 §7의 기존 한계다.
+- preparing→opening→clipping→finishing→ready/failed/cancelled를 보고한다.
+  terminal은 worker reap과 자원 반환 뒤다. cancel과 결과 commit을 같은 mutex로
+  직렬화하므로 cancel이 이기면 artifact가 없고, commit이 이기면 늦은 cancel은 false다.
+  이미 관찰한 native/IO 오류를 나중의 cancel로 바꾸지 않는다. Job Drop도 cancel→join한다.
+- 등록 scope/source를 작업 전후 확인하고, source/meta/OVM/OVP/선택적 OVT의
+  dev/ino/size/mtime/ctime을 전후 대조하며 마지막에 marker/version을 재검증한다.
+  같은 서비스의 index는 read lease로 배제한다. **외부 프로세스가 열린 view의 cache를
+  교체하는 문제 전체를 해결하거나 immutable revision을 제공하는 것은 아니다.**
+  기존 보류 사항인 cache 세대 관리와 외부 writer CAS/lock은 별도다.
+
+### 파일 보관·만료·다운로드 준비
+
+- worker client가 header/END·unit/name·크기를 확인하고 unlink한 regular-file
+  descriptor를 그대로 소유한다. 두 번째 전체 `Vec`, named artifact 디렉터리나
+  최종 파일 복사를 만들지 않는다. 아직 웹 다운로드 라우트는 없다.
+- 기본 보관 한도는4건·건당512MiB·합계2GiB, 동시 reader2, ready 후 TTL600초다.
+  작업 시작 전에 건당 최대량을 예약하고 성공하면 실제 파일 크기로 줄인다.
+  실패하면 반환하며, 용량 확보를 위해 다른 결과를 자동 축출하지 않는다.
+  **건당 한도는 native 생성 후 검사한다. 생성 중 임시 디스크나 ClipGeometry의
+  메모리를 이 한도로 제한하는 것은 아니다.** 초과 결과는 Incomplete 오류이며 게시하지 않는다.
+- 별도 만료 thread가 browser 트래픽 없이도 만료를 검사한다(최대1초 간격).
+  만료/release/owner close 뒤에는 기존 reader도 더 읽을 수 없다. reader가 붙은
+  retired descriptor는 reader Drop까지 계속 보관량·건수에 산입한다. pending 작업의
+  예약도 close만으로 미리 반환하지 않고 native 정리 뒤 Reservation Drop에서 반환한다.
+- `Download::read_chunk`는 최대1MiB, 독립 `read_at` offset으로 읽고 전후에
+  만료/철회·파일 크기를 검사한다. 같은 artifact의 두 download가 seek offset을 공유하지
+  않는다. HTTP 연결 시 reactor 밖에서 읽고 transport credit을 기다린 뒤 다음 chunk를
+  읽어야 하며, 연결 종료/timeout에 reader를 Drop해야 한다.
+- `Store::close`는 결과와 reader를 철회하고 pending 작업에 취소를 보낸다.
+  owner 종료 처리에서는 별도로 Job들을 join해야 native reap이 완료된다.
+  artifact ID는 Resources의 단조 ID를 쓰지만 **이 모듈은 인증/권한/재요청 ledger가 아니다.**
+
+### 검증과 다음 연결
+
+단위 테스트는 pending 예약·실제 bytes 정산, 한도/잘못된 descriptor,
+독립 offset·reader cap, 트래픽 없는 TTL, pin 상태 회계, owner close,
+cancel/commit 경합과 실제 오류 보존을 검사한다.
+
+필수 `validate_managed_clip.py`는 private concave/path/회전·반사·배열 fixture를
+Python/j1/j8 바이트 및 KLayout Region XOR로 대조한 뒤, managed 결과도17-byte
+chunk로 같은 바이트인지 검사한다. explicit none, stale flag, unknown layer/등록
+불일치/deck 거부, admission/읽기 lease, ready/open/clip/quit의 cancel/Drop/close,
+timeout·ENOSPC·손상 출력·작업 중 source/cache 변경·oversize 결과 폐기를 고정한다.
+기존 valmini 포함 `validate_app_clip.py`도 공통화 회귀 게이트로 유지한다.
+
+실행 결과(2026-09-14): 전체 `sh tools/validate_rust.sh`가 `RUST VALIDATION: ALL OK`다.
+새 managed clip과 기존 clip·캡처·query/DRC/웹 UI, jobdeck80·renderer46,
+KLayout13 PX +2 phase-exact +14 style jobs1/8 검증을 포함한다. 만료 단위 테스트의
+30ms 스케줄링 의존도 제거한 뒤 app11/core128/web36·transport8·worker-client
+unit7/lifecycle14를 다시 통과했다. Rust1.89.0 테스트와 최종 export9개 재검증,
+scoped fmt/strict clippy, macOS release·Linux x86-64 musl static-pie 교차 빌드도 통과했다.
+워크스페이스 전체 `cargo fmt --all -- --check`는 기존 미변경 CLI/VFS 등의 포맷
+차이로 실패하며 변경 패키지의 통과와 구분한다. 해당 파일은 포맷 일괄 수정하지 않았다.
+기존 dependency/Pillow/GDK warning은 남고, native geometry/wire/renderd 버전0.12.87과
+vendor는 변경하지 않았다. 실제 Linux 실행·현장 Firefox/ETX 수용은 별도다.
+
+다음 M4c 연결은 owner HTTP 작업 ledger·표시/revision receipt·취소·artifact download와
+clip UI다. read-only 공유를 export 허가로 해석하지 않으며 guest endpoint는 추가하지
+않았다. 전체 M4·GTK 기본 launcher 교체·현장 Firefox/ETX 수용은 여전히 미완료다.

@@ -13,6 +13,7 @@ pub mod catalog;
 pub mod clip;
 pub mod dataset;
 pub mod drc;
+pub mod exports;
 pub mod index;
 pub mod index_progress;
 pub mod jobdeck;

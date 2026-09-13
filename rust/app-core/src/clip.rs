@@ -3,11 +3,12 @@ use crate::{
     artifact, catalog::Layout, check_cancelled, native::Discovery, render::env_number, Error,
     ErrorKind, Result,
 };
-use floe_worker_client::{ClipRequest, Config, Fields, Layers, Source, WorkerClient};
+use floe_worker_client::{ClipArtifact, ClipRequest, Config, Fields, Layers, Source, WorkerClient};
 use std::path::{Path, PathBuf};
 use std::sync::{atomic::AtomicUsize, Arc};
 use std::time::Duration;
 
+#[derive(Clone, Debug)]
 pub struct ClipOptions {
     pub binary: PathBuf,
     pub budget_mb: u64,
@@ -87,11 +88,50 @@ pub fn export(
     };
     request.validate()?;
     let output = artifact::output_path(output, layout)?;
+    let mut clip = collect(layout, &request, options, cancelled, |_, _| {})?;
+    // Recheck the destination after a potentially long export. The worker
+    // wrote only to its private slot and is already reaped before publication.
+    let output = artifact::output_path(&output, layout)?;
+    artifact::publish_reader(&output, &mut clip.file, clip.size_bytes, cancelled)?;
+    Ok(ClipReport {
+        output,
+        size_bytes: clip.size_bytes,
+        fields: clip.fields,
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CollectPhase {
+    Opening,
+    Clipping,
+    Closing,
+}
+/// Return a validated, unlinked descriptor only after worker reap. This is
+/// shared by the CLI publisher and managed artifact ownership; it does not
+/// reinterpret Layers::None as All or round already-integer DBU coordinates.
+pub fn collect(
+    layout: &Layout,
+    request: &ClipRequest,
+    options: &ClipOptions,
+    cancelled: &Arc<AtomicUsize>,
+    mut progress: impl FnMut(CollectPhase, Option<u32>),
+) -> Result<ClipArtifact> {
+    check_cancelled(cancelled)?;
+    request.validate()?;
+    if request.jobs != options.jobs
+        || options.budget_mb == 0
+        || !(1..=86400).contains(&options.open_timeout_s)
+        || !(1..=86400).contains(&options.clip_timeout_s)
+    {
+        return Err(Error::input("invalid clip collection options"));
+    }
     let mut config = Config::new(&options.binary);
     config.open_timeout = Duration::from_secs(options.open_timeout_s);
     config.clip_timeout = Duration::from_secs(options.clip_timeout_s);
     config.shutdown_requested = Some(Arc::clone(cancelled));
+    progress(CollectPhase::Opening, None);
     let mut worker = WorkerClient::spawn(config)?;
+    progress(CollectPhase::Opening, worker.pid());
     let opened = worker.open(
         Source::Layout(layout.directory.clone()),
         options.budget_mb,
@@ -103,20 +143,14 @@ pub fn export(
             "metadata and worker units differ",
         ));
     }
-    let result = worker.clip(&request);
+    progress(CollectPhase::Clipping, worker.pid());
+    let result = worker.clip(request);
+    progress(CollectPhase::Closing, worker.pid());
     let closed = worker.close();
-    let mut clip = result?;
+    let clip = result?;
     closed?;
     check_cancelled(cancelled)?;
-    // Recheck the destination after a potentially long export. The worker
-    // wrote only to its private slot and is already reaped before publication.
-    let output = artifact::output_path(&output, layout)?;
-    artifact::publish_reader(&output, &mut clip.file, clip.size_bytes, cancelled)?;
-    Ok(ClipReport {
-        output,
-        size_bytes: clip.size_bytes,
-        fields: clip.fields,
-    })
+    Ok(clip)
 }
 
 #[cfg(test)]

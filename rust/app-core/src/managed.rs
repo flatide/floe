@@ -105,6 +105,24 @@ impl Resources {
     pub fn read(self: &Arc<Self>, caches: impl IntoIterator<Item = PathBuf>) -> Result<Permit> {
         self.acquire(Usage::default(), keys(caches)?, false)
     }
+    /// Dedicated exact export worker. The dataset's separate read permit must
+    /// remain alive through child reap; this reserves CPU and decoded memory,
+    /// not the native geometry/writer's total RSS or temporary disk footprint.
+    pub fn export(self: &Arc<Self>, jobs: u16, budget_mb: u64) -> Result<Permit> {
+        if !(1..=16).contains(&jobs) || budget_mb == 0 {
+            return Err(Error::input("invalid managed export reservation"));
+        }
+        self.acquire(
+            Usage {
+                cpu_slots: u32::from(jobs),
+                workers: 1,
+                decoded_mb: budget_mb,
+                index_jobs: 0,
+            },
+            BTreeSet::new(),
+            false,
+        )
+    }
     /// One DRC reader owns metadata, a coordinate LRU and bounded replies.
     /// Reserve its CPU even while idle, like a render worker. decoded_mb is the
     /// existing shared read-memory admission pool, NOT a process RSS ceiling.

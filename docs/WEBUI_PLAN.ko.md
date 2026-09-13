@@ -47,6 +47,7 @@ M4b-2에서 layout/jobdeck batch·mosaic 캡처와 report·kept tiles를 단일 
 M4b-3에서 PNG pixels를 보존하는 flateyes metadata와 `fe-embed` Rust 보조 CLI를 연결했다.
 M4b-4에서 기존 live 스타일·오류 marker/CD/legend를 유지하는 DRC PNG 캡처 CLI를 연결했다.
 M4b-5에서 SVRF subset 전처리·규칙 그래프·scan/원자 sidecar 저장 CLI를 Rust로 이관했다.
+M4c-1에서 별도 자원 예약·취소/reap·만료 descriptor 저장소를 갖는 관리형 exact clip 코어를 추가했다.
 웹 clip/나머지 내보내기와 실제 브라우저 수용은 남아 있다([M4 기록](WEBUI_M4.ko.md)).
 전체 조작 parity와 M0/Firefox/ETX 현장 검증은 아직 완료되지 않았다.
 상세 범위는 [M1b 기록](WEBUI_M1B.ko.md)과 [M2 기록](WEBUI_M2.ko.md). 여기의 M0~M5는 **웹 전환 단계**이며
