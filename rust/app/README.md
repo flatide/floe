@@ -3,7 +3,8 @@
 현재 **일반 레이아웃/잡덱 `index/info/render/probe`, 분석 `jobdeck`, 기본 웹 `view`, ICE/ASCII `drc` 조회를 지원**한다.
 기존 Python `floe2`/GTK와 병행 개발하는 별도 실행 파일이며 제품 전환은 아직 완료되지 않았다.
 M4a-1/2에서 native scene-pinned pick/snap과 표시 프레임에 고정한 앱 controller를
-추가했다. HTTP/UI query는 아직 미연결이다([M4 기록](../../docs/WEBUI_M4.ko.md)). native 호환 버전0.12.87로
+추가했고 M4a-3에서 owner WebSocket query를 연결했다. 브라우저 조작 UI는 다음 단계다
+([M4 기록](../../docs/WEBUI_M4.ko.md)). native 호환 버전0.12.87로
 `floe-index`와 `floe-renderd`를 함께 재빌드한다. 공유 기능과 현장 Firefox 수용은 별도다.
 
 ```sh

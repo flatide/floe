@@ -4,6 +4,8 @@
 M2 공유 권한 추가와 실제 브라우저 pack-build 승인 클릭은 승인 대기이며,
 M0/G2·M3 현장 Firefox/ETX는 사용자 요청대로 보류다. 이 경계를 우회하지 않고
 독립적인 로컬 native 이관을 진행한다. M4 전체 완료나 GTK 은퇴를 뜻하지 않는다.
+현재는 §3의 **owner WebSocket query API**까지 연결했다. §1/2의 capability=false는
+각 선행 단계 당시의 범위이며, 브라우저 조작 UI 연결은 아직 남아 있다.
 
 ## 1. M4a-1: 표시 scene에 고정한 native pick/snap
 
@@ -223,7 +225,133 @@ native 호환 버전은0.12.87로 index/renderd를 함께 재빌드해야 한다
   jobs1/8에서 통과했다. Linux musl release 앱/index/renderd 교차 빌드와 x86-64
   static-pie 형식도 확인했다. Linux 실제 실행 및 현장 수용은 미검증이다.
 
-다음은 owner/view/connection epoch·실제 표시 packet과 이 local anchor를 연결하는
-bounded transport, 안전한 query DTO와 UI pick/snap·수동 ruler/clip이다. 현재 false인
-웹 capability를 구현보다 먼저 켜지 않는다. `.ovo` 외부 교체/hot reload·현장
+owner/view/connection epoch·표시 packet 연결과 query DTO는 다음 §3에서 구현했다.
+UI pick/snap·수동 ruler/clip은 남아 있다. `.ovo` 외부 교체/hot reload·현장
 Firefox/ETX·실칩 지연/메모리·공유 권한과 실제 pack-build 승인 클릭은 별도다.
+
+## 3. M4a-3: owner WebSocket query
+
+기존 인증된 `/api/v1/events`에 질의·취소와 결과 전송을 연결했다. bootstrap/
+HttpOnly cookie/CSRF/Origin/bundle 검사·loopback 제한·owner 세션 수명은 그대로다.
+새 공유 권한, 외부 listener, REST query, 경로/argv 입력 또는 파일 쓰기는 없다.
+브라우저 pick/snap·수동 ruler 조작은 아직 연결하지 않았다. native wire 변경은
+없어 버전0.12.87을 유지하며, 앱/웹 bundle은 다시 빌드해야 한다.
+
+### 요청과 응답
+
+기존 연결별 단조 `seq`를 다른 제어 메시지와 함께 쓴다. 다음은 shape 질의다.
+
+```json
+{
+  "type": "view.query", "seq": "20", "view_id": "<view>",
+  "connection_epoch": "<current connection>",
+  "body": {
+    "anchor": {
+      "dataset_revision": "1", "worker_epoch": "2", "frame_id": "4",
+      "state_rev": "3", "render_rev": "3", "render_key": "1"
+    },
+    "operation": {"kind": "pick", "nth": "0"},
+    "position": [0.5, 0.5], "radius_px": 1,
+    "layers": {"mode": "all"}
+  }
+}
+```
+
+- snap은 `operation:{"kind":"snap"}`(nth 없음), pick의 nth는 signed-i64 canonical
+  문자열이다. ID/seq는 양의 canonical u64 문자열이다. 중복/미정의 필드, null,
+  객체로 쓴 문자열 enum 등을 거부한다. 메시지는 기존8KiB·60개/s 한계 안이다.
+- `position`은 현재 viewport 기준 비율이고 `radius_px`는0..64 device px다.
+  화면에 안 보이는 점·비유한 값은 오류이며 DBU 변환은 controller가 수행한다.
+  가시 레이어 all/none/only 의미와4096 pair 상한은 §2와 같다. 8KiB 메시지 한계도
+  별도로 적용되므로 큰 명시 목록은 모두 전달할 수 있다는 뜻은 아니다.
+- 접수되면 `query.accepted`에 원래 seq·view_id·connection_epoch·query_id가 온다.
+  잘못된 body는 `error`/`invalid_request`, 표시 receipt가 없으면
+  `frame_not_displayed`, 현재 frame/state와 맞지 않으면 `stale_frame`이다.
+  미완료/unsupported 등 controller 거부도 safe code다. 잘못된 view/connection,
+  역행 seq·잘못된 JSON schema는 기존 제어 계약처럼 socket을 닫는다.
+- 비동기 `query.result`는 원래 seq·query_id·view_id·connection_epoch·전체 anchor,
+  status와 hit를 가진다. 정상 `ok`+hit=null만 빈 결과다. native refusal은 §1의
+  상태명을 유지하고, 일반 native 오류는 `query_failed`로 바꾼다. native 처리 전
+  anchor가 바뀌거나 다른 최신 질의가 생기면 `stale_frame`/`superseded`이며 hit는 null이다.
+- native 응답에는 `scene:{generation,round,complete,summary_layers}`와
+  `requested_summary_layers`도 있다. native 응답 없이 transport에서 종료한 결과에는
+  이 native metadata가 없다. scene counter/summary 수는 문자열이며 미게시 ID는 null이다.
+- snap hit는 `kind:snap`, `point_dbu:[x,y]`, `snap:vertex|edge`다. pick은
+  `kind:pick`, count/index, pair, layer_name/cell_name, area_dbu2, bbox_dbu,
+  points_dbu, points_truncated다. 좌표·면적·counter는 문자열, u32 pair만 JSON 숫자다.
+  면적은 native f64 값을 더 손실 없이 옮긴 것이지 임의 정밀도 정수 면적은 아니다.
+  `points_truncated=true`의512점 prefix를 완전한 윤곽/측정값으로 해석하면 안 된다.
+  이름은 도형 metadata이며 future UI에서 text로 표시해야 한다. native 오류 문자열,
+  파일 경로·native 명령·전체 request/진단 필드는 전송하지 않는다.
+
+취소는 다음과 같다. 자신의 연결에서 마지막으로 제출한 해당 종류만 취소한다.
+
+```json
+{"type":"view.query.cancel","seq":"21","view_id":"<view>","connection_epoch":"<current connection>","kind":"snap"}
+```
+
+응답 `query.cancelled`는 원래 seq·view/connection·kind를 확인한다. 이것은 local
+latest 슬롯 무효화 확인이며 native가 중단됐다는 ACK/terminal과 구별한다.
+
+### 표시·연결·전송 상한
+
+- frame packet에 `query_scene`를 추가한다. frame의 `query`는 게시 geometry ID가
+  있고 geometry가 완료됐을 때 true다. 라벨만 잘림·mixed summary 자체는 false
+  조건이 아니며, 요청 요약 레이어는 native가 따로 거부한다. snapshot capability
+  `query`는 layout=true, deck=false다. 프레임 없거나 stale일 때의 제출 허가는 아니다.
+- socket마다 **displayed ACK와 writer 완료를 모두 확인한** foreground/margin
+  receipt 각1개만 보관한다. discarded ACK, 새 연결, 다른 frame/worker/revision에는
+  receipt를 빌려주지 않는다. receipt는 ID metadata뿐이며 frame Arc/bytes는 추가로
+  보관하지 않는다. margin receipt의 원래 state/render revision은 crop 후 오래될
+  수 있으므로 요청은 현재 snapshot revision을 쓰고 controller에서 다시 확인한다.
+- ACK/전송 완료는 클라이언트가 표시했다고 신고한 근거이며 DOM 표시를 증명하지는
+  못한다. 미래 UI는 실제 사용할 foreground/margin을 골라야 하고, drag preview·
+  미확정 입력·새 상태/연결에서 이전 결과를 표시하지 않도록 별도 검증해야 한다.
+  writer 완료가 아직 확인되지 않은 순간의 질의도 `frame_not_displayed`로 거부한다.
+- 연결별 ticket은 snap/pick 각1개이며 최신 결과만 한 번 전송한다. superseded
+  입력마다 terminal을 보장하지 않는다. 같은 view의 여러 owner 소켓은 같은
+  controller의 종류별 latest 질의를 공유하므로 서로 supersede할 수 있지만,
+  결과는 발급한 소켓의 ID에만 반환한다. 독립 view를 같은 view로 취급하지 않는다.
+- 연결 종료/명시 취소는 `cancel_query_if_current(kind,id)`로 비교 후 무효화한다.
+  오래된 소켓이 닫히며 다른 소켓의 새 질의를 취소하거나 새 결과를 지우지 않는다.
+  재접속은 receipt와 질의를 복원·재전송하지 않는다. native drain/timeout은 §2를 유지한다.
+- query 결과는 이미지 ACK·encoder/byte admission을 기다리지 않는다. 공통 유계
+  writer queue4개에 공간이 없으면 latest ticket에서 재시도하며 결과 큐를 늘리지
+  않는다. view edit ACK+snapshot용2슬롯을 남긴다. 개별 응답은256KiB 상한이다.
+  완료된 이미지 packet도 기존 byte reservation 안에서 최대1개만 대기하며 output
+  queue가 잠시 찼다고 복사/렌더를 다시 하지 않는다. queue에 여유가 있으면 encoder
+  완료 즉시 전송하여 정상 프레임에 추가 tick 지연을 넣지 않는다. 이미지의 기존 ACK/write
+  deadline과 native controller의 독립 poll/reap은 그대로다.
+
+### 검증 범위
+
+- 단위: DTO의 각 counter·signed nth·미정의 필드·범위, 큰 좌표 문자열과 native
+  오류 redaction,2개 receipt 상한/worker·revision 구별, geometry 완료와 라벨/요약
+  capability 구별, 오래된 consumer의 조건부 취소를 고정한다.
+- `tools/validate_worker_queries.py`는 기존 fixture로 세 실제 owner WS gate를
+  추가 실행한다.2개 겹침/음수 nth·vertex·긴 윤곽, visible layer·요약/exact subset·
+  정상 빈 결과, margin ACK 보류 중 foreground query·crop·재접속·다른 연결 종료,
+  discarded/위조 frame/worker·stale revision·화면 밖 점·큰 반경·다른 view/epoch·
+  미정의/중복 필드 거부를 검사한다. cache bytes/mtime 불변과 worker 파일 회수도 유지한다.
+- 기존 실제 PNG/raw view-stream gate는 같은 test harness를 재사용하며
+  100-input/slow subscriber/credit/재접속/로그아웃과 margin parity 기준을 유지한다.
+
+검증 결과:
+
+- core89개, web34개와 transport8개 통과. 전송 queue 포화 시 packet/byte reservation을
+  복사 없이 유지·반환하는 단위 테스트도 포함한다. 실제 native query1개·controller
+  query/capture2개·owner WS3개와 기존 PNG/raw stream2개 모두 통과했다.
+- app/core/worker/web의 offline·locked 테스트와 scoped strict clippy·포맷 검사,
+  기존 JS/UI 회귀 검사를 통과했다. Rust 1.89.0 테스트 및 Linux musl release
+  app/index/renderd 교차 빌드도 통과했으며 세 실행 파일의 x86-64 static-pie 형식을
+  확인했다. 기존 native/dependency warning은 남아 있다. 전체 workspace 포맷 검사는
+  변경하지 않은 native 파일의 기존 차이로 실패하며 이번 범위에 일괄 포맷을 섞지
+  않았다. Linux 실제 실행은 미검증이다.
+- 전체 `sh tools/validate_rust.sh`가 `RUST VALIDATION: ALL OK`로 통과했다.
+  jobdeck80·renderer46 및 KLayout 13 PX + 2 phase-exact + 14 style을 jobs1/8에서
+  통과했다. 전체 검사 시작 후 추가한 정상 packet 즉시 전송 보정은 영향받는 단위·
+  clippy·실제 query/stream 및 MSRV/교차 빌드를 다시 실행해 확인했다.
+
+다음은 실제 표시 projection·CSS/DPR와 query 입력/결과를 연결하는 브라우저
+pick/snap 및 수동 ruler/clip이다. 현장 Firefox/ETX, 외부 공유 권한과 pack-build
+승인 클릭 수용은 이번 owner API 검증으로 대체하지 않는다.

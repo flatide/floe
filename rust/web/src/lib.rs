@@ -9,6 +9,7 @@ mod operations;
 pub mod origin;
 mod owner;
 mod prepared;
+mod query;
 pub mod service;
 mod stream;
 pub mod transport;

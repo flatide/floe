@@ -2,6 +2,7 @@
 //! Reader/control, bounded packet encoding and socket writer are independent.
 use crate::{
     auth::{public_id, SessionId},
+    query,
     transport::{Gate, BUNDLE},
     view::{self, PatchDto},
 };
@@ -34,6 +35,8 @@ enum Out {
 }
 struct Flight {
     id: u64,
+    receipt: query::Receipt,
+    displayed: bool,
     since: Instant,
     written: bool,
     acked: bool,
@@ -102,14 +105,41 @@ enum Control {
         frame_id: String,
         disposition: Disposition,
     },
+    #[serde(rename = "view.query")]
+    Query {
+        seq: String,
+        connection_epoch: String,
+        view_id: String,
+        body: Box<query::Request>,
+    },
+    #[serde(rename = "view.query.cancel")]
+    CancelQuery {
+        seq: String,
+        connection_epoch: String,
+        view_id: String,
+        kind: query::Kind,
+    },
 }
-fn reply(tx: &mpsc::Sender<Out>, value: Value) -> Result<(), ()> {
+fn try_reply(tx: &mpsc::Sender<Out>, value: Value) -> Result<bool, ()> {
     let text = value.to_string();
     if text.len() > view::CONTROL_REPLY_BYTES {
         return Err(());
     }
-    tx.try_send(Out::Control(Message::Text(text.into())))
-        .map_err(|_| ())
+    match tx.try_send(Out::Control(Message::Text(text.into()))) {
+        Ok(()) => Ok(true),
+        Err(mpsc::error::TrySendError::Full(_)) => Ok(false),
+        Err(mpsc::error::TrySendError::Closed(_)) => Err(()),
+    }
+}
+fn reply(tx: &mpsc::Sender<Out>, value: Value) -> Result<(), ()> {
+    try_reply(tx, value)?.then_some(()).ok_or(())
+}
+fn offer_packet(tx: &mpsc::Sender<Out>, packet: Packet) -> Result<Option<Packet>, ()> {
+    match tx.try_send(Out::Frame(packet)) {
+        Ok(()) => Ok(None),
+        Err(mpsc::error::TrySendError::Full(Out::Frame(p))) => Ok(Some(p)),
+        _ => Err(()),
+    }
 }
 fn state_marker(
     s: &floe_app_core::view::Snapshot,
@@ -184,6 +214,8 @@ pub(crate) async fn socket(
     let mut last_state = state_marker(&initial);
     let (mut seq, mut last_frame, mut last_margin) = (0u64, 0u64, 0u64);
     let mut flight: Option<Flight> = None;
+    let mut pending_packet: Option<Packet> = None;
+    let mut queries = query::Queries::new(controller);
     let mut encoding: Option<JoinHandle<Result<Packet, &'static str>>> = None;
     let mut tick = tokio::time::interval(Duration::from_millis(20));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -192,13 +224,13 @@ pub(crate) async fn socket(
     let mut messages = 0u32;
     let mut writer_finished = false;
     let mut closed_since: Option<Instant> = None;
-    loop {
+    'socket: loop {
         tokio::select! {
             _=stop.changed()=>break,
             _=&mut writer=>{writer_finished=true;break;},
             Some(written)=sent_rx.recv()=>{
                 let Some(f)=flight.as_mut() else {break;};if f.written(written).is_err(){break;}
-                if f.complete(){flight=None;}
+                if f.complete(){if f.displayed{queries.displayed(f.receipt);}flight=None;}
             }
             result=async {encoding.as_mut().expect("guarded encoder").await}, if encoding.is_some()=>{
                 encoding=None;
@@ -207,7 +239,8 @@ pub(crate) async fn socket(
                         let state=controller.snapshot();
                         let current=if packet.margin {state.margin.is_some_and(|m|m.frame_id==packet.id)} else {packet.render_rev==state.render_rev};
                         if !current {flight=None;continue;}
-                        if tx.try_send(Out::Frame(packet)).is_err(){break;}
+                        // No added tick latency for the normal, writable case.
+                        match offer_packet(&tx,packet) {Ok(p)=>pending_packet=p,Err(())=>break}
                     }
                     _=>break,
                 }
@@ -229,6 +262,24 @@ pub(crate) async fn socket(
                     if reply(&tx,view::snapshot(&state,&controller.model,&attached.id,&epoch)).is_err(){break;}
                     last_state=marker;
                 }
+                if let Some(packet)=pending_packet.take() {
+                    let current=if packet.margin {state.margin.is_some_and(|m|m.frame_id==packet.id)} else {packet.render_rev==state.render_rev};
+                    if !current {flight=None;} else {
+                        match offer_packet(&tx,packet) {Ok(p)=>pending_packet=p,Err(())=>break}
+                    }
+                }
+                // Query replies do not wait for image encoder/byte admission.
+                // Leave two slots for a revision edit's ACK+snapshot.
+                for index in 0..2 {
+                    if tx.capacity()<3 {break;}
+                    if let Some(value)=queries.ready(index,&attached.id,&epoch) {
+                        match try_reply(&tx,value) {
+                            Ok(true)=>queries.sent(index),
+                            Ok(false)=>break,
+                            Err(())=>break 'socket,
+                        }
+                    }
+                }
                 if flight.is_none() {
                     if let Some(frame)=controller.latest().filter(|f|f.id!=last_frame && f.matches(&state))
                         .or_else(||controller.margin().filter(|f|f.id!=last_margin && f.matches(&state))) {
@@ -241,7 +292,7 @@ pub(crate) async fn socket(
                         let cost=frame.frame.bytes.len()*3+(header.len()+4)*2;
                         let Ok(reservation)=Arc::clone(&gate.output_bytes).try_acquire_many_owned(cost as u32) else {continue;};
                         let reservation=Arc::new(reservation);let owned=Arc::clone(&reservation);let frame_id=frame.id;
-                        flight=Some(Flight{id:frame_id,since:Instant::now(),written:false,acked:false,_reservation:reservation});
+                        flight=Some(Flight{id:frame_id,receipt:query::Receipt::of(&frame),displayed:false,since:Instant::now(),written:false,acked:false,_reservation:reservation});
                         let margin=frame.purpose==floe_app_core::view::Purpose::Margin;
                         if margin {last_margin=frame_id;} else {last_frame=frame_id;}
                         encoding=Some(tokio::task::spawn_blocking(move || {
@@ -254,6 +305,12 @@ pub(crate) async fn socket(
             }
             incoming=input.next()=>{
                 if !gate.alive(&id){break;}
+                // A displayed ACK/query can win select! over a ready writer
+                // notification. Consume that proof before testing its receipt.
+                if let Ok(written)=sent_rx.try_recv() {
+                    let Some(f)=flight.as_mut() else {break;};if f.written(written).is_err(){break;}
+                    if f.complete(){if f.displayed{queries.displayed(f.receipt);}flight=None;}
+                }
                 if window.elapsed()>=Duration::from_secs(1){window=Instant::now();messages=0;}
                 messages+=1;if messages>60{break;}received=Instant::now();
                 let text=match incoming {
@@ -263,18 +320,31 @@ pub(crate) async fn socket(
                     _=>break,
                 };
                 let control=match serde_json::from_str::<Control>(&text){Ok(c)=>c,Err(_)=>break};
-                let value=match &control {Control::Ping{seq}|Control::Set{seq,..}|Control::Apply{seq,..}|Control::Ack{seq,..}=>view::counter(seq)};
+                let value=match &control {Control::Ping{seq}|Control::Set{seq,..}|Control::Apply{seq,..}|Control::Ack{seq,..}|Control::Query{seq,..}|Control::CancelQuery{seq,..}=>view::counter(seq)};
                 let Ok(n)=value else {break;};if n<=seq{break;}seq=n;
                 match control {
                     Control::Ping{seq}=>{if reply(&tx,json!({"type":"pong","seq":seq})).is_err(){break;}}
                     Control::Ack{connection_epoch,frame_id,disposition,..}=>{
-                        let _=disposition;
                         if connection_epoch!=epoch{break;}
                         let Ok(frame_id)=view::counter(&frame_id) else {break;};
                         let Some(f)=flight.as_mut() else {break;};if f.acknowledge(frame_id).is_err(){break;}
+                        f.displayed=matches!(disposition,Disposition::Displayed);
                         // A guessed early ACK cannot release byte credit before
                         // the independent writer confirms its write finished.
-                        if f.complete(){flight=None;}
+                        if f.complete(){if f.displayed{queries.displayed(f.receipt);}flight=None;}
+                    }
+                    Control::Query{seq,connection_epoch,view_id,body}=>{
+                        if connection_epoch!=epoch||view_id!=attached.id{break;}
+                        let event=match queries.submit(seq.clone(),*body) {
+                            Ok(query_id)=>json!({"type":"query.accepted","seq":seq,"view_id":attached.id,"connection_epoch":epoch,"query_id":query_id.to_string()}),
+                            Err(code)=>json!({"type":"error","seq":seq,"code":code}),
+                        };
+                        if reply(&tx,event).is_err(){break;}
+                    }
+                    Control::CancelQuery{seq,connection_epoch,view_id,kind}=>{
+                        if connection_epoch!=epoch||view_id!=attached.id{break;}
+                        queries.cancel(kind);
+                        if reply(&tx,json!({"type":"query.cancelled","seq":seq,"view_id":attached.id,"connection_epoch":epoch,"kind":kind.name()})).is_err(){break;}
                     }
                     Control::Set{seq,connection_epoch,view_id,base_state_rev,body}=>{
                         if connection_epoch!=epoch||view_id!=attached.id{break;}
@@ -319,6 +389,35 @@ pub(crate) async fn socket(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn full_writer_preserves_packet_and_credit_without_copy_or_extra_queue() {
+        let budget = Arc::new(tokio::sync::Semaphore::new(100));
+        let permit = Arc::new(Arc::clone(&budget).try_acquire_many_owned(100).unwrap());
+        let packet = Packet {
+            id: 1,
+            render_rev: 1,
+            margin: false,
+            bytes: Bytes::from_static(b"pixels"),
+            _reservation: permit,
+        };
+        let address = packet.bytes.as_ptr();
+        let (tx, mut rx) = mpsc::channel(1);
+        assert_eq!(try_reply(&tx, json!({"type":"test"})), Ok(true));
+        assert_eq!(try_reply(&tx, json!({"type":"another"})), Ok(false));
+        assert!(try_reply(&tx, json!("x".repeat(view::CONTROL_REPLY_BYTES))).is_err());
+        let pending = offer_packet(&tx, packet).unwrap().unwrap();
+        assert_eq!(pending.bytes.as_ptr(), address);
+        assert_eq!(budget.available_permits(), 0);
+        assert!(matches!(rx.try_recv().unwrap(), Out::Control(_)));
+        assert!(offer_packet(&tx, pending).unwrap().is_none());
+        assert_eq!(budget.available_permits(), 0);
+        let Out::Frame(sent) = rx.try_recv().unwrap() else {
+            panic!("frame expected")
+        };
+        assert_eq!(sent.bytes.as_ptr(), address);
+        drop(sent);
+        assert_eq!(budget.available_permits(), 100);
+    }
     #[test]
     fn disposition_is_a_string_not_an_externally_tagged_object() {
         for value in [r#"{"displayed":null}"#, "null", "0", r#""other""#] {
@@ -334,6 +433,8 @@ mod tests {
             let reservation = Arc::new(Arc::clone(&budget).try_acquire_many_owned(100).unwrap());
             let mut f = Flight {
                 id: 5,
+                receipt: query::Receipt::default(),
+                displayed: false,
                 since: Instant::now(),
                 written: false,
                 acked: false,

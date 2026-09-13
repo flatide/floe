@@ -187,7 +187,7 @@ queryable. Scene identity belongs to one worker and may precede the frame's own
 generation after margin reuse; upper clients must also bind the displayed frame
 and worker lifetime. Omitting both expected counters preserves the legacy local
 query behavior. See [the M4 query contract](WEBUI_M4.ko.md) for statuses and gates;
-this native API does not yet enable web queries.
+the wire remains private, not a public browser protocol.
 
 Native 0.12.87 adds `cancel_query kind=snap|pick before_seq=N`, where `N` is a
 positive canonical integer no larger than i64::MAX. It advances only that kind's
@@ -197,8 +197,9 @@ generations and the other query kind are unaffected. Cancellation is cooperative
 and may race an already completed reply. The diagnostic inline-query mode cannot
 interrupt a running stdin query. New clients drain the cancellation ACK **and**
 each query terminal before a synchronous style change. The M4a-2 local view
-controller also checks displayed-frame/worker/revision anchors; HTTP/UI exposure
-is still disabled. See [M4 §2](WEBUI_M4.ko.md#2-m4a-2-표시-frame에-고정한-로컬-controller-query).
+controller also checks displayed-frame/worker/revision anchors. M4a-3 adds an
+owner-only WebSocket adapter with displayed receipts and safe result DTOs;
+browser interaction UI and sharing are still separate. See [M4](WEBUI_M4.ko.md).
 
 Renderer repetition traversal supports small collinear or zero-vector
 two-dimensional grids, but explicitly rejects a degenerate per-view range

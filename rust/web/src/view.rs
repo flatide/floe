@@ -279,7 +279,7 @@ pub fn snapshot(s: &Snapshot, m: &Model, view_id: &str, connection_epoch: &str) 
         "margin":s.margin.map(|v|json!({"frame_id":v.frame_id.to_string(),"origin_px":v.origin_px,"crop_safe":v.crop_safe})),
         "margin_working":s.margin_working,"margin_submitted":s.margin_submitted.to_string(),"crop_hits":s.crop_hits.to_string(),
         "margin_failure":s.margin_failure.as_ref().map(|(kind,_)|safe_error(*kind)),
-        "capabilities":{"labels":!m.deck,"frames":true,"margin":s.margin_enabled,"query":false,"clip":false,"edit_source":false}})
+        "capabilities":{"labels":!m.deck,"frames":true,"margin":s.margin_enabled,"query":!m.deck,"clip":false,"edit_source":false}})
 }
 pub fn safe_error(kind: floe_app_core::ErrorKind) -> &'static str {
     use floe_app_core::ErrorKind as K;
@@ -410,13 +410,17 @@ pub fn frame_header(
             .and_then(|v| v.parse::<u64>().ok())
             .is_some_and(|v| v > 0)
     });
+    let query_scene = f
+        .query_scene()
+        .map_err(|_| "invalid query scene metadata")?;
     let value = json!({"type":"frame","protocol":1,"view_id":view_id,"connection_epoch":epoch,"frame_id":frame.id.to_string(),
         "dataset_revision":frame.dataset_revision.to_string(),"state_rev":frame.state_rev.to_string(),"render_rev":frame.render_rev.to_string(),
         "render_key":frame.render_key.to_string(),"worker_epoch":frame.worker_epoch.to_string(),"generation":f.generation.to_string(),"round":f.round.to_string(),
         "purpose":match frame.purpose {floe_app_core::view::Purpose::Foreground=>"foreground",_=>"margin"},"bbox_dbu":r.view.map(|n|n.to_string()),"width":r.width,"height":r.height,"row0":"top",
         "format":match r.format {FrameFormat::Raw=>"raw",FrameFormat::Png=>"png"},"payload_length":f.bytes.len().to_string(),
         "final":f.final_frame,"partial":f.partial,"deferred":f.deferred.to_string(),"labels_truncated":f.labels_truncated,
-        "deck_skipped":frame.deck_skipped.to_string(),"complete":f.complete()&&frame.deck_skipped==0,"approximate":approximate,"query":false,"perf":perf});
+        "deck_skipped":frame.deck_skipped.to_string(),"complete":f.complete()&&frame.deck_skipped==0,"approximate":approximate,
+        "query":query_scene.id.is_some()&&query_scene.complete,"query_scene":crate::query::scene(query_scene),"perf":perf});
     let header = serde_json::to_vec(&value).map_err(|_| "frame metadata encoding failed")?;
     if header.len() > HEADER_BYTES {
         return Err("frame metadata limit");
@@ -530,6 +534,10 @@ mod tests {
                 },
                 bytes,
                 fields: Fields(BTreeMap::from([
+                    ("scene_gen".into(), "4".into()),
+                    ("scene_round".into(), "3".into()),
+                    ("scene_complete".into(), "1".into()),
+                    ("scene_summary".into(), "1".into()),
                     ("png".into(), "/secret/path".into()),
                     ("raster_us".into(), "9007199254740993".into()),
                     ("decode_us".into(), "NaN".into()),
@@ -553,7 +561,8 @@ mod tests {
             .contains("/secret"));
         assert_eq!(h["complete"], true);
         assert_eq!(h["approximate"], true);
-        assert_eq!(h["query"], false);
+        assert_eq!(h["query"], true); // Exact subset of a mixed scene is queryable.
+        assert_eq!(h["query_scene"]["summary_layers"], "1");
         let out = packet(&header, &f.frame.bytes).unwrap();
         let n = u32::from_le_bytes(out[..4].try_into().unwrap()) as usize;
         assert_eq!(&out[4..4 + n], &header);
@@ -565,6 +574,25 @@ mod tests {
         f.deck_skipped = 1;
         let h: Value = serde_json::from_slice(&frame_header(&f, "v", "c").unwrap()).unwrap();
         assert_eq!(h["complete"], false);
+    }
+    #[test]
+    fn query_capability_is_geometry_completion_not_label_or_summary_completion() {
+        let mut f = frame();
+        f.frame.labels_truncated = true;
+        let h: Value = serde_json::from_slice(&frame_header(&f, "v", "c").unwrap()).unwrap();
+        assert_eq!(h["complete"], false);
+        assert_eq!(h["query"], true);
+        f.frame.fields.0.insert("scene_complete".into(), "0".into());
+        let h: Value = serde_json::from_slice(&frame_header(&f, "v", "c").unwrap()).unwrap();
+        assert_eq!(h["query"], false);
+        for k in ["scene_gen", "scene_round", "scene_summary"] {
+            f.frame.fields.0.insert(k.into(), "0".into());
+        }
+        let h: Value = serde_json::from_slice(&frame_header(&f, "v", "c").unwrap()).unwrap();
+        assert_eq!(h["query"], false);
+        assert!(h["query_scene"]["generation"].is_null());
+        f.frame.fields.0.remove("scene_gen");
+        assert!(frame_header(&f, "v", "c").is_err());
     }
     #[test]
     fn malformed_frame_dimensions_payload_and_header_size_fail_before_encoding() {

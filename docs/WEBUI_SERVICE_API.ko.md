@@ -40,7 +40,10 @@ identity 등록 순서다. native 게시 결과와 새 reader의 opening/ready/e
 실제 브라우저 승인 클릭 수용은 별도다(서버 M2 §23, UI §24).
 M4a-1/2의 scene-pinned query는 **로컬 native process client와 ViewController**까지 구현했다.
 frame/scene 구분·거부 코드·표시 anchor·종류별 취소·수명/상한은 [M4 기록](WEBUI_M4.ko.md)을 따른다.
-현재 owner/share HTTP query가 존재한다는 뜻은 아니며 웹 capability=false를 유지한다.
+M4a-3은 기존 인증된 owner WebSocket의 `view.query`/`view.query.cancel`에 연결했다.
+layout snapshot query capability는 true, deck은 false다. 표시 ACK+write receipt,
+연결별 결과·정수 문자열 DTO는 M4 §3이 기준이다. REST query·공유 권한·브라우저
+pick/snap 조작 UI를 추가했다는 뜻은 아니다.
 2026-09-13 M1a-1 `rust/worker-client`와 M1a-2a/b `app/app-core`의 일반 index·info/단일 render/probe를
 구현했다. 현재 호출 계약은 [worker README](../rust/worker-client/README.md),
 [M1a 기록](WEBUI_M1A.ko.md)을 따르며 아래 서비스 전체가 존재하는 것은 아니다.
@@ -304,10 +307,12 @@ DBU로 변환하고, 가시 레이어·scene 완료 여부와 알려진 margin c
 종류별 latest-only 질의와 명시 취소는 render와 독립이며 늦은 응답은 폐기한다.
 요약-only/지원하지 않는 deck을 "찾지 못함"으로 위장하지 않는다.
 
-웹 개방에는 추가로 인증된 owner·view ID·connection epoch와 **실제로 표시한
-packet/frame**의 anchor를 연결해야 한다. native 오류 문자열을 그대로 보내지 않고
-safe DTO로 변환하며, CSS/DPR 좌표·응답 사용 직전 stale 검사를 UI에서 검증해야 한다.
-이 연결 전 웹 capability는 계속 false다. 로컬 anchor는 접근 권한 토큰이 아니다.
+M4a-3은 인증된 owner·view ID·connection epoch와 **표시 완료로 ACK한 packet**의
+anchor를 연결한다. matching ACK와 writer 완료를 모두 확인한 foreground/margin
+각1개만 연결별로 보관한다. native 오류는 safe code로 바꾸고, 다른 연결의 결과는
+반환하지 않는다. 새 연결은 예전 receipt/질의를 재사용하지 않는다.
+서버는 DOM을 확인하지 못하므로 CSS/DPR 좌표·실제 표시 대상 선택·응답 사용 직전
+stale 검사는 UI 연결에서 검증해야 한다. 로컬 anchor는 접근 권한 토큰이 아니다.
 
 ## 6. 인덱스 revision — 제안 비교, hot reload 미구현
 

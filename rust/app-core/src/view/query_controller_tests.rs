@@ -368,3 +368,23 @@ fn deck_queries_are_explicitly_unsupported() {
     v.close().unwrap();
     assert_eq!(r.usage(), Usage::default());
 }
+
+#[test]
+fn departing_consumer_cannot_cancel_another_consumers_newer_query() {
+    use floe_worker_client::QueryOperation;
+    let (r, c, mut v) = setup(false);
+    c.query_reply.store(false, Ordering::Relaxed);
+    let old = v.query(input(&v, QueryOperation::Snap)).unwrap();
+    let current = v.query(input(&v, QueryOperation::Snap)).unwrap();
+    let pick = v.query(input(&v, QueryOperation::Pick { nth: 0 })).unwrap();
+    assert!(!v.cancel_query_if_current(QueryKind::Snap, old));
+    assert_eq!(v.query_snapshot().snap_id, Some(current));
+    assert!(v.cancel_query_if_current(QueryKind::Snap, current));
+    assert!(!v.cancel_query_if_current(QueryKind::Snap, current));
+    assert_eq!(v.query_snapshot().pick_id, Some(pick));
+    c.query_reply.store(true, Ordering::Relaxed);
+    result(&v, pick, QueryKind::Pick);
+    assert!(v.query_snapshot().snap.is_none());
+    v.close().unwrap();
+    assert_eq!(r.usage(), Usage::default());
+}

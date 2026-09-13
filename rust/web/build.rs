@@ -18,6 +18,7 @@ fn main() {
         "src/layer_catalog.rs",
         "src/stream.rs",
         "src/prepared.rs",
+        "src/query.rs",
         "src/service.rs",
         "src/owner.rs",
         "src/transport.rs",

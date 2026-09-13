@@ -398,6 +398,16 @@ impl ViewController {
     pub fn cancel_query(&self, kind: QueryKind) {
         self.shared.lock().unwrap().queries.cancel(kind);
     }
+    /// A departing consumer must not cancel a newer consumer's request. The
+    /// local query ID is a compare-and-cancel stamp, not an authority token.
+    pub fn cancel_query_if_current(&self, kind: QueryKind, id: u64) -> bool {
+        let mut s = self.shared.lock().unwrap();
+        if s.queries.slots[query::slot(kind)].latest != Some(id) {
+            return false;
+        }
+        s.queries.cancel(kind);
+        true
+    }
     /// A conflict changes neither view nor pending render. Caller returns the
     /// authoritative snapshot, rather than retrying relative deltas blindly.
     pub fn edit(&self, base_state_rev: u64, patch: Patch) -> Result<Snapshot> {

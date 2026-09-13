@@ -60,7 +60,8 @@ label 잘림 검사이고, 별도 jobdeck source skip ledger까지 판정하지 
 daemon 자체를 수거한다. 브라우저에서 binary/argv/path/env를 받는 API는 없다.
 새 인덱스 revision은 기존 worker 재open 대신 close→새 worker로 전환한다.
 M0-D4의 scene ID 확장은 M4a-1, 표시 anchor·query 취소 연결은 M4a-2에서 추가했다.
-**웹에는 아직 공개하지 않는다.**
+native wire는 외부에 직접 공개하지 않는다. M4a-3의 owner WebSocket은 상위
+controller/표시 receipt와 allowlisted DTO를 거치는 별도 경계다.
 
 ## M4a-1: native pick/snap
 
@@ -81,7 +82,7 @@ summary/미완료/mismatch를 빈 hit와 구별한다. 혼합 scene의 exact 레
 질의할 수 있지만 전체 scene의 `queryable()`은 false다. 모든 render/query 응답을
 독립적으로 소비해야 하며 frame만 골라 다른 이벤트를 버리는 capture loop에 query를
 동시에 제출하지 않는다. `RenderSession::capture`는 미소비 query/취소 ACK가 있으면
-worker를 닫지 않고 Busy로 거부한다. deck query와 HTTP/UI 연결은 여전히 미지원이다.
+worker를 닫지 않고 Busy로 거부한다. deck query와 브라우저 조작 UI는 여전히 미지원이다.
 
 `cancel_queries(QueryKind::Snap|Pick)`는 그 종류의 frontier만 올린다. 성공한 송신은
 query와 같은 seq 시계를 한 칸 사용한다. render generation/다른 종류에는 영향이 없다.
@@ -94,11 +95,15 @@ query와 같은 seq 시계를 한 칸 사용한다. render generation/다른 종
 M4a-2의 `app-core/view`는 표시 frame/worker epoch·revision을 검증하고 종류별 latest-only
 입력·결과와 최대4개 native 미완료 질의를 보관한다. margin crop/라벨-only의 geometry
 scene을 재사용하며 style 변경 때 query·취소 ACK를 먼저 소비한다. 이것은 로컬 도메인
-연결이며 owner/view/connection 범위를 검증하는 HTTP API는 아니다.
+연결이다. M4a-3의 `web/query`가 owner/view/connection·표시 ACK를 추가 검증하고
+`cancel_query_if_current(kind,id)`로 오래된 연결이 다른 연결의 새 질의를 취소하지
+않게 한다. query 자체가 새 worker나 별도 geometry decode를 만들지는 않는다.
 
 `tools/validate_worker_queries.py`는 합성 OASIS/점유 혼합·KLayout 면적, margin/라벨
 재사용·가시성 전환·overlap/긴 outline·query/render/종류별 취소 교차와 실제 controller의
-crop·worker 격리를 PATH-empty native로 검사한다. full battery가 실행하며 fixture 누락은 skip이 아니다.
+crop·worker 격리를 PATH-empty native로 검사한다. M4a-3의 실제 owner WebSocket
+pick/snap·표시/연결 거부·요약 subset·재접속도 함께 검사한다. full battery가
+실행하며 fixture 누락은 skip이 아니다.
 
 ## 검증
 

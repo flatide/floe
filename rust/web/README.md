@@ -17,6 +17,18 @@ controller owns/drains/reaps the native worker. Browser-provided paths and
 native commands are never accepted. A disconnected view lingers for 60 seconds;
 the owner catalog service can explicitly reopen it with a new revision.
 
+M4a-3 adds `view.query`/`view.query.cancel` on the existing owner WebSocket. A
+query pins the dataset/worker/frame/state identity and requires a displayed ACK
+plus completed packet write on that same connection. Foreground and margin
+receipts stay bounded to one each; native requests/results are latest-only per
+kind. Query results do not wait for image ACK/admission. Disconnection conditionally
+cancels only this consumer's current query IDs, never another socket's newer work.
+Coordinates and counters cross the wire as strings; native errors/paths are not
+forwarded. Mixed summary scenes can query exact-only visible layers, and truncated
+outlines are explicit. Jobdeck queries remain unsupported. Backend capabilities
+are available for layouts, but browser pick/snap/ruler controls are a later stage.
+The request/result schema and limits are recorded in [M4 §3](../../docs/WEBUI_M4.ko.md).
+
 `Service::start` + `Gateway::with_service` adds up to 32 trusted registered
 sources, a current view and one bounded open/index operation. All filesystem
 and native waits run on the service thread. HTTP source IDs are opaque, index
@@ -76,6 +88,9 @@ bursts, slow subscribers, reconnect, stale revisions/epochs and resource cleanup
 `tools/validate_owner_service.py` covers actual authenticated index/open/reopen,
 duplicate operations, cache leases, deck level/chip metadata and child cleanup.
 It also runs native prepared-focus/CAS/replay/reconnect/restore isolation tests.
+`tools/validate_worker_queries.py` adds real owner socket pick/snap/overlap,
+long-outline, summary subset, stale/discarded receipt, wrong connection/view,
+margin-credit and reconnect tests on its private synthetic source.
 
 API, limits, dependency/license/security audit, and incomplete milestones:
 [WEBUI_M1B.ko.md](../../docs/WEBUI_M1B.ko.md).
