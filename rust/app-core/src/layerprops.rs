@@ -84,6 +84,113 @@ pub struct Document {
     /// Blank/comment lines do not count. Unknown color/fill/flags remain rows.
     pub malformed: usize,
 }
+/// Lossless floe settings; absence of an assignment means inheritance.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Settings {
+    pub format: String,
+    pub version: u32,
+    pub groups: Vec<LayerGroup>,
+    pub rows: Vec<Setting>,
+}
+pub type LayerGroup = ((u32, u32), Vec<(u32, u32)>);
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Setting {
+    pub pair: (u32, u32),
+    pub color: String,
+    #[serde(deserialize_with = "required_optional")]
+    pub fill: Option<Bitmap>,
+    #[serde(deserialize_with = "required_optional")]
+    pub width: Option<u8>,
+    pub visible: bool,
+}
+fn required_optional<'de, D, T>(d: D) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::deserialize(d)
+}
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Bitmap {
+    Solid,
+    Clear,
+    Speckle,
+    Pattern { rows: [u16; 16] },
+}
+impl From<&Fill> for Bitmap {
+    fn from(fill: &Fill) -> Self {
+        match fill {
+            Fill::Solid => Self::Solid,
+            Fill::Clear => Self::Clear,
+            Fill::Speckle => Self::Speckle,
+            Fill::Pattern(rows) => Self::Pattern { rows: *rows },
+        }
+    }
+}
+impl From<&Bitmap> for Fill {
+    fn from(fill: &Bitmap) -> Self {
+        match fill {
+            Bitmap::Solid => Self::Solid,
+            Bitmap::Clear => Self::Clear,
+            Bitmap::Speckle => Self::Speckle,
+            Bitmap::Pattern { rows } => Self::Pattern(*rows),
+        }
+    }
+}
+pub fn parse_settings(text: &str) -> Result<Settings> {
+    if text.len() > MAX_BYTES {
+        return Err(Error::input("settings exceeds 4 MiB"));
+    }
+    let settings: Settings =
+        serde_json::from_str(text).map_err(|_| Error::input("invalid floe layer settings"))?;
+    settings.validate()?;
+    Ok(settings)
+}
+impl Settings {
+    pub fn validate(&self) -> Result<()> {
+        if self.format != "floe.layers"
+            || self.version != 1
+            || self.rows.len() > MAX_ROWS
+            || self.groups.len() > MAX_ROWS
+            || self
+                .groups
+                .iter()
+                .try_fold(0usize, |n, (_, g)| n.checked_add(g.len()))
+                .is_none_or(|n| n > MAX_ROWS)
+            || self.rows.iter().any(|r| {
+                r.color.len() > 64
+                    || styles::color(&r.color).is_none()
+                    || r.width.is_some_and(|w| !(1..=8).contains(&w))
+            })
+        {
+            return Err(Error::input("invalid floe layer settings"));
+        }
+        Ok(())
+    }
+    pub fn text(&self) -> Result<String> {
+        self.validate()?;
+        struct Bounded(Vec<u8>);
+        impl std::io::Write for Bounded {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                if data.len() > MAX_BYTES - self.0.len() {
+                    return Err(std::io::Error::other("settings exceeds 4 MiB"));
+                }
+                self.0.extend_from_slice(data);
+                Ok(data.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut out = Bounded(Vec::new());
+        serde_json::to_writer(&mut out, self)
+            .map_err(|_| Error::input("settings exceeds 4 MiB"))?;
+        String::from_utf8(out.0).map_err(|_| Error::input("invalid settings encoding"))
+    }
+}
 pub fn parse(text: &str) -> Result<Document> {
     if text.len() > MAX_BYTES {
         return Err(Error::input("layerprops exceeds 4 MiB"));

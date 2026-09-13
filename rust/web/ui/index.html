@@ -18,6 +18,7 @@
   <script defer src="/assets/@@BUNDLE@@/drc-groups.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc-build.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/settings.js"></script>
   <script defer src="/assets/@@BUNDLE@@/app.js"></script>
 </head>
 <body>
@@ -97,6 +98,13 @@
         <p class="note">Files expire after 10 minutes. Maximum 4 files, 512 MiB each. Closing the view does not cancel an approved clip; ending the session does.</p>
       </section>
       <section class="layers-panel">
+        <div id="settings-panel" hidden>
+          <div class="button-row"><button id="settings-load" disabled>Load settings…</button><button id="settings-cancel" disabled>Cancel</button></div>
+          <input id="settings-file" type="file" accept=".layerprops,.json" hidden>
+          <div class="button-row"><select id="settings-format" aria-label="Settings save format"><option value="native">Native JSON (lossless)</option><option value="calibre">Calibre layerprops</option></select><button id="settings-save" disabled>Save settings…</button></div>
+          <p class="note">Session only. Native restores the same layer/group table; Calibre applies matching rows and flattens inherited styles on save. No design defaults are written.</p>
+          <p id="settings-status" role="status" class="note"></p>
+        </div>
         <div class="section-title"><h2>Layers</h2><div><button id="layers-all" class="text-button" disabled>All</button><button id="layers-none" class="text-button" disabled>None</button></div></div>
         <div id="layers" class="layers"><p class="empty-list">Open a layout to see its layers.</p></div>
         <div class="pagination"><button id="layers-prev" disabled aria-label="Previous layer page">←</button><span id="layers-count">0 layers</span><button id="layers-next" disabled aria-label="Next layer page">→</button></div>
@@ -105,7 +113,7 @@
           <div class="form-row"><label for="style-fill">Fill</label><select id="style-fill"><option value="solid">Solid</option><option value="clear">Outline</option><option value="speckle">Speckle</option><option value="pattern">16×16 pattern</option></select></div>
           <label id="pattern-label" for="style-pattern" hidden>16 rows, four hex digits each</label>
           <textarea id="style-pattern" rows="3" maxlength="95" spellcheck="false" hidden></textarea>
-          <div class="form-row"><label for="style-width">Line px</label><input id="style-width" class="short" type="number" min="1" max="8" value="1"></div>
+          <div class="form-row"><label for="style-width">Line px</label><input id="style-width" class="short" type="number" min="1" max="8" value="1" title="1 clears the override; a child inherits its group width"></div>
           <div class="button-row"><button type="submit">Apply style</button><button id="style-cancel" type="button">Cancel</button></div>
         </form>
       </section>

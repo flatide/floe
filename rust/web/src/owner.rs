@@ -15,6 +15,7 @@ use axum::{
 use serde_json::json;
 pub(crate) fn routes() -> Router<Gate> {
     Router::new()
+        .merge(crate::settings::routes())
         .route("/api/v1/catalog", get(catalog))
         .route("/api/v1/catalog/{id}/levels/{start}", get(levels))
         .route("/api/v1/operations", get(operations).post(submit))

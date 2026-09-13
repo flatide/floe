@@ -125,14 +125,14 @@ async fn explicit_pack_build_retires_prepared_focus_without_reopening_layout() {
     println!("RUST DRC BUILD IDENTITY: ALL OK (readonly deny, stale WebSocket token, new focus, same layout, resources)");
 }
 
-struct ReviewSocket {
+pub(super) struct ReviewSocket {
     socket: Socket,
-    hello: Value,
-    state: Value,
+    pub(super) hello: Value,
+    pub(super) state: Value,
     seq: u64,
 }
 impl ReviewSocket {
-    async fn new(h: &Harness, login: &Login) -> Self {
+    pub(super) async fn new(h: &Harness, login: &Login) -> Self {
         let mut socket = h.connect(login).await;
         let hello = text(&mut socket).await;
         let state = text(&mut socket).await;
@@ -165,7 +165,7 @@ impl ReviewSocket {
             }
         }
     }
-    async fn edit(&mut self, mut value: Value, error: Option<&str>) -> Value {
+    pub(super) async fn edit(&mut self, mut value: Value, error: Option<&str>) -> Value {
         // Exercise the protocol below its documented rate cap, including ACKs.
         tokio::time::sleep(Duration::from_millis(50)).await;
         self.seq += 1;
@@ -196,11 +196,11 @@ impl ReviewSocket {
             }
         }
     }
-    async fn set(&mut self, body: Value) {
+    pub(super) async fn set(&mut self, body: Value) {
         self.edit(json!({"type":"view.set","body":body}), None)
             .await;
     }
-    async fn apply(&mut self, token: &Value, error: Option<&str>) {
+    pub(super) async fn apply(&mut self, token: &Value, error: Option<&str>) {
         self.edit(json!({"type":"view.apply","token":token}), error)
             .await;
     }

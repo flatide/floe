@@ -62,7 +62,16 @@ browser 기능 검사를 추가로 요구하고 새 HTTP/WS·clipboard 읽기·u
 표시/overlay·수명·fallback 계약과 미검증 범위는 [M4 §15](WEBUI_M4.ko.md)를 따른다.
 M4d-2는 layerprops library codec·초기 view visibility를 연결했다. 명시적인 startup
 selection이 design default보다 우선하며, 기존 RenderSession의 archival 기본 All은
-유지한다. live Load/Save HTTP/WS나 기본값 쓰기 권한은 아직 추가하지 않았다([M4 §16](WEBUI_M4.ko.md)).
+유지한다([M4 §16](WEBUI_M4.ko.md)). M4d-3은 owner `capabilities.layer_settings`와
+`GET/POST /api/v1/views/{id}/settings/{state_rev}/{native|calibre}`를 추가한다.
+GET는 현 revision의 설정 text 다운로드, POST는 UTF-8 text의 읽기 전용 준비다.
+POST 결과의 `prepared_token`만 기존 `view.apply`로 보내 같은 revision CAS에서 적용한다.
+`rows`는 읽은 행 수이지 유효 pair/변경 행 수가 아니다. 세부 상속/한계는 [M4 §17](WEBUI_M4.ko.md).
+cookie+CSRF·Origin 정책은 기존 owner 규칙이다. 등록된 view의 설정 text만 최대4MiB,
+한 준비/내보내기를 별도 semaphore로 허용하며, 일반16KiB body·8KiB control 한계는
+유지한다. 임의 경로·레이아웃 upload·source/default 쓰기 권한은 아니다(`uploads:false`).
+`view.set.body.style_deltas`는 `{pair,color?,fill?,width?}`의 필드별 수정이다.
+omitted는 유지, null은 오류이며 기존 완전한 `styles`와 한 요청에서 혼용하지 않는다.
 2026-09-13 M1a-1 `rust/worker-client`와 M1a-2a/b `app/app-core`의 일반 index·info/단일 render/probe를
 구현했다. 현재 호출 계약은 [worker README](../rust/worker-client/README.md),
 [M1a 기록](WEBUI_M1A.ko.md)을 따르며 아래 서비스 전체가 존재하는 것은 아니다.
@@ -221,7 +230,9 @@ renderd argv, 임의 환경변수, 임의 출력 경로를 받는 endpoint는 �
 로컬 CLI의 자유로운 파일 경로는 **trusted local boundary**에만 허용한다.
 웹의 파일 선택은 서버 catalog handle을 사용한다. 브라우저 local file upload와
 서버 파일 열기는 다르며, 업로드 지원을 M1에 암묵적으로 넣지 않는다.
-DRC/설정 import 역시 등록된 입력/artifact로 처리하고 include 탈출을 막는다.
+DRC import는 등록된 입력/artifact로 처리하고 include 탈출을 막는다. M4d-3 설정만은
+사용자가 선택한 UTF-8 text의 유계 import를 명시적으로 추가했다. 설정 문서에는
+서버 경로/include 명령이 없으며 source나 sidecar를 자동으로 쓰지 않는다.
 
 WS control envelope 예(설계용):
 

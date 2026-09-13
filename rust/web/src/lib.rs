@@ -13,6 +13,7 @@ mod owner;
 mod prepared;
 mod query;
 pub mod service;
+mod settings;
 mod stream;
 pub mod transport;
 pub mod view;

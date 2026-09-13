@@ -12,6 +12,7 @@
     let gesture = null, dragShift = null, lastPlacement = null;
     let drcPanel = null, displayProjection = null, frozenProjection = null;
     let inspector = null, measurement = null, clipper = null, snapshots = null, overlayMode = 'all', pickedPairs = [];
+    let settings = null;
     const rulerHistory = window.FloeRulers.history();
     let ackedFrames = {foreground: null, margin: null};
     const sessionKey = 'floe-session:' + location.origin;
@@ -165,7 +166,12 @@
                     context.drawImage(temp, 0, 0); temp.width = 1; temp.height = 1;
                 }
             }
-            foregroundFrame = null; canvas.hidden = false; positionCanvas(dims());
+            // A no-op/rejected edit produces no replacement frame. If the
+            // pixels were not copied/recomposed, their original receipt is
+            // still valid; pending/revision checks already prevent queries
+            // during a real state change.
+            if (copy) { foregroundFrame = null; }
+            canvas.hidden = false; positionCanvas(dims());
             lastPlacement = {pixels: p.pixels, margin: null, full: false, foreground: [0, 0]};
         }
         marginCanvas.hidden = true;
@@ -188,6 +194,7 @@
         el('open').disabled = submitting || ownerBusy || !!live();
         el('close').disabled = !currentId || submitting || ownerBusy;
         el('index').disabled = submitting || ownerBusy;
+        if (settings) { settings.changed(); }
         if (drcPanel) { drcPanel.contextChanged(); }
         if (inspector) { inspector.changed(); }
         if (measurement) { measurement.changed(); }
@@ -367,6 +374,7 @@
         ++socketSerial; finishDecode();
         if (socket) { socket.onclose = null; socket.close(); socket = null; }
         epoch = ''; rejectEdits('Connection interrupted; pending input was not replayed.');
+        if (settings) { settings.changed(); }
         if (inspector) { inspector.changed(); }
         if (clipper) { clipper.changed(); }
         if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
@@ -447,7 +455,7 @@
             const color = document.createElement('input'); color.type = 'color'; color.value = r.color; color.setAttribute('aria-label', 'Color ' + r.name);
             color.onchange = function () {
                 if (!state || state.render_key !== page.render_key) { notice('Layer styles changed. Select the layer again.'); return; }
-                edit({styles: [{pair: r.pair, color: color.value, fill: r.fill, width: r.width}]});
+                edit({style_deltas: [{pair: r.pair, color: color.value}]});
             };
             const name = document.createElement('span'); name.className = 'layer-name'; name.textContent = r.name || r.pair.join('/'); name.title = r.name + (r.aliases.length ? ' · ' + r.aliases.join(', ') : '');
             name.dataset.pair = r.pair.join('/');
@@ -557,6 +565,7 @@
         if (caps.drc) { await drcPanel.init(); }
         await clipper.init(caps.exports);
         snapshots.init(caps.snapshot_png);
+        settings.capabilities(caps.layer_settings);
         sourceSelection();
         const operations = await operationState();
         await restore();
@@ -581,6 +590,7 @@
         if (drcPanel) { drcPanel.stop(); }
         if (clipper) { clipper.stop(); }
         if (snapshots) { snapshots.stop(); }
+        if (settings) { settings.stop(); }
         stopped = true; disconnect(); if (operationTimer) { clearTimeout(operationTimer); }
         try { await http('DELETE', '/api/v1/session'); } catch (e) { report(e); }
         try { sessionStorage.removeItem(sessionKey); } catch (_) { /* storage may be disabled */ }
@@ -612,7 +622,10 @@
             if (rows.length !== 16 || !rows.every(function (s) { return /^[0-9a-f]{4}$/i.test(s); })) { notice('A pattern needs exactly 16 four-digit hex rows.'); return; }
             fill.rows = rows.map(function (s) { return parseInt(s, 16); });
         }
-        edit({styles: [{pair: selectedStyle.row.pair, color: selectedStyle.row.color, fill: fill, width: width}]});
+        const row = selectedStyle.row, delta = {pair: row.pair};
+        if (fill.kind !== row.fill.kind || (fill.kind === 'pattern' && fill.rows.some(function (n, i) { return n !== row.fill.rows[i]; }))) { delta.fill = fill; }
+        if (width !== row.width) { delta.width = width; }
+        if (delta.fill || delta.width !== undefined) { edit({style_deltas: [delta]}); }
         selectedStyle = null; el('style-editor').hidden = true;
     };
     const nav = function (n) { edit({navigation: n}); };
@@ -768,12 +781,16 @@
             ['query-canvas','drc-canvas','ruler-canvas'].forEach(function(id){const c=el(id);if(!c.hidden){layers.push({canvas:c,offset:[0,0]});}});
             return {pixels:p.pixels.slice(),layers:layers};
         }});
-    document.addEventListener('visibilitychange', function () { if (document.hidden) { finishDecode(); inspector.changed(); measurement.changed(); clipper.changed(); } else if (live() && !stopped) { connect(); } });
+    settings=window.FloeSettings.bind({el:el,window:window,document:document,XHR:XMLHttpRequest,Blob:Blob,Encoder:TextEncoder,Decoder:TextDecoder,
+        csrf:function(){return auth?auth.csrf:'';},message:message,edit:edit,setTimeout:setTimeout.bind(window),clearTimeout:clearTimeout.bind(window),
+        context:function(){return state?{id:currentId,epoch:epoch,rev:state.state_rev,ready:!stopped&&!document.hidden&&live()&&socket&&socket.readyState===WebSocket.OPEN,
+            idle:!inflight&&!accepted&&!queue.length&&!submitting&&!ownerBusy}:null;}});
+    document.addEventListener('visibilitychange', function () { settings.changed(); if (document.hidden) { finishDecode(); inspector.changed(); measurement.changed(); clipper.changed(); } else if (live() && !stopped) { connect(); } });
     window.addEventListener('blur', function () { inspector.move(NaN, NaN); measurement.interrupt(); });
     setInterval(function () { if (socket && socket.readyState === WebSocket.OPEN && epoch) { try { send({type: 'ping'}); } catch (e) { report(e); } } }, 10000);
-    window.addEventListener('pagehide', function () { disconnect(); inspector.stop(); measurement.stop(); clipper.stop(); snapshots.stop(); clearTimeout(operationTimer); clearTimeout(resizeTimer); if (sizeObserver) { sizeObserver.disconnect(); } drcPanel.stop(); });
+    window.addEventListener('pagehide', function () { disconnect(); inspector.stop(); measurement.stop(); clipper.stop(); snapshots.stop(); settings.stop(); clearTimeout(operationTimer); clearTimeout(resizeTimer); if (sizeObserver) { sizeObserver.disconnect(); } drcPanel.stop(); });
     window.addEventListener('pageshow', function (event) {
-        if (event.persisted && auth && !stopped) { inspector.resume(); measurement.resume(); clipper.resume(); snapshots.resume(); if (sizeObserver) { sizeObserver.observe(viewport); } drcPanel.resume().then(operationState).then(restore).then(resized).catch(report); }
+        if (event.persisted && auth && !stopped) { inspector.resume(); measurement.resume(); clipper.resume(); snapshots.resume(); settings.resume(); if (sizeObserver) { sizeObserver.observe(viewport); } drcPanel.resume().then(operationState).then(restore).then(resized).catch(report); }
     });
     start().catch(function (e) { connection('Not connected', false); report(e); el('empty-message').textContent = e.message; });
 }());

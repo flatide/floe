@@ -101,6 +101,52 @@ fn snapshots_styles_and_native_frames_match_python() {
         )
         .unwrap();
         let model = Model::new(&managed).unwrap();
+        let mut live = ViewState::initial(&model, 103, 91).unwrap();
+        assert_eq!(case["live"].as_array().unwrap().len(), 16);
+        for step in case["live"].as_array().unwrap() {
+            live = live
+                .edit(
+                    &model,
+                    floe_app_core::view::Patch {
+                        properties: Some(
+                            floe_app_core::layerprops::parse(step["text"].as_str().unwrap())
+                                .unwrap(),
+                        ),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let styles:Vec<_> = live.styles.iter().map(|s|json!({"layer":s.layer,"color":styles::color_text(s.color),"fill":floe_app_core::layerprops::Row::from_style(s,"",true).unwrap().fill,"width":s.width})).collect();
+            assert_eq!(
+                json!(styles),
+                step["styles"],
+                "GTK live styles {}",
+                case["mode"]
+            );
+            let visible: Vec<_> = match &live.layers {
+                Layers::All => live
+                    .styles
+                    .iter()
+                    .filter(|s| {
+                        let Dataset::Deck(d) = &managed.dataset else {
+                            panic!("deck")
+                        };
+                        !d.metadata.layers.iter().any(|r| {
+                            r.jobdeck_head && (r.layer as u32, r.datatype as u32) == s.layer
+                        })
+                    })
+                    .map(|s| s.layer)
+                    .collect(),
+                Layers::None => vec![],
+                Layers::Only(p) => p.clone(),
+            };
+            assert_eq!(
+                json!(visible),
+                step["visible"],
+                "GTK live visibility {}",
+                case["mode"]
+            );
+        }
         let mut state = ViewState::initial(&model, 103, 91).unwrap();
         let selected = match &state.layers {
             Layers::All => {

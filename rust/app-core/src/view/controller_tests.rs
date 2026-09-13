@@ -266,6 +266,8 @@ fn model(deck: bool) -> Arc<Model> {
     }]);
     Arc::new(Model {
         initial_layers: Layers::All,
+        assignments: Arc::default(),
+        property_names: Vec::new(),
         dataset_revision: 7,
         dbu: 0.001,
         bbox: [0., 0., 800., 640.],

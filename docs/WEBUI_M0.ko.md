@@ -217,8 +217,11 @@ exact clip이나 원본 재렌더 export로 간주하지 않는다.
 
 UI-03의 layerprops 공통 codec·초기 가시성은 M4d-2에서 연결했다([M4 §16](WEBUI_M4.ko.md)).
 색/fill뿐 아니라 file/stem default의 visibility를 첫 frame 전에 적용하고, 명시된
-startup selection이 우선한다. 열린 세션 Load/Save·기본값 게시/bitmap 편집 저장은
-아직 남아 있다. 개인 palette cache는 현재 GTK에도 없으며 자동 저장을 새로 만들지 않는다.
+startup selection이 우선한다. M4d-3에서 열린 세션 Load/Save와 custom bitmap·fill/width
+상속을 보존하는 native JSON을 연결했다([M4 §17](WEBUI_M4.ko.md)). Calibre 형식은
+기존 partial import와 현재 표시 스타일 export를 지원한다. 기본값 게시와 실제 브라우저
+file chooser/다운로드 수용은 남아 있다. 개인 palette cache는 현재 GTK에도 없으며
+자동 저장을 새로 만들지 않는다.
 
 `python -m floe.fe_embed` 보조 CLI도 범위에 포함한다: 위치 인자 PNG들,
 `--box`, `--ellipse`, `--line`, `--path`, `--polygon`, `--ruler`, `--text`,

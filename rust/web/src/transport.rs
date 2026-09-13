@@ -1,5 +1,6 @@
 //! Authenticated bounded HTTP/1 + RFC6455 transport. M1b foundation only:
-//! no browser-provided path, native command, upload or arbitrary file endpoint.
+//! no browser-provided path, native command, layout upload or arbitrary file
+//! endpoint. Owner settings text has a separate bounded import route.
 use crate::{
     auth::{Auth, Secret, SessionId},
     origin::{self, Origin},
@@ -137,6 +138,7 @@ pub struct Gateway {
     startup: Option<serde_json::Value>,
     pub(crate) output_bytes: Arc<Semaphore>,
     pub(crate) encoders: Arc<Semaphore>,
+    pub(crate) settings_ops: Arc<Semaphore>,
 }
 impl Gateway {
     pub fn new(addr: SocketAddr) -> Result<(Gate, Secret), String> {
@@ -162,6 +164,7 @@ impl Gateway {
                 startup: None,
                 output_bytes: Arc::new(Semaphore::new(crate::view::OUTPUT_BUDGET)),
                 encoders: Arc::new(Semaphore::new(2)),
+                settings_ops: Arc::new(Semaphore::new(1)),
             }),
             secret,
         ))
@@ -322,12 +325,37 @@ async fn guard(State(gate): State<Gate>, request: Request, next: Next) -> Respon
     } else {
         // Bound even bodies an endpoint would ignore. Without the old
         // connection-wide timeout, trickling an unused GET/denied POST body
-        // must not hold an HTTP slot indefinitely. At most 16KiB is buffered;
-        // response bodies (downloads) remain streamed under the idle deadline.
+        // must not hold an HTTP slot indefinitely. Ordinary bodies are 16KiB;
+        // the authenticated settings route admits one 4MiB body/preparation.
+        // Response bodies (downloads) remain under the idle deadline.
+        let gate = Arc::clone(&gate);
         timeout(IO_TIMEOUT, async move {
+            let settings_body = crate::settings::is_import(request.method(), request.uri().path());
+            let permit = if settings_body {
+                if http_session(&gate, request.headers()).is_err() {
+                    return error(StatusCode::UNAUTHORIZED);
+                }
+                match Arc::clone(&gate.settings_ops).try_acquire_owned() {
+                    Ok(p) => Some(p),
+                    Err(_) => return error(StatusCode::TOO_MANY_REQUESTS),
+                }
+            } else {
+                None
+            };
+            let limit = if settings_body {
+                floe_app_core::layerprops::MAX_BYTES
+            } else {
+                BODY_BYTES
+            };
             let (parts, body) = request.into_parts();
-            match axum::body::to_bytes(body, BODY_BYTES).await {
-                Ok(bytes) => next.run(Request::from_parts(parts, bytes.into())).await,
+            match axum::body::to_bytes(body, limit).await {
+                Ok(bytes) => {
+                    let mut request = Request::from_parts(parts, bytes.into());
+                    if let Some(permit) = permit {
+                        request.extensions_mut().insert(Arc::new(permit));
+                    }
+                    next.run(request).await
+                }
                 Err(_) => error(StatusCode::PAYLOAD_TOO_LARGE),
             }
         })
@@ -424,7 +452,7 @@ async fn capabilities(State(gate): State<Gate>, headers: HeaderMap) -> Response 
     }
     let render = gate.service.is_some() || gate.view.is_some();
     Json(json!({"protocol":1,"bundle":BUNDLE,"stage":if gate.service.is_some(){"owner-service"}else if render{"view-stream"}else{"transport"},
-        "render":render,"catalog":gate.service.is_some(),"index":gate.service.is_some(),"drc":gate.drc.is_some(),"exports":gate.service.is_some(),"snapshot_png":gate.service.is_some(),"shares":false,"uploads":false,"control_bytes":CONTROL_BYTES,
+        "render":render,"catalog":gate.service.is_some(),"index":gate.service.is_some(),"drc":gate.drc.is_some(),"exports":gate.service.is_some(),"snapshot_png":gate.service.is_some(),"layer_settings":true,"shares":false,"uploads":false,"control_bytes":CONTROL_BYTES,
         "frame_bytes":crate::view::PACKET_BYTES,"frame_credit":1,"pending_frames":1}))
     .into_response()
 }

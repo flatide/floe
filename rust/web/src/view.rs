@@ -168,6 +168,47 @@ impl StyleDto {
         })
     }
 }
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct StyleDeltaDto {
+    pair: (u32, u32),
+    #[serde(default)]
+    color: Field<String>,
+    #[serde(default)]
+    fill: Field<FillDto>,
+    #[serde(default)]
+    width: Field<u8>,
+}
+impl StyleDeltaDto {
+    fn core(self) -> Result<floe_app_core::view::StyleDelta, &'static str> {
+        let color = self
+            .color
+            .optional()
+            .map(|color| {
+                StyleDto {
+                    pair: self.pair,
+                    color,
+                    fill: FillDto::Speckle {},
+                    width: 1,
+                }
+                .core()
+                .map(|s| s.color)
+            })
+            .transpose()?;
+        let fill = self.fill.optional().map(|fill| match fill {
+            FillDto::Solid {} => Fill::Solid,
+            FillDto::Clear {} => Fill::Clear,
+            FillDto::Speckle {} => Fill::Speckle,
+            FillDto::Pattern { rows } => Fill::Pattern(rows),
+        });
+        Ok(floe_app_core::view::StyleDelta {
+            layer: self.pair,
+            color,
+            fill,
+            width: self.width.optional(),
+        })
+    }
+}
 #[derive(Default, Deserialize, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub struct PatchDto {
@@ -184,6 +225,7 @@ pub struct PatchDto {
     pub font_px: Field<u32>,
     pub mono: Field<bool>,
     pub styles: Field<Vec<StyleDto>>,
+    pub style_deltas: Field<Vec<StyleDeltaDto>>,
 }
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
@@ -246,6 +288,16 @@ impl PatchDto {
             font_px: self.font_px.optional(),
             mono: self.mono.optional(),
             style_changes,
+            style_deltas: self
+                .style_deltas
+                .optional()
+                .unwrap_or_default()
+                .into_iter()
+                .map(StyleDeltaDto::core)
+                .collect::<Result<_, _>>()?,
+            properties: None,
+            settings: None,
+            prepared_layers: None,
         })
     }
 }
@@ -452,6 +504,13 @@ mod tests {
             r#"{"labels":null}"#,
             r#"{"pixels":null}"#,
             r#"{"styles":null}"#,
+            r#"{"style_deltas":null}"#,
+            r##"{"style_deltas":[{"color":"#123456"}]}"##,
+            r#"{"style_deltas":[{"pair":[1,0],"color":null}]}"#,
+            r#"{"style_deltas":[{"pair":[1,0],"fill":null}]}"#,
+            r#"{"style_deltas":[{"pair":[1,0],"width":null}]}"#,
+            r#"{"style_deltas":[{"pair":[1,0],"file":"secret"}]}"#,
+            r#"{"style_deltas":[{"pair":[1,0],"width":1,"width":2}]}"#,
             r#"{"depth":null}"#,
             r#"{"restore_layers":null}"#,
             r#"{"restore_layers":"yes"}"#,
@@ -474,6 +533,8 @@ mod tests {
             r#"{"depth":"-1"}"#,
             r#"{"navigation":{"kind":"goto","center_um":["NaN","0"],"width_um":"5"}}"#,
             r#"{"styles":[{"pair":[1,0],"color":"한글","fill":{"kind":"solid"},"width":1}]}"#,
+            r#"{"style_deltas":[{"pair":[1,0],"color":"한글"}]}"#,
+            r#"{"style_deltas":[{"pair":[1,0],"color":"red"}]}"#,
         ] {
             assert!(
                 serde_json::from_str::<PatchDto>(text)
@@ -487,6 +548,19 @@ mod tests {
             assert!(counter(value).is_err());
         }
         assert_eq!(counter("18446744073709551615").unwrap(), u64::MAX);
+        let delta = serde_json::from_str::<PatchDto>(
+            r##"{"style_deltas":[{"pair":[1,0],"color":"#123456"}]}"##,
+        )
+        .unwrap()
+        .core()
+        .unwrap()
+        .style_deltas
+        .pop()
+        .unwrap();
+        assert_eq!(delta.layer, (1, 0));
+        assert_eq!(delta.color, Some([18, 52, 86, 255]));
+        assert!(delta.fill.is_none());
+        assert!(delta.width.is_none());
         assert!(matches!(
             serde_json::from_str::<PatchDto>(r#"{"restore_layers":true}"#)
                 .unwrap()

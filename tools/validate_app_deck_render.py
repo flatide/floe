@@ -17,7 +17,7 @@ from floe.jobdeck.viewer import DeckCache
 from floe.jobdeck.render import DeckRenderWorker
 from floe.shots import ShotRunner
 from floe import fillpat
-from validate_layerprops import visible_layers
+from validate_layerprops import visible_layers, live_properties
 
 
 def compare(source, work, env, tag, args, code=0):
@@ -140,7 +140,8 @@ def main():
                             runner.stop()
                         cases.append({"source": str(deck), "mode": mode, "levels": selection,
                                       "metadata": cache.meta, "styles": styles,
-                                      "bbox": box, "png": str(out), "view_png": str(view_out), "visible": visible})
+                                      "bbox": box, "png": str(out), "view_png": str(view_out), "visible": visible,
+                                      "live": live_properties(cache, work / (mode + str(selection) + "-live"))})
                     finally:
                         cache.close()
         oracle = work / "dataset-oracle.json"

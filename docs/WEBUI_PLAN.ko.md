@@ -52,6 +52,7 @@ M4c-2에서 표시 receipt·명시 승인·중복 방지·취소와 owner HTTP c
 M4c-3에서 현재 viewport의 준비→명시 승인·취소·파일 목록/다운로드 UI를 연결했다.
 M4d-1에서 이미 표시한 픽셀의 PNG 복사/저장과 overlay 3상태 전환을 연결했다.
 M4d-2에서 layerprops Rust codec과 GTK에 맞춘 첫 view의 레이어 가시성을 연결했다.
+M4d-3에서 열린 세션 설정 Load/Save·bitmap/상속을 보존하는 native JSON과 원자적 적용을 연결했다.
 나머지 내보내기와 브라우저 다운로드/현장 수용은 남아 있다([M4 기록](WEBUI_M4.ko.md)).
 전체 조작 parity와 M0/Firefox/ETX 현장 검증은 아직 완료되지 않았다.
 상세 범위는 [M1b 기록](WEBUI_M1B.ko.md)과 [M2 기록](WEBUI_M2.ko.md). 여기의 M0~M5는 **웹 전환 단계**이며

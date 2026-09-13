@@ -78,6 +78,7 @@ for line in sys.stdin:
         assert "RUST DRC BUILD IDENTITY: ALL OK" in checked.stdout
         assert "RUST OWNER EXPORT: ALL OK" in checked.stdout
         assert "RUST OWNER EXPORT LIFECYCLE: ALL OK" in checked.stdout
+        assert "RUST OWNER SETTINGS: ALL OK" in checked.stdout
         for marker in exports.glob("fake-*.pid"):
             try:
                 os.kill(int(marker.read_text()), 0)

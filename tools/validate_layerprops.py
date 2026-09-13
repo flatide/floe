@@ -6,6 +6,7 @@ runs with PATH empty and must not mutate any of them. No browser file upload,
 design-default publication, or user directory writes are performed.
 """
 import ast
+import copy
 import hashlib
 import json
 import os
@@ -21,13 +22,14 @@ sys.path.insert(0, str(ROOT))
 from floe import fillpat
 
 
-def visible_layers(metadata, rows):
+def gtk_view(metadata, rows):
     """Run the actual GTK methods with only their checkbox boundary mocked."""
-    names = {"_apply_props_visibility", "_sync_jobdeck_groups", "_is_jobdeck_head"}
+    names = {"_apply_props_visibility", "_sync_jobdeck_groups", "_is_jobdeck_head",
+             "_load_props_dialog", "_push_fills", "_refresh_row_fills"}
     tree = ast.parse((ROOT / "floe/gui.py").read_text())
     methods = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name in names]
     assert len(methods) == len(names)
-    scope = {}
+    scope = {"fillpat": fillpat}
     exec(compile(ast.Module(body=methods, type_ignores=[]), "GTK props oracle", "exec"), scope)
     legacy = type("LegacyVisibility", (), {name: scope[name] for name in names})()
     legacy.meta = metadata
@@ -49,9 +51,77 @@ def visible_layers(metadata, rows):
         def set_group_state(self, active, partial):
             assert active == (self.key in legacy.visible)
 
+        def set_color(self, color):
+            pass
+
+        def set_fill(self, fill):
+            pass
+
     legacy._layer_rows = {key: Checkbox(key) for key in keys}
     legacy._apply_props_visibility(rows)
-    return sorted(legacy.visible - heads)
+    return legacy
+
+
+def visible_layers(metadata, rows):
+    gui = gtk_view(metadata, rows)
+    return sorted(gui.visible - set(gui._layer_groups))
+
+
+def live_properties(cache, directory):
+    """Actual GTK load + actual adapter expansion; only UI/pipe I/O mocked."""
+    from floe import cache as cache_mod
+    from floe.rust_render import RustRenderWorker, _pattern_fill
+    from floe.jobdeck.render import DeckRenderWorker
+    directory.mkdir()
+    props = cache_mod.load_layer_props(getattr(cache, "props_src", cache.src))[0]
+    gui = gtk_view(copy.deepcopy(cache.meta), props)
+    gui._layer_patterns = {}
+    gui._layer_widths = {}
+    gui._fill_patterns = fillpat.default_patterns()
+    for key, _color, fill, _name, _visible, width in props:
+        index = fillpat.fill_index(fill)
+        if index is not None:
+            gui._layer_patterns[tuple(key)] = index
+        try:
+            if int(width) > 1:
+                gui._layer_widths[tuple(key)] = int(width)
+        except ValueError:
+            pass
+    gui._color_epoch = 0
+    gui.redraw = lambda **kw: None
+    gui._set_live_status = lambda message: None
+    worker = DeckRenderWorker(cache) if cache.meta.get("jobdeck") else RustRenderWorker(cache)
+    worker.alive = lambda: True
+    worker._publish_style = lambda **kw: None
+    gui.worker = worker
+    keys = sorted(gui._layer_rows)
+    rng = random.Random(191)
+    outputs = []
+    wire_names = {}
+    for name, bitmap in fillpat.FILL_PATTERNS:
+        wire_names.setdefault(_pattern_fill(bitmap), name)
+    for step in range(16):
+        lines = []
+        # A valid fill keeps GTK's load from taking its width-only early
+        # return. That GTK bug is covered as an intentional fix in Rust units.
+        lines.append("%d.%d INVALID speckle KEEP ? bad" % keys[-1])
+        for _ in range(8):
+            key = rng.choice(keys)
+            lines.append("%d.%d %s %s MASK %s %s" % (*key, rng.choice(["red", "blue", "INVALID"]),
+                         rng.choice(["solid", "clear", "diagonal_1", "brick", "INVALID"]),
+                         rng.choice(["0", "1", "?"]), rng.choice(["0", "1", "3", "8", "bad"])))
+        text = "\n".join(lines)
+        path = directory / (str(step) + ".layerprops")
+        path.write_text(text)
+        gui._props_chooser = lambda save: str(path)
+        gui._load_props_dialog()
+        assert worker.res.empty(), list(worker.res.queue)
+        outputs.append(dict(text=text, visible=sorted(gui.visible - set(gui._layer_groups)),
+                            styles=[dict(layer=key, color=worker._colors[key],
+                                         fill=wire_names[worker._fills.get(key, "speckle")],
+                                         width=worker._widths.get(key, 1)) for key in sorted(worker._colors)]))
+    worker.stop()
+    return outputs
 
 
 def row_dict(row):
@@ -126,7 +196,11 @@ def main(fixture):
             else:
                 source.with_suffix(".layerprops").write_text("0 red solid ignored 1 1\n")
                 Path(str(source) + ".layerprops").write_text(text)
-            views.append(dict(source=str(source), visible=visible_layers(meta, fillpat.parse_layerprops(text))))
+            from floe.cache import Cache
+            cache = Cache(str(source))
+            cache.load()
+            views.append(dict(source=str(source), visible=visible_layers(meta, fillpat.parse_layerprops(text)),
+                              live=live_properties(cache, work / ("live-" + str(i)))))
         cases, styles = codec_cases()
         oracle = work / "oracle.json"
         oracle.write_text(json.dumps(dict(cases=cases, styles=styles, views=views)))

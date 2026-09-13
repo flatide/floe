@@ -3,6 +3,7 @@
 //! browser floating-point world math.
 mod controller;
 pub mod margin;
+mod properties;
 mod query;
 mod ruler;
 use crate::{
@@ -193,6 +194,28 @@ pub struct Patch {
     pub font_px: Option<u32>,
     pub mono: Option<bool>,
     pub style_changes: Vec<Style>,
+    pub style_deltas: Vec<StyleDelta>,
+    /// Parsed settings are prepared off the control channel, then committed
+    /// under the same revision CAS as all other view edits.
+    pub properties: Option<crate::layerprops::Document>,
+    pub settings: Option<crate::layerprops::Settings>,
+    pub prepared_layers: Option<LayerSettings>,
+}
+#[derive(Clone, Debug, Default)]
+pub struct StyleDelta {
+    pub layer: (u32, u32),
+    pub color: Option<[u8; 4]>,
+    pub fill: Option<floe_worker_client::Fill>,
+    pub width: Option<u8>,
+}
+/// Validated off-thread against the same immutable model and CAS base. The
+/// control thread only installs these Arc-backed fields, not a 4MiB parser.
+#[derive(Clone, Debug)]
+pub struct LayerSettings {
+    dataset_revision: u64,
+    layers: Layers,
+    styles: Arc<Vec<Style>>,
+    assignments: Arc<properties::Assignments>,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct ViewState {
@@ -209,6 +232,7 @@ pub struct ViewState {
     pub font_px: u32,
     pub mono: bool,
     pub styles: Arc<Vec<Style>>,
+    assignments: Arc<properties::Assignments>,
 }
 /// Immutable metadata sufficient for validation, without retaining a second
 /// cache mapping or leaking source paths into a transport snapshot.
@@ -223,6 +247,8 @@ pub struct Model {
     pairs: BTreeSet<(u32, u32)>,
     groups: BTreeMap<(u32, u32), Vec<(u32, u32)>>,
     initial_layers: Layers,
+    assignments: Arc<properties::Assignments>,
+    property_names: Vec<((u32, u32), String)>,
 }
 impl Model {
     pub fn new(data: &ManagedDataset) -> Result<Arc<Self>> {
@@ -256,15 +282,38 @@ impl Model {
             pairs,
             groups,
             initial_layers: Layers::All,
+            assignments: Arc::default(),
+            property_names: match d {
+                Dataset::Layout(l) => l
+                    .metadata
+                    .layers
+                    .iter()
+                    .map(|r| (r.key(), r.name.clone()))
+                    .collect(),
+                Dataset::Deck(d) => d
+                    .metadata
+                    .layers
+                    .iter()
+                    .map(|r| ((r.layer as u32, r.datatype as u32), r.name.clone()))
+                    .collect(),
+            },
         };
         let props = match d {
             Dataset::Layout(l) => &l.layer_props,
             Dataset::Deck(d) => &d.layer_props,
         };
         model.initial_layers = model.properties_visibility(props)?;
+        model.assignments = Arc::new(properties::Assignments::initial(props, &model.pairs));
         Ok(Arc::new(model))
     }
     fn properties_visibility(&self, props: &[crate::styles::LayerProps]) -> Result<Layers> {
+        self.properties_visibility_from(props, &Layers::All)
+    }
+    fn properties_visibility_from(
+        &self,
+        props: &[crate::styles::LayerProps],
+        initial: &Layers,
+    ) -> Result<Layers> {
         // Explicit leaf flags beat a head independent of file order. Head
         // checkboxes derive from leaves; do not send a head for partial groups.
         let flags: BTreeMap<_, _> = props
@@ -272,16 +321,21 @@ impl Model {
             .filter(|p| self.pairs.contains(&p.layer))
             .filter_map(|p| p.visible.map(|v| (p.layer, v)))
             .collect();
-        if flags.values().all(|&v| v) {
+        if *initial == Layers::All && flags.values().all(|&v| v) {
             return Ok(Layers::All);
         }
-        let mut selected: BTreeSet<_> = self
+        let all: BTreeSet<_> = self
             .styles
             .iter()
             .map(|s| s.layer)
             .filter(|p| !self.groups.contains_key(p))
             .collect();
-        let total = selected.len();
+        let total = all.len();
+        let mut selected = match initial {
+            Layers::All => all,
+            Layers::None => BTreeSet::new(),
+            Layers::Only(p) => p.iter().copied().collect(),
+        };
         // Fold duplicate heads before expansion: a bounded text file must not
         // make us walk a large group once per duplicate input row.
         for (&pair, &visible) in &flags {
@@ -356,9 +410,23 @@ impl ViewState {
             font_px: 14,
             mono: false,
             styles: Arc::clone(&model.styles),
+            assignments: Arc::clone(&model.assignments),
         })
     }
     pub fn edit(&self, model: &Model, patch: Patch) -> Result<Self> {
+        if (patch.properties.is_some()
+            || patch.settings.is_some()
+            || patch.prepared_layers.is_some())
+            && (patch.layers.is_some()
+                || patch.layer_change.is_some()
+                || patch.layer_isolation.is_some()
+                || !patch.style_deltas.is_empty()
+                || !patch.style_changes.is_empty())
+        {
+            return Err(Error::input(
+                "properties conflict with explicit layer/style edits",
+            ));
+        }
         if patch.layer_isolation.is_some()
             && (patch.layers.is_some() || patch.layer_change.is_some())
         {
@@ -367,6 +435,17 @@ impl ViewState {
             ));
         }
         let mut s = self.clone();
+        if !patch.style_deltas.is_empty() && !patch.style_changes.is_empty() {
+            return Err(Error::input("conflicting style edit forms"));
+        }
+        if patch.prepared_layers.is_some()
+            && (patch.properties.is_some() || patch.settings.is_some())
+        {
+            return Err(Error::input("conflicting settings operations"));
+        }
+        if patch.properties.is_some() && patch.settings.is_some() {
+            return Err(Error::input("conflicting settings formats"));
+        }
         if let Some((w, h)) = patch.pixels {
             s.viewport = s.viewport.resize(w, h)?;
         }
@@ -487,12 +566,35 @@ impl ViewState {
             }
             // An explicit child in this transaction wins over its group.
             expanded.extend(changes);
+            let assignments = Arc::make_mut(&mut s.assignments);
+            for (key, style) in &expanded {
+                // Existing complete-style edits remain complete overrides.
+                assignments.fills.insert(*key, style.fill.clone());
+                assignments.widths.insert(*key, style.width);
+            }
             let styles = s
                 .styles
                 .iter()
                 .map(|old| expanded.get(&old.layer).unwrap_or(old).clone())
                 .collect();
             s.styles = Arc::new(styles);
+        }
+        if let Some(doc) = patch.properties {
+            s.apply_properties(model, &doc)?;
+        }
+        if !patch.style_deltas.is_empty() {
+            s.apply_style_deltas(model, patch.style_deltas)?;
+        }
+        if let Some(settings) = patch.settings {
+            s.apply_settings(model, &settings)?;
+        }
+        if let Some(settings) = patch.prepared_layers {
+            if settings.dataset_revision != model.dataset_revision {
+                return Err(Error::input("prepared settings belong to another dataset"));
+            }
+            s.layers = settings.layers;
+            s.styles = settings.styles;
+            s.assignments = settings.assignments;
         }
         s.validate(model)?;
         Ok(s)
@@ -521,6 +623,15 @@ impl ViewState {
     }
     pub fn layers_isolated(&self) -> bool {
         self.isolated_from.is_some()
+    }
+    pub fn prepare_layers(&self, model: &Model, patch: Patch) -> Result<LayerSettings> {
+        let next = self.edit(model, patch)?;
+        Ok(LayerSettings {
+            dataset_revision: model.dataset_revision,
+            layers: next.layers,
+            styles: next.styles,
+            assignments: next.assignments,
+        })
     }
     pub fn same_policy(&self, other: &Self, deck: bool) -> bool {
         // Saving/restoring unchanged visibility must not invalidate geometry.
@@ -579,6 +690,8 @@ mod tests {
             groups: [((1, 0), vec![(1, 1), (1, 2)])].into(),
             styles,
             initial_layers: Layers::All,
+            assignments: Arc::default(),
+            property_names: Vec::new(),
         };
         let prop = |layer, visible| crate::styles::LayerProps {
             layer,
@@ -684,6 +797,8 @@ mod tests {
             groups: [((1, 0), vec![(1, 1), (1, 2)])].into(),
             styles,
             initial_layers: Layers::All,
+            assignments: Arc::default(),
+            property_names: Vec::new(),
         };
         let all = ViewState::initial(&model, 100, 100).unwrap();
         let partial = all

@@ -5,9 +5,10 @@ M2 공유 권한 추가와 실제 브라우저 pack-build 승인 클릭은 승�
 M0/G2·M3 현장 Firefox/ETX는 사용자 요청대로 보류다. 이 경계를 우회하지 않고
 독립적인 로컬 native 이관을 진행한다. M4 전체 완료나 GTK 은퇴를 뜻하지 않는다.
 현재는 §14의 **owner viewport clip UI**, §15의 **표시 픽셀 PNG 복사/저장과
-overlay 전환**, §16의 **Rust layerprops 포맷·초기 가시성**까지 연결했다.
+overlay 전환**, §16의 **Rust layerprops 포맷·초기 가시성**, §17의
+**열린 세션 설정 Load/Save·필드별 스타일 적용**까지 연결했다.
 각 절의 미연결 표기는 해당 선행 단계 당시의 범위다.
-나머지 내보내기·주석/설정 저장과 전체 조작/실제 브라우저 수용은 남아 있다.
+나머지 내보내기·주석 저장·설계 기본값 게시와 전체 조작/실제 브라우저 수용은 남아 있다.
 
 ## 1. M4a-1: 표시 scene에 고정한 native pick/snap
 
@@ -1482,3 +1483,106 @@ child fill/width를 보존해야 한다. 이를 행마다 완전한 Style로 덮
 대체하면 GTK의 sparse assignment 상속과 달라진다. 저장은 source 경로 임의 쓰기나
 자동 기본값 게시가 아니어야 한다. GTK 기본값 게시 메뉴는 `FLOE_FILL_EDIT` 개발용임도
 유지한다. 이 단계는 Load/Save UI나 전체 UI-03/M4 완료가 아니다.
+
+## 17. M4d-3: 열린 세션의 설정 Load/Save
+
+UI-03의 Load/Save를 Rust의 세션 상태와 기존 owner HTTP/WS에 연결했다. 레이어 패널의
+**Load settings**로 사용자가 직접 파일을 고르고, **Save settings**는 선택한 형식의
+브라우저 다운로드를 요청한다. source 옆의 `.layerprops`나 색인 파일을 쓰지 않으며,
+자동 저장·설계 기본값 게시·임의 서버 경로 입출력은 추가하지 않는다.
+
+### 두 형식과 적용 의미
+
+- **Calibre layerprops**: §16의 six-column 텍스트를 현재 상태에 부분 적용한다.
+  모르는 pair와 invalid color/fill/visibility/width는 해당 항목만 무시한다. unlisted
+  레이어와 관련 없는 view 상태는 유지한다. 중복은 마지막 유효 항목, 명시 자식은
+  같은 파일의 헤드보다 우선한다. visibility는 현재 선택을 기반으로 적용한다.
+- 색은 **이번 파일에 명시된** 헤드 recolor가 자식에 전파된다. 반면 fill/width는 GTK처럼
+  세션의 **희소 assignment map**을 보존하므로 이전에 명시한 자식 값이 새 헤드 값보다
+  우선한다. invalid 항목을 기본값으로 채운 완전한 Style로 변환하지 않는다. width≤1은
+  override 제거이고, 자식이면 헤드 선폭을 상속한다. 초기 sidecar의 width>1만 반영하는
+  정책과 live import의 제거 정책은 실제 GTK와 마찬가지로 별개다.
+- GTK의 width-only 파일은 유효 color/fill이 없으면 repattern 전에 return하는 결함이
+  있다. Rust는 width-only도 즉시 반영한다. 이 차이는 의도된 수정이며 단위 테스트로
+  고정한다. GTK 연속 로드 오라클은 각 파일에 유효 fill 하나를 두어 이 결함을 분리한다.
+- Calibre Save는 현재 **유효 색/fill/width/가시성**과 metadata 순서·전체 이름을
+  내보내므로 상속 관계를 평탄화한다. 알려진 이름이 없는 custom bitmap은 명시 오류다.
+  손실을 숨기거나 다른 패턴 이름으로 대체하지 않고 Native JSON 사용을 안내한다.
+- **Native JSON (기본 저장 형식)**: `format:"floe.layers", version:1`과 전체 레이어
+  row·group 표를 저장한다. 색은 유효 값, fill/width는 희소 assignment다. 두 필드는
+  필수이며 `null`은 상속/기본값, bitmap은 `solid`/`clear`/`speckle` 또는16행 u16을 저장한다.
+  같은 pair/group 표의 view에만 전체 복원한다. 누락/중복 pair, 다른 group, 미지원 버전,
+  unknown field·invalid 값은 문서 전체 오류다. custom bitmap과 이후 헤드 변경 의미를
+  모두 보존한다. viewport·mono·DRC·주석·격리 전 visibility 백업은 저장 대상이 아니다.
+
+설정 파일뿐 아니라 웹 스타일 편집도 `style_deltas`로 **변경한 필드만** 보낸다.
+색상 변경이 fill/width를 새 자식 override로 고정하지 않는다. fill/width dialog도
+변하지 않은 값은 보내지 않고 no-op 제출은 요청 자체가 없다. GUI의 헤드 직접 편집은
+해당 필드를 자식 전체에 적용하고, 같은 요청의 명시 자식 필드는 개별적으로 우선한다.
+이 동작은 위의 Calibre partial import와 구별한다. 기존 완전한 `styles` API의 의미는
+유지하고 두 수정 형식의 혼용·null·unknown/중복 pair는 거부한다.
+
+### 트랜잭션·자원·수명
+
+`POST /api/v1/views/{id}/settings/{state_rev}/{native|calibre}`는 읽기 전용 준비다.
+파일 이름/경로 대신 선택한 UTF-8 본문만 보내며 cookie·CSRF·Origin 검사를 통과해야 한다.
+canonical settings POST만 인증 후 최대4MiB를 버퍼링한다. 일반 요청16KiB,
+WebSocket control8KiB는 그대로다. semaphore1이 import body/파싱과 export 작업을
+유계화하고 문서 파싱·모델 적용 준비는 blocking pool에서 수행한다. HTTP 수명은 기존
+5초 한계를 유지하며 timeout 뒤 남는 blocking 작업도 완료 전까지 permit을 보유한다.
+완성된 HTTP 응답 전송까지 semaphore를 보유하는 것은 아니며, 그 잔류량은 기존
+HTTP 동시 연결32개와 응답별4MiB·idle deadline으로 제한한다.
+
+준비 결과는 해당 view의 기존 single-use slot에 Arc-backed 레이어 상태로 보관한다.
+`view.apply`는 token과 base revision만 받아 기존 CAS로 원자 반영한다. 새 준비는 이전
+token을 대체하고, 알려진 token은 충돌 시에도 한 번만 소비된다. view 교체/로그아웃/
+revision 변경 뒤 준비/다운로드 결과는 버린다. token의 서버 바인딩은 **view+base revision**이며,
+브라우저는 추가로 connection epoch가 바뀌면 진행 중 작업을 중단하고 자동 재전송하지 않는다.
+이미 적용을 전송한 뒤 Cancel이면 committed 가능성을 명시하고 현재 snapshot을 권위로 삼는다.
+
+`GET`는 같은 id/revision의 설정 텍스트만 반환한다. Native JSON과 Calibre 모두4MiB/
+65,536행 한계며 상한 초과는 prefix 성공이 아니다. 기존4,096 partial selection 한계도
+유지한다. 입력은 FileReader 비동기 읽기 후 fatal UTF-8 검사, 다운로드는 Blob URL과
+고정된 안전한 파일명이다. 파일 접근은 브라우저에서 사용자가 선택한 File에 한정한다.
+이 API 선택의 근거는 [W3C File API](https://www.w3.org/TR/FileAPI/)이며 현장 Firefox
+호환성을 이 문서나 Node 실행만으로 확인한 것으로 간주하지 않는다.
+
+브라우저는 한 작업만 허용하고, 다운로드 URL은 최대4개/60초 후 또는 종료 시 회수한다.
+복구·epoch/revision 변경·pagehide/stop에서 reader/XHR/edit callback을 정리한다.
+GET 저장도 현재 revision과 맞지 않으면 다운로드하지 않는다. 실제 저장 성공 여부는
+브라우저 소관이므로 UI는 “Download requested”와 다운로드 목록 확인을 안내한다.
+이번 통합 테스트에서 발견한 **no-op edit 후 pick receipt 소실**도 수정했다. margin을
+실제로 재합성한 경우에만 foreground receipt를 폐기하고, pixels가 바뀌지 않았다면
+그 receipt를 유지한다. 최신 입력/정책/ACK 검사 자체를 우회하지 않는다.
+
+### 검증과 남은 범위
+
+`validate_layerprops.py`는 기존72문서/980표준 스타일/4모델 외에 실제 GTK
+`_load_props_dialog`/희소 map 처리와 RustRenderWorker/DeckRenderWorker의
+recolor/repattern을 오라클로 사용한다. 일반4모델+덱6모델에 각16회, 총160회 연속
+로드의 가시성·색/fill/width를 Rust 상태와 비교한다. 기존 덱6 controller의 초기/All
+12 PNG와 archival PNG 게이트도 유지한다. 입력/cache byte·mtime 불변을 검사한다.
+GTK widget·chooser는 mock이며 실제 GTK 창을 조작한 검증은 아니다.
+
+core 단위 테스트는 희소 상속·중복/invalid 항목·width-only·custom bitmap/native 왕복,
+불완전 snapshot·충돌 거부와 색상만/헤드·자식 필드별 편집을 고정한다. owner HTTP native
+테스트는32KiB 준비가 무변경임을 확인하고 CAS/replay/stale·형식/4MiB 거부·custom bitmap
+왕복과 source/cache bytes 불변을 검사한다. runtime PATH를 비워 Python fallback을 막는다.
+ES2017 모듈/실제 app.js 실행은 file/UTF8·상한·취소/timeout·재접속·ACK 뒤 효과·native
+다운로드와 no-op 뒤 pick 사용을 확인한다. Node FileReader/download mock은 실제 브라우저
+chooser·저장 결과의 대체가 아니다.
+
+로컬 Chrome의 합성 valmini에서 첫 frame·margin crop의 착지와 Load/Save 버튼 활성화,
+Native JSON/Calibre 선택 및 “설계 기본값을 쓰지 않음” 안내를 accessibility tree로
+확인했다. 파일 선택/다운로드 버튼은 실제로 누르지 않았고 pixel screenshot 대조도 없다.
+검증용 서버는 SIGINT로 정상 종료했다.
+
+최종 검증(2026-09-14): 마지막 필드별 편집과 owner 테스트를 포함한
+`sh tools/validate_rust.sh`가 종료 코드0·`RUST VALIDATION: ALL OK`로 완료됐다.
+owner6개, jobdeck80·renderer46, KLayout13 PX+2 phase-exact+14 style, GTK160회 연속
+설정 오라클과 기존12 초기/All PNG를 포함한다. app11/core140/web41와 ES2017/전체 JS,
+scoped strict clippy/fmt도 통과했다. Rust1.89 테스트와 macOS release/Linux x86-64 musl
+static-pie 빌드는 통과했으며 기존 tiler/vfs 등의 dependency 경고는 남아 있다.
+worker 구현은 바꾸지 않아 renderd0.12.87은 유지한다. 실제 브라우저 파일 선택/저장과
+Linux 실행·현장 Firefox/ETX 수용은 미확인이다.
+설계 기본값 게시와 나머지 주석/review 쓰기·내보내기·배포 작업은 후속 단계다.

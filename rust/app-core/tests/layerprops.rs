@@ -70,6 +70,29 @@ fn python_codec_and_gtk_initial_visibility_match() {
             Layers::Only(p) => p.clone(),
         };
         assert_eq!(json!(visible), case["visible"]);
+        let mut live = state.clone();
+        assert_eq!(case["live"].as_array().unwrap().len(), 16);
+        for step in case["live"].as_array().unwrap() {
+            live = live
+                .edit(
+                    &model,
+                    Patch {
+                        properties: Some(
+                            layerprops::parse(step["text"].as_str().unwrap()).unwrap(),
+                        ),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let visible = match &live.layers {
+                Layers::All => model.styles.iter().map(|s| s.layer).collect(),
+                Layers::None => vec![],
+                Layers::Only(p) => p.clone(),
+            };
+            assert_eq!(json!(visible), step["visible"]);
+            let styles:Vec<_> = live.styles.iter().map(|s| json!({"layer":s.layer,"color":floe_app_core::styles::color_text(s.color),"fill":Row::from_style(s,"",true).unwrap().fill,"width":s.width})).collect();
+            assert_eq!(json!(styles), step["styles"]);
+        }
         assert_eq!(
             state
                 .edit(

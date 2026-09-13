@@ -146,12 +146,33 @@ impl Harness {
         request.push_str(body);
         stream.write_all(request.as_bytes()).await.unwrap();
         let mut bytes = Vec::new();
-        timeout(Duration::from_secs(7), stream.read_to_end(&mut bytes))
+        let read = timeout(Duration::from_secs(7), stream.read_to_end(&mut bytes))
             .await
-            .unwrap()
             .unwrap();
         let split = bytes.windows(4).position(|s| s == b"\r\n\r\n").unwrap();
         let header = std::str::from_utf8(&bytes[..split]).unwrap();
+        if let Err(e) = read {
+            // An early authenticated/body-limit rejection deliberately does
+            // not drain the upload. macOS can RST after the complete response.
+            assert_eq!(
+                e.kind(),
+                std::io::ErrorKind::ConnectionReset,
+                "{method} {path}: {e}"
+            );
+            let n = header
+                .lines()
+                .find_map(|l| {
+                    l.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|n| n.trim().parse::<usize>().unwrap())
+                })
+                .expect("reset requires a complete length-delimited response");
+            assert_eq!(
+                bytes.len() - split - 4,
+                n,
+                "reset truncated {method} {path}"
+            );
+        }
         (
             header.split_whitespace().nth(1).unwrap().parse().unwrap(),
             header.into(),
@@ -335,6 +356,8 @@ fn open(seq: &str, id: &Value, mode: &str, levels: Value) -> Value {
 mod drc_isolation;
 #[path = "support/exports.rs"]
 mod exports;
+#[path = "support/settings.rs"]
+mod settings;
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "run tools/validate_owner_service.py with private source files"]

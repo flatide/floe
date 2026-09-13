@@ -7,6 +7,7 @@ const P = require('./protocol.js');
 const DRC = require('./drc.js'), drcDisplays = [], drcClicks = [], observers = [];
 const Clip=require('./clip.js'),clipEnabled=process.env.FLOE_TEST_CLIP==='1',forms=[];
 const snapshotEnabled=process.env.FLOE_TEST_SNAPSHOT==='1',captures=[],copies=[],downloads=[];
+const settingsEnabled=process.env.FLOE_TEST_SETTINGS==='1';
 let textSelection=null;
 let clipController,clipOp=null,clipFile=null;
 function clipState(){return {available:true,kind:'exact_clip',jobs_default:4,jobs_min:1,jobs_max:16,
@@ -25,7 +26,7 @@ class Element {
     appendChild(child) { this.children.push(child); if (child.tag==='option'&&!this.value) {this.value=child.value;} return child; }
     removeChild(child) {this.children.splice(this.children.indexOf(child),1);return child;}
     submit() {assert.equal(this.tag,'form');forms.push({method:this.method,action:this.action,body:this.children.map(c=>[c.name,c.value])});}
-    click() {assert.equal(this.tag,'a');downloads.push({href:this.href,name:this.download});}
+    click() {if(this.id==='settings-file'){return;}assert.equal(this.tag,'a');downloads.push({href:this.href,name:this.download});}
     toBlob(fn,type) {assert.equal(this.tag,'canvas');assert.equal(type,'image/png');captures.push({width:this.width,height:this.height,draws:draws.slice()});setImmediate(()=>fn(new Blob(['mock PNG'],{type})));}
     setAttribute(k,v) {this[k]=v;}
     querySelectorAll(tag) {return this.children.flatMap(c=>[...(c.tag===tag?[c]:[]), ...c.querySelectorAll(tag)]);}
@@ -60,11 +61,14 @@ const document={hidden:false,activeElement:null,title:'',body:new Element('','bo
 class XHR {
     open(method,path){this.method=method;this.path=path;}
     setRequestHeader() {}
+    getResponseHeader() {return this.path.includes('/settings/')&&this.method==='GET'?'text/plain; charset=utf-8':'application/json';}
     send(text){
-        const body=text===null?null:JSON.parse(text); requests.push({method:this.method,path:this.path,body});
+        const settingsPath=this.path.includes('/settings/');
+        const body=text===null?null:settingsPath?text:JSON.parse(text); requests.push({method:this.method,path:this.path,body});
         let value, status=200;
         if (this.path==='/api/v1/session/exchange') {value={csrf:'c'.repeat(64),bundle,protocol:1};}
-        else if(this.path==='/api/v1/capabilities') {value={protocol:1,bundle,exports:clipEnabled,snapshot_png:snapshotEnabled};}
+        else if(this.path==='/api/v1/capabilities') {value={protocol:1,bundle,exports:clipEnabled,snapshot_png:snapshotEnabled,layer_settings:settingsEnabled};}
+        else if(settingsPath) {value=this.method==='POST'?{view_id:viewId,state_rev:'1',prepared_token:'d'.repeat(64),rows:0,malformed:0}:'{"format":"floe.layers"}';}
         else if(this.path==='/api/v1/exports') {
             if(this.method==='POST') {clipFile={id:body.seq,bytes:'64',expires_in_ms:'600000',name:'floe-clip-'+body.seq+'.oas'};
                 clipOp={seq:body.seq,kind:'exact_clip',phase:'ready',view_id:body.view_id,artifact:{...clipFile,records:'2',bbox_dbu:['-11','0','89','80'],source_stale:false,available:true}};value=clipOp;
@@ -79,7 +83,7 @@ class XHR {
         else if(this.path==='/api/v1/view') {status=open?200:404;value=open?{title:'synthetic',source_id:'src',mode:'level',levels:null,view:{...snapshot,connection_epoch:''}}:null;}
         else if(this.path.endsWith('/layers/0')) {value={state_rev:snapshot.state_rev,render_key:snapshot.render_key,total:1,start:0,next:null,rows:[layerRow]};}
         else {throw new Error('Unexpected HTTP '+this.path);}
-        this.status=status;this.responseText=JSON.stringify(value);
+        this.status=status;this.responseText=settingsPath&&this.method==='GET'?value:JSON.stringify(value);
         setImmediate(()=>this.onload());
     }
 }
@@ -101,6 +105,8 @@ const window={FloeProtocol:P,FloeQuery:require('./query.js'),FloeInspect:require
     addEventListener:(k,f)=>listen(listeners,k,f),setTimeout,requestAnimationFrame:fn=>setTimeout(fn,0),cancelAnimationFrame:clearTimeout};
 const storage=new Map();
 window.isSecureContext=true;window.ClipboardItem=class {constructor(data){this.data=data;}};
+window.FloeSettings=require('./settings.js');
+window.FileReader=class {readAsArrayBuffer(file){this.result=new TextEncoder().encode(file.text).buffer;setImmediate(()=>this.onload());}abort(){if(this.onabort){this.onabort();}}};
 window.navigator={clipboard:{write(items){copies.push(items);return Promise.all(items.map(i=>i.data['image/png']));}}};
 window.getSelection=()=>textSelection;
 let captureUrl=0;const captureUrls=new Set();
@@ -141,6 +147,14 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     assert.equal(ws.sent.at(-1).disposition,'displayed');
     assert.equal(node('canvas').style.width,'100px');
     assert.equal(node('snapshot-panel').hidden,!snapshotEnabled);
+    assert.equal(node('settings-panel').hidden,!settingsEnabled);
+    if(settingsEnabled){
+        assert(!node('settings-load').disabled);node('settings-load').onclick();node('settings-file').files=[{size:0,text:''}];node('settings-file').onchange();
+        await wait(()=>ws.sent.some(m=>m.type==='view.apply'));const command=ws.sent.find(m=>m.type==='view.apply');assert.equal(command.token,'d'.repeat(64));assert.equal(command.body,undefined);
+        assert.equal(requests.filter(r=>r.path.includes('/settings/')&&r.method==='POST').length,1);
+        ws.receive({type:'accepted',seq:command.seq,state_rev:'1',render_rev:'1'});ws.receive(snapshot);await wait(()=>node('settings-status').textContent.startsWith('Settings applied'));
+        node('settings-format').value='native';node('settings-save').onclick();await wait(()=>downloads.length===1);assert.equal(downloads[0].name,'floe-layers.json');assert.equal(draws.length,1,'settings download rerendered the view');
+    }
     if(clipEnabled) {
         assert(!node('clip-open').disabled,'display ACK did not enable clip');node('clip-open').onclick();
         node('clip-form').onsubmit({preventDefault(){}});const prepared=ws.sent.at(-1);
@@ -313,7 +327,7 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     node('style-pattern').value=new Array(16).fill('a55a').join(' ');node('style-width').value='4';
     node('style-editor').onsubmit(submitEvent);
     let sent=second.sent.at(-1);assert.equal(sent.type,'view.set');
-    assert.deepEqual(sent.body.styles,[{pair:[7,0],color:'#ffffff',fill:{kind:'pattern',rows:new Array(16).fill(0xa55a)},width:4}]);
+    assert.deepEqual(sent.body.style_deltas,[{pair:[7,0],fill:{kind:'pattern',rows:new Array(16).fill(0xa55a)},width:4}]);
     async function applied(policy=true){
         const s=second.sent.filter(m=>m.type==='view.set').at(-1);
         snapshot.state_rev=P.next(snapshot.state_rev);snapshot.render_rev=P.next(snapshot.render_rev);
@@ -322,6 +336,15 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
         await new Promise(setImmediate);
     }
     await applied();
+    await wait(()=>node('layers').children.length===1);
+    const colorInput=node('layers').children[0].children[1];colorInput.value='#123456';colorInput.onchange();
+    assert.deepEqual(second.sent.at(-1).body,{style_deltas:[{pair:[7,0],color:'#123456'}]});await applied();
+    await wait(()=>node('layers').children.length===1);
+    node('layers').children[0].children.at(-1).onclick();
+    const noChange=second.sent.length;node('style-editor').onsubmit(submitEvent);
+    assert.equal(second.sent.length,noChange,'unchanged style form materialized inherited settings');
+    node('layers').children[0].children.at(-1).onclick();node('style-width').value='7';node('style-editor').onsubmit(submitEvent);
+    assert.deepEqual(second.sent.at(-1).body,{style_deltas:[{pair:[7,0],width:7}]});await applied();
     node('font-px').value='18';node('font-px').onchange();assert.equal(second.sent.at(-1).body.font_px,18);await applied();
     node('viewport').keydown({key:'f',preventDefault(){}});assert.deepEqual(second.sent.at(-1).body,{frames:true});await applied();
     node('viewport').keydown({key:'a',ctrlKey:true,preventDefault(){}});assert.equal(second.sent.at(-1).body.navigation.kind,'fit');await applied(false);
