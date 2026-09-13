@@ -38,6 +38,7 @@ async fn catalog(State(gate): State<Gate>, headers: HeaderMap) -> Response {
 struct Read {
     view_id: String,
     revision: String,
+    state_rev: Option<String>,
     body: Request,
 }
 async fn read(
@@ -56,15 +57,46 @@ async fn read(
     let Some(drc) = gate.drc.as_ref().filter(|d| d.id == id) else {
         return failure("drc_unavailable");
     };
+    let focused = matches!(&body.body, Request::Focus { .. } | Request::InView { .. });
+    if body
+        .state_rev
+        .as_ref()
+        .is_some_and(|s| crate::view::counter(s).is_err())
+        || focused && body.state_rev.is_none()
+    {
+        return failure("invalid_drc_request");
+    }
     let matches = || {
         gate.active_view().is_some_and(|v| {
-            v.id == body.view_id && v.source_id == drc.source_id && !v.controller.is_finished()
+            v.id == body.view_id
+                && v.source_id == drc.source_id
+                && !v.controller.is_finished()
+                && body
+                    .state_rev
+                    .as_ref()
+                    .is_none_or(|rev| v.controller.snapshot().state_rev.to_string() == *rev)
         }) && body.revision == drc.revision
     };
     if !matches() {
         return failure("drc_context_changed");
     }
-    let mut ticket = match drc.submit(body.body) {
+    let context = if focused {
+        let Some(v) = gate.active_view() else {
+            return failure("drc_context_changed");
+        };
+        let s = v.controller.snapshot();
+        if body.state_rev.as_deref() != Some(s.state_rev.to_string().as_str()) {
+            return failure("drc_context_changed");
+        }
+        Some(super::dto::FocusContext {
+            bbox_dbu: s.state.viewport.bbox,
+            dbu: v.controller.model.dbu,
+            pixels: [s.state.viewport.width, s.state.viewport.height],
+        })
+    } else {
+        None
+    };
+    let mut ticket = match drc.submit_context(body.body, context) {
         Ok(t) => t,
         Err(e) => return failure(e),
     };

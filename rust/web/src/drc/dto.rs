@@ -32,6 +32,16 @@ pub enum Request {
         start: String,
         limit: usize,
     },
+    Focus {
+        check: String,
+        error: String,
+        fit: bool,
+    },
+    InView {
+        waived: Option<bool>,
+        cursor: CursorDto,
+        limit: usize,
+    },
     Query {
         bbox_um: [String; 4],
         checks: Option<Vec<String>>,
@@ -61,6 +71,18 @@ pub(super) enum Command {
         start: usize,
         limit: usize,
     },
+    Focus {
+        check: usize,
+        error: u64,
+        fit: bool,
+        context: Option<FocusContext>,
+    },
+    InView {
+        waived: Option<bool>,
+        cursor: Cursor,
+        limit: usize,
+        context: Option<FocusContext>,
+    },
     Query {
         bbox_um: [f64; 4],
         checks: Option<BTreeSet<usize>>,
@@ -68,6 +90,12 @@ pub(super) enum Command {
         cursor: Cursor,
         limit: usize,
     },
+}
+#[derive(Clone, Copy)]
+pub(super) struct FocusContext {
+    pub bbox_dbu: [f64; 4],
+    pub dbu: f64,
+    pub pixels: [u32; 2],
 }
 fn number(s: &str) -> Result<u64, Failure> {
     if s.len() > 20 {
@@ -108,6 +136,25 @@ impl Request {
             }
             Self::Rule { check } => Command::Rule {
                 check: index(&check)?,
+            },
+            Self::Focus { check, error, fit } => Command::Focus {
+                check: index(&check)?,
+                error: number(&error)?,
+                fit,
+                context: None,
+            },
+            Self::InView {
+                waived,
+                cursor,
+                limit,
+            } => Command::InView {
+                waived,
+                cursor: Cursor {
+                    check: index(&cursor.check)?,
+                    error: number(&cursor.error)?,
+                },
+                limit: cap(limit, 64)?,
+                context: None,
             },
             Self::Errors {
                 check,

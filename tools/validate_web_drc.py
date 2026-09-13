@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Authenticated DRC read gate: actual Rust CLI, private synthetic inputs only."""
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -124,6 +125,28 @@ def main(fixture):
             read(dict(rules, path=str(db)), 400)
             read(dict(rules, start="00"), 400)
             read(dict(rules, limit=65), 400)
+            view_state = client.call("GET", "/api/v1/view")["view"]
+            focused = dict(context, state_rev=view_state["state_rev"])
+            ci = next(i for i, c in enumerate(expected) if c["errors"])
+            first_error = expected[ci]["errors"][0]
+            focus_request = dict(kind="focus", check=str(ci), error=first_error["local"], fit=True)
+            read(focus_request, 400)
+            read(focus_request, 409, dict(focused, state_rev="99999999"))
+            for fit in (True, False):
+                response = read(dict(focus_request, fit=fit), ctx=focused)
+                b = first_error["bbox"]
+                width = max((b[2]-b[0])/.3, (b[3]-b[1])/.3 * 257/191) if fit else (
+                    float(view_state["bbox_dbu"][2])-float(view_state["bbox_dbu"][0]))*float(view_state["dbu_um"])
+                width = width if width > 0 else .1
+                assert math.isclose(float(response["navigation"]["width_um"]), width, rel_tol=1e-12)
+                assert list(map(float, response["navigation"]["center_um"])) == [(b[0]+b[2])*.5, (b[1]+b[3])*.5]
+            in_view = read(dict(kind="in_view", cursor=dict(check="0", error="0"), waived=None, limit=64), ctx=focused)
+            box = list(map(float, in_view["bbox_um"]))
+            assert box == [float(v)*float(view_state["dbu_um"]) for v in view_state["bbox_dbu"]]
+            wanted = [e["glob"] for c in expected for e in c["errors"]
+                      if e["bbox"][0] <= box[2] and e["bbox"][2] >= box[0]
+                      and e["bbox"][1] <= box[3] and e["bbox"][3] >= box[1]]
+            assert [r["global"] for r in in_view["rows"]] == wanted[:64]
             found = []
             while True:
                 page = read(rules)
@@ -209,7 +232,7 @@ def main(fixture):
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     proc.communicate(timeout=5)
-    print("WEB DRC: ALL OK (auth, scoped IDs, pages, coordinates, waive, queries, stale view, read-only, cancellation/reap)")
+    print("WEB DRC: ALL OK (auth, scoped IDs, pages, coordinates, waive, queries, focus/in-view, stale view, read-only, cancellation/reap)")
 
 
 if __name__ == "__main__":

@@ -1,10 +1,11 @@
-# floe-web — M1b local browser viewer
+# floe-web — local browser viewer and read-only DRC
 
 Internal Rust library used by `floe2-web view`. An embedded HTML/Canvas client
 shows native PNG/raw frames and controls registered layouts/jobdecks. The existing
 Python/GTK launcher is unchanged. File upload, remote binding and share grants do
 not exist yet. Layout margin/crop is opt-in through ControllerOptions (on in
-the `view` CLI); drag and further interaction parity are still pending.
+the `view` CLI); release-only drag, styles/font and basic keyboard controls are
+implemented. Full GTK interaction parity and field Firefox/ETX gates remain open.
 
 `Gateway::new(listener.local_addr())` returns a loopback-only gate and one-use
 bootstrap secret. `transport::serve(listener, gate, shutdown)` runs bounded
@@ -22,6 +23,14 @@ and native waits run on the service thread. HTTP source IDs are opaque, index
 options are allowlisted, open never indexes implicitly, and monotonically
 numbered operations remain at-most-once even after their history is evicted.
 Catalog/level/layer pages, progress, close/cancel and revocation are authenticated.
+
+`floe2-web view SOURCE --drc PACK.ice [--drc-waives EXISTING_FILE]` adds a
+source-bound read-only DRC panel: rule search, bounded error/coordinate pages,
+waive filtering, focus and a display-aligned marker overlay. A dedicated actor
+reserves one CPU/256 MiB admission slot and keeps file reads off the HTTP reactor.
+View/revision checks surround each read; focus/in-view additionally require the
+current state revision. Files are not modified. Selection persistence, shared
+review state, review writes and further parity are not included in this stage.
 
 ```sh
 # Run in rust/ to use the vendored source configuration
@@ -43,3 +52,4 @@ duplicate operations, cache leases, deck level/chip metadata and child cleanup.
 
 API, limits, dependency/license/security audit, and incomplete milestones:
 [WEBUI_M1B.ko.md](../../docs/WEBUI_M1B.ko.md).
+DRC API/UI, bounds and remaining work: [WEBUI_M2.ko.md](../../docs/WEBUI_M2.ko.md).

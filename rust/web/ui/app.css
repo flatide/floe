@@ -67,6 +67,28 @@ details > summary { cursor: pointer; font-size: 12px; color: #b4c3d8; }
 .goto-fields input { width: 87px; font-size: 12px; font-variant-numeric: tabular-nums; }
 .viewport { position: relative; flex: 1; min-height: 0; min-width: 0; background: #000; overflow: hidden; outline-offset: -2px; }
 #canvas, #margin-canvas { position: absolute; top: 0; left: 0; display: block; }
+#drc-canvas { position: absolute; top: 0; left: 0; pointer-events: none; }
+.drc-panel { width: 320px; flex-shrink: 0; min-height: 0; display: flex; flex-direction: column; padding: 16px 13px; border-left: 1px solid #343d4c; background: #1d232d; overflow-y: auto; }
+.drc-heading h2 { display: flex; justify-content: space-between; align-items: center; }
+.drc-heading h2 span { font-size: 9px; color: #8194af; border: 1px solid #46556c; padding: 2px 4px; border-radius: 3px; }
+#drc-title { display: block; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.drc-search { display: flex; gap: 5px; margin: 12px 0 8px; }
+.drc-search input { flex: 1; min-width: 0; width: 140px; font-size: 12px; }
+.drc-search button, .drc-actions button { font-size: 12px; }
+.drc-rules { max-height: 180px; min-height: 65px; overflow-y: auto; font-size: 12px; color: #9dacc0; }
+.drc-rule, .drc-error { display: block; width: 100%; border-radius: 0; border: 0; border-bottom: 1px solid #30394a; text-align: left; font-size: 12px; background: transparent; padding: 7px 8px; overflow: hidden; text-overflow: ellipsis; }
+.drc-rule.selected, .drc-error.selected { background: #2c435f; box-shadow: inset 3px 0 #7fb3f6; }
+.drc-error { color: #efb0b0; }
+.drc-error.waived { color: #a1d7ba; }
+.drc-description { padding: 10px 0; border-bottom: 1px solid #333c4a; }
+.drc-description summary { overflow-wrap: anywhere; }
+.drc-description pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.55 monospace; max-height: 140px; overflow-y: auto; color: #acbace; }
+.drc-actions { display: flex; align-items: center; gap: 6px; margin-top: 10px; }
+.drc-actions .check { margin: 0 0 0 auto; }
+.drc-errors { flex: 1; min-height: 130px; overflow-y: auto; margin-top: 8px; font-size: 12px; }
+.drc-selection { padding-top: 10px; margin-top: 10px; border-top: 1px solid #333c4a; }
+#drc-message { font-size: 11px; }
+@media (max-width: 1100px) { .drc-panel { width: 265px; } .drc-actions { flex-wrap: wrap; } .drc-actions .check { margin-left: 0; } }
 #margin-info { color: #91a98f; font-size: 11px; }
 .empty { position: absolute; left: 0; right: 0; top: 0; bottom: 0; display: flex; align-items: center; justify-content: center; flex-direction: column; pointer-events: none; color: #8d9bb1; }
 .empty-mark { font-size: 38px; color: #43566e; }
@@ -79,7 +101,8 @@ details > summary { cursor: pointer; font-size: 12px; color: #b4c3d8; }
 #status { overflow: hidden; text-overflow: ellipsis; }
 #viewport-info { color: #9badc5; font-variant-numeric: tabular-nums; }
 .perf { padding: 5px 14px; background: #181e28; color: #8194af; font-size: 11px; line-height: 1.5; min-height: 26px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.notice { padding: 9px 14px; background: #493423; color: #f6d5a8; border-bottom: 1px solid #88613c; font-size: 13px; line-height: 1.4; }
+/* An error must not resize the viewport behind an already cropped frame. */
+.notice { position: absolute; top: 0; left: 0; right: 0; z-index: 3; max-height: 40%; overflow: auto; padding: 9px 14px; background: #493423; color: #f6d5a8; border-bottom: 1px solid #88613c; font-size: 13px; line-height: 1.4; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
 @media (max-width: 940px) { .sidebar { width: 244px; } .topbar { gap: 12px; } .brand small { display: none; } .goto-fields input { width: 66px; } .toolbar { gap: 6px; padding: 6px 9px; } .goto-fields { gap: 5px; } }
 @media (max-width: 720px) { .sidebar { width: 210px; } .goto-fields { margin-left: 0; } .topbar { padding: 0 10px; } .connection { display: none; } .form-row > select { width: 115px; } .check-row { flex-wrap: wrap; gap: 7px; } #viewport-info { display: none; } }

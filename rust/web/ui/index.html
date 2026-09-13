@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="/assets/@@BUNDLE@@/app.css">
   <script defer src="/assets/@@BUNDLE@@/protocol.js"></script>
   <script defer src="/assets/@@BUNDLE@@/gestures.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/drc.js"></script>
   <script defer src="/assets/@@BUNDLE@@/app.js"></script>
 </head>
 <body>
@@ -15,6 +16,7 @@
     <div class="brand">floe<span>2</span><small>WEB PREVIEW</small></div>
     <div id="document-title" class="document-title">Layout workspace</div>
     <span id="connection" class="connection">Connecting</span>
+    <button id="drc-toggle" class="quiet" aria-expanded="true" aria-controls="drc-panel" hidden>DRC</button>
     <button id="logout" class="quiet" title="End this session and stop its workers">End session</button>
   </header>
   <div class="workspace">
@@ -65,10 +67,11 @@
         <div class="zoom-buttons"><button id="zoom-out" type="button" disabled title="Zoom out (−)">−</button><button id="zoom-in" type="button" disabled title="Zoom in (+)">+</button></div>
         <div class="goto-fields"><label>X <input id="goto-x" value="0" inputmode="decimal" aria-label="Center X in micrometres"></label><label>Y <input id="goto-y" value="0" inputmode="decimal" aria-label="Center Y in micrometres"></label><label>View <input id="goto-width" value="700" inputmode="decimal" aria-label="View width in micrometres"></label><span>µm</span><button id="goto" disabled>Go</button></div>
       </form>
-      <div id="notice" class="notice" role="alert" hidden></div>
       <div id="viewport" class="viewport" tabindex="0" aria-label="Layout canvas. Drag or arrow keys pan; Shift plus arrow pans ten percent; plus and minus zoom; Ctrl+A fits; F toggles frames.">
+        <div id="notice" class="notice" role="alert" hidden></div>
         <canvas id="margin-canvas" width="1" height="1" aria-hidden="true" hidden></canvas>
         <canvas id="canvas" width="1" height="1" aria-label="Rendered layout"></canvas>
+        <canvas id="drc-canvas" width="1" height="1" aria-label="DRC markers and selected violation" hidden></canvas>
         <div id="empty" class="empty"><div class="empty-mark">＋</div><h1>Layout workspace</h1><p id="empty-message">Connecting to the local Rust renderer…</p></div>
         <div id="rendering" class="rendering" hidden>Rendering</div>
         <div class="viewport-hint">Drag / arrows · pan <span>Shift · 10%</span> <span>+ / − zoom</span> <span>Ctrl+A · fit</span></div>
@@ -76,6 +79,20 @@
       <footer class="statusbar"><span id="status">Waiting for session</span><span id="margin-info"></span><span id="viewport-info">Native pixels · Canvas 2D</span></footer>
       <div id="perf" class="perf">Rust renderer · no automatic indexing · refinement off</div>
     </main>
+    <aside id="drc-panel" class="drc-panel" aria-label="DRC review" hidden>
+      <div class="drc-heading"><h2>DRC review <span>READ ONLY</span></h2><strong id="drc-title">DRC results</strong><p id="drc-summary" class="note"></p></div>
+      <form id="drc-search-form" class="drc-search"><label for="drc-search" class="sr-only">Search DRC rules</label><input id="drc-search" placeholder="Search rule names" maxlength="256"><button id="drc-search-submit">Search</button></form>
+      <div id="drc-rules" class="drc-rules" aria-label="DRC rules">Waiting for DRC metadata…</div>
+      <div class="pagination"><button id="drc-rule-prev" aria-label="Previous rule page" disabled>←</button><span>Rule pages</span><button id="drc-rule-next" aria-label="Next rule page" disabled>→</button></div>
+      <details class="drc-description"><summary id="drc-rule-title">Choose a rule</summary><pre id="drc-description"></pre></details>
+      <div class="form-row"><label for="drc-waived">Errors</label><select id="drc-waived"><option value="all">All statuses</option><option value="unwaived">Not waived</option><option value="waived">Waived</option></select></div>
+      <div class="drc-actions"><button id="drc-in-view" title="Query all rules in the current viewport">In view</button><button id="drc-first" title="First error page; back history retains 128 pages">First page</button><label class="check"><input id="drc-markers" type="checkbox" checked> Markers</label></div>
+      <p id="drc-result-info" class="note">No rule selected.</p>
+      <div id="drc-errors" class="drc-errors" aria-label="DRC errors"></div>
+      <div class="pagination"><button id="drc-error-prev" aria-label="Previous error page" disabled>←</button><span>n / p · within page</span><button id="drc-error-next" aria-label="Next error page" disabled>→</button></div>
+      <div class="drc-selection"><p id="drc-selected" class="note">Select an error to inspect and go to it.</p><div class="button-row"><button id="drc-frame" disabled>Frame error</button><button id="drc-clear" disabled>Clear</button></div></div>
+      <p id="drc-message" class="note" role="status">Read-only review</p>
+    </aside>
   </div>
   <noscript>This workspace requires JavaScript. All assets are served locally.</noscript>
 </body>

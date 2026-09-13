@@ -10,6 +10,7 @@
     marginCanvas.hidden = true;
     let foregroundFrame = null, marginFrame = null, inflightBody = null, foregroundPerf = '';
     let gesture = null, dragShift = null, lastPlacement = null;
+    let drcPanel = null, displayProjection = null, frozenProjection = null;
     const sessionKey = 'floe-session:' + location.origin;
     let auth = null, stopped = false, socket = null, epoch = '', state = null;
     let seq = '0', queue = [], inflight = null, accepted = null, lastSend = 0;
@@ -30,18 +31,29 @@
         cancelled: 'Operation cancelled.',
         operation_sequence: 'Another operation changed the session. Refresh its state and submit again.',
         io_error: 'A local file could not be read or written.',
-        closed: 'This session is closed. Start a new local session.'
+        closed: 'This session is closed. Start a new local session.',
+        drc_changed_or_corrupt: 'The DRC pack or review sidecar changed or is corrupt. Restart with a valid pack.',
+        drc_read_error: 'The registered DRC file cannot be read.',
+        drc_read_limit: 'This DRC item exceeds the read/response limit; no partial geometry was accepted.',
+        drc_context_changed: 'The view changed while reading DRC. Select the error again.',
+        drc_busy: 'The DRC read queue is busy. Retry this page.',
+        drc_closed: 'The DRC reader is closed.',
+        invalid_drc_request: 'Invalid DRC index, cursor, coordinate or page limit.'
     };
     function notice(text) { el('notice').textContent = text || ''; el('notice').hidden = !text; }
     function message(error) { return errors[error] || String(error || 'Request failed'); }
     function report(error) { notice(message(error.message || error)); }
-    function http(method, path, body, missing) {
+    function http(method, path, body, missing, token) {
         return new Promise(function (resolve, reject) {
             const xhr = new XMLHttpRequest();
+            if (token && token.cancelled) { reject(new Error('Request cancelled')); return; }
+            if (token) { token.abort = function () { xhr.abort(); }; }
+            function done() { if (token) { token.abort = null; } }
             xhr.open(method, path); xhr.timeout = 8000;
             if (auth) { xhr.setRequestHeader('X-Floe-CSRF', auth.csrf); }
             if (body !== undefined) { xhr.setRequestHeader('Content-Type', 'application/json'); }
             xhr.onload = function () {
+                done();
                 if (missing && xhr.status === 404) { resolve(null); return; }
                 let value = null;
                 try {
@@ -53,8 +65,9 @@
                     reject(new Error(message(value && value.error || ('HTTP ' + xhr.status))));
                 } else { resolve(value); }
             };
-            xhr.onerror = function () { reject(new Error('Local service is unavailable')); };
-            xhr.ontimeout = function () { reject(new Error('Request timed out; its outcome may be pending. Check operation status before retrying.')); };
+            xhr.onerror = function () { done(); reject(new Error('Local service is unavailable')); };
+            xhr.onabort = function () { done(); reject(new Error('Request cancelled')); };
+            xhr.ontimeout = function () { done(); reject(new Error('Request timed out; its outcome may be pending. Check operation status before retrying.')); };
             xhr.send(body === undefined ? null : JSON.stringify(body));
         });
     }
@@ -101,6 +114,11 @@
         if (fp) { positionBuffer(canvas, size, fp); } else { positionCanvas(size); }
         lastPlacement = {pixels: size.pixels, margin: mp, full: !!full,
             foreground: fp || [-Math.round((size.pixels[0] - canvas.width) / 2), -Math.round((size.pixels[1] - canvas.height) / 2)]};
+        if (full) { displayProjection = window.FloeDRC.projection(marginFrame, mp, state.dbu_um); }
+        else if (foregroundFrame) { displayProjection = window.FloeDRC.projection(foregroundFrame, lastPlacement.foreground, state.dbu_um); }
+        else { displayProjection = frozenProjection && window.FloeDRC.shifted(frozenProjection.projection,
+            [-Math.round((size.pixels[0] - frozenProjection.pixels[0]) / 2), -Math.round((size.pixels[1] - frozenProjection.pixels[1]) / 2)]); }
+        if (drcPanel) { drcPanel.paint(displayProjection, size); }
         if (full) {
             const pending = !!inflightBody || queue.length > 0 || !!dragShift;
             el('status').textContent = (pending ? 'Pan preview' : 'Live') + ' · margin crop · gen ' + marginFrame.generation;
@@ -116,6 +134,7 @@
         // strip. A non-period mouse release must not recenter the previous image.
         const p = lastPlacement;
         if (displayed && p) {
+            frozenProjection = {projection: displayProjection, pixels: p.pixels.slice()};
             const [w, h] = p.pixels, mp = p.margin, fp = p.foreground;
             const copy = !!mp || fp[0] !== 0 || fp[1] !== 0 || canvas.width !== w || canvas.height !== h;
             if (copy) {
@@ -139,6 +158,7 @@
     function clearBuffers() {
         foregroundFrame = null; marginFrame = null; inflightBody = null; foregroundPerf = '';
         lastPlacement = null; dragShift = null;
+        displayProjection = null; frozenProjection = null;
         canvas.hidden = false; canvas.width = 1; canvas.height = 1;
         marginCanvas.hidden = true; marginCanvas.width = 1; marginCanvas.height = 1;
     }
@@ -151,6 +171,7 @@
         el('open').disabled = submitting || ownerBusy || !!live();
         el('close').disabled = !currentId || submitting || ownerBusy;
         el('index').disabled = submitting || ownerBusy;
+        if (drcPanel) { drcPanel.contextChanged(); }
     }
     function send(value) {
         if (!socket || socket.readyState !== WebSocket.OPEN) { throw new Error('View is disconnected'); }
@@ -228,7 +249,7 @@
                     const ctx = h.purpose === 'margin' ? marginContext : context;
                     if (target.width !== h.width || target.height !== h.height) { target.width = h.width; target.height = h.height; }
                     ctx.imageSmoothingEnabled = false; draw(ctx);
-                    if (h.purpose === 'margin') { marginFrame = h; } else { foregroundFrame = h; }
+                    if (h.purpose === 'margin') { marginFrame = h; } else { foregroundFrame = h; frozenProjection = null; }
                     if (!displayed && document.activeElement === document.body) { viewport.focus(); }
                     displayed = true; el('empty').hidden = true; disposition = 'displayed';
                     target.dataset.frameId = h.frame_id; target.dataset.renderRev = h.render_rev;
@@ -447,6 +468,7 @@
         catalog = (await http('GET', '/api/v1/catalog')).sources;
         el('source').textContent = '';
         catalog.forEach(function (s) { const option = document.createElement('option'); option.value = s.source_id; option.textContent = s.title; el('source').appendChild(option); });
+        if (caps.drc) { await drcPanel.init(); }
         sourceSelection();
         const operations = await operationState();
         await restore();
@@ -468,6 +490,7 @@
         catch (e) { report(e); }
     };
     el('logout').onclick = async function () {
+        if (drcPanel) { drcPanel.stop(); }
         stopped = true; disconnect(); if (operationTimer) { clearTimeout(operationTimer); }
         try { await http('DELETE', '/api/v1/session'); } catch (e) { report(e); }
         try { sessionStorage.removeItem(sessionKey); } catch (_) { /* storage may be disabled */ }
@@ -525,6 +548,7 @@
             else if (key === '.') { event.preventDefault(); el('goto-x').focus(); el('goto-x').select(); }
             return;
         }
+        if (drcPanel && drcPanel.key(key)) { event.preventDefault(); return; }
         const amount = event.shiftKey ? 0.1 : 0.5;
         const directions = {ArrowLeft: [-amount, 0], ArrowRight: [amount, 0], ArrowUp: [0, amount], ArrowDown: [0, -amount]};
         if (directions[key]) { event.preventDefault(); nav({kind: 'pan', x: directions[key][0], y: directions[key][1], snap: true}); }
@@ -558,18 +582,33 @@
         catch (e) { report(e); }
     };
     el('cancel-job').onclick = function () { const id = el('cancel-job').dataset.seq; if (id) { http('POST', '/api/v1/operations/' + id + '/cancel', {}).then(operationState).catch(report); } };
-    window.addEventListener('resize', function () {
+    function resized() {
         clearTimeout(resizeTimer); resizeTimer = setTimeout(function () {
-            if (!live()) { return; }
-            try { const size = dims(); freezeMargin(); positionCanvas(size); if (size.pixels[0] !== state.pixels[0] || size.pixels[1] !== state.pixels[1]) { edit({pixels: size.pixels}); } }
+            if (!live() || stopped || document.hidden) { return; }
+            try {
+                const size = dims();
+                const target = (inflightBody ? [inflightBody] : []).concat(queue).filter(function (b) { return b.pixels; });
+                const pendingSize = target.length ? target[target.length - 1].pixels : state.pixels;
+                if (size.pixels[0] !== pendingSize[0] || size.pixels[1] !== pendingSize[1]) { edit({pixels: size.pixels}); }
+                present();
+            }
             catch (e) { report(e); }
         }, 120);
-    });
+    }
+    window.addEventListener('resize', resized);
+    // Optional on older Firefox. Explicit panel/window resize paths remain;
+    // notices are overlays and never change the viewport's layout size.
+    const sizeObserver = typeof window.ResizeObserver === 'function' ? new window.ResizeObserver(resized) : null;
+    if (sizeObserver) { sizeObserver.observe(viewport); }
+    drcPanel = window.FloeDRC.bind({document: document, window: window, protocol: P, http: http,
+        context: function () { return !stopped && state && currentId ? {id: currentId, source: currentSource, state: state,
+            connected: !!epoch && !!socket && socket.readyState === WebSocket.OPEN, pending: !!inflight || queue.length > 0 || !!dragShift} : null; },
+        navigate: nav, resize: resized});
     document.addEventListener('visibilitychange', function () { if (document.hidden) { finishDecode(); } else if (live() && !stopped) { connect(); } });
     setInterval(function () { if (socket && socket.readyState === WebSocket.OPEN && epoch) { try { send({type: 'ping'}); } catch (e) { report(e); } } }, 10000);
-    window.addEventListener('pagehide', function () { disconnect(); clearTimeout(operationTimer); });
+    window.addEventListener('pagehide', function () { disconnect(); clearTimeout(operationTimer); clearTimeout(resizeTimer); if (sizeObserver) { sizeObserver.disconnect(); } drcPanel.stop(); });
     window.addEventListener('pageshow', function (event) {
-        if (event.persisted && auth && !stopped) { operationState().then(restore).catch(report); }
+        if (event.persisted && auth && !stopped) { if (sizeObserver) { sizeObserver.observe(viewport); } drcPanel.resume().then(operationState).then(restore).then(resized).catch(report); }
     });
     start().catch(function (e) { connection('Not connected', false); report(e); el('empty-message').textContent = e.message; });
 }());

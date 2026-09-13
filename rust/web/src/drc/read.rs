@@ -163,6 +163,46 @@ pub(super) fn execute(p: &mut Pack, request: Command, stop: &AtomicUsize) -> Res
                 "points_dbu":points,"start":start.to_string(),"total":v.points.len().to_string(),
                 "next":if end<v.points.len(){Some(end.to_string())}else{None}})
         }
+        Command::InView {
+            waived,
+            cursor,
+            limit,
+            context,
+        } => {
+            let c = context.ok_or_else(|| Error::input("query requires an authoritative view"))?;
+            let b = c.bbox_dbu.map(|v| v * c.dbu);
+            let page = p.query(b, None, waived, cursor, limit, stop)?;
+            let rows = page
+                .hits
+                .iter()
+                .map(|h| hit(p, h))
+                .collect::<Result<Vec<_>>>()?;
+            json!({"rows":rows,"next":next(page.next),"scanned":page.scanned.to_string(),"bbox_um":b.map(|v|v.to_string())})
+        }
+        Command::Focus {
+            check,
+            error,
+            fit,
+            context,
+        } => {
+            let c = context.ok_or_else(|| Error::input("focus requires an authoritative view"))?;
+            let v = p.error(check, error, stop)?;
+            let b = p.bbox_um(v.bbox)?;
+            let mut width = (c.bbox_dbu[2] - c.bbox_dbu[0]) * c.dbu;
+            if fit {
+                width = ((b[2] - b[0]) / 0.3)
+                    .max((b[3] - b[1]) / 0.3 * f64::from(c.pixels[0]) / f64::from(c.pixels[1]));
+                if width <= 0. {
+                    width = 0.1;
+                }
+            }
+            let center = [b[0] * 0.5 + b[2] * 0.5, b[1] * 0.5 + b[3] * 0.5];
+            if !width.is_finite() || width <= 0. || !center.iter().all(|v| v.is_finite()) {
+                return Err(Error::input("unrepresentable DRC focus viewport"));
+            }
+            json!({"check":check.to_string(),"local":error.to_string(),"navigation":{
+                "kind":"goto","center_um":center.map(|v|v.to_string()),"width_um":width.to_string()}})
+        }
     };
     check_cancelled(stop)?;
     p.unchanged()?;

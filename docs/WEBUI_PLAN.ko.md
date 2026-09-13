@@ -15,6 +15,7 @@ M1b-4a에서 layout margin prefetch/crop과 라벨 포함 pan 재사용을 연�
 M1b-4b에서 drag·fill/width/font 편집·기본 GTK 단축키를 연결했다.
 M2a-1에서 기존 DRC ICE pack 읽기·공간 페이지·waive 조회 CLI를 이관했다.
 M2a-2에서 DRC 전용 actor·자원 예약과 등록 ID 기반 인증 읽기 API를 연결했다.
+M2a-3에서 규칙/오류 페이지·waive 필터·goto·표시 프레임에 정렬된 DRC overlay를 연결했다.
 전체 조작 parity와 M0/Firefox/ETX 현장 검증은 아직 완료되지 않았다.
 상세 범위는 [M1b 기록](WEBUI_M1B.ko.md)과 [M2 기록](WEBUI_M2.ko.md). 여기의 M0~M5는 **웹 전환 단계**이며
 jobdeck/occupancy의 같은 이름 단계와 별개다. 개발 기준과 합류 규칙은 §11.
@@ -464,6 +465,6 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
   PNG/raw·최초 한 번의 설정 적용·재접속/종료를 검증했다. M1b-4a에서 layout
   margin의 픽셀 parity·16px pan·라벨/실패 fallback을 검증했다. M1b-4b에서
   drag·스타일/글꼴·기본 단축키와 실제 Chrome 조작을 검증했다. M2a-1에서 기존
-  DRC pack/waive 읽기 CLI·페이지 조회를 검증했다. M2a-2는 DRC actor/인증 API이며
-  DRC 브라우저 패널·공유는 다음이다.
+  DRC pack/waive 읽기 CLI·페이지 조회를 검증했다. M2a-2는 DRC actor/인증 API,
+  M2a-3는 읽기 패널·focus·overlay다. DRC 선택 상태 보존·공유와 고급 조작은 남아 있다.
   CLI 전체/웹 전환 완료가 아니며 GTK/실측 브랜치는 유지한다.

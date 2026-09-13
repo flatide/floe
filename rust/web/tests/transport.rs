@@ -41,6 +41,7 @@ async fn embedded_assets_are_content_identified_and_never_serve_files() {
     for (name, mime) in [
         ("app.js", "text/javascript"),
         ("protocol.js", "text/javascript"),
+        ("drc.js", "text/javascript"),
         ("app.css", "text/css"),
     ] {
         let r = server

@@ -155,7 +155,23 @@ impl Service {
             "metadata":s.metadata,"error":s.failure,"read_only":true,"response_bytes":RESPONSE_BYTES})
     }
     pub fn submit(&self, request: Request) -> std::result::Result<Ticket, Failure> {
-        let request = request.core()?;
+        self.submit_context(request, None)
+    }
+    fn submit_context(
+        &self,
+        request: Request,
+        context: Option<dto::FocusContext>,
+    ) -> std::result::Result<Ticket, Failure> {
+        let mut request = request.core()?;
+        match &mut request {
+            dto::Command::Focus {
+                context: target, ..
+            }
+            | dto::Command::InView {
+                context: target, ..
+            } => *target = context,
+            _ => (),
+        }
         let mut s = self.inner.state.lock().unwrap();
         if let Some(code) = s.failure {
             return Err(code);

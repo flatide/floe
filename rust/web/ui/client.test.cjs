@@ -4,10 +4,12 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const P = require('./protocol.js');
+const DRC = require('./drc.js'), drcDisplays = [], observers = [];
 const nodes = new Map(), images = [], sockets = [], urls = new Set(), draws = [], requests = [];
 const listeners = {}, docListeners = {};
 function listen(target,k,fn){const old=target[k];target[k]=old?(event)=>{old(event);fn(event);}:fn;}
 let clock = 10000;
+let viewportSize = [100, 80];
 class Element {
     constructor(id, tag='div') { Object.assign(this, {id, tag, value:'', checked:false, disabled:false, hidden:false,
         dataset:{}, style:{}, children:[], className:'', textContent:'', width:1, height:1}); }
@@ -15,7 +17,7 @@ class Element {
     setAttribute(k,v) {this[k]=v;}
     querySelectorAll(tag) {return this.children.flatMap(c=>[...(c.tag===tag?[c]:[]), ...c.querySelectorAll(tag)]);}
     addEventListener(k,f) {listen(this,k,f);}
-    getBoundingClientRect() {return {left:0,top:0,right:100,bottom:80,width:100,height:80};}
+    getBoundingClientRect() {const [w,h]=viewportSize;return {left:0,top:0,right:w,bottom:h,width:w,height:h};}
     getContext() {return ctx;}
     focus() {}
     select() {}
@@ -71,7 +73,9 @@ class Socket {
 class Image {
     constructor(){this.naturalWidth=100;this.naturalHeight=80;images.push(this);}
 }
-const window={FloeProtocol:P,FloeGestures:require('./gestures.js'),devicePixelRatio:1,
+const window={FloeProtocol:P,FloeGestures:require('./gestures.js'),FloeDRC:{...DRC,bind(o){
+    const panel=DRC.bind(o),paint=panel.paint;panel.paint=(p,s)=>{drcDisplays.push({p,s});paint(p,s);};return panel;
+}},ResizeObserver:class {constructor(fn){this.fn=fn;observers.push(this);}observe(e){this.target=e;}disconnect(){this.target=null;}},devicePixelRatio:1,
     addEventListener:(k,f)=>listen(listeners,k,f),setTimeout,requestAnimationFrame:fn=>setTimeout(fn,0),cancelAnimationFrame:clearTimeout};
 const storage=new Map();
 const sandbox={window,document,XMLHttpRequest:XHR,WebSocket:Socket,Image,ImageData:class {constructor(data,w,h){this.data=data;this.width=w;this.height=h;}},
@@ -136,6 +140,7 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     assert.equal(second.sent.at(-1).disposition,'displayed');
     assert.equal(node('canvas').hidden,true);assert.equal(node('margin-canvas').hidden,false);
     assert.equal(node('margin-canvas').style.left,'-48px');
+    assert.deepEqual(DRC.point(drcDisplays.at(-1).p,0,0),[10.9375,80]);
     assert(node('perf').textContent.includes('100 × 80 px'));
     assert(!node('perf').textContent.includes('196 × 176 px'));
     const painted=draws.length;
@@ -148,6 +153,7 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     snapshot.state_rev='3';snapshot.render_rev='3';snapshot.bbox_dbu=['37.0625','0','137.0625','80'];
     snapshot.margin.origin_px=[96,48];second.receive(snapshot);
     assert.equal(node('margin-canvas').style.left,'-96px');
+    assert.deepEqual(DRC.point(drcDisplays.at(-1).p,0,0),[-37.0625,80]);
     assert(node('status').textContent.includes('Live · margin crop'));
     assert.equal(requests.filter(r=>r.path.endsWith('/layers/0')).length,listRequests,'pan refreshed the layer panel');
     // Truncated labels are base only, not a completed replacement for foreground.
@@ -197,6 +203,7 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     const mouse=(x,y)=>({button:0,buttons:1,clientX:x,clientY:y,preventDefault(){}});
     node('viewport').mousedown(mouse(20,20));listeners.mousemove(mouse(33,31));
     await wait(()=>node('canvas').style.left==='13px');
+    assert.deepEqual(DRC.point(drcDisplays.at(-1).p,0,0),[-24.0625,91]);
     assert.equal(dragEdits(),beforeDrag);assert.equal(draws.length,beforeDragDraws);
     listeners.mouseup(mouse(33,31));
     assert.equal(dragEdits(),beforeDrag+1);
@@ -204,6 +211,7 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     assert.deepEqual(draws.slice(beforeDragDraws).map(d=>[d.x,d.y]),[[13,11],[0,0]],'preview composite jumped before native reply');
     assert.equal(node('canvas').style.left,'0px');
     snapshot.bbox_dbu=['24.0625','11','124.0625','91'];await applied(false);
+    assert.deepEqual(DRC.point(drcDisplays.at(-1).p,0,0),[-24.0625,91],'DRC did not follow frozen pan preview');
     assert.equal(node('canvas').style.left,'0px');
     assert.equal(draws.length,beforeDragDraws+2,'snapshot redrew the frozen preview');
     second.receive(packet('raw','12',snapshot.render_rev,nextEpoch));
@@ -211,10 +219,22 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     await wait(()=>node('canvas').style.left==='22px');listeners.blur();
     assert.equal(node('canvas').style.left,'0px');assert.equal(dragEdits(),beforeDrag+1);
     listeners.mouseup(mouse(42,41));assert.equal(dragEdits(),beforeDrag+1,'blur left a late mouseup edit');
+    // Panel/element resize, including a height change without window.resize:
+    // keep old pixels/overlay centered, request native dimensions exactly once.
+    const beforeResize=dragEdits();viewportSize=[120,90];observers[0].fn();
+    await new Promise(resolve=>setTimeout(resolve,140));
+    assert.equal(dragEdits(),beforeResize+1);assert.deepEqual(second.sent.at(-1).body.pixels,[120,90]);
+    assert.deepEqual(DRC.point(drcDisplays.at(-1).p,0,0),[-14.0625,96]);
+    observers[0].fn();await new Promise(resolve=>setTimeout(resolve,140));
+    assert.equal(dragEdits(),beforeResize+1,'duplicate pending resize');
+    snapshot.pixels=[120,90];await applied(false);
+    observers[0].fn();await new Promise(resolve=>setTimeout(resolve,140));
+    assert.equal(dragEdits(),beforeResize+1,'same-size observer invalidated native pixels');
     node('source').value='deck';node('source').onchange();node('level-more').onclick();node('level-more').onclick();
     await wait(()=>node('level-list').children.length===2);
     assert.equal(requests.filter(r=>r.path.includes('/catalog/deck/levels/')).length,1,'duplicate level page');
     for(const s of sockets){for(let i=1;i<s.sent.length;i++){assert(P.compare(s.sent[i-1].seq,s.sent[i].seq)<0);}}
     listeners.pagehide();
-    console.log('WEB CLIENT: ALL OK (startup/frames/epochs, margin/free-pan, cached layer pages, styles/font/keys, level paging, cleanup)');
+    assert.equal(observers[0].target,null);
+    console.log('WEB CLIENT: ALL OK (startup/frames/epochs, margin/free-pan/DRC projection, element resize, cached layer pages, styles/font/keys, level paging, cleanup)');
 })().catch(e=>{console.error(e);process.exitCode=1;});

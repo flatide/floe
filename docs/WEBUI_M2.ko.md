@@ -135,9 +135,75 @@ strict clippy, Rust 1.89/빈 registry/offline 테스트·Linux musl release link
 입력/DRC 전용 root 분리·추가 거부 게이트는 재빌드한 CLI와 HTTP 테스트로 재확인했다.
 현장 Firefox/ETX는 현재 실행 불가라는 사용자 확인에 따라 보류다(로컬 PASS로 대체하지 않음).
 
-## 3. 다음 경계
+## 3. M2a-3: 읽기 전용 DRC 패널과 표시 좌표
 
-1. rule/error 목록·검색·waive 필터·goto·marker overlay를 브라우저에 연결한다.
+`view SOURCE --drc PACK.ice`가 오른쪽 DRC 패널을 연다. 별도 Python/브라우저
+확장 없이 로컬 번들의 ES2017 JS/Canvas를 사용한다. 기존 pack/waive는 읽기만 한다.
+
+- 규칙 이름 검색(32개/페이지), 전체 설명, 상태 필터(all/not waived/waived),
+  오류 64개/페이지와 이전/다음·첫 페이지. 뒤로 이동 cursor 기록은 128개다.
+  이름·설명은 `textContent`만 사용하며 HTML로 해석하지 않는다. 규칙 검색은
+  목록을 필터링하고 현재 선택은 새 규칙을 클릭할 때 바뀐다.
+- 오류 click은 선택+goto, double-click/Frame error는 오류 bbox를 뷰의 30%에
+  맞춘다. 점 오류의 기본 폭은 0.1 µm. 사용자가 zoom을 바꾼 뒤 다른 오류로
+  이동하면 그 배율을 유지하며 Frame error/Clear로 고정을 해제한다.
+  `n`/`p`와 오류 행 위/아래는 **현재 페이지 안에서만** 이동한다. 경계는 안내하고
+  페이지 버튼을 사용한다. 전체 규칙 간 자동 순회는 아직 없다.
+- In view는 모든 규칙을 현재 viewport에서 검색한다. 후속 페이지는 최초 bbox에
+  고정하며 pan/zoom 뒤에는 이전 뷰 결과임을 표시한다. 자동 전체 페이지 수집이나
+  매 pan마다 DRC 재검색은 하지 않는다. Markers는 현재 페이지의 최대64개 표시다.
+- 선택 geometry는 2,048점/응답, 최대128페이지·262,144점(좌표 배열 4 MiB)이다.
+  읽기 중에는 **점선 bbox preview**, 모든 좌표가 온 뒤에만 polygon을 닫는다.
+  edge는 두 점씩 선분으로 그린다. 상태1은 waived 색, 작은 오류는 최소 표시점을
+  사용한다. 큰 단일 polygon의 브라우저 paint 시간 상한을 보장하는 것은 아니다.
+- 선택/검색/context 변경은 이전 XHR를 취소하고 늦은 응답을 token + view/revision
+  검사로 버린다. u64 ID/cursor는 JS Number로 바꾸지 않는다. geometry의 좌표 변환은
+  화면 표시용이고 goto 뷰포트 계산은 Rust에서 한다.
+
+읽기 API에 두 명령을 추가했다. `focus(check,error,fit)`와
+`in_view(waived,cursor,limit)`는 envelope의 `state_rev`가 필수이고 요청 전후
+현재 view revision을 검사한다. 서버가 DBU/viewport/pixels를 actor에 전달하므로
+브라우저가 임의 DBU 또는 종횡비를 지정하지 않는다. focus는 `navigation`을
+반환할 뿐 view를 변경하지 않는다. UI가 이를 기존 revision-checked WS edit로
+보내며 중간의 입력 경합은 폐기한다. in_view는 실제 사용한 bbox도 반환한다.
+
+### 3.1 pan·margin·resize
+
+DRC overlay는 **현재 표시된 native 프레임의 bbox + 실제 blit/crop 원점**에 맞춘다.
+요청한 새 viewport를 먼저 적용하지 않는다. 완전한 margin의 crop, 이전 label
+foreground, mouse pan에서 동결한 composite, resize의 중앙 padding에 같은 변환을
+사용한다. 따라서 native 응답을 기다리는 동안에도 DRC가 이전 화면과 함께 움직인다.
+패널 숨김은 marker 토글과 별개이며 숨긴 뒤에도 선택 overlay는 유지한다.
+
+실제 Chrome QA에서 기존 안내문이 나타났다 사라지면 viewport 높이가 바뀌지만
+서버가 이전 크기의 margin crop을 유지하는 결함을 재현했다. 안내문을 viewport
+안의 absolute overlay로 옮겨 표시만으로 해상도가 바뀌지 않게 했다. 선택적
+ResizeObserver + 기존 window/panel resize 경로가 실제 요소 치수를 동기화한다.
+같은 크기/이미 제출한 크기는 재제출·frame 동결하지 않는다. 이전 Firefox에서
+ResizeObserver가 없어도 기본 경로는 유지하며 현장 지원 판정은 별도다.
+
+### 3.2 검증과 미완료 범위
+
+- JS gate: ES2017 구문, u64/text 안전성, 취소/늦은 좌표·focus 폐기,
+  5,000점 geometry 3페이지의 완료 시점, zoom 고정/재프레임, 빈 페이지 continuation,
+  in_view 고정 bbox, DRC의 margin/free-pan/resize 투영과 중복 resize 억제.
+- native HTTP gate: focus fit/배율 유지·필수/오래된 state_rev, in_view bbox·결과를
+  Python bbox 기준과 대조. 조회만으로 render state가 변하지 않는지 단언한다.
+- 로컬 Chrome: synthetic valmini + 2규칙/4오류로 polygon/edge 선택,
+  Shift+cursor 10% margin crop, 119×33 CSS px drag, 패널 접기/펴기, 규칙 검색,
+  waive 빈 결과·In view, 입력 오류 중 viewport 크기 유지 확인. 콘솔 warn/error 없음.
+  스크린샷은 세션 내 육안 확인이며 현장 Firefox/ETX·input-to-photon 측정이 아니다.
+- 2026-09-13: 전체 `sh tools/validate_rust.sh` ALL OK, 대상 crate fmt/strict clippy,
+  Rust 1.89 빈 registry/offline 테스트와 Linux musl release link 통과. 기존 native
+  경고는 남아 있으며 Linux 실행/현장 브라우저 성능 PASS를 의미하지 않는다.
+
+새로고침은 native view를 복원하지만 **DRC 선택/필터는 아직 초기화**한다.
+화면 오류 hit-test/box selection, 전체 오류 순회, SVRF 연동/자동 CD·측정,
+선택 상태의 서버 보존/공유·waive/note 쓰기는 이 단계의 완료 범위가 아니다.
+
+## 4. 다음 경계
+
+1. DRC 선택/필터·이동 상태 서버 보존과 전체 오류 순회를 단계적으로 연결한다.
 2. ASCII/index 흐름·기존 notes·상세 측정/룰 매핑은 각각 parity gate와 함께 확장.
 3. 공유는 설계/DRC에 묶인 읽기 capability, 발급/만료/폐기·follow/independent
    state를 별도 구현·검증. 아직 shares=false, loopback-only다.
