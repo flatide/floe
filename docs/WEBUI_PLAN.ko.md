@@ -39,7 +39,8 @@ M2a-12b2에서 pack 생성 승인·진행/취소·불명확한 요청 확인 UI�
 M4a-1에서 공유와 독립적인 native pick/snap scene 식별·Rust process client를 연결했다.
 M4a-2에서 표시 frame/worker·revision에 고정한 로컬 controller query와 종류별 취소·style drain을 연결했다.
 M4a-3에서 기존 owner WebSocket에 표시 ACK/연결별 query와 안전한 결과 DTO를 연결했다.
-레이아웃 query API는 사용 가능하며 브라우저 조작 UI는 다음 단계다([M4 기록](WEBUI_M4.ko.md)).
+M4a-4에서 브라우저 도형 선택/overlap 순환·modifier 선택·스냅 프로브와 stale 검사를 연결했다.
+수동 ruler/clip과 실제 브라우저 수용은 남아 있다([M4 기록](WEBUI_M4.ko.md)).
 전체 조작 parity와 M0/Firefox/ETX 현장 검증은 아직 완료되지 않았다.
 상세 범위는 [M1b 기록](WEBUI_M1B.ko.md)과 [M2 기록](WEBUI_M2.ko.md). 여기의 M0~M5는 **웹 전환 단계**이며
 jobdeck/occupancy의 같은 이름 단계와 별개다. 개발 기준과 합류 규칙은 §11.

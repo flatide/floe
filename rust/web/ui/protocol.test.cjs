@@ -22,6 +22,7 @@ const h = {
     worker_epoch: '1', generation: '4', round: '1', payload_length: '24',
     deferred: '0', deck_skipped: '0', final: true, partial: false, labels_truncated: false,
     complete: true, approximate: false, query: false, width: 2, height: 1,
+    query_scene:{generation:null,round:null,complete:false,summary_layers:'0'},
     bbox_dbu: ['-10.9375', '-1', '1', '2'], perf: {}
 };
 function frame(header, data) {
@@ -36,6 +37,11 @@ raw.set(new TextEncoder().encode('FLOERAW1'));
 const v = new DataView(raw.buffer); v.setUint32(8, 2, true); v.setUint32(12, 1, true);
 raw.set([255, 0, 0, 255, 0, 255, 0, 255], 16);
 assert.deepEqual(p.packet(frame(h, raw)).data, raw);
+const queryScene={generation:'9007199254740993',round:'1',complete:true,summary_layers:'2'};
+assert(p.packet(frame({...h,query:true,query_scene:queryScene},raw)).header.query);
+for(const extra of [{query_scene:null},{query_scene:{...queryScene,round:null}},{query_scene:{...queryScene,generation:1}},
+    {query:true,query_scene:{...queryScene,complete:false}},{query:false,query_scene:queryScene},
+    {query_scene:{...queryScene,extra:'native-path'}}])assert.throws(()=>p.packet(frame({...h,...extra},raw)));
 const state = Object.assign({}, h, {pixels: [2, 1]});
 assert(p.matches(h, state));
 for (const k of ['view_id', 'connection_epoch', 'dataset_revision', 'worker_epoch', 'render_rev', 'render_key']) {

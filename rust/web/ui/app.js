@@ -11,6 +11,8 @@
     let foregroundFrame = null, marginFrame = null, inflightBody = null, foregroundPerf = '';
     let gesture = null, dragShift = null, lastPlacement = null;
     let drcPanel = null, displayProjection = null, frozenProjection = null;
+    let inspector = null, pickedPairs = [];
+    let ackedFrames = {foreground: null, margin: null};
     const sessionKey = 'floe-session:' + location.origin;
     let auth = null, stopped = false, socket = null, epoch = '', state = null;
     let seq = '0', queue = [], inflight = null, accepted = null, lastSend = 0;
@@ -127,6 +129,7 @@
         else { displayProjection = frozenProjection && window.FloeDRC.shifted(frozenProjection.projection,
             [-Math.round((size.pixels[0] - frozenProjection.pixels[0]) / 2), -Math.round((size.pixels[1] - frozenProjection.pixels[1]) / 2)]); }
         if (drcPanel) { drcPanel.paint(displayProjection, size); }
+        if (inspector) { inspector.changed(); inspector.paint(displayProjection, size); }
         if (full) {
             const pending = !!inflightBody || queue.length > 0 || !!dragShift;
             el('status').textContent = (pending ? 'Pan preview' : 'Live') + ' · margin crop · gen ' + marginFrame.generation;
@@ -169,6 +172,7 @@
         displayProjection = null; frozenProjection = null;
         canvas.hidden = false; canvas.width = 1; canvas.height = 1;
         marginCanvas.hidden = true; marginCanvas.width = 1; marginCanvas.height = 1;
+        ackedFrames = {foreground: null, margin: null};
     }
     function live() { return state && !['closed', 'failed'].includes(state.status); }
     function controls() {
@@ -180,6 +184,27 @@
         el('close').disabled = !currentId || submitting || ownerBusy;
         el('index').disabled = submitting || ownerBusy;
         if (drcPanel) { drcPanel.contextChanged(); }
+        if (inspector) { inspector.changed(); }
+    }
+    function queryContext() {
+        if (!state || !currentId || !lastPlacement) { return null; }
+        let h = lastPlacement.full ? marginFrame : foregroundFrame;
+        let origin = lastPlacement.full ? lastPlacement.margin : lastPlacement.foreground;
+        // A label-truncated margin still supplies complete geometry beneath
+        // the old label frame, including the newly exposed strip.
+        if ((!h || !P.matches(h, state)) && marginFrame && P.matches(marginFrame, state)) { h = marginFrame; origin = lastPlacement.margin; }
+        let size; try { size = dims(); } catch (e) { return null; }
+        return {id: currentId, state: state, frame: h, origin: origin, size: size, rect: viewport.getBoundingClientRect(),
+            acked: !!h && ackedFrames[h.purpose] === h.frame_id,
+            connected: !stopped && !!epoch && !!socket && socket.readyState === WebSocket.OPEN,
+            hidden: document.hidden, pending: !!inflight || queue.length > 0 || !!dragShift || !!accepted ||
+                !!(gesture && gesture.active()) || !!(drcPanel && drcPanel.boxActive())};
+    }
+    function highlightPicked(pairs) {
+        pickedPairs = pairs;
+        Array.from(el('layers').querySelectorAll('span')).forEach(function (name) {
+            if (name.dataset.pair) { name.dataset.picked = String(pairs.some(function (p) { return p.join('/') === name.dataset.pair; })); }
+        });
     }
     function send(value) {
         if (!socket || socket.readyState !== WebSocket.OPEN) { throw new Error('View is disconnected'); }
@@ -263,7 +288,11 @@
     function finishDecode() { if (decode) { decode(); decode = null; } }
     function acknowledge(h, disposition, ws, serial) {
         if (ws !== socket || serial !== socketSerial || ws.readyState !== WebSocket.OPEN) { return; }
-        try { send({type: 'frame.ack', connection_epoch: h.connection_epoch, frame_id: h.frame_id, disposition: disposition}); }
+        try {
+            send({type: 'frame.ack', connection_epoch: h.connection_epoch, frame_id: h.frame_id, disposition: disposition});
+            if (disposition === 'displayed') { ackedFrames[h.purpose] = h.frame_id; }
+            if (inspector) { inspector.changed(); }
+        }
         catch (e) { report(e); ws.close(); }
     }
     function frame(buffer, ws, serial) {
@@ -322,11 +351,14 @@
         }
     }
     function disconnect() {
+        if (inspector) { inspector.interrupt(); }
+        ackedFrames = {foreground: null, margin: null};
         if (gesture) { gesture.cancel(); }
         freezeMargin();
         ++socketSerial; finishDecode();
         if (socket) { socket.onclose = null; socket.close(); socket = null; }
         epoch = ''; rejectEdits('Connection interrupted; pending input was not replayed.');
+        if (inspector) { inspector.changed(); }
         if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     }
     function connect() {
@@ -345,12 +377,15 @@
                     if (m.protocol !== 1 || m.bundle !== bundle || m.view_id !== currentId) { throw new Error('Client/server version mismatch; reload'); }
                     epoch = m.connection_epoch; reconnectDelay = 500; connection('Local · connected', true);
                 } else if (m.type === 'snapshot') { statusSnapshot(m); }
+                else if (inspector && inspector.receive(m)) { /* latest query owns its response */ }
                 else if (m.type === 'accepted') {
                     if (m.seq !== inflight) { throw new Error('Unexpected edit acknowledgement'); }
                     accepted = {rev: m.state_rev, render: m.render_rev};
                 } else if (m.type === 'error') {
-                    if (m.seq === inflight) { rejectQueued(message(m.code)); accepted = {rev: '0', render: state.render_rev, error: message(m.code)}; }
-                    notice(message(m.code));
+                    if (m.seq === inflight) {
+                        rejectQueued(message(m.code)); accepted = {rev: '0', render: state.render_rev, error: message(m.code)};
+                        notice(message(m.code));
+                    } // An old query's refusal cannot replace current UI state.
                 }
             } catch (e) { report(e); ws.close(); }
         };
@@ -359,6 +394,7 @@
             if (gesture) { gesture.cancel(); }
             const uncertain = !!inflight || queue.length > 0;
             freezeMargin(); epoch = ''; socket = null; finishDecode(); rejectEdits('Connection interrupted; pending input was not replayed.');
+            ackedFrames = {foreground: null, margin: null};
             controls(); connection('Disconnected', false);
             if (uncertain) { notice('Connection interrupted. Pending input was not replayed; the restored view is authoritative.'); }
             if (!stopped && live()) {
@@ -402,6 +438,7 @@
                 edit({styles: [{pair: r.pair, color: color.value, fill: r.fill, width: r.width}]});
             };
             const name = document.createElement('span'); name.className = 'layer-name'; name.textContent = r.name || r.pair.join('/'); name.title = r.name + (r.aliases.length ? ' · ' + r.aliases.join(', ') : '');
+            name.dataset.pair = r.pair.join('/');
             const style = document.createElement('button'); style.className = 'layer-edit'; style.textContent = '⋯';
             style.setAttribute('aria-label', 'Edit style ' + r.name);
             style.onclick = function () {
@@ -415,6 +452,7 @@
         if (!page.rows.length) { el('layers').textContent = 'No visible layer rows.'; }
         el('layers-count').textContent = (page.total ? (start + 1) + '–' + (start + page.rows.length) + ' / ' : '') + page.total;
         el('layers-prev').disabled = start === 0; el('layers-next').disabled = page.next === null;
+        highlightPicked(pickedPairs);
     }
     async function moreLevels() {
         if (levelBusy) { return; }
@@ -585,6 +623,7 @@
             return;
         }
         if (drcPanel && drcPanel.key(key)) { event.preventDefault(); return; }
+        if (inspector && inspector.key(key)) { event.preventDefault(); return; }
         const amount = event.shiftKey ? 0.1 : 0.5;
         const directions = {ArrowLeft: [-amount, 0], ArrowRight: [amount, 0], ArrowUp: [0, amount], ArrowDown: [0, -amount]};
         if (directions[key]) { event.preventDefault(); nav({kind: 'pan', x: directions[key][0], y: directions[key][1], snap: true}); }
@@ -606,19 +645,31 @@
         const rect = viewport.getBoundingClientRect();
         zoom(event.deltaY < 0 ? 0.8 : 1.25, [Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)), Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height))]);
     }, {passive: false});
-    function reviewCursor() { viewport.style.cursor = gesture && gesture.active() ? 'grabbing' : drcPanel && drcPanel.boxActive() ? 'crosshair' : ''; }
-    viewport.addEventListener('mousemove', function (event) { if (drcPanel && (!gesture || !gesture.active())) { drcPanel.move(event.clientX, event.clientY); } });
-    viewport.addEventListener('mouseleave', function () { if (drcPanel) { drcPanel.move(NaN, NaN); } });
+    function reviewCursor() {
+        viewport.style.cursor = gesture && gesture.active() ? 'grabbing' : drcPanel && drcPanel.boxActive() ? 'crosshair' : '';
+        if (inspector && (!gesture || !gesture.active())) { inspector.changed(); }
+    }
+    viewport.addEventListener('mousemove', function (event) {
+        if (!gesture || !gesture.active()) {
+            if (drcPanel) { drcPanel.move(event.clientX, event.clientY); }
+            if (inspector) { inspector.move(event.clientX, event.clientY); }
+        }
+    });
+    viewport.addEventListener('mouseleave', function () { if (drcPanel) { drcPanel.move(NaN, NaN); } if (inspector) { inspector.move(NaN, NaN); } });
     gesture = window.FloeGestures.bind({viewport: viewport, window: window, document: document,
         dimensions: dims, ready: function () { return live() && displayed && !!epoch && !inflight && queue.length === 0; },
         stamp: function () { return currentId + ':' + epoch + ':' + (state ? state.state_rev : ''); },
         requestAnimationFrame: function (fn) { return window.requestAnimationFrame(fn); },
         cancelAnimationFrame: function (id) { window.cancelAnimationFrame(id); },
         preview: function (p, paint) { dragShift = p; if (paint) { present(); } },
-        cursor: reviewCursor, pan: nav, selectionMode: function () { return !!drcPanel && drcPanel.boxActive(); },
-        // DRC owns display-space marker hits. Native geometry queries remain
-        // disabled until the expected/actual query-scene contract is wired.
-        click: function (x, y, twice, modifiers) { if (drcPanel) { drcPanel.click(x, y, twice, modifiers); } }});
+        cursor: reviewCursor, pan: nav, objectClicks: true, selectionMode: function () { return !!drcPanel && drcPanel.boxActive(); },
+        click: function (x, y, twice, modifiers) {
+            const m = modifiers || {};
+            if (drcPanel && (drcPanel.boxActive() || (!m.ctrlKey && !m.metaKey && !m.shiftKey)) && drcPanel.click(x, y, twice, modifiers)) {
+                if (inspector) { inspector.interrupt(); } return;
+            }
+            if (inspector) { inspector.click(x, y, modifiers); }
+        }});
     el('index').onclick = function () {
         try { submitOperation({kind: 'index', source_id: el('source').value, levels: levels(), options: {jobs: Number(el('index-jobs').value), force: el('index-force').checked, lod: el('index-lod').checked, occupancy: el('index-occupancy').checked}}).catch(report); }
         catch (e) { report(e); }
@@ -648,11 +699,15 @@
             connected: !!epoch && !!socket && socket.readyState === WebSocket.OPEN, pending: !!inflight || queue.length > 0 || !!dragShift} : null; },
         navigate: function (n, token, done) { return edit({prepared_token: token}, done); },
         restoreLayers: function (done) { return edit({restore_layers: true}, done); }, resize: resized});
-    document.addEventListener('visibilitychange', function () { if (document.hidden) { finishDecode(); } else if (live() && !stopped) { connect(); } });
+    inspector = window.FloeInspect.bind({document: document, window: window, protocol: P, query: window.FloeQuery,
+        context: queryContext, send: send, layers: highlightPicked, now: function () { return Date.now(); },
+        setTimeout: setTimeout, clearTimeout: clearTimeout});
+    document.addEventListener('visibilitychange', function () { if (document.hidden) { finishDecode(); inspector.changed(); } else if (live() && !stopped) { connect(); } });
+    window.addEventListener('blur', function () { inspector.move(NaN, NaN); });
     setInterval(function () { if (socket && socket.readyState === WebSocket.OPEN && epoch) { try { send({type: 'ping'}); } catch (e) { report(e); } } }, 10000);
-    window.addEventListener('pagehide', function () { disconnect(); clearTimeout(operationTimer); clearTimeout(resizeTimer); if (sizeObserver) { sizeObserver.disconnect(); } drcPanel.stop(); });
+    window.addEventListener('pagehide', function () { disconnect(); inspector.stop(); clearTimeout(operationTimer); clearTimeout(resizeTimer); if (sizeObserver) { sizeObserver.disconnect(); } drcPanel.stop(); });
     window.addEventListener('pageshow', function (event) {
-        if (event.persisted && auth && !stopped) { if (sizeObserver) { sizeObserver.observe(viewport); } drcPanel.resume().then(operationState).then(restore).then(resized).catch(report); }
+        if (event.persisted && auth && !stopped) { inspector.resume(); if (sizeObserver) { sizeObserver.observe(viewport); } drcPanel.resume().then(operationState).then(restore).then(resized).catch(report); }
     });
     start().catch(function (e) { connection('Not connected', false); report(e); el('empty-message').textContent = e.message; });
 }());

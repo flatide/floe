@@ -67,3 +67,21 @@ viewport.emit('mousedown',event(100,100));viewport.emit('mousedown',event(100,10
 viewport.emit('mousedown',event(100,100));boxMode=false;win.emit('mouseup',event(100,100,0,0));assert.equal(clicks.length,boxClicks,'mode changed during click');
 viewport.emit('mousedown',event(100,100));boxMode=true;win.emit('mouseup',event(100,100,0,0));assert.equal(clicks.length,boxClicks);
 console.log('WEB GESTURES: ALL OK (rAF, release-only pan, clicks/modifiers/chords, opt-in box mode, jitter, bounds, lost capture/stale/hidden)');
+{
+    const v=target(),w=target(),d=target(),picks=[],moves=[];
+    const g=gestures.bind({viewport:v,window:w,document:d,stamp:()=>1,ready:()=>true,objectClicks:true,selectionMode:()=>false,
+        dimensions:()=>({pixels:[100,80],dpr:1}),cursor(){},preview(){},pan:n=>moves.push(n),click:(...c)=>picks.push(c),
+        requestAnimationFrame:()=>1,cancelAnimationFrame(){}});
+    for(const m of [{},{shiftKey:true},{ctrlKey:true},{metaKey:true}]){
+        v.emit('mousedown',{...event(30,20),...m});w.emit('mouseup',{...event(30,20,0,0),...m});
+        assert.equal(picks.length,m.shiftKey?2:m.ctrlKey?3:m.metaKey?4:1);
+    }
+    for(const key of ['shiftKey','ctrlKey','metaKey'])for(const press of [true,false]){
+        v.emit('mousedown',{...event(30,20),[key]:press});w.emit('mouseup',{...event(30,20,0,0),[key]:!press});assert.equal(picks.length,4);
+    }
+    v.emit('mousedown',{...event(30,20),ctrlKey:true});w.emit('mousemove',{...event(50,20),ctrlKey:true});w.emit('mouseup',{...event(50,20,0,0),ctrlKey:true});
+    assert.equal(picks.length,4);assert.equal(moves.length,0);assert(!g.active(),'modifier drag must retain its old no-pan meaning');
+    v.emit('mousedown',event(30,20));w.emit('blur');w.emit('mouseup',event(30,20,0,0));assert.equal(picks.length,4);
+    assert.deepEqual(picks[0],[30,20,false]);assert.equal(picks[2][3].ctrlKey,true);
+}
+console.log('WEB OBJECT GESTURES: ALL OK (opt-in modifiers, unchanged plain click, release consistency, drag/cancel isolation)');

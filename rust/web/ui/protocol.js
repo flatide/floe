@@ -106,6 +106,13 @@
         ['final', 'partial', 'labels_truncated', 'complete', 'approximate', 'query'].forEach(function (k) {
             if (typeof h[k] !== 'boolean') { fail('Invalid frame status'); }
         });
+        const scene = h.query_scene;
+        if (!scene || typeof scene !== 'object' || Array.isArray(scene) ||
+            Object.keys(scene).sort().join(',') !== 'complete,generation,round,summary_layers' ||
+            typeof scene.complete !== 'boolean' || (scene.generation === null) !== (scene.round === null)) { fail('Invalid query scene'); }
+        counter(scene.summary_layers, true);
+        if (scene.generation !== null) { counter(scene.generation); counter(scene.round); }
+        if ((scene.complete && scene.generation === null) || h.query !== (scene.generation !== null && scene.complete)) { fail('Invalid query capability'); }
         if (h.complete && (!h.final || h.partial || h.labels_truncated ||
             h.deferred !== '0' || h.deck_skipped !== '0')) { fail('Inconsistent frame status'); }
         pixels(h.width, h.height); bbox(h.bbox_dbu);

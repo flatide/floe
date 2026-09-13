@@ -3,7 +3,8 @@
 현재 **일반 레이아웃/잡덱 `index/info/render/probe`, 분석 `jobdeck`, 기본 웹 `view`, ICE/ASCII `drc` 조회를 지원**한다.
 기존 Python `floe2`/GTK와 병행 개발하는 별도 실행 파일이며 제품 전환은 아직 완료되지 않았다.
 M4a-1/2에서 native scene-pinned pick/snap과 표시 프레임에 고정한 앱 controller를
-추가했고 M4a-3에서 owner WebSocket query를 연결했다. 브라우저 조작 UI는 다음 단계다
+추가했고 M4a-3/4에서 owner WebSocket query와 브라우저 선택/스냅 프로브를 연결했다.
+수동 ruler/clip 및 실제 브라우저 조작 수용은 남아 있다
 ([M4 기록](../../docs/WEBUI_M4.ko.md)). native 호환 버전0.12.87로
 `floe-index`와 `floe-renderd`를 함께 재빌드한다. 공유 기능과 현장 Firefox 수용은 별도다.
 
@@ -80,7 +81,9 @@ cargo build --offline --locked --release -p floe-app -p floe-index -p floe-rende
 - 웹 canvas는 왼쪽/가운데 drag(놓을 때 한 번 제출), 화살표 50%/Shift 10% pan,
   ± zoom, `Ctrl+A` fit, `f` frames를 지원한다. 레이어 `⋯`는 fill/pattern/선폭 편집,
   Label px는 6..96 device px다. `--labels`, `--no-frames`, `--label-font-px`는
-  초기 표시 옵션이다. 전체 GTK 단축키·query/ruler parity는 아직 개발 중이다.
+  초기 표시 옵션이다. 일반 클릭/반복 클릭은 도형 선택/overlap 순환, Shift는 추가,
+  Ctrl/Cmd는 toggle이다. Inspector의 Snap probe(m)는 기본 off인 vertex/edge 조회다.
+  DRC marker 일반 클릭은 우선한다. 전체 GTK 단축키·수동 ruler parity는 아직 개발 중이다.
 - `drc` 읽기는 기존 pack(또는 .db 옆의 fresh pack)을 우선하며, 없거나 stale/corrupt이면
   읽기 전용 ASCII로 fallback한다. `--rules`/`--errs`/`--list`·소수 좌표를 지원한다.
   pack의 per-reviewer waive는 읽되 ASCII fallback에는 적용하지 않는다.

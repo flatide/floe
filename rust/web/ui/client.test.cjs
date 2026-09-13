@@ -9,7 +9,7 @@ const nodes = new Map(), images = [], sockets = [], urls = new Set(), draws = []
 const listeners = {}, docListeners = {};
 function listen(target,k,fn){const old=target[k];target[k]=old?(event)=>{old(event);fn(event);}:fn;}
 let clock = 10000;
-let drcOptions, contextChanges=0;
+let drcOptions, contextChanges=0, consumeDRC=false;
 let viewportSize = [100, 80];
 class Element {
     constructor(id, tag='div') { Object.assign(this, {id, tag, value:'', checked:false, disabled:false, hidden:false,
@@ -26,7 +26,8 @@ class Element {
     set textContent(v){this._text=v;this.children=[];}
 }
 const ctx = {imageSmoothingEnabled:true, putImageData(data,x,y) {draws.push({kind:'raw',data:[...data.data],x,y});},
-    drawImage(image,x,y) {draws.push({kind:'png',x,y});}};
+    drawImage(image,x,y) {draws.push({kind:'png',x,y});},clearRect(){},save(){},restore(){},beginPath(){},rect(){},clip(){},
+    moveTo(){},lineTo(){},setLineDash(){},closePath(){},stroke(){}};
 for (const id of [...fs.readFileSync(__dirname+'/index.html','utf8').matchAll(/\bid="([^"]+)"/g)].map(m=>m[1])) {
     nodes.set(id,new Element(id));
 }
@@ -74,10 +75,10 @@ class Socket {
 class Image {
     constructor(){this.naturalWidth=100;this.naturalHeight=80;images.push(this);}
 }
-const window={FloeProtocol:P,FloeGestures:require('./gestures.js'),FloeRulers:require('./rulers.js'),FloeDRCGroups:require('./drc-groups.js'),FloeDRC:{...DRC,bind(o){
+const window={FloeProtocol:P,FloeQuery:require('./query.js'),FloeInspect:require('./inspect.js'),FloeGestures:require('./gestures.js'),FloeRulers:require('./rulers.js'),FloeDRCGroups:require('./drc-groups.js'),FloeDRC:{...DRC,bind(o){
     drcOptions=o;const panel=DRC.bind(o),paint=panel.paint,changed=panel.contextChanged;
     panel.contextChanged=()=>{contextChanges++;changed();};panel.paint=(p,s)=>{drcDisplays.push({p,s});paint(p,s);};
-    const click=panel.click;panel.click=(...v)=>{drcClicks.push(v);return click(...v);};return panel;
+    const click=panel.click;panel.click=(...v)=>{drcClicks.push(v);return consumeDRC || click(...v);};return panel;
 }},FloePanelState:require('./panel-state.js'),FloeDRCBuild:require('./drc-build.js'),ResizeObserver:class {constructor(fn){this.fn=fn;observers.push(this);}observe(e){this.target=e;}disconnect(){this.target=null;}},devicePixelRatio:1,
     addEventListener:(k,f)=>listen(listeners,k,f),setTimeout,requestAnimationFrame:fn=>setTimeout(fn,0),cancelAnimationFrame:clearTimeout};
 const storage=new Map();
@@ -98,7 +99,8 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     }else{data.set([137,80,78,71,13,10,26,10]);d.setUint32(8,13);d.setUint32(12,0x49484452);d.setUint32(16,width);d.setUint32(20,height);}
     const header={...snapshot,type:'frame',protocol:1,connection_epoch:ep,state_rev:rev,render_rev:rev,frame_id:id,
         generation:id,round:'1',purpose:'foreground',width,height,row0:'top',format,payload_length:String(data.length),
-        final:true,partial:false,deferred:'0',labels_truncated:false,complete:true,approximate:false,query:false,perf:{},...extra};
+        final:true,partial:false,deferred:'0',labels_truncated:false,complete:true,approximate:false,query:true,
+        query_scene:{generation:id,round:'1',complete:true,summary_layers:'0'},perf:{},...extra};
     const text=new TextEncoder().encode(JSON.stringify(header)),out=new Uint8Array(4+text.length+data.length);
     new DataView(out.buffer).setUint32(0,text.length,true);out.set(text,4);out.set(data,4+text.length);
     return out.buffer;
@@ -113,6 +115,45 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     assert.equal(draws.length,1);assert.deepEqual(draws[0].data.slice(0,4),[16,0,127,255]);
     assert.equal(ws.sent.at(-1).disposition,'displayed');
     assert.equal(node('canvas').style.width,'100px');
+    // Real app wiring: the query uses the displayed/ACKed frame without
+    // issuing another render or HTTP read. This is not a stub inspector.
+    ws.receive({...snapshot,capabilities:{labels:true,query:true}});
+    const geometry={kind:'pick',count:'2',index:'0',pair:[7,0],layer_name:'<img onerror=bad>',cell_name:'TOP <script>',area_dbu2:'1500',
+        bbox_dbu:['0','10','30','60'],points_dbu:[['0','10'],['30','10'],['30','60'],['0','60']],points_truncated:false};
+    const queryClick=(x,y,mod={})=>{
+        node('viewport').mousedown({button:0,buttons:1,clientX:x,clientY:y,preventDefault(){},...mod});
+        listeners.mouseup({button:0,buttons:0,clientX:x,clientY:y,preventDefault(){},...mod});
+    };
+    const queryLast=()=>ws.sent.filter(m=>m.type==='view.query').at(-1);
+    const answerQuery=(request,hit,status='ok',target=ws)=>{
+        target.receive({type:'query.accepted',seq:request.seq,query_id:'9007199254740993',view_id:request.view_id,connection_epoch:request.connection_epoch});
+        const reply={type:'query.result',seq:request.seq,query_id:'9007199254740993',view_id:request.view_id,connection_epoch:request.connection_epoch,anchor:request.body.anchor,
+            status,hit,scene:{generation:'1',round:'1',complete:true,summary_layers:'0'},requested_summary_layers:'0'};
+        target.receive(reply);return reply;
+    };
+    const oldHttp=requests.length;queryClick(20,20);const picked=queryLast();assert(picked);
+    assert.equal(picked.body.anchor.frame_id,'1');assert.deepEqual(picked.body.position,[.2,.25]);assert.equal(picked.body.radius_px,3);
+    assert.equal(ws.sent.findIndex(m=>m.type==='frame.ack') < ws.sent.indexOf(picked),true);
+    answerQuery(picked,geometry);assert.match(node('pick-details').textContent,/<img onerror=bad>/);assert.equal(node('pick-details').children.length,0);
+    await wait(()=>!node('query-canvas').hidden);assert.equal(draws.length,1,'pick redrew native pixels');
+    assert.equal(requests.length,oldHttp,'pick made an unrelated HTTP call');
+    queryClick(20,20);assert.equal(queryLast().body.operation.nth,'1');answerQuery(queryLast(),{...geometry,index:'1',pair:[8,0]});
+    queryClick(20,20,{shiftKey:true});assert.equal(queryLast().body.operation.nth,'0');answerQuery(queryLast(),geometry);
+    assert.match(node('pick-status').textContent,/2 selected/);
+    queryClick(20,20,{ctrlKey:true});answerQuery(queryLast(),geometry);assert.match(node('pick-status').textContent,/1 selected/);
+    node('snap-probe').checked=true;node('snap-probe').onchange();node('viewport').mousemove({clientX:22,clientY:23});
+    const snapped=queryLast();assert.equal(snapped.body.operation.kind,'snap');assert.equal(snapped.body.radius_px,10);
+    answerQuery(snapped,{kind:'snap',point_dbu:['0','60'],snap:'vertex'});assert.match(node('snap-status').textContent,/vertex/);
+    node('viewport').mouseleave();assert.equal(node('snap-status').textContent,'');node('snap-probe').checked=false;node('snap-probe').onchange();
+    queryClick(20,20);const staleQuery=queryLast();node('pick-clear').onclick();answerQuery(staleQuery,geometry);
+    assert.equal(node('pick-details').textContent,'','cleared request revived the selection');
+    ws.receive({type:'error',seq:staleQuery.seq,code:'scene_summary'});assert.equal(node('notice').hidden,true,'old query error replaced current notice');
+    // Marker geometry/hits are covered by drc-markers.test.cjs; here assert
+    // that a consumed marker click does not also query a layout shape.
+    queryClick(20,20);const pendingMarker=queryLast();consumeDRC=true;queryClick(20,20);
+    assert.equal(queryLast(),pendingMarker);assert.equal(ws.sent.at(-1).type,'view.query.cancel');
+    answerQuery(pendingMarker,geometry);assert.equal(node('pick-details').textContent,'');consumeDRC=false;
+    ws.receive({...snapshot,capabilities:{labels:true,query:false}});drcClicks.length=0;
     // An accepted newer render invalidates old PNG even before its snapshot arrives.
     ws.receive(packet('png','2'));const old=images.at(-1), oldOnload=old.onload;
     node('zoom-in').onclick();const edit=ws.sent.find(m=>m.type==='view.set');
@@ -143,6 +184,15 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     assert.equal(second.sent.at(-1).disposition,'displayed');
     assert.equal(node('canvas').hidden,true);assert.equal(node('margin-canvas').hidden,false);
     assert.equal(node('margin-canvas').style.left,'-48px');
+    function marginQuery(id){
+        second.receive({...snapshot,capabilities:{...snapshot.capabilities,query:true}});
+        queryClick(20,20);const q=second.sent.filter(m=>m.type==='view.query').at(-1);
+        assert.equal(q.body.anchor.frame_id,id);assert.equal(q.body.anchor.state_rev,snapshot.state_rev);
+        assert.equal(q.body.anchor.render_rev,snapshot.render_rev);assert.deepEqual(q.body.position,[.2,.25]);
+        answerQuery(q,geometry,'ok',second);assert.match(node('pick-details').textContent,/TOP/);node('pick-clear').onclick();
+        second.receive(snapshot);drcClicks.length=0;
+    }
+    marginQuery('8');
     assert.deepEqual(DRC.point(drcDisplays.at(-1).p,0,0),[10.9375,80]);
     assert(node('perf').textContent.includes('100 × 80 px'));
     assert(!node('perf').textContent.includes('196 × 176 px'));
@@ -159,21 +209,24 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     assert.deepEqual(DRC.point(drcDisplays.at(-1).p,0,0),[-37.0625,80]);
     assert(node('status').textContent.includes('Live · margin crop'));
     assert.equal(requests.filter(r=>r.path.endsWith('/layers/0')).length,listRequests,'pan refreshed the layer panel');
+    marginQuery('8'); // Same ACKed margin, newer viewport state/render revisions.
     // Truncated labels are base only, not a completed replacement for foreground.
     snapshot.margin={frame_id:'9',origin_px:[96,48],crop_safe:false};second.receive(snapshot);
     second.receive(packet('raw','9','3',nextEpoch,{...margin,complete:false,labels_truncated:true}));
     assert.equal(node('canvas').hidden,false);assert.equal(node('margin-canvas').hidden,false);
     assert.equal(node('canvas').style.left,'-48px');
+    marginQuery('9'); // Geometry-complete margin under old labels is queryable.
     // A policy change during slow margin decoding cannot land the stale image.
     snapshot.margin.frame_id='10';second.receive(snapshot);
     second.receive(packet('png','10','3',nextEpoch,margin));const staleMargin=images.at(-1);
     staleMargin.naturalWidth=196;staleMargin.naturalHeight=176;
+    const previousLayerRow=node('layers').children[0];
     snapshot.state_rev='4';snapshot.render_rev='4';snapshot.render_key='2';snapshot.margin=null;
     second.receive(snapshot);const beforeLate=draws.length;staleMargin.onload();
     assert.equal(draws.length,beforeLate);assert.equal(node('margin-canvas').hidden,true);
     assert.equal(node('margin-canvas').width,1);
     assert.equal(second.sent.at(-1).disposition,'discarded');assert.equal(urls.size,0);
-    await wait(()=>node('layers').children.length===1);
+    await wait(()=>node('layers').children.length===1&&node('layers').children[0]!==previousLayerRow);
     const submitEvent={preventDefault(){}};
     node('font-px').value='999';const beforeInvalid=second.sent.length;node('font-px').onchange();
     assert.equal(second.sent.length,beforeInvalid);

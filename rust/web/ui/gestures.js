@@ -17,6 +17,9 @@
             if (drag.stamp !== port.stamp() || !port.ready()) { cancel(); return; }
             const x = event.clientX - drag.x, y = event.clientY - drag.y;
             if (!drag.moved && Math.abs(x) <= 8 && Math.abs(y) <= 8) { return; }
+            // Ctrl/Cmd was not a pan gesture before object picking. Opting in
+            // to modifier clicks must not introduce modifier-drag navigation.
+            if (drag.objectOnly) { cancel(); return; }
             drag.moved = true;
             drag.dx = Math.max(-drag.width, Math.min(drag.width, Math.round(x * drag.dpr)));
             drag.dy = Math.max(-drag.height, Math.min(drag.height, Math.round(y * drag.dpr)));
@@ -24,11 +27,13 @@
         port.viewport.addEventListener('mousedown', function (event) {
             if (drag) { drag.plain = drag.unchorded = false; return; }
             const box = !!(port.selectionMode && port.selectionMode());
-            if ((event.button !== 0 && event.button !== 1) || ((event.ctrlKey || event.metaKey) && !box) || event.altKey || !port.ready()) { return; }
+            if ((event.button !== 0 && event.button !== 1) || ((event.ctrlKey || event.metaKey) && !box && !port.objectClicks) || event.altKey || !port.ready()) { return; }
             const d = port.dimensions();
             drag = {x: event.clientX, y: event.clientY, button: event.button, stamp: port.stamp(),
                 width: d.pixels[0], height: d.pixels[1], dpr: d.dpr, dx: 0, dy: 0, moved: false,
-                box: box, unchorded: event.buttons === undefined || event.buttons === (event.button === 0 ? 1 : 4),
+                box: box, modifiers: [!!event.ctrlKey, !!event.metaKey, !!event.shiftKey],
+                objectOnly: !!port.objectClicks && !box && !!(event.ctrlKey || event.metaKey),
+                unchorded: event.buttons === undefined || event.buttons === (event.button === 0 ? 1 : 4),
                 plain: !event.shiftKey && (event.buttons === undefined || event.buttons === 1)};
             event.preventDefault(); port.viewport.focus(); port.cursor(true);
         });
@@ -62,6 +67,12 @@
                     done.box === !!(port.selectionMode && port.selectionMode()) && !event.altKey &&
                     (event.buttons === undefined || event.buttons === 0)) {
                     if (done.box) { port.click(event.clientX, event.clientY, event.detail === 2, {ctrlKey: !!event.ctrlKey, metaKey: !!event.metaKey, shiftKey: !!event.shiftKey}); }
+                    else if (port.objectClicks) {
+                        if (done.modifiers.every(function (v, i) { return v === [!!event.ctrlKey, !!event.metaKey, !!event.shiftKey][i]; })) {
+                            if (done.modifiers.some(Boolean)) { port.click(event.clientX, event.clientY, event.detail === 2, {ctrlKey: !!event.ctrlKey, metaKey: !!event.metaKey, shiftKey: !!event.shiftKey}); }
+                            else { port.click(event.clientX, event.clientY, event.detail === 2); }
+                        }
+                    }
                     else if (done.plain && !event.ctrlKey && !event.metaKey && !event.shiftKey) { port.click(event.clientX, event.clientY, event.detail === 2); }
                 }
             }

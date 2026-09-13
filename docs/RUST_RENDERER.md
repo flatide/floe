@@ -198,8 +198,9 @@ and may race an already completed reply. The diagnostic inline-query mode cannot
 interrupt a running stdin query. New clients drain the cancellation ACK **and**
 each query terminal before a synchronous style change. The M4a-2 local view
 controller also checks displayed-frame/worker/revision anchors. M4a-3 adds an
-owner-only WebSocket adapter with displayed receipts and safe result DTOs;
-browser interaction UI and sharing are still separate. See [M4](WEBUI_M4.ko.md).
+owner-only WebSocket adapter with displayed receipts and safe result DTOs.
+M4a-4 connects browser shape inspection and an opt-in snap probe; manual rulers,
+clip UI, browser acceptance and sharing remain separate. See [M4](WEBUI_M4.ko.md).
 
 Renderer repetition traversal supports small collinear or zero-vector
 two-dimensional grids, but explicitly rejects a degenerate per-view range

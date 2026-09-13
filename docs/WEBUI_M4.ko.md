@@ -4,8 +4,8 @@
 M2 공유 권한 추가와 실제 브라우저 pack-build 승인 클릭은 승인 대기이며,
 M0/G2·M3 현장 Firefox/ETX는 사용자 요청대로 보류다. 이 경계를 우회하지 않고
 독립적인 로컬 native 이관을 진행한다. M4 전체 완료나 GTK 은퇴를 뜻하지 않는다.
-현재는 §3의 **owner WebSocket query API**까지 연결했다. §1/2의 capability=false는
-각 선행 단계 당시의 범위이며, 브라우저 조작 UI 연결은 아직 남아 있다.
+현재는 §4의 **브라우저 도형 선택·스냅 프로브**까지 연결했다. §1/2/3의 미연결
+표기는 각 선행 단계 당시의 범위이며, 수동 ruler/clip과 전체 조작 수용은 남아 있다.
 
 ## 1. M4a-1: 표시 scene에 고정한 native pick/snap
 
@@ -352,6 +352,93 @@ latest 슬롯 무효화 확인이며 native가 중단됐다는 ACK/terminal과 �
   통과했다. 전체 검사 시작 후 추가한 정상 packet 즉시 전송 보정은 영향받는 단위·
   clippy·실제 query/stream 및 MSRV/교차 빌드를 다시 실행해 확인했다.
 
-다음은 실제 표시 projection·CSS/DPR와 query 입력/결과를 연결하는 브라우저
-pick/snap 및 수동 ruler/clip이다. 현장 Firefox/ETX, 외부 공유 권한과 pack-build
-승인 클릭 수용은 이번 owner API 검증으로 대체하지 않는다.
+브라우저 pick/snap 연결은 다음 §4로 이어진다. 수동 ruler/clip, 현장 Firefox/ETX,
+외부 공유 권한과 pack-build 승인 클릭 수용은 owner API 검증으로 대체하지 않는다.
+
+## 4. M4a-4: 브라우저 도형 선택·스냅 프로브
+
+`query.js`는 §3 API의 유계 클라이언트, `inspect.js`는 Canvas 주석/Inspector다.
+기존 ES2017·로컬 자산·인증·pan/DRC 경로를 확장하며 새 라이브러리, 외부 호스팅,
+공유 권한 또는 원본/인덱스/리뷰 파일 쓰기는 없다. native wire/버전은0.12.87을
+유지하고 UI bundle을 다시 빌드한다. 기존 GTK launcher는 유지한다.
+
+### 사용자 동작
+
+- 일반 클릭은 도형 선택, 같은 위치8 CSS px 안의 반복 클릭은 overlap 순환이다.
+  Inspector의 ←/→는 현재 지점의 이전/다음 후보를 조회한다. native 후보64개 계약을
+  유지하며 Shift는 추가, Ctrl/Cmd는 toggle이다. modifier 클릭은 최상위 후보를
+  고르고 순환을 초기화한다. 최대64개 선택에 도달하면 기존 선택을 보존하고 표시한다.
+- DRC box 모드가 입력을 소유하며, 일반 클릭의 실제 DRC marker hit는 기존 동작을
+  우선한다. modifier 클릭은 도형에 전달한다. drag/반환 drag/chord/버튼 불일치/
+  취소는 클릭이 아니다. Ctrl/Cmd drag는 이전처럼 pan을 만들지 않는다.
+- 도형의 layer/cell·native 면적(DBU²)·bounds(DBU)를 text로 표시하고, 현재 layer
+  페이지의 해당 행과 도형 윤곽을 노란색으로 강조한다. 숨은 layer page를 자동으로
+  찾아 이동하는 기능은 아직 없다. Clear/Escape로 선택·미완료 질의를 지운다.
+  DRC의 기존 Escape 처리 순서를 먼저 유지한다.
+- `Snap probe (m)`는 기본 off다. 켜면 hover의 vertex/edge를 십자로 표시하고
+  native 정수 DBU 좌표를 읽는다. **수동 ruler나 거리 측정의 대체가 아니다.**
+  이후 ruler가 같은 snap 경로를 사용한다. 반경은 pick3/snap10 CSS px를 DPR로
+  변환하되 기존 API 한계64 device px로 제한한다.
+- 요약/미완료/scene 교체/timeout/질의 오류를 "도형 없음"과 구별한다. UI는 현재
+  가시 레이어 all로 조회하므로 mixed summary 거부 시 확대하거나 summary 레이어를
+  숨겨 exact subset을 고른다. deck은 기존 미지원 이유를 보여준다.
+
+### 좌표·수명·상한
+
+- 실제로 blit하고 displayed ACK를 전송한 foreground/margin만 요청 대상이다.
+  전체 margin crop을 우선하고, 라벨 partial margin이 이전 라벨 프레임 아래에서
+  새 strip을 제공하는 경우에도 geometry-complete이면 그 margin을 선택한다.
+  margin 원래 revision이 아니라 **현재** snapshot revision과 retained frame ID를 보낸다.
+- 입력은 viewport의 정렬된 device 영역(CSS left/top의 소수 여백 포함)에서 구한
+  0..1 비율이다. margin origin을 입력에 이중 가산하지 않는다. DBU 변환/반올림은
+  Rust만 수행한다. pending edit/drag/frozen preview, 크기/DPR 불일치, 숨김/끊긴
+  연결, ACK 전에는 보내지 않는다. 응답 사용 직전 같은 표시 anchor·DPR·CSS 배치를
+  재검사한다. 새 프레임·pan·편집·재접속·모드 전환에서 이전 응답을 되살리지 않는다.
+- snap/pick 각 최신 입력1개, 공통 전송 간격80ms(최대12.5 query/s), 단일 송신
+  타이머와 종류별8s timeout이다. 500개 hover도 최신1개로 합치고 중간 입력을
+  재생하지 않는다. 아직 전송하지 않은 최신 hover가 취소될 때도 이전 native
+  in-flight 요청을 취소한다. 로컬 취소는 native drain 완료를 뜻하지 않는다.
+- 이미 접수한 도형은 같은 dataset/worker/render key의 pan에서 world 주석으로
+  유지한다. 미완료 요청은 폐기한다. render key(표시 정책/스타일), dataset/worker,
+  connection 교체에서는 선택도 초기화한다. query 결과만으로 새 render/HTTP
+  조회를 만들지 않는다. opt-in snap이 off이면 hover 질의도 없다.
+- wire ID/좌표는 u64/i64 canonical 문자열로 검증하고 text에 보존한다. Canvas
+  투영은 기존 렌더/DRC와 같은 f64 표시 연산이며 임의 정밀도 측정기가 아니다.
+  면적은 native f64 DBU² 값이다. native 윤곽512점 상한을 검증하며 truncated
+  prefix를 닫힌 polygon으로 잇지 않는다(열린 선 + 점선 bbox + 명시 문구).
+- 선택64개·윤곽512점과 viewport 픽셀 상한을 적용하는 주석 Canvas1개를 쓴다.
+  pan/hover paint는 rAF로 합치고 종료 시 주석 버퍼·타이머를 정리한다. 도형 재스캔/
+  raster·파일/scene history를 브라우저에 추가하지 않는다.
+
+### 검증과 남은 범위
+
+- `query.test.cjs`: 소수 CSS origin/DPR/margin crop, 모든 표시 anchor 경계,
+  큰 정수·잘못된 DTO·긴 윤곽·scene/summary/empty 구별,500 hover coalescing,
+  전송/대기 교체 후 취소·종류 격리·timeout·stop/resume/회수.
+- `inspect.test.cjs`: 실제 UI 모듈에 클릭·순환·추가/toggle·cap·취소·snap을 입력한다.
+  plain text, 열린 truncated 윤곽, DPR2 십자 크기, pan 주석 유지와 style/연결
+  초기화, 오류와 빈 결과 구별, 수동 ruler를 꾸며내지 않는 범위를 고정한다.
+- `client.test.cjs`: 실제 app.js/gesture/Inspector/WS ACK 경로를 함께 실행한다.
+  재렌더/HTTP 없이 selection/snap, margin crop의 새 revision, label partial의
+  geometry, late response·error 무효화를 단언한다. 기존 전체 DRC/UI 테스트와
+  object modifier/release/drag, frame query metadata 검사를 함께 실행한다.
+- 위 테스트는 결정적 DOM/Canvas 하네스이며 실제 브라우저 시각·조작 수용을
+  대신하지 않는다. 이 단계에서 사용자 브라우저 탭을 바꾸거나 pack-build 승인
+  클릭을 실행하지 않았다. 현장 Firefox/ETX는 보류이고 공유 권한도 대기 중이다.
+
+검증 결과:
+
+- ES2017 파싱과 전체 JS/UI 회귀가 `WEB UI: ALL OK`다. 새 query/Inspector 및
+  실제 app.js 연결 테스트와 기존 DRC·gesture·protocol 검사를 함께 통과했다.
+- app6개·web34개·transport8개 offline·locked 테스트, scoped 포맷·strict clippy,
+  release 자산 빌드가 통과했다. Rust 1.89.0에서도 같은 테스트를 통과했으며
+  Linux musl release 앱 교차 빌드와 x86-64 static-pie 형식을 확인했다.
+  기존 native/dependency warning은 남고 Linux 실제 실행은 미검증이다.
+- 전체 `sh tools/validate_rust.sh`가 `RUST VALIDATION: ALL OK`다. jobdeck80·
+  renderer46, KLayout 13 PX + 2 phase-exact + 14 style의 jobs1/8 게이트도 통과했다.
+  전체 검사 후 추가한 JS-only hover repaint/입력 보정은 최종 JS/UI·app/web 테스트,
+  clippy·release 자산·MSRV/musl 빌드를 다시 실행해 확인했다. native geometry는
+  이번 단계에서 변경하지 않았다. 현장 수용이나 전체 M4 완료를 뜻하지 않는다.
+
+수동 ruler(시작/끝·snap·축 고정·삭제·clear·측정), clip/내보내기, 선택 layer의
+다른 페이지 추적, 나머지 GTK 조작 parity는 다음 단계다. M4 전체 완료가 아니다.

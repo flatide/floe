@@ -8,6 +8,8 @@
   <link rel="stylesheet" href="/assets/@@BUNDLE@@/app.css">
   <script defer src="/assets/@@BUNDLE@@/protocol.js"></script>
   <script defer src="/assets/@@BUNDLE@@/gestures.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/query.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/inspect.js"></script>
   <script defer src="/assets/@@BUNDLE@@/panel-state.js"></script>
   <script defer src="/assets/@@BUNDLE@@/rulers.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc-groups.js"></script>
@@ -42,6 +44,16 @@
         <div class="check-row"><label class="check"><input id="frames" type="checkbox" disabled> Frames</label><label class="check"><input id="labels" type="checkbox" disabled> Labels</label><label class="check"><input id="mono" type="checkbox" disabled> Mono</label></div>
         <div class="form-row"><label for="font-px">Label px</label><input id="font-px" class="short" type="number" min="6" max="96" value="14" disabled></div>
       </section>
+      <section class="inspect-panel" aria-label="Geometry inspection">
+        <h2>Inspect geometry</h2>
+        <p id="pick-status" role="status">Click a shape to inspect it.</p>
+        <div class="button-row"><button id="pick-prev" disabled title="Previous overlapping shape">←</button><button id="pick-next" disabled title="Next overlapping shape">→</button><button id="pick-clear" disabled>Clear selection</button></div>
+        <pre id="pick-details"></pre>
+        <label class="check"><input id="snap-probe" type="checkbox" disabled> Snap probe (m)</label>
+        <p id="snap-status"></p>
+        <p id="query-availability" class="note">Connect a layout to inspect geometry.</p>
+        <p class="note">Click again: next overlap · Shift: add · Ctrl/Cmd: toggle. Snap probes vertices and edges; it does not measure.</p>
+      </section>
       <section class="layers-panel">
         <div class="section-title"><h2>Layers</h2><div><button id="layers-all" class="text-button" disabled>All</button><button id="layers-none" class="text-button" disabled>None</button></div></div>
         <div id="layers" class="layers"><p class="empty-list">Open a layout to see its layers.</p></div>
@@ -71,10 +83,11 @@
         <div class="zoom-buttons"><button id="zoom-out" type="button" disabled title="Zoom out (−)">−</button><button id="zoom-in" type="button" disabled title="Zoom in (+)">+</button></div>
         <div class="goto-fields"><label>X <input id="goto-x" value="0" inputmode="decimal" aria-label="Center X in micrometres"></label><label>Y <input id="goto-y" value="0" inputmode="decimal" aria-label="Center Y in micrometres"></label><label>View <input id="goto-width" value="700" inputmode="decimal" aria-label="View width in micrometres"></label><span>µm</span><button id="goto" disabled>Go</button></div>
       </form>
-      <div id="viewport" class="viewport" tabindex="0" aria-label="Layout canvas. Drag or arrow keys pan; Shift plus arrow pans ten percent; plus and minus zoom; Ctrl+A fits; F toggles frames.">
+      <div id="viewport" class="viewport" tabindex="0" aria-label="Layout canvas. Click selects a shape; repeat cycles overlaps; Shift adds; Ctrl or Command toggles. M toggles snap probe. Drag or arrow keys pan; Shift plus arrow pans ten percent; plus and minus zoom; Ctrl+A fits; F toggles frames.">
         <div id="notice" class="notice" role="alert" hidden></div>
         <canvas id="margin-canvas" width="1" height="1" aria-hidden="true" hidden></canvas>
         <canvas id="canvas" width="1" height="1" aria-label="Rendered layout"></canvas>
+        <canvas id="query-canvas" width="1" height="1" aria-label="Selected shapes and snap point" hidden></canvas>
         <canvas id="drc-canvas" width="1" height="1" aria-label="DRC markers, selected violation and CD rulers" hidden></canvas>
         <div id="empty" class="empty"><div class="empty-mark">＋</div><h1>Layout workspace</h1><p id="empty-message">Connecting to the local Rust renderer…</p></div>
         <div id="rendering" class="rendering" hidden>Rendering</div>
