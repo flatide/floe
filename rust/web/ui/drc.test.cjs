@@ -3,6 +3,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const D = require('./drc.js'), P = require('./protocol.js');
+const focus = require('./test-focus.cjs');
 const frame = {bbox_dbu:['-48','-48','148','128'],width:196,height:176};
 assert.equal(D.projection(frame,[48,48]),null,'native frame has no DBU field');
 const base = D.projection(frame,[48,48],'1');
@@ -40,10 +41,10 @@ function http(method,path,body,missing,token){return new Promise((resolve,reject
 });}
 function pending(kind){const call=calls.find(c=>!c.done&&(kind==='catalog'?c.path==='/api/v1/drc':c.body&&c.body.body.kind===(kind==='errors'?'list':kind)));assert(call,'no pending '+kind);return call;}
 function reply(kind,value){const c=pending(kind);c.done=true;if(c.token)c.token.abort=null;const b=c.body&&c.body.body;
-    c.resolve(b&&['list','filtered_step'].includes(b.kind)?{bbox_um:b.in_view?state.bbox_dbu:null,selection_rev:b.selection_rev,scanned:'64',...value}:value);return c;}
+    c.resolve(b&&['list','filtered_step'].includes(b.kind)?{bbox_um:b.in_view?state.bbox_dbu:null,selection_rev:b.selection_rev,scanned:'64',...value}:b&&b.kind==='focus'?focus.reply(b,value):value);return c;}
 async function tick(){for(let i=0;i<12;i++)await Promise.resolve();}
 function paint(){for(const [id,fn] of [...raf]){raf.delete(id);fn();}}
-const panel=D.bind({document:doc,window,protocol:P,rulers:require('./rulers.js'),groups:require('./drc-groups.js'),http,context:()=>view,navigate:n=>nav.push(n),resize:()=>resize++,
+const panel=D.bind({document:doc,window,protocol:P,rulers:require('./rulers.js'),groups:require('./drc-groups.js'),http,context:()=>view,navigate:focus.accept(nav),resize:()=>resize++,
     stateStore:{bind:o=>{o.clearTimeout(o.setTimeout(()=>{},0));let ready=false;return {attach:async()=>{ready=false;await o.apply(savedPanel);ready=true;},
         change:d=>{if(ready)savedChanges.push(d);},close(){ready=false;}};}}});
 const a={check:'0',local:'9007199254740993',global:'9007199254740994',kind:'p',status:0,bbox_um:['10','10','30','30'],points:'5000'};

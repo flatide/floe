@@ -72,6 +72,7 @@
         // accepted focus navigation, not necessarily the selected row.
         let cdTarget = null, cdGlobal = null, cdSegments = null, cdRemaining = 0, cdError = '';
         let restoring = false;
+        let isolationNotice = '';
         const groups = o.groups.bind({http: o.http, protocol: P, changed: groupsChanged,
             status: function (s) { el('drc-group-status').textContent = s; }});
         const persistence = o.stateStore.bind({http: o.http, protocol: P,
@@ -166,6 +167,9 @@
             el('drc-type').disabled = !available || !typeReady || typeBusy;
             el('drc-type-prev').disabled = !available || typeBusy || !previousTypes.length;
             el('drc-type-next').disabled = !available || typeBusy || typeNext === null;
+            const c = current(), isolated = !!c && c.state.layers_isolated === true;
+            el('drc-restore-layers').disabled = !available || !isolated || !c.connected || c.pending;
+            el('drc-layer-status').textContent = (isolated ? 'Layers isolated · Restore returns to the first visibility snapshot. ' : '') + isolationNotice;
         }
         function boxReset(off) {
             boxStart = boxEnd = null; if (off) { boxMode = false; }
@@ -302,7 +306,25 @@
         }
         function escape() {
             if (boxMode) { boxReset(!boxStart); return true; }
-            return popCD(true) || groupClear() || endFocus();
+            return popCD(true) || groupClear() || restoreLayers() || endFocus();
+        }
+        function restoreLayers() {
+            let c = current();
+            if (!c || c.state.layers_isolated !== true || restoring) { return false; }
+            // Escape cancels the pending jump even if an already-sent edit
+            // means restoration itself must wait for a later explicit input.
+            cancelStep(); cancel('focus');
+            c = current();
+            if (!c.connected || c.pending) { info('Wait for the view to reconnect or finish its current edit before restoring layers.'); return true; }
+            const t = task('restore-layers');
+            t.abort = o.restoreLayers(function (error) {
+                if (!valid('restore-layers', t, c)) { return; }
+                t.abort = null;
+                if (error) { info(error); navigationButtons(); return; }
+                isolationNotice = ''; resetCD(); endFocus(); // Keep the selected cursor for click-mode n/p.
+                info('Layer visibility restored · error focus cleared.'); navigationButtons(); savePanel();
+            });
+            navigationButtons(); return true;
         }
         function paintLater(keepHits) {
             if (!keepHits) { markerHits = []; hitStamp = ''; tooltip(''); }
@@ -385,6 +407,7 @@
             cancelStep(); rowFocus = false; select(best, !!twice, !!twice); return true;
         }
         function clearSelection() {
+            cancel('restore-layers');
             cancelStep(); jumpActive = focusVisible = rowFocus = false;
             resetCD();
             cancel('geometry'); cancel('focus'); selected = null; points = null; pointsReady = false;
@@ -395,7 +418,7 @@
         function endFocus() {
             const hadWork = stepBusy || stepContinuation || (selected && (focusVisible || jumpActive));
             if (!hadWork) { return false; }
-            cancelStep(); cancel('focus'); cancel('geometry'); points = null; pointsReady = false;
+            cancelStep(); cancel('focus'); cancel('restore-layers'); cancel('geometry'); points = null; pointsReady = false;
             resetCD();
             jumpActive = focusVisible = rowFocus = false;
             if (selected) { el('drc-selected').textContent = 'Global ' + selected.global + ' · focus cleared; n/p continues without moving the view.'; }
@@ -594,17 +617,32 @@
             const t = task('focus'), s = c.state, b = s.bbox_dbu.map(Number), scale = (b[2] - b[0]) * Number(s.dbu_um) / s.pixels[0];
             if (frame) { zoomLock = false; } else if (jumpScale !== null && Math.abs(scale / jumpScale - 1) > 1e-6) { zoomLock = true; }
             try {
-                const page = await read('focus', t, c, {kind: 'focus', check: r.check, error: r.local, fit: !zoomLock}, true); if (!page) { return; }
-                if (current().pending) { info('View input changed; select the error again to move.'); return; }
-                // Release the live list *before* navigation. Keep this error,
-                // groups and jump mode, and reload one page around its cursor.
-                // Calling the checkbox handler would clear the selection.
-                if (inView()) {
-                    el('drc-in-view').checked = false; resetFilterPage(); filterStamp = '';
-                    errorStart = r.local; loadErrors();
-                }
-                jumpScale = Number(P.decimal(page.navigation.width_um)) / s.pixels[0]; o.navigate(page.navigation); jumpCD(r);
-                info('Read-only · review files are never changed.'); savePanel();
+                const page = await read('focus', t, c, {kind: 'focus', check: r.check, error: r.local, fit: !zoomLock, isolate: true}, true); if (!page) { return; }
+                if (!current().connected || current().state.connection_epoch !== s.connection_epoch || current().pending) { info('View input or connection changed; select the error again to move.'); return; }
+                const isolation = page.layer_isolation, statuses = ['ready', 'no_metadata', 'no_rule', 'no_source_layers', 'no_match', 'unsupported_deck'];
+                if (page.check !== r.check || page.local !== r.local || !/^[0-9a-f]{64}$/.test(page.prepared_token || '') ||
+                    !isolation || !statuses.includes(isolation.status)) { throw new Error('Invalid prepared move'); }
+                cursor(isolation.matched);
+                if ((isolation.status === 'ready') !== (isolation.matched !== '0')) { throw new Error('Invalid isolated layer count'); }
+                const nextScale = Number(P.decimal(page.navigation.width_um)) / s.pixels[0];
+                if (!(nextScale > 0) || !Number.isFinite(nextScale)) { throw new Error('Invalid prepared scale'); }
+                // The client never sends metadata layer pairs or recomputes
+                // geometry. Server approval commits layers + navigation once.
+                t.abort = o.navigate(page.navigation, page.prepared_token, function (error) {
+                    if (!valid('focus', t, c)) { return; }
+                    t.abort = null;
+                    if (error) { info(error); return; }
+                    if (inView()) {
+                        el('drc-in-view').checked = false; resetFilterPage(); filterStamp = '';
+                        errorStart = r.local; loadErrors();
+                    }
+                    jumpScale = nextScale; jumpCD(r);
+                    isolationNotice = isolation.status === 'ready' ? 'Last jump: ' + isolation.matched + ' layer pairs isolated.' :
+                        isolation.status === 'unsupported_deck' ? 'Layers unchanged · physical GDS isolation is unavailable in jobdeck views.' :
+                        'Layers unchanged · this rule has no matching source-layer metadata.';
+                    info('Read-only · review files are never changed.');
+                    navigationButtons(); savePanel();
+                });
             } catch (e) { failure('focus', t, c, e); }
         }
         function syncRule(check) {
@@ -622,7 +660,7 @@
         }
         function select(r, frame, allowFocus) {
             if (!current()) { return; }
-            cancel('focus'); syncRule(r.check);
+            cancel('focus'); cancel('restore-layers'); isolationNotice = ''; syncRule(r.check);
             const same = selected && selected.check === r.check && selected.local === r.local;
             if (!selected) { jumpScale = null; zoomLock = false; }
             selected = r; focusVisible = true; if (frame) { jumpActive = true; }
@@ -760,7 +798,7 @@
             const c = current(); if (!c) { return; }
             // Cancel immediately, not after the panel GET completes. A slow
             // previous focus/step must not move the view during restoration.
-            cancelStep(); ['focus', 'geometry', 'cd', 'types', 'comparison', 'rules', 'errors', 'description', 'restore', 'group-metadata'].forEach(cancel);
+            cancelStep(); ['focus', 'restore-layers', 'geometry', 'cd', 'types', 'comparison', 'rules', 'errors', 'description', 'restore', 'group-metadata'].forEach(cancel);
             boxReset(true); groupRows = []; groupStamp = '';
             clearTimeout(filterTimer); filterTimer = null; filterStamp = '';
             const key = contextKey(c), turn = ++restoreTurn; restoring = true; navigationButtons(); renderRules(); renderErrors();
@@ -777,10 +815,11 @@
         function contextChanged() {
             markerHits = []; hitStamp = ''; tooltip('');
             const c = current(), key = contextKey(c);
+            if (c && !c.connected) { cancel('focus'); cancel('restore-layers'); }
             if (key !== bound) {
                 ++restoreTurn; clearTimeout(filterTimer); filterTimer = null; filterStamp = '';
                 persistence.close(); groups.close(); cancelAll(); boxReset(true); groupRows = []; groupStamp = ''; pageReady = false;
-                bound = key; restoring = false; rule = null; ruleRows = []; rows = []; ruleStart = errorStart = '0'; query = null;
+                bound = key; restoring = false; isolationNotice = ''; rule = null; ruleRows = []; rows = []; ruleStart = errorStart = '0'; query = null;
                 metric = null; typeStart = '0'; typeNext = null; typeReady = typeBusy = false; previousTypes.length = 0; renderTypes([]);
                 previousRules.length = previousErrors.length = 0; ruleNext = errorNext = null; clearSelection(); renderRules();
                 el('drc-rule-title').textContent = 'Choose a rule'; el('drc-description').textContent = ''; el('drc-rule-metadata').textContent = ''; el('drc-type-info').textContent = '';
@@ -825,6 +864,7 @@
             query = null; clearSelection(); resetFilterPage(); filterStamp = ''; loadErrors(); savePanel();
         };
         el('drc-frame').onclick = function () { if (selected) { cancelStep(); select(selected, true); } };
+        el('drc-restore-layers').onclick = restoreLayers;
         el('drc-step-prev').onclick = function () { step(true, false, true); };
         el('drc-step-next').onclick = function () { step(false, false, true); };
         el('drc-step-continue').onclick = function () { step(false, true, true); };

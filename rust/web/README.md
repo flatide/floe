@@ -51,8 +51,12 @@ The server now supports `focus(isolate=true)` preparation and single-use
 visibility is saved once in view state; `view.set.restore_layers` restores it.
 Snapshot `layers_isolated` survives reconnect, not a new view. Matching uses the
 entire model; missing metadata/matches and virtual jobdeck IDs never hide layers.
-UI acceptance handling and Restore/Escape integration are the next slice;
-see [M2 §16–18](../../docs/WEBUI_M2.ko.md).
+The panel uses this token-only path for error jumps. CD and live-filter effects
+wait for acceptance plus its matching authoritative snapshot, before viewport
+observers run; superseded or disconnected inputs are not replayed. Restore and
+Escape return the first visibility, then clear CD/jump focus while retaining the
+selected cursor. Missing matches and jobdeck physical-plane isolation report
+unchanged layers. See [M2 §16–19](../../docs/WEBUI_M2.ko.md).
 
 ```sh
 # Run in rust/ to use the vendored source configuration

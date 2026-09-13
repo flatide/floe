@@ -34,7 +34,7 @@ function httpImpl(method,path,body,missing,token){
     if(b.kind==='geometry') {const r=row(Number(b.error)),points=[[r.bbox_um[0],'0'],[r.bbox_um[2],'0'],[r.bbox_um[2],'1'],[r.bbox_um[0],'1']];
         const start=Number(b.start),end=Math.min(4,start+b.limit);
         return Promise.resolve({...r,precision:'1',points_dbu:points.slice(start,end),start:b.start,total:'4',next:end<4?String(end):null});}
-    if(b.kind==='focus')return Promise.resolve({navigation:{kind:'goto',center_um:[b.error,'0.5'],width_um:'4'}});
+    if(b.kind==='focus')return Promise.resolve(require('./test-focus.cjs').reply(b,{navigation:{kind:'goto',center_um:[b.error,'0.5'],width_um:'4'}}));
     if(b.kind==='measurements')return Promise.resolve({check:b.check,local:b.error,global:P.next(b.error),segments:[]});
     if(b.kind==='filtered_step') {
         if(holdStep)return new Promise(resolve=>{held={token,resolve,body:b};token.abort=()=>{};});
@@ -45,7 +45,7 @@ function httpImpl(method,path,body,missing,token){
     }
     throw new Error('unexpected request '+JSON.stringify(b));
 }
-const panel=D.bind({document,window:{requestAnimationFrame:()=>1,cancelAnimationFrame(){}},protocol:P,rulers:require('./rulers.js'),groups:require('./drc-groups.js'),http,context:()=>context,navigate:v=>moves.push(v),resize(){},
+const panel=D.bind({document,window:{requestAnimationFrame:()=>1,cancelAnimationFrame(){}},protocol:P,rulers:require('./rulers.js'),groups:require('./drc-groups.js'),http,context:()=>context,navigate:require('./test-focus.cjs').accept(moves),resize(){},
     stateStore:{bind:o=>{let ready=false;return {attach:async()=>{ready=false;if(waitRestore)await new Promise(r=>{releaseRestore=r;});await o.apply(restoreData);ready=true;},change:d=>{if(ready)saves.push(JSON.parse(JSON.stringify(d)));},close(){ready=false;}};}}});
 async function tick(){for(let i=0;i<60;i++)await Promise.resolve();}
 const count=kind=>requests.filter(r=>r.body&&r.body.body.kind===(kind==='step'?'filtered_step':kind)).length;

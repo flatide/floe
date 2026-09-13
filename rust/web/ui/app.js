@@ -14,6 +14,7 @@
     const sessionKey = 'floe-session:' + location.origin;
     let auth = null, stopped = false, socket = null, epoch = '', state = null;
     let seq = '0', queue = [], inflight = null, accepted = null, lastSend = 0;
+    const editCallbacks = new WeakMap();
     let socketSerial = 0, decode = null, reconnectTimer = null, reconnectDelay = 500;
     let catalog = [], currentId = '', currentSource = '', ownerBusy = false, submitting = false;
     let layerStart = 0, layerNext = null, layerLoad = 0, layerKey = '', selectedStyle = null;
@@ -26,6 +27,9 @@
         worker_version: 'The native renderer version does not match. Rebuild the matched binaries.',
         worker_failed: 'The renderer failed. Check the local service diagnostics; close and reopen to retry.',
         stale_state: 'The view changed in another connection. That edit was not replayed.',
+        prepared_edit_expired: 'This prepared move is no longer current. Select the error again; it was not replayed.',
+        prepared_edit_unavailable: 'The move could not be prepared. Try again.',
+        prepared_edit_limit: 'This view cannot prepare another move. Close and reopen it.',
         invalid_request: 'The requested value or selection is not supported.',
         incomplete: 'Operation finished with missing or unsupported sources.',
         cancelled: 'Operation cancelled.',
@@ -158,7 +162,7 @@
         marginCanvas.hidden = true;
     }
     function clearBuffers() {
-        foregroundFrame = null; marginFrame = null; inflightBody = null; foregroundPerf = '';
+        foregroundFrame = null; marginFrame = null; foregroundPerf = '';
         lastPlacement = null; dragShift = null;
         displayProjection = null; frozenProjection = null;
         canvas.hidden = false; canvas.width = 1; canvas.height = 1;
@@ -184,6 +188,18 @@
         }
         socket.send(text); return seq;
     }
+    function settleEdit(body, error) {
+        if (!body) { return; }
+        const done = editCallbacks.get(body); editCallbacks.delete(body);
+        if (done) { try { done(error || null); } catch (e) { report(e); } }
+    }
+    function rejectQueued(error) {
+        const old = queue; queue = []; old.forEach(function (body) { settleEdit(body, error); });
+    }
+    function rejectEdits(error) {
+        const body = inflightBody; inflight = null; inflightBody = null; accepted = null;
+        rejectQueued(error); settleEdit(body, error);
+    }
     function pump() {
         if (!live() || !epoch || inflight || !queue.length || !socket || socket.readyState !== WebSocket.OPEN) { return; }
         const wait = 65 - (Date.now() - lastSend);
@@ -191,16 +207,23 @@
         try {
             const body = queue.shift();
             inflightBody = body;
-            inflight = send({type: 'view.set', connection_epoch: epoch, view_id: currentId,
-                base_state_rev: state.state_rev, body: body});
+            const wire = {type: body.prepared_token ? 'view.apply' : 'view.set', connection_epoch: epoch, view_id: currentId, base_state_rev: state.state_rev};
+            if (body.prepared_token) { wire.token = body.prepared_token; } else { wire.body = body; }
+            inflight = send(wire);
             lastSend = Date.now();
-        } catch (e) { inflight = null; inflightBody = null; queue = []; report(e); }
+        } catch (e) { rejectEdits(e.message); report(e); }
     }
-    function edit(body) {
-        if (!live() || !epoch) { notice('Open a connected view first.'); return; }
-        if (queue.length >= 64) { notice('Input queue is full. This input was not applied.'); return; }
+    function edit(body, done) {
+        if (done) { editCallbacks.set(body, done); }
+        const error = !live() || !epoch ? 'Open a connected view first.' : queue.length >= 64 ? 'Input queue is full. This input was not applied.' : null;
+        if (error) { notice(error); settleEdit(body, error); return null; }
         if (!body.navigation || body.navigation.kind !== 'pan' || !body.navigation.snap) { freezeMargin(); }
         queue.push(body); pump(); present();
+        return function () {
+            const i = queue.indexOf(body);
+            if (i < 0) { return false; } // A sent edit may already be committed.
+            queue.splice(i, 1); settleEdit(body, 'Request cancelled'); controls(); present(); return true;
+        };
     }
     function statusSnapshot(s) {
         if (s.view_id !== currentId || s.connection_epoch !== epoch) { return; }
@@ -209,7 +232,16 @@
         if (marginFrame && !P.placement(marginFrame, s)) {
             freezeMargin(); marginFrame = null; marginCanvas.width = 1; marginCanvas.height = 1;
         }
-        state = s; controls();
+        state = s;
+        if (accepted && P.compare(s.state_rev, accepted.rev) >= 0) {
+            const body = inflightBody, error = accepted.error || (s.state_rev !== accepted.rev ?
+                'The view changed again after that edit; dependent review effects were not applied. The current view is authoritative.' : null);
+            accepted = null; inflight = null; inflightBody = null;
+            // Apply dependent UI only after the authoritative snapshot, but
+            // before live viewport filters observe the new location.
+            settleEdit(body, error);
+        }
+        controls();
         el('rendering').hidden = !['opening', 'rendering', 'cancelling'].includes(s.status);
         el('rendering').textContent = s.status === 'opening' ? 'Opening index' : 'Rendering';
         if (!displayed) { el('empty-message').textContent = s.status === 'failed' ? message(s.failure) : 'Preparing the first frame…'; }
@@ -222,7 +254,7 @@
         const b = s.bbox_dbu.map(Number), dbu = Number(s.dbu_um);
         el('viewport-info').textContent = ((b[2] - b[0]) * dbu).toPrecision(6) + ' × ' + ((b[3] - b[1]) * dbu).toPrecision(6) + ' µm';
         el('status').textContent = s.status + ' · depth ' + s.depth + ' · thin:' + s.effective_thin + (s.source_stale ? ' · SOURCE STALE' : '');
-        if (accepted && P.compare(s.state_rev, accepted.rev) >= 0) { accepted = null; inflight = null; inflightBody = null; pump(); }
+        pump();
         present();
         if (s.render_key !== layerKey) { loadLayers().catch(report); }
     }
@@ -292,7 +324,7 @@
         freezeMargin();
         ++socketSerial; finishDecode();
         if (socket) { socket.onclose = null; socket.close(); socket = null; }
-        epoch = ''; inflight = null; inflightBody = null; accepted = null; queue = [];
+        epoch = ''; rejectEdits('Connection interrupted; pending input was not replayed.');
         if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     }
     function connect() {
@@ -315,7 +347,7 @@
                     if (m.seq !== inflight) { throw new Error('Unexpected edit acknowledgement'); }
                     accepted = {rev: m.state_rev, render: m.render_rev};
                 } else if (m.type === 'error') {
-                    if (m.seq === inflight) { queue = []; accepted = {rev: '0', render: state.render_rev}; }
+                    if (m.seq === inflight) { rejectQueued(message(m.code)); accepted = {rev: '0', render: state.render_rev, error: message(m.code)}; }
                     notice(message(m.code));
                 }
             } catch (e) { report(e); ws.close(); }
@@ -324,7 +356,7 @@
             if (socket !== ws || serial !== socketSerial) { return; }
             if (gesture) { gesture.cancel(); }
             const uncertain = !!inflight || queue.length > 0;
-            freezeMargin(); epoch = ''; socket = null; finishDecode(); queue = []; inflight = null; inflightBody = null; accepted = null;
+            freezeMargin(); epoch = ''; socket = null; finishDecode(); rejectEdits('Connection interrupted; pending input was not replayed.');
             controls(); connection('Disconnected', false);
             if (uncertain) { notice('Connection interrupted. Pending input was not replayed; the restored view is authoritative.'); }
             if (!stopped && live()) {
@@ -612,7 +644,8 @@
         stateStore: window.FloePanelState, rulers: window.FloeRulers, groups: window.FloeDRCGroups, cursor: reviewCursor,
         context: function () { return !stopped && state && currentId ? {id: currentId, source: currentSource, state: state,
             connected: !!epoch && !!socket && socket.readyState === WebSocket.OPEN, pending: !!inflight || queue.length > 0 || !!dragShift} : null; },
-        navigate: nav, resize: resized});
+        navigate: function (n, token, done) { return edit({prepared_token: token}, done); },
+        restoreLayers: function (done) { return edit({restore_layers: true}, done); }, resize: resized});
     document.addEventListener('visibilitychange', function () { if (document.hidden) { finishDecode(); } else if (live() && !stopped) { connect(); } });
     setInterval(function () { if (socket && socket.readyState === WebSocket.OPEN && epoch) { try { send({type: 'ping'}); } catch (e) { report(e); } } }, 10000);
     window.addEventListener('pagehide', function () { disconnect(); clearTimeout(operationTimer); clearTimeout(resizeTimer); if (sizeObserver) { sizeObserver.disconnect(); } drcPanel.stop(); });

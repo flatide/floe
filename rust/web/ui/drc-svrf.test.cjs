@@ -60,7 +60,7 @@ function http(method,path,envelope,missing,token){
         (q.waived===null||(r.status===1)===q.waived)),next:null,scanned:'2',bbox_um:q.in_view?context.state.bbox_dbu:null,selection_rev:q.selection_rev});
     if(q.kind==='geometry')return Promise.resolve({...row(Number(q.error),q.check),precision:'1',points_dbu:[['1','1'],['5','1'],['5','3'],['1','3']].slice(0,q.limit),start:'0',total:'4',next:q.limit<4?String(q.limit):null});
     if(q.kind==='focus'){
-        const v={navigation:{kind:'goto',center_um:['3','2'],width_um:'8'}};
+        const v=require('./test-focus.cjs').reply(q,{navigation:{kind:'goto',center_um:['3','2'],width_um:'8'}});
         return holdFocus?hold(token,v,h=>{heldFocus=h;}):Promise.resolve(v);
     }
     if(q.kind==='measurements')return Promise.resolve({check:q.check,local:q.error,global:row(Number(q.error),q.check).global,segments:[]});
@@ -69,7 +69,7 @@ function http(method,path,envelope,missing,token){
 }
 const panel=D.bind({document:{getElementById:el,createElement:()=>new Element()},protocol:P,rulers:require('./rulers.js'),groups:require('./drc-groups.js'),http,
     window:{requestAnimationFrame:()=>++serial,cancelAnimationFrame(){}},context:()=>context,
-    navigate:v=>{assert(!el('drc-in-view').checked,'jump navigated before releasing In view');moves.push(v);},resize(){},
+    navigate:require('./test-focus.cjs').accept(moves),resize(){},
     stateStore:{bind:o=>{let ready=false;return {attach:async()=>{ready=false;await o.apply(saved);ready=true;},change:v=>{if(ready){saved=JSON.parse(JSON.stringify(v));saves.push(saved);}},close(){ready=false;}};}}});
 const count=k=>requests.filter(r=>r.q&&r.q.kind===k).length,last=k=>requests.filter(r=>r.q&&r.q.kind===k).at(-1);
 async function tick(){for(let i=0;i<90;i++)await Promise.resolve();}

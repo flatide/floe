@@ -1,6 +1,7 @@
 'use strict';
 // Simulated asynchronous reads/DOM; actual browser presentation is separate.
 const assert=require('node:assert/strict'), D=require('./drc.js'), P=require('./protocol.js'), R=require('./rulers.js');
+const focus=require('./test-focus.cjs');
 const nodes=new Map(), raf=new Map(), requests=[], saves=[], moves=[], drawing=[];
 let serial=0, cdHold=false, focusHold=false, heldCD=null, heldFocus=null, restoreData=null, restoreWait=false, releaseRestore=null, badCD=false;
 const ctx=new Proxy({measureText:s=>({width:s.length*6})},{get:(t,k)=>k in t?t[k]:(...v)=>drawing.push([k,...v])});
@@ -32,7 +33,7 @@ function http(method,path,body,missing,token){
     }
     if(q.kind==='focus'){
         if(focusHold)return new Promise(resolve=>{heldFocus={resolve,token};token.abort=()=>{};});
-        return Promise.resolve({navigation:{kind:'goto',center_um:['40','30'],width_um:'200'}});
+        return Promise.resolve(focus.reply(q,{navigation:{kind:'goto',center_um:['40','30'],width_um:'200'}}));
     }
     if(q.kind==='measurements'){
         if(cdHold)return new Promise(resolve=>{heldCD={resolve,token,q};token.abort=()=>{};});
@@ -42,7 +43,7 @@ function http(method,path,body,missing,token){
 }
 const panel=D.bind({document:{getElementById:el,createElement:()=>new Element()},
     window:{requestAnimationFrame:fn=>{raf.set(++serial,fn);return serial;},cancelAnimationFrame:id=>raf.delete(id)},
-    protocol:P,rulers:R,groups:require('./drc-groups.js'),http,context:()=>context,navigate:n=>moves.push(n),resize(){},stateStore:{bind:o=>{
+    protocol:P,rulers:R,groups:require('./drc-groups.js'),http,context:()=>context,navigate:focus.accept(moves),resize(){},stateStore:{bind:o=>{
         let ready=false;return {attach:async()=>{ready=false;if(restoreWait)await new Promise(r=>{releaseRestore=r;});await o.apply(restoreData);ready=true;},
             change:v=>{if(ready)saves.push(JSON.parse(JSON.stringify(v)));},close(){ready=false;}};
     }}});

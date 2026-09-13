@@ -30,7 +30,7 @@ function http(method,path,body,missing,token){
     if(q.kind==='rules')return Promise.resolve({rows:[{check:'0',name:'R',errors:'9007199254740997',waived:'1'}],next:null});
     if(q.kind==='rule')return Promise.resolve({description:'test'});
     if(q.kind==='list')return Promise.resolve({rows,next,scanned:'4',bbox_um:null,selection_rev:null});
-    if(q.kind==='focus')return Promise.resolve({navigation:{kind:'goto',center_um:['20','20'],width_um:'60'}});
+    if(q.kind==='focus')return Promise.resolve(require('./test-focus.cjs').reply(q,{navigation:{kind:'goto',center_um:['20','20'],width_um:'60'}}));
     if(q.kind==='measurements')return Promise.resolve({check:q.check,local:q.error,global:P.next(q.error),segments:[]});
     if(q.kind==='geometry'){
         if(holdGeometry)return new Promise(resolve=>{held={token,resolve};token.abort=()=>{};});
@@ -41,7 +41,7 @@ function http(method,path,body,missing,token){
 }
 const panel=D.bind({document:{getElementById:el,createElement:()=>new Element()},
     window:{requestAnimationFrame:fn=>{raf.set(++serial,fn);return serial;},cancelAnimationFrame:i=>raf.delete(i)},
-    protocol:P,rulers:require('./rulers.js'),groups:require('./drc-groups.js'),http,context:()=>context,navigate:n=>moves.push(n),resize(){},
+    protocol:P,rulers:require('./rulers.js'),groups:require('./drc-groups.js'),http,context:()=>context,navigate:require('./test-focus.cjs').accept(moves),resize(){},
     stateStore:{bind:o=>{let ready=false;return {attach:async()=>{ready=false;await o.apply(null);ready=true;},change:d=>{if(ready)saves.push(d);},close(){ready=false;}};}}});
 const base=D.projection({bbox_dbu:['-48','-48','148','128'],width:196,height:176},[48,48],'1');
 const size={pixels:[100,80],dpr:2,left:.25,top:.5};

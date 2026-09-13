@@ -106,12 +106,14 @@
       <div class="button-row"><button id="drc-step-prev" title="Previous matching error in this rule, wrapping (p)" disabled>Previous error</button><button id="drc-step-next" title="Next matching error in this rule, wrapping (n)" disabled>Next error</button></div>
       <button id="drc-step-continue" hidden>Continue search</button>
       <div class="drc-selection"><p id="drc-selected" class="note">Click to inspect · double-click to go to an error.</p><div class="button-row"><button id="drc-frame" disabled>Frame error</button><button id="drc-clear" disabled>Clear</button></div></div>
+      <div class="button-row"><button id="drc-restore-layers" title="Restore the visibility saved before the first DRC layer isolation" disabled>Restore layers</button></div>
+      <p id="drc-layer-status" class="note" role="status"></p>
       <section class="drc-constraint" aria-label="SVRF constraint comparison"><pre id="drc-comparison" role="status">Select an error to compare its parsed bound.</pre><p class="note">Parsed metadata and geometric measurement only · not a sign-off or waive decision.</p></section>
       <section class="drc-cd" aria-label="Automatic CD measurements">
         <p id="drc-cd-title" class="note" role="status">Go to an error to measure it.</p>
         <ul id="drc-cd-values"></ul>
         <div class="button-row"><button id="drc-cd-pop" title="Remove the last CD ruler (k)" disabled>Remove ruler</button><button id="drc-cd-clear" title="Clear CD rulers (Shift+K or Escape)" disabled>Clear rulers</button></div>
-        <p class="note">k removes one · Shift+K clears all. Escape clears rulers before ending error focus.</p>
+        <p class="note">k removes one · Shift+K clears all. Escape: rulers → selections → restore layers and end focus.</p>
       </section>
       <p id="drc-message" class="note" role="status">Read-only review</p>
       <p id="drc-sync-status" class="note" role="status"></p>

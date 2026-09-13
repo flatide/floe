@@ -891,7 +891,9 @@ renderd 버전과 GTK 기본값, loopback/auth 모델은 바꾸지 않았다. Li
   unsupported 상태이며 sign-off/waive 여부를 판정하지 않는다. 측정 대상은 **선택 오류**;
   CD 치수선은 §11처럼 **마지막 이동 오류**이므로 둘은 의도적으로 다를 수 있다.
   pan 시 metadata/comparison을 다시 읽지 않으며 geometry 전송량도 늘리지 않는다.
-- 성공한 오류 이동은 viewport를 바꾸기 **직전** live `In view`를 해제한다.
+- 성공한 오류 이동은 live `In view`를 해제한다. 이 단계의 navigation 제출 직전 처리에서
+  §19는 **서버 승인 + 같은 revision의 snapshot 수신 후**, viewport 추종 관찰자보다
+  먼저 해제하도록 강화했다.
   checkbox의 기존 핸들러(선택까지 지움)를 호출하지 않고 현재 선택·그룹·jump mode를
   보존한 채 그 오류 cursor에서 한 페이지만 다시 읽는다. 단순 선택 또는 거부/취소된
   오래된 focus 응답은 필터를 바꾸지 않는다. Saved viewport query와는 별도다.
@@ -922,15 +924,14 @@ renderd 버전과 GTK 기본값, loopback/auth 모델은 바꾸지 않았다. Li
   브라우저 새로고침 복원 및 End session 후 프로세스 종료/세션 파일 제거도 확인했다.
   기존 native/Pillow/GLib 경고는 남아 있으며 현장 Linux 실행을 검증한 것은 아니다.
 
-레이어 격리는 아직 미연결이다. 다음 단계에서는 source_gds를 **서버의 전체 레이어
-모델**과 매칭하고(브라우저 현재 페이지로 계산하지 않음), 첫 격리 전 가시성 snapshot을
-한 번만 저장하며 격리+goto를 한 번의 view 변경으로 적용해야 한다. jobdeck의 virtual
-level/TC 번호를 physical GDS 번호로 취급해서는 안 된다.
+이 단계에서 미연결이었던 격리는 §18의 **서버 전체 레이어 모델** 매칭과 §19의
+웹 승인 처리로 연결했다. 첫 격리 전 가시성은 한 번만 저장하며 격리+goto는 한 번의
+view 변경이다. jobdeck virtual level/TC 번호를 physical GDS 번호로 취급하지 않는다.
 
 ## 18. M2a-10d1: 레이어 격리·복원 코어와 원자적 focus API
 
 웹 조작 연결에 앞서 서버 계약을 추가했다. **이 단계만으로 기존 웹 double-click이
-격리를 실행하지는 않는다.** 다음 10d2에서 요청·승인 처리와 Restore/Escape를 연결한다.
+격리를 실행하지는 않는다.** 요청·승인 처리와 Restore/Escape의 후속 연결은 §19다.
 
 ### 상태와 매칭
 
@@ -1013,10 +1014,80 @@ release link를 통과했다. 기존 native/Pillow/GLib 경고는 남아 있다.
 변경이 없고 현장 Firefox/ETX PASS나 Linux 실행·GTK 기본값 교체를 의미하지 않는다.
 renderer wire/캐시 형식/RENDERD_VERSION도 바꾸지 않았다.
 
-## 19. 다음 경계
+## 19. M2a-10d2: 웹 격리 승인·Restore·Escape
+
+§18의 native patch 준비/적용을 기존 오류 double-click·Frame error·이동 모드 n/p·
+마커 double-click에 연결했다. 일반 pan/zoom/layer 입력은 기존 `view.set`을 유지한다.
+Python/GTK나 renderer wire·캐시·버전은 바꾸지 않았다.
+
+### 승인과 취소
+
+- focus 읽기는 `isolate:true`를 보낸다. 오류 ID·토큰 형식·상태/일치 수·유효 배율을
+  검증하지만 **브라우저가 source_gds를 매칭하거나 goto/layers를 재작성하지 않는다**.
+  실제 변경은 토큰만 담은 `view.apply` 한 건이다. 페이지에 보이는 레이어 수와 무관하다.
+- HTTP 준비 성공 또는 `accepted` 단독으로 CD/필터를 바꾸지 않는다. 승인된 **같은
+  state_rev**의 snapshot을 받은 뒤 CD·jump scale·live In view 해제를 적용한다.
+  이 callback을 viewport 추종 관찰자보다 먼저 호출하여 새 위치로 이전 필터 조회가
+  나가지 않게 한다. 다른 연결의 추가 편집으로 snapshot이 승인보다 앞서가면
+  서버 최신 상태를 따르고 해당 이동의 CD/필터 효과는 생략·안내한다.
+- HTTP 지연 중 새 선택·Escape·새 view/재접속·Reload review는 오래된 준비를 무효화한다.
+  아직 전송되지 않은 이동/복원은 기존64개 입력 큐에서 제거할 수 있다. 이미 전송한
+  편집은 서버에서 승인됐을 수 있어 **취소가 undo를 의미하지 않는다**. 늦은 callback은
+  CD/이동 모드를 되살리지 않으며 `layers_isolated`는 서버 snapshot을 그대로 따른다.
+  이미 격리된 상태의 Escape도 새 이동을 먼저 취소한다. 전송한 편집이 아직 대기 중이면
+  복원 자체는 기다려야 하며 완료 후 사용자가 다시 Escape/Restore를 눌러야 한다.
+- 토큰 만료/기준 충돌/전송 제한/큐 초과/연결 끊김은 명시 오류다. callback은 한 번만
+  완료하며 대기 입력이나 토큰을 재접속 때 자동 재전송하지 않는다. 같은 view/revision도
+  connection epoch가 바뀌었으면 이전 HTTP 준비를 자동 적용하지 않는다.
+
+### 복원과 표시
+
+- `Restore layers`는 서버의 `layers_isolated`와 연결/대기 상태로 활성화한다. 원래
+  가시성은 서버에만 두며 브라우저4 KiB 패널 상태에 pair 목록/백업을 저장하지 않는다.
+  반복 격리·중간 수동 checkbox 수정 뒤에도 첫 가시성으로 돌아간다. 새로고침/동일 view
+  재접속은 복원 가능 상태를 유지하지만 새 view로는 이어가지 않는다.
+- 복원 승인 후에만 CD·선택 outline·이동 모드를 정리한다. **오류 cursor는 유지**하므로
+  이후 n/p는 위치를 바꾸지 않는 선택 모드다. 현재 viewport·스타일·depth/detail은
+  복원하지 않는다. 복원 실패는 기존 CD/선택을 유지한다. 새 선택 후 도착한 오래된
+  복원 callback은 그 선택을 지우지 않는다.
+- Escape 우선순위는 기존 박스 모드의 모서리/모드 해제 → CD → 현재 규칙 선택 집합 →
+  레이어 복원+focus 종료다. 격리가 없으면 마지막 단계는 기존 focus 종료다.
+  수동 ruler의 우선순위는 아직 M4 대상이다.
+- 격리 결과는 별도 status 영역에 유지하여 목록 갱신의 일반 안내가 덮어쓰지 못한다.
+  metadata/일치 없음은 가시성 유지 사유를 표시한다. 모든 jobdeck mode는 아직
+  `unsupported_deck`: 물리 plane 격리를 구현한 것처럼 virtual IDs를 숨기지 않는다.
+
+### 검증
+
+- `drc-isolation.test.cjs`: HTTP 준비와 ACK 분리, 승인 전 CD/In view 무변경,
+  Restore/Escape 순서·실패 보존·새 선택/복원 경합,5000 pair를 브라우저 목록 없이 처리,
+  missing/unsupported 상태, Reload review 무이동, 늦은 HTTP/큐 취소/epoch 교체,
+  잘못된 토큰/상태·count/배율과 늦은 ACK 무시를 단언한다.
+- 실제 `app.js`를 실행하는 `client.test.cjs`: token-only wire, ACK+snapshot 후 한 번만
+  callback·관찰자 순서, 승인보다 새 snapshot의 종속 효과 거부, 큐 취소·64개 상한,
+  전송 실패/재접속 거부·자동 replay 없음. 기존 CD/마커/순회/SVRF gate도 승인 계약으로
+  갱신했으며 ES2017와 전체 UI 게이트에 배선했다.
+- 로컬 Chrome 합성 valmini/260-error pack: 처음2/0을 숨긴 뒤 Global132 이동에서
+  1/0만 격리, In view 해제와 CD/비교 표시를 확인했다. 수동3/0 추가 후 반복 이동과
+  새로고침 뒤에도 최초 가시성으로 복원했으며 viewport는 유지됐다. 복원 후 n은
+  Global134를 선택하되 gen12를 유지했다. 이후 Frame error와 Escape의
+  CD→선택 집합→복원 순서, 경고/오류 console0건, End session 후 exit0 및 세션 파일
+  제거도 확인했다. 시각 확인은 기존 dark CAD 화면의 버튼/안내·CD 배치를 대상으로 했다.
+  **현장 Firefox/ETX 또는 실칩 성능 측정이 아니다.**
+
+2026-09-13 전체 `sh tools/validate_rust.sh`를 두 차례 통과했다. KLayout13 PX+
+2 phase-exact+14 style(j1/j8), jobdeck80, renderer46, native owner/isolation·DRC/SVRF
+gate가 포함된다. 마지막 UI Escape 취소 순서 보완 후에도 전체 UI gate·내장 release
+재빌드·core67/app6/web27/transport8을 재확인했다. 최종 번들에서 Escape 후2/0만 숨긴
+원래 레이어 상태와 종료/수거를 실제 Chrome에서 다시 확인했다. fmt·전환 패키지 strict
+clippy, Rust1.89 빈 registry offline 테스트와 Linux musl release link도 통과했다.
+기존 native/Pillow/GLib 경고는 남아 있다. GTK 기본값이나 현장 게이트 판정은 바꾸지 않는다.
+
+## 20. 다음 경계
 
 1. SVRF sidecar 코어/actor/API·웹 type/상세/비교는 §15~17까지 이관했다.
-   layer isolate/복원·한 번의 goto 서버 기반은 §18이며 웹 승인 처리·Restore/Escape는 다음이다.
+   일반 레이아웃 layer isolate/복원·한 번의 goto는 §18~19까지 연결했다.
+   jobdeck 물리 plane 격리는 미완료이며 현재 명시적으로 가시성을 유지한다.
    selected/live In view 목록 필터·순회·hover는 §13~14까지 구현했다.
    손으로 그리는 ruler와 그에 따른 Escape 우선순위는 M4에서 확장한다.
    현재 페이지 마커 정책 자체를 전체 pack 마커로 확대하지 않는다.

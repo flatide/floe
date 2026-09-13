@@ -9,6 +9,7 @@ const nodes = new Map(), images = [], sockets = [], urls = new Set(), draws = []
 const listeners = {}, docListeners = {};
 function listen(target,k,fn){const old=target[k];target[k]=old?(event)=>{old(event);fn(event);}:fn;}
 let clock = 10000;
+let drcOptions, contextChanges=0;
 let viewportSize = [100, 80];
 class Element {
     constructor(id, tag='div') { Object.assign(this, {id, tag, value:'', checked:false, disabled:false, hidden:false,
@@ -35,7 +36,7 @@ const bundle='d'.repeat(40), viewId='a'.repeat(64), epoch='b'.repeat(64);
 const snapshot={type:'snapshot',view_id:viewId,connection_epoch:epoch,dataset_revision:'1',state_rev:'1',
     render_rev:'1',render_key:'1',worker_epoch:'2',bbox_dbu:['-10.9375','0','89.0625','80'],
     dbu_um:'1',pixels:[100,80],depth:'full',max_depth:'2',detail:'high',thin:'auto',effective_thin:'cull',
-    layers:{mode:'all'},frames:false,labels:false,font_px:14,mono:false,status:'idle',source_stale:false,
+    layers:{mode:'all'},layers_isolated:false,frames:false,labels:false,font_px:14,mono:false,status:'idle',source_stale:false,
     deck_skipped:'0',failure:null,submitted:'1',consumed:'1',discarded:'0',capabilities:{labels:true}};
 let open=false, lastSeq='0';
 const layerRow={pair:[7,0],name:'MASK',aliases:[],parent:null,head:false,visible:true,color:'#ffffff',fill:{kind:'solid'},width:1};
@@ -74,7 +75,8 @@ class Image {
     constructor(){this.naturalWidth=100;this.naturalHeight=80;images.push(this);}
 }
 const window={FloeProtocol:P,FloeGestures:require('./gestures.js'),FloeRulers:require('./rulers.js'),FloeDRCGroups:require('./drc-groups.js'),FloeDRC:{...DRC,bind(o){
-    const panel=DRC.bind(o),paint=panel.paint;panel.paint=(p,s)=>{drcDisplays.push({p,s});paint(p,s);};
+    drcOptions=o;const panel=DRC.bind(o),paint=panel.paint,changed=panel.contextChanged;
+    panel.contextChanged=()=>{contextChanges++;changed();};panel.paint=(p,s)=>{drcDisplays.push({p,s});paint(p,s);};
     const click=panel.click;panel.click=(...v)=>{drcClicks.push(v);return click(...v);};return panel;
 }},FloePanelState:require('./panel-state.js'),ResizeObserver:class {constructor(fn){this.fn=fn;observers.push(this);}observe(e){this.target=e;}disconnect(){this.target=null;}},devicePixelRatio:1,
     addEventListener:(k,f)=>listen(listeners,k,f),setTimeout,requestAnimationFrame:fn=>setTimeout(fn,0),cancelAnimationFrame:clearTimeout};
@@ -238,8 +240,46 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     node('source').value='deck';node('source').onchange();node('level-more').onclick();node('level-more').onclick();
     await wait(()=>node('level-list').children.length===2);
     assert.equal(requests.filter(r=>r.path.includes('/catalog/deck/levels/')).length,1,'duplicate level page');
+    // Prepared edits send only a short token. Dependent UI is completed once,
+    // after ACK+snapshot and before viewport-follow observers run.
+    const done=[],token='7'.repeat(64),beforeObservers=contextChanges;
+    const cancelSent=drcOptions.navigate({kind:'goto',center_um:['bad','ignored'],width_um:'999'},token,e=>{
+        done.push(e);assert.equal(drcOptions.context().state.layers_isolated,true);
+        assert.equal(contextChanges,beforeObservers,'live filters observed the new view before ACK callback');
+    });
+    const prepared=second.sent.at(-1);
+    assert.deepEqual(prepared,{type:'view.apply',connection_epoch:nextEpoch,view_id:viewId,base_state_rev:snapshot.state_rev,token,seq:prepared.seq});
+    assert.equal(cancelSent(),false,'sent edits cannot be unsent');assert.equal(done.length,0);
+    snapshot.state_rev=P.next(snapshot.state_rev);snapshot.render_rev=P.next(snapshot.render_rev);snapshot.layers_isolated=true;
+    second.receive({type:'accepted',seq:prepared.seq,state_rev:snapshot.state_rev,render_rev:snapshot.render_rev});assert.equal(done.length,0);
+    second.receive(snapshot);assert.deepEqual(done,[null]);second.receive(snapshot);assert.equal(done.length,1);
+    const restored=[],cancelled=[];
+    drcOptions.restoreLayers(e=>restored.push(e));const restore=second.sent.at(-1);assert.deepEqual(restore.body,{restore_layers:true});
+    const cancelQueued=drcOptions.navigate({},token,e=>cancelled.push(e));assert.equal(second.sent.at(-1),restore);
+    assert.equal(cancelQueued(),true);assert.match(cancelled[0],/cancelled/);assert.equal(cancelQueued(),false);
+    second.receive({type:'error',seq:restore.seq,code:'stale_state'});assert.equal(restored.length,0);
+    second.receive(snapshot);assert.equal(restored.length,1);assert.match(restored[0],/not replayed/);assert.equal(done.length,1);
+    assert.equal(second.sent.at(-1),restore,'cancelled queued token was transmitted');
+    const failed=[];second.bufferedAmount=20000;
+    drcOptions.navigate({},token,e=>failed.push(e));assert.match(failed[0],/Input limit/);second.bufferedAmount=0;
+    // Another authorized connection can edit between controller.edit() and
+    // the reply snapshot. Do not attach an old jump's CD/filter to that view.
+    const superseded=[];drcOptions.navigate({},token,e=>superseded.push(e));const supersededWire=second.sent.at(-1);
+    const approved=P.next(snapshot.state_rev);snapshot.state_rev=P.next(approved);
+    second.receive({type:'accepted',seq:supersededWire.seq,state_rev:approved,render_rev:snapshot.render_rev});
+    second.receive(snapshot);assert.equal(superseded.length,1);assert.match(superseded[0],/changed again/);
+    // Closing a socket rejects all queued callbacks, never silently leaving a
+    // pending review effect or replaying one on the replacement connection.
+    const interrupted=[];
+    drcOptions.navigate({},token,e=>interrupted.push(e));
+    for(let i=0;i<64;i++)drcOptions.restoreLayers(e=>interrupted.push(e));
+    drcOptions.restoreLayers(e=>interrupted.push(e));assert.equal(interrupted.length,1);assert.match(interrupted[0],/queue is full/);
+    second.close();assert.equal(interrupted.length,66);assert(interrupted.every(e=>typeof e==='string'));
+    document.hidden=false;docListeners.visibilitychange();const reconnected=sockets.at(-1);hello(reconnected,'9'.repeat(64));
+    assert(!reconnected.sent.some(m=>m.type==='view.set'||m.type==='view.apply'));
+    second.receive({type:'accepted',seq:prepared.seq,state_rev:snapshot.state_rev,render_rev:snapshot.render_rev});assert.equal(done.length,1);
     for(const s of sockets){for(let i=1;i<s.sent.length;i++){assert(P.compare(s.sent[i-1].seq,s.sent[i].seq)<0);}}
     listeners.pagehide();
     assert.equal(observers[0].target,null);
-    console.log('WEB CLIENT: ALL OK (startup/frames/epochs, margin/free-pan/DRC projection, element resize, cached layer pages, styles/font/keys, level paging, cleanup)');
+    console.log('WEB CLIENT: ALL OK (startup/frames/epochs, margin/pan/DRC, controls, token-only edits, ACK+snapshot ordering, cancellation/limits/reconnect, cleanup)');
 })().catch(e=>{console.error(e);process.exitCode=1;});
