@@ -28,9 +28,13 @@ M2a-11a의 CLI는 fresh 인접 ICE 우선/ASCII fallback이다(§20). M2a-11b의
 catalog의 format과 geometry의 points_dbu 또는 points_um으로 좌표 단위를 구별한다.
 브라우저의 임의 경로 입력이나 암묵적 index 실행은 허용하지 않는다.
 M2a-12a의 `drc/build::Build`는 명시 pack 생성·자원/쓰기 lease·진행/취소·검증/게시
-코어이며 CLI `drc --build`에서 호출한다(M2 §22). 아직 웹 write endpoint나 자동
-actor 교체는 없다. 후속 웹 연결은 동의 → 기존 DRC actor 종료/lease 해제 →
-생성 → 새로운 리뷰 identity 등록을 별도로 구현해야 한다.
+코어이며 CLI `drc --build`에서 호출한다(M2 §22). M2a-12b1은 owner 전용
+`POST /api/v1/drc/builds`(seq/drc_id/revision/view_id/approve/force/jobs),
+`GET /api/v1/drc/builds[/{seq}]`, `POST /api/v1/drc/builds/{seq}/cancel`를 연결했다.
+명시 동의 → 현재 DRC 응답/token 무효화·actor 종료/lease 해제 → 생성 → 새 리뷰
+identity 등록 순서다. native 게시 결과와 새 reader의 opening/ready/error를 구분한다.
+`GET /api/v1/drc`의 별도 build capability/ledger는 owner 작업이며 읽기 공유 권한이
+아니다. 브라우저 승인/진행 UI는 남아 있다(세부 계약은 M2 §23).
 2026-09-13 M1a-1 `rust/worker-client`와 M1a-2a/b `app/app-core`의 일반 index·info/단일 render/probe를
 구현했다. 현재 호출 계약은 [worker README](../rust/worker-client/README.md),
 [M1a 기록](WEBUI_M1A.ko.md)을 따르며 아래 서비스 전체가 존재하는 것은 아니다.

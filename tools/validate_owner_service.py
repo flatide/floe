@@ -35,6 +35,7 @@ def main(fixture):
         assert run.returncode == 0, (run.stdout, run.stderr)
         assert "RUST OWNER SERVICE: ALL OK" in run.stdout
         assert "RUST DRC ISOLATION: ALL OK" in run.stdout
+        assert "RUST DRC BUILD IDENTITY: ALL OK" in run.stdout
         assert not list(workers.iterdir()), "owner service leaked worker files"
         print(run.stdout.strip())
 

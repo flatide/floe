@@ -56,6 +56,14 @@ impl Harness {
         indexer: Indexer,
         drc: Option<(&Path, Option<&Path>)>,
     ) -> Self {
+        Self::start_with_drc_builds(paths, indexer, drc, false).await
+    }
+    async fn start_with_drc_builds(
+        paths: &[PathBuf],
+        indexer: Indexer,
+        drc: Option<(&Path, Option<&Path>)>,
+        builds: bool,
+    ) -> Self {
         let resources = Resources::new(Limits::default()).unwrap();
         let scope = AccessScope::new(&[paths[0].parent().unwrap().to_owned()]).unwrap();
         let sources = paths
@@ -69,7 +77,8 @@ impl Harness {
         options.raster_jobs = 1;
         options.budget_mb = 64;
         options.raw = false;
-        let service = Service::start(sources, Arc::clone(&resources), options, indexer).unwrap();
+        let service =
+            Service::start(sources, Arc::clone(&resources), options, indexer.clone()).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (mut gate, bootstrap) = Gateway::with_service(addr, Arc::clone(&service)).unwrap();
@@ -83,7 +92,15 @@ impl Harness {
                 &resources, scope, pack, None, rules, &source_id,
             )
             .unwrap();
-            Gateway::attach_drc(&mut gate, drc).unwrap();
+            if builds {
+                Gateway::attach_drc_registry(
+                    &mut gate,
+                    floe_web::drc::Registry::with_builds(drc, indexer).unwrap(),
+                )
+                .unwrap();
+            } else {
+                Gateway::attach_drc(&mut gate, drc).unwrap();
+            }
         }
         let (stop, rx) = oneshot::channel();
         let task = tokio::spawn(transport::serve(listener, Arc::clone(&gate), async {

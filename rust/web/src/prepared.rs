@@ -6,6 +6,7 @@ use floe_app_core::view::{Patch, Snapshot, ViewController};
 pub(crate) struct PreparedEdits {
     serial: u64,
     ready: Option<Edit>,
+    exhausted: bool,
 }
 pub(crate) struct Stamp {
     serial: u64,
@@ -17,6 +18,15 @@ struct Edit {
     patch: Patch,
 }
 impl PreparedEdits {
+    /// Revocation must also defeat a preparation still awaiting the DRC actor.
+    /// Do not reset the serial: an old finish could otherwise match a new begin.
+    pub fn invalidate(&mut self) {
+        self.ready = None;
+        match self.serial.checked_add(1) {
+            Some(next) => self.serial = next,
+            None => self.exhausted = true,
+        }
+    }
     pub fn begin(&mut self, base: u64) -> Result<Stamp, &'static str> {
         let serial = self.serial.checked_add(1).ok_or("prepared_edit_limit")?;
         let token = crate::auth::public_id().map_err(|_| "prepared_edit_unavailable")?;
@@ -29,7 +39,7 @@ impl PreparedEdits {
         })
     }
     pub fn finish(&mut self, stamp: Stamp, patch: Patch) -> Result<String, &'static str> {
-        if self.serial != stamp.serial {
+        if self.exhausted || self.serial != stamp.serial {
             return Err("prepared_edit_expired");
         }
         let token = stamp.token.clone();
@@ -68,6 +78,22 @@ impl PreparedEdits {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn revocation_cancels_ready_and_inflight_preparations_even_at_exhaustion() {
+        let mut p = PreparedEdits::default();
+        let pending = p.begin(1).unwrap();
+        p.invalidate();
+        assert!(p.finish(pending, Patch::default()).is_err());
+        let stamp = p.begin(1).unwrap();
+        let token = p.finish(stamp, Patch::default()).unwrap();
+        p.invalidate();
+        assert!(p.take(&token, 1).is_err());
+        p.serial = u64::MAX - 1;
+        let pending = p.begin(1).unwrap();
+        p.invalidate();
+        assert!(p.finish(pending, Patch::default()).is_err());
+        assert!(p.begin(1).is_err());
+    }
     #[test]
     fn newest_preparation_wins_and_tokens_are_scoped_single_use() {
         let mut plans = PreparedEdits::default();

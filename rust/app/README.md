@@ -87,7 +87,10 @@ cargo build --offline --locked --release -p floe-app -p floe-index -p floe-rende
   유지하고 잘린 레코드 개수를 표시한다. 최초 ASCII open은 전체 입력 스캔이다.
   웹은 CLI fallback과 달리 명시 파일만 읽으며 인접 ICE/ambient reviewer를
   탐색하지 않는다. ASCII에 `--drc-waives`를 함께 지정하면 오류다.
-  웹 pack-build 승인/진행/취소 연결·공유·편집/notes는 미이관이다([M2 기록](../../docs/WEBUI_M2.ko.md)).
+  웹 pack-build 서버는 명시 승인된 HTTP 작업으로만 생성/취소/새 identity 등록을
+  수행한다. 브라우저 승인/진행 화면·공유·편집/notes는 미이관이다([M2 기록](../../docs/WEBUI_M2.ko.md)).
+  생성 승인은 현재 DRC 선택/준비된 이동을 초기화하지만 레이아웃을 재오픈하지 않는다.
+  native 생성 terminal과 새 reader의 metadata open 완료는 별도 상태다.
 - `drc RESULTS.db --build`는 명시적인 쓰기 작업이다. 기존 fresh `RESULTS.db.ice`는
   재사용하고 stale/corrupt/기존 pack 교체에는 `--force`가 필요하다. `--jobs`는
   1..16, 기본12다. 원본·review sidecar는 수정하지 않는다. 읽기 옵션과 병용할 수 없다.

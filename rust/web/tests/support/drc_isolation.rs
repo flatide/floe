@@ -2,6 +2,129 @@
 use super::*;
 use floe_app_core::{jobdeck::color::Mode, managed::ManagedDataset};
 
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "run tools/validate_owner_service.py with private source files"]
+async fn explicit_pack_build_retires_prepared_focus_without_reopening_layout() {
+    let fixture = PathBuf::from(std::env::var_os("FLOE_OWNER_FIXTURE").unwrap());
+    let root = fixture.parent().unwrap().join("drc-build-identity");
+    fs::create_dir(&root).unwrap();
+    let source = root.join("design.oas");
+    fs::copy(&fixture, &source).unwrap();
+    let indexer = std::env::var_os("FLOE_INDEX_BIN").unwrap();
+    assert!(std::process::Command::new(&indexer)
+        .arg("vfs")
+        .arg(&source)
+        .arg(source.with_extension("oas.floe"))
+        .args(["--jobs", "2"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let db = root.join("review.db");
+    fs::write(
+        &db,
+        "TOP 1000\nWIDTH\n1 1 0\np 1 4\n0 0\n100 0\n100 20\n0 20\n",
+    )
+    .unwrap();
+    for writable in [false, true] {
+        let h = Harness::start_with_drc_builds(
+            std::slice::from_ref(&source),
+            native(),
+            Some((&db, None)),
+            writable,
+        )
+        .await;
+        let login = h.login().await;
+        let source_id = h
+            .call(&login, "GET", "/api/v1/catalog", Value::Null)
+            .await
+            .1["sources"][0]["source_id"]
+            .clone();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let drc = loop {
+            assert!(Instant::now() < deadline);
+            let catalog = h.call(&login, "GET", "/api/v1/drc", Value::Null).await.1;
+            assert_eq!(catalog["build"]["available"], writable);
+            let d = catalog["drc"].clone();
+            if d["phase"] == "ready" {
+                break d;
+            }
+            assert_eq!(d["phase"], "opening");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+        assert_eq!(
+            h.call(
+                &login,
+                "POST",
+                "/api/v1/operations",
+                open("1", &source_id, "level", json!({"mode":"all"}))
+            )
+            .await
+            .0,
+            202
+        );
+        assert_eq!(h.finished(&login, 1).await["phase"], "succeeded");
+        let mut socket = ReviewSocket::new(&h, &login).await;
+        let token = prepare(&h, &login, &drc, &socket, 0, true).await["prepared_token"].clone();
+        let before = socket.state.clone();
+        let req = json!({"seq":"1","drc_id":drc["id"],"revision":drc["revision"],"view_id":socket.hello["view_id"],"approve":true,"force":false,"jobs":2});
+        let (code, value) = h
+            .call(&login, "POST", "/api/v1/drc/builds", req.clone())
+            .await;
+        assert_eq!(code, if writable { 202 } else { 403 }, "{value}");
+        if writable {
+            socket.apply(&token, Some("prepared_edit_expired")).await;
+            for key in ["view_id", "state_rev", "render_rev", "bbox_dbu", "layers"] {
+                assert_eq!(socket.state[key], before[key], "{key}");
+            }
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let built = loop {
+                assert!(Instant::now() < deadline, "pack build terminal deadline");
+                let v = h
+                    .call(&login, "GET", "/api/v1/drc/builds/1", Value::Null)
+                    .await
+                    .1;
+                if v["phase"] == "succeeded" {
+                    break v;
+                }
+                assert!(
+                    !["failed", "cancelled"].iter().any(|p| v["phase"] == *p),
+                    "{v}"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            };
+            assert_eq!(
+                h.call(&login, "POST", "/api/v1/drc/builds", req).await.1,
+                built
+            );
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let adopted = loop {
+                assert!(Instant::now() < deadline);
+                let d = h.call(&login, "GET", "/api/v1/drc", Value::Null).await.1["drc"].clone();
+                if d["phase"] == "ready" {
+                    break d;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            };
+            assert_ne!(adopted["id"], drc["id"]);
+            assert_ne!(adopted["revision"], drc["revision"]);
+            assert_eq!(adopted["metadata"]["format"], "ice");
+            assert_eq!(h.resources.usage().index_jobs, 0);
+            assert_eq!(h.resources.usage().cpu_slots, 3);
+            let fresh = prepare(&h, &login, &adopted, &socket, 0, true).await;
+            socket.apply(&fresh["prepared_token"], None).await;
+            assert_ne!(socket.state["state_rev"], before["state_rev"]);
+        } else {
+            assert!(!db.with_extension("db.ice").exists());
+            // A denied write does not revoke the read-only owner's valid move.
+            socket.apply(&token, None).await;
+        }
+        socket.socket.close(None).await.unwrap();
+        h.shutdown().await;
+    }
+    println!("RUST DRC BUILD IDENTITY: ALL OK (readonly deny, stale WebSocket token, new focus, same layout, resources)");
+}
+
 struct ReviewSocket {
     socket: Socket,
     hello: Value,

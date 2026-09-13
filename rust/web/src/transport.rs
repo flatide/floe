@@ -131,7 +131,7 @@ pub struct Gateway {
     pub(crate) stopping: watch::Sender<bool>,
     pub(crate) view: Option<Arc<Attachment>>,
     pub(crate) service: Option<Arc<crate::service::Service>>,
-    pub(crate) drc: Option<Arc<crate::drc::Service>>,
+    pub(crate) drc: Option<Arc<crate::drc::Registry>>,
     startup: Option<serde_json::Value>,
     pub(crate) output_bytes: Arc<Semaphore>,
     pub(crate) encoders: Arc<Semaphore>,
@@ -252,12 +252,20 @@ impl Gateway {
     /// Attach a locally authorized read-only pack before publishing the gateway.
     /// Its source binding must be one of the owner's registered sources.
     pub fn attach_drc(gate: &mut Gate, drc: Arc<crate::drc::Service>) -> Result<(), String> {
+        Self::attach_drc_registry(gate, crate::drc::Registry::read_only(drc))
+    }
+    /// Local launcher opts the owner into explicit builds of this registered
+    /// source only. Read-only registrations and future shares do not gain writes.
+    pub fn attach_drc_registry(
+        gate: &mut Gate,
+        drc: Arc<crate::drc::Registry>,
+    ) -> Result<(), String> {
         let gate = Arc::get_mut(gate).ok_or("gateway already published")?;
         if gate.drc.is_some()
             || !gate.service.as_ref().is_some_and(|s| {
                 s.catalog()["sources"]
                     .as_array()
-                    .is_some_and(|rows| rows.iter().any(|r| r["source_id"] == drc.source_id))
+                    .is_some_and(|rows| rows.iter().any(|r| r["source_id"] == drc.source_id()))
             })
         {
             return Err("invalid DRC source registration".into());

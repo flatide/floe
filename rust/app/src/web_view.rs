@@ -47,7 +47,7 @@ const HELP: &str = "Usage: floe2-web view SOURCE [SOURCE ...] [OPTIONS]
   --png / --raw            Frame transfer (default raw)
   --frame-cache on|off      Retained frame reuse + layout margin (default on)
   --root DIRECTORY         Additional approved dependency root, repeatable
-  --drc RESULTS.db|PACK.ice Read-only DRC service bound to the first source
+  --drc RESULTS.db|PACK.ice Register DRC on first source; pack build needs owner approval
   --drc-waives FILE        Explicit existing waive sidecar (requires --drc)
   --drc-rules FILE         Explicit existing SVRF rules.json (requires --drc)
   --port N                 Loopback port (default random)
@@ -375,7 +375,7 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
         sources,
         Arc::clone(&resources),
         options.clone(),
-        indexer,
+        indexer.clone(),
         ControllerOptions {
             margin_prefetch: c.frame_cache,
             frame_cache: c.frame_cache,
@@ -402,7 +402,8 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
         // Check combined capacity before publishing a URL or starting a browser.
         // The actual view acquires its own reservation when opened by the UI.
         drop(resources.render(&options)?);
-        Gateway::attach_drc(&mut gate, drc).map_err(Error::input)?;
+        let registry = floe_web::drc::Registry::with_builds(drc, indexer)?;
+        Gateway::attach_drc_registry(&mut gate, registry).map_err(Error::input)?;
     }
     let url = format!("{}/#bootstrap={}", gate.origin(), secret.expose());
     let session = SessionFile::create(

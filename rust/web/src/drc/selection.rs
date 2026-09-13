@@ -157,7 +157,7 @@ async fn snapshot(
     if let Err(e) = transport::http_session(&gate, &headers) {
         return transport::error(e);
     }
-    let Some(drc) = gate.drc.as_ref().filter(|d| d.id == id) else {
+    let Some(drc) = gate.drc.as_ref().and_then(|r| r.current(&id)) else {
         return failure("drc_unavailable");
     };
     let Some(v) = gate
@@ -166,8 +166,17 @@ async fn snapshot(
     else {
         return failure("drc_context_changed");
     };
-    let state = v.drc_panel.lock().unwrap().groups.snapshot();
-    Json(json!({"revision":drc.revision,"view_id":view,"state":state})).into_response()
+    match gate
+        .drc
+        .as_ref()
+        .unwrap()
+        .with_current(&drc, || Ok(v.drc_panel.lock().unwrap().groups.snapshot()))
+    {
+        Ok(state) => {
+            Json(json!({"revision":drc.revision,"view_id":view,"state":state})).into_response()
+        }
+        Err(e) => failure(e),
+    }
 }
 async fn change(
     State(gate): State<Gate>,
@@ -196,7 +205,7 @@ async fn change(
     {
         return failure("invalid_drc_request");
     }
-    let Some(drc) = gate.drc.as_ref().filter(|d| d.id == id) else {
+    let Some(drc) = gate.drc.as_ref().and_then(|r| r.current(&id)) else {
         return failure("drc_unavailable");
     };
     let matches = || {
@@ -205,6 +214,7 @@ async fn change(
                 && v.source_id == drc.source_id
                 && !v.controller.is_finished()
                 && body.revision == drc.revision
+                && gate.drc.as_ref().unwrap().is_current(&drc)
                 && body
                     .state_rev
                     .as_ref()
@@ -259,12 +269,13 @@ async fn change(
         Ok(v) => v,
         Err(e) => return failure(e),
     };
-    let updated = v
-        .drc_panel
-        .lock()
-        .unwrap()
-        .groups
-        .apply(base, edit.check, edit.mode, &hits);
+    let updated = gate.drc.as_ref().unwrap().with_current(&drc, || {
+        v.drc_panel
+            .lock()
+            .unwrap()
+            .groups
+            .apply(base, edit.check, edit.mode, &hits)
+    });
     match updated {
         Ok(state) => {
             Json(json!({"revision":drc.revision,"view_id":view,"state":state})).into_response()

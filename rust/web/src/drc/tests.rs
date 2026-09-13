@@ -10,6 +10,14 @@ fn bounded_queue_drop_cancels_and_stop_drains_without_runtime_waits() {
         revision: "revision".into(),
         source_id: "source".into(),
         title: "DRC".into(),
+        registration: Registration {
+            resources: Resources::new(floe_app_core::managed::Limits::default()).unwrap(),
+            scope: AccessScope::new(&[std::env::temp_dir()]).unwrap(),
+            path: std::env::temp_dir().join("queue-test-not-opened.db"),
+            waives: None,
+            rules: None,
+            source_id: "source".into(),
+        },
         inner: Arc::new(Inner {
             state: Mutex::new(State {
                 pending: VecDeque::new(),

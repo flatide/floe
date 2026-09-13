@@ -6,16 +6,18 @@ mod http;
 mod metadata;
 pub(crate) mod panel;
 mod read;
+mod registry;
 mod selection;
 pub use dto::Request;
 use floe_app_core::{
     drc::Database, managed::Resources, registered::AccessScope, Error, ErrorKind, Result,
 };
 pub(crate) use http::routes;
+pub use registry::Registry;
 use serde_json::{json, Value};
 use std::{
     collections::VecDeque,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Condvar, Mutex,
@@ -48,8 +50,18 @@ pub struct Service {
     pub revision: String,
     pub source_id: String,
     title: String,
+    registration: Registration,
     inner: Arc<Inner>,
     thread: Mutex<Option<JoinHandle<()>>>,
+}
+#[derive(Clone)]
+struct Registration {
+    resources: Arc<Resources>,
+    scope: Arc<AccessScope>,
+    path: PathBuf,
+    waives: Option<PathBuf>,
+    rules: Option<PathBuf>,
+    source_id: String,
 }
 /// Cancelling a handler (including timeout/disconnect) cancels its queued or
 /// active work. A reply does not keep the actor or an HTTP connection alive.
@@ -68,6 +80,38 @@ impl Drop for Ticket {
     }
 }
 impl Service {
+    /// Keep a fresh, failed registration addressable after reopen admission or
+    /// path validation fails. The owner can retry; old review IDs never revive.
+    fn unavailable(registration: Registration, failure: Failure) -> Result<Arc<Self>> {
+        let identity = || {
+            crate::auth::public_id().map_err(|_| Error::new(ErrorKind::Io, "entropy unavailable"))
+        };
+        Ok(Arc::new(Self {
+            id: identity()?,
+            revision: identity()?,
+            source_id: registration.source_id.clone(),
+            title: registration
+                .path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("DRC")
+                .chars()
+                .take(256)
+                .collect(),
+            registration,
+            inner: Arc::new(Inner {
+                state: Mutex::new(State {
+                    pending: VecDeque::new(),
+                    active: None,
+                    closed: true,
+                    failure: Some(failure),
+                    metadata: None,
+                }),
+                wake: Condvar::new(),
+            }),
+            thread: Mutex::new(None),
+        }))
+    }
     /// Local launcher only. Pack and optional waive paths must be explicitly
     /// authorized; no ambient reviewer/temp lookup and no autosave creation.
     pub fn start(
@@ -118,6 +162,14 @@ impl Service {
             id,
             revision,
             source_id: source_id.into(),
+            registration: Registration {
+                resources: Arc::clone(resources),
+                scope: Arc::clone(&scope),
+                path: path.clone(),
+                waives: waives.clone(),
+                rules: rules.clone(),
+                source_id: source_id.into(),
+            },
             title: path
                 .file_name()
                 .and_then(|s| s.to_str())

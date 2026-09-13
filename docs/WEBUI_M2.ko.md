@@ -1273,7 +1273,89 @@ release link도 통과했다. workspace 전체 fmt는 기존 native 파일의 �
 DRC identity 채택은 다음 단계다. 생성 권한을 브라우저의 읽기 capability에 추가하지 않았고
 source/pack/review revision을 임의로 합치지 않는다. GTK/현장 게이트 판정은 불변이다.
 
-## 23. 다음 경계
+## 23. M2a-12b1: 웹 pack-build 서버·DRC 교체
+
+§22의 생성 코어를 인증된 owner HTTP 작업과 연결했다. 아직 브라우저의 생성 승인
+버튼/진행 UI는 연결하지 않았다. 기존 읽기 UI는 불변이며 아래 쓰기는 명시 POST로만
+실행된다. `view --drc`나 조회·재접속·catalog GET이 자동으로 pack을 만들지 않는다.
+
+### 승인·작업 계약
+
+- `GET /api/v1/drc`는 기존 `drc`와 별도 `build` capability/작업 snapshot을 반환한다.
+  로컬 CLI가 등록한 DRC source만 대상이며, 명시 ICE 또는 waive sidecar를 등록한
+  읽기는 build를 지원하지 않는다. `Gateway::attach_drc`의 읽기 전용 등록도 그대로다.
+  CLI는 `Registry::with_builds`로 owner 작업만 허용한다. 공유 capability는 아직 없고,
+  추후 읽기 공유에 이 권한을 자동 부여하지 않는다. `drc.read_only`는 review 조회와
+  notes/waive 불변을 뜻하며 별도 승인 작업의 `build.available`과 구분한다.
+- `POST /api/v1/drc/builds`는 `seq/drc_id/revision/view_id/approve/force/jobs`만 받는다.
+  `approve=true`가 필수이고 `force=true`만 기존 pack 교체 동의다. 경로·reviewer·
+  native argv는 wire에 없다. 대상은 최초 등록 ASCII 옆 `<source>.ice`로 고정한다.
+  최초 ASCII metadata open이 실패/진행 중이어도 명시 build를 시도할 수 있다.
+  실제 입력이 ICE이면 코어에서 거부하며 확장자로 ASCII를 추정하지 않는다.
+- `GET /api/v1/drc/builds[/{seq}]`, `POST /api/v1/drc/builds/{seq}/cancel`로 추적한다.
+  기존 owner ledger와 같은 구현의 **별도** 단조 sequence/32개 history이며 동일
+  요청 재전송은 재실행하지 않는다. 성공 후 ID가 바뀌어도 과거 요청은 기록으로
+  재생하고, 같은 seq의 다른 옵션/퇴거된 seq는 오류다. 한 번에 한 작업만 받는다.
+- 기존 Host/Origin·owner 세션·CSRF·16 KiB 요청 제한을 그대로 적용한다. HTTP는
+  유계 상태/DTO만 다루며 파일 검사·reader 종료 대기·native 생성·재등록은 전용
+  worker에서 수행한다. native PID/원문 로그/절대 경로는 작업 wire에 싣지 않는다.
+- jobs는1..16이며 웹 제안 기본값은4다(단독 CLI의12와 다름). 기존 `Resources`의
+  render/DRC/index 공통16-slot·foreground reserve·단일 index job admission을 쓴다.
+  가용량 초과는 Busy이며 자동으로 renderer를 중지하거나 worker 수를 낮추지 않는다.
+  OS 전체 thread/RSS/I/O cap은 아니다.
+
+### 교체 경계·취소
+
+1. 승인 시 registry 락 아래 현재 DRC를 retire하고 현재 view의 panel/groups/CD 상태와
+   준비된 focus token을 비운다. 미완료 prepare도 serial 증가로 무효화하며 serial을
+   0으로 재사용하지 않는다. 레이아웃 controller·viewport·레이어/격리 복원 snapshot·
+   renderer/cache는 건드리지 않는다. 새 DRC에서도 Restore layers가 원래 상태를 복원할 수 있다.
+2. 진행 중/대기 중 DRC 읽기를 취소하고 actor가 실제 종료해 lease를 돌려준 뒤 생성한다.
+   오래된 HTTP read/selection/panel/focus 응답은 최종 적용 시 같은 registry 락 아래
+   현재 ID/revision을 확인하므로 새 panel/이동 token을 채울 수 없다. 이미 승인 전에
+   적용된 이동은 유효하지만, 승인 후 이전 token의 WebSocket 적용은 거부한다.
+3. §22의 private staging·검증/원자 게시·cleanup/reap를 재사용한다. `--force`도
+   출력과 명시 등록 SVRF 파일이 충돌하면 거부한다(대소문자 별칭도 inode 비교).
+   원본·rules·review 파일 보존이며
+   외부 미등록 프로세스까지 잠그는 모델은 아니다.
+4. 성공/재사용은 새 pack, 실패/취소는 이전에 조회하던 파일을 **새 ID/revision**으로
+   등록한다. 인접 waive를 탐색하거나 예전 오류 ID/선택/notes를 자동 이식하지 않는다.
+   명시 rules는 다시 검증한다. 재등록 admission/path 실패도 별도 error 등록으로 남겨
+   재시도 가능하게 한다. 임의 hot-reload나 외부 교체 탐지 정책의 완성은 아니다.
+5. 작업 terminal은 native 수거/정리와 새 reader **등록 시도**까지 완료했다는 뜻이다.
+   새 reader의 metadata open은 catalog의 `opening/ready/error`로 별도 확인한다.
+   cancel 뒤 대형 ASCII 재스캔을 취소 완료 시간에 합산하지 않는다. 게시 후 늦은
+   cancel이나 review open 실패로 pack 생성 성공을 취소/실패로 바꾸지 않는다.
+   `outcome`/`directory_synced`/`cleanup_warning`과 `review` 상태를 구별해야 한다.
+6. logout·세션 만료·종료는 생성/읽기 worker를 취소하고 transport가 종료를 기다린다.
+   취소 POST의 수신은 즉시 미게시 보장이 아니며 코어의 cancel/commit 승자가 기준이다.
+   NFS syscall은 강제 중단할 수 없으므로 기존 shutdown deadline 초과는 명시 오류다.
+
+### 검증
+
+- `validate_web_drc_build.py`: PATH-empty 실제 CLI/HTTP/native 생성·fresh 재사용·force,
+  재전송·옵션 conflict, 승인/CSRF/범위/형식 거부, 공통 CPU Busy, 새 ID/빈 선택,
+  레이아웃 ID·state/render 세대·제출 횟수·bbox·layers 불변을 단언한다.
+  native 실패/손상/소수 DBU 거부·SIGTERM 무시 child의 cancel/logout 수거,
+  원본/이전 pack/review 보존·staging 정리·등록 SVRF와 출력 충돌도 포함한다.
+- owner native WebSocket gate: 읽기 전용 등록에서 생성 거부, 이미 준비된 이동의
+  생성 승인 후 거부, 새 DRC의 새 token 적용, 동일 layout 유지와 자원 반환을 검증한다.
+- registry callback/retirement 락 경합과 준비 token의 in-flight/ready/serial 소진
+  무효화는 단위 gate다. 기존 ICE/ASCII 조회·선택·SVRF/CD 회귀는 그대로 실행한다.
+
+2026-09-13 `sh tools/validate_rust.sh`가 `RUST VALIDATION: ALL OK`로 완료됐다.
+core80/app6/web29/transport8, 새 HTTP/WebSocket build gate, 기존 CLI·웹 DRC/SVRF,
+jobdeck80·renderer46·KLayout13 PX+2 phase-exact+14 style을 포함한다. 최종 inode 별칭
+보호 보완 후 해당 HTTP/owner WebSocket gate와 core/app/web/transport 테스트,
+전환 패키지 fmt/strict clippy, Rust1.89 offline 테스트와 Linux musl release link를
+다시 통과했다. 기존 native/Pillow/GLib 경고는 남아 있다. 브라우저 UI 변경은 없고,
+실칩 생성 시간/RSS·Linux 실행·현장 Firefox/ETX 검증은 이번 결과에 포함하지 않는다.
+
+다음 연결은 승인 화면에 **현재 리뷰 선택 초기화·기존 pack 교체 여부**를 명시하고,
+생성 중 패널을 닫지 않고 진행/취소를 표시하며, 새 catalog identity의 조회만 복원하는
+브라우저 controller다. UI 생성 완료나 Firefox/ETX 현장 수용을 주장하지 않는다.
+
+## 24. 다음 경계
 
 1. SVRF sidecar 코어/actor/API·웹 type/상세/비교는 §15~17까지 이관했다.
    일반 레이아웃 layer isolate/복원·한 번의 goto는 §18~19까지 연결했다.
@@ -1281,8 +1363,8 @@ source/pack/review revision을 임의로 합치지 않는다. GTK/현장 게이�
    selected/live In view 목록 필터·순회·hover는 §13~14까지 구현했다.
    손으로 그리는 ruler와 그에 따른 Escape 우선순위는 M4에서 확장한다.
    현재 페이지 마커 정책 자체를 전체 pack 마커로 확대하지 않는다.
-2. ASCII 읽기 코어/CLI·명시 등록 웹 조회는 §20~21까지 이관했다. §22의 pack-build
-   코어에 웹 승인/진행/취소와 actor 재등록을 연결한다. 기존 notes·상세 측정/룰 매핑은
+2. ASCII 읽기 코어/CLI·명시 등록 웹 조회는 §20~21까지 이관했다. §22~23의 pack-build
+   코어/서버에 브라우저 승인/진행/취소와 새 identity 조회 복원을 연결한다. 기존 notes·상세 측정/룰 매핑은
    각각 parity gate와 함께 확장한다.
 3. 공유는 설계/DRC에 묶인 읽기 capability, 발급/만료/폐기·follow/independent
    state를 별도 구현·검증. 아직 shares=false, loopback-only다.

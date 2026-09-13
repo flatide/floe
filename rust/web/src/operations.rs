@@ -21,6 +21,21 @@ pub(crate) enum Admission {
     Replay(Value),
 }
 impl Ledger {
+    /// Check retries before validating a mutable registration. A successful
+    /// build changes that registration, but an uncertain retry is still a replay.
+    pub fn replay(&self, seq: u64, signature: &str) -> Result<Option<Value>, &'static str> {
+        if let Some(record) = self.history.iter().find(|r| r.seq == seq) {
+            return if record.signature == signature {
+                Ok(Some(record.state.clone()))
+            } else {
+                Err("operation_conflict")
+            };
+        }
+        if seq <= self.high_water {
+            return Err("operation_expired");
+        }
+        Ok(None)
+    }
     pub fn admit(
         &mut self,
         seq: u64,
@@ -30,15 +45,8 @@ impl Ledger {
         if signature.len() > SIGNATURE_BYTES {
             return Err("request_too_large");
         }
-        if let Some(record) = self.history.iter().find(|r| r.seq == seq) {
-            return if record.signature == signature {
-                Ok(Admission::Replay(record.state.clone()))
-            } else {
-                Err("operation_conflict")
-            };
-        }
-        if seq <= self.high_water {
-            return Err("operation_expired");
+        if let Some(state) = self.replay(seq, &signature)? {
+            return Ok(Admission::Replay(state));
         }
         if Some(seq) != self.high_water.checked_add(1) {
             return Err("operation_sequence");
