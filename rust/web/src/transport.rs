@@ -52,6 +52,7 @@ pub(crate) struct Attachment {
     pub source_id: String,
     pub mode: &'static str,
     pub levels: Option<Vec<String>>,
+    pub drc_panel: Mutex<crate::drc::panel::Panel>,
     activity: Mutex<Activity>,
 }
 impl Attachment {
@@ -75,6 +76,7 @@ impl Attachment {
             source_id: String::new(),
             mode: "level",
             levels: None,
+            drc_panel: Mutex::new(crate::drc::panel::Panel::default()),
             activity: Mutex::new(Activity {
                 connected: 0,
                 seen: false,

@@ -20,6 +20,7 @@ fn main() {
         "src/drc/dto.rs",
         "src/drc/http.rs",
         "src/drc/read.rs",
+        "src/drc/panel.rs",
     ] {
         println!("cargo:rerun-if-changed={path}");
         hash.update(path.as_bytes());

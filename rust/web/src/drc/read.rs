@@ -49,6 +49,10 @@ pub(super) fn execute(p: &mut Pack, request: Command, stop: &AtomicUsize) -> Res
     check_cancelled(stop)?;
     p.unchanged()?;
     let value = match request {
+        Command::ValidatePanel(data) => {
+            data.validate_pack(p)?;
+            json!({})
+        }
         Command::Rules {
             start,
             search,

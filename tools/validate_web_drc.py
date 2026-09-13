@@ -100,6 +100,8 @@ def main(fixture):
             client = Client(wait(lambda: read_json(session_path), proc))
             client.call("GET", "/api/v1/drc", code=401)
             client.call("POST", "/api/v1/drc/unknown/read", {}, code=401)
+            client.call("GET", "/api/v1/drc/unknown/views/unknown/panel", code=401)
+            client.call("POST", "/api/v1/drc/unknown/views/unknown/panel", {}, code=401)
             client.login()
             assert client.call("GET", "/api/v1/capabilities")["drc"] is True
             catalog = wait(lambda: (lambda d: d if d["phase"] == "ready" else None)(
@@ -113,6 +115,45 @@ def main(fixture):
             assert opened["phase"] == "succeeded", opened
             context = dict(view_id=opened["view_id"], revision=catalog["revision"])
             endpoint = "/api/v1/drc/" + catalog["id"] + "/read"
+            panel_path = "/api/v1/drc/" + catalog["id"] + "/views/" + opened["view_id"] + "/panel"
+            fresh_panel = client.call("GET", panel_path)
+            assert fresh_panel == dict(revision=catalog["revision"], view_id=opened["view_id"],
+                                       state=dict(panel_rev="1", body=None))
+            chosen = next(i for i, c in enumerate(expected) if c["errors"])
+            panel = dict(search="<script>", rule_start="0", check=str(chosen), error_start="0",
+                         query=None, waived=False, selected=dict(check=str(chosen), error="0"),
+                         markers=True, shown=True, jump_scale=".25", zoom_lock=True)
+
+            def save_panel(value, base="1", code=200, **extra):
+                return client.call("POST", panel_path, dict(revision=catalog["revision"],
+                                    base_panel_rev=base, body=value, **extra), code)
+
+            client.call("POST", panel_path, dict(revision="stale", base_panel_rev="1", body=panel), 409)
+            # CSRF remains mandatory for in-memory writes, not just file writes.
+            csrf = client.csrf
+            client.csrf = "wrong"
+            save_panel(panel, code=401)
+            client.csrf = csrf
+            save_panel(dict(panel, path="/etc/passwd"), code=400)
+            save_panel(dict(panel, selected=dict(check=str(chosen), error="999999999")), code=400)
+            save_panel(dict(panel, check=str(len(expected))), code=400)
+            save_panel(dict(panel, rule_start=str(len(expected)+1)), code=400)
+            save_panel(dict(panel, error_start="999999999"), code=400)
+            save_panel(dict(panel, jump_scale="NaN"), code=400)
+            save_panel(dict(panel, search="x"*257), code=400)
+            save_panel(dict(panel, query=dict(bbox_um=["0","0","1","1"], state_rev="999999",
+                                              cursor=dict(check="0",error="0"))), code=400)
+            assert client.call("GET", panel_path) == fresh_panel, "invalid state committed"
+            saved = save_panel(panel)
+            assert saved["state"] == dict(panel_rev="2", body=panel)
+            assert save_panel(panel) == saved, "uncertain retry was not idempotent"
+            assert client.call("GET", panel_path) == saved, "state did not survive a fresh HTTP read"
+            assert save_panel(dict(panel, markers=False), code=409)["error"] == "drc_panel_conflict"
+            changed = save_panel(dict(panel, markers=False), base="2")
+            assert changed["state"]["panel_rev"] == "3"
+            assert save_panel(panel, base="2", code=409)["error"] == "drc_panel_conflict"
+            assert client.call("GET", panel_path) == changed
+            assert fingerprint(data) == before, "panel state wrote review files"
 
             def read(body, code=200, ctx=None):
                 v = client.call("POST", endpoint, dict(ctx or context, body=body), code)
@@ -215,6 +256,10 @@ def main(fixture):
             reopened = client.finished(2, proc)
             assert reopened["phase"] == "succeeded", reopened
             read(rules, 409)
+            client.call("GET", panel_path, code=409)
+            save_panel(panel, base="3", code=409)
+            fresh_path = panel_path.replace(opened["view_id"], reopened["view_id"])
+            assert client.call("GET", fresh_path)["state"] == dict(panel_rev="1", body=None), "new view inherited old panel"
             context["view_id"] = reopened["view_id"]
             # External truncation gives a safe, path-free error, not SIGBUS.
             packed.write_bytes(b"truncated")
@@ -232,7 +277,7 @@ def main(fixture):
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     proc.communicate(timeout=5)
-    print("WEB DRC: ALL OK (auth, scoped IDs, pages, coordinates, waive, queries, focus/in-view, stale view, read-only, cancellation/reap)")
+    print("WEB DRC: ALL OK (auth, scoped IDs, pages, coordinates, waive, queries, focus/in-view, panel CAS/replay, stale view, read-only, cancellation/reap)")
 
 
 if __name__ == "__main__":

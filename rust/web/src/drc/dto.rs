@@ -1,9 +1,9 @@
 use super::Failure;
 use floe_app_core::drc::Cursor;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CursorDto {
     pub check: String,
@@ -51,6 +51,7 @@ pub enum Request {
     },
 }
 pub(super) enum Command {
+    ValidatePanel(Box<super::panel::Data>),
     Rules {
         start: usize,
         search: String,
@@ -97,7 +98,7 @@ pub(super) struct FocusContext {
     pub dbu: f64,
     pub pixels: [u32; 2],
 }
-fn number(s: &str) -> Result<u64, Failure> {
+pub(super) fn number(s: &str) -> Result<u64, Failure> {
     if s.len() > 20 {
         return Err("invalid_drc_request");
     }

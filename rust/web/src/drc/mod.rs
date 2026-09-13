@@ -2,6 +2,7 @@
 //! bounded DTOs/tickets. No path/reviewer/native command is accepted on the wire.
 mod dto;
 mod http;
+pub(crate) mod panel;
 mod read;
 pub use dto::Request;
 use floe_app_core::{
@@ -172,6 +173,9 @@ impl Service {
             } => *target = context,
             _ => (),
         }
+        self.enqueue(request)
+    }
+    fn enqueue(&self, request: dto::Command) -> std::result::Result<Ticket, Failure> {
         let mut s = self.inner.state.lock().unwrap();
         if let Some(code) = s.failure {
             return Err(code);

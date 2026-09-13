@@ -148,7 +148,8 @@ strict clippy, Rust 1.89/빈 registry/offline 테스트·Linux musl release link
   맞춘다. 점 오류의 기본 폭은 0.1 µm. 사용자가 zoom을 바꾼 뒤 다른 오류로
   이동하면 그 배율을 유지하며 Frame error/Clear로 고정을 해제한다.
   `n`/`p`와 오류 행 위/아래는 **현재 페이지 안에서만** 이동한다. 경계는 안내하고
-  페이지 버튼을 사용한다. 전체 규칙 간 자동 순회는 아직 없다.
+  페이지 버튼을 사용한다. 기존 GTK의 **현재 규칙/필터 결과 안에서 페이지를 넘어
+  순환**하는 동작은 아직 미이관이다(규칙을 전부 가로지르는 순회가 아님).
 - In view는 모든 규칙을 현재 viewport에서 검색한다. 후속 페이지는 최초 bbox에
   고정하며 pan/zoom 뒤에는 이전 뷰 결과임을 표시한다. 자동 전체 페이지 수집이나
   매 pan마다 DRC 재검색은 하지 않는다. Markers는 현재 페이지의 최대64개 표시다.
@@ -198,12 +199,47 @@ ResizeObserver가 없어도 기본 경로는 유지하며 현장 지원 판정�
   경고는 남아 있으며 Linux 실행/현장 브라우저 성능 PASS를 의미하지 않는다.
 
 새로고침은 native view를 복원하지만 **DRC 선택/필터는 아직 초기화**한다.
-화면 오류 hit-test/box selection, 전체 오류 순회, SVRF 연동/자동 CD·측정,
+화면 오류 hit-test/box selection, 현재 규칙의 페이지 횡단 순회, SVRF 연동/자동 CD·측정,
 선택 상태의 서버 보존/공유·waive/note 쓰기는 이 단계의 완료 범위가 아니다.
 
-## 4. 다음 경계
+## 4. M2a-4a: view별 DRC 패널 상태 API
 
-1. DRC 선택/필터·이동 상태 서버 보존과 전체 오류 순회를 단계적으로 연결한다.
+`GET/POST /api/v1/drc/{id}/views/{view_id}/panel`을 추가했다. 이 단계는 **서버
+API 기반**이며 브라우저의 자동 복원 연결은 M2a-4b다. 기존 read-only 표현은
+pack/waive/notes 파일에 대한 것이고, 이 API는 열린 view의 메모리만 변경한다.
+
+- 저장 항목: 규칙 검색·현재 규칙 페이지/선택, 오류 페이지·waive 필터,
+  선택 check/local ID, 고정된 In view query bbox/cursor·당시 state_rev,
+  marker/패널 가시성, 오류 이동의 zoom 고정 상태. 번호는 u64 문자열이며
+  이름/좌표 수와 길이를 구조적으로 제한한다. 과거 페이지 전체/좌표 목록은 저장하지 않는다.
+- view attachment당 한 상태 + `panel_rev`가 있고 초기값은 1/body=null이다.
+  pack revision과 view ID가 반드시 일치해야 한다. view를 닫고 새로 열면 새 상태다.
+  서버 재시작·view 만료 뒤까지 유지되는 영속 저장이 아니다. HTTP 연결을 새로
+  맺어도 같은 열린 view이면 GET으로 복원할 수 있다.
+- POST는 `{revision, base_panel_rev, body}`. 다른 값으로 변경할 때만 revision을
+  올린다. 같은 요청의 결과 불명확 재시도는 상태가 동일할 때만 idempotent 성공,
+  오래된 base의 다른 상태는 409 `drc_panel_conflict`다. 병렬 요청도 commit 락에서
+  다시 검사한다. 따라서 늦은 탭을 무조건 최종 writer로 취급하지 않는다.
+- 구조/유한 좌표/양수 배율/길이는 HTTP에서 유계 검사하고, 실제 rule/error/cursor
+  범위는 기존 actor의 metadata로 검사한다(좌표 decode 없음). 검증 중 취소·파일
+  변경·닫힌 view는 기존 취소/오류 계약을 따르며 성공 전에 인증·view를 재확인한다.
+  검증 실패나 revision overflow에는 이전 상태를 보존한다.
+- native render state/worker generation은 바뀌지 않으며 implicit goto·waive/note
+  쓰기·색인도 하지 않는다. 공유 권한과 충돌 조정 UI를 구현했다는 뜻은 아니다.
+
+게이트: 동시 같은 base의 서로 다른 상태는 하나만 commit, retry/conflict/overflow,
+문자열/좌표 한계 단위 테스트. 실제 HTTP는 무인증/잘못된 CSRF·revision·참조·cursor,
+새 연결 GET/retry/conflict/새 view 초기화, 원본 파일·render revision 비변경을 단언한다.
+2026-09-13: 전체 `sh tools/validate_rust.sh` ALL OK, web/app strict clippy와
+Rust 1.89/offline 테스트·Linux musl release link 통과. 브라우저 저장 큐 모듈은
+별도로 선행 테스트했지만 이 API 단계의 번들에는 아직 연결하지 않았다.
+
+## 5. 다음 경계
+
+1. M2a-4b에서 브라우저의 선택/필터를 위 API에 연결하고 새로고침/재접속을 검증한다.
+   현재 규칙/필터 안의 페이지 횡단 순회는 별도 작은 단계로 연결한다.
+   GTK의 단일 click=선택/초점, double-click=이동, Escape 뒤 n/p=뷰 이동 없이
+   초점 변경도 조작 parity로 남아 있다(현 M2a-3 click은 선택+goto).
 2. ASCII/index 흐름·기존 notes·상세 측정/룰 매핑은 각각 parity gate와 함께 확장.
 3. 공유는 설계/DRC에 묶인 읽기 capability, 발급/만료/폐기·follow/independent
    state를 별도 구현·검증. 아직 shares=false, loopback-only다.

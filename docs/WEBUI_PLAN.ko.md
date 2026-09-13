@@ -16,6 +16,7 @@ M1b-4b에서 drag·fill/width/font 편집·기본 GTK 단축키를 연결했다.
 M2a-1에서 기존 DRC ICE pack 읽기·공간 페이지·waive 조회 CLI를 이관했다.
 M2a-2에서 DRC 전용 actor·자원 예약과 등록 ID 기반 인증 읽기 API를 연결했다.
 M2a-3에서 규칙/오류 페이지·waive 필터·goto·표시 프레임에 정렬된 DRC overlay를 연결했다.
+M2a-4a에서 view별 DRC 패널 상태의 서버 메모리 보존·revision 충돌 API를 추가했다(브라우저 복원 연결은 다음).
 전체 조작 parity와 M0/Firefox/ETX 현장 검증은 아직 완료되지 않았다.
 상세 범위는 [M1b 기록](WEBUI_M1B.ko.md)과 [M2 기록](WEBUI_M2.ko.md). 여기의 M0~M5는 **웹 전환 단계**이며
 jobdeck/occupancy의 같은 이름 단계와 별개다. 개발 기준과 합류 규칙은 §11.
