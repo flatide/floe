@@ -51,7 +51,11 @@ M4c-1의 `exports::clip::Job`/`exports::artifacts::Store`는 관리형 exact cli
 파일 소유 코어다(M4 §12). M4c-2는 owner `view.clip.prepare`와 별도 `/exports`
 ledger, 승인/취소·artifact metadata/폐기·chunk 다운로드를 연결했다(M4 §13).
 다운로드 GET는 cookie+header CSRF, native browser form POST는 cookie+고정 body
-CSRF로 인증한다. 임의 파일·guest 권한·자동 export는 없고 clip UI는 다음 단계다.
+CSRF로 인증한다. M4c-3은 현재 viewport 준비/승인·취소·파일 목록/다운로드 UI다.
+`GET /exports`의 `artifacts` 목록은 작업 이력32개와 독립적이므로, 이력에서 사라진
+ready 파일도 TTL 안에는 발견/다운로드/폐기할 수 있다. 전역 `capabilities.exports`와
+view의 `capabilities.clip`(layout만 true)을 함께 요구한다. 임의 파일·guest 권한·자동
+export는 없고 native form은 같은 출처 POST body에만 CSRF를 넣는다.
 2026-09-13 M1a-1 `rust/worker-client`와 M1a-2a/b `app/app-core`의 일반 index·info/단일 render/probe를
 구현했다. 현재 호출 계약은 [worker README](../rust/worker-client/README.md),
 [M1a 기록](WEBUI_M1A.ko.md)을 따르며 아래 서비스 전체가 존재하는 것은 아니다.

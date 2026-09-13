@@ -11,6 +11,7 @@
   <script defer src="/assets/@@BUNDLE@@/query.js"></script>
   <script defer src="/assets/@@BUNDLE@@/inspect.js"></script>
   <script defer src="/assets/@@BUNDLE@@/measure.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/clip.js"></script>
   <script defer src="/assets/@@BUNDLE@@/panel-state.js"></script>
   <script defer src="/assets/@@BUNDLE@@/rulers.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc-groups.js"></script>
@@ -63,6 +64,28 @@
         <pre id="ruler-auto"></pre>
         <p class="note">Select 2+ shapes, then enter Ruler: nearest-neighbour bbox gaps, not contour distances. Undo follows creation order across manual, bbox and CD rulers.</p>
         <p class="note">Axis-aligned by default · Shift: free angle · Escape: cancel point, exit mode, clear rulers.</p>
+      </section>
+      <section id="clip-panel" class="clip-panel" aria-label="Exact OASIS export" hidden>
+        <h2>Export exact clip</h2>
+        <button id="clip-open" aria-expanded="false" aria-controls="clip-form" disabled>Clip current viewport…</button>
+        <p class="note">Full-depth source geometry, independent of detail, summary and style. Layout only; no jobdeck, labels, frames or DRC markers.</p>
+        <form id="clip-form" hidden>
+          <div class="form-row"><label for="clip-layers">Layers</label><select id="clip-layers"><option value="visible">Visible layers</option><option value="all">All layers</option><option value="none">None (empty file)</option></select></div>
+          <div class="form-row"><label for="clip-jobs">Jobs</label><input id="clip-jobs" class="short" type="number" min="1" max="16" value="4" required></div>
+          <label for="clip-cell-name">Output cell name</label><input id="clip-cell-name" value="FLOE_CLIP" maxlength="4096" required autocomplete="off" spellcheck="false">
+          <div class="button-row"><button id="clip-prepare" type="submit">Review clip</button><button id="clip-dismiss" type="button">Dismiss</button></div>
+          <div id="clip-review" hidden>
+            <p class="note">Exact bounds: left, bottom, right, top</p><pre id="clip-bounds"></pre>
+            <p id="clip-selection"></p><p id="clip-options"></p>
+            <p id="clip-stale" class="note" hidden>Source changed since indexing. Export uses the indexed geometry, not newer source contents.</p>
+            <button id="clip-approve" type="button" class="primary" disabled>Approve export</button>
+          </div>
+        </form>
+        <p id="clip-status" role="status">No clip requested.</p>
+        <div class="button-row"><button id="clip-cancel" hidden>Cancel clip</button><button id="clip-resolve" hidden>Resolve request</button><button id="clip-refresh">Refresh</button></div>
+        <p id="clip-note" class="note" role="status"></p><p id="clip-usage" class="note"></p>
+        <div id="clip-files" aria-label="Available clip files"></div>
+        <p class="note">Files expire after 10 minutes. Maximum 4 files, 512 MiB each. Closing the view does not cancel an approved clip; ending the session does.</p>
       </section>
       <section class="layers-panel">
         <div class="section-title"><h2>Layers</h2><div><button id="layers-all" class="text-button" disabled>All</button><button id="layers-none" class="text-button" disabled>None</button></div></div>

@@ -104,7 +104,11 @@ impl Service {
             self.decorate(row);
         }
         let usage = self.inner.store.usage();
+        let artifacts=self.inner.store.inventory().into_iter().map(|(id,i)|json!({
+            "id":id.to_string(),"bytes":i.size_bytes.to_string(),"expires_in_ms":i.expires_in_ms.to_string(),"name":format!("floe-clip-{id}.oas")
+        })).collect::<Vec<_>>();
         json!({"operations":ledger,"available":!s.closed,"kind":"exact_clip","jobs_default":4,"jobs_min":1,"jobs_max":16,
+            "artifacts":artifacts,
             "limits":{"artifacts":4,"artifact_bytes":"536870912","total_bytes":"2147483648","readers":2,"ttl_seconds":600},
             "usage":{"entries":usage.entries,"pending":usage.pending,"bytes":usage.bytes.to_string(),"readers":usage.readers}})
     }
@@ -175,12 +179,13 @@ impl Service {
     }
     pub fn cancel(&self, seq: u64) -> std::result::Result<Value, &'static str> {
         let s = self.inner.state.lock().unwrap();
-        let state = s.ledger.get(seq).ok_or("operation_expired")?;
+        let mut state = s.ledger.get(seq).ok_or("operation_expired")?;
         if s.ledger.active() == Some(seq) {
             if let Some(stop) = &s.stop {
                 stop.store(1, Ordering::Relaxed);
             }
         }
+        self.decorate(&mut state);
         Ok(state)
     }
     pub fn request_stop(&self) {

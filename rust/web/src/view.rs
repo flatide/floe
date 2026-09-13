@@ -279,7 +279,7 @@ pub fn snapshot(s: &Snapshot, m: &Model, view_id: &str, connection_epoch: &str) 
         "margin":s.margin.map(|v|json!({"frame_id":v.frame_id.to_string(),"origin_px":v.origin_px,"crop_safe":v.crop_safe})),
         "margin_working":s.margin_working,"margin_submitted":s.margin_submitted.to_string(),"crop_hits":s.crop_hits.to_string(),
         "margin_failure":s.margin_failure.as_ref().map(|(kind,_)|safe_error(*kind)),
-        "capabilities":{"labels":!m.deck,"frames":true,"margin":s.margin_enabled,"query":!m.deck,"clip":false,"edit_source":false}})
+        "capabilities":{"labels":!m.deck,"frames":true,"margin":s.margin_enabled,"query":!m.deck,"clip":!m.deck,"edit_source":false}})
 }
 pub fn safe_error(kind: floe_app_core::ErrorKind) -> &'static str {
     use floe_app_core::ErrorKind as K;

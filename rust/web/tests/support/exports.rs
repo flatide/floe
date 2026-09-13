@@ -160,10 +160,24 @@ async fn exact_export_receipts_replays_and_authenticated_binary_downloads() {
     assert_eq!((a.0, b.0), (202, 202));
     let result = done(&h, &l, 1).await;
     assert_eq!(result["phase"], "ready", "{result}");
+    let catalog = h.call(&l, "GET", "/api/v1/exports", Value::Null).await.1;
+    assert_eq!(catalog["usage"]["entries"], 1);
+    assert_eq!(catalog["artifacts"].as_array().unwrap().len(), 1);
+    assert_eq!(catalog["artifacts"][0]["id"], result["artifact"]["id"]);
     assert_eq!(
-        h.call(&l, "GET", "/api/v1/exports", Value::Null).await.1["usage"]["entries"],
-        1
+        catalog["artifacts"][0]["bytes"],
+        result["artifact"]["bytes"]
     );
+    assert_eq!(catalog["artifacts"][0]["name"], result["artifact"]["name"]);
+    // Completion may win the cancel race: the response has the same decorated
+    // ready schema as GET, not a malformed receipt that the UI must guess at.
+    let cancel = h
+        .call(&l, "POST", "/api/v1/exports/1/cancel", json!({}))
+        .await
+        .1;
+    assert_eq!(cancel["phase"], "ready");
+    assert_eq!(cancel["artifact"]["available"], true);
+    assert!(cancel["artifact"]["expires_in_ms"].is_string());
     let id = result["artifact"]["id"].as_str().unwrap();
     let expected = fs::read(path.parent().unwrap().join("golden-visible.oas")).unwrap();
     for form in [false, true] {
@@ -243,6 +257,12 @@ async fn exact_export_receipts_replays_and_authenticated_binary_downloads() {
         204
     );
     assert_eq!(download(&h, &l, id, false).await.0, 410);
+    assert!(
+        h.call(&l, "GET", "/api/v1/exports", Value::Null).await.1["artifacts"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         h.call(&l, "POST", "/api/v1/exports", req.clone()).await.1["artifact"]["available"],
         false
@@ -292,7 +312,31 @@ async fn exact_export_receipts_replays_and_authenticated_binary_downloads() {
     );
     let mut fresh = h.connect(&l).await;
     let (hello2, f2) = frame(&mut fresh).await;
-    let pending = prepare(&mut fresh, &hello2, &f2, 2, "all", 1).await;
+    // The browser prepares the actual viewport, never recomputing world DBU
+    // bounds through Canvas/CSS coordinates. Use small synthetic coordinates
+    // for this independent ties-even expectation; i64 extremes have core gates.
+    fresh.send(Message::Text(json!({"type":"view.clip.prepare","seq":"2","view_id":hello2["view_id"],"connection_epoch":hello2["connection_epoch"],
+        "body":{"anchor":anchor(&f2),"bounds":{"kind":"viewport"},"layers":"all","jobs":4,"cell_name":"WEB_VIEWPORT"}}).to_string().into())).await.unwrap();
+    let pending = event(&mut fresh, 2).await;
+    assert_eq!(pending["type"], "clip.prepared", "{pending}");
+    let expected = f2["bbox_dbu"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| {
+            (v.as_str()
+                .unwrap()
+                .parse::<f64>()
+                .unwrap()
+                .round_ties_even() as i64)
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(pending["draft"]["bbox_dbu"], json!(expected));
+    assert_eq!(
+        h.call(&l, "GET", "/api/v1/view", Value::Null).await.1["view"]["capabilities"]["clip"],
+        true
+    );
     // Closing the view invalidates an unaccepted draft but not an old replay.
     h.call(
         &l,

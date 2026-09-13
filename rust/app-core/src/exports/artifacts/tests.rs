@@ -39,6 +39,7 @@ fn reserve(store: &Arc<Store>, id: u64) -> Reservation {
 fn reservations_size_validation_and_failed_commit_release_capacity() {
     let s = store();
     let r = reserve(&s, 1);
+    assert!(s.inventory().is_empty(), "pending file became downloadable");
     assert_eq!(
         s.usage(),
         Usage {
@@ -67,6 +68,10 @@ fn chunks_have_independent_offsets_and_readers_are_bounded() {
     let s = store();
     reserve(&s, 1).commit(file(b"abcdefgh"), 8).unwrap();
     assert_eq!(s.info(1).unwrap().size_bytes, 8);
+    assert_eq!(
+        s.inventory().iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        vec![1]
+    );
     assert!(s.info(1).unwrap().expires_in_ms <= 60_000);
     assert_eq!(s.usage().readers, 0);
     let mut a = s.open(1).unwrap();
@@ -83,6 +88,7 @@ fn chunks_have_independent_offsets_and_readers_are_bounded() {
     assert_eq!(b.read_chunk(5).unwrap(), b"fgh");
     s.release(1);
     assert!(s.info(1).is_none());
+    assert!(s.inventory().is_empty());
     assert!(!b.is_available());
     assert_eq!(s.usage().bytes, 8);
     assert!(b.read_chunk(5).is_err());
@@ -116,6 +122,7 @@ fn expiry_is_automatic_but_active_files_stay_charged() {
     }
     assert!(s.info(1).is_none());
     assert!(!reader.is_available());
+    assert!(s.inventory().is_empty(), "expired file stayed discoverable");
     let end = Instant::now() + Duration::from_secs(3);
     while s.usage().entries == 2 && Instant::now() < end {
         thread::sleep(Duration::from_millis(5));
@@ -138,6 +145,7 @@ fn reactor_revocation_is_immediate_and_disposal_is_eventually_reaped() {
         }
         assert!(s.info(1).is_none());
         assert!(s.open(1).is_err());
+        assert!(s.inventory().is_empty());
         let end = Instant::now() + Duration::from_secs(3);
         while s.usage() != Usage::default() {
             assert!(Instant::now() < end);

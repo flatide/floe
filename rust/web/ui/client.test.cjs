@@ -5,6 +5,12 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const P = require('./protocol.js');
 const DRC = require('./drc.js'), drcDisplays = [], drcClicks = [], observers = [];
+const Clip=require('./clip.js'),clipEnabled=process.env.FLOE_TEST_CLIP==='1',forms=[];
+let clipController,clipOp=null,clipFile=null;
+function clipState(){return {available:true,kind:'exact_clip',jobs_default:4,jobs_min:1,jobs_max:16,
+    operations:{last_seq:clipOp?'1':'0',active:null,history:clipOp?[clipOp]:[]},artifacts:clipFile?[clipFile]:[],
+    limits:{artifacts:4,artifact_bytes:'536870912',total_bytes:'2147483648',readers:2,ttl_seconds:600},
+    usage:{entries:clipFile?1:0,pending:0,bytes:clipFile?'64':'0',readers:0}};}
 const nodes = new Map(), images = [], sockets = [], urls = new Set(), draws = [], requests = [];
 const listeners = {}, docListeners = {};
 function listen(target,k,fn){const old=target[k];target[k]=old?(event)=>{old(event);fn(event);}:fn;}
@@ -15,6 +21,8 @@ class Element {
     constructor(id, tag='div') { Object.assign(this, {id, tag, value:'', checked:false, disabled:false, hidden:false,
         dataset:{}, style:{}, children:[], className:'', textContent:'', width:1, height:1}); }
     appendChild(child) { this.children.push(child); if (child.tag==='option'&&!this.value) {this.value=child.value;} return child; }
+    removeChild(child) {this.children.splice(this.children.indexOf(child),1);return child;}
+    submit() {assert.equal(this.tag,'form');forms.push({method:this.method,action:this.action,body:this.children.map(c=>[c.name,c.value])});}
     setAttribute(k,v) {this[k]=v;}
     querySelectorAll(tag) {return this.children.flatMap(c=>[...(c.tag===tag?[c]:[]), ...c.querySelectorAll(tag)]);}
     addEventListener(k,f) {listen(this,k,f);}
@@ -38,10 +46,10 @@ const snapshot={type:'snapshot',view_id:viewId,connection_epoch:epoch,dataset_re
     render_rev:'1',render_key:'1',worker_epoch:'2',bbox_dbu:['-10.9375','0','89.0625','80'],
     dbu_um:'1',pixels:[100,80],depth:'full',max_depth:'2',detail:'high',thin:'auto',effective_thin:'cull',
     layers:{mode:'all'},layers_isolated:false,frames:false,labels:false,font_px:14,mono:false,status:'idle',source_stale:false,
-    deck_skipped:'0',failure:null,submitted:'1',consumed:'1',discarded:'0',capabilities:{labels:true}};
+    deck_skipped:'0',failure:null,submitted:'1',consumed:'1',discarded:'0',capabilities:{labels:true,clip:true}};
 let open=false, lastSeq='0';
 const layerRow={pair:[7,0],name:'MASK',aliases:[],parent:null,head:false,visible:true,color:'#ffffff',fill:{kind:'solid'},width:1};
-const document={hidden:false,activeElement:null,title:'',
+const document={hidden:false,activeElement:null,title:'',body:new Element('','body'),
     getElementById:node,querySelector:()=>({content:bundle}),createElement:tag=>new Element('',tag),
     createTextNode:text=>Object.assign(new Element(''),{textContent:text}),
     addEventListener:(k,f)=>listen(docListeners,k,f)};
@@ -52,7 +60,13 @@ class XHR {
         const body=text===null?null:JSON.parse(text); requests.push({method:this.method,path:this.path,body});
         let value, status=200;
         if (this.path==='/api/v1/session/exchange') {value={csrf:'c'.repeat(64),bundle,protocol:1};}
-        else if(this.path==='/api/v1/capabilities') {value={protocol:1,bundle};}
+        else if(this.path==='/api/v1/capabilities') {value={protocol:1,bundle,exports:clipEnabled};}
+        else if(this.path==='/api/v1/exports') {
+            if(this.method==='POST') {clipFile={id:body.seq,bytes:'64',expires_in_ms:'600000',name:'floe-clip-'+body.seq+'.oas'};
+                clipOp={seq:body.seq,kind:'exact_clip',phase:'ready',view_id:body.view_id,artifact:{...clipFile,records:'2',bbox_dbu:['-11','0','89','80'],source_stale:false,available:true}};value=clipOp;
+            }else{value=clipState();}
+        }
+        else if(this.method==='DELETE'&&this.path==='/api/v1/artifacts/1'){clipFile=null;clipOp.artifact.available=false;clipOp.artifact.expires_in_ms=null;value=null;status=204;}
         else if(this.path==='/api/v1/catalog') {value={sources:[{source_id:'src',title:'synthetic',deck:false,levels:0},{source_id:'deck',title:'synthetic deck',deck:true,levels:2}]};}
         else if(this.path==='/api/v1/catalog/deck/levels/0') {value={levels:[{id:'1',title:'Level 1'},{id:'2',title:'Level 2'}],next:null};}
         else if(this.path==='/api/v1/startup') {value={request:{kind:'open',seq:'1',source_id:'src',mode:'level',levels:{mode:'all'},body:{detail:'high'}}};}
@@ -75,7 +89,7 @@ class Socket {
 class Image {
     constructor(){this.naturalWidth=100;this.naturalHeight=80;images.push(this);}
 }
-const window={FloeProtocol:P,FloeQuery:require('./query.js'),FloeInspect:require('./inspect.js'),FloeMeasure:require('./measure.js'),FloeGestures:require('./gestures.js'),FloeRulers:require('./rulers.js'),FloeDRCGroups:require('./drc-groups.js'),FloeDRC:{...DRC,bind(o){
+const window={FloeProtocol:P,FloeQuery:require('./query.js'),FloeInspect:require('./inspect.js'),FloeMeasure:require('./measure.js'),FloeClip:{...Clip,bind(o){clipController=Clip.bind(o);return clipController;}},FloeGestures:require('./gestures.js'),FloeRulers:require('./rulers.js'),FloeDRCGroups:require('./drc-groups.js'),FloeDRC:{...DRC,bind(o){
     drcOptions=o;const panel=DRC.bind(o),paint=panel.paint,changed=panel.contextChanged;
     panel.contextChanged=()=>{contextChanges++;changed();};panel.paint=(p,s)=>{drcDisplays.push({p,s});paint(p,s);};
     const click=panel.click;panel.click=(...v)=>{drcClicks.push(v);return consumeDRC || click(...v);};return panel;
@@ -87,7 +101,9 @@ const sandbox={window,document,XMLHttpRequest:XHR,WebSocket:Socket,Image,ImageDa
     history:{replaceState(){sandbox.location.hash='';}},sessionStorage:{getItem:k=>storage.get(k)||null,setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},
     URL:{createObjectURL(){const s='blob:test/'+images.length;urls.add(s);return s;},revokeObjectURL:s=>urls.delete(s)},
     Blob,TextEncoder,TextDecoder,ArrayBuffer,DataView,Uint8Array,Uint8ClampedArray,
-    setTimeout,clearTimeout,setInterval:()=>0,Date:{now:()=>clock+=100},console};
+    setTimeout:function(fn,ms){assert(!this||!this.context,'unbound Window timer receiver');return setTimeout(fn,ms);},
+    clearTimeout:function(id){assert(!this||!this.context,'unbound Window timer receiver');return clearTimeout(id);},
+    setInterval:()=>0,Date:{now:()=>clock+=100},console};
 vm.runInNewContext(fs.readFileSync(__dirname+'/app.js','utf8'),sandbox,{filename:'app.js'});
 async function wait(test){for(let i=0;i<1000;i++){if(test()){return;}await new Promise(setImmediate);}throw new Error('client did not progress');}
 function hello(ws,ep=epoch){ws.receive({type:'hello',protocol:1,bundle,view_id:viewId,connection_epoch:ep});ws.receive({...snapshot,connection_epoch:ep});}
@@ -115,6 +131,20 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     assert.equal(draws.length,1);assert.deepEqual(draws[0].data.slice(0,4),[16,0,127,255]);
     assert.equal(ws.sent.at(-1).disposition,'displayed');
     assert.equal(node('canvas').style.width,'100px');
+    if(clipEnabled) {
+        assert(!node('clip-open').disabled,'display ACK did not enable clip');node('clip-open').onclick();
+        node('clip-form').onsubmit({preventDefault(){}});const prepared=ws.sent.at(-1);
+        assert.equal(prepared.type,'view.clip.prepare');assert.deepEqual(prepared.body.bounds,{kind:'viewport'});
+        assert.equal(requests.filter(r=>r.method==='POST'&&r.path==='/api/v1/exports').length,0);
+        ws.receive({type:'clip.prepared',seq:prepared.seq,view_id:viewId,connection_epoch:epoch,source_stale:false,
+            draft:{token:'f'.repeat(64),dataset_revision:'1',bbox_dbu:['-11','0','89','80'],layers:{mode:'all'},jobs:4,cell_name:'FLOE_CLIP',expires_in_ms:'30000'}});
+        assert(!node('clip-approve').disabled);await node('clip-approve').onclick();
+        assert.equal(requests.filter(r=>r.method==='POST'&&r.path==='/api/v1/exports').length,1);
+        const buttons=node('clip-files').children[0].children[1];buttons.children[0].onclick();
+        assert.deepEqual(forms,[{method:'POST',action:'/api/v1/artifacts/1/download',body:[['csrf','c'.repeat(64)]]}]);
+        assert.equal(document.body.children.length,0);await buttons.children[1].onclick();assert.equal(clipFile,null);
+        assert.equal(draws.length,1,'clip changed the displayed render');clipController.stop();
+    } else {assert(node('clip-panel').hidden);}
     // Real app wiring: the query uses the displayed/ACKed frame without
     // issuing another render or HTTP read. This is not a stub inspector.
     ws.receive({...snapshot,capabilities:{labels:true,query:true}});

@@ -171,6 +171,31 @@ impl Store {
                 .min(u128::from(u64::MAX)) as u64,
         })
     }
+    /// Ready artifacts outlive the HTTP operation ledger. A bounded inventory
+    /// keeps old downloads discoverable after history eviction or page reload.
+    pub fn inventory(&self) -> Vec<(u64, Info)> {
+        let s = self.shared.state.lock().unwrap();
+        let now = Instant::now();
+        s.rows
+            .iter()
+            .filter_map(|(&id, e)| {
+                let until = e.expires?;
+                (!s.closed && !e.retired && e.file.is_some() && now < until).then(|| {
+                    (
+                        id,
+                        Info {
+                            size_bytes: e.bytes,
+                            expires_in_ms: until
+                                .duration_since(now)
+                                .as_millis()
+                                .min(u128::from(u64::MAX))
+                                as u64,
+                        },
+                    )
+                })
+            })
+            .collect()
+    }
     /// Reserve the maximum before native work. Never evict somebody's pending
     /// export or active download to make a new request appear successful.
     pub(super) fn reserve(

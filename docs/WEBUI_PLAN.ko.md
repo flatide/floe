@@ -49,7 +49,8 @@ M4b-4에서 기존 live 스타일·오류 marker/CD/legend를 유지하는 DRC P
 M4b-5에서 SVRF subset 전처리·규칙 그래프·scan/원자 sidecar 저장 CLI를 Rust로 이관했다.
 M4c-1에서 별도 자원 예약·취소/reap·만료 descriptor 저장소를 갖는 관리형 exact clip 코어를 추가했다.
 M4c-2에서 표시 receipt·명시 승인·중복 방지·취소와 owner HTTP chunk 다운로드를 연결했다.
-clip UI/나머지 내보내기와 실제 브라우저 수용은 남아 있다([M4 기록](WEBUI_M4.ko.md)).
+M4c-3에서 현재 viewport의 준비→명시 승인·취소·파일 목록/다운로드 UI를 연결했다.
+나머지 내보내기와 브라우저 다운로드/현장 수용은 남아 있다([M4 기록](WEBUI_M4.ko.md)).
 전체 조작 parity와 M0/Firefox/ETX 현장 검증은 아직 완료되지 않았다.
 상세 범위는 [M1b 기록](WEBUI_M1B.ko.md)과 [M2 기록](WEBUI_M2.ko.md). 여기의 M0~M5는 **웹 전환 단계**이며
 jobdeck/occupancy의 같은 이름 단계와 별개다. 개발 기준과 합류 규칙은 §11.

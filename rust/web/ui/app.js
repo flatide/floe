@@ -11,7 +11,7 @@
     let foregroundFrame = null, marginFrame = null, inflightBody = null, foregroundPerf = '';
     let gesture = null, dragShift = null, lastPlacement = null;
     let drcPanel = null, displayProjection = null, frozenProjection = null;
-    let inspector = null, measurement = null, pickedPairs = [];
+    let inspector = null, measurement = null, clipper = null, pickedPairs = [];
     const rulerHistory = window.FloeRulers.history();
     let ackedFrames = {foreground: null, margin: null};
     const sessionKey = 'floe-session:' + location.origin;
@@ -132,6 +132,7 @@
         if (drcPanel) { drcPanel.paint(displayProjection, size); }
         if (inspector) { inspector.changed(); inspector.paint(displayProjection, size); }
         if (measurement) { measurement.changed(); measurement.paint(displayProjection, size); }
+        if (clipper) { clipper.changed(); }
         if (full) {
             const pending = !!inflightBody || queue.length > 0 || !!dragShift;
             el('status').textContent = (pending ? 'Pan preview' : 'Live') + ' · margin crop · gen ' + marginFrame.generation;
@@ -188,6 +189,7 @@
         if (drcPanel) { drcPanel.contextChanged(); }
         if (inspector) { inspector.changed(); }
         if (measurement) { measurement.changed(); }
+        if (clipper) { clipper.changed(); }
     }
     function queryContext() {
         if (!state || !currentId || !lastPlacement) { return null; }
@@ -295,6 +297,7 @@
             send({type: 'frame.ack', connection_epoch: h.connection_epoch, frame_id: h.frame_id, disposition: disposition});
             if (disposition === 'displayed') { ackedFrames[h.purpose] = h.frame_id; }
             if (inspector) { inspector.changed(); }
+            if (clipper) { clipper.changed(); }
         }
         catch (e) { report(e); ws.close(); }
     }
@@ -362,6 +365,7 @@
         if (socket) { socket.onclose = null; socket.close(); socket = null; }
         epoch = ''; rejectEdits('Connection interrupted; pending input was not replayed.');
         if (inspector) { inspector.changed(); }
+        if (clipper) { clipper.changed(); }
         if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     }
     function connect() {
@@ -380,6 +384,7 @@
                     if (m.protocol !== 1 || m.bundle !== bundle || m.view_id !== currentId) { throw new Error('Client/server version mismatch; reload'); }
                     epoch = m.connection_epoch; reconnectDelay = 500; connection('Local · connected', true);
                 } else if (m.type === 'snapshot') { statusSnapshot(m); }
+                else if (clipper && clipper.receive(m)) { /* current clip preparation owns this response */ }
                 else if (measurement && measurement.receive(m)) { /* ruler owns its current response */ }
                 else if (inspector && inspector.receive(m)) { /* latest query owns its response */ }
                 else if (m.type === 'accepted') {
@@ -547,6 +552,7 @@
         el('source').textContent = '';
         catalog.forEach(function (s) { const option = document.createElement('option'); option.value = s.source_id; option.textContent = s.title; el('source').appendChild(option); });
         if (caps.drc) { await drcPanel.init(); }
+        await clipper.init(caps.exports);
         sourceSelection();
         const operations = await operationState();
         await restore();
@@ -569,6 +575,7 @@
     };
     el('logout').onclick = async function () {
         if (drcPanel) { drcPanel.stop(); }
+        if (clipper) { clipper.stop(); }
         stopped = true; disconnect(); if (operationTimer) { clearTimeout(operationTimer); }
         try { await http('DELETE', '/api/v1/session'); } catch (e) { report(e); }
         try { sessionStorage.removeItem(sessionKey); } catch (_) { /* storage may be disabled */ }
@@ -713,21 +720,28 @@
         restoreLayers: function (done) { return edit({restore_layers: true}, done); }, resize: resized});
     inspector = window.FloeInspect.bind({document: document, window: window, protocol: P, query: window.FloeQuery,
         context: queryContext, send: send, layers: highlightPicked, now: function () { return Date.now(); },
-        setTimeout: setTimeout, clearTimeout: clearTimeout});
+        setTimeout: setTimeout.bind(window), clearTimeout: clearTimeout.bind(window)});
     measurement = window.FloeMeasure.bind({document: document, window: window, protocol: P, query: window.FloeQuery, rulers: window.FloeRulers,
         history:rulerHistory, selection:function () { return inspector.selection(); },
         popCD:function (all) { return drcPanel.key(all?'K':'k'); }, cdBusy:function () { return drcPanel.rulersBusy(); },
-        context: queryContext, send: send, now: function () { return Date.now(); }, setTimeout: setTimeout, clearTimeout: clearTimeout,
+        context: queryContext, send: send, now: function () { return Date.now(); }, setTimeout: setTimeout.bind(window), clearTimeout: clearTimeout.bind(window),
         modeChanged: function () {
             if (measurement && measurement.active()) { if (drcPanel.boxActive()) { drcPanel.key('e'); } inspector.interrupt(); }
             if (gesture) { gesture.cancel(); } reviewCursor();
         }});
-    document.addEventListener('visibilitychange', function () { if (document.hidden) { finishDecode(); inspector.changed(); measurement.changed(); } else if (live() && !stopped) { connect(); } });
+    clipper = window.FloeClip.bind({document: document, protocol: P, query: window.FloeQuery, context: queryContext,
+        // Window timer methods cannot be invoked with a controller as `this`.
+        http: http, send: send, now: function () { return Date.now(); }, setTimeout: setTimeout.bind(window), clearTimeout: clearTimeout.bind(window),
+        download: function (id) {
+            if (stopped || !auth) { throw new Error('The owner session is closed.'); }
+            window.FloeClip.download(document, auth.csrf, id, P);
+        }});
+    document.addEventListener('visibilitychange', function () { if (document.hidden) { finishDecode(); inspector.changed(); measurement.changed(); clipper.changed(); } else if (live() && !stopped) { connect(); } });
     window.addEventListener('blur', function () { inspector.move(NaN, NaN); measurement.interrupt(); });
     setInterval(function () { if (socket && socket.readyState === WebSocket.OPEN && epoch) { try { send({type: 'ping'}); } catch (e) { report(e); } } }, 10000);
-    window.addEventListener('pagehide', function () { disconnect(); inspector.stop(); measurement.stop(); clearTimeout(operationTimer); clearTimeout(resizeTimer); if (sizeObserver) { sizeObserver.disconnect(); } drcPanel.stop(); });
+    window.addEventListener('pagehide', function () { disconnect(); inspector.stop(); measurement.stop(); clipper.stop(); clearTimeout(operationTimer); clearTimeout(resizeTimer); if (sizeObserver) { sizeObserver.disconnect(); } drcPanel.stop(); });
     window.addEventListener('pageshow', function (event) {
-        if (event.persisted && auth && !stopped) { inspector.resume(); measurement.resume(); if (sizeObserver) { sizeObserver.observe(viewport); } drcPanel.resume().then(operationState).then(restore).then(resized).catch(report); }
+        if (event.persisted && auth && !stopped) { inspector.resume(); measurement.resume(); clipper.resume(); if (sizeObserver) { sizeObserver.observe(viewport); } drcPanel.resume().then(operationState).then(restore).then(resized).catch(report); }
     });
     start().catch(function (e) { connection('Not connected', false); report(e); el('empty-message').textContent = e.message; });
 }());

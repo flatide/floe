@@ -1150,8 +1150,8 @@ clip UI다. read-only 공유를 export 허가로 해석하지 않으며 guest en
 
 §12의 관리형 코어를 기존 인증된 **owner** 서비스에 연결했다. 별도 guest/export
 권한을 만들지 않았고 임의 경로·명령·업로드를 받지 않는다. 일반 layout만 지원한다.
-이번 단계에 clip 브라우저 버튼/선택 도구는 없으며 `capabilities.exports`는 owner
-서비스의 API 존재, 기존 view snapshot의 `capabilities.clip=false`는 UI 미연결을 뜻한다.
+이 단계 시점에는 clip 브라우저 버튼/선택 도구가 없었다. `capabilities.exports`는 owner
+서비스의 API 존재를 뜻하며, 이후 §14에서 view의 `capabilities.clip`과 UI를 연결했다.
 
 ### 준비와 명시 승인
 
@@ -1181,7 +1181,7 @@ clip UI다. read-only 공유를 export 허가로 해석하지 않으며 guest en
 
 | 라우트 | 동작 |
 |---|---|
-| `GET /api/v1/exports` | ledger·한계·사용량 |
+| `GET /api/v1/exports` | ledger·한계·사용량·별도 ready `artifacts` 목록(§14) |
 | `POST /api/v1/exports` | 위 준비 토큰의 명시 승인, 202 |
 | `GET /api/v1/exports/{seq}` | queued/preparing/opening/clipping/finishing/cancelling/ready/failed/cancelled |
 | `POST /api/v1/exports/{seq}/cancel` | 취소 요청, 현재 상태와202 |
@@ -1242,5 +1242,73 @@ musl static-pie 교차 빌드도 통과했다. 기존 dependency/Pillow/GDK warn
 native geometry/wire/renderd 버전0.12.87·vendor·GTK 기본 launcher는 변경하지 않았다.
 실제 Linux 실행이나 현장 Firefox/ETX, 브라우저 다운로드 수용을 대신하는 결과는 아니다.
 
-다음 독립 단계는 이 계약을 사용하는 clip UI다. 다운로드 UI 실브라우저 수용,
+이 계약을 사용하는 clip UI는 다음 §14에 기록했다. 다운로드 UI 실브라우저 수용,
 나머지 export/주석 저장/전체 M4·GTK 은퇴·현장 Firefox/ETX 완료와 구분한다.
+
+## 14. M4c-3: 현재 viewport clip UI
+
+일반 layout의 **현재 화면 범위**를 exact OASIS로 내보내는 owner UI다. GTK의
+현재 viewport clip 범위와 같으며 별도 사각형 선택 도구는 이번 범위가 아니다.
+`capabilities.exports`는 인증된 owner API의 존재, view의 `capabilities.clip`은
+layout 지원 여부다. 둘을 함께 검사하므로 서비스 없는 preattached viewer에 export
+권한을 주거나 jobdeck을 암묵적으로 layout으로 처리하지 않는다.
+
+### 준비·승인·수명
+
+- `Clip current viewport…` → 레이어 visible/all/none·jobs1~16·셀 이름 입력 →
+  `Review clip` → 서버가 동결한 DBU 정수 범위/레이어 모드·개수/옵션을 확인 →
+  `Approve export` 순서다. Enter는 준비만 하고, 별도 승인 버튼이 있어야 worker를 쓴다.
+  None은 빈 OASIS라는 경고를 표시한다. 이름은 일반 textContent로 출력한다.
+- 현재 표시 ACK·연결·view/render revision·DPR/viewport 정합성을 요구한다. 옵션
+  편집, pan/zoom/visibility/프레임 변경, 연결 종료, 30초 만료는 준비 결과를 버린다.
+  화면의 summary/query 불가 여부는 좌표 준비를 막지 않으며 export는 항상 별도
+  full-depth exact geometry다. 브라우저가 Canvas 좌표에서 world 정수를 재계산하지 않는다.
+- 승인 직전에 ledger를 다시 조회하고 새 seq를 계산한다. 중복 클릭을 막고, 응답이
+  불명확하면 원래 승인 요청을 보관한다. `Resolve request`는 **동일 seq/token/body**만
+  명시 재전송한다. GET에 그 seq가 보이는 것만으로 다른 탭의 요청과 동일하다고
+  가정하지 않는다. pagehide/bfcache 복원·재접속은 조회만 하고 새 export를 시작하지 않는다.
+- 승인 이후 pan/view close와 독립적으로 상태를 조회/취소한다. Cancel 응답에서
+  ready가 이긴 경우에도 GET과 같은 available/TTL 스키마를 준다. 창을 닫는 것은
+  취소가 아니며 owner session 종료는 §13처럼 작업·파일 접근을 폐기한다.
+
+### 파일과 다운로드
+
+`GET /exports`에 별도 `artifacts:[{id,bytes,expires_in_ms,name}]`를 추가했다.
+operation history32개가 만료 파일의 수명은 아니므로, ready 파일은 이력에서 밀려도
+TTL 안에 계속 발견할 수 있다. 최대4개이며 pending/만료/폐기 파일은 목록에 없다.
+usage와 목록은 reaper와 별도 잠금으로 읽으므로 순간 entries 수와 목록 길이의 일치를
+클라이언트가 단언하지 않는다. 파일 ID와 이름은 서버 지정이며 임의 path를 받지 않는다.
+
+Download는 같은 출처의 일회성 native form POST다. CSRF는 body에만 있고 URL에는
+없다. JS Blob으로 파일 전체를 복제하지 않는다. 오류 페이지가 layout을 대체하지
+않도록 별도 다운로드 context(`noopener noreferrer`)를 사용한다. 서버/클라이언트는
+클릭을 다운로드 완료로 표시하지 않는다. 실제 완료는 브라우저 다운로드 UI에서 확인한다.
+Release는 서버 파일 접근만 폐기하며 이미 받은 사용자의 복사본은 지우지 않는다.
+TTL 조회는 버튼 DOM을 교체하지 않아 키보드 focus를 보존한다.
+
+### 검증과 남은 수용
+
+`clip.test.cjs`는 summary 표시·display receipt, i64/u64 극값, 준비 만료/변경/timeout,
+명시 승인·중복 클릭, 불명확 응답의 동일 요청 replay, pagehide/resume, ready/cancel 경합,
+독립 파일 목록/TTL focus, body CSRF form을 고정한다. `client.test.cjs`의 별도 clip 실행은
+실제 app.js의 표시 ACK→WS 준비→HTTP 승인→Download/Release 연결까지 실행한다.
+Node 테스트는 브라우저 Window 타이머의 잘못된 receiver도 거부한다.
+
+로컬 Chrome 합성 valmini 점검에서 unbound Window timer의 `Illegal invocation`을
+발견했다. clip뿐 아니라 같은 주입 방식을 쓰던 inspect/measure 타이머도 Window에
+bind했다. 수정 후 초기 연결·layout 표시·clip 활성화와 margin crop 상태를 확인했다.
+브라우저에서 승인→실제 저장 파일까지의 수용과 현장 Firefox/ETX는 **미확인**이다.
+네이티브 HTTP 게이트는 viewport 준비의 ties-even 범위, ready cancel 응답 스키마,
+목록의 게시/폐기를 검증하며, 기존 all/visible/none OASIS 바이트/XOR 게이트도 유지한다.
+
+실행 결과(2026-09-14): 필수 `sh tools/validate_rust.sh`가 `RUST VALIDATION: ALL OK`다.
+owner export2 + 기존 owner/DRC3, managed/CLI clip 오라클, jobdeck80·renderer46,
+KLayout13 PX +2 phase-exact +14 style jobs1/8을 포함한다. 마지막 UI 수명주기 보강 후
+ES2017/전체 JS 게이트도 재실행해 통과했다. app11/core130/web41·transport10·
+worker-client unit7/lifecycle14, strict scoped clippy/fmt, Rust1.89.0 테스트와
+macOS release/Linux x86-64 musl static-pie 빌드도 통과했다. Linux 실행은 미확인이다.
+renderd0.12.87·geometry/wire·vendor·GTK 기본 launcher는 바꾸지 않았다.
+
+전체 M4 완료, GTK 기본 전환/제거, 공유 권한 추가, 현장 수용을 뜻하지 않는다.
+다음 독립 구현은 남은 웹 내보내기와 review/주석 저장 등 parity 항목이며,
+기존 현장 실측 보류는 유지한다.

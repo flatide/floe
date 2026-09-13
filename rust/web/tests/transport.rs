@@ -44,6 +44,7 @@ async fn embedded_assets_are_content_identified_and_never_serve_files() {
         ("query.js", "text/javascript"),
         ("inspect.js", "text/javascript"),
         ("measure.js", "text/javascript"),
+        ("clip.js", "text/javascript"),
         ("drc.js", "text/javascript"),
         ("rulers.js", "text/javascript"),
         ("drc-groups.js", "text/javascript"),

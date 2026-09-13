@@ -184,6 +184,6 @@
         return {request: request, receive: receive, changed: changed, cancel: cancel,
             stop: function () { stopped = true; cancel('pick'); cancel('snap'); }, resume: function () { stopped = false; }};
     }
-    const api = {bind: bind, scope: scope, position: position, scene: scene, hit: hit, i64: i64};
+    const api = {bind: bind, scope: scope, position: position, scene: scene, hit: hit, i64: i64, cmp: cmp};
     if (typeof module === 'object' && module.exports) { module.exports = api; } else { root.FloeQuery = api; }
 }(typeof window === 'object' ? window : this));

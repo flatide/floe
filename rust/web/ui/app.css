@@ -40,6 +40,17 @@ details > summary { cursor: pointer; font-size: 12px; color: #b4c3d8; }
 #level-options { margin-top: 11px; }
 #level-list { max-height: 170px; overflow-y: auto; }
 .layers-panel { display: flex; flex-direction: column; flex: 1; min-height: 200px; padding-bottom: 8px; }
+.clip-panel { flex-shrink: 0; font-size: 12px; overflow-wrap: anywhere; }
+.clip-panel button { white-space: normal; }
+.clip-panel .button-row { flex-wrap: wrap; }
+.clip-panel pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; }
+#clip-form { margin-top: 12px; padding-top: 4px; border-top: 1px solid #42526a; }
+#clip-cell-name { display: block; width: 100%; margin-top: 5px; }
+#clip-form > label { display: block; margin-top: 12px; }
+#clip-review { margin-top: 12px; padding: 9px; border: 1px solid #5e799d; border-radius: 4px; }
+#clip-options { max-height: 90px; overflow-y: auto; }
+#clip-status { white-space: pre-wrap; }
+.clip-file { margin-top: 12px; padding-top: 4px; border-top: 1px solid #333c4a; }
 .section-title { display: flex; justify-content: space-between; align-items: center; margin-bottom: 7px; }
 .section-title h2 { margin: 0; }
 .text-button { min-height: 25px; background: transparent; border-color: transparent; font-size: 12px; padding: 2px 5px; color: #aac9f6; }
