@@ -4,8 +4,8 @@
 M2 공유 권한 추가와 실제 브라우저 pack-build 승인 클릭은 승인 대기이며,
 M0/G2·M3 현장 Firefox/ETX는 사용자 요청대로 보류다. 이 경계를 우회하지 않고
 독립적인 로컬 native 이관을 진행한다. M4 전체 완료나 GTK 은퇴를 뜻하지 않는다.
-현재는 §9의 **PNG 주석 metadata/fe-embed CLI**까지 연결했다.
-§1~8의 미연결 표기는 각 선행 단계 당시의 범위다. 웹 clip/나머지 내보내기와 전체 조작
+현재는 §10의 **DRC 오류별 PNG 캡처 CLI**까지 연결했다.
+§1~9의 미연결 표기는 각 선행 단계 당시의 범위다. 웹 clip/나머지 내보내기와 전체 조작
 수용은 남아 있다.
 
 ## 1. M4a-1: 표시 scene에 고정한 native pick/snap
@@ -893,3 +893,94 @@ musl static-pie 교차 빌드가 통과했다. 기존 의존성 warning은 남�
 
 다음 독립 단계는 DRC marker·CD ruler·레이어 legend metadata 조립과
 `render --drc*` 연결이다. 웹 다운로드/공유 권한이나 review 쓰기까지 완료한 것은 아니다.
+
+## 10. M4b-4: DRC 오류별 PNG 캡처
+
+```sh
+rust/target/release/floe2-web render design.oas \
+  --drc results.db --drc-rule 'M1.WIDTH' --drc-err 1-20 \
+  --px 1200 --out width.png
+# 결과: local<TAB>global<TAB>path. 여러 장은 width_1.png … width_20.png.
+# --layers가 없으면 기존 SVRF sidecar로 레이어를 격리한다.
+rust/target/release/floe2-web render design.oas \
+  --drc results.db.ice --drc-rule 'M1.WIDTH' --drc-err 3 \
+  --layers all --floe-reviewer reviewerA --out one.png
+```
+
+### 표시와 CLI 계약
+
+- `--drc/--drc-rule`, `--drc-err N|A-B|all`, `--drc-cap`(200),
+  `--drc-frac`(.3), `--drc-rules`, `--floe-reviewer`를 연결했다.
+  중복 룰 이름은 경고 후 첫 블록을 쓴다. all만 cap을 적용하고 명시 범위는
+  끝 번호를 실제 개수에 맞추되 cap으로 자르지 않는다. 빈 선택/0 cap은 오류다.
+  인덱스 범위를 Vec으로 펼치지 않고 한 오류씩 읽는다.
+- 정사각형은 오류 bbox의 긴 변/fraction(유한 값만, .02..1 clamp), 축퇴 오류는
+  0.1 µm다. `--px WxH`도 기존처럼 W×W로 쓴다. worker bbox는 DBU half-even
+  정수 반올림, metadata는 반올림 전 µm bbox에서 중심 원점/y-down pixels로
+  변환한다. round 후 축퇴/overflow는 오류이며 임의의 확대·좌표 clamp를 하지 않는다.
+- **기존 Rust DRC 경로의 실제 기본값:** full depth, cut=0, live speckle/사용자
+  패턴·outline 스타일, frames/labels on(덱 labels off). 일반 shot의 archival
+  solid/1px·frames/labels off와 다르다. Python docstring의 "viewer detail"만 보고
+  cut=3 같은 값을 추정하지 않았다. `--depth`는 기존대로, 명시 `--detail/--thin/`
+  `--label-font-px`는 새 Rust CLI에서 실제로 반영한다(기존 DRC CLI는 후자들을 무시했다).
+- 픽셀에 마커를 굽지 않는다. 기존 flateyes iTXt에 active `#FF5252`/waived
+  `#00E676`, 2px casing 없는 선/다각형을 넣는다. 다각형 ≤256점만 solid alpha128
+  내부 채움, 그 이상은 윤곽만이다. 단순 도형의 기존 CD 계산을 재사용하고 한 edge의
+  ruler는 endpoint 순서와 무관하게 위쪽/오른쪽 법선으로14px 옮긴다.
+  note는 `RULE #local(global)` 및 waived 표식, ruler scale은 ppu/unit=um이다.
+- 명시 `--layers all`은 자동 격리를 우회한다. 생략 시 CLI에서만
+  `--drc-rules` → 기록된 deck basename의 인접 `.rules.json` → 기록된 deck 경로의
+  `.rules.json` → `<drc 인자>.rules.json` 순서를 사용한다(명시 경로는 자동 후보와
+  합치지 않는다). 실패/룰 없음/가시 레이어 미일치는 경고 후 all이다.
+  all/none에는 범례가 없고 선택 레이어는 디자인 색·fill 이름·이름·L/D 순으로 쓴다.
+  원격 요청에 임의 경로나 이 자동 발견을 노출하지 않는다.
+- layout과 complete jobdeck 공통 runner다. DRC와 region/batch/mosaic/report
+  옵션의 혼용은 조용히 무시하지 않고 거부한다. 기본 파일명은 룰 이름을 안전한
+  문자로 바꾼 이름, 여러 장은 룰-local 번호 suffix다. 부모 디렉터리는 자동 생성하지 않는다.
+
+### 수명·안전·비용
+
+- 모든 목적지를 native worker 시작 전에 검사한다. 원본/cache/lock·layerprops·
+  DRC 인자/선택 pack·reviewer waive·rules 후보와 출력의 충돌, symlink/hardlink
+  목적지를 거부한다. 이미지16M pixels, 기존 DRC 읽기·metadata16MiB/100k 주석
+  한계는 오류로 끝내며 prefix 마커나 unannotated PNG로 성공하지 않는다.
+- 하나의 live worker/style를 재사용하고 오류 하나의 geometry/PNG만 처리한다.
+  worker-client의 요청별300초 render deadline을 사용한다(기존 Python의 첫300초/
+  이후120초 idle 대기와 다름). ready/open/style deadline과 종료/reap도 공통 client가 맡는다.
+  문법 오류·미완료/라벨 잘림·손상 PNG·잘린 ASCII 입력은 정상 캡처로 게시하지 않는다.
+  skip ledger가 있는 덱도 DRC 캡처에서는 미완료 오류다(일반 shot의 flagged PNG와 구별).
+- 완전한 PNG를 `annotations::png::stage`로 원본 chunk를 유지하며 주석과 함께
+  staging→sync한 뒤 입력 DRC identity/취소를 확인해 한 번 rename한다.
+  PNG를 먼저 덮어쓴 뒤 metadata를 추가하는 창은 없다. 실패/중단은 현재 출력과
+  owned 임시 파일을 보호한다. 여러 PNG 전체의 트랜잭션은 아니므로 후속 실패는
+  이미 저장한 장수를 오류에 포함한다. 외부 파일 편집과의 CAS/lock은 별도 계약이다.
+- read-only `open_current`를 재사용한다. fresh pack/기존 waive는 읽기만 하고,
+  stale/corrupt 인접 pack은 경고 후 ASCII fallback한다. pack/review 자동 생성이나
+  review/notes 쓰기, 새 HTTP/download 경로는 추가하지 않았다.
+
+### 검증
+
+- 필수 `validate_drc_captures.py`: private valmini/DRC/pack/waive·fractional ASCII·
+  thin jobdeck의 Python PNG 전체 bytes·metadata·Rust jobs1/8 불변을 대조한다.
+  rectangle/회전·single/pair edges·교차/축퇴·256/257점 fill 경계·상태 색·범례·
+  명시 all/none·자동 sidecar 우선순위·cap/범위·fraction clamp·depth/파일명을 검사한다.
+- fake worker로 open/style 각1회·연속 generation, 기본 cut/frames/labels 및
+  명시 detail/thin/font 전달, partial/deferred/손상 PNG/후속 렌더 실패를 고정한다.
+  SIGINT/SIGTERM을 ready/open/style/render에 주입하고 실제 reap/이전 출력 보존을
+  확인한다. staging write 실패·주석 상한·잘린 ASCII·출력 alias/입력 보호도 검사한다.
+  native 임시 디렉터리와 기존 Python 덱 오라클의 임시 파일은 분리한다.
+
+실행 결과(2026-09-14): 전체 `sh tools/validate_rust.sh`가 `RUST VALIDATION: ALL OK`다.
+새 DRC 캡처·fe-embed·일반/batch 캡처와 기존 jobdeck80·renderer46, KLayout13 PX
++2 phase-exact +14 style jobs1/8 검증을 포함한다. 이후 점으로만 된 룰의 기본
+파일명 코너를 보강했고, 최종 실행 파일로 DRC PNG/metadata·fe-embed·batch/mosaic
+오라클을 모두 다시 통과했다. 새 DRC 비교는401×401px(384px 타일 경계 통과)에서
+decode/raster jobs1/8을 각각 요청한다.
+
+최종 app9/core110/web36/transport8·worker-client unit7/lifecycle14, scoped fmt/strict
+clippy, Rust1.89.0의 같은 테스트, macOS release와 Linux x86-64 musl static-pie
+교차 빌드도 통과했다. 기존 의존성/개발 오라클 warning은 남고 native geometry/wire/
+renderd 버전0.12.87은 변경하지 않았다. 실 Linux 실행·현장 Firefox 수용을 주장하지 않는다.
+
+다음 CLI 이관은 SVRF subset parser/scan이다. 웹 내보내기 UI·review 저장·나머지 조작·
+패키징/현장 수용은 남으며 M4 전체 완료가 아니다. GTK 기본값과 공유/승인 경계는 유지한다.

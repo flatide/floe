@@ -33,12 +33,21 @@ const RENDER_HELP: &str = "Usage: floe2-web render SOURCE [OPTIONS]
   --corners X0,Y0,X1,Y1     Four --size rectangles INSIDE this region
   --line W --line-color RGB  Separator width (default 2), color (default #ffffff)
   --keep-tiles              Keep mosaic _tl/_tr/_bl/_br PNGs after all renders succeed
+  --drc DB --drc-rule NAME   Square per-error PNGs, live style + flateyes metadata
+  --drc-err N|A-B|all        1-based local selection (default all)
+  --drc-cap N               Limit all only (default 200); explicit ranges uncapped
+  --drc-frac F              Error/frame span (default .3, clamped .02..1)
+  --drc-rules FILE          SVRF isolation sidecar; explicit --layers wins
+  --floe-reviewer TAG       Read existing waive status; no review writes
 Lengths: bare/um/µm/μm, nm, mm, cm, m. Fractional DBU is preserved.
 Batch: NAME key=value ...; quotes supported, full-line # comments. Region fields
 override the CLI region. Keys: bbox at size anchor px stretch layers depth mosaic
 corners line linecolor keep_tiles. Limit 16 MiB/4096 shots; no shell expansion.
-DRC captures require a later stage; annotate existing PNGs with fe-embed.
-Jobdeck labels unsupported.
+DRC uses the width from --px even for WxH; frames/labels are on (deck labels off),
+cut=0 by default, non-archival fills. --detail/--thin/--label-font-px are honored.
+No batch/mosaic/region/report with DRC; no implicit indexing. Local/global/path TSV.
+Only complete DRC frames are saved; all-layer shots omit the layer legend.
+Annotate existing PNGs with fe-embed. Jobdeck labels unsupported.
 Frames exceeding 16 Mpx are rejected, not silently rescaled.
 Mosaic final image is four tiles (up to 64 Mpx). Outputs must not collide.
 Cancelled/failed frames never replace an existing PNG. Jobdeck known skipped
@@ -66,6 +75,7 @@ pub enum Command {
         report: Option<PathBuf>,
         batch: Option<String>,
         levels: Option<BTreeSet<i64>>,
+        drc: Option<Box<floe_app_core::drc::capture::Options>>,
     },
     Probe(PathBuf),
 }
@@ -77,6 +87,10 @@ pub fn parse(args: &[String]) -> Result<Command> {
     let mut out = PathBuf::from("view.png");
     let mut report = None;
     let mut batch = None;
+    let mut drc = floe_app_core::drc::capture::Options::default();
+    let mut drc_requested = false;
+    let mut capture_only = false;
+    let mut layers_explicit = false;
     let mut json = false;
     let mut levels = None;
     let mut positional = false;
@@ -135,7 +149,38 @@ pub fn parse(args: &[String]) -> Result<Command> {
         if kind != "render" {
             return Err(Error::input(format!("unsupported {kind} option: {flag}")));
         }
+        if matches!(
+            flag,
+            "--bbox"
+                | "--at"
+                | "--size"
+                | "--anchor"
+                | "--stretch"
+                | "--report"
+                | "--batch"
+                | "--mosaic-at"
+                | "--corners"
+                | "--line"
+                | "--line-color"
+                | "--keep-tiles"
+        ) {
+            capture_only = true;
+        }
         match flag {
+            "--drc" | "--drc-rule" | "--drc-err" | "--drc-cap" | "--drc-frac" | "--drc-rules"
+            | "--floe-reviewer" => {
+                drc_requested = true;
+                let v = value()?;
+                match flag {
+                    "--drc" => drc.database = v.into(),
+                    "--drc-rule" => drc.rule = v.into(),
+                    "--drc-err" => drc.errors = v.into(),
+                    "--drc-cap" => drc.cap = super::number(v, flag)?,
+                    "--drc-frac" => drc.fraction = super::number(v, flag)?,
+                    "--drc-rules" => drc.rules = Some(v.into()),
+                    _ => drc.reviewer = Some(v.trim().into()),
+                }
+            }
             "--bbox" => shot.bbox = Some(shots::lengths(value()?)?),
             "--at" => shot.at = Some(shots::lengths(value()?)?),
             "--size" => shot.size = Some(shots::lengths(value()?)?),
@@ -173,6 +218,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
                 }
             }
             "--layers" => {
+                layers_explicit = true;
                 let v = value()?;
                 shot.layers = if v.is_empty() || v == "all" {
                     None
@@ -218,6 +264,20 @@ pub fn parse(args: &[String]) -> Result<Command> {
         }
     }
     let source = source.ok_or_else(|| Error::input(format!("{kind} requires SOURCE")))?;
+    let drc = if drc_requested {
+        drc.validate()?;
+        if capture_only {
+            return Err(Error::input(
+                "DRC captures cannot be combined with region/batch/mosaic/report options",
+            ));
+        }
+        if layers_explicit {
+            drc.layers = Some(shot.layers.clone().unwrap_or_else(|| "all".into()));
+        }
+        Some(Box::new(drc))
+    } else {
+        None
+    };
     if levels.is_some() && !is_deck(&source) {
         return Err(Error::input("--level requires a jobdeck"));
     }
@@ -245,6 +305,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
                 report,
                 batch,
                 levels,
+                drc,
             })
         }
     }
@@ -286,7 +347,21 @@ pub fn run(command: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
             report,
             batch,
             levels,
+            drc,
         } => {
+            if let Some(drc) = drc {
+                let dataset = dataset(&source, levels, cancelled)?;
+                floe_app_core::drc::capture::run(
+                    &dataset,
+                    &capture.shot,
+                    &out,
+                    &drc,
+                    RenderOptions::local()?,
+                    cancelled,
+                    |line| println!("{line}"),
+                )?;
+                return Ok(0);
+            }
             return crate::capture::run(source, *capture, out, report, batch, levels, cancelled);
         }
         Command::Probe(source) => {
@@ -372,5 +447,32 @@ mod tests {
         };
         assert_eq!(capture.shot.depth, Some(0));
         assert_eq!(capture.shot.thin, Thin::Auto);
+    }
+    #[test]
+    fn drc_captures_preserve_explicit_all_and_reject_ignored_modes() {
+        let args = ["render", "a.oas", "--drc=db", "--drc-rule=R"];
+        for layers in [None, Some("all"), Some("1/0")] {
+            let mut a = args.to_vec();
+            if let Some(s) = layers {
+                a.extend(["--layers", s]);
+            }
+            let Command::Render { drc: Some(drc), .. } = parsed(&a).unwrap() else {
+                panic!()
+            };
+            assert_eq!(drc.layers.as_deref(), layers);
+        }
+        for flags in [
+            ["--batch", "-"],
+            ["--report", "report.json"],
+            ["--bbox", "0,0,1,1"],
+            ["--floe-reviewer", " "],
+            ["--drc-frac", "nan"],
+            ["--drc-cap", "0"],
+        ] {
+            let mut a = args.to_vec();
+            a.extend(flags);
+            assert!(parsed(&a).is_err(), "{a:?}");
+        }
+        assert!(parsed(&["render", "a.oas", "--drc-rule=R"]).is_err());
     }
 }

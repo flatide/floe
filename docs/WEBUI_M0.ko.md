@@ -89,7 +89,9 @@ M4b-2: `--batch`/stdin, `--mosaic-at`/`--corners`, 구분선·kept tiles·JSON r
 layout/jobdeck 공통 Rust capture runner로 연결했다([M4 §8](WEBUI_M4.ko.md)).
 Python 픽셀/report·jobs1/8 결정성과 단일 worker/실패·취소 보존을 검증한다.
 파일별 원자 게시이며 batch/여러 kept tile의 일괄 트랜잭션은 아니다.
-DRC overlay 캡처는 남아 있고 PNG metadata/보조 CLI는 M4b-3으로 연결했다.
+PNG metadata/보조 CLI는 M4b-3, DRC 오류별 marker/CD/legend 캡처는 M4b-4로
+연결했다([M4 §10](WEBUI_M4.ko.md)). DRC 캡처는 live 스타일·frames/labels on·
+기본 cut0이며 일반 archival shot과 구별한다. 웹 내보내기/UI는 아직 별도다.
 
 ### 2.4 clip — M4 (5개 옵션)
 

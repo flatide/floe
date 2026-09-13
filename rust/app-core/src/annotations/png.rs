@@ -335,6 +335,22 @@ impl Input {
 pub fn read(path: &Path, flag: &AtomicUsize) -> Result<Option<String>> {
     Ok(Input::open(path, false, flag)?.scan.text)
 }
+/// Decorate an owned native PNG into an unpublished artifact. The caller keeps
+/// the previous destination intact until BOTH image and metadata are complete.
+pub fn stage(
+    path: &Path,
+    bytes: &[u8],
+    doc: &Document,
+    flag: &AtomicUsize,
+) -> Result<StagedArtifact> {
+    let mut input = std::io::Cursor::new(bytes);
+    let info = scan(&mut input, flag)?;
+    let text = doc.serialize(None, false, flag)?;
+    validate_rewrite(&info, text.as_deref())?;
+    StagedArtifact::write(path, flag, |out| {
+        rewrite(&mut input, &info, out, text.as_deref(), flag)
+    })
+}
 /// In-place CLI edit. Atomic per PNG, not a multi-file transaction or a
 /// cross-process compare-and-swap: metadata is rechecked just before rename.
 pub fn edit(path: &Path, doc: &Document, append: bool, flag: &AtomicUsize) -> Result<()> {

@@ -3,6 +3,7 @@
 //! No mmap: truncation of a shared file is an I/O error rather than SIGBUS.
 mod ascii;
 pub mod build;
+pub mod capture;
 mod database;
 mod filters;
 mod local;

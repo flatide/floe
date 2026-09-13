@@ -41,9 +41,9 @@ and jobdeck analysis/spec + source indexing with level selection.
 Web preview: isolated Firefox or --no-open; no GTK launcher replacement yet.
 DRC: read-only ICE/ASCII queries; explicit --build [--force] for atomic packs.
 Clip: full-depth exact layout OASIS export; jobdeck clip remains unsupported.
-Render: batch/mosaic + JSON reports; no Python runtime.
+Render: batch/mosaic + JSON reports, DRC marker/CD/legend captures; no Python runtime.
 Annotations: fe-embed CLI writes flateyes PNG metadata without changing pixels.
-Not yet ported: svrf, gtktest, DRC overlay exports, review writes.
+Not yet ported: svrf, gtktest, review writes and browser exports.
 Use the existing floe2 for those commands; there is no Python fallback.
 Run floe2-web index --help for indexing options.";
 const INDEX_HELP: &str = "Usage: floe2-web index SOURCE [OPTIONS]

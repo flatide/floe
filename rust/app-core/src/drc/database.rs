@@ -43,6 +43,27 @@ pub struct ReadPage {
     pub next: Option<Cursor>,
 }
 impl ReadViolation {
+    pub(crate) fn points_um(&self, stop: &AtomicUsize) -> Result<Vec<[f64; 2]>> {
+        let n = match &self.points {
+            ReadPoints::Dbu(p, _) => p.len(),
+            ReadPoints::Um(p) => p.len(),
+        };
+        let mut points = Vec::with_capacity(n);
+        for i in 0..n {
+            if i % 1024 == 0 {
+                check_cancelled(stop)?;
+            }
+            let point = match &self.points {
+                ReadPoints::Dbu(p, precision) => p[i].map(|v| v as f64 / precision),
+                ReadPoints::Um(p) => p[i],
+            };
+            if !point.iter().all(|n| n.is_finite()) {
+                return Err(Error::input("unrepresentable DRC capture point"));
+            }
+            points.push(point);
+        }
+        Ok(points)
+    }
     pub fn comparison<'a>(
         &self,
         rule: &'a Rule,

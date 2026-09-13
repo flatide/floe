@@ -45,6 +45,7 @@ M4a-6에서 Rust 선택 bbox 자동 gap과 수동/auto/CD 생성 순서·삭제�
 M4b-1에서 일반 layout의 exact clip CLI·private 출력 검증·스트리밍 원자 게시를 연결했다.
 M4b-2에서 layout/jobdeck batch·mosaic 캡처와 report·kept tiles를 단일 Rust worker로 연결했다.
 M4b-3에서 PNG pixels를 보존하는 flateyes metadata와 `fe-embed` Rust 보조 CLI를 연결했다.
+M4b-4에서 기존 live 스타일·오류 marker/CD/legend를 유지하는 DRC PNG 캡처 CLI를 연결했다.
 웹 clip/나머지 내보내기와 실제 브라우저 수용은 남아 있다([M4 기록](WEBUI_M4.ko.md)).
 전체 조작 parity와 M0/Firefox/ETX 현장 검증은 아직 완료되지 않았다.
 상세 범위는 [M1b 기록](WEBUI_M1B.ko.md)과 [M2 기록](WEBUI_M2.ko.md). 여기의 M0~M5는 **웹 전환 단계**이며
