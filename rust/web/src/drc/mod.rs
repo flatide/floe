@@ -164,6 +164,14 @@ impl Service {
         request: Request,
         context: Option<dto::FocusContext>,
     ) -> std::result::Result<Ticket, Failure> {
+        self.submit_filters(request, context, None)
+    }
+    fn submit_filters(
+        &self,
+        request: Request,
+        context: Option<dto::FocusContext>,
+        selected: Option<std::collections::BTreeSet<u64>>,
+    ) -> std::result::Result<Ticket, Failure> {
         let mut request = request.core()?;
         match &mut request {
             dto::Command::Focus {
@@ -172,6 +180,10 @@ impl Service {
             | dto::Command::InView {
                 context: target, ..
             } => *target = context,
+            dto::Command::List { filters, .. } | dto::Command::FilteredStep { filters, .. } => {
+                filters.context = context;
+                filters.selected = selected;
+            }
             _ => (),
         }
         self.enqueue(request)

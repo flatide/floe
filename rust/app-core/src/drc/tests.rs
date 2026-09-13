@@ -148,6 +148,233 @@ fn geometry_bytes(n: u64, vertices: usize) -> Vec<u8> {
     out
 }
 #[test]
+fn metadata_query_shares_geometry_members_but_not_its_copy_budget() {
+    let f = Fixture::new(&geometry_bytes(65, 16384));
+    let stop = AtomicUsize::new(0);
+    let mut p = Pack::open(&f.path, &stop).unwrap();
+    let b = [-1., -1., 2., 2.];
+    let start = Cursor { check: 1, error: 0 };
+    let geometry = p.query(b, None, None, start, 65, &stop).unwrap();
+    assert_eq!(geometry.hits.len(), 64);
+    assert_eq!(geometry.next.unwrap().error, 64);
+    let metadata = p.query_info(b, None, None, start, 65, &stop).unwrap();
+    assert_eq!(metadata.hits.len(), 65);
+    for (i, h) in metadata.hits.iter().enumerate() {
+        assert_eq!(
+            (h.local, h.record.number, h.record.points),
+            (i as u64, i as u64 + 1, 16384)
+        );
+        if i < geometry.hits.len() {
+            assert_eq!(h.record, RecordInfo::from(&geometry.hits[i].violation));
+        }
+    }
+}
+#[test]
+fn rule_list_and_step_intersect_selection_waive_and_bounds_before_limits() {
+    use std::collections::BTreeSet;
+    let mut b = bytes(130);
+    let offset = b.len() - 136 + 4 * 8;
+    let at = u64::from_le_bytes(b[offset..offset + 8].try_into().unwrap()) as usize;
+    for i in 0..130 {
+        b[at + i] = if i % 3 == 0 {
+            1
+        } else if i % 7 == 0 {
+            2
+        } else {
+            0
+        };
+    }
+    let f = Fixture::new(&b);
+    let stop = AtomicUsize::new(0);
+    let mut p = Pack::open(&f.path, &stop).unwrap();
+    let all = p.errors(1, 0, 130, &stop).unwrap().hits;
+    let some = BTreeSet::from([0, 2, 7, 63, 64, 66, 128, 129]);
+    let empty = BTreeSet::new();
+    for selected in [None, Some(&some), Some(&empty)] {
+        for waived in [None, Some(true), Some(false)] {
+            for bbox_um in [
+                None,
+                Some([0.63, 0., 0.66, 0.003]),
+                Some([0.64, 0., 0.64, 0.]),
+                Some([5., 5., 6., 6.]),
+            ] {
+                let expected: Vec<_> = all
+                    .iter()
+                    .filter(|h| {
+                        selected.is_none_or(|s| s.contains(&h.local))
+                            && waived.is_none_or(|w| (h.status == 1) == w)
+                            && bbox_um.is_none_or(|b| {
+                                let e = p.bbox_um(h.violation.bbox).unwrap();
+                                b[0] <= e[2] && b[2] >= e[0] && b[1] <= e[3] && b[3] >= e[1]
+                            })
+                    })
+                    .map(|h| h.local)
+                    .collect();
+                for limit in [1, 7, 64] {
+                    let (mut start, mut found, mut scanned) = (0, Vec::new(), 0);
+                    loop {
+                        let page = p
+                            .filtered_errors(
+                                ListRequest {
+                                    check: 1,
+                                    start,
+                                    waived,
+                                    bbox_um,
+                                    selected,
+                                    limit,
+                                },
+                                &stop,
+                            )
+                            .unwrap();
+                        assert!(page.hits.len() <= limit);
+                        scanned += page.scanned;
+                        for h in page.hits {
+                            assert_eq!(
+                                h.record,
+                                RecordInfo::from(&all[h.local as usize].violation)
+                            );
+                            found.push(h.local);
+                        }
+                        let Some(next) = page.next else {
+                            break;
+                        };
+                        assert!(next > start);
+                        start = next;
+                    }
+                    assert_eq!(found, expected);
+                    assert!(scanned <= 130);
+                    if let Some(s) = selected {
+                        assert!(scanned <= s.len() as u64);
+                    }
+                }
+                for backwards in [false, true] {
+                    for after in [None, Some(0), Some(63), Some(64), Some(129)] {
+                        let expected_hit = if backwards {
+                            after
+                                .and_then(|a| expected.iter().rev().copied().find(|&n| n < a))
+                                .or_else(|| expected.last().copied())
+                        } else {
+                            after
+                                .and_then(|a| expected.iter().copied().find(|&n| n > a))
+                                .or_else(|| expected.first().copied())
+                        };
+                        let page = p
+                            .filtered_step(
+                                StepRequest {
+                                    check: 1,
+                                    backwards,
+                                    after,
+                                    waived,
+                                    bbox_um,
+                                    cursor: None,
+                                },
+                                selected,
+                                &stop,
+                            )
+                            .unwrap();
+                        assert!(page.next.is_none());
+                        assert_eq!(page.hit.map(|h| h.local), expected_hit);
+                        assert!(page.scanned <= selected.map_or(130, |s| s.len()) as u64);
+                    }
+                }
+            }
+        }
+    }
+}
+#[test]
+fn filtered_reads_reject_invalid_empty_filters_cancel_and_truncate() {
+    use std::collections::BTreeSet;
+    let f = Fixture::new(&bytes(130));
+    let stop = AtomicUsize::new(0);
+    let mut p = Pack::open(&f.path, &stop).unwrap();
+    let empty = BTreeSet::new();
+    for (check, start, limit, bbox) in [
+        (3, 0, 1, None),
+        (1, 131, 1, None),
+        (1, 0, 65, None),
+        (1, 0, 0, None),
+        (0, 0, 1, Some([f64::NAN, 0., 1., 1.])),
+        (1, 0, 1, Some([1., 0., 0., 1.])),
+    ] {
+        assert!(p
+            .filtered_errors(
+                ListRequest {
+                    check,
+                    start,
+                    limit,
+                    bbox_um: bbox,
+                    waived: None,
+                    selected: Some(&empty)
+                },
+                &stop
+            )
+            .is_err());
+    }
+    for ids in [BTreeSet::from([130]), (0..5001).collect()] {
+        assert!(p
+            .filtered_errors(
+                ListRequest {
+                    check: 1,
+                    start: 0,
+                    limit: 64,
+                    bbox_um: None,
+                    waived: None,
+                    selected: Some(&ids)
+                },
+                &stop
+            )
+            .is_err());
+    }
+    assert!(p
+        .filtered_step(
+            StepRequest {
+                check: 1,
+                cursor: Some(StepCursor {
+                    next: 0,
+                    remaining: 130
+                }),
+                ..Default::default()
+            },
+            Some(&empty),
+            &stop
+        )
+        .is_err());
+    stop.store(1, Ordering::Relaxed);
+    assert!(p
+        .filtered_errors(
+            ListRequest {
+                check: 1,
+                start: 0,
+                limit: 64,
+                bbox_um: None,
+                waived: None,
+                selected: Some(&empty)
+            },
+            &stop
+        )
+        .is_err());
+    stop.store(0, Ordering::Relaxed);
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&f.path)
+        .unwrap()
+        .set_len(1)
+        .unwrap();
+    assert!(p
+        .filtered_errors(
+            ListRequest {
+                check: 1,
+                start: 0,
+                limit: 64,
+                bbox_um: None,
+                waived: None,
+                selected: None
+            },
+            &stop
+        )
+        .is_err());
+}
+#[test]
 fn large_record_metadata_and_point_pages_do_not_clone_the_whole_record() {
     let f = Fixture::new(&geometry_bytes(1, 5000));
     let flag = AtomicUsize::new(0);

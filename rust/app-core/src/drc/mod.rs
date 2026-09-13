@@ -1,13 +1,15 @@
 //! Read-only, bounded queries over the existing native DRC pack (layout 4).
 //! No mmap: truncation of a shared file is an I/O error rather than SIGBUS.
+mod filters;
 mod local;
 mod measure;
 mod pack;
 mod selection;
+pub use filters::{ListPage, ListRequest};
 pub use local::{open_current, reviewer_tag, waive_paths};
 pub use measure::{cd_segments, CdSegment};
 pub use pack::{
-    Check, Cursor, Hit, InfoHit, Pack, Page, PointPage, RecordInfo, StepCursor, StepPage,
+    Check, Cursor, Hit, InfoHit, InfoPage, Pack, Page, PointPage, RecordInfo, StepCursor, StepPage,
     StepRequest, Violation,
 };
 pub use selection::{SelectionMode, Selections, SELECTION_INPUT, SELECTION_ITEMS};

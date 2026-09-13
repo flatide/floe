@@ -25,6 +25,9 @@ impl Selections {
     pub fn total(&self) -> usize {
         self.total
     }
+    pub fn ids(&self, check: usize) -> BTreeSet<u64> {
+        self.rules.get(&check).cloned().unwrap_or_default()
+    }
     pub fn rules(&self) -> impl Iterator<Item = (usize, &BTreeSet<u64>)> {
         self.rules.iter().map(|(&ci, ids)| (ci, ids))
     }

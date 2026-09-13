@@ -25,6 +25,7 @@ M2a-7a에서 단순 DRC 오류의 CD 측정 코어와 읽기 API를 추가했다
 M2a-7b에서 마지막 이동 오류의 CD 치수선·값 표시, k/K/Escape와 상태 복원을 연결했다.
 M2a-8a에서 규칙별 DRC 선택 집합과 현재 페이지 후보 bbox 판정·revision 충돌 API를 추가했다(UI는 다음 단계).
 M2a-8b에서 두 클릭 박스·Shift/Ctrl/Cmd 선택과 규칙별 금색 마커·세션 복원을 연결했다.
+M2a-9a에서 현재 규칙의 Selected·waive·live viewport 교집합 목록/순회 코어와 인증 API를 추가했다(UI는 다음 단계).
 전체 조작 parity와 M0/Firefox/ETX 현장 검증은 아직 완료되지 않았다.
 상세 범위는 [M1b 기록](WEBUI_M1B.ko.md)과 [M2 기록](WEBUI_M2.ko.md). 여기의 M0~M5는 **웹 전환 단계**이며
 jobdeck/occupancy의 같은 이름 단계와 별개다. 개발 기준과 합류 규칙은 §11.

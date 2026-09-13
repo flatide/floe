@@ -626,11 +626,66 @@ release 인증 HTTP 오라클을 재확인했다. Rust1.89 빈 registry 오프�
 Linux musl release link도 통과했으며 마지막 UI 보완은 ES2017/JS 게이트로 재검증했다.
 기존 native 경고는 남아 있고 Linux 실행 PASS로 해석하지 않는다.
 
-## 13. 다음 경계
+## 13. M2a-9a: 현재 규칙의 목록 필터·순회 코어/API
 
-1. DRC selected 목록 필터·hover와 현재 규칙의 live
-   In view 필터, SVRF metric/type 필터·layer isolate는
-   아직 미이관이다. 손으로 그리는 ruler/격리와 Escape 우선순위도 M4에서 확장한다.
+§12의 선택 집합을 목록과 순회에도 적용한다. 이 단계는 **서버/API까지**이며
+현재 UI의 전체 규칙 고정 In view 버튼은 다음 M2a-9b에서 현재 규칙의 live 필터로
+바꾼다. 기존 `errors/query/in_view/step` 읽기 API는 호환/오라클용으로 유지한다.
+
+- `app-core::Pack::filtered_errors`는 현재 규칙의 local ID 순서로 **Selected ∩
+  waive ∩ viewport bbox**를 모두 적용한 뒤 최대64개를 반환한다. `next`는 선택
+  배열의 첨자가 아니라 다음 rule-local ID다. 빈 선택 집합은 빈 목록이며 전체 오류로
+  되돌아가지 않는다. 필터 없는 목록도 같은 좌표/bbox 판정을 사용한다.
+- 선택 집합이 있으면 그 규칙의 최대5000개 ID만 검사한다. 없으면 기존 query의
+  check/block/qbox/실제 bbox 가지치기와 요청당 262,144 slot/4096단계 continuation을
+  유지한다. `next`가 있는 빈 페이지는 완료가 아니다. 필터를 바꾸면 처음부터 시작한다.
+- 새 `query_info`는 기존 geometry query와 판정·순회 코드를 공유하지만
+  **vertex 배열을 복사하지 않고 metadata만** 반환한다. containing block의 검사와
+  decode는 여전히 필요하므로 무I/O/무decode나 RSS cap을 보장하는 것은 아니다.
+  geometry query의 기존 복사점 cap/continuation은 바꾸지 않았다.
+- `filtered_step`은 동일 교집합 안에서 앞/뒤 순환한다. Selected이면 최대5000개
+  ID를64개씩 검사해 전체 한 바퀴 안에서 끝나며 별도 pack-range cursor를 받지 않는다.
+  Selected가 아니면 기존 유계 step/continuation을 사용한다. 필터 판정에 요약된
+  waived count를 사용하지 않아 stale counter가 결과를 숨기지 않는다.
+
+인증된 `/api/v1/drc/{id}/read`에 두 body kind를 추가했다:
+
+| kind | 필드 | 결과 |
+|---|---|---|
+| `list` | check/start/limit(1..64)/waived/in_view/selection_rev? | metadata rows, next local ID, scanned, bbox_um, selection_rev |
+| `filtered_step` | check/backwards/after?/cursor?/waived/in_view/selection_rev? | metadata hit, next step cursor, scanned, bbox_um, selection_rev |
+
+`in_view:true`는 envelope의 현재 `state_rev`가 필수다. actor에 전달할 bbox/DBU는
+서버의 authoritative viewport에서 얻는다. `selection_rev`는 양의 canonical u64
+문자열이며 해당 revision의 **서버 집합**을 복사해 쓴다. null/생략은 Selected off,
+해당 규칙의 집합이 비어 있더라도 명시된 revision은 Selected on이다. 브라우저가
+임의 bbox/선택 ID 목록/경로를 이 두 명령에 넣을 수 없다. context가 필요한데
+내부 호출자가 이를 전달하지 않아도 전체 결과로 fallback하지 않고 오류다.
+
+읽기 전후 owner/view/source/pack revision, 주어진 view/selection revision을 확인한다.
+변경된 집합은409 `drc_selection_conflict`, 변경된 뷰는409 `drc_context_changed`다.
+기존 단일 actor·pending4·취소 경로를 재사용하며 새로운 스레드/의존성/파일 쓰기나
+native navigation은 없다. 여러 요청의 cursor를 서로 다른 필터로 재사용하지 않는
+것은 클라이언트 책임이며 UI에서 token과 revision으로 방어한다.
+
+검증: core의 Selected/waive/bbox/limit/방향/순환 오라클, 빈 집합/빈 규칙/잘못된
+cursor·ID·bbox·상한/취소·truncate를 검사했다. 65개×16,384점 fixture로 기존
+geometry query는 복사점 cap에서 이어지고 metadata query는 좌표 복제 없이 같은
+오류 metadata를 이어 읽는지 확인했다. 실제 HTTP는 Python 오라클과 **384개**
+목록·순회 조합을 비교하고 잘못된 context/revision 거부, 큰 polygon의 metadata-only,
+빈 Selected, panel/render 상태 및 원본 바이트·mtime 불변을 단언한다.
+
+2026-09-13: core59/app6/web24/transport8 테스트, fmt·전환 패키지 strict clippy,
+Rust1.89 빈 registry 오프라인 테스트와 Linux musl release link를 통과했다.
+전체 `sh tools/validate_rust.sh`는 `RUST VALIDATION: ALL OK`이며 기존 ES2017/JS,
+KLayout13 PX+2 phase-exact+14 style도 통과했다. native 의존성 경고는 남아 있다.
+새 필터 UI의 브라우저 QA는 M2a-9b이며 현장 Firefox/ETX·G2는 여전히 보류다.
+
+## 14. 다음 경계
+
+1. DRC selected/live In view 목록 필터의 UI 연결·hover, SVRF metric/type 필터·
+   layer isolate는 아직 미이관이다. 필터/순회 코어와 API는 §13까지 구현했다.
+   손으로 그리는 ruler/격리와 Escape 우선순위도 M4에서 확장한다.
    현재 웹의 In view는 전체 규칙의 고정 시점 검색이며 GTK의 현재 규칙·뷰 추종
    필터와 다르다. 현재 페이지 마커 정책 자체를 전체 pack 마커로 확대하지 않는다.
 2. ASCII/index 흐름·기존 notes·상세 측정/룰 매핑은 각각 parity gate와 함께 확장.

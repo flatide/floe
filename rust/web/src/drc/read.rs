@@ -1,7 +1,7 @@
 use super::{dto::Command, RESPONSE_BYTES};
 use floe_app_core::{
     check_cancelled,
-    drc::{cd_segments, Cursor, Hit, InfoHit, Pack, RecordInfo},
+    drc::{cd_segments, Cursor, Hit, InfoHit, ListRequest, Pack, RecordInfo},
     Error, ErrorKind, Result,
 };
 use serde_json::{json, Value};
@@ -60,6 +60,37 @@ pub(super) fn execute(p: &mut Pack, request: Command, stop: &AtomicUsize) -> Res
     check_cancelled(stop)?;
     p.unchanged()?;
     let value = match request {
+        Command::List {
+            check,
+            start,
+            waived,
+            limit,
+            filters,
+        } => {
+            let b = filters.bounds()?;
+            let page = p.filtered_errors(
+                ListRequest {
+                    check,
+                    start,
+                    waived,
+                    limit,
+                    bbox_um: b,
+                    selected: filters.selection()?,
+                },
+                stop,
+            )?;
+            json!({"rows":page.hits.iter().map(|h| info_hit(p,h)).collect::<Result<Vec<_>>>()?, "next":page.next.map(|n|n.to_string()),
+                "scanned":page.scanned.to_string(), "bbox_um":b.map(|b|b.map(|n|n.to_string())), "selection_rev":filters.selection_rev.map(|n|n.to_string())})
+        }
+        Command::FilteredStep {
+            mut request,
+            filters,
+        } => {
+            request.bbox_um = filters.bounds()?;
+            let page = p.filtered_step(request, filters.selection()?, stop)?;
+            json!({"hit":page.hit.as_ref().map(|h|info_hit(p,h)).transpose()?,"next":page.next.map(|c|json!({"next":c.next.to_string(),"remaining":c.remaining.to_string()})),
+                "scanned":page.scanned.to_string(),"bbox_um":request.bbox_um.map(|b|b.map(|n|n.to_string())),"selection_rev":filters.selection_rev.map(|n|n.to_string())})
+        }
         Command::SelectionCandidates {
             check,
             errors,

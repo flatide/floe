@@ -58,6 +58,9 @@ fn wire_rejects_paths_noncanonical_counters_and_unbounded_reads() {
         json!({"kind":"records","check":"00","errors":[]}),
         json!({"kind":"records","check":"0","errors":["00"]}),
         json!({"kind":"records","check":"0","errors":vec!["0";65]}),
+        json!({"kind":"list","check":"0","start":"0","limit":65,"in_view":false}),
+        json!({"kind":"list","check":"0","start":"0","limit":64,"in_view":false,"selection_rev":"0"}),
+        json!({"kind":"filtered_step","check":"0","backwards":false,"in_view":false,"selection_rev":"1","cursor":{"next":"1","remaining":"1"}}),
     ] {
         assert!(serde_json::from_value::<Request>(v)
             .unwrap()
@@ -76,6 +79,9 @@ fn wire_rejects_paths_noncanonical_counters_and_unbounded_reads() {
         json!({"kind":"measurements","check":"0","error":"1","points":[[0,0],[1,1]]}),
         json!({"kind":"records","check":"0","errors":[0]}),
         json!({"kind":"records","check":"0","errors":[],"path":"/etc/passwd"}),
+        json!({"kind":"list","check":"0","start":"0","limit":64,"in_view":1}),
+        json!({"kind":"list","check":"0","start":"0","limit":64,"in_view":false,"errors":["1"]}),
+        json!({"kind":"filtered_step","check":"0","backwards":false,"in_view":false,"path":"/etc/passwd"}),
     ] {
         assert!(serde_json::from_value::<Request>(v).is_err());
     }
@@ -87,4 +93,55 @@ fn wire_rejects_paths_noncanonical_counters_and_unbounded_reads() {
     .unwrap()
     .core()
     .is_ok());
+}
+
+#[test]
+fn list_filters_require_authoritative_context_and_keep_empty_selection_empty() {
+    use super::dto::{Command, FocusContext};
+    use std::collections::BTreeSet;
+    for kind in ["list", "filtered_step"] {
+        for in_view in [false, true] {
+            for selected in [false, true] {
+                let mut value = json!({"kind":kind,"check":"2","in_view":in_view,
+                    "selection_rev":selected.then_some("9007199254740993")});
+                if kind == "list" {
+                    value["start"] = json!("0");
+                    value["limit"] = json!(64);
+                } else {
+                    value["backwards"] = json!(true);
+                }
+                let request: Request = serde_json::from_value(value).unwrap();
+                assert_eq!(
+                    request.selection_filter().unwrap(),
+                    selected.then_some((9007199254740993, 2))
+                );
+                let mut filters = match request.core().unwrap() {
+                    Command::List { filters, .. } | Command::FilteredStep { filters, .. } => {
+                        filters
+                    }
+                    _ => unreachable!(),
+                };
+                assert_eq!(filters.bounds().is_err(), in_view);
+                assert_eq!(filters.selection().is_err(), selected);
+                filters.context = Some(FocusContext {
+                    bbox_dbu: [-100., -50., 100., 50.],
+                    dbu: 0.001,
+                    pixels: [800, 400],
+                });
+                assert_eq!(
+                    filters.bounds().unwrap(),
+                    in_view.then_some([-0.1, -0.05, 0.1, 0.05])
+                );
+                filters.selected = Some(BTreeSet::new());
+                if selected {
+                    assert!(filters.selection().unwrap().unwrap().is_empty());
+                } else {
+                    assert!(
+                        filters.selection().is_err(),
+                        "unsolicited selection changed an all-errors request"
+                    );
+                }
+            }
+        }
+    }
 }

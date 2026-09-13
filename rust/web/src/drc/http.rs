@@ -159,7 +159,17 @@ async fn read(
     let Some(drc) = gate.drc.as_ref().filter(|d| d.id == id) else {
         return failure("drc_unavailable");
     };
-    let focused = matches!(&body.body, Request::Focus { .. } | Request::InView { .. });
+    let focused = matches!(
+        &body.body,
+        Request::Focus { .. }
+            | Request::InView { .. }
+            | Request::List { in_view: true, .. }
+            | Request::FilteredStep { in_view: true, .. }
+    );
+    let selection_filter = match body.body.selection_filter() {
+        Ok(v) => v,
+        Err(e) => return failure(e),
+    };
     if body
         .state_rev
         .as_ref()
@@ -198,7 +208,19 @@ async fn read(
     } else {
         None
     };
-    let mut ticket = match drc.submit_context(body.body, context) {
+    let selected = if let Some((revision, check)) = selection_filter {
+        let Some(v) = gate.active_view().filter(|v| v.id == body.view_id) else {
+            return failure("drc_context_changed");
+        };
+        let ids = v.drc_panel.lock().unwrap().groups.ids(revision, check);
+        match ids {
+            Ok(ids) => Some(ids),
+            Err(e) => return failure(e),
+        }
+    } else {
+        None
+    };
+    let mut ticket = match drc.submit_filters(body.body, context, selected) {
         Ok(t) => t,
         Err(e) => return failure(e),
     };
@@ -208,6 +230,15 @@ async fn read(
     }
     if !matches() {
         return failure("drc_context_changed");
+    }
+    if let Some((revision, _)) = selection_filter {
+        let Some(v) = gate.active_view().filter(|v| v.id == body.view_id) else {
+            return failure("drc_context_changed");
+        };
+        let check = v.drc_panel.lock().unwrap().groups.check(revision);
+        if let Err(e) = check {
+            return failure(e);
+        }
     }
     match result {
         Ok(bytes) => (

@@ -25,12 +25,20 @@ impl Default for Groups {
     }
 }
 impl Groups {
-    fn check(&self, base: u64) -> Result<(), Failure> {
+    pub(super) fn check(&self, base: u64) -> Result<(), Failure> {
         if base == self.revision {
             Ok(())
         } else {
             Err("drc_selection_conflict")
         }
+    }
+    pub(super) fn ids(
+        &self,
+        base: u64,
+        check: usize,
+    ) -> Result<std::collections::BTreeSet<u64>, Failure> {
+        self.check(base)?;
+        Ok(self.selected.ids(check))
     }
     fn snapshot(&self) -> Value {
         let rules = self.selected.rules().map(|(check, ids)| json!({"check":check.to_string(), "errors":ids.iter().map(u64::to_string).collect::<Vec<_>>() })).collect::<Vec<_>>();

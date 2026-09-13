@@ -18,6 +18,23 @@ pub struct StepCursorDto {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
+    List {
+        check: String,
+        start: String,
+        waived: Option<bool>,
+        limit: usize,
+        in_view: bool,
+        selection_rev: Option<String>,
+    },
+    FilteredStep {
+        check: String,
+        backwards: bool,
+        after: Option<String>,
+        cursor: Option<StepCursorDto>,
+        waived: Option<bool>,
+        in_view: bool,
+        selection_rev: Option<String>,
+    },
     Rules {
         start: String,
         search: String,
@@ -73,6 +90,17 @@ pub enum Request {
     },
 }
 pub(super) enum Command {
+    List {
+        check: usize,
+        start: u64,
+        waived: Option<bool>,
+        limit: usize,
+        filters: Filters,
+    },
+    FilteredStep {
+        request: StepRequest,
+        filters: Filters,
+    },
     ValidatePanel(Box<super::panel::Data>),
     SelectionCandidates {
         check: Option<usize>,
@@ -125,6 +153,12 @@ pub(super) enum Command {
         limit: usize,
     },
 }
+pub(super) struct Filters {
+    pub in_view: bool,
+    pub selection_rev: Option<u64>,
+    pub context: Option<FocusContext>,
+    pub selected: Option<BTreeSet<u64>>,
+}
 #[derive(Clone, Copy)]
 pub(super) struct FocusContext {
     pub bbox_dbu: [f64; 4],
@@ -168,8 +202,79 @@ pub(super) fn bbox(strings: [String; 4]) -> Result<[f64; 4], Failure> {
     Ok(b)
 }
 impl Request {
+    pub(super) fn selection_filter(&self) -> Result<Option<(u64, usize)>, Failure> {
+        let pair = match self {
+            Self::List {
+                check,
+                selection_rev,
+                ..
+            }
+            | Self::FilteredStep {
+                check,
+                selection_rev,
+                ..
+            } => (check, selection_rev),
+            _ => return Ok(None),
+        };
+        pair.1
+            .as_ref()
+            .map(|rev| {
+                Ok((
+                    crate::view::counter(rev).map_err(|_| "invalid_drc_request")?,
+                    index(pair.0)?,
+                ))
+            })
+            .transpose()
+    }
     pub(super) fn core(self) -> Result<Command, Failure> {
         Ok(match self {
+            Self::List {
+                check,
+                start,
+                waived,
+                limit,
+                in_view,
+                selection_rev,
+            } => Command::List {
+                check: index(&check)?,
+                start: number(&start)?,
+                waived,
+                limit: cap(limit, 64)?,
+                filters: Filters::new(in_view, selection_rev)?,
+            },
+            Self::FilteredStep {
+                check,
+                backwards,
+                after,
+                cursor,
+                waived,
+                in_view,
+                selection_rev,
+            } => {
+                if after.is_some() && cursor.is_some()
+                    || selection_rev.is_some() && cursor.is_some()
+                {
+                    return Err("invalid_drc_request");
+                }
+                Command::FilteredStep {
+                    request: StepRequest {
+                        check: index(&check)?,
+                        backwards,
+                        after: after.as_deref().map(number).transpose()?,
+                        cursor: cursor
+                            .map(|c| {
+                                Ok::<_, Failure>(StepCursor {
+                                    next: number(&c.next)?,
+                                    remaining: number(&c.remaining)?,
+                                })
+                            })
+                            .transpose()?,
+                        waived,
+                        bbox_um: None,
+                    },
+                    filters: Filters::new(in_view, selection_rev)?,
+                }
+            }
             Self::Records { check, errors } => {
                 if errors.len() > floe_app_core::drc::SELECTION_INPUT {
                     return Err("invalid_drc_request");
@@ -295,5 +400,35 @@ impl Request {
                 }
             }
         })
+    }
+}
+impl Filters {
+    fn new(in_view: bool, selection_rev: Option<String>) -> Result<Self, Failure> {
+        Ok(Self {
+            in_view,
+            selection_rev: selection_rev
+                .map(|s| crate::view::counter(&s).map_err(|_| "invalid_drc_request"))
+                .transpose()?,
+            context: None,
+            selected: None,
+        })
+    }
+    pub fn bounds(&self) -> floe_app_core::Result<Option<[f64; 4]>> {
+        if self.in_view {
+            let c = self
+                .context
+                .ok_or_else(|| floe_app_core::Error::input("filter requires authoritative view"))?;
+            Ok(Some(c.bbox_dbu.map(|v| v * c.dbu)))
+        } else {
+            Ok(None)
+        }
+    }
+    pub fn selection(&self) -> floe_app_core::Result<Option<&BTreeSet<u64>>> {
+        if self.selection_rev.is_some() != self.selected.is_some() {
+            return Err(floe_app_core::Error::input(
+                "filter requires authoritative selection",
+            ));
+        }
+        Ok(self.selected.as_ref())
     }
 }

@@ -15,6 +15,7 @@ from validate_web_cli import APP, INDEX, RENDERD, ROOT, Client, read_json, wait
 from validate_app_drc import fingerprint
 from validate_drc_ice import DB
 from validate_web_drc_selection import validate_selection
+from validate_web_drc_filters import validate_filters
 from floe import drc
 
 
@@ -212,6 +213,7 @@ def main(fixture):
             focused = dict(context, state_rev=view_state["state_rev"])
             selection_path = panel_path.removesuffix("panel") + "selection"
             selection_rev = validate_selection(client, selection_path, endpoint, context, expected, view_state)
+            selection_rev = validate_filters(client, selection_path, endpoint, context, expected, view_state, selection_rev)
             assert client.call("GET", panel_path) == changed, "groups changed panel settings"
             assert fingerprint(data) == before, "groups changed review files"
             ci = next(i for i, c in enumerate(expected) if c["errors"])

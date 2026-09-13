@@ -71,6 +71,43 @@ pub struct Page {
     pub next: Option<Cursor>,
     pub scanned: u64,
 }
+#[derive(Clone, Debug)]
+pub struct InfoPage {
+    pub hits: Vec<InfoHit>,
+    pub next: Option<Cursor>,
+    pub scanned: u64,
+}
+struct QueryPage<T> {
+    hits: Vec<T>,
+    next: Option<Cursor>,
+    scanned: u64,
+}
+trait QueryHit: Sized {
+    const COPY_POINTS: bool;
+    fn project(check: usize, local: u64, status: u8, v: &Violation) -> Self;
+}
+impl QueryHit for Hit {
+    const COPY_POINTS: bool = true;
+    fn project(check: usize, local: u64, status: u8, v: &Violation) -> Self {
+        Self {
+            check,
+            local,
+            status,
+            violation: v.clone(),
+        }
+    }
+}
+impl QueryHit for InfoHit {
+    const COPY_POINTS: bool = false;
+    fn project(check: usize, local: u64, status: u8, v: &Violation) -> Self {
+        Self {
+            check,
+            local,
+            status,
+            record: RecordInfo::from(v),
+        }
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StepCursor {
     pub next: u64,
@@ -935,10 +972,44 @@ impl Pack {
         bbox_um: [f64; 4],
         checks: Option<&BTreeSet<usize>>,
         waived: Option<bool>,
-        mut cursor: Cursor,
+        cursor: Cursor,
         limit: usize,
         cancelled: &AtomicUsize,
     ) -> Result<Page> {
+        let p = self.query_page::<Hit>(bbox_um, checks, waived, cursor, limit, cancelled)?;
+        Ok(Page {
+            hits: p.hits,
+            next: p.next,
+            scanned: p.scanned,
+        })
+    }
+    /// Same broad/exact intersection and continuation as geometry queries,
+    /// without cloning vertices or imposing a copied-point limit on metadata.
+    pub fn query_info(
+        &mut self,
+        bbox_um: [f64; 4],
+        checks: Option<&BTreeSet<usize>>,
+        waived: Option<bool>,
+        cursor: Cursor,
+        limit: usize,
+        cancelled: &AtomicUsize,
+    ) -> Result<InfoPage> {
+        let p = self.query_page::<InfoHit>(bbox_um, checks, waived, cursor, limit, cancelled)?;
+        Ok(InfoPage {
+            hits: p.hits,
+            next: p.next,
+            scanned: p.scanned,
+        })
+    }
+    fn query_page<T: QueryHit>(
+        &mut self,
+        bbox_um: [f64; 4],
+        checks: Option<&BTreeSet<usize>>,
+        waived: Option<bool>,
+        mut cursor: Cursor,
+        limit: usize,
+        cancelled: &AtomicUsize,
+    ) -> Result<QueryPage<T>> {
         self.unchanged()?;
         check_cancelled(cancelled)?;
         if !(1..=PAGE_ITEMS).contains(&limit)
@@ -953,7 +1024,7 @@ impl Pack {
             return Err(crate::Error::input("invalid DRC query/cursor/limit"));
         }
         let q = query_box(bbox_um, self.precision)?;
-        let mut page = Page {
+        let mut page = QueryPage {
             hits: Vec::new(),
             next: None,
             scanned: 0,
@@ -1045,17 +1116,13 @@ impl Pack {
                             && bbox_um[1] <= eb[3]
                             && bbox_um[3] >= eb[1]
                         {
-                            if output_points + e.points.len() > BLOCK_POINTS {
+                            let points = if T::COPY_POINTS { e.points.len() } else { 0 };
+                            if output_points + points > BLOCK_POINTS {
                                 cursor.error = ei;
                                 break 'search;
                             }
-                            output_points += e.points.len();
-                            page.hits.push(Hit {
-                                check: ci,
-                                local: ei,
-                                status: statuses[j],
-                                violation: e.clone(),
-                            });
+                            output_points += points;
+                            page.hits.push(T::project(ci, ei, statuses[j], e));
                         }
                     }
                     if page.hits.len() == limit || page.scanned >= SCAN_ITEMS {
