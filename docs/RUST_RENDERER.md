@@ -161,24 +161,39 @@ with frontier changes, so a stale generation cannot commit a frame. Successfully
 decoded immutable pages remain reusable in the LRU. `exact=1` is accepted only
 with `cut=0 depth=full frames=off`; conflicting options are errors.
 
-Every successfully published refinement round atomically replaces the shared
-query snapshot with that round's `FrameScene`. Snap and pick therefore inspect
-exactly the decoded design geometry currently on screen, including hierarchy,
+Every successfully published geometry round atomically replaces the shared
+query snapshot with that round's `FrameScene`. A label-only foreground backed
+by a retained margin keeps the covering scene instead. Snap and pick inspect
+the selected, decoded design geometry, including hierarchy,
 orthogonal transforms, repetitions, paths, and planner washes, while excluding
-draw-only frames and live labels. They never load delta OASIS into KLayout and
-never consult a stale KLayout shadow scene. The stdin thread clones the scene
-`Arc` and performs the bounded query while the render worker continues decoding
-and rasterizing later rounds. Query traversal skips decoded pages whose
-cell-local bbox misses the probe and examines at most 400 repetition members,
-including non-visible members of sparse explicit-point repetitions. Snap also
-examines at most 400 touching shapes and prefers any in-radius vertex over the
-nearest edge. Pick retains at most 64 containing candidates, is
-boundary-inclusive, sorts by
-`(integer area, layer, datatype)`, and preserves `nth` overlap cycling.
+draw-only frames and live labels. They never load delta OASIS into KLayout.
+A dedicated query thread captures one immutable scene `Arc`; stdin/cancel and
+render dispatch remain independent. Traversal prunes by the query box and
+reports an explicit error if the 4,194,304 repetition-member safety limit is
+exhausted. Legacy snap additionally stops after 1,048,576 touching shapes;
+scene-pinned snap uses the explicit member limit instead of silently truncating
+its nearest-result search. Snap prefers any in-radius vertex over the nearest
+edge. Pick retains at most 64 containing candidates, is boundary-inclusive,
+sorts by `(integer area, layer, datatype)`, and preserves `nth` overlap cycling.
+An outline longer than 512 points carries `points_truncated=1`; the prefix is
+not a complete polygon, although bbox and area describe the complete shape.
 
-Renderer repetition traversal rejects collinear or zero-vector two-dimensional
-grids explicitly before enumerating them; the normal one-dimensional grid forms
-remain supported. Page OASIS point-list and explicit-point repetition counts
+Native 0.12.86 adds frame/query `scene_gen`, `scene_round`, `scene_complete`, and
+`scene_summary`. New clients pin both scene counters on pick/snap and inspect
+`query_status` plus `query_summary` before using a result. Unpublished, mismatched,
+partial/deferred, or requested summary geometry is explicitly refused rather
+than returned as an empty hit. Exact-only layers of a mixed summary scene remain
+queryable. Scene identity belongs to one worker and may precede the frame's own
+generation after margin reuse; upper clients must also bind the displayed frame
+and worker lifetime. Omitting both expected counters preserves the legacy local
+query behavior. See [the M4 query contract](WEBUI_M4.ko.md) for statuses and gates;
+this native API does not yet enable web queries.
+
+Renderer repetition traversal supports small collinear or zero-vector
+two-dimensional grids, but explicitly rejects a degenerate per-view range
+larger than 1,048,576 visits before enumeration. Non-degenerate grids use
+analytical viewport pruning without this degenerate-only limit. Page OASIS
+point-list and explicit-point repetition counts
 are bounded by the remaining payload bytes before any proportional allocation,
 and corrupt payloads return a page decode error rather than attempting an
 unbounded allocation.

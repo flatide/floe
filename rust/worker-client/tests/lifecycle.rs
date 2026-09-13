@@ -24,6 +24,11 @@ fn main() {
         ("bounded_stderr_and_blocked_stdin_shutdown", blocked_io),
         ("deck_open_and_capability", deck),
         ("shutdown_interrupts_startup_waits", interrupt_startup),
+        (
+            "queries_interleave_frames_and_keep_independent_credit",
+            queries,
+        ),
+        ("query_corruption_deadline_and_limits", query_errors),
     ];
     for (name, test) in tests {
         test();
@@ -60,6 +65,7 @@ impl Temp {
         c.open_timeout = Duration::from_millis(300);
         c.style_timeout = Duration::from_millis(300);
         c.render_timeout = Duration::from_millis(500);
+        c.query_timeout = Duration::from_millis(300);
         c.shutdown_grace = Duration::from_millis(50);
         c
     }
@@ -164,6 +170,125 @@ fn partial() {
     let f = frame(&mut w);
     assert!(f.final_frame && !f.complete());
 }
+fn query_request(operation: QueryOperation) -> QueryRequest {
+    QueryRequest {
+        scene: SceneId {
+            generation: 1,
+            round: 1,
+        },
+        operation,
+        x: 1,
+        y: 1,
+        radius: 2,
+        layers: Layers::All,
+    }
+}
+fn query_reply(w: &mut WorkerClient) -> QueryReply {
+    loop {
+        match w.poll(Duration::from_millis(20)).unwrap() {
+            Some(Event::Query(q)) => return q,
+            Some(Event::Failed { message, .. }) => panic!("{message}"),
+            _ => (),
+        }
+    }
+}
+fn queries() {
+    let tmp = Temp::new();
+    let mut w = tmp.worker("normal");
+    w.render(request(FrameFormat::Raw)).unwrap();
+    let f = frame(&mut w);
+    assert_eq!(
+        f.query_scene().unwrap().id,
+        Some(SceneId {
+            generation: 1,
+            round: 1
+        })
+    );
+    let seq = w
+        .query(query_request(QueryOperation::Pick { nth: 0 }))
+        .unwrap();
+    assert_eq!(seq, 1);
+    assert_eq!(w.set_styles(&[style()]).unwrap_err().kind, ErrorKind::State);
+    // A render can be submitted while a query owns credit. Draining one must
+    // neither consume nor acknowledge the other kind's result.
+    let gen = w.render(request(FrameFormat::Raw)).unwrap();
+    let reply = query_reply(&mut w);
+    assert_eq!(reply.sequence, seq);
+    let Some(QueryHit::Pick(hit)) = reply.hit else {
+        panic!()
+    };
+    assert_eq!(hit.layer, (1, 0));
+    assert_eq!(hit.cell_name, "TOP 한글");
+    assert_eq!(w.pending_queries(), 0);
+    assert_eq!(frame(&mut w).generation, gen);
+    let mut invalid = query_request(QueryOperation::Snap);
+    invalid.radius = -1;
+    assert!(w.query(invalid).is_err());
+    assert_eq!(w.query(query_request(QueryOperation::Snap)).unwrap(), 2);
+    assert!(matches!(query_reply(&mut w).hit, Some(QueryHit::Snap(_))));
+    w.set_styles(&[style()]).unwrap();
+    no_outputs(&w);
+    w.close().unwrap();
+    assert_eq!(w.pending_queries(), 0);
+}
+fn query_errors() {
+    let tmp = Temp::new();
+    for mode in [
+        "query_bad_seq",
+        "query_bad_kind",
+        "query_bad_scene",
+        "query_duplicate",
+    ] {
+        let mut w = tmp.worker(mode);
+        let work = w.work_dir().to_owned();
+        w.query(query_request(QueryOperation::Snap)).unwrap();
+        if mode == "query_duplicate" {
+            query_reply(&mut w);
+        }
+        assert_eq!(
+            w.poll(Duration::from_secs(1)).unwrap_err().kind,
+            ErrorKind::Protocol,
+            "{mode}"
+        );
+        assert!(w.pid().is_none());
+        assert!(!work.exists());
+    }
+    let mut config = tmp.config("query_hold");
+    config.query_timeout = Duration::from_millis(80);
+    let mut w = WorkerClient::spawn(config).unwrap();
+    w.open(Source::Layout(tmp.0.join("cache 한 글")), 32, 1)
+        .unwrap();
+    w.set_styles(&[style()]).unwrap();
+    for _ in 0..8 {
+        w.query(query_request(QueryOperation::Snap)).unwrap();
+    }
+    assert_eq!(
+        w.query(query_request(QueryOperation::Snap))
+            .unwrap_err()
+            .kind,
+        ErrorKind::Busy
+    );
+    assert_eq!(w.pending_queries(), 8);
+    w.render(request(FrameFormat::Raw)).unwrap();
+    assert!(frame(&mut w).complete());
+    w.cancel().unwrap();
+    assert!(matches!(
+        w.poll(Duration::from_millis(20)).unwrap(),
+        Some(Event::CancelAcknowledged { .. })
+    ));
+    assert_eq!(
+        w.pending_queries(),
+        8,
+        "render cancellation is not query completion"
+    );
+    let work = w.work_dir().to_owned();
+    assert_eq!(
+        w.poll(Duration::from_secs(1)).unwrap_err().kind,
+        ErrorKind::Timeout
+    );
+    assert!(!work.exists());
+    assert_eq!(w.pending_queries(), 0);
+}
 fn stale() {
     let tmp = Temp::new();
     let mut w = tmp.worker("normal");
@@ -247,6 +372,10 @@ fn frame_errors() {
         "render_timeout",
         "render_eof",
         "bad_round",
+        "scene_missing",
+        "scene_future_generation",
+        "scene_future_round",
+        "scene_wrong_source",
     ] {
         let mut w = tmp.worker(mode);
         let work = w.work_dir().to_owned();
@@ -414,6 +543,7 @@ fn fixture(mode: &str, root: Option<&String>) {
         "ready version={} git=fixture flavor=test",
         EXPECTED_RENDERD_VERSION
     ));
+    let mut deck = false;
     for line in std::io::stdin().lock().lines() {
         let line = line.unwrap();
         let mut words = line.split_whitespace();
@@ -421,6 +551,7 @@ fn fixture(mode: &str, root: Option<&String>) {
         let fields: BTreeMap<_, _> = words.map(|w| w.split_once('=').unwrap()).collect();
         match command {
             "open" => {
+                deck = fields.contains_key("deck");
                 if mode == "open_timeout" {
                     std::thread::sleep(Duration::from_secs(30));
                     continue;
@@ -510,10 +641,70 @@ fn fixture(mode: &str, root: Option<&String>) {
                     }
                     let partial = !final_frame || mode == "partial_final";
                     let r = if mode == "bad_round" { 0 } else { round };
-                    reply(&format!("frame gen={} round={r} final={} partial={} deferred=0 labels_truncated=0 style_epoch={} format={} png={}", fields["gen"], u8::from(final_frame), u8::from(partial), fields["style_epoch"], fields["frame_format"], path.display()));
+                    let mut scene = if deck {
+                        "scene_gen=0 scene_round=0 scene_complete=0 scene_summary=0".into()
+                    } else {
+                        format!(
+                            "scene_gen={} scene_round={r} scene_complete={} scene_summary=0",
+                            fields["gen"],
+                            u8::from(!partial)
+                        )
+                    };
+                    match mode {
+                        "scene_missing" => scene.clear(),
+                        "scene_future_generation" => {
+                            scene = format!(
+                                "scene_gen={} scene_round=1 scene_complete=1 scene_summary=0",
+                                fields["gen"].parse::<u64>().unwrap() + 1
+                            )
+                        }
+                        "scene_future_round" => {
+                            scene = format!(
+                                "scene_gen={} scene_round={} scene_complete=1 scene_summary=0",
+                                fields["gen"],
+                                r + 1
+                            )
+                        }
+                        "scene_wrong_source" => {
+                            scene =
+                                "scene_gen=0 scene_round=0 scene_complete=0 scene_summary=0".into()
+                        }
+                        _ => (),
+                    }
+                    reply(&format!("frame gen={} round={r} final={} partial={} deferred=0 labels_truncated=0 style_epoch={} format={} png={} {scene}", fields["gen"], u8::from(final_frame), u8::from(partial), fields["style_epoch"], fields["frame_format"], path.display()));
                 }
             }
             "cancel" => reply(&format!("cancelled before_gen={}", fields["before_gen"])),
+            "snap" | "pick" => {
+                if mode == "query_hold" {
+                    continue;
+                }
+                let seq =
+                    fields["seq"].parse::<u64>().unwrap() + u64::from(mode == "query_bad_seq");
+                let context = format!(
+                    "scene_gen={} scene_round={} scene_complete=1 scene_summary=0 query_summary=0 query_status=ok",
+                    if mode == "query_bad_scene" {
+                        "2"
+                    } else {
+                        fields["scene_gen"]
+                    },
+                    fields["scene_round"]
+                );
+                let kind = if mode == "query_bad_kind" {
+                    "pick"
+                } else {
+                    command
+                };
+                let line = if kind == "snap" {
+                    format!("snap seq={seq} found=1 x=0 y=0 snap=vertex {context}")
+                } else {
+                    format!("pick seq={seq} found=1 count=1 index=0 layer=1 datatype=0 lname_hex=312f30 cell_hex=544f5020ed959ceab880 area=100 bbox=0,0,10,10 points=0,0;0,10;10,10;10,0 points_truncated=0 {context}")
+                };
+                reply(&line);
+                if mode == "query_duplicate" {
+                    reply(&line);
+                }
+            }
             "quit" => return,
             _ => panic!("unexpected command"),
         }

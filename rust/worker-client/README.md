@@ -7,10 +7,11 @@ HTTP 서버/CLI 전체 이관은 아직 아니다. Linux/macOS 대상, unsafe Ru
 
 - 명시 executable + `ready` 버전 검증 → layout/deck `open` → typed style ack.
   호환 버전은 build 시 `renderd/Cargo.toml`에서 읽는다. 새 통신 필드나
-  daemon 변경이 없으므로 renderd 버전은 이 작업에서 올리지 않는다.
+  M1a 당시 daemon 변경은 없었다. M4a-1의 scene query 필드 추가로 native 호환
+  버전은0.12.86이며 renderd/index를 함께 재빌드해야 한다.
 - `RenderRequest`: DBU bbox, 치수, depth/cut/exact, all/none/layers,
   frames/labels/font, style/mono, thin, raster/decode jobs, PNG/raw.
-  기본 refinement off(2^30 round pages), query/clip API는 미구현.
+  기본 refinement off(2^30 round pages). query는 M4a-1에서 아래와 같이 추가했고 clip은 미구현.
 - 단조 generation, 취소 frontier, stale frame 폐기, partial/final 구별.
   이전 세대의 실제 오류도 `Event::Failed`로 전달해 cancelled로 위장하지 않는다.
 - private 0700 디렉터리의 source alias로 공백/한글 경로 지원. style은 ack 후,
@@ -58,7 +59,31 @@ label 잘림 검사이고, 별도 jobdeck source skip ledger까지 판정하지 
 실행 파일이 자손 프로세스에 pipe를 넘기는 wrapper는 범위 밖이다. close/Drop은
 daemon 자체를 수거한다. 브라우저에서 binary/argv/path/env를 받는 API는 없다.
 새 인덱스 revision은 기존 worker 재open 대신 close→새 worker로 전환한다.
-M0-D4의 scene ID 확장 전까지 pick/snap은 공개하지 않는다.
+M0-D4의 scene ID 확장은 M4a-1에서 추가했다. **웹에는 아직 공개하지 않는다.**
+
+## M4a-1: native pick/snap
+
+`Frame::query_scene()`으로 실제 게시 geometry의 generation/round·완료·요약 수를
+읽는다. label-only foreground는 이전 margin scene을 재사용하므로 frame의
+generation을 대신 넣으면 안 된다. `WorkerClient::query(QueryRequest)`는 기대 scene,
+DBU x/y/radius, layers, `Snap|Pick{nth}`를 받고 새 seq를 반환한다.
+`poll()`의 `Event::Query(QueryReply)`에 원래 요청·actual scene·typed 결과가 온다.
+ID는 worker-local이며 상위 controller가 dataset/view/worker epoch와 표시 상태를
+검사해야 한다. 자세한 wire·제한은 [M4 기록](../../docs/WEBUI_M4.ko.md)을 따른다.
+
+최대8개 outstanding query, IO line64KiB, outline512점이다. `points_truncated`이면
+prefix를 완전한 polygon으로 해석하지 않는다. query seq는 양의 i64 범위에서
+성공한 제출만 증가하고 render frontier와 독립이다. query 중 render/cancel/poll은
+가능하며 style ACK 전에는 query를 drain한다. default query deadline5초는 frame이나
+다른 질의 응답으로 연장되지 않고 timeout/protocol 오류는 close/reap한다.
+summary/미완료/mismatch를 빈 hit와 구별한다. 혼합 scene의 exact 레이어만 지정하면
+질의할 수 있지만 전체 scene의 `queryable()`은 false다. 모든 render/query 응답을
+독립적으로 소비해야 하며 frame만 골라 다른 이벤트를 버리는 capture loop에 query를
+동시에 제출하지 않는다. deck query와 웹 controller 연결은 여전히 미지원이다.
+
+`tools/validate_worker_queries.py`는 합성 OASIS/점유 혼합·KLayout 면적, margin/라벨
+재사용·가시성 전환·overlap/긴 outline·query/render 교차를 PATH-empty native로
+검사한다. full battery가 실행하며 fixture 누락은 skip이 아니다.
 
 ## 검증
 

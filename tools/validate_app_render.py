@@ -95,7 +95,9 @@ for line in sys.stdin:
             print("error gen=" + d["gen"] + " code=render message=ENOSPC", flush=True)
             continue
         pathlib.Path(d["out"]).write_bytes(pathlib.Path(os.environ["FAKE_PNG"]).read_bytes())
-        print("frame gen=" + d["gen"] + " round=1 final=1 partial=" + ("1" if mode in ("partial", "deferred") else "0") + " deferred=" + ("2" if mode == "deferred" else "0") + " labels_truncated=" + ("1" if mode == "labels" else "0") + " style_epoch=" + d["style_epoch"] + " format=png png=" + d["out"], flush=True)
+        scene = ("scene_gen=0 scene_round=0 scene_complete=0 scene_summary=0" if {deck!r}
+                 else "scene_gen=" + d["gen"] + " scene_round=1 scene_complete=" + ("0" if mode in ("partial", "deferred") else "1") + " scene_summary=0")
+        print("frame gen=" + d["gen"] + " round=1 final=1 partial=" + ("1" if mode in ("partial", "deferred") else "0") + " deferred=" + ("2" if mode == "deferred" else "0") + " labels_truncated=" + ("1" if mode == "labels" else "0") + " style_epoch=" + d["style_epoch"] + " format=png png=" + d["out"] + " " + scene, flush=True)
     elif kind == "quit": break
 ''')
     fake.chmod(0o700)

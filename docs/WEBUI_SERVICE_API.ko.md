@@ -38,6 +38,9 @@ identity 등록 순서다. native 게시 결과와 새 reader의 opening/ready/e
 전송된 뒤 결과가 불명확하면 새 seq를 자동 발급하지 않고, 사용자 명시 확인만
 원래 seq/옵션/identity를 재전송한다. GET/재접속은 생성 동의가 아니다.
 실제 브라우저 승인 클릭 수용은 별도다(서버 M2 §23, UI §24).
+M4a-1의 scene-pinned query는 **로컬 native process client만** 구현했다.
+frame/scene 구분·거부 코드·수명/상한은 [M4 §1](WEBUI_M4.ko.md#1-m4a-1-표시-scene에-고정한-native-picksnap)을 따른다.
+현재 owner/share HTTP query가 존재한다는 뜻은 아니며 웹 capability=false를 유지한다.
 2026-09-13 M1a-1 `rust/worker-client`와 M1a-2a/b `app/app-core`의 일반 index·info/단일 render/probe를
 구현했다. 현재 호출 계약은 [worker README](../rust/worker-client/README.md),
 [M1a 기록](WEBUI_M1A.ko.md)을 따르며 아래 서비스 전체가 존재하는 것은 아니다.

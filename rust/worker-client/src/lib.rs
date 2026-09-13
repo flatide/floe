@@ -8,10 +8,15 @@ compile_error!("floe-worker-client currently supports Linux/macOS only");
 
 mod files;
 mod protocol;
+mod query;
 use files::{wire_path, Workspace};
 use protocol::{parse_line, style_text, Line, MAX_LINE_BYTES};
 pub use protocol::{Fields, Fill, FrameFormat, Layers, RenderRequest, Style, ThinPolicy};
-use std::collections::{BTreeSet, VecDeque};
+pub use query::{
+    PickHit, QueryHit, QueryOperation, QueryReply, QueryRequest, QueryScene, QueryStatus, SceneId,
+    SnapHit, SnapKind,
+};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::{fs::symlink, process::CommandExt};
@@ -24,6 +29,7 @@ use std::time::{Duration, Instant};
 pub const EXPECTED_RENDERD_VERSION: &str = env!("FLOE_RENDERD_VERSION");
 const QUEUE_CAP: usize = 8;
 const MAX_IN_FLIGHT: usize = 32;
+const MAX_QUERIES: usize = 8;
 const STDERR_BYTES: usize = 8192;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,6 +87,7 @@ pub struct Config {
     pub open_timeout: Duration,
     pub style_timeout: Duration,
     pub render_timeout: Duration,
+    pub query_timeout: Duration,
     pub shutdown_grace: Duration,
     pub max_pixels: u64,
     pub max_frame_bytes: usize,
@@ -98,6 +105,7 @@ impl Config {
             open_timeout: Duration::from_secs(300),
             style_timeout: Duration::from_secs(10),
             render_timeout: Duration::from_secs(300),
+            query_timeout: Duration::from_secs(5),
             shutdown_grace: Duration::from_millis(1500),
             max_pixels: 16 * 1024 * 1024,
             max_frame_bytes: 80 * 1024 * 1024,
@@ -136,6 +144,18 @@ pub struct Frame {
     pub fields: Fields,
 }
 impl Frame {
+    /// Scene identity is scoped to this worker lifetime. A reused label-only
+    /// frame can legitimately reference an older geometry generation/round.
+    pub fn query_scene(&self) -> Result<QueryScene> {
+        let scene = QueryScene::parse(&self.fields)?;
+        if scene.id.is_some_and(|s| {
+            s.generation > self.generation
+                || (s.generation == self.generation && s.round > self.round)
+        }) {
+            return Err(Error::protocol("frame references future query scene"));
+        }
+        Ok(scene)
+    }
     pub fn complete(&self) -> bool {
         self.final_frame && !self.partial && self.deferred == 0 && !self.labels_truncated
     }
@@ -144,6 +164,7 @@ impl Frame {
 #[derive(Debug)]
 pub enum Event {
     Frame(Frame),
+    Query(QueryReply),
     Cancelled {
         generation: u64,
     },
@@ -163,6 +184,10 @@ struct Active {
     last_round: u64,
     deadline: Instant,
 }
+struct ActiveQuery {
+    request: QueryRequest,
+    deadline: Instant,
+}
 
 pub struct WorkerClient {
     config: Config,
@@ -178,6 +203,8 @@ pub struct WorkerClient {
     frontier: u64,
     issued: BTreeSet<u64>,
     active: Option<Active>,
+    query_sequence: u64,
+    queries: BTreeMap<u64, ActiveQuery>,
 }
 
 impl WorkerClient {
@@ -208,6 +235,7 @@ impl WorkerClient {
             config.open_timeout,
             config.style_timeout,
             config.render_timeout,
+            config.query_timeout,
             config.shutdown_grace,
         ] {
             if timeout.is_zero() || timeout > Duration::from_secs(86400) {
@@ -248,6 +276,8 @@ impl WorkerClient {
             frontier: 0,
             issued: BTreeSet::new(),
             active: None,
+            query_sequence: 0,
+            queries: BTreeMap::new(),
         };
         let tx = response_tx.clone();
         client.threads.push(
@@ -385,10 +415,14 @@ impl WorkerClient {
     /// Synchronous style transaction. Cancel/drain a foreground render first;
     /// async live-style orchestration belongs in the ViewService, not here.
     pub fn set_styles(&mut self, styles: &[Style]) -> Result<u64> {
-        if self.child.is_none() || self.opened.is_none() || self.active.is_some() {
+        if self.child.is_none()
+            || self.opened.is_none()
+            || self.active.is_some()
+            || !self.queries.is_empty()
+        {
             return Err(Error::new(
                 ErrorKind::State,
-                "styles require an idle open worker",
+                "styles require an idle open worker with queries drained",
             ));
         }
         let text = style_text(styles)?;
@@ -450,6 +484,40 @@ impl WorkerClient {
         Ok(gen)
     }
 
+    /// Nonblocking, bounded submission. Render polling and cancellation remain
+    /// independent; each response carries the actual pinned scene identity.
+    pub fn query(&mut self, request: QueryRequest) -> Result<u64> {
+        if self.child.is_none() || self.opened.as_ref().is_none_or(|o| o.is_deck) {
+            return Err(Error::new(
+                ErrorKind::State,
+                "queries require an open layout worker",
+            ));
+        }
+        if self.queries.len() >= MAX_QUERIES {
+            return Err(Error::new(
+                ErrorKind::Busy,
+                "drain query responses before submitting more queries",
+            ));
+        }
+        let sequence = self
+            .query_sequence
+            .checked_add(1)
+            .ok_or_else(|| Error::input("query sequence exhausted"))?;
+        self.send(request.command(sequence)?)?;
+        self.query_sequence = sequence;
+        self.queries.insert(
+            sequence,
+            ActiveQuery {
+                request,
+                deadline: Instant::now() + self.config.query_timeout,
+            },
+        );
+        Ok(sequence)
+    }
+    pub fn pending_queries(&self) -> usize {
+        self.queries.len()
+    }
+
     pub fn cancel(&mut self) -> Result<u64> {
         let frontier = self
             .frontier
@@ -478,10 +546,14 @@ impl WorkerClient {
             if self.active.as_ref().is_some_and(|a| now >= a.deadline) {
                 return Err(Error::new(ErrorKind::Timeout, "render deadline exceeded"));
             }
+            if self.queries.values().any(|q| now >= q.deadline) {
+                return Err(Error::new(ErrorKind::Timeout, "query deadline exceeded"));
+            }
             let until = self
                 .active
                 .as_ref()
                 .map_or(deadline, |a| deadline.min(a.deadline));
+            let until = self.queries.values().fold(until, |t, q| t.min(q.deadline));
             let interval = until.saturating_duration_since(now);
             let interval = if self.config.shutdown_requested.is_some() {
                 interval.min(Duration::from_millis(20))
@@ -490,6 +562,9 @@ impl WorkerClient {
             };
             let Some(line) = self.receive(interval)? else {
                 self.check_shutdown()?;
+                if self.queries.values().any(|q| Instant::now() >= q.deadline) {
+                    return Err(Error::new(ErrorKind::Timeout, "query deadline exceeded"));
+                }
                 if self
                     .active
                     .as_ref()
@@ -605,6 +680,18 @@ impl WorkerClient {
     fn handle(&mut self, line: Line) -> Result<Option<Event>> {
         let mut f = line.fields;
         match line.kind.as_str() {
+            "snap" | "pick" => {
+                let sequence = f.u64("seq")?;
+                let pending = self
+                    .queries
+                    .remove(&sequence)
+                    .ok_or_else(|| Error::protocol("unissued query response"))?;
+                Ok(Some(Event::Query(query::parse_reply(
+                    &line.kind,
+                    f,
+                    pending.request,
+                )?)))
+            }
             "frame" => {
                 let gen = f.u64("gen")?;
                 let round = f.u64("round")?;
@@ -657,6 +744,10 @@ impl WorkerClient {
                     bytes,
                     fields: f,
                 };
+                let query_scene = frame.query_scene()?;
+                if query_scene.id.is_some() == self.opened.as_ref().is_some_and(|o| o.is_deck) {
+                    return Err(Error::protocol("frame query scene/source kind mismatch"));
+                }
                 if final_frame {
                     self.active = None;
                 }
@@ -724,6 +815,7 @@ impl WorkerClient {
         }
         self.active = None;
         self.issued.clear();
+        self.queries.clear();
         self.workspace.cleanup()
     }
 }

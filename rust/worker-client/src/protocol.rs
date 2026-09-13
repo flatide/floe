@@ -54,7 +54,16 @@ pub(crate) fn parse_line(bytes: &[u8]) -> Result<Line> {
         .ok_or_else(|| Error::protocol("empty daemon line"))?;
     if !matches!(
         kind,
-        "ready" | "opened" | "styled" | "frame" | "cancelled" | "dropped" | "error" | "bye"
+        "ready"
+            | "opened"
+            | "styled"
+            | "frame"
+            | "cancelled"
+            | "dropped"
+            | "error"
+            | "bye"
+            | "pick"
+            | "snap"
     ) {
         return Err(Error::protocol(format!("unexpected response kind {kind}")));
     }
@@ -114,7 +123,7 @@ pub enum Layers {
     Only(Vec<(u32, u32)>),
 }
 impl Layers {
-    fn wire(&self) -> Result<String> {
+    pub(crate) fn wire(&self) -> Result<String> {
         match self {
             Self::All => Ok("all".into()),
             Self::None => Ok("none".into()),
@@ -204,6 +213,9 @@ pub struct RenderRequest {
     pub decode_jobs: u16,
     pub tile_px: u32,
     pub round_pages: u32,
+    /// Explicit native decode ceiling (diagnostics); None leaves it unlimited.
+    /// A partial result is still reported, never silently marked complete.
+    pub decode_pages: Option<usize>,
     pub thin: ThinPolicy,
     pub format: FrameFormat,
 }
@@ -228,6 +240,7 @@ impl Default for RenderRequest {
             decode_jobs: jobs,
             tile_px: 384,
             round_pages: 1 << 30,
+            decode_pages: None,
             thin: ThinPolicy::Cull,
             format: FrameFormat::Raw,
         }
@@ -273,8 +286,11 @@ impl RenderRequest {
             ));
         }
         let depth = self.depth.map_or_else(|| "full".into(), |d| d.to_string());
-        let command = format!("render gen={generation} view={x0},{y0},{x1},{y1} w={} h={} depth={depth} cut={} exact={} layers={} frames={} labels={} font_px={} mono={} frame_cache={} jobs={} decode_jobs={} tile_px={} round_pages={} round_paths=1 frame_format={} thin={} style_epoch={epoch} out={out}",
+        let mut command = format!("render gen={generation} view={x0},{y0},{x1},{y1} w={} h={} depth={depth} cut={} exact={} layers={} frames={} labels={} font_px={} mono={} frame_cache={} jobs={} decode_jobs={} tile_px={} round_pages={} round_paths=1 frame_format={} thin={} style_epoch={epoch} out={out}",
             self.width, self.height, self.cut_px, u8::from(self.exact), self.layers.wire()?, u8::from(self.frames), u8::from(self.labels), self.font_px, u8::from(self.mono), u8::from(self.frame_cache), self.raster_jobs, self.decode_jobs, self.tile_px, self.round_pages, self.format.wire(), self.thin.wire());
+        if let Some(limit) = self.decode_pages {
+            write!(command, " decode_pages={limit}").unwrap();
+        }
         if command.len() > MAX_LINE_BYTES {
             return Err(Error::new(
                 ErrorKind::InvalidInput,
@@ -319,6 +335,13 @@ mod tests {
         r.frames = true;
         assert!(r.command(1, 1, "/tmp/f", 1_000_000).is_err());
         assert_eq!(Layers::None.wire().unwrap(), "none");
+        r.exact = false;
+        r.frames = false;
+        r.decode_pages = Some(0);
+        assert!(r
+            .command(1, 1, "/tmp/f", 1_000_000)
+            .unwrap()
+            .ends_with("decode_pages=0"));
         assert_eq!(Layers::All.wire().unwrap(), "all");
         assert!(Layers::Only(vec![]).wire().is_err());
     }

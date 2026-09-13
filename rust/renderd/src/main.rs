@@ -1,12 +1,11 @@
 use floe_render_core::{
     pick_scene, pick_scene_cancellable, render_geometry_occupancy_cancellable,
-    render_geometry_styled_cancellable_reuse,
-    render_geometry_styled_unbinned_cancellable, FrameReuse,
+    render_geometry_styled_cancellable_reuse, render_geometry_styled_unbinned_cancellable,
     snap_scene, snap_scene_cancellable, validate_font_px, Cache, CacheLayer, ClipGeometry, Deck,
-    DeckRenderRequest, DeckSpec, DecodedPageCache, FrameScene,
-    GeometryRasterRequest, LayerFill, LayerStyle, PlanRequest, RasterViewBox, RenderCancellation,
-    SceneQueryLayer, SceneQueryRequest, SceneSnapKind, StyledGeometryRasterRequest, ViewBox,
-    DEFAULT_LABEL_FONT_PX, DEFAULT_TILE_SIZE, FULL_DEPTH, MAX_TILE_SIZE,
+    DeckRenderRequest, DeckSpec, DecodedPageCache, FrameReuse, FrameScene, GeometryRasterRequest,
+    LayerFill, LayerStyle, PlanRequest, RasterViewBox, RenderCancellation, SceneQueryLayer,
+    SceneQueryRequest, SceneSnapKind, StyledGeometryRasterRequest, ViewBox, DEFAULT_LABEL_FONT_PX,
+    DEFAULT_TILE_SIZE, FULL_DEPTH, MAX_TILE_SIZE,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufRead, Write};
@@ -16,6 +15,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Instant;
+mod query_context;
+use query_context::{QueryContext, SceneId};
 
 const DEFAULT_BUDGET_MB: u64 = 1024;
 const DEFAULT_JOBS: u16 = 1;
@@ -39,6 +40,8 @@ const PICK_CANDIDATE_CAP: usize = 64;
 const QUERY_MEMBER_CAP: usize = 4_194_304;
 
 struct PublishedScene {
+    context: QueryContext,
+    summary_layers: Arc<BTreeSet<u32>>,
     scene: Arc<FrameScene>,
     layers: Arc<[CacheLayer]>,
     cell_names: Arc<BTreeMap<u32, String>>,
@@ -128,7 +131,9 @@ fn serve() -> Result<(), String> {
         let responses = response_tx.clone();
         let scene = Arc::clone(&published_scene);
         let (snap_frontier, pick_frontier) = (snap_frontier.clone(), pick_frontier.clone());
-        thread::spawn(move || query_worker(query_rx, responses, scene, snap_frontier, pick_frontier))
+        thread::spawn(move || {
+            query_worker(query_rx, responses, scene, snap_frontier, pick_frontier)
+        })
     };
 
     let stdin = io::stdin();
@@ -282,11 +287,21 @@ fn query_worker(
         match command {
             QueryCommand::Snap(command) => {
                 let sequence = query_generation(command.sequence);
-                handle_snap(&scene, command, &responses, Some((sequence, &snap_frontier)));
+                handle_snap(
+                    &scene,
+                    command,
+                    &responses,
+                    Some((sequence, &snap_frontier)),
+                );
             }
             QueryCommand::Pick(command) => {
                 let sequence = query_generation(command.sequence);
-                handle_pick(&scene, command, &responses, Some((sequence, &pick_frontier)));
+                handle_pick(
+                    &scene,
+                    command,
+                    &responses,
+                    Some((sequence, &pick_frontier)),
+                );
             }
             QueryCommand::Shutdown => break,
         }
@@ -358,6 +373,7 @@ struct RenderCommand {
 
 #[derive(Debug, PartialEq, Eq)]
 struct SnapCommand {
+    expected_scene: Option<SceneId>,
     sequence: i64,
     x: i64,
     y: i64,
@@ -367,6 +383,7 @@ struct SnapCommand {
 
 #[derive(Debug, PartialEq, Eq)]
 struct PickCommand {
+    expected_scene: Option<SceneId>,
     sequence: i64,
     x: i64,
     y: i64,
@@ -544,8 +561,12 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
             ))))
         }
         "snap" => {
-            reject_unknown(&fields, &["seq", "x", "y", "r", "layers"])?;
+            reject_unknown(
+                &fields,
+                &["seq", "x", "y", "r", "layers", "scene_gen", "scene_round"],
+            )?;
             Ok(Some(InputCommand::Snap(SnapCommand {
+                expected_scene: SceneId::parse(&fields)?,
                 sequence: optional_parse(&fields, "seq")?.unwrap_or(-1),
                 x: required_parse(&fields, "x")?,
                 y: required_parse(&fields, "y")?,
@@ -554,8 +575,21 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
             })))
         }
         "pick" => {
-            reject_unknown(&fields, &["seq", "x", "y", "r", "nth", "layers"])?;
+            reject_unknown(
+                &fields,
+                &[
+                    "seq",
+                    "x",
+                    "y",
+                    "r",
+                    "nth",
+                    "layers",
+                    "scene_gen",
+                    "scene_round",
+                ],
+            )?;
             Ok(Some(InputCommand::Pick(PickCommand {
+                expected_scene: SceneId::parse(&fields)?,
                 sequence: optional_parse(&fields, "seq")?.unwrap_or(-1),
                 x: required_parse(&fields, "x")?,
                 y: required_parse(&fields, "y")?,
@@ -773,7 +807,11 @@ impl RetainedKey {
         Self::with_summary(command, style_epoch, SummaryKey::default())
     }
 
-    fn with_summary(command: &RenderCommand, style_epoch: Option<u64>, summary: SummaryKey) -> Self {
+    fn with_summary(
+        command: &RenderCommand,
+        style_epoch: Option<u64>,
+        summary: SummaryKey,
+    ) -> Self {
         Self {
             depth: command.depth,
             cut_px: command.cut_px.to_bits(),
@@ -1306,8 +1344,21 @@ fn handle_snap(
     responses: &Sender<String>,
     cancellation: Option<(u64, &RenderCancellation)>,
 ) {
+    let published = current_scene(shared);
+    let context = published
+        .as_ref()
+        .ok()
+        .and_then(|p| p.as_ref())
+        .map_or(QueryContext::default(), |p| p.context);
+    let refusal = command
+        .expected_scene
+        .and_then(|id| context.rejection(id, 0));
+    let mut requested_summaries = 0;
     let result: Result<Option<floe_render_core::SceneSnap>, String> = (|| {
-        let Some(published) = current_scene(shared)? else {
+        if let Some(code) = refusal {
+            return Err(code.into());
+        }
+        let Some(published) = published? else {
             return Ok(None);
         };
         let request = scene_query_request(
@@ -1316,9 +1367,23 @@ fn handle_snap(
             command.y,
             command.radius,
             command.visible_layers.as_deref(),
-            SNAP_SHAPE_CAP,
+            // A pinned request must not silently truncate the nearest result.
+            // The global repetition-member limit remains an explicit error.
+            if command.expected_scene.is_some() {
+                usize::MAX
+            } else {
+                SNAP_SHAPE_CAP
+            },
             QUERY_MEMBER_CAP,
         )?;
+        requested_summaries = request
+            .layers
+            .iter()
+            .filter(|l| published.summary_layers.contains(&l.index))
+            .count();
+        if command.expected_scene.is_some() && requested_summaries != 0 {
+            return Err("scene_summary".into());
+        }
         match cancellation {
             Some((sequence, frontier)) => {
                 snap_scene_cancellable(&published.scene, &request, sequence, frontier)
@@ -1327,11 +1392,12 @@ fn handle_snap(
             None => snap_scene(&published.scene, &request),
         }
     })();
+    let suffix = query_suffix(context, requested_summaries, refusal, result.as_ref().err());
     match result {
         Ok(Some(snap)) => respond(
             responses,
             format!(
-                "snap seq={} found=1 x={} y={} snap={}",
+                "snap seq={} found=1 x={} y={} snap={} {suffix}",
                 command.sequence,
                 snap.x,
                 snap.y,
@@ -1344,14 +1410,14 @@ fn handle_snap(
         Ok(None) => respond(
             responses,
             format!(
-                "snap seq={} found=0 x={} y={} snap=-",
+                "snap seq={} found=0 x={} y={} snap=- {suffix}",
                 command.sequence, command.x, command.y
             ),
         ),
         Err(error) => respond(
             responses,
             format!(
-                "snap seq={} found=0 x={} y={} snap=- err_hex={}",
+                "snap seq={} found=0 x={} y={} snap=- err_hex={} {suffix}",
                 command.sequence,
                 command.x,
                 command.y,
@@ -1367,8 +1433,21 @@ fn handle_pick(
     responses: &Sender<String>,
     cancellation: Option<(u64, &RenderCancellation)>,
 ) {
+    let published = current_scene(shared);
+    let context = published
+        .as_ref()
+        .ok()
+        .and_then(|p| p.as_ref())
+        .map_or(QueryContext::default(), |p| p.context);
+    let refusal = command
+        .expected_scene
+        .and_then(|id| context.rejection(id, 0));
+    let mut requested_summaries = 0;
     let result: Result<Option<PickWireResponse>, String> = (|| {
-        let Some(published) = current_scene(shared)? else {
+        if let Some(code) = refusal {
+            return Err(code.into());
+        }
+        let Some(published) = published? else {
             return Ok(None);
         };
         let request = scene_query_request(
@@ -1380,15 +1459,19 @@ fn handle_pick(
             PICK_CANDIDATE_CAP,
             QUERY_MEMBER_CAP,
         )?;
+        requested_summaries = request
+            .layers
+            .iter()
+            .filter(|l| published.summary_layers.contains(&l.index))
+            .count();
+        if command.expected_scene.is_some() && requested_summaries != 0 {
+            return Err("scene_summary".into());
+        }
         let pick = match cancellation {
-            Some((sequence, frontier)) => pick_scene_cancellable(
-                &published.scene,
-                &request,
-                command.nth,
-                sequence,
-                frontier,
-            )
-            .map_err(superseded)?,
+            Some((sequence, frontier)) => {
+                pick_scene_cancellable(&published.scene, &request, command.nth, sequence, frontier)
+                    .map_err(superseded)?
+            }
             None => pick_scene(&published.scene, &request, command.nth)?,
         };
         let Some(candidate) = pick.candidate else {
@@ -1418,11 +1501,12 @@ fn handle_pick(
             cell_name: cell_name.to_string(),
         }))
     })();
+    let suffix = query_suffix(context, requested_summaries, refusal, result.as_ref().err());
     match result {
         Ok(Some(pick)) => respond(
             responses,
             format!(
-                "pick seq={} found=1 count={} index={} layer={} datatype={} lname_hex={} cell_hex={} area={} bbox={},{},{},{} points={}",
+                "pick seq={} found=1 count={} index={} layer={} datatype={} lname_hex={} cell_hex={} area={} bbox={},{},{},{} points={} points_truncated={} {suffix}",
                 command.sequence,
                 pick.count,
                 pick.index,
@@ -1436,21 +1520,41 @@ fn handle_pick(
                 pick.candidate.bbox.x1,
                 pick.candidate.bbox.y1,
                 wire_points(&pick.candidate.points),
+                pick.candidate.points_truncated as u8,
             ),
         ),
         Ok(None) => respond(
             responses,
-            format!("pick seq={} found=0 count=0", command.sequence),
+            format!("pick seq={} found=0 count=0 {suffix}", command.sequence),
         ),
         Err(error) => respond(
             responses,
             format!(
-                "pick seq={} found=0 count=0 err_hex={}",
+                "pick seq={} found=0 count=0 err_hex={} {suffix}",
                 command.sequence,
                 wire_hex(&error)
             ),
         ),
     }
+}
+
+fn query_suffix(
+    context: QueryContext,
+    requested_summaries: usize,
+    refusal: Option<&str>,
+    error: Option<&String>,
+) -> String {
+    let status = refusal.unwrap_or_else(|| match error.map(String::as_str) {
+        Some(QUERY_SUPERSEDED) => "superseded",
+        Some("scene_summary") => "scene_summary",
+        Some(_) => "error",
+        None if context.id.is_none() => "scene_unavailable",
+        None => "ok",
+    });
+    format!(
+        "{} query_summary={requested_summaries} query_status={status}",
+        context.wire()
+    )
 }
 
 fn current_scene(shared: &SharedPublishedScene) -> Result<Option<Arc<PublishedScene>>, String> {
@@ -1664,9 +1768,7 @@ fn run_deck_render(
     };
     let publish_stats = publish_frame(&command.out, command.generation, &parts, cancellation)?;
     let stats = &report.stats;
-    respond(
-        responses,
-        format!(
+    let response = format!(
             "frame gen={} round=1 final=1 png={} format={} partial={} deferred={} frame_cache_hit=0 style_epoch={} plan_us={} text_plan_us=0 labels=0 labels_truncated=0 text_place_records=0 read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes=0 raster_us={} raster_tile_max_us={} tiles_reused=0 bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells=0 inst_edges=0 frame_rects=0 rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints=0 label_pixel_paints=0 rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes=0 passes={} passes_skipped={} pass_bytes_max={} frame_passes={} unique_pages={} frame_raster_us={} composite_us={} scene_reuses={} raster_wall_us={} pass_workers={} batches={} batch_bytes_max={} streamed_passes={} slices={} wide_washes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} summary_passes={} summary_none_passes={} summary_cells={}",
             command.generation,
             command.out,
@@ -1740,7 +1842,10 @@ fn run_deck_render(
             report.summary_passes,
             report.summary_none_passes,
             report.summary_cells,
-        ),
+        );
+    respond(
+        responses,
+        format!("{response} {}", QueryContext::default().wire()),
     );
     Ok(())
 }
@@ -1766,6 +1871,13 @@ fn run_render(
         std::env::var("FLOE_RUST_OCCUPANCY").as_deref() == Ok("off"),
     )?;
     let summary_key = SummaryKey::of(&summary);
+    let query_summary_layers = Arc::new(
+        summary
+            .planes
+            .iter()
+            .map(|p| p.layer_idx)
+            .collect::<BTreeSet<_>>(),
+    );
     let pan_reuse = prepare_pan_reuse(state, &mut command, &summary_key);
     let command = &command;
     check_generation(cancellation, command.generation)?;
@@ -1983,9 +2095,7 @@ fn run_render(
                 work_bin_overflow_items: report.stats.work_bin_overflow_items,
                 work_bin_defer_rep: report.stats.work_bin_defer_rep,
                 work_bin_defer_single: report.stats.work_bin_defer_single,
-                work_bin_defer_weight_max: report
-                    .stats
-                    .work_bin_defer_weight_max,
+                work_bin_defer_weight_max: report.stats.work_bin_defer_weight_max,
                 tiles_reused: report.stats.tiles_reused,
                 png_us,
                 workers_used: report.stats.workers_used,
@@ -2029,12 +2139,8 @@ fn run_render(
             (None, _, Some(png)) => vec![png.as_slice()],
             _ => return Err("frame has neither raw pixels nor PNG bytes".to_string()),
         };
-        let publish_stats = publish_frame(
-            &published_output,
-            command.generation,
-            &parts,
-            cancellation,
-        )?;
+        let publish_stats =
+            publish_frame(&published_output, command.generation, &parts, cancellation)?;
         // A successful rename is the generation's linearization point. A
         // later cancellation must not turn an already-published frame into a
         // cancelled response or leave a reported-less partial file behind.
@@ -2045,6 +2151,15 @@ fn run_render(
                 .write()
                 .map_err(|_| "published scene lock poisoned".to_string())?;
             *published = Some(Arc::new(PublishedScene {
+                summary_layers: Arc::clone(&query_summary_layers),
+                context: QueryContext {
+                    id: Some(SceneId {
+                        generation: command.generation,
+                        round: (round_index + 1) as u64,
+                    }),
+                    complete: !pixels.partial && scene.deferred_pages().is_empty(),
+                    summary_layers: summary.planes.len(),
+                },
                 scene: Arc::clone(&scene),
                 layers: Arc::clone(&query_layers),
                 cell_names: Arc::clone(&query_cell_names),
@@ -2066,7 +2181,11 @@ fn run_render(
                 store_retained(
                     &mut state.retained,
                     RetainedFrame {
-                        key: RetainedKey::with_summary(command, state.style_epoch, summary_key.clone()),
+                        key: RetainedKey::with_summary(
+                            command,
+                            state.style_epoch,
+                            summary_key.clone(),
+                        ),
                         view: command.view,
                         frame,
                     },
@@ -2079,9 +2198,12 @@ fn run_render(
         pixels.frame = None;
         pixels.png = None;
 
-        respond(
-            responses,
-            format!(
+        // A label-only/cropped foreground keeps the covering scene identity.
+        let query_context = current_scene(published_scene)?
+            .as_ref()
+            .map_or(QueryContext::default(), |p| p.context)
+            .wire();
+        let response = format!(
                 "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={}",
                 command.generation,
                 round_index + 1,
@@ -2165,8 +2287,8 @@ fn run_render(
                 summary.cell_um(),
                 summary.none.unwrap_or("-"),
                 planned.summary.culls.summary_pages,
-            ),
-        );
+            );
+        respond(responses, format!("{response} {query_context}"));
         // Cost-aware refinement (F2R-09 REOPEN, §3.15): every round
         // re-rasterizes the whole accumulated scene, so on a large
         // cold view the intermediate frames themselves became the
@@ -2284,8 +2406,10 @@ fn published_scene_serves(
     let Some(published) = current_scene(shared)? else {
         return Ok(false);
     };
-    Ok(published.key == RetainedKey::with_summary(command, style_epoch, summary.clone())
-        && view_contains(&published.view, &command.view))
+    Ok(
+        published.key == RetainedKey::with_summary(command, style_epoch, summary.clone())
+            && view_contains(&published.view, &command.view),
+    )
 }
 
 fn store_retained(retained: &mut Vec<RetainedFrame>, entry: RetainedFrame, budget_bytes: usize) {
@@ -2435,8 +2559,8 @@ fn prepare_pan_reuse(
         let dst = (y as usize) * dst_row_bytes + (valid_x0 as usize) * 4;
         pixels[dst..dst + len].copy_from_slice(&old[src..src + len]);
     }
-    let base = floe_render_core::RgbaFrame::from_pixels(command.width, command.height, pixels)
-        .ok()?;
+    let base =
+        floe_render_core::RgbaFrame::from_pixels(command.width, command.height, pixels).ok()?;
     Some(FrameReuse {
         base,
         valid: [
@@ -2811,6 +2935,7 @@ mod tests {
             )
         });
         tx.send(QueryCommand::Pick(PickCommand {
+            expected_scene: None,
             sequence: 5,
             x: 1,
             y: 2,
@@ -2820,6 +2945,7 @@ mod tests {
         }))
         .unwrap();
         tx.send(QueryCommand::Snap(SnapCommand {
+            expected_scene: None,
             sequence: 6,
             x: 1,
             y: 2,
@@ -2834,7 +2960,10 @@ mod tests {
         tx.send(QueryCommand::Shutdown).unwrap();
         worker.join().unwrap();
         assert_eq!(query_generation(-7), 0);
-        assert_eq!(superseded("render cancelled: generation 1 is before 2".into()), QUERY_SUPERSEDED);
+        assert_eq!(
+            superseded("render cancelled: generation 1 is before 2".into()),
+            QUERY_SUPERSEDED
+        );
         assert_eq!(superseded("other".into()), "other");
     }
 
@@ -2862,15 +2991,24 @@ mod tests {
         let keep = parse("keep");
         let cull = parse("cull");
         assert!(keep.thin_keep && !cull.thin_keep);
-        assert_ne!(RetainedKey::new(&keep, Some(1)), RetainedKey::new(&cull, Some(1)));
-        assert_eq!(RetainedKey::new(&keep, Some(1)), RetainedKey::new(&parse("keep"), Some(1)));
+        assert_ne!(
+            RetainedKey::new(&keep, Some(1)),
+            RetainedKey::new(&cull, Some(1))
+        );
+        assert_eq!(
+            RetainedKey::new(&keep, Some(1)),
+            RetainedKey::new(&parse("keep"), Some(1))
+        );
         // absent = cull, the plain layout's policy
         let absent = render(
             parse_command("render gen=1 view=0,0,320,320 w=32 h=32 frames=off out=/tmp/a.raw")
                 .unwrap()
                 .unwrap(),
         );
-        assert_eq!(RetainedKey::new(&absent, Some(1)), RetainedKey::new(&cull, Some(1)));
+        assert_eq!(
+            RetainedKey::new(&absent, Some(1)),
+            RetainedKey::new(&cull, Some(1))
+        );
         assert!(parse_command(
             "render gen=1 view=0,0,320,320 w=32 h=32 frames=off thin=maybe out=/tmp/a.raw"
         )
@@ -3014,6 +3152,7 @@ mod tests {
                     .unwrap()
             ),
             SnapCommand {
+                expected_scene: None,
                 sequence: 4,
                 x: -2,
                 y: 7,
@@ -3028,6 +3167,7 @@ mod tests {
                     .unwrap()
             ),
             PickCommand {
+                expected_scene: None,
                 sequence: 5,
                 x: 1,
                 y: 2,
@@ -3096,21 +3236,15 @@ mod tests {
         // newest last, capped - a zoom round-trip finds its scale
         // again while re-renders at one scale replace in place.
         let command = render(
-            parse_command(
-                "render gen=1 view=0,0,320,320 w=32 h=32 frames=off out=/tmp/a.raw",
-            )
-            .unwrap()
-            .unwrap(),
+            parse_command("render gen=1 view=0,0,320,320 w=32 h=32 frames=off out=/tmp/a.raw")
+                .unwrap()
+                .unwrap(),
         );
         let frame = |scale: f64| RetainedFrame {
             key: RetainedKey::new(&command, Some(7)),
             view: [0.0, 0.0, 320.0 * scale, 320.0 * scale],
-            frame: floe_render_core::RgbaFrame::from_pixels(
-                32,
-                32,
-                vec![0u8; 32 * 32 * 4],
-            )
-            .unwrap(),
+            frame: floe_render_core::RgbaFrame::from_pixels(32, 32, vec![0u8; 32 * 32 * 4])
+                .unwrap(),
         };
         let roomy = usize::MAX;
         let mut retained = Vec::new();
@@ -3149,7 +3283,11 @@ mod tests {
             .collect();
         assert_eq!(spans, vec![320.0 * 2.0, 320.0 * 4.0], "oldest evicted");
         store_retained(&mut retained, frame(8.0), one - 1);
-        assert_eq!(retained.len(), 2, "an over-budget frame is dropped, not stored");
+        assert_eq!(
+            retained.len(),
+            2,
+            "an over-budget frame is dropped, not stored"
+        );
         assert!(!retained.iter().any(|entry| entry.view[2] == 320.0 * 8.0));
         let mut none = Vec::new();
         store_retained(&mut none, frame(1.0), 0);
@@ -3170,16 +3308,36 @@ mod tests {
         };
         let mut retained = Vec::new();
         store_retained(&mut retained, sized(64, [0.0, 0.0, 640.0, 640.0]), roomy);
-        store_retained(&mut retained, sized(32, [160.0, 160.0, 480.0, 480.0]), roomy);
+        store_retained(
+            &mut retained,
+            sized(32, [160.0, 160.0, 480.0, 480.0]),
+            roomy,
+        );
         assert_eq!(retained.len(), 1);
         assert_eq!(retained[0].frame.width(), 64, "the containing margin stays");
-        store_retained(&mut retained, sized(128, [-320.0, -320.0, 960.0, 960.0]), roomy);
+        store_retained(
+            &mut retained,
+            sized(128, [-320.0, -320.0, 960.0, 960.0]),
+            roomy,
+        );
         assert_eq!(retained.len(), 1);
-        assert_eq!(retained[0].frame.width(), 128, "a containing frame replaces");
-        assert!(view_contains(&[0.0, 0.0, 10.0, 10.0], &[0.0, 0.0, 10.0, 10.0]));
-        assert!(!view_contains(&[0.0, 0.0, 10.0, 10.0], &[0.0, 0.0, 10.0, 11.0]));
+        assert_eq!(
+            retained[0].frame.width(),
+            128,
+            "a containing frame replaces"
+        );
+        assert!(view_contains(
+            &[0.0, 0.0, 10.0, 10.0],
+            &[0.0, 0.0, 10.0, 10.0]
+        ));
+        assert!(!view_contains(
+            &[0.0, 0.0, 10.0, 10.0],
+            &[0.0, 0.0, 10.0, 11.0]
+        ));
         let shared: SharedPublishedScene = Arc::new(RwLock::new(None));
-        assert!(!published_scene_serves(&shared, &command, Some(7), &SummaryKey::default()).unwrap());
+        assert!(
+            !published_scene_serves(&shared, &command, Some(7), &SummaryKey::default()).unwrap()
+        );
     }
 
     #[test]
@@ -3223,11 +3381,9 @@ mod tests {
         // out fully covered.
         let mut state = WorkerState::default();
         let retained_cmd = render(
-            parse_command(
-                "render gen=0 view=0,0,320,320 w=32 h=32 frames=off out=/tmp/b.raw",
-            )
-            .unwrap()
-            .unwrap(),
+            parse_command("render gen=0 view=0,0,320,320 w=32 h=32 frames=off out=/tmp/b.raw")
+                .unwrap()
+                .unwrap(),
         );
         let pixels: Vec<u8> = (0..32u32 * 32)
             .flat_map(|index| [(index % 251) as u8, 1, 2, 255])
@@ -3244,10 +3400,14 @@ mod tests {
             .unwrap()
             .unwrap(),
         );
-        let reuse = prepare_pan_reuse(&state, &mut margin, &SummaryKey::default()).expect("margin maps the center");
+        let reuse = prepare_pan_reuse(&state, &mut margin, &SummaryKey::default())
+            .expect("margin maps the center");
         assert_eq!(reuse.valid, [16, 16, 48, 48]);
         // margin pixel (16,16) is retained pixel (0,0)
-        assert_eq!(&reuse.base.pixels()[(16 * 64 + 16) * 4..][..4], &pixels[..4]);
+        assert_eq!(
+            &reuse.base.pixels()[(16 * 64 + 16) * 4..][..4],
+            &pixels[..4]
+        );
         assert_eq!(margin.view, [-160.0, -160.0, 480.0, 480.0]);
 
         let margin_pixels = vec![7u8; 64 * 64 * 4];
@@ -3257,13 +3417,12 @@ mod tests {
             frame: floe_render_core::RgbaFrame::from_pixels(64, 64, margin_pixels).unwrap(),
         }];
         let mut inside = render(
-            parse_command(
-                "render gen=2 view=0,0,320,320 w=32 h=32 frames=off out=/tmp/c.raw",
-            )
-            .unwrap()
-            .unwrap(),
+            parse_command("render gen=2 view=0,0,320,320 w=32 h=32 frames=off out=/tmp/c.raw")
+                .unwrap()
+                .unwrap(),
         );
-        let reuse = prepare_pan_reuse(&state, &mut inside, &SummaryKey::default()).expect("viewport maps out");
+        let reuse = prepare_pan_reuse(&state, &mut inside, &SummaryKey::default())
+            .expect("viewport maps out");
         assert_eq!(reuse.valid, [0, 0, 32, 32], "fully covered by the margin");
 
         // Vertical pan: row 0 is the TOP (world y1), so a pan UP in
@@ -3279,13 +3438,12 @@ mod tests {
             frame: floe_render_core::RgbaFrame::from_pixels(32, 32, row_coded).unwrap(),
         }];
         let mut panned_up = render(
-            parse_command(
-                "render gen=3 view=0,160,320,480 w=32 h=32 frames=off out=/tmp/d.raw",
-            )
-            .unwrap()
-            .unwrap(),
+            parse_command("render gen=3 view=0,160,320,480 w=32 h=32 frames=off out=/tmp/d.raw")
+                .unwrap()
+                .unwrap(),
         );
-        let reuse = prepare_pan_reuse(&state, &mut panned_up, &SummaryKey::default()).expect("vertical pan maps");
+        let reuse = prepare_pan_reuse(&state, &mut panned_up, &SummaryKey::default())
+            .expect("vertical pan maps");
         // request y1 = 480 sits 16 rows above retained y1 = 320:
         // request rows 16..32 hold retained rows 0..16.
         assert_eq!(reuse.valid, [0, 16, 32, 32]);

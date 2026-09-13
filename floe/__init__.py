@@ -12,4 +12,4 @@ __version__ = "0.12.116"
 # push advance __version__ without tripping the renderd version guard
 # (no rebuild needed on the deploy host). The floe2 review branch has
 # rebuilt on every push so far, so both move together there.
-RENDERD_VERSION = "0.12.85"
+RENDERD_VERSION = "0.12.86"
