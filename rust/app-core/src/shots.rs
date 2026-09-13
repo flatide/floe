@@ -1,6 +1,8 @@
 //! Capture coordinates are micrometres. Keep Python shots' operation order,
 //! half-even pixel sizing and anchor semantics, including fractional DBU views.
 use crate::{Error, Result};
+pub mod batch;
+pub mod mosaic;
 
 pub const MAX_PIXELS: u64 = 16 * 1024 * 1024;
 

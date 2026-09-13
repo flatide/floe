@@ -7,6 +7,7 @@ compile_error!("floe-app-core currently targets Linux/macOS");
 pub mod artifact;
 pub mod browser;
 pub mod cache;
+pub mod captures;
 pub mod catalog;
 pub mod clip;
 pub mod dataset;

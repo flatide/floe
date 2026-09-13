@@ -1,12 +1,11 @@
 use floe_app_core::{
-    artifact,
     dataset::Dataset,
     jobdeck::{
         color::Mode,
         index::{is_deck, parse_levels},
     },
     render::{require_complete, RenderOptions, RenderSession},
-    shots::{self, Anchor, Detail, Shot, Thin},
+    shots::{self, batch::Capture, Anchor, Detail, Thin},
     Error, ErrorKind, Result,
 };
 use std::collections::BTreeSet;
@@ -29,9 +28,18 @@ const RENDER_HELP: &str = "Usage: floe2-web render SOURCE [OPTIONS]
   --label-font-px N          6..96 (default 14)
   --out FILE                Default view.png; atomic PNG publication
   --report FILE             JSON single-shot report
+  --batch FILE|-            Named captures; --out is a directory (also for one shot)
+  --mosaic-at X,Y;X,Y;X,Y;X,Y  Four points clockwise TL,TR,BR,BL; needs --size
+  --corners X0,Y0,X1,Y1     Four --size rectangles INSIDE this region
+  --line W --line-color RGB  Separator width (default 2), color (default #ffffff)
+  --keep-tiles              Keep mosaic _tl/_tr/_bl/_br PNGs after all renders succeed
 Lengths: bare/um/µm/μm, nm, mm, cm, m. Fractional DBU is preserved.
-Mosaic/batch/DRC/metadata exports require later stages. Jobdeck labels unsupported.
+Batch: NAME key=value ...; quotes supported, full-line # comments. Region fields
+override the CLI region. Keys: bbox at size anchor px stretch layers depth mosaic
+corners line linecolor keep_tiles. Limit 16 MiB/4096 shots; no shell expansion.
+DRC/annotation metadata exports require later stages. Jobdeck labels unsupported.
 Frames exceeding 16 Mpx are rejected, not silently rescaled.
+Mosaic final image is four tiles (up to 64 Mpx). Outputs must not collide.
 Cancelled/failed frames never replace an existing PNG. Jobdeck known skipped
 placements/over-budget pages may publish a flagged incomplete PNG (exit 3).
 Other incomplete frames preserve the previous output.";
@@ -52,19 +60,22 @@ pub enum Command {
     },
     Render {
         source: PathBuf,
-        shot: Shot,
+        capture: Box<Capture>,
         out: PathBuf,
         report: Option<PathBuf>,
+        batch: Option<String>,
         levels: Option<BTreeSet<i64>>,
     },
     Probe(PathBuf),
 }
 pub fn parse(args: &[String]) -> Result<Command> {
     let kind = args[0].as_str();
-    let mut shot = Shot::default();
+    let mut capture = Capture::default();
+    let shot = &mut capture.shot;
     let mut source = None;
     let mut out = PathBuf::from("view.png");
     let mut report = None;
+    let mut batch = None;
     let mut json = false;
     let mut levels = None;
     let mut positional = false;
@@ -171,6 +182,18 @@ pub fn parse(args: &[String]) -> Result<Command> {
             "--label-font-px" => shot.font_px = super::number(value()?, flag)?,
             "--out" => out = value()?.into(),
             "--report" => report = Some(PathBuf::from(value()?)),
+            "--batch" => {
+                let v = value()?;
+                batch = if v.is_empty() { None } else { Some(v.into()) };
+            }
+            "--mosaic-at" => capture.mosaic = Some(shots::batch::points(value()?)?),
+            "--corners" => capture.corners = Some(shots::lengths(value()?)?),
+            "--line" => capture.line = super::number(value()?, flag)?,
+            "--line-color" => capture.line_color = value()?.into(),
+            "--keep-tiles" => {
+                no_value()?;
+                capture.keep_tiles = true;
+            }
             "--stretch" => {
                 no_value()?;
                 shot.stretch = true;
@@ -211,12 +234,15 @@ pub fn parse(args: &[String]) -> Result<Command> {
         }),
         "probe" => Ok(Command::Probe(source)),
         _ => {
-            shot.validate()?;
+            if batch.is_none() {
+                capture.validate()?;
+            }
             Ok(Command::Render {
                 source,
-                shot,
+                capture: Box::new(capture),
                 out,
                 report,
+                batch,
                 levels,
             })
         }
@@ -254,77 +280,13 @@ pub fn run(command: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
         }
         Command::Render {
             source,
-            shot,
+            capture,
             out,
             report,
+            batch,
             levels,
         } => {
-            let l = dataset(&source, levels, cancelled)?;
-            // All caller values/targets are checked before starting a worker.
-            let (bb, width, height) = shot.fitted(l.bbox_um())?;
-            l.resolve_layers(shot.layers.as_deref())?;
-            let target = l.output_path(&out)?;
-            let report_target = report.as_ref().map(|p| l.output_path(p)).transpose()?;
-            if report_target.as_ref() == Some(&target) {
-                return Err(Error::input("PNG and report paths must differ"));
-            }
-            let mut session =
-                RenderSession::open(&l, RenderOptions::local()?, true, Arc::clone(cancelled))?;
-            let request = session.shot_request(&l, &shot)?;
-            let started = Instant::now();
-            let frame = session.capture(request)?;
-            // Preserve the deck CLI contract: known decode-budget deferrals
-            // can be exported only as explicitly incomplete (exit 3). Unknown
-            // final-partial/glyph failures keep the previous artifact intact.
-            if !l.is_deck() || frame.labels_truncated || (frame.partial && frame.deferred == 0) {
-                require_complete(&frame)?;
-            }
-            let complete = frame.complete() && l.skipped().is_empty();
-            session.close()?;
-            artifact::publish(&target, &frame.bytes, cancelled)?;
-            let ms = (started.elapsed().as_secs_f64() * 1000.).round_ties_even() as u64;
-            println!(
-                "[floe2-web] rendered {} ({}x{}, {:.4},{:.4},{:.4},{:.4} um) in {:.2}s",
-                out.display(),
-                width,
-                height,
-                bb[0],
-                bb[1],
-                bb[2],
-                bb[3],
-                ms as f64 / 1000.
-            );
-            if let Some(path) = report_target {
-                let name = out
-                    .file_stem()
-                    .and_then(|p| p.to_str())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or("view");
-                let mut doc = serde_json::json!({"source": l.source(), "dbu": l.dbu(), "cut_px": shot.detail.cut_px(), "thin": shot.thin.name(), "complete": complete,
-                    "shots": [{"name": name, "out": out, "pixel": [width,height], "layers": shot.layers,
-                        "depth": shot.depth, "bbox_um": bb, "ms": ms, "over_budget_pages": frame.deferred, "skipped_placements": l.skipped().len(), "complete": complete}]});
-                if let Dataset::Deck(deck) = &l {
-                    doc["jobdeck"] = serde_json::json!({"complete":complete,"skipped":l.skipped(),"over_budget_pages":frame.deferred,
-                    "view":deck.metadata.jobdeck.mode,"levels":deck.metadata.jobdeck.levels});
-                }
-                let data = artifact::json_bytes(&doc, cancelled).map_err(|e| {
-                    Error::new(e.kind, format!("PNG was saved; report failed: {e}"))
-                })?;
-                artifact::publish(&path, &data, cancelled).map_err(|e| {
-                    Error::new(e.kind, format!("PNG was saved; report failed: {e}"))
-                })?;
-                println!("[floe2-web] report {} (1 shot)", path.display());
-            }
-            if !complete {
-                for r in l.skipped() {
-                    eprintln!(
-                        "[jobdeck] skipped: CHIP {} ${} {}: {} ({})",
-                        r.chip, r.idx, r.tc, r.reason, r.detail
-                    );
-                }
-                eprintln!("[floe2-web] rendered INCOMPLETE: {} skipped placement(s), {} over-budget page(s) [exit 3]",l.skipped().len(),frame.deferred);
-                return Ok(3);
-            }
+            return crate::capture::run(source, *capture, out, report, batch, levels, cancelled);
         }
         Command::Probe(source) => {
             let l = dataset(&source, None, cancelled)?;
@@ -402,12 +364,12 @@ mod tests {
         assert!(parsed(&["info", "a.oas", "--out=a"]).is_err());
         assert!(parsed(&["probe", "a.oas", "b.oas"]).is_err());
         assert!(parsed(&["render", "a.oas", "--frames=yes"]).is_err());
-        let Command::Render { shot, .. } =
+        let Command::Render { capture, .. } =
             parsed(&["render", "한 글.oas", "--depth=-2", "--thin=auto"]).unwrap()
         else {
             panic!()
         };
-        assert_eq!(shot.depth, Some(0));
-        assert_eq!(shot.thin, Thin::Auto);
+        assert_eq!(capture.shot.depth, Some(0));
+        assert_eq!(capture.shot.thin, Thin::Auto);
     }
 }

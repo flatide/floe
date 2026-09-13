@@ -1,5 +1,6 @@
 //! Development CLI: deliberately distinct from the Python floe2 launcher.
 #![forbid(unsafe_code)]
+mod capture;
 mod clip;
 mod deck_analysis;
 mod deck_index;
@@ -38,7 +39,8 @@ and jobdeck analysis/spec + source indexing with level selection.
 Web preview: isolated Firefox or --no-open; no GTK launcher replacement yet.
 DRC: read-only ICE/ASCII queries; explicit --build [--force] for atomic packs.
 Clip: full-depth exact layout OASIS export; jobdeck clip remains unsupported.
-Not yet ported: svrf, gtktest, batch/mosaic/DRC exports, review writes.
+Render: batch/mosaic + JSON reports; no Python runtime.
+Not yet ported: svrf, gtktest, DRC/annotation exports, review writes.
 Use the existing floe2 for those commands; there is no Python fallback.
 Run floe2-web index --help for indexing options.";
 const INDEX_HELP: &str = "Usage: floe2-web index SOURCE [OPTIONS]

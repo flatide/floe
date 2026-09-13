@@ -122,6 +122,14 @@ impl Analysis {
     /// A report must never replace the deck, an OASIS or a cache/lock through
     /// an alias. No read lease/hot-reload guarantee is implied here.
     pub fn output_path(&self, path: &Path, extra_inputs: &[PathBuf]) -> Result<PathBuf> {
+        self.output_path_mode(path, extra_inputs, false)
+    }
+    pub(crate) fn output_path_mode(
+        &self,
+        path: &Path,
+        extra_inputs: &[PathBuf],
+        planned: bool,
+    ) -> Result<PathBuf> {
         let mut files = vec![PathBuf::from(&self.deck.path)];
         files.extend_from_slice(extra_inputs);
         let mut trees = Vec::new();
@@ -134,7 +142,7 @@ impl Analysis {
             files.push(lock.into());
             trees.push(directory);
         }
-        artifact::protected_output(path, &files, &trees)
+        artifact::protected_output_mode(path, &files, &trees, planned)
     }
     pub fn summary(&self) -> Result<Vec<String>> {
         let stats = &self.model.stats;

@@ -88,15 +88,21 @@ impl Dataset {
         }
     }
     pub fn output_path(&self, path: &Path) -> Result<PathBuf> {
+        self.output_path_mode(path, false)
+    }
+    pub(crate) fn output_path_mode(&self, path: &Path, planned: bool) -> Result<PathBuf> {
         match self {
-            Self::Layout(l) => artifact::output_path(path, l),
+            Self::Layout(l) => artifact::layout_output_mode(path, l, planned),
             Self::Deck(d) => {
                 let props =
                     crate::jobdeck::dataset::props_source(&d.source, d.metadata.jobdeck.mode)?;
                 let mut full = props.as_os_str().to_owned();
                 full.push(".layerprops");
-                d.analysis
-                    .output_path(path, &[full.into(), props.with_extension("layerprops")])
+                d.analysis.output_path_mode(
+                    path,
+                    &[full.into(), props.with_extension("layerprops")],
+                    planned,
+                )
             }
         }
     }

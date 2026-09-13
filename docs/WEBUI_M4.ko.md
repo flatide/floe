@@ -4,8 +4,8 @@
 M2 공유 권한 추가와 실제 브라우저 pack-build 승인 클릭은 승인 대기이며,
 M0/G2·M3 현장 Firefox/ETX는 사용자 요청대로 보류다. 이 경계를 우회하지 않고
 독립적인 로컬 native 이관을 진행한다. M4 전체 완료나 GTK 은퇴를 뜻하지 않는다.
-현재는 §7의 **일반 layout exact clip CLI**까지 연결했다.
-§1~6의 미연결 표기는 각 선행 단계 당시의 범위다. 웹 clip/나머지 내보내기와 전체 조작
+현재는 §8의 **일반 layout/jobdeck batch·mosaic 캡처 CLI**까지 연결했다.
+§1~7의 미연결 표기는 각 선행 단계 당시의 범위다. 웹 clip/나머지 내보내기와 전체 조작
 수용은 남아 있다.
 
 ## 1. M4a-1: 표시 scene에 고정한 native pick/snap
@@ -705,3 +705,98 @@ static-pie 교차 빌드도 다시 통과했다. native geometry와 renderd wire
 
 다음 독립 단계는 render CLI의 batch/mosaic와 관련 report·PNG metadata 이관이다.
 웹 clip·공유 권한·현장 수용과 구분해 진행한다.
+
+## 8. M4b-2: batch·mosaic 캡처 CLI
+
+### 범위와 사용
+
+```sh
+rust/target/release/floe2-web render design.oas \
+  --batch shots.txt --out captures --report captures/report.json
+rust/target/release/floe2-web render design.oas \
+  --corners=0,0,100,100 --size=10,10 --px=600x400 \
+  --line=0.5 --line-color='#ffffff' --keep-tiles --out corners.png
+```
+
+batch 예시(좌표는 µm, 기존 단위 suffix도 허용):
+
+```text
+# 한 줄에 이름과 key=value. shell을 실행하지 않는다.
+'영역 A' bbox=0,0,100,80 px=800x640 layers=7/0 depth=full
+four mosaic='10,90;90,90;90,10;10,10' size=10,10 px=400 keep_tiles=yes
+```
+
+- 일반 layout과 jobdeck 모두 기존 `render` 경로를 공통 Rust capture runner로
+  옮겼다. `--batch -`는 stdin, 한 줄짜리 batch도 `--out`은 디렉터리다.
+  단일 이미지의 기본값·레이어/depth/detail/thin·frames/labels와 JSON 의미는 유지한다.
+  덱 labels는 기존처럼 명시 미지원이며, 인덱스 자동 생성이나 원본 변경은 없다.
+- batch는 POSIX `shlex.split(comments=False)` 상당의 인용/escape를 직접 파싱한다.
+  전체 줄 `#` 주석만 허용하고 `#rrggbb`를 inline 주석으로 오인하지 않는다.
+  CLI 기본값을 상속하되 줄에 영역 키가 있으면 기존 bbox/at/mosaic/corners를 모두
+  비운 뒤 그 줄 값을 적용한다. 같은 키는 마지막 값이 이기며 알 수 없는 키는 오류다.
+  전역 detail/thin·frames/labels/font는 batch 키가 아니다.
+- `--mosaic-at`은 TL,TR,BR,BL 시계방향 입력이고, 결과와 kept tile 이름은
+  TL,TR,BL,BR 행 우선이다. `--corners`는 지정 bbox의 **안쪽** 네 모서리를 캡처한다.
+  tile마다 기존 aspect/anchor 규칙을 적용하고 첫 tile의 픽셀 크기를 공통 사용한다.
+- 구분선은 기존 세로→가로 순서, 소수 px coverage와 ties-even 색상 혼합을 유지한다.
+  폭이 이미지보다 훨씬 커도 작업은 이미지 행/열 수에 비례한다.
+  report의 bbox/tiles·순서·pixel·line 정보와 complete/over-budget/skipped 의미도 유지한다.
+- 일반 shots에는 원래 PNG annotation metadata가 없었다. `fe_embed` iTXt 보조 CLI와
+  DRC marker/legend/ruler 캡처는 **아직 남아 있다**. 웹 내보내기/API는 추가하지 않았다.
+
+### 비용·실패·파일 계약
+
+- batch 전체가 한 native worker와 style을 재사용한다. 일반 shot은 native PNG를,
+  mosaic은 네 raw tile을 순서대로 받아 canvas에 복사한다. raw tile 한 장을 처리한
+  뒤 버리며 네 tile 전체를 별도 Vec으로 유지하지 않는다. kept tile은 즉시 staging한다.
+- tile은 기존 최대16M pixels, 최종2×2 mosaic은 최대64M pixels(256MiB RGBA canvas)다.
+  canvas 외 raw tile 한 장과 worker/cache 메모리는 별도다. 전체 프로세스 RSS의
+  256MiB 상한을 주장하지 않는다. PNG는 RGBA8/filter0/single IDAT를 staging 파일로
+  스트리밍하고 IDAT 길이·CRC를 마감한다. 전체 filtered/compressed 복사본은 만들지 않는다.
+  이미 vendored된 `flate2`/`crc32fast`를 사용하며 새 다운로드나 vendor 수정은 없다.
+- batch 입력 최대16MiB·4096 shots, 이름 최대247 UTF-8 bytes다. 안전한 파일명·
+  고유 이름을 요구하며 상한 초과는 오류이지 prefix 캡처/조용한 잘림이 아니다.
+  `--batch -`의 입력 생산자가 EOF를 보내지 않아도 SIGINT/SIGTERM으로 CLI를 끝낸다.
+  stdin reader의 비-join 종료는 CLI process 전용이며 HTTP 작업에 사용하지 않는다.
+- 모든 shot/레이어·목적지를 worker 시작 전에 검사한다. batch 디렉터리만 명시 생성하며,
+  별도 report 부모는 미리 존재해야 한다. 원본·색상 입력·cache/lock·batch 파일,
+  symlink 출력/부모 alias를 보호한다. shot/report/kept tile의 동일·대소문자만 다른
+  이름과 파일/부모 경로 충돌도 거부한다. 대소문자 규칙은 Linux에서도 보수적으로 적용한다.
+- 한 mosaic의 네 렌더와 모든 PNG staging을 성공시킨 뒤 main/kept tile을 게시한다.
+  그 전 ENOSPC·손상/unknown partial·중단은 이전 main/report/kept 파일을 보존하고
+  owned staging·worker 파일을 회수한다. 각 파일은 create-new/0600→sync→취소 확인→
+  rename이 commit point다. **여러 파일/shot 전체가 하나의 트랜잭션은 아니다.**
+  이후 shot이나 후속 rename 실패는 이미 저장한 artifact 수를 명시한다.
+  report는 마지막에 원자 게시하며 실패하면 PNG가 저장됐음을 오류에 적는다.
+- 일반 layout의 미완료 frame은 게시하지 않는다. 덱의 알려진 deferred/skipped는
+  기존처럼 INCOMPLETE 이미지/report와 exit3으로 보존하되 각 tile의 deferred를 합산한다.
+  원인 없는 partial/라벨 잘림은 성공으로 내보내지 않는다.
+
+### 검증
+
+- `validate_app_captures.py`를 필수 배터리에 추가했다. PATH-empty Rust runtime으로
+  layout/jobdeck·단일/다중 batch·stdin·한글/공백·단위·역방향 corners·half phase·
+  labels/frames·분수/큰 구분선·kept tiles를 검증한다. Python 오라클은 개발에만 쓴다.
+  PNG decoded RGBA와 report는 Python과 일치하고 Rust jobs1/8의 PNG bytes도 일치한다.
+  Python과 Rust PNG의 압축 bytes 동일성은 계약이 아니다.
+- fake worker는 ready/open/style 각1회·gen1..5의 단일 worker 재사용, 네 tile의
+  deferred 합산, 두 번째 tile 실패와 unknown partial, ready/open/style/render 중
+  SIGINT/SIGTERM·reap·기존 출력 보존을 검사한다. EOF 없는 stdin 취소도 검사한다.
+  잘못된 옵션/파일명/레이어·경로 충돌은 새 디렉터리/worker 없이 거부하는지 확인한다.
+- batch 문법/입력 상한과 mosaic blend/PNG CRC·inflate는 단위로 고정한다.
+  기존 단일 PNG·덱 render·exact clip/공통 게시 회귀와 cache bytes/mtime 불변도 유지한다.
+- GTK 기본값, native geometry/wire/renderd 버전0.12.87은 바꾸지 않는다.
+  현장 Firefox/ETX·Linux 실행·공유 권한·실제 pack-build 승인 클릭은 별도 보류다.
+
+실행 결과(2026-09-14): 전체 `sh tools/validate_rust.sh`가 `RUST VALIDATION: ALL OK`다.
+새 capture 게이트와 기존 jobdeck80·renderer46·웹/owner/query, KLayout13 PX +
+2 phase-exact +14 style의 jobs1/8 검증을 포함한다. 마지막 구분선 무할당/PNG CRC·
+staging/후속 shot 실패 보강 후 app7/core103/web36/transport8 및 worker-client
+unit7/lifecycle14, 새 capture·기존 단일 PNG·exact clip 오라클을 다시 통과했다.
+scoped fmt/strict clippy, Rust1.89.0의 같은 테스트, macOS release와 Linux x86-64
+musl static-pie 교차 빌드도 통과했다. 기존 의존성/개발 오라클의 warning은 남는다.
+실 Linux 실행이나 현장 Firefox 수용을 이 결과로 대체하지 않는다.
+
+다음 독립 단계는 픽셀 chunk를 유지하는 PNG 주석 metadata codec과 `fe_embed`
+보조 CLI다. 이후 DRC overlay/legend/ruler 캡처를 연결하며, 웹 download·공유 권한과
+일반 캡처의 Python 제거 완료를 혼동하지 않는다.

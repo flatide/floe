@@ -85,6 +85,12 @@ CLI의 사람용 출력과 HTTP용 구조화 DTO는 같은 서비스 결과에�
 `floe/fe_embed.py`의 PNG metadata 연계까지 포함한다. 한 장 render만 옮기고
 CLI 전체가 Python-free라고 판정하지 않는다. 파일 교체는 최종 성공 시 원자적으로.
 
+M4b-2: `--batch`/stdin, `--mosaic-at`/`--corners`, 구분선·kept tiles·JSON report를
+layout/jobdeck 공통 Rust capture runner로 연결했다([M4 §8](WEBUI_M4.ko.md)).
+Python 픽셀/report·jobs1/8 결정성과 단일 worker/실패·취소 보존을 검증한다.
+파일별 원자 게시이며 batch/여러 kept tile의 일괄 트랜잭션은 아니다.
+DRC overlay 캡처와 `fe_embed` PNG metadata/보조 CLI는 아직 미이관이다.
+
 ### 2.4 clip — M4 (5개 옵션)
 
 `src`, 필수 `--bbox`, 선택 `--layers`, `--out`(clip.oas),

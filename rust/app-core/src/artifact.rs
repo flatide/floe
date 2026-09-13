@@ -11,7 +11,7 @@ static SERIAL: AtomicU64 = AtomicU64::new(0);
 /// Resolve the existing prefix, preserving a missing source/cache suffix.
 /// This permits reports for missing sources without allowing those reports
 /// to replace the very source/cache paths they diagnose.
-fn resolve_prefix(path: &Path) -> Result<PathBuf> {
+pub(crate) fn resolve_prefix(path: &Path) -> Result<PathBuf> {
     let absolute = cache::absolute(path)?;
     let mut prefix = absolute.as_path();
     let mut suffix = Vec::new();
@@ -38,16 +38,32 @@ fn resolve_prefix(path: &Path) -> Result<PathBuf> {
     }
 }
 pub fn protected_output(path: &Path, files: &[PathBuf], trees: &[PathBuf]) -> Result<PathBuf> {
+    protected_output_mode(path, files, trees, false)
+}
+pub(crate) fn protected_output_mode(
+    path: &Path,
+    files: &[PathBuf],
+    trees: &[PathBuf],
+    planned: bool,
+) -> Result<PathBuf> {
     let out = cache::absolute(path)?;
     let parent = out
         .parent()
         .ok_or_else(|| Error::input("output needs a parent directory"))?;
-    let resolved = fs::canonicalize(parent)?.join(
+    let resolved = (if planned {
+        resolve_prefix(parent)?
+    } else {
+        fs::canonicalize(parent)?
+    })
+    .join(
         out.file_name()
             .ok_or_else(|| Error::input("output needs a filename"))?,
     );
     for file in files {
-        if out == cache::absolute(file)? || resolved == resolve_prefix(file)? {
+        if out == cache::absolute(file)?
+            || resolved == resolve_prefix(file)?
+            || fs::canonicalize(&resolved).ok().as_ref() == Some(&resolve_prefix(file)?)
+        {
             return Err(Error::input(
                 "output would replace a source, color input, or cache lock",
             ));
@@ -105,11 +121,19 @@ pub fn json_bytes(value: &serde_json::Value, cancelled: &AtomicUsize) -> Result<
     Ok(writer.bytes)
 }
 pub fn output_path(path: &Path, layout: &Layout) -> Result<PathBuf> {
+    layout_output_mode(path, layout, false)
+}
+pub(crate) fn layout_output_mode(path: &Path, layout: &Layout, planned: bool) -> Result<PathBuf> {
     let out = cache::absolute(path)?;
     let parent = out
         .parent()
         .ok_or_else(|| Error::input("output needs a parent directory"))?;
-    let resolved = fs::canonicalize(parent)?.join(
+    let resolved = (if planned {
+        resolve_prefix(parent)?
+    } else {
+        fs::canonicalize(parent)?
+    })
+    .join(
         out.file_name()
             .ok_or_else(|| Error::input("output needs a filename"))?,
     );
@@ -118,6 +142,7 @@ pub fn output_path(path: &Path, layout: &Layout) -> Result<PathBuf> {
     let lock = PathBuf::from(lock);
     let resolved_lock = fs::canonicalize(lock.parent().unwrap())?.join(lock.file_name().unwrap());
     if resolved == fs::canonicalize(&layout.source)?
+        || fs::canonicalize(&resolved).ok() == Some(fs::canonicalize(&layout.source)?)
         || out == layout.source
         || resolved.starts_with(fs::canonicalize(&layout.directory)?)
         || out.starts_with(&layout.directory)
@@ -196,43 +221,72 @@ fn publish_with(
     cancelled: &AtomicUsize,
     write: impl FnOnce(&mut std::fs::File) -> Result<()>,
 ) -> Result<()> {
-    check_cancelled(cancelled)?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| Error::input("output needs a parent directory"))?;
-    let mut created = None;
-    for _ in 0..128 {
-        let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
-        let p = parent.join(format!(".floe-shot-{}-{serial}.tmp", std::process::id()));
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&p)
-        {
-            Ok(f) => {
-                created = Some((p, f));
-                break;
+    StagedArtifact::write(path, cancelled, write)?.commit(cancelled)
+}
+
+/// Stage one complete export without replacing its target yet. A mosaic keeps
+/// at most five of these until all four renders succeed; Drop removes only
+/// the create-new temporary, never a user's output or directory.
+pub struct StagedArtifact {
+    temporary: Option<PathBuf>,
+    target: PathBuf,
+}
+impl StagedArtifact {
+    pub fn write(
+        path: &Path,
+        cancelled: &AtomicUsize,
+        write: impl FnOnce(&mut std::fs::File) -> Result<()>,
+    ) -> Result<Self> {
+        check_cancelled(cancelled)?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| Error::input("output needs a parent directory"))?;
+        let mut created = None;
+        for _ in 0..128 {
+            let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
+            let p = parent.join(format!(".floe-shot-{}-{serial}.tmp", std::process::id()));
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&p)
+            {
+                Ok(f) => {
+                    created = Some((p, f));
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e.into()),
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e.into()),
         }
-    }
-    let (temporary, mut file) =
-        created.ok_or_else(|| Error::input("cannot allocate output staging file"))?;
-    let result = (|| -> Result<()> {
+        let (temporary, mut file) =
+            created.ok_or_else(|| Error::input("cannot allocate output staging file"))?;
+        let staged = Self {
+            temporary: Some(temporary),
+            target: path.to_owned(),
+        };
         write(&mut file)?;
         file.sync_all()?;
         check_cancelled(cancelled)?;
-        fs::rename(&temporary, path)?;
-        // Rename is the commit point. Do not report a late signal as an
-        // unpublished/cancelled artifact after this succeeds.
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(temporary);
+        Ok(staged)
     }
-    result
+    pub fn commit(mut self, cancelled: &AtomicUsize) -> Result<()> {
+        check_cancelled(cancelled)?;
+        fs::rename(
+            self.temporary.as_ref().expect("uncommitted stage"),
+            &self.target,
+        )?;
+        self.temporary = None;
+        // Rename is the commit point; no late signal can unpublish it.
+        Ok(())
+    }
+}
+impl Drop for StagedArtifact {
+    fn drop(&mut self) {
+        if let Some(path) = &self.temporary {
+            let _ = fs::remove_file(path);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -256,6 +310,44 @@ mod tests {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.0).unwrap();
         }
+    }
+    #[test]
+    fn staged_files_publish_only_on_commit() {
+        let dir = Temp::new();
+        let output = dir.0.join("mosaic.png");
+        let flag = AtomicUsize::new(0);
+        fs::write(&output, b"old").unwrap();
+        let stage = || {
+            StagedArtifact::write(&output, &flag, |f| {
+                f.write_all(b"new")?;
+                Ok(())
+            })
+            .unwrap()
+        };
+        let pending = stage();
+        assert_eq!(fs::read(&output).unwrap(), b"old");
+        assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 2);
+        drop(pending);
+        assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 1);
+        assert!(StagedArtifact::write(&output, &flag, |f| {
+            f.write_all(b"failed")?;
+            Err(Error::input("encode failed"))
+        })
+        .is_err());
+        assert_eq!(fs::read(&output).unwrap(), b"old");
+        assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 1);
+        let pending = stage();
+        flag.store(2, Ordering::Relaxed);
+        assert_eq!(
+            pending.commit(&flag).unwrap_err().kind,
+            crate::ErrorKind::Cancelled
+        );
+        assert_eq!(fs::read(&output).unwrap(), b"old");
+        assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 1);
+        flag.store(0, Ordering::Relaxed);
+        stage().commit(&flag).unwrap();
+        assert_eq!(fs::read(&output).unwrap(), b"new");
+        assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 1);
     }
     #[test]
     fn stream_is_exact_bounded_and_atomic() {
