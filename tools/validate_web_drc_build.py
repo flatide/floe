@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 
-from validate_web_cli import APP, INDEX, RENDERD, Client, read_json, wait
+from validate_web_cli import APP, INDEX, RENDERD, ROOT, Client, read_json, wait
 from validate_drc_build import fingerprint, clean_stage
 
 DB = 'TOP 1000\nWIDTH\n2 2 1\nwidth rule\np 1 4\n0 0\n100 0\n100 20\n0 20\ne 2 1\n50 0 50 100\n'
@@ -84,6 +84,9 @@ while True:time.sleep(.01)
             p = subprocess.Popen(args,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
             try:
                 c = Client(wait(lambda:read_json(session),p))
+                asset = '/assets/' + c.bundle + '/drc-build.js'
+                assert asset.encode() in c.call('GET','/')
+                assert c.call('GET',asset) == (ROOT/'rust/web/ui/drc-build.js').read_bytes(), 'stale or missing embedded build controller'
                 for method,path,body in [('GET','/api/v1/drc/builds',None),('POST','/api/v1/drc/builds',{}),
                                           ('GET','/api/v1/drc/builds/1',None),('POST','/api/v1/drc/builds/1/cancel',{})]:
                     c.call(method,path,body,401)

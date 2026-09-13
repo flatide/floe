@@ -68,7 +68,9 @@
                 } catch (e) { reject(e); return; }
                 if (xhr.status < 200 || xhr.status >= 300) {
                     if (xhr.status === 401) { stopped = true; connection('Session expired', false); }
-                    reject(new Error(message(value && value.error || ('HTTP ' + xhr.status))));
+                    const failure = new Error(message(value && value.error || ('HTTP ' + xhr.status)));
+                    failure.status = xhr.status; failure.code = value && value.error;
+                    reject(failure);
                 } else { resolve(value); }
             };
             xhr.onerror = function () { done(); reject(new Error('Local service is unavailable')); };
@@ -641,7 +643,7 @@
     const sizeObserver = typeof window.ResizeObserver === 'function' ? new window.ResizeObserver(resized) : null;
     if (sizeObserver) { sizeObserver.observe(viewport); }
     drcPanel = window.FloeDRC.bind({document: document, window: window, protocol: P, http: http,
-        stateStore: window.FloePanelState, rulers: window.FloeRulers, groups: window.FloeDRCGroups, cursor: reviewCursor,
+        stateStore: window.FloePanelState, rulers: window.FloeRulers, groups: window.FloeDRCGroups, builds: window.FloeDRCBuild, cursor: reviewCursor,
         context: function () { return !stopped && state && currentId ? {id: currentId, source: currentSource, state: state,
             connected: !!epoch && !!socket && socket.readyState === WebSocket.OPEN, pending: !!inflight || queue.length > 0 || !!dragShift} : null; },
         navigate: function (n, token, done) { return edit({prepared_token: token}, done); },

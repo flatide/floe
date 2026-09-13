@@ -72,6 +72,13 @@ details > summary { cursor: pointer; font-size: 12px; color: #b4c3d8; }
 .drc-heading h2 { display: flex; justify-content: space-between; align-items: center; }
 .drc-heading h2 span { font-size: 9px; color: #8194af; border: 1px solid #46556c; padding: 2px 4px; border-radius: 3px; }
 #drc-title { display: block; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.drc-build { padding: 12px 0; flex-shrink: 0; }
+.drc-build p, .drc-build .check { font-size: 1rem; line-height: 1.45; }
+.drc-build .note { font-size: .93rem; }
+.drc-build button { white-space: normal; }
+#drc-build-form { padding: 10px; margin-top: 10px; background: #171b23; border: 1px solid #526887; border-radius: 4px; }
+#drc-build-source, #drc-build-status { overflow-wrap: anywhere; white-space: pre-wrap; }
+#drc-build-status { margin: 10px 0 0; font-variant-numeric: tabular-nums; }
 .drc-search { display: flex; gap: 5px; margin: 12px 0 8px; }
 .drc-search input { flex: 1; min-width: 0; width: 140px; font-size: 12px; }
 .drc-search button, .drc-actions button { font-size: 12px; }

@@ -11,6 +11,7 @@
   <script defer src="/assets/@@BUNDLE@@/panel-state.js"></script>
   <script defer src="/assets/@@BUNDLE@@/rulers.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc-groups.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/drc-build.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc.js"></script>
   <script defer src="/assets/@@BUNDLE@@/app.js"></script>
 </head>
@@ -83,7 +84,23 @@
       <div id="perf" class="perf">Rust renderer · no automatic indexing · refinement off</div>
     </main>
     <aside id="drc-panel" class="drc-panel" aria-label="DRC review" hidden>
-      <div class="drc-heading"><h2>DRC review <span>READ ONLY</span></h2><strong id="drc-title">DRC results</strong><p id="drc-summary" class="note"></p></div>
+      <div class="drc-heading"><h2>DRC review <span>NO REVIEW WRITES</span></h2><strong id="drc-title">DRC results</strong><p id="drc-summary" class="note"></p></div>
+      <section id="drc-build" class="drc-build" aria-label="DRC pack build" hidden>
+        <button id="drc-build-open" aria-expanded="false" aria-controls="drc-build-form" disabled>Build pack…</button>
+        <form id="drc-build-form" aria-label="Approve pack build" hidden>
+          <p>Current review: <strong id="drc-build-source"></strong></p>
+          <p>The registered ASCII source’s <code>.ice</code> pack will be created or reused beside that source.</p>
+          <p>DRC reads pause. Selected errors, groups and CD rulers reset, even if cancelled. Layout and layer visibility stay unchanged. Review files are not changed.</p>
+          <div class="form-row"><label for="drc-build-jobs">Build jobs</label><input id="drc-build-jobs" class="short" type="number" min="1" max="16" step="1" value="4" required></div>
+          <label class="check"><input id="drc-build-force" type="checkbox"> Replace existing pack</label>
+          <p class="note">Unchecked: reuse a current pack; refuse a stale or corrupt pack. Checked: rebuild and atomically replace it, without a backup.</p>
+          <div class="button-row"><button id="drc-build-submit" class="primary" type="submit">Approve build</button><button id="drc-build-dismiss" type="button">Back</button></div>
+        </form>
+        <p id="drc-build-status" role="status">No pack build requested.</p>
+        <p id="drc-build-review" class="note"></p>
+        <p id="drc-build-note" class="note" role="status"></p>
+        <div class="button-row"><button id="drc-build-cancel" hidden>Cancel build</button><button id="drc-build-resolve" hidden>Resolve request</button></div>
+      </section>
       <form id="drc-search-form" class="drc-search"><label for="drc-search" class="sr-only">Search DRC rules</label><input id="drc-search" placeholder="Search rule names" maxlength="256"><button id="drc-search-submit">Search</button></form>
       <div class="form-row"><label for="drc-type">Rule type</label><select id="drc-type" disabled><option value="">All types</option></select></div>
       <div class="pagination"><button id="drc-type-prev" aria-label="Previous type page" disabled>←</button><span>Type pages</span><button id="drc-type-next" aria-label="Next type page" disabled>→</button></div>

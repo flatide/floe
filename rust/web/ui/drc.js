@@ -95,13 +95,21 @@
             setTimeout: function (fn, delay) { return setTimeout(fn, delay); },
             clearTimeout: function (id) { clearTimeout(id); },
             apply: restorePanel, status: function (s) { el('drc-sync-status').textContent = s; }});
+        const builds = o.builds ? o.builds.bind({document: doc, protocol: P, http: o.http, context: o.context,
+            setTimeout: function (fn, delay) { return setTimeout(fn, delay); },
+            clearTimeout: function (id) { clearTimeout(id); }, changed: applyCatalog,
+            retire: function () {
+                registration = null; contextChanged(); overlay.hidden = true;
+                el('drc-summary').textContent = 'Review paused · checking pack build state';
+                info('Previous DRC selection and outlines are not active.');
+            }}) : null;
         function info(s) { el('drc-message').textContent = s || ''; }
         function cancel(key) { const t = tasks[key]; if (t) { t.cancelled = true; if (t.abort) { t.abort(); } delete tasks[key]; } }
         function cancelAll() { Object.keys(tasks).forEach(cancel); }
         function cancelStep() { cancel('step'); stepBusy = false; stepContinuation = null; el('drc-step-continue').hidden = true; }
         function current() {
             const c = o.context();
-            return !stopped && registration && registration.phase === 'ready' && c &&
+            return !stopped && !(builds && builds.suspended()) && registration && registration.phase === 'ready' && c &&
                 c.source === registration.source_id && !['closed', 'failed'].includes(c.state.status) ? c : null;
         }
         function contextKey(c) { return c && registration ? c.id + ':' + registration.revision : ''; }
@@ -321,6 +329,7 @@
             showCD(); savePanel(); return true;
         }
         function escape() {
+            if (builds && builds.escape()) { return true; }
             if (boxMode) { boxReset(!boxStart); return true; }
             return popCD(true) || groupClear() || restoreLayers() || endFocus();
         }
@@ -760,7 +769,13 @@
             ruleStart = errorStart = '0'; ruleNext = errorNext = null;
             navigationButtons();
             try {
-                if (!data) { await loadTypes(true); if (valid('restore', t, c)) { await loadRules(undefined, true); } return; }
+                if (!data) {
+                    // A new registry identity has no saved panel. Do not seed
+                    // it with the retired review's search/status/zoom filters.
+                    el('drc-search').value = ''; el('drc-waived').value = 'all'; el('drc-markers').checked = true;
+                    jumpScale = null; zoomLock = false;
+                    await loadTypes(true); if (valid('restore', t, c)) { await loadRules(undefined, true); } return;
+                }
                 if (typeof data.search !== 'string' || new TextEncoder().encode(data.search).length > 256 ||
                     (data.waived !== null && typeof data.waived !== 'boolean') ||
                     !['markers','shown','zoom_lock','jump_active','focus_visible'].every(function (k) { return typeof data[k] === 'boolean'; }) ||
@@ -827,6 +842,7 @@
             });
         }
         function contextChanged() {
+            if (builds) { builds.contextChanged(); }
             markerHits = []; hitStamp = ''; tooltip('');
             const c = current(), key = contextKey(c);
             if (c && !c.connected) { cancel('focus'); cancel('restore-layers'); }
@@ -843,25 +859,35 @@
             if (registration && !c && registration.phase === 'ready') { info('Open the source associated with this DRC database.'); }
             if (query && c && query.rev !== c.state.state_rev) { el('drc-result-info').textContent = 'Saved earlier-viewport query · enable In view for the live current-rule filter.'; }
         }
+        function applyCatalog(v) {
+            const before = registration, present = !!(v.drc || v.build);
+            registration = v.drc; el('drc-toggle').hidden = !present; el('drc-panel').hidden = !present || !shown;
+            if (registration) {
+                el('drc-title').textContent = registration.title;
+                el('drc-summary').textContent = registration.metadata ? registration.metadata.checks + ' rules · ' + registration.metadata.errors + ' errors' : registration.phase;
+                if (registration.metadata) {
+                    const m = registration.metadata;
+                    if (m.format) { el('drc-summary').textContent += ' · ' + (m.format === 'ascii' ? 'ASCII' : 'ICE'); }
+                    if (m.truncated_records !== undefined && cursor(m.truncated_records) !== '0') { el('drc-summary').textContent += ' · ' + m.truncated_records + ' truncated records'; }
+                }
+                if (!before || before.id !== registration.id || before.phase !== registration.phase) {
+                    info(registration.error || (registration.phase === 'opening' ? 'Opening DRC metadata…' : 'Read-only review'));
+                }
+            }
+            // The catalog is polled while idle too. Rebinding/restarting an
+            // unfinished geometry read every poll would starve large outlines.
+            if (!before || !registration || before.id !== registration.id || before.phase !== registration.phase || contextKey(current()) !== bound) {
+                contextChanged();
+            }
+        }
         async function refresh() {
             if (stopped) { return; }
+            if (builds) { return builds.refresh(); }
             const t = task('catalog');
             try {
                 const v = await o.http('GET', '/api/v1/drc', undefined, false, t); if (t.cancelled || stopped) { return; }
-                registration = v.drc; el('drc-toggle').hidden = !registration; el('drc-panel').hidden = !registration || !shown;
-                if (registration) {
-                    el('drc-title').textContent = registration.title;
-                    el('drc-summary').textContent = registration.metadata ? registration.metadata.checks + ' rules · ' + registration.metadata.errors + ' errors' : registration.phase;
-                    if (registration.metadata) {
-                        const m = registration.metadata;
-                        if (m.format) { el('drc-summary').textContent += ' · ' + (m.format === 'ascii' ? 'ASCII' : 'ICE'); }
-                        if (m.truncated_records !== undefined && cursor(m.truncated_records) !== '0') { el('drc-summary').textContent += ' · ' + m.truncated_records + ' truncated records'; }
-                    }
-                    info(registration.error || (registration.phase === 'opening' ? 'Opening DRC metadata…' : 'Read-only review'));
-                    if (registration.phase === 'opening') { timer = setTimeout(refresh, 500); }
-                }
-                contextChanged();
-                if (focusVisible && selected && !pointsReady && current()) { geometry(selected); }
+                applyCatalog(v);
+                if (registration && registration.phase === 'opening') { timer = setTimeout(refresh, 500); }
             } catch (e) { if (!t.cancelled) { info(e.message); } }
         }
         el('drc-search-form').onsubmit = function (e) { e.preventDefault(); ruleStart = '0'; previousRules.length = 0; loadRules(); };
@@ -895,7 +921,7 @@
         el('drc-group-clear').onclick = groupClear;
         el('drc-toggle').onclick = function () { shown = !shown; el('drc-panel').hidden = !shown; el('drc-toggle').setAttribute('aria-expanded', String(shown)); o.resize(); savePanel(); };
         el('drc-reload').onclick = restoreState;
-        return {init: refresh, contextChanged: contextChanged, paint: paint, click: click, clear: clearSelection,
+        return {init: refresh, refresh: refresh, contextChanged: contextChanged, paint: paint, click: click, clear: clearSelection,
             boxActive: function () { return boxMode; }, move: move,
             key: function (key) {
                 if (key === 'Escape') { return escape(); }
@@ -904,8 +930,8 @@
                 if ((key === 'n' || key === 'p') && rule && current()) { step(key === 'p', false, false); return true; }
                 return false;
             },
-            stop: function () { stopped = true; ++restoreTurn; clearTimeout(filterTimer); filterTimer = null; persistence.close(); groups.close(); bound = ''; boxReset(true); cancelAll(); clearTimeout(timer); if (painting !== null) { o.window.cancelAnimationFrame(painting); painting = null; } overlay.hidden = true; },
-            resume: function () { stopped = false; return refresh(); }};
+            stop: function () { stopped = true; if (builds) { builds.stop(); } ++restoreTurn; clearTimeout(filterTimer); filterTimer = null; persistence.close(); groups.close(); bound = ''; boxReset(true); cancelAll(); clearTimeout(timer); if (painting !== null) { o.window.cancelAnimationFrame(painting); painting = null; } overlay.hidden = true; },
+            resume: function () { stopped = false; return builds ? builds.resume() : refresh(); }};
     }
     const api = {bind: bind, projection: projection, point: point, shifted: shifted, vertices: vertices, metadataText: metadataText, comparisonText: comparisonText};
     if (typeof module === 'object' && module.exports) { module.exports = api; } else { root.FloeDRC = api; }

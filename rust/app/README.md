@@ -88,7 +88,10 @@ cargo build --offline --locked --release -p floe-app -p floe-index -p floe-rende
   웹은 CLI fallback과 달리 명시 파일만 읽으며 인접 ICE/ambient reviewer를
   탐색하지 않는다. ASCII에 `--drc-waives`를 함께 지정하면 오류다.
   웹 pack-build 서버는 명시 승인된 HTTP 작업으로만 생성/취소/새 identity 등록을
-  수행한다. 브라우저 승인/진행 화면·공유·편집/notes는 미이관이다([M2 기록](../../docs/WEBUI_M2.ko.md)).
+  수행한다. 웹 DRC 패널의 **Build pack… → Approve build**에서 명시 승인하며,
+  jobs1..16(웹 기본4), 기존 pack 교체는 별도 unchecked 선택이다. 진행/취소 및
+  결과 불명확 시 동일 요청 확인을 지원한다. 공유·편집/notes는 미이관이며 실제
+  브라우저 승인 클릭 수용도 남아 있다([M2 기록](../../docs/WEBUI_M2.ko.md)).
   생성 승인은 현재 DRC 선택/준비된 이동을 초기화하지만 레이아웃을 재오픈하지 않는다.
   native 생성 terminal과 새 reader의 metadata open 완료는 별도 상태다.
 - `drc RESULTS.db --build`는 명시적인 쓰기 작업이다. 기존 fresh `RESULTS.db.ice`는

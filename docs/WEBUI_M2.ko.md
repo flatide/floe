@@ -1355,7 +1355,81 @@ jobdeck80·renderer46·KLayout13 PX+2 phase-exact+14 style을 포함한다. 최�
 생성 중 패널을 닫지 않고 진행/취소를 표시하며, 새 catalog identity의 조회만 복원하는
 브라우저 controller다. UI 생성 완료나 Firefox/ETX 현장 수용을 주장하지 않는다.
 
-## 24. 다음 경계
+## 24. M2a-12b2: pack-build 승인·진행 UI와 새 리뷰 조회
+
+§23의 owner API를 기존 DRC 패널에 연결했다. 별도 `drc-build.js` controller가
+생성 요청과 catalog polling을 소유하며, 읽기 패널의 identity 전환/취소가 생성
+상태 관찰 자체를 중단하지 않는다. ES2017·기존 정적 asset 번들/CSP를 유지하고
+새 runtime 의존성이나 배포 경로를 추가하지 않았다.
+
+### 명시 승인과 관찰
+
+- `Build pack…`은 패널 안의 승인 form만 펼친다. 등록 ASCII 원본 옆 `.ice`라는
+  고정 목적지, 읽기 중단·선택/그룹/CD 초기화(취소해도 동일), layout/layer visibility와
+  review 파일 보존을 표시한다. `Replace existing pack`은 매번 unchecked이며
+  교체에는 backup이 없음을 알린다. jobs는1..16, 웹 제안 기본4다.
+- `Approve build`만 POST한다. read-only preflight GET으로 작업 high-water를 읽고,
+  원래 view/source/connection epoch/DRC ID·revision이 그대로일 때만 seq를 발급한다.
+  확인 중 source/view/연결이 바뀌거나 Back/Escape를 누르면 생성하지 않는다.
+  사용자가 고른 jobs를 자동으로 줄이거나 Busy 작업을 자동 재시도하지 않는다.
+- queued/reader 종료/native 생성/검증/새 reader 등록·terminal을 구별한다. native의
+  유계 check/error 숫자와 경과시간만 표시하며 worker별 수를 퍼센트로 해석하지 않는다.
+  게시 성공/재사용과 cleanup/directory-sync 경고, 새 catalog의 opening/ready/error를
+  따로 표시한다. 작업에 저장된 과거 `review: opening`을 최종 조회 상태로 오인하지 않는다.
+- Cancel은 관찰한 active seq 하나만 대상으로 한다. 이미 게시가 이겼으면 성공을
+  유지한다는 안내를 붙이며, 버튼 수신만으로 미게시/중단 완료를 주장하지 않는다.
+  pagehide/disconnect는 HTTP 관찰만 중단하며 서버 작업을 임의로 취소하지 않는다.
+- 요청 응답이 불명확하면 신규 생성 버튼을 잠근다. `Resolve request`를 사용자가
+  명시할 때만 **같은 seq·view/DRC ID·revision·force·jobs**를 재전송한다. 이미 접수됐으면
+  ledger replay이고, 원래 도달하지 않았다면 같은 승인 작업이 처음 접수될 수 있다.
+  parsed4xx 거부와 network/timeout/5xx/잘못된 receipt를 구별한다. 자동 새 seq/옵션 변경은 없다.
+  pending body는 controller 메모리에만 두며 BFcache 복귀는 유지, 전체 reload는 조회로
+  복원한다. 전체 reload도 생성 POST를 재생하지 않고 새 작업에는 새 명시 승인이 필요하다.
+
+### 리뷰 수명·성능
+
+- 같은 창에서 POST를 보내면 이전 DRC 읽기/focus 요청·선택·윤곽을 즉시 비활성화한다.
+  진행 중 `drc:null`이어도 패널과 진행/취소를 유지한다. 새로고침해 진행 중인 작업을
+  처음 관찰한 경우도 같다. layout close/open/goto나 레이어 복원은 실행하지 않는다.
+- active/opening은500ms, idle은2.5s 간격의 **메모리 catalog GET**으로 관찰한다.
+  다른 owner 탭의 교체는 다음 성공한 poll에서 감지한다. 네트워크 지연/브라우저의
+  background timer throttling을 포함한 즉시 동기화 보장은 아니며, 그 사이 이전
+  ID/token의 서버 적용은 §23이 거부한다. 조회 실패 시 기존 윤곽은 숨기고 새 catalog
+  확인 전까지 읽기/생성을 잠근다.401은 polling을 중단한다.
+- 읽기와 build 관찰의 task pool을 분리했다. 동일 ready identity를 poll할 때 미완료
+  geometry paging을 재시작하지 않는다. 새 ID에서는 server selection→panel 순으로
+  조회만 복원하며, 저장 상태가 없으면 이전 검색/waive/zoom 필터도 비운다.
+  새 리뷰에 이전 error ID/CD/autosave를 이식하지 않는다. 레이어 격리의 서버 복원
+  snapshot은 유지되어 새 리뷰 ready 이후 Restore layers를 사용할 수 있다.
+
+### 검증 경계
+
+- `drc-build.test.cjs`: 승인·force 초기화·jobs/u64·중복 클릭·identity/epoch 경합,
+  진행/게시가 이긴 cancel, 불명확한 응답과 동일 payload 재확인, stale GET/401,
+  read-only capability·DTO 오류·stop/resume/preflight 취소를 검증한다.
+- `drc-build-panel.test.cjs`: 실제 두 controller 결합으로 이전 geometry/focus 취소와
+  늦은 응답 폐기, 진행 중 reload, 새 ID/빈 필터 복원·stale autosave 없음·layout 불변,
+  동일 catalog polling에 의한 긴 윤곽 읽기 재시작 없음을 검증한다.
+  기존 ASCII/ICE·CD/SVRF·선택/그룹 UI gate와 함께 `validate_web_ui.cjs`에 배선했다.
+- 로컬 Chrome에서 합성 DRC의 초기 패널·Build pack 버튼·metadata/레이아웃 표시를
+  accessibility tree와 screenshot으로 확인했다. **실제 승인/취소 클릭은 미검증**이다.
+  클릭 대상을 확정하지 못한 키보드 자동 입력이 안전 검토에서 차단되어 중단했다.
+  브라우저 보안 설정을 낮추지 않았다. 실제 승인 클릭을 재개하려면 정확한 대상 확인과
+  명시 승인을 먼저 받아야 하며, controller/HTTP 테스트를 실제 클릭 수용으로 대체하지 않는다.
+
+2026-09-13 `sh tools/validate_rust.sh`가 `RUST VALIDATION: ALL OK`로 완료됐다.
+새 controller/패널 UI와 native HTTP/WebSocket build gate, 기존 ASCII/ICE/SVRF,
+jobdeck80·renderer46·KLayout13 PX+2 phase-exact+14 style을 포함한다. 마지막 UI의
+read-only preflight 유지 보완 후 ES2017/전체 UI gate를 다시 통과했다.
+최종 소스로 `cargo test --workspace --offline --locked`와 fmt/strict clippy·release
+빌드를 완료하고 native HTTP build gate를 재실행했다. HTTP gate는 HTML script 연결과
+임베드된 `drc-build.js`가 checkout의 바이트와 일치하는지도 단언한다.
+Rust1.89 offline 테스트·Linux musl release link와 전환 패키지 fmt/strict clippy도
+통과했다. 기존 native/Pillow/GLib 경고는 남아 있다.
+실칩 생성 시간/RSS·Linux 실행·현장 Firefox/ETX·외부 공유/배포는 검증한 것이 아니다.
+M0/G2는 사용자 요청대로 보류이며 GTK launcher는 유지한다.
+
+## 25. 다음 경계
 
 1. SVRF sidecar 코어/actor/API·웹 type/상세/비교는 §15~17까지 이관했다.
    일반 레이아웃 layer isolate/복원·한 번의 goto는 §18~19까지 연결했다.
@@ -1363,8 +1437,9 @@ jobdeck80·renderer46·KLayout13 PX+2 phase-exact+14 style을 포함한다. 최�
    selected/live In view 목록 필터·순회·hover는 §13~14까지 구현했다.
    손으로 그리는 ruler와 그에 따른 Escape 우선순위는 M4에서 확장한다.
    현재 페이지 마커 정책 자체를 전체 pack 마커로 확대하지 않는다.
-2. ASCII 읽기 코어/CLI·명시 등록 웹 조회는 §20~21까지 이관했다. §22~23의 pack-build
-   코어/서버에 브라우저 승인/진행/취소와 새 identity 조회 복원을 연결한다. 기존 notes·상세 측정/룰 매핑은
+2. ASCII 읽기 코어/CLI·명시 등록 웹 조회는 §20~21, pack-build 코어/서버/UI는
+   §22~24까지 연결했다. §24의 실제 브라우저 승인 클릭 수용은 별도로 남아 있다.
+   기존 notes·상세 측정/룰 매핑은
    각각 parity gate와 함께 확장한다.
 3. 공유는 설계/DRC에 묶인 읽기 capability, 발급/만료/폐기·follow/independent
    state를 별도 구현·검증. 아직 shares=false, loopback-only다.

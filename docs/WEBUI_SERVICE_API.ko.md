@@ -34,7 +34,10 @@ M2a-12a의 `drc/build::Build`는 명시 pack 생성·자원/쓰기 lease·진행
 명시 동의 → 현재 DRC 응답/token 무효화·actor 종료/lease 해제 → 생성 → 새 리뷰
 identity 등록 순서다. native 게시 결과와 새 reader의 opening/ready/error를 구분한다.
 `GET /api/v1/drc`의 별도 build capability/ledger는 owner 작업이며 읽기 공유 권한이
-아니다. 브라우저 승인/진행 UI는 남아 있다(세부 계약은 M2 §23).
+아니다. M2a-12b2는 이 capability를 읽는 별도 브라우저 controller다. 생성 POST가
+전송된 뒤 결과가 불명확하면 새 seq를 자동 발급하지 않고, 사용자 명시 확인만
+원래 seq/옵션/identity를 재전송한다. GET/재접속은 생성 동의가 아니다.
+실제 브라우저 승인 클릭 수용은 별도다(서버 M2 §23, UI §24).
 2026-09-13 M1a-1 `rust/worker-client`와 M1a-2a/b `app/app-core`의 일반 index·info/단일 render/probe를
 구현했다. 현재 호출 계약은 [worker README](../rust/worker-client/README.md),
 [M1a 기록](WEBUI_M1A.ko.md)을 따르며 아래 서비스 전체가 존재하는 것은 아니다.
