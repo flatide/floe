@@ -1,7 +1,7 @@
 use super::{dto::Command, metadata::Metadata, RESPONSE_BYTES};
 use floe_app_core::{
     check_cancelled,
-    drc::{cd_segments, Cursor, Hit, InfoHit, ListRequest, Pack, RecordInfo},
+    drc::{Cursor, Database, ListRequest, ReadInfoHit, ReadPoints},
     Error, ErrorKind, Result,
 };
 use serde_json::{json, Value};
@@ -27,28 +27,15 @@ impl Write for Output {
 fn short(s: &str) -> (String, bool) {
     (s.chars().take(256).collect(), s.chars().count() > 256)
 }
-fn bounds(p: &Pack, b: Option<[i64; 4]>) -> Result<Value> {
-    Ok(match b {
-        Some(b) => json!(p.bbox_um(b)?.map(|v| v.to_string())),
+fn bounds(b: Option<[f64; 4]>) -> Value {
+    match b {
+        Some(b) => json!(b.map(|v| v.to_string())),
         None => Value::Null,
-    })
+    }
 }
-fn hit(p: &Pack, h: &Hit) -> Result<Value> {
-    info_hit(
-        p,
-        &InfoHit {
-            check: h.check,
-            local: h.local,
-            status: h.status,
-            record: RecordInfo::from(&h.violation),
-        },
-    )
-}
-fn info_hit(p: &Pack, h: &InfoHit) -> Result<Value> {
-    Ok(
-        json!({"check":h.check.to_string(),"local":h.local.to_string(),"global":h.record.number.to_string(),
-        "kind":h.record.kind.to_string(),"status":h.status,"bbox_um":bounds(p,Some(h.record.bbox))?,"points":h.record.points.to_string()}),
-    )
+fn hit(h: &ReadInfoHit) -> Value {
+    json!({"check":h.check.to_string(),"local":h.local.to_string(),"global":h.record.number.to_string(),
+        "kind":h.record.kind.to_string(),"status":h.status,"bbox_um":bounds(Some(h.record.bbox)),"points":h.record.points.to_string()})
 }
 fn next(c: Option<Cursor>) -> Value {
     c.map_or(
@@ -57,7 +44,7 @@ fn next(c: Option<Cursor>) -> Value {
     )
 }
 pub(super) fn execute(
-    p: &mut Pack,
+    p: &mut Database,
     metadata: Option<&Metadata>,
     request: Command,
     stop: &AtomicUsize,
@@ -84,7 +71,7 @@ pub(super) fn execute(
                 },
                 stop,
             )?;
-            json!({"rows":page.hits.iter().map(|h| info_hit(p,h)).collect::<Result<Vec<_>>>()?, "next":page.next.map(|n|n.to_string()),
+            json!({"rows":page.hits.iter().map(hit).collect::<Vec<_>>(), "next":page.next.map(|n|n.to_string()),
                 "scanned":page.scanned.to_string(), "bbox_um":b.map(|b|b.map(|n|n.to_string())), "selection_rev":filters.selection_rev.map(|n|n.to_string())})
         }
         Command::FilteredStep {
@@ -93,7 +80,7 @@ pub(super) fn execute(
         } => {
             request.bbox_um = filters.bounds()?;
             let page = p.filtered_step(request, filters.selection()?, stop)?;
-            json!({"hit":page.hit.as_ref().map(|h|info_hit(p,h)).transpose()?,"next":page.next.map(|c|json!({"next":c.next.to_string(),"remaining":c.remaining.to_string()})),
+            json!({"hit":page.hit.as_ref().map(hit),"next":page.next.map(|c|json!({"next":c.next.to_string(),"remaining":c.remaining.to_string()})),
                 "scanned":page.scanned.to_string(),"bbox_um":request.bbox_um.map(|b|b.map(|n|n.to_string())),"selection_rev":filters.selection_rev.map(|n|n.to_string())})
         }
         Command::SelectionCandidates {
@@ -106,7 +93,7 @@ pub(super) fn execute(
                 .map(|ci| p.selection_candidates(ci, &errors, bbox_um, waived, stop))
                 .transpose()?
                 .unwrap_or_default();
-            json!({"rows": hits.iter().map(|h| info_hit(p, h)).collect::<Result<Vec<_>>>()?})
+            json!({"rows": hits.iter().map(hit).collect::<Vec<_>>()})
         }
         Command::ValidatePanel(data) => {
             data.validate_pack(p)?;
@@ -121,7 +108,7 @@ pub(super) fn execute(
         }
         Command::Step(request) => {
             let page = p.step(request, stop)?;
-            json!({"hit":page.hit.as_ref().map(|h| info_hit(p,h)).transpose()?,
+            json!({"hit":page.hit.as_ref().map(hit),
                 "next":page.next.map(|c|json!({"next":c.next.to_string(),"remaining":c.remaining.to_string()})),
                 "scanned":page.scanned.to_string()})
         }
@@ -135,7 +122,7 @@ pub(super) fn execute(
             if metric.is_some() && metadata.is_none() {
                 return Err(Error::input("SVRF metadata required for a type filter"));
             }
-            if start > p.checks.len() {
+            if start > p.check_count() {
                 return Err(Error::input("rule cursor"));
             }
             let mut rows = Vec::new();
@@ -143,17 +130,17 @@ pub(super) fn execute(
             // Bound scanned NAME bytes as well as rule count (a single name
             // may be 1 MiB). Empty+next is incomplete, never an empty full list.
             let mut bytes = 0usize;
-            while end < p.checks.len()
+            while end < p.check_count()
                 && end - start < 4096
                 && rows.len() < limit
                 && bytes < 1024 * 1024
             {
                 check_cancelled(stop)?;
-                let c = &p.checks[end];
+                let c = p.check(end)?;
                 bytes += c.name.len();
                 if metric
                     .as_ref()
-                    .is_none_or(|m| metadata.is_some_and(|data| data.matches(&c.name, m)))
+                    .is_none_or(|m| metadata.is_some_and(|data| data.matches(c.name, m)))
                     && (search.is_empty() || c.name.to_lowercase().contains(&search))
                 {
                     let w = p.waived_count(end)?;
@@ -161,20 +148,17 @@ pub(super) fn execute(
                         end += 1;
                         continue;
                     }
-                    let (name, truncated) = short(&c.name);
+                    let (name, truncated) = short(c.name);
                     rows.push(json!({"check":end.to_string(),"name":name,"name_truncated":truncated,
-                        "errors":c.count.to_string(),"waived":w.to_string(),"bbox_um":bounds(p,c.bbox)?}));
+                        "errors":c.count.to_string(),"waived":w.to_string(),"bbox_um":bounds(p.bounds(end)?)}));
                 }
                 end += 1;
             }
-            json!({"rows":rows,"next":if end<p.checks.len(){Some(end.to_string())}else{None},"scanned":(end-start).to_string(),"metric":metric,"waived":waived})
+            json!({"rows":rows,"next":if end<p.check_count(){Some(end.to_string())}else{None},"scanned":(end-start).to_string(),"metric":metric,"waived":waived})
         }
         Command::Types { start, limit } => Metadata::types(metadata, start, limit)?,
         Command::Rule { check } => {
-            let c = p
-                .checks
-                .get(check)
-                .ok_or_else(|| Error::input("rule index"))?;
+            let c = p.check(check)?;
             if c.name.len().saturating_add(c.desc.len()) > RESPONSE_BYTES {
                 return Err(Error::new(
                     ErrorKind::Incomplete,
@@ -182,15 +166,11 @@ pub(super) fn execute(
                 ));
             }
             json!({"check":check.to_string(),"name":c.name,"description":c.desc,"errors":c.count.to_string(),
-                "declared":c.declared.to_string(),"original":c.original.to_string(),"waived":p.waived_count(check)?.to_string(),"bbox_um":bounds(p,c.bbox)?,
-                "svrf":metadata.map(|m|m.detail(&c.name,stop)).transpose()?})
+                "declared":c.declared.to_string(),"original":c.original.to_string(),"waived":p.waived_count(check)?.to_string(),"bbox_um":bounds(p.bounds(check)?),
+                "svrf":metadata.map(|m|m.detail(c.name,stop)).transpose()?})
         }
         Command::Comparison { check, error } => {
-            let name = &p
-                .checks
-                .get(check)
-                .ok_or_else(|| Error::input("rule index"))?
-                .name;
+            let name = p.check(check)?.name;
             let rule = metadata.and_then(|m| m.rules.rule(name));
             let (record, comparison) = p.constraint_comparison(check, error, rule, stop)?;
             let compared = comparison.map(|c|json!({"constraint":c.constraint.to_string(),"metric":c.metric,"op":c.op,"unit":c.unit,
@@ -203,16 +183,13 @@ pub(super) fn execute(
             waived,
             limit,
         } => {
-            let c = p
-                .checks
-                .get(check)
-                .ok_or_else(|| Error::input("rule index"))?;
+            let c = p.check(check)?;
             if start > c.count {
                 return Err(Error::input("error cursor"));
             }
-            if let Some(b) = c.bbox {
+            if let Some(b) = p.bounds(check)? {
                 let page = p.query(
-                    p.bbox_um(b)?,
+                    b,
                     Some(&BTreeSet::from([check])),
                     waived,
                     Cursor {
@@ -222,11 +199,7 @@ pub(super) fn execute(
                     limit,
                     stop,
                 )?;
-                let rows = page
-                    .hits
-                    .iter()
-                    .map(|h| hit(p, h))
-                    .collect::<Result<Vec<_>>>()?;
+                let rows = page.hits.iter().map(hit).collect::<Vec<_>>();
                 json!({"rows":rows,"next":page.next.filter(|c|c.check==check).map(|c|c.error.to_string()),"scanned":page.scanned.to_string()})
             } else {
                 json!({"rows":[],"next":null,"scanned":"0"})
@@ -240,11 +213,7 @@ pub(super) fn execute(
             limit,
         } => {
             let page = p.query(bbox_um, checks.as_ref(), waived, cursor, limit, stop)?;
-            let rows = page
-                .hits
-                .iter()
-                .map(|h| hit(p, h))
-                .collect::<Result<Vec<_>>>()?;
+            let rows = page.hits.iter().map(hit).collect::<Vec<_>>();
             json!({"rows":rows,"next":next(page.next),"scanned":page.scanned.to_string()})
         }
         Command::Geometry {
@@ -255,25 +224,29 @@ pub(super) fn execute(
         } => {
             let page = p.error_points(check, error, start, limit, stop)?;
             let v = page.record;
-            let points = page
-                .points
-                .iter()
-                .map(|xy| xy.map(|v| v.to_string()))
-                .collect::<Vec<_>>();
-            json!({"check":check.to_string(),"local":error.to_string(),"global":v.number.to_string(),"kind":v.kind.to_string(),
-                "status":p.status(check,error)?,"bbox_um":bounds(p,Some(v.bbox))?,"precision":p.precision.to_string(),
-                "points_dbu":points,"start":page.start.to_string(),"total":v.points.to_string(),
-                "next":page.next.map(|v|v.to_string())})
+            let mut value = json!({"check":check.to_string(),"local":error.to_string(),"global":v.number.to_string(),"kind":v.kind.to_string(),
+                "status":p.status(check,error)?,"bbox_um":bounds(Some(v.bbox)),"precision":p.precision().to_string(),
+                "start":page.start.to_string(),"total":v.points.to_string(),"next":page.next.map(|v|v.to_string())});
+            match page.points {
+                ReadPoints::Dbu(points, _) => {
+                    value["points_dbu"] = json!(points
+                        .iter()
+                        .map(|xy| xy.map(|n| n.to_string()))
+                        .collect::<Vec<_>>())
+                }
+                ReadPoints::Um(points) => {
+                    value["points_um"] = json!(points
+                        .iter()
+                        .map(|xy| xy.map(|n| n.to_string()))
+                        .collect::<Vec<_>>())
+                }
+            }
+            value
         }
         Command::Measurements { check, error } => {
             // CD supports at most four vertices. Validate/decode the containing
             // block as usual, but never clone a large selected polygon here.
-            let page = p.error_points(check, error, 0, 4, stop)?;
-            let segments = if page.next.is_none() {
-                cd_segments(page.record.kind, &page.points, p.precision)?
-            } else {
-                Vec::new()
-            };
+            let (record, segments) = p.measurements(check, error, stop)?;
             let segments: Vec<_> = segments
                 .into_iter()
                 .map(|s| {
@@ -283,7 +256,7 @@ pub(super) fn execute(
                 })
                 .collect();
             json!({"check":check.to_string(),"local":error.to_string(),
-                "global":page.record.number.to_string(),"segments":segments})
+                "global":record.number.to_string(),"segments":segments})
         }
         Command::InView {
             waived,
@@ -294,11 +267,7 @@ pub(super) fn execute(
             let c = context.ok_or_else(|| Error::input("query requires an authoritative view"))?;
             let b = c.bbox_dbu.map(|v| v * c.dbu);
             let page = p.query(b, None, waived, cursor, limit, stop)?;
-            let rows = page
-                .hits
-                .iter()
-                .map(|h| hit(p, h))
-                .collect::<Result<Vec<_>>>()?;
+            let rows = page.hits.iter().map(hit).collect::<Vec<_>>();
             json!({"rows":rows,"next":next(page.next),"scanned":page.scanned.to_string(),"bbox_um":b.map(|v|v.to_string())})
         }
         Command::Focus {
@@ -316,7 +285,7 @@ pub(super) fn execute(
             }
             let c = context.ok_or_else(|| Error::input("focus requires an authoritative view"))?;
             let v = p.error_info(check, error, stop)?;
-            let b = p.bbox_um(v.bbox)?;
+            let b = v.bbox;
             let mut width = (c.bbox_dbu[2] - c.bbox_dbu[0]) * c.dbu;
             if fit {
                 width = ((b[2] - b[0]) / 0.3)
@@ -334,7 +303,7 @@ pub(super) fn execute(
             if let Some(preparation) = preparation {
                 value["layer_isolation"] = preparation.build(
                     metadata,
-                    &p.checks[check].name,
+                    p.check(check)?.name,
                     floe_app_core::view::Navigation::Goto {
                         center_um: center,
                         width_um: width,

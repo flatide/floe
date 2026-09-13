@@ -47,7 +47,7 @@ const HELP: &str = "Usage: floe2-web view SOURCE [SOURCE ...] [OPTIONS]
   --png / --raw            Frame transfer (default raw)
   --frame-cache on|off      Retained frame reuse + layout margin (default on)
   --root DIRECTORY         Additional approved dependency root, repeatable
-  --drc PACK.ice           Read-only DRC service bound to the first source
+  --drc RESULTS.db|PACK.ice Read-only DRC service bound to the first source
   --drc-waives FILE        Explicit existing waive sidecar (requires --drc)
   --drc-rules FILE         Explicit existing SVRF rules.json (requires --drc)
   --port N                 Loopback port (default random)
@@ -62,7 +62,7 @@ Binds only 127.0.0.1; stops on Ctrl+C or End session.
 Managed capacity: 16 CPU slots, 4 reserved for foreground; index jobs <=12.
 Decode+raster reservation must fit 16 slots (DRC reserves 1 extra slot + 256 MiB;
 SVRF metadata reserves another 256 MiB, with no extra CPU worker).
-DRC requires an existing native ICE pack; no implicit review sidecar/ASCII fallback.
+DRC reads the explicit ASCII or ICE file; no adjacent-pack/reviewer discovery or implicit indexing.
 Refinement off; deck margin unsupported.
 The session link is a one-time credential; do not share or log it.";
 

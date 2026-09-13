@@ -22,6 +22,7 @@ pub struct AsciiCheck {
     pub original: String,
     pub start: u64,
     pub count: u64,
+    pub bbox_um: Option<[f64; 4]>,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct AsciiViolation {
@@ -47,6 +48,8 @@ pub struct Ascii {
     pub total: u64,
     pub truncated_records: u64,
     records: Vec<Record>,
+    // At most one complete record (<=4 MiB) for paged outline/CD reads.
+    cached: Option<(usize, u64, AsciiViolation)>,
 }
 fn limit(what: &str) -> Error {
     Error::new(
@@ -339,6 +342,7 @@ impl Ascii {
                 original: "0".into(),
                 start: records.len() as u64,
                 count: 0,
+                bbox_um: None,
             };
             if let Some(line) = lines.peek(stop)? {
                 let ints: Vec<_> = tokens(&line.text).take(3).map_while(integer).collect();
@@ -415,6 +419,14 @@ impl Ascii {
                         truncated_records += 1;
                     }
                     if let Some(bbox_um) = bbox {
+                        c.bbox_um = Some(c.bbox_um.map_or(bbox_um, |b| {
+                            [
+                                b[0].min(bbox_um[0]),
+                                b[1].min(bbox_um[1]),
+                                b[2].max(bbox_um[2]),
+                                b[3].max(bbox_um[3]),
+                            ]
+                        }));
                         push(
                             &mut records,
                             Record {
@@ -454,6 +466,7 @@ impl Ascii {
             checks,
             records,
             truncated_records,
+            cached: None,
         })
     }
     pub fn unchanged(&self) -> Result<()> {
@@ -510,5 +523,6 @@ impl Ascii {
     }
 }
 
+mod query;
 #[cfg(test)]
 mod tests;

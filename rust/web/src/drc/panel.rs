@@ -1,6 +1,6 @@
 //! Per-view UI state only: never an autosave/waive/geometry mutation.
 use super::{dto::CursorDto, Failure};
-use floe_app_core::{drc::Pack, Error, Result};
+use floe_app_core::{drc::Database, Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -106,16 +106,13 @@ impl Data {
         }
         Ok(())
     }
-    pub fn validate_pack(&self, p: &Pack) -> Result<()> {
+    pub fn validate_pack(&self, p: &Database) -> Result<()> {
         let number = |s: &str| super::dto::number(s).map_err(Error::input);
         let count = |s: &str| -> Result<u64> {
             let i = usize::try_from(number(s)?).map_err(|_| Error::input("DRC check index"))?;
-            p.checks
-                .get(i)
-                .map(|c| c.count)
-                .ok_or_else(|| Error::input("DRC check index"))
+            Ok(p.check(i)?.count)
         };
-        if number(&self.rule_start)? > p.checks.len() as u64 {
+        if number(&self.rule_start)? > p.check_count() as u64 {
             return Err(Error::input("rule cursor"));
         }
         if number(&self.error_start)?
@@ -140,7 +137,7 @@ impl Data {
         }
         if let Some(q) = &self.query {
             let end =
-                number(&q.cursor.check)? == p.checks.len() as u64 && number(&q.cursor.error)? == 0;
+                number(&q.cursor.check)? == p.check_count() as u64 && number(&q.cursor.error)? == 0;
             if !end && number(&q.cursor.error)? > count(&q.cursor.check)? {
                 return Err(Error::input("query cursor"));
             }

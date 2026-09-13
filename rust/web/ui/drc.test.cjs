@@ -3,6 +3,17 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const D = require('./drc.js'), P = require('./protocol.js');
+const ascii = process.env.FLOE_TEST_ASCII === '1';
+assert.deepEqual(Array.from(D.vertices({precision:'1000',points_um:[['.000125','-1.75']]},'ascii',P).points),[.000125,-1.75]);
+assert.deepEqual(Array.from(D.vertices({precision:'1000',points_dbu:[['1','-1750']]},'ice',P).points),[.001,-1.75]);
+for (const page of [
+    {precision:'1000',points_um:[['0','0']],points_dbu:[['0','0']]},
+    {precision:'1000'}, {precision:'0',points_um:[['0','0']]},
+    {precision:'1',points_um:[['NaN','0']]}, {precision:'1',points_um:[]},
+    {precision:'1',points_um:new Array(2049).fill(['0','0'])}
+]) { assert.throws(()=>D.vertices(page,'ascii',P)); }
+assert.throws(()=>D.vertices({precision:'1',points_dbu:[['0','0']]},'ascii',P));
+assert.throws(()=>D.vertices({precision:'1',points_um:[['0','0']]},'ice',P));
 const focus = require('./test-focus.cjs');
 const frame = {bbox_dbu:['-48','-48','148','128'],width:196,height:176};
 assert.equal(D.projection(frame,[48,48]),null,'native frame has no DBU field');
@@ -50,12 +61,13 @@ const panel=D.bind({document:doc,window,protocol:P,rulers:require('./rulers.js')
 const a={check:'0',local:'9007199254740993',global:'9007199254740994',kind:'p',status:0,bbox_um:['10','10','30','30'],points:'5000'};
 const b={check:'0',local:'9007199254740994',global:'9007199254740995',kind:'e',status:1,bbox_um:['40','10','60','30'],points:'2'};
 const geom=(r,pts,start,total,next)=>({check:r.check,local:r.local,global:r.global,kind:r.kind,status:r.status,bbox_um:r.bbox_um,
-    precision:'1000',points_dbu:pts,start:String(start),total:String(total),next});
+    precision:'1000',...(ascii?{points_um:pts.map(xy=>xy.map(v=>String(Number(v)/1000+.000125)))}:{points_dbu:pts}),start:String(start),total:String(total),next});
 (async()=>{
     const initialized=panel.init();
-    reply('catalog',{drc:{id:'drc-id',revision:'r1',source_id:'source',title:'synthetic',phase:'ready',metadata:{checks:'2',errors:'9007199254740996'}}});
+    reply('catalog',{drc:{id:'drc-id',revision:'r1',source_id:'source',title:'synthetic',phase:'ready',metadata:{checks:'2',errors:'9007199254740996',format:ascii?'ascii':'ice',truncated_records:ascii?'1':'0'}}});
     await initialized;await tick();
     assert.equal(el('drc-panel').hidden,false);
+    assert(el('drc-summary').textContent.includes(ascii?'ASCII · 1 truncated records':'ICE'));
     reply('rules',{rows:[{check:'0',name:'MASK <img src=x>',name_truncated:false,errors:'9007199254740996',waived:'1'}],next:null});
     await tick();
     assert.equal(el('drc-rules').children[0].textContent,'MASK <img src=x>  ·  9007199254740996');
@@ -80,6 +92,7 @@ const geom=(r,pts,start,total,next)=>({check:r.check,local:r.local,global:r.glob
     reply('focus',{navigation:{kind:'goto',center_um:['50','20'],width_um:'66.66666666666667'}});await tick();
     assert.equal(nav.length,1);assert.equal(nav[0].center_um[0],'50');
     paint();assert(drawing.some(c=>c[0]==='lineTo'));assert(!drawing.some(c=>c[0]==='closePath'));
+    if (ascii) { assert(drawing.some(c=>c[0]==='lineTo' && Math.abs(c[1]-60.000125)<1e-10),'fractional outline was rounded or rescaled'); }
     // A user zoom sticks on the next selection; Frame error resets it.
     state={...state,state_rev:'2',bbox_dbu:['0','0','20','16']};view={...view,state};panel.contextChanged();
     el('drc-errors').children[0].onclick();assert.equal(pending('focus').body.body.fit,false);

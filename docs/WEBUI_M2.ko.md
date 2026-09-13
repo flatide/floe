@@ -1142,11 +1142,69 @@ fmt·전환 패키지 strict clippy, Rust1.89 빈 registry offline 테스트와 
 release link를 재확인했다. 기존 native/Pillow/GLib 경고는 남아 있다. Linux 실행·
 현장 Firefox 수용이나 실칩 ASCII 성능을 측정한 것은 아니다.
 
-**이번 단계는 코어·CLI**다.
-웹 actor/API는 여전히 명시 등록한 pack만 읽는다. browser ASCII·명시 pack-build
-승인/진행/취소, read-sharing/notes는 다음 단계이며 GTK 기본값·현장 게이트는 불변이다.
+**§20 당시 범위는 코어·CLI**다. 웹 ASCII는 아래 §21에서 연결했다.
+관리형 pack-build 승인/진행/취소, read-sharing/notes는 남아 있으며 GTK 기본값·현장 게이트는 불변이다.
 
-## 21. 다음 경계
+## 21. M2a-11b: 웹 ASCII 등록·조회·윤곽/CD
+
+`floe2-web view design.oas --drc results.db [--drc-rules rules.json]`로 명시한
+ASCII를 첫 등록 소스에 연결한다. 기존 `--drc PACK.ice`도 동일하게 지원한다.
+웹의 등록은 **명시 파일만 읽는 계약**이다. CLI `drc results.db`의 fresh 인접
+pack 우선 정책과 달리, 웹은 인접 ICE나 ambient reviewer를 탐색하지 않는다.
+ASCII에 `--drc-waives`를 지정하면 오류이며, 과거 pack의 waive를 조용히 적용하거나
+무시하지 않는다. 브라우저에 파일 경로 입력·자동 색인·임의 파일 읽기를 추가하지 않았다.
+
+### 읽기 비용과 wire
+
+- 기존 전용 DRC actor가 공통 `Database`를 소유한다. scope/lease·1 CPU/256 MiB
+  예약, SVRF 등록의 추가256 MiB, 유계 작업 큐·취소·종료 계약은 유지한다.
+  최초 ASCII open은 §20의 전체 입력 스캔이다. 대형 파일에서 ICE 수준의 빠른
+  open을 보장하는 변경은 아니다.
+- ASCII는 오류별 offset/bbox/점 수와 규칙별 bbox를 보관한다. 조회·Selected/
+  live In view·앞뒤 순회는 이 metadata만 읽고 좌표를 다시 파싱하지 않는다.
+  query는 요청당 최대4,096 step/262,144 오류 slot, 반환 수 제한과 continuation을
+  둔다. 빈 규칙도 step으로 세며 빈 결과+next를 완료로 오인하지 않는다.
+- 선택된 오류 하나만 좌표 cache로 보관한다(최대262,144점, 약4 MiB).
+  다른 오류를 읽기 전에 이전 cache를 버리므로 큰 polygon의 2,048점 페이지마다
+  전체 레코드를 재파싱하지 않는다. fd fingerprint·취소 검사는 cache hit에도 적용한다.
+  §20의 metadata64 MiB는 전체 RSS cap이 아니며 단일 좌표 cache/응답은 별도다.
+- catalog metadata에 `format: "ice" | "ascii"`, `truncated_records: "N"`를
+  추가한다. 좌표 endpoint는 ICE이면 기존 `points_dbu`와 `precision`을 유지하고,
+  ASCII이면 µm 소수 문자열 배열 `points_um`을 반환한다. 두 필드는 동시에 나오지
+  않는다. bbox/CD는 기존처럼 µm다. 정수 ICE의 검색/좌표 변환·페이지 경계는 유지한다.
+- 브라우저는 catalog format·점 배열 단위·precision·global/kind·continuation을
+  검증한다. ASCII를 DBU 정수로 반올림하거나 precision으로 두 번 나누지 않는다.
+  전체 점이 도착하기 전에는 닫힌 polygon을 그리지 않는 기존 정책을 유지한다.
+  단순 polygon/edge의 CD는 float 경로에서 측정하며 일반 polygon width를 추가하지 않는다.
+
+### 패널과 검증
+
+같은 규칙/오류 패널에서 검색·타입/waive·Selected/live In view 필터·유계 순회·박스
+선택·윤곽·focus/격리·SVRF 비교·CD·재접속 복원을 제공한다. ASCII는 모든 status가0이므로
+Waived 필터 결과는 빈 목록이다. 패널 요약에 ASCII/ICE와 잘린 레코드 개수를 표시해
+부분 레코드가 정상 완전 입력으로 보이지 않도록 한다. 기존 CAD 배치/스타일은 유지했다.
+
+- native core76/app6/web27/transport8, fmt·전환 패키지 strict clippy 통과.
+  ASCII 소수 경계의 bbox 조회·선택/필터·역순/유계 순회·4,100개 빈 규칙의
+  continuation·좌표 cache·파일 변경·명시 waive 거부 단위 테스트를 추가했다.
+- `validate_web_drc.py`를 ICE와 fractional ASCII 두 경로에서 실행한다. 각 경로의
+  선택/필터384조합·좌표 페이지·CD·순회·원자적 focus·이전 view 응답 거부·종료를
+  검증한다. ASCII 옆 garbage ICE는 읽지 않으며 원본/sidecar는 불변이다.
+- `validate_web_svrf.py`도 양쪽 입력으로 각각2,943개 비교를 검증한다.
+  기존 CLI의 Python 측정 parity와 함께 실행하며 프론트 계산을 오라클로 쓰지 않는다.
+- 전체 UI gate에 fractional ASCII 패널 경로를 추가했다. 단위 혼합/변경·NaN/
+  유효하지 않은 페이지를 거부하고 소수 좌표가 Canvas까지 유지되는지 단언한다.
+- 로컬 Chrome 합성 fixture에서 ASCII/잘린1개 표시, 오류 윤곽·일반 레이어 격리와
+  폭30.00025 µm/높이30.000375 µm CD를 실제 확인했다. 다음 edge 순회·새로고침 후
+  선택/CD 복원·End session 종료/수거도 확인했다. 현장 Firefox 대체 판정은 아니다.
+
+2026-09-13 `sh tools/validate_rust.sh`가 `RUST VALIDATION: ALL OK`로 완료됐다.
+KLayout13 PX+2 phase-exact+14 style, jobdeck80, renderer46과 전체 CLI/웹 DRC·SVRF
+회귀를 포함한다. Rust1.89 빈 registry offline 테스트와 Linux musl release link도 통과했다.
+기존 native/Pillow/GLib 경고는 남아 있다. 실칩 ASCII 초기 스캔 시간/RSS, Linux 실행,
+현장 Firefox·ETX는 미검증이다. 원본·pack·review 쓰기, GTK launcher나 배포 기본값은 바꾸지 않는다.
+
+## 22. 다음 경계
 
 1. SVRF sidecar 코어/actor/API·웹 type/상세/비교는 §15~17까지 이관했다.
    일반 레이아웃 layer isolate/복원·한 번의 goto는 §18~19까지 연결했다.
@@ -1154,8 +1212,8 @@ release link를 재확인했다. 기존 native/Pillow/GLib 경고는 남아 있�
    selected/live In view 목록 필터·순회·hover는 §13~14까지 구현했다.
    손으로 그리는 ruler와 그에 따른 Escape 우선순위는 M4에서 확장한다.
    현재 페이지 마커 정책 자체를 전체 pack 마커로 확대하지 않는다.
-2. ASCII 읽기 코어/CLI는 §20까지 이관했다. 웹 ASCII/index 승인 흐름·기존 notes·
-   상세 측정/룰 매핑은 각각 parity gate와 함께 확장한다.
+2. ASCII 읽기 코어/CLI·명시 등록 웹 조회는 §20~21까지 이관했다. 관리형 pack-build
+   승인/진행/취소·기존 notes·상세 측정/룰 매핑은 각각 parity gate와 함께 확장한다.
 3. 공유는 설계/DRC에 묶인 읽기 capability, 발급/만료/폐기·follow/independent
    state를 별도 구현·검증. 아직 shares=false, loopback-only다.
 4. 외부 HTTPS/WSS·TeeBox 접근/인증 정책은 상위 계획 §10 미결 사항이며 로컬 기반 구현과

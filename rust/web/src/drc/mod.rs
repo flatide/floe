@@ -9,7 +9,7 @@ mod read;
 mod selection;
 pub use dto::Request;
 use floe_app_core::{
-    drc::Pack, managed::Resources, registered::AccessScope, Error, ErrorKind, Result,
+    drc::Database, managed::Resources, registered::AccessScope, Error, ErrorKind, Result,
 };
 pub(crate) use http::routes;
 use serde_json::{json, Value};
@@ -132,13 +132,12 @@ impl Service {
             .name("floe-drc-read".into())
             .spawn(move || {
                 let _permit = permit;
-                let opened: Result<(Pack, Option<metadata::Metadata>)> = (|| {
+                let opened: Result<(Database, Option<metadata::Metadata>)> = (|| {
                     scope.check(&path)?;
-                    let mut pack = Pack::open(&path, &stop)?;
                     if let Some(p) = &waives {
                         scope.check(p)?;
-                        pack.attach_waives(p)?;
                     }
+                    let pack = Database::open_explicit(&path, waives.as_deref(), &stop)?;
                     let metadata = rules
                         .as_ref()
                         .map(|p| {
@@ -153,10 +152,11 @@ impl Service {
                 match opened {
                     Ok((mut pack, metadata)) => {
                         inner.state.lock().unwrap().metadata = Some(json!({
-                            "cell":pack.cell.chars().take(256).collect::<String>(),
-                            "cell_truncated":pack.cell.chars().count()>256,
-                            "precision":pack.precision.to_string(),"errors":pack.total.to_string(),
-                            "checks":pack.checks.len().to_string(),"waives":waives.is_some(),
+                            "cell":pack.cell().chars().take(256).collect::<String>(),
+                            "cell_truncated":pack.cell().chars().count()>256,
+                            "precision":pack.precision().to_string(),"errors":pack.total().to_string(),
+                            "checks":pack.check_count().to_string(),"waives":waives.is_some(),
+                            "format":pack.format(),"truncated_records":pack.truncated_records().to_string(),
                             "svrf":metadata.as_ref().map(metadata::Metadata::summary),
                         }));
                         run(&inner, &mut pack, metadata.as_ref());
@@ -287,7 +287,7 @@ impl Drop for Service {
         }
     }
 }
-fn run(inner: &Inner, pack: &mut Pack, metadata: Option<&metadata::Metadata>) {
+fn run(inner: &Inner, pack: &mut Database, metadata: Option<&metadata::Metadata>) {
     loop {
         let work = {
             let mut s = inner.state.lock().unwrap();

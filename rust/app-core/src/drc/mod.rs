@@ -9,10 +9,13 @@ mod measure;
 mod pack;
 mod selection;
 pub use ascii::{Ascii, AsciiCheck, AsciiViolation};
-pub use database::{Database, ReadCheck, ReadHit, ReadPage, ReadViolation};
+pub use database::{
+    Database, ReadCheck, ReadHit, ReadInfo, ReadInfoHit, ReadPage, ReadPointPage, ReadPoints,
+    ReadViolation,
+};
 pub use filters::{ListPage, ListRequest};
 pub use local::{open_current, reviewer_tag, waive_paths};
-pub use measure::{cd_segments, measured, measured_um, CdSegment};
+pub use measure::{cd_segments, cd_segments_um, measured, measured_um, CdSegment};
 pub use pack::{
     Check, Cursor, Hit, InfoHit, InfoPage, Pack, Page, PointPage, RecordInfo, StepCursor, StepPage,
     StepRequest, Violation,

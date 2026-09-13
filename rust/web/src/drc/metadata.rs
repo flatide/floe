@@ -1,6 +1,6 @@
 //! Owned immutable metadata snapshot for one DRC actor/revision. Browser DTOs
 //! contain no recorded deck/include paths and all floating values are strings.
-use floe_app_core::{drc::Pack, svrf::Rules, Error, Result};
+use floe_app_core::{drc::Database, svrf::Rules, Error, Result};
 use serde_json::{json, Value};
 use std::{path::Path, sync::atomic::AtomicUsize};
 
@@ -10,9 +10,9 @@ pub(super) struct Metadata {
     types: Vec<(String, usize)>,
 }
 impl Metadata {
-    pub fn load(path: &Path, pack: &Pack, stop: &AtomicUsize) -> Result<Self> {
+    pub fn load(path: &Path, pack: &Database, stop: &AtomicUsize) -> Result<Self> {
         let rules = Rules::load(path, stop)?;
-        let catalog = rules.catalog(pack.checks.iter().map(|c| c.name.as_str()), stop)?;
+        let catalog = rules.catalog(pack.names(), stop)?;
         let summary = json!({"matched":catalog.matched.to_string(),"checks":catalog.checks.to_string(),"type_count":catalog.types.len().to_string()});
         let types = catalog
             .types

@@ -29,10 +29,10 @@ pub struct Violation {
     pub bbox: [i64; 4],
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RecordInfo {
+pub struct RecordInfo<B = [i64; 4]> {
     pub kind: char,
     pub number: u64,
-    pub bbox: [i64; 4],
+    pub bbox: B,
     pub points: usize,
 }
 impl From<&Violation> for RecordInfo {
@@ -72,8 +72,8 @@ pub struct Page {
     pub scanned: u64,
 }
 #[derive(Clone, Debug)]
-pub struct InfoPage {
-    pub hits: Vec<InfoHit>,
+pub struct InfoPage<B = [i64; 4]> {
+    pub hits: Vec<InfoHit<B>>,
     pub next: Option<Cursor>,
     pub scanned: u64,
 }
@@ -123,15 +123,15 @@ pub struct StepRequest {
     pub bbox_um: Option<[f64; 4]>,
 }
 #[derive(Clone, Copy, Debug)]
-pub struct InfoHit {
+pub struct InfoHit<B = [i64; 4]> {
     pub check: usize,
     pub local: u64,
     pub status: u8,
-    pub record: RecordInfo,
+    pub record: RecordInfo<B>,
 }
 #[derive(Clone, Debug)]
-pub struct StepPage {
-    pub hit: Option<InfoHit>,
+pub struct StepPage<B = [i64; 4]> {
+    pub hit: Option<InfoHit<B>>,
     /// Continue with the SAME rule, direction and filters. Only no hit AND no
     /// continuation establishes that the complete circular search is empty.
     pub next: Option<StepCursor>,

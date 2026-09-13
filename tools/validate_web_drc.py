@@ -19,7 +19,7 @@ from validate_web_drc_filters import validate_filters
 from floe import drc
 
 
-def main(fixture):
+def main(fixture, ascii=False):
     cargo = shutil.which("cargo") or str(Path.home() / ".cargo/bin/cargo")
     built = subprocess.run([cargo, "test", "--offline", "--locked", "-p", "floe-web",
                             "--test", "drc_service", "--no-run", "--message-format=json"],
@@ -107,6 +107,24 @@ def main(fixture):
                               capture_output=True, text=True, timeout=20)
         assert test.returncode == 0, (test.stdout, test.stderr)
         assert "RUST DRC ACTOR: ALL OK" in test.stdout
+        if ascii:
+            # Keep the packed oracle above, but use a distinct fractional
+            # registered input. Its adjacent garbage ICE must not be consulted.
+            fractional = []
+            for line in text.splitlines():
+                words = line.split()
+                if len(words) in (2, 4) and all(w.lstrip('-').isdigit() for w in words):
+                    line = ' '.join(format(int(w)/8 + (.0625 if j % 2 == 0 else -.1875), '.17g')
+                                    for j, w in enumerate(words))
+                fractional.append(line)
+            db = data / 'fractional.db'
+            db.write_text('\n'.join(fractional) + '\n')
+            Path(str(db) + '.ice').write_bytes(b'not an authorized implicit input')
+            p = drc.load_ascii(str(db))
+            expected = [dict(name=c.name, desc=c.desc, waived=0,
+                        errors=[dict(local=str(i), glob=str(e.num), kind=e.kind, status=0,
+                                     bbox=e.bbox(), pts=e.pts) for i, e in enumerate(c.errors)])
+                        for c in p.checks]
         session_path = work / "session.json"
         # Authorizing a DRC parent must NOT authorize a deck TC in that parent.
         outside = data / "not-authorized.oas"
@@ -120,8 +138,10 @@ def main(fixture):
         assert not session_path.exists() and not list(temps.iterdir())
         before = fingerprint(data)
         args = [str(APP), "view", str(source), "--no-open", "--session-file", str(session_path),
-                "--drc", str(packed), "--drc-waives", str(side), "--jobs", "2", "--raster-jobs", "1",
+                "--drc", str(db if ascii else packed), "--jobs", "2", "--raster-jobs", "1",
                 "--no-labels", "--frame-cache", "off"]
+        if not ascii:
+            args += ["--drc-waives", str(side)]
         for extra in (["--jobs", "15", "--raster-jobs", "1"], ["--budget-mb", "2048"]):
             rejected = subprocess.run(args + extra, env=env, capture_output=True, text=True, timeout=15)
             assert rejected.returncode != 0 and "managed resource" in rejected.stderr
@@ -141,7 +161,8 @@ def main(fixture):
             assert client.call("GET", "/api/v1/capabilities")["drc"] is True
             catalog = wait(lambda: (lambda d: d if d["phase"] == "ready" else None)(
                 client.call("GET", "/api/v1/drc")["drc"]), proc)
-            assert catalog["read_only"] and catalog["metadata"]["waives"]
+            assert catalog["read_only"] and catalog["metadata"]["waives"] is (not ascii)
+            assert catalog["metadata"]["format"] == ("ascii" if ascii else "ice")
             assert catalog["metadata"]["checks"] == str(len(expected))
             startup = client.call("GET", "/api/v1/startup")["request"]
             startup["body"]["pixels"] = [257, 191]
@@ -275,7 +296,12 @@ def main(fixture):
                     points, start = [], "0"
                     while True:
                         page = read(dict(kind="geometry", check=str(ci), error=e["local"], start=start, limit=511))
-                        points.extend([[int(x)/float(page["precision"]), int(y)/float(page["precision"])] for x, y in page["points_dbu"]])
+                        if ascii:
+                            assert "points_dbu" not in page
+                            points.extend([list(map(float, xy)) for xy in page["points_um"]])
+                        else:
+                            assert "points_um" not in page
+                            points.extend([[int(x)/float(page["precision"]), int(y)/float(page["precision"])] for x, y in page["points_dbu"]])
                         if page["next"] is None:
                             break
                         assert page["next"] != start
@@ -374,7 +400,7 @@ def main(fixture):
             assert empty_groups["state"] == dict(selection_rev="1", total="0", limit=5000, rules=[])
             context["view_id"] = reopened["view_id"]
             # External truncation gives a safe, path-free error, not SIGBUS.
-            packed.write_bytes(b"truncated")
+            (db if ascii else packed).write_bytes(b"truncated")
             assert read(dict(kind="rule", check="0"), 422)["error"] == "drc_changed_or_corrupt"
             client.call("POST", new_selection, dict(revision=catalog["revision"], base_selection_rev="1", body=dict(kind="apply", check=str(chosen), errors=["0"], mode="toggle")), 422)
             assert client.call("GET", new_selection) == empty_groups, "corrupt-pack selection committed"
@@ -396,3 +422,4 @@ def main(fixture):
 
 if __name__ == "__main__":
     main(Path(sys.argv[1]).resolve())
+    main(Path(sys.argv[1]).resolve(), ascii=True)

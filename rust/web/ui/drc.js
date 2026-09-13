@@ -17,6 +17,22 @@
         return p && {bbox: p.bbox, dbu: p.dbu, step: p.step,
             origin: [p.origin[0] + delta[0], p.origin[1] + delta[1]]};
     }
+    function vertices(page, format, P) {
+        const um = page.points_um !== undefined, dbu = page.points_dbu !== undefined;
+        if (um === dbu || (format === 'ascii' && !um) || (format === 'ice' && !dbu)) { throw new Error('Invalid DRC geometry units'); }
+        const precision = Number(P.decimal(page.precision)), rows = um ? page.points_um : page.points_dbu;
+        if (!(precision > 0) || !Number.isFinite(precision) || !Array.isArray(rows) || !rows.length || rows.length > 2048) { throw new Error('Invalid DRC geometry page'); }
+        const values = new Float64Array(rows.length * 2);
+        rows.forEach(function (xy, i) {
+            if (!Array.isArray(xy) || xy.length !== 2) { throw new Error('Invalid DRC vertex'); }
+            xy.forEach(function (s, axis) {
+                const n = Number(P.decimal(s)) / (um ? 1 : precision);
+                if (!Number.isFinite(n)) { throw new Error('Unrepresentable DRC vertex'); }
+                values[i * 2 + axis] = n;
+            });
+        });
+        return {mode: um ? 'um' : 'dbu', precision: precision, points: values};
+    }
     // These formatters never interpret rule text as markup or compute a DRC
     // measurement in JS. Exact server scalars remain available in the text.
     function metricName(s) {
@@ -591,20 +607,18 @@
             finally { if (valid('errors', t, c)) { navigationButtons(); } }
         }
         async function geometry(r) {
-            const c = current(), t = task('geometry'); let start = '0', total = null;
+            const c = current(), t = task('geometry'); let start = '0', total = null, units = null;
             try {
                 for (let pageNo = 0; pageNo < 128; ++pageNo) {
                     const page = await read('geometry', t, c, {kind: 'geometry', check: r.check, error: r.local, start: start, limit: 2048}); if (!page) { return; }
                     cursor(page.total); cursor(page.start);
-                    const n = Number(page.total), unit = Number(P.decimal(page.precision));
-                    if (page.check !== r.check || page.local !== r.local || page.start !== start || n < 1 || n > 262144 || !(unit > 0) || !Array.isArray(page.points_dbu) || !page.points_dbu.length || page.points_dbu.length > 2048) { throw new Error('Invalid DRC geometry page'); }
-                    if (total === null) { total = n; points = new Float64Array(n * 2); } else if (n !== total) { throw new Error('DRC geometry changed'); }
-                    const offset = Number(start), end = offset + page.points_dbu.length;
+                    const n = Number(page.total), v = vertices(page, registration.metadata.format, P);
+                    if (page.check !== r.check || page.local !== r.local || page.global !== r.global || page.kind !== r.kind || page.start !== start || n < 1 || n > 262144) { throw new Error('Invalid DRC geometry page'); }
+                    const stamp = v.mode + ':' + v.precision;
+                    if (total === null) { total = n; units = stamp; points = new Float64Array(n * 2); } else if (n !== total || units !== stamp) { throw new Error('DRC geometry changed'); }
+                    const offset = Number(start), end = offset + v.points.length / 2;
                     if (end > total) { throw new Error('DRC geometry bounds'); }
-                    page.points_dbu.forEach(function (xy, i) {
-                        if (!Array.isArray(xy) || xy.length !== 2) { throw new Error('Invalid DRC vertex'); }
-                        xy.forEach(function (s, axis) { const n = Number(P.decimal(s)) / unit; if (!Number.isFinite(n)) { throw new Error('Unrepresentable DRC vertex'); } points[(offset + i) * 2 + axis] = n; });
-                    });
+                    points.set(v.points, offset * 2);
                     el('drc-selected').textContent = 'Global ' + r.global + ' · ' + end + '/' + total + ' vertices' + (page.next === null ? '' : ' · bounding-box preview');
                     if (page.next === null) { if (end !== total) { throw new Error('Incomplete DRC outline'); } pointsReady = true; paintLater(); return; }
                     if (cursor(page.next) !== String(end)) { throw new Error('DRC geometry cursor did not progress'); } start = page.next;
@@ -826,7 +840,7 @@
                 if (c) { restoreState(); }
             }
             groupsChanged();
-            if (registration && !c && registration.phase === 'ready') { info('Open the source associated with this DRC pack.'); }
+            if (registration && !c && registration.phase === 'ready') { info('Open the source associated with this DRC database.'); }
             if (query && c && query.rev !== c.state.state_rev) { el('drc-result-info').textContent = 'Saved earlier-viewport query · enable In view for the live current-rule filter.'; }
         }
         async function refresh() {
@@ -838,6 +852,11 @@
                 if (registration) {
                     el('drc-title').textContent = registration.title;
                     el('drc-summary').textContent = registration.metadata ? registration.metadata.checks + ' rules · ' + registration.metadata.errors + ' errors' : registration.phase;
+                    if (registration.metadata) {
+                        const m = registration.metadata;
+                        if (m.format) { el('drc-summary').textContent += ' · ' + (m.format === 'ascii' ? 'ASCII' : 'ICE'); }
+                        if (m.truncated_records !== undefined && cursor(m.truncated_records) !== '0') { el('drc-summary').textContent += ' · ' + m.truncated_records + ' truncated records'; }
+                    }
                     info(registration.error || (registration.phase === 'opening' ? 'Opening DRC metadata…' : 'Read-only review'));
                     if (registration.phase === 'opening') { timer = setTimeout(refresh, 500); }
                 }
@@ -888,6 +907,6 @@
             stop: function () { stopped = true; ++restoreTurn; clearTimeout(filterTimer); filterTimer = null; persistence.close(); groups.close(); bound = ''; boxReset(true); cancelAll(); clearTimeout(timer); if (painting !== null) { o.window.cancelAnimationFrame(painting); painting = null; } overlay.hidden = true; },
             resume: function () { stopped = false; return refresh(); }};
     }
-    const api = {bind: bind, projection: projection, point: point, shifted: shifted, metadataText: metadataText, comparisonText: comparisonText};
+    const api = {bind: bind, projection: projection, point: point, shifted: shifted, vertices: vertices, metadataText: metadataText, comparisonText: comparisonText};
     if (typeof module === 'object' && module.exports) { module.exports = api; } else { root.FloeDRC = api; }
 }(typeof window === 'object' ? window : this));

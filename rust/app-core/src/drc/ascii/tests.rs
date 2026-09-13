@@ -29,6 +29,129 @@ impl Drop for Fixture {
 fn flag() -> AtomicUsize {
     AtomicUsize::new(0)
 }
+#[test]
+fn metadata_queries_filters_and_steps_preserve_fractional_boundaries() {
+    use crate::drc::{filters::Filtering, Cursor, ListRequest, StepRequest};
+    use std::collections::BTreeSet;
+    let f = Fixture::new(b"TOP 1\nR\np 1 1\n.125 -.5\np 2 1\n.25 .5\np 3 1\n.375 -.5\n");
+    let mut p = Ascii::open(&f.path, &flag()).unwrap();
+    let query = [0.125, -0.5, 0.375, -0.5];
+    let first = p
+        .query_info(query, None, None, Cursor::default(), 1, &flag())
+        .unwrap();
+    assert_eq!(first.hits[0].local, 0);
+    let last = p
+        .query_info(query, None, None, first.next.unwrap(), 1, &flag())
+        .unwrap();
+    assert_eq!(last.hits[0].local, 2);
+    assert!(last.next.is_none());
+    assert!(
+        p.cached.is_none(),
+        "metadata query decoded a coordinate record"
+    );
+    let ids = BTreeSet::from([1, 2]);
+    let v = p
+        .filtered_errors(
+            ListRequest {
+                check: 0,
+                start: 0,
+                waived: None,
+                bbox_um: Some(query),
+                selected: Some(&ids),
+                limit: 1,
+            },
+            &flag(),
+        )
+        .unwrap();
+    assert_eq!(v.hits[0].local, 2);
+    assert!(v.next.is_none());
+    let r = StepRequest {
+        check: 0,
+        bbox_um: Some([0.375, -0.5, 0.375, -0.5]),
+        ..Default::default()
+    };
+    let a = p.step_limited(r, 1, &flag()).unwrap();
+    assert!(a.hit.is_none());
+    assert_eq!(a.next.unwrap().next, 1);
+    let a = p
+        .step_limited(
+            StepRequest {
+                cursor: a.next,
+                ..r
+            },
+            1,
+            &flag(),
+        )
+        .unwrap();
+    assert!(a.hit.is_none());
+    let a = p
+        .step_limited(
+            StepRequest {
+                cursor: a.next,
+                ..r
+            },
+            1,
+            &flag(),
+        )
+        .unwrap();
+    assert_eq!(a.hit.unwrap().local, 2);
+    assert!(a.next.is_none());
+    let a = p
+        .filtered_step(
+            StepRequest {
+                after: Some(1),
+                backwards: true,
+                ..Default::default()
+            },
+            Some(&ids),
+            &flag(),
+        )
+        .unwrap();
+    assert_eq!(a.hit.unwrap().local, 2);
+    assert!(p
+        .selection_candidates(0, &[0, 0], Some(query), Some(true), &flag())
+        .unwrap()
+        .is_empty());
+    assert!(p
+        .query_info([f64::NAN; 4], None, None, Cursor::default(), 1, &flag())
+        .is_err());
+    assert_eq!(
+        p.cached_error(0, 1, &flag()).unwrap().points_um,
+        [[0.25, 0.5]]
+    );
+    assert!(p.cached.is_some());
+    fs::write(&f.path, b"changed").unwrap();
+    assert!(p.cached_error(0, 1, &flag()).is_err());
+}
+#[test]
+fn empty_rule_walk_is_bounded_and_geometry_pages_have_explicit_units() {
+    use crate::drc::{filters::Filtering, Cursor, Database, ReadPoints};
+    let mut text = String::from("TOP 1\n");
+    for i in 0..4100 {
+        text.push_str(&format!("R{i}\n0 0 0\n"));
+    }
+    text.push_str("LAST\np 1 2\n.125 .25\n.375 .5\n");
+    let f = Fixture::new(text.as_bytes());
+    let mut p = Ascii::open(&f.path, &flag()).unwrap();
+    let v = p
+        .query_info([0., 0., 1., 1.], None, None, Cursor::default(), 1, &flag())
+        .unwrap();
+    assert!(v.hits.is_empty());
+    assert_eq!(v.next.unwrap().check, 4096);
+    let v = p
+        .query_info([0., 0., 1., 1.], None, None, v.next.unwrap(), 1, &flag())
+        .unwrap();
+    assert_eq!(v.hits[0].check, 4100);
+    let mut db = Database::open_explicit(&f.path, None, &flag()).unwrap();
+    let v = db.error_points(4100, 0, 0, 1, &flag()).unwrap();
+    assert_eq!(v.next, Some(1));
+    assert!(matches!(v.points,ReadPoints::Um(p) if p==[[0.125,0.25]]));
+    let v = db.error_points(4100, 0, 1, 1, &flag()).unwrap();
+    assert!(v.next.is_none());
+    assert!(matches!(v.points,ReadPoints::Um(p) if p==[[0.375,0.5]]));
+    assert!(Database::open_explicit(&f.path, Some(&f.path), &flag()).is_err());
+    assert!(db.error_points(4100, 0, 3, 1, &flag()).is_err());
+}
 
 #[test]
 fn fractional_advisory_partial_unknown_internal_and_admin_sections() {

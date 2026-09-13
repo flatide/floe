@@ -1,6 +1,8 @@
 //! Rule-list filters are intersected before page limits. Empty selection means
 //! empty results, never an accidental all-errors query.
-use super::{Cursor, InfoHit, Pack, StepPage, StepRequest, SELECTION_INPUT, SELECTION_ITEMS};
+use super::{
+    Cursor, InfoHit, InfoPage, Pack, StepPage, StepRequest, SELECTION_INPUT, SELECTION_ITEMS,
+};
 use crate::{check_cancelled, Error, Result};
 use std::{collections::BTreeSet, sync::atomic::AtomicUsize};
 
@@ -13,25 +15,49 @@ pub struct ListRequest<'a> {
     pub selected: Option<&'a BTreeSet<u64>>,
     pub limit: usize,
 }
-pub struct ListPage {
-    pub hits: Vec<InfoHit>,
+pub struct ListPage<B = [i64; 4]> {
+    pub hits: Vec<InfoHit<B>>,
     pub next: Option<u64>,
     pub scanned: u64,
 }
-impl Pack {
+// One filter/circular-selection policy for integer packs and fractional ASCII.
+// Each source keeps its own exact bbox conversion and indexed scan strategy.
+pub(super) trait Filtering {
+    type Bounds: Copy;
+    fn unchanged(&self) -> Result<()>;
+    fn count(&self, check: usize) -> Result<u64>;
+    fn bounds(&self, check: usize) -> Result<Option<[f64; 4]>>;
+    fn selection_candidates(
+        &mut self,
+        check: usize,
+        errors: &[u64],
+        bbox: Option<[f64; 4]>,
+        waived: Option<bool>,
+        stop: &AtomicUsize,
+    ) -> Result<Vec<InfoHit<Self::Bounds>>>;
+    fn query_info(
+        &mut self,
+        bbox: [f64; 4],
+        checks: Option<&BTreeSet<usize>>,
+        waived: Option<bool>,
+        cursor: Cursor,
+        limit: usize,
+        stop: &AtomicUsize,
+    ) -> Result<InfoPage<Self::Bounds>>;
+    fn step(&mut self, request: StepRequest, stop: &AtomicUsize) -> Result<StepPage<Self::Bounds>>;
     fn validate_filter(&self, check: usize, ids: Option<&BTreeSet<u64>>) -> Result<u64> {
         self.unchanged()?;
-        let count = self
-            .checks
-            .get(check)
-            .ok_or_else(|| Error::input("DRC rule index"))?
-            .count;
+        let count = self.count(check)?;
         if ids.is_some_and(|s| s.len() > SELECTION_ITEMS || s.last().is_some_and(|&i| i >= count)) {
             return Err(Error::input("invalid DRC selection filter"));
         }
         Ok(count)
     }
-    pub fn filtered_errors(&mut self, r: ListRequest<'_>, stop: &AtomicUsize) -> Result<ListPage> {
+    fn filtered_errors(
+        &mut self,
+        r: ListRequest<'_>,
+        stop: &AtomicUsize,
+    ) -> Result<ListPage<Self::Bounds>> {
         let count = self.validate_filter(r.check, r.selected)?;
         if r.start > count || !(1..=SELECTION_INPUT).contains(&r.limit) {
             return Err(Error::input("invalid filtered error page"));
@@ -58,10 +84,7 @@ impl Pack {
         }
         let bounds = match r.bbox_um {
             Some(b) => Some(b),
-            None => self.checks[r.check]
-                .bbox
-                .map(|b| self.bbox_um(b))
-                .transpose()?,
+            None => self.bounds(r.check)?,
         };
         let Some(bounds) = bounds else {
             return Ok(ListPage {
@@ -87,12 +110,12 @@ impl Pack {
             scanned: page.scanned,
         })
     }
-    pub fn filtered_step(
+    fn filtered_step(
         &mut self,
         r: StepRequest,
         ids: Option<&BTreeSet<u64>>,
         stop: &AtomicUsize,
-    ) -> Result<StepPage> {
+    ) -> Result<StepPage<Self::Bounds>> {
         let Some(ids) = ids else {
             return self.step(r, stop);
         };
@@ -140,5 +163,62 @@ impl Pack {
             }
         }
         Ok(page)
+    }
+}
+impl Pack {
+    pub fn filtered_errors(&mut self, r: ListRequest<'_>, stop: &AtomicUsize) -> Result<ListPage> {
+        Filtering::filtered_errors(self, r, stop)
+    }
+    pub fn filtered_step(
+        &mut self,
+        r: StepRequest,
+        ids: Option<&BTreeSet<u64>>,
+        stop: &AtomicUsize,
+    ) -> Result<StepPage> {
+        Filtering::filtered_step(self, r, ids, stop)
+    }
+}
+impl Filtering for Pack {
+    type Bounds = [i64; 4];
+    fn unchanged(&self) -> Result<()> {
+        self.unchanged()
+    }
+    fn count(&self, ci: usize) -> Result<u64> {
+        self.checks
+            .get(ci)
+            .map(|c| c.count)
+            .ok_or_else(|| Error::input("DRC rule index"))
+    }
+    fn bounds(&self, ci: usize) -> Result<Option<[f64; 4]>> {
+        self.checks
+            .get(ci)
+            .ok_or_else(|| Error::input("DRC rule index"))?
+            .bbox
+            .map(|b| self.bbox_um(b))
+            .transpose()
+    }
+    fn selection_candidates(
+        &mut self,
+        ci: usize,
+        ids: &[u64],
+        b: Option<[f64; 4]>,
+        w: Option<bool>,
+        stop: &AtomicUsize,
+    ) -> Result<Vec<InfoHit>> {
+        self.selection_candidates(ci, ids, b, w, stop)
+    }
+    fn query_info(
+        &mut self,
+        b: [f64; 4],
+        cs: Option<&BTreeSet<usize>>,
+        w: Option<bool>,
+        c: Cursor,
+        n: usize,
+        stop: &AtomicUsize,
+    ) -> Result<InfoPage> {
+        self.query_info(b, cs, w, c, n, stop)
+    }
+    fn step(&mut self, r: StepRequest, stop: &AtomicUsize) -> Result<StepPage> {
+        self.step(r, stop)
     }
 }

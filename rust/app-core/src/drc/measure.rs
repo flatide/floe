@@ -257,34 +257,7 @@ pub fn measured_um(
     if !supported {
         return Ok(None);
     }
-    let mut extent = 0f64;
-    for (i, v) in points.iter().enumerate() {
-        if i % 1024 == 0 {
-            check_cancelled(stop)?;
-        }
-        for &x in v {
-            if !x.is_finite() {
-                return Err(Error::input("non-finite ASCII DRC measurement coordinate"));
-            }
-            extent = extent.max(x.abs());
-        }
-    }
-    let scale = if extent == 0. {
-        1.
-    } else {
-        2f64.powi((extent.log2().floor() as i32).clamp(-1022, 1023))
-    };
-    let origin = points[0].map(|v| v / scale);
-    let mut local = Vec::new();
-    local
-        .try_reserve_exact(points.len())
-        .map_err(|_| super::limit("measurement allocation"))?;
-    for (i, v) in points.iter().enumerate() {
-        if i % 1024 == 0 {
-            check_cancelled(stop)?;
-        }
-        local.push([v[0] / scale - origin[0], v[1] / scale - origin[1]]);
-    }
+    let (_, scale, local) = ascii_local(points, stop)?;
     let value = match metric {
         "area" => {
             let mut sum = 0.;
@@ -320,6 +293,63 @@ pub fn measured_um(
         return Err(Error::input("unrepresentable ASCII DRC measurement"));
     }
     Ok(Some(value))
+}
+fn ascii_local(points: &[Point], stop: &AtomicUsize) -> Result<(Point, f64, Vec<Point>)> {
+    let mut extent = 0f64;
+    for (i, v) in points.iter().enumerate() {
+        if i % 1024 == 0 {
+            check_cancelled(stop)?;
+        }
+        for &x in v {
+            if !x.is_finite() {
+                return Err(Error::input("non-finite ASCII DRC measurement coordinate"));
+            }
+            extent = extent.max(x.abs());
+        }
+    }
+    let scale = if extent == 0. {
+        1.
+    } else {
+        2f64.powi((extent.log2().floor() as i32).clamp(-1022, 1023))
+    };
+    let origin = points[0].map(|v| v / scale);
+    let mut local = Vec::new();
+    local
+        .try_reserve_exact(points.len())
+        .map_err(|_| super::limit("measurement allocation"))?;
+    for (i, v) in points.iter().enumerate() {
+        if i % 1024 == 0 {
+            check_cancelled(stop)?;
+        }
+        local.push([v[0] / scale - origin[0], v[1] / scale - origin[1]]);
+    }
+    Ok((origin, scale, local))
+}
+/// Same simple CD rules on parsed fractional micrometres; never integer-round.
+pub fn cd_segments_um(kind: char, points: &[Point], stop: &AtomicUsize) -> Result<Vec<CdSegment>> {
+    check_cancelled(stop)?;
+    if !matches!((kind, points.len()), ('p', 4) | ('e', 2 | 4)) {
+        return Ok(Vec::new());
+    }
+    let (origin, scale, local) = ascii_local(points, stop)?;
+    simple(kind, &local)
+        .into_iter()
+        .map(|s| {
+            let endpoints_um = s.map(|p| [(origin[0] + p[0]) * scale, (origin[1] + p[1]) * scale]);
+            let distance_um = distance(s[0], s[1]) * scale;
+            if !endpoints_um.iter().flatten().all(|n| n.is_finite())
+                || !distance_um.is_finite()
+                || distance_um <= 0.
+            {
+                return Err(Error::input("unrepresentable ASCII DRC measurement"));
+            }
+            Ok(CdSegment {
+                endpoints_um,
+                distance_um,
+                offset: kind == 'e' && points.len() == 2,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 # floe2-web — Rust 애플리케이션 CLI (개발 중)
 
-현재 **일반 레이아웃/잡덱 `index/info/render/probe`, 분석 `jobdeck`, 기본 웹 `view`, packed `drc` 조회를 지원**한다.
+현재 **일반 레이아웃/잡덱 `index/info/render/probe`, 분석 `jobdeck`, 기본 웹 `view`, ICE/ASCII `drc` 조회를 지원**한다.
 기존 Python `floe2`/GTK와 병행 개발하는 별도 실행 파일이며 제품 전환은 아직 완료되지 않았다.
 
 ```sh
@@ -31,6 +31,7 @@ cargo build --offline --locked --release -p floe-app -p floe-index -p floe-rende
 ./target/release/floe2-web drc /path/to/results.db --errs M1.WIDTH --svrf-rules /path/to/deck.rules.json
 ./target/release/floe2-web view /path/to/design.oas --drc /path/to/results.db.ice
 ./target/release/floe2-web view /path/to/design.oas --drc /path/to/results.db.ice --drc-rules /path/to/deck.rules.json
+./target/release/floe2-web view /path/to/design.oas --drc /path/to/results.db --drc-rules /path/to/deck.rules.json
 ```
 
 `cargo`는 `rust/`에서 실행해야 그 안의 `.cargo/config.toml`(vendor, musl linker)이
@@ -78,11 +79,13 @@ cargo build --offline --locked --release -p floe-app -p floe-index -p floe-rende
   읽기 전용 ASCII로 fallback한다. `--rules`/`--errs`/`--list`·소수 좌표를 지원한다.
   pack의 per-reviewer waive는 읽되 ASCII fallback에는 적용하지 않는다.
   source/pack/autosave를 생성·수정하지 않으며 자동 pack-build는 없다.
-  웹 `view --drc PACK.ice [--drc-waives FILE]`는 첫 소스에 묶인 읽기 전용 API를
+  웹 `view --drc RESULTS.db|PACK.ice [--drc-waives FILE]`는 첫 소스에 묶인 읽기 전용 API를
   등록한다(별도 1 CPU + 256 MiB admission). DRC 패널은 읽기·선택·live In view/
-  Selected 필터·순회·CD·복원을 지원한다.
-  웹에는 ambient reviewer 조회가 없으며 명시 sidecar만 읽는다. 웹 ASCII 등록·
-  pack-build 승인·공유·편집/notes는 미이관이다([M2 기록](../../docs/WEBUI_M2.ko.md)).
+  Selected 필터·순회·CD·복원을 ICE/ASCII 모두 지원한다. ASCII 소수 좌표는 µm로
+  유지하고 잘린 레코드 개수를 표시한다. 최초 ASCII open은 전체 입력 스캔이다.
+  웹은 CLI fallback과 달리 명시 파일만 읽으며 인접 ICE/ambient reviewer를
+  탐색하지 않는다. ASCII에 `--drc-waives`를 함께 지정하면 오류다.
+  관리형 pack-build 승인/진행/취소·공유·편집/notes는 미이관이다([M2 기록](../../docs/WEBUI_M2.ko.md)).
 - CLI `drc --rules`/`--errs`에 `--svrf-rules FILE`을 명시하면 기존 version1
   sidecar의 규칙 정보/참고 측정값을 JSON에 추가한다. 원본 SVRF를 해석하거나
   경로를 자동 탐색하지 않는다. 일반 polygon width/signoff 판정기가 아니며,

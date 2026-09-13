@@ -17,12 +17,12 @@ from validate_app_drc import fingerprint
 from floe import drc, svrf
 
 
-def fixtures(work):
+def fixtures(work, ascii=False):
     data = work / "drc"
     data.mkdir()
     metadata = work / "metadata"
     metadata.mkdir()
-    db, deck = custom_fixture(data)
+    db, deck = custom_fixture(data, fractional=ascii)
     text = db.read_text()
     head, body = text.split("\n", 1)
     # More than 4096 rule slots: type filtering may yield empty+continuation,
@@ -51,22 +51,25 @@ def fixtures(work):
     empty.write_text(json.dumps(dict(format="floe-svrf-rules", version=1, checks={})))
     invalid = metadata / "future.rules.json"
     invalid.write_text(json.dumps(dict(format="floe-svrf-rules", version=2, checks={})))
-    run([INDEX, "drc", db, "--jobs", "2"])
+    if not ascii:
+        run([INDEX, "drc", db, "--jobs", "2"])
     os.environ["FLOE_REVIEWER"] = "svrf-http"
-    p = drc.IcePack(str(db)+".ice")
+    p = drc.load_ascii(str(db)) if ascii else drc.IcePack(str(db)+".ice")
     expected = []
     for ci, c in enumerate(p.checks):
-        for ei, _ in enumerate(c.errors):
-            p.set_status(ci, ei, 1 if ei % 3 == 0 else 2 if ei % 5 == 0 else 0)
+        if not ascii:
+            for ei, _ in enumerate(c.errors):
+                p.set_status(ci, ei, 1 if ei % 3 == 0 else 2 if ei % 5 == 0 else 0)
         rule = meta["checks"].get(c.name)
         types = set(x["metric"] for x in (rule or {}).get("constraints", []) if x["metric"]) or {"other"}
-        expected.append(dict(name=c.name, count=len(c.errors), waived=p.status_counts(ci)[0], types=types))
-    waive = Path(p._waive_path)
-    p.close()
+        expected.append(dict(name=c.name, count=len(c.errors), waived=0 if ascii else p.status_counts(ci)[0], types=types))
+    waive = None if ascii else Path(p._waive_path)
+    if not ascii:
+        p.close()
     return db, rules, empty, invalid, waive, meta, expected
 
 
-def main(fixture):
+def main(fixture, ascii=False):
     with tempfile.TemporaryDirectory(prefix="floe-web-svrf-") as td:
         work = Path(td)
         layout = work / "layout"
@@ -74,14 +77,17 @@ def main(fixture):
         source = layout / "design.oas"
         shutil.copy2(fixture, source)
         run([INDEX, "vfs", source, str(source)+".floe", "--jobs", "2"])
-        db, rules, empty, invalid, waive, meta, expected = fixtures(work)
+        db, rules, empty, invalid, waive, meta, expected = fixtures(work, ascii)
+        registered = db if ascii else str(db)+".ice"
         temps = work / "temp"
         temps.mkdir()
         env = dict(os.environ, PATH="", TMPDIR=str(temps), FLOE_INDEX_BIN=str(INDEX), FLOE_RENDERD_BIN=str(RENDERD))
         session = work / "session.json"
-        base = [APP, "view", source, "--no-open", "--drc", str(db)+".ice", "--drc-waives", waive,
+        base = [APP, "view", source, "--no-open", "--drc", registered,
                 "--jobs", "2", "--raster-jobs", "1", "--no-labels", "--frame-cache", "off",
                 "--session-file", session]
+        if waive is not None:
+            base += ["--drc-waives", waive]
         # Explicit metadata must not broaden layout/TC roots or bypass shared
         # admission. Failure happens before publishing a session credential.
         rejected = run(base + ["--drc-rules", rules, "--budget-mb", "1537"], env, False)
@@ -90,7 +96,7 @@ def main(fixture):
         shutil.copy2(source, outside)
         escape = layout / "escape.jb"
         escape.write_text("MTITLE 1,Mask\nCHIP C\n$ (1,PATTERN,TC='../metadata/outside.oas',AD=0.001,LY={1},DT={0},UX=100,UY=100)\nROWS 0/0\n")
-        denied = run([APP,"view",escape,"--no-open","--drc",str(db)+".ice","--drc-rules",rules,"--session-file",session],env,False)
+        denied = run([APP,"view",escape,"--no-open","--drc",registered,"--drc-rules",rules,"--session-file",session],env,False)
         assert "outside approved roots" in denied.stderr and not session.exists()
         checks = 0
         for chosen in (None, empty, rules, invalid):
@@ -220,7 +226,7 @@ def main(fixture):
                     if c["name"] in seen:
                         continue
                     seen.add(c["name"])
-                    compared = json.loads(run([APP,"drc",str(db)+".ice","--errs",c["name"],"--svrf-rules",rules],env).stdout)
+                    compared = json.loads(run([APP,"drc",registered,"--errs",c["name"],"--svrf-rules",rules],env).stdout)
                     for ei,row in enumerate(compared):
                         actual = read(dict(kind="comparison",check=str(ci),error=str(ei)))
                         assert (actual["check"],actual["local"],actual["global"]) == (str(ci),str(ei),str(row["global"]))
@@ -265,3 +271,4 @@ def main(fixture):
 
 if __name__ == "__main__":
     main(Path(sys.argv[1]))
+    main(Path(sys.argv[1]), ascii=True)

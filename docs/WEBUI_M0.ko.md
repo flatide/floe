@@ -106,7 +106,8 @@ ASCII DB와 fresh ICE pack 선택, rule/error JSON, declared/실제 count,
 Rust 구현은 재사용 대상이나 Python `IcePack`과 GUI의 읽기·쓰기 전체 대체는 아니다.
 M2a-11a에서 CLI의 fresh ICE 우선/readonly ASCII fallback과 소수 좌표·목록·JSON을
 이관했다([M2 §20](WEBUI_M2.ko.md#20-m2a-11a-읽기-전용-ascii-drc-코어cli-fallback)).
-웹 ASCII 등록·명시 pack-build 승인 및 review 쓰기는 여전히 별도 단계다.
+M2a-11b에서 명시 ASCII 웹 등록·조회·윤곽/CD를 연결했다([M2 §21](WEBUI_M2.ko.md#21-m2a-11b-웹-ascii-등록조회윤곽cd)).
+관리형 pack-build 승인/진행/취소 및 review 쓰기는 여전히 별도 단계다.
 
 ### 2.7 svrf — M4 (6개 옵션)
 

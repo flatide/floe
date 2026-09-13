@@ -6,7 +6,7 @@ use crate::{
     svrf::{Comparison, Rule},
     Error, Result,
 };
-use std::{path::Path, sync::atomic::AtomicUsize};
+use std::{borrow::Cow, path::Path, sync::atomic::AtomicUsize};
 
 enum Backend {
     Pack(Box<Pack>),
@@ -20,8 +20,10 @@ pub struct ReadCheck<'a> {
     pub name: &'a str,
     pub desc: &'a str,
     pub count: u64,
+    pub declared: Cow<'a, str>,
+    pub original: Cow<'a, str>,
 }
-enum Points {
+pub enum ReadPoints {
     Dbu(Vec<[i64; 2]>, f64),
     Um(Vec<[f64; 2]>),
 }
@@ -29,7 +31,7 @@ pub struct ReadViolation {
     pub kind: char,
     pub number: u64,
     pub bbox_um: [f64; 4],
-    points: Points,
+    points: ReadPoints,
 }
 pub struct ReadHit {
     pub local: u64,
@@ -47,8 +49,8 @@ impl ReadViolation {
         stop: &AtomicUsize,
     ) -> Result<Option<Comparison<'a>>> {
         match &self.points {
-            Points::Dbu(p, precision) => rule.compare(self.kind, p, *precision, stop),
-            Points::Um(p) => rule.compare_um(self.kind, p, stop),
+            ReadPoints::Dbu(p, precision) => rule.compare(self.kind, p, *precision, stop),
+            ReadPoints::Um(p) => rule.compare_um(self.kind, p, stop),
         }
     }
 }
@@ -108,11 +110,15 @@ impl Database {
                 name: &c.name,
                 desc: &c.desc,
                 count: c.count,
+                declared: Cow::Owned(c.declared.to_string()),
+                original: Cow::Owned(c.original.to_string()),
             }),
             Backend::Ascii(p) => p.checks.get(i).map(|c| ReadCheck {
                 name: &c.name,
                 desc: &c.desc,
                 count: c.count,
+                declared: Cow::Borrowed(&c.declared),
+                original: Cow::Borrowed(&c.original),
             }),
         }
         .ok_or_else(|| Error::input("DRC check index out of range"))
@@ -151,7 +157,7 @@ impl Database {
                             kind: e.kind,
                             number: e.number,
                             bbox_um,
-                            points: Points::Dbu(e.points, p.precision),
+                            points: ReadPoints::Dbu(e.points, p.precision),
                         },
                     });
                 }
@@ -185,7 +191,7 @@ impl Database {
                             kind: e.kind,
                             number: e.number,
                             bbox_um: e.bbox_um,
-                            points: Points::Um(e.points_um),
+                            points: ReadPoints::Um(e.points_um),
                         },
                     });
                     i += 1;
@@ -199,3 +205,5 @@ impl Database {
         }
     }
 }
+mod queries;
+pub use queries::{ReadInfo, ReadInfoHit, ReadPointPage};

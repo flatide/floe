@@ -18,4 +18,6 @@ for (const file of ['protocol.test.cjs', 'gestures.test.cjs', 'client.test.cjs',
     const run = spawnSync(process.execPath, [path.join(ui, file)], {stdio: 'inherit', timeout: 15000});
     assert.equal(run.status, 0, file + ': ' + run.error);
 }
+const ascii = spawnSync(process.execPath, [path.join(ui, 'drc.test.cjs')], {stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_ASCII:'1'}});
+if (ascii.status !== 0) { process.exit(ascii.status || 1); }
 console.log('WEB UI: ALL OK (ES2017 parse + deterministic client/protocol tests)');

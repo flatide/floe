@@ -7,7 +7,7 @@
 (exchange/capabilities/logout/WS ping)는 [M1b 기록](WEBUI_M1B.ko.md)에 명세/구현했다.
 아래 전체 URI가 그대로 구현된 것은 아니며 공유 API는 아직 없다.
 M2a의 현재 DRC 등록/읽기 URI·페이지·취소·focus/in_view·패널 상태·필터·순회·마커·
-CD·선택 집합·SVRF metadata/비교·타입 패널·격리/원자적 focus API 계약은 [M2 기록](WEBUI_M2.ko.md) §2~19가
+CD·선택 집합·SVRF metadata/비교·타입 패널·격리/원자적 focus·ASCII API 계약은 [M2 기록](WEBUI_M2.ko.md) §2~21이
 기준이다. read-only actor만 있고 review 저장/공유 endpoint는 아직 없다.
 M1b-2a의 `app-core/managed`·`view`에는 process-local lease/admission과
 독립 worker controller를 구현했다. M1b-2b의 사전 등록 view용 제어/이미지
@@ -23,8 +23,10 @@ snapshot `layers_isolated`는 [M2 §18](WEBUI_M2.ko.md#18-m2a-10d1-레이어-격
 M2a-10d2에서 double-click/Frame error/이동 순회와 Restore/Escape를 연결했다.
 CD·live In view 등 종속 UI는 승인+같은 state_rev의 snapshot 후 반영하며,
 불확실한 입력은 재접속 시 재전송하지 않는다. jobdeck 물리 plane 격리는 아직 미지원이다.
-M2a-11a의 ASCII fallback은 코어/CLI에만 추가했다. 웹 actor는 명시 pack 등록을
-유지하며 브라우저의 임의 경로 입력이나 암묵적 index 실행을 허용하지 않는다(M2 §20).
+M2a-11a의 CLI는 fresh 인접 ICE 우선/ASCII fallback이다(§20). M2a-11b의 웹 actor는
+명시 등록한 ICE/ASCII 파일만 읽으며 인접 pack/reviewer를 탐색하지 않는다(§21).
+catalog의 format과 geometry의 points_dbu 또는 points_um으로 좌표 단위를 구별한다.
+브라우저의 임의 경로 입력이나 암묵적 index 실행은 허용하지 않는다.
 2026-09-13 M1a-1 `rust/worker-client`와 M1a-2a/b `app/app-core`의 일반 index·info/단일 render/probe를
 구현했다. 현재 호출 계약은 [worker README](../rust/worker-client/README.md),
 [M1a 기록](WEBUI_M1A.ko.md)을 따르며 아래 서비스 전체가 존재하는 것은 아니다.
