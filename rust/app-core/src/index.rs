@@ -239,9 +239,9 @@ fn arguments(
     Ok(a)
 }
 
-struct WriteLease(File);
+pub(crate) struct WriteLease(File);
 impl WriteLease {
-    fn acquire(directory: &Path) -> Result<Self> {
+    pub(crate) fn acquire(directory: &Path) -> Result<Self> {
         let mut path = directory.as_os_str().to_owned();
         path.push(".index.lock");
         // Persistent zero-byte inode: unlink-on-unlock would allow a second
@@ -427,6 +427,27 @@ pub struct IndexJob {
     capture: Option<crate::index_progress::Capture>,
 }
 impl IndexJob {
+    /// Reuse the subprocess/cancel/reap lifecycle for DRC staging. Its caller
+    /// owns publication and the write lease; VFS cleanup is deliberately off.
+    pub(crate) fn captured(indexer: &Indexer, args: &[OsString]) -> Result<Self> {
+        let mut child = indexer.spawn(args, true)?;
+        let capture = match crate::index_progress::Capture::take(&mut child) {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e);
+            }
+        };
+        Ok(Self {
+            child: Some(child),
+            lease: None,
+            directory: PathBuf::new(),
+            cleanup_occupancy: false,
+            finished: None,
+            capture: Some(capture),
+        })
+    }
     pub fn pid(&self) -> Option<u32> {
         self.child.as_ref().map(Child::id)
     }

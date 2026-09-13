@@ -29,6 +29,8 @@ cargo build --offline --locked --release -p floe-app -p floe-index -p floe-rende
 ./target/release/floe2-web drc /path/to/results.db.ice --rules
 ./target/release/floe2-web drc /path/to/results.db --errs M1.WIDTH --floe-reviewer reviewer1
 ./target/release/floe2-web drc /path/to/results.db --errs M1.WIDTH --svrf-rules /path/to/deck.rules.json
+./target/release/floe2-web drc /path/to/results.db --build --jobs 12
+./target/release/floe2-web drc /path/to/results.db --build --force --jobs 12
 ./target/release/floe2-web view /path/to/design.oas --drc /path/to/results.db.ice
 ./target/release/floe2-web view /path/to/design.oas --drc /path/to/results.db.ice --drc-rules /path/to/deck.rules.json
 ./target/release/floe2-web view /path/to/design.oas --drc /path/to/results.db --drc-rules /path/to/deck.rules.json
@@ -75,7 +77,7 @@ cargo build --offline --locked --release -p floe-app -p floe-index -p floe-rende
   ± zoom, `Ctrl+A` fit, `f` frames를 지원한다. 레이어 `⋯`는 fill/pattern/선폭 편집,
   Label px는 6..96 device px다. `--labels`, `--no-frames`, `--label-font-px`는
   초기 표시 옵션이다. 전체 GTK 단축키·query/ruler parity는 아직 개발 중이다.
-- `drc`는 기존 pack(또는 .db 옆의 fresh pack)을 우선하며, 없거나 stale/corrupt이면
+- `drc` 읽기는 기존 pack(또는 .db 옆의 fresh pack)을 우선하며, 없거나 stale/corrupt이면
   읽기 전용 ASCII로 fallback한다. `--rules`/`--errs`/`--list`·소수 좌표를 지원한다.
   pack의 per-reviewer waive는 읽되 ASCII fallback에는 적용하지 않는다.
   source/pack/autosave를 생성·수정하지 않으며 자동 pack-build는 없다.
@@ -85,7 +87,17 @@ cargo build --offline --locked --release -p floe-app -p floe-index -p floe-rende
   유지하고 잘린 레코드 개수를 표시한다. 최초 ASCII open은 전체 입력 스캔이다.
   웹은 CLI fallback과 달리 명시 파일만 읽으며 인접 ICE/ambient reviewer를
   탐색하지 않는다. ASCII에 `--drc-waives`를 함께 지정하면 오류다.
-  관리형 pack-build 승인/진행/취소·공유·편집/notes는 미이관이다([M2 기록](../../docs/WEBUI_M2.ko.md)).
+  웹 pack-build 승인/진행/취소 연결·공유·편집/notes는 미이관이다([M2 기록](../../docs/WEBUI_M2.ko.md)).
+- `drc RESULTS.db --build`는 명시적인 쓰기 작업이다. 기존 fresh `RESULTS.db.ice`는
+  재사용하고 stale/corrupt/기존 pack 교체에는 `--force`가 필요하다. `--jobs`는
+  1..16, 기본12다. 원본·review sidecar는 수정하지 않는다. 읽기 옵션과 병용할 수 없다.
+  전용 임시 디렉터리에서 기존 native pack을 만든 뒤 metadata/fingerprint 검사와
+  fsync를 거쳐 게시한다. 게시 전 실패·취소는 기존 pack을 보존한다. 소수 DBU는
+  반올림하지 않고 build를 거부하므로 ASCII 읽기를 사용한다. stdout은 결과 JSON,
+  stderr는 단계/유계 진행값이다. `<pack>.index.lock` inode는 종료 후에도 남는다.
+  새 pack은0600, 교체 시 기존 일반 permission bits를 유지한다. `directory_synced`
+  false 또는 `cleanup_warning` true는 게시 성공과 별도로 확인해야 한다.
+  자원 lease는 process-local이므로 다른 실행 중인 뷰어를 자동 종료/갱신하지 않는다.
 - CLI `drc --rules`/`--errs`에 `--svrf-rules FILE`을 명시하면 기존 version1
   sidecar의 규칙 정보/참고 측정값을 JSON에 추가한다. 원본 SVRF를 해석하거나
   경로를 자동 탐색하지 않는다. 일반 polygon width/signoff 판정기가 아니며,

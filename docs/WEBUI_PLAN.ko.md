@@ -33,6 +33,7 @@ M2a-10d1에서 서버의 레이어 격리·한 번만 복원과 준비 토큰 �
 M2a-10d2에서 승인 후 웹 상태 반영·Restore layers·Escape와 취소/재접속을 연결했다.
 M2a-11a에서 읽기 전용 ASCII DRC 코어·CLI fallback과 소수 좌표 측정 parity를 추가했다.
 M2a-11b에서 명시한 ASCII DRC의 웹 등록·유계 조회·소수 좌표 윤곽/CD를 연결했다.
+M2a-12a에서 명시 DRC pack 생성 코어/CLI와 임시 생성·검증·원자 게시·취소를 추가했다.
 전체 조작 parity와 M0/Firefox/ETX 현장 검증은 아직 완료되지 않았다.
 상세 범위는 [M1b 기록](WEBUI_M1B.ko.md)과 [M2 기록](WEBUI_M2.ko.md). 여기의 M0~M5는 **웹 전환 단계**이며
 jobdeck/occupancy의 같은 이름 단계와 별개다. 개발 기준과 합류 규칙은 §11.
@@ -494,7 +495,8 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
   M2a-10c는 웹 타입/규칙 상세/측정 비교와 In view 해제다.
   M2a-10d1/10d2는 레이어 격리/복원·원자적 focus 서버와 웹 승인 처리·Restore/Escape다.
   M2a-11a/11b는 ASCII DRC 읽기 코어/CLI fallback과 명시 등록한 웹 ASCII의
-  조회·선택·순회·윤곽/CD다. 관리형 pack-build 승인/진행/취소 연결은 남아 있다.
+  조회·선택·순회·윤곽/CD다. M2a-12a는 관리형 pack-build 코어/CLI와
+  파일 보존·진행/취소다. 웹의 승인·기존 actor 종료·생성 후 재등록 연결은 남아 있다.
   jobdeck 물리 plane 격리와 원본 SVRF parser는 남아 있다.
   공유와 고급 DRC 조작은 남아 있다.
   CLI 전체/웹 전환 완료가 아니며 GTK/실측 브랜치는 유지한다.

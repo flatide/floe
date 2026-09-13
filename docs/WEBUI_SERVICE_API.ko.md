@@ -27,6 +27,10 @@ M2a-11a의 CLI는 fresh 인접 ICE 우선/ASCII fallback이다(§20). M2a-11b의
 명시 등록한 ICE/ASCII 파일만 읽으며 인접 pack/reviewer를 탐색하지 않는다(§21).
 catalog의 format과 geometry의 points_dbu 또는 points_um으로 좌표 단위를 구별한다.
 브라우저의 임의 경로 입력이나 암묵적 index 실행은 허용하지 않는다.
+M2a-12a의 `drc/build::Build`는 명시 pack 생성·자원/쓰기 lease·진행/취소·검증/게시
+코어이며 CLI `drc --build`에서 호출한다(M2 §22). 아직 웹 write endpoint나 자동
+actor 교체는 없다. 후속 웹 연결은 동의 → 기존 DRC actor 종료/lease 해제 →
+생성 → 새로운 리뷰 identity 등록을 별도로 구현해야 한다.
 2026-09-13 M1a-1 `rust/worker-client`와 M1a-2a/b `app/app-core`의 일반 index·info/단일 render/probe를
 구현했다. 현재 호출 계약은 [worker README](../rust/worker-client/README.md),
 [M1a 기록](WEBUI_M1A.ko.md)을 따르며 아래 서비스 전체가 존재하는 것은 아니다.

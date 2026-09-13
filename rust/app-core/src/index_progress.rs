@@ -28,6 +28,10 @@ pub struct Progress {
     pub total_cells: Option<u64>,
     pub planned_pages: Option<u64>,
     pub encoded_pages: Option<u64>,
+    pub drc_checks: Option<u64>,
+    pub drc_total_checks: Option<u64>,
+    pub drc_errors: Option<u64>,
+    pub drc_noninteger: bool,
 }
 #[derive(Default)]
 struct Line {
@@ -74,6 +78,32 @@ impl Line {
             p.phase = NativePhase::Publishing;
         } else if s.starts_with("[occupancy]") {
             p.phase = NativePhase::Occupancy;
+        }
+        if s.starts_with("[drc-pack w") && s.contains("G scanned, ") {
+            p.phase = NativePhase::Parsing;
+        }
+        if let Some(s) = s.strip_prefix("[drc-pack enc] ") {
+            let mut words = s.split_whitespace();
+            if let Some((done, total)) = words
+                .next()
+                .and_then(|s| s.split_once('/'))
+                .and_then(|(a, b)| Some((a.parse::<u64>().ok()?, b.parse::<u64>().ok()?)))
+                .filter(|(a, b)| a <= b)
+            {
+                if words.next() == Some("checks,") {
+                    if let Some(errors) = words.next().and_then(|s| s.parse::<u64>().ok()) {
+                        if words.next() == Some("errors,") {
+                            p.phase = NativePhase::Building;
+                            p.drc_checks = Some(done);
+                            p.drc_total_checks = Some(total);
+                            p.drc_errors = Some(errors);
+                        }
+                    }
+                }
+            }
+        }
+        if s.contains("non-integer coordinate token: --pack") {
+            p.drc_noninteger = true;
         }
         if let Some(s) = s.strip_prefix("[vfs] build: pipeline cells ") {
             let mut tokens = s.split_whitespace();
@@ -199,5 +229,35 @@ mod tests {
         line.feed(b"[vfs] build: pipeline complete", &mut p, true);
         line.finish(&mut p);
         assert_eq!(p.phase, NativePhase::Publishing);
+    }
+    #[test]
+    fn drc_progress_is_allowlisted_and_partial_worker_scans_are_not_global_counts() {
+        let mut line = Line::default();
+        let mut p = Progress::default();
+        line.feed(b"[drc-pack w0] 1.0G scanned, 200 checks\n", &mut p, true);
+        assert_eq!(p.phase, NativePhase::Parsing);
+        assert_eq!(p.drc_checks, None);
+        line.feed(
+            b"[drc-pack enc] 40/120 checks, 8000 errors, 0.1G blob\n",
+            &mut p,
+            true,
+        );
+        assert_eq!(
+            (p.drc_checks, p.drc_total_checks, p.drc_errors),
+            (Some(40), Some(120), Some(8000))
+        );
+        line.feed(
+            b"[drc-pack enc] 50/2 checks, 99 errors, invalid\n",
+            &mut p,
+            true,
+        );
+        assert_eq!(p.drc_errors, Some(8000));
+        line.feed(
+            b"drc private.db: non-integer coordinate token: --pack stores dbu integers\n",
+            &mut p,
+            true,
+        );
+        assert!(p.drc_noninteger);
+        assert!(line.bytes.is_empty());
     }
 }

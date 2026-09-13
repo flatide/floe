@@ -187,6 +187,16 @@ impl Input {
     pub(super) fn len(&self) -> u64 {
         self.stamp.len
     }
+    pub(super) fn unchanged_at(&self, path: &Path) -> Result<()> {
+        self.unchanged()?;
+        if Stamp::from(fs::metadata(path)?) != self.stamp {
+            return Err(crate::Error::new(
+                crate::ErrorKind::Cache,
+                "DRC path changed during operation",
+            ));
+        }
+        Ok(())
+    }
     fn read(&self, off: u64, out: &mut [u8]) -> Result<()> {
         if off
             .checked_add(out.len() as u64)

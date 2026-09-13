@@ -1204,7 +1204,76 @@ KLayout13 PX+2 phase-exact+14 style, jobdeck80, renderer46과 전체 CLI/웹 DRC
 기존 native/Pillow/GLib 경고는 남아 있다. 실칩 ASCII 초기 스캔 시간/RSS, Linux 실행,
 현장 Firefox·ETX는 미검증이다. 원본·pack·review 쓰기, GTK launcher나 배포 기본값은 바꾸지 않는다.
 
-## 22. 다음 경계
+## 22. M2a-12a: 명시 pack 생성 코어·CLI
+
+`floe2-web drc RESULTS.db --build [--force] [--jobs 1..16]`를 추가했다.
+읽기 CLI와 별도 명시 작업이며 `--rules/--errs/--list/reviewer/SVRF` 읽기 옵션과
+혼합하지 않는다. 기본12 jobs. 목적지는 `RESULTS.db.ice`로 고정하고 임의 출력 경로를
+받지 않는다. fresh pack은 재사용, stale/손상/기존 pack 교체는 `--force`가 필요하다.
+읽기 명령이나 현재 웹 `view --drc`가 암묵적으로 이 작업을 실행하지 않는다.
+
+### 생성·게시·수명
+
+- 기존 `floe-index drc`를 그대로 호출한다. 이 인덱서의 실패 경로에는 출력 삭제,
+  시작 경로에는 `<out>.tmp*` 청소가 있으므로 **실제 pack 경로를 native 출력으로
+  넘기지 않는다**. 대상과 같은 filesystem의 새0700 디렉터리에 `result.ice`와
+  native 임시 파일을 격리한다. 정상 종료/실패/취소 후 자기 디렉터리의 flat 파일만
+  정리하며 외부/shared tmp namespace나 다른 실행의 잔류 디렉터리를 sweep하지 않는다.
+- native 성공 후 공통 `Pack::open`의 layout4 metadata/구조 검증·source fingerprint
+  일치를 확인하고 파일 fsync 후 게시한다. 전체 좌표를 다시 decode하는 검증은 아니다.
+  원본의 fd/경로 inode·size·mtime·ctime과 기존 대상의 변화도 전후 검사한다.
+  fresh 판정은 현 pack 포맷의 source size/초 단위 mtime 계약을 그대로 따른다.
+- 교체는 rename, 최초 생성은 atomic no-clobber hard-link다. 같은 filesystem의
+  hard-link를 지원하지 않으면 오류이지 overwrite fallback이 아니다. 게시와 cancel은
+  같은 mutex에서 순서를 정한다. cancel이 먼저면 미게시, 게시가 먼저면 성공이며
+  늦은 cancel로 결과를 바꾸지 않는다. 게시 후 parent sync 실패는
+  `directory_synced=false`로 분리한다. 정리 실패는 `cleanup_warning=true`/stderr다.
+- 새 pack은0600, 교체는 기존 regular permission bits(0777)를 유지한다. inode 교체이며
+  소유자/ACL/xattr 전체 복제나 backup은 아니다. symlink·다중 hard-link 대상은 거부한다.
+  원본, 기존 pack의 게시 전 내용, waive/notes와 인접 다른 작업의 tmp 파일은 보존한다.
+- 생성은 공통 `Resources::index`의 단일 index job/CPU·쓰기 lease를 사용한다.
+  DRC source 또는 목적지를 같은 서비스가 읽고 있으면 Busy다. terminal 상태는
+  native child 수거·검증/게시·임시 정리 시도·lease 해제를 마친 뒤에만 나온다.
+  `<pack>.index.lock` OS inode는 다른 새 CLI의 동시 생성을 막으며 종료 후에도 남는다.
+  legacy/native 직접 실행이나 다른 프로세스의 reader까지 잠그는 계약은 아니다.
+- 자원 admission과 `--jobs`는 전체 OS thread 수/RSS/I/O의 hard cap이 아니다.
+  native parse·stitch·encode의 알고리즘/메모리 정책은 바꾸지 않았다. 외부 동시 path
+  교체를 위한 OS sandbox·revision hot-reload나 NFS syscall 강제 중단도 미구현이다.
+  부모 SIGKILL/머신 중단으로 남은 staging은 자동 삭제하지 않는다.
+
+### 진행과 검증
+
+stdout은 `source/pack/reused/checks/errors/bytes/directory_synced/cleanup_warning`
+결과 JSON이다. stderr에는 단계와 경과시간/인코딩 check·error 수를 출력한다.
+파싱 worker별 check 수를 전체 진행률로 합산하지 않는다. 유계 nonblocking pipe의
+allowlist 숫자만 snapshot에 보관하고 raw 로그/고객 rule/path를 누적하지 않는다.
+형식이 다른 로그는 완료 오라클이 아니며 native 종료 코드와 pack 검증이 기준이다.
+기존 integer-DBU native 형식을 사용하므로 소수 좌표 입력은 오류로 종료하고 기존
+pack을 보존한다. 소수 좌표를 정수로 반올림하거나 ASCII 읽기 경로를 폐기하지 않는다.
+
+- 단위 gate: 64회 생성/교체와 취소 경합, 최초 생성의 no-clobber, private staging과
+  예상 밖 entry 보존/경고, path 교체·symlink/hardlink 거부, 유계 진행 파싱.
+- `validate_drc_build.py`: native 직접 산출물과 바이트 일치, fresh 무변경 재사용,
+  force/permission 보존, 원본/waive/notes/shared temp 불변을 확인한다. 약66 MiB·
+  520규칙/133,120오류 합성 입력으로 native의 4 MiB/worker 문턱을 넘어 실제 분할
+  경로의 jobs1/4/16 바이트 동일성을 검증한다(작은 파일의 jobs 플래그만 비교하지 않음).
+- native 실패/성공 코드+손상 출력/원본·대상 변경을 주입한다. 확인된 live child에
+  SIGINT/SIGTERM을 보내고 SIGTERM 무시 시 kill fallback·reap·기존 pack 불변을 확인한다.
+  공통 서비스의 reader 충돌, 작업 drop/late cancel, 자원 반환도 native/fault gate로 고정한다.
+
+2026-09-13 `sh tools/validate_rust.sh`가 `RUST VALIDATION: ALL OK`로 완료됐다.
+core80/app6/web27/transport8, 새 DRC build 통합 gate와 기존 CLI/웹 DRC·SVRF,
+KLayout13 PX+2 phase-exact+14 style, jobdeck80, renderer46을 포함한다.
+전환 패키지의 fmt/strict clippy, Rust1.89 빈 registry offline 테스트와 Linux musl
+release link도 통과했다. workspace 전체 fmt는 기존 native 파일의 차이가 있으며
+이번 단계에서 재포맷하지 않았다. 기존 native/Pillow/GLib 경고도 남아 있다. 실칩 pack 생성의
+시간/RSS·Linux 실행·현장 Firefox/ETX 수용을 검증한 것은 아니다.
+
+이번 단계는 **공통 코어와 CLI**다. 웹 승인/진행 UI·기존 actor 종료·성공 후 새로운
+DRC identity 채택은 다음 단계다. 생성 권한을 브라우저의 읽기 capability에 추가하지 않았고
+source/pack/review revision을 임의로 합치지 않는다. GTK/현장 게이트 판정은 불변이다.
+
+## 23. 다음 경계
 
 1. SVRF sidecar 코어/actor/API·웹 type/상세/비교는 §15~17까지 이관했다.
    일반 레이아웃 layer isolate/복원·한 번의 goto는 §18~19까지 연결했다.
@@ -1212,8 +1281,9 @@ KLayout13 PX+2 phase-exact+14 style, jobdeck80, renderer46과 전체 CLI/웹 DRC
    selected/live In view 목록 필터·순회·hover는 §13~14까지 구현했다.
    손으로 그리는 ruler와 그에 따른 Escape 우선순위는 M4에서 확장한다.
    현재 페이지 마커 정책 자체를 전체 pack 마커로 확대하지 않는다.
-2. ASCII 읽기 코어/CLI·명시 등록 웹 조회는 §20~21까지 이관했다. 관리형 pack-build
-   승인/진행/취소·기존 notes·상세 측정/룰 매핑은 각각 parity gate와 함께 확장한다.
+2. ASCII 읽기 코어/CLI·명시 등록 웹 조회는 §20~21까지 이관했다. §22의 pack-build
+   코어에 웹 승인/진행/취소와 actor 재등록을 연결한다. 기존 notes·상세 측정/룰 매핑은
+   각각 parity gate와 함께 확장한다.
 3. 공유는 설계/DRC에 묶인 읽기 capability, 발급/만료/폐기·follow/independent
    state를 별도 구현·검증. 아직 shares=false, loopback-only다.
 4. 외부 HTTPS/WSS·TeeBox 접근/인증 정책은 상위 계획 §10 미결 사항이며 로컬 기반 구현과

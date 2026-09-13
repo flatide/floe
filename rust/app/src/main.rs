@@ -28,14 +28,14 @@ Usage: floe2-web index SOURCE [OPTIONS]
        floe2-web render SOURCE [OPTIONS]
        floe2-web probe SOURCE
        floe2-web jobdeck DECK.jb [OPTIONS]
-       floe2-web drc RESULTS.ice [OPTIONS]
+       floe2-web drc RESULTS.db|PACK.ice [OPTIONS]
        floe2-web --version
 
 Implemented: layout/jobdeck index/info/render/probe, occupancy, profiling,
 and jobdeck analysis/spec + source indexing with level selection.
 Web preview: isolated Firefox or --no-open; no GTK launcher replacement yet.
-DRC read-only CLI: existing fresh ICE packs and waive sidecars.
-Not yet ported: clip, svrf, gtktest, batch/mosaic/DRC exports, ASCII DRC fallback.
+DRC: read-only ICE/ASCII queries; explicit --build [--force] for atomic packs.
+Not yet ported: clip, svrf, gtktest, batch/mosaic/DRC exports, review writes.
 Use the existing floe2 for those commands; there is no Python fallback.
 Run floe2-web index --help for indexing options.";
 const INDEX_HELP: &str = "Usage: floe2-web index SOURCE [OPTIONS]

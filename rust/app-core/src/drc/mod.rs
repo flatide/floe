@@ -1,7 +1,8 @@
-//! Read-only DRC sources: bounded layout-4 pack queries and a streaming ASCII
-//! fallback for trusted CLI input. Neither path implicitly indexes or writes.
+//! DRC sources: bounded layout-4 pack queries and a streaming ASCII fallback.
+//! Reads never implicitly write; build is a separate, explicitly approved job.
 //! No mmap: truncation of a shared file is an I/O error rather than SIGBUS.
 mod ascii;
+pub mod build;
 mod database;
 mod filters;
 mod local;
