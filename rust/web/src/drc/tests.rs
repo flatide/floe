@@ -49,6 +49,10 @@ fn wire_rejects_paths_noncanonical_counters_and_unbounded_reads() {
         json!({"kind":"query","bbox_um":["NaN","0","1","1"],"checks":null,"waived":null,"cursor":{"check":"0","error":"0"},"limit":1}),
         json!({"kind":"geometry","check":"0","error":"0","start":"0","limit":2049}),
         json!({"kind":"errors","check":"0","start":"-1","waived":null,"limit":1}),
+        json!({"kind":"step","check":"0","backwards":false,"after":"00"}),
+        json!({"kind":"step","check":"0","backwards":false,"after":"0","cursor":{"next":"1","remaining":"2"}}),
+        json!({"kind":"step","check":"0","backwards":false,"cursor":{"next":"0","remaining":"-1"}}),
+        json!({"kind":"step","check":"0","backwards":false,"bbox_um":["0","0","-1","1"]}),
     ] {
         assert!(serde_json::from_value::<Request>(v)
             .unwrap()
@@ -59,6 +63,9 @@ fn wire_rejects_paths_noncanonical_counters_and_unbounded_reads() {
         json!({"kind":"rule","check":0}),
         json!({"kind":"rule","check":"0","path":"/etc/passwd"}),
         json!({"kind":"rule","check":"0","reviewer":"other"}),
+        json!({"kind":"step","check":"0","backwards":1}),
+        json!({"kind":"step","check":"0","backwards":false,"cursor":{"next":0,"remaining":"1"}}),
+        json!({"kind":"step","check":"0","backwards":false,"cursor":{"next":"0","remaining":"1","path":"/etc/passwd"}}),
     ] {
         assert!(serde_json::from_value::<Request>(v).is_err());
     }

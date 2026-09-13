@@ -18,6 +18,7 @@ M2a-2에서 DRC 전용 actor·자원 예약과 등록 ID 기반 인증 읽기 AP
 M2a-3에서 규칙/오류 페이지·waive 필터·goto·표시 프레임에 정렬된 DRC overlay를 연결했다.
 M2a-4a에서 view별 DRC 패널 상태의 서버 메모리 보존·revision 충돌 API를 추가했다.
 M2a-4b에서 유계 브라우저 저장 큐·새로고침/재접속 복원을 연결했다.
+M2a-5a에서 현재 규칙/필터의 유계 순회 API와 좌표 slice 읽기를 추가했다(UI 연결은 다음 단계).
 전체 조작 parity와 M0/Firefox/ETX 현장 검증은 아직 완료되지 않았다.
 상세 범위는 [M1b 기록](WEBUI_M1B.ko.md)과 [M2 기록](WEBUI_M2.ko.md). 여기의 M0~M5는 **웹 전환 단계**이며
 jobdeck/occupancy의 같은 이름 단계와 별개다. 개발 기준과 합류 규칙은 §11.

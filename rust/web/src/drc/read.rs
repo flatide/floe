@@ -1,7 +1,7 @@
 use super::{dto::Command, RESPONSE_BYTES};
 use floe_app_core::{
     check_cancelled,
-    drc::{Cursor, Hit, Pack},
+    drc::{Cursor, Hit, InfoHit, Pack, RecordInfo},
     Error, ErrorKind, Result,
 };
 use serde_json::{json, Value};
@@ -34,9 +34,20 @@ fn bounds(p: &Pack, b: Option<[i64; 4]>) -> Result<Value> {
     })
 }
 fn hit(p: &Pack, h: &Hit) -> Result<Value> {
+    info_hit(
+        p,
+        &InfoHit {
+            check: h.check,
+            local: h.local,
+            status: h.status,
+            record: RecordInfo::from(&h.violation),
+        },
+    )
+}
+fn info_hit(p: &Pack, h: &InfoHit) -> Result<Value> {
     Ok(
-        json!({"check":h.check.to_string(),"local":h.local.to_string(),"global":h.violation.number.to_string(),
-        "kind":h.violation.kind.to_string(),"status":h.status,"bbox_um":bounds(p,Some(h.violation.bbox))?,"points":h.violation.points.len().to_string()}),
+        json!({"check":h.check.to_string(),"local":h.local.to_string(),"global":h.record.number.to_string(),
+        "kind":h.record.kind.to_string(),"status":h.status,"bbox_um":bounds(p,Some(h.record.bbox))?,"points":h.record.points.to_string()}),
     )
 }
 fn next(c: Option<Cursor>) -> Value {
@@ -52,6 +63,12 @@ pub(super) fn execute(p: &mut Pack, request: Command, stop: &AtomicUsize) -> Res
         Command::ValidatePanel(data) => {
             data.validate_pack(p)?;
             json!({})
+        }
+        Command::Step(request) => {
+            let page = p.step(request, stop)?;
+            json!({"hit":page.hit.as_ref().map(|h| info_hit(p,h)).transpose()?,
+                "next":page.next.map(|c|json!({"next":c.next.to_string(),"remaining":c.remaining.to_string()})),
+                "scanned":page.scanned.to_string()})
         }
         Command::Rules {
             start,
@@ -153,19 +170,17 @@ pub(super) fn execute(p: &mut Pack, request: Command, stop: &AtomicUsize) -> Res
             start,
             limit,
         } => {
-            let v = p.error(check, error, stop)?;
-            if start > v.points.len() {
-                return Err(Error::input("point cursor"));
-            }
-            let end = (start + limit).min(v.points.len());
-            let points = v.points[start..end]
+            let page = p.error_points(check, error, start, limit, stop)?;
+            let v = page.record;
+            let points = page
+                .points
                 .iter()
                 .map(|xy| xy.map(|v| v.to_string()))
                 .collect::<Vec<_>>();
             json!({"check":check.to_string(),"local":error.to_string(),"global":v.number.to_string(),"kind":v.kind.to_string(),
                 "status":p.status(check,error)?,"bbox_um":bounds(p,Some(v.bbox))?,"precision":p.precision.to_string(),
-                "points_dbu":points,"start":start.to_string(),"total":v.points.len().to_string(),
-                "next":if end<v.points.len(){Some(end.to_string())}else{None}})
+                "points_dbu":points,"start":page.start.to_string(),"total":v.points.to_string(),
+                "next":page.next.map(|v|v.to_string())})
         }
         Command::InView {
             waived,
@@ -190,7 +205,7 @@ pub(super) fn execute(p: &mut Pack, request: Command, stop: &AtomicUsize) -> Res
             context,
         } => {
             let c = context.ok_or_else(|| Error::input("focus requires an authoritative view"))?;
-            let v = p.error(check, error, stop)?;
+            let v = p.error_info(check, error, stop)?;
             let b = p.bbox_um(v.bbox)?;
             let mut width = (c.bbox_dbu[2] - c.bbox_dbu[0]) * c.dbu;
             if fit {

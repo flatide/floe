@@ -1,5 +1,5 @@
 use super::Failure;
-use floe_app_core::drc::Cursor;
+use floe_app_core::drc::{Cursor, StepCursor, StepRequest};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -8,6 +8,12 @@ use std::collections::BTreeSet;
 pub struct CursorDto {
     pub check: String,
     pub error: String,
+}
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StepCursorDto {
+    pub next: String,
+    pub remaining: String,
 }
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -37,6 +43,14 @@ pub enum Request {
         error: String,
         fit: bool,
     },
+    Step {
+        check: String,
+        backwards: bool,
+        after: Option<String>,
+        cursor: Option<StepCursorDto>,
+        waived: Option<bool>,
+        bbox_um: Option<[String; 4]>,
+    },
     InView {
         waived: Option<bool>,
         cursor: CursorDto,
@@ -52,6 +66,7 @@ pub enum Request {
 }
 pub(super) enum Command {
     ValidatePanel(Box<super::panel::Data>),
+    Step(StepRequest),
     Rules {
         start: usize,
         search: String,
@@ -118,9 +133,52 @@ fn cap(n: usize, max: usize) -> Result<usize, Failure> {
         Ok(n)
     }
 }
+fn bbox(strings: [String; 4]) -> Result<[f64; 4], Failure> {
+    let mut b = [0.; 4];
+    for (out, s) in b.iter_mut().zip(strings) {
+        if s.len() > 80 {
+            return Err("invalid_drc_request");
+        }
+        *out = s.parse::<f64>().map_err(|_| "invalid_drc_request")?;
+        if !out.is_finite() {
+            return Err("invalid_drc_request");
+        }
+    }
+    if b[0] > b[2] || b[1] > b[3] {
+        return Err("invalid_drc_request");
+    }
+    Ok(b)
+}
 impl Request {
     pub(super) fn core(self) -> Result<Command, Failure> {
         Ok(match self {
+            Self::Step {
+                check,
+                backwards,
+                after,
+                cursor,
+                waived,
+                bbox_um,
+            } => {
+                if after.is_some() && cursor.is_some() {
+                    return Err("invalid_drc_request");
+                }
+                Command::Step(StepRequest {
+                    check: index(&check)?,
+                    backwards,
+                    after: after.as_deref().map(number).transpose()?,
+                    cursor: cursor
+                        .map(|c| {
+                            Ok::<_, Failure>(StepCursor {
+                                next: number(&c.next)?,
+                                remaining: number(&c.remaining)?,
+                            })
+                        })
+                        .transpose()?,
+                    waived,
+                    bbox_um: bbox_um.map(bbox).transpose()?,
+                })
+            }
             Self::Rules {
                 start,
                 search,
@@ -186,19 +244,7 @@ impl Request {
                 cursor,
                 limit,
             } => {
-                let mut b = [0.; 4];
-                for (out, s) in b.iter_mut().zip(bbox_um) {
-                    if s.len() > 80 {
-                        return Err("invalid_drc_request");
-                    }
-                    *out = s.parse::<f64>().map_err(|_| "invalid_drc_request")?;
-                    if !out.is_finite() {
-                        return Err("invalid_drc_request");
-                    }
-                }
-                if b[0] > b[2] || b[1] > b[3] {
-                    return Err("invalid_drc_request");
-                }
+                let b = bbox(bbox_um)?;
                 if checks.as_ref().is_some_and(|c| c.len() > 128) {
                     return Err("invalid_drc_request");
                 }

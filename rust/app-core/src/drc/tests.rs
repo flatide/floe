@@ -53,6 +53,9 @@ fn string(b: &mut Vec<u8>, s: &str) -> u32 {
     off
 }
 fn bytes(n: u64) -> Vec<u8> {
+    geometry_bytes(n, 2)
+}
+fn geometry_bytes(n: u64, vertices: usize) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend(MAGIC);
     push32(&mut out, 4);
@@ -71,11 +74,13 @@ fn bytes(n: u64) -> Vec<u8> {
         }
         let mut px = 0;
         for i in start..start + count {
-            uv(&mut out, 4 + (i % 2));
+            uv(&mut out, 2 * vertices as u64 + (i % 2));
             zz(&mut out, i as i64 * 10 - px);
             zz(&mut out, 0);
-            zz(&mut out, 2);
-            zz(&mut out, 3);
+            for j in 1..vertices {
+                zz(&mut out, if j % 2 == 1 { 2 } else { -2 });
+                zz(&mut out, if j % 2 == 1 { 3 } else { -3 });
+            }
             px = i as i64 * 10;
         }
     }
@@ -141,6 +146,240 @@ fn bytes(n: u64) -> Vec<u8> {
     push32(&mut out, 0);
     out.extend(MAGIC);
     out
+}
+#[test]
+fn large_record_metadata_and_point_pages_do_not_clone_the_whole_record() {
+    let f = Fixture::new(&geometry_bytes(1, 5000));
+    let flag = AtomicUsize::new(0);
+    let mut p = Pack::open(&f.path, &flag).unwrap();
+    let meta = p.error_info(1, 0, &flag).unwrap();
+    assert_eq!(
+        (meta.number, meta.kind, meta.points, meta.bbox),
+        (1, 'p', 5000, [0, 0, 2, 3])
+    );
+    let mut points = Vec::new();
+    let mut start = 0;
+    loop {
+        let page = p.error_points(1, 0, start, 2048, &flag).unwrap();
+        assert_eq!(page.start, start);
+        assert_eq!(page.record, meta);
+        assert!(page.points.len() <= 2048);
+        points.extend(page.points);
+        let Some(next) = page.next else {
+            break;
+        };
+        assert!(next > start);
+        start = next;
+    }
+    assert_eq!(points, p.error(1, 0, &flag).unwrap().points);
+    assert_eq!(p.decoded_blocks, 1);
+    assert!(p.error_points(1, 0, 5001, 1, &flag).is_err());
+    assert!(p.error_points(1, 0, 0, 2049, &flag).is_err());
+    assert!(p.error_points(1, 0, usize::MAX, 1, &flag).is_err());
+    assert!(p
+        .error_points(1, 0, 5000, 1, &flag)
+        .unwrap()
+        .points
+        .is_empty());
+    flag.store(1, Ordering::Relaxed);
+    assert_eq!(
+        p.error_info(1, 0, &flag).unwrap_err().kind,
+        ErrorKind::Cancelled
+    );
+}
+#[test]
+fn circular_step_matches_filtered_file_order_across_blocks_and_resumes() {
+    let mut b = bytes(130);
+    let offset = b.len() - 136 + 4 * 8;
+    let statuses = u64::from_le_bytes(b[offset..offset + 8].try_into().unwrap()) as usize;
+    for i in 0..130 {
+        b[statuses + i] = if i % 3 == 0 {
+            1
+        } else if i % 7 == 0 {
+            2
+        } else {
+            0
+        };
+    }
+    // Deliberately leave waived counters zero: the status bytes are truth.
+    let f = Fixture::new(&b);
+    let flag = AtomicUsize::new(0);
+    let mut p = Pack::open(&f.path, &flag).unwrap();
+    let all = p.errors(1, 0, 130, &flag).unwrap().hits;
+    for backwards in [false, true] {
+        for after in [
+            None,
+            Some(0),
+            Some(62),
+            Some(63),
+            Some(64),
+            Some(128),
+            Some(129),
+        ] {
+            for waived in [None, Some(false), Some(true)] {
+                for bbox_um in [
+                    None,
+                    Some([0.631, -1., 1.271, 1.]),
+                    Some([0.0031, 0., 0.0032, 0.001]),
+                ] {
+                    let start = after.map_or(if backwards { 129 } else { 0 }, |i| {
+                        if backwards {
+                            (i + 129) % 130
+                        } else {
+                            (i + 1) % 130
+                        }
+                    });
+                    let expected = (0..130)
+                        .map(|i| {
+                            if backwards {
+                                (start + 130 - i) % 130
+                            } else {
+                                (start + i) % 130
+                            }
+                        })
+                        .find(|i| {
+                            let h = &all[*i as usize];
+                            waived.is_none_or(|w| (h.status == 1) == w)
+                                && bbox_um.is_none_or(|b| {
+                                    let e = p.bbox_um(h.violation.bbox).unwrap();
+                                    b[0] <= e[2] && b[2] >= e[0] && b[1] <= e[3] && b[3] >= e[1]
+                                })
+                        });
+                    for limit in [1, 7, SCAN_ITEMS] {
+                        let mut req = StepRequest {
+                            check: 1,
+                            backwards,
+                            after,
+                            waived,
+                            bbox_um,
+                            cursor: None,
+                        };
+                        let mut scanned = 0;
+                        loop {
+                            let page = p.step_with_limit(req, limit, &flag).unwrap();
+                            assert!(page.scanned <= limit);
+                            scanned += page.scanned;
+                            assert!(scanned <= 130);
+                            if let Some(next) = page.next {
+                                assert!(page.hit.is_none() && page.scanned > 0);
+                                assert_eq!(next.remaining, 130 - scanned);
+                                req.after = None;
+                                req.cursor = Some(next);
+                                continue;
+                            }
+                            assert_eq!(page.hit.map(|h| h.local), expected, "{req:?}");
+                            if let Some(h) = page.hit {
+                                assert_eq!(
+                                    h.record,
+                                    RecordInfo::from(&all[h.local as usize].violation)
+                                );
+                                assert_eq!(h.status, all[h.local as usize].status);
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for check in [0, 2] {
+        let page = p
+            .step(
+                StepRequest {
+                    check,
+                    ..Default::default()
+                },
+                &flag,
+            )
+            .unwrap();
+        assert!(page.hit.is_none() && page.next.is_none());
+        assert_eq!(page.scanned, 0);
+    }
+    let req = StepRequest {
+        check: 1,
+        ..Default::default()
+    };
+    for invalid in [
+        StepRequest { check: 3, ..req },
+        StepRequest {
+            after: Some(130),
+            ..req
+        },
+        StepRequest {
+            cursor: Some(StepCursor {
+                next: 130,
+                remaining: 1,
+            }),
+            ..req
+        },
+        StepRequest {
+            cursor: Some(StepCursor {
+                next: 0,
+                remaining: 131,
+            }),
+            ..req
+        },
+        StepRequest {
+            cursor: Some(StepCursor {
+                next: 0,
+                remaining: 0,
+            }),
+            ..req
+        },
+        StepRequest {
+            after: Some(0),
+            cursor: Some(StepCursor {
+                next: 1,
+                remaining: 130,
+            }),
+            ..req
+        },
+        StepRequest {
+            bbox_um: Some([0., 0., f64::NAN, 1.]),
+            ..req
+        },
+        StepRequest {
+            bbox_um: Some([0., 0., -1., 1.]),
+            ..req
+        },
+    ] {
+        assert!(p.step(invalid, &flag).is_err());
+    }
+    assert!(p.step_with_limit(req, 0, &flag).is_err());
+    flag.store(1, Ordering::Relaxed);
+    assert_eq!(p.step(req, &flag).unwrap_err().kind, ErrorKind::Cancelled);
+    assert_eq!(fs::read(&f.path).unwrap(), b);
+}
+#[test]
+fn sparse_step_exposes_incomplete_search_without_decoding_unmatched_statuses() {
+    let f = Fixture::new(&bytes(SCAN_ITEMS + 64));
+    let flag = AtomicUsize::new(0);
+    let mut p = Pack::open(&f.path, &flag).unwrap();
+    for backwards in [false, true] {
+        let request = StepRequest {
+            check: 1,
+            backwards,
+            after: Some(31),
+            waived: Some(true),
+            ..Default::default()
+        };
+        let first = p.step(request, &flag).unwrap();
+        assert!(first.hit.is_none() && first.next.is_some());
+        assert!(first.scanned > 0 && first.scanned <= SCAN_ITEMS);
+        let last = p
+            .step(
+                StepRequest {
+                    after: None,
+                    cursor: first.next,
+                    ..request
+                },
+                &flag,
+            )
+            .unwrap();
+        assert!(last.hit.is_none() && last.next.is_none());
+        assert_eq!(first.scanned + last.scanned, SCAN_ITEMS + 64);
+        assert_eq!(p.decoded_blocks, 0);
+    }
 }
 #[test]
 fn lazy_decode_numbering_and_resumable_spatial_pages() {

@@ -28,6 +28,30 @@ pub struct Violation {
     pub points: Vec<[i64; 2]>,
     pub bbox: [i64; 4],
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecordInfo {
+    pub kind: char,
+    pub number: u64,
+    pub bbox: [i64; 4],
+    pub points: usize,
+}
+impl From<&Violation> for RecordInfo {
+    fn from(v: &Violation) -> Self {
+        Self {
+            kind: v.kind,
+            number: v.number,
+            bbox: v.bbox,
+            points: v.points.len(),
+        }
+    }
+}
+#[derive(Clone, Debug)]
+pub struct PointPage {
+    pub record: RecordInfo,
+    pub start: usize,
+    pub points: Vec<[i64; 2]>,
+    pub next: Option<usize>,
+}
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Cursor {
     pub check: usize,
@@ -45,6 +69,35 @@ pub struct Page {
     pub hits: Vec<Hit>,
     /// A resumable file-order cursor. None alone means the search is complete.
     pub next: Option<Cursor>,
+    pub scanned: u64,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StepCursor {
+    pub next: u64,
+    pub remaining: u64,
+}
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StepRequest {
+    pub check: usize,
+    pub backwards: bool,
+    pub after: Option<u64>,
+    pub cursor: Option<StepCursor>,
+    pub waived: Option<bool>,
+    pub bbox_um: Option<[f64; 4]>,
+}
+#[derive(Clone, Copy, Debug)]
+pub struct InfoHit {
+    pub check: usize,
+    pub local: u64,
+    pub status: u8,
+    pub record: RecordInfo,
+}
+#[derive(Clone, Debug)]
+pub struct StepPage {
+    pub hit: Option<InfoHit>,
+    /// Continue with the SAME rule, direction and filters. Only no hit AND no
+    /// continuation establishes that the complete circular search is empty.
+    pub next: Option<StepCursor>,
     pub scanned: u64,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -159,6 +212,24 @@ fn text(b: &[u8], p: u32) -> Result<String> {
 }
 fn intersects(a: [f64; 4], b: [i64; 4]) -> bool {
     a[0] <= b[2] as f64 && a[2] >= b[0] as f64 && a[1] <= b[3] as f64 && a[3] >= b[1] as f64
+}
+fn query_box(bbox_um: [f64; 4], precision: f64) -> Result<[f64; 4]> {
+    if !bbox_um.iter().all(|v| v.is_finite()) || bbox_um[0] > bbox_um[2] || bbox_um[1] > bbox_um[3]
+    {
+        return Err(crate::Error::input("invalid DRC query bbox"));
+    }
+    let q = bbox_um.map(|v| v * precision);
+    if !q.iter().all(|v| v.is_finite()) {
+        return Err(crate::Error::input("DRC query coordinate overflow"));
+    }
+    // Broad phase only: (integer / precision) * precision can round below
+    // the integer. The final predicate stays in the caller's µm domain.
+    Ok([
+        q[0].next_down().next_down().floor(),
+        q[1].next_down().next_down().floor(),
+        q[2].next_up().next_up().ceil(),
+        q[3].next_up().next_up().ceil(),
+    ])
 }
 fn bbox_valid(b: [i64; 4]) -> bool {
     b[0] <= b[2] && b[1] <= b[3]
@@ -587,12 +658,13 @@ impl Pack {
         self.decoded_blocks += 1;
         Ok(records)
     }
-    pub fn error(
+    fn with_record<T>(
         &mut self,
         check: usize,
         error: u64,
         cancelled: &AtomicUsize,
-    ) -> Result<Violation> {
+        read: impl FnOnce(&Violation) -> Result<T>,
+    ) -> Result<T> {
         self.unchanged()?;
         let c = self
             .checks
@@ -603,10 +675,55 @@ impl Pack {
         let records = self.block(check, bi, cancelled)?;
         let e = records
             .get((error % 64) as usize)
-            .ok_or_else(|| corrupt("block member index"))?
-            .clone();
+            .ok_or_else(|| corrupt("block member index"))?;
+        let value = read(e)?;
         self.unchanged()?;
-        Ok(e)
+        Ok(value)
+    }
+    pub fn error(
+        &mut self,
+        check: usize,
+        error: u64,
+        cancelled: &AtomicUsize,
+    ) -> Result<Violation> {
+        self.with_record(check, error, cancelled, |v| Ok(v.clone()))
+    }
+    /// Validation still decodes the containing block, but a bbox-only consumer
+    /// need not clone a large polygon's coordinates or retain a cache Arc.
+    pub fn error_info(
+        &mut self,
+        check: usize,
+        error: u64,
+        cancelled: &AtomicUsize,
+    ) -> Result<RecordInfo> {
+        self.with_record(check, error, cancelled, |v| Ok(RecordInfo::from(v)))
+    }
+    /// Copy only the requested coordinate slice. Coordinate-copy cost over
+    /// all pages is O(total points), not O(record * pages). Cache eviction
+    /// can still require decoding the containing block again.
+    pub fn error_points(
+        &mut self,
+        check: usize,
+        error: u64,
+        start: usize,
+        limit: usize,
+        cancelled: &AtomicUsize,
+    ) -> Result<PointPage> {
+        if !(1..=2048).contains(&limit) || start > RECORD_POINTS {
+            return Err(crate::Error::input("invalid point page"));
+        }
+        self.with_record(check, error, cancelled, |v| {
+            if start > v.points.len() {
+                return Err(crate::Error::input("point cursor"));
+            }
+            let end = (start + limit).min(v.points.len());
+            Ok(PointPage {
+                record: RecordInfo::from(v),
+                start,
+                points: v.points[start..end].to_vec(),
+                next: (end < v.points.len()).then_some(end),
+            })
+        })
     }
     /// A single rule's file-order page, with blockwise status I/O. This is
     /// also the streamed CLI path: not two stat calls per individual error.
@@ -676,6 +793,141 @@ impl Pack {
         }
         Ok(b)
     }
+    /// Next/previous matching error in ONE rule, wrapping once. Work and
+    /// response size are bounded even when a sparse filter finds no hit.
+    pub fn step(&mut self, request: StepRequest, cancelled: &AtomicUsize) -> Result<StepPage> {
+        self.step_with_limit(request, SCAN_ITEMS, cancelled)
+    }
+    pub(super) fn step_with_limit(
+        &mut self,
+        request: StepRequest,
+        limit: u64,
+        cancelled: &AtomicUsize,
+    ) -> Result<StepPage> {
+        self.unchanged()?;
+        check_cancelled(cancelled)?;
+        let StepRequest {
+            check,
+            backwards,
+            after,
+            cursor,
+            waived,
+            bbox_um,
+        } = request;
+        let c = self
+            .checks
+            .get(check)
+            .ok_or_else(|| crate::Error::input("DRC rule index"))?;
+        let (count, block_start, global_start) = (c.count, c.block_start, c.start);
+        if !(1..=SCAN_ITEMS).contains(&limit)
+            || after.is_some_and(|i| i >= count)
+            || cursor.is_some_and(|c| c.next >= count || c.remaining == 0 || c.remaining > count)
+            || after.is_some() && cursor.is_some()
+        {
+            return Err(crate::Error::input("invalid DRC step cursor"));
+        }
+        let broad = bbox_um.map(|b| query_box(b, self.precision)).transpose()?;
+        let mut page = StepPage {
+            hit: None,
+            next: None,
+            scanned: 0,
+        };
+        if count == 0 || broad.is_some_and(|b| c.bbox.is_none_or(|c| !intersects(b, c))) {
+            self.unchanged()?;
+            return Ok(page);
+        }
+        let advance = |i: u64| {
+            if backwards {
+                if i == 0 {
+                    count - 1
+                } else {
+                    i - 1
+                }
+            } else if i == count - 1 {
+                0
+            } else {
+                i + 1
+            }
+        };
+        let mut cursor = cursor.unwrap_or_else(|| StepCursor {
+            next: after.map_or(if backwards { count - 1 } else { 0 }, advance),
+            remaining: count,
+        });
+        let mut blocks = 0;
+        'blocks: while cursor.remaining > 0 && page.scanned < limit && blocks < 4096 {
+            blocks += 1;
+            check_cancelled(cancelled)?;
+            let at = cursor.next;
+            let len = if backwards {
+                at % 64 + 1
+            } else {
+                (64 - at % 64).min(count - at)
+            }
+            .min(cursor.remaining)
+            .min(limit - page.scanned) as usize;
+            let lo = if backwards { at + 1 - len as u64 } else { at };
+            let bi = block_start + at / 64;
+            let mut block = [0; 48];
+            self.input
+                .read(add(self.blocks, mul(bi, 48)?)?, &mut block)?;
+            let block_bb = [
+                i64at(&block, 16),
+                i64at(&block, 24),
+                i64at(&block, 32),
+                i64at(&block, 40),
+            ];
+            if broad.is_some_and(|b| !intersects(b, block_bb)) {
+                cursor.next = advance(if backwards { lo } else { lo + len as u64 - 1 });
+                cursor.remaining -= len as u64;
+                page.scanned += len as u64;
+                continue;
+            }
+            let mut statuses = [0; 64];
+            let (f, off) = self
+                .review
+                .as_ref()
+                .map_or((&self.input, self.status), |r| (r, 40));
+            f.read(add(off, global_start + lo)?, &mut statuses[..len])?;
+            // Do not trust the optional waived counters to skip a block:
+            // older tools can leave counters stale while statuses are valid.
+            let mut records = None;
+            for offset in 0..len {
+                let j = if backwards { len - 1 - offset } else { offset };
+                let ei = lo + j as u64;
+                cursor.next = advance(ei);
+                cursor.remaining -= 1;
+                page.scanned += 1;
+                if waived.is_some_and(|w| (statuses[j] == 1) != w) {
+                    continue;
+                }
+                if records.is_none() {
+                    records = Some(self.block(check, bi, cancelled)?);
+                }
+                let e = records
+                    .as_ref()
+                    .unwrap()
+                    .get((ei % 64) as usize)
+                    .ok_or_else(|| corrupt("step member index"))?;
+                if let Some(b) = bbox_um {
+                    let eb = self.bbox_um(e.bbox)?;
+                    if b[0] > eb[2] || b[2] < eb[0] || b[1] > eb[3] || b[3] < eb[1] {
+                        continue;
+                    }
+                }
+                page.hit = Some(InfoHit {
+                    check,
+                    local: ei,
+                    status: statuses[j],
+                    record: RecordInfo::from(e),
+                });
+                break 'blocks;
+            }
+        }
+        page.next = (page.hit.is_none() && cursor.remaining > 0).then_some(cursor);
+        check_cancelled(cancelled)?;
+        self.unchanged()?;
+        Ok(page)
+    }
     /// Bounded spatial page. `scanned` counts error slots, not just hits; an
     /// empty dense query therefore yields a continuation instead of hanging.
     pub fn query(
@@ -700,19 +952,7 @@ impl Pack {
         {
             return Err(crate::Error::input("invalid DRC query/cursor/limit"));
         }
-        let q = bbox_um.map(|v| v * self.precision);
-        if !q.iter().all(|v| v.is_finite()) {
-            return Err(crate::Error::input("DRC query coordinate overflow"));
-        }
-        // Broad phase only: (integer / precision) * precision may round to
-        // just below the integer. Expand by two ULPs and outward DBU rounding;
-        // the final predicate below stays in the caller's micrometre domain.
-        let q = [
-            q[0].next_down().next_down().floor(),
-            q[1].next_down().next_down().floor(),
-            q[2].next_up().next_up().ceil(),
-            q[3].next_up().next_up().ceil(),
-        ];
+        let q = query_box(bbox_um, self.precision)?;
         let mut page = Page {
             hits: Vec::new(),
             next: None,

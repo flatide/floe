@@ -3,7 +3,10 @@
 mod local;
 mod pack;
 pub use local::{open_current, reviewer_tag, waive_paths};
-pub use pack::{Check, Cursor, Hit, Pack, Page, Violation};
+pub use pack::{
+    Check, Cursor, Hit, InfoHit, Pack, Page, PointPage, RecordInfo, StepCursor, StepPage,
+    StepRequest, Violation,
+};
 
 use crate::{Error, ErrorKind};
 pub const MAGIC: &[u8; 8] = b"FLOEICE\0";

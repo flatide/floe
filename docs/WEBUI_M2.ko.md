@@ -276,11 +276,51 @@ DRC 패널은 선택/waive/페이지/zoom 상태 복원이 goto나 새로운 저
 offline 테스트·Linux musl release link로 재확인했다. QA 세션은 End session으로
 정상 종료했다. 기존 native 경고는 남아 있다.
 
-## 6. 다음 경계
+## 6. M2a-5a: 현재 규칙의 유계 순회와 좌표 읽기 비용
+
+`Pack::step`과 `body.kind=step` 읽기 API를 추가했다. 아직 UI 단축키에는
+연결하지 않은 코어/API 단계이며 §3의 페이지 내 순회 제한은 다음 단계에서 바꾼다.
+
+- 요청은 `check`, `backwards`, `after`(없으면 앞/뒤 첫 오류부터), `waived`,
+  선택적인 `bbox_um`이다. **한 규칙 안에서** 동일 필터를 만족하는 다음 오류를
+  찾으며 끝에서는 반대쪽으로 한 번 순환한다. 자기 자신만 일치하면 다시 자신이다.
+- 응답은 최대 하나의 `hit`(기존 목록과 같은 번호/종류/status/bbox/점 수),
+  검사 slot 수 `scanned`, 그리고 `next={next,remaining}`이다. 번호는 u64 문자열.
+  hit가 없고 next가 있을 때는 미완료이며 동일 규칙·방향·필터로 이어 읽는다.
+  이어읽기는 `after=null`로 보내고, 원래 기준과 cursor를 함께 보내면 거부한다.
+  서버가 cursor 세션을 별도로 보관하지 않으므로 filter 동일성은 호출자 계약이다.
+- 한 호출은 최대 262,144 slots / 4,096 block 단계다. 상태 bytes를 블록 단위로
+  읽으며 오래된 waive count를 근거로 생략하지 않는다. 공간 필터는 check/block
+  bbox로 가지치기하고 실제 오류 bbox를 µm에서 비교한다. 최악 시간/RSS를 숫자로
+  보장하는 cap은 아니며 큰 coordinate block과 NFS I/O는 기존 취소/timeout 계약이다.
+- `error_info()`는 bbox만 필요한 focus/step 소비자에 작은 metadata만 복사한다.
+  `error_points()`는 최대 2,048점의 요청 구간만 복사하므로 한 큰 오류의 여러
+  transport 페이지에서 **좌표 복사량**이 전체 좌표 수에 비례한다. containing block
+  decode/검증은 여전히 필요하고 다른 요청의 LRU eviction으로 재decode할 수 있다.
+  errors/query의 기존 전체 record 복사까지 제거한 것으로 해석하지 않는다.
+- 인증·source/view/DRC revision·원본 파일 변경 검사와 actor queue는 동일하다.
+  native render state, 캐시 포맷, renderd wire/버전, waive 파일은 변경하지 않는다.
+
+게이트: 앞/뒤·처음/끝/63→64 경계·waive 세 상태·공간 필터·1/7/전체 scan limit
+조합을 파일 순서 전수 오라클과 비교한다. 262k 초과 무일치 검색은 continuation을
+내고 geometry를 decode하지 않는지 검사한다. 5,000점 좌표의 2,048/2,048/904
+구간 합은 원본과 같고 bbox 소비자는 전체 좌표를 반환하지 않는다. 실제 HTTP도
+130개 오류를 담은 규칙과 큰 polygon에서 기존 Python 결과와 순회/번호/bbox를 대조하며,
+잘못된 cursor·타입·범위를 거부하고 원본 파일 및 render revision 비변경을 확인한다.
+
+2026-09-13: core 50개 및 web/app/transport 테스트, strict clippy,
+Rust 1.89/빈 registry 오프라인 테스트·Linux musl release link 통과.
+실제 HTTP 오라클과 전체 `sh tools/validate_rust.sh`는 `RUST VALIDATION: ALL OK`.
+field Firefox/ETX와 새 단축키 UI의 검증을 이 API 단계의 완료에 포함하지 않는다.
+기존 native 경고는 남아 있다.
+
+## 7. 다음 경계
 
 1. 현재 규칙/필터 안의 페이지 횡단 순회는 별도 작은 단계로 연결한다.
-   GTK의 단일 click=선택/초점, double-click=이동, Escape 뒤 n/p=뷰 이동 없이
-   초점 변경도 조작 parity로 남아 있다(현 M2a-3 click은 선택+goto).
+   GTK의 최초 click=선택/초점, double-click=이동 모드, 이동 모드의 click/n/p=이동,
+   Escape 뒤 n/p=뷰 이동 없이 초점 변경도 조작 parity로 남아 있다
+   (현 M2a-3 click은 항상 선택+goto). Escape는 viewport 복원이 아니라
+   mark/격리 등을 종료하고 순회 위치를 유지하는 동작이다.
 2. ASCII/index 흐름·기존 notes·상세 측정/룰 매핑은 각각 parity gate와 함께 확장.
 3. 공유는 설계/DRC에 묶인 읽기 capability, 발급/만료/폐기·follow/independent
    state를 별도 구현·검증. 아직 shares=false, loopback-only다.

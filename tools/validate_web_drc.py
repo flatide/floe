@@ -228,6 +228,45 @@ def main(fixture):
                     assert points == [list(pt) for pt in e["pts"]]
             search = read(dict(kind="rules", start="0", search="mask<", limit=64))
             assert [r["name"] for r in search["rows"]] == ["MASK<&>"]
+            # A navigation step crosses pages/64-record blocks and wraps in
+            # ONE rule, with the same waive/spatial predicate as the list.
+            # Neither the hit metadata nor a focus request includes coordinates.
+            for ci, exp in enumerate(expected):
+                count = len(exp["errors"])
+                anchors = [None] + sorted({i for i in (0, 62, 63, 64, 128, count-1) if 0 <= i < count})
+                for backwards in (False, True):
+                    for waived in (None, False, True):
+                        for after in anchors:
+                            for box in (None, [0, 0, .03, .01]):
+                                request = dict(kind="step", check=str(ci), backwards=backwards,
+                                               after=None if after is None else str(after), cursor=None,
+                                               waived=waived, bbox_um=None if box is None else list(map(str, box)))
+                                page = read(request)
+                                assert page["next"] is None and int(page["scanned"]) <= count
+                                start = (count-1 if backwards else 0) if after is None else after + (-1 if backwards else 1)
+                                indices = [((start-i) if backwards else (start+i)) % count for i in range(count)]
+                                wanted = next((exp["errors"][i] for i in indices
+                                    if (waived is None or (exp["errors"][i]["status"] == 1) == waived)
+                                    and (box is None or (exp["errors"][i]["bbox"][0] <= box[2]
+                                    and exp["errors"][i]["bbox"][2] >= box[0]
+                                    and exp["errors"][i]["bbox"][1] <= box[3]
+                                    and exp["errors"][i]["bbox"][3] >= box[1]))), None)
+                                assert (page["hit"] is None) == (wanted is None), (request, page)
+                                if wanted:
+                                    h = page["hit"]
+                                    assert (h["check"], h["local"], h["global"], h["status"]) == (
+                                        str(ci), wanted["local"], wanted["glob"], wanted["status"])
+                                    assert h["points"] == str(len(wanted["pts"])) and "points_dbu" not in h
+                                    assert list(map(float, h["bbox_um"])) == list(wanted["bbox"])
+            mask = next(i for i, c in enumerate(expected) if c["name"] == "MASK<&>")
+            step = dict(kind="step", check=str(mask), backwards=False, after=None,
+                        cursor=dict(next="63", remaining="2"), waived=None, bbox_um=None)
+            assert read(step)["hit"]["local"] == "63"
+            for invalid in (dict(next="130", remaining="1"), dict(next="0", remaining="131"),
+                            dict(next="0", remaining="0"), dict(next="00", remaining="1")):
+                read(dict(step, cursor=invalid), 400)
+            read(dict(step, after="62"), 400)
+            read(dict(step, bbox_um=["0", "0", "NaN", "1"]), 400)
             for box in ([-1e6, -1e6, 1e6, 1e6], [0, 0, 0.03, 0.01], [900, 900, 901, 901]):
                 for waived in (None, True, False):
                     cursor = dict(check="0", error="0")
@@ -277,7 +316,7 @@ def main(fixture):
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     proc.communicate(timeout=5)
-    print("WEB DRC: ALL OK (auth, scoped IDs, pages, coordinates, waive, queries, focus/in-view, panel CAS/replay, stale view, read-only, cancellation/reap)")
+    print("WEB DRC: ALL OK (auth, scoped IDs, pages, coordinates, waive, queries, circular step, focus/in-view, panel CAS/replay, stale view, read-only, cancellation/reap)")
 
 
 if __name__ == "__main__":
