@@ -77,6 +77,8 @@ pub enum Request {
         check: String,
         error: String,
         fit: bool,
+        #[serde(default)]
+        isolate: bool,
     },
     Step {
         check: String,
@@ -158,6 +160,8 @@ pub(super) enum Command {
         error: u64,
         fit: bool,
         context: Option<FocusContext>,
+        isolate: bool,
+        preparation: Option<super::focus::Preparation>,
     },
     InView {
         waived: Option<bool>,
@@ -370,11 +374,18 @@ impl Request {
                 check: index(&check)?,
                 error: number(&error)?,
             },
-            Self::Focus { check, error, fit } => Command::Focus {
+            Self::Focus {
+                check,
+                error,
+                fit,
+                isolate,
+            } => Command::Focus {
                 check: index(&check)?,
                 error: number(&error)?,
                 fit,
                 context: None,
+                isolate,
+                preparation: None,
             },
             Self::InView {
                 waived,

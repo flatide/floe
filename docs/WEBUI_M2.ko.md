@@ -927,10 +927,96 @@ renderd 버전과 GTK 기본값, loopback/auth 모델은 바꾸지 않았다. Li
 한 번만 저장하며 격리+goto를 한 번의 view 변경으로 적용해야 한다. jobdeck의 virtual
 level/TC 번호를 physical GDS 번호로 취급해서는 안 된다.
 
-## 18. 다음 경계
+## 18. M2a-10d1: 레이어 격리·복원 코어와 원자적 focus API
+
+웹 조작 연결에 앞서 서버 계약을 추가했다. **이 단계만으로 기존 웹 double-click이
+격리를 실행하지는 않는다.** 다음 10d2에서 요청·승인 처리와 Restore/Escape를 연결한다.
+
+### 상태와 매칭
+
+- `ViewState`가 첫 격리 직전의 가시성(`All`/`None`/정규화된 pairs)을 한 번만 저장한다.
+  두 번째 격리나 수동 layer checkbox 변경은 저장값을 덮어쓰지 않는다. 저장값은 Arc로
+  공유하여 주기적인 snapshot마다 복사하지 않는다. 복원은 가시성만 되돌리며
+  viewport·스타일·detail·depth를 되돌리지 않는다. 새 view는 저장값이 없다.
+- 격리와 goto는 동일 `Patch`에서 검증·CAS·반영한다. 빈/없는 pair,4096 초과의 명시
+  선택, isolation과 일반 layers/layer_change를 같은 patch에 넣은 경우는 전체 오류다.
+  저장/해제만 달라지고 가시성 정책값도 같으면 state_rev만 증가하며 render_rev/key와
+  기존 프레임을 유지한다. 이미 복원된 상태의 재복원은 no-op이다.
+- source_gds는 DRC actor에서 **전체 immutable Model.styles**와 매칭한다. datatype=null은
+  같은 GDS layer의 모든 datatype이다. 중복 요청 pair는 중복 집계하지 않으며
+  브라우저의64개 표시 페이지와 무관하다. 일치 전체가 모든 스타일이면 `All`로 표현;
+  일부만 일치하면서4096개를 넘으면413 `drc_read_limit`이지 prefix 격리가 아니다.
+  매칭 중 취소를 검사하며 도형/페이지를 디코드하지 않는다.
+- metadata 없음·rule 없음·source_gds 비어 있음·일치 없음은 **격리 없이 goto만 준비**한다.
+  이미 격리된 상태가 있다면 가시성/첫 저장값을 유지한다. jobdeck virtual level/TC를
+  physical GDS로 오인하지 않도록 현재 모든 deck mode는 `unsupported_deck`로 표시하고
+  격리하지 않는다. 물리 plane 매핑에 따른 덱 격리는 별도 미완료다.
+
+### 전달과 적용
+
+기존 `POST /api/v1/drc/{id}/read`의 focus body에 `isolate:boolean`을 추가했다.
+생략/false는 기존 navigation-only 읽기와 동일하다. true는 기존 source/view/DRC revision과
+필수 state_rev 인증·검사를 거쳐 아래 추가 필드를 반환한다.
+
+```json
+{
+  "check": "0", "local": "1",
+  "navigation": {"kind": "goto", "center_um": ["1", "2"], "width_um": "10"},
+  "layer_isolation": {"status": "ready", "matched": "2"},
+  "prepared_token": "<opaque one-use ID>"
+}
+```
+
+status는 `ready|no_metadata|no_rule|no_source_layers|no_match|unsupported_deck`다.
+matched는 GDS pair 개수의 십진 문자열이다. 실제 pairs/원래 가시성을 요청 토큰과 함께
+브라우저로 왕복시키지 않는다. navigation의 십진 문자열은 기존 관찰·호환용이며
+토큰 적용은 서버에 보관한 native patch 자체를 사용한다.
+
+```json
+{
+  "type": "view.apply", "seq": "9", "connection_epoch": "<current>",
+  "view_id": "<current>", "base_state_rev": "3", "token": "<prepared_token>"
+}
+```
+
+준비 HTTP는 view를 바꾸거나 렌더를 제출하지 않는다. 적용은 기존 인증 WebSocket의
+epoch/view 검사와 controller state CAS를 사용한다. 응답은 view.set과 같은
+`accepted|error` 뒤 authoritative `snapshot`이다. 한 view에 최신 준비 슬롯 **1개**만
+있고 새로운 준비 시작은 이전 슬롯을 무효화한다. 먼저 시작한 느린 HTTP가 나중 요청의
+준비를 덮어쓰지 못하며 해당 응답은409 `prepared_edit_expired`다. 일치 토큰은 적용
+시도에 한 번만 소비한다(기준 버전 충돌/검증 오류도 포함). 다른 토큰은 슬롯을 소비하지
+않는다. state_rev가 달라지면 `stale_state`; 다른/이미 소비된/새 view의 토큰은
+`prepared_edit_expired`이며 자동 재시도하지 않는다. 준비 번호 고갈/entropy 실패는503이다.
+DRC actor의 기존 대기4개·동시 HTTP/응답 제한은 유지하며 추가 worker는 없다.
+
+복원은 `view.set` body의 `restore_layers:true`다(false/생략=no-op, null 거부).
+snapshot의 `layers_isolated:boolean`이 복원 가능 상태를 알려 준다. 원래 pairs는
+브라우저 패널4 KiB 상태에 저장하지 않으며 동일 view 재접속 후에도 서버가 보존한다.
+view 종료·재open은 새 scope이므로 이전 격리/토큰을 이어받지 않는다.
+
+### 검증
+
+- 코어: 원래 visibility=None도 복원, 반복 격리의 Arc 동일성, 수동 수정·depth/detail 보존,
+  격리+goto 하나의 revision, stale/빈/초과/알 수 없는 layer/충돌 patch 전체 거부,
+  같은 visibility의 저장·복원은 새 raster 없음, 종료 후 편집 거부.
+- actor/준비 슬롯:300개 전체 스타일의 뒤쪽 pair·wildcard·중복,5000개 All 표현 및
+  일부4096 초과의 명시 오류, 취소·jobdeck 오매칭 방지, 준비 순서 역전·재사용 거부.
+- `validate_owner_service.py`의 추가 native HTTP/WS gate: 준비의 무변경,
+  단일 격리+goto render_rev, 오래된 기준/CAS·잘못된/소비된 토큰 거부, missing rule/metadata
+  시 가시성 유지, WebSocket 재접속 후 한 번만 복원, 새 view의 이전 토큰 거부,
+  pack byte/mtime 무변경과 모든 worker/예약 수거를 실제 renderd로 확인한다.
+
+2026-09-13 전체 `sh tools/validate_rust.sh` ALL OK; KLayout13 PX+2 phase-exact+
+14 style(j1/j8), jobdeck80, renderer46도 통과했다. core67/app6/web27/transport8,
+fmt·전환 패키지 strict clippy, Rust1.89 빈 registry offline 테스트 및 Linux musl
+release link를 통과했다. 기존 native/Pillow/GLib 경고는 남아 있다. 이 단계는 UI
+변경이 없고 현장 Firefox/ETX PASS나 Linux 실행·GTK 기본값 교체를 의미하지 않는다.
+renderer wire/캐시 형식/RENDERD_VERSION도 바꾸지 않았다.
+
+## 19. 다음 경계
 
 1. SVRF sidecar 코어/actor/API·웹 type/상세/비교는 §15~17까지 이관했다.
-   layer isolate/복원과 한 번의 goto 적용은 다음 단계다.
+   layer isolate/복원·한 번의 goto 서버 기반은 §18이며 웹 승인 처리·Restore/Escape는 다음이다.
    selected/live In view 목록 필터·순회·hover는 §13~14까지 구현했다.
    손으로 그리는 ruler와 그에 따른 Escape 우선순위는 M4에서 확장한다.
    현재 페이지 마커 정책 자체를 전체 pack 마커로 확대하지 않는다.

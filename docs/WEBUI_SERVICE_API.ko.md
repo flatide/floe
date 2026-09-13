@@ -7,7 +7,7 @@
 (exchange/capabilities/logout/WS ping)는 [M1b 기록](WEBUI_M1B.ko.md)에 명세/구현했다.
 아래 전체 URI가 그대로 구현된 것은 아니며 공유 API는 아직 없다.
 M2a의 현재 DRC 등록/읽기 URI·페이지·취소·focus/in_view·패널 상태·필터·순회·마커·
-CD·선택 집합·SVRF metadata/비교·타입 패널 상태 API 계약은 [M2 기록](WEBUI_M2.ko.md) §2~17이
+CD·선택 집합·SVRF metadata/비교·타입 패널·격리/원자적 focus API 계약은 [M2 기록](WEBUI_M2.ko.md) §2~18이
 기준이다. read-only actor만 있고 review 저장/공유 endpoint는 아직 없다.
 M1b-2a의 `app-core/managed`·`view`에는 process-local lease/admission과
 독립 worker controller를 구현했다. M1b-2b의 사전 등록 view용 제어/이미지
@@ -18,6 +18,9 @@ M1b-3의 실행/정적 자산·startup과 브라우저 계약은 §9를 따른�
 checkbox는 `view.set`의 `layer_change:{pair:[layer_u32,datatype_u32],visible:bool}`로
 처리하고 서버에서 head/child 의미를 적용한다. `layers` 전체 선택과 같은 요청이면
 전체 선택을 먼저 적용한다. 잘못된 pair나 선택 수 상한은 오류이며 조용히 자르지 않는다.
+M2a-10d1의 `focus(isolate=true)` 준비 토큰과 `view.apply`, `view.set.restore_layers`,
+snapshot `layers_isolated`는 [M2 §18](WEBUI_M2.ko.md#18-m2a-10d1-레이어-격리복원-코어와-원자적-focus-api)을 따른다.
+기존 double-click/Escape에 자동 연결된 상태는 아직 아니다.
 2026-09-13 M1a-1 `rust/worker-client`와 M1a-2a/b `app/app-core`의 일반 index·info/단일 render/probe를
 구현했다. 현재 호출 계약은 [worker README](../rust/worker-client/README.md),
 [M1a 기록](WEBUI_M1A.ko.md)을 따르며 아래 서비스 전체가 존재하는 것은 아니다.

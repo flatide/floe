@@ -306,7 +306,14 @@ pub(super) fn execute(
             error,
             fit,
             context,
+            isolate,
+            preparation,
         } => {
+            if isolate != preparation.is_some() {
+                return Err(Error::input(
+                    "isolation requires an authoritative preparation",
+                ));
+            }
             let c = context.ok_or_else(|| Error::input("focus requires an authoritative view"))?;
             let v = p.error_info(check, error, stop)?;
             let b = p.bbox_um(v.bbox)?;
@@ -322,8 +329,20 @@ pub(super) fn execute(
             if !width.is_finite() || width <= 0. || !center.iter().all(|v| v.is_finite()) {
                 return Err(Error::input("unrepresentable DRC focus viewport"));
             }
-            json!({"check":check.to_string(),"local":error.to_string(),"navigation":{
-                "kind":"goto","center_um":center.map(|v|v.to_string()),"width_um":width.to_string()}})
+            let mut value = json!({"check":check.to_string(),"local":error.to_string(),"navigation":{
+                "kind":"goto","center_um":center.map(|v|v.to_string()),"width_um":width.to_string()}});
+            if let Some(preparation) = preparation {
+                value["layer_isolation"] = preparation.build(
+                    metadata,
+                    &p.checks[check].name,
+                    floe_app_core::view::Navigation::Goto {
+                        center_um: center,
+                        width_um: width,
+                    },
+                    stop,
+                )?;
+            }
+            value
         }
     };
     check_cancelled(stop)?;

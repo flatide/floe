@@ -34,6 +34,7 @@ def main(fixture):
                              text=True, capture_output=True, timeout=120)
         assert run.returncode == 0, (run.stdout, run.stderr)
         assert "RUST OWNER SERVICE: ALL OK" in run.stdout
+        assert "RUST DRC ISOLATION: ALL OK" in run.stdout
         assert not list(workers.iterdir()), "owner service leaked worker files"
         print(run.stdout.strip())
 

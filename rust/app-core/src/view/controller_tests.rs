@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     managed::{Limits, Usage},
     shots::{Detail, Thin},
-    view::{Depth, Navigation, Viewport},
+    view::{Depth, LayerIsolation, Navigation, Viewport},
 };
 use floe_worker_client::{Fields, Fill, FrameFormat, Layers};
 use std::{
@@ -222,6 +222,175 @@ fn pan() -> Patch {
         }),
         ..Default::default()
     }
+}
+
+#[test]
+fn isolation_and_goto_are_atomic_and_restore_only_the_first_visibility() {
+    let r = Resources::new(Limits::default()).unwrap();
+    let mut m = model(false);
+    let model = Arc::get_mut(&mut m).unwrap();
+    let other = model.styles[0].clone();
+    Arc::make_mut(&mut model.styles).push(Style {
+        layer: (2, 0),
+        ..other
+    });
+    model.pairs.insert((2, 0));
+    let c = Arc::new(Control::default());
+    c.open.store(false, Ordering::Relaxed);
+    let mut initial = ViewState::initial(&m, 80, 64).unwrap();
+    initial.layers = Layers::None;
+    let mut v = start(&r, m, initial, Arc::clone(&c));
+    let patch = Patch {
+        navigation: Some(Navigation::Goto {
+            center_um: [8., 9.],
+            width_um: 2.,
+        }),
+        layer_isolation: Some(LayerIsolation::Set(Layers::Only(vec![(2, 0)]))),
+        ..Default::default()
+    };
+    for isolation in [
+        Layers::None,
+        Layers::Only(vec![]),
+        Layers::Only(vec![(9, 9)]),
+        Layers::Only(vec![(1, 0); 4097]),
+    ] {
+        assert!(v
+            .edit(
+                1,
+                Patch {
+                    layer_isolation: Some(LayerIsolation::Set(isolation)),
+                    ..patch.clone()
+                }
+            )
+            .is_err());
+        assert_eq!(v.snapshot().state_rev, 1);
+        assert!(!v.snapshot().state.layers_isolated());
+    }
+    assert!(v
+        .edit(
+            1,
+            Patch {
+                layers: Some(Layers::All),
+                ..patch.clone()
+            }
+        )
+        .is_err());
+    assert!(v
+        .edit(
+            1,
+            Patch {
+                layer_change: Some(((1, 0), true)),
+                ..patch.clone()
+            }
+        )
+        .is_err());
+    let first = v.edit(1, patch).unwrap();
+    assert_eq!(
+        (first.state_rev, first.render_rev, first.render_key),
+        (2, 2, 2)
+    );
+    assert_eq!(first.state.layers, Layers::Only(vec![(2, 0)]));
+    assert_eq!(first.state.viewport.bbox, [7000., 8200., 9000., 9800.]);
+    let saved = first.state.isolated_from.clone().unwrap();
+    assert_eq!(*saved, Layers::None);
+    let second = v
+        .edit(
+            2,
+            Patch {
+                layer_isolation: Some(LayerIsolation::Set(Layers::Only(vec![(1, 0)]))),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(Arc::ptr_eq(
+        &saved,
+        second.state.isolated_from.as_ref().unwrap()
+    ));
+    v.edit(
+        3,
+        Patch {
+            layer_change: Some(((1, 0), false)),
+            detail: Some(Detail::High),
+            depth: Some(Depth::Levels(4)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let restore = Patch {
+        layer_isolation: Some(LayerIsolation::Restore),
+        ..Default::default()
+    };
+    assert_eq!(
+        v.edit(1, restore.clone()).unwrap_err().kind,
+        ErrorKind::Busy
+    );
+    let before = v.snapshot();
+    let restored = v.edit(4, restore.clone()).unwrap();
+    assert_eq!(restored.state_rev, 5);
+    assert_eq!(
+        restored.render_rev, before.render_rev,
+        "same visible layers need no new raster"
+    );
+    assert_eq!(restored.render_key, before.render_key);
+    assert_eq!(restored.state.layers, Layers::None);
+    assert!(!restored.state.layers_isolated());
+    assert_eq!(restored.state.viewport, first.state.viewport);
+    assert_eq!(restored.state.detail, Detail::High);
+    assert_eq!(restored.state.depth, Some(4));
+    assert_eq!(v.edit(5, restore.clone()).unwrap().state_rev, 5);
+    assert!(c.requests.lock().unwrap().is_empty());
+    c.open.store(true, Ordering::Relaxed);
+    wait(|| v.latest().is_some());
+    assert_eq!(v.snapshot().submitted, 1);
+    v.close().unwrap();
+    assert!(v.edit(5, restore).is_err());
+    assert!(!ViewState::initial(&v.model, 80, 64)
+        .unwrap()
+        .layers_isolated());
+}
+
+#[test]
+fn isolation_bookkeeping_does_not_invalidate_an_unchanged_frame() {
+    let r = Resources::new(Limits::default()).unwrap();
+    let m = model(false);
+    let mut v = start(
+        &r,
+        Arc::clone(&m),
+        ViewState::initial(&m, 80, 64).unwrap(),
+        Arc::new(Control::default()),
+    );
+    wait(|| v.latest().is_some());
+    let frame = v.latest().unwrap();
+    let isolated = v
+        .edit(
+            1,
+            Patch {
+                layer_isolation: Some(LayerIsolation::Set(Layers::All)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        (isolated.state_rev, isolated.render_rev, isolated.render_key),
+        (2, 1, 1)
+    );
+    assert!(isolated.state.layers_isolated());
+    let restored = v
+        .edit(
+            2,
+            Patch {
+                layer_isolation: Some(LayerIsolation::Restore),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        (restored.state_rev, restored.render_rev, restored.render_key),
+        (3, 1, 1)
+    );
+    assert_eq!(v.latest().unwrap().id, frame.id);
+    assert_eq!(v.snapshot().submitted, 1);
+    v.close().unwrap();
 }
 
 #[test]

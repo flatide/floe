@@ -45,8 +45,14 @@ copying/transferring its vertices. Snapshot replacement is not hot-reloaded.
 The panel shows paged types, rule metadata and the selected error's comparison;
 type/name/waive filters run together on rule reads. Type choice is restored through
 the existing revision-checked panel state. Successful focus navigation releases
-live In view without clearing the selected error. Layer isolation remains next;
-see [M2 §16–17](../../docs/WEBUI_M2.ko.md).
+live In view without clearing the selected error.
+The server now supports `focus(isolate=true)` preparation and single-use
+`view.apply` for atomic physical-layer isolation + navigation. The original
+visibility is saved once in view state; `view.set.restore_layers` restores it.
+Snapshot `layers_isolated` survives reconnect, not a new view. Matching uses the
+entire model; missing metadata/matches and virtual jobdeck IDs never hide layers.
+UI acceptance handling and Restore/Escape integration are the next slice;
+see [M2 §16–18](../../docs/WEBUI_M2.ko.md).
 
 ```sh
 # Run in rust/ to use the vendored source configuration
@@ -65,6 +71,7 @@ PNG/raw integration in a private synthetic fixture with PATH empty: 100-input
 bursts, slow subscribers, reconnect, stale revisions/epochs and resource cleanup.
 `tools/validate_owner_service.py` covers actual authenticated index/open/reopen,
 duplicate operations, cache leases, deck level/chip metadata and child cleanup.
+It also runs native prepared-focus/CAS/replay/reconnect/restore isolation tests.
 
 API, limits, dependency/license/security audit, and incomplete milestones:
 [WEBUI_M1B.ko.md](../../docs/WEBUI_M1B.ko.md).

@@ -49,6 +49,13 @@ struct Login {
 }
 impl Harness {
     async fn start(paths: &[PathBuf], indexer: Indexer) -> Self {
+        Self::start_with_drc(paths, indexer, None).await
+    }
+    async fn start_with_drc(
+        paths: &[PathBuf],
+        indexer: Indexer,
+        drc: Option<(&Path, Option<&Path>)>,
+    ) -> Self {
         let resources = Resources::new(Limits::default()).unwrap();
         let scope = AccessScope::new(&[paths[0].parent().unwrap().to_owned()]).unwrap();
         let sources = paths
@@ -65,7 +72,19 @@ impl Harness {
         let service = Service::start(sources, Arc::clone(&resources), options, indexer).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let (gate, bootstrap) = Gateway::with_service(addr, Arc::clone(&service)).unwrap();
+        let (mut gate, bootstrap) = Gateway::with_service(addr, Arc::clone(&service)).unwrap();
+        if let Some((pack, rules)) = drc {
+            let scope = AccessScope::new(&[pack.parent().unwrap().to_owned()]).unwrap();
+            let source_id = service.catalog()["sources"][0]["source_id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let drc = floe_web::drc::Service::start_with_rules(
+                &resources, scope, pack, None, rules, &source_id,
+            )
+            .unwrap();
+            Gateway::attach_drc(&mut gate, drc).unwrap();
+        }
         let (stop, rx) = oneshot::channel();
         let task = tokio::spawn(transport::serve(listener, Arc::clone(&gate), async {
             let _ = rx.await;
@@ -284,6 +303,9 @@ fn native() -> Indexer {
 fn open(seq: &str, id: &Value, mode: &str, levels: Value) -> Value {
     json!({"kind":"open","seq":seq,"source_id":id,"mode":mode,"levels":levels,"body":{"pixels":[257,191],"labels":false,"depth":"full","detail":"high","thin":"keep"}})
 }
+
+#[path = "support/drc_isolation.rs"]
+mod drc_isolation;
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "run tools/validate_owner_service.py with private source files"]

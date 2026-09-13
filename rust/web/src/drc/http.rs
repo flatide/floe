@@ -9,6 +9,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
+use std::sync::{Arc, Mutex};
 pub(crate) fn routes() -> Router<Gate> {
     Router::new()
         .route("/api/v1/drc", get(catalog))
@@ -26,9 +27,11 @@ pub(super) fn failure(code: super::Failure) -> Response {
         "drc_unavailable" => StatusCode::NOT_FOUND,
         "drc_changed_or_corrupt" | "drc_read_error" => StatusCode::UNPROCESSABLE_ENTITY,
         "drc_read_limit" | "drc_selection_limit" => StatusCode::PAYLOAD_TOO_LARGE,
-        "drc_context_changed" | "drc_panel_conflict" | "drc_selection_conflict" => {
-            StatusCode::CONFLICT
-        }
+        "drc_context_changed"
+        | "drc_panel_conflict"
+        | "drc_selection_conflict"
+        | "prepared_edit_expired" => StatusCode::CONFLICT,
+        "prepared_edit_unavailable" | "prepared_edit_limit" => StatusCode::SERVICE_UNAVAILABLE,
         "drc_cancelled" => StatusCode::REQUEST_TIMEOUT,
         _ => StatusCode::BAD_REQUEST,
     };
@@ -220,7 +223,26 @@ async fn read(
     } else {
         None
     };
-    let mut ticket = match drc.submit_filters(body.body, context, selected) {
+    let preparation = if matches!(&body.body, Request::Focus { isolate: true, .. }) {
+        let Some(v) = gate.active_view().filter(|v| v.id == body.view_id) else {
+            return failure("drc_context_changed");
+        };
+        let base = crate::view::counter(body.state_rev.as_deref().unwrap()).unwrap();
+        let stamp = match v.prepared.lock().unwrap().begin(base) {
+            Ok(stamp) => stamp,
+            Err(e) => return failure(e),
+        };
+        Some((v, stamp, Arc::new(Mutex::new(None))))
+    } else {
+        None
+    };
+    let actor_preparation = preparation
+        .as_ref()
+        .map(|(v, _, result)| super::focus::Preparation {
+            model: Arc::clone(&v.controller.model),
+            result: Arc::clone(result),
+        });
+    let mut ticket = match drc.submit_prepared(body.body, context, selected, actor_preparation) {
         Ok(t) => t,
         Err(e) => return failure(e),
     };
@@ -240,6 +262,22 @@ async fn read(
             return failure(e);
         }
     }
+    let result = result.and_then(|bytes| {
+        let Some((v, stamp, result)) = preparation else {
+            return Ok(bytes);
+        };
+        let patch = result.lock().unwrap().take().ok_or("drc_read_error")?;
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|_| "drc_read_error")?;
+        // Publishing the plan does not edit the view. The consuming WebSocket
+        // command still performs the state CAS under the controller lock.
+        value["prepared_token"] = json!(v.prepared.lock().unwrap().finish(stamp, patch)?);
+        let bytes = serde_json::to_vec(&value).map_err(|_| "drc_read_error")?;
+        if bytes.len() > super::RESPONSE_BYTES {
+            return Err("drc_read_limit");
+        }
+        Ok(bytes)
+    });
     match result {
         Ok(bytes) => (
             [

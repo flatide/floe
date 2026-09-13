@@ -8,6 +8,7 @@ mod layer_catalog;
 mod operations;
 pub mod origin;
 mod owner;
+mod prepared;
 pub mod service;
 mod stream;
 pub mod transport;

@@ -165,6 +165,12 @@ pub enum Depth {
     Full,
     Levels(u32),
 }
+#[derive(Clone, Debug)]
+pub enum LayerIsolation {
+    /// Remember the original visibility once, even across subsequent isolates.
+    Set(Layers),
+    Restore,
+}
 #[derive(Default, Clone, Debug)]
 pub struct Patch {
     pub navigation: Option<Navigation>,
@@ -175,6 +181,7 @@ pub struct Patch {
     pub layers: Option<Layers>,
     /// A panel checkbox is a bounded delta, not a round-trip of all layer IDs.
     pub layer_change: Option<((u32, u32), bool)>,
+    pub layer_isolation: Option<LayerIsolation>,
     pub frames: Option<bool>,
     pub labels: Option<bool>,
     pub font_px: Option<u32>,
@@ -188,6 +195,9 @@ pub struct ViewState {
     pub detail: Detail,
     pub thin: Thin,
     pub layers: Layers,
+    // Controller snapshots are frequent; never copy the saved pair list on a
+    // poll. This is view state, not a raster policy or a browser-owned backup.
+    isolated_from: Option<Arc<Layers>>,
     pub frames: bool,
     pub labels: bool,
     pub font_px: u32,
@@ -280,6 +290,7 @@ impl ViewState {
             detail: Detail::Medium,
             thin: Thin::Auto,
             layers: Layers::All,
+            isolated_from: None,
             frames: false,
             labels: !model.deck,
             font_px: 14,
@@ -288,6 +299,13 @@ impl ViewState {
         })
     }
     pub fn edit(&self, model: &Model, patch: Patch) -> Result<Self> {
+        if patch.layer_isolation.is_some()
+            && (patch.layers.is_some() || patch.layer_change.is_some())
+        {
+            return Err(Error::input(
+                "isolation conflicts with explicit layer edits",
+            ));
+        }
         let mut s = self.clone();
         if let Some((w, h)) = patch.pixels {
             s.viewport = s.viewport.resize(w, h)?;
@@ -344,6 +362,27 @@ impl ViewState {
             } else {
                 model.layers(&Layers::Only(selected.into_iter().collect()))?
             };
+        }
+        if let Some(isolation) = patch.layer_isolation {
+            match isolation {
+                LayerIsolation::Set(layers) => {
+                    let layers = model.layers(&layers)?;
+                    if layers == Layers::None {
+                        return Err(Error::input(
+                            "isolation requires a nonempty layer selection",
+                        ));
+                    }
+                    if s.isolated_from.is_none() {
+                        s.isolated_from = Some(Arc::new(s.layers.clone()));
+                    }
+                    s.layers = layers;
+                }
+                LayerIsolation::Restore => {
+                    if let Some(saved) = s.isolated_from.take() {
+                        s.layers = (*saved).clone();
+                    }
+                }
+            }
         }
         if let Some(v) = patch.frames {
             s.frames = v;
@@ -406,6 +445,11 @@ impl ViewState {
         if self.layers != model.layers(&self.layers)? {
             return Err(Error::input("layers must be normalized"));
         }
+        if let Some(saved) = &self.isolated_from {
+            if **saved != model.layers(saved)? {
+                return Err(Error::input("saved layers must be normalized"));
+            }
+        }
         if self.styles.len() != model.styles.len()
             || self.styles.iter().zip(model.styles.iter()).any(|(a, b)| {
                 a.layer != b.layer || a.width == 0 || a.width > 8 || a.color[3] != 255
@@ -415,7 +459,11 @@ impl ViewState {
         }
         Ok(())
     }
+    pub fn layers_isolated(&self) -> bool {
+        self.isolated_from.is_some()
+    }
     pub fn same_policy(&self, other: &Self, deck: bool) -> bool {
+        // Saving/restoring unchanged visibility must not invalidate geometry.
         self.depth == other.depth
             && self.detail == other.detail
             && self.thin.effective(deck) == other.thin.effective(deck)

@@ -87,6 +87,14 @@ enum Control {
         base_state_rev: String,
         body: Box<PatchDto>,
     },
+    #[serde(rename = "view.apply")]
+    Apply {
+        seq: String,
+        connection_epoch: String,
+        view_id: String,
+        base_state_rev: String,
+        token: String,
+    },
     #[serde(rename = "frame.ack")]
     Ack {
         seq: String,
@@ -255,7 +263,7 @@ pub(crate) async fn socket(
                     _=>break,
                 };
                 let control=match serde_json::from_str::<Control>(&text){Ok(c)=>c,Err(_)=>break};
-                let value=match &control {Control::Ping{seq}|Control::Set{seq,..}|Control::Ack{seq,..}=>view::counter(seq)};
+                let value=match &control {Control::Ping{seq}|Control::Set{seq,..}|Control::Apply{seq,..}|Control::Ack{seq,..}=>view::counter(seq)};
                 let Ok(n)=value else {break;};if n<=seq{break;}seq=n;
                 match control {
                     Control::Ping{seq}=>{if reply(&tx,json!({"type":"pong","seq":seq})).is_err(){break;}}
@@ -273,6 +281,18 @@ pub(crate) async fn socket(
                         let Ok(base)=view::counter(&base_state_rev) else {break;};
                         let outcome=body.core().map_err(|_|"invalid_request").and_then(|patch|
                             controller.edit(base,patch).map_err(|e|if e.kind==floe_app_core::ErrorKind::Busy{"stale_state"}else{view::safe_error(e.kind)}));
+                        let state=controller.snapshot();
+                        let event=match outcome {
+                            Ok(accepted)=>json!({"type":"accepted","seq":seq,"state_rev":accepted.state_rev.to_string(),"render_rev":accepted.render_rev.to_string()}),
+                            Err(code)=>json!({"type":"error","seq":seq,"code":code}),
+                        };
+                        if reply(&tx,event).is_err() || reply(&tx,view::snapshot(&state,&controller.model,&attached.id,&epoch)).is_err(){break;}
+                        last_state=state_marker(&state);
+                    }
+                    Control::Apply{seq,connection_epoch,view_id,base_state_rev,token}=>{
+                        if connection_epoch!=epoch||view_id!=attached.id{break;}
+                        let Ok(base)=view::counter(&base_state_rev) else {break;};
+                        let outcome=attached.prepared.lock().unwrap().apply(&token,base,controller);
                         let state=controller.snapshot();
                         let event=match outcome {
                             Ok(accepted)=>json!({"type":"accepted","seq":seq,"state_rev":accepted.state_rev.to_string(),"render_rev":accepted.render_rev.to_string()}),

@@ -1,6 +1,7 @@
 //! Registered, read-only DRC queries. One actor owns the pack; HTTP owns only
 //! bounded DTOs/tickets. No path/reviewer/native command is accepted on the wire.
 mod dto;
+mod focus;
 mod http;
 mod metadata;
 pub(crate) mod panel;
@@ -197,12 +198,30 @@ impl Service {
         context: Option<dto::FocusContext>,
         selected: Option<std::collections::BTreeSet<u64>>,
     ) -> std::result::Result<Ticket, Failure> {
+        self.submit_prepared(request, context, selected, None)
+    }
+    fn submit_prepared(
+        &self,
+        request: Request,
+        context: Option<dto::FocusContext>,
+        selected: Option<std::collections::BTreeSet<u64>>,
+        preparation: Option<focus::Preparation>,
+    ) -> std::result::Result<Ticket, Failure> {
         let mut request = request.core()?;
         match &mut request {
             dto::Command::Focus {
-                context: target, ..
+                context: target,
+                isolate,
+                preparation: prepared,
+                ..
+            } => {
+                if *isolate != preparation.is_some() || *isolate && context.is_none() {
+                    return Err("invalid_drc_request");
+                }
+                *target = context;
+                *prepared = preparation;
             }
-            | dto::Command::InView {
+            dto::Command::InView {
                 context: target, ..
             } => *target = context,
             dto::Command::List { filters, .. } | dto::Command::FilteredStep { filters, .. } => {

@@ -2,7 +2,7 @@
 //! commands never enter these APIs. World coordinates and u64 IDs are strings.
 use floe_app_core::{
     shots::{Detail, Thin},
-    view::{Depth, DisplayFrame, Model, Navigation, Patch, Phase, Snapshot},
+    view::{Depth, DisplayFrame, LayerIsolation, Model, Navigation, Patch, Phase, Snapshot},
 };
 use floe_worker_client::{Fill, FrameFormat, Layers, Style};
 use serde::{Deserialize, Deserializer};
@@ -178,6 +178,7 @@ pub struct PatchDto {
     pub thin: Field<ThinDto>,
     pub layers: Field<Selection>,
     pub layer_change: Field<LayerChange>,
+    pub restore_layers: Field<bool>,
     pub frames: Field<bool>,
     pub labels: Field<bool>,
     pub font_px: Field<u32>,
@@ -235,6 +236,11 @@ impl PatchDto {
                 Selection::Only { pairs } => Layers::Only(pairs),
             }),
             layer_change: self.layer_change.optional().map(|c| (c.pair, c.visible)),
+            layer_isolation: self
+                .restore_layers
+                .optional()
+                .filter(|v| *v)
+                .map(|_| LayerIsolation::Restore),
             frames: self.frames.optional(),
             labels: self.labels.optional(),
             font_px: self.font_px.optional(),
@@ -266,7 +272,7 @@ pub fn snapshot(s: &Snapshot, m: &Model, view_id: &str, connection_epoch: &str) 
         "depth":v.depth.map_or("full".into(),|n|n.to_string()),"max_depth":s.max_depth.map(|n|n.to_string()),
         "detail":match v.detail {Detail::Exact=>"exact",Detail::Low=>"low",Detail::Medium=>"medium",Detail::High=>"high"},
         "thin":v.thin.name(),"effective_thin":match v.thin.effective(m.deck){floe_worker_client::ThinPolicy::Keep=>"keep",_=>"cull"},
-        "layers":layers,"frames":v.frames,"labels":v.labels,"font_px":v.font_px,"mono":v.mono,
+        "layers":layers,"layers_isolated":v.layers_isolated(),"frames":v.frames,"labels":v.labels,"font_px":v.font_px,"mono":v.mono,
         "status":phase(s.phase),"source_stale":m.source_stale,"deck_skipped":m.skipped.to_string(),
         "failure":s.failure.as_ref().map(|(kind,_)|safe_error(*kind)),
         "submitted":s.submitted.to_string(),"consumed":s.consumed.to_string(),"discarded":s.discarded.to_string(),
@@ -443,6 +449,9 @@ mod tests {
             r#"{"pixels":null}"#,
             r#"{"styles":null}"#,
             r#"{"depth":null}"#,
+            r#"{"restore_layers":null}"#,
+            r#"{"restore_layers":"yes"}"#,
+            r#"{"layer_isolation":{"mode":"all"}}"#,
             r#"{"out":"/tmp/a"}"#,
             r#"{"thin":"cull","thin":"keep"}"#,
             r#"{"navigation":{"kind":"goto","center_um":[1,2],"width_um":"5"}}"#,
@@ -474,6 +483,22 @@ mod tests {
             assert!(counter(value).is_err());
         }
         assert_eq!(counter("18446744073709551615").unwrap(), u64::MAX);
+        assert!(matches!(
+            serde_json::from_str::<PatchDto>(r#"{"restore_layers":true}"#)
+                .unwrap()
+                .core()
+                .unwrap()
+                .layer_isolation,
+            Some(LayerIsolation::Restore)
+        ));
+        assert!(
+            serde_json::from_str::<PatchDto>(r#"{"restore_layers":false}"#)
+                .unwrap()
+                .core()
+                .unwrap()
+                .layer_isolation
+                .is_none()
+        );
     }
     fn frame() -> DisplayFrame {
         let mut bytes = b"FLOERAW1".to_vec();

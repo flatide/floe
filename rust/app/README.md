@@ -89,6 +89,8 @@ cargo build --offline --locked --release -p floe-app -p floe-index -p floe-rende
   필터·scalar 측정 비교 API와 웹 패널 표시/상태 복원을 지원한다. 추가256 MiB를
   공통 admission에 예약하지만 CPU/worker 수는 늘지 않는다. 원본/include 경로를
   따라가거나 jobdeck TC root를 넓히지 않는다([M2 §16](../../docs/WEBUI_M2.ko.md#16-m2a-10b-svrf-등록타입규칙-필터측정-비교-api)).
+  서버에는 격리+goto 준비/단일 적용 및 최초 가시성 복원 API도 있다. 웹 조작 연결과
+  jobdeck 물리 plane 격리는 다음 단계다([M2 §18](../../docs/WEBUI_M2.ko.md#18-m2a-10d1-레이어-격리복원-코어와-원자적-focus-api)).
 - `clip/...`와 batch/mosaic/DRC export는 미이관 오류를 낸다.
   자동 Python fallback이나 기존 launcher/portable 교체는 없다.
 
