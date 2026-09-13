@@ -27,6 +27,9 @@
         let jumpScale = null, zoomLock = false, painting = null, lastProjection = null, lastSize = null;
         let jumpActive = false, focusVisible = false, stepBusy = false, stepContinuation = null, rowFocus = false;
         let markerHits = [], hitStamp = '';
+        // A canvas click selects without moving. Auto CD belongs to the last
+        // accepted focus navigation, not necessarily the selected row.
+        let cdTarget = null, cdGlobal = null, cdSegments = null, cdRemaining = 0, cdError = '';
         let restoring = false;
         const persistence = o.stateStore.bind({http: o.http, protocol: P,
             setTimeout: function (fn, delay) { return setTimeout(fn, delay); },
@@ -78,7 +81,51 @@
             el('drc-reload').disabled = !current();
             ['drc-step-prev', 'drc-step-next'].forEach(function (id) { el(id).disabled = !available || !rule || stepBusy || !!(query && !query.bbox); });
             el('drc-step-continue').disabled = !available || stepBusy || !stepContinuation;
+            ['drc-cd-pop', 'drc-cd-clear'].forEach(function (id) { el(id).disabled = !available || !hasCD(); });
         }
+        function hasCD() { return !!cdTarget && cdRemaining > 0 && (cdSegments === null || cdSegments.length > 0); }
+        function showCD() {
+            const title = el('drc-cd-title'), list = el('drc-cd-values'); list.textContent = '';
+            if (!cdTarget) { title.textContent = 'Go to an error to measure it.'; }
+            else if (!cdRemaining) { title.textContent = 'CD rulers cleared.'; }
+            else if (cdError) { title.textContent = 'CD unavailable · ' + cdError; }
+            else if (cdSegments === null) { title.textContent = 'Reading CD measurements…'; }
+            else {
+                title.textContent = 'CD · jumped global ' + cdGlobal + (cdSegments.length ? '' : ' · no supported measurement');
+                cdSegments.slice(0, cdRemaining).forEach(function (s) {
+                    const li = doc.createElement('li'); li.textContent = s.label; li.title = s.role + ': ' + s.distance + ' µm'; list.appendChild(li);
+                });
+            }
+            navigationButtons(); paintLater();
+        }
+        function resetCD() { cancel('cd'); cdTarget = null; cdGlobal = null; cdSegments = null; cdRemaining = 0; cdError = ''; showCD(); }
+        async function loadCD() {
+            const c = current(); if (!c || !cdTarget || !cdRemaining) { return; }
+            const ref = cdTarget, t = task('cd');
+            try {
+                const v = await read('cd', t, c, {kind: 'measurements', check: ref.check, error: ref.error});
+                if (!v || cdTarget !== ref || !cdRemaining) { return; }
+                const decoded = o.rulers.decode(v, ref, P); cdGlobal = decoded.global; cdSegments = decoded.segments; cdError = ''; showCD();
+            } catch (e) {
+                if (valid('cd', t, c) && cdTarget === ref) { cdSegments = []; cdError = e.message || String(e); showCD(); }
+            }
+        }
+        function jumpCD(r) {
+            const same = cdTarget && cdTarget.check === r.check && cdTarget.error === r.local;
+            if (!same || cdSegments === null || cdError) {
+                resetCD(); cdTarget = {check: r.check, error: r.local}; cdGlobal = r.global; cdRemaining = 3; loadCD();
+            } else { cdRemaining = 3; }
+            showCD();
+        }
+        function popCD(all) {
+            if (!hasCD() || restoring) { return false; }
+            // Ruler dismissal also cancels a pending jump so a late response
+            // cannot create a replacement after Escape/k. Jump mode remains.
+            cancelStep(); cancel('focus'); cancel('cd');
+            cdRemaining = all || cdSegments === null ? 0 : Math.max(0, Math.min(cdRemaining, cdSegments.length) - 1);
+            showCD(); savePanel(); return true;
+        }
+        function escape() { return popCD(true) || endFocus(); }
         function paintLater() {
             markerHits = []; hitStamp = '';
             if (stopped || painting !== null) { return; }
@@ -94,7 +141,7 @@
         function paint(p, size) {
             markerHits = []; hitStamp = ''; lastProjection = p; lastSize = size;
             const c = current();
-            if (!ctx || !p || !size || !c || !el('drc-markers').checked || (!rows.length && (!selected || !focusVisible))) { overlay.hidden = true; return; }
+            if (!ctx || !p || !size || !c || !el('drc-markers').checked || (!rows.length && (!selected || !focusVisible) && !hasCD())) { overlay.hidden = true; return; }
             const w = size.pixels[0], h = size.pixels[1]; P.pixels(w, h);
             if (overlay.width !== w || overlay.height !== h) { overlay.width = w; overlay.height = h; }
             overlay.style.width = w / size.dpr + 'px'; overlay.style.height = h / size.dpr + 'px';
@@ -106,6 +153,10 @@
                 const b = bbox(r.bbox_um), xy = point(p, b[0] * .5 + b[2] * .5, b[1] * .5 + b[3] * .5);
                 marker(r, xy, 7, w, h);
             });
+            paintSelected(p, w, h);
+            if (cdSegments && cdRemaining) { o.rulers.paint(ctx, cdSegments.slice(0, cdRemaining), function (x, y) { return point(p, x, y); }, size); }
+        }
+        function paintSelected(p, w, h) {
             if (!selected || !focusVisible) { return; }
             const b = bbox(selected.bbox_um), a = point(p, b[0], b[3]), z = point(p, b[2], b[1]);
             if (![a[0], a[1], z[0], z[1]].every(Number.isFinite) || z[0] < -9 || a[0] > w + 9 || z[1] < -9 || a[1] > h + 9) { return; }
@@ -146,6 +197,7 @@
         }
         function clearSelection() {
             cancelStep(); jumpActive = focusVisible = rowFocus = false;
+            resetCD();
             cancel('geometry'); cancel('focus'); selected = null; points = null; pointsReady = false;
             jumpScale = null; zoomLock = false; el('drc-selected').textContent = 'Click to inspect · double-click to go to an error.';
             paintLater(); navigationButtons(); renderErrors(); savePanel();
@@ -154,6 +206,7 @@
             const hadWork = stepBusy || stepContinuation || (selected && (focusVisible || jumpActive));
             if (!hadWork) { return false; }
             cancelStep(); cancel('focus'); cancel('geometry'); points = null; pointsReady = false;
+            resetCD();
             jumpActive = focusVisible = rowFocus = false;
             if (selected) { el('drc-selected').textContent = 'Global ' + selected.global + ' · focus cleared; n/p continues without moving the view.'; }
             info('Focus cleared · pending error search cancelled.');
@@ -215,7 +268,8 @@
                     if (e.ctrlKey || e.metaKey || e.altKey || e.isComposing) { return; }
                     if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'n' || e.key === 'p') {
                         e.preventDefault(); step(e.key === 'ArrowUp' || e.key === 'p', false, true);
-                    } else if (e.key === 'Escape' && endFocus()) { e.preventDefault(); }
+                    } else if (e.key === 'Escape' && escape()) { e.preventDefault(); }
+                    else if ((e.key === 'k' || e.key === 'K') && popCD(e.key === 'K')) { e.preventDefault(); }
                 };
                 el('drc-errors').appendChild(b);
             });
@@ -265,11 +319,13 @@
             try {
                 const page = await read('focus', t, c, {kind: 'focus', check: r.check, error: r.local, fit: !zoomLock}, true); if (!page) { return; }
                 if (current().pending) { info('View input changed; select the error again to move.'); return; }
-                jumpScale = Number(P.decimal(page.navigation.width_um)) / s.pixels[0]; o.navigate(page.navigation); savePanel();
+                jumpScale = Number(P.decimal(page.navigation.width_um)) / s.pixels[0]; o.navigate(page.navigation); jumpCD(r);
+                info('Read-only · review files are never changed.'); savePanel();
             } catch (e) { failure('focus', t, c, e); }
         }
         function syncRule(check) {
             if (rule && rule.check === check) { return; }
+            resetCD();
             rule = {check: check, name: 'Rule ' + P.next(check)};
             renderRules(); el('drc-rule-title').textContent = rule.name; el('drc-description').textContent = '';
             const c = current(), t = task('description');
@@ -341,7 +397,8 @@
                 error_start: query ? '0' : errorStart, query: query ? {bbox_um: query.bbox, state_rev: query.rev, cursor: errorStart} : null,
                 waived: filter(), selected: selected ? {check: selected.check, error: selected.local} : null,
                 markers: el('drc-markers').checked, shown: shown, jump_scale: jumpScale === null ? null : String(jumpScale), zoom_lock: zoomLock,
-                jump_active: jumpActive, focus_visible: focusVisible};
+                jump_active: jumpActive, focus_visible: focusVisible,
+                cd: cdTarget ? {target: cdTarget, remaining: cdRemaining} : null};
         }
         function savePanel() {
             if (restoring || !current()) { return; }
@@ -366,6 +423,11 @@
                 if (shown !== data.shown) { shown = data.shown; el('drc-panel').hidden = !shown; el('drc-toggle').setAttribute('aria-expanded', String(shown)); o.resize(); }
                 jumpScale = data.jump_scale === null ? null : Number(P.decimal(data.jump_scale)); zoomLock = data.zoom_lock;
                 jumpActive = data.jump_active; focusVisible = data.focus_visible;
+                if (data.cd !== null) {
+                    const cd = data.cd;
+                    if (!cd || !cd.target || !jumpActive || !Number.isInteger(cd.remaining) || cd.remaining < 0 || cd.remaining > 3) { throw new Error('Invalid saved CD state'); }
+                    cdTarget = {check: cursor(cd.target.check), error: cursor(cd.target.error)}; cdRemaining = cd.remaining;
+                }
                 if (jumpScale !== null && !(jumpScale > 0)) { throw new Error('Invalid saved zoom scale'); }
                 if (data.query) { P.bbox(data.query.bbox_um); P.counter(data.query.state_rev);
                     cursor(data.query.cursor.check); cursor(data.query.cursor.error);
@@ -386,6 +448,7 @@
                     el('drc-selected').textContent = 'Global ' + selected.global + (focusVisible ? ' · bounding-box preview' : ' · focus cleared; n/p continues without moving the view.');
                     if (focusVisible) { geometry(selected); }
                 }
+                if (cdTarget && cdRemaining) { loadCD(); } showCD();
             } finally {
                 if (valid('restore', t, c)) { restoring = false; renderRules(); renderErrors(); contextChanged(); }
             }
@@ -394,7 +457,7 @@
             const c = current(); if (!c) { return; }
             // Cancel immediately, not after the panel GET completes. A slow
             // previous focus/step must not move the view during restoration.
-            cancelStep(); ['focus', 'geometry', 'rules', 'errors', 'description', 'restore'].forEach(cancel);
+            cancelStep(); ['focus', 'geometry', 'cd', 'rules', 'errors', 'description', 'restore'].forEach(cancel);
             const key = contextKey(c); restoring = true; navigationButtons(); renderRules(); renderErrors();
             return persistence.attach({path: '/api/v1/drc/' + registration.id + '/views/' + c.id + '/panel',
                 revision: registration.revision, view: c.id}).then(function () {
@@ -446,12 +509,15 @@
         el('drc-step-next').onclick = function () { step(false, false, true); };
         el('drc-step-continue').onclick = function () { step(false, true, true); };
         el('drc-clear').onclick = clearSelection;
+        el('drc-cd-pop').onclick = function () { popCD(false); };
+        el('drc-cd-clear').onclick = function () { popCD(true); };
         el('drc-markers').onchange = function () { paintLater(); savePanel(); };
         el('drc-toggle').onclick = function () { shown = !shown; el('drc-panel').hidden = !shown; el('drc-toggle').setAttribute('aria-expanded', String(shown)); o.resize(); savePanel(); };
         el('drc-reload').onclick = restoreState;
         return {init: refresh, contextChanged: contextChanged, paint: paint, click: click, clear: clearSelection,
             key: function (key) {
-                if (key === 'Escape') { return endFocus(); }
+                if (key === 'Escape') { return escape(); }
+                if (key === 'k' || key === 'K') { return popCD(key === 'K'); }
                 if ((key === 'n' || key === 'p') && rule && current()) { step(key === 'p', false, false); return true; }
                 return false;
             },

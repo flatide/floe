@@ -9,6 +9,7 @@
   <script defer src="/assets/@@BUNDLE@@/protocol.js"></script>
   <script defer src="/assets/@@BUNDLE@@/gestures.js"></script>
   <script defer src="/assets/@@BUNDLE@@/panel-state.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/rulers.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc.js"></script>
   <script defer src="/assets/@@BUNDLE@@/app.js"></script>
 </head>
@@ -72,7 +73,7 @@
         <div id="notice" class="notice" role="alert" hidden></div>
         <canvas id="margin-canvas" width="1" height="1" aria-hidden="true" hidden></canvas>
         <canvas id="canvas" width="1" height="1" aria-label="Rendered layout"></canvas>
-        <canvas id="drc-canvas" width="1" height="1" aria-label="DRC markers and selected violation" hidden></canvas>
+        <canvas id="drc-canvas" width="1" height="1" aria-label="DRC markers, selected violation and CD rulers" hidden></canvas>
         <div id="empty" class="empty"><div class="empty-mark">＋</div><h1>Layout workspace</h1><p id="empty-message">Connecting to the local Rust renderer…</p></div>
         <div id="rendering" class="rendering" hidden>Rendering</div>
         <div class="viewport-hint">Drag / arrows · pan <span>Shift · 10%</span> <span>+ / − zoom</span> <span>Ctrl+A · fit</span></div>
@@ -95,6 +96,12 @@
       <div class="button-row"><button id="drc-step-prev" title="Previous matching error in this rule, wrapping (p)" disabled>Previous error</button><button id="drc-step-next" title="Next matching error in this rule, wrapping (n)" disabled>Next error</button></div>
       <button id="drc-step-continue" hidden>Continue search</button>
       <div class="drc-selection"><p id="drc-selected" class="note">Click to inspect · double-click to go to an error.</p><div class="button-row"><button id="drc-frame" disabled>Frame error</button><button id="drc-clear" disabled>Clear</button></div></div>
+      <section class="drc-cd" aria-label="Automatic CD measurements">
+        <p id="drc-cd-title" class="note" role="status">Go to an error to measure it.</p>
+        <ul id="drc-cd-values"></ul>
+        <div class="button-row"><button id="drc-cd-pop" title="Remove the last CD ruler (k)" disabled>Remove ruler</button><button id="drc-cd-clear" title="Clear CD rulers (Shift+K or Escape)" disabled>Clear rulers</button></div>
+        <p class="note">k removes one · Shift+K clears all. Escape clears rulers before ending error focus.</p>
+      </section>
       <p id="drc-message" class="note" role="status">Read-only review</p>
       <p id="drc-sync-status" class="note" role="status"></p>
       <button id="drc-reload" class="quiet" title="Discard unsynchronized local panel changes and restore this view's server state">Reload review</button>

@@ -9,6 +9,7 @@ fn main() {
         "ui/protocol.js",
         "ui/gestures.js",
         "ui/drc.js",
+        "ui/rulers.js",
         "ui/panel-state.js",
         "ui/app.js",
         "src/view.rs",

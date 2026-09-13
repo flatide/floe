@@ -451,12 +451,74 @@ Linux musl release link 통과. 전체 `sh tools/validate_rust.sh`는
 추가한 1,931개 CD 테스트는 전체 배터리 후 별도 native/MSRV 오라클로 재확인했다.
 이 단계는 API까지이며 CD UI·현장 Firefox/ETX 수용은 완료로 세지 않는다.
 
-## 10. 다음 경계
+## 10. M2a-7b: 자동 CD 치수선·값 표시
 
-1. DRC box-select/전체 공간 마커·hover, SVRF metric/type 필터·layer isolate·CD overlay는
-   아직 미이관이다. Escape의 ruler/격리 우선순위도 해당 기능과 함께 확장한다.
+Rust 측정 API를 `rulers.js`와 읽기 전용 CD 패널에 연결했다. 화면 표시용 투영과
+라벨 배치는 JS지만 거리/측정 geometry 계산은 §9의 Rust 코어가 담당한다.
+native raster·renderd wire/버전·캐시 포맷을 변경하거나 재색인하지 않는다.
+
+- CD의 소속은 **마지막으로 focus 응답을 받아 이동 요청한 오류**다. 단순 canvas
+  click은 선택만 바꾸므로 선택 오류와 CD 대상이 다를 수 있다. 패널은 자신의
+  `jumped global N`을 표시하며 두 상태를 혼동하지 않는다. 다른 규칙으로 바꾸거나
+  Clear/source/view 변경·focus 종료 때 CD도 정리한다. 단순 목록 선택은 CD를
+  생성하지 않고, 이동 모드에서 goto가 성립한 경우에만 교체한다.
+- 동일한 **표시 프레임**의 bbox/DBU/blit 원점으로 투영한다. pan/zoom/margin crop은
+  최대3개 선분만 재투영하며 측정 API를 다시 호출하지 않는다. 늦은 geometry와
+  독립적인 CD read token을 사용하고, 응답의 check/local/global·endpoint·길이·개수를
+  검증한다. Reload는 panel GET을 기다리기 **전에** 이전 CD/focus/step을 취소한다.
+- 단일 edge 치수선은 endpoint 순서와 무관한 위쪽 normal(수직이면 오른쪽)으로
+  **14 CSS px** 이동하고 점선 연장선을 그린다. rectangle은 폭→높이, edge pair는
+  gap→가능한 X/Y 성분 순서다. 실제 edge는 이동하지 않는다. DPR1/1.25/2/3에서도
+  이격/선 두께/라벨 크기는 CSS 기준이다. 브라우저 UI 글꼴이며 native PNG의
+  결정적 글꼴·pixel oracle에 포함시키지 않는다.
+- 라벨은 흰 글자/불투명 배경과 leader로 자기 선을 가리키며, 서로 겹치지 않는
+  유계 후보를 찾는다. 너무 작은 화면/축소로 배치할 자리가 없으면 **화면 라벨만**
+  생략하고 패널에는 남은 모든 측정값을 보인다. 일반 값은 소수4자리 µm,
+  0.0001 미만의 양수나 1e9 이상은 과학 표기로 표시하고 원 응답 문자열은 tooltip에
+  둔다. 복잡한 오류는 `no supported measurement`, 읽기 실패는 `CD unavailable`다.
+  unsupported/실패를 가짜 길이0으로 표시하거나 오류 outline을 버리지 않는다.
+- `k`/Remove ruler는 마지막 하나, `Shift+K`/Clear rulers와 첫 Escape는 전부 지운다.
+  이어지는 Escape는 focus/이동 모드를 종료하며 순회 위치는 유지한다. CD가 없으면
+  첫 Escape가 focus를 종료한다. 읽기 중 지우기는 요청을 취소하고 모두 지운다.
+  pending focus/step도 취소하여 늦은 이동이 다시 ruler를 만들지 않게 한다.
+  Markers off는 치수선도 숨기지만 CD 값/상태를 삭제하지 않는다.
+
+view 패널 JSON에 nullable `cd:{target:{check,error},remaining:0..3}`를 추가했다.
+target은 selected와 별개이며 서버에서 canonical u64 및 pack의 실제 error 범위를
+검증한다. `cd`가 있으면 jump_active여야 한다. remaining=0은 지운 상태다.
+복원은 최대3개 측정을 읽어 남아 있는 선만 표시하고 **focus/goto를 호출하지 않는다**.
+remaining=0이면 CD를 다시 읽지 않는다. 기존 4 KiB
+latest-only/CAS·서버 세션 메모리 수명은 같고 pack/waive/notes 파일은 쓰지 않는다.
+콘텐츠 hash로 JS/HTML/스키마 버전을 함께 식별한다.
+
+검증: ES2017 parse와 기존 UI gate, CD DTO/label/crop/DPR 테스트,
+독립 대상 복원·pan 재조회 0회·k/K/2단계 Escape·지연/취소/잘못된 응답을 테스트한다.
+선택 오류가 화면 밖이어도 다른 CD의 화면 표시를 막지 않는지 확인한다.
+인증 HTTP 게이트는 selected와 다른 CD target을 저장/복원하고 잘못된 번호/개수/
+불일치 이동 상태는 commit 전에 거부한다(원본 파일/렌더 상태 불변 유지).
+
+로컬 Chrome 실제 QA(합성 valmini + 260오류, DPR2): global1 edge의
+`Length 0.6650 µm`/14px 이격, global2의 `Width 0.7600 µm`와 `Height 0.1700 µm`를
+확인했다. k 후 reload는 폭만 복원하며 gen8/2.53333µm 뷰를 유지했다.
+Shift+Right 10% margin pan에서도 도형/치수선이 함께 이동했고 gen8 그대로였다.
+Escape 두 번은 CD→focus 순으로 정리했다. Fit 후 다른 마커를 클릭하면 선택은
+51→39, CD는51이며 gen17/451.725µm를 유지했고 새로고침 뒤에도 각각 복원됐다.
+콘솔 warn/error는 없었고 End session은 exit0이다. 빠른 연속 focus+다른 view 입력은
+이동을 거부하는 기존 경합 방어를 확인했으며, 다음 성공 때 이전 경고를 지운다.
+이 결과는 현장 Firefox/ETX/G2 수용을 대신하지 않는다.
+
+2026-09-13: 전체 `sh tools/validate_rust.sh` ALL OK, KLayout 13 PX + 2 phase-exact
+및 14 style 통과. 최종 보완까지 ES2017/JS·전환 패키지 fmt/strict clippy(`--no-deps`),
+core 53/app 6/web 19 및 transport 8 테스트, release 번들의 인증 HTTP 게이트를
+재확인했다. Rust 1.89 빈 registry 오프라인 테스트와 Linux musl release link도
+통과했다. 기존 native 의존성 경고는 남아 있으며 Linux 실제 실행 PASS는 아니다.
+
+## 11. 다음 경계
+
+1. DRC box-select/전체 공간 마커·hover, SVRF metric/type 필터·layer isolate는
+   아직 미이관이다. 손으로 그리는 ruler/격리와 Escape 우선순위도 M4에서 확장한다.
 2. ASCII/index 흐름·기존 notes·상세 측정/룰 매핑은 각각 parity gate와 함께 확장.
 3. 공유는 설계/DRC에 묶인 읽기 capability, 발급/만료/폐기·follow/independent
    state를 별도 구현·검증. 아직 shares=false, loopback-only다.
-4. 외부 HTTPS/WSS·TeeBox 접근/인증 정책은 §10 미결 사항이며 로컬 기반 구현과
+4. 외부 HTTPS/WSS·TeeBox 접근/인증 정책은 상위 계획 §10 미결 사항이며 로컬 기반 구현과
    실제 외부 공개를 구별한다. 브라우저 주소만 외부 IP로 바꿔 노출하지 않는다.

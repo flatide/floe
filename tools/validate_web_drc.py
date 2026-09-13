@@ -152,7 +152,8 @@ def main(fixture):
             panel = dict(search="<script>", rule_start="0", check=str(chosen), error_start="0",
                          query=None, waived=False, selected=dict(check=str(chosen), error="0"),
                          markers=True, shown=True, jump_scale=".25", zoom_lock=True,
-                         jump_active=True, focus_visible=True)
+                         jump_active=True, focus_visible=True,
+                         cd=dict(target=dict(check=str(chosen), error="1"), remaining=2))
 
             def save_panel(value, base="1", code=200, **extra):
                 return client.call("POST", panel_path, dict(revision=catalog["revision"],
@@ -172,6 +173,12 @@ def main(fixture):
             save_panel(dict(panel, jump_scale="NaN"), code=400)
             save_panel(dict(panel, jump_active=True, focus_visible=False), code=400)
             save_panel(dict(panel, selected=None), code=400)
+            save_panel(dict(panel, cd=dict(target=dict(check=str(chosen), error="999999999"), remaining=2)), code=400)
+            save_panel(dict(panel, cd=dict(target=dict(check=str(chosen), error="00"), remaining=2)), code=400)
+            save_panel(dict(panel, cd=dict(target=panel["selected"], remaining=4)), code=400)
+            save_panel(dict(panel, cd=dict(target=panel["selected"], remaining=-1)), code=400)
+            save_panel(dict(panel, cd=dict(target=panel["selected"], remaining=True)), code=400)
+            save_panel(dict(panel, jump_active=False), code=400)
             save_panel(dict(panel, search="x"*257), code=400)
             save_panel(dict(panel, query=dict(bbox_um=["0","0","1","1"], state_rev="999999",
                                               cursor=dict(check="0",error="0"))), code=400)

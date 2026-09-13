@@ -41,7 +41,7 @@ function pending(kind){const call=calls.find(c=>!c.done&&(kind==='catalog'?c.pat
 function reply(kind,value){const c=pending(kind);c.done=true;if(c.token)c.token.abort=null;c.resolve(value);return c;}
 async function tick(){for(let i=0;i<12;i++)await Promise.resolve();}
 function paint(){for(const [id,fn] of [...raf]){raf.delete(id);fn();}}
-const panel=D.bind({document:doc,window,protocol:P,http,context:()=>view,navigate:n=>nav.push(n),resize:()=>resize++,
+const panel=D.bind({document:doc,window,protocol:P,rulers:require('./rulers.js'),http,context:()=>view,navigate:n=>nav.push(n),resize:()=>resize++,
     stateStore:{bind:o=>{o.clearTimeout(o.setTimeout(()=>{},0));let ready=false;return {attach:async()=>{ready=false;await o.apply(savedPanel);ready=true;},
         change:d=>{if(ready)savedChanges.push(d);},close(){ready=false;}};}}});
 const a={check:'0',local:'9007199254740993',global:'9007199254740994',kind:'p',status:0,bbox_um:['10','10','30','30'],points:'5000'};
@@ -110,7 +110,7 @@ const geom=(r,pts,start,total,next)=>({check:r.check,local:r.local,global:r.glob
     // Restoring server state reloads bounded pages/selected geometry without
     // running a focus/goto or writing the restored state back as a new edit.
     savedPanel={search:'MASK',rule_start:'0',check:'0',error_start:'0',query:null,waived:true,
-        selected:{check:b.check,error:b.local},markers:false,shown:true,jump_scale:'0.2',zoom_lock:true,jump_active:true,focus_visible:true};
+        selected:{check:b.check,error:b.local},markers:false,shown:true,jump_scale:'0.2',zoom_lock:true,jump_active:true,focus_visible:true,cd:null};
     const beforeRestoreNav=nav.length,beforeRestoreSaves=savedChanges.length;
     view={...view,source:'source',id:'view-c'};panel.contextChanged();
     reply('rules',{rows:[{check:'0',name:'MASK',name_truncated:false,errors:'9007199254740996',waived:'1'}],next:null});await tick();

@@ -73,7 +73,7 @@ class Socket {
 class Image {
     constructor(){this.naturalWidth=100;this.naturalHeight=80;images.push(this);}
 }
-const window={FloeProtocol:P,FloeGestures:require('./gestures.js'),FloeDRC:{...DRC,bind(o){
+const window={FloeProtocol:P,FloeGestures:require('./gestures.js'),FloeRulers:require('./rulers.js'),FloeDRC:{...DRC,bind(o){
     const panel=DRC.bind(o),paint=panel.paint;panel.paint=(p,s)=>{drcDisplays.push({p,s});paint(p,s);};
     const click=panel.click;panel.click=(...v)=>{drcClicks.push(v);return click(...v);};return panel;
 }},FloePanelState:require('./panel-state.js'),ResizeObserver:class {constructor(fn){this.fn=fn;observers.push(this);}observe(e){this.target=e;}disconnect(){this.target=null;}},devicePixelRatio:1,

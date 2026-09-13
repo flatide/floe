@@ -13,6 +13,12 @@ pub(super) struct Query {
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub(super) struct CdState {
+    pub target: CursorDto,
+    pub remaining: u8,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub(super) struct Data {
     pub search: String,
     pub rule_start: String,
@@ -27,6 +33,7 @@ pub(super) struct Data {
     pub zoom_lock: bool,
     pub jump_active: bool,
     pub focus_visible: bool,
+    pub cd: Option<CdState>,
 }
 impl Data {
     pub fn validate(&self) -> std::result::Result<(), Failure> {
@@ -47,6 +54,13 @@ impl Data {
         if let Some(c) = &self.selected {
             super::dto::number(&c.check)?;
             super::dto::number(&c.error)?;
+        }
+        if let Some(cd) = &self.cd {
+            if !self.jump_active || cd.remaining > 3 {
+                return Err("invalid_drc_request");
+            }
+            super::dto::number(&cd.target.check)?;
+            super::dto::number(&cd.target.error)?;
         }
         if let Some(q) = &self.query {
             crate::view::counter(&q.state_rev).map_err(|_| "invalid_drc_request")?;
@@ -102,6 +116,11 @@ impl Data {
         if let Some(c) = &self.selected {
             if number(&c.error)? >= count(&c.check)? {
                 return Err(Error::input("selected error index"));
+            }
+        }
+        if let Some(cd) = &self.cd {
+            if number(&cd.target.error)? >= count(&cd.target.check)? {
+                return Err(Error::input("CD target error index"));
             }
         }
         if let Some(q) = &self.query {
@@ -182,6 +201,24 @@ mod tests {
             error: "9007199254740993".into(),
         });
         d.validate().unwrap();
+        d.cd = Some(CdState {
+            target: CursorDto {
+                check: "1".into(),
+                error: "9007199254740994".into(),
+            },
+            remaining: 2,
+        });
+        d.validate().unwrap();
+        d.cd.as_mut().unwrap().remaining = 4;
+        assert!(d.validate().is_err());
+        d.cd.as_mut().unwrap().remaining = 0;
+        d.validate().unwrap();
+        d.jump_active = false;
+        assert!(d.validate().is_err());
+        d.jump_active = true;
+        d.cd.as_mut().unwrap().target.error = "01".into();
+        assert!(d.validate().is_err());
+        d.cd = None;
         d.rule_start = "00".into();
         assert!(d.validate().is_err());
         d.rule_start = "0".into();

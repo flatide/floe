@@ -87,6 +87,9 @@ details > summary { cursor: pointer; font-size: 12px; color: #b4c3d8; }
 .drc-actions .check { margin: 0 0 0 auto; }
 .drc-errors { flex: 1; min-height: 130px; overflow-y: auto; margin-top: 8px; font-size: 12px; }
 .drc-selection { padding-top: 10px; margin-top: 10px; border-top: 1px solid #333c4a; }
+.drc-cd { margin-top: 10px; border-top: 1px solid #333c4a; }
+#drc-cd-values { margin: 8px 0 0; padding-left: 18px; font-size: 12px; line-height: 1.6; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.drc-cd .button-row button { font-size: 12px; }
 #drc-message { font-size: 11px; }
 @media (max-width: 1100px) { .drc-panel { width: 265px; } .drc-actions { flex-wrap: wrap; } .drc-actions .check { margin-left: 0; } }
 #margin-info { color: #91a98f; font-size: 11px; }

@@ -30,6 +30,7 @@ function http(method,path,body,missing,token){
     if(q.kind==='rule')return Promise.resolve({description:'test'});
     if(q.kind==='errors')return Promise.resolve({rows,next});
     if(q.kind==='focus')return Promise.resolve({navigation:{kind:'goto',center_um:['20','20'],width_um:'60'}});
+    if(q.kind==='measurements')return Promise.resolve({check:q.check,local:q.error,global:P.next(q.error),segments:[]});
     if(q.kind==='geometry'){
         if(holdGeometry)return new Promise(resolve=>{held={token,resolve};token.abort=()=>{};});
         const r=[a,b,c,invisible].find(r=>r.local===q.error),v=r.bbox_um;
@@ -39,7 +40,7 @@ function http(method,path,body,missing,token){
 }
 const panel=D.bind({document:{getElementById:el,createElement:()=>new Element()},
     window:{requestAnimationFrame:fn=>{raf.set(++serial,fn);return serial;},cancelAnimationFrame:i=>raf.delete(i)},
-    protocol:P,http,context:()=>context,navigate:n=>moves.push(n),resize(){},
+    protocol:P,rulers:require('./rulers.js'),http,context:()=>context,navigate:n=>moves.push(n),resize(){},
     stateStore:{bind:o=>{let ready=false;return {attach:async()=>{ready=false;await o.apply(null);ready=true;},change:d=>{if(ready)saves.push(d);},close(){ready=false;}};}}});
 const base=D.projection({bbox_dbu:['-48','-48','148','128'],width:196,height:176},[48,48],'1');
 const size={pixels:[100,80],dpr:2,left:.25,top:.5};
