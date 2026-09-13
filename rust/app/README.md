@@ -127,7 +127,11 @@ cargo build --offline --locked --release -p floe-app -p floe-index -p floe-rende
 - CLI `drc --rules`/`--errs`에 `--svrf-rules FILE`을 명시하면 기존 version1
   sidecar의 규칙 정보/참고 측정값을 JSON에 추가한다. 원본 SVRF를 해석하거나
   경로를 자동 탐색하지 않는다. 일반 polygon width/signoff 판정기가 아니며,
-  원본 parser는 미이관이다([M2 §15](../../docs/WEBUI_M2.ko.md#15-m2a-10a-svrf-sidecar규칙-메타데이터측정-코어)).
+  읽기 계약은 [M2 §15](../../docs/WEBUI_M2.ko.md#15-m2a-10a-svrf-sidecar규칙-메타데이터측정-코어)를 따른다.
+- `svrf DECK --scan/-o/-D/-I/--follow-verbatim/--no-env-switches`는 별도의 로컬
+  Rust subset parser/scan이다. INCLUDE/환경 분기는 기존 CLI와 같으며 Tcl·매크로는
+  실행하지 않는다. source/include를 보호하며 완성된 version1 JSON만 원자 게시한다.
+  상한·숫자 오류는 잘린 sidecar 성공이 아니다. [M4 §11](../../docs/WEBUI_M4.ko.md#11-m4b-5-svrf-subset-parserscan-cli).
 - `view --drc-rules FILE`은 명시한 rules snapshot을 DRC actor에 연결한다. 타입/규칙
   필터·scalar 측정 비교 API와 웹 패널 표시/상태 복원을 지원한다. 추가256 MiB를
   공통 admission에 예약하지만 CPU/worker 수는 늘지 않는다. 원본/include 경로를

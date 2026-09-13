@@ -133,6 +133,9 @@ M2a-12b2에서 pack-build 승인/진행/취소·새 identity 조회 UI를 연결
 `--no-env-switches`.
 현 parser의 subset/진단을 보존하고 임의 Tcl 실행기를 만들지 않는다.
 CLI 환경 분기 호환과 서버의 include/환경 접근 통제는 구별한다(API §8).
+M4b-5에서 Rust-only `floe2-web svrf`에 연결했다. JSON/scan은 기존 parser의
+R1–R4와 비교하며, 빠진 root·비정상 숫자·자원 상한은 명시 오류다.
+sidecar 원자 저장/입력 보호와 구체적 차이는 [M4 §11](WEBUI_M4.ko.md)을 따른다.
 
 ### 2.8 gtktest — M4에서 진단 대체 (공개 옵션 없음)
 

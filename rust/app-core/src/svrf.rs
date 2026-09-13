@@ -1,5 +1,7 @@
-//! Read-only `floe-svrf-rules` metadata, not an SVRF interpreter/signoff engine.
-//! Recorded deck/include paths are deliberately neither retained nor followed.
+//! `floe-svrf-rules` metadata, not an SVRF interpreter/signoff engine.
+//! The reader never follows recorded paths. Only the explicit local `parse`
+//! service reads source decks/includes; it is not a web registration endpoint.
+pub mod parse;
 use crate::{check_cancelled, drc::measured, Error, ErrorKind, Result};
 use serde::{de, Deserialize, Deserializer, Serialize};
 use std::{
@@ -446,7 +448,6 @@ impl Rules {
 /// Same ASCII identifier/operator subset as floe.svrf.rhs_operands. This only
 /// follows the already parsed derivation graph for the six-line detail pane.
 fn operands(rhs: &str) -> impl Iterator<Item = &str> {
-    const KEYWORDS: &str = "INTERNAL INT EXTERNAL EXT ENCLOSURE ENC AREA DENSITY LENGTH ANGLE PERIMETER VERTEX AND OR NOT XOR INTERACT INSIDE OUTSIDE TOUCH CUT ENCLOSE BY SIZE GROW SHRINK EXTENT EXTENTS HOLES WITH EDGE CONVEX OPPOSITE ABUT SINGULAR REGION PROJECTING PARALLEL PERPENDICULAR ONLY ALSO OVER UNDER UNDEROVER COPY NET RATIO WINDOW STEP TRUNCATE INNER OUTER MEASURE ALL PRINT RECTANGLE SQUARE COUNT COINCIDENT EXPAND TOP LEFT RIGHT BOTTOM GOOD BAD MAX MIN EVEN ODD MULTI ORTHOGONAL POLYGON CORNER CENTERLINE SPACE WIDTH NOTCH";
     let mut i = 0;
     std::iter::from_fn(move || {
         let b = rhs.as_bytes();
@@ -461,15 +462,19 @@ fn operands(rhs: &str) -> impl Iterator<Item = &str> {
                 i += 1;
             }
             let name = &rhs[start..i];
-            if !KEYWORDS
-                .split_ascii_whitespace()
-                .any(|k| name.eq_ignore_ascii_case(k))
-            {
+            if !keyword(name) {
                 return Some(name);
             }
         }
         None
     })
+}
+
+fn keyword(name: &str) -> bool {
+    const KEYWORDS: &str = "INTERNAL INT EXTERNAL EXT ENCLOSURE ENC AREA DENSITY LENGTH ANGLE PERIMETER VERTEX AND OR NOT XOR INTERACT INSIDE OUTSIDE TOUCH CUT ENCLOSE BY SIZE GROW SHRINK EXTENT EXTENTS HOLES WITH EDGE CONVEX OPPOSITE ABUT SINGULAR REGION PROJECTING PARALLEL PERPENDICULAR ONLY ALSO OVER UNDER UNDEROVER COPY NET RATIO WINDOW STEP TRUNCATE INNER OUTER MEASURE ALL PRINT RECTANGLE SQUARE COUNT COINCIDENT EXPAND TOP LEFT RIGHT BOTTOM GOOD BAD MAX MIN EVEN ODD MULTI ORTHOGONAL POLYGON CORNER CENTERLINE SPACE WIDTH NOTCH";
+    KEYWORDS
+        .split_ascii_whitespace()
+        .any(|k| name.eq_ignore_ascii_case(k))
 }
 
 #[cfg(test)]

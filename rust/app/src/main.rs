@@ -7,6 +7,7 @@ mod deck_index;
 mod drc;
 mod fe_embed;
 mod read;
+mod svrf;
 mod web_view;
 use floe_app_core::{
     index::{Action, IndexOptions, PreparedIndex, ProfileCell},
@@ -34,6 +35,7 @@ Usage: floe2-web index SOURCE [OPTIONS]
        floe2-web jobdeck DECK.jb [OPTIONS]
        floe2-web drc RESULTS.db|PACK.ice [OPTIONS]
        floe2-web fe-embed [OPTIONS] PNG...
+       floe2-web svrf DECK [OPTIONS]
        floe2-web --version
 
 Implemented: layout/jobdeck index/info/render/probe, occupancy, profiling,
@@ -43,7 +45,8 @@ DRC: read-only ICE/ASCII queries; explicit --build [--force] for atomic packs.
 Clip: full-depth exact layout OASIS export; jobdeck clip remains unsupported.
 Render: batch/mosaic + JSON reports, DRC marker/CD/legend captures; no Python runtime.
 Annotations: fe-embed CLI writes flateyes PNG metadata without changing pixels.
-Not yet ported: svrf, gtktest, review writes and browser exports.
+SVRF: local subset parser/scan with diagnostics; no Tcl or macro execution.
+Not yet ported: gtktest, review writes and browser exports.
 Use the existing floe2 for those commands; there is no Python fallback.
 Run floe2-web index --help for indexing options.";
 const INDEX_HELP: &str = "Usage: floe2-web index SOURCE [OPTIONS]
@@ -83,6 +86,7 @@ enum Cli {
     View(Box<web_view::Command>),
     Drc(Box<drc::Command>),
     FeEmbed(Box<fe_embed::Command>),
+    Svrf(Box<svrf::Command>),
 }
 fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
     let args: Vec<String> = args
@@ -108,7 +112,8 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
         "drc" => return drc::parse(&args).map(|c| Cli::Drc(Box::new(c))),
         "clip" => return clip::parse(&args).map(|c| Cli::Clip(Box::new(c))),
         "fe-embed" => return fe_embed::parse(&args).map(|c| Cli::FeEmbed(Box::new(c))),
-        "svrf" | "gtktest" => {
+        "svrf" => return svrf::parse(&args).map(|c| Cli::Svrf(Box::new(c))),
+        "gtktest" => {
             return Err(Error::new(
                 ErrorKind::Unsupported,
                 format!(
@@ -275,6 +280,7 @@ fn run(cli: Cli, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
         Cli::View(command) => return web_view::run(*command, cancelled),
         Cli::Drc(command) => return drc::run(*command, cancelled),
         Cli::FeEmbed(command) => return fe_embed::run(*command, cancelled),
+        Cli::Svrf(command) => return svrf::run(*command, cancelled),
         Cli::Read(command) => return read::run(*command, cancelled),
         Cli::Clip(command) => return clip::run(*command, cancelled),
         Cli::Jobdeck(command) => return deck_analysis::run(*command, cancelled),

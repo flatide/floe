@@ -63,8 +63,16 @@ def main(fixture):
         assert "--no-open" in run("view", "--help", env=env).stdout
         run("view", env=env, code=2)
         assert "--bbox" in run("clip", "--help", env=env).stdout
-        for cmd in ("svrf", "gtktest"):
-            assert "not yet ported" in run(cmd, env=env, code=2).stderr
+        assert "not yet ported" in run("gtktest", env=env, code=2).stderr
+        assert "--follow-verbatim" in run("svrf", "--help", env=env).stdout
+        assert "requires DECK" in run("svrf", env=env, code=2).stderr
+        deck = work / "rules.svrf"
+        deck.write_text("LAYER M 7\nR { INT M < .05 }\n")
+        assert "checks 1" in run("svrf", deck, "--scan", env=env).stdout
+        assert not Path(str(deck) + ".rules.json").exists()
+        run("svrf", deck, env=env)
+        rules = json.loads(Path(str(deck) + ".rules.json").read_text())
+        assert rules["checks"]["R"]["source_gds"] == [[7, None]]
         for option in ("--coverage", "--legacy", "--tile-mb", "--level"):
             run("index", source, option, env=env, code=2)
         for option in ("--jobs", "--page-target-mb", "--profile-repeat"):

@@ -46,6 +46,7 @@ M4b-1에서 일반 layout의 exact clip CLI·private 출력 검증·스트리밍
 M4b-2에서 layout/jobdeck batch·mosaic 캡처와 report·kept tiles를 단일 Rust worker로 연결했다.
 M4b-3에서 PNG pixels를 보존하는 flateyes metadata와 `fe-embed` Rust 보조 CLI를 연결했다.
 M4b-4에서 기존 live 스타일·오류 marker/CD/legend를 유지하는 DRC PNG 캡처 CLI를 연결했다.
+M4b-5에서 SVRF subset 전처리·규칙 그래프·scan/원자 sidecar 저장 CLI를 Rust로 이관했다.
 웹 clip/나머지 내보내기와 실제 브라우저 수용은 남아 있다([M4 기록](WEBUI_M4.ko.md)).
 전체 조작 parity와 M0/Firefox/ETX 현장 검증은 아직 완료되지 않았다.
 상세 범위는 [M1b 기록](WEBUI_M1B.ko.md)과 [M2 기록](WEBUI_M2.ko.md). 여기의 M0~M5는 **웹 전환 단계**이며
@@ -512,7 +513,8 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
   파일 보존·진행/취소다. M2a-12b1은 승인된 HTTP 작업·기존 actor 종료·새 identity 등록이며,
   M2a-12b2는 브라우저 승인/진행/취소와 새 catalog 조회 복원이다.
   실제 브라우저의 승인 클릭 수용은 별도로 남아 있다(M2 §24).
-  jobdeck 물리 plane 격리와 원본 SVRF parser는 남아 있다.
+  jobdeck 물리 plane 격리는 남아 있다. 원본 SVRF subset parser는 M4b-5의 로컬 CLI로
+  이관했으며 web API의 임의 deck/include 접근을 추가한 것은 아니다.
   공유와 고급 DRC 조작은 남아 있다.
   공유 권한 경로 추가는 안전 검토 차단 후 승인 대기다. M4a-1/2/3은 독립적인
   native/controller와 기존 owner WebSocket 질의이며 공유 권한이나 외부 공개는 추가하지 않는다.

@@ -4,8 +4,8 @@
 M2 공유 권한 추가와 실제 브라우저 pack-build 승인 클릭은 승인 대기이며,
 M0/G2·M3 현장 Firefox/ETX는 사용자 요청대로 보류다. 이 경계를 우회하지 않고
 독립적인 로컬 native 이관을 진행한다. M4 전체 완료나 GTK 은퇴를 뜻하지 않는다.
-현재는 §10의 **DRC 오류별 PNG 캡처 CLI**까지 연결했다.
-§1~9의 미연결 표기는 각 선행 단계 당시의 범위다. 웹 clip/나머지 내보내기와 전체 조작
+현재는 §11의 **SVRF subset parser/scan CLI**까지 연결했다.
+§1~10의 미연결 표기는 각 선행 단계 당시의 범위다. 웹 clip/나머지 내보내기와 전체 조작
 수용은 남아 있다.
 
 ## 1. M4a-1: 표시 scene에 고정한 native pick/snap
@@ -984,3 +984,84 @@ renderd 버전0.12.87은 변경하지 않았다. 실 Linux 실행·현장 Firefo
 
 다음 CLI 이관은 SVRF subset parser/scan이다. 웹 내보내기 UI·review 저장·나머지 조작·
 패키징/현장 수용은 남으며 M4 전체 완료가 아니다. GTK 기본값과 공유/승인 경계는 유지한다.
+
+## 11. M4b-5: SVRF subset parser/scan CLI
+
+```sh
+rust/target/release/floe2-web svrf deck.cal --scan -DSTACK=6LM -I rules
+rust/target/release/floe2-web svrf deck.cal -o deck.rules.json \
+  -DSTACK=6LM --follow-verbatim --no-env-switches
+```
+
+### 호환 범위
+
+- 기존 `svrf`의 모든 옵션을 연결했다. `-D/-I` 반복·붙여쓰기, `--out=FILE`,
+  `-oFILE`, `--` 이후 dash 파일명도 지원한다. 기본 출력은 `<deck>.rules.json`이고
+  `--scan`은 양쪽 IFDEF 분기를 조사하며 `-o`가 있어도 파일을 쓰지 않는다.
+- `INCLUDE`, DEFINE/UNDEFINE, IFDEF/IFNDEF의 값 비교, ELSE/ENDIF, VARIABLE,
+  LAYER/MAP, derivation 연결 그래프, check의 @ 설명·측정·여러 줄 bound/연산자
+  continuation을 기존 Python 상태 머신과 대조한다. 그래프는 연산을 실행하지 않고
+  source GDS와 unresolved 이름만 구한다. 순환은 유한하게 처리한다.
+- `-D`/DEFINE이 환경보다 우선한다. **덱이 실제 테스트한 switch만** 환경에서 읽고
+  `env_switches` provenance에 남긴다. `$NAME` switch도 지원한다.
+  INCLUDE의 `$VAR/${VAR}/~[/~user]` 확장은 별도이므로 `--no-env-switches`로
+  꺼지지 않는다. INCLUDE 검색은 포함한 파일의 디렉터리 → `-I` 순서다.
+- DMACRO/CMACRO는 확장하지 않으며 Tcl·shell·SVRF geometry를 실행하지 않는다.
+  VERBATIM 안 INCLUDE는 inventory만 하고 `--scan/--follow-verbatim`일 때만 읽는다.
+  unknown histogram, 중복 check의 last-wins, 괄호/comment/IFDEF drift 경고,
+  동일 빈도 histogram의 최초 출현 순서까지 보존한다. OS I/O 실패의 상세 문구는
+  Rust/운영체제 표현을 쓰며 Python exception 문자열과 같지는 않다. signoff 판정기가 아니다.
+- `floe-svrf-rules` version1 JSON의 필드/값을 유지한다. `generated_by`는
+  `floe2-web <native package version>`으로 구별하고, JSON 공백·키 배치·Unicode escape는
+  Python과 바이트 동일 계약이 아니다. CR/LF/CRLF, 마지막 줄, UTF-8 replacement,
+  Unicode 설명·경로·십진 숫자를 처리한다. 원래 측정 RHS의 ASCII operand 문법은 그대로다.
+
+### 자원·파일 계약
+
+- 입력은 regular file만 허용하며 O_NONBLOCK으로 FIFO를 기다리지 않는다.
+  INCLUDE cycle은 canonical 경로로 찾되 진단에는 원래 상대/`..` 경로를 유지한다.
+  빠진 root는 Python의 빈 sidecar 성공 대신 오류다. 빠진/열 수 없는 INCLUDE는
+  기존처럼 경고이며, 읽는 도중 실패·변경·상한 초과는 오류다.
+- 누적 입력256MiB, file visits4096, INCLUDE 깊이64, 조건부 깊이4096,
+  physical/치환 line·text64KiB, metadata/치환 작업 회계64MiB, mapping/closure 확장
+  회계64MiB, 그래프 작업16M, sidecar16MiB다. map65536, check별 constraints1024·
+  operands/closure4096, 기존 reader의 총 rule text64KiB도 검사한다.
+  정수는 signed64 파싱 후 check의 source GDS가 reader의 u32 영역인지 확인한다.
+  무한대가 되는 decimal은 오류이고, 미해석 변수 bound는 기존처럼 null/raw다.
+  **상한은 잘린 정상 결과가 아니라 미완료 오류다. 회계값은 프로세스 RSS 한도가 아니다.**
+- DEFINE 치환은 longest-name/word-boundary/단일 pass를 유지하는 증분 trie다.
+  DEFINE마다 전체 정규식을 다시 만들지 않는다. trie262144 nodes와 line당8M match
+  steps를 제한하며, 조건부 활성 여부는 깊이와 무관하게 O(1)로 검사한다.
+- 출력은 source·읽은 INCLUDE·검색한 missing INCLUDE 후보, symlink/hardlink,
+  cache/lock과 충돌할 수 없다. 부모는 자동 생성하지 않는다. 완성된 JSON을 기존
+  reader로 검증한 뒤 같은 디렉터리의 create-new0600 임시 파일에 쓰고 sync한다.
+  모든 입력 identity/dev/ino/size/mtime/ctime·취소를 재확인한 뒤 rename한다.
+  실패 시 이전 출력과 원본을 보존하고 자신이 만든 임시 파일만 정리한다.
+  SIGINT/SIGTERM은130/143이며, 원본 외부 편집과의 CAS/lock은 제공하지 않는다.
+- 새 HTTP endpoint나 browser source-path 입력은 없다. sidecar reader/등록 API는
+  계속 recorded deck/include 경로를 따라가지 않는다. indexer/renderd/Python 실행도 없다.
+
+### 검증
+
+필수 `validate_svrf_native.py`는 **기존 `validate_svrf.py` R1–R4의 모든 parse 호출**에
+실제 Python parser를 oracle로 쓰고, JSON 전체 내용·CLI 요약·scan 전문을 비교한다.
+추가로 고정 seed의100개 상태 혼합, Unicode/손상 UTF-8·개행·symlink include cycle·
+include-dir 순서·숫자/치환 한계·FIFO·missing root·깊은 INCLUDE·출력 충돌·
+원자 저장/취소/임시 파일 정리를 확인한다. native PATH는 비워 fallback을 배제한다.
+Rust 단위 테스트는 작은 상한을 주입한 오류 경로, 그래프/치환, env lazy lookup,
+재귀 없는 inline block 종료, 변한 입력의 게시 거부, 기존 reader round-trip을 검사한다.
+
+실행 결과(2026-09-14): 전체 `sh tools/validate_rust.sh`가 `RUST VALIDATION: ALL OK`다.
+새 SVRF135개 JSON/scan 비교+faults, 기존 sidecar2032개 비교, jobdeck80·renderer46,
+KLayout13 PX +2 phase-exact +14 style jobs1/8 검증을 포함한다. 과거 CLI 게이트의
+"svrf 미지원" 단언도 실제 native scan/변환 검증으로 갱신했다.
+
+최종 app11/core119/web36/transport8·worker-client unit7 및 lifecycle 검사,
+scoped fmt/strict clippy, Rust1.89.0의 같은 패키지 테스트, macOS release와 Linux
+x86-64 musl static-pie 교차 빌드가 통과했다. 기존 의존성·개발 오라클 warning은
+남는다. native geometry/wire/renderd 버전0.12.87은 바꾸지 않았다.
+실 Linux 실행·현장 Firefox/ETX 수용을 주장하지 않는다.
+
+다음 독립 작업은 owner 웹 clip/내보내기 연결이다. review/주석 저장·나머지 조작·
+GTK 진단 대체·패키징/현장 수용은 남는다. 공유 권한·실제 pack-build 승인 클릭은
+보류 경계를 유지하며 M4 전체 완료나 GTK launcher 교체를 뜻하지 않는다.

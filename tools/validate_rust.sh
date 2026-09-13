@@ -156,6 +156,7 @@ fi
 # SVRF subset parser: preprocessing / derivation closure / check
 # extraction / end-to-end vs gen_drcdb --svrf
 .venv/bin/python tools/validate_svrf.py
+.venv/bin/python -B tools/validate_svrf_native.py
 # OASIS TRAPEZOID / CTRAPEZOID (mask data): every record type through
 # floe-index + clip must equal KLayout's reading of the same bytes
 .venv/bin/python tools/validate_oasis_shapes.py
