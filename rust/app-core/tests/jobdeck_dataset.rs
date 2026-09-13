@@ -7,7 +7,7 @@ use floe_app_core::{
     styles,
     view::{Model, Phase, ViewController, ViewState, Viewport},
 };
-use floe_worker_client::Fill;
+use floe_worker_client::{Fill, Layers};
 use serde_json::{json, Value};
 use std::{
     path::Path,
@@ -102,6 +102,31 @@ fn snapshots_styles_and_native_frames_match_python() {
         .unwrap();
         let model = Model::new(&managed).unwrap();
         let mut state = ViewState::initial(&model, 103, 91).unwrap();
+        let selected = match &state.layers {
+            Layers::All => {
+                let floe_app_core::dataset::Dataset::Deck(d) = &managed.dataset else {
+                    panic!("deck required");
+                };
+                model
+                    .styles
+                    .iter()
+                    .filter(|s| {
+                        !d.metadata.layers.iter().any(|r| {
+                            r.jobdeck_head && (r.layer as u32, r.datatype as u32) == s.layer
+                        })
+                    })
+                    .map(|s| s.layer)
+                    .collect()
+            }
+            Layers::None => vec![],
+            Layers::Only(p) => p.clone(),
+        };
+        assert_eq!(
+            json!(selected),
+            case["visible"],
+            "GTK default visibility {}",
+            case["mode"]
+        );
         let bounds: [f64; 4] = serde_json::from_value(case["bbox"].clone()).unwrap();
         state.viewport = Viewport::new(bounds.map(|n| n / model.dbu), 103, 91).unwrap();
         state.detail = floe_app_core::shots::Detail::Exact;
@@ -111,23 +136,42 @@ fn snapshots_styles_and_native_frames_match_python() {
         options.raster_jobs = 2;
         options.raw = false;
         let mut controller = ViewController::start(&resources, managed, options, state).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let frame = loop {
-            let snapshot = controller.snapshot();
-            assert_ne!(snapshot.phase, Phase::Failed, "{:?}", snapshot.failure);
-            if let Some(f) = controller.latest().filter(|f| f.frame.final_frame) {
-                break f;
-            }
-            assert!(Instant::now() < deadline, "deck controller deadline");
-            std::thread::sleep(Duration::from_millis(2));
-        };
-        assert_eq!(
-            frame.frame.bytes,
-            std::fs::read(case["png"].as_str().unwrap()).unwrap(),
-            "managed deck PNG {}",
-            case["mode"]
-        );
-        assert_eq!(frame.state_rev, 1);
+        for (pass, path) in ["view_png", "png"].into_iter().enumerate() {
+            let expected_rev = if pass == 0 {
+                1
+            } else {
+                controller
+                    .edit(
+                        controller.snapshot().state_rev,
+                        floe_app_core::view::Patch {
+                            layers: Some(Layers::All),
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap()
+                    .render_rev
+            };
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let frame = loop {
+                let snapshot = controller.snapshot();
+                assert_ne!(snapshot.phase, Phase::Failed, "{:?}", snapshot.failure);
+                if let Some(f) = controller
+                    .latest()
+                    .filter(|f| f.frame.final_frame && f.render_rev == expected_rev)
+                {
+                    break f;
+                }
+                assert!(Instant::now() < deadline, "deck controller deadline");
+                std::thread::sleep(Duration::from_millis(2));
+            };
+            assert_eq!(
+                frame.frame.bytes,
+                std::fs::read(case[path].as_str().unwrap()).unwrap(),
+                "managed deck PNG {}",
+                case["mode"]
+            );
+            assert_eq!(frame.render_rev, expected_rev);
+        }
         controller.close().unwrap();
     }
     println!("RUST APP DECK DATASET: ALL OK (6 cases) + 6 managed controllers");

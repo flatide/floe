@@ -16,6 +16,8 @@ from validate_jobdeck import (DECK, DENSE_DECK, FRAMES_DECK, MISSING_LAYER_DECK,
 from floe.jobdeck.viewer import DeckCache
 from floe.jobdeck.render import DeckRenderWorker
 from floe.shots import ShotRunner
+from floe import fillpat
+from validate_layerprops import visible_layers
 
 
 def compare(source, work, env, tag, args, code=0):
@@ -107,12 +109,14 @@ def main():
                 for selection in (None, [2, 3]):
                     cache = DeckCache(str(deck), mode=mode, ids=selection)
                     props = Path(cache.props_src + ".layerprops")
-                    props.write_text("1.0 red diagonal_1 HEAD 0 8\n"
-                                     "1.1 skyblue INVALID CHILD 0 1\n"
-                                     "2.0 yellow plus TWO 0 5\n"
-                                     "2.1 cyan clear LEAF 0 2\n"
-                                     "2.1 cyan INVALID LEAF 0 1\n"
-                                     "123.43 orange brick RAW 0 3\n")
+                    property_lines = ["1.0 red diagonal_1 HEAD 0 8", "1.1 skyblue INVALID CHILD 1 1",
+                                      "2.0 yellow plus TWO 0 5", "2.1 cyan clear LEAF 0 2",
+                                      "2.1 cyan INVALID LEAF 1 1", "123.43 orange brick RAW 0 3"]
+                    if selection is not None:
+                        # Explicit child flags win even when a hidden head
+                        # appears later in the input file.
+                        property_lines.sort(key=lambda s: s.split()[0] in ("1.0", "2.0"))
+                    props.write_text("\n".join(property_lines) + "\n")
                     try:
                         cache.load()
                         worker = DeckRenderWorker(cache)
@@ -121,17 +125,22 @@ def main():
                                    "width": worker._widths.get(k, 1)}
                                   for k in sorted(worker._colors)]
                         box = [v * cache.meta["dbu"] for v in cache.meta["bbox"]]
+                        visible = visible_layers(cache.meta, fillpat.parse_layerprops(props.read_text()))
                         runner = ShotRunner(cache)
                         try:
                             out = work / (mode + str(selection) + "-api.png")
                             data, result = runner.capture(box, 103, 91)
                             assert not result.get("over_budget_pages") and not result.get("labels_truncated")
                             out.write_bytes(data)
+                            view_out = work / (mode + str(selection) + "-view-api.png")
+                            view_data, view_result = runner.capture(box, 103, 91, layers=visible)
+                            assert not view_result.get("over_budget_pages") and not view_result.get("labels_truncated")
+                            view_out.write_bytes(view_data)
                         finally:
                             runner.stop()
                         cases.append({"source": str(deck), "mode": mode, "levels": selection,
                                       "metadata": cache.meta, "styles": styles,
-                                      "bbox": box, "png": str(out)})
+                                      "bbox": box, "png": str(out), "view_png": str(view_out), "visible": visible})
                     finally:
                         cache.close()
         oracle = work / "dataset-oracle.json"

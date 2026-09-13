@@ -265,6 +265,7 @@ fn model(deck: bool) -> Arc<Model> {
         width: 1,
     }]);
     Arc::new(Model {
+        initial_layers: Layers::All,
         dataset_revision: 7,
         dbu: 0.001,
         bbox: [0., 0., 800., 640.],

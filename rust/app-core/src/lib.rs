@@ -17,6 +17,7 @@ pub mod exports;
 pub mod index;
 pub mod index_progress;
 pub mod jobdeck;
+pub mod layerprops;
 pub mod managed;
 pub mod managed_index;
 pub mod native;

@@ -60,6 +60,9 @@ M4d-1의 owner `capabilities.snapshot_png`는 브라우저 표시 pixels의 복�
 UI만 광고한다. layout/jobdeck 공통이며 `capabilities.clip`·query 지원과 독립적이다.
 browser 기능 검사를 추가로 요구하고 새 HTTP/WS·clipboard 읽기·upload는 없다.
 표시/overlay·수명·fallback 계약과 미검증 범위는 [M4 §15](WEBUI_M4.ko.md)를 따른다.
+M4d-2는 layerprops library codec·초기 view visibility를 연결했다. 명시적인 startup
+selection이 design default보다 우선하며, 기존 RenderSession의 archival 기본 All은
+유지한다. live Load/Save HTTP/WS나 기본값 쓰기 권한은 아직 추가하지 않았다([M4 §16](WEBUI_M4.ko.md)).
 2026-09-13 M1a-1 `rust/worker-client`와 M1a-2a/b `app/app-core`의 일반 index·info/단일 render/probe를
 구현했다. 현재 호출 계약은 [worker README](../rust/worker-client/README.md),
 [M1a 기록](WEBUI_M1A.ko.md)을 따르며 아래 서비스 전체가 존재하는 것은 아니다.

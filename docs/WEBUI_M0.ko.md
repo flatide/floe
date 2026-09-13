@@ -215,6 +215,11 @@ UI-05 일부는 M4d-1에서 연결했다: 표시된 layout/annotation PNG 복사
 수용과 주석/설정 저장은 남는다([M4 §15](WEBUI_M4.ko.md)). 이미 그린 pixels만 합성하며
 exact clip이나 원본 재렌더 export로 간주하지 않는다.
 
+UI-03의 layerprops 공통 codec·초기 가시성은 M4d-2에서 연결했다([M4 §16](WEBUI_M4.ko.md)).
+색/fill뿐 아니라 file/stem default의 visibility를 첫 frame 전에 적용하고, 명시된
+startup selection이 우선한다. 열린 세션 Load/Save·기본값 게시/bitmap 편집 저장은
+아직 남아 있다. 개인 palette cache는 현재 GTK에도 없으며 자동 저장을 새로 만들지 않는다.
+
 `python -m floe.fe_embed` 보조 CLI도 범위에 포함한다: 위치 인자 PNG들,
 `--box`, `--ellipse`, `--line`, `--path`, `--polygon`, `--ruler`, `--text`,
 `--json`, `--legend`, `--note`, `--ppu`, `--unit`, `--append`, `--dump`,

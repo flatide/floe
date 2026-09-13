@@ -222,6 +222,7 @@ pub struct Model {
     pub styles: Arc<Vec<Style>>,
     pairs: BTreeSet<(u32, u32)>,
     groups: BTreeMap<(u32, u32), Vec<(u32, u32)>>,
+    initial_layers: Layers,
 }
 impl Model {
     pub fn new(data: &ManagedDataset) -> Result<Arc<Self>> {
@@ -244,7 +245,7 @@ impl Model {
         }
         let mut pairs: BTreeSet<_> = styles.iter().map(|s| s.layer).collect();
         pairs.extend(groups.keys().copied());
-        Ok(Arc::new(Self {
+        let mut model = Self {
             dataset_revision: data.revision,
             dbu: d.dbu(),
             bbox: d.bbox().map(|n| n as f64),
@@ -254,7 +255,60 @@ impl Model {
             styles,
             pairs,
             groups,
-        }))
+            initial_layers: Layers::All,
+        };
+        let props = match d {
+            Dataset::Layout(l) => &l.layer_props,
+            Dataset::Deck(d) => &d.layer_props,
+        };
+        model.initial_layers = model.properties_visibility(props)?;
+        Ok(Arc::new(model))
+    }
+    fn properties_visibility(&self, props: &[crate::styles::LayerProps]) -> Result<Layers> {
+        // Explicit leaf flags beat a head independent of file order. Head
+        // checkboxes derive from leaves; do not send a head for partial groups.
+        let flags: BTreeMap<_, _> = props
+            .iter()
+            .filter(|p| self.pairs.contains(&p.layer))
+            .filter_map(|p| p.visible.map(|v| (p.layer, v)))
+            .collect();
+        if flags.values().all(|&v| v) {
+            return Ok(Layers::All);
+        }
+        let mut selected: BTreeSet<_> = self
+            .styles
+            .iter()
+            .map(|s| s.layer)
+            .filter(|p| !self.groups.contains_key(p))
+            .collect();
+        let total = selected.len();
+        // Fold duplicate heads before expansion: a bounded text file must not
+        // make us walk a large group once per duplicate input row.
+        for (&pair, &visible) in &flags {
+            let mut set = |key| {
+                if visible {
+                    selected.insert(key);
+                } else {
+                    selected.remove(&key);
+                }
+            };
+            if let Some(children) = self.groups.get(&pair) {
+                for &key in children {
+                    if !flags.contains_key(&key) {
+                        set(key);
+                    }
+                }
+            } else {
+                set(pair);
+            }
+        }
+        if selected.len() == total {
+            Ok(Layers::All)
+        } else if selected.is_empty() {
+            Ok(Layers::None)
+        } else {
+            self.layers(&Layers::Only(selected.into_iter().collect()))
+        }
     }
     fn layers(&self, layers: &Layers) -> Result<Layers> {
         let Layers::Only(pairs) = layers else {
@@ -295,7 +349,7 @@ impl ViewState {
             depth: None,
             detail: Detail::Medium,
             thin: Thin::Auto,
-            layers: Layers::All,
+            layers: model.initial_layers.clone(),
             isolated_from: None,
             frames: false,
             labels: !model.deck,
@@ -502,6 +556,111 @@ impl ViewState {
 mod tests {
     use super::*;
     #[test]
+    fn properties_visibility_is_order_independent_for_explicit_children_and_never_prefixes() {
+        let styles = Arc::new(
+            vec![(1, 0), (1, 1), (1, 2), (2, 0)]
+                .into_iter()
+                .map(|layer| Style {
+                    layer,
+                    color: [255; 4],
+                    fill: floe_worker_client::Fill::Solid,
+                    width: 1,
+                })
+                .collect::<Vec<_>>(),
+        );
+        let mut model = Model {
+            dataset_revision: 1,
+            dbu: 1.,
+            bbox: [0., 0., 100., 100.],
+            deck: true,
+            skipped: 0,
+            source_stale: false,
+            pairs: styles.iter().map(|s| s.layer).collect(),
+            groups: [((1, 0), vec![(1, 1), (1, 2)])].into(),
+            styles,
+            initial_layers: Layers::All,
+        };
+        let prop = |layer, visible| crate::styles::LayerProps {
+            layer,
+            color: None,
+            fill: "unknown".into(),
+            width: 1,
+            visible,
+        };
+        let forward = vec![
+            prop((1, 0), Some(false)),
+            prop((1, 1), Some(true)),
+            prop((9, 9), Some(false)),
+        ];
+        let reverse = forward.iter().rev().cloned().collect::<Vec<_>>();
+        assert_eq!(
+            model.properties_visibility(&forward).unwrap(),
+            Layers::Only(vec![(1, 1), (2, 0)])
+        );
+        assert_eq!(
+            model.properties_visibility(&forward).unwrap(),
+            model.properties_visibility(&reverse).unwrap()
+        );
+        assert_eq!(
+            model
+                .properties_visibility(&[prop((1, 0), None), prop((2, 0), None)])
+                .unwrap(),
+            Layers::All
+        );
+        assert_eq!(
+            model
+                .properties_visibility(&[
+                    prop((1, 1), Some(false)),
+                    prop((1, 1), None),
+                    prop((1, 1), Some(true))
+                ])
+                .unwrap(),
+            Layers::All
+        );
+        model.initial_layers = model
+            .properties_visibility(&[prop((1, 0), Some(false)), prop((2, 0), Some(false))])
+            .unwrap();
+        assert_eq!(
+            ViewState::initial(&model, 100, 100).unwrap().layers,
+            Layers::None
+        );
+        assert_eq!(
+            ViewState::initial(&model, 100, 100)
+                .unwrap()
+                .edit(
+                    &model,
+                    Patch {
+                        layers: Some(Layers::All),
+                        ..Default::default()
+                    }
+                )
+                .unwrap()
+                .layers,
+            Layers::All
+        );
+        model.groups.clear();
+        model.deck = false;
+        model.styles = Arc::new(
+            (0..4100)
+                .map(|n| Style {
+                    layer: (n, 0),
+                    color: [255; 4],
+                    fill: floe_worker_client::Fill::Solid,
+                    width: 1,
+                })
+                .collect(),
+        );
+        model.pairs = model.styles.iter().map(|s| s.layer).collect();
+        assert_eq!(model.properties_visibility(&[]).unwrap(), Layers::All);
+        assert!(model
+            .properties_visibility(&[prop((0, 0), Some(false))])
+            .is_err());
+        let hidden = (0..4100)
+            .map(|n| prop((n, 0), Some(false)))
+            .collect::<Vec<_>>();
+        assert_eq!(model.properties_visibility(&hidden).unwrap(), Layers::None);
+    }
+    #[test]
     fn layer_checkbox_delta_expands_groups_without_losing_other_selections() {
         let styles = Arc::new(
             vec![(1, 0), (1, 1), (1, 2), (2, 0)]
@@ -524,6 +683,7 @@ mod tests {
             pairs: [(1, 0), (1, 1), (1, 2), (2, 0)].into(),
             groups: [((1, 0), vec![(1, 1), (1, 2)])].into(),
             styles,
+            initial_layers: Layers::All,
         };
         let all = ViewState::initial(&model, 100, 100).unwrap();
         let partial = all

@@ -5,7 +5,8 @@ M2 공유 권한 추가와 실제 브라우저 pack-build 승인 클릭은 승�
 M0/G2·M3 현장 Firefox/ETX는 사용자 요청대로 보류다. 이 경계를 우회하지 않고
 독립적인 로컬 native 이관을 진행한다. M4 전체 완료나 GTK 은퇴를 뜻하지 않는다.
 현재는 §14의 **owner viewport clip UI**, §15의 **표시 픽셀 PNG 복사/저장과
-overlay 전환**까지 연결했다. 각 절의 미연결 표기는 해당 선행 단계 당시의 범위다.
+overlay 전환**, §16의 **Rust layerprops 포맷·초기 가시성**까지 연결했다.
+각 절의 미연결 표기는 해당 선행 단계 당시의 범위다.
 나머지 내보내기·주석/설정 저장과 전체 조작/실제 브라우저 수용은 남아 있다.
 
 ## 1. M4a-1: 표시 scene에 고정한 native pick/snap
@@ -1403,3 +1404,81 @@ renderd 버전은0.12.87로 유지했다(이번 단계는 worker 구현 변경 �
 현장 Firefox/ETX와 실제 OS clipboard·다운로드 수용은 보류/미확인이다.
 전체 M4 완료나 GTK 기본 전환은 아니다. 남은 review/주석·설정 저장·기타 export와
 공유 승인/패키징·현장 게이트를 계속 별도로 추적한다.
+
+## 16. M4d-2: Rust layerprops 포맷과 초기 가시성
+
+UI-03의 설정 불러오기/저장 이관을 위한 공통 Rust 포맷과, 웹 첫 화면의 실제 누락을
+해결한다. 이전 `styles::load_props`는 색·fill·width만 보존하고 다섯 번째 visibility
+열을 버렸으며 `ViewState::initial`은 무조건 All이었다. GTK는 `_apply_props_visibility`를
+첫 렌더 전에 적용하므로 숨김 설정이 있는 같은 설계의 첫 화면이 달랐다.
+
+### 현재 연결된 동작
+
+- source 옆의 `<file>.layerprops`, 없으면 `<stem>.layerprops`라는 기존 우선순위를
+  유지한다. 덱은 기존 mode별 `props_source` namespace를 사용한다. `cache.py`의 실제
+  정책은 **개인 palette cache 없음**이며, 오래된 GUI 소개 주석을 근거로 새 개인
+  파일 조회/자동 저장을 도입하지 않는다.
+- 공통 `layerprops::parse`는 여섯 열, 생략된 datatype=0/name=""/visibility=1/width=1,
+  주석/빈 행 생략, malformed 행 수, 중복 행 순서와 미정의 color/fill/flag 토큰을
+  보존한다. extra column/dot suffix 무시는 기존 Python 형식과 같다. u32 밖의 pair는
+  native layer가 될 수 없으므로 malformed로 센다. unknown color/fill을 다른 값으로
+  바꿔 저장하지 않는다. 파일 포맷 해석과 현재 스타일에 적용하는 정책을 분리했다.
+- startup visibility는 실제 `0`/`1`만 적용한다. 모르는 pair·다른 flag는 무시하며
+  unlisted layer는 기본 표시를 유지한다. 중복은 마지막 유효 flag가 이긴다. 덱 헤드는
+  **명시적인 유효 flag가 없는 자식**에만 영향을 준다. 자식 행이 헤드보다 먼저 있어도
+  같은 결과다. 부분 선택에는 헤드 key를 포함하지 않는다. 중복 헤드를 먼저 합쳐
+  큰 자식 목록을 중복 행마다 순회하지 않으며, 모두 표시이면 기존 All 경로를 유지한다.
+- `Model`의 초기 가시성은 native worker 첫 요청 전 `ViewState`에 들어간다.
+  `--layers`/startup body의 명시 All/None/Only가 있으면 그 편집이 우선한다.
+  headless render/capture의 기본 All은 바꾸지 않는다. 열린 view가 변경된 sidecar를
+  자동 감지하는 기능은 추가하지 않았다. 기존 source/cache revision 결정 보류도 유지한다.
+- `layerprops::format`과 `Row::from_style`은 순서·이름·색 palette의 첫 일치 이름과
+  표준 bitmap 이름을 보존해 six-column text를 만든다. 빈 이름은 L_D, ASCII space는
+  underscore로 바꾸는 기존 포맷이다. 현재는 **라이브러리 API**이며 브라우저 Load/Save
+  버튼이나 새 filesystem/HTTP endpoint를 광고하지 않는다.
+
+### 데이터 손실·자원 경계
+
+문서4MiB, 최대65,536행·필드4,096bytes다. 크기 초과/필드 내 control character는
+문서 전체의 명시 오류이며 prefix만 적용/저장하지 않는다. 출력 token에 whitespace를
+넣어 새 행/열을 만드는 것도 거부한다. 선폭 정수는 큰 수 allocation/overflow 없이
+native 범위1..8로 clamp하며 invalid token은 별도로 유지한다. 기존 explicit selection
+한계4,096은 그대로다. 더 큰 부분 선택이면 명시 오류이며 임의의 일부만 표시하지 않는다.
+All/None으로 정규화되는 대형 표에는 이 부분 선택 한계를 잘못 적용하지 않는다.
+
+six-column Calibre 파일에는 임의16×16 bitmap 본문을 저장할 수 없다. 알려진 이름과
+맞지 않는 bitmap은 `Unsupported`이며 speckle/solid로 대체하지 않는다. GTK의 세션 내
+bitmap 편집 후 슬롯 이름만 저장하는 경로도 재오픈 시 편집 내용이 보존되지 않으므로
+그 손실을 정답으로 복제하지 않는다. 완전한 설정 snapshot/브라우저 저장 연결에서는
+이 경우를 별도 lossless 형식/명시 안내로 처리해야 한다.
+
+### 검증과 다음 연결
+
+`validate_layerprops.py`는 실제 `floe.fillpat` parse/format/color 이름과 GTK의
+`_apply_props_visibility`/group sync를 추출해 오라클로 쓴다. GTK import/창은 필요 없다.
+72문서·980표준 스타일·4개 private valmini 모델의 초기 선택/명시 All, 입력/cache의
+byte·mtime 불변을 검사한다. Rust 실행 PATH는 비워 Python fallback을 금지한다.
+단위 테스트는 malformed/unknown/큰 정수·control/한계, 부모-자식 역순/중복, 대형
+All/None과 부분 선택 거부를 추가로 고정한다.
+
+기존 `validate_app_deck_render.py`의6 native managed controller에 GTK 기본 가시성의
+첫 PNG와 명시 All 복원 PNG를 모두 대조한다. 부모0/자식1과 헤드 후순위 파일을 포함한다.
+기존 metadata/styles/archival PNG gate를 삭제하거나 조건부로 바꾸지 않았다.
+새 layerprops 게이트도 `validate_rust.sh`에 연결했다.
+
+최종 검증(2026-09-14): 전체 `sh tools/validate_rust.sh`가 종료 코드0과
+`RUST VALIDATION: ALL OK`로 완료됐다. jobdeck80·renderer46, KLayout13 PX
++2 phase-exact +14 style jobs1/8을 포함한다. 마지막 중복 헤드 정규화 뒤에는
+codec72문서/980스타일/4모델과 덱6 controller의 초기·All 총12 PNG를 다시 대조했고,
+app11/core134/web41·transport10·worker-client7/lifecycle14 및 scoped strict
+clippy/fmt를 재확인했다. Rust1.89 테스트와 macOS release/Linux x86-64 musl
+static-pie 빌드도 통과했다. 기존 vfs dead-code 경고는 남아 있다.
+renderd는0.12.87로 유지한다(worker 변경 없음). 이번 단계에는 새 브라우저 UI가 없고,
+실제 Linux 실행·현장 Firefox/ETX 검증을 수행한 것으로 간주하지 않는다.
+
+다음은 열린 세션의 원자적 속성 적용/브라우저 Load·Save와 명시적인 기본값 게시다.
+live import에서 invalid 색/fill/width를 각기 무시하고 unlisted 상태·기존 명시적
+child fill/width를 보존해야 한다. 이를 행마다 완전한 Style로 덮어쓰는 변환으로
+대체하면 GTK의 sparse assignment 상속과 달라진다. 저장은 source 경로 임의 쓰기나
+자동 기본값 게시가 아니어야 한다. GTK 기본값 게시 메뉴는 `FLOE_FILL_EDIT` 개발용임도
+유지한다. 이 단계는 Load/Save UI나 전체 UI-03/M4 완료가 아니다.

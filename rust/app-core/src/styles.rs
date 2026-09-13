@@ -17,6 +17,38 @@ pub struct LayerProps {
     pub color: Option<[u8; 4]>,
     pub fill: String,
     pub width: u8,
+    pub visible: Option<bool>,
+}
+pub fn color_name(value: [u8; 4]) -> String {
+    let hex = color_text(value);
+    COLORS
+        .lines()
+        .filter_map(|line| {
+            let mut p = line.split_whitespace();
+            let name = p.next()?;
+            (!name.starts_with('#') && p.next()? == &hex[1..]).then_some(name)
+        })
+        .next()
+        .unwrap_or(&hex)
+        .to_string()
+}
+pub(crate) fn pattern_name(fill: &Fill) -> Option<&'static str> {
+    let Fill::Pattern(want) = fill else {
+        return None;
+    };
+    PATTERNS.lines().find_map(|line| {
+        let mut words = line.split_whitespace();
+        let name = words.next()?;
+        if name.starts_with('#') {
+            return None;
+        }
+        for &row in want {
+            if words.next().and_then(|s| u16::from_str_radix(s, 16).ok()) != Some(row) {
+                return None;
+            }
+        }
+        words.next().is_none().then_some(name)
+    })
 }
 pub fn color_text([r, g, b, _]: [u8; 4]) -> String {
     format!("#{r:02x}{g:02x}{b:02x}")
@@ -75,32 +107,17 @@ pub fn load_props(source: &Path) -> Result<Vec<LayerProps>> {
         if text.len() > 4 * 1024 * 1024 {
             return Err(Error::input("layerprops exceeds 4 MiB"));
         }
-        let mut props = Vec::new();
-        for line in text.lines().map(str::trim).filter(|l| !l.starts_with('#')) {
-            let p: Vec<_> = line.split_whitespace().collect();
-            if p.len() < 3 {
-                continue;
-            }
-            let mut ld = p[0].split('.');
-            let (Ok(l), Ok(d)) = (
-                ld.next().unwrap_or("").parse(),
-                ld.next().unwrap_or("0").parse(),
-            ) else {
-                continue;
-            };
-            let width = p
-                .get(5)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(1)
-                .clamp(1, 8) as u8;
-            props.push(LayerProps {
-                layer: (l, d),
-                color: color(p[1]),
-                fill: p[2].into(),
-                width,
-            });
-        }
-        return Ok(props);
+        return Ok(crate::layerprops::parse(&text)?
+            .rows
+            .into_iter()
+            .map(|p| LayerProps {
+                layer: p.layer,
+                color: color(&p.color),
+                width: p.line_width().unwrap_or(1),
+                visible: p.visible(),
+                fill: p.fill,
+            })
+            .collect());
     }
     Ok(vec![])
 }
