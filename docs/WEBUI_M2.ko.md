@@ -739,9 +739,75 @@ Linux musl release link도 통과했다. 기존 native 경고는 남아 있으�
 PASS나 M2 전체 완료를 뜻하지 않는다. 기존 내장 정적 자산 구조를 유지했고 외부
 호스팅·의존성·native wire/캐시 포맷·renderd 버전은 바꾸지 않았다.
 
-## 15. 다음 경계
+## 15. M2a-10a: SVRF sidecar·규칙 메타데이터/측정 코어
 
-1. SVRF metric/type 필터·layer isolate는 아직 미이관이다.
+`rust/app-core/src/svrf.rs`는 기존 **`floe-svrf-rules` version 1 `.rules.json`**을
+읽는다. GTK도 원본 deck 대신 이 파일을 읽는다. **원본 SVRF subset parser/CLI의
+Rust 이관은 아직 M4에 남아 있다.** 이번 단계는 메타데이터 코어와 명시적인 CLI
+읽기이며 웹 actor/타입 UI/레이어 격리는 다음 연결 단계다.
+
+```sh
+rust/target/release/floe2-web drc results.db.ice --rules --svrf-rules deck.rules.json
+rust/target/release/floe2-web drc results.db.ice --errs M1.WIDTH --svrf-rules deck.rules.json
+```
+
+개발 CLI의 추가 옵션 `--svrf-rules FILE`을 명시할 때만 `--rules` 행에 `svrf`,
+`--errs` 행에 `comparison`을 추가한다. 없는 규칙·측정 불가능한 오류는 각각 null이다.
+기존 옵션만 쓰면 기존 JSON이 그대로이고 첫 중복 규칙 선택/경고도 유지된다.
+메타데이터 옵션은 `--rules`/`--errs` 중 하나와만 사용하며 `--list` 병용은 거부한다.
+DB/pack/sidecar의 읽기이며 자동 생성·갱신·Python fallback은 없다.
+
+- 규칙명으로 match한다. description, constraint의 metric/op/value/text 및
+  **미해석 값의 raw 원문**, 직접 layer, source_gds, unresolved를 보존한다.
+  이 match는 올바른 deck/스위치 조합을 증명하는 provenance 검증이 아니다.
+- 타입 코어는 규칙마다 metric을 중복 제거하고 기존 `width/space/enclosure/area/
+  density/length/angle/perimeter/vertex/other` 순서, 그 밖의 metric은 이름 순이다.
+  미매칭·measurement 없는 규칙은 other, 빈 sidecar는 타입 목록 자체가 비어 있다.
+  DRC 파일의 동명 규칙은 각각 센다. 아직 웹 규칙 목록에 적용하지 않았다.
+- derivation은 기존 ASCII operand/keyword subset과 breadth-first 순서를 쓰며
+  cycle을 막고 6개 뒤 `derivations_more`를 명시한다. `source_gds`의 null datatype은
+  모든 datatype이라는 매칭 helper를 둔다. 현재 설계에서 0개 match일 때 hide-all로
+  해석하지 않는 것은 후속 격리 호출자의 계약이다.
+- 측정은 단일 에지 length, 단순 에지 쌍의 진짜 gap, 축정렬 4점 사각형의 min span,
+  polygon의 shoelace area만 지원한다. 나머지는 null이다. `< / <= / ==` 중 **처음
+  측정 가능한 제약**을 우선하고 없으면 첫 측정 가능한 제약을 선택한다. bound=0은
+  percent=null이다. marker의 측정값·bound·차이를 보여주는 참고값이지 재검증이나
+  signoff PASS/FAIL 판정이 아니다(일반 다각형의 최소 폭/면적 Boolean 연산 아님).
+- 면적은 원점을 뺀 i128 좌표에서 checked shoelace를 계산한다. i64 극단의 작은
+  도형을 절대 f64 곱셈으로 상쇄시키지 않는다. i128 산술 overflow, 표현 불가능한
+  면적 underflow/비유한 값·비교값은 오류이며 조용히0이나 infinity를 반환하지 않는다.
+  이는 Python 절대좌표 shoelace의 반올림 손실을 재현하지 않는 정밀도 보완이다.
+
+입력 경계: 전체16 MiB, checks/derived 각각65,536개, 규칙별 constraint1,024개,
+layers/source_gds/unresolved 각각4,096개, 규칙 텍스트 합/각 derivation64 KiB,
+metric64 bytes. map/배열 상한은 deserialize 중 적용하고 중복 key, 잘못된 타입,
+비유한 값·알 수 없는 version은 명시 거부한다. GTK의 미래 version 경고 후 계속
+읽기와 달리 이 typed reader는 version1만 수용한다. 새 제한은 표시를 자르는 budget이
+아니며 RSS cap 주장도 아니다. 전체 파일 파싱은 유계 worker 작업으로 쓰도록 하며
+즉시 취소 가능한 JSON parser라는 계약은 아니다.
+
+파일은 nonblocking open 후 regular-file을 확인해 FIFO 입력이 대기하지 않는다.
+읽기 전후 fd/path의 inode·size·mtime/ctime을 비교하고 취소를 검사한다. 받은 snapshot만
+보관하며 **기록된 deck/include 경로를 따라가지 않는다.** root 권한 검사는 후속 웹
+등록 계층의 책임이고 자동 탐색/공유 범위 확대/외부 변경 hot-reload를 추가하지 않았다.
+
+`validate_app_svrf.py`는 실제 Python parser 출력과 GUI의 순수 메서드를 AST로
+가져와(no GTK import) 비교한다. 합성/generated DB의 **1,052개 도형·제약 조합**, raw
+미해석 값·중복 규칙·타입·6단 derivation·null·첫 upper-bound 선택을 검사한다. Python
+area 반올림 차이는 ULP 범위와 독립적인 정수 DBU shoelace로 검증한다. Rust 실행은
+PATH-empty이고 전후 파일 목록·mtime·hash 불변, corrupt/미래 version/초과/FIFO/디렉터리/
+missing 파일의 실패도 단언한다. 이 gate를 전체 배터리에 추가했다.
+
+2026-09-13: 전체 `sh tools/validate_rust.sh` ALL OK, KLayout13 PX+2 phase-exact+
+14 style 통과. core65/app6/web24/transport8 테스트, fmt·전환 패키지 strict clippy,
+Rust1.89 빈 registry 오프라인 테스트와 Linux musl release link도 통과했다. 기존
+native/Pillow 경고는 남아 있다. native wire/캐시·renderd 버전·GTK 기본값은 바꾸지
+않았다. Linux 실행이나 브라우저 기능 추가·현장 Firefox/ETX PASS를 뜻하지 않는다.
+
+## 16. 다음 경계
+
+1. SVRF sidecar 코어는 §15까지 이관했다. actor/웹 metric/type 필터·layer isolate는
+   아직 미연결이다. 기존 GTK의 jump 시 In view 해제도 함께 parity 검증해야 한다.
    selected/live In view 목록 필터·순회·hover는 §13~14까지 구현했다.
    손으로 그리는 ruler/격리와 Escape 우선순위도 M4에서 확장한다.
    현재 페이지 마커 정책 자체를 전체 pack 마커로 확대하지 않는다.

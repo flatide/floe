@@ -20,6 +20,7 @@ pub mod registered;
 pub mod render;
 pub mod shots;
 pub mod styles;
+pub mod svrf;
 pub mod view;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

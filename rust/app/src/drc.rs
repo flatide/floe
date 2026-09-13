@@ -1,5 +1,5 @@
 //! Existing scripting output remains streamed; no browser/GTK dependencies.
-use floe_app_core::{check_cancelled, drc::open_current, Error, Result};
+use floe_app_core::{check_cancelled, drc::open_current, svrf::Rules, Error, Result};
 use std::{
     io::{self, Write},
     path::PathBuf,
@@ -10,6 +10,7 @@ const HELP: &str = "Usage: floe2-web drc RESULTS.db|RESULTS.ice [OPTIONS]
   --rules                 Rule JSON [{name,errors,waived},...]
   --errs RULE             Stream one rule's error JSON (first duplicate)
   --floe-reviewer TAG     Existing per-reviewer waive sidecar selection
+  --svrf-rules FILE       Explicit rules.json metadata for --rules / --errs
 
 Read-only: no automatic indexing, autosave creation, or in-pack writes.
 This stage requires an existing layout-4 .ice pack (fresh beside a .db).
@@ -20,6 +21,7 @@ pub struct Command {
     rules: bool,
     errs: Option<String>,
     reviewer: Option<String>,
+    svrf_rules: Option<PathBuf>,
 }
 pub fn parse(args: &[String]) -> Result<Command> {
     let mut c = Command {
@@ -28,6 +30,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
         rules: false,
         errs: None,
         reviewer: None,
+        svrf_rules: None,
     };
     let mut i = 1;
     let mut positional = false;
@@ -58,7 +61,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
                     c.rules = true
                 }
             }
-            "--errs" | "--floe-reviewer" => {
+            "--errs" | "--floe-reviewer" | "--svrf-rules" => {
                 let value = if let Some(s) = inline {
                     s
                 } else {
@@ -74,6 +77,8 @@ pub fn parse(args: &[String]) -> Result<Command> {
                 }
                 if flag == "--errs" {
                     c.errs = Some(value.into())
+                } else if flag == "--svrf-rules" {
+                    c.svrf_rules = Some(value.into())
                 } else {
                     c.reviewer = Some(value.into())
                 }
@@ -83,6 +88,11 @@ pub fn parse(args: &[String]) -> Result<Command> {
     }
     if c.source.is_none() {
         return Err(Error::input("drc requires a database"));
+    }
+    if c.svrf_rules.is_some() && (c.list || (c.rules == c.errs.is_some())) {
+        return Err(Error::input(
+            "--svrf-rules requires exactly one of --rules / --errs (without --list)",
+        ));
     }
     Ok(c)
 }
@@ -100,6 +110,11 @@ pub fn run(command: Command, cancelled: &AtomicUsize) -> Result<i32> {
         return Ok(0);
     };
     let mut p = open_current(&source, command.reviewer.as_deref(), cancelled)?;
+    let metadata = command
+        .svrf_rules
+        .as_deref()
+        .map(|path| Rules::load(path, cancelled))
+        .transpose()?;
     let mut out = io::BufWriter::new(io::stdout().lock());
     if command.rules {
         writeln!(out, "[")?;
@@ -108,10 +123,13 @@ pub fn run(command: Command, cancelled: &AtomicUsize) -> Result<i32> {
             if i > 0 {
                 writeln!(out, ",")?;
             }
-            json(
-                &mut out,
-                &serde_json::json!({"name":c.name,"errors":c.count,"waived":p.waived_count(i)?}),
-            )?;
+            let mut row =
+                serde_json::json!({"name":c.name,"errors":c.count,"waived":p.waived_count(i)?});
+            if let Some(m) = &metadata {
+                row["svrf"] = serde_json::to_value(m.detail(&c.name, cancelled)?)
+                    .map_err(|e| Error::input(e.to_string()))?;
+            }
+            json(&mut out, &row)?;
         }
         writeln!(out, "\n]")?;
     } else if let Some(rule) = command.errs {
@@ -140,10 +158,17 @@ pub fn run(command: Command, cancelled: &AtomicUsize) -> Result<i32> {
                 if hit.local > 0 {
                     writeln!(out, ",")?;
                 }
-                json(
-                    &mut out,
-                    &serde_json::json!({"local":hit.local+1,"global":e.number,"kind":e.kind.to_string(),"status":hit.status,"bbox":p.bbox_um(e.bbox)?.map(rounded)}),
-                )?;
+                let mut row = serde_json::json!({"local":hit.local+1,"global":e.number,"kind":e.kind.to_string(),"status":hit.status,"bbox":p.bbox_um(e.bbox)?.map(rounded)});
+                if let Some(m) = &metadata {
+                    let comparison = m
+                        .rule(&rule)
+                        .map(|r| r.compare(e.kind, &e.points, p.precision, cancelled))
+                        .transpose()?
+                        .flatten();
+                    row["comparison"] = serde_json::to_value(comparison)
+                        .map_err(|e| Error::input(e.to_string()))?;
+                }
+                json(&mut out, &row)?;
             }
             if let Some(next) = page.next {
                 start = next.error;
@@ -222,5 +247,9 @@ mod tests {
         assert!(parse_str(&["drc", "a", "b"]).is_err());
         assert!(parse_str(&["drc", "a", "--errs"]).is_err());
         assert!(parse_str(&["drc", "a", "--rules=true"]).is_err());
+        assert!(parse_str(&["drc", "a", "--svrf-rules", "x"]).is_err());
+        assert!(parse_str(&["drc", "a", "--svrf-rules", "x", "--rules", "--errs", "r"]).is_err());
+        assert!(parse_str(&["drc", "a", "--svrf-rules", "x", "--rules", "--list"]).is_err());
+        assert!(parse_str(&["drc", "a", "--svrf-rules=한 글.rules.json", "--rules"]).is_ok());
     }
 }

@@ -7,7 +7,7 @@ mod pack;
 mod selection;
 pub use filters::{ListPage, ListRequest};
 pub use local::{open_current, reviewer_tag, waive_paths};
-pub use measure::{cd_segments, CdSegment};
+pub use measure::{cd_segments, measured, CdSegment};
 pub use pack::{
     Check, Cursor, Hit, InfoHit, InfoPage, Pack, Page, PointPage, RecordInfo, StepCursor, StepPage,
     StepRequest, Violation,

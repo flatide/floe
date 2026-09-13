@@ -1,6 +1,7 @@
 //! Existing floe/drc.py CD policy: simple edges/gaps and rectangle spans,
 //! not a general polygon width, signoff check, or SVRF constraint evaluator.
-use crate::{Error, Result};
+use crate::{check_cancelled, Error, ErrorKind, Result};
+use std::sync::atomic::AtomicUsize;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CdSegment {
@@ -158,6 +159,81 @@ pub fn cd_segments(kind: char, points_dbu: &[[i64; 2]], precision: f64) -> Resul
             })
         })
         .collect()
+}
+
+/// Legacy rule-detail measurements, in um or um². Unsupported geometry/metric
+/// returns None, never a bounding-box approximation or a signoff verdict.
+pub fn measured(
+    kind: char,
+    p: &[[i64; 2]],
+    precision: f64,
+    metric: &str,
+    stop: &AtomicUsize,
+) -> Result<Option<f64>> {
+    check_cancelled(stop)?;
+    if !precision.is_finite() || precision <= 0. {
+        return Err(Error::input("invalid DRC measurement precision"));
+    }
+    let value = match metric {
+        "area" if kind == 'p' && p.len() >= 3 => {
+            if p.len() > super::RECORD_POINTS {
+                return Err(super::limit("measurement point limit"));
+            }
+            // Integer, translated shoelace preserves one-DBU regions near i64
+            // limits. Checked products/sum reject extremes rather than wrap or
+            // quietly cancel large absolute floating-point products.
+            let origin = p[0];
+            let local = |q: [i64; 2]| {
+                [
+                    i128::from(q[0]) - i128::from(origin[0]),
+                    i128::from(q[1]) - i128::from(origin[1]),
+                ]
+            };
+            let mut sum = 0i128;
+            for i in 0..p.len() {
+                if i % 1024 == 0 {
+                    check_cancelled(stop)?;
+                }
+                let (a, b) = (local(p[i]), local(p[(i + 1) % p.len()]));
+                sum = a[0]
+                    .checked_mul(b[1])
+                    .and_then(|x| a[1].checked_mul(b[0]).and_then(|y| x.checked_sub(y)))
+                    .and_then(|cross| sum.checked_add(cross))
+                    .ok_or_else(|| {
+                        Error::new(ErrorKind::Incomplete, "DRC area arithmetic overflow")
+                    })?;
+            }
+            let area = sum.unsigned_abs() as f64 * 0.5 / precision / precision;
+            if sum != 0 && area == 0. {
+                return Err(Error::input("unrepresentable DRC area (underflow)"));
+            }
+            area
+        }
+        "width" | "space" | "enclosure" if kind == 'p' || (kind == 'e' && p.len() == 4) => {
+            let segments = cd_segments(kind, p, precision)?;
+            let Some(first) = segments.first() else {
+                return Ok(None);
+            };
+            if kind == 'e' {
+                first.distance_um
+            } else {
+                segments
+                    .iter()
+                    .map(|s| s.distance_um)
+                    .fold(f64::INFINITY, f64::min)
+            }
+        }
+        "length" if kind == 'e' && p.len() == 2 => {
+            let dx = (i128::from(p[1][0]) - i128::from(p[0][0])) as f64 / precision;
+            let dy = (i128::from(p[1][1]) - i128::from(p[0][1])) as f64 / precision;
+            dx.hypot(dy)
+        }
+        _ => return Ok(None),
+    };
+    if !value.is_finite() {
+        return Err(Error::input("unrepresentable DRC measurement"));
+    }
+    Ok(Some(value))
 }
 
 #[cfg(test)]
