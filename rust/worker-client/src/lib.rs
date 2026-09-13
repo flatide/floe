@@ -13,8 +13,8 @@ use files::{wire_path, Workspace};
 use protocol::{parse_line, style_text, Line, MAX_LINE_BYTES};
 pub use protocol::{Fields, Fill, FrameFormat, Layers, RenderRequest, Style, ThinPolicy};
 pub use query::{
-    PickHit, QueryHit, QueryOperation, QueryReply, QueryRequest, QueryScene, QueryStatus, SceneId,
-    SnapHit, SnapKind,
+    PickHit, QueryHit, QueryKind, QueryOperation, QueryReply, QueryRequest, QueryScene,
+    QueryStatus, SceneId, SnapHit, SnapKind,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::OsString;
@@ -165,6 +165,10 @@ impl Frame {
 pub enum Event {
     Frame(Frame),
     Query(QueryReply),
+    QueryCancelAcknowledged {
+        kind: QueryKind,
+        before_sequence: u64,
+    },
     Cancelled {
         generation: u64,
     },
@@ -188,6 +192,10 @@ struct ActiveQuery {
     request: QueryRequest,
     deadline: Instant,
 }
+struct ActiveQueryCancel {
+    before_sequence: u64,
+    deadline: Instant,
+}
 
 pub struct WorkerClient {
     config: Config,
@@ -205,6 +213,7 @@ pub struct WorkerClient {
     active: Option<Active>,
     query_sequence: u64,
     queries: BTreeMap<u64, ActiveQuery>,
+    query_cancels: BTreeMap<QueryKind, ActiveQueryCancel>,
 }
 
 impl WorkerClient {
@@ -278,6 +287,7 @@ impl WorkerClient {
             active: None,
             query_sequence: 0,
             queries: BTreeMap::new(),
+            query_cancels: BTreeMap::new(),
         };
         let tx = response_tx.clone();
         client.threads.push(
@@ -418,7 +428,7 @@ impl WorkerClient {
         if self.child.is_none()
             || self.opened.is_none()
             || self.active.is_some()
-            || !self.queries.is_empty()
+            || self.pending_queries() != 0
         {
             return Err(Error::new(
                 ErrorKind::State,
@@ -515,7 +525,50 @@ impl WorkerClient {
         Ok(sequence)
     }
     pub fn pending_queries(&self) -> usize {
-        self.queries.len()
+        self.queries.len() + self.query_cancels.len()
+    }
+
+    /// Cancel one kind without touching renders or releasing request credit.
+    /// At most one unacknowledged cancellation per kind; poll all replies/ACKs.
+    pub fn cancel_queries(&mut self, kind: QueryKind) -> Result<u64> {
+        if self.child.is_none() || self.opened.as_ref().is_none_or(|o| o.is_deck) {
+            return Err(Error::new(
+                ErrorKind::State,
+                "query cancellation requires an open layout",
+            ));
+        }
+        if self.query_cancels.contains_key(&kind) {
+            return Err(Error::new(
+                ErrorKind::Busy,
+                "drain query cancellation acknowledgement",
+            ));
+        }
+        let before_sequence = self
+            .query_sequence
+            .checked_add(1)
+            .filter(|n| *n <= i64::MAX as u64)
+            .ok_or_else(|| Error::input("query sequence exhausted"))?;
+        self.send(format!(
+            "cancel_query kind={} before_seq={before_sequence}",
+            kind.wire()
+        ))?;
+        self.query_sequence = before_sequence;
+        self.query_cancels.insert(
+            kind,
+            ActiveQueryCancel {
+                before_sequence,
+                deadline: Instant::now() + self.config.query_timeout,
+            },
+        );
+        Ok(before_sequence)
+    }
+
+    fn query_deadline(&self) -> Option<Instant> {
+        self.queries
+            .values()
+            .map(|q| q.deadline)
+            .chain(self.query_cancels.values().map(|q| q.deadline))
+            .min()
     }
 
     pub fn cancel(&mut self) -> Result<u64> {
@@ -546,14 +599,14 @@ impl WorkerClient {
             if self.active.as_ref().is_some_and(|a| now >= a.deadline) {
                 return Err(Error::new(ErrorKind::Timeout, "render deadline exceeded"));
             }
-            if self.queries.values().any(|q| now >= q.deadline) {
+            if self.query_deadline().is_some_and(|at| now >= at) {
                 return Err(Error::new(ErrorKind::Timeout, "query deadline exceeded"));
             }
             let until = self
                 .active
                 .as_ref()
                 .map_or(deadline, |a| deadline.min(a.deadline));
-            let until = self.queries.values().fold(until, |t, q| t.min(q.deadline));
+            let until = self.query_deadline().map_or(until, |at| until.min(at));
             let interval = until.saturating_duration_since(now);
             let interval = if self.config.shutdown_requested.is_some() {
                 interval.min(Duration::from_millis(20))
@@ -562,7 +615,7 @@ impl WorkerClient {
             };
             let Some(line) = self.receive(interval)? else {
                 self.check_shutdown()?;
-                if self.queries.values().any(|q| Instant::now() >= q.deadline) {
+                if self.query_deadline().is_some_and(|at| Instant::now() >= at) {
                     return Err(Error::new(ErrorKind::Timeout, "query deadline exceeded"));
                 }
                 if self
@@ -680,6 +733,20 @@ impl WorkerClient {
     fn handle(&mut self, line: Line) -> Result<Option<Event>> {
         let mut f = line.fields;
         match line.kind.as_str() {
+            "query_cancelled" => {
+                let kind = QueryKind::parse(f.required("kind")?)?;
+                let before_sequence = query::counter(&f, "before_seq")?;
+                let pending = self.query_cancels.remove(&kind).ok_or_else(|| {
+                    Error::protocol("unissued query cancellation acknowledgement")
+                })?;
+                if pending.before_sequence != before_sequence {
+                    return Err(Error::protocol("query cancellation frontier mismatch"));
+                }
+                Ok(Some(Event::QueryCancelAcknowledged {
+                    kind,
+                    before_sequence,
+                }))
+            }
             "snap" | "pick" => {
                 let sequence = f.u64("seq")?;
                 let pending = self
@@ -816,6 +883,7 @@ impl WorkerClient {
         self.active = None;
         self.issued.clear();
         self.queries.clear();
+        self.query_cancels.clear();
         self.workspace.cleanup()
     }
 }

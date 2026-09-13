@@ -38,7 +38,33 @@ pub enum QueryOperation {
     Snap,
     Pick { nth: i64 },
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum QueryKind {
+    Snap,
+    Pick,
+}
+impl QueryKind {
+    pub(crate) fn wire(self) -> &'static str {
+        match self {
+            Self::Snap => "snap",
+            Self::Pick => "pick",
+        }
+    }
+    pub(crate) fn parse(value: &str) -> Result<Self> {
+        match value {
+            "snap" => Ok(Self::Snap),
+            "pick" => Ok(Self::Pick),
+            _ => Err(Error::protocol("invalid query kind")),
+        }
+    }
+}
 impl QueryOperation {
+    pub fn kind(self) -> QueryKind {
+        match self {
+            Self::Snap => QueryKind::Snap,
+            Self::Pick { .. } => QueryKind::Pick,
+        }
+    }
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Snap => "snap",
@@ -136,7 +162,7 @@ fn int(s: &str) -> Result<i64> {
     s.parse()
         .map_err(|_| Error::protocol("invalid query coordinate"))
 }
-fn counter(fields: &Fields, key: &str) -> Result<u64> {
+pub(crate) fn counter(fields: &Fields, key: &str) -> Result<u64> {
     let n = fields.u64(key)?;
     if fields.required(key)? != n.to_string() {
         return Err(Error::protocol("noncanonical query counter"));

@@ -189,6 +189,17 @@ and worker lifetime. Omitting both expected counters preserves the legacy local
 query behavior. See [the M4 query contract](WEBUI_M4.ko.md) for statuses and gates;
 this native API does not yet enable web queries.
 
+Native 0.12.87 adds `cancel_query kind=snap|pick before_seq=N`, where `N` is a
+positive canonical integer no larger than i64::MAX. It advances only that kind's
+monotonic query frontier and replies `query_cancelled kind=... before_seq=N`
+(the actual frontier). Query sequences below the frontier are superseded; render
+generations and the other query kind are unaffected. Cancellation is cooperative
+and may race an already completed reply. The diagnostic inline-query mode cannot
+interrupt a running stdin query. New clients drain the cancellation ACK **and**
+each query terminal before a synchronous style change. The M4a-2 local view
+controller also checks displayed-frame/worker/revision anchors; HTTP/UI exposure
+is still disabled. See [M4 §2](WEBUI_M4.ko.md#2-m4a-2-표시-frame에-고정한-로컬-controller-query).
+
 Renderer repetition traversal supports small collinear or zero-vector
 two-dimensional grids, but explicitly rejects a degenerate per-view range
 larger than 1,048,576 visits before enumeration. Non-degenerate grids use

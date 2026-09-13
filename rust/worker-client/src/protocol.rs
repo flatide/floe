@@ -64,6 +64,7 @@ pub(crate) fn parse_line(bytes: &[u8]) -> Result<Line> {
             | "bye"
             | "pick"
             | "snap"
+            | "query_cancelled"
     ) {
         return Err(Error::protocol(format!("unexpected response kind {kind}")));
     }

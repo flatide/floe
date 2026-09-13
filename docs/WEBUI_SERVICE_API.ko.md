@@ -38,8 +38,8 @@ identity 등록 순서다. native 게시 결과와 새 reader의 opening/ready/e
 전송된 뒤 결과가 불명확하면 새 seq를 자동 발급하지 않고, 사용자 명시 확인만
 원래 seq/옵션/identity를 재전송한다. GET/재접속은 생성 동의가 아니다.
 실제 브라우저 승인 클릭 수용은 별도다(서버 M2 §23, UI §24).
-M4a-1의 scene-pinned query는 **로컬 native process client만** 구현했다.
-frame/scene 구분·거부 코드·수명/상한은 [M4 §1](WEBUI_M4.ko.md#1-m4a-1-표시-scene에-고정한-native-picksnap)을 따른다.
+M4a-1/2의 scene-pinned query는 **로컬 native process client와 ViewController**까지 구현했다.
+frame/scene 구분·거부 코드·표시 anchor·종류별 취소·수명/상한은 [M4 기록](WEBUI_M4.ko.md)을 따른다.
 현재 owner/share HTTP query가 존재한다는 뜻은 아니며 웹 capability=false를 유지한다.
 2026-09-13 M1a-1 `rust/worker-client`와 M1a-2a/b `app/app-core`의 일반 index·info/단일 render/probe를
 구현했다. 현재 호출 계약은 [worker README](../rust/worker-client/README.md),
@@ -293,16 +293,21 @@ margin crop 불가/labels_truncated에서는 이전 화면을 "현재 완성"으
 
 ### 5.1 query는 현재 wire를 그대로 중계하면 부족하다
 
-현재 snap/pick request와 response에는 `seq`는 있지만 조회 scene의 gen/round는
-없다. render thread는 query와 별개로 published scene을 교체할 수 있고 margin도
-scene을 바꾼다. gateway에서 "지금 표시한 gen"을 응답에 붙이는 것만으로는
-어느 scene을 실제 조회했는지 증명할 수 없다.
+초기 snap/pick wire에는 `seq`만 있어 조회 scene의 gen/round를 증명할 수 없었다.
+M4a-1에서 expected/actual scene ID와 캡처한 immutable Arc의 상태 검증을 추가했다.
+render thread와 margin이 scene을 교체할 수 있으므로 gateway에서 "지금 표시한
+gen"을 응답에 붙이는 것으로 대체하지 않는다. 상태별 코드는 [M4 §1](WEBUI_M4.ko.md)을 따른다.
 
-M4 query 개방 전 내부 wire 확장: 요청에 expected scene ID, scene Arc를 잡는
-시점에 그 ID 확인, 응답에 actual ID. ID는 최소 worker epoch의 gen/round와
-렌더 상태를 식별해야 한다. 다르면 `stale_scene`/`query_unavailable`, 재시도는
-현재 화면과 합치될 때만 한다. 원본 geometry 없는 summary-only/지원하지 않는
-deck에서 "찾지 못함"으로 위장하지 않는다. 확장 전 웹 capability는 false.
+M4a-2의 로컬 controller는 dataset revision·worker epoch·실제 표시 frame ID·
+state/render revision·render key를 고정한다. 현재 viewport의 좌표를 서버에서
+DBU로 변환하고, 가시 레이어·scene 완료 여부와 알려진 margin coverage를 검사한다.
+종류별 latest-only 질의와 명시 취소는 render와 독립이며 늦은 응답은 폐기한다.
+요약-only/지원하지 않는 deck을 "찾지 못함"으로 위장하지 않는다.
+
+웹 개방에는 추가로 인증된 owner·view ID·connection epoch와 **실제로 표시한
+packet/frame**의 anchor를 연결해야 한다. native 오류 문자열을 그대로 보내지 않고
+safe DTO로 변환하며, CSS/DPR 좌표·응답 사용 직전 stale 검사를 UI에서 검증해야 한다.
+이 연결 전 웹 capability는 계속 false다. 로컬 anchor는 접근 권한 토큰이 아니다.
 
 ## 6. 인덱스 revision — 제안 비교, hot reload 미구현
 

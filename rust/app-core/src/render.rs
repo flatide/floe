@@ -117,6 +117,15 @@ impl RenderSession {
     pub fn pending_generations(&self) -> usize {
         self.worker.pending_generations()
     }
+    pub fn query(&mut self, request: floe_worker_client::QueryRequest) -> Result<u64> {
+        self.worker.query(request).map_err(Into::into)
+    }
+    pub fn cancel_queries(&mut self, kind: floe_worker_client::QueryKind) -> Result<u64> {
+        self.worker.cancel_queries(kind).map_err(Into::into)
+    }
+    pub fn pending_queries(&self) -> usize {
+        self.worker.pending_queries()
+    }
     pub fn poll(&mut self, timeout: Duration) -> Result<Option<Event>> {
         self.worker.poll(timeout).map_err(Into::into)
     }
@@ -131,6 +140,12 @@ impl RenderSession {
     }
 
     pub fn capture(&mut self, request: RenderRequest) -> Result<Frame> {
+        if self.pending_queries() != 0 {
+            return Err(Error::new(
+                ErrorKind::Busy,
+                "drain queries before synchronous capture",
+            ));
+        }
         let result = self.capture_inner(request);
         if result.is_err() {
             let _ = self.close();

@@ -1,7 +1,9 @@
 //! Server-authoritative view state. Relative inputs are applied in order;
-//! only rendering is coalesced. No HTTP or browser floating-point world math.
+//! rendering and latest-only queries are coalesced independently. No HTTP or
+//! browser floating-point world math.
 mod controller;
 pub mod margin;
+mod query;
 use crate::{
     dataset::Dataset,
     managed::ManagedDataset,
@@ -12,6 +14,8 @@ pub use controller::{
     ControllerOptions, DisplayFrame, MarginStatus, Phase, Purpose, Snapshot, ViewController,
 };
 use floe_worker_client::{Layers, RenderRequest, Style};
+pub use floe_worker_client::{QueryKind, QueryOperation};
+pub use query::{QueryAnchor, QuerySnapshot, ViewQuery, ViewQueryResult};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,

@@ -1,12 +1,15 @@
 //! One bounded control thread owns one worker. It polls/drains even without a
 //! frame subscriber; HTTP/WS credit never gates worker cleanup or cancellation.
-use super::{margin, Model, Patch, ViewState, Viewport};
+use super::{
+    margin, query, Model, Patch, QueryAnchor, QuerySnapshot, ViewQuery, ViewQueryResult, ViewState,
+    Viewport,
+};
 use crate::{
     managed::{ManagedDataset, Permit, Resources},
     render::{RenderOptions, RenderSession},
     Error, ErrorKind, Result,
 };
-use floe_worker_client::{Event, Frame, RenderRequest, Style};
+use floe_worker_client::{Event, Frame, QueryKind, QueryReply, QueryRequest, RenderRequest, Style};
 use std::{
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -103,8 +106,65 @@ struct Shared {
     snapshot: Snapshot,
     latest: Option<Arc<DisplayFrame>>,
     margin: Option<Arc<DisplayFrame>>,
+    queries: query::Queries,
 }
 impl Shared {
+    fn prune_queries(&mut self, model: &Model) {
+        for kind in query::KINDS {
+            if self
+                .queries
+                .latest_anchor(kind)
+                .is_some_and(|a| !self.anchor_valid(a, model))
+            {
+                self.queries.cancel(kind);
+            }
+        }
+    }
+    fn query_frame(&self, id: u64) -> Option<&DisplayFrame> {
+        self.latest
+            .as_deref()
+            .filter(|f| f.id == id)
+            .or_else(|| self.margin.as_deref().filter(|f| f.id == id))
+    }
+    fn anchor_valid(&self, anchor: QueryAnchor, model: &Model) -> bool {
+        !matches!(
+            self.snapshot.phase,
+            Phase::Closed | Phase::Failed | Phase::Opening
+        ) && self
+            .query_frame(anchor.frame_id)
+            .is_some_and(|f| anchor.matches(f, &self.snapshot(), model))
+    }
+    fn query_request(&self, input: &ViewQuery, model: &Model) -> Result<QueryRequest> {
+        if model.deck {
+            return Err(Error::new(
+                ErrorKind::Unsupported,
+                "jobdeck queries are not implemented",
+            ));
+        }
+        if !self.anchor_valid(input.anchor, model) {
+            return Err(Error::new(
+                ErrorKind::Busy,
+                "displayed query frame or view state is stale",
+            ));
+        }
+        let displayed = self
+            .query_frame(input.anchor.frame_id)
+            .unwrap()
+            .frame
+            .query_scene()?;
+        if !displayed.complete {
+            return Err(Error::new(
+                ErrorKind::Incomplete,
+                "displayed geometry is incomplete",
+            ));
+        }
+        let source = self
+            .queries
+            .source
+            .as_ref()
+            .ok_or_else(|| Error::new(ErrorKind::Busy, "no published query scene"))?;
+        query::request(input, &self.snapshot(), model, source)
+    }
     fn snapshot(&self) -> Snapshot {
         let mut s = self.snapshot.clone();
         s.margin = self.margin.as_ref().and_then(|f| {
@@ -131,6 +191,9 @@ trait Engine: Send {
     fn submit(&mut self, request: RenderRequest) -> Result<u64>;
     fn cancel(&mut self) -> Result<u64>;
     fn pending(&self) -> usize;
+    fn query(&mut self, request: QueryRequest) -> Result<u64>;
+    fn cancel_queries(&mut self, kind: QueryKind) -> Result<u64>;
+    fn pending_queries(&self) -> usize;
     fn poll(&mut self, timeout: Duration) -> Result<Option<Event>>;
     fn styles(&mut self, styles: &[Style]) -> Result<()>;
     fn base(&self) -> RenderRequest;
@@ -140,6 +203,15 @@ trait Engine: Send {
     }
 }
 impl Engine for RenderSession {
+    fn query(&mut self, r: QueryRequest) -> Result<u64> {
+        self.query(r)
+    }
+    fn cancel_queries(&mut self, k: QueryKind) -> Result<u64> {
+        self.cancel_queries(k)
+    }
+    fn pending_queries(&self) -> usize {
+        self.pending_queries()
+    }
     fn max_depth(&self) -> Option<u64> {
         Some(self.max_depth())
     }
@@ -239,6 +311,7 @@ impl ViewController {
             },
             latest: None,
             margin: None,
+            queries: query::Queries::default(),
         }));
         let (state, flag, model2) = (Arc::clone(&shared), Arc::clone(&stop), Arc::clone(&model));
         let resources = Arc::clone(resources);
@@ -265,6 +338,9 @@ impl ViewController {
                 let mut s = state.lock().unwrap();
                 s.latest = None;
                 s.margin = None;
+                s.queries.invalidate();
+                s.queries.in_flight.clear();
+                s.queries.source = None;
                 s.snapshot.margin_working = false;
                 if flag.load(Ordering::Relaxed) != 0 || result.is_ok() {
                     s.snapshot.phase = Phase::Closed;
@@ -289,6 +365,38 @@ impl ViewController {
     pub fn margin(&self) -> Option<Arc<DisplayFrame>> {
         let s = self.shared.lock().unwrap();
         s.margin.clone().filter(|f| f.matches(&s.snapshot()))
+    }
+    /// Caller supplies the frame actually displayed, not merely the last frame
+    /// received. The eventual transport must also bind its view/connection ID.
+    pub fn query_anchor(&self, frame_id: u64) -> Result<QueryAnchor> {
+        let s = self.shared.lock().unwrap();
+        let f = s
+            .query_frame(frame_id)
+            .ok_or_else(|| Error::new(ErrorKind::Busy, "query frame is no longer retained"))?;
+        let anchor = QueryAnchor::new(f, &s.snapshot());
+        if self.stop.load(Ordering::Relaxed) != 0 || !s.anchor_valid(anchor, &self.model) {
+            return Err(Error::new(
+                ErrorKind::Busy,
+                "query frame is not displayed in this state",
+            ));
+        }
+        Ok(anchor)
+    }
+    /// Latest-only per kind: superseded IDs need not get a result. No native
+    /// work or allocation proportional to history occurs on the caller thread.
+    pub fn query(&self, input: ViewQuery) -> Result<u64> {
+        let mut s = self.shared.lock().unwrap();
+        if self.stop.load(Ordering::Relaxed) != 0 {
+            return Err(Error::new(ErrorKind::Cancelled, "view is closing"));
+        }
+        let native = s.query_request(&input, &self.model)?;
+        s.queries.enqueue(input, native)
+    }
+    pub fn query_snapshot(&self) -> QuerySnapshot {
+        self.shared.lock().unwrap().queries.snapshot()
+    }
+    pub fn cancel_query(&self, kind: QueryKind) {
+        self.shared.lock().unwrap().queries.cancel(kind);
     }
     /// A conflict changes neither view nor pending render. Caller returns the
     /// authoritative snapshot, rather than retrying relative deltas blindly.
@@ -330,6 +438,7 @@ impl ViewController {
         s.snapshot.state_rev = rev;
         s.snapshot.render_rev = render_rev;
         s.snapshot.render_key = key;
+        s.queries.invalidate();
         if render_changed {
             s.latest = None;
         }
@@ -345,6 +454,7 @@ impl ViewController {
     /// Non-blocking; interrupts ready/open/style and worker polling too.
     pub fn request_close(&self) {
         self.stop.store(1, Ordering::Relaxed);
+        self.shared.lock().unwrap().queries.invalidate();
     }
     pub fn is_finished(&self) -> bool {
         self.thread.as_ref().is_none_or(|t| t.is_finished())
@@ -387,6 +497,7 @@ fn run(
     let mut base = engine.base();
     base.frame_cache = configuration.frame_cache;
     while stop.load(Ordering::Relaxed) == 0 {
+        pump_queries(engine, &mut shared.lock().unwrap(), model)?;
         let current = shared.lock().unwrap().snapshot();
         let covered = current.margin.is_some_and(|m| m.crop_safe);
         if current.render_rev != handled_rev && covered {
@@ -419,7 +530,6 @@ fn run(
             let mut submit = None;
             if needs_foreground {
                 submit = Some((Purpose::Foreground, current.state.viewport));
-                handled_rev = current.render_rev;
             } else if current.margin_enabled {
                 let s = shared.lock().unwrap();
                 let settled = covered
@@ -437,7 +547,13 @@ fn run(
                     submit = margin::grow(current.state.viewport).map(|v| (Purpose::Margin, v));
                 }
             }
-            if let Some((purpose, viewport)) = submit {
+            // Synchronous style ACK must not swallow query replies. An edit
+            // invalidates/cancels queries; keep draining before changing styles.
+            let waiting_styles = current.state.styles != styles && engine.pending_queries() != 0;
+            if waiting_styles {
+                shared.lock().unwrap().snapshot.phase = Phase::Cancelling;
+            }
+            if let Some((purpose, viewport)) = submit.filter(|_| !waiting_styles) {
                 if current.state.styles != styles {
                     engine.styles(&current.state.styles)?;
                     styles = Arc::clone(&current.state.styles);
@@ -447,6 +563,9 @@ fn run(
                 request.width = viewport.width;
                 request.height = viewport.height;
                 let generation = engine.submit(request)?;
+                if purpose == Purpose::Foreground {
+                    handled_rev = current.render_rev;
+                }
                 if purpose == Purpose::Margin {
                     margin_attempt = Some((current.render_key, viewport));
                 }
@@ -474,6 +593,9 @@ fn run(
             ));
         }
         match engine.poll(Duration::from_millis(20))? {
+            Some(Event::Query(reply)) => {
+                consume_query(&mut shared.lock().unwrap(), reply, model)?;
+            }
             Some(Event::Frame(frame)) => {
                 let mut s = shared.lock().unwrap();
                 s.snapshot.consumed += 1;
@@ -504,12 +626,14 @@ fn run(
                         purpose: t.purpose,
                         frame,
                     });
+                    s.queries.observe(&f)?;
                     if t.purpose == Purpose::Foreground {
                         s.latest = Some(f);
                     } else {
                         s.snapshot.margin_working = false;
                         s.margin = Some(f);
                     }
+                    s.prune_queries(model);
                 } else {
                     s.snapshot.discarded += 1;
                     if frame.final_frame
@@ -547,6 +671,83 @@ fn run(
             }
             _ => (),
         }
+    }
+    Ok(())
+}
+
+fn pump_queries(engine: &mut dyn Engine, s: &mut Shared, model: &Model) -> Result<()> {
+    for kind in query::KINDS {
+        let k = query::slot(kind);
+        let count = s
+            .queries
+            .in_flight
+            .values()
+            .filter(|t| t.input.operation.kind() == kind)
+            .count();
+        if s.queries.slots[k].cancel {
+            if count != 0 {
+                match engine.cancel_queries(kind) {
+                    Ok(_) => (),
+                    Err(e) if e.kind == ErrorKind::Busy => continue,
+                    Err(e) => return Err(e),
+                }
+            }
+            s.queries.slots[k].cancel = false;
+        }
+        if count >= query::IN_FLIGHT_PER_KIND {
+            continue;
+        }
+        let Some(mut ticket) = s.queries.slots[k].pending.clone() else {
+            continue;
+        };
+        // Rebind to the current equivalent geometry (e.g. a just-landed margin),
+        // while preserving the original displayed frame/state anchor.
+        let Ok(request) = s.query_request(&ticket.input, model) else {
+            s.queries.slots[k].pending = None;
+            s.queries.discard(&ticket);
+            continue;
+        };
+        ticket.native = request;
+        match engine.query(ticket.native.clone()) {
+            Ok(seq) => {
+                s.queries.slots[k].pending = None;
+                s.queries.submitted = s.queries.submitted.saturating_add(1);
+                if s.queries.in_flight.insert(seq, ticket).is_some() {
+                    return Err(Error::new(
+                        ErrorKind::Worker,
+                        "duplicate engine query sequence",
+                    ));
+                }
+            }
+            Err(e) if e.kind == ErrorKind::Busy => (),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+fn consume_query(s: &mut Shared, reply: QueryReply, model: &Model) -> Result<()> {
+    let ticket = s
+        .queries
+        .in_flight
+        .remove(&reply.sequence)
+        .ok_or_else(|| Error::new(ErrorKind::Worker, "unissued controller query reply"))?;
+    s.queries.consumed = s.queries.consumed.saturating_add(1);
+    if reply.request != ticket.native {
+        return Err(Error::new(
+            ErrorKind::Worker,
+            "controller query request changed",
+        ));
+    }
+    let k = query::slot(ticket.input.operation.kind());
+    if s.queries.slots[k].latest != Some(ticket.id) || !s.anchor_valid(ticket.input.anchor, model) {
+        s.queries.discard(&ticket);
+    } else {
+        s.queries.slots[k].result = Some(Arc::new(ViewQueryResult {
+            id: ticket.id,
+            anchor: ticket.input.anchor,
+            reply,
+        }));
     }
     Ok(())
 }

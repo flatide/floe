@@ -16,7 +16,7 @@ use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Instant;
 mod query_context;
-use query_context::{QueryContext, SceneId};
+use query_context::{QueryCancel, QueryContext, SceneId};
 
 const DEFAULT_BUDGET_MB: u64 = 1024;
 const DEFAULT_JOBS: u16 = 1;
@@ -180,6 +180,9 @@ fn serve() -> Result<(), String> {
                 let frontier = cancellation.cancel_before(before_generation);
                 respond(&response_tx, format!("cancelled before_gen={frontier}"));
             }
+            InputCommand::CancelQuery(command) => {
+                respond(&response_tx, command.apply(&snap_frontier, &pick_frontier));
+            }
             InputCommand::Snap(command) if query_inline => {
                 handle_snap(&published_scene, command, &response_tx, None)
             }
@@ -254,6 +257,7 @@ fn respond(responses: &Sender<String>, response: String) {
 enum InputCommand {
     Worker(WorkerCommand),
     Cancel(u64),
+    CancelQuery(QueryCancel),
     Snap(SnapCommand),
     Pick(PickCommand),
     Quit,
@@ -559,6 +563,12 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                     thin_keep,
                 },
             ))))
+        }
+        "cancel_query" => {
+            reject_unknown(&fields, &["kind", "before_seq"])?;
+            Ok(Some(InputCommand::CancelQuery(QueryCancel::parse(
+                &fields,
+            )?)))
         }
         "snap" => {
             reject_unknown(
@@ -1326,8 +1336,8 @@ fn handle_info(state: &WorkerState, responses: &Sender<String>) {
     }
 }
 
-/// A query superseded by a newer one of its kind answers with this
-/// error; the GUI only reads the response of its latest sequence.
+/// A query superseded by a newer one of its kind or explicit cancellation
+/// answers with this legacy diagnostic; clients also check status and identity.
 const QUERY_SUPERSEDED: &str = "superseded by a newer query";
 
 fn superseded(error: String) -> String {

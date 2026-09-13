@@ -2,6 +2,46 @@
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct QueryCancel {
+    pub snap: bool,
+    pub before_sequence: u64,
+}
+impl QueryCancel {
+    pub fn apply(
+        self,
+        snap: &floe_render_core::RenderCancellation,
+        pick: &floe_render_core::RenderCancellation,
+    ) -> String {
+        let (kind, frontier) = if self.snap {
+            ("snap", snap)
+        } else {
+            ("pick", pick)
+        };
+        let before = frontier.cancel_before(self.before_sequence);
+        format!("query_cancelled kind={kind} before_seq={before}")
+    }
+    pub fn parse(fields: &BTreeMap<String, String>) -> Result<Self, String> {
+        let snap = match fields.get("kind").map(String::as_str) {
+            Some("snap") => true,
+            Some("pick") => false,
+            _ => return Err("cancel_query kind must be snap or pick".into()),
+        };
+        let raw = fields.get("before_seq").ok_or("missing before_seq")?;
+        let before_sequence = raw.parse::<u64>().map_err(|_| "invalid before_seq")?;
+        if before_sequence == 0
+            || before_sequence > i64::MAX as u64
+            || before_sequence.to_string() != *raw
+        {
+            return Err("invalid before_seq".into());
+        }
+        Ok(Self {
+            snap,
+            before_sequence,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SceneId {
     pub generation: u64,
     pub round: u64,
@@ -63,6 +103,84 @@ impl QueryContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cancellation_kind_and_frontier_are_canonical_and_bounded() {
+        for kind in ["snap", "pick"] {
+            let c = QueryCancel::parse(
+                &[
+                    ("kind".into(), kind.into()),
+                    ("before_seq".into(), i64::MAX.to_string()),
+                ]
+                .into(),
+            )
+            .unwrap();
+            assert_eq!(c.snap, kind == "snap");
+            assert_eq!(c.before_sequence, i64::MAX as u64);
+        }
+        for value in [
+            "0",
+            "01",
+            "+1",
+            "한글",
+            "9223372036854775808",
+            "18446744073709551616",
+        ] {
+            assert!(QueryCancel::parse(
+                &[
+                    ("kind".into(), "snap".into()),
+                    ("before_seq".into(), value.into())
+                ]
+                .into()
+            )
+            .is_err());
+        }
+        assert!(QueryCancel::parse(
+            &[
+                ("kind".into(), "all".into()),
+                ("before_seq".into(), "1".into())
+            ]
+            .into()
+        )
+        .is_err());
+        assert!(QueryCancel::parse(&[("kind".into(), "snap".into())].into()).is_err());
+        assert!(QueryCancel::parse(&BTreeMap::new()).is_err());
+    }
+    #[test]
+    fn cancellation_only_advances_its_kind_and_keeps_newer_queries_current() {
+        use floe_render_core::RenderCancellation;
+        let snap = RenderCancellation::new();
+        let pick = RenderCancellation::new();
+        assert_eq!(
+            QueryCancel {
+                snap: true,
+                before_sequence: 5
+            }
+            .apply(&snap, &pick),
+            "query_cancelled kind=snap before_seq=5"
+        );
+        assert!(snap.is_cancelled(4));
+        assert!(!snap.is_cancelled(5));
+        assert!(!pick.is_cancelled(4));
+        assert_eq!(
+            QueryCancel {
+                snap: false,
+                before_sequence: 9
+            }
+            .apply(&snap, &pick),
+            "query_cancelled kind=pick before_seq=9"
+        );
+        assert!(pick.is_cancelled(8));
+        assert!(!pick.is_cancelled(9));
+        assert_eq!(snap.before_generation(), 5);
+        assert_eq!(
+            QueryCancel {
+                snap: true,
+                before_sequence: 2
+            }
+            .apply(&snap, &pick),
+            "query_cancelled kind=snap before_seq=5"
+        );
+    }
     #[test]
     fn identity_requires_both_positive_canonical_counters() {
         assert_eq!(SceneId::parse(&BTreeMap::new()).unwrap(), None);

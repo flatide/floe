@@ -7,8 +7,8 @@ HTTP 서버/CLI 전체 이관은 아직 아니다. Linux/macOS 대상, unsafe Ru
 
 - 명시 executable + `ready` 버전 검증 → layout/deck `open` → typed style ack.
   호환 버전은 build 시 `renderd/Cargo.toml`에서 읽는다. 새 통신 필드나
-  M1a 당시 daemon 변경은 없었다. M4a-1의 scene query 필드 추가로 native 호환
-  버전은0.12.86이며 renderd/index를 함께 재빌드해야 한다.
+  M1a 당시 daemon 변경은 없었다. M4a-1/2의 scene query·종류별 취소 추가로 native 호환
+  버전은0.12.87이며 renderd/index를 함께 재빌드해야 한다.
 - `RenderRequest`: DBU bbox, 치수, depth/cut/exact, all/none/layers,
   frames/labels/font, style/mono, thin, raster/decode jobs, PNG/raw.
   기본 refinement off(2^30 round pages). query는 M4a-1에서 아래와 같이 추가했고 clip은 미구현.
@@ -59,7 +59,8 @@ label 잘림 검사이고, 별도 jobdeck source skip ledger까지 판정하지 
 실행 파일이 자손 프로세스에 pipe를 넘기는 wrapper는 범위 밖이다. close/Drop은
 daemon 자체를 수거한다. 브라우저에서 binary/argv/path/env를 받는 API는 없다.
 새 인덱스 revision은 기존 worker 재open 대신 close→새 worker로 전환한다.
-M0-D4의 scene ID 확장은 M4a-1에서 추가했다. **웹에는 아직 공개하지 않는다.**
+M0-D4의 scene ID 확장은 M4a-1, 표시 anchor·query 취소 연결은 M4a-2에서 추가했다.
+**웹에는 아직 공개하지 않는다.**
 
 ## M4a-1: native pick/snap
 
@@ -71,7 +72,7 @@ DBU x/y/radius, layers, `Snap|Pick{nth}`를 받고 새 seq를 반환한다.
 ID는 worker-local이며 상위 controller가 dataset/view/worker epoch와 표시 상태를
 검사해야 한다. 자세한 wire·제한은 [M4 기록](../../docs/WEBUI_M4.ko.md)을 따른다.
 
-최대8개 outstanding query, IO line64KiB, outline512점이다. `points_truncated`이면
+최대8개 outstanding query, 추가로 종류별 취소 ACK 각1개, IO line64KiB, outline512점이다. `points_truncated`이면
 prefix를 완전한 polygon으로 해석하지 않는다. query seq는 양의 i64 범위에서
 성공한 제출만 증가하고 render frontier와 독립이다. query 중 render/cancel/poll은
 가능하며 style ACK 전에는 query를 drain한다. default query deadline5초는 frame이나
@@ -79,11 +80,25 @@ prefix를 완전한 polygon으로 해석하지 않는다. query seq는 양의 i6
 summary/미완료/mismatch를 빈 hit와 구별한다. 혼합 scene의 exact 레이어만 지정하면
 질의할 수 있지만 전체 scene의 `queryable()`은 false다. 모든 render/query 응답을
 독립적으로 소비해야 하며 frame만 골라 다른 이벤트를 버리는 capture loop에 query를
-동시에 제출하지 않는다. deck query와 웹 controller 연결은 여전히 미지원이다.
+동시에 제출하지 않는다. `RenderSession::capture`는 미소비 query/취소 ACK가 있으면
+worker를 닫지 않고 Busy로 거부한다. deck query와 HTTP/UI 연결은 여전히 미지원이다.
+
+`cancel_queries(QueryKind::Snap|Pick)`는 그 종류의 frontier만 올린다. 성공한 송신은
+query와 같은 seq 시계를 한 칸 사용한다. render generation/다른 종류에는 영향이 없다.
+취소 ACK(`Event::QueryCancelAcknowledged`)는 실제 query terminal을 대신하지 않는다.
+`pending_queries()`는 **query+취소 ACK**를 합산하고 동기 style 전에는 모두 drain해야 한다.
+취소 ACK에도 제출 기준5초 절대 deadline과 미발급/중복/잘못된 frontier 검사를 적용한다.
+종류별 기존 ACK 미소비나 bounded 송신 큐 포화는 Busy이며 seq를 소비하지 않는다.
+실행이 이미 끝난 질의는 취소와 경합해 정상 응답할 수 있으므로 상위 anchor 검사는 필수다.
+
+M4a-2의 `app-core/view`는 표시 frame/worker epoch·revision을 검증하고 종류별 latest-only
+입력·결과와 최대4개 native 미완료 질의를 보관한다. margin crop/라벨-only의 geometry
+scene을 재사용하며 style 변경 때 query·취소 ACK를 먼저 소비한다. 이것은 로컬 도메인
+연결이며 owner/view/connection 범위를 검증하는 HTTP API는 아니다.
 
 `tools/validate_worker_queries.py`는 합성 OASIS/점유 혼합·KLayout 면적, margin/라벨
-재사용·가시성 전환·overlap/긴 outline·query/render 교차를 PATH-empty native로
-검사한다. full battery가 실행하며 fixture 누락은 skip이 아니다.
+재사용·가시성 전환·overlap/긴 outline·query/render/종류별 취소 교차와 실제 controller의
+crop·worker 격리를 PATH-empty native로 검사한다. full battery가 실행하며 fixture 누락은 skip이 아니다.
 
 ## 검증
 

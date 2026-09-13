@@ -4,11 +4,13 @@ use crate::{
     shots::{Detail, Thin},
     view::{Depth, LayerIsolation, Navigation, Viewport},
 };
-use floe_worker_client::{Fields, Fill, FrameFormat, Layers};
+use floe_worker_client::{Fields, Fill, FrameFormat, Layers, QueryScene, QueryStatus};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::atomic::AtomicBool,
 };
+#[path = "query_controller_tests.rs"]
+mod query_tests;
 
 struct Control {
     open: AtomicBool,
@@ -23,6 +25,13 @@ struct Control {
     cancels: AtomicUsize,
     acks: AtomicUsize,
     closed: AtomicUsize,
+    query_reply: AtomicBool,
+    query_ack: AtomicBool,
+    query_busy: AtomicBool,
+    query_failed: AtomicBool,
+    geometry_partial: AtomicBool,
+    query_requests: Mutex<Vec<(u64, QueryRequest)>>,
+    query_cancels: Mutex<Vec<QueryKind>>,
 }
 impl Default for Control {
     fn default() -> Self {
@@ -39,6 +48,13 @@ impl Default for Control {
             cancels: AtomicUsize::new(0),
             acks: AtomicUsize::new(0),
             closed: AtomicUsize::new(0),
+            query_reply: AtomicBool::new(true),
+            query_ack: AtomicBool::new(true),
+            query_busy: AtomicBool::new(false),
+            query_failed: AtomicBool::new(false),
+            geometry_partial: AtomicBool::new(false),
+            query_requests: Mutex::new(Vec::new()),
+            query_cancels: Mutex::new(Vec::new()),
         }
     }
 }
@@ -48,8 +64,42 @@ struct Fake {
     gen: u64,
     cancelled: bool,
     ack: bool,
+    deck: bool,
+    query_sequence: u64,
+    queries: BTreeMap<u64, QueryRequest>,
+    query_frontiers: BTreeMap<QueryKind, u64>,
+    query_acks: VecDeque<(QueryKind, u64)>,
 }
 impl Engine for Fake {
+    fn query(&mut self, r: QueryRequest) -> Result<u64> {
+        assert!(!self.deck);
+        if self.control.query_busy.load(Ordering::Relaxed) {
+            return Err(Error::new(ErrorKind::Busy, "query busy"));
+        }
+        self.query_sequence += 1;
+        self.query_frontiers
+            .insert(r.operation.kind(), self.query_sequence);
+        self.control
+            .query_requests
+            .lock()
+            .unwrap()
+            .push((self.query_sequence, r.clone()));
+        self.queries.insert(self.query_sequence, r);
+        Ok(self.query_sequence)
+    }
+    fn cancel_queries(&mut self, kind: QueryKind) -> Result<u64> {
+        if self.query_acks.iter().any(|(k, _)| *k == kind) {
+            return Err(Error::new(ErrorKind::Busy, "query cancel busy"));
+        }
+        self.query_sequence += 1;
+        self.query_frontiers.insert(kind, self.query_sequence);
+        self.query_acks.push_back((kind, self.query_sequence));
+        self.control.query_cancels.lock().unwrap().push(kind);
+        Ok(self.query_sequence)
+    }
+    fn pending_queries(&self) -> usize {
+        self.queries.len() + self.query_acks.len()
+    }
     fn submit(&mut self, r: RenderRequest) -> Result<u64> {
         assert!(self.active.is_none(), "controller queued a second render");
         self.gen += 1;
@@ -69,6 +119,39 @@ impl Engine for Fake {
     }
     fn poll(&mut self, _: Duration) -> Result<Option<Event>> {
         thread::sleep(Duration::from_millis(1));
+        if self.control.query_failed.load(Ordering::Relaxed) && !self.queries.is_empty() {
+            return Err(Error::new(ErrorKind::Worker, "query deadline test"));
+        }
+        if self.control.query_ack.load(Ordering::Relaxed) {
+            if let Some((kind, before_sequence)) = self.query_acks.pop_front() {
+                return Ok(Some(Event::QueryCancelAcknowledged {
+                    kind,
+                    before_sequence,
+                }));
+            }
+        }
+        if self.control.query_reply.load(Ordering::Relaxed) {
+            if let Some((seq, request)) = self.queries.pop_first() {
+                let superseded = self.query_frontiers[&request.operation.kind()] > seq;
+                return Ok(Some(Event::Query(QueryReply {
+                    sequence: seq,
+                    scene: QueryScene {
+                        id: Some(request.scene),
+                        complete: true,
+                        summary_layers: 0,
+                    },
+                    request,
+                    status: if superseded {
+                        QueryStatus::Superseded
+                    } else {
+                        QueryStatus::Ok
+                    },
+                    summary_layers: 0,
+                    hit: None,
+                    error: superseded.then(|| "superseded".into()),
+                })));
+            }
+        }
         if (self.control.fail.load(Ordering::Relaxed)
             || (self.gen == 2 && self.control.margin_fail.load(Ordering::Relaxed)))
             && self.active.is_some()
@@ -108,13 +191,41 @@ impl Engine for Fake {
                     generation,
                     round: 1,
                     final_frame: true,
-                    partial: false,
+                    partial: self.control.geometry_partial.load(Ordering::Relaxed),
                     deferred: 0,
                     labels_truncated: self.gen == 2
                         && self.control.margin_truncated.load(Ordering::Relaxed),
                     request,
                     bytes,
-                    fields: Fields(BTreeMap::new()),
+                    fields: Fields(
+                        [
+                            (
+                                "scene_gen".into(),
+                                if self.deck { 0 } else { generation }.to_string(),
+                            ),
+                            (
+                                "scene_round".into(),
+                                if self.deck { "0" } else { "1" }.into(),
+                            ),
+                            (
+                                "scene_complete".into(),
+                                if self.deck
+                                    || self.control.geometry_partial.load(Ordering::Relaxed)
+                                {
+                                    "0"
+                                } else {
+                                    "1"
+                                }
+                                .into(),
+                            ),
+                            ("scene_summary".into(), "0".into()),
+                            (
+                                "style_epoch".into(),
+                                (1 + self.control.styles.lock().unwrap().len()).to_string(),
+                            ),
+                        ]
+                        .into(),
+                    ),
                 })));
             }
         }
@@ -122,6 +233,11 @@ impl Engine for Fake {
     }
     fn styles(&mut self, styles: &[Style]) -> Result<()> {
         assert_eq!(self.pending(), 0);
+        assert_eq!(
+            self.pending_queries(),
+            0,
+            "style ACK would swallow query results"
+        );
         self.control.styles.lock().unwrap().push(styles.to_vec());
         Ok(())
     }
@@ -135,6 +251,8 @@ impl Engine for Fake {
     }
     fn close(&mut self) -> Result<()> {
         self.active = None;
+        self.queries.clear();
+        self.query_acks.clear();
         self.control.closed.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -181,6 +299,7 @@ fn start_configured(
     c: Arc<Control>,
     configuration: ControllerOptions,
 ) -> ViewController {
+    let deck = m.deck;
     ViewController::spawn(
         r,
         m,
@@ -199,6 +318,11 @@ fn start_configured(
                     gen: 0,
                     cancelled: false,
                     ack: false,
+                    deck,
+                    query_sequence: 0,
+                    queries: BTreeMap::new(),
+                    query_frontiers: BTreeMap::new(),
+                    query_acks: VecDeque::new(),
                 }),
                 None,
             ))
@@ -206,7 +330,7 @@ fn start_configured(
     )
     .unwrap()
 }
-fn wait(check: impl Fn() -> bool) {
+fn wait(mut check: impl FnMut() -> bool) {
     let until = Instant::now() + Duration::from_secs(3);
     while !check() {
         assert!(Instant::now() < until, "test deadline");

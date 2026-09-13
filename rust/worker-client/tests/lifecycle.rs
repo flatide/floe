@@ -29,6 +29,10 @@ fn main() {
             queries,
         ),
         ("query_corruption_deadline_and_limits", query_errors),
+        (
+            "query_cancellation_has_independent_ack_credit_and_deadline",
+            query_cancellation,
+        ),
     ];
     for (name, test) in tests {
         test();
@@ -288,6 +292,93 @@ fn query_errors() {
     );
     assert!(!work.exists());
     assert_eq!(w.pending_queries(), 0);
+}
+
+fn query_cancellation() {
+    let tmp = Temp::new();
+    let mut w = tmp.worker("query_hold");
+    assert_eq!(w.query(query_request(QueryOperation::Snap)).unwrap(), 1);
+    assert_eq!(
+        w.query(query_request(QueryOperation::Pick { nth: 0 }))
+            .unwrap(),
+        2
+    );
+    let generation = w.render(request(FrameFormat::Raw)).unwrap();
+    assert_eq!(w.cancel_queries(QueryKind::Snap).unwrap(), 3);
+    assert_eq!(
+        w.cancel_queries(QueryKind::Snap).unwrap_err().kind,
+        ErrorKind::Busy
+    );
+    assert_eq!(w.query(query_request(QueryOperation::Snap)).unwrap(), 4);
+    assert_eq!(w.pending_queries(), 4, "three requests plus one cancel ACK");
+    let mut rendered = false;
+    let mut acknowledged = false;
+    let end = Instant::now() + Duration::from_secs(2);
+    while !rendered || !acknowledged {
+        assert!(Instant::now() < end);
+        match w.poll(Duration::from_millis(20)).unwrap() {
+            Some(Event::Frame(f)) => {
+                assert_eq!(f.generation, generation);
+                rendered = true;
+            }
+            Some(Event::QueryCancelAcknowledged {
+                kind,
+                before_sequence,
+            }) => {
+                assert_eq!((kind, before_sequence), (QueryKind::Snap, 3));
+                acknowledged = true;
+            }
+            _ => (),
+        }
+    }
+    assert_eq!(w.pending_generations(), 0);
+    assert_eq!(
+        w.pending_queries(),
+        3,
+        "ACK is not the cancelled request's terminal response"
+    );
+    assert_eq!(w.set_styles(&[style()]).unwrap_err().kind, ErrorKind::State);
+    w.close().unwrap();
+    assert_eq!(w.pending_queries(), 0);
+    for mode in [
+        "query_cancel_bad_kind",
+        "query_cancel_bad_frontier",
+        "query_cancel_duplicate",
+        "query_cancel_timeout",
+    ] {
+        let mut cfg = tmp.config(mode);
+        cfg.query_timeout = Duration::from_millis(80);
+        let mut w = WorkerClient::spawn(cfg).unwrap();
+        w.open(Source::Layout(tmp.0.join("cache 한 글")), 32, 1)
+            .unwrap();
+        let path = w.work_dir().to_owned();
+        w.cancel_queries(QueryKind::Pick).unwrap();
+        let end = Instant::now() + Duration::from_secs(2);
+        loop {
+            assert!(Instant::now() < end);
+            match w.poll(Duration::from_millis(20)) {
+                Err(e) => {
+                    assert_eq!(
+                        e.kind,
+                        if mode == "query_cancel_timeout" {
+                            ErrorKind::Timeout
+                        } else {
+                            ErrorKind::Protocol
+                        },
+                        "{mode}"
+                    );
+                    break;
+                }
+                Ok(Some(Event::QueryCancelAcknowledged { .. })) => {
+                    assert_eq!(mode, "query_cancel_duplicate")
+                }
+                Ok(None) => (),
+                other => panic!("{mode}: {other:?}"),
+            }
+        }
+        assert!(!path.exists());
+        assert_eq!(w.pending_queries(), 0);
+    }
 }
 fn stale() {
     let tmp = Temp::new();
@@ -675,6 +766,23 @@ fn fixture(mode: &str, root: Option<&String>) {
                 }
             }
             "cancel" => reply(&format!("cancelled before_gen={}", fields["before_gen"])),
+            "cancel_query" => {
+                if mode == "query_cancel_timeout" {
+                    continue;
+                }
+                let kind = if mode == "query_cancel_bad_kind" {
+                    "other"
+                } else {
+                    fields["kind"]
+                };
+                let frontier = fields["before_seq"].parse::<u64>().unwrap()
+                    + u64::from(mode == "query_cancel_bad_frontier");
+                let line = format!("query_cancelled kind={kind} before_seq={frontier}");
+                reply(&line);
+                if mode == "query_cancel_duplicate" {
+                    reply(&line);
+                }
+            }
             "snap" | "pick" => {
                 if mode == "query_hold" {
                     continue;

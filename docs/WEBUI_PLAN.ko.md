@@ -37,6 +37,7 @@ M2a-12a에서 명시 DRC pack 생성 코어/CLI와 임시 생성·검증·원자
 M2a-12b1에서 owner HTTP 생성/취소와 이전 DRC 응답 무효화·새 identity 재등록을 연결했다.
 M2a-12b2에서 pack 생성 승인·진행/취소·불명확한 요청 확인 UI와 새 리뷰 조회 복원을 연결했다.
 M4a-1에서 공유와 독립적인 native pick/snap scene 식별·Rust process client를 연결했다.
+M4a-2에서 표시 frame/worker·revision에 고정한 로컬 controller query와 종류별 취소·style drain을 연결했다.
 웹 query는 아직 false이며 범위/남은 연결은 [M4 기록](WEBUI_M4.ko.md)을 따른다.
 전체 조작 parity와 M0/Firefox/ETX 현장 검증은 아직 완료되지 않았다.
 상세 범위는 [M1b 기록](WEBUI_M1B.ko.md)과 [M2 기록](WEBUI_M2.ko.md). 여기의 M0~M5는 **웹 전환 단계**이며

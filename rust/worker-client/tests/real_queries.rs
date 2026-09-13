@@ -238,6 +238,7 @@ fn pinned_margin_reuse_visibility_overlaps_summary_and_concurrent_render() {
     inner.frame_cache = false;
     let gen = w.render(inner.clone()).unwrap();
     let mut rendered = false;
+    let mut rendered_scene = None;
     let end = Instant::now() + Duration::from_secs(5);
     while !rendered || !sequences.is_empty() {
         assert!(Instant::now() < end);
@@ -245,6 +246,7 @@ fn pinned_margin_reuse_visibility_overlaps_summary_and_concurrent_render() {
             Some(Event::Frame(f)) => {
                 assert_eq!(f.generation, gen);
                 rendered |= f.final_frame;
+                rendered_scene = f.query_scene().unwrap().id;
             }
             Some(Event::Query(q)) => {
                 assert!(sequences.remove(&q.sequence));
@@ -262,6 +264,52 @@ fn pinned_margin_reuse_visibility_overlaps_summary_and_concurrent_render() {
     }
     assert_eq!(w.pending_queries(), 0);
     assert_eq!(w.pending_generations(), 0);
+    let current = rendered_scene.unwrap();
+    for kind in [QueryKind::Snap, QueryKind::Pick] {
+        let (operation, other) = match kind {
+            QueryKind::Snap => (QueryOperation::Snap, QueryOperation::Pick { nth: 0 }),
+            QueryKind::Pick => (QueryOperation::Pick { nth: 0 }, QueryOperation::Snap),
+        };
+        let old = w.query(request(current, operation)).unwrap();
+        let frontier = w.cancel_queries(kind).unwrap();
+        let next = w.query(request(current, other)).unwrap();
+        assert!(old < frontier && frontier < next);
+        let mut replies = std::collections::BTreeSet::from([old, next]);
+        let mut ack = false;
+        let end = Instant::now() + Duration::from_secs(5);
+        while !ack || !replies.is_empty() {
+            assert!(Instant::now() < end);
+            match w.poll(Duration::from_millis(20)).unwrap() {
+                Some(Event::QueryCancelAcknowledged {
+                    kind: k,
+                    before_sequence,
+                }) => {
+                    assert_eq!((k, before_sequence), (kind, frontier));
+                    ack = true;
+                }
+                Some(Event::Query(q)) => {
+                    assert!(replies.remove(&q.sequence));
+                    assert_eq!(q.scene.id, Some(current));
+                    if q.sequence == next {
+                        assert_eq!(q.status, QueryStatus::Ok);
+                    } else {
+                        assert!(matches!(
+                            q.status,
+                            QueryStatus::Ok | QueryStatus::Superseded
+                        ));
+                    }
+                }
+                Some(e) => panic!("query cancellation affected render: {e:?}"),
+                None => (),
+            }
+        }
+        assert_eq!(
+            query(&mut w, request(current, operation)).status,
+            QueryStatus::Ok
+        );
+        assert_eq!(w.pending_generations(), 0);
+        assert_eq!(w.pending_queries(), 0);
+    }
     let summary = frame(
         &mut w,
         RenderRequest {

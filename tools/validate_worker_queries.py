@@ -20,14 +20,17 @@ def fingerprints(directory):
 
 def main():
     cargo = shutil.which("cargo") or str(Path.home() / ".cargo/bin/cargo")
-    build = subprocess.run([cargo, "test", "--offline", "--locked", "-p", "floe-worker-client",
-                            "--test", "real_queries", "--no-run", "--message-format=json"],
-                           cwd=ROOT / "rust", text=True, capture_output=True, timeout=180)
-    assert build.returncode == 0, build.stderr
-    binaries = [r["executable"] for line in build.stdout.splitlines()
-                if (r := json.loads(line)).get("reason") == "compiler-artifact"
-                and r["target"]["name"] == "real_queries" and r.get("executable")]
-    assert len(binaries) == 1
+    binaries = []
+    for package, target in [("floe-worker-client", "real_queries"), ("floe-app-core", "view_queries")]:
+        build = subprocess.run([cargo, "test", "--offline", "--locked", "-p", package,
+                                "--test", target, "--no-run", "--message-format=json"],
+                               cwd=ROOT / "rust", text=True, capture_output=True, timeout=180)
+        assert build.returncode == 0, build.stderr
+        found = [r["executable"] for line in build.stdout.splitlines()
+                 if (r := json.loads(line)).get("reason") == "compiler-artifact"
+                 and r["target"]["name"] == target and r.get("executable")]
+        assert len(found) == 1
+        binaries.extend(found)
     with tempfile.TemporaryDirectory(prefix="floe-query-gate-") as td:
         root = Path(td)
         source = root / "query 한글.oas"
@@ -75,17 +78,23 @@ def main():
         workers.mkdir()
         before = fingerprints(cache)
         env = dict(os.environ, PATH="", TMPDIR=str(workers), FLOE_QUERY_CACHE=str(cache),
+                   FLOE_QUERY_SOURCE=str(source),
                    FLOE_QUERY_RENDERD=str(ROOT / "rust/target/release/floe-renderd"),
+                   FLOE_RENDERD_BIN=str(ROOT / "rust/target/release/floe-renderd"),
+                   FLOE_INDEX_BIN=indexer,
                    FLOE_QUERY_POLYGON_AREA=str(polygon.area()),
                    FLOE_RUST_OCCUPANCY="on", FLOE_RUST_OCCUPANCY_PX="1",
-                   FLOE_RUST_PAN_REUSE="on", FLOE_RUST_RETAINED_MB="64")
-        run = subprocess.run([binaries[0], "--ignored", "--nocapture"], env=env,
-                             text=True, capture_output=True, timeout=60)
-        assert run.returncode == 0, (run.stdout, run.stderr)
-        assert "RUST PINNED QUERIES: ALL OK" in run.stdout
+                   FLOE_RUST_PAN_REUSE="on", FLOE_RUST_RETAINED_MB="64", FLOE_RUST_QUERY_INLINE="0")
+        for binary, marker in zip(binaries, ["RUST PINNED QUERIES: ALL OK", "RUST VIEW QUERIES: ALL OK"]):
+            run = subprocess.run([binary, "--ignored", "--nocapture"], env=env,
+                                 text=True, capture_output=True, timeout=60)
+            assert run.returncode == 0, (run.stdout, run.stderr)
+            assert marker in run.stdout
+            if marker == "RUST VIEW QUERIES: ALL OK":
+                assert "RUST CAPTURE QUERY GUARD: ALL OK" in run.stdout
+            print(run.stdout.strip())
         assert fingerprints(cache) == before, "queries modified index/summary bytes or mtime"
         assert not list(workers.iterdir()), "query workers leaked private files"
-        print(run.stdout.strip())
 
 
 if __name__ == "__main__":
