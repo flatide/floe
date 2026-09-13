@@ -89,7 +89,7 @@
       <div class="pagination"><button id="drc-rule-prev" aria-label="Previous rule page" disabled>←</button><span>Rule pages</span><button id="drc-rule-next" aria-label="Next rule page" disabled>→</button></div>
       <details class="drc-description"><summary id="drc-rule-title">Choose a rule</summary><pre id="drc-description"></pre></details>
       <div class="form-row"><label for="drc-waived">Errors</label><select id="drc-waived"><option value="all">All statuses</option><option value="unwaived">Not waived</option><option value="waived">Waived</option></select></div>
-      <div class="drc-actions"><button id="drc-in-view" title="Query all rules in the current viewport">In view</button><button id="drc-first" title="First error page; back history retains 128 pages">First page</button><label class="check"><input id="drc-markers" type="checkbox" checked> Markers</label></div>
+      <div class="drc-actions"><label class="check" title="Only errors of this rule intersecting the live viewport"><input id="drc-in-view" type="checkbox"> In view</label><label class="check" title="Only this rule’s selected errors; an empty selection shows no errors"><input id="drc-selected-only" type="checkbox"> Selected</label><label class="check"><input id="drc-markers" type="checkbox" checked> Markers</label><button id="drc-first" title="First error page; back history retains 128 pages">First page</button></div>
       <p id="drc-result-info" class="note">No rule selected.</p>
       <p class="note">Canvas markers: click to inspect · double-click to go. Current page and this rule’s selections are marked; only the focused error shows its outline.</p>
       <section class="drc-groups" aria-label="DRC selection groups">

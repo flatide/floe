@@ -25,7 +25,7 @@ function http(method,path,body,missing,token){
     if(!q)return Promise.resolve({drc:{id:'drc',revision:'r1',source_id:'source',title:'CD test',phase:'ready',metadata:{checks:'1',errors:'3'}}});
     if(q.kind==='rules')return Promise.resolve({rows:[{check:'0',name:'R',errors:'3',waived:'0'}],next:null});
     if(q.kind==='rule')return Promise.resolve({name:'R',description:'test',errors:'3',waived:'0'});
-    if(q.kind==='errors')return Promise.resolve({rows:[row(0),row(1),row(2)],next:null});
+    if(q.kind==='list')return Promise.resolve({rows:[row(0),row(1),row(2)],next:null,scanned:'3',bbox_um:null,selection_rev:null});
     if(q.kind==='geometry'){
         const r=row(Number(q.error)),pts=r.kind==='e'?[['90','50'],['160','50']]:[['10','10'],['70','10'],['70','50'],['10','50']];
         return Promise.resolve({...r,precision:'1',points_dbu:pts.slice(0,q.limit),start:'0',total:String(pts.length),next:q.limit<pts.length?String(q.limit):null});

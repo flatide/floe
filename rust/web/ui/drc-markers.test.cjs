@@ -29,7 +29,7 @@ function http(method,path,body,missing,token){
     if(!q)return Promise.resolve({drc:{id:'drc',revision:'r1',source_id:'source',title:'synthetic',phase:'ready',metadata:{checks:'1',errors:'9007199254740997'}}});
     if(q.kind==='rules')return Promise.resolve({rows:[{check:'0',name:'R',errors:'9007199254740997',waived:'1'}],next:null});
     if(q.kind==='rule')return Promise.resolve({description:'test'});
-    if(q.kind==='errors')return Promise.resolve({rows,next});
+    if(q.kind==='list')return Promise.resolve({rows,next,scanned:'4',bbox_um:null,selection_rev:null});
     if(q.kind==='focus')return Promise.resolve({navigation:{kind:'goto',center_um:['20','20'],width_um:'60'}});
     if(q.kind==='measurements')return Promise.resolve({check:q.check,local:q.error,global:P.next(q.error),segments:[]});
     if(q.kind==='geometry'){

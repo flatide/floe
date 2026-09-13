@@ -38,8 +38,9 @@ function http(method,path,body,missing,token){return new Promise((resolve,reject
     const req={method,path,body,resolve,reject,token,done:false};calls.push(req);
     if(token)token.abort=()=>{req.done=true;reject(new Error('aborted'));};
 });}
-function pending(kind){const call=calls.find(c=>!c.done&&(kind==='catalog'?c.path==='/api/v1/drc':c.body&&c.body.body.kind===kind));assert(call,'no pending '+kind);return call;}
-function reply(kind,value){const c=pending(kind);c.done=true;if(c.token)c.token.abort=null;c.resolve(value);return c;}
+function pending(kind){const call=calls.find(c=>!c.done&&(kind==='catalog'?c.path==='/api/v1/drc':c.body&&c.body.body.kind===(kind==='errors'?'list':kind)));assert(call,'no pending '+kind);return call;}
+function reply(kind,value){const c=pending(kind);c.done=true;if(c.token)c.token.abort=null;const b=c.body&&c.body.body;
+    c.resolve(b&&['list','filtered_step'].includes(b.kind)?{bbox_um:b.in_view?state.bbox_dbu:null,selection_rev:b.selection_rev,scanned:'64',...value}:value);return c;}
 async function tick(){for(let i=0;i<12;i++)await Promise.resolve();}
 function paint(){for(const [id,fn] of [...raf]){raf.delete(id);fn();}}
 const panel=D.bind({document:doc,window,protocol:P,rulers:require('./rulers.js'),groups:require('./drc-groups.js'),http,context:()=>view,navigate:n=>nav.push(n),resize:()=>resize++,
@@ -52,7 +53,7 @@ const geom=(r,pts,start,total,next)=>({check:r.check,local:r.local,global:r.glob
 (async()=>{
     const initialized=panel.init();
     reply('catalog',{drc:{id:'drc-id',revision:'r1',source_id:'source',title:'synthetic',phase:'ready',metadata:{checks:'2',errors:'9007199254740996'}}});
-    await initialized;
+    await initialized;await tick();
     assert.equal(el('drc-panel').hidden,false);
     reply('rules',{rows:[{check:'0',name:'MASK <img src=x>',name_truncated:false,errors:'9007199254740996',waived:'1'}],next:null});
     await tick();
@@ -95,17 +96,18 @@ const geom=(r,pts,start,total,next)=>({check:r.check,local:r.local,global:r.glob
     assert(drawing.some(c=>c[0]==='closePath'));assert(el('drc-selected').textContent.includes('5000/5000'));
     el('drc-waived').value='waived';el('drc-waived').onchange();assert.equal(pending('errors').body.body.waived,true);
     reply('errors',{rows:[b],next:null});await tick();assert.equal(el('drc-error-next').disabled,true);
-    // In-view bounds are computed by the server, not rounded in the browser.
-    el('drc-in-view').onclick();const q=pending('in_view');assert.equal(q.body.state_rev,'3');assert(!('bbox_um' in q.body.body));
-    reply('in_view',{rows:[],next:{check:'0',error:'100'},bbox_um:['-0.125','0','19.875','16']});await tick();
+    // Live in-view uses the current rule and authoritative server bbox.
+    el('drc-in-view').checked=true;el('drc-in-view').onchange();const q=pending('errors');assert.equal(q.body.state_rev,'3');assert(!('bbox_um' in q.body.body));
+    assert.equal(q.body.body.check,'0');assert.equal(q.body.body.in_view,true);
+    reply('errors',{rows:[],next:'100'});await tick();
     assert.equal(el('drc-error-next').disabled,false);assert(el('drc-result-info').textContent.includes('more available'));
-    el('drc-error-next').onclick();assert.deepEqual(pending('query').body.body.bbox_um,['-0.125','0','19.875','16']);
-    reply('query',{rows:[b],next:null});await tick();
-    el('drc-error-prev').onclick();reply('query',{rows:[],next:{check:'0',error:'100'}});await tick();
-    state={...state,state_rev:'4'};view={...view,state};panel.contextChanged();assert(el('drc-result-info').textContent.includes('earlier viewport'));
+    el('drc-error-next').onclick();assert.equal(pending('errors').body.body.start,'100');
+    reply('errors',{rows:[{...b,bbox_um:['1','1','2','2']}],next:null});await tick();
+    el('drc-error-prev').onclick();reply('errors',{rows:[],next:'100'});await tick();
+    state={...state,state_rev:'4'};view={...view,state};panel.contextChanged();assert(el('drc-result-info').textContent.includes('waiting'));
     el('drc-toggle').onclick();assert.equal(resize,1);assert.equal(el('drc-panel').hidden,true);
     // A different source drops rows and all pending requests immediately.
-    el('drc-error-next').onclick();const stale=pending('query');view={...view,source:'other',id:'view-b'};panel.contextChanged();
+    await new Promise(resolve=>setTimeout(resolve,120));const stale=pending('errors');view={...view,source:'other',id:'view-b'};panel.contextChanged();
     assert(stale.token.cancelled);stale.resolve({rows:[a],next:null});await tick();paint();
     assert.equal(el('drc-canvas').hidden,true);assert.equal(el('drc-errors').children.length,0);
     // Restoring server state reloads bounded pages/selected geometry without
@@ -113,7 +115,7 @@ const geom=(r,pts,start,total,next)=>({check:r.check,local:r.local,global:r.glob
     savedPanel={search:'MASK',rule_start:'0',check:'0',error_start:'0',query:null,waived:true,
         selected:{check:b.check,error:b.local},markers:false,shown:true,jump_scale:'0.2',zoom_lock:true,jump_active:true,focus_visible:true,cd:null};
     const beforeRestoreNav=nav.length,beforeRestoreSaves=savedChanges.length;
-    view={...view,source:'source',id:'view-c'};panel.contextChanged();
+    view={...view,source:'source',id:'view-c'};panel.contextChanged();await tick();
     reply('rules',{rows:[{check:'0',name:'MASK',name_truncated:false,errors:'9007199254740996',waived:'1'}],next:null});await tick();
     reply('rule',{name:'MASK',description:'Restored description',errors:'9007199254740996',waived:'1'});await tick();
     assert.equal(pending('errors').body.body.waived,true);reply('errors',{rows:[b],next:null});await tick();
@@ -129,13 +131,13 @@ const geom=(r,pts,start,total,next)=>({check:r.check,local:r.local,global:r.glob
     assert.deepEqual(savedChanges.at(-1).selected,{check:b.check,error:b.local});
     assert.equal(savedChanges.at(-1).zoom_lock,true);assert.equal(savedChanges.at(-1).jump_scale,'0.2');
     savedPanel={...savedPanel,selected:null,jump_active:false,focus_visible:false,query:{bbox_um:['1.25','2','60','70'],state_rev:'1',cursor:{check:'0',error:'100'}}};
-    const queryReload=el('drc-reload').onclick();
+    const queryReload=el('drc-reload').onclick();await tick();
     reply('rules',{rows:[],next:null});await tick();
     reply('rule',{name:'MASK',description:'query restoration',errors:'9007199254740996',waived:'1'});await tick();
     assert.deepEqual(pending('query').body.body.bbox_um,savedPanel.query.bbox_um);
     assert.deepEqual(pending('query').body.body.cursor,savedPanel.query.cursor);
     reply('query',{rows:[],next:{check:'0',error:'200'}});await queryReload;await tick();
-    assert.equal(el('drc-error-next').disabled,false);assert(el('drc-result-info').textContent.includes('earlier viewport'));
+    assert.equal(el('drc-error-next').disabled,false);assert(el('drc-result-info').textContent.includes('earlier-viewport'));
     assert.equal(nav.length,beforeRestoreNav);
     // Selecting another rule from a frozen all-rule query changes the open
     // rule, but never changes that query's box. n/p then stays in THAT rule.

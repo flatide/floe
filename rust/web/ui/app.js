@@ -574,6 +574,7 @@
     }, {passive: false});
     function reviewCursor() { viewport.style.cursor = gesture && gesture.active() ? 'grabbing' : drcPanel && drcPanel.boxActive() ? 'crosshair' : ''; }
     viewport.addEventListener('mousemove', function (event) { if (drcPanel && (!gesture || !gesture.active())) { drcPanel.move(event.clientX, event.clientY); } });
+    viewport.addEventListener('mouseleave', function () { if (drcPanel) { drcPanel.move(NaN, NaN); } });
     gesture = window.FloeGestures.bind({viewport: viewport, window: window, document: document,
         dimensions: dims, ready: function () { return live() && displayed && !!epoch && !inflight && queue.length === 0; },
         stamp: function () { return currentId + ':' + epoch + ':' + (state ? state.state_rev : ''); },

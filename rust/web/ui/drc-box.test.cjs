@@ -40,7 +40,7 @@ function http(method,path,body,missing,token){
     reads.push(q);
     if(q.kind==='rules')return Promise.resolve({rows:[{check:'0',name:'MASK',errors:'9007199254740996',waived:'0'},{check:'1',name:'OTHER',errors:'1',waived:'0'}],next:null});
     if(q.kind==='rule')return Promise.resolve({name:q.check==='0'?'MASK':'OTHER',description:'rule',errors:'9007199254740996',waived:'0'});
-    if(q.kind==='errors')return Promise.resolve({rows:q.check==='0'?(page===0?all.slice(0,2):all.slice(2,3)):all.slice(3),next:null});
+    if(q.kind==='list')return Promise.resolve({rows:q.check==='0'?(page===0?all.slice(0,2):all.slice(2,3)):all.slice(3),next:null,scanned:'3',bbox_um:null,selection_rev:null});
     if(q.kind==='records')return Promise.resolve({rows:q.errors.map(id=>all.find(r=>r.check===q.check&&r.local===id))});
     throw new Error('Unexpected read '+JSON.stringify(q));
 }

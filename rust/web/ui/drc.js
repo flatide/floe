@@ -29,6 +29,7 @@
         let markerHits = [], hitStamp = '';
         let boxMode = false, boxStart = null, boxEnd = null, pageReady = false;
         let groupRows = [], groupStamp = '';
+        let filterTimer = null, filterStamp = '', restoreTurn = 0, hoverText = '';
         // A canvas click selects without moving. Auto CD belongs to the last
         // accepted focus navigation, not necessarily the selected row.
         let cdTarget = null, cdGlobal = null, cdSegments = null, cdRemaining = 0, cdError = '';
@@ -75,16 +76,19 @@
         function remember(history, value) { if (history.length === 128) { history.shift(); } history.push(value); }
         function navigationButtons() {
             const available = !!current() && !restoring;
+            const filtered = available && filtersReady(current());
             el('drc-rule-prev').disabled = !available || !previousRules.length;
             el('drc-rule-next').disabled = !available || ruleNext === null;
-            el('drc-error-prev').disabled = !available || !previousErrors.length;
-            el('drc-error-next').disabled = !available || errorNext === null;
+            el('drc-error-prev').disabled = !filtered || !pageReady || !previousErrors.length;
+            el('drc-error-next').disabled = !filtered || !pageReady || errorNext === null;
             ['drc-search', 'drc-search-submit', 'drc-waived', 'drc-in-view', 'drc-first'].forEach(function (id) { el(id).disabled = !available; });
+            el('drc-selected-only').disabled = !available || !groups.ready();
+            el('drc-first').disabled = !filtered || !rule;
             el('drc-frame').disabled = !available || !selected;
             el('drc-clear').disabled = restoring || !selected;
             el('drc-reload').disabled = !current();
-            ['drc-step-prev', 'drc-step-next'].forEach(function (id) { el(id).disabled = !available || !rule || stepBusy || !!(query && !query.bbox); });
-            el('drc-step-continue').disabled = !available || stepBusy || !stepContinuation;
+            ['drc-step-prev', 'drc-step-next'].forEach(function (id) { el(id).disabled = !filtered || !rule || stepBusy || !!(query && !query.bbox); });
+            el('drc-step-continue').disabled = !filtered || stepBusy || !stepContinuation;
             ['drc-cd-pop', 'drc-cd-clear'].forEach(function (id) { el(id).disabled = !available || !hasCD(); });
             el('drc-box').disabled = !available || !rule || !pageReady || !groups.ready() || !el('drc-markers').checked;
             el('drc-group-clear').disabled = !available || !rule || !groups.ready() || !groups.ids(rule.check).length;
@@ -106,7 +110,7 @@
         function groupsChanged() {
             const count = rule ? groups.ids(rule.check).length : 0;
             el('drc-group-count').textContent = count + ' selected in this rule · ' + groups.total() + '/5000 across all rules';
-            markErrors(); navigationButtons(); paintLater(); loadGroupMarkers();
+            markErrors(); navigationButtons(); paintLater(); loadGroupMarkers(); followFilters();
         }
         async function loadGroupMarkers() {
             const c = current(), ci = rule && rule.check, ids = ci === null ? [] : groups.ids(ci);
@@ -160,6 +164,16 @@
         function boxMove(x, y) {
             if (!boxMode || !boxStart) { return; }
             const xy = unproject(x, y); if (xy) { boxEnd = xy; paintLater(true); }
+        }
+        function tooltip(text) {
+            if (text === hoverText) { return; }
+            hoverText = text; el('viewport').title = text;
+        }
+        function move(x, y) {
+            if (boxMode) { tooltip(''); boxMove(x, y); return; }
+            const r = hitRow(x, y);
+            tooltip(r ? (rule && rule.check === r.check ? rule.name : 'Rule ' + P.next(r.check)) +
+                ' #' + P.next(r.local) + ' (' + r.global + ')' + (r.status === 1 ? ' · waived' : '') : '');
         }
         function paintBox(p, dpr) {
             if (!boxMode || !boxStart || !boxEnd) { return; }
@@ -218,7 +232,7 @@
             return popCD(true) || groupClear() || endFocus();
         }
         function paintLater(keepHits) {
-            if (!keepHits) { markerHits = []; hitStamp = ''; }
+            if (!keepHits) { markerHits = []; hitStamp = ''; tooltip(''); }
             if (stopped || painting !== null) { return; }
             painting = o.window.requestAnimationFrame(function () { painting = null; paint(lastProjection, lastSize); });
         }
@@ -272,24 +286,27 @@
             if (selected.kind === 'p') { ctx.closePath(); ctx.globalAlpha = .25; ctx.fill(); ctx.globalAlpha = 1; }
             ctx.stroke();
         }
-        function click(clientX, clientY, twice, modifiers) {
-            if (boxMode) { return boxClick(clientX, clientY, modifiers); }
+        function hitRow(clientX, clientY) {
             const c = current();
             if (!c || !c.connected || c.pending || restoring || overlay.hidden || !el('drc-markers').checked ||
                 hitStamp !== contextKey(c) + ':' + c.state.state_rev || !markerHits.length ||
-                !Number.isFinite(clientX) || !Number.isFinite(clientY)) { return false; }
+                !Number.isFinite(clientX) || !Number.isFinite(clientY)) { return null; }
             // Use the *painted* overlay's DOM rectangle, including fractional
             // CSS origins/DPR/margin translations. Do not unproject through a
             // newer requested viewport or issue an all-error spatial scan.
             const rect = overlay.getBoundingClientRect();
-            if (!(rect.width > 0 && rect.height > 0) || clientX < rect.left || clientX >= rect.right || clientY < rect.top || clientY >= rect.bottom) { return false; }
+            if (!(rect.width > 0 && rect.height > 0) || clientX < rect.left || clientX >= rect.right || clientY < rect.top || clientY >= rect.bottom) { return null; }
             let best = null, distance = 36 + 1;
             markerHits.forEach(function (hit) {
                 const dx = (hit.x / overlay.width * rect.width + rect.left) - clientX;
                 const dy = (hit.y / overlay.height * rect.height + rect.top) - clientY, d = dx * dx + dy * dy;
                 if (d <= 36 && d < distance) { best = hit.row; distance = d; }
             });
-            if (!best) { return false; }
+            return best;
+        }
+        function click(clientX, clientY, twice, modifiers) {
+            if (boxMode) { return boxClick(clientX, clientY, modifiers); }
+            const best = hitRow(clientX, clientY); if (!best) { return false; }
             // Like GTK's canvas marker pick, a single click only selects,
             // even in jump mode. A double click explicitly requests focus.
             cancelStep(); rowFocus = false; select(best, !!twice, !!twice); return true;
@@ -346,6 +363,47 @@
             loadErrors(); savePanel(); groupsChanged();
         }
         function filter() { return el('drc-waived').value === 'all' ? null : el('drc-waived').value === 'waived'; }
+        function inView() { return !query && el('drc-in-view').checked; }
+        function selectedOnly() { return !query && el('drc-selected-only').checked; }
+        function filtersReady(c) {
+            return !!c && (!inView() || c.connected && !c.pending) && (!selectedOnly() || groups.ready());
+        }
+        function filterKey(c) {
+            return JSON.stringify([contextKey(c), rule && rule.check, filter(), inView(), selectedOnly(),
+                inView() && c ? c.state.state_rev : null, selectedOnly() ? groups.revision() : null]);
+        }
+        function resetFilterPage() {
+            clearTimeout(filterTimer); filterTimer = null; cancel('errors'); cancelStep();
+            boxReset(false); pageReady = false; rows = []; errorNext = null; errorStart = '0'; previousErrors.length = 0;
+            renderErrors();
+        }
+        function followFilters() {
+            const c = current();
+            if (!c || restoring || !rule || query || (!inView() && !selectedOnly())) { return; }
+            if (!filtersReady(c)) {
+                if (filterStamp !== 'waiting') { resetFilterPage(); filterStamp = 'waiting'; info('Waiting for the current view/selection before filtering…'); }
+                return;
+            }
+            const stamp = filterKey(c);
+            if (filterStamp === stamp) { return; }
+            resetFilterPage(); filterStamp = stamp; info('Updating current-rule filters…');
+            // Coalesce a burst of accepted pan/zoom or selection changes. Only
+            // the first bounded page is read; never auto-drain the whole query.
+            filterTimer = setTimeout(function () { filterTimer = null; if (current() && filterKey(current()) === stamp) { loadErrors(); } }, 100);
+        }
+        function validateFilters(page, body) {
+            if (page.selection_rev !== body.selection_rev) { throw new Error('DRC selection revision mismatch'); }
+            if (body.selection_rev !== null && (!groups.ready() || groups.revision() !== body.selection_rev)) { throw new Error('DRC selection changed; reload the filtered page.'); }
+            if (body.in_view) { P.bbox(page.bbox_um); } else if (page.bbox_um !== null) { throw new Error('Unexpected DRC viewport filter'); }
+            cursor(page.scanned); if (P.compare(page.scanned, '262144') > 0) { throw new Error('DRC scan limit'); }
+        }
+        function matchesFilters(r, body, bounds) {
+            if (r.check !== body.check || body.waived !== null && (r.status === 1) !== body.waived ||
+                body.selection_rev !== null && !groups.contains(r.check, r.local)) { return false; }
+            if (!body.in_view) { return true; }
+            const b = bbox(r.bbox_um), q = bbox(bounds);
+            return b[0] <= q[2] && b[2] >= q[0] && b[1] <= q[3] && b[3] >= q[1];
+        }
         function markErrors() {
             Array.prototype.forEach.call(el('drc-errors').children, function (b, i) {
                 const r = rows[i], active = r && selected && selected.check === r.check && selected.local === r.local;
@@ -358,7 +416,7 @@
             el('drc-errors').textContent = '';
             rows.forEach(function (r) {
                 const b = doc.createElement('button');
-                b.disabled = restoring;
+                b.disabled = restoring || !pageReady;
                 b.textContent = '#' + P.next(r.local) + '  ·  global ' + r.global + '  ·  ' + (r.kind === 'p' ? 'poly' : 'edge') + (r.status === 1 ? '  ·  waived' : '');
                 b.setAttribute('aria-label', 'Error ' + P.next(r.local) + ', global ' + r.global);
                 b.onclick = function (e) {
@@ -376,23 +434,49 @@
                 };
                 el('drc-errors').appendChild(b);
             });
-            if (!rows.length) { el('drc-errors').textContent = errorNext === null ? 'No matching errors.' : 'No match in this scan. Continue to the next page.'; }
-            el('drc-result-info').textContent = (query ? 'Viewport query' : 'Rule errors') + ' · ' + rows.length + ' on this page' + (errorNext === null ? ' · end' : ' · more available');
+            if (!rows.length) { el('drc-errors').textContent = !pageReady ? 'Waiting for an error page…' : errorNext === null ? 'No matching errors.' : 'No match in this scan. Continue to the next page.'; }
+            el('drc-result-info').textContent = (query ? 'Saved viewport query' : 'Rule errors' + (selectedOnly() ? ' ∩ Selected' : '') + (inView() ? ' ∩ In view' : '')) +
+                ' · ' + rows.length + ' on this page' + (!pageReady ? ' · waiting for a page' : errorNext === null ? ' · end' : ' · more available');
             markErrors(); navigationButtons(); paintLater();
         }
         async function loadErrors(strict) {
             const c = current(); if (!c || (!rule && !query)) { return; }
-            pageReady = false; boxReset(false); navigationButtons();
+            clearTimeout(filterTimer); filterTimer = null;
+            if (!filtersReady(c)) {
+                if (strict && selectedOnly() && !groups.ready()) { throw new Error('Selection is not ready; Reload review to retry.'); }
+                // A normal reload races WebSocket attach/initial resize. The
+                // saved panel is valid; defer its live list, not its restoration.
+                pageReady = false; rows = []; filterStamp = 'waiting'; renderErrors();
+                info('Waiting for the current view before filtering…');
+                followFilters(); return;
+            }
+            const stamp = filterKey(c); filterStamp = stamp;
+            pageReady = false; rows = []; boxReset(false); renderErrors();
             const t = task('errors'), body = query ? (query.bbox ? {kind: 'query', bbox_um: query.bbox, checks: null, cursor: errorStart, waived: filter(), limit: 64} :
-                {kind: 'in_view', cursor: errorStart, waived: filter(), limit: 64}) : {kind: 'errors', check: rule.check, start: errorStart, waived: filter(), limit: 64};
+                {kind: 'in_view', cursor: errorStart, waived: filter(), limit: 64}) : {kind: 'list', check: rule.check, start: errorStart, waived: filter(), limit: 64,
+                    in_view: inView(), selection_rev: selectedOnly() ? groups.revision() : null};
             try {
-                const page = await read('errors', t, c, body, body.kind === 'in_view'); if (!page) { return; }
+                const page = await read('errors', t, c, body, body.kind === 'in_view' || body.in_view); if (!page || filterKey(current()) !== stamp) { return; }
                 if (body.kind === 'in_view') { P.bbox(page.bbox_um); query.bbox = page.bbox_um; }
-                rows = validateRows(page.rows); errorNext = page.next;
+                const list = validateRows(page.rows);
+                if (body.kind === 'list') {
+                    validateFilters(page, body);
+                    list.forEach(function (r, i) {
+                        if (!matchesFilters(r, body, page.bbox_um) || P.compare(r.local, body.start) < 0 || i && P.compare(list[i - 1].local, r.local) >= 0) { throw new Error('DRC list filter/order mismatch'); }
+                    });
+                    if (page.next !== null && (P.compare(cursor(page.next), body.start) <= 0 || list.length && P.compare(page.next, list[list.length - 1].local) <= 0)) { throw new Error('DRC list cursor did not progress'); }
+                }
+                rows = list; errorNext = page.next;
                 if (errorNext !== null) { if (query) { cursor(errorNext.check); cursor(errorNext.error); } else { cursor(errorNext); } }
                 if (JSON.stringify(errorNext) === JSON.stringify(errorStart)) { throw new Error('DRC cursor did not progress'); }
                 pageReady = true; renderErrors(); info('Read-only · review files are never changed.'); savePanel();
-            } catch (e) { if (strict) { throw e; } failure('errors', t, c, e); }
+            } catch (e) {
+                const now = current();
+                if (body.in_view && valid('errors', t, c) && now && (!now.connected || now.pending || now.state.state_rev !== c.state.state_rev)) {
+                    filterStamp = 'waiting'; followFilters(); return;
+                }
+                if (strict) { throw e; } failure('errors', t, c, e);
+            }
             finally { if (valid('errors', t, c)) { navigationButtons(); } }
         }
         async function geometry(r) {
@@ -454,7 +538,8 @@
             savePanel();
         }
         async function step(backwards, resume, focusRow) {
-            const c = current(); if (!c || restoring || !rule || stepBusy || (query && !query.bbox)) { return; }
+            const c = current(); if (!c || restoring || !rule || stepBusy || !filtersReady(c) || (query && !query.bbox)) { return; }
+            const stamp = filterKey(c);
             let body;
             if (resume) { if (!stepContinuation) { return; } body = stepContinuation; }
             else {
@@ -464,15 +549,19 @@
                     const a = bbox(selected.bbox_um), b = bbox(query.bbox);
                     if (a[0] > b[2] || a[2] < b[0] || a[1] > b[3] || a[3] < b[1]) { after = null; }
                 }
-                body = {kind: 'step', check: rule.check, backwards: backwards, after: after, cursor: null, waived: filter(), bbox_um: query ? query.bbox : null};
+                body = query ? {kind: 'step', check: rule.check, backwards: backwards, after: after, cursor: null, waived: filter(), bbox_um: query.bbox} :
+                    {kind: 'filtered_step', check: rule.check, backwards: backwards, after: after, cursor: null, waived: filter(),
+                        in_view: inView(), selection_rev: selectedOnly() ? groups.revision() : null};
             }
             cancel('focus'); const t = task('step'); stepBusy = true; rowFocus = false;
             navigationButtons(); info('Searching the current rule…');
             try {
-                const page = await read('step', t, c, body); if (!page) { return; }
+                const page = await read('step', t, c, body, body.in_view); if (!page || filterKey(current()) !== stamp) { return; }
+                if (body.kind === 'filtered_step') { validateFilters(page, body); }
                 cursor(page.scanned);
                 if (P.compare(page.scanned, '262144') > 0 || page.hit === undefined || page.next === undefined || (page.hit !== null && page.next !== null)) { throw new Error('Invalid DRC step response'); }
                 if (page.next !== null) {
+                    if (body.selection_rev) { throw new Error('Unexpected selected-step continuation'); }
                     cursor(page.next.next); P.counter(page.next.remaining);
                     if (page.scanned === '0' || (body.cursor && P.compare(page.next.remaining, body.cursor.remaining) >= 0)) { throw new Error('DRC step cursor did not progress'); }
                     stepContinuation = Object.assign({}, body, {after: null, cursor: page.next});
@@ -483,6 +572,7 @@
                 stepContinuation = null; el('drc-step-continue').hidden = true;
                 if (page.hit === null) { info('No matching errors in the current rule.'); return; }
                 const r = validateRows([page.hit])[0];
+                if (body.kind === 'filtered_step' && !matchesFilters(r, body, page.bbox_um)) { throw new Error('DRC step filter mismatch'); }
                 cursor(r.points);
                 if (r.check !== body.check || (body.waived !== null && (r.status === 1) !== body.waived)) { throw new Error('DRC step filter mismatch'); }
                 const existing = rows.some(function (v) { return v.check === r.check && v.local === r.local; });
@@ -502,6 +592,7 @@
             return {search: el('drc-search').value.trim(), rule_start: ruleStart, check: rule ? rule.check : null,
                 error_start: query ? '0' : errorStart, query: query ? {bbox_um: query.bbox, state_rev: query.rev, cursor: errorStart} : null,
                 waived: filter(), selected: selected ? {check: selected.check, error: selected.local} : null,
+                in_view: inView(), selected_only: selectedOnly(),
                 markers: el('drc-markers').checked, shown: shown, jump_scale: jumpScale === null ? null : String(jumpScale), zoom_lock: zoomLock,
                 jump_active: jumpActive, focus_visible: focusVisible,
                 cd: cdTarget ? {target: cdTarget, remaining: cdRemaining} : null};
@@ -515,6 +606,8 @@
             const t = task('restore'); restoring = true;
             cancel('rules'); cancel('errors'); cancel('description'); clearSelection(); boxReset(true);
             rule = null; rows = []; query = null; previousRules.length = previousErrors.length = 0;
+            filterStamp = ''; clearTimeout(filterTimer); filterTimer = null;
+            el('drc-in-view').checked = el('drc-selected-only').checked = false;
             ruleStart = errorStart = '0'; ruleNext = errorNext = null;
             navigationButtons();
             try {
@@ -524,6 +617,9 @@
                     !['markers','shown','zoom_lock','jump_active','focus_visible'].every(function (k) { return typeof data[k] === 'boolean'; }) ||
                     (data.jump_active && !data.focus_visible) || ((data.jump_active || data.focus_visible) && !data.selected)) { throw new Error('Invalid saved review state'); }
                 ruleStart = cursor(data.rule_start); errorStart = cursor(data.error_start);
+                ['in_view', 'selected_only'].forEach(function (k) { if (data[k] !== undefined && typeof data[k] !== 'boolean') { throw new Error('Invalid saved filter'); } });
+                if (data.query && (data.in_view || data.selected_only)) { throw new Error('Saved snapshot and live filters conflict'); }
+                el('drc-in-view').checked = data.in_view === true; el('drc-selected-only').checked = data.selected_only === true;
                 el('drc-search').value = data.search; el('drc-waived').value = data.waived === null ? 'all' : data.waived ? 'waived' : 'unwaived';
                 el('drc-markers').checked = data.markers;
                 if (shown !== data.shown) { shown = data.shown; el('drc-panel').hidden = !shown; el('drc-toggle').setAttribute('aria-expanded', String(shown)); o.resize(); }
@@ -565,17 +661,23 @@
             // previous focus/step must not move the view during restoration.
             cancelStep(); ['focus', 'geometry', 'cd', 'rules', 'errors', 'description', 'restore', 'group-metadata'].forEach(cancel);
             boxReset(true); groupRows = []; groupStamp = '';
-            const key = contextKey(c); restoring = true; navigationButtons(); renderRules(); renderErrors();
+            clearTimeout(filterTimer); filterTimer = null; filterStamp = '';
+            const key = contextKey(c), turn = ++restoreTurn; restoring = true; navigationButtons(); renderRules(); renderErrors();
             const path = '/api/v1/drc/' + registration.id + '/views/' + c.id;
-            return Promise.all([persistence.attach({path: path + '/panel', revision: registration.revision, view: c.id}),
-                groups.attach({path: path + '/selection', revision: registration.revision, view: c.id})]).then(function () {
-                if (contextKey(current()) === key) { restoring = false; renderRules(); renderErrors(); contextChanged(); groupsChanged(); }
+            // Selected=true must not restore before its server group snapshot.
+            // Guard this await too: a superseded reload cannot start a new GET.
+            return groups.attach({path: path + '/selection', revision: registration.revision, view: c.id}).then(function () {
+                if (turn !== restoreTurn || contextKey(current()) !== key) { return; }
+                return persistence.attach({path: path + '/panel', revision: registration.revision, view: c.id});
+            }).then(function () {
+                if (turn === restoreTurn && contextKey(current()) === key) { restoring = false; renderRules(); renderErrors(); contextChanged(); groupsChanged(); }
             });
         }
         function contextChanged() {
-            markerHits = []; hitStamp = '';
+            markerHits = []; hitStamp = ''; tooltip('');
             const c = current(), key = contextKey(c);
             if (key !== bound) {
+                ++restoreTurn; clearTimeout(filterTimer); filterTimer = null; filterStamp = '';
                 persistence.close(); groups.close(); cancelAll(); boxReset(true); groupRows = []; groupStamp = ''; pageReady = false;
                 bound = key; restoring = false; rule = null; ruleRows = []; rows = []; ruleStart = errorStart = '0'; query = null;
                 previousRules.length = previousErrors.length = 0; ruleNext = errorNext = null; clearSelection(); renderRules();
@@ -584,7 +686,7 @@
             }
             groupsChanged();
             if (registration && !c && registration.phase === 'ready') { info('Open the source associated with this DRC pack.'); }
-            if (query && c && query.rev !== c.state.state_rev) { el('drc-result-info').textContent = 'Results from an earlier viewport · click In view to refresh.'; }
+            if (query && c && query.rev !== c.state.state_rev) { el('drc-result-info').textContent = 'Saved earlier-viewport query · enable In view for the live current-rule filter.'; }
         }
         async function refresh() {
             if (stopped) { return; }
@@ -609,9 +711,9 @@
         el('drc-error-next').onclick = function () { cancelStep(); if (errorNext !== null) { remember(previousErrors, errorStart); errorStart = errorNext; loadErrors(); } };
         el('drc-first').onclick = function () { cancelStep(); previousErrors.length = 0; errorStart = query ? {check: '0', error: '0'} : '0'; loadErrors(); };
         el('drc-waived').onchange = function () { boxReset(false); if (groups.total()) { groups.change({kind: 'clear_all'}); } clearSelection(); el('drc-first').onclick(); };
-        el('drc-in-view').onclick = function () {
-            const c = current(); if (!c || c.pending) { info('Wait for the current view edit.'); return; }
-            query = {bbox: null, rev: c.state.state_rev}; errorStart = {check: '0', error: '0'}; previousErrors.length = 0; clearSelection(); loadErrors();
+        el('drc-in-view').onchange = el('drc-selected-only').onchange = function () {
+            if (!current() || restoring) { return; }
+            query = null; clearSelection(); resetFilterPage(); filterStamp = ''; loadErrors(); savePanel();
         };
         el('drc-frame').onclick = function () { if (selected) { cancelStep(); select(selected, true); } };
         el('drc-step-prev').onclick = function () { step(true, false, true); };
@@ -626,7 +728,7 @@
         el('drc-toggle').onclick = function () { shown = !shown; el('drc-panel').hidden = !shown; el('drc-toggle').setAttribute('aria-expanded', String(shown)); o.resize(); savePanel(); };
         el('drc-reload').onclick = restoreState;
         return {init: refresh, contextChanged: contextChanged, paint: paint, click: click, clear: clearSelection,
-            boxActive: function () { return boxMode; }, move: boxMove,
+            boxActive: function () { return boxMode; }, move: move,
             key: function (key) {
                 if (key === 'Escape') { return escape(); }
                 if (key === 'k' || key === 'K') { return popCD(key === 'K'); }
@@ -634,7 +736,7 @@
                 if ((key === 'n' || key === 'p') && rule && current()) { step(key === 'p', false, false); return true; }
                 return false;
             },
-            stop: function () { stopped = true; persistence.close(); groups.close(); bound = ''; boxReset(true); cancelAll(); clearTimeout(timer); if (painting !== null) { o.window.cancelAnimationFrame(painting); painting = null; } overlay.hidden = true; },
+            stop: function () { stopped = true; ++restoreTurn; clearTimeout(filterTimer); filterTimer = null; persistence.close(); groups.close(); bound = ''; boxReset(true); cancelAll(); clearTimeout(timer); if (painting !== null) { o.window.cancelAnimationFrame(painting); painting = null; } overlay.hidden = true; },
             resume: function () { stopped = false; return refresh(); }};
     }
     const api = {bind: bind, projection: projection, point: point, shifted: shifted};

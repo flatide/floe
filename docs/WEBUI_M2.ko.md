@@ -681,13 +681,70 @@ Rust1.89 빈 registry 오프라인 테스트와 Linux musl release link를 통�
 KLayout13 PX+2 phase-exact+14 style도 통과했다. native 의존성 경고는 남아 있다.
 새 필터 UI의 브라우저 QA는 M2a-9b이며 현장 Firefox/ETX·G2는 여전히 보류다.
 
-## 14. 다음 경계
+## 14. M2a-9b: Selected·live In view 목록 UI와 hover
 
-1. DRC selected/live In view 목록 필터의 UI 연결·hover, SVRF metric/type 필터·
-   layer isolate는 아직 미이관이다. 필터/순회 코어와 API는 §13까지 구현했다.
+§13을 기본 오류 목록/순회에 연결했다. **In view는 현재 규칙의 뷰 추종 체크박스**,
+Selected는 현재 규칙의 선택 집합 체크박스다. 두 필터와 waive가 함께 교차하며
+선택이 비어 있으면 빈 목록이다. 선택 자체를 바꾸는 박스/Shift/Ctrl/Cmd 동작과
+목록을 좁히는 Selected는 별개다. 목록64개/페이지·명시적 다음/이전·유계 n/p 순회는
+유지하고, 선택에 없는 오류/다른 규칙의 결과를 뒤섞지 않는다.
+
+- 뷰 revision이 바뀌면 이전 목록·순회 요청과 cursor history를 버리고 새 첫
+  페이지만 읽는다. pan/zoom 입력 중·WS 단절 중에는 조회하지 않는다. 연속된
+  변경은 **100ms latest-only**로 묶으며 timer는 하나다. 빈 continuation은 계속
+  미완료로 표시하고 자동으로 pack 전체를 따라 읽지 않는다. 이100ms는 DRC 목록
+  갱신 지연이며 native geometry pan/crop을 지연시키는 debounce가 아니다.
+- Selected가 켜진 동안 집합 revision이 바뀌어도 같은 방식으로 목록을 갱신한다.
+  꺼져 있으면 집합 변경으로 목록을 다시 읽지 않는다. 선택 목록/쿼리/레이어 변경이
+  스스로 native goto를 호출하지 않는다. focus/CD와 규칙별 선택 집합은 독립적으로
+  유지되며 박스 선택 대상은 계속 현재 필터·페이지의 최대64개다.
+- 응답의 scope/view/selection revision·rule/waive/selected/bbox·오름차순 local ID·
+  진행 cursor를 검사한다. 늦은 응답은 token과 필터 키로 폐기한다. 오류/대기 중인
+  목록을 `No matching errors` 완료로 표시하지 않으며 박스 선택을 잠근다.
+- `in_view`/`selected_only` 두 boolean을 서버 panel 상태에 저장한다. 이전 body의
+  생략값은 false다. 옛 고정 query 상태는 **복원만** 지원하고 당시 viewport임을
+  표시한다. 새 체크박스를 조작하면 그 snapshot을 끝내고 현재 규칙으로 전환한다.
+  snapshot+새 필터를 동시에 지정한 저장 요청은 거부한다.
+
+복원은 선택 집합 GET→패널 GET/복원 순서다. Selected를 먼저 전체 오류로 표시하는
+단계는 없다. 새로고침 중 WebSocket 접속/resize가 아직 진행 중이거나 live 조회가
+view revision 충돌을 받으면 **패널 설정의 복원은 완료하고 목록만 준비된 뷰로 미룬다**.
+선택 집합 GET 실패는 여전히 명시적인 복원 오류다. 오래된 reload의 GET이 도착해도
+후속 패널 복원을 시작하지 않으며 자동 toggle 재전송/파일 쓰기는 없다.
+
+마커 hover는 click과 동일한 **실제로 그린 마커의 화면 hit-list**를 사용한다.
+6 CSS px 최근접 판정, 표시 crop/분수 원점/DPR를 유지하며 툴팁은
+`룰명 #로컬 (전역) · waived`다. 같은 내용이면 DOM을 다시 쓰지 않고 좌표/pack/API를
+조회하지 않는다. pointer leave·pan·필터/표시 변경 시 tooltip을 지운다. 전체 DRC
+객체를 순회하는 hover가 아니며 마커 정책을 전체 pack으로 확대하지 않았다.
+
+로컬 Chrome/DPR2 합성260오류 QA에서 빈 Selected, global1/2 선택 후 두 체크박스
+교집합, 새로고침 후 번호/필터 보존을 확인했다. 첫 최종 번들 reload는 gen2와 뷰를
+유지했다. 레이어를 숨긴 뒤 Shift+Right와 Up/Down pan에서는 **2→1→2개**로 목록이
+따라왔고 집합은 두 개로 유지됐다. 다른 규칙은0개/전체 선택2개를 표시했고 돌아오면
+원래 선택을 복구했다. clear 후0개, Selected off 후 live 목록/n 순회(global1, gen6)
+및 재복원도 확인했다. 앞선 QA에서 발견한 초기 WS/resize 복원 실패를 위의 지연
+조회로 고치고 새 세션에서 재현되지 않음을 확인했다. 두 세션 콘솔 warn/error는
+없고 End session은 모두 exit0이다. 이 결과는 현장 Firefox/ETX 수용이 아니다.
+
+새 JS gate는 100회 revision 알림의 단일 조회, 대기/단절/오래된 view·selection
+응답 폐기, 3종 필터·빈 집합·순환·명시적 페이지, group GET 지연과 초기 WS/resize·
+409 복원 경합, 무조회 hover/DOM 중복 갱신 금지를 단언한다. 기존 ES2017·마커·
+box·CD·geometry·수명 게이트와 인증 HTTP384조합·panel 저장/원본 불변도 통과했다.
+
+2026-09-13: 전체 `sh tools/validate_rust.sh` ALL OK 및 KLayout13 PX+2 phase-exact+
+14 style 통과. 최종 보완을 포함한 JS/ES2017·core59/app6/web24/transport8·fmt·전환
+패키지 strict clippy를 재확인했다. Rust1.89 빈 registry 오프라인 테스트와 최종
+Linux musl release link도 통과했다. 기존 native 경고는 남아 있으며 Linux 실행
+PASS나 M2 전체 완료를 뜻하지 않는다. 기존 내장 정적 자산 구조를 유지했고 외부
+호스팅·의존성·native wire/캐시 포맷·renderd 버전은 바꾸지 않았다.
+
+## 15. 다음 경계
+
+1. SVRF metric/type 필터·layer isolate는 아직 미이관이다.
+   selected/live In view 목록 필터·순회·hover는 §13~14까지 구현했다.
    손으로 그리는 ruler/격리와 Escape 우선순위도 M4에서 확장한다.
-   현재 웹의 In view는 전체 규칙의 고정 시점 검색이며 GTK의 현재 규칙·뷰 추종
-   필터와 다르다. 현재 페이지 마커 정책 자체를 전체 pack 마커로 확대하지 않는다.
+   현재 페이지 마커 정책 자체를 전체 pack 마커로 확대하지 않는다.
 2. ASCII/index 흐름·기존 notes·상세 측정/룰 매핑은 각각 parity gate와 함께 확장.
 3. 공유는 설계/DRC에 묶인 읽기 capability, 발급/만료/폐기·follow/independent
    state를 별도 구현·검증. 아직 shares=false, loopback-only다.

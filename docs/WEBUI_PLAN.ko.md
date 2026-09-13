@@ -26,6 +26,7 @@ M2a-7b에서 마지막 이동 오류의 CD 치수선·값 표시, k/K/Escape와 
 M2a-8a에서 규칙별 DRC 선택 집합과 현재 페이지 후보 bbox 판정·revision 충돌 API를 추가했다(UI는 다음 단계).
 M2a-8b에서 두 클릭 박스·Shift/Ctrl/Cmd 선택과 규칙별 금색 마커·세션 복원을 연결했다.
 M2a-9a에서 현재 규칙의 Selected·waive·live viewport 교집합 목록/순회 코어와 인증 API를 추가했다(UI는 다음 단계).
+M2a-9b에서 Selected·현재 규칙 live In view UI, 유계 추종/복원·마커 hover를 연결했다.
 전체 조작 parity와 M0/Firefox/ETX 현장 검증은 아직 완료되지 않았다.
 상세 범위는 [M1b 기록](WEBUI_M1B.ko.md)과 [M2 기록](WEBUI_M2.ko.md). 여기의 M0~M5는 **웹 전환 단계**이며
 jobdeck/occupancy의 같은 이름 단계와 별개다. 개발 기준과 합류 규칙은 §11.
@@ -479,6 +480,8 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
   M2a-3는 읽기 패널·focus·overlay, M2a-4는 서버 상태 보존·브라우저 복원,
   M2a-5는 현재 규칙 내 유계 순회 API/UI와 선택/이동 모드,
   M2a-6은 화면에 그린 DRC 마커의 클릭 선택/이동,
-  M2a-7은 단순 오류의 CD 측정 코어/API 및 표시·지우기·복원이다.
+  M2a-7은 단순 오류의 CD 측정 코어/API 및 표시·지우기·복원,
+  M2a-8은 규칙별 선택 집합·박스·금색 마커/복원,
+  M2a-9는 Selected/waive/live In view 교집합 목록·순회·hover다.
   공유와 고급 DRC 조작은 남아 있다.
   CLI 전체/웹 전환 완료가 아니며 GTK/실측 브랜치는 유지한다.

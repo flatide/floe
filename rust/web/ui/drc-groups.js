@@ -67,6 +67,7 @@
         }
         return {attach: attach, change: change, close: close,
             ready: function () { return ready && !busy; },
+            revision: function () { return state ? state.revision : null; },
             contains: function (ci, id) { return !!state && state.rules.has(ci) && state.rules.get(ci).has(id); },
             ids: function (ci) { return state && state.rules.has(ci) ? Array.from(state.rules.get(ci)) : []; },
             total: function () { return state ? state.total : 0; }};

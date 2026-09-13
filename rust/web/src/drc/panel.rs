@@ -25,6 +25,10 @@ pub(super) struct Data {
     pub check: Option<String>,
     pub error_start: String,
     pub query: Option<Query>,
+    #[serde(default)]
+    pub in_view: bool,
+    #[serde(default)]
+    pub selected_only: bool,
     pub waived: Option<bool>,
     pub selected: Option<CursorDto>,
     pub markers: bool,
@@ -37,6 +41,9 @@ pub(super) struct Data {
 }
 impl Data {
     pub fn validate(&self) -> std::result::Result<(), Failure> {
+        if self.query.is_some() && (self.in_view || self.selected_only) {
+            return Err("invalid_drc_request");
+        }
         if self.jump_active && !self.focus_visible
             || (self.jump_active || self.focus_visible) && self.selected.is_none()
         {
@@ -194,6 +201,20 @@ mod tests {
     #[test]
     fn bounded_typed_state_keeps_u64_and_rejects_nonfinite_coordinates() {
         let mut d = data();
+        assert!(!d.in_view && !d.selected_only);
+        d.in_view = true;
+        d.selected_only = true;
+        d.validate().unwrap();
+        d.query = Some(Query {
+            bbox_um: ["0".into(), "0".into(), "1".into(), "1".into()],
+            state_rev: "1".into(),
+            cursor: CursorDto {
+                check: "0".into(),
+                error: "0".into(),
+            },
+        });
+        assert!(d.validate().is_err());
+        d.query = None;
         d.jump_active = true;
         assert!(d.validate().is_err());
         d.focus_visible = true;

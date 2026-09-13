@@ -154,7 +154,7 @@ def main(fixture):
                                        state=dict(panel_rev="1", body=None))
             chosen = next(i for i, c in enumerate(expected) if c["errors"])
             panel = dict(search="<script>", rule_start="0", check=str(chosen), error_start="0",
-                         query=None, waived=False, selected=dict(check=str(chosen), error="0"),
+                         query=None, in_view=True, selected_only=True, waived=False, selected=dict(check=str(chosen), error="0"),
                          markers=True, shown=True, jump_scale=".25", zoom_lock=True,
                          jump_active=True, focus_visible=True,
                          cd=dict(target=dict(check=str(chosen), error="1"), remaining=2))
@@ -184,6 +184,9 @@ def main(fixture):
             save_panel(dict(panel, cd=dict(target=panel["selected"], remaining=True)), code=400)
             save_panel(dict(panel, jump_active=False), code=400)
             save_panel(dict(panel, search="x"*257), code=400)
+            save_panel(dict(panel, in_view=1), code=400)
+            save_panel(dict(panel, selected_only="true"), code=400)
+            save_panel(dict(panel, query=dict(bbox_um=["0","0","1","1"], state_rev="1", cursor=dict(check="0",error="0"))), code=400)
             save_panel(dict(panel, query=dict(bbox_um=["0","0","1","1"], state_rev="999999",
                                               cursor=dict(check="0",error="0"))), code=400)
             assert client.call("GET", panel_path) == fresh_panel, "invalid state committed"

@@ -21,19 +21,22 @@ const row=i=>({check:'0',local:String(i),global:String(i+1),kind:'p',status:i%3=
 let context={id:'v1',source:'source',connected:true,pending:false,state:{state_rev:'1',status:'idle',dbu_um:'1',bbox_dbu:['0','0','100','80'],pixels:[100,80]}};
 let held=null, holdStep=false, heldPage=null, restoreData=null, waitRestore=false, releaseRestore=null;
 const page=(start,waived)=>{let rows=[];let i=Number(start);for(;i<130&&rows.length<64;i++){const r=row(i);if(waived===null||(r.status===1)===waived)rows.push(r);}return {rows,next:i<130?String(i):null};};
-function http(method,path,body,missing,token){
+function http(...args){return Promise.resolve(httpImpl(...args)).then(v=>{
+    const b=args[2]&&args[2].body;return b&&['list','filtered_step'].includes(b.kind)?{bbox_um:null,selection_rev:null,...v}:v;
+});}
+function httpImpl(method,path,body,missing,token){
     if(path.endsWith('/selection'))return Promise.resolve({revision:'r1',view_id:context.id,state:{selection_rev:'1',total:'0',limit:5000,rules:[]}});
     const b=body&&body.body;requests.push({method,path,body});
     if(!b)return Promise.resolve({drc:{id:'drc',revision:'r1',source_id:'source',title:'test',phase:'ready',metadata:{checks:'1',errors:'130'}}});
     if(b.kind==='rules')return Promise.resolve({rows:[{check:'0',name:'R',name_truncated:false,errors:'130',waived:'44'}],next:null});
     if(b.kind==='rule')return Promise.resolve({check:'0',name:'R',description:'rule',errors:'130',waived:'44'});
-    if(b.kind==='errors')return Promise.resolve(page(b.start,b.waived));
+    if(b.kind==='list')return Promise.resolve({scanned:'130',...page(b.start,b.waived)});
     if(b.kind==='geometry') {const r=row(Number(b.error)),points=[[r.bbox_um[0],'0'],[r.bbox_um[2],'0'],[r.bbox_um[2],'1'],[r.bbox_um[0],'1']];
         const start=Number(b.start),end=Math.min(4,start+b.limit);
         return Promise.resolve({...r,precision:'1',points_dbu:points.slice(start,end),start:b.start,total:'4',next:end<4?String(end):null});}
     if(b.kind==='focus')return Promise.resolve({navigation:{kind:'goto',center_um:[b.error,'0.5'],width_um:'4'}});
     if(b.kind==='measurements')return Promise.resolve({check:b.check,local:b.error,global:P.next(b.error),segments:[]});
-    if(b.kind==='step') {
+    if(b.kind==='filtered_step') {
         if(holdStep)return new Promise(resolve=>{held={token,resolve,body:b};token.abort=()=>{};});
         if(heldPage){const v=heldPage;heldPage=null;return Promise.resolve(v);}
         let start=b.cursor?Number(b.cursor.next):b.after===null?(b.backwards?129:0):(Number(b.after)+(b.backwards?-1:1)+130)%130;
@@ -45,7 +48,7 @@ function http(method,path,body,missing,token){
 const panel=D.bind({document,window:{requestAnimationFrame:()=>1,cancelAnimationFrame(){}},protocol:P,rulers:require('./rulers.js'),groups:require('./drc-groups.js'),http,context:()=>context,navigate:v=>moves.push(v),resize(){},
     stateStore:{bind:o=>{let ready=false;return {attach:async()=>{ready=false;if(waitRestore)await new Promise(r=>{releaseRestore=r;});await o.apply(restoreData);ready=true;},change:d=>{if(ready)saves.push(JSON.parse(JSON.stringify(d)));},close(){ready=false;}};}}});
 async function tick(){for(let i=0;i<60;i++)await Promise.resolve();}
-const count=kind=>requests.filter(r=>r.body&&r.body.body.kind===kind).length;
+const count=kind=>requests.filter(r=>r.body&&r.body.body.kind===(kind==='step'?'filtered_step':kind)).length;
 (async()=>{
     await panel.init();await tick();
     assert.equal(el('drc-errors').children.length,64);
@@ -76,7 +79,7 @@ const count=kind=>requests.filter(r=>r.body&&r.body.body.kind===kind).length;
     const before=count('step');panel.key('n');await tick();assert.equal(count('step'),before+1);
     assert.equal(el('drc-step-continue').hidden,false);assert(el('drc-message').textContent.includes('incomplete'));
     el('drc-step-continue').onclick();await tick();assert.equal(saves.at(-1).selected.error,'66');
-    const resumed=requests.filter(r=>r.body&&r.body.body.kind==='step').at(-1).body.body;
+    const resumed=requests.filter(r=>r.body&&r.body.body.kind==='filtered_step').at(-1).body.body;
     assert.equal(resumed.after,null);assert.deepEqual(resumed.cursor,{next:'65',remaining:'65'});
     // Repeated input has no unbounded queue. Esc cancels a held read and a
     // late response must not resurrect a cleared focus or move the view.
