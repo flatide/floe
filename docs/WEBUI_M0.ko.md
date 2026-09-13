@@ -210,6 +210,11 @@ DISPLAY가 없어도 동작해야 한다(기존 GTK 오류까지 이식하지 �
 | SYS-01 / M1a→M4 | instance, cli, cache | 바이너리 발견/버전, index freshness, 취소/타임아웃/자식 수거, 개인·설계 설정 구분 |
 | SYS-02 / M4 | portable 도구 | Rust+정적 자산만으로 실행, offline build, GLIBC/아키텍처 확인, licenses/About, 브라우저 실행/프로필 격리 |
 
+UI-05 일부는 M4d-1에서 연결했다: 표시된 layout/annotation PNG 복사·저장, overlay
+3상태, canvas 단축키와 텍스트/IME 보호. 실제 clipboard/다운로드·현장 Firefox/ETX
+수용과 주석/설정 저장은 남는다([M4 §15](WEBUI_M4.ko.md)). 이미 그린 pixels만 합성하며
+exact clip이나 원본 재렌더 export로 간주하지 않는다.
+
 `python -m floe.fe_embed` 보조 CLI도 범위에 포함한다: 위치 인자 PNG들,
 `--box`, `--ellipse`, `--line`, `--path`, `--polygon`, `--ruler`, `--text`,
 `--json`, `--legend`, `--note`, `--ppu`, `--unit`, `--append`, `--dump`,

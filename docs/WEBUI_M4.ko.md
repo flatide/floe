@@ -4,9 +4,9 @@
 M2 공유 권한 추가와 실제 브라우저 pack-build 승인 클릭은 승인 대기이며,
 M0/G2·M3 현장 Firefox/ETX는 사용자 요청대로 보류다. 이 경계를 우회하지 않고
 독립적인 로컬 native 이관을 진행한다. M4 전체 완료나 GTK 은퇴를 뜻하지 않는다.
-현재는 §13의 **owner exact clip HTTP/WS·다운로드**까지 연결했다.
-§1~12의 미연결 표기는 각 선행 단계 당시의 범위다. clip UI/나머지 내보내기와 전체 조작
-수용은 남아 있다.
+현재는 §14의 **owner viewport clip UI**, §15의 **표시 픽셀 PNG 복사/저장과
+overlay 전환**까지 연결했다. 각 절의 미연결 표기는 해당 선행 단계 당시의 범위다.
+나머지 내보내기·주석/설정 저장과 전체 조작/실제 브라우저 수용은 남아 있다.
 
 ## 1. M4a-1: 표시 scene에 고정한 native pick/snap
 
@@ -1312,3 +1312,94 @@ renderd0.12.87·geometry/wire·vendor·GTK 기본 launcher는 바꾸지 않았�
 전체 M4 완료, GTK 기본 전환/제거, 공유 권한 추가, 현장 수용을 뜻하지 않는다.
 다음 독립 구현은 남은 웹 내보내기와 review/주석 저장 등 parity 항목이며,
 기존 현장 실측 보류는 유지한다.
+
+## 15. M4d-1: 표시 픽셀 PNG와 overlay 전환
+
+UI-05 중 GTK `_copy_view`의 **보이는 canvas 복사**, `_toggle_overlays`의
+3상태를 웹에 연결한다. 새 native render/export나 source 파일 접근 없이 이미 표시한
+픽셀만 사용한다. exact OASIS clip(§14), batch/DRC 재렌더 캡처(§8/10), 주석 metadata
+편집(§9)과 별개다. 일반 layout과 jobdeck/summary/preview 모두 대상이며, exact scene
+query가 가능해야 한다는 조건은 없다. GTK launcher·geometry/cut·vendor는 바꾸지 않는다.
+
+### 조작과 화면 계약
+
+- Display의 **Copy view** 또는 canvas focus의 Ctrl/Cmd+C가 이미지 복사를 요청한다.
+  선택된 텍스트, 자식/input target, Alt/Shift/IME 조합은 가로채지 않는다.
+- **Save view PNG**는 같은 합성 결과를 브라우저 다운로드로 요청한다.
+  clipboard 기능이 없으면 Copy만 비활성화한다. 권한 거부 시 자동 파일 쓰기로
+  바꾸지 않고, **Download captured PNG**로 방금 고정한 같은 이미지를 받을 수 있다.
+- 화면 크기의 opaque black canvas에 현재 margin → foreground → 도형 선택/snap →
+  DRC → ruler 순서로 합성한다. 실제 표시 중인 정수 device offset을 그대로 쓰며
+  보간/재스케일하지 않는다. pan 중 새 strip은 margin, 겹친 부분은 이전 labeled
+  foreground인 상태도 그대로다. native design labels는 이미 원본 pixels에 있다.
+- annotation의 예약된 rAF만 동기적으로 마무리하고 클릭 시점의 합성을 고정한다.
+  이후 pan/frame 교체가 진행돼도 그 PNG는 바뀌지 않는다. UI sidebar/status/오류 배너/
+  viewport hint는 제외한다. 출력 크기는 CSS 크기가 아니라 viewport **device pixels**다.
+  이것은 원본 도형 전체·최신 final만의 캡처 또는 flateyes metadata 파일이 아니다.
+- Overlays는 `All → Hide other errors → Hide all`로 순환한다. canvas의 Tab으로도
+  바꾸며 Shift+Tab은 정상적인 focus 이탈에 남긴다. 중간 단계는 선택/snap/룰러와
+  focused DRC를 유지하고 page/group 오류 marker만 숨긴다. 숨긴 DRC는 hit/tooltip
+  대상에서도 제거한다. 마지막 단계는 모두 숨기되 완료된 선택·룰러·group은 지우지
+  않는다. 진행 중 DRC box 선택만 취소한다. native labels/frames는 별도 토글 그대로다.
+  모드는 현재 페이지 수명 안에서만 보관하며 사용자/설계 설정 저장은 후속 범위다.
+
+### 브라우저·권한·비용 경계
+
+인증된 owner capability `snapshot_png`만 추가했다. 새 HTTP/WS route, guest 권한,
+upload, clipboard 읽기는 없다. PNG와 blob URL은 로컬 browser 메모리에서만 만든다.
+파일명은 `floe-view-WxH.png`이며 경로/원본 이름/토큰을 넣지 않는다.
+
+Async Clipboard는 secure context 및 실제 `ClipboardItem`/`clipboard.write` 지원을
+검사한다. 지원돼도 브라우저 권한에 따라 실패할 수 있다. PNG Promise를 항목에 넣어
+**원래 클릭/keydown 안에서** write를 시작하고, 인코딩 완료 뒤 새 권한 동작을
+가정하지 않는다. 브라우저 하한은 이를 지원한다고 가정해 올리지 않으며 PNG 저장이
+대안이다([Clipboard API 명세](https://www.w3.org/TR/clipboard-apis/)).
+PNG 인코딩은 표준 canvas `toBlob`을 사용한다
+([HTML canvas 명세](https://html.spec.whatwg.org/multipage/canvas.html#dom-canvas-toblob-dev)).
+
+- 출력·입력 canvas는 기존 pixel 한계(축8192, 면적16Mi pixels)로 검증한다.
+  입력 canvas 최대5개를 출력 canvas1개에 합성하며 encoder1개,
+  retained PNG1개(80MiB 이하)로 제한한다.
+  이는 browser 내부 인코딩 임시 메모리까지의 하드 한계를 의미하지 않는다.
+- native `toBlob`은 취소 API가 없으므로 pagehide/stop이 전달 promise를 거부해도
+  encoder credit은 callback까지 유지한다. 빠른 권한 거부나 bfcache resume로
+  encoder가 중첩되지 않는다. 15초가 지나면 대기 안내만 표시하며 성공/취소로 가장하지
+  않는다. OS clipboard 요청 자체를 취소하거나 이미 전달된 복사본을 되돌릴 수는 없다.
+- 이전 retained PNG/URL은 다음 캡처와 stop에서 폐기하며, 임시 합성 canvas는
+  callback/인코딩 오류 때 1×1로 줄인다. 실패 후 재다운로드는 새 렌더/인코딩이 아니다.
+  download 요청을 저장 완료로 표시하지 않는다. 실제 파일 완료는 브라우저가 관리한다.
+- GTK의 selection-owner clipboard와 달리 세션 종료 시 시스템 clipboard를 비우지
+  않는다. 이를 UI에 표시한다. 사용자 clipboard를 읽거나 덮어써 복구하려 하지 않는다.
+
+### 검증과 미완료
+
+`snapshot.test.cjs`의 독립 pixel source-over 모델은 crop/alpha/stack/검정 여백,
+후속 frame과 독립적인 캡처, 동기 clipboard 요청, 기능 부재/거부/인코딩 실패,
+크기/개수 한계, uncancellable encoder와 stop/resume, URL/canvas 회수를 고정한다.
+실제 app.js 통합 실행은 margin+옛 foreground 위치, Ctrl/Cmd+C/선택 텍스트/IME와
+Tab/Shift+Tab, 복사/저장/fallback, HTTP·native 명령 없음과 종료 정리를 확인한다.
+inspect/measure/DRC 테스트는 숨김 중 데이터 보존과 숨긴 marker의 hit 제거를 검사한다.
+Node canvas/clipboard mock은 실제 OS clipboard·PNG codec·다운로드 수용의 대체가 아니다.
+
+로컬 Chrome에서는 합성 valmini 초기 연결, margin crop 상태와 Copy/Save 버튼
+활성화를 accessibility tree로 확인했다. 실제 버튼 저장/OS clipboard 조작과 화면
+픽셀 screenshot 대조는 하지 않았다. owner capability false/true와 새 embedded asset은
+transport/owner native 게이트로 확인했다.
+
+Rust1.89.0 테스트, scoped strict clippy/fmt와 macOS release/Linux x86-64 musl
+static-pie 빌드는 통과했다. Linux 실행은 미확인이다. 초기 scoped 테스트는
+worker-client `query_errors`에서 `worker command queue full`로 1회 실패했다.
+8개 query 직후 render를 unwrap하는 기존 테스트의 writer scheduling 가정이 있으며,
+관련 제품/테스트 코드는 이번에 바꾸지 않았다. 동일 버전의 단독 lifecycle14개와
+scoped 전체 재실행, 전체 배터리의 해당 테스트 및 Rust1.89 실행은 통과했다.
+최초 실패를 지우거나 이 원인을 이번 UI 수정으로 해결했다고 간주하지 않는다.
+
+최종 실행(2026-09-14): `sh tools/validate_rust.sh`는 `RUST VALIDATION: ALL OK`다.
+owner export2 + owner/DRC3, managed clip, jobdeck80·renderer46와
+KLayout13 PX +2 phase-exact +14 style jobs1/8을 포함한다. ES2017/전체 JS,
+app11/core130/web41·transport10·worker-client7/lifecycle14도 최종 통과했다.
+renderd 버전은0.12.87로 유지했다(이번 단계는 worker 구현 변경 없음).
+
+현장 Firefox/ETX와 실제 OS clipboard·다운로드 수용은 보류/미확인이다.
+전체 M4 완료나 GTK 기본 전환은 아니다. 남은 review/주석·설정 저장·기타 export와
+공유 승인/패키징·현장 게이트를 계속 별도로 추적한다.

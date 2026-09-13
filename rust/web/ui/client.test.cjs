@@ -6,6 +6,8 @@ const vm = require('node:vm');
 const P = require('./protocol.js');
 const DRC = require('./drc.js'), drcDisplays = [], drcClicks = [], observers = [];
 const Clip=require('./clip.js'),clipEnabled=process.env.FLOE_TEST_CLIP==='1',forms=[];
+const snapshotEnabled=process.env.FLOE_TEST_SNAPSHOT==='1',captures=[],copies=[],downloads=[];
+let textSelection=null;
 let clipController,clipOp=null,clipFile=null;
 function clipState(){return {available:true,kind:'exact_clip',jobs_default:4,jobs_min:1,jobs_max:16,
     operations:{last_seq:clipOp?'1':'0',active:null,history:clipOp?[clipOp]:[]},artifacts:clipFile?[clipFile]:[],
@@ -23,6 +25,8 @@ class Element {
     appendChild(child) { this.children.push(child); if (child.tag==='option'&&!this.value) {this.value=child.value;} return child; }
     removeChild(child) {this.children.splice(this.children.indexOf(child),1);return child;}
     submit() {assert.equal(this.tag,'form');forms.push({method:this.method,action:this.action,body:this.children.map(c=>[c.name,c.value])});}
+    click() {assert.equal(this.tag,'a');downloads.push({href:this.href,name:this.download});}
+    toBlob(fn,type) {assert.equal(this.tag,'canvas');assert.equal(type,'image/png');captures.push({width:this.width,height:this.height,draws:draws.slice()});setImmediate(()=>fn(new Blob(['mock PNG'],{type})));}
     setAttribute(k,v) {this[k]=v;}
     querySelectorAll(tag) {return this.children.flatMap(c=>[...(c.tag===tag?[c]:[]), ...c.querySelectorAll(tag)]);}
     addEventListener(k,f) {listen(this,k,f);}
@@ -34,7 +38,7 @@ class Element {
     set textContent(v){this._text=v;this.children=[];}
 }
 const ctx = {imageSmoothingEnabled:true, putImageData(data,x,y) {draws.push({kind:'raw',data:[...data.data],x,y});},
-    drawImage(image,x,y) {draws.push({kind:'png',x,y});},clearRect(){},save(){},restore(){},beginPath(){},rect(){},clip(){},
+    drawImage(image,x,y) {draws.push({kind:'png',x,y,source:image.id});},clearRect(){},save(){},restore(){},beginPath(){},rect(){},clip(){},
     moveTo(){},lineTo(){},setLineDash(){},closePath(){},stroke(){},setTransform(){},fill(){},fillRect(){},fillText(){},measureText(s){return {width:s.length*7};}};
 for (const id of [...fs.readFileSync(__dirname+'/index.html','utf8').matchAll(/\bid="([^"]+)"/g)].map(m=>m[1])) {
     nodes.set(id,new Element(id));
@@ -60,7 +64,7 @@ class XHR {
         const body=text===null?null:JSON.parse(text); requests.push({method:this.method,path:this.path,body});
         let value, status=200;
         if (this.path==='/api/v1/session/exchange') {value={csrf:'c'.repeat(64),bundle,protocol:1};}
-        else if(this.path==='/api/v1/capabilities') {value={protocol:1,bundle,exports:clipEnabled};}
+        else if(this.path==='/api/v1/capabilities') {value={protocol:1,bundle,exports:clipEnabled,snapshot_png:snapshotEnabled};}
         else if(this.path==='/api/v1/exports') {
             if(this.method==='POST') {clipFile={id:body.seq,bytes:'64',expires_in_ms:'600000',name:'floe-clip-'+body.seq+'.oas'};
                 clipOp={seq:body.seq,kind:'exact_clip',phase:'ready',view_id:body.view_id,artifact:{...clipFile,records:'2',bbox_dbu:['-11','0','89','80'],source_stale:false,available:true}};value=clipOp;
@@ -89,13 +93,18 @@ class Socket {
 class Image {
     constructor(){this.naturalWidth=100;this.naturalHeight=80;images.push(this);}
 }
-const window={FloeProtocol:P,FloeQuery:require('./query.js'),FloeInspect:require('./inspect.js'),FloeMeasure:require('./measure.js'),FloeClip:{...Clip,bind(o){clipController=Clip.bind(o);return clipController;}},FloeGestures:require('./gestures.js'),FloeRulers:require('./rulers.js'),FloeDRCGroups:require('./drc-groups.js'),FloeDRC:{...DRC,bind(o){
+const window={FloeProtocol:P,FloeQuery:require('./query.js'),FloeInspect:require('./inspect.js'),FloeMeasure:require('./measure.js'),FloeSnapshot:require('./snapshot.js'),FloeClip:{...Clip,bind(o){clipController=Clip.bind(o);return clipController;}},FloeGestures:require('./gestures.js'),FloeRulers:require('./rulers.js'),FloeDRCGroups:require('./drc-groups.js'),FloeDRC:{...DRC,bind(o){
     drcOptions=o;const panel=DRC.bind(o),paint=panel.paint,changed=panel.contextChanged;
     panel.contextChanged=()=>{contextChanges++;changed();};panel.paint=(p,s)=>{drcDisplays.push({p,s});paint(p,s);};
     const click=panel.click;panel.click=(...v)=>{drcClicks.push(v);return consumeDRC || click(...v);};return panel;
 }},FloePanelState:require('./panel-state.js'),FloeDRCBuild:require('./drc-build.js'),ResizeObserver:class {constructor(fn){this.fn=fn;observers.push(this);}observe(e){this.target=e;}disconnect(){this.target=null;}},devicePixelRatio:1,
     addEventListener:(k,f)=>listen(listeners,k,f),setTimeout,requestAnimationFrame:fn=>setTimeout(fn,0),cancelAnimationFrame:clearTimeout};
 const storage=new Map();
+window.isSecureContext=true;window.ClipboardItem=class {constructor(data){this.data=data;}};
+window.navigator={clipboard:{write(items){copies.push(items);return Promise.all(items.map(i=>i.data['image/png']));}}};
+window.getSelection=()=>textSelection;
+let captureUrl=0;const captureUrls=new Set();
+window.URL={createObjectURL(){const u='blob:capture/'+ ++captureUrl;captureUrls.add(u);return u;},revokeObjectURL:u=>captureUrls.delete(u)};
 const sandbox={window,document,XMLHttpRequest:XHR,WebSocket:Socket,Image,ImageData:class {constructor(data,w,h){this.data=data;this.width=w;this.height=h;}},
     location:{origin:'http://127.0.0.1:1234',hash:'#bootstrap='+'e'.repeat(64),pathname:'/'},
     history:{replaceState(){sandbox.location.hash='';}},sessionStorage:{getItem:k=>storage.get(k)||null,setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},
@@ -131,6 +140,7 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     assert.equal(draws.length,1);assert.deepEqual(draws[0].data.slice(0,4),[16,0,127,255]);
     assert.equal(ws.sent.at(-1).disposition,'displayed');
     assert.equal(node('canvas').style.width,'100px');
+    assert.equal(node('snapshot-panel').hidden,!snapshotEnabled);
     if(clipEnabled) {
         assert(!node('clip-open').disabled,'display ACK did not enable clip');node('clip-open').onclick();
         node('clip-form').onsubmit({preventDefault(){}});const prepared=ws.sent.at(-1);
@@ -275,6 +285,13 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     assert.equal(node('canvas').hidden,false);assert.equal(node('margin-canvas').hidden,false);
     assert.equal(node('canvas').style.left,'-48px');
     marginQuery('9'); // Geometry-complete margin under old labels is queryable.
+    if(snapshotEnabled){
+        const at=draws.length,network=requests.length,sent=second.sent.length;
+        node('snapshot-save').onclick();
+        assert.deepEqual(captures.at(-1).draws.slice(at).map(d=>[d.source,d.x||0,d.y||0]),[['margin-canvas',-96,-48],['canvas',-48,0]]);
+        await wait(()=>!node('snapshot-save').disabled);assert.equal(downloads.length,1);
+        assert.equal(requests.length,network);assert.equal(second.sent.length,sent,'pan snapshot requested a native render');
+    }
     // A policy change during slow margin decoding cannot land the stale image.
     snapshot.margin.frame_id='10';second.receive(snapshot);
     second.receive(packet('png','10','3',nextEpoch,margin));const staleMargin=images.at(-1);
@@ -391,7 +408,29 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     assert(!reconnected.sent.some(m=>m.type==='view.set'||m.type==='view.apply'));
     second.receive({type:'accepted',seq:prepared.seq,state_rev:snapshot.state_rev,render_rev:snapshot.render_rev});assert.equal(done.length,1);
     for(const s of sockets){for(let i=1;i<s.sent.length;i++){assert(P.compare(s.sent[i-1].seq,s.sent[i].seq)<0);}}
+    if(snapshotEnabled){
+        reconnected.receive(packet('raw','13',snapshot.render_rev,'9'.repeat(64),{width:120,height:90}));
+        assert(!node('snapshot-copy').disabled);assert(!node('snapshot-save').disabled);
+        const beforeRequests=requests.length,beforeSent=reconnected.sent.length,copyBase=copies.length,captureBase=captures.length,downloadBase=downloads.length;
+        function key(k,extra={}){let used=false;node('viewport').keydown({key:k,target:node('viewport'),preventDefault(){used=true;},...extra});return used;}
+        for(const mode of ['focus','none','all']){assert(key('Tab'));assert.equal(node('overlays').value,mode);}
+        assert(!key('Tab',{shiftKey:true}));assert.equal(node('overlays').value,'all');
+        const cut=draws.length;assert(key('c',{ctrlKey:true}));assert.equal(copies.length,copyBase+1,'copy was not called synchronously from keydown');
+        assert.equal(captures.length,captureBase+1);assert.deepEqual([captures.at(-1).width,captures.at(-1).height],[120,90]);
+        assert.deepEqual(captures.at(-1).draws.slice(cut).map(d=>[d.source,d.x||0,d.y||0]),[['canvas',0,0]]);
+        await wait(()=>!node('snapshot-copy').disabled);assert.match(node('snapshot-status').textContent,/Copied 120 × 90/);
+        assert(key('c',{metaKey:true}));await wait(()=>!node('snapshot-copy').disabled);assert.equal(copies.length,copyBase+2);
+        textSelection={isCollapsed:false};assert(!key('c',{ctrlKey:true}));textSelection=null;
+        for(const extra of [{shiftKey:true},{altKey:true},{isComposing:true},{target:node('goto-x')},{target:node('canvas')}])assert(!key('c',{ctrlKey:true,...extra}));
+        assert.equal(copies.length,copyBase+2,'copy hijacked selection, an editor or browser shortcut');
+        node('snapshot-save').onclick();await wait(()=>downloads.length===downloadBase+1&&!node('snapshot-save').disabled);
+        assert.equal(downloads.at(-1).name,'floe-view-120x90.png');assert.equal(captureUrls.size,1);
+        node('snapshot-retry').onclick();assert.equal(downloads.length,downloadBase+2);assert.equal(captures.length,captureBase+3,'download fallback rerendered');
+        assert.equal(requests.length,beforeRequests,'snapshot or overlays made an HTTP request');
+        assert.equal(reconnected.sent.length,beforeSent,'snapshot or overlays dispatched a native command');
+    }
     listeners.pagehide();
+    assert.equal(captureUrls.size,0);
     assert.equal(observers[0].target,null);
     console.log('WEB CLIENT: ALL OK (startup/frames/epochs, margin/pan/DRC, controls, token-only edits, ACK+snapshot ordering, cancellation/limits/reconnect, cleanup)');
 })().catch(e=>{console.error(e);process.exitCode=1;});

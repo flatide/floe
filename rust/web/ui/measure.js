@@ -172,9 +172,10 @@
             else { book.pop(); }
             status(all?'Rulers cleared.':'Last ruler deleted.');refresh();return true;
         }
+        let overlayVisible=true;
         function draw() {
             const entries=book.entries();
-            if (!projection || !size || !bound || (!entries.length && !preview)) { canvas.hidden=true;return; }
+            if (!overlayVisible || !projection || !size || !bound || (!entries.length && !preview)) { canvas.hidden=true;return; }
             const w=size.pixels[0],h=size.pixels[1],dpr=size.dpr,p=projection;
             if (canvas.width!==w || canvas.height!==h) { canvas.width=w;canvas.height=h; }
             canvas.style.width=w/dpr+'px';canvas.style.height=h/dpr+'px';canvas.style.left=size.left+'px';canvas.style.top=size.top+'px';canvas.hidden=false;
@@ -200,6 +201,8 @@
         el('ruler-snap').checked=true;el('ruler-snap').onchange=function () { snapPreference=el('ruler-snap').checked;interrupt();status('Snap '+(snapPreference?'on.':'off.')); };
         book.watch(refresh);
         return {active:function () { return enabled; },changed:changed,interrupt:interrupt,leave:leave,
+            showOverlay:function (show) { overlayVisible=!!show;draw(); },
+            flush:function () { if(painting!==null){o.window.cancelAnimationFrame(painting);painting=null;}draw(); },
             click:function (x,y,m) { return sample(x,y,m&&m.shiftKey,true); },
             move:function (x,y,m) { if (enabled && !locked) { sample(x,y,m&&m.shiftKey,false); } },
             key:function (key) {

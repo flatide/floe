@@ -12,6 +12,7 @@ fn main() {
         "ui/inspect.js",
         "ui/measure.js",
         "ui/clip.js",
+        "ui/snapshot.js",
         "ui/drc.js",
         "ui/drc-build.js",
         "ui/rulers.js",

@@ -8,7 +8,7 @@ let serial=0, rows=[], next=null, holdGeometry=false, held=null;
 const ctx=new Proxy({}, {get:(t,k)=>k in t?t[k]:(...v)=>drawing.push([k,...v]),set:(t,k,v)=>(t[k]=v,true)});
 let rect={left:120.25,top:40.5,width:50,height:40,right:170.25,bottom:80.5};
 class Element {
-    constructor(){this.children=[];this.value='';this.checked=false;this.hidden=false;this.style={};this.width=1;this.height=1;}
+    constructor(){this.children=[];this.value='';this.checked=false;this.hidden=false;this.style={};this.title='';this.width=1;this.height=1;}
     set textContent(v){this.text=v;this.children=[];}get textContent(){return this.text||'';}
     appendChild(v){this.children.push(v);return v;}
     setAttribute(k,v){this[k]=v;}
@@ -57,6 +57,12 @@ async function tick(){for(let i=0;i<40;i++)await Promise.resolve();}
     assert.equal(saves.at(-1).selected.error,a.local);assert.equal(count('focus'),0);assert.equal(moves.length,0);
     assert(drawing.some(v=>v[0]==='fillRect'&&v[3]===9),'selection removed its visible double-click anchor');
     assert.equal(hit(20,60,true),true);await tick();paint();assert.equal(moves.length,1);
+    const reads=requests.length,persisted=saves.length;drawing.length=0;panel.overlayMode('focus');panel.flush();
+    assert(drawing.some(v=>v[0]==='fillRect'&&v[3]===9));assert(!drawing.some(v=>v[0]==='fillRect'&&v[3]===7));
+    assert(!hit(50));assert(!hit(20),'focus-only mark remained a hidden-list pick target');
+    panel.move(rect.left+10,rect.top+30);assert.equal(el('viewport').title,'');panel.overlayMode('none');assert(el('drc-canvas').hidden);
+    panel.flush();assert(el('drc-canvas').hidden);assert.equal(requests.length,reads);assert.equal(saves.length,persisted);
+    panel.overlayMode('all');assert(!el('drc-canvas').hidden);assert.equal(requests.length,reads);
     // Single canvas click stays focus-only even after entering jump mode.
     assert.equal(hit(58),true);await tick();paint();assert.equal(saves.at(-1).selected.error,c.local);assert.equal(moves.length,1);
     assert.equal(hit(50),true);await tick();paint();assert.equal(saves.at(-1).selected.error,b.local,'nearest marker lost to earlier row');

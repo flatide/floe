@@ -11,7 +11,7 @@
     let foregroundFrame = null, marginFrame = null, inflightBody = null, foregroundPerf = '';
     let gesture = null, dragShift = null, lastPlacement = null;
     let drcPanel = null, displayProjection = null, frozenProjection = null;
-    let inspector = null, measurement = null, clipper = null, pickedPairs = [];
+    let inspector = null, measurement = null, clipper = null, snapshots = null, overlayMode = 'all', pickedPairs = [];
     const rulerHistory = window.FloeRulers.history();
     let ackedFrames = {foreground: null, margin: null};
     const sessionKey = 'floe-session:' + location.origin;
@@ -133,6 +133,7 @@
         if (inspector) { inspector.changed(); inspector.paint(displayProjection, size); }
         if (measurement) { measurement.changed(); measurement.paint(displayProjection, size); }
         if (clipper) { clipper.changed(); }
+        if (snapshots) { snapshots.changed(); }
         if (full) {
             const pending = !!inflightBody || queue.length > 0 || !!dragShift;
             el('status').textContent = (pending ? 'Pan preview' : 'Live') + ' · margin crop · gen ' + marginFrame.generation;
@@ -181,6 +182,7 @@
     function controls() {
         const enabled = live() && socket && socket.readyState === WebSocket.OPEN && !!epoch;
         ['fit', 'zoom-in', 'zoom-out', 'goto', 'depth', 'detail', 'thin', 'frames', 'labels', 'mono', 'layers-all', 'layers-none'].forEach(function (id) { el(id).disabled = !enabled; });
+        el('overlays').disabled=!live();
         el('labels').disabled = !enabled || !state.capabilities.labels;
         el('font-px').disabled = !enabled || !state.capabilities.labels;
         el('open').disabled = submitting || ownerBusy || !!live();
@@ -190,6 +192,7 @@
         if (inspector) { inspector.changed(); }
         if (measurement) { measurement.changed(); }
         if (clipper) { clipper.changed(); }
+        if (snapshots) { snapshots.changed(); }
     }
     function queryContext() {
         if (!state || !currentId || !lastPlacement) { return null; }
@@ -553,6 +556,7 @@
         catalog.forEach(function (s) { const option = document.createElement('option'); option.value = s.source_id; option.textContent = s.title; el('source').appendChild(option); });
         if (caps.drc) { await drcPanel.init(); }
         await clipper.init(caps.exports);
+        snapshots.init(caps.snapshot_png);
         sourceSelection();
         const operations = await operationState();
         await restore();
@@ -576,6 +580,7 @@
     el('logout').onclick = async function () {
         if (drcPanel) { drcPanel.stop(); }
         if (clipper) { clipper.stop(); }
+        if (snapshots) { snapshots.stop(); }
         stopped = true; disconnect(); if (operationTimer) { clearTimeout(operationTimer); }
         try { await http('DELETE', '/api/v1/session'); } catch (e) { report(e); }
         try { sessionStorage.removeItem(sessionKey); } catch (_) { /* storage may be disabled */ }
@@ -620,9 +625,19 @@
         try { nav({kind: 'goto', center_um: [P.decimal(el('goto-x').value), P.decimal(el('goto-y').value)], width_um: P.decimal(el('goto-width').value)}); }
         catch (e) { report(e); }
     };
+    function overlays(mode) {
+        if(!['all','focus','none'].includes(mode)){return;}
+        overlayMode=mode;el('overlays').value=mode;
+        inspector.showOverlay(mode!=='none');measurement.showOverlay(mode!=='none');drcPanel.overlayMode(mode);
+    }
+    el('overlays').onchange=function(){overlays(el('overlays').value);};
     viewport.addEventListener('mousedown', function () { viewport.focus(); });
     viewport.addEventListener('keydown', function (event) {
         if (!live()) { return; }
+        if(event.target===viewport&&!event.altKey&&!event.shiftKey&&!event.isComposing&&(event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='c') {
+            const selected=typeof window.getSelection==='function'&&window.getSelection();
+            if(!selected||selected.isCollapsed){event.preventDefault();snapshots.request('copy');}return;
+        }
         if (gesture && gesture.active()) { if (event.key === 'Escape') { event.preventDefault(); gesture.cancel(); } return; }
         if (event.metaKey || event.altKey || event.isComposing) { return; }
         let key = event.key;
@@ -633,6 +648,7 @@
             else if (key === '.') { event.preventDefault(); el('goto-x').focus(); el('goto-x').select(); }
             return;
         }
+        if(key==='Tab'&&!event.shiftKey&&event.target===viewport){event.preventDefault();const modes=['all','focus','none'];overlays(modes[(modes.indexOf(overlayMode)+1)%3]);return;}
         if (key === 'r' && drcPanel && drcPanel.boxActive()) { drcPanel.key('e'); }
         if (measurement && !(drcPanel && drcPanel.boxActive()) && measurement.key(key)) {
             event.preventDefault(); return;
@@ -736,12 +752,28 @@
             if (stopped || !auth) { throw new Error('The owner session is closed.'); }
             window.FloeClip.download(document, auth.csrf, id, P);
         }});
+    function snapshotReady() {
+        if(stopped||document.hidden||!displayed||!lastPlacement||!currentId){return false;}
+        try{const size=dims();return size.pixels.every(function(n,i){return n===lastPlacement.pixels[i];});}catch(_){return false;}
+    }
+    snapshots=window.FloeSnapshot.bind({document:document,window:window,protocol:P,ready:snapshotReady,
+        setTimeout:setTimeout.bind(window),clearTimeout:clearTimeout.bind(window),scene:function(){
+            if(!snapshotReady()){return null;}
+            // Flush only annotation canvases. Neither native pixels nor world
+            // coordinates are recomputed, and there is no HTTP/WS request.
+            inspector.flush();measurement.flush();drcPanel.flush();
+            const p=lastPlacement,layers=[];
+            if(p.margin&&!marginCanvas.hidden){layers.push({canvas:marginCanvas,offset:p.margin.map(function(n){return -n;})});}
+            if(!canvas.hidden){layers.push({canvas:canvas,offset:p.foreground.map(function(n){return -n;})});}
+            ['query-canvas','drc-canvas','ruler-canvas'].forEach(function(id){const c=el(id);if(!c.hidden){layers.push({canvas:c,offset:[0,0]});}});
+            return {pixels:p.pixels.slice(),layers:layers};
+        }});
     document.addEventListener('visibilitychange', function () { if (document.hidden) { finishDecode(); inspector.changed(); measurement.changed(); clipper.changed(); } else if (live() && !stopped) { connect(); } });
     window.addEventListener('blur', function () { inspector.move(NaN, NaN); measurement.interrupt(); });
     setInterval(function () { if (socket && socket.readyState === WebSocket.OPEN && epoch) { try { send({type: 'ping'}); } catch (e) { report(e); } } }, 10000);
-    window.addEventListener('pagehide', function () { disconnect(); inspector.stop(); measurement.stop(); clipper.stop(); clearTimeout(operationTimer); clearTimeout(resizeTimer); if (sizeObserver) { sizeObserver.disconnect(); } drcPanel.stop(); });
+    window.addEventListener('pagehide', function () { disconnect(); inspector.stop(); measurement.stop(); clipper.stop(); snapshots.stop(); clearTimeout(operationTimer); clearTimeout(resizeTimer); if (sizeObserver) { sizeObserver.disconnect(); } drcPanel.stop(); });
     window.addEventListener('pageshow', function (event) {
-        if (event.persisted && auth && !stopped) { inspector.resume(); measurement.resume(); clipper.resume(); if (sizeObserver) { sizeObserver.observe(viewport); } drcPanel.resume().then(operationState).then(restore).then(resized).catch(report); }
+        if (event.persisted && auth && !stopped) { inspector.resume(); measurement.resume(); clipper.resume(); snapshots.resume(); if (sizeObserver) { sizeObserver.observe(viewport); } drcPanel.resume().then(operationState).then(restore).then(resized).catch(report); }
     });
     start().catch(function (e) { connection('Not connected', false); report(e); el('empty-message').textContent = e.message; });
 }());

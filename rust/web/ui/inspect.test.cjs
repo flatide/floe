@@ -33,6 +33,8 @@ function shape(n=0,truncated=false){return {kind:'pick',count:'2',index:String(n
     const h=harness();assert(h.i.click(62,58));assert.deepEqual(h.request().body.position,[.52,.475]);assert.equal(h.request().body.radius_px,6);
     h.reply(shape());assert.match(h.el('pick-details').textContent,/<img onerror=bad>/);assert.match(h.el('pick-details').textContent,/100 DBU²/);
     assert.deepEqual(h.pairs,[[7,0]]);assert(h.paths.some(p=>p.closed&&p.width===2));assert.equal(h.el('query-canvas').style.width,'100px');
+    const requestCount=h.sent.length;h.i.showOverlay(false);h.paint();assert(h.el('query-canvas').hidden);assert.deepEqual(h.pairs,[[7,0]]);
+    h.i.showOverlay(true);h.i.flush();assert(!h.el('query-canvas').hidden);assert.equal(h.sent.length,requestCount);
     h.i.move(61,60);assert.equal(h.frames.size,0,'probe-off hover repainted the selection');
     h.tick();h.i.click(62,58);assert.equal(h.request().body.operation.nth,'1');h.reply(shape(1));
     h.tick();h.el('pick-prev').onclick();assert.equal(h.request().body.operation.nth,'0');h.reply(shape());

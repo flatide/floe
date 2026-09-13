@@ -128,6 +128,9 @@ async fn exact_export_receipts_replays_and_authenticated_binary_downloads() {
         401
     );
     let l = h.login().await;
+    let caps = h.call(&l, "GET", "/api/v1/capabilities", Value::Null).await;
+    assert_eq!(caps.0, 200);
+    assert_eq!(caps.1["snapshot_png"], true);
     let (mut ws, hello, f) = opened(&h, &l, true).await;
     let mut forged = f.clone();
     forged["dataset_revision"] = json!("999999");

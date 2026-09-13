@@ -6,7 +6,7 @@
         const P = o.protocol, Q = o.query, el = function (id) { return o.document.getElementById(id); };
         const canvas = el('query-canvas'), ctx = canvas.getContext('2d');
         let selections = [], snap = null, cycle = null, bound = '', queryStamp = '', waiting = false;
-        let projection = null, size = null, painting = null, pickTurn = 0, snapTurn = 0;
+        let projection = null, size = null, painting = null, pickTurn = 0, snapTurn = 0, overlayVisible = true;
         const transport = Q.bind({protocol: P, context: o.context, send: o.send, now: o.now,
             setTimeout: o.setTimeout, clearTimeout: o.clearTimeout});
         function info(s) { el('pick-status').textContent = s; }
@@ -102,7 +102,7 @@
             paintLater();
         }
         function draw(p, s) {
-            if (!p || !s || !bound || (!selections.length && !snap)) { canvas.hidden = true; return; }
+            if (!overlayVisible || !p || !s || !bound || (!selections.length && !snap)) { canvas.hidden = true; return; }
             const w = s.pixels[0], h = s.pixels[1], dpr = s.dpr;
             if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
             canvas.style.width = w / dpr + 'px'; canvas.style.height = h / dpr + 'px';
@@ -135,6 +135,8 @@
         el('pick-next').onclick = function () { next(1); };
         el('snap-probe').onchange = function () { move(NaN, NaN); };
         return {changed: changed, paint: paint, click: click, move: move, receive: function (m) { changed(); return transport.receive(m); },
+            showOverlay:function (show) { overlayVisible=!!show;draw(projection,size); },
+            flush:function () { if(painting!==null){o.window.cancelAnimationFrame(painting);painting=null;}draw(projection,size); },
             selection:function () { changed(); return selections.map(function (s) { return s.bbox_dbu.slice(); }); },
             interrupt: function () { if (waiting) { info('Selection request cancelled.'); } invalidate(); cycle = null; refresh(); },
             key: function (key) {

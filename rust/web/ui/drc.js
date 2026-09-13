@@ -78,7 +78,7 @@
         let ruleStart = '0', ruleNext = null, errorStart = '0', errorNext = null, query = null;
         let jumpScale = null, zoomLock = false, painting = null, lastProjection = null, lastSize = null;
         let jumpActive = false, focusVisible = false, stepBusy = false, stepContinuation = null, rowFocus = false;
-        let markerHits = [], hitStamp = '';
+        let markerHits = [], hitStamp = '', overlayMode = 'all';
         let boxMode = false, boxStart = null, boxEnd = null, pageReady = false;
         let groupRows = [], groupStamp = '';
         let filterTimer = null, filterStamp = '', restoreTurn = 0, hoverText = '';
@@ -203,7 +203,7 @@
         }
         function toggleBox() {
             if (boxMode) { boxReset(true); return true; }
-            if (!current() || restoring || !rule || !pageReady || !groups.ready() || !el('drc-markers').checked) {
+            if (!current() || restoring || overlayMode === 'none' || !rule || !pageReady || !groups.ready() || !el('drc-markers').checked) {
                 info('Box selection needs a ready rule page with markers on.'); return false;
             }
             boxMode = true; boxReset(false); return true;
@@ -363,25 +363,25 @@
             const x = Math.round(xy[0]), y = Math.round(xy[1]), half = Math.floor(side / 2);
             if (x - half >= w || x + half < 0 || y - half >= h || y + half < 0) { return; }
             ctx.fillStyle = groups.contains(r.check, r.local) ? '#f4cd64' : r.status === 1 ? '#70da9a' : '#ff6969'; ctx.fillRect(x - half, y - half, side, side);
-            markerHits.push({x: x, y: y, row: r});
+            if(overlayMode==='all') { markerHits.push({x: x, y: y, row: r}); }
         }
         function paint(p, size) {
             markerHits = []; hitStamp = ''; lastProjection = p; lastSize = size;
             const c = current();
-            if (!ctx || !p || !size || !c || !el('drc-markers').checked || (!boxMode && !groupRows.length && !rows.length && (!selected || !focusVisible) && !hasCD())) { overlay.hidden = true; return; }
+            if (overlayMode==='none' || !ctx || !p || !size || !c || !el('drc-markers').checked || (!boxMode && !groupRows.length && !rows.length && (!selected || !focusVisible) && !hasCD())) { overlay.hidden = true; return; }
             const w = size.pixels[0], h = size.pixels[1]; P.pixels(w, h);
             if (overlay.width !== w || overlay.height !== h) { overlay.width = w; overlay.height = h; }
             overlay.style.width = w / size.dpr + 'px'; overlay.style.height = h / size.dpr + 'px';
             overlay.style.left = size.left + 'px'; overlay.style.top = size.top + 'px'; overlay.hidden = false;
             hitStamp = contextKey(c) + ':' + c.state.state_rev;
             ctx.clearRect(0, 0, w, h); ctx.lineWidth = 2;
-            rows.forEach(function (r) {
+            (overlayMode==='all'?rows:[]).forEach(function (r) {
                 if (focusVisible && selected && r.check === selected.check && r.local === selected.local) { return; }
                 const b = bbox(r.bbox_um), xy = point(p, b[0] * .5 + b[2] * .5, b[1] * .5 + b[3] * .5);
                 marker(r, xy, 7, w, h);
             });
             const pageIds = new Set(rows.map(function (r) { return r.check + ':' + r.local; }));
-            groupRows.forEach(function (r) {
+            (overlayMode==='all'?groupRows:[]).forEach(function (r) {
                 if (!rule || r.check !== rule.check || !groups.contains(r.check, r.local) || pageIds.has(r.check + ':' + r.local) ||
                     (filter() !== null && (r.status === 1) !== filter()) || (focusVisible && selected && selected.check === r.check && selected.local === r.local)) { return; }
                 const b = bbox(r.bbox_um); marker(r, point(p, b[0] * .5 + b[2] * .5, b[1] * .5 + b[3] * .5), 7, w, h);
@@ -410,7 +410,7 @@
         }
         function hitRow(clientX, clientY) {
             const c = current();
-            if (!c || !c.connected || c.pending || restoring || overlay.hidden || !el('drc-markers').checked ||
+            if (overlayMode!=='all' || !c || !c.connected || c.pending || restoring || overlay.hidden || !el('drc-markers').checked ||
                 hitStamp !== contextKey(c) + ':' + c.state.state_rev || !markerHits.length ||
                 !Number.isFinite(clientX) || !Number.isFinite(clientY)) { return null; }
             // Use the *painted* overlay's DOM rectangle, including fractional
@@ -925,6 +925,11 @@
         el('drc-toggle').onclick = function () { shown = !shown; el('drc-panel').hidden = !shown; el('drc-toggle').setAttribute('aria-expanded', String(shown)); o.resize(); savePanel(); };
         el('drc-reload').onclick = restoreState;
         return {init: refresh, refresh: refresh, contextChanged: contextChanged, paint: paint, click: click, clear: clearSelection,
+            overlayMode:function (mode) {
+                if(!['all','focus','none'].includes(mode)){throw new Error('Invalid overlay mode');}
+                overlayMode=mode;markerHits=[];hitStamp='';tooltip('');if(mode==='none'&&boxMode){boxReset(true);}paint(lastProjection,lastSize);
+            },
+            flush:function () { if(painting!==null){o.window.cancelAnimationFrame(painting);painting=null;}paint(lastProjection,lastSize); },
             rulersBusy:function () { return restoring; },
             boxActive: function () { return boxMode; }, move: move,
             key: function (key) {

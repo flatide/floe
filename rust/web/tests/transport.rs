@@ -45,6 +45,7 @@ async fn embedded_assets_are_content_identified_and_never_serve_files() {
         ("inspect.js", "text/javascript"),
         ("measure.js", "text/javascript"),
         ("clip.js", "text/javascript"),
+        ("snapshot.js", "text/javascript"),
         ("drc.js", "text/javascript"),
         ("rulers.js", "text/javascript"),
         ("drc-groups.js", "text/javascript"),
@@ -330,6 +331,10 @@ async fn bootstrap_host_origin_csrf_and_logout() {
     assert_eq!(r.status, 200);
     assert_eq!(
         serde_json::from_str::<Value>(&r.body).unwrap()["render"],
+        false
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&r.body).unwrap()["snapshot_png"],
         false
     );
     assert!(!r.headers.contains_key("access-control-allow-origin"));

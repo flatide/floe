@@ -56,6 +56,10 @@ CSRF로 인증한다. M4c-3은 현재 viewport 준비/승인·취소·파일 목
 ready 파일도 TTL 안에는 발견/다운로드/폐기할 수 있다. 전역 `capabilities.exports`와
 view의 `capabilities.clip`(layout만 true)을 함께 요구한다. 임의 파일·guest 권한·자동
 export는 없고 native form은 같은 출처 POST body에만 CSRF를 넣는다.
+M4d-1의 owner `capabilities.snapshot_png`는 브라우저 표시 pixels의 복사/PNG 저장
+UI만 광고한다. layout/jobdeck 공통이며 `capabilities.clip`·query 지원과 독립적이다.
+browser 기능 검사를 추가로 요구하고 새 HTTP/WS·clipboard 읽기·upload는 없다.
+표시/overlay·수명·fallback 계약과 미검증 범위는 [M4 §15](WEBUI_M4.ko.md)를 따른다.
 2026-09-13 M1a-1 `rust/worker-client`와 M1a-2a/b `app/app-core`의 일반 index·info/단일 render/probe를
 구현했다. 현재 호출 계약은 [worker README](../rust/worker-client/README.md),
 [M1a 기록](WEBUI_M1A.ko.md)을 따르며 아래 서비스 전체가 존재하는 것은 아니다.
@@ -147,6 +151,7 @@ DBU와 µm를 같은 필드에 혼용하지 않고 source/deck 좌표계 ID를 �
 |---|---|---|
 | thin auto | cull | keep |
 | PNG/raw, style, depth/detail | 지원 | 지원(virtual layer 매핑) |
+| 표시 pixels PNG 복사/저장 | 브라우저 기능 검사, 실제 수용 미확인 | 동일(원본 geometry export 아님) |
 | 착지 margin/pan prefetch | 지원 | 미지원 |
 | label size / labels | 지원 | 현재 미지원 |
 | pick/snap/clip | layout 지원, scene 상태에 따른 제한 | 현재 미지원 |

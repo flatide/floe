@@ -31,6 +31,9 @@ h2 { font-size: 11px; letter-spacing: 1.25px; text-transform: uppercase; font-we
 .short { width: 68px; text-align: right; }
 .button-row { display: flex; gap: 6px; margin-top: 12px; }
 .button-row > button:first-child { flex: 1; }
+#snapshot-panel .button-row { flex-wrap: wrap; }
+#snapshot-panel button { white-space: normal; }
+#snapshot-retry { width: 100%; margin-top: 6px; }
 .primary { background: #2e65aa; border-color: #5488c8; }
 .primary:hover:not(:disabled) { background: #3877c4; }
 .note { font-size: 12px; line-height: 1.5; color: #9dacc0; margin: 9px 0 0; overflow-wrap: anywhere; }

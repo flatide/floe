@@ -35,6 +35,8 @@ const pair=[segment(['1','2.75'],['3','2.75'],'2',['2','0']),segment(['2.25','1'
     assert.match(h.el('ruler-auto').textContent,/BBox gap 2: 3.0000 µm/);assert.match(h.el('ruler-status').textContent,/not contour/);
     h.m.key('m');h.tick();h.m.click(60,60);h.reply(['0','0']);h.tick();h.m.click(61,60);h.reply(['1','0'],segment(['0','0'],['1','0'],'1',['1','0']));
     assert.deepEqual(h.book.entries().map(e=>e.kind),['auto','auto','manual']);
+    const requestCount=h.sent.length;h.m.showOverlay(false);h.paint();assert(h.el('ruler-canvas').hidden);assert.equal(h.book.entries().length,3);
+    h.m.showOverlay(true);h.m.flush();assert(!h.el('ruler-canvas').hidden);assert.equal(h.sent.length,requestCount);
     h.m.key('r');h.m.key('r');gaps(h,pair);assert.deepEqual(h.book.entries().map(e=>e.kind),['manual','auto','auto']);
     h.m.key('k');assert.equal(h.book.entries().at(-1).value.distance_um,'2');h.m.key('k');assert.equal(h.book.entries().at(-1).kind,'manual');
     // Fewer than two selections keep the old auto set, as GTK does.
