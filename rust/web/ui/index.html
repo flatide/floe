@@ -10,6 +10,7 @@
   <script defer src="/assets/@@BUNDLE@@/gestures.js"></script>
   <script defer src="/assets/@@BUNDLE@@/query.js"></script>
   <script defer src="/assets/@@BUNDLE@@/inspect.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/measure.js"></script>
   <script defer src="/assets/@@BUNDLE@@/panel-state.js"></script>
   <script defer src="/assets/@@BUNDLE@@/rulers.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc-groups.js"></script>
@@ -54,6 +55,13 @@
         <p id="query-availability" class="note">Connect a layout to inspect geometry.</p>
         <p class="note">Click again: next overlap · Shift: add · Ctrl/Cmd: toggle. Snap probes vertices and edges; it does not measure.</p>
       </section>
+      <section class="inspect-panel" aria-label="Manual rulers">
+        <div class="button-row"><button id="ruler-mode" aria-pressed="false" disabled>Ruler (r)</button><button id="ruler-pop" disabled>Undo (k)</button><button id="ruler-clear" disabled>Clear (Shift+K)</button></div>
+        <label class="check"><input id="ruler-snap" type="checkbox" checked disabled> Edge/vertex snap (m in ruler mode)</label>
+        <p id="ruler-status" role="status">Click two points to measure.</p><pre id="ruler-details"></pre>
+        <p id="ruler-count" class="note">0 rulers</p><p id="ruler-availability" class="note"></p>
+        <p class="note">Axis-aligned by default · Shift: free angle · Escape: cancel point, exit mode, clear rulers.</p>
+      </section>
       <section class="layers-panel">
         <div class="section-title"><h2>Layers</h2><div><button id="layers-all" class="text-button" disabled>All</button><button id="layers-none" class="text-button" disabled>None</button></div></div>
         <div id="layers" class="layers"><p class="empty-list">Open a layout to see its layers.</p></div>
@@ -83,11 +91,12 @@
         <div class="zoom-buttons"><button id="zoom-out" type="button" disabled title="Zoom out (−)">−</button><button id="zoom-in" type="button" disabled title="Zoom in (+)">+</button></div>
         <div class="goto-fields"><label>X <input id="goto-x" value="0" inputmode="decimal" aria-label="Center X in micrometres"></label><label>Y <input id="goto-y" value="0" inputmode="decimal" aria-label="Center Y in micrometres"></label><label>View <input id="goto-width" value="700" inputmode="decimal" aria-label="View width in micrometres"></label><span>µm</span><button id="goto" disabled>Go</button></div>
       </form>
-      <div id="viewport" class="viewport" tabindex="0" aria-label="Layout canvas. Click selects a shape; repeat cycles overlaps; Shift adds; Ctrl or Command toggles. M toggles snap probe. Drag or arrow keys pan; Shift plus arrow pans ten percent; plus and minus zoom; Ctrl+A fits; F toggles frames.">
+      <div id="viewport" class="viewport" tabindex="0" aria-label="Layout canvas. Click selects a shape; repeat cycles overlaps; Shift adds; Ctrl or Command toggles. R starts two-point rulers; Shift allows free angles; M toggles snap; K undoes; Shift+K clears rulers. Drag or arrow keys pan; Shift plus arrow pans ten percent; plus and minus zoom; Ctrl+A fits; F toggles frames.">
         <div id="notice" class="notice" role="alert" hidden></div>
         <canvas id="margin-canvas" width="1" height="1" aria-hidden="true" hidden></canvas>
         <canvas id="canvas" width="1" height="1" aria-label="Rendered layout"></canvas>
         <canvas id="query-canvas" width="1" height="1" aria-label="Selected shapes and snap point" hidden></canvas>
+        <canvas id="ruler-canvas" width="1" height="1" aria-label="Manual rulers and measurement preview" hidden></canvas>
         <canvas id="drc-canvas" width="1" height="1" aria-label="DRC markers, selected violation and CD rulers" hidden></canvas>
         <div id="empty" class="empty"><div class="empty-mark">＋</div><h1>Layout workspace</h1><p id="empty-message">Connecting to the local Rust renderer…</p></div>
         <div id="rendering" class="rendering" hidden>Rendering</div>

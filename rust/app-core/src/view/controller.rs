@@ -395,6 +395,62 @@ impl ViewController {
     pub fn query_snapshot(&self) -> QuerySnapshot {
         self.shared.lock().unwrap().queries.snapshot()
     }
+    /// Read-only coordinate measurement on a displayed frame. With snap off,
+    /// this does not require an exact scene (including deck/summary views).
+    /// A supplied snap ID must still be the current successful query at this
+    /// position and anchor; a refusal is never converted to an unsnapped point.
+    pub fn measure(
+        &self,
+        anchor: QueryAnchor,
+        position: [f64; 2],
+        start: Option<super::RulerPoint>,
+        free_angle: bool,
+        snap_id: Option<u64>,
+    ) -> Result<super::RulerMeasurement> {
+        use floe_worker_client::{QueryHit, QueryStatus};
+        let s = self.shared.lock().unwrap();
+        if self.stop.load(Ordering::Relaxed) != 0 || !s.anchor_valid(anchor, &self.model) {
+            return Err(Error::new(ErrorKind::Busy, "measurement frame is stale"));
+        }
+        let mut point = super::RulerPoint::cursor(s.snapshot.state.viewport, position)?;
+        let mut snap = None;
+        if let Some(id) = snap_id {
+            let q = &s.queries.slots[query::slot(QueryKind::Snap)];
+            let result = q
+                .result
+                .as_ref()
+                .filter(|r| q.latest == Some(id) && r.id == id && r.anchor == anchor)
+                .ok_or_else(|| Error::new(ErrorKind::Busy, "snap result is stale"))?;
+            let native = s.query_request(
+                &ViewQuery {
+                    anchor,
+                    operation: super::QueryOperation::Snap,
+                    position,
+                    radius_px: 0.,
+                    layers: floe_worker_client::Layers::All,
+                },
+                &self.model,
+            )?;
+            if result.reply.request.x != native.x || result.reply.request.y != native.y {
+                return Err(Error::input("snap position changed"));
+            }
+            if result.reply.status != QueryStatus::Ok {
+                return Err(Error::new(
+                    ErrorKind::Incomplete,
+                    "snap did not complete successfully",
+                ));
+            }
+            match &result.reply.hit {
+                Some(QueryHit::Snap(hit)) => {
+                    point = super::RulerPoint::snapped(hit.x, hit.y);
+                    snap = Some(hit.kind);
+                }
+                None => (),
+                _ => return Err(Error::new(ErrorKind::Worker, "invalid snap result")),
+            }
+        }
+        super::ruler::measure(start, point, free_angle, self.model.dbu, snap)
+    }
     pub fn cancel_query(&self, kind: QueryKind) {
         self.shared.lock().unwrap().queries.cancel(kind);
     }

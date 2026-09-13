@@ -30,8 +30,12 @@ are available for layouts. M4a-4 connects browser shape picking/overlap cycling,
 modifier multiselection and an opt-in snap probe. Input uses the actually displayed
 ACKed frame and current CSS/DPR; pending edits/drag and late results are rejected.
 The client coalesces hover input with a shared 80ms send interval. Selected shapes
-are bounded annotations, never a renderer substitute. Manual rulers/clip and actual
-browser acceptance are still pending; deterministic client tests are not pixel QA.
+are bounded annotations, never a renderer substitute. M4a-5 adds manual two-point
+rulers through owner `view.measure`: Rust computes coordinates, dominant-axis/free
+segments and distances, optionally referencing this socket's successful snap ticket.
+Cursor-only measurements do not require an exact scene and never rerender. Selection
+gap/CD-order parity, clip and actual browser acceptance remain pending; deterministic
+client tests are not pixel QA.
 The request/result schema and limits are recorded in [M4 §3](../../docs/WEBUI_M4.ko.md).
 
 `Service::start` + `Gateway::with_service` adds up to 32 trusted registered

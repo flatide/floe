@@ -98,6 +98,7 @@ def main():
             if marker == "WEB QUERY GEOMETRY: ALL OK":
                 assert "WEB QUERY LIFECYCLE: ALL OK" in run.stdout
                 assert "WEB QUERY REJECTIONS: ALL OK" in run.stdout
+                assert "WEB MANUAL RULERS: ALL OK" in run.stdout
             print(run.stdout.strip())
         assert fingerprints(cache) == before, "queries modified index/summary bytes or mtime"
         assert not list(workers.iterdir()), "query workers leaked private files"

@@ -1,4 +1,5 @@
 use super::*;
+use floe_worker_client::QueryOperation;
 
 fn setup(margin: bool) -> (Arc<Resources>, Arc<Control>, ViewController) {
     let r = Resources::new(Limits::default()).unwrap();
@@ -40,6 +41,118 @@ fn result(v: &ViewController, id: u64, kind: QueryKind) -> Arc<ViewQueryResult> 
         out.is_some()
     });
     out.unwrap()
+}
+
+#[test]
+fn manual_measurements_use_display_anchor_without_render_or_query_work() {
+    let (r, c, mut v) = setup(true);
+    wait(|| v.margin().is_some());
+    let margin = v.margin().unwrap();
+    let before = v.snapshot().submitted;
+    let a = v.query_anchor(margin.id).unwrap();
+    let first = v.measure(a, [0.25, 0.5], None, false, None).unwrap();
+    assert_eq!(first.point.strings(), ["200", "320"]);
+    let second = v
+        .measure(a, [0.75, 0.75], Some(first.point), false, None)
+        .unwrap()
+        .segment
+        .unwrap();
+    assert_eq!(second.endpoints[1].strings(), ["600", "320"]);
+    assert_eq!(second.delta_um, [400. * v.model.dbu, 0.]);
+    assert_eq!(v.snapshot().submitted, before);
+    assert!(c.query_requests.lock().unwrap().is_empty());
+    v.edit(v.snapshot().state_rev, pan()).unwrap();
+    assert_eq!(
+        v.measure(a, [0.5, 0.5], None, false, None)
+            .unwrap_err()
+            .kind,
+        ErrorKind::Busy
+    );
+    let a = v.query_anchor(margin.id).unwrap();
+    assert!(v
+        .measure(a, [0.5, 0.5], Some(first.point), true, None)
+        .is_ok());
+    v.close().unwrap();
+    assert!(v.measure(a, [0.5, 0.5], None, false, None).is_err());
+    assert_eq!(r.usage(), Usage::default());
+}
+
+#[test]
+fn manual_measurements_only_reuse_current_successful_snap_at_same_point() {
+    let (_r, _c, mut v) = setup(false);
+    let q = input(&v, QueryOperation::Snap);
+    let id = v.query(q.clone()).unwrap();
+    result(&v, id, QueryKind::Snap);
+    // A genuinely successful empty snap is a cursor measurement, not an error.
+    assert!(v
+        .measure(q.anchor, q.position, None, false, Some(id))
+        .unwrap()
+        .snap
+        .is_none());
+    assert!(v
+        .measure(q.anchor, [0.1, 0.1], None, false, Some(id))
+        .is_err());
+    assert!(v
+        .measure(q.anchor, q.position, None, false, Some(id + 1))
+        .is_err());
+    {
+        let mut s = v.shared.lock().unwrap();
+        let reply = &mut Arc::make_mut(s.queries.slots[0].result.as_mut().unwrap()).reply;
+        reply.hit = Some(floe_worker_client::QueryHit::Snap(
+            floe_worker_client::SnapHit {
+                x: 399,
+                y: 319,
+                kind: floe_worker_client::SnapKind::Vertex,
+            },
+        ));
+    }
+    assert_eq!(
+        v.measure(q.anchor, q.position, None, false, Some(id))
+            .unwrap()
+            .point
+            .strings(),
+        ["399", "319"]
+    );
+    {
+        let mut s = v.shared.lock().unwrap();
+        Arc::make_mut(s.queries.slots[0].result.as_mut().unwrap())
+            .reply
+            .status = QueryStatus::Summary;
+    }
+    assert_eq!(
+        v.measure(q.anchor, q.position, None, false, Some(id))
+            .unwrap_err()
+            .kind,
+        ErrorKind::Incomplete
+    );
+    v.cancel_query(QueryKind::Snap);
+    assert!(v
+        .measure(q.anchor, q.position, None, false, Some(id))
+        .is_err());
+    v.close().unwrap();
+}
+
+#[test]
+fn cursor_measurement_is_independent_of_deck_and_incomplete_geometry() {
+    for deck in [false, true] {
+        let r = Resources::new(Limits::default()).unwrap();
+        let m = model(deck);
+        let initial = ViewState::initial(&m, 800, 640).unwrap();
+        let c = Arc::new(Control::default());
+        c.geometry_partial.store(true, Ordering::Relaxed);
+        let mut v = start(&r, m, initial, Arc::clone(&c));
+        wait(|| v.latest().is_some_and(|f| f.frame.partial));
+        let a = v.query_anchor(v.latest().unwrap().id).unwrap();
+        let point = v.measure(a, [0.25, 0.25], None, false, None).unwrap().point;
+        assert!(v
+            .measure(a, [0.5, 0.5], Some(point), false, None)
+            .unwrap()
+            .segment
+            .is_some());
+        assert_eq!(v.query_snapshot().accepted, 0);
+        assert_eq!(v.snapshot().submitted, 1);
+        v.close().unwrap();
+    }
 }
 
 #[test]

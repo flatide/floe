@@ -69,6 +69,7 @@ details > summary { cursor: pointer; font-size: 12px; color: #b4c3d8; }
 #canvas, #margin-canvas { position: absolute; top: 0; left: 0; display: block; }
 #drc-canvas { position: absolute; top: 0; left: 0; pointer-events: none; }
 #query-canvas { position: absolute; top: 0; left: 0; pointer-events: none; }
+#ruler-canvas { position: absolute; top: 0; left: 0; pointer-events: none; }
 .inspect-panel h2, .inspect-panel .check { font-size: 1rem; }
 .inspect-panel p { margin: 8px 0 0; line-height: 1.4; overflow-wrap: anywhere; }
 .inspect-panel .note { font-size: .93rem; }

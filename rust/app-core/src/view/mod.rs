@@ -4,6 +4,7 @@
 mod controller;
 pub mod margin;
 mod query;
+mod ruler;
 use crate::{
     dataset::Dataset,
     managed::ManagedDataset,
@@ -16,6 +17,7 @@ pub use controller::{
 use floe_worker_client::{Layers, RenderRequest, Style};
 pub use floe_worker_client::{QueryKind, QueryOperation};
 pub use query::{QueryAnchor, QuerySnapshot, ViewQuery, ViewQueryResult};
+pub use ruler::{RulerMeasurement, RulerPoint, RulerSegment};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,

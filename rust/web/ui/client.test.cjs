@@ -27,7 +27,7 @@ class Element {
 }
 const ctx = {imageSmoothingEnabled:true, putImageData(data,x,y) {draws.push({kind:'raw',data:[...data.data],x,y});},
     drawImage(image,x,y) {draws.push({kind:'png',x,y});},clearRect(){},save(){},restore(){},beginPath(){},rect(){},clip(){},
-    moveTo(){},lineTo(){},setLineDash(){},closePath(){},stroke(){}};
+    moveTo(){},lineTo(){},setLineDash(){},closePath(){},stroke(){},setTransform(){},fill(){},fillRect(){},fillText(){},measureText(s){return {width:s.length*7};}};
 for (const id of [...fs.readFileSync(__dirname+'/index.html','utf8').matchAll(/\bid="([^"]+)"/g)].map(m=>m[1])) {
     nodes.set(id,new Element(id));
 }
@@ -75,7 +75,7 @@ class Socket {
 class Image {
     constructor(){this.naturalWidth=100;this.naturalHeight=80;images.push(this);}
 }
-const window={FloeProtocol:P,FloeQuery:require('./query.js'),FloeInspect:require('./inspect.js'),FloeGestures:require('./gestures.js'),FloeRulers:require('./rulers.js'),FloeDRCGroups:require('./drc-groups.js'),FloeDRC:{...DRC,bind(o){
+const window={FloeProtocol:P,FloeQuery:require('./query.js'),FloeInspect:require('./inspect.js'),FloeMeasure:require('./measure.js'),FloeGestures:require('./gestures.js'),FloeRulers:require('./rulers.js'),FloeDRCGroups:require('./drc-groups.js'),FloeDRC:{...DRC,bind(o){
     drcOptions=o;const panel=DRC.bind(o),paint=panel.paint,changed=panel.contextChanged;
     panel.contextChanged=()=>{contextChanges++;changed();};panel.paint=(p,s)=>{drcDisplays.push({p,s});paint(p,s);};
     const click=panel.click;panel.click=(...v)=>{drcClicks.push(v);return consumeDRC || click(...v);};return panel;
@@ -153,6 +153,22 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     queryClick(20,20);const pendingMarker=queryLast();consumeDRC=true;queryClick(20,20);
     assert.equal(queryLast(),pendingMarker);assert.equal(ws.sent.at(-1).type,'view.query.cancel');
     answerQuery(pendingMarker,geometry);assert.equal(node('pick-details').textContent,'');consumeDRC=false;
+    // Actual app input dispatch: ruler mode owns the click, even over a DRC
+    // marker. It uses snap then Rust measurement without native redraw/HTTP.
+    node('ruler-mode').onclick();assert.equal(node('ruler-mode')['aria-pressed'],'true');
+    assert(node('ruler-snap').checked);consumeDRC=true;queryClick(20,20);
+    assert.equal(queryLast().body.operation.kind,'snap');answerQuery(queryLast(),{kind:'snap',point_dbu:['0','60'],snap:'vertex'});
+    const measureLast=()=>ws.sent.filter(m=>m.type==='view.measure').at(-1);
+    const measureReply=(point,segment)=>{const t=measureLast();ws.receive({type:'measure.result',seq:t.seq,view_id:t.view_id,connection_epoch:t.connection_epoch,
+        anchor:t.body.anchor,point_dbu:point,snap:'vertex',segment});};
+    assert.equal(measureLast().body.snap_query,'9007199254740993');measureReply(['0','60'],null);
+    queryClick(40,40,{shiftKey:true});answerQuery(queryLast(),{kind:'snap',point_dbu:['30','40'],snap:'vertex'});
+    assert(measureLast().body.free_angle);assert.deepEqual(measureLast().body.start_dbu,['0','60']);
+    measureReply(['30','40'],{endpoints_dbu:[['0','60'],['30','40']],delta_um:['30','-20'],distance_um:String(Math.sqrt(1300))});
+    assert.equal(node('ruler-count').textContent,'1 rulers');await wait(()=>!node('ruler-canvas').hidden);
+    assert.equal(draws.length,1,'ruler redrew native pixels');assert.equal(requests.length,oldHttp);
+    node('ruler-mode').onclick();node('ruler-clear').onclick();consumeDRC=false;
+    assert.equal(node('ruler-count').textContent,'0 rulers');assert.equal(node('ruler-mode')['aria-pressed'],'false');
     ws.receive({...snapshot,capabilities:{labels:true,query:false}});drcClicks.length=0;
     // An accepted newer render invalidates old PNG even before its snapshot arrives.
     ws.receive(packet('png','2'));const old=images.at(-1), oldOnload=old.onload;

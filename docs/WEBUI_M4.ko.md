@@ -4,8 +4,9 @@
 M2 공유 권한 추가와 실제 브라우저 pack-build 승인 클릭은 승인 대기이며,
 M0/G2·M3 현장 Firefox/ETX는 사용자 요청대로 보류다. 이 경계를 우회하지 않고
 독립적인 로컬 native 이관을 진행한다. M4 전체 완료나 GTK 은퇴를 뜻하지 않는다.
-현재는 §4의 **브라우저 도형 선택·스냅 프로브**까지 연결했다. §1/2/3의 미연결
-표기는 각 선행 단계 당시의 범위이며, 수동 ruler/clip과 전체 조작 수용은 남아 있다.
+현재는 §5의 **Rust 계산 기반 수동 ruler**까지 연결했다. §1~4의 미연결
+표기는 각 선행 단계 당시의 범위다. 선택 도형 간 자동 gap ruler·통합 CD 순서,
+clip과 전체 조작 수용은 남아 있다.
 
 ## 1. M4a-1: 표시 scene에 고정한 native pick/snap
 
@@ -442,3 +443,96 @@ latest 슬롯 무효화 확인이며 native가 중단됐다는 ACK/terminal과 �
 
 수동 ruler(시작/끝·snap·축 고정·삭제·clear·측정), clip/내보내기, 선택 layer의
 다른 페이지 추적, 나머지 GTK 조작 parity는 다음 단계다. M4 전체 완료가 아니다.
+
+## 5. M4a-5: Rust 좌표·거리 계산과 수동 ruler
+
+일반 두 점 ruler를 연결했다. GTK의 `_cursor_snapped`/`_ruler_end_preview`/
+`_ruler_click`을 기준으로 **기본 dominant-axis, 동률 수평, Shift 자유 각도**다.
+거리와 Δx/Δy는 Rust에서 DBU→µm로 계산하며, browser는 수치 검증·표시 투영과
+문자열 formatting만 한다. native renderer/인덱스 포맷·버전0.12.87은 유지하고
+Rust 앱과 embedded UI bundle을 재빌드한다.
+
+### 읽기 전용 계산 계약
+
+- 기존 owner WebSocket에 `view.measure`를 추가했다. `seq`, view ID, connection
+  epoch와 §3의 표시 ACK+write receipt 검증을 그대로 사용한다. 새로운 listener,
+  공유 권한, REST route, 파일 읽기/쓰기, 원본 geometry 열거는 없다.
+- body는 `anchor`, 현재 viewport top-left 기준 `position:[x,y]`(0..1),
+  `start_dbu:null|[x문자열,y문자열]`, `free_angle:bool`,
+  `snap_query:null|query_id문자열`이다. 첫 점은 start=null, 두 번째 점/미리보기는
+  이미 접수한 첫 점을 보낸다. start는 사용자 주석 좌표이며 geometry 권한 토큰이 아니다.
+- `snap_query`는 **이 연결에서 결과를 전송한** snap ticket만 참조한다. controller에서
+  여전히 latest이고 동일한 표시 anchor·질의 위치(기존 GTK int 변환 기준)이며
+  성공한 결과인지 다시 확인한다. 다른 연결·변경된 위치·취소/교체/오류 결과는 거부한다.
+  성공한 빈 snap만 커서 좌표로 측정하며, 오류/summary 거부는 빈 결과로 바꾸지 않는다.
+- snap이 없으면 표시 viewport와 입력 비율의 고정 개수 좌표만 계산한다(도형 열거 없음).
+  exact geometry가 없어도 가능하므로 잡덱/summary/미완료 geometry에서도 **snap off**
+  좌표 측정은 지원한다. 이는 해당 도형을 검증하거나 실제 경계를 찾아준다는 뜻이 아니다.
+- `measure.result`는 seq/view/epoch/anchor, 원래 cursor/snap의 `point_dbu`,
+  `snap:null|vertex|edge`, `segment:null|{endpoints_dbu,delta_um,distance_um}`을
+  반환한다. endpoints는 축 고정 후 좌표다. 좌표/거리/ID는 문자열이며 native 오류나
+  로컬 경로는 응답에 넣지 않는다. 현재 view 상태·render revision을 바꾸지 않는다.
+- unsnapped 좌표는 GTK와 같은 f64이고 ±2^62 DBU 범위를 따른다. snapped i64는
+  문자열로 보존하고 두 정수의 차이를 i128에서 먼저 계산한다. 따라서 2^53 위의
+  인접 정수 간격을 절대 좌표 반올림으로 잃지 않는다. 비정수 좌표와 최종 길이는
+  f64이므로 임의 정밀도 측정기라고 주장하지 않는다. 비유한 수/overflow는 명시 오류다.
+
+### 조작·수명·상한
+
+- `r`/Ruler 버튼으로 시작, 두 클릭으로 저장하며 mode는 다음 측정을 위해 유지한다.
+  Shift는 자유 각도, `m`은 ruler mode의 edge/vertex snap toggle이다. layout은
+  snap 기본 on이며 mode 밖의 기존 Inspector snap probe(m, 기본 off)와 구별한다.
+  잡덱은 snap을 비활성화하고 cursor-only 안내를 표시한다. summary는 사용자가
+  snap을 끄거나 exact 레이어/배율을 선택해야 한다.
+- 수동 ruler mode의 클릭은 geometry pick/DRC marker보다 우선한다. DRC box는
+  서로 배타적인 mode다. 기존 drag pan을 유지하며 drag를 두 번째 점으로 간주하지 않는다.
+- hover는 snap·계산 각각 최신1개와80ms 송신 간격을 사용한다. 중간 입력은 replay하지
+  않고 종료/화면 교체에서 폐기한다. 클릭 확정 중 hover는 확정 요청을 덮어쓰지 않는다.
+  항상 클릭 위치를 새로 해결하므로 오래된 hover snap/preview를 클릭 결과로 쓰지 않는다.
+- 첫 점 marker와 마지막 검증된 preview는 새 응답을 기다리는 동안 유지해 매 mousemove에
+  깜빡이지 않게 한다. 상태는 계산 중임을 표시한다. stale/오류/화면 교체에서는 preview를
+  지운다. 완료 ruler와 이미 접수한 첫 점은 같은 view/dataset/worker의 pan·zoom·표시 정책
+  변경에서 world 주석으로 남는다. 미완료 요청은 표시 anchor/연결/DPR/크기 변경 시 폐기한다.
+- `k`는 수동 ruler의 마지막 항목, `Shift+K`는 수동/DRC ruler 전체를 지운다.
+  Escape는 pending point → ruler mode → 완료 rulers 순서이고 그 뒤 기존 selection/DRC
+  처리를 따른다. mode 밖에서 완료 수동 ruler를 Escape로 지우면 CD ruler도 같이 지운다.
+  DRC box가 활성화된 때는 기존 box Escape 우선순위를 유지한다.
+- 수동 ruler는256개까지이며 초과 시 기존 ruler를 버리지 않고 명시 안내한다. 서버에는
+  ruler history를 추가하지 않고 화면당 Canvas1개(기존16 Mpx 한계)와 유계 배열만 사용한다.
+  이전 DRC ruler의 clipping·label 배치 코드를 재사용한다. 값은 별도 panel에서도 읽을 수 있다.
+  query/measure timeout은 각각8s이며 다시 선택하도록 안내한다. 페이지 종료 시 타이머·
+  주석 Canvas를 회수한다. ruler 영구 저장이나 페이지 새로고침 복원은 아직 없다.
+
+### 검증 범위와 남은 parity
+
+- Rust 단위: canonical 좌표, fractional cursor, 양/음수·동률 축·free angle·0 길이,
+  i64 극단의 checked 차이·1 DBU 간격, frame/margin·pan·닫힘, snap 성공/빈 결과/
+  summary 오류·다른 위치·취소. viewport 좌표 측정은 추가 query/render가0인지 단언한다.
+- 실제 renderer/owner WS: 두 도형 vertex snap, axis/free 거리, 다른 socket의 snap
+  대여 거부, 이전 snap/frame 거부, pan 후 소수 좌표, 렌더 횟수 불변을 고정한다.
+  기존 `validate_worker_queries.py`에 필수 `WEB MANUAL RULERS: ALL OK` 마커를 배선했다.
+  인덱스/summary bytes·mtime 불변과 worker 임시 파일 회수도 같은 gate가 검사한다.
+- 결정적 UI: 실제 measure 모듈의 두 점/preview·Shift·snap→measure 연결, 큰 ID,
+  summary와 정상 빈 결과 구별,500 hover 최신 슬롯, 클릭 확정 보호·timeout·stale,
+  marker 유지·256개 상한·삭제/Escape·회수. 실제 app.js에서도 DRC marker보다 ruler
+  입력 우선, HTTP/이미지 재렌더 없이 native 응답을 표시하는 경로를 검사한다.
+- **아직 남음:** 선택2개 이상에서 `r` 진입 시 nearest-neighbor bbox gap 자동 측정,
+  수동/auto/CD를 통합한 정확한 생성 순서의 k 삭제, 서로 다른 ruler군의 label 충돌
+  회피, overlay/export·새로고침 복원. 현재는 k가 수동 항목부터 지우고 없을 때 CD를
+  처리한다. 이를 GTK와 완전 동일하다고 보지 않는다. clip/다른 layer page 추적도 남는다.
+- 실제 browser 시각·조작 수용, 현장 Firefox/ETX, pack-build 승인 클릭, 공유 권한은
+  여전히 별도 미검증/대기다. 로컬 하네스와 교차 빌드로 대체하지 않는다.
+
+검증 결과(2026-09-14):
+
+- 최종 app6·app-core94·web35·transport8 테스트, scoped 포맷/strict clippy와
+  ES2017·전체 JS/UI 회귀가 통과했다. 실제 query gate는 native1·controller2·
+  owner WS4개(새 ruler 포함)를 통과했다. 새 marker를 빼거나 ignored 테스트를
+  건너뛰면 통합 스크립트가 실패한다.
+- 전체 `sh tools/validate_rust.sh`가 `RUST VALIDATION: ALL OK`다.
+  jobdeck80·renderer46, KLayout 13 PX + 2 phase-exact + 14 style의 jobs1/8
+  검증을 포함한다. 전체 검사 시작 후 보강한 극단 수치의64자 표기 및 추가 단위
+  케이스는 최종 관련 Rust/UI·실제 query·clippy·release 빌드에서 재검증했다.
+- Rust 1.89.0에서도 app6·core94·web35·transport8을 통과했고 Linux musl
+  release 앱의 x86-64 static-pie 교차 빌드를 확인했다. 기존 dependency warning은
+  남는다. Linux 실제 실행·브라우저 시각/조작 및 TeeBox 수용은 이 결과에 포함하지 않는다.

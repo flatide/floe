@@ -158,6 +158,15 @@ struct Ticket {
     anchor: QueryAnchor,
     sent: bool,
 }
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MeasureRequest {
+    anchor: Anchor,
+    position: [f64; 2],
+    start_dbu: Option<[String; 2]>,
+    free_angle: bool,
+    snap_query: Option<String>,
+}
 #[derive(Default)]
 struct Receipts([Option<Receipt>; 2]);
 impl Receipts {
@@ -215,6 +224,54 @@ impl<'a> Queries<'a> {
             self.controller
                 .cancel_query_if_current(kind.core(), ticket.id);
         }
+    }
+    /// Constant-size, read-only arithmetic on the same owner/display receipt.
+    /// A snap reference can only name a result sent on this connection.
+    pub fn measure(
+        &self,
+        sequence: &str,
+        request: MeasureRequest,
+        view_id: &str,
+        epoch: &str,
+    ) -> Result<Value, &'static str> {
+        let a = request.anchor.core().map_err(|_| "invalid_request")?;
+        if !self.displayed.accepts(a) {
+            return Err("frame_not_displayed");
+        }
+        let snap_id = request
+            .snap_query
+            .map(|id| view::counter(&id))
+            .transpose()
+            .map_err(|_| "invalid_request")?;
+        if let Some(id) = snap_id {
+            if !self.tickets[0]
+                .as_ref()
+                .is_some_and(|t| t.id == id && t.anchor == a && t.sent)
+            {
+                return Err("stale_snap");
+            }
+        }
+        let start = request
+            .start_dbu
+            .map(|p| floe_app_core::view::RulerPoint::parse([&p[0], &p[1]]))
+            .transpose()
+            .map_err(|_| "invalid_request")?;
+        let r = self
+            .controller
+            .measure(a, request.position, start, request.free_angle, snap_id)
+            .map_err(|e| {
+                if e.kind == floe_app_core::ErrorKind::Busy {
+                    "stale_frame"
+                } else {
+                    view::safe_error(e.kind)
+                }
+            })?;
+        Ok(
+            json!({"type":"measure.result","seq":sequence,"view_id":view_id,"connection_epoch":epoch,"anchor":anchor(a),
+            "point_dbu":r.point.strings(),"snap":r.snap.map(|s|match s {SnapKind::Vertex=>"vertex",SnapKind::Edge=>"edge"}),
+            "segment":r.segment.map(|s|json!({"endpoints_dbu":s.endpoints.map(|p|p.strings()),
+                "delta_um":s.delta_strings(),"distance_um":s.distance_string()}))}),
+        )
     }
     /// Latest-only results, at most one per kind. A full socket queue leaves
     /// the ticket unsent for retry, never accumulates another response queue.

@@ -15,6 +15,34 @@ fn request() -> Value {
     json!({"anchor":anchor(stamp()),"operation":{"kind":"pick","nth":"-1"},
         "position":[0.5,0.5],"radius_px":10.,"layers":{"mode":"all"}})
 }
+
+#[test]
+fn ruler_dtos_are_fixed_size_and_never_accept_paths_or_numeric_coordinates() {
+    let valid = json!({"anchor":anchor(stamp()),"position":[0.5,0.25],"start_dbu":["-0.5","9007199254740993"],"free_angle":false,"snap_query":"9007199254740997"});
+    assert!(serde_json::from_value::<MeasureRequest>(valid.clone()).is_ok());
+    for (field, value) in [
+        ("position", json!([0.5])),
+        ("position", json!([0., 0., 0.])),
+        ("position", json!(["0", "0"])),
+        ("start_dbu", json!([0, 0])),
+        ("start_dbu", json!(["0", "0", "0"])),
+        ("free_angle", json!("true")),
+        ("snap_query", json!(7)),
+        ("path", json!("/private/design")),
+    ] {
+        let mut bad = valid.clone();
+        bad[field] = value;
+        assert!(
+            serde_json::from_value::<MeasureRequest>(bad).is_err(),
+            "{field}"
+        );
+    }
+    let duplicate = format!(
+        "{{\"anchor\":{},\"position\":[0,0],\"position\":[1,1],\"free_angle\":false}}",
+        anchor(stamp())
+    );
+    assert!(serde_json::from_str::<MeasureRequest>(&duplicate).is_err());
+}
 #[test]
 fn query_dtos_require_canonical_strings_and_strict_bounded_input() {
     let parsed: Request = serde_json::from_value(request()).unwrap();

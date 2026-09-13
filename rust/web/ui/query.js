@@ -44,14 +44,13 @@
         return a;
     }
     function same(a, b) { return FIELDS.every(function (k) { return a[k] === b[k]; }); }
-    function scope(c, P) {
-        if (!c || !c.connected || c.pending || c.hidden || !c.state.capabilities.query || !c.frame || !c.acked ||
+    function scope(c, P, coordinatesOnly) {
+        if (!c || !c.connected || c.pending || c.hidden || (!coordinatesOnly && !c.state.capabilities.query) || !c.frame || !c.acked ||
             c.id !== c.state.view_id || !Number.isFinite(c.size.dpr) || c.size.dpr <= 0 ||
             ![c.size.left, c.size.top, c.rect.left, c.rect.top].every(Number.isFinite) ||
-            ['closed', 'failed', 'opening'].includes(c.state.status) || !c.frame.query || !P.matches(c.frame, c.state) ||
+            ['closed', 'failed', 'opening'].includes(c.state.status) || (!coordinatesOnly && !c.frame.query) || !P.matches(c.frame, c.state) ||
             c.size.pixels[0] !== c.state.pixels[0] || c.size.pixels[1] !== c.state.pixels[1]) { return null; }
-        const s = scene(c.frame.query_scene, P);
-        if (!s.complete || s.generation === null) { return null; }
+        if (!coordinatesOnly) { const s = scene(c.frame.query_scene, P); if (!s.complete || s.generation === null) { return null; } }
         const p = c.origin;
         if (!p || p[0] < 0 || p[1] < 0 || p[0] + c.size.pixels[0] > c.frame.width || p[1] + c.size.pixels[1] > c.frame.height) { return null; }
         const a = anchor(c, P);
@@ -170,7 +169,7 @@
                     t.id = P.counter(m.query_id); return true;
                 }
                 if (m.type === 'query.result') {
-                    const v = result(m, t, P); settled(t); t.done(v); return true;
+                    const v = result(m, t, P); settled(t); t.done(v, {query_id: t.id, anchor: t.anchor}); return true;
                 }
                 // A refused replacement may leave the previous native ticket
                 // alive on this connection; explicitly retire that kind too.

@@ -10,6 +10,7 @@ fn main() {
         "ui/gestures.js",
         "ui/query.js",
         "ui/inspect.js",
+        "ui/measure.js",
         "ui/drc.js",
         "ui/drc-build.js",
         "ui/rulers.js",

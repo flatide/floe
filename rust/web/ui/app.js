@@ -11,7 +11,7 @@
     let foregroundFrame = null, marginFrame = null, inflightBody = null, foregroundPerf = '';
     let gesture = null, dragShift = null, lastPlacement = null;
     let drcPanel = null, displayProjection = null, frozenProjection = null;
-    let inspector = null, pickedPairs = [];
+    let inspector = null, measurement = null, pickedPairs = [];
     let ackedFrames = {foreground: null, margin: null};
     const sessionKey = 'floe-session:' + location.origin;
     let auth = null, stopped = false, socket = null, epoch = '', state = null;
@@ -130,6 +130,7 @@
             [-Math.round((size.pixels[0] - frozenProjection.pixels[0]) / 2), -Math.round((size.pixels[1] - frozenProjection.pixels[1]) / 2)]); }
         if (drcPanel) { drcPanel.paint(displayProjection, size); }
         if (inspector) { inspector.changed(); inspector.paint(displayProjection, size); }
+        if (measurement) { measurement.changed(); measurement.paint(displayProjection, size); }
         if (full) {
             const pending = !!inflightBody || queue.length > 0 || !!dragShift;
             el('status').textContent = (pending ? 'Pan preview' : 'Live') + ' · margin crop · gen ' + marginFrame.generation;
@@ -185,6 +186,7 @@
         el('index').disabled = submitting || ownerBusy;
         if (drcPanel) { drcPanel.contextChanged(); }
         if (inspector) { inspector.changed(); }
+        if (measurement) { measurement.changed(); }
     }
     function queryContext() {
         if (!state || !currentId || !lastPlacement) { return null; }
@@ -377,6 +379,7 @@
                     if (m.protocol !== 1 || m.bundle !== bundle || m.view_id !== currentId) { throw new Error('Client/server version mismatch; reload'); }
                     epoch = m.connection_epoch; reconnectDelay = 500; connection('Local · connected', true);
                 } else if (m.type === 'snapshot') { statusSnapshot(m); }
+                else if (measurement && measurement.receive(m)) { /* ruler owns its current response */ }
                 else if (inspector && inspector.receive(m)) { /* latest query owns its response */ }
                 else if (m.type === 'accepted') {
                     if (m.seq !== inflight) { throw new Error('Unexpected edit acknowledgement'); }
@@ -622,6 +625,12 @@
             else if (key === '.') { event.preventDefault(); el('goto-x').focus(); el('goto-x').select(); }
             return;
         }
+        if (key === 'r' && drcPanel && drcPanel.boxActive()) { drcPanel.key('e'); }
+        const measuring = measurement && measurement.active();
+        if (measurement && !(drcPanel && drcPanel.boxActive()) && measurement.key(key)) {
+            if ((key === 'K' || (key === 'Escape' && !measuring)) && drcPanel) { drcPanel.key('K'); }
+            event.preventDefault(); return;
+        }
         if (drcPanel && drcPanel.key(key)) { event.preventDefault(); return; }
         if (inspector && inspector.key(key)) { event.preventDefault(); return; }
         const amount = event.shiftKey ? 0.1 : 0.5;
@@ -646,16 +655,18 @@
         zoom(event.deltaY < 0 ? 0.8 : 1.25, [Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)), Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height))]);
     }, {passive: false});
     function reviewCursor() {
-        viewport.style.cursor = gesture && gesture.active() ? 'grabbing' : drcPanel && drcPanel.boxActive() ? 'crosshair' : '';
+        if (measurement && measurement.active() && drcPanel && drcPanel.boxActive()) { measurement.leave(); }
+        viewport.style.cursor = gesture && gesture.active() ? 'grabbing' : (drcPanel && drcPanel.boxActive()) || (measurement && measurement.active()) ? 'crosshair' : '';
         if (inspector && (!gesture || !gesture.active())) { inspector.changed(); }
     }
     viewport.addEventListener('mousemove', function (event) {
         if (!gesture || !gesture.active()) {
             if (drcPanel) { drcPanel.move(event.clientX, event.clientY); }
-            if (inspector) { inspector.move(event.clientX, event.clientY); }
+            if (measurement && measurement.active()) { measurement.move(event.clientX, event.clientY, event); }
+            else if (inspector) { inspector.move(event.clientX, event.clientY); }
         }
     });
-    viewport.addEventListener('mouseleave', function () { if (drcPanel) { drcPanel.move(NaN, NaN); } if (inspector) { inspector.move(NaN, NaN); } });
+    viewport.addEventListener('mouseleave', function () { if (drcPanel) { drcPanel.move(NaN, NaN); } if (inspector) { inspector.move(NaN, NaN); } if (measurement) { measurement.move(NaN, NaN); } });
     gesture = window.FloeGestures.bind({viewport: viewport, window: window, document: document,
         dimensions: dims, ready: function () { return live() && displayed && !!epoch && !inflight && queue.length === 0; },
         stamp: function () { return currentId + ':' + epoch + ':' + (state ? state.state_rev : ''); },
@@ -664,6 +675,7 @@
         preview: function (p, paint) { dragShift = p; if (paint) { present(); } },
         cursor: reviewCursor, pan: nav, objectClicks: true, selectionMode: function () { return !!drcPanel && drcPanel.boxActive(); },
         click: function (x, y, twice, modifiers) {
+            if (measurement && measurement.active()) { measurement.click(x, y, modifiers); return; }
             const m = modifiers || {};
             if (drcPanel && (drcPanel.boxActive() || (!m.ctrlKey && !m.metaKey && !m.shiftKey)) && drcPanel.click(x, y, twice, modifiers)) {
                 if (inspector) { inspector.interrupt(); } return;
@@ -702,12 +714,18 @@
     inspector = window.FloeInspect.bind({document: document, window: window, protocol: P, query: window.FloeQuery,
         context: queryContext, send: send, layers: highlightPicked, now: function () { return Date.now(); },
         setTimeout: setTimeout, clearTimeout: clearTimeout});
-    document.addEventListener('visibilitychange', function () { if (document.hidden) { finishDecode(); inspector.changed(); } else if (live() && !stopped) { connect(); } });
-    window.addEventListener('blur', function () { inspector.move(NaN, NaN); });
+    measurement = window.FloeMeasure.bind({document: document, window: window, protocol: P, query: window.FloeQuery, rulers: window.FloeRulers,
+        context: queryContext, send: send, now: function () { return Date.now(); }, setTimeout: setTimeout, clearTimeout: clearTimeout,
+        modeChanged: function () {
+            if (measurement && measurement.active()) { if (drcPanel.boxActive()) { drcPanel.key('e'); } inspector.interrupt(); }
+            if (gesture) { gesture.cancel(); } reviewCursor();
+        }});
+    document.addEventListener('visibilitychange', function () { if (document.hidden) { finishDecode(); inspector.changed(); measurement.changed(); } else if (live() && !stopped) { connect(); } });
+    window.addEventListener('blur', function () { inspector.move(NaN, NaN); measurement.interrupt(); });
     setInterval(function () { if (socket && socket.readyState === WebSocket.OPEN && epoch) { try { send({type: 'ping'}); } catch (e) { report(e); } } }, 10000);
-    window.addEventListener('pagehide', function () { disconnect(); inspector.stop(); clearTimeout(operationTimer); clearTimeout(resizeTimer); if (sizeObserver) { sizeObserver.disconnect(); } drcPanel.stop(); });
+    window.addEventListener('pagehide', function () { disconnect(); inspector.stop(); measurement.stop(); clearTimeout(operationTimer); clearTimeout(resizeTimer); if (sizeObserver) { sizeObserver.disconnect(); } drcPanel.stop(); });
     window.addEventListener('pageshow', function (event) {
-        if (event.persisted && auth && !stopped) { inspector.resume(); if (sizeObserver) { sizeObserver.observe(viewport); } drcPanel.resume().then(operationState).then(restore).then(resized).catch(report); }
+        if (event.persisted && auth && !stopped) { inspector.resume(); measurement.resume(); if (sizeObserver) { sizeObserver.observe(viewport); } drcPanel.resume().then(operationState).then(restore).then(resized).catch(report); }
     });
     start().catch(function (e) { connection('Not connected', false); report(e); el('empty-message').textContent = e.message; });
 }());
