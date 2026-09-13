@@ -53,6 +53,8 @@ fn wire_rejects_paths_noncanonical_counters_and_unbounded_reads() {
         json!({"kind":"step","check":"0","backwards":false,"after":"0","cursor":{"next":"1","remaining":"2"}}),
         json!({"kind":"step","check":"0","backwards":false,"cursor":{"next":"0","remaining":"-1"}}),
         json!({"kind":"step","check":"0","backwards":false,"bbox_um":["0","0","-1","1"]}),
+        json!({"kind":"measurements","check":"00","error":"0"}),
+        json!({"kind":"measurements","check":"0","error":"-1"}),
     ] {
         assert!(serde_json::from_value::<Request>(v)
             .unwrap()
@@ -66,6 +68,9 @@ fn wire_rejects_paths_noncanonical_counters_and_unbounded_reads() {
         json!({"kind":"step","check":"0","backwards":1}),
         json!({"kind":"step","check":"0","backwards":false,"cursor":{"next":0,"remaining":"1"}}),
         json!({"kind":"step","check":"0","backwards":false,"cursor":{"next":"0","remaining":"1","path":"/etc/passwd"}}),
+        json!({"kind":"measurements","check":"0","error":1}),
+        json!({"kind":"measurements","check":"0","error":"1","path":"/etc/passwd"}),
+        json!({"kind":"measurements","check":"0","error":"1","points":[[0,0],[1,1]]}),
     ] {
         assert!(serde_json::from_value::<Request>(v).is_err());
     }

@@ -62,7 +62,8 @@ def main():
                 for ei, error in enumerate(ch.errors):
                     status = 1 if error.num % 7 == 0 else 2 if error.num % 11 == 0 else 0
                     p.set_status(ci, ei, status)
-                    row["errors"].append({"num": error.num, "kind": error.kind, "pts": error.pts, "status": status})
+                    row["errors"].append({"num": error.num, "kind": error.kind, "pts": error.pts,
+                                          "status": status, "cd": drc.cd_segments(error)})
                     flat.append((ci, ei, error, status))
                 row["waived"] = p.status_counts(ci)[0]
                 case["checks"].append(row)

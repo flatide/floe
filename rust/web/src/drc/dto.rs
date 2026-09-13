@@ -38,6 +38,10 @@ pub enum Request {
         start: String,
         limit: usize,
     },
+    Measurements {
+        check: String,
+        error: String,
+    },
     Focus {
         check: String,
         error: String,
@@ -86,6 +90,10 @@ pub(super) enum Command {
         error: u64,
         start: usize,
         limit: usize,
+    },
+    Measurements {
+        check: usize,
+        error: u64,
     },
     Focus {
         check: usize,
@@ -195,6 +203,10 @@ impl Request {
             }
             Self::Rule { check } => Command::Rule {
                 check: index(&check)?,
+            },
+            Self::Measurements { check, error } => Command::Measurements {
+                check: index(&check)?,
+                error: number(&error)?,
             },
             Self::Focus { check, error, fit } => Command::Focus {
                 check: index(&check)?,

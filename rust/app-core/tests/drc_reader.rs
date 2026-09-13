@@ -1,5 +1,5 @@
 //! Native pack + Python oracle, private generated DB only. No Python at runtime.
-use floe_app_core::drc::{Cursor, Pack};
+use floe_app_core::drc::{cd_segments, Cursor, Pack};
 use serde_json::{json, Value};
 use std::{collections::BTreeSet, path::Path, sync::atomic::AtomicUsize};
 #[test]
@@ -40,6 +40,26 @@ fn packed_geometry_status_and_paged_queries_match_python() {
                     .collect();
                 assert_eq!(json!(pts), e["pts"]);
                 assert_eq!(json!(p.status(ci, ei as u64).unwrap()), e["status"]);
+                let rulers = cd_segments(record.kind, &record.points, p.precision).unwrap();
+                let expected: Vec<[f64; 4]> = serde_json::from_value(e["cd"].clone()).unwrap();
+                assert_eq!(rulers.len(), expected.len(), "CD count {ci}/{ei}: {e}");
+                let close = |a: f64, b: f64| (a - b).abs() <= 1e-11 + 1e-10 * a.abs().max(b.abs());
+                for (got, want) in rulers.iter().zip(expected) {
+                    assert!(
+                        got.endpoints_um
+                            .iter()
+                            .flatten()
+                            .zip(want)
+                            .all(|(a, b)| close(*a, b)),
+                        "CD endpoints {ci}/{ei}: {got:?} {want:?}"
+                    );
+                    let d = (want[2] - want[0]).hypot(want[3] - want[1]);
+                    assert!(
+                        close(got.distance_um, d),
+                        "CD distance {ci}/{ei}: {got:?} {want:?}"
+                    );
+                    assert_eq!(got.offset, record.kind == 'e' && record.points.len() == 2);
+                }
                 errors += 1;
             }
             let mut cursor = 0;
@@ -109,5 +129,7 @@ fn packed_geometry_status_and_paged_queries_match_python() {
     }
     assert!(errors > 1000);
     assert!(queries >= 100);
-    println!("RUST DRC READER: ALL OK ({errors} error records, {queries} paged query pairs)");
+    println!(
+        "RUST DRC READER: ALL OK ({errors} error records + CD rulers, {queries} paged query pairs)"
+    );
 }

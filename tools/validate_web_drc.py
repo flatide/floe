@@ -3,6 +3,7 @@
 import json
 import math
 import os
+import random
 from pathlib import Path
 import shutil
 import signal
@@ -45,6 +46,34 @@ def main(fixture):
             text += 'p %d 4\n%d 0\n%d 0\n%d 10\n%d 10\n' % (i+1, i*20, i*20+10, i*20+10, i*20)
         text += 'BIG\n1 1 1\nlarge polygon\np 1 5000\n'
         text += ''.join('%d %d\n' % (i, i % 2) for i in range(5000))
+        # CD measurements: legacy ordering, touching/crossing/degenerate edges,
+        # skew pairs, rectangle permutations, both endpoint orders/translations.
+        cd_cases = [
+            ('e', [(0, 0), (3, 4)]),
+            ('e', [(0, 0), (0, 0)]),
+            ('e', [(0, 0), (10, 0), (0, 3), (10, 3)]),
+            ('e', [(0, 0), (1, 0), (2, 1), (3, 1)]),
+            ('e', [(1, 0), (0, 0), (3, 1), (2, 1)]),
+            ('e', [(0, 0), (10, 0), (5, -5), (5, 5)]),
+            ('e', [(0, 0), (10, 0), (5, 0), (15, 0)]),
+            ('e', [(0, 0), (10, 0), (10, 0), (10, 10)]),
+            ('e', [(0, 0), (0, 0), (2, 1), (3, 1)]),
+            ('p', [(0, 0), (10, 0), (10, 20), (0, 20)]),
+            ('p', [(0, 0), (10, 20), (10, 0), (0, 20)]),
+            ('p', [(0, 0), (10, 10), (0, 20), (-10, 10)]),
+        ]
+        rng = random.Random(76)
+        for _ in range(32):
+            cd_cases.append(('e', [(rng.randint(-5000, 5000), rng.randint(-5000, 5000)) for _ in range(4)]))
+        cd_cases += [(kind, [(x+123456, y-987654) for x, y in pts]) for kind, pts in cd_cases]
+        text += 'CDHELPERS\n%d %d 1\nCD oracle cases\n' % (len(cd_cases), len(cd_cases))
+        for i, (kind, pts) in enumerate(cd_cases):
+            n = len(pts) if kind == 'p' else len(pts)//2
+            text += '%s %d %d\n' % (kind, i+1, n)
+            if kind == 'p':
+                text += ''.join('%d %d\n' % p for p in pts)
+            else:
+                text += ''.join('%d %d %d %d\n' % (*pts[j], *pts[j+1]) for j in range(0, len(pts), 2))
         db.write_text(text)
         run = subprocess.run([str(INDEX), "drc", str(db), "--jobs", "2"], capture_output=True, timeout=30)
         assert run.returncode == 0, run.stderr
@@ -229,6 +258,19 @@ def main(fixture):
                         assert page["next"] != start
                         start = page["next"]
                     assert points == [list(pt) for pt in e["pts"]]
+                    measured = read(dict(kind="measurements", check=str(ci), error=e["local"]))
+                    assert (measured["check"], measured["local"], measured["global"]) == (str(ci), e["local"], e["glob"])
+                    rulers = drc.cd_segments(drc.DrcError(e["kind"], int(e["glob"]), e["pts"]))
+                    assert len(measured["segments"]) == len(rulers) <= 3, (e, rulers, measured)
+                    for segment, ruler in zip(measured["segments"], rulers):
+                        actual = [float(v) for p in segment["endpoints_um"] for v in p]
+                        assert all(math.isclose(a, b, rel_tol=1e-10, abs_tol=1e-11) for a, b in zip(actual, ruler)), (e, actual, ruler)
+                        wanted = math.hypot(ruler[2]-ruler[0], ruler[3]-ruler[1])
+                        assert math.isclose(float(segment["distance_um"]), wanted, rel_tol=1e-9, abs_tol=1e-11), (e, segment, ruler)
+                        assert segment["offset"] is (e["kind"] == 'e' and len(e["pts"]) == 2)
+            read(dict(kind="measurements", check="0", error="999999999999"), 400)
+            read(dict(kind="measurements", check="00", error="0"), 400)
+            read(dict(kind="measurements", check="0", error="0", path=str(db)), 400)
             search = read(dict(kind="rules", start="0", search="mask<", limit=64))
             assert [r["name"] for r in search["rows"]] == ["MASK<&>"]
             # A navigation step crosses pages/64-record blocks and wraps in
@@ -319,7 +361,7 @@ def main(fixture):
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     proc.communicate(timeout=5)
-    print("WEB DRC: ALL OK (auth, scoped IDs, pages, coordinates, waive, queries, circular step, focus/in-view, panel CAS/replay, stale view, read-only, cancellation/reap)")
+    print("WEB DRC: ALL OK (auth, scoped IDs, pages, coordinates/CD, waive, queries, circular step, focus/in-view, panel CAS/replay, stale view, read-only, cancellation/reap)")
 
 
 if __name__ == "__main__":

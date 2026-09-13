@@ -1,7 +1,7 @@
 use super::{dto::Command, RESPONSE_BYTES};
 use floe_app_core::{
     check_cancelled,
-    drc::{Cursor, Hit, InfoHit, Pack, RecordInfo},
+    drc::{cd_segments, Cursor, Hit, InfoHit, Pack, RecordInfo},
     Error, ErrorKind, Result,
 };
 use serde_json::{json, Value};
@@ -181,6 +181,26 @@ pub(super) fn execute(p: &mut Pack, request: Command, stop: &AtomicUsize) -> Res
                 "status":p.status(check,error)?,"bbox_um":bounds(p,Some(v.bbox))?,"precision":p.precision.to_string(),
                 "points_dbu":points,"start":page.start.to_string(),"total":v.points.to_string(),
                 "next":page.next.map(|v|v.to_string())})
+        }
+        Command::Measurements { check, error } => {
+            // CD supports at most four vertices. Validate/decode the containing
+            // block as usual, but never clone a large selected polygon here.
+            let page = p.error_points(check, error, 0, 4, stop)?;
+            let segments = if page.next.is_none() {
+                cd_segments(page.record.kind, &page.points, p.precision)?
+            } else {
+                Vec::new()
+            };
+            let segments: Vec<_> = segments
+                .into_iter()
+                .map(|s| {
+                    json!({
+                "endpoints_um":s.endpoints_um.map(|p|p.map(|v|v.to_string())),
+                "distance_um":s.distance_um.to_string(),"offset":s.offset})
+                })
+                .collect();
+            json!({"check":check.to_string(),"local":error.to_string(),
+                "global":page.record.number.to_string(),"segments":segments})
         }
         Command::InView {
             waived,

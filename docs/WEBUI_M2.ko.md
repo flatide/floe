@@ -407,7 +407,51 @@ ES2017/JS·전환 패키지 strict clippy(`--no-deps`)·fmt·최종 native build
 workspace 의존 parser/tiler의 기존 clippy 경고는 별개이며 전체 warning-free를
 주장하지 않는다. pack/캐시 포맷과 renderd wire/버전은 변경하지 않았다.
 
-## 9. 다음 경계
+## 9. M2a-7a: 단순 오류의 CD 측정 코어/API
+
+`app-core::drc::cd_segments`는 기존 `floe/drc.py::cd_segments`의 의미를 옮긴다.
+단일 edge는 길이, edge 두 개는 가장 가까운 간격을 첫 항목으로 돌려주며,
+서로 평행하고 X/Y 범위가 떨어진 경우 그 뒤에 수평·수직 성분을 붙인다.
+마주 보는 평행 edge는 가운데 gap을 택한다. 네 모서리가 축 정렬 사각형이면
+폭 다음 높이를 돌려준다. 복잡한 polygon/edge 집합·접촉/교차·길이0에는
+CD ruler를 발명하지 않고 빈 목록이다. SVRF width/space/area 판정기는 아니다.
+
+읽기 body `{"kind":"measurements","check":"0","error":"0"}`는 기존
+DRC/view/revision scope 및 actor queue·취소 경계를 쓴다. 응답은 check/local/global
+문자열 ID와 최대3개 `segments`다. 각 항목은 두 µm endpoint의 문자열 배열
+`endpoints_um`, 문자열 `distance_um`, 단일 edge의 평행 offset 표시용 `offset` bool이다.
+viewport에 독립적인 측정이라 `state_rev`는 필요 없고, native view는 변경하지 않는다.
+요청에 좌표/경로/확장 알고리즘을 넣을 수 없고 파일의 오류만 읽는다.
+
+- containing block은 기존처럼 검사/디코드하지만 선택 오류에서 최대4점만 복사한다.
+  5,000점 이상 polygon도 전체 geometry를 다시 복사하거나 매 transport 페이지마다
+  측정하지 않는다. 이 API의 빈 segments는 임의의 4점 prefix 측정이 아니다.
+- i64 DBU 차이를 i128에서 먼저 구하고 2의 거듭제곱으로 정규화한 작은 좌표계에서
+  계산한다. 절대좌표가 큰 곳의 1 DBU edge나 precision이 극단인 곳에서 중간 제곱의
+  overflow/underflow로 잘못된0·NaN을 내지 않도록 하기 위함이다. µm 길이 자체가
+  f64로 표현 불가능하면 명시 오류다. 출력 endpoint는 기존 표시 좌표처럼 f64이고
+  특히 큰 원점에서는 endpoint 차이보다 별도 distance 값이 더 정밀할 수 있다.
+- Python과 같은 후보 순서·가운데 허용오차(1.0001)·평행 허용오차(1e-12)를 유지한다.
+  정규화와 거리 계산의 반올림까지 byte 동일하다는 계약은 아니다. 일반 합성 파일은
+  endpoint/거리 수치 오라클로 비교하고, 큰 원점/작은 길이는 별도 정확값으로 검사한다.
+- UI 연결과 CD 글자 배치는 다음 단계다. native renderer·pack 포맷·캐시·waive 파일과
+  renderd wire/버전은 바꾸지 않았다.
+
+검증: 고정 CD 예와 endpoint 역순, 접촉/교차/축퇴/복잡 도형, i64 양 끝·1 DBU 길이·
+precision 한계를 단위 테스트한다. 실제 HTTP 게이트에 일반/뒤집힌/이동된 rectangle,
+edge pair 및 seed76 난수 쌍 88개를 더해 기존 Python CD와 endpoint 순서·거리·offset을
+대조하며, 기존 5,000점 polygon은 빈 segments인지 확인한다.
+기존 native pack 읽기 오라클도 **1,931개 오류의 CD**를 전수 대조한다(geometry/status와
+168개 공간 페이지 비교 유지). default toolchain과 Rust 1.89에서 모두 통과했다.
+
+2026-09-13: core 53개 및 app/web/transport 테스트·fmt·전환 패키지 strict clippy,
+인증 HTTP CD 오라클·ES2017 UI 회귀, Rust 1.89 빈 registry 오프라인 테스트와
+Linux musl release link 통과. 전체 `sh tools/validate_rust.sh`는
+`RUST VALIDATION: ALL OK`이며 13 PX + 2 phase-exact + 14 style 오라클도 통과했다.
+추가한 1,931개 CD 테스트는 전체 배터리 후 별도 native/MSRV 오라클로 재확인했다.
+이 단계는 API까지이며 CD UI·현장 Firefox/ETX 수용은 완료로 세지 않는다.
+
+## 10. 다음 경계
 
 1. DRC box-select/전체 공간 마커·hover, SVRF metric/type 필터·layer isolate·CD overlay는
    아직 미이관이다. Escape의 ruler/격리 우선순위도 해당 기능과 함께 확장한다.
