@@ -55,36 +55,36 @@ const count=kind=>requests.filter(r=>r.body&&r.body.body.kind===(kind==='step'?'
     const clicked=el('drc-errors').children[63];clicked.onclick();await tick();
     assert.equal(moves.length,0,'first click must only focus/select');
     assert.equal(el('drc-errors').children[63],clicked,'single click replaced the double-click target');
-    assert(panel.key('n'));await tick();
+    assert(panel.key('.'));await tick();
     assert.equal(saves.at(-1).selected.error,'64','n did not cross the page boundary');
     assert.equal(moves.length,0);
-    panel.key('p');await tick();assert.equal(saves.at(-1).selected.error,'63');
+    panel.key(',');await tick();assert.equal(saves.at(-1).selected.error,'63');
     el('drc-first').onclick();await tick();el('drc-errors').children[0].onclick();await tick();
-    panel.key('p');await tick();assert.equal(saves.at(-1).selected.error,'129');
+    panel.key(',');await tick();assert.equal(saves.at(-1).selected.error,'129');
     el('drc-step-next').onclick();await tick();assert.equal(saves.at(-1).selected.error,'0');
     assert.equal(active.getAttribute?active.getAttribute('aria-label'):active['aria-label'],'Error 1, global 1');
-    // Double click enters jump mode; click/n/p now move, Escape ends the
+    // Double click enters jump mode; click/comma/period now move, Escape ends the
     // mode but preserves the position for the next keyboard step.
     el('drc-errors').children[0].ondblclick();await tick();assert.equal(moves.length,1);
-    panel.key('n');await tick();assert.equal(moves.length,2);assert.equal(saves.at(-1).selected.error,'1');
+    panel.key('.');await tick();assert.equal(moves.length,2);assert.equal(saves.at(-1).selected.error,'1');
     el('drc-errors').children[2].onclick();await tick();assert.equal(moves.length,3);
     assert(panel.key('Escape'));await tick();assert.equal(saves.at(-1).selected.error,'2');
     assert.equal(saves.at(-1).jump_active,false);assert.equal(saves.at(-1).focus_visible,false);
-    panel.key('n');await tick();assert.equal(saves.at(-1).selected.error,'3');assert.equal(moves.length,3);
+    panel.key('.');await tick();assert.equal(saves.at(-1).selected.error,'3');assert.equal(moves.length,3);
     el('drc-waived').value='waived';el('drc-waived').onchange();await tick();
-    panel.key('p');await tick();assert.equal(saves.at(-1).selected.error,'129');
-    panel.key('n');await tick();assert.equal(saves.at(-1).selected.error,'0');
+    panel.key(',');await tick();assert.equal(saves.at(-1).selected.error,'129');
+    panel.key('.');await tick();assert.equal(saves.at(-1).selected.error,'0');
     // Empty + continuation is shown and only resumes after explicit input.
     heldPage={hit:null,next:{next:'65',remaining:'65'},scanned:'65'};
-    const before=count('step');panel.key('n');await tick();assert.equal(count('step'),before+1);
+    const before=count('step');panel.key('.');await tick();assert.equal(count('step'),before+1);
     assert.equal(el('drc-step-continue').hidden,false);assert(el('drc-message').textContent.includes('incomplete'));
     el('drc-step-continue').onclick();await tick();assert.equal(saves.at(-1).selected.error,'66');
     const resumed=requests.filter(r=>r.body&&r.body.body.kind==='filtered_step').at(-1).body.body;
     assert.equal(resumed.after,null);assert.deepEqual(resumed.cursor,{next:'65',remaining:'65'});
     // Repeated input has no unbounded queue. Esc cancels a held read and a
     // late response must not resurrect a cleared focus or move the view.
-    holdStep=true;panel.key('n');await tick();const inFlight=count('step');
-    for(let i=0;i<100;i++)panel.key('n');await tick();assert.equal(count('step'),inFlight);
+    holdStep=true;panel.key('.');await tick();const inFlight=count('step');
+    for(let i=0;i<100;i++)panel.key('.');await tick();assert.equal(count('step'),inFlight);
     panel.key('Escape');assert(held.token.cancelled);held.resolve({hit:row(69),next:null,scanned:'3'});await tick();
     assert(!el('drc-message').textContent.includes('Searching'));
     assert.equal(saves.at(-1).selected.error,'66');assert.equal(moves.length,3);holdStep=false;
@@ -92,21 +92,21 @@ const count=kind=>requests.filter(r=>r.body&&r.body.body.kind===(kind==='step'?'
     restoreData=saves.at(-1);const beforeRestore=count('focus');
     await el('drc-reload').onclick();await tick();assert.equal(count('focus'),beforeRestore);
     assert.equal(el('drc-selected').textContent.includes('focus cleared'),true);
-    panel.key('n');await tick();assert.equal(saves.at(-1).selected.error,'69');assert.equal(moves.length,3);
+    panel.key('.');await tick();assert.equal(saves.at(-1).selected.error,'69');assert.equal(moves.length,3);
     // A later pan wins over a slow navigation lookup, even in jump mode.
     el('drc-frame').onclick();await tick();assert.equal(moves.length,4);
-    holdStep=true;panel.key('n');await tick();
+    holdStep=true;panel.key('.');await tick();
     context={...context,state:{...context.state,state_rev:'2',bbox_dbu:['10','0','110','80']}};panel.contextChanged();
     held.resolve({hit:row(72),next:null,scanned:'3'});await tick();
     assert.equal(saves.at(-1).selected.error,'72');assert.equal(moves.length,4,'late step displaced a newer pan');holdStep=false;
     // Clicking Reload review cancels before a potentially slow panel GET,
     // not only when the saved state finally arrives and apply() starts.
-    restoreData=saves.at(-1);holdStep=true;panel.key('n');await tick();waitRestore=true;
+    restoreData=saves.at(-1);holdStep=true;panel.key('.');await tick();waitRestore=true;
     const reloading=el('drc-reload').onclick();assert(held.token.cancelled,'reload left an old step active');
     held.resolve({hit:row(75),next:null,scanned:'3'});await tick();releaseRestore();waitRestore=false;await reloading;await tick();
     assert.equal(el('drc-selected').textContent,'Global 73 · 4/4 vertices');assert.equal(moves.length,4);
     // Filter changes cancel a held lookup. Cursor state must not cross them.
-    holdStep=true;panel.key('n');await tick();
+    holdStep=true;panel.key('.');await tick();
     el('drc-waived').value='all';el('drc-waived').onchange();assert(held.token.cancelled);
     held.resolve({hit:row(75),next:null,scanned:'3'});await tick();assert.equal(saves.at(-1).selected,null);
     panel.stop();console.log('WEB DRC NAVIGATION: ALL OK (cross-page/wrap/filter, click/double-click, Escape/mode, bounded continuation/cancel, restoration)');

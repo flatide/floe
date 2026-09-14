@@ -23,7 +23,9 @@ function harness(shared={model:catalog(),raw:null,writes:0,records:new Map()}){
     const c={context:clone(context),epoch:'9'.repeat(64),key:'groups:1',caption:'2 selected errors across rules',ready:true,
         rows:[{check:'0',error:'9007199254740993'},{check:'7',error:'0'}]};
     function el(id){assert(ids.includes(id),'missing HTML '+id);if(!nodes.has(id)){nodes.set(id,{value:'',textContent:'',disabled:false,hidden:false,checked:false,
-        focus(){this.focused=true;},set innerHTML(v){throw Error('HTML injection '+v);}});}return nodes.get(id);}
+        focus(){if(!this.disabled&&!this.hidden&&!el('notes-panel').hidden&&
+            (!['notes-text','notes-consent'].includes(id)||!el('notes-editor').hidden)&&
+            (id!=='notes-consent'||!el('notes-review').hidden)){this.focused=true;}},set innerHTML(v){throw Error('HTML injection '+v);}});}return nodes.get(id);}
     function execute(r){
         if(r.method==='GET')return clone(shared.model);
         if(r.path.endsWith('/read'))return snapshot(r.body.context,r.body.errors.length,{review_rev:shared.model.review_rev});
@@ -61,8 +63,9 @@ async function test(){
     assert.equal(await guarded.panel.publishTransfer(whole,()=>valid),false);assert.equal(writes(guarded).length,0);guarded.panel.stop(true);
     const h=harness();h.panel.attach(null);assert(h.el('notes-panel').hidden);assert.equal(h.calls.length,0);
     h.init();assert(!h.el('notes-read').disabled);await h.read();assert.deepEqual(h.calls.at(-1).body.errors,h.c.rows);
+    assert(h.el('notes-text').focused,'snapshot must reveal and enable editor before focus');
     h.text('  한글 <script> & text\nsecond line  ');await h.prepare();assert.equal(writes(h).length,0);assert(h.el('notes-approve').disabled);
-    assert.equal(h.el('notes-preview').textContent,'한글 <script> & text\nsecond line');await h.el('notes-approve').onclick();assert.equal(writes(h).length,0);
+    assert.equal(h.el('notes-preview').textContent,'한글 <script> & text\nsecond line');assert(h.el('notes-consent').focused,'preview must enable consent before focus');await h.el('notes-approve').onclick();assert.equal(writes(h).length,0);
     await h.approve();assert.equal(h.shared.writes,1);assert.equal(h.shared.raw,null);assert.equal(h.el('notes-text').value,'');assert.match(h.el('notes-status').textContent,/Saved.*#1/);
     assert(h.displayStates.some(s=>s&&s.blocked.includes('pending')));assert.equal(h.displayStates.at(-1).review_rev,'1');assert.equal(h.displayStates.at(-1).blocked,'');assert.equal(h.displayStates.at(-1).read_turn,1);
     assert.equal(h.calls.filter(r=>r.path.endsWith('/revoke')).length,0,'approved token revoked');

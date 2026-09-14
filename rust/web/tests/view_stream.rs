@@ -3,6 +3,40 @@ include!("support/view_harness.rs");
 
 #[tokio::test]
 #[ignore = "run tools/validate_view_stream.py with a private synthetic fixture"]
+async fn native_relative_depth_is_revision_bound_and_preserves_camera() {
+    let h = Harness::start(true).await;
+    let login = h.login().await;
+    let (mut ws, hello, _) = h.connect(&login).await;
+    let (first, _) = frame(&mut ws).await;
+    ack(&mut ws, &hello, 1, &first).await;
+    let original = h.controller.snapshot().state.viewport;
+    assert_eq!(h.controller.snapshot().max_depth, Some(2));
+    for (i, (delta, expected)) in [(-1, 1), (1, 2), (1, 2), (-1, 1), (-1, 0), (-1, 0)]
+        .into_iter()
+        .enumerate()
+    {
+        let before = h.controller.snapshot();
+        let seq = 2 + i as u64 * 2;
+        ws.send(Message::Text(json!({"type":"view.set","seq":seq.to_string(),"view_id":hello["view_id"],"connection_epoch":hello["connection_epoch"],
+            "base_state_rev":before.state_rev.to_string(),"body":{"depth_step":delta}}).to_string().into())).await.unwrap();
+        let reply = until_reply(&mut ws, seq, "accepted").await;
+        let after = h.controller.snapshot();
+        assert_eq!(after.state.depth, Some(expected));
+        assert_eq!(after.state.viewport, original);
+        assert_eq!(reply["state_rev"], after.state_rev.to_string());
+        if before.state_rev != after.state_rev {
+            let (next, _) = frame(&mut ws).await;
+            ack(&mut ws, &hello, seq + 1, &next).await;
+        }
+    }
+    h.shutdown().await;
+    println!(
+        "RUST DEPTH STREAM: ALL OK (relative steps, full/max/zero, noop, revision and camera)"
+    );
+}
+
+#[tokio::test]
+#[ignore = "run tools/validate_view_stream.py with a private synthetic fixture"]
 async fn native_minimap_is_readonly_and_navigation_keeps_scale() {
     let h = Harness::start(true).await;
     let login = h.login().await;

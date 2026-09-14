@@ -154,13 +154,16 @@ const geom=(r,pts,start,total,next)=>({check:r.check,local:r.local,global:r.glob
     assert.equal(el('drc-error-next').disabled,false);assert(el('drc-result-info').textContent.includes('earlier-viewport'));
     assert.equal(nav.length,beforeRestoreNav);
     // Selecting another rule from a frozen all-rule query changes the open
-    // rule, but never changes that query's box. n/p then stays in THAT rule.
+    // rule, but never changes that query's box. Comma/period stays in THAT rule.
     const other={...b,check:'1',local:'0',global:'9007199254740996'};
     el('drc-error-next').onclick();reply('query',{rows:[other],next:null});await tick();
     el('drc-errors').children[0].onclick();assert.equal(pending('rule').body.body.check,'1');
     reply('rule',{name:'OTHER',description:'other rule',errors:'2',waived:'2'});
     reply('geometry',geom(other,[['40000','10000'],['60000','30000']],0,2,null));await tick();
-    panel.key('n');const stepping=pending('step');
+    const noRead=calls.length;assert(panel.key('n'));assert(panel.key('w'));
+    assert.equal(calls.length,noRead,'disabled review writes started a read/step');
+    assert.match(el('drc-message').textContent,/owner waive session/);
+    panel.key('.');const stepping=pending('step');
     assert.equal(stepping.body.body.check,'1');assert.equal(stepping.body.body.after,'0');
     assert.deepEqual(stepping.body.body.bbox_um,savedPanel.query.bbox_um);
     const nextOther={...other,local:'1',global:'9007199254740997'};

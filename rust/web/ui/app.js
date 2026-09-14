@@ -688,6 +688,7 @@
         else if (key === 'Z') { event.preventDefault(); zoom(2); }
         else if (key === 'g') { event.preventDefault(); el('goto-x').focus(); el('goto-x').select(); }
         else if (key === 'd') { event.preventDefault(); el('detail').focus(); }
+        else if (key === '<' || key === '>') { event.preventDefault(); edit({depth_step:key === '<' ? -1 : 1}); }
         else if (/^[0-9]$/.test(key)) {
             event.preventDefault(); const depth = key === '9' && lastDigit === '9' && Date.now() - lastDigitAt < 1000 ? 'full' : key;
             lastDigit = depth === 'full' ? '' : key; lastDigitAt = Date.now(); edit({depth: depth});

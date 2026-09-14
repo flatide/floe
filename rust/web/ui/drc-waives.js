@@ -162,19 +162,20 @@
             try{const v=catalog(await o.http('GET',API,undefined,false,t),P);if(t.cancelled||poll!==t||stopped){return;}install(v);}
             catch(e){if(!t.cancelled&&poll===t){stale=true;notice='Waive status unavailable. '+(errors[e.code]||e.message);}}
             finally{if(poll===t){poll=null;changed();schedule();refreshReview();}}}
-        async function read(keep){changed();const c=selection();if(!permitted()||busy()||io||!c||model.preparing||(editor&&!keep)||(keep&&(!editor||!same(editor.selection)))){return;}
+        async function read(keep,toggle){changed();const c=selection();if(!permitted()||busy()||io||!c||model.preparing||(editor&&!keep)||(keep&&(!editor||!same(editor.selection)))){return;}
             let rows;try{rows=refs(c.references(),P);if(rows.length!==c.count){fail();}}catch(e){notice=e.message;render();return;}
             const saved=keep?el('waives-action').value:'';if(editor){invalidate('Reloading snapshot.');}
-            const t={selection:c,cancelled:false,abort:null,sent:o.now()};io=t;notice='Reading selected statuses. No file is changed.';render();
+            const t={selection:c,cancelled:false,abort:null,sent:o.now()};let focus=false;io=t;notice='Reading selected statuses. No file is changed.';render();
             try{const v=preview(await o.http('POST',API+'/read',{context:c.context,errors:rows},false,t),c.context,c.count,P,false);
                 if(t.cancelled||io!==t||!same(c)){revoke(v.token);return;}if(v.reviewer!==model.reviewer){fail();}
-                editor={selection:c,token:v.token,until:Math.min(t.sent+120000,o.now()+Number(v.expires_in_ms)),invalid:false};draft=null;el('waives-action').value=saved;
+                editor={selection:c,token:v.token,until:Math.min(t.sent+120000,o.now()+Number(v.expires_in_ms)),invalid:false};draft=null;el('waives-action').value=toggle?(v.waived_count===v.selected_count?'clear':'waive'):saved;
                 el('waives-target').textContent=c.caption+'\n'+v.name+'\n'+v.waived_count+' already waived · '+v.reserved_count+' reserved statuses';
-                notice='Snapshot loaded. Choose Waive or Clear waive; no per-click autosave.';expiry=o.setTimeout(changed,Math.max(0,editor.until-o.now()));el('waives-action').focus();
+                notice=toggle?'Toggle selected from current statuses. Preview and explicit approval are still required.':'Snapshot loaded. Choose Waive or Clear waive; no per-click autosave.';expiry=o.setTimeout(changed,Math.max(0,editor.until-o.now()));focus=true;
             }catch(e){if(!t.cancelled&&io===t){notice=errors[e.code]||e.message;}}
-            finally{if(io===t){io=null;changed();}}}
+            // Hidden/disabled controls cannot receive browser focus. Render after releasing IO first.
+            finally{if(io===t){io=null;changed();if(focus&&editor&&!editor.invalid&&!el('waives-action').disabled){el('waives-action').focus();}}}}
         async function prepare(){changed();if(el('waives-prepare').disabled){return;}const e=editor,c=e.selection,token=e.token,waived=action();
-            e.token=null;e.invalid=true;o.clearTimeout(expiry);expiry=null;const t={selection:c,cancelled:false,abort:null,sent:o.now()};io=t;notice='Preparing this selection. No file is changed.';render();
+            e.token=null;e.invalid=true;o.clearTimeout(expiry);expiry=null;const t={selection:c,cancelled:false,abort:null,sent:o.now()};let focus=false;io=t;notice='Preparing this selection. No file is changed.';render();
             try{const v=preview(await o.http('POST',API+'/prepare',{context:c.context,token:token,waived:waived},false,t),c.context,c.count,P,true);
                 if(t.cancelled||io!==t||editor!==e||!same(c)){revoke(v.token);return;}if(v.reviewer!==model.reviewer||v.waived!==waived){fail();}
                 draft=v;e.invalid=false;e.until=Math.min(t.sent+30000,o.now()+Number(v.expires_in_ms));
@@ -183,9 +184,9 @@
                 el('waives-reserved').textContent=v.reserved_count==='0'?'':v.reserved_count+' selected reserved statuses will be replaced with '+(v.waived?'1 (waived).':'0 (not waived).');
                 el('waives-legacy-row').hidden=!v.legacy_unverified;el('waives-consent').checked=el('waives-legacy').checked=false;
                 notice='Approve only the action shown above. Preview expires after 30 seconds. The geometry pack is not changed.';
-                expiry=o.setTimeout(changed,Math.max(0,e.until-o.now()));el('waives-consent').focus();
+                expiry=o.setTimeout(changed,Math.max(0,e.until-o.now()));focus=true;
             }catch(error){if(!t.cancelled&&io===t){notice=(errors[error.code]||error.message)+' Read a new snapshot before preparing again.';}}
-            finally{if(io===t){io=null;changed();}}}
+            finally{if(io===t){io=null;changed();if(focus&&draft&&!el('waives-consent').disabled){el('waives-consent').focus();}}}}
         function clearEditor(discard){if(discard){invalidate('Draft discarded.');}else{o.clearTimeout(expiry);expiry=null;}
             editor=draft=null;el('waives-action').value='';el('waives-preview').textContent='';el('waives-consent').checked=el('waives-legacy').checked=false;}
         async function send(request){pending=request;uncertain=false;el('waives-checked').checked=false;store(request);abort(poll);poll=null;
@@ -219,6 +220,7 @@
         render();return {attach:function(value,currentReader){reader=currentReader||null;if(!value){if(enabled){stale=true;notice='Waive registration unavailable. Refresh before relying on review statuses.';}render();return;}
                 try{if(!enabled){enabled=true;recover();}const v=catalog(value,P);install(v);changed();schedule();}
                 catch(e){stale=true;notice=e.message;render();}},changed:changed,refresh:refresh,suspended:suspended,
+            open:function(){if(!enabled||stopped){return false;}changed();if(editor){el('waives-action').focus();}else{read(false,true);}return true;},
             transferReady:transferReady,transferLock:function(value){transferLocked=value===true;render();},publishTransfer:publishTransfer,
             stop:function(final){stopped=true;stale=true;approving=null;clearEditor(false);if(write){uncertain=true;}
                 [io,poll,write,cancelling,revokeTask].forEach(abort);io=poll=write=cancelling=revokeTask=null;revokeNext=null;o.clearTimeout(timer);timer=null;

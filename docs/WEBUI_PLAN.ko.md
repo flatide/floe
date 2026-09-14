@@ -1,6 +1,6 @@
 # floe2 웹 셸 / 서버-클라이언트 계획 (정본)
 
-작성 2026-08-29, 갱신 2026-09-15(M4g-2 구조 미니맵).
+작성 2026-08-29, 갱신 2026-09-15(M4g-3 depth/DRC 키).
 관련 정본: `FLOE2_OPTIMIZATION.ko.md`(F2R-10/11),
 `RUST_RENDERER_PLAN.ko.md`, `SPEC-VIEWER.ko.md`, `rust/BUILD.md`.
 
@@ -78,6 +78,8 @@ M4g-1에서 GTK 오른쪽 드래그 박스 확대/축소·방향 되돌림/얇�
 Rust 좌표 계산과 웹 입력으로 연결했다([M4 §40](WEBUI_M4.ko.md)).
 M4g-2에서 기존 색인의 depth 구조 미니맵과 동일 배율 클릭 이동을 연결했다.
 180px 베이스를 재사용하며 pan 중 geometry 재렌더는 없다([M4 §41](WEBUI_M4.ko.md)).
+M4g-3에서 `<`/`>` depth 상대 이동과 GTK의 DRC `,`/`.` 순회·`n` 주석·`w` waive
+편집 진입을 연결했다. 게시 승인은 계속 별도다([M4 §42](WEBUI_M4.ko.md)).
 나머지 내보내기와 브라우저 다운로드/현장 수용은 남아 있다([M4 기록](WEBUI_M4.ko.md)).
 전체 조작 parity와 M0/Firefox/ETX 현장 검증은 아직 완료되지 않았다.
 상세 범위는 [M1b 기록](WEBUI_M1B.ko.md)과 [M2 기록](WEBUI_M2.ko.md). 여기의 M0~M5는 **웹 전환 단계**이며
@@ -614,3 +616,6 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
 - **M4g-2**: 기존 baked frontier의 180×180 구조 미니맵·현재 뷰 표시와 16px 위상
   클릭 이동을 복원했다. world 계산은 Rust, 브라우저는 유계 palette 베이스와 위치
   사각형만 받는다. 새 coverage/thumbnail 렌더·인덱스 형식 변경은 없다([M4 §41](WEBUI_M4.ko.md)).
+- **M4g-3**: `<`/`>` 상대 depth를 Rust revision CAS 아래에서 계산한다. DRC 순회 키를
+  GTK의 comma/period로 바로잡고 n/w는 기존 주석/waive 승인 편집기로 연결했다.
+  자동 저장·q 종료 확인·잡덱 모드 전환·startup 전체 이관은 아니다([M4 §42](WEBUI_M4.ko.md)).

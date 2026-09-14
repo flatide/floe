@@ -75,7 +75,7 @@ async function jump(i=0){el('drc-errors').children[i].ondblclick();await tick();
     assert(panel.key('Escape'));await tick();assert.equal(restoreCount,1);assert(saved.focus_visible,'unapproved restore cleared focus');
     assert(el('drc-restore-layers').disabled);await ack();assert(!saved.focus_visible&&!saved.jump_active);assert.equal(saved.selected.error,'0');
     assert.equal(saved.cd,null);assert(el('drc-restore-layers').disabled);
-    const moved=moves.length;panel.key('n');await tick();assert.equal(saved.selected.error,'1');assert.equal(moves.length,moved,'n/p re-entered jump mode after restore');
+    const moved=moves.length;panel.key('.');await tick();assert.equal(saved.selected.error,'1');assert.equal(moves.length,moved,'comma/period re-entered jump mode after restore');
     await jump(1);await ack();const cd=saved.cd;
     el('drc-restore-layers').onclick();await tick();assert.deepEqual(saved.cd,cd);
     await ack(moves.at(-1),'stale_state');assert(context.state.layers_isolated);assert.deepEqual(saved.cd,cd);assert(saved.focus_visible);

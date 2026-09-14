@@ -236,6 +236,7 @@ pub struct PatchDto {
     pub navigation: Field<Nav>,
     pub pixels: Field<(u32, u32)>,
     pub depth: Field<String>,
+    pub depth_step: Field<i8>,
     pub detail: Field<DetailDto>,
     pub thin: Field<ThinDto>,
     pub layers: Field<Selection>,
@@ -256,7 +257,7 @@ pub struct LayerChange {
 }
 impl PatchDto {
     pub fn core(self) -> Result<Patch, &'static str> {
-        let depth = self
+        let mut depth = self
             .depth
             .optional()
             .map(|s| {
@@ -271,6 +272,12 @@ impl PatchDto {
                 }
             })
             .transpose()?;
+        if let Some(delta) = self.depth_step.optional() {
+            if depth.is_some() || ![-1, 1].contains(&delta) {
+                return Err("depth_step requires -1 or 1 without depth");
+            }
+            depth = Some(Depth::Step(delta));
+        }
         let style_changes = self
             .styles
             .optional()
@@ -536,6 +543,9 @@ mod tests {
             r#"{"style_deltas":[{"pair":[1,0],"file":"secret"}]}"#,
             r#"{"style_deltas":[{"pair":[1,0],"width":1,"width":2}]}"#,
             r#"{"depth":null}"#,
+            r#"{"depth_step":null}"#,
+            r#"{"depth_step":"1"}"#,
+            r#"{"depth_step":1,"depth_step":-1}"#,
             r#"{"restore_layers":null}"#,
             r#"{"restore_layers":"yes"}"#,
             r#"{"layer_isolation":{"mode":"all"}}"#,
@@ -558,6 +568,9 @@ mod tests {
         for text in [
             r#"{"depth":"01"}"#,
             r#"{"depth":"-1"}"#,
+            r#"{"depth_step":0}"#,
+            r#"{"depth_step":2}"#,
+            r#"{"depth_step":1,"depth":"full"}"#,
             r#"{"navigation":{"kind":"goto","center_um":["NaN","0"],"width_um":"5"}}"#,
             r#"{"styles":[{"pair":[1,0],"color":"한글","fill":{"kind":"solid"},"width":1}]}"#,
             r#"{"style_deltas":[{"pair":[1,0],"color":"한글"}]}"#,

@@ -234,6 +234,30 @@ pub enum Navigation {
 pub enum Depth {
     Full,
     Levels(u32),
+    /// Relative input, resolved under the controller's state-revision lock.
+    Step(i8),
+}
+impl Depth {
+    pub fn stepped(current: Option<u32>, maximum: Option<u64>, delta: i8) -> Result<Self> {
+        if ![-1, 1].contains(&delta) {
+            return Err(Error::input("depth step must be -1 or 1"));
+        }
+        // GTK treats 999 as full, caps the setter at 999, and uses the real
+        // maximum (when known) before stepping down from full.
+        let cap = maximum.unwrap_or(999);
+        let cur = current.filter(|&n| n < 999).map_or(cap, u64::from);
+        let next = if delta < 0 {
+            cur.saturating_sub(1)
+        } else {
+            cur.saturating_add(1)
+        };
+        let next = next.min(cap).min(999) as u32;
+        Ok(if next == 999 {
+            Self::Full
+        } else {
+            Self::Levels(next)
+        })
+    }
 }
 #[derive(Clone, Debug)]
 pub enum LayerIsolation {
@@ -524,6 +548,9 @@ impl ViewState {
             s.depth = match depth {
                 Depth::Full => None,
                 Depth::Levels(n) => Some(n),
+                Depth::Step(_) => {
+                    return Err(Error::input("relative depth needs a live controller"))
+                }
             };
         }
         if let Some(detail) = patch.detail {

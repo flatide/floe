@@ -529,7 +529,7 @@ impl ViewController {
     }
     /// A conflict changes neither view nor pending render. Caller returns the
     /// authoritative snapshot, rather than retrying relative deltas blindly.
-    pub fn edit(&self, base_state_rev: u64, patch: Patch) -> Result<Snapshot> {
+    pub fn edit(&self, base_state_rev: u64, mut patch: Patch) -> Result<Snapshot> {
         let mut s = self.shared.lock().unwrap();
         if matches!(s.snapshot.phase, Phase::Closed | Phase::Failed)
             || self.stop.load(Ordering::Relaxed) != 0
@@ -541,6 +541,13 @@ impl ViewController {
         }
         if s.snapshot.state_rev != base_state_rev {
             return Err(Error::new(ErrorKind::Busy, "stale view state revision"));
+        }
+        if let Some(super::Depth::Step(delta)) = patch.depth {
+            patch.depth = Some(super::Depth::stepped(
+                s.snapshot.state.depth,
+                s.snapshot.max_depth,
+                delta,
+            )?);
         }
         let next = s.snapshot.state.edit(&self.model, patch)?;
         if next == s.snapshot.state {

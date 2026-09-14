@@ -13,6 +13,10 @@ snapshot의 `minimap`은 base 키·die·유계 화면 사각형만 포함하고,
 `view.set`의 `navigation:{kind:"minimap",point:[x,y]}`는180px 미니맵 좌표로
 동일 배율/16px 위상 이동을 요청한다. world 계산·범위 검증은 Rust에 있다
 ([M4 §41](WEBUI_M4.ko.md)). 아래 공유/카탈로그 API 초안을 구현한 것으로 보지 않는다.
+M4g-3은 live `view.set` body에 `depth_step:-1|1`을 추가한다. 절대 `depth`와
+동시 지정은 거부하고, controller가 CAS 락 안의 현재 depth와 native max_depth로
+해석한다. 초기 open body에서는 상대 depth를 거부한다. DRC 단축키는 기존 유계
+순회/owner editor API만 사용하며 새 게시 endpoint나 autosave를 추가하지 않는다.
 M2a의 현재 DRC 등록/읽기 URI·페이지·취소·focus/in_view·패널 상태·필터·순회·마커·
 CD·선택 집합·SVRF metadata/비교·타입 패널·격리/원자적 focus·ASCII API 계약은 [M2 기록](WEBUI_M2.ko.md) §2~21이
 기준이다. geometry reader는 read-only이며, 명시 opt-in한 owner의 주석 저장 endpoint는

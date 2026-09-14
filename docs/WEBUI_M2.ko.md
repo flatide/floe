@@ -3,6 +3,11 @@
 2026-09-13, `feature/webui`. [상위 계획](WEBUI_PLAN.ko.md),
 [기능 대조표](WEBUI_M0.ko.md), [M1b](WEBUI_M1B.ko.md).
 
+2026-09-15 단축키 정정: 아래 초기 M2 기록의 `n/p` 순회는 M4g-3에서 GTK에 맞춰
+**comma/period(이전/다음)**로 바꿨다. `n`은 주석 편집, `w`는 현재 상태에 따른
+waive 토글 제안으로 연결했다. 아래 순회/선택/이동 모드 계약은 그대로이며 주석·waive
+게시에는 별도 preview/명시 승인이 필요하다([M4 §42](WEBUI_M4.ko.md)).
+
 ## 1. M2a-1: 기존 ICE pack 읽기 서비스와 CLI
 
 `rust/app-core/src/drc/`는 native `floe-index drc`가 이미 만드는 **layout 4**

@@ -45,7 +45,8 @@ async function tick(){for(let i=0;i<150;i++)await Promise.resolve();}
 const noteReads=()=>requests.filter(r=>r.path===API+'/read');
 (async()=>{
     await panel.init();await tick();assert(!el('notes-read').disabled);assert.match(el('notes-selection').textContent,/2 selected.*across rules/);
-    await el('notes-read').onclick();assert.deepEqual(noteReads().at(-1).body.errors,[{check:'0',error:'0'},{check:'1',error:'1'}]);
+    assert(panel.key('n'));await tick();assert.deepEqual(noteReads().at(-1).body.errors,[{check:'0',error:'0'},{check:'1',error:'1'}]);
+    const keyReads=noteReads().length;assert(panel.key('n'));await tick();assert.equal(noteReads().length,keyReads,'repeat note key reread snapshot');
     assert.deepEqual(noteReads().at(-1).body.context,F.context);el('notes-text').value='two rules';el('notes-text').oninput();await el('notes-prepare').onclick();
     assert(!el('notes-review').hidden);const reads=noteReads().length;
     view.pending=true;view.state.state_rev='2';panel.contextChanged();await tick();assert(!el('notes-review').hidden);assert.equal(noteReads().length,reads,'pan triggered a note read');view.pending=false;

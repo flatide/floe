@@ -80,15 +80,15 @@ function paint(){for(const [id,fn] of [...raf]){raf.delete(id);fn();}panel.paint
     assert.equal(titleWrites,writes,'unchanged hover rewrote the DOM');assert.equal(requests.length,reads);
     panel.move(NaN,NaN);assert.equal(el('viewport').title,'');
     await toggle('drc-selected-only',true);assert.deepEqual(listIds(),[]);
-    panel.key('n');await tick();assert.match(el('drc-message').textContent,/No matching/);assert.equal(moves.length,0);
+    panel.key('.');await tick();assert.match(el('drc-message').textContent,/No matching/);assert.equal(moves.length,0);
     await toggle('drc-selected-only',false);assert.equal(list().length,64);
     const before=listCount();el('drc-errors').children[0].onclick({shiftKey:true});await tick();el('drc-errors').children[2].onclick({shiftKey:true});await tick();
     assert.equal(listCount(),before,'unfiltered group edit reloaded errors');
     el('drc-error-next').onclick();await tick();el('drc-errors').children[1].onclick({shiftKey:true});await tick();
     await toggle('drc-selected-only',true);assert.deepEqual(listIds(),[0,2,65]);
-    panel.key('n');await tick();assert.equal(saved.selected.error,'0');panel.key('p');await tick();assert.equal(saved.selected.error,'65');assert.equal(moves.length,0);
+    panel.key('.');await tick();assert.equal(saved.selected.error,'0');panel.key(',');await tick();assert.equal(saved.selected.error,'65');assert.equal(moves.length,0);
     await toggle('drc-in-view',true);assert.deepEqual(listIds(),[0,2]);
-    holdStep=true;panel.key('n');await tick();const oldStep=heldStep;
+    holdStep=true;panel.key('.');await tick();const oldStep=heldStep;
     context={...context,pending:true};panel.contextChanged();assert(oldStep.token.cancelled);assert.deepEqual(listIds(),[]);
     holdStep=false;oldStep.resolve();await tick();
     context={...context,pending:false,state:{...context.state,state_rev:'2',bbox_dbu:['64','0','128','20']}};

@@ -353,6 +353,91 @@ fn pan() -> Patch {
 }
 
 #[test]
+fn relative_depth_is_clamped_under_revision_lock() {
+    let r = Resources::new(Limits::default()).unwrap();
+    let m = model(false);
+    let c = Arc::new(Control::default());
+    c.open.store(false, Ordering::Relaxed);
+    let initial = ViewState::initial(&m, 80, 64).unwrap();
+    assert!(initial
+        .edit(
+            &m,
+            Patch {
+                depth: Some(Depth::Step(1)),
+                ..Default::default()
+            }
+        )
+        .is_err());
+    let mut v = start(&r, m, initial, c);
+    v.shared.lock().unwrap().snapshot.max_depth = Some(2);
+    for (delta, expected) in [(-1, 1), (1, 2), (1, 2), (-1, 1), (-1, 0), (-1, 0)] {
+        let before = v.snapshot();
+        let after = v
+            .edit(
+                before.state_rev,
+                Patch {
+                    depth: Some(Depth::Step(delta)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(after.state.depth, Some(expected));
+        assert_eq!(after.state.viewport, before.state.viewport);
+        assert_eq!(
+            after.state_rev == before.state_rev,
+            before.state.depth == Some(expected)
+        );
+    }
+    let before = v.snapshot();
+    assert!(v
+        .edit(
+            1,
+            Patch {
+                depth: Some(Depth::Step(1)),
+                ..Default::default()
+            }
+        )
+        .is_err());
+    for delta in [0, 2, -2, i8::MIN, i8::MAX] {
+        assert!(v
+            .edit(
+                before.state_rev,
+                Patch {
+                    depth: Some(Depth::Step(delta)),
+                    ..Default::default()
+                }
+            )
+            .is_err());
+    }
+    assert_eq!(v.snapshot().state_rev, before.state_rev);
+    v.close().unwrap();
+}
+
+#[test]
+#[ignore = "run tools/validate_depth_keys.py against the actual GTK depth step"]
+fn gtk_depth_step_oracle() {
+    let path = std::env::var_os("FLOE_DEPTH_CASES").unwrap();
+    let cases: Vec<serde_json::Value> =
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert!(cases.len() >= 100);
+    for case in &cases {
+        let got = Depth::stepped(
+            case["current"].as_u64().map(|n| n as u32),
+            case["maximum"].as_u64(),
+            case["delta"].as_i64().unwrap() as i8,
+        )
+        .unwrap();
+        let got = match got {
+            Depth::Full => None,
+            Depth::Levels(n) => Some(n),
+            Depth::Step(_) => unreachable!(),
+        };
+        assert_eq!(got.map(u64::from), case["want"].as_u64(), "{case}");
+    }
+    println!("GTK DEPTH KEYS: ALL OK ({} cases)", cases.len());
+}
+
+#[test]
 fn isolation_and_goto_are_atomic_and_restore_only_the_first_visibility() {
     let r = Resources::new(Limits::default()).unwrap();
     let mut m = model(false);

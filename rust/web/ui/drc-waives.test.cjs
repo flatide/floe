@@ -23,7 +23,9 @@ function harness(shared={model:catalog(),raw:null,writes:0,records:new Map()}){
     const c={context:clone(context),epoch:'9'.repeat(64),key:'groups:1',caption:'2 selected errors across rules',ready:true,
         rows:[{check:'0',error:'9007199254740993'},{check:'7',error:'0'}]};
     function el(id){assert(ids.has(id),'missing HTML '+id);if(!nodes.has(id))nodes.set(id,{value:'',textContent:'',disabled:false,hidden:false,checked:false,
-        focus(){},set innerHTML(_){throw Error('HTML injection');}});return nodes.get(id);}
+        focus(){if(!this.disabled&&!this.hidden&&!el('waives-panel').hidden&&
+            (!['waives-action','waives-consent'].includes(id)||!el('waives-editor').hidden)&&
+            (id!=='waives-consent'||!el('waives-review').hidden)){this.focused=true;}},set innerHTML(_){throw Error('HTML injection');}});return nodes.get(id);}
     function execute(r){
         if(r.method==='GET')return clone(shared.model);
         if(r.path.endsWith('/read'))return snapshot(r.body.context,r.body.errors.length,{review_rev:shared.model.review_rev});
@@ -51,6 +53,17 @@ function harness(shared={model:catalog(),raw:null,writes:0,records:new Map()}){
 }
 const writes=h=>h.calls.filter(r=>r.method==='POST'&&r.path===API);
 async function test(){
+    for(const waived of ['0','1','2']){
+        const key=harness();assert.equal(key.panel.open(),false);key.init();
+        key.override=r=>r.path.endsWith('/read')?snapshot(r.body.context,2,{waived_count:waived}):undefined;
+        assert(key.panel.open());assert(key.panel.open());await flush();
+        assert.equal(key.calls.filter(r=>r.path.endsWith('/read')).length,1);
+        assert.equal(key.el('waives-action').value,waived==='2'?'clear':'waive');
+        assert(key.el('waives-action').focused,'snapshot must reveal and enable editor before focus');
+        assert.equal(writes(key).length,0);assert.equal(key.calls.filter(r=>r.path.endsWith('/prepare')).length,0);
+        key.choose('clear');key.panel.open();assert.equal(key.el('waives-action').value,'clear','key overwrote existing draft');
+        key.panel.stop();assert.equal(key.panel.open(),false);
+    }
     const imported=harness();imported.init();imported.c.ready=false;imported.panel.transferLock(true);
     const whole={context:clone(context),token:'e'.repeat(64),reviewer:'fixed-owner',review_rev:'0'};
     assert(imported.panel.transferReady(true));assert.equal(await imported.panel.publishTransfer(whole,()=>false),false);assert.equal(writes(imported).length,0);
@@ -63,6 +76,7 @@ async function test(){
     const h=harness();h.panel.attach(null,h.reader);assert(h.el('waives-panel').hidden);assert.equal(h.calls.length,0);h.init();await h.read();
     assert.deepEqual(h.calls.at(-1).body.errors,h.c.rows);assert(h.el('waives-prepare').disabled);await h.prepare();assert.equal(h.calls.length,1);
     h.choose('waive');await h.prepare();assert.equal(writes(h).length,0);assert.match(h.el('waives-preview').textContent,/Waive 2/);assert(h.el('waives-approve').disabled);
+    assert(h.el('waives-consent').focused,'preview must enable consent before focus');
     await h.el('waives-approve').onclick();assert.equal(writes(h).length,0);await h.approve();await flush();
     assert.equal(h.shared.writes,1);assert.equal(h.shared.raw,null);assert.equal(h.el('waives-action').value,'');assert(h.panel.suspended());assert(h.reviewReads>0);
     assert.match(h.el('waives-status').textContent,/file saved/);assert.match(h.el('waives-status').textContent,/Reader updated/);

@@ -3425,3 +3425,57 @@ Rust1.89에서도 core218·web60·미니맵180건·native 스트림4건을 통�
 로그는 `/private/tmp/floe-minimap-battery.log`, `floe-minimap-msrv.log`,
 `floe-minimap-clippy.log`, `floe-minimap-ui-lifecycle.log`다.
 검증용 `.venv` symlink만 제거했으며 실제 가상환경·main의 기존 수정·feature/jobdeck은 보존했다.
+
+## 42. M4g-3 — depth 상대 입력과 DRC 단축키 정정
+
+현재 `floe/gui.py._on_key/_depth_step` 대조에서 누락된 `<`/`>`와 잘못 배정된
+DRC 순회 키를 이관했다. 범위는 UI-01/05의 이 입력들이다. q 종료 확인·Ctrl+,
+잡덱 모드 전환·전체 startup/single-instance·현장 입력 수용은 다음 작업으로 남긴다.
+native index/renderd 호환 버전0.12.87과 렌더 픽셀 정책은 바꾸지 않는다.
+
+- `<`/`>`는 절대값을 브라우저에서 추측하지 않고 `depth_step:-1|1`을 보낸다.
+  기존64개 입력 큐·ACK/snapshot 장벽을 사용하며 controller가 revision CAS 락 안에서
+  현재 depth와 native 최대 depth를 읽는다. 경계 no-op은 revision/렌더를 증가시키지 않는다.
+  stale revision·0/기타 delta·절대 depth와 동시 지정·null/중복 키는 거부한다.
+- GTK처럼 full(999 이상)은 실제 최대 depth에서 시작한다. 최대값 미확인 시999를
+  사용하며 결과는0..최대값, setter의999 한계에 맞춘다. 최대값이999 이상일 때도
+  saturating 산술로 처리한다. 초기 open은 relative depth를 허용하지 않는다.
+  기존 절대 depth 입력·9 9→full·view 배율/위치는 유지한다.
+- DRC 다음/이전은 **period/comma**다. 초기 웹 M2의 n/p는 제거한다. 현재 규칙·
+  Selected/In view·pagination·wrap·클릭/이동 모드·Escape 복원은 바꾸지 않는다.
+  오류 행의 위/아래도 그대로이고 입력칸·IME/modifier는 보호한다.
+- `n`은 기존 owner 주석 snapshot/editor, `w`는 기존 owner waive snapshot/editor를
+  연다. gold 선택 우선·없으면 현재 오류라는 기존 유계 선택을 재사용한다. 패널이
+  닫혀 있으면 열고 해당 입력으로 포커스를 옮긴다. 권한 없는 세션은 안내만 보인다.
+- `w`의 신규 snapshot에서 모두 waived이면 Clear waive, 그 외/혼합이면 Waive를
+  미리 선택한다. reserved 상태는 기존 경고/명시 승인 계약을 유지한다. **키 자체는
+  prepare/게시를 하지 않는다.** preview·체크 승인·이전 파일/legacy 검증이 계속 필요하다.
+  이미 열린 편집기는 초안을 보존하고 재포커스만 한다. 반복 키는 읽기/게시를 늘리지 않는다.
+
+`validate_depth_keys.py`는 실제 GTK 함수 AST를 실행해200개 현재/최대/depth 방향
+조합을 Rust와 대조한다(미확인·0·999 경계·u32/u64 최대 포함). 개발 gate만 Python을
+사용한다. controller 단위 테스트는 CAS/no-op/거부 시 상태 보존을, native HTTP/WS는
+full→1→2→경계→1→0→경계의 프레임·camera 보존을 검사한다. 실제 UI 회귀는
+연속 depth 입력의 ACK 대기·modifier/IME, DRC 순회/필터/복원, real editor 배선,
+반복 읽기 억제·선택 ID 보존·혼합/all-waived 토글 제안·자동 게시 없음을 검사한다.
+
+로컬 Chrome에서 full→1→2 depth 이동의471.129×446.051µm camera 보존,
+period로Global1 선택·comma로Global3 wrap, n/w의 실제 편집기 진입과 Escape 폐기를
+확인했다. 첫 시각 검증에서 기존 snapshot/preview 코드가 아직 hidden/disabled인
+입력에 focus하던 문제를 발견했다. IO 해제와 render 이후에만 focus하도록 notes와
+waives를 고치고, disabled/hidden이면 focus되지 않는 회귀 모델에서 실패→통과를
+확인했다. 재빌드한 Chrome에서 주석 입력칸 및 Waive 선택칸 focus를 재확인했다.
+이 브라우저 검증은 preview/게시·업로드·공유 기본값을 사용하지 않았다. 두 번의
+End session 모두 서버 exit0과 접속 파일 제거를 확인했고 합성 디렉터리
+`/private/tmp/floe-keys-ui.RnHbRW`에 notes/waive sidecar가 생기지 않았다.
+
+전체 `sh tools/validate_rust.sh`는 exit0·`RUST VALIDATION: ALL OK`다. core219·web60·
+HTTP12, GTK depth200·미니맵180·band352, native 스트림5건, jobdeck80·renderer46,
+KLayout13 PX+2 phase-exact+14 style(jobs1/8)을 통과했다. 별도 드라이버로 실행하는
+core oracle2건은 일반 cargo test에서는 ignored이지만 배터리에서 필수 실행한다.
+Rust1.89에서도 core219·web60·depth200·native 스트림5건을 통과했다.
+브라우저에서 보강한 focus 수정 후 전체 ES2017 UI gate·release 자산 빌드,
+app-core/web/app clippy `--no-deps --all-targets -D warnings`와 변경 Rust 파일
+scoped rustfmt/check를 다시 통과했다. 로그는 `/private/tmp/floe-keys-battery.log`,
+`floe-keys-msrv.log`, `floe-keys-ui-focus.log`, `floe-keys-clippy.log`다.
+기존 dependency 경고·현장 Firefox/ETX·남은 입력/운영 수용은 별도다.

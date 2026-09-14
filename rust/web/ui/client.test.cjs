@@ -399,6 +399,16 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     node('viewport').keydown({key:'a',ctrlKey:true,preventDefault(){}});assert.equal(second.sent.at(-1).body.navigation.kind,'fit');await applied(false);
     node('viewport').keydown({key:'9',preventDefault(){}});assert.equal(second.sent.at(-1).body.depth,'9');await applied();
     node('viewport').keydown({key:'9',preventDefault(){}});assert.equal(second.sent.at(-1).body.depth,'full');await applied();
+    node('viewport').keydown({key:'<',shiftKey:true,preventDefault(){}});assert.deepEqual(second.sent.at(-1).body,{depth_step:-1});
+    const firstDepthSeq=second.sent.at(-1).seq;
+    node('viewport').keydown({key:'>',shiftKey:true,preventDefault(){}});assert.equal(second.sent.at(-1).seq,firstDepthSeq,'relative depth bypassed inflight CAS');
+    await applied();await wait(()=>second.sent.at(-1).seq!==firstDepthSeq);
+    assert.deepEqual(second.sent.at(-1).body,{depth_step:1});await applied();
+    const depthCount=second.sent.length;
+    for(const extra of [{ctrlKey:true},{metaKey:true},{altKey:true},{isComposing:true}]){
+        node('viewport').keydown({key:'<',preventDefault(){assert.fail('modified/composing depth key consumed');},...extra});
+    }
+    assert.equal(second.sent.length,depthCount);
     // Free mouse pan has no network traffic while moving and preserves the
     // translated foreground until its new (non-16px) native phase arrives.
     second.receive(packet('raw','11',snapshot.render_rev,nextEpoch));

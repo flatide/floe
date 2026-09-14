@@ -57,7 +57,7 @@
           <p class="note">Click to recenter · same zoom · 16px aligned. Structural boxes, not rendered geometry.</p>
         </details>
         <h2>Display</h2>
-        <div class="form-row"><label for="depth">Depth <span id="max-depth"></span></label><input id="depth" value="full" title="full or a nonnegative depth" class="short" disabled></div>
+        <div class="form-row"><label for="depth">Depth <span id="max-depth"></span></label><input id="depth" value="full" title="full or a nonnegative depth; canvas &lt; / &gt; steps, 9 9 selects full" class="short" disabled></div>
         <div class="form-row"><label for="detail">Detail</label><select id="detail" disabled><option value="low">Low · 5 px</option><option value="medium" selected>Medium · 3 px</option><option value="high">High · 1 px</option><option value="exact">Exact · no cut</option></select></div>
         <div class="form-row"><label for="thin">Thin shapes</label><select id="thin" disabled><option value="auto">Auto</option><option value="keep">Keep · mask</option><option value="cull">Cull · layout</option></select></div>
         <div class="check-row"><label class="check"><input id="frames" type="checkbox" disabled> Frames</label><label class="check"><input id="labels" type="checkbox" disabled> Labels</label><label class="check"><input id="mono" type="checkbox" disabled> Mono</label></div>
@@ -167,7 +167,7 @@
         <div class="zoom-buttons"><button id="zoom-out" type="button" disabled title="Zoom out (−)">−</button><button id="zoom-in" type="button" disabled title="Zoom in (+)">+</button></div>
         <div class="goto-fields"><label>X <input id="goto-x" value="0" inputmode="decimal" aria-label="Center X in micrometres"></label><label>Y <input id="goto-y" value="0" inputmode="decimal" aria-label="Center Y in micrometres"></label><label>View <input id="goto-width" value="700" inputmode="decimal" aria-label="View width in micrometres"></label><span>µm</span><button id="goto" disabled>Go</button></div>
       </form>
-      <div id="viewport" class="viewport" tabindex="0" aria-label="Layout canvas. Click selects a shape; repeat cycles overlaps; Shift adds; Ctrl or Command toggles. R starts two-point rulers; Shift allows free angles; M toggles snap; K undoes; Shift+K clears rulers. Left or middle drag and arrow keys pan. Right drag rightwards zooms into a box; leftwards zooms out; Escape cancels. Shift plus arrow pans ten percent; plus and minus zoom; Ctrl+A fits; F toggles frames. Tab cycles overlays; Shift+Tab leaves the canvas. Ctrl or Command+C copies visible pixels.">
+      <div id="viewport" class="viewport" tabindex="0" aria-label="Layout canvas. Click selects a shape; repeat cycles overlaps; Shift adds; Ctrl or Command toggles. R starts two-point rulers; Shift allows free angles; M toggles snap; K undoes; Shift+K clears rulers. Left or middle drag and arrow keys pan. Right drag rightwards zooms into a box; leftwards zooms out; Escape cancels. Shift plus arrow pans ten percent; plus and minus zoom; Ctrl+A fits; F toggles frames. Less/greater steps depth; digits choose depth, 9 9 selects full. Comma/period steps DRC errors; N opens notes; W proposes a waive toggle, with separate save approval. Tab cycles overlays; Shift+Tab leaves the canvas. Ctrl or Command+C copies visible pixels.">
         <div id="notice" class="notice" role="alert" hidden></div>
         <canvas id="margin-canvas" width="1" height="1" aria-hidden="true" hidden></canvas>
         <canvas id="canvas" width="1" height="1" aria-label="Rendered layout"></canvas>
@@ -219,7 +219,8 @@
       </section>
       <div id="drc-errors" class="drc-errors" aria-label="DRC errors"></div>
       <div class="pagination"><button id="drc-error-prev" aria-label="Previous error page" disabled>←</button><span>Error pages</span><button id="drc-error-next" aria-label="Next error page" disabled>→</button></div>
-      <div class="button-row"><button id="drc-step-prev" title="Previous matching error in this rule, wrapping (p)" disabled>Previous error</button><button id="drc-step-next" title="Next matching error in this rule, wrapping (n)" disabled>Next error</button></div>
+      <div class="button-row"><button id="drc-step-prev" title="Previous matching error in this rule, wrapping (comma)" disabled>Previous error</button><button id="drc-step-next" title="Next matching error in this rule, wrapping (period)" disabled>Next error</button></div>
+      <p class="note">Comma / period: previous / next error. N: note editor. W: propose a waive toggle. Review writes still need preview and explicit approval.</p>
       <button id="drc-step-continue" hidden>Continue search</button>
       <div class="drc-selection"><p id="drc-selected" class="note">Click to inspect · double-click to go to an error.</p><div class="button-row"><button id="drc-frame" disabled>Frame error</button><button id="drc-clear" disabled>Clear</button></div></div>
       <section id="notes-panel" class="notes-panel" aria-label="Owner DRC notes" hidden>

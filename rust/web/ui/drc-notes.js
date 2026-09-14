@@ -167,7 +167,7 @@
             let rows;try{rows=refs(c.references(),P);if(rows.length!==c.count){fail();}}catch(e){notice=e.message;render();return;}
             const saved=keep?el('notes-text').value:null;
             if(editor){invalidate('Reloading snapshot.');}
-            const t={selection:c,cancelled:false,abort:null,sent:o.now()};io=t;notice='Reading selected notes. No file is changed.';render();
+            const t={selection:c,cancelled:false,abort:null,sent:o.now()};let focus=false;io=t;notice='Reading selected notes. No file is changed.';render();
             try{const v=preview(await o.http('POST',API+'/read',{context:c.context,errors:rows},false,t),c.context,c.count,P,false);
                 if(t.cancelled||io!==t||!same(c)){revoke(v.token);return;}
                 if(v.reviewer!==model.reviewer){fail();}
@@ -177,14 +177,15 @@
                 el('notes-target').textContent=c.caption+'\n'+v.name+'\n'+v.existing_count+' selected errors already have notes.';
                 notice=(v.mixed?'Selected notes differ. Saving will replace all selected notes with this text.':'Note snapshot loaded.')+
                     (saved!==null?' Local text retained; review against this new snapshot.':'')+(reportText(v.import_report)?'\nExisting file parse report: '+reportText(v.import_report):'');
-                expiry=o.setTimeout(changed,Math.max(0,editor.until-o.now()));el('notes-text').focus();
+                expiry=o.setTimeout(changed,Math.max(0,editor.until-o.now()));focus=true;
             }catch(e){if(!t.cancelled&&io===t){notice=errors[e.code]||e.message;}}
-            finally{if(io===t){io=null;changed();}}
+            // Hidden/disabled controls cannot receive browser focus. Render after releasing IO first.
+            finally{if(io===t){io=null;changed();if(focus&&editor&&!editor.invalid&&!el('notes-text').disabled){el('notes-text').focus();}}}
         }
         async function prepare(){
             changed();if(el('notes-prepare').disabled){return;}const e=editor,c=e.selection,token=e.token;
             e.token=null;e.invalid=true;o.clearTimeout(expiry);expiry=null;
-            const t={selection:c,cancelled:false,abort:null,sent:o.now()};io=t;notice='Preparing the selected edit. No file is changed.';render();
+            const t={selection:c,cancelled:false,abort:null,sent:o.now()};let focus=false;io=t;notice='Preparing the selected edit. No file is changed.';render();
             try{const v=preview(await o.http('POST',API+'/prepare',{context:c.context,token:token,text:el('notes-text').value},false,t),c.context,c.count,P,true);
                 if(t.cancelled||io!==t||editor!==e||!same(c)){revoke(v.token);return;}if(v.reviewer!==model.reviewer){fail();}
                 draft=v;e.invalid=false;e.until=Math.min(t.sent+30000,o.now()+Number(v.expires_in_ms));
@@ -193,9 +194,9 @@
                 el('notes-report').textContent=reportText(v.import_report)?'Existing file parse report: '+reportText(v.import_report):'';
                 el('notes-legacy-row').hidden=!v.legacy_unverified;el('notes-consent').checked=el('notes-legacy').checked=false;
                 notice='Review the exact text above. Approval expires after 30 seconds. Layout and waive files are not changed.';
-                expiry=o.setTimeout(changed,Math.max(0,e.until-o.now()));el('notes-consent').focus();
+                expiry=o.setTimeout(changed,Math.max(0,e.until-o.now()));focus=true;
             }catch(error){if(!t.cancelled&&io===t){notice=(errors[error.code]||error.message)+' Your text is retained. Reload the snapshot to prepare again.';}}
-            finally{if(io===t){io=null;changed();}}
+            finally{if(io===t){io=null;changed();if(focus&&draft&&!el('notes-consent').disabled){el('notes-consent').focus();}}}
         }
         function clearEditor(notify){if(notify){invalidate('Draft discarded.');}else{o.clearTimeout(expiry);expiry=null;}
             editor=draft=null;el('notes-text').value='';el('notes-preview').textContent='';el('notes-consent').checked=el('notes-legacy').checked=false;}
@@ -236,6 +237,7 @@
         render();
         return {attach:function(value){if(!value){if(!enabled){render();}return;}try{const v=catalog(value,P);if(!enabled){enabled=true;recover();}install(v);changed();schedule();}
                 catch(e){stale=true;notice=e.message;render();}},changed:changed,refresh:refresh,
+            open:function(){if(!enabled||stopped){return false;}changed();if(editor){el('notes-text').focus();}else{read(false);}return true;},
             transferReady:transferReady,transferLock:function(value){transferLocked=value===true;render();},publishTransfer:publishTransfer,
             stop:function(final){stopped=true;stale=true;approving=null;clearEditor(false);if(write){uncertain=true;}
                 [io,poll,write,cancelling,revokeTask].forEach(abort);io=poll=write=cancelling=revokeTask=null;revokeNext=null;o.clearTimeout(timer);timer=null;

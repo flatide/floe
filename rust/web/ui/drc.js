@@ -398,7 +398,7 @@
                 if (!valid('restore-layers', t, c)) { return; }
                 t.abort = null;
                 if (error) { info(error); navigationButtons(); return; }
-                isolationNotice = ''; resetCD(); endFocus(); // Keep the selected cursor for click-mode n/p.
+                isolationNotice = ''; resetCD(); endFocus(); // Keep the selected cursor for comma/period.
                 info('Layer visibility restored · error focus cleared.'); navigationButtons(); savePanel();
             });
             navigationButtons(); return true;
@@ -506,7 +506,7 @@
             resetCD();
             jumpActive = focusVisible = rowFocus = false;
             noteTarget=null;if(noteDisplay){noteDisplay.sync();}
-            if (selected) { el('drc-selected').textContent = 'Global ' + selected.global + ' · focus cleared; n/p continues without moving the view.'; }
+            if (selected) { el('drc-selected').textContent = 'Global ' + selected.global + ' · focus cleared; comma/period continues without moving the view.'; }
             info('Focus cleared · pending error search cancelled.');
             paintLater(); navigationButtons(); savePanel(); return true;
         }
@@ -626,8 +626,10 @@
                 b.ondblclick = function (e) { if (e && (e.ctrlKey || e.shiftKey || e.metaKey || e.altKey)) { return; } cancelStep(); select(r, true); };
                 b.onkeydown = function (e) {
                     if (e.ctrlKey || e.metaKey || e.altKey || e.isComposing) { return; }
-                    if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'n' || e.key === 'p') {
-                        e.preventDefault(); step(e.key === 'ArrowUp' || e.key === 'p', false, true);
+                    if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === '.' || e.key === ',') {
+                        e.preventDefault(); step(e.key === 'ArrowUp' || e.key === ',', false, true);
+                    } else if (e.key === 'n' || e.key === 'w') {
+                        e.preventDefault(); reviewKey(e.key);
                     } else if (e.key === 'Escape' && ((o.rulerKey && o.rulerKey(e.key)) || escape())) { e.preventDefault(); }
                     else if ((e.key === 'k' || e.key === 'K') && ((o.rulerKey && o.rulerKey(e.key)) || popCD(e.key === 'K'))) { e.preventDefault(); }
                 };
@@ -886,7 +888,7 @@
                     const page = await read('restore', t, c, {kind: 'geometry', check: ref.check, error: ref.error, start: '0', limit: 1}); if (!page) { return; }
                     selected = validateRows([page])[0]; points = null; pointsReady = false;
                     loadComparison(selected);
-                    el('drc-selected').textContent = 'Global ' + selected.global + (focusVisible ? ' · bounding-box preview' : ' · focus cleared; n/p continues without moving the view.');
+                    el('drc-selected').textContent = 'Global ' + selected.global + (focusVisible ? ' · bounding-box preview' : ' · focus cleared; comma/period continues without moving the view.');
                     if (focusVisible) { geometry(selected); }
                 }
                 if (cdTarget && cdRemaining) { loadCD(); } showCD();
@@ -995,6 +997,13 @@
         el('drc-cd-pop').onclick = function () { popCD(false); };
         el('drc-cd-clear').onclick = function () { popCD(true); };
         el('drc-markers').onchange = function () { if (!el('drc-markers').checked) { boxReset(true); } showCD(); savePanel(); };
+        function reviewKey(key) {
+            if(!current()){return false;}
+            const editor=key==='n'?notes:waives;
+            if(!shown){shown=true;el('drc-panel').hidden=false;el('drc-toggle').setAttribute('aria-expanded','true');o.resize();savePanel();}
+            if(!editor||!editor.open()){info(key==='n'?'Notes require an enabled owner note session.':'Waives require an enabled owner waive session.');}
+            return true;
+        }
         el('drc-box').onclick = toggleBox;
         el('drc-group-clear').onclick = groupClear;
         el('drc-toggle').onclick = function () { shown = !shown; el('drc-panel').hidden = !shown; el('drc-toggle').setAttribute('aria-expanded', String(shown)); o.resize(); savePanel(); };
@@ -1011,7 +1020,8 @@
                 if (key === 'Escape') { return escape(); }
                 if (key === 'k' || key === 'K') { return popCD(key === 'K'); }
                 if (key === 'e') { return toggleBox(); }
-                if ((key === 'n' || key === 'p') && rule && current()) { step(key === 'p', false, false); return true; }
+                if (key === 'n' || key === 'w') { return reviewKey(key); }
+                if ((key === '.' || key === ',') && rule && current()) { step(key === ',', false, false); return true; }
                 return false;
             },
             stop: function (final) { stopped = true; if(transfers){transfers.stop(final);} if(noteDisplay){noteDisplay.stop();} if (notes) { notes.stop(final); } if (waives) { waives.stop(final); } if (builds) { builds.stop(); } ++restoreTurn; clearTimeout(filterTimer); filterTimer = null; persistence.close(); groups.close(); bound = ''; boxReset(true); cancelAll(); clearTimeout(timer); if (painting !== null) { o.window.cancelAnimationFrame(painting); painting = null; } overlay.hidden = true; },

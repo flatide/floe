@@ -55,7 +55,8 @@ const readCount=()=>requests.filter(r=>r.body&&r.body.body).length;
 (async()=>{
     await panel.init();await tick();assert(!el('waives-read').disabled);assert.equal(el('drc-review-mode').textContent,'OWNER REVIEW');
     await el('notes-read').onclick();el('notes-text').value='Preserve this unapproved note';el('notes-text').oninput();await el('notes-prepare').onclick();
-    await el('waives-read').onclick();assert.deepEqual(requests.at(-1).body.errors,[{check:'0',error:'0'},{check:'1',error:'1'}]);
+    assert(panel.key('w'));await tick();assert.deepEqual(requests.at(-1).body.errors,[{check:'0',error:'0'},{check:'1',error:'1'}]);
+    assert.equal(el('waives-action').value,'waive');assert.equal(requests.filter(r=>r.path===API&&r.method==='POST').length,0);
     el('waives-action').value='waive';el('waives-action').onchange();await el('waives-prepare').onclick();
     const reads=requests.filter(r=>r.path===API+'/read').length;view.pending=true;view.state.state_rev='2';panel.contextChanged();await tick();
     assert(!el('waives-review').hidden);assert.equal(requests.filter(r=>r.path===API+'/read').length,reads);view.pending=false;
