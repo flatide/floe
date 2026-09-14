@@ -111,6 +111,26 @@ def inspect_archive(path, work):
     assert set(listed) == files - {"SHA256SUMS"}
     for name, digest in listed.items():
         assert hashlib.sha256((bundle / name).read_bytes()).hexdigest() == digest, name
+    index_bytes = (bundle / "NOTICE-INDEX.json").read_bytes()
+    index_id = hashlib.sha1(index_bytes).hexdigest()
+    index = json.loads(index_bytes)
+    assert index["format"] == 1 and len(index_bytes) <= 2 * 1024 * 1024
+    assert {f["name"] for f in index["files"]} == {n for n in listed if n.startswith("NOTICES/")}
+    for f in index["files"]:
+        data = (bundle / f["name"]).read_bytes()
+        assert len(data) == f["bytes"]
+        at = 0
+        for page in f["pages"]:
+            assert page["offset"] == at and 0 <= page["bytes"] <= 65536
+            raw = data[at:at + page["bytes"]]
+            assert hashlib.sha1(raw).hexdigest() == page["digest"]
+            if f["encoding"] == "utf8":
+                raw.decode("utf8")
+            else:
+                assert f["encoding"] == "hex"
+            at += len(raw)
+        assert at == len(data)
+    assert index_id.encode() in (bundle / "floe2-web").read_bytes(), "catalogue ID not embedded in the app"
     assert {p.name for p in bundle.iterdir() if p.is_file() and p.read_bytes()[:4] == b'\x7fELF'} == {"floe2-web", "floe-index", "floe-renderd"}
     assert not any(p.suffix in (".py", ".so") for p in bundle.rglob("*"))
     env = dict(os.environ, FLOE_INDEX_BIN="/invalid-index", FLOE_RENDERD_BIN="/invalid-renderd")

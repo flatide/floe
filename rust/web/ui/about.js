@@ -1,11 +1,13 @@
 /* ES2017. Read-only modal, independent of layout/view and render generations. */
 (function(root) {
     'use strict';
+    const N=typeof module==='object'&&module.exports?require('./notices.js'):root.FloeNotices;
     function parse(v,bundle) {
         function text(s,max){return typeof s==='string'&&s.length>0&&s.length<=max;}
         if(!v||v.product!=='floe2-web'||v.bundle!==bundle||v.python_runtime!==false||
-            v.desktop_acceptance!=='unverified'||v.notice_scope!=='embedded_font_only'||
+            v.desktop_acceptance!=='unverified'||!v.notices||v.notice_scope!==(v.notices.status==='available'?'portable_manifest':'embedded_font_only')||
             v.font_name!=='Noto Sans Mono'||!text(v.font_notice,16384)){throw new Error('Invalid About response');}
+        N.metadata(v.notices);
         if(v.build!==null){
             if(!v.build||['app_version','source_revision','target','index_compatibility','renderd_compatibility'].some(function(k){
                 return !text(v.build[k],128)||!/^[\x21-\x7e]+$/.test(v.build[k]);
@@ -22,10 +24,11 @@
     }
     function bind(o) {
         const el=o.el,doc=o.document,panel=el('about-dialog'),button=el('about-open');
+        const notices=N.bind({el:el,document:doc,http:o.http});
         let enabled=false,opened=false,task=null,prior=null,hidden=[];
         function cancel(){if(task){task.cancelled=true;if(task.abort){task.abort();}task=null;}}
         function close(restore) {
-            cancel();if(!opened){return;}opened=false;panel.hidden=true;button.setAttribute('aria-expanded','false');
+            cancel();notices.close();if(!opened){return;}opened=false;panel.hidden=true;button.setAttribute('aria-expanded','false');
             hidden.forEach(function(p){if(p[1]===null){p[0].removeAttribute('aria-hidden');}else{p[0].setAttribute('aria-hidden',p[1]);}});hidden=[];
             if(restore){const target=prior&&doc.contains(prior)?prior:button;target.focus();}prior=null;
         }
@@ -37,6 +40,7 @@
             try{const v=parse(await o.http('GET','/api/v1/about',undefined,false,t),o.bundle);
                 if(t.cancelled||task!==t||!opened){return;}
                 el('about-build').textContent=describe(v);el('about-font').textContent=v.font_notice;el('about-status').textContent='Read-only · no render or selfcheck was started.';
+                notices.open(v.notices);
             }catch(e){if(!t.cancelled&&task===t&&opened){el('about-status').textContent='About could not be read. Close and reopen to retry. '+e.message;}}
             finally{if(task===t){task=null;}}
         }
@@ -46,7 +50,7 @@
             if(!opened){return;}e.stopPropagation();
             if(e.key==='Escape'){e.preventDefault();close(true);return;}
             if(e.key==='Tab'){
-                const items=Array.from(panel.querySelectorAll('button, [tabindex="0"]'));
+                const items=Array.from(panel.querySelectorAll('button, input, [tabindex="0"]')).filter(function(n){return !n.disabled&&n.getClientRects().length>0;});
                 const index=items.indexOf(doc.activeElement);
                 if(index<0||e.shiftKey&&index===0||!e.shiftKey&&index===items.length-1){
                     e.preventDefault();items[e.shiftKey?items.length-1:0].focus();

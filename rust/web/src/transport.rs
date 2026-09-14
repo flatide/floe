@@ -138,6 +138,8 @@ pub struct Gateway {
     pub(crate) defaults: Option<Arc<crate::defaults::Service>>,
     startup: Option<serde_json::Value>,
     pub(crate) build: Option<crate::about::BuildInfo>,
+    pub(crate) notices: crate::about::Notices,
+    pub(crate) notice_readers: Arc<Semaphore>,
     pub(crate) output_bytes: Arc<Semaphore>,
     pub(crate) encoders: Arc<Semaphore>,
     pub(crate) settings_ops: Arc<Semaphore>,
@@ -166,6 +168,8 @@ impl Gateway {
                 defaults: None,
                 startup: None,
                 build: None,
+                notices: crate::about::Notices::NotPackaged,
+                notice_readers: Arc::new(Semaphore::new(1)),
                 output_bytes: Arc::new(Semaphore::new(crate::view::OUTPUT_BUDGET)),
                 encoders: Arc::new(Semaphore::new(2)),
                 settings_ops: Arc::new(Semaphore::new(1)),
@@ -183,6 +187,12 @@ impl Gateway {
             return Err("build identity already attached".into());
         }
         g.build = Some(info);
+        Ok(())
+    }
+    pub fn attach_notices(gate: &mut Gate, notices: crate::about::Notices) -> Result<(), String> {
+        Arc::get_mut(gate)
+            .ok_or("gateway already published")?
+            .notices = notices;
         Ok(())
     }
     /// A trusted local launcher supplies the controller, never an HTTP path.
@@ -383,6 +393,8 @@ pub fn router(gate: Gate) -> Router {
         .route("/api/v1/session", delete(logout))
         .route("/api/v1/capabilities", get(capabilities))
         .route("/api/v1/about", get(crate::about::read))
+        .route("/api/v1/about/notices/{start}", get(crate::about::list))
+        .route("/api/v1/about/notices/{id}/{page}", get(crate::about::page))
         .route("/api/v1/events", get(upgrade))
         .route("/api/v1/view", get(current_view))
         .route("/api/v1/startup", get(startup))

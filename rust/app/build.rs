@@ -18,6 +18,17 @@ fn valid_revision(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || b"._-+".contains(&c))
 }
 fn main() {
+    println!("cargo:rerun-if-env-changed=FLOE_NOTICE_INDEX_SHA1");
+    let notice = env::var("FLOE_NOTICE_INDEX_SHA1").unwrap_or_default();
+    assert!(
+        notice.is_empty()
+            || notice.len() == 40
+                && notice
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+        "invalid FLOE_NOTICE_INDEX_SHA1"
+    );
+    println!("cargo:rustc-env=FLOE_NOTICE_INDEX_SHA1={notice}");
     println!("cargo:rerun-if-env-changed=FLOE_SRC_REV");
     println!("cargo:rerun-if-changed=src");
     println!(

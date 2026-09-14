@@ -24,6 +24,7 @@
   <script defer src="/assets/@@BUNDLE@@/drc.js"></script>
   <script defer src="/assets/@@BUNDLE@@/settings.js"></script>
   <script defer src="/assets/@@BUNDLE@@/defaults.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/notices.js"></script>
   <script defer src="/assets/@@BUNDLE@@/about.js"></script>
   <script defer src="/assets/@@BUNDLE@@/app.js"></script>
 </head>
@@ -307,10 +308,18 @@
       <p id="about-status" role="status"></p>
       <pre id="about-build" tabindex="0" aria-label="Build identity"></pre>
       <p class="note">Native versions above are the launcher's expected compatibility versions, not source hashes of running tools. Revision “unknown” has no Git provenance; a trailing “+” reports a dirty tree observed at build time. These are diagnostics, not signatures.</p>
-      <p class="note">Linux, Firefox/ETX and shared-server acceptance still require field validation. This panel does not run selfcheck, open files or change the view.</p>
+      <p class="note">Linux, Firefox/ETX and shared-server acceptance still require field validation. This panel reads build identity and packaged notices only; it does not run selfcheck, open design files or change the view.</p>
       <h2>Distribution notices</h2>
-      <p>Portable packages contain the full collected material in NOTICES/ (starting with INVENTORY.txt). Use verify.sh to check the package hashes. This panel currently shows only the embedded font notice, not the complete dependency or toolchain inventory.</p>
+      <p>Portable packages contain the collected original material in NOTICES/ (starting with INVENTORY.txt). Use verify.sh to check the complete package hashes. The reader below displays one bounded source chunk at a time, not executable HTML.</p>
       <p class="note">The inventory includes build dependencies and may include components not linked at runtime. It is not legal clearance or a grant of Floe distribution rights. Development executables may have no adjacent notice bundle.</p>
+      <p id="notice-availability" role="status"></p>
+      <div id="notice-catalog" hidden>
+        <div class="button-row"><button id="notice-list-prev">Previous files</button><button id="notice-list-next">More files</button><button id="notice-list-retry">Reload list</button></div>
+        <p id="notice-list-status" role="status"></p><div id="notice-files" aria-label="Portable notice files"></div>
+        <h3 id="notice-title"></h3>
+        <div class="button-row notice-pages"><button id="notice-prev">Previous page</button><button id="notice-next">Next page</button><label>Page <input id="notice-jump" inputmode="numeric" size="5" aria-label="Notice page number"></label><button id="notice-go">Go to page</button><button id="notice-retry">Retry page</button></div>
+        <p id="notice-page-status" role="status"></p><pre id="notice-text" tabindex="0" aria-label="Original notice source"></pre>
+      </div>
       <h2>Noto Sans Mono · Original font notice</h2>
       <pre id="about-font" tabindex="0" aria-label="Original font license"></pre>
     </section>

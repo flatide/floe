@@ -9,6 +9,7 @@ description = "Authenticated loopback transport for the floe2 web migration"
 [dependencies]
 floe-app-core = { path = "../app-core" }
 floe-worker-client = { path = "../worker-client" }
+floe-notices = { path = "../notices" }
 bytes = "=1.12.1"
 futures-util = { version = "=0.3.34", default-features = false, features = ["sink", "std"] }
 axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "tokio", "ws"] }

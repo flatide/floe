@@ -261,7 +261,9 @@ M4f-2는 별도 `make_web_portable.sh`의 Rust 조립·ELF 감사·고지 수집
 비덮어쓰기 archive 게시다([안내](WEBUI_PORTABLE.ko.md)). macOS에서 실제 musl archive의
 조립/재배치/hash는 검사하지만 Linux 실행·현장 수용 및 About UI 완료와 구분한다.
 M4f-3a는 About 빌드 식별과 내장 글꼴 원문 고지까지다([M4 §38](WEBUI_M4.ko.md)).
-전체 portable 고지의 유계 UI 열람은 M4f-3b에 남으므로 SYS-02 전체를 닫지 않는다.
+M4f-3b는 새 portable의 compiled 목록과 검증된 원본 chunk를 유계 UI로 읽는다
+([M4 §39](WEBUI_M4.ko.md)). 실제 Linux/Firefox/ETX·남은 UI parity 수용은 별도이므로
+SYS-02 전체를 닫지 않는다.
 
 UI-05 일부는 M4d-1에서 연결했다: 표시된 layout/annotation PNG 복사·저장, overlay
 3상태, canvas 단축키와 텍스트/IME 보호. 실제 clipboard/다운로드·현장 Firefox/ETX

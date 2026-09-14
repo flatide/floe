@@ -10,3 +10,4 @@ description = "Offline development-only Rust web portable assembler"
 libc = "0.2"
 signal-hook = { version = "=0.4.4", default-features = false }
 serde_json = "=1.0.151"
+floe-notices = { path = "../notices" }

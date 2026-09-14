@@ -4,7 +4,7 @@
 `tools/make_web_portable.sh`를 사용한다. 기본 GTK 실행기나 설치를 교체하지 않는다.
 실행 파일은 `floe2-web`, `floe-index`, `floe-renderd` 세 개이며 UI/font는 Rust에 내장된다.
 Python/GTK/KLayout/Node/브라우저는 패키지에 넣지 않는다. 개발용 packager도 Rust이며
-기존 vendor의 libc/signal-hook/serde_json만 사용한다.
+기존 vendor 의존성만 사용한다. 고지 목록의 content ID에는 기존 sha1을 재사용한다.
 
 ## 만들기
 
@@ -53,6 +53,8 @@ packager 실행 중 SIGINT/SIGTERM은 직접 소유한 빌드 프로세스 그�
    선택 툴체인의 copyright/library copyright/licenses를 보존한다.
    `--extra-notices DIR`로 추가 고지를 명시할 수 있다. 목록은 법적 배포 승인이나
    Floe 사용권 부여가 아니며 `LicenseRef-Flatide-Proprietary`를 재해석하지 않는다.
+   원본을 바꾸지 않고 `NOTICE-INDEX.json`에 경로·크기·UTF-8/hex·유계 chunk digest를
+   기록한다. 그 content ID를 같은 앱 빌드에 고정하고 `BUILD.txt`에도 남긴다.
 2. 같은 소스/target/revision으로 세 바이너리를 빌드하고 복사한 파일을 검사한다.
    ELF64 little-endian x86-64만 허용한다. GNU는 loader 경로·DT_NEEDED 목록과 실제
    DT_VERNEED/DT_VERNEEDNUM의 GLIBC 버전을 읽으며 임의 문자열이나 section header
@@ -87,23 +89,41 @@ sh verify.sh
 설치의 override를 점검한다. `--adjacent`만 의도적으로 이 override를 무시한다.
 Firefox는 설치된 것을 사용하며 진단/패키징은 브라우저나 설계/리스너를 열지 않는다.
 
-`BUILD.txt`, `ELF.txt`, `NOTICES/INVENTORY.txt`, `SHA256SUMS`를 함께 전달한다.
+`BUILD.txt`, `ELF.txt`, `NOTICE-INDEX.json`, `NOTICES/INVENTORY.txt`, `SHA256SUMS`를 함께 전달한다.
 archive SHA-256은 게시 결과에 출력된다. 체크섬은 손상 검출용이지 인증 서명이 아니므로
 배포 파일의 hash는 신뢰하는 전달 경로로 확인한다. tar 바이트 재현성을 보장하는
 reproducible-build 기능은 아니다. GNU 시스템 라이브러리·Linux kernel/CPU·Firefox/
-ETX/NFS 수용과 남은 UI parity, 전체 고지 열람 UI 및 GTK 은퇴는 별도다.
+ETX/NFS 수용과 남은 UI parity 및 GTK 은퇴는 별도다.
 
 ## 로컬 검증
 
 웹 상단 **About**은 launcher의 build identity와 expected native compatibility를
 보여준다. 실제 native 도구 검사에는 계속 `selfcheck --adjacent`를 사용한다.
-About의 원문 고지는 현재 내장 Noto Sans Mono만이며, 전체 고지는 배포본의
-`NOTICES/INVENTORY.txt`부터 읽어야 한다. 전체 고지 웹 열람은 후속 M4f-3b다.
+M4f-3b부터 새 portable의 원본 고지를 About에서 읽을 수 있다. 목록은64개씩,
+본문은 UTF-8 경계를 보존한 최대64KiB씩 바꿔 표시한다. HTML은 텍스트로만 표시하고
+비UTF-8 원본은 hex로 표시한다. 다음/이전·페이지 이동·명시 재시도를 지원한다.
+개발 실행 파일이나 이전 portable처럼 compiled index가 없는 경우에는 내장 글꼴
+고지만 가능하다고 명시한다. 파일을 옆에 복사하기만 해서는 활성화되지 않으며
+새 packager로 **재빌드**해야 한다.
+
+앱은 인접 `NOTICE-INDEX.json`의 compiled ID/source/target을 시작 시 검사하고 그 목록을
+고정한다. 목록≤2MiB·4096파일·원본 합128MiB이며 요청은 숫자 ID/page만 받는다.
+원본 chunk마다 digest/크기/읽기 전후 변경을 확인하고 경로 성분의 symlink를 거부한다.
+검증 실패 시 해당 본문을 표시하지 않는다. 목록 검증 실패는 viewer를 죽이지 않고
+고지 기능만 unavailable로 표시한다. 설치 복구 후에는 앱을 재시작한다.
+
+이 SHA-1은 content/change ID이지 게시자 인증이 아니다. `verify.sh`의 전체 SHA-256
+검사·신뢰하는 배포 경로 확인을 대체하지 않는다. `selfcheck --metadata-only`는 여전히
+파일을 읽지 않으며 compiled ID만 출력한다. 일반 selfcheck는 목록만 검사하고,
+원본 전체 chunk를 읽거나 배포 전체 hash를 검사했다고 보고하지 않는다.
 About을 열어도 selfcheck·인덱싱·렌더·게시가 시작되지 않는다.
 
 Rust unit은 옵션/ELF 구조·문자열 오탐·손상 입력·비덮어쓰기/정리 규칙을 검사한다.
 `validate_web_portable.py`는 synthetic tool double로 notice/build/ELF 거부,
 SIGTERM143·직접 자식 수거·stage 정리를 검사한다. 실제 archive를 인자로 주면 전체
-목록/경로·세 ELF·hash·공백/한글 재배치·손상 사본 거부까지 확인한다. Linux x86_64에서는
+목록/경로·세 ELF·hash·compiled notice ID·원본 모든 chunk·공백/한글 재배치·손상 사본
+거부까지 확인한다. Linux x86_64에서는
 재배치한 실제 앱의 selfcheck도 실행한다. 합성 도구 테스트를 Linux 실행 수용으로
 보고하지 않는다. 이 gate는 전체 `validate_rust.sh`에도 연결되어 있다.
+실제 compiled catalogue를 가진 macOS 앱의 HTTP 왕복은 별도 개발용
+`validate_web_notices.py`로 검사했다([M4 §39](WEBUI_M4.ko.md)).

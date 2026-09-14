@@ -1,7 +1,8 @@
 'use strict';
 const assert=require('node:assert/strict'),fs=require('node:fs'),A=require('./about.js');
 const bundle='a'.repeat(40),font=fs.readFileSync(__dirname+'/../../render-core/assets/NotoSansMono-OFL.txt','utf8');
-const value={product:'floe2-web',bundle,build:{app_version:'0.1.0',source_revision:'unknown',target:'x86_64-unknown-linux-musl',index_compatibility:'0.12.87',renderd_compatibility:'0.12.87'},python_runtime:false,desktop_acceptance:'unverified',notice_scope:'embedded_font_only',font_name:'Noto Sans Mono',font_notice:font};
+const value={product:'floe2-web',bundle,build:{app_version:'0.1.0',source_revision:'unknown',target:'x86_64-unknown-linux-musl',index_compatibility:'0.12.87',renderd_compatibility:'0.12.87'},python_runtime:false,desktop_acceptance:'unverified',notice_scope:'embedded_font_only',font_name:'Noto Sans Mono',font_notice:font,
+    notices:{status:'not_packaged',index_id:null,files:0,total_bytes:0,page_bytes:65536,list_size:64}};
 assert.equal(A.parse(value,bundle),value);
 assert.match(A.describe(value),/Expected renderd compatibility: 0.12.87/);
 assert.match(A.describe({...value,build:null}),/unavailable/);
@@ -17,6 +18,7 @@ class Node{
     addEventListener(k,fn){this.events[k]=fn;}
     contains(n){return ['about-dialog','about-close','about-build','about-font'].includes(n.id);}
     querySelectorAll(){return ['about-close','about-build','about-font'].map(el);}
+    getClientRects(){return [{}];}
 }
 function el(id){if(!nodes.has(id)){nodes.set(id,new Node(id));}return nodes.get(id);}
 let pending=[];

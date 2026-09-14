@@ -40,7 +40,7 @@ def build_identity(work):
     helper = work / "build-info-helper"
     subprocess.run(["rustc", "--edition=2021", str(ROOT / "rust/app/build.rs"),
                     "-o", str(helper)], check=True, capture_output=True)
-    clean = {k: v for k, v in os.environ.items() if not k.startswith("GIT_") and k != "FLOE_SRC_REV"}
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("GIT_") and k not in ("FLOE_SRC_REV", "FLOE_NOTICE_INDEX_SHA1")}
     clean.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, TARGET="fixture-target")
     repo = work / "identity repository"
     app = repo / "rust/app"
@@ -78,6 +78,13 @@ def build_identity(work):
     assert revision == head and "worktrees/" in watched and "refs/heads/selfcheck-fixture" in watched
     explicit = dict(clean, PATH="", FLOE_SRC_REV="offline-test-r1")
     assert identity(archive, explicit)[0] == "offline-test-r1"
+    for value in ("bad", "A" * 40, "a" * 41, "a" * 39):
+        p = subprocess.run([str(helper)], cwd=archive,
+                           env=dict(explicit, FLOE_NOTICE_INDEX_SHA1=value),
+                           capture_output=True, text=True, timeout=10)
+        assert p.returncode != 0 and "invalid FLOE_NOTICE_INDEX_SHA1" in p.stderr
+    assert "cargo:rustc-env=FLOE_NOTICE_INDEX_SHA1=" + "a" * 40 in identity(
+        archive, dict(explicit, FLOE_NOTICE_INDEX_SHA1="a" * 40))[1]
     for value in ("", "bad revision", "bad\nrevision", "a" * 129):
         p = subprocess.run([str(helper)], cwd=archive, env=dict(explicit, FLOE_SRC_REV=value),
                            capture_output=True, text=True, timeout=10)

@@ -15,6 +15,7 @@ members = [
     "app",
     "web",
     "packager",
+    "notices",
 ]
 
 [workspace.package]

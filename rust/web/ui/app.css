@@ -27,6 +27,12 @@ input[type="color"] { padding: 1px; width: 26px; height: 25px; min-height: 25px;
 .about-heading h2 { margin: 0; }
 .about-card pre { white-space: pre-wrap; overflow-wrap: break-word; user-select: text; padding: 12px; background: #111720; line-height: 1.5; }
 .about-card p { line-height: 1.6; }
+#notice-files { max-height: 240px; overflow-y: auto; }
+#notice-files button { display: block; width: 100%; text-align: left; margin: 3px 0; white-space: normal; overflow-wrap: break-word; }
+.notice-pages { flex-wrap: wrap; align-items: center; }
+.notice-pages input { width: 65px; }
+#notice-text { max-height: 380px; overflow-y: auto; }
+#notice-title { overflow-wrap: break-word; }
 .sidebar { width: 280px; flex-shrink: 0; display: flex; flex-direction: column; overflow-y: auto; background: #1d232d; border-right: 1px solid #343d4c; }
 section, .index-panel { padding: 15px 15px; border-bottom: 1px solid #333c4a; }
 h2 { font-size: 11px; letter-spacing: 1.25px; text-transform: uppercase; font-weight: 650; color: #9cacbf; margin: 0 0 11px; }

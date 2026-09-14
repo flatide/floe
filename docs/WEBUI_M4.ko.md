@@ -3225,3 +3225,91 @@ app/web scoped clippy `--no-deps --all-targets -- -D warnings`와 Rust1.89 HTTP1
 `rustfmt(HEAD)`와 바이트 단위 동일함을 재확인하고 복구용 patch를 보관한 뒤
 그 포맷 변경만 되돌렸다. source 변경/사용자 작업은 섞지 않았으며 이후 fmt는
 변경 파일에만 한정한다.
+
+## 39. M4f-3b — portable 원본 고지의 유계 열람
+
+새 portable의 `NOTICES/` 원본 자료를 About에서 읽는다. 원문을 별도 JS나 바이너리에
+중복 내장하지 않는다. packager가 `NOTICE-INDEX.json`을 먼저 만들고 그 SHA-1 content ID를
+`FLOE_NOTICE_INDEX_SHA1`으로 앱에 고정한다. 목록에는 source revision/target, 원본 경로와
+크기, UTF-8/hex 구분, 연속 chunk offset/길이/digest가 있다. `BUILD.txt`와 metadata에도
+ID를 남긴다. 새 crate `floe-notices`는 기존 vendor만 사용하며 index/renderd0.12.87,
+렌더 픽셀·wire·기본 GTK 실행기는 변경하지 않는다.
+
+### 범위와 자원 계약
+
+- 목록≤2MiB·4096파일, 원본 합≤128MiB. 목록64개와 원본 chunk≤64KiB를 한 번에 읽는다.
+  UTF-8 경계는 보존하며 빈 파일도 한 페이지다. 비UTF-8 원본은 파일 전체를 hex 형식으로
+  분류해 원래 byte를 잃지 않는다. packager 생성 시에는 원본 하나를 상한 안에서 읽지만
+  runtime이 전체 원문을 초기 JSON/JS/DOM에 적재하지는 않는다.
+- 서버는 실행 파일 인접 목록의 compiled ID/source/target과 구조를 검증하고 해당
+  catalogue를 고정한다. 경로는 `NOTICES/` 하위 상대 경로만 허용하며 각 성분을 열린
+  디렉터리 fd에 대해 `openat(O_NOFOLLOW)`로 연다. symlink/FIFO/비regular leaf와
+  `..`·제어문자·과도한 경로 깊이를 거부한다. 임의 파일을 발견하거나 열람하지 않는다.
+- 인증·CSRF가 필요한 `GET /api/v1/about/notices/{start}`와 `/{id}/{page}`만 제공한다.
+  브라우저는 숫자만 보내고 서버 경로를 요청하지 않는다. 기존 Host/Origin·query 거부,
+  no-store·HTTP5초 기한을 사용한다. 요청 chunk는 원본 크기·읽기 전후 identity/mtime/ctime
+  및 digest 검사를 모두 통과해야 한다. 실패하면 본문을 표시하지 않는다.
+- Gateway당 읽기 slot은1개다. timeout/요청 취소 시 취소 flag를 설정하지만 slot은
+  syscall이 돌아올 때까지 reader가 보유해 thread가 쌓이지 않는다. 파일 읽기는 detached
+  OS thread로 분리해 Tokio runtime 종료가 blocking pool을 무제한 기다리지 않는다.
+  kernel의 uninterruptible I/O 자체를 강제로 중단하거나 NFS 지연이 없다고 보장하지 않는다.
+- 목록 검증 실패는 `unavailable`로 고지 기능만 닫고 viewer는 유지한다. compiled ID가
+  없는 개발 실행 파일/구 portable은 `not_packaged`·내장 글꼴만 가능함을 표시한다.
+  인접 파일 복사만으로 활성화되지 않으며 새 packager 재빌드가 필요하다. 설치 복구/
+  교체는 재시작 후 다시 검사하며 열린 앱에 목록 hot reload를 추가하지 않는다.
+
+SHA-1은 **content/change 식별자이지 게시자 인증이 아니다**. `verify.sh`의 전체 패키지
+SHA-256과 신뢰하는 배포 경로 확인은 별도로 유지한다. `selfcheck --metadata-only`는
+파일을 읽지 않고 compiled ID만 출력한다. 일반 selfcheck는 `portable_notice_index`를
+`index_only_not_all_file_chunks` 범위로 검사하며 원본 전체/전체 배포 검증이라고 부르지
+않는다. About을 열어도 selfcheck·설계 open/index/render·게시가 시작되지 않는다.
+
+### UI와 로컬 확인
+
+목록/본문은 replace하며 누적하지 않는다. 이전/다음·1-based 페이지 이동·명시 재시도를
+제공한다. 파일명과 HTML을 `textContent`로만 표시한다. 닫기·다른 선택·종료 후 늦은 응답은
+버리고 오류 시 이전 본문을 새 제목 밑에 남기지 않는다. 자동 재시도/다운로드/쓰기 기능은
+없다. About의 포커스 순환은 현재 표시되고 활성인 입력만 포함한다.
+
+Rust catalogue5개는 UTF-8 경계·빈 파일·hex·HTML 원문, 목록 페이징·미등록 파일 제외,
+identity/손상/취소, symlink/부모 symlink/FIFO/경로, 손상 목록/크기 상한을 검사한다.
+HTTP12개(기존11+고지1)와 ES2017 UI 회귀는 인증·범위·손상 거부·no-store·POST 거부·
+로그아웃·늦은 응답·페이지 이동·원문 보존을 검사한다. 실제 kernel-hung NFS fault를
+주입한 검사는 아니며 그 경로는 읽기 slot 소유권과 종료 구조의 검토로 구분한다.
+
+`tools/validate_web_notices.py`는 **개발용** 별도 compiled-fixture gate다. 기본 battery는
+Rust/HTTP/UI 및 packager 거부 테스트를 실행하며 이 별도 바이너리 빌드를 자동 만들지는
+않는다. 재현할 때 `prepare NEW_DIR` 출력의 digest/source_revision을 각각
+`FLOE_NOTICE_INDEX_SHA1`/`FLOE_SRC_REV`로 설정하고 `cargo build --offline --locked
+-p floe-app --bin floe2-web`로 빌드한 뒤 `run TEST_APP NEW_DIR SYNTHETIC_OAS`를 실행한다.
+NEW_DIR는 새 private 위치여야 한다. 해당 빌드는 테스트 전용이며 일반 배포에 쓰지 않는다.
+
+Rust1.89로 만든 macOS compiled fixture에서 원본70개·모든 UTF-8/hex chunk 복원,
+목록/원본 손상 거부, metadata-only 무읽기와 index-only selfcheck, 인증·종료·credential
+정리를 통과했다. 실제 Chrome에서도 긴 HTML의 비실행 원문 표시,64KiB 다음 페이지,
+마지막4/4 페이지·비활성 Next, 목록65–70/70, hex, Escape 포커스 복원, End session 후
+About 비활성화를 확인했다. 서버 exit0·credential 제거를 확인하고 생성한 탭만 닫았다.
+이 소스는 index가 유효하지 않아 뷰가 열리지 않은 상태였으며, 자동 재인덱싱하지 않았다.
+실칩 렌더 성능이나 Firefox/ETX 수용 결과로 확대 해석하지 않는다.
+
+원본70개 검증 로그는 `/private/tmp/floe-notices-native-test.log`, 브라우저용 fixture는
+`/private/tmp/floe-notices-native.WkLc8Y/install`이다. 승인된 합성 shared-default 결과는
+유지했고 이번 고지 검증에서 공유 기본값·DRC 게시/업로드·clipboard는 사용하지 않았다.
+전체 웹 전환·SYS-02·현장 수용·GTK 은퇴 완료를 뜻하지 않는다.
+
+전체 `sh tools/validate_rust.sh`는 exit0·`RUST VALIDATION: ALL OK`다. notices5·packager6·
+app13/core215/web60·HTTP12, CLI/WS·ES2017 UI, jobdeck80·renderer46과 KLayout13 PX+
+2 phase-exact+14 style(jobs1/8)을 통과했다. 별도로 Rust1.89의 notices5·packager6·app13·
+HTTP12도 통과했다. 해당 툴체인에는 clippy가 설치되지 않아 추가 다운로드 없이 기존
+설치 툴체인의 scoped clippy `--no-deps --all-targets -- -D warnings`로 검사했고 통과했다.
+변경 파일만 fmt/check했으며 기존 dependency/PyGI/Gdk 경고를 전체 무경고로 표현하지 않는다.
+
+실제 musl archive를 Rust1.89로 다시 조립하고 compiled notice ID·원본 모든 chunk,
+전체 파일/hash·공백/한글 재배치·손상 사본 거부를 검사했다. 이 archive는 검증용 dirty
+pre-commit 산출물이고 `runtime_checked=false`·`desktop_acceptance=unverified`다.
+Linux 실기 실행이나 릴리스 승인으로 보고하지 않는다. 경로는
+`/private/tmp/floe-notices-portable.Vs6zqx/floe2-web-musl.tar.gz`이며 Git에 포함하지 않는다.
+
+전체 로그는 `/private/tmp/floe-notices-battery.log`, 별도 검증은 같은 접두사의
+`msrv-final/clippy-installed/archive-check/native-test.log`다. 실제 venv는 보존하고
+검증용 `.venv` symlink만 제거했다. main의 기존 변경과 feature/jobdeck는 건드리지 않았다.

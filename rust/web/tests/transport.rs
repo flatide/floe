@@ -29,6 +29,126 @@ use tokio_tungstenite::{
 };
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 #[tokio::test]
+async fn portable_notice_catalogue_is_authenticated_bounded_and_fail_closed() {
+    use std::{
+        fs,
+        os::unix::fs::DirBuilderExt,
+        sync::{atomic::AtomicUsize, Arc},
+    };
+    let dir = std::env::temp_dir().join(format!("floe-http-notices-{}", std::process::id()));
+    fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = Cleanup(dir.clone());
+    fs::create_dir(dir.join("NOTICES")).unwrap();
+    let original = "x".repeat(65535) + "한";
+    fs::write(dir.join("NOTICES/test.html"), &original).unwrap();
+    fs::write(dir.join("NOTICES/binary"), [0, 255]).unwrap();
+    let index = floe_notices::build_index(
+        &dir,
+        &["NOTICES/test.html".into(), "NOTICES/binary".into()],
+        "r",
+        "t",
+        &AtomicUsize::new(0),
+    )
+    .unwrap();
+    fs::write(dir.join(floe_notices::INDEX_NAME), &index).unwrap();
+    let digest = floe_notices::digest(&index);
+    let cat = floe_notices::Catalog::open(&dir, &digest, "r", "t", &AtomicUsize::new(0)).unwrap();
+    let s = Server::configured(None, floe_web::about::Notices::Ready(Arc::new(cat))).await;
+    for path in ["/api/v1/about/notices/0", "/api/v1/about/notices/0/0"] {
+        assert_eq!(s.request("GET", path, &[], "").await.status, 401);
+    }
+    let a = s.login().await;
+    let h = [
+        ("Cookie", a.cookie.as_str()),
+        ("X-Floe-CSRF", a.csrf.as_str()),
+    ];
+    let about = s.request("GET", "/api/v1/about", &h, "").await;
+    let about: Value = serde_json::from_str(&about.body).unwrap();
+    assert_eq!(about["notice_scope"], "portable_manifest");
+    assert_eq!(about["notices"]["files"], 2);
+    assert_eq!(about["notices"]["index_id"], digest);
+    let list = s.request("GET", "/api/v1/about/notices/0", &h, "").await;
+    assert_eq!(list.status, 200);
+    assert_eq!(list.headers["cache-control"], "no-store");
+    let list: Value = serde_json::from_str(&list.body).unwrap();
+    assert_eq!(list["files"][0]["pages"], 2);
+    let page = s.request("GET", "/api/v1/about/notices/0/0", &h, "").await;
+    assert_eq!(page.status, 200);
+    assert!(page.body.len() < 1024 * 1024);
+    let page: Value = serde_json::from_str(&page.body).unwrap();
+    assert_eq!(page["text"].as_str().unwrap().len(), 65535);
+    let next = s.request("GET", "/api/v1/about/notices/0/1", &h, "").await;
+    let next: Value = serde_json::from_str(&next.body).unwrap();
+    assert_eq!(next["text"], "한");
+    assert_eq!(next["offset"], 65535);
+    let binary = s.request("GET", "/api/v1/about/notices/1/0", &h, "").await;
+    let binary: Value = serde_json::from_str(&binary.body).unwrap();
+    assert_eq!(binary["text"], "00 ff ");
+    for path in [
+        "/api/v1/about/notices/01",
+        "/api/v1/about/notices/64",
+        "/api/v1/about/notices/1/x",
+        "/api/v1/about/notices/99/0",
+    ] {
+        assert!((400..500).contains(&s.request("GET", path, &h, "").await.status));
+    }
+    assert_eq!(
+        s.request("GET", "/api/v1/about/notices/0?path=/etc/passwd", &h, "")
+            .await
+            .status,
+        403
+    );
+    fs::write(dir.join("NOTICES/test.html"), "z".repeat(original.len())).unwrap();
+    let bad = s.request("GET", "/api/v1/about/notices/0/0", &h, "").await;
+    assert_eq!(bad.status, 409);
+    assert!(!bad.body.contains("text"));
+    assert!(!bad.body.contains(dir.to_str().unwrap()));
+    let origin = format!("http://{}", s.addr);
+    let post = [
+        ("Cookie", a.cookie.as_str()),
+        ("X-Floe-CSRF", a.csrf.as_str()),
+        ("Origin", origin.as_str()),
+    ];
+    assert_eq!(
+        s.request("POST", "/api/v1/about/notices/0/0", &post, "")
+            .await
+            .status,
+        405
+    );
+    assert_eq!(
+        s.request("DELETE", "/api/v1/session", &post, "")
+            .await
+            .status,
+        204
+    );
+    assert_eq!(
+        s.request("GET", "/api/v1/about/notices/0/0", &h, "")
+            .await
+            .status,
+        401
+    );
+    s.shutdown().await;
+    let s = Server::configured(None, floe_web::about::Notices::Unavailable).await;
+    let a = s.login().await;
+    let h = [
+        ("Cookie", a.cookie.as_str()),
+        ("X-Floe-CSRF", a.csrf.as_str()),
+    ];
+    assert_eq!(
+        s.request("GET", "/api/v1/about/notices/0", &h, "")
+            .await
+            .status,
+        503
+    );
+    s.shutdown().await;
+}
+#[tokio::test]
 async fn about_is_authenticated_readonly_and_reports_expected_not_running_versions() {
     for configured in [false, true] {
         let server = Server::start_build(configured.then_some(floe_web::about::BuildInfo {
@@ -123,6 +243,7 @@ async fn embedded_assets_are_content_identified_and_never_serve_files() {
     for (name, mime) in [
         ("app.js", "text/javascript"),
         ("about.js", "text/javascript"),
+        ("notices.js", "text/javascript"),
         ("protocol.js", "text/javascript"),
         ("query.js", "text/javascript"),
         ("inspect.js", "text/javascript"),
@@ -181,6 +302,12 @@ impl Server {
         Self::start_build(None).await
     }
     async fn start_build(info: Option<floe_web::about::BuildInfo>) -> Self {
+        Self::configured(info, floe_web::about::Notices::NotPackaged).await
+    }
+    async fn configured(
+        info: Option<floe_web::about::BuildInfo>,
+        notices: floe_web::about::Notices,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (mut gateway, bootstrap) = Gateway::new(addr).unwrap();
@@ -188,6 +315,7 @@ impl Server {
             Gateway::attach_build(&mut gateway, info.clone()).unwrap();
             assert!(Gateway::attach_build(&mut gateway, info).is_err());
         }
+        Gateway::attach_notices(&mut gateway, notices).unwrap();
         let (stop, rx) = oneshot::channel();
         let task = tokio::spawn(transport::serve(listener, gateway, async move {
             let _ = rx.await;

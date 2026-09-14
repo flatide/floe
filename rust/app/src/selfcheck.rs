@@ -25,6 +25,8 @@ No source file is opened/indexed/rendered, no listener or browser is started.
 The renderd handshake uses and removes its own temporary working directory.
 Firefox discovery does not execute Firefox, validate its version/features or
 prove desktop readiness. Missing Firefox is informational (--no-open is valid).
+When a portable notice index is compiled in, its manifest is also checked;
+this is not a check of every notice chunk or of the complete package.
 This is not an ELF/glibc audit, pixel test, or Firefox/ETX/NFS acceptance gate.";
 
 #[derive(Default)]
@@ -64,7 +66,28 @@ pub fn metadata() -> Value {
         "source_revision":build.source_revision,"target":build.target,
         "web_bundle":floe_web::transport::BUNDLE,"index_version":build.index_compatibility,
         "renderd_version":build.renderd_compatibility,"python_runtime":false,
-        "desktop_acceptance":"unverified"})
+        "desktop_acceptance":"unverified","notice_index":notice_id()})
+}
+pub fn notice_id() -> Option<&'static str> {
+    let id = env!("FLOE_NOTICE_INDEX_SHA1");
+    (!id.is_empty()).then_some(id)
+}
+pub fn notice_catalog(cancelled: &AtomicUsize) -> Result<Option<floe_notices::Catalog>> {
+    let Some(id) = notice_id() else {
+        return Ok(None);
+    };
+    let exe = std::env::current_exe()?;
+    let root = exe
+        .parent()
+        .ok_or_else(|| Error::input("executable has no parent"))?;
+    let build = build_info();
+    Ok(Some(floe_notices::Catalog::open(
+        root,
+        id,
+        build.source_revision,
+        build.target,
+        cancelled,
+    )?))
 }
 fn discovery(adjacent: bool, renderer: bool) -> Result<Discovery> {
     if !adjacent {
@@ -134,6 +157,11 @@ pub fn run(o: Options, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
             })();
             check_cancelled(cancelled)?;
             checks.push(json!({"name":name,"ok":checked.is_ok(),"path":path,"error":checked.err().map(|e| e.to_string())}));
+        }
+        if notice_id().is_some() {
+            let checked = notice_catalog(cancelled);
+            check_cancelled(cancelled)?;
+            checks.push(json!({"name":"portable_notice_index","ok":checked.is_ok(),"error":checked.err().map(|e|e.to_string()),"scope":"index_only_not_all_file_chunks"}));
         }
         let firefox = match browser::discover(None) {
             Ok(path) => json!({"available":true,"path":path,"executed":false}),

@@ -411,6 +411,16 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
         Gateway::with_startup(listener.local_addr()?, Arc::clone(&service), request)
             .map_err(Error::input)?;
     Gateway::attach_build(&mut gate, crate::selfcheck::build_info()).map_err(Error::input)?;
+    let notices = match crate::selfcheck::notice_catalog(cancelled) {
+        Ok(Some(c)) => floe_web::about::Notices::Ready(Arc::new(c)),
+        Ok(None) => floe_web::about::Notices::NotPackaged,
+        Err(e) => {
+            eprintln!("[floe2-web] portable notices unavailable: {e}");
+            floe_web::about::Notices::Unavailable
+        }
+    };
+    floe_app_core::check_cancelled(cancelled)?;
+    Gateway::attach_notices(&mut gate, notices).map_err(Error::input)?;
     if let Some(path) = &c.drc {
         // The explicit write opt-in also reads that fixed reviewer's existing
         // file on ICE reopen. It never discovers another reviewer or a pack.

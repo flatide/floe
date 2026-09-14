@@ -588,6 +588,20 @@ fn build(root: &Path, o: Options) -> Result<()> {
         &bundle.join("NOTICES"),
         &crates,
     )?;
+    let names = files(&bundle.join("NOTICES"))?
+        .iter()
+        .map(|p| {
+            p.strip_prefix(&bundle)
+                .ok()
+                .and_then(|p| p.to_str())
+                .map(str::to_owned)
+                .ok_or("invalid notice name")
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let index =
+        floe_notices::build_index(&bundle, &names, &stamp, &o.target, CANCEL.get().unwrap())?;
+    let notice_id = floe_notices::digest(&index);
+    fs::write(bundle.join(floe_notices::INDEX_NAME), index)?;
     eprintln!(
         "building offline: {} / source {stamp} / {} jobs",
         o.target, o.jobs
@@ -596,6 +610,7 @@ fn build(root: &Path, o: Options) -> Result<()> {
         .current_dir(root.join("rust"))
         .env("RUSTC", &rustc)
         .env("FLOE_SRC_REV", &stamp)
+        .env("FLOE_NOTICE_INDEX_SHA1", &notice_id)
         .env("CARGO_TARGET_DIR", &target_dir)
         .env("CARGO_NET_OFFLINE", "true")
         .args([
@@ -639,7 +654,7 @@ fn build(root: &Path, o: Options) -> Result<()> {
         run(Command::new(bundle.join("floe2-web")).args(["selfcheck", "--adjacent"]))?;
     }
     fs::write(bundle.join("BUILD.txt"), format!(
-        "format=1\nproduct=floe2-web-portable-preview\ntarget={}\nsource_revision={stamp}\nruntime_checked={native}\ndesktop_acceptance=unverified\npython_runtime=false\n\n{compiler}\n",
+        "format=1\nproduct=floe2-web-portable-preview\ntarget={}\nsource_revision={stamp}\nnotice_index_sha1={notice_id}\nruntime_checked={native}\ndesktop_acceptance=unverified\npython_runtime=false\n\n{compiler}\n",
         o.target))?;
     checksums(&bundle)?;
     run(Command::new("sh").arg(bundle.join("verify.sh")))?;

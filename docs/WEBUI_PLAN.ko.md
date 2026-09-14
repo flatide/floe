@@ -1,6 +1,6 @@
 # floe2 웹 셸 / 서버-클라이언트 계획 (정본)
 
-작성 2026-08-29, 갱신 2026-09-15(M4f-1 로컬 배포 진단).
+작성 2026-08-29, 갱신 2026-09-15(M4f-3b portable 고지 열람).
 관련 정본: `FLOE2_OPTIMIZATION.ko.md`(F2R-10/11),
 `RUST_RENDERER_PLAN.ko.md`, `SPEC-VIEWER.ko.md`, `rust/BUILD.md`.
 
@@ -72,7 +72,8 @@ M4f-1에서 `selfcheck`의 빌드 식별·실제 native 버전/handshake/종료 
 M4f-2에서 별도 offline packager·ELF 감사·원자적 비덮어쓰기 archive와 고지/체크섬을
 연결했다([portable 안내](WEBUI_PORTABLE.ko.md)). Linux 실행·현장 수용 및 About UI는 별도다.
 M4f-3a에서 읽기 전용 About/빌드 식별·글꼴 원문 고지를 연결했다.
-전체 portable 고지 열람 UI는 M4f-3b에 남는다([M4 §38](WEBUI_M4.ko.md)).
+M4f-3b에서 compiled catalogue로 고정된 portable 원본 고지의 유계 열람을 추가했다.
+현장 수용·남은 조작 parity는 계속 열린 상태다([M4 §39](WEBUI_M4.ko.md)).
 나머지 내보내기와 브라우저 다운로드/현장 수용은 남아 있다([M4 기록](WEBUI_M4.ko.md)).
 전체 조작 parity와 M0/Firefox/ETX 현장 검증은 아직 완료되지 않았다.
 상세 범위는 [M1b 기록](WEBUI_M1B.ko.md)과 [M2 기록](WEBUI_M2.ko.md). 여기의 M0~M5는 **웹 전환 단계**이며
@@ -598,5 +599,8 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
   전체 파일 hash를 검사한다. Linux 조립은 native selfcheck 필수, macOS 교차 조립은
   미실행 표시다. 기존 GTK portable과 기본 실행기를 유지한다.
 - **M4f-3a**: 인증된 About GET과 읽기 전용 모달. 앱/소스/target/bundle 및 native 호환
-  요구값을 구분하며 내장 글꼴 원문만 표시한다. 전체 고지 열람 UI는 M4f-3b,
+  요구값을 구분하며 내장 글꼴 원문만 표시한다. 전체 고지 열람 UI는 후속 M4f-3b로 분리했고,
   실제 Linux/Firefox/ETX와 SYS-02 전체 수용은 별도로 남긴다.
+- **M4f-3b**: 새 portable의 compiled notice index·원본 chunk 검증과 읽기 전용 목록/
+  본문 페이징을 추가했다. 개발 빌드/구 배포본은 고지 범위를 명시한다. 전체 패키지
+  검증·게시자 인증·현장 수용을 대신하지 않는다([M4 §39](WEBUI_M4.ko.md)).
