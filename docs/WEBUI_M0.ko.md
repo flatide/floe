@@ -279,7 +279,8 @@ UI-01의 구조 미니맵은 M4g-2에서 연결했다([M4 §41](WEBUI_M4.ko.md))
 배율과 16px 위상을 유지한다. 잡덱/구 캐시에 없는 frontier를 새로 만들지는 않는다.
 UI-01/05의 M4g-3은 `<`/`>` depth 상대 이동, DRC comma/period 순회와 n/w 편집
 진입이다([M4 §42](WEBUI_M4.ko.md)). 주석·waive 파일은 여전히 명시 승인만으로 게시한다.
-q 종료 확인·Ctrl+, 잡덱 모드 전환 및 CLI startup/single-instance는 남는다.
+q 종료 확인은 M4g-4에서 복원했다([M4 §43](WEBUI_M4.ko.md)). Ctrl+, 잡덱 모드
+전환 및 CLI startup/single-instance는 남는다.
 
 UI-03의 layerprops 공통 codec·초기 가시성은 M4d-2에서 연결했다([M4 §16](WEBUI_M4.ko.md)).
 색/fill뿐 아니라 file/stem default의 visibility를 첫 frame 전에 적용하고, 명시된

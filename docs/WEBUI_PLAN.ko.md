@@ -1,6 +1,6 @@
 # floe2 웹 셸 / 서버-클라이언트 계획 (정본)
 
-작성 2026-08-29, 갱신 2026-09-15(M4g-3 depth/DRC 키).
+작성 2026-08-29, 갱신 2026-09-15(M4g-4 종료 확인).
 관련 정본: `FLOE2_OPTIMIZATION.ko.md`(F2R-10/11),
 `RUST_RENDERER_PLAN.ko.md`, `SPEC-VIEWER.ko.md`, `rust/BUILD.md`.
 
@@ -80,6 +80,8 @@ M4g-2에서 기존 색인의 depth 구조 미니맵과 동일 배율 클릭 이�
 180px 베이스를 재사용하며 pan 중 geometry 재렌더는 없다([M4 §41](WEBUI_M4.ko.md)).
 M4g-3에서 `<`/`>` depth 상대 이동과 GTK의 DRC `,`/`.` 순회·`n` 주석·`w` waive
 편집 진입을 연결했다. 게시 승인은 계속 별도다([M4 §42](WEBUI_M4.ko.md)).
+M4g-4에서 q/End session에 취소 기본값의 종료 확인을 연결했다. 서버 종료 요청의
+실패는 성공으로 표시하지 않고 승인 복구 기록을 남긴다([M4 §43](WEBUI_M4.ko.md)).
 나머지 내보내기와 브라우저 다운로드/현장 수용은 남아 있다([M4 기록](WEBUI_M4.ko.md)).
 전체 조작 parity와 M0/Firefox/ETX 현장 검증은 아직 완료되지 않았다.
 상세 범위는 [M1b 기록](WEBUI_M1B.ko.md)과 [M2 기록](WEBUI_M2.ko.md). 여기의 M0~M5는 **웹 전환 단계**이며
@@ -619,3 +621,6 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
 - **M4g-3**: `<`/`>` 상대 depth를 Rust revision CAS 아래에서 계산한다. DRC 순회 키를
   GTK의 comma/period로 바로잡고 n/w는 기존 주석/waive 승인 편집기로 연결했다.
   자동 저장·q 종료 확인·잡덱 모드 전환·startup 전체 이관은 아니다([M4 §42](WEBUI_M4.ko.md)).
+- **M4g-4**: q/End session의 명시 확인·취소 기본 포커스·Escape/Tab 보호를 연결했다.
+  확인 전에는 종료 요청·초안 폐기가 없으며 기존 세션 종료 API만 사용한다.
+  잡덱 모드 전환·CLI startup/single-instance·현장 수용은 남는다([M4 §43](WEBUI_M4.ko.md)).

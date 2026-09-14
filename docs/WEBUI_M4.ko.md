@@ -3479,3 +3479,43 @@ app-core/web/app clippy `--no-deps --all-targets -D warnings`와 변경 Rust 파
 scoped rustfmt/check를 다시 통과했다. 로그는 `/private/tmp/floe-keys-battery.log`,
 `floe-keys-msrv.log`, `floe-keys-ui-focus.log`, `floe-keys-clippy.log`다.
 기존 dependency 경고·현장 Firefox/ETX·남은 입력/운영 수용은 별도다.
+
+## 43. M4g-4 — q 종료 확인과 미확정 종료 표시
+
+GTK `_confirm_quit()`처럼 취소를 기본으로 하는 종료 확인창을 연결했다. live canvas의
+`q`와 상단 End session은 같은 modal을 연다. 입력칸·modifier·IME·진행 중 drag의
+키는 가로채지 않는다. 확인창을 여는 것만으로 파일을 저장하거나 초안/선택/연결을
+폐기하지 않는다. 기존 세션 API·worker 종료 계약·native 호환0.12.87은 그대로다.
+
+- Cancel에 기본 포커스를 두므로 바로 Enter하면 취소한다. Escape·배경 클릭도 취소,
+  Tab/Shift+Tab은 두 버튼 안에서 순회하고 닫으면 원래 포커스와 aria-hidden을 복원한다.
+  브라우저 탭 자체를 닫는 동작을 가로채거나 자동 저장하지 않는다.
+- 확인 버튼만 기존 `DELETE /api/v1/session`을 한 번 호출한다. 반복 키/중복 클릭은
+  종료를 재전송하지 않는다. pagehide는 열린 확인창을 닫으며 복원 시 재승인을 요구한다.
+  기존에 승인한 게시의 커밋은 종료로 되돌려지지 않는다고 명시한다.
+- 기존 client가 DELETE 실패를 덮고 `Session ended`로 표시하던 부분도 보완했다.
+  실패 시 로컬 뷰는 중단되지만 **Server shutdown unconfirmed**로 알린다. session 및
+  기존 게시 복구 기록은 성공 응답까지 남긴다. 자동 재시도·다른 세션의 종료는 없다.
+  사용자가 로컬 launcher를 확인해야 하며 성공/실패 네트워크 수신이 파일 게시 결과를
+  판정하지 않는다. 이미 열린 파일과 서버 자원의 실제 종료는 기존 endpoint가 담당한다.
+
+ES2017 독립 modal gate는 취소 기본값·focus trap·Escape/IME·ARIA 복구·pagehide/복원·
+확인 전 무동작·한 번만 호출을 검사한다. 실제 app.js client gate는 q와 버튼 배선,
+취소 전후 HTTP/WS 불변, 확인 시 단일 DELETE, 실패 시 미확정 표시/복구 기록 보존을
+검사한다. 새 자산은 고정 embedded route와 bundle hash에 포함된다.
+
+로컬 Chrome의 합성 valmini에서 q→Cancel 기본 포커스·Enter 취소·Escape 취소·
+Tab 순환과 상단 버튼의 동일 확인창을 확인했다. 취소 전후 live gen2와 camera는
+유지됐다. 확인 버튼 이후 Session ended·버튼 비활성·서버 exit0·접속 파일 제거를
+확인하고 생성한 탭만 닫았다. 기본값/DRC 파일 게시·다운로드·업로드는 사용하지 않았다.
+실제 네트워크 응답 유실은 Chrome에서 주입하지 않았으며 그 경로는 client mock gate다.
+
+전체 ES2017 UI·web60·HTTP12·실제 native CLI 수명주기·변경 파일 scoped rustfmt와
+web/app clippy `--no-deps --all-targets -D warnings`를 통과했다. Rust1.89에서도
+web60·HTTP12를 통과했다. 최종 자산으로 release 재빌드와 Chrome 확인을 수행했다.
+렌더러/플래너/인덱스 코드는 이 단계에서 변경하지 않았다. 전체 native/오라클 배터리의
+가장 최근 실행은 직전 M4g-3의 exit0이며, 이 단계는 위 UI/HTTP/CLI 게이트를 재실행했다.
+로그는 `/private/tmp/floe-exit-ui-final.log`, `floe-exit-rust-final.log`,
+`floe-exit-cli.log`, `floe-exit-msrv.log`, `floe-exit-clippy-final.log`다.
+main의 기존 수정과 feature/jobdeck worktree는 보존했다. Firefox/ETX 현장 수용과
+잡덱 모드 전환·CLI startup/single-instance·공유 정책의 나머지는 여전히 미완료다.

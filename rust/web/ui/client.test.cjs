@@ -10,6 +10,8 @@ const snapshotEnabled=process.env.FLOE_TEST_SNAPSHOT==='1',captures=[],copies=[]
 const settingsEnabled=process.env.FLOE_TEST_SETTINGS==='1';
 const defaultsEnabled=process.env.FLOE_TEST_DEFAULTS==='1';let defaultOp=null;
 const minimapEnabled=process.env.FLOE_TEST_MINIMAP==='1';
+const exitEnabled=process.env.FLOE_TEST_EXIT==='1';
+const exitFailure=process.env.FLOE_TEST_EXIT_FAILURE==='1';
 let textSelection=null;
 let clipController,clipOp=null,clipFile=null;
 function clipState(){return {available:true,kind:'exact_clip',jobs_default:4,jobs_min:1,jobs_max:16,
@@ -31,11 +33,14 @@ class Element {
     click() {if(this.id==='settings-file'){return;}assert.equal(this.tag,'a');downloads.push({href:this.href,name:this.download});}
     toBlob(fn,type) {assert.equal(this.tag,'canvas');assert.equal(type,'image/png');captures.push({width:this.width,height:this.height,draws:draws.slice()});setImmediate(()=>fn(new Blob(['mock PNG'],{type})));}
     setAttribute(k,v) {this[k]=v;}
+    getAttribute(k) {return Object.hasOwn(this,k)?this[k]:null;}
+    removeAttribute(k) {delete this[k];}
+    contains(n) {return this===n||this.children.some(c=>c.contains(n));}
     querySelectorAll(tag) {return this.children.flatMap(c=>[...(c.tag===tag?[c]:[]), ...c.querySelectorAll(tag)]);}
     addEventListener(k,f) {listen(this,k,f);}
     getBoundingClientRect() {const [w,h]=viewportSize;return {left:0,top:0,right:w,bottom:h,width:w,height:h};}
     getContext() {return this.id==='minimap'?{fillRect(){},drawImage(){}}:ctx;}
-    focus() {}
+    focus() {document.activeElement=this;}
     select() {}
     get textContent(){return this._text||'';}
     set textContent(v){this._text=v;this.children=[];}
@@ -58,6 +63,7 @@ if(minimapEnabled){snapshot.minimap={size:180,base:'full',die:[0,0,180,180],mark
 let open=false, lastSeq='0';
 const layerRow={pair:[7,0],name:'MASK',aliases:[],parent:null,head:false,visible:true,color:'#ffffff',fill:{kind:'solid'},width:1};
 const document={hidden:false,activeElement:null,title:'',body:new Element('','body'),
+    contains:n=>[...nodes.values()].includes(n),
     getElementById:node,querySelector:()=>({content:bundle}),createElement:tag=>new Element('',tag),
     createTextNode:text=>Object.assign(new Element(''),{textContent:text}),
     addEventListener:(k,f)=>listen(docListeners,k,f)};
@@ -72,6 +78,7 @@ class XHR {
         let value, status=200;
         if(raw){value={kind:'drc_review_transfer',phase:'queued',seq:this.headers['X-Floe-Transfer-Seq']};status=202;}
         else if (this.path==='/api/v1/session/exchange') {value={csrf:'c'.repeat(64),session_id:'c'.repeat(64),bundle,protocol:1};}
+        else if (this.path==='/api/v1/session'&&this.method==='DELETE') {value=exitFailure?{error:'unavailable'}:null;status=exitFailure?503:204;}
         else if(this.path==='/api/v1/capabilities') {value={protocol:1,bundle,exports:clipEnabled,snapshot_png:snapshotEnabled,layer_settings:settingsEnabled,design_defaults:defaultsEnabled};}
         else if(this.path==='/api/v1/defaults/prepare') {value={token:'d'.repeat(64),view_id:body.view_id,state_rev:body.state_rev,name:'synthetic.oas.layerprops',title:'synthetic',mode:'level',levels:null,rows:1,bytes:'24',replaces_existing:false,expires_in_ms:'30000',scope:'shared_design_default',affects:'future_opens'};}
         else if(this.path==='/api/v1/defaults/revoke') {value=null;status=204;}
@@ -120,6 +127,7 @@ window.isSecureContext=true;window.ClipboardItem=class {constructor(data){this.d
 window.FloeSettings=require('./settings.js');
 window.FloeDefaults=require('./defaults.js');
 window.FloeAbout=require('./about.js');
+window.FloeSessionExit=require('./session-exit.js');
 window.FloeNotices=require('./notices.js');
 window.FloeMinimap=require('./minimap.js');
 window.FloeDRCNotes=require('./drc-notes.js');
@@ -166,6 +174,25 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     assert.equal(draws.length,1);assert.deepEqual(draws[0].data.slice(0,4),[16,0,127,255]);
     assert.equal(ws.sent.at(-1).disposition,'displayed');
     assert.equal(node('canvas').style.width,'100px');
+    if(exitEnabled){
+        const n=requests.length,commands=ws.sent.length;
+        const key=(k,extra={})=>{let used=false;node('viewport').keydown({key:k,target:node('viewport'),preventDefault(){used=true;},...extra});return used;};
+        for(const extra of [{ctrlKey:true},{metaKey:true},{altKey:true},{shiftKey:true},{isComposing:true},{target:node('goto-x')}])assert(!key('q',extra));
+        node('viewport').focus();assert(key('q'));assert(!node('session-exit-dialog').hidden);assert.equal(document.activeElement,node('session-exit-cancel'));
+        assert.equal(requests.length,n);assert.equal(ws.sent.length,commands);assert.equal(ws.readyState,1);
+        node('session-exit-cancel').onclick();assert(node('session-exit-dialog').hidden);assert.equal(document.activeElement,node('viewport'));
+        assert.equal(requests.length,n);assert(key('q'));docListeners.keydown({key:'Escape',preventDefault(){},stopPropagation(){}});
+        assert(node('session-exit-dialog').hidden);assert.equal(requests.length,n);
+        node('logout').onclick();assert(!node('session-exit-dialog').hidden);assert.equal(requests.length,n);
+        storage.set('floe-default-pending','synthetic existing recovery record');
+        const ending=node('session-exit-confirm').onclick();node('session-exit-confirm').onclick();await ending;
+        assert.equal(requests.filter(r=>r.method==='DELETE'&&r.path==='/api/v1/session').length,1);
+        assert.equal(node('connection').textContent,exitFailure?'Server shutdown unconfirmed':'Session ended');
+        assert.equal(storage.has('floe-default-pending'),exitFailure);assert.equal(storage.has('floe-session:'+sandbox.location.origin),exitFailure);
+        if(exitFailure){assert.match(node('notice').textContent,/No automatic retry/);}
+        assert(node('logout').disabled);assert(node('session-exit-dialog').hidden);
+        listeners.pagehide();console.log('WEB SESSION EXIT CLIENT: ALL OK (q/button wiring, modifiers, cancel no HTTP/WS, confirmed single DELETE, cleanup)');return;
+    }
     if(minimapEnabled){
         await wait(()=>node('minimap-note').textContent==='Die outline · current view');
         const n=requests.length;

@@ -27,6 +27,7 @@ input[type="color"] { padding: 1px; width: 26px; height: 25px; min-height: 25px;
 .about-heading h2 { margin: 0; }
 .about-card pre { white-space: pre-wrap; overflow-wrap: break-word; user-select: text; padding: 12px; background: #111720; line-height: 1.5; }
 .about-card p { line-height: 1.6; }
+.session-exit-card { width: 440px; }
 #notice-files { max-height: 240px; overflow-y: auto; }
 #notice-files button { display: block; width: 100%; text-align: left; margin: 3px 0; white-space: normal; overflow-wrap: break-word; }
 .notice-pages { flex-wrap: wrap; align-items: center; }

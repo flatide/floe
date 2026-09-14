@@ -27,6 +27,7 @@ fn main() {
         "ui/settings.js",
         "ui/defaults.js",
         "ui/about.js",
+        "ui/session-exit.js",
         "ui/notices.js",
         "src/about.rs",
         "../notices/src/lib.rs",

@@ -243,6 +243,7 @@ async fn embedded_assets_are_content_identified_and_never_serve_files() {
     for (name, mime) in [
         ("app.js", "text/javascript"),
         ("about.js", "text/javascript"),
+        ("session-exit.js", "text/javascript"),
         ("notices.js", "text/javascript"),
         ("protocol.js", "text/javascript"),
         ("query.js", "text/javascript"),

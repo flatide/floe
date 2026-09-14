@@ -27,6 +27,7 @@
   <script defer src="/assets/@@BUNDLE@@/defaults.js"></script>
   <script defer src="/assets/@@BUNDLE@@/notices.js"></script>
   <script defer src="/assets/@@BUNDLE@@/about.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/session-exit.js"></script>
   <script defer src="/assets/@@BUNDLE@@/app.js"></script>
 </head>
 <body>
@@ -35,7 +36,7 @@
     <div id="document-title" class="document-title">Layout workspace</div>
     <span id="connection" class="connection">Connecting</span>
     <button id="drc-toggle" class="quiet" aria-expanded="true" aria-controls="drc-panel" hidden>DRC</button>
-    <button id="logout" class="quiet" title="End this session and stop its workers">End session</button>
+    <button id="logout" class="quiet" title="Confirm ending this session (q on canvas)" aria-haspopup="dialog" aria-controls="session-exit-dialog" aria-expanded="false" disabled>End session</button>
     <button id="about-open" class="quiet" aria-haspopup="dialog" aria-controls="about-dialog" aria-expanded="false" disabled>About</button>
   </header>
   <div id="app-workspace" class="workspace">
@@ -331,6 +332,13 @@
       </div>
       <h2>Noto Sans Mono · Original font notice</h2>
       <pre id="about-font" tabindex="0" aria-label="Original font license"></pre>
+    </section>
+  </div>
+  <div id="session-exit-dialog" class="about-backdrop" role="dialog" aria-modal="true" aria-labelledby="session-exit-title" aria-describedby="session-exit-description" hidden>
+    <section class="about-card session-exit-card">
+      <h2 id="session-exit-title">End this session?</h2>
+      <p id="session-exit-description">Stop this session's workers and discard unsaved local drafts. Earlier approved file writes are not undone. This does not close your browser tab.</p>
+      <div class="button-row"><button id="session-exit-cancel">Cancel</button><button id="session-exit-confirm">End session</button></div>
     </section>
   </div>
   <noscript>This workspace requires JavaScript. All assets are served locally.</noscript>

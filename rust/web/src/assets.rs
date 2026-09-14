@@ -36,6 +36,10 @@ async fn asset(Path((bundle, name)): Path<(String, String)>) -> Response {
             "text/javascript; charset=utf-8",
             include_str!("../ui/about.js"),
         ),
+        "session-exit.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("../ui/session-exit.js"),
+        ),
         "app.css" => ("text/css; charset=utf-8", include_str!("../ui/app.css")),
         "protocol.js" => (
             "text/javascript; charset=utf-8",
