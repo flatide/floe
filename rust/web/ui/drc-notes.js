@@ -114,7 +114,7 @@
             render();
         }
         function render(){
-            el('notes-panel').hidden=!enabled;el('drc-review-mode').textContent=enabled?'OWNER NOTES':'NO REVIEW WRITES';
+            el('notes-panel').hidden=!enabled;
             el('notes-owner').textContent=model?'Reviewer: '+model.reviewer+' · explicit saves only':'';
             const c=selection(),ok=permitted()&&!busy()&&!io&&!model.preparing;
             el('notes-selection').textContent=c?c.caption:'Select errors in a ready ICE review to edit notes.';

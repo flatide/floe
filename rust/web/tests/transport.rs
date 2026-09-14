@@ -48,6 +48,7 @@ async fn embedded_assets_are_content_identified_and_never_serve_files() {
         ("snapshot.js", "text/javascript"),
         ("drc.js", "text/javascript"),
         ("drc-notes.js", "text/javascript"),
+        ("drc-waives.js", "text/javascript"),
         ("rulers.js", "text/javascript"),
         ("drc-groups.js", "text/javascript"),
         ("panel-state.js", "text/javascript"),

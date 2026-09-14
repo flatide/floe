@@ -18,6 +18,7 @@
   <script defer src="/assets/@@BUNDLE@@/drc-groups.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc-build.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc-notes.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/drc-waives.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc.js"></script>
   <script defer src="/assets/@@BUNDLE@@/settings.js"></script>
   <script defer src="/assets/@@BUNDLE@@/defaults.js"></script>
@@ -230,6 +231,33 @@
           <button id="notes-resolve">Resolve approved request</button>
           <label class="check"><input id="notes-checked" type="checkbox"> I checked the note file and understand the previous outcome.</label>
           <button id="notes-forget" disabled>Clear local recovery record</button>
+        </div>
+      </section>
+      <section id="waives-panel" class="notes-panel" aria-label="Owner DRC waives" hidden>
+        <h3>Waives</h3><p id="waives-owner" class="note"></p><p id="waives-selection" class="note"></p>
+        <button id="waives-read" disabled>Read selected statuses</button>
+        <div id="waives-editor" hidden>
+          <p id="waives-target" class="note"></p>
+          <label for="waives-action">Action on this selection</label>
+          <select id="waives-action"><option value="">Choose an action…</option><option value="waive">Waive</option><option value="clear">Clear waive</option></select>
+          <p class="note">No autosave. Ctrl/Cmd+Enter previews; Escape discards the local choice.</p>
+          <div class="button-row"><button id="waives-prepare">Preview save</button><button id="waives-reload">Reload snapshot</button><button id="waives-discard">Discard choice</button></div>
+          <div id="waives-review" hidden>
+            <strong id="waives-preview-target"></strong><p id="waives-preview"></p><p id="waives-reserved" class="note"></p>
+            <label id="waives-legacy-row" class="check" hidden><input id="waives-legacy" type="checkbox"> I verified that this unbound legacy waive file belongs to this DRC run.</label>
+            <label class="check"><input id="waives-consent" type="checkbox"> Save the displayed action on these selected errors in this reviewer's waive file.</label>
+            <button id="waives-approve" class="primary" disabled>Approve waive save</button>
+          </div>
+        </div>
+        <p class="note">Latest session waive receipt · file save and reader update are separate</p>
+        <p id="waives-status" role="status"></p><p id="waives-message" class="note" role="status"></p>
+        <p id="waives-paused" class="note" hidden>DRC reads are paused until the save outcome and matching reader revision are confirmed. If reader update failed or is unknown, check the file and reopen the review. Layout navigation remains available.</p>
+        <div class="button-row"><button id="waives-refresh">Refresh save and review status</button><button id="waives-cancel" hidden>Cancel save</button></div>
+        <div id="waives-uncertain" hidden>
+          <p>Previous approval may have reached the server. Resolve resends only that same approved request; refresh never resends a save.</p>
+          <button id="waives-resolve">Resolve approved request</button>
+          <label class="check"><input id="waives-checked" type="checkbox"> I checked the waive file and understand the previous outcome.</label>
+          <button id="waives-forget" disabled>Clear local recovery record</button>
         </div>
       </section>
       <div class="button-row"><button id="drc-restore-layers" title="Restore the visibility saved before the first DRC layer isolation" disabled>Restore layers</button></div>

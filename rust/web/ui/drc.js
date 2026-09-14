@@ -88,7 +88,7 @@
         // accepted focus navigation, not necessarily the selected row.
         let cdTarget = null, cdGlobal = null, cdSegments = null, cdRemaining = 0, cdError = '';
         let restoring = false;
-        let isolationNotice = '', notes = null;
+        let isolationNotice = '', notes = null, waives = null;
         const groups = o.groups.bind({http: o.http, protocol: P, changed: groupsChanged,
             status: function (s) { el('drc-group-status').textContent = s; }});
         const persistence = o.stateStore.bind({http: o.http, protocol: P,
@@ -106,6 +106,12 @@
         if (o.notes) { notes = o.notes.bind({el: el, protocol: P, http: o.http, selection: noteSelection,
             session: o.session, loadPending: o.loadNotePending, savePending: o.saveNotePending,
             now: o.now || function () { return Date.now(); },
+            setTimeout: o.setTimeout || function (fn, ms) { return setTimeout(fn, ms); },
+            clearTimeout: o.clearTimeout || function (id) { clearTimeout(id); }}); }
+        if (o.waives) { waives = o.waives.bind({el: el, protocol: P, http: o.http, selection: noteSelection,
+            session: o.session, loadPending: o.loadWaivePending, savePending: o.saveWaivePending,
+            now: o.now || function () { return Date.now(); },
+            changed: contextChanged, refreshReview: refresh,
             setTimeout: o.setTimeout || function (fn, ms) { return setTimeout(fn, ms); },
             clearTimeout: o.clearTimeout || function (id) { clearTimeout(id); }}); }
         function noteSelection() {
@@ -126,7 +132,7 @@
         function cancelStep() { cancel('step'); stepBusy = false; stepContinuation = null; el('drc-step-continue').hidden = true; }
         function current() {
             const c = o.context();
-            return !stopped && !(builds && builds.suspended()) && registration && registration.phase === 'ready' && c &&
+            return !stopped && !(builds && builds.suspended()) && !(waives && waives.suspended()) && registration && registration.phase === 'ready' && c &&
                 c.source === registration.source_id && !['closed', 'failed'].includes(c.state.status) ? c : null;
         }
         function contextKey(c) { return c && registration ? c.id + ':' + registration.revision : ''; }
@@ -227,6 +233,7 @@
         }
         function groupsChanged() {
             if (notes) { notes.changed(); }
+            if (waives) { waives.changed(); }
             const count = rule ? groups.ids(rule.check).length : 0;
             el('drc-group-count').textContent = count + ' selected in this rule · ' + groups.total() + '/5000 across all rules';
             markErrors(); navigationButtons(); paintLater(); loadGroupMarkers(); followFilters();
@@ -457,6 +464,7 @@
             resetCD();
             cancel('geometry'); cancel('focus'); selected = null; points = null; pointsReady = false;
             if (notes) { notes.changed(); }
+            if (waives) { waives.changed(); }
             cancel('comparison'); el('drc-comparison').textContent = 'Select an error to compare its parsed bound.';
             jumpScale = null; zoomLock = false; el('drc-selected').textContent = 'Click to inspect · double-click to go to an error.';
             paintLater(); navigationButtons(); renderErrors(); savePanel();
@@ -709,6 +717,7 @@
             if (!selected) { jumpScale = null; zoomLock = false; }
             selected = r; focusVisible = true; if (frame) { jumpActive = true; }
             if (notes) { notes.changed(); }
+            if (waives) { waives.changed(); }
             if (!same) { loadComparison(r); }
             if (!same || !pointsReady) { points = null; pointsReady = false; el('drc-selected').textContent = 'Global ' + r.global + ' · bounding-box preview'; geometry(r); }
             // Keep the button node alive between click and double-click.
@@ -879,13 +888,16 @@
                 if (c) { restoreState(); }
             }
             groupsChanged();
-            if (registration && !c && registration.phase === 'ready') { info('Open the source associated with this DRC database.'); }
+            if (waives && waives.suspended()) { info('Waive save or reader refresh pending. Previous DRC selection and outlines are not active.'); }
+            else if (registration && !c && registration.phase === 'ready') { info('Open the source associated with this DRC database.'); }
             if (query && c && query.rev !== c.state.state_rev) { el('drc-result-info').textContent = 'Saved earlier-viewport query · enable In view for the live current-rule filter.'; }
         }
         function applyCatalog(v) {
             const before = registration, present = !!(v.drc || v.build);
             registration = v.drc; el('drc-toggle').hidden = !present; el('drc-panel').hidden = !present || !shown;
             if (notes) { notes.attach(v.notes); }
+            if (waives) { waives.attach(v.waives, registration); }
+            el('drc-review-mode').textContent = v.waives ? 'OWNER REVIEW' : v.notes ? 'OWNER NOTES' : 'NO REVIEW WRITES';
             if (registration) {
                 el('drc-title').textContent = registration.title;
                 el('drc-summary').textContent = registration.metadata ? registration.metadata.checks + ' rules · ' + registration.metadata.errors + ' errors' : registration.phase;
@@ -895,7 +907,7 @@
                     if (m.truncated_records !== undefined && cursor(m.truncated_records) !== '0') { el('drc-summary').textContent += ' · ' + m.truncated_records + ' truncated records'; }
                 }
                 if (!before || before.id !== registration.id || before.phase !== registration.phase) {
-                    info(registration.error || (registration.phase === 'opening' ? 'Opening DRC metadata…' : v.notes ? 'Geometry and waive statuses are read-only; notes require explicit approval.' : 'Read-only review'));
+                    info(registration.error || (registration.phase === 'opening' ? 'Opening DRC metadata…' : v.waives ? 'Notes and waives require explicit preview and approval. Geometry is read-only.' : v.notes ? 'Geometry and waive statuses are read-only; notes require explicit approval.' : 'Read-only review'));
                 }
             }
             // The catalog is polled while idle too. Rebinding/restarting an
@@ -960,8 +972,8 @@
                 if ((key === 'n' || key === 'p') && rule && current()) { step(key === 'p', false, false); return true; }
                 return false;
             },
-            stop: function (final) { stopped = true; if (notes) { notes.stop(final); } if (builds) { builds.stop(); } ++restoreTurn; clearTimeout(filterTimer); filterTimer = null; persistence.close(); groups.close(); bound = ''; boxReset(true); cancelAll(); clearTimeout(timer); if (painting !== null) { o.window.cancelAnimationFrame(painting); painting = null; } overlay.hidden = true; },
-            resume: function () { stopped = false; if (notes) { notes.resume(); } return builds ? builds.resume() : refresh(); }};
+            stop: function (final) { stopped = true; if (notes) { notes.stop(final); } if (waives) { waives.stop(final); } if (builds) { builds.stop(); } ++restoreTurn; clearTimeout(filterTimer); filterTimer = null; persistence.close(); groups.close(); bound = ''; boxReset(true); cancelAll(); clearTimeout(timer); if (painting !== null) { o.window.cancelAnimationFrame(painting); painting = null; } overlay.hidden = true; },
+            resume: function () { stopped = false; if (notes) { notes.resume(); } if (waives) { waives.resume(); } return builds ? builds.resume() : refresh(); }};
     }
     const api = {bind: bind, projection: projection, point: point, shifted: shifted, vertices: vertices, metadataText: metadataText, comparisonText: comparisonText};
     if (typeof module === 'object' && module.exports) { module.exports = api; } else { root.FloeDRC = api; }

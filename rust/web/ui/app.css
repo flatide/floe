@@ -121,6 +121,9 @@ details > summary { cursor: pointer; font-size: 12px; color: #b4c3d8; }
 #notes-review, #notes-uncertain { padding: 10px; margin-top: 10px; border: 1px solid #526887; border-radius: 4px; }
 #notes-target, #notes-preview-target, #notes-preview, #notes-status, #notes-message { white-space: pre-wrap; overflow-wrap: anywhere; }
 #notes-preview { max-height: 220px; overflow-y: auto; font: 13px/1.5 monospace; }
+#waives-review, #waives-uncertain { padding: 10px; margin-top: 10px; border: 1px solid #526887; border-radius: 4px; }
+#waives-target, #waives-preview-target, #waives-preview, #waives-status, #waives-message { white-space: pre-wrap; overflow-wrap: anywhere; }
+#waives-paused, #waives-reserved { color: #f2cd83; }
 .drc-search { display: flex; gap: 5px; margin: 12px 0 8px; }
 .drc-search input { flex: 1; min-width: 0; width: 140px; font-size: 12px; }
 .drc-search button, .drc-actions button { font-size: 12px; }

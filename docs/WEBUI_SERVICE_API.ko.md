@@ -41,7 +41,10 @@ prepare는 검증한 check/local 선택에 `waived:bool`만 적용한다. native
 서버가 고정한다. 승인 worker가 파일 게시 전부터 조회 revision을 fence하고 게시한 동일
 파일의 snapshot만 reader에 반영한다. `published`와 `reader_applied`는 각각 true/false/null로
 분리되며, reader 실패/ACK 불명이 성공한 디스크 commit을 미게시로 바꾸지 않는다.
-외부 변경 자동 재부착이나 autosave는 없다. 실제 waive UI/브라우저 게시 수용은 후속이다.
+외부 변경 자동 재부착이나 autosave는 없다. M4e-4d UI는 이 API로 action/preview/별도
+승인과 동일 요청 복구를 제공하고, 게시 성공뿐 아니라 reader ACK와 일치하는 ready
+revision을 확인한 뒤 DRC 조회를 재개한다([M4 §30](WEBUI_M4.ko.md)). 새 endpoint는
+없으며 실제 브라우저 게시·현장 수용은 후속이다.
 M1b-2a의 `app-core/managed`·`view`에는 process-local lease/admission과
 독립 worker controller를 구현했다. M1b-2b의 사전 등록 view용 제어/이미지
 스트림은 [M1b 기록 §6](WEBUI_M1B.ko.md#6-m1b-2b--인증된-제어이미지-스트림)을 따른다.

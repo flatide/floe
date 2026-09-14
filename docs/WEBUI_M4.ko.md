@@ -2539,3 +2539,88 @@ KLayout13 PX+2 phase-exact+14 style(jobs1/8)이 통과했다. 검증용 venv 링
 waive UI·실제 브라우저 게시·현장 Firefox/NFS와 Linux 실행 수용은 아직 남아 있다.
 승인된 shared-default 합성 게시 결과물은 보존한다. renderd0.12.87·GTK 기본 경로,
 공유 endpoint 보류와 사용자 jobdeck 실측 브랜치는 바꾸지 않는다. 전체 M4 완료가 아니다.
+
+## 30. M4e-4d — owner waive 편집·승인 패널
+
+§29의 별도 `--drc-edit-waives` opt-in에만 Waives 패널을 표시한다. Read selected
+statuses → Waive/Clear waive 선택 → Preview save → 별도 동의 → Approve waive save
+순서다. 초기 동작은 미선택이며 선택/읽기/미리보기/pan/재접속은 저장하지 않는다.
+reviewer·파일 경로·임의 status byte는 브라우저에서 고르지 않는다.
+
+### 대상과 표시
+
+- 주석과 같은 선택 공급자를 사용한다. 최대5000개의 룰 간 그룹 선택이 현재 행보다
+  우선하며, 대상을 고정한 뒤0-based check/local 문자열을 보낸다. 표시 global 번호를
+  wire ID로 변환하지 않는다. refs 복사는 명시적 읽기에만 수행한다.
+- snapshot은 이미 waived인 수·reserved 수·파일 이름을, preview는 선택 수·실제 변경 수·
+  생성/교체와 selected reserved 상태의0/1 교체를 표시한다. legacy 파일은 별도 확인이
+  필요하며 미동의 저장 버튼은 비활성이다. 빈 선택이나 미선택 action은 준비할 수 없다.
+- snapshot120초·preview30초, 선택/DRC/view/connection epoch 변경은 미승인 token을
+  폐기한다. 다른 선택에 같은 동작을 몰래 적용하지 않으며, 같은 선택의 Reload snapshot은
+  로컬 action만 유지한다. Ctrl/Cmd+Enter는 preview, Escape는 local discard다.
+  UI 문구는 textContent로 출력한다. pan/zoom만으로 snapshot을 다시 읽지 않는다.
+
+### 조회 중지와 복귀
+
+이 탭의 승인 POST **전부터** DRC 조회·선택·윤곽·prepared focus를 비활성화한다.
+레이아웃 viewport/레이어/렌더 상태는 바꾸지 않는다. 승인 중 도착한 이전 geometry 응답은
+버리고, 이미 준비했던 주석의 승인은 막되 주석 초안 문구는 보존한다. 다른 탭의 작업은
+기존 catalog/operation poll로 감지한 시점부터 같은 중지 규칙을 적용한다.
+
+`published:true`만으로 복귀하지 않는다. terminal receipt, `reader_applied:true`, 같은
+geometry의 **receipt reader_revision과 일치하는 ready catalog**를 확인해야 새 목록과
+선택을 읽는다. 파일 저장은 성공했지만 reader 반영 실패/불명이면 두 결과를 나눠 보여주고
+기존 상태를 계속 표시하지 않는다. 파일 확인 후 명시적으로 reopen해야 한다. 새 geometry
+id의 catalog까지 옛 receipt로 막지는 않는다. 게시 전 실패/취소도 갱신된 조회 revision을
+확인한 뒤 복귀하며, 상태 조회 실패/스키마 오류는 정상 catalog가 올 때까지 중지한다.
+
+파일 게시·reader 적용·directory sync 경고는 각각 표시한다. `refreshing_reader`는
+이미 저장됐지만 조회 반영을 기다리는 중이다. 늦은 취소는 저장/반영의 undo가 아니다.
+active 작업은500ms, 유실된 승인 기록이 남으면2500ms로 가벼운 ledger만 조회한다.
+terminal receipt마다 전체 catalog를 한 번 갱신하고, 수동 Refresh로 재조회할 수 있다.
+대형 sidecar snapshot/geometry를 이 주기로 읽는 것은 아니다. §29의 O(파일 크기)
+저장/검증 비용은 남으며 자동 저장 성능 수용을 주장하지 않는다.
+
+### 응답 유실과 종료
+
+원래 승인한 body와 session ID만 독립된 `floe-waive-pending` sessionStorage에 남긴다.
+선택 refs·편집 action을 따로 보관하거나 reload 때 새 저장을 보내지 않는다. Resolve만
+원래 seq/body를 재전송한다. 다른 탭의 같은 seq receipt는 내 선택이 저장됐다는 증거가
+아니므로 내 승인 ACK와 context도 일치해야 local choice를 정리한다. 결과 불명·실패·
+취소는 새 동작으로 자동 재시도하지 않는다. 손상/다른 세션 기록은 사용자가 파일을 확인한
+뒤 로컬 기록만 지울 수 있다. 서버 durable ledger나 외부 파일 자동 재부착은 아니다.
+disconnect/pagehide/end 시 진행 중 읽기와 타이머를 정리하고 미승인 초안을 지운다.
+재접속 시 receipt를 먼저 확인하며, 종료된 화면에 저장 진행 중 안내를 남기지 않는다.
+
+### 검증
+
+`drc-waives.test.cjs`는 선택·action/동의·legacy/reserved·만료·epoch·고정 refs/u64,
+파일/reader의 성공·실패·불명·취소·directory sync, old/new catalog 복귀, stale schema,
+동일 승인만 복구·다른 탭 충돌·storage 실패·타이머 정리를 검사한다. 실제 DRC/notes/group
+모듈을 사용하는 `drc-waives-panel.test.cjs`는 룰 간 대상, pan 무조회, 승인 시 이전 geometry
+취소, 늦은 callback 무시, 같은 revision에서만 재개, 주석 보존과 layout 무편집을 검사한다.
+두 gate를 ES2017/전체 UI와 필수 Rust 배터리에 배선하고 새 JS를 bundle identity와
+native HTTP asset gate에 포함했다. Chrome 실제 DOM 검사에서 발견한 option 닫기 태그
+오타를 수정하고 placeholder/Waive/Clear 세 option의 HTML 구조 단언을 추가했다.
+
+전체 `sh tools/validate_rust.sh`는 exit0·`RUST VALIDATION: ALL OK`다. workspace
+unit(app11/core202/web54), owner HTTP/WS·notes/waives API, 전체 ES2017/JS,
+native 관리형 게시/Python oracle, jobdeck80·renderer46, KLayout13 PX+2 phase-exact+
+14 style(jobs1/8)이 통과했다. 배터리 시작 뒤 수정한 HTML option 오타는 최종 소스로
+전체 JS, web54/transport10, app/web strict clippy, release 빌드, Rust1.89 web54/
+transport10과 Linux x86-64 musl release 교차 빌드를 다시 통과했다.
+`cargo fmt -p floe-web -p floe-app -- --check` 범위도 통과했다. 전체 workspace
+fmt 검사는 이번에 변경하지 않은 CLI/VFS 등의 기존 편차로 실패하므로 전체 fmt clean을
+주장하지 않는다. 관련 없는 포맷 일괄 변경은 하지 않았다.
+
+Chrome의 최종 bundle에서 합성 입력만 사용해 Error1 선택→Read selected statuses→
+Waive 미리보기(선택1·변경1), Discard→Clear waive 미리보기(선택1·변경0)를 실제
+조작했다. 두 경우 동의 전 Approve 버튼은 비활성이며, Error2로 변경하면 미리보기가
+사라지고 승인할 수 없다. 화면 캡처로 패널·레이아웃 표시도 확인했다. 승인 버튼은 누르지
+않았다. End session 뒤 프로세스 exit0, session 파일 제거, 입력3개·인덱스4개의 SHA256
+불변과 note/waive sidecar·lock 미생성을 확인했고 합성 입력과 로그는 보존했다.
+검증용 venv 심볼릭 링크만 정리했다.
+
+실제 브라우저 waive 게시·현장 Firefox/NFS·Linux 실제 실행 수용은 별도다. 새 API나
+공유 권한은 추가하지 않았으며 GTK 기본·renderd0.12.87·기존 승인된 shared-default
+합성 게시 결과물은 유지한다. 전체 M4 완료를 뜻하지 않는다.
