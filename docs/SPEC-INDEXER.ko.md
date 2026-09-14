@@ -48,6 +48,12 @@ floe-index vfs <src.oas> [outdir=.floe] [--jobs N] [--plan-batch N]
     [--profile-snapshot PATH] [--profile-snapshot-refresh]
 ```
 
+`--`로 시작하는데 위 목록에 없는 인자는 `floe-index <cmd>: unknown option …`으로
+거부한다(exit 2, 파일 시스템 접근 전). 위치 인자(src·outdir)는 `--`로 시작할 수
+없다. `tile`·`index`·`vfs`·`occupancy`·`vfsd` 공통(2026-09-14 현장: `floe-index
+index file.oas --occupancy-only`가 옵션을 outdir로 받아 `--occupancy-only` 폴더에
+레거시 타일 색인을 만들었다). `plan`만 `--키 값` 쌍을 그대로 넘긴다.
+
 `--slow-cell-s S` = slow-cell 로그 임계 초(기본 5.0, 0 = 전 셀 —
 게이트/계측용), `--p2-shard-limit-mb N` = P2 arena 샤딩 복사 명시
 상한(미지정: Linux = MemAvailable 여유 절반, off-Linux = 무제한).

@@ -418,6 +418,34 @@ class GenerationContractTests(unittest.TestCase):
         write_reps(cls.other)
         cls.other_cache = index_with_occupancy(cls.other, 1)
 
+    def test_an_unknown_option_is_refused_instead_of_becoming_the_outdir(self):
+        # field 2026-09-14: `floe-index index file.oas --occupancy-only`
+        # (the legacy tile indexer knows no such option) took the option
+        # as the output directory and built a tile index under a folder
+        # named --occupancy-only; every subcommand's positional arm did
+        # the same. An argument starting with -- that is not an option
+        # of the subcommand exits 2 before anything touches the file
+        # system (vfsd would otherwise start serving on stdin).
+        cases = (("index", self.src, "--occupancy-only"),
+                 ("vfs", self.src, "--occupancy_only"),
+                 ("tile", self.src, "--grids"),
+                 ("occupancy", self.cache, "--layers"),
+                 ("vfsd", self.cache, "--budget"))
+        for sub, target, opt in cases:
+            with self.subTest(sub=sub, opt=opt):
+                cwd = TMP / ("unknown_option_" + sub)
+                shutil.rmtree(cwd, ignore_errors=True)
+                cwd.mkdir()
+                res = subprocess.run(
+                    [str(BIN), sub, str(target), opt], cwd=cwd,
+                    capture_output=True, text=True, env=run_env(),
+                    stdin=subprocess.DEVNULL, timeout=120)
+                self.assertEqual(res.returncode, 2, res.stderr)
+                self.assertIn("floe-index %s: unknown option %s" % (sub, opt),
+                              res.stderr)
+                self.assertEqual(sorted(p.name for p in cwd.iterdir()), [],
+                                 "the option must not become a directory")
+
     def listing(self, cache, ok=0):
         return floe_index("occupancy", cache, ok=ok)
 

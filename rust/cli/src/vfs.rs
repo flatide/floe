@@ -255,6 +255,7 @@ pub fn vfs_cmd(args: &[String]) {
                 profile_snapshot_refresh = true;
                 i += 1;
             }
+            a if a.starts_with("--") => crate::unknown_option("vfs", a),
             a => {
                 if src.is_none() {
                     src = Some(a.to_string());
@@ -1898,6 +1899,7 @@ pub fn occupancy_cmd(args: &[String]) {
                 dump = true;
                 i += 1;
             }
+            a if a.starts_with("--") => crate::unknown_option("occupancy", a),
             a => {
                 dir = Some(a.to_string());
                 i += 1;
@@ -6799,6 +6801,7 @@ pub fn vfsd_cmd(args: &[String]) {
                 stream_kb = args[i + 1].parse().expect("stream");
                 i += 2;
             }
+            a if a.starts_with("--") => crate::unknown_option("vfsd", a),
             a => {
                 if dir.is_none() {
                     dir = Some(a.to_string());

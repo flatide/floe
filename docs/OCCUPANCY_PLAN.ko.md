@@ -445,6 +445,10 @@ layer 3/300 status=ok work=729081740 set=4342426,1220836,338091,94074,27163,8105
 - 남은 실측(8-b): 피크 메모리, 덱 소스 전체 생성 시간, 뷰어 상태줄(fit·킬 스위치
   A/B·`near` 전환 뷰·문제 영역 477.9 × 461.6 µm 회귀·cull 불변), 덱 fit(기준 25,138
   페이지 32,283 ms), 5 mm 뷰 요약 vs exact 샷, `FLOE_RUST_OCCUPANCY_PX=0.5` A/B.
+- 현장 부산물: `floe-index index file.oas --occupancy-only`(레거시 타일 색인기)가
+  옵션을 outdir로 받아 `--occupancy-only` 폴더에 타일 색인을 만들었다 → 모든
+  서브커맨드가 모르는 `--` 인자를 exit 2로 거부(RENDERD 0.12.84, SPEC-INDEXER §1,
+  gate `test_an_unknown_option_is_refused_instead_of_becoming_the_outdir`).
 
 ## 11. 1차 계획 리뷰(7건, 2026-09-11) 반영
 
