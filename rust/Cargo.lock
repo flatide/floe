@@ -291,6 +291,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "floe-web-packager"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde_json",
+ "signal-hook",
+]
+
+[[package]]
 name = "floe-worker-client"
 version = "0.1.0"
 dependencies = [

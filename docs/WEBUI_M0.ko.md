@@ -257,6 +257,9 @@ SYS-01/02의 M4f-1은 native `selfcheck`와 source/target/web bundle 식별이�
 renderd 종료를 검사한다. 기존 CLI 10개/옵션 대조표를 소급 변경하는 parity 항목이 아니라
 배포 진단용 확장이다. 전용 Rust portable 조립·ELF/GLIBC 감사·licenses/About·현장 브라우저
 수용 전체가 끝난 것으로 간주하지 않는다.
+M4f-2는 별도 `make_web_portable.sh`의 Rust 조립·ELF 감사·고지 수집·체크섬과
+비덮어쓰기 archive 게시다([안내](WEBUI_PORTABLE.ko.md)). macOS에서 실제 musl archive의
+조립/재배치/hash는 검사하지만 Linux 실행·현장 수용 및 About UI 완료와 구분한다.
 
 UI-05 일부는 M4d-1에서 연결했다: 표시된 layout/annotation PNG 복사·저장, overlay
 3상태, canvas 단축키와 텍스트/IME 보호. 실제 clipboard/다운로드·현장 Firefox/ETX

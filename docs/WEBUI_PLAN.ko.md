@@ -68,7 +68,9 @@ M4e-6b에서 owner 분할 업로드·전체 교체 준비·기존 승인 게시�
 내보내기/다운로드 UI를 연결했다. Chrome 합성 내보내기 준비는 확인했으며, 실제 브라우저
 업로드·review 게시·다운로드 파일 수용과 현장 검증은 후속이다.
 M4f-1에서 `selfcheck`의 빌드 식별·실제 native 버전/handshake/종료 검사를 추가했다.
-Rust+내장 자산 전용 portable 조립은 M4f-2로 남으며 기존 GTK 패키지를 교체하지 않는다.
+이 선행 단계에서는 전용 portable 조립을 후속 M4f-2로 구분했고 기존 GTK 패키지를 유지했다.
+M4f-2에서 별도 offline packager·ELF 감사·원자적 비덮어쓰기 archive와 고지/체크섬을
+연결했다([portable 안내](WEBUI_PORTABLE.ko.md)). Linux 실행·현장 수용 및 About UI는 별도다.
 나머지 내보내기와 브라우저 다운로드/현장 수용은 남아 있다([M4 기록](WEBUI_M4.ko.md)).
 전체 조작 parity와 M0/Firefox/ETX 현장 검증은 아직 완료되지 않았다.
 상세 범위는 [M1b 기록](WEBUI_M1B.ko.md)과 [M2 기록](WEBUI_M2.ko.md). 여기의 M0~M5는 **웹 전환 단계**이며
@@ -589,3 +591,7 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
   ([M4 §36](WEBUI_M4.ko.md)). 인접 Rust 바이너리만 검사하는 모드와 정상 도구 검색을
   구분하며, 버전 subprocess의 EOF까지 5초 기한을 적용한다. 실제 브라우저 실행/게시
   권한을 확대하지 않는다. 전용 portable 조립·ELF/GLIBC 감사와 현장 수용은 다음 단계다.
+- **M4f-2**: 별도 Rust 웹 portable 조립기를 추가했다([M4 §37](WEBUI_M4.ko.md)).
+  설치된 툴체인으로만 offline 빌드하고, Linux GNU/musl ELF·동적 버전 요구·원본 고지·
+  전체 파일 hash를 검사한다. Linux 조립은 native selfcheck 필수, macOS 교차 조립은
+  미실행 표시다. 기존 GTK portable과 기본 실행기를 유지한다.

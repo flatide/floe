@@ -1,0 +1,12 @@
+[package]
+name = "floe-web-packager"
+version = "0.1.0"
+rust-version = "1.89"
+edition.workspace = true
+license.workspace = true
+description = "Offline development-only Rust web portable assembler"
+
+[dependencies]
+libc = "0.2"
+signal-hook = { version = "=0.4.4", default-features = false }
+serde_json = "=1.0.151"

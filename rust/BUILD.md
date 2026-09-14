@@ -1,5 +1,9 @@
 # floe Rust runtime 빌드 안내 (리눅스 서버)
 
+웹 preview의 **Python-free 전체 패키지**는 별도 `tools/make_web_portable.sh`를 사용한다.
+[WEBUI_PORTABLE.ko.md](../docs/WEBUI_PORTABLE.ko.md)에 offline GNU/musl 조립·ELF 감사·
+selfcheck·고지/체크섬과 현장 미검증 범위를 설명한다. 아래 기존 native/GTK 빌드는 유지한다.
+
 `sh build-linux.sh`는 각 Rust runtime binary를 GNU와 musl 두 형식으로 만든다:
 
 - `dist/floe-index-linux-gnu` — **glibc 동적 빌드, 권장.** 병렬

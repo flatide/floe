@@ -20,6 +20,7 @@ overlay 전환**, §16의 **Rust layerprops 포맷·초기 가시성**, §17의
 §33~35에서 native 전체 review import/export, owner 분할 전송 API와 파일 선택·전체 교체
 미리보기/별도 승인·내보내기 패널을 연결했다.
 §36은 Python-free 로컬 배포 진단과 빌드 식별이며 실제 패키지 조립은 다음 단계다.
+§37에서 기존 GTK portable과 독립적인 Rust 웹 패키지 조립을 연결했다.
 각 절의 미연결 표기는 해당 선행 단계 당시의 범위다.
 전체 조작 parity와 실제 브라우저/현장 수용은 남아 있다.
 
@@ -3114,3 +3115,56 @@ scoped fmt·vendored clippy `--no-deps --all-targets -- -D warnings`도 통과�
 완료됐다고 가정하지 않으며, 실제 toolchain/runtime 고지 출처도 확인한다.
 Linux 실행 검사를 할 수 없는 교차 조립은 미실행으로 표시하고 현장 검사를
 남긴다. 현재 단계에서는 tarball/GTK 은퇴/현장 수용 완료를 선언하지 않는다.
+
+## 37. M4f-2 — 별도 Rust 웹 portable
+
+`tools/make_web_portable.sh`와 개발용 `floe-web-packager`가 Rust 실행 파일3개·내장 UI를
+오프라인 조립한다. 기존 `make_portable.sh`/GTK 실행기·권한 endpoint·renderd0.12.87은
+변경하지 않는다. 자세한 명령·배포/고지 범위는 [WEBUI_PORTABLE.ko.md](WEBUI_PORTABLE.ko.md).
+
+설치된 cargo/rustc/대상 std만 사용하며 다운로드나 target 설치를 자동 수행하지 않는다.
+native/build dependency closure의 원본 고지·manifest, font·toolchain 자료를 수집하고
+각 파일 SHA-256을 검사한다. GTK/Python/Node/브라우저와 개발 packager는 배포하지 않는다.
+GNU는 ELF 로더·허용 공유 라이브러리·실제 동적 version requirement의 GLIBC 상한을,
+musl은 interpreter·DT_NEEDED·버전 요구 부재를 검사한다. section header나 파일 안의
+임의 GLIBC 문자열만으로 호환성을 판정하지 않는다. tar의 외부 TAR_OPTIONS는 무시한다.
+고지 수집은 배포 승인이나 새 사용권을 의미하지 않는다.
+
+새 private stage만 사용하고 같은 부모의 최종 archive에 hard-link로 비덮어쓰기
+게시한다. 파일/디렉터리/깨진 symlink와 게시 경쟁은 모두 기존 대상을 보존한다.
+취소 시 직접 소유한 자식 그룹을 종료하고 leader를 수거한 뒤 stage를 정리한다.
+metadata/EOF는10초·스트림당4MiB, notice 합128MiB·개별 입력128MiB 상한이다.
+SIGKILL/시스템 장애 잔류는 별도이며 다음 실행이 미지의 stage를 자동 삭제하지 않는다.
+게시 완료 뒤 늦은 취소나 stdout 파이프 종료가 파일을 되돌리지는 않는다.
+
+Linux x86_64 조립은 실제 `selfcheck --adjacent`를 반드시 실행한다. macOS 교차 조립은
+Linux 실행을 생략한 것이 아니라 **실행할 수 없음**을 `runtime_checked=false`로 기록한다.
+어느 경우에도 `desktop_acceptance=unverified`다. GNU/실제 Linux·Firefox/ETX/NFS 및
+About 고지 UI·남은 조작 parity·GTK 은퇴는 후속으로 남는다.
+
+### 검증과 수정 기록
+
+합성 ELF의 GLIBC 상한/임의 문자열 오탐/잘못된 offset·부족한 payload·동적 테이블,
+옵션/불변 output·stage 정리의 Rust unit6개와 scoped clippy를 통과했다. Rust1.89에서도
+6개를 통과했다. 최초 테스트의 문자열 길이와 macOS `/var`→`/private/var` 기대값 오류는
+fixture를 수정했고 판정 기준을 약화하지 않았다. 고지 첫 실행은 미사용 UEFI r-efi의
+자료까지 요구해 게시 전에 실패했다. 고지 생략으로 우회하지 않고 target-filtered
+dependency closure를 사용해 실제 선택되지 않은 패키지를 제외했다.
+
+실제 musl archive를 조립해 세 ELF, 전체 목록/hash, 공백/한글 경로 재배치, 손상 사본
+거부를 검사했다. 약6.4MiB이며 Linux 실행 수용으로 보고하지 않는다.
+`validate_web_portable.py`는 합성 도구로 기존 output/깨진 symlink·잘못된 옵션,
+notice/build/ELF 실패와 SIGTERM143·직접 자식 수거·stage 제거를 검사하고 전체 battery에
+연결했다. 이 합성 경로와 실제 archive 검증을 구분해 보고한다.
+
+전체 `sh tools/validate_rust.sh`는 exit0·`RUST VALIDATION: ALL OK`로 완료했다.
+packager6·app13/core215/web60과 기존 CLI/HTTP/WS·ES2017 UI, jobdeck80·renderer46,
+KLayout13 PX+2 phase-exact+14 style(jobs1/8)을 통과했다. 새 private valmini의 legacy
+oracle은 `--legacy --jobs 1`로 먼저 생성했고 원본 geometry 대조를 생략하지 않았다.
+scoped fmt/clippy `--no-deps --all-targets -- -D warnings`, Rust1.89 packager 검증과
+실제 musl 조립을 별도로 통과했다. 기존 dependency/개발 oracle 경고는 남는다.
+로그는 `/private/tmp/floe-web-portable-battery.log` 및 같은 접두사의
+`real3/integration2/clippy-final/msrv-final.log`다. 실제 archive는 private 임시 산출물이며
+Git에는 코드/문서/검증만 포함한다. 검증용 venv 링크만 제거하고 원본 venv·합성 게시
+결과와 main/feature-jobdeck 작업은 보존한다. 다음은 About/빌드 정보 연결이며 전체
+웹 전환·Linux 실기·현장 수용 완료를 선언하지 않는다.

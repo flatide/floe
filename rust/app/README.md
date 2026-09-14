@@ -79,8 +79,9 @@ wire 규약상 **TMPDIR에는 공백/제어 문자가 없어야 한다**. 잘못
 이 명령은 소스 파일/브라우저/리스너를 열지 않는다. Firefox는 경로 검색만 하며,
 없어도 `--no-open` 용도가 있으므로 필수 실패로 간주하지 않는다. `desktop_acceptance`
 값은 항상 `unverified`다. ELF/GLIBC 감사·픽셀 대조·Firefox/ETX/NFS 수용을 대신하지 않는다.
-Rust+내장 자산 전용 portable 패키지 조립은 다음 M4f-2이며, 기존 Python/GTK용
-`tools/make_portable.sh`나 기본 실행기를 이 단계에서 교체하지 않는다.
+Rust+내장 자산 전용 portable은 별도 `tools/make_web_portable.sh`로 조립한다
+([빌드·검증 안내](../../docs/WEBUI_PORTABLE.ko.md)). 기존 Python/GTK용
+`tools/make_portable.sh`나 기본 실행기를 교체하지 않는다.
 
 ### 실행 계약
 
