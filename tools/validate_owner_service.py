@@ -76,6 +76,7 @@ for line in sys.stdin:
         assert "RUST OWNER SERVICE: ALL OK" in checked.stdout
         assert "RUST DRC ISOLATION: ALL OK" in checked.stdout
         assert "RUST DRC BUILD IDENTITY: ALL OK" in checked.stdout
+        assert "RUST DRC WAIVE REVISION: ALL OK" in checked.stdout
         assert "RUST OWNER EXPORT: ALL OK" in checked.stdout
         assert "RUST OWNER EXPORT LIFECYCLE: ALL OK" in checked.stdout
         assert "RUST OWNER SETTINGS: ALL OK" in checked.stdout

@@ -13,7 +13,8 @@ overlay 전환**, §16의 **Rust layerprops 포맷·초기 가시성**, §17의
 명시한 owner의 주석 read/prepare/승인 게시 API를 연결했다. §26은 그 API의
 선택 주석 편집·미리보기·명시 승인 UI다. geometry reader는 읽기 전용이다.
 §27은 native waive snapshot을 기존 reader에 적용하는 내부 갱신 경로다.
-waive 저장의 owner API·UI와 status-dependent 응답 revision 연결은 아직 후속이다.
+§28은 그 갱신과 HTTP/선택/준비된 focus의 조회 revision 장벽을 연결한다.
+waive 저장의 owner 승인 API·UI와 디스크 게시/읽기 반영 receipt 결합은 아직 후속이다.
 각 절의 미연결 표기는 해당 선행 단계 당시의 범위다.
 나머지 내보내기·주석 표시/불러오기·waive 쓰기와 전체 조작/실제 브라우저 수용은 남아 있다.
 
@@ -2391,3 +2392,67 @@ owner notes gate·28회 managed 게시/Python oracle, jobdeck80·renderer46,
 KLayout13 PX+2 phase-exact+14 style(jobs1/8)이 통과했다. 검증용 venv 링크만 제거했다.
 native DRC 경로만 바꾸므로 renderd0.12.87과 GTK 기본
 실행 경로는 유지한다. owner waive 쓰기/API/UI·전체 M4·현장 Firefox/NFS 수용 완료는 아니다.
+
+## 28. M4e-4b — waive 갱신의 조회 revision 장벽
+
+§27의 geometry 보존 갱신을 HTTP/WS에 연결하기 위한 선행 단계다. **새 waive 쓰기
+endpoint·자동 저장·임의 파일 재부착 권한은 추가하지 않는다.** `--drc-reviewer`는
+여전히 주석 opt-in이고 `--drc-waives`는 읽기 등록이다. 이 둘을 waive 쓰기 권한으로
+해석하지 않는다. native 내부 `apply_waives`를 호출하는 owner writer는 다음 단계다.
+
+### identity와 전환
+
+- 같은 reader/geometry의 `id`는 유지한다. catalog의 `revision`은 이제 **해당 조회
+  상태**의 opaque64hex 토큰이다. waive apply가 유계 actor queue에 수용되면 새 토큰으로
+  전환하고 `phase: updating`을 노출한다. queue 포화·닫힌 reader 등 admission 거부는
+  토큰을 바꾸지 않는다. metadata/좌표/qbox/LRU를 새로 열거나 레이아웃을 렌더하지 않는다.
+- 적용 중 새 조회는 기다리는 HTTP 요청을 쌓지 않고 `drc_context_changed`로 거부한다.
+  coordinator는 apply ACK 또는 catalog의 `ready`를 확인한 뒤 새 revision으로 읽는다.
+  적용이 취소·실패하거나 ACK가 유실돼도 이전 토큰은 되살리지 않는다. 새 토큰은 저장 성공
+  증명이 아니라 오래된 결과를 폐기하기 위한 장벽이다. 실패 원인은 apply 응답에 남는다.
+- query ticket은 제출 시 revision을 캡처한다. actor 실행 전후와 ticket 결과 소비 시점에
+  확인해, 이미 계산됐지만 소비되지 않은 이전 status 응답도 거부한다. HTTP는 요청의
+  revision을 시작/await 이후/메모리 상태 commit에서 확인하고 응답 header에도 그대로 싣는다.
+- registry identity → read revision → panel/prepared/controller 순서의 짧은 메모리 락이다.
+  파일 해시·decode·native I/O나 await 동안 revision 락을 잡지 않는다. 기존 bounded actor와
+  작업별 취소/lease 수명은 유지한다. geometry 인덱스 hot reload 정책과는 별개다.
+
+### UI·선택·준비된 focus
+
+- 같은 DRC id라도 revision이 달라지면 기존 panel/그룹/필터 커서를 다시 쓴다고 보지 않는다.
+  서버는 새 revision의 첫 panel/selection 접근에서 저장 상태를 비우며, 오래된 요청이 이를
+  다시 채울 수 없다. idle catalog poll은 revision이 같으면 상태와 진행 중 geometry 읽기를
+  보존한다. 기존 layout의 viewport·레이어 isolation/복원 snapshot·geometry는 건드리지 않는다.
+- 준비된 DRC focus에는 원 revision fence가 붙는다. HTTP 응답 뒤에 갱신이 발생해도
+  WebSocket `apply`가 fence를 확인한 상태로 controller CAS를 수행하므로 낡은 focus는
+  뷰를 이동시키지 못한다. 일반 layer settings의 prepared edit는 기존 경로를 유지한다.
+- 브라우저 task는 요청 당시 revision을 고정한다. 새 catalog를 채택하면 옛 결과·focus를
+  취소/무시하고 `ready`에서 새 목록을 읽는다. 이미 클라이언트에 도착한 표시를 서버가
+  소급 취소하는 것은 아니다. 다른 탭의 변경을 아는 시점은 catalog poll이며, 다음 writer UI는
+  자기 저장을 시작할 때 조회를 일시 중지하고 receipt/새 catalog를 연결해야 한다.
+- 주석 snapshot/preview/승인도 기존 context.revision 검증을 이 장벽에 연결한다. 이전
+  context의 새로운 승인은 거부하되 이미 수용된 동일 operation의 receipt 조회/replay는
+  별도 기존 ledger 계약을 따른다. 디스크 게시 성공을 조회 갱신 실패로 뒤집으면 안 된다.
+
+### 검증 및 남은 연결
+
+web unit52·transport10·전체 ES2017/JS gate와 strict app/core/web clippy가 통과했다.
+revision 변경/취소/닫힘·짧은 commit 락·동일 reader의 stale callback·panel 초기화와 idle
+유지를 unit으로 고정했다. 실제 native actor gate는 게시를 반복하며 이전 ticket 거부,
+새 status/counter·동일 geometry를 검사한다. 실제 owner HTTP/WS gate는 합성 pack에만
+native waive를 저장한 뒤 이전 filter cursor/panel/selection409, stale focus 무이동,
+새 status/focus 성공·pack bytes 불변을 검사한다. `validate_owner_service.py`에
+`RUST DRC WAIVE REVISION: ALL OK`를 필수 단언해 ignored 기본 실행으로 대체할 수 없다.
+UI gate는 같은 id·새 revision과 `updating→ready`, 지연된 geometry/focus 폐기·새 조회 복귀,
+stale panel 자동 저장 없음·layout 무편집을 검사한다. 실제 browser waive 게시 수용은 아니다.
+
+Rust1.89 core201/web52와 Linux x86-64 musl release 교차 빌드가 통과했다.
+전체 `sh tools/validate_rust.sh`는 exit0·`RUST VALIDATION: ALL OK`로 완료됐다.
+workspace unit·owner10(새 HTTP/WS revision gate 포함)·pack/ASCII 웹 DRC·주석/API·
+28회 managed 게시/Python oracle·jobdeck80·renderer46·KLayout13 PX+2 phase-exact+
+14 style(jobs1/8)이 통과했다. 검증용 venv 링크만 제거했으며 원래 venv와 승인된
+shared-default 합성 게시 결과물은 보존했다. Linux 실제 실행·현장 수용을 뜻하지 않는다.
+owner waive의 명시 opt-in·read/prepare/승인/receipt·UI와 전체 M4는 남아 있다.
+다음 단계는 `published`와 `reader_applied`를
+분리하고 외부 교체/취소/응답 유실 시 이를 정확히 보존하는 owner 연결이다.
+renderd0.12.87·GTK 기본 실행·현장 보류 범위는 바꾸지 않는다.

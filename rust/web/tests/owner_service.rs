@@ -40,6 +40,7 @@ struct Harness {
     bootstrap: Secret,
     service: Arc<Service>,
     resources: Arc<Resources>,
+    drc_reader: Option<Arc<floe_web::drc::Service>>,
     stop: oneshot::Sender<()>,
     task: JoinHandle<std::io::Result<()>>,
 }
@@ -91,6 +92,7 @@ impl Harness {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (mut gate, bootstrap) = Gateway::with_service(addr, Arc::clone(&service)).unwrap();
+        let mut drc_reader = None;
         if let Some((pack, rules)) = drc {
             let scope = AccessScope::new(&[pack.parent().unwrap().to_owned()]).unwrap();
             let source_id = service.catalog()["sources"][0]["source_id"]
@@ -101,6 +103,7 @@ impl Harness {
                 &resources, scope, pack, None, rules, &source_id,
             )
             .unwrap();
+            drc_reader = Some(Arc::clone(&drc));
             if builds {
                 Gateway::attach_drc_registry(
                     &mut gate,
@@ -124,6 +127,7 @@ impl Harness {
             bootstrap,
             service,
             resources,
+            drc_reader,
             stop,
             task,
         }

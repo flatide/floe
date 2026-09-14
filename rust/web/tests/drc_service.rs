@@ -264,7 +264,7 @@ async fn reader_actor_refreshes_waives_without_changing_geometry_identity() {
         .unwrap()
     }
     let before = read(reader.submit(query()).unwrap()).await;
-    let identity = (reader.id.clone(), reader.revision.clone());
+    let identity = reader.id.clone();
     assert_eq!(before["rows"][0]["status"], 0);
     let save = |value| {
         let mut job = store
@@ -283,16 +283,17 @@ async fn reader_actor_refreshes_waives_without_changing_geometry_identity() {
         assert!(job.status().outcome.is_some());
     };
     for value in [1, 0, 239] {
+        let previous = reader.revision();
+        let mut old = reader.submit(query()).unwrap();
         save(value);
         let snapshot = store.snapshot(Arc::clone(&stop)).unwrap();
         let ticket = reader.apply_waives(snapshot).unwrap();
-        // A queued read after the barrier sees the new status. The coordinator
-        // still has to fence HTTP replies already sent before this barrier.
-        let after = reader.submit(query()).unwrap();
         let applied = read(ticket).await;
+        assert_eq!(old.result().await, Err("drc_context_changed"));
+        assert_ne!(reader.revision(), previous);
         assert_eq!(applied["sidecar"], true);
         assert_eq!(applied["waived"], if value == 1 { "1" } else { "0" });
-        let mut result = read(after).await;
+        let mut result = read(reader.submit(query()).unwrap()).await;
         assert_eq!(result["rows"][0]["status"], value);
         result["rows"][0]["status"] = json!(0);
         assert_eq!(result, before);
@@ -302,7 +303,7 @@ async fn reader_actor_refreshes_waives_without_changing_geometry_identity() {
             read(reader.submit(rule).unwrap()).await["waived"],
             if value == 1 { "1" } else { "0" }
         );
-        assert_eq!((&reader.id, &reader.revision), (&identity.0, &identity.1));
+        assert_eq!(reader.id, identity);
     }
     let stale = store.snapshot(Arc::clone(&stop)).unwrap();
     // A second registered writer models external replacement. Reusing `store`

@@ -4,6 +4,171 @@ use floe_app_core::{jobdeck::color::Mode, managed::ManagedDataset};
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "run tools/validate_owner_service.py with private source files"]
+async fn waive_refresh_fences_http_cursors_and_prepared_websocket_focus() {
+    use floe_app_core::drc::review::{
+        managed::{ManagedStore, Registration},
+        store::Kind,
+    };
+    let fixture = PathBuf::from(std::env::var_os("FLOE_OWNER_FIXTURE").unwrap());
+    let root = fixture.parent().unwrap().join("drc-waive-revision");
+    fs::create_dir(&root).unwrap();
+    let source = root.join("design.oas");
+    fs::copy(&fixture, &source).unwrap();
+    let indexer = std::env::var_os("FLOE_INDEX_BIN").unwrap();
+    assert!(std::process::Command::new(&indexer)
+        .arg("vfs")
+        .arg(&source)
+        .arg(source.with_extension("oas.floe"))
+        .args(["--jobs", "2"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let db = root.join("review.db");
+    fs::write(
+        &db,
+        "TOP 1000\nWIDTH\n1 1 0\np 1 4\n0 0\n100 0\n100 20\n0 20\n",
+    )
+    .unwrap();
+    assert!(std::process::Command::new(&indexer)
+        .arg("drc")
+        .arg(&db)
+        .args(["--jobs", "2"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let pack = db.with_extension("db.ice");
+    let original = fs::read(&pack).unwrap();
+    let h =
+        Harness::start_with_drc(std::slice::from_ref(&source), native(), Some((&pack, None))).await;
+    let login = h.login().await;
+    let reader = h.drc_reader.as_ref().unwrap();
+    reader
+        .submit(serde_json::from_value(json!({"kind":"rule","check":"0"})).unwrap())
+        .unwrap()
+        .result()
+        .await
+        .unwrap();
+    let old = h.call(&login, "GET", "/api/v1/drc", Value::Null).await.1["drc"].clone();
+    let source_id = h.service.catalog()["sources"][0]["source_id"].clone();
+    assert_eq!(
+        h.call(
+            &login,
+            "POST",
+            "/api/v1/operations",
+            open("1", &source_id, "level", json!({"mode":"all"}))
+        )
+        .await
+        .0,
+        202
+    );
+    assert_eq!(h.finished(&login, 1).await["phase"], "succeeded");
+    let mut socket = ReviewSocket::new(&h, &login).await;
+    let token = prepare(&h, &login, &old, &socket, 0, true).await["prepared_token"].clone();
+    let before = socket.state.clone();
+    let prefix = format!(
+        "/api/v1/drc/{}/views/{}",
+        reader.id,
+        socket.hello["view_id"].as_str().unwrap()
+    );
+    let panel_path = format!("{prefix}/panel");
+    let selection_path = format!("{prefix}/selection");
+    let panel = json!({"revision":old["revision"],"base_panel_rev":"1","body":{
+        "search":"saved filter","rule_start":"0","check":"0","error_start":"0","query":null,
+        "waived":false,"selected":{"check":"0","error":"0"},"markers":true,"shown":true,
+        "jump_scale":null,"zoom_lock":false,"jump_active":false,"focus_visible":false}});
+    assert_eq!(
+        h.call(&login, "POST", &panel_path, panel.clone()).await.0,
+        200
+    );
+    let selection = json!({"revision":old["revision"],"base_selection_rev":"1",
+        "body":{"kind":"apply","check":"0","errors":["0"],"mode":"replace","waived":false}});
+    assert_eq!(
+        h.call(&login, "POST", &selection_path, selection.clone())
+            .await
+            .1["state"]["total"],
+        "1"
+    );
+    let stop = Arc::new(AtomicUsize::new(0));
+    let store = ManagedStore::open(
+        &h.resources,
+        Registration {
+            scope: AccessScope::new(std::slice::from_ref(&root)).unwrap(),
+            pack: pack.clone(),
+            reviewer: "synthetic-revision".into(),
+            kind: Kind::Waives,
+            protected_files: vec![],
+            protected_trees: vec![],
+        },
+        &stop,
+    )
+    .unwrap();
+    let mut job = store
+        .snapshot(Arc::clone(&stop))
+        .unwrap()
+        .prepare_waives(&[(0, 1)])
+        .unwrap()
+        .publish(false)
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !job.is_finished() {
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    job.close().unwrap();
+    assert!(job.status().outcome.is_some());
+    drop(job);
+    reader
+        .apply_waives(store.snapshot(Arc::clone(&stop)).unwrap())
+        .unwrap()
+        .result()
+        .await
+        .unwrap();
+    let fresh = h.call(&login, "GET", "/api/v1/drc", Value::Null).await.1["drc"].clone();
+    assert_eq!(fresh["id"], old["id"]);
+    assert_eq!(fresh["phase"], "ready");
+    assert_ne!(fresh["revision"], old["revision"]);
+    let path = format!("/api/v1/drc/{}/read", reader.id);
+    let mut read = json!({"view_id":socket.hello["view_id"],"revision":old["revision"],
+        "body":{"kind":"filtered_step","check":"0","backwards":false,"in_view":false,"waived":false,
+        "cursor":{"next":"0","remaining":"1"}}});
+    for (path, body) in [
+        (&path, read.clone()),
+        (&panel_path, panel),
+        (&selection_path, selection),
+    ] {
+        let (code, value) = h.call(&login, "POST", path, body).await;
+        assert_eq!(code, 409, "{value}");
+        assert_eq!(value["error"], "drc_context_changed");
+    }
+    socket.apply(&token, Some("drc_context_changed")).await;
+    for key in ["view_id", "state_rev", "render_rev", "bbox_dbu", "layers"] {
+        assert_eq!(socket.state[key], before[key], "{key}");
+    }
+    let state = h.call(&login, "GET", &panel_path, Value::Null).await.1;
+    assert_eq!(state["revision"], fresh["revision"]);
+    assert_eq!(state["state"]["body"], Value::Null);
+    assert_eq!(
+        h.call(&login, "GET", &selection_path, Value::Null).await.1["state"]["total"],
+        "0"
+    );
+    read["revision"] = fresh["revision"].clone();
+    read["body"] = json!({"kind":"errors","check":"0","start":"0","waived":true,"limit":64});
+    let (code, value) = h.call(&login, "POST", &path, read).await;
+    assert_eq!(code, 200, "{value}");
+    assert_eq!(value["rows"][0]["status"], 1);
+    let focus = prepare(&h, &login, &fresh, &socket, 0, true).await;
+    socket.apply(&focus["prepared_token"], None).await;
+    assert_eq!(fs::read(&pack).unwrap(), original);
+    socket.socket.close(None).await.unwrap();
+    drop(store);
+    h.shutdown().await;
+    println!("RUST DRC WAIVE REVISION: ALL OK (HTTP cursors/panel/groups, stale WS focus, new statuses, same geometry/view)");
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "run tools/validate_owner_service.py with private source files"]
 async fn explicit_pack_build_retires_prepared_focus_without_reopening_layout() {
     let fixture = PathBuf::from(std::env::var_os("FLOE_OWNER_FIXTURE").unwrap());
     let root = fixture.parent().unwrap().join("drc-build-identity");

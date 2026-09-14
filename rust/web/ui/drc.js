@@ -130,8 +130,8 @@
                 c.source === registration.source_id && !['closed', 'failed'].includes(c.state.status) ? c : null;
         }
         function contextKey(c) { return c && registration ? c.id + ':' + registration.revision : ''; }
-        function task(key) { cancel(key); const t = {cancelled: false, abort: null}; tasks[key] = t; return t; }
-        function valid(key, t, c) { return !t.cancelled && tasks[key] === t && contextKey(current()) === contextKey(c); }
+        function task(key) { cancel(key); const t = {cancelled: false, abort: null, revision: registration && registration.revision}; tasks[key] = t; return t; }
+        function valid(key, t, c) { return !t.cancelled && tasks[key] === t && registration && t.revision === registration.revision && contextKey(current()) === contextKey(c); }
         async function read(key, t, c, body, lockView) {
             const envelope = {view_id: c.id, revision: registration.revision, body: body};
             if (lockView) { envelope.state_rev = c.state.state_rev; }
@@ -911,7 +911,7 @@
             try {
                 const v = await o.http('GET', '/api/v1/drc', undefined, false, t); if (t.cancelled || stopped) { return; }
                 applyCatalog(v);
-                if (registration && registration.phase === 'opening') { timer = setTimeout(refresh, 500); }
+                if (registration && ['opening', 'updating'].includes(registration.phase)) { timer = setTimeout(refresh, 500); }
             } catch (e) { if (!t.cancelled) { info(e.message); } }
         }
         el('drc-search-form').onsubmit = function (e) { e.preventDefault(); ruleStart = '0'; previousRules.length = 0; loadRules(); };

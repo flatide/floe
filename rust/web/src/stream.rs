@@ -399,7 +399,7 @@ pub(crate) async fn socket(
                     Control::Apply{seq,connection_epoch,view_id,base_state_rev,token}=>{
                         if connection_epoch!=epoch||view_id!=attached.id{break;}
                         let Ok(base)=view::counter(&base_state_rev) else {break;};
-                        let outcome=attached.prepared.lock().unwrap().apply(&token,base,controller);
+                        let outcome=crate::prepared::PreparedEdits::apply_current(&attached.prepared,&token,base,controller);
                         let state=controller.snapshot();
                         let event=match outcome {
                             Ok(accepted)=>json!({"type":"accepted","seq":seq,"state_rev":accepted.state_rev.to_string(),"render_rev":accepted.render_rev.to_string()}),

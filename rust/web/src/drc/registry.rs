@@ -179,20 +179,42 @@ impl Registry {
         f: impl FnOnce() -> std::result::Result<T, Failure>,
     ) -> std::result::Result<T, Failure> {
         let s = self.inner.state.lock().unwrap();
-        if s.closed
-            || !s
-                .current
-                .as_ref()
-                .is_some_and(|d| d.id == reader.id && d.revision == reader.revision)
-        {
+        if s.closed || !s.current.as_ref().is_some_and(|d| d.id == reader.id) {
             return Err("drc_context_changed");
         }
         // Lock order: registry -> panel/prepared -> view controller. No caller
         // may keep these guards across await or reacquire the registry in f.
         f()
     }
+    #[cfg(test)]
     pub(crate) fn is_current(&self, reader: &Service) -> bool {
         self.with_current(reader, || Ok(())).is_ok()
+    }
+    pub(crate) fn with_revision<T>(
+        &self,
+        reader: &Service,
+        expected: &str,
+        f: impl FnOnce() -> std::result::Result<T, Failure>,
+    ) -> std::result::Result<T, Failure> {
+        // Registry -> read revision -> panel/prepared/controller. No I/O and
+        // no revision lookup from inside f (the same non-reentrant lock).
+        self.with_current(reader, || reader.fence(expected)?.with_current(f))
+    }
+    pub(crate) fn is_revision(&self, reader: &Service, expected: &str) -> bool {
+        self.with_revision(reader, expected, || Ok(())).is_ok()
+    }
+    pub(super) fn with_panel<T>(
+        &self,
+        reader: &Service,
+        expected: &str,
+        view: &Attachment,
+        f: impl FnOnce(&mut super::panel::Panel) -> std::result::Result<T, Failure>,
+    ) -> std::result::Result<T, Failure> {
+        self.with_revision(reader, expected, || {
+            let mut panel = view.drc_panel.lock().unwrap();
+            panel.bind_revision(expected);
+            f(&mut panel)
+        })
     }
     fn allowed(&self, s: &State) -> bool {
         self.inner.indexer.is_some()
@@ -240,7 +262,7 @@ impl Registry {
         let reader = s
             .current
             .as_ref()
-            .filter(|d| d.id == req.drc_id && d.revision == req.revision)
+            .filter(|d| d.id == req.drc_id)
             .ok_or("drc_context_changed")?
             .clone();
         if view.id != req.view_id
@@ -250,11 +272,13 @@ impl Registry {
             return Err("drc_context_changed");
         }
         let admit = || s.ledger.admit(seq, signature, "drc_build");
-        let admitted = if let Some(notes) = self.notes() {
-            notes.admit_build(admit)?
-        } else {
-            admit()?
-        };
+        let admitted = reader.fence(&req.revision)?.with_current(|| {
+            if let Some(notes) = self.notes() {
+                notes.admit_build(admit)
+            } else {
+                admit()
+            }
+        })?;
         match admitted {
             Admission::Replay(v) => return Ok(v),
             Admission::New => (),
@@ -590,6 +614,34 @@ mod tests {
         managed::{Limits, Resources},
         registered::AccessScope,
     };
+    #[test]
+    fn refreshed_revision_rejects_old_callbacks_without_replacing_reader() {
+        let reg = Registration {
+            resources: Resources::new(Limits::default()).unwrap(),
+            scope: AccessScope::new(&[std::env::temp_dir()]).unwrap(),
+            path: std::env::temp_dir().join("revision-test-not-opened.db"),
+            waives: None,
+            rules: None,
+            source_id: "source".into(),
+        };
+        let reader = Service::unavailable(reg, "drc_read_error").unwrap();
+        let registry = Registry::read_only(Arc::clone(&reader));
+        let old = reader.revision();
+        registry.with_revision(&reader, &old, || Ok(())).unwrap();
+        let change = reader.inner.revision.begin().unwrap();
+        let next = reader.revision();
+        assert!(!registry.is_revision(&reader, &old));
+        assert!(!registry.is_revision(&reader, &next));
+        drop(change);
+        assert_eq!(
+            registry.with_revision(&reader, &old, || panic!("stale commit")),
+            Err::<(), _>("drc_context_changed")
+        );
+        assert!(registry.is_revision(&reader, &next));
+        assert_eq!(registry.current(&reader.id).unwrap().id, reader.id);
+        registry.request_stop();
+        assert!(!registry.is_revision(&reader, &next));
+    }
     #[test]
     fn retired_read_callbacks_never_commit_to_the_new_review() {
         let reg = Registration {

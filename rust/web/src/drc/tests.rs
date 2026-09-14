@@ -7,7 +7,6 @@ fn rules() -> Request {
 fn bounded_queue_drop_cancels_and_stop_drains_without_runtime_waits() {
     let s = Service {
         id: "id".into(),
-        revision: "revision".into(),
         source_id: "source".into(),
         title: "DRC".into(),
         registration: Registration {
@@ -27,6 +26,7 @@ fn bounded_queue_drop_cancels_and_stop_drains_without_runtime_waits() {
                 metadata: None,
             }),
             wake: Condvar::new(),
+            revision: revision::Revision::new("revision".into()),
         }),
         thread: Mutex::new(None),
     };

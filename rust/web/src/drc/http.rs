@@ -62,14 +62,15 @@ async fn panel_get(
     else {
         return failure("drc_context_changed");
     };
+    let revision = drc.revision();
     match gate
         .drc
         .as_ref()
         .unwrap()
-        .with_current(&drc, || Ok(v.drc_panel.lock().unwrap().snapshot()))
+        .with_panel(&drc, &revision, &v, |p| Ok(p.snapshot()))
     {
         Ok(state) => {
-            Json(json!({"revision":drc.revision,"view_id":view,"state":state})).into_response()
+            Json(json!({"revision":revision,"view_id":view,"state":state})).into_response()
         }
         Err(e) => failure(e),
     }
@@ -102,8 +103,7 @@ async fn panel_set(
             v.id == view
                 && v.source_id == drc.source_id
                 && !v.controller.is_finished()
-                && body.revision == drc.revision
-                && gate.drc.as_ref().unwrap().is_current(&drc)
+                && gate.drc.as_ref().unwrap().is_revision(&drc, &body.revision)
         })
     };
     let Some(v) = matches() else {
@@ -112,11 +112,12 @@ async fn panel_set(
     let Ok(base) = crate::view::counter(&body.base_panel_rev) else {
         return failure("invalid_drc_request");
     };
-    if let Err(e) = body
-        .body
-        .validate()
-        .and_then(|()| v.drc_panel.lock().unwrap().check(base, &body.body))
-    {
+    if let Err(e) = body.body.validate().and_then(|()| {
+        gate.drc
+            .as_ref()
+            .unwrap()
+            .with_panel(&drc, &body.revision, &v, |p| p.check(base, &body.body))
+    }) {
         return failure(e);
     }
     if body.body.query.as_ref().is_some_and(|q| {
@@ -146,10 +147,10 @@ async fn panel_set(
         .drc
         .as_ref()
         .unwrap()
-        .with_current(&drc, || v.drc_panel.lock().unwrap().set(base, body.body));
+        .with_panel(&drc, &body.revision, &v, |p| p.set(base, body.body));
     match result {
         Ok(state) => {
-            Json(json!({"revision":drc.revision,"view_id":view,"state":state})).into_response()
+            Json(json!({"revision":body.revision,"view_id":view,"state":state})).into_response()
         }
         Err(e) => failure(e),
     }
@@ -217,12 +218,15 @@ async fn read(
                     .state_rev
                     .as_ref()
                     .is_none_or(|rev| v.controller.snapshot().state_rev.to_string() == *rev)
-        }) && body.revision == drc.revision
-            && gate.drc.as_ref().unwrap().is_current(&drc)
+        }) && gate.drc.as_ref().unwrap().is_revision(&drc, &body.revision)
     };
     if !matches() {
         return failure("drc_context_changed");
     }
+    let fence = match drc.fence(&body.revision) {
+        Ok(f) => f,
+        Err(e) => return failure(e),
+    };
     let context = if focused {
         let Some(v) = gate.active_view() else {
             return failure("drc_context_changed");
@@ -243,7 +247,11 @@ async fn read(
         let Some(v) = gate.active_view().filter(|v| v.id == body.view_id) else {
             return failure("drc_context_changed");
         };
-        let ids = v.drc_panel.lock().unwrap().groups.ids(revision, check);
+        let ids = gate
+            .drc
+            .as_ref()
+            .unwrap()
+            .with_panel(&drc, &body.revision, &v, |p| p.groups.ids(revision, check));
         match ids {
             Ok(ids) => Some(ids),
             Err(e) => return failure(e),
@@ -260,8 +268,9 @@ async fn read(
             .drc
             .as_ref()
             .unwrap()
-            .with_current(&drc, || v.prepared.lock().unwrap().begin(base))
-        {
+            .with_revision(&drc, &body.revision, || {
+                v.prepared.lock().unwrap().begin(base)
+            }) {
             Ok(stamp) => stamp,
             Err(e) => return failure(e),
         };
@@ -286,38 +295,41 @@ async fn read(
     if !matches() {
         return failure("drc_context_changed");
     }
-    if let Some((revision, _)) = selection_filter {
-        let Some(v) = gate.active_view().filter(|v| v.id == body.view_id) else {
-            return failure("drc_context_changed");
-        };
-        let check = v.drc_panel.lock().unwrap().groups.check(revision);
-        if let Err(e) = check {
-            return failure(e);
-        }
-    }
-    let result = gate.drc.as_ref().unwrap().with_current(&drc, || {
-        result.and_then(|bytes| {
-            let Some((v, stamp, result)) = preparation else {
-                return Ok(bytes);
-            };
-            let patch = result.lock().unwrap().take().ok_or("drc_read_error")?;
-            let mut value: serde_json::Value =
-                serde_json::from_slice(&bytes).map_err(|_| "drc_read_error")?;
-            // Publishing the plan does not edit the view. The consuming WebSocket
-            // command still performs the state CAS under the controller lock.
-            value["prepared_token"] = json!(v.prepared.lock().unwrap().finish(stamp, patch)?);
-            let bytes = serde_json::to_vec(&value).map_err(|_| "drc_read_error")?;
-            if bytes.len() > super::RESPONSE_BYTES {
-                return Err("drc_read_limit");
+    let result = gate
+        .drc
+        .as_ref()
+        .unwrap()
+        .with_revision(&drc, &body.revision, || {
+            if let Some((revision, _)) = selection_filter {
+                let v = gate
+                    .active_view()
+                    .filter(|v| v.id == body.view_id)
+                    .ok_or("drc_context_changed")?;
+                v.drc_panel.lock().unwrap().groups.check(revision)?;
             }
-            Ok(bytes)
-        })
-    });
+            result.and_then(|bytes| {
+                let Some((v, stamp, result)) = preparation else {
+                    return Ok(bytes);
+                };
+                let patch = result.lock().unwrap().take().ok_or("drc_read_error")?;
+                let mut value: serde_json::Value =
+                    serde_json::from_slice(&bytes).map_err(|_| "drc_read_error")?;
+                // Publishing the plan does not edit the view. The consuming WebSocket
+                // command still performs the state CAS under the controller lock.
+                value["prepared_token"] =
+                    json!(v.prepared.lock().unwrap().finish_drc(stamp, patch, fence)?);
+                let bytes = serde_json::to_vec(&value).map_err(|_| "drc_read_error")?;
+                if bytes.len() > super::RESPONSE_BYTES {
+                    return Err("drc_read_limit");
+                }
+                Ok(bytes)
+            })
+        });
     match result {
         Ok(bytes) => (
             [
                 ("content-type", "application/json"),
-                ("x-floe-drc-revision", drc.revision.as_str()),
+                ("x-floe-drc-revision", body.revision.as_str()),
                 ("x-floe-view-id", body.view_id.as_str()),
             ],
             bytes,

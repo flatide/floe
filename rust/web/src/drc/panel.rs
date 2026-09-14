@@ -148,6 +148,7 @@ impl Data {
 pub(crate) struct Panel {
     revision: u64,
     data: Option<Data>,
+    read_revision: Option<String>,
     pub(super) groups: super::selection::Groups,
 }
 impl Default for Panel {
@@ -155,11 +156,22 @@ impl Default for Panel {
         Self {
             revision: 1,
             data: None,
+            read_revision: None,
             groups: super::selection::Groups::default(),
         }
     }
 }
 impl Panel {
+    pub(super) fn bind_revision(&mut self, revision: &str) {
+        if self.read_revision.as_deref() != Some(revision) {
+            // Filtered cursors and selections were derived under old statuses.
+            // Reset lazily under the read revision fence, never from stale GETs.
+            *self = Self {
+                read_revision: Some(revision.into()),
+                ..Self::default()
+            };
+        }
+    }
     pub fn snapshot(&self) -> Value {
         json!({"panel_rev":self.revision.to_string(),"body":self.data})
     }
@@ -185,6 +197,18 @@ impl Panel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn new_read_revision_discards_saved_filter_cursors_but_idle_poll_keeps_them() {
+        let mut p = Panel::default();
+        p.bind_revision("old");
+        p.set(1, data()).unwrap();
+        let before = p.snapshot();
+        p.bind_revision("old");
+        assert_eq!(p.snapshot(), before);
+        p.bind_revision("new");
+        assert_eq!(p.snapshot()["body"], Value::Null);
+        assert_eq!(p.snapshot()["panel_rev"], "1");
+    }
     fn data() -> Data {
         serde_json::from_value(json!({"search":"","rule_start":"0","check":null,"error_start":"0","query":null,"waived":null,"selected":null,"markers":true,"shown":true,"jump_scale":null,"zoom_lock":false,"jump_active":false,"focus_visible":false})).unwrap()
     }

@@ -166,14 +166,15 @@ async fn snapshot(
     else {
         return failure("drc_context_changed");
     };
+    let revision = drc.revision();
     match gate
         .drc
         .as_ref()
         .unwrap()
-        .with_current(&drc, || Ok(v.drc_panel.lock().unwrap().groups.snapshot()))
+        .with_panel(&drc, &revision, &v, |p| Ok(p.groups.snapshot()))
     {
         Ok(state) => {
-            Json(json!({"revision":drc.revision,"view_id":view,"state":state})).into_response()
+            Json(json!({"revision":revision,"view_id":view,"state":state})).into_response()
         }
         Err(e) => failure(e),
     }
@@ -213,8 +214,7 @@ async fn change(
             v.id == view
                 && v.source_id == drc.source_id
                 && !v.controller.is_finished()
-                && body.revision == drc.revision
-                && gate.drc.as_ref().unwrap().is_current(&drc)
+                && gate.drc.as_ref().unwrap().is_revision(&drc, &body.revision)
                 && body
                     .state_rev
                     .as_ref()
@@ -224,7 +224,12 @@ async fn change(
     let Some(v) = matches() else {
         return failure("drc_context_changed");
     };
-    if let Err(e) = v.drc_panel.lock().unwrap().groups.check(base) {
+    if let Err(e) = gate
+        .drc
+        .as_ref()
+        .unwrap()
+        .with_panel(&drc, &body.revision, &v, |p| p.groups.check(base))
+    {
         return failure(e);
     }
     let mut ticket = match drc.enqueue(dto::Command::SelectionCandidates {
@@ -269,16 +274,16 @@ async fn change(
         Ok(v) => v,
         Err(e) => return failure(e),
     };
-    let updated = gate.drc.as_ref().unwrap().with_current(&drc, || {
-        v.drc_panel
-            .lock()
-            .unwrap()
-            .groups
-            .apply(base, edit.check, edit.mode, &hits)
-    });
+    let updated = gate
+        .drc
+        .as_ref()
+        .unwrap()
+        .with_panel(&drc, &body.revision, &v, |p| {
+            p.groups.apply(base, edit.check, edit.mode, &hits)
+        });
     match updated {
         Ok(state) => {
-            Json(json!({"revision":drc.revision,"view_id":view,"state":state})).into_response()
+            Json(json!({"revision":body.revision,"view_id":view,"state":state})).into_response()
         }
         Err(e) => failure(e),
     }

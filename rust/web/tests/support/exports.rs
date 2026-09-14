@@ -384,6 +384,7 @@ async fn fake_harness(path: &Path, binary: &Path) -> Harness {
         bootstrap,
         service,
         resources,
+        drc_reader: None,
         stop,
         task,
     }

@@ -1,6 +1,7 @@
 //! One bounded, single-use server-side edit per view. HTTP can prepare a large
 //! layer selection without reflecting it through the 8 KiB control channel.
 use floe_app_core::view::{Patch, Snapshot, ViewController};
+use std::sync::Mutex;
 
 #[derive(Default)]
 pub(crate) struct PreparedEdits {
@@ -16,6 +17,7 @@ pub(crate) struct Stamp {
 struct Edit {
     stamp: Stamp,
     patch: Patch,
+    fence: Option<crate::drc::revision::Fence>,
 }
 impl PreparedEdits {
     /// Revocation must also defeat a preparation still awaiting the DRC actor.
@@ -39,11 +41,31 @@ impl PreparedEdits {
         })
     }
     pub fn finish(&mut self, stamp: Stamp, patch: Patch) -> Result<String, &'static str> {
+        self.finish_with(stamp, patch, None)
+    }
+    pub fn finish_drc(
+        &mut self,
+        stamp: Stamp,
+        patch: Patch,
+        fence: crate::drc::revision::Fence,
+    ) -> Result<String, &'static str> {
+        self.finish_with(stamp, patch, Some(fence))
+    }
+    fn finish_with(
+        &mut self,
+        stamp: Stamp,
+        patch: Patch,
+        fence: Option<crate::drc::revision::Fence>,
+    ) -> Result<String, &'static str> {
         if self.exhausted || self.serial != stamp.serial {
             return Err("prepared_edit_expired");
         }
         let token = stamp.token.clone();
-        self.ready = Some(Edit { stamp, patch });
+        self.ready = Some(Edit {
+            stamp,
+            patch,
+            fence,
+        });
         Ok(token)
     }
     fn take(&mut self, token: &str, base: u64) -> Result<Patch, &'static str> {
@@ -59,7 +81,7 @@ impl PreparedEdits {
         }
         Ok(edit.patch)
     }
-    pub fn apply(
+    fn apply(
         &mut self,
         token: &str,
         base: u64,
@@ -72,6 +94,28 @@ impl PreparedEdits {
                 crate::view::safe_error(e.kind)
             }
         })
+    }
+    pub fn apply_current(
+        plans: &Mutex<Self>,
+        token: &str,
+        base: u64,
+        controller: &ViewController,
+    ) -> Result<Snapshot, &'static str> {
+        let fence = plans
+            .lock()
+            .unwrap()
+            .ready
+            .as_ref()
+            .filter(|edit| edit.stamp.token == token)
+            .and_then(|edit| edit.fence.clone());
+        let apply = || plans.lock().unwrap().apply(token, base, controller);
+        // Recheck token under the prepared lock after acquiring revision. This
+        // preserves revision -> prepared -> controller order and defeats a
+        // concurrent begin/invalidate without keeping any guard across await.
+        match fence {
+            Some(f) => f.with_current(apply),
+            None => apply(),
+        }
     }
 }
 

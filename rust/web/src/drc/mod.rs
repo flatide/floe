@@ -8,6 +8,7 @@ pub(crate) mod panel;
 mod read;
 mod registry;
 pub(crate) mod review;
+pub(crate) mod revision;
 mod selection;
 pub use dto::Request;
 use floe_app_core::{
@@ -34,6 +35,8 @@ struct Work {
     request: dto::Command,
     stop: Arc<AtomicUsize>,
     reply: oneshot::Sender<std::result::Result<Vec<u8>, Failure>>,
+    fence: Option<revision::Fence>,
+    change: Option<revision::Change>,
 }
 struct State {
     pending: VecDeque<Work>,
@@ -45,10 +48,10 @@ struct State {
 struct Inner {
     state: Mutex<State>,
     wake: Condvar,
+    revision: revision::Revision,
 }
 pub struct Service {
     pub id: String,
-    pub revision: String,
     pub source_id: String,
     title: String,
     registration: Registration,
@@ -69,10 +72,15 @@ struct Registration {
 pub struct Ticket {
     reply: oneshot::Receiver<std::result::Result<Vec<u8>, Failure>>,
     stop: Arc<AtomicUsize>,
+    fence: Option<revision::Fence>,
 }
 impl Ticket {
     pub async fn result(&mut self) -> std::result::Result<Vec<u8>, Failure> {
-        (&mut self.reply).await.unwrap_or(Err("drc_closed"))
+        let result = (&mut self.reply).await.unwrap_or(Err("drc_closed"));
+        match &self.fence {
+            Some(f) => f.with_current(|| result),
+            None => result,
+        }
     }
 }
 impl Drop for Ticket {
@@ -82,8 +90,8 @@ impl Drop for Ticket {
 }
 impl Service {
     /// Trusted coordinator only; no HTTP request can construct a snapshot.
-    /// This is an actor barrier, not an end-to-end UI revision barrier. The
-    /// caller must retire stale status-dependent HTTP replies/prepared actions.
+    /// Admission retires old read revisions before native I/O. New reads wait
+    /// for the apply ACK/catalog ready phase; geometry identity/cache survive.
     pub fn apply_waives(
         &self,
         snapshot: floe_app_core::drc::review::managed::Snapshot,
@@ -107,7 +115,6 @@ impl Service {
         };
         Ok(Arc::new(Self {
             id: identity()?,
-            revision: identity()?,
             source_id: registration.source_id.clone(),
             title: registration
                 .path
@@ -127,6 +134,7 @@ impl Service {
                     metadata: None,
                 }),
                 wake: Condvar::new(),
+                revision: revision::Revision::new(identity()?),
             }),
             thread: Mutex::new(None),
         }))
@@ -176,10 +184,10 @@ impl Service {
                 metadata: None,
             }),
             wake: Condvar::new(),
+            revision: revision::Revision::new(revision),
         });
         let service = Arc::new(Self {
             id,
-            revision,
             source_id: source_id.into(),
             registration: Registration {
                 resources: Arc::clone(resources),
@@ -249,9 +257,16 @@ impl Service {
     }
     pub fn catalog(&self) -> Value {
         let s = self.inner.state.lock().unwrap();
-        json!({"id":self.id,"revision":self.revision,"source_id":self.source_id,"title":self.title,
-            "phase":if s.failure.is_some(){"error"}else if s.closed{"closed"}else if s.metadata.is_some(){"ready"}else{"opening"},
+        let (revision, changing) = self.inner.revision.snapshot();
+        json!({"id":self.id,"revision":revision,"source_id":self.source_id,"title":self.title,
+            "phase":if s.failure.is_some(){"error"}else if s.closed{"closed"}else if changing{"updating"}else if s.metadata.is_some(){"ready"}else{"opening"},
             "metadata":s.metadata,"error":s.failure,"read_only":true,"response_bytes":RESPONSE_BYTES})
+    }
+    pub fn revision(&self) -> String {
+        self.inner.revision.snapshot().0
+    }
+    fn fence(&self, expected: &str) -> std::result::Result<revision::Fence, Failure> {
+        self.inner.revision.capture(expected)
     }
     pub fn submit(&self, request: Request) -> std::result::Result<Ticket, Failure> {
         self.submit_context(request, None)
@@ -316,22 +331,31 @@ impl Service {
         if s.pending.len() >= QUEUE {
             return Err("drc_busy");
         }
+        let (fence, change) = if matches!(&request, dto::Command::ApplyWaives(_)) {
+            (None, Some(self.inner.revision.begin()?))
+        } else {
+            (Some(self.fence(&self.revision())?), None)
+        };
         let (reply, receiver) = oneshot::channel();
         let stop = Arc::new(AtomicUsize::new(0));
         s.pending.push_back(Work {
             request,
             stop: Arc::clone(&stop),
             reply,
+            fence: fence.clone(),
+            change,
         });
         self.inner.wake.notify_one();
         Ok(Ticket {
             reply: receiver,
             stop,
+            fence,
         })
     }
     pub fn request_stop(&self) {
         let mut s = self.inner.state.lock().unwrap();
         s.closed = true;
+        self.inner.revision.close();
         if let Some(flag) = &s.active {
             flag.store(1, Ordering::Relaxed);
         }
@@ -377,12 +401,23 @@ fn run(inner: &Inner, pack: &mut Database, metadata: Option<&metadata::Metadata>
             continue;
         }
         let applying = matches!(&work.request, dto::Command::ApplyWaives(_));
-        let result = read::execute(pack, metadata, work.request, &work.stop).map_err(|e| code(&e));
+        let current = work
+            .fence
+            .as_ref()
+            .map_or(Ok(()), |f| f.with_current(|| Ok(())));
+        let result = current.and_then(|()| {
+            read::execute(pack, metadata, work.request, &work.stop).map_err(|e| code(&e))
+        });
         if applying && result.is_ok() {
             if let Some(m) = inner.state.lock().unwrap().metadata.as_mut() {
                 m["waives"] = json!(pack.has_waives());
             }
         }
+        drop(work.change);
+        let result = match work.fence {
+            Some(f) => f.with_current(|| result),
+            None => result,
+        };
         let _ = work.reply.send(result);
     }
 }

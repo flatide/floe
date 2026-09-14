@@ -23,7 +23,7 @@ function http(method,path,body,missing,token){
     requests.push({method,path,body,token});
     if(path==='/api/v1/drc')return Promise.resolve(JSON.parse(JSON.stringify(cat)));
     if(path==='/api/v1/drc/builds')return new Promise((resolve,reject)=>{buildRequest={body,resolve,reject,token};token.abort=()=>reject(new Error('aborted'));});
-    const id=path.split('/')[4],rev=id+'r';
+    const id=path.split('/')[4],rev=cat.drc&&cat.drc.id===id?cat.drc.revision:id+'r';
     if(path.endsWith('/selection'))return Promise.resolve({revision:rev,view_id:'view',state:{selection_rev:'1',limit:5000,total:'0',rules:[]}});
     const q=body.body;
     if(q.kind==='rules')return Promise.resolve({rows:[{check:'0',name:'WIDTH',errors:'1',waived:'0'}],next:null});
@@ -67,6 +67,16 @@ function paint(){for(const [id,fn]of[...raf]){raf.delete(id);fn();}}
     assert.equal(attachments.at(-1).path,'/api/v1/drc/new/views/view/panel');assert.equal(attachments.at(-1).revision,'newr');
     assert.equal(el('drc-search').value,'');assert.equal(el('drc-waived').value,'all');assert(!el('drc-restore-layers').disabled);
     assert(!el('drc-selected').textContent.includes('Global'));assert.equal(saves.length,beforeWrites);assert.equal(JSON.stringify(view),unchanged);assert.equal(moves.length,0);
+    // Same geometry id, new waive revision: an old already-produced response
+    // cannot repaint or dispatch its prepared focus after catalog adoption.
+    hold=true;held.length=0;el('drc-errors').children[0].ondblclick();await tick();assert(held.length>=2);
+    const revisionWrites=saves.length;
+    cat.drc.revision='status2';cat.drc.phase='updating';await panel.refresh();await tick();
+    assert(held.every(r=>r.token.cancelled));assert(el('drc-canvas').hidden);assert.equal(el('drc-errors').children.length,0);
+    held.forEach(q=>q.resolve());await tick();paint();assert.equal(moves.length,0);
+    hold=false;cat.drc.phase='ready';await panel.refresh();await tick();
+    assert.equal(attachments.at(-1).revision,'status2');assert(!el('drc-selected').textContent.includes('Global'));
+    assert.equal(saves.length,revisionWrites);assert.equal(JSON.stringify(view),unchanged);
     // Another owner tab begins a build: catalog polling drops active outlines,
     // including on resume directly into drc:null, while leaving progress visible.
     el('drc-errors').children[0].onclick();await tick();assert.match(el('drc-selected').textContent,/Global/);

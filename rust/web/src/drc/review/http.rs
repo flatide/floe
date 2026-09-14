@@ -42,7 +42,6 @@ fn reader(g: &Gate, c: &Context) -> std::result::Result<Arc<Reader>, Failure> {
         .drc
         .as_ref()
         .and_then(|r| r.current(&c.drc_id))
-        .filter(|r| r.revision == c.revision)
         .ok_or("drc_context_changed")?;
     current(g, &reader, c, || Ok(()))?;
     Ok(reader)
@@ -56,13 +55,9 @@ fn current<T>(
 ) -> std::result::Result<T, Failure> {
     let registry = g.drc.as_ref().ok_or("drc_context_changed")?;
     let views = g.service.as_ref().ok_or("drc_context_changed")?;
-    registry.with_current(r, || {
+    registry.with_revision(r, &c.revision, || {
         views.with_current(&c.view_id, |v| {
-            if r.id != c.drc_id
-                || r.revision != c.revision
-                || v.source_id != r.source_id
-                || v.controller.is_finished()
-            {
+            if r.id != c.drc_id || v.source_id != r.source_id || v.controller.is_finished() {
                 return Err("drc_context_changed");
             }
             f()
