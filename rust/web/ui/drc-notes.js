@@ -79,7 +79,7 @@
         const P=o.protocol,el=o.el;
         let enabled=false,stopped=false,model=null,stale=true,editor=null,draft=null,timer=null,expiry=null;
         let io=null,poll=null,write=null,cancelling=null,approving=null,revokeTask=null,revokeNext=null;
-        let pending=null,uncertain=false,notice='',storageWarning='',readTurn=0;
+        let pending=null,uncertain=false,notice='',storageWarning='',readTurn=0,transferLocked=false;
         function abort(t){if(t){t.cancelled=true;if(t.abort){t.abort();}}}
         function selection(){try{const c=o.selection();if(stopped||!c){return null;}context(c.context);id(c.epoch);text(c.key,256);text(c.caption,4096);
             if(!Number.isInteger(c.count)||c.count<1||c.count>5000){return null;}return c;}catch(_){return null;}}
@@ -87,7 +87,14 @@
         function active(){return model&&model.operations.active;}
         function latest(){const rows=model&&model.operations.history;return rows&&rows[rows.length-1];}
         function permitted(){return enabled&&!stopped&&!stale&&model&&model.available;}
-        function busy(){return !!pending||uncertain||!!active()||!!write||!!approving;}
+        function busy(ignoreTransfer){return (!ignoreTransfer&&transferLocked)||!!pending||uncertain||!!active()||!!write||!!approving;}
+        function transferReady(importing){return !!(permitted()&&!busy(true)&&!io&&!model.preparing&&!revokeTask&&(!importing||!editor));}
+        async function publishTransfer(value,valid){
+            if(!transferReady(true)||!valid()){return false;}const t={};approving=t;render();await refresh();
+            if(approving!==t){return false;}approving=null;
+            if(!transferReady(true)||!valid()||value.reviewer!==model.reviewer||value.review_rev!==model.review_rev){render();return false;}
+            await send({seq:P.next(model.operations.last_seq),context:value.context,token:value.token,approve:true,confirm_legacy:true});return true;
+        }
         function store(value){try{o.savePending(value?JSON.stringify({session_id:id(o.session()),request:value}):null);storageWarning='';}
             catch(_){storageWarning='Session storage unavailable. Keep this page open until the save outcome is confirmed.';}}
         function recover(){try{const raw=o.loadPending();if(raw===null){return;}if(typeof raw!=='string'||raw.length>2048){fail();}
@@ -133,7 +140,8 @@
             el('notes-status').textContent=statusText(latest());el('notes-message').textContent=[notice,storageWarning].filter(Boolean).join('\n');
             el('notes-bytes').textContent=new TextEncoder().encode(el('notes-text').value).length+' / '+LIMIT+' UTF-8 bytes · empty text clears the selected notes';
             if(o.displayState){o.displayState(!enabled||!model?null:{reviewer:model.reviewer,review_rev:model.review_rev,read_turn:readTurn,
-                blocked:!permitted()?'Saved-note status is not ready.':busy()||latest()&&latest().outcome_unknown?'Saved-note publication is pending or unconfirmed.':
+                blocked:!permitted()?'Saved-note status is not ready.':busy(true)||latest()&&latest().outcome_unknown?'Saved-note publication is pending or unconfirmed.':
+                    transferLocked?'Whole-review transfer is in progress; no save is implied.':
                     io||model.preparing?'Note snapshot preparation is in progress.':''});}
         }
         function schedule(){o.clearTimeout(timer);timer=null;if(enabled&&!stopped&&(active()||pending)){timer=o.setTimeout(refresh,active()?500:2500);}}
@@ -228,6 +236,7 @@
         render();
         return {attach:function(value){if(!value){if(!enabled){render();}return;}try{const v=catalog(value,P);if(!enabled){enabled=true;recover();}install(v);changed();schedule();}
                 catch(e){stale=true;notice=e.message;render();}},changed:changed,refresh:refresh,
+            transferReady:transferReady,transferLock:function(value){transferLocked=value===true;render();},publishTransfer:publishTransfer,
             stop:function(final){stopped=true;stale=true;approving=null;clearEditor(false);if(write){uncertain=true;}
                 [io,poll,write,cancelling,revokeTask].forEach(abort);io=poll=write=cancelling=revokeTask=null;revokeNext=null;o.clearTimeout(timer);timer=null;
                 if(final){store(null);}render();},resume:function(){stopped=false;return enabled?refresh():Promise.resolve();}};

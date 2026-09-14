@@ -165,7 +165,10 @@ M4e-6a는 주석/waive snapshot export와 전체 waive import의 native/managed 
 ([M4 §33](WEBUI_M4.ko.md)). bounded streaming·전체 교체 확인·입력/대상 변경 보호와
 Python byte oracle을 추가했다. M4e-6b는 owner 전용 분할 업로드·전체 교체 준비와
 artifact 다운로드 API 연결이다([M4 §34](WEBUI_M4.ko.md)). 기존 notes/waives opt-in과
-명시 게시 승인을 재사용하며 새 CLI/패널 조작·실제 브라우저 전송 수용은 아직 남아 있다.
+명시 게시 승인을 재사용한다. M4e-6c는 전체 review 가져오기/내보내기 패널과 기존 저장
+receipt/복구 연결이다([M4 §35](WEBUI_M4.ko.md)). Chrome 합성 export 준비와 세션 종료는
+확인했으며 브라우저 업로드·review 게시·다운로드 파일 수용/현장 검증은 아직 남아 있다.
+DRC 검사 CLI는 계속 read-only이며 review 편집 opt-in은 `view`에만 있다.
 
 ### 2.7 svrf — M4 (6개 옵션)
 

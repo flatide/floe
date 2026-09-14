@@ -62,7 +62,12 @@ owner 전용 분할 업로드/비동기 작업/다운로드를 추가한다([M4 
 1MiB chunk·파일512MiB(주석 입력16MiB, waive는 pack의 정확한 길이)·종류별2슬롯/1reader·
 600초 TTL이며 브라우저가 path/reviewer/target을 지정하지 않는다. import prepare의
 전체 교체 preview/token은 기존 root 승인 게시로만 소비한다. 전송 seq는 기존 게시 seq와
-분리하고 HTTP ACK 소실 후 같은 seq/body로 재확인한다. 패널 UI/현장 수용은 후속이다.
+분리하고 HTTP ACK 소실 후 같은 seq/body로 재확인한다.
+M4e-6c 패널은 같은 API와 기존 notes/waives 승인 경로만 사용한다
+([M4 §35](WEBUI_M4.ko.md)). 파일 전체를 JSON/base64로 바꾸지 않고 1MiB Blob을
+순서대로 보내며, UI의 전체 교체/run 확인이 승인 요청과 분리된다. 전송 중 선택 편집은
+잠그고 기존 선택 editor가 있으면 import를 금지한다(export는 보존). 새 권한/자동 게시/
+재접속 업로드 재개는 없다. 실제 브라우저 업로드·게시와 현장 수용은 별도다.
 M1b-2a의 `app-core/managed`·`view`에는 process-local lease/admission과
 독립 worker controller를 구현했다. M1b-2b의 사전 등록 view용 제어/이미지
 스트림은 [M1b 기록 §6](WEBUI_M1B.ko.md#6-m1b-2b--인증된-제어이미지-스트림)을 따른다.

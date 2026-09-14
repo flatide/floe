@@ -53,7 +53,7 @@
     function notice(text) { el('notice').textContent = text || ''; el('notice').hidden = !text; }
     function message(error) { return errors[error] || String(error || 'Request failed'); }
     function report(error) { notice(message(error.message || error)); }
-    function http(method, path, body, missing, token) {
+    function http(method, path, body, missing, token, upload) {
         return new Promise(function (resolve, reject) {
             const xhr = new XMLHttpRequest();
             if (token && token.cancelled) { reject(new Error('Request cancelled')); return; }
@@ -61,7 +61,8 @@
             function done() { if (token) { token.abort = null; } }
             xhr.open(method, path); xhr.timeout = 8000;
             if (auth) { xhr.setRequestHeader('X-Floe-CSRF', auth.csrf); }
-            if (body !== undefined) { xhr.setRequestHeader('Content-Type', 'application/json'); }
+            if (upload) {Object.keys(upload.headers).forEach(function (k) {xhr.setRequestHeader(k, upload.headers[k]);});}
+            else if (body !== undefined) { xhr.setRequestHeader('Content-Type', 'application/json'); }
             xhr.onload = function () {
                 done();
                 if (missing && xhr.status === 404) { resolve(null); return; }
@@ -80,7 +81,7 @@
             xhr.onerror = function () { done(); reject(new Error('Local service is unavailable')); };
             xhr.onabort = function () { done(); reject(new Error('Request cancelled')); };
             xhr.ontimeout = function () { done(); reject(new Error('Request timed out; its outcome may be pending. Check operation status before retrying.')); };
-            xhr.send(body === undefined ? null : JSON.stringify(body));
+            xhr.send(upload ? upload.blob : body === undefined ? null : JSON.stringify(body));
         });
     }
     function connection(text, ready) { el('connection').textContent = text; el('connection').className = 'connection' + (ready ? ' ready' : ''); }
@@ -746,7 +747,14 @@
     drcPanel = window.FloeDRC.bind({document: document, window: window, protocol: P, http: http,
         history:rulerHistory, rulerKey:function (key) { return measurement && !drcPanel.boxActive() && measurement.key(key); },
         stateStore: window.FloePanelState, rulers: window.FloeRulers, groups: window.FloeDRCGroups, builds: window.FloeDRCBuild, cursor: reviewCursor,
-        notes: window.FloeDRCNotes, noteDisplay: window.FloeDRCNoteDisplay, waives: window.FloeDRCWaives, session: function () { return auth ? auth.session_id : ''; },
+        notes: window.FloeDRCNotes, noteDisplay: window.FloeDRCNoteDisplay, waives: window.FloeDRCWaives, transfers: window.FloeDRCTransfer, session: function () { return auth ? auth.session_id : ''; },
+        transferChunk: function (kind, request, offset, blob, token) {
+            if (!['notes','waives'].includes(kind)||!blob||blob.size<1||blob.size>1048576) {return Promise.reject(new Error('Invalid review chunk'));}
+            return http('POST','/api/v1/drc/review/'+kind+'/transfer/chunk',undefined,false,token,{blob:blob,headers:{
+                'Content-Type':'application/octet-stream','X-Floe-Transfer-Token':request.token,'X-Floe-Transfer-Seq':request.seq,
+                'X-Floe-Transfer-Offset':String(offset),'X-Floe-DRC':request.context.drc_id,'X-Floe-Revision':request.context.revision,'X-Floe-View':request.context.view_id}});
+        },
+        transferDownload: function (kind, id) {if(stopped||!auth){throw new Error('The owner session is closed.');}window.FloeDRCTransfer.download(document,auth.csrf,kind,id,P);},
         loadNotePending: function () { return sessionStorage.getItem('floe-note-pending'); },
         saveNotePending: function (value) { if (value === null) { sessionStorage.removeItem('floe-note-pending'); } else { sessionStorage.setItem('floe-note-pending', value); } },
         loadWaivePending: function () { return sessionStorage.getItem('floe-waive-pending'); },

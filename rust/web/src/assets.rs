@@ -81,6 +81,10 @@ async fn asset(Path((bundle, name)): Path<(String, String)>) -> Response {
             "text/javascript; charset=utf-8",
             include_str!("../ui/drc-note-display.js"),
         ),
+        "drc-transfer.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("../ui/drc-transfer.js"),
+        ),
         "drc-waives.js" => (
             "text/javascript; charset=utf-8",
             include_str!("../ui/drc-waives.js"),

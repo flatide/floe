@@ -115,6 +115,9 @@ details > summary { cursor: pointer; font-size: 12px; color: #b4c3d8; }
 .notes-panel { flex-shrink: 0; border-top: 1px solid #42526a; padding: 12px 0; }
 .notes-panel .button-row { flex-wrap: wrap; }
 .notes-panel button { white-space: normal; }
+#transfer-panel > label { display: block; margin-top: 10px; margin-bottom: 5px; }
+#transfer-file, #transfer-kind { max-width: 100%; }
+#transfer-preview, #transfer-files { white-space: pre-wrap; overflow-wrap: anywhere; }
 .notes-panel .check { align-items: flex-start; line-height: 1.5; margin: 10px 0; }
 .notes-panel .check input { margin-top: 4px; }
 .notes-panel textarea { width: 100%; resize: vertical; color: #dce3ec; background: #171b23; border: 1px solid #526887; font: 13px/1.5 monospace; }

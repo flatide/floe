@@ -61,13 +61,15 @@ const document={hidden:false,activeElement:null,title:'',body:new Element('','bo
     addEventListener:(k,f)=>listen(docListeners,k,f)};
 class XHR {
     open(method,path){this.method=method;this.path=path;}
-    setRequestHeader() {}
+    setRequestHeader(k,v) {if(!this.headers)this.headers={};this.headers[k]=v;}
     getResponseHeader() {return this.path.includes('/settings/')&&this.method==='GET'?'text/plain; charset=utf-8':'application/json';}
     send(text){
         const settingsPath=this.path.includes('/settings/');
-        const body=text===null?null:settingsPath?text:JSON.parse(text); requests.push({method:this.method,path:this.path,body});
+        const raw=this.path.endsWith('/transfer/chunk');
+        const body=text===null?null:settingsPath||raw?text:JSON.parse(text); requests.push(Object.assign({method:this.method,path:this.path,body},raw?{headers:this.headers}:{}));
         let value, status=200;
-        if (this.path==='/api/v1/session/exchange') {value={csrf:'c'.repeat(64),session_id:'c'.repeat(64),bundle,protocol:1};}
+        if(raw){value={kind:'drc_review_transfer',phase:'queued',seq:this.headers['X-Floe-Transfer-Seq']};status=202;}
+        else if (this.path==='/api/v1/session/exchange') {value={csrf:'c'.repeat(64),session_id:'c'.repeat(64),bundle,protocol:1};}
         else if(this.path==='/api/v1/capabilities') {value={protocol:1,bundle,exports:clipEnabled,snapshot_png:snapshotEnabled,layer_settings:settingsEnabled,design_defaults:defaultsEnabled};}
         else if(this.path==='/api/v1/defaults/prepare') {value={token:'d'.repeat(64),view_id:body.view_id,state_rev:body.state_rev,name:'synthetic.oas.layerprops',title:'synthetic',mode:'level',levels:null,rows:1,bytes:'24',replaces_existing:false,expires_in_ms:'30000',scope:'shared_design_default',affects:'future_opens'};}
         else if(this.path==='/api/v1/defaults/revoke') {value=null;status=204;}
@@ -117,6 +119,7 @@ window.FloeDefaults=require('./defaults.js');
 window.FloeDRCNotes=require('./drc-notes.js');
 window.FloeDRCNoteDisplay=require('./drc-note-display.js');
 window.FloeDRCWaives=require('./drc-waives.js');
+window.FloeDRCTransfer=require('./drc-transfer.js');
 window.FileReader=class {readAsArrayBuffer(file){this.result=new TextEncoder().encode(file.text).buffer;setImmediate(()=>this.onload());}abort(){if(this.onabort){this.onabort();}}};
 window.navigator={clipboard:{write(items){copies.push(items);return Promise.all(items.map(i=>i.data['image/png']));}}};
 window.getSelection=()=>textSelection;
@@ -157,6 +160,12 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     assert.equal(draws.length,1);assert.deepEqual(draws[0].data.slice(0,4),[16,0,127,255]);
     assert.equal(ws.sent.at(-1).disposition,'displayed');
     assert.equal(node('canvas').style.width,'100px');
+    const uploadBlob={size:16},uploadContext={drc_id:'1'.repeat(64),revision:'2'.repeat(64),view_id:viewId};
+    await drcOptions.transferChunk('notes',{context:uploadContext,token:'3'.repeat(64),seq:'9007199254740993'},1048576,uploadBlob,{});
+    const rawUpload=requests.at(-1);assert.equal(rawUpload.body,uploadBlob);assert.equal(rawUpload.headers['Content-Type'],'application/octet-stream');
+    assert.equal(rawUpload.headers['X-Floe-CSRF'],'c'.repeat(64));assert.equal(rawUpload.headers['X-Floe-Transfer-Offset'],'1048576');assert.equal(rawUpload.headers['X-Floe-Transfer-Seq'],'9007199254740993');
+    assert.equal(rawUpload.headers['X-Floe-DRC'],uploadContext.drc_id);assert.equal(rawUpload.headers['X-Floe-Revision'],uploadContext.revision);assert.equal(rawUpload.headers['X-Floe-View'],viewId);
+    await assert.rejects(drcOptions.transferChunk('notes',{},0,{size:1048577},{}));
     assert.equal(node('snapshot-panel').hidden,!snapshotEnabled);
     assert.equal(node('settings-panel').hidden,!settingsEnabled);
     assert.equal(node('default-panel').hidden,!defaultsEnabled);

@@ -12,6 +12,11 @@ const settings = spawnSync(process.execPath, [path.join(ui, 'settings.test.cjs')
 assert.equal(settings.status, 0, 'settings.test.cjs: ' + settings.error);
 acorn.parse(fs.readFileSync(path.join(ui, 'settings.js'), 'utf8'), options);
 acorn.parse(fs.readFileSync(path.join(ui, 'drc-note-display.js'), 'utf8'), options);
+acorn.parse(fs.readFileSync(path.join(ui, 'drc-transfer.js'), 'utf8'), options);
+const transfers = spawnSync(process.execPath, [path.join(ui, 'drc-transfer.test.cjs')], {stdio:'inherit',timeout:15000});
+assert.equal(transfers.status, 0, 'drc-transfer.test.cjs: ' + transfers.error);
+const transferPanel = spawnSync(process.execPath, [path.join(ui, 'drc-transfer-panel.test.cjs')], {stdio:'inherit',timeout:15000});
+assert.equal(transferPanel.status, 0, 'drc-transfer-panel.test.cjs: ' + transferPanel.error);
 for (const file of ['drc-note-display.test.cjs', 'drc-note-display-panel.test.cjs']) {
     const run = spawnSync(process.execPath, [path.join(ui, file)], {stdio:'inherit',timeout:15000});
     assert.equal(run.status, 0, file + ': ' + run.error);

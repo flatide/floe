@@ -6,7 +6,9 @@
 M4a-1/2에서 native scene-pinned pick/snap과 표시 프레임에 고정한 앱 controller를
 추가했고 M4a-3/4에서 owner WebSocket query와 브라우저 선택/스냅 프로브를 연결했다.
 M4a-5/6은 Rust 계산 기반 수동·선택 bbox gap ruler와 CD 공통 생성 순서를 연결했다.
-M4b-1/2/3/4는 exact clip·batch/mosaic·PNG metadata·DRC 캡처 CLI다. 웹 clip/내보내기 및 실제 브라우저 조작 수용은 남아 있다
+M4b-1/2/3/4는 exact clip·batch/mosaic·PNG metadata·DRC 캡처 CLI다. M4c/d는 웹 viewport
+clip·표시 PNG·스타일 설정/공유 기본값, M4e는 명시 opt-in owner의 notes/waives 편집과
+전체 review import/export다. 전체 조작 parity 및 실제 브라우저/현장 수용은 남아 있다
 ([M4 기록](../../docs/WEBUI_M4.ko.md)). native 호환 버전0.12.87로
 `floe-index`와 `floe-renderd`를 함께 재빌드한다. 공유 기능과 현장 Firefox 수용은 별도다.
 
@@ -49,6 +51,8 @@ cargo build --offline --locked --release -p floe-app -p floe-index -p floe-rende
 ./target/release/floe2-web view /path/to/design.oas --drc /path/to/results.db.ice
 ./target/release/floe2-web view /path/to/design.oas --drc /path/to/results.db.ice --drc-rules /path/to/deck.rules.json
 ./target/release/floe2-web view /path/to/design.oas --drc /path/to/results.db --drc-rules /path/to/deck.rules.json
+./target/release/floe2-web view /path/to/design.oas --drc /path/to/results.db.ice \
+  --drc-reviewer reviewer1 --drc-edit-waives
 ```
 
 `cargo`는 `rust/`에서 실행해야 그 안의 `.cargo/config.toml`(vendor, musl linker)이
@@ -110,10 +114,22 @@ cargo build --offline --locked --release -p floe-app -p floe-index -p floe-rende
   웹 pack-build 서버는 명시 승인된 HTTP 작업으로만 생성/취소/새 identity 등록을
   수행한다. 웹 DRC 패널의 **Build pack… → Approve build**에서 명시 승인하며,
   jobs1..16(웹 기본4), 기존 pack 교체는 별도 unchecked 선택이다. 진행/취소 및
-  결과 불명확 시 동일 요청 확인을 지원한다. 공유·편집/notes는 미이관이며 실제
+  결과 불명확 시 동일 요청 확인을 지원한다. 공유는 미이관이며 실제
   브라우저 승인 클릭 수용도 남아 있다([M2 기록](../../docs/WEBUI_M2.ko.md)).
   생성 승인은 현재 DRC 선택/준비된 이동을 초기화하지만 레이아웃을 재오픈하지 않는다.
   native 생성 terminal과 새 reader의 metadata open 완료는 별도 상태다.
+- ICE `view --drc-reviewer TAG`는 해당 reviewer의 Notes 편집·표시·import/export를
+  활성화한다. Waives 쓰기는 `--drc-edit-waives`도 명시해야 한다. 이는 launcher가 고정한
+  로컬 owner 설정이지 공유 계정의 실사용자 인증/RBAC가 아니다. 기존 파일 변경은 preview와
+  명시 승인을 요구하며 autosave는 없다. 전체 review 가져오기는 선택 오류와 무관하게
+  기존 review를 교체한다(병합 아님). `Import / export review`에서 파일 업로드/미리보기 후
+  DRC run 확인과 전체 교체 확인을 각각 해야 저장을 승인할 수 있다. 업로드만으로는
+  review가 바뀌지 않는다. Notes 입력16MiB·Waives512MiB/exact pack length, chunk1MiB,
+  임시 파일600초·승인 preview30초이며 새로고침은 파일/저장을 자동 재개하지 않는다.
+  `Prepare export`는 읽기 전용이고 준비된 다운로드를 `Download`로 받는다. 브라우저
+  요청 성공 메시지가 실제 다운로드 파일 저장 완료를 뜻하지는 않는다.
+  저장 ACK가 불명확하면 기존 Notes/Waives 패널에서 확인한다. 상세 계약과 남은
+  수용은 [M4 §35](../../docs/WEBUI_M4.ko.md#35-m4e-6c--전체-review-가져오기내보내기-ui).
 - `drc RESULTS.db --build`는 명시적인 쓰기 작업이다. 기존 fresh `RESULTS.db.ice`는
   재사용하고 stale/corrupt/기존 pack 교체에는 `--force`가 필요하다. `--jobs`는
   1..16, 기본12다. 원본·review sidecar는 수정하지 않는다. 읽기 옵션과 병용할 수 없다.

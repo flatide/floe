@@ -88,7 +88,7 @@
         // accepted focus navigation, not necessarily the selected row.
         let cdTarget = null, cdGlobal = null, cdSegments = null, cdRemaining = 0, cdError = '';
         let restoring = false;
-        let isolationNotice = '', notes = null, waives = null, noteDisplay = null, noteState = null, noteTarget = null;
+        let isolationNotice = '', notes = null, waives = null, transfers = null, noteDisplay = null, noteState = null, noteTarget = null;
         const groups = o.groups.bind({http: o.http, protocol: P, changed: groupsChanged,
             status: function (s) { el('drc-group-status').textContent = s; }});
         const persistence = o.stateStore.bind({http: o.http, protocol: P,
@@ -135,6 +135,10 @@
             changed: contextChanged, refreshReview: refresh,
             setTimeout: o.setTimeout || function (fn, ms) { return setTimeout(fn, ms); },
             clearTimeout: o.clearTimeout || function (id) { clearTimeout(id); }}); }
+        if (o.transfers) {transfers=o.transfers.bind({document:doc,el:el,protocol:P,http:o.http,chunk:o.transferChunk,download:o.transferDownload,
+            editors:{notes:notes,waives:waives},context:function(){const c=current();return c&&c.connected&&!restoring&&registration.metadata&&registration.metadata.format==='ice'?
+                {context:{drc_id:registration.id,revision:registration.revision,view_id:c.id},epoch:c.state.connection_epoch}:null;},
+            now:o.now||function(){return Date.now();},setTimeout:o.setTimeout||function(fn,ms){return setTimeout(fn,ms);},clearTimeout:o.clearTimeout||function(id){clearTimeout(id);}});}
         function noteSelection() {
             const c = current();
             if (!c || !c.connected || restoring || !groups.ready() || !registration.metadata || registration.metadata.format !== 'ice') { return null; }
@@ -924,6 +928,7 @@
             }
             groupsChanged();
             if(noteDisplay){noteDisplay.sync();}
+            if(transfers){transfers.changed();}
             if (waives && waives.suspended()) { info('Waive save or reader refresh pending. Previous DRC selection and outlines are not active.'); }
             else if (registration && !c && registration.phase === 'ready') { info('Open the source associated with this DRC database.'); }
             if (query && c && query.rev !== c.state.state_rev) { el('drc-result-info').textContent = 'Saved earlier-viewport query · enable In view for the live current-rule filter.'; }
@@ -933,6 +938,7 @@
             registration = v.drc; el('drc-toggle').hidden = !present; el('drc-panel').hidden = !present || !shown;
             if (notes) { notes.attach(v.notes); }
             if (waives) { waives.attach(v.waives, registration); }
+            if (transfers) { transfers.attach(v); }
             el('drc-review-mode').textContent = v.waives ? 'OWNER REVIEW' : v.notes ? 'OWNER NOTES' : 'NO REVIEW WRITES';
             if (registration) {
                 el('drc-title').textContent = registration.title;
@@ -1008,8 +1014,8 @@
                 if ((key === 'n' || key === 'p') && rule && current()) { step(key === 'p', false, false); return true; }
                 return false;
             },
-            stop: function (final) { stopped = true; if(noteDisplay){noteDisplay.stop();} if (notes) { notes.stop(final); } if (waives) { waives.stop(final); } if (builds) { builds.stop(); } ++restoreTurn; clearTimeout(filterTimer); filterTimer = null; persistence.close(); groups.close(); bound = ''; boxReset(true); cancelAll(); clearTimeout(timer); if (painting !== null) { o.window.cancelAnimationFrame(painting); painting = null; } overlay.hidden = true; },
-            resume: function () { stopped = false; if(noteDisplay){noteDisplay.resume();} if (notes) { notes.resume(); } if (waives) { waives.resume(); } return builds ? builds.resume() : refresh(); }};
+            stop: function (final) { stopped = true; if(transfers){transfers.stop(final);} if(noteDisplay){noteDisplay.stop();} if (notes) { notes.stop(final); } if (waives) { waives.stop(final); } if (builds) { builds.stop(); } ++restoreTurn; clearTimeout(filterTimer); filterTimer = null; persistence.close(); groups.close(); bound = ''; boxReset(true); cancelAll(); clearTimeout(timer); if (painting !== null) { o.window.cancelAnimationFrame(painting); painting = null; } overlay.hidden = true; },
+            resume: function () { stopped = false; if(noteDisplay){noteDisplay.resume();} if (notes) { notes.resume(); } if (waives) { waives.resume(); } if(transfers){transfers.resume();} return builds ? builds.resume() : refresh(); }};
     }
     const api = {bind: bind, projection: projection, point: point, shifted: shifted, vertices: vertices, metadataText: metadataText, comparisonText: comparisonText};
     if (typeof module === 'object' && module.exports) { module.exports = api; } else { root.FloeDRC = api; }

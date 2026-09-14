@@ -51,6 +51,13 @@ function harness(shared={model:catalog(),raw:null,writes:0,records:new Map()}){
 }
 const writes=h=>h.calls.filter(r=>r.method==='POST'&&r.path===API);
 async function test(){
+    const imported=harness();imported.init();imported.c.ready=false;imported.panel.transferLock(true);
+    const whole={context:clone(context),token:'e'.repeat(64),reviewer:'fixed-owner',review_rev:'0'};
+    assert(imported.panel.transferReady(true));assert.equal(await imported.panel.publishTransfer(whole,()=>false),false);assert.equal(writes(imported).length,0);
+    let dropImport=true;imported.override=r=>{if(r.path===API&&r.method==='POST'&&dropImport){dropImport=false;imported.execute(r);return Promise.reject(error(0));}};
+    await imported.panel.publishTransfer(whole,()=>true);assert.equal(imported.shared.writes,1);assert(imported.panel.suspended());assert(imported.shared.raw);
+    await imported.el('waives-resolve').onclick();assert.equal(imported.shared.writes,1);imported.sync();assert(!imported.panel.suspended());assert.equal(imported.shared.raw,null);
+    assert.equal(writes(imported)[0].body.confirm_legacy,true);imported.panel.stop(true);
     const actionHtml=fs.readFileSync(__dirname+'/index.html','utf8').match(/<select id="waives-action">([\s\S]*?)<\/select>/)[1];
     assert.deepEqual([...actionHtml.matchAll(/<option value="([^"]*)">([^<]+)<\/option>/g)].map(m=>[m[1],m[2]]),[['','Choose an action…'],['waive','Waive'],['clear','Clear waive']]);
     const h=harness();h.panel.attach(null,h.reader);assert(h.el('waives-panel').hidden);assert.equal(h.calls.length,0);h.init();await h.read();

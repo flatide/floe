@@ -1,9 +1,10 @@
-# floe-web — local browser viewer and read-only DRC
+# floe-web — local browser viewer and scoped DRC review
 
 Internal Rust library used by `floe2-web view`. An embedded HTML/Canvas client
 shows native PNG/raw frames and controls registered layouts/jobdecks. The existing
-Python/GTK launcher is unchanged. File upload, remote binding and share grants do
-not exist yet. Layout margin/crop is opt-in through ControllerOptions (on in
+Python/GTK launcher is unchanged. General file upload, remote binding and share
+grants do not exist. Owner-only review transfer is separately bounded below.
+Layout margin/crop is opt-in through ControllerOptions (on in
 the `view` CLI); release-only drag, styles/font and basic keyboard controls are
 implemented. Full GTK interaction parity and field Firefox/ETX gates remain open.
 
@@ -54,7 +55,20 @@ current state revision. Files are not modified. A per-view revision-checked pane
 snapshot restores filters/selection on reload without moving the native view.
 One active save and one latest pending state bound browser traffic; ambiguous
 outcomes require an explicit server-state reload. This is session memory, not
-durable review-file storage. Sharing, review writes and further parity remain open.
+durable review-file storage. Review writes require the separate opt-ins below;
+sharing and full interaction/field parity remain open.
+
+For ICE only, trusted `view --drc-reviewer TAG` enables this owner's Notes; waive
+writes additionally require `--drc-edit-waives`. M4e adds explicit selection edits,
+saved-note badges/overlays, and whole-review import/export. The transfer panel uses
+1 MiB raw Blob chunks, never a whole-file JSON/base64 or selected-error array.
+Import preview is not a save: exact DRC-run confirmation and entire-replacement
+consent precede the existing save controller's approval/receipt/recovery path.
+Waive publication fences reads until the matching reader revision is ready.
+Reload never automatically resumes upload or saves. Exports preserve selection
+editors and use expiring server-named downloads, with no caller paths. These are
+not general upload/share permissions or multiuser authentication. API/UI contracts
+and the limited actual-browser acceptance are in [M4 §33–35](../../docs/WEBUI_M4.ko.md).
 
 Optional `--drc-rules FILE` registers an existing version-1 SVRF metadata snapshot
 on the same actor, reserving another 256 MiB (no extra CPU worker). DRC-only roots

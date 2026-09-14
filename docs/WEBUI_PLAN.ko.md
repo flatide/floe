@@ -64,7 +64,9 @@ waive 저장 후 reader 갱신/조회 revision 장벽을 연결했다. M4e-5a는
 ACK 이동 대상의 주석 overlay·서버 panel 상태 복원을 연결했다.
 M4e-6a에서 주석/waive native snapshot export와 전체 waive import를 연결했다.
 M4e-6b에서 owner 분할 업로드·전체 교체 준비·기존 승인 게시와 유계 artifact 다운로드를
-연결했다. 실제 웹 패널의 import/export 조작과 브라우저 전송 수용은 후속이다.
+연결했다. M4e-6c에서 전체 review 파일 선택·분할 전송/미리보기·별도 승인과
+내보내기/다운로드 UI를 연결했다. Chrome 합성 내보내기 준비는 확인했으며, 실제 브라우저
+업로드·review 게시·다운로드 파일 수용과 현장 검증은 후속이다.
 나머지 내보내기와 브라우저 다운로드/현장 수용은 남아 있다([M4 기록](WEBUI_M4.ko.md)).
 전체 조작 parity와 M0/Firefox/ETX 현장 검증은 아직 완료되지 않았다.
 상세 범위는 [M1b 기록](WEBUI_M1B.ko.md)과 [M2 기록](WEBUI_M2.ko.md). 여기의 M0~M5는 **웹 전환 단계**이며
@@ -574,5 +576,10 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
   취소·admission을 검증했다. 새 HTTP/upload/download/UI는 없으며 owner 전송 연결은 후속이다.
 - **M4e-6b**: 위 native 경로에 owner 전용 분할 업로드·비동기 준비/내보내기·만료
   artifact 다운로드 API를 연결했다([M4 §34](WEBUI_M4.ko.md)). 전체 review 교체는
-  별도 승인과 portable run 확인 후 기존 게시 경로로만 수행한다. 웹 패널의 import/export
-  조작, 실제 브라우저 게시·현장 수용은 남아 있으며 일반 파일 업로드/guest 권한은 추가하지 않는다.
+  별도 승인과 portable run 확인 후 기존 게시 경로로만 수행한다. 일반 파일 업로드/guest
+  권한은 추가하지 않는다.
+- **M4e-6c**: 전체 review 전송 패널을 연결했다([M4 §35](WEBUI_M4.ko.md)). 오류 선택과
+  독립적인 1MiB Blob 전송·불명확한 동일 요청만 재시도·전체 교체/DRC run 이중 확인,
+  기존 저장 패널의 receipt/복구와 waive reader 장벽을 재사용한다. Chrome 합성 export
+  준비/종료는 확인했다. 브라우저 업로드·실제 review 게시·다운로드 파일 수용과 현장
+  Firefox/ETX/NFS는 아직 남는다.

@@ -17,8 +17,10 @@ overlay 전환**, §16의 **Rust layerprops 포맷·초기 가시성**, §17의
 §29/30에서 waive 저장의 owner 승인 API·UI와 디스크 게시/읽기 반영 receipt를 연결했다.
 §31은 저장 주석의 목록 badge/이동 대상 본문을 위한 읽기 전용 projection API다.
 §32에서 목록 badge와 마지막으로 이동한 오류의 주석 overlay·서버 상태 복원을 연결했다.
+§33~35에서 native 전체 review import/export, owner 분할 전송 API와 파일 선택·전체 교체
+미리보기/별도 승인·내보내기 패널을 연결했다.
 각 절의 미연결 표기는 해당 선행 단계 당시의 범위다.
-나머지 내보내기·주석 불러오기와 전체 조작/실제 브라우저 수용은 남아 있다.
+전체 조작 parity와 실제 브라우저/현장 수용은 남아 있다.
 
 ## 1. M4a-1: 표시 scene에 고정한 native pick/snap
 
@@ -2967,3 +2969,79 @@ Rust1.89 core215/web60/transport10, scoped fmt·vendored clippy `--no-deps --all
 
 GTK 기본·renderd0.12.87을 바꾸지 않는다. UI 연결과 실제 브라우저 review 게시 권한,
 현장 수용은 후속이다. shared-default 합성 게시 승인을 review 게시 승인으로 확대하지 않는다.
+
+## 35. M4e-6c — 전체 review 가져오기·내보내기 UI
+
+§34의 owner API를 `Import / export review` 패널에 연결했다. 기존 notes reviewer와
+waives opt-in을 따르며, ICE와 연결된 열린 layout/view가 필요하다. 선택 오류는 없어도
+된다. import는 **현재 reviewer의 전체 review 교체**이지 선택 편집이나 병합이 아니다.
+기존 선택 editor가 있으면 먼저 종료해야 import할 수 있고, export는 그 editor/preview를
+보존한다. trusted reviewer·경로/대상·인증 권한을 브라우저에서 바꾸는 기능은 없다.
+
+### 파일·승인·경합
+
+- 파일 chooser의 File handle에서 최대1MiB `slice` 하나씩 raw 전송한다. 전체 파일의
+  `arrayBuffer`/text/JSON/base64나 오류 ID 배열로 변환하지 않는다. 주석16MiB·waives512MiB와
+  서버의 exact pack length/내용 검증을 유지한다. 선택한 클라이언트 파일명/경로는 보내지 않는다.
+- 전송 seq와 게시 seq는 독립적이다. ACK 소실/timeout은 현재 요청과 같은 Blob을 보관하고
+  `Resolve identical request`로만 다시 확인한다. offset/body/seq를 바꾸거나 새 승인으로
+  재시도하지 않는다. 새로고침/재접속은 서버의 남은 임시 상태를 조회할 뿐 파일을 다시
+  읽거나 업로드·게시를 자동 재개하지 않는다.
+- 완성된 prepare의 개수/정규화 손실·대상 이름을 표시하고, portable 파일이 같은 DRC run인지
+  확인하는 체크와 전체 교체 체크를 각각 요구한다. size/time/count header만으로 run을
+  인증할 수 없음을 표시한다. prepare 최초 제출 시각을 포함한 보수적30초 기한과
+  DRC id/revision·view id·연결 epoch를 다시 검증한다. pan/zoom은 같은 review를 무효화하지 않는다.
+- 실제 승인은 기존 Notes/Waives 컨트롤러에 넘긴다. 그 컨트롤러가 다시 최신 reviewer/
+  review_rev를 확인하고 기존 승인 ledger·session recovery·receipt·cancel을 소유한다.
+  waive는 실제 게시 전부터 기존 조회를 중지하고 적용 ACK와 같은 ready reader revision을
+  확인한 뒤 재개한다. transfer 패널이 별도 저장 경로나 재연결 autosave를 만들지 않는다.
+- 전송/preview 중 두 선택 편집 컨트롤러를 잠근다. 읽기 전용 export를 진행하는 것을
+  게시 중이라고 표시하지 않는다. 취소는 accepted 작업 취소+알려진 token revoke이며
+  이미 게시된 review를 되돌리지 않는다. ACK 소실로 남은 서버 upload는 조회 후 명시 폐기한다.
+  연결 종료/늦은 응답은 추가 chunk·승인·poll을 만들지 않고 File/Blob 참조를 놓는다.
+  최종 세션 종료에서는 오래된 다운로드 목록/사용량도 화면에서 제거한다.
+- 내보내기 목록은 작업 이력과 독립적인 artifact 목록을 사용한다. refresh가 같은 파일의
+  버튼을 다시 만들어 키보드 focus를 잃지 않는다. download는 CSRF hidden form의 POST이며
+  token을 URL에 넣지 않는다. 다운로드 요청 메시지와 실제 브라우저 파일 저장 성공은 구별한다.
+  파일 만료/슬롯/예약 bytes/진행 상태·명시 release를 노출하며 세션 종료가 임시 자원을 회수한다.
+
+### 검증·남은 수용
+
+ES2017 gate에 `drc-transfer.test.cjs`와 실제 DRC+Notes+Waives 컨트롤러를 조합하는
+`drc-transfer-panel.test.cjs`를 추가했다. 전자는 1MiB+10byte slicing·같은 Blob replay,
+queued poll/취소 wake-up·focus 보존·늦은 응답/종료·기한/범위·이중 확인과 파일 한도를
+검증한다. 후자는 오류 선택이 없는 전체 교체가 기존 게시 패널만 사용하고 waive reader
+장벽을 지키며 layout을 변경하지 않는지 검증한다. 기존 편집 gate는 전체 교체 승인
+ACK 소실→동일 승인 복구와 승인 직전 context 무효화를 추가했다. app XHR gate는 raw Blob,
+CSRF/context/offset/64bit seq 헤더와 크기 거부를 검증한다. 새 자산은 Rust bundle hash와
+transport 테스트에 포함한다. CLI help의 오래된 'notes 미이관' 문구도 read-only 검사와
+web view opt-in의 차이를 설명하도록 바로잡았다.
+
+Chrome 실제 UI에서 private 합성 `synthetic.oas`/2-error ICE로 정상 layout/DRC 연결,
+무선택 export 준비(`floe-notes-4.fe`,63bytes), 다운로드 요청 메시지와 End session을 확인했다.
+실제 다운로드 파일의 저장 완료는 확인하지 않았으므로 브라우저 다운로드 수용 완료로
+표시하지 않는다. source/입력은 보존됐고 review target/lock은 생기지 않았으며 server exit0,
+private runtime 디렉터리 빈 상태를 확인했다. 파일 input 줄바꿈/preview word-wrap와
+전송 중 문구를 실제 화면 점검 후 보강했다.
+합성 shared-default 게시 승인은 **이 파일 업로드·review 게시의 승인으로 확대하지 않았다**.
+browser chooser/upload·최종 approve 클릭, 기존 review 교체·Firefox/ETX/NFS 수용은 남는다.
+로컬 Firefox가 설치되지 않아 자동 실행 시도는 실패했고 Chrome만 검사했다.
+
+전체 `sh tools/validate_rust.sh` 재실행은 exit0·`RUST VALIDATION: ALL OK`로 완료했다.
+app11/core215/web60, 새 전송 API/ES2017 UI와 기존 HTTP/WS, jobdeck80·renderer46,
+KLayout13 PX+2 phase-exact+14 style(jobs1/8)을 통과했다. Rust1.89 core215/web60/
+transport10, Linux x86-64 musl release 교차 빌드, scoped fmt와 vendored
+`clippy --no-deps --all-targets -- -D warnings`도 통과했다. 의존성의 기존 경고는 남는다.
+새 private valmini의 legacy oracle은 macOS fork 대기를 피하도록 `--legacy --jobs 1`로
+먼저 만들었으며 대조 geometry나 gate를 생략하지 않았다. 마지막 테스트 보강은
+비동기 미완료 상태의 조용한 성공 종료를 거부하며 전체 battery에도 포함됐다.
+
+첫 전체 실행은 기존 worker-client lifecycle의 `query_errors`에서 8개 query 직후
+render 제출이 `Busy: worker command queue full`을 반환해 실패했다. 해당 test는
+8-slot 전송 큐가 즉시 비워진다고 가정한다. 제품/테스트 코드를 바꾸거나 실패를 숨기지 않고
+단독3회(각14개) 통과와 다른 빌드가 끝난 뒤 전체 재실행 통과를 확인했다. 부하/스케줄링
+의존의 테스트 취약점은 별도 남기며, 단독 통과만으로 근본 해결됐다고 주장하지 않는다.
+첫 실패 로그는 `/private/tmp/floe-review-transfer-ui-battery.log`, 최종 전체 로그는
+`/private/tmp/floe-review-transfer-ui-battery2.log`다. 별도 `floe-review-transfer-ui-`
+접두사의 `tests/clippy/msrv/musl/lifecycle-{1,2,3}.log`도 보존한다.
+GTK 기본·renderd0.12.87은 유지하며 이 단계로 전체 웹 전환/현장 수용 완료를 선언하지 않는다.

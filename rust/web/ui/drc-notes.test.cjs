@@ -49,6 +49,16 @@ function harness(shared={model:catalog(),raw:null,writes:0,records:new Map()}){
 }
 const writes=h=>h.calls.filter(r=>r.method==='POST'&&r.path===API);
 async function test(){
+    const imported=harness();imported.init();imported.c.ready=false;imported.panel.transferLock(true);
+    assert.match(imported.displayStates.at(-1).blocked,/transfer.*no save is implied/);
+    assert(imported.panel.transferReady(true),'whole import must not require selected errors');
+    const whole={context:clone(context),token:'e'.repeat(64),reviewer:'fixed-owner',review_rev:'0'};
+    assert.equal(await imported.panel.publishTransfer(whole,()=>false),false);assert.equal(writes(imported).length,0);
+    let dropImport=true;imported.override=r=>{if(r.path===API&&r.method==='POST'&&dropImport){dropImport=false;imported.execute(r);return Promise.reject(error(0));}};
+    await imported.panel.publishTransfer(whole,()=>true);assert.equal(imported.shared.writes,1);assert(imported.shared.raw);assert(!imported.el('notes-uncertain').hidden);
+    await imported.el('notes-resolve').onclick();assert.equal(imported.shared.writes,1);assert.equal(imported.shared.raw,null);assert.equal(writes(imported)[0].body.confirm_legacy,true);imported.panel.stop(true);
+    const guarded=harness();guarded.init();let valid=true;guarded.override=r=>{if(r.method==='GET'){valid=false;return guarded.execute(r);}};
+    assert.equal(await guarded.panel.publishTransfer(whole,()=>valid),false);assert.equal(writes(guarded).length,0);guarded.panel.stop(true);
     const h=harness();h.panel.attach(null);assert(h.el('notes-panel').hidden);assert.equal(h.calls.length,0);
     h.init();assert(!h.el('notes-read').disabled);await h.read();assert.deepEqual(h.calls.at(-1).body.errors,h.c.rows);
     h.text('  한글 <script> & text\nsecond line  ');await h.prepare();assert.equal(writes(h).length,0);assert(h.el('notes-approve').disabled);

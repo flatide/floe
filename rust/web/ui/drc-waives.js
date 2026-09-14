@@ -82,7 +82,7 @@
         const P=o.protocol,el=o.el;
         let enabled=false,stopped=false,stale=true,model=null,reader=null,editor=null,draft=null,expiry=null,timer=null;
         let io=null,poll=null,write=null,approving=null,cancelling=null,revokeTask=null,revokeNext=null;
-        let pending=null,uncertain=false,notice='',storageWarning='',notified=false,refreshKey='';
+        let pending=null,uncertain=false,notice='',storageWarning='',notified=false,refreshKey='',transferLocked=false;
         function abort(t){if(t){t.cancelled=true;if(t.abort){t.abort();}}}
         function active(){return model&&model.operations.active;}
         function latest(){const a=model&&model.operations.history;return a&&a[a.length-1];}
@@ -101,7 +101,14 @@
             if(!Number.isInteger(c.count)||c.count<1||c.count>5000){return null;}return c;}catch(_){return null;}}
         function same(c){const n=selection();return !!n&&equal(n.context,c.context)&&n.epoch===c.epoch&&n.key===c.key&&n.count===c.count;}
         function permitted(){return enabled&&!stopped&&!stale&&model&&model.available;}
-        function busy(){return !!pending||uncertain||!!active()||!!write||!!approving||suspended();}
+        function busy(ignoreTransfer){return (!ignoreTransfer&&transferLocked)||!!pending||uncertain||!!active()||!!write||!!approving||suspended();}
+        function transferReady(importing){return !!(permitted()&&!busy(true)&&!io&&!model.preparing&&!revokeTask&&(!importing||!editor));}
+        async function publishTransfer(value,valid){
+            if(!transferReady(true)||!valid()){return false;}const t={};approving=t;render();await refresh();
+            if(approving!==t){return false;}approving=null;
+            if(!transferReady(true)||!valid()||value.reviewer!==model.reviewer||value.review_rev!==model.review_rev){render();return false;}
+            await send({seq:P.next(model.operations.last_seq),context:value.context,token:value.token,approve:true,confirm_legacy:true});return true;
+        }
         function store(value){try{o.savePending(value?JSON.stringify({session_id:id(o.session()),request:value}):null);storageWarning='';}
             catch(_){storageWarning='Session storage unavailable. Keep this page open until the outcome is confirmed.';}}
         function recover(){try{const raw=o.loadPending();if(raw===null){return;}if(typeof raw!=='string'||raw.length>2048){fail();}const v=JSON.parse(raw);
@@ -212,6 +219,7 @@
         render();return {attach:function(value,currentReader){reader=currentReader||null;if(!value){if(enabled){stale=true;notice='Waive registration unavailable. Refresh before relying on review statuses.';}render();return;}
                 try{if(!enabled){enabled=true;recover();}const v=catalog(value,P);install(v);changed();schedule();}
                 catch(e){stale=true;notice=e.message;render();}},changed:changed,refresh:refresh,suspended:suspended,
+            transferReady:transferReady,transferLock:function(value){transferLocked=value===true;render();},publishTransfer:publishTransfer,
             stop:function(final){stopped=true;stale=true;approving=null;clearEditor(false);if(write){uncertain=true;}
                 [io,poll,write,cancelling,revokeTask].forEach(abort);io=poll=write=cancelling=revokeTask=null;revokeNext=null;o.clearTimeout(timer);timer=null;
                 if(final){store(null);}notice=final?'Session ended. Earlier committed saves are not undone.':'Review disconnected. Check the receipt after reconnecting.';render();},resume:function(){stopped=false;return enabled?refresh():Promise.resolve();}};

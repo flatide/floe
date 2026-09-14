@@ -26,7 +26,8 @@ ASCII parsing (including fractional coordinates). Stale/corrupt adjacent
 packs are reported but never overwritten by read commands.
 --build uses the existing integer-DBU pack format; fractional coordinates fail
 without changing the old pack. It preserves review files and emits JSON.
-DRC editing/notes are not ported yet.";
+Interactive notes/waives use the web view's explicit reviewer/edit opt-ins;
+this drc inspection command does not edit reviews.";
 pub struct Command {
     source: Option<PathBuf>,
     list: bool,

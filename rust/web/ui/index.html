@@ -20,6 +20,7 @@
   <script defer src="/assets/@@BUNDLE@@/drc-notes.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc-note-display.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc-waives.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/drc-transfer.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc.js"></script>
   <script defer src="/assets/@@BUNDLE@@/settings.js"></script>
   <script defer src="/assets/@@BUNDLE@@/defaults.js"></script>
@@ -265,6 +266,24 @@
           <label class="check"><input id="waives-checked" type="checkbox"> I checked the waive file and understand the previous outcome.</label>
           <button id="waives-forget" disabled>Clear local recovery record</button>
         </div>
+      </section>
+      <section id="transfer-panel" class="notes-panel" aria-label="Whole review import and export" hidden>
+        <h3>Import / export review</h3>
+        <p class="note">Import replaces this reviewer's ENTIRE review, not the selected errors. Uploading is not saving. No automatic import or save on reload.</p>
+        <label for="transfer-kind">Review file</label><select id="transfer-kind"><option value="notes">Notes (.fe)</option><option id="transfer-waives-option" value="waives">Waives (.waive)</option></select>
+        <label for="transfer-file">Local file to import</label><input id="transfer-file" type="file" accept=".fe,.waive">
+        <p class="note">Notes: 16 MiB maximum. Waives: 512 MiB maximum and exact pack length. Finish or discard the selection editor before importing.</p>
+        <div class="button-row"><button id="transfer-import">Upload and preview</button><button id="transfer-export">Prepare export</button></div>
+        <p id="transfer-progress" class="note" role="status"></p><p id="transfer-message" class="note" role="status"></p>
+        <div class="button-row"><button id="transfer-refresh">Refresh transfer status</button><button id="transfer-cancel">Cancel transfer</button><button id="transfer-discard">Discard temporary upload</button><button id="transfer-resolve" hidden>Resolve identical request</button></div>
+        <div id="transfer-review" hidden>
+          <pre id="transfer-preview"></pre>
+          <label class="check"><input id="transfer-run" type="checkbox"> I verified that this portable file belongs to this exact DRC run; its size/time/count header alone is not proof.</label>
+          <label class="check"><input id="transfer-consent" type="checkbox"> Replace the ENTIRE listed review with this file, including removing entries that are not present. This is not a merge.</label>
+          <button id="transfer-approve" class="primary" disabled>Approve entire review replacement</button>
+          <p class="note">The Notes/Waives save panel above owns save receipts, cancellation and recovery. A completed save is not undone by cancelling a transfer.</p>
+        </div>
+        <p id="transfer-usage" class="note"></p><div id="transfer-files" aria-label="Prepared review downloads"></div>
       </section>
       <div class="button-row"><button id="drc-restore-layers" title="Restore the visibility saved before the first DRC layer isolation" disabled>Restore layers</button></div>
       <p id="drc-layer-status" class="note" role="status"></p>
