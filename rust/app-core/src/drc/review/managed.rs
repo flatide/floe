@@ -82,6 +82,9 @@ impl ManagedStore {
     pub fn kind(&self) -> store::Kind {
         self.store.kind()
     }
+    pub fn identity(&self) -> super::Identity {
+        self.store.identity()
+    }
     /// At most one snapshot/draft/job owns this registration. No hidden queue
     /// or unlimited retained models behind a one-CPU admission reservation.
     /// Caller owns the flag before this blocking call so timeout can cancel it.
@@ -149,6 +152,10 @@ pub struct Snapshot {
     lease: Borrow,
 }
 impl Snapshot {
+    pub fn selected_statuses(&self, gids: &[u64]) -> Result<Vec<u8>> {
+        self.lease.check()?;
+        self.value.selected_statuses(gids, &self.lease.stop)
+    }
     pub fn exists(&self) -> bool {
         self.value.exists()
     }

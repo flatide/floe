@@ -2119,3 +2119,48 @@ KLayout13 PX+2 phase-exact+14 style(jobs1/8)를 포함한다. renderer/worker pr
 다음은 owner actor의 인증 reviewer/seq receipt·review_rev, 읽기 actor의 waive 상태 갱신,
 명시 note/waive import/export 및 편집 UI다. 큰 waive의 O(파일 크기) I/O와 batch/coalesce
 실측, 현장 Firefox/NFS/SMB는 여전히 남는다. M4 전체 완료나 GTK 은퇴를 뜻하지 않는다.
+
+## 24. M4e-2c — reader/store pack 일치와 선택 waive 조회
+
+관리형 store가 자기 pack을 검증하는 것과, 웹의 기존 읽기 actor가 **같은 pack**을
+보고 있는지는 별개다. reader가 먼저 열린 뒤 외부에서 파일을 교체하면 새 store가
+새 pack을 정상적으로 열어도 화면의 gid 의미와 달라질 수 있다. 저장 HTTP를 붙이기 전에
+이 두 등록을 연결하는 검증을 추가했다.
+
+- store/managed 등록에서 얻는 `review::Identity`는 비직렬화 opaque Rust 값이다.
+  `Database::validate_review_identity`는 이미 열린 reader의 descriptor·등록 경로와
+  store의 보수적 pack binding을 대조한다. 동일 legacy header나 동일 파일 bytes라도
+  다른 inode는 거부한다. 같은 inode의 touch/변경·외부 교체도 명시 reopen 전까지 거부한다.
+  ASCII reader는 이 검토 저장 경로의 대상이 아니며 먼저 pack이 필요하다.
+- 웹 DRC `Service::validate_review_identity`는 기존 bounded read actor/Ticket으로
+  검사를 수행한다. HTTP DTO에는 이 명령이나 filesystem identity 필드가 없다.
+  취소·닫힌 actor·오류 코드는 기존 읽기 계약을 따른다. 인증이나 atomic commit 그 자체가
+  아니므로 다음 owner coordinator는 이 검사와 registry의 현재 id/revision 확인을 모두
+  사용하고, 승인 시점과 실제 저장까지 managed lease/expected snapshot을 유지해야 한다.
+- `Snapshot::selected_statuses`는 최대5000개의 gid를 받아 입력 순서·중복과0/1 외의
+  reserved status bytes도 그대로 돌려준다. sidecar가 없으면 embedded pack 상태를 쓴다.
+  정렬 후 인접 gid만 묶어 positional read하며 드문드문 떨어진 gid 사이를 읽지 않는다.
+  결과·임시 메모리는 O(선택 수)다. 실패/범위 초과/취소 시 부분 결과를 성공으로 반환하지 않는다.
+- 조회 전후 expected snapshot을 검사한다. 새 파일 생성/원자 교체를 현재 상태로 몰래
+  받아들이지 않으며 managed 등록이 retire되면 읽기도 중단한다. **기존 sidecar digest
+  검증은 그대로여서 전체 조회 I/O가 O(선택 수)가 되는 것은 아니다.** 현재 경로는 전후
+  전체 sidecar hash를 읽는다. 큰 waive 파일의 batch/지연·I/O 실측 과제는 남아 있다.
+
+### 검증
+
+새 core unit4개가 reader/store 동일성, 같은 bytes의 다른 pack·교체·touch·ASCII 거부,
+선택 상태의 순서/중복/reserved bytes·범위/개수 상한·취소·stale snapshot과 managed
+lease 수명을 검사한다. positional helper는5000개 순서 섞인 선택,16GiB sparse gap,
+offset overflow와EOF도 확인한다. 기존 unit과 함께 core195·web44 및 strict all-target
+clippy를 통과했다. 기존28회 native 게시/Python oracle에도 선택 상태 byte 대조를 넣었다.
+`validate_web_drc.py`는 실제 actor에 올바른/다른/교체된 pack identity를 보내 확인하며
+읽기·검증이 sidecar/lock을 만들지 않는 것도 단언한다. pack/ASCII HTTP 회귀는 통과했다.
+Rust1.89 core195와 Linux x86-64 musl release static-pie 빌드도 통과했다(Linux 실행은 아님).
+최종 `sh tools/validate_rust.sh` exit0·`RUST VALIDATION: ALL OK`: workspace unit
+(app11/core195/web44), 위28회 native 게시 oracle, jobdeck80·renderer46,
+KLayout13 PX+2 phase-exact+14 style(jobs1/8)를 포함한다. 검증용 임시 venv 링크는 제거하고
+기존 venv 및 승인된 합성 shared-default 게시 결과물은 보존했다.
+
+다음은 고정 reviewer를 owner 인증에 결합한 편집·승인/receipt API와 UI다. 이 단계에는
+새 HTTP 쓰기 endpoint·자동 저장·reviewer CLI 옵션을 추가하지 않았다. 기존 launcher와
+renderd0.12.87은 그대로이며, TeeBox/Firefox·NFS 수용 및 M4 전체 완료는 아니다.

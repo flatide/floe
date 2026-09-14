@@ -10,6 +10,23 @@ static SERIAL: AtomicU64 = AtomicU64::new(0);
 fn flag() -> Arc<AtomicUsize> {
     Arc::new(AtomicUsize::new(0))
 }
+
+#[test]
+fn selected_snapshot_is_bound_to_reader_and_managed_lifetime() {
+    let f = Fixture::new();
+    let m = f.open(store::Kind::Waives);
+    let reader = crate::drc::Database::packed(crate::drc::Pack::open(&f.pack, &flag()).unwrap());
+    reader.validate_review_identity(&m.identity()).unwrap();
+    let snapshot = m.snapshot(flag()).unwrap();
+    assert_eq!(snapshot.selected_statuses(&[64, 0, 64]).unwrap(), [0, 0, 0]);
+    m.request_stop();
+    assert_eq!(kind(snapshot.selected_statuses(&[0])), ErrorKind::Cancelled);
+    drop(m);
+    assert_ne!(f.resources.usage(), Usage::default());
+    drop(snapshot);
+    assert_eq!(f.resources.usage(), Usage::default());
+    f.preserved();
+}
 fn kind<T>(r: Result<T>) -> ErrorKind {
     match r {
         Ok(_) => panic!("expected error"),

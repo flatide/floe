@@ -18,6 +18,10 @@ review_rev·승인 receipt는 향후 actor에서 연결한다. legacy 미확인 
 M4e-2b의 `review::managed`가 준비/게시의 admission·read lease 수명과 취소/join·typed 결과를
 제공한다([M4 §23](WEBUI_M4.ko.md)). 원격 endpoint를 추가한 것은 아니며, 이 process-local
 작업 ID는 HTTP 재시도 승인 ledger를 대신하지 않는다.
+M4e-2c는 store의 opaque pack identity를 기존 DRC 읽기 actor와 대조하는 내부 Ticket과
+선택 waive 상태 조회를 제공한다([M4 §24](WEBUI_M4.ko.md)). HTTP로 filesystem identity를
+받지 않으며, owner는 승인 시 registry id/revision도 확인해야 한다. 선택 상태 메모리는
+최대5000개지만 expected sidecar digest 검증의 O(파일 크기) I/O는 남아 있다.
 M1b-2a의 `app-core/managed`·`view`에는 process-local lease/admission과
 독립 worker controller를 구현했다. M1b-2b의 사전 등록 view용 제어/이미지
 스트림은 [M1b 기록 §6](WEBUI_M1B.ko.md#6-m1b-2b--인증된-제어이미지-스트림)을 따른다.

@@ -80,6 +80,15 @@ impl Drop for Ticket {
     }
 }
 impl Service {
+    /// Trusted owner coordinator only. The opaque identity is created by core
+    /// registration, never deserialized from HTTP. Uses the same bounded actor
+    /// and cancellation semantics as ordinary read requests.
+    pub fn validate_review_identity(
+        &self,
+        identity: floe_app_core::drc::review::Identity,
+    ) -> std::result::Result<Ticket, Failure> {
+        self.enqueue(dto::Command::ValidateReview(identity))
+    }
     /// Keep a fresh, failed registration addressable after reopen admission or
     /// path validation fails. The owner can retry; old review IDs never revive.
     fn unavailable(registration: Registration, failure: Failure) -> Result<Arc<Self>> {

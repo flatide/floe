@@ -118,6 +118,8 @@ fn store_publication_matches_python() {
             &stop,
         )
         .unwrap();
+        let reader = floe_app_core::drc::Database::open_explicit(pack, None, &stop).unwrap();
+        reader.validate_review_identity(&waives.identity()).unwrap();
         for expected in case["waives"].as_array().unwrap() {
             let data: Vec<u8> = serde_json::from_value(expected["input"].clone()).unwrap();
             let edits: Vec<(u64, u8)> = serde_json::from_value(expected["edits"].clone()).unwrap();
@@ -133,6 +135,17 @@ fn store_publication_matches_python() {
                 json!(fs::read(waives.target()).unwrap()),
                 expected["output"]
             );
+            let ids: Vec<_> = (0..reader.total()).rev().collect();
+            let selected = waives
+                .snapshot(Arc::clone(&stop))
+                .unwrap()
+                .selected_statuses(&ids)
+                .unwrap();
+            let reference: Vec<u8> = ids
+                .iter()
+                .map(|&id| expected["output"][40 + id as usize].as_u64().unwrap() as u8)
+                .collect();
+            assert_eq!(selected, reference);
             assert_eq!(
                 json!(
                     waives

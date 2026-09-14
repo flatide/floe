@@ -81,6 +81,136 @@ fn kind<T>(r: Result<T>) -> ErrorKind {
 }
 
 #[test]
+fn reader_and_review_bind_the_same_open_pack_not_equal_legacy_headers() {
+    use crate::drc::Database;
+    let f = Fixture::new();
+    let store = f.store(Kind::Notes);
+    let identity = store.identity();
+    let reader = Database::packed(Pack::open(&f.pack, &f.stop).unwrap());
+    reader.validate_review_identity(&identity).unwrap();
+    let ascii_path = f.dir.join("unpacked.db");
+    fs::write(
+        &ascii_path,
+        b"TOP 1000\nRULE\n1 1 1\nrule text\np 1 4\n0 0\n1 0\n1 1\n0 1\n",
+    )
+    .unwrap();
+    let ascii = Database::open_explicit(&ascii_path, None, &f.stop).unwrap();
+    assert!(ascii.validate_review_identity(&identity).is_err());
+
+    let copy = f.dir.join("identical-copy.ice");
+    fs::write(&copy, &f.bytes).unwrap();
+    let other = Database::packed(Pack::open(&copy, &f.stop).unwrap());
+    assert_eq!(
+        kind(other.validate_review_identity(&identity)),
+        ErrorKind::Cache
+    );
+    // Reader predates an external replace; the writer opens the new inode.
+    fs::rename(&copy, &f.pack).unwrap();
+    let replacement = f.store(Kind::Notes);
+    assert!(reader
+        .validate_review_identity(&replacement.identity())
+        .is_err());
+    let reopened = Database::packed(Pack::open(&f.pack, &f.stop).unwrap());
+    reopened
+        .validate_review_identity(&replacement.identity())
+        .unwrap();
+    assert!(reopened.validate_review_identity(&identity).is_err());
+    // Even touching the same inode invalidates its conservative run identity.
+    fs::write(&f.pack, &f.bytes).unwrap();
+    assert!(reopened
+        .validate_review_identity(&replacement.identity())
+        .is_err());
+    f.clean();
+}
+
+#[test]
+fn selected_waives_preserve_order_duplicates_and_reserved_bytes() {
+    let f = Fixture::new();
+    let store = f.store(Kind::Waives);
+    let snapshot = store.snapshot(&f.stop).unwrap();
+    let ids = [64, 2, 0, 1, 2, 3, 63];
+    assert_eq!(snapshot.selected_statuses(&ids, &f.stop).unwrap(), [0; 7]);
+    assert!(snapshot.selected_statuses(&[], &f.stop).unwrap().is_empty());
+    assert!(snapshot.selected_statuses(&[65], &f.stop).is_err());
+    assert_eq!(
+        kind(snapshot.selected_statuses(&vec![0; EDIT_ITEMS + 1], &f.stop)),
+        ErrorKind::Incomplete
+    );
+    assert!(f
+        .store(Kind::Notes)
+        .snapshot(&f.stop)
+        .unwrap()
+        .selected_statuses(&ids, &f.stop)
+        .is_err());
+    store
+        .snapshot(&f.stop)
+        .unwrap()
+        .prepare_waives(&[(0, 1), (1, 2), (2, 255), (64, 1)], &f.stop)
+        .unwrap()
+        .publish(&f.stop)
+        .unwrap();
+    // A missing-file snapshot cannot silently start reading a newly created file.
+    assert_eq!(
+        kind(snapshot.selected_statuses(&ids, &f.stop)),
+        ErrorKind::Busy
+    );
+    let current = store.snapshot(&f.stop).unwrap();
+    assert_eq!(
+        current.selected_statuses(&ids, &f.stop).unwrap(),
+        [1, 255, 1, 2, 255, 0, 0]
+    );
+    assert_eq!(
+        kind(current.selected_statuses(&ids, &AtomicUsize::new(1))),
+        ErrorKind::Cancelled
+    );
+    current
+        .store
+        .snapshot(&f.stop)
+        .unwrap()
+        .prepare_waives(&[(2, 0)], &f.stop)
+        .unwrap()
+        .publish(&f.stop)
+        .unwrap();
+    // Atomic replacement does not keep serving the open old inode as current.
+    assert_eq!(
+        kind(current.selected_statuses(&ids, &f.stop)),
+        ErrorKind::Busy
+    );
+    f.clean();
+}
+
+#[test]
+fn selected_status_reads_coalesce_without_scanning_sparse_gaps() {
+    use std::os::unix::fs::FileExt;
+    let f = Fixture::new();
+    let path = f.dir.join("status.bin");
+    let bytes: Vec<_> = (0..6000).map(|i| (i % 256) as u8).collect();
+    fs::write(&path, &bytes).unwrap();
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    let ids: Vec<_> = (0..EDIT_ITEMS as u64)
+        .rev()
+        .map(|n| n * 47 % 6000)
+        .collect();
+    let result = super::super::selected_statuses(&file, 0, 6000, &ids, &f.stop).unwrap();
+    assert_eq!(
+        result,
+        ids.iter().map(|&n| bytes[n as usize]).collect::<Vec<_>>()
+    );
+    let far = 1u64 << 34;
+    file.write_all_at(&[253], far).unwrap(); // sparse file, not a 16 GiB allocation
+    assert_eq!(
+        super::super::selected_statuses(&file, 0, far + 1, &[far, 0, far], &f.stop).unwrap(),
+        [253, 0, 253]
+    );
+    assert!(super::super::selected_statuses(&file, u64::MAX, 2, &[1], &f.stop).is_err());
+    assert!(super::super::selected_statuses(&file, far + 1, 2, &[0], &f.stop).is_err());
+}
+
+#[test]
 fn registration_snapshot_and_preparation_do_not_write() {
     let f = Fixture::new();
     let w = f.store(Kind::Waives);

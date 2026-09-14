@@ -560,6 +560,18 @@ impl Pack {
         )
         .into_bytes())
     }
+    pub(crate) fn review_statuses(&self, gids: &[u64], stop: &AtomicUsize) -> Result<Vec<u8>> {
+        self.unchanged_at()?;
+        let result = super::review::selected_statuses(
+            &self.input.file,
+            self.status,
+            self.total,
+            gids,
+            stop,
+        )?;
+        self.unchanged_at()?;
+        Ok(result)
+    }
     /// Virtual legacy sidecar seed: header + embedded status/counters, without
     /// copying all errors into RAM or ever opening the pack for writing.
     pub(crate) fn review_seed(&self) -> Result<impl std::io::Read + '_> {

@@ -52,6 +52,10 @@ pub(super) fn execute(
     check_cancelled(stop)?;
     p.unchanged()?;
     let value = match request {
+        Command::ValidateReview(identity) => {
+            p.validate_review_identity(&identity)?;
+            json!({})
+        }
         Command::List {
             check,
             start,

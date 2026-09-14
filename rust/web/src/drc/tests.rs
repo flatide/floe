@@ -50,6 +50,10 @@ fn bounded_queue_drop_cancels_and_stop_drains_without_runtime_waits() {
 }
 #[test]
 fn wire_rejects_paths_noncanonical_counters_and_unbounded_reads() {
+    assert!(serde_json::from_value::<Request>(
+        json!({"kind":"validate_review", "identity":"forged"})
+    )
+    .is_err());
     for v in [
         json!({"kind":"rules","start":"00","search":"","limit":1}),
         json!({"kind":"rules","start":"0","search":"","limit":65}),

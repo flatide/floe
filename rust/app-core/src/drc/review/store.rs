@@ -129,6 +129,9 @@ impl Store {
     pub fn kind(&self) -> Kind {
         self.kind
     }
+    pub fn identity(&self) -> super::Identity {
+        super::Identity(self.binding.clone())
+    }
     fn lock_path(&self) -> PathBuf {
         self.directory
             .path
@@ -298,6 +301,41 @@ pub struct Snapshot {
     waives: Option<WaiveStats>,
 }
 impl Snapshot {
+    /// Reads this expected snapshot, never the latest sidecar silently. Missing
+    /// sidecars use embedded pack bytes. Full expected-version validation still
+    /// hashes the sidecar; only the selected-status allocation/reads are bounded.
+    pub fn selected_statuses(&self, gids: &[u64], stop: &AtomicUsize) -> Result<Vec<u8>> {
+        if self.store.kind != Kind::Waives {
+            return Err(Error::input("not a waive store"));
+        }
+        if gids.len() > EDIT_ITEMS {
+            return Err(super::bounded("selected status count"));
+        }
+        if gids
+            .iter()
+            .any(|&gid| gid >= self.store.layout.fingerprint().total)
+        {
+            return Err(Error::input("review error index out of range"));
+        }
+        self.current(false, stop)?;
+        let result = match &self.before {
+            Some(c) => super::selected_statuses(
+                &c.file,
+                40,
+                self.store.layout.fingerprint().total,
+                gids,
+                stop,
+            )?,
+            None => self
+                .store
+                .pack
+                .lock()
+                .unwrap()
+                .review_statuses(gids, stop)?,
+        };
+        self.current(false, stop)?;
+        Ok(result)
+    }
     pub fn legacy_unverified(&self) -> bool {
         self.before
             .as_ref()

@@ -18,6 +18,59 @@ const MAX_CHECKS: usize = super::META_BYTES / 16;
 pub mod managed;
 pub mod store;
 
+/// Opaque local pack identity, not an HTTP revision or authorization token.
+/// Produced by a registered store and compared with the reader's open pack.
+/// Deliberately not serializable: do not expose filesystem identity on the wire.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Identity(pub(super) Vec<u8>);
+
+/// Bounded positional reads, preserving caller order, duplicates and reserved
+/// status bytes. Adjacent IDs share one read; sparse IDs never read the gap.
+/// The caller validates the file identity before/after this operation.
+pub(super) fn selected_statuses(
+    file: &std::fs::File,
+    base: u64,
+    total: u64,
+    gids: &[u64],
+    stop: &AtomicUsize,
+) -> Result<Vec<u8>> {
+    use std::os::unix::fs::FileExt;
+    check_cancelled(stop)?;
+    if gids.len() > EDIT_ITEMS {
+        return Err(bounded("selected status count"));
+    }
+    if gids.iter().any(|&id| id >= total) {
+        return Err(Error::input("review error index out of range"));
+    }
+    let mut sorted: Vec<_> = gids.iter().copied().zip(0..gids.len()).collect();
+    sorted.sort_unstable();
+    let mut result = vec![0; gids.len()];
+    let mut bytes = vec![0; gids.len()];
+    let mut start = 0;
+    while start < sorted.len() {
+        check_cancelled(stop)?;
+        let first = sorted[start].0;
+        let mut last = first;
+        let mut end = start + 1;
+        while end < sorted.len() && sorted[end].0 - last <= 1 {
+            last = sorted[end].0;
+            end += 1;
+        }
+        let n = (last - first + 1) as usize; // <= bounded number of selected IDs
+        let offset = base
+            .checked_add(first)
+            .filter(|o| o.checked_add(n as u64).is_some())
+            .ok_or_else(|| Error::input("review status offset overflow"))?;
+        file.read_exact_at(&mut bytes[..n], offset)?;
+        for &(id, index) in &sorted[start..end] {
+            result[index] = bytes[(id - first) as usize];
+        }
+        start = end;
+    }
+    check_cancelled(stop)?;
+    Ok(result)
+}
+
 fn bounded(what: &str) -> Error {
     Error::new(
         ErrorKind::Incomplete,

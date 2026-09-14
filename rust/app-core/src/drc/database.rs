@@ -76,6 +76,19 @@ impl ReadViolation {
     }
 }
 impl Database {
+    /// Bind a prepared review to THIS already-open reader, not merely another
+    /// pack with matching legacy headers. Call on the read actor, off-reactor.
+    /// Path replacement/touch is conservatively rejected until reopen.
+    pub fn validate_review_identity(&self, identity: &super::review::Identity) -> Result<()> {
+        match &self.backend {
+            Backend::Pack(p) if p.review_binding()? == identity.0 => Ok(()),
+            Backend::Pack(_) => Err(Error::new(
+                crate::ErrorKind::Cache,
+                "review and reader refer to different DRC packs",
+            )),
+            Backend::Ascii(_) => Err(Error::input("DRC review requires a registered pack")),
+        }
+    }
     pub(super) fn packed(pack: Pack) -> Self {
         Self {
             backend: Backend::Pack(Box::new(pack)),

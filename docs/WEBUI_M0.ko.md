@@ -136,6 +136,8 @@ M4e-2a는 로컬 저장의 snapshot 충돌·원자 게시·pack binding과 legac
 ([M4 §22](WEBUI_M4.ko.md)). 웹 actor/자동 저장·전체 import/export 연결은 여전히 남는다.
 M4e-2b는 준비부터 게시 완료까지 admission/read lease를 유지하고 취소·결과 조회·join을
 제공한다([M4 §23](WEBUI_M4.ko.md)). owner의 쓰기 API/UI는 아직 연결하지 않았다.
+M4e-2c는 기존 reader와 store의 opaque pack identity 일치 검사와 bounded 선택 waive
+조회다([M4 §24](WEBUI_M4.ko.md)). 같은 내용의 다른 pack도 구별하며 쓰기 API/UI는 후속이다.
 
 ### 2.7 svrf — M4 (6개 옵션)
 

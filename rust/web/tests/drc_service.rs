@@ -121,3 +121,92 @@ async fn real_pack_cancellation_admission_scope_and_reap() {
     assert_eq!(resources.usage(), Usage::default());
     println!("RUST DRC ACTOR: ALL OK");
 }
+
+#[tokio::test]
+#[ignore = "run tools/validate_web_drc.py with a synthetic pack"]
+async fn reader_actor_rejects_review_for_another_or_replaced_pack() {
+    use floe_app_core::drc::review::{
+        managed::{ManagedStore, Registration},
+        store::Kind,
+    };
+    use std::{fs, sync::atomic::AtomicUsize};
+    let fixture = PathBuf::from(std::env::var_os("FLOE_DRC_WEB_PACK").unwrap());
+    let dir = fixture
+        .parent()
+        .unwrap()
+        .join(format!("review-binding-{}", std::process::id()));
+    fs::create_dir(&dir).unwrap();
+    let path = dir.join("reader.ice");
+    let copy = dir.join("copy.ice");
+    fs::copy(&fixture, &path).unwrap();
+    fs::copy(&fixture, &copy).unwrap();
+    let scope = AccessScope::new(std::slice::from_ref(&dir)).unwrap();
+    let resources = Resources::new(Limits::default()).unwrap();
+    let store = |pack: &std::path::Path| {
+        ManagedStore::open(
+            &resources,
+            Registration {
+                scope: Arc::clone(&scope),
+                pack: pack.to_owned(),
+                reviewer: "synthetic-reader".into(),
+                kind: Kind::Notes,
+                protected_files: vec![],
+                protected_trees: vec![],
+            },
+            &AtomicUsize::new(0),
+        )
+        .unwrap()
+    };
+    let original = store(&path);
+    let other = store(&copy);
+    let reader = Service::start(&resources, Arc::clone(&scope), &path, None, "source").unwrap();
+    let mut ticket = reader
+        .validate_review_identity(original.identity())
+        .unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), ticket.result())
+            .await
+            .unwrap()
+            .unwrap(),
+        b"{}"
+    );
+    let mut mismatch = reader.validate_review_identity(other.identity()).unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), mismatch.result())
+            .await
+            .unwrap(),
+        Err("drc_changed_or_corrupt")
+    );
+    // Equal bytes/legacy header do not authorize a different inode. Simulate an
+    // external replace while the read actor still owns its first descriptor.
+    fs::rename(&copy, &path).unwrap();
+    let fresh = store(&path);
+    let mut stale = reader.validate_review_identity(fresh.identity()).unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), stale.result())
+            .await
+            .unwrap(),
+        Err("drc_changed_or_corrupt")
+    );
+    reader.request_stop();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !reader.is_finished() {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        reader.validate_review_identity(fresh.identity()),
+        Err("drc_closed")
+    ));
+    drop((original, other, fresh, reader));
+    assert_eq!(resources.usage(), Usage::default());
+    assert_eq!(
+        fs::read_dir(&dir).unwrap().count(),
+        1,
+        "no review/lock files from validation"
+    );
+    assert_eq!(fs::read(&path).unwrap(), fs::read(&fixture).unwrap());
+    fs::remove_dir_all(&dir).unwrap();
+}
