@@ -1586,3 +1586,101 @@ static-pie 빌드는 통과했으며 기존 tiler/vfs 등의 dependency 경고�
 worker 구현은 바꾸지 않아 renderd0.12.87은 유지한다. 실제 브라우저 파일 선택/저장과
 Linux 실행·현장 Firefox/ETX 수용은 미확인이다.
 설계 기본값 게시와 나머지 주석/review 쓰기·내보내기·배포 작업은 후속 단계다.
+
+## 18. M4d-4a — 공유 설계 기본값 게시 코어 (2026-09-14)
+
+UI-03의 남은 설계 기본값 게시를 구현하기 위한 **Rust 코어 단계**다. 일반 설정 Save와
+구분하며, 아직 launcher opt-in·HTTP/WS 게시 endpoint·브라우저 승인 버튼을 추가하지 않았다.
+`FLOE_FILL_EDIT`가 비어 있지 않을 때만 보이는 GTK 개발 메뉴의 공유 파일 쓰기를
+일반 다운로드나 자동 저장으로 확대하지 않는다. 기존 owner 설정 API에는 파일 쓰기 권한이 없다.
+
+### 대상·형식
+
+`layer_defaults::Publisher`는 trusted launcher가 등록한 전체 source 집합(1..32)을 받아
+만드는 capability다. `prepare`는 그 집합에 속한 source, mode, 현재 Calibre 설정 text로
+읽기 전용 draft를 만들고, **draft를 소비하는 `publish`만** 파일을 쓴다. 브라우저 경로 입력이나
+임의 출력 경로는 없으며, 후속 서버에서는 `ViewState::layerprops`의 현재 revision 출력만
+사용해야 한다. 이 코어 자체는 view/owner/승인 토큰을 알지 못한다.
+
+- 일반 layout: `<source>.layerprops`.
+- 덱 level: `<deck>.jb.layerprops`, chip: `<stem>.chip-by-level.jb.layerprops`,
+  source-layer: `<stem>.layer.jb.layerprops`. 확장자·숨김 파일·공백·한글 처리는 기존
+  `props_source`/GTK와 같다. 읽기의 `<stem>.layerprops` fallback에 쓰지는 않는다.
+- 입력은 기존 six-column codec의4MiB/65,536행 한계, malformed/빈 문서는 전체 거부다.
+  게시 코어가 새 설정 형식이나 개인 palette 파일을 만들지 않는다.
+- custom bitmap의 Calibre 이름 부재 외에 **폭이 넓은 head 아래 명시 child width1**도
+  Calibre export 오류로 알린다. startup/live import에서1은 상속이므로 그대로 저장하면
+  다음 로드에 폭이 달라진다. Native JSON은 이 상태를 손실 없이 보존한다. 공유 default의
+  형식을 JSON으로 몰래 바꾸거나 근사 선폭을 쓰지 않는다.
+
+현재 source뿐 아니라 **모든 등록 source·덱 dependency·cache tree·index lock**을
+출력 금지 대상으로 검사한다. 다른 source가 `.layerprops` 형태의 파일명을 갖거나
+missing dependency가 게시 대상과 같은 이름인 경우도 거부한다. source/dependency 범위와
+directory identity를 준비 및 게시 직전에 다시 확인한다. source/cache 원본은 쓰지 않는다.
+
+### 원자성·충돌·메타데이터
+
+draft는120초 유효하며 기존 파일의 bytes, dev/inode, size, mtime/ctime ns, mode/uid/gid,
+link 수, 읽을 수 있는 확장 속성과 ACL을 캡처한다. 기존 파일은4MiB 이하 regular single-link만
+허용하고 symlink/FIFO/directory/hardlink를 거부한다. 교체 시 `O_RDWR`로 truncate 없이
+열어 기존 파일의 쓰기 권한도 확인한다. directory 쓰기 권한만으로 read-only 파일을 우회하지 않는다.
+
+게시 시 `<target>.lock`의 nonblocking exclusive `flock`을 얻는다. lock은0-byte regular
+single-link 파일이고 inode가 유지되어야 하므로 **게시 후에도 삭제하지 않는다**. 같은 protocol을
+쓰는 프로세스끼리 최종 재검사와 commit을 직렬화한다. 이미 있는 빈 lock 파일은 실패나
+이전 프로세스 종료의 증거가 아니며, PID stale-lock 삭제 로직을 두지 않는다. 잠금 수명과
+NFS/SMB 동작은 [flock 매뉴얼](https://man7.org/linux/man-pages/man2/flock.2.html)을 따른다.
+
+같은 directory FD 안에 임시파일을 만들고 `openat`/`fstatat`의 no-follow로 다룬다.
+새 파일의 umask/default ACL 정책을 **내용이 비어 있을 때** 캡처한 뒤 private로 만들고,
+완성한 text에 원래 target의 mode/uid/gid/확장 속성/ACL 또는 새 파일의 생성 정책을 적용한다.
+복원 후 동일성을 확인하고 파일 sync → 최종 충돌/취소 확인 → 기존 대상은 `renameat`,
+없던 대상은 create-if-absent `linkat`으로 게시한다. 기존 열린 descriptor는 이전 inode를
+계속 읽을 수 있고 pathname 독자는 완성된 old/new 파일을 본다. 실패 시 소유한 임시 entry만
+정리한다. commit 뒤 디렉터리 sync 실패는 `Published {directory_synced:false}` 경고이며,
+게시 완료를 오류/취소로 뒤집거나 자동 재시도하지 않는다.
+
+Linux POSIX ACL은 FD xattr로, macOS extended ACL은 Darwin ACL API로 보존한다.
+새 파일의 ACL·mode 관계는 [Linux ACL 매뉴얼](https://man7.org/linux/man-pages/man5/acl.5.html),
+Darwin descriptor API는 [Apple ACL 문서](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/acl_get_fd.3.html)
+및 SDK `sys/acl.h`를 기준으로 했다. 추가 libacl·Python·외부 chmod 실행은 **제품에 없다**.
+macOS 단위 테스트의 chmod는 전용 합성 파일에 실제 ACL을 주는 오라클로만 사용한다.
+확장 속성 이름 합64KiB/값 합1MiB, 특수 permission bits·실행 capability·macOS BSD flags는
+명시 거부하고, 읽기/복원 불가 속성도 기존 파일을 바꾸지 않고 실패한다.
+원래 소유자가 다른 UID이면 group 쓰기 권한이 있더라도 새 inode에 그 owner를 복원할
+권한이 없어 실패할 수 있다. 같은 서비스 UID의 게시를 우선 대상으로 하며, GTK의
+in-place group-write와 여러 OS 계정 간 게시의 완전한 동작 일치는 아직 수용 범위가 아니다.
+지속 lock 파일의 접근 권한도 해당 공유 계정/디렉터리 정책에 맞아야 한다. 이를 해결하려고
+owner/ACL을 몰래 바꾸거나 lock을 삭제하는 fallback은 두지 않는다.
+
+이는 모든 filesystem metadata의 보존이나 hostile filesystem sandbox를 뜻하지 않는다.
+권한 때문에 열거되지 않는 privileged xattr, 파일 시스템 고유 속성은 보장 범위 밖이다.
+외부 writer가 lock을 무시하고 최종 검사 뒤 바꾸는 경쟁은 filesystem CAS가 아니다.
+concurrent source/symlink/directory 이동도 기존 등록 계약대로 미지원이다. NFS/SMB의
+lock·ACL·durability는 현장 검증 전 수용으로 표시하지 않는다. 강제 종료/파일 시스템 장애의
+임시 entry 회수도 후속 운영 정책이며, 임의 `.tmp`/lock 청소를 자동으로 실행하지 않는다.
+열려 있는 다른 GUI의 default 변경 감지·캐시 교체는 앞서 보류한 파일 관리 정책 범위다.
+
+### 검증·후속
+
+집중 단위 테스트14개는 read-only prepare, 생성/교체, old FD 보존, 실제 ACL/xattr·mode
+보존과 생성 시 directory ACL 상속, bytes/속성/삭제/새 생성 충돌, 취소/만료/주입 실패,
+nonblocking lock·단회 경쟁 승자, 특수 파일·전체 source/cache 보호, directory/lock/temp
+치환 시 무관 파일 보존, commit 후 늦은 취소/dir-sync 실패를 고정한다. Calibre 선폭
+손실 거부와 Native JSON 왕복1개를 더해 app-core155개가 로컬에서 통과했다.
+
+`tools/validate_layer_defaults.py`는 실제 GTK `props_src`/`shared_props_paths`/
+`save_shared_props`를 오라클로 layout2개와 덱6개×3mode, **20개 경로/바이트**를 비교한다.
+모든 쓰기는 독립 임시 fixture이며 Rust runtime PATH를 비운다. source·stem fallback의
+bytes/mtime 불변과 허용된 target/0-byte lock 외 잔류 없음도 단언한다. 이 게이트는
+`tools/validate_rust.sh`에 필수 연결했다. 실제 웹 게시/사용자 default를 바꾼 검증은 아니다.
+
+Rust1.89의 app-core155개와 Linux x86-64 musl release 테스트 static-pie 링크를 확인했다.
+Linux에서 실행한 ACL 검증은 아니며 현재 macOS의 결과로 대신하지 않는다.
+최종 `sh tools/validate_rust.sh`는 종료 코드0·`RUST VALIDATION: ALL OK`로 완료됐다.
+새20개 게시 오라클과 app-core155·web41, 기존 owner6·jobdeck80·renderer46 및
+KLayout13 PX+2 phase-exact+14 style을 포함한다. ES2017/전체 JS, scoped fmt와
+app-core/web all-target strict clippy도 통과했고, 기존 dependency/deprecation 경고는 남는다.
+worker 구현은 바꾸지 않아 renderd0.12.87을 유지한다.
+다음 단계는 별도 launcher opt-in, owner/view/revision에 고정한 준비/명시 승인/결과 receipt,
+취소·연결 단절 시 미확정 결과 조회, 유계 작업 admission과 UI다. guest 공유 범위는 추가하지 않는다.

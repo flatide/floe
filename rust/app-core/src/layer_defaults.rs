@@ -1,0 +1,498 @@
+//! Explicit shared-default publication, not ordinary session settings Save.
+//! Trusted callers register the entire source set and obtain a read-only draft;
+//! only consuming that draft writes the exact derived sidecar. HTTP consent,
+//! view/revision binding and operation receipts belong to the caller.
+use crate::{
+    check_cancelled,
+    jobdeck::{color::Mode, dataset::props_source},
+    layerprops,
+    registered::{RegisteredSource, MAX_SOURCES},
+    Error, ErrorKind, Result,
+};
+use std::{
+    ffi::{CStr, CString},
+    fs::{self, File, OpenOptions},
+    io::{Read, Write},
+    os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::{
+            ffi::OsStrExt,
+            fs::{MetadataExt, OpenOptionsExt},
+        },
+    },
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+        Arc,
+    },
+    time::{Duration, Instant, SystemTime},
+};
+
+mod security;
+use security::Security;
+const DRAFT_TTL: Duration = Duration::from_secs(120);
+static SERIAL: AtomicU64 = AtomicU64::new(0);
+
+fn conflict() -> Error {
+    Error::new(ErrorKind::Busy, "design default changed; prepare it again")
+}
+fn unsupported(message: &str) -> Error {
+    Error::new(ErrorKind::Unsupported, message)
+}
+
+/// Creating this capability is an explicit local opt-in. It does not itself
+/// change a source, create a lock file, or grant a browser any permission.
+pub struct Publisher {
+    sources: Vec<Arc<RegisteredSource>>,
+}
+impl Publisher {
+    pub fn new(sources: Vec<Arc<RegisteredSource>>) -> Result<Arc<Self>> {
+        if sources.is_empty() || sources.len() > MAX_SOURCES {
+            return Err(Error::input(
+                "default publisher requires 1..32 registered sources",
+            ));
+        }
+        Ok(Arc::new(Self { sources }))
+    }
+    fn protect(&self, path: &Path) -> Result<()> {
+        for source in &self.sources {
+            source.protect_output(path)?;
+        }
+        Ok(())
+    }
+    pub fn prepare(
+        self: &Arc<Self>,
+        source: Arc<RegisteredSource>,
+        mode: Mode,
+        text: &str,
+        stop: &AtomicUsize,
+    ) -> Result<Draft> {
+        check_cancelled(stop)?;
+        if !self.sources.iter().any(|s| Arc::ptr_eq(s, &source))
+            || (!source.deck && mode != Mode::Level)
+        {
+            return Err(Error::input(
+                "source/mode is outside this default publisher",
+            ));
+        }
+        let document = layerprops::parse(text)?;
+        if document.malformed != 0 || document.rows.is_empty() {
+            return Err(Error::input(
+                "design default requires valid layer property rows",
+            ));
+        }
+        let text = layerprops::format(&document.rows)?.into_bytes();
+        source.validate(stop)?;
+        let props = if source.deck {
+            props_source(source.path(), mode)?
+        } else {
+            source.path().to_owned()
+        };
+        let mut target = props.into_os_string();
+        target.push(".layerprops");
+        let target = source.scoped_output(Path::new(&target))?;
+        self.protect(&target)?;
+        let directory = Directory::open(
+            target
+                .parent()
+                .ok_or_else(|| Error::input("default has no parent"))?,
+        )?;
+        let name = leaf(
+            target
+                .file_name()
+                .ok_or_else(|| Error::input("default has no name"))?,
+        )?;
+        let target = directory.path.join(target.file_name().unwrap());
+        let lock_name = leaf(std::ffi::OsStr::from_bytes(
+            &[name.as_bytes(), b".lock"].concat(),
+        ))?;
+        self.protect(
+            &directory
+                .path
+                .join(std::ffi::OsStr::from_bytes(lock_name.as_bytes())),
+        )?;
+        let before = Capture::read(&directory, &name, false, stop)?;
+        directory.validate()?;
+        source.validate(stop)?;
+        Ok(Draft {
+            publisher: Arc::clone(self),
+            source,
+            directory,
+            name,
+            lock_name,
+            target,
+            text,
+            before,
+            expires: Instant::now() + DRAFT_TTL,
+        })
+    }
+}
+pub struct Draft {
+    publisher: Arc<Publisher>,
+    source: Arc<RegisteredSource>,
+    directory: Arc<Directory>,
+    name: CString,
+    lock_name: CString,
+    target: PathBuf,
+    text: Vec<u8>,
+    before: Option<Capture>,
+    expires: Instant,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Published {
+    /// Rename/link already committed. A false value is a durability warning,
+    /// NOT permission to retry the publication or report it as cancelled.
+    pub directory_synced: bool,
+}
+impl Draft {
+    /// Trusted local information; a gateway must expose only the basename.
+    pub fn target(&self) -> &Path {
+        &self.target
+    }
+    pub fn bytes(&self) -> usize {
+        self.text.len()
+    }
+    pub fn replaces_existing(&self) -> bool {
+        self.before.is_some()
+    }
+    pub fn publish(self, stop: &AtomicUsize) -> Result<Published> {
+        self.publish_with(stop, || Ok(()))
+    }
+    fn current(&self, writable: bool, stop: &AtomicUsize) -> Result<()> {
+        check_cancelled(stop)?;
+        if Instant::now() >= self.expires {
+            return Err(conflict());
+        }
+        self.directory.validate()?;
+        self.source.validate(stop)?;
+        self.publisher.protect(&self.target)?;
+        let current = Capture::read(&self.directory, &self.name, writable, stop)?;
+        if !match (&self.before, &current) {
+            (None, None) => true,
+            (Some(a), Some(b)) => a.same(b),
+            _ => false,
+        } {
+            return Err(conflict());
+        }
+        Ok(())
+    }
+    fn publish_with(
+        self,
+        stop: &AtomicUsize,
+        before_commit: impl FnOnce() -> Result<()>,
+    ) -> Result<Published> {
+        self.publish_using(stop, before_commit, File::sync_all)
+    }
+    fn publish_using(
+        self,
+        stop: &AtomicUsize,
+        before_commit: impl FnOnce() -> Result<()>,
+        sync_directory: impl FnOnce(&File) -> std::io::Result<()>,
+    ) -> Result<Published> {
+        self.current(false, stop)?;
+        self.publisher.protect(
+            &self
+                .directory
+                .path
+                .join(std::ffi::OsStr::from_bytes(self.lock_name.as_bytes())),
+        )?;
+        let lock =
+            self.directory
+                .open_leaf(&self.lock_name, libc::O_RDWR | libc::O_CREAT, 0o666)?;
+        let lm = lock.metadata()?;
+        if !lm.is_file() || lm.nlink() != 1 || lm.len() != 0 {
+            return Err(Error::input("invalid design-default lock file"));
+        }
+        // SAFETY: a live regular-file descriptor; nonblocking OS advisory lock.
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let e = std::io::Error::last_os_error();
+            return Err(if e.kind() == std::io::ErrorKind::WouldBlock {
+                Error::new(ErrorKind::Busy, "design-default publisher is busy")
+            } else {
+                e.into()
+            });
+        }
+        self.current(true, stop)?; // Open-without-truncate honors existing file write access.
+        let mut staged = Stage::create(Arc::clone(&self.directory), &self.publisher)?;
+        for chunk in self.text.chunks(64 * 1024) {
+            check_cancelled(stop)?;
+            staged.file.write_all(chunk)?;
+        }
+        let security = self
+            .before
+            .as_ref()
+            .map(|c| &c.security)
+            .unwrap_or(&staged.creation_security);
+        security.apply(&staged.file)?;
+        if Security::read(&staged.file)? != *security {
+            return Err(unsupported(
+                "cannot preserve design-default permissions/attributes",
+            ));
+        }
+        staged
+            .file
+            .set_times(fs::FileTimes::new().set_modified(SystemTime::now()))?;
+        staged.file.sync_all()?;
+        before_commit()?;
+        self.current(true, stop)?;
+        if self.directory.leaf_identity(&self.lock_name)? != identity(&lm) {
+            return Err(conflict());
+        }
+        staged.validate()?;
+        check_cancelled(stop)?;
+        // All cooperating publishers hold this stable sidecar lock through
+        // revalidation and commit. It is deliberately never unlinked: replacing
+        // a lock inode would let two processes hold different exclusive locks.
+        // Noncooperating writes after the last check are not a filesystem CAS.
+        let rc = unsafe {
+            // SAFETY: both names are single CString leaves in a live dir fd.
+            if self.before.is_some() {
+                libc::renameat(
+                    self.directory.file.as_raw_fd(),
+                    staged.name.as_ptr(),
+                    self.directory.file.as_raw_fd(),
+                    self.name.as_ptr(),
+                )
+            } else {
+                libc::linkat(
+                    self.directory.file.as_raw_fd(),
+                    staged.name.as_ptr(),
+                    self.directory.file.as_raw_fd(),
+                    self.name.as_ptr(),
+                    0,
+                )
+            }
+        };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        if self.before.is_some() {
+            staged.linked = false;
+        } else {
+            staged.unlink();
+        }
+        // Never turn an already committed result into a cancellation/error.
+        let directory_synced = sync_directory(&self.directory.file).is_ok();
+        Ok(Published { directory_synced })
+    }
+}
+fn leaf(name: &std::ffi::OsStr) -> Result<CString> {
+    let b = name.as_bytes();
+    if b.is_empty() || b == b"." || b == b".." || b.contains(&b'/') {
+        return Err(Error::input("invalid sidecar leaf name"));
+    }
+    CString::new(b).map_err(|_| Error::input("NUL in sidecar name"))
+}
+fn identity(m: &fs::Metadata) -> (u64, u64) {
+    (m.dev(), m.ino())
+}
+struct Directory {
+    file: File,
+    path: PathBuf,
+    id: (u64, u64),
+}
+impl Directory {
+    fn open(path: &Path) -> Result<Arc<Self>> {
+        let path = fs::canonicalize(path)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_NONBLOCK)
+            .open(&path)?;
+        let id = identity(&file.metadata()?);
+        Ok(Arc::new(Self { file, path, id }))
+    }
+    fn validate(&self) -> Result<()> {
+        if identity(&fs::symlink_metadata(&self.path)?) != self.id {
+            return Err(conflict());
+        }
+        Ok(())
+    }
+    fn open_leaf(&self, name: &CStr, flags: i32, mode: u32) -> std::io::Result<File> {
+        // SAFETY: valid dir fd and NUL-terminated basename; no paths/traversal.
+        let fd = unsafe {
+            libc::openat(
+                self.file.as_raw_fd(),
+                name.as_ptr(),
+                flags | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+                mode as libc::c_uint,
+            )
+        };
+        if fd < 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(unsafe { File::from_raw_fd(fd) })
+        }
+    }
+    fn leaf_identity(&self, name: &CStr) -> std::io::Result<(u64, u64)> {
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: live dir fd/CString and writable stat storage; no symlink follow.
+        if unsafe {
+            libc::fstatat(
+                self.file.as_raw_fd(),
+                name.as_ptr(),
+                stat.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } != 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: successful fstatat initialized the entire stat structure.
+        let stat = unsafe { stat.assume_init() };
+        // Darwin dev_t is signed; Linux uses unsigned platform-sized fields.
+        #[allow(clippy::unnecessary_cast)]
+        Ok((stat.st_dev as u64, stat.st_ino as u64))
+    }
+}
+#[derive(PartialEq, Eq)]
+struct Stamp {
+    id: (u64, u64),
+    len: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    nlink: u64,
+}
+impl Stamp {
+    fn of(m: &fs::Metadata) -> Self {
+        Self {
+            id: identity(m),
+            len: m.len(),
+            modified: (m.mtime(), m.mtime_nsec()),
+            changed: (m.ctime(), m.ctime_nsec()),
+            mode: m.mode(),
+            uid: m.uid(),
+            gid: m.gid(),
+            nlink: m.nlink(),
+        }
+    }
+}
+struct Capture {
+    stamp: Stamp,
+    bytes: Vec<u8>,
+    security: Security,
+}
+impl Capture {
+    fn read(
+        dir: &Directory,
+        name: &CStr,
+        writable: bool,
+        stop: &AtomicUsize,
+    ) -> Result<Option<Self>> {
+        let file = match dir.open_leaf(
+            name,
+            if writable {
+                libc::O_RDWR
+            } else {
+                libc::O_RDONLY
+            },
+            0,
+        ) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let m = file.metadata()?;
+        if !m.is_file() || m.nlink() != 1 || m.len() > layerprops::MAX_BYTES as u64 {
+            return Err(Error::input(
+                "default must be a single-link regular file of at most 4 MiB",
+            ));
+        }
+        let stamp = Stamp::of(&m);
+        let security = Security::read(&file)?;
+        let mut bytes = Vec::new();
+        (&file)
+            .take(layerprops::MAX_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        check_cancelled(stop)?;
+        if bytes.len() > layerprops::MAX_BYTES || Stamp::of(&file.metadata()?) != stamp {
+            return Err(conflict());
+        }
+        Ok(Some(Self {
+            stamp,
+            bytes,
+            security,
+        }))
+    }
+    fn same(&self, other: &Self) -> bool {
+        self.stamp == other.stamp && self.bytes == other.bytes && self.security == other.security
+    }
+}
+struct Stage {
+    directory: Arc<Directory>,
+    name: CString,
+    file: File,
+    creation_security: Security,
+    linked: bool,
+    id: (u64, u64),
+}
+impl Stage {
+    fn create(directory: Arc<Directory>, publisher: &Publisher) -> Result<Self> {
+        for _ in 0..128 {
+            let n = SERIAL
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+                .map_err(|_| Error::input("default temporary sequence exhausted"))?;
+            let name =
+                CString::new(format!(".floe-layerprops-{}-{n}.tmp", std::process::id())).unwrap();
+            publisher.protect(
+                &directory
+                    .path
+                    .join(std::ffi::OsStr::from_bytes(name.as_bytes())),
+            )?;
+            let file = match directory.open_leaf(
+                &name,
+                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+                0o666,
+            ) {
+                Ok(f) => f,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e.into()),
+            };
+            let id = identity(&file.metadata()?);
+            // Capture the filesystem/umask/default-ACL policy before making
+            // this empty staging file private. Never read/change process umask.
+            let mut stage = Self {
+                directory,
+                name,
+                file,
+                creation_security: Security::empty(),
+                linked: true,
+                id,
+            };
+            stage.creation_security = Security::read(&stage.file)?;
+            Security::private(&stage.file)?;
+            return Ok(stage);
+        }
+        Err(Error::input("cannot allocate default staging file"))
+    }
+    fn validate(&self) -> Result<()> {
+        let m = self.file.metadata()?;
+        if !m.is_file() || m.nlink() != 1 || self.directory.leaf_identity(&self.name)? != self.id {
+            return Err(conflict());
+        }
+        Ok(())
+    }
+    fn unlink(&mut self) {
+        if self.linked {
+            // Only remove our own entry; a replacement is not ours to delete.
+            if self.directory.leaf_identity(&self.name).ok() == Some(self.id) {
+                // SAFETY: fixed leaf in the same held directory; no recursion.
+                if unsafe { libc::unlinkat(self.directory.file.as_raw_fd(), self.name.as_ptr(), 0) }
+                    == 0
+                {
+                    self.linked = false;
+                }
+            }
+        }
+    }
+}
+impl Drop for Stage {
+    fn drop(&mut self) {
+        self.unlink();
+    }
+}
+
+#[cfg(test)]
+mod tests;

@@ -72,6 +72,10 @@ cookie+CSRF·Origin 정책은 기존 owner 규칙이다. 등록된 view의 설�
 유지한다. 임의 경로·레이아웃 upload·source/default 쓰기 권한은 아니다(`uploads:false`).
 `view.set.body.style_deltas`는 `{pair,color?,fill?,width?}`의 필드별 수정이다.
 omitted는 유지, null은 오류이며 기존 완전한 `styles`와 한 요청에서 혼용하지 않는다.
+M4d-4a의 `layer_defaults::Publisher`는 trusted local Rust 코어다. 아직 HTTP capability,
+게시 endpoint·브라우저 승인 권한은 없으며 `layer_settings`가 공유 default 쓰기를 허용하지 않는다.
+후속 연결에서는 launcher opt-in·owner·view/revision·단회 승인과 게시 결과 receipt를 별도로
+바인딩해야 한다. 게시 후 디렉터리 sync 실패는 committed 경고이지 재시도 가능한 미게시가 아니다.
 2026-09-13 M1a-1 `rust/worker-client`와 M1a-2a/b `app/app-core`의 일반 index·info/단일 render/probe를
 구현했다. 현재 호출 계약은 [worker README](../rust/worker-client/README.md),
 [M1a 기록](WEBUI_M1A.ko.md)을 따르며 아래 서비스 전체가 존재하는 것은 아니다.

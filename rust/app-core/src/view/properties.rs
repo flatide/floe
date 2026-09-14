@@ -203,6 +203,19 @@ impl ViewState {
     pub fn layerprops(&self, model: &Model) -> Result<String> {
         let names = &model.property_names;
         let styles: BTreeMap<_, _> = self.styles.iter().map(|s| (s.layer, s)).collect();
+        // Six-column startup/load interpret width 1 as inheritance. Native
+        // JSON/complete styles can represent a narrow child under a wider
+        // head; never silently widen that child on reopening a default.
+        for (head, children) in &model.groups {
+            if styles.get(head).is_some_and(|s| s.width > 1)
+                && children
+                    .iter()
+                    .any(|p| styles.get(p).is_some_and(|s| s.width == 1))
+            {
+                return Err(crate::Error::new(crate::ErrorKind::Unsupported,
+                    "Calibre layerprops cannot preserve child width 1 under a wider head; use Native JSON"));
+            }
+        }
         let selected = |pair| match &self.layers {
             Layers::All => true,
             Layers::None => false,
@@ -688,6 +701,45 @@ mod tests {
         assert!(
             layerprops::parse_settings(&text.replace("\"version\":1", "\"version\":2")).is_err()
         );
+    }
+    #[test]
+    fn calibre_rejects_explicit_child_width_one_that_would_inherit_on_load() {
+        let m = model();
+        let s = load(
+            &ViewState::initial(&m, 100, 100).unwrap(),
+            &m,
+            "1 red solid HEAD 1 6",
+        );
+        let mut child = s.styles[1].clone();
+        child.width = 1;
+        let s = s
+            .edit(
+                &m,
+                Patch {
+                    style_changes: vec![child],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(s.styles[0].width, 6);
+        assert_eq!(s.styles[1].width, 1);
+        assert_eq!(
+            s.layerprops(&m).unwrap_err().kind,
+            crate::ErrorKind::Unsupported
+        );
+        let restored = ViewState::initial(&m, 100, 100)
+            .unwrap()
+            .edit(
+                &m,
+                Patch {
+                    settings: Some(
+                        layerprops::parse_settings(&s.settings(&m).text().unwrap()).unwrap(),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(restored, s);
     }
     #[test]
     fn prepared_import_is_atomic_and_calibre_export_uses_effective_styles() {

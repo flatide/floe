@@ -170,6 +170,22 @@ impl RegisteredSource {
             .map(|p| cache::cache_path(p))
             .collect()
     }
+    pub(crate) fn scoped_output(&self, path: &Path) -> Result<PathBuf> {
+        self.scope.check(path)
+    }
+    /// A shared sidecar writer must protect every registered source, not only
+    /// the current one: another source may have a sidecar-shaped filename.
+    pub(crate) fn protect_output(&self, path: &Path) -> Result<PathBuf> {
+        let trees = self.cache_paths()?;
+        let mut files = self.dependencies.clone();
+        files.push(self.path.clone());
+        for tree in &trees {
+            let mut lock = tree.as_os_str().to_owned();
+            lock.push(".index.lock");
+            files.push(lock.into());
+        }
+        crate::artifact::protected_output(path, &files, &trees)
+    }
     pub fn validate_levels(&self, selected: Option<&BTreeSet<i64>>) -> Result<()> {
         if let Some(ids) = selected {
             if !self.deck
