@@ -462,3 +462,24 @@ fn directory_replacement_and_unsafe_lock_do_not_write_elsewhere() {
     assert!(!f.target().exists());
     f.no_stage();
 }
+
+#[test]
+fn extra_registrations_and_inode_aliases_are_never_publication_targets() {
+    let f = Fixture::new();
+    let p =
+        Publisher::with_protected(vec![Arc::clone(&f.source)], vec![f.target()], vec![]).unwrap();
+    assert!(p
+        .prepare(Arc::clone(&f.source), Mode::Level, TEXT, &f.stop)
+        .is_err());
+    let file = f.dir.join("private-session");
+    fs::write(&file, "private synthetic value").unwrap();
+    fs::hard_link(&file, f.target()).unwrap();
+    assert!(reject_aliases(&f.target(), std::slice::from_ref(&file)).is_err());
+    fs::remove_file(f.target()).unwrap();
+    let p = Publisher::with_protected(vec![Arc::clone(&f.source)], vec![], vec![f.dir.clone()])
+        .unwrap();
+    assert!(p
+        .prepare(Arc::clone(&f.source), Mode::Level, TEXT, &f.stop)
+        .is_err());
+    assert_eq!(fs::read_to_string(file).unwrap(), "private synthetic value");
+}

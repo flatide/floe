@@ -64,6 +64,15 @@ impl Harness {
         drc: Option<(&Path, Option<&Path>)>,
         builds: bool,
     ) -> Self {
+        Self::configured(paths, indexer, drc, builds, false).await
+    }
+    async fn configured(
+        paths: &[PathBuf],
+        indexer: Indexer,
+        drc: Option<(&Path, Option<&Path>)>,
+        builds: bool,
+        defaults: bool,
+    ) -> Self {
         let resources = Resources::new(Limits::default()).unwrap();
         let scope = AccessScope::new(&[paths[0].parent().unwrap().to_owned()]).unwrap();
         let sources = paths
@@ -101,6 +110,9 @@ impl Harness {
             } else {
                 Gateway::attach_drc(&mut gate, drc).unwrap();
             }
+        }
+        if defaults {
+            Gateway::enable_design_defaults(&mut gate, &[], &[]).unwrap();
         }
         let (stop, rx) = oneshot::channel();
         let task = tokio::spawn(transport::serve(listener, Arc::clone(&gate), async {
@@ -352,6 +364,8 @@ fn open(seq: &str, id: &Value, mode: &str, levels: Value) -> Value {
     json!({"kind":"open","seq":seq,"source_id":id,"mode":mode,"levels":levels,"body":{"pixels":[257,191],"labels":false,"depth":"full","detail":"high","thin":"keep"}})
 }
 
+#[path = "support/defaults.rs"]
+mod defaults;
 #[path = "support/drc_isolation.rs"]
 mod drc_isolation;
 #[path = "support/exports.rs"]

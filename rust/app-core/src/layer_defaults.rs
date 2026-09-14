@@ -44,17 +44,37 @@ fn unsupported(message: &str) -> Error {
 /// change a source, create a lock file, or grant a browser any permission.
 pub struct Publisher {
     sources: Vec<Arc<RegisteredSource>>,
+    protected_files: Vec<PathBuf>,
+    protected_trees: Vec<PathBuf>,
 }
 impl Publisher {
     pub fn new(sources: Vec<Arc<RegisteredSource>>) -> Result<Arc<Self>> {
+        Self::with_protected(sources, Vec::new(), Vec::new())
+    }
+    /// Additional local registrations such as DRC/waive/SVRF inputs. These
+    /// only restrict derived sidecar targets; they never grant output paths.
+    pub fn with_protected(
+        sources: Vec<Arc<RegisteredSource>>,
+        protected_files: Vec<PathBuf>,
+        protected_trees: Vec<PathBuf>,
+    ) -> Result<Arc<Self>> {
         if sources.is_empty() || sources.len() > MAX_SOURCES {
             return Err(Error::input(
                 "default publisher requires 1..32 registered sources",
             ));
         }
-        Ok(Arc::new(Self { sources }))
+        if protected_files.len() > 128 || protected_trees.len() > 128 {
+            return Err(Error::input("too many protected default publication paths"));
+        }
+        Ok(Arc::new(Self {
+            sources,
+            protected_files,
+            protected_trees,
+        }))
     }
     fn protect(&self, path: &Path) -> Result<()> {
+        crate::artifact::protected_output(path, &self.protected_files, &self.protected_trees)?;
+        reject_aliases(path, &self.protected_files)?;
         for source in &self.sources {
             source.protect_output(path)?;
         }
@@ -126,6 +146,23 @@ impl Publisher {
             expires: Instant::now() + DRAFT_TTL,
         })
     }
+}
+/// Case-insensitive aliases can share an inode with nlink==1. Path spelling
+/// and the target's single-link guard alone are not an identity boundary.
+pub(crate) fn reject_aliases(path: &Path, files: &[PathBuf]) -> Result<()> {
+    let metadata = |p: &Path| match fs::metadata(p) {
+        Ok(m) => Ok(Some(m)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(Error::from(e)),
+    };
+    if let Some(target) = metadata(path)? {
+        for file in files {
+            if metadata(file)?.is_some_and(|m| identity(&m) == identity(&target)) {
+                return Err(Error::input("default output aliases a registered input"));
+            }
+        }
+    }
+    Ok(())
 }
 pub struct Draft {
     publisher: Arc<Publisher>,

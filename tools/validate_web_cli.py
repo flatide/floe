@@ -95,6 +95,10 @@ def main(fixture):
         env = dict(os.environ, PATH="", TMPDIR=str(temps), FLOE_INDEX_BIN=str(INDEX),
                    FLOE_RENDERD_BIN=str(RENDERD), FLOE_BROWSER_TEST_RECORD=str(argv_path))
         for manual in (False, True):
+            env["FLOE_FILL_EDIT"] = "0" if manual else ""
+            # A launcher credential must not be reused as a publication lock.
+            # This is an isolated test session, never a user's credential file.
+            session_path = Path(str(source) + ".layerprops.lock") if manual else work / "session.json"
             args = [str(APP), "view", str(source), "--session-file", str(session_path),
                     "--goto", "-10.9375,20,700", "--depth", "99", "--detail", "high",
                     "--thin", "keep", "--no-labels", "--jobs", "2", "--raster-jobs", "1"]
@@ -123,6 +127,11 @@ def main(fixture):
                     assert launch.stat().st_mode & 0o777 == 0o600
                     assert session["url"] in launch.read_text()
                 client.login()
+                assert client.call("GET", "/api/v1/capabilities")["design_defaults"] is manual
+                if not manual:
+                    client.call("GET", "/api/v1/defaults", code=403)
+                else:
+                    assert client.call("GET", "/api/v1/defaults")["scope"] == "shared_design_default"
                 startup = client.call("GET", "/api/v1/startup")["request"]
                 assert startup["body"]["navigation"]["center_um"][0] == "-10.9375"
                 assert startup["body"]["detail"] == "high"
@@ -158,6 +167,11 @@ def main(fixture):
                 assert abs((bbox[2] - bbox[0]) * unit - 700) < 1e-9
                 assert abs((bbox[0] + bbox[2]) / 2 * unit + 10.9375) < 1e-9
                 if manual:
+                    credential = session_path.read_bytes()
+                    client.call("POST", "/api/v1/defaults/prepare",
+                                dict(view_id=view["view_id"], state_rev=view["state_rev"]), 400)
+                    assert session_path.read_bytes() == credential
+                    assert not Path(str(source) + ".layerprops").exists()
                     proc.send_signal(signal.SIGINT)
                 else:
                     client.call("DELETE", "/api/v1/session", code=204)
@@ -192,7 +206,7 @@ def main(fixture):
             assert run.returncode != 0
             assert source.read_bytes() == original
         assert not list(temps.iterdir())
-    print("WEB CLI: ALL OK (PATH empty, first generation, explicit index, private Firefox argv, logout/SIGINT, cleanup)")
+    print("WEB CLI: ALL OK (PATH empty, first generation, explicit index, private Firefox argv, defaults opt-in/credential protection, logout/SIGINT, cleanup)")
 
 
 if __name__ == "__main__":

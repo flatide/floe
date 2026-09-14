@@ -64,6 +64,7 @@ Decode+raster reservation must fit 16 slots (DRC reserves 1 extra slot + 256 MiB
 SVRF metadata reserves another 256 MiB, with no extra CPU worker).
 DRC reads the explicit ASCII or ICE file; no adjacent-pack/reviewer discovery or implicit indexing.
 Refinement off; deck margin unsupported.
+FLOE_FILL_EDIT (nonempty) explicitly enables approved shared design-default publication.
 The session link is a one-time credential; do not share or log it.";
 
 #[derive(Debug)]
@@ -410,6 +411,14 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
         c.session_file,
         &json!({"url":url,"origin":gate.origin(),"bundle":BUNDLE,"pid":std::process::id()}),
     )?;
+    if std::env::var_os("FLOE_FILL_EDIT").is_some_and(|v| !v.is_empty()) {
+        Gateway::enable_design_defaults(
+            &mut gate,
+            std::slice::from_ref(&session.path),
+            std::slice::from_ref(&session.directory),
+        )
+        .map_err(Error::input)?;
+    }
     let mut browser = firefox
         .map(|path| floe_app_core::browser::Browser::start(&path, &session.directory, &url))
         .transpose()?;

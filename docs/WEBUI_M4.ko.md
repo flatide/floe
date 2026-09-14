@@ -6,9 +6,10 @@ M0/G2·M3 현장 Firefox/ETX는 사용자 요청대로 보류다. 이 경계를 
 독립적인 로컬 native 이관을 진행한다. M4 전체 완료나 GTK 은퇴를 뜻하지 않는다.
 현재는 §14의 **owner viewport clip UI**, §15의 **표시 픽셀 PNG 복사/저장과
 overlay 전환**, §16의 **Rust layerprops 포맷·초기 가시성**, §17의
-**열린 세션 설정 Load/Save·필드별 스타일 적용**까지 연결했다.
+**열린 세션 설정 Load/Save·필드별 스타일 적용**, §18/19의
+**공유 설계 기본값 게시 코어·owner 승인 API**까지 연결했다.
 각 절의 미연결 표기는 해당 선행 단계 당시의 범위다.
-나머지 내보내기·주석 저장·설계 기본값 게시와 전체 조작/실제 브라우저 수용은 남아 있다.
+나머지 내보내기·주석 저장·설계 기본값 게시 UI와 전체 조작/실제 브라우저 수용은 남아 있다.
 
 ## 1. M4a-1: 표시 scene에 고정한 native pick/snap
 
@@ -1684,3 +1685,97 @@ app-core/web all-target strict clippy도 통과했고, 기존 dependency/depreca
 worker 구현은 바꾸지 않아 renderd0.12.87을 유지한다.
 다음 단계는 별도 launcher opt-in, owner/view/revision에 고정한 준비/명시 승인/결과 receipt,
 취소·연결 단절 시 미확정 결과 조회, 유계 작업 admission과 UI다. guest 공유 범위는 추가하지 않는다.
+
+## 19. M4d-4b — owner 기본값 승인·게시 API (2026-09-14)
+
+§18의 파일 게시 코어를 별도 owner capability에 연결했다. **브라우저 버튼은 아직 없다.**
+기존 Settings Save는 계속 다운로드이며, 이 단계는 개인 palette 자동 저장이나
+guest 공유 권한을 추가하지 않는다. native renderer·인덱스 포맷·cut/LOD 정책도 바꾸지 않는다.
+
+### 실행 권한과 준비
+
+`floe2-web view` 실행 환경의 `FLOE_FILL_EDIT`가 비어 있지 않으면
+`capabilities.design_defaults:true`다. 기존 GTK 개발 메뉴와 같이 문자열 `0`도 **켜짐**이다.
+변수가 없거나 빈 문자열이면 false이고 모든 defaults endpoint는 인증 후403이다.
+trusted Rust embedding은 모든 source/DRC를 등록한 뒤 `Gateway::enable_design_defaults`를
+한 번 호출할 수 있다. gateway를 공개하거나 capability를 만든 뒤 DRC를 추가하지 못한다.
+
+등록된 layout/deck/dependency/cache/index-lock 외에 DRC 입력·waive·SVRF·현재/향후 ICE
+tree와 launcher의 세션 자격증명 파일·private directory도 보호한다. 별도 보호 경로는
+출력 경로를 늘리지 않고 제한만 추가한다. target뿐 아니라 지속 lock도 검사하며,
+대소문자 무시 파일 시스템에서 다른 이름·nlink1로 같은 입력을 가리키는 경우도 inode로 거부한다.
+
+모든 HTTP 요청은 기존 exact Origin/Host·owner cookie·CSRF·16KiB body 제한을 따른다.
+입력 DTO는 알 수 없는 필드를 거부한다. 브라우저는 path, source path, mode, text를
+지정하지 못하며 서버의 **현재 view와 state revision**에서 source/mode/설정 text를 얻는다.
+
+| API | 역할 |
+|---|---|
+| `POST /api/v1/defaults/prepare` | `{view_id,state_rev}`를 읽기 전용 draft로 준비 |
+| `POST /api/v1/defaults` | `{seq,view_id,state_rev,token,approve:true}` 명시 승인,202 |
+| `GET /api/v1/defaults` | capability 상태와 전용 operation ledger |
+| `GET /api/v1/defaults/{seq}` | 진행/최종 receipt 조회 |
+| `POST /api/v1/defaults/{seq}/cancel` | 실제 작업에 취소 요청,202; 즉시 취소 완료를 뜻하지 않음 |
+| `POST /api/v1/defaults/revoke` | `{token}`에 해당하는 미승인 draft 폐기,204 |
+
+준비는 파일을 만들거나 lock을 잡지 않는다. 응답에는 basename, title, mode, 선택 levels,
+rows/bytes, `replaces_existing`, `scope:shared_design_default`, `affects:future_opens`와
+30초짜리 opaque token만 있다. 전체 서버 경로·native 오류·설정 text는 응답하지 않는다.
+최신 draft 하나만 보관하고 새 prepare는 이전 draft를 폐기한다. token은 owner/view/revision에
+고정되며 같은 숫자의 revision을 가진 다른 view·덱 mode 재open에 사용할 수 없다.
+
+**게시 내용은 현재 모델의 전체 설정 파일이며 다른 파일과 병합하지 않는다.** 일부 덱 level만
+열었다면 그 선택 모델의 rows로 해당 mode 기본값 파일을 교체한다. 후속 UI는 선택 level,
+파일 교체 여부와 다른 사용자의 향후 open에 영향을 줄 수 있음을 승인 전에 표시해야 한다.
+전체 덱 설정을 보존하는 자동 병합으로 설명하면 안 된다.
+
+### 수명·응답과 비용
+
+prepare의 파일 읽기/직렬화는 semaphore1의 blocking task에서 수행한다. draft1·게시 작업1,
+기존 text4MiB/65,536행, 최근 receipt32개로 유계다. 게시 전용 native thread가 코어를 호출하며
+HTTP/event loop나 view/controller lock을 파일 I/O 중 잡지 않는다. 활성 게시 중 새 준비는429다.
+
+승인 시 현재 view/revision을 다시 확인한 시점이 acceptance point다. 이미 인정한 같은
+seq/body는 현재 view가 바뀌어도 receipt를 replay하고 새 게시를 실행하지 않는다. 다른 body는
+409, 오래된/소비된 token은410이다. 알아본 token의 stale view/revision은 폐기한다.
+유효한 승인 뒤 navigation/style 변경은 **이미 승인한 immutable 설정 bytes**를 바꾸지 않는다.
+게시 commit까지 view revision을 잠그는 계약은 아니다.
+
+상태는 queued → publishing → succeeded/failed/cancelled다. `published:true`가 commit 결과이고
+늦은 cancel을 받아도 취소로 다시 쓰지 않는다. `directory_synced:false`는 게시 완료·durability
+경고다. 게시 전 오류는 `published:false`와 안전한 오류 코드로 알리며 native path/로그는 숨긴다.
+파일/속성 충돌이나 비협조 writer 문제의 코어 계약은 §18 그대로다.
+
+POST 전송 뒤 연결이 끊기면 결과는 미확정일 수 있다. 같은 서버 세션에서 GET/원래 seq의
+명시 확인으로 해결하고 **새 seq로 자동 재게시하지 않는다**. ledger는 서버 메모리이며
+서버 종료/재시작에 걸친 durable idempotency를 제공하지 않는다. logout/서버 종료는 미승인
+draft를 버리고 승인 작업에 stop을 요청한다. 실제 commit 결과를 우선하며 다른 열린 GUI의
+default 교체 감지/실시간 전파는 여전히 보류다.
+
+기존 HTTP5초 deadline에서 취소된 prepare는 stop을 전달하고 결과를 버린다. 서버는 종료 시
+작업 drain에4초 관찰 한계를 둔다. 그러나 NFS/SMB 등의 **블로킹 syscall을 강제 중단하는
+시간 상한은 아니다**. task/thread 수는 제한되지만 커널 I/O가 멈추면 최종 join도 지연될 수 있다.
+이를 현장 파일 시스템의 lock/ACL/종료 수용을 통과한 것으로 표시하지 않는다.
+
+### 검증·후속
+
+로컬 단위 테스트는 app11·app-core156·web44가 통과했다. 추가 항목은 owner별 draft 폐기,
+최신/만료 token·semaphore1·종료 후 준비 거부, 승인 작업 취소 후 ledger drain·미게시,
+임의 path/text DTO 거부와 추가 등록 파일/inode alias 보호다.
+
+owner 실제 HTTP/native 통합은9개다. 기본 off/auth/명시 승인, read-only prepare,
+same-seq replay·서로 다른 body, revision 변경·revoke·외부 파일 충돌, DRC 입력 보존,
+덱 level→chip→layer 닫기/재열기의 token 무효화·선택 level preview·mode별 게시를 확인한다.
+`validate_web_cli.py`는 PATH를 비운 Rust 실행에서 env 빈 값과 nonempty `0` 구별,
+세션 credential이 게시 lock 경로와 충돌하면 준비를 거부하는 것, logout/SIGINT 정리를 단언한다.
+모든 쓰기는 전용 합성 임시 fixture이며 실제 사용자 default 파일은 바꾸지 않는다.
+
+Rust1.89에서도 app11·app-core156·web44를 실행했고, Linux x86-64 musl의 release
+`floe2-web` static-pie 링크를 확인했다(Linux 실행 검증은 아님). scoped fmt와 app/core/web
+all-target strict clippy도 통과했다. 기존 dependency/deprecation 경고는 별도다.
+최종 `sh tools/validate_rust.sh`는 종료 코드0·`RUST VALIDATION: ALL OK`로 완료됐다.
+owner9·CLI opt-in/credential 보호·GTK 게시20개 오라클, 기존 jobdeck80·renderer46,
+KLayout13 PX+2 phase-exact+14 style(jobs1/8), ES2017/전체 JS를 포함한다.
+renderd0.12.87은 유지하며, 실제 브라우저 게시 클릭·현장 공유 파일 시스템 수용은 아직 아니다.
+후속 M4d-4c는 별도 Publish design default 버튼, preview와 공유 영향 명시 승인,
+진행/취소·미확정 결과 확인·재접속 receipt 복원이다. 일반 Save의 의미를 바꾸지 않는다.

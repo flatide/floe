@@ -93,6 +93,24 @@ impl Registry {
     pub(crate) fn source_id(&self) -> &str {
         &self.inner.registration.source_id
     }
+    pub(crate) fn protected_paths(
+        &self,
+    ) -> Result<(Vec<std::path::PathBuf>, Vec<std::path::PathBuf>)> {
+        let r = &self.inner.registration;
+        let files = std::iter::once(r.path.clone())
+            .chain(r.waives.clone())
+            .chain(r.rules.clone())
+            .collect();
+        // Protect both an existing ICE tree and the future build target. A
+        // read-only registration must not gain writes through another feature.
+        let mut trees = vec![r.path.clone()];
+        if self.inner.indexer.is_some() {
+            let mut target = r.path.as_os_str().to_owned();
+            target.push(".ice");
+            trees.push(target.into());
+        }
+        Ok((files, trees))
+    }
     pub(crate) fn current(&self, id: &str) -> Option<Arc<Service>> {
         let s = self.inner.state.lock().unwrap();
         s.current

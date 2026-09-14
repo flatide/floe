@@ -132,6 +132,9 @@ pub(super) struct ReviewSocket {
     seq: u64,
 }
 impl ReviewSocket {
+    pub(super) async fn closed(mut self) {
+        super::closed(&mut self.socket).await;
+    }
     pub(super) async fn new(h: &Harness, login: &Login) -> Self {
         let mut socket = h.connect(login).await;
         let hello = text(&mut socket).await;

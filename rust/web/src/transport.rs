@@ -135,6 +135,7 @@ pub struct Gateway {
     pub(crate) view: Option<Arc<Attachment>>,
     pub(crate) service: Option<Arc<crate::service::Service>>,
     pub(crate) drc: Option<Arc<crate::drc::Registry>>,
+    pub(crate) defaults: Option<Arc<crate::defaults::Service>>,
     startup: Option<serde_json::Value>,
     pub(crate) output_bytes: Arc<Semaphore>,
     pub(crate) encoders: Arc<Semaphore>,
@@ -161,6 +162,7 @@ impl Gateway {
                 view: None,
                 service: None,
                 drc: None,
+                defaults: None,
                 startup: None,
                 output_bytes: Arc::new(Semaphore::new(crate::view::OUTPUT_BUDGET)),
                 encoders: Arc::new(Semaphore::new(2)),
@@ -236,6 +238,9 @@ impl Gateway {
         Ok((gate, secret))
     }
     fn stop_services(&self) {
+        if let Some(defaults) = &self.defaults {
+            defaults.request_stop();
+        }
         if let Some(drc) = &self.drc {
             drc.request_stop();
         }
@@ -267,6 +272,7 @@ impl Gateway {
     ) -> Result<(), String> {
         let gate = Arc::get_mut(gate).ok_or("gateway already published")?;
         if gate.drc.is_some()
+            || gate.defaults.is_some()
             || !gate.service.as_ref().is_some_and(|s| {
                 s.catalog()["sources"]
                     .as_array()
@@ -276,6 +282,38 @@ impl Gateway {
             return Err("invalid DRC source registration".into());
         }
         gate.drc = Some(drc);
+        Ok(())
+    }
+    /// Explicit trusted-launcher opt-in, after all DRC/input registrations and
+    /// before publishing the gateway. Extra paths protect launcher-owned files
+    /// (notably the private session credential); they never grant write paths.
+    pub fn enable_design_defaults(
+        gate: &mut Gate,
+        files: &[std::path::PathBuf],
+        trees: &[std::path::PathBuf],
+    ) -> Result<(), String> {
+        let g = Arc::get_mut(gate).ok_or("gateway already published")?;
+        if g.defaults.is_some() {
+            return Err("design defaults already enabled".into());
+        }
+        let service = g
+            .service
+            .as_ref()
+            .ok_or("design defaults require registered sources")?;
+        let mut files = files.to_vec();
+        let mut trees = trees.to_vec();
+        if let Some(drc) = &g.drc {
+            let (df, dt) = drc.protected_paths().map_err(|e| e.to_string())?;
+            files.extend(df);
+            trees.extend(dt);
+        }
+        let publisher = floe_app_core::layer_defaults::Publisher::with_protected(
+            service.registered_sources(),
+            files,
+            trees,
+        )
+        .map_err(|e| e.to_string())?;
+        g.defaults = Some(crate::defaults::Service::start(publisher).map_err(|e| e.to_string())?);
         Ok(())
     }
     fn authenticate(&self, headers: &HeaderMap, csrf: &str) -> Result<SessionId, StatusCode> {
@@ -304,6 +342,7 @@ pub fn router(gate: Gate) -> Router {
         .merge(crate::owner::routes())
         .merge(crate::drc::routes())
         .merge(crate::exports::routes())
+        .merge(crate::defaults::routes())
         .merge(crate::assets::routes())
         .fallback(|| async { error(StatusCode::NOT_FOUND) })
         .layer(DefaultBodyLimit::max(BODY_BYTES))
@@ -452,7 +491,7 @@ async fn capabilities(State(gate): State<Gate>, headers: HeaderMap) -> Response 
     }
     let render = gate.service.is_some() || gate.view.is_some();
     Json(json!({"protocol":1,"bundle":BUNDLE,"stage":if gate.service.is_some(){"owner-service"}else if render{"view-stream"}else{"transport"},
-        "render":render,"catalog":gate.service.is_some(),"index":gate.service.is_some(),"drc":gate.drc.is_some(),"exports":gate.service.is_some(),"snapshot_png":gate.service.is_some(),"layer_settings":true,"shares":false,"uploads":false,"control_bytes":CONTROL_BYTES,
+        "render":render,"catalog":gate.service.is_some(),"index":gate.service.is_some(),"drc":gate.drc.is_some(),"exports":gate.service.is_some(),"snapshot_png":gate.service.is_some(),"layer_settings":true,"design_defaults":gate.defaults.is_some(),"shares":false,"uploads":false,"control_bytes":CONTROL_BYTES,
         "frame_bytes":crate::view::PACKET_BYTES,"frame_credit":1,"pending_frames":1}))
     .into_response()
 }
@@ -619,6 +658,7 @@ pub async fn serve(
         tokio::select! {
             _ = &mut shutdown => break Ok(()),
             _ = maintenance.tick()=>{
+                if let Some(defaults)=&gate.defaults {defaults.maintain();}
                 if gate.auth.lock().is_ok_and(|a|a.expired(Instant::now())) {gate.stop_services();}
                 if let Some(view)=gate.active_view() {
                     if view.activity.lock().unwrap().expired(Instant::now()) {view.controller.request_close();}
@@ -689,6 +729,20 @@ pub async fn serve(
         .is_err()
         {
             return Err(io::Error::other("DRC service shutdown deadline exceeded"));
+        }
+    }
+    if let Some(defaults) = &gate.defaults {
+        if timeout(Duration::from_secs(4), async {
+            while !defaults.is_finished() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_err()
+        {
+            return Err(io::Error::other(
+                "design-default shutdown deadline exceeded",
+            ));
         }
     }
     result

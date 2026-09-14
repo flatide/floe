@@ -72,10 +72,18 @@ cookie+CSRF·Origin 정책은 기존 owner 규칙이다. 등록된 view의 설�
 유지한다. 임의 경로·레이아웃 upload·source/default 쓰기 권한은 아니다(`uploads:false`).
 `view.set.body.style_deltas`는 `{pair,color?,fill?,width?}`의 필드별 수정이다.
 omitted는 유지, null은 오류이며 기존 완전한 `styles`와 한 요청에서 혼용하지 않는다.
-M4d-4a의 `layer_defaults::Publisher`는 trusted local Rust 코어다. 아직 HTTP capability,
-게시 endpoint·브라우저 승인 권한은 없으며 `layer_settings`가 공유 default 쓰기를 허용하지 않는다.
-후속 연결에서는 launcher opt-in·owner·view/revision·단회 승인과 게시 결과 receipt를 별도로
-바인딩해야 한다. 게시 후 디렉터리 sync 실패는 committed 경고이지 재시도 가능한 미게시가 아니다.
+M4d-4a의 `layer_defaults::Publisher`에 M4d-4b의 owner API를 연결했다.
+`FLOE_FILL_EDIT`가 비어 있지 않은 launcher만 `design_defaults:true`이며 기본은 false다.
+`layer_settings`는 공유 default 쓰기 권한이 아니다. 인증/CSRF 후
+`POST /api/v1/defaults/prepare {view_id,state_rev}`는 경로/내용 입력 없는 읽기 전용 준비,
+`POST /api/v1/defaults {seq,view_id,state_rev,token,approve:true}`는 별도 명시 승인이다.
+preview는 basename/mode/levels/title/rows/bytes/교체 여부·30초 토큰을 반환한다.
+`GET /api/v1/defaults[/{seq}]`, `POST /api/v1/defaults/{seq}/cancel`,
+`POST /api/v1/defaults/revoke {token}`로 유계 receipt 조회·취소·미승인 draft 폐기가 가능하다.
+seq는 owner open/index와 다른 namespace이며 같은 body 재전송은 한 번만 실행된다.
+게시 API의 상태·파일 보호·예산과 UI 후속 계약은 [M4 §19](WEBUI_M4.ko.md)를 따른다.
+게시 후 디렉터리 sync 실패는 committed 경고이지 재시도 가능한 미게시가 아니다.
+receipt는 서버 메모리 수명만 보장하며 프로세스 재시작 뒤 자동 재시도 근거가 아니다.
 2026-09-13 M1a-1 `rust/worker-client`와 M1a-2a/b `app/app-core`의 일반 index·info/단일 render/probe를
 구현했다. 현재 호출 계약은 [worker README](../rust/worker-client/README.md),
 [M1a 기록](WEBUI_M1A.ko.md)을 따르며 아래 서비스 전체가 존재하는 것은 아니다.

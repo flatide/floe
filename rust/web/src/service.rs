@@ -252,6 +252,30 @@ impl Service {
             .find(|s| s.id == id)
             .map(|s| Arc::clone(&s.source))
     }
+    pub(crate) fn registered_sources(&self) -> Vec<Arc<RegisteredSource>> {
+        self.inner
+            .sources
+            .iter()
+            .map(|s| Arc::clone(&s.source))
+            .collect()
+    }
+    /// Cheap admission checks only: never hold this lock across I/O or await.
+    pub(crate) fn with_current<T>(
+        &self,
+        id: &str,
+        f: impl FnOnce(&Arc<Attachment>) -> std::result::Result<T, &'static str>,
+    ) -> std::result::Result<T, &'static str> {
+        let s = self.inner.state.lock().unwrap();
+        if s.closed || s.ledger.active().is_some() {
+            return Err("view_unavailable");
+        }
+        let v = s
+            .view
+            .as_ref()
+            .filter(|v| v.id == id)
+            .ok_or("view_unavailable")?;
+        f(v)
+    }
     pub fn levels(&self, id: &str, start: usize) -> Option<Value> {
         let source = &self.inner.sources.iter().find(|s| s.id == id)?.source;
         if start > source.levels.len() {

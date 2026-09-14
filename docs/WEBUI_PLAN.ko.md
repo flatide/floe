@@ -54,7 +54,8 @@ M4d-1에서 이미 표시한 픽셀의 PNG 복사/저장과 overlay 3상태 전�
 M4d-2에서 layerprops Rust codec과 GTK에 맞춘 첫 view의 레이어 가시성을 연결했다.
 M4d-3에서 열린 세션 설정 Load/Save·bitmap/상속을 보존하는 native JSON과 원자적 적용을 연결했다.
 M4d-4a에서 공유 설계 기본값의 읽기 전용 준비·충돌 검사·권한 보존·원자 게시 Rust 코어를 추가했다.
-아직 launcher opt-in·owner 승인 API/UI에는 연결하지 않았고 일반 Save는 계속 다운로드뿐이다.
+M4d-4b에서 launcher opt-in·owner 준비/명시 승인/취소/결과 API를 연결했다.
+게시 버튼·불명확한 요청 확인 UI는 후속이며 일반 Save는 계속 다운로드뿐이다.
 나머지 내보내기와 브라우저 다운로드/현장 수용은 남아 있다([M4 기록](WEBUI_M4.ko.md)).
 전체 조작 parity와 M0/Firefox/ETX 현장 검증은 아직 완료되지 않았다.
 상세 범위는 [M1b 기록](WEBUI_M1B.ko.md)과 [M2 기록](WEBUI_M2.ko.md). 여기의 M0~M5는 **웹 전환 단계**이며

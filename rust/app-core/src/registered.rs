@@ -184,7 +184,9 @@ impl RegisteredSource {
             lock.push(".index.lock");
             files.push(lock.into());
         }
-        crate::artifact::protected_output(path, &files, &trees)
+        let out = crate::artifact::protected_output(path, &files, &trees)?;
+        crate::layer_defaults::reject_aliases(path, &files)?;
+        Ok(out)
     }
     pub fn validate_levels(&self, selected: Option<&BTreeSet<i64>>) -> Result<()> {
         if let Some(ids) = selected {

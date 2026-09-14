@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 mod assets;
 pub mod auth;
+mod defaults;
 pub mod drc;
 mod exports;
 mod idle_io;
