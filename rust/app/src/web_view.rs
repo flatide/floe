@@ -50,6 +50,7 @@ const HELP: &str = "Usage: floe2-web view SOURCE [SOURCE ...] [OPTIONS]
   --drc RESULTS.db|PACK.ice Register DRC on first source; pack build needs owner approval
   --drc-waives FILE        Explicit existing waive sidecar (requires --drc)
   --drc-rules FILE         Explicit existing SVRF rules.json (requires --drc)
+  --drc-reviewer TAG       Enable owner note publication for this fixed tag (requires --drc)
   --port N                 Loopback port (default random)
   --no-open                Do not launch a browser; use the private session file
   --firefox PATH           Explicit Firefox binary (or FLOE_FIREFOX_BIN)
@@ -87,6 +88,7 @@ pub struct Command {
     drc: Option<PathBuf>,
     drc_waives: Option<PathBuf>,
     drc_rules: Option<PathBuf>,
+    drc_reviewer: Option<String>,
 }
 pub fn parse(args: &[String]) -> Result<Command> {
     let mut c = Command {
@@ -108,6 +110,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
         drc: None,
         drc_waives: None,
         drc_rules: None,
+        drc_reviewer: None,
     };
     let mut i = 1;
     let mut positional = false;
@@ -237,11 +240,19 @@ pub fn parse(args: &[String]) -> Result<Command> {
             "--drc" => c.drc = Some(PathBuf::from(value()?)),
             "--drc-waives" => c.drc_waives = Some(PathBuf::from(value()?)),
             "--drc-rules" => c.drc_rules = Some(PathBuf::from(value()?)),
+            "--drc-reviewer" => c.drc_reviewer = Some(value()?.to_owned()),
             _ => return Err(Error::input(format!("unsupported view option: {key}"))),
         }
     }
-    if (c.drc_waives.is_some() || c.drc_rules.is_some()) && c.drc.is_none() {
-        return Err(Error::input("--drc-waives / --drc-rules require --drc"));
+    if (c.drc_waives.is_some() || c.drc_rules.is_some() || c.drc_reviewer.is_some())
+        && c.drc.is_none()
+    {
+        return Err(Error::input(
+            "--drc-waives / --drc-rules / --drc-reviewer require --drc",
+        ));
+    }
+    if let Some(tag) = &c.drc_reviewer {
+        floe_app_core::drc::waive_paths(c.drc.as_ref().unwrap(), tag)?;
     }
     if c.sources.is_empty() || c.sources.len() > 32 {
         return Err(Error::input("view requires 1..32 registered sources"));
@@ -411,6 +422,15 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
         c.session_file,
         &json!({"url":url,"origin":gate.origin(),"bundle":BUNDLE,"pid":std::process::id()}),
     )?;
+    if let Some(tag) = &c.drc_reviewer {
+        Gateway::enable_drc_notes(
+            &mut gate,
+            tag,
+            std::slice::from_ref(&session.path),
+            std::slice::from_ref(&session.directory),
+        )
+        .map_err(Error::input)?;
+    }
     if std::env::var_os("FLOE_FILL_EDIT").is_some_and(|v| !v.is_empty()) {
         Gateway::enable_design_defaults(
             &mut gate,
@@ -491,6 +511,8 @@ mod tests {
             "view a --label-font-px 5",
             "view a --drc-waives review",
             "view a --drc-rules rules.json",
+            "view a --drc-reviewer test",
+            "view a --drc b --drc-reviewer ../escape",
         ] {
             assert!(parse(&args(s)).is_err(), "{s}");
         }
@@ -502,6 +524,14 @@ mod tests {
         .is_some());
         assert!(parse(&args("view --help")).unwrap().help);
         let c = parse(&args("view a --drc b.ice --drc-waives side")).unwrap();
+        assert!(c.drc_reviewer.is_none());
+        assert_eq!(
+            parse(&args("view a --drc b.ice --drc-reviewer fixed-owner"))
+                .unwrap()
+                .drc_reviewer
+                .as_deref(),
+            Some("fixed-owner")
+        );
         assert_eq!(c.drc, Some(PathBuf::from("b.ice")));
         assert_eq!(c.drc_waives, Some(PathBuf::from("side")));
     }

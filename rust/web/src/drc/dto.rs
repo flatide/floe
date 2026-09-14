@@ -116,6 +116,10 @@ pub(super) enum Command {
     ValidatePanel(Box<super::panel::Data>),
     // Internal only: wire requests cannot forge filesystem pack identities.
     ValidateReview(floe_app_core::drc::review::Identity),
+    ReviewTargets {
+        identity: floe_app_core::drc::review::Identity,
+        refs: Vec<(usize, u64)>,
+    },
     SelectionCandidates {
         check: Option<usize>,
         errors: Vec<u64>,

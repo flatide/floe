@@ -138,6 +138,9 @@ M4e-2b는 준비부터 게시 완료까지 admission/read lease를 유지하고 
 제공한다([M4 §23](WEBUI_M4.ko.md)). owner의 쓰기 API/UI는 아직 연결하지 않았다.
 M4e-2c는 기존 reader와 store의 opaque pack identity 일치 검사와 bounded 선택 waive
 조회다([M4 §24](WEBUI_M4.ko.md)). 같은 내용의 다른 pack도 구별하며 쓰기 API/UI는 후속이다.
+M4e-3a는 `view --drc-reviewer TAG`의 명시 opt-in과 owner 주석 read/prepare/승인 게시·
+receipt/취소 API다([M4 §25](WEBUI_M4.ko.md)). 기본 비활성이고 reviewer/path는 wire로
+고르지 않는다. 주석 UI·자동 저장·waive 쓰기·import/export·현장 수용은 남아 있다.
 
 ### 2.7 svrf — M4 (6개 옵션)
 

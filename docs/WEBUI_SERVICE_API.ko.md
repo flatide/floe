@@ -8,7 +8,8 @@
 아래 전체 URI가 그대로 구현된 것은 아니며 공유 API는 아직 없다.
 M2a의 현재 DRC 등록/읽기 URI·페이지·취소·focus/in_view·패널 상태·필터·순회·마커·
 CD·선택 집합·SVRF metadata/비교·타입 패널·격리/원자적 focus·ASCII API 계약은 [M2 기록](WEBUI_M2.ko.md) §2~21이
-기준이다. read-only actor만 있고 review 저장/공유 endpoint는 아직 없다.
+기준이다. geometry reader는 read-only이며, 명시 opt-in한 owner의 주석 저장 endpoint는
+M4e-3a에 추가했다. waive 쓰기와 공유 endpoint는 아직 없다.
 M4e-1의 `app-core::drc::review`는 waive/FE codec과 메모리 note 그룹만 제공한다.
 레거시 fingerprint는 인증/유일 run identity가 아니며, 향후 writer의 pack identity·
 review revision 검증을 대체하지 않는다([M4 §21](WEBUI_M4.ko.md)).
@@ -22,6 +23,9 @@ M4e-2c는 store의 opaque pack identity를 기존 DRC 읽기 actor와 대조하�
 선택 waive 상태 조회를 제공한다([M4 §24](WEBUI_M4.ko.md)). HTTP로 filesystem identity를
 받지 않으며, owner는 승인 시 registry id/revision도 확인해야 한다. 선택 상태 메모리는
 최대5000개지만 expected sidecar digest 검증의 O(파일 크기) I/O는 남아 있다.
+M4e-3a의 실제 주석 URI·snapshot/승인 token·owner receipt·rebuild와 자원 수명·출력 보호는
+[M4 §25](WEBUI_M4.ko.md)를 따른다. `--drc-reviewer`는 trusted launcher 설정이며 단일
+owner bootstrap에 결합한다. 공유 계정의 실사용자 인증/RBAC를 구현한 것으로 보지 않는다.
 M1b-2a의 `app-core/managed`·`view`에는 process-local lease/admission과
 독립 worker controller를 구현했다. M1b-2b의 사전 등록 view용 제어/이미지
 스트림은 [M1b 기록 §6](WEBUI_M1B.ko.md#6-m1b-2b--인증된-제어이미지-스트림)을 따른다.

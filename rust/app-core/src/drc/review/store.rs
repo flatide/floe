@@ -7,7 +7,7 @@ use crate::{
     artifact, check_cancelled,
     drc::{waive_paths, Pack},
     layer_defaults::{identity, leaf, reject_aliases, security::Security, Directory, Stage, Stamp},
-    registered::AccessScope,
+    registered::{AccessScope, RegisteredSource},
     Error, ErrorKind, Result,
 };
 use sha1::{Digest, Sha1};
@@ -44,6 +44,28 @@ pub enum Kind {
     Waives,
     Notes,
 }
+/// Fixed adjacent names, without opening a pack or discovering a reviewer.
+/// Used by a trusted gateway to protect future targets before enabling writes.
+pub fn paths(pack: &Path, reviewer: &str, kind: Kind) -> Result<[PathBuf; 2]> {
+    let waiver = waive_paths(pack, reviewer)?[0].clone();
+    let target = match kind {
+        Kind::Waives => waiver,
+        Kind::Notes => {
+            let pack = crate::cache::absolute(pack)?;
+            let name = pack
+                .file_name()
+                .and_then(|s| s.to_str())
+                .ok_or_else(|| Error::input("review name must be UTF-8"))?;
+            pack.parent().unwrap().join(format!(
+                ".{}.notes.{reviewer}.fe",
+                name.strip_suffix(".ice").unwrap_or(name)
+            ))
+        }
+    };
+    let mut lock = target.as_os_str().to_owned();
+    lock.push(".lock");
+    Ok([target, lock.into()])
+}
 /// A local capability for exactly one pack/reviewer/kind. Reviewer is a trusted
 /// caller-selected tag, not authentication. A future server must authorize it
 /// before constructing this object; request text cannot choose an output path.
@@ -60,6 +82,7 @@ pub struct Store {
     lock_name: CString,
     protected_files: Vec<PathBuf>,
     protected_trees: Vec<PathBuf>,
+    sources: Vec<Arc<RegisteredSource>>,
 }
 impl Store {
     /// Read-only registration. All other registered inputs/cache/private paths
@@ -73,29 +96,37 @@ impl Store {
         protected_trees: Vec<PathBuf>,
         stop: &AtomicUsize,
     ) -> Result<Arc<Self>> {
+        Self::open_guarded(
+            scope,
+            pack_path,
+            reviewer,
+            kind,
+            protected_files,
+            protected_trees,
+            vec![],
+            stop,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_guarded(
+        scope: Arc<AccessScope>,
+        pack_path: &Path,
+        reviewer: &str,
+        kind: Kind,
+        protected_files: Vec<PathBuf>,
+        protected_trees: Vec<PathBuf>,
+        sources: Vec<Arc<RegisteredSource>>,
+        stop: &AtomicUsize,
+    ) -> Result<Arc<Self>> {
         check_cancelled(stop)?;
-        if protected_files.len() > 128 || protected_trees.len() > 128 {
+        if protected_files.len() > 128 || protected_trees.len() > 128 || sources.len() > 32 {
             return Err(Error::input("too many protected review paths"));
         }
         let pack_path = scope.check(pack_path)?;
         let pack = Pack::open(&pack_path, stop)?;
         let layout = Layout::from_pack(&pack)?;
         let binding = pack.review_binding()?;
-        // Reuse legacy tag validation without reading either fallback file.
-        let waiver = waive_paths(&pack_path, reviewer)?[0].clone();
-        let target = match kind {
-            Kind::Waives => waiver,
-            Kind::Notes => {
-                let name = pack_path
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .ok_or_else(|| Error::input("review name must be UTF-8"))?;
-                pack_path.parent().unwrap().join(format!(
-                    ".{}.notes.{reviewer}.fe",
-                    name.strip_suffix(".ice").unwrap_or(name)
-                ))
-            }
-        };
+        let [target, _] = paths(&pack_path, reviewer, kind)?;
         scope.check(&target)?;
         let directory = Directory::open(target.parent().unwrap())?;
         let name = leaf(target.file_name().unwrap())?;
@@ -118,6 +149,7 @@ impl Store {
             lock_name,
             protected_files: files,
             protected_trees,
+            sources,
         });
         store.validate(stop)?;
         store.protect(&store.lock_path())?;
@@ -140,7 +172,11 @@ impl Store {
     fn protect(&self, path: &Path) -> Result<()> {
         self.scope.check(path)?;
         artifact::protected_output(path, &self.protected_files, &self.protected_trees)?;
-        reject_aliases(path, &self.protected_files)
+        reject_aliases(path, &self.protected_files)?;
+        for source in &self.sources {
+            source.protect_output(path)?;
+        }
+        Ok(())
     }
     fn validate(&self, stop: &AtomicUsize) -> Result<()> {
         check_cancelled(stop)?;

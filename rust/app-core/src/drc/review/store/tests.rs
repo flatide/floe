@@ -88,6 +88,25 @@ fn reader_and_review_bind_the_same_open_pack_not_equal_legacy_headers() {
     let identity = store.identity();
     let reader = Database::packed(Pack::open(&f.pack, &f.stop).unwrap());
     reader.validate_review_identity(&identity).unwrap();
+    assert_eq!(
+        reader
+            .review_targets(&identity, &[(1, 0), (1, 64), (1, 0)], &f.stop)
+            .unwrap(),
+        [0, 64, 0]
+    );
+    for refs in [
+        vec![],
+        vec![(0, 0)],
+        vec![(1, 65)],
+        vec![(3, 0)],
+        vec![(1, 0); 5001],
+    ] {
+        assert!(reader.review_targets(&identity, &refs, &f.stop).is_err());
+    }
+    assert_eq!(
+        kind(reader.review_targets(&identity, &[(1, 0)], &AtomicUsize::new(1))),
+        ErrorKind::Cancelled
+    );
     let ascii_path = f.dir.join("unpacked.db");
     fs::write(
         &ascii_path,
@@ -226,6 +245,66 @@ fn registration_snapshot_and_preparation_do_not_write() {
     s.prepare_waives(&[(0, 1)], &f.stop).unwrap();
     f.note(&n, "한글\n메모");
     assert_eq!(fs::read_dir(&f.dir).unwrap().count(), 1);
+    f.clean();
+}
+
+#[test]
+fn guarded_review_cannot_replace_a_registered_source_or_its_cache() {
+    let f = Fixture::new();
+    let [target, lock] = paths(&f.pack, "protected", Kind::Notes).unwrap();
+    fs::write(&target, b"protected registered input").unwrap();
+    let deck = f.dir.join("owner.jb");
+    fs::write(
+        &deck,
+        format!(
+            "CHIP A\n$ (1,PATTERN,TC='{}',AD=0.001,LY={{1}},DT={{0}},UX=1,UY=1)\nROWS 0/0\n",
+            target.file_name().unwrap().to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    let source = RegisteredSource::register(Arc::clone(&f.scope), &deck, &f.stop).unwrap();
+    let open = |sources| {
+        Store::open_guarded(
+            Arc::clone(&f.scope),
+            &f.pack,
+            "protected",
+            Kind::Notes,
+            vec![],
+            vec![],
+            sources,
+            &f.stop,
+        )
+    };
+    assert!(open(vec![source]).is_err());
+    assert_eq!(fs::read(&target).unwrap(), b"protected registered input");
+    assert!(!lock.exists());
+    // Parent of the pack is a registered layout's cache. Neither a review
+    // target nor its lock may be introduced inside that protected tree.
+    let layout = f.root.join("owner.oas");
+    fs::write(&layout, b"synthetic registration").unwrap();
+    let cache = crate::cache::cache_path(&layout).unwrap();
+    fs::create_dir(&cache).unwrap();
+    let packed = cache.join("nested.ice");
+    fs::write(&packed, &f.bytes).unwrap();
+    let owner = f.root.join("cache-owner.jb");
+    fs::write(
+        &owner,
+        "CHIP A\n$ (1,PATTERN,TC='owner.oas',AD=0.001,LY={1},DT={0},UX=1,UY=1)\nROWS 0/0\n",
+    )
+    .unwrap();
+    let source = RegisteredSource::register(Arc::clone(&f.scope), &owner, &f.stop).unwrap();
+    assert!(Store::open_guarded(
+        Arc::clone(&f.scope),
+        &packed,
+        "protected",
+        Kind::Notes,
+        vec![],
+        vec![],
+        vec![source],
+        &f.stop
+    )
+    .is_err());
+    assert_eq!(fs::read_dir(cache).unwrap().count(), 1);
     f.clean();
 }
 #[test]

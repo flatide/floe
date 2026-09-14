@@ -20,6 +20,7 @@ pub(crate) fn routes() -> Router<Gate> {
         )
         .merge(super::selection::routes())
         .merge(super::registry::routes())
+        .merge(super::review::routes())
 }
 pub(super) fn failure(code: super::Failure) -> Response {
     let status = match code {
@@ -29,13 +30,15 @@ pub(super) fn failure(code: super::Failure) -> Response {
         "drc_changed_or_corrupt" | "drc_read_error" => StatusCode::UNPROCESSABLE_ENTITY,
         "drc_read_limit" | "drc_selection_limit" => StatusCode::PAYLOAD_TOO_LARGE,
         "drc_context_changed"
+        | "review_changed"
         | "drc_panel_conflict"
         | "drc_selection_conflict"
         | "prepared_edit_expired" => StatusCode::CONFLICT,
         "operation_conflict" | "operation_sequence" => StatusCode::CONFLICT,
-        "operation_expired" => StatusCode::GONE,
+        "operation_expired" | "review_expired" => StatusCode::GONE,
         "busy" => StatusCode::TOO_MANY_REQUESTS,
-        "drc_build_unavailable" => StatusCode::FORBIDDEN,
+        "drc_build_unavailable" | "review_disabled" => StatusCode::FORBIDDEN,
+        "review_io_error" | "review_unavailable" => StatusCode::UNPROCESSABLE_ENTITY,
         "prepared_edit_unavailable" | "prepared_edit_limit" => StatusCode::SERVICE_UNAVAILABLE,
         "drc_cancelled" => StatusCode::REQUEST_TIMEOUT,
         _ => StatusCode::BAD_REQUEST,

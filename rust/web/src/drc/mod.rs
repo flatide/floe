@@ -7,6 +7,7 @@ mod metadata;
 pub(crate) mod panel;
 mod read;
 mod registry;
+pub(crate) mod review;
 mod selection;
 pub use dto::Request;
 use floe_app_core::{

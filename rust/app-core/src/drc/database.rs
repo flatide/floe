@@ -76,6 +76,40 @@ impl ReadViolation {
     }
 }
 impl Database {
+    /// Convert canonical check/local references only after binding this reader
+    /// to the review store. Displayed global numbers are one-based, store gids
+    /// zero-based: never use the UI's displayed number as a write index.
+    pub fn review_targets(
+        &self,
+        identity: &super::review::Identity,
+        refs: &[(usize, u64)],
+        stop: &AtomicUsize,
+    ) -> Result<Vec<u64>> {
+        check_cancelled(stop)?;
+        if refs.is_empty() || refs.len() > super::review::EDIT_ITEMS {
+            return Err(Error::input("review requires 1..5000 error references"));
+        }
+        self.validate_review_identity(identity)?;
+        let Backend::Pack(p) = &self.backend else {
+            unreachable!()
+        };
+        let mut ids = Vec::with_capacity(refs.len());
+        for &(ci, local) in refs {
+            check_cancelled(stop)?;
+            let c = p
+                .checks
+                .get(ci)
+                .filter(|c| local < c.count)
+                .ok_or_else(|| Error::input("review error reference out of range"))?;
+            ids.push(
+                c.start
+                    .checked_add(local)
+                    .ok_or_else(|| Error::input("review gid overflow"))?,
+            );
+        }
+        p.unchanged_at()?;
+        Ok(ids)
+    }
     /// Bind a prepared review to THIS already-open reader, not merely another
     /// pack with matching legacy headers. Call on the read actor, off-reactor.
     /// Path replacement/touch is conservatively rejected until reopen.

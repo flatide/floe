@@ -9,9 +9,10 @@ overlay 전환**, §16의 **Rust layerprops 포맷·초기 가시성**, §17의
 **열린 세션 설정 Load/Save·필드별 스타일 적용**, §18/19의
 **공유 설계 기본값 게시 코어·owner 승인 API**, §20의 **게시 preview·승인·결과 UI**까지 연결했다.
 §21은 DRC waive·주석 이관의 포맷/메모리 모델 단계이며 저장 API/UI 연결은 아니다.
-§22에서 명시적 로컬 review 저장과 pack binding을 추가했다. 서버 actor는 아직 읽기 전용이다.
+§22에서 명시적 로컬 review 저장과 pack binding을 추가했다. §25에서 고정 reviewer를
+명시한 owner의 주석 read/prepare/승인 게시 API를 연결했다. geometry reader는 읽기 전용이다.
 각 절의 미연결 표기는 해당 선행 단계 당시의 범위다.
-나머지 내보내기·주석 저장과 전체 조작/실제 브라우저 수용은 남아 있다.
+나머지 내보내기·주석 UI·waive 쓰기와 전체 조작/실제 브라우저 수용은 남아 있다.
 
 ## 1. M4a-1: 표시 scene에 고정한 native pick/snap
 
@@ -2164,3 +2165,95 @@ KLayout13 PX+2 phase-exact+14 style(jobs1/8)를 포함한다. 검증용 임시 v
 다음은 고정 reviewer를 owner 인증에 결합한 편집·승인/receipt API와 UI다. 이 단계에는
 새 HTTP 쓰기 endpoint·자동 저장·reviewer CLI 옵션을 추가하지 않았다. 기존 launcher와
 renderd0.12.87은 그대로이며, TeeBox/Firefox·NFS 수용 및 M4 전체 완료는 아니다.
+
+## 25. M4e-3a — owner 주석 편집·승인 API
+
+`floe2-web view layout.oas --drc results.db.ice --drc-reviewer alice --no-open`으로
+등록된 pack의 **주석** 편집 API를 명시적으로 켤 수 있다. 기본은 꺼져 있다.
+reviewer는 trusted launcher의 고정 설정이며 owner bootstrap 세션에 연결한다.
+환경의 `FLOE_REVIEWER`나 브라우저의 reviewer/path/gid 필드는 채택하지 않는다.
+공유 TeeBox 계정에서 실제 사람을 식별하는 인증/RBAC 구현은 아니며, trusted launcher
+자체를 조작할 수 있는 운영자로부터 다른 tag를 격리한다는 뜻도 아니다. guest 권한은 없다.
+`--drc-waives`는 계속 명시된 기존 waive의 읽기 등록이며, 이 옵션이 waive 쓰기를 켜지는 않는다.
+ASCII 등록은 owner pack-build 후 주석을 읽을 수 있다. 옆 `.ice`를 몰래 선택하지 않는다.
+
+### 요청과 승인
+
+공통 prefix는 `/api/v1/drc/review/notes`다. 모든 요청은 기존 cookie+CSRF·Host/Origin
+검사를 받는다. `context`는 현재 `drc_id`, `revision`, `view_id` 세 문자열이다.
+
+| 메서드 / suffix | 동작 |
+|---|---|
+| GET (prefix 자체) | 고정 reviewer·진행 상태·process-local `review_rev`·receipt 목록 |
+| POST `/read` | `context`, `errors:[{check,error}]`로 snapshot 준비. 파일 무쓰기 |
+| POST `/prepare` | `context`, snapshot `token`, `text`로 수정 준비. 파일 무쓰기 |
+| POST (prefix 자체) | `seq`, `context`, prepared `token`, `approve:true`, `confirm_legacy`로 게시 승인 |
+| GET `/{seq}` | 응답 유실/재접속 후 같은 작업 결과 조회 |
+| POST `/{seq}/cancel` | 승인된 작업의 best-effort 취소. 이미 게시한 파일의 undo는 아님 |
+| POST `/revoke` | `token`으로 미승인 snapshot/draft 폐기 |
+
+- check/local은 기존 읽기 API와 같은 **0-based** 정규 십진 문자열이다. 화면의 global
+  번호는1부터 시작하므로 저장 gid로 쓰지 않는다. read actor가 store의 opaque pack
+  identity를 확인한 뒤 check/local을0-based gid로 변환한다. 최대5000개이며 중복은 합친다.
+- snapshot은 현재 파일의 expected revision을 소유하고120초 유효하다. 같은 owner에서
+  새 read를 하면 이전 미승인 상태는 폐기한다. 선택 멤버의 공통 주석 또는 mixed 표시,
+  기존 주석 개수·파일 존재·legacy 미확인·파싱 report를 반환한다. 모든 note 그룹을
+  JSON으로 복제하지 않는다. 브라우저는 snapshot 조회를 배경 polling으로 반복하면 안 된다.
+- prepare는 snapshot을 한 번 소비하고30초짜리 새 token을 발급한다. selection은 read에서
+  고정되며 prepare/submit으로 다른 errors를 끼워 넣지 못한다. 실제 저장될 trim 결과,
+  clear 여부, 대상 이름, 기존 파일 교체 여부와 파싱 report를 돌려준다. 빈/공백 주석은
+  선택 멤버만 지우며 전체가 비어도 fingerprinted FE tombstone을 남긴다.
+- 승인 시 registry의 현재 reader와 등록된 view를 확인한다. 그 뒤의 이동은 이미 승인한
+  선택·텍스트를 바꾸지 않는다. 같은 seq+승인 본문은 기존 receipt를 돌려주며 새 게시를
+  만들지 않는다. 다른 본문은 conflict, history32개에서 밀린 과거 seq는 expired다.
+  process 재시작까지 지속되는 durable 작업 DB는 아니다. 미확인 legacy는 별도
+  `confirm_legacy:true`가 필요하고, 다른 pack에 기록된 binding은 이 flag로 우회하지 못한다.
+
+### 수명·출력 보호
+
+주석 owner 작업은 bounded native thread에서 실행하며 HTTP 구독자 수명과 분리된다.
+read/prepare의 취소는 작업 flag로 전달하고 native 작업이 끝날 때까지 admission/lease와
+body slot을 보존한다. 게시가 실제로 끝난 경우 늦은 취소로 cancelled로 바꾸지 않는다.
+directory sync 실패는 `published:true`인 내구성 경고다. worker panic 등의 결과 불명은
+`outcome_unknown:true, published:null`로 표시하고 자동 재시도/롤백을 주장하지 않는다.
+
+read/prepare는 최대1MiB body를 허용하며 settings import와 공통 large-body slot 하나를
+공유한다. 주석 한 개는 trim 후64KiB, 응답은 공통 주석 한 개라 JSON escaping 후에도
+1MiB 안이다. 일반 요청은 기존16KiB다. native 등록은 CPU1·256MiB와 pack/DRC source/rules
+read lease를 추가로 예약한다. hard RSS/I/O deadline은 아니며 큰 sidecar의 전후 digest와
+전체 FE 재작성 비용은 남는다. 이 단계는 per-click autosave 성능 검증이 아니다.
+
+저장 코어의 `open_guarded`는 등록된 layout/jobdeck과 그 의존 파일·캐시·index lock도
+출력 제외 대상으로 검사한다. DRC/rules/명시 waive/세션 credential 및 private directory는
+별도 보호한다. notes 등록은 design-default writer보다 먼저 하므로 그 writer도 미래의
+review target/lock을 보호한다. native target은 고정된 adjacent name뿐이며 temp fallback,
+pack pwrite, 기존 파일 삭제, 임의 경로 다운로드/게시를 추가하지 않는다.
+
+pack-build는 진행 중인 read/prepare/게시가 있으면 Busy다. 올바른 build 승인 시 미승인
+preview만 폐기하고 그 lease를 놓은 뒤 기존 rebuild 경로로 간다. accepted note receipt는
+새 DRC id가 등록돼도 보존한다. force rebuild로 같은 bytes를 만들었더라도 pack identity가
+달라지므로 이전 sidecar는 자동 승계하지 않는다. 명시 import 연결은 다음 단계다.
+
+### 검증과 남은 작업
+
+`tools/validate_web_drc_notes.py`를 필수 배터리에 배선했다. private synthetic pack·valmini와
+PATH-empty native runtime으로 기본 비활성/인증, forged reviewer/path/gid, check/local 범위,
+미승인 무쓰기, 실제 주석 게시/Python gid 대조, 중복 승인·변경 본문 거부·늦은 취소,
+외부 수정/lock 충돌,64KiB 주석과 금지 문자, clear/tombstone, legacy 별도 승인,
+credential 모양 target 보호, 외부 pack 교체와 rebuild 뒤 receipt/old binding을 검증한다.
+core의 추가 보호 gate는 등록 jobdeck 의존 파일과 그 캐시를 검사한다. owner unit은
+준비 수명·body slot·build 배제·취소 flag/late commit·owner-bound receipt·wire와
+미확정 게시/null 및 directory-sync 경고를 검사한다.
+
+최종 `sh tools/validate_rust.sh`는 exit0·`RUST VALIDATION: ALL OK`다. workspace unit
+(app11/core196/web49), 새 owner HTTP 게시 gate, 기존28회 native 게시/Python oracle,
+jobdeck80·renderer46, KLayout13 PX+2 phase-exact+14 style(jobs1/8)을 포함한다.
+Rust1.89 core196/web49와 Linux x86-64 musl release static-pie 교차 빌드도 통과했다.
+변경한 app/core/web의 fmt check와 strict all-target clippy도 통과했다. 기존 의존성
+warning은 남아 있다. 검증용 임시 venv 링크만 제거하고 기존 venv 및 승인된 합성
+shared-default 게시 결과물은 보존했다.
+이는 Linux 실제 실행이나 실제 브라우저의 주석 게시 클릭을 검증한 것은 아니다.
+
+브라우저 편집 패널·자동 저장, waive 쓰기와 reader 상태 갱신, 명시 import/export는 아직
+남아 있다. 실제 브라우저의 주석 게시 클릭 수용도 미실시다. 기존 GTK launcher와
+renderd0.12.87은 유지하며, M4 전체·현장 Firefox/NFS 수용 완료를 뜻하지 않는다.

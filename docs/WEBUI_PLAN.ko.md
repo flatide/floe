@@ -539,3 +539,5 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
   연결했다([M4 §23](WEBUI_M4.ko.md)). owner/API/UI 및 autosave 실측은 후속이다.
   M4e-2c는 기존 읽기 actor와 store의 pack identity 대조·선택 waive 상태 읽기다
   ([M4 §24](WEBUI_M4.ko.md)). HTTP 쓰기 endpoint와 편집 UI를 추가한 것은 아니다.
+  M4e-3a에서 명시 reviewer opt-in의 owner 주석 승인/게시 API를 연결했다
+  ([M4 §25](WEBUI_M4.ko.md)). 주석 UI·autosave·waive 쓰기·import/export는 다음 단계다.

@@ -5,7 +5,7 @@ use super::{store, ImportReport, Notes, WaiveStats};
 use crate::{
     check_cancelled,
     managed::{Permit, Resources},
-    registered::AccessScope,
+    registered::{AccessScope, RegisteredSource},
     Error, ErrorKind, Result,
 };
 use std::{
@@ -49,20 +49,30 @@ impl ManagedStore {
         r: Registration,
         stop: &AtomicUsize,
     ) -> Result<Arc<Self>> {
+        Self::open_guarded(resources, r, vec![], stop)
+    }
+    /// Sources only restrict outputs; they grant no additional output authority.
+    pub fn open_guarded(
+        resources: &Arc<Resources>,
+        r: Registration,
+        sources: Vec<Arc<RegisteredSource>>,
+        stop: &AtomicUsize,
+    ) -> Result<Arc<Self>> {
         check_cancelled(stop)?;
-        if r.protected_files.len() > 128 || r.protected_trees.len() > 128 {
+        if r.protected_files.len() > 128 || r.protected_trees.len() > 128 || sources.len() > 32 {
             return Err(Error::input("too many protected review paths"));
         }
         let pack = r.scope.check(&r.pack)?;
         let permit = resources
             .drc(std::iter::once(pack.clone()).chain(r.protected_files.iter().cloned()))?;
-        let store = store::Store::open(
+        let store = store::Store::open_guarded(
             r.scope,
             &pack,
             &r.reviewer,
             r.kind,
             r.protected_files,
             r.protected_trees,
+            sources,
             stop,
         )?;
         check_cancelled(stop)?;

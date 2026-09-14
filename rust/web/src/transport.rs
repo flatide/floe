@@ -316,6 +316,30 @@ impl Gateway {
         g.defaults = Some(crate::defaults::Service::start(publisher).map_err(|e| e.to_string())?);
         Ok(())
     }
+    /// Trusted launcher chooses the owner tag. No browser-supplied reviewer or
+    /// output path; enable before defaults so those writers protect these names.
+    pub fn enable_drc_notes(
+        gate: &mut Gate,
+        reviewer: &str,
+        files: &[std::path::PathBuf],
+        trees: &[std::path::PathBuf],
+    ) -> Result<(), String> {
+        let g = Arc::get_mut(gate).ok_or("gateway already published")?;
+        if g.defaults.is_some() {
+            return Err("register notes before design defaults".into());
+        }
+        let drc = g
+            .drc
+            .as_ref()
+            .ok_or("note review requires registered DRC")?;
+        let sources = g
+            .service
+            .as_ref()
+            .ok_or("note review requires registered sources")?
+            .registered_sources();
+        drc.enable_notes(reviewer, sources, files, trees)
+            .map_err(|e| e.to_string())
+    }
     fn authenticate(&self, headers: &HeaderMap, csrf: &str) -> Result<SessionId, StatusCode> {
         let cookie = origin::cookie(headers, &self.cookie_name).ok_or(StatusCode::UNAUTHORIZED)?;
         self.auth
@@ -365,12 +389,15 @@ async fn guard(State(gate): State<Gate>, request: Request, next: Next) -> Respon
         // Bound even bodies an endpoint would ignore. Without the old
         // connection-wide timeout, trickling an unused GET/denied POST body
         // must not hold an HTTP slot indefinitely. Ordinary bodies are 16KiB;
-        // the authenticated settings route admits one 4MiB body/preparation.
+        // authenticated settings (4MiB) and note previews (1MiB) share one
+        // large-body/preparation slot; note native work retains it on disconnect.
         // Response bodies (downloads) remain under the idle deadline.
         let gate = Arc::clone(&gate);
         timeout(IO_TIMEOUT, async move {
             let settings_body = crate::settings::is_import(request.method(), request.uri().path());
-            let permit = if settings_body {
+            let review_body =
+                crate::drc::review::is_large_body(request.method(), request.uri().path());
+            let permit = if settings_body || review_body {
                 if http_session(&gate, request.headers()).is_err() {
                     return error(StatusCode::UNAUTHORIZED);
                 }
@@ -383,6 +410,8 @@ async fn guard(State(gate): State<Gate>, request: Request, next: Next) -> Respon
             };
             let limit = if settings_body {
                 floe_app_core::layerprops::MAX_BYTES
+            } else if review_body {
+                crate::drc::RESPONSE_BYTES
             } else {
                 BODY_BYTES
             };
@@ -491,7 +520,7 @@ async fn capabilities(State(gate): State<Gate>, headers: HeaderMap) -> Response 
     }
     let render = gate.service.is_some() || gate.view.is_some();
     Json(json!({"protocol":1,"bundle":BUNDLE,"stage":if gate.service.is_some(){"owner-service"}else if render{"view-stream"}else{"transport"},
-        "render":render,"catalog":gate.service.is_some(),"index":gate.service.is_some(),"drc":gate.drc.is_some(),"exports":gate.service.is_some(),"snapshot_png":gate.service.is_some(),"layer_settings":true,"design_defaults":gate.defaults.is_some(),"shares":false,"uploads":false,"control_bytes":CONTROL_BYTES,
+        "render":render,"catalog":gate.service.is_some(),"index":gate.service.is_some(),"drc":gate.drc.is_some(),"drc_notes":gate.drc.as_ref().is_some_and(|r|r.notes_enabled()),"exports":gate.service.is_some(),"snapshot_png":gate.service.is_some(),"layer_settings":true,"design_defaults":gate.defaults.is_some(),"shares":false,"uploads":false,"control_bytes":CONTROL_BYTES,
         "frame_bytes":crate::view::PACKET_BYTES,"frame_credit":1,"pending_frames":1}))
     .into_response()
 }
@@ -659,6 +688,7 @@ pub async fn serve(
             _ = &mut shutdown => break Ok(()),
             _ = maintenance.tick()=>{
                 if let Some(defaults)=&gate.defaults {defaults.maintain();}
+                if let Some(drc)=&gate.drc {drc.maintain();}
                 if gate.auth.lock().is_ok_and(|a|a.expired(Instant::now())) {gate.stop_services();}
                 if let Some(view)=gate.active_view() {
                     if view.activity.lock().unwrap().expired(Instant::now()) {view.controller.request_close();}

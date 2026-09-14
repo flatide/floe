@@ -52,6 +52,10 @@ pub(super) fn execute(
     check_cancelled(stop)?;
     p.unchanged()?;
     let value = match request {
+        Command::ReviewTargets { identity, refs } => {
+            let gids = p.review_targets(&identity, &refs, stop)?;
+            json!({"gids":gids.iter().map(u64::to_string).collect::<Vec<_>>()})
+        }
         Command::ValidateReview(identity) => {
             p.validate_review_identity(&identity)?;
             json!({})

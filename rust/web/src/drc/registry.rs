@@ -54,6 +54,7 @@ struct Inner {
 pub struct Registry {
     inner: Arc<Inner>,
     thread: Mutex<Option<JoinHandle<()>>>,
+    notes: Mutex<Option<Arc<super::review::Service>>>,
 }
 impl Registry {
     pub fn read_only(reader: Arc<Service>) -> Arc<Self> {
@@ -88,7 +89,55 @@ impl Registry {
         Ok(Arc::new(Self {
             inner,
             thread: Mutex::new(thread),
+            notes: Mutex::new(None),
         }))
+    }
+    pub(super) fn notes(&self) -> Option<Arc<super::review::Service>> {
+        self.notes.lock().unwrap().clone()
+    }
+    pub(crate) fn enable_notes(
+        &self,
+        reviewer: &str,
+        sources: Vec<Arc<floe_app_core::registered::RegisteredSource>>,
+        files: &[std::path::PathBuf],
+        trees: &[std::path::PathBuf],
+    ) -> Result<()> {
+        use floe_app_core::drc::review::store;
+        let mut notes = self.notes.lock().unwrap();
+        if notes.is_some()
+            || files.len() > 120
+            || trees.len() > 128
+            || sources.is_empty()
+            || sources.len() > 32
+        {
+            return Err(floe_app_core::Error::input(
+                "invalid note review registration",
+            ));
+        }
+        let r = &self.inner.registration;
+        store::paths(&r.path, reviewer, store::Kind::Notes)?;
+        let files = files
+            .iter()
+            .cloned()
+            .chain(std::iter::once(r.path.clone()))
+            .chain(r.waives.clone())
+            .chain(r.rules.clone())
+            .collect();
+        *notes = Some(super::review::Service::start(super::review::Config {
+            reviewer: reviewer.into(),
+            files,
+            trees: trees.to_vec(),
+            sources,
+        })?);
+        Ok(())
+    }
+    pub(crate) fn maintain(&self) {
+        if let Some(n) = self.notes() {
+            n.maintain();
+        }
+    }
+    pub(crate) fn notes_enabled(&self) -> bool {
+        self.notes().is_some()
     }
     pub(crate) fn source_id(&self) -> &str {
         &self.inner.registration.source_id
@@ -97,7 +146,7 @@ impl Registry {
         &self,
     ) -> Result<(Vec<std::path::PathBuf>, Vec<std::path::PathBuf>)> {
         let r = &self.inner.registration;
-        let files = std::iter::once(r.path.clone())
+        let mut files: Vec<_> = std::iter::once(r.path.clone())
             .chain(r.waives.clone())
             .chain(r.rules.clone())
             .collect();
@@ -108,6 +157,12 @@ impl Registry {
             let mut target = r.path.as_os_str().to_owned();
             target.push(".ice");
             trees.push(target.into());
+        }
+        if let Some(notes) = self.notes() {
+            files.extend(notes.protected_targets(&r.path)?);
+            if self.inner.indexer.is_some() {
+                files.extend(notes.protected_targets(&build::output_path(&r.path)?)?);
+            }
         }
         Ok((files, trees))
     }
@@ -150,6 +205,7 @@ impl Registry {
     pub fn catalog(&self) -> Value {
         let s = self.inner.state.lock().unwrap();
         json!({"drc":s.current.as_ref().map(|d|d.catalog()),
+            "notes":self.notes().map(|n|n.status()),
             "build":{"available":!s.closed && self.allowed(&s),"source_id":self.source_id(),"jobs_min":1,"jobs_max":16,"jobs_default":4,"operations":s.ledger.snapshot()}})
     }
     fn submit(
@@ -193,7 +249,13 @@ impl Registry {
         {
             return Err("drc_context_changed");
         }
-        match s.ledger.admit(seq, signature, "drc_build")? {
+        let admit = || s.ledger.admit(seq, signature, "drc_build");
+        let admitted = if let Some(notes) = self.notes() {
+            notes.admit_build(admit)?
+        } else {
+            admit()?
+        };
+        match admitted {
             Admission::Replay(v) => return Ok(v),
             Admission::New => (),
         }
@@ -239,14 +301,19 @@ impl Registry {
         if let Some(d) = &s.current {
             d.request_stop();
         }
+        if let Some(n) = self.notes() {
+            n.request_stop();
+        }
         self.inner.wake.notify_all();
     }
     pub fn is_finished(&self) -> bool {
-        self.thread
-            .lock()
-            .unwrap()
-            .as_ref()
-            .is_none_or(JoinHandle::is_finished)
+        self.notes().is_none_or(|n| n.is_finished())
+            && self
+                .thread
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_none_or(JoinHandle::is_finished)
             && self
                 .inner
                 .state
