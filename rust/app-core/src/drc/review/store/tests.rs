@@ -81,6 +81,62 @@ fn kind<T>(r: Result<T>) -> ErrorKind {
 }
 
 #[test]
+fn committed_waive_proof_rejects_replacement_mutation_and_other_targets() {
+    let f = Fixture::new();
+    let s = f.store(Kind::Waives);
+    let publish = || {
+        s.snapshot(&f.stop)
+            .unwrap()
+            .prepare_waives(&[(0, 1)], &f.stop)
+            .unwrap()
+            .publish(&f.stop)
+            .unwrap()
+    };
+    let first = publish();
+    assert!(first.file.is_some());
+    s.snapshot(&f.stop)
+        .unwrap()
+        .verify_published(&first)
+        .unwrap();
+    let second = publish();
+    assert_eq!(
+        kind(s.snapshot(&f.stop).unwrap().verify_published(&first)),
+        ErrorKind::Busy
+    );
+    s.snapshot(&f.stop)
+        .unwrap()
+        .verify_published(&second)
+        .unwrap();
+    let other = f.reviewer(Kind::Waives, "other");
+    let copied = other
+        .snapshot(&f.stop)
+        .unwrap()
+        .prepare_waives(&[(0, 1)], &f.stop)
+        .unwrap()
+        .publish(&f.stop)
+        .unwrap();
+    assert_eq!(
+        kind(s.snapshot(&f.stop).unwrap().verify_published(&copied)),
+        ErrorKind::Busy
+    );
+    let notes = f.store(Kind::Notes);
+    let note = f.note(&notes, "unrelated").publish(&f.stop).unwrap();
+    assert!(note.file.is_none());
+    assert_eq!(
+        kind(s.snapshot(&f.stop).unwrap().verify_published(&note)),
+        ErrorKind::Busy
+    );
+    let mut bytes = fs::read(s.target()).unwrap();
+    *bytes.last_mut().unwrap() = 239;
+    fs::write(s.target(), bytes).unwrap();
+    assert_eq!(
+        kind(s.snapshot(&f.stop).unwrap().verify_published(&second)),
+        ErrorKind::Busy
+    );
+    f.clean();
+}
+
+#[test]
 fn waive_install_last_check_rejects_cancel_and_input_mutation() {
     for change in ["cancel", "pack", "sidecar"] {
         let f = Fixture::new();

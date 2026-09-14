@@ -324,6 +324,17 @@ impl Gateway {
         files: &[std::path::PathBuf],
         trees: &[std::path::PathBuf],
     ) -> Result<(), String> {
+        Self::enable_drc_review(gate, reviewer, files, trees, false)
+    }
+    /// Separate trusted opt-in for waive publication, never implied by a
+    /// read-sidecar registration or the existing notes-only setting.
+    pub fn enable_drc_review(
+        gate: &mut Gate,
+        reviewer: &str,
+        files: &[std::path::PathBuf],
+        trees: &[std::path::PathBuf],
+        edit_waives: bool,
+    ) -> Result<(), String> {
         let g = Arc::get_mut(gate).ok_or("gateway already published")?;
         if g.defaults.is_some() {
             return Err("register notes before design defaults".into());
@@ -337,7 +348,7 @@ impl Gateway {
             .as_ref()
             .ok_or("note review requires registered sources")?
             .registered_sources();
-        drc.enable_notes(reviewer, sources, files, trees)
+        drc.enable_notes(reviewer, sources, files, trees, edit_waives)
             .map_err(|e| e.to_string())
     }
     fn authenticate(&self, headers: &HeaderMap, csrf: &str) -> Result<SessionId, StatusCode> {
@@ -520,7 +531,7 @@ async fn capabilities(State(gate): State<Gate>, headers: HeaderMap) -> Response 
     }
     let render = gate.service.is_some() || gate.view.is_some();
     Json(json!({"protocol":1,"bundle":BUNDLE,"stage":if gate.service.is_some(){"owner-service"}else if render{"view-stream"}else{"transport"},
-        "render":render,"catalog":gate.service.is_some(),"index":gate.service.is_some(),"drc":gate.drc.is_some(),"drc_notes":gate.drc.as_ref().is_some_and(|r|r.notes_enabled()),"exports":gate.service.is_some(),"snapshot_png":gate.service.is_some(),"layer_settings":true,"design_defaults":gate.defaults.is_some(),"shares":false,"uploads":false,"control_bytes":CONTROL_BYTES,
+        "render":render,"catalog":gate.service.is_some(),"index":gate.service.is_some(),"drc":gate.drc.is_some(),"drc_notes":gate.drc.as_ref().is_some_and(|r|r.notes_enabled()),"drc_waives":gate.drc.as_ref().is_some_and(|r|r.waives_enabled()),"exports":gate.service.is_some(),"snapshot_png":gate.service.is_some(),"layer_settings":true,"design_defaults":gate.defaults.is_some(),"shares":false,"uploads":false,"control_bytes":CONTROL_BYTES,
         "frame_bytes":crate::view::PACKET_BYTES,"frame_credit":1,"pending_frames":1}))
     .into_response()
 }

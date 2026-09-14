@@ -9,31 +9,38 @@ use axum::{
 };
 use std::collections::BTreeSet;
 
-const ROOT: &str = "/api/v1/drc/review/notes";
 pub(crate) fn is_large_body(method: &Method, path: &str) -> bool {
     *method == Method::POST
         && matches!(
             path,
-            "/api/v1/drc/review/notes/read" | "/api/v1/drc/review/notes/prepare"
+            "/api/v1/drc/review/notes/read"
+                | "/api/v1/drc/review/notes/prepare"
+                | "/api/v1/drc/review/waives/read"
+                | "/api/v1/drc/review/waives/prepare"
         )
 }
 pub(crate) fn routes() -> Router<Gate> {
+    routes_for(store::Kind::Notes, "/api/v1/drc/review/notes")
+        .merge(routes_for(store::Kind::Waives, "/api/v1/drc/review/waives"))
+}
+fn routes_for(kind: store::Kind, root: &str) -> Router<Gate> {
     Router::new()
-        .route(ROOT, get(status).post(submit))
-        .route(&format!("{ROOT}/read"), post(read))
-        .route(&format!("{ROOT}/prepare"), post(prepare))
-        .route(&format!("{ROOT}/revoke"), post(revoke))
-        .route(&format!("{ROOT}/{{seq}}"), get(operation))
-        .route(&format!("{ROOT}/{{seq}}/cancel"), post(cancel))
+        .route(root, get(status).post(submit))
+        .route(&format!("{root}/read"), post(read))
+        .route(&format!("{root}/prepare"), post(prepare))
+        .route(&format!("{root}/revoke"), post(revoke))
+        .route(&format!("{root}/{{seq}}"), get(operation))
+        .route(&format!("{root}/{{seq}}/cancel"), post(cancel))
+        .layer(Extension(kind))
         .layer(DefaultBodyLimit::max(crate::drc::RESPONSE_BYTES))
 }
 fn fail(code: Failure) -> Response {
     crate::drc::http::failure(code)
 }
-fn notes(g: &Gate) -> std::result::Result<Arc<Service>, Failure> {
+fn review(g: &Gate, kind: store::Kind) -> std::result::Result<Arc<Service>, Failure> {
     g.drc
         .as_ref()
-        .and_then(|r| r.notes())
+        .and_then(|r| r.review(kind))
         .ok_or("review_disabled")
 }
 fn reader(g: &Gate, c: &Context) -> std::result::Result<Arc<Reader>, Failure> {
@@ -92,6 +99,7 @@ fn refs(errors: &[crate::drc::dto::CursorDto]) -> std::result::Result<Vec<(usize
 }
 async fn read(
     State(g): State<Gate>,
+    Extension(kind): Extension<store::Kind>,
     headers: HeaderMap,
     Extension(body_permit): Extension<Arc<OwnedSemaphorePermit>>,
     body: std::result::Result<Json<Read>, axum::extract::rejection::JsonRejection>,
@@ -100,7 +108,7 @@ async fn read(
         Ok(o) => o,
         Err(e) => return transport::error(e),
     };
-    let service = match notes(&g) {
+    let service = match review(&g, kind) {
         Ok(s) => s,
         Err(e) => return fail(e),
     };
@@ -167,6 +175,14 @@ async fn read(
     let task = Arc::clone(&op);
     let result = tokio::task::spawn_blocking(move || -> Result<_> {
         let snapshot = store.snapshot(Arc::clone(&task.stop))?;
+        if kind == store::Kind::Waives {
+            let statuses = snapshot.selected_statuses(&gids)?;
+            let value = json!({"kind":"drc_waive","phase":"snapshot","name":store.target().file_name().and_then(|s|s.to_str()),
+                "selected_count":gids.len().to_string(),"waived_count":statuses.iter().filter(|&&v|v==1).count().to_string(),
+                "reserved_count":statuses.iter().filter(|&&v|v>1).count().to_string(),
+                "exists":snapshot.exists(),"legacy_unverified":snapshot.legacy_unverified()});
+            return Ok((Model::Snapshot(snapshot, gids), value));
+        }
         let notes = snapshot.notes().ok_or_else(|| floe_app_core::Error::input("not a note snapshot"))?;
         let first = notes.get(gids[0]);
         let mixed = gids.iter().any(|&g| notes.get(g) != first);
@@ -186,7 +202,14 @@ async fn read(
         Err(_) => return fail("review_unavailable"),
     };
     match current(&g, &r, &req.context, || {
-        service.finish(&op, owner, req.context.clone(), model, value)
+        service.finish(
+            &op,
+            owner,
+            Arc::clone(&r),
+            req.context.clone(),
+            model,
+            value,
+        )
     }) {
         Ok(value) => {
             cancel.0 = None;
@@ -197,6 +220,7 @@ async fn read(
 }
 async fn prepare(
     State(g): State<Gate>,
+    Extension(kind): Extension<store::Kind>,
     headers: HeaderMap,
     Extension(body_permit): Extension<Arc<OwnedSemaphorePermit>>,
     body: std::result::Result<Json<Prepare>, axum::extract::rejection::JsonRejection>,
@@ -205,7 +229,7 @@ async fn prepare(
         Ok(o) => o,
         Err(e) => return transport::error(e),
     };
-    let service = match notes(&g) {
+    let service = match review(&g, kind) {
         Ok(s) => s,
         Err(e) => return fail(e),
     };
@@ -229,11 +253,24 @@ async fn prepare(
         floe_app_core::check_cancelled(&task.stop)?;
         let count = gids.len();
         let exists = snapshot.exists();
+        if kind == store::Kind::Waives {
+            let status = u8::from(req.waived.unwrap());
+            let before = snapshot.selected_statuses(&gids)?;
+            let changed = before.iter().filter(|&&v|v != status).count();
+            let edits = gids.iter().map(|&id|(id, status)).collect::<Vec<_>>();
+            let draft = snapshot.prepare_waives(&edits)?;
+            let value = json!({"kind":"drc_waive","phase":"prepared","name":draft.target().file_name().and_then(|s|s.to_str()),
+                "selected_count":count.to_string(),"changed_count":changed.to_string(),"waived":status==1,
+                "reserved_count":before.iter().filter(|&&v|v>1).count().to_string(),
+                "legacy_unverified":draft.legacy_unverified(),"replaces_existing":exists,"scope":"registered_reviewer_waives"});
+            return Ok((Model::Prepared(draft), value));
+        }
+        let text = req.text.unwrap();
         let report = snapshot.import_report();
         let report = json!({"skipped_lines":report.skipped_lines,"invalid_members":report.invalid_members,"reassigned_members":report.reassigned_members});
-        let draft = snapshot.prepare_note(&gids, &req.text)?;
+        let draft = snapshot.prepare_note(&gids, &text)?;
         let value = json!({"kind":"drc_note","phase":"prepared","name":draft.target().file_name().and_then(|s|s.to_str()),
-            "selected_count":count.to_string(),"text":req.text.trim(),"clears":req.text.trim().is_empty(),
+            "selected_count":count.to_string(),"text":text.trim(),"clears":text.trim().is_empty(),
             "legacy_unverified":draft.legacy_unverified(),"replaces_existing":exists,"import_report":report,"scope":"registered_reviewer_notes"});
         Ok((Model::Prepared(draft), value))
     }).await;
@@ -246,7 +283,7 @@ async fn prepare(
         Err(_) => return fail("review_unavailable"),
     };
     match current(&g, &r, &context, || {
-        service.finish(&op, owner, context.clone(), model, value)
+        service.finish(&op, owner, Arc::clone(&r), context.clone(), model, value)
     }) {
         Ok(value) => {
             cancel.0 = None;
@@ -257,6 +294,7 @@ async fn prepare(
 }
 async fn submit(
     State(g): State<Gate>,
+    Extension(kind): Extension<store::Kind>,
     headers: HeaderMap,
     body: std::result::Result<Json<Submit>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
@@ -264,7 +302,7 @@ async fn submit(
         Ok(o) => o,
         Err(e) => return transport::error(e),
     };
-    let service = match notes(&g) {
+    let service = match review(&g, kind) {
         Ok(s) => s,
         Err(e) => return fail(e),
     };
@@ -286,20 +324,29 @@ async fn submit(
         Err(e) => fail(e),
     }
 }
-async fn status(State(g): State<Gate>, headers: HeaderMap) -> Response {
+async fn status(
+    State(g): State<Gate>,
+    Extension(kind): Extension<store::Kind>,
+    headers: HeaderMap,
+) -> Response {
     if let Err(e) = transport::http_session(&g, &headers) {
         return transport::error(e);
     }
-    match notes(&g) {
+    match review(&g, kind) {
         Ok(s) => Json(s.status()).into_response(),
         Err(e) => fail(e),
     }
 }
-async fn operation(State(g): State<Gate>, headers: HeaderMap, Path(seq): Path<String>) -> Response {
+async fn operation(
+    State(g): State<Gate>,
+    Extension(kind): Extension<store::Kind>,
+    headers: HeaderMap,
+    Path(seq): Path<String>,
+) -> Response {
     if let Err(e) = transport::http_session(&g, &headers) {
         return transport::error(e);
     }
-    let s = match notes(&g) {
+    let s = match review(&g, kind) {
         Ok(s) => s,
         Err(e) => return fail(e),
     };
@@ -310,11 +357,16 @@ async fn operation(State(g): State<Gate>, headers: HeaderMap, Path(seq): Path<St
     s.operation(n)
         .map_or_else(|| fail("operation_expired"), |v| Json(v).into_response())
 }
-async fn cancel(State(g): State<Gate>, headers: HeaderMap, Path(seq): Path<String>) -> Response {
+async fn cancel(
+    State(g): State<Gate>,
+    Extension(kind): Extension<store::Kind>,
+    headers: HeaderMap,
+    Path(seq): Path<String>,
+) -> Response {
     if let Err(e) = transport::http_session(&g, &headers) {
         return transport::error(e);
     }
-    let s = match notes(&g) {
+    let s = match review(&g, kind) {
         Ok(s) => s,
         Err(e) => return fail(e),
     };
@@ -334,6 +386,7 @@ struct Revoke {
 }
 async fn revoke(
     State(g): State<Gate>,
+    Extension(kind): Extension<store::Kind>,
     headers: HeaderMap,
     body: std::result::Result<Json<Revoke>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
@@ -341,7 +394,7 @@ async fn revoke(
         Ok(o) => o,
         Err(e) => return transport::error(e),
     };
-    let s = match notes(&g) {
+    let s = match review(&g, kind) {
         Ok(s) => s,
         Err(e) => return fail(e),
     };

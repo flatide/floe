@@ -9,13 +9,13 @@
 M2a의 현재 DRC 등록/읽기 URI·페이지·취소·focus/in_view·패널 상태·필터·순회·마커·
 CD·선택 집합·SVRF metadata/비교·타입 패널·격리/원자적 focus·ASCII API 계약은 [M2 기록](WEBUI_M2.ko.md) §2~21이
 기준이다. geometry reader는 read-only이며, 명시 opt-in한 owner의 주석 저장 endpoint는
-M4e-3a에 추가했다. waive 쓰기와 공유 endpoint는 아직 없다.
+M4e-3a에 추가했다. waive 승인 쓰기는 별도 opt-in의 M4e-4c이며 공유 endpoint는 아직 없다.
 M4e-1의 `app-core::drc::review`는 waive/FE codec과 메모리 note 그룹만 제공한다.
 레거시 fingerprint는 인증/유일 run identity가 아니며, 향후 writer의 pack identity·
 review revision 검증을 대체하지 않는다([M4 §21](WEBUI_M4.ko.md)).
 M4e-2a의 `review::store`는 로컬 expected snapshot·pack binding·명시 게시 코어다
-([M4 §22](WEBUI_M4.ko.md)). 쓰기 HTTP/WS endpoint는 아직 없으며, 인증 reviewer/lease/
-review_rev·승인 receipt는 향후 actor에서 연결한다. legacy 미확인 파일의 수정은 별도 확인이 필요하다.
+([M4 §22](WEBUI_M4.ko.md)). 이 코어 자체에 HTTP/WS endpoint는 없으며, owner 설정/lease/
+review_rev·승인 receipt는 아래 M4e-3a/4c에서 연결한다. legacy 파일의 수정은 별도 확인이 필요하다.
 M4e-2b의 `review::managed`가 준비/게시의 admission·read lease 수명과 취소/join·typed 결과를
 제공한다([M4 §23](WEBUI_M4.ko.md)). 원격 endpoint를 추가한 것은 아니며, 이 process-local
 작업 ID는 HTTP 재시도 승인 ledger를 대신하지 않는다.
@@ -34,7 +34,14 @@ HTTP로 경로/상태 파일을 받아 재부착하지 않는다. M4e-4b는 이 
 같은 geometry id의 조회 `revision`을 바꾸고 `phase: updating` 동안 새 조회를 거부한다
 ([M4 §28](WEBUI_M4.ko.md)). 이전 ticket/HTTP commit·필터/선택 상태·준비된 focus는
 새 조회에 섞이지 않는다. 실패·취소여도 이전 revision은 되살리지 않는다.
-owner 쓰기 연결에서는 별도로 명시 승인·디스크 게시/조회 반영 outcome을 결합해야 한다.
+M4e-4c의 `/api/v1/drc/review/waives` read/prepare/승인/receipt/cancel은
+`--drc-reviewer TAG --drc-edit-waives`의 별도 trusted opt-in으로만 활성화한다
+([M4 §29](WEBUI_M4.ko.md)). 읽기 sidecar 등록이나 notes 권한만으로 켜지지 않는다.
+prepare는 검증한 check/local 선택에 `waived:bool`만 적용한다. native kind/path/reviewer는
+서버가 고정한다. 승인 worker가 파일 게시 전부터 조회 revision을 fence하고 게시한 동일
+파일의 snapshot만 reader에 반영한다. `published`와 `reader_applied`는 각각 true/false/null로
+분리되며, reader 실패/ACK 불명이 성공한 디스크 commit을 미게시로 바꾸지 않는다.
+외부 변경 자동 재부착이나 autosave는 없다. 실제 waive UI/브라우저 게시 수용은 후속이다.
 M1b-2a의 `app-core/managed`·`view`에는 process-local lease/admission과
 독립 worker controller를 구현했다. M1b-2b의 사전 등록 view용 제어/이미지
 스트림은 [M1b 기록 §6](WEBUI_M1B.ko.md#6-m1b-2b--인증된-제어이미지-스트림)을 따른다.

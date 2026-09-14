@@ -2456,3 +2456,86 @@ owner waive의 명시 opt-in·read/prepare/승인/receipt·UI와 전체 M4는 �
 다음 단계는 `published`와 `reader_applied`를
 분리하고 외부 교체/취소/응답 유실 시 이를 정확히 보존하는 owner 연결이다.
 renderd0.12.87·GTK 기본 실행·현장 보류 범위는 바꾸지 않는다.
+
+## 29. M4e-4c — owner waive 승인 게시와 동일 reader 반영
+
+§25의 owner 승인 모델을 waive에도 연결했다. **`--drc-edit-waives`를 추가로 명시해야**
+활성화되며 `--drc-reviewer TAG`와 `--drc`가 필요하다. 기존 reviewer 옵션은 주석만,
+`--drc-waives FILE`은 읽기만 허용한다. 기본 실행에서 새 쓰기 권한을 추론하지 않는다.
+이 단계는 API/CLI이며 waive 편집 패널은 다음 단계다.
+
+### 등록과 요청
+
+- `/api/v1/drc/review/waives`의 GET 상태·POST 승인, `/read`, `/prepare`, `/revoke`,
+  `/{seq}`, `/{seq}/cancel`이 주석과 같은 owner cookie/CSRF·Host/Origin·body admission을
+  따른다. `capabilities.drc_waives`와 DRC catalog의 `waives`가 활성 여부를 표시한다.
+- reviewer와 대상은 launcher가 고정한 pack 인접 sidecar다. native kind는 route의
+  서버 설정으로 고정하고 JSON의 path/reviewer/kind/global ID는 거부한다. 선택은 기존
+  opaque DRC/view/revision과0-based check/local 문자열로 검증·중복 제거하며 최대5000개다.
+- 읽기는 선택 수·waived 수·reserved 수·파일 이름·legacy 여부를 반환한다. 준비는
+  `waived: true|false`만 받으며 선택 수·실제 변경 수·reserved 수·생성/교체 여부를 보여준다.
+  임의 status byte는 입력할 수 없다. 선택하지 않은 reserved status는 그대로 보존한다.
+  선택한 reserved status를0/1로 바꾸는 경우에도 준비 결과에 그 수를 표시한다.
+- Read/Prepare/Revoke는 target·lock을 만들지 않는다. snapshot120초·preview30초,
+  별도 `approve:true`와 legacy 확인, 동일 owner/seq/body만 receipt replay하는 계약은
+  주석과 같다. notes/waives ledger는 각각 유계이며 autosave는 둘 다 false다.
+- write opt-in으로 ICE를 다시 열 때만 해당 고정 reviewer 파일이 이미 있으면 읽기에
+  연결한다. 다른 reviewer나 인접 ICE를 탐색하지 않는다. 명시한 read sidecar가 고정
+  write target과 다르면 시작을 거부한다. 소스·캐시·pack·rules·세션/credential 보호는
+  유지하고 자기 write target만 별도 읽기 입력 보호 목록에 중복 추가하지 않는다.
+  CLI의8바이트 pack header 확인은 시작 전 동기 I/O이며 NFS open 지연을 없애지는 않는다.
+
+### 게시와 조회 결과는 별개
+
+waive worker가 승인 context를 확인한 뒤 **디스크 게시 전에** 조회 revision을 전환한다.
+파일 게시·새 snapshot 검증·actor 반영까지 `updating`을 유지하므로 이전 조회 결과나
+prepared focus가 이 구간에 commit될 수 없다. 실패·취소도 이전 revision을 되살리지 않는다.
+geometry id/LRU는 그대로이며 status/counter만 교체한다. notes와 waives의 준비/게시
+어느 쪽이든 진행 중이면 pack rebuild를 거부하고, 종료 시 두 writer 모두 취소/join한다.
+
+native waive 게시 결과에는 staged inode·전체 digest·pack binding의 **비직렬화 proof**가
+붙는다. 게시 뒤 경로에서 읽은 snapshot이 바로 그 게시 파일인지 검증한 다음 §27 경로로
+적용한다. 같은 bytes의 다른 inode나 외부 수정, 다른 target/kind는 거부한다. path만
+다시 열어 외부 writer의 파일을 자기 게시 결과로 채택하지 않는다. staged 파일에 대한
+추가 해시는 고정64KiB 메모리이지만 **O(sidecar bytes)의 추가 읽기**다. 기존 전체 digest/
+재작성 비용도 남으므로 대형 파일 per-click autosave 성능을 보장하는 변경이 아니다.
+SHA-1은 기존 변경 감지용이며 인증 서명은 아니다.
+
+| 결과 필드 | 의미 |
+|---|---|
+| `published: true/false/null` | 디스크 commit 성공/미게시/결과 불명 |
+| `directory_synced: false` | 게시된 파일의 내구성 경고. 재게시 지시가 아님 |
+| `reader_applied: true/false/null` | reader 반영 성공/미반영/ACK 결과 불명 |
+| `reader_error`, `reader_revision` | 조회 반영 문제와 새 조회 토큰. 저장 성공 증명이 아님 |
+
+게시 성공 뒤에는 중간 `refreshing_reader`를 노출한다. reader 검증 실패·취소·응답 유실이
+이미 성공한 디스크 게시를 `published:false`로 바꾸지 않는다. 전용 owner thread가
+actor ACK를 최대30초 기다리며 기한 초과/채널 유실은 `reader_applied:null`이다. ticket
+drop은 best-effort 취소이며 이미 반영된 상태를 undo하지 않는다. HTTP 연결 단절도
+승인 작업을 자동 재제출하거나 결과를 성공으로 추정하지 않는다.
+
+자동 갱신은 **이 owner가 승인한 게시**에 한정된다. 외부 파일 교체 뒤 원래 inode를
+되돌려도 ctime이 달라져 일반 조회는 계속 거부될 수 있다. 명시적으로 다시 열어야 하며,
+외부 변경 hot reload나 서버/클라이언트 인덱스 교체 정책을 이 단계에서 추가하지 않는다.
+
+### 검증과 남은 작업
+
+`tools/validate_web_drc_waives.py`를 필수 배터리에 추가했다. PATH-empty release의
+합성 owner HTTP로 기본 비활성·별도 opt-in·위조 필드·check/local·중복 refs·미승인 무쓰기,
+실제 승인/clear와 Python status oracle, 같은 reader의 새 revision·이전 조회 거부,
+동일 승인 receipt replay·변경 본문 거부, lock 충돌·legacy 별도 승인·reserved 보존,
+snapshot 뒤 외부 교체의 무덮어쓰기·명시 reopen 복구·고정 target 자동 읽기를 검사한다.
+원본 OASIS/DRC/pack/cache의 bytes·mtime·ctime 불변도 단언한다. core unit은 게시 proof의
+동일 파일/다른 inode·변조·다른 reviewer/kind를, web unit은 kind 고정과 reader 실패/ACK
+불명이 디스크 성공·directory sync 경고를 바꾸지 않음을 검사한다. worker 예외에서도
+waive 전용 `reader_applied`가 주석 응답에 섞이지 않아 기존 strict UI 스키마를 보존한다.
+
+집중 HTTP gate, app11/core202/web54 unit, fmt·strict app/core/web all-target clippy,
+Rust1.89 core202/web54와 Linux x86-64 musl release 교차 빌드가 통과했다.
+최종 소스의 전체 `sh tools/validate_rust.sh`는 exit0·`RUST VALIDATION: ALL OK`다.
+workspace unit(app11/core202/web54), owner HTTP/WS·notes/waives 승인 API·전체 ES2017/JS,
+native 관리형 게시/Python oracle, jobdeck80·renderer46,
+KLayout13 PX+2 phase-exact+14 style(jobs1/8)이 통과했다. 검증용 venv 링크만 정리했다.
+waive UI·실제 브라우저 게시·현장 Firefox/NFS와 Linux 실행 수용은 아직 남아 있다.
+승인된 shared-default 합성 게시 결과물은 보존한다. renderd0.12.87·GTK 기본 경로,
+공유 endpoint 보류와 사용자 jobdeck 실측 브랜치는 바꾸지 않는다. 전체 M4 완료가 아니다.

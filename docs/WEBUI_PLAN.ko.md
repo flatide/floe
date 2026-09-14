@@ -548,4 +548,7 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
   M4e-4a는 검증한 waive snapshot만 기존 reader에 적용하는 native/actor 경로다
   ([M4 §27](WEBUI_M4.ko.md)). geometry 캐시를 보존한다. M4e-4b에서 같은 geometry id의
   조회 revision을 갱신하고 오래된 ticket/HTTP·필터·선택/prepared focus를 fence했다
-  ([M4 §28](WEBUI_M4.ko.md)). owner waive 승인·게시/조회 반영 receipt·편집 UI는 다음 단계다.
+  ([M4 §28](WEBUI_M4.ko.md)). M4e-4c는 별도 `--drc-edit-waives` opt-in의 owner waive
+  승인 API와 게시/조회 반영 receipt를 연결한다([M4 §29](WEBUI_M4.ko.md)). 게시한 동일
+  파일만 기존 reader에 적용하며 외부 교체는 명시 reopen을 유지한다. waive 편집 UI·
+  실제 브라우저 게시·현장 수용은 다음 단계다. 자동 저장/공유 권한은 추가하지 않는다.

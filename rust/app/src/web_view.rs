@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use std::{
     collections::BTreeSet,
     fs::{self, DirBuilder, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     net::{Ipv4Addr, TcpListener},
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
     path::PathBuf,
@@ -51,6 +51,7 @@ const HELP: &str = "Usage: floe2-web view SOURCE [SOURCE ...] [OPTIONS]
   --drc-waives FILE        Explicit existing waive sidecar (requires --drc)
   --drc-rules FILE         Explicit existing SVRF rules.json (requires --drc)
   --drc-reviewer TAG       Enable owner note publication for this fixed tag (requires --drc)
+  --drc-edit-waives        Also enable approved waive writes for --drc-reviewer
   --port N                 Loopback port (default random)
   --no-open                Do not launch a browser; use the private session file
   --firefox PATH           Explicit Firefox binary (or FLOE_FIREFOX_BIN)
@@ -89,6 +90,7 @@ pub struct Command {
     drc_waives: Option<PathBuf>,
     drc_rules: Option<PathBuf>,
     drc_reviewer: Option<String>,
+    drc_edit_waives: bool,
 }
 pub fn parse(args: &[String]) -> Result<Command> {
     let mut c = Command {
@@ -111,6 +113,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
         drc_waives: None,
         drc_rules: None,
         drc_reviewer: None,
+        drc_edit_waives: false,
     };
     let mut i = 1;
     let mut positional = false;
@@ -241,6 +244,10 @@ pub fn parse(args: &[String]) -> Result<Command> {
             "--drc-waives" => c.drc_waives = Some(PathBuf::from(value()?)),
             "--drc-rules" => c.drc_rules = Some(PathBuf::from(value()?)),
             "--drc-reviewer" => c.drc_reviewer = Some(value()?.to_owned()),
+            "--drc-edit-waives" => {
+                flag()?;
+                c.drc_edit_waives = true;
+            }
             _ => return Err(Error::input(format!("unsupported view option: {key}"))),
         }
     }
@@ -253,6 +260,9 @@ pub fn parse(args: &[String]) -> Result<Command> {
     }
     if let Some(tag) = &c.drc_reviewer {
         floe_app_core::drc::waive_paths(c.drc.as_ref().unwrap(), tag)?;
+    }
+    if c.drc_edit_waives && c.drc_reviewer.is_none() {
+        return Err(Error::input("--drc-edit-waives requires --drc-reviewer"));
     }
     if c.sources.is_empty() || c.sources.len() > 32 {
         return Err(Error::input("view requires 1..32 registered sources"));
@@ -401,11 +411,34 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
         Gateway::with_startup(listener.local_addr()?, Arc::clone(&service), request)
             .map_err(Error::input)?;
     if let Some(path) = &c.drc {
+        // The explicit write opt-in also reads that fixed reviewer's existing
+        // file on ICE reopen. It never discovers another reviewer or a pack.
+        let default_waives = if c.drc_edit_waives && c.drc_waives.is_none() {
+            let mut header = [0; 8];
+            let ice = match fs::File::open(path)?.read_exact(&mut header) {
+                Ok(()) => &header == floe_app_core::drc::MAGIC,
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => false,
+                Err(e) => return Err(e.into()),
+            };
+            let target = floe_app_core::drc::review::store::paths(
+                path,
+                c.drc_reviewer.as_deref().unwrap(),
+                floe_app_core::drc::review::store::Kind::Waives,
+            )?[0]
+                .clone();
+            if ice && target.try_exists()? {
+                Some(target)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let drc = floe_web::drc::Service::start_with_rules(
             &resources,
             drc_scope.expect("DRC-specific registration scope"),
             path,
-            c.drc_waives.as_deref(),
+            c.drc_waives.as_deref().or(default_waives.as_deref()),
             c.drc_rules.as_deref(),
             service.catalog()["sources"][0]["source_id"]
                 .as_str()
@@ -423,11 +456,12 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
         &json!({"url":url,"origin":gate.origin(),"bundle":BUNDLE,"pid":std::process::id()}),
     )?;
     if let Some(tag) = &c.drc_reviewer {
-        Gateway::enable_drc_notes(
+        Gateway::enable_drc_review(
             &mut gate,
             tag,
             std::slice::from_ref(&session.path),
             std::slice::from_ref(&session.directory),
+            c.drc_edit_waives,
         )
         .map_err(Error::input)?;
     }
@@ -513,6 +547,9 @@ mod tests {
             "view a --drc-rules rules.json",
             "view a --drc-reviewer test",
             "view a --drc b --drc-reviewer ../escape",
+            "view a --drc-edit-waives",
+            "view a --drc b --drc-edit-waives",
+            "view a --drc b --drc-reviewer fixed --drc-edit-waives=true",
         ] {
             assert!(parse(&args(s)).is_err(), "{s}");
         }
@@ -525,6 +562,14 @@ mod tests {
         assert!(parse(&args("view --help")).unwrap().help);
         let c = parse(&args("view a --drc b.ice --drc-waives side")).unwrap();
         assert!(c.drc_reviewer.is_none());
+        assert!(!c.drc_edit_waives);
+        assert!(
+            parse(&args(
+                "view a --drc b.ice --drc-reviewer fixed --drc-edit-waives"
+            ))
+            .unwrap()
+            .drc_edit_waives
+        );
         assert_eq!(
             parse(&args("view a --drc b.ice --drc-reviewer fixed-owner"))
                 .unwrap()

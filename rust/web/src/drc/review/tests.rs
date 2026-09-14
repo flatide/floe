@@ -2,6 +2,7 @@ use super::*;
 
 fn service() -> Arc<Service> {
     Service::start(Config {
+        kind: store::Kind::Notes,
         reviewer: "fixed".into(),
         files: vec![],
         trees: vec![],
@@ -145,6 +146,62 @@ fn wire_never_accepts_reviewer_path_kind_or_forged_global_ids() {
 }
 
 #[test]
+fn prepare_kind_comes_only_from_registration_and_route() {
+    let base = json!({"context":request().context,"token":"a".repeat(64)});
+    for (fields, notes, waives) in [
+        (json!({"text":"note"}), true, false),
+        (json!({"waived":true}), false, true),
+        (json!({"waived":false}), false, true),
+        (json!({}), false, false),
+        (json!({"text":"note","waived":true}), false, false),
+    ] {
+        let mut value = base.clone();
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        let req: Prepare = serde_json::from_value(value).unwrap();
+        assert_eq!(req.validate(store::Kind::Notes).is_ok(), notes);
+        assert_eq!(req.validate(store::Kind::Waives).is_ok(), waives);
+    }
+    let mut invalid = base;
+    invalid["waived"] = json!(2);
+    assert!(serde_json::from_value::<Prepare>(invalid).is_err());
+    assert!(http::is_large_body(
+        &axum::http::Method::POST,
+        "/api/v1/drc/review/waives/prepare"
+    ));
+}
+
+#[test]
+fn reader_failure_or_unknown_ack_never_relabels_successful_publication() {
+    let context = request().context;
+    let note = unknown_progress(1, &context, store::Kind::Notes);
+    assert_eq!(note["kind"], "drc_note");
+    assert!(note.get("reader_applied").is_none());
+    let waive = unknown_progress(1, &context, store::Kind::Waives);
+    assert_eq!(waive.get("reader_applied"), Some(&Value::Null));
+    for value in [note, waive] {
+        assert_eq!(value["phase"], "failed");
+        assert_eq!(value["published"], Value::Null);
+        assert_eq!(value["outcome_unknown"], true);
+    }
+    for (result, applied) in [
+        (Ok(vec![]), json!(true)),
+        (Err("review_changed"), json!(false)),
+        (Err("drc_cancelled"), json!(false)),
+        (Err("drc_apply_unknown"), Value::Null),
+    ] {
+        let mut value = json!({"published":true,"phase":"succeeded","directory_synced":false});
+        reader_result(&mut value, result);
+        assert_eq!(value["published"], true);
+        assert_eq!(value["phase"], "succeeded");
+        assert_eq!(value["directory_synced"], false);
+        assert_eq!(value["reader_applied"], applied);
+    }
+}
+
+#[test]
 fn unknown_commit_is_not_false_and_directory_sync_warning_is_published() {
     let mut status = managed::Status {
         id: 1,
@@ -163,6 +220,7 @@ fn unknown_commit_is_not_false_and_directory_sync_warning_is_published() {
     status.failure = None;
     status.outcome = Some(store::Published {
         directory_synced: false,
+        file: None,
     });
     status.outcome_unknown = false;
     let value = progress(7, &context, &status);

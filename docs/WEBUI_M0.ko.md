@@ -150,7 +150,10 @@ M4e-4a는 waive snapshot을 같은 geometry reader에 적용하는 내부 경로
 ([M4 §27](WEBUI_M4.ko.md)). geometry cache를 유지하고 status/counter를 함께 교체한다.
 M4e-4b는 이 갱신의 HTTP/필터·선택/prepared focus revision 장벽이다
 ([M4 §28](WEBUI_M4.ko.md)). geometry id/cache를 유지하되 조회 revision을 바꾼다.
-owner waive 쓰기 API/UI와 디스크 게시/조회 반영 receipt 연결은 후속이다.
+M4e-4c는 별도 `--drc-edit-waives` opt-in의 owner read/prepare/승인 API다
+([M4 §29](WEBUI_M4.ko.md)). 디스크 `published`와 `reader_applied`를 분리하고 게시한
+동일 파일만 기존 reader에 반영한다. 기본 비활성·자동 저장 없음이며, 외부 파일 교체는
+명시 reopen이 필요하다. waive 편집 UI·실제 브라우저 게시·현장 수용은 후속이다.
 
 ### 2.7 svrf — M4 (6개 옵션)
 

@@ -36,6 +36,9 @@ impl Revision {
         Ok(fence)
     }
     pub(super) fn begin(&self) -> Result<Change, Failure> {
+        self.begin_at(None)
+    }
+    pub(super) fn begin_at(&self, expected: Option<&str>) -> Result<Change, Failure> {
         let next = crate::auth::public_id().map_err(|_| "drc_read_error")?;
         let mut s = self.0.lock().unwrap();
         if s.closed {
@@ -44,9 +47,15 @@ impl Revision {
         if s.changing {
             return Err("drc_busy");
         }
+        if expected.is_some_and(|v| v != s.token) {
+            return Err("drc_context_changed");
+        }
         s.token = next;
         s.changing = true;
         Ok(Change(Arc::clone(&self.0)))
+    }
+    pub(super) fn owns(&self, change: &Change) -> bool {
+        Arc::ptr_eq(&self.0, &change.0)
     }
     pub(super) fn close(&self) {
         self.0.lock().unwrap().closed = true;

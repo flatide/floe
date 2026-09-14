@@ -118,6 +118,16 @@ impl ManagedStore {
         check_cancelled(&lease.stop)?;
         Ok(Snapshot { value, lease })
     }
+    pub fn snapshot_published(
+        self: &Arc<Self>,
+        published: &store::Published,
+        stop: Arc<AtomicUsize>,
+    ) -> Result<Snapshot> {
+        let snapshot = self.snapshot(stop)?;
+        snapshot.value.verify_published(published)?;
+        snapshot.lease.check()?;
+        Ok(snapshot)
+    }
     /// Retire before pack replacement/logout. Nonblocking, no force release;
     /// live work keeps the pack lease until it actually unwinds/finishes.
     pub fn request_stop(&self) {
@@ -234,6 +244,9 @@ pub struct Prepared {
     legacy: bool,
 }
 impl Prepared {
+    pub fn store(&self) -> Arc<ManagedStore> {
+        Arc::clone(&self.lease.owner)
+    }
     pub fn target(&self) -> &Path {
         self.draft.target()
     }

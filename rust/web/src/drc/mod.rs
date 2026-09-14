@@ -75,6 +75,20 @@ pub struct Ticket {
     fence: Option<revision::Fence>,
 }
 impl Ticket {
+    fn blocking_apply_result(&mut self) -> std::result::Result<Vec<u8>, Failure> {
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            match self.reply.try_recv() {
+                Ok(result) => return result,
+                Err(oneshot::error::TryRecvError::Closed) => return Err("drc_apply_unknown"),
+                Err(oneshot::error::TryRecvError::Empty) => (),
+            }
+            if std::time::Instant::now() >= end {
+                return Err("drc_apply_unknown");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
     pub async fn result(&mut self) -> std::result::Result<Vec<u8>, Failure> {
         let result = (&mut self.reply).await.unwrap_or(Err("drc_closed"));
         match &self.fence {
@@ -89,6 +103,26 @@ impl Drop for Ticket {
     }
 }
 impl Service {
+    fn begin_waive_write(&self, expected: &str) -> std::result::Result<revision::Change, Failure> {
+        let s = self.inner.state.lock().unwrap();
+        if s.closed {
+            return Err("drc_closed");
+        }
+        if let Some(e) = s.failure {
+            return Err(e);
+        }
+        self.inner.revision.begin_at(Some(expected))
+    }
+    fn apply_waives_in_change(
+        &self,
+        snapshot: floe_app_core::drc::review::managed::Snapshot,
+        change: revision::Change,
+    ) -> std::result::Result<Ticket, Failure> {
+        if !self.inner.revision.owns(&change) {
+            return Err("drc_context_changed");
+        }
+        self.enqueue_with_change(dto::Command::ApplyWaives(snapshot), Some(change))
+    }
     /// Trusted coordinator only; no HTTP request can construct a snapshot.
     /// Admission retires old read revisions before native I/O. New reads wait
     /// for the apply ACK/catalog ready phase; geometry identity/cache survive.
@@ -319,6 +353,13 @@ impl Service {
         self.enqueue(request)
     }
     fn enqueue(&self, request: dto::Command) -> std::result::Result<Ticket, Failure> {
+        self.enqueue_with_change(request, None)
+    }
+    fn enqueue_with_change(
+        &self,
+        request: dto::Command,
+        change: Option<revision::Change>,
+    ) -> std::result::Result<Ticket, Failure> {
         let mut s = self.inner.state.lock().unwrap();
         if let Some(code) = s.failure {
             return Err(code);
@@ -332,7 +373,13 @@ impl Service {
             return Err("drc_busy");
         }
         let (fence, change) = if matches!(&request, dto::Command::ApplyWaives(_)) {
-            (None, Some(self.inner.revision.begin()?))
+            (
+                None,
+                Some(match change {
+                    Some(c) => c,
+                    None => self.inner.revision.begin()?,
+                }),
+            )
         } else {
             (Some(self.fence(&self.revision())?), None)
         };

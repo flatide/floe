@@ -55,6 +55,7 @@ pub struct Registry {
     inner: Arc<Inner>,
     thread: Mutex<Option<JoinHandle<()>>>,
     notes: Mutex<Option<Arc<super::review::Service>>>,
+    waives: Mutex<Option<Arc<super::review::Service>>>,
 }
 impl Registry {
     pub fn read_only(reader: Arc<Service>) -> Arc<Self> {
@@ -90,10 +91,25 @@ impl Registry {
             inner,
             thread: Mutex::new(thread),
             notes: Mutex::new(None),
+            waives: Mutex::new(None),
         }))
     }
     pub(super) fn notes(&self) -> Option<Arc<super::review::Service>> {
         self.notes.lock().unwrap().clone()
+    }
+    pub(super) fn review(
+        &self,
+        kind: floe_app_core::drc::review::store::Kind,
+    ) -> Option<Arc<super::review::Service>> {
+        match kind {
+            floe_app_core::drc::review::store::Kind::Notes => self.notes(),
+            floe_app_core::drc::review::store::Kind::Waives => self.waives.lock().unwrap().clone(),
+        }
+    }
+    fn reviews(&self) -> impl Iterator<Item = Arc<super::review::Service>> {
+        self.notes()
+            .into_iter()
+            .chain(self.waives.lock().unwrap().clone())
     }
     pub(crate) fn enable_notes(
         &self,
@@ -101,6 +117,7 @@ impl Registry {
         sources: Vec<Arc<floe_app_core::registered::RegisteredSource>>,
         files: &[std::path::PathBuf],
         trees: &[std::path::PathBuf],
+        edit_waives: bool,
     ) -> Result<()> {
         use floe_app_core::drc::review::store;
         let mut notes = self.notes.lock().unwrap();
@@ -116,7 +133,13 @@ impl Registry {
         }
         let r = &self.inner.registration;
         store::paths(&r.path, reviewer, store::Kind::Notes)?;
-        let files = files
+        let waive_target = store::paths(&r.path, reviewer, store::Kind::Waives)?;
+        if edit_waives && r.waives.as_ref().is_some_and(|p| *p != waive_target[0]) {
+            return Err(floe_app_core::Error::input(
+                "waive write target must match the registered read sidecar",
+            ));
+        }
+        let note_files = files
             .iter()
             .cloned()
             .chain(std::iter::once(r.path.clone()))
@@ -124,20 +147,39 @@ impl Registry {
             .chain(r.rules.clone())
             .collect();
         *notes = Some(super::review::Service::start(super::review::Config {
+            kind: store::Kind::Notes,
             reviewer: reviewer.into(),
-            files,
+            files: note_files,
             trees: trees.to_vec(),
-            sources,
+            sources: sources.clone(),
         })?);
+        if edit_waives {
+            *self.waives.lock().unwrap() =
+                Some(super::review::Service::start(super::review::Config {
+                    kind: store::Kind::Waives,
+                    reviewer: reviewer.into(),
+                    files: files
+                        .iter()
+                        .cloned()
+                        .chain(std::iter::once(r.path.clone()))
+                        .chain(r.rules.clone())
+                        .collect(),
+                    trees: trees.to_vec(),
+                    sources,
+                })?);
+        }
         Ok(())
     }
     pub(crate) fn maintain(&self) {
-        if let Some(n) = self.notes() {
+        for n in self.reviews() {
             n.maintain();
         }
     }
     pub(crate) fn notes_enabled(&self) -> bool {
         self.notes().is_some()
+    }
+    pub(crate) fn waives_enabled(&self) -> bool {
+        self.waives.lock().unwrap().is_some()
     }
     pub(crate) fn source_id(&self) -> &str {
         &self.inner.registration.source_id
@@ -228,6 +270,7 @@ impl Registry {
         let s = self.inner.state.lock().unwrap();
         json!({"drc":s.current.as_ref().map(|d|d.catalog()),
             "notes":self.notes().map(|n|n.status()),
+            "waives":self.review(floe_app_core::drc::review::store::Kind::Waives).map(|n|n.status()),
             "build":{"available":!s.closed && self.allowed(&s),"source_id":self.source_id(),"jobs_min":1,"jobs_max":16,"jobs_default":4,"operations":s.ledger.snapshot()}})
     }
     fn submit(
@@ -273,6 +316,13 @@ impl Registry {
         }
         let admit = || s.ledger.admit(seq, signature, "drc_build");
         let admitted = reader.fence(&req.revision)?.with_current(|| {
+            let admit = || {
+                if let Some(waives) = self.review(floe_app_core::drc::review::store::Kind::Waives) {
+                    waives.admit_build(admit)
+                } else {
+                    admit()
+                }
+            };
             if let Some(notes) = self.notes() {
                 notes.admit_build(admit)
             } else {
@@ -325,13 +375,13 @@ impl Registry {
         if let Some(d) = &s.current {
             d.request_stop();
         }
-        if let Some(n) = self.notes() {
+        for n in self.reviews() {
             n.request_stop();
         }
         self.inner.wake.notify_all();
     }
     pub fn is_finished(&self) -> bool {
-        self.notes().is_none_or(|n| n.is_finished())
+        self.reviews().all(|n| n.is_finished())
             && self
                 .thread
                 .lock()

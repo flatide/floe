@@ -344,6 +344,21 @@ pub struct AppliedWaives {
     pub waived: u64,
 }
 impl Snapshot {
+    /// Match this captured file to an actual native commit, not merely the
+    /// current contents of the same path. Not a wire token or an authorization.
+    pub fn verify_published(&self, published: &Published) -> Result<()> {
+        let proof = published.file.ok_or_else(conflict)?;
+        let before = self.before.as_ref().ok_or_else(conflict)?;
+        if self.store.kind != Kind::Waives
+            || identity(&before.file.metadata()?) != proof.identity
+            || before.digest != proof.digest
+            || Sha1::digest(&self.store.binding).as_slice() != proof.binding
+            || before.security.attribute(BINDING) != Some(self.store.binding.as_slice())
+        {
+            return Err(conflict());
+        }
+        before.unchanged()
+    }
     /// Consume an expected snapshot to refresh one already-open reader without
     /// decoding its geometry again. Off-reactor: expected validation hashes the
     /// whole sidecar. No target/lock creation, path discovery or implicit writes.
@@ -545,6 +560,14 @@ pub struct Draft {
 pub struct Published {
     /// Commit succeeded. False is a durability warning, never a retry request.
     pub directory_synced: bool,
+    /// Present only for native waive publication; opaque and non-serializable.
+    pub file: Option<PublishedFile>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PublishedFile {
+    identity: (u64, u64),
+    digest: [u8; 20],
+    binding: [u8; 20],
 }
 impl Draft {
     /// Trusted caller has separately confirmed that the unbound legacy file
@@ -657,6 +680,28 @@ impl Draft {
             .file
             .set_times(fs::FileTimes::new().set_modified(SystemTime::now()))?;
         staged.file.sync_all()?;
+        // Fixed-memory extra read pass, before commit. SHA-1 is used here as
+        // the existing revision change detector, not as a signature.
+        let proof = if s.kind == Kind::Waives {
+            staged.file.rewind()?;
+            let mut hash = Sha1::new();
+            let mut bytes = [0; 64 * 1024];
+            loop {
+                check_cancelled(stop)?;
+                let n = staged.file.read(&mut bytes)?;
+                if n == 0 {
+                    break;
+                }
+                hash.update(&bytes[..n]);
+            }
+            Some(PublishedFile {
+                identity: identity(&staged.file.metadata()?),
+                digest: hash.finalize().into(),
+                binding: Sha1::digest(&s.binding).into(),
+            })
+        } else {
+            None
+        };
         before_commit()?;
         if Instant::now() >= self.expires {
             return Err(conflict());
@@ -682,6 +727,7 @@ impl Draft {
         // The commit wins over any later cancellation or directory-sync error.
         Ok(Published {
             directory_synced: sync(&s.directory.file).is_ok(),
+            file: proof,
         })
     }
 }

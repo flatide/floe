@@ -1,4 +1,4 @@
-//! Owner-only note review. Fixed trusted reviewer/targets; opaque snapshots and
+//! Owner-only review. Fixed trusted reviewer/targets; opaque snapshots and
 //! one-use prepared tokens. Native publication outlives HTTP subscribers.
 mod http;
 use super::{Failure, Service as Reader};
@@ -26,6 +26,7 @@ use std::{
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub(super) struct Config {
+    pub kind: store::Kind,
     pub reviewer: String,
     pub files: Vec<PathBuf>,
     pub trees: Vec<PathBuf>,
@@ -65,7 +66,18 @@ struct Read {
 struct Prepare {
     context: Context,
     token: String,
-    text: String,
+    text: Option<String>,
+    waived: Option<bool>,
+}
+impl Prepare {
+    fn validate(&self, kind: store::Kind) -> std::result::Result<(), Failure> {
+        match (kind, &self.text, self.waived) {
+            (store::Kind::Notes, Some(text), None) if text.trim().len() <= NOTE_BYTES => Ok(()),
+            (store::Kind::Notes, Some(_), None) => Err("drc_read_limit"),
+            (store::Kind::Waives, None, Some(_)) => Ok(()),
+            _ => Err("invalid_drc_request"),
+        }
+    }
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -82,6 +94,7 @@ enum Model {
     Prepared(managed::Prepared),
 }
 struct Ready {
+    reader: Arc<Reader>,
     owner: SessionId,
     context: Context,
     token: String,
@@ -90,6 +103,7 @@ struct Ready {
     expires: Instant,
 }
 struct Work {
+    reader: Arc<Reader>,
     seq: u64,
     context: Context,
     draft: managed::Prepared,
@@ -134,6 +148,9 @@ impl Drop for Operation {
     }
 }
 impl Service {
+    fn kind(&self) -> &'static str {
+        kind_name(self.inner.config.kind)
+    }
     pub(super) fn protected_targets(&self, pack: &std::path::Path) -> Result<Vec<PathBuf>> {
         Ok([store::Kind::Notes, store::Kind::Waives]
             .into_iter()
@@ -160,7 +177,7 @@ impl Service {
         });
         let task = Arc::clone(&inner);
         let thread = thread::Builder::new()
-            .name("floe-note-owner".into())
+            .name(format!("floe-{}-owner", kind_name(inner.config.kind)))
             .spawn(move || run(task))?;
         Ok(Arc::new(Self {
             inner,
@@ -200,9 +217,7 @@ impl Service {
         req: &Prepare,
         body: Arc<OwnedSemaphorePermit>,
     ) -> std::result::Result<(Arc<Operation>, managed::Snapshot, Vec<u64>), Failure> {
-        if req.text.trim().len() > NOTE_BYTES {
-            return Err("drc_read_limit");
-        }
+        req.validate(self.inner.config.kind)?;
         let permit = Arc::clone(&self.preparations)
             .try_acquire_owned()
             .map_err(|_| "drc_busy")?;
@@ -248,6 +263,7 @@ impl Service {
         &self,
         op: &Operation,
         owner: SessionId,
+        reader: Arc<Reader>,
         context: Context,
         model: Model,
         mut value: Value,
@@ -268,6 +284,7 @@ impl Service {
         value["reviewer"] = json!(self.inner.config.reviewer);
         value["expires_in_ms"] = json!((seconds * 1000).to_string());
         s.ready = Some(Ready {
+            reader,
             owner,
             context,
             token,
@@ -330,7 +347,7 @@ impl Service {
         if s.review_rev == u64::MAX {
             return Err("review_limit");
         }
-        match s.ledger.admit(seq, signature, "drc_note")? {
+        match s.ledger.admit(seq, signature, self.kind())? {
             Admission::Replay(v) => return Ok(v),
             Admission::New => (),
         }
@@ -340,6 +357,7 @@ impl Service {
         };
         s.stop = Some(Arc::clone(&r.stop));
         s.pending = Some(Work {
+            reader: r.reader,
             seq,
             context: req.context,
             draft,
@@ -351,7 +369,7 @@ impl Service {
     }
     pub(super) fn status(&self) -> Value {
         let s = self.inner.state.lock().unwrap();
-        json!({"available":!s.closed,"kind":"drc_note","reviewer":self.inner.config.reviewer,
+        json!({"available":!s.closed,"kind":self.kind(),"reviewer":self.inner.config.reviewer,
             "review_rev":s.review_rev.to_string(),"operations":s.ledger.snapshot(),
             "note_bytes":NOTE_BYTES,"selection_limit":floe_app_core::drc::review::EDIT_ITEMS,
             "preparing":s.preparing.is_some(),"autosave":false})
@@ -427,12 +445,21 @@ impl Service {
     fn open(&self, reader: &Reader, stop: &AtomicUsize) -> Result<Arc<managed::ManagedStore>> {
         let r = &reader.registration;
         let c = &self.inner.config;
+        if c.kind == store::Kind::Waives
+            && r.waives.as_ref().is_some_and(|p| {
+                store::paths(&r.path, &c.reviewer, c.kind).is_ok_and(|paths| *p != paths[0])
+            })
+        {
+            return Err(floe_app_core::Error::input(
+                "waive write target differs from registered read sidecar",
+            ));
+        }
         let files = c
             .files
             .iter()
             .cloned()
             .chain(std::iter::once(r.path.clone()))
-            .chain(r.waives.clone())
+            .chain(r.waives.clone().filter(|_| c.kind == store::Kind::Notes))
             .chain(r.rules.clone())
             .collect();
         managed::ManagedStore::open_guarded(
@@ -441,7 +468,7 @@ impl Service {
                 scope: Arc::clone(&r.scope),
                 pack: r.path.clone(),
                 reviewer: c.reviewer.clone(),
-                kind: store::Kind::Notes,
+                kind: c.kind,
                 protected_files: files,
                 protected_trees: c.trees.clone(),
             },
@@ -480,14 +507,56 @@ fn progress(seq: u64, context: &Context, status: &managed::Status) -> Value {
         Phase::Failed => "failed",
         Phase::Cancelled => "cancelled",
     };
-    json!({"seq":seq.to_string(),"kind":"drc_note","phase":phase,"context":context,
+    json!({"seq":seq.to_string(),"kind":kind_name(status.kind),"phase":phase,"context":context,
         "elapsed_ms":status.elapsed_ms.to_string(),"error":status.failure.map(safe),
         "published":if status.outcome_unknown {None} else {Some(status.outcome.is_some())},"outcome_unknown":status.outcome_unknown,
         "directory_synced":status.outcome.map(|o|o.directory_synced)})
 }
+fn kind_name(kind: store::Kind) -> &'static str {
+    match kind {
+        store::Kind::Notes => "drc_note",
+        store::Kind::Waives => "drc_waive",
+    }
+}
+fn unknown_progress(seq: u64, context: &Context, kind: store::Kind) -> Value {
+    let mut value = json!({"seq":seq.to_string(),"kind":kind_name(kind),"context":context,
+        "phase":"failed","error":"review_unavailable","published":null,"outcome_unknown":true});
+    if kind == store::Kind::Waives {
+        value["reader_applied"] = Value::Null;
+    }
+    value
+}
+fn reader_result(value: &mut Value, result: std::result::Result<Vec<u8>, Failure>) {
+    match result {
+        Ok(_) => value["reader_applied"] = json!(true),
+        Err(e) => {
+            value["reader_applied"] = if e == "drc_apply_unknown" {
+                Value::Null
+            } else {
+                json!(false)
+            };
+            value["reader_error"] = json!(e);
+        }
+    }
+}
 fn execute(inner: &Inner, w: Work) -> Value {
     let context = w.context;
+    let kind = inner.config.kind;
+    // The writer owns this boundary, not an HTTP subscriber. A cancelled or
+    // failed publication still retires old read results without changing pixels.
+    let change = if kind == store::Kind::Waives {
+        match w.reader.begin_waive_write(&context.revision) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                return json!({"seq":w.seq.to_string(),"kind":kind_name(kind),"context":context,
+                "phase":"failed","error":e,"published":false,"outcome_unknown":false,"reader_applied":false})
+            }
+        }
+    } else {
+        None
+    };
     let result = (|| -> Result<Value> {
+        let store = w.draft.store();
         let mut job = w.draft.publish(w.confirm_legacy)?;
         loop {
             if w.stop.load(Ordering::Relaxed) != 0 {
@@ -499,7 +568,33 @@ fn execute(inner: &Inner, w: Work) -> Value {
                 managed::Phase::Succeeded | managed::Phase::Failed | managed::Phase::Cancelled
             ) {
                 job.close()?;
-                return Ok(progress(w.seq, &context, &job.status()));
+                let status = job.status();
+                let mut value = progress(w.seq, &context, &status);
+                if kind == store::Kind::Waives {
+                    value["reader_applied"] = json!(false);
+                    if let Some(published) = status.outcome {
+                        // A successful file commit stays successful even when
+                        // refresh fails, is cancelled, or its ACK is uncertain.
+                        let mut refreshing = value.clone();
+                        refreshing["phase"] = json!("refreshing_reader");
+                        inner
+                            .state
+                            .lock()
+                            .unwrap()
+                            .ledger
+                            .update(w.seq, refreshing, false);
+                        let applied = store
+                            .snapshot_published(&published, Arc::clone(&w.stop))
+                            .map_err(|e| safe(e.kind))
+                            .and_then(|snapshot| {
+                                w.reader.apply_waives_in_change(snapshot, change.unwrap())
+                            })
+                            .and_then(|mut ticket| ticket.blocking_apply_result());
+                        reader_result(&mut value, applied);
+                    }
+                    value["reader_revision"] = json!(w.reader.revision());
+                }
+                return Ok(value);
             }
             inner.state.lock().unwrap().ledger.update(
                 w.seq,
@@ -509,9 +604,16 @@ fn execute(inner: &Inner, w: Work) -> Value {
             thread::sleep(Duration::from_millis(20));
         }
     })();
-    result.unwrap_or_else(|e| json!({"seq":w.seq.to_string(),"kind":"drc_note","context":context,
+    let mut value = result.unwrap_or_else(|e| json!({"seq":w.seq.to_string(),"kind":kind_name(kind),"context":context,
         "phase":if e.kind == ErrorKind::Cancelled {"cancelled"} else {"failed"},"error":safe(e.kind),
-        "published":if e.kind == ErrorKind::Worker {None} else {Some(false)},"outcome_unknown":e.kind == ErrorKind::Worker}))
+        "published":if e.kind == ErrorKind::Worker {None} else {Some(false)},"outcome_unknown":e.kind == ErrorKind::Worker}));
+    if kind == store::Kind::Waives {
+        if value.get("reader_applied").is_none() {
+            value["reader_applied"] = json!(false);
+        }
+        value["reader_revision"] = json!(w.reader.revision());
+    }
+    value
 }
 fn run(inner: Arc<Inner>) {
     loop {
@@ -526,8 +628,10 @@ fn run(inner: Arc<Inner>) {
             w
         };
         let seq = w.seq;
-        let mut value = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute(&inner, w)))
-            .unwrap_or_else(|_| json!({"seq":seq.to_string(),"kind":"drc_note","phase":"failed", "error":"review_unavailable","published":null,"outcome_unknown":true}));
+        let context = w.context.clone();
+        let mut value =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute(&inner, w)))
+                .unwrap_or_else(|_| unknown_progress(seq, &context, inner.config.kind));
         let mut s = inner.state.lock().unwrap();
         if value["published"] == true || value["outcome_unknown"] == true {
             s.review_rev += 1;
