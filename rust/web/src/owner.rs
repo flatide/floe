@@ -23,6 +23,7 @@ pub(crate) fn routes() -> Router<Gate> {
         .route("/api/v1/operations/{seq}/cancel", post(cancel))
         .route("/api/v1/views/{id}", delete(close_view))
         .route("/api/v1/views/{id}/layers/{start}", get(layers))
+        .route("/api/v1/views/{id}/minimap/{base}", get(minimap))
 }
 fn failure(code: &'static str) -> Response {
     let status = match code {
@@ -33,6 +34,23 @@ fn failure(code: &'static str) -> Response {
         _ => StatusCode::BAD_REQUEST,
     };
     (status, Json(json!({"error":code}))).into_response()
+}
+async fn minimap(
+    State(gate): State<Gate>,
+    headers: HeaderMap,
+    Path((id, base)): Path<(String, String)>,
+) -> Response {
+    if let Err(e) = transport::http_session(&gate, &headers) {
+        return transport::error(e);
+    }
+    let Some(v) = gate.active_view().filter(|v| v.id == id) else {
+        return transport::error(StatusCode::NOT_FOUND);
+    };
+    let model = &v.controller.model;
+    match model.minimap.base(&base) {
+        Some(pixels) => Json(json!({"view_id":id,"dataset_revision":model.dataset_revision.to_string(),"base":base,"size":180,"pixels":pixels})).into_response(),
+        None => transport::error(StatusCode::NOT_FOUND),
+    }
 }
 async fn catalog(State(gate): State<Gate>, headers: HeaderMap) -> Response {
     if let Err(e) = transport::http_session(&gate, &headers) {

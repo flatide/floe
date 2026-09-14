@@ -1,5 +1,6 @@
 //! Local cache metadata, not a browser-controlled filesystem endpoint. Geometry
-//! stays mmap-backed in renderd; JSON frontier/minimap arrays are never retained.
+//! stays mmap-backed in renderd. View-only minimaps retain compact palette pixels,
+//! not the JSON frontier/world-coordinate arrays.
 use crate::{cache, check_cancelled, styles, Error, ErrorKind, Result};
 use floe_worker_client::Layers;
 use serde::{Deserialize, Serialize};
@@ -65,6 +66,7 @@ pub struct Metadata {
 }
 #[derive(Debug)]
 pub struct Layout {
+    pub(crate) minimap: std::sync::OnceLock<std::sync::Arc<crate::view::minimap::Minimap>>,
     pub source: PathBuf,
     pub directory: PathBuf,
     pub metadata: Metadata,
@@ -164,6 +166,7 @@ impl Layout {
         check_cancelled(cancelled)?;
         let source_stale = fingerprint != (metadata.src.size, metadata.src.mtime);
         Ok(Self {
+            minimap: std::sync::OnceLock::new(),
             source,
             directory,
             metadata,

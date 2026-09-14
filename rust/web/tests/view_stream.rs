@@ -3,6 +3,87 @@ include!("support/view_harness.rs");
 
 #[tokio::test]
 #[ignore = "run tools/validate_view_stream.py with a private synthetic fixture"]
+async fn native_minimap_is_readonly_and_navigation_keeps_scale() {
+    let h = Harness::start(true).await;
+    let login = h.login().await;
+    let (mut ws, hello, state) = h.connect(&login).await;
+    let (first, _) = frame(&mut ws).await;
+    ack(&mut ws, &hello, 1, &first).await;
+    let id = hello["view_id"].as_str().unwrap();
+    let path = format!("/api/v1/views/{id}/minimap/full");
+    assert_eq!(h.http("GET", &path, &[], "").await.0, 401);
+    let headers = [
+        ("Cookie", login.cookie.as_str()),
+        ("X-Floe-CSRF", login.csrf.as_str()),
+    ];
+    let before = h.controller.snapshot();
+    let (status, _, body) = h.http("GET", &path, &headers, "").await;
+    assert_eq!(status, 200);
+    let base: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(base["view_id"], id);
+    assert_eq!(base["dataset_revision"], state["dataset_revision"]);
+    assert_eq!(base["pixels"].as_str().unwrap().len(), 180 * 180);
+    assert!(base["pixels"]
+        .as_str()
+        .unwrap()
+        .bytes()
+        .all(|b| (b'0'..=b'3').contains(&b)));
+    assert_eq!(
+        h.controller.snapshot().submitted,
+        before.submitted,
+        "overview GET rendered"
+    );
+    assert_eq!(h.controller.snapshot().state_rev, before.state_rev);
+    for suffix in ["00", "32", "999", "garbage"] {
+        assert_eq!(
+            h.http(
+                "GET",
+                &format!("/api/v1/views/{id}/minimap/{suffix}"),
+                &headers,
+                ""
+            )
+            .await
+            .0,
+            404
+        );
+    }
+    assert_eq!(
+        h.http(
+            "GET",
+            "/api/v1/views/not-current/minimap/full",
+            &headers,
+            ""
+        )
+        .await
+        .0,
+        404
+    );
+    ws.send(Message::Text(json!({"type":"view.set","seq":"2","view_id":id,"connection_epoch":hello["connection_epoch"],"base_state_rev":"1",
+        "body":{"navigation":{"kind":"minimap","point":[60,60]}}}).to_string().into())).await.unwrap();
+    assert_eq!(until_reply(&mut ws, 2, "accepted").await["state_rev"], "2");
+    let (next, _) = frame(&mut ws).await;
+    ack(&mut ws, &hello, 3, &next).await;
+    let after = h.controller.snapshot();
+    let a = before.state.viewport.bbox;
+    let b = after.state.viewport.bbox;
+    assert_eq!(next["render_key"], first["render_key"]);
+    let spp = (a[2] - a[0]) / f64::from(before.state.viewport.width);
+    for i in 0..2 {
+        let n = (b[i] - a[i]) / spp / 16.;
+        assert!((n - n.round()).abs() < 1e-8);
+    }
+    assert!(((b[2] - b[0]) / (a[2] - a[0]) - 1.).abs() < 1e-12);
+    assert!(((b[3] - b[1]) / (a[3] - a[1]) - 1.).abs() < 1e-12);
+    let (mut reconnect, _, restored) = h.connect(&login).await;
+    assert_eq!(restored["minimap"]["base"], "full");
+    assert!(!restored["minimap"]["marks"].as_array().unwrap().is_empty());
+    let _ = frame(&mut reconnect).await;
+    h.shutdown().await;
+    println!("RUST MINIMAP STREAM: ALL OK (authenticated cached bases, no render on read, 16px same-scale navigation, reconnect)");
+}
+
+#[tokio::test]
+#[ignore = "run tools/validate_view_stream.py with a private synthetic fixture"]
 async fn native_box_zoom_round_trip_is_pixel_exact_and_revision_checked() {
     for raw in [true, false] {
         let h = Harness::start(raw).await;

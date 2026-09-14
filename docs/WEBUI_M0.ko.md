@@ -273,7 +273,10 @@ exact clip이나 원본 재렌더 export로 간주하지 않는다.
 UI-01의 오른쪽 드래그 박스 줌은 M4g-1에서 연결했다([M4 §40](WEBUI_M4.ko.md)).
 GTK의 지배 excursion·5px 축 선택을 이관하고 world 계산은 Rust에 둔다. 현재 표시된
 뷰와 배율이 맞아야 시작하며 resize/revision/접속 변경은 취소한다. 나머지 단축키/
-minimap·CLI startup/single-instance·현장 입력 검증까지 완료한 의미는 아니다.
+CLI startup/single-instance·현장 입력 검증까지 완료한 의미는 아니다.
+UI-01의 구조 미니맵은 M4g-2에서 연결했다([M4 §41](WEBUI_M4.ko.md)). 기존 색인의
+180px depth 구조 베이스를 재사용하며 pan은 현재 뷰 표시만 갱신한다. 다이 안 클릭은
+배율과 16px 위상을 유지한다. 잡덱/구 캐시에 없는 frontier를 새로 만들지는 않는다.
 
 UI-03의 layerprops 공통 codec·초기 가시성은 M4d-2에서 연결했다([M4 §16](WEBUI_M4.ko.md)).
 색/fill뿐 아니라 file/stem default의 visibility를 첫 frame 전에 적용하고, 명시된

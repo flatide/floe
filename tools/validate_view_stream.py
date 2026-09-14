@@ -41,6 +41,7 @@ def main(fixture):
         assert "RUST VIEW STREAM: ALL OK" in test.stdout
         assert "RUST MARGIN STREAM: ALL OK" in test.stdout
         assert "RUST BAND STREAM: ALL OK" in test.stdout
+        assert "RUST MINIMAP STREAM: ALL OK" in test.stdout
         assert digest(cache) == before, "stream modified cache bytes/mtime"
         assert not list(workers.iterdir()), "stream worker files leaked"
         print(test.stdout.strip())

@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="/assets/@@BUNDLE@@/app.css">
   <script defer src="/assets/@@BUNDLE@@/protocol.js"></script>
   <script defer src="/assets/@@BUNDLE@@/gestures.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/minimap.js"></script>
   <script defer src="/assets/@@BUNDLE@@/query.js"></script>
   <script defer src="/assets/@@BUNDLE@@/inspect.js"></script>
   <script defer src="/assets/@@BUNDLE@@/measure.js"></script>
@@ -49,6 +50,12 @@
         <p id="source-note" class="note">Sources are registered by the local launcher.</p>
       </section>
       <section class="display-panel">
+        <details id="minimap-panel" open hidden>
+          <summary>Overview</summary>
+          <canvas id="minimap" width="180" height="180" tabindex="0" role="button" aria-label="Structural overview. Click to recenter at the current zoom. Enter or Space centers the layout."></canvas>
+          <p id="minimap-note" class="note" role="status"></p><button id="minimap-retry" type="button" hidden>Retry overview</button>
+          <p class="note">Click to recenter · same zoom · 16px aligned. Structural boxes, not rendered geometry.</p>
+        </details>
         <h2>Display</h2>
         <div class="form-row"><label for="depth">Depth <span id="max-depth"></span></label><input id="depth" value="full" title="full or a nonnegative depth" class="short" disabled></div>
         <div class="form-row"><label for="detail">Detail</label><select id="detail" disabled><option value="low">Low · 5 px</option><option value="medium" selected>Medium · 3 px</option><option value="high">High · 1 px</option><option value="exact">Exact · no cut</option></select></div>

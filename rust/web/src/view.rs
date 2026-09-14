@@ -56,6 +56,9 @@ impl<T> Field<T> {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Nav {
     Fit {},
+    Minimap {
+        point: [f64; 2],
+    },
     Goto {
         center_um: [String; 2],
         width_um: String,
@@ -80,6 +83,7 @@ impl Nav {
     fn core(self) -> Result<Navigation, &'static str> {
         Ok(match self {
             Self::Fit {} => Navigation::Fit,
+            Self::Minimap { point } => Navigation::Minimap { point },
             Self::Goto {
                 center_um,
                 width_um,
@@ -335,7 +339,7 @@ pub fn snapshot(s: &Snapshot, m: &Model, view_id: &str, connection_epoch: &str) 
         Layers::None => json!({"mode":"none"}),
         Layers::Only(pairs) => json!({"mode":"only","pairs":pairs}),
     };
-    json!({"type":"snapshot","view_id":view_id,"connection_epoch":connection_epoch,"dataset_revision":m.dataset_revision.to_string(),
+    let mut out = json!({"type":"snapshot","view_id":view_id,"connection_epoch":connection_epoch,"dataset_revision":m.dataset_revision.to_string(),
         "state_rev":s.state_rev.to_string(),"render_rev":s.render_rev.to_string(),"render_key":s.render_key.to_string(),"worker_epoch":s.worker_epoch.to_string(),
         "bbox_dbu":v.viewport.bbox.map(|n|n.to_string()),"dbu_um":m.dbu.to_string(),"pixels":[v.viewport.width,v.viewport.height],
         "depth":v.depth.map_or("full".into(),|n|n.to_string()),"max_depth":s.max_depth.map(|n|n.to_string()),
@@ -348,7 +352,10 @@ pub fn snapshot(s: &Snapshot, m: &Model, view_id: &str, connection_epoch: &str) 
         "margin":s.margin.map(|v|json!({"frame_id":v.frame_id.to_string(),"origin_px":v.origin_px,"crop_safe":v.crop_safe})),
         "margin_working":s.margin_working,"margin_submitted":s.margin_submitted.to_string(),"crop_hits":s.crop_hits.to_string(),
         "margin_failure":s.margin_failure.as_ref().map(|(kind,_)|safe_error(*kind)),
-        "capabilities":{"labels":!m.deck,"frames":true,"margin":s.margin_enabled,"query":!m.deck,"clip":!m.deck,"edit_source":false}})
+        "capabilities":{"labels":!m.deck,"frames":true,"margin":s.margin_enabled,"query":!m.deck,"clip":!m.deck,"edit_source":false}});
+    out["minimap"] = serde_json::to_value(m.minimap.projection(m.bbox, v.viewport, v.depth))
+        .expect("finite overview projection");
+    out
 }
 pub fn safe_error(kind: floe_app_core::ErrorKind) -> &'static str {
     use floe_app_core::ErrorKind as K;

@@ -1,6 +1,6 @@
 # floe2 웹 셸 / 서버-클라이언트 계획 (정본)
 
-작성 2026-08-29, 갱신 2026-09-15(M4g-1 박스 줌 입력).
+작성 2026-08-29, 갱신 2026-09-15(M4g-2 구조 미니맵).
 관련 정본: `FLOE2_OPTIMIZATION.ko.md`(F2R-10/11),
 `RUST_RENDERER_PLAN.ko.md`, `SPEC-VIEWER.ko.md`, `rust/BUILD.md`.
 
@@ -76,6 +76,8 @@ M4f-3b에서 compiled catalogue로 고정된 portable 원본 고지의 유계 �
 현장 수용·남은 조작 parity는 계속 열린 상태다([M4 §39](WEBUI_M4.ko.md)).
 M4g-1에서 GTK 오른쪽 드래그 박스 확대/축소·방향 되돌림/얇은 박스와 취소를
 Rust 좌표 계산과 웹 입력으로 연결했다([M4 §40](WEBUI_M4.ko.md)).
+M4g-2에서 기존 색인의 depth 구조 미니맵과 동일 배율 클릭 이동을 연결했다.
+180px 베이스를 재사용하며 pan 중 geometry 재렌더는 없다([M4 §41](WEBUI_M4.ko.md)).
 나머지 내보내기와 브라우저 다운로드/현장 수용은 남아 있다([M4 기록](WEBUI_M4.ko.md)).
 전체 조작 parity와 M0/Firefox/ETX 현장 검증은 아직 완료되지 않았다.
 상세 범위는 [M1b 기록](WEBUI_M1B.ko.md)과 [M2 기록](WEBUI_M2.ko.md). 여기의 M0~M5는 **웹 전환 단계**이며
@@ -609,3 +611,6 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
 - **M4g-1**: 오른쪽 드래그 박스 확대/축소를 추가했다. 실제 GTK 처리 함수→production
   JS 제스처→Rust 좌표 대조와 PNG/raw 왕복·취소를 검증한다. 전체 입력 parity나
   전역 camera clamp 재설계를 완료한 단계는 아니다([M4 §40](WEBUI_M4.ko.md)).
+- **M4g-2**: 기존 baked frontier의 180×180 구조 미니맵·현재 뷰 표시와 16px 위상
+  클릭 이동을 복원했다. world 계산은 Rust, 브라우저는 유계 palette 베이스와 위치
+  사각형만 받는다. 새 coverage/thumbnail 렌더·인덱스 형식 변경은 없다([M4 §41](WEBUI_M4.ko.md)).

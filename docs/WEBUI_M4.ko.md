@@ -3367,3 +3367,61 @@ clippy `-D warnings`도 통과했다. 기존 의존 패키지의 tiler/VFS 경�
 최소 지원 Rust1.89에서도 app-core216·web60, GTK/JS/Rust352건과 실제 native
 band/margin/연속 입력 스트림3건을 통과했다. 새 의존성·native 호환 버전 변경은 없다.
 검증용 `.venv` symlink만 제거했으며 기존 가상환경, main의 수정 및 feature/jobdeck은 보존했다.
+
+## 41. M4g-2 — 색인 구조 미니맵과 동일 배율 이동
+
+GTK의 고정 **180×180** 미니맵을 복원했다. 이것은 렌더 thumbnail이나 occupancy/
+coverage가 아니다. 일반 layout 색인의 기존 `meta.json.frontier.depths`에 저장된
+DBU bbox를 사용하며, 메인 화면의 frames off와 무관하게 구조를 보여 준다. full depth,
+저장 depth 범위 밖, frontier 없는 구 캐시와 jobdeck은 다이 외곽선/현재 위치만 보인다.
+색인 형식·페이지 선택·cut·LOD·renderer wire와 native 호환 요구0.12.87은 변경하지 않는다.
+
+### 데이터·입력·비용 경계
+
+- Rust가 view 최초 준비 시 metadata를 한 번 더 읽고 source size/mtime·bbox·dbu가
+  이미 연 cache와 일치하는지 검사한다. regular/no-follow 파일만 받으며256MiB 기존
+  metadata 상한, depth32개·depth당6000행·행당4~5숫자를 제한하고 잘못된 좌표를 거부한다.
+  잘못된 미니맵 metadata는 view open 오류다. index/info/render 자체는 이 읽기를 하지 않는다.
+- raw world 배열은 변환 후 버린다. 다이 베이스+최대32 depth의 ASCII palette 인덱스
+  32400bytes씩, 최대 약1.02MiB를 Layout별 OnceLock/Arc로 공유한다. 프레임을 생성하거나
+  별도 worker를 시작하지 않는다. 동시 최초 준비의 임시 변환 중복까지 RSS 상한으로
+  보장하는 것은 아니다. 기존 bake의6000행/멤버 예산에 따른 구조 요약 한계도 유지한다.
+- 인증된 `GET /api/v1/views/{id}/minimap/{base}`는 등록 view의 메모리 베이스만 읽는다.
+  원본 경로/geometry 배열을 전달하지 않고 임의 depth/경로는404다. snapshot은 현재
+  depth 키·다이·최대6개 palette 사각형만 보내며 위치 투영·클릭 world 계산은 Rust가 맡는다.
+- 브라우저는180px Canvas 베이스 최대3개를 보관하고 요청은1개만 진행한다. 빠른 depth
+  변경은 최신 값으로 합치며 pan은 베이스 조회 없이 위치 표시만 갱신한다. 접속 epoch/
+  view 교체·숨김·종료에서 과거 응답을 버린다. 읽기 실패는 명시 Retry까지 재시도하지 않는다.
+- 다이 내부 왼쪽 클릭은 현재 배율을 유지하고 이동량을 현재 **16 device px** 간격에
+  ties-even으로 맞춘다. letterbox는 no-op이다. Enter/Space는 현재 배율로 다이 중심 이동,
+  IME/modifier/진행 중 제스처는 보호한다. 기존 state CAS·latest-only·margin 경로를 재사용한다.
+  전역 camera clamp/단일 인스턴스·초기 CLI 옵션 parity를 함께 변경하지 않는다.
+- GTK와 동일한 배경/외곽/구조/현재 뷰 색,0.7px 구조 생략,6px 현재 뷰 상자↔점 기준을
+  적용한다. 다이와 완전히 겹치지 않는 뷰에서는 GTK의 stray border를 그리지 않도록
+  보정했다. 미니맵은 정밀 geometry 조회나 빠진 도형을 복구하는 표시가 아니다.
+
+`tools/validate_minimap.py`는 GTK의 실제 helper/미니맵/클릭 함수를 AST로 실행해
+Rust와180개 사례의 베이스·표시 픽셀 완전 일치와 배율/16px 위상 이동을 대조한다.
+음수·큰 offset·얇은 다이·여러 depth/줌·letterbox를 포함한다. 좌표만 부동소수점 허용
+오차를 적용하며 픽셀은 exact다. Python/Node는 개발 gate일 뿐 앱 runtime 의존성이 아니다.
+전체 battery에 연결했고, unit은 손상/초과 metadata·잘못된 키·off-die를 추가 검사한다.
+native HTTP/WS gate는 인증·404·조회 무렌더/무상태변경·동일 배율/위상 클릭과 재접속을,
+JS/client gate는3개 캐시·depth 합치기·pan 무조회·응답 검증·retry·suspend/resume·종료를 검사한다.
+
+로컬 Chrome에서 별도 합성 valmini 사본을 열어 frames off에서도 depth0/1 구조가
+표시되고 full은 다이 외곽선으로 전환되는 것을 확인했다. 미니맵의 다른 위치를 클릭한
+전후 뷰 크기는521.172×356.841µm로 유지되고 현재 위치 박스와 메인 화면이 이동했다.
+End session 뒤 미니맵 숨김·서버 exit0·접속 파일 제거를 확인하고 생성한 탭만 닫았다.
+검증 사본은 `/private/tmp/floe-minimap-ui.uyD4A3`이며 공유 기본값/DRC 게시·업로드·
+clipboard/다운로드는 사용하지 않았다. 현장 Firefox/ETX, 실제 오른쪽 drag 입력,
+남은 CLI startup/single-instance와 공유 권한 수용은 별도로 남는다.
+
+전체 `sh tools/validate_rust.sh`는 exit0·`RUST VALIDATION: ALL OK`다. core218·web60·
+HTTP12, GTK 미니맵180건·band352건·native 스트림4건·전체 ES2017 UI,
+jobdeck80·renderer46와 KLayout13 PX+2 phase-exact+14 style(jobs1/8)을 통과했다.
+Rust1.89에서도 core218·web60·미니맵180건·native 스트림4건을 통과했다.
+변경 파일 scoped rustfmt/check, app-core/web/app clippy `--no-deps --all-targets`
+`-D warnings`와 최신 자산 release 빌드를 통과했다. 기존 dependency 경고는 별도다.
+로그는 `/private/tmp/floe-minimap-battery.log`, `floe-minimap-msrv.log`,
+`floe-minimap-clippy.log`, `floe-minimap-ui-lifecycle.log`다.
+검증용 `.venv` symlink만 제거했으며 실제 가상환경·main의 기존 수정·feature/jobdeck은 보존했다.

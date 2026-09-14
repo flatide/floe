@@ -6,6 +6,13 @@
 **아래 endpoint/message는 전체 서비스 설계안이다.** M1b-1의 일부 transport API
 (exchange/capabilities/logout/WS ping)는 [M1b 기록](WEBUI_M1B.ko.md)에 명세/구현했다.
 아래 전체 URI가 그대로 구현된 것은 아니며 공유 API는 아직 없다.
+M4g-2의 실제 `GET /api/v1/views/{id}/minimap/{base}`는 owner 인증+CSRF로 현재 view의
+메모리 palette 베이스(180×180 ASCII 인덱스)만 반환한다. `base`는 `full` 또는 실제
+저장된 depth의 정규 십진수다. 임의 파일/geometry 조회나 새 렌더를 하지 않는다.
+snapshot의 `minimap`은 base 키·die·유계 화면 사각형만 포함하고,
+`view.set`의 `navigation:{kind:"minimap",point:[x,y]}`는180px 미니맵 좌표로
+동일 배율/16px 위상 이동을 요청한다. world 계산·범위 검증은 Rust에 있다
+([M4 §41](WEBUI_M4.ko.md)). 아래 공유/카탈로그 API 초안을 구현한 것으로 보지 않는다.
 M2a의 현재 DRC 등록/읽기 URI·페이지·취소·focus/in_view·패널 상태·필터·순회·마커·
 CD·선택 집합·SVRF metadata/비교·타입 패널·격리/원자적 focus·ASCII API 계약은 [M2 기록](WEBUI_M2.ko.md) §2~21이
 기준이다. geometry reader는 read-only이며, 명시 opt-in한 owner의 주석 저장 endpoint는

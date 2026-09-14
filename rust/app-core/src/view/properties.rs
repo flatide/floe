@@ -354,6 +354,7 @@ mod tests {
             })
             .collect();
         Model {
+            minimap: Arc::default(),
             dataset_revision: 1,
             dbu: 1.,
             bbox: [0., 0., 100., 100.],

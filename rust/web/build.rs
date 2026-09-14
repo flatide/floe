@@ -8,6 +8,7 @@ fn main() {
         "ui/app.css",
         "ui/protocol.js",
         "ui/gestures.js",
+        "ui/minimap.js",
         "ui/query.js",
         "ui/inspect.js",
         "ui/measure.js",

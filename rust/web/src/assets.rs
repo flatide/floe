@@ -24,6 +24,10 @@ async fn asset(Path((bundle, name)): Path<(String, String)>) -> Response {
         return transport::error(StatusCode::NOT_FOUND);
     }
     let (mime, body) = match name.as_str() {
+        "minimap.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("../ui/minimap.js"),
+        ),
         "notices.js" => (
             "text/javascript; charset=utf-8",
             include_str!("../ui/notices.js"),

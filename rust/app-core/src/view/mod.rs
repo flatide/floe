@@ -3,6 +3,7 @@
 //! browser floating-point world math.
 mod controller;
 pub mod margin;
+pub mod minimap;
 mod properties;
 mod query;
 mod ruler;
@@ -84,6 +85,7 @@ impl Viewport {
         let (sx, sy) = (x1 - x0, y1 - y0);
         match nav {
             Navigation::Fit => Self::fit(fit, self.width, self.height),
+            Navigation::Minimap { point } => minimap::navigate(*self, fit, point),
             Navigation::Goto {
                 center_um,
                 width_um,
@@ -204,6 +206,9 @@ impl Viewport {
 #[derive(Clone, Copy, Debug)]
 pub enum Navigation {
     Fit,
+    Minimap {
+        point: [f64; 2],
+    },
     Goto {
         center_um: [f64; 2],
         width_um: f64,
@@ -295,6 +300,7 @@ pub struct ViewState {
 /// Immutable metadata sufficient for validation, without retaining a second
 /// cache mapping or leaking source paths into a transport snapshot.
 pub struct Model {
+    pub minimap: Arc<minimap::Minimap>,
     pub dataset_revision: u64,
     pub dbu: f64,
     pub bbox: [f64; 4],
@@ -330,6 +336,10 @@ impl Model {
         let mut pairs: BTreeSet<_> = styles.iter().map(|s| s.layer).collect();
         pairs.extend(groups.keys().copied());
         let mut model = Self {
+            minimap: match d {
+                Dataset::Layout(l) => minimap::Minimap::shared(l)?,
+                Dataset::Deck(_) => Arc::new(minimap::Minimap::plain(d.bbox().map(|v| v as f64))),
+            },
             dataset_revision: data.revision,
             dbu: d.dbu(),
             bbox: d.bbox().map(|n| n as f64),
@@ -738,6 +748,7 @@ mod tests {
                 .collect::<Vec<_>>(),
         );
         let mut model = Model {
+            minimap: Arc::default(),
             dataset_revision: 1,
             dbu: 1.,
             bbox: [0., 0., 100., 100.],
@@ -845,6 +856,7 @@ mod tests {
                 .collect::<Vec<_>>(),
         );
         let model = Model {
+            minimap: Arc::default(),
             dataset_revision: 1,
             dbu: 1.,
             bbox: [0., 0., 100., 100.],

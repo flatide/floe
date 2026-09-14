@@ -265,6 +265,7 @@ fn model(deck: bool) -> Arc<Model> {
         width: 1,
     }]);
     Arc::new(Model {
+        minimap: Arc::default(),
         initial_layers: Layers::All,
         assignments: Arc::default(),
         property_names: Vec::new(),

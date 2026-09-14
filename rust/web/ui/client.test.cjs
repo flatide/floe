@@ -9,6 +9,7 @@ const Clip=require('./clip.js'),clipEnabled=process.env.FLOE_TEST_CLIP==='1',for
 const snapshotEnabled=process.env.FLOE_TEST_SNAPSHOT==='1',captures=[],copies=[],downloads=[];
 const settingsEnabled=process.env.FLOE_TEST_SETTINGS==='1';
 const defaultsEnabled=process.env.FLOE_TEST_DEFAULTS==='1';let defaultOp=null;
+const minimapEnabled=process.env.FLOE_TEST_MINIMAP==='1';
 let textSelection=null;
 let clipController,clipOp=null,clipFile=null;
 function clipState(){return {available:true,kind:'exact_clip',jobs_default:4,jobs_min:1,jobs_max:16,
@@ -33,7 +34,7 @@ class Element {
     querySelectorAll(tag) {return this.children.flatMap(c=>[...(c.tag===tag?[c]:[]), ...c.querySelectorAll(tag)]);}
     addEventListener(k,f) {listen(this,k,f);}
     getBoundingClientRect() {const [w,h]=viewportSize;return {left:0,top:0,right:w,bottom:h,width:w,height:h};}
-    getContext() {return ctx;}
+    getContext() {return this.id==='minimap'?{fillRect(){},drawImage(){}}:ctx;}
     focus() {}
     select() {}
     get textContent(){return this._text||'';}
@@ -53,6 +54,7 @@ const snapshot={type:'snapshot',view_id:viewId,connection_epoch:epoch,dataset_re
     dbu_um:'1',pixels:[100,80],depth:'full',max_depth:'2',detail:'high',thin:'auto',effective_thin:'cull',
     layers:{mode:'all'},layers_isolated:false,frames:false,labels:false,font_px:14,mono:false,status:'idle',source_stale:false,
     deck_skipped:'0',failure:null,submitted:'1',consumed:'1',discarded:'0',capabilities:{labels:true,clip:true}};
+if(minimapEnabled){snapshot.minimap={size:180,base:'full',die:[0,0,180,180],marks:[[10,10,5,5,4]]};}
 let open=false, lastSeq='0';
 const layerRow={pair:[7,0],name:'MASK',aliases:[],parent:null,head:false,visible:true,color:'#ffffff',fill:{kind:'solid'},width:1};
 const document={hidden:false,activeElement:null,title:'',body:new Element('','body'),
@@ -90,6 +92,7 @@ class XHR {
         else if(this.path==='/api/v1/operations'&&this.method==='POST') {open=true;lastSeq=body.seq;value={seq:lastSeq,kind:'open',phase:'succeeded',view_id:viewId};status=202;}
         else if(this.path==='/api/v1/operations') {value={last_seq:lastSeq,active:null,history:open?[{seq:lastSeq,kind:'open',phase:'succeeded',view_id:viewId}]:[]};}
         else if(this.path==='/api/v1/view') {status=open?200:404;value=open?{title:'synthetic',source_id:'src',mode:'level',levels:null,view:{...snapshot,connection_epoch:''}}:null;}
+        else if(this.path.endsWith('/minimap/full')){value={view_id:viewId,dataset_revision:'1',base:'full',size:180,pixels:'0'.repeat(32400)};}
         else if(this.path.endsWith('/layers/0')) {value={state_rev:snapshot.state_rev,render_key:snapshot.render_key,total:1,start:0,next:null,rows:[layerRow]};}
         else {throw new Error('Unexpected HTTP '+this.path);}
         this.status=status;this.responseText=settingsPath&&this.method==='GET'?value:JSON.stringify(value);
@@ -118,6 +121,7 @@ window.FloeSettings=require('./settings.js');
 window.FloeDefaults=require('./defaults.js');
 window.FloeAbout=require('./about.js');
 window.FloeNotices=require('./notices.js');
+window.FloeMinimap=require('./minimap.js');
 window.FloeDRCNotes=require('./drc-notes.js');
 window.FloeDRCNoteDisplay=require('./drc-note-display.js');
 window.FloeDRCWaives=require('./drc-waives.js');
@@ -162,6 +166,18 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     assert.equal(draws.length,1);assert.deepEqual(draws[0].data.slice(0,4),[16,0,127,255]);
     assert.equal(ws.sent.at(-1).disposition,'displayed');
     assert.equal(node('canvas').style.width,'100px');
+    if(minimapEnabled){
+        await wait(()=>node('minimap-note').textContent==='Die outline · current view');
+        const n=requests.length;
+        node('minimap').mousedown({button:0,buttons:1,detail:1,clientX:25,clientY:20,preventDefault(){}});
+        const move=ws.sent.at(-1);assert.equal(move.type,'view.set');assert.equal(move.base_state_rev,'1');
+        assert.deepEqual(move.body.navigation,{kind:'minimap',point:[45,45]});assert.equal(requests.length,n,'click requested geometry/another base over HTTP');
+        snapshot.state_rev='2';snapshot.render_rev='2';snapshot.minimap.marks=[[20,20,5,5,4]];
+        ws.receive({type:'accepted',seq:move.seq,state_rev:'2',render_rev:'2'});ws.receive(snapshot);
+        await new Promise(setImmediate);assert.equal(requests.length,n,'pan refetched minimap');
+        listeners.pagehide();assert(node('minimap-panel').hidden);
+        console.log('WEB MINIMAP CLIENT: ALL OK (real app wiring, CAS navigation, no per-pan GET, pagehide cleanup)');return;
+    }
     const uploadBlob={size:16},uploadContext={drc_id:'1'.repeat(64),revision:'2'.repeat(64),view_id:viewId};
     await drcOptions.transferChunk('notes',{context:uploadContext,token:'3'.repeat(64),seq:'9007199254740993'},1048576,uploadBlob,{});
     const rawUpload=requests.at(-1);assert.equal(rawUpload.body,uploadBlob);assert.equal(rawUpload.headers['Content-Type'],'application/octet-stream');
