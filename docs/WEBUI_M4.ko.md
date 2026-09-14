@@ -1850,14 +1850,25 @@ scoped fmt/all-target strict clippy, Rust1.89 Linux musl static-pie 링크가 �
 
 로컬 Chrome의 합성 valmini 사본에서 미리보기·체크 전 게시 비활성·30초 만료·Escape 폐기와
 포커스 복귀를 직접 확인하고 screenshot으로 패널 겹침 수정을 재확인했다. 미승인 상태에서는
-`.layerprops`와 `.lock`이 생성되지 않았다. 브라우저의 **실제 게시 클릭은 별도 승인 대기**이며,
+`.layerprops`와 `.lock`이 생성되지 않았다. 당시 브라우저의 **실제 게시 클릭은 별도 승인 대기**였으며,
 이 시각 검증을 성공 게시/취소 클릭의 실제 browser acceptance나 현장 Firefox/ETX 수용으로
 대체하지 않는다. 서버의 실제 파일 쓰기는 §19의 독립 합성 HTTP/native 테스트 범위다.
 전체 `sh tools/validate_rust.sh`는 `RUST VALIDATION: ALL OK`로 완료됐다.
 owner9·jobdeck80·renderer46, KLayout13 PX+2 phase-exact+14 style(jobs1/8)을 포함한다.
 배터리 실행 뒤 미확정 결과 확인 체크의 초기화를 보강했고, 최종 소스에서 전체 JS와
 launcher CLI 게이트·release bundle·Rust1.89 Linux musl 링크를 다시 통과했다.
-검증용 브라우저와 서버는 종료했으며 실제 공유 기본값 파일은 생성하지 않았다.
+그 검증의 브라우저와 서버는 종료했으며 공유 기본값 파일은 생성하지 않았다.
+
+2026-09-14 추가 승인 후, 로컬 Chrome에서 같은 전용 합성 `synthetic.oas`에 대해
+**실제 Publish shared default 버튼**을 실행했다. 첫 preview는 조작 중30초 만료로 폐기되어
+게시되지 않았으며, 새 preview의 Create·9 rows·262 bytes와 승인 체크를 거쳐
+`Queued #1` → `Published #1 synthetic.oas.layerprops` 및 향후 open에 적용된다는 안내를 확인했다.
+대상 `/private/tmp/floe-default-ui.AeRhyd/synthetic.oas.layerprops`는262바이트·mode0600·9개
+레이어로 생성됐고, stable `.lock`은0바이트였다. 합성 OASIS 및 OVM/OVP/OVT/meta.json의
+SHA-256이 게시 전후 동일했다. End session의 종료 화면과 서버 exit0을 확인하고 탭을 닫았다.
+이 결과는 합성 layout의 **신규 파일 게시 성공**에 한정한다. 실제 browser의 기존 파일 교체,
+게시 취소·응답 유실 복구·덱별 게시와 현장 Firefox/ETX·NFS/SMB 수용을 대신하지 않는다.
+생성한 합성 기본값은 관찰 결과로 남겼으며 사용자 설계/기존 기본값은 변경하지 않았다.
 M4 전체와 GTK 은퇴는 아직 완료가 아니다.
 
 ## 21. M4e-1 — DRC review sidecar codec과 주석 그룹 모델
