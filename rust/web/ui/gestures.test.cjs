@@ -85,3 +85,37 @@ console.log('WEB GESTURES: ALL OK (rAF, release-only pan, clicks/modifiers/chord
     assert.deepEqual(picks[0],[30,20,false]);assert.equal(picks[2][3].ctrlKey,true);
 }
 console.log('WEB OBJECT GESTURES: ALL OK (opt-in modifiers, unchanged plain click, release consistency, drag/cancel isolation)');
+{
+    const v=target(),w=target(),d=target(),bands=[],boxes=[],warnings=[],frames=new Map();
+    let id=0,stamp=1,ready=true;
+    v.getBoundingClientRect=()=>({left:10,top:20});
+    const g=gestures.bind({viewport:v,window:w,document:d,ready:()=>true,bandReady:()=>ready,stamp:()=>stamp,
+        dimensions:()=>({pixels:[800,600],dpr:2,left:0,top:0}),cursor(){},preview(){assert.fail('band moved pan pixels');},
+        pan(){assert.fail('band became pan');},click(){assert.fail('band became pick');},band:n=>bands.push(n),bandPreview:b=>boxes.push(b),notice:n=>warnings.push(n),
+        requestAnimationFrame:f=>{frames.set(++id,f);return id;},cancelAnimationFrame:i=>frames.delete(i)});
+    const down=(x,y)=>v.emit('mousedown',event(x,y,2,2));
+    const move=(x,y)=>w.emit('mousemove',event(x,y,2,2));
+    const up=(x,y)=>w.emit('mouseup',event(x,y,2,0));
+    down(110,120);move(210,121);assert(g.bandActive());assert.equal(bands.length,0);assert.equal(frames.size,1);
+    const draw=[...frames.values()][0];frames.clear();draw();assert.equal(boxes.at(-1).outward,false);
+    up(210,121);assert.deepEqual(bands.at(-1),{kind:'band',start:[.25,1/3],end:[.5,1/3+1/300],axes:[true,false],outward:false});
+    assert(!g.active());assert.equal(boxes.at(-1),null);
+    down(210,120);move(110,120);up(213,120);assert.equal(bands.length,1);assert.equal(warnings.at(-1),'Zoom band cancelled');
+    down(210,120);move(110,120);up(215,160);assert.deepEqual(bands.at(-1).axes,[false,true]);assert.equal(bands.at(-1).outward,true);
+    down(210,120);move(110,120);up(310,160);assert.equal(bands.at(-1).outward,false,'tie must zoom in');
+    down(110,120);up(114.9,124.9);assert.equal(bands.length,3,'subthreshold click navigated');
+    down(110,120);up(115,120);assert.equal(bands.length,4,'5px horizontal band was swallowed by pan jitter');
+    for(const kind of ['blur','resize','pagehide','hidden','stale','not-displayed','buttons','chord']){
+        down(110,120);move(160,150);
+        if(kind==='hidden'){d.hidden=true;d.emit('visibilitychange');d.hidden=false;}
+        else if(kind==='stale'){stamp++;move(170,160);}
+        else if(kind==='not-displayed'){ready=false;move(170,160);ready=true;}
+        else if(kind==='buttons'){w.emit('mousemove',event(170,160,2,0));}
+        else if(kind==='chord'){v.emit('mousedown',event(170,160,0,3));}
+        else{w.emit(kind);}
+        assert(!g.active(),kind);assert.equal(frames.size,0,kind);assert.equal(boxes.at(-1),null,kind);
+        up(170,160);assert.equal(bands.length,4,kind);
+    }
+    let blocked=false;v.emit('contextmenu',{preventDefault(){blocked=true;}});assert(blocked);
+}
+console.log('WEB BAND GESTURES: ALL OK (release-only, dominant direction/tie/wobble, 5px axes, DPI, no pick/pan, stale/cancel/hidden/chords)');

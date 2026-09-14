@@ -160,16 +160,17 @@
         <div class="zoom-buttons"><button id="zoom-out" type="button" disabled title="Zoom out (−)">−</button><button id="zoom-in" type="button" disabled title="Zoom in (+)">+</button></div>
         <div class="goto-fields"><label>X <input id="goto-x" value="0" inputmode="decimal" aria-label="Center X in micrometres"></label><label>Y <input id="goto-y" value="0" inputmode="decimal" aria-label="Center Y in micrometres"></label><label>View <input id="goto-width" value="700" inputmode="decimal" aria-label="View width in micrometres"></label><span>µm</span><button id="goto" disabled>Go</button></div>
       </form>
-      <div id="viewport" class="viewport" tabindex="0" aria-label="Layout canvas. Click selects a shape; repeat cycles overlaps; Shift adds; Ctrl or Command toggles. R starts two-point rulers; Shift allows free angles; M toggles snap; K undoes; Shift+K clears rulers. Drag or arrow keys pan; Shift plus arrow pans ten percent; plus and minus zoom; Ctrl+A fits; F toggles frames. Tab cycles overlays; Shift+Tab leaves the canvas. Ctrl or Command+C copies visible pixels.">
+      <div id="viewport" class="viewport" tabindex="0" aria-label="Layout canvas. Click selects a shape; repeat cycles overlaps; Shift adds; Ctrl or Command toggles. R starts two-point rulers; Shift allows free angles; M toggles snap; K undoes; Shift+K clears rulers. Left or middle drag and arrow keys pan. Right drag rightwards zooms into a box; leftwards zooms out; Escape cancels. Shift plus arrow pans ten percent; plus and minus zoom; Ctrl+A fits; F toggles frames. Tab cycles overlays; Shift+Tab leaves the canvas. Ctrl or Command+C copies visible pixels.">
         <div id="notice" class="notice" role="alert" hidden></div>
         <canvas id="margin-canvas" width="1" height="1" aria-hidden="true" hidden></canvas>
         <canvas id="canvas" width="1" height="1" aria-label="Rendered layout"></canvas>
         <canvas id="query-canvas" width="1" height="1" aria-label="Selected shapes and snap point" hidden></canvas>
         <canvas id="drc-canvas" width="1" height="1" aria-label="DRC markers and selected violation" hidden></canvas>
         <canvas id="ruler-canvas" width="1" height="1" aria-label="Manual, bbox gap and CD rulers with measurement preview" hidden></canvas>
+        <div id="zoom-band" aria-hidden="true" hidden></div><div id="zoom-band-hint" role="status" hidden></div>
         <div id="empty" class="empty"><div class="empty-mark">＋</div><h1>Layout workspace</h1><p id="empty-message">Connecting to the local Rust renderer…</p></div>
         <div id="rendering" class="rendering" hidden>Rendering</div>
-        <div class="viewport-hint">Drag / arrows · pan <span>Shift · 10%</span> <span>+ / − zoom</span> <span>Ctrl+A · fit</span></div>
+        <div class="viewport-hint">Drag / arrows · pan <span>Right drag · box zoom</span> <span>Shift · 10%</span> <span>+ / − zoom</span> <span>Ctrl+A · fit</span></div>
       </div>
       <footer class="statusbar"><span id="status">Waiting for session</span><span id="margin-info"></span><span id="viewport-info">Native pixels · Canvas 2D</span></footer>
       <div id="perf" class="perf">Rust renderer · no automatic indexing · refinement off</div>

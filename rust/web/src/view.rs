@@ -69,6 +69,12 @@ pub enum Nav {
         factor: f64,
         anchor: [f64; 2],
     },
+    Band {
+        start: [f64; 2],
+        end: [f64; 2],
+        axes: [bool; 2],
+        outward: bool,
+    },
 }
 impl Nav {
     fn core(self) -> Result<Navigation, &'static str> {
@@ -83,6 +89,17 @@ impl Nav {
             },
             Self::Pan { x, y, snap } => Navigation::Pan { x, y, snap },
             Self::Zoom { factor, anchor } => Navigation::Zoom { factor, anchor },
+            Self::Band {
+                start,
+                end,
+                axes,
+                outward,
+            } => Navigation::Band {
+                start,
+                end,
+                axes,
+                outward,
+            },
         })
     }
 }
@@ -519,6 +536,9 @@ mod tests {
             r#"{"thin":"cull","thin":"keep"}"#,
             r#"{"navigation":{"kind":"goto","center_um":[1,2],"width_um":"5"}}"#,
             r#"{"navigation":{"kind":"fit","extra":1}}"#,
+            r#"{"navigation":{"kind":"band","start":[0,0],"end":[0.5,0.5],"axes":[true,true],"outward":false,"path":"secret"}}"#,
+            r#"{"navigation":{"kind":"band","start":[0,0],"end":[0.5,0.5],"axes":[true,true],"outward":null}}"#,
+            r#"{"navigation":{"kind":"band","start":[0,0],"end":[0.5,0.5],"axes":[1,1],"outward":false}}"#,
             r#"{"layers":{"mode":"all","pairs":[]}}"#,
             r##"{"styles":[{"pair":[1,0],"color":"#00ff00","fill":{"kind":"solid","extra":1},"width":1}]}"##,
         ] {

@@ -121,7 +121,9 @@ Rust+내장 자산 전용 portable은 별도 `tools/make_web_portable.sh`로 조
   `--frame-cache off`로 native retained frame 재사용과 margin을 함께 끄고 측정할 수 있다.
   잡덱 margin은 미지원이다.
 - 웹 canvas는 왼쪽/가운데 drag(놓을 때 한 번 제출), 화살표 50%/Shift 10% pan,
-  ± zoom, `Ctrl+A` fit, `f` frames를 지원한다. 레이어 `⋯`는 fill/pattern/선폭 편집,
+  ± zoom, `Ctrl+A` fit, `f` frames를 지원한다. 레이어 `⋯`는 fill/pattern/선폭을 편집한다.
+  오른쪽 drag는 우측 지배 이동이면 박스 확대, 좌측 지배 이동이면 축소다. 5 CSS px
+  이상 움직인 축만 배율에 참여하며 Escape로 취소한다. 드래그 중 렌더 요청은 없다.
   Label px는 6..96 device px다. `--labels`, `--no-frames`, `--label-font-px`는
   초기 표시 옵션이다. 일반 클릭/반복 클릭은 도형 선택/overlap 순환, Shift는 추가,
   Ctrl/Cmd는 toggle이다. Inspector의 Snap probe(m)는 기본 off인 vertex/edge 조회다.
@@ -192,8 +194,8 @@ Rust+내장 자산 전용 portable은 별도 `tools/make_web_portable.sh`로 조
   한 worker로 만든다. `--drc-cap`은 all에만 적용하며 명시 번호/범위는 잘리지 않는다.
   기존 waive를 읽기만 하고 각 PNG는 주석까지 staging한 뒤 교체한다. partial/라벨 잘림은
   정상 캡처로 내보내지 않는다. 표시 기본값/sidecar 격리/제한은 [M4 §10](../../docs/WEBUI_M4.ko.md#10-m4b-4-drc-오류별-png-캡처)을 따른다.
-- 웹 clip/download·주석 편집은 남아 있다. 자동 Python fallback이나
-  기존 launcher/portable 교체는 없다.
+- 웹 clip/download·주석 편집은 M4c/e에서 연결했으며 실제 파일 chooser/다운로드·게시와
+  현장 수용은 별도로 추적한다. 자동 Python fallback이나 기존 launcher/portable 교체는 없다.
 
 범위·차이·검증·다음 단계는 [M1a 기록](../../docs/WEBUI_M1A.ko.md)과 [M4 기록](../../docs/WEBUI_M4.ko.md)에 있다.
 웹 실행·브라우저 검증/남은 범위는 [M1b §9](../../docs/WEBUI_M1B.ko.md#9-m1b-3--기본-canvas-뷰어와-rust-실행-명령)를 따른다.

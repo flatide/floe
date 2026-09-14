@@ -411,6 +411,24 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     assert.equal(node('canvas').style.left,'0px');assert.equal(dragEdits(),beforeDrag+1);
     listeners.mouseup(mouse(42,41));assert.equal(dragEdits(),beforeDrag+1,'blur left a late mouseup edit');
     assert.equal(drcClicks.length,2,'pan or cancelled drag became a DRC click');
+    const right=(x,y,buttons=2)=>({...mouse(x,y),button:2,buttons});
+    node('viewport').mousedown(right(20,20));listeners.mousemove(right(60,50));
+    await wait(()=>!node('zoom-band').hidden);
+    assert.equal(node('zoom-band').style.left,'20px');assert.equal(node('zoom-band').style.width,'40px');
+    assert.match(node('zoom-band-hint').textContent,/Zoom in/);assert.equal(dragEdits(),beforeDrag+1);
+    node('viewport').keydown({key:'Escape',preventDefault(){}});assert(node('zoom-band').hidden);
+    listeners.mouseup(right(60,50,0));assert.equal(dragEdits(),beforeDrag+1);
+    node('overlays').value='none';node('overlays').onchange();
+    node('viewport').mousedown(right(20,20));listeners.mousemove(right(60,50));
+    await wait(()=>!node('zoom-band').hidden);listeners.mouseup(right(60,50,0));
+    const bandWire=second.sent.at(-1).body.navigation;
+    assert.deepEqual({...bandWire,end:null},{kind:'band',start:[.2,.25],end:null,axes:[true,true],outward:false});
+    assert(Math.abs(bandWire.end[0]-.6)<1e-15);assert.equal(bandWire.end[1],.625);
+    assert(node('zoom-band').hidden);assert.equal(drcClicks.length,2);await applied(false);
+    // Until the corresponding frame lands, an old frozen image is not a band anchor.
+    const afterBand=dragEdits();node('viewport').mousedown(right(20,20));listeners.mousemove(right(60,50));listeners.mouseup(right(60,50,0));
+    assert.equal(dragEdits(),afterBand);assert(node('zoom-band').hidden);
+    node('overlays').value='all';node('overlays').onchange();
     // Panel/element resize, including a height change without window.resize:
     // keep old pixels/overlay centered, request native dimensions exactly once.
     const beforeResize=dragEdits();viewportSize=[120,90];observers[0].fn();

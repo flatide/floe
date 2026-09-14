@@ -1,20 +1,33 @@
-/* Mouse pan is a temporary pixel translation; only release submits navigation. */
+/* Mouse pan/band previews are screen-only; only release submits navigation. */
 (function (root) {
     'use strict';
     function bind(port) {
         let drag = null, paint = null;
         function draw() {
             paint = null;
-            if (drag && drag.moved) { port.preview([-drag.dx, -drag.dy], true); }
+            if (drag && drag.band) { port.bandPreview(bandPreview(drag)); }
+            else if (drag && drag.moved) { port.preview([-drag.dx, -drag.dy], true); }
+        }
+        function bandPreview(d) {
+            return {start:d.start,end:d.end,outward:d.x-d.minX>d.maxX-d.x,dimensions:d.dimensions};
         }
         function cancel() {
             if (paint !== null) { port.cancelAnimationFrame(paint); paint = null; }
-            const had = !!drag; drag = null;
-            if (had) { port.preview(null, true); port.cursor(false); }
+            const had = drag; drag = null;
+            if (had) { if(had.band){port.bandPreview(null);}else{port.preview(null, true);} port.cursor(false); }
         }
         function update(event) {
             if (!drag) { return; }
             if (drag.stamp !== port.stamp() || !port.ready()) { cancel(); return; }
+            if (drag.band) {
+                if (port.bandReady && !port.bandReady()) { cancel(); return; }
+                const dx=Math.max(-drag.width/drag.dpr,Math.min(drag.width/drag.dpr,event.clientX-drag.x));
+                const dy=Math.max(-drag.height/drag.dpr,Math.min(drag.height/drag.dpr,event.clientY-drag.y));
+                if(!Number.isFinite(dx)||!Number.isFinite(dy)){cancel();return;}
+                drag.minX=Math.min(drag.minX,drag.x+dx);drag.maxX=Math.max(drag.maxX,drag.x+dx);
+                drag.dx=dx;drag.dy=dy;
+                drag.end=[drag.start[0]+dx*drag.dpr/drag.width,drag.start[1]+dy*drag.dpr/drag.height];return;
+            }
             const x = event.clientX - drag.x, y = event.clientY - drag.y;
             if (!drag.moved && Math.abs(x) <= 8 && Math.abs(y) <= 8) { return; }
             // Ctrl/Cmd was not a pan gesture before object picking. Opting in
@@ -25,10 +38,19 @@
             drag.dy = Math.max(-drag.height, Math.min(drag.height, Math.round(y * drag.dpr)));
         }
         port.viewport.addEventListener('mousedown', function (event) {
-            if (drag) { drag.plain = drag.unchorded = false; return; }
+            if (drag) { if(drag.band){cancel();}else{drag.plain = drag.unchorded = false;} return; }
             const box = !!(port.selectionMode && port.selectionMode());
-            if ((event.button !== 0 && event.button !== 1) || ((event.ctrlKey || event.metaKey) && !box && !port.objectClicks) || event.altKey || !port.ready()) { return; }
+            const band=event.button===2&&!!port.band;
+            if ((!band && event.button !== 0 && event.button !== 1) || ((event.ctrlKey || event.metaKey) && !box && !port.objectClicks) || event.altKey || !port.ready()) { return; }
             const d = port.dimensions();
+            if(band){
+                if((event.buttons!==undefined&&event.buttons!==2)||(port.bandReady&&!port.bandReady())){return;}
+                const r=port.viewport.getBoundingClientRect();
+                const start=[(event.clientX-r.left-(d.left||0))*d.dpr/d.pixels[0],(event.clientY-r.top-(d.top||0))*d.dpr/d.pixels[1]].map(v=>Math.max(0,Math.min(1,v)));
+                drag={band:true,button:2,stamp:port.stamp(),x:event.clientX,y:event.clientY,minX:event.clientX,maxX:event.clientX,
+                    dx:0,dy:0,width:d.pixels[0],height:d.pixels[1],dpr:d.dpr,start:start,end:start.slice(),dimensions:d};
+                event.preventDefault();port.viewport.focus();port.cursor(true);return;
+            }
             drag = {x: event.clientX, y: event.clientY, button: event.button, stamp: port.stamp(),
                 width: d.pixels[0], height: d.pixels[1], dpr: d.dpr, dx: 0, dy: 0, moved: false,
                 box: box, modifiers: [!!event.ctrlKey, !!event.metaKey, !!event.shiftKey],
@@ -39,8 +61,9 @@
         });
         port.window.addEventListener('mousemove', function (event) {
             if (!drag) { return; }
-            const mask = drag.button === 0 ? 1 : 4;
+            const mask = drag.button === 0 ? 1 : drag.button===2 ? 2 : 4;
             if (typeof event.buttons === 'number' && (event.buttons & mask) === 0) { cancel(); return; }
+            if(drag.band && typeof event.buttons==='number' && event.buttons!==mask){cancel();return;}
             if (typeof event.buttons === 'number' && event.buttons !== mask) { drag.plain = drag.unchorded = false; }
             update(event);
             if (drag && paint === null) { paint = port.requestAnimationFrame(draw); }
@@ -51,6 +74,15 @@
             if (!drag) { return; }
             if (paint !== null) { port.cancelAnimationFrame(paint); paint = null; }
             const done = drag;
+            if(done.band){
+                drag=null;port.bandPreview(null);port.cursor(false);
+                if(event.buttons!==undefined&&event.buttons!==0){return;}
+                const outward=done.x-done.minX>done.maxX-done.x;
+                const axes=[(outward?-done.dx:done.dx)>=5,Math.abs(done.dy)>=5];
+                if(axes.some(Boolean)){port.band({kind:'band',start:done.start,end:done.end,axes:axes,outward:outward});}
+                else if(Math.max(done.maxX-done.x,done.x-done.minX)>=5 && port.notice){port.notice('Zoom band cancelled');}
+                return;
+            }
             if (done.moved) { port.preview([-done.dx, -done.dy], true); }
             drag = null; port.preview(null, false); port.cursor(false);
             if (done.moved && (done.dx || done.dy)) {
@@ -78,10 +110,11 @@
             }
         });
         port.window.addEventListener('blur', cancel);
+        port.viewport.addEventListener('contextmenu', function(event){if(port.band){event.preventDefault();}});
         port.window.addEventListener('resize', cancel);
         port.window.addEventListener('pagehide', cancel);
         port.document.addEventListener('visibilitychange', function () { if (port.document.hidden) { cancel(); } });
-        return Object.freeze({cancel: cancel, active: function () { return drag !== null; }});
+        return Object.freeze({cancel: cancel, active: function () { return drag !== null; }, bandActive:function(){return !!drag&&!!drag.band;}});
     }
     if (typeof module !== 'undefined' && module.exports) { module.exports = {bind: bind}; }
     else { root.FloeGestures = {bind: bind}; }

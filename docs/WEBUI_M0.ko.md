@@ -270,6 +270,11 @@ UI-05 일부는 M4d-1에서 연결했다: 표시된 layout/annotation PNG 복사
 수용과 주석/설정 저장은 남는다([M4 §15](WEBUI_M4.ko.md)). 이미 그린 pixels만 합성하며
 exact clip이나 원본 재렌더 export로 간주하지 않는다.
 
+UI-01의 오른쪽 드래그 박스 줌은 M4g-1에서 연결했다([M4 §40](WEBUI_M4.ko.md)).
+GTK의 지배 excursion·5px 축 선택을 이관하고 world 계산은 Rust에 둔다. 현재 표시된
+뷰와 배율이 맞아야 시작하며 resize/revision/접속 변경은 취소한다. 나머지 단축키/
+minimap·CLI startup/single-instance·현장 입력 검증까지 완료한 의미는 아니다.
+
 UI-03의 layerprops 공통 codec·초기 가시성은 M4d-2에서 연결했다([M4 §16](WEBUI_M4.ko.md)).
 색/fill뿐 아니라 file/stem default의 visibility를 첫 frame 전에 적용하고, 명시된
 startup selection이 우선한다. M4d-3에서 열린 세션 Load/Save와 custom bitmap·fill/width

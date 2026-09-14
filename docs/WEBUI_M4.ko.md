@@ -3313,3 +3313,57 @@ Linux 실기 실행이나 릴리스 승인으로 보고하지 않는다. 경로�
 전체 로그는 `/private/tmp/floe-notices-battery.log`, 별도 검증은 같은 접두사의
 `msrv-final/clippy-installed/archive-check/native-test.log`다. 실제 venv는 보존하고
 검증용 `.venv` symlink만 제거했다. main의 기존 변경과 feature/jobdeck는 건드리지 않았다.
+
+## 40. M4g-1 — 오른쪽 드래그 박스 확대/축소
+
+입력 parity 대조에서 빠져 있던 GTK `_on_release`의 오른쪽 드래그를 이관했다.
+왼쪽/가운데 pan·도형/DRC 클릭·룰러·선택 박스의 기존 동작을 바꾸지 않는다.
+`Navigation::Band`와 strict `navigation.kind=band`가 시작/끝 화면 비율·참여 축·축소
+여부만 받는다. world bbox/중심·배율은 Rust가 계산하고 기존 state revision CAS와
+렌더 latest-only 경로를 탄다. 새 renderer 명령/worker/권한은 추가하지 않는다.
+
+- 오른쪽 버튼을 누른 뒤 **전체 수평 excursion**의 우측이 좌측 이상이면 확대,
+  좌측이 더 크면 축소다. 마지막 위치 부호로 방향을 뒤집지 않는다. 되돌아온 sliver를
+  과도한 확대 박스로 해석하지 않는다. 동률은 GTK처럼 확대다.
+- 방향에 맞는 수평 이동과 수직 절댓값 각각5 CSS px 이상인 축만 배율에 참여한다.
+  가늘고 긴 박스는 긴 축으로 동작하며 두 축 모두 미달이면 no-op이다. 보였던 박스가
+  되접혀 취소되면 안내한다. DPR은 제스처 좌표 변환에만 쓰고 world 좌표를 반올림하지 않는다.
+- 흰1 device px 밴드와 방향 안내만 rAF로 표시한다. 이동 중 네트워크/geometry 렌더와
+  큰 bitmap 복사는 없다. Overlay none에서도 밴드는 남으며 release에 한 번만 제출한다.
+  band zoom 대기 중 기존 픽셀은 기존 frozen viewport 경로로 유지한다.
+- 실제 표시 프레임/착지 crop이 현재 bbox·배율과 맞아야 시작한다. 과거 frozen frame에서
+  새 상태를 기준으로 박스를 계산하지 않는다. view/revision/epoch·resize(패널 포함),
+  blur/hidden/pagehide·버튼 상실·chord와 Escape는 밴드/예약 paint를 취소하고 늦은 release를
+  실행하지 않는다. wheel은 제스처 중 무시하고 단순 오른쪽 클릭은 inert다.
+- 기존 mouse pan과 마찬가지로 드래그 delta는 축마다 한 viewport까지다. 브라우저
+  바깥 무제한 drag나 GTK의 전역 `_clamp_view`(최소/fit 배율·다이 경계) 전체 이관은 아니다.
+  Rust의 기존 finite/좌표±2^62·16Mpx 유효성 검사를 유지하며 거부 시 현재 상태를 보존한다.
+
+`validate_zoom_band.py`는 GTK의 **실제** `_track_band`/`_on_release`를 AST로 읽어 실행하고,
+같은 입력을 production `gestures.js`에 전달한 뒤 Rust DTO/Viewport 결과를 비교한다.
+352개 고정/seeded 케이스, DPR1/1.25/2/2.5, 음수·half-DBU 위치, 양방향/동률/되돌림,
+가로·세로/얇은 박스/no-op을 포함한다. 비교 범위는 GTK의 **clamp 전** 좌표/배율이다.
+개발 gate만 Python/Node를 쓰며 Rust 앱의 실행 의존성은 아니다. 전체 battery에 연결했다.
+
+JS 단위/통합은 rAF·release1회,5px 임계·취소·stale/과거 화면 거부·숨김 overlay에서도
+밴드 표시·기존 클릭/pan 보존을 검사한다. native WS gate는 PNG/raw의 확대→축소
+바이트 복원, 잘못된 범위/낡은 revision 거부와 재접속을 검사한다.
+이 단계는 M4 전체나 현장 Firefox/ETX 입력 수용 완료를 뜻하지 않는다.
+
+로컬 Chrome에서 별도 합성 valmini 사본의 첫 화면·margin crop과 조작 안내를
+실제 표시해 확인했다. End session 뒤 서버 exit0·접속 파일 제거와 테스트 탭 닫기를
+확인했다. 이 세션은 공유 기본값/DRC review 게시·파일 다운로드를 하지 않았다.
+브라우저 제어 지연으로 **실제 오른쪽 버튼 드래그의 시각/입력 수용은 미검증**이며,
+이를 production JS/GTK/Rust 대조352건과 실제 native WS gate 통과로 대체하지 않는다.
+테스트의 fit bbox 왕복에는 부동소수점 반올림 허용 오차를 적용하지만,
+PNG/raw payload 왕복 비교는 계속 바이트 완전 일치다.
+
+검증: 새 합성 valmini 환경에서 전체 `sh tools/validate_rust.sh`가 exit0 /
+`RUST VALIDATION: ALL OK`로 완료됐다. app-core216·web60·HTTP12,
+GTK/JS/Rust 입력352건·native band/margin/연속 입력 스트림, ES2017/전체 UI,
+jobdeck80·renderer46와 KLayout13 PX+2 phase-exact+14 style(jobs1/8)을 포함한다.
+변경 Rust 파일의 scoped rustfmt 및 app-core/web/app의 `--no-deps --all-targets`
+clippy `-D warnings`도 통과했다. 기존 의존 패키지의 tiler/VFS 경고는 별도다.
+최소 지원 Rust1.89에서도 app-core216·web60, GTK/JS/Rust352건과 실제 native
+band/margin/연속 입력 스트림3건을 통과했다. 새 의존성·native 호환 버전 변경은 없다.
+검증용 `.venv` symlink만 제거했으며 기존 가상환경, main의 수정 및 feature/jobdeck은 보존했다.

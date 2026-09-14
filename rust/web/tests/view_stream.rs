@@ -3,6 +3,72 @@ include!("support/view_harness.rs");
 
 #[tokio::test]
 #[ignore = "run tools/validate_view_stream.py with a private synthetic fixture"]
+async fn native_box_zoom_round_trip_is_pixel_exact_and_revision_checked() {
+    for raw in [true, false] {
+        let h = Harness::start(raw).await;
+        let login = h.login().await;
+        let (mut ws, hello, _) = h.connect(&login).await;
+        let (first, original) = frame(&mut ws).await;
+        ack(&mut ws, &hello, 1, &first).await;
+        let before = h.controller.snapshot();
+        for (seq, base, nav) in [
+            (
+                2,
+                "1",
+                json!({"kind":"band","start":[0.25,0.25],"end":[0.75,0.75],"axes":[true,true],"outward":false}),
+            ),
+            (
+                4,
+                "2",
+                json!({"kind":"band","start":[0.75,0.5],"end":[0.25,0.5],"axes":[true,false],"outward":true}),
+            ),
+        ] {
+            ws.send(Message::Text(json!({"type":"view.set","seq":seq.to_string(),"view_id":hello["view_id"],
+                "connection_epoch":hello["connection_epoch"],"base_state_rev":base,"body":{"navigation":nav}}).to_string().into())).await.unwrap();
+            assert_eq!(
+                until_reply(&mut ws, seq, "accepted").await["state_rev"],
+                if seq == 2 { "2" } else { "3" }
+            );
+            let (f, bytes) = frame(&mut ws).await;
+            assert_eq!(f["render_key"], first["render_key"]);
+            if seq == 4 {
+                assert_eq!(bytes, original, "box zoom in/out changed native pixels");
+            }
+            ack(&mut ws, &hello, seq + 1, &f).await;
+        }
+        let restored = h.controller.snapshot().state.viewport;
+        let initial = before.state.viewport;
+        assert_eq!(
+            (restored.width, restored.height),
+            (initial.width, initial.height)
+        );
+        // Fit has a non-binary aspect ratio. In/out world coordinates can
+        // round by a few ULPs; native PNG/raw pixels above must remain exact.
+        let tolerance = 32. * f64::EPSILON * initial.bbox.iter().fold(1_f64, |n, x| n.max(x.abs()));
+        for (got, expected) in restored.bbox.iter().zip(initial.bbox.iter()) {
+            assert!((got - expected).abs() <= tolerance);
+        }
+        for (seq, base, end, code) in [
+            (6, "1", 0.5, "stale_state"),
+            (7, "3", 9.0, "invalid_request"),
+        ] {
+            ws.send(Message::Text(json!({"type":"view.set","seq":seq.to_string(),"view_id":hello["view_id"],
+                "connection_epoch":hello["connection_epoch"],"base_state_rev":base,"body":{"navigation":
+                {"kind":"band","start":[0.25,0.25],"end":[end,0.5],"axes":[true,true],"outward":false}}}).to_string().into())).await.unwrap();
+            assert_eq!(until_reply(&mut ws, seq, "error").await["code"], code);
+            assert_eq!(h.controller.snapshot().state_rev, 3);
+        }
+        let (mut reconnect, _, state) = h.connect(&login).await;
+        assert_eq!(state["state_rev"], "3");
+        let (_, bytes) = frame(&mut reconnect).await;
+        assert_eq!(bytes, original);
+        h.shutdown().await;
+    }
+    println!("RUST BAND STREAM: ALL OK (PNG/raw in-out bytes, stale/invalid rejection, reconnect)");
+}
+
+#[tokio::test]
+#[ignore = "run tools/validate_view_stream.py with a private synthetic fixture"]
 async fn native_frames_reconnect_credit_errors_and_shutdown() {
     for raw in [true, false] {
         let h = Harness::start(raw).await;

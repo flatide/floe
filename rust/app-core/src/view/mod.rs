@@ -147,6 +147,47 @@ impl Viewport {
                     self.height,
                 )
             }
+            Navigation::Band {
+                start,
+                end,
+                axes,
+                outward,
+            } => {
+                // Screen fractions only. Gesture direction and the 5-CSS-px
+                // threshold are input classification; all world math stays here.
+                if !start
+                    .iter()
+                    .all(|v| v.is_finite() && (0. ..=1.).contains(v))
+                    || !end
+                        .iter()
+                        .enumerate()
+                        .all(|(i, v)| v.is_finite() && (start[i] - 1. ..=start[i] + 1.).contains(v))
+                {
+                    return Err(Error::input("zoom band is outside one viewport"));
+                }
+                let spans = [(end[0] - start[0]).abs(), (end[1] - start[1]).abs()];
+                if axes
+                    .iter()
+                    .enumerate()
+                    .any(|(i, used)| *used && spans[i] == 0.)
+                {
+                    return Err(Error::input("zoom band has an empty active axis"));
+                }
+                if !axes[0] && !axes[1] {
+                    return Ok(*self);
+                }
+                let factor = (0..2)
+                    .filter(|i| axes[*i])
+                    .map(|i| if outward { 1. / spans[i] } else { spans[i] })
+                    .fold(0_f64, f64::max);
+                Self::centered(
+                    x0 + (start[0] + end[0]) * sx / 2.,
+                    y1 - (start[1] + end[1]) * sy / 2.,
+                    sx * factor,
+                    self.width,
+                    self.height,
+                )
+            }
         }
     }
     fn resize(&self, width: u32, height: u32) -> Result<Self> {
@@ -163,9 +204,26 @@ impl Viewport {
 #[derive(Clone, Copy, Debug)]
 pub enum Navigation {
     Fit,
-    Goto { center_um: [f64; 2], width_um: f64 },
-    Pan { x: f64, y: f64, snap: bool },
-    Zoom { factor: f64, anchor: [f64; 2] },
+    Goto {
+        center_um: [f64; 2],
+        width_um: f64,
+    },
+    Pan {
+        x: f64,
+        y: f64,
+        snap: bool,
+    },
+    Zoom {
+        factor: f64,
+        anchor: [f64; 2],
+    },
+    /// Right-button box zoom. Only axes exceeding input jitter take part.
+    Band {
+        start: [f64; 2],
+        end: [f64; 2],
+        axes: [bool; 2],
+        outward: bool,
+    },
 }
 #[derive(Clone, Copy, Debug)]
 pub enum Depth {
@@ -872,6 +930,48 @@ mod tests {
         assert_eq!(z.bbox, [-100., 70., 540., 550.]);
         let r = v.resize(1600, 1200).unwrap();
         assert_eq!(r.bbox, [-500., -350., 1100., 850.]);
+    }
+    #[test]
+    fn band_zoom_uses_only_spanned_axes_and_rejects_invalid_inputs() {
+        let v = Viewport::new([-10.9375, -50., 789.0625, 550.], 800, 600).unwrap();
+        let band = |start, end, axes, outward| {
+            v.navigate(
+                Navigation::Band {
+                    start,
+                    end,
+                    axes,
+                    outward,
+                },
+                [0.; 4],
+                1.,
+            )
+        };
+        let inside = band([0.25, 0.25], [0.75, 0.75], [true, true], false).unwrap();
+        assert_eq!(inside.bbox, [189.0625, 100., 589.0625, 400.]);
+        assert_eq!(
+            band([0.75, 0.5], [0.25, 0.5], [true, false], true)
+                .unwrap()
+                .bbox,
+            [-410.9375, -350., 1189.0625, 850.]
+        );
+        assert_eq!(
+            band([0.5, 0.25], [0.5, 0.75], [false, true], false).unwrap(),
+            inside
+        );
+        assert_eq!(
+            band([0.5, 0.5], [0.5, 0.5], [false, false], false).unwrap(),
+            v
+        );
+        for (start, end, axes, out) in [
+            ([f64::NAN, 0.5], [0.5, 0.5], [true, true], false),
+            ([0.5, 0.5], [f64::INFINITY, 0.5], [true, false], false),
+            ([-0.1, 0.5], [0.5, 0.5], [true, false], false),
+            ([0.5, 0.5], [1.51, 0.5], [true, false], false),
+            ([0.5, 0.5], [0.5, 0.7], [true, true], false),
+            ([0., 0.], [1e-300, 0.], [true, false], true),
+        ] {
+            assert!(band(start, end, axes, out).is_err());
+        }
     }
     #[test]
     fn hostile_or_unrepresentable_coordinates_are_rejected() {
