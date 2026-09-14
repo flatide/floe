@@ -17,7 +17,65 @@ from floe.jobdeck.viewer import DeckCache
 from floe.jobdeck.render import DeckRenderWorker
 from floe.shots import ShotRunner
 from floe import fillpat
-from validate_layerprops import visible_layers, live_properties
+from validate_layerprops import visible_layers, live_properties, gtk_view
+
+
+def mode_transitions(deck, work):
+    """Actual GTK visibility methods and DeckCache mode reload, not a restated rule."""
+    def load_gui(cache):
+        props = Path(cache.props_src + ".layerprops").read_text()
+        return gtk_view(cache.meta, fillpat.parse_layerprops(props))
+
+    cases = []
+    for selection in (None, [2, 3]):
+        cache = DeckCache(str(deck), mode="chip", ids=selection)
+        steps = []
+        try:
+            cache.load()
+            gui = load_gui(cache)
+            for i, (mode, edit) in enumerate([
+                    ("level", "first"), ("chip", "keep"), ("layer", "keep"),
+                    ("level", "first"), ("layer", "keep"), ("chip", "keep"),
+                    ("level", "none"), ("chip", "all"), ("layer", "keep"),
+                    ("chip", "none"), ("layer", "keep"), ("level", "all")]):
+                heads = set(gui._layer_groups)
+                leaves = sorted(set(gui._layer_rows) - heads)
+                assert leaves
+                if edit != "keep":
+                    gui.visible = set(leaves[:1] if edit == "first" else
+                                      leaves if edit == "all" else [])
+                    gui._sync_jobdeck_groups()
+                before = sorted(gui.visible - heads)
+                cache.save_visibility(gui.visible)
+                cache.set_mode(mode)
+                gui = load_gui(cache)
+                gui.visible = cache.restore_visibility(gui.visible)
+                gui._sync_jobdeck_groups()
+                visible = sorted(gui.visible - set(gui._layer_groups))
+                # Deliberately off-center and not a fit: mode edits must not
+                # replace the camera with the source bbox.
+                b = [v * cache.meta["dbu"] for v in cache.meta["bbox"]]
+                box = [b[0] - 13.5, b[1] + 11.25, b[2] + 37.75, b[3] + 59.5]
+                runner = ShotRunner(cache)
+                out = work / ("mode-" + str(selection) + "-" + str(i) + ".png")
+                try:
+                    png, result = runner.capture(box, 103, 91, layers=visible)
+                    assert not result.get("over_budget_pages")
+                    assert not result.get("labels_truncated")
+                    out.write_bytes(png)
+                finally:
+                    runner.stop()
+                steps.append({"mode": mode, "before": before, "visible": visible,
+                              "bbox": box, "png": str(out)})
+            # The PNG oracle must discriminate visibility/mode, not pass on
+            # a collection of identically empty offscreen frames.
+            assert len({Path(step["png"]).read_bytes() for step in steps}) >= 3
+            assert any(not step["visible"] for step in steps)
+            assert any(step["visible"] for step in steps)
+            cases.append({"source": str(deck), "levels": selection, "steps": steps})
+        finally:
+            cache.close()
+    return cases
 
 
 def compare(source, work, env, tag, args, code=0):
@@ -146,15 +204,20 @@ def main():
                         cache.close()
         oracle = work / "dataset-oracle.json"
         oracle.write_text(json.dumps(cases))
+        mode_oracle = work / "mode-oracle.json"
+        with patch.dict(os.environ, env, clear=True):
+            mode_oracle.write_text(json.dumps(mode_transitions(deck, work)))
         cargo = os.environ.get("CARGO", str(Path.home() / ".cargo/bin/cargo"))
-        p = subprocess.run([cargo, "test", "--offline", "-p", "floe-app-core", "--test",
+        p = subprocess.run([cargo, "test", "--offline", "--locked", "-p", "floe-app-core", "--test",
                             "jobdeck_dataset", "--", "--ignored", "--nocapture"],
                            cwd=ROOT / "rust", env=dict(os.environ, FLOE_APP_DATASET_ORACLE=str(oracle),
+                                                     FLOE_APP_MODE_ORACLE=str(mode_oracle),
                                                      FLOE_RENDERD_BIN=str(RENDERD)),
-                           text=True, capture_output=True, timeout=90)
+                           text=True, capture_output=True, timeout=180)
         assert p.returncode == 0, p.stdout + p.stderr
         assert "RUST APP DECK DATASET: ALL OK (6 cases)" in p.stdout
         assert "+ 6 managed controllers" in p.stdout
+        assert "RUST DECK MODE PREPARATION: ALL OK (24 GTK transitions + native PNGs)" in p.stdout
         for props in work.glob("*.layerprops"):
             props.unlink()
 
@@ -176,7 +239,7 @@ def main():
         fake_worker_tests(deck, work, env, png, info["metadata"]["dbu"], deck=True)
         assert not list(temp.iterdir()), "worker workspace leaked"
         assert all(digest(path) == before for path, before in snapshots.items())
-    print("RUST APP DECK READ: ALL OK (23 PNG/report pairs + 6 API cases + 8 signal phases)")
+    print("RUST APP DECK READ: ALL OK (23 PNG/report pairs + 6 API cases + 24 GTK mode transitions/native PNGs + 8 signal phases)")
 
 
 if __name__ == "__main__":

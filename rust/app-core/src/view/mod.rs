@@ -2,6 +2,7 @@
 //! rendering and latest-only queries are coalesced independently. No HTTP or
 //! browser floating-point world math.
 mod controller;
+pub mod deck_mode;
 pub mod margin;
 pub mod minimap;
 mod properties;

@@ -3,9 +3,12 @@ use floe_app_core::{
     jobdeck::color::Mode,
     managed::{Limits, ManagedDataset, Resources},
     render::{require_complete, RenderOptions, RenderSession},
-    shots::Shot,
+    shots::{Detail, Shot, Thin},
     styles,
-    view::{Model, Phase, ViewController, ViewState, Viewport},
+    view::{
+        deck_mode::DeckModeMemory, LayerIsolation, Model, Patch, Phase, StyleDelta, ViewController,
+        ViewState, Viewport,
+    },
 };
 use floe_worker_client::{Fill, Layers};
 use serde_json::{json, Value};
@@ -221,4 +224,218 @@ fn snapshots_styles_and_native_frames_match_python() {
         controller.close().unwrap();
     }
     println!("RUST APP DECK DATASET: ALL OK (6 cases) + 6 managed controllers");
+}
+
+fn selected_leaves(state: &ViewState, data: &ManagedDataset) -> Vec<(u32, u32)> {
+    match &state.layers {
+        Layers::All => {
+            let Dataset::Deck(d) = &data.dataset else {
+                panic!("deck required")
+            };
+            state
+                .styles
+                .iter()
+                .filter(|s| {
+                    !d.metadata
+                        .layers
+                        .iter()
+                        .any(|r| r.jobdeck_head && (r.layer as u32, r.datatype as u32) == s.layer)
+                })
+                .map(|s| s.layer)
+                .collect()
+        }
+        Layers::None => vec![],
+        Layers::Only(p) => p.clone(),
+    }
+}
+
+#[test]
+#[ignore = "run tools/validate_app_deck_render.py for GTK mode/PNG oracle"]
+fn deck_mode_preparation_matches_gtk_and_native_frames() {
+    let cases: Vec<Value> = serde_json::from_slice(
+        &std::fs::read(std::env::var_os("FLOE_APP_MODE_ORACLE").expect("mode oracle required"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(cases.len(), 2);
+    let flag = Arc::new(AtomicUsize::new(0));
+    let resources = Resources::new(Limits::default()).unwrap();
+    let mut count = 0;
+    for case in &cases {
+        let open = |mode, levels| {
+            ManagedDataset::open(
+                &resources,
+                Path::new(case["source"].as_str().unwrap()),
+                levels,
+                mode,
+                &flag,
+            )
+            .unwrap()
+        };
+        let levels = serde_json::from_value(case["levels"].clone()).unwrap();
+        let mut current = open(Mode::Chip, levels);
+        let mut model = Model::new(&current).unwrap();
+        let mut state = ViewState::initial(&model, 103, 91).unwrap();
+        let mut memory = DeckModeMemory::default();
+        let steps = case["steps"].as_array().unwrap();
+        assert_eq!(steps.len(), 12);
+        let bounds: [f64; 4] = serde_json::from_value(steps[0]["bbox"].clone()).unwrap();
+        state.viewport = Viewport::new(bounds.map(|n| n / model.dbu), 103, 91).unwrap();
+        state.depth = Some(3);
+        state.detail = Detail::High;
+        state.thin = Thin::Keep;
+        state.frames = true;
+        state.font_px = 20;
+        state.mono = true;
+        for step in steps {
+            let before: Vec<(u32, u32)> = serde_json::from_value(step["before"].clone()).unwrap();
+            let layers = if before.is_empty() {
+                Layers::None
+            } else {
+                Layers::Only(before)
+            };
+            // Empty visibility is a checkbox operation, not a valid isolate.
+            // Other cases exercise dropping the old namespace's restore handle.
+            let patch = if layers == Layers::None {
+                Patch {
+                    layers: Some(layers),
+                    ..Default::default()
+                }
+            } else {
+                Patch {
+                    layer_isolation: Some(LayerIsolation::Set(layers)),
+                    ..Default::default()
+                }
+            };
+            state = state.edit(&model, patch).unwrap();
+            state = state
+                .edit(
+                    &model,
+                    Patch {
+                        style_deltas: vec![StyleDelta {
+                            layer: model.styles[0].layer,
+                            color: Some([11, 22, 33, 255]),
+                            width: Some(7),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let target = open(
+                Mode::parse(step["mode"].as_str().unwrap()).unwrap(),
+                serde_json::from_value(case["levels"].clone()).unwrap(),
+            );
+            let old_memory = memory.clone();
+            let old_state = state.clone();
+            let usage = resources.usage();
+            assert!(memory.prepare(&current, &model, &state, &current).is_err());
+            let mut invalid = state.clone();
+            invalid.viewport.bbox[0] = f64::NAN;
+            assert!(memory.prepare(&current, &model, &invalid, &target).is_err());
+            let wrong_model = Model::new(&target).unwrap();
+            assert!(memory
+                .prepare(&current, &wrong_model, &state, &target)
+                .is_err());
+            let next = memory.prepare(&current, &model, &state, &target).unwrap();
+            assert_eq!(memory, old_memory, "preparation must not commit memory");
+            assert_eq!(
+                state, old_state,
+                "preparation must not edit the current view"
+            );
+            assert_eq!(
+                resources.usage(),
+                usage,
+                "preparation must not start a worker"
+            );
+            assert_eq!(next.model.dataset_revision, target.revision);
+            assert_eq!(next.state.viewport, state.viewport, "camera must not refit");
+            assert_eq!(next.state.depth, state.depth);
+            assert_eq!(next.state.detail, state.detail);
+            assert_eq!(next.state.thin, state.thin);
+            assert_eq!(next.state.frames, state.frames);
+            assert_eq!(next.state.labels, state.labels);
+            assert_eq!(next.state.font_px, state.font_px);
+            assert_eq!(next.state.mono, state.mono);
+            assert!(!next.state.layers_isolated());
+            assert_eq!(*next.state.styles, target.dataset.styles(false).unwrap());
+            assert_eq!(
+                json!(selected_leaves(&next.state, &target)),
+                step["visible"],
+                "GTK mode {}",
+                step["mode"]
+            );
+            let expected_box: [f64; 4] = serde_json::from_value(step["bbox"].clone()).unwrap();
+            assert_eq!(
+                next.state.viewport.bbox,
+                expected_box.map(|n| n / next.model.dbu)
+            );
+
+            // Archival style/depth for the independent Python ShotRunner
+            // oracle. The mode-prepared visibility and off-center camera stay.
+            let mut shot = next.state.clone();
+            shot.detail = Detail::Exact;
+            shot.depth = None;
+            shot.frames = false;
+            shot.mono = false;
+            shot.styles = Arc::new(target.dataset.styles(true).unwrap());
+            let mut options = RenderOptions::local().unwrap();
+            options.decode_jobs = 2;
+            options.raster_jobs = 2;
+            options.raw = false;
+            let mut controller =
+                ViewController::start(&resources, Arc::clone(&target), options, shot).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let frame = loop {
+                let snapshot = controller.snapshot();
+                assert_ne!(snapshot.phase, Phase::Failed, "{:?}", snapshot.failure);
+                if let Some(frame) = controller.latest().filter(|f| f.frame.final_frame) {
+                    break frame;
+                }
+                assert!(Instant::now() < deadline, "deck mode frame deadline");
+                std::thread::sleep(Duration::from_millis(2));
+            };
+            assert_eq!(
+                frame.frame.bytes,
+                std::fs::read(step["png"].as_str().unwrap()).unwrap(),
+                "mode PNG {}",
+                step["mode"]
+            );
+            controller.close().unwrap();
+            assert_eq!(resources.usage(), usage);
+            memory = next.memory;
+            model = next.model;
+            state = next.state;
+            current = target;
+            count += 1;
+        }
+        let other = if case["levels"].is_null() {
+            Some([2, 3].into_iter().collect())
+        } else {
+            None
+        };
+        let other_selection = open(Mode::Chip, other);
+        assert!(
+            memory
+                .prepare(&current, &model, &state, &other_selection)
+                .is_err(),
+            "cannot carry visibility into a different level selection"
+        );
+        let other_model = Model::new(&other_selection).unwrap();
+        let other_state = ViewState::initial(&other_model, 103, 91).unwrap();
+        let other = if case["levels"].is_null() {
+            Some([2, 3].into_iter().collect())
+        } else {
+            None
+        };
+        let other_target = open(Mode::Level, other);
+        assert!(
+            memory
+                .prepare(&other_selection, &other_model, &other_state, &other_target)
+                .is_err(),
+            "saved memory cannot be reused by another level selection"
+        );
+    }
+    assert_eq!(count, 24);
+    println!("RUST DECK MODE PREPARATION: ALL OK (24 GTK transitions + native PNGs)");
 }

@@ -281,6 +281,8 @@ UI-01/05의 M4g-3은 `<`/`>` depth 상대 이동, DRC comma/period 순회와 n/w
 진입이다([M4 §42](WEBUI_M4.ko.md)). 주석·waive 파일은 여전히 명시 승인만으로 게시한다.
 q 종료 확인은 M4g-4에서 복원했다([M4 §43](WEBUI_M4.ko.md)). Ctrl+, 잡덱 모드
 전환 및 CLI startup/single-instance는 남는다.
+M4g-5a는 UI-03 잡덱 모드 전환의 Rust 상태 준비만 추가한다([M4 §44](WEBUI_M4.ko.md)).
+GTK 가시성/PNG 24경로를 비교하지만 worker 교체·모드 API·Ctrl+, 연결 완료는 아니다.
 
 UI-03의 layerprops 공통 codec·초기 가시성은 M4d-2에서 연결했다([M4 §16](WEBUI_M4.ko.md)).
 색/fill뿐 아니라 file/stem default의 visibility를 첫 frame 전에 적용하고, 명시된

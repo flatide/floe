@@ -3519,3 +3519,49 @@ web60·HTTP12를 통과했다. 최종 자산으로 release 재빌드와 Chrome �
 `floe-exit-cli.log`, `floe-exit-msrv.log`, `floe-exit-clippy-final.log`다.
 main의 기존 수정과 feature/jobdeck worktree는 보존했다. Firefox/ETX 현장 수용과
 잡덱 모드 전환·CLI startup/single-instance·공유 정책의 나머지는 여전히 미완료다.
+
+## 44. M4g-5a — 잡덱 모드 전환의 상태 준비와 GTK 오라클
+
+열린 jobdeck의 level/chip/source-layer 전환에 앞서 `view::deck_mode`를 추가했다.
+**상태 준비만** 담당한다. 아직 HTTP/API·worker 교체·Ctrl+, 또는 모드 선택 UI에
+연결하지 않았으므로 현 사용자는 새 open에서만 mode를 고를 수 있다. 렌더러·색인
+형식과 native 호환0.12.87은 바꾸지 않는다.
+
+- `DeckModeMemory`는 로드한 덱/선택 레벨의 수명에 귀속된다. GTK `save_visibility`/
+  `restore_visibility`처럼 level/chip은 같은 leaf namespace를 공유하고 raw source
+  layer는 독립적으로 기억한다. 최초 raw 진입은 그 모드의 기본 가시성을 읽는다.
+  부모 행을 전송해 일부 숨긴 칩이 다시 켜지지 않도록 effective leaf 집합을 이관한다.
+- 새 모드의 `Model`·`ViewState`를 준비하면서 DBU bbox와 pixel dimensions를 그대로
+  유지한다. depth/detail/thin/frames/labels/font도 유지하며 카메라를 fit으로 바꾸지 않는다.
+  모드별 layerprops 색·채움·폭/상속은 새로 읽는다. 이전 raw 숫자 key의 스타일을
+  다른 의미의 덱 key에 복사하지 않는다. 이전 isolate의 restore handle도 제거한다.
+  GTK의 generic `_apply_cache`가 mono를 끄는 것과 달리 **mono는 유지**한다.
+- 같은 덱 경로/선택 레벨/source size·mtime, DBU/bbox와 현재 model revision을
+  확인한다. 다른 selection·좌표계·현재 model, invalid view는 거부하고 같은 mode는
+  호출자가 no-op으로 처리하도록 한다. 이 검사는 캐시 hot-reload 불변성/권한 검사를
+  대신하지 않는다. 후속 service는 등록 source 검증과 revision CAS가 별도로 필요하다.
+- 준비는 기존 view/memory를 수정하지 않고 렌더 permit을 예약하거나 worker를 시작하지
+  않는다. 후속 service가 성공한 전환에서만 반환된 state/memory를 함께 설치해야 한다.
+  기본 decode8+raster4 worker 둘을 겹쳐 시작하면16 CPU admission을 넘으므로, 안전한
+  순차 교체·실패/취소 처리·이전 view/query/게시 토큰 무효화가 다음 구현 범위다.
+
+`validate_app_deck_render.py`에 실제 GTK 가시성 메서드와 Python `DeckCache.set_mode`
+오라클을 추가했다. 전체/선택[2,3] 로드 각각12단계, 총24단계의 모드 왕복에서 일부
+칩만 표시·전체 숨김·전체 표시·독립 raw 가시성을 비교한다. 매번 off-center camera의
+103×91 native PNG도 Python `ShotRunner` 결과와 바이트 대조한다. 이는 전환 직후
+archival exact 출력 오라클이며 HTTP 연결/worker handoff·브라우저 수용 테스트는 아니다.
+뷰 옵션·기본 스타일 복원·isolate 초기화·prepare 무변경·오류 시 상태 보존도 단언한다.
+다른 selection으로 memory를 재사용하는 경우를 거부하며, 새 ignored integration test는
+기존 전체 배터리 드라이버가 실행 횟수24와 성공 marker를 필수 확인한다.
+
+집중 GTK/native 오라클은23 PNG/report 쌍+6 API+24 mode PNG+8 signal 단계를 통과했다.
+픽셀 비교가 모두 빈 화면에서 통과하지 않도록 각 selection의 PNG가 최소3종류이고
+숨김/표시 전환이 모두 존재함도 확인한다. 전체 `sh tools/validate_rust.sh`는 exit0,
+`RUST VALIDATION: ALL OK`다. core219·web60·HTTP12, GTK depth200·미니맵180·band352,
+jobdeck80·renderer46와 KLayout13 PX+2 phase-exact+14 style(jobs1/8)을 통과했다.
+Rust1.89에서도 core219와 GTK/native24전환 포함 드라이버를 통과했다. 변경 Rust 파일의
+scoped rustfmt와 app-core clippy `--no-deps --all-targets -D warnings`도 통과했다.
+로그는 `/private/tmp/floe-deck-mode-battery.log`, `floe-deck-mode-oracle.log`,
+`floe-deck-mode-msrv.log`, `floe-deck-mode-clippy-final.log`다. 기존 dependency/GTK/Pillow
+경고는 별도다. 실제 브라우저의 모드 전환·현장 Firefox/ETX와 실칩 jobdeck 수용을 완료한
+단계는 아니며, main의 기존 수정과 feature/jobdeck 작업 트리는 보존했다.
