@@ -302,14 +302,23 @@ floe-index occupancy <outdir> [--layer L/D] [--level N] [--dump]  # 검사
   않는다(KLayout region 판정). hull이 거부되는 path(퇴화 spine·U-turn)가 있는
   레이어는 `none:unsupported`로 게시되어 페이지 경로가 그린다(2차 리뷰 P1-2:
   건너뛰고 ok로 두면 도형이 조용히 사라진다); 개수는 `paths_skipped`로 로그.
-- 레이어 병렬(`--jobs`): 레이어마다 재귀 레이어 존재 집합으로 가지치기한 순회
-  한 번. 배치 반복의 멤버는 열거하면서 하나씩 charge·walk한다(오프셋 벡터 없음,
-  2차 리뷰 P1-1). 상위 레벨은 OR 풀링, 격자가 64 × 64 이하가 될 때까지.
+- 병렬(`--jobs`, 2026-09-14): 레이어는 순서대로, 한 레이어의 마킹을 `--jobs`
+  스레드가 나눠 맡는다. top 셀의 레코드 목록(조각)과 배치의 멤버 범위가 unit이고,
+  top이 단일 배치(die)뿐이면 최대 4단계 내려가 unit을 확보한다(4 × jobs개 목표).
+  스레드마다 자기 level 0 비트맵에 마킹하고 끝에 OR로 합치므로 결과 파일은
+  스레드 수와 무관하게 바이트 동일하다(unit은 레코드의 반복을 쪼개지 않고 단일
+  배치만 통과하므로 charge도 같다; `none:work`일 때의 work 값만 다를 수 있다).
+  작업 예산은 레이어 공유 카운터(스레드가 4,096 charge마다 flush, 초과 폭 ≤ jobs ×
+  4,096). 메모리 = jobs × level 0 한 장. 레이어마다 재귀 레이어 존재 집합으로
+  가지치기하고, 존재하지 않는 레이어는 순회 없이 `empty`. 배치 반복의 멤버는
+  열거하면서 하나씩 charge·walk한다(오프셋 벡터 없음, 2차 리뷰 P1-1). 상위 레벨은
+  OR 풀링, 격자가 64 × 64 이하가 될 때까지. 로그 `[vfs] occupancy cell= … ok=K
+  empty=E jobs=N SIZE (Ts)`.
 - 상한(레이어 단위, 근사 저장 없음): level 0 셀 수 > `--occupancy-max-cells`
   (기본 2^30)면 모든 레이어 `none:cells`(파일은 만들어져 이유를 남김);
   마킹 작업(켠 셀 + 멤버 + 변 행) > `--occupancy-max-work`(기본 2^31)면 그
   레이어 `none:work`; 누적 비트맵 바이트가 `--occupancy-max-bytes`(기본 1 GiB)를
-  넘는 순서부터 `none:size`. 세 옵션은 게이트용 명시 CLI 상태다(`--kill-at`과
+  넘는 순서부터 `none:size`(`empty`·`none:*` 레이어는 자리를 차지하지 않는다). 세 옵션은 게이트용 명시 CLI 상태다(`--kill-at`과
   같은 규칙, 환경변수 없음).
 - 게시: `design.ovo.tmp` 작성·fsync 뒤 rename. `--kill-at occupancy-tmp`는 rename
   직전에 죽는 게이트 훅(이전 파일 보존, tmp 잔존). 다음 실행은 시작 시 tmp를

@@ -101,7 +101,7 @@ HDR = "<8sIdQQq4qII"     # magic version unit size mtime cell bbox levels layers
 LAYER = "<IIBQ"           # layer dt status work
 LEVEL = "<IIQQ"           # w h off len
 STATUS = {0: "ok", 1: "none:cells", 2: "none:work", 3: "none:size",
-          4: "none:unsupported"}
+          4: "none:unsupported", 5: "empty"}
 
 
 def read_ovo(path):
@@ -218,6 +218,10 @@ def write_shapes(path):
     top.shapes(L[6]).insert(db.Box(5 * UM, 5 * UM, 5 * UM, 9 * UM))
     top.shapes(L[6]).insert(db.Path([P(7 * UM, 7 * UM), P(12 * UM, 7 * UM)], 0))
     top.shapes(L[6]).insert(db.Box(14 * UM, 14 * UM, 16 * UM, 16 * UM))
+    # a layer without any positive-area shape: recorded as `empty`
+    L7 = ly.layer(7, 0)
+    top.shapes(L7).insert(db.Box(3 * UM, 3 * UM, 3 * UM, 20 * UM))
+    top.shapes(L7).insert(db.Path([P(2 * UM, 2 * UM), P(9 * UM, 2 * UM)], 0))
     ly.write(str(path))
     ly._destroy()
 
@@ -357,8 +361,14 @@ class GenerationOracleTests(unittest.TestCase):
         ovo = read_ovo(cache / "design.ovo")
         checked = 0
         for layer in ovo["layers"]:
-            self.assertEqual(layer["status"], "ok", layer)
             w, h, lit = oracle_level0(src, layer["key"], ovo)
+            if layer["status"] == "empty":
+                # no bitmap at all, and the oracle agrees there is nothing
+                self.assertEqual(lit, set(), layer["key"])
+                self.assertTrue(all(lv == (0, 0, b"") for lv in layer["levels"]))
+                checked += 1
+                continue
+            self.assertEqual(layer["status"], "ok", layer)
             l0 = layer["levels"][0]
             self.assertEqual((l0[0], l0[1]), (w, h), layer["key"])
             mine = {(i, j) for j in range(h) for i in range(w)
@@ -418,6 +428,37 @@ class GenerationContractTests(unittest.TestCase):
         write_reps(cls.other)
         cls.other_cache = index_with_occupancy(cls.other, 1)
 
+    def test_an_empty_layer_costs_no_bitmap_and_threads_write_the_same_file(self):
+        # field 2026-09-14: the deck-wide build wrote 9.8 GB, half of it
+        # full-size zero pyramids of layers without a shape, on one
+        # thread per layer. A layer without a positive-area shape is
+        # `empty` without bitmaps (the file holds exactly the ok
+        # layers' pyramids), and the marking of a layer is split over
+        # --jobs threads whose merge is byte-identical to one thread
+        ovo = read_ovo(self.cache / "design.ovo")
+        by_key = {l["key"]: l for l in ovo["layers"]}
+        self.assertEqual(by_key[(7, 0)]["status"], "empty")
+        self.assertTrue(all(lv == (0, 0, b"") for lv in by_key[(7, 0)]["levels"]))
+        rows = self.listing(self.cache).stdout.splitlines()
+        self.assertTrue(any("ld=7/0 status=empty work=0" in r for r in rows),
+                        rows)
+        table = struct.calcsize(HDR) + 2 + len(ovo["top"]) + len(ovo["layers"]) * (
+            struct.calcsize(LAYER) + ovo["n_levels"] * struct.calcsize(LEVEL))
+        bitmaps = sum(len(lv[2]) for l in ovo["layers"] if l["status"] == "ok"
+                      for lv in l["levels"])
+        self.assertEqual(os.path.getsize(self.cache / "design.ovo"),
+                         table + bitmaps)
+        outs = []
+        for jobs in (1, 4):
+            out = TMP / ("reps_jobs%d.floe" % jobs)
+            shutil.rmtree(out, ignore_errors=True)
+            res = floe_index("vfs", self.other, out, "--occupancy",
+                             "--occupancy-um", 1, "--no-lod", "--slow-cell-s",
+                             "999", "--jobs", jobs)
+            self.assertIn(" jobs=%d " % jobs, res.stderr)
+            outs.append(sha(out / "design.ovo"))
+        self.assertEqual(outs[0], outs[1])
+
     def test_an_unknown_option_is_refused_instead_of_becoming_the_outdir(self):
         # field 2026-09-14: `floe-index index file.oas --occupancy-only`
         # (the legacy tile indexer knows no such option) took the option
@@ -465,7 +506,8 @@ class GenerationContractTests(unittest.TestCase):
         self.assertEqual(len(rows), len(ovo["layers"]))
         for row, layer in zip(rows, ovo["layers"]):
             self.assertIn("ld=%d/%d" % layer["key"], row)
-            self.assertIn("status=ok", row)
+            self.assertIn("status=empty" if layer["key"] == (7, 0)
+                          else "status=ok", row)
             counts = [sum(bin(b).count("1") for b in lv[2])
                       for lv in layer["levels"]]
             self.assertIn("set=" + ",".join(map(str, counts)), row)
@@ -635,7 +677,10 @@ class GenerationContractTests(unittest.TestCase):
                    "--occupancy-max-work", "0")
         rows = [l for l in self.listing(self.cache).stdout.splitlines()
                 if l.startswith("layer ")]
-        self.assertTrue(all("status=none:work" in r for r in rows))
+        # the layer without a positive-area shape charges nothing: it
+        # stays `empty` under a zero budget
+        self.assertTrue(all("status=none:work" in r
+                            or "ld=7/0 status=empty" in r for r in rows), rows)
         res = floe_index("vfs", self.src, self.cache, "--occupancy-only",
                          "--occupancy-max-bytes", "1")
         self.assertIn("none:size", res.stderr)
@@ -643,7 +688,8 @@ class GenerationContractTests(unittest.TestCase):
                    "--occupancy-um", "1")
         rows = [l for l in self.listing(self.cache).stdout.splitlines()
                 if l.startswith("layer ")]
-        self.assertTrue(all("status=ok" in r for r in rows))
+        self.assertTrue(all("status=ok" in r or "ld=7/0 status=empty" in r
+                            for r in rows), rows)
 
     def test_kill_point_keeps_the_previous_file_and_the_wrapper_cleans_up(self):
         before = sha(self.cache / "design.ovo")

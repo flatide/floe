@@ -1839,8 +1839,9 @@ fn write_occupancy(
     }
     std::fs::rename(&tmp, &path).expect("publish ovo");
     let ok = built.layers.iter().filter(|l| l.status == occ::STATUS_OK).count();
+    let empty = built.layers.iter().filter(|l| l.status == occ::STATUS_EMPTY).count();
     eprintln!(
-        "[vfs] occupancy cell={}um ({} dbu) grid={}x{} levels={} layers={} ok={} {} ({:.1}s)",
+        "[vfs] occupancy cell={}um ({} dbu) grid={}x{} levels={} layers={} ok={} empty={} jobs={} {} ({:.1}s)",
         opts.base_um,
         built.cell_dbu,
         built.w,
@@ -1848,11 +1849,13 @@ fn write_occupancy(
         built.n_levels,
         built.layers.len(),
         ok,
+        empty,
+        opts.jobs,
         fmt_size(bytes.len() as u64),
         t.elapsed().as_secs_f64()
     );
     for l in &built.layers {
-        if l.status != occ::STATUS_OK {
+        if l.status != occ::STATUS_OK && l.status != occ::STATUS_EMPTY {
             eprintln!(
                 "[vfs] occupancy layer {}/{} {} (work {})",
                 l.layer,

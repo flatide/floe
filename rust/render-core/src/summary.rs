@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use floe_vfs::occupancy::{OvoFile, STATUS_OK};
+use floe_vfs::occupancy::{OvoFile, STATUS_EMPTY, STATUS_OK};
 
 /// One layer's summary for one frame: the pyramid level to paint and
 /// its grid in source dbu. Cheap to clone (the file is shared).
@@ -115,7 +115,10 @@ pub(crate) fn planes_for(
     let mut planes = Vec::new();
     for (layer_idx, k) in layer_ks {
         let layer = &file.layers[k];
-        if layer.status != STATUS_OK {
+        // an empty layer (no positive-area shape) is summarized as
+        // nothing to draw: a plane without cells, counted as a summary
+        // layer, its (nonexistent) pages skipped
+        if layer.status != STATUS_OK && layer.status != STATUS_EMPTY {
             continue;
         }
         let Some(entry) = layer.levels.get(level as usize) else {
@@ -194,6 +197,40 @@ mod tests {
         // a half-pixel bound picks the finer level and narrows the near view
         assert_eq!(level_for(4000, 0.0001, 4, 0.5), Some(0));
         assert_eq!(level_for(4000, 0.00013, 4, 0.5), None);
+    }
+
+    #[test]
+    fn an_empty_layer_is_a_plane_without_cells() {
+        use floe_vfs::occupancy::{write_ovo, Layer, Level, Occupancy, STATUS_NONE_WORK};
+        let ok = Layer {
+            layer: 1,
+            dt: 0,
+            status: STATUS_OK,
+            work: 3,
+            levels: vec![Level { w: 8, h: 2, bits: vec![0b0000_0101, 0] }, Level { w: 4, h: 1, bits: vec![0b0011] }],
+        };
+        let empty = Layer { layer: 2, dt: 0, status: STATUS_EMPTY, work: 0, levels: Vec::new() };
+        let none = Layer { layer: 3, dt: 0, status: STATUS_NONE_WORK, work: 9, levels: Vec::new() };
+        let occ = Occupancy {
+            unit: 1000.0,
+            src_size: 1,
+            src_mtime: 2,
+            top: "T".into(),
+            cell_dbu: 10,
+            bbox: (0, 0, 80, 20),
+            w: 8,
+            h: 2,
+            n_levels: 2,
+            layers: vec![ok, empty, none],
+            paths_skipped: 0,
+        };
+        let file = Arc::new(OvoFile::from_bytes(write_ovo(&occ)).unwrap());
+        let planes = planes_for(&file, 0, [(0u32, 0usize), (1, 1), (2, 2)]);
+        // the ok and the empty layer are planes, the none:work layer is not
+        assert_eq!(planes.iter().map(|p| p.layer_idx).collect::<Vec<_>>(), vec![0, 1]);
+        assert!(planes[0].get(0, 0) && planes[0].get(2, 0) && !planes[0].get(1, 0));
+        assert_eq!((planes[1].w, planes[1].h), (0, 0));
+        assert!(!planes[1].get(0, 0) && planes[1].bits().is_empty() && planes[1].row_bytes() == 0);
     }
 
     #[test]
