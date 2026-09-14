@@ -1,5 +1,6 @@
 //! Owner-only review. Fixed trusted reviewer/targets; opaque snapshots and
 //! one-use prepared tokens. Native publication outlives HTTP subscribers.
+mod display;
 mod http;
 use super::{Failure, Service as Reader};
 use crate::{
@@ -116,6 +117,7 @@ struct State {
     review_rev: u64,
     preparing: Option<(u64, Arc<AtomicUsize>)>,
     ready: Option<Ready>,
+    display: Option<Arc<display::Cache>>,
     pending: Option<Work>,
     stop: Option<Arc<AtomicUsize>>,
     ledger: Ledger,
@@ -169,6 +171,7 @@ impl Service {
                 review_rev: 0,
                 preparing: None,
                 ready: None,
+                display: None,
                 pending: None,
                 stop: None,
                 ledger: Ledger::default(),
@@ -189,6 +192,13 @@ impl Service {
         self: &Arc<Self>,
         body: Arc<OwnedSemaphorePermit>,
     ) -> std::result::Result<Arc<Operation>, Failure> {
+        self.begin_read(body, false)
+    }
+    fn begin_read(
+        self: &Arc<Self>,
+        body: Arc<OwnedSemaphorePermit>,
+        display: bool,
+    ) -> std::result::Result<Arc<Operation>, Failure> {
         let permit = Arc::clone(&self.preparations)
             .try_acquire_owned()
             .map_err(|_| "drc_busy")?;
@@ -200,7 +210,11 @@ impl Service {
             return Err("drc_busy");
         }
         s.serial = s.serial.checked_add(1).ok_or("review_limit")?;
-        s.ready = None;
+        if !display {
+            s.ready = None;
+            // Display must not make a user edit lose resource admission.
+            s.display = None;
+        }
         let stop = Arc::new(AtomicUsize::new(0));
         s.preparing = Some((s.serial, Arc::clone(&stop)));
         Ok(Arc::new(Operation {
@@ -355,6 +369,7 @@ impl Service {
         let Model::Prepared(draft) = r.model else {
             unreachable!()
         };
+        s.display = None;
         s.stop = Some(Arc::clone(&r.stop));
         s.pending = Some(Work {
             reader: r.reader,
@@ -407,12 +422,14 @@ impl Service {
         }
         let result = f()?;
         s.ready = None;
+        s.display = None;
         Ok(result)
     }
     pub(super) fn request_stop(&self) {
         let mut s = self.inner.state.lock().unwrap();
         s.closed = true;
         s.ready = None;
+        s.display = None;
         if let Some((_, stop)) = &s.preparing {
             stop.store(1, Ordering::Relaxed);
         }

@@ -14,9 +14,10 @@ overlay 전환**, §16의 **Rust layerprops 포맷·초기 가시성**, §17의
 선택 주석 편집·미리보기·명시 승인 UI다. geometry reader는 읽기 전용이다.
 §27은 native waive snapshot을 기존 reader에 적용하는 내부 갱신 경로다.
 §28은 그 갱신과 HTTP/선택/준비된 focus의 조회 revision 장벽을 연결한다.
-waive 저장의 owner 승인 API·UI와 디스크 게시/읽기 반영 receipt 결합은 아직 후속이다.
+§29/30에서 waive 저장의 owner 승인 API·UI와 디스크 게시/읽기 반영 receipt를 연결했다.
+§31은 저장 주석의 목록 badge/이동 대상 본문을 위한 읽기 전용 projection API다.
 각 절의 미연결 표기는 해당 선행 단계 당시의 범위다.
-나머지 내보내기·주석 표시/불러오기·waive 쓰기와 전체 조작/실제 브라우저 수용은 남아 있다.
+나머지 내보내기·주석 표시 UI/불러오기와 전체 조작/실제 브라우저 수용은 남아 있다.
 
 ## 1. M4a-1: 표시 scene에 고정한 native pick/snap
 
@@ -2624,3 +2625,79 @@ Waive 미리보기(선택1·변경1), Discard→Clear waive 미리보기(선택1
 실제 브라우저 waive 게시·현장 Firefox/NFS·Linux 실제 실행 수용은 별도다. 새 API나
 공유 권한은 추가하지 않았으며 GTK 기본·renderd0.12.87·기존 승인된 shared-default
 합성 게시 결과물은 유지한다. 전체 M4 완료를 뜻하지 않는다.
+
+## 31. M4e-5a — 저장 주석 표시용 읽기 API
+
+GTK의 오류 목록 `*` 표시와 마지막으로 이동한 오류의 좌상단 주석 패널에 필요한
+서버 읽기 경로다. 편집용 `/notes/read`를 목록 표시 때 호출하면 미승인 snapshot/preview가
+폐기되고 파일 전체를 다시 파싱하므로, 표시 조회와 편집 준비를 분리했다. **이 절은
+API/캐시 단계이며 웹 badge·본문 overlay UI는 아직 연결하지 않았다.**
+
+### 요청·응답과 권한
+
+`POST /api/v1/drc/review/notes/display`는 기존 `--drc-reviewer TAG`의 owner 등록만
+사용한다. 일반 read-only 등록에서는 비활성이고 guest/새 파일 경로/추가 reviewer를
+허용하지 않는다. cookie+CSRF·Host/Origin·기존 large-body admission을 그대로 적용한다.
+
+- 입력: 기존 `{drc_id, revision, view_id}` context, `errors:[{check,error}]` 최대512개,
+  선택적인 `focus:{check,error}` 하나. 인덱스는 canonical u64 문자열의0-based 값이며
+  표시 global 번호나 임의 gid를 받지 않는다. errors가 비어 있어도 focus 하나는 허용하지만
+  둘 다 없으면 오류다. 입력 순서·중복을 보존하며,5000개 편집 선택 전체를 보내는 API가 아니다.
+- 응답: `kind:drc_note_display`, 요청 context, 문자열 `review_rev`, 고정 reviewer·파일
+  **basename**, `rows:[{check,error,noted}]`, `focus:{check,error,text}` 또는 null.
+  본문은 선택된 한 오류의 전체 주석(최대64KiB) 또는 null이다. `exists`,
+  `legacy_unverified`, `import_report`도 함께 반환하므로 파싱 손실·미확인 legacy를
+  숨기면 안 된다. `cache_hit`은 서버 snapshot 재사용 여부다. 편집/게시 토큰은 발급하지 않는다.
+- 각 check/local은 기존 DRC actor가 opaque pack identity와 함께 검증한다. 요청 시작과
+  응답 전의 registry·view·조회 revision을 재검사한다. 도중 waive 갱신/pack rebuild/close가
+  있으면 이전 결과를 채택하지 않는다. 진행 중 저장이나 마지막 저장 결과 불명은 표시 조회를
+  거부한다. 표시 읽기가 저장 결과 불명을 해소하거나 새 저장을 자동 승인하지 않는다.
+
+### 캐시·비용·수명
+
+- review service당 immutable note snapshot 하나다. key는 전체 context와 notes
+  `review_rev`이며 viewport pan/zoom state_rev는 넣지 않는다. 첫 조회는 기존 managed
+  store로 pack metadata와 note sidecar를 읽는다. warm 조회는 note map lookup과
+  bounded check/local 매핑만 수행하고 sidecar hash/파싱을 다시 하지 않는다.
+- cache도 기존 admission/pack read lease를 유지한다: CPU1·256MiB 예약이며 실제 RSS의
+  하드 상한은 아니다. 이미 편집 preview가 있으면 독립 표시 cache와 함께 최대CPU2·512MiB를
+  예약할 수 있다(DRC reader·waive store 등과 별도). 자원 부족은 명시 오류다. 캐시가 공짜거나
+  전체 프로세스 메모리가512MiB 이내라는 뜻은 아니다.
+- 명시 edit read 시작은 display cache를 먼저 내려 편집 admission을 우선한다. 승인 submit,
+  pack rebuild, session stop도 cache를 해제한다. context/revision 변경은 다음 표시 조회에서
+  교체한다. 다른 표시 조회 때문에 기존 edit snapshot/preview를 폐기하지 않는다.
+- 표시 읽기는 편집 준비와 같은 try-only 슬롯 하나를 사용한다. 실행 중인 읽기의 취소/timeout은
+  native 작업이 실제로 풀릴 때까지 body/CPU/lease를 유지하며 rebuild·submit과 겹치지 않는다.
+  큰 파일 I/O·파싱은 HTTP reactor 밖에서 수행한다. 표시 캐시는 세션 메모리이며 durable
+  파일이나 다른 사용자 데이터베이스를 만들지 않는다.
+- warm 조회 전후에는 directory/pack·열린 파일과 경로의 inode·size·mtime/ctime·소유권/
+  mode·link count·보안 attribute가 캡처와 같은지 확인한다. 변경·삭제·대체·처음 없던 파일
+  생성은 명시 오류이며 새 외부 파일을 자동 파싱하지 않는다. 이는 표시 snapshot의 저비용
+  guard이지, 전체 digest를 검사하는 게시 CAS나 보안 서명을 대체하지 않는다. 명시적 새
+  edit read/reopen 전까지 해당 외부 변경을 자동 채택하지 않는 정책을 유지한다.
+
+### 검증과 다음 연결
+
+core 테스트는 없음→생성·동일 bytes 쓰기·다른 inode 교체·삭제·취소·종류 불일치를 검사한다.
+web 단위는 표시 읽기 중 build/edit admission 거부·종료 시 native unwind까지 permit 유지와
+결과 불명·클라이언트 path/reviewer/gid/승인 필드 거부를 검사한다.
+기존 필수 `validate_web_drc_notes.py`에 실제 native HTTP 검증을 추가했다. 빈 PATH에서
+512개 목록+focus, 순서·본문/배지·64KiB escaping, warm cache hit, edit snapshot와 preview
+보존, 저장/clear 후 revision·cache 교체, 외부 변경 거부, stale context/pack binding,
+cache와 draft를 함께 보유한 pack rebuild, 미등록/ASCII/보호된 session-file 거부를 검사한다.
+합성 OASIS·DB·pack·index의 bytes/metadata 불변과 서버 종료/임시파일 정리도 유지한다.
+
+전체 `sh tools/validate_rust.sh`는 exit0·`RUST VALIDATION: ALL OK`다. core203/web56,
+기존 owner HTTP/WS·notes/waives·전체 ES2017/JS, jobdeck80·renderer46,
+KLayout13 PX+2 phase-exact+14 style(jobs1/8)이 통과했다. 마지막 HTTP body 한도 수정은
+최종 release로 실제 주석 HTTP gate와 web56/transport10을 재실행했다. 일반16KiB를
+넘는 유효32KiB JSON은 성공하고1MiB 초과는 거부하며, 룰 횡단 역순·중복 목록도
+Python oracle과 대조했다. app/core/web scoped fmt·strict all-target clippy가 통과했다.
+Rust1.89 core203 및 최종 web56/transport10, Linux x86-64 musl release 교차 빌드도
+통과했다(실제 Linux 실행 수용은 아님). 검증용 venv 링크만 정리하고 로그는 보존했다.
+
+다음 연결은 읽기 결과를 사용한
+목록 badge와 **선택 행이 아닌 마지막으로 승인된 오류 이동**의 주석 overlay다. pan 무조회,
+overlay all/focus/none, 주석 저장 revision·늦은 응답·재접속, 전체 본문/긴 주석 잘림 표시,
+표시 PNG 캡처와 상태 복원까지 함께 검증한다. 실제 브라우저 주석/waive 게시 승인과
+현장 Firefox/NFS/ETX 수용은 별도이며 GTK 기본과 renderd0.12.87은 유지한다.

@@ -449,6 +449,38 @@ impl Snapshot {
     pub fn notes(&self) -> Option<&Notes> {
         self.notes.as_ref()
     }
+    /// Read-only display guard for an already decoded note snapshot. Unlike a
+    /// publication check, this does not rehash/reparse the sidecar. A changed
+    /// directory/pack/file identity, metadata or security is an explicit error;
+    /// this method never adopts external edits or grants publication authority.
+    pub fn check_note_display(&self, stop: &AtomicUsize) -> Result<()> {
+        if self.store.kind != Kind::Notes {
+            return Err(Error::input("not a note snapshot"));
+        }
+        self.store.validate(stop)?;
+        let current = match self
+            .store
+            .directory
+            .open_leaf(&self.store.name, libc::O_RDONLY, 0)
+        {
+            Ok(file) => Some(file),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.into()),
+        };
+        match (&self.before, current) {
+            (None, None) => (),
+            (Some(before), Some(file)) => {
+                before.unchanged()?;
+                if Stamp::of(&file.metadata()?) != before.stamp
+                    || Security::read(&file)? != before.security
+                {
+                    return Err(conflict());
+                }
+            }
+            _ => return Err(conflict()),
+        }
+        check_cancelled(stop)
+    }
     pub fn import_report(&self) -> &ImportReport {
         &self.report
     }

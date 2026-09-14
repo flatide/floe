@@ -14,6 +14,7 @@ pub(crate) fn is_large_body(method: &Method, path: &str) -> bool {
         && matches!(
             path,
             "/api/v1/drc/review/notes/read"
+                | "/api/v1/drc/review/notes/display"
                 | "/api/v1/drc/review/notes/prepare"
                 | "/api/v1/drc/review/waives/read"
                 | "/api/v1/drc/review/waives/prepare"
@@ -21,6 +22,10 @@ pub(crate) fn is_large_body(method: &Method, path: &str) -> bool {
 }
 pub(crate) fn routes() -> Router<Gate> {
     routes_for(store::Kind::Notes, "/api/v1/drc/review/notes")
+        .route(
+            "/api/v1/drc/review/notes/display",
+            post(super::display::read).layer(DefaultBodyLimit::max(crate::drc::RESPONSE_BYTES)),
+        )
         .merge(routes_for(store::Kind::Waives, "/api/v1/drc/review/waives"))
 }
 fn routes_for(kind: store::Kind, root: &str) -> Router<Gate> {
@@ -34,16 +39,16 @@ fn routes_for(kind: store::Kind, root: &str) -> Router<Gate> {
         .layer(Extension(kind))
         .layer(DefaultBodyLimit::max(crate::drc::RESPONSE_BYTES))
 }
-fn fail(code: Failure) -> Response {
+pub(super) fn fail(code: Failure) -> Response {
     crate::drc::http::failure(code)
 }
-fn review(g: &Gate, kind: store::Kind) -> std::result::Result<Arc<Service>, Failure> {
+pub(super) fn review(g: &Gate, kind: store::Kind) -> std::result::Result<Arc<Service>, Failure> {
     g.drc
         .as_ref()
         .and_then(|r| r.review(kind))
         .ok_or("review_disabled")
 }
-fn reader(g: &Gate, c: &Context) -> std::result::Result<Arc<Reader>, Failure> {
+pub(super) fn reader(g: &Gate, c: &Context) -> std::result::Result<Arc<Reader>, Failure> {
     c.validate()?;
     let reader = g
         .drc
@@ -54,7 +59,7 @@ fn reader(g: &Gate, c: &Context) -> std::result::Result<Arc<Reader>, Failure> {
     Ok(reader)
 }
 /// Lock order registry -> registered owner view -> review. No filesystem I/O.
-fn current<T>(
+pub(super) fn current<T>(
     g: &Gate,
     r: &Reader,
     c: &Context,
@@ -71,7 +76,7 @@ fn current<T>(
         })
     })
 }
-struct Cancel(Option<Arc<Operation>>);
+pub(super) struct Cancel(pub(super) Option<Arc<Operation>>);
 impl Drop for Cancel {
     fn drop(&mut self) {
         if let Some(op) = &self.0 {
@@ -79,10 +84,12 @@ impl Drop for Cancel {
         }
     }
 }
-fn alive(g: &Gate, owner: &SessionId) -> bool {
+pub(super) fn alive(g: &Gate, owner: &SessionId) -> bool {
     g.alive(owner) && !*g.stopping.borrow()
 }
-fn refs(errors: &[crate::drc::dto::CursorDto]) -> std::result::Result<Vec<(usize, u64)>, Failure> {
+pub(super) fn refs(
+    errors: &[crate::drc::dto::CursorDto],
+) -> std::result::Result<Vec<(usize, u64)>, Failure> {
     if errors.is_empty() || errors.len() > floe_app_core::drc::review::EDIT_ITEMS {
         return Err("drc_read_limit");
     }

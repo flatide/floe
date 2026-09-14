@@ -197,6 +197,10 @@ impl Snapshot {
     pub fn notes(&self) -> Option<&Notes> {
         self.value.notes()
     }
+    pub fn check_note_display(&self, stop: &AtomicUsize) -> Result<()> {
+        self.lease.check()?;
+        self.value.check_note_display(stop)
+    }
     pub fn waives(&self) -> Option<&WaiveStats> {
         self.value.waives()
     }

@@ -2,6 +2,7 @@
 """Owner note HTTP publication on private synthetic data; runtime PATH is empty."""
 import fcntl
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -9,6 +10,8 @@ import signal
 import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.request
 
 from validate_web_cli import APP, INDEX, RENDERD, Client, read_json, wait
 from validate_drc_ice import DB
@@ -56,6 +59,7 @@ class Session:
         self.client = Client(wait(lambda: read_json(self.session_path), self.proc))
         self.client.call("GET", API, code=401)
         self.client.call("POST", API + "/read", {}, code=401)
+        self.client.call("POST", API + "/display", {}, code=401)
         self.client.login()
         catalog = wait(lambda: (lambda c: c if c["phase"] == "ready" else None)(
             self.client.call("GET", "/api/v1/drc")["drc"]), self.proc)
@@ -80,6 +84,24 @@ class Session:
     def prepare(self, snapshot, text, code=200):
         return self.client.call("POST", API + "/prepare",
                                 dict(context=self.context, token=snapshot["token"], text=text), code)
+
+    def display(self, refs, focus=None, code=200):
+        return self.client.call("POST", API + "/display",
+                                dict(context=self.context, errors=refs, focus=focus), code)
+
+    def display_padded(self, ref, padding, code=200):
+        c = self.client
+        payload = json.dumps(dict(context=self.context, errors=[ref])).encode() + b" " * padding
+        request = urllib.request.Request(c.origin + API + "/display", data=payload, method="POST",
+                                         headers={"Origin": c.origin, "X-Floe-CSRF": c.csrf,
+                                                  "Content-Type": "application/json"})
+        try:
+            response = c.opener.open(request, timeout=8)
+        except urllib.error.HTTPError as error:
+            response = error
+        with response:
+            assert response.status == code, (response.status, response.read())
+            return json.loads(response.read())
 
     def request(self, draft, seq, confirm=False):
         return dict(context=self.context, token=draft["token"], seq=str(seq),
@@ -118,6 +140,7 @@ def main(fixture):
             sessions.append(s)
             s.client.call("GET", API, code=403)
             s.read(references[:1], 403)
+            s.display(references[:1], code=403)
             s.close()
             sessions.remove(s)
 
@@ -125,6 +148,24 @@ def main(fixture):
             sessions.append(s)
             c = s.client
             assert c.call("GET", API)["reviewer"] == "fixed-owner"
+            empty = s.display(references[:3], references[0])
+            assert not empty["exists"] and not empty["cache_hit"]
+            assert empty["context"] == s.context and empty["review_rev"] == "0"
+            assert empty["focus"]["text"] is None and all(not r["noted"] for r in empty["rows"])
+            assert s.display(references[:1])["cache_hit"]
+            s.display([], code=413)
+            s.display(references[:1] * 513, code=413)
+            s.display([dict(check="00", error="0")], code=400)
+            s.display([dict(check="99999", error="0")], code=400)
+            # Valid JSON above 16 KiB reaches the handler, while shared 1 MiB
+            # admission remains hard. Invalid long IDs still fail pack bounds.
+            assert s.display_padded(references[0], 32 * 1024)["rows"][0]["noted"] is False
+            s.display_padded(references[0], 1024 * 1024, 413)
+            s.display([dict(check="18446744073709551615", error="18446744073709551615")] * 512, code=400)
+            for field in ("reviewer", "path", "gids", "token", "approve"):
+                c.call("POST", API + "/display", dict(context=s.context, errors=references[:1], **{field: "untrusted"}), 400)
+            c.call("POST", API + "/display", dict(context=dict(s.context, revision="0" * 64), errors=references[:1]), 409)
+            assert not target.exists() and not lock.exists()
             base = dict(context=s.context, errors=references[:2])
             for field in ("reviewer", "path", "gids"):
                 c.call("POST", API + "/read", dict(base, **{field: "untrusted"}), 400)
@@ -137,7 +178,10 @@ def main(fixture):
             assert first["selected_count"] == "2" and first["text"] is None and not first["mixed"]
             assert not target.exists() and not lock.exists()
             s.prepare(first, "x" * 65537, 413)
+            assert not s.display(references[:1])["exists"]
             draft = s.prepare(first, "  한글 <script> & 메모\n두 번째 줄  ")
+            # Display reads do not consume an edit snapshot/prepared token.
+            assert not s.display(references[:2], references[0])["exists"]
             assert draft["text"] == "한글 <script> & 메모\n두 번째 줄" and not draft["clears"]
             assert not target.exists() and not lock.exists()
             s.prepare(first, "cannot reuse snapshot", 410)
@@ -158,6 +202,19 @@ def main(fixture):
             assert oracle._parse_notes(target.read_text(), oracle.total)
             assert oracle.get_note_gid(0) == draft["text"] and oracle.get_note_gid(1) == draft["text"]
             assert oracle.get_note_gid(2) is None
+            displayed = s.display(references[:3], references[1])
+            assert displayed["review_rev"] == "1" and not displayed["cache_hit"]
+            assert [r["noted"] for r in displayed["rows"]] == [True, True, False]
+            assert displayed["focus"] == dict(references[1], text=draft["text"])
+            assert not displayed["legacy_unverified"]
+            cross_rule = list(reversed(references)) + [references[0]]
+            shown = s.display(cross_rule, references[0])
+            assert shown["rows"] == [dict(ref, noted=oracle.get_note(int(ref["check"]), int(ref["error"])) is not None)
+                                     for ref in cross_rule]
+            assert shown["focus"] == dict(references[0], text=draft["text"])
+            assert s.display([], references[2])["focus"]["text"] is None
+            assert s.display(references[:1] * 512, references[1])["cache_hit"]
+            assert fingerprint([target, lock]) == published
             readback = s.read(references[:2])
             assert readback["text"] == draft["text"] and not readback["legacy_unverified"]
             mixed = s.read(references[1:3])
@@ -168,8 +225,10 @@ def main(fixture):
 
             # A foreign cooperating writer changed the expected file after read.
             stale = s.read(references[:1])
+            assert s.display(references[:1])["rows"][0]["noted"]
             original = target.read_bytes()
             target.write_bytes(original + b"\n# external edit\n")
+            s.display(references[:1], code=409)  # no implicit reparse/adoption
             s.prepare(stale, "must not overwrite", 409)
             target.write_bytes(original)
             # One prepared draft, lock contention fails without replacing bytes.
@@ -189,11 +248,15 @@ def main(fixture):
             c.call("POST", API, s.request(large, 3), 202)
             assert s.finished(3)["phase"] == "succeeded"
             assert s.read(references[:1])["text"] == text
+            assert s.display([], references[0])["focus"]["text"] == text
             clear = s.prepare(s.read(references[:2]), "  \n ")
             assert clear["clears"] and clear["text"] == ""
             c.call("POST", API, s.request(clear, 4), 202)
             assert s.finished(4)["phase"] == "succeeded"
             assert target.exists() and "floe_note=" not in target.read_text()
+            cleared = s.display(references[:2], references[0])
+            assert cleared["review_rev"] == "3" and not cleared["cache_hit"]
+            assert not any(r["noted"] for r in cleared["rows"]) and cleared["focus"]["text"] is None
             assert s.read(references[:2])["text"] is None
             # Leave an unapproved snapshot; logout must release its pack lease.
             s.close()
@@ -220,6 +283,7 @@ def main(fixture):
             s = Session(source, pack, temps, "protected-owner", credential)
             sessions.append(s)
             s.read(references[:1], 400)
+            s.display(references[:1], code=400)
             s.close()
             sessions.remove(s)
             assert not credential.exists()
@@ -247,6 +311,7 @@ def main(fixture):
             assert failed["phase"] == "failed" and failed["error"] == "drc_changed_or_corrupt", failed
             assert replacement_target.read_bytes() == saved
             s.read(references[:1], 422)
+            s.display(references[:1], code=422)
             s.close()
             sessions.remove(s)
 
@@ -257,6 +322,7 @@ def main(fixture):
             s = Session(source, rebuild_db, temps, "build-owner", work / "rebuild.session")
             sessions.append(s)
             s.read(references[:1], 400)  # explicit pack is required, no implicit lookup
+            s.display(references[:1], code=400)
             def build(seq, force):
                 req = dict(s.context, seq=str(seq), approve=True, force=force, jobs=2)
                 s.client.call("POST", "/api/v1/drc/builds", req, 202)
@@ -271,12 +337,15 @@ def main(fixture):
             s.client.call("POST", API, accepted, 202)
             receipt = s.finished(1)
             assert receipt["phase"] == "succeeded"
+            assert s.display(references[:1])["rows"][0]["noted"]
             old = s.request(s.prepare(s.read(references[:1]), "discard on rebuild"), 2)
+            assert s.display(references[:1])["rows"][0]["noted"]  # cached model and draft both hold leases
             build(2, True)
             s.client.call("POST", API, old, 409)
             assert s.client.call("POST", API, accepted, 202) == receipt
             assert s.client.call("GET", API + "/1") == receipt
             s.read(references[:1], 422)  # old run binding requires explicit import, never auto-adopt
+            s.display(references[:1], code=422)
             s.close()
             sessions.remove(s)
             assert fingerprint(inputs) == before and not list(temps.iterdir())
@@ -291,6 +360,7 @@ def main(fixture):
                         s.proc.kill()
                         s.proc.communicate(timeout=5)
     print("WEB DRC NOTES: ALL OK (fixed owner, auth, references, preview/approve/replay, conflicts, legacy, maximum text, tombstone, no input writes/reap)")
+    print("WEB DRC NOTE DISPLAY: ALL OK (read-only badges/focus, bounded rows/text, cache hits, editor token preservation, publication invalidation, external-change rejection, identity/rebuild, no input writes/reap)")
 
 
 if __name__ == "__main__":

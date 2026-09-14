@@ -81,6 +81,48 @@ fn kind<T>(r: Result<T>) -> ErrorKind {
 }
 
 #[test]
+fn note_display_uses_the_captured_model_and_rejects_external_changes() {
+    let f = Fixture::new();
+    let s = f.store(Kind::Notes);
+    let missing = s.snapshot(&f.stop).unwrap();
+    missing.check_note_display(&f.stop).unwrap();
+    assert!(!s.target().exists() && !s.lock_path().exists());
+    f.note(&s, "saved note").publish(&f.stop).unwrap();
+    assert_eq!(kind(missing.check_note_display(&f.stop)), ErrorKind::Busy);
+    let captured = s.snapshot(&f.stop).unwrap();
+    let bytes = fs::read(s.target()).unwrap();
+    for _ in 0..3 {
+        captured.check_note_display(&f.stop).unwrap();
+        assert_eq!(captured.notes().unwrap().get(0), Some("saved note"));
+    }
+    assert_eq!(
+        kind(captured.check_note_display(&AtomicUsize::new(1))),
+        ErrorKind::Cancelled
+    );
+    fs::write(s.target(), &bytes).unwrap(); // even identical bytes are a new expected version
+    assert_eq!(kind(captured.check_note_display(&f.stop)), ErrorKind::Busy);
+    let captured = s.snapshot(&f.stop).unwrap();
+    let replacement = f.dir.join("replacement.fe");
+    fs::write(&replacement, &bytes).unwrap();
+    fs::rename(replacement, s.target()).unwrap();
+    assert_eq!(kind(captured.check_note_display(&f.stop)), ErrorKind::Busy);
+    let captured = s.snapshot(&f.stop).unwrap();
+    fs::remove_file(s.target()).unwrap();
+    assert_eq!(kind(captured.check_note_display(&f.stop)), ErrorKind::Busy);
+    assert_eq!(captured.notes().unwrap().get(0), Some("saved note"));
+    assert_eq!(
+        kind(
+            f.store(Kind::Waives)
+                .snapshot(&f.stop)
+                .unwrap()
+                .check_note_display(&f.stop)
+        ),
+        ErrorKind::InvalidInput
+    );
+    f.clean();
+}
+
+#[test]
 fn committed_waive_proof_rejects_replacement_mutation_and_other_targets() {
     let f = Fixture::new();
     let s = f.store(Kind::Waives);

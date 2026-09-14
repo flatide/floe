@@ -45,6 +45,11 @@ prepare는 검증한 check/local 선택에 `waived:bool`만 적용한다. native
 승인과 동일 요청 복구를 제공하고, 게시 성공뿐 아니라 reader ACK와 일치하는 ready
 revision을 확인한 뒤 DRC 조회를 재개한다([M4 §30](WEBUI_M4.ko.md)). 새 endpoint는
 없으며 실제 브라우저 게시·현장 수용은 후속이다.
+M4e-5a는 기존 주석 owner 등록에 `POST /api/v1/drc/review/notes/display`를 추가한다.
+최대512개의 check/local 배지와 focus 하나의 본문만 반환하고 편집/게시 token을 만들지
+않는다. context+notes review_rev에 고정한 admitted snapshot 하나를 재사용하며,
+저장/재빌드·외부 변경 시 의미와 비용은 [M4 §31](WEBUI_M4.ko.md)을 따른다.
+주석 badge/overlay UI는 아직 연결하지 않았다.
 M1b-2a의 `app-core/managed`·`view`에는 process-local lease/admission과
 독립 worker controller를 구현했다. M1b-2b의 사전 등록 view용 제어/이미지
 스트림은 [M1b 기록 §6](WEBUI_M1B.ko.md#6-m1b-2b--인증된-제어이미지-스트림)을 따른다.

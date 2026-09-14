@@ -1,6 +1,6 @@
 use super::*;
 
-fn service() -> Arc<Service> {
+pub(super) fn service() -> Arc<Service> {
     Service::start(Config {
         kind: store::Kind::Notes,
         reviewer: "fixed".into(),
@@ -19,7 +19,7 @@ fn owner() -> SessionId {
     .unwrap();
     auth.exchange(&secret.expose(), Instant::now()).unwrap().id
 }
-fn request() -> Submit {
+pub(super) fn request() -> Submit {
     Submit {
         seq: "1".into(),
         context: Context {
@@ -32,7 +32,7 @@ fn request() -> Submit {
         confirm_legacy: false,
     }
 }
-fn stop(s: &Service) {
+pub(super) fn stop(s: &Service) {
     s.request_stop();
     let end = Instant::now() + Duration::from_secs(3);
     while !s.is_finished() {
@@ -63,6 +63,31 @@ fn preparation_keeps_body_and_build_exclusion_until_native_work_unwinds() {
     assert!(!s.is_finished());
     assert_eq!(body.available_permits(), 0);
     drop(native);
+    stop(&s);
+    assert_eq!(body.available_permits(), 1);
+}
+
+#[test]
+fn display_holds_admission_until_cancelled_native_work_unwinds() {
+    let s = service();
+    let body = Arc::new(Semaphore::new(1));
+    let op = s
+        .begin_read(
+            Arc::new(Arc::clone(&body).try_acquire_owned().unwrap()),
+            true,
+        )
+        .unwrap();
+    assert!(matches!(s.admit_build(|| Ok(())), Err("drc_busy")));
+    assert!(matches!(
+        s.begin(Arc::new(
+            Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap()
+        )),
+        Err("drc_busy")
+    ));
+    s.request_stop();
+    assert_ne!(op.stop.load(Ordering::Relaxed), 0);
+    assert!(!s.is_finished());
+    drop(op);
     stop(&s);
     assert_eq!(body.available_permits(), 1);
 }

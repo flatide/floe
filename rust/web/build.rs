@@ -40,6 +40,7 @@ fn main() {
         "src/drc/mod.rs",
         "src/drc/registry.rs",
         "src/drc/review.rs",
+        "src/drc/review/display.rs",
         "src/drc/review/http.rs",
         "src/drc/dto.rs",
         "src/drc/http.rs",
