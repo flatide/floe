@@ -35,6 +35,7 @@ pub(super) fn failure(code: super::Failure) -> Response {
         | "drc_selection_conflict"
         | "prepared_edit_expired" => StatusCode::CONFLICT,
         "operation_conflict" | "operation_sequence" => StatusCode::CONFLICT,
+        "transfer_offset" | "transfer_incomplete" => StatusCode::CONFLICT,
         "operation_expired" | "review_expired" => StatusCode::GONE,
         "busy" => StatusCode::TOO_MANY_REQUESTS,
         "drc_build_unavailable" | "review_disabled" => StatusCode::FORBIDDEN,

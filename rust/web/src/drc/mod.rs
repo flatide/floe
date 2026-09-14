@@ -75,6 +75,32 @@ pub struct Ticket {
     fence: Option<revision::Fence>,
 }
 impl Ticket {
+    /// Read-only actor work from the bounded owner worker, not the reactor.
+    fn blocking_review_result(
+        &mut self,
+        stop: &AtomicUsize,
+    ) -> std::result::Result<Vec<u8>, Failure> {
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if stop.load(Ordering::Relaxed) != 0 {
+                return Err("drc_cancelled");
+            }
+            match self.reply.try_recv() {
+                Ok(result) => {
+                    return match &self.fence {
+                        Some(f) => f.with_current(|| result),
+                        None => result,
+                    }
+                }
+                Err(oneshot::error::TryRecvError::Closed) => return Err("drc_closed"),
+                Err(oneshot::error::TryRecvError::Empty) => (),
+            }
+            if std::time::Instant::now() >= end {
+                return Err("drc_read_error");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
     fn blocking_apply_result(&mut self) -> std::result::Result<Vec<u8>, Failure> {
         let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {

@@ -163,7 +163,9 @@ M4e-5a는 저장 주석의 최대512개 목록 badge와 이동 대상 하나의 
 확인했다. 전체 import/export·실제 브라우저 게시·현장 수용은 후속이다.
 M4e-6a는 주석/waive snapshot export와 전체 waive import의 native/managed 기반이다
 ([M4 §33](WEBUI_M4.ko.md)). bounded streaming·전체 교체 확인·입력/대상 변경 보호와
-Python byte oracle을 추가했다. 전송 CLI/HTTP/upload/artifact/UI 연결은 아직 남아 있다.
+Python byte oracle을 추가했다. M4e-6b는 owner 전용 분할 업로드·전체 교체 준비와
+artifact 다운로드 API 연결이다([M4 §34](WEBUI_M4.ko.md)). 기존 notes/waives opt-in과
+명시 게시 승인을 재사용하며 새 CLI/패널 조작·실제 브라우저 전송 수용은 아직 남아 있다.
 
 ### 2.7 svrf — M4 (6개 옵션)
 

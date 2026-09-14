@@ -18,6 +18,10 @@ pub(crate) fn is_large_body(method: &Method, path: &str) -> bool {
                 | "/api/v1/drc/review/notes/prepare"
                 | "/api/v1/drc/review/waives/read"
                 | "/api/v1/drc/review/waives/prepare"
+                | "/api/v1/drc/review/notes/transfer"
+                | "/api/v1/drc/review/waives/transfer"
+                | "/api/v1/drc/review/notes/transfer/chunk"
+                | "/api/v1/drc/review/waives/transfer/chunk"
         )
 }
 pub(crate) fn routes() -> Router<Gate> {
@@ -36,6 +40,7 @@ fn routes_for(kind: store::Kind, root: &str) -> Router<Gate> {
         .route(&format!("{root}/revoke"), post(revoke))
         .route(&format!("{root}/{{seq}}"), get(operation))
         .route(&format!("{root}/{{seq}}/cancel"), post(cancel))
+        .merge(super::transfer::routes(root))
         .layer(Extension(kind))
         .layer(DefaultBodyLimit::max(crate::drc::RESPONSE_BYTES))
 }
@@ -270,7 +275,7 @@ async fn prepare(
                 "selected_count":count.to_string(),"changed_count":changed.to_string(),"waived":status==1,
                 "reserved_count":before.iter().filter(|&&v|v>1).count().to_string(),
                 "legacy_unverified":draft.legacy_unverified(),"replaces_existing":exists,"scope":"registered_reviewer_waives"});
-            return Ok((Model::Prepared(draft), value));
+            return Ok((Model::Prepared(draft, None), value));
         }
         let text = req.text.unwrap();
         let report = snapshot.import_report();
@@ -279,7 +284,7 @@ async fn prepare(
         let value = json!({"kind":"drc_note","phase":"prepared","name":draft.target().file_name().and_then(|s|s.to_str()),
             "selected_count":count.to_string(),"text":text.trim(),"clears":text.trim().is_empty(),
             "legacy_unverified":draft.legacy_unverified(),"replaces_existing":exists,"import_report":report,"scope":"registered_reviewer_notes"});
-        Ok((Model::Prepared(draft), value))
+        Ok((Model::Prepared(draft, None), value))
     }).await;
     if !alive(&g, &owner) {
         return transport::error(StatusCode::GONE);

@@ -207,6 +207,9 @@ impl Snapshot {
     pub fn import_report(&self) -> &ImportReport {
         self.value.import_report()
     }
+    pub fn import_bytes(&self) -> u64 {
+        self.value.import_bytes()
+    }
     /// Off-reactor expected-snapshot export; output MUST be an unpublished sink.
     /// The borrow/admission stays alive through errors and native unwind.
     pub fn export(&self, output: impl std::io::Write) -> Result<store::ExportInfo> {
@@ -268,6 +271,9 @@ pub struct Prepared {
     legacy: bool,
 }
 impl Prepared {
+    pub fn note_counts(&self) -> Option<(usize, usize)> {
+        self.draft.note_counts()
+    }
     pub fn store(&self) -> Arc<ManagedStore> {
         Arc::clone(&self.lease.owner)
     }

@@ -621,6 +621,12 @@ pub struct PublishedFile {
     binding: [u8; 20],
 }
 impl Draft {
+    pub fn note_counts(&self) -> Option<(usize, usize)> {
+        self.snapshot
+            .notes
+            .as_ref()
+            .map(|n| (n.groups().count(), n.member_count()))
+    }
     pub fn legacy_unverified(&self) -> bool {
         self.imported || self.snapshot.legacy_unverified()
     }

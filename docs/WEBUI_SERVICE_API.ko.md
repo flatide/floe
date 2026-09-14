@@ -56,8 +56,13 @@ M4e-5b UI는 같은 endpoint만 사용하며 편집 snapshot/token을 소비하�
 화면/경합·긴 본문·캡처 계약은 [M4 §32](WEBUI_M4.ko.md)을 따른다.
 M4e-6a는 native review snapshot export/전체 waive import만 추가하며 endpoint 변경은 없다.
 export는 미게시 sink, import는 trusted descriptor를 요구한다. portable run 확인·스트리밍·
-expected revision/admission 계약은 [M4 §33](WEBUI_M4.ko.md)을 따른다. owner upload와
-artifact 다운로드·TTL/승인 UI는 다음 단계이며 현재 API에 파일 경로/임의 reviewer를 추가하지 않는다.
+expected revision/admission 계약은 [M4 §33](WEBUI_M4.ko.md)을 따른다.
+M4e-6b는 `/api/v1/drc/review/{notes|waives}` 아래 `/transfer`와 `/artifacts/{id}`의
+owner 전용 분할 업로드/비동기 작업/다운로드를 추가한다([M4 §34](WEBUI_M4.ko.md)).
+1MiB chunk·파일512MiB(주석 입력16MiB, waive는 pack의 정확한 길이)·종류별2슬롯/1reader·
+600초 TTL이며 브라우저가 path/reviewer/target을 지정하지 않는다. import prepare의
+전체 교체 preview/token은 기존 root 승인 게시로만 소비한다. 전송 seq는 기존 게시 seq와
+분리하고 HTTP ACK 소실 후 같은 seq/body로 재확인한다. 패널 UI/현장 수용은 후속이다.
 M1b-2a의 `app-core/managed`·`view`에는 process-local lease/admission과
 독립 worker controller를 구현했다. M1b-2b의 사전 등록 view용 제어/이미지
 스트림은 [M1b 기록 §6](WEBUI_M1B.ko.md#6-m1b-2b--인증된-제어이미지-스트림)을 따른다.

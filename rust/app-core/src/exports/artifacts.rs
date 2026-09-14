@@ -1,5 +1,5 @@
 //! Bounded, expiring ownership of unlinked files. No artifact directory or
-//! path-based open API: the only inputs are validated worker file descriptors.
+//! path-based open API: inputs are owned, validated file descriptors.
 //! Retired files with an active reader remain charged until that reader drops.
 use crate::{Error, ErrorKind, Result};
 use std::{
@@ -198,11 +198,7 @@ impl Store {
     }
     /// Reserve the maximum before native work. Never evict somebody's pending
     /// export or active download to make a new request appear successful.
-    pub(super) fn reserve(
-        self: &Arc<Self>,
-        id: u64,
-        stop: Arc<AtomicUsize>,
-    ) -> Result<Reservation> {
+    pub fn reserve(self: &Arc<Self>, id: u64, stop: Arc<AtomicUsize>) -> Result<Reservation> {
         self.collect_expired();
         let mut s = self.shared.state.lock().unwrap();
         if s.closed {
@@ -324,7 +320,9 @@ impl Drop for Store {
         }
     }
 }
-pub(super) struct Reservation {
+/// Trusted native writer capacity. Hold through staging/validation/unwind;
+/// publishing this reservation does not authorize a browser download.
+pub struct Reservation {
     store: Arc<Store>,
     pub id: u64,
     committed: bool,
@@ -363,6 +361,15 @@ impl Reservation {
         self.store.shared.changed.notify_all();
         Ok(self.id)
     }
+}
+
+/// Off-reactor private spool in the configured process temp root. O_EXCL and
+/// descriptor-relative unlink reuse the sidecar stage protection. The file is
+/// unlinked BEFORE any user bytes are written; no path escapes to the caller.
+pub fn temporary_file() -> Result<File> {
+    use crate::layer_defaults::{Directory, Stage};
+    let directory = Directory::open(&std::env::temp_dir())?;
+    Stage::create_for(directory, "transfer", |_| Ok(()))?.detach()
 }
 impl Drop for Reservation {
     fn drop(&mut self) {

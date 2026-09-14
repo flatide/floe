@@ -183,7 +183,7 @@ fn download(g: Gate, session: SessionId, headers: HeaderMap, id: String) -> Resp
     let Some(service) = &g.service else {
         return failure("artifact_unavailable");
     };
-    let mut reader = match service.exports().store().open(id) {
+    let reader = match service.exports().store().open(id) {
         Ok(r) => r,
         Err(e) => {
             return failure(if e.kind == floe_app_core::ErrorKind::Busy {
@@ -193,6 +193,17 @@ fn download(g: Gate, session: SessionId, headers: HeaderMap, id: String) -> Resp
             })
         }
     };
+    stream_download(g, session, reader, format!("floe-clip-{id}.oas"), |_| true)
+}
+/// Shared bounded download transport. The caller supplies a fixed server
+/// filename and a memory-only context fence; never a client-selected path.
+pub(crate) fn stream_download(
+    g: Gate,
+    session: SessionId,
+    mut reader: floe_app_core::exports::artifacts::Download,
+    name: String,
+    valid: impl Fn(&Gate) -> bool + Send + 'static,
+) -> Response {
     let size = reader.size_bytes();
     let (tx, rx) = mpsc::channel::<Result<Bytes, io::Error>>(1);
     // At most Store::readers producers. Every live chunk retains its byte
@@ -200,7 +211,8 @@ fn download(g: Gate, session: SessionId, headers: HeaderMap, id: String) -> Resp
     tokio::task::spawn_blocking(move || {
         let mut active = Instant::now();
         loop {
-            let alive = || g.alive(&session) && !*g.stopping.borrow() && reader.is_available();
+            let alive =
+                || g.alive(&session) && !*g.stopping.borrow() && reader.is_available() && valid(&g);
             let permit = loop {
                 if !alive() || active.elapsed() >= IDLE {
                     return;
@@ -227,6 +239,7 @@ fn download(g: Gate, session: SessionId, headers: HeaderMap, id: String) -> Resp
                 if !g.alive(&session)
                     || *g.stopping.borrow()
                     || !reader.is_available()
+                    || !valid(&g)
                     || active.elapsed() >= IDLE
                 {
                     return;
@@ -260,7 +273,7 @@ fn download(g: Gate, session: SessionId, headers: HeaderMap, id: String) -> Resp
     );
     h.insert(
         "content-disposition",
-        HeaderValue::from_str(&format!("attachment; filename=\"floe-clip-{id}.oas\"")).unwrap(),
+        HeaderValue::from_str(&format!("attachment; filename=\"{name}\"")).unwrap(),
     );
     response
 }

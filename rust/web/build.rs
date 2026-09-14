@@ -43,6 +43,7 @@ fn main() {
         "src/drc/review.rs",
         "src/drc/review/display.rs",
         "src/drc/review/http.rs",
+        "src/drc/review/transfer.rs",
         "src/drc/dto.rs",
         "src/drc/http.rs",
         "src/drc/read.rs",

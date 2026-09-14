@@ -2,6 +2,7 @@
 //! one-use prepared tokens. Native publication outlives HTTP subscribers.
 mod display;
 mod http;
+mod transfer;
 use super::{Failure, Service as Reader};
 use crate::{
     auth::SessionId,
@@ -92,7 +93,11 @@ struct Submit {
 }
 enum Model {
     Snapshot(managed::Snapshot, Vec<u64>),
-    Prepared(managed::Prepared),
+    Prepared(
+        managed::Prepared,
+        Option<floe_app_core::exports::artifacts::Reservation>,
+    ),
+    Upload(transfer::Upload),
 }
 struct Ready {
     reader: Arc<Reader>,
@@ -110,6 +115,7 @@ struct Work {
     draft: managed::Prepared,
     confirm_legacy: bool,
     stop: Arc<AtomicUsize>,
+    _charge: Option<floe_app_core::exports::artifacts::Reservation>,
 }
 struct State {
     closed: bool,
@@ -121,11 +127,14 @@ struct State {
     pending: Option<Work>,
     stop: Option<Arc<AtomicUsize>>,
     ledger: Ledger,
+    transfer: transfer::State,
+    retired: Vec<Ready>,
 }
 struct Inner {
     config: Config,
     state: Mutex<State>,
     wake: Condvar,
+    artifacts: Arc<floe_app_core::exports::artifacts::Store>,
 }
 pub(super) struct Service {
     inner: Arc<Inner>,
@@ -175,8 +184,11 @@ impl Service {
                 pending: None,
                 stop: None,
                 ledger: Ledger::default(),
+                transfer: transfer::State::default(),
+                retired: Vec::new(),
             }),
             wake: Condvar::new(),
+            artifacts: floe_app_core::exports::artifacts::Store::new(transfer::limits())?,
         });
         let task = Arc::clone(&inner);
         let thread = thread::Builder::new()
@@ -206,12 +218,13 @@ impl Service {
         if s.closed {
             return Err("drc_closed");
         }
-        if s.ledger.active().is_some() {
+        if s.ledger.active().is_some() || s.transfer.ledger.active().is_some() {
             return Err("drc_busy");
         }
         s.serial = s.serial.checked_add(1).ok_or("review_limit")?;
         if !display {
-            s.ready = None;
+            transfer::retire(&mut s);
+            self.inner.wake.notify_one();
             // Display must not make a user edit lose resource admission.
             s.display = None;
         }
@@ -239,7 +252,7 @@ impl Service {
         if s.closed {
             return Err("drc_closed");
         }
-        if s.ledger.active().is_some() {
+        if s.ledger.active().is_some() || s.transfer.ledger.active().is_some() {
             return Err("drc_busy");
         }
         let ready = s
@@ -352,7 +365,7 @@ impl Service {
                     && r.expires > Instant::now()
             })
             .ok_or("review_expired")?;
-        let Model::Prepared(draft) = &r.model else {
+        let Model::Prepared(draft, _) = &r.model else {
             return Err("review_expired");
         };
         if draft.legacy_unverified() && !req.confirm_legacy {
@@ -366,7 +379,7 @@ impl Service {
             Admission::New => (),
         }
         let r = s.ready.take().unwrap();
-        let Model::Prepared(draft) = r.model else {
+        let Model::Prepared(draft, charge) = r.model else {
             unreachable!()
         };
         s.display = None;
@@ -378,6 +391,7 @@ impl Service {
             draft,
             confirm_legacy: req.confirm_legacy,
             stop: r.stop,
+            _charge: charge,
         });
         self.inner.wake.notify_one();
         Ok(s.ledger.get(seq).unwrap())
@@ -395,17 +409,22 @@ impl Service {
             .as_ref()
             .is_some_and(|r| r.owner == *owner && r.token == token)
         {
-            s.ready = None;
+            transfer::retire(&mut s);
+            self.inner.wake.notify_one();
         }
     }
     pub(super) fn maintain(&self) {
         let mut s = self.inner.state.lock().unwrap();
         if s.ready
             .as_ref()
-            .is_some_and(|r| r.expires <= Instant::now())
+            .is_some_and(|r| r.expires <= Instant::now() || r.stop.load(Ordering::Relaxed) != 0)
         {
-            s.ready = None;
+            transfer::retire(&mut s);
+            self.inner.wake.notify_one();
         }
+        s.transfer
+            .artifacts
+            .retain(|id, _| self.inner.artifacts.info(*id).is_some());
     }
     /// Registry -> review lock order. Builds reject active preparation/write;
     /// an unapproved preview is discarded before the build takes a write lease.
@@ -417,18 +436,28 @@ impl Service {
         if s.preparing.is_some()
             || self.preparations.available_permits() == 0
             || s.ledger.active().is_some()
+            || s.transfer.ledger.active().is_some()
+            || !s.retired.is_empty()
+            || s.ready
+                .as_ref()
+                .is_some_and(|r| matches!(&r.model, Model::Upload(_) | Model::Prepared(_, Some(_))))
         {
             return Err("drc_busy");
         }
         let result = f()?;
-        s.ready = None;
+        transfer::retire(&mut s);
+        self.inner.wake.notify_one();
+        for id in s.transfer.artifacts.keys() {
+            self.inner.artifacts.request_release(*id);
+        }
+        s.transfer.artifacts.clear();
         s.display = None;
         Ok(result)
     }
     pub(super) fn request_stop(&self) {
         let mut s = self.inner.state.lock().unwrap();
         s.closed = true;
-        s.ready = None;
+        transfer::retire(&mut s);
         s.display = None;
         if let Some((_, stop)) = &s.preparing {
             stop.store(1, Ordering::Relaxed);
@@ -436,6 +465,7 @@ impl Service {
         if let Some(stop) = &s.stop {
             stop.store(1, Ordering::Relaxed);
         }
+        self.inner.artifacts.request_close();
         self.inner.wake.notify_all();
     }
     pub(super) fn is_finished(&self) -> bool {
@@ -445,6 +475,8 @@ impl Service {
             .as_ref()
             .is_none_or(JoinHandle::is_finished)
             && self.preparations.available_permits() == 1
+            && self.inner.artifacts.usage().readers == 0
+            && self.inner.artifacts.disposal_finished()
     }
     fn operation(&self, seq: u64) -> Option<Value> {
         self.inner.state.lock().unwrap().ledger.get(seq)
@@ -557,6 +589,7 @@ fn reader_result(value: &mut Value, result: std::result::Result<Vec<u8>, Failure
     }
 }
 fn execute(inner: &Inner, w: Work) -> Value {
+    let _charge = w._charge;
     let context = w.context;
     let kind = inner.config.kind;
     // The writer owns this boundary, not an HTTP subscriber. A cancelled or
@@ -636,8 +669,23 @@ fn run(inner: Arc<Inner>) {
     loop {
         let w = {
             let mut s = inner.state.lock().unwrap();
-            while s.pending.is_none() && !s.closed {
+            while s.pending.is_none()
+                && s.transfer.pending.is_none()
+                && s.retired.is_empty()
+                && !s.closed
+            {
                 s = inner.wake.wait(s).unwrap();
+            }
+            if !s.retired.is_empty() {
+                let retired = std::mem::take(&mut s.retired);
+                drop(s);
+                drop(retired); // potentially large unlinked files close off-reactor
+                continue;
+            }
+            if let Some(task) = s.transfer.pending.take() {
+                drop(s);
+                transfer::run(&inner, task);
+                continue;
             }
             let Some(w) = s.pending.take() else {
                 break;
@@ -652,6 +700,12 @@ fn run(inner: Arc<Inner>) {
         let mut s = inner.state.lock().unwrap();
         if value["published"] == true || value["outcome_unknown"] == true {
             s.review_rev += 1;
+            // Older downloads are no longer authoritative. Revoke now rather
+            // than letting unreachable artifacts consume capacity until TTL.
+            for id in s.transfer.artifacts.keys() {
+                inner.artifacts.request_release(*id);
+            }
+            s.transfer.artifacts.clear();
         }
         value["review_rev"] = json!(s.review_rev.to_string());
         s.ledger.update(seq, value, true);

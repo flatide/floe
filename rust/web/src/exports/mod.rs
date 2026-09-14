@@ -20,6 +20,7 @@ use floe_app_core::{
 };
 use floe_worker_client::ClipRequest;
 pub(crate) use http::routes;
+pub(crate) use http::stream_download;
 pub(crate) use prepared::{Drafts, PrepareDto};
 use serde::Deserialize;
 use serde_json::{json, Value};

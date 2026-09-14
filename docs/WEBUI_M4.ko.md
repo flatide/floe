@@ -2858,3 +2858,112 @@ Rust1.89 core214/web57/transport10과 Linux x86-64 musl release 교차 빌드도
 context/revision·TTL·취소/재접속·다운로드와 UI 연결이다. 큰 waive를 JSON 배열로 올리거나
 선택 편집 한도로 조용히 자르는 경로는 허용하지 않는다. 실제 브라우저 주석/waive 게시 및
 현장 Firefox/NFS/ETX 수용은 여전히 별도다. GTK 기본·renderd0.12.87은 유지한다.
+
+## 34. M4e-6b — owner 전체 review 전송 API
+
+§33의 native 전송을 현재 owner 서비스에 연결했다. 이 단계는 **API와 합성 회귀**이며
+웹 패널의 파일 선택·가져오기/내보내기 버튼은 아직 없다. 실제 브라우저 review 게시,
+브라우저 다운로드와 현장 Firefox/ETX/NFS 수용을 완료로 간주하지 않는다.
+
+### 범위·입력
+
+기존 `--drc-reviewer TAG`의 notes와 `--drc-edit-waives`의 waive opt-in을 각각 따른다.
+owner cookie·CSRF·origin 검사를 재사용하고, 등록한 ICE reader와 열린 view의
+`{drc_id,revision,view_id}`를 고정한다. ASCII review, guest/share, 임의 서버 파일
+업로드·경로/reviewer 변경은 허용하지 않는다. `/capabilities uploads:false`의 일반 파일
+업로드 금지 계약은 그대로이며 새 권한이나 자동 게시를 추가하지 않는다.
+
+다음 경로에서 `ROOT = /api/v1/drc/review/{notes|waives}`다.
+
+| 경로 | 의미 |
+|---|---|
+| `GET ROOT/transfer` | 전송 ledger32개, 독립 artifact 목록, 현재 upload, 한도/사용량 |
+| `POST ROOT/transfer` | `seq,context,action`으로 import 시작/export/prepare |
+| `POST ROOT/transfer/chunk` | raw octet-stream을 현재 offset부터 추가 |
+| `GET ROOT/transfer/{seq}` | accepted 작업의 확정/미확정 결과 확인 |
+| `POST ROOT/transfer/{seq}/cancel` | 실행 중 작업 취소 요청, 이미 완료된 결과 보존 |
+| `GET/DELETE ROOT/artifacts/{id}` | 준비한 다운로드 metadata/명시 폐기 |
+| `GET/POST ROOT/artifacts/{id}/download` | bounded 첨부 파일 다운로드 |
+
+import 시작에는 `bytes`(정규화한 십진 문자열), prepare에는 `token`만 추가한다.
+export에는 둘 다 없다. JSON `chunk` action이나 알 수 없는 필드는 거부한다.
+raw chunk는 `Content-Type: application/octet-stream` 및
+`X-Floe-Transfer-{Token,Seq,Offset}`, `X-Floe-{DRC,Revision,View}` 고정 헤더를 사용한다.
+전체 파일 JSON/base64/선택 오류 배열을 받지 않고, 서버가 파일명을 정한다.
+
+### 수명·예산·재시도
+
+- 기존 공유 large-body semaphore 하나/1MiB body 한도를 transfer와 chunk에도 적용한다.
+  chunk의 body permit은 HTTP 응답이 아니라 native 작업의 실제 unwind까지 보유한다.
+  파일 최대512MiB, notes 입력 최대16MiB, waive 입력은 등록 pack의 header/status/counter
+  전체 길이와 정확히 같아야 한다. 종류별 notes/waives 각각2슬롯·최대1GiB 예약·동시
+  다운로드1개다. clip 저장소와는 별도이며 서버 전체 disk/RSS 상한이라고 주장하지 않는다.
+- import는 `O_EXCL`·0600 private stage를 생성하고 사용자 bytes를 쓰기 **전에**
+  descriptor-relative unlink한다. 경로나 원래 클라이언트 파일명을 서버에 보존하지 않는다.
+  snapshot/read lease와 최댓값 예약을 upload가 소유한다. 순서에 맞는 offset만 받아
+  64KiB씩 기록하며 업로드 종료까지 한 메모리 버퍼로 합치지 않는다.
+- upload TTL은 시작부터600초이며 chunk마다 연장하지 않는다. 완성된 prepare token은
+  기존30초 정책이다. waive의 입력 FD/예약은 전체 교체 preview와 실제 게시 unwind까지
+  살아 있다. notes는 bounded FE 파싱 후 FD/예약을 반환하고 기존 admitted draft를 유지한다.
+- native 준비/export는 기존 종류별 review owner worker에서 실행한다. 별도 무제한
+  worker/queue를 만들지 않는다. 큰 unlinked FD의 revoke/expiry/logout 폐기는 같은
+  worker에 넘겨 HTTP reactor/registry mutex 밖에서 수행한다. blocking fsync/read/write를
+  선점하거나 취소 지연의 절대 상한을 보장하지는 않는다.
+- 전송 seq는 기존 게시 seq와 분리한다. 같은 owner/context/action/offset/길이/bytes의
+  재시도만 기존 결과를 돌려주고, 다른 body는409다. SHA-1은 chunk 변경/재전송 검출용이며
+  인증 수단이 아니다. ledger에는 raw body가 없다. HTTP ACK가 끊겨도 accepted 작업은
+  계속되므로 poll/replay로 확인한다. prepare 후 소비된 upload의 이전 chunk 재시도도
+  재기록하지 않는다. 오래된 이력은 expired이지 새 작업이 아니다.
+- 미완성 upload·waive import preview가 남아 있으면 DRC pack 재빌드는 busy다.
+  기존 `POST ROOT/revoke {token}`으로 폐기하고 native cleanup 후 재빌드한다.
+  preview를 지운 즉시 파일/lease가 해제됐다고 간주하지 않는다.
+
+### 준비와 실제 게시·다운로드
+
+prepare는 `action:replace_all`, 대상 이름/기존 여부, 입력 크기, 전체 주석 그룹/멤버 수와
+손실 카운터 또는 waived count를 반환한다. 빈 notes는 `clears:true`의 fingerprinted
+tombstone이다. 현재 선택 오류만 교체하거나 조용히 병합하지 않는다.
+명시 import는 portable run을 인증할 수 없으므로 이미 bound인 대상도
+`legacy_unverified:true`다. 기존 `POST ROOT`에 `approve:true,confirm_legacy:true`를
+별도로 제출해야 실제 파일이 바뀐다. 기존 revision/입력 충돌, stable lock, atomic commit,
+waive reader 적용·ACK 분리 계약은 그대로다. 전송 worker 자체는 review를 게시하지 않는다.
+
+export는 기존 편집 snapshot/preview를 소비하지 않는 읽기 작업이다. 현재 native snapshot을
+private spool에 직렬화·fsync한 뒤 context/cancel을 다시 검사하고만 artifact를 노출한다.
+실패·중간 파일은 다운로드할 수 없다. sidecar/lock이 없는 경우 새 review 파일을 만들지 않는다.
+artifact는 owner/reader/view/review revision과600초 TTL에 고정된다. review 게시 성공 또는
+결과 불명으로 revision이 바뀌면 이전 artifact를 즉시 revoke하고 off-reactor 회수한다.
+재빌드/logout/명시 폐기도 같은 경로다. active reader가 남으면 실제 drop까지 회계가 유지된다.
+
+다운로드는 기존 clip의64KiB reader/전송 credit/idle10초 경로를 공유한다. 매 chunk에서
+owner/context/review revision/TTL을 확인한다. GET은 CSRF 헤더, 브라우저 form POST는
+정확한 `csrf=<token>` body와 origin/cookie를 요구한다. CSRF query·Range는 거부하며
+`no-store,nosniff,attachment`와 고정 서버 파일명을 사용한다. 만료/새 revision에서 과거
+성공 ledger를 replay해도 파일을 재생성하거나 다시 다운로드 가능하게 만들지 않는다.
+artifact 목록은32개 작업 이력과 독립적이다. 많은 upload chunk가 과거 export의 이력을
+밀어내도 새로고침 후 파일 조회/폐기는600초 수명 안에서 가능하다.
+
+### 검증
+
+`validate_web_drc_transfer.py`를 전체 battery에 추가했다. private valmini/ICE만 사용하며
+런타임 PATH는 비운다. 합성 FE 입력>1MiB와 정규화 다운로드>2MiB, 전체6007개 status
+(선택 edit cap 초과), reserved2/255·counter 재계산을 Python oracle bytes와 비교한다.
+opt-in/auth/알 수 없는 필드/크기·offset/동일·변조 replay/미완성 prepare, 승인 전 무쓰기,
+전체 교체/빈 tombstone/별도 legacy 확인, 외부 target 충돌, 슬롯 포화/폐기, GET/form
+다운로드·Range/CSRF 거부, 이전 review artifact 폐기, 취소/logout·입력 fingerprint
+불변·named stage 잔류 없음이 gate다. 순수 Rust는 private spool의 unlink-before-write·0600,
+wire 경계값·body 없는 replay signature, 취소 후 실제 unwind까지 admission을 검증한다.
+
+전체 `sh tools/validate_rust.sh`는 exit0·`RUST VALIDATION: ALL OK`로 완료했다.
+app11/core215/web60과 기존 HTTP/WS·ES2017 UI, jobdeck80·renderer46,
+KLayout13 PX+2 phase-exact+14 style(jobs1/8)을 통과했다. 새 private valmini의 legacy
+oracle은 macOS의 기존 fork 대기를 피하도록 먼저 `--legacy --jobs 1`로 생성했다.
+최종 artifact 목록/이력 분리 보강은 release 재빌드 후 HTTP gate를 재실행했고,
+Rust1.89 core215/web60/transport10, scoped fmt·vendored clippy `--no-deps --all-targets
+-- -D warnings`, Linux x86-64 musl release 교차 빌드도 재검증했다. 의존성의 기존
+경고를 workspace 전체 clippy clean으로 표현하지 않으며, 교차 빌드는 Linux 실기 수용이 아니다.
+로그는 `/private/tmp/floe-review-transfer-api-battery.log` 및
+`floe-review-transfer-api-final-{http,msrv,musl,clippy}.log`에 보존한다.
+
+GTK 기본·renderd0.12.87을 바꾸지 않는다. UI 연결과 실제 브라우저 review 게시 권한,
+현장 수용은 후속이다. shared-default 합성 게시 승인을 review 게시 승인으로 확대하지 않는다.

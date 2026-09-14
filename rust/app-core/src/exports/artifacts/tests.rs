@@ -36,6 +36,28 @@ fn reserve(store: &Arc<Store>, id: u64) -> Reservation {
     store.reserve(id, Arc::new(AtomicUsize::new(0))).unwrap()
 }
 #[test]
+fn private_spool_is_unlinked_before_payload_and_serves_only_after_commit() {
+    use std::os::unix::fs::MetadataExt;
+    let s = store();
+    let reservation = reserve(&s, 1);
+    let mut spool = temporary_file().unwrap();
+    let meta = spool.metadata().unwrap();
+    assert!(meta.is_file());
+    assert_eq!(meta.len(), 0);
+    assert_eq!(meta.nlink(), 0);
+    assert_eq!(meta.mode() & 0o777, 0o600);
+    spool.write_all(b"portable review").unwrap();
+    assert!(s.open(1).is_err());
+    spool.sync_all().unwrap();
+    reservation.commit(spool, 15).unwrap();
+    let mut reader = s.open(1).unwrap();
+    assert_eq!(reader.read_chunk(100).unwrap(), b"portable review");
+    s.request_close();
+    assert!(!reader.is_available());
+    drop(reader);
+    assert_eq!(s.usage(), Usage::default());
+}
+#[test]
 fn reservations_size_validation_and_failed_commit_release_capacity() {
     let s = store();
     let r = reserve(&s, 1);

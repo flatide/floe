@@ -16,6 +16,7 @@ tokio = { version = "=1.53.1", default-features = false, features = ["rt", "net"
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = { version = "=1.0.151", features = ["float_roundtrip"] }
 getrandom = "=0.3.4"
+sha1 = "=0.10.7"
 subtle = "=2.6.1"
 hyper = { version = "=1.11.1", default-features = false, features = ["server", "http1"] }
 hyper-util = { version = "=0.1.20", default-features = false, features = ["tokio", "service"] }

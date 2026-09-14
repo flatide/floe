@@ -506,6 +506,17 @@ impl Stage {
         }
         Ok(())
     }
+    /// Only the just-created private empty stage is detached. No caller path
+    /// is unlinked, and failure never returns a linked descriptor as private.
+    pub(crate) fn detach(mut self) -> Result<File> {
+        self.validate()?;
+        let file = self.file.try_clone()?;
+        self.unlink();
+        if self.linked || file.metadata()?.nlink() != 0 {
+            return Err(Error::input("cannot unlink private transfer stage"));
+        }
+        Ok(file)
+    }
     /// Caller holds the stable advisory lock and has revalidated input/target.
     /// A missing target uses linkat, never a clobbering rename.
     pub(crate) fn commit(&mut self, name: &CStr, replace: bool) -> Result<()> {

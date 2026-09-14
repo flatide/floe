@@ -91,6 +91,10 @@ impl ImportedWaives {
     }
 }
 impl Snapshot {
+    /// Exact waive length, or the bounded FE limit. No status scan required.
+    pub fn import_bytes(&self) -> u64 {
+        self.store.max_bytes()
+    }
     /// Serialize the expected review, never a newly adopted external sidecar.
     /// May leave a prefix in the sink on failure: do not expose/publish it until
     /// Ok and your own context/cancellation/commit checks. Does not sync a sink.
