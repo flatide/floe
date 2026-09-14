@@ -71,6 +71,8 @@ M4f-1에서 `selfcheck`의 빌드 식별·실제 native 버전/handshake/종료 
 이 선행 단계에서는 전용 portable 조립을 후속 M4f-2로 구분했고 기존 GTK 패키지를 유지했다.
 M4f-2에서 별도 offline packager·ELF 감사·원자적 비덮어쓰기 archive와 고지/체크섬을
 연결했다([portable 안내](WEBUI_PORTABLE.ko.md)). Linux 실행·현장 수용 및 About UI는 별도다.
+M4f-3a에서 읽기 전용 About/빌드 식별·글꼴 원문 고지를 연결했다.
+전체 portable 고지 열람 UI는 M4f-3b에 남는다([M4 §38](WEBUI_M4.ko.md)).
 나머지 내보내기와 브라우저 다운로드/현장 수용은 남아 있다([M4 기록](WEBUI_M4.ko.md)).
 전체 조작 parity와 M0/Firefox/ETX 현장 검증은 아직 완료되지 않았다.
 상세 범위는 [M1b 기록](WEBUI_M1B.ko.md)과 [M2 기록](WEBUI_M2.ko.md). 여기의 M0~M5는 **웹 전환 단계**이며
@@ -595,3 +597,6 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
   설치된 툴체인으로만 offline 빌드하고, Linux GNU/musl ELF·동적 버전 요구·원본 고지·
   전체 파일 hash를 검사한다. Linux 조립은 native selfcheck 필수, macOS 교차 조립은
   미실행 표시다. 기존 GTK portable과 기본 실행기를 유지한다.
+- **M4f-3a**: 인증된 About GET과 읽기 전용 모달. 앱/소스/target/bundle 및 native 호환
+  요구값을 구분하며 내장 글꼴 원문만 표시한다. 전체 고지 열람 UI는 M4f-3b,
+  실제 Linux/Firefox/ETX와 SYS-02 전체 수용은 별도로 남긴다.

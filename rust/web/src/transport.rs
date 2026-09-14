@@ -137,6 +137,7 @@ pub struct Gateway {
     pub(crate) drc: Option<Arc<crate::drc::Registry>>,
     pub(crate) defaults: Option<Arc<crate::defaults::Service>>,
     startup: Option<serde_json::Value>,
+    pub(crate) build: Option<crate::about::BuildInfo>,
     pub(crate) output_bytes: Arc<Semaphore>,
     pub(crate) encoders: Arc<Semaphore>,
     pub(crate) settings_ops: Arc<Semaphore>,
@@ -164,6 +165,7 @@ impl Gateway {
                 drc: None,
                 defaults: None,
                 startup: None,
+                build: None,
                 output_bytes: Arc::new(Semaphore::new(crate::view::OUTPUT_BUDGET)),
                 encoders: Arc::new(Semaphore::new(2)),
                 settings_ops: Arc::new(Semaphore::new(1)),
@@ -173,6 +175,15 @@ impl Gateway {
     }
     pub fn origin(&self) -> &str {
         self.origin.url()
+    }
+    /// Compile-time identity from the launcher, not a live native-tool audit.
+    pub fn attach_build(gate: &mut Gate, info: crate::about::BuildInfo) -> Result<(), String> {
+        let g = Arc::get_mut(gate).ok_or("gateway already published")?;
+        if g.build.is_some() {
+            return Err("build identity already attached".into());
+        }
+        g.build = Some(info);
+        Ok(())
     }
     /// A trusted local launcher supplies the controller, never an HTTP path.
     /// One pre-registered owner view in this slice; creation/catalog is separate.
@@ -371,6 +382,7 @@ pub fn router(gate: Gate) -> Router {
         .route("/api/v1/session/exchange", post(exchange))
         .route("/api/v1/session", delete(logout))
         .route("/api/v1/capabilities", get(capabilities))
+        .route("/api/v1/about", get(crate::about::read))
         .route("/api/v1/events", get(upgrade))
         .route("/api/v1/view", get(current_view))
         .route("/api/v1/startup", get(startup))

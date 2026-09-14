@@ -29,6 +29,88 @@ use tokio_tungstenite::{
 };
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 #[tokio::test]
+async fn about_is_authenticated_readonly_and_reports_expected_not_running_versions() {
+    for configured in [false, true] {
+        let server = Server::start_build(configured.then_some(floe_web::about::BuildInfo {
+            app_version: "0.1.0",
+            source_revision: "unknown",
+            target: "synthetic",
+            index_compatibility: "test-index",
+            renderd_compatibility: "test-renderd",
+        }))
+        .await;
+        assert_eq!(
+            server.request("GET", "/api/v1/about", &[], "").await.status,
+            401
+        );
+        let auth = server.login().await;
+        assert_eq!(
+            server
+                .request("GET", "/api/v1/about", &[("Cookie", &auth.cookie)], "")
+                .await
+                .status,
+            401
+        );
+        let h = [
+            ("Cookie", auth.cookie.as_str()),
+            ("X-Floe-CSRF", auth.csrf.as_str()),
+        ];
+        let reply = server.request("GET", "/api/v1/about", &h, "").await;
+        assert_eq!(reply.status, 200);
+        assert_eq!(reply.headers["cache-control"], "no-store");
+        assert!(reply.body.len() < 16384);
+        let value: Value = serde_json::from_str(&reply.body).unwrap();
+        assert_eq!(value["bundle"], BUNDLE);
+        assert_eq!(value["desktop_acceptance"], "unverified");
+        assert_eq!(value["notice_scope"], "embedded_font_only");
+        assert_eq!(
+            value["font_notice"],
+            include_str!("../../render-core/assets/NotoSansMono-OFL.txt")
+        );
+        if configured {
+            assert_eq!(value["build"]["renderd_compatibility"], "test-renderd");
+        } else {
+            assert!(value["build"].is_null());
+        }
+        assert_eq!(
+            server.request("GET", "/api/v1/view", &h, "").await.status,
+            404
+        );
+        assert_eq!(
+            server
+                .request("GET", "/api/v1/about?path=/etc/passwd", &h, "")
+                .await
+                .status,
+            403
+        );
+        let origin = format!("http://{}", server.addr);
+        let post = [
+            ("Cookie", auth.cookie.as_str()),
+            ("X-Floe-CSRF", auth.csrf.as_str()),
+            ("Origin", origin.as_str()),
+        ];
+        assert_eq!(
+            server
+                .request("POST", "/api/v1/about", &post, "")
+                .await
+                .status,
+            405
+        );
+        assert_eq!(
+            server
+                .request("DELETE", "/api/v1/session", &post, "")
+                .await
+                .status,
+            204
+        );
+        assert_eq!(
+            server.request("GET", "/api/v1/about", &h, "").await.status,
+            401
+        );
+        server.shutdown().await;
+    }
+}
+#[tokio::test]
 async fn embedded_assets_are_content_identified_and_never_serve_files() {
     let server = Server::start().await;
     let page = server.request("GET", "/", &[], "").await;
@@ -40,6 +122,7 @@ async fn embedded_assets_are_content_identified_and_never_serve_files() {
     assert!(!page.headers["content-security-policy"].contains("unsafe-inline"));
     for (name, mime) in [
         ("app.js", "text/javascript"),
+        ("about.js", "text/javascript"),
         ("protocol.js", "text/javascript"),
         ("query.js", "text/javascript"),
         ("inspect.js", "text/javascript"),
@@ -95,9 +178,16 @@ struct Auth {
 }
 impl Server {
     async fn start() -> Self {
+        Self::start_build(None).await
+    }
+    async fn start_build(info: Option<floe_web::about::BuildInfo>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let (gateway, bootstrap) = Gateway::new(addr).unwrap();
+        let (mut gateway, bootstrap) = Gateway::new(addr).unwrap();
+        if let Some(info) = info {
+            Gateway::attach_build(&mut gateway, info.clone()).unwrap();
+            assert!(Gateway::attach_build(&mut gateway, info).is_err());
+        }
         let (stop, rx) = oneshot::channel();
         let task = tokio::spawn(transport::serve(listener, gateway, async move {
             let _ = rx.await;

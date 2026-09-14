@@ -91,9 +91,15 @@ Firefox는 설치된 것을 사용하며 진단/패키징은 브라우저나 설
 archive SHA-256은 게시 결과에 출력된다. 체크섬은 손상 검출용이지 인증 서명이 아니므로
 배포 파일의 hash는 신뢰하는 전달 경로로 확인한다. tar 바이트 재현성을 보장하는
 reproducible-build 기능은 아니다. GNU 시스템 라이브러리·Linux kernel/CPU·Firefox/
-ETX/NFS 수용과 남은 UI parity, About 고지 UI 및 GTK 은퇴는 별도다.
+ETX/NFS 수용과 남은 UI parity, 전체 고지 열람 UI 및 GTK 은퇴는 별도다.
 
 ## 로컬 검증
+
+웹 상단 **About**은 launcher의 build identity와 expected native compatibility를
+보여준다. 실제 native 도구 검사에는 계속 `selfcheck --adjacent`를 사용한다.
+About의 원문 고지는 현재 내장 Noto Sans Mono만이며, 전체 고지는 배포본의
+`NOTICES/INVENTORY.txt`부터 읽어야 한다. 전체 고지 웹 열람은 후속 M4f-3b다.
+About을 열어도 selfcheck·인덱싱·렌더·게시가 시작되지 않는다.
 
 Rust unit은 옵션/ELF 구조·문자열 오탐·손상 입력·비덮어쓰기/정리 규칙을 검사한다.
 `validate_web_portable.py`는 synthetic tool double로 notice/build/ELF 거부,

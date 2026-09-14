@@ -12,7 +12,7 @@
     let gesture = null, dragShift = null, lastPlacement = null;
     let drcPanel = null, displayProjection = null, frozenProjection = null;
     let inspector = null, measurement = null, clipper = null, snapshots = null, overlayMode = 'all', pickedPairs = [];
-    let settings = null, defaults = null;
+    let settings = null, defaults = null, about = null;
     const rulerHistory = window.FloeRulers.history();
     let ackedFrames = {foreground: null, margin: null};
     const sessionKey = 'floe-session:' + location.origin;
@@ -561,6 +561,7 @@
         }
         const caps = await http('GET', '/api/v1/capabilities');
         if (caps.protocol !== 1 || caps.bundle !== bundle) { throw new Error('Client/server version mismatch. Reload the page.'); }
+        about.init();
         catalog = (await http('GET', '/api/v1/catalog')).sources;
         el('source').textContent = '';
         catalog.forEach(function (s) { const option = document.createElement('option'); option.value = s.source_id; option.textContent = s.title; el('source').appendChild(option); });
@@ -590,6 +591,7 @@
         catch (e) { report(e); }
     };
     el('logout').onclick = async function () {
+        about.stop();
         if (drcPanel) { drcPanel.stop(true); }
         if (clipper) { clipper.stop(); }
         if (snapshots) { snapshots.stop(); }
@@ -806,12 +808,13 @@
     settings=window.FloeSettings.bind({el:el,window:window,document:document,XHR:XMLHttpRequest,Blob:Blob,Encoder:TextEncoder,Decoder:TextDecoder,
         csrf:function(){return auth?auth.csrf:'';},message:message,edit:edit,setTimeout:setTimeout.bind(window),clearTimeout:clearTimeout.bind(window),
         context:settingsContext});
+    about=window.FloeAbout.bind({el:el,document:document,http:http,bundle:bundle});
     document.addEventListener('visibilitychange', function () { settings.changed(); defaults.changed(); if (document.hidden) { finishDecode(); inspector.changed(); measurement.changed(); clipper.changed(); } else if (live() && !stopped) { connect(); } });
     window.addEventListener('blur', function () { inspector.move(NaN, NaN); measurement.interrupt(); });
     setInterval(function () { if (socket && socket.readyState === WebSocket.OPEN && epoch) { try { send({type: 'ping'}); } catch (e) { report(e); } } }, 10000);
-    window.addEventListener('pagehide', function () { disconnect(); inspector.stop(); measurement.stop(); clipper.stop(); snapshots.stop(); settings.stop(); defaults.stop(); clearTimeout(operationTimer); clearTimeout(resizeTimer); if (sizeObserver) { sizeObserver.disconnect(); } drcPanel.stop(); });
+    window.addEventListener('pagehide', function () { about.stop(); disconnect(); inspector.stop(); measurement.stop(); clipper.stop(); snapshots.stop(); settings.stop(); defaults.stop(); clearTimeout(operationTimer); clearTimeout(resizeTimer); if (sizeObserver) { sizeObserver.disconnect(); } drcPanel.stop(); });
     window.addEventListener('pageshow', function (event) {
-        if (event.persisted && auth && !stopped) { inspector.resume(); measurement.resume(); clipper.resume(); snapshots.resume(); settings.resume(); defaults.resume(); if (sizeObserver) { sizeObserver.observe(viewport); } drcPanel.resume().then(operationState).then(restore).then(resized).catch(report); }
+        if (event.persisted && auth && !stopped) { about.init(); inspector.resume(); measurement.resume(); clipper.resume(); snapshots.resume(); settings.resume(); defaults.resume(); if (sizeObserver) { sizeObserver.observe(viewport); } drcPanel.resume().then(operationState).then(restore).then(resized).catch(report); }
     });
     start().catch(function (e) { connection('Not connected', false); report(e); el('empty-message').textContent = e.message; });
 }());

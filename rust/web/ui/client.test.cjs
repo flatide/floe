@@ -116,6 +116,7 @@ const storage=new Map();
 window.isSecureContext=true;window.ClipboardItem=class {constructor(data){this.data=data;}};
 window.FloeSettings=require('./settings.js');
 window.FloeDefaults=require('./defaults.js');
+window.FloeAbout=require('./about.js');
 window.FloeDRCNotes=require('./drc-notes.js');
 window.FloeDRCNoteDisplay=require('./drc-note-display.js');
 window.FloeDRCWaives=require('./drc-waives.js');

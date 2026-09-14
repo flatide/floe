@@ -49,11 +49,21 @@ pub fn parse(args: &[String]) -> Result<Options> {
     }
     Ok(o)
 }
+pub fn build_info() -> floe_web::about::BuildInfo {
+    floe_web::about::BuildInfo {
+        app_version: env!("CARGO_PKG_VERSION"),
+        source_revision: env!("FLOE_APP_REVISION"),
+        target: env!("FLOE_APP_TARGET"),
+        index_compatibility: INDEX_VERSION,
+        renderd_compatibility: EXPECTED_RENDERD_VERSION,
+    }
+}
 pub fn metadata() -> Value {
-    json!({"product":"floe2-web","app_version":env!("CARGO_PKG_VERSION"),
-        "source_revision":env!("FLOE_APP_REVISION"),"target":env!("FLOE_APP_TARGET"),
-        "web_bundle":floe_web::transport::BUNDLE,"index_version":INDEX_VERSION,
-        "renderd_version":EXPECTED_RENDERD_VERSION,"python_runtime":false,
+    let build = build_info();
+    json!({"product":"floe2-web","app_version":build.app_version,
+        "source_revision":build.source_revision,"target":build.target,
+        "web_bundle":floe_web::transport::BUNDLE,"index_version":build.index_compatibility,
+        "renderd_version":build.renderd_compatibility,"python_runtime":false,
         "desktop_acceptance":"unverified"})
 }
 fn discovery(adjacent: bool, renderer: bool) -> Result<Discovery> {

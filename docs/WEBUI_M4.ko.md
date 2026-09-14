@@ -3168,3 +3168,60 @@ scoped fmt/clippy `--no-deps --all-targets -- -D warnings`, Rust1.89 packager �
 Git에는 코드/문서/검증만 포함한다. 검증용 venv 링크만 제거하고 원본 venv·합성 게시
 결과와 main/feature-jobdeck 작업은 보존한다. 다음은 About/빌드 정보 연결이며 전체
 웹 전환·Linux 실기·현장 수용 완료를 선언하지 않는다.
+
+## 38. M4f-3a — 읽기 전용 About / 빌드 식별
+
+상단 About은 앱 버전·소스 revision·target·웹 bundle·expected native compatibility를
+표시한다. launcher와 `selfcheck --metadata-only`가 같은 build-info를 사용한다.
+index/renderd 값은 **호환 요구값**이지 실행 중 도구의 source hash가 아니다.
+`unknown`/dirty `+`와 desktop acceptance `unverified`의 의미도 화면에 명시한다.
+인증된 `GET /api/v1/about`만 사용하며 source/index/renderer/selfcheck를 실행하지 않는다.
+뷰가 없어도 읽을 수 있고, endpoint에 파일 경로나 게시/업로드 기능은 없다.
+
+웹 bundle fingerprint에 About JS/DTO와 원본 Noto Sans Mono OFL을 포함했다.
+고지 본문은 `textContent`로만 표시하며 HTML/링크/외부 자산을 실행하지 않는다.
+모달은 배경 입력/접근성 노출을 차단하고 Tab·Escape·포커스 복원·pagehide 정리를
+소유한다. 닫기/새로 열기/종료 뒤 늦게 도착한 응답은 표시하지 않고 자동 재시도하지 않는다.
+기존 렌더 상태·픽셀·index/renderd0.12.87 및 GTK 기본값은 그대로다.
+
+### 고지 범위와 후속
+
+이번 UI의 `notice_scope=embedded_font_only`는 글꼴 원문만을 뜻한다.
+portable의 전체 원본 고지는 `NOTICES/INVENTORY.txt`부터 별도로 읽고 `verify.sh`로
+무결성을 검사한다. 전체 고지 브라우저를 완료했다고 표현하지 않는다.
+실제 musl 조립본의 고지 파일 합은 약13MiB이고 단일 Rust 저작권 문서는 약12MiB여서,
+전체 원문을 초기 About JSON/JS/DOM에 무제한 적재하지 않는다.
+
+**M4f-3b 후속:** 설치된 portable의 고지 목록/본문을 유계 페이지로 읽는 UI.
+고정된 배포 출처·무결성/교체 처리·경로/심볼릭 링크 차단·읽기 자원 상한을 먼저
+정의해야 한다. 개발 빌드에 인접 자료가 없을 때도 기능/고지 범위를 명시하며,
+브라우저에서 서버 임의 경로를 요청하는 API는 만들지 않는다.
+이 구분은 SYS-02 전체, Linux 실행·Firefox/ETX/NFS 현장 수용·GTK 은퇴를 닫지 않는다.
+
+### 검증
+
+ES2017 UI 회귀와 About의 schema·read-only GET·원문 일치·늦은 응답/종료·Tab/Escape/
+포커스 복원 테스트를 통과했다. 실제 HTTP 테스트는 인증/CSRF·no-store·POST 거부,
+경로 query 거부·로그아웃 후 거부·뷰 부재에서도 조회 가능함을 검사한다.
+실제 launcher HTTP와 selfcheck의 build/bundle/compatibility 일치 및 open/index
+operation이 발생하지 않음은 `validate_web_cli.py`에 연결했다.
+Chrome 실제 화면에서 build/OFL 본문과 레이아웃, 배경 AX 숨김, Shift+Tab/Tab 순환,
+Escape 포커스 복원, End session 뒤 About 비활성화를 확인했다. 이 합성 소스는 현재
+index가 없어 뷰 open이 거부된 상태였으며, 자동 인덱싱 없이 About이 동작하는 경우를
+확인한 것이다. 실칩 렌더 성능/Firefox 수용으로 확대 해석하지 않는다.
+세션은 exit0으로 종료했고 임시 credential은 제거됐다. 공유 기본값·DRC 게시/업로드는
+실행하지 않았다.
+
+전체 `sh tools/validate_rust.sh`는 exit0·`RUST VALIDATION: ALL OK`다.
+app13/core215/web60, HTTP11, 새 About을 포함한 ES2017 UI, jobdeck80·renderer46 및
+KLayout13 PX+2 phase-exact+14 style(jobs1/8)을 통과했다. 변경 파일 fmt/check,
+app/web scoped clippy `--no-deps --all-targets -- -D warnings`와 Rust1.89 HTTP11/app13도
+통과했다. 기존 dependency/PyGI/Gdk 경고는 전체 무경고로 표현하지 않는다.
+로그는 `/private/tmp/floe-web-about-battery.log` 및 같은 접두사의
+`http/ui2/clippy/msrv.log`다. 검증용 venv 링크만 정리하고 원본 venv·사용자 작업은
+보존한다. 전체 웹 전환 및 SYS-02 완료가 아니라 M4f-3a 구현/로컬 검증 완료다.
+
+검증 준비 중 `cargo fmt --all`이 만든 범위 밖25개 파일은 모두
+`rustfmt(HEAD)`와 바이트 단위 동일함을 재확인하고 복구용 patch를 보관한 뒤
+그 포맷 변경만 되돌렸다. source 변경/사용자 작업은 섞지 않았으며 이후 fmt는
+변경 파일에만 한정한다.

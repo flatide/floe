@@ -24,17 +24,19 @@
   <script defer src="/assets/@@BUNDLE@@/drc.js"></script>
   <script defer src="/assets/@@BUNDLE@@/settings.js"></script>
   <script defer src="/assets/@@BUNDLE@@/defaults.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/about.js"></script>
   <script defer src="/assets/@@BUNDLE@@/app.js"></script>
 </head>
 <body>
-  <header class="topbar">
+  <header id="app-header" class="topbar">
     <div class="brand">floe<span>2</span><small>WEB PREVIEW</small></div>
     <div id="document-title" class="document-title">Layout workspace</div>
     <span id="connection" class="connection">Connecting</span>
     <button id="drc-toggle" class="quiet" aria-expanded="true" aria-controls="drc-panel" hidden>DRC</button>
     <button id="logout" class="quiet" title="End this session and stop its workers">End session</button>
+    <button id="about-open" class="quiet" aria-haspopup="dialog" aria-controls="about-dialog" aria-expanded="false" disabled>About</button>
   </header>
-  <div class="workspace">
+  <div id="app-workspace" class="workspace">
     <aside class="sidebar" aria-label="Layout controls">
       <section class="source-panel">
         <h2>Source</h2>
@@ -298,6 +300,20 @@
       <p id="drc-sync-status" class="note" role="status"></p>
       <button id="drc-reload" class="quiet" title="Discard unsynchronized local panel changes and restore this view's server state">Reload review</button>
     </aside>
+  </div>
+  <div id="about-dialog" class="about-backdrop" role="dialog" aria-modal="true" aria-labelledby="about-title" hidden>
+    <section class="about-card">
+      <div class="about-heading"><h2 id="about-title">About floe2 · Web preview</h2><button id="about-close">Close</button></div>
+      <p id="about-status" role="status"></p>
+      <pre id="about-build" tabindex="0" aria-label="Build identity"></pre>
+      <p class="note">Native versions above are the launcher's expected compatibility versions, not source hashes of running tools. Revision “unknown” has no Git provenance; a trailing “+” reports a dirty tree observed at build time. These are diagnostics, not signatures.</p>
+      <p class="note">Linux, Firefox/ETX and shared-server acceptance still require field validation. This panel does not run selfcheck, open files or change the view.</p>
+      <h2>Distribution notices</h2>
+      <p>Portable packages contain the full collected material in NOTICES/ (starting with INVENTORY.txt). Use verify.sh to check the package hashes. This panel currently shows only the embedded font notice, not the complete dependency or toolchain inventory.</p>
+      <p class="note">The inventory includes build dependencies and may include components not linked at runtime. It is not legal clearance or a grant of Floe distribution rights. Development executables may have no adjacent notice bundle.</p>
+      <h2>Noto Sans Mono · Original font notice</h2>
+      <pre id="about-font" tabindex="0" aria-label="Original font license"></pre>
+    </section>
   </div>
   <noscript>This workspace requires JavaScript. All assets are served locally.</noscript>
 </body>

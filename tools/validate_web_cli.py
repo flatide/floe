@@ -116,6 +116,7 @@ def main(fixture):
                 assert session["bundle"].encode() in page
                 assert session["url"].encode() not in page
                 client.call("GET", "/api/v1/startup", code=401)
+                client.call("GET", "/api/v1/about", code=401)
                 if not manual:
                     argv = wait(lambda: argv_path.read_text().splitlines() if argv_path.exists() else None, proc)
                     assert argv[:3] == ["--no-remote", "--new-instance", "--profile"]
@@ -127,6 +128,18 @@ def main(fixture):
                     assert launch.stat().st_mode & 0o777 == 0o600
                     assert session["url"] in launch.read_text()
                 client.login()
+                about = client.call("GET", "/api/v1/about")
+                identity = json.loads(subprocess.check_output(
+                    [str(APP), "selfcheck", "--metadata-only"], env=env, text=True))
+                assert about["bundle"] == session["bundle"] == identity["web_bundle"]
+                for key in ("app_version", "source_revision", "target"):
+                    assert about["build"][key] == identity[key]
+                assert about["build"]["index_compatibility"] == identity["index_version"]
+                assert about["build"]["renderd_compatibility"] == identity["renderd_version"]
+                assert about["desktop_acceptance"] == "unverified"
+                assert about["notice_scope"] == "embedded_font_only"
+                assert about["font_notice"] == (ROOT / "rust/render-core/assets/NotoSansMono-OFL.txt").read_text()
+                assert client.call("GET", "/api/v1/operations")["last_seq"] == "0"
                 assert client.call("GET", "/api/v1/capabilities")["design_defaults"] is manual
                 if not manual:
                     client.call("GET", "/api/v1/defaults", code=403)

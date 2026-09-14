@@ -410,6 +410,7 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
     let (mut gate, secret) =
         Gateway::with_startup(listener.local_addr()?, Arc::clone(&service), request)
             .map_err(Error::input)?;
+    Gateway::attach_build(&mut gate, crate::selfcheck::build_info()).map_err(Error::input)?;
     if let Some(path) = &c.drc {
         // The explicit write opt-in also reads that fixed reviewer's existing
         // file on ICE reopen. It never discovers another reviewer or a pack.
