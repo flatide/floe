@@ -161,6 +161,9 @@ M4e-5a는 저장 주석의 최대512개 목록 badge와 이동 대상 하나의 
 소비하지 않는다. M4e-5b에서 배지와 마지막 ACK 이동 대상의 본문 overlay를 연결했다
 ([M4 §32](WEBUI_M4.ko.md)). Markers/Tab·상태 복원·저장 장벽과 Chrome 합성 표시를
 확인했다. 전체 import/export·실제 브라우저 게시·현장 수용은 후속이다.
+M4e-6a는 주석/waive snapshot export와 전체 waive import의 native/managed 기반이다
+([M4 §33](WEBUI_M4.ko.md)). bounded streaming·전체 교체 확인·입력/대상 변경 보호와
+Python byte oracle을 추가했다. 전송 CLI/HTTP/upload/artifact/UI 연결은 아직 남아 있다.
 
 ### 2.7 svrf — M4 (6개 옵션)
 

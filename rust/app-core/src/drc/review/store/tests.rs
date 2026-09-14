@@ -6,6 +6,8 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 static SERIAL: AtomicU64 = AtomicU64::new(0);
+#[path = "transfer_tests.rs"]
+mod transfer;
 struct Fixture {
     root: PathBuf,
     dir: PathBuf,
@@ -16,6 +18,9 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::with_count(65)
+    }
+    fn with_count(count: u64) -> Self {
         let root = std::env::temp_dir().join(format!(
             "floe-review-store-{}-{}",
             std::process::id(),
@@ -26,7 +31,7 @@ impl Fixture {
         let dir = root.join("inputs");
         fs::create_dir(&dir).unwrap();
         let pack = dir.join("한 글.db.ice");
-        let bytes = crate::drc::tests::bytes(65);
+        let bytes = crate::drc::tests::bytes(count);
         fs::write(&pack, &bytes).unwrap();
         let scope = AccessScope::new(std::slice::from_ref(&root)).unwrap();
         Self {
@@ -535,7 +540,8 @@ fn note_import_reports_normalization_and_rejects_foreign_data_without_write() {
         }
     );
     assert_eq!(fs::read(s.target()).unwrap(), before);
-    d.publish(&f.stop).unwrap();
+    assert!(d.legacy_unverified());
+    d.accept_legacy_run().publish(&f.stop).unwrap();
     let snap = s.snapshot(&f.stop).unwrap();
     assert_eq!(snap.import_report(), &ImportReport::default());
     assert_eq!(snap.notes().unwrap().get(1), Some("last"));

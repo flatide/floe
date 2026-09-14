@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pure Rust DRC review codec parity; Python writes only private synthetic data."""
+"""Native DRC review codecs/store/transfer parity against private Python fixtures."""
 import hashlib
 import json
 import os
@@ -79,8 +79,13 @@ def main():
                     for gid, status in edits:
                         pack.set_status(*refs[gid], status)
                     pack.waive_export(str(saved))
+                    # The native whole-file import reads this immutable Python
+                    # export, but must recompute deliberately invalid counters.
+                    transfer = work / f"{source.name}.transfer-{len(case['waives'])}.waive"
+                    export = saved.read_bytes()
+                    transfer.write_bytes(export[:40+pack.total] + bytes([255]) * (4 * len(pack.checks)))
                     case["waives"].append({"input": list(tampered), "edits": edits,
-                                           "output": list(saved.read_bytes()),
+                                           "output": list(export), "transfer_input": str(transfer),
                                            "counts": [pack.status_counts(ci)[0] for ci in range(len(pack.checks))]})
 
                 def snapshot(step):
@@ -94,8 +99,11 @@ def main():
                 for ids, text in edits:
                     pack.set_note(ids, text)
                     snapshot({"op": "set", "ids": ids, "text": text})
-                exported = pack._serialize_notes()
-                assert pack._parse_notes(exported, pack.total)
+                note_file = work / f"{source.name}.export.notes.fe"
+                pack.note_export(str(note_file))
+                exported = note_file.read_text()
+                assert exported == pack._serialize_notes()
+                pack.note_import(str(note_file))
                 snapshot({"op": "parse", "input": exported})
                 ids = list(range(min(pack.total, 5000)))
                 pack.clear_note(ids)

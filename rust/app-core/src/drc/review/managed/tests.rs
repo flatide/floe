@@ -12,6 +12,106 @@ fn flag() -> Arc<AtomicUsize> {
 }
 
 #[test]
+fn blocked_export_keeps_admission_until_native_unwind_after_retirement() {
+    struct Block {
+        entered: Option<mpsc::SyncSender<()>>,
+        release: mpsc::Receiver<()>,
+    }
+    impl std::io::Write for Block {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if let Some(tx) = self.entered.take() {
+                tx.send(()).unwrap();
+                self.release.recv_timeout(Duration::from_secs(10)).unwrap();
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    for k in [store::Kind::Notes, store::Kind::Waives] {
+        let f = Fixture::new();
+        let m = f.open(k);
+        let target = m.target().to_owned();
+        let snapshot = m.snapshot(flag()).unwrap();
+        let (tx, rx) = mpsc::sync_channel(1);
+        let (release, wait) = mpsc::sync_channel(1);
+        let worker = thread::spawn(move || {
+            snapshot.export(Block {
+                entered: Some(tx),
+                release: wait,
+            })
+        });
+        rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(kind(m.snapshot(flag())), ErrorKind::Busy);
+        m.request_stop();
+        drop(m);
+        assert_eq!(f.resources.usage().cpu_slots, 1);
+        assert_eq!(
+            kind(f.resources.index([f.pack.clone()], 1)),
+            ErrorKind::Busy
+        );
+        release.send(()).unwrap();
+        assert_eq!(kind(worker.join().unwrap()), ErrorKind::Cancelled);
+        assert_eq!(f.resources.usage(), Usage::default());
+        assert!(!target.exists());
+        f.preserved();
+    }
+}
+
+#[test]
+fn managed_whole_import_preserves_borrow_confirmation_cancellation_and_reader_proof() {
+    let f = Fixture::new();
+    let m = f.open(store::Kind::Waives);
+    let mut bytes = Vec::new();
+    m.snapshot(flag()).unwrap().export(&mut bytes).unwrap();
+    bytes[40] = 1;
+    bytes[104] = 255;
+    let input = f.dir.join("portable.waive");
+    fs::write(&input, &bytes).unwrap();
+    let prepare = || {
+        m.snapshot(flag())
+            .unwrap()
+            .prepare_waives_import(fs::File::open(&input).unwrap())
+            .unwrap()
+            .0
+    };
+    let draft = prepare();
+    assert!(draft.legacy_unverified());
+    assert_eq!(kind(m.snapshot(flag())), ErrorKind::Busy);
+    assert_eq!(kind(draft.publish(false)), ErrorKind::Unsupported);
+    assert!(m.is_idle());
+    assert!(!m.target().exists());
+    let mut job = prepare().publish(true).unwrap();
+    let done = finish(&mut job);
+    assert_eq!(done.phase, Phase::Succeeded);
+    let proof = done.outcome.unwrap();
+    let mut reader = crate::drc::Database::open_explicit(&f.pack, None, &flag()).unwrap();
+    m.snapshot_published(&proof, flag())
+        .unwrap()
+        .apply_waives(&mut reader, &flag())
+        .unwrap();
+    assert!(reader.has_waives());
+    assert_eq!(
+        m.snapshot(flag())
+            .unwrap()
+            .selected_statuses(&[0, 64])
+            .unwrap(),
+        [1, 255]
+    );
+    let before = fs::read(m.target()).unwrap();
+    let draft = prepare();
+    m.request_stop();
+    assert_eq!(kind(draft.publish(true)), ErrorKind::Cancelled);
+    assert!(m.is_idle());
+    assert_eq!(fs::read(m.target()).unwrap(), before);
+    assert_eq!(fs::read(input).unwrap(), bytes);
+    drop(m);
+    assert_eq!(f.resources.usage(), Usage::default());
+    f.preserved();
+}
+
+#[test]
 fn selected_snapshot_is_bound_to_reader_and_managed_lifetime() {
     let f = Fixture::new();
     let m = f.open(store::Kind::Waives);

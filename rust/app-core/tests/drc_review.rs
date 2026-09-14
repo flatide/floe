@@ -73,7 +73,7 @@ fn store_publication_matches_python() {
     use floe_app_core::{
         drc::review::{
             managed::{ManagedStore, Phase, Publication, Registration},
-            store::Kind,
+            store::{ExportContents, Kind},
         },
         managed::{Limits, Resources, Usage},
         registered::AccessScope,
@@ -102,6 +102,7 @@ fn store_publication_matches_python() {
     let stop = Arc::new(AtomicUsize::new(0));
     let resources = Resources::new(Limits::default()).unwrap();
     let mut writes = 0;
+    let mut exports = 0;
     for case in cases.as_array().unwrap() {
         let pack = Path::new(case["pack"].as_str().unwrap());
         let scope = AccessScope::new(&[pack.parent().unwrap().to_owned()]).unwrap();
@@ -158,6 +159,37 @@ fn store_publication_matches_python() {
                 expected["counts"]
             );
             writes += 1;
+            let snapshot = waives.snapshot(Arc::clone(&stop)).unwrap();
+            assert!(!snapshot.legacy_unverified());
+            let (draft, stats) = snapshot
+                .prepare_waives_import(
+                    fs::File::open(expected["transfer_input"].as_str().unwrap()).unwrap(),
+                )
+                .unwrap();
+            assert!(draft.legacy_unverified());
+            assert_eq!(json!(stats.per_rule), expected["counts"]);
+            published(draft.publish(true).unwrap());
+            writes += 1;
+            let mut output = Vec::new();
+            let info = waives
+                .snapshot(Arc::clone(&stop))
+                .unwrap()
+                .export(&mut output)
+                .unwrap();
+            assert_eq!(info.bytes, output.len() as u64);
+            assert_eq!(
+                info.contents,
+                ExportContents::Waives {
+                    waived: stats.waived
+                }
+            );
+            assert!(!info.legacy_unverified);
+            assert_eq!(json!(output), expected["output"]);
+            assert_eq!(
+                json!(fs::read(waives.target()).unwrap()),
+                expected["output"]
+            );
+            exports += 1;
         }
         let notes = ManagedStore::open(
             &resources,
@@ -185,7 +217,7 @@ fn store_publication_matches_python() {
                     .unwrap()
                     .0
             };
-            published(draft.publish(false).unwrap());
+            published(draft.publish(expected["op"] != "set").unwrap());
             let text = fs::read_to_string(notes.target()).unwrap();
             if let Some(expected) = expected["output"].as_str() {
                 assert_eq!(text, expected);
@@ -207,11 +239,24 @@ fn store_publication_matches_python() {
             for (gid, expected) in expected["lookup"].as_array().unwrap().iter().enumerate() {
                 assert_eq!(json!(loaded.notes().unwrap().get(gid as u64)), *expected);
             }
+            let mut output = Vec::new();
+            let info = loaded.export(&mut output).unwrap();
+            assert_eq!(info.bytes, output.len() as u64);
+            assert_eq!(std::str::from_utf8(&output).unwrap(), text);
+            assert_eq!(
+                info.contents,
+                ExportContents::Notes {
+                    groups: loaded.notes().unwrap().groups().count(),
+                    members: loaded.notes().unwrap().member_count(),
+                }
+            );
+            exports += 1;
             writes += 1;
         }
         drop((waives, notes));
         assert_eq!(resources.usage(), Usage::default());
     }
-    assert_eq!(writes, 28);
-    println!("RUST DRC REVIEW STORE: ALL OK ({writes} managed native publications, admission release, real pack centers, Python bytes, reload and empty tombstones)");
+    assert_eq!(writes, 34);
+    assert_eq!(exports, 28);
+    println!("RUST DRC REVIEW STORE: ALL OK ({writes} managed native publications including 6 whole-waive imports, {exports} exports, admission release, real pack centers, Python bytes, reload and empty tombstones)");
 }

@@ -207,6 +207,26 @@ impl Snapshot {
     pub fn import_report(&self) -> &ImportReport {
         self.value.import_report()
     }
+    /// Off-reactor expected-snapshot export; output MUST be an unpublished sink.
+    /// The borrow/admission stays alive through errors and native unwind.
+    pub fn export(&self, output: impl std::io::Write) -> Result<store::ExportInfo> {
+        self.lease.check()?;
+        let result = self.value.export(output, &self.lease.stop)?;
+        self.lease.check()?;
+        Ok(result)
+    }
+    pub fn prepare_waives_import(self, file: std::fs::File) -> Result<(Prepared, WaiveStats)> {
+        self.lease.check()?;
+        let (draft, stats) = self.value.prepare_waives_import(file, &self.lease.stop)?;
+        Ok((
+            Prepared {
+                legacy: draft.legacy_unverified(),
+                draft,
+                lease: self.lease,
+            },
+            stats,
+        ))
+    }
     pub fn prepare_waives(self, edits: &[(u64, u8)]) -> Result<Prepared> {
         self.lease.check()?;
         let legacy = self.value.legacy_unverified();
@@ -230,8 +250,8 @@ impl Snapshot {
     /// Caller must show the normalization report before approving publication.
     pub fn prepare_notes_import(self, text: &str) -> Result<(Prepared, ImportReport)> {
         self.lease.check()?;
-        let legacy = self.value.legacy_unverified();
         let (draft, report) = self.value.prepare_notes_import(text, &self.lease.stop)?;
+        let legacy = draft.legacy_unverified();
         Ok((
             Prepared {
                 draft,

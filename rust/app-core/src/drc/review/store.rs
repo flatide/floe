@@ -25,6 +25,8 @@ use std::{
 };
 
 const TTL: Duration = Duration::from_secs(120);
+mod transfer;
+pub use transfer::{ExportContents, ExportInfo};
 #[cfg(target_os = "macos")]
 const BINDING: &std::ffi::CStr = c"com.floe.review-pack-v1";
 #[cfg(not(target_os = "macos"))]
@@ -517,6 +519,7 @@ impl Snapshot {
             change: Change::Waives(changes.to_vec()),
             expires: Instant::now() + TTL,
             accept_legacy: false,
+            imported: false,
         })
     }
     pub fn prepare_note(mut self, gids: &[u64], text: &str, stop: &AtomicUsize) -> Result<Draft> {
@@ -538,27 +541,35 @@ impl Snapshot {
         }
         let (notes, report) = Notes::parse(text, self.store.layout.fingerprint(), stop)?;
         self.notes = Some(notes);
-        Ok((self.note_draft(stop)?, report))
+        let mut draft = self.note_draft(stop)?;
+        // Portable FE has only the weak size/mtime/count tag, not proof of
+        // this exact run. Explicit import confirmation is separate from the
+        // target sidecar's (possibly already verified) binding.
+        draft.imported = true;
+        Ok((draft, report))
     }
-    fn note_draft(self, stop: &AtomicUsize) -> Result<Draft> {
-        self.current(false, stop)?;
+    fn note_text(&self, stop: &AtomicUsize) -> Result<String> {
         let text = {
             let mut pack = self.store.pack.lock().unwrap();
-            let text = self.notes.as_ref().unwrap().serialize(
-                |gid| {
-                    let ci = pack.checks.partition_point(|c| c.start + c.count <= gid);
-                    let c = pack
-                        .checks
-                        .get(ci)
-                        .filter(|c| gid >= c.start)
-                        .ok_or_else(|| Error::input("note error index out of range"))?;
-                    let local = gid - c.start;
-                    let record = pack.error_info(ci, local, stop)?;
-                    let b = pack.bbox_um(record.bbox)?;
-                    Ok([(b[0] + b[2]) / 2., (b[1] + b[3]) / 2.])
-                },
-                stop,
-            )?;
+            let text = self
+                .notes
+                .as_ref()
+                .ok_or_else(|| Error::input("not a note snapshot"))?
+                .serialize(
+                    |gid| {
+                        let ci = pack.checks.partition_point(|c| c.start + c.count <= gid);
+                        let c = pack
+                            .checks
+                            .get(ci)
+                            .filter(|c| gid >= c.start)
+                            .ok_or_else(|| Error::input("note error index out of range"))?;
+                        let local = gid - c.start;
+                        let record = pack.error_info(ci, local, stop)?;
+                        let b = pack.bbox_um(record.bbox)?;
+                        Ok([(b[0] + b[2]) / 2., (b[1] + b[3]) / 2.])
+                    },
+                    stop,
+                )?;
             pack.unchanged_at()?;
             // An empty clear is a valid, fingerprinted tombstone, not a delete.
             // Legacy readers load it as no notes; expected-version checks survive.
@@ -569,17 +580,24 @@ impl Snapshot {
                 )
             })
         };
+        Ok(text)
+    }
+    fn note_draft(self, stop: &AtomicUsize) -> Result<Draft> {
+        self.current(false, stop)?;
+        let text = self.note_text(stop)?;
         self.current(false, stop)?;
         Ok(Draft {
             snapshot: self,
             change: Change::Notes(text.into_bytes()),
             expires: Instant::now() + TTL,
             accept_legacy: false,
+            imported: false,
         })
     }
 }
 enum Change {
     Waives(Vec<(u64, u8)>),
+    WaivesImport(transfer::ImportedWaives),
     Notes(Vec<u8>),
 }
 pub struct Draft {
@@ -587,6 +605,7 @@ pub struct Draft {
     change: Change,
     expires: Instant,
     accept_legacy: bool,
+    imported: bool,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Published {
@@ -602,8 +621,11 @@ pub struct PublishedFile {
     binding: [u8; 20],
 }
 impl Draft {
-    /// Trusted caller has separately confirmed that the unbound legacy file
-    /// belongs to this run. This never overrides a mismatching recorded binding.
+    pub fn legacy_unverified(&self) -> bool {
+        self.imported || self.snapshot.legacy_unverified()
+    }
+    /// Trusted caller confirmed the portable import or unbound legacy target
+    /// belongs to this run. Never overrides a mismatching target binding.
     pub fn accept_legacy_run(mut self) -> Self {
         self.accept_legacy = true;
         self
@@ -626,7 +648,7 @@ impl Draft {
         if Instant::now() >= self.expires {
             return Err(conflict());
         }
-        if self.snapshot.legacy_unverified() && !self.accept_legacy {
+        if self.legacy_unverified() && !self.accept_legacy {
             return Err(Error::new(
                 ErrorKind::Unsupported,
                 "legacy review run is unverified; confirm before adopting it",
@@ -684,6 +706,7 @@ impl Draft {
                     pack.unchanged_at()?;
                 }
             }
+            Change::WaivesImport(input) => input.write(&mut staged.file, &s.layout, stop)?,
         }
         if let Some(c) = &self.snapshot.before {
             c.security.apply(&staged.file)?;
@@ -739,6 +762,9 @@ impl Draft {
             return Err(conflict());
         }
         context("commit check", self.snapshot.current(true, stop))?;
+        if let Change::WaivesImport(input) = &self.change {
+            input.unchanged()?;
+        }
         s.protect(&s.lock_path())?;
         if context(
             "lock identity",

@@ -250,7 +250,7 @@ pub struct Notes {
     next: u64,
     text_bytes: usize,
 }
-#[derive(Default, Debug, PartialEq, Eq)]
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
 pub struct ImportReport {
     pub skipped_lines: usize,
     pub invalid_members: usize,

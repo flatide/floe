@@ -2779,3 +2779,82 @@ jobdeck80·renderer46, KLayout13 PX+2 phase-exact+14 style(jobs1/8)을 통과했
 검증용 venv 링크만 제거하며 실제 venv·합성 게시 결과물·다른 worktree 변경은 보존한다.
 주석 import/export·실제 브라우저 게시·현장 Firefox/NFS/ETX 수용은 남아 있고,
 GTK 기본과 renderd0.12.87은 바꾸지 않는다.
+
+## 33. M4e-6a — 주석·waive native 가져오기/내보내기
+
+GTK의 `note_import`/`waive_import`는 선택 오류 편집이나 병합이 아니라 **전체 review
+교체**다. 기존 notes import draft에 더해 두 종류의 snapshot export와 전체 waive import를
+`app-core/drc/review/store/transfer.rs`에 구현하고 managed borrow에 연결했다.
+이 단계에는 새 CLI/HTTP/upload/download/UI가 없다. 브라우저의 게시·다운로드 수용이나
+전체 Python 이관 완료를 의미하지 않는다.
+
+### 전송·메모리 계약
+
+- `Snapshot::export`는 이미 읽고 검증한 snapshot만 직렬화한다. 현재 경로의 외부 파일을
+  조용히 새 review로 채택하지 않는다. 출력은 caller가 소유한 **미게시 staging sink**이며
+  경로를 열거나 파일·lock을 만들지 않는다. 오류 시 sink에 prefix가 남을 수 있으므로
+  `Ok`와 caller의 최종 context/cancel 검증 전에는 다운로드/게시 대상으로 노출하지 않는다.
+  flush/fsync/원자 게시·artifact TTL/다운로드 권한은 다음 연결의 책임이다.
+- Notes는 기존 FE serializer와 native pack의 실제 error bbox 중심을 재사용한다.
+  정규화 손실 카운터·그룹/멤버 수를 반환한다. 빈 주석도 유효한 fingerprinted tombstone을
+  내보낸다. GTK의 빈 export는 목적지를 지우지만, native export는 삭제 권한을 추론하지 않는다.
+- Waive는 64KiB positional read로 처리하고 cursor를 공유/변경하지 않는다. 입력의 reserved
+  status 값(2/255 등)은 그대로 보존하고 `status == 1`의 룰별 counter를 다시 센다.
+  존재하지 않는 sidecar는 원본 pack의 status를 읽어 export하며 sidecar를 생성하지 않는다.
+- `prepare_waives_import(File)`은 trusted caller가 선택·허용한 regular descriptor만 받는다.
+  expected header/정확한 길이/EOF를 확인하고 전체를 한 번 세어 preview를 만든다. approved
+  publication에서 다시 스트리밍해 입력 digest와 metadata/security가 같은지 검증하며
+  commit 직전에도 재검사한다. 전체 status Vec나 5,000개 선택 편집 목록을 만들지 않는다.
+  비용은 입력 길이에 선형이며 재검사로 여러 번 읽는다. 메모리는 O(룰 수)+고정 I/O chunk다.
+  큰 파일의 blocking I/O는 chunk 사이에서만 취소할 수 있고 즉시 선점/고정 지연을 보장하지 않는다.
+- 경로 문자열 재조회가 아닌 열린 descriptor를 보유한다. upload가 연결될 때 caller는
+  비공개 임시파일을 **capture 전에** unlink한 FD도 전달할 수 있다. capture 후 inode/link 수/
+  내용/속성이 바뀌면 보수적으로 충돌 처리한다. 업로드 권한이나 경로 접근을 이 함수에서
+  새로 허용하지 않는다.
+
+### 확인·게시 경계
+
+FE/waive의 size/mtime/count 헤더는 호환성 표식이지 고유 run의 인증이 아니다.
+따라서 명시 import draft는 대상이 이미 native binding을 갖더라도 `legacy_unverified`로
+표시하고 별도 `accept_legacy_run`/`publish(true)` 확인을 요구한다. 기존의 잘못된 **대상**
+binding을 우회하는 옵션은 아니다. portable input의 속성/binding을 대상에 복사하지 않고,
+기존 대상 권한을 보존하면서 승인된 pack binding을 새 inode에 기록한다.
+
+기존 stable lock·expected revision·동일 디렉터리 stage·fsync/commit·waive reader proof를
+공유한다. 취소/입력 변경/대상 교체/입출력 실패는 commit 전 기존 파일을 보존한다.
+commit 이후 취소와 directory-sync 실패는 기존대로 게시 성공/내구성 경고이며 rollback으로
+보고하지 않는다. noncooperating writer와의 완전한 filesystem CAS는 보장하지 않는다.
+managed snapshot/draft/publication은 동일 CPU1/256MiB admission 및 pack/source read lease를
+유지한다. export의 sink가 막혀 있어도 retire만으로 permit을 반환하지 않고 native unwind까지
+보유한다. 새 무제한 worker/queue는 만들지 않았다.
+
+### 검증·다음 단계
+
+전송 회귀는 빈 export 무쓰기, 실제 주석 중심, 이미 bound인 대상의 import 확인,
+131,075 status(선택/64KiB 경계 초과), reserved 값/빈 룰/잘못된 counter, header/길이/종류/
+취소 거부, unlink된 FD와 cursor 독립성, preview 이후/scan 도중/commit 직전 변경,
+대상 충돌, sink I/O 실패 및 managed retire/admission/reader proof를 검사한다.
+`validate_drc_review.py`는 실제 Python `note_export`/`note_import`와 `waive_export`로
+만든 두 synthetic pack을 PATH 없는 Rust에서 대조한다. 22 주석 상태·5,793 status bytes의
+codec 비교, 전체 waive import6회를 포함한 native 게시34회·export28회가 통과했다.
+기존 입력·Python review·transfer 파일의 bytes/mtime/ctime/mode/xattrs 불변과 허용한
+native target/lock 외 출력·잔류 stage 없음도 단언한다.
+
+전체 `sh tools/validate_rust.sh`는 exit0·`RUST VALIDATION: ALL OK`다. app11/core214/web57,
+기존 owner HTTP/WS·notes/waives·전체 ES2017/JS, jobdeck80·renderer46,
+KLayout13 PX+2 phase-exact+14 style(jobs1/8)을 통과했다. 새 합성 source의 legacy oracle은
+기존 macOS fork 대기를 피하기 위해 먼저 `index --legacy --jobs 1`로 생성했다.
+비교 geometry와 gate를 생략하지 않았다. 마지막 전체 교체 단언은 core214 전체 테스트를
+현재 Rust와1.89에서 재실행했다. app/core/web scoped fmt 및 vendored
+`clippy --no-deps --all-targets -- -D warnings`도 통과했다. 변경하지 않은 의존성의 기존
+경고를 전체 workspace clippy clean으로 표현하지 않는다.
+Rust1.89 core214/web57/transport10과 Linux x86-64 musl release 교차 빌드도 통과했다.
+이는 실제 Linux/Firefox 실행 수용이 아니다. 로그는
+`/private/tmp/floe-review-transfer-battery.log`와 `floe-review-transfer-*-final.log`,
+`floe-review-transfer-msrv.log`/`floe-review-transfer-musl.log`에 보존했다.
+검증용 venv 링크만 제거하며 실제 venv·승인된 합성 shared-default 게시 결과·다른 worktree는 보존한다.
+
+다음은 owner에 한정한 bounded upload/artifact lifetime, 전체 교체 preview·별도 승인,
+context/revision·TTL·취소/재접속·다운로드와 UI 연결이다. 큰 waive를 JSON 배열로 올리거나
+선택 편집 한도로 조용히 자르는 경로는 허용하지 않는다. 실제 브라우저 주석/waive 게시 및
+현장 Firefox/NFS/ETX 수용은 여전히 별도다. GTK 기본·renderd0.12.87은 유지한다.

@@ -62,6 +62,8 @@ M4e-1~4에서 DRC 주석/waive codec·관리형 게시, owner의 편집·미리�
 waive 저장 후 reader 갱신/조회 revision 장벽을 연결했다. M4e-5a는 저장된 주석의
 목록 badge·이동 대상 본문용 읽기 전용 API/캐시다. M4e-5b에서 목록 배지와 마지막
 ACK 이동 대상의 주석 overlay·서버 panel 상태 복원을 연결했다.
+M4e-6a에서 주석/waive native snapshot export와 전체 waive import를 연결했다.
+전송의 owner HTTP/upload/artifact/UI 경로는 아직 후속이다.
 나머지 내보내기와 브라우저 다운로드/현장 수용은 남아 있다([M4 기록](WEBUI_M4.ko.md)).
 전체 조작 parity와 M0/Firefox/ETX 현장 검증은 아직 완료되지 않았다.
 상세 범위는 [M1b 기록](WEBUI_M1B.ko.md)과 [M2 기록](WEBUI_M2.ko.md). 여기의 M0~M5는 **웹 전환 단계**이며
@@ -566,3 +568,6 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
   현재 선택과 마지막 ACK 이동을 분리하고 Markers/overlay·서버 상태 복원·pan 무조회·
   편집 preview 보존·저장/늦은 응답 장벽을 검증했다. Chrome 합성 표시/복원을 확인했으며
   브라우저 주석 게시·clipboard·현장 수용은 별도다. 주석 import/export는 다음 단계다.
+- **M4e-6a**: 주석/waive snapshot export와 streaming 전체 waive import를 native/managed
+  store에 연결했다([M4 §33](WEBUI_M4.ko.md)). 전체 교체·import 확인·입력/대상 충돌과
+  취소·admission을 검증했다. 새 HTTP/upload/download/UI는 없으며 owner 전송 연결은 후속이다.
