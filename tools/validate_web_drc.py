@@ -181,6 +181,7 @@ def main(fixture, ascii=False):
                          query=None, in_view=True, selected_only=True, waived=False, selected=dict(check=str(chosen), error="0"),
                          markers=True, shown=True, jump_scale=".25", zoom_lock=True,
                          jump_active=True, focus_visible=True,
+                         note_target=dict(check=str(chosen), error="1"),
                          cd=dict(target=dict(check=str(chosen), error="1"), remaining=2))
 
             def save_panel(value, base="1", code=200, **extra):
@@ -201,6 +202,9 @@ def main(fixture, ascii=False):
             save_panel(dict(panel, jump_scale="NaN"), code=400)
             save_panel(dict(panel, jump_active=True, focus_visible=False), code=400)
             save_panel(dict(panel, selected=None), code=400)
+            save_panel(dict(panel, note_target=dict(check=str(chosen), error="999999999")), code=400)
+            save_panel(dict(panel, note_target=dict(check=str(chosen), error="00")), code=400)
+            save_panel(dict(panel, note_target=dict(check=str(chosen), error="0", text="forbidden")), code=400)
             save_panel(dict(panel, cd=dict(target=dict(check=str(chosen), error="999999999"), remaining=2)), code=400)
             save_panel(dict(panel, cd=dict(target=dict(check=str(chosen), error="00"), remaining=2)), code=400)
             save_panel(dict(panel, cd=dict(target=panel["selected"], remaining=4)), code=400)

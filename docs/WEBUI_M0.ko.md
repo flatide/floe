@@ -158,7 +158,9 @@ M4e-4c는 별도 `--drc-edit-waives` opt-in의 owner read/prepare/승인 API다
 revision의 ready catalog를 확인한 뒤 재개한다. 실제 브라우저 게시·현장 수용은 후속이다.
 M4e-5a는 저장 주석의 최대512개 목록 badge와 이동 대상 하나의 본문을 읽는 owner API다
 ([M4 §31](WEBUI_M4.ko.md)). 유계 admitted snapshot을 재사용하고 편집 preview를
-소비하지 않는다. badge/overlay 표시 UI와 전체 import/export는 다음 연결이다.
+소비하지 않는다. M4e-5b에서 배지와 마지막 ACK 이동 대상의 본문 overlay를 연결했다
+([M4 §32](WEBUI_M4.ko.md)). Markers/Tab·상태 복원·저장 장벽과 Chrome 합성 표시를
+확인했다. 전체 import/export·실제 브라우저 게시·현장 수용은 후속이다.
 
 ### 2.7 svrf — M4 (6개 옵션)
 

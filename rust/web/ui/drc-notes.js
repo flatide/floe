@@ -79,7 +79,7 @@
         const P=o.protocol,el=o.el;
         let enabled=false,stopped=false,model=null,stale=true,editor=null,draft=null,timer=null,expiry=null;
         let io=null,poll=null,write=null,cancelling=null,approving=null,revokeTask=null,revokeNext=null;
-        let pending=null,uncertain=false,notice='',storageWarning='';
+        let pending=null,uncertain=false,notice='',storageWarning='',readTurn=0;
         function abort(t){if(t){t.cancelled=true;if(t.abort){t.abort();}}}
         function selection(){try{const c=o.selection();if(stopped||!c){return null;}context(c.context);id(c.epoch);text(c.key,256);text(c.caption,4096);
             if(!Number.isInteger(c.count)||c.count<1||c.count>5000){return null;}return c;}catch(_){return null;}}
@@ -132,6 +132,9 @@
             el('notes-forget').disabled=!permitted()||!!active()||!!write||!el('notes-checked').checked;
             el('notes-status').textContent=statusText(latest());el('notes-message').textContent=[notice,storageWarning].filter(Boolean).join('\n');
             el('notes-bytes').textContent=new TextEncoder().encode(el('notes-text').value).length+' / '+LIMIT+' UTF-8 bytes · empty text clears the selected notes';
+            if(o.displayState){o.displayState(!enabled||!model?null:{reviewer:model.reviewer,review_rev:model.review_rev,read_turn:readTurn,
+                blocked:!permitted()?'Saved-note status is not ready.':busy()||latest()&&latest().outcome_unknown?'Saved-note publication is pending or unconfirmed.':
+                    io||model.preparing?'Note snapshot preparation is in progress.':''});}
         }
         function schedule(){o.clearTimeout(timer);timer=null;if(enabled&&!stopped&&(active()||pending)){timer=o.setTimeout(refresh,active()?500:2500);}}
         function install(v){
@@ -160,6 +163,7 @@
             try{const v=preview(await o.http('POST',API+'/read',{context:c.context,errors:rows},false,t),c.context,c.count,P,false);
                 if(t.cancelled||io!==t||!same(c)){revoke(v.token);return;}
                 if(v.reviewer!==model.reviewer){fail();}
+                ++readTurn;
                 editor={selection:c,token:v.token,until:Math.min(t.sent+120000,o.now()+Number(v.expires_in_ms)),invalid:false};draft=null;
                 el('notes-text').value=saved===null?(v.text||''):saved;
                 el('notes-target').textContent=c.caption+'\n'+v.name+'\n'+v.existing_count+' selected errors already have notes.';

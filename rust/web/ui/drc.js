@@ -88,7 +88,7 @@
         // accepted focus navigation, not necessarily the selected row.
         let cdTarget = null, cdGlobal = null, cdSegments = null, cdRemaining = 0, cdError = '';
         let restoring = false;
-        let isolationNotice = '', notes = null, waives = null;
+        let isolationNotice = '', notes = null, waives = null, noteDisplay = null, noteState = null, noteTarget = null;
         const groups = o.groups.bind({http: o.http, protocol: P, changed: groupsChanged,
             status: function (s) { el('drc-group-status').textContent = s; }});
         const persistence = o.stateStore.bind({http: o.http, protocol: P,
@@ -104,10 +104,31 @@
                 info('Previous DRC selection and outlines are not active.');
             }}) : null;
         if (o.notes) { notes = o.notes.bind({el: el, protocol: P, http: o.http, selection: noteSelection,
+            displayState: function (s) { noteState = s; if (noteDisplay) { noteDisplay.sync(); } },
             session: o.session, loadPending: o.loadNotePending, savePending: o.saveNotePending,
             now: o.now || function () { return Date.now(); },
             setTimeout: o.setTimeout || function (fn, ms) { return setTimeout(fn, ms); },
             clearTimeout: o.clearTimeout || function (id) { clearTimeout(id); }}); }
+        if (o.noteDisplay) {
+            noteDisplay = o.noteDisplay.bind({protocol:P, http:o.http, source:displaySource, changed:displayChanged});
+            el('drc-notes-refresh').onclick = function () { noteDisplay.sync(true); };
+        }
+        function displaySource() {
+            const c=current();
+            if(!noteState||!c||!registration.metadata||registration.metadata.format!=='ice'){return null;}
+            return {reviewer:noteState.reviewer,review_rev:noteState.review_rev,read_turn:noteState.read_turn,epoch:c.state.connection_epoch,
+                blocked:!c.connected||restoring?'Saved notes paused while reconnecting or restoring the review.':noteState.blocked,
+                body:{context:{drc_id:registration.id,revision:registration.revision,view_id:c.id},
+                    errors:pageReady?rows.map(function(r){return {check:r.check,error:r.local};}):[],focus:noteTarget}};
+        }
+        function displayChanged() {
+            if(!noteDisplay){return;}
+            el('drc-saved-notes').hidden=!noteDisplay.visible();
+            el('drc-notes-status').textContent=noteDisplay.message();
+            el('drc-note-text').textContent=noteDisplay.text()||'';
+            el('drc-note-body').hidden=!noteDisplay.text();
+            markErrors();paintLater();
+        }
         if (o.waives) { waives = o.waives.bind({el: el, protocol: P, http: o.http, selection: noteSelection,
             session: o.session, loadPending: o.loadWaivePending, savePending: o.saveWaivePending,
             now: o.now || function () { return Date.now(); },
@@ -393,27 +414,31 @@
         function paint(p, size) {
             markerHits = []; hitStamp = ''; lastProjection = p; lastSize = size;
             const c = current();
-            if (overlayMode==='none' || !ctx || !p || !size || !c || !el('drc-markers').checked || (!boxMode && !groupRows.length && !rows.length && (!selected || !focusVisible) && !hasCD())) { overlay.hidden = true; return; }
+            const geometryVisible=el('drc-markers').checked&&(boxMode||groupRows.length||rows.length||(selected&&focusVisible)||hasCD());
+            if (overlayMode==='none' || !ctx || !p || !size || !c || (!geometryVisible&&!(noteDisplay&&noteDisplay.text()))) { overlay.hidden = true; return; }
             const w = size.pixels[0], h = size.pixels[1]; P.pixels(w, h);
             if (overlay.width !== w || overlay.height !== h) { overlay.width = w; overlay.height = h; }
             overlay.style.width = w / size.dpr + 'px'; overlay.style.height = h / size.dpr + 'px';
             overlay.style.left = size.left + 'px'; overlay.style.top = size.top + 'px'; overlay.hidden = false;
             hitStamp = contextKey(c) + ':' + c.state.state_rev;
             ctx.clearRect(0, 0, w, h); ctx.lineWidth = 2;
-            (overlayMode==='all'?rows:[]).forEach(function (r) {
-                if (focusVisible && selected && r.check === selected.check && r.local === selected.local) { return; }
-                const b = bbox(r.bbox_um), xy = point(p, b[0] * .5 + b[2] * .5, b[1] * .5 + b[3] * .5);
-                marker(r, xy, 7, w, h);
-            });
-            const pageIds = new Set(rows.map(function (r) { return r.check + ':' + r.local; }));
-            (overlayMode==='all'?groupRows:[]).forEach(function (r) {
-                if (!rule || r.check !== rule.check || !groups.contains(r.check, r.local) || pageIds.has(r.check + ':' + r.local) ||
-                    (filter() !== null && (r.status === 1) !== filter()) || (focusVisible && selected && selected.check === r.check && selected.local === r.local)) { return; }
-                const b = bbox(r.bbox_um); marker(r, point(p, b[0] * .5 + b[2] * .5, b[1] * .5 + b[3] * .5), 7, w, h);
-            });
-            paintSelected(p, w, h);
-            if (!o.history && cdSegments && cdRemaining) { o.rulers.paint(ctx, cdSegments.slice(0, cdRemaining), function (x, y) { return point(p, x, y); }, size); }
-            paintBox(p, size.dpr);
+            if (geometryVisible) {
+                (overlayMode==='all'?rows:[]).forEach(function (r) {
+                    if (focusVisible && selected && r.check === selected.check && r.local === selected.local) { return; }
+                    const b = bbox(r.bbox_um), xy = point(p, b[0] * .5 + b[2] * .5, b[1] * .5 + b[3] * .5);
+                    marker(r, xy, 7, w, h);
+                });
+                const pageIds = new Set(rows.map(function (r) { return r.check + ':' + r.local; }));
+                (overlayMode==='all'?groupRows:[]).forEach(function (r) {
+                    if (!rule || r.check !== rule.check || !groups.contains(r.check, r.local) || pageIds.has(r.check + ':' + r.local) ||
+                        (filter() !== null && (r.status === 1) !== filter()) || (focusVisible && selected && selected.check === r.check && selected.local === r.local)) { return; }
+                    const b = bbox(r.bbox_um); marker(r, point(p, b[0] * .5 + b[2] * .5, b[1] * .5 + b[3] * .5), 7, w, h);
+                });
+                paintSelected(p, w, h);
+                if (!o.history && cdSegments && cdRemaining) { o.rulers.paint(ctx, cdSegments.slice(0, cdRemaining), function (x, y) { return point(p, x, y); }, size); }
+                paintBox(p, size.dpr);
+            }
+            if (noteDisplay) { noteDisplay.paint(ctx, size); }
         }
         function paintSelected(p, w, h) {
             if (!selected || !focusVisible) { return; }
@@ -459,6 +484,7 @@
             cancelStep(); rowFocus = false; select(best, !!twice, !!twice); return true;
         }
         function clearSelection() {
+            noteTarget=null;
             cancel('restore-layers');
             cancelStep(); jumpActive = focusVisible = rowFocus = false;
             resetCD();
@@ -475,6 +501,7 @@
             cancelStep(); cancel('focus'); cancel('restore-layers'); cancel('geometry'); points = null; pointsReady = false;
             resetCD();
             jumpActive = focusVisible = rowFocus = false;
+            noteTarget=null;if(noteDisplay){noteDisplay.sync();}
             if (selected) { el('drc-selected').textContent = 'Global ' + selected.global + ' · focus cleared; n/p continues without moving the view.'; }
             info('Focus cleared · pending error search cancelled.');
             paintLater(); navigationButtons(); savePanel(); return true;
@@ -573,6 +600,9 @@
             Array.prototype.forEach.call(el('drc-errors').children, function (b, i) {
                 const r = rows[i], active = r && selected && selected.check === r.check && selected.local === r.local;
                 b.className = 'drc-error' + (r && r.status === 1 ? ' waived' : '') + (r && groups.contains(r.check, r.local) ? ' grouped' : '') + (active ? ' selected' : '');
+                if(r){const noted=noteDisplay&&noteDisplay.noted({check:r.check,error:r.local});
+                    b.textContent=(noted===true?'* ':'')+'#'+P.next(r.local)+'  ·  global '+r.global+'  ·  '+(r.kind==='p'?'poly':'edge')+(r.status===1?'  ·  waived':'');
+                    b.title=noted===true?'Saved note present':noted===false?'No saved note':'Saved-note status unavailable';}
                 if (active && rowFocus) { rowFocus = false; b.focus(); b.scrollIntoView({block: 'nearest'}); }
             });
         }
@@ -602,7 +632,7 @@
             if (!rows.length) { el('drc-errors').textContent = !pageReady ? 'Waiting for an error page…' : errorNext === null ? 'No matching errors.' : 'No match in this scan. Continue to the next page.'; }
             el('drc-result-info').textContent = (query ? 'Saved viewport query' : 'Rule errors' + (selectedOnly() ? ' ∩ Selected' : '') + (inView() ? ' ∩ In view' : '')) +
                 ' · ' + rows.length + ' on this page' + (!pageReady ? ' · waiting for a page' : errorNext === null ? ' · end' : ' · more available');
-            markErrors(); navigationButtons(); paintLater();
+            markErrors(); navigationButtons(); paintLater();if(noteDisplay){noteDisplay.sync();}
         }
         async function loadErrors(strict) {
             const c = current(); if (!c || (!rule && !query)) { return; }
@@ -688,7 +718,7 @@
                         el('drc-in-view').checked = false; resetFilterPage(); filterStamp = '';
                         errorStart = r.local; loadErrors();
                     }
-                    jumpScale = nextScale; jumpCD(r);
+                    jumpScale = nextScale; jumpCD(r);noteTarget={check:r.check,error:r.local};if(noteDisplay){noteDisplay.sync();}
                     isolationNotice = isolation.status === 'ready' ? 'Last jump: ' + isolation.matched + ' layer pairs isolated.' :
                         isolation.status === 'unsupported_deck' ? 'Layers unchanged · physical GDS isolation is unavailable in jobdeck views.' :
                         'Layers unchanged · this rule has no matching source-layer metadata.';
@@ -783,6 +813,7 @@
                 in_view: inView(), selected_only: selectedOnly(),
                 markers: el('drc-markers').checked, shown: shown, jump_scale: jumpScale === null ? null : String(jumpScale), zoom_lock: zoomLock,
                 jump_active: jumpActive, focus_visible: focusVisible,
+                note_target: noteTarget || undefined,
                 cd: cdTarget ? {target: cdTarget, remaining: cdRemaining} : null};
         }
         function savePanel() {
@@ -823,6 +854,10 @@
                 if (shown !== data.shown) { shown = data.shown; el('drc-panel').hidden = !shown; el('drc-toggle').setAttribute('aria-expanded', String(shown)); o.resize(); }
                 jumpScale = data.jump_scale === null ? null : Number(P.decimal(data.jump_scale)); zoomLock = data.zoom_lock;
                 jumpActive = data.jump_active; focusVisible = data.focus_visible;
+                if(data.note_target!==undefined&&data.note_target!==null){
+                    if(!jumpActive){throw new Error('Invalid saved note target');}
+                    noteTarget={check:cursor(data.note_target.check),error:cursor(data.note_target.error)};
+                }
                 if (data.cd !== null) {
                     const cd = data.cd;
                     if (!cd || !cd.target || !jumpActive || !Number.isInteger(cd.remaining) || cd.remaining < 0 || cd.remaining > 3) { throw new Error('Invalid saved CD state'); }
@@ -888,6 +923,7 @@
                 if (c) { restoreState(); }
             }
             groupsChanged();
+            if(noteDisplay){noteDisplay.sync();}
             if (waives && waives.suspended()) { info('Waive save or reader refresh pending. Previous DRC selection and outlines are not active.'); }
             else if (registration && !c && registration.phase === 'ready') { info('Open the source associated with this DRC database.'); }
             if (query && c && query.rev !== c.state.state_rev) { el('drc-result-info').textContent = 'Saved earlier-viewport query · enable In view for the live current-rule filter.'; }
@@ -972,8 +1008,8 @@
                 if ((key === 'n' || key === 'p') && rule && current()) { step(key === 'p', false, false); return true; }
                 return false;
             },
-            stop: function (final) { stopped = true; if (notes) { notes.stop(final); } if (waives) { waives.stop(final); } if (builds) { builds.stop(); } ++restoreTurn; clearTimeout(filterTimer); filterTimer = null; persistence.close(); groups.close(); bound = ''; boxReset(true); cancelAll(); clearTimeout(timer); if (painting !== null) { o.window.cancelAnimationFrame(painting); painting = null; } overlay.hidden = true; },
-            resume: function () { stopped = false; if (notes) { notes.resume(); } if (waives) { waives.resume(); } return builds ? builds.resume() : refresh(); }};
+            stop: function (final) { stopped = true; if(noteDisplay){noteDisplay.stop();} if (notes) { notes.stop(final); } if (waives) { waives.stop(final); } if (builds) { builds.stop(); } ++restoreTurn; clearTimeout(filterTimer); filterTimer = null; persistence.close(); groups.close(); bound = ''; boxReset(true); cancelAll(); clearTimeout(timer); if (painting !== null) { o.window.cancelAnimationFrame(painting); painting = null; } overlay.hidden = true; },
+            resume: function () { stopped = false; if(noteDisplay){noteDisplay.resume();} if (notes) { notes.resume(); } if (waives) { waives.resume(); } return builds ? builds.resume() : refresh(); }};
     }
     const api = {bind: bind, projection: projection, point: point, shifted: shifted, vertices: vertices, metadataText: metadataText, comparisonText: comparisonText};
     if (typeof module === 'object' && module.exports) { module.exports = api; } else { root.FloeDRC = api; }

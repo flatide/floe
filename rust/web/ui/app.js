@@ -746,7 +746,7 @@
     drcPanel = window.FloeDRC.bind({document: document, window: window, protocol: P, http: http,
         history:rulerHistory, rulerKey:function (key) { return measurement && !drcPanel.boxActive() && measurement.key(key); },
         stateStore: window.FloePanelState, rulers: window.FloeRulers, groups: window.FloeDRCGroups, builds: window.FloeDRCBuild, cursor: reviewCursor,
-        notes: window.FloeDRCNotes, waives: window.FloeDRCWaives, session: function () { return auth ? auth.session_id : ''; },
+        notes: window.FloeDRCNotes, noteDisplay: window.FloeDRCNoteDisplay, waives: window.FloeDRCWaives, session: function () { return auth ? auth.session_id : ''; },
         loadNotePending: function () { return sessionStorage.getItem('floe-note-pending'); },
         saveNotePending: function (value) { if (value === null) { sessionStorage.removeItem('floe-note-pending'); } else { sessionStorage.setItem('floe-note-pending', value); } },
         loadWaivePending: function () { return sessionStorage.getItem('floe-waive-pending'); },

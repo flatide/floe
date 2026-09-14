@@ -49,7 +49,11 @@ M4e-5a는 기존 주석 owner 등록에 `POST /api/v1/drc/review/notes/display`�
 최대512개의 check/local 배지와 focus 하나의 본문만 반환하고 편집/게시 token을 만들지
 않는다. context+notes review_rev에 고정한 admitted snapshot 하나를 재사용하며,
 저장/재빌드·외부 변경 시 의미와 비용은 [M4 §31](WEBUI_M4.ko.md)을 따른다.
-주석 badge/overlay UI는 아직 연결하지 않았다.
+M4e-5b UI는 같은 endpoint만 사용하며 편집 snapshot/token을 소비하지 않는다.
+기존 view panel body에 선택적 `note_target:{check,error}`를 추가했다. 마지막 ACK 이동
+대상을 현재 선택/CD와 독립적으로 복원하며, 필드 생략/null은 대상 없음이다. 직렬화에서는
+대상 없음의 필드를 생략한다. live jump와 pack 범위를 검증하고 본문/경로는 저장하지 않는다.
+화면/경합·긴 본문·캡처 계약은 [M4 §32](WEBUI_M4.ko.md)을 따른다.
 M1b-2a의 `app-core/managed`·`view`에는 process-local lease/admission과
 독립 worker controller를 구현했다. M1b-2b의 사전 등록 view용 제어/이미지
 스트림은 [M1b 기록 §6](WEBUI_M1B.ko.md#6-m1b-2b--인증된-제어이미지-스트림)을 따른다.

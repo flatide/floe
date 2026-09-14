@@ -39,6 +39,8 @@ pub(super) struct Data {
     pub jump_active: bool,
     pub focus_visible: bool,
     pub cd: Option<CdState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note_target: Option<CursorDto>,
 }
 impl Data {
     pub fn validate(&self) -> std::result::Result<(), Failure> {
@@ -76,6 +78,13 @@ impl Data {
             }
             super::dto::number(&cd.target.check)?;
             super::dto::number(&cd.target.error)?;
+        }
+        if let Some(c) = &self.note_target {
+            if !self.jump_active {
+                return Err("invalid_drc_request");
+            }
+            super::dto::number(&c.check)?;
+            super::dto::number(&c.error)?;
         }
         if let Some(q) = &self.query {
             crate::view::counter(&q.state_rev).map_err(|_| "invalid_drc_request")?;
@@ -133,6 +142,11 @@ impl Data {
         if let Some(cd) = &self.cd {
             if number(&cd.target.error)? >= count(&cd.target.check)? {
                 return Err(Error::input("CD target error index"));
+            }
+        }
+        if let Some(c) = &self.note_target {
+            if number(&c.error)? >= count(&c.check)? {
+                return Err(Error::input("note target error index"));
             }
         }
         if let Some(q) = &self.query {
@@ -211,6 +225,31 @@ mod tests {
     }
     fn data() -> Data {
         serde_json::from_value(json!({"search":"","rule_start":"0","check":null,"error_start":"0","query":null,"waived":null,"selected":null,"markers":true,"shown":true,"jump_scale":null,"zoom_lock":false,"jump_active":false,"focus_visible":false})).unwrap()
+    }
+    #[test]
+    fn saved_note_target_is_independent_but_requires_a_live_jump() {
+        let mut d = data();
+        assert!(d.note_target.is_none());
+        assert!(serde_json::to_value(&d)
+            .unwrap()
+            .get("note_target")
+            .is_none());
+        d.note_target = Some(CursorDto {
+            check: "1".into(),
+            error: "9007199254740994".into(),
+        });
+        assert!(d.validate().is_err());
+        d.jump_active = true;
+        d.focus_visible = true;
+        d.selected = Some(CursorDto {
+            check: "0".into(),
+            error: "0".into(),
+        });
+        d.validate().unwrap();
+        let encoded = serde_json::to_value(&d).unwrap();
+        assert_eq!(serde_json::from_value::<Data>(encoded).unwrap(), d);
+        d.note_target.as_mut().unwrap().error = "01".into();
+        assert!(d.validate().is_err());
     }
     #[test]
     fn revision_retries_and_conflicting_old_tab_are_not_last_writer_wins() {

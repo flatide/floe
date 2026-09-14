@@ -18,6 +18,7 @@
   <script defer src="/assets/@@BUNDLE@@/drc-groups.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc-build.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc-notes.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/drc-note-display.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc-waives.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc.js"></script>
   <script defer src="/assets/@@BUNDLE@@/settings.js"></script>
@@ -210,6 +211,11 @@
       <button id="drc-step-continue" hidden>Continue search</button>
       <div class="drc-selection"><p id="drc-selected" class="note">Click to inspect · double-click to go to an error.</p><div class="button-row"><button id="drc-frame" disabled>Frame error</button><button id="drc-clear" disabled>Clear</button></div></div>
       <section id="notes-panel" class="notes-panel" aria-label="Owner DRC notes" hidden>
+        <section id="drc-saved-notes" aria-label="Saved note display" hidden>
+          <p id="drc-notes-status" class="note" role="status"></p>
+          <button id="drc-notes-refresh">Refresh saved notes</button>
+          <details id="drc-note-body" class="drc-description" hidden><summary>Last jumped error · full saved note</summary><pre id="drc-note-text"></pre></details>
+        </section>
         <h3>Notes</h3><p id="notes-owner" class="note"></p><p id="notes-selection" class="note"></p>
         <button id="notes-read" disabled>Read selected notes</button>
         <div id="notes-editor" hidden>

@@ -115,6 +115,7 @@ window.isSecureContext=true;window.ClipboardItem=class {constructor(data){this.d
 window.FloeSettings=require('./settings.js');
 window.FloeDefaults=require('./defaults.js');
 window.FloeDRCNotes=require('./drc-notes.js');
+window.FloeDRCNoteDisplay=require('./drc-note-display.js');
 window.FloeDRCWaives=require('./drc-waives.js');
 window.FileReader=class {readAsArrayBuffer(file){this.result=new TextEncoder().encode(file.text).buffer;setImmediate(()=>this.onload());}abort(){if(this.onabort){this.onabort();}}};
 window.navigator={clipboard:{write(items){copies.push(items);return Promise.all(items.map(i=>i.data['image/png']));}}};

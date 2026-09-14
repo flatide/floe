@@ -16,8 +16,9 @@ overlay 전환**, §16의 **Rust layerprops 포맷·초기 가시성**, §17의
 §28은 그 갱신과 HTTP/선택/준비된 focus의 조회 revision 장벽을 연결한다.
 §29/30에서 waive 저장의 owner 승인 API·UI와 디스크 게시/읽기 반영 receipt를 연결했다.
 §31은 저장 주석의 목록 badge/이동 대상 본문을 위한 읽기 전용 projection API다.
+§32에서 목록 badge와 마지막으로 이동한 오류의 주석 overlay·서버 상태 복원을 연결했다.
 각 절의 미연결 표기는 해당 선행 단계 당시의 범위다.
-나머지 내보내기·주석 표시 UI/불러오기와 전체 조작/실제 브라우저 수용은 남아 있다.
+나머지 내보내기·주석 불러오기와 전체 조작/실제 브라우저 수용은 남아 있다.
 
 ## 1. M4a-1: 표시 scene에 고정한 native pick/snap
 
@@ -2701,3 +2702,80 @@ Rust1.89 core203 및 최종 web56/transport10, Linux x86-64 musl release 교차 
 overlay all/focus/none, 주석 저장 revision·늦은 응답·재접속, 전체 본문/긴 주석 잘림 표시,
 표시 PNG 캡처와 상태 복원까지 함께 검증한다. 실제 브라우저 주석/waive 게시 승인과
 현장 Firefox/NFS/ETX 수용은 별도이며 GTK 기본과 renderd0.12.87은 유지한다.
+
+## 32. M4e-5b — 저장 주석 배지·이동 대상 overlay
+
+§31의 표시 읽기 API를 웹 오류 목록과 캔버스에 연결했다. 편집 snapshot/preview는
+목록 조회에 쓰지 않는다. 주석 게시·waive 승인·공유 기본값의 권한은 확장하지 않았다.
+
+### 표시·선택 계약
+
+- 현재 유계 오류 페이지의 주석 유무를 `*` 접두부와 tooltip으로 표시한다. 응답 실패는
+  `Saved notes unavailable`과 조회 오류로 표시하며 **주석 없음으로 해석하지 않는다**.
+  legacy binding 미확인·import 손실 카운터도 패널에서 명시한다.
+- 본문은 현재 선택 행이 아니라 **성공 ACK를 받은 마지막 오류 이동**의 대상이다.
+  준비된 focus가 실패하거나 아직 ACK되지 않았으면 바꾸지 않는다. 캔버스 단일 클릭으로
+  다른 오류를 선택해도 마지막 이동의 주석은 유지한다. 기존 jump mode에서 실제 이동하는
+  목록/step 조작은 ACK 후 갱신된다.
+- Markers 체크와 독립적이며 overlay `all`/`focus`에서 보이고 `none`에서만 숨긴다.
+  `k`/`K`로 ruler만 지우는 동작은 주석을 지우지 않는다. Clear/실제 focus 종료·source/DRC
+  변경은 대상을 해제한다. viewport 교차 여부로 본문을 숨기지 않는 GTK의 현재 구현을 따른다.
+- 12 CSS px 본문·반투명 검정 배경을 기존 `drc-canvas` 좌상단에 그린다. DPR을 반영하며
+  텍스트는 코드로 실행하지 않는다. viewport보다 긴 본문은 표시 prefix만 측정하고
+  `note clipped; full text in panel`로 알린다. 패널의 접힌 **full saved note**에는 최대64KiB
+  전문을 `textContent`로 제공한다. wrap 결과를 재사용하므로 pan마다 글자를 재측정하지 않는다.
+  0폭/결합문자가 길게 반복돼도 측정 문자열이 무한히 자라지 않도록 한 줄128 codepoint에서
+  강제로 줄바꿈한다. 본문 저장값은 바꾸지 않는다.
+- 표시 PNG의 기존 flush/합성 경로가 같은 `drc-canvas`를 포함한다. 추가 canvas·서버 geometry
+  재렌더·주석 본문 localStorage 저장은 없다. overlay none이면 캡처에도 주석이 없다.
+
+### 요청·복원·경합
+
+- 표시 identity는 DRC/view/read revision·connection epoch·notes `review_rev`·목록 refs·
+  마지막 이동 target이다. viewport `state_rev`는 제외한다. 따라서 일반 pan/zoom·현재 행
+  선택·catalog의 같은 상태 poll은 조회하지 않는다. In view 필터로 실제 목록이 바뀌면
+  새 페이지 배지 조회는 필요하다. 화면당64행을 쓰며 API 자체 한도는512행이다.
+- 요청은 최대1개 진행+최신 desired 상태만 보관한다. 같은 turn의 상태 변경을 합치고
+  오래된 응답은 폐기한다. 실패 시 자동 반복하지 않고 `Refresh saved notes`로 재시도한다.
+  서버가 거부하는 외부 sidecar 교체는 표시 Refresh만으로 채택되지 않는다. 기존 명시적
+  Reload snapshot/reopen 경계를 유지한다.
+- 편집 UI는 승인 제출 전·진행/결과 불명·상태 조회 실패·snapshot 준비 중임을 표시 모델에
+  전달한다. 그동안 기존 배지/본문을 내리고 새 표시 읽기를 시작하지 않는다. 확인한 게시
+  revision 이후에 새 조회를 한다. 명시 edit read는 외부 변경을 같은 review_rev로 다시
+  읽을 수 있어 별도 read-turn으로 표시도 갱신한다. 표시 읽기는 편집 초안/preview를 지우지 않는다.
+- 서버 panel 상태에 선택/CD와 독립된 선택적 `note_target:{check,error}`를 저장한다.
+  canonical u64·pack 범위와 live jump 조건을 검증하며, 본문/경로는 저장하지 않는다.
+  이전 상태에 필드가 없으면 대상 없음으로 복원한다. Reload review는 화면을 다시 이동하지
+  않고 그 target으로 본문을 읽는다. 미접속·복원 중·waive reader 갱신 중에는 표시하지 않는다.
+
+### 검증
+
+전용 JS gate는 strict 응답 schema·역순/누락/잘못된 target·큰 u64·UTF-8 제한, 한 요청
+직렬화·늦은 revision·오류/결과 불명·재접속·명시 read 갱신·pan 무조회·긴 주석의 측정 상한을
+검사한다. 실제 DRC/notes/selection/navigation 모듈 통합 gate는 ACK 대상/선택 분리,
+서버 panel 복원·Markers/overlay/k·snapshot canvas flush·편집 preview 보존·저장 revision
+장벽·종료 정리를 확인한다. 기존 필수 ES2017 gate에 모두 배선했다.
+
+native panel 테스트와 실제 HTTP gate는 독립 target round-trip과 invalid/범위 초과/body
+확장을 거부한다. web57/transport10, scoped fmt와 app/core/web `clippy --no-deps --all-targets
+-- -D warnings`, 전체 JS·DRC ASCII/ICE HTTP·주석 read/edit/display HTTP gate가 통과했다.
+의존성까지 검사한 clippy는 변경하지 않은 oasis의 기존 lint13건 때문에 실패하므로 전체
+workspace clippy green을 주장하지 않는다. Rust1.89 web57/transport10과 Linux x86-64 musl
+release 교차 빌드도 통과했다(실제 Linux 실행 수용은 아님).
+
+Chrome에서는 새 `/private/tmp/floe-note-ui-browser.rnYzbr`의 합성 OASIS/DRC pack과
+사전 작성 주석으로 `*`·HTML처럼 보이는 문자/한글·ACK 후 좌상단 본문·Markers off·overlay
+focus/none/all·Reload review 복원을 확인했다. End session은 exit0으로 끝났고 session JSON을
+정리했다. 합성 source/DB/pack/주석 SHA256은 시작 전과 동일하다. 이 확인에서 주석/waive
+게시나 clipboard 버튼은 누르지 않았다. shared-default 합성 게시의 별도 승인/결과는 §20 그대로다.
+
+전체 배터리는 exit0·`RUST VALIDATION: ALL OK`다: app11/core203/web57,
+jobdeck80·renderer46, KLayout13 PX+2 phase-exact+14 style(jobs1/8)을 통과했다.
+최초 실행은 기존 macOS legacy oracle의 fork pool 대기에서 중단했다. 미완성 합성 cache를
+옆에 보존하고 동일 source를 `index --legacy --jobs 1`로4초에 생성한 뒤, 전체 배터리를
+처음부터 재실행했다. 비교 geometry와 게이트를 생략하지 않았다. 마지막 결합문자 측정 상한은
+최종 JS/ES2017·web57/transport10·주석 HTTP gate와 release/musl 빌드로 별도 재검증했다.
+로그는 `/private/tmp/floe-note-ui-battery-retry.log` 및 `floe-note-ui-*-final.log`에 보존했다.
+검증용 venv 링크만 제거하며 실제 venv·합성 게시 결과물·다른 worktree 변경은 보존한다.
+주석 import/export·실제 브라우저 게시·현장 Firefox/NFS/ETX 수용은 남아 있고,
+GTK 기본과 renderd0.12.87은 바꾸지 않는다.

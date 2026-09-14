@@ -11,6 +11,11 @@ const options = {ecmaVersion: 2017, sourceType: 'script'};
 const settings = spawnSync(process.execPath, [path.join(ui, 'settings.test.cjs')], {stdio:'inherit',timeout:15000});
 assert.equal(settings.status, 0, 'settings.test.cjs: ' + settings.error);
 acorn.parse(fs.readFileSync(path.join(ui, 'settings.js'), 'utf8'), options);
+acorn.parse(fs.readFileSync(path.join(ui, 'drc-note-display.js'), 'utf8'), options);
+for (const file of ['drc-note-display.test.cjs', 'drc-note-display-panel.test.cjs']) {
+    const run = spawnSync(process.execPath, [path.join(ui, file)], {stdio:'inherit',timeout:15000});
+    assert.equal(run.status, 0, file + ': ' + run.error);
+}
 for (const file of ['protocol.js', 'gestures.js', 'query.js', 'inspect.js', 'measure.js', 'clip.js', 'snapshot.js', 'defaults.js', 'panel-state.js', 'rulers.js', 'drc-groups.js', 'drc-build.js', 'drc-notes.js', 'drc-waives.js', 'drc.js', 'app.js']) {
     acorn.parse(fs.readFileSync(path.join(ui, file), 'utf8'), options);
 }

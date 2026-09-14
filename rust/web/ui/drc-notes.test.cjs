@@ -19,7 +19,7 @@ function prepared(c,count=2,text='hello',extra={}){const v=snapshot(c,count);del
 function error(status,code){return Object.assign(new Error(code||'network lost'),{status,code});}
 function harness(shared={model:catalog(),raw:null,writes:0,records:new Map()}){
     const ids=[...fs.readFileSync(__dirname+'/index.html','utf8').matchAll(/\bid="([^"]+)"/g)].map(m=>m[1]);
-    const nodes=new Map(),calls=[],timers=new Map();let now=0,serial=0,override=null,storageError=false,session='f'.repeat(64);
+    const nodes=new Map(),calls=[],timers=new Map(),displayStates=[];let now=0,serial=0,override=null,storageError=false,session='f'.repeat(64);
     const c={context:clone(context),epoch:'9'.repeat(64),key:'groups:1',caption:'2 selected errors across rules',ready:true,
         rows:[{check:'0',error:'9007199254740993'},{check:'7',error:'0'}]};
     function el(id){assert(ids.includes(id),'missing HTML '+id);if(!nodes.has(id)){nodes.set(id,{value:'',textContent:'',disabled:false,hidden:false,checked:false,
@@ -37,11 +37,12 @@ function harness(shared={model:catalog(),raw:null,writes:0,records:new Map()}){
         shared.model=catalog(shared.model.operations.history.concat([result]).slice(-32));return clone(result);
     }
     const panel=N.bind({el,protocol:P,session:()=>session,now:()=>now,
+        displayState:s=>displayStates.push(clone(s)),
         selection:()=>c.ready?{context:clone(c.context),epoch:c.epoch,key:c.key,caption:c.caption,count:c.rows.length,references:()=>clone(c.rows)}:null,
         setTimeout(fn,ms){timers.set(++serial,{fn,at:now+ms});return serial;},clearTimeout:id=>timers.delete(id),
         loadPending(){if(storageError)throw Error('no storage');return shared.raw;},savePending(v){if(storageError)throw Error('no storage');shared.raw=v;},
         async http(method,path,body,missing,token){const r={method,path,body,token};calls.push(r);if(override){const v=override(r);if(v!==undefined)return await v;}return execute(r);}});
-    return {panel,el,c,calls,timers,shared,execute,init:()=>panel.attach(clone(shared.model)),read:()=>el('notes-read').onclick(),prepare:()=>el('notes-prepare').onclick(),
+    return {panel,el,c,calls,timers,displayStates,shared,execute,init:()=>panel.attach(clone(shared.model)),read:()=>el('notes-read').onclick(),prepare:()=>el('notes-prepare').onclick(),
         text(v){el('notes-text').value=v;el('notes-text').oninput();},approve(legacy=false){el('notes-consent').checked=true;el('notes-legacy').checked=legacy;el('notes-consent').onchange();return el('notes-approve').onclick();},
         tick(ms){now+=ms;for(const[id,t]of[...timers])if(t.at<=now){timers.delete(id);t.fn();}},
         set override(v){override=v;},set session(v){session=v;},set storageError(v){storageError=v;}};
@@ -53,6 +54,7 @@ async function test(){
     h.text('  한글 <script> & text\nsecond line  ');await h.prepare();assert.equal(writes(h).length,0);assert(h.el('notes-approve').disabled);
     assert.equal(h.el('notes-preview').textContent,'한글 <script> & text\nsecond line');await h.el('notes-approve').onclick();assert.equal(writes(h).length,0);
     await h.approve();assert.equal(h.shared.writes,1);assert.equal(h.shared.raw,null);assert.equal(h.el('notes-text').value,'');assert.match(h.el('notes-status').textContent,/Saved.*#1/);
+    assert(h.displayStates.some(s=>s&&s.blocked.includes('pending')));assert.equal(h.displayStates.at(-1).review_rev,'1');assert.equal(h.displayStates.at(-1).blocked,'');assert.equal(h.displayStates.at(-1).read_turn,1);
     assert.equal(h.calls.filter(r=>r.path.endsWith('/revoke')).length,0,'approved token revoked');
     await h.read();h.text('local draft');const n=h.calls.length;h.c.pan='any zoom or pan';h.panel.changed();assert.equal(h.calls.length,n,'pan reread notes');
     h.c.key='groups:2';h.panel.changed();await flush();assert(h.el('notes-prepare').disabled);assert.equal(h.el('notes-text').value,'local draft');assert(h.calls.at(-1).path.endsWith('/revoke'));
@@ -97,6 +99,7 @@ async function test(){
     const unknown=harness();unknown.init();await unknown.read();unknown.text('unknown outcome');await unknown.prepare();
     unknown.override=r=>{if(r.path===API&&r.method==='POST'){const v=op('1','failed',{published:null,outcome_unknown:true,error:'review_unavailable',review_rev:'1'});unknown.shared.model=catalog([v]);return v;}};
     await unknown.approve();assert.match(unknown.el('notes-status').textContent,/UNKNOWN.*#1/);assert.equal(unknown.el('notes-text').value,'unknown outcome');await unknown.panel.refresh();assert.equal(writes(unknown).length,1);unknown.panel.stop();
+    assert(unknown.displayStates.some(s=>s&&s.review_rev==='1'&&s.blocked.includes('unconfirmed')));
 
     for(const kind of ['read','prepare']){
         const late=harness();late.init();if(kind==='prepare'){await late.read();late.text('before context change');}

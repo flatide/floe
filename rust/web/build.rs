@@ -16,6 +16,7 @@ fn main() {
         "ui/drc.js",
         "ui/drc-build.js",
         "ui/drc-notes.js",
+        "ui/drc-note-display.js",
         "ui/drc-waives.js",
         "ui/rulers.js",
         "ui/drc-groups.js",
