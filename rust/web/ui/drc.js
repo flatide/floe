@@ -1,4 +1,4 @@
-/* ES2017 read-only review panel. Geometry projection is display-only; Rust
+/* ES2017 review panel. Geometry projection is display-only; Rust
  * computes every focus viewport. IDs/cursors stay decimal strings. */
 (function (root) {
     'use strict';
@@ -88,7 +88,7 @@
         // accepted focus navigation, not necessarily the selected row.
         let cdTarget = null, cdGlobal = null, cdSegments = null, cdRemaining = 0, cdError = '';
         let restoring = false;
-        let isolationNotice = '';
+        let isolationNotice = '', notes = null;
         const groups = o.groups.bind({http: o.http, protocol: P, changed: groupsChanged,
             status: function (s) { el('drc-group-status').textContent = s; }});
         const persistence = o.stateStore.bind({http: o.http, protocol: P,
@@ -103,6 +103,23 @@
                 el('drc-summary').textContent = 'Review paused · checking pack build state';
                 info('Previous DRC selection and outlines are not active.');
             }}) : null;
+        if (o.notes) { notes = o.notes.bind({el: el, protocol: P, http: o.http, selection: noteSelection,
+            session: o.session, loadPending: o.loadNotePending, savePending: o.saveNotePending,
+            now: o.now || function () { return Date.now(); },
+            setTimeout: o.setTimeout || function (fn, ms) { return setTimeout(fn, ms); },
+            clearTimeout: o.clearTimeout || function (id) { clearTimeout(id); }}); }
+        function noteSelection() {
+            const c = current();
+            if (!c || !c.connected || restoring || !groups.ready() || !registration.metadata || registration.metadata.format !== 'ice') { return null; }
+            const grouped = groups.total() > 0;
+            if (!grouped && !selected) { return null; }
+            const ci = selected && selected.check, local = selected && selected.local;
+            return {context: {drc_id: registration.id, revision: registration.revision, view_id: c.id},
+                epoch: c.state.connection_epoch, key: grouped ? 'groups:' + groups.revision() : 'cursor:' + ci + ':' + local,
+                count: grouped ? groups.total() : 1,
+                caption: grouped ? groups.total() + ' selected errors across rules (group selection takes priority)' : 'Current error · Global ' + selected.global,
+                references: function () { return grouped ? groups.references() : [{check: ci, error: local}]; }};
+        }
         function info(s) { el('drc-message').textContent = s || ''; }
         function cancel(key) { const t = tasks[key]; if (t) { t.cancelled = true; if (t.abort) { t.abort(); } delete tasks[key]; } }
         function cancelAll() { Object.keys(tasks).forEach(cancel); }
@@ -209,6 +226,7 @@
             boxMode = true; boxReset(false); return true;
         }
         function groupsChanged() {
+            if (notes) { notes.changed(); }
             const count = rule ? groups.ids(rule.check).length : 0;
             el('drc-group-count').textContent = count + ' selected in this rule · ' + groups.total() + '/5000 across all rules';
             markErrors(); navigationButtons(); paintLater(); loadGroupMarkers(); followFilters();
@@ -438,6 +456,7 @@
             cancelStep(); jumpActive = focusVisible = rowFocus = false;
             resetCD();
             cancel('geometry'); cancel('focus'); selected = null; points = null; pointsReady = false;
+            if (notes) { notes.changed(); }
             cancel('comparison'); el('drc-comparison').textContent = 'Select an error to compare its parsed bound.';
             jumpScale = null; zoomLock = false; el('drc-selected').textContent = 'Click to inspect · double-click to go to an error.';
             paintLater(); navigationButtons(); renderErrors(); savePanel();
@@ -607,7 +626,7 @@
                 rows = list; errorNext = page.next;
                 if (errorNext !== null) { if (query) { cursor(errorNext.check); cursor(errorNext.error); } else { cursor(errorNext); } }
                 if (JSON.stringify(errorNext) === JSON.stringify(errorStart)) { throw new Error('DRC cursor did not progress'); }
-                pageReady = true; renderErrors(); info('Read-only · review files are never changed.'); savePanel();
+                pageReady = true; renderErrors(); info('Read-only geometry query · no review file changed by this read.'); savePanel();
             } catch (e) {
                 const now = current();
                 if (body.in_view && valid('errors', t, c) && now && (!now.connected || now.pending || now.state.state_rev !== c.state.state_rev)) {
@@ -665,7 +684,7 @@
                     isolationNotice = isolation.status === 'ready' ? 'Last jump: ' + isolation.matched + ' layer pairs isolated.' :
                         isolation.status === 'unsupported_deck' ? 'Layers unchanged · physical GDS isolation is unavailable in jobdeck views.' :
                         'Layers unchanged · this rule has no matching source-layer metadata.';
-                    info('Read-only · review files are never changed.');
+                    info('Read-only geometry query · no review file changed by this read.');
                     navigationButtons(); savePanel();
                 });
             } catch (e) { failure('focus', t, c, e); }
@@ -689,6 +708,7 @@
             const same = selected && selected.check === r.check && selected.local === r.local;
             if (!selected) { jumpScale = null; zoomLock = false; }
             selected = r; focusVisible = true; if (frame) { jumpActive = true; }
+            if (notes) { notes.changed(); }
             if (!same) { loadComparison(r); }
             if (!same || !pointsReady) { points = null; pointsReady = false; el('drc-selected').textContent = 'Global ' + r.global + ' · bounding-box preview'; geometry(r); }
             // Keep the button node alive between click and double-click.
@@ -742,7 +762,7 @@
                 }
                 const allowFocus = !c.pending && !current().pending && current().state.state_rev === c.state.state_rev;
                 select(r, false, allowFocus);
-                info(allowFocus || !jumpActive ? 'Read-only · review files are never changed.' : 'View changed during search; selected without moving.');
+                info(allowFocus || !jumpActive ? 'Read-only geometry query · no review file changed by this read.' : 'View changed during search; selected without moving.');
             } catch (e) { failure('step', t, c, e); }
             finally { if (valid('step', t, c)) { stepBusy = false; navigationButtons(); } }
         }
@@ -865,6 +885,7 @@
         function applyCatalog(v) {
             const before = registration, present = !!(v.drc || v.build);
             registration = v.drc; el('drc-toggle').hidden = !present; el('drc-panel').hidden = !present || !shown;
+            if (notes) { notes.attach(v.notes); }
             if (registration) {
                 el('drc-title').textContent = registration.title;
                 el('drc-summary').textContent = registration.metadata ? registration.metadata.checks + ' rules · ' + registration.metadata.errors + ' errors' : registration.phase;
@@ -874,7 +895,7 @@
                     if (m.truncated_records !== undefined && cursor(m.truncated_records) !== '0') { el('drc-summary').textContent += ' · ' + m.truncated_records + ' truncated records'; }
                 }
                 if (!before || before.id !== registration.id || before.phase !== registration.phase) {
-                    info(registration.error || (registration.phase === 'opening' ? 'Opening DRC metadata…' : 'Read-only review'));
+                    info(registration.error || (registration.phase === 'opening' ? 'Opening DRC metadata…' : v.notes ? 'Geometry and waive statuses are read-only; notes require explicit approval.' : 'Read-only review'));
                 }
             }
             // The catalog is polled while idle too. Rebinding/restarting an
@@ -939,8 +960,8 @@
                 if ((key === 'n' || key === 'p') && rule && current()) { step(key === 'p', false, false); return true; }
                 return false;
             },
-            stop: function () { stopped = true; if (builds) { builds.stop(); } ++restoreTurn; clearTimeout(filterTimer); filterTimer = null; persistence.close(); groups.close(); bound = ''; boxReset(true); cancelAll(); clearTimeout(timer); if (painting !== null) { o.window.cancelAnimationFrame(painting); painting = null; } overlay.hidden = true; },
-            resume: function () { stopped = false; return builds ? builds.resume() : refresh(); }};
+            stop: function (final) { stopped = true; if (notes) { notes.stop(final); } if (builds) { builds.stop(); } ++restoreTurn; clearTimeout(filterTimer); filterTimer = null; persistence.close(); groups.close(); bound = ''; boxReset(true); cancelAll(); clearTimeout(timer); if (painting !== null) { o.window.cancelAnimationFrame(painting); painting = null; } overlay.hidden = true; },
+            resume: function () { stopped = false; if (notes) { notes.resume(); } return builds ? builds.resume() : refresh(); }};
     }
     const api = {bind: bind, projection: projection, point: point, shifted: shifted, vertices: vertices, metadataText: metadataText, comparisonText: comparisonText};
     if (typeof module === 'object' && module.exports) { module.exports = api; } else { root.FloeDRC = api; }

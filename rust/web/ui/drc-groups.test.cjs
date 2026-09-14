@@ -15,8 +15,11 @@ async function tick(){for(let i=0;i<20;i++)await Promise.resolve();}
     promise=groups.change(apply,'7');assert(!groups.ready());assert.equal(last().body.base_selection_rev,'1');assert.equal(last().body.state_rev,'7');
     const count=calls.length;assert.equal(await groups.change(apply),false);assert.equal(calls.length,count,'queued a second toggle');
     last().resolve(snapshot('2',[{check:'0',errors:apply.errors}]));assert(await promise);assert(groups.contains('0',apply.errors[0]));assert.equal(groups.total(),1);
+    assert.deepEqual(groups.references(),[{check:'0',error:'9007199254740993'}]);
+    const copy=groups.references();copy[0].error='7';assert.equal(groups.references()[0].error,'9007199254740993');
     // The command may commit before a timeout. Only GET follows, never POST.
     promise=groups.change(apply);last().reject(new Error('timeout'));await tick();assert.equal(last().method,'GET');
+    assert.equal(groups.references(),null);
     last().resolve(snapshot('3'));assert.equal(await promise,false);assert.equal(groups.total(),0);assert(groups.ready());assert.match(statuses.at(-1),/not retried/);
     assert.equal(calls.filter(c=>c.method==='POST').length,2);
     // An invalid success response is uncertain too. A failed GET disables edits.
@@ -26,6 +29,7 @@ async function tick(){for(let i=0;i<20;i++)await Promise.resolve();}
     promise=groups.attach(scope);const old=last();const next=groups.attach({...scope,view:'v2'});assert(old.token.cancelled);
     old.resolve(snapshot('9',[{check:'0',errors:['1']}]));await promise;assert.equal(groups.total(),0);
     last().resolve({...snapshot(),view_id:'v2'});await next;assert(groups.ready());groups.close();assert(!groups.ready());assert.equal(groups.total(),0);
+    assert.equal(groups.references(),null);
     const good=snapshot('18446744073709551615',[{check:'0',errors:['0','9007199254740993','18446744073709551615']}]);
     assert.equal(G.decode(good,scope,P).total,3);
     for(const change of [v=>v.state.total='4',v=>v.state.limit=6000,v=>v.view_id='wrong',v=>v.state.selection_rev=1,

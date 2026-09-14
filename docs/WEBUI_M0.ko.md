@@ -141,6 +141,10 @@ M4e-2c는 기존 reader와 store의 opaque pack identity 일치 검사와 bounde
 M4e-3a는 `view --drc-reviewer TAG`의 명시 opt-in과 owner 주석 read/prepare/승인 게시·
 receipt/취소 API다([M4 §25](WEBUI_M4.ko.md)). 기본 비활성이고 reviewer/path는 wire로
 고르지 않는다. 주석 UI·자동 저장·waive 쓰기·import/export·현장 수용은 남아 있다.
+M4e-3b는 위 API의 선택 주석 편집·미리보기·명시 승인 패널이다
+([M4 §26](WEBUI_M4.ko.md)). 선택 변경 시 초안 문구 보존, 동일 승인만 재전송하는
+복구 UI를 제공한다. 자동 저장·주석 badge/overlay·waive 쓰기·import/export와
+실제 브라우저/현장 수용은 남아 있다.
 
 ### 2.7 svrf — M4 (6개 옵션)
 

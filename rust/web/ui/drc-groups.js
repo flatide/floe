@@ -70,6 +70,12 @@
             revision: function () { return state ? state.revision : null; },
             contains: function (ci, id) { return !!state && state.rules.has(ci) && state.rules.get(ci).has(id); },
             ids: function (ci) { return state && state.rules.has(ci) ? Array.from(state.rules.get(ci)) : []; },
+            references: function () {
+                if (!ready || busy || !state) { return null; }
+                const rows = []; state.rules.forEach(function (ids, ci) {
+                    ids.forEach(function (id) { rows.push({check: ci, error: id}); });
+                }); return rows;
+            },
             total: function () { return state ? state.total : 0; }};
     }
     const api = {bind: bind, decode: decode};

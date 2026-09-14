@@ -589,7 +589,7 @@
         catch (e) { report(e); }
     };
     el('logout').onclick = async function () {
-        if (drcPanel) { drcPanel.stop(); }
+        if (drcPanel) { drcPanel.stop(true); }
         if (clipper) { clipper.stop(); }
         if (snapshots) { snapshots.stop(); }
         if (settings) { settings.stop(); }
@@ -746,6 +746,9 @@
     drcPanel = window.FloeDRC.bind({document: document, window: window, protocol: P, http: http,
         history:rulerHistory, rulerKey:function (key) { return measurement && !drcPanel.boxActive() && measurement.key(key); },
         stateStore: window.FloePanelState, rulers: window.FloeRulers, groups: window.FloeDRCGroups, builds: window.FloeDRCBuild, cursor: reviewCursor,
+        notes: window.FloeDRCNotes, session: function () { return auth ? auth.session_id : ''; },
+        loadNotePending: function () { return sessionStorage.getItem('floe-note-pending'); },
+        saveNotePending: function (value) { if (value === null) { sessionStorage.removeItem('floe-note-pending'); } else { sessionStorage.setItem('floe-note-pending', value); } },
         context: function () { return !stopped && state && currentId ? {id: currentId, source: currentSource, state: state,
             connected: !!epoch && !!socket && socket.readyState === WebSocket.OPEN, pending: !!inflight || queue.length > 0 || !!dragShift} : null; },
         navigate: function (n, token, done) { return edit({prepared_token: token}, done); },

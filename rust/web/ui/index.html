@@ -17,6 +17,7 @@
   <script defer src="/assets/@@BUNDLE@@/rulers.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc-groups.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc-build.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/drc-notes.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc.js"></script>
   <script defer src="/assets/@@BUNDLE@@/settings.js"></script>
   <script defer src="/assets/@@BUNDLE@@/defaults.js"></script>
@@ -168,7 +169,7 @@
       <div id="perf" class="perf">Rust renderer · no automatic indexing · refinement off</div>
     </main>
     <aside id="drc-panel" class="drc-panel" aria-label="DRC review" hidden>
-      <div class="drc-heading"><h2>DRC review <span>NO REVIEW WRITES</span></h2><strong id="drc-title">DRC results</strong><p id="drc-summary" class="note"></p></div>
+      <div class="drc-heading"><h2>DRC review <span id="drc-review-mode">NO REVIEW WRITES</span></h2><strong id="drc-title">DRC results</strong><p id="drc-summary" class="note"></p></div>
       <section id="drc-build" class="drc-build" aria-label="DRC pack build" hidden>
         <button id="drc-build-open" aria-expanded="false" aria-controls="drc-build-form" disabled>Build pack…</button>
         <form id="drc-build-form" aria-label="Approve pack build" hidden>
@@ -207,6 +208,30 @@
       <div class="button-row"><button id="drc-step-prev" title="Previous matching error in this rule, wrapping (p)" disabled>Previous error</button><button id="drc-step-next" title="Next matching error in this rule, wrapping (n)" disabled>Next error</button></div>
       <button id="drc-step-continue" hidden>Continue search</button>
       <div class="drc-selection"><p id="drc-selected" class="note">Click to inspect · double-click to go to an error.</p><div class="button-row"><button id="drc-frame" disabled>Frame error</button><button id="drc-clear" disabled>Clear</button></div></div>
+      <section id="notes-panel" class="notes-panel" aria-label="Owner DRC notes" hidden>
+        <h3>Notes</h3><p id="notes-owner" class="note"></p><p id="notes-selection" class="note"></p>
+        <button id="notes-read" disabled>Read selected notes</button>
+        <div id="notes-editor" hidden>
+          <p id="notes-target" class="note"></p>
+          <label for="notes-text">Note text</label><textarea id="notes-text" rows="5" maxlength="65536" spellcheck="false" aria-describedby="notes-bytes notes-local"></textarea>
+          <p id="notes-bytes" class="note"></p><p id="notes-local" class="note">Local draft only · not autosaved · lost on page reload. Ctrl/Cmd+Enter previews; Escape discards. Browser IME is supported.</p>
+          <div class="button-row"><button id="notes-prepare">Preview save</button><button id="notes-reload">Reload snapshot, keep text</button><button id="notes-discard">Discard draft</button></div>
+          <div id="notes-review" hidden>
+            <strong id="notes-preview-target"></strong><pre id="notes-preview"></pre><p id="notes-report" class="note"></p>
+            <label id="notes-legacy-row" class="check" hidden><input id="notes-legacy" type="checkbox"> I verified that this unbound legacy note file belongs to this DRC run.</label>
+            <label class="check"><input id="notes-consent" type="checkbox"> Save this exact text (or clear it) on the listed selected errors in this reviewer's note file.</label>
+            <button id="notes-approve" class="primary" disabled>Approve note save</button>
+          </div>
+        </div>
+        <p class="note">Latest session save receipt</p><p id="notes-status" role="status"></p><p id="notes-message" class="note" role="status"></p>
+        <div class="button-row"><button id="notes-refresh">Refresh save status</button><button id="notes-cancel" hidden>Cancel save</button></div>
+        <div id="notes-uncertain" hidden>
+          <p>Previous approval may have reached the server. Resolve resends only that same approved request; refresh never resends a save.</p>
+          <button id="notes-resolve">Resolve approved request</button>
+          <label class="check"><input id="notes-checked" type="checkbox"> I checked the note file and understand the previous outcome.</label>
+          <button id="notes-forget" disabled>Clear local recovery record</button>
+        </div>
+      </section>
       <div class="button-row"><button id="drc-restore-layers" title="Restore the visibility saved before the first DRC layer isolation" disabled>Restore layers</button></div>
       <p id="drc-layer-status" class="note" role="status"></p>
       <section class="drc-constraint" aria-label="SVRF constraint comparison"><pre id="drc-comparison" role="status">Select an error to compare its parsed bound.</pre><p class="note">Parsed metadata and geometric measurement only · not a sign-off or waive decision.</p></section>

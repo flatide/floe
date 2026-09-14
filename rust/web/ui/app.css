@@ -112,6 +112,15 @@ details > summary { cursor: pointer; font-size: 12px; color: #b4c3d8; }
 #drc-build-form { padding: 10px; margin-top: 10px; background: #171b23; border: 1px solid #526887; border-radius: 4px; }
 #drc-build-source, #drc-build-status { overflow-wrap: anywhere; white-space: pre-wrap; }
 #drc-build-status { margin: 10px 0 0; font-variant-numeric: tabular-nums; }
+.notes-panel { flex-shrink: 0; border-top: 1px solid #42526a; padding: 12px 0; }
+.notes-panel .button-row { flex-wrap: wrap; }
+.notes-panel button { white-space: normal; }
+.notes-panel .check { align-items: flex-start; line-height: 1.5; margin: 10px 0; }
+.notes-panel .check input { margin-top: 4px; }
+.notes-panel textarea { width: 100%; resize: vertical; color: #dce3ec; background: #171b23; border: 1px solid #526887; font: 13px/1.5 monospace; }
+#notes-review, #notes-uncertain { padding: 10px; margin-top: 10px; border: 1px solid #526887; border-radius: 4px; }
+#notes-target, #notes-preview-target, #notes-preview, #notes-status, #notes-message { white-space: pre-wrap; overflow-wrap: anywhere; }
+#notes-preview { max-height: 220px; overflow-y: auto; font: 13px/1.5 monospace; }
 .drc-search { display: flex; gap: 5px; margin: 12px 0 8px; }
 .drc-search input { flex: 1; min-width: 0; width: 140px; font-size: 12px; }
 .drc-search button, .drc-actions button { font-size: 12px; }

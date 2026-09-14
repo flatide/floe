@@ -26,6 +26,9 @@ M4e-2c는 store의 opaque pack identity를 기존 DRC 읽기 actor와 대조하�
 M4e-3a의 실제 주석 URI·snapshot/승인 token·owner receipt·rebuild와 자원 수명·출력 보호는
 [M4 §25](WEBUI_M4.ko.md)를 따른다. `--drc-reviewer`는 trusted launcher 설정이며 단일
 owner bootstrap에 결합한다. 공유 계정의 실사용자 인증/RBAC를 구현한 것으로 보지 않는다.
+M4e-3b의 owner 주석 UI는 이 API를 그대로 사용한다([M4 §26](WEBUI_M4.ko.md)).
+그룹 선택 우선·명시 snapshot 조회·정규화 preview·별도 승인·동일 승인만 복구하는 UI다.
+pan/restore/reload가 자동 저장하지 않으며 새 endpoint는 없다.
 M1b-2a의 `app-core/managed`·`view`에는 process-local lease/admission과
 독립 worker controller를 구현했다. M1b-2b의 사전 등록 view용 제어/이미지
 스트림은 [M1b 기록 §6](WEBUI_M1B.ko.md#6-m1b-2b--인증된-제어이미지-스트림)을 따른다.

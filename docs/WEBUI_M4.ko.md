@@ -10,9 +10,10 @@ overlay 전환**, §16의 **Rust layerprops 포맷·초기 가시성**, §17의
 **공유 설계 기본값 게시 코어·owner 승인 API**, §20의 **게시 preview·승인·결과 UI**까지 연결했다.
 §21은 DRC waive·주석 이관의 포맷/메모리 모델 단계이며 저장 API/UI 연결은 아니다.
 §22에서 명시적 로컬 review 저장과 pack binding을 추가했다. §25에서 고정 reviewer를
-명시한 owner의 주석 read/prepare/승인 게시 API를 연결했다. geometry reader는 읽기 전용이다.
+명시한 owner의 주석 read/prepare/승인 게시 API를 연결했다. §26은 그 API의
+선택 주석 편집·미리보기·명시 승인 UI다. geometry reader는 읽기 전용이다.
 각 절의 미연결 표기는 해당 선행 단계 당시의 범위다.
-나머지 내보내기·주석 UI·waive 쓰기와 전체 조작/실제 브라우저 수용은 남아 있다.
+나머지 내보내기·주석 표시/불러오기·waive 쓰기와 전체 조작/실제 브라우저 수용은 남아 있다.
 
 ## 1. M4a-1: 표시 scene에 고정한 native pick/snap
 
@@ -2257,3 +2258,66 @@ shared-default 게시 결과물은 보존했다.
 브라우저 편집 패널·자동 저장, waive 쓰기와 reader 상태 갱신, 명시 import/export는 아직
 남아 있다. 실제 브라우저의 주석 게시 클릭 수용도 미실시다. 기존 GTK launcher와
 renderd0.12.87은 유지하며, M4 전체·현장 Firefox/NFS 수용 완료를 뜻하지 않는다.
+
+## 26. M4e-3b — owner 선택 주석 편집·승인 패널
+
+§25의 `--drc-reviewer TAG`를 명시한 세션에만 Notes 패널을 표시한다. reviewer와
+출력 경로를 브라우저에서 고르지 않는다. Read selected notes → 편집 → Preview save →
+별도 동의 → Approve note save 순서다. 읽기·미리보기·선택 이동·패널 복원은 무쓰기다.
+파일 이름, 생성/교체 여부, 정규화된 실제 저장 텍스트(빈 문구는 선택 주석 지우기),
+파싱 경고를 승인 전에 표시하고 legacy 미확인은 별도 체크가 필요하다.
+
+### 선택·수명과 비용
+
+- 여러 룰의 그룹 선택(최대5000개)이 클릭한 행보다 우선한다. 없으면 현재 행 하나다.
+  대상 설명에 이 차이를 표시한다. 화면 global 번호 대신0-based check/local 문자열을
+  보내며 u64를 JS Number로 바꾸지 않는다. refs 전체 복사는 명시적 Read 때만 한다.
+- pan/zoom·viewport revision 변경은 snapshot을 다시 읽지 않는다. 선택 revision·
+  DRC id/revision·view id·connection epoch 변경/연결 해제는 미승인 capability를 폐기하고
+  새 저장을 막되 로컬 문구는 남긴다. 이미 승인된 작업의 선택을 바꾸지는 않는다.
+- snapshot120초·preview30초 만료 시 새 승인을 막는다. 같은 선택의 Reload snapshot,
+  keep text로 파일의 새 버전을 명시적으로 읽고 다시 준비한다. 다른 선택 편집은
+  Discard 후 시작하며 문구를 다른 선택에 몰래 적용하지 않는다.
+- 초안은 메모리에만 둔다. reload/pagehide/logout 때 지우며 자동 저장이 아니다.
+  Ctrl/Cmd+Enter는 미리보기만, Escape는 초안만 버린다. IME 조합 중에는 실행하지 않는다.
+  GTK 한글 조합기는 이관하지 않고 browser IME를 사용한다.
+- 상태는 기존 DRC catalog를 재사용한다. 승인 작업 중500ms, 응답 유실 요청이 남으면
+  2500ms로 결과만 조회한다. 큰 FE snapshot을 배경에서 반복 읽지 않는다. 서버의
+  sidecar hash·전체 재작성 I/O 비용과 autosave 성능 검증은 여전히 남는다.
+
+### 결과·복구
+
+원래 승인 본문과 session id만 sessionStorage에 보관하고 주석 문구는 저장하지 않는다.
+reload/Refresh는 POST를 재전송하지 않는다. Resolve approved request만 원래 승인한
+동일 seq/body를 보내 receipt를 확인한다. 다른 세션/손상된 기록은 새 승인을 막고,
+사용자가 파일을 확인했다는 별도 확인 뒤 로컬 기록만 지울 수 있다. durable 서버
+ledger나 자동 재시작 복구는 아니다.
+
+내 요청의 수락 응답과 `published:true`를 모두 확인해야 로컬 문구를 지운다. 다른 탭의
+같은 seq receipt만으로 내 문구가 저장됐다고 판단하지 않는다. 실패·commit 전 취소·
+결과 불명에서는 문구를 남긴다. `published:null`은 미확정이고, commit 뒤 취소는 undo가
+아니다. directory sync 실패는 저장된 파일의 내구성 경고다. latest receipt는 세션 전체
+결과라는 제목이며, 승인 후 선택 이동이 이미 승인한 내용을 바꾸거나 취소하지 않는다.
+
+### 검증과 남은 작업
+
+`drc-notes.test.cjs`가 동의/legacy/clear, UTF-8/u64 경계, 만료/연결 변경, 실패·취소·unknown
+문구 보존, 다른 탭 충돌, 동일 승인만 재전송, 저장소 실패, 지연 응답 폐기/정리를 검사한다.
+`drc-notes-panel.test.cjs`는 실제 DRC/selection/notes 모듈의 룰 간 선택과0-based refs,
+pan 무조회, 선택/epoch/DRC 변경 무효화를 묶어 검사한다. 두 gate와 ES2017 파싱·전체 UI
+회귀를 `tools/validate_web_ui.cjs`와 필수 Rust 배터리에 배선했다. 자산 HTTP gate와
+bundle identity에 새 JS 및 native review API 소스를 포함했다.
+
+집중 UI gate, web/app strict all-target clippy, Rust1.89 web49 unit+transport10,
+Linux x86-64 musl release static-pie 교차 빌드가 통과했다.
+최종 `sh tools/validate_rust.sh` exit0·`RUST VALIDATION: ALL OK`: workspace unit
+(app11/core196/web49), owner 주석 HTTP gate, 기존28회 native 게시/Python oracle,
+jobdeck80·renderer46, KLayout13 PX+2 phase-exact+14 style(jobs1/8)을 포함한다.
+실제 브라우저 합성 읽기/미리보기는 탭 생성 전에 자동 승인 서비스 용량 오류로 차단돼
+미실시다. 우회하지 않았다. 합성 서버 종료 후 입력 OASIS·DRC·cache SHA-256 불변과
+주석/lock 미생성을 확인했다. 앞서 별도 승인받은 shared-default 합성 게시 결과물은 보존했다.
+
+주석 badge/overlay·명시 import/export, waive 쓰기와 reader 갱신, 자동 저장 정책/성능,
+실제 브라우저 편집/게시와 현장 Firefox/IME/NFS 수용은 남아 있다. native API·worker·
+raster 변경이 아니므로 renderd0.12.87과 GTK 기본 경로를 유지한다. M4 전체 완료나
+Linux 실제 실행 검증을 뜻하지 않는다.
