@@ -129,6 +129,9 @@ M2a-12a는 명시 `drc --build [--force] [--jobs N]`와 공통 생성/취소 코
 M2a-12b1에서 owner HTTP 승인·생성/취소·새 identity 재등록 서버를 연결했다.
 M2a-12b2에서 pack-build 승인/진행/취소·새 identity 조회 UI를 연결했다.
 실제 브라우저 승인 클릭 수용과 review 쓰기는 별도로 남아 있다(M2 §24).
+M4e-1은 waive 스트리밍 codec과 메모리 주석 그룹 편집/FE 포맷을 Rust로 이관했다
+([M4 §21](WEBUI_M4.ko.md)). Python byte oracle과 손상/취소 게이트를 추가했으며,
+실제 autosave·동시 수정 충돌·review 쓰기 API/UI는 아직 연결하지 않았다.
 
 ### 2.7 svrf — M4 (6개 옵션)
 

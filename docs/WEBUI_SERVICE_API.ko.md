@@ -9,6 +9,9 @@
 M2a의 현재 DRC 등록/읽기 URI·페이지·취소·focus/in_view·패널 상태·필터·순회·마커·
 CD·선택 집합·SVRF metadata/비교·타입 패널·격리/원자적 focus·ASCII API 계약은 [M2 기록](WEBUI_M2.ko.md) §2~21이
 기준이다. read-only actor만 있고 review 저장/공유 endpoint는 아직 없다.
+M4e-1의 `app-core::drc::review`는 waive/FE codec과 메모리 note 그룹만 제공한다.
+레거시 fingerprint는 인증/유일 run identity가 아니며, 향후 writer의 pack identity·
+review revision 검증을 대체하지 않는다([M4 §21](WEBUI_M4.ko.md)).
 M1b-2a의 `app-core/managed`·`view`에는 process-local lease/admission과
 독립 worker controller를 구현했다. M1b-2b의 사전 등록 view용 제어/이미지
 스트림은 [M1b 기록 §6](WEBUI_M1B.ko.md#6-m1b-2b--인증된-제어이미지-스트림)을 따른다.

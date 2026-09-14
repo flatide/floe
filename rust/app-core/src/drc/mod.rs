@@ -9,6 +9,7 @@ mod filters;
 mod local;
 mod measure;
 mod pack;
+pub mod review;
 mod selection;
 pub use ascii::{Ascii, AsciiCheck, AsciiViolation};
 pub use database::{

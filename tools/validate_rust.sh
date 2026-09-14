@@ -153,6 +153,7 @@ fi
 # DRC .ice index sidecar: reading through the index == ASCII parse
 .venv/bin/python tools/validate_drc_ice.py
 .venv/bin/python -B tools/validate_app_drc.py
+.venv/bin/python -B tools/validate_drc_review.py
 .venv/bin/python -B tools/validate_drc_build.py
 .venv/bin/python -B tools/validate_web_drc_build.py "$FLOE2_SMOKE_SRC"
 .venv/bin/python -B tools/validate_app_svrf.py

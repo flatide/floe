@@ -8,6 +8,7 @@ M0/G2·M3 현장 Firefox/ETX는 사용자 요청대로 보류다. 이 경계를 
 overlay 전환**, §16의 **Rust layerprops 포맷·초기 가시성**, §17의
 **열린 세션 설정 Load/Save·필드별 스타일 적용**, §18/19의
 **공유 설계 기본값 게시 코어·owner 승인 API**, §20의 **게시 preview·승인·결과 UI**까지 연결했다.
+§21은 DRC waive·주석 이관의 포맷/메모리 모델 단계이며 저장 API/UI 연결은 아니다.
 각 절의 미연결 표기는 해당 선행 단계 당시의 범위다.
 나머지 내보내기·주석 저장과 전체 조작/실제 브라우저 수용은 남아 있다.
 
@@ -1857,3 +1858,79 @@ owner9·jobdeck80·renderer46, KLayout13 PX+2 phase-exact+14 style(jobs1/8)을 �
 launcher CLI 게이트·release bundle·Rust1.89 Linux musl 링크를 다시 통과했다.
 검증용 브라우저와 서버는 종료했으며 실제 공유 기본값 파일은 생성하지 않았다.
 M4 전체와 GTK 은퇴는 아직 완료가 아니다.
+
+## 21. M4e-1 — DRC review sidecar codec과 주석 그룹 모델
+
+`app-core::drc::review`에 Python `IcePack`의 waive import/export와 shared note
+편집·`.fe` 직렬화를 이관했다. **순수 library 단계**다. 파일 경로/계정/reviewer 탐색,
+자동 저장·삭제, 기존 pack 수정, HTTP/WS 권한·쓰기 endpoint를 추가하지 않는다.
+현재 웹 DRC actor는 여전히 읽기 전용이다. DRC-02의 저장/충돌/API/UI 전체가 완료된 것은 아니다.
+
+### waive: 64KiB 스트리밍
+
+- `Layout`은 pack의 source size·mtime·total과 파일 순서의 rule counts를 검증한다.
+  빈 rule도 counter 자리를 유지한다. 합계 불일치·u64 산술 overflow·rule별 u32 초과는
+  거부하며 FLOEWAIV v1의40-byte header, status byte 배열, rule별 little-endian u32를 유지한다.
+- `rewrite_waives`는 header와 정확한 전체 입력 길이를 확인하고, status를64KiB씩 읽어
+  요청된 전역0-based gid 변경을 적용한다. `status == 1`만 waived로 세며2..255도 보존한다.
+  입력 counter는 신뢰하지 않고 재계산한다(Python `waive_import`와 동일).
+  중복 변경 gid는 마지막 값이 우선하며 한 호출 최대5000개다.
+- 메모리는 오류 총수에 비례하는 status 벡터가 아니라 **rule counts + 변경 집합 +64KiB**다.
+  300만 오류 가상 reader/계측 sink 테스트가 전체 status 배열 없이 이 경로를 실행한다.
+  rule 수 자체도 기존 metadata 한도와 연계해 최대4,194,304개로 제한한다.
+- 출력 인자는 **미게시 staging sink**여야 한다. 손상된 말미/추가 바이트·I/O 실패·취소 시
+  sink에는 prefix가 남을 수 있다. 성공 반환은 파일 commit/fsync 완료가 아니다.
+  실제 저장 계층이 전체 검증·동시 수정 확인 후 교체해야 한다. chunk 사이 취소는 확인하지만
+  blocking Read/Write 자체를 즉시 중단하거나 NFS deadline을 보장하지 않는다.
+
+### 주석: 그룹과 오류 ID 보존
+
+- 하나의 주석이 여러 전역 gid를 공유한다. 새 선택에 note를 붙이면 기존 그룹에서 그 멤버만
+  분리하고, 남은 멤버는 기존 문구를 유지한다. 빈/공백 문구는 선택 멤버만 지운다.
+  그룹은 생성 순서, 각 그룹의 members는 숫자 순서로 직렬화한다.
+- 잘못된 gid·과대 text/membership·취소·sequence overflow는 **메모리 변경 전에** 검사한다.
+  입력을 조용히 일부 적용하지 않는다. 유효한 반복 gid는 집합으로 취급한다.
+- `.fe`의 authoritative 데이터는 `floe_pack=`과 `floe_note=`다. `text=` mirror로
+  멤버를 재구성하지 않는다. export는 기존 escape(`\\`, `\n`)·색`#FFD819`·16px/검정
+  translucent 배경과 error bbox 중심의 text mirror를 같은 annotation codec으로 만든다.
+  한글·탭·여러 줄·literal backslash·pipe를 그대로 round-trip한다.
+- 중심 callback 실패/NaN은 export 오류다. Python의 예외 fallback `(0,0)`을 복제하지 않는다.
+  빈 모델은 `None`을 반환할 뿐, 기존 파일을 삭제하지 않는다.
+- 한 edit 최대5000 gid, 모델100,000 membership, 한 문구64KiB, 모델 문구 합과 import/export
+  각각16MiB다. mirror가 많으면 export 한도가 먼저 찰 수 있다. 오류로 표시하며 잘린 정상
+  파일을 내보내지 않는다. 이 수치는 RSS 상한이나 서버의 총 admission 예산이 아니다.
+
+### 의도적으로 보강한 호환 경계
+
+1. note import는 **정확히 한 개의 matching fingerprint**를 요구한다. 기존 Python의
+   fingerprint 없는 파일 허용·마지막 tag 우선은 다른 run의 gid 적용 위험 때문에 따르지 않는다.
+2. malformed note 행/빈 내용/무효 gid는 기존처럼 건너뛰되 `ImportReport`에 행/멤버 수를
+   반환한다. gid 표기는 ASCII decimal만 받으며 Unicode digit·overflow도 무효 멤버로 센다.
+   지원하지 않는 control/line separator 문자와 자원 한도는 전체 import 오류다.
+3. 서로 겹친 import 그룹은 **마지막 할당 우선 + 이전 그룹에서 detach**다. Python은 lookup은
+   마지막을 읽어도 옛 그룹 membership을 남겨, clear/export 뒤 과거 note가 되살아날 수 있다.
+   Rust는 그 모순을 남기지 않으며 재할당 수를 별도 반환한다. 정상 GTK 산출물의 bytes는 같다.
+4. 이 fingerprint는 size/초 단위mtime/total이라는 **레거시 호환 표식**이다. 같은 값의 별도
+   DRC run을 식별하거나 동일 권한을 증명하지 못한다. 저장 계층은 별도의 현재 pack identity,
+   인증된 reviewer scope, 기대 review revision을 결합해야 하며 tag 일치만으로 autosave를
+   덮어쓰거나 기존 review를 새 pack에 자동 승계해서는 안 된다.
+
+### 검증과 다음 단계
+
+`tools/validate_drc_review.py`가 작은 adversarial DB와 생성 DB를 native pack으로 만들고,
+Python 편집/export/import 결과를 Rust와 대조한다. **22개 주석 상태와5793 status bytes**의
+FE/waive 전체 bytes, note lookup·그룹/멤버 순서, reserved status·counter 재계산을 확인한다.
+Rust 테스트 실행은 `PATH`가 비어 있고 source/pack/sidecar 전체의 hash·mtime가 불변이다.
+이 게이트는 `tools/validate_rust.sh`에 연결했다. native unit은 foreign/truncated/extra 입력,
+취소·write 실패·bounded streaming, 그룹 원자성·재import·상한·정확한u64 gid를 검증한다.
+최종 `sh tools/validate_rust.sh`는 종료 코드0·`RUST VALIDATION: ALL OK`로 완료됐다.
+app11·app-core165·web44, 새 review 대조, jobdeck80·renderer46,
+KLayout13 PX+2 phase-exact+14 style(jobs1/8)을 포함한다. review unit9개는 Rust1.89에서도
+통과했고, 최종 scoped fmt·app/core/web all-target strict clippy와 Linux x86-64 musl
+release static-pie 링크를 확인했다. Linux 실행/현장 Firefox 수용은 아니며 기존 dependency/
+GTK/Pillow 경고는 별도다. renderd0.12.87은 유지하며 실제 서버 쓰기 경로는 바꾸지 않았다.
+
+다음은 이 codec을 사용하는 **명시적 로컬 review 저장 계층**이다. pack/파일 identity와
+revision 충돌, atomic staging/commit, reviewer 구분, 실패 시 기존 파일 보존을 먼저 고정한 뒤
+owner/API/UI에 연결한다. GTK의 read-only 폴더→전역 temp→pack 내부 pwrite fallback이나
+stale 파일의 자동 이동/삭제를 그대로 이식하지 않는다. 공유 권한/현장 Firefox 수용은 별도다.
