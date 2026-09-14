@@ -81,6 +81,35 @@ fn kind<T>(r: Result<T>) -> ErrorKind {
 }
 
 #[test]
+fn waive_install_last_check_rejects_cancel_and_input_mutation() {
+    for change in ["cancel", "pack", "sidecar"] {
+        let f = Fixture::new();
+        let s = f.store(Kind::Waives);
+        s.snapshot(&f.stop)
+            .unwrap()
+            .prepare_waives(&[(0, 1)], &f.stop)
+            .unwrap()
+            .publish(&f.stop)
+            .unwrap();
+        let mut reader = crate::drc::Database::open_explicit(&f.pack, None, &f.stop).unwrap();
+        let snapshot = s.snapshot(&f.stop).unwrap();
+        let result = snapshot.apply_waives_using(&mut reader, &f.stop, || {
+            match change {
+                "cancel" => f.stop.store(1, Ordering::Relaxed),
+                "pack" => fs::write(&f.pack, &f.bytes).unwrap(),
+                _ => {
+                    let bytes = fs::read(s.target()).unwrap();
+                    fs::write(s.target(), bytes).unwrap();
+                }
+            }
+            Ok(())
+        });
+        assert!(result.is_err(), "installed after {change}");
+        assert!(!reader.has_waives(), "partial installation after {change}");
+    }
+}
+
+#[test]
 fn reader_and_review_bind_the_same_open_pack_not_equal_legacy_headers() {
     use crate::drc::Database;
     let f = Fixture::new();

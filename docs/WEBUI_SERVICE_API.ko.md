@@ -29,6 +29,9 @@ owner bootstrap에 결합한다. 공유 계정의 실사용자 인증/RBAC를 �
 M4e-3b의 owner 주석 UI는 이 API를 그대로 사용한다([M4 §26](WEBUI_M4.ko.md)).
 그룹 선택 우선·명시 snapshot 조회·정규화 preview·별도 승인·동일 승인만 복구하는 UI다.
 pan/restore/reload가 자동 저장하지 않으며 새 endpoint는 없다.
+M4e-4a의 waive snapshot 적용은 내부 actor 명령이다([M4 §27](WEBUI_M4.ko.md)).
+HTTP로 경로/상태 파일을 받아 재부착하지 않는다. actor 뒤의 조회만 새 상태가 보장되므로
+owner 쓰기 연결에서는 별도 review revision 장벽·저장/조회 반영 outcome을 결합해야 한다.
 M1b-2a의 `app-core/managed`·`view`에는 process-local lease/admission과
 독립 worker controller를 구현했다. M1b-2b의 사전 등록 view용 제어/이미지
 스트림은 [M1b 기록 §6](WEBUI_M1B.ko.md#6-m1b-2b--인증된-제어이미지-스트림)을 따른다.

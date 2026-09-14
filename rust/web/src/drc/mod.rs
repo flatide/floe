@@ -81,6 +81,15 @@ impl Drop for Ticket {
     }
 }
 impl Service {
+    /// Trusted coordinator only; no HTTP request can construct a snapshot.
+    /// This is an actor barrier, not an end-to-end UI revision barrier. The
+    /// caller must retire stale status-dependent HTTP replies/prepared actions.
+    pub fn apply_waives(
+        &self,
+        snapshot: floe_app_core::drc::review::managed::Snapshot,
+    ) -> std::result::Result<Ticket, Failure> {
+        self.enqueue(dto::Command::ApplyWaives(snapshot))
+    }
     /// Trusted owner coordinator only. The opaque identity is created by core
     /// registration, never deserialized from HTTP. Uses the same bounded actor
     /// and cancellation semantics as ordinary read requests.
@@ -367,7 +376,13 @@ fn run(inner: &Inner, pack: &mut Database, metadata: Option<&metadata::Metadata>
         if work.stop.load(Ordering::Relaxed) != 0 || work.reply.is_closed() {
             continue;
         }
+        let applying = matches!(&work.request, dto::Command::ApplyWaives(_));
         let result = read::execute(pack, metadata, work.request, &work.stop).map_err(|e| code(&e));
+        if applying && result.is_ok() {
+            if let Some(m) = inner.state.lock().unwrap().metadata.as_mut() {
+                m["waives"] = json!(pack.has_waives());
+            }
+        }
         let _ = work.reply.send(result);
     }
 }

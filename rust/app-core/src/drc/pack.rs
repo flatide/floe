@@ -166,6 +166,9 @@ impl Input {
             .read(true)
             .custom_flags(libc::O_NONBLOCK)
             .open(path)?;
+        Self::from_file(file)
+    }
+    pub(super) fn from_file(file: File) -> Result<Self> {
         let meta = file.metadata()?;
         if !meta.is_file() {
             return Err(crate::Error::input("DRC input must be a regular file"));
@@ -334,6 +337,8 @@ pub struct Pack {
     blocks: u64,
     block_count: u64,
     review: Option<Input>,
+    // Snapshot-derived counts are recounted, not trusted legacy counter bytes.
+    review_counts: Option<Vec<u32>>,
     cache: VecDeque<(u64, Arc<Vec<Violation>>, usize)>,
     cache_bytes: usize,
     pub decoded_blocks: u64,
@@ -481,6 +486,7 @@ impl Pack {
             block_count: f[7],
             checks,
             review: None,
+            review_counts: None,
             cache: VecDeque::new(),
             cache_bytes: 0,
             decoded_blocks: 0,
@@ -553,12 +559,49 @@ impl Pack {
     /// Not a credential or defense against malicious same-UID metadata forgery.
     pub(crate) fn review_binding(&self) -> Result<Vec<u8>> {
         self.unchanged_at()?;
+        self.geometry_binding()
+    }
+    /// A saved waiver replaces the old inode. Refresh checks the geometry
+    /// independently, so stale review metadata cannot prevent its own recovery.
+    pub(super) fn geometry_binding(&self) -> Result<Vec<u8>> {
+        self.input.unchanged_at(&self.path)?;
         let s = self.input.stamp;
         Ok(format!(
             "floe-review-pack-v1:{}:{}:{}:{}:{}:{}:{}",
             s.dev, s.ino, s.len, s.modified.0, s.modified.1, s.changed.0, s.changed.1
         )
         .into_bytes())
+    }
+    pub(super) fn install_waives(
+        &mut self,
+        identity: &super::review::Identity,
+        review: Option<Input>,
+        counts: Vec<u32>,
+        stop: &AtomicUsize,
+    ) -> Result<()> {
+        if self.geometry_binding()? != identity.0 {
+            return Err(corrupt("waive snapshot belongs to another pack"));
+        }
+        if counts.len() != self.checks.len()
+            || counts
+                .iter()
+                .zip(&self.checks)
+                .any(|(&n, c)| u64::from(n) > c.count)
+        {
+            return Err(corrupt("waive snapshot counts"));
+        }
+        if let Some(r) = &review {
+            r.unchanged()?;
+        }
+        check_cancelled(stop)?;
+        // No fallible work after this point. Geometry blocks, qboxes, check
+        // identity and their decoded LRU are unchanged; statuses are read apart.
+        self.review = review;
+        self.review_counts = Some(counts);
+        Ok(())
+    }
+    pub(super) fn has_waives(&self) -> bool {
+        self.review.is_some()
     }
     pub(crate) fn review_statuses(&self, gids: &[u64], stop: &AtomicUsize) -> Result<Vec<u8>> {
         self.unchanged_at()?;
@@ -640,11 +683,15 @@ impl Pack {
         }
         r.unchanged()?;
         self.review = Some(r);
+        self.review_counts = None;
         Ok(())
     }
     pub fn waived_count(&self, check: usize) -> Result<u64> {
         if check >= self.checks.len() {
             return Err(crate::Error::input("DRC check index out of range"));
+        }
+        if let Some(counts) = &self.review_counts {
+            return Ok(u64::from(counts[check]));
         }
         let (f, off) = self
             .review

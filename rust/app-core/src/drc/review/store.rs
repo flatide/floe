@@ -336,7 +336,61 @@ pub struct Snapshot {
     report: ImportReport,
     waives: Option<WaiveStats>,
 }
+/// Read-state installation, NOT a disk publication receipt or an HTTP revision.
+#[derive(Debug, PartialEq, Eq)]
+pub struct AppliedWaives {
+    pub sidecar: bool,
+    pub legacy_unverified: bool,
+    pub waived: u64,
+}
 impl Snapshot {
+    /// Consume an expected snapshot to refresh one already-open reader without
+    /// decoding its geometry again. Off-reactor: expected validation hashes the
+    /// whole sidecar. No target/lock creation, path discovery or implicit writes.
+    pub fn apply_waives(
+        self,
+        database: &mut crate::drc::Database,
+        stop: &AtomicUsize,
+    ) -> Result<AppliedWaives> {
+        self.apply_waives_using(database, stop, || Ok(()))
+    }
+    pub(super) fn apply_waives_using(
+        mut self,
+        database: &mut crate::drc::Database,
+        stop: &AtomicUsize,
+        before_install: impl FnOnce() -> Result<()>,
+    ) -> Result<AppliedWaives> {
+        if self.store.kind != Kind::Waives {
+            return Err(Error::input("not a waive snapshot"));
+        }
+        check_cancelled(stop)?;
+        let identity = self.store.identity();
+        database.validate_waive_identity(&identity)?;
+        self.current(false, stop)?;
+        let input = self
+            .before
+            .as_ref()
+            .map(|c| crate::drc::pack::Input::from_file(c.file.try_clone()?))
+            .transpose()?;
+        // Keep the captured descriptor, not a fresh path lookup after checking.
+        // A replacement/mutation during preparation cannot be silently adopted.
+        self.current(false, stop)?;
+        if let Some(c) = &self.before {
+            c.unchanged()?;
+        }
+        let stats = self
+            .waives
+            .take()
+            .ok_or_else(|| Error::input("missing waive snapshot counts"))?;
+        let applied = AppliedWaives {
+            sidecar: self.exists(),
+            legacy_unverified: self.legacy_unverified(),
+            waived: stats.waived,
+        };
+        before_install()?;
+        database.install_waives(&identity, input, stats.per_rule, stop)?;
+        Ok(applied)
+    }
     /// Reads this expected snapshot, never the latest sidecar silently. Missing
     /// sidecars use embedded pack bytes. Full expected-version validation still
     /// hashes the sidecar; only the selected-status allocation/reads are bounded.

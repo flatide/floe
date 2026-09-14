@@ -210,3 +210,177 @@ async fn reader_actor_rejects_review_for_another_or_replaced_pack() {
     assert_eq!(fs::read(&path).unwrap(), fs::read(&fixture).unwrap());
     fs::remove_dir_all(&dir).unwrap();
 }
+
+#[tokio::test]
+#[ignore = "run tools/validate_web_drc.py with a synthetic pack"]
+async fn reader_actor_refreshes_waives_without_changing_geometry_identity() {
+    use floe_app_core::drc::{
+        review::{
+            managed::{ManagedStore, Registration},
+            store::Kind,
+        },
+        Pack,
+    };
+    use std::{fs, sync::atomic::AtomicUsize};
+    let fixture = PathBuf::from(std::env::var_os("FLOE_DRC_WEB_PACK").unwrap());
+    let dir = fixture
+        .parent()
+        .unwrap()
+        .join(format!("waive-refresh-{}", std::process::id()));
+    fs::create_dir(&dir).unwrap();
+    let path = dir.join("reader.ice");
+    fs::copy(&fixture, &path).unwrap();
+    let scope = AccessScope::new(std::slice::from_ref(&dir)).unwrap();
+    let resources = Resources::new(Limits::default()).unwrap();
+    let stop = Arc::new(AtomicUsize::new(0));
+    let pack = Pack::open(&path, &stop).unwrap();
+    let ci = pack.checks.iter().position(|c| c.count > 0).unwrap();
+    let gid = pack.checks[ci].start;
+    let store = ManagedStore::open(
+        &resources,
+        Registration {
+            scope: Arc::clone(&scope),
+            pack: path.clone(),
+            reviewer: "synthetic-refresh".into(),
+            kind: Kind::Waives,
+            protected_files: vec![],
+            protected_trees: vec![],
+        },
+        &stop,
+    )
+    .unwrap();
+    let reader = Service::start(&resources, Arc::clone(&scope), &path, None, "source").unwrap();
+    let query = || {
+        serde_json::from_value(json!({"kind":"records","check":ci.to_string(),"errors":["0"]}))
+            .unwrap()
+    };
+    async fn read(mut t: floe_web::drc::Ticket) -> serde_json::Value {
+        serde_json::from_slice(
+            &tokio::time::timeout(Duration::from_secs(5), t.result())
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap()
+    }
+    let before = read(reader.submit(query()).unwrap()).await;
+    let identity = (reader.id.clone(), reader.revision.clone());
+    assert_eq!(before["rows"][0]["status"], 0);
+    let save = |value| {
+        let mut job = store
+            .snapshot(Arc::clone(&stop))
+            .unwrap()
+            .prepare_waives(&[(gid, value)])
+            .unwrap()
+            .publish(false)
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !job.is_finished() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        job.close().unwrap();
+        assert!(job.status().outcome.is_some());
+    };
+    for value in [1, 0, 239] {
+        save(value);
+        let snapshot = store.snapshot(Arc::clone(&stop)).unwrap();
+        let ticket = reader.apply_waives(snapshot).unwrap();
+        // A queued read after the barrier sees the new status. The coordinator
+        // still has to fence HTTP replies already sent before this barrier.
+        let after = reader.submit(query()).unwrap();
+        let applied = read(ticket).await;
+        assert_eq!(applied["sidecar"], true);
+        assert_eq!(applied["waived"], if value == 1 { "1" } else { "0" });
+        let mut result = read(after).await;
+        assert_eq!(result["rows"][0]["status"], value);
+        result["rows"][0]["status"] = json!(0);
+        assert_eq!(result, before);
+        assert_eq!(reader.catalog()["metadata"]["waives"], true);
+        let rule = serde_json::from_value(json!({"kind":"rule","check":ci.to_string()})).unwrap();
+        assert_eq!(
+            read(reader.submit(rule).unwrap()).await["waived"],
+            if value == 1 { "1" } else { "0" }
+        );
+        assert_eq!((&reader.id, &reader.revision), (&identity.0, &identity.1));
+    }
+    let stale = store.snapshot(Arc::clone(&stop)).unwrap();
+    // A second registered writer models external replacement. Reusing `store`
+    // would correctly fail its one-live-snapshot admission before any write.
+    let external = floe_app_core::drc::review::store::Store::open(
+        Arc::clone(&scope),
+        &path,
+        "synthetic-refresh",
+        Kind::Waives,
+        vec![],
+        vec![],
+        &stop,
+    )
+    .unwrap();
+    external
+        .snapshot(&stop)
+        .unwrap()
+        .prepare_waives(&[(gid, 1)], &stop)
+        .unwrap()
+        .publish(&stop)
+        .unwrap();
+    drop(external);
+    let mut rejected = reader.apply_waives(stale).unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), rejected.result())
+            .await
+            .unwrap(),
+        Err("drc_busy")
+    );
+    read(
+        reader
+            .apply_waives(store.snapshot(Arc::clone(&stop)).unwrap())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        read(reader.submit(query()).unwrap()).await["rows"][0]["status"],
+        1
+    );
+    assert!(
+        serde_json::from_value::<Request>(json!({"kind":"apply_waives","path":"forged"})).is_err()
+    );
+    let cancelled = Arc::new(AtomicUsize::new(0));
+    let snapshot = store.snapshot(Arc::clone(&cancelled)).unwrap();
+    cancelled.store(1, std::sync::atomic::Ordering::Relaxed);
+    let mut ticket = reader.apply_waives(snapshot).unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), ticket.result())
+            .await
+            .unwrap(),
+        Err("drc_cancelled")
+    );
+    assert!(store.is_idle());
+    assert_eq!(
+        read(reader.submit(query()).unwrap()).await["rows"][0]["status"],
+        1
+    );
+    reader.request_stop();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !reader.is_finished() {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        reader.apply_waives(store.snapshot(Arc::clone(&stop)).unwrap()),
+        Err("drc_closed")
+    ));
+    assert!(store.is_idle());
+    drop((store, reader, pack));
+    assert_eq!(resources.usage(), Usage::default());
+    assert_eq!(fs::read(&path).unwrap(), fs::read(&fixture).unwrap());
+    assert_eq!(
+        fs::read_dir(&dir).unwrap().count(),
+        3,
+        "only synthetic pack and approved native waive/lock"
+    );
+    fs::remove_dir_all(&dir).unwrap();
+    println!("RUST DRC WAIVE REFRESH: ALL OK");
+}

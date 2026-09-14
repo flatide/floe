@@ -50,8 +50,18 @@ pub(super) fn execute(
     stop: &AtomicUsize,
 ) -> Result<Vec<u8>> {
     check_cancelled(stop)?;
+    if let Command::ApplyWaives(snapshot) = request {
+        // The old sidecar may have been replaced by this owner's publication.
+        // Only this internal command bypasses its stale-input precheck. The
+        // snapshot verifies the unchanged geometry and exact new review instead.
+        let applied = snapshot.apply_waives(p, stop)?;
+        return serde_json::to_vec(&json!({"sidecar":applied.sidecar,
+            "legacy_unverified":applied.legacy_unverified,"waived":applied.waived.to_string()}))
+        .map_err(|e| Error::input(e.to_string()));
+    }
     p.unchanged()?;
     let value = match request {
+        Command::ApplyWaives(_) => unreachable!(),
         Command::ReviewTargets { identity, refs } => {
             let gids = p.review_targets(&identity, &refs, stop)?;
             json!({"gids":gids.iter().map(u64::to_string).collect::<Vec<_>>()})

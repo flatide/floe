@@ -542,5 +542,9 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
   M4e-3a에서 명시 reviewer opt-in의 owner 주석 승인/게시 API를 연결했다
   ([M4 §25](WEBUI_M4.ko.md)). 주석 UI·autosave·waive 쓰기·import/export는 다음 단계다.
   M4e-3b는 선택 주석 read/edit/preview·명시 승인/결과·동일 승인만 복구하는 UI다
-  ([M4 §26](WEBUI_M4.ko.md)). 실제 브라우저 검증은 승인 서비스 용량 오류로 미실시다.
+  ([M4 §26](WEBUI_M4.ko.md)). 초기 승인 서비스 오류 후 Chrome 합성 읽기·편집·미리보기·
+  만료/선택 변경 문구 보존·폐기/종료까지 확인했다. 실제 브라우저 게시는 미실시다.
   주석 badge/overlay·autosave·waive 쓰기·import/export·현장 수용은 남는다.
+  M4e-4a는 검증한 waive snapshot만 기존 reader에 적용하는 native/actor 경로다
+  ([M4 §27](WEBUI_M4.ko.md)). geometry 캐시를 보존한다. owner waive 승인·게시와
+  review revision/오래된 HTTP 결과 fence·UI 연결은 다음 단계다.

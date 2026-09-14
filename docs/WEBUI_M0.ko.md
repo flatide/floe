@@ -144,7 +144,11 @@ receipt/취소 API다([M4 §25](WEBUI_M4.ko.md)). 기본 비활성이고 reviewe
 M4e-3b는 위 API의 선택 주석 편집·미리보기·명시 승인 패널이다
 ([M4 §26](WEBUI_M4.ko.md)). 선택 변경 시 초안 문구 보존, 동일 승인만 재전송하는
 복구 UI를 제공한다. 자동 저장·주석 badge/overlay·waive 쓰기·import/export와
-실제 브라우저/현장 수용은 남아 있다.
+실제 브라우저 게시/현장 수용은 남아 있다. Chrome 합성 읽기·미리보기·만료/선택 변경
+문구 보존·폐기·정상 종료는 후속 M4e-4a 작업 중 확인했다(주석 파일 무쓰기).
+M4e-4a는 waive snapshot을 같은 geometry reader에 적용하는 내부 경로다
+([M4 §27](WEBUI_M4.ko.md)). geometry cache를 유지하고 status/counter를 함께 교체한다.
+owner waive 쓰기 API/UI와 status-dependent HTTP 응답의 review revision 연결은 후속이다.
 
 ### 2.7 svrf — M4 (6개 옵션)
 

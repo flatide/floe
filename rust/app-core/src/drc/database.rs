@@ -76,6 +76,31 @@ impl ReadViolation {
     }
 }
 impl Database {
+    pub fn has_waives(&self) -> bool {
+        matches!(&self.backend, Backend::Pack(p) if p.has_waives())
+    }
+    pub(super) fn validate_waive_identity(&self, identity: &super::review::Identity) -> Result<()> {
+        match &self.backend {
+            Backend::Pack(p) if p.geometry_binding()? == identity.0 => Ok(()),
+            Backend::Pack(_) => Err(Error::new(
+                crate::ErrorKind::Cache,
+                "waive snapshot belongs to another pack",
+            )),
+            Backend::Ascii(_) => Err(Error::input("waive refresh requires a registered pack")),
+        }
+    }
+    pub(super) fn install_waives(
+        &mut self,
+        identity: &super::review::Identity,
+        input: Option<super::pack::Input>,
+        counts: Vec<u32>,
+        stop: &AtomicUsize,
+    ) -> Result<()> {
+        match &mut self.backend {
+            Backend::Pack(p) => p.install_waives(identity, input, counts, stop),
+            Backend::Ascii(_) => Err(Error::input("waive refresh requires a registered pack")),
+        }
+    }
     /// Convert canonical check/local references only after binding this reader
     /// to the review store. Displayed global numbers are one-based, store gids
     /// zero-based: never use the UI's displayed number as a write index.
@@ -275,3 +300,6 @@ impl Database {
 }
 mod queries;
 pub use queries::{ReadInfo, ReadInfoHit, ReadPointPage};
+
+#[cfg(test)]
+mod waive_tests;

@@ -107,6 +107,7 @@ def main(fixture, ascii=False):
                               capture_output=True, text=True, timeout=20)
         assert test.returncode == 0, (test.stdout, test.stderr)
         assert "RUST DRC ACTOR: ALL OK" in test.stdout
+        assert "RUST DRC WAIVE REFRESH: ALL OK" in test.stdout
         if ascii:
             # Keep the packed oracle above, but use a distinct fractional
             # registered input. Its adjacent garbage ICE must not be consulted.

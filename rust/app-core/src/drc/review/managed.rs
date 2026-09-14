@@ -162,6 +162,18 @@ pub struct Snapshot {
     lease: Borrow,
 }
 impl Snapshot {
+    /// An actor owns the snapshot and its admission/pack lease until installation
+    /// finishes. Both request cancellation and store retirement are checked before
+    /// switching state; failure is not reported as a failed disk publication.
+    pub fn apply_waives(
+        self,
+        database: &mut crate::drc::Database,
+        stop: &AtomicUsize,
+    ) -> Result<store::AppliedWaives> {
+        self.lease.check()?;
+        let Self { value, lease } = self;
+        value.apply_waives_using(database, stop, || lease.check())
+    }
     pub fn selected_statuses(&self, gids: &[u64]) -> Result<Vec<u8>> {
         self.lease.check()?;
         self.value.selected_statuses(gids, &self.lease.stop)

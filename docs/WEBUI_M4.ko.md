@@ -12,6 +12,8 @@ overlay 전환**, §16의 **Rust layerprops 포맷·초기 가시성**, §17의
 §22에서 명시적 로컬 review 저장과 pack binding을 추가했다. §25에서 고정 reviewer를
 명시한 owner의 주석 read/prepare/승인 게시 API를 연결했다. §26은 그 API의
 선택 주석 편집·미리보기·명시 승인 UI다. geometry reader는 읽기 전용이다.
+§27은 native waive snapshot을 기존 reader에 적용하는 내부 갱신 경로다.
+waive 저장의 owner API·UI와 status-dependent 응답 revision 연결은 아직 후속이다.
 각 절의 미연결 표기는 해당 선행 단계 당시의 범위다.
 나머지 내보내기·주석 표시/불러오기·waive 쓰기와 전체 조작/실제 브라우저 수용은 남아 있다.
 
@@ -2313,11 +2315,79 @@ Linux x86-64 musl release static-pie 교차 빌드가 통과했다.
 최종 `sh tools/validate_rust.sh` exit0·`RUST VALIDATION: ALL OK`: workspace unit
 (app11/core196/web49), owner 주석 HTTP gate, 기존28회 native 게시/Python oracle,
 jobdeck80·renderer46, KLayout13 PX+2 phase-exact+14 style(jobs1/8)을 포함한다.
-실제 브라우저 합성 읽기/미리보기는 탭 생성 전에 자동 승인 서비스 용량 오류로 차단돼
-미실시다. 우회하지 않았다. 합성 서버 종료 후 입력 OASIS·DRC·cache SHA-256 불변과
-주석/lock 미생성을 확인했다. 앞서 별도 승인받은 shared-default 합성 게시 결과물은 보존했다.
+초기 실제 브라우저 시도는 탭 생성 전 승인 서비스 용량 오류로 차단됐다. 후속 §27 작업 중
+정상 승인된 Chrome 세션에서 합성 DRC 오류 선택→읽기→한글/여러 줄/`<script>` 텍스트
+미리보기, 미동의 저장 버튼 비활성,30초 만료 뒤 문구 보존, snapshot 재조회,
+선택 변경 시 저장 차단과 문구 보존, Discard 및 End session 정상 종료를 확인했다.
+스크린샷으로 편집 패널의 줄바꿈/배치를 확인했다. 게시·clipboard 버튼은 누르지 않았다.
+서버 exit0, 입력 OASIS·DRC·cache SHA-256 불변 및 주석/lock 미생성을 확인했다.
+앞서 별도 승인받은 shared-default 합성 게시 결과물은 보존했다.
 
 주석 badge/overlay·명시 import/export, waive 쓰기와 reader 갱신, 자동 저장 정책/성능,
-실제 브라우저 편집/게시와 현장 Firefox/IME/NFS 수용은 남아 있다. native API·worker·
+실제 브라우저 게시와 현장 Firefox/IME/NFS 수용은 남아 있다. native API·worker·
 raster 변경이 아니므로 renderd0.12.87과 GTK 기본 경로를 유지한다. M4 전체 완료나
 Linux 실제 실행 검증을 뜻하지 않는다.
+
+## 27. M4e-4a — geometry 캐시를 보존하는 waive 조회 갱신
+
+waive writer를 연결하기 전, 저장으로 파일 inode가 바뀌었을 때 이미 열린 reader를
+갱신하는 경로를 추가했다. 기존 `attach_waives`는 이전 입력의 `unchanged()`를 먼저
+확인하므로 원자 교체 후 그 reader에 다시 적용할 수 없었다. 새 경로는 **같은 geometry
+pack**을 별도로 확인하고, 검증한 waive 상태만 교체한다. 일반 조회의 기존 변경 검사는
+완화하지 않는다. 이 단계에서 새 HTTP 쓰기 endpoint·waive UI·자동 저장을 켜지는 않는다.
+
+### native 계약
+
+- `store::Snapshot::apply_waives`가 expected snapshot을 한 번 소비한다. Notes/ASCII,
+  다른 pack inode/변경된 pack, 취소, snapshot 이후 sidecar 생성/변경/교체/삭제를 거부한다.
+  legacy header가 같은 다른 pack도 허용하지 않는다. 새 파일/lock/임시 산출물은 없다.
+- snapshot의 captured descriptor를 복제하고 전후 expected revision·security·digest를
+  검사한다. 검사 뒤 경로를 새로 열어 다른 파일을 몰래 채택하지 않는다. 마지막 pack/file
+  metadata·취소 검사까지 성공해야 status 입력과 counter 벡터를 함께 교체한다.
+- counter는 snapshot의 실제 status 스트림 recount 결과를 사용한다. legacy 파일의
+  낡은 counter를 UI에 다시 노출하지 않으며 status2..255는 그대로 보존한다. 읽기 갱신이
+  legacy 파일을 재작성하거나 해당 run의 소유권을 승인한 것으로 보지는 않는다.
+- 명시적으로 읽은 snapshot이 absent이면 pack embedded status로 전환한다. 기존
+  snapshot 이후 파일이 사라지면 오류이며, 자동 fallback/sidecar 삭제 기능이 아니다.
+- geometry block LRU·qbox·check/global identity는 그대로 둔다. 오류 수만큼의 status
+  벡터는 만들지 않고, 추가 상주 데이터는 rule당 u32 counter와 열린 descriptor다.
+  snapshot 검증의 **전체 waive digest I/O는 여전히 O(파일 크기)**다. 이관 후 모든 저장이
+  빠르다거나 per-click autosave에 적합하다는 성능 판정은 아니다.
+
+`managed::Snapshot::apply_waives`는 적용 완료까지 admission·pack/source lease를 유지한다.
+caller 취소와 store retire를 적용 전에 검사한다. retire/cancel은 best-effort이며 이미
+반영한 읽기 상태를 undo하는 작업이 아니다. disk 게시 outcome과 reader 적용 결과는
+다른 값이다. reader 적용 실패를 이미 성공한 파일 게시의 실패/롤백으로 보고하면 안 된다.
+
+### actor와 후속 owner 연결
+
+`drc::Service::apply_waives`는 이 opaque managed snapshot만 받아 기존 유계 reader queue에
+넣는다. HTTP `Request`로 snapshot·경로를 만들 수 없다. 해당 명령만 오래된 waive 입력
+precheck를 우회하며, 내부 snapshot 검증은 그대로 수행한다. 뒤에 큐잉된 조회는 새
+status/counter를 보고 catalog의 `metadata.waives`도 갱신된다. 실패 시 partial install은 없다.
+snapshot·lease는 큐/실행/취소 수명에 묶이고 response subscriber가 추가 복제를 만들지 않는다.
+
+이는 **native actor 순서 보장**이지 브라우저의 revision 장벽 전체가 아니다. 현재 pack
+id/revision을 바꾸지 않는다. 다음 owner 단계에서 status 변경 전 HTTP 결과·waived filter
+cursor·준비된 focus/selection 응답을 fence하고 review revision/receipt에 적용 결과를
+연결해야 한다. 파일은 저장됐지만 읽기 갱신이 실패한 경우와 응답 유실 후 재조회도 별도로
+표시해야 한다. 이 연결 전에는 일반 웹 실행에서 새 적용 명령을 호출하지 않는다.
+
+### 검증
+
+새 core unit5개는 두 차례 native 게시 뒤 상태/카운터/필터, geometry/좌표 불변과
+decoded block 수 불변, legacy recount·reserved bytes, wrong kind/pack/ASCII,
+생성/교체/삭제·적용 직전 취소/변조, absent 명시 복원, managed lease/retire를 고정한다.
+실제 actor 테스트는 native 저장→갱신→뒤에 큐잉한 조회의 새 상태, 동일 geometry
+id/revision, 외부 writer로 stale snapshot 거부/새 snapshot 복구, wire 위조 거부,
+종료·예약 반환과 원본 pack bytes 불변을 검사한다. `validate_web_drc.py`가 그 테스트의
+성공 마커를 필수로 단언하므로 기본 cargo의 ignored 상태만으로 통과시키지 않는다.
+
+core201·web49 unit, 실제 합성 actor 검사, app/core/web strict all-target clippy,
+Rust1.89 core201/web49 및 Linux x86-64 musl release static-pie 교차 빌드가 통과했다.
+최종 `sh tools/validate_rust.sh` exit0·`RUST VALIDATION: ALL OK`: workspace unit
+(app11/core201/web49), 새 native actor 갱신을 포함한 pack/ASCII 웹 DRC gate,
+owner notes gate·28회 managed 게시/Python oracle, jobdeck80·renderer46,
+KLayout13 PX+2 phase-exact+14 style(jobs1/8)이 통과했다. 검증용 venv 링크만 제거했다.
+native DRC 경로만 바꾸므로 renderd0.12.87과 GTK 기본
+실행 경로는 유지한다. owner waive 쓰기/API/UI·전체 M4·현장 Firefox/NFS 수용 완료는 아니다.
