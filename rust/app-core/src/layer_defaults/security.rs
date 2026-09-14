@@ -16,7 +16,7 @@ const MAX_NAMES: usize = 65536;
 const MAX_VALUES: usize = 1024 * 1024;
 
 #[derive(PartialEq, Eq)]
-pub(super) struct Security {
+pub(crate) struct Security {
     mode: u32,
     uid: u32,
     gid: u32,
@@ -25,6 +25,9 @@ pub(super) struct Security {
     acl: Vec<u8>,
 }
 impl Security {
+    pub(crate) fn attribute(&self, name: &CStr) -> Option<&[u8]> {
+        self.attrs.get(name).map(Vec::as_slice)
+    }
     pub fn empty() -> Self {
         Self {
             mode: 0,
@@ -175,7 +178,7 @@ fn attributes(file: &File) -> Result<BTreeMap<CString, Vec<u8>>> {
     }
     Ok(result)
 }
-pub(super) fn set(file: &File, name: &CStr, value: &[u8]) -> Result<()> {
+pub(crate) fn set(file: &File, name: &CStr, value: &[u8]) -> Result<()> {
     // SAFETY: valid fd/CString and readable value buffer, flags 0 (set/replace).
     let rc = unsafe {
         #[cfg(target_os = "macos")]

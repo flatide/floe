@@ -12,6 +12,9 @@ CD·선택 집합·SVRF metadata/비교·타입 패널·격리/원자적 focus·
 M4e-1의 `app-core::drc::review`는 waive/FE codec과 메모리 note 그룹만 제공한다.
 레거시 fingerprint는 인증/유일 run identity가 아니며, 향후 writer의 pack identity·
 review revision 검증을 대체하지 않는다([M4 §21](WEBUI_M4.ko.md)).
+M4e-2a의 `review::store`는 로컬 expected snapshot·pack binding·명시 게시 코어다
+([M4 §22](WEBUI_M4.ko.md)). 쓰기 HTTP/WS endpoint는 아직 없으며, 인증 reviewer/lease/
+review_rev·승인 receipt는 향후 actor에서 연결한다. legacy 미확인 파일의 수정은 별도 확인이 필요하다.
 M1b-2a의 `app-core/managed`·`view`에는 process-local lease/admission과
 독립 worker controller를 구현했다. M1b-2b의 사전 등록 view용 제어/이미지
 스트림은 [M1b 기록 §6](WEBUI_M1B.ko.md#6-m1b-2b--인증된-제어이미지-스트림)을 따른다.

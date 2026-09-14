@@ -1,0 +1,532 @@
+use super::*;
+use std::{
+    fs::OpenOptions,
+    io::Read,
+    os::unix::fs::{symlink, PermissionsExt},
+    sync::atomic::{AtomicU64, Ordering},
+};
+static SERIAL: AtomicU64 = AtomicU64::new(0);
+struct Fixture {
+    root: PathBuf,
+    dir: PathBuf,
+    pack: PathBuf,
+    bytes: Vec<u8>,
+    scope: Arc<AccessScope>,
+    stop: AtomicUsize,
+}
+impl Fixture {
+    fn new() -> Self {
+        let root = std::env::temp_dir().join(format!(
+            "floe-review-store-{}-{}",
+            std::process::id(),
+            SERIAL.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        let root = fs::canonicalize(root).unwrap();
+        let dir = root.join("inputs");
+        fs::create_dir(&dir).unwrap();
+        let pack = dir.join("한 글.db.ice");
+        let bytes = crate::drc::tests::bytes(65);
+        fs::write(&pack, &bytes).unwrap();
+        let scope = AccessScope::new(std::slice::from_ref(&root)).unwrap();
+        Self {
+            root,
+            dir,
+            pack,
+            bytes,
+            scope,
+            stop: AtomicUsize::new(0),
+        }
+    }
+    fn store(&self, kind: Kind) -> Arc<Store> {
+        self.reviewer(kind, "reviewer")
+    }
+    fn reviewer(&self, kind: Kind, tag: &str) -> Arc<Store> {
+        Store::open(
+            Arc::clone(&self.scope),
+            &self.pack,
+            tag,
+            kind,
+            vec![],
+            vec![],
+            &self.stop,
+        )
+        .unwrap()
+    }
+    fn note(&self, s: &Arc<Store>, text: &str) -> Draft {
+        s.snapshot(&self.stop)
+            .unwrap()
+            .prepare_note(&[0, 1], text, &self.stop)
+            .unwrap()
+    }
+    fn clean(&self) {
+        assert_eq!(fs::read(&self.pack).unwrap(), self.bytes);
+        assert!(!fs::read_dir(&self.dir).unwrap().any(|e| e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".floe-review-")));
+    }
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        fs::remove_dir_all(&self.root).unwrap();
+    }
+}
+fn kind<T>(r: Result<T>) -> ErrorKind {
+    match r {
+        Err(e) => e.kind,
+        Ok(_) => panic!("expected failure"),
+    }
+}
+
+#[test]
+fn registration_snapshot_and_preparation_do_not_write() {
+    let f = Fixture::new();
+    let w = f.store(Kind::Waives);
+    let n = f.store(Kind::Notes);
+    assert_eq!(w.target().file_name().unwrap(), ".한 글.db.waive.reviewer");
+    assert_eq!(
+        n.target().file_name().unwrap(),
+        ".한 글.db.notes.reviewer.fe"
+    );
+    let s = w.snapshot(&f.stop).unwrap();
+    assert!(!s.exists());
+    assert_eq!(s.waives().unwrap().per_rule, [0, 0, 0]);
+    s.prepare_waives(&[(0, 1)], &f.stop).unwrap();
+    f.note(&n, "한글\n메모");
+    assert_eq!(fs::read_dir(&f.dir).unwrap().count(), 1);
+    f.clean();
+}
+#[test]
+fn waive_creation_seeds_pack_and_replacement_preserves_open_old_inode() {
+    let f = Fixture::new();
+    let s = f.store(Kind::Waives);
+    let d = s
+        .snapshot(&f.stop)
+        .unwrap()
+        .prepare_waives(&[(0, 1), (64, 255)], &f.stop)
+        .unwrap();
+    assert!(d.publish(&f.stop).unwrap().directory_synced);
+    assert_eq!(fs::metadata(s.target()).unwrap().mode() & 0o777, 0o600);
+    let first = fs::read(s.target()).unwrap();
+    assert_eq!(first.len(), 40 + 65 + 12);
+    assert_eq!(first[40], 1);
+    assert_eq!(first[104], 255);
+    let mut reader = File::open(s.target()).unwrap();
+    s.snapshot(&f.stop)
+        .unwrap()
+        .prepare_waives(&[(0, 0), (1, 1), (64, 1)], &f.stop)
+        .unwrap()
+        .publish(&f.stop)
+        .unwrap();
+    let mut old = Vec::new();
+    reader.read_to_end(&mut old).unwrap();
+    assert_eq!(old, first);
+    let mut p = Pack::open(&f.pack, &f.stop).unwrap();
+    p.attach_waives(s.target()).unwrap();
+    assert_eq!(p.status(1, 0).unwrap(), 0);
+    assert_eq!(p.status(1, 1).unwrap(), 1);
+    assert_eq!(p.status(1, 64).unwrap(), 1);
+    assert_eq!(
+        s.snapshot(&f.stop).unwrap().waives().unwrap().per_rule,
+        [0, 2, 0]
+    );
+    assert_eq!(
+        f.reviewer(Kind::Waives, "other")
+            .snapshot(&f.stop)
+            .unwrap()
+            .waives()
+            .unwrap()
+            .waived,
+        0
+    );
+    f.clean();
+}
+#[test]
+fn notes_use_real_pack_centers_and_clear_is_an_empty_compatible_tombstone() {
+    let f = Fixture::new();
+    let s = f.store(Kind::Notes);
+    f.note(&s, "첫 줄\nsecond").publish(&f.stop).unwrap();
+    let text = fs::read_to_string(s.target()).unwrap();
+    assert!(text.contains("text=0.001,0.0015,16,#FFD819,#00000059,첫 줄\\nsecond"));
+    assert!(text.contains("text=0.011,0.0015,16,#FFD819,#00000059,첫 줄\\nsecond"));
+    s.snapshot(&f.stop)
+        .unwrap()
+        .prepare_note(&[1, 2], "replacement", &f.stop)
+        .unwrap()
+        .publish(&f.stop)
+        .unwrap();
+    let snap = s.snapshot(&f.stop).unwrap();
+    assert_eq!(snap.notes().unwrap().get(0), Some("첫 줄\nsecond"));
+    assert_eq!(snap.notes().unwrap().get(1), Some("replacement"));
+    snap.prepare_note(&[0, 1, 2], "", &f.stop)
+        .unwrap()
+        .publish(&f.stop)
+        .unwrap();
+    assert!(s.target().is_file());
+    let empty = s.snapshot(&f.stop).unwrap();
+    assert_eq!(empty.notes().unwrap().member_count(), 0);
+    assert!(fs::read_to_string(s.target())
+        .unwrap()
+        .contains("floe_pack=1234,5678,65"));
+    f.clean();
+}
+#[test]
+fn note_import_reports_normalization_and_rejects_foreign_data_without_write() {
+    let f = Fixture::new();
+    let s = f.store(Kind::Notes);
+    f.note(&s, "old").publish(&f.stop).unwrap();
+    let before = fs::read(s.target()).unwrap();
+    assert!(s
+        .snapshot(&f.stop)
+        .unwrap()
+        .prepare_notes_import("floe_pack=0,0,0\nfloe_note=0|bad", &f.stop)
+        .is_err());
+    assert_eq!(fs::read(s.target()).unwrap(), before);
+    let input="floe_pack=1234,5678,65\nfloe_note=0,1|first\nfloe_note=1,2,999|last\nfloe_note=malformed\n";
+    let (d, report) = s
+        .snapshot(&f.stop)
+        .unwrap()
+        .prepare_notes_import(input, &f.stop)
+        .unwrap();
+    assert_eq!(
+        report,
+        ImportReport {
+            skipped_lines: 1,
+            invalid_members: 1,
+            reassigned_members: 1
+        }
+    );
+    assert_eq!(fs::read(s.target()).unwrap(), before);
+    d.publish(&f.stop).unwrap();
+    let snap = s.snapshot(&f.stop).unwrap();
+    assert_eq!(snap.import_report(), &ImportReport::default());
+    assert_eq!(snap.notes().unwrap().get(1), Some("last"));
+    f.clean();
+}
+#[test]
+fn two_independent_writers_reject_stale_and_newly_created_revisions() {
+    let f = Fixture::new();
+    let a = f.store(Kind::Notes);
+    let b = f.store(Kind::Notes);
+    let missing = f.note(&a, "missing snapshot");
+    f.note(&b, "other writer").publish(&f.stop).unwrap();
+    let before = fs::read(a.target()).unwrap();
+    assert_eq!(kind(missing.publish(&f.stop)), ErrorKind::Busy);
+    assert_eq!(fs::read(a.target()).unwrap(), before);
+    let stale = f.note(&a, "stale");
+    f.note(&b, "newest").publish(&f.stop).unwrap();
+    let before = fs::read(a.target()).unwrap();
+    assert_eq!(kind(stale.publish(&f.stop)), ErrorKind::Busy);
+    assert_eq!(fs::read(a.target()).unwrap(), before);
+    f.clean();
+}
+#[test]
+fn metadata_content_removal_and_same_byte_replacement_are_conflicts() {
+    for change in 0..4 {
+        let f = Fixture::new();
+        let s = f.store(Kind::Notes);
+        f.note(&s, "old").publish(&f.stop).unwrap();
+        let d = f.note(&s, "new");
+        match change {
+            0 => {
+                let mut file = OpenOptions::new().append(true).open(s.target()).unwrap();
+                file.write_all(b"# external\n").unwrap();
+            }
+            1 => fs::set_permissions(s.target(), fs::Permissions::from_mode(0o640)).unwrap(),
+            2 => {
+                let p = f.dir.join("replacement");
+                fs::write(&p, fs::read(s.target()).unwrap()).unwrap();
+                fs::rename(p, s.target()).unwrap();
+            }
+            _ => fs::remove_file(s.target()).unwrap(),
+        }
+        let before = fs::read(s.target()).ok();
+        assert_eq!(kind(d.publish(&f.stop)), ErrorKind::Busy);
+        assert_eq!(fs::read(s.target()).ok(), before);
+        f.clean();
+    }
+}
+#[test]
+fn pack_replacement_with_identical_legacy_fingerprint_and_inplace_change_are_rejected() {
+    for replace in [false, true] {
+        let f = Fixture::new();
+        let s = f.store(Kind::Notes);
+        let d = f.note(&s, "new");
+        if replace {
+            let p = f.dir.join("new.ice");
+            fs::write(&p, &f.bytes).unwrap();
+            fs::rename(p, &f.pack).unwrap();
+        } else {
+            let file = OpenOptions::new().write(true).open(&f.pack).unwrap();
+            let old = fs::metadata(&f.pack).unwrap().modified().unwrap();
+            std::os::unix::fs::FileExt::write_all_at(&file, b"OTHER", 40).unwrap();
+            file.set_times(fs::FileTimes::new().set_modified(old))
+                .unwrap();
+        }
+        assert_eq!(kind(d.publish(&f.stop)), ErrorKind::Cache);
+        assert!(!s.target().exists());
+    }
+}
+#[test]
+fn parent_directory_replacement_cannot_redirect_a_draft() {
+    let f = Fixture::new();
+    let s = f.store(Kind::Notes);
+    let d = f.note(&s, "new");
+    fs::rename(&f.dir, f.root.join("old-inputs")).unwrap();
+    fs::create_dir(&f.dir).unwrap();
+    fs::write(&f.pack, &f.bytes).unwrap();
+    assert!(d.publish(&f.stop).is_err());
+    assert_eq!(fs::read_dir(&f.dir).unwrap().count(), 1);
+    assert_eq!(fs::read_dir(f.root.join("old-inputs")).unwrap().count(), 1);
+}
+#[test]
+fn cancellation_faults_and_late_commit_outcomes_preserve_the_publication_boundary() {
+    let f = Fixture::new();
+    let s = f.store(Kind::Notes);
+    f.note(&s, "old").publish(&f.stop).unwrap();
+    let old = fs::read(s.target()).unwrap();
+    let d = f.note(&s, "new");
+    f.stop.store(1, Ordering::Relaxed);
+    assert_eq!(kind(d.publish(&f.stop)), ErrorKind::Cancelled);
+    assert_eq!(fs::read(s.target()).unwrap(), old);
+    f.stop.store(0, Ordering::Relaxed);
+    let d = f.note(&s, "new");
+    assert_eq!(
+        kind(d.publish_using(
+            &f.stop,
+            || Err(std::io::Error::from_raw_os_error(libc::ENOSPC).into()),
+            File::sync_all
+        )),
+        ErrorKind::Io
+    );
+    assert_eq!(fs::read(s.target()).unwrap(), old);
+    f.clean();
+    let d = f.note(&s, "cancel");
+    assert_eq!(
+        kind(d.publish_using(
+            &f.stop,
+            || {
+                f.stop.store(1, Ordering::Relaxed);
+                Ok(())
+            },
+            File::sync_all
+        )),
+        ErrorKind::Cancelled
+    );
+    assert_eq!(fs::read(s.target()).unwrap(), old);
+    f.stop.store(0, Ordering::Relaxed);
+    f.clean();
+    let d = f.note(&s, "committed");
+    let result = d
+        .publish_using(
+            &f.stop,
+            || Ok(()),
+            |_| {
+                f.stop.store(1, Ordering::Relaxed);
+                Err(std::io::ErrorKind::Other.into())
+            },
+        )
+        .unwrap();
+    assert!(!result.directory_synced);
+    assert_ne!(fs::read(s.target()).unwrap(), old);
+    f.clean();
+}
+#[test]
+fn stable_lock_busy_replacement_and_invalid_lock_are_not_bypassed() {
+    let f = Fixture::new();
+    let s = f.store(Kind::Notes);
+    let d = f.note(&s, "new");
+    let lock = OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(s.lock_path())
+        .unwrap();
+    // SAFETY: live private test file descriptor.
+    assert_eq!(
+        unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+    assert_eq!(kind(d.publish(&f.stop)), ErrorKind::Busy);
+    drop(lock);
+    assert!(!s.target().exists());
+    let d = f.note(&s, "new");
+    assert_eq!(
+        kind(d.publish_using(
+            &f.stop,
+            || {
+                fs::remove_file(s.lock_path())?;
+                fs::write(s.lock_path(), b"")?;
+                Ok(())
+            },
+            File::sync_all
+        )),
+        ErrorKind::Busy
+    );
+    assert!(!s.target().exists());
+    f.clean();
+    fs::write(s.lock_path(), b"not a lock").unwrap();
+    assert!(f.note(&s, "new").publish(&f.stop).is_err());
+    assert!(!s.target().exists());
+}
+#[test]
+fn permissions_and_extended_attributes_survive_replacement() {
+    let f = Fixture::new();
+    let s = f.store(Kind::Notes);
+    f.note(&s, "old").publish(&f.stop).unwrap();
+    fs::set_permissions(s.target(), fs::Permissions::from_mode(0o640)).unwrap();
+    let file = File::open(s.target()).unwrap();
+    #[cfg(target_os = "macos")]
+    let attr = c"com.floe.review-test";
+    #[cfg(not(target_os = "macos"))]
+    let attr = c"user.floe-review-test";
+    crate::layer_defaults::security::set(&file, attr, b"keep").unwrap();
+    let security = Security::read(&file).unwrap();
+    f.note(&s, "new").publish(&f.stop).unwrap();
+    assert!(Security::read(&File::open(s.target()).unwrap()).unwrap() == security);
+    let old = fs::read(s.target()).unwrap();
+    let d = f.note(&s, "stale attributes");
+    crate::layer_defaults::security::set(&File::open(s.target()).unwrap(), attr, b"changed")
+        .unwrap();
+    assert_eq!(kind(d.publish(&f.stop)), ErrorKind::Busy);
+    assert_eq!(fs::read(s.target()).unwrap(), old);
+    f.clean();
+}
+#[test]
+fn scope_protected_inputs_symlinks_hardlinks_and_expired_drafts_fail_closed() {
+    let f = Fixture::new();
+    let s = f.store(Kind::Notes);
+    assert!(Store::open(
+        Arc::clone(&f.scope),
+        &f.pack,
+        "../other",
+        Kind::Notes,
+        vec![],
+        vec![],
+        &f.stop
+    )
+    .is_err());
+    assert!(Store::open(
+        Arc::clone(&f.scope),
+        &f.pack,
+        "reviewer",
+        Kind::Notes,
+        vec![s.target().to_owned()],
+        vec![],
+        &f.stop
+    )
+    .is_err());
+    assert!(Store::open(
+        Arc::clone(&f.scope),
+        &f.pack,
+        "reviewer",
+        Kind::Notes,
+        vec![s.lock_path()],
+        vec![],
+        &f.stop
+    )
+    .is_err());
+    symlink(&f.pack, s.target()).unwrap();
+    assert!(s.snapshot(&f.stop).is_err());
+    fs::remove_file(s.target()).unwrap();
+    fs::hard_link(&f.pack, s.target()).unwrap();
+    assert!(s.snapshot(&f.stop).is_err());
+    fs::remove_file(s.target()).unwrap();
+    let other = f.dir.join("unrelated");
+    fs::write(&other, b"").unwrap();
+    fs::hard_link(&other, s.target()).unwrap();
+    assert!(s.snapshot(&f.stop).is_err());
+    fs::remove_file(s.target()).unwrap();
+    // Creating/removing a hardlink changes the pack's ctime. A previous store
+    // is correctly invalidated; explicitly register the now-stable pack again.
+    let s = f.store(Kind::Notes);
+    let mut d = f.note(&s, "expired");
+    d.expires = Instant::now() - Duration::from_secs(1);
+    assert_eq!(kind(d.publish(&f.stop)), ErrorKind::Busy);
+    assert!(!s.target().exists());
+    f.clean();
+}
+#[test]
+fn readonly_sidecar_is_not_replaced_using_directory_permissions() {
+    // Root can open mode-0400 files for writing; this is an access-control test.
+    // SAFETY: geteuid has no arguments and cannot access caller memory.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let f = Fixture::new();
+    let s = f.store(Kind::Notes);
+    f.note(&s, "old").publish(&f.stop).unwrap();
+    fs::set_permissions(s.target(), fs::Permissions::from_mode(0o400)).unwrap();
+    let old = fs::read(s.target()).unwrap();
+    assert!(f.note(&s, "new").publish(&f.stop).is_err());
+    assert_eq!(fs::read(s.target()).unwrap(), old);
+    f.clean();
+}
+
+#[test]
+fn concurrent_cooperating_publishers_have_exactly_one_winner() {
+    for _ in 0..64 {
+        let f = Fixture::new();
+        let a = f.store(Kind::Notes);
+        let b = f.store(Kind::Notes);
+        let da = f.note(&a, "writer a");
+        let db = f.note(&b, "writer b");
+        let barrier = std::sync::Barrier::new(2);
+        let results = std::thread::scope(|scope| {
+            let x = scope.spawn(|| {
+                barrier.wait();
+                da.publish(&f.stop)
+            });
+            let y = scope.spawn(|| {
+                barrier.wait();
+                db.publish(&f.stop)
+            });
+            [x.join().unwrap(), y.join().unwrap()]
+        });
+        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter_map(|r| r.as_ref().err())
+                .next()
+                .unwrap()
+                .kind,
+            ErrorKind::Busy,
+            "{results:?}"
+        );
+        assert!(matches!(
+            a.snapshot(&f.stop).unwrap().notes().unwrap().get(0),
+            Some("writer a" | "writer b")
+        ));
+        f.clean();
+    }
+}
+
+#[test]
+fn legacy_adoption_is_explicit_and_new_pack_registration_does_not_inherit_review() {
+    let f = Fixture::new();
+    let s = f.store(Kind::Notes);
+    fs::write(s.target(), b"floe_pack=1234,5678,65\nfloe_note=0|legacy\n").unwrap();
+    assert!(s.snapshot(&f.stop).unwrap().legacy_unverified());
+    let old = fs::read(s.target()).unwrap();
+    assert_eq!(
+        kind(f.note(&s, "unapproved").publish(&f.stop)),
+        ErrorKind::Unsupported
+    );
+    assert_eq!(fs::read(s.target()).unwrap(), old);
+    assert!(!s.lock_path().exists());
+    f.note(&s, "approved adoption")
+        .accept_legacy_run()
+        .publish(&f.stop)
+        .unwrap();
+    assert!(!s.snapshot(&f.stop).unwrap().legacy_unverified());
+    let saved = fs::read(s.target()).unwrap();
+    let replacement = f.dir.join("copy.ice");
+    fs::write(&replacement, &f.bytes).unwrap();
+    fs::rename(replacement, &f.pack).unwrap();
+    let reopened = f.store(Kind::Notes);
+    assert_eq!(kind(reopened.snapshot(&f.stop)), ErrorKind::Cache);
+    assert_eq!(fs::read(s.target()).unwrap(), saved);
+}

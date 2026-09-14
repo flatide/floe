@@ -28,7 +28,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-mod security;
+pub(crate) mod security;
 use security::Security;
 const DRAFT_TTL: Duration = Duration::from_secs(120);
 static SERIAL: AtomicU64 = AtomicU64::new(0);
@@ -233,9 +233,7 @@ impl Draft {
                 .path
                 .join(std::ffi::OsStr::from_bytes(self.lock_name.as_bytes())),
         )?;
-        let lock =
-            self.directory
-                .open_leaf(&self.lock_name, libc::O_RDWR | libc::O_CREAT, 0o666)?;
+        let lock = self.directory.open_lock(&self.lock_name, 0o666)?;
         let lm = lock.metadata()?;
         if !lm.is_file() || lm.nlink() != 1 || lm.len() != 0 {
             return Err(Error::input("invalid design-default lock file"));
@@ -281,55 +279,29 @@ impl Draft {
         // revalidation and commit. It is deliberately never unlinked: replacing
         // a lock inode would let two processes hold different exclusive locks.
         // Noncooperating writes after the last check are not a filesystem CAS.
-        let rc = unsafe {
-            // SAFETY: both names are single CString leaves in a live dir fd.
-            if self.before.is_some() {
-                libc::renameat(
-                    self.directory.file.as_raw_fd(),
-                    staged.name.as_ptr(),
-                    self.directory.file.as_raw_fd(),
-                    self.name.as_ptr(),
-                )
-            } else {
-                libc::linkat(
-                    self.directory.file.as_raw_fd(),
-                    staged.name.as_ptr(),
-                    self.directory.file.as_raw_fd(),
-                    self.name.as_ptr(),
-                    0,
-                )
-            }
-        };
-        if rc != 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        if self.before.is_some() {
-            staged.linked = false;
-        } else {
-            staged.unlink();
-        }
+        staged.commit(&self.name, self.before.is_some())?;
         // Never turn an already committed result into a cancellation/error.
         let directory_synced = sync_directory(&self.directory.file).is_ok();
         Ok(Published { directory_synced })
     }
 }
-fn leaf(name: &std::ffi::OsStr) -> Result<CString> {
+pub(crate) fn leaf(name: &std::ffi::OsStr) -> Result<CString> {
     let b = name.as_bytes();
     if b.is_empty() || b == b"." || b == b".." || b.contains(&b'/') {
         return Err(Error::input("invalid sidecar leaf name"));
     }
     CString::new(b).map_err(|_| Error::input("NUL in sidecar name"))
 }
-fn identity(m: &fs::Metadata) -> (u64, u64) {
+pub(crate) fn identity(m: &fs::Metadata) -> (u64, u64) {
     (m.dev(), m.ino())
 }
-struct Directory {
-    file: File,
-    path: PathBuf,
+pub(crate) struct Directory {
+    pub(crate) file: File,
+    pub(crate) path: PathBuf,
     id: (u64, u64),
 }
 impl Directory {
-    fn open(path: &Path) -> Result<Arc<Self>> {
+    pub(crate) fn open(path: &Path) -> Result<Arc<Self>> {
         let path = fs::canonicalize(path)?;
         let file = OpenOptions::new()
             .read(true)
@@ -338,13 +310,13 @@ impl Directory {
         let id = identity(&file.metadata()?);
         Ok(Arc::new(Self { file, path, id }))
     }
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         if identity(&fs::symlink_metadata(&self.path)?) != self.id {
             return Err(conflict());
         }
         Ok(())
     }
-    fn open_leaf(&self, name: &CStr, flags: i32, mode: u32) -> std::io::Result<File> {
+    pub(crate) fn open_leaf(&self, name: &CStr, flags: i32, mode: u32) -> std::io::Result<File> {
         // SAFETY: valid dir fd and NUL-terminated basename; no paths/traversal.
         let fd = unsafe {
             libc::openat(
@@ -360,7 +332,18 @@ impl Directory {
             Ok(unsafe { File::from_raw_fd(fd) })
         }
     }
-    fn leaf_identity(&self, name: &CStr) -> std::io::Result<(u64, u64)> {
+    pub(crate) fn open_lock(&self, name: &CStr, mode: u32) -> std::io::Result<File> {
+        // Separate creation from opening a stable existing inode. Concurrent
+        // O_CREAT (without O_EXCL) returned ENOENT in our macOS first-writer
+        // test. Only EEXIST permits fallback; never truncate or unlink a lock.
+        match self.open_leaf(name, libc::O_RDWR | libc::O_CREAT | libc::O_EXCL, mode) {
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                self.open_leaf(name, libc::O_RDWR, 0)
+            }
+            result => result,
+        }
+    }
+    pub(crate) fn leaf_identity(&self, name: &CStr) -> std::io::Result<(u64, u64)> {
         let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
         // SAFETY: live dir fd/CString and writable stat storage; no symlink follow.
         if unsafe {
@@ -382,7 +365,7 @@ impl Directory {
     }
 }
 #[derive(PartialEq, Eq)]
-struct Stamp {
+pub(crate) struct Stamp {
     id: (u64, u64),
     len: u64,
     modified: (i64, i64),
@@ -393,7 +376,7 @@ struct Stamp {
     nlink: u64,
 }
 impl Stamp {
-    fn of(m: &fs::Metadata) -> Self {
+    pub(crate) fn of(m: &fs::Metadata) -> Self {
         Self {
             id: identity(m),
             len: m.len(),
@@ -457,23 +440,35 @@ impl Capture {
         self.stamp == other.stamp && self.bytes == other.bytes && self.security == other.security
     }
 }
-struct Stage {
+pub(crate) struct Stage {
     directory: Arc<Directory>,
     name: CString,
-    file: File,
-    creation_security: Security,
+    pub(crate) file: File,
+    pub(crate) creation_security: Security,
     linked: bool,
     id: (u64, u64),
 }
 impl Stage {
     fn create(directory: Arc<Directory>, publisher: &Publisher) -> Result<Self> {
+        Self::create_for(directory, "layerprops", |path| publisher.protect(path))
+    }
+    /// Shared descriptor-relative staging for trusted local sidecar writers.
+    /// Every candidate is checked against registered inputs before O_EXCL.
+    pub(crate) fn create_for(
+        directory: Arc<Directory>,
+        label: &str,
+        mut protect: impl FnMut(&Path) -> Result<()>,
+    ) -> Result<Self> {
+        if label.is_empty() || !label.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            return Err(Error::input("invalid staging namespace"));
+        }
         for _ in 0..128 {
             let n = SERIAL
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
                 .map_err(|_| Error::input("default temporary sequence exhausted"))?;
             let name =
-                CString::new(format!(".floe-layerprops-{}-{n}.tmp", std::process::id())).unwrap();
-            publisher.protect(
+                CString::new(format!(".floe-{label}-{}-{n}.tmp", std::process::id())).unwrap();
+            protect(
                 &directory
                     .path
                     .join(std::ffi::OsStr::from_bytes(name.as_bytes())),
@@ -504,10 +499,42 @@ impl Stage {
         }
         Err(Error::input("cannot allocate default staging file"))
     }
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         let m = self.file.metadata()?;
         if !m.is_file() || m.nlink() != 1 || self.directory.leaf_identity(&self.name)? != self.id {
             return Err(conflict());
+        }
+        Ok(())
+    }
+    /// Caller holds the stable advisory lock and has revalidated input/target.
+    /// A missing target uses linkat, never a clobbering rename.
+    pub(crate) fn commit(&mut self, name: &CStr, replace: bool) -> Result<()> {
+        // SAFETY: live directory fd and validated single-component CStrings.
+        let rc = unsafe {
+            if replace {
+                libc::renameat(
+                    self.directory.file.as_raw_fd(),
+                    self.name.as_ptr(),
+                    self.directory.file.as_raw_fd(),
+                    name.as_ptr(),
+                )
+            } else {
+                libc::linkat(
+                    self.directory.file.as_raw_fd(),
+                    self.name.as_ptr(),
+                    self.directory.file.as_raw_fd(),
+                    name.as_ptr(),
+                    0,
+                )
+            }
+        };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        if replace {
+            self.linked = false;
+        } else {
+            self.unlink();
         }
         Ok(())
     }

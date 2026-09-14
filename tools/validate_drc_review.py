@@ -15,9 +15,21 @@ from floe import drc
 from validate_drc_ice import DB
 
 
+def attributes(path):
+    if hasattr(os, "listxattr"):
+        return sorted((key, hashlib.sha256(os.getxattr(path, key)).hexdigest())
+                      for key in os.listxattr(path))
+    # macOS CPython lacks Linux's os.*xattr APIs; use its read-only system tool.
+    assert sys.platform == "darwin", "an xattr reader is required for this gate"
+    run = subprocess.run(["/usr/bin/xattr", "-lx", str(path)], capture_output=True, timeout=10)
+    assert run.returncode == 0, run.stderr
+    return hashlib.sha256(run.stdout).hexdigest()
+
+
 def fingerprint(root):
-    return {str(p.relative_to(root)): (p.stat().st_mtime_ns,
-            hashlib.sha256(p.read_bytes()).hexdigest())
+    return {str(p.relative_to(root)): (p.stat().st_mtime_ns, p.stat().st_ctime_ns,
+            p.stat().st_mode, hashlib.sha256(p.read_bytes()).hexdigest(),
+            attributes(p))
             for p in root.rglob("*") if p.is_file()}
 
 
@@ -95,11 +107,35 @@ def main():
         oracle = work / "oracle.json"
         oracle.write_text(json.dumps(cases))
         before = fingerprint(work)
-        run = subprocess.run([binaries[0], "--ignored", "--nocapture"],
+        run = subprocess.run([binaries[0], "sidecars_and_note_edits_match_python", "--ignored", "--nocapture"],
                              env=dict(os.environ, PATH="", FLOE_DRC_REVIEW_ORACLE=str(oracle)),
                              capture_output=True, text=True, timeout=60)
         assert run.returncode == 0, run.stdout + run.stderr
         assert fingerprint(work) == before, "Rust codec execution wrote a file"
+        print(run.stdout.strip())
+        run = subprocess.run([binaries[0], "store_publication_matches_python", "--ignored", "--nocapture"],
+                             env=dict(os.environ, PATH="", FLOE_DRC_REVIEW_ORACLE=str(oracle)),
+                             capture_output=True, text=True, timeout=60)
+        assert run.returncode == 0, run.stdout + run.stderr
+        after = fingerprint(work)
+        assert all(after.get(p) == stamp for p, stamp in before.items()), "store modified an existing input/review"
+        allowed = set()
+        for case in cases:
+            name = Path(case["pack"]).name.removesuffix(".ice")
+            for target in (f".{name}.waive.synthetic-rust-store", f".{name}.notes.synthetic-rust-store.fe"):
+                allowed.update((target, target + ".lock"))
+        assert set(after) - set(before) == allowed, "unexpected output or surviving staging file"
+        # GTK can reopen every generated file. This read of the native note
+        # tombstone must not be mistaken for native deletion of the user's file.
+        for case in cases:
+            pack = drc.IcePack(case["pack"])
+            try:
+                name = Path(case["pack"]).name.removesuffix(".ice")
+                text = (work / f".{name}.notes.synthetic-rust-store.fe").read_text()
+                assert pack._parse_notes(text, pack.total)
+                assert pack.notes_list() == []
+            finally:
+                pack.close()
         print(run.stdout.strip())
 
 

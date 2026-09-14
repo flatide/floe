@@ -543,6 +543,61 @@ impl Pack {
         }
         Ok(())
     }
+    /// Review writers bind both the open inode and its registered path.
+    pub(crate) fn unchanged_at(&self) -> Result<()> {
+        self.unchanged()?;
+        self.input.unchanged_at(&self.path)
+    }
+    /// Durable conservative run binding. Copying/replacing/touching a pack may
+    /// require explicit import again; matching legacy header fields is not enough.
+    /// Not a credential or defense against malicious same-UID metadata forgery.
+    pub(crate) fn review_binding(&self) -> Result<Vec<u8>> {
+        self.unchanged_at()?;
+        let s = self.input.stamp;
+        Ok(format!(
+            "floe-review-pack-v1:{}:{}:{}:{}:{}:{}:{}",
+            s.dev, s.ino, s.len, s.modified.0, s.modified.1, s.changed.0, s.changed.1
+        )
+        .into_bytes())
+    }
+    /// Virtual legacy sidecar seed: header + embedded status/counters, without
+    /// copying all errors into RAM or ever opening the pack for writing.
+    pub(crate) fn review_seed(&self) -> Result<impl std::io::Read + '_> {
+        self.unchanged_at()?;
+        let layout = super::review::Layout::from_pack(self)?;
+        struct Section<'a> {
+            file: &'a File,
+            offset: u64,
+            remaining: u64,
+        }
+        impl std::io::Read for Section<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let n = self.remaining.min(buf.len() as u64) as usize;
+                if n == 0 {
+                    return Ok(0);
+                }
+                let n = self.file.read_at(&mut buf[..n], self.offset)?;
+                if n == 0 {
+                    return Err(std::io::ErrorKind::UnexpectedEof.into());
+                }
+                self.offset += n as u64;
+                self.remaining -= n as u64;
+                Ok(n)
+            }
+        }
+        use std::io::Read;
+        Ok(std::io::Cursor::new(layout.header())
+            .chain(Section {
+                file: &self.input.file,
+                offset: self.status,
+                remaining: self.total,
+            })
+            .chain(Section {
+                file: &self.input.file,
+                offset: self.wcount,
+                remaining: self.checks.len() as u64 * 4,
+            }))
+    }
     pub fn source_matches(&self, path: &Path) -> Result<bool> {
         let m = fs::metadata(path)?;
         Ok(m.len() == self.source_size && u64::try_from(m.mtime()).ok() == Some(self.source_mtime))

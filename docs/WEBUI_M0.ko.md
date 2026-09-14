@@ -132,6 +132,8 @@ M2a-12b2에서 pack-build 승인/진행/취소·새 identity 조회 UI를 연결
 M4e-1은 waive 스트리밍 codec과 메모리 주석 그룹 편집/FE 포맷을 Rust로 이관했다
 ([M4 §21](WEBUI_M4.ko.md)). Python byte oracle과 손상/취소 게이트를 추가했으며,
 실제 autosave·동시 수정 충돌·review 쓰기 API/UI는 아직 연결하지 않았다.
+M4e-2a는 로컬 저장의 snapshot 충돌·원자 게시·pack binding과 legacy 확인 경계를 추가했다
+([M4 §22](WEBUI_M4.ko.md)). 웹 actor/자동 저장·전체 import/export 연결은 여전히 남는다.
 
 ### 2.7 svrf — M4 (6개 옵션)
 

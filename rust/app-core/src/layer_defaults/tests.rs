@@ -61,6 +61,36 @@ fn kind<T>(result: Result<T>) -> ErrorKind {
 }
 
 #[test]
+fn concurrent_lock_creation_opens_one_stable_inode_without_truncation() {
+    let f = Fixture::new();
+    let dir = Directory::open(&f.dir).unwrap();
+    for i in 0..64 {
+        let name = CString::new(format!("concurrent-{i}.lock")).unwrap();
+        let barrier = std::sync::Barrier::new(2);
+        let files = std::thread::scope(|scope| {
+            let open = || {
+                barrier.wait();
+                dir.open_lock(&name, 0o600).unwrap()
+            };
+            let a = scope.spawn(open);
+            let b = scope.spawn(open);
+            [a.join().unwrap(), b.join().unwrap()]
+        });
+        assert_eq!(
+            identity(&files[0].metadata().unwrap()),
+            identity(&files[1].metadata().unwrap())
+        );
+        (&files[0]).write_all(b"do not truncate").unwrap();
+        let reopened = dir.open_lock(&name, 0o600).unwrap();
+        assert_eq!(reopened.metadata().unwrap().len(), 15);
+        assert_eq!(
+            identity(&reopened.metadata().unwrap()),
+            identity(&files[0].metadata().unwrap())
+        );
+    }
+}
+
+#[test]
 fn prepare_is_read_only_and_modes_derive_exact_shared_names() {
     let f = Fixture::named("한 글.test.jb");
     for (mode, name) in [

@@ -52,7 +52,7 @@ fn string(b: &mut Vec<u8>, s: &str) -> u32 {
     b.extend(s.as_bytes());
     off
 }
-fn bytes(n: u64) -> Vec<u8> {
+pub(super) fn bytes(n: u64) -> Vec<u8> {
     geometry_bytes(n, 2)
 }
 fn geometry_bytes(n: u64, vertices: usize) -> Vec<u8> {

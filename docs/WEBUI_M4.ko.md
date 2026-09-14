@@ -9,6 +9,7 @@ overlay 전환**, §16의 **Rust layerprops 포맷·초기 가시성**, §17의
 **열린 세션 설정 Load/Save·필드별 스타일 적용**, §18/19의
 **공유 설계 기본값 게시 코어·owner 승인 API**, §20의 **게시 preview·승인·결과 UI**까지 연결했다.
 §21은 DRC waive·주석 이관의 포맷/메모리 모델 단계이며 저장 API/UI 연결은 아니다.
+§22에서 명시적 로컬 review 저장과 pack binding을 추가했다. 서버 actor는 아직 읽기 전용이다.
 각 절의 미연결 표기는 해당 선행 단계 당시의 범위다.
 나머지 내보내기·주석 저장과 전체 조작/실제 브라우저 수용은 남아 있다.
 
@@ -1934,3 +1935,107 @@ GTK/Pillow 경고는 별도다. renderd0.12.87은 유지하며 실제 서버 쓰
 revision 충돌, atomic staging/commit, reviewer 구분, 실패 시 기존 파일 보존을 먼저 고정한 뒤
 owner/API/UI에 연결한다. GTK의 read-only 폴더→전역 temp→pack 내부 pwrite fallback이나
 stale 파일의 자동 이동/삭제를 그대로 이식하지 않는다. 공유 권한/현장 Firefox 수용은 별도다.
+
+## 22. M4e-2a — pack에 고정한 로컬 review 저장
+
+`app-core::drc::review::store`는 승인된 root 안의 **pack·reviewer·종류별 한 파일**에 대한
+로컬 쓰기 capability다. `Store::open`/`snapshot`/`prepare_*`는 파일을 만들지 않는다.
+실제 쓰기는 준비 결과를 소비하는 `Draft::publish`뿐이다. reviewer 문자열은 인증이 아니며,
+원격 요청이 경로/reviewer를 골라 이 constructor를 직접 부를 수 있는 API는 없다.
+기존 웹 DRC actor·공유 권한·GUI 자동 저장·CLI 옵션은 변경하지 않았다.
+
+### 읽기·준비·게시
+
+- 이름은 기존 GTK와 같은 `.<db>.waive.<reviewer>`, `.<db>.notes.<reviewer>.fe`다.
+  원본 pack, caller가 등록한 다른 입력/캐시/credential 경로와 alias는 보호한다.
+  심볼릭 링크·여러 hardlink·비정규 파일을 거부하며 전역 temp fallback이나 pack pwrite는 없다.
+- `Snapshot`은 외부에서 조립/역직렬화할 수 없는 기대 review 버전이다. 파일의 inode·size·
+  mtime/ctime(ns)·owner/group/mode/nlink·ACL/xattr와 streaming content digest를 캡처한다.
+  digest는 변경 검출용 SHA-1이며 인증 서명이나 악의적 same-UID 프로세스 방어가 아니다.
+  gateway의 `review_rev`와 승인 receipt는 이후 actor가 별도로 매핑해야 한다.
+- waiver가 없으면 pack 내부의 기존 status/counter를 read-only 가상 스트림으로 읽어
+  첫 sidecar를 만든다. 기존 waiver는 header/전체 길이를 검사하고 counters를 재계산한다.
+  상태 변경은 최대5000 gid의 한 batch이며 reserved byte도 보존한다.
+- 주석은 실제 pack의 전역 gid→rule/local ID→bbox 중심을 사용한다. 기존 codec의 그룹 편집,
+  note import의 replace 의미·경고 report를 유지한다. 준비/승인 전에 import report를 보여야 한다.
+  중심 읽기 오류를 원점 주석으로 대체하지 않는다.
+- publish는 안정된 `.lock` inode의 nonblocking exclusive flock을 얻고 snapshot을 다시
+  확인한다. 같은 디렉터리의 전용 private staging에 전체 결과를 쓴 뒤 권한/속성 적용,
+  file sync, pack/대상/lock/staging 재검사 후 rename으로 교체한다. 기존 파일이 없으면
+  link-at로 생성해 그 사이 다른 파일이 생겼을 때 덮어쓰지 않는다.
+- `layer_defaults`의 descriptor-relative Directory/Stage와 OS Security 보존 코드를
+  crate 내부에서 재사용했다. 기존 기본값의 temp 이름·권한·게시 정책은 유지한다.
+  단, macOS 동시 최초 게시 테스트에서 lock의 `O_CREAT` open이 간헐적 ENOENT를
+  반환해 lock 열기를 `O_CREAT|O_EXCL` 생성 → EEXIST일 때 기존 inode 열기로 분리했다.
+  두 저장 경로에 공통 적용하며, 다른 오류는 숨기지 않고 lock은 지우거나 truncate하지 않는다.
+  review 신규 파일은0600이며, 기존 파일은 원래 ACL/xattr/권한을 유지한다(아래 owned binding만
+  추가/확인). read-only 파일은 디렉터리 쓰기 권한만으로 우회 교체하지 않는다.
+- 주석을 모두 지울 때 파일을 삭제하지 않고 matching fingerprint가 있는 빈 FE를 게시한다.
+  GTK도 빈 주석으로 읽으며, 파일 부재가 다른 writer의 신규 생성으로 오인되는 일을 줄인다.
+  이 empty tombstone은 Python의 빈 note 파일 삭제와 다른 저장 정책이다.
+- 검사에서 발견된 동시 변경/삭제/동일 bytes의 inode 교체·120초 draft 만료는 실패다.
+  실패/취소는 기존 대상 파일을 보존하고 소유한 staging entry만 정리한다. 다른 writer가
+  대상 자체를 지웠다면 그것을 되살리는 기능은 아니다. commit 뒤 취소나 directory sync
+  실패는 성공을 취소로 바꾸지 않으며 `Published { directory_synced:false }`로 경고한다.
+
+### 재시작과 legacy binding
+
+FLOEWAIV/FE의 size·초mtime·total은 유일한 DRC run ID가 아니다. 새 review에는 다음 owned
+확장 속성을 **같은 staging inode에 설정한 뒤 함께 commit**한다. 별도 manifest 두 파일을
+순차 교체하는 방식이 아니다. waive/FE의 기존 내용 형식은 바꾸지 않는다.
+
+- macOS: `com.floe.review-pack-v1`, Linux: `user.floe.review-pack-v1`.
+- 값: 현재 open pack의 dev/inode/size/mtime(ns)/ctime(ns). 경로·reviewer credential은 없다.
+- matching binding이면 재등록/재시작 뒤 읽기·수정이 가능하다. binding이 다른 pack이면
+  legacy header가 같아도 Cache 오류다. 복사/교체/touch된 pack도 보수적으로 별도 run으로
+  판단할 수 있다. **내용 해시 기반의 이동 가능한 run ID나 완전한 index revision 관리가 아니다.**
+- binding 없는 기존 파일은 `legacy_unverified()`로 표시한다. 읽기/준비는 가능하지만
+  게시 전에 caller의 명시 `accept_legacy_run()`이 필요하다. 이는 해당 파일이 이 run의
+  review라는 별도 확인이며, 서로 다른 binding을 강제로 덮는 옵션은 아니다.
+- GTK 등 다른 도구가 파일을 새 inode로 저장하며 xattr를 버리면 다시 legacy 확인이 필요하다.
+  xattr를 보존한 복사본이 다른 pack을 가리키면 자동 승계하지 않는다. foreign review의
+  안전한 보관/초기화·전체 waive import/export UI는 후속 범위이며 자동 aside/delete는 없다.
+- xattr를 지원하지 않거나 binding을 쓰지 못하면 **게시 전 실패**한다. NFS/SMB의 xattr,
+  inode/시간 정밀도·flock·rename·fsync 의미는 현장 수용 항목이다. 로컬 macOS 검사나 Linux
+  링크만으로 이 보장을 해당 파일 시스템에 일반화하지 않는다.
+
+### 비용·동시성 한계와 다음 단계
+
+현재 waiver 편집은 header/status/counter 전체를 streaming 재작성하고 검증 시 전체 digest를
+읽는다. 메모리는 오류 총수에 비례하지 않지만 **I/O는 O(waive 파일 크기)**이며, 과거 GTK의
+status/counter pwrite O(수정 수)보다 비용이 크다. 작은 개별 클릭마다 즉시 호출하는 autosave
+UI를 붙였다고 주장하지 않는다. 실제 actor 연결에서 batch/coalesce·작업 admission·취소/receipt를
+묶고 대형 review 실측을 해야 한다. status journal/증분 트랜잭션은 필요 시 별도 설계 대상이다.
+주석 준비는 현재 모델 전체의 FE mirror를 직렬화하며 기존16MiB export 한도를 따른다.
+
+각 파일은 원자적이지만 waive+notes 두 파일을 합친 하나의 트랜잭션은 아니다. 동시 writer는
+같은 stable lock 규약을 따라야 한다. GTK 등 비협력 writer가 최종 검사 이후 쓰는 경우까지
+막는 filesystem CAS는 아니며, 악의적인 같은 UID/관리자 격리도 아니다. pack은 게시 후
+immutable하게 취급해야 한다. 서비스 연결 시 현재 DRC/read lease를 작업 수명까지 유지해
+같은 서버의 pack rebuild를 직렬화하고, source/pack 교체 뒤 오래된 주석/선택을 승계하지 않는다.
+blocking 파일 I/O는 즉시 중단할 수 없으며 lock은 의도적으로 unlink하지 않는다.
+
+### 검증
+
+native 저장 unit15개는 read-only 준비·초기 seed·reserved bytes·실제 중심·empty tombstone,
+서로 다른 reviewer, 독립/동시 writer, 파일/pack/parent 교체·mtime 복원 후 in-place 변경,
+symlink/hardlink·protected 경로·lock 경합/교체, 권한/xattr·read-only 대상,
+pre-commit 오류/취소·late commit+directory-sync 실패, legacy 승인·새 pack binding 거부를 검증한다.
+DRC 두 writer 중 정확히 하나만 성공하는 테스트와 공유 lock의 동일 inode·비절단 테스트를
+각64회씩10번(각640회 경합) 반복 통과했다. ENOENT를 Busy로 치환하거나 테스트 기대값을
+완화한 것이 아니라 위 lock 생성 경로를 바꿨다.
+`validate_drc_review.py`의 별도 Rust 실행은 합성 파일에서 **28회 실제 게시**를 수행하고
+Python 전체 bytes와 재로드/빈 주석을 대조한다. runtime PATH는 비어 있으며 원래 입력과
+Python review의 bytes·mtime/ctime·mode·xattrs가 불변이고, 허용한8개 target/lock 외의
+새 파일이나 남은 staging이 없는지 검사한다. macOS의 Python xattr API 부재는 개발 gate에서만
+읽기 전용 `/usr/bin/xattr -lx`로 보완한다; 제품 runtime은 libc를 쓴다.
+`cargo fmt -p floe-app-core --check`와 app-core/app/web의 strict all-target clippy가
+통과했다. Rust1.89에서 app-core unit181개와 Linux `x86_64-unknown-linux-musl`
+release static-pie 빌드도 통과했다(이 Mac에서 Linux 바이너리를 실행한 것은 아니다).
+최종 `sh tools/validate_rust.sh` exit0: workspace unit(app11/core181/web44 포함),
+위28회 저장 oracle, jobdeck80, renderer46, KLayout13 PX+2 phase-exact+14 style,
+`RUST VALIDATION: ALL OK`를 확인했다. 이 단계는 renderer/worker protocol 변경이 없어
+renderd 버전은0.12.87을 유지한다. TeeBox/Firefox 및 공유 파일 시스템 현장 수용은 미실시다.
+
+다음 단계는 이 로컬 코어의 관리형 writer/수명·승인/review revision·명시 import/export와
+owner API/UI 연결이다. M4 전체·DRC-02 전체·GTK 은퇴·현장 수용 완료는 아니다.

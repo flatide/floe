@@ -532,3 +532,5 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
   M4e-1에서 DRC waive/주석 포맷과 메모리 편집 모델을 Rust로 이관했다
   ([M4 §21](WEBUI_M4.ko.md)). 실제 review 저장/충돌/API/UI는 다음 단계이며,
   공유 권한 추가나 현장 수용을 대신하지 않는다.
+  M4e-2a는 같은 codec의 로컬 원자 저장·파일 충돌·pack binding과 legacy 확인 경계다
+  ([M4 §22](WEBUI_M4.ko.md)). 관리형 writer/API/UI·실제 autosave 성능 검증은 남아 있다.
