@@ -71,26 +71,50 @@ fn sidecars_and_note_edits_match_python() {
 #[ignore = "run tools/validate_drc_review.py with private synthetic sidecars"]
 fn store_publication_matches_python() {
     use floe_app_core::{
-        drc::review::store::{Kind, Store},
+        drc::review::{
+            managed::{ManagedStore, Phase, Publication, Registration},
+            store::Kind,
+        },
+        managed::{Limits, Resources, Usage},
         registered::AccessScope,
     };
-    use std::{fs, sync::Arc};
+    use std::{
+        fs,
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+    fn published(mut job: Publication) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !job.is_finished() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        job.close().unwrap();
+        let status = job.status();
+        assert_eq!(status.phase, Phase::Succeeded);
+        assert!(!status.outcome_unknown);
+        assert!(status.outcome.unwrap().directory_synced);
+    }
     let cases: Value = serde_json::from_slice(
         &fs::read(std::env::var_os("FLOE_DRC_REVIEW_ORACLE").unwrap()).unwrap(),
     )
     .unwrap();
-    let stop = AtomicUsize::new(0);
+    let stop = Arc::new(AtomicUsize::new(0));
+    let resources = Resources::new(Limits::default()).unwrap();
     let mut writes = 0;
     for case in cases.as_array().unwrap() {
         let pack = Path::new(case["pack"].as_str().unwrap());
         let scope = AccessScope::new(&[pack.parent().unwrap().to_owned()]).unwrap();
-        let waives = Store::open(
-            Arc::clone(&scope),
-            pack,
-            "synthetic-rust-store",
-            Kind::Waives,
-            vec![],
-            vec![],
+        let waives = ManagedStore::open(
+            &resources,
+            Registration {
+                scope: Arc::clone(&scope),
+                pack: pack.into(),
+                reviewer: "synthetic-rust-store".into(),
+                kind: Kind::Waives,
+                protected_files: vec![],
+                protected_trees: vec![],
+            },
             &stop,
         )
         .unwrap();
@@ -100,51 +124,55 @@ fn store_publication_matches_python() {
             // Only a named synthetic test target, never the Python/source file.
             fs::write(waives.target(), data).unwrap();
             let draft = waives
-                .snapshot(&stop)
+                .snapshot(Arc::clone(&stop))
                 .unwrap()
-                .prepare_waives(&edits, &stop)
+                .prepare_waives(&edits)
                 .unwrap();
-            assert!(
-                draft
-                    .accept_legacy_run()
-                    .publish(&stop)
-                    .unwrap()
-                    .directory_synced
-            );
+            published(draft.publish(true).unwrap());
             assert_eq!(
                 json!(fs::read(waives.target()).unwrap()),
                 expected["output"]
             );
             assert_eq!(
-                json!(waives.snapshot(&stop).unwrap().waives().unwrap().per_rule),
+                json!(
+                    waives
+                        .snapshot(Arc::clone(&stop))
+                        .unwrap()
+                        .waives()
+                        .unwrap()
+                        .per_rule
+                ),
                 expected["counts"]
             );
             writes += 1;
         }
-        let notes = Store::open(
-            scope,
-            pack,
-            "synthetic-rust-store",
-            Kind::Notes,
-            vec![],
-            vec![],
+        let notes = ManagedStore::open(
+            &resources,
+            Registration {
+                scope,
+                pack: pack.into(),
+                reviewer: "synthetic-rust-store".into(),
+                kind: Kind::Notes,
+                protected_files: vec![],
+                protected_trees: vec![],
+            },
             &stop,
         )
         .unwrap();
         for expected in case["notes"].as_array().unwrap() {
-            let snapshot = notes.snapshot(&stop).unwrap();
+            let snapshot = notes.snapshot(Arc::clone(&stop)).unwrap();
             let draft = if expected["op"] == "set" {
                 let ids: Vec<u64> = serde_json::from_value(expected["ids"].clone()).unwrap();
                 snapshot
-                    .prepare_note(&ids, expected["text"].as_str().unwrap(), &stop)
+                    .prepare_note(&ids, expected["text"].as_str().unwrap())
                     .unwrap()
             } else {
                 snapshot
-                    .prepare_notes_import(expected["input"].as_str().unwrap(), &stop)
+                    .prepare_notes_import(expected["input"].as_str().unwrap())
                     .unwrap()
                     .0
             };
-            assert!(draft.publish(&stop).unwrap().directory_synced);
+            published(draft.publish(false).unwrap());
             let text = fs::read_to_string(notes.target()).unwrap();
             if let Some(expected) = expected["output"].as_str() {
                 assert_eq!(text, expected);
@@ -152,7 +180,7 @@ fn store_publication_matches_python() {
                 assert!(text.contains("floe_pack="));
                 assert!(!text.contains("floe_note="));
             }
-            let loaded = notes.snapshot(&stop).unwrap();
+            let loaded = notes.snapshot(Arc::clone(&stop)).unwrap();
             assert!(!loaded.legacy_unverified());
             assert_eq!(
                 json!(loaded
@@ -168,7 +196,9 @@ fn store_publication_matches_python() {
             }
             writes += 1;
         }
+        drop((waives, notes));
+        assert_eq!(resources.usage(), Usage::default());
     }
     assert_eq!(writes, 28);
-    println!("RUST DRC REVIEW STORE: ALL OK ({writes} native publications, real pack centers, Python bytes, reload and empty tombstones)");
+    println!("RUST DRC REVIEW STORE: ALL OK ({writes} managed native publications, admission release, real pack centers, Python bytes, reload and empty tombstones)");
 }

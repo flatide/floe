@@ -15,6 +15,7 @@ pub const EDIT_ITEMS: usize = 5000;
 pub const SIDECAR_BYTES: usize = annotations::MAX_TEXT;
 const STATUS_CHUNK: usize = 64 * 1024;
 const MAX_CHECKS: usize = super::META_BYTES / 16;
+pub mod managed;
 pub mod store;
 
 fn bounded(what: &str) -> Error {

@@ -56,7 +56,8 @@ M4d-3에서 열린 세션 설정 Load/Save·bitmap/상속을 보존하는 native
 M4d-4a에서 공유 설계 기본값의 읽기 전용 준비·충돌 검사·권한 보존·원자 게시 Rust 코어를 추가했다.
 M4d-4b에서 launcher opt-in·owner 준비/명시 승인/취소/결과 API를 연결했다.
 M4d-4c에서 공유 영향 preview·체크 승인·진행/취소·새로고침 후 동일 요청 확인 UI를 연결했다.
-실제 브라우저 게시 클릭 수용은 별도이며 일반 Save는 계속 다운로드뿐이다.
+별도 승인 후 실제 Chrome의 합성 layout 신규 게시 클릭은 확인했다(M4 §20).
+기존 파일 교체·취소/복구·현장 브라우저 수용은 별도이며 일반 Save는 계속 다운로드뿐이다.
 나머지 내보내기와 브라우저 다운로드/현장 수용은 남아 있다([M4 기록](WEBUI_M4.ko.md)).
 전체 조작 parity와 M0/Firefox/ETX 현장 검증은 아직 완료되지 않았다.
 상세 범위는 [M1b 기록](WEBUI_M1B.ko.md)과 [M2 기록](WEBUI_M2.ko.md). 여기의 M0~M5는 **웹 전환 단계**이며
@@ -534,3 +535,5 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
   공유 권한 추가나 현장 수용을 대신하지 않는다.
   M4e-2a는 같은 codec의 로컬 원자 저장·파일 충돌·pack binding과 legacy 확인 경계다
   ([M4 §22](WEBUI_M4.ko.md)). 관리형 writer/API/UI·실제 autosave 성능 검증은 남아 있다.
+  M4e-2b는 native 관리형 writer의 admission·pack/source lease·취소·typed 결과와 join을
+  연결했다([M4 §23](WEBUI_M4.ko.md)). owner/API/UI 및 autosave 실측은 후속이다.

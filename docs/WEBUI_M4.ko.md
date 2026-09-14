@@ -2050,3 +2050,72 @@ renderd 버전은0.12.87을 유지한다. TeeBox/Firefox 및 공유 파일 시�
 
 다음 단계는 이 로컬 코어의 관리형 writer/수명·승인/review revision·명시 import/export와
 owner API/UI 연결이다. M4 전체·DRC-02 전체·GTK 은퇴·현장 수용 완료는 아니다.
+
+## 23. M4e-2b — 관리형 review 수명과 게시 작업
+
+`app-core::drc::review::managed`가 §22 저장 코어를 서비스 자원 관리에 연결한다.
+아직 HTTP 쓰기 endpoint나 자동 저장 UI는 아니며, 승인된 경로·reviewer를 제공하는
+로컬 caller용 API다. `ManagedStore` → `Snapshot` → `Prepared` → `Publication`으로
+실행권을 넘기며, 원래 expected snapshot·pack binding·원자 게시 계약을 그대로 사용한다.
+
+### admission과 lease
+
+- 등록은 off-reactor에서 수행한다. pack을 열기 **전** 기존 DRC admission pool에서
+  CPU1 slot·256MiB를 예약하고 pack 및 caller가 지정한 protected files의 read lease를
+  함께 잡는다. 등록 실패/취소는 예약을 반환한다. protected trees는 출력 제외 영역이며
+  재귀적 read lease 집합으로 확장하지 않는다. 서비스는 실제 ASCII source/rules 등
+  의존 파일을 등록해야 한다.
+- 종류별 등록이다. notes와 waives를 둘 다 열면 각각의 pack/model에 대해 합계CPU2·512MiB를
+  예약한다. 기존 reader/renderer의 예약에 추가된다. 이 수치는 admission이며 hard RSS,
+  디스크 I/O 대역폭·지연시간 또는 다른 프로세스의 소비 상한이 아니다.
+- 등록 하나당 살아 있는 snapshot/draft/게시 작업은1개다. 추가 호출은 Busy이며 숨은
+  큐나 한 CPU 예약 뒤 무제한 model 보관을 하지 않는다. 읽기/준비는 동기 파일 I/O라
+  서비스가 blocking worker에서 호출해야 한다. caller는 호출 전에 취소 flag를 소유하며,
+  해당 작업이 끝나기 전에 flag를 reset/reuse하지 않는다.
+- snapshot/draft/worker가 등록을 소유한다. 밖의 등록 핸들을 먼저 닫아도 실행 중인
+  작업의 CPU/memory 예약과 pack/source lease는 남는다. 같은 Resources를 쓰는 pack
+  rebuild와 충돌하며, 무관한 입력의 인덱싱은 기존 admission 범위 안에서 가능하다.
+
+### 승인·취소·결과
+
+`Prepared::publish`만 실제 저장 작업을 시작한다. draft는 한 번 소비되며 legacy 미확인은
+별도 `confirm_legacy`가 필요하다. 이는 로컬 caller의 명시 승인이지 HTTP 인증이 아니다.
+FE import의 경고 report도 승인 전에 caller가 보여야 한다. 웹의 owner·DRC identity·
+review_rev·예상 파일 버전 token과 승인 seq/signature를 결합하는 것은 다음 owner actor의 책임이다.
+
+`Publication`은 별도 join 가능한 thread에서 게시하고, 조회자가 없어도 typed status를
+유지한다. process-local ID·kind·phase·elapsed·안전한 오류 종류·게시 outcome만 포함하며
+원시 경로/오류 메시지를 wire용 status에 넣지 않는다. durable HTTP retry ledger가 아니므로
+응답 유실 후 새 `publish`를 자동 호출하면 안 된다. owner가 이 핸들을 보관하고 동일 작업을 조회해야 한다.
+
+- `request_stop`은 등록을 retire하고 진행 중 flag를 취소한다. 새 읽기/준비/게시를
+  허용하지 않는다. 강제로 lease를 반환하거나 작업이 끝난 것처럼 표시하지 않는다.
+- `cancel`은 best-effort 요청이다. 실제 commit이 끝났으면 Succeeded를 유지하며
+  directory sync 실패는 게시 outcome의 내구성 경고다. 이미 게시한 것을 롤백됐다고 하지 않는다.
+- worker panic은 `Failed / Worker / outcome_unknown:true`다. commit 뒤 panic 가능성이
+  있으므로 미게시로 단정하거나 자동 재시도하지 않는다. 이 경우 결과 파일과 등록을 다시 확인해야 한다.
+- `close`/Drop은 취소하고 join한다. HTTP reactor에서 호출하지 않는다. blocking OS I/O는
+  즉시 중단할 수 없으며, 파일 시스템이 멈추면 정리도 기다린다. 프로세스 격리·강제 I/O deadline을
+  구현한 것으로 간주하지 않는다.
+- terminal은 이 게시 작업의 borrow 해제를 뜻한다. 여전히 등록 핸들이 살아 있으면 idle
+  예약/lease도 살아 있다. rebuild 전에 owner가 registration·미승인 draft를 retire/drop하고
+  진행 작업의 실제 종료를 기다려야 한다.
+
+### 검증과 남은 연결
+
+집중 unit10개가 admission 선행·실패/취소 반환·한 개 작업 제한·준비 시 무쓰기,
+원본/pack rebuild 충돌·무관 입력 허용·핸들 drop 이후 lease 유지, legacy/import/revision,
+native note/waive 게시·재로드, 취소 중 lease 보존·join, late commit/내구성 경고와
+post-commit panic의 미확정 결과를 고정한다. 기존 Python oracle의28회 실제 게시도
+이 managed 경로로 올려 전체 bytes·실제 bbox 중심·재로드·모든 예약 반환을 함께 단언한다.
+PATH-empty 실행이며, 기존 입력/sidecar 불변성과 staging 정리는 같은 harness가 검사한다.
+core unit191·scoped fmt·app/core/web strict all-target clippy를 통과했다. Rust1.89에서도
+core191 및 Linux x86-64 musl release static-pie 빌드를 통과했다(Linux 실행 검증은 아님).
+최종 `sh tools/validate_rust.sh` exit0·`RUST VALIDATION: ALL OK`: workspace unit
+(app11/core191/web44), managed 저장28회 oracle, jobdeck80·renderer46,
+KLayout13 PX+2 phase-exact+14 style(jobs1/8)를 포함한다. renderer/worker protocol은
+바꾸지 않아 renderd0.12.87을 유지한다.
+
+다음은 owner actor의 인증 reviewer/seq receipt·review_rev, 읽기 actor의 waive 상태 갱신,
+명시 note/waive import/export 및 편집 UI다. 큰 waive의 O(파일 크기) I/O와 batch/coalesce
+실측, 현장 Firefox/NFS/SMB는 여전히 남는다. M4 전체 완료나 GTK 은퇴를 뜻하지 않는다.
