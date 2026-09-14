@@ -58,7 +58,8 @@ def main(fixture):
         # No Python/shell can be discovered by the Rust runtime under this PATH.
         env = dict(os.environ, FLOE_INDEX_BIN=str(INDEX), PATH="",
                    PYTHONPATH=str(ROOT), PYTHONDONTWRITEBYTECODE="1")
-        assert "M1a" in run("--help", env=env).stdout
+        assert "Rust application migration CLI" in run("--help", env=env).stdout
+        assert "selfcheck" in run("--help", env=env).stdout
         assert version in run("--version", env=env).stdout
         assert "--no-open" in run("view", "--help", env=env).stdout
         run("view", env=env, code=2)

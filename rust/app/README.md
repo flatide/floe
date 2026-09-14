@@ -16,6 +16,8 @@ clip·표시 PNG·스타일 설정/공유 기본값, M4e는 명시 opt-in owner�
 cd rust
 cargo build --offline --locked --release -p floe-app -p floe-index -p floe-renderd
 ./target/release/floe2-web index --help
+./target/release/floe2-web selfcheck --metadata-only
+./target/release/floe2-web selfcheck
 ./target/release/floe2-web index /path/to/design.oas --jobs 12
 ./target/release/floe2-web index /path/to/deck.jb --level 1,3 --lod --jobs 12
 ./target/release/floe2-web jobdeck /path/to/deck.jb --level 1,3 --mode chip \
@@ -57,6 +59,30 @@ cargo build --offline --locked --release -p floe-app -p floe-index -p floe-rende
 
 `cargo`는 `rust/`에서 실행해야 그 안의 `.cargo/config.toml`(vendor, musl linker)이
 적용된다. 저장소 루트에서 `--manifest-path rust/Cargo.toml`만 주는 것과 다르다.
+
+### 로컬 배포 진단 (M4f-1)
+
+`--version`과 `selfcheck --metadata-only`는 앱/인덱서/렌더러 호환 버전,
+소스 revision·컴파일 target·내장 웹 bundle ID를 표시한다. Git worktree와 소스 ZIP을
+구별하며, ZIP은 `unknown` 또는 빌드 시 명시한 `FLOE_SRC_REV`를 쓴다.
+revision의 `+`는 빌드 스크립트 실행 시 변경이 관찰됐다는 뜻이며 바이너리 서명이나
+전체 파일 무결성 검증은 아니다. metadata-only는 도구를 찾거나 실행하지 않고,
+`runtime_checked:false`로 표시한다.
+
+`selfcheck`는 실제 `floe-index --version`과 renderd ready handshake/종료·임시 디렉터리
+정리를 검사한다. 기본은 일반 명령과 같은 도구 검색/명시 override이며,
+`selfcheck --adjacent`는 **현재 실행 파일 옆의 두 바이너리만** 검사하고 해당 override,
+개발 tree와 PATH fallback을 무시한다. 공백/한글 설치 경로를 지원하지만 현재 native
+wire 규약상 **TMPDIR에는 공백/제어 문자가 없어야 한다**. 잘못된 임시 경로는 오류로 보고한다.
+필수 검사 실패는 exit1, 옵션 오류는 exit2이며 SIGINT/SIGTERM은 기존 종료 코드를 따른다.
+
+이 명령은 소스 파일/브라우저/리스너를 열지 않는다. Firefox는 경로 검색만 하며,
+없어도 `--no-open` 용도가 있으므로 필수 실패로 간주하지 않는다. `desktop_acceptance`
+값은 항상 `unverified`다. ELF/GLIBC 감사·픽셀 대조·Firefox/ETX/NFS 수용을 대신하지 않는다.
+Rust+내장 자산 전용 portable 패키지 조립은 다음 M4f-2이며, 기존 Python/GTK용
+`tools/make_portable.sh`나 기본 실행기를 이 단계에서 교체하지 않는다.
+
+### 실행 계약
 
 - `--force` 없이 current 캐시는 재사용, stale/incomplete 캐시는 거부한다.
   LOD는 기본 off; current 캐시의 생성 옵션은 `--lod`만으로 바뀌지 않는다.

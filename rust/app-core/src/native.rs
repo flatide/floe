@@ -95,63 +95,70 @@ impl Indexer {
             .stderr(Stdio::null())
             .process_group(0)
             .spawn()?;
-        let stdout = child.stdout.take().expect("version stdout");
-        let reader = match std::thread::Builder::new()
-            .name("floe-index-version".into())
-            .spawn(move || {
-                let mut bytes = Vec::new();
-                stdout.take(4097).read_to_end(&mut bytes).map(|_| bytes)
-            }) {
-            Ok(t) => t,
-            Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(e.into());
-            }
-        };
+        let mut stdout = child.stdout.take().expect("version stdout");
+        let mut bytes = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(5);
-        let result = loop {
-            if cancelled.load(Ordering::Relaxed) != 0 {
-                break Err(Error::new(
-                    ErrorKind::Cancelled,
-                    "indexer validation cancelled",
-                ));
-            }
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    break if status.success() {
-                        Ok(())
-                    } else {
-                        Err(Error::new(
-                            ErrorKind::Version,
-                            "floe-index --version failed",
-                        ))
+        // Leader exit is not pipe EOF: a wrapper may leave stdout inherited by
+        // a descendant. Bound both waits without joining a blocked reader.
+        let result = (|| -> Result<()> {
+            crate::index_progress::nonblocking(&stdout)?;
+            let mut status = None;
+            let mut eof = false;
+            loop {
+                if cancelled.load(Ordering::Relaxed) != 0 {
+                    return Err(Error::new(
+                        ErrorKind::Cancelled,
+                        "indexer validation cancelled",
+                    ));
+                }
+                if !eof {
+                    let mut block = [0u8; 4097];
+                    match stdout.read(&mut block[..4097 - bytes.len()]) {
+                        Ok(0) => eof = true,
+                        Ok(n) => bytes.extend_from_slice(&block[..n]),
+                        Err(e)
+                            if matches!(
+                                e.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                            ) => {}
+                        Err(e) => return Err(e.into()),
                     }
                 }
-                Err(e) => break Err(e.into()),
-                _ if Instant::now() >= deadline => {
-                    break Err(Error::new(
+                if bytes.len() > 4096 {
+                    return Err(Error::new(
+                        ErrorKind::Version,
+                        "oversized indexer version response",
+                    ));
+                }
+                if status.is_none() {
+                    status = child.try_wait()?;
+                }
+                if let Some(status) = status {
+                    if !status.success() {
+                        return Err(Error::new(
+                            ErrorKind::Version,
+                            "floe-index --version failed",
+                        ));
+                    }
+                    if eof {
+                        return Ok(());
+                    }
+                }
+                if Instant::now() >= deadline {
+                    return Err(Error::new(
                         ErrorKind::Version,
                         "floe-index --version timed out",
-                    ))
+                    ));
                 }
-                _ => std::thread::sleep(Duration::from_millis(10)),
+                std::thread::sleep(Duration::from_millis(10));
             }
-        };
+        })();
+        drop(stdout);
         if result.is_err() {
             let _ = child.kill();
             let _ = child.wait();
         }
-        let bytes = reader
-            .join()
-            .map_err(|_| Error::new(ErrorKind::Worker, "version reader failed"))??;
         result?;
-        if bytes.len() > 4096 {
-            return Err(Error::new(
-                ErrorKind::Version,
-                "oversized indexer version response",
-            ));
-        }
         let text = std::str::from_utf8(&bytes)
             .map_err(|_| Error::new(ErrorKind::Version, "invalid indexer version UTF-8"))?;
         let words: Vec<_> = text.split_whitespace().collect();

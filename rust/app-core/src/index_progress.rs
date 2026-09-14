@@ -135,7 +135,7 @@ pub(crate) struct Capture {
     line: Line,
     pub progress: Progress,
 }
-fn nonblocking(pipe: &impl AsRawFd) -> io::Result<()> {
+pub(crate) fn nonblocking(pipe: &impl AsRawFd) -> io::Result<()> {
     // SAFETY: this descriptor is borrowed from a live, exclusively owned pipe.
     // fcntl reads/sets only its status flags and does not transfer ownership.
     let flags = unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_GETFL) };

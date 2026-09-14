@@ -1,6 +1,6 @@
 # floe2 웹 셸 / 서버-클라이언트 계획 (정본)
 
-작성 2026-08-29, 갱신 2026-09-12(Rust-only 실행 경로·브랜치 분리).
+작성 2026-08-29, 갱신 2026-09-15(M4f-1 로컬 배포 진단).
 관련 정본: `FLOE2_OPTIMIZATION.ko.md`(F2R-10/11),
 `RUST_RENDERER_PLAN.ko.md`, `SPEC-VIEWER.ko.md`, `rust/BUILD.md`.
 
@@ -67,6 +67,8 @@ M4e-6b에서 owner 분할 업로드·전체 교체 준비·기존 승인 게시�
 연결했다. M4e-6c에서 전체 review 파일 선택·분할 전송/미리보기·별도 승인과
 내보내기/다운로드 UI를 연결했다. Chrome 합성 내보내기 준비는 확인했으며, 실제 브라우저
 업로드·review 게시·다운로드 파일 수용과 현장 검증은 후속이다.
+M4f-1에서 `selfcheck`의 빌드 식별·실제 native 버전/handshake/종료 검사를 추가했다.
+Rust+내장 자산 전용 portable 조립은 M4f-2로 남으며 기존 GTK 패키지를 교체하지 않는다.
 나머지 내보내기와 브라우저 다운로드/현장 수용은 남아 있다([M4 기록](WEBUI_M4.ko.md)).
 전체 조작 parity와 M0/Firefox/ETX 현장 검증은 아직 완료되지 않았다.
 상세 범위는 [M1b 기록](WEBUI_M1B.ko.md)과 [M2 기록](WEBUI_M2.ko.md). 여기의 M0~M5는 **웹 전환 단계**이며
@@ -583,3 +585,7 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
   기존 저장 패널의 receipt/복구와 waive reader 장벽을 재사용한다. Chrome 합성 export
   준비/종료는 확인했다. 브라우저 업로드·실제 review 게시·다운로드 파일 수용과 현장
   Firefox/ETX/NFS는 아직 남는다.
+- **M4f-1**: Python-free `selfcheck`와 앱 source/target/bundle 식별을 추가했다
+  ([M4 §36](WEBUI_M4.ko.md)). 인접 Rust 바이너리만 검사하는 모드와 정상 도구 검색을
+  구분하며, 버전 subprocess의 EOF까지 5초 기한을 적용한다. 실제 브라우저 실행/게시
+  권한을 확대하지 않는다. 전용 portable 조립·ELF/GLIBC 감사와 현장 수용은 다음 단계다.

@@ -186,6 +186,8 @@ sidecar 원자 저장/입력 보호와 구체적 차이는 [M4 §11](WEBUI_M4.ko
 선택 위치 인자 `png`. GTK 전용 진단을 웹 제품에 끌고 오지 않는다.
 전환 중 기존 명령은 GTK 비교 패키지에 남기고, Rust 셸은 명시적인 안내/오류를
 제공한다. 웹용 PNG/raw/Canvas 표시 진단과 대체 명령 이름을 정한 뒤 폐기 승인.
+M4f-1의 `selfcheck`는 native 설치 진단만 담당하므로 위 표시 진단/GTK 폐기 승인을
+대체하지 않는다. 브라우저를 실행하지 않고 항상 desktop 수용 미검증을 표시한다.
 
 ### 2.9 view — M1b/M4 (21개 옵션)
 
@@ -249,6 +251,12 @@ DISPLAY가 없어도 동작해야 한다(기존 GTK 오류까지 이식하지 �
 | EXPORT-01 / M4 | shots, fe_embed | batch/mosaic·DRC 캡처·PNG iTXt metadata/legend/ruler. raster pixels와 metadata 각각 round-trip |
 | SYS-01 / M1a→M4 | instance, cli, cache | 바이너리 발견/버전, index freshness, 취소/타임아웃/자식 수거, 개인·설계 설정 구분 |
 | SYS-02 / M4 | portable 도구 | Rust+정적 자산만으로 실행, offline build, GLIBC/아키텍처 확인, licenses/About, 브라우저 실행/프로필 격리 |
+
+SYS-01/02의 M4f-1은 native `selfcheck`와 source/target/web bundle 식별이다
+([M4 §36](WEBUI_M4.ko.md)). PATH 없는 재배치·인접 도구 제한·버전 기한/취소와
+renderd 종료를 검사한다. 기존 CLI 10개/옵션 대조표를 소급 변경하는 parity 항목이 아니라
+배포 진단용 확장이다. 전용 Rust portable 조립·ELF/GLIBC 감사·licenses/About·현장 브라우저
+수용 전체가 끝난 것으로 간주하지 않는다.
 
 UI-05 일부는 M4d-1에서 연결했다: 표시된 layout/annotation PNG 복사·저장, overlay
 3상태, canvas 단축키와 텍스트/IME 보호. 실제 clipboard/다운로드·현장 Firefox/ETX

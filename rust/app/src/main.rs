@@ -7,6 +7,7 @@ mod deck_index;
 mod drc;
 mod fe_embed;
 mod read;
+mod selfcheck;
 mod svrf;
 mod web_view;
 use floe_app_core::{
@@ -24,7 +25,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
-const HELP: &str = "floe2-web — Rust application migration CLI (M1a services + M1b web preview)
+const HELP: &str = "floe2-web — Rust application migration CLI (web preview)
 
 Usage: floe2-web index SOURCE [OPTIONS]
        floe2-web view SOURCE [OPTIONS]
@@ -36,6 +37,7 @@ Usage: floe2-web index SOURCE [OPTIONS]
        floe2-web drc RESULTS.db|PACK.ice [OPTIONS]
        floe2-web fe-embed [OPTIONS] PNG...
        floe2-web svrf DECK [OPTIONS]
+       floe2-web selfcheck [--adjacent] [--metadata-only]
        floe2-web --version
 
 Implemented: layout/jobdeck index/info/render/probe, occupancy, profiling,
@@ -46,8 +48,9 @@ Clip: full-depth exact layout OASIS export; jobdeck clip remains unsupported.
 Render: batch/mosaic + JSON reports, DRC marker/CD/legend captures; no Python runtime.
 Annotations: fe-embed CLI writes flateyes PNG metadata without changing pixels.
 SVRF: local subset parser/scan with diagnostics; no Tcl or macro execution.
-Not yet ported: gtktest, review writes and browser exports.
-Use the existing floe2 for those commands; there is no Python fallback.
+Web: owner notes/waives and whole-review transfers require explicit opt-ins.
+GTK-only gtktest is not ported. Full interaction/field acceptance remains open.
+The existing floe2/GTK launcher is unchanged; there is no Python fallback here.
 Run floe2-web index --help for indexing options.";
 const INDEX_HELP: &str = "Usage: floe2-web index SOURCE [OPTIONS]
 
@@ -87,6 +90,7 @@ enum Cli {
     Drc(Box<drc::Command>),
     FeEmbed(Box<fe_embed::Command>),
     Svrf(Box<svrf::Command>),
+    SelfCheck(selfcheck::Options),
 }
 fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
     let args: Vec<String> = args
@@ -105,6 +109,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
     match args[0].as_str() {
         "--help" | "-h" if args.len() == 1 => return Ok(Cli::Help(false)),
         "--version" if args.len() == 1 => return Ok(Cli::Version),
+        "selfcheck" => return selfcheck::parse(&args).map(Cli::SelfCheck),
         "index" => (),
         "info" | "render" | "probe" => return read::parse(&args).map(|c| Cli::Read(Box::new(c))),
         "jobdeck" => return deck_analysis::parse(&args).map(|c| Cli::Jobdeck(Box::new(c))),
@@ -277,6 +282,7 @@ impl Drop for Signals {
 }
 fn run(cli: Cli, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
     match cli {
+        Cli::SelfCheck(options) => return selfcheck::run(options, cancelled),
         Cli::View(command) => return web_view::run(*command, cancelled),
         Cli::Drc(command) => return drc::run(*command, cancelled),
         Cli::FeEmbed(command) => return fe_embed::run(*command, cancelled),
@@ -286,9 +292,10 @@ fn run(cli: Cli, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
         Cli::Jobdeck(command) => return deck_analysis::run(*command, cancelled),
         Cli::Help(index) => println!("{}", if index { INDEX_HELP } else { HELP }),
         Cli::Version => println!(
-            "floe2-web {} (development M1a; floe-index {})",
+            "floe2-web {} (preview; revision {}; target {}; web {}; floe-index {}; floe-renderd {})",
             env!("CARGO_PKG_VERSION"),
-            floe_app_core::native::INDEX_VERSION
+            env!("FLOE_APP_REVISION"), env!("FLOE_APP_TARGET"), floe_web::transport::BUNDLE,
+            floe_app_core::native::INDEX_VERSION, floe_worker_client::EXPECTED_RENDERD_VERSION
         ),
         Cli::Index(source, options, levels) => {
             if is_deck(&source) {

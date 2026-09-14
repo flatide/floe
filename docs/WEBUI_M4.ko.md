@@ -19,6 +19,7 @@ overlay 전환**, §16의 **Rust layerprops 포맷·초기 가시성**, §17의
 §32에서 목록 badge와 마지막으로 이동한 오류의 주석 overlay·서버 상태 복원을 연결했다.
 §33~35에서 native 전체 review import/export, owner 분할 전송 API와 파일 선택·전체 교체
 미리보기/별도 승인·내보내기 패널을 연결했다.
+§36은 Python-free 로컬 배포 진단과 빌드 식별이며 실제 패키지 조립은 다음 단계다.
 각 절의 미연결 표기는 해당 선행 단계 당시의 범위다.
 전체 조작 parity와 실제 브라우저/현장 수용은 남아 있다.
 
@@ -3045,3 +3046,71 @@ render 제출이 `Busy: worker command queue full`을 반환해 실패했다. �
 `/private/tmp/floe-review-transfer-ui-battery2.log`다. 별도 `floe-review-transfer-ui-`
 접두사의 `tests/clippy/msrv/musl/lifecycle-{1,2,3}.log`도 보존한다.
 GTK 기본·renderd0.12.87은 유지하며 이 단계로 전체 웹 전환/현장 수용 완료를 선언하지 않는다.
+
+## 36. M4f-1 — Python-free 배포 진단과 빌드 식별
+
+SYS-01/02의 전용 웹 portable 조립에 앞서 `floe2-web selfcheck`를 추가했다.
+기존 Python/GTK `make_portable.sh`, 기본 실행기, 인증/공유 범위나 source/cache 포맷은
+바꾸지 않는다. 새 HTTP endpoint·리스너·브라우저 실행/파일 게시 동작도 없다.
+
+### 검사 범위와 종료 의미
+
+- `--version`과 JSON metadata에 앱 버전, source revision, target triple, 내장 웹 bundle,
+  index/renderd 호환 버전을 표시한다. linked worktree의 `.git` 파일을 지원하며, 소스 ZIP이
+  무관한 상위 저장소 revision을 상속하지 않는다. `FLOE_SRC_REV`는 빌드 시 명시할 수 있고
+  빈 값/공백/제어 문자/128byte 초과를 거부한다. `+`는 빌드 스크립트가 관찰한 dirty 상태이며
+  신뢰 서명이나 전체 binary checksum이 아니다. GTK/renderd0.12.87은 그대로다.
+- `--metadata-only`는 도구 검색/실행을 하지 않고 `runtime_checked:false`, 빈 checks를
+  반환한다. 실행하지 않은 검사를 `ok:true`로 주장하지 않는다.
+- 기본 selfcheck는 정상 명령과 같은 override→dev→adjacent→PATH 검색을 사용한다.
+  `--adjacent`는 앱 실행 파일 옆의 index/renderd만 검사하고 그 도구의 override와 fallback을
+  무시한다. 두 모드의 scope와 실제 검사 경로를 JSON에 노출한다. 잘못된 명시 override는
+  일반 모드에서 여전히 hard error다.
+- 실제 index 버전 확인과 renderd ready handshake·종료/자기 임시 디렉터리 정리를 수행한다.
+  첫 검사 실패 뒤에도 다른 도구 결과를 수집하되 취소 뒤에는 다음 검사를 시작하지 않는다.
+  필수 검사 성공 exit0, 검사 실패 exit1, CLI 오류 exit2이며 SIGINT/SIGTERM은 기존 코드다.
+- Firefox는 **경로만** 찾고 실행하지 않는다. `--no-open`이 유효하므로 없는 것은 참고 정보다.
+  `desktop_acceptance:unverified`를 명시하며 브라우저 버전/기능·ELF/GLIBC·렌더 pixels·
+  Firefox/ETX/NFS 실기 수용을 이 검사로 대체하지 않는다.
+- 공백/한글 설치 경로는 지원한다. 반면 현재 worker wire는 공백/제어 문자가 있는 TMPDIR을
+  거부한다. 이 경우 selfcheck도 명시 실패하며 임시 자원을 남기거나 다른 경로로 조용히
+  fallback하지 않는다. 설계 파일은 열거나 색인/렌더하지 않는다.
+
+### 버전 검사의 deadline 보강
+
+기존 index 검사는 자식 종료를 5초 기다린 뒤 stdout reader thread를 무제한 join했다.
+wrapper가 종료됐어도 자손이 stdout을 상속하면 끝나지 않을 수 있었다. 기존 nonblocking
+pipe helper를 재사용해 상태와 **EOF 모두**를 같은 5초 기한/취소 검사 안에서 기다린다.
+4096byte 응답 상한·UTF-8/버전 검증을 유지하고 오류 시 직접 실행한 자식을 수거한다.
+자손 전체 sandbox나 OS의 uninterruptible I/O까지 강제 중단한다는 보장은 아니다.
+
+### 검증
+
+`validate_web_selfcheck.py`를 전체 battery에 연결했다. PATH 없는 실제 Rust 3개 재배치,
+공백/한글 설치 경로·인접 모드의 override 무시와 일반 모드의 hard error, browser 무실행,
+metadata-only 무실행, 불일치/UTF-8/oversize/잘못된 ready, TMPDIR 오류·정리, wrapper 종료 후
+남은 stdout의 5초 종료, SIGTERM143·자식 수거를 고정한다. 전용 사설 Git fixture로 clean/
+dirty/worktree/ZIP/명시 revision을 검사한다. Python은 개발용 gate일 뿐 배포 의존성이 아니다.
+실제 shared-default 합성 게시 승인은 DRC review 게시/업로드 승인으로 확대하지 않는다.
+
+첫 통합 실행은 테스트 TMPDIR에 공백이 있어 기존 wire 거부를 만났다. 정상 fixture는
+공백 없는 TMPDIR을 쓰고, 공백 오류는 별도 회귀로 남긴 뒤 통합 gate를 통과했다.
+scoped clippy의 불필요한 `()` 경고도 수정 후 통과했다. Rust1.89 app13/core215/web60/
+transport10과 Linux x86-64 musl release 교차 빌드는 통과했다.
+
+전체 `sh tools/validate_rust.sh`는 exit0·`RUST VALIDATION: ALL OK`로 완료했다.
+workspace unit, 새 selfcheck와 기존 CLI/HTTP/WS·ES2017 UI, jobdeck80·renderer46,
+KLayout13 PX+2 phase-exact+14 style(jobs1/8)을 통과했다. 새 private valmini의 legacy
+oracle은 기존 macOS fork 대기를 피하도록 `--legacy --jobs 1`로 먼저 생성했다.
+scoped fmt·vendored clippy `--no-deps --all-targets -- -D warnings`도 통과했으며
+의존성의 기존 경고를 workspace 전체 무경고로 표현하지 않는다. 로그는
+`/private/tmp/floe-web-selfcheck-battery.log`와 같은 접두사의
+`integration2/clippy2/msrv/musl.log`에 보존한다. 검증용 임시 venv 링크만 제거하며
+원래 venv·승인된 합성 shared-default 게시 결과는 보존한다.
+
+다음 M4f-2는 **별도** Rust+내장 자산 portable 조립이다. 기존 GTK 패키지와 이름/출력을
+분리하고, offline build·대상 ELF/GLIBC 확인·무결성 manifest·원본 dependency/font notice를
+보존해야 한다. vendor crate 목록만으로 Rust 표준 라이브러리·정적 musl까지의 고지가
+완료됐다고 가정하지 않으며, 실제 toolchain/runtime 고지 출처도 확인한다.
+Linux 실행 검사를 할 수 없는 교차 조립은 미실행으로 표시하고 현장 검사를
+남긴다. 현재 단계에서는 tarball/GTK 은퇴/현장 수용 완료를 선언하지 않는다.

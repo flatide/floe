@@ -171,6 +171,7 @@ version = "0.1.0"
 dependencies = [
  "floe-app-core",
  "floe-web",
+ "floe-worker-client",
  "serde_json",
  "signal-hook",
  "tokio",
