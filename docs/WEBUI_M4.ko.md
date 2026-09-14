@@ -7,9 +7,9 @@ M0/G2·M3 현장 Firefox/ETX는 사용자 요청대로 보류다. 이 경계를 
 현재는 §14의 **owner viewport clip UI**, §15의 **표시 픽셀 PNG 복사/저장과
 overlay 전환**, §16의 **Rust layerprops 포맷·초기 가시성**, §17의
 **열린 세션 설정 Load/Save·필드별 스타일 적용**, §18/19의
-**공유 설계 기본값 게시 코어·owner 승인 API**까지 연결했다.
+**공유 설계 기본값 게시 코어·owner 승인 API**, §20의 **게시 preview·승인·결과 UI**까지 연결했다.
 각 절의 미연결 표기는 해당 선행 단계 당시의 범위다.
-나머지 내보내기·주석 저장·설계 기본값 게시 UI와 전체 조작/실제 브라우저 수용은 남아 있다.
+나머지 내보내기·주석 저장과 전체 조작/실제 브라우저 수용은 남아 있다.
 
 ## 1. M4a-1: 표시 scene에 고정한 native pick/snap
 
@@ -1779,3 +1779,81 @@ KLayout13 PX+2 phase-exact+14 style(jobs1/8), ES2017/전체 JS를 포함한다.
 renderd0.12.87은 유지하며, 실제 브라우저 게시 클릭·현장 공유 파일 시스템 수용은 아직 아니다.
 후속 M4d-4c는 별도 Publish design default 버튼, preview와 공유 영향 명시 승인,
 진행/취소·미확정 결과 확인·재접속 receipt 복원이다. 일반 Save의 의미를 바꾸지 않는다.
+
+## 20. M4d-4c — 공유 기본값 게시 UI
+
+`FLOE_FILL_EDIT` opt-in의 `design_defaults:true`에서만 **Shared design default** 패널을
+보인다. 기존 Load/Save와 시각·동작을 구분하며 기본 실행에서는 새 API polling도 없다.
+일반 Save는 파일 다운로드이고, 게시 UI에 파일 업로드·서버 경로 입력·자동 저장은 없다.
+
+### 확인과 승인
+
+1. 현재 연결·view ID·state revision과 미완료 편집이 없는 상태에서 **Review publication**을
+   누르면 읽기 전용 prepare만 호출한다. layout뿐 아니라 덱 mode·선택 levels도 서버 preview를
+   사용한다. basename, title, mode, rows/bytes, Create/Replace를 textContent로 표시한다.
+2. **전체 공유 파일 교체, 다른 사용자의 향후 open에도 영향, 열린 창에는 즉시 전파하지 않음**을
+   표시한다. 선택 level만 연 덱이면 그 행만 저장하고 나머지를 병합/보존하지 않음을 명시한다.
+   설명을 읽고 승인 체크를 켜야 **Publish shared default**가 활성화된다.
+3. 클릭 후 최신 ledger를 GET으로 재확인하고 같은 view/connection/revision·유효한30초
+   draft인지 다시 검사한다. 중간에 다른 게시가 있거나 local edit가 대기하면 다시 검토해야 한다.
+   승인 token을 revoke하지 않고 원래 seq/body로 POST한다.
+4. Dismiss/Escape, 만료, view/epoch/revision 변경은 미승인 draft를 폐기한다. 알려진 token은
+   best-effort revoke하며, 전송 중 끊겨 token을 모르면 서버 만료에 맡긴다. Escape는 시작
+   버튼으로 포커스를 돌린다. 이미 승인한 작업을 닫기/이동으로 취소한 것처럼 표시하지 않는다.
+
+custom bitmap 또는 Calibre에서 보존되지 않는 child 선폭 override는 Native JSON Save를
+안내한다. 파일 ACL/권한 등 코어의 다른 Unsupported도 근사 저장하지 않고 오류로 남긴다.
+시각 검증에서 확인한 긴 패널과 후속 Index 영역의 겹침은 layers section의 non-shrinking
+높이와 별도120..360px layer list로 수정했다. 전체 sidebar는 스크롤하며 canvas 폭은 유지한다.
+
+### 미확정 요청·종료
+
+승인 POST 직전에 원래 `{seq,view_id,state_rev,token,approve:true}`와 owner session ID를
+현재 origin의 `sessionStorage` 한 entry에 보관한다. full 설정 내용이나 서버 경로는 저장하지
+않고, 복구 입력은2KiB/schema/ID/u64를 검증한다. 다른 session 또는 손상된 entry는 전송하지
+않고 명시 확인을 요구한다. 이 entry는 서버 receipt의 영구 저장소나 새로운 권한이 아니다.
+
+응답 유실·408·5xx·잘못된 receipt는 **Outcome unknown**이다. 자동 GET/reload/bfcache 복원은
+새 게시를 하지 않는다. **Resolve original request**를 누른 경우에만 동일하게 승인했던 body를
+재전송한다. GET의 같은 seq 기록만으로 token/signature 일치를 단정하지 않는다. 확인된 승인
+응답은 entry를 지우고 서버 진행을 추적한다. 세션 내 frame/viewport가 바뀌어도 기존 요청의
+결과는 조회 가능하다. `operation_expired`는 과거 commit 가능성이 있어 미게시로 단정하지 않는다.
+
+history가 소실되거나 요청 record가 손상되어 확인할 수 없으면 사용자가 공유 파일을 확인했다는
+별도 체크 후 **Clear local record**를 선택할 수 있다. 이는 로컬 record만 버리며 서버 파일,
+history, 작업을 삭제하거나 새 게시를 보내지 않는다. 게시가 활성 상태일 때는 허용하지 않는다.
+storage 사용 불가/저장 실패 시 복구 제한을 표시한다. GET/reload만으로 자동 재시도하지 않는
+원칙은 같지만, storage가 없으면 페이지를 닫은 뒤 미확정 body를 복원할 수 없다.
+
+승인 결과는 queued/publishing/succeeded/failed/cancelled receipt로 표시한다. 취소 버튼은
+요청만 보내며, 이미 `published:true`면 성공을 유지한다. `directory_synced:false`는
+**게시 완료·내구성 미확인**이며 재게시를 권하지 않는다. 일반poll2.5초/활성poll0.5초,
+draft1·GET/prepare/write/cancel 각각1·revoke1+최신 대기token1로 유계다.
+페이지 종료는 XHR/timer를 정리하고 미확정 승인 record를 보존한다. 명시 End session은
+record를 지우고 기존 서버 logout/stop 정책을 따른다. actual commit 확인 없이 파일이
+롤백됐다고 주장하지 않는다. NFS/SMB·다른 GUI 캐시 교체의 §18/19 한계는 그대로다.
+
+### 검증
+
+`defaults.test.cjs`는 opt-in off·read-only preview·unchecked 승인 거부·만료/epoch/view/revision,
+늦은 prepare·revoke·Escape, 승인 뒤 응답 유실/페이지 종료·새로고침 시 같은 요청만 복구,
+409/408/expired history 구분·명시 local record clear·cancel/commit·dir-sync 경고,
+다른 tab의 seq 경합, u64>2^53·overflow, storage/schema·plain-text 표시를 고정한다.
+`client.test.cjs`의 별도 defaults 실행은 실제 app.js의 auth/capability·checkbox/승인·저장소
+정리·Escape를 연결하고, frame pixels/WS view.set을 새로 만들지 않는 것을 단언한다.
+기존 settings의 Unsupported 안내도 bitmap뿐 아니라 inherited-width override를 포함한다.
+새 JS는 ES2017 gate, 실제 bundle route와 content hash에 들어가며 defaults API 소스도
+bundle fingerprint에 포함한다. 전체 JS 게이트와 Rust app11·app-core156·web44,
+scoped fmt/all-target strict clippy, Rust1.89 Linux musl static-pie 링크가 통과했다.
+
+로컬 Chrome의 합성 valmini 사본에서 미리보기·체크 전 게시 비활성·30초 만료·Escape 폐기와
+포커스 복귀를 직접 확인하고 screenshot으로 패널 겹침 수정을 재확인했다. 미승인 상태에서는
+`.layerprops`와 `.lock`이 생성되지 않았다. 브라우저의 **실제 게시 클릭은 별도 승인 대기**이며,
+이 시각 검증을 성공 게시/취소 클릭의 실제 browser acceptance나 현장 Firefox/ETX 수용으로
+대체하지 않는다. 서버의 실제 파일 쓰기는 §19의 독립 합성 HTTP/native 테스트 범위다.
+전체 `sh tools/validate_rust.sh`는 `RUST VALIDATION: ALL OK`로 완료됐다.
+owner9·jobdeck80·renderer46, KLayout13 PX+2 phase-exact+14 style(jobs1/8)을 포함한다.
+배터리 실행 뒤 미확정 결과 확인 체크의 초기화를 보강했고, 최종 소스에서 전체 JS와
+launcher CLI 게이트·release bundle·Rust1.89 Linux musl 링크를 다시 통과했다.
+검증용 브라우저와 서버는 종료했으며 실제 공유 기본값 파일은 생성하지 않았다.
+M4 전체와 GTK 은퇴는 아직 완료가 아니다.

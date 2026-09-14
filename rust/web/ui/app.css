@@ -42,7 +42,7 @@ h2 { font-size: 11px; letter-spacing: 1.25px; text-transform: uppercase; font-we
 details > summary { cursor: pointer; font-size: 12px; color: #b4c3d8; }
 #level-options { margin-top: 11px; }
 #level-list { max-height: 170px; overflow-y: auto; }
-.layers-panel { display: flex; flex-direction: column; flex: 1; min-height: 200px; padding-bottom: 8px; }
+.layers-panel { display: flex; flex-direction: column; flex: 1 0 auto; min-height: 200px; padding-bottom: 8px; }
 .clip-panel { flex-shrink: 0; font-size: 12px; overflow-wrap: anywhere; }
 .clip-panel button { white-space: normal; }
 .clip-panel .button-row { flex-wrap: wrap; }
@@ -53,11 +53,21 @@ details > summary { cursor: pointer; font-size: 12px; color: #b4c3d8; }
 #clip-review { margin-top: 12px; padding: 9px; border: 1px solid #5e799d; border-radius: 4px; }
 #clip-options { max-height: 90px; overflow-y: auto; }
 #clip-status { white-space: pre-wrap; }
+#default-panel { border-top: 1px solid #42526a; margin: 14px 0; padding-top: 14px; flex-shrink: 0; }
+#default-panel .button-row { flex-wrap: wrap; }
+#default-panel button { white-space: normal; }
+#default-review, #default-uncertain { border: 1px solid #5e799d; padding: 9px; margin-top: 10px; border-radius: 4px; }
+#default-review > button, #default-uncertain > button { margin-top: 10px; width: 100%; }
+#default-panel .check { align-items: flex-start; line-height: 1.5; }
+#default-panel .check input { margin-top: 3px; }
+#default-target, #default-status, #default-note { white-space: pre-wrap; overflow-wrap: anywhere; }
+#default-target { font-size: 12px; }
+#default-levels { max-height: 100px; overflow-y: auto; }
 .clip-file { margin-top: 12px; padding-top: 4px; border-top: 1px solid #333c4a; }
 .section-title { display: flex; justify-content: space-between; align-items: center; margin-bottom: 7px; }
 .section-title h2 { margin: 0; }
 .text-button { min-height: 25px; background: transparent; border-color: transparent; font-size: 12px; padding: 2px 5px; color: #aac9f6; }
-.layers { flex: 1; min-height: 120px; overflow-y: auto; }
+.layers { flex: 1 0 120px; min-height: 120px; max-height: 360px; overflow-y: auto; }
 .layer-row { display: flex; align-items: center; gap: 7px; min-height: 34px; border-bottom: 1px solid #2d3542; }
 .layer-row.child { padding-left: 15px; }
 .layer-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }

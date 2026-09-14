@@ -19,6 +19,7 @@
   <script defer src="/assets/@@BUNDLE@@/drc-build.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc.js"></script>
   <script defer src="/assets/@@BUNDLE@@/settings.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/defaults.js"></script>
   <script defer src="/assets/@@BUNDLE@@/app.js"></script>
 </head>
 <body>
@@ -102,8 +103,27 @@
           <div class="button-row"><button id="settings-load" disabled>Load settings…</button><button id="settings-cancel" disabled>Cancel</button></div>
           <input id="settings-file" type="file" accept=".layerprops,.json" hidden>
           <div class="button-row"><select id="settings-format" aria-label="Settings save format"><option value="native">Native JSON (lossless)</option><option value="calibre">Calibre layerprops</option></select><button id="settings-save" disabled>Save settings…</button></div>
-          <p class="note">Session only. Native restores the same layer/group table; Calibre applies matching rows and flattens inherited styles on save. No design defaults are written.</p>
+          <p class="note">Load applies to this session; Save downloads a file. Native restores the same layer/group table; Calibre flattens inherited styles. These buttons do not write design defaults.</p>
           <p id="settings-status" role="status" class="note"></p>
+        </div>
+        <div id="default-panel" hidden>
+          <h2>Shared design default</h2>
+          <div class="button-row"><button id="default-prepare" type="button" disabled>Review publication…</button><button id="default-dismiss" type="button" disabled>Dismiss</button></div>
+          <div id="default-review" hidden>
+            <p id="default-target"></p><p id="default-levels" class="note"></p>
+            <p class="note">This writes the shared Calibre layerprops file for future opens, including other users. It replaces the whole file, not a merge. Existing windows are unchanged.</p>
+            <label class="check"><input id="default-consent" type="checkbox">I approve writing this shared default.</label>
+            <button id="default-approve" type="button" class="primary" disabled>Publish shared default</button>
+          </div>
+          <p id="default-status" role="status" class="note"></p>
+          <div class="button-row"><button id="default-cancel" type="button" hidden>Request cancel</button><button id="default-refresh" type="button">Refresh receipt</button></div>
+          <div id="default-uncertain" hidden>
+            <p class="note">Outcome unknown. Resolve sends only the original approved request. Do not start a new publication to retry it.</p>
+            <button id="default-resolve" type="button">Resolve original request</button>
+            <label class="check"><input id="default-checked" type="checkbox">I checked the shared file and want to clear this unresolved local record.</label>
+            <button id="default-forget" type="button" disabled>Clear local record</button>
+          </div>
+          <p id="default-note" class="note" role="status"></p>
         </div>
         <div class="section-title"><h2>Layers</h2><div><button id="layers-all" class="text-button" disabled>All</button><button id="layers-none" class="text-button" disabled>None</button></div></div>
         <div id="layers" class="layers"><p class="empty-list">Open a layout to see its layers.</p></div>

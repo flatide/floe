@@ -219,10 +219,11 @@ UI-03의 layerprops 공통 codec·초기 가시성은 M4d-2에서 연결했다([
 색/fill뿐 아니라 file/stem default의 visibility를 첫 frame 전에 적용하고, 명시된
 startup selection이 우선한다. M4d-3에서 열린 세션 Load/Save와 custom bitmap·fill/width
 상속을 보존하는 native JSON을 연결했다([M4 §17](WEBUI_M4.ko.md)). Calibre 형식은
-기존 partial import와 현재 표시 스타일 export를 지원한다. 기본값 게시 UI와 실제 브라우저
+기존 partial import와 현재 표시 스타일 export를 지원한다. 실제 브라우저의 파일 게시 클릭·
 file chooser/다운로드 수용은 남아 있다. M4d-4a는 기본값 게시 Rust 코어와 GTK 경로/내용
 오라클, M4d-4b는 launcher opt-in·owner 승인/취소/결과 API를 추가했다
-([M4 §18/19](WEBUI_M4.ko.md)). 일반 Save는 공유 기본값을 쓰지 않는다.
+([M4 §18/19](WEBUI_M4.ko.md)). M4d-4c는 opt-in 게시 UI와 공유 영향 승인·미확정 요청의
+새로고침 복구를 연결했다(§20). 일반 Save는 공유 기본값을 쓰지 않는다.
 개인 palette cache는 현재 GTK에도 없으며
 자동 저장을 새로 만들지 않는다.
 

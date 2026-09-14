@@ -20,7 +20,7 @@
             xhr.onerror=function(){failure('Settings service unavailable. Nothing was retried.');};xhr.onabort=function(){failure('Settings request cancelled.');};xhr.ontimeout=function(){failure('Settings request timed out. Nothing was retried.');};
             xhr.onload=function(){j.xhr=null;try{
                 if(xhr.responseText.length>MAX||new o.Encoder().encode(xhr.responseText).length>MAX){throw new Error('Settings reply exceeds 4 MiB.');}
-                if(xhr.status<200||xhr.status>=300){let message='Settings request failed.';try{const p=JSON.parse(xhr.responseText);message=p.error==='unsupported'?'Custom bitmap cannot be saved as Calibre. Choose Native JSON.':o.message(p.error);}catch(_){}throw new Error(message);}
+                if(xhr.status<200||xhr.status>=300){let message='Settings request failed.';try{const p=JSON.parse(xhr.responseText);message=p.error==='unsupported'?'Custom bitmaps or inherited-width overrides cannot be saved as Calibre. Choose Native JSON.':o.message(p.error);}catch(_){}throw new Error(message);}
                 if(xhr.getResponseHeader('Content-Type')!==(method==='GET'?'text/plain; charset=utf-8':'application/json')){throw new Error('Invalid settings reply.');}resolve(xhr.responseText);
             }catch(e){reject(e);}};xhr.send(text===undefined?null:text);
         });}

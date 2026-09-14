@@ -37,6 +37,10 @@ async fn asset(Path((bundle, name)): Path<(String, String)>) -> Response {
             "text/javascript; charset=utf-8",
             include_str!("../ui/settings.js"),
         ),
+        "defaults.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("../ui/defaults.js"),
+        ),
         "gestures.js" => (
             "text/javascript; charset=utf-8",
             include_str!("../ui/gestures.js"),

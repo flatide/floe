@@ -81,7 +81,11 @@ preview는 basename/mode/levels/title/rows/bytes/교체 여부·30초 토큰을 
 `GET /api/v1/defaults[/{seq}]`, `POST /api/v1/defaults/{seq}/cancel`,
 `POST /api/v1/defaults/revoke {token}`로 유계 receipt 조회·취소·미승인 draft 폐기가 가능하다.
 seq는 owner open/index와 다른 namespace이며 같은 body 재전송은 한 번만 실행된다.
-게시 API의 상태·파일 보호·예산과 UI 후속 계약은 [M4 §19](WEBUI_M4.ko.md)를 따른다.
+게시 API의 상태·파일 보호·예산은 [M4 §19](WEBUI_M4.ko.md)를 따른다.
+M4d-4c의 UI(§20)는 preview와 체크 승인을 분리하며, 승인 POST 직전의 원래 요청을
+owner session에 고정해 sessionStorage에 하나만 보관한다. 새로고침/GET은 게시 동의가 아니다.
+미확정 상태의 Resolve 클릭만 같은 seq/body를 재전송하고, 게시 여부를 알 수 없는
+`operation_expired`나408을 미게시로 단정하지 않는다. token/seq는 URL에 넣지 않는다.
 게시 후 디렉터리 sync 실패는 committed 경고이지 재시도 가능한 미게시가 아니다.
 receipt는 서버 메모리 수명만 보장하며 프로세스 재시작 뒤 자동 재시도 근거가 아니다.
 2026-09-13 M1a-1 `rust/worker-client`와 M1a-2a/b `app/app-core`의 일반 index·info/단일 render/probe를

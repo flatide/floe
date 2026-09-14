@@ -12,7 +12,7 @@
     let gesture = null, dragShift = null, lastPlacement = null;
     let drcPanel = null, displayProjection = null, frozenProjection = null;
     let inspector = null, measurement = null, clipper = null, snapshots = null, overlayMode = 'all', pickedPairs = [];
-    let settings = null;
+    let settings = null, defaults = null;
     const rulerHistory = window.FloeRulers.history();
     let ackedFrames = {foreground: null, margin: null};
     const sessionKey = 'floe-session:' + location.origin;
@@ -195,6 +195,7 @@
         el('close').disabled = !currentId || submitting || ownerBusy;
         el('index').disabled = submitting || ownerBusy;
         if (settings) { settings.changed(); }
+        if (defaults) { defaults.changed(); }
         if (drcPanel) { drcPanel.contextChanged(); }
         if (inspector) { inspector.changed(); }
         if (measurement) { measurement.changed(); }
@@ -566,6 +567,7 @@
         await clipper.init(caps.exports);
         snapshots.init(caps.snapshot_png);
         settings.capabilities(caps.layer_settings);
+        await defaults.init(caps.design_defaults);
         sourceSelection();
         const operations = await operationState();
         await restore();
@@ -591,6 +593,7 @@
         if (clipper) { clipper.stop(); }
         if (snapshots) { snapshots.stop(); }
         if (settings) { settings.stop(); }
+        if (defaults) { defaults.stop(true); }
         stopped = true; disconnect(); if (operationTimer) { clearTimeout(operationTimer); }
         try { await http('DELETE', '/api/v1/session'); } catch (e) { report(e); }
         try { sessionStorage.removeItem(sessionKey); } catch (_) { /* storage may be disabled */ }
@@ -781,16 +784,21 @@
             ['query-canvas','drc-canvas','ruler-canvas'].forEach(function(id){const c=el(id);if(!c.hidden){layers.push({canvas:c,offset:[0,0]});}});
             return {pixels:p.pixels.slice(),layers:layers};
         }});
+    function settingsContext(){return state?{id:currentId,epoch:epoch,rev:state.state_rev,ready:!stopped&&!document.hidden&&live()&&socket&&socket.readyState===WebSocket.OPEN,
+        idle:!inflight&&!accepted&&!queue.length&&!submitting&&!ownerBusy}:null;}
+    defaults=window.FloeDefaults.bind({el:el,protocol:P,query:window.FloeQuery,http:http,context:settingsContext,
+        session:function(){return auth?auth.session_id:'';},now:function(){return Date.now();},setTimeout:setTimeout.bind(window),clearTimeout:clearTimeout.bind(window),
+        loadPending:function(){return sessionStorage.getItem('floe-default-pending');},
+        savePending:function(value){if(value===null){sessionStorage.removeItem('floe-default-pending');}else{sessionStorage.setItem('floe-default-pending',value);}}});
     settings=window.FloeSettings.bind({el:el,window:window,document:document,XHR:XMLHttpRequest,Blob:Blob,Encoder:TextEncoder,Decoder:TextDecoder,
         csrf:function(){return auth?auth.csrf:'';},message:message,edit:edit,setTimeout:setTimeout.bind(window),clearTimeout:clearTimeout.bind(window),
-        context:function(){return state?{id:currentId,epoch:epoch,rev:state.state_rev,ready:!stopped&&!document.hidden&&live()&&socket&&socket.readyState===WebSocket.OPEN,
-            idle:!inflight&&!accepted&&!queue.length&&!submitting&&!ownerBusy}:null;}});
-    document.addEventListener('visibilitychange', function () { settings.changed(); if (document.hidden) { finishDecode(); inspector.changed(); measurement.changed(); clipper.changed(); } else if (live() && !stopped) { connect(); } });
+        context:settingsContext});
+    document.addEventListener('visibilitychange', function () { settings.changed(); defaults.changed(); if (document.hidden) { finishDecode(); inspector.changed(); measurement.changed(); clipper.changed(); } else if (live() && !stopped) { connect(); } });
     window.addEventListener('blur', function () { inspector.move(NaN, NaN); measurement.interrupt(); });
     setInterval(function () { if (socket && socket.readyState === WebSocket.OPEN && epoch) { try { send({type: 'ping'}); } catch (e) { report(e); } } }, 10000);
-    window.addEventListener('pagehide', function () { disconnect(); inspector.stop(); measurement.stop(); clipper.stop(); snapshots.stop(); settings.stop(); clearTimeout(operationTimer); clearTimeout(resizeTimer); if (sizeObserver) { sizeObserver.disconnect(); } drcPanel.stop(); });
+    window.addEventListener('pagehide', function () { disconnect(); inspector.stop(); measurement.stop(); clipper.stop(); snapshots.stop(); settings.stop(); defaults.stop(); clearTimeout(operationTimer); clearTimeout(resizeTimer); if (sizeObserver) { sizeObserver.disconnect(); } drcPanel.stop(); });
     window.addEventListener('pageshow', function (event) {
-        if (event.persisted && auth && !stopped) { inspector.resume(); measurement.resume(); clipper.resume(); snapshots.resume(); settings.resume(); if (sizeObserver) { sizeObserver.observe(viewport); } drcPanel.resume().then(operationState).then(restore).then(resized).catch(report); }
+        if (event.persisted && auth && !stopped) { inspector.resume(); measurement.resume(); clipper.resume(); snapshots.resume(); settings.resume(); defaults.resume(); if (sizeObserver) { sizeObserver.observe(viewport); } drcPanel.resume().then(operationState).then(restore).then(resized).catch(report); }
     });
     start().catch(function (e) { connection('Not connected', false); report(e); el('empty-message').textContent = e.message; });
 }());

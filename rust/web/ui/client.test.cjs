@@ -8,6 +8,7 @@ const DRC = require('./drc.js'), drcDisplays = [], drcClicks = [], observers = [
 const Clip=require('./clip.js'),clipEnabled=process.env.FLOE_TEST_CLIP==='1',forms=[];
 const snapshotEnabled=process.env.FLOE_TEST_SNAPSHOT==='1',captures=[],copies=[],downloads=[];
 const settingsEnabled=process.env.FLOE_TEST_SETTINGS==='1';
+const defaultsEnabled=process.env.FLOE_TEST_DEFAULTS==='1';let defaultOp=null;
 let textSelection=null;
 let clipController,clipOp=null,clipFile=null;
 function clipState(){return {available:true,kind:'exact_clip',jobs_default:4,jobs_min:1,jobs_max:16,
@@ -66,8 +67,14 @@ class XHR {
         const settingsPath=this.path.includes('/settings/');
         const body=text===null?null:settingsPath?text:JSON.parse(text); requests.push({method:this.method,path:this.path,body});
         let value, status=200;
-        if (this.path==='/api/v1/session/exchange') {value={csrf:'c'.repeat(64),bundle,protocol:1};}
-        else if(this.path==='/api/v1/capabilities') {value={protocol:1,bundle,exports:clipEnabled,snapshot_png:snapshotEnabled,layer_settings:settingsEnabled};}
+        if (this.path==='/api/v1/session/exchange') {value={csrf:'c'.repeat(64),session_id:'c'.repeat(64),bundle,protocol:1};}
+        else if(this.path==='/api/v1/capabilities') {value={protocol:1,bundle,exports:clipEnabled,snapshot_png:snapshotEnabled,layer_settings:settingsEnabled,design_defaults:defaultsEnabled};}
+        else if(this.path==='/api/v1/defaults/prepare') {value={token:'d'.repeat(64),view_id:body.view_id,state_rev:body.state_rev,name:'synthetic.oas.layerprops',title:'synthetic',mode:'level',levels:null,rows:1,bytes:'24',replaces_existing:false,expires_in_ms:'30000',scope:'shared_design_default',affects:'future_opens'};}
+        else if(this.path==='/api/v1/defaults/revoke') {value=null;status=204;}
+        else if(this.path==='/api/v1/defaults') {
+            if(this.method==='POST'){defaultOp={seq:body.seq,kind:'design_default',phase:'succeeded',view_id:body.view_id,state_rev:body.state_rev,name:'synthetic.oas.layerprops',published:true,directory_synced:true};value=defaultOp;status=202;}
+            else{value={available:true,kind:'design_default',scope:'shared_design_default',jobs:1,max_bytes:'4194304',operations:{last_seq:defaultOp?defaultOp.seq:'0',active:null,history:defaultOp?[defaultOp]:[]}};}
+        }
         else if(settingsPath) {value=this.method==='POST'?{view_id:viewId,state_rev:'1',prepared_token:'d'.repeat(64),rows:0,malformed:0}:'{"format":"floe.layers"}';}
         else if(this.path==='/api/v1/exports') {
             if(this.method==='POST') {clipFile={id:body.seq,bytes:'64',expires_in_ms:'600000',name:'floe-clip-'+body.seq+'.oas'};
@@ -106,6 +113,7 @@ const window={FloeProtocol:P,FloeQuery:require('./query.js'),FloeInspect:require
 const storage=new Map();
 window.isSecureContext=true;window.ClipboardItem=class {constructor(data){this.data=data;}};
 window.FloeSettings=require('./settings.js');
+window.FloeDefaults=require('./defaults.js');
 window.FileReader=class {readAsArrayBuffer(file){this.result=new TextEncoder().encode(file.text).buffer;setImmediate(()=>this.onload());}abort(){if(this.onabort){this.onabort();}}};
 window.navigator={clipboard:{write(items){copies.push(items);return Promise.all(items.map(i=>i.data['image/png']));}}};
 window.getSelection=()=>textSelection;
@@ -148,6 +156,17 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     assert.equal(node('canvas').style.width,'100px');
     assert.equal(node('snapshot-panel').hidden,!snapshotEnabled);
     assert.equal(node('settings-panel').hidden,!settingsEnabled);
+    assert.equal(node('default-panel').hidden,!defaultsEnabled);
+    if(defaultsEnabled){
+        assert(!node('default-prepare').disabled);node('default-prepare').onclick();await wait(()=>!node('default-review').hidden);
+        assert.equal(requests.filter(r=>r.path==='/api/v1/defaults'&&r.method==='POST').length,0);assert(node('default-approve').disabled);
+        node('default-consent').checked=true;node('default-consent').onchange();node('default-approve').onclick();
+        await wait(()=>node('default-status').textContent.startsWith('Published'));
+        assert.equal(requests.filter(r=>r.path==='/api/v1/defaults'&&r.method==='POST').length,1);assert.equal(storage.get('floe-default-pending'),undefined);
+        assert.equal(draws.length,1,'shared publication redrew native pixels');assert.equal(ws.sent.filter(m=>m.type==='view.set').length,0);
+        await wait(()=>!node('default-prepare').disabled);node('default-prepare').onclick();await wait(()=>!node('default-review').hidden);
+        node('default-review').onkeydown({key:'Escape',preventDefault(){},stopPropagation(){}});assert(node('default-review').hidden);
+    }
     if(settingsEnabled){
         assert(!node('settings-load').disabled);node('settings-load').onclick();node('settings-file').files=[{size:0,text:''}];node('settings-file').onchange();
         await wait(()=>ws.sent.some(m=>m.type==='view.apply'));const command=ws.sent.find(m=>m.type==='view.apply');assert.equal(command.token,'d'.repeat(64));assert.equal(command.body,undefined);

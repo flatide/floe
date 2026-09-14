@@ -11,7 +11,7 @@ const options = {ecmaVersion: 2017, sourceType: 'script'};
 const settings = spawnSync(process.execPath, [path.join(ui, 'settings.test.cjs')], {stdio:'inherit',timeout:15000});
 assert.equal(settings.status, 0, 'settings.test.cjs: ' + settings.error);
 acorn.parse(fs.readFileSync(path.join(ui, 'settings.js'), 'utf8'), options);
-for (const file of ['protocol.js', 'gestures.js', 'query.js', 'inspect.js', 'measure.js', 'clip.js', 'snapshot.js', 'panel-state.js', 'rulers.js', 'drc-groups.js', 'drc-build.js', 'drc.js', 'app.js']) {
+for (const file of ['protocol.js', 'gestures.js', 'query.js', 'inspect.js', 'measure.js', 'clip.js', 'snapshot.js', 'defaults.js', 'panel-state.js', 'rulers.js', 'drc-groups.js', 'drc-build.js', 'drc.js', 'app.js']) {
     acorn.parse(fs.readFileSync(path.join(ui, file), 'utf8'), options);
 }
 for (const newer of ['const x = a?.b;', 'const x = 1n;', 'const x = {...a};']) {
@@ -21,7 +21,7 @@ for (const file of ['protocol.test.cjs', 'gestures.test.cjs', 'client.test.cjs',
     const run = spawnSync(process.execPath, [path.join(ui, file)], {stdio: 'inherit', timeout: 15000});
     assert.equal(run.status, 0, file + ': ' + run.error);
 }
-for (const file of ['drc-build.test.cjs', 'drc-build-panel.test.cjs', 'clip.test.cjs', 'snapshot.test.cjs']) {
+for (const file of ['drc-build.test.cjs', 'drc-build-panel.test.cjs', 'clip.test.cjs', 'snapshot.test.cjs', 'defaults.test.cjs']) {
     const build = spawnSync(process.execPath, [path.join(ui, file)], {stdio:'inherit',timeout:15000});
     assert.equal(build.status, 0, file + ': ' + build.error);
 }
@@ -37,6 +37,8 @@ const snapshotClient = spawnSync(process.execPath, [path.join(ui, 'client.test.c
 assert.equal(snapshotClient.status, 0, 'snapshot full client: ' + snapshotClient.error);
 const settingsClient = spawnSync(process.execPath, [path.join(ui, 'client.test.cjs')], {stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_SETTINGS:'1'}});
 assert.equal(settingsClient.status, 0, 'settings full client: ' + settingsClient.error);
+const defaultsClient = spawnSync(process.execPath, [path.join(ui, 'client.test.cjs')], {stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_DEFAULTS:'1'}});
+assert.equal(defaultsClient.status, 0, 'defaults full client: ' + defaultsClient.error);
 const shared = spawnSync(process.execPath, [path.join(ui, 'drc-cd.test.cjs')], {stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_SHARED_RULERS:'1'}});
 assert.equal(shared.status, 0, 'shared CD rulers: ' + shared.error);
 const ascii = spawnSync(process.execPath, [path.join(ui, 'drc.test.cjs')], {stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_ASCII:'1'}});
