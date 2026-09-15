@@ -1,8 +1,8 @@
 # 웹 bitmap 슬롯 이관 계약
 
-2026-09-16, M4g-16b. [G4 잔여 감사](WEBUI_G4_AUDIT.ko.md)의 UI-03 개발 도구
-계약과 이관 기록이다. §1~3은 M4g-16a 감사 시점, §4가 현재 구현 상태다.
-**Rust 모델·설정 v2는 연결했고 슬롯 편집 API/UI는 아직 연결하지 않았다.**
+2026-09-16, M4g-16c. [G4 잔여 감사](WEBUI_G4_AUDIT.ko.md)의 UI-03 개발 도구
+계약과 이관 기록이다. §1~4는 앞 단계 기록이며 §5가 현재 구현 상태다.
+**Rust 모델·설정 v2·슬롯 API는 연결했다. 웹 프리셋 참조 할당/편집 UI는 아직 남는다.**
 
 ## 1. 이관 전 코드에서 확인한 의미(M4g-16a)
 
@@ -144,3 +144,39 @@ controller 검사는 stale CAS·미사용 슬롯의 margin 유지·사용 슬롯
 기존 owner HTTP gate에는 v2 준비의 무변경·승인 적용/다운로드·고정 슬롯 거부·
 Calibre 손실 거부·v1 복원·source/cache 무변경을 추가했다. 최종 실행 결과는
 [M4 §67](WEBUI_M4.ko.md)에 기록한다. API/UI·실제 브라우저 수용은 여전히 미완료다.
+
+## 5. M4g-16c — 슬롯 조회·할당·편집 transport
+
+서버 API를 먼저 연결해 다음 웹 편집기의 권한과 revision 경계를 고정했다.
+기존 `GET /api/v1/palette/presets`는 계속 내장 기본 표이며 세션 편집으로 변하지 않는다.
+새 `GET /api/v1/views/{id}/fill-slots/{key}`는 열린 view의 전체20슬롯 값을 읽는다.
+응답은 `{version:1,view_id,fill_slots_key,editable,fills:[{name,rows},…]}`다.
+모든 조회는 owner cookie/CSRF·host/origin 검사를 거치며 state/renderer/파일을 변경하지 않는다.
+
+- snapshot의 `fill_slots_key`는 sparse override 표의 SHA-1 **캐시 힌트**다. 최대18개
+  슬롯에만 비례하고 전체 레이어/배치를 순회하지 않는다. 내장 표 변경은 bundle 식별에
+  포함된다. pan/색/슬롯 참조 할당은 힌트를 바꾸지 않으므로 UI가 매 프레임 표를 다시
+  읽을 필요가 없다. 다른 key는409, 닫힌/다른 view는404, 무효 key는400이다.
+- `style_batch.fill_slot`은 이제 wire에서 받으며 보통의 스타일 할당이다. 개발 권한 없이
+  사용할 수 있다. `fill`과 동시 지정·미정의 이름·null은 거부한다. 기존 값 기반 경로는
+  계속 직접 값이며 참조를 자동 생성하지 않는다.
+- 편집 전용 `view.fill_slot`은 `{seq,connection_epoch,view_id,base_state_rev,
+  body:{name,rows:[u16;16]}}`를 받는다. `FLOE_FILL_EDIT` nonempty로 trusted launcher가
+  활성화하지 않으면 `fill_edit_disabled`다. 고정 solid/clear·unknown/무효 bitmap과
+  4096초과 fan-out은 원자 거부한다. 다른 view/연결은 기존 WS 계약대로 종료한다.
+  stale state는 오류이며 자동 재전송하지 않는다. ACK 뒤 snapshot을 기준으로 UI를 갱신해야 한다.
+- `view.set`의 일반 Patch에는 `fill_slot_edit`를 추가하지 않았다. 따라서 startup/open/
+  CLI forward가 개발 opt-in을 우회하는 편집 경로가 되지 않는다. 기존 Native JSON v2의
+  명시 import는 별도의 설정 기능으로 유지한다. 개발 opt-in은 임의 bitmap 입력 자체의
+  보안 경계가 아니라 **공유 슬롯 편집 명령의 launcher 허용 범위**다.
+- 표가 예전 값으로 되돌아가 cache key가 같아져도 옛 state revision의 편집은 거부한다.
+  캐시 힌트·슬롯 이름·UI capability 어느 것도 owner 인증이나 전체 state CAS를 대신하지 않는다.
+- `Gateway::enable_fill_slot_edit`는 메모리 도구만 허용한다. 같은 env가 기존 공유
+  기본값 게시 기능도 켜지만 그쪽 preview/별도 승인은 유지한다. 편집 명령이 `.def`,
+  layerprops, reviewer sidecar, 사용자 source/cache를 쓰지 않는다.
+
+실제 HTTP/WS와 native renderer gate는 기본 off 거부/일반 참조 할당 허용, 인증·고정
+슬롯·stale·다른 view/연결 거부, unused 슬롯 무렌더, 같은 bitmap의 직접 값 분리,
+참조 변경과 byte-exact 픽셀 복원, 불변 기본 표 및 source/cache 무변경을 검사한다.
+웹 프리셋은 아직 값 기반이고16×16 draft 편집기는 다음 단계다. 실제 브라우저 수용을
+이 API gate로 대체하지 않는다. 실행 결과는 [M4 §68](WEBUI_M4.ko.md)에 기록한다.

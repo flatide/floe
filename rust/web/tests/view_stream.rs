@@ -1,5 +1,7 @@
 //! Real HTTP/WS + native daemon. The launcher gate supplies private valmini.
 include!("support/view_harness.rs");
+#[path = "support/fill_slots.rs"]
+mod fill_slots;
 
 #[tokio::test]
 #[ignore = "run tools/validate_view_stream.py with a private synthetic fixture"]

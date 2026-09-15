@@ -94,7 +94,8 @@ source text and raw worker lines; synchronous stderr can affect timing.
 FLOE_JOBDECK_LEVELS=all|ask|N,N... supplies the default level choice (--level wins).
 --perf-baseline leaves decoded caches and geometry cut unchanged; no live LOD toggle.
 It may start an independent empty window; its display settings apply to the first file choice.
-FLOE_FILL_EDIT (nonempty) explicitly enables approved shared design-default publication.
+FLOE_FILL_EDIT (nonempty) enables session bitmap-slot editing and, separately,
+shared design-default publication with its own preview and explicit approval.
 The session link is a one-time credential; do not share or log it.";
 
 #[derive(Debug)]
@@ -768,6 +769,7 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
         .map_err(Error::input)?;
     }
     if std::env::var_os("FLOE_FILL_EDIT").is_some_and(|v| !v.is_empty()) {
+        Gateway::enable_fill_slot_edit(&mut gate).map_err(Error::input)?;
         Gateway::enable_design_defaults(
             &mut gate,
             std::slice::from_ref(&session.path),

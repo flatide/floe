@@ -242,6 +242,8 @@ pub struct StyleBatchDto {
     #[serde(default)]
     fill: Field<FillDto>,
     #[serde(default)]
+    fill_slot: Field<String>,
+    #[serde(default)]
     width: Field<u8>,
     #[serde(default)]
     width_step: Field<i8>,
@@ -265,7 +267,7 @@ impl StyleBatchDto {
             collapsed: self.collapsed,
             color: delta.color,
             fill: delta.fill,
-            fill_slot: None,
+            fill_slot: self.fill_slot.optional(),
             width: delta
                 .width
                 .map(WidthEdit::Set)
@@ -463,7 +465,7 @@ pub fn snapshot(s: &Snapshot, m: &Model, view_id: &str, connection_epoch: &str) 
     };
     let capabilities = json!({"labels":!m.deck,"frames":true,"margin":s.margin_enabled,"query":!m.deck,"clip":!m.deck,"mode":m.deck,"edit_source":false});
     let mut out = json!({"type":"snapshot","view_id":view_id,"connection_epoch":connection_epoch,"dataset_revision":m.dataset_revision.to_string(),
-        "state_rev":s.state_rev.to_string(),"render_rev":s.render_rev.to_string(),"render_key":s.render_key.to_string(),"worker_epoch":s.worker_epoch.to_string(),
+        "state_rev":s.state_rev.to_string(),"render_rev":s.render_rev.to_string(),"render_key":s.render_key.to_string(),"fill_slots_key":v.fill_slots_key(),"worker_epoch":s.worker_epoch.to_string(),
         "bbox_dbu":v.viewport.bbox.map(|n|n.to_string()),"dbu_um":m.dbu.to_string(),"pixels":[v.viewport.width,v.viewport.height],
         "camera_um":camera_um(v.viewport.bbox,m.dbu),
         "depth":v.depth.map_or("full".into(),|n|n.to_string()),"max_depth":s.max_depth.map(|n|n.to_string()),
@@ -673,8 +675,9 @@ mod tests {
             json!({"pairs":[[3,1]],"width":3,"collapsed":null}),
             json!({"pairs":[[3,1]],"width":3,"out":"secret"}),
             json!({"pairs":[[3,1]],"fill":{"kind":"pattern","rows":[1,2]}}),
-            // Core groundwork is not an advertised slot-edit transport yet.
-            json!({"pairs":[[3,1]],"fill_slot":"brick"}),
+            json!({"pairs":[[3,1]],"fill_slot":null}),
+            json!({"pairs":[[3,1]],"fill_slot":"unknown"}),
+            json!({"pairs":[[3,1]],"fill_slot":"brick","fill":{"kind":"clear"}}),
         ] {
             assert!(
                 serde_json::from_value::<PatchDto>(json!({"style_batch":body}))
@@ -693,6 +696,16 @@ mod tests {
             "fill_slot_edit":{"name":"brick","rows":vec![1;16]}
         }))
         .is_err());
+        // Slot editing has its own opt-in command, never an open/startup patch.
+        let b = serde_json::from_value::<PatchDto>(json!({
+            "style_batch":{"pairs":[[3,1]],"fill_slot":"brick"}
+        }))
+        .unwrap()
+        .core()
+        .unwrap()
+        .style_batch
+        .unwrap();
+        assert_eq!(b.fill_slot.as_deref(), Some("brick"));
     }
     #[test]
     fn palette_batch_wire_is_strict_and_bounded() {

@@ -80,6 +80,14 @@ impl TryFrom<String> for Disposition {
 #[derive(Deserialize)]
 #[serde(tag = "type", deny_unknown_fields)]
 enum Control {
+    #[serde(rename = "view.fill_slot")]
+    FillSlot {
+        seq: String,
+        connection_epoch: String,
+        view_id: String,
+        base_state_rev: String,
+        body: crate::fill_slots::Edit,
+    },
     #[serde(rename = "view.clip.prepare")]
     ClipPrepare {
         seq: String,
@@ -341,7 +349,7 @@ pub(crate) async fn socket(
                     _=>break,
                 };
                 let control=match serde_json::from_str::<Control>(&text){Ok(c)=>c,Err(_)=>break};
-                let value=match &control {Control::Ping{seq}|Control::Set{seq,..}|Control::Apply{seq,..}|Control::Ack{seq,..}|Control::Query{seq,..}|Control::CancelQuery{seq,..}|Control::Measure{seq,..}|Control::MeasureSelection{seq,..}|Control::ClipPrepare{seq,..}=>view::counter(seq)};
+                let value=match &control {Control::Ping{seq}|Control::Set{seq,..}|Control::FillSlot{seq,..}|Control::Apply{seq,..}|Control::Ack{seq,..}|Control::Query{seq,..}|Control::CancelQuery{seq,..}|Control::Measure{seq,..}|Control::MeasureSelection{seq,..}|Control::ClipPrepare{seq,..}=>view::counter(seq)};
                 let Ok(n)=value else {break;};if n<=seq{break;}seq=n;
                 match control {
                     Control::Ping{seq}=>{if reply(&tx,json!({"type":"pong","seq":seq})).is_err(){break;}}
@@ -382,6 +390,19 @@ pub(crate) async fn socket(
                         if connection_epoch!=epoch||view_id!=attached.id{break;}
                         let event=queries.measure_selection(&seq,*body,&attached.id,&epoch).unwrap_or_else(|code|json!({"type":"error","seq":seq,"code":code}));
                         if reply(&tx,event).is_err(){break;}
+                    }
+                    Control::FillSlot{seq,connection_epoch,view_id,base_state_rev,body}=>{
+                        if connection_epoch!=epoch||view_id!=attached.id{break;}
+                        let Ok(base)=view::counter(&base_state_rev) else {break;};
+                        let outcome=body.patch(gate.fill_slot_edit).and_then(|patch|
+                            controller.edit(base,patch).map_err(|e|if e.kind==floe_app_core::ErrorKind::Busy{"stale_state"}else{view::safe_error(e.kind)}));
+                        let state=controller.snapshot();
+                        let event=match outcome {
+                            Ok(accepted)=>json!({"type":"accepted","seq":seq,"state_rev":accepted.state_rev.to_string(),"render_rev":accepted.render_rev.to_string()}),
+                            Err(code)=>json!({"type":"error","seq":seq,"code":code}),
+                        };
+                        if reply(&tx,event).is_err() || reply(&tx,view::snapshot(&state,&controller.model,&attached.id,&epoch)).is_err(){break;}
+                        last_state=state_marker(&state);
                     }
                     Control::Set{seq,connection_epoch,view_id,base_state_rev,body}=>{
                         if connection_epoch!=epoch||view_id!=attached.id{break;}

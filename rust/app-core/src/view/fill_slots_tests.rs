@@ -150,6 +150,52 @@ fn model(deck: bool, pairs: &[(u32, u32)]) -> Model {
         property_names: pairs.iter().map(|&p| (p, "MASK".into())).collect(),
     }
 }
+
+#[test]
+fn cache_hint_tracks_table_not_assignments_and_survives_settings_roundtrip() {
+    let m = model(false, &[(3, 0), (3, 1)]);
+    let s = ViewState::initial(&m, 100, 100).unwrap();
+    let key = s.fill_slots_key();
+    assert_eq!(key.len(), 40);
+    let bound = s
+        .edit(
+            &m,
+            Patch {
+                style_batch: Some(StyleBatch {
+                    pairs: vec![(3, 0)],
+                    fill_slot: Some("brick".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(bound.fill_slots_key(), key);
+    let edited = slot(&bound, &m, "brick", [1; 16]);
+    assert_ne!(edited.fill_slots_key(), key);
+    assert_ne!(
+        edited.fill_slots_key(),
+        slot(&bound, &m, "plus", [1; 16]).fill_slots_key()
+    );
+    assert_eq!(
+        edited.fill_slots_key(),
+        slot(&bound, &m, "brick", [1; 16]).fill_slots_key()
+    );
+    let default = s
+        .fill_slots()
+        .into_iter()
+        .find(|p| p.name == "brick")
+        .unwrap()
+        .rows;
+    assert_eq!(slot(&edited, &m, "brick", default).fill_slots_key(), key);
+    let mut moved = edited.clone();
+    moved.viewport.bbox[0] += 1.;
+    assert_eq!(moved.fill_slots_key(), edited.fill_slots_key());
+    assert_eq!(
+        load(&s, &m, edited.settings(&m)).fill_slots_key(),
+        edited.fill_slots_key()
+    );
+}
 fn standard(deck: bool) -> Model {
     model(deck, &[(3, 0), (3, 1), (3, 2), (7, 0)])
 }

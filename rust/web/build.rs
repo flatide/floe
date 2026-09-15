@@ -43,6 +43,7 @@ fn main() {
         "../notices/src/lib.rs",
         "../render-core/assets/NotoSansMono-OFL.txt",
         "src/view.rs",
+        "src/fill_slots.rs",
         "src/layer_catalog.rs",
         "src/stream.rs",
         "src/prepared.rs",

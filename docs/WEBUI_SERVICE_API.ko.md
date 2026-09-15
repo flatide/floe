@@ -104,6 +104,29 @@ M4g-11f는 인증된 읽기 전용 `GET /api/v1/palette/presets`를 추가한다
 노출한다. 표와 전송 코드도 bundle 식별에 포함된다. 팔레트 읽기는 state/render revision을
 변경하지 않고 클릭 시점의 선택을 단일 `style_batch`로 별도 제출한다.
 
+M4g-16c는 세션 슬롯 표를 별도로 읽는 owner API
+`GET /api/v1/views/{id}/fill-slots/{key}`를 추가한다. snapshot의 `fill_slots_key`
+(40 lowercase hex)가 현재 표와 같아야 하며 다르면409, 열린 view가 아니면404다.
+응답은 `{version:1,view_id,fill_slots_key,editable,fills:[{name,rows:[u16;16]},…]}`이며
+전체20슬롯/16KiB 미만이다. 기본 프리셋 GET은 계속 불변이다. key는 override만 해시한
+비권한 캐시 힌트라 pan/색/할당마다 바뀌지 않는다. 별도 파일 I/O나 render를 하지 않는다.
+
+`style_batch.fill_slot:"brick"`는 현재 슬롯 참조를 할당한다(`fill`과 동시 지정 불가).
+슬롯의 내용 편집은 일반 Patch가 아니라 전용 WS 명령 `view.fill_slot`이다:
+
+```json
+{"type":"view.fill_slot","seq":"7","connection_epoch":"<current>","view_id":"<current>",
+ "base_state_rev":"12","body":{"name":"brick","rows":[1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768]}}
+```
+
+capability `fill_slot_edit`는 기본 false다. trusted launcher의 nonempty `FLOE_FILL_EDIT`
+opt-in 없이는 `fill_edit_disabled`, 고정 solid/clear/무효 슬롯은 `invalid_request`,
+오래된 state는 `stale_state`다. 연결/view/seq 검사는 `view.set`과 같다. 결과는 기존
+`accepted` 또는 `error` 뒤 authoritative snapshot이며 renderer는 resolved bitmap만 받는다.
+새 edit 필드를 `view.set`/startup/open Patch에 넣지 않으므로 opt-in 우회 경로가 없다.
+기존 명시 Native JSON import는 계속 허용한다. 슬롯 Apply는 파일 게시 승인이 아니며
+공유 기본값 게시의 별도 preview/승인을 자동 수행하지 않는다. UI 연결은 다음 단계다.
+
 M4g-11b는 `index`/`index_open`의 `options.occupancy` 생략 기본값을 true로
 맞춘다. false는 명시 해제이며 기존 요약을 지우지 않는다. `occupancy_only:true`는
 일반 생성 기본값보다 우선하고, `occupancy_um` 지정도 요약 생성을 요청한다.
@@ -315,7 +338,8 @@ M4g-16b에서 native 설정은 기존 `floe.layers` v1과 슬롯 보존 v2를 �
 `fill_slots:[{name,rows:[u16;16]},…]` 전체20항목과 행의 선택적 `fill_slot` 참조를
 포함한다. 참조 행은 필수 `fill`이 null이며 직접 값과 동시에 지정하지 않는다.
 v1은 값만 복원하고 v2는 미사용 슬롯 편집까지 보존한다. 누락/중복/고정 슬롯 변경은
-문서 전체 오류다. slot 편집용 view.set/API는 아직 없고 현재 프리셋은 계속 값 기반이다.
+문서 전체 오류다. M4g-16c의 별도 슬롯 API는 위에 기술한다. 현재 웹 프리셋은
+아직 값 기반이며 슬롯 편집 UI는 미연결이다.
 기존 prepare/승인·한계·권한을 유지한다([슬롯 계약 §4](WEBUI_BITMAP_SLOTS.ko.md)).
 `view.set.body.style_deltas`는 `{pair,color?,fill?,width?}`의 필드별 수정이다.
 omitted는 유지, null은 오류이며 기존 완전한 `styles`와 한 요청에서 혼용하지 않는다.

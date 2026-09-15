@@ -57,6 +57,15 @@ impl Harness {
         labels: bool,
         viewport: Option<floe_app_core::view::Viewport>,
     ) -> Self {
+        Self::start_with_tools(raw, margin, labels, viewport, false).await
+    }
+    async fn start_with_tools(
+        raw: bool,
+        margin: bool,
+        labels: bool,
+        viewport: Option<floe_app_core::view::Viewport>,
+        fill_edit: bool,
+    ) -> Self {
         let resources = Resources::new(Limits::default()).unwrap();
         let source =
             PathBuf::from(std::env::var_os("FLOE_VIEW_FIXTURE").expect("private fixture required"));
@@ -90,8 +99,11 @@ impl Harness {
         );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let (gate, bootstrap) =
+        let (mut gate, bootstrap) =
             Gateway::with_view(addr, Arc::clone(&controller), "synthetic <valmini>").unwrap();
+        if fill_edit {
+            Gateway::enable_fill_slot_edit(&mut gate).unwrap();
+        }
         let (stop, rx) = oneshot::channel();
         let task = tokio::spawn(transport::serve(listener, Arc::clone(&gate), async {
             let _ = rx.await;
@@ -188,12 +200,17 @@ impl Harness {
         (ws, hello, state)
     }
     async fn shutdown(self) {
+        let started = Instant::now();
         let _ = self.stop.send(());
-        timeout(Duration::from_secs(6), self.task)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
+        let result = timeout(Duration::from_secs(6), self.task).await;
+        if !matches!(&result, Ok(Ok(Ok(())))) {
+            // Numeric/lifecycle diagnostics only; preserve all production and
+            // harness deadlines. A timeout is a failure, never a retry/pass.
+            let s = self.controller.snapshot();
+            panic!("shutdown failed: {result:?}; elapsed={:?}, finished={}, phase={:?}, submitted={}, consumed={}, transport={:?}, resources={:?}",
+                started.elapsed(), self.controller.is_finished(), s.phase,
+                s.submitted, s.consumed, self.gate.transport_usage(), self.resources.usage());
+        }
         assert!(self.controller.is_finished());
         assert_eq!(self.resources.usage(), Usage::default());
         let deadline = Instant::now() + Duration::from_secs(2);

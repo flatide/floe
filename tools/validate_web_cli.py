@@ -142,6 +142,7 @@ def main(fixture):
                 assert about["font_notice"] == (ROOT / "rust/render-core/assets/NotoSansMono-OFL.txt").read_text()
                 assert client.call("GET", "/api/v1/operations")["last_seq"] == "0"
                 assert client.call("GET", "/api/v1/capabilities")["design_defaults"] is manual
+                assert client.call("GET", "/api/v1/capabilities")["fill_slot_edit"] is manual
                 if not manual:
                     client.call("GET", "/api/v1/defaults", code=403)
                 else:

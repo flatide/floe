@@ -141,6 +141,7 @@ pub struct Gateway {
     pub(crate) browse: Option<Arc<crate::browse::Picker>>,
     pub(crate) drc: Option<Arc<crate::drc::Registry>>,
     pub(crate) defaults: Option<Arc<crate::defaults::Service>>,
+    pub(crate) fill_slot_edit: bool,
     startup: Option<serde_json::Value>,
     startup_confirm_levels: bool,
     pub(crate) build: Option<crate::about::BuildInfo>,
@@ -175,6 +176,7 @@ impl Gateway {
                 browse: None,
                 drc: None,
                 defaults: None,
+                fill_slot_edit: false,
                 startup: None,
                 startup_confirm_levels: false,
                 build: None,
@@ -370,6 +372,14 @@ impl Gateway {
         gate.drc = Some(drc);
         Ok(())
     }
+    /// Memory-only developer tool. This grants no filesystem publication,
+    /// source access or reviewer permissions, unlike other launcher opt-ins.
+    pub fn enable_fill_slot_edit(gate: &mut Gate) -> Result<(), String> {
+        Arc::get_mut(gate)
+            .ok_or("gateway already published")?
+            .fill_slot_edit = true;
+        Ok(())
+    }
     /// Explicit trusted-launcher opt-in, after all DRC/input registrations and
     /// before publishing the gateway. Extra paths protect launcher-owned files
     /// (notably the private session credential); they never grant write paths.
@@ -479,6 +489,10 @@ pub fn router(gate: Gate) -> Router {
         .route("/api/v1/capabilities", get(capabilities))
         .route("/api/v1/about", get(crate::about::read))
         .route("/api/v1/palette/presets", get(crate::presets::read))
+        .route(
+            "/api/v1/views/{id}/fill-slots/{key}",
+            get(crate::fill_slots::read),
+        )
         .route("/api/v1/about/notices/{start}", get(crate::about::list))
         .route("/api/v1/about/notices/{id}/{page}", get(crate::about::page))
         .route("/api/v1/events", get(upgrade))
@@ -644,7 +658,7 @@ async fn capabilities(State(gate): State<Gate>, headers: HeaderMap) -> Response 
     let render = gate.service.is_some() || gate.view.is_some();
     Json(json!({"protocol":1,"bundle":BUNDLE,"stage":if gate.service.is_some(){"owner-service"}else if render{"view-stream"}else{"transport"},
         "render":render,"catalog":gate.service.is_some(),"index":gate.service.is_some(),"index_open":gate.service.is_some(),"launcher":gate.cli_owner,"file_picker":gate.browse.is_some(),"jobdeck_modes":gate.service.is_some(),"drc":gate.drc.is_some(),"drc_notes":gate.drc.as_ref().is_some_and(|r|r.notes_enabled()),"drc_waives":gate.drc.as_ref().is_some_and(|r|r.waives_enabled()),"exports":gate.service.is_some(),"snapshot_png":gate.service.is_some(),"layer_settings":true,"design_defaults":gate.defaults.is_some(),"shares":false,"uploads":false,"control_bytes":CONTROL_BYTES,
-        "frame_bytes":crate::view::PACKET_BYTES,"frame_credit":1,"pending_frames":1}))
+        "fill_slot_edit":gate.fill_slot_edit,"frame_bytes":crate::view::PACKET_BYTES,"frame_credit":1,"pending_frames":1}))
     .into_response()
 }
 async fn current_view(State(gate): State<Gate>, headers: HeaderMap) -> Response {

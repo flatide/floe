@@ -66,6 +66,22 @@ async fn preset_catalogue_is_authenticated_readonly_and_works_without_a_view() {
     assert_eq!(p["fills"][18]["fill"], json!({"kind":"solid"}));
     assert_eq!(p["fills"][19]["fill"], json!({"kind":"clear"}));
     assert_eq!(s.request("GET", path, &headers, "").await.body, r.body);
+    let live = format!("/api/v1/views/absent/fill-slots/{}", "0".repeat(40));
+    assert_eq!(s.request("GET", &live, &[], "").await.status, 401);
+    assert_eq!(s.request("GET", &live, &headers, "").await.status, 404);
+    assert_eq!(
+        s.request("GET", "/api/v1/views/absent/fill-slots/bad", &headers, "")
+            .await
+            .status,
+        400
+    );
+    let caps: Value = serde_json::from_str(
+        &s.request("GET", "/api/v1/capabilities", &headers, "")
+            .await
+            .body,
+    )
+    .unwrap();
+    assert_eq!(caps["fill_slot_edit"], false);
     assert_eq!(
         s.request("GET", "/api/v1/view", &headers, "").await.status,
         404

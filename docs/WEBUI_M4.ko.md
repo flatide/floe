@@ -5102,3 +5102,66 @@ KLayout jobs1/8 각각13 PX+2 phase-exact+14 style을 통과했다. 검증용 `.
 구현에 남는다. 실제 브라우저 입력/저장/복구/화면, Python-free Linux와 G1/G4 수용도
 남는다. M2 공유/원격은 미구현, M0/M3 현장은 보류, M5 world-tile은 조건부다.
 index hot reload/revision은 사용자 유보 범위다. 전체 목표는 아직 완료가 아니다.
+
+## 68. M4g-16c — 슬롯 표 조회와 개발 opt-in/CAS API
+
+2026-09-16. [슬롯 계약 §5](WEBUI_BITMAP_SLOTS.ko.md)의 transport 단계다.
+Rust 모델을 임의 경로/파일 게시 없이 웹에서 호출할 수 있게 했다. 이 단계에서는
+브라우저 프리셋과 편집기 DOM을 바꾸지 않았으며 **슬롯 UI 완료가 아니다**.
+
+- snapshot에 sparse 슬롯 override의40hex 캐시 힌트를 추가했다. pan·색·참조 할당은
+  키를 바꾸지 않고, 해시 비용은 최대18개 override에만 비례한다. 이 값은 인증/
+  편집 revision이 아니다. 표가 예전 값으로 돌아와도 오래된 state CAS는 거부한다.
+- owner 인증된 `GET /api/v1/views/{id}/fill-slots/{key}`는 전체20슬롯을 반환한다.
+  잘못된 key/view는400/409/404, 미인증/cross-origin은401/403으로 거부한다.
+  기존 compiled presets GET은 바뀌지 않으며, 조회로 render·state·파일을 수정하지 않는다.
+- `style_batch.fill_slot`은 정상 스타일 할당으로 허용한다. 값 기반 `fill`과 혼합,
+  null/미정의 이름은 거부한다. 다른 필드 변경이 참조를 의도 없이 해제하지 않는다.
+- 전용 `view.fill_slot`만 슬롯 bitmap을 편집한다. launcher의 nonempty
+  `FLOE_FILL_EDIT` opt-in이 없으면 `fill_edit_disabled`. 고정 슬롯·잘못된 bitmap·
+  fan-out 초과는 기존 모델의 원자 거부, 연결/view/seq/state CAS는 기존 WS 경계다.
+  일반 `view.set`/startup/open Patch에는 이 편집 필드를 넣지 않는다.
+- 메모리 편집 capability는 파일 게시와 독립적이다. 공유 기본값 publish의 별도
+  preview/승인은 유지하고, 기존 명시 Native JSON v2 load/save도 그대로다.
+  서버 오류/거부를 UI가 자동 재전송하는 경로는 추가하지 않는다.
+- renderer/index protocol·cache 형식·버전은 바꾸지 않는다. transport/schema는
+  web bundle identity에 반영되며 새 모듈도 build hash에 포함했다.
+
+집중 검증:
+
+- core 슬롯 검사6개 통과(추가 cache hint 분리/기본 Reset/설정 왕복 포함), GTK 대조는
+  독립 full battery에서 실행한다. core 로그 `/private/tmp/floe-slot-api-core.log`.
+- web 단위86개/실제 transport14개 통과(`/private/tmp/floe-slot-api-web.log`).
+- 실제 HTTP/WS+native renderer8개 통과(`/private/tmp/floe-slot-api-stream.log`).
+  새 슬롯 gate는 opt-in on/off, 일반 참조 할당, 미사용 슬롯 무렌더, 직접 bitmap
+  분리, 사용 슬롯 render key 변경, byte-exact 픽셀 복원, 고정/stale/다른 view/연결
+  거부, read-only 기본 표와 원본/cache 무변경을 단언한다.
+- core/app/web all-targets strict clippy 통과(`/private/tmp/floe-slot-api-clippy.log`).
+  기존 tiler unused-mut/VFS dead-code 의존 경고는 범위 밖이며 숨기지 않았다.
+- 기존 actual launcher gate에 env 빈 값과 nonempty `0`의 capability 차이를 추가했다.
+  전체 배터리의 실제 CLI 실행에서 둘 다 통과했다.
+
+첫 전체 배터리(`/private/tmp/floe-slot-api-battery.log`)는 기존 native palette batch
+검사의 서버 종료에서 `view shutdown deadline exceeded`로 실패했다. 새 슬롯 검사와
+해당 palette의 픽셀/원자성 검사는 통과했고 종료에서만 실패했다. 원인을 확정하거나
+해결했다고 주장하지 않는다. 하네스에 실패 시 phase/완료 여부/자원·transport 사용량
+진단을 추가했으며 production의4초/하네스6초 제한과 테스트 병렬도는 그대로 유지했다.
+
+같은 native HTTP/WS8개 묶음을 같은 병렬 조건으로 연속3회 더 실행해 모두 통과했다
+(`/private/tmp/floe-slot-api-stream-repeat1.log`~`repeat3.log`). 진단 변경 후 clippy도
+통과했다(`/private/tmp/floe-slot-api-clippy-final.log`). 최종 전체
+`sh tools/validate_rust.sh`는 **exit0 / RUST VALIDATION: ALL OK**로 완료했다
+(`/private/tmp/floe-slot-api-battery-final.log`). app23/core270/web86 단위, GTK 슬롯324/
+스타일10,584, 실제 controller15 PNG 쌍과 새 슬롯 HTTP/WS, launcher opt-in, DRC 수동/
+자동 저장 및 전체 ES2017/UI, occupancy27/잡덱83/렌더러46, VFS H1-H5/L1-L9,
+KLayout jobs1/8 각각13 PX+2 phase-exact+14 style을 통과했다. 단위 검사 수는 기존
+reviewer 미커밋 검사도 포함된 작업 트리 기준이며 그 변경은 이 커밋에 포함하지 않는다.
+첫 종료 실패의 원인은 아직 미확정이며 재발 시 위 진단으로 추적한다. 검사 삭제,
+deadline 완화나 반복 실행 결과 중 실패를 숨기는 방식으로 통과 처리하지 않았다.
+
+목표 잔여: 웹 프리셋을 슬롯 참조로 연결하고 세션 표·16×16 draft 편집·Apply/Cancel/
+Reset·키보드/드래그와 stale 입력 거부를 이관해야 한다. reviewer legacy 읽기 연결은
+별도 승인 대기 상태이며 그8개 native 미커밋 파일은 이번 단계에서 건드리지 않았다.
+CLI 경계/G4 재감사, 실제 브라우저 입력·저장·복구/화면과 Python-free Linux/G1/G4
+수용도 남는다. M2 공유/원격은 미구현, M0/M3 현장은 보류, M5 world-tile은 조건부,
+index hot reload/revision은 사용자 유보다. 이 API 단계로 전체 목표를 완료 처리하지 않는다.

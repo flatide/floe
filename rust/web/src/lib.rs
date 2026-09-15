@@ -8,6 +8,7 @@ pub mod browse;
 mod defaults;
 pub mod drc;
 mod exports;
+mod fill_slots;
 mod idle_io;
 pub mod launch;
 mod layer_catalog;

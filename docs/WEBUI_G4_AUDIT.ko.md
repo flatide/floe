@@ -1,6 +1,6 @@
 # 웹 전환 G4 잔여 감사
 
-갱신: 2026-09-16, M4g-16b(슬롯 Rust 모델·설정 v2). 상위 [계획](WEBUI_PLAN.ko.md), 원래 범위
+갱신: 2026-09-16, M4g-16c(슬롯 Rust/API·설정 v2). 상위 [계획](WEBUI_PLAN.ko.md), 원래 범위
 [M0 §2~3](WEBUI_M0.ko.md), 단계별 실행 기록 [M4](WEBUI_M4.ko.md).
 
 이 문서는 **로컬 구현과 전체 수용을 분리하는 잔여 목록**이다. 표의 구현/게이트는
@@ -15,7 +15,7 @@
 | CLI 10종·보조 PNG 명령 | `rust/app`, `rust/app-core`; `validate_app_cli.py`, `validate_app_render.py`, `validate_app_jobdeck*.py`, `validate_fe_embed.py` 등. view 옵션/형식 대조 M4 §62; M4g-15a 명시 ICE/인접 reviewer 읽기 | reviewer 읽기의 ASCII/cache/legacy 임시 파일 선택, 무효/개발 옵션의 최종 제품 경계. GDS/gzip은 기존 native 한계이며 새 지원 아님 |
 | UI-01 열기·조작 | `launcher.js`, `browse.js`, `index-open.js`, `gestures.js`, `minimap.js`, `app.js`; 실제 startup/IPC·DOM gate | 실제 브라우저 포커스·키·wheel·resize·재접속 수용, G1 input→photon/pacing |
 | UI-02 pan/margin | `view_controller`, `stream`, `app.js`의 착지 margin/16px 위상·crop/표시 base, controller/stream/client gate | GTK 대비 새 strip·라벨 지연 실제 화면 측정. 덱 margin은 기존에도 미지원 |
-| UI-03 레이어·스타일 | Rust 선택/CAS, palette/presets/settings/defaults; GTK 원본 선택·접힘·상속 oracle, HTTP/DOM gate. M4g-16b 슬롯 모델·JSON v2와324 native 대조 | 실제 선택·다중 스타일·기본값 게시 화면 수용. 개발 bitmap **슬롯 API/UI** 연결은 남음([계약/후속 gate](WEBUI_BITMAP_SLOTS.ko.md)) |
+| UI-03 레이어·스타일 | Rust 선택/CAS, palette/presets/settings/defaults; GTK 원본 선택·접힘·상속 oracle, HTTP/DOM gate. M4g-16c 슬롯 모델·JSON v2·조회/편집 API와324 native 대조 | 실제 선택·다중 스타일·기본값 게시 화면 수용. 웹 프리셋 참조 할당·개발 bitmap **슬롯 UI** 연결은 남음([계약/후속 gate](WEBUI_BITMAP_SLOTS.ko.md)) |
 | UI-04 pick/snap/측정 | query/inspect/measure/rulers + Rust query/export, 숫자·scene 유효성·stale gate | 실제 포인터/클립보드·시각적 측정 검증 |
 | UI-05 입력·복사·종료 | snapshot/session-exit와 단축키 보호. **M4g-13 두벌식 fallback**: `hangul.js`/`drc-notes.js`, GTK 원본 조합 oracle | OS IME와 fallback의 실제 입력·스크롤·키보드/브라우저별 수용. DOM gate로 대체하지 않음 |
 | DRC-01 조회·선택 | `app-core/drc`, `web/src/drc`, `drc*.js`; lazy paging/selection/CD/isolation/query gate | 현장 대형 결과와 실제 브라우저 조작 수용 |
