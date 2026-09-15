@@ -5635,3 +5635,30 @@ main의 기존 수정과 feature/jobdeck 작업 트리는 보존하고 검증용
 실제 브라우저 입력/저장/복구·dump/화면·Python-free Linux·G1/G4 수용은 별도다.
 공유/원격 승인·구현, M0/M3 현장 보류, M5 world-tile 조건부도 남아 있으며 index
 hot reload/revision은 사용자 유보다. 이번 단계로 전체 goal을 완료 처리하지 않는다.
+
+## 78. M4g-23 — GTK 메뉴 기반 G4 완료 감사 정정
+
+2026-09-16. `e48e91f` 이후 원래 메뉴와 실행 경로를 다시 대조했다. 공개 CLI/전체
+회귀 green만으로는 실행 중 조작의 누락을 잡지 못했다. `_drc_open_dialog`,
+`_drc_rules_dialog`, `_jobdeck_reselect_levels`에 해당하는 웹 경로가 없다.
+초기 CLI 등록·현재 등록의 Reload/Build·일반 Open·Mode는 이 세 경로를 대체하지
+못한다. 구체적 근거와 다음 구현 경계는 [G4 메뉴 감사](WEBUI_G4_MENU.ko.md)다.
+
+`validate_web_menu_inventory.py`는 원본 AST의42개 호출/39개 handler를 분류하고
+웹 control/JS/test 링크와 신규/제거 callback을 검사한다.36개 연결·2개 제외·1개
+기존 무효·3개 미구현이다. 링크/새 handler/누락 control/누락 test 결함 주입도
+검증한다. 기본 exit0는 inventory의 정합성뿐이며 실제 동작 수용이 아니다.
+`--require-complete`는 현재3건을 출력하고 **의도대로 exit1**이다. 배터리에는
+inventory 모드만 연결하며 원래 미완료를 숨기거나 전체 G4 PASS로 바꾸지 않는다.
+
+검증: inventory와 결함 주입, 완료 모드의3건 거부, `sh -n tools/validate_rust.sh`,
+`git diff --check`를 실행했다. 이번 변경은 감사 도구/문서/배터리 호출만이며 제품
+Rust/JS 코드는 변경하지 않았다. 전체 배터리는 이전 §77의 `e48e91f` 구현 검사
+기록을 보존하고 이번 감사 변경에서 재실행했다고 보고하지 않는다. 실제 브라우저
+합성 세션 열기/다운로드 검증의 추가 승인은 요청 상태이며 이전 도구 제한을
+우회하지 않았다. main과 feature/jobdeck 작업은 그대로다.
+
+커밋 시 목표 잔여 정정: 우선 실행 중 DRC 등록/교체·SVRF metadata 교체, 카메라
+유지 jobdeck 레벨 재선택의 구현·gate·UI 연결이다. 진단/무효 CLI 경계 최종 결정,
+실제 브라우저·Python-free Linux·G1/G4·현장 수용, 공유/원격 승인·구현과 조건부
+M5도 남는다. 감사표 작성이나 연결 검사만으로 이 기능들이 완료됐다고 세지 않는다.

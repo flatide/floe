@@ -5,6 +5,9 @@
 서비스 계약 초안: [WEBUI_SERVICE_API.ko.md](WEBUI_SERVICE_API.ko.md).
 
 현재 구현·수용 잔여는 [G4 감사](WEBUI_G4_AUDIT.ko.md)에서 대조한다.
+M4g-23은 GTK 메뉴 원본의 실행 중 DRC/SVRF 교체·카메라 유지 레벨 재선택3건을
+미구현으로 확인했다([메뉴 대조](WEBUI_G4_MENU.ko.md)). CLI 초기 등록/일반 open과
+실행 중 조작을 구별하며, 아래 누적 기록만으로 전체 UI parity를 판정하지 않는다.
 아래는 원래 범위와 단계별 누적 기록이며 작성 시점의 미구현 설명을 현재 상태로
 그대로 읽지 않는다. M4g-13은 두벌식 fallback, M4g-14는 DRC 확정 시 자동 저장
 opt-in을 연결했다. M4g-15a는 명시 ICE/인접 reviewer 파일의 읽기 전용 선택을
