@@ -260,6 +260,10 @@ floe2 index deck.jb --force --lod --jobs 16
 ```
 
 소스 파일은 순차 처리하고, 각 파일 내부에서 `--jobs`만큼 병렬화한다.
+소스마다 시작 줄 `[jobdeck] index : (n/N) <src>`와 끝 줄 `[jobdeck] index :
+(n/N) ok <src> (Ts; M:SS elapsed, ~M:SS left)`를 찍는다(N = 이번 실행이 처리할
+소스 수, 남은 시간은 지금까지의 소스당 평균; 실패는 `FAILED <src> (exit E; …)`).
+마지막 줄은 `[jobdeck] index : B built, F failed, K kept`.
 `--level 1,3`을 추가하면 그 레벨이 참조하는 소스만 처리한다. `--lod`는
 각 소스의 인덱싱 명령에 전달되며, 생략하면 기존 기본값인 LOD 미생성을
 유지한다. 현재 캐시는 `--lod`만으로 교체하지 않으므로 LOD 없이 만든

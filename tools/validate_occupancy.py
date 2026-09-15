@@ -750,6 +750,11 @@ sys.exit(9)
         res = floe2("index", deck_dir / "occ.jb", "--occupancy-only",
                     "--occupancy-um", "10", "--jobs", "2")
         self.assertIn("[jobdeck] occupancy : (1/2)", res.stdout)
+        # the closing line repeats the position and carries the
+        # elapsed / remaining estimate (field 2026-09-15, 667 sources)
+        self.assertRegex(res.stdout, r"\[jobdeck\] occupancy : \(2/2\) ok "
+                                     r"\S+ \(\d+\.\ds; \d+:\d\d elapsed, "
+                                     r"~0:00 left\)")
         self.assertIn("2 built, 0 failed, 0 kept", res.stdout)
         for c in caches:
             self.assertEqual(read_ovo(c / "design.ovo")["cell"], 10000)

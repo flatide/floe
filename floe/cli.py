@@ -1621,6 +1621,14 @@ def cmd_jobdeck(args):
     return 0
 
 
+def _hms(seconds):
+    """0:07, 3:41, 1:02:15 - compact for the progress lines"""
+    seconds = max(0, int(round(seconds)))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return "%d:%02d:%02d" % (h, m, s) if h else "%d:%02d" % (m, s)
+
+
 def _jobdeck_index(args, catalog):
     """Index every probed-ok source the deck names, one `index` run each
     (each run parallelises internally with --jobs). The occupancy
@@ -1652,6 +1660,7 @@ def _jobdeck_index(args, catalog):
     if kept:
         print("[jobdeck] index     : %d source(s) already indexed" % kept)
     failed = 0
+    started = time.time()
     for n, (tc, m) in enumerate(todo, 1):
         info = catalog.infos[tc]
         cmd = [sys.executable, "-B", "-m", args.index_module, "index",
@@ -1672,13 +1681,22 @@ def _jobdeck_index(args, catalog):
               flush=True)
         t0 = time.time()
         res = subprocess.run(cmd)
+        # the closing line repeats the position (a source's own output
+        # can push the opening line off the screen - field 2026-09-15,
+        # 667 sources) and adds the run's elapsed time and the time
+        # the remaining sources will take at the average so far
+        elapsed = time.time() - started
+        left = elapsed / n * (len(todo) - n)
+        pos = "(%d/%d)" % (n, len(todo))
         if res.returncode != 0:
             failed += 1
-            print("[jobdeck] %s : FAILED %s (exit %d)"
-                  % (label, tc, res.returncode))
+            print("[jobdeck] %s : %s FAILED %s (exit %d; %s elapsed, ~%s left)"
+                  % (label, pos, tc, res.returncode, _hms(elapsed),
+                     _hms(left)), flush=True)
         else:
-            print("[jobdeck] %s : ok %s (%.1fs)"
-                  % (label, tc, time.time() - t0))
+            print("[jobdeck] %s : %s ok %s (%.1fs; %s elapsed, ~%s left)"
+                  % (label, pos, tc, time.time() - t0, _hms(elapsed),
+                     _hms(left)), flush=True)
     print("[jobdeck] index     : %d built, %d failed, %d kept"
           % (len(todo) - failed, failed, kept))
     return 2 if failed else 0
