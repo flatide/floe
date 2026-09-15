@@ -186,6 +186,7 @@ fn prepare(service: &Service, work: Pending, launches: &Launches) {
             work.policy.as_deref(),
         )?;
         service.validate_source_selection(&ids[0], &c.mode, levels.as_ref())?;
+        let label_preference = startup_labels(&c.initial);
         let mut body = startup_body(c.initial, deck, false);
         // GTK forwards these resolved defaults even when omitted. Thin remains
         // absent unless explicitly supplied (including auto).
@@ -195,7 +196,7 @@ fn prepare(service: &Service, work: Pending, launches: &Launches) {
         if body.get("font_px").is_none() {
             body["font_px"] = json!(14);
         }
-        launches.ready(&work.id,Some(json!({"kind":"open","seq":"1","source_id":ids[0],"mode":c.mode,"levels":levels_json(levels),"body":body})),confirm)
+        launches.ready(&work.id,Some(json!({"kind":"open","seq":"1","source_id":ids[0],"mode":c.mode,"levels":levels_json(levels),"body":body,"label_preference":label_preference})),confirm)
     })();
     if let Err(e) = result {
         launches.failed(&work.id, e.kind);

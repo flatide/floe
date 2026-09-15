@@ -284,7 +284,7 @@ fn run(inner: Arc<Inner>, mut browser: Browser, service: Arc<Service>, launch: A
             Output::Selected{source_id,deck,levels}=>{
                 let (id,_)=launch.reserve()?;
                 let request=json!({"kind":"open","seq":"1","source_id":source_id,"mode":"level","levels":{"mode":"all"},
-                    "body":{"depth":if deck {"full"} else {"0"},"frames":true,"labels":!deck,"detail":"medium","thin":"auto","font_px":14}});
+                    "display_policy":"window","body":{}});
                 if let Err(e)=launch.ready(&id,Some(request),deck&&levels>1) {launch.failed(&id,e.kind);return Err(e);}
                 Ok(json!({"source_id":source_id,"launch_id":id}))
             }

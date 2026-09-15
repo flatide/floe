@@ -136,6 +136,7 @@ def native(work, fixture):
             assert startup["confirm_levels"] is ask
             assert client.call("GET", "/api/v1/operations")["last_seq"] == "0"
             request = startup["request"]
+            assert request["label_preference"] is (frames and "--labels=off" not in extra and "--no-labels" not in extra), request
             assert request["body"]["depth"] == depth
             assert request["body"]["frames"] is frames
             assert request["body"]["labels"] is labels

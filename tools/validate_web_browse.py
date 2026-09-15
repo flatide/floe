@@ -39,7 +39,7 @@ def main(fixture):
         before = digest(designs)
         session_path = work / "session.json"
         proc = subprocess.Popen([str(APP), "view", "--multi", "--no-open", "--root", str(designs),
-                                 "--root", str(extra), "--session-file", str(session_path), "--jobs", "2", "--raster-jobs", "1"],
+                                 "--root", str(extra), "--session-file", str(session_path), "--jobs", "2", "--raster-jobs", "1", "--perf-baseline"],
                                 env=env, cwd=outside, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             client = Client(wait(lambda: read_json(session_path), proc))
@@ -126,6 +126,8 @@ def main(fixture):
                 return wait(lambda: (lambda v: v if v["status"] == "idle" else None)(client.call("GET", "/api/v1/view")["view"]), proc)
 
             first_view = open_selected(selected)
+            assert first_view["frames"] is False and first_view["labels"] is False, "empty-window baseline lost on first file choice"
+            assert first_view["depth"] == "0" and first_view["detail"] == "medium"
             same = open_selected(select(a.name), first_view)
             assert (same["view_id"], same["worker_epoch"]) == (first_view["view_id"], first_view["worker_epoch"])
             other = open_selected(select(b.name), same)
@@ -135,8 +137,8 @@ def main(fixture):
             assert client.call("GET", "/api/v1/view")["view"]["view_id"] == other["view_id"]
             selected = select(deck.name)
             pending = client.call("GET", "/api/v1/launch")["pending"]
-            assert pending["confirm_levels"] and pending["request"]["body"]["depth"] == "full"
-            assert pending["request"]["body"]["labels"] is False
+            assert pending["confirm_levels"] and pending["request"]["display_policy"] == "window"
+            assert pending["request"]["body"] == {}, "picker must inherit at the revision-checked open, not list time"
             client.call("POST", "/api/v1/launch/" + selected["result"]["launch_id"], dict(action="dismiss"))
             assert digest(designs) == before, "picker or open modified a source/cache"
             client.call("DELETE", "/api/v1/session", code=204)

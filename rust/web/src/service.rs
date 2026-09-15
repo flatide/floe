@@ -7,6 +7,7 @@ use crate::{
     operations::{Admission, Ledger},
     transport::Attachment,
     view::{self, Field, PatchDto},
+    window_display::{OpenDisplay, WindowDisplay},
 };
 use floe_app_core::{
     index::IndexOptions,
@@ -130,6 +131,10 @@ pub enum OperationDto {
         #[serde(default)]
         levels: LevelSelection,
         body: Box<PatchDto>,
+        #[serde(default)]
+        display_policy: OpenDisplay,
+        #[serde(default)]
+        label_preference: Field<bool>,
     },
     Index {
         seq: String,
@@ -152,6 +157,8 @@ enum Command {
         mode: Mode,
         patch: Box<Patch>,
         replace: Option<(String, u64)>,
+        display_policy: OpenDisplay,
+        label_preference: Option<bool>,
     },
     Index {
         source: Arc<RegisteredSource>,
@@ -175,6 +182,7 @@ struct State {
     view: Option<Arc<Attachment>>,
     closed: bool,
     registering: bool,
+    window_display: WindowDisplay,
 }
 struct Inner {
     exports: Arc<crate::exports::Service>,
@@ -250,6 +258,7 @@ impl Service {
                 view: None,
                 closed: false,
                 registering: false,
+                window_display: WindowDisplay::default(),
             }),
             wake: Condvar::new(),
         });
@@ -264,6 +273,18 @@ impl Service {
     }
     pub fn catalog(&self) -> Value {
         json!({"sources":self.inner.sources.lock().unwrap().iter().map(|s|json!({"source_id":s.id,"title":s.source.title,"deck":s.source.deck,"levels":s.source.levels.len()})).collect::<Vec<_>>()})
+    }
+    /// Trusted startup only. Seed an empty window's display options before any
+    /// owner operation. No HTTP endpoint or dataset work; camera/layer state is
+    /// intentionally not a window preference.
+    pub fn seed_window_display(&self, patch: Patch) -> Result<()> {
+        let display = WindowDisplay::initial(patch)?;
+        let mut s = self.inner.state.lock().unwrap();
+        if s.closed || s.registering || s.view.is_some() || s.ledger.cursor()["last_seq"] != "0" {
+            return Err(Error::new(ErrorKind::Busy, "window has already started"));
+        }
+        s.window_display = display;
+        Ok(())
     }
     /// Trusted local launcher only, off the HTTP reactor. Registration alone
     /// never opens a view, indexes a file, or grants a sidecar write capability.
@@ -493,6 +514,8 @@ impl Service {
                 mode,
                 levels,
                 body,
+                display_policy,
+                label_preference,
                 ..
             } => {
                 let source = source(&source_id)?;
@@ -514,6 +537,11 @@ impl Service {
                         mode,
                         patch: Box::new(patch),
                         replace,
+                        display_policy,
+                        label_preference: match label_preference {
+                            Field::Absent => None,
+                            Field::Value(v) => Some(v),
+                        },
                     },
                 )
             }
@@ -764,6 +792,8 @@ fn execute(inner: &Inner, work: Work) -> Result<Value> {
             mode,
             patch,
             replace,
+            display_policy,
+            label_preference,
         } => {
             let mode_name = match mode {
                 Mode::Level => "level",
@@ -773,15 +803,24 @@ fn execute(inner: &Inner, work: Work) -> Result<Value> {
             let selected_levels: Option<Vec<String>> = levels
                 .as_ref()
                 .map(|ids| ids.iter().map(i64::to_string).collect());
-            let previous = {
+            let (previous, window_display) = {
                 let s = inner.state.lock().unwrap();
-                if let Some((id, rev)) = &replace {
-                    let v = s
-                        .view
+                // Read the preferences and CAS revision from ONE snapshot.
+                // A concurrent edit between two reads must not validate a new
+                // revision while inheriting the older revision's preferences.
+                let old = s.view.as_ref().map(|v| (v, v.controller.snapshot()));
+                let window_display = old.as_ref().map_or_else(
+                    || s.window_display.clone(),
+                    |(v, snapshot)| {
+                        s.window_display
+                            .capture(&snapshot.state, v.controller.model.deck)
+                    },
+                );
+                let previous = if let Some((id, rev)) = &replace {
+                    let (v, snapshot) = old
                         .as_ref()
-                        .filter(|v| v.id == *id)
+                        .filter(|(v, _)| v.id == *id)
                         .ok_or_else(|| Error::new(ErrorKind::Busy, "launcher view changed"))?;
-                    let snapshot = v.controller.snapshot();
                     if snapshot.state_rev != *rev
                         || !matches!(
                             snapshot.phase,
@@ -802,7 +841,8 @@ fn execute(inner: &Inner, work: Work) -> Result<Value> {
                     ));
                 } else {
                     None
-                }
+                };
+                (previous, window_display.label_preference(label_preference))
             };
             inner.state.lock().unwrap().ledger.update(
                 seq,
@@ -815,7 +855,7 @@ fn execute(inner: &Inner, work: Work) -> Result<Value> {
                     && previous.mode == mode_name
                     && previous.levels == selected_levels
                 {
-                    let s = inner.state.lock().unwrap();
+                    let mut s = inner.state.lock().unwrap();
                     if s.closed || stop.load(Ordering::Relaxed) != 0 {
                         return Err(Error::new(ErrorKind::Cancelled, "launcher edit cancelled"));
                     }
@@ -825,6 +865,8 @@ fn execute(inner: &Inner, work: Work) -> Result<Value> {
                     // Preserve native/decoded/retained caches for same-source
                     // navigation. Only explicitly supplied preferences change.
                     let snapshot = previous.controller.edit(*rev, *patch)?;
+                    s.window_display =
+                        window_display.capture(&snapshot.state, previous.controller.model.deck);
                     return Ok(
                         json!({"seq":seq.to_string(),"kind":"open","phase":"succeeded",
                         "view_id":previous.id,"reused":true,"state_rev":snapshot.state_rev.to_string()}),
@@ -834,7 +876,13 @@ fn execute(inner: &Inner, work: Work) -> Result<Value> {
             let data = ManagedDataset::open(&inner.resources, source.path(), levels, mode, &stop)?;
             let model = Model::new(&data)?;
             let (width, height) = patch.pixels.unwrap_or((1024, 768));
-            let initial = ViewState::initial(&model, width, height)?.edit(&model, *patch)?;
+            let initial = ViewState::initial(&model, width, height)?;
+            let initial = match display_policy {
+                OpenDisplay::Explicit => initial,
+                OpenDisplay::Window => initial.edit(&model, window_display.patch(model.deck))?,
+            }
+            .edit(&model, *patch)?;
+            let remembered = window_display.capture(&initial, model.deck);
             let rows = LayerCatalog::dataset(&data.dataset, &model);
             // Prepare a dormant controller with the existing reservation; the
             // old worker is fully reaped before the new one opens. Metadata,
@@ -885,6 +933,7 @@ fn execute(inner: &Inner, work: Work) -> Result<Value> {
                     .commit(rev)?;
             }
             let id = view.id.clone();
+            s.window_display = remembered;
             s.view = Some(view);
             Ok(json!({"seq":seq.to_string(),"kind":"open","phase":"succeeded","view_id":id}))
         }

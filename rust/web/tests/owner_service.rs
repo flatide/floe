@@ -401,6 +401,8 @@ mod exports;
 mod launch;
 #[path = "support/settings.rs"]
 mod settings;
+#[path = "support/window_display.rs"]
+mod window_display;
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "run tools/validate_owner_service.py with private source files"]

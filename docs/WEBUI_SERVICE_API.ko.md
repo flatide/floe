@@ -350,6 +350,11 @@ renderd argv, 임의 환경변수, 임의 출력 경로를 받는 endpoint는 �
 목록/선택은 전용 단일 작업자가 수행하고 접수는 즉시202를 반환한다. seq와 요청
 내용을 결과에 함께 실어 다른 연결의 같은 seq 응답을 내 선택 결과로 채택하지 않는다.
 선택 결과의 `launch_id`는 기존 owner 열기 제안이며 파일 읽기 capability가 아니다.
+M4g-8b의 open `display_policy=explicit|window`는 생략 시 explicit이다. picker는
+window를 발급하고 실행 시점의 revision-검증된 이전 view에서 표시 선호를 계승한다.
+CLI는 기존 body를 유지하며 `label_preference` bool로 잡덱 capability에 가리기 전
+라벨 선호를 전달한다. 두 필드는 경로·색인·출력 쓰기 권한이 아니다. null/미정의 값은
+거부하며 receipt 서명과 재시도 identity에 포함한다. 세부 계약은 [M4 §52](WEBUI_M4.ko.md).
 
 업로드 지원을 M1에 암묵적으로 넣지 않는다.
 DRC import는 등록된 입력/artifact로 처리하고 include 탈출을 막는다. M4d-3 설정만은

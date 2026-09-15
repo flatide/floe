@@ -21,3 +21,4 @@ mod settings;
 mod stream;
 pub mod transport;
 pub mod view;
+mod window_display;

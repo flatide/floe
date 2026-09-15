@@ -1,6 +1,6 @@
 # 서버 파일 선택기 (M4g-8)
 
-`feature/webui`. 구현 기록은 [M4 §51](WEBUI_M4.ko.md), 전체 이관 잔여는
+`feature/webui`. 선택기·창 표시 설정 구현 기록은 [M4 §51–52](WEBUI_M4.ko.md), 전체 이관 잔여는
 [M0 §2.9](WEBUI_M0.ko.md)를 따른다. GTK 기본 실행기·실칩 브랜치는 바꾸지 않는다.
 
 ```sh
@@ -24,9 +24,18 @@ All files 필터를 제공한다. `PATTERN01.TE`처럼 확장자 없는 마스�
 
 파일 선택은 읽기 전용 등록 후 기존 열기 제안을 만든다. 다중 레벨 덱은 선택을
 확인하고, 미색인 파일은 오류와 별도 Index 조작을 제공한다. 그 자체가 색인·설정
-게시·출력 저장 승인은 아니다. 현재 새 열기는 CLI 기본값(layout depth0 / deck full,
-medium, frames on, layout labels on / deck off, thin auto)을 사용한다. 마지막 표시
-설정을 보존하는 GTK 파일 선택 동작 및 색인 동의→자동 재열기 UX는 후속 parity다.
+게시·출력 저장 승인은 아니다. M4g-8b부터 파일 메뉴의 새 열기는 서버가 확정한 마지막
+depth·detail·thin(auto 포함)·frames·labels 선호·글꼴 크기를 유지한다. 새 잡덱은
+full depth이며 실제 labels는 off지만 레이아웃으로 돌아오면 이전 선호를 복원한다.
+다른 소스는 fit하고 단색·레이어 선택·스타일은 새 소스 기본값으로 시작한다. 같은
+소스/모드/레벨 재선택은 depth·카메라·스타일·worker/캐시를 유지한다. Close 뒤에도
+창 표시 선호는 남으며 새 세션에는 남지 않는다. 빈 창의 `--perf-baseline`도 첫 파일
+선택에 적용된다(그 밖의 source 필수 표시 옵션은 기존 CLI 제약을 따른다).
+
+CLI 전달은 파일 메뉴와 구분해 기존 명시 옵션/기본값을 적용한다. 잡덱의 labels=false
+capability와 `--labels off` 선호도 구분해 다음 파일에서 라벨이 뜻밖에 켜지지 않는다.
+표시 설정은 새 controller의 첫 렌더 전에 적용하며, 이전 revision이 바뀌면 전환을
+거부한다. 색인 동의→자동 재열기 UX는 아직 별도다.
 
 읽기가 진행 중이면 Cancel work를 누른다. 취소와 열기 제안 게시가 같은 잠금 아래
 경합하므로, 취소가 먼저면 열지 않는다. 이미 게시됐으면 성공 receipt의 제안을

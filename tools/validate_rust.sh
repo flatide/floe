@@ -90,6 +90,7 @@ echo "== floe2 product + accuracy gates (KLayout = oracle/generator only)"
 .venv/bin/python tools/validate_web_cli.py "$FLOE2_SMOKE_SRC"
 .venv/bin/python -B tools/validate_web_handoff.py "$FLOE2_SMOKE_SRC"
 .venv/bin/python -B tools/validate_web_browse.py "$FLOE2_SMOKE_SRC"
+.venv/bin/python -B tools/validate_web_file_display.py
 .venv/bin/python -B tools/validate_web_startup.py "$FLOE2_SMOKE_SRC"
 .venv/bin/python -B tools/validate_instance_key.py
 .venv/bin/python -B tools/validate_web_drc.py "$FLOE2_SMOKE_SRC"

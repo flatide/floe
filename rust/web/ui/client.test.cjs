@@ -116,7 +116,7 @@ class XHR {
         else if(this.method==='DELETE'&&this.path==='/api/v1/artifacts/1'){clipFile=null;clipOp.artifact.available=false;clipOp.artifact.expires_in_ms=null;value=null;status=204;}
         else if(this.path==='/api/v1/catalog') {value={sources:launchEnabled&&!launchRegistered?[]:[{source_id:'src',title:'synthetic',deck:false,levels:0},{source_id:'deck',title:'synthetic deck',deck:true,levels:2}]};}
         else if(this.path==='/api/v1/catalog/deck/levels/0') {value={levels:[{id:'1',title:'Level 1'},{id:'2',title:'Level 2'}],next:null};}
-        else if(this.path==='/api/v1/startup') {value={confirm_levels:startupEnabled,request:{kind:'open',seq:'1',source_id:modeEnabled||startupEnabled?'deck':'src',mode:modeEnabled?'chip':'level',levels:modeEnabled?{mode:'only',ids:['1']}:{mode:'all'},body:startupEnabled?startupBody:{detail:'high'}}};}
+        else if(this.path==='/api/v1/startup') {value={confirm_levels:startupEnabled,request:{kind:'open',seq:'1',source_id:modeEnabled||startupEnabled?'deck':'src',mode:modeEnabled?'chip':'level',levels:modeEnabled?{mode:'only',ids:['1']}:{mode:'all'},body:startupEnabled?startupBody:{detail:'high'},label_preference:false}};}
         else if(this.path==='/api/v1/operations'&&this.method==='POST') {
             open=true;lastSeq=body.seq;value={seq:lastSeq,kind:body.kind,phase:body.kind==='mode'?'preparing':'succeeded',view_id:viewId};status=202;
             if(body.kind==='mode') {assert(modeEnabled);modeOperation=value;}
@@ -248,6 +248,8 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
         assert.equal(commands()[1].body.kind,'index');
         startupFail=false;node('open').onclick();await wait(()=>sockets.length===1);
         assert.deepEqual(commands()[2].body.body,{...startupBody,pixels:[100,80]});
+        assert.equal(commands()[2].body.display_policy,'explicit','CLI retry must not inherit window defaults');
+        assert.equal(commands()[2].body.label_preference,false,'CLI label preference must survive index retry');
         assert(!Object.hasOwn(startupBody,'pixels'),'startup request mutated');
         hello(sockets[0]);sockets[0].receive(packet('raw','1'));
         await node('close').onclick();
@@ -255,6 +257,7 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
         node('source').value='src';node('source').onchange();node('open').onclick();
         await wait(()=>commands().length===4);
         assert.deepEqual(commands()[3].body.body,{pixels:[100,80]},'startup leaked to a new source');
+        assert.equal(commands()[3].body.display_policy,'window','manual file open preserves window display');
         listeners.pagehide();
         console.log('WEB STARTUP CLIENT: ALL OK (level consent, no implicit work, selected levels, index retry preserves CLI, no source leak)');
         return;

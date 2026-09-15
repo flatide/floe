@@ -80,6 +80,7 @@ DRC reads the explicit ASCII or ICE file; no adjacent-pack/reviewer discovery or
 Refinement off; deck margin unsupported.
 FLOE_JOBDECK_LEVELS=all|ask|N,N... supplies the default level choice (--level wins).
 --perf-baseline leaves decoded caches and geometry cut unchanged; no live LOD toggle.
+It may start an independent empty window; its display settings apply to the first file choice.
 FLOE_FILL_EDIT (nonempty) explicitly enables approved shared design-default publication.
 The session link is a one-time credential; do not share or log it.";
 
@@ -339,11 +340,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
         return Err(Error::input("view accepts at most 32 sources"));
     }
     if c.sources.is_empty()
-        && (c.drc.is_some()
-            || c.levels.is_some()
-            || c.mode != "level"
-            || c.initial != json!({})
-            || c.perf_baseline)
+        && (c.drc.is_some() || c.levels.is_some() || c.mode != "level" || c.initial != json!({}))
     {
         return Err(Error::input("display/DRC/level options require a source"));
     }
@@ -376,6 +373,9 @@ fn startup_depth(text: &str) -> Result<String> {
         digits.into()
     })
 }
+fn startup_labels(body: &Value) -> bool {
+    body["frames"].as_bool().unwrap_or(true) && body["labels"].as_bool().unwrap_or(true)
+}
 fn startup_body(mut body: Value, deck: bool, drc: bool) -> Value {
     if body.get("depth").is_none() {
         body["depth"] = json!(if deck || drc || body.get("navigation").is_some() {
@@ -386,7 +386,7 @@ fn startup_body(mut body: Value, deck: bool, drc: bool) -> Value {
     }
     let frames = body["frames"].as_bool().unwrap_or(true);
     body["frames"] = json!(frames);
-    body["labels"] = json!(!deck && frames && body["labels"].as_bool().unwrap_or(true));
+    body["labels"] = json!(!deck && startup_labels(&body));
     body
 }
 fn startup_levels(
@@ -570,6 +570,10 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
         })
         .collect::<Result<Vec<_>>>()?;
     let level_env = std::env::var("FLOE_JOBDECK_LEVELS").ok();
+    let label_preference = startup_labels(&c.initial);
+    let window_seed: floe_web::view::PatchDto =
+        serde_json::from_value(startup_body(c.initial.clone(), false, c.drc.is_some()))
+            .map_err(|_| Error::input("invalid initial display"))?;
     let preferences = if let Some(first) = sources.first() {
         let (levels, confirm) = startup_levels(
             c.levels,
@@ -600,11 +604,12 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
             frame_cache: c.frame_cache,
         },
     )?;
+    service.seed_window_display(window_seed.core().map_err(Error::input)?)?;
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, c.port))?;
     listener.set_nonblocking(true)?;
     let (mut gate, secret) = if let Some((levels,confirm_levels,initial)) = preferences {
         let request = json!({"kind":"open","seq":"1","source_id":service.catalog()["sources"][0]["source_id"],"mode":c.mode,
-            "levels":handoff::levels_json(levels),"body":initial});
+            "levels":handoff::levels_json(levels),"body":initial,"label_preference":label_preference});
         Gateway::with_startup_options(listener.local_addr()?,Arc::clone(&service),request,confirm_levels)
     } else { Gateway::with_service(listener.local_addr()?,Arc::clone(&service)) }.map_err(Error::input)?;
     Gateway::attach_build(&mut gate, crate::selfcheck::build_info()).map_err(Error::input)?;
@@ -930,6 +935,11 @@ mod tests {
         assert!(parse(&args("view")).unwrap().sources.is_empty());
         assert!(!parse(&args("view --no-open")).unwrap().independent);
         assert!(parse(&args("view --multi --no-open")).unwrap().independent);
+        let baseline = parse(&args("view --perf-baseline")).unwrap();
+        assert!(baseline.sources.is_empty() && baseline.independent && baseline.direct_final);
+        assert!(!baseline.frame_cache);
+        assert_eq!(baseline.initial["frames"], false);
+        assert_eq!(baseline.initial["labels"], false);
         for options in [
             "--jobs 2",
             "--raster-jobs 1",

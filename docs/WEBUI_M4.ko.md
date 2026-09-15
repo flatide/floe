@@ -4120,3 +4120,63 @@ KLayout13 PX+2 phase-exact+14 style(jobs1/8)을 포함한다. 기존 dependency/
 경고는 별도다. 검증용 `.venv` 링크만 제거했고 main/feature/jobdeck 변경은 보존했다.
 전체 로그: `/private/tmp/floe-browse-battery.log`.
 집중 gate 로그: `floe-browse-{unit,api-unit,clippy,ui,msrv,linux-check,native}.log`.
+
+## 52. M4g-8b — 파일 선택 시 창 표시 설정 유지
+
+GTK `open_file`/`_apply_cache`를 기준으로 파일 메뉴의 표시 정책을 복원했다.
+기존 chooser가 각 선택을 CLI 기본값으로 바꾸던 차이를 제거하며 자동 색인은 추가하지 않는다.
+
+- open DTO `display_policy`: 생략/explicit은 기존 API·CLI 의미 그대로, window는
+  파일 메뉴/수동 재열기다. picker 목록 조사 시점이나 DOM의 낡은 값을 복사하지 않는다.
+  owner 작업에서 controller state와 CAS revision을 **한 snapshot**으로 읽고, 새 모델의
+  초기 상태에 depth/detail/thin/frames/labels/font를 적용한 뒤 첫 render를 시작한다.
+- 다른 소스는 fit 및 mono/layer/style 초기화, 같은 소스/모드/레벨은 기존 controller의
+  edit 경로로 worker/decoded/retained cache·카메라·depth·mono·레이어 상태를 보존한다.
+  같은 잡덱 재선택도 사용자가 고른 shallow depth를 full로 되돌리지 않는다.
+- 새 잡덱은 full depth, 실제 labels=false다. window의 원래 레이아웃 라벨 선호는
+  따로 기억하므로 layout→deck→layout에서 on/off 모두 보존한다. thin은 resolved
+  keep/cull이 아니라 auto까지 원래 정책을 복사한다. Close는 세션 선호를 지우지 않는다.
+- CLI가 보내는 `label_preference`는 capability로 가리기 전 frames∩labels 값이다.
+  기본 덱 labels=false와 명시 `--labels off`를 혼동하지 않는다. 재접수/색인 후 수동
+  재열기에서도 이 값과 display_policy를 유지한다. 빈 창 `--perf-baseline`은 trusted
+  초기 설정으로 seed된다. 기존에는 빈 창 baseline도 거부했지만 이제 독립 빈 창에
+  한해 허용한다(process 옵션이므로 기존 owner에 present만 전달하지 않는다). 나머지
+  source 필수 표시/DRC/레벨 옵션 제약은 그대로다.
+- remembered preference는 전환 commit/동일 뷰 edit 성공 후만 갱신한다. metadata 준비
+  실패·취소·stale CAS는 이전 view와 선호를 유지한다. 신규 세션에 영구 저장하지 않으며
+  layerprops나 공유 기본값 파일을 읽는 기존 정책/쓰기 권한도 바꾸지 않는다.
+
+검증 범위:
+
+1. `validate_web_file_display.py`: 실제 GTK open 함수와 depth setter, cache 교체의
+   mono reset을 실행한다(cache I/O만 fake). cache 함수가 표시 선호를 직접 덮어쓰는지
+   별도로 단언하고 Rust 정책과 1,296개 조합을 비교한다. 전체 배터리에 필수 배선했다.
+2. owner native gate: 첫 generation1/state_rev1에서 설정 확인, 동일 파일 worker/카메라/
+   mono/레이어 유지, 다른 파일 fit/reset, 잡덱 왕복 labels on/off·auto thin, Close 뒤
+   재열기, CLI label 선호와 동일 덱 shallow depth를 검사한다. 이전 stale/cancel/실패/
+   한번만 접수 gate도 그대로 실행한다.
+3. 실제 CLI chooser gate는 빈 창 baseline의 첫 파일 frames/labels off를 확인한다.
+   CLI startup/handoff 및 실제 app.js harness는 전달 기본값·원래 요청 재열기·다른
+   소스로 설정이 누출되지 않는 기존 조건에 display_policy/label_preference를 더한다.
+4. Rust1.89에서 app 17/web 72 단위 테스트(각 oracle 1개는 전용 gate에서 실행),
+   Linux musl all-target check, 최종 host clippy와 ES2017/UI를 통과했다.
+5. 실제 Chrome에서 합성 first.oas의 depth7/high/auto·frames on·labels off·font23을
+   확인하고 Mono를 켠 뒤 picker로 second.oas를 열었다. 표시 선호는 유지되고 Mono는
+   해제되며 두 번째 파일의 실제 컬러 geometry가 표시됨을 확인했다. End session 뒤
+   exit0·session file 제거·worker 디렉터리 비움과 테스트 탭 종료도 확인했다.
+   첫 실행은 브라우저 연결 전에 bootstrap이 만료되어 정상 종료됐으며 새 private
+   세션으로 검증했다. 공유 파일 게시·업로드·다운로드·clipboard는 수행하지 않았다.
+
+전체 배터리 첫 실행은 초기 legacy 다중 worker oracle에서 진행 없이 대기했다.
+해당 검증 프로세스만 SIGINT로 종료하고 자식 프로세스 정리를 확인했다. 같은 private
+valmini에 `floe index --legacy --jobs 1`로 oracle을 5초 만에 생성한 뒤 배터리를
+재실행했다. 제품/legacy 코드는 이 우회를 위해 변경하지 않았다. 전체 배터리는
+exit0, `RUST VALIDATION: ALL OK`로 완료했다. workspace 단위·owner 14·GTK file
+display 1,296·startup144/native8·picker/handoff·ES2017/UI·잡덱80·렌더러46과
+KLayout13 PX+2 phase-exact+14 style(jobs1/8)을 포함한다. 기존 dependency/GTK/Pillow
+경고는 별도다. 로그: `/private/tmp/floe-window-battery-retry.log`,
+집중 검사: `/private/tmp/floe-window-*.log`.
+
+다음은 미색인 파일의 단일 동의→색인→자동 재열기다. 파일 선택 자체로 색인·force·
+공유 게시를 승인한 것으로 해석하지 않는다. 현장 Firefox/ETX 수용은 여전히 미검증이며
+이 단계로 GTK 폐기나 전체 웹 이관 완료를 선언하지 않는다.

@@ -601,7 +601,9 @@
     el('live-mode').onchange = function () { changeDeckMode(el('live-mode').value).catch(report); };
     async function openSource(startup) {
         const remembered = pendingStartup && pendingStartup.source_id === el('source').value ? pendingStartup : null;
-        const request = Object.assign({}, startup || {kind: 'open', mode: el('mode').value, source_id: el('source').value, levels: levels(), body: remembered ? remembered.body : {}});
+        const request = Object.assign({}, startup || {kind: 'open', mode: el('mode').value, source_id: el('source').value, levels: levels(),
+            display_policy: remembered ? remembered.display_policy || 'explicit' : 'window', body: remembered ? remembered.body : {}});
+        if (!startup && remembered && remembered.label_preference !== undefined) { request.label_preference = remembered.label_preference; }
         request.body = Object.assign({}, request.body, {pixels:dims().pixels});
         await submitOperation(request);
         startupWaiting = false;

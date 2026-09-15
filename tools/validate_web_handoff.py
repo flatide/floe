@@ -143,6 +143,7 @@ def main(fixture):
                     assert p['confirm_levels'] is ask
                     assert p['request']['levels'] == selected
                     assert p['request']['body']['labels'] is False
+                    assert p['request']['label_preference'] is True
                     client.call('POST', '/api/v1/launch/' + p['id'], dict(action='dismiss'))
 
                 isolated_file = work / 'independent.json'
