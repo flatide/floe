@@ -92,6 +92,8 @@ def cases():
 
 
 def main():
+    from validate_bitmap_slots import validate as validate_slots
+    validate_slots()
     cargo = shutil.which("cargo") or str(Path.home() / ".cargo/bin/cargo")
     build = subprocess.run([cargo, "test", "--offline", "--locked", "-j2", "-p", "floe-app-core", "--lib",
                             "--no-run", "--message-format=json"], cwd=ROOT / "rust", capture_output=True, text=True, timeout=240)

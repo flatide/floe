@@ -5018,3 +5018,33 @@ acceptance를 DOM/native HTTP 검사로 대체하지 않는다. renderer/index �
 개발 bitmap 슬롯/CLI 제품 경계·G4 최종 대조, 실제 브라우저 입력/저장/복구/화면,
 Python-free Linux 실행과 G1/G4 수용은 미완료다. M2 공유/원격은 미구현, M0/M3 현장은
 보류, M5 world-tile은 조건부다. 전체 goal은 계속 active이며 임의 완료율을 보고하지 않는다.
+
+## 66. M4g-16a — 개발 bitmap 슬롯의 source-side 계약 고정
+
+2026-09-16. reviewer legacy 읽기 연결과 독립적으로 UI-03의 남은 슬롯 의미를
+감사했다. 제품 모델/API/UI는 아직 미구현이며, 이번 커밋은 문서와 개발 오라클뿐이다.
+세부 근거와 후속 수용 조건은 [슬롯 계약](WEBUI_BITMAP_SLOTS.ko.md)에 고정했다.
+
+- GTK의 슬롯 참조는 bitmap 값과 다르다. 같은 값인 별도 슬롯, 미사용 슬롯 편집 후
+  나중의 할당, 슬롯을 참조하는 모든 행의 갱신을 구분해야 한다. 선택 행 custom hex
+  입력으로 이관 완료 판정을 내리지 않는다.
+- `solid`/`clear`는 이름으로 고정하며 현재 슬롯18/19다. GTK 메뉴의 비활성화만
+  복제하지 않고 후속 Rust 진입점에서도 검증해야 한다. `FLOE_FILL_EDIT`의 현재 웹
+  공유 기본값 게시 opt-in을 슬롯 편집 자체의 동의와 혼동하지 않는다.
+- 실제 GTK 편집 메서드의 Cancel/Apply·clear/solid/invert/reset·드래그 방향과 release,
+  동일 bitmap 슬롯 격리·다음 할당, worker 전송을 inert widget과 합성 행으로 실행했다.
+  `_props_rows`가 편집 bitmap 대신 이름만 내보내는 저장 손실도 명시했다. 웹의
+  Native JSON/Calibre text 손실 거부 정책은 유지한다.
+
+검증: `validate_palette_styles.py` exit0. 새 원본 계약324편집/80메뉴, 기존
+GTK+adapter→Rust 스타일10,584개,49색/20bitmap 대조가 모두 통과했다
+(`/private/tmp/floe-bitmap-contract-palette.log`). `node tools/validate_web_ui.cjs`
+exit0/ALL OK로 자동 저장 opt-in/read-prepare-approve 경합과 전체 ES2017/DOM 회귀도
+통과했다(`/private/tmp/floe-bitmap-contract-ui.log`). 원본 계약은 기존 palette 검사에
+연결해 전체 배터리에 포함했지만 **이번 문서/테스트 전용 단계에서 전체 배터리를
+재실행하지는 않았다**. 제품 변경·Rust 슬롯과의 parity·실제 browser 조작 PASS가 아니다.
+
+목표 잔여: 슬롯 Rust 모델/API/UI·lossless 설정, reviewer legacy 읽기 연결과 G4 최종
+대조, 실제 브라우저 입력/저장/복구/화면 및 Python-free Linux 실행은 남는다. M2 공유/
+원격은 미구현, M0/M3 현장 검증은 보류, M5 world-tile은 조건부다. 단계를 세분화한
+커밋 수를 전체 완료율로 바꾸지 않는다. main/feature/jobdeck은 수정하지 않았다.
