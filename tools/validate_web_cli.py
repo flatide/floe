@@ -105,7 +105,7 @@ def main(fixture):
             args += ["--no-open"] if manual else ["--firefox", str(fake)]
             if manual:
                 args.pop(1)  # Same real startup via bare SOURCE, not only parser tests.
-                args += ["--frame-cache", "off"]
+                args += ["--frame-cache", "off", "--dump"]
             proc = subprocess.Popen(args, env=env, stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE, text=True)
             try:
@@ -143,6 +143,10 @@ def main(fixture):
                 assert client.call("GET", "/api/v1/operations")["last_seq"] == "0"
                 assert client.call("GET", "/api/v1/capabilities")["design_defaults"] is manual
                 assert client.call("GET", "/api/v1/capabilities")["fill_slot_edit"] is manual
+                assert client.call("GET", "/api/v1/capabilities")["display_dump"] is True
+                assert client.call("GET", "/api/v1/capabilities")["dump_on_start"] is manual
+                asset = client.call("GET", "/assets/" + session["bundle"] + "/display-dump.js")
+                assert b"FloeDisplayDump" in asset
                 if not manual:
                     client.call("GET", "/api/v1/defaults", code=403)
                 else:

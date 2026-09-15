@@ -13,7 +13,7 @@
     let gesture = null, dragShift = null, lastPlacement = null;
     let drcPanel = null, displayProjection = null, frozenProjection = null;
     let inspector = null, measurement = null, clipper = null, snapshots = null, overlayMode = 'all', pickedPairs = [];
-    let settings = null, defaults = null, about = null, sessionExit = null;
+    let settings = null, defaults = null, about = null, sessionExit = null, dumps = null;
     let minimap = null, launcher = null, picker = null, indexOpen = null, palette = null;
     const rulerHistory = window.FloeRulers.history();
     let ackedFrames = {foreground: null, margin: null};
@@ -82,7 +82,7 @@
                     if (xhr.responseText) { value = JSON.parse(xhr.responseText); }
                 } catch (e) { reject(e); return; }
                 if (xhr.status < 200 || xhr.status >= 300) {
-                    if (xhr.status === 401) { stopped = true; if (indexOpen) { indexOpen.stop(); } if (picker) { picker.stop(); } if (launcher) { launcher.stop(); } connection('Session expired', false); }
+                    if (xhr.status === 401) { stopped = true; if (dumps) { dumps.stop(); } if (indexOpen) { indexOpen.stop(); } if (picker) { picker.stop(); } if (launcher) { launcher.stop(); } connection('Session expired', false); }
                     const failure = new Error(message(value && value.error || ('HTTP ' + xhr.status)));
                     failure.status = xhr.status; failure.code = value && value.error;
                     reject(failure);
@@ -124,6 +124,7 @@
         if (dragShift) { delta[0] += dragShift[0]; delta[1] += dragShift[1]; }
         return delta;
     }
+    function dumpChanged() { if (dumps) { dumps.changed(); } }
     function present() {
         const size = dims(), delta = state && pendingPan();
         const sameSize = state && size.pixels[0] === state.pixels[0] && size.pixels[1] === state.pixels[1];
@@ -146,6 +147,7 @@
         if (measurement) { measurement.changed(); measurement.paint(displayProjection, size); }
         if (clipper) { clipper.changed(); }
         if (snapshots) { snapshots.changed(); }
+        dumpChanged();
         if (minimap) { minimap.changed(); }
         if (full) {
             const pending = !!inflightBody || queue.length > 0 || !!dragShift;
@@ -189,6 +191,7 @@
         marginCanvas.hidden = true;
     }
     function clearBuffers() {
+        if (dumps) { dumps.reset(); }
         foregroundFrame = null; marginFrame = null; foregroundPerf = '';
         lastPlacement = null; dragShift = null;
         displayProjection = null; frozenProjection = null;
@@ -382,6 +385,7 @@
                     const ctx = h.purpose === 'margin' ? marginContext : context;
                     if (target.width !== h.width || target.height !== h.height) { target.width = h.width; target.height = h.height; }
                     ctx.imageSmoothingEnabled = false; draw(ctx);
+                    if (dumps) { dumps.received(h, target); }
                     if (h.purpose === 'margin') { marginFrame = h; } else { foregroundFrame = h; frozenProjection = null; }
                     if (!displayed && document.activeElement === document.body) { viewport.focus(); }
                     displayed = true; el('empty').hidden = true; disposition = 'displayed';
@@ -650,6 +654,7 @@
         if (caps.drc) { await drcPanel.init(); }
         await clipper.init(caps.exports);
         snapshots.init(caps.snapshot_png);
+        dumps.init(caps.display_dump, caps.dump_on_start);
         settings.capabilities(caps.layer_settings);
         await defaults.init(caps.design_defaults);
         sourceSelection();
@@ -689,6 +694,7 @@
         if (drcPanel) { drcPanel.stop(); }
         if (clipper) { clipper.stop(); }
         if (snapshots) { snapshots.stop(); }
+        if (dumps) { dumps.stop(); }
         if (settings) { settings.stop(); }
         if (defaults) { defaults.stop(); }
         stopped = true; disconnect(); if (operationTimer) { clearTimeout(operationTimer); }
@@ -889,7 +895,7 @@
     // notices are overlays and never change the viewport's layout size.
     const sizeObserver = typeof window.ResizeObserver === 'function' ? new window.ResizeObserver(resized) : null;
     if (sizeObserver) { sizeObserver.observe(viewport); }
-    drcPanel = window.FloeDRC.bind({document: document, window: window, protocol: P, http: http,
+    drcPanel = window.FloeDRC.bind({document: document, window: window, protocol: P, http: http, painted:dumpChanged,
         history:rulerHistory, rulerKey:function (key) { return measurement && !drcPanel.boxActive() && measurement.key(key); },
         stateStore: window.FloePanelState, rulers: window.FloeRulers, groups: window.FloeDRCGroups, builds: window.FloeDRCBuild, cursor: reviewCursor,
         notes: window.FloeDRCNotes, noteDisplay: window.FloeDRCNoteDisplay, waives: window.FloeDRCWaives, transfers: window.FloeDRCTransfer, session: function () { return auth ? auth.session_id : ''; },
@@ -908,10 +914,10 @@
             connected: !!epoch && !!socket && socket.readyState === WebSocket.OPEN, pending: !!inflight || queue.length > 0 || !!dragShift} : null; },
         navigate: function (n, token, done) { return edit({prepared_token: token}, done); },
         restoreLayers: function (done) { return edit({restore_layers: true}, done); }, resize: resized});
-    inspector = window.FloeInspect.bind({document: document, window: window, protocol: P, query: window.FloeQuery,
+    inspector = window.FloeInspect.bind({document: document, window: window, protocol: P, query: window.FloeQuery, painted:dumpChanged,
         context: queryContext, send: send, layers: highlightPicked, now: function () { return Date.now(); },
         setTimeout: setTimeout.bind(window), clearTimeout: clearTimeout.bind(window)});
-    measurement = window.FloeMeasure.bind({document: document, window: window, protocol: P, query: window.FloeQuery, rulers: window.FloeRulers,
+    measurement = window.FloeMeasure.bind({document: document, window: window, protocol: P, query: window.FloeQuery, rulers: window.FloeRulers, painted:dumpChanged,
         history:rulerHistory, selection:function () { return inspector.selection(); },
         popCD:function (all) { return drcPanel.key(all?'K':'k'); }, cdBusy:function () { return drcPanel.rulersBusy(); },
         context: queryContext, send: send, now: function () { return Date.now(); }, setTimeout: setTimeout.bind(window), clearTimeout: clearTimeout.bind(window),
@@ -930,18 +936,20 @@
         if(stopped||document.hidden||!displayed||!lastPlacement||!currentId){return false;}
         try{const size=dims();return size.pixels.every(function(n,i){return n===lastPlacement.pixels[i];});}catch(_){return false;}
     }
+    function displayedScene(){
+        if(!snapshotReady()){return null;}
+        // Flush only annotation canvases. Neither native pixels nor world
+        // coordinates are recomputed, and there is no HTTP/WS request.
+        inspector.flush();measurement.flush();drcPanel.flush();
+        const p=lastPlacement,layers=[];
+        if(p.margin&&!marginCanvas.hidden){layers.push({canvas:marginCanvas,offset:p.margin.map(function(n){return -n;})});}
+        if(!canvas.hidden){layers.push({canvas:canvas,offset:p.foreground.map(function(n){return -n;})});}
+        ['query-canvas','drc-canvas','ruler-canvas'].forEach(function(id){const c=el(id);if(!c.hidden){layers.push({canvas:c,offset:[0,0]});}});
+        return {pixels:p.pixels.slice(),layers:layers};
+    }
     snapshots=window.FloeSnapshot.bind({document:document,window:window,protocol:P,ready:snapshotReady,
-        setTimeout:setTimeout.bind(window),clearTimeout:clearTimeout.bind(window),scene:function(){
-            if(!snapshotReady()){return null;}
-            // Flush only annotation canvases. Neither native pixels nor world
-            // coordinates are recomputed, and there is no HTTP/WS request.
-            inspector.flush();measurement.flush();drcPanel.flush();
-            const p=lastPlacement,layers=[];
-            if(p.margin&&!marginCanvas.hidden){layers.push({canvas:marginCanvas,offset:p.margin.map(function(n){return -n;})});}
-            if(!canvas.hidden){layers.push({canvas:canvas,offset:p.foreground.map(function(n){return -n;})});}
-            ['query-canvas','drc-canvas','ruler-canvas'].forEach(function(id){const c=el(id);if(!c.hidden){layers.push({canvas:c,offset:[0,0]});}});
-            return {pixels:p.pixels.slice(),layers:layers};
-        }});
+        setTimeout:setTimeout.bind(window),clearTimeout:clearTimeout.bind(window),scene:displayedScene});
+    dumps=window.FloeDisplayDump.bind({document:document,window:window,protocol:P,compose:window.FloeSnapshot.compose,scene:displayedScene});
     function settingsContext(){return state?{id:currentId,epoch:epoch,rev:state.state_rev,ready:!stopped&&!document.hidden&&live()&&socket&&socket.readyState===WebSocket.OPEN,
         idle:!indexBlocked()&&!inflight&&!accepted&&!queue.length&&!submitting&&!ownerBusy}:null;}
     defaults=window.FloeDefaults.bind({el:el,protocol:P,query:window.FloeQuery,http:http,context:settingsContext,
@@ -1010,9 +1018,9 @@
     document.addEventListener('visibilitychange', function () { settings.changed(); defaults.changed(); minimap.changed(); palette.changed(); if (document.hidden) { indexOpen.stop(); finishDecode(); inspector.changed(); measurement.changed(); clipper.changed(); } else if (!stopped) { indexOpen.resume().catch(report); if(live()){connect();} } });
     window.addEventListener('blur', function () { inspector.move(NaN, NaN); measurement.interrupt(); });
     setInterval(function () { if (socket && socket.readyState === WebSocket.OPEN && epoch) { try { send({type: 'ping'}); } catch (e) { report(e); } } }, 10000);
-    window.addEventListener('pagehide', function () { palette.suspend(); indexOpen.stop(); picker.stop(); launcher.stop(); minimap.suspend(); about.stop(); sessionExit.stop(); disconnect(); inspector.stop(); measurement.stop(); clipper.stop(); snapshots.stop(); settings.stop(); defaults.stop(); clearTimeout(operationTimer); clearTimeout(resizeTimer); if (sizeObserver) { sizeObserver.disconnect(); } drcPanel.stop(); });
+    window.addEventListener('pagehide', function () { dumps.stop(); palette.suspend(); indexOpen.stop(); picker.stop(); launcher.stop(); minimap.suspend(); about.stop(); sessionExit.stop(); disconnect(); inspector.stop(); measurement.stop(); clipper.stop(); snapshots.stop(); settings.stop(); defaults.stop(); clearTimeout(operationTimer); clearTimeout(resizeTimer); if (sizeObserver) { sizeObserver.disconnect(); } drcPanel.stop(); });
     window.addEventListener('pageshow', function (event) {
-        if (event.persisted && auth && !stopped) { palette.resume(); minimap.resume(); about.init(); sessionExit.init(); inspector.resume(); measurement.resume(); clipper.resume(); snapshots.resume(); settings.resume(); defaults.resume(); if (sizeObserver) { sizeObserver.observe(viewport); } drcPanel.resume().then(function(){return indexOpen.resume();}).then(operationState).then(restore).then(resized).then(function(){return picker.resume();}).then(function(){return launcher.resume();}).catch(report); }
+        if (event.persisted && auth && !stopped) { dumps.resume(); palette.resume(); minimap.resume(); about.init(); sessionExit.init(); inspector.resume(); measurement.resume(); clipper.resume(); snapshots.resume(); settings.resume(); defaults.resume(); if (sizeObserver) { sizeObserver.observe(viewport); } drcPanel.resume().then(function(){return indexOpen.resume();}).then(operationState).then(restore).then(resized).then(function(){return picker.resume();}).then(function(){return launcher.resume();}).catch(report); }
     });
     start().catch(function (e) { connection('Not connected', false); report(e); el('empty-message').textContent = e.message; });
 }());

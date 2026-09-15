@@ -407,7 +407,7 @@
         function paintLater(keepHits) {
             if (!keepHits) { markerHits = []; hitStamp = ''; tooltip(''); }
             if (stopped || painting !== null) { return; }
-            painting = o.window.requestAnimationFrame(function () { painting = null; paint(lastProjection, lastSize); });
+            painting = o.window.requestAnimationFrame(function () { painting = null; paint(lastProjection, lastSize); if(o.painted){o.painted();} });
         }
         function marker(r, xy, side, w, h) {
             if (!xy.every(Number.isFinite)) { return; }

@@ -1,8 +1,8 @@
 # 웹 표시 진단 이관
 
-2026-09-16, M4g-17c. [M0 §2.8~2.9](WEBUI_M0.ko.md)의 `gtktest`/`--dump`
+2026-09-16, M4g-22. [M0 §2.8~2.9](WEBUI_M0.ko.md)의 `gtktest`/`--dump`
 미이관을 실제 코드로 분리한 계약과 현재 구현이다. **합성·정적 입력 PNG 진단은
-연결했지만 실제 브라우저 수용·GTK 진단 폐기·자동 dump의 이관 완료는 아니다.**
+연결하고 승인된 브라우저 dump도 추가했지만 실제 브라우저 수용·GTK 진단 폐기는 아니다.**
 
 ## 1. GTK의 실제 동작
 
@@ -11,13 +11,13 @@
 | `gtktest [png]` | 선택 PNG를360×160으로 bilinear 축소해 표시 | `displaytest [PNG]`: 정적 PNG snapshot을 브라우저 smoothing으로360×160 표시. GTK 보간 픽셀 동일성은 보장하지 않음 |
 | `gtktest` 합성 | 검은360×160 RGB pixbuf에 빨강/초록/파랑/노랑70×100 막대4개 | 같은 픽셀의 Rust PNG/raw, 공통 디코더와 Canvas로 대조 |
 | `gtktest` 배치 | 같은 pixbuf를 Overlay/ScrolledWindow 안에 표시 | 웹 `.viewport`의 crop/별도 투명 overlay를 표시; GTK 위젯 구조를 복제하지 않음 |
-| `view --dump` 수신 | 수신 raw/PNG를 pixbuf로 만든 뒤 `/tmp/<APP>_frame.png`에 덮어씀 | 아직 변경하지 않음; 숫자 `--render-debug`와 다른 기능 |
-| `view --dump` 합성 | overlays 후 `/tmp/<APP>_disp.png`와 widget alloc/mapped/visible 진단 | 2026-09-16 브라우저 최근 프레임/합성 화면 보관·명시적 다운로드로 결정; 구현은 남으며 기존 Save view PNG만으로 대체 완료라고 세지 않음 |
+| `view --dump` 수신 | 수신 raw/PNG를 pixbuf로 만든 뒤 `/tmp/<APP>_frame.png`에 덮어씀 | M4g-22: 승인된 decoded raw/PNG 한 장을 브라우저 bitmap으로 보관; 명시 PNG 다운로드 |
+| `view --dump` 합성 | overlays 후 `/tmp/<APP>_disp.png`와 widget alloc/mapped/visible 진단 | M4g-22: 최근 viewport crop/합성과 canvas 주석 한 장 보관·명시 다운로드. GTK 위젯/OS 진단을 복제하는 기능은 아님 |
 
 `_display`의 기존 dump는 `_update_labels/_update_note_labels` **전**에 실행된다.
 GTK dump가 항상 화면의 모든 주석을 포함한다는 가정도 맞지 않는다.
-서버 파일 연속 덮어쓰기와 브라우저 최근 이미지 보관/명시 다운로드 중 어느 경계를
-택할지 사용자에게 물었으며, 응답 없이 기존 `--dump` 의미를 바꾸지 않는다.
+사용자는 브라우저 최근 이미지 보관/명시 다운로드를 선택했다. 서버 파일 연속
+덮어쓰기는 추가하지 않으며 기존 GTK 명령의 동작은 보존한다.
 GTK 명령의 폐기·alias 승인도 이 합성 진단 구현에 포함하지 않는다.
 
 ## 2. 사용과 보안 경계
@@ -132,5 +132,49 @@ DOM gate는 실제 공통 decoder와 대역 Image/Canvas로 배율·alpha readba
 전체 배터리 실행 기록은 [M4 §70~72](WEBUI_M4.ko.md)에 둔다. 이를 실제 브라우저 실행으로
 대체 보고하지 않는다. 기존 브라우저 시작 경로의 도구 거부도 우회하지 않았다.
 
-다음 잔여는 기존 GTK 진단/애니메이션 PNG의 제품 경계, `--dump` 저장 방식,
+다음 잔여는 기존 GTK 진단/애니메이션 PNG의 제품 경계,
 실제 Firefox/ETX의 표시/입력 수용이다. 기존 GTK 구현은 보존한다.
+
+## 4. M4g-22 — 최근 수신/합성 화면의 브라우저 dump
+
+`floe2-web view SOURCE --dump`는 독립 workspace로 시작하고 브라우저의 보관을
+초기 활성화한다. 기존 창으로 forward하지 않는다. 일반 실행은 off이며 **About →
+Display diagnostics → Keep recent received frame and composed display**로 켤 수 있다.
+About를 닫아도 활성화는 유지하고, opt-out·페이지 종료/로그아웃·세션 만료는 해제한다.
+BFCache 복귀는 off여서 명시적으로 다시 켜야 한다. 새 페이지 reload는 원래 CLI
+옵션을 다시 읽는다. 기능은 숫자 전용 `--render-debug`나 일반 Save view PNG와 별개다.
+
+- 수신: 유효한 현재 WS frame이 정상 디코드되어 canvas에 적용될 때 복사한다. stale/
+  hidden/discarded/디코드 실패는 보관하지 않는다. 마지막 **foreground 또는 margin**
+  하나이며 목적·원형식·generation·픽셀 크기·incomplete 여부를 표시한다. 원 PNG의
+  압축 바이트를 보관하는 것이 아니라 디코딩 결과를 PNG로 내보낸다.
+- 합성: `present()`의 현재 margin/foreground 배치와 보이는 query/DRC/ruler canvas를
+  viewport device-pixel 크기로 복사한다. pan preview, incomplete/frozen base도 보이는
+  그대로 대상이다. 주석의 비동기 paint도 알림을 보내며 한 animation-frame 작업으로
+  병합한다. 캡처 전에 기존 overlay flush를 사용하되 네이티브 재렌더·query는 하지 않는다.
+  **Capture display now**는 현재 합성만 새로 보관한다.
+- 두 이미지는 독립적인 최근 캡처다. 로컬 번호와 합성 시 마지막 수신 번호를 보여
+  주지만 동일 시점의 한 쌍이나 동일 generation임을 보장하지 않는다. 여백 수신 이미지와
+  화면 crop의 크기도 다르다. 패널·status·CSS 선택 box·OS/ETX 합성 화면은 제외한다.
+- 각각 최대16Mpx/한 축8192px(기존 frame contract), 총32Mpx ≈128MiB RGBA bitmap을
+  보관한다. 교체 전에 이전 bitmap을1×1로 해제한다. off에는 복사가 없지만 on에는
+  수신 시 동기 복사와 합성 복사/overlay flush 비용이 생긴다. 정상 성능 측정에서 끈다.
+  브라우저 내부 메모리·기존 표시 canvas까지128MiB로 제한한다는 뜻은 아니다.
+- PNG 인코딩은 다운로드 클릭에서만 시작한다. 동시 encoder1개와 retry PNG1개(80MiB
+  이하)만 허용한다. 인코더 내부 snapshot은 추가 최대16Mpx이며 기존 화면/브라우저
+  자체 할당은 별도다. 이후 프레임으로 canvas가 바뀌어도 클릭 시 bitmap을 인코딩한다.
+  다운로드를 요청한 뒤에도 같은 frozen PNG의 명시 재다운로드가 가능하다. 브라우저가
+  저장을 완료했는지는 알 수 없으므로 “requested”로 표시한다.
+- clear/opt-out/다른 view·close/pagehide/종료가 오면 이미지·PNG·object URL을 해제하고
+  진행 중 encoder의 delivery를 취소한다. 실제 `toBlob` 작업은 취소할 수 없으므로
+  callback까지 credit을 유지하며 다시 켜도 encoder가 중첩되지 않는다. 이전 source의
+  늦은 callback은 다운로드하지 않는다. 이미 사용자에게 내려간 파일은 지우지 않는다.
+- WS 단절만으로 이미 보관한 픽셀을 지우지는 않아 단절 당시 상태를 다운로드할 수
+  있다. 인증 만료가 확인되거나 페이지/세션을 종료하면 지운다. 브라우저 storage·서버
+  파일·업로드·clipboard read는 없다. PNG에는 화면의 설계/주석이 들어가므로 민감한
+  파일일 수 있다. 경로·credential·원본 metadata를 이미지 이름에 넣지 않는다.
+
+카탈로그의 `display_dump`는 viewer 지원 여부, `dump_on_start`는 trusted CLI의 초기
+선택이다. 새 서버 이미지 저장/다운로드 endpoint나 path DTO는 만들지 않는다.
+독립 displaytest 세션에서는 둘 다 false다. 실제 브라우저 PNG/다운로드·물리 화면 수용은
+기존 도구 제약을 우회하지 않고 별도 항목으로 유지한다.

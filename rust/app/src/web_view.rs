@@ -53,6 +53,7 @@ const HELP: &str = "Usage: floe2-web view [SOURCE ...] [OPTIONS]
   --refinement off         Explicit direct-final render (overrides round env)
   --stream-kb 0            Compatibility spelling for --refinement off (only 0)
   --render-debug           Numeric worker-frame diagnostics to stderr; independent workspace
+  --dump                   Keep recent frame/display pixels in browser memory; explicit downloads
   --perf-baseline           Frames/labels/refinement/frame reuse off; caches stay
   --root DIRECTORY         Additional approved dependency/file-picker root, repeatable
   --drc RESULTS.db|PACK.ice Register DRC on first source; pack build needs owner approval
@@ -86,8 +87,10 @@ SVRF metadata reserves another 256 MiB, with no extra CPU worker).
 DRC reads the explicit file unless --floe-reviewer selects its current adjacent ICE.
 No implicit indexing or ambient reviewer selection; read-only selection grants no writes.
 Refinement off; deck margin unsupported.
-Nonzero --stream-kb, --stream-target-ms, --lod, --hairline, --thin-um
-and GTK --dump are not migrated; they are rejected, never silently ignored.
+Nonzero --stream-kb, --stream-target-ms, --lod, --hairline and --thin-um
+are not migrated; they are rejected, never silently ignored.
+--dump starts an independent workspace. About has the capture toggle/downloads.
+It copies displayed pixels, affects timing/memory and never writes server /tmp PNGs.
 --hairline/--thin-um affected the legacy KLayout planner, not Rust renderd.
 Use --thin auto|keep|cull for the existing Rust thin-page policy, not as an
 equivalent frame-lattice control. --render-debug excludes paths, coordinates,
@@ -115,6 +118,7 @@ pub struct Command {
     frame_cache: bool,
     direct_final: bool,
     render_debug: bool,
+    dump: bool,
     perf_baseline: bool,
     port: u16,
     no_open: bool,
@@ -143,6 +147,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
         frame_cache: true,
         direct_final: false,
         render_debug: false,
+        dump: false,
         perf_baseline: false,
         port: 0,
         no_open: false,
@@ -184,6 +189,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
                 | "--refinement"
                 | "--stream-kb"
                 | "--render-debug"
+                | "--dump"
                 | "--perf-baseline"
                 | "--port"
                 | "--session-file"
@@ -312,9 +318,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
             "--lod" => return Err(Error::input(
                 "view --lod was not sent to Rust renderd; a live LOD policy switch is not migrated (index --lod controls generation, not display)",
             )),
-            "--dump" => return Err(Error::input(
-                "--dump is a GTK/XQuartz display diagnostic; web display dumps are not migrated; --render-debug provides numeric worker diagnostics only",
-            )),
+            "--dump" => { flag()?; c.dump = true; }
             "--floe-reviewer" => c.read_reviewer = Some(value()?.to_owned()),
             "--perf-baseline" => {
                 flag()?;
@@ -716,6 +720,9 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
         Gateway::with_startup_options(listener.local_addr()?,Arc::clone(&service),request,confirm_levels)
     } else { Gateway::with_service(listener.local_addr()?,Arc::clone(&service)) }.map_err(Error::input)?;
     Gateway::attach_build(&mut gate, crate::selfcheck::build_info()).map_err(Error::input)?;
+    if c.dump {
+        Gateway::enable_display_dump(&mut gate).map_err(Error::input)?;
+    }
     let notices = match crate::selfcheck::notice_catalog(cancelled) {
         Ok(Some(c)) => floe_web::about::Notices::Ready(Arc::new(c)),
         Ok(None) => floe_web::about::Notices::NotPackaged,
@@ -938,6 +945,10 @@ mod tests {
         assert!(c.render_debug && c.independent);
         assert!(!c.direct_final);
         assert!(!parse(&args("view")).unwrap().render_debug);
+        let c = parse(&args("view --dump")).unwrap();
+        assert!(c.dump && c.independent && !c.render_debug && !c.direct_final);
+        assert_eq!(c.initial, json!({})); // Not forwarded as a display patch.
+        assert!(!parse(&args("view")).unwrap().dump);
         for tail in [
             "--stream-kb",
             "--stream-kb 1",
@@ -948,6 +959,7 @@ mod tests {
             "--refinement off --stream-kb 8",
             "--perf-baseline --stream-kb 8",
             "--render-debug=false",
+            "--dump=false",
         ] {
             assert!(parse(&args(&format!("view {tail}"))).is_err(), "{tail}");
         }
@@ -959,7 +971,6 @@ mod tests {
             ("--thin-um 0", "not an equivalent frame control"),
             ("--stream-target-ms 500", "unused by Rust renderd"),
             ("--lod off", "not sent to Rust renderd"),
-            ("--dump", "GTK/XQuartz"),
         ] {
             let e = parse(&args(&format!("view missing.oas {tail}"))).unwrap_err();
             assert!(e.to_string().contains(explanation), "{e}");

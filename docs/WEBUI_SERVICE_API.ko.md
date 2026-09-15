@@ -291,6 +291,15 @@ null이다. UI는 ASCII fallback에 notes/waives 미적용 안내를 유지한�
 없고, fallback에는 note/waive 서비스도 만들지 않는다. 최초 선택과 actor open은
 size/초 단위 mtime 일치를 검사하며 내용 hash/hot reload 보장은 아니다. writer와
 reviewer 미지정 실행의 기존 explicit-file 선택은 변경하지 않는다.
+
+M4g-22의 capabilities `display_dump:bool`은 viewer의 브라우저-local dump 지원,
+`dump_on_start:bool`은 trusted CLI `view --dump`의 초기 보관 선택이다. 일반 viewer는
+true/false, 명시 `--dump`는 true/true, 독립 displaytest는 false/false다. 브라우저
+토글은 로컬 메모리만 변경한다. 새 이미지 보관/다운로드 HTTP endpoint, path DTO,
+권한 확대는 없다. 승인된 decoded frame과 합성 canvas를 각각1장 보관하며 이미지
+다운로드는 사용자의 명시 동작이다. [표시 진단 §4](WEBUI_DISPLAY_DIAGNOSTICS.ko.md)의
+상한·취소·민감 정보·성능/수용 경계를 따른다. frame ACK/credit이나 worker protocol을
+새로 정의하지 않는다.
 M4e-5a는 기존 주석 owner 등록에 `POST /api/v1/drc/review/notes/display`를 추가한다.
 최대512개의 check/local 배지와 focus 하나의 본문만 반환하고 편집/게시 token을 만들지
 않는다. context+notes review_rev에 고정한 admitted snapshot 하나를 재사용하며,

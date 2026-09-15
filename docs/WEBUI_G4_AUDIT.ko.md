@@ -1,6 +1,6 @@
 # 웹 전환 G4 잔여 감사
 
-갱신: 2026-09-16, M4g-21(reviewer ASCII/cache 선택). 상위 [계획](WEBUI_PLAN.ko.md), 원래 범위
+갱신: 2026-09-16, M4g-22(브라우저 display dump). 상위 [계획](WEBUI_PLAN.ko.md), 원래 범위
 [M0 §2~3](WEBUI_M0.ko.md), 단계별 실행 기록 [M4](WEBUI_M4.ko.md).
 
 이 문서는 **로컬 구현과 전체 수용을 분리하는 잔여 목록**이다. 표의 구현/게이트는
@@ -12,7 +12,7 @@
 
 | 범위 | 로컬 구현/검증 근거 | 아직 닫지 않은 부분 |
 |---|---|---|
-| CLI 10종·보조 PNG 명령 | `rust/app`, `rust/app-core`; `validate_app_cli.py`, `validate_app_render.py`, `validate_app_jobdeck*.py`, `validate_fe_embed.py` 등. view 옵션/형식 대조 M4 §62; M4g-15a/20/21 명시 reviewer ICE/legacy·ASCII/cache 읽기 | dump 구현, 무효/개발 옵션의 최종 제품 경계. GDS/gzip은 기존 native 한계이며 새 지원 아님 |
+| CLI 10종·보조 PNG 명령 | `rust/app`, `rust/app-core`; `validate_app_cli.py`, `validate_app_render.py`, `validate_app_jobdeck*.py`, `validate_fe_embed.py` 등. view 옵션/형식 대조 M4 §62; M4g-15a/20/21 reviewer 읽기; M4g-22 브라우저 dump | 무효/개발 옵션의 최종 제품 경계. GDS/gzip은 기존 native 한계이며 새 지원 아님 |
 | UI-01 열기·조작 | `launcher.js`, `browse.js`, `index-open.js`, `gestures.js`, `minimap.js`, `app.js`; 실제 startup/IPC·DOM gate. M4g-19 GTK 휠137입력·현재 표시/대기/drop·margin/DPR gate | 실제 브라우저 포커스·키·wheel·resize·재접속 수용, G1 input→photon/pacing·장치별 감도 |
 | UI-02 pan/margin | `view_controller`, `stream`, `app.js`의 착지 margin/16px 위상·crop/표시 base, controller/stream/client gate | GTK 대비 새 strip·라벨 지연 실제 화면 측정. 덱 margin은 기존에도 미지원 |
 | UI-03 레이어·스타일 | Rust 선택/CAS, palette/presets/settings/defaults; GTK 원본 선택·접힘·상속 oracle, HTTP/DOM gate. M4g-16d 슬롯 모델/API·JSON v2·참조 프리셋/16×16 UI와324 GTK/native/web 대조 | 실제 선택·다중 스타일·기본값 게시와 슬롯 pointer/keyboard·포커스 화면 수용([계약/gate](WEBUI_BITMAP_SLOTS.ko.md)) |
@@ -21,7 +21,7 @@
 | DRC-01 조회·선택 | `app-core/drc`, `web/src/drc`, `drc*.js`; lazy paging/selection/CD/isolation/query gate | 현장 대형 결과와 실제 브라우저 조작 수용 |
 | DRC-02 저장·전송 | reviewer 고정 sidecar, snapshot/prepare/approve·CAS·receipt, notes/waives/transfer HTTP와 UI gate. **M4g-14 확정 시 자동 저장 opt-in**, M4g-15a/20/21 읽기/쓰기 분리·legacy·ASCII/cache | 실제 브라우저 저장/충돌/복구 수용, 대형 sidecar 연속 저장 및 cache 선택 cold-open 비용 실측 |
 | EXPORT-01 | Rust capture/mosaic/PNG metadata/clip + snapshot; raster/metadata/DRC-capture gate | 실제 브라우저 copy/download/승인 표시 수용 |
-| SYS-01/02 | Rust worker 발견·수거·cache freshness·selfcheck·portable/ELF/고지; native/포장/전송 gate. M4g-17a About 합성 PNG/raw/crop·GTK57600픽셀 대조; 17b 독립 `displaytest`; 17c 정적 입력 PNG snapshot/11형식 byte·픽셀 대조 | dump 및 GTK 진단/애니메이션 PNG 경계, Python-free **Linux에서 실행**, 현장 Firefox/ETX, G4 전체 end-to-end 판정 |
+| SYS-01/02 | Rust worker 발견·수거·cache freshness·selfcheck·portable/ELF/고지; native/포장/전송 gate. M4g-17a~c 합성/독립/정적 PNG 진단; M4g-22 최근 수신·합성 bitmap/명시 PNG 다운로드 | 실제 dump/표시·다운로드 수용, GTK 진단/애니메이션 PNG 경계, Python-free **Linux에서 실행**, 현장 Firefox/ETX, G4 전체 end-to-end 판정 |
 
 표의 `validate_*.py`와 Node는 개발 오라클/하네스다. 제품 실행 경로에 Python,
 KLayout, Node를 다시 넣지 않는다. 브라우저의 입력 조합·표시 일시 상태는 계획대로
@@ -86,7 +86,8 @@ open에서도 원본 일치를 재검사한다. hot reload/내용 해시 기반 
    M4g-16d에서 로컬 연결했지만 실제 브라우저 수용은 아래2번에 남는다.
    M4g-17a~c [합성/독립/정적 PNG 표시 진단](WEBUI_DISPLAY_DIAGNOSTICS.ko.md)은 연결했다.
    `--dump`는 브라우저 최근 프레임/합성 화면 보관과 명시적 다운로드로 사용자 결정됐다.
-   그 구현과 GTK 진단/애니메이션 PNG 경계는 남으며 기존 명령을 폐기하지 않는다.
+   M4g-22에서 로컬 연결·회귀를 추가했다. GTK 진단/애니메이션 PNG 경계는 남으며
+   기존 명령을 폐기하지 않는다. Canvas 검증을 실제 화면/다운로드 수용으로 세지 않는다.
 2. 실제 브라우저 입력·저장·복구·화면 수용, Python-free Linux 실행, G1/G4 판정.
    이전 브라우저 시작 파일의 도구 제한을 우회하지 않는다.
 3. M2 공유/원격은 `shares=false`, loopback-only인 **미구현**이다. 허가 없는 원격

@@ -5588,3 +5588,50 @@ feature/jobdeck 작업 트리는 건드리지 않았으며 검증용 `.venv` 임
 커밋 시 목표 잔여: 승인된 브라우저 dump 구현과 진단/무효 CLI 경계, G4 최종 대조.
 실제 브라우저 입력/저장/복구·Python-free Linux·G1/G4 수용, 공유/원격 승인·구현,
 M0/M3 현장 보류·M5 world-tile 조건부는 별도다. 이 단계로 전체 goal을 완료 처리하지 않는다.
+
+## 77. M4g-22 — 승인된 브라우저 display dump
+
+2026-09-16. 사용자 결정대로 `view --dump`를 서버 `/tmp` overwrite가 아닌
+브라우저의 최근 수신 프레임/합성 화면 보관·명시 다운로드로 연결했다.
+정확한 사용·수명·비용 계약은 [표시 진단 §4](WEBUI_DISPLAY_DIAGNOSTICS.ko.md)다.
+
+- CLI는 독립 workspace를 열고 보관의 초기값만 capability로 전달한다. About의
+  명시 토글로도 켤 수 있으며 off에는 복사하지 않는다. 숫자 `--render-debug`,
+  Save view PNG, 공유 파일 게시 권한과 구별한다. IPC 요청으로 켤 수 없다.
+- 정상 디코드되어 수용된 foreground/margin frame 한 장과 현재 viewport 합성 한 장을
+  각각 frozen canvas로 보관한다. crop·이전 foreground·보이는 query/DRC/ruler 포함,
+  비동기 주석 paint 알림은 rAF1개로 합친다. flush는 paint 알림을 재발행하지 않는다.
+  동일 시점의 한 쌍·완료 프레임·OS/ETX 화면의 screenshot이라고 부르지 않는다.
+- bitmap2장(각 최대16Mpx), 동시 PNG encoder1개·retry blob1개(80MiB)를 제한한다.
+  PNG는 다운로드 클릭 때만 인코드한다. clear/opt-out/view close/change/pagehide/
+  종료 후 늦은 callback은 저장하지 않으며 실제 encoder callback까지 credit을 유지한다.
+  수신 시 복사와 overlay flush는 비용이 있으므로 정상 benchmark에서는 끈다.
+- HTTP 쓰기/이미지 경로/API·서버 파일·storage·clipboard read·자동 다운로드가 없다.
+  다운로드 파일 자체는 설계와 주석을 포함할 수 있음을 UI에 명시한다. 실브라우저
+  저장 완료 여부는 알 수 없으며 retry 버튼은 같은 frozen PNG를 다시 요청한다.
+
+집중 검증: 독립 pixel-canvas 하네스가 received의 원크기와 margin/foreground/overlay
+합성, 후속 canvas 변경에 대한 snapshot 불변,100회 교체의 보관 상한, off 무복사,
+자동 인코드/다운로드 없음, 취소·늦은 callback·단일 encoder·실패/80MiB 거부·URL
+정리를 확인했다. 실제 app.js 하네스는 CLI 초기 보관, raw/PNG·margin, stale/실패 제외,
+비동기 overlay 알림, 네트워크 명령 없음과 view close/pagehide 정리를 통과했다.
+초기 close 단언 실패는 테스트 대역이 dump 시나리오의 DELETE view를 지원하지 않은
+것으로 확인해 해당204 응답을 보완했다. 제품의 실패 응답을 성공으로 치환한 것이 아니다.
+전체 ES2017/UI(`floe-dump-ui.log`), app24/web89 단위·release build
+(`floe-dump-native.log`), strict clippy(`floe-dump-clippy.log`) 및 실제 CLI/HTTP의
+초기 capability/default off·자산·기존 렌더/종료(`floe-dump-http.log`)가 통과했다.
+로그는 모두 `/private/tmp/`에 있다. 첫 전체 배터리는 `validate_app_cli.py`에 남은
+이전 `--dump` 미이관 오류 단언에서 exit1이었다. 승인된 새 동작에 맞춰 잘못된 값
+거부/서버 비저장 help 검사를 유지하고, 활성화의 실제 CLI/HTTP gate는 그대로 둔다.
+최종 전체 `sh tools/validate_rust.sh`는 `RUST VALIDATION: ALL OK`까지 완료됐다
+(`/private/tmp/floe-dump-battery.log`). 새 dump/CLI/HTTP 게이트와 기존 jobdeck83·
+renderer46·KLayout13 PX+2 phase-exact+14 style(j1/j8)을 모두 통과했다.
+최종 strict all-target clippy도 exit0(`floe-dump-final-clippy.log`)이며 scoped
+rustfmt/diff 검사를 통과했다. 실제 브라우저/현장 수용은 이 결과에 포함하지 않는다.
+main의 기존 수정과 feature/jobdeck 작업 트리는 보존하고 검증용 `.venv` 임시 링크만
+제거했다. 기존 가상환경이나 설계 파일은 삭제하지 않는다.
+
+커밋 시 목표 잔여: GTK 진단/애니메이션 PNG·무효 CLI 경계와 G4 목록 최종 대조.
+실제 브라우저 입력/저장/복구·dump/화면·Python-free Linux·G1/G4 수용은 별도다.
+공유/원격 승인·구현, M0/M3 현장 보류, M5 world-tile 조건부도 남아 있으며 index
+hot reload/revision은 사용자 유보다. 이번 단계로 전체 goal을 완료 처리하지 않는다.

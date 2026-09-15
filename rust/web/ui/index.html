@@ -15,6 +15,7 @@
   <script defer src="/assets/@@BUNDLE@@/measure.js"></script>
   <script defer src="/assets/@@BUNDLE@@/clip.js"></script>
   <script defer src="/assets/@@BUNDLE@@/snapshot.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/display-dump.js"></script>
   <script defer src="/assets/@@BUNDLE@@/panel-state.js"></script>
   <script defer src="/assets/@@BUNDLE@@/rulers.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc-groups.js"></script>
@@ -415,6 +416,16 @@
       <p class="note">Native versions above are the launcher's expected compatibility versions, not source hashes of running tools. Revision “unknown” has no Git provenance; a trailing “+” reports a dirty tree observed at build time. These are diagnostics, not signatures.</p>
       <p class="note">Linux, Firefox/ETX and shared-server acceptance still require field validation. About does not run selfcheck, open design files or change the view.</p>
       <h2>Display diagnostics</h2>
+      <section id="dump-panel" hidden aria-label="Recent display pixels">
+        <label class="check"><input id="dump-enabled" type="checkbox"> Keep recent received frame and composed display</label>
+        <p class="note">Browser memory only; off by default unless launched with --dump. Copies cost time and memory (up to 128 MiB retained pixels, plus encoding). Downloads can contain design data and annotations. No server PNGs, uploads or persistent image storage.</p>
+        <p id="dump-received-info" class="note"></p><button id="dump-received" type="button" disabled>Download received frame PNG</button>
+        <p id="dump-display-info" class="note"></p><button id="dump-display" type="button" disabled>Download composed display PNG</button>
+        <div class="button-row"><button id="dump-refresh" type="button" disabled>Capture display now</button><button id="dump-clear" type="button" disabled>Clear retained images</button></div>
+        <button id="dump-retry" type="button" hidden>Download encoded PNG again</button>
+        <p id="dump-status" class="note" role="status"></p>
+        <p class="note">Latest accepted decoded frame (foreground or margin) and latest composition are independent captures, not a guaranteed pair. Composition includes visible overlays/previews, not panels, CSS selection boxes or the OS/remote screen. View close/change, opt-out and page exit clear retained images; downloaded files remain.</p>
+      </section>
       <p class="note">Run explicitly to compare PNG, raw RGBA and crop/overlay display. Expect red, green, blue and yellow bars on black; panel C is cropped and has a white cross. No design data, renderer, upload or file save is involved.</p>
       <div class="button-row"><button id="display-test-run" type="button" disabled>Run display test</button><button id="display-test-cancel" type="button" disabled>Cancel test</button></div>
       <p id="display-test-status" role="status">Canvas readback does not prove what the remote screen displays.</p>

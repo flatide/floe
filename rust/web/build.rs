@@ -17,6 +17,7 @@ fn main() {
         "ui/measure.js",
         "ui/clip.js",
         "ui/snapshot.js",
+        "ui/display-dump.js",
         "ui/drc.js",
         "ui/drc-build.js",
         "ui/drc-notes.js",

@@ -21,6 +21,7 @@ const paletteEnabled=process.env.FLOE_TEST_PALETTE==='1';
 const fillEditorEnabled=process.env.FLOE_TEST_FILL_EDITOR==='1';
 const displayTestEnabled=process.env.FLOE_TEST_DISPLAY==='1',displayReads=[];
 const wheelEnabled=process.env.FLOE_TEST_WHEEL==='1';
+const dumpEnabled=process.env.FLOE_TEST_DUMP==='1';
 function presetFixture(){
     const lines=name=>fs.readFileSync(__dirname+'/../../../floe/'+name,'utf8').split('\n').map(l=>l.trim()).filter(l=>l&&!l.startsWith('#')).map(l=>l.split(/\s+/));
     return {version:1,colors:lines('colornames.def').map(([name,color])=>({name,color:'#'+color.toLowerCase()})),
@@ -107,8 +108,8 @@ class XHR {
         else if(raw){value={kind:'drc_review_transfer',phase:'queued',seq:this.headers['X-Floe-Transfer-Seq']};status=202;}
         else if (this.path==='/api/v1/session/exchange') {value={csrf:'c'.repeat(64),session_id:'c'.repeat(64),bundle,protocol:1};}
         else if (this.path==='/api/v1/session'&&this.method==='DELETE') {value=exitFailure?{error:'unavailable'}:null;status=exitFailure?503:204;}
-        else if(startupEnabled&&this.path==='/api/v1/views/'+viewId&&this.method==='DELETE'){open=false;value=null;status=204;}
-        else if(this.path==='/api/v1/capabilities') {value={protocol:1,bundle,index_open:indexOpenEnabled,launcher:launchEnabled,exports:clipEnabled,snapshot_png:snapshotEnabled,layer_settings:settingsEnabled,design_defaults:defaultsEnabled,jobdeck_modes:modeEnabled,fill_slot_edit:fillEditorEnabled};}
+        else if((startupEnabled||dumpEnabled)&&this.path==='/api/v1/views/'+viewId&&this.method==='DELETE'){open=false;value=null;status=204;}
+        else if(this.path==='/api/v1/capabilities') {value={protocol:1,bundle,index_open:indexOpenEnabled,launcher:launchEnabled,exports:clipEnabled,snapshot_png:snapshotEnabled,layer_settings:settingsEnabled,design_defaults:defaultsEnabled,jobdeck_modes:modeEnabled,fill_slot_edit:fillEditorEnabled,display_dump:true,dump_on_start:dumpEnabled};}
         else if(launchEnabled&&this.path==='/api/v1/launch'){value=launchState;}
         else if(launchEnabled&&this.path.startsWith('/api/v1/launch/poll/')){launchPolls.push(this);return;}
         else if(launchEnabled&&this.path.startsWith('/api/v1/launch/')){
@@ -197,6 +198,7 @@ window.isSecureContext=true;window.ClipboardItem=class {constructor(data){this.d
 window.FloeSettings=require('./settings.js');
 window.FloeDefaults=require('./defaults.js');
 window.FloeAbout=require('./about.js');
+window.FloeDisplayDump=require('./display-dump.js');
 window.FloeSessionExit=require('./session-exit.js');
 window.FloeNotices=require('./notices.js');
 window.FloeMinimap=require('./minimap.js');
@@ -244,6 +246,41 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     return out.buffer;
 }
 (async()=>{
+    if(dumpEnabled){
+        await wait(()=>sockets.length===1);const ws=sockets[0];hello(ws);
+        assert(node('dump-enabled').checked);assert(node('dump-received').disabled);
+        ws.receive(packet('raw','1'));await wait(()=>!node('dump-display').disabled);
+        assert.match(node('dump-received-info').textContent,/foreground · raw/);
+        assert.equal(captures.length,0);assert.equal(downloads.length,0);
+        const before=requests.length,sent=ws.sent.length;
+        node('dump-received').onclick();await wait(()=>downloads.length===1);
+        assert.match(downloads[0].name,/received-\d+-100x80\.png/);
+        node('dump-display').onclick();await wait(()=>downloads.length===2);
+        assert.match(downloads[1].name,/display-\d+-100x80\.png/);
+        assert.equal(requests.length,before);assert.equal(ws.sent.length,sent,'dump sent a native command');
+        ws.receive(packet('png','2'));images.at(-1).onload();
+        assert.match(node('dump-received-info').textContent,/foreground · png/);
+        const info=node('dump-received-info').textContent;
+        ws.receive(packet('raw','3','1','f'.repeat(64)));assert.equal(node('dump-received-info').textContent,info,'stale frame retained');
+        ws.receive(packet('png','4'));images.at(-1).onerror();assert.equal(node('dump-received-info').textContent,info,'failed decode retained');
+        snapshot.margin={frame_id:'5',origin_px:[48,48],crop_safe:false};snapshot.capabilities.margin=true;ws.receive(snapshot);
+        const at=draws.length;
+        ws.receive(packet('raw','5','1',epoch,{purpose:'margin',width:196,height:176,bbox_dbu:['-58.9375','-48','137.0625','128'],complete:false,labels_truncated:true}));
+        await wait(()=>node('dump-display-info').textContent.includes('2 canvas layers'));
+        assert.match(node('dump-received-info').textContent,/margin · raw.*196 × 176 px · incomplete/);
+        assert(draws.slice(at).some(d=>d.source==='margin-canvas'&&d.x===-48&&d.y===-48));
+        assert(draws.slice(at).some(d=>d.source==='canvas'&&d.x===0&&d.y===0));
+        node('dump-received').onclick();await wait(()=>downloads.length===3);assert.match(downloads[2].name,/196x176/);
+        node('dump-display').onclick();await wait(()=>downloads.length===4);assert.match(downloads[3].name,/100x80/);
+        // Async annotation notification captures again without waiting for a
+        // native frame. flush does not notify recursively or run a new query.
+        const old=node('dump-display-info').textContent,native=ws.sent.length,httpCount=requests.length;
+        drcOptions.painted();await wait(()=>node('dump-display-info').textContent!==old);
+        assert.equal(ws.sent.length,native);assert.equal(requests.length,httpCount);
+        await node('close').onclick();assert(node('dump-received').disabled&&node('dump-display').disabled);
+        assert.equal(captureUrls.size,0);listeners.pagehide();assert(!node('dump-enabled').checked);
+        console.log('WEB DUMP CLIENT: ALL OK (CLI startup, accepted raw/margin, stale/decode rejection, crop+foreground, async overlays, independent downloads, no network commands, close/pagehide)');return;
+    }
     if(wheelEnabled){
         await wait(()=>sockets.length===1);const ws=sockets[0];hello(ws);
         const edits=()=>ws.sent.filter(m=>m.type==='view.set');

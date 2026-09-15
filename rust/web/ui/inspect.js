@@ -13,7 +13,7 @@
         function identity(c) { return c && c.connected ? [c.id, c.state.connection_epoch, c.state.dataset_revision, c.state.worker_epoch, c.state.render_key].join(':') : ''; }
         function geometryKey(h) { return JSON.stringify([h.pair, h.cell_name, h.bbox_dbu, h.area_dbu2, h.points_dbu, h.points_truncated]); }
         function paintLater() {
-            if (painting === null) { painting = o.window.requestAnimationFrame(function () { painting = null; draw(projection, size); }); }
+            if (painting === null) { painting = o.window.requestAnimationFrame(function () { painting = null; draw(projection, size); if(o.painted){o.painted();} }); }
         }
         function refresh() {
             const h = selections.length ? selections[selections.length - 1] : null;

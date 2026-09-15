@@ -12,13 +12,15 @@ for(const file of ['wheel.test.cjs','client.test.cjs']){
     const run=spawnSync(process.execPath,[path.join(ui,file)],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_WHEEL:'1'}});
     assert.equal(run.status,0,'wheel '+file+': '+run.error);
 }
-for(const name of ['image-decode','display-test','display-input','display-page']){
+for(const name of ['image-decode','display-test','display-input','display-page','display-dump']){
     acorn.parse(fs.readFileSync(path.join(ui,name+'.js'),'utf8'),options);
     const test=spawnSync(process.execPath,[path.join(ui,name+'.test.cjs')],{stdio:'inherit',timeout:15000});
     assert.equal(test.status,0,name+': '+test.error);
 }
 const displayClient=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_DISPLAY:'1'}});
 assert.equal(displayClient.status,0,'display client: '+displayClient.error);
+const dumpClient=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_DUMP:'1'}});
+assert.equal(dumpClient.status,0,'dump client: '+dumpClient.error);
 acorn.parse(fs.readFileSync(path.join(ui, 'review-save-mode.js'), 'utf8'), options);
 for(const file of ['review-save-mode.test.cjs','review-autosave.test.cjs']){
     const run=spawnSync(process.execPath,[path.join(ui,file)],{stdio:'inherit',timeout:15000});

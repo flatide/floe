@@ -63,13 +63,14 @@ def main(fixture):
         assert version in run("--version", env=env).stdout
         assert "--no-open" in run("view", "--help", env=env).stdout
         assert "--stream-kb 0" in run("view", "--help", env=env).stdout
+        assert "never writes server /tmp PNGs" in run("view", "--help", env=env).stdout
         for args, text in [
             (("--stream-kb", "1"), "supports --stream-kb 0 only"),
             (("--stream-target-ms", "500"), "unused by Rust renderd"),
             (("--hairline", "0"), "legacy KLayout planner"),
             (("--thin-um", "0"), "not an equivalent frame control"),
             (("--lod", "off"), "not sent to Rust renderd"),
-            (("--dump",), "GTK/XQuartz"),
+            (("--dump=false",), "--dump takes no value"),
             (("--floe-reviewer", "tag"), "require --drc"),
         ]:
             assert text in run("view", source, *args, env=env, code=2).stderr

@@ -350,6 +350,7 @@ mod tests {
             vec!["view", "/tmp/a", "--jobs", "2"],
             vec!["view", "/tmp/a", "--stream-kb", "0"],
             vec!["view", "/tmp/a", "--render-debug"],
+            vec!["view", "/tmp/a", "--dump"],
             vec!["view", "relative.oas"],
             vec!["view", "--no-open"],
             vec!["view", "--help"],

@@ -45,7 +45,7 @@
         function scope() { try { return Q.scope(o.context(),P,true); } catch (e) { return null; } }
         function status(s) { el('ruler-status').textContent=s; }
         function format(s) { const n=Number(s); return n!==0 && (Math.abs(n)<.0001 || Math.abs(n)>=1e9) ? n.toExponential(4) : n.toFixed(4); }
-        function paintLater() { if (!stopped && painting===null) { painting=o.window.requestAnimationFrame(function () { painting=null; draw(); }); } }
+        function paintLater() { if (!stopped && painting===null) { painting=o.window.requestAnimationFrame(function () { painting=null; draw(); if(o.painted){o.painted();} }); } }
         function refresh() {
             const entries=book.entries(), segments=entries.filter(function (e) { return e.kind!=='cd' && e.value; }).map(function (e) { return e.value; });
             el('ruler-mode').setAttribute('aria-pressed',String(enabled));

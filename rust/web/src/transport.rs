@@ -143,6 +143,7 @@ pub struct Gateway {
     pub(crate) defaults: Option<Arc<crate::defaults::Service>>,
     pub(crate) fill_slot_edit: bool,
     pub(crate) display_only: bool,
+    dump_on_start: bool,
     pub(crate) display_input: Option<crate::display_test::Input>,
     startup: Option<serde_json::Value>,
     startup_confirm_levels: bool,
@@ -180,6 +181,7 @@ impl Gateway {
                 defaults: None,
                 fill_slot_edit: false,
                 display_only: false,
+                dump_on_start: false,
                 display_input: None,
                 startup: None,
                 startup_confirm_levels: false,
@@ -397,6 +399,15 @@ impl Gateway {
         Arc::get_mut(gate)
             .ok_or("gateway already published")?
             .fill_slot_edit = true;
+        Ok(())
+    }
+    /// Browser-local diagnostic pixels only; no file API or server dump writer.
+    pub fn enable_display_dump(gate: &mut Gate) -> Result<(), String> {
+        let g = Arc::get_mut(gate).ok_or("gateway already published")?;
+        if g.service.is_none() || g.display_only {
+            return Err("display dump requires a view workspace".into());
+        }
+        g.dump_on_start = true;
         Ok(())
     }
     /// Explicit trusted-launcher opt-in, after all DRC/input registrations and
@@ -682,6 +693,7 @@ async fn capabilities(State(gate): State<Gate>, headers: HeaderMap) -> Response 
     Json(json!({"protocol":1,"bundle":BUNDLE,"stage":if gate.service.is_some(){"owner-service"}else if render{"view-stream"}else{"transport"},
         "render":render,"catalog":gate.service.is_some(),"index":gate.service.is_some(),"index_open":gate.service.is_some(),"launcher":gate.cli_owner,"file_picker":gate.browse.is_some(),"jobdeck_modes":gate.service.is_some(),"drc":gate.drc.is_some(),"drc_notes":gate.drc.as_ref().is_some_and(|r|r.notes_enabled()),"drc_waives":gate.drc.as_ref().is_some_and(|r|r.waives_enabled()),"exports":gate.service.is_some(),"snapshot_png":gate.service.is_some(),"layer_settings":true,"design_defaults":gate.defaults.is_some(),"shares":false,"uploads":false,"control_bytes":CONTROL_BYTES,
         "fill_slot_edit":gate.fill_slot_edit,"display_only":gate.display_only,
+        "display_dump":gate.service.is_some(),"dump_on_start":gate.dump_on_start,
         "display_input":gate.display_input.as_ref().map(|p|json!({"width":p.width,"height":p.height,"bytes":p.bytes.len()})),
         "frame_bytes":crate::view::PACKET_BYTES,"frame_credit":1,"pending_frames":1}))
     .into_response()
