@@ -611,8 +611,24 @@ budget = 패스별 디코드 보유)을 코드와 대조했다. 모두 사실이
     예산으로 막는다. r == 0(깊이 소진, 자식은 outline뿐)에서는 wash 없음.
   - top 셀이 통째로 sub-cut이면(덱 뷰의 0.2× 마크) 플랜을 버리지 않고 위 규칙으로
     wash → 마크의 색이 남는다(`CompositeTests.test_3b` 재고정).
+- **채움 하한(2026-09-15, RENDERD 0.12.86)**: wash는 footprint 안의 멤버를 1 px
+  hairline으로 그렸을 때의 덮임을 대신하는 것이므로, footprint가 cut보다 넓은데
+  `members × max(w,1 px) × max(h,1 px)`가 footprint 픽셀의 1/256(`WASH_MIN_COVERAGE`)에
+  못 미치면 wash를 내지 않는다(`Hier::wash_worth`; 양축 ≤ cut인 footprint는 blob이라
+  항상 wash). 문턱은 일부러 낮다: 배열을 100배 과장하는 것은 종전 한계 그대로
+  두고(10 µm 피치 1 µm 격자는 2.5 µm/px에서 6 %), 마스크 전체를 bbox로 갖는 마크
+  몇 개 페이지(10^-5)만 걸러낸다. 페이지·페이지 BVH 노드(blob이면 통째, 아니면 예산 안에서 잎까지
+  걸어 페이지별 판정, 예산 밖은 종전대로 coarse)·배치 footprint(멤버 수 = 반복
+  수)에 같은 규칙. 현장 2026-09-15: level 4 depth 0에서 140 × 4 µm 45° 마크 두
+  개가 137 mm 떨어진 다른 마크와 한 페이지라 bbox 137,044 × 54,011 µm가 통째로
+  레이어 색 블록이 됐다(뷰 31,752 µm부터 fit까지; frame off와 무관). 이제 그
+  페이지는 그 줌에서 덱 밖에서처럼 사라지고, 광역뷰의 답은 요약(design.ovo)이다.
+  stats `sub_cut_sparse`, explain `page`/`child` `wash_sparse`. gate
+  `WideViewTests.test_a_sparse_page_or_array_is_not_washed_as_its_footprint`
+  (sparse.jb: 모서리 마크 두 개 페이지·2 × 2 배치는 0 px, 중앙 9 µm 클러스터는
+  blob wash).
 - 한계(문서화): wash는 페이지/배치 bbox이므로 30% 채움의 콘택 배열이 100%
-  블록으로 보인다(speckle이 완화). 뷰어의 일반 레이아웃 경로는 바뀌지 않는다
+  블록으로 보인다(speckle이 완화; 채움 하한 1/256 아래만 제외). 뷰어의 일반 레이아웃 경로는 바뀌지 않는다
   (`sub_cut_wash=false`). 킬 스위치 `FLOE_RUST_DECK_WIDE=off`. 상태줄 `N sub-cut
   washes`, 프레임 줄 `wide_washes=`.
 - gate `WideViewTests`: tiny.jb(1 µm 점 4만 개의 자체 페이지 + 1 µm 자식 셀

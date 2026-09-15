@@ -270,8 +270,9 @@ explain  <kind>  <verdict>  <cell>  <layer L/D | ->  <id>  <bbox um x0,y0,x1,y1>
   마스크/jobdeck 정책) ·
   `pbvh` cull_size(페이지 BVH 노드째) · `cbvh` prune_size(자식 BVH 노드째, w/h =
   max_dim, min = max_min) · `child` expand|omit_size|omit_hair(full depth 생략)|
-  fold_size(유한 깊이 폴드)|cull_layer · `frame`(r==0) keep|thin_lattice|cull_size|
-  cull_hair.
+  fold_size(유한 깊이 폴드)|cull_layer|wash_sparse(덱 sub-cut wash 보류, members =
+  반복 수) · `frame`(r==0) keep|thin_lattice|cull_size|cull_hair · `page` wash_sparse
+  (덱 sub-cut wash 보류: 멤버가 footprint의 1/256을 못 덮음, JOBDECK 4단계).
 - 페이지의 w/h/min은 색인 필드 max_w/max_h/max_min, bbox는 셀 로컬 dbu를 µm로;
   배치는 첫 멤버의 월드 박스, members는 반복 멤버 수. 뷰 박스와 겹치는 것만
   기록되므로 fit 뷰에서도 수천 줄 규모다.

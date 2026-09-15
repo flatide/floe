@@ -139,6 +139,25 @@ END
 
 # 2026-09-11: a mask deck of the thin-line source (its default keeps
 # the all-thin pages; a plain layout culls them)
+SPARSE_DECK = """* sparse.jb
+SLICE 1,17
+RETICLE
+OPTION PA, AA=0.0200, BA=0.002000, SA=80
+MTITLE 1,MARKS
+MTITLE 2,BLOB
+MTITLE 3,ARR
+*PLACE-INFO
+*
+CHIP ID001, * MAIN 1.0000
+*
+$ (1, MARKS, AD=0.00020, SF=1, TC=sparse.oas, LY={1}, DT={0}, BX=0.0, BY=0.0, UX=2000.0, UY=2000.0 )
+$ (2, BLOB, AD=0.00020, SF=1, TC=sparse.oas, LY={2}, DT={0}, BX=0.0, BY=0.0, UX=2000.0, UY=2000.0 )
+$ (3, ARR, AD=0.00020, SF=1, TC=sparse.oas, LY={3}, DT={0}, BX=0.0, BY=0.0, UX=2000.0, UY=2000.0 )
+ROWS 100.0/100.0
+*END-PLACE
+END
+"""
+
 THIN_DECK = """* thin.jb
 MTITLE 1,HAIR
 *PLACE-INFO
@@ -240,6 +259,8 @@ def build_fixtures(d: Path):
     (d / "dt.jb").write_text(DT_DECK)
     (d / "tiny.jb").write_text(TINY_DECK)
     (d / "thin.jb").write_text(THIN_DECK)
+    (d / "sparse.jb").write_text(SPARSE_DECK)
+    build_sparse_oas(d / "sparse.oas")
     build_oas(d / "dt.oas", 0.00005, 2000.0, 2000.0, [(7, 0), (7, 1)], "DT")
     build_dense_oas(d / "dense.oas")
     build_tiny_oas(d / "tiny.oas")
@@ -328,6 +349,37 @@ def build_tiny_oas(path, dbu=0.00005, pitch_um=10.0, n=200, box_um=1.0):
     bit.shapes(l2).insert(db.Box(0, 0, b, b))
     top.insert(db.CellInstArray(bit.cell_index(), db.Trans(),
                                 db.Vector(p, 0), db.Vector(0, p), n, n))
+    ly.write(str(path))
+
+
+def build_sparse_oas(path, dbu=0.00005, extent_um=2000.0, box_um=1.0):
+    """SPARSE (field 2026-09-15): layer 1/0 holds two 1 um marks at
+    opposite corners of the field - one page whose bbox spans the
+    field while its members could never cover it; layer 2/0 a 5 x 5
+    cluster of 1 um boxes at the centre (a page that IS one blob);
+    layer 3/0 the mark as a child cell placed 2 x 2 at the corners
+    (a sparse placement footprint)."""
+    import klayout.db as db
+    ly = db.Layout()
+    ly.dbu = dbu
+    top = ly.create_cell("SPARSE")
+    mark = ly.create_cell("MARK")
+    unit = int(round(1.0 / dbu))
+    b = int(round(box_um * unit))
+    e = int(round(extent_um * unit))
+    l1, l2, l3 = ly.layer(1, 0), ly.layer(2, 0), ly.layer(3, 0)
+    for x, y in ((5 * unit, 5 * unit), (e - 6 * unit, e - 6 * unit)):
+        top.shapes(l1).insert(db.Box(x, y, x + b, y + b))
+    c = e // 2
+    for i in range(5):
+        for j in range(5):
+            x, y = c + i * 2 * unit, c + j * 2 * unit
+            top.shapes(l2).insert(db.Box(x, y, x + b, y + b))
+    mark.shapes(l3).insert(db.Box(0, 0, b, b))
+    pitch = e - 11 * unit
+    top.insert(db.CellInstArray(mark.cell_index(),
+                                db.Trans(db.Vector(5 * unit, 5 * unit)),
+                                db.Vector(pitch, 0), db.Vector(0, pitch), 2, 2))
     ly.write(str(path))
 
 
@@ -2906,7 +2958,7 @@ class WideViewTests(unittest.TestCase):
                    "FLOE_RENDERD_BIN": str(ROOT / "rust" / "target" /
                                            "release" / "floe-renderd")}
         os.environ["FLOE_RENDERD_BIN"] = cls.env["FLOE_RENDERD_BIN"]
-        for deck in ("tiny.jb", "test.jb"):
+        for deck in ("tiny.jb", "test.jb", "sparse.jb"):
             run_floe2("index", CLI / deck, "--jobs", "2", env=cls.env,
                       ok=0)
 
@@ -2961,6 +3013,26 @@ class WideViewTests(unittest.TestCase):
                              for o in range(0, len(exact), 4)
                              if exact[o:o + 3] != b"\0\0\0"}
             self.assertEqual(lit_colours, exact_colours)
+
+    def test_a_sparse_page_or_array_is_not_washed_as_its_footprint(self):
+        # field 2026-09-15 (level 4 at depth 0): a page of two 140 x
+        # 4 um marks 137 mm apart was washed as one 137 x 54 mm block
+        # in the layer colour once the marks went under the cut. A
+        # wash must be able to stand for 1/256 of its footprint (the
+        # members as one-pixel hairlines) or be one screen blob;
+        # otherwise the sub-cut thing vanishes as it does off the
+        # deck. sparse.jb on 200 px over 2000 um, cut 3 px = 30 um:
+        # level 1 (two marks at the corners: 2 px of 40,000) and
+        # level 3 (the same as a 2 x 2 placement array)
+        # draw nothing; level 2 (a 9 x 9 um cluster) is a blob wash
+        for level in (1, 3):
+            rgba, r = self._render("sparse.jb", {}, [(level, 0)], 3.0)
+            self.assertEqual(_lit(rgba), 0, "level %d washed" % level)
+            self.assertEqual(r["deck"]["wide_washes"], 0, level)
+        rgba, r = self._render("sparse.jb", {}, [(2, 0)], 3.0)
+        self.assertGreater(_lit(rgba), 0)
+        self.assertLessEqual(_lit(rgba), 16, "a blob, not a field")
+        self.assertGreaterEqual(r["deck"]["wide_washes"], 1)
 
     def test_render_detail_reproduces_the_viewer_cut(self):
         # field 2026-09-10: a region the viewer dropped past a zoom
