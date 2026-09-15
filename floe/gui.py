@@ -5355,10 +5355,12 @@ class Viewer:
                 self._set_live_status(
                     err[4:] if err.startswith("ERR ") else err)
 
-        # jobs 12 default, LOD off (retirement) - user call 2026-08-28
+        # jobs 12 default, LOD off (retirement) - user call 2026-08-28;
+        # the occupancy summary as `floe2 index` builds it by default
+        # (M5, 2026-09-15) - the raw binary is opt-in
         self._index_modal("indexing layout…",
                           [bin_, "vfs", src, outdir,
-                           "--jobs", "12", "--no-lod"],
+                           "--jobs", "12", "--occupancy", "--no-lod"],
                           on_success, "VFS indexing")
 
     def _jobdeck_index_and_load(self, path, after=None, ids=None):

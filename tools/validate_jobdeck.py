@@ -1501,6 +1501,21 @@ class LoadingBannerTests(unittest.TestCase):
         self.assertIn("loading nothing.oas", calls[0][1])
 
 
+class ViewerIndexArgvTests(unittest.TestCase):
+    """The viewer's own indexing (File > load layout on a layout
+    without a cache) calls the raw floe-index binary, which is opt-in
+    for the occupancy summary: it must ask for it explicitly so the
+    result matches `floe2 index`'s default (M5, 2026-09-15). A jobdeck
+    load goes through `floe2 index deck.jb` and inherits the default."""
+
+    def test_the_layout_index_asks_for_the_summary(self):
+        import inspect
+        from floe import gui
+        src = inspect.getsource(gui)
+        self.assertIn('"--jobs", "12", "--occupancy", "--no-lod"', src)
+        self.assertIn('"-m", APP, "index", path', src)
+
+
 class JobdeckShortcutTests(unittest.TestCase):
     """Ctrl+, (user call 2026-09-10) flips level view <-> chip view; the
     source layer view goes back to the level view; on a plain layout

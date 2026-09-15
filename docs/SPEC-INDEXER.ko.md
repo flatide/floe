@@ -22,7 +22,8 @@ coverage는 viewer 기본값과 맞춰 opt-in이다. **점유 요약(`--occupanc
 `floe-index vfs` 바이너리 자체 기본은 여전히 CPU 코어), LOD는 **끔**
 — `floe index`는 항상 `--no-lod`를 전달하고 `--lod`로만 다시 켠다(LOD
 퇴출 방향; raw 바이너리 기본은 아직 LOD 포함). 뷰어의 load-layout /
-open .db 인덱싱도 동일하게 `--jobs 12`(+VFS는 `--no-lod`)로 실행한다.
+open .db 인덱싱도 동일하게 `--jobs 12`(+VFS는 `--occupancy --no-lod`; load
+jobdeck은 `floe2 index deck.jb`라 기본이 그대로 적용)로 실행한다.
 
 정상 VFS cache의 cache version과 source size/mtime fingerprint가 맞고,
 `floe-index vfsd`의 `Vfs::open` 검증(OVM 구조 + OVP/OVT committed length)을
