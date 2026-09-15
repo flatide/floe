@@ -4694,3 +4694,61 @@ GTK bitmap 편집은 `FLOE_FILL_EDIT` 뒤의 개발용 기능이므로 이 경�
 미이관 CLI/view 옵션·GDS/gzip 차이, G1 지연/pacing·G4 전체 감사, 실제 브라우저 저장/
 복구/입력·Python-free Linux 실행도 남는다. 공유/원격은 미구현, 현장 Firefox/ETX는
 보류, world-tile M5는 조건부 보류다. 커밋마다 이 잔여를 보고하며 임의 완료율로 바꾸지 않는다.
+
+## 61. M4g-11f — 이름 있는 프리셋과 단일 행 스타일 경로 통일
+
+GTK의 `colornames.def`49색(7×7), `fillpatterns.def`20채움(5×4)을 같은 순서로
+웹에 제공한다. yellow/yellow1처럼 RGB가 같은 별칭도 별도 버튼으로 유지한다.
+새 Rust 목록은 공유 `.def`를 compile-time에 포함하고 런타임 Python·파일 읽기를
+호출하지 않는다. 각 표는 최대256항목, 이름64 ASCII자, 색6 hex/패턴16×u16로
+제한한다. 잘못된 내장 표를 일부만 표시하지 않고 오류로 처리한다.
+
+- 인증된 `GET /api/v1/palette/presets`는 열린 view·worker 없이 읽을 수 있다.
+  색 이름/RGB와 패턴 이름/16행/정규화된 fill DTO만 반환한다. 현재 응답16KiB 이내를
+  gate로 고정하며 source 경로·사용자 설정은 노출하지 않는다. `.def`와 새 모듈도
+  web bundle 식별에 포함해 데이터만 바뀐 빌드가 예전 UI와 섞이지 않게 한다.
+- Color and fill presets를 처음 펼칠 때만 읽는다. 같은 bundle 안에서는 view/policy
+  변경으로 다시 읽지 않는다. 연결 단절·pagehide는 진행 중 읽기를 취소하고 늦은
+  결과를 폐기한다. 읽기 실패는 명시 Retry이며 불완전한 팔레트는 표시하지 않는다.
+- 이름은 title/접근성 이름으로, 색은 검증된 RGB로 표시한다. 채움은 흰 바탕의 검은
+  16×16 미리보기이며 MSB가 왼쪽, 위 행부터다. 고정16 CSS px로 표시해 패턴을
+  위젯 폭으로 늘리지 않는다. 스와치와 키보드 focus는 일반 button을 사용한다.
+- 클릭은 **그 시점의 선택/접힘**을 캡처해 `style_batch` 한 번으로 해당 필드만
+  지정한다. 읽기/선택 자체는 렌더하지 않는다. ACK만으로 버튼을 풀지 않고 현재
+  snapshot을 기다리며 거부된 쓰기를 자동 재전송하지 않는다. 기존4096행/8KiB 쓰기
+  상한과 Rust의 sparse 상속 규칙을 그대로 사용한다.
+- 웹 단일 행 색 picker와 style form도 `style_batch`로 전환했다. 접힌 부모는
+  자식을 포함하고, 펼친 잡덱 부모의 자식 fill/width override는 보존한다. 현재 값과
+  다른 필드만 제출하여 변경 없는 Apply가 상속을 명시값으로 바꾸지 않는다.
+  페이지/접힘/연결/정책이 바뀐 뒤 옛 행 편집기는 제출할 수 없다. 단일/다중 편집기는
+  서로 닫으며 color picker도 서버 확인 전 새 색을 확정하지 않는다. 기존 외부
+  `styles`/`style_deltas` API의 의미는 바꾸지 않는다.
+
+검증:
+
+- core259/web84 단위, HTTP transport14와 strict clippy를 통과했다.
+  실제 GTK 표49색·20 bitmap은 이름·순서·모든16행을 Rust와 비교하며, 기존
+  GTK/adapter 스타일10,584개 대조도 유지한다. 이 오라클의 Rust 검사는 PATH를 비워 실행한다.
+- ES2017/DOM gate는 전49색·20패턴의 클릭 필드와 MSB-left 모든 미리보기 픽셀,
+  별칭 보존·무효 DTO·읽기 실패/취소/늦은 응답·한 번 읽기를 단언한다. 실제 app.js
+  연결 gate는 접힌 선택 CAS, ACK/snapshot 순서, 거부 미재전송, 옛 행 form 거부와
+  편집기 전환을 검사한다. native stream에는 프리셋 GET의 state/render 무변경
+  검사를 추가했다. 최종 배터리·최소 버전/Linux 결과는 아래에 별도 기록한다.
+- 실제 브라우저 클릭/키보드/스크린샷 수용은 미검증이다. §57의 인증 시작 파일
+  브라우저 도구 제한을 우회하지 않았으며 위 검증을 실제 화면 수용으로 세지 않는다.
+- Rust1.89 core259/web84 단위와 Linux musl all-targets check도 통과했다.
+  기존 renderer 전체 lint 부채(§57)는 건드리지 않았으며, Linux 컴파일은 실제
+  Python-free Linux 실행 수용이 아니다. 집중 로그는 `/private/tmp/floe-presets-*.log`다.
+- 전체 `sh tools/validate_rust.sh`는 exit0 / `RUST VALIDATION: ALL OK`로 끝났다
+  (`/private/tmp/floe-presets-battery.log`). app20/core259/web84 단위, transport14·
+  native stream7, GTK 프리셋49색/20패턴·스타일10,584, occupancy27·잡덱83·렌더러46,
+  VFS H1-H5/L1-L9와 KLayout jobs1/8 각각13 PX+2 phase-exact+14 style을 통과했다.
+  검증용 `.venv` 심볼릭 링크만 정리했으며 원래 환경과 main/실측 작업은 보존했다.
+
+목표 잔여: 프리셋·행 스타일의 로컬 연결을 닫지만 UI-03 전체 수용은 아니다.
+GTK의 `FLOE_FILL_EDIT` bitmap 편집은 슬롯 하나를 바꾸면 그 슬롯을 참조하는 모든
+레이어를 바꾸는 개발용 기능이다. 현재 Rust는 레이어별 fill 값을 보존하므로 선택
+레이어 hex 입력과 동등하지 않다. 이 개발 도구의 슬롯 상태/저장 의미 이관은 남긴다.
+다음 로컬 우선순위는 M0의 미이관 CLI/view 옵션·GDS/gzip 등 입력 형식 대조다.
+G1 지연/pacing·G4 전체 수용, 실제 브라우저 저장/복구/입력과 Python-free Linux 실행,
+공유/원격 미구현, 현장 Firefox/ETX 보류, 조건부 world-tile M5도 여전히 남아 있다.

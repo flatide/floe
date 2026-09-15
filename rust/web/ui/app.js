@@ -492,14 +492,16 @@
     function paletteStyle(r, scope, valid) {
         const color = document.createElement('input'); color.type = 'color'; color.value = r.color; color.setAttribute('aria-label', 'Color ' + r.name);
         color.onchange = function () {
+            const value=color.value; color.value=r.color;
             if (!valid()) { notice('Layer styles changed or an input is pending. Select the layer again.'); return; }
-            edit({style_deltas: [{pair: r.pair, color: color.value}]});
+            edit({style_batch: {pairs:[r.pair],collapsed:r.closed?[r.pair]:[],color:value}});
         };
         const style = document.createElement('button'); style.className = 'layer-edit'; style.textContent = '⋯';
         style.setAttribute('aria-label', 'Edit style ' + r.name);
         style.onclick = function () {
             if (!valid()) { return; }
-            selectedStyle = {row: r, key: scope.key, view: scope.id};
+            palette.closeStyle();
+            selectedStyle = {row: r, key: scope.key, view: scope.id, valid:valid};
             el('style-title').textContent = r.name; el('style-fill').value = r.fill.kind; el('style-width').value = r.width;
             el('style-pattern').value = (r.fill.rows || new Array(16).fill(0xaaaa)).map(function (n) { return n.toString(16).padStart(4, '0'); }).join(' ');
             el('style-editor').hidden = false; patternControls(); el('style-fill').focus();
@@ -725,7 +727,7 @@
     el('style-cancel').onclick = function () { selectedStyle = null; el('style-editor').hidden = true; };
     el('style-editor').onsubmit = function (event) {
         event.preventDefault();
-        if (!selectedStyle || !state || selectedStyle.view !== currentId || selectedStyle.key !== state.render_key) { notice('Layer styles changed. Select the layer again before applying.'); return; }
+        if (!selectedStyle || !state || selectedStyle.view !== currentId || selectedStyle.key !== state.render_key || !selectedStyle.valid()) { notice('Layer styles changed. Select the layer again before applying.'); return; }
         const fill = {kind: el('style-fill').value}, width = Number(el('style-width').value);
         if (!Number.isInteger(width) || width < 1 || width > 8) { notice('Line width must be 1–8 device pixels.'); return; }
         if (fill.kind === 'pattern') {
@@ -733,10 +735,10 @@
             if (rows.length !== 16 || !rows.every(function (s) { return /^[0-9a-f]{4}$/i.test(s); })) { notice('A pattern needs exactly 16 four-digit hex rows.'); return; }
             fill.rows = rows.map(function (s) { return parseInt(s, 16); });
         }
-        const row = selectedStyle.row, delta = {pair: row.pair};
+        const row = selectedStyle.row, delta = {pairs:[row.pair],collapsed:row.closed?[row.pair]:[]};
         if (fill.kind !== row.fill.kind || (fill.kind === 'pattern' && fill.rows.some(function (n, i) { return n !== row.fill.rows[i]; }))) { delta.fill = fill; }
         if (width !== row.width) { delta.width = width; }
-        if (delta.fill || delta.width !== undefined) { edit({style_deltas: [delta]}); }
+        if (delta.fill || delta.width !== undefined) { edit({style_batch: delta}); }
         selectedStyle = null; el('style-editor').hidden = true;
     };
     const nav = function (n) { edit({navigation: n}); };
@@ -947,7 +949,8 @@
     settings=window.FloeSettings.bind({el:el,window:window,document:document,XHR:XMLHttpRequest,Blob:Blob,Encoder:TextEncoder,Decoder:TextDecoder,
         csrf:function(){return auth?auth.csrf:'';},message:message,edit:edit,setTimeout:setTimeout.bind(window),clearTimeout:clearTimeout.bind(window),
         context:settingsContext});
-    palette=window.FloePalette.bind({el:el,document:document,window:window,http:http,edit:edit,styles:paletteStyle,
+    palette=window.FloePalette.bind({el:el,document:document,window:window,http:http,edit:edit,styles:paletteStyle,presets:window.FloePresets,
+        closeRowStyle:function(){selectedStyle=null;el('style-editor').hidden=true;},
         painted:function(){highlightPicked(pickedPairs);},
         context:function(){return !stopped&&state&&currentId?{id:currentId,key:state.render_key,
             connected:!document.hidden&&live()&&!!epoch&&!!socket&&socket.readyState===WebSocket.OPEN&&!ownerBusy&&!submitting&&!indexBlocked(),

@@ -10,6 +10,7 @@ use std::path::Path;
 
 const COLORS: &str = include_str!("../../../floe/colornames.def");
 const PATTERNS: &str = include_str!("../../../floe/fillpatterns.def");
+pub mod presets;
 
 #[derive(Clone, Debug)]
 pub struct LayerProps {

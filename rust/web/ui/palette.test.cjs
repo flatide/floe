@@ -24,7 +24,7 @@ function harness(rows=fixture()) {
     const document={activeElement:null,createElement(tag){const e=new Element(tag);e.document=document;return e;},addEventListener(k,fn){events[k]=fn;}};
     function el(id){if(!nodes.has(id)){nodes.set(id,document.createElement('div'));}return nodes.get(id);}
     let state={id:'a'.repeat(64),key:'1',connected:true,editable:true};
-    const port={el,document,window:{innerWidth:300,innerHeight:240},context:()=>state,
+    const port={el,document,window:{innerWidth:300,innerHeight:240},context:()=>state,presets:{bind:()=>({changed(){},stop(){}})},
         http(method,path,body,missing,token){
             assert.equal(method,'POST');assert(path.endsWith('/palette'));
             return new Promise((resolve,reject)=>{const q={path,body,token,resolve,reject,key:state.key,done:false};requests.push(q);token.abort=()=>{q.aborted=true;};});

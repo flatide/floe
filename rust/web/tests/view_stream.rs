@@ -11,6 +11,17 @@ async fn native_palette_style_is_one_frame_and_pixel_reversible() {
     let (first, original) = frame(&mut ws).await;
     ack(&mut ws, &hello, 1, &first).await;
     let initial = h.controller.snapshot();
+    let headers = [
+        ("Cookie", login.cookie.as_str()),
+        ("X-Floe-CSRF", login.csrf.as_str()),
+    ];
+    let (status, _, body) = h.http("GET", "/api/v1/palette/presets", &headers, "").await;
+    assert_eq!(status, 200);
+    let presets: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(presets["colors"].as_array().unwrap().len(), 49);
+    assert_eq!(presets["fills"].as_array().unwrap().len(), 20);
+    assert_eq!(h.controller.snapshot().state_rev, initial.state_rev);
+    assert_eq!(h.controller.snapshot().submitted, initial.submitted);
     let pairs: Vec<_> = initial.state.styles.iter().map(|s| s.layer).collect();
     let body =
         json!({"style_batch":{"pairs":pairs,"color":"#22aa88","fill":{"kind":"clear"},"width":5}});
@@ -64,7 +75,7 @@ async fn native_palette_style_is_one_frame_and_pixel_reversible() {
     assert!(restored == original);
     ack(&mut ws, &hello, 8, &head).await;
     h.shutdown().await;
-    println!("RUST PALETTE STYLE STREAM: ALL OK (one CAS/frame, fields, noop, stale/invalid, byte-exact restore)");
+    println!("RUST PALETTE STYLE STREAM: ALL OK (preset read without render, one CAS/frame, fields, noop, stale/invalid, byte-exact restore)");
 }
 
 #[tokio::test]

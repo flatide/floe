@@ -109,6 +109,17 @@ def main():
         assert test.returncode == 0, (test.stdout, test.stderr)
         assert "GTK PALETTE STYLE: ALL OK (10584 GTK + adapter cases)" in test.stdout
         print(test.stdout.strip())
+        presets = Path(td) / "presets.json"
+        presets.write_text(json.dumps(dict(
+            colors=[dict(name=n, color=c) for n, c in fillpat.COLOR_TABLE],
+            fills=[dict(name=n, rows=[int(w, 16) for w in fillpat.rows_to_hex(p).split()])
+                   for n, p in fillpat.FILL_PATTERNS])))
+        env["FLOE_PRESET_ORACLE"] = str(presets)
+        test = subprocess.run([bins[0], "styles::presets::tests::gtk_preset_tables_match", "--ignored", "--nocapture"],
+                              env=env, capture_output=True, text=True, timeout=30)
+        assert test.returncode == 0, (test.stdout, test.stderr)
+        assert "GTK PRESET TABLES: ALL OK" in test.stdout
+        print(test.stdout.strip())
 
 
 if __name__ == "__main__":

@@ -29,6 +29,54 @@ use tokio_tungstenite::{
 };
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 #[tokio::test]
+async fn preset_catalogue_is_authenticated_readonly_and_works_without_a_view() {
+    let s = Server::start().await;
+    let path = "/api/v1/palette/presets";
+    assert_eq!(s.request("GET", path, &[], "").await.status, 401);
+    let a = s.login().await;
+    let headers = [
+        ("Cookie", a.cookie.as_str()),
+        ("X-Floe-CSRF", a.csrf.as_str()),
+    ];
+    assert_eq!(s.request("GET", path, &headers[..1], "").await.status, 401);
+    assert_eq!(
+        s.request(
+            "GET",
+            path,
+            &[("Cookie", &a.cookie), ("X-Floe-CSRF", "wrong")],
+            ""
+        )
+        .await
+        .status,
+        401
+    );
+    let mut cross = headers.to_vec();
+    cross.push(("Origin", "http://wrong.invalid"));
+    assert_eq!(s.request("GET", path, &cross, "").await.status, 403);
+    let r = s.request("GET", path, &headers, "").await;
+    assert_eq!(r.status, 200);
+    assert_eq!(r.headers["cache-control"], "no-store");
+    assert!(r.body.len() < 16 * 1024);
+    let p: Value = serde_json::from_str(&r.body).unwrap();
+    assert_eq!(p["colors"].as_array().unwrap().len(), 49);
+    assert_eq!(p["fills"].as_array().unwrap().len(), 20);
+    assert_eq!(p["colors"][7]["name"], "yellow");
+    assert_eq!(p["colors"][8]["name"], "yellow1");
+    assert_eq!(p["colors"][7]["color"], p["colors"][8]["color"]);
+    assert_eq!(p["fills"][18]["fill"], json!({"kind":"solid"}));
+    assert_eq!(p["fills"][19]["fill"], json!({"kind":"clear"}));
+    assert_eq!(s.request("GET", path, &headers, "").await.body, r.body);
+    assert_eq!(
+        s.request("GET", "/api/v1/view", &headers, "").await.status,
+        404
+    );
+    let origin = format!("http://{}", s.addr);
+    let mut same = headers.to_vec();
+    same.push(("Origin", &origin));
+    assert_eq!(s.request("POST", path, &same, "{}").await.status, 405);
+    s.shutdown().await;
+}
+#[tokio::test]
 async fn launcher_routes_require_trusted_attachment_and_owner_credentials() {
     let (mut gate, _) = Gateway::new("127.0.0.1:23456".parse().unwrap()).unwrap();
     assert!(Gateway::attach_launches(&mut gate, floe_web::launch::Launches::new()).is_err());
@@ -261,6 +309,7 @@ async fn embedded_assets_are_content_identified_and_never_serve_files() {
     assert_eq!(page.status, 200);
     assert!(page.body.contains(&format!("/assets/{BUNDLE}/app.js")));
     assert!(page.body.contains(&format!("/assets/{BUNDLE}/palette.js")));
+    assert!(page.body.contains(&format!("/assets/{BUNDLE}/presets.js")));
     assert!(!page.body.contains("@@BUNDLE@@"));
     assert!(page.headers["content-security-policy"].contains("script-src 'self'"));
     assert!(page.headers["content-security-policy"].contains(&format!("ws://{}", server.addr)));
@@ -268,6 +317,7 @@ async fn embedded_assets_are_content_identified_and_never_serve_files() {
     for (name, mime) in [
         ("app.js", "text/javascript"),
         ("palette.js", "text/javascript"),
+        ("presets.js", "text/javascript"),
         ("about.js", "text/javascript"),
         ("session-exit.js", "text/javascript"),
         ("notices.js", "text/javascript"),

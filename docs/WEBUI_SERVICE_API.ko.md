@@ -92,7 +92,17 @@ width는1..8, width_step은-1/+1이며 둘의 동시 지정은 오류다. null/�
   변경하지 않으며 공유 파일에 쓰지 않는다. 기존 CAS·no-op·렌더 합치기 계약을 따른다.
 
 구형 행 단위 `style_deltas`의 전체 그룹 덮어쓰기 의미는 유지한다. 새 팔레트 선택
-명령의 sparse 상속 의미와 구분하며 UI 행 단위 조작 정리는 후속 대조 항목이다.
+명령의 sparse 상속 의미와 구분한다. M4g-11f부터 웹 단일 행 편집기도 `style_batch`를
+사용하여 현재 접힘과 sparse 상속 규칙을 따른다. 기존 외부 API 의미는 바꾸지 않는다.
+
+M4g-11f는 인증된 읽기 전용 `GET /api/v1/palette/presets`를 추가한다. 본문과 view ID가
+없고 열린 설계/worker 없이도 동작한다. cookie/CSRF·host/origin 검사를 적용하며 응답은
+`version:1`, 순서 있는 `colors:[{name,color}]`, `fills:[{name,rows,fill}]`이다.
+`rows`는 MSB-left16×u16 미리보기, `fill`은 기존 solid/clear/speckle/pattern DTO다.
+색 이름 별칭은 RGB가 같아도 합치지 않는다. 현재49색/20채움과16KiB 이내 응답을 gate로
+고정한다. 런타임에서 표를 읽거나 수정하는 endpoint가 아니며 compile-time `.def`만
+노출한다. 표와 전송 코드도 bundle 식별에 포함된다. 팔레트 읽기는 state/render revision을
+변경하지 않고 클릭 시점의 선택을 단일 `style_batch`로 별도 제출한다.
 
 M4g-11b는 `index`/`index_open`의 `options.occupancy` 생략 기본값을 true로
 맞춘다. false는 명시 해제이며 기존 요약을 지우지 않는다. `occupancy_only:true`는

@@ -18,6 +18,11 @@ const launchEnabled=process.env.FLOE_TEST_LAUNCH==='1';
 const indexOpenEnabled=process.env.FLOE_TEST_INDEX_OPEN==='1',indexSource='f'.repeat(64),indexOperations=[];
 const gotoEnabled=process.env.FLOE_TEST_GOTO==='1';
 const paletteEnabled=process.env.FLOE_TEST_PALETTE==='1';
+function presetFixture(){
+    const lines=name=>fs.readFileSync(__dirname+'/../../../floe/'+name,'utf8').split('\n').map(l=>l.trim()).filter(l=>l&&!l.startsWith('#')).map(l=>l.split(/\s+/));
+    return {version:1,colors:lines('colornames.def').map(([name,color])=>({name,color:'#'+color.toLowerCase()})),
+        fills:lines('fillpatterns.def').map(([name,...words])=>{const rows=words.map(w=>parseInt(w,16));return {name,rows,fill:['solid','clear','speckle'].includes(name)?{kind:name}:{kind:'pattern',rows}};})};
+}
 let launchState={revision:'0',pending:null},launchPolls=[],launchRegistered=false,launchReceipt=null;
 let startupReceipt=null,startupFail=true;
 const startupBody={depth:'17',detail:'high',thin:'keep',frames:true,labels:false,navigation:{kind:'goto',center_um:['1.25','-2.5']}};
@@ -145,6 +150,7 @@ class XHR {
             if(modeViewReadFailure){modeViewReadFailure=false;status=503;value={error:'unavailable'};}}
         else if(this.path.endsWith('/minimap/full')){value={view_id:viewId,dataset_revision:'1',base:'full',size:180,pixels:'0'.repeat(32400)};}
         else if(this.path.endsWith('/layers/0')) {value={state_rev:snapshot.state_rev,render_key:snapshot.render_key,total:1,start:0,next:null,rows:[layerRow]};}
+        else if(this.path==='/api/v1/palette/presets') {value=presetFixture();}
         else if(this.path.endsWith('/palette')) {
             assert.equal(body.kind,'page');
             const closed=p=>body.fold.closed!==body.fold.exceptions.some(v=>v.join('/')===p.join('/'));
@@ -188,6 +194,7 @@ window.FloeLauncher=require('./launcher.js');
 window.FloeBrowse=require('./browse.js');
 window.FloeIndexOpen=require('./index-open.js');
 window.FloePalette=require('./palette.js');
+window.FloePresets=require('./presets.js');
 window.crypto={getRandomValues:a=>a.fill(37)};
 window.FloeDRCNotes=require('./drc-notes.js');
 window.FloeDRCNoteDisplay=require('./drc-note-display.js');
@@ -269,8 +276,40 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
         paletteRows.slice(0,3).forEach(r=>{r.color='#22aa88';r.fill={kind:'clear'};r.width=2;});
         snapshot.state_rev='4';snapshot.render_rev='4';snapshot.render_key='4';ws.receive(snapshot);
         await wait(()=>!node('layers-style').disabled);assert.equal(row('3/1').children[1].value,'#22aa88');
+        // Opening the immutable palette performs one read, never a render.
+        const count=edits().length,paintBeforePresets=draws.length;
+        node('palette-presets').open=true;node('palette-presets').ontoggle();
+        await wait(()=>node('presets-colors').children.length===49);
+        assert.equal(node('presets-fills').children.length,20);
+        assert.equal(edits().length,count);assert.equal(draws.length,paintBeforePresets);
+        node('presets-colors').children[8].onclick();await wait(()=>edits().length===count+1);
+        const recolor=edits().at(-1);
+        assert.deepEqual(recolor.body,{style_batch:{pairs:[[3,1],[3,2],[3,300]],collapsed:[[3,1]],color:'#ffff00'}});
+        assert(node('presets-fills').children.every(b=>b.disabled));
+        ws.receive({type:'accepted',seq:recolor.seq,state_rev:'5',render_rev:'5'});
+        assert(node('presets-fills').children.every(b=>b.disabled));
+        snapshot.state_rev='5';snapshot.render_rev='5';snapshot.render_key='5';ws.receive(snapshot);
+        await wait(()=>!node('presets-fills').children[15].disabled);
+        node('presets-fills').children[15].onclick();await wait(()=>edits().length===count+2);
+        const fill=edits().at(-1);
+        assert.deepEqual(fill.body,{style_batch:{pairs:[[3,1],[3,2],[3,300]],collapsed:[[3,1]],fill:presetFixture().fills[15].fill}});
+        ws.receive({type:'error',seq:fill.seq,code:'stale_state',state_rev:'5',render_rev:'5'});ws.receive(snapshot);
+        await wait(()=>!node('layers-style').disabled);assert.equal(edits().length,count+2,'preset error replayed a write');
+        assert.equal(requests.filter(r=>r.path==='/api/v1/palette/presets').length,1,'style change reread immutable presets');
+        // Row editors share folded-group semantics, and stale rows cannot act.
+        row('3/1').children.at(-1).onclick();node('style-width').value='7';
+        node('layers-expand').onclick();await wait(()=>node('layers').children.length===4&&!node('layers-style').disabled);
+        node('style-editor').onsubmit({preventDefault(){}});assert.equal(edits().length,count+2,'old folded editor survived a fold change');
+        node('layers-collapse').onclick();await wait(()=>node('layers').children.length===2&&!node('layers-style').disabled);
+        row('3/1').children.at(-1).onclick();node('style-width').value='7';node('style-editor').onsubmit({preventDefault(){}});
+        assert.deepEqual(edits().at(-1).body,{style_batch:{pairs:[[3,1]],collapsed:[[3,1]],width:7}});
+        const width=edits().at(-1);ws.receive({type:'accepted',seq:width.seq,state_rev:'6',render_rev:'6'});
+        snapshot.state_rev='6';snapshot.render_rev='6';snapshot.render_key='6';ws.receive(snapshot);await wait(()=>!node('layers-style').disabled);
+        row('3/1').children.at(-1).onclick();node('layers-style').onclick();assert.equal(node('style-editor').hidden,true);
+        row('3/1').children.at(-1).onclick();assert.equal(node('palette-style').hidden,true);
         listeners.pagehide();assert.equal(node('layers-show').disabled,true);assert.equal(node('layer-menu').hidden,true);
-        console.log('WEB PALETTE CLIENT: ALL OK (real app binding, no render on selection/fold, one CAS batch, ACK/snapshot, rejected/stale edits, cleanup)');return;
+        assert(node('presets-colors').children.every(b=>b.disabled));
+        console.log('WEB PALETTE CLIENT: ALL OK (real selection/fold/presets, read without render, one-field CAS, ACK/snapshot, row fold parity, rejected/stale edits, cleanup)');return;
     }
     if(gotoEnabled){
         const fields=()=>['goto-x','goto-y','goto-width'].map(k=>node(k).value);
@@ -687,7 +726,7 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     node('style-pattern').value=new Array(16).fill('a55a').join(' ');node('style-width').value='4';
     node('style-editor').onsubmit(submitEvent);
     let sent=second.sent.at(-1);assert.equal(sent.type,'view.set');
-    assert.deepEqual(sent.body.style_deltas,[{pair:[7,0],fill:{kind:'pattern',rows:new Array(16).fill(0xa55a)},width:4}]);
+    assert.deepEqual(sent.body.style_batch,{pairs:[[7,0]],collapsed:[],fill:{kind:'pattern',rows:new Array(16).fill(0xa55a)},width:4});
     async function applied(policy=true){
         const s=second.sent.filter(m=>m.type==='view.set').at(-1);
         snapshot.state_rev=P.next(snapshot.state_rev);snapshot.render_rev=P.next(snapshot.render_rev);
@@ -698,13 +737,13 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     await applied();
     await wait(()=>node('layers').children.length===1);
     const colorInput=node('layers').children[0].children[1];colorInput.value='#123456';colorInput.onchange();
-    assert.deepEqual(second.sent.at(-1).body,{style_deltas:[{pair:[7,0],color:'#123456'}]});await applied();
+    assert.deepEqual(second.sent.at(-1).body,{style_batch:{pairs:[[7,0]],collapsed:[],color:'#123456'}});await applied();
     await wait(()=>node('layers').children.length===1);
     node('layers').children[0].children.at(-1).onclick();
     const noChange=second.sent.length;node('style-editor').onsubmit(submitEvent);
     assert.equal(second.sent.length,noChange,'unchanged style form materialized inherited settings');
     node('layers').children[0].children.at(-1).onclick();node('style-width').value='7';node('style-editor').onsubmit(submitEvent);
-    assert.deepEqual(second.sent.at(-1).body,{style_deltas:[{pair:[7,0],width:7}]});await applied();
+    assert.deepEqual(second.sent.at(-1).body,{style_batch:{pairs:[[7,0]],collapsed:[],width:7}});await applied();
     node('font-px').value='18';node('font-px').onchange();assert.equal(second.sent.at(-1).body.font_px,18);await applied();
     node('viewport').keydown({key:'f',preventDefault(){}});assert.deepEqual(second.sent.at(-1).body,{frames:true});await applied();
     node('viewport').keydown({key:'a',ctrlKey:true,preventDefault(){}});assert.equal(second.sent.at(-1).body.navigation.kind,'fit');await applied(false);

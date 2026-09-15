@@ -82,6 +82,7 @@
             el('layers-next').disabled = !use || !!flight || page.value.next === null;
             el('layers-retry').hidden = !failed;
             el('layers-retry').disabled = !available() || pending;
+            presets.changed();
         }
         function valid(p) { const s = context(); return available() && p === page && p.value.start === start && s.key === loadedKey && p.fold === foldRevision; }
         function applySelection(result, groups, row) {
@@ -137,6 +138,7 @@
         function closeStyle() { styleScope = null; el('palette-style').hidden = true; }
         function openStyle() {
             if (!editable() || !selected.size) { return; }
+            if (port.closeRowStyle) { port.closeRowStyle(); }
             hideMenu(false);
             styleScope = {id:identity,key:loadedKey,revision:inputRevision,fold:foldRevision,selected:new Map(selected)};
             el('palette-style-title').textContent = 'Style ' + selected.size + ' selected rows';
@@ -287,8 +289,18 @@
         function suspend() { suspended = true; cancelRead(); hideMenu(false); update(); }
         function resume() { suspended = false; changed(); }
         function stop() { stopped = true; suspend(); }
+        function applyPreset(fields) {
+            if (!editable() || !selected.size) { return; }
+            const ids=Array.from(selected.keys()).sort(order);
+            const batch={pairs:ids.map(pair),collapsed:ids.filter(function(k){return selected.get(k)&&closed(k);}).map(pair)};
+            if (fields.color) { batch.color=fields.color; }
+            if (fields.fill) { batch.fill=fields.fill; }
+            closeStyle(); if (port.closeRowStyle) { port.closeRowStyle(); } write({style_batch:batch});
+        }
+        const presets=port.presets.bind({el:el,document:port.document,http:port.http,available:available,
+            enabled:function(){return editable()&&selected.size>0;},apply:applyPreset});
         menu.hidden = true; closeStyle(); changed();
-        return Object.freeze({changed:changed, stop:stop, suspend:suspend, resume:resume});
+        return Object.freeze({changed:changed, stop:function(){stop();presets.stop();}, suspend:suspend, resume:resume, closeStyle:closeStyle});
     }
     const api = {bind:bind, choose:choose};
     if (typeof module !== 'undefined' && module.exports) { module.exports = api; } else { root.FloePalette = api; }

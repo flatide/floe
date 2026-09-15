@@ -278,6 +278,12 @@ M4g-10에서 bare FILE를 명시 view와 같은 파서에 연결했다([M4 §55]
 
 ## 3. CLI 밖 기능과 폐기 경계
 
+UI-03의 M4g-11f는 공유 정의의49색/20채움 프리셋과 단일 행 스타일의 접힘·상속을
+연결한다([M4 §61](WEBUI_M4.ko.md)). 일반 팔레트 선택과 `FLOE_FILL_EDIT` 개발용
+bitmap 슬롯 편집을 구분한다. 후자는 슬롯을 참조하는 모든 레이어를 바꾸므로 현재의
+선택 레이어 hex 입력과 동등하지 않으며 이관/은퇴 판정이 남는다. 실제 브라우저 수용도
+아직 UI-03 완료로 세지 않는다.
+
 | ID / 목표 | 현재 코드 | 이관·검증 단위 |
 |---|---|---|
 | UI-01 / M1b | gui, viewport | 열기/레벨 선택/색인 동의, fit/goto/history, resize·wheel·drag·키 pan·zoom·depth/detail |
