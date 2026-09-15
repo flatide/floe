@@ -58,8 +58,19 @@ commit에서 확인한다. source/모드/선택 레벨/표시 patch는 서버가
 취소는 `index.phase:succeeded`를 보존하며 디스크 결과를 취소한 것으로 표시하지 않는다.
 top-level succeeded는 기존 open과 같은 attachment 교체 완료이며 첫 프레임의 완료는
 아니다. 기존 작업 조회/cancel/replay/32개 이력 만료 계약을 따른다.
-이 단계는 서버 기반이다. 브라우저 승인 preview·승인 요청 저장/동일 요청 복구·새 뷰
-채택은 아직 연결하지 않았다([M4 §53](WEBUI_M4.ko.md)).
+M4g-9a는 서버 기반([M4 §53](WEBUI_M4.ko.md))이며 M4g-9b에서 브라우저 승인/복구를
+연결했다([M4 §54](WEBUI_M4.ko.md)). `capabilities.index_open`은 owner service가
+있을 때만 true다. 인증+CSRF를 요구하는
+`GET /api/v1/operations/{seq}/index-open`은 메모리에 보존한 원래 source/title/mode/
+display_policy/open_seq, 전체 선택 레벨(`all` 또는 `only`+정규 i64 문자열 ids),
+현재 `jobs_available`(0..16)을 반환한다. cache probe·색인·자원 예약을 하지 않으며
+실제 admission은 승인 후 다시 검사한다. 만료 이력은410, 제안 없는 seq는400,
+잘못된 CSRF는 기존 인증 규약대로401이다. 짧은 history 제안은 계속 레벨 개수만
+보내고 전체 ids는 단일 preview에만 담는다(최대4096). 모든 queued/progress/terminal
+`index_open` 응답은 request_id와 **open_seq**를 echo해 새로고침 후 원래 실패와
+묶는다. 브라우저는 승인 내용을 sessionStorage에 먼저 저장하고 결과를 seq+kind+
+request_id+open_seq로 검사한다. 조회/새로고침은 읽기 전용이며 불명확한 접수의
+재시도도 동일 payload만 사용한다. 같은 seq의 다른 요청을 채택/취소하지 않는다.
 M2a의 현재 DRC 등록/읽기 URI·페이지·취소·focus/in_view·패널 상태·필터·순회·마커·
 CD·선택 집합·SVRF metadata/비교·타입 패널·격리/원자적 focus·ASCII API 계약은 [M2 기록](WEBUI_M2.ko.md) §2~21이
 기준이다. geometry reader는 read-only이며, 명시 opt-in한 owner의 주석 저장 endpoint는

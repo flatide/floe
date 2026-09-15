@@ -168,6 +168,7 @@ enum Command {
         open: Box<OpenCommand>,
         options: Box<IndexOptions>,
         request_id: String,
+        open_seq: u64,
     },
     Index {
         source: Arc<RegisteredSource>,
@@ -609,6 +610,7 @@ impl Service {
                         open: Box::new(open),
                         options: Box::new(options),
                         request_id,
+                        open_seq: original,
                     },
                 )
             }
@@ -646,8 +648,13 @@ impl Service {
             Admission::New => (),
         }
         let stop = Arc::new(AtomicUsize::new(0));
-        if let Command::IndexOpen { request_id, .. } = &command {
-            s.ledger.update(seq,json!({"seq":seq.to_string(),"kind":"index_open","phase":"queued","stage":"index","request_id":request_id}),false);
+        if let Command::IndexOpen {
+            request_id,
+            open_seq,
+            ..
+        } = &command
+        {
+            s.ledger.update(seq,json!({"seq":seq.to_string(),"kind":"index_open","phase":"queued","stage":"index","request_id":request_id,"open_seq":open_seq.to_string()}),false);
         }
         s.active_stop = Some(Arc::clone(&stop));
         s.pending = Some(Work { seq, command, stop });
@@ -667,6 +674,29 @@ impl Service {
         }
         self.inner.wake.notify_one();
         Ok(state)
+    }
+    /// A single bounded in-memory preview, never cache probing or indexing.
+    pub fn index_open_preview(&self, seq: u64) -> std::result::Result<Value, &'static str> {
+        let s = self.inner.state.lock().unwrap();
+        if s.closed {
+            return Err("closed");
+        }
+        s.ledger.get(seq).ok_or("operation_expired")?;
+        let open = s
+            .retry_opens
+            .iter()
+            .find(|(n, _)| *n == seq)
+            .map(|(_, o)| o)
+            .ok_or("invalid_request")?;
+        let mut out = index_open::proposal(seq, open);
+        out["levels"] = match &open.levels {
+            None => json!({"mode":"all"}),
+            Some(ids) => {
+                json!({"mode":"only","ids":ids.iter().map(i64::to_string).collect::<Vec<_>>()})
+            }
+        };
+        out["jobs_available"] = json!(self.inner.resources.index_slots());
+        Ok(out)
     }
     pub fn close_view(&self, id: &str) -> std::result::Result<(), &'static str> {
         let s = self.inner.state.lock().unwrap();
@@ -732,7 +762,11 @@ fn run(inner: Arc<Inner>) {
             _ => None,
         };
         let request_id = match &work.command {
-            Command::IndexOpen { request_id, .. } => Some(request_id.clone()),
+            Command::IndexOpen {
+                request_id,
+                open_seq,
+                ..
+            } => Some((request_id.clone(), *open_seq)),
             _ => None,
         };
         let stop = Arc::clone(&work.stop);
@@ -750,8 +784,9 @@ fn run(inner: Arc<Inner>) {
             }
         };
         let mut s = inner.state.lock().unwrap();
-        if let Some(request_id) = request_id {
+        if let Some((request_id, open_seq)) = request_id {
             state["request_id"] = json!(request_id);
+            state["open_seq"] = json!(open_seq.to_string());
             if state.get("stage").is_none() {
                 state["stage"] = json!("index");
             }
@@ -890,7 +925,8 @@ fn execute(inner: &Inner, work: Work) -> Result<Value> {
             open,
             options,
             request_id,
-        } => index_open::execute(inner, seq, *open, *options, stop, &request_id),
+            open_seq,
+        } => index_open::execute(inner, seq, *open, *options, stop, &request_id, open_seq),
         Command::Index {
             source,
             levels,

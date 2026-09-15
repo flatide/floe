@@ -15,6 +15,7 @@ const exitFailure=process.env.FLOE_TEST_EXIT_FAILURE==='1';
 const modeEnabled=process.env.FLOE_TEST_MODE==='1';
 const startupEnabled=process.env.FLOE_TEST_STARTUP==='1';
 const launchEnabled=process.env.FLOE_TEST_LAUNCH==='1';
+const indexOpenEnabled=process.env.FLOE_TEST_INDEX_OPEN==='1',indexSource='f'.repeat(64),indexOperations=[];
 let launchState={revision:'0',pending:null},launchPolls=[],launchRegistered=false,launchReceipt=null;
 let startupReceipt=null,startupFail=true;
 const startupBody={depth:'17',detail:'high',thin:'keep',frames:true,labels:false,navigation:{kind:'goto',center_um:['1.25','-2.5']}};
@@ -59,6 +60,7 @@ for (const id of [...fs.readFileSync(__dirname+'/index.html','utf8').matchAll(/\
     nodes.set(id,new Element(id));
 }
 nodes.get('levels-all').checked=true;
+nodes.get('index-open').hidden=true;
 const node = id=>nodes.get(id);
 const bundle='d'.repeat(40), epoch='b'.repeat(64);let viewId='a'.repeat(64);
 const snapshot={type:'snapshot',view_id:viewId,connection_epoch:epoch,dataset_revision:'1',state_rev:'1',
@@ -89,7 +91,7 @@ class XHR {
         else if (this.path==='/api/v1/session/exchange') {value={csrf:'c'.repeat(64),session_id:'c'.repeat(64),bundle,protocol:1};}
         else if (this.path==='/api/v1/session'&&this.method==='DELETE') {value=exitFailure?{error:'unavailable'}:null;status=exitFailure?503:204;}
         else if(startupEnabled&&this.path==='/api/v1/views/'+viewId&&this.method==='DELETE'){open=false;value=null;status=204;}
-        else if(this.path==='/api/v1/capabilities') {value={protocol:1,bundle,launcher:launchEnabled,exports:clipEnabled,snapshot_png:snapshotEnabled,layer_settings:settingsEnabled,design_defaults:defaultsEnabled,jobdeck_modes:modeEnabled};}
+        else if(this.path==='/api/v1/capabilities') {value={protocol:1,bundle,index_open:indexOpenEnabled,launcher:launchEnabled,exports:clipEnabled,snapshot_png:snapshotEnabled,layer_settings:settingsEnabled,design_defaults:defaultsEnabled,jobdeck_modes:modeEnabled};}
         else if(launchEnabled&&this.path==='/api/v1/launch'){value=launchState;}
         else if(launchEnabled&&this.path.startsWith('/api/v1/launch/poll/')){launchPolls.push(this);return;}
         else if(launchEnabled&&this.path.startsWith('/api/v1/launch/')){
@@ -114,27 +116,38 @@ class XHR {
             }else{value=clipState();}
         }
         else if(this.method==='DELETE'&&this.path==='/api/v1/artifacts/1'){clipFile=null;clipOp.artifact.available=false;clipOp.artifact.expires_in_ms=null;value=null;status=204;}
-        else if(this.path==='/api/v1/catalog') {value={sources:launchEnabled&&!launchRegistered?[]:[{source_id:'src',title:'synthetic',deck:false,levels:0},{source_id:'deck',title:'synthetic deck',deck:true,levels:2}]};}
+        else if(indexOpenEnabled&&this.path.endsWith('/index-open')){value={...indexOperations[0].index_open,jobs_available:3};}
+        else if(indexOpenEnabled&&/^\/api\/v1\/operations\/[0-9]+$/.test(this.path)){value=indexOperations.find(v=>v.seq===this.path.split('/').at(-1));}
+        else if(this.path==='/api/v1/catalog') {value={sources:launchEnabled&&!launchRegistered?[]:[{source_id:indexOpenEnabled?indexSource:'src',title:'synthetic',deck:false,levels:0},{source_id:'deck',title:'synthetic deck',deck:true,levels:2}]};}
         else if(this.path==='/api/v1/catalog/deck/levels/0') {value={levels:[{id:'1',title:'Level 1'},{id:'2',title:'Level 2'}],next:null};}
         else if(this.path==='/api/v1/startup') {value={confirm_levels:startupEnabled,request:{kind:'open',seq:'1',source_id:modeEnabled||startupEnabled?'deck':'src',mode:modeEnabled?'chip':'level',levels:modeEnabled?{mode:'only',ids:['1']}:{mode:'all'},body:startupEnabled?startupBody:{detail:'high'},label_preference:false}};}
         else if(this.path==='/api/v1/operations'&&this.method==='POST') {
             open=true;lastSeq=body.seq;value={seq:lastSeq,kind:body.kind,phase:body.kind==='mode'?'preparing':'succeeded',view_id:viewId};status=202;
             if(body.kind==='mode') {assert(modeEnabled);modeOperation=value;}
             if(startupEnabled){open=body.kind==='open'&&!startupFail;startupReceipt=value={seq:lastSeq,kind:body.kind,phase:body.kind==='open'&&startupFail?'failed':'succeeded',view_id:open?viewId:null,error:body.kind==='open'&&startupFail?'index_required':null};}
+            if(indexOpenEnabled){
+                open=body.kind==='index_open';
+                if(open){assert(storage.has('floe-index-open:'+'c'.repeat(64)),'approval must be saved before POST');value={seq:lastSeq,kind:'index_open',request_id:body.request_id,open_seq:body.open_seq,phase:'succeeded',stage:'open',view_id:viewId,index:{phase:'succeeded'}};}
+                else{value={seq:lastSeq,kind:'open',phase:'failed',error:'index_unavailable',index_open:{open_seq:lastSeq,source_id:body.source_id,title:'synthetic',mode:body.mode,levels:body.levels,display_policy:body.display_policy||'explicit'}};}
+                indexOperations.push(value);
+            }
         }
         else if(this.path==='/api/v1/operations') {
             value={last_seq:lastSeq,active:modeOperation&&modeOperation.phase==='preparing'?lastSeq:null,history:modeOperation?[modeOperation]:open?[{seq:lastSeq,kind:'open',phase:'succeeded',view_id:viewId}]:[]};
             if(startupEnabled){value.history=startupReceipt?[startupReceipt]:[];}
+            if(indexOpenEnabled){value={last_seq:lastSeq,active:null,history:indexOperations};}
             if(modeReadFailure){modeReadFailure=false;status=503;value={error:'unavailable'};}
         }
-        else if(this.path==='/api/v1/view') {status=open?200:404;value=open?{title:'synthetic',source_id:modeEnabled?'deck':'src',mode:modeEnabled?serverMode:'level',levels:modeEnabled?['1']:null,view:{...snapshot,connection_epoch:''}}:null;
+        else if(this.path==='/api/v1/view') {status=open?200:404;value=open?{title:'synthetic',source_id:indexOpenEnabled?indexSource:modeEnabled?'deck':'src',mode:modeEnabled?serverMode:'level',levels:modeEnabled?['1']:null,view:{...snapshot,connection_epoch:''}}:null;
             if(modeViewReadFailure){modeViewReadFailure=false;status=503;value={error:'unavailable'};}}
         else if(this.path.endsWith('/minimap/full')){value={view_id:viewId,dataset_revision:'1',base:'full',size:180,pixels:'0'.repeat(32400)};}
         else if(this.path.endsWith('/layers/0')) {value={state_rev:snapshot.state_rev,render_key:snapshot.render_key,total:1,start:0,next:null,rows:[layerRow]};}
         else {throw new Error('Unexpected HTTP '+this.path);}
         if(launchEnabled&&this.path==='/api/v1/startup'){value={request:null};}
+        if(indexOpenEnabled&&this.path==='/api/v1/startup'){value.request.source_id=indexSource;}
         this.status=status;this.responseText=settingsPath&&this.method==='GET'?value:JSON.stringify(value);
         if(body&&body.kind==='mode'&&modeLosePost){modeLosePost=false;setImmediate(()=>this.ontimeout());return;}
+        if(indexOpenEnabled&&body&&body.kind==='index_open'){setImmediate(()=>this.ontimeout());return;}
         setImmediate(()=>this.onload());
     }
 }
@@ -164,6 +177,8 @@ window.FloeNotices=require('./notices.js');
 window.FloeMinimap=require('./minimap.js');
 window.FloeLauncher=require('./launcher.js');
 window.FloeBrowse=require('./browse.js');
+window.FloeIndexOpen=require('./index-open.js');
+window.crypto={getRandomValues:a=>a.fill(37)};
 window.FloeDRCNotes=require('./drc-notes.js');
 window.FloeDRCNoteDisplay=require('./drc-note-display.js');
 window.FloeDRCWaives=require('./drc-waives.js');
@@ -199,6 +214,33 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     return out.buffer;
 }
 (async()=>{
+    if(indexOpenEnabled){
+        const commands=()=>requests.filter(r=>r.method==='POST'&&r.path==='/api/v1/operations');
+        await wait(()=>!node('index-open').hidden&&!node('index-open').disabled);
+        assert.equal(commands().length,1);assert.equal(sockets.length,0);
+        await node('index-open').onclick();assert.match(node('index-open-preview').textContent,/synthetic.*\nSource ID:/);
+        assert.equal(commands().length,1);assert.equal(node('index-open-jobs').value,'3');assert(node('source').disabled);
+        node('index-open-jobs').value='2';node('index-open-lod').checked=true;
+        await node('index-open-approve').onclick();
+        assert.equal(commands().length,2);assert.equal(commands()[1].body.kind,'index_open');assert.equal(commands()[1].body.open_seq,'1');
+        assert.equal(commands()[1].body.approved,true);assert.deepEqual(commands()[1].body.options,{jobs:2,force:false,lod:true,occupancy:false});
+        assert.deepEqual(commands()[1].body.target,{kind:'empty'});assert.deepEqual(commands()[1].body.pixels,[100,80]);
+        assert(storage.has('floe-index-open:'+'c'.repeat(64)));assert(node('index').disabled);assert(node('source').disabled);assert.equal(sockets.length,0);
+        node('cancel-job').dataset.seq='99';const cancelReads=requests.length;node('cancel-job').onclick();
+        assert.equal(requests.length,cancelReads,'unresolved approval only uses its identity-bound cancel');
+        node('index-open-close').onclick();assert(node('source').disabled,'hiding unresolved dialog cannot unlock mutation');
+        listeners.pagehide();listeners.pageshow({persisted:true});
+        await wait(()=>sockets.length===1&&!storage.has('floe-index-open:'+'c'.repeat(64)));
+        assert.equal(commands().length,2,'BFCache recovery must only read the original receipt');
+        hello(sockets[0]);sockets[0].receive(packet('raw','1'));assert(draws.length);
+        assert.match(node('operation').textContent,/Index succeeded.*View attached/);
+        assert(node('notice').hidden,'successful indexed open must clear the earlier missing-index notice');
+        const edits=sockets[0].sent.length;node('fit').onclick();assert.equal(sockets[0].sent.length,edits,'approval modal gates viewport edits');
+        node('index-open-close').onclick();assert(!node('source').disabled);assert(node('index-open').hidden);
+        listeners.pagehide();
+        console.log('WEB INDEX OPEN CLIENT: ALL OK (failed startup, read-only preview, original approval, disabled conflicts, lost response/BFCache recovery, no duplicate POST, restored pixels)');
+        return;
+    }
     if(launchEnabled){
         const posts=()=>requests.filter(r=>r.method==='POST'&&r.path.startsWith('/api/v1/launch/'));
         async function push(id,confirm=false){

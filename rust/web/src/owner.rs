@@ -20,6 +20,10 @@ pub(crate) fn routes() -> Router<Gate> {
         .route("/api/v1/catalog/{id}/levels/{start}", get(levels))
         .route("/api/v1/operations", get(operations).post(submit))
         .route("/api/v1/operations/{seq}", get(operation))
+        .route(
+            "/api/v1/operations/{seq}/index-open",
+            get(index_open_preview),
+        )
         .route("/api/v1/operations/{seq}/cancel", post(cancel))
         .route("/api/v1/views/{id}", delete(close_view))
         .route("/api/v1/views/{id}/layers/{start}", get(layers))
@@ -136,6 +140,25 @@ async fn operation(
         .as_ref()
         .and_then(|s| s.operation(seq))
         .map_or_else(|| failure("operation_expired"), |v| Json(v).into_response())
+}
+async fn index_open_preview(
+    State(gate): State<Gate>,
+    headers: HeaderMap,
+    Path(seq): Path<String>,
+) -> Response {
+    if let Err(e) = transport::http_session(&gate, &headers) {
+        return transport::error(e);
+    }
+    let Ok(seq) = view::counter(&seq) else {
+        return failure("invalid_request");
+    };
+    let Some(service) = &gate.service else {
+        return transport::error(StatusCode::NOT_FOUND);
+    };
+    match service.index_open_preview(seq) {
+        Ok(v) => Json(v).into_response(),
+        Err(code) => failure(code),
+    }
 }
 async fn cancel(State(gate): State<Gate>, headers: HeaderMap, Path(seq): Path<String>) -> Response {
     if let Err(e) = transport::http_session(&gate, &headers) {

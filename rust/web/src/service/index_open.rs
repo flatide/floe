@@ -96,6 +96,7 @@ pub(super) fn open_state(mut state: Value, index: Option<&Value>) -> Value {
     if let Some(index) = index {
         state["kind"] = json!("index_open");
         state["request_id"] = index["request_id"].clone();
+        state["open_seq"] = index["open_seq"].clone();
         state["stage"] = json!("open");
         state["index"] = index.clone();
     }
@@ -108,7 +109,7 @@ fn failure(seq: u64, kind: &str, error: Error) -> Value {
 }
 fn index_envelope(seq: u64, index: &Value) -> Value {
     json!({"seq":seq.to_string(),"kind":"index_open","stage":"index",
-        "phase":index["phase"],"error":index["error"],"index":index,"request_id":index["request_id"]})
+        "phase":index["phase"],"error":index["error"],"index":index,"request_id":index["request_id"],"open_seq":index["open_seq"]})
 }
 
 pub(super) fn execute(
@@ -118,9 +119,11 @@ pub(super) fn execute(
     options: IndexOptions,
     stop: Arc<AtomicUsize>,
     request_id: &str,
+    open_seq: u64,
 ) -> Result<Value> {
     let identified = |mut state: Value| {
         state["request_id"] = json!(request_id);
+        state["open_seq"] = json!(open_seq.to_string());
         state
     };
     let index = identified(

@@ -14,7 +14,7 @@
     let drcPanel = null, displayProjection = null, frozenProjection = null;
     let inspector = null, measurement = null, clipper = null, snapshots = null, overlayMode = 'all', pickedPairs = [];
     let settings = null, defaults = null, about = null, sessionExit = null;
-    let minimap = null, launcher = null, picker = null;
+    let minimap = null, launcher = null, picker = null, indexOpen = null;
     const rulerHistory = window.FloeRulers.history();
     let ackedFrames = {foreground: null, margin: null};
     const sessionKey = 'floe-session:' + location.origin;
@@ -30,8 +30,8 @@
     let lastDigit = '', lastDigitAt = 0;
     let operationTimer = null, resizeTimer = null, displayed = false;
     const errors = {
-        index_unavailable: 'A current index is required. Use “Index this source”; opening never indexes automatically.',
-        busy: 'Resource or cache is busy. Close the current view before indexing or opening another source.',
+        index_unavailable: 'A current index is required. Review “Index and open…” or use “Index this source”; opening never indexes automatically.',
+        busy: 'Resources or cache are busy. Wait, choose fewer index jobs, or explicitly close a reader before rebuilding its cache.',
         worker_version: 'The native renderer version does not match. Rebuild the matched binaries.',
         worker_failed: 'The renderer failed. Check the local service diagnostics; close and reopen to retry.',
         stale_state: 'The view changed in another connection. That edit was not replayed.',
@@ -76,7 +76,7 @@
                     if (xhr.responseText) { value = JSON.parse(xhr.responseText); }
                 } catch (e) { reject(e); return; }
                 if (xhr.status < 200 || xhr.status >= 300) {
-                    if (xhr.status === 401) { stopped = true; if (picker) { picker.stop(); } if (launcher) { launcher.stop(); } connection('Session expired', false); }
+                    if (xhr.status === 401) { stopped = true; if (indexOpen) { indexOpen.stop(); } if (picker) { picker.stop(); } if (launcher) { launcher.stop(); } connection('Session expired', false); }
                     const failure = new Error(message(value && value.error || ('HTTP ' + xhr.status)));
                     failure.status = xhr.status; failure.code = value && value.error;
                     reject(failure);
@@ -191,23 +191,28 @@
         ackedFrames = {foreground: null, margin: null};
     }
     function live() { return state && !['closed', 'failed'].includes(state.status); }
+    function indexBlocked() { return !!indexOpen && indexOpen.blocked(); }
     function deckModeReady() {
         return modeSupported && live() && state.capabilities.mode &&
             ['idle','rendering'].includes(state.status) && socket && socket.readyState === WebSocket.OPEN && epoch &&
-            !submitting && !ownerBusy && !inflight && !accepted && !queue.length && !(gesture && gesture.active());
+            !indexBlocked() && !submitting && !ownerBusy && !inflight && !accepted && !queue.length && !(gesture && gesture.active());
     }
     function controls() {
-        const enabled = live() && socket && socket.readyState === WebSocket.OPEN && !!epoch && !submitting && !ownerBusy;
+        const enabled = live() && socket && socket.readyState === WebSocket.OPEN && !!epoch && !submitting && !ownerBusy && !indexBlocked();
         ['fit', 'zoom-in', 'zoom-out', 'goto', 'depth', 'detail', 'thin', 'frames', 'labels', 'mono', 'layers-all', 'layers-none'].forEach(function (id) { el(id).disabled = !enabled; });
         el('overlays').disabled=!live();
         el('labels').disabled = !enabled || !state.capabilities.labels;
         el('font-px').disabled = !enabled || !state.capabilities.labels;
         const launchPending = launcher && launcher.blocked(), source = catalog.find(function (s) { return s.source_id === el('source').value; });
-        el('open').disabled = submitting || ownerBusy || !!live() || !source || launchPending;
-        el('source').disabled = !catalog.length || launchPending;
-        el('mode').disabled = !source || !source.deck || launchPending;
-        el('close').disabled = !currentId || submitting || ownerBusy;
-        el('index').disabled = submitting || ownerBusy || !source;
+        el('open').disabled = submitting || ownerBusy || !!live() || !source || launchPending || indexBlocked();
+        el('source').disabled = !catalog.length || launchPending || ownerBusy || submitting || indexBlocked();
+        el('mode').disabled = !source || !source.deck || launchPending || ownerBusy || submitting || indexBlocked();
+        el('close').disabled = !currentId || submitting || ownerBusy || indexBlocked();
+        el('index').disabled = submitting || ownerBusy || !source || indexBlocked();
+        el('cancel-job').disabled = !ownerBusy || indexBlocked();
+        el('levels-all').disabled = indexBlocked();
+        el('level-more').disabled = indexBlocked() || levelBusy || levelNext === null;
+        Array.from(el('level-list').querySelectorAll('input')).forEach(function (box) { box.disabled = indexBlocked() || el('levels-all').checked; });
         el('live-mode-row').hidden = !modeSupported || !state || !state.capabilities.mode;
         el('live-mode').disabled = !deckModeReady();
         el('live-mode').value = currentMode;
@@ -220,6 +225,7 @@
         if (snapshots) { snapshots.changed(); }
         if (launcher) { launcher.changed(); }
         if (picker) { picker.changed(); }
+        if (indexOpen) { indexOpen.changed(); }
     }
     function queryContext() {
         if (!state || !currentId || !lastPlacement) { return null; }
@@ -232,7 +238,7 @@
         return {id: currentId, state: state, frame: h, origin: origin, size: size, rect: viewport.getBoundingClientRect(),
             acked: !!h && ackedFrames[h.purpose] === h.frame_id,
             connected: !stopped && !!epoch && !!socket && socket.readyState === WebSocket.OPEN,
-            hidden: document.hidden, pending: !!inflight || queue.length > 0 || !!dragShift || !!accepted ||
+            hidden: document.hidden, pending: indexBlocked() || !!inflight || queue.length > 0 || !!dragShift || !!accepted ||
                 !!(gesture && gesture.active()) || !!(drcPanel && drcPanel.boxActive())};
     }
     function highlightPicked(pairs) {
@@ -263,7 +269,7 @@
         rejectQueued(error); settleEdit(body, error);
     }
     function pump() {
-        if (!live() || !epoch || inflight || !queue.length || !socket || socket.readyState !== WebSocket.OPEN || ownerBusy || submitting) { return; }
+        if (!live() || !epoch || inflight || !queue.length || !socket || socket.readyState !== WebSocket.OPEN || ownerBusy || submitting || indexBlocked()) { return; }
         const wait = 65 - (Date.now() - lastSend);
         if (wait > 0) { window.setTimeout(pump, wait); return; }
         try {
@@ -277,7 +283,7 @@
     }
     function edit(body, done) {
         if (done) { editCallbacks.set(body, done); }
-        const error = ownerBusy || submitting ? 'An owner operation is running. This input was not applied.' : !live() || !epoch ? 'Open a connected view first.' : queue.length >= 64 ? 'Input queue is full. This input was not applied.' : null;
+        const error = ownerBusy || submitting || indexBlocked() ? 'An owner operation or approval is pending. This input was not applied.' : !live() || !epoch ? 'Open a connected view first.' : queue.length >= 64 ? 'Input queue is full. This input was not applied.' : null;
         if (error) { notice(error); settleEdit(body, error); return null; }
         if (!body.navigation || body.navigation.kind !== 'pan' || !body.navigation.snap) { freezeMargin(); }
         queue.push(body); pump(); present();
@@ -542,6 +548,7 @@
         return {mode: 'only', ids: Array.from(levelIds)};
     }
     function operationLabel(op) {
+        if (op.kind === 'index_open') { return window.FloeIndexOpen.resultText(op,message); }
         const p = op.native || {};
         return op.kind + ' · ' + op.phase + (p.phase ? ' · ' + p.phase : '') + (op.error ? ' · ' + message(op.error) : '');
     }
@@ -559,6 +566,7 @@
     }
     async function readOperationState() {
         const all = await http('GET', '/api/v1/operations');
+        if (indexOpen) { indexOpen.observe(all); }
         ownerBusy = all.active !== null; el('cancel-job').disabled = !ownerBusy;
         el('cancel-job').dataset.seq = all.active || ''; controls();
         const recent = all.history || [], last = recent[recent.length - 1];
@@ -569,7 +577,7 @@
             if (!currentId) { el('empty-message').textContent = message(last.error || last.phase); connection('Local · ready', true); }
         }
         if (ownerBusy) { operationTimer = setTimeout(function () { operationState().catch(report); }, 500); }
-        else if (last && last.kind === 'open' && last.phase === 'succeeded') {
+        else if (last && (last.kind === 'open' || last.kind === 'index_open' && !indexOpen.pending()) && last.phase === 'succeeded') {
             if (last.view_id !== currentId) { await restore(); }
             else if (pendingStartup && pendingStartup.source_id === currentSource) { pendingStartup = null; }
         }
@@ -581,7 +589,7 @@
         return all;
     }
     async function submitOperation(request) {
-        if (ownerBusy || submitting) { throw new Error('An operation is already running.'); }
+        if (ownerBusy || submitting || indexBlocked()) { throw new Error('An operation or approval is already pending.'); }
         submitting = true; controls();
         if (operationTimer) { clearTimeout(operationTimer); operationTimer = null; }
         try {
@@ -649,6 +657,7 @@
         settings.capabilities(caps.layer_settings);
         await defaults.init(caps.design_defaults);
         sourceSelection();
+        await indexOpen.init(caps.index_open);
         const operations = await operationState();
         await restore();
         if (!currentId && operations.last_seq === '0') {
@@ -675,6 +684,7 @@
         catch (e) { report(e); }
     };
     async function endSession() {
+        if (indexOpen) { indexOpen.stop(); }
         if (launcher) { launcher.stop(); }
         if (picker) { picker.stop(); }
         if (minimap) { minimap.stop(); }
@@ -695,6 +705,7 @@
         }
         if (drcPanel) { drcPanel.stop(true); }
         if (defaults) { defaults.stop(true); }
+        if (indexOpen) { try { indexOpen.clear(); } catch (_) { /* Confirmed ended session cannot accept this record. */ } }
         try { sessionStorage.removeItem(sessionKey); } catch (_) { /* storage may be disabled */ }
         connection('Session ended', false); notice('Session ended. Close this tab.');
     }
@@ -810,7 +821,7 @@
     });
     viewport.addEventListener('mouseleave', function () { if (drcPanel) { drcPanel.move(NaN, NaN); } if (inspector) { inspector.move(NaN, NaN); } if (measurement) { measurement.move(NaN, NaN); } });
     gesture = window.FloeGestures.bind({viewport: viewport, window: window, document: document,
-        dimensions: dims, ready: function () { return live() && displayed && !!epoch && !inflight && queue.length === 0; },
+        dimensions: dims, ready: function () { return !indexBlocked() && live() && displayed && !!epoch && !inflight && queue.length === 0; },
         stamp: function () { return currentId + ':' + epoch + ':' + (state ? state.state_rev : ''); },
         requestAnimationFrame: function (fn) { return window.requestAnimationFrame(fn); },
         cancelAnimationFrame: function (id) { window.cancelAnimationFrame(id); },
@@ -842,7 +853,7 @@
         try { submitOperation({kind: 'index', source_id: el('source').value, levels: levels(), options: {jobs: Number(el('index-jobs').value), force: el('index-force').checked, lod: el('index-lod').checked, occupancy: el('index-occupancy').checked}}).catch(report); }
         catch (e) { report(e); }
     };
-    el('cancel-job').onclick = function () { const id = el('cancel-job').dataset.seq; if (id) { http('POST', '/api/v1/operations/' + id + '/cancel', {}).then(operationState).catch(report); } };
+    el('cancel-job').onclick = function () { const id = el('cancel-job').dataset.seq; if (id && !indexBlocked()) { http('POST', '/api/v1/operations/' + id + '/cancel', {}).then(operationState).catch(report); } };
     function resized() {
         if (gesture && gesture.active()) { gesture.cancel(); }
         clearTimeout(resizeTimer); resizeTimer = setTimeout(function () {
@@ -916,7 +927,7 @@
             return {pixels:p.pixels.slice(),layers:layers};
         }});
     function settingsContext(){return state?{id:currentId,epoch:epoch,rev:state.state_rev,ready:!stopped&&!document.hidden&&live()&&socket&&socket.readyState===WebSocket.OPEN,
-        idle:!inflight&&!accepted&&!queue.length&&!submitting&&!ownerBusy}:null;}
+        idle:!indexBlocked()&&!inflight&&!accepted&&!queue.length&&!submitting&&!ownerBusy}:null;}
     defaults=window.FloeDefaults.bind({el:el,protocol:P,query:window.FloeQuery,http:http,context:settingsContext,
         session:function(){return auth?auth.session_id:'';},now:function(){return Date.now();},setTimeout:setTimeout.bind(window),clearTimeout:clearTimeout.bind(window),
         loadPending:function(){return sessionStorage.getItem('floe-default-pending');},
@@ -930,7 +941,7 @@
         ready:function(){return !!epoch&&live()&&!inflight&&!accepted&&queue.length===0&&!(gesture&&gesture.active())&&!document.hidden;},
         navigate:nav,focus:function(){viewport.focus();}});
     function launchReady() {
-        return !stopped && !document.hidden && (!picker || !picker.blocked()) && !startupWaiting && !submitting && !ownerBusy && !inflight && !accepted && !queue.length &&
+        return !indexBlocked() && !stopped && !document.hidden && (!picker || !picker.blocked()) && !startupWaiting && !submitting && !ownerBusy && !inflight && !accepted && !queue.length &&
             !(gesture && gesture.active()) && (!live() || ['idle','rendering'].includes(state.status));
     }
     launcher=window.FloeLauncher.bind({el:el,http:http,protocol:P,ready:launchReady,changed:controls,
@@ -952,17 +963,27 @@
             }finally{try{await operationState();}finally{submitting=false;controls();pump();}}
         }});
     picker=window.FloeBrowse.bind({el:el,document:document,http:http,protocol:P,changed:controls,
-        available:function(){return !stopped&&!submitting&&!ownerBusy&&(!launcher||!launcher.blocked());},
+        available:function(){return !indexBlocked()&&!stopped&&!submitting&&!ownerBusy&&(!launcher||!launcher.blocked());},
         selected:function(){startupWaiting=false;pendingStartup=null;notice('File selected. Preparing the open request; indexing requires separate approval.');},
         loadPending:function(){return sessionStorage.getItem('floe-browse-pending:'+auth.session_id);},
         savePending:function(value){const key='floe-browse-pending:'+auth.session_id;if(value===null){sessionStorage.removeItem(key);}else{sessionStorage.setItem(key,value);}},
         setTimeout:function(fn,ms){return setTimeout(fn,ms);},clearTimeout:function(id){clearTimeout(id);}});
-    document.addEventListener('visibilitychange', function () { settings.changed(); defaults.changed(); minimap.changed(); if (document.hidden) { finishDecode(); inspector.changed(); measurement.changed(); clipper.changed(); } else if (live() && !stopped) { connect(); } });
+    indexOpen=window.FloeIndexOpen.bind({el:el,document:document,protocol:P,http:http,message:message,pixels:function(){return dims().pixels;},
+        session:function(){return auth.session_id;},changed:controls,
+        ready:function(){return !stopped&&!document.hidden&&!submitting&&!ownerBusy&&!inflight&&!accepted&&!queue.length&&!(gesture&&gesture.active())&&
+            (!picker||!picker.blocked())&&(!launcher||!launcher.blocked())&&(!live()||['idle','rendering'].includes(state.status));},
+        randomId:function(){if(!window.crypto||typeof window.crypto.getRandomValues!=='function'){throw Error('Secure random IDs are unavailable in this browser. No approval was submitted.');}
+            const bytes=new Uint8Array(32);window.crypto.getRandomValues(bytes);return Array.from(bytes,function(n){return ('0'+n.toString(16)).slice(-2);}).join('');},
+        loadPending:function(){return sessionStorage.getItem('floe-index-open:'+auth.session_id);},
+        savePending:function(value){const key='floe-index-open:'+auth.session_id;if(value===null){sessionStorage.removeItem(key);}else{sessionStorage.setItem(key,value);}},
+        completed:async function(value){if(value.phase==='succeeded'){await restore();pendingStartup=null;notice('');}await operationState();},
+        setTimeout:function(fn,ms){return setTimeout(fn,ms);},clearTimeout:function(id){clearTimeout(id);}});
+    document.addEventListener('visibilitychange', function () { settings.changed(); defaults.changed(); minimap.changed(); if (document.hidden) { indexOpen.stop(); finishDecode(); inspector.changed(); measurement.changed(); clipper.changed(); } else if (!stopped) { indexOpen.resume().catch(report); if(live()){connect();} } });
     window.addEventListener('blur', function () { inspector.move(NaN, NaN); measurement.interrupt(); });
     setInterval(function () { if (socket && socket.readyState === WebSocket.OPEN && epoch) { try { send({type: 'ping'}); } catch (e) { report(e); } } }, 10000);
-    window.addEventListener('pagehide', function () { picker.stop(); launcher.stop(); minimap.suspend(); about.stop(); sessionExit.stop(); disconnect(); inspector.stop(); measurement.stop(); clipper.stop(); snapshots.stop(); settings.stop(); defaults.stop(); clearTimeout(operationTimer); clearTimeout(resizeTimer); if (sizeObserver) { sizeObserver.disconnect(); } drcPanel.stop(); });
+    window.addEventListener('pagehide', function () { indexOpen.stop(); picker.stop(); launcher.stop(); minimap.suspend(); about.stop(); sessionExit.stop(); disconnect(); inspector.stop(); measurement.stop(); clipper.stop(); snapshots.stop(); settings.stop(); defaults.stop(); clearTimeout(operationTimer); clearTimeout(resizeTimer); if (sizeObserver) { sizeObserver.disconnect(); } drcPanel.stop(); });
     window.addEventListener('pageshow', function (event) {
-        if (event.persisted && auth && !stopped) { minimap.resume(); about.init(); sessionExit.init(); inspector.resume(); measurement.resume(); clipper.resume(); snapshots.resume(); settings.resume(); defaults.resume(); if (sizeObserver) { sizeObserver.observe(viewport); } drcPanel.resume().then(operationState).then(restore).then(resized).then(function(){return picker.resume();}).then(function(){return launcher.resume();}).catch(report); }
+        if (event.persisted && auth && !stopped) { minimap.resume(); about.init(); sessionExit.init(); inspector.resume(); measurement.resume(); clipper.resume(); snapshots.resume(); settings.resume(); defaults.resume(); if (sizeObserver) { sizeObserver.observe(viewport); } drcPanel.resume().then(function(){return indexOpen.resume();}).then(operationState).then(restore).then(resized).then(function(){return picker.resume();}).then(function(){return launcher.resume();}).catch(report); }
     });
     start().catch(function (e) { connection('Not connected', false); report(e); el('empty-message').textContent = e.message; });
 }());

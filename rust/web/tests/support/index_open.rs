@@ -250,6 +250,34 @@ async fn approved_index_open_preserves_first_frame_replays_and_explicit_force() 
     initial["body"] = json!({"depth":"7","detail":"high","thin":"keep","frames":true,
         "labels":false,"font_px":23,"navigation":{"kind":"goto","center_um":["5","6"],"width_um":"300"}});
     failed(&h, &login, initial).await;
+    let preview = h
+        .call(
+            &login,
+            "GET",
+            "/api/v1/operations/1/index-open",
+            Value::Null,
+        )
+        .await;
+    assert_eq!(preview.0, 200);
+    assert_eq!(preview.1["open_seq"], "1");
+    assert_eq!(preview.1["source_id"], sources[0]["source_id"]);
+    assert_eq!(preview.1["levels"], json!({"mode":"all"}));
+    assert_eq!(preview.1["jobs_available"], 12);
+    let wrong = Login {
+        cookie: login.cookie.clone(),
+        csrf: "0".repeat(64),
+    };
+    assert_eq!(
+        h.call(
+            &wrong,
+            "GET",
+            "/api/v1/operations/1/index-open",
+            Value::Null
+        )
+        .await
+        .0,
+        401
+    );
     assert!(!cache_dir(&a).exists(), "opening alone indexed the source");
     let approved = request(2, 1, json!({"kind":"empty"}));
     let mut denied = approved.clone();
@@ -268,6 +296,7 @@ async fn approved_index_open_preserves_first_frame_replays_and_explicit_force() 
     let done = operation(&h, &login, approved.clone()).await;
     assert_eq!(done["kind"], "index_open");
     assert_eq!(done["request_id"], approved["request_id"]);
+    assert_eq!(done["open_seq"], approved["open_seq"]);
     assert_eq!(done["phase"], "succeeded", "{done}");
     assert_eq!(done["stage"], "open");
     assert_eq!(done["index"]["phase"], "succeeded");
@@ -382,6 +411,17 @@ async fn approved_index_open_preserves_first_frame_replays_and_explicit_force() 
     assert_eq!(changed["phase"], "failed");
     assert!(changed.get("index_open").is_none());
     assert!(!cache_dir(&dir.join("C.oas")).exists());
+    assert_eq!(
+        h.call(
+            &login,
+            "GET",
+            "/api/v1/operations/6/index-open",
+            Value::Null
+        )
+        .await
+        .0,
+        400
+    );
     // Expired approval contexts cannot be reinterpreted as a new file request.
     for seq in 7..=39 {
         let result=operation(&h,&login,json!({"kind":"mode","seq":seq.to_string(),"view_id":"gone","base_state_rev":"1","mode":"chip"})).await;
@@ -436,6 +476,17 @@ async fn index_open_keeps_selected_deck_levels_and_does_not_open_partial_decks()
         result["index_open"]["levels"],
         json!({"mode":"only","count":1})
     );
+    let preview = h
+        .call(
+            &login,
+            "GET",
+            "/api/v1/operations/1/index-open",
+            Value::Null,
+        )
+        .await;
+    assert_eq!(preview.0, 200);
+    assert_eq!(preview.1["levels"], json!({"mode":"only","ids":["1"]}));
+    assert!(!cache_dir(&dir.join("A.oas")).exists());
     let mut consent = request(2, 1, json!({"kind":"empty"}));
     consent["options"]["lod"] = json!(true);
     assert_eq!(operation(&h, &login, consent).await["phase"], "succeeded");

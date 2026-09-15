@@ -80,6 +80,19 @@ impl Resources {
     pub fn usage(&self) -> Usage {
         self.state.lock().unwrap().usage
     }
+    /// Read-only UI advice, not a reservation or cache-writer preflight. Index
+    /// admission rechecks the same limits after the user chooses their jobs.
+    pub fn index_slots(&self) -> u32 {
+        let usage = self.usage();
+        if usage.index_jobs != 0 {
+            return 0;
+        }
+        self.limits
+            .cpu_slots
+            .saturating_sub(usage.cpu_slots)
+            .min(self.limits.cpu_slots - self.limits.foreground_reserve)
+            .min(16)
+    }
     pub fn next_id(&self) -> Result<u64> {
         let mut s = self.state.lock().unwrap();
         s.next_id = s
@@ -359,6 +372,34 @@ impl ManagedDataset {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn index_slot_advice_obeys_foreground_reserve_without_reserving() {
+        let r = Resources::new(Limits::default()).unwrap();
+        assert_eq!(r.index_slots(), 12);
+        let browse = r.browse().unwrap();
+        let render = r
+            .render(&RenderOptions {
+                decode_jobs: 8,
+                raster_jobs: 4,
+                budget_mb: 64,
+                binary: PathBuf::from("unused-index-slot-test-renderer"),
+                tile_px: 384,
+                round_pages: 1024,
+                open_timeout_s: 30,
+                label_font_px: 14,
+                raw: true,
+            })
+            .unwrap();
+        let before = r.usage();
+        assert_eq!(r.index_slots(), 3);
+        assert_eq!(r.usage(), before);
+        let index = r.index(Vec::new(), 3).unwrap();
+        assert_eq!(r.index_slots(), 0);
+        drop(index);
+        assert_eq!(r.index_slots(), 3);
+        drop((browse, render));
+        assert_eq!(r.index_slots(), 12);
+    }
     #[test]
     fn drc_read_reservation_is_symmetric_and_shared_with_render() {
         let r = Resources::new(Limits::default()).unwrap();

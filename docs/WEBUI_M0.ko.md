@@ -244,6 +244,12 @@ M4g-9a는 실패한 원래 open의 옵션·선택 레벨을 보존한 `index_ope
 추가한다([M4 §53](WEBUI_M4.ko.md)). 색인 성공과 화면 교체 성공을 따로 보고하며
 승인·force·현재 view revision을 명시 검증한다. 브라우저 승인/복구 UI는 후속이므로
 UI-01의 색인 동의 흐름 전체를 아직 완료로 세지 않는다.
+M4g-9b에서 위 승인/복구 UI를 연결했다([M4 §54](WEBUI_M4.ko.md)). 원래 선택을
+읽기 전용으로 확인하고 jobs/LOD/occupancy/별도 force를 승인하며, 응답 유실·reload는
+저장된 같은 요청을 조회한다. 명시 재시도만 같은 승인을 재전송하고 다른 seq를 만들지
+않는다. 실제 Chrome 합성 색인→원래 표시 설정·geometry와 정상 종료를 확인했다.
+선택 덱·부분 실패·취소·revision 경합은 native/harness gate이며 현장 수용은 별도다.
+bare FILE, GDS/gzip, 나머지 CLI/조작 parity와 Firefox/ETX 수용은 아직 남아 있다.
 
 ### 2.10 jobdeck — M1a (10개 옵션)
 

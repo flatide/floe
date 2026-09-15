@@ -4261,3 +4261,63 @@ musl all-target check를 통과했다. Linux 검사는 컴파일 확인이지 �
 전체 로그: `/private/tmp/floe-index-open-battery.log`. 집중 검사 로그는
 `floe-index-open-owner-v6.log`, `floe-index-open-clippy-final.log`,
 `floe-index-open-msrv.log`, `floe-index-open-linux-check.log`다.
+
+## 54. M4g-9b — 승인된 색인→재열기 UI와 동일 요청 복구
+
+이 단계는 §53의 서버 작업에 실제 브라우저 동의를 연결한다. 기존 독립 Index 조작도
+유지한다. 파일 선택·preview·Close·새로고침은 색인 승인이 아니다.
+
+- `Index and open…`은 재시도 가능한 실패 open에만 나타난다. 인증된 단일 preview는
+  원래 source ID/이름·모드·전체 선택 레벨·표시 정책을 보여 준다. 현재 DOM의 다른
+  소스/레벨로 바꿔 보내지 않으며 서버가 저장한 원래 요청이 권위다.
+- jobs는 현재 자원 잔여의 읽기 전용 안내로 제안하고 최종 입력 그대로 제출한다.
+  자동 축소/확대하지 않는다. cache reader 충돌은 별개이며 창을 암묵 닫지 않는다.
+  LOD·occupancy·force는 매 새 preview에서 off, force는 별도 체크다. Close가 기본
+  포커스이며 키보드 focus trap/Escape/IME를 처리한다. 문자열은 textContent다.
+- 클릭 후 seq·crypto request ID·원래 open_seq·현재 view/revision target·pixels·
+  옵션 전체를 세션별 sessionStorage에 **POST보다 먼저** 저장한다. 저장 실패이면
+  제출하지 않는다. 조회 결과의 identity 불일치/만료/손상은 fail closed다.
+- reload·visibility 복귀·BFCache는 GET만으로 복구한다. 결과 불명확 시 Check / retry는
+  같은 승인만 전송하며 새 seq를 만들지 않는다. 취소도 원래 요청 identity 확인 후만
+  수행한다. 아직 접수 여부가 불명확하면 late POST를 취소했다고 주장하지 않으며
+  Close→End session 경로를 안내한다. 일반 Cancel은 승인 복구 중 차단한다.
+- Close는 pending 승인 기록을 잊지 않는다. 작업 중 화면/source/설정 변경은 잠그되
+  End session은 접근할 수 있다. hide/pagehide는 XHR 관찰만 중단하고 네이티브 작업을
+  취소하지 않는다. 승인 기록은 terminal 결과의 UI 반영까지 성공한 뒤 지운다.
+- 색인 실패/부분 덱은 자동 열기를 하지 않는다. 색인 성공 후 open 실패/취소는 완성된
+  캐시가 남는다고 구별해 표시한다. 성공은 새 view 부착이며 픽셀 렌더 상태와 별개다.
+  성공 채택 후 기존 미색인 경고를 지운다. reload가 force/게시 승인으로 확대되지 않는다.
+
+집중 검증:
+
+1. ES2017/독립 UI: 원래 선택·별도 force·자원 안내·전송 전 저장·저장 실패·read-only
+   reload·동일 재시도·identity 충돌·불명확한 취소·만료·부분 결과·UI 채택 실패·late
+   응답·키보드. 실제 app.js harness는 startup 실패→승인→응답 유실→BFCache 복구→
+   새 픽셀 표시, POST 중복 없음, 일반 취소/뷰 변경 차단, 오래된 경고 해제를 검사한다.
+2. owner native17: preview의 인증/no-write/선택 레벨·open_seq echo를 더했으며
+   첫 generation의 원래 설정·선택 덱 LOD·미선택 소스 불변·부분 덱·force·CAS·취소/
+   reap·이력 만료를 계속 검사한다. Rust1.89 app-core249/web73 단위, 대상 clippy와
+   Linux musl all-target check도 통과했다. Linux 컴파일은 현장 실행 수용이 아니다.
+3. 실제 Chrome에서 새 private valmini 복사본의 실패 open→preview→Close 후 cache
+   미생성을 확인했다. jobs2/LOD on/force off로 승인하고 depth7/high/keep/frames on/
+   labels off/font23/goto(5,6,300)와 실제 컬러 geometry를 확인했다. End session 뒤
+   서버 exit0·session file 제거·worker 디렉터리 비움을 확인했다. 공유 기본값 게시,
+   사용자 파일 upload·download·clipboard·실칩 데이터는 사용하지 않았다.
+
+전체 `sh tools/validate_rust.sh`는 exit0, `RUST VALIDATION: ALL OK`로 완료했다.
+owner17·GTK file display1,296·CLI/picker/handoff·ES2017/UI·occupancy25·잡덱80·
+렌더러46과 KLayout13 PX+2 phase-exact+14 style(jobs1/8)을 포함한다. 배터리 시작 뒤
+추가한 JS의 이전 경고 해제/일반 취소 가드는 별도 전체 UI 회귀를 재실행했고, 최종
+release를 재빌드해 두 번째 합성 파일로 실제 Chrome 승인→geometry/원래 표시 옵션→
+경고 해제→reload 복원을 확인했다. reload 전후 OVM/OVP SHA256도 같았다. 두 번째
+세션 역시 End session 후 exit0·session 파일/worker 임시 파일 정리와 테스트 탭 종료를
+확인했다. 브라우저의 **진행 중** 응답 유실/취소는 결정적 harness/native gate로
+검사한 것이며 실제 장시간 브라우저 장애 주입 수용으로 확대하지 않는다.
+
+이번 reload 관찰에서는 실제 viewport와 depth/detail은 복원됐지만 goto 입력칸은
+HTML 초기값(0,0,700)으로 돌아왔다(실제 뷰 폭300 유지). 입력 초안/현재 뷰 동기화는
+후속 CLI·입력 parity 감사의 열린 항목으로 남긴다. 전체 GTK 동일 복원 완료는 아니다.
+전체 로그: `/private/tmp/floe-index-open-ui-battery.log`. 집중 로그는
+`/private/tmp/floe-index-open-ui-{owner-v2,msrv,linux,clippy,final}.log`다.
+Firefox/ETX 현장·장시간 실칩·공유 서버 수용은 여전히 별도다. 다음 구현은 bare FILE와
+M0의 잔여 CLI/파일 형식/조작 parity이며 G1/G4 전체 감사와 GTK 은퇴 판정도 남아 있다.
