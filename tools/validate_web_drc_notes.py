@@ -29,7 +29,7 @@ def fingerprint(paths):
 
 
 class Session:
-    def __init__(self, source, pack, temps, reviewer, session_path, *, edit_waives=False, waives=None):
+    def __init__(self, source, pack, temps, reviewer, session_path, *, edit_waives=False, waives=None, read_reviewer=None):
         self.session_path = session_path
         env = dict(os.environ, PATH="", TMPDIR=str(temps), FLOE_INDEX_BIN=str(INDEX),
                    FLOE_RENDERD_BIN=str(RENDERD), FLOE_REVIEWER="must-not-be-used", FLOE_FILL_EDIT="")
@@ -38,6 +38,8 @@ class Session:
                 "--no-labels", "--frame-cache", "off"]
         if reviewer is not None:
             args += ["--drc-reviewer", reviewer]
+        if read_reviewer is not None:
+            args += ["--floe-reviewer", read_reviewer]
         if edit_waives:
             args += ["--drc-edit-waives"]
         if waives is not None:

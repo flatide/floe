@@ -5,6 +5,7 @@ const N=require('./drc-notes.js'),W=require('./drc-waives.js'),P=require('./prot
 const config=JSON.parse(fs.readFileSync(0,'utf8'));assert(/^http:\/\/127\.0\.0\.1:\d+$/.test(config.origin));
 const ids=new Set([...fs.readFileSync(__dirname+'/index.html','utf8').matchAll(/\bid="([^"]+)"/g)].map(m=>m[1]));
 const nodes=new Map(),timers=new Map(),writes={notes:0,waives:0};let serial=0,context=config.context,reader,notes,waives;
+let heldSecondWaive=null,sawPreviousReceipt=false;
 function el(id){assert(ids.has(id));if(!nodes.has(id))nodes.set(id,{value:'',textContent:'',checked:false,disabled:false,hidden:false,focus(){}});return nodes.get(id);}
 function call(method,path,body){
     assert(path.startsWith('/api/v1/drc'));const data=body===undefined?null:JSON.stringify(body);
@@ -17,7 +18,11 @@ function call(method,path,body){
             res.on('end',()=>{try{const value=text?JSON.parse(text):null;
                 if(res.statusCode>=400)reject(Object.assign(new Error('Native HTTP rejected request'),{status:res.statusCode,code:value&&value.error}));else resolve(value);
             }catch(e){reject(e);}});
-        });req.on('error',reject);req.setTimeout(8000,()=>req.destroy(new Error('Native HTTP timeout')));req.end(data);
+        });req.on('error',reject);req.setTimeout(8000,()=>req.destroy(new Error('Native HTTP timeout')));
+        // Force the gate to see operation 1 still terminal after operation 2
+        // has been issued locally. A write counter is not a server receipt.
+        if(method==='POST'&&path==='/api/v1/drc/review/waives'&&writes.waives===2){heldSecondWaive=()=>req.end(data);}
+        else req.end(data);
     });
 }
 const common={el,protocol:P,http:call,session:()=>'f'.repeat(64),now:()=>Date.now(),loadPending:()=>null,savePending(){},
@@ -33,8 +38,16 @@ async function until(check){const end=Date.now()+15000;while(!check()){if(Date.n
 async function settle(kind,expected){await until(()=>writes[kind]===expected);const panel=kind==='notes'?notes:waives;
     const end=Date.now()+15000;for(;;){await panel.refresh();if(kind==='waives')await refreshReview();
         const state=await call('GET','/api/v1/drc/review/'+kind),last=state.operations.history.at(-1);
-        if(last&&['failed','cancelled'].includes(last.phase))throw Error('Native save '+last.phase+': '+(last.error||'no code'));
-        if(last&&last.phase==='succeeded'&&!state.operations.active){assert.equal(last.published,true);if(kind==='waives')assert.equal(last.reader_applied,true);return;}
+        if(kind==='waives'&&expected===2&&heldSecondWaive){assert.equal(last.seq,'1');sawPreviousReceipt=true;const release=heldSecondWaive;heldSecondWaive=null;release();}
+        const current=last&&last.seq===String(expected);
+        if(current&&['failed','cancelled'].includes(last.phase))throw Error('Native save '+last.phase+': '+(last.error||'no code'));
+        if(current&&last.phase==='succeeded'&&!state.operations.active){
+            assert.equal(last.published,true);
+            // This GET may be newer than the panel's preceding refresh. Feed
+            // it through the real controller and wait for its reader/POST ACK.
+            if(kind==='waives'){assert.equal(last.reader_applied,true);waives.attach(state,reader);await refreshReview();if(!waives.suspended())return;}
+            else{notes.attach(state);return;}
+        }
         if(Date.now()>end)throw Error('Native save did not finish');await new Promise(r=>setTimeout(r,20));}
 }
 async function main(){
@@ -46,7 +59,7 @@ async function main(){
     assert.equal(readback.focus.text,'자동 저장 confirmed\nsecond line');
     await el('waives-read').onclick();el('waives-action').value='waive';await el('waives-action').onchange();await settle('waives',1);
     assert(!waives.suspended());assert(el('waives-autosave').checked,'reader revision reset the opt-in');
-    waives.open();await settle('waives',2);assert(!waives.suspended());
+    waives.open();await settle('waives',2);assert(!waives.suspended());assert(sawPreviousReceipt);
     const cleared=await call('POST','/api/v1/drc/review/waives/read',{context,errors:config.references});assert.equal(cleared.waived_count,'0');
     await call('POST','/api/v1/drc/review/waives/revoke',{token:cleared.token});
     mode('notes',false);await el('notes-read').onclick();el('notes-text').value='not approved';el('notes-text').oninput();await el('notes-prepare').onclick();

@@ -58,6 +58,8 @@ const HELP: &str = "Usage: floe2-web view [SOURCE ...] [OPTIONS]
   --drc RESULTS.db|PACK.ice Register DRC on first source; pack build needs owner approval
   --drc-waives FILE        Explicit existing waive sidecar (requires --drc)
   --drc-rules FILE         Explicit existing SVRF rules.json (requires --drc)
+  --floe-reviewer TAG      Read adjacent reviewer notes/waives for an explicit ICE; no writes
+                          No ASCII cache or legacy temporary-file discovery in this stage
   --drc-reviewer TAG       Enable owner note publication for this fixed tag (requires --drc)
   --drc-edit-waives        Also enable approved waive writes for --drc-reviewer
   --port N                 Loopback port (default random)
@@ -120,6 +122,7 @@ pub struct Command {
     drc_waives: Option<PathBuf>,
     drc_rules: Option<PathBuf>,
     drc_reviewer: Option<String>,
+    read_reviewer: Option<String>,
     drc_edit_waives: bool,
 }
 pub fn parse(args: &[String]) -> Result<Command> {
@@ -147,6 +150,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
         drc_waives: None,
         drc_rules: None,
         drc_reviewer: None,
+        read_reviewer: None,
         drc_edit_waives: false,
     };
     let mut i = 1;
@@ -186,6 +190,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
                 | "--drc-waives"
                 | "--drc-rules"
                 | "--drc-reviewer"
+                | "--floe-reviewer"
                 | "--drc-edit-waives"
         ) {
             c.independent = true;
@@ -308,9 +313,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
             "--dump" => return Err(Error::input(
                 "--dump is a GTK/XQuartz display diagnostic; web display dumps are not migrated; --render-debug provides numeric worker diagnostics only",
             )),
-            "--floe-reviewer" => return Err(Error::input(
-                "--floe-reviewer was a display/reviewer tag, not write authority; it is not mapped to the --drc-reviewer publication opt-in",
-            )),
+            "--floe-reviewer" => c.read_reviewer = Some(value()?.to_owned()),
             "--perf-baseline" => {
                 flag()?;
                 c.perf_baseline = true;
@@ -365,15 +368,24 @@ pub fn parse(args: &[String]) -> Result<Command> {
             _ => return Err(Error::input(format!("unsupported view option: {key}"))),
         }
     }
-    if (c.drc_waives.is_some() || c.drc_rules.is_some() || c.drc_reviewer.is_some())
+    if (c.drc_waives.is_some()
+        || c.drc_rules.is_some()
+        || c.drc_reviewer.is_some()
+        || c.read_reviewer.is_some())
         && c.drc.is_none()
     {
         return Err(Error::input(
-            "--drc-waives / --drc-rules / --drc-reviewer require --drc",
+            "--drc-waives / --drc-rules / --drc-reviewer / --floe-reviewer require --drc",
         ));
     }
     if let Some(tag) = &c.drc_reviewer {
         floe_app_core::drc::waive_paths(c.drc.as_ref().unwrap(), tag)?;
+    }
+    if let Some(tag) = &c.read_reviewer {
+        floe_app_core::drc::waive_paths(c.drc.as_ref().unwrap(), tag)?;
+        if c.drc_reviewer.is_some() || c.drc_edit_waives || c.drc_waives.is_some() {
+            return Err(Error::input("--floe-reviewer is read-only; do not combine it with --drc-reviewer, --drc-edit-waives or --drc-waives"));
+        }
     }
     if c.drc_edit_waives && c.drc_reviewer.is_none() {
         return Err(Error::input("--drc-edit-waives requires --drc-reviewer"));
@@ -506,10 +518,32 @@ impl Drop for SessionFile {
         let _ = fs::remove_dir(&self.directory);
     }
 }
+// Read selection is intentionally narrower than the CLI's legacy discovery:
+// an explicit ICE and fixed adjacent files only. Never create/repair sidecars.
+fn readonly_waives(path: &std::path::Path, reviewer: &str) -> Result<Option<PathBuf>> {
+    if !floe_app_core::drc::is_packed_source(path)? {
+        return Err(Error::input("--floe-reviewer currently requires an explicit ICE via --drc; ASCII cache discovery is not migrated"));
+    }
+    let target = floe_app_core::drc::waive_paths(path, reviewer)?[0].clone();
+    Ok(if target.try_exists()? {
+        Some(target)
+    } else {
+        None
+    })
+}
 pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
     if c.help {
         println!("{HELP}");
         return Ok(0);
+    }
+    let read_waives = c
+        .read_reviewer
+        .as_ref()
+        .map(|tag| readonly_waives(c.drc.as_ref().unwrap(), tag))
+        .transpose()?
+        .flatten();
+    if c.read_reviewer.is_some() {
+        eprintln!("[floe2-web] read-only reviewer: explicit ICE and adjacent sidecars only; no legacy temporary-file discovery or review writes");
     }
     // Claim/forward before Firefox or native discovery. A stale/busy owner is
     // an explicit error, never permission to create a second default instance.
@@ -694,7 +728,10 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
             &resources,
             drc_scope.expect("DRC-specific registration scope"),
             path,
-            c.drc_waives.as_deref().or(default_waives.as_deref()),
+            c.drc_waives
+                .as_deref()
+                .or(default_waives.as_deref())
+                .or(read_waives.as_deref()),
             c.drc_rules.as_deref(),
             service.catalog()["sources"][0]["source_id"]
                 .as_str()
@@ -718,6 +755,15 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
             std::slice::from_ref(&session.path),
             std::slice::from_ref(&session.directory),
             c.drc_edit_waives,
+        )
+        .map_err(Error::input)?;
+    }
+    if let Some(tag) = &c.read_reviewer {
+        Gateway::enable_drc_readonly_review(
+            &mut gate,
+            tag,
+            std::slice::from_ref(&session.path),
+            std::slice::from_ref(&session.directory),
         )
         .map_err(Error::input)?;
     }
@@ -878,7 +924,6 @@ mod tests {
             ("--stream-target-ms 500", "unused by Rust renderd"),
             ("--lod off", "not sent to Rust renderd"),
             ("--dump", "GTK/XQuartz"),
-            ("--floe-reviewer tag", "not write authority"),
         ] {
             let e = parse(&args(&format!("view missing.oas {tail}"))).unwrap_err();
             assert!(e.to_string().contains(explanation), "{e}");
@@ -1063,6 +1108,26 @@ mod tests {
         );
         assert_eq!(c.drc, Some(PathBuf::from("b.ice")));
         assert_eq!(c.drc_waives, Some(PathBuf::from("side")));
+    }
+    #[test]
+    fn readonly_reviewer_is_not_a_write_grant_or_forwarded_display_patch() {
+        let c = parse(&args("view a.oas --drc review.ice --floe-reviewer fixed")).unwrap();
+        assert_eq!(c.read_reviewer.as_deref(), Some("fixed"));
+        assert!(c.drc_reviewer.is_none() && !c.drc_edit_waives && c.independent);
+        for tail in [
+            "--drc-reviewer fixed",
+            "--drc-reviewer other",
+            "--drc-waives any",
+            "--drc-edit-waives",
+        ] {
+            assert!(parse(&args(&format!(
+                "view a --drc review.ice --floe-reviewer fixed {tail}"
+            )))
+            .is_err());
+        }
+        for tail in ["", "--drc review.ice --floe-reviewer ../escape"] {
+            assert!(parse(&args(&format!("view a --floe-reviewer fixed {tail}"))).is_err());
+        }
     }
     #[test]
     fn empty_window_and_process_options_have_explicit_instance_policy() {

@@ -942,7 +942,7 @@
             if (notes) { notes.attach(v.notes); }
             if (waives) { waives.attach(v.waives, registration); }
             if (transfers) { transfers.attach(v); }
-            el('drc-review-mode').textContent = v.waives ? 'OWNER REVIEW' : v.notes ? 'OWNER NOTES' : 'NO REVIEW WRITES';
+            el('drc-review-mode').textContent = v.waives ? 'OWNER REVIEW' : v.notes ? (v.notes.editable ? 'OWNER NOTES' : 'READ-ONLY REVIEWER') : 'NO REVIEW WRITES';
             if (registration) {
                 el('drc-title').textContent = registration.title;
                 el('drc-summary').textContent = registration.metadata ? registration.metadata.checks + ' rules · ' + registration.metadata.errors + ' errors' : registration.phase;
@@ -952,7 +952,7 @@
                     if (m.truncated_records !== undefined && cursor(m.truncated_records) !== '0') { el('drc-summary').textContent += ' · ' + m.truncated_records + ' truncated records'; }
                 }
                 if (!before || before.id !== registration.id || before.phase !== registration.phase) {
-                    info(registration.error || (registration.phase === 'opening' ? 'Opening DRC metadata…' : v.waives ? 'Geometry is read-only. Notes/waives use approval by default; automatic save of confirmed edits is a separate reviewer opt-in.' : v.notes ? 'Geometry and waive statuses are read-only. Confirmed note edits can use the separate reviewer save opt-in.' : 'Read-only review'));
+                    info(registration.error || (registration.phase === 'opening' ? 'Opening DRC metadata…' : v.waives ? 'Geometry is read-only. Notes/waives use approval by default; automatic save of confirmed edits is a separate reviewer opt-in.' : v.notes&&v.notes.editable ? 'Geometry and waive statuses are read-only. Confirmed note edits can use the separate reviewer save opt-in.' : 'Read-only review'));
                 }
             }
             // The catalog is polled while idle too. Rebinding/restarting an

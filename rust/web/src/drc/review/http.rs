@@ -48,6 +48,16 @@ pub(super) fn fail(code: Failure) -> Response {
     crate::drc::http::failure(code)
 }
 pub(super) fn review(g: &Gate, kind: store::Kind) -> std::result::Result<Arc<Service>, Failure> {
+    let service = read_review(g, kind)?;
+    service.require_editor()?;
+    Ok(service)
+}
+// Only status and the saved-note projection use this read capability. All
+// editor, transfer, artifact and recovery routes retain the write registration.
+pub(super) fn read_review(
+    g: &Gate,
+    kind: store::Kind,
+) -> std::result::Result<Arc<Service>, Failure> {
     g.drc
         .as_ref()
         .and_then(|r| r.review(kind))
@@ -344,7 +354,7 @@ async fn status(
     if let Err(e) = transport::http_session(&g, &headers) {
         return transport::error(e);
     }
-    match review(&g, kind) {
+    match read_review(&g, kind) {
         Ok(s) => Json(s.status()).into_response(),
         Err(e) => fail(e),
     }

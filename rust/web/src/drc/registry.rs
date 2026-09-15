@@ -118,10 +118,12 @@ impl Registry {
         files: &[std::path::PathBuf],
         trees: &[std::path::PathBuf],
         edit_waives: bool,
+        editable: bool,
     ) -> Result<()> {
         use floe_app_core::drc::review::store;
         let mut notes = self.notes.lock().unwrap();
         if notes.is_some()
+            || edit_waives && !editable
             || files.len() > 120
             || trees.len() > 128
             || sources.snapshot().is_empty()
@@ -147,6 +149,22 @@ impl Registry {
             .collect();
         *notes = Some(super::review::Service::start(super::review::Config {
             kind: store::Kind::Notes,
+            editable,
+            reader_id: if editable {
+                None
+            } else {
+                Some(
+                    self.inner
+                        .state
+                        .lock()
+                        .unwrap()
+                        .current
+                        .as_ref()
+                        .ok_or_else(|| floe_app_core::Error::input("DRC reader unavailable"))?
+                        .id
+                        .clone(),
+                )
+            },
             reviewer: reviewer.into(),
             files: note_files,
             trees: trees.to_vec(),
@@ -156,6 +174,8 @@ impl Registry {
             *self.waives.lock().unwrap() =
                 Some(super::review::Service::start(super::review::Config {
                     kind: store::Kind::Waives,
+                    editable: true,
+                    reader_id: None,
                     reviewer: reviewer.into(),
                     files: files
                         .iter()

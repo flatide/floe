@@ -2,6 +2,7 @@
 // Real DRC navigation, editor and display modules; all input is synthetic.
 const assert=require('node:assert/strict'),fs=require('node:fs'),D=require('./drc.js'),P=require('./protocol.js');
 const F=require('./drc-notes.test.cjs'),N=require('./drc-note-display.test.cjs'),clone=v=>JSON.parse(JSON.stringify(v));
+const readonly=process.argv.includes('--read-only');
 const ids=new Set([...fs.readFileSync(__dirname+'/index.html','utf8').matchAll(/\bid="([^"]+)"/g)].map(m=>m[1]));
 const nodes=new Map(),calls=[],moves=[],saves=[],drawing=[],timers=new Map(),raf=new Map();
 let serial=0,restore=null,hold=false,ack=null,displayHold=null,holdDisplay=false,noteText='saved <script> 한글';
@@ -17,6 +18,7 @@ const el=id=>{assert(ids.has(id),'missing HTML '+id);if(!nodes.has(id))nodes.set
 el('drc-waived').value='all';el('drc-markers').checked=true;
 const view={id:F.context.view_id,source:'source',connected:true,pending:false,state:{connection_epoch:'e'.repeat(64),state_rev:'1',status:'idle',dbu_um:'1',bbox_dbu:['0','0','200','160'],pixels:[200,160]}};
 const cat={drc:{id:F.context.drc_id,revision:F.context.revision,source_id:'source',title:'synthetic.db',phase:'ready',metadata:{checks:'2',errors:'4',format:'ice'}},notes:F.catalog()};
+cat.notes.editable=!readonly;
 const row=(ci='0',ei='0')=>({check:ci,local:ei,global:ei==='0'?'1':'2',kind:'p',status:0,bbox_um:ei==='0'?['10','10','70','50']:['90','50','160','70'],points:'4'});
 async function http(method,path,body,missing,t){
     calls.push({method,path,body,t});const api='/api/v1/drc/review/notes';
@@ -72,6 +74,17 @@ async function jump(i){el('drc-errors').children[i].ondblclick();await tick();}
     // Snapshot uses the same DRC canvas, with a synchronous flush.
     drawing.length=0;panel.flush();assert(drawing.some(v=>v[0]==='fillText'));
     const app=fs.readFileSync(__dirname+'/app.js','utf8');assert(app.includes("['query-canvas','drc-canvas','ruler-canvas']"));assert(app.includes('drcPanel.flush()'));
+    if(readonly){
+        assert.equal(el('drc-review-mode').textContent,'READ-ONLY REVIEWER');assert(el('notes-authoring').hidden);
+        assert(!el('notes-panel').hidden);assert(!el('drc-saved-notes').hidden);assert(el('notes-autosave').disabled);
+        const before=calls.length;panel.key('n');panel.key('w');await tick();assert.equal(calls.length,before,'read-only shortcuts started editor IO');
+        assert(calls.filter(r=>r.path.startsWith('/api/v1/drc/review/')).every(r=>r.method==='GET'||r.path.endsWith('/display')));
+        view.connected=false;panel.contextChanged();await tick();assert.equal(el('drc-note-text').textContent,'');
+        view.connected=true;view.state.connection_epoch='7'.repeat(64);panel.contextChanged();await tick();
+        assert.equal(el('drc-note-text').textContent,noteText);assert(el('notes-autosave').disabled);
+        panel.stop();await tick();assert.equal(timers.size,0);assert.equal(raf.size,0);
+        console.log('WEB READ REVIEWER PANEL: ALL OK (real DRC/editor/display; badges/body/canvas/restore, no pan reads or editor IO, reconnect, cleanup)');return;
+    }
     // Display must leave an editor/preview intact, then refresh after explicit reload.
     await el('notes-read').onclick();el('notes-text').value='UNSAVED';el('notes-text').oninput();await el('notes-prepare').onclick();await tick();
     assert(!el('notes-review').hidden);el('drc-notes-refresh').onclick();await tick();assert(!el('notes-review').hidden);assert.equal(el('notes-text').value,'UNSAVED');

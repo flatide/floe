@@ -421,6 +421,26 @@ impl Gateway {
         trees: &[std::path::PathBuf],
         edit_waives: bool,
     ) -> Result<(), String> {
+        Self::register_drc_review(gate, reviewer, files, trees, edit_waives, true)
+    }
+    /// Display existing notes without granting editor/transfer/publication APIs.
+    /// The trusted CLI separately registers that reviewer's read-only waives.
+    pub fn enable_drc_readonly_review(
+        gate: &mut Gate,
+        reviewer: &str,
+        files: &[std::path::PathBuf],
+        trees: &[std::path::PathBuf],
+    ) -> Result<(), String> {
+        Self::register_drc_review(gate, reviewer, files, trees, false, false)
+    }
+    fn register_drc_review(
+        gate: &mut Gate,
+        reviewer: &str,
+        files: &[std::path::PathBuf],
+        trees: &[std::path::PathBuf],
+        edit_waives: bool,
+        editable: bool,
+    ) -> Result<(), String> {
         let g = Arc::get_mut(gate).ok_or("gateway already published")?;
         if g.defaults.is_some() {
             return Err("register notes before design defaults".into());
@@ -434,7 +454,7 @@ impl Gateway {
             .as_ref()
             .ok_or("note review requires registered sources")?
             .source_set();
-        drc.enable_notes(reviewer, sources, files, trees, edit_waives)
+        drc.enable_notes(reviewer, sources, files, trees, edit_waives, editable)
             .map_err(|e| e.to_string())
     }
     fn authenticate(&self, headers: &HeaderMap, csrf: &str) -> Result<SessionId, StatusCode> {

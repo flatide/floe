@@ -29,6 +29,9 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub(super) struct Config {
     pub kind: store::Kind,
+    pub editable: bool,
+    // Read-only selection does not follow an approved pack replacement.
+    pub reader_id: Option<String>,
     pub reviewer: String,
     pub files: Vec<PathBuf>,
     pub trees: Vec<PathBuf>,
@@ -204,6 +207,7 @@ impl Service {
         self: &Arc<Self>,
         body: Arc<OwnedSemaphorePermit>,
     ) -> std::result::Result<Arc<Operation>, Failure> {
+        self.require_editor()?;
         self.begin_read(body, false)
     }
     fn begin_read(
@@ -340,6 +344,7 @@ impl Service {
     /// Called while the registry holds the current-reader lock; acceptance is
     /// ordered against a rebuild. Replays are checked before mutable context.
     fn submit(&self, owner: &SessionId, req: Submit) -> std::result::Result<Value, Failure> {
+        self.require_editor()?;
         let seq = crate::view::counter(&req.seq)?;
         if !req.approve {
             return Err("review_approval_required");
@@ -398,10 +403,21 @@ impl Service {
     }
     pub(super) fn status(&self) -> Value {
         let s = self.inner.state.lock().unwrap();
-        json!({"available":!s.closed,"kind":self.kind(),"reviewer":self.inner.config.reviewer,
+        let mut value = json!({"available":!s.closed,"kind":self.kind(),"reviewer":self.inner.config.reviewer,
             "review_rev":s.review_rev.to_string(),"operations":s.ledger.snapshot(),
             "note_bytes":NOTE_BYTES,"selection_limit":floe_app_core::drc::review::EDIT_ITEMS,
-            "preparing":s.preparing.is_some(),"autosave":false})
+            "preparing":s.preparing.is_some(),"autosave":false});
+        if self.inner.config.kind == store::Kind::Notes {
+            value["editable"] = json!(self.inner.config.editable);
+        }
+        value
+    }
+    fn require_editor(&self) -> std::result::Result<(), Failure> {
+        if self.inner.config.editable {
+            Ok(())
+        } else {
+            Err("review_disabled")
+        }
     }
     fn revoke(&self, owner: &SessionId, token: &str) {
         let mut s = self.inner.state.lock().unwrap();
@@ -494,6 +510,11 @@ impl Service {
     fn open(&self, reader: &Reader, stop: &AtomicUsize) -> Result<Arc<managed::ManagedStore>> {
         let r = &reader.registration;
         let c = &self.inner.config;
+        if c.reader_id.as_ref().is_some_and(|id| *id != reader.id) {
+            return Err(floe_app_core::Error::input(
+                "read-only review registration changed; reopen explicitly",
+            ));
+        }
         if c.kind == store::Kind::Waives
             && r.waives.as_ref().is_some_and(|p| {
                 store::paths(&r.path, &c.reviewer, c.kind).is_ok_and(|paths| *p != paths[0])

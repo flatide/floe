@@ -44,8 +44,8 @@
         if(terminal(v)){P.counter(v.review_rev,true);}return v;
     }
     function catalog(v,P){
-        keys(v,['available','kind','reviewer','review_rev','operations','note_bytes','selection_limit','preparing','autosave']);
-        if(v.kind!=='drc_note'||typeof v.available!=='boolean'||typeof v.preparing!=='boolean'||v.autosave!==false||v.note_bytes!==LIMIT||v.selection_limit!==5000){fail();}
+        keys(v,['available','editable','kind','reviewer','review_rev','operations','note_bytes','selection_limit','preparing','autosave']);
+        if(v.kind!=='drc_note'||typeof v.editable!=='boolean'||typeof v.available!=='boolean'||typeof v.preparing!=='boolean'||v.autosave!==false||v.note_bytes!==LIMIT||v.selection_limit!==5000){fail();}
         text(v.reviewer,200);P.counter(v.review_rev,true);
         const a=v.operations;keys(a,['last_seq','active','history']);P.counter(a.last_seq,true);if(a.active!==null){P.counter(a.active);}
         if(!Array.isArray(a.history)||a.history.length>32){fail();}let previous='0';
@@ -90,7 +90,8 @@
         function same(c){const n=selection();return !!n&&equal(n.context,c.context)&&n.epoch===c.epoch&&n.key===c.key&&n.count===c.count;}
         function active(){return model&&model.operations.active;}
         function latest(){const rows=model&&model.operations.history;return rows&&rows[rows.length-1];}
-        function permitted(){return enabled&&!stopped&&!stale&&model&&model.available;}
+        function displayReady(){return enabled&&!stopped&&!stale&&model&&model.available;}
+        function permitted(){return displayReady()&&model.editable;}
         function busy(ignoreTransfer){return (!ignoreTransfer&&transferLocked)||!!pending||uncertain||!!active()||!!write||!!approving;}
         function transferReady(importing){return !!(permitted()&&!busy(true)&&!io&&!model.preparing&&!revokeTask&&(!importing||!editor));}
         async function publishTransfer(value,valid){
@@ -133,10 +134,11 @@
         }
         function render(){
             el('notes-panel').hidden=!enabled;
-            el('notes-owner').textContent=model?'Reviewer: '+model.reviewer:'';
+            el('notes-owner').textContent=model?'Reviewer: '+model.reviewer+(model.editable?'':' · read only'):'';
+            el('notes-authoring').hidden=!model||!model.editable;
             const c=selection(),ok=permitted()&&!busy()&&!io&&!model.preparing;
             const connection=o.connection?o.connection():null;
-            saveMode.sync(enabled&&!stopped&&model?model.reviewer:'',o.session()+'\n'+(connection||''),!!ok&&!!connection);
+            saveMode.sync(enabled&&!stopped&&model&&model.editable?model.reviewer:'',o.session()+'\n'+(connection||''),!!ok&&!!connection);
             el('notes-prepare').textContent=saveMode.on()?'Save note':'Preview save';
             el('notes-local').textContent='Local draft only until confirmed · lost on page reload. Ctrl/Cmd+Enter '+
                 (saveMode.on()?'saves the note':'previews')+'; Escape discards. Browser IME is supported.';
@@ -157,14 +159,14 @@
             el('notes-status').textContent=statusText(latest());el('notes-message').textContent=[notice,storageWarning].filter(Boolean).join('\n');
             el('notes-bytes').textContent=new TextEncoder().encode(el('notes-text').value).length+' / '+LIMIT+' UTF-8 bytes · empty text clears the selected notes';
             if(o.displayState){o.displayState(!enabled||!model?null:{reviewer:model.reviewer,review_rev:model.review_rev,read_turn:readTurn,
-                blocked:!permitted()?'Saved-note status is not ready.':busy(true)||latest()&&latest().outcome_unknown?'Saved-note publication is pending or unconfirmed.':
+                blocked:!displayReady()?'Saved-note status is not ready.':busy(true)||latest()&&latest().outcome_unknown?'Saved-note publication is pending or unconfirmed.':
                     transferLocked?'Whole-review transfer is in progress; no save is implied.':
                     io||model.preparing?'Note snapshot preparation is in progress.':''});}
         }
         function schedule(){o.clearTimeout(timer);timer=null;if(enabled&&!stopped&&(active()||pending)){timer=o.setTimeout(refresh,active()?500:2500);}}
         function install(v){
             const old=latest(),next=v.operations.history[v.operations.history.length-1];
-            if(model&&(v.reviewer!==model.reviewer||P.compare(v.review_rev,model.review_rev)<0||P.compare(v.operations.last_seq,model.operations.last_seq)<0||
+            if(model&&(v.editable!==model.editable||v.reviewer!==model.reviewer||P.compare(v.review_rev,model.review_rev)<0||P.compare(v.operations.last_seq,model.operations.last_seq)<0||
                 old&&next&&old.seq===next.seq&&terminal(old)&&(['phase','elapsed_ms','error','published','outcome_unknown','directory_synced','review_rev'].some(function(k){return old[k]!==next[k];})||!!old.context!==!!next.context||old.context&&!equal(old.context,next.context)))){throw new Error('Older note state was ignored.');}
             if(editor&&model&&editor.approvedSeq!==v.operations.last_seq&&(v.review_rev!==model.review_rev||v.operations.last_seq!==model.operations.last_seq)){invalidate('Another save changed the note state.');}
             model=v;stale=false;v.operations.history.forEach(settled);
@@ -256,16 +258,16 @@
         el('notes-editor').onkeydown=function(e){if(hangul.composing(e)){return;}if(e.key==='Escape'){e.preventDefault();e.stopPropagation();discard();}
             else if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();e.stopPropagation();if(!draft){confirm();}}};
         el('notes-refresh').onclick=refresh;el('notes-cancel').onclick=cancel;
-        el('notes-resolve').onclick=function(){if(pending&&uncertain&&!stopped&&!write&&!cancelling){return send(pending);}};
+        el('notes-resolve').onclick=function(){if(model&&model.editable&&pending&&uncertain&&!stopped&&!write&&!cancelling){return send(pending);}};
         el('notes-checked').onchange=render;el('notes-forget').onclick=function(){if(!el('notes-forget').disabled){pending=null;uncertain=false;store(null);el('notes-checked').checked=false;notice='Local recovery record cleared after your check. No request was sent.';render();}};
         render();
-        return {attach:function(value){if(!value){if(!enabled){render();}return;}try{const v=catalog(value,P);if(!enabled){enabled=true;recover();}install(v);changed();schedule();}
+        return {attach:function(value){if(!value){if(!enabled){render();}return;}try{const v=catalog(value,P);if(!enabled){enabled=true;if(v.editable){recover();}}install(v);changed();schedule();}
                 catch(e){stale=true;notice=e.message;render();}},changed:changed,refresh:refresh,
-            open:function(){if(!enabled||stopped){return false;}changed();if(editor){el('notes-text').focus();}else{read(false);}return true;},
+            open:function(){if(!permitted()){return false;}changed();if(editor){el('notes-text').focus();}else{read(false);}return true;},
             transferReady:transferReady,transferLock:function(value){transferLocked=value===true;render();},publishTransfer:publishTransfer,
             stop:function(final){stopped=true;stale=true;saveMode.reset();approving=null;clearEditor(false);if(write){uncertain=true;}
                 [io,poll,write,cancelling,revokeTask].forEach(abort);io=poll=write=cancelling=revokeTask=null;revokeNext=null;o.clearTimeout(timer);timer=null;
-                if(final){store(null);}render();},resume:function(){stopped=false;return enabled?refresh():Promise.resolve();}};
+                if(final&&model&&model.editable){store(null);}render();},resume:function(){stopped=false;return enabled?refresh():Promise.resolve();}};
     }
     const api={bind:bind,catalog:catalog,preview:preview,operation:operation,approval:approval,refs:refs,statusText:statusText};
     if(typeof module==='object'&&module.exports){module.exports=api;}else{root.FloeDRCNotes=api;}

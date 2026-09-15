@@ -104,12 +104,9 @@ pub fn waive_paths(pack: &Path, reviewer: &str) -> Result<[PathBuf; 2]> {
         env::temp_dir().join(format!(".{name}.waive.{reviewer}-{}", &tag[..12])),
     ])
 }
-pub fn open_current(
-    source: &Path,
-    reviewer: Option<&str>,
-    cancelled: &AtomicUsize,
-) -> Result<Database> {
-    crate::check_cancelled(cancelled)?;
+/// Bounded, nonblocking type probe for trusted CLI registration. Never parses
+/// ASCII, discovers a cache, or creates a review sidecar.
+pub fn is_packed_source(source: &Path) -> Result<bool> {
     let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK)
@@ -118,7 +115,19 @@ pub fn open_current(
         return Err(Error::input("DRC source must be a regular file"));
     }
     let mut magic = [0; 8];
-    let packed = file.read_exact(&mut magic).is_ok() && &magic == MAGIC;
+    match file.read_exact(&mut magic) {
+        Ok(()) => Ok(&magic == MAGIC),
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+pub fn open_current(
+    source: &Path,
+    reviewer: Option<&str>,
+    cancelled: &AtomicUsize,
+) -> Result<Database> {
+    crate::check_cancelled(cancelled)?;
+    let packed = is_packed_source(source)?;
     let mut pack = if packed {
         Pack::open(source, cancelled)?
     } else {

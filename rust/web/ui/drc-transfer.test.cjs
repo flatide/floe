@@ -42,7 +42,7 @@ function harness(){
         chunk(k,request,at,blob,t){return invoke({kind:k,method:'POST',path:'/api/v1/drc/review/'+k+'/transfer/chunk',body:request,at,blob,t});},
         download:(k,id)=>downloads.push({kind:k,id})});
     return {panel,el,calls,slices,models,records,publications,downloads,locks,timers,editors,execute,
-        init:()=>panel.attach({notes:{},waives:{}}),
+        init:()=>panel.attach({notes:{editable:true},waives:{}}),
         file(size=CHUNK+10){el('transfer-file').files=[{size,slice(at,end){assert(end-at<=CHUNK);const blob={size:end-at,at};slices.push(blob);return blob;},text(){throw Error('whole-file read');},arrayBuffer(){throw Error('whole-file read');}}];el('transfer-file').onchange();},
         upload:()=>el('transfer-import').onclick(),export:()=>el('transfer-export').onclick(),resolve:()=>el('transfer-resolve').onclick(),discard:()=>el('transfer-discard').onclick(),
         consent(){el('transfer-run').checked=el('transfer-consent').checked=true;el('transfer-consent').onchange();},approve:()=>el('transfer-approve').onclick(),
@@ -50,6 +50,9 @@ function harness(){
         set override(v){override=v;},set scope(v){scope=v;},set canImport(v){canImport=v;},set canExport(v){canExport=v;}};
 }
 async function tests(){
+    const reader=harness();await reader.panel.attach({notes:{editable:false},waives:null});
+    assert(reader.el('transfer-panel').hidden);reader.file();await reader.upload();await reader.export();
+    assert.equal(reader.calls.length,0,'read-only reviewer opened transfer APIs');reader.panel.stop(true);
     const h=harness();assert(h.el('transfer-panel').hidden);await h.init();h.file();await h.upload();
     assert.equal(h.slices.length,2);assert.deepEqual(h.slices.map(b=>b.size),[CHUNK,10]);assert.equal(h.publications.length,0);assert(!h.el('transfer-review').hidden);
     assert(h.el('transfer-approve').disabled);await h.approve();assert.equal(h.publications.length,0);h.el('transfer-consent').checked=true;h.el('transfer-consent').onchange();assert(h.el('transfer-approve').disabled);

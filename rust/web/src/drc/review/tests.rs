@@ -1,14 +1,32 @@
 use super::*;
 
 pub(super) fn service() -> Arc<Service> {
+    configured_service(true)
+}
+fn configured_service(editable: bool) -> Arc<Service> {
     Service::start(Config {
         kind: store::Kind::Notes,
+        editable,
+        reader_id: None,
         reviewer: "fixed".into(),
         files: vec![],
         trees: vec![],
         sources: SourceSet::new(vec![]).unwrap(),
     })
     .unwrap()
+}
+#[test]
+fn read_registration_cannot_submit_or_acquire_editor_authority() {
+    let s = configured_service(false);
+    assert_eq!(s.status()["editable"], false);
+    assert_eq!(s.status()["available"], true);
+    assert!(matches!(s.require_editor(), Err("review_disabled")));
+    assert!(matches!(
+        s.submit(&owner(), request()),
+        Err("review_disabled")
+    ));
+    assert_eq!(s.status()["operations"]["last_seq"], "0");
+    stop(&s);
 }
 fn owner() -> SessionId {
     let (mut auth, secret) = crate::auth::Auth::new(

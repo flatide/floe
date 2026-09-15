@@ -4951,3 +4951,70 @@ GTK pwrite와 같은 성능 또는 대형 파일 연속 클릭 성능을 보장�
 입력·저장·복구/시각 수용, Python-free Linux 실행과 G1/G4 판정은 남는다. 공유/원격은
 미구현, M0/M3 현장은 보류, M5 world-tile은 조건부다. 커밋 보고도 이 전체 잔여를
 유지하며 이 opt-in 한 건을 전체 완료나 임의 완료율로 바꾸지 않는다.
+
+## 65. M4g-15a — 명시 ICE reviewer의 읽기 전용 선택
+
+2026-09-16. G4 잔여 중 reviewer 읽기와 쓰기 opt-in을 분리하는 첫 단계다.
+GTK의 전체 자동 탐색을 이관 완료한 것으로 세지 않는다.
+
+```sh
+floe2-web view layout.oas --drc results.db.ice --floe-reviewer alice
+```
+
+- trusted CLI가 명시한 ICE와 인접 `.results.db.waive.alice`,
+  `.results.db.notes.alice.fe`만 읽는다. 명시 reviewer는 엄격히 검증하며 환경변수나
+  browser 요청의 tag/path로 바꾸지 않는다. 파일 부재는 빈 review이며 생성·수리·
+  lock 생성·in-pack fallback을 하지 않는다. 기존 pack/sidecar 검증과 saved-note
+  snapshot/바인딩·외부 변경 검사를 유지한다. readonly 파일의 atime 갱신은 OS 정책이다.
+- 메모 배지·마지막 점프 오류 본문과 waive 상태/필터는 기존 reader UI로 표시한다.
+  notes 서비스의 `editable:false`를 UI가 검사해 편집·자동 저장을 숨기고, 서버는
+  편집 snapshot부터 prepare/submit/recovery/transfer/artifact까지 거부한다.
+  GET notes status와 POST notes/display만 허용한다. 기존 로컬 저장 복구 기록을
+  읽거나 replay/삭제하지 않는다. 자동 저장 checkbox 복원으로 권한을 얻지 못한다.
+- `--drc-reviewer`·`--drc-edit-waives`·`--drc-waives`와 혼용은 명시 오류다.
+  기존 writer 등록/자동 저장은 그대로이며 새 계정 인증·공유 권한은 아니다.
+  독립 창으로 열고 기존 single-instance에 reviewer/write 설정을 전달하지 않는다.
+- 시작 시 8-byte nonblocking regular-file probe로 명시 ICE만 허용한다. FIFO는
+  대기하지 않고 거부한다. ASCII가 주어지면 아직 미이관인 cache 자동 선택을
+  조용히 흉내 내지 않고 명시 ICE를 요구한다. 기존 CLI `open_current`와 안전 probe를
+  공유하며 파서/renderer/캐시 포맷은 바꾸지 않는다.
+- read-only notes는 처음 등록한 reader ID에 고정된다. 명시 rebuild로 reader가
+  교체돼도 기존 review를 새 pack에 자동 연결하지 않는다. 재열기가 필요하다.
+  index hot reload/revision 운영 정책은 여전히 사용자 유보 범위다.
+
+범위 제한: legacy 임시 디렉터리의 waive/note fallback, `--drc ASCII`에서 fresh
+ICE 자동 선택, env/host 기반 reviewer 기본 선택은 남아 있다. 이번 모드는 인접
+파일만 읽는다는 점을 help·시작 안내에 표시한다. 임시 경로를 지원하려고 파일
+picker/덱 source scope를 `/tmp` 전체로 넓히지 않는다. 과거 GTK의 자동 파일 생성·
+손상 파일 덮어쓰기·in-pack 쓰기를 read-only 호환성으로 이관하지 않는다.
+
+검증:
+
+- app23/core261/web85 단위, strict clippy(app/web all-targets), ES2017/전체 UI 통과.
+  실제 DRC+editor+display 모듈의 읽기 모드에서도 배지/본문/캔버스·점프 ACK·복원·
+  pan 무조회·재연결을 검사하고 편집/자동 저장·transfer·복구 호출이 없음을 고정했다.
+- `validate_web_read_reviewer.py`: 실제 Rust HTTP와 private 합성 자료. 기존 native
+  승인 API로 만든 메모/waive, xattr 없는 **0444 legacy 파일**, 파일 없는 reviewer를
+  각각 읽었다. 두 review API의 모든 editor/transfer/artifact 경로(정상 CSRF form
+  download 포함)는 403, 미인증은 401이다. 원본/pack/cache·sidecar 내용/mtime/ctime/
+  mode 불변, 새 sidecar/lock 없음, ASCII 명시 오류와 FIFO 비차단, 정상 종료를 확인했다.
+- `sh tools/validate_rust.sh` **exit 0 / ALL OK**
+  (`/private/tmp/floe-read-review-battery.log`). 기존 수동/자동 저장·DRC 전송, occupancy27,
+  jobdeck83, renderer46, VFS H1-H5/L1-L9, KLayout jobs1/8 각각13 PX+2 phase-exact+
+  14 style 통과. 최종 안내 문구 변경은 전체 UI와 embedded-asset HTTP 검사 및 release
+  재빌드로 별도 검증했다(`floe-read-review-ui-final.log`, `floe-read-review-assets-final.log`).
+- 추가 재검사에서 기존 native 자동 저장 하네스의 `!waives.suspended()` 단언이 한 번
+  실패했다. 하네스는 요청 번호 일치 없이 마지막 terminal receipt를 썼고, UI refresh
+  이후 별도 GET이 더 최신인 경우도 처리하지 않았다. 저장 제품 코드는 바꾸지 않고
+  하네스에 **요청 seq 일치 + 실제 controller/reader 반영**을 넣었다. 두 번째 POST를
+  첫 번째 성공 receipt 관측까지 보류하는 재현을 강제하고 5회 연속 통과했다.
+  timeout 상향/재시도로 실패를 숨기거나 이전 성공을 새 성공으로 세지 않는다.
+
+제품 runtime에 Python/Node를 추가하지 않는다. 브라우저 click/IME/화면 또는 현장
+acceptance를 DOM/native HTTP 검사로 대체하지 않는다. renderer/index 버전과
+공유 캐시 형식은 그대로다. main/feature/jobdeck 작업 트리는 수정하지 않았다.
+
+목표 잔여: 명시 ICE 읽기 경로 하나를 닫는 단계이며 reviewer legacy 탐색은 남는다.
+개발 bitmap 슬롯/CLI 제품 경계·G4 최종 대조, 실제 브라우저 입력/저장/복구/화면,
+Python-free Linux 실행과 G1/G4 수용은 미완료다. M2 공유/원격은 미구현, M0/M3 현장은
+보류, M5 world-tile은 조건부다. 전체 goal은 계속 active이며 임의 완료율을 보고하지 않는다.

@@ -261,7 +261,7 @@
       <div id="drc-errors" class="drc-errors" aria-label="DRC errors"></div>
       <div class="pagination"><button id="drc-error-prev" aria-label="Previous error page" disabled>←</button><span>Error pages</span><button id="drc-error-next" aria-label="Next error page" disabled>→</button></div>
       <div class="button-row"><button id="drc-step-prev" title="Previous matching error in this rule, wrapping (comma)" disabled>Previous error</button><button id="drc-step-next" title="Next matching error in this rule, wrapping (period)" disabled>Next error</button></div>
-      <p class="note">Comma / period: previous / next error. N: note editor. W: propose a waive toggle. Review writes still need preview and explicit approval.</p>
+      <p class="note">Comma / period: previous / next error. N: note editor. W: propose a waive toggle. Editing requires a writer registration. Preview and approval are the default; saving confirmed edits automatically is a separate reviewer opt-in.</p>
       <button id="drc-step-continue" hidden>Continue search</button>
       <div class="drc-selection"><p id="drc-selected" class="note">Click to inspect · double-click to go to an error.</p><div class="button-row"><button id="drc-frame" disabled>Frame error</button><button id="drc-clear" disabled>Clear</button></div></div>
       <section id="notes-panel" class="notes-panel" aria-label="Owner DRC notes" hidden>
@@ -270,7 +270,8 @@
           <button id="drc-notes-refresh">Refresh saved notes</button>
           <details id="drc-note-body" class="drc-description" hidden><summary>Last jumped error · full saved note</summary><pre id="drc-note-text"></pre></details>
         </section>
-        <h3>Notes</h3><p id="notes-owner" class="note"></p><p id="notes-selection" class="note"></p>
+        <h3>Notes</h3><p id="notes-owner" class="note"></p>
+        <div id="notes-authoring" hidden><p id="notes-selection" class="note"></p>
         <label class="check"><input id="notes-autosave" type="checkbox" disabled> Automatically save confirmed note edits for this reviewer (this tab)</label>
         <p id="notes-autosave-status" class="note" role="status"></p>
         <button id="notes-read" disabled>Read selected notes</button>
@@ -295,6 +296,7 @@
           <button id="notes-resolve">Resolve approved request</button>
           <label class="check"><input id="notes-checked" type="checkbox"> I checked the note file and understand the previous outcome.</label>
           <button id="notes-forget" disabled>Clear local recovery record</button>
+        </div>
         </div>
       </section>
       <section id="waives-panel" class="notes-panel" aria-label="Owner DRC waives" hidden>

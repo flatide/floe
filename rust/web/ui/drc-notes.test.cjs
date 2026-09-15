@@ -10,7 +10,7 @@ function op(seq='1',phase='succeeded',extra={}){
     return {seq,kind:'drc_note',phase,...(phase==='queued'?{}:{context:clone(context),elapsed_ms:'3',error:phase==='failed'?'review_changed':null,
         published:phase==='succeeded',outcome_unknown:false,directory_synced:phase==='succeeded'?true:null}),...(done?{review_rev:phase==='succeeded'?'1':'0'}:{}),...extra};
 }
-function catalog(history=[],rev){const last=history.at(-1);return {available:true,kind:'drc_note',reviewer:'fixed-owner',review_rev:rev||(last&&last.review_rev)||'0',
+function catalog(history=[],rev){const last=history.at(-1);return {available:true,editable:true,kind:'drc_note',reviewer:'fixed-owner',review_rev:rev||(last&&last.review_rev)||'0',
     operations:{last_seq:last?last.seq:'0',active:last&&!['succeeded','failed','cancelled'].includes(last.phase)?last.seq:null,history},note_bytes:65536,selection_limit:5000,preparing:false,autosave:false};}
 function snapshot(c,count=2,extra={}){return {kind:'drc_note',phase:'snapshot',name:'.synthetic.db.notes.fixed-owner.fe',context:clone(c),token:'d'.repeat(64),
     review_rev:'0',reviewer:'fixed-owner',expires_in_ms:'120000',selected_count:String(count),existing_count:'0',mixed:false,text:null,exists:false,legacy_unverified:false,import_report:clone(report),...extra};}
@@ -52,6 +52,17 @@ function harness(shared={model:catalog(),raw:null,writes:0,records:new Map()}){
 }
 const writes=h=>h.calls.filter(r=>r.method==='POST'&&r.path===API);
 async function test(){
+    const reader=harness();reader.shared.model.editable=false;reader.shared.raw='unrelated old recovery record';reader.init();
+    assert(!reader.el('notes-panel').hidden);assert(reader.el('notes-authoring').hidden);
+    assert.match(reader.el('notes-owner').textContent,/read only/);assert.equal(reader.displayStates.at(-1).blocked,'');
+    assert.equal(reader.panel.open(),false);assert.equal(reader.panel.transferReady(false),false);
+    assert.equal(reader.panel.transferReady(true),false);assert(reader.el('notes-autosave').disabled);
+    reader.el('notes-autosave').checked=true;reader.el('notes-autosave').onchange();
+    await reader.read();reader.text('must not save');await reader.prepare();await reader.approve();
+    await reader.el('notes-resolve').onclick();assert.equal(reader.calls.length,0,'read capability started editor IO');
+    reader.panel.stop(true);assert.equal(reader.shared.raw,'unrelated old recovery record');
+    const missing=catalog();delete missing.editable;assert.throws(()=>N.catalog(missing,P));
+    const bad=catalog();bad.editable='true';assert.throws(()=>N.catalog(bad,P));
     const imported=harness();imported.init();imported.c.ready=false;imported.panel.transferLock(true);
     assert.match(imported.displayStates.at(-1).blocked,/transfer.*no save is implied/);
     assert(imported.panel.transferReady(true),'whole import must not require selected errors');

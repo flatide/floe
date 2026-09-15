@@ -74,6 +74,8 @@ for (const file of ['drc-note-display.test.cjs', 'drc-note-display-panel.test.cj
     const run = spawnSync(process.execPath, [path.join(ui, file)], {stdio:'inherit',timeout:15000});
     assert.equal(run.status, 0, file + ': ' + run.error);
 }
+const readReviewer = spawnSync(process.execPath, [path.join(ui, 'drc-note-display-panel.test.cjs'), '--read-only'], {stdio:'inherit',timeout:15000});
+assert.equal(readReviewer.status, 0, 'read-only reviewer panel: ' + readReviewer.error);
 for (const file of ['protocol.js', 'gestures.js', 'query.js', 'inspect.js', 'measure.js', 'clip.js', 'snapshot.js', 'defaults.js', 'panel-state.js', 'rulers.js', 'drc-groups.js', 'drc-build.js', 'drc-notes.js', 'drc-waives.js', 'drc.js', 'app.js']) {
     acorn.parse(fs.readFileSync(path.join(ui, file), 'utf8'), options);
 }

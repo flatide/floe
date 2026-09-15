@@ -216,6 +216,17 @@ M4g-14는 **웹의 확정 시 자동 저장 opt-in**을 추가한다([M4 §64](W
 폐기하고, 이미 제출된 요청의 취소/receipt는 기존 의미를 유지한다. legacy 파일과
 note 파싱 경고는 별도 확인이며 import/기본값 게시 승인도 자동화하지 않는다.
 이 UI opt-in은 실사용자 인증/RBAC 또는 새로운 파일 쓰기 권한이 아니다.
+
+M4g-15a의 `--floe-reviewer TAG`는 **명시 ICE/인접 파일의 읽기 전용 선택**이다
+([M4 §65](WEBUI_M4.ko.md)). notes 카탈로그에 필수 `editable:bool`을 추가한다.
+`false`일 때 GET notes status와 POST notes/display만 열고, edit snapshot/prepare/
+submit/recovery와 전체 transfer/artifact API는 `review_disabled`로 거부한다. waive는
+등록 reader의 기존 read API에 반영하며 waive writer 자체는 만들지 않는다. 이
+모드의 reviewer는 initial reader에 고정하고 새 pack reader로 자동 승계하지 않는다.
+`--drc-reviewer`는 기존대로 editable=true이며, waive 추가 권한은 여전히 별도다.
+두 CLI 옵션을 동시에 써서 읽기 대상을 다른 쓰기 대상으로 해석하지 않는다.
+`drc_notes` capability는 조회 기능의 존재도 포함하므로 쓰기 허용은 notes의
+`editable`로 판단한다. 공유/게스트/RBAC 구현을 뜻하지 않는다.
 M4e-5a는 기존 주석 owner 등록에 `POST /api/v1/drc/review/notes/display`를 추가한다.
 최대512개의 check/local 배지와 focus 하나의 본문만 반환하고 편집/게시 token을 만들지
 않는다. context+notes review_rev에 고정한 admitted snapshot 하나를 재사용하며,

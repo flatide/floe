@@ -1,6 +1,6 @@
 //! Read-only saved-note projection. One cached admitted snapshot; no preview
 //! tokens, editor mutation, automatic publication or client-chosen paths.
-use super::http::{alive, current, fail, reader, refs, review, Cancel};
+use super::http::{alive, current, fail, read_review, reader, refs, Cancel};
 use super::*;
 use crate::transport::{self, Gate};
 use axum::{
@@ -62,7 +62,7 @@ pub(super) async fn read(
         Ok(o) => o,
         Err(e) => return transport::error(e),
     };
-    let service = match review(&g, store::Kind::Notes) {
+    let service = match read_review(&g, store::Kind::Notes) {
         Ok(s) => s,
         Err(e) => return fail(e),
     };

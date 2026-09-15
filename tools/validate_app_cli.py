@@ -70,7 +70,7 @@ def main(fixture):
             (("--thin-um", "0"), "not an equivalent frame control"),
             (("--lod", "off"), "not sent to Rust renderd"),
             (("--dump",), "GTK/XQuartz"),
-            (("--floe-reviewer", "tag"), "not write authority"),
+            (("--floe-reviewer", "tag"), "require --drc"),
         ]:
             assert text in run("view", source, *args, env=env, code=2).stderr
         run("view", env=env, code=2)
