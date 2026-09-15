@@ -45,7 +45,7 @@
         <h2>Source</h2>
         <label for="source" class="sr-only">Registered source</label>
         <select id="source"><option>Loading catalog…</option></select>
-        <div class="source-mode"><label for="mode">View mode</label><select id="mode"><option value="level">Level view</option><option value="chip">Chip view</option></select></div>
+        <div class="source-mode"><label for="mode">Open mode</label><select id="mode"><option value="level">Level view</option><option value="chip">Chip view</option><option value="layer">Source layers</option></select></div>
         <details id="level-options"><summary>Levels to load</summary><label class="check"><input id="levels-all" type="checkbox" checked> All levels</label><div id="level-list"></div><button id="level-more" hidden>More levels</button></details>
         <div class="button-row"><button id="open" class="primary">Open layout</button><button id="close" disabled>Close</button></div>
         <p id="source-note" class="note">Sources are registered by the local launcher.</p>
@@ -58,6 +58,7 @@
           <p class="note">Click to recenter · same zoom · 16px aligned. Structural boxes, not rendered geometry.</p>
         </details>
         <h2>Display</h2>
+        <div id="live-mode-row" hidden><div class="form-row"><label for="live-mode">Jobdeck mode</label><select id="live-mode" disabled title="Keep camera and visibility; reload mode defaults"><option value="level">Level view</option><option value="chip">Chip view</option><option value="layer">Source layers</option></select></div><p id="live-mode-note" class="note" role="status">Ctrl+, toggles level/chip · same camera and loaded levels. Mode defaults reload.</p></div>
         <div class="form-row"><label for="depth">Depth <span id="max-depth"></span></label><input id="depth" value="full" title="full or a nonnegative depth; canvas &lt; / &gt; steps, 9 9 selects full" class="short" disabled></div>
         <div class="form-row"><label for="detail">Detail</label><select id="detail" disabled><option value="low">Low · 5 px</option><option value="medium" selected>Medium · 3 px</option><option value="high">High · 1 px</option><option value="exact">Exact · no cut</option></select></div>
         <div class="form-row"><label for="thin">Thin shapes</label><select id="thin" disabled><option value="auto">Auto</option><option value="keep">Keep · mask</option><option value="cull">Cull · layout</option></select></div>

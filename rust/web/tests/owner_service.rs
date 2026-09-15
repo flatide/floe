@@ -74,7 +74,17 @@ impl Harness {
         builds: bool,
         defaults: bool,
     ) -> Self {
-        let resources = Resources::new(Limits::default()).unwrap();
+        Self::configured_limits(paths, indexer, drc, builds, defaults, Limits::default()).await
+    }
+    async fn configured_limits(
+        paths: &[PathBuf],
+        indexer: Indexer,
+        drc: Option<(&Path, Option<&Path>)>,
+        builds: bool,
+        defaults: bool,
+        limits: Limits,
+    ) -> Self {
+        let resources = Resources::new(limits).unwrap();
         let scope = AccessScope::new(&[paths[0].parent().unwrap().to_owned()]).unwrap();
         let sources = paths
             .iter()
@@ -368,6 +378,8 @@ fn open(seq: &str, id: &Value, mode: &str, levels: Value) -> Value {
     json!({"kind":"open","seq":seq,"source_id":id,"mode":mode,"levels":levels,"body":{"pixels":[257,191],"labels":false,"depth":"full","detail":"high","thin":"keep"}})
 }
 
+#[path = "support/deck_modes.rs"]
+mod deck_modes;
 #[path = "support/defaults.rs"]
 mod defaults;
 #[path = "support/drc_isolation.rs"]

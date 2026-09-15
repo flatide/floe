@@ -15,7 +15,8 @@ use crate::{
     Error, Result,
 };
 pub use controller::{
-    ControllerOptions, DisplayFrame, MarginStatus, Phase, Purpose, Snapshot, ViewController,
+    ControllerOptions, DisplayFrame, MarginStatus, Phase, PreparedReplacement, Purpose, Snapshot,
+    ViewController,
 };
 use floe_worker_client::{Layers, RenderRequest, Style};
 pub use floe_worker_client::{QueryKind, QueryOperation};

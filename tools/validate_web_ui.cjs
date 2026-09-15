@@ -12,6 +12,8 @@ acorn.parse(fs.readFileSync(path.join(ui,'session-exit.js'),'utf8'),options);
 const exit=spawnSync(process.execPath,[path.join(ui,'session-exit.test.cjs')],{stdio:'inherit',timeout:15000});
 assert.equal(exit.status,0,'session-exit.test.cjs: '+exit.error);
 const exitClient=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_EXIT:'1'}});
+const modeClient=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_MODE:'1'}});
+assert.equal(modeClient.status,0,'deck mode client: '+modeClient.error);
 assert.equal(exitClient.status,0,'session exit client: '+exitClient.error);
 const exitFailed=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_EXIT:'1',FLOE_TEST_EXIT_FAILURE:'1'}});
 assert.equal(exitFailed.status,0,'unconfirmed session exit client: '+exitFailed.error);

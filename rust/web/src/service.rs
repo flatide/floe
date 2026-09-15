@@ -117,6 +117,12 @@ impl IndexArgs {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OperationDto {
+    Mode {
+        seq: String,
+        view_id: String,
+        base_state_rev: String,
+        mode: String,
+    },
     Open {
         seq: String,
         source_id: String,
@@ -134,6 +140,11 @@ pub enum OperationDto {
     },
 }
 enum Command {
+    Mode {
+        view_id: String,
+        base_state_rev: u64,
+        mode: Mode,
+    },
     Open {
         source: Arc<RegisteredSource>,
         source_id: String,
@@ -302,24 +313,52 @@ impl Service {
         // Stable typed representation (field order independent), bounded by
         // the HTTP request limit and ledger cap. Never logged or sent back.
         let signature = format!("{request:?}");
-        let (seq, id) = match &request {
-            OperationDto::Open { seq, source_id, .. }
-            | OperationDto::Index { seq, source_id, .. } => (view::counter(seq)?, source_id),
+        let seq = match &request {
+            OperationDto::Open { seq, .. }
+            | OperationDto::Mode { seq, .. }
+            | OperationDto::Index { seq, .. } => view::counter(seq)?,
         };
-        let source = Arc::clone(
-            &self
-                .inner
+        // A completed mode change has retired its original view ID. Replays
+        // must be resolved before consulting that mutable current attachment.
+        {
+            let s = self.inner.state.lock().unwrap();
+            if s.closed {
+                return Err("closed");
+            }
+            if let Some(replay) = s.ledger.replay(seq, &signature)? {
+                return Ok(replay);
+            }
+        }
+        let source = |id: &str| {
+            self.inner
                 .sources
                 .iter()
-                .find(|s| s.id == *id)
-                .ok_or("source_unavailable")?
-                .source,
-        );
-        let source_id = id.clone();
+                .find(|s| s.id == id)
+                .map(|s| Arc::clone(&s.source))
+                .ok_or("source_unavailable")
+        };
         let (kind, command) = match request {
+            OperationDto::Mode {
+                view_id,
+                base_state_rev,
+                mode,
+                ..
+            } => (
+                "mode",
+                Command::Mode {
+                    view_id,
+                    base_state_rev: view::counter(&base_state_rev)?,
+                    mode: Mode::parse(&mode).map_err(|_| "invalid_request")?,
+                },
+            ),
             OperationDto::Open {
-                mode, levels, body, ..
+                source_id,
+                mode,
+                levels,
+                body,
+                ..
             } => {
+                let source = source(&source_id)?;
                 let mode = Mode::parse(&mode).map_err(|_| "invalid_request")?;
                 let levels = levels.core().map_err(|_| "invalid_request")?;
                 source
@@ -341,8 +380,12 @@ impl Service {
                 )
             }
             OperationDto::Index {
-                levels, options, ..
+                source_id,
+                levels,
+                options,
+                ..
             } => {
+                let source = source(&source_id)?;
                 let levels = levels.core().map_err(|_| "invalid_request")?;
                 source
                     .validate_levels(levels.as_ref())
@@ -440,6 +483,7 @@ fn run(inner: Arc<Inner>) {
         };
         let seq = work.seq;
         let kind = match &work.command {
+            Command::Mode { .. } => "mode",
             Command::Open { .. } => "open",
             Command::Index { .. } => "index",
         };
@@ -466,6 +510,110 @@ fn execute(inner: &Inner, work: Work) -> Result<Value> {
     let Work { seq, command, stop } = work;
     floe_app_core::check_cancelled(&stop)?;
     match command {
+        Command::Mode {
+            view_id,
+            base_state_rev,
+            mode,
+        } => {
+            let previous = inner
+                .state
+                .lock()
+                .unwrap()
+                .view
+                .as_ref()
+                .filter(|v| v.id == view_id)
+                .cloned()
+                .ok_or_else(|| Error::new(ErrorKind::Busy, "view changed"))?;
+            let snapshot = previous.controller.snapshot();
+            if !matches!(
+                snapshot.phase,
+                floe_app_core::view::Phase::Idle | floe_app_core::view::Phase::Rendering
+            ) {
+                return Err(Error::new(
+                    ErrorKind::Busy,
+                    "view is not ready for a mode change",
+                ));
+            }
+            if snapshot.state_rev != base_state_rev {
+                return Err(Error::new(ErrorKind::Busy, "view revision changed"));
+            }
+            if !previous.controller.model.deck {
+                return Err(Error::new(
+                    ErrorKind::Unsupported,
+                    "mode changes require a jobdeck",
+                ));
+            }
+            let mode_name = match mode {
+                Mode::Level => "level",
+                Mode::Chip => "chip",
+                Mode::Layer => "layer",
+            };
+            if previous.mode == mode_name {
+                return Ok(
+                    json!({"seq":seq.to_string(),"kind":"mode","phase":"succeeded","view_id":view_id,"unchanged":true}),
+                );
+            }
+            inner.state.lock().unwrap().ledger.update(
+                seq,
+                json!({"seq":seq.to_string(),"kind":"mode","phase":"preparing"}),
+                false,
+            );
+            let source = &inner
+                .sources
+                .iter()
+                .find(|s| s.id == previous.source_id)
+                .ok_or_else(|| Error::new(ErrorKind::Busy, "source registration changed"))?
+                .source;
+            source.validate(&stop)?;
+            let current = previous.controller.pin_dataset()?;
+            let floe_app_core::dataset::Dataset::Deck(deck) = &current.dataset else {
+                unreachable!("deck model")
+            };
+            let data = ManagedDataset::open(
+                &inner.resources,
+                source.path(),
+                deck.metadata.jobdeck.levels.clone(),
+                mode,
+                &stop,
+            )?;
+            let prepared = previous.mode_memory.prepare(
+                &current,
+                &previous.controller.model,
+                &snapshot.state,
+                &data,
+            )?;
+            let rows = LayerCatalog::dataset(&data.dataset, &prepared.model);
+            let mut replacement = previous
+                .controller
+                .prepare_replacement(data, prepared.state)?;
+            // Entropy, metadata and dormant thread creation all precede the
+            // cutover. Failures/cancellation here leave the original alive.
+            let mut view = Attachment::with_rows(replacement.controller(), &source.title, rows)
+                .map_err(|_| Error::new(ErrorKind::Io, "entropy unavailable"))?;
+            view.source_id = previous.source_id.clone();
+            view.levels = previous.levels.clone();
+            view.mode = mode_name;
+            view.mode_memory = prepared.memory;
+            let view = Arc::new(view);
+            let mut s = inner.state.lock().unwrap();
+            if s.closed || stop.load(Ordering::Relaxed) != 0 {
+                return Err(Error::new(
+                    ErrorKind::Cancelled,
+                    "mode change cancelled before cutover",
+                ));
+            }
+            if !s.view.as_ref().is_some_and(|v| Arc::ptr_eq(v, &previous)) {
+                return Err(Error::new(ErrorKind::Busy, "view changed before cutover"));
+            }
+            replacement.commit(base_state_rev)?;
+            let id = view.id.clone();
+            s.view = Some(view);
+            // Cutover is committed. A later operation cancel cannot undo it;
+            // session stop still closes the newly installed controller.
+            Ok(
+                json!({"seq":seq.to_string(),"kind":"mode","phase":"succeeded","view_id":id,"unchanged":false}),
+            )
+        }
         Command::Open {
             source,
             source_id,

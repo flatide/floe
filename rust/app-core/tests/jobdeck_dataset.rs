@@ -259,7 +259,13 @@ fn deck_mode_preparation_matches_gtk_and_native_frames() {
     .unwrap();
     assert_eq!(cases.len(), 2);
     let flag = Arc::new(AtomicUsize::new(0));
-    let resources = Resources::new(Limits::default()).unwrap();
+    let resources = Resources::new(Limits {
+        cpu_slots: 4,
+        foreground_reserve: 0,
+        workers: 1,
+        decoded_mb: 1024,
+    })
+    .unwrap();
     let mut count = 0;
     for case in &cases {
         let open = |mode, levels| {
@@ -287,6 +293,25 @@ fn deck_mode_preparation_matches_gtk_and_native_frames() {
         state.frames = true;
         state.font_px = 20;
         state.mono = true;
+        let mut initial_shot = state.clone();
+        initial_shot.detail = Detail::Exact;
+        initial_shot.depth = None;
+        initial_shot.frames = false;
+        initial_shot.mono = false;
+        initial_shot.styles = Arc::new(current.dataset.styles(true).unwrap());
+        let mut options = RenderOptions::local().unwrap();
+        options.decode_jobs = 2;
+        options.raster_jobs = 2;
+        options.raw = false;
+        let mut controller = Arc::new(
+            ViewController::start(&resources, Arc::clone(&current), options, initial_shot).unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while controller.latest().is_none() {
+            assert_ne!(controller.snapshot().phase, Phase::Failed);
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(2));
+        }
         for step in steps {
             let before: Vec<(u32, u32)> = serde_json::from_value(step["before"].clone()).unwrap();
             let layers = if before.is_empty() {
@@ -379,17 +404,17 @@ fn deck_mode_preparation_matches_gtk_and_native_frames() {
             shot.frames = false;
             shot.mono = false;
             shot.styles = Arc::new(target.dataset.styles(true).unwrap());
-            let mut options = RenderOptions::local().unwrap();
-            options.decode_jobs = 2;
-            options.raster_jobs = 2;
-            options.raw = false;
-            let mut controller =
-                ViewController::start(&resources, Arc::clone(&target), options, shot).unwrap();
+            let mut replacement = controller
+                .prepare_replacement(Arc::clone(&target), shot)
+                .unwrap();
+            let next_controller = replacement.controller();
+            assert_eq!(resources.usage(), usage);
+            replacement.commit(controller.snapshot().state_rev).unwrap();
             let deadline = Instant::now() + Duration::from_secs(10);
             let frame = loop {
-                let snapshot = controller.snapshot();
+                let snapshot = next_controller.snapshot();
                 assert_ne!(snapshot.phase, Phase::Failed, "{:?}", snapshot.failure);
-                if let Some(frame) = controller.latest().filter(|f| f.frame.final_frame) {
+                if let Some(frame) = next_controller.latest().filter(|f| f.frame.final_frame) {
                     break frame;
                 }
                 assert!(Instant::now() < deadline, "deck mode frame deadline");
@@ -401,7 +426,12 @@ fn deck_mode_preparation_matches_gtk_and_native_frames() {
                 "mode PNG {}",
                 step["mode"]
             );
-            controller.close().unwrap();
+            assert!(controller.is_finished(), "native workers overlapped");
+            assert_ne!(
+                controller.snapshot().worker_epoch,
+                next_controller.snapshot().worker_epoch
+            );
+            controller = next_controller;
             assert_eq!(resources.usage(), usage);
             memory = next.memory;
             model = next.model;
@@ -409,6 +439,13 @@ fn deck_mode_preparation_matches_gtk_and_native_frames() {
             current = target;
             count += 1;
         }
+        controller.request_close();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !controller.is_finished() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(resources.usage(), floe_app_core::managed::Usage::default());
         let other = if case["levels"].is_null() {
             Some([2, 3].into_iter().collect())
         } else {
@@ -438,4 +475,5 @@ fn deck_mode_preparation_matches_gtk_and_native_frames() {
     }
     assert_eq!(count, 24);
     println!("RUST DECK MODE PREPARATION: ALL OK (24 GTK transitions + native PNGs)");
+    println!("RUST DECK MODE HANDOFF: ALL OK (24 native transitions, one worker reservation)");
 }

@@ -3565,3 +3565,91 @@ scoped rustfmt와 app-core clippy `--no-deps --all-targets -D warnings`도 통�
 `floe-deck-mode-msrv.log`, `floe-deck-mode-clippy-final.log`다. 기존 dependency/GTK/Pillow
 경고는 별도다. 실제 브라우저의 모드 전환·현장 Firefox/ETX와 실칩 jobdeck 수용을 완료한
 단계는 아니며, main의 기존 수정과 feature/jobdeck 작업 트리는 보존했다.
+
+## 45. M4g-5b — 열린 잡덱 모드 전환과 단일 예약 worker 교체
+
+§44의 상태 준비를 owner service와 웹 UI에 연결했다. 열린 잡덱에서 Display의
+**Jobdeck mode**로 level/chip/source-layer를 선택하며, canvas의 Ctrl+,는
+level→chip, chip/source-layer→level로 전환한다. Source의 Open mode는 다음 open용
+설정으로 분리한다. 현재 덱의 source와 로드한 level 집합은 바뀌지 않는다.
+새 렌더링 알고리즘·인덱스 포맷·자동 재색인은 없고 native 호환0.12.87을 유지한다.
+
+### 상태와 작업 계약
+
+- 기존 `POST /api/v1/operations`에 `kind:mode`를 추가했다. 입력은 seq, 현재 view_id,
+  base_state_rev와 mode뿐이다. 임의 source/path/levels/body는 거부한다. 등록 source의
+  재검증 후 같은 선택 집합의 새 모드 dataset/model을 준비한다.
+- viewport의 DBU bbox/pixel dimensions, depth/detail/thin/frames/labels/font/mono는
+  유지한다. level/chip은 exact leaf 가시성을 공유하므로 level 부모가 켜져 있어도 숨긴
+  칩을 다시 켜지 않는다. source-layer 가시성은 독립적으로 기억한다.
+  모드별 기본 색/채움/폭을 다시 읽고 이전 isolate restore handle은 제거한다.
+- 원래 attachment에서 읽은 revision과 현재 attachment를 commit 직전에 다시 검사한다.
+  다른 WS가 준비 중 뷰를 편집했다면 stale로 실패하고 그 최신 원래 뷰를 보존한다.
+  동일 모드 요청은 worker/epoch/state_rev를 바꾸지 않는 no-op이다.
+- 같은 seq/body 재전송은 원래 receipt만 반환한다. 전환으로 원래 view_id가 폐기된
+  뒤에도 replay를 먼저 처리한다. 같은 seq의 다른 body는 충돌이다.
+  새 view_id/worker epoch로 이전 frame·query·layer/settings/prepared scope가 섞이지
+  않으며, 이전 WS는 종료되고 새 연결이 새 snapshot을 읽는다.
+
+### 자원·취소·실패 경계
+
+`PreparedReplacement`는 기존 CPU/decoded/worker **동일 예약**을 공유한다. 준비 중
+추가 control thread는 대기만 하며 두 번째 native engine을 열지 않는다. 초기 state
+검증·새 attachment entropy·행 metadata 등 실패 가능한 준비를 cutover 전에 끝낸다.
+취소 또는 stale CAS는 대기 thread를 종료하고 원래 worker를 계속 사용한다.
+
+commit은 기존 controller의 CAS 락 아래 stop/query 무효화와 활성화 gate를 연결한다.
+새 controller는 기존 worker의 close/drop/reap와 control thread 종료를 확인한 뒤에만
+native engine을 연다. 이 대기는 commit 후 새 뷰가 취소돼도 생략하지 않는다.
+Opening/Cancelling controller에는 재교체를 허용하지 않아 종료 확인을 건너뛰는
+연쇄 교체를 막는다. controller handle은 예약을 weak로만 참조하므로 닫힌 handle이나
+옛 WS가 남아 있어도 native 종료 후 quota를 계속 붙잡지 않는다.
+
+`succeeded`는 attachment cutover 완료이지 첫 렌더 완료가 아니다. cutover 후 native
+open/render 실패는 새 view의 failed 상태로 표시하며 이전 worker 자동 복구를 약속하지
+않는다. cutover 이후 작업 cancel은 이미 완료한 전환을 되돌리지 않는다. End session은
+새 controller를 닫으며 기존 worker까지 reap한 후 예약을 해제한다.
+
+### 브라우저
+
+모드 변경은 연결된 ready view에서만 가능하며 pending WS 입력/gesture/owner 작업 중에는
+새 전환을 막는다. 변경 중 일반 뷰 입력도 제출하지 않는다. 새 snapshot에서 카메라와
+level 선택기를 복원하고 이전 프레임/레이어 목록/스타일 편집 선택을 정리한다.
+POST 응답 유실, 작업 조회 실패 또는 terminal 이후 view 조회 실패는 **읽기만 재조회**한다.
+새 seq로 mutation을 자동 재전송하지 않는다. source 선택 메뉴가 다른 항목을 가리켜도
+live mode 명령은 현재 view_id/revision만 보낸다. Ctrl+,는 canvas에만 적용하고
+repeat/Shift/Alt/Meta/IME 입력은 받지 않는다.
+
+### 검증과 남은 범위
+
+- controller 집중 테스트4개: 준비/drop/stale·중복 준비, 종료 지연 시 비중첩,
+  commit 직후 취소, 새 open 실패를 강제한다. workers1/CPU2/decoded1 제한에서
+  추가 quota 없이 동작하고 종료 후 usage0을 확인한다.
+- §44의 GTK 24전환 PNG 오라클을 실제 연속 controller 교체로 확장했다. workers1에서
+  매번 이전 controller 종료·새 epoch·동일 quota와 GTK PNG 바이트를 함께 확인한다.
+- owner HTTP native 테스트는 선택[1,2]/chip 한 개 숨김→level→layer→chip→layer→level
+  5회 교체, raw의 독립 전체 숨김, 카메라/제어 보존, no-op/stale/replay/conflict,
+  old layer URI 거부와 old WS 종료, 새 epoch PNG, logout/quota0을 확인한다.
+  private 합성 source 두 개의 캐시 digest도 전후 동일하다.
+- JS 게이트는 dropdown/Ctrl+,·다른 source picker·중복/대기 입력 차단·응답 유실·
+  작업/view 조회 실패 후 read-only 복구·stale 전환을 전체 UI 드라이버에서 필수 실행한다.
+
+CLI startup/single-instance 전체 이관·실칩 전환 지연/메모리·현장 Firefox/ETX 수용은
+이 단계의 완료 조건에 포함하지 않는다. GTK 기본 launcher는 변경하지 않는다.
+
+로컬 Chrome에서는 전용 합성 덱의 선택[1,2], 중심(103,117)/폭311µm에서 B 칩 하나만
+숨기고 chip→level→chip→layer→chip→layer→chip으로 왕복했다. Ctrl+,와 선택기를 모두
+사용했고 chip 숨김·raw 전체 숨김의 독립 복원, 카메라 유지, 정상 geometry 표시를
+확인했다. 모드 선택기와 레이어 목록 screenshot도 확인했다. End session 후 Session ended와
+서버 exit0을 확인하고 전용 탭을 닫았다. 기본값 게시·업로드·다운로드는 실행하지 않았다.
+
+전체 `sh tools/validate_rust.sh`는 exit0, `RUST VALIDATION: ALL OK`다. core223·web60,
+owner HTTP native11(새 모드5회 포함), GTK/native 모드24회, jobdeck80·renderer46,
+KLayout13 PX+2 phase-exact+14 style(jobs1/8)을 포함한다. Rust1.89에서도 core223·web60과
+owner11·GTK/native24회가 통과했다. scoped rustfmt 및 app-core/web/app all-target
+clippy `--no-deps -D warnings`도 통과했다. 마지막 안내 문구 정리 뒤 release bundle을
+다시 빌드하고 전체 UI/launcher CLI smoke를 재실행했다. 기존 dependency·GTK/Pillow
+경고는 별도이며 main의 기존 수정과 feature/jobdeck worktree는 보존했다.
+로그는 `/private/tmp/floe-live-mode-battery.log`, `floe-live-mode-msrv.log`,
+`floe-live-mode-msrv-owner.log`, `floe-live-mode-msrv-deck.log`,
+`floe-live-mode-clippy.log`, `floe-live-mode-final-ui.log`, `floe-live-mode-final-cli.log`다.

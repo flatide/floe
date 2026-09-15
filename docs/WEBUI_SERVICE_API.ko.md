@@ -17,6 +17,15 @@ M4g-3은 live `view.set` body에 `depth_step:-1|1`을 추가한다. 절대 `dept
 동시 지정은 거부하고, controller가 CAS 락 안의 현재 depth와 native max_depth로
 해석한다. 초기 open body에서는 상대 depth를 거부한다. DRC 단축키는 기존 유계
 순회/owner editor API만 사용하며 새 게시 endpoint나 autosave를 추가하지 않는다.
+M4g-5b는 기존 owner `POST /api/v1/operations`에
+`{kind:"mode",seq,view_id,base_state_rev,mode:"level"|"chip"|"layer"}`를 추가한다.
+seq/revision은 정규 십진 문자열이고 source/levels/path/body 필드는 받지 않는다.
+전역 `jobdeck_modes`와 snapshot `capabilities.mode`를 함께 확인한다. 현재 덱의
+선택 레벨·카메라를 보존하고 새 모드 기본 스타일을 읽어 순차 worker 교체를 CAS로
+commit한다. 성공 receipt는 새 view_id와 unchanged:false(동일 모드는 true)를 반환한다.
+이는 첫 프레임 완료가 아닌 attachment 교체 완료이며 이후 worker 실패는 view에 표시된다.
+기존 작업 조회/cancel/replay 계약을 사용한다. old view_id의 원래 seq 재전송도 원래
+receipt만 반환하며 다시 전환하지 않는다. 파일 게시/재색인 권한은 아니다([M4 §45](WEBUI_M4.ko.md)).
 M2a의 현재 DRC 등록/읽기 URI·페이지·취소·focus/in_view·패널 상태·필터·순회·마커·
 CD·선택 집합·SVRF metadata/비교·타입 패널·격리/원자적 focus·ASCII API 계약은 [M2 기록](WEBUI_M2.ko.md) §2~21이
 기준이다. geometry reader는 read-only이며, 명시 opt-in한 owner의 주석 저장 endpoint는

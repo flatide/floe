@@ -12,7 +12,7 @@ use crate::{
 use floe_worker_client::{Event, Frame, QueryKind, QueryReply, QueryRequest, RenderRequest, Style};
 use std::{
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex, Weak,
     },
     thread::{self, JoinHandle},
@@ -103,6 +103,7 @@ pub struct Snapshot {
     pub failure: Option<(ErrorKind, String)>,
 }
 struct Shared {
+    replacement_pending: bool,
     snapshot: Snapshot,
     latest: Option<Arc<DisplayFrame>>,
     margin: Option<Arc<DisplayFrame>>,
@@ -189,6 +190,56 @@ pub struct ViewController {
     shared: Arc<Mutex<Shared>>,
     stop: Arc<AtomicUsize>,
     thread: Option<JoinHandle<()>>,
+    resources: Weak<Resources>,
+    reservation: Weak<Permit>,
+    native_options: Option<RenderOptions>,
+    configuration: ControllerOptions,
+}
+
+/// A dormant replacement owns the SAME reservation, not a second worker slot.
+/// Prepare can fail without stopping the original. Commit is the cutover: the
+/// new engine waits for the original's complete close/drop/reap before opening.
+pub struct PreparedReplacement {
+    previous: Arc<ViewController>,
+    next: Arc<ViewController>,
+    ready: Arc<AtomicBool>,
+    committed: bool,
+}
+impl PreparedReplacement {
+    /// For preparing attachment metadata before cutover; do not publish this
+    /// handle until commit succeeds. It cannot render before then.
+    pub fn controller(&self) -> Arc<ViewController> {
+        Arc::clone(&self.next)
+    }
+    pub fn commit(&mut self, base_state_rev: u64) -> Result<()> {
+        let mut s = self.previous.shared.lock().unwrap();
+        if self.committed
+            || !replacement_ready(&s, &self.previous.stop)
+            || s.snapshot.state_rev != base_state_rev
+            || self.next.stop.load(Ordering::Relaxed) != 0
+        {
+            return Err(Error::new(
+                ErrorKind::Busy,
+                "replacement view is stale or closed",
+            ));
+        }
+        self.previous.stop.store(1, Ordering::Relaxed);
+        s.queries.invalidate();
+        self.committed = true;
+        self.ready.store(true, Ordering::Release);
+        Ok(())
+    }
+}
+impl Drop for PreparedReplacement {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.next.request_close();
+            self.previous.shared.lock().unwrap().replacement_pending = false;
+        }
+    }
+}
+fn replacement_ready(s: &Shared, stop: &AtomicUsize) -> bool {
+    stop.load(Ordering::Relaxed) == 0 && matches!(s.snapshot.phase, Phase::Idle | Phase::Rendering)
 }
 trait Engine: Send {
     fn submit(&mut self, request: RenderRequest) -> Result<u64>;
@@ -262,6 +313,7 @@ impl ViewController {
         initial: ViewState,
         configuration: ControllerOptions,
     ) -> Result<Self> {
+        let native_options = options.clone();
         let model = Model::new(&dataset)?;
         let permit = resources.render(&options)?;
         let weak = Arc::downgrade(&dataset);
@@ -278,7 +330,101 @@ impl ViewController {
             },
         )?;
         controller.dataset = weak;
+        controller.native_options = Some(native_options);
         Ok(controller)
+    }
+    pub fn prepare_replacement(
+        self: &Arc<Self>,
+        dataset: Arc<ManagedDataset>,
+        initial: ViewState,
+    ) -> Result<PreparedReplacement> {
+        let options = self.native_options.clone().ok_or_else(|| {
+            Error::new(
+                ErrorKind::Unsupported,
+                "replacement needs a native controller",
+            )
+        })?;
+        let native_options = options.clone();
+        let model = Model::new(&dataset)?;
+        let weak = Arc::downgrade(&dataset);
+        let mut prepared = self.prepare_engine(model, initial, move |stop| {
+            let engine = RenderSession::open(&dataset.dataset, options, false, stop)?;
+            Ok((Box::new(engine) as Box<dyn Engine>, Some(dataset)))
+        })?;
+        let next = Arc::get_mut(&mut prepared.next).expect("unexposed replacement");
+        next.dataset = weak;
+        next.native_options = Some(native_options);
+        Ok(prepared)
+    }
+    fn prepare_engine(
+        self: &Arc<Self>,
+        model: Arc<Model>,
+        initial: ViewState,
+        open: impl FnOnce(Arc<AtomicUsize>) -> Result<(Box<dyn Engine>, Option<Arc<ManagedDataset>>)>
+            + Send
+            + 'static,
+    ) -> Result<PreparedReplacement> {
+        initial.validate(&model)?;
+        let resources = self
+            .resources
+            .upgrade()
+            .ok_or_else(|| Error::new(ErrorKind::Busy, "resources closed"))?;
+        let permit = self
+            .reservation
+            .upgrade()
+            .ok_or_else(|| Error::new(ErrorKind::Busy, "worker closed"))?;
+        {
+            let mut s = self.shared.lock().unwrap();
+            if s.replacement_pending || !replacement_ready(&s, &self.stop) {
+                return Err(Error::new(
+                    ErrorKind::Busy,
+                    "view is not ready for replacement",
+                ));
+            }
+            s.replacement_pending = true;
+        }
+        let ready = Arc::new(AtomicBool::new(false));
+        let (gate, previous) = (Arc::clone(&ready), Arc::clone(self));
+        let next = Self::spawn_reserved(
+            &resources,
+            model,
+            initial,
+            permit,
+            self.configuration,
+            move |stop| {
+                while !gate.load(Ordering::Acquire) {
+                    if stop.load(Ordering::Relaxed) != 0 {
+                        // Serialize an unactivated abort with commit's final
+                        // stop check: never miss a concurrent cutover and exit
+                        // before the predecessor has been reaped.
+                        let _state = previous.shared.lock().unwrap();
+                        if !gate.load(Ordering::Acquire) {
+                            crate::check_cancelled(&stop)?;
+                        }
+                    }
+                    thread::sleep(Duration::from_millis(2));
+                }
+                // Even cancellation must not make this controller "finished"
+                // while its predecessor still owns a live native worker.
+                while !previous.is_finished() {
+                    thread::sleep(Duration::from_millis(2));
+                }
+                crate::check_cancelled(&stop)?;
+                open(stop)
+            },
+        );
+        match next {
+            Ok(next) => Ok(PreparedReplacement {
+                previous: Arc::clone(self),
+                next: Arc::new(next),
+                ready,
+                committed: false,
+            }),
+            Err(e) => {
+                self.shared.lock().unwrap().replacement_pending = false;
+                Err(e)
+            }
+        }
     }
     fn spawn(
         resources: &Arc<Resources>,
@@ -290,10 +436,32 @@ impl ViewController {
             + Send
             + 'static,
     ) -> Result<Self> {
+        Self::spawn_reserved(
+            resources,
+            model,
+            initial,
+            Arc::new(permit),
+            configuration,
+            open,
+        )
+    }
+    fn spawn_reserved(
+        resources: &Arc<Resources>,
+        model: Arc<Model>,
+        initial: ViewState,
+        permit: Arc<Permit>,
+        configuration: ControllerOptions,
+        open: impl FnOnce(Arc<AtomicUsize>) -> Result<(Box<dyn Engine>, Option<Arc<ManagedDataset>>)>
+            + Send
+            + 'static,
+    ) -> Result<Self> {
         initial.validate(&model)?;
+        let reservation = Arc::downgrade(&permit);
+        let resource_ref = Arc::downgrade(resources);
         let epoch = resources.next_id()?;
         let stop = Arc::new(AtomicUsize::new(0));
         let shared = Arc::new(Mutex::new(Shared {
+            replacement_pending: false,
             snapshot: Snapshot {
                 state: initial,
                 state_rev: 1,
@@ -361,10 +529,21 @@ impl ViewController {
             shared,
             stop,
             thread: Some(thread),
+            resources: resource_ref,
+            reservation,
+            native_options: None,
+            configuration,
         })
     }
     pub fn snapshot(&self) -> Snapshot {
         self.shared.lock().unwrap().snapshot()
+    }
+    /// Pin the immutable cache lease for owner-side preparation. Browser
+    /// authorization and view/revision validation remain the owner's job.
+    pub fn pin_dataset(&self) -> Result<Arc<ManagedDataset>> {
+        self.dataset
+            .upgrade()
+            .ok_or_else(|| Error::new(ErrorKind::Busy, "view dataset closed"))
     }
     pub fn latest(&self) -> Option<Arc<DisplayFrame>> {
         self.shared.lock().unwrap().latest.clone()

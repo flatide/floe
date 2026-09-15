@@ -283,6 +283,9 @@ q 종료 확인은 M4g-4에서 복원했다([M4 §43](WEBUI_M4.ko.md)). Ctrl+, �
 전환 및 CLI startup/single-instance는 남는다.
 M4g-5a는 UI-03 잡덱 모드 전환의 Rust 상태 준비만 추가한다([M4 §44](WEBUI_M4.ko.md)).
 GTK 가시성/PNG 24경로를 비교하지만 worker 교체·모드 API·Ctrl+, 연결 완료는 아니다.
+M4g-5b에서 UI-03의 열린 잡덱 모드 선택과 canvas Ctrl+,를 연결했다([M4 §45](WEBUI_M4.ko.md)).
+level/chip 공통 가시성과 source-layer 독립 가시성을 유지하며 선택 레벨을 확장하지 않는다.
+CLI startup/single-instance 전체 이관과 현장 Firefox/ETX 수용은 계속 열린 항목이다.
 
 UI-03의 layerprops 공통 codec·초기 가시성은 M4d-2에서 연결했다([M4 §16](WEBUI_M4.ko.md)).
 색/fill뿐 아니라 file/stem default의 visibility를 첫 frame 전에 적용하고, 명시된

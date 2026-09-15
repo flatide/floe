@@ -1,6 +1,6 @@
 # floe2 웹 셸 / 서버-클라이언트 계획 (정본)
 
-작성 2026-08-29, 갱신 2026-09-15(M4g-5a 잡덱 모드 상태 이관).
+작성 2026-08-29, 갱신 2026-09-15(M4g-5b 열린 잡덱 모드 전환).
 관련 정본: `FLOE2_OPTIMIZATION.ko.md`(F2R-10/11),
 `RUST_RENDERER_PLAN.ko.md`, `SPEC-VIEWER.ko.md`, `rust/BUILD.md`.
 
@@ -83,7 +83,9 @@ M4g-3에서 `<`/`>` depth 상대 이동과 GTK의 DRC `,`/`.` 순회·`n` 주석
 M4g-4에서 q/End session에 취소 기본값의 종료 확인을 연결했다. 서버 종료 요청의
 실패는 성공으로 표시하지 않고 승인 복구 기록을 남긴다([M4 §43](WEBUI_M4.ko.md)).
 M4g-5a에서 잡덱 모드 전환의 카메라·가시성 이관을 Rust 코어에 준비했다. 실제 GTK
-전환과 native PNG를 비교하며, worker 교체·API·Ctrl+, UI 연결은 다음 단계다([M4 §44](WEBUI_M4.ko.md)).
+전환과 native PNG를 비교했다([M4 §44](WEBUI_M4.ko.md)). M4g-5b에서 같은 자원 예약의
+순차 worker 교체·revision CAS·owner API와 모드 선택기/Ctrl+,를 연결했다.
+선택 레벨과 카메라는 유지하고 모드별 기본 스타일은 다시 읽는다([M4 §45](WEBUI_M4.ko.md)).
 나머지 내보내기와 브라우저 다운로드/현장 수용은 남아 있다([M4 기록](WEBUI_M4.ko.md)).
 전체 조작 parity와 M0/Firefox/ETX 현장 검증은 아직 완료되지 않았다.
 상세 범위는 [M1b 기록](WEBUI_M1B.ko.md)과 [M2 기록](WEBUI_M2.ko.md). 여기의 M0~M5는 **웹 전환 단계**이며
@@ -629,3 +631,7 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
 - **M4g-5a**: 같은 덱/선택 레벨 안에서 level/chip 공통 가시성과 raw-layer 독립
   가시성, 카메라·뷰 제어 유지, 모드별 기본 스타일 복원을 Rust로 이관했다.
   준비 함수만 추가했으며 자원 상한 안의 worker 교체·CAS 게시·UI는 아직 없다([M4 §44](WEBUI_M4.ko.md)).
+- **M4g-5b**: 열린 잡덱의 level/chip/source-layer 모드를 owner 작업으로 전환한다.
+  기존 worker 종료/reap 후 같은 예약으로 새 worker를 시작하며, 준비 실패·취소·stale
+  revision은 이전 view를 보존한다. source/선택 레벨은 현재 view에서만 얻는다.
+  Ctrl+,와 live 선택기를 제공하며 실칩 성능·현장 Firefox 수용은 별도다([M4 §45](WEBUI_M4.ko.md)).

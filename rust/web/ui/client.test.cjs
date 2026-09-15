@@ -12,6 +12,8 @@ const defaultsEnabled=process.env.FLOE_TEST_DEFAULTS==='1';let defaultOp=null;
 const minimapEnabled=process.env.FLOE_TEST_MINIMAP==='1';
 const exitEnabled=process.env.FLOE_TEST_EXIT==='1';
 const exitFailure=process.env.FLOE_TEST_EXIT_FAILURE==='1';
+const modeEnabled=process.env.FLOE_TEST_MODE==='1';
+let modeOperation=null,serverMode='chip',modeReadFailure=false,modeViewReadFailure=false,modeLosePost=false,modeNumber=0;
 let textSelection=null;
 let clipController,clipOp=null,clipFile=null;
 function clipState(){return {available:true,kind:'exact_clip',jobs_default:4,jobs_min:1,jobs_max:16,
@@ -53,13 +55,14 @@ for (const id of [...fs.readFileSync(__dirname+'/index.html','utf8').matchAll(/\
 }
 nodes.get('levels-all').checked=true;
 const node = id=>nodes.get(id);
-const bundle='d'.repeat(40), viewId='a'.repeat(64), epoch='b'.repeat(64);
+const bundle='d'.repeat(40), epoch='b'.repeat(64);let viewId='a'.repeat(64);
 const snapshot={type:'snapshot',view_id:viewId,connection_epoch:epoch,dataset_revision:'1',state_rev:'1',
     render_rev:'1',render_key:'1',worker_epoch:'2',bbox_dbu:['-10.9375','0','89.0625','80'],
     dbu_um:'1',pixels:[100,80],depth:'full',max_depth:'2',detail:'high',thin:'auto',effective_thin:'cull',
     layers:{mode:'all'},layers_isolated:false,frames:false,labels:false,font_px:14,mono:false,status:'idle',source_stale:false,
     deck_skipped:'0',failure:null,submitted:'1',consumed:'1',discarded:'0',capabilities:{labels:true,clip:true}};
 if(minimapEnabled){snapshot.minimap={size:180,base:'full',die:[0,0,180,180],marks:[[10,10,5,5,4]]};}
+if(modeEnabled){snapshot.capabilities={labels:false,clip:false,mode:true};snapshot.effective_thin='keep';}
 let open=false, lastSeq='0';
 const layerRow={pair:[7,0],name:'MASK',aliases:[],parent:null,head:false,visible:true,color:'#ffffff',fill:{kind:'solid'},width:1};
 const document={hidden:false,activeElement:null,title:'',body:new Element('','body'),
@@ -79,7 +82,7 @@ class XHR {
         if(raw){value={kind:'drc_review_transfer',phase:'queued',seq:this.headers['X-Floe-Transfer-Seq']};status=202;}
         else if (this.path==='/api/v1/session/exchange') {value={csrf:'c'.repeat(64),session_id:'c'.repeat(64),bundle,protocol:1};}
         else if (this.path==='/api/v1/session'&&this.method==='DELETE') {value=exitFailure?{error:'unavailable'}:null;status=exitFailure?503:204;}
-        else if(this.path==='/api/v1/capabilities') {value={protocol:1,bundle,exports:clipEnabled,snapshot_png:snapshotEnabled,layer_settings:settingsEnabled,design_defaults:defaultsEnabled};}
+        else if(this.path==='/api/v1/capabilities') {value={protocol:1,bundle,exports:clipEnabled,snapshot_png:snapshotEnabled,layer_settings:settingsEnabled,design_defaults:defaultsEnabled,jobdeck_modes:modeEnabled};}
         else if(this.path==='/api/v1/defaults/prepare') {value={token:'d'.repeat(64),view_id:body.view_id,state_rev:body.state_rev,name:'synthetic.oas.layerprops',title:'synthetic',mode:'level',levels:null,rows:1,bytes:'24',replaces_existing:false,expires_in_ms:'30000',scope:'shared_design_default',affects:'future_opens'};}
         else if(this.path==='/api/v1/defaults/revoke') {value=null;status=204;}
         else if(this.path==='/api/v1/defaults') {
@@ -95,14 +98,22 @@ class XHR {
         else if(this.method==='DELETE'&&this.path==='/api/v1/artifacts/1'){clipFile=null;clipOp.artifact.available=false;clipOp.artifact.expires_in_ms=null;value=null;status=204;}
         else if(this.path==='/api/v1/catalog') {value={sources:[{source_id:'src',title:'synthetic',deck:false,levels:0},{source_id:'deck',title:'synthetic deck',deck:true,levels:2}]};}
         else if(this.path==='/api/v1/catalog/deck/levels/0') {value={levels:[{id:'1',title:'Level 1'},{id:'2',title:'Level 2'}],next:null};}
-        else if(this.path==='/api/v1/startup') {value={request:{kind:'open',seq:'1',source_id:'src',mode:'level',levels:{mode:'all'},body:{detail:'high'}}};}
-        else if(this.path==='/api/v1/operations'&&this.method==='POST') {open=true;lastSeq=body.seq;value={seq:lastSeq,kind:'open',phase:'succeeded',view_id:viewId};status=202;}
-        else if(this.path==='/api/v1/operations') {value={last_seq:lastSeq,active:null,history:open?[{seq:lastSeq,kind:'open',phase:'succeeded',view_id:viewId}]:[]};}
-        else if(this.path==='/api/v1/view') {status=open?200:404;value=open?{title:'synthetic',source_id:'src',mode:'level',levels:null,view:{...snapshot,connection_epoch:''}}:null;}
+        else if(this.path==='/api/v1/startup') {value={request:{kind:'open',seq:'1',source_id:modeEnabled?'deck':'src',mode:modeEnabled?'chip':'level',levels:modeEnabled?{mode:'only',ids:['1']}:{mode:'all'},body:{detail:'high'}}};}
+        else if(this.path==='/api/v1/operations'&&this.method==='POST') {
+            open=true;lastSeq=body.seq;value={seq:lastSeq,kind:body.kind,phase:body.kind==='mode'?'preparing':'succeeded',view_id:viewId};status=202;
+            if(body.kind==='mode') {assert(modeEnabled);modeOperation=value;}
+        }
+        else if(this.path==='/api/v1/operations') {
+            value={last_seq:lastSeq,active:modeOperation&&modeOperation.phase==='preparing'?lastSeq:null,history:modeOperation?[modeOperation]:open?[{seq:lastSeq,kind:'open',phase:'succeeded',view_id:viewId}]:[]};
+            if(modeReadFailure){modeReadFailure=false;status=503;value={error:'unavailable'};}
+        }
+        else if(this.path==='/api/v1/view') {status=open?200:404;value=open?{title:'synthetic',source_id:modeEnabled?'deck':'src',mode:modeEnabled?serverMode:'level',levels:modeEnabled?['1']:null,view:{...snapshot,connection_epoch:''}}:null;
+            if(modeViewReadFailure){modeViewReadFailure=false;status=503;value={error:'unavailable'};}}
         else if(this.path.endsWith('/minimap/full')){value={view_id:viewId,dataset_revision:'1',base:'full',size:180,pixels:'0'.repeat(32400)};}
         else if(this.path.endsWith('/layers/0')) {value={state_rev:snapshot.state_rev,render_key:snapshot.render_key,total:1,start:0,next:null,rows:[layerRow]};}
         else {throw new Error('Unexpected HTTP '+this.path);}
         this.status=status;this.responseText=settingsPath&&this.method==='GET'?value:JSON.stringify(value);
+        if(body&&body.kind==='mode'&&modeLosePost){modeLosePost=false;setImmediate(()=>this.ontimeout());return;}
         setImmediate(()=>this.onload());
     }
 }
@@ -144,7 +155,7 @@ const sandbox={window,document,XMLHttpRequest:XHR,WebSocket:Socket,Image,ImageDa
     history:{replaceState(){sandbox.location.hash='';}},sessionStorage:{getItem:k=>storage.get(k)||null,setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},
     URL:{createObjectURL(){const s='blob:test/'+images.length;urls.add(s);return s;},revokeObjectURL:s=>urls.delete(s)},
     Blob,TextEncoder,TextDecoder,ArrayBuffer,DataView,Uint8Array,Uint8ClampedArray,
-    setTimeout:function(fn,ms){assert(!this||!this.context,'unbound Window timer receiver');return setTimeout(fn,ms);},
+    setTimeout:function(fn,ms){assert(!this||!this.context,'unbound Window timer receiver');return setTimeout(fn,modeEnabled?Math.min(ms,5):ms);},
     clearTimeout:function(id){assert(!this||!this.context,'unbound Window timer receiver');return clearTimeout(id);},
     setInterval:()=>0,Date:{now:()=>clock+=100},console};
 vm.runInNewContext(fs.readFileSync(__dirname+'/app.js','utf8'),sandbox,{filename:'app.js'});
@@ -174,6 +185,50 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     assert.equal(draws.length,1);assert.deepEqual(draws[0].data.slice(0,4),[16,0,127,255]);
     assert.equal(ws.sent.at(-1).disposition,'displayed');
     assert.equal(node('canvas').style.width,'100px');
+    if(modeEnabled){
+        const commands=()=>requests.filter(r=>r.method==='POST'&&r.path==='/api/v1/operations'&&r.body.kind==='mode');
+        const key=(extra={})=>{let used=false;node('viewport').keydown({key:',',ctrlKey:true,target:node('viewport'),preventDefault(){used=true;},...extra});return used;};
+        assert(!node('live-mode-row').hidden);assert(!node('live-mode').disabled);assert.equal(node('live-mode').value,'chip');
+        for(const extra of [{repeat:true},{metaKey:true},{altKey:true},{shiftKey:true},{isComposing:true},{target:node('goto-x')}])assert(!key(extra));
+        const camera=JSON.stringify(snapshot.bbox_dbu);
+        async function complete(mode,failed=false){
+            const prior=sockets.length;
+            if(failed){modeOperation={...modeOperation,phase:'failed',error:'stale_state'};}
+            else{serverMode=mode;viewId=String(++modeNumber).repeat(64);snapshot.view_id=viewId;snapshot.dataset_revision=String(modeNumber+1);snapshot.worker_epoch=String(modeNumber+2);modeOperation={...modeOperation,phase:'succeeded',view_id:viewId};}
+            await wait(()=>sockets.length>prior);const next=sockets.at(-1);hello(next);next.receive(packet('raw',String(modeNumber+2)));
+            await wait(()=>!node('live-mode').disabled);assert.equal(node('live-mode').value,serverMode);
+            assert.equal(JSON.stringify(snapshot.bbox_dbu),camera);return next;
+        }
+        // Open-source selection is independent: the live mode command has
+        // only the displayed view/revision, never levels/source paths.
+        node('source').value='src';node('source').onchange();
+        node('live-mode').value='layer';node('live-mode').onchange();
+        await wait(()=>commands().length===1&&node('live-mode').disabled);
+        assert.deepEqual(commands()[0].body,{kind:'mode',view_id:'a'.repeat(64),base_state_rev:'1',mode:'layer',seq:'2'});
+        const sends=ws.sent.length;key();node('viewport').keydown({key:'ArrowUp',target:node('viewport'),preventDefault(){}});
+        assert.equal(commands().length,1);assert.equal(ws.sent.length,sends,'input leaked during owner operation');
+        const next=await complete('layer');assert.equal(node('levels-all').checked,false);
+        assert.equal(node('source').value,'deck');assert(!node('labels').checked);
+        const count=commands().length;node('live-mode').onchange();await new Promise(setImmediate);assert.equal(commands().length,count,'same-mode generated a request');
+        modeLosePost=true;modeReadFailure=true;assert(key());
+        // A failed status preflight never sends a mutation. Repeating is an
+        // explicit user action after read-only reconciliation, not an auto retry.
+        await wait(()=>!node('live-mode').disabled);assert.equal(commands().length,count);
+        modeReadFailure=true;
+        node('live-mode').value='level';node('live-mode').onchange();
+        await wait(()=>!node('live-mode').disabled);assert.equal(commands().length,count);
+        assert(key());await wait(()=>commands().length===count+1);
+        assert.equal(commands().at(-1).body.mode,'level');
+        const reads=requests.filter(r=>r.path==='/api/v1/view').length;
+        modeViewReadFailure=true;
+        await complete('level');assert.equal(commands().length,count+1,'lost POST was automatically replayed');
+        assert(requests.filter(r=>r.path==='/api/v1/view').length>=reads+2,'terminal restore was not retried read-only');
+        assert(key());await wait(()=>commands().length===count+2);assert.equal(commands().at(-1).body.mode,'chip');
+        await complete('chip',true);assert.match(node('notice').textContent,/changed/);
+        assert.equal(serverMode,'level');assert.equal(commands().length,count+2);
+        next.receive(packet('raw','99','1',epoch,{view_id:'a'.repeat(64)}));
+        listeners.pagehide();console.log('WEB DECK MODE CLIENT: ALL OK (scope/CAS, dropdown/Ctrl+, pending input/duplicates, raw/level/chip, stale/unknown reconciliation, no automatic replay)');return;
+    }
     if(exitEnabled){
         const n=requests.length,commands=ws.sent.length;
         const key=(k,extra={})=>{let used=false;node('viewport').keydown({key:k,target:node('viewport'),preventDefault(){used=true;},...extra});return used;};

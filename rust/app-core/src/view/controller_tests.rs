@@ -13,6 +13,9 @@ use std::{
 mod query_tests;
 
 struct Control {
+    opened: AtomicUsize,
+    close_release: AtomicBool,
+    closing: AtomicUsize,
     open: AtomicBool,
     frame: AtomicBool,
     drain: AtomicBool,
@@ -36,6 +39,9 @@ struct Control {
 impl Default for Control {
     fn default() -> Self {
         Self {
+            opened: AtomicUsize::new(0),
+            close_release: AtomicBool::new(true),
+            closing: AtomicUsize::new(0),
             open: AtomicBool::new(true),
             frame: AtomicBool::new(true),
             drain: AtomicBool::new(true),
@@ -250,6 +256,10 @@ impl Engine for Fake {
         }
     }
     fn close(&mut self) -> Result<()> {
+        self.control.closing.fetch_add(1, Ordering::Relaxed);
+        while !self.control.close_release.load(Ordering::Relaxed) {
+            thread::sleep(Duration::from_millis(1));
+        }
         self.active = None;
         self.queries.clear();
         self.query_acks.clear();
@@ -293,6 +303,21 @@ fn options() -> RenderOptions {
         raw: true,
     }
 }
+fn fake(c: Arc<Control>, deck: bool) -> Box<dyn Engine> {
+    c.opened.fetch_add(1, Ordering::Relaxed);
+    Box::new(Fake {
+        control: c,
+        active: None,
+        gen: 0,
+        cancelled: false,
+        ack: false,
+        deck,
+        query_sequence: 0,
+        queries: BTreeMap::new(),
+        query_frontiers: BTreeMap::new(),
+        query_acks: VecDeque::new(),
+    })
+}
 fn start(r: &Arc<Resources>, m: Arc<Model>, initial: ViewState, c: Arc<Control>) -> ViewController {
     start_configured(r, m, initial, c, ControllerOptions::default())
 }
@@ -315,21 +340,7 @@ fn start_configured(
                 crate::check_cancelled(&stop)?;
                 thread::sleep(Duration::from_millis(1));
             }
-            Ok((
-                Box::new(Fake {
-                    control: c,
-                    active: None,
-                    gen: 0,
-                    cancelled: false,
-                    ack: false,
-                    deck,
-                    query_sequence: 0,
-                    queries: BTreeMap::new(),
-                    query_frontiers: BTreeMap::new(),
-                    query_acks: VecDeque::new(),
-                }),
-                None,
-            ))
+            Ok((fake(c, deck), None))
         },
     )
     .unwrap()
@@ -350,6 +361,173 @@ fn pan() -> Patch {
         }),
         ..Default::default()
     }
+}
+
+fn one_worker() -> (
+    Arc<Resources>,
+    Arc<Model>,
+    Arc<Control>,
+    Arc<ViewController>,
+) {
+    let r = Resources::new(Limits {
+        cpu_slots: 2,
+        foreground_reserve: 0,
+        workers: 1,
+        decoded_mb: 1,
+    })
+    .unwrap();
+    let m = model(true);
+    let c = Arc::new(Control::default());
+    let v = Arc::new(start(
+        &r,
+        Arc::clone(&m),
+        ViewState::initial(&m, 80, 64).unwrap(),
+        Arc::clone(&c),
+    ));
+    wait(|| v.latest().is_some());
+    (r, m, c, v)
+}
+struct ReleaseClose(Arc<Control>);
+impl Drop for ReleaseClose {
+    fn drop(&mut self) {
+        self.0.close_release.store(true, Ordering::Relaxed);
+    }
+}
+
+#[test]
+fn replacement_prepare_drop_stale_revision_and_exclusive_slot_preserve_current() {
+    let (r, m, c, v) = one_worker();
+    let usage = r.usage();
+    let original = v.snapshot();
+    let new = Arc::new(Control::default());
+    let n = Arc::clone(&new);
+    let mut p = v
+        .prepare_engine(Arc::clone(&m), original.state.clone(), move |_| {
+            Ok((fake(n, true), None))
+        })
+        .unwrap();
+    let next = p.controller();
+    assert_eq!(r.usage(), usage);
+    assert!(r.render(&options()).is_err());
+    assert!(v
+        .prepare_engine(Arc::clone(&m), original.state.clone(), |_| panic!(
+            "duplicate open"
+        ))
+        .is_err());
+    thread::sleep(Duration::from_millis(10));
+    assert_eq!(new.opened.load(Ordering::Relaxed), 0);
+    assert_eq!(v.snapshot().state, original.state);
+    assert_eq!(c.closed.load(Ordering::Relaxed), 0);
+    v.edit(original.state_rev, pan()).unwrap();
+    assert!(p.commit(original.state_rev).is_err());
+    drop(p);
+    wait(|| next.is_finished());
+    assert_eq!(r.usage(), usage);
+    assert_eq!(new.opened.load(Ordering::Relaxed), 0);
+    assert_eq!(c.closed.load(Ordering::Relaxed), 0);
+    let p = v
+        .prepare_engine(Arc::clone(&m), v.snapshot().state, |_| {
+            panic!("aborted open")
+        })
+        .unwrap();
+    let aborted = p.controller();
+    drop(p);
+    wait(|| aborted.is_finished());
+    v.request_close();
+    wait(|| v.is_finished());
+    assert_eq!(r.usage(), Usage::default());
+}
+
+#[test]
+fn replacement_cutover_waits_for_reap_and_never_borrows_another_reservation() {
+    let (r, m, c, v) = one_worker();
+    let usage = r.usage();
+    let original = v.snapshot();
+    let new = Arc::new(Control::default());
+    let n = Arc::clone(&new);
+    let old = Arc::clone(&c);
+    let mut p = v
+        .prepare_engine(Arc::clone(&m), original.state.clone(), move |_| {
+            assert_eq!(
+                old.closed.load(Ordering::Relaxed),
+                1,
+                "new worker overlapped old close"
+            );
+            Ok((fake(n, true), None))
+        })
+        .unwrap();
+    let next = p.controller();
+    let _release = ReleaseClose(Arc::clone(&c));
+    c.close_release.store(false, Ordering::Relaxed);
+    p.commit(original.state_rev).unwrap();
+    assert!(p.commit(original.state_rev).is_err());
+    wait(|| c.closing.load(Ordering::Relaxed) == 1);
+    assert_eq!(new.opened.load(Ordering::Relaxed), 0);
+    assert_eq!(r.usage(), usage);
+    assert!(r.render(&options()).is_err());
+    assert!(v.edit(original.state_rev, pan()).is_err());
+    assert!(next
+        .prepare_engine(Arc::clone(&m), next.snapshot().state, |_| panic!(
+            "opening chain"
+        ))
+        .is_err());
+    c.close_release.store(true, Ordering::Relaxed);
+    wait(|| next.latest().is_some());
+    assert!(v.is_finished());
+    assert_ne!(next.snapshot().worker_epoch, original.worker_epoch);
+    assert_eq!(next.snapshot().state, original.state);
+    assert_eq!(new.opened.load(Ordering::Relaxed), 1);
+    assert_eq!(r.usage(), usage);
+    drop(p);
+    next.request_close();
+    wait(|| next.is_finished());
+    assert_eq!(
+        r.usage(),
+        Usage::default(),
+        "retained controller handles must not retain reservations"
+    );
+}
+
+#[test]
+fn replacement_shutdown_waits_for_its_predecessor_without_opening_an_engine() {
+    let (r, m, c, v) = one_worker();
+    let rev = v.snapshot().state_rev;
+    let mut p = v
+        .prepare_engine(m, v.snapshot().state, |_| {
+            panic!("cancelled replacement opened")
+        })
+        .unwrap();
+    let next = p.controller();
+    let _release = ReleaseClose(Arc::clone(&c));
+    c.close_release.store(false, Ordering::Relaxed);
+    p.commit(rev).unwrap();
+    wait(|| c.closing.load(Ordering::Relaxed) == 1);
+    next.request_close();
+    thread::sleep(Duration::from_millis(10));
+    assert!(!next.is_finished());
+    assert_eq!(r.usage().workers, 1);
+    c.close_release.store(true, Ordering::Relaxed);
+    wait(|| next.is_finished());
+    assert_eq!(r.usage(), Usage::default());
+    assert_eq!(next.snapshot().phase, Phase::Closed);
+}
+
+#[test]
+fn replacement_open_failure_is_explicit_and_releases_the_transferred_quota() {
+    let (r, m, c, v) = one_worker();
+    let rev = v.snapshot().state_rev;
+    let mut p = v
+        .prepare_engine(m, v.snapshot().state, |_| {
+            Err(Error::new(ErrorKind::Worker, "replacement open failed"))
+        })
+        .unwrap();
+    let next = p.controller();
+    p.commit(rev).unwrap();
+    wait(|| next.is_finished());
+    assert!(v.is_finished());
+    assert_eq!(c.closed.load(Ordering::Relaxed), 1);
+    assert_eq!(next.snapshot().phase, Phase::Failed);
+    assert_eq!(r.usage(), Usage::default());
 }
 
 #[test]

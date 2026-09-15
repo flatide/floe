@@ -70,6 +70,16 @@ for line in sys.stdin:
 ''')
             fake.chmod(0o700)
         env["FLOE_OWNER_EXPORT_FIXTURE"] = str(export_source)
+        mode_dir = work / "mode"
+        mode_dir.mkdir()
+        mode_caches = {}
+        for name in ("A", "B"):
+            mode_source = mode_dir / (name + ".oas")
+            shutil.copy2(fixture, mode_source)
+            run(["index", mode_source, "--jobs=2"], oracle_env)
+            cache = Path(str(mode_source) + ".floe")
+            mode_caches[cache] = digest(cache)
+        env["FLOE_OWNER_MODE_FIXTURE"] = str(mode_dir / "A.oas")
         checked = subprocess.run([tests[0], "--ignored", "--nocapture"], env=env,
                              text=True, capture_output=True, timeout=120)
         assert checked.returncode == 0, (checked.stdout, checked.stderr)
@@ -83,6 +93,8 @@ for line in sys.stdin:
         assert "RUST OWNER DEFAULTS: ALL OK" in checked.stdout
         assert "RUST OWNER DEFAULT PROTECTION: ALL OK" in checked.stdout
         assert "RUST OWNER DECK DEFAULTS: ALL OK" in checked.stdout
+        assert "RUST OWNER DECK MODES: ALL OK (5 native cutovers, one reservation" in checked.stdout
+        assert all(digest(path) == before for path, before in mode_caches.items())
         for marker in exports.glob("fake-*.pid"):
             try:
                 os.kill(int(marker.read_text()), 0)

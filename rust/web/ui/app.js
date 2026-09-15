@@ -22,7 +22,8 @@
     let seq = '0', queue = [], inflight = null, accepted = null, lastSend = 0;
     const editCallbacks = new WeakMap();
     let socketSerial = 0, decode = null, reconnectTimer = null, reconnectDelay = 500;
-    let catalog = [], currentId = '', currentSource = '', ownerBusy = false, submitting = false;
+    let catalog = [], currentId = '', currentSource = '', currentMode = 'level', ownerBusy = false, submitting = false;
+    let modeReceipt = '', modeSupported = false;
     let layerStart = 0, layerNext = null, layerLoad = 0, layerKey = '', selectedStyle = null;
     let levelNext = null, levelSource = '', levelIds = new Set(), levelLoad = 0, levelBusy = false;
     let lastDigit = '', lastDigitAt = 0;
@@ -189,8 +190,13 @@
         ackedFrames = {foreground: null, margin: null};
     }
     function live() { return state && !['closed', 'failed'].includes(state.status); }
+    function deckModeReady() {
+        return modeSupported && live() && state.capabilities.mode &&
+            ['idle','rendering'].includes(state.status) && socket && socket.readyState === WebSocket.OPEN && epoch &&
+            !submitting && !ownerBusy && !inflight && !accepted && !queue.length && !(gesture && gesture.active());
+    }
     function controls() {
-        const enabled = live() && socket && socket.readyState === WebSocket.OPEN && !!epoch;
+        const enabled = live() && socket && socket.readyState === WebSocket.OPEN && !!epoch && !submitting && !ownerBusy;
         ['fit', 'zoom-in', 'zoom-out', 'goto', 'depth', 'detail', 'thin', 'frames', 'labels', 'mono', 'layers-all', 'layers-none'].forEach(function (id) { el(id).disabled = !enabled; });
         el('overlays').disabled=!live();
         el('labels').disabled = !enabled || !state.capabilities.labels;
@@ -198,6 +204,9 @@
         el('open').disabled = submitting || ownerBusy || !!live();
         el('close').disabled = !currentId || submitting || ownerBusy;
         el('index').disabled = submitting || ownerBusy;
+        el('live-mode-row').hidden = !modeSupported || !state || !state.capabilities.mode;
+        el('live-mode').disabled = !deckModeReady();
+        el('live-mode').value = currentMode;
         if (settings) { settings.changed(); }
         if (defaults) { defaults.changed(); }
         if (drcPanel) { drcPanel.contextChanged(); }
@@ -248,7 +257,7 @@
         rejectQueued(error); settleEdit(body, error);
     }
     function pump() {
-        if (!live() || !epoch || inflight || !queue.length || !socket || socket.readyState !== WebSocket.OPEN) { return; }
+        if (!live() || !epoch || inflight || !queue.length || !socket || socket.readyState !== WebSocket.OPEN || ownerBusy || submitting) { return; }
         const wait = 65 - (Date.now() - lastSend);
         if (wait > 0) { window.setTimeout(pump, wait); return; }
         try {
@@ -262,7 +271,7 @@
     }
     function edit(body, done) {
         if (done) { editCallbacks.set(body, done); }
-        const error = !live() || !epoch ? 'Open a connected view first.' : queue.length >= 64 ? 'Input queue is full. This input was not applied.' : null;
+        const error = ownerBusy || submitting ? 'An owner operation is running. This input was not applied.' : !live() || !epoch ? 'Open a connected view first.' : queue.length >= 64 ? 'Input queue is full. This input was not applied.' : null;
         if (error) { notice(error); settleEdit(body, error); return null; }
         if (!body.navigation || body.navigation.kind !== 'pan' || !body.navigation.snap) { freezeMargin(); }
         queue.push(body); pump(); present();
@@ -434,7 +443,7 @@
         if (!current) { currentId = ''; state = null; controls(); return; }
         const changed = currentId !== current.view.view_id;
         if (changed) { displayed = false; clearBuffers(); el('empty').hidden = false; layerStart = 0; layerKey = ''; selectedStyle = null; el('style-editor').hidden = true; }
-        currentId = current.view.view_id; currentSource = current.source_id; state = current.view;
+        currentId = current.view.view_id; currentSource = current.source_id; currentMode = current.mode; state = current.view;
         el('document-title').textContent = current.title; document.title = current.title + ' · floe2';
         el('source').value = currentSource; el('mode').value = current.mode;
         sourceSelection();
@@ -517,17 +526,35 @@
         return op.kind + ' · ' + op.phase + (p.phase ? ' · ' + p.phase : '') + (op.error ? ' · ' + message(op.error) : '');
     }
     async function operationState() {
+        try { return await readOperationState(); }
+        catch (e) {
+            // Read-only reconciliation after an uncertain mutation response;
+            // never re-submit the mutation automatically.
+            if (!stopped && !document.hidden) {
+                clearTimeout(operationTimer);
+                operationTimer = setTimeout(function () { operationState().catch(report); }, 1000);
+            }
+            throw e;
+        }
+    }
+    async function readOperationState() {
         const all = await http('GET', '/api/v1/operations');
         ownerBusy = all.active !== null; el('cancel-job').disabled = !ownerBusy;
         el('cancel-job').dataset.seq = all.active || ''; controls();
         const recent = all.history || [], last = recent[recent.length - 1];
         if (last) { el('operation').textContent = operationLabel(last); }
+        el('live-mode-note').textContent = ownerBusy && last && last.kind === 'mode' ? 'Changing jobdeck mode…' : 'Ctrl+, toggles level/chip · same camera and loaded levels. Mode defaults reload.';
         if (!ownerBusy && last && ['failed', 'incomplete', 'cancelled'].includes(last.phase)) {
             notice(message(last.error || last.phase));
             if (!currentId) { el('empty-message').textContent = message(last.error || last.phase); connection('Local · ready', true); }
         }
         if (ownerBusy) { operationTimer = setTimeout(function () { operationState().catch(report); }, 500); }
         else if (last && last.kind === 'open' && last.phase === 'succeeded' && last.view_id !== currentId) { await restore(); }
+        else if (last && last.kind === 'mode' && last.seq !== modeReceipt) {
+            await restore(); modeReceipt = last.seq;
+            if (last.phase === 'succeeded') { notice(''); }
+        }
+        if (!ownerBusy && !submitting) { pump(); }
         return all;
     }
     async function submitOperation(request) {
@@ -540,8 +567,15 @@
             request.seq = P.next(all.last_seq); ownerBusy = true; controls(); notice('');
             try { await http('POST', '/api/v1/operations', request); }
             finally { await operationState(); }
-        } finally { submitting = false; controls(); }
+        } finally { submitting = false; controls(); pump(); }
     }
+    async function changeDeckMode(mode) {
+        if (!['level','chip','layer'].includes(mode)) { throw new Error('Invalid jobdeck mode.'); }
+        if (!deckModeReady()) { el('live-mode').value = currentMode; throw new Error('Wait for the current view and pending inputs before changing jobdeck mode.'); }
+        if (mode === currentMode) { return; }
+        await submitOperation({kind:'mode', view_id:currentId, base_state_rev:state.state_rev, mode:mode});
+    }
+    el('live-mode').onchange = function () { changeDeckMode(el('live-mode').value).catch(report); };
     async function openSource(startup) {
         const request = startup || {kind: 'open', mode: el('mode').value, source_id: el('source').value, levels: levels(), body: {}};
         request.body.pixels = dims().pixels;
@@ -565,6 +599,7 @@
         const caps = await http('GET', '/api/v1/capabilities');
         if (caps.protocol !== 1 || caps.bundle !== bundle) { throw new Error('Client/server version mismatch. Reload the page.'); }
         about.init(); sessionExit.init();
+        modeSupported = caps.jobdeck_modes === true;
         catalog = (await http('GET', '/api/v1/catalog')).sources;
         el('source').textContent = '';
         catalog.forEach(function (s) { const option = document.createElement('option'); option.value = s.source_id; option.textContent = s.title; el('source').appendChild(option); });
@@ -678,6 +713,9 @@
             if (key.toLowerCase() === 'a') { event.preventDefault(); nav({kind: 'fit'}); }
             else if (key.toLowerCase() === 'z') { event.preventDefault(); zoom(0.5); }
             else if (key === '.') { event.preventDefault(); el('goto-x').focus(); el('goto-x').select(); }
+            else if (key === ',' && !event.shiftKey && !event.repeat && event.target === viewport && modeSupported && state.capabilities.mode) {
+                event.preventDefault(); changeDeckMode(currentMode === 'level' ? 'chip' : 'level').catch(report);
+            }
             return;
         }
         if(key==='Tab'&&!event.shiftKey&&event.target===viewport){event.preventDefault();const modes=['all','focus','none'];overlays(modes[(modes.indexOf(overlayMode)+1)%3]);return;}
