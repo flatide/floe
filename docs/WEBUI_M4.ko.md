@@ -3726,3 +3726,77 @@ CLI 전체 완료는 아니다: single-instance/`--multi`/인자 없는 빈 창,
 hairline/thin-um/debug/dump/stream/LOD 옵션 정책, 수동 source open 기본값 통합,
 현장 Firefox/ETX와 Linux portable 실행 수용은 후속이다. M5 공유 권한·실칩 jobdeck
 실측도 그대로 남는다. native 프로토콜/RENDERD_VERSION0.12.87은 변경하지 않는다.
+
+## 47. M4g-7a — 로컬 단일 인스턴스 통신 기반
+
+`app-core::instance`에 trusted launcher용 Unix socket rendezvous를 추가했다.
+이 단계는 **제품 CLI/브라우저와 연결하지 않은 기반**이다. 기존 GTK와 웹 실행 동작은
+그대로이며 forwarding/`--multi`/인자 없는 빈 창이 완성된 것으로 보지 않는다.
+
+### 소유권·전달 계약
+
+- 키는 product/effective UID/정규화 DISPLAY다. GTK 실제 함수처럼 screen suffix를
+  제외하고 구분하며, DISPLAY 없는 macOS는 aqua/Linux는 headless 이름을 쓴다.
+  SHA-1은 파일 이름용일 뿐 인증이 아니다. TeeBox의 공유 UID를 실사용자 ID로 취급하지 않는다.
+- launcher가 선택한 로컬 부모 아래 owner 전용0700 디렉터리와0600 socket/lock을
+  사용한다. 부적절한 소유권·권한·symlink·hard-linked lock은 거부하며 권한을 고치지 않는다.
+  경로가 Unix socket 길이 제한을 넘으면 명시 오류다. 기본 registry 위치 선택은 CLI 통합 때 정한다.
+- 실제 owner는 커널 flock을 유지한다. lock inode는 종료 시에도 남겨 동시 실행의
+  분리 소유를 피한다. 소켓은 보관한 inode와 일치할 때만 정리한다. crash 복구도 lock을
+  얻고 connect가 connection-refused일 때만 stale socket을 제거한다. timeout/권한 오류/
+  응답 불명은 새 owner 실행이나 소켓 삭제의 허가가 아니다. 저장된 PID로 신호를 보내지 않는다.
+- 연결 양쪽이 Linux SO_PEERCRED/macOS getpeereid로 같은 UID를 확인한다.
+  protocol/build 불일치를 거부한다. 이는 협력하는 로컬 launcher와 다른 UID에 대한
+  경계이지 악의적인 동일 UID/root의 파일 교체를 방어하는 sandbox가 아니다.
+- 길이 prefix와 엄격한 JSON schema, 본문64KiB/응답16KiB, 직렬화 중 크기 제한을 둔다.
+  I/O는 절대3초 기한과 취소 확인을 사용하므로 한 byte씩 보내도 기한이 연장되지 않는다.
+  잘못된 framing은 handler 실행 없이 연결을 닫는다. 모든 오류에 구조화 응답을 보장하지 않는다.
+  callback은 유계 작업 접수만 해야 하며 취소에 협력해야 한다. 동기 색인/렌더를 수행하면 안 된다.
+- owner 시작마다 무작위 epoch를 새로 만들고, **연결 handshake마다** 고유 ticket을
+  예약한다. 연결만 끊긴 요청과 뒤이어 내용이 같은 새 요청은 서로 다른 ticket이다.
+  최근32개 **발급 ticket**의 본문/결과를 보관한다(성공한 작업32개가 아님).
+  같은 intent의 재전송은 결과만 돌려주고, 다른 본문은 conflict, 보관 범위 밖은 expired다.
+  재접속도 새 미사용 ticket을 소비한다. 이전 미처리 ticket은 유효 범위 안에서 늦게 처리될
+  수 있으므로 실제 open 요청은 향후 source/context/revision도 검증해야 한다.
+- 처리 결과를 ACK 전 보관한다. submit 도중 I/O 실패·잘못된 응답·취소는 결과 불명
+  `Incomplete`다. 복구하려면 보관한 동일 intent를 사용하며 새 번호로 자동 재실행하지 않는다.
+  재시작한 owner는 epoch가 달라 과거 intent를 거부한다. 영속적인 exactly-once 보장은 아니다.
+  `Handled`는 callback 결과/접수 receipt이며 첫 프레임 완료 ACK가 아니다. callback 오류는
+  고정 code만 전달하고 내부 경로가 포함될 수 있는 Error.message를 보내지 않는다.
+
+### 실제 연결에 앞서 필요한 작업
+
+현재 web service의 source 목록과 공유 기본값/DRC 게시 보호 source 목록은 시작 시 고정된다.
+목록만 동적으로 바꾸면 이미 준비·승인한 게시 대상이 새 source/cache와 충돌할 수 있다.
+따라서 다음 단계는 trusted launcher의 등록과 게시 보호 검사를 같은 수명/동기화 경계에
+넣는 것이다. 브라우저가 임의 서버 경로를 등록하는 API로 대체하지 않는다. 그 뒤 CLI 전달
+옵션의 원자적 적용·open receipt/실패·`--multi`·빈 창을 실제 UI에 연결한다. 새 등록만으로
+색인/force/공유 게시를 승인하지 않으며 원래 사용자의 단계별 승인 의미를 유지한다.
+
+### 검증
+
+새 단위10개는 lost ACK/replay·동일 내용의 별도 요청·ticket 만료·충돌·restart epoch,
+소유권/권한/교체 inode, 잘못된 길이/UTF-8/JSON/응답, 응답 상한·비공개 오류,
+trickle 절대 기한·부분 입력 중 종료를 검사한다. ignored oracle는 기본 단위 결과와
+분리하며 `validate_instance_key.py`가 GTK 실제 normalize_display의199입력을 비교한다.
+이 gate를 전체 배터리에 필수 배선했다.
+
+별도 native integration 실행 파일은 자신을 PATH 없는 자식으로 실행한다. 실제 두
+프로세스의 동시 claim·동일 요청 replay·build 거부·테스트 소유 자식 SIGKILL 후 복구·
+epoch 변경·정상 종료와 lock inode 유지, exec한 자식에 flock이 상속되지 않음을 검사한다.
+합성 임시 파일만 사용하고 layout/cache/브라우저 게시를 하지 않는다. 다른 UID 계정 간
+실행과 Linux 현장 runtime 수용은 이 macOS 검사로 대체하지 않는다.
+
+검증: app-core233·web61·app14 단위, scoped rustfmt, app-core/web/app all-target
+clippy를 통과했다. Rust1.89에서도 새 단위10개·native lifecycle·GTK199를 통과했고
+x86_64-unknown-linux-musl all-target check가 성공했다(Linux 실행 확인은 아님).
+전체 `sh tools/validate_rust.sh`는 첫 실행에서 exit0,
+`RUST VALIDATION: ALL OK`다. 새 GTK199/native IPC와 기존 GTK startup144/native8,
+owner/DRC/UI·잡덱80·렌더러46, KLayout13 PX+2 phase-exact+14 style(jobs1/8)을
+포함한다. 기존 dependency/GTK/Pillow 경고는 별도이며 main 변경·feature/jobdeck은
+보존했다. 검증 전용 `.venv` symlink만 종료 후 제거했다.
+로그는 `/private/tmp/floe-instance-battery.log`, `floe-instance-msrv.log`,
+`floe-instance-msrv-oracle.log`, `floe-instance-linux-check.log`,
+`floe-instance-clippy.log`, `floe-instance-native.log`다.
+native renderd wire/RENDERD_VERSION0.12.87은 불변이다. getrandom0.3.4/socket2 0.6.5는
+이미 vendored된 의존성을 app-core에도 명시한 것이며 vendor 원본은 변경하지 않는다.

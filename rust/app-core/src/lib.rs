@@ -16,6 +16,7 @@ pub mod drc;
 pub mod exports;
 pub mod index;
 pub mod index_progress;
+pub mod instance;
 pub mod jobdeck;
 pub mod layer_defaults;
 pub mod layerprops;

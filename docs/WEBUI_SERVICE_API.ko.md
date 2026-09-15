@@ -33,6 +33,11 @@ M4g-6의 인증된 `GET /api/v1/startup`은 `{request,confirm_levels}`를 반환
 유지한다. JSON null·비유한/0/음수 폭은 거부한다. CLI 초기 정책은 launcher에서
 하나의 open body로 확정하며 저수준 owner API의 빈 body 기본값을 변경하지 않는다
 ([M4 §46](WEBUI_M4.ko.md)).
+M4g-7a의 `app-core::instance`는 trusted local launcher끼리의 Unix socket 코어다.
+HTTP/WS endpoint 또는 브라우저 임의 경로 등록 API를 추가하지 않는다. 동일 UID와
+DISPLAY 구분은 공유 서비스의 실사용자 인증이 아니다. 통신 `Handled`는 callback의
+처리/작업 접수 결과이며 view 부착·첫 프레임 완료를 뜻하지 않는다. 제품 CLI와의 연결,
+동적 catalog 및 진행 중 게시 작업의 보호 경계는 후속이다([M4 §47](WEBUI_M4.ko.md)).
 M2a의 현재 DRC 등록/읽기 URI·페이지·취소·focus/in_view·패널 상태·필터·순회·마커·
 CD·선택 집합·SVRF metadata/비교·타입 패널·격리/원자적 focus·ASCII API 계약은 [M2 기록](WEBUI_M2.ko.md) §2~21이
 기준이다. geometry reader는 read-only이며, 명시 opt-in한 owner의 주석 저장 endpoint는

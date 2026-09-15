@@ -187,10 +187,12 @@ dependencies = [
  "floe-oasis",
  "floe-vfs",
  "floe-worker-client",
+ "getrandom",
  "libc",
  "serde",
  "serde_json",
  "sha1",
+ "socket2",
 ]
 
 [[package]]

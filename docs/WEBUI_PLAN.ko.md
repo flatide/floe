@@ -1,6 +1,6 @@
 # floe2 웹 셸 / 서버-클라이언트 계획 (정본)
 
-작성 2026-08-29, 갱신 2026-09-15(M4g-6 CLI 초기 표시/카메라·레벨 선택).
+작성 2026-08-29, 갱신 2026-09-15(M4g-7a 로컬 단일 인스턴스 통신 기반).
 관련 정본: `FLOE2_OPTIMIZATION.ko.md`(F2R-10/11),
 `RUST_RENDERER_PLAN.ko.md`, `SPEC-VIEWER.ko.md`, `rust/BUILD.md`.
 
@@ -90,6 +90,9 @@ M4g-6에서 CLI 초기 depth/frames/labels·폭 없는 goto·GTK fit 여백, 명
 direct-final/baseline과 잡덱 초기 레벨 선택 대기를 연결했다. 색인 재시도 중 초기
 옵션을 보존한다([M4 §46](WEBUI_M4.ko.md)). single-instance/빈 창 시작·남은 CLI 옵션은
 후속이며 GTK 기본 launcher를 교체하지 않는다.
+M4g-7a에서 로컬 launcher의 소유권 lock·동일 UID 통신·고유 요청/재전송 코어를
+추가했다([M4 §47](WEBUI_M4.ko.md)). 아직 제품 CLI/열린 창에 연결하지 않은 기반이며,
+동적 소스 등록과 게시 보호·실제 forwarding·`--multi`·빈 창 시작은 미완료다.
 나머지 내보내기와 브라우저 다운로드/현장 수용은 남아 있다([M4 기록](WEBUI_M4.ko.md)).
 전체 조작 parity와 M0/Firefox/ETX 현장 검증은 아직 완료되지 않았다.
 상세 범위는 [M1b 기록](WEBUI_M1B.ko.md)과 [M2 기록](WEBUI_M2.ko.md). 여기의 M0~M5는 **웹 전환 단계**이며
