@@ -58,6 +58,16 @@ pub const STATUS_NONE_SIZE: u8 = 3;
 /// no summary rather than one with a shape silently missing (review
 /// 2026-09-11 (2nd) P1-2)
 pub const STATUS_NONE_UNSUPPORTED: u8 = 4;
+/// no positive-area shape on the layer (or a layer the table names
+/// without a record): summarized as "nothing to draw" without bitmaps.
+/// Field 2026-09-14: a deck-wide build wrote 9.8 GB, half of it
+/// full-size zero pyramids of such layers.
+pub const STATUS_EMPTY: u8 = 5;
+
+/// charges a worker thread accumulates before adding them to the
+/// layer's shared work total (the over-budget stop lands within
+/// jobs x this of the budget)
+pub const FLUSH_CHARGES: u64 = 1 << 12;
 
 pub fn status_text(status: u8) -> &'static str {
     match status {
@@ -66,6 +76,7 @@ pub fn status_text(status: u8) -> &'static str {
         STATUS_NONE_WORK => "none:work",
         STATUS_NONE_SIZE => "none:size",
         STATUS_NONE_UNSUPPORTED => "none:unsupported",
+        STATUS_EMPTY => "empty",
         _ => "none:unknown",
     }
 }
@@ -314,7 +325,7 @@ fn layer_presence(doc: &Doc, key: (u32, u32)) -> Vec<bool> {
 struct Marker<'a> {
     doc: &'a Doc,
     key: (u32, u32),
-    has: Vec<bool>,
+    has: &'a [bool],
     ox: i64,
     oy: i64,
     c: i64,
@@ -323,6 +334,10 @@ struct Marker<'a> {
     max_work: u64,
     over: bool,
     paths_skipped: u64,
+    /// the layer's work total across the worker threads (None on a
+    /// single thread: the local count is exact)
+    shared: Option<&'a std::sync::atomic::AtomicU64>,
+    unflushed: u64,
 }
 
 impl<'a> Marker<'a> {
@@ -331,7 +346,70 @@ impl<'a> Marker<'a> {
         if self.work > self.max_work {
             self.over = true;
         }
+        if let Some(shared) = self.shared {
+            self.unflushed = self.unflushed.saturating_add(n);
+            if self.unflushed >= FLUSH_CHARGES {
+                self.flush(shared);
+            }
+        }
         !self.over
+    }
+
+    /// add the local charges to the layer's total: the other threads'
+    /// marks count against the same budget
+    fn flush(&mut self, shared: &std::sync::atomic::AtomicU64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let total = shared.fetch_add(self.unflushed, Relaxed).saturating_add(self.unflushed);
+        self.unflushed = 0;
+        if total > self.max_work {
+            self.over = true;
+        }
+    }
+
+    /// mark one unit (a cell's records on the layer, or a member range
+    /// of one of its placements); false = over budget
+    fn run_unit(&mut self, u: &Unit) -> bool {
+        if self.over {
+            return false;
+        }
+        let cell = &self.doc.cells[u.ci];
+        match &u.kind {
+            UnitKind::Shapes { rects, polys, paths } => {
+                for r in &cell.rects[rects.0..rects.1] {
+                    if (r.layer, r.dt) == self.key && !self.mark_rect_rec(r, &u.xf) {
+                        return false;
+                    }
+                }
+                for p in &cell.polys[polys.0..polys.1] {
+                    if (p.layer, p.dt) == self.key && !self.mark_poly_rec(p, &u.xf) {
+                        return false;
+                    }
+                }
+                for p in &cell.paths[paths.0..paths.1] {
+                    if (p.layer, p.dt) == self.key && !self.mark_path_rec(p, &u.xf) {
+                        return false;
+                    }
+                }
+                true
+            }
+            UnitKind::Place { pi, m0, m1 } => {
+                let pl = &cell.places[*pi];
+                // Grid/Pts members are charged one each, exactly as the
+                // walk charges them; a plain placement is not charged
+                let charged = !matches!(pl.rep, Rep::One);
+                for k in *m0..*m1 {
+                    if charged && !self.charge(1) {
+                        return false;
+                    }
+                    let (dx, dy) = rep_member(&pl.rep, k);
+                    let base = u.xf.compose(&Xf::place(pl.x + dx, pl.y + dy, pl.rot, pl.flip));
+                    if !self.walk(pl.cell, &base) {
+                        return false;
+                    }
+                }
+                true
+            }
+        }
     }
 
     /// cells of one axis whose open interval meets the open (lo, hi)
@@ -709,57 +787,216 @@ impl<'a> Marker<'a> {
     }
 }
 
-/// build the pyramid of one layer (status + levels)
+/// one parcel of a layer's marking for a worker thread: a cell's own
+/// records on the layer (a slice of each record list), or a member
+/// range of one of its placements. Units never split a record's own
+/// repetition and only descend through plain placements, so the marks
+/// and the charges do not depend on how the units are cut: the merged
+/// bits and the work are those of a single thread.
+struct Unit {
+    ci: usize,
+    xf: Xf,
+    kind: UnitKind,
+}
+
+enum UnitKind {
+    Shapes { rects: (usize, usize), polys: (usize, usize), paths: (usize, usize) },
+    Place { pi: usize, m0: u64, m1: u64 },
+}
+
+fn rep_members(rep: &Rep) -> u64 {
+    match rep {
+        Rep::One => 1,
+        Rep::Grid { na, nb, .. } => na.saturating_mul(*nb),
+        Rep::Pts(p) => p.len() as u64,
+    }
+}
+
+/// member k's offset in the parent frame, in the walk's enumeration
+/// order (i fastest)
+fn rep_member(rep: &Rep, k: u64) -> (i64, i64) {
+    match rep {
+        Rep::One => (0, 0),
+        Rep::Grid { na, va, vb, .. } => {
+            if *na == 0 {
+                return (0, 0);
+            }
+            let (i, j) = ((k % *na) as i64, (k / *na) as i64);
+            (i * va.0 + j * vb.0, i * va.1 + j * vb.1)
+        }
+        Rep::Pts(p) => p[k as usize],
+    }
+}
+
+/// a cell's units under `xf`: its record lists in `pieces` slices, its
+/// placements' members in `pieces` ranges; plain placements are
+/// descended into while `depth < expand`
+#[allow(clippy::too_many_arguments)]
+fn collect_units(
+    doc: &Doc,
+    has: &[bool],
+    key: (u32, u32),
+    ci: usize,
+    xf: Xf,
+    depth: usize,
+    expand: usize,
+    pieces: usize,
+    out: &mut Vec<Unit>,
+) {
+    let cell = &doc.cells[ci];
+    let pieces = pieces.max(1);
+    if cell.rects.iter().any(|r| (r.layer, r.dt) == key)
+        || cell.polys.iter().any(|p| (p.layer, p.dt) == key)
+        || cell.paths.iter().any(|p| (p.layer, p.dt) == key)
+    {
+        let (nr, np, nq) = (cell.rects.len(), cell.polys.len(), cell.paths.len());
+        let slice = |n: usize, t: usize| (n * t / pieces, n * (t + 1) / pieces);
+        for t in 0..pieces {
+            let (rects, polys, paths) = (slice(nr, t), slice(np, t), slice(nq, t));
+            if rects.0 == rects.1 && polys.0 == polys.1 && paths.0 == paths.1 {
+                continue;
+            }
+            out.push(Unit { ci, xf, kind: UnitKind::Shapes { rects, polys, paths } });
+        }
+    }
+    for (pi, pl) in cell.places.iter().enumerate() {
+        if !has[pl.cell] {
+            continue;
+        }
+        if matches!(pl.rep, Rep::One) && depth < expand {
+            let base = xf.compose(&Xf::place(pl.x, pl.y, pl.rot, pl.flip));
+            collect_units(doc, has, key, pl.cell, base, depth + 1, expand, pieces, out);
+            continue;
+        }
+        let members = rep_members(&pl.rep);
+        if members == 0 {
+            continue;
+        }
+        let chunk = ((members + pieces as u64 - 1) / pieces as u64).max(1);
+        let mut m0 = 0u64;
+        while m0 < members {
+            let m1 = (m0 + chunk).min(members);
+            out.push(Unit { ci, xf, kind: UnitKind::Place { pi, m0, m1 } });
+            m0 = m1;
+        }
+    }
+}
+
+/// the units of a layer for `jobs` threads: the top cell's own, then
+/// one level deeper (through plain placements, at most four levels)
+/// while there are fewer than 4 x jobs of them - a source whose top
+/// holds one die placement still spreads its placements over the
+/// threads
+fn units_for(doc: &Doc, has: &[bool], key: (u32, u32), jobs: usize) -> Vec<Unit> {
+    let target = jobs.max(1) * 4;
+    let mut units = Vec::new();
+    for expand in 0..=4 {
+        units.clear();
+        collect_units(doc, has, key, doc.top, Xf::identity(), 0, expand, target, &mut units);
+        if units.len() >= target {
+            break;
+        }
+    }
+    units
+}
+
+/// build the pyramid of one layer (status + levels): the units are
+/// marked by `jobs` threads into their own level-0 bitmaps, OR-merged
+/// at the end (field 2026-09-14: one thread per layer kept two cores
+/// busy for 41 s on the real chip's two populated layers)
+#[allow(clippy::too_many_arguments)]
 fn build_layer(
     doc: &Doc,
     key: (u32, u32),
+    has: &[bool],
     origin: (i64, i64),
     cell_dbu: i64,
     w: u32,
     h: u32,
     max_work: u64,
+    jobs: usize,
 ) -> (Layer, u64) {
-    let mut m = Marker {
-        doc,
-        key,
-        has: layer_presence(doc, key),
-        ox: origin.0,
-        oy: origin.1,
-        c: cell_dbu,
-        bits: Bits::new(w, h),
-        work: 0,
-        max_work,
-        over: false,
-        paths_skipped: 0,
-    };
-    let ok = m.walk(doc.top, &Xf::identity());
-    if !ok || m.over {
-        return (
-            Layer { layer: key.0, dt: key.1, status: STATUS_NONE_WORK, work: m.work, levels: Vec::new() },
-            m.paths_skipped,
-        );
+    let layer_with = |status: u8, work: u64, levels: Vec<Level>| Layer { layer: key.0, dt: key.1, status, work, levels };
+    if !has[doc.top] {
+        return (layer_with(STATUS_EMPTY, 0, Vec::new()), 0);
+    }
+    let units = units_for(doc, has, key, jobs);
+    let threads = jobs.max(1).min(units.len()).max(1);
+    let shared = std::sync::atomic::AtomicU64::new(0);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let markers: Vec<Marker> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..threads)
+            .map(|_| {
+                let (units, next, shared) = (&units, &next, &shared);
+                std::thread::Builder::new()
+                    .stack_size(64 << 20)
+                    .spawn_scoped(s, move || {
+                        use std::sync::atomic::Ordering::Relaxed;
+                        let mut m = Marker {
+                            doc,
+                            key,
+                            has,
+                            ox: origin.0,
+                            oy: origin.1,
+                            c: cell_dbu,
+                            bits: Bits::new(w, h),
+                            work: 0,
+                            max_work,
+                            over: false,
+                            paths_skipped: 0,
+                            shared: if threads > 1 { Some(shared) } else { None },
+                            unflushed: 0,
+                        };
+                        loop {
+                            let k = next.fetch_add(1, Relaxed);
+                            if k >= units.len() || !m.run_unit(&units[k]) {
+                                break;
+                            }
+                        }
+                        if let Some(shared) = m.shared {
+                            m.flush(shared);
+                        }
+                        m
+                    })
+                    .expect("occupancy worker")
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().expect("occupancy worker")).collect()
+    });
+    let mut iter = markers.into_iter();
+    let mut m = iter.next().expect("one marker");
+    for other in iter {
+        m.work = m.work.saturating_add(other.work);
+        m.paths_skipped += other.paths_skipped;
+        m.over |= other.over;
+        for (a, b) in m.bits.words.iter_mut().zip(other.bits.words.iter()) {
+            *a |= *b;
+        }
+    }
+    if m.over || m.work > max_work {
+        return (layer_with(STATUS_NONE_WORK, m.work, Vec::new()), m.paths_skipped);
     }
     if m.paths_skipped > 0 {
         // a shape the summary cannot represent: no summary for the
         // layer (the page path draws it, or refuses it loudly), never
         // a summary with the shape missing
-        return (
-            Layer { layer: key.0, dt: key.1, status: STATUS_NONE_UNSUPPORTED, work: m.work, levels: Vec::new() },
-            m.paths_skipped,
-        );
+        return (layer_with(STATUS_NONE_UNSUPPORTED, m.work, Vec::new()), m.paths_skipped);
+    }
+    if m.bits.words.iter().all(|&x| x == 0) {
+        // records without positive area (zero-width rects, degenerate
+        // polygons): nothing to draw, no bitmap
+        return (layer_with(STATUS_EMPTY, m.work, Vec::new()), 0);
     }
     let mut levels = vec![m.bits.to_level()];
     while levels.last().unwrap().w > TOP_GRID || levels.last().unwrap().h > TOP_GRID {
         let next = levels.last().unwrap().pool();
         levels.push(next);
     }
-    (
-        Layer { layer: key.0, dt: key.1, status: STATUS_OK, work: m.work, levels },
-        m.paths_skipped,
-    )
+    (layer_with(STATUS_OK, m.work, levels), 0)
 }
 
-/// build every layer's pyramid; `jobs` layers at a time
+/// build every layer's pyramid; each layer's marking runs on `jobs`
+/// threads (memory: jobs x level 0 of one layer)
 pub fn build(doc: &Doc, src_size: u64, src_mtime: u64, opts: &Opts) -> Result<Occupancy, String> {
     if !(opts.base_um > 0.0) || !opts.base_um.is_finite() {
         return Err(format!("occupancy: base cell must be positive, got {}", opts.base_um));
@@ -800,56 +1037,30 @@ pub fn build(doc: &Doc, src_size: u64, src_mtime: u64, opts: &Opts) -> Result<Oc
     occ.n_levels = level_count(w, h);
     let per_layer = layer_bytes(w, h);
     let fit = if per_layer == 0 { doc.layer_order.len() } else { (opts.max_bytes / per_layer) as usize };
-    let keys: Vec<(u32, u32)> = doc.layer_order.clone();
-    let n = keys.len();
-    let mut out: Vec<Option<Layer>> = (0..n).map(|_| None).collect();
+    // layers one after another, each marked by `jobs` threads; the
+    // byte limit counts the layers that hold a pyramid (empty and
+    // none:* layers take no room)
     let mut skipped = 0u64;
-    let jobs = opts.jobs.max(1).min(n.max(1));
-    let next = std::sync::atomic::AtomicUsize::new(0);
-    let results: Vec<(usize, Layer, u64)> = std::thread::scope(|s| {
-        let handles: Vec<_> = (0..jobs)
-            .map(|_| {
-                let next = &next;
-                let keys = &keys;
-                std::thread::Builder::new()
-                    .stack_size(64 << 20)
-                    .spawn_scoped(s, move || {
-                        use std::sync::atomic::Ordering::Relaxed;
-                        let mut mine = Vec::new();
-                        loop {
-                            let k = next.fetch_add(1, Relaxed);
-                            if k >= n {
-                                break;
-                            }
-                            if k >= fit {
-                                mine.push((
-                                    k,
-                                    Layer {
-                                        layer: keys[k].0,
-                                        dt: keys[k].1,
-                                        status: STATUS_NONE_SIZE,
-                                        work: 0,
-                                        levels: Vec::new(),
-                                    },
-                                    0,
-                                ));
-                                continue;
-                            }
-                            let (layer, sk) = build_layer(doc, keys[k], (bbox.0, bbox.1), cell_dbu, w, h, opts.max_work);
-                            mine.push((k, layer, sk));
-                        }
-                        mine
-                    })
-                    .expect("occupancy worker")
-            })
-            .collect();
-        handles.into_iter().flat_map(|h| h.join().expect("occupancy worker")).collect()
-    });
-    for (k, layer, sk) in results {
+    let mut slot = 0usize;
+    let mut layers = Vec::with_capacity(doc.layer_order.len());
+    for &key in &doc.layer_order {
+        let has = layer_presence(doc, key);
+        if !has[doc.top] {
+            layers.push(Layer { layer: key.0, dt: key.1, status: STATUS_EMPTY, work: 0, levels: Vec::new() });
+            continue;
+        }
+        if slot >= fit {
+            layers.push(Layer { layer: key.0, dt: key.1, status: STATUS_NONE_SIZE, work: 0, levels: Vec::new() });
+            continue;
+        }
+        let (layer, sk) = build_layer(doc, key, &has, (bbox.0, bbox.1), cell_dbu, w, h, opts.max_work, opts.jobs);
         skipped += sk;
-        out[k] = Some(layer);
+        if layer.status == STATUS_OK {
+            slot += 1;
+        }
+        layers.push(layer);
     }
-    occ.layers = out.into_iter().map(|l| l.expect("every layer built")).collect();
+    occ.layers = layers;
     occ.paths_skipped = skipped;
     Ok(occ)
 }
@@ -1261,7 +1472,7 @@ mod tests {
         let mut m = Marker {
             doc: &doc_with(vec![cell("T")], 0, vec![(1, 0)]),
             key: (1, 0),
-            has: vec![true],
+            has: &[true],
             ox: 0,
             oy: 0,
             c,
@@ -1270,6 +1481,8 @@ mod tests {
             max_work: u64::MAX,
             over: false,
             paths_skipped: 0,
+            shared: None,
+            unflushed: 0,
         };
         let world: Vec<(i128, i128)> = pts.iter().map(|&(x, y)| (x as i128, y as i128)).collect();
         assert!(m.mark_world_poly(&world));
@@ -1447,6 +1660,110 @@ mod tests {
         let occ = build(&d, 0, 0, &Opts { base_um: 0.01, max_work: budget, ..Opts::default() }).unwrap();
         assert_eq!(occ.layers[0].status, STATUS_NONE_WORK);
         assert!(occ.layers[0].work <= budget + 2);
+    }
+
+    #[test]
+    fn marking_in_parallel_matches_one_thread_bit_for_bit() {
+        // a grid and a point list of a child with its own grid of
+        // rects, plus a record of the top's own: the units split the
+        // members over the threads and the merged file is the one a
+        // single thread writes (bits and work)
+        let make_child = || {
+            let mut child = cell("C");
+            child.rects.push(rect(1, 0, 0, 4, 4, Rep::One));
+            child.rects.push(rect(1, 0, 0, 1, 1, Rep::Grid { na: 5, nb: 5, va: (30, 0), vb: (0, 30) }));
+            child.polys.push(PolyRec { layer: 1, dt: 0, pts: vec![(10, 0), (30, 0), (30, 25)], rep: Rep::One });
+            child
+        };
+        let mut top = cell("T");
+        top.rects.push(rect(1, 900, 900, 50, 50, Rep::One));
+        top.places.push(PlaceRec { cell: 1, x: 100, y: 100, rot: 0, flip: false, rep: Rep::Grid { na: 37, nb: 11, va: (20, 0), vb: (0, 20) } });
+        let pts: Vec<(i64, i64)> = (0..23).map(|k| (k * 15, (k % 3) * 40)).collect();
+        top.places.push(PlaceRec { cell: 1, x: 0, y: 700, rot: 2, flip: true, rep: Rep::Pts(Arc::from(pts)) });
+        let d = doc_with(vec![top, make_child()], 0, vec![(1, 0)]);
+        let one = build(&d, 1, 2, &Opts { base_um: 0.01, jobs: 1, ..Opts::default() }).unwrap();
+        let many = build(&d, 1, 2, &Opts { base_um: 0.01, jobs: 3, ..Opts::default() }).unwrap();
+        assert_eq!(one.layers[0].status, STATUS_OK);
+        assert!(one.layers[0].work > 37 * 11 + 23);
+        assert_eq!(one.layers[0].work, many.layers[0].work);
+        assert_eq!(write_ovo(&one), write_ovo(&many));
+        let has = layer_presence(&d, (1, 0));
+        assert!(units_for(&d, &has, (1, 0), 3).len() >= 12);
+        // a top holding one die placement: the units come from below
+        let mut leaf = cell("B");
+        leaf.rects.push(rect(1, 0, 0, 7, 3, Rep::One));
+        leaf.rects.push(rect(1, 50, 50, 7, 3, Rep::One));
+        leaf.places.push(PlaceRec { cell: 3, x: 200, y: 0, rot: 0, flip: false, rep: Rep::Grid { na: 9, nb: 2, va: (40, 0), vb: (0, 40) } });
+        let mut die = cell("A");
+        die.places.push(PlaceRec { cell: 2, x: 5, y: 5, rot: 1, flip: false, rep: Rep::One });
+        let mut top = cell("T");
+        top.places.push(PlaceRec { cell: 1, x: 0, y: 0, rot: 0, flip: false, rep: Rep::One });
+        let d = doc_with(vec![top, die, leaf, make_child()], 0, vec![(1, 0)]);
+        let has = layer_presence(&d, (1, 0));
+        let units = units_for(&d, &has, (1, 0), 3);
+        assert!(units.iter().all(|u| u.ci == 2), "units should sit in the leaf");
+        assert!(units.len() >= 3, "{} units", units.len());
+        let one = build(&d, 1, 2, &Opts { base_um: 0.01, jobs: 1, ..Opts::default() }).unwrap();
+        let many = build(&d, 1, 2, &Opts { base_um: 0.01, jobs: 3, ..Opts::default() }).unwrap();
+        assert_eq!(write_ovo(&one), write_ovo(&many));
+        assert!(one.layers[0].levels[0].count() > 20);
+    }
+
+    #[test]
+    fn the_work_budget_is_shared_across_threads() {
+        // the review's huge grid on four threads: every thread flushes
+        // its charges into the layer's total, so the over-budget stop
+        // lands within jobs x FLUSH_CHARGES of the budget
+        let mut child = cell("C");
+        child.rects.push(rect(1, 0, 0, 5, 5, Rep::One));
+        let mut top = cell("T");
+        top.places.push(PlaceRec {
+            cell: 1,
+            x: 0,
+            y: 0,
+            rot: 0,
+            flip: false,
+            rep: Rep::Grid { na: 100_000, nb: 100_000, va: (1, 0), vb: (0, 0) },
+        });
+        let d = doc_with(vec![top, child], 0, vec![(1, 0)]);
+        let budget = 50_000u64;
+        let occ = build(&d, 0, 0, &Opts { base_um: 0.01, max_work: budget, jobs: 4, ..Opts::default() }).unwrap();
+        assert_eq!(occ.layers[0].status, STATUS_NONE_WORK);
+        assert!(occ.layers[0].work > budget);
+        assert!(
+            occ.layers[0].work <= budget + 4 * FLUSH_CHARGES + 4,
+            "charged {} for a budget of {}",
+            occ.layers[0].work,
+            budget
+        );
+    }
+
+    #[test]
+    fn a_layer_without_positive_area_shapes_is_empty_without_bitmaps() {
+        let mut top = cell("T");
+        top.rects.push(rect(1, 0, 0, 1000, 1000, Rep::One));
+        // zero-width rects only, repeated
+        top.rects.push(RectRec { layer: 2, dt: 0, x: 0, y: 0, w: 0, h: 500, rep: Rep::Grid { na: 3, nb: 1, va: (10, 0), vb: (0, 0) } });
+        // layer 3 is in the table without a record
+        let d = doc_with(vec![top], 0, vec![(2, 0), (1, 0), (3, 0)]);
+        let occ = build(&d, 0, 0, &opts(0.01)).unwrap();
+        assert_eq!(occ.layers[0].status, STATUS_EMPTY);
+        assert!(occ.layers[0].levels.is_empty());
+        assert_eq!(occ.layers[1].status, STATUS_OK);
+        assert_eq!((occ.layers[2].status, occ.layers[2].work), (STATUS_EMPTY, 0));
+        // empty layers take no room: a byte limit of one pyramid still
+        // fits the ok layer that follows an empty one
+        let tight = build(&d, 0, 0, &Opts { base_um: 0.01, max_bytes: layer_bytes(occ.w, occ.h), ..Opts::default() }).unwrap();
+        assert_eq!(tight.layers[1].status, STATUS_OK);
+        // the file holds only the ok layer's bitmaps; empty reads as nothing
+        let bytes = write_ovo(&occ);
+        let f = OvoFile::from_bytes(bytes.clone()).unwrap();
+        assert_eq!(f.layers[0].status, STATUS_EMPTY);
+        assert!(f.level(0, 0).is_none() && !f.get(0, 0, 0, 0) && f.count(0, 0) == 0);
+        assert!(f.count(1, 0) > 0);
+        let table = 3 * (LAYER_FIXED + occ.n_levels as usize * LEVEL_ENTRY);
+        assert_eq!(bytes.len(), HEADER_FIXED + 1 + table + layer_bytes(occ.w, occ.h) as usize);
+        assert_eq!(status_text(STATUS_EMPTY), "empty");
     }
 
     #[test]

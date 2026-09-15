@@ -60,8 +60,17 @@ fn real_layout_deck_and_bounded_cancellation() {
     );
     assert!(!cache_dir.exists());
     drop(read);
-    let mut job =
-        ManagedIndex::start(&resources, Arc::clone(&registered), None, options(), real()).unwrap();
+    let mut job = ManagedIndex::start(
+        &resources,
+        Arc::clone(&registered),
+        None,
+        IndexOptions {
+            occupancy: false,
+            ..options()
+        },
+        real(),
+    )
+    .unwrap();
     let built = wait(&mut job);
     assert_eq!(built.phase, Phase::Succeeded, "{built:?}");
     assert_eq!(
@@ -93,8 +102,17 @@ fn real_layout_deck_and_bounded_cancellation() {
     )
     .is_err());
     drop(pinned);
-    let mut reuse =
-        ManagedIndex::start(&resources, Arc::clone(&registered), None, options(), real()).unwrap();
+    let mut reuse = ManagedIndex::start(
+        &resources,
+        Arc::clone(&registered),
+        None,
+        IndexOptions {
+            occupancy: false,
+            ..options()
+        },
+        real(),
+    )
+    .unwrap();
     let reused = wait(&mut reuse);
     assert_eq!(
         (reused.phase, reused.kept, reused.native.output_bytes),
@@ -104,17 +122,8 @@ fn real_layout_deck_and_bounded_cancellation() {
         .into_iter()
         .map(|n| (n, fs::read(cache_dir.join(n)).unwrap()))
         .collect();
-    let mut summary = ManagedIndex::start(
-        &resources,
-        Arc::clone(&registered),
-        None,
-        IndexOptions {
-            occupancy: true,
-            ..options()
-        },
-        real(),
-    )
-    .unwrap();
+    let mut summary =
+        ManagedIndex::start(&resources, Arc::clone(&registered), None, options(), real()).unwrap();
     assert_eq!(wait(&mut summary).phase, Phase::Succeeded);
     assert!(cache_dir.join("design.ovo").is_file());
     for (name, bytes) in before {

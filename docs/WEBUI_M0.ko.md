@@ -41,7 +41,7 @@
 | `--force` | 기존 캐시 교체 허용. 생략 시 current 재사용, stale/incomplete는 거부. 자동 파괴적 재색인 금지 |
 | `--jobs N` | 양수, 기본 12. 덱 전체의 동시 소스 수와 소스 내부 jobs를 곱하지 않기 |
 | `--page-target-mb N` | 양수 MiB, 생략 시 native 기본(현재 1 MiB) |
-| `--occupancy`, `--occupancy-only` | 상호 배타. 전자는 색인+요약/기존 캐시에 추가, 후자는 fresh 캐시에 요약만 생성·교체 |
+| `--occupancy`, `--no-occupancy`, `--occupancy-only` | 명시 모드는 상호 배타. 기본은 색인+요약/기존 current 캐시에 요약 추가. no는 추가 생략(기존 요약 삭제 아님), only는 current 캐시에 요약만 생성·교체. M4g-11b에서 실측 브랜치 기본값 합류 |
 | `--occupancy-um UM` | 양수, 요약 생성 요청을 포함. 생략 시 기준 셀 4 µm. occupancy-only와 병용 시 원본 캐시 보존 |
 | `--lod`, `--no-lod` | 생성은 기본 off, `--lod` opt-in. 덱 소스 색인에도 전달. occupancy-only에서 OVM/OVP 재생성 금지 |
 | `--slow-cell-s S` | 0 이상, native 기본 5초. 0은 모든 셀 기록 |

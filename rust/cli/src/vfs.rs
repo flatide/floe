@@ -255,6 +255,7 @@ pub fn vfs_cmd(args: &[String]) {
                 profile_snapshot_refresh = true;
                 i += 1;
             }
+            a if a.starts_with("--") => crate::unknown_option("vfs", a),
             a => {
                 if src.is_none() {
                     src = Some(a.to_string());
@@ -1838,8 +1839,9 @@ fn write_occupancy(
     }
     std::fs::rename(&tmp, &path).expect("publish ovo");
     let ok = built.layers.iter().filter(|l| l.status == occ::STATUS_OK).count();
+    let empty = built.layers.iter().filter(|l| l.status == occ::STATUS_EMPTY).count();
     eprintln!(
-        "[vfs] occupancy cell={}um ({} dbu) grid={}x{} levels={} layers={} ok={} {} ({:.1}s)",
+        "[vfs] occupancy cell={}um ({} dbu) grid={}x{} levels={} layers={} ok={} empty={} jobs={} {} ({:.1}s)",
         opts.base_um,
         built.cell_dbu,
         built.w,
@@ -1847,11 +1849,13 @@ fn write_occupancy(
         built.n_levels,
         built.layers.len(),
         ok,
+        empty,
+        opts.jobs,
         fmt_size(bytes.len() as u64),
         t.elapsed().as_secs_f64()
     );
     for l in &built.layers {
-        if l.status != occ::STATUS_OK {
+        if l.status != occ::STATUS_OK && l.status != occ::STATUS_EMPTY {
             eprintln!(
                 "[vfs] occupancy layer {}/{} {} (work {})",
                 l.layer,
@@ -1898,6 +1902,7 @@ pub fn occupancy_cmd(args: &[String]) {
                 dump = true;
                 i += 1;
             }
+            a if a.starts_with("--") => crate::unknown_option("occupancy", a),
             a => {
                 dir = Some(a.to_string());
                 i += 1;
@@ -6618,6 +6623,12 @@ pub fn plan_cmd(args: &[String]) {
         if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--page-hairline") {
             req.page_hairline = val != "0";
         }
+        // --sub-cut-wash 0|1: the jobdeck wide-view policy (JOBDECK
+        // step 4) on a single source, so `--explain` shows its
+        // verdicts (wash, keep_sparse, expand_sparse) off the deck
+        if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--sub-cut-wash") {
+            req.sub_cut_wash = val != "0";
+        }
         // --summary-layers a/b,..: layers an occupancy summary draws
         // (OCCUPANCY_PLAN M3): their pages are skipped (verdict
         // `summary` under --explain); --prune-summary 1 also prunes
@@ -6799,6 +6810,7 @@ pub fn vfsd_cmd(args: &[String]) {
                 stream_kb = args[i + 1].parse().expect("stream");
                 i += 2;
             }
+            a if a.starts_with("--") => crate::unknown_option("vfsd", a),
             a => {
                 if dir.is_none() {
                     dir = Some(a.to_string());

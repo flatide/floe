@@ -300,6 +300,10 @@ async fn approved_index_open_preserves_first_frame_replays_and_explicit_force() 
     assert_eq!(done["phase"], "succeeded", "{done}");
     assert_eq!(done["stage"], "open");
     assert_eq!(done["index"]["phase"], "succeeded");
+    assert!(
+        cache_dir(&a).join("design.ovo").is_file(),
+        "approved default omitted occupancy"
+    );
     let mut ws = h.connect(&login).await;
     let (_, header) = frame(&mut ws).await;
     assert_eq!(header["generation"], "1");
@@ -491,6 +495,7 @@ async fn index_open_keeps_selected_deck_levels_and_does_not_open_partial_decks()
     consent["options"]["lod"] = json!(true);
     assert_eq!(operation(&h, &login, consent).await["phase"], "succeeded");
     assert!(cache_dir(&dir.join("A.oas")).exists());
+    assert!(cache_dir(&dir.join("A.oas")).join("design.ovo").is_file());
     assert!(!cache_dir(&dir.join("B.oas")).exists());
     let mut ws = h.connect(&login).await;
     let (_, header) = frame(&mut ws).await;

@@ -52,14 +52,24 @@ function rig(saved=null) {
     const r=rig();await r.api.init(true);await r.open();assert(r.api.blocked());assert.match(r.el('index-open-preview').textContent,/<img src=x>/);
     assert.equal(r.calls.filter(c=>c.method==='POST').length,0);assert.equal(r.el('index-open-jobs').value,'3');
     assert.equal(r.doc.activeElement,r.el('index-open-close'),'approval is not default focus');
+    assert.equal(r.el('index-open-occupancy').checked,true,'fresh approval defaults to summary');
     r.el('index-open-force').checked=true;r.el('index-open-close').onclick();await r.open();assert.equal(r.el('index-open-force').checked,false,'fresh review resets force');
     r.el('index-open-jobs').value='2';r.el('index-open-lod').checked=true;
     await r.approve();const record=JSON.parse(r.saved),req=record.request;
     assert.equal(req.options.jobs,2);assert.equal(req.options.force,false);assert.equal(req.options.lod,true);assert.equal(req.open_seq,'1');
+    assert.equal(req.options.occupancy,true);
     assert.deepEqual(req.target,{kind:'replace',view_id:id(8),state_rev:'7'});assert.deepEqual(req.pixels,[137,103]);
     assert.match(r.el('index-open-status').textContent,/building/);assert(r.el('index-open-approve').hidden);
     r.ops.set(req.seq,r.terminal(req,'failed'));await r.el('index-open-check').onclick();
     assert.equal(r.saved,null);assert.match(r.el('index-open-status').textContent,/Index succeeded.*not opened.*remain/);r.api.stop();
+
+    const optout=rig();await optout.api.init(true);await optout.open();optout.el('index-open-occupancy').checked=false;
+    await optout.approve();const without=optout.saved;assert.equal(JSON.parse(without).request.options.occupancy,false);optout.api.stop();
+    const resumed=rig(without);resumed.el('index-open-occupancy').checked=true;await resumed.api.init(true);
+    assert.equal(resumed.el('index-open-occupancy').checked,false,'recovered UI shows approved opt-out, not new default');
+    assert.equal(resumed.el('index-open-jobs').value,'3');assert(resumed.el('index-open-occupancy').disabled);
+    await resumed.el('index-open-check').onclick();
+    assert.equal(resumed.calls.find(c=>c.method==='POST').body.options.occupancy,false,'recovery preserves the approved opt-out');resumed.api.stop();
 
     const noStore=rig();await noStore.api.init(true);await noStore.open();noStore.saveFail=true;await noStore.approve();
     assert.equal(noStore.calls.filter(c=>c.method==='POST').length,0);assert.match(noStore.el('index-open-status').textContent,/storage/);noStore.api.stop();

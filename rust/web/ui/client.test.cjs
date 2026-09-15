@@ -266,7 +266,7 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
         node('index-open-jobs').value='2';node('index-open-lod').checked=true;
         await node('index-open-approve').onclick();
         assert.equal(commands().length,2);assert.equal(commands()[1].body.kind,'index_open');assert.equal(commands()[1].body.open_seq,'1');
-        assert.equal(commands()[1].body.approved,true);assert.deepEqual(commands()[1].body.options,{jobs:2,force:false,lod:true,occupancy:false});
+        assert.equal(commands()[1].body.approved,true);assert.deepEqual(commands()[1].body.options,{jobs:2,force:false,lod:true,occupancy:true});
         assert.deepEqual(commands()[1].body.target,{kind:'empty'});assert.deepEqual(commands()[1].body.pixels,[100,80]);
         assert(storage.has('floe-index-open:'+'c'.repeat(64)));assert(node('index').disabled);assert(node('source').disabled);assert.equal(sockets.length,0);
         node('cancel-job').dataset.seq='99';const cancelReads=requests.length;node('cancel-job').onclick();

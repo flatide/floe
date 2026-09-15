@@ -260,6 +260,10 @@ floe2 index deck.jb --force --lod --jobs 16
 ```
 
 소스 파일은 순차 처리하고, 각 파일 내부에서 `--jobs`만큼 병렬화한다.
+소스마다 시작 줄 `[jobdeck] index : (n/N) <src>`와 끝 줄 `[jobdeck] index :
+(n/N) ok <src> (Ts; M:SS elapsed, ~M:SS left)`를 찍는다(N = 이번 실행이 처리할
+소스 수, 남은 시간은 지금까지의 소스당 평균; 실패는 `FAILED <src> (exit E; …)`).
+마지막 줄은 `[jobdeck] index : B built, F failed, K kept`.
 `--level 1,3`을 추가하면 그 레벨이 참조하는 소스만 처리한다. `--lod`는
 각 소스의 인덱싱 명령에 전달되며, 생략하면 기존 기본값인 LOD 미생성을
 유지한다. 현재 캐시는 `--lod`만으로 교체하지 않으므로 LOD 없이 만든
@@ -310,6 +314,11 @@ floe2 index deck.jb --force --lod --jobs 16
   `IndexOnOpenTests.test_deck_asks_levels_then_opens_them`.
 - File > **load jobdeck…**(2026-09-09; `.jb` 필터가 앞에 오는 같은 대화상자) 또는 File > load layout… 의 `jobdecks (*.jb)` 필터. 소스 중 인덱스 없는 것이
   있으면 "지금 인덱싱할까요?" → `floe2 index deck.jb`를 모달 로그로 실행 후 연다.
+  여는 동안(덱 계획·캐시 로드·레이어 패널 재구성·렌더 서비스 open)은 캔버스
+  중앙에 배너 `loading jobdeck X…` → `opening render service…`와 wait 커서가
+  뜨고 렌더 서비스가 열리면 사라진다(2026-09-15, `Viewer._loading_show`; 레이아웃
+  로드는 `loading X…`). Jobdeck 뷰 전환(Ctrl+, / colour by …)도 `switching to
+  chip view…` 배너를 띄운다. gate `LoadingBannerTests`, 뷰 전환 GUI 테스트.
   `floe2 view deck.jb`도 같다(2026-09-09: 인덱스 없는 파일은 레이아웃·덱·DRC db
   모두 뷰어가 묻고 인덱싱한 뒤 연다 — `Viewer._open_or_index`,
   `FLOE_INDEX_ON_OPEN=yes|no`로 자동 응답).
@@ -602,8 +611,31 @@ budget = 패스별 디코드 보유)을 코드와 대조했다. 모두 사실이
     예산으로 막는다. r == 0(깊이 소진, 자식은 outline뿐)에서는 wash 없음.
   - top 셀이 통째로 sub-cut이면(덱 뷰의 0.2× 마크) 플랜을 버리지 않고 위 규칙으로
     wash → 마크의 색이 남는다(`CompositeTests.test_3b` 재고정).
+- **채움 하한(2026-09-15, RENDERD 0.12.86)**: wash는 footprint 안의 멤버를 1 px
+  hairline으로 그렸을 때의 덮임을 대신하는 것이므로, footprint가 cut보다 넓은데
+  `members × max(w,1 px) × max(h,1 px)`가 footprint 픽셀의 1/256(`WASH_MIN_COVERAGE`)에
+  못 미치면 wash 대신 **그 페이지를 선택해 그린다**(`keep_sparse`: 멤버가 hairline
+  픽셀로 남는다 — Calibre는 광역뷰에서도 이 마크를 보여준다, 사용자 확인
+  2026-09-15) — 희소하다는 사실이 곧 디코드·페인트 비용이 작다는 뜻이다. 배치
+  footprint(멤버 수 = 반복 수)도 같은 판정으로 생략 대신 펼친다(`expand_sparse`).
+  양축 ≤ cut인 footprint는 blob이라 항상 wash. 문턱은 일부러 낮다: 배열을 100배
+  과장하는 것은 종전 한계 그대로 두고(10 µm 피치 1 µm 격자는 2.5 µm/px에서 6 %),
+  마스크 전체를 bbox로 갖는 마크 몇 개 페이지(10^-5)만 걸러낸다. 페이지 BVH 노드는
+  blob이거나 양축 ≤ 16 px(`WASH_WIDE_NODE_PX`, 그만한 블록은 과장이 보이지 않는다)
+  이면 종전대로 통째 wash, 그보다 넓으면 예산 안에서 잎까지 걸어 페이지별 판정,
+  예산 밖은 coarse — 넓은 덱 뷰에서 sub-cut 노드를 전부 내려가는 비용을 막는다
+  (예산은 pass마다이고 pass는 수백 개). 현장 2026-09-15: level 4 depth 0에서 140 × 4 µm 45° 마크 두
+  개가 137 mm 떨어진 다른 마크와 한 페이지라 bbox 137,044 × 54,011 µm가 통째로
+  레이어 색 블록이 됐다(뷰 31,752 µm부터 fit까지; frame off와 무관). stats
+  `sub_cut_sparse`, explain `page` `keep_sparse` / `child` `expand_sparse`. gate
+  `WideViewTests.test_a_sparse_page_or_array_is_not_washed_as_its_footprint`
+  (sparse.jb: 모서리 마크 두 개 페이지·2 × 2 배치는 몇 px만 켜지고 footprint wash
+  없음 — 펼쳐진 마크 셀 자체의 1 µm 페이지는 blob wash 1 px, 중앙 9 µm 클러스터는
+  blob wash). depth 0의 마크는 thin 정책 keep(덱 기본)에서 hairline으로 그려진다.
+  단일 소스에서 같은 판정을 보려면 `floe-index plan … --page-hairline 0
+  --sub-cut-wash 1 --explain 1`(SPEC-INDEXER §6).
 - 한계(문서화): wash는 페이지/배치 bbox이므로 30% 채움의 콘택 배열이 100%
-  블록으로 보인다(speckle이 완화). 뷰어의 일반 레이아웃 경로는 바뀌지 않는다
+  블록으로 보인다(speckle이 완화; 채움 하한 1/256 아래만 제외). 뷰어의 일반 레이아웃 경로는 바뀌지 않는다
   (`sub_cut_wash=false`). 킬 스위치 `FLOE_RUST_DECK_WIDE=off`. 상태줄 `N sub-cut
   washes`, 프레임 줄 `wide_washes=`.
 - gate `WideViewTests`: tiny.jb(1 µm 점 4만 개의 자체 페이지 + 1 µm 자식 셀
@@ -644,8 +676,8 @@ budget = 패스별 디코드 보유)을 코드와 대조했다. 모두 사실이
   1차 해제"), 기존 raster 그대로. LOD run 1 px 접기·밀도 사다리·크기 cut 제거·
   재인덱싱은 실칩의 `thin pages N kept` 비용 측정 뒤로 분리. **정책 분리
   (2026-09-11)**: 마스크는 hairline이 많으므로 덱은 keep이 기본, 일반 레이아웃은
-  기존 성능 정책(cull)을 유지하고, 단독 마스크 OASIS는 `--thin keep`/View > keep
-  thin shapes로 선택한다. 요청별 `thin=keep|cull`로 전달되며 공유 기본값이 아니다.
+  기존 성능 정책(cull)을 유지하고, 단독 마스크 OASIS는 `--thin keep`/View > thin
+  shapes at wide views > keep으로 선택한다(2026-09-15: auto/keep/cull 서브메뉴). 요청별 `thin=keep|cull`로 전달되며 공유 기본값이 아니다.
   gate `ThinPageTests`(덱 기본 keep, 레이아웃 기본 cull, `--thin`, 진단 override).
   **실측 6(2026-09-11, 덱 fit 뷰 165 × 160 mm, 1 px = 202 µm)**: keep 정책으로
   25,138페이지(그중 thin 25k)를 전부 디코드(합 30.9 s)하고 4,170만 hairline을
@@ -680,7 +712,22 @@ budget = 패스별 디코드 보유)을 코드와 대조했다. 모두 사실이
   2026-09-11**(RENDERD 0.12.80): 단독 마스크 OASIS의 keep 광역뷰가 요약으로
   그려진다. **M3(플래너 프루닝·explain)·M4(덱 pass 요약) 완료 2026-09-11**
   (RENDERD 0.12.81): 덱 perf 줄 `summary P passes C cells (not pickable)`,
-  `N passes without summary`. 남은 것은 실칩 실측(M5). 실칩을 쓸 수 없을 때는
+  `N passes without summary`. 남은 것은 실칩 실측(M5). **실측 8-a(2026-09-14,
+  26 × 33 mm 추출본 85.6 MB)**: 생성 41.1 s·34 MB, 4레이어 ok, 상한 도달 없음,
+  4 µm 점유 8.1 %(계획 §12; 41 s는 멤버별 charge — 축별 닫힌형이 후속 후보).
+  덱 전체 `--occupancy-only`는 39.7 분(CPU 5,724 s, 쓰기 9.8 GB — dense 피라미드가
+  소스마다 bbox 면적에 비례; 계획 §12 후속 후보 4건). 후속 (1)·(2) 구현
+  2026-09-14(RENDERD 0.12.85): 빈 레이어는 `empty`(비트맵 없음), 한 레이어의 마킹을
+  `--jobs` 스레드로 분할(파일은 스레드 수와 무관하게 동일). 실측 8-c(2026-09-15):
+  같은 추출본이 jobs 48로 4.4 s·17 MB(8-a 41.1 s·34 MB); 실측 8-d(2026-09-15,
+  RENDERD 0.12.88): 뷰어 depth 7/7이 숫자 7로 가서 요약이 꺼졌던 것을 "무제한·계층
+  높이 이상·레이어별 최대 깊이 이상이면 그 레이어는 full"로 고침(계획 §12); 덱 전체 요약 생성 9.9 분·
+  172 MB(667 소스, 레이어 2,251 = ok 1,176 + empty 1,075; 8-a의 39.7 분·9.8 GB는
+  소스 533개 재색인이 섞인 값 — ovp mtime으로 확인). **M5 마감(2026-09-15,
+  0.12.131)**: 색인 기본 on(`--no-occupancy`로 끔; 요약 없는 캐시에는 추가), base
+  cell 4 µm, 마스크는 keep + detail medium(요약이 켜진 광역뷰는 cut과 무관), View
+  메뉴에 thin 정책 서브메뉴. 후속: 8-b 품질 샷, scan(charge당 비용), cull에서의
+  요약. 실칩을 쓸 수 없을 때는
   `tools/gen_maskchip.py OUT.oas [--jb]`가 같은 크기(35838.4 × 34617.6 µm)에
   실측 5·7의 ICV 셀(167.7 × 535 µm, 11.38 × 0.0806 µm 선 약 2만 9천 멤버, 118.6 µm
   선·4.3 µm 바 변형, 3/300 쌍둥이, 2 × 3쌍 클러스터로 26 × 33 mm 영역의 7.4 %)과

@@ -237,6 +237,80 @@ pub struct Cache {
     /// mtime changes (a rename publish from --occupancy-only while the
     /// viewer is up; docs/OCCUPANCY_PLAN.ko.md §4)
     occupancy: std::sync::Mutex<OccupancySlot>,
+    /// per layer index: the longest top-to-cell path (in placement
+    /// levels) of any cell holding the layer's own pages - a request
+    /// depth at or above it draws every shape of the layer, so the
+    /// layer's summary (a full-depth flattening) equals the exact
+    /// render there (user 2026-09-15: the depth is a free control)
+    layer_depth: Vec<u32>,
+}
+
+/// The longest top-to-cell path of every cell (None = unreachable
+/// from the top), then per layer the maximum over the cells holding
+/// the layer's own pages. One sweep over the cells and their
+/// placement records; cycles never extend a path.
+fn layer_max_depths(ovm: &floe_ovm::Ovm) -> Vec<u32> {
+    let n_layers = ovm.n_layers as usize;
+    let n = ovm.n_cells as usize;
+    if n == 0 || ovm.top as usize >= n {
+        return vec![0; n_layers];
+    }
+    let children = |ci: usize| -> Vec<usize> {
+        let c = ovm.cell(ci as u32);
+        (c.place_start as u64..c.place_start as u64 + c.place_count as u64)
+            .map(|pli| ovm.place_head(pli).child as usize)
+            .filter(|&k| k < n)
+            .collect()
+    };
+    // post-order DFS from the top -> reversed, a topological order of
+    // the reachable cells (edges back into the stack are cycles)
+    let mut state = vec![0u8; n]; // 0 new, 1 on the stack, 2 done
+    let mut order: Vec<usize> = Vec::new();
+    let mut stack: Vec<(usize, Vec<usize>, usize)> = vec![(ovm.top as usize, children(ovm.top as usize), 0)];
+    state[ovm.top as usize] = 1;
+    while let Some(frame) = stack.last_mut() {
+        if frame.2 < frame.1.len() {
+            let k = frame.1[frame.2];
+            frame.2 += 1;
+            if state[k] == 0 {
+                state[k] = 1;
+                stack.push((k, children(k), 0));
+            }
+        } else {
+            let (ci, _, _) = stack.pop().unwrap();
+            state[ci] = 2;
+            order.push(ci);
+        }
+    }
+    let mut longest = vec![u32::MAX; n];
+    longest[ovm.top as usize] = 0;
+    for &ci in order.iter().rev() {
+        let d = longest[ci];
+        if d == u32::MAX {
+            continue;
+        }
+        for k in children(ci) {
+            if longest[k] == u32::MAX || longest[k] < d + 1 {
+                longest[k] = d + 1;
+            }
+        }
+    }
+    let mut out = vec![0u32; n_layers];
+    for ci in 0..n {
+        let d = longest[ci];
+        if d == u32::MAX {
+            continue;
+        }
+        let c = ovm.cell(ci as u32);
+        let bits = ovm.bitset(c.lmask_direct);
+        for (li, slot) in out.iter_mut().enumerate() {
+            let byte = bits.get(li / 8).copied().unwrap_or(0);
+            if (byte >> (li % 8)) & 1 == 1 && *slot < d {
+                *slot = d;
+            }
+        }
+    }
+    out
 }
 
 #[derive(Default)]
@@ -253,11 +327,18 @@ impl Cache {
             .to_str()
             .ok_or_else(|| format!("cache path is not UTF-8: {}", path.display()))?;
         let vfs = Vfs::open(dir)?;
+        let layer_depth = layer_max_depths(&vfs.ovm);
         Ok(Self {
             vfs,
             dir: dir.to_string(),
             occupancy: std::sync::Mutex::new(OccupancySlot::default()),
+            layer_depth,
         })
+    }
+
+    /// The deepest placement level holding pages of layer `idx`.
+    pub fn layer_depth(&self, idx: u32) -> u32 {
+        self.layer_depth.get(idx as usize).copied().unwrap_or(0)
     }
 
     /// The cache's design.ovo if present and valid for THIS cache
@@ -353,7 +434,17 @@ impl Cache {
         if request.exact || request.cut_dbu == 0 {
             return Ok(SummarySelection::none(summary::NONE_EXACT));
         }
-        if request.depth != crate::request::FULL_DEPTH {
+        // depth, per layer (field 2026-09-15: the GUI's depth 7 of 7
+        // travelled as the number 7 and lost the summary - a 150 x
+        // 103 mm deck view took 16.7 s drawing 15k thin pages; and the
+        // user changes the depth freely): a layer whose pages all sit
+        // within the requested depth is drawn whole there, so its
+        // summary stays exact; the request has no summary only when
+        // no visible layer qualifies
+        let visible = self.visible_indices(request.visible_layers.as_deref())?;
+        let eligible: Vec<u32> =
+            visible.iter().copied().filter(|&idx| self.depth_is_full_for(request.depth, idx)).collect();
+        if eligible.is_empty() && !visible.is_empty() {
             return Ok(SummarySelection::none(summary::NONE_DEPTH));
         }
         if disabled {
@@ -374,11 +465,10 @@ impl Cache {
             none.stamp = stamp;
             return Ok(none);
         };
-        let visible = self.visible_indices(request.visible_layers.as_deref())?;
         let planes = summary::planes_for(
             &file,
             level,
-            visible.iter().map(|&idx| (idx, idx as usize)),
+            eligible.iter().map(|&idx| (idx, idx as usize)),
         );
         let none = if planes.is_empty() { Some(summary::NONE_LAYERS) } else { None };
         Ok(SummarySelection {
@@ -422,12 +512,26 @@ impl Cache {
             ovp_bytes: self.vfs.ovm.ovp_len,
             // GUI depth cap; the same expression the VFS daemon
             // reports as max_depth (top cell hierarchy height)
-            max_depth: if self.vfs.ovm.n_cells == 0 {
-                0
-            } else {
-                self.vfs.ovm.cell(self.vfs.ovm.top).height
-            },
+            max_depth: self.max_depth(),
         }
+    }
+
+    /// The top cell's hierarchy height: a requested depth at or above
+    /// it draws every shape, exactly like the unlimited depth.
+    pub fn max_depth(&self) -> u32 {
+        if self.vfs.ovm.n_cells == 0 {
+            0
+        } else {
+            self.vfs.ovm.cell(self.vfs.ovm.top).height
+        }
+    }
+
+    /// Whether a request depth draws every shape of layer `idx`:
+    /// unlimited, at or above the hierarchy height, or at or above the
+    /// deepest cell holding the layer's pages - the summary of such a
+    /// layer equals its exact render.
+    pub fn depth_is_full_for(&self, depth: u32, idx: u32) -> bool {
+        depth == crate::request::FULL_DEPTH || depth >= self.max_depth() || depth >= self.layer_depth(idx)
     }
 
     pub fn unit(&self) -> f64 {

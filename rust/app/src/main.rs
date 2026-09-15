@@ -61,7 +61,8 @@ const INDEX_HELP: &str = "Usage: floe2-web index SOURCE [OPTIONS]
   --jobs N                   Native parser/planner workers (default 12)
   --page-target-mb N          Encoded page target MiB (native default 1)
   --lod / --no-lod            LOD generation opt-in / default off
-  --occupancy                Add summary, or include it in a new build
+  --occupancy                Add summary, or include it in a new build (default)
+  --no-occupancy             Leave/build the cache without adding a summary
   --occupancy-only           Rebuild only summary on a current cache
   --occupancy-um UM          Positive base cell; implies occupancy
   --slow-cell-s S            Nonnegative slow-cell threshold
@@ -139,6 +140,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
         }
     }
     let mut options = IndexOptions::default();
+    let mut occupancy_mode = None;
     let mut source = None;
     let mut levels = None;
     let mut positional = false;
@@ -196,13 +198,14 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
             "--no-lod" => {
                 no_value()?;
             }
-            "--occupancy" => {
+            "--occupancy" | "--no-occupancy" | "--occupancy-only" => {
                 no_value()?;
-                options.occupancy = true;
-            }
-            "--occupancy-only" => {
-                no_value()?;
-                options.occupancy_only = true;
+                if occupancy_mode.is_some_and(|previous| previous != flag) {
+                    return Err(Error::input("occupancy mode flags are mutually exclusive"));
+                }
+                occupancy_mode = Some(flag);
+                options.occupancy = flag != "--no-occupancy";
+                options.occupancy_only = flag == "--occupancy-only";
             }
             "--profile-snapshot-refresh" => {
                 no_value()?;
@@ -333,7 +336,7 @@ fn execute_index(
         }
         Action::OccupancyPresent => {
             println!(
-                "[floe2-web] occupancy already present: {} (use --occupancy-only to rebuild it)",
+                "[floe2-web] cache up to date: {} (occupancy already present; use --force to rebuild, --occupancy-only to rebuild the summary)",
                 prepared.directory().join("design.ovo").display()
             );
             return Ok((0, action));
@@ -413,6 +416,7 @@ mod tests {
         assert_eq!(p, PathBuf::from("-source.oas"));
         assert_eq!(o.jobs, 12);
         assert!(!o.lod);
+        assert!(o.occupancy);
         let Cli::Index(_, o, levels) =
             parsed(&["index", "x.JB", "--level", "2,1,2", "--lod"]).unwrap()
         else {
@@ -420,6 +424,24 @@ mod tests {
         };
         assert_eq!(levels, Some(BTreeSet::from([1, 2])));
         assert!(o.lod);
+    }
+    #[test]
+    fn occupancy_default_optout_only_and_profile_parse_without_writes() {
+        for (flags, enabled, only) in [
+            (vec![], true, false),
+            (vec!["--no-occupancy"], false, false),
+            (vec!["--occupancy-only"], true, true),
+            (vec!["--profile-cell", "TOP"], true, false),
+        ] {
+            let mut args = vec!["index", "x.oas"];
+            args.extend(flags);
+            let Cli::Index(_, o, _) = parsed(&args).unwrap() else {
+                panic!()
+            };
+            assert_eq!((o.occupancy, o.occupancy_only), (enabled, only));
+        }
+        assert!(parsed(&["index", "x", "--occupancy-only", "--no-occupancy"]).is_err());
+        assert!(parsed(&["index", "x", "--no-occupancy", "--occupancy"]).is_err());
     }
     #[test]
     fn invalid_or_unported_requests_never_launch_native() {

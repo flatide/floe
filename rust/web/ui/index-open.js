@@ -59,6 +59,11 @@
             button.textContent = pending || invalid ? 'Resolve index / open request…' : 'Index and open…';
             el('index-open-status').textContent = error || status || 'Review the original selection. No indexing has started.';
             panel.setAttribute('aria-busy', busy ? 'true' : 'false');
+            if (pending) {
+                const options = pending.request.options;
+                el('index-open-jobs').value = String(options.jobs);
+                ['lod','occupancy','force'].forEach(function (k) { el('index-open-'+k).checked = options[k]; });
+            }
             ['index-open-jobs','index-open-lod','index-open-occupancy','index-open-force'].forEach(function (k) { el(k).disabled = busy || !!pending || invalid || !review; });
             el('index-open-approve').hidden = !!pending || invalid;
             el('index-open-approve').disabled = busy || !review || !review.preview.jobs_available || !o.ready();
@@ -152,7 +157,8 @@
                 const to = current ? {kind:'replace',view_id:current.view.view_id,state_rev:current.view.state_rev} : {kind:'empty'};
                 target(to,P); review = {preview:v,target:to}; details(v,to);
                 el('index-open-jobs').value = String(Math.max(1,Math.min(12,v.jobs_available)));
-                ['lod','occupancy','force'].forEach(function (k) { el('index-open-'+k).checked = false; });
+                ['lod','force'].forEach(function (k) { el('index-open-'+k).checked = false; });
+                el('index-open-occupancy').checked = true;
                 if (!v.jobs_available) { status = 'No index slots are available. Close this dialog and review again after other work finishes.'; }
             } catch (e) { if (active(t)) { error = e.message || String(e); } }
             finally { end(t); }

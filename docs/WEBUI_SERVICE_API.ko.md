@@ -35,6 +35,12 @@ Rust가 현재 model의 정렬/그룹과 가시성을 사용하며 브라우저�
 없으면 revision/렌더도 늘지 않는다. 파일 쓰기·렌더러 wire 변경은 없다.
 브라우저의 다중 선택/접힘 UI는 아직 연결하지 않았다([M4 §56](WEBUI_M4.ko.md)).
 
+M4g-11b는 `index`/`index_open`의 `options.occupancy` 생략 기본값을 true로
+맞춘다. false는 명시 해제이며 기존 요약을 지우지 않는다. `occupancy_only:true`는
+일반 생성 기본값보다 우선하고, `occupancy_um` 지정도 요약 생성을 요청한다.
+UI는 신규 승인에서 기본 체크하지만 저장된 승인/재시도의 false는 바꾸지 않는다.
+파일 선택/읽기 전용 preview는 여전히 색인을 실행하지 않고 승인 후에만 쓴다.
+
 M4g-3은 live `view.set` body에 `depth_step:-1|1`을 추가한다. 절대 `depth`와
 동시 지정은 거부하고, controller가 CAS 락 안의 현재 depth와 native max_depth로
 해석한다. 초기 open body에서는 상대 depth를 거부한다. DRC 단축키는 기존 유계

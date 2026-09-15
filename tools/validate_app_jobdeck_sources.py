@@ -186,7 +186,10 @@ def index_gate(work, env):
 
     def compare(args):
         for deck, python in zip(decks, (False, True)):
-            run(["index", deck, "--jobs", "2", *args], env, python=python)
+            result = run(["index", deck, "--jobs", "2", *args], env, python=python)
+            for line in result.stdout.splitlines():
+                if line.startswith("[jobdeck]") and " : " in line and " ok " in line:
+                    assert "elapsed, ~" in line and " left)" in line and "(" in line.split(" ok ")[0], line
         for name in NAMES:
             if not cache(actual, name).exists():
                 assert not cache(reference, name).exists()
@@ -198,6 +201,19 @@ def index_gate(work, env):
     assert not cache(actual, "chipA.oas").exists()
     assert not cache(actual, "chipB.oas").exists()
     compare([])
+    assert all((cache(actual, name) / "design.ovo").is_file() for name in NAMES)
+    for parent, python in zip((actual, reference), (False, True)):
+        optout = parent / "no-summary"
+        optout.mkdir()
+        build_thin_oas(optout / "mark.oas")
+        (optout / "test.jb").write_text(DECK)
+        run(["index", optout / "test.jb", "--level", "3", "--no-occupancy", "--jobs", "2"], env, python=python)
+        assert not (cache(optout, "mark.oas") / "design.ovo").exists(), "deck lost explicit opt-out"
+        before_add = digest(cache(optout, "mark.oas"))
+        run(["index", optout / "test.jb", "--level", "3", "--jobs", "2"], env, python=python)
+        assert (cache(optout, "mark.oas") / "design.ovo").is_file()
+        after_add = digest(cache(optout, "mark.oas"))
+        assert {k: after_add[k] for k in before_add} == before_add
     before = {name: digest(cache(actual, name)) for name in NAMES}
     compare(["--lod"])
     assert before == {name: digest(cache(actual, name)) for name in NAMES}, "current cache changed"

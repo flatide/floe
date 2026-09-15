@@ -43,7 +43,7 @@ impl Default for IndexOptions {
             jobs: 12,
             page_target_mb: None,
             lod: false,
-            occupancy: false,
+            occupancy: true,
             occupancy_only: false,
             occupancy_um: None,
             slow_cell_s: None,
@@ -81,11 +81,8 @@ impl IndexOptions {
                 "occupancy-um must be finite/positive; slow-cell-s finite/nonnegative",
             ));
         }
-        if self.occupancy && self.occupancy_only {
-            return Err(Error::input(
-                "--occupancy and --occupancy-only are mutually exclusive",
-            ));
-        }
+        // Summary-only overrides the ordinary build default. Explicit CLI
+        // mode flags remain mutually exclusive at the parser boundary.
         if self.profile_jobs.as_ref().is_some_and(|v| {
             v.is_empty() || v.iter().any(|&n| n == 0 || n.checked_mul(8).is_none())
         }) {
@@ -112,11 +109,7 @@ impl IndexOptions {
             ));
         }
         if self.profile_cell.is_some()
-            && (self.force
-                || self.occupancy
-                || self.occupancy_only
-                || self.occupancy_um.is_some()
-                || self.slow_cell_s.is_some())
+            && (self.force || self.occupancy_only || self.slow_cell_s.is_some())
         {
             return Err(Error::input(
                 "cell profiling cannot be combined with force, occupancy or slow-cell-s",
@@ -197,7 +190,7 @@ fn arguments(
     if let Some(v) = o.page_target_mb {
         add(&mut a, "--page-target-mb", v);
     }
-    if o.wants_occupancy() {
+    if *action != Action::Profile && o.wants_occupancy() {
         a.push("--occupancy".into());
         if let Some(v) = o.occupancy_um {
             add(&mut a, "--occupancy-um", v);
@@ -538,7 +531,10 @@ mod tests {
     use super::*;
     #[test]
     fn reuse_force_and_additive_policy() {
-        let mut o = IndexOptions::default();
+        let mut o = IndexOptions {
+            occupancy: false,
+            ..Default::default()
+        };
         assert_eq!(
             decide(&o, &CacheState::Missing, false).unwrap(),
             Action::Build
@@ -586,7 +582,51 @@ mod tests {
         assert!(!a.contains(&OsString::from("/NEVER")));
         assert!(a.contains(&OsString::from("16,1,16")));
         assert!(a.contains(&OsString::from("--no-lod")));
+        assert!(!a.contains(&OsString::from("--occupancy")));
         assert!(o.validate().is_ok());
+    }
+    #[test]
+    fn default_summary_is_additive_and_only_overrides_the_default() {
+        let mut o = IndexOptions::default();
+        assert!(o.occupancy);
+        assert_eq!(
+            decide(&o, &CacheState::Current, false).unwrap(),
+            Action::OccupancyOnly
+        );
+        let a = arguments(
+            Path::new("/source"),
+            Path::new("/cache"),
+            &o,
+            &Action::Build,
+        )
+        .unwrap();
+        assert!(a.contains(&OsString::from("--occupancy")));
+        o.occupancy_only = true;
+        assert_eq!(
+            decide(&o, &CacheState::Current, true).unwrap(),
+            Action::OccupancyOnly
+        );
+        let a = arguments(
+            Path::new("/source"),
+            Path::new("/cache"),
+            &o,
+            &Action::OccupancyOnly,
+        )
+        .unwrap();
+        assert!(a.contains(&OsString::from("--occupancy-only")));
+        assert!(!a.contains(&OsString::from("--occupancy")));
+        o.occupancy_only = false;
+        o.profile_cell = Some(ProfileCell::Index(0));
+        o.occupancy_um = Some(2.0);
+        o.validate().unwrap();
+        let a = arguments(
+            Path::new("/source"),
+            Path::new("/cache"),
+            &o,
+            &Action::Profile,
+        )
+        .unwrap();
+        assert!(!a.iter().any(|v| v.to_string_lossy().contains("occupancy")));
     }
     #[test]
     fn rejects_invalid_combinations_and_nonfinite_numbers() {

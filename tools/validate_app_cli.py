@@ -85,6 +85,8 @@ def main(fixture):
         run("index", source, "--jobs", "2", env=env)
         run("index", oracle, "--jobs", "2", env=env, python=True)
         oracle_cache = Path(str(oracle) + ".floe")
+        assert (cache / "design.ovo").is_file(), "default build omitted summary"
+        assert (cache / "design.ovo").read_bytes() == (oracle_cache / "design.ovo").read_bytes()
         for part in PARTS:
             assert (cache / part).read_bytes() == (oracle_cache / part).read_bytes(), part
         before = digest(cache)
@@ -124,7 +126,21 @@ def main(fixture):
             assert (cache / part).read_bytes() == (oracle_cache / part).read_bytes(), part
         print("app CLI: real cache bytes, reuse, force, corruption and LOD parity ok")
 
-        before = digest(cache)
+        older = work / "older.oas"
+        shutil.copy2(fixture, older)
+        older_cache = Path(str(older) + ".floe")
+        run("index", older, "--no-occupancy", "--jobs", "2", env=env)
+        assert not (older_cache / "design.ovo").exists()
+        legacy = digest(older_cache)
+        run("index", older, "--no-occupancy", env=env)
+        assert digest(older_cache) == legacy
+        run("index", older, "--jobs", "2", env=env)
+        assert (older_cache / "design.ovo").is_file()
+        assert digest(older_cache, legacy) == legacy, "default summary replaced legacy cache"
+        summary_kept = digest(older_cache)
+        run("index", older, "--no-occupancy", env=env)
+        assert digest(older_cache) == summary_kept, "opt-out removed existing summary"
+        before = digest(cache, (*PARTS, "meta.json"))
         run("index", source, "--occupancy", "--occupancy-um", "4", "--jobs", "2", env=env)
         assert digest(cache, before) == before, "additive summary changed base cache"
         summary = (cache / "design.ovo").read_bytes()

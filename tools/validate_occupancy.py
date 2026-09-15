@@ -101,7 +101,7 @@ HDR = "<8sIdQQq4qII"     # magic version unit size mtime cell bbox levels layers
 LAYER = "<IIBQ"           # layer dt status work
 LEVEL = "<IIQQ"           # w h off len
 STATUS = {0: "ok", 1: "none:cells", 2: "none:work", 3: "none:size",
-          4: "none:unsupported"}
+          4: "none:unsupported", 5: "empty"}
 
 
 def read_ovo(path):
@@ -218,6 +218,10 @@ def write_shapes(path):
     top.shapes(L[6]).insert(db.Box(5 * UM, 5 * UM, 5 * UM, 9 * UM))
     top.shapes(L[6]).insert(db.Path([P(7 * UM, 7 * UM), P(12 * UM, 7 * UM)], 0))
     top.shapes(L[6]).insert(db.Box(14 * UM, 14 * UM, 16 * UM, 16 * UM))
+    # a layer without any positive-area shape: recorded as `empty`
+    L7 = ly.layer(7, 0)
+    top.shapes(L7).insert(db.Box(3 * UM, 3 * UM, 3 * UM, 20 * UM))
+    top.shapes(L7).insert(db.Path([P(2 * UM, 2 * UM), P(9 * UM, 2 * UM)], 0))
     ly.write(str(path))
     ly._destroy()
 
@@ -357,8 +361,14 @@ class GenerationOracleTests(unittest.TestCase):
         ovo = read_ovo(cache / "design.ovo")
         checked = 0
         for layer in ovo["layers"]:
-            self.assertEqual(layer["status"], "ok", layer)
             w, h, lit = oracle_level0(src, layer["key"], ovo)
+            if layer["status"] == "empty":
+                # no bitmap at all, and the oracle agrees there is nothing
+                self.assertEqual(lit, set(), layer["key"])
+                self.assertTrue(all(lv == (0, 0, b"") for lv in layer["levels"]))
+                checked += 1
+                continue
+            self.assertEqual(layer["status"], "ok", layer)
             l0 = layer["levels"][0]
             self.assertEqual((l0[0], l0[1]), (w, h), layer["key"])
             mine = {(i, j) for j in range(h) for i in range(w)
@@ -418,6 +428,65 @@ class GenerationContractTests(unittest.TestCase):
         write_reps(cls.other)
         cls.other_cache = index_with_occupancy(cls.other, 1)
 
+    def test_an_empty_layer_costs_no_bitmap_and_threads_write_the_same_file(self):
+        # field 2026-09-14: the deck-wide build wrote 9.8 GB, half of it
+        # full-size zero pyramids of layers without a shape, on one
+        # thread per layer. A layer without a positive-area shape is
+        # `empty` without bitmaps (the file holds exactly the ok
+        # layers' pyramids), and the marking of a layer is split over
+        # --jobs threads whose merge is byte-identical to one thread
+        ovo = read_ovo(self.cache / "design.ovo")
+        by_key = {l["key"]: l for l in ovo["layers"]}
+        self.assertEqual(by_key[(7, 0)]["status"], "empty")
+        self.assertTrue(all(lv == (0, 0, b"") for lv in by_key[(7, 0)]["levels"]))
+        rows = self.listing(self.cache).stdout.splitlines()
+        self.assertTrue(any("ld=7/0 status=empty work=0" in r for r in rows),
+                        rows)
+        table = struct.calcsize(HDR) + 2 + len(ovo["top"]) + len(ovo["layers"]) * (
+            struct.calcsize(LAYER) + ovo["n_levels"] * struct.calcsize(LEVEL))
+        bitmaps = sum(len(lv[2]) for l in ovo["layers"] if l["status"] == "ok"
+                      for lv in l["levels"])
+        self.assertEqual(os.path.getsize(self.cache / "design.ovo"),
+                         table + bitmaps)
+        outs = []
+        for jobs in (1, 4):
+            out = TMP / ("reps_jobs%d.floe" % jobs)
+            shutil.rmtree(out, ignore_errors=True)
+            res = floe_index("vfs", self.other, out, "--occupancy",
+                             "--occupancy-um", 1, "--no-lod", "--slow-cell-s",
+                             "999", "--jobs", jobs)
+            self.assertIn(" jobs=%d " % jobs, res.stderr)
+            outs.append(sha(out / "design.ovo"))
+        self.assertEqual(outs[0], outs[1])
+
+    def test_an_unknown_option_is_refused_instead_of_becoming_the_outdir(self):
+        # field 2026-09-14: `floe-index index file.oas --occupancy-only`
+        # (the legacy tile indexer knows no such option) took the option
+        # as the output directory and built a tile index under a folder
+        # named --occupancy-only; every subcommand's positional arm did
+        # the same. An argument starting with -- that is not an option
+        # of the subcommand exits 2 before anything touches the file
+        # system (vfsd would otherwise start serving on stdin).
+        cases = (("index", self.src, "--occupancy-only"),
+                 ("vfs", self.src, "--occupancy_only"),
+                 ("tile", self.src, "--grids"),
+                 ("occupancy", self.cache, "--layers"),
+                 ("vfsd", self.cache, "--budget"))
+        for sub, target, opt in cases:
+            with self.subTest(sub=sub, opt=opt):
+                cwd = TMP / ("unknown_option_" + sub)
+                shutil.rmtree(cwd, ignore_errors=True)
+                cwd.mkdir()
+                res = subprocess.run(
+                    [str(BIN), sub, str(target), opt], cwd=cwd,
+                    capture_output=True, text=True, env=run_env(),
+                    stdin=subprocess.DEVNULL, timeout=120)
+                self.assertEqual(res.returncode, 2, res.stderr)
+                self.assertIn("floe-index %s: unknown option %s" % (sub, opt),
+                              res.stderr)
+                self.assertEqual(sorted(p.name for p in cwd.iterdir()), [],
+                                 "the option must not become a directory")
+
     def listing(self, cache, ok=0):
         return floe_index("occupancy", cache, ok=ok)
 
@@ -437,7 +506,8 @@ class GenerationContractTests(unittest.TestCase):
         self.assertEqual(len(rows), len(ovo["layers"]))
         for row, layer in zip(rows, ovo["layers"]):
             self.assertIn("ld=%d/%d" % layer["key"], row)
-            self.assertIn("status=ok", row)
+            self.assertIn("status=empty" if layer["key"] == (7, 0)
+                          else "status=ok", row)
             counts = [sum(bin(b).count("1") for b in lv[2])
                       for lv in layer["levels"]]
             self.assertIn("set=" + ",".join(map(str, counts)), row)
@@ -607,7 +677,10 @@ class GenerationContractTests(unittest.TestCase):
                    "--occupancy-max-work", "0")
         rows = [l for l in self.listing(self.cache).stdout.splitlines()
                 if l.startswith("layer ")]
-        self.assertTrue(all("status=none:work" in r for r in rows))
+        # the layer without a positive-area shape charges nothing: it
+        # stays `empty` under a zero budget
+        self.assertTrue(all("status=none:work" in r
+                            or "ld=7/0 status=empty" in r for r in rows), rows)
         res = floe_index("vfs", self.src, self.cache, "--occupancy-only",
                          "--occupancy-max-bytes", "1")
         self.assertIn("none:size", res.stderr)
@@ -615,7 +688,8 @@ class GenerationContractTests(unittest.TestCase):
                    "--occupancy-um", "1")
         rows = [l for l in self.listing(self.cache).stdout.splitlines()
                 if l.startswith("layer ")]
-        self.assertTrue(all("status=ok" in r for r in rows))
+        self.assertTrue(all("status=ok" in r or "ld=7/0 status=empty" in r
+                            for r in rows), rows)
 
     def test_kill_point_keeps_the_previous_file_and_the_wrapper_cleans_up(self):
         before = sha(self.cache / "design.ovo")
@@ -653,11 +727,23 @@ sys.exit(9)
         self.assertIn("--occupancy --occupancy-um 2.0", res.stdout)
         ovo = read_ovo(Path(str(src) + ".floe") / "design.ovo")
         self.assertEqual((ovo["cell"], ovo["top"]), (2000, "FRESH"))
-        # a plain index makes no summary (opt-in)
+        # the summary is the default (M5 decision 2026-09-15); a plain
+        # index makes it, --no-occupancy does not, and a later default
+        # index adds it to that cache
         plain = TMP / "plain.oas"
         write_chip(plain, "PLAIN", 10, 8)
         floe2("index", plain, "--jobs", "2")
-        self.assertFalse((Path(str(plain) + ".floe") / "design.ovo").exists())
+        self.assertTrue((Path(str(plain) + ".floe") / "design.ovo").exists())
+        bare = TMP / "bare.oas"
+        write_chip(bare, "BARE", 10, 8)
+        floe2("index", bare, "--no-occupancy", "--jobs", "2")
+        self.assertFalse((Path(str(bare) + ".floe") / "design.ovo").exists())
+        res = floe2("index", bare, "--jobs", "2")
+        self.assertIn("--occupancy-only", res.stdout)
+        self.assertTrue((Path(str(bare) + ".floe") / "design.ovo").exists())
+        res = floe2("index", bare, "--jobs", "2")
+        self.assertIn("cache up to date", res.stdout)
+        self.assertIn("occupancy already present", res.stdout)
 
     def test_jobdeck_wrapper_forwards_the_occupancy_options(self):
         deck_dir = TMP / "deck"
@@ -676,6 +762,11 @@ sys.exit(9)
         res = floe2("index", deck_dir / "occ.jb", "--occupancy-only",
                     "--occupancy-um", "10", "--jobs", "2")
         self.assertIn("[jobdeck] occupancy : (1/2)", res.stdout)
+        # the closing line repeats the position and carries the
+        # elapsed / remaining estimate (field 2026-09-15, 667 sources)
+        self.assertRegex(res.stdout, r"\[jobdeck\] occupancy : \(2/2\) ok "
+                                     r"\S+ \(\d+\.\ds; \d+:\d\d elapsed, "
+                                     r"~0:00 left\)")
         self.assertIn("2 built, 0 failed, 0 kept", res.stdout)
         for c in caches:
             self.assertEqual(read_ovo(c / "design.ovo")["cell"], 10000)
@@ -712,6 +803,14 @@ def write_thinwide(path):
         P(200 * UM, 1200 * UM), P(300 * UM, 1200 * UM), P(300 * UM, 1230 * UM),
         P(230 * UM, 1230 * UM), P(230 * UM, 1300 * UM), P(200 * UM, 1300 * UM)]))
     top.shapes(l3).insert(db.Box(100 * UM, 100 * UM, 1600 * UM, 1600 * UM))
+    # one child (hierarchy height 1) with a 2/0 box inside the top's
+    # 2/0 block, so every depth draws the same pixels: 2/0's pages
+    # reach depth 1, 1/0's stay at depth 0 - the summary's per-layer
+    # depth condition is tested on both (2026-09-15)
+    deep = ly.create_cell("DEEP")
+    deep.shapes(l2).insert(db.Box(0, 0, 50 * UM, 50 * UM))
+    top.insert(db.CellInstArray(deep.cell_index(),
+                                db.Trans(db.Vector(1250 * UM, 1250 * UM))))
     ly.write(str(path))
     ly._destroy()
 
@@ -890,13 +989,31 @@ class RenderTests(unittest.TestCase):
         self.assertTrue((21, 78) in lit2 and (28, 79) in lit2, "the L's arms")
 
     def test_cull_exact_and_limited_depth_requests_are_untouched(self):
-        for kw, reason in (({"thin": "cull"}, "policy"),
-                           ({"cut_px": 0.0}, "exact"),
-                           ({"depth": 0}, "depth")):
-            lit, summ, _ = self._render(self.worker, visible=[(1, 0)], **kw)
-            off, s_off, _ = self._render(self.worker_off, visible=[(1, 0)], **kw)
+        # the depth case uses 2/0, whose pages reach the DEEP child at
+        # depth 1: at depth 0 that layer is not drawn whole, no summary
+        for kw, vis, reason in (({"thin": "cull"}, [(1, 0)], "policy"),
+                                ({"cut_px": 0.0}, [(1, 0)], "exact"),
+                                ({"depth": 0}, [(2, 0)], "depth")):
+            lit, summ, _ = self._render(self.worker, visible=vis, **kw)
+            off, s_off, _ = self._render(self.worker_off, visible=vis, **kw)
             self.assertEqual((summ["layers"], summ["none"]), (0, reason), kw)
             self.assertEqual(lit, off, kw)
+        # the depth condition is per layer (user 2026-09-15: the depth
+        # is a free control): 1/0's pages all sit in the top, so depth
+        # 0 draws it whole and its summary is on with the pixels of
+        # the unlimited depth; 2/0 needs depth 1 (= the hierarchy
+        # height, also full); with both visible at depth 0 only 1/0
+        # is summarized
+        full1, s_full1, _ = self._render(self.worker, visible=[(1, 0)])
+        d0, s_d0, _ = self._render(self.worker, visible=[(1, 0)], depth=0)
+        self.assertEqual((s_full1["layers"], s_d0["layers"], s_d0["none"]), (1, 1, "-"), s_d0)
+        self.assertEqual(d0, full1)
+        full2, s_full2, _ = self._render(self.worker, visible=[(2, 0)])
+        d1, s_d1, _ = self._render(self.worker, visible=[(2, 0)], depth=1)
+        self.assertEqual((s_full2["layers"], s_d1["layers"]), (1, 1), s_d1)
+        self.assertEqual(d1, full2)
+        _, s_both, _ = self._render(self.worker, visible=[(1, 0), (2, 0)], depth=0)
+        self.assertEqual((s_both["layers"], s_both["none"]), (1, "-"), s_both)
         # the kill switch: same pixels as a cache without the file
         off, s_off, _ = self._render(self.worker_off, visible=[(1, 0)])
         self.assertEqual(s_off["none"], "off")
@@ -1170,10 +1287,15 @@ class DeckRenderTests(unittest.TestCase):
         self.assertEqual(off, single_off)
         on, _ = render_settled(self.deck, self._next(), self.bbox, 200)
         self.assertNotEqual(on, off)
-        shallow, res = render_settled(self.deck, self._next(), self.bbox,
-                                      200, depth=0)
-        self.assertEqual((res["deck"]["summary_passes"],
-                          res["deck"]["summary_none_passes"]), (0, 0), res["deck"])
+        # the deck places 1/0, whose pages all sit in the top: depth 0
+        # draws that layer whole, so its pass is summarized even there
+        # (per-layer depth condition, 2026-09-15); depth 1 is the
+        # source's hierarchy height
+        for depth in (0, 1):
+            at, res_d = render_settled(self.deck, self._next(), self.bbox,
+                                       200, depth=depth)
+            self.assertEqual(res_d["deck"]["summary_passes"], 1, (depth, res_d["deck"]))
+            self.assertEqual(at, on, depth)
 
     def test_a_source_without_the_file_counts_as_none(self):
         ovo = self.dir / "thinwide.oas.floe" / "design.ovo"

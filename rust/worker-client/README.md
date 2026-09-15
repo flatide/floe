@@ -8,7 +8,7 @@ HTTP 서버/CLI 전체 이관은 아직 아니다. Linux/macOS 대상, unsafe Ru
 - 명시 executable + `ready` 버전 검증 → layout/deck `open` → typed style ack.
   호환 버전은 build 시 `renderd/Cargo.toml`에서 읽는다. 새 통신 필드나
   M1a 당시 daemon 변경은 없었다. M4a-1/2의 scene query·종류별 취소 추가로 native 호환
-  버전은0.12.87이며 renderd/index를 함께 재빌드해야 한다.
+  버전은0.12.89이며 renderd/index를 함께 재빌드해야 한다.
 - `RenderRequest`: DBU bbox, 치수, depth/cut/exact, all/none/layers,
   frames/labels/font, style/mono, thin, raster/decode jobs, PNG/raw.
   기본 refinement off(2^30 round pages). query는 M4a-1에서 아래와 같이 추가했고 clip은 미구현.

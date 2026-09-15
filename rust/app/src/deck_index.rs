@@ -46,6 +46,7 @@ pub fn run(
         );
     }
     let (mut built, mut failed, mut kept) = (0, 0, plan.kept);
+    let batch_started = Instant::now();
     for (n, entry) in plan.todo.iter().enumerate() {
         check_cancelled(cancelled)?;
         let label = if entry.options.occupancy_only {
@@ -69,27 +70,64 @@ pub fn run(
         if signal != 0 {
             return Ok(128 + signal as i32);
         }
+        let elapsed = batch_started.elapsed().as_secs_f64();
+        let remaining = elapsed / (n + 1) as f64 * (plan.todo.len() - n - 1) as f64;
+        let progress = format!("({}/{})", n + 1, plan.todo.len());
+        let timing = format!("{} elapsed, ~{} left", hms(elapsed), hms(remaining));
         match result {
             Ok((code, _)) if matches!(code, 130 | 143) => return Ok(code),
             Ok((0, Action::Reuse | Action::OccupancyPresent)) => kept += 1,
             Ok((0, _)) => {
                 built += 1;
                 println!(
-                    "[jobdeck] {label} : ok {} ({:.1}s)",
+                    "[jobdeck] {label} : {progress} ok {} ({:.1}s; {timing})",
                     entry.tc,
                     started.elapsed().as_secs_f64()
                 );
             }
             Ok((code, _)) => {
                 failed += 1;
-                eprintln!("[jobdeck] {label} : FAILED {} (exit {code})", entry.tc);
+                eprintln!(
+                    "[jobdeck] {label} : {progress} FAILED {} (exit {code}; {timing})",
+                    entry.tc
+                );
             }
             Err(error) => {
                 failed += 1;
-                eprintln!("[jobdeck] {label} : FAILED {} ({error})", entry.tc);
+                eprintln!(
+                    "[jobdeck] {label} : {progress} FAILED {} ({error}; {timing})",
+                    entry.tc
+                );
             }
         }
     }
     println!("[jobdeck] index     : {built} built, {failed} failed, {kept} kept");
     Ok(if failed == 0 { 0 } else { 2 })
+}
+
+fn hms(seconds: f64) -> String {
+    let seconds = seconds.max(0.).round_ties_even() as u64;
+    let (h, m, s) = (seconds / 3600, (seconds % 3600) / 60, seconds % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn progress_times_match_python_rounding_and_hours() {
+        for (seconds, expected) in [
+            (0., "0:00"),
+            (7., "0:07"),
+            (221., "3:41"),
+            (3735., "1:02:15"),
+            (2.5, "0:02"),
+            (3.5, "0:04"),
+        ] {
+            assert_eq!(super::hms(seconds), expected);
+        }
+    }
 }

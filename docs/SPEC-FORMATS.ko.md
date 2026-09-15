@@ -71,8 +71,8 @@ header  magic "FLOEOVO1" | version u32 | unit f64 | src_size u64 | src_mtime u64
         | cell_dbu i64 | bbox x0 y0 x1 y1 i64 | n_levels u32 | n_layers u32
         | top_len u16 | top utf8
 layer k layer u32 | dt u32 | status u8 (0 ok, 1 none:cells, 2 none:work,
-        3 none:size, 4 none:unsupported) | work u64 | n_levels × (w u32 | h u32
-        | off u64 | len u64)
+        3 none:size, 4 none:unsupported, 5 empty) | work u64 | n_levels × (w u32
+        | h u32 | off u64 | len u64)
 body    레벨 비트맵: row-major, 행은 바이트 패딩, 행의 i번째 셀 = byte i/8 의
         bit i%8. level L 셀 = cell_dbu × 2^L, 원점 = bbox x0/y0, grid =
         ceil(span / cell). 격자가 64 × 64 이하가 될 때까지 2배 레벨.
@@ -81,7 +81,12 @@ body    레벨 비트맵: row-major, 행은 바이트 패딩, 행의 i번째 셀
 비트 = "셀의 열린 상자가 도형 내부와 양의 면적으로 만남"(KLayout `Region & box`
 판정). 도형 교차로만 만들며 bbox 대체가 없다(리뷰 2026-09-11 P1-1). hull이
 거부되는 path(퇴화 spine·U-turn)가 있는 레이어는 `none:unsupported`(비트맵
-없음)다. 로더는 magic·버전·레벨 격자·`(w+7)/8 × h == len`·오프셋 범위(잘린
+없음)다. 양의 면적 도형이 하나도 없는 레이어(레이어 테이블에만 있는 레이어, 폭 0
+rect·path뿐인 레이어)는 `empty`(비트맵 없음, 레벨 항목은 0)로 기록되고 렌더러는
+"그릴 것 없음"으로 요약한다(페이지 경로로 돌리지 않으며 상태줄의 요약 레이어
+수에 든다; 2026-09-14 실측: 덱 하나에 9.8 GB, 절반이 빈 레이어의 0 피라미드).
+`none:*`·`empty` 레이어는 파일 크기 상한(`none:size`)의 자리를 차지하지 않는다.
+로더는 magic·버전·레벨 격자·`(w+7)/8 × h == len`·오프셋 범위(잘린
 파일 거부)·비트맵이 테이블 뒤에서 테이블 순서대로 겹침 없이 이어지는지
 (2차 리뷰 P2-4)를 검사하고, `identity`(src_size·src_mtime·top·레이어 테이블)가 design.ovm과
 다르면 파일 전체를 거부한다. `floe-index occupancy <cache>`가 헤더·identity·

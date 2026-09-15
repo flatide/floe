@@ -325,9 +325,10 @@ print(json.dumps([_renderer_backend(), instance.APP,
         delegated = run(env, "-m", "floe2", "index", source,
                         "--jobs", "2")
         check(delegated.returncode == 0, "floe2 Rust index delegation failed")
+        # the occupancy summary is the default (M5 decision 2026-09-15)
         check(json.loads(log.read_text()) == [
             "vfs", str(source), str(source) + ".floe", "--jobs", "2",
-            "--no-lod",
+            "--occupancy", "--no-lod",
         ], "floe2 changed the canonical Rust index argv")
 
     if fixture is not None:

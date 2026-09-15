@@ -103,7 +103,7 @@ fn main() {
              [--profile-snapshot PATH] [--profile-snapshot-refresh]\n       \
              floe-index plan <outdir> --view x0,y0,x1,y1 \
              [--px-per-um N] [--cut-px N] [--layers a/b,..] \
-             [--depth N] [--explain 1] [--page-hairline 0|1] \
+             [--depth N] [--explain 1] [--page-hairline 0|1] [--sub-cut-wash 0|1] \
              [--summary-layers a/b,..] [--prune-summary 0|1]\n       \
              floe-index occupancy <outdir> [--layer L/D] [--level N] \
              [--dump]\n       \
@@ -209,6 +209,21 @@ fn main() {
     println!("{}", out);
 }
 
+/// An argument that starts with `--` and is not an option of the
+/// subcommand is a mistake, never a positional. Field 2026-09-14:
+/// `floe-index index file.oas --occupancy-only` (the legacy tile
+/// indexer knows no such option) took it as the output directory and
+/// built a tile index under a folder named `--occupancy-only`; the
+/// other subcommands' positional arms did the same. Exit 2 before
+/// anything touches the file system.
+pub(crate) fn unknown_option(cmd: &str, arg: &str) -> ! {
+    eprintln!(
+        "floe-index {}: unknown option {} (run floe-index without arguments for the usage)",
+        cmd, arg
+    );
+    std::process::exit(2)
+}
+
 fn tile_cmd(args: &[String]) {
     // <file.oas> <outdir> --grid x0,y0,tw,th,nx,ny --edges e0,e1,e2
     let mut src = None;
@@ -243,6 +258,7 @@ fn tile_cmd(args: &[String]) {
                 );
                 i += 2;
             }
+            a if a.starts_with("--") => unknown_option("tile", a),
             a => {
                 if src.is_none() {
                     src = Some(a.to_string());
@@ -706,6 +722,7 @@ fn index_cmd(args: &[String]) {
                     .collect();
                 i += 2;
             }
+            a if a.starts_with("--") => unknown_option("index", a),
             a => {
                 if src.is_none() {
                     src = Some(a.to_string());

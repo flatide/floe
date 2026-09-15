@@ -9,7 +9,7 @@ M4a-5/6은 Rust 계산 기반 수동·선택 bbox gap ruler와 CD 공통 생성 
 M4b-1/2/3/4는 exact clip·batch/mosaic·PNG metadata·DRC 캡처 CLI다. M4c/d는 웹 viewport
 clip·표시 PNG·스타일 설정/공유 기본값, M4e는 명시 opt-in owner의 notes/waives 편집과
 전체 review import/export다. 전체 조작 parity 및 실제 브라우저/현장 수용은 남아 있다
-([M4 기록](../../docs/WEBUI_M4.ko.md)). native 호환 버전0.12.87로
+([M4 기록](../../docs/WEBUI_M4.ko.md)). native 호환 버전0.12.89로
 `floe-index`와 `floe-renderd`를 함께 재빌드한다. 공유 기능과 현장 Firefox 수용은 별도다.
 
 ```sh
@@ -87,8 +87,12 @@ Rust+내장 자산 전용 portable은 별도 `tools/make_web_portable.sh`로 조
 
 - `--force` 없이 current 캐시는 재사용, stale/incomplete 캐시는 거부한다.
   LOD는 기본 off; current 캐시의 생성 옵션은 `--lod`만으로 바뀌지 않는다.
-- occupancy 추가/교체는 기존 OVM/OVP/OVT를 보존한다. 기존 요약을 바꾸려면
-  `--occupancy-only`를 명시한다. 프로파일 stdout은 native JSON 그대로다.
+- occupancy는 일반/잡덱 색인 및 웹 색인 승인에서 기본 생성한다. 기존 current
+  캐시에 요약만 없으면 OVM/OVP/OVT를 보존하며 추가한다. `--no-occupancy`(웹의
+  체크 해제)는 추가를 생략하고, 이미 있는 요약을 삭제하지 않는다. 기존 요약을
+  바꾸려면 `--occupancy-only`를 명시한다. `--occupancy-um`은 요약 생성을 요청한다.
+  셀 프로파일에서는 기본/명시 occupancy 설정을 보내지 않으며 normal cache를
+  생성하지 않는다. 프로파일 stdout은 native JSON 그대로다.
 - `FLOE_INDEX_BIN` 명시 override → 개발 tree release → 실행 파일 옆 → PATH.
   잘못된 override/버전 불일치는 hard error. 실행 시 Python은 필요 없다.
 - 두 새 CLI 사이의 동시 색인을 막는 `<source>.floe.index.lock` 파일이 남는다.

@@ -22,6 +22,22 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet};
 
 /// remaining-depth sentinel: no depth truncation below this WC
 pub const REM_FULL: u32 = u32::MAX;
+/// A sub-cut wash must be able to stand for at least this share of
+/// its footprint's pixels (members as one-pixel hairlines), else it
+/// is withheld (Hier::wash_worth, field 2026-09-15). The bar is low
+/// on purpose: a wash overstating a sparse array 100-fold is the
+/// documented wide-view trade (a 1 um lattice on a 10 um pitch at
+/// 2.5 um/px covers 6%), while a page of a few fiducial marks whose
+/// bbox spans the mask (10^-5) must not become a block.
+pub const WASH_MIN_COVERAGE: f64 = 1.0 / 256.0;
+
+/// A sub-cut page-BVH node whose extent is at most this many screen
+/// pixels on both sides washes whole, as it always did (a block that
+/// small overstates nothing anyone can see); a wider node walks on
+/// so its pages decide by their own member coverage. Keeps the plan
+/// from descending every sub-cut node of a wide deck view (field
+/// 2026-09-15: the walk budget is per pass, hundreds of passes).
+pub const WASH_WIDE_NODE_PX: f64 = 16.0;
 /// Calibre-style frame size bands, judged on the MIN screen side
 /// (however long the other side is, a short side demotes the box):
 ///   >= FRAME_WHITE_PX   white outline   (band 0, dt+0)
@@ -216,6 +232,13 @@ pub struct HierStats {
     /// placements) and the coarse child-BVH node washes among them
     pub sub_cut_washes: u64,
     pub sub_cut_coarse: u64,
+    /// sub-cut pages kept and child placements expanded instead of
+    /// washed: the footprint is wider than the cut and its members,
+    /// even as one-pixel hairlines, could not cover WASH_MIN_COVERAGE
+    /// (1/256) of it - too few to justify a wash, cheap to draw, and
+    /// Calibre shows them at every zoom (field 2026-09-15: two 140 x
+    /// 4 um marks 137 mm apart washed as one 137 x 54 mm block)
+    pub sub_cut_sparse: u64,
     /// pages selected whose every record is thin (max_min < hairline
     /// x cut): what the page hairline rule would have dropped
     pub thin_pages_kept: u64,
@@ -542,6 +565,7 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
         sub_cut_wash: req.sub_cut_wash && req.cut_dbu > 0,
         wash_walk_budget: opts.sub_cut_walk_budget,
         wash_nodes: HashSet::new(),
+        sparse_edges: HashSet::new(),
         hair: (req.cut_dbu.max(0) as f64 * opts.hairline) as u64,
         page_hair: if req.page_hairline {
             (req.cut_dbu.max(0) as f64 * opts.hairline) as u64
@@ -839,6 +863,9 @@ struct Hier<'a> {
     wash_walk_budget: u64,
     /// child-BVH nodes already washed coarsely (per expand)
     wash_nodes: HashSet<u32>,
+    /// placements expanded because they were sparse (no wash could
+    /// stand for them): place_edge lets them through the cell cut
+    sparse_edges: HashSet<u64>,
     /// (child ci, bin x, bin y) bins already owning a representative
     /// - One/Pts thin frames dedupe here; cleared per expand (bins
     /// are WC-local coordinates)
@@ -925,8 +952,21 @@ impl<'a> Hier<'a> {
                         && p.max_h < self.cut)
                         || p.max_min < self.page_hair
                     {
-                        self.st.cull_page_size += 1;
                         let in_view = boxes.iter().any(|b| p.bbox.intersects(b));
+                        if self.sub_cut_wash
+                            && in_view
+                            && !self.wash_worth(&p.bbox, p.members, p.max_w, p.max_h)
+                        {
+                            // sparse: too few members for a wash to
+                            // stand for them and cheap to draw - keep
+                            // the page; its members render as
+                            // hairline pixels, as Calibre shows them
+                            self.st.sub_cut_sparse += 1;
+                            self.note_page("keep_sparse", ci, &p, pi);
+                            psel.insert(pi);
+                            continue;
+                        }
+                        self.st.cull_page_size += 1;
                         if in_view {
                             let verdict = if p.max_w < self.cut && p.max_h < self.cut {
                                 "cull_size"
@@ -1080,6 +1120,7 @@ impl<'a> Hier<'a> {
             };
             self.thin_bins.clear();
             self.wash_nodes.clear();
+            self.sparse_edges.clear();
             let mut edges: BTreeSet<u64> = BTreeSet::new();
             let mut framed: HashSet<u64> = HashSet::new();
             for b in &boxes {
@@ -1199,14 +1240,23 @@ impl<'a> Hier<'a> {
                                 // only the proxy box is gone,
                                 // matching the depth-full omission
                                 // rule.
+                                if self.sub_cut_wash
+                                    && !self.wash_sub_cut_child(
+                                        &mut wc, pli, &h, &rb, &boxes,
+                                    )
+                                {
+                                    // sparse (no wash could stand for
+                                    // it): walk it - few members, and
+                                    // Calibre shows them at every zoom
+                                    self.st.sub_cut_sparse += 1;
+                                    self.note_child("expand_sparse", pli, &h, &rb, &boxes);
+                                    self.sparse_edges.insert(pli);
+                                    edges.insert(pli);
+                                    continue;
+                                }
                                 self.st.cull_size += 1;
                                 framed.insert(pli);
                                 self.note_child("fold_size", pli, &h, &rb, &boxes);
-                                if self.sub_cut_wash {
-                                    self.wash_sub_cut_child(
-                                        &mut wc, pli, &h, &rb, &boxes,
-                                    );
-                                }
                                 continue;
                             }
                             if self.opts.frame_cap != 0
@@ -1256,16 +1306,25 @@ impl<'a> Hier<'a> {
                         if (cw < cut && chh < cut)
                             || cw.min(chh) < self.hair
                         {
+                            if self.sub_cut_wash
+                                && !self.wash_sub_cut_child(
+                                    &mut wc, pli, &h, &rb, &boxes,
+                                )
+                            {
+                                // sparse (no wash could stand for it):
+                                // expand - few members, and Calibre
+                                // shows them at every zoom
+                                self.st.sub_cut_sparse += 1;
+                                self.note_child("expand_sparse", pli, &h, &rb, &boxes);
+                                self.sparse_edges.insert(pli);
+                                edges.insert(pli);
+                                continue;
+                            }
                             self.st.cull_size += 1;
                             self.note_child(
                                 if cw < cut && chh < cut { "omit_size" } else { "omit_hair" },
                                 pli, &h, &rb, &boxes,
                             );
-                            if self.sub_cut_wash {
-                                self.wash_sub_cut_child(
-                                    &mut wc, pli, &h, &rb, &boxes,
-                                );
-                            }
                             continue;
                         }
                         self.note_child("expand", pli, &h, &rb, &boxes);
@@ -1284,6 +1343,56 @@ impl<'a> Hier<'a> {
     /// whole footprint (the repetition extent, one rect) on every
     /// visible layer of the child's recursive layer mask, when the
     /// footprint meets a view box.
+    /// The footprint is wider than WASH_WIDE_NODE_PX on a side.
+    fn wash_wide(&self, fp: &BBox) -> bool {
+        let ppd = self.px_per_dbu;
+        if !(ppd > 0.0) {
+            return false;
+        }
+        let fw = (fp.x1 - fp.x0).max(0) as f64 * ppd;
+        let fh = (fp.y1 - fp.y0).max(0) as f64 * ppd;
+        fw > WASH_WIDE_NODE_PX || fh > WASH_WIDE_NODE_PX
+    }
+
+    /// The footprint is one screen blob: both sides at most the cut.
+    fn wash_blob(&self, fp: &BBox) -> bool {
+        let ppd = self.px_per_dbu;
+        if !(ppd > 0.0) {
+            return true;
+        }
+        let fw = (fp.x1 - fp.x0).max(0) as f64 * ppd;
+        let fh = (fp.y1 - fp.y0).max(0) as f64 * ppd;
+        let cut_px = self.cut as f64 * ppd;
+        fw <= cut_px && fh <= cut_px
+    }
+
+    /// Whether a sub-cut wash may stand in for what the hairline
+    /// render of `members` records of at most `w` x `h` dbu inside
+    /// `fp` would show: the footprint is one screen blob, or the
+    /// members - each at least one pixel, as a hairline is - could
+    /// cover at least WASH_MIN_COVERAGE of the footprint's pixels.
+    /// Field 2026-09-15 (level 4 at depth 0): a page holding two
+    /// 140 x 4 um marks 137 mm apart has a 137 x 54 mm page bbox and
+    /// was washed as one block of that size in the layer colour from
+    /// the zoom where the marks went under the cut. A sparse page
+    /// is now KEPT (its members draw as hairline pixels, as Calibre
+    /// shows them at every zoom - user 2026-09-15) and a sparse
+    /// placement expanded, the cost being bounded by the very
+    /// sparseness that ruled the wash out.
+    fn wash_worth(&self, fp: &BBox, members: u64, w: u64, h: u64) -> bool {
+        if self.wash_blob(fp) {
+            return true;
+        }
+        let ppd = self.px_per_dbu;
+        let fw = ((fp.x1 - fp.x0).max(0) as f64 * ppd).max(1.0);
+        let fh = ((fp.y1 - fp.y0).max(0) as f64 * ppd).max(1.0);
+        let mw = (w as f64 * ppd).max(1.0);
+        let mh = (h as f64 * ppd).max(1.0);
+        (members as f64) * mw * mh >= WASH_MIN_COVERAGE * fw * fh
+    }
+
+    /// Returns false when the placement is sparse (no wash could
+    /// stand for it): the caller expands it instead of dropping it.
     fn wash_sub_cut_child(
         &mut self,
         wc: &mut WsCell,
@@ -1291,25 +1400,34 @@ impl<'a> Hier<'a> {
         h: &floe_ovm::PlaceHead,
         rb: &BBox,
         boxes: &[BBox],
-    ) {
+    ) -> bool {
         let t0 = Xf::place(h.x, h.y, h.rot, h.flip);
         let b0 = xf_bbox(&t0, rb);
-        let fp = match h.kind {
-            0 => b0,
-            1 => grow_by_offsets(
-                &b0,
-                &grid_ovis(0, h.na as i64 - 1, 0, h.nb as i64 - 1, h.va, h.vb),
+        let (fp, members) = match h.kind {
+            0 => (b0, 1u64),
+            1 => (
+                grow_by_offsets(
+                    &b0,
+                    &grid_ovis(0, h.na as i64 - 1, 0, h.nb as i64 - 1, h.va, h.vb),
+                ),
+                (h.na as u64).saturating_mul(h.nb as u64),
             ),
             _ => match self.v.pts_ref(pli) {
-                Some(pr) => grow_by_offsets(&b0, &pr.extent()),
-                None => b0,
+                Some(pr) => (grow_by_offsets(&b0, &pr.extent()), pr.count as u64),
+                None => (b0, 1u64),
             },
         };
         if fp.is_empty() || !boxes.iter().any(|b| fp.intersects(b)) {
-            return;
+            return true;
+        }
+        let bw = (b0.x1 - b0.x0).max(0) as u64;
+        let bh = (b0.y1 - b0.y0).max(0) as u64;
+        if !self.wash_worth(&fp, members, bw, bh) {
+            return false;
         }
         let mask = self.v.cell_lmask_rec(h.child);
         self.wash_layers(wc, mask, fp);
+        true
     }
 
     /// One wash rect `fp` per visible layer in bitset `mask`.
@@ -1414,13 +1532,29 @@ impl<'a> Hier<'a> {
                     let (mw, mh) = (n.max_w, n.max_h);
                     self.note("pbvh", "cull_size", cell, Some(layer_idx), ni as u64, nb, mw, mh, mw.min(mh), n.count as u64);
                 }
-                // sub-cut wash: the pruned node's whole extent, on
-                // the range's layer (a page BVH is per (cell, layer))
+                // sub-cut wash: a node that is one screen blob, or
+                // at most WASH_WIDE_NODE_PX on both sides, washes
+                // whole (a page BVH is per (cell, layer), so the
+                // layer is exact); a wider node walks on while the
+                // budget lasts so its pages decide by their own
+                // member coverage (wash_worth / keep_sparse), and
+                // beyond the budget washes its extent coarsely
                 if self.sub_cut_wash && n.bbox.intersects(b) {
-                    washes.push((layer_idx, n.bbox));
-                    self.st.sub_cut_washes += 1;
+                    if self.wash_blob(&n.bbox) || !self.wash_wide(&n.bbox) {
+                        washes.push((layer_idx, n.bbox));
+                        self.st.sub_cut_washes += 1;
+                        continue;
+                    }
+                    if self.wash_walk_budget == 0 {
+                        washes.push((layer_idx, n.bbox));
+                        self.st.sub_cut_washes += 1;
+                        self.st.sub_cut_coarse += 1;
+                        continue;
+                    }
+                    self.wash_walk_budget -= 1;
+                } else {
+                    continue;
                 }
-                continue;
             }
             if !n.bbox.intersects(b) {
                 self.st.culled_page_bvh_bbox += 1;
@@ -1434,8 +1568,19 @@ impl<'a> Hier<'a> {
                         && p.max_h < self.cut)
                         || p.max_min < self.page_hair
                     {
+                        let in_view = p.bbox.intersects(b);
+                        if self.sub_cut_wash
+                            && in_view
+                            && !self.wash_worth(&p.bbox, p.members, p.max_w, p.max_h)
+                        {
+                            // sparse: kept, see the linear page loop
+                            self.st.sub_cut_sparse += 1;
+                            self.note_page("keep_sparse", cell, &p, pi);
+                            psel.insert(pi);
+                            continue;
+                        }
                         self.st.cull_page_size += 1;
-                        if p.bbox.intersects(b) {
+                        if in_view {
                             let verdict = if p.max_w < self.cut && p.max_h < self.cut {
                                 "cull_size"
                             } else {
@@ -1443,7 +1588,7 @@ impl<'a> Hier<'a> {
                             };
                             self.note_page(verdict, cell, &p, pi);
                         }
-                        if self.sub_cut_wash && p.bbox.intersects(b) {
+                        if self.sub_cut_wash && in_view {
                             washes.push((layer_idx, p.bbox));
                             self.st.sub_cut_washes += 1;
                         }
@@ -1759,7 +1904,10 @@ impl<'a> Hier<'a> {
         // below-cut placements inline before this fn is reached.)
         let cw = (child.rbbox.x1 - child.rbbox.x0).max(0) as u64;
         let ch = (child.rbbox.y1 - child.rbbox.y0).max(0) as u64;
+        // a sparse placement the wide policy expanded instead of
+        // washing (expand_sparse) passes the cut here on purpose
         if !structural
+            && !self.sparse_edges.contains(&pli)
             && ((cw < self.cut && ch < self.cut)
                 || cw.min(ch) < self.hair)
         {

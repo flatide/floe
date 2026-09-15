@@ -151,9 +151,11 @@ floe view data/testchip_1g5.oas            # 개발용 KLayout 셸 (동결, 비�
   `--p2-shard-limit-mb`는 Rust 빌드 옵션이다. floe2는 density coverage를
   생성·표시하지 않으며 공유 cache에 남은 `design.ovc`도 읽지 않는다. 안정판
   `floe`의 KLayout 화면만 `--coverage`/`--coverage-only`를 계속 제공한다.
-- `--occupancy`(opt-in)는 마스크 정책 광역뷰용 점유 피라미드 `design.ovo`를
-  함께 만들고, `--occupancy-only`는 현재 캐시에 추가·교체한다(`--occupancy-um`
-  기준 셀, 기본 4 µm; 덱에도 적용). 확인은 `floe-index occupancy <src>.floe`.
+- 마스크 정책 광역뷰용 점유 피라미드 `design.ovo`는 **기본으로 함께 만든다**
+  (M5 결정 2026-09-15; `--no-occupancy`로 끔). 현재 캐시에 요약이 없으면 기본
+  색인이 추가만 하고, `--occupancy-only`는 현재 캐시에 추가·교체한다
+  (`--occupancy-um` 기준 셀, 기본 4 µm; 덱에도 적용). 확인은 `floe-index
+  occupancy <src>.floe`.
   뷰어 사용(M2)은 아직이며 형식·규칙은 docs/OCCUPANCY_PLAN.ko.md.
 
 ### Jobdeck (Calibre MDPView `.jb`)
@@ -377,12 +379,15 @@ floe는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델을 
   상태줄 `thin:cull` — 가는 도형이 광역 뷰에서 생략될 수 있다), **jobdeck에서는
   해제**(`thin:keep` — 마스크 데이터는 hairline이 많고, 실칩에서 81~124 nm 선
   영역이 210 µm 뷰부터 사라졌다). 단독 마스크 OASIS는 `floe2 view/render --thin
-  keep` 또는 View > keep thin shapes (mask detail)로 마스크 정책을 고른다. 남긴
+  keep` 또는 View > thin shapes at wide views > keep (mask policy)로 마스크
+  정책을 고른다(auto = 소스 기본, cull = 레이아웃 정책). 남긴
   페이지는 perf 줄 `thin pages N kept`로 표시된다. 진단용 override
   `FLOE_RUST_PAGE_HAIRLINE=cull|keep`.
 - **점유 요약**(`thin:keep`의 광역뷰, 2026-09-11, docs/OCCUPANCY_PLAN.ko.md):
   캐시에 `design.ovo`(`floe2 index --occupancy-only`)가 있고 요청이 keep·
-  exact 아님·depth full이며 기준 셀이 화면 1 px 이하이면, 그 레이어는 페이지
+  exact 아님·depth가 그 레이어를 통째로 그리는 값(무제한, 소스 계층 높이 이상,
+  또는 그 레이어의 가장 깊은 페이지 깊이 이상)이며 기준 셀이 화면 1 px 이하이면,
+  그 레이어는 페이지
   대신 셀 ≤ 1 px인 피라미드 레벨의 점유 마스크로 그려진다(셀 중심이 놓인
   픽셀; 경계 solid, 내부 채움). 오차 계약: 요약과 exact는 서로 1 px 팽창 안에
   있다(3 px 이상 빈 간격은 항상 보존, 2 px는 위상에 따라 닫힐 수 있음; 진단

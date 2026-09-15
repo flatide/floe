@@ -63,6 +63,22 @@ def validate_real_marker():
 
 
 def main():
+    # The Rust summary default must not disable the explicit legacy oracle.
+    # Stub the writer: no source/cache or KLayout runtime is touched here.
+    from unittest.mock import patch
+    sys.path.insert(0, str(ROOT))
+    from floe import cli
+    with patch.object(cli, "_cmd_index_legacy", return_value=0) as legacy:
+        cli.main(["index", "/synthetic/unused.oas", "--legacy"], rust_only=False)
+        assert legacy.call_count == 1 and legacy.call_args.args[0].occupancy is False
+        for flags in (["--occupancy"], ["--occupancy-only"], ["--occupancy-um", "4"]):
+            try:
+                cli.main(["index", "/synthetic/unused.oas", "--legacy", *flags], rust_only=False)
+            except SystemExit as error:
+                assert "cannot be combined" in str(error)
+            else:
+                raise AssertionError("explicit Rust summary flag reached legacy writer")
+        assert legacy.call_count == 1
     with tempfile.TemporaryDirectory(prefix="floe-index-cli-") as td:
         work = Path(td)
         binary_dir = work / "bin with space"
@@ -106,6 +122,8 @@ else:
     (out / "design.ovm").write_bytes(b"committed")
     if "--coverage" in args:
         (out / "design.ovc").write_bytes(b"coverage")
+if "--occupancy" in args or "--occupancy-only" in args:
+    (out / "design.ovo").write_bytes(b"occupancy")
 """, encoding="utf-8")
         binary.chmod(0o755)
         env = os.environ.copy()
@@ -121,13 +139,16 @@ else:
         run(env, src, "--jobs", "3", "--page-target-mb", "2",
             "--coverage", "--no-lod", "--slow-cell-s", "0",
             "--p2-shard-limit-mb", "0")
+        # the occupancy summary is the default (M5, 2026-09-15)
         expected = [
             "vfs", str(src), str(src) + ".floe", "--jobs", "3",
-            "--page-target-mb", "2", "--coverage", "--no-lod",
+            "--page-target-mb", "2", "--coverage", "--occupancy", "--no-lod",
             "--slow-cell-s", "0.0", "--p2-shard-limit-mb", "0",
         ]
         check(build_calls(log) == [expected],
               "Rust VFS options were not forwarded")
+        check((Path(str(src) + ".floe") / "design.ovo").is_file(),
+              "the default index did not ask for the summary")
 
         reused = run(env, src)
         check("cache up to date" in reused.stdout, "current cache not reused")
@@ -144,6 +165,23 @@ else:
         run(env, src, "--force")
         check(len(build_calls(log)) == 2,
               "--force did not launch a rebuild")
+        # --no-occupancy indexes without the summary; the next default
+        # index adds it to that cache without re-indexing (counts below
+        # are relative from here on)
+        noocc = work / "noocc.oas"
+        noocc.write_bytes(b"fixture no summary")
+        run(env, noocc, "--no-occupancy")
+        check("--occupancy" not in build_calls(log)[-1],
+              "--no-occupancy still asked for the summary")
+        check(not (Path(str(noocc) + ".floe") / "design.ovo").exists(),
+              "--no-occupancy produced a summary")
+        run(env, noocc)
+        check(build_calls(log)[-1] == [
+            "vfs", str(noocc), str(noocc) + ".floe", "--jobs", "12",
+            "--occupancy-only",
+        ], "the default did not add the summary to a cache without one")
+        check((Path(str(noocc) + ".floe") / "design.ovo").is_file(),
+              "the added summary is missing")
 
         additive = work / "additive.oas"
         additive.write_bytes(b"fixture 2")

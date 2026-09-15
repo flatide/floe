@@ -23,7 +23,8 @@ def main():
     tree = ast.parse((ROOT / "floe/gui.py").read_text())
     viewer = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Viewer")
     methods = {n.name: n for n in viewer.body if isinstance(n, ast.FunctionDef)}
-    functions = [methods[n] for n in ("open_file", "_set_depth")]
+    method_names = ("open_file", "_open_file_load", "_set_depth")
+    functions = [methods[n] for n in method_names]
     scope = dict(os=os, APP="floe2", __name__="floe.gui", __package__="floe",
                  _is_deck_path=lambda p: p.endswith(".jb"))
 
@@ -57,14 +58,19 @@ def main():
             depth_value=depth, detail=detail, thin_mode=thin, frames_on=frames,
             labels_on=labels, label_font_px=font, _mono=True, _mono_saved=True,
             _ddlg=None, _restore_keys=lambda: None)
+        loading = []
+        obj._loading_show = lambda message: loading.append(message)
+        obj._loading_hide = lambda: loading.append(None)
         def apply(c):
             obj.cache = c
             exec(mono_code, dict(self=obj))
         obj._apply_cache = apply
-        for name in ("open_file", "_set_depth"):
+        for name in method_names:
             setattr(obj, name, MethodType(scope[name], obj))
         with patch.dict(sys.modules, {"floe.jobdeck.viewer": SimpleNamespace(DeckCache=Cache)}):
             assert obj.open_file(path) is None
+        assert len(loading) == (0 if same else 1), "new cache loads show the banner; same source does not"
+        assert None not in loading, "successful apply leaves banner for worker-ready completion"
         cases.append(dict(before=dict(depth=depth, detail=detail, thin=thin, frames=frames,
             labels=labels, font_px=font), deck=deck, same=same, want=dict(
             depth=None if obj.depth_value == 999 else obj.depth_value, detail=obj.detail,

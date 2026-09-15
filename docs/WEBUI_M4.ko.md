@@ -4433,3 +4433,73 @@ occupancy25, 잡덱80, 렌더러46, KLayout13 PX+2 phase-exact+14 style 대조�
 것이다. 이 단계에서는 합류하지 않았다. 그 뒤 브라우저 다중 선택·접기/펼치기·
 페이지 간 선택과 multi-style 조작을 잇는다.
 잔여 CLI/형식·G1/G4·공유/원격·현장 수용은 계속 열려 있다.
+
+## 57. M4g-11b — 실측 잡덱 합류와 occupancy 기본 생성
+
+`feature/jobdeck`의 로컬 `09be2ab`까지 16개 커밋을 §11의 정방향 merge로 가져왔다.
+실측 브랜치와 main의 작업 트리를 수정하거나 역머지하지 않았다. 버전 충돌만
+수동 해결했으며 결합된 renderd/index는 `0.12.89`, Python 표시 버전은 `0.12.133`이다.
+양쪽 분기의 이전 실행 파일을 잘못 호환으로 받아들이지 않도록 함께 재빌드해야 한다.
+
+합류한 핵심은 빈 occupancy 레이어의 무비트맵 표현·마킹 병렬화, 레이어별 전체
+내용을 포함하는 depth의 요약 사용, 희소 sub-cut 페이지 유지/배치 확장과 wash 억제,
+알 수 없는 index 옵션 거부, GTK 로딩 안내와 기본 요약 생성이다. 기하/요약 알고리즘은
+실측 브랜치의 계약을 보존한다. 그 브랜치에 기록된 실칩 150ms는 웹 실측값이 아니다.
+occupancy의 M5 완료와 웹 M5(world-tile)를 혼동하지 않는다.
+
+Python 변경의 Rust 대응:
+
+- 일반/잡덱 CLI, managed index, 웹 index/index-open은 occupancy 기본 on이다.
+  fresh current 캐시에 요약만 없으면 추가하고 base marker·page·text·metadata를
+  보존한다. stale/incomplete 캐시는 여전히 별도 force가 필요하다.
+- `--no-occupancy` / `options.occupancy:false`는 생성·추가 생략이며 기존 요약 삭제가
+  아니다. `occupancy-only`는 요약만 다시 만들고, `occupancy-um`은 생성을 요청한다.
+  명시 CLI 모드 플래그끼리는 배타적이다. 셀 profile에는 기본/명시 summary 옵션을
+  전달하지 않아 normal cache/lock을 만들지 않는다.
+- 신규 웹 승인 dialog와 일반 index checkbox는 기본 체크한다. 저장된 false 승인,
+  응답 유실/reload 후 동일 승인 재시도는 false 그대로이며 비활성 checkbox/jobs도
+  저장된 승인 값으로 표시한다. 선택/preview는 쓰지 않고
+  force 체크는 계속 기본 off다. 기존 작업/모드 전환 상태 안내와 thin 3상태 선택은
+  이미 웹에 있어 GTK widget을 복사하지 않는다.
+- 잡덱 CLI 완료 줄에 `(n/N)`, 경과 및 평균 기반 남은 시간(추정)을 표시한다.
+  기존 Rust 서비스는 순차 source 실행과 내부 jobs, 취소/lease 계약을 유지한다.
+- 합류 중 Python 잡덱 wrapper의 no-occupancy 누락을 발견했다. 자식 CLI 기본값도
+  on이므로 새/force 소스에 flag를 보내지 않으면 해제가 유실된다. 웹 작업 트리에서
+  `--no-occupancy` 전달을 보완하고 Rust/Python 양쪽의 실제 소스 생성으로 검사한다.
+  이 추가 수정은 아직 실측 브랜치로 역반영하지 않았다.
+- Python CLI의 암묵 occupancy 기본값은 backend 확정 뒤 적용한다. 그렇지 않으면
+  `--legacy`도 Rust 옵션을 지정한 것으로 오인되어 새 `.tiles` oracle을 만들 수 없다.
+  Rust 기본 on/legacy 기본 off를 구분하고 legacy에 명시한 summary 옵션은 계속 거부한다.
+
+검증 결과:
+
+- app-core254/web76/app20 단위, 이 세 package 대상 strict clippy, Rust 1.89.0 단위, Linux musl
+  all-targets check 통과. CLI의 default OVO bytes를 Python과 대조하고 opt-out→기존
+  캐시 추가 시 base bytes/mtime 보존, profile JSON/snapshot·SIGINT/SIGTERM을 통과했다.
+- 잡덱 source/index gate에서 선택된 source의 기본 생성, opt-out→additive, LOD와
+  occupancy-only, 중간 실패·비선택 소스 보존, 완료 줄 진행 정보를 대조했다.
+- 첫 전체 배터리는 GTK `open_file`이 `_open_file_load`로 분리된 데 따른 대조 도구의
+  AttributeError에서 멈췄다. 새 helper와 로딩 callback을 포함해 실제 GTK 정책을
+  다시 실행하고 1,296개 대조를 통과했다. legacy 기본값은 stub writer gate와 별도로
+  새 합성 소스에 실제 `index --legacy --jobs 1`을 실행해 `.tiles` 생성/`.floe` 미생성을
+  확인했다. 재실행 로그는 `floe-deck-sync-battery-final.log`다.
+- index-open/client JS gate는 기본 체크, 명시 해제, 승인 journal/재시도 불변을 확인한다.
+  native owner gate는 생략 옵션의 실제 OVO 생성과 첫 프레임을 검사한다.
+- 실제 Chrome 시도는 브라우저 도구의 `file://` 인증 시작 파일 정책으로 차단됐다.
+  우회하지 않았고 합성 서버는 종료하여 임시 인증 파일을 정리했다. 이번 기본 체크의
+  실제 브라우저 클릭 수용은 미검증이며, native/JS 검증을 그 수용으로 대신하지 않는다.
+- 집중 로그: `/private/tmp/floe-deck-sync-{units,build,cli,sources,clippy,msrv,linux}.log`.
+  추가 renderer 전체 strict clippy(`render-clippy.log`)는 통과하지 않았다. lib test
+  기준 31개 진단이며 미사용 repetition 함수, 기존 deck/raster/summary 스타일과
+  합류한 layer-depth 루프의 `needless_range_loop`가 포함된다. deck/raster/repetition은
+  이번 HEAD 대비 변경이 없음을 확인했다. 이 lint 부채를 실행·픽셀 회귀 PASS나
+  위의 app/core/web clippy PASS와 혼동하지 않는다.
+  추가 로그: `floe-deck-sync-{file-display,python-index,legacy}.log`.
+  전체 `sh tools/validate_rust.sh`는 exit 0 / `RUST VALIDATION: ALL OK`로 끝났다
+  (`/private/tmp/floe-deck-sync-battery-final.log`). owner17, GTK 파일 정책1296,
+  palette12096, native stream6, occupancy27, 잡덱83, 렌더러46, VFS H1-H5/L1-L9,
+  KLayout13 PX+2 phase-exact+14 style을 통과했다.
+
+목표 잔여: 레이어 다중 선택/접힘/페이지 간 UI와 스타일 조작, 잔여 CLI·입력 형식,
+G1 지연/pacing·G4 전체 수용, Python-free Linux 실행, 공유/원격 및 Firefox/ETX 현장.
+이번 합류로 실측 코드와의 차이는 줄었지만 전체 목표 완료 직전으로 판정하지 않는다.

@@ -13,12 +13,17 @@
 `--profile-cell-ci`, `--profile-jobs`, `--profile-repeat`,
 `--profile-snapshot`/`--profile-snapshot-refresh`를 같은 이름의 Rust
 옵션으로 전달한다.
-coverage는 viewer 기본값과 맞춰 opt-in이다.
+coverage는 viewer 기본값과 맞춰 opt-in이다. **점유 요약(`--occupancy`)은
+기본**(M5 결정 2026-09-15): `floe index`는 항상 `--occupancy`를 전달하고
+`--no-occupancy`로만 끈다(raw 바이너리는 명시 옵션). 현재 캐시에 `design.ovo`가
+없으면 재색인 없이 `--occupancy-only`로 추가하고, 있으면 "cache up to date
+(occupancy already present)". 셀 프로파일 실행은 요약을 요청하지 않는다.
 **기본값(2026-08-28)**: `--jobs`는 **12**(구 host parallelism — raw
 `floe-index vfs` 바이너리 자체 기본은 여전히 CPU 코어), LOD는 **끔**
 — `floe index`는 항상 `--no-lod`를 전달하고 `--lod`로만 다시 켠다(LOD
 퇴출 방향; raw 바이너리 기본은 아직 LOD 포함). 뷰어의 load-layout /
-open .db 인덱싱도 동일하게 `--jobs 12`(+VFS는 `--no-lod`)로 실행한다.
+open .db 인덱싱도 동일하게 `--jobs 12`(+VFS는 `--occupancy --no-lod`; load
+jobdeck은 `floe2 index deck.jb`라 기본이 그대로 적용)로 실행한다.
 
 정상 VFS cache의 cache version과 source size/mtime fingerprint가 맞고,
 `floe-index vfsd`의 `Vfs::open` 검증(OVM 구조 + OVP/OVT committed length)을
@@ -47,6 +52,12 @@ floe-index vfs <src.oas> [outdir=.floe] [--jobs N] [--plan-batch N]
     [--profile-jobs N,N,...] [--profile-repeat N]
     [--profile-snapshot PATH] [--profile-snapshot-refresh]
 ```
+
+`--`로 시작하는데 위 목록에 없는 인자는 `floe-index <cmd>: unknown option …`으로
+거부한다(exit 2, 파일 시스템 접근 전). 위치 인자(src·outdir)는 `--`로 시작할 수
+없다. `tile`·`index`·`vfs`·`occupancy`·`vfsd` 공통(2026-09-14 현장: `floe-index
+index file.oas --occupancy-only`가 옵션을 outdir로 받아 `--occupancy-only` 폴더에
+레거시 타일 색인을 만들었다). `plan`만 `--키 값` 쌍을 그대로 넘긴다.
 
 `--slow-cell-s S` = slow-cell 로그 임계 초(기본 5.0, 0 = 전 셀 —
 게이트/계측용), `--p2-shard-limit-mb N` = P2 arena 샤딩 복사 명시
@@ -244,7 +255,8 @@ frontier를 재계산하고 meta.json의 해당 객체만 brace-balanced splice�
 ```
 floe-index plan <cachedir> --view x0,y0,x1,y1(µm) [--px-per-um F]
     [--cut-px F] [--depth N|full] [--layers ...] [--lod 0]
-    [--wash-px F] [--hairline-f F] [--thin-um F] [--page-hairline 0|1] [--inspect]
+    [--wash-px F] [--hairline-f F] [--thin-um F] [--page-hairline 0|1]
+    [--sub-cut-wash 0|1] [--inspect]
 ```
 JSON 출력: pages/bytes/records/members + 플래너 stats 전체
 (frame_rects, culled_*, lod_pages, washed_pages, culled_bvh_size,
@@ -264,8 +276,11 @@ explain  <kind>  <verdict>  <cell>  <layer L/D | ->  <id>  <bbox um x0,y0,x1,y1>
   마스크/jobdeck 정책) ·
   `pbvh` cull_size(페이지 BVH 노드째) · `cbvh` prune_size(자식 BVH 노드째, w/h =
   max_dim, min = max_min) · `child` expand|omit_size|omit_hair(full depth 생략)|
-  fold_size(유한 깊이 폴드)|cull_layer · `frame`(r==0) keep|thin_lattice|cull_size|
-  cull_hair.
+  fold_size(유한 깊이 폴드)|cull_layer|expand_sparse(덱: 희소해 wash 대신 펼침,
+  members = 반복 수) · `frame`(r==0) keep|thin_lattice|cull_size|cull_hair · `page`
+  keep_sparse(덱: 멤버가 footprint의 1/256을 못 덮어 wash 대신 페이지를 선택,
+  JOBDECK 4단계). 덱 정책의 판정을 단일 소스에서 보려면 `--sub-cut-wash 1
+  --page-hairline 0`(2026-09-15).
 - 페이지의 w/h/min은 색인 필드 max_w/max_h/max_min, bbox는 셀 로컬 dbu를 µm로;
   배치는 첫 멤버의 월드 박스, members는 반복 멤버 수. 뷰 박스와 겹치는 것만
   기록되므로 fit 뷰에서도 수천 줄 규모다.
@@ -296,14 +311,23 @@ floe-index occupancy <outdir> [--layer L/D] [--level N] [--dump]  # 검사
   않는다(KLayout region 판정). hull이 거부되는 path(퇴화 spine·U-turn)가 있는
   레이어는 `none:unsupported`로 게시되어 페이지 경로가 그린다(2차 리뷰 P1-2:
   건너뛰고 ok로 두면 도형이 조용히 사라진다); 개수는 `paths_skipped`로 로그.
-- 레이어 병렬(`--jobs`): 레이어마다 재귀 레이어 존재 집합으로 가지치기한 순회
-  한 번. 배치 반복의 멤버는 열거하면서 하나씩 charge·walk한다(오프셋 벡터 없음,
-  2차 리뷰 P1-1). 상위 레벨은 OR 풀링, 격자가 64 × 64 이하가 될 때까지.
+- 병렬(`--jobs`, 2026-09-14): 레이어는 순서대로, 한 레이어의 마킹을 `--jobs`
+  스레드가 나눠 맡는다. top 셀의 레코드 목록(조각)과 배치의 멤버 범위가 unit이고,
+  top이 단일 배치(die)뿐이면 최대 4단계 내려가 unit을 확보한다(4 × jobs개 목표).
+  스레드마다 자기 level 0 비트맵에 마킹하고 끝에 OR로 합치므로 결과 파일은
+  스레드 수와 무관하게 바이트 동일하다(unit은 레코드의 반복을 쪼개지 않고 단일
+  배치만 통과하므로 charge도 같다; `none:work`일 때의 work 값만 다를 수 있다).
+  작업 예산은 레이어 공유 카운터(스레드가 4,096 charge마다 flush, 초과 폭 ≤ jobs ×
+  4,096). 메모리 = jobs × level 0 한 장. 레이어마다 재귀 레이어 존재 집합으로
+  가지치기하고, 존재하지 않는 레이어는 순회 없이 `empty`. 배치 반복의 멤버는
+  열거하면서 하나씩 charge·walk한다(오프셋 벡터 없음, 2차 리뷰 P1-1). 상위 레벨은
+  OR 풀링, 격자가 64 × 64 이하가 될 때까지. 로그 `[vfs] occupancy cell= … ok=K
+  empty=E jobs=N SIZE (Ts)`.
 - 상한(레이어 단위, 근사 저장 없음): level 0 셀 수 > `--occupancy-max-cells`
   (기본 2^30)면 모든 레이어 `none:cells`(파일은 만들어져 이유를 남김);
   마킹 작업(켠 셀 + 멤버 + 변 행) > `--occupancy-max-work`(기본 2^31)면 그
   레이어 `none:work`; 누적 비트맵 바이트가 `--occupancy-max-bytes`(기본 1 GiB)를
-  넘는 순서부터 `none:size`. 세 옵션은 게이트용 명시 CLI 상태다(`--kill-at`과
+  넘는 순서부터 `none:size`(`empty`·`none:*` 레이어는 자리를 차지하지 않는다). 세 옵션은 게이트용 명시 CLI 상태다(`--kill-at`과
   같은 규칙, 환경변수 없음).
 - 게시: `design.ovo.tmp` 작성·fsync 뒤 rename. `--kill-at occupancy-tmp`는 rename
   직전에 죽는 게이트 훅(이전 파일 보존, tmp 잔존). 다음 실행은 시작 시 tmp를

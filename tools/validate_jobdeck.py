@@ -139,6 +139,25 @@ END
 
 # 2026-09-11: a mask deck of the thin-line source (its default keeps
 # the all-thin pages; a plain layout culls them)
+SPARSE_DECK = """* sparse.jb
+SLICE 1,17
+RETICLE
+OPTION PA, AA=0.0200, BA=0.002000, SA=80
+MTITLE 1,MARKS
+MTITLE 2,BLOB
+MTITLE 3,ARR
+*PLACE-INFO
+*
+CHIP ID001, * MAIN 1.0000
+*
+$ (1, MARKS, AD=0.00020, SF=1, TC=sparse.oas, LY={1}, DT={0}, BX=0.0, BY=0.0, UX=2000.0, UY=2000.0 )
+$ (2, BLOB, AD=0.00020, SF=1, TC=sparse.oas, LY={2}, DT={0}, BX=0.0, BY=0.0, UX=2000.0, UY=2000.0 )
+$ (3, ARR, AD=0.00020, SF=1, TC=sparse.oas, LY={3}, DT={0}, BX=0.0, BY=0.0, UX=2000.0, UY=2000.0 )
+ROWS 100.0/100.0
+*END-PLACE
+END
+"""
+
 THIN_DECK = """* thin.jb
 MTITLE 1,HAIR
 *PLACE-INFO
@@ -240,6 +259,8 @@ def build_fixtures(d: Path):
     (d / "dt.jb").write_text(DT_DECK)
     (d / "tiny.jb").write_text(TINY_DECK)
     (d / "thin.jb").write_text(THIN_DECK)
+    (d / "sparse.jb").write_text(SPARSE_DECK)
+    build_sparse_oas(d / "sparse.oas")
     build_oas(d / "dt.oas", 0.00005, 2000.0, 2000.0, [(7, 0), (7, 1)], "DT")
     build_dense_oas(d / "dense.oas")
     build_tiny_oas(d / "tiny.oas")
@@ -328,6 +349,37 @@ def build_tiny_oas(path, dbu=0.00005, pitch_um=10.0, n=200, box_um=1.0):
     bit.shapes(l2).insert(db.Box(0, 0, b, b))
     top.insert(db.CellInstArray(bit.cell_index(), db.Trans(),
                                 db.Vector(p, 0), db.Vector(0, p), n, n))
+    ly.write(str(path))
+
+
+def build_sparse_oas(path, dbu=0.00005, extent_um=2000.0, box_um=1.0):
+    """SPARSE (field 2026-09-15): layer 1/0 holds two 1 um marks at
+    opposite corners of the field - one page whose bbox spans the
+    field while its members could never cover it; layer 2/0 a 5 x 5
+    cluster of 1 um boxes at the centre (a page that IS one blob);
+    layer 3/0 the mark as a child cell placed 2 x 2 at the corners
+    (a sparse placement footprint)."""
+    import klayout.db as db
+    ly = db.Layout()
+    ly.dbu = dbu
+    top = ly.create_cell("SPARSE")
+    mark = ly.create_cell("MARK")
+    unit = int(round(1.0 / dbu))
+    b = int(round(box_um * unit))
+    e = int(round(extent_um * unit))
+    l1, l2, l3 = ly.layer(1, 0), ly.layer(2, 0), ly.layer(3, 0)
+    for x, y in ((5 * unit, 5 * unit), (e - 6 * unit, e - 6 * unit)):
+        top.shapes(l1).insert(db.Box(x, y, x + b, y + b))
+    c = e // 2
+    for i in range(5):
+        for j in range(5):
+            x, y = c + i * 2 * unit, c + j * 2 * unit
+            top.shapes(l2).insert(db.Box(x, y, x + b, y + b))
+    mark.shapes(l3).insert(db.Box(0, 0, b, b))
+    pitch = e - 11 * unit
+    top.insert(db.CellInstArray(mark.cell_index(),
+                                db.Trans(db.Vector(5 * unit, 5 * unit)),
+                                db.Vector(pitch, 0), db.Vector(0, pitch), 2, 2))
     ly.write(str(path))
 
 
@@ -1402,10 +1454,23 @@ class JobdeckChipHierarchyTests(unittest.TestCase):
                 wanted = set(v.visible)
                 pose = v.cx, v.cy, v.spp
                 self.assertIsNotNone(v._debounce)
+                shown = []
+                orig_show = v._loading_show
+
+                def show(text):
+                    shown.append(text)
+                    orig_show(text)
+                v._loading_show = show
                 for mode in ("level", "chip"):
                     v._jobdeck_set_mode(mode)
                     self.assertIsNone(v._debounce)
+                    # the loading banner (user call 2026-09-15) is up
+                    # from the re-plan until the render service opened
+                    self.assertTrue(v._loading.get_visible(), mode)
+                    self.assertIn("switching to %s view" % mode,
+                                  [t for t in shown if "switching" in t][-1])
                     landed()
+                    self.assertFalse(v._loading.get_visible(), mode)
                     self.assertEqual(v.visible, wanted)
                     self.assertEqual((v.cx, v.cy, v.spp), pose)
                     self.assertTrue(v._layer_rows[(2, 0)]._partial)
@@ -1413,6 +1478,42 @@ class JobdeckChipHierarchyTests(unittest.TestCase):
             finally:
                 v._quit()
                 v.window.destroy()
+
+
+class LoadingBannerTests(unittest.TestCase):
+    """The loading banner (user call 2026-09-15) comes down when an
+    open is refused before the render service is involved."""
+
+    def test_an_open_that_refuses_hides_the_banner(self):
+        import tempfile
+        from floe import gui
+        gui.import_gtk()
+        calls = []
+        v = gui.Viewer.__new__(gui.Viewer)
+        v.cache = None
+        v._loading_show = lambda text: calls.append(("show", text))
+        v._loading_hide = lambda: calls.append(("hide",))
+        missing = os.path.join(tempfile.mkdtemp(prefix="floe-banner-"),
+                               "nothing.oas")
+        err = v.open_file(missing)
+        self.assertTrue(err and err.startswith("ERR no VFS cache"), err)
+        self.assertEqual([c[0] for c in calls], ["show", "hide"])
+        self.assertIn("loading nothing.oas", calls[0][1])
+
+
+class ViewerIndexArgvTests(unittest.TestCase):
+    """The viewer's own indexing (File > load layout on a layout
+    without a cache) calls the raw floe-index binary, which is opt-in
+    for the occupancy summary: it must ask for it explicitly so the
+    result matches `floe2 index`'s default (M5, 2026-09-15). A jobdeck
+    load goes through `floe2 index deck.jb` and inherits the default."""
+
+    def test_the_layout_index_asks_for_the_summary(self):
+        import inspect
+        from floe import gui
+        src = inspect.getsource(gui)
+        self.assertIn('"--jobs", "12", "--occupancy", "--no-lod"', src)
+        self.assertIn('"-m", APP, "index", path', src)
 
 
 class JobdeckShortcutTests(unittest.TestCase):
@@ -1469,6 +1570,12 @@ class JobdeckShortcutTests(unittest.TestCase):
             if hasattr(gui.Viewer, "_build_menubar") else \
             inspect.getsource(gui)
         self.assertIn("toggle level view / chip view\\tCtrl+,", src)
+        # View > thin shapes at wide views (user call 2026-09-15): the
+        # three policies as menu commands
+        for label in ("thin shapes at wide views", "keep (mask policy)",
+                      "cull (layout policy, faster)",
+                      "auto (jobdeck keep, layout cull)"):
+            self.assertIn(label, src)
 
 
 class LevelSelectTests(unittest.TestCase):
@@ -2719,8 +2826,16 @@ class ThinPageTests(unittest.TestCase):
                    "FLOE_RENDERD_BIN": str(ROOT / "rust" / "target" /
                                            "release" / "floe-renderd")}
         os.environ["FLOE_RENDERD_BIN"] = cls.env["FLOE_RENDERD_BIN"]
+        # these gates pin the PAGE path's thin-page policy; the
+        # occupancy summary (the index default since 2026-09-15) would
+        # draw the wide views instead, so it is switched off here
+        os.environ["FLOE_RUST_OCCUPANCY"] = "off"
         for name in ("thin.oas", "thinmix.oas", "thin.jb"):
             run_floe2("index", CLI / name, "--jobs", "2", env=cls.env, ok=0)
+
+    @classmethod
+    def tearDownClass(cls):
+        os.environ.pop("FLOE_RUST_OCCUPANCY", None)
 
     def _rgb(self, src, detail, env=None, thin=None):
         from PIL import Image
@@ -2872,9 +2987,17 @@ class WideViewTests(unittest.TestCase):
                    "FLOE_RENDERD_BIN": str(ROOT / "rust" / "target" /
                                            "release" / "floe-renderd")}
         os.environ["FLOE_RENDERD_BIN"] = cls.env["FLOE_RENDERD_BIN"]
-        for deck in ("tiny.jb", "test.jb"):
+        # the wide-view policy (washes, sparse pages) is the PAGE
+        # path's; the occupancy summary (the index default since
+        # 2026-09-15) would draw these views instead, so it is off here
+        os.environ["FLOE_RUST_OCCUPANCY"] = "off"
+        for deck in ("tiny.jb", "test.jb", "sparse.jb"):
             run_floe2("index", CLI / deck, "--jobs", "2", env=cls.env,
                       ok=0)
+
+    @classmethod
+    def tearDownClass(cls):
+        os.environ.pop("FLOE_RUST_OCCUPANCY", None)
 
     def _render(self, deck, env, visible, cut_px, size=(200, 200)):
         from floe.jobdeck.viewer import DeckCache
@@ -2927,6 +3050,35 @@ class WideViewTests(unittest.TestCase):
                              for o in range(0, len(exact), 4)
                              if exact[o:o + 3] != b"\0\0\0"}
             self.assertEqual(lit_colours, exact_colours)
+
+    def test_a_sparse_page_or_array_is_not_washed_as_its_footprint(self):
+        # field 2026-09-15 (level 4 at depth 0): a page of two 140 x
+        # 4 um marks 137 mm apart was washed as one 137 x 54 mm block
+        # in the layer colour once the marks went under the cut. A
+        # wash must be able to stand for 1/256 of its footprint (the
+        # members as one-pixel hairlines) or be one screen blob;
+        # otherwise the sparse page is KEPT and its members drawn as
+        # hairline pixels (Calibre shows them at every zoom - user
+        # 2026-09-15), a sparse placement expanded. sparse.jb on
+        # 200 px over 2000 um, cut 3 px = 30 um: level 1 (two marks
+        # at the corners: 2 px of 40,000) and level 3 (the same as a
+        # 2 x 2 placement array) draw a few pixels and no wash;
+        # level 2 (a 9 x 9 um cluster) is a blob wash
+        # (an expanded mark cell's own 1 um page is a blob wash of one
+        # pixel - allowed; the footprint wash is what must not happen)
+        for level, most, washes in ((1, 8, 0), (3, 16, 4)):
+            rgba, r = self._render("sparse.jb", {}, [(level, 0)], 3.0)
+            self.assertGreater(_lit(rgba), 0, "level %d vanished" % level)
+            self.assertLessEqual(_lit(rgba), most, "level %d washed" % level)
+            self.assertLessEqual(r["deck"]["wide_washes"], washes, level)
+            # the marks sit at the field's corners, nothing in between
+            w = 200
+            centre = (100 * w + 100) * 4
+            self.assertEqual(rgba[centre:centre + 3], b"\0\0\0", level)
+        rgba, r = self._render("sparse.jb", {}, [(2, 0)], 3.0)
+        self.assertGreater(_lit(rgba), 0)
+        self.assertLessEqual(_lit(rgba), 16, "a blob, not a field")
+        self.assertGreaterEqual(r["deck"]["wide_washes"], 1)
 
     def test_render_detail_reproduces_the_viewer_cut(self):
         # field 2026-09-10: a region the viewer dropped past a zoom

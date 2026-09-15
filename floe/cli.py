@@ -349,7 +349,9 @@ def _run_rust_index(args, binary, coverage_only=False,
             command += ["--page-target-mb", str(args.page_target_mb)]
         if args.coverage:
             command.append("--coverage")
-        if getattr(args, "occupancy", False):
+        # the summary is the default (M5, 2026-09-15); a cell profile
+        # never publishes, so it does not ask for one
+        if getattr(args, "occupancy", False) and not profiling:
             command.append("--occupancy")
             command += _occupancy_args(args)
         # LOD off by default (retirement, 2026-08-28); --lod opts back in
@@ -486,8 +488,6 @@ def cmd_index(args):
             incompatible.append("--coverage")
         if args.coverage_only:
             incompatible.append("--coverage-only")
-        if args.occupancy:
-            incompatible.append("--occupancy")
         if args.occupancy_only:
             incompatible.append("--occupancy-only")
         if args.slow_cell_s is not None:
@@ -525,9 +525,11 @@ def cmd_index(args):
         if args.occupancy:
             ovo = os.path.join(outdir, "design.ovo")
             if not os.path.isfile(ovo):
+                # the default summary added to an older cache
                 return _run_rust_index(args, binary, occupancy_only=True)
-            print(f"[floe] occupancy already present: {ovo} "
-                  "(use --occupancy-only to rebuild it)")
+            print(f"[floe] cache up to date: {outdir} (occupancy already "
+                  "present; use --force to rebuild, --occupancy-only to "
+                  "rebuild the summary)")
             return
         print(f"[floe] cache up to date: {outdir} "
               "(use --force to rebuild with new options)")
@@ -1621,6 +1623,14 @@ def cmd_jobdeck(args):
     return 0
 
 
+def _hms(seconds):
+    """0:07, 3:41, 1:02:15 - compact for the progress lines"""
+    seconds = max(0, int(round(seconds)))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return "%d:%02d:%02d" % (h, m, s) if h else "%d:%02d" % (m, s)
+
+
 def _jobdeck_index(args, catalog):
     """Index every probed-ok source the deck names, one `index` run each
     (each run parallelises internally with --jobs). The occupancy
@@ -1652,6 +1662,7 @@ def _jobdeck_index(args, catalog):
     if kept:
         print("[jobdeck] index     : %d source(s) already indexed" % kept)
     failed = 0
+    started = time.time()
     for n, (tc, m) in enumerate(todo, 1):
         info = catalog.infos[tc]
         cmd = [sys.executable, "-B", "-m", args.index_module, "index",
@@ -1667,18 +1678,31 @@ def _jobdeck_index(args, catalog):
             if occupancy or occupancy_only:
                 cmd.append("--occupancy")
                 cmd += _occupancy_args(args)
+            else:
+                # The child CLI also defaults on: an explicit deck opt-out
+                # must survive the wrapper boundary for new/forced sources.
+                cmd.append("--no-occupancy")
         label = "occupancy" if m == "occupancy" else "index    "
         print("[jobdeck] %s : (%d/%d) %s" % (label, n, len(todo), tc),
               flush=True)
         t0 = time.time()
         res = subprocess.run(cmd)
+        # the closing line repeats the position (a source's own output
+        # can push the opening line off the screen - field 2026-09-15,
+        # 667 sources) and adds the run's elapsed time and the time
+        # the remaining sources will take at the average so far
+        elapsed = time.time() - started
+        left = elapsed / n * (len(todo) - n)
+        pos = "(%d/%d)" % (n, len(todo))
         if res.returncode != 0:
             failed += 1
-            print("[jobdeck] %s : FAILED %s (exit %d)"
-                  % (label, tc, res.returncode))
+            print("[jobdeck] %s : %s FAILED %s (exit %d; %s elapsed, ~%s left)"
+                  % (label, pos, tc, res.returncode, _hms(elapsed),
+                     _hms(left)), flush=True)
         else:
-            print("[jobdeck] %s : ok %s (%.1fs)"
-                  % (label, tc, time.time() - t0))
+            print("[jobdeck] %s : %s ok %s (%.1fs; %s elapsed, ~%s left)"
+                  % (label, pos, tc, time.time() - t0, _hms(elapsed),
+                     _hms(left)), flush=True)
     print("[jobdeck] index     : %d built, %d failed, %d kept"
           % (len(todo) - failed, failed, kept))
     return 2 if failed else 0
@@ -1740,8 +1764,13 @@ def main(argv=None, *, prog=None, rust_only=None):
     occ.add_argument(
         "--occupancy", action="store_true",
         help="build the design.ovo occupancy pyramid (the mask-policy "
-             "wide view summary; opt-in until it is measured); when a "
-             "current cache lacks it, add it without replacing the cache")
+             "wide view summary) - the default since the M5 field "
+             "measurement (2026-09-15); when a current cache lacks it, "
+             "add it without replacing the cache")
+    occ.add_argument(
+        "--no-occupancy", dest="occupancy", action="store_false",
+        help="index without the occupancy summary (a current cache "
+             "without one is left as is)")
     occ.add_argument(
         "--occupancy-only", action="store_true",
         help="add or rebuild design.ovo on a current cache without "
@@ -1750,7 +1779,9 @@ def main(argv=None, *, prog=None, rust_only=None):
         "--occupancy-um", type=_positive_float, default=None, metavar="UM",
         help="occupancy base cell in microns (default: 4); implies "
              "--occupancy")
-    p.set_defaults(occupancy=False, occupancy_only=False)
+    # Defer the implicit default until the backend is known: legacy tiles
+    # have no occupancy format, but explicit Rust-only flags still error.
+    p.set_defaults(occupancy=None, occupancy_only=False)
     rust.add_argument("--no-lod", action="store_true",
                       help="do not generate merged LOD page variants "
                            "(default; LOD is being retired)")
@@ -2216,6 +2247,8 @@ def main(argv=None, *, prog=None, rust_only=None):
     p.set_defaults(fn=cmd_jobdeck)
 
     args = ap.parse_args(argv)
+    if args.cmd == "index" and args.occupancy is None:
+        args.occupancy = not args.legacy
     reviewer = getattr(args, "floe_reviewer", None)
     if reviewer is not None:
         reviewer = reviewer.strip()

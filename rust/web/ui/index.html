@@ -168,7 +168,7 @@
         <p class="note">Explicit operation. Close the view before rebuilding its cache.</p>
         <div class="form-row"><label for="index-jobs">Index jobs</label><input id="index-jobs" class="short" type="number" min="1" max="16" value="12"></div>
         <label class="check"><input id="index-lod" type="checkbox"> Include LOD</label>
-        <label class="check"><input id="index-occupancy" type="checkbox"> Include occupancy summary</label>
+        <label class="check"><input id="index-occupancy" type="checkbox" checked> Include occupancy summary (default)</label>
         <label class="check"><input id="index-force" type="checkbox"> Force replacement of existing cache</label>
         <div class="button-row"><button id="index">Run index</button><button id="cancel-job" disabled>Cancel</button></div>
         <p id="operation" class="note" role="status">No active operation.</p>
@@ -346,7 +346,7 @@
       <p class="note">This writes index files for the ORIGINAL selection above, then opens it. Choosing a file or reading this preview does not approve indexing. Other selected files on the page do not change this request.</p>
       <div class="form-row"><label for="index-open-jobs">Index jobs</label><input id="index-open-jobs" class="short" type="number" min="1" max="16" value="12"></div>
       <label class="check"><input id="index-open-lod" type="checkbox"> Include LOD</label>
-      <label class="check"><input id="index-open-occupancy" type="checkbox"> Include occupancy summary</label>
+      <label class="check"><input id="index-open-occupancy" type="checkbox" checked> Include occupancy summary (default)</label>
       <label class="check"><input id="index-open-force" type="checkbox"> Also approve FORCE replacement of existing cache files</label>
       <p class="note">Existing live cache readers can block indexing. No view is silently closed. Partial indexing does not open a partial deck. Cancellation does not remove already completed cache files.</p>
       <div class="button-row"><button id="index-open-approve" type="button" class="primary" disabled>Approve indexing and open</button><button id="index-open-check" type="button" hidden>Check / retry same approval</button><button id="index-open-cancel" type="button" hidden>Cancel approved work</button></div>

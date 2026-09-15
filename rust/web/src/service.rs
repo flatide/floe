@@ -88,7 +88,7 @@ impl Default for IndexArgs {
             jobs: 12,
             force: false,
             lod: false,
-            occupancy: false,
+            occupancy: true,
             occupancy_only: false,
             occupancy_um: Field::Absent,
         }
@@ -975,4 +975,26 @@ fn index_state(seq: u64, s: &IndexSnapshot) -> Value {
     };
     json!({"seq":seq.to_string(),"kind":"index","phase":phase,"title":s.title,"current":s.current,"completed":s.completed,"total":s.total,"kept":s.kept,"skipped":s.skipped,"failed":s.failed,"elapsed_ms":s.elapsed_ms.to_string(),"error":s.failure.map(view::safe_error),
         "native":{"phase":native,"output_bytes":s.native.output_bytes.to_string(),"dropped_lines":s.native.dropped_lines.to_string(),"cells":s.native.cells.map(|n|n.to_string()),"total_cells":s.native.total_cells.map(|n|n.to_string()),"planned_pages":s.native.planned_pages.map(|n|n.to_string()),"encoded_pages":s.native.encoded_pages.map(|n|n.to_string())}})
+}
+
+#[cfg(test)]
+mod index_args_tests {
+    use super::*;
+    #[test]
+    fn summary_defaults_on_but_explicit_optout_and_summary_only_survive() {
+        let parse = |v| {
+            serde_json::from_value::<IndexArgs>(v)
+                .unwrap()
+                .core()
+                .unwrap()
+        };
+        assert!(parse(json!({})).occupancy);
+        assert!(!parse(json!({"occupancy":false})).occupancy);
+        assert!(parse(json!({"occupancy_only":true})).occupancy_only);
+        assert_eq!(
+            parse(json!({"occupancy":false,"occupancy_um":"2"})).occupancy_um,
+            Some(2.0)
+        );
+        assert!(serde_json::from_value::<IndexArgs>(json!({"occupancy":null})).is_err());
+    }
 }
