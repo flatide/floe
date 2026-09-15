@@ -51,6 +51,8 @@ const HELP: &str = "Usage: floe2-web view [SOURCE ...] [OPTIONS]
   --png / --raw            Frame transfer (default raw)
   --frame-cache on|off      Retained frame reuse + layout margin (default on)
   --refinement off         Explicit direct-final render (overrides round env)
+  --stream-kb 0            Compatibility spelling for --refinement off (only 0)
+  --render-debug           Numeric worker-frame diagnostics to stderr; independent workspace
   --perf-baseline           Frames/labels/refinement/frame reuse off; caches stay
   --root DIRECTORY         Additional approved dependency/file-picker root, repeatable
   --drc RESULTS.db|PACK.ice Register DRC on first source; pack build needs owner approval
@@ -81,6 +83,12 @@ Decode+raster plus file catalogue (1 slot + 192 MiB) must fit 16 slots
 SVRF metadata reserves another 256 MiB, with no extra CPU worker).
 DRC reads the explicit ASCII or ICE file; no adjacent-pack/reviewer discovery or implicit indexing.
 Refinement off; deck margin unsupported.
+Nonzero --stream-kb, --stream-target-ms, --lod, --hairline, --thin-um
+and GTK --dump are not migrated; they are rejected, never silently ignored.
+--hairline/--thin-um affected the legacy KLayout planner, not Rust renderd.
+Use --thin auto|keep|cull for the existing Rust thin-page policy, not as an
+equivalent frame-lattice control. --render-debug excludes paths, coordinates,
+source text and raw worker lines; synchronous stderr can affect timing.
 FLOE_JOBDECK_LEVELS=all|ask|N,N... supplies the default level choice (--level wins).
 --perf-baseline leaves decoded caches and geometry cut unchanged; no live LOD toggle.
 It may start an independent empty window; its display settings apply to the first file choice.
@@ -102,6 +110,7 @@ pub struct Command {
     raw: Option<bool>,
     frame_cache: bool,
     direct_final: bool,
+    render_debug: bool,
     perf_baseline: bool,
     port: u16,
     no_open: bool,
@@ -128,6 +137,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
         raw: None,
         frame_cache: true,
         direct_final: false,
+        render_debug: false,
         perf_baseline: false,
         port: 0,
         no_open: false,
@@ -166,6 +176,8 @@ pub fn parse(args: &[String]) -> Result<Command> {
                 | "--raw"
                 | "--frame-cache"
                 | "--refinement"
+                | "--stream-kb"
+                | "--render-debug"
                 | "--perf-baseline"
                 | "--port"
                 | "--session-file"
@@ -272,6 +284,33 @@ pub fn parse(args: &[String]) -> Result<Command> {
                 }
                 c.direct_final = true;
             }
+            "--stream-kb" => {
+                if value()?.parse::<u64>().ok() != Some(0) {
+                    return Err(Error::input(
+                        "web view supports --stream-kb 0 only (same as --refinement off); progressive byte-budget policy is not migrated",
+                    ));
+                }
+                c.direct_final = true;
+            }
+            "--render-debug" => {
+                flag()?;
+                c.render_debug = true;
+            }
+            "--stream-target-ms" => return Err(Error::input(
+                "--stream-target-ms controlled legacy adaptive streaming and was unused by Rust renderd; use --refinement off for direct-final rendering",
+            )),
+            "--hairline" | "--thin-um" => return Err(Error::input(
+                "--hairline/--thin-um were legacy KLayout planner controls, not Rust renderd controls; --thin keep|cull is a separate thin-page policy, not an equivalent frame control",
+            )),
+            "--lod" => return Err(Error::input(
+                "view --lod was not sent to Rust renderd; a live LOD policy switch is not migrated (index --lod controls generation, not display)",
+            )),
+            "--dump" => return Err(Error::input(
+                "--dump is a GTK/XQuartz display diagnostic; web display dumps are not migrated; --render-debug provides numeric worker diagnostics only",
+            )),
+            "--floe-reviewer" => return Err(Error::input(
+                "--floe-reviewer was a display/reviewer tag, not write authority; it is not mapped to the --drc-reviewer publication opt-in",
+            )),
             "--perf-baseline" => {
                 flag()?;
                 c.perf_baseline = true;
@@ -505,6 +544,7 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
     if c.direct_final {
         options.round_pages = 1 << 30;
     }
+    options.debug = c.render_debug;
     let resources = Resources::new(Limits::default())?;
     drop(resources.render(&options)?);
     let mut drc_roots = c.roots.clone();
@@ -798,6 +838,51 @@ mod tests {
     }
     fn args(s: &str) -> Vec<String> {
         s.split_whitespace().map(str::to_owned).collect()
+    }
+    #[test]
+    fn direct_final_alias_and_debug_are_independent_process_options() {
+        for tail in [
+            "--stream-kb 0",
+            "--stream-kb=0",
+            "--stream-kb 0 --refinement off",
+        ] {
+            let c = parse(&args(&format!("view {tail}"))).unwrap();
+            assert!(c.direct_final && c.independent);
+            assert!(!c.render_debug);
+            assert!(c.frame_cache); // Direct-final is not the performance baseline.
+            assert_eq!(c.initial, json!({}));
+        }
+        let c = parse(&args("view --render-debug")).unwrap();
+        assert!(c.render_debug && c.independent);
+        assert!(!c.direct_final);
+        assert!(!parse(&args("view")).unwrap().render_debug);
+        for tail in [
+            "--stream-kb",
+            "--stream-kb 1",
+            "--stream-kb -1",
+            "--stream-kb NaN",
+            "--stream-kb 0.0",
+            "--stream-kb 0 --refinement on",
+            "--refinement off --stream-kb 8",
+            "--perf-baseline --stream-kb 8",
+            "--render-debug=false",
+        ] {
+            assert!(parse(&args(&format!("view {tail}"))).is_err(), "{tail}");
+        }
+    }
+    #[test]
+    fn unmigrated_options_explain_their_actual_boundary() {
+        for (tail, explanation) in [
+            ("--hairline 0", "legacy KLayout planner"),
+            ("--thin-um 0", "not an equivalent frame control"),
+            ("--stream-target-ms 500", "unused by Rust renderd"),
+            ("--lod off", "not sent to Rust renderd"),
+            ("--dump", "GTK/XQuartz"),
+            ("--floe-reviewer tag", "not write authority"),
+        ] {
+            let e = parse(&args(&format!("view missing.oas {tail}"))).unwrap_err();
+            assert!(e.to_string().contains(explanation), "{e}");
+        }
     }
     #[test]
     fn startup_depth_display_and_levels_follow_legacy_policy() {

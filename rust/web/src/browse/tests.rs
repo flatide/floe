@@ -41,6 +41,7 @@ fn service(resources: &Arc<Resources>) -> Arc<Service> {
         open_timeout_s: 1,
         label_font_px: 14,
         raw: true,
+        debug: false,
     };
     Service::start(vec![], Arc::clone(resources), options, indexer).unwrap()
 }

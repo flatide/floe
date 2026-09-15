@@ -126,8 +126,14 @@ def native(work, fixture):
         child_env = dict(env, TMPDIR=str(temps))
         if policy is not None:
             child_env["FLOE_JOBDECK_LEVELS"] = policy
+        # Both spellings must defeat FLOE_RUST_ROUND_PAGES=1 before
+        # the first frame, including deck workers. No Python runtime fallback.
+        direct_final = ["--stream-kb", "0"] if i % 2 else ["--refinement", "off"]
+        debug = i in (1, 3, 5)
         args = [str(APP), "view", str(path), "--no-open", "--session-file", str(session_file),
-                "--jobs", "1", "--raster-jobs", "1", "--frame-cache", "off", "--refinement", "off"] + extra
+                "--jobs", "1", "--raster-jobs", "1", "--frame-cache", "off"] + direct_final + extra
+        if debug:
+            args += ["--render-debug"]
         p = subprocess.Popen(args, env=child_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             client = Client(wait(lambda: read_json(session_file), p))
@@ -161,6 +167,20 @@ def native(work, fixture):
             client.call("DELETE", "/api/v1/session", code=204)
             out, err = p.communicate(timeout=15)
             assert p.returncode == 0, (out, err)
+            metrics = [line for line in err.splitlines() if line.startswith("[render-perf]")]
+            assert len(metrics) == (1 if debug and not ask else 0), err
+            assert "[render-perf]" not in out
+            for line in metrics:
+                assert len(line) < 4096
+                fields = dict(word.split("=", 1) for word in line.split()[1:])
+                assert all(value.isascii() and value.isdecimal() for value in fields.values()), line
+                assert fields["gen"] == fields["round"] == fields["final"] == "1", fields
+                assert fields["partial"] == fields["deferred"] == "0", fields
+                assert fields["w"] == "257" and fields["h"] == "191", fields
+                assert int(fields["worker_pid"]) > 0
+                assert "plan_us" in fields and "raster_us" in fields, fields
+                assert "path" not in fields and "view" not in fields
+                assert str(work) not in line and source.name not in line and deck.name not in line
             assert not session_file.exists() and not list(temps.iterdir())
         finally:
             if p.poll() is None:
@@ -168,7 +188,7 @@ def native(work, fixture):
                 p.communicate(timeout=15)
     assert {p.name:p.read_bytes() for p in cache.iterdir() if p.is_file()} == before
     assert source.read_bytes() == fixture.read_bytes()
-    print("WEB STARTUP NATIVE: ALL OK (8 launch cases, 7 first frames, no implicit index, source/cache unchanged)")
+    print("WEB STARTUP NATIVE: ALL OK (8 launch cases, 7 first frames, direct-final aliases, numeric debug opt-in, no implicit index, source/cache unchanged)")
 
 
 def main(fixture):

@@ -1,5 +1,6 @@
 //! Synchronous application API for the CLI and dedicated view-control thread.
 //! No raster implementation lives here; only policy and worker lifecycle.
+mod diagnostics;
 use crate::{
     artifact, check_cancelled,
     dataset::Dataset,
@@ -23,6 +24,8 @@ pub struct RenderOptions {
     pub open_timeout_s: u64,
     pub label_font_px: u32,
     pub raw: bool,
+    /// Opt-in local numeric diagnostics. Never relay raw worker lines or paths.
+    pub debug: bool,
 }
 pub(crate) fn env_number(name: &str, default: u64, min: u64, max: u64) -> Result<u64> {
     let Some(value) = std::env::var_os(name) else {
@@ -49,6 +52,7 @@ impl RenderOptions {
             open_timeout_s: env_number("FLOE_RUST_OPEN_TIMEOUT_S", 300, 1, 86400)?,
             label_font_px: env_number("FLOE_RUST_LABEL_PX", 14, 6, 96)? as u32,
             raw: std::env::var_os("FLOE_RUST_RAW_FRAME").is_none_or(|s| s != "off"),
+            debug: false,
         })
     }
 }
@@ -127,7 +131,18 @@ impl RenderSession {
         self.worker.pending_queries()
     }
     pub fn poll(&mut self, timeout: Duration) -> Result<Option<Event>> {
-        self.worker.poll(timeout).map_err(Into::into)
+        let event = self.worker.poll(timeout)?;
+        if self.options.debug {
+            if let Some(Event::Frame(frame)) = &event {
+                use std::io::Write;
+                // Explicit debug only: a slow stderr reader can delay polling.
+                // Broken diagnostics must not turn a good render into an error.
+                let _ = std::io::stderr()
+                    .lock()
+                    .write_all(diagnostics::frame_line(self.worker.pid(), frame).as_bytes());
+            }
+        }
+        Ok(event)
     }
     pub fn set_styles(&mut self, styles: &[floe_worker_client::Style]) -> Result<()> {
         self.worker
@@ -157,7 +172,7 @@ impl RenderSession {
         let generation = self.worker.render(request)?;
         loop {
             check_cancelled(&self.cancelled)?;
-            match self.worker.poll(Duration::from_millis(20))? {
+            match self.poll(Duration::from_millis(20))? {
                 Some(Event::Frame(frame))
                     if frame.generation == generation && frame.final_frame =>
                 {

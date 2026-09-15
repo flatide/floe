@@ -4752,3 +4752,64 @@ GTK의 `FLOE_FILL_EDIT` bitmap 편집은 슬롯 하나를 바꾸면 그 슬롯�
 다음 로컬 우선순위는 M0의 미이관 CLI/view 옵션·GDS/gzip 등 입력 형식 대조다.
 G1 지연/pacing·G4 전체 수용, 실제 브라우저 저장/복구/입력과 Python-free Linux 실행,
 공유/원격 미구현, 현장 Firefox/ETX 보류, 조건부 world-tile M5도 여전히 남아 있다.
+
+## 62. M4g-12 — direct-final 호환 CLI와 안전한 렌더 진단
+
+M0 잔여 옵션을 이름이 아니라 실제 Python→worker 경로로 대조했다. `--hairline`과
+`--thin-um`은 환경을 설정하지만 이를 읽는 곳은 KLayout용 `vfsclient.py`뿐이다.
+`rust_render.py`/renderd는 두 환경이나 동등 필드를 소비하지 않는다. 이전 M0 표의
+“프레임 정책 override” 표현을 정정했다. 웹 이관에서 새 hairline/격자 정책을 켜지 않는다.
+
+- `view --stream-kb 0`은 기존 `--refinement off`와 동일하게 round_pages=2^30으로
+  설정한다. 환경값보다 우선하며 명시 process 옵션이므로 독립 workspace를 시작한다.
+  source 없이 빈 창도 가능하고, 뒤에 열리는 파일에 동일 설정이 적용된다. 이 옵션만으로
+  frame/decoded cache나 frames/labels를 끄지 않는다. nonzero·음수·실수는 명시 오류다.
+- `view --render-debug`는 workspace의 `RenderOptions.debug`에만 저장한다. 기본 off,
+  환경/전역 mutable 상태/HTTP 옵션 없이 trusted CLI만 켠다. 기존 창으로 포워딩하지
+  않으며 receiver도 위 두 process 옵션을 거부한다. 소스/모드 교체로 열린 새 render
+  worker에도 같은 설정이 전달된다. 별도 clip worker의 진단까지 추가한 것은 아니다.
+  native render wire·cache key·페이지/픽셀 정책은 바꾸지 않는다.
+- `RenderSession.poll`에서 소비한 frame마다 `[render-perf]` 한 줄을 stderr로 쓴다.
+  PID·세대·round·final/partial/deferred/labels_truncated·출력 w/h/bytes와 고정 allowlist의
+  숫자 phase/cache/paint/deck/summary 지표만 담는다. 미래의 알 수 없는 필드와 숫자가 아닌
+  값은 제외하고 u64로 정규화해 4KiB 미만으로 제한한다. 경로·월드 좌표·원본 텍스트·raw
+  wire/stderr는 출력하지 않는다. 예전 debug의 raw dump와 의도적으로 다르다.
+- 이 로그는 worker frame 수신 기준이며 화면에 실제 표시된 프레임·input-to-photon·
+  API 완료 ACK가 아니다. prefetch/나중에 버릴 frame도 포함될 수 있다. stderr는 동기
+  출력이므로 느린 소비자가 있으면 측정에 영향을 준다. 기본 benchmark는 off로 하고,
+  진단 출력 실패만으로 정상 렌더를 실패시키지 않는다. 오류·query의 원문 중계도 하지 않는다.
+- `--stream-target-ms`, view `--lod`, `--hairline`, `--thin-um`, GTK `--dump`,
+  `--floe-reviewer`는 이유를 포함해 시작 전에 거부한다. 특히 reviewer 표시 태그를
+  `--drc-reviewer`의 게시 권한 opt-in으로 자동 변환하지 않는다. 안내가 생긴 것이지
+  progressive/표시 진단/태그 기능을 이관 완료한 것은 아니다.
+- 형식 감사: 기존/신규 source catalog 모두 GDS/gzip은 제한된 header/DBU 조회만 하고
+  네이티브 색인 불가로 분류한다. plain OASIS·jobdeck parity와 추가 형식 지원을 분리한다.
+  자동 변환·재색인·Python fallback·cache format 변경은 없다([M0 §2.9](WEBUI_M0.ko.md)).
+
+검증: app22/core261/web84 단위 검사는 통과했다. 진단 gate는 민감한 문자열·좌표·
+미래 필드·줄바꿈·u64 초과·긴 zero-padding이 로그에 새지 않는지 단언한다.
+
+- 실제 GTK startup 정책144개와 native 실행8조건/첫 frame7개를 대조했다.
+  `FLOE_RUST_ROUND_PAGES=1`을 둔 뒤 off/stream-kb 별칭을 번갈아 사용해 layout/덱
+  모두 gen1/round1 한 번으로 끝나는지 검사한다. debug on인3조건만 stderr에 한 줄이
+  나오며 모든 값이 ASCII 숫자, geometry/source 경로 미포함, stdout 미출력임을 단언한다.
+- CLI의 미지원 옵션은 파일/worker를 열기 전에 이유를 포함해 실패한다. 기존 cache
+  bytes·재사용·force·LOD/occupancy·profile·snapshot·signal/lock gate도 통과했다.
+  GDS/gzip header/DBU·unsupported source 상태는 기존 Python/Rust 대조를 통과했다.
+- app/core/web all-targets strict clippy와 Rust1.89 Linux musl all-targets check를
+  통과했다. Linux 컴파일을 실제 Python-free Linux 실행으로 세지 않는다. 기존 renderer
+  전체 lint 부채(§57)는 그대로다. 집중 로그는 `/private/tmp/floe-cli-audit-*.log`다.
+- 실제 브라우저 입력/표시 수용은 미검증이다. 이전 브라우저 인증 시작 파일 도구 제한을
+  우회하지 않았으며 HTTP/WS/native/DOM gate를 화면 수용으로 바꾸지 않는다.
+- 전체 `sh tools/validate_rust.sh`는 exit0 / `RUST VALIDATION: ALL OK`로 끝났다
+  (`/private/tmp/floe-cli-audit-battery.log`). app22/core261/web84 단위, native stream7,
+  실제 startup8조건/7 frame·GTK 정책144개, occupancy27·잡덱83·렌더러46,
+  VFS H1-H5/L1-L9와 KLayout jobs1/8 각각13 PX+2 phase-exact+14 style을 통과했다.
+  검증용 `.venv` 심볼릭 링크만 제거했으며 원래 환경과 main/실측 작업은 보존했다.
+
+목표 잔여: 이 단계는 **잔여 CLI/형식 감사와 지원 가능한 두 옵션**을 닫는다.
+다음은 G4 기능별 최신 구현/검증 대조다. GTK 개발 bitmap 슬롯·표시 진단/태그와
+progressive 정책 결정, 실제 브라우저 입력/저장/복구 수용, Python-free Linux 실행,
+G1 지연/pacing·G4 전체 수용은 남는다. 공유/원격은 미구현, 현장 Firefox/ETX와
+M3는 보류, world-tile M5는 조건부 보류다. 전체 완료에 가깝다고 과장하거나 임의
+완료율로 환산하지 않고 커밋마다 이 잔여를 함께 보고한다.

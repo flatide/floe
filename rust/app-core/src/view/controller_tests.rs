@@ -302,6 +302,7 @@ fn options() -> RenderOptions {
         open_timeout_s: 1,
         label_font_px: 14,
         raw: true,
+        debug: false,
     }
 }
 fn fake(c: Arc<Control>, deck: bool) -> Box<dyn Engine> {

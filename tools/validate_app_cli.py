@@ -62,6 +62,17 @@ def main(fixture):
         assert "selfcheck" in run("--help", env=env).stdout
         assert version in run("--version", env=env).stdout
         assert "--no-open" in run("view", "--help", env=env).stdout
+        assert "--stream-kb 0" in run("view", "--help", env=env).stdout
+        for args, text in [
+            (("--stream-kb", "1"), "supports --stream-kb 0 only"),
+            (("--stream-target-ms", "500"), "unused by Rust renderd"),
+            (("--hairline", "0"), "legacy KLayout planner"),
+            (("--thin-um", "0"), "not an equivalent frame control"),
+            (("--lod", "off"), "not sent to Rust renderd"),
+            (("--dump",), "GTK/XQuartz"),
+            (("--floe-reviewer", "tag"), "not write authority"),
+        ]:
+            assert text in run("view", source, *args, env=env, code=2).stderr
         run("view", env=env, code=2)
         assert "--bbox" in run("clip", "--help", env=env).stdout
         assert "not yet ported" in run("gtktest", env=env, code=2).stderr

@@ -207,10 +207,41 @@ M4f-1의 `selfcheck`는 native 설치 진단만 담당하므로 위 표시 진�
 | `--perf-baseline` | lod/refinement/frame-cache/frames/labels off. cold/warm page cache 자체는 유지 |
 | `--frames`, `--labels`, `--label-font-px` | 표시 기본 on, 14px(6..96); GTK의 frames/labels 연동과 덱 capability를 별도 시험 |
 | `--stream-kb`, `--stream-target-ms` | 0=refinement off; off와 nonzero 충돌 오류. target 기본 500(100..2000), Rust는 target 값을 사용하지 않음 |
-| `--render-debug` | worker 진단. 외부 공유 로그에는 경로·원본 문자열 비노출 |
-| `--hairline`, `--thin-um` | 프레임 정책 환경 override. 현재 이미 실행 중인 프로세스로는 소급되지 않음 |
+| `--render-debug` | 기존 Rust 어댑터는 송수신 wire·stderr를 그대로 출력(경로/좌표 포함). 웹은 숫자 frame 진단만 허용(아래 대조) |
+| `--hairline`, `--thin-um` | **정정: `vfsclient.py`의 KLayout VFS 요청만 환경값을 전달. Rust 어댑터/renderd에는 필드·환경 소비가 없어 효과 없음** |
 | `--dump` | 진단 옵션. 웹에서는 범위를 명시하고 무효 옵션으로 조용히 수용하지 않기 |
 | `--floe-reviewer` | 표시 태그이지 인증 주체가 아님. 공유 계정에서 임의 reviewer 이름이 쓰기 권한을 만들면 안 됨 |
+
+#### M4g-12 — 잔여 옵션·입력 형식 실제 경로 대조 (2026-09-15)
+
+위 표는 기존 CLI 표면의 조사 기록이다. 현재 Rust/web의 지원 여부는 다음과 같다.
+미지원 옵션을 무효로 받아들이지 않으며, 옵션 이름만으로 새 렌더 정책을 켜지 않는다.
+
+| 항목 | 현재 웹 동작 / 남은 결정 |
+|---|---|
+| `--stream-kb 0` | `--refinement off`와 같은 direct-final. 둘 다 `FLOE_RUST_ROUND_PAGES`보다 우선하며 독립 workspace. decoded/frame cache는 이 옵션만으로 끄지 않음 |
+| nonzero `--stream-kb`, `--refinement on` | 명시 오류. 바이트 단위 스트리밍과 page-round는 같은 단위가 아니므로 이름만 대응하지 않음. 새 progressive 정책은 별도 |
+| `--stream-target-ms` | 기본500도 명시 오류. 기존 Rust 어댑터가 이미 쓰지 않던 값이며 적응형 스트리밍 이관 필요 여부는 별도 |
+| `--render-debug` | 독립 workspace의 worker가 소비한 frame/round당 숫자 한 줄을 stderr에 출력. 원 wire/stderr/좌표·이름·경로 미전달. 아래 M4 §62의 차이 명시 |
+| view `--lod` | 기존 Rust wire에 없음. on/off 모두 이유를 포함해 오류. `index --lod`는 생성 옵션으로 지원하며 live LOD 제어와 다름 |
+| `--hairline`, `--thin-um` | 기존 Rust에서는 무효였음. 웹은 이유를 포함해 오류. `--thin keep|cull`은 페이지 정책이지 프레임 격자의 동등 대체가 아님 |
+| `--dump` | GTK/XQuartz 표시 경로 PNG 진단. 웹 표시 진단 이관/폐기 결정은 아직 없음; 숫자 진단이나 일반 Export로 대체 완료라 하지 않음 |
+| `--floe-reviewer` | 표시 태그를 게시 권한으로 바꾸지 않고 명시 오류. `--drc-reviewer`는 trusted launcher의 쓰기 opt-in이므로 자동 alias 금지 |
+| plain OASIS / `.jb` | 기존/웹 공통 네이티브 경로. OASIS는 확장자가 아니라 magic/header로 식별해 확장자 없는 TC 파일도 읽음 |
+| GDS / gzip OASIS·GDS | Python `jobdeck/sources.py`와 Rust `jobdeck/sources.rs` 모두 header/DBU만 인식, `unsupported`로 분류. `floe-index`는 plain OASIS parser만 호출. **웹 이관으로 새로 잃은 지원이 아니라 기존 네이티브 한계** |
+
+GDS/gzip의 헤더 인식은 도형 색인·표시 지원이 아니다. 웹 source 등록도 plain OASIS만
+허용하며 자동 압축해제/변환이나 Python fallback은 없다. 전체 형식 지원을 추가하려면
+명시 변환 산출물·용량 상한·취소·원본/변환본 cache identity를 먼저 정해야 한다.
+이 확장은 현재 Rust 제품 parity의 미완료와 구분하며, 지원을 새로 추가했다고 세지 않는다.
+현행 `validate_app_jobdeck_sources.py`가 OASIS/GDS/gzip 헤더·DBU·unsupported 상태를
+실제 Python과 Rust 경로로 비교한다. 이 대조로 새 parser나 cache format을 도입하지 않았다.
+
+근거: `floe/cli.py:cmd_view`, `floe/vfsclient.py:VfsClient`, `floe/rust_render.py`,
+`rust/worker-client/src/protocol.rs`, `rust/renderd/src/main.rs`,
+`floe/jobdeck/sources.py`, `rust/app-core/src/jobdeck/sources.rs`,
+`rust/app-core/src/registered.rs`, `rust/cli/src/vfs.rs`.
+검증/진단의 정확한 범위는 [M4 §62](WEBUI_M4.ko.md).
 
 단일 인스턴스: 현재 `(product, uid, DISPLAY)`와 프로세스 생성 옵션에 따라
 포워딩/독립 실행을 고른다. 웹은 launcher의 세션 레지스트리와 `--multi`로

@@ -388,6 +388,7 @@ mod tests {
                 open_timeout_s: 30,
                 label_font_px: 14,
                 raw: true,
+                debug: false,
             })
             .unwrap();
         let before = r.usage();

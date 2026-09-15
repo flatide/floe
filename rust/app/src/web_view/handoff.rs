@@ -348,6 +348,8 @@ mod tests {
     fn receiver_refuses_process_options_relative_paths_and_extra_keys() {
         for argv in [
             vec!["view", "/tmp/a", "--jobs", "2"],
+            vec!["view", "/tmp/a", "--stream-kb", "0"],
+            vec!["view", "/tmp/a", "--render-debug"],
             vec!["view", "relative.oas"],
             vec!["view", "--no-open"],
             vec!["view", "--help"],
