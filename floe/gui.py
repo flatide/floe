@@ -1894,7 +1894,11 @@ class Viewer:
         if worker is not self.worker:
             return False
         self._worker_starting = False
-        self._loading_hide()
+        # the loading banner comes down here (a stub viewer in the
+        # worker-contract gate has no banner: guard, never assume)
+        hide = getattr(self, "_loading_hide", None)
+        if hide is not None:
+            hide()
         if error is not None:
             self._set_live_status("render service open failed: %s" % error)
             return False
