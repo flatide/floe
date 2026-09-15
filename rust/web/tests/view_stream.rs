@@ -3,6 +3,72 @@ include!("support/view_harness.rs");
 
 #[tokio::test]
 #[ignore = "run tools/validate_view_stream.py with a private synthetic fixture"]
+async fn native_palette_style_is_one_frame_and_pixel_reversible() {
+    use floe_worker_client::Fill;
+    let h = Harness::start(true).await;
+    let login = h.login().await;
+    let (mut ws, hello, _) = h.connect(&login).await;
+    let (first, original) = frame(&mut ws).await;
+    ack(&mut ws, &hello, 1, &first).await;
+    let initial = h.controller.snapshot();
+    let pairs: Vec<_> = initial.state.styles.iter().map(|s| s.layer).collect();
+    let body =
+        json!({"style_batch":{"pairs":pairs,"color":"#22aa88","fill":{"kind":"clear"},"width":5}});
+    for (seq, value) in [(2, body.clone()), (4, body)] {
+        let before = h.controller.snapshot();
+        ws.send(Message::Text(json!({"type":"view.set","seq":seq.to_string(),"view_id":hello["view_id"],"connection_epoch":hello["connection_epoch"],"base_state_rev":before.state_rev.to_string(),"body":value}).to_string().into())).await.unwrap();
+        until_reply(&mut ws, seq, "accepted").await;
+        let after = h.controller.snapshot();
+        assert_eq!(after.state.layers, initial.state.layers);
+        assert_eq!(after.state.viewport, initial.state.viewport);
+        assert!(after
+            .state
+            .styles
+            .iter()
+            .all(|s| s.color == [34, 170, 136, 255] && s.fill == Fill::Clear && s.width == 5));
+        if seq == 2 {
+            assert_eq!(after.state_rev, before.state_rev + 1);
+            assert_eq!(after.render_rev, before.render_rev + 1);
+            let (head, pixels) = frame(&mut ws).await;
+            assert!(pixels != original);
+            assert_eq!(h.controller.snapshot().submitted, before.submitted + 1);
+            ack(&mut ws, &hello, 3, &head).await;
+        } else {
+            assert_eq!(after.state_rev, before.state_rev);
+            assert_eq!(after.submitted, before.submitted);
+        }
+    }
+    let before = h.controller.snapshot();
+    for (seq, base, body) in [
+        (
+            5,
+            initial.state_rev,
+            json!({"style_batch":{"pairs":pairs,"width_step":1}}),
+        ),
+        (
+            6,
+            before.state_rev,
+            json!({"style_batch":{"pairs":[pairs[0],[u32::MAX,u32::MAX]],"width":3}}),
+        ),
+    ] {
+        ws.send(Message::Text(json!({"type":"view.set","seq":seq.to_string(),"view_id":hello["view_id"],"connection_epoch":hello["connection_epoch"],"base_state_rev":base.to_string(),"body":body}).to_string().into())).await.unwrap();
+        until_reply(&mut ws, seq, "error").await;
+        assert_eq!(h.controller.snapshot().state_rev, before.state_rev);
+        assert_eq!(h.controller.snapshot().submitted, before.submitted);
+    }
+    let styles:Vec<_>=initial.state.styles.iter().map(|s|json!({"pair":s.layer,"color":floe_app_core::styles::color_text(s.color),"width":s.width,"fill":match &s.fill {
+        Fill::Solid=>json!({"kind":"solid"}),Fill::Clear=>json!({"kind":"clear"}),Fill::Speckle=>json!({"kind":"speckle"}),Fill::Pattern(rows)=>json!({"kind":"pattern","rows":rows})}})).collect();
+    ws.send(Message::Text(json!({"type":"view.set","seq":"7","view_id":hello["view_id"],"connection_epoch":hello["connection_epoch"],"base_state_rev":before.state_rev.to_string(),"body":{"styles":styles}}).to_string().into())).await.unwrap();
+    until_reply(&mut ws, 7, "accepted").await;
+    let (head, restored) = frame(&mut ws).await;
+    assert!(restored == original);
+    ack(&mut ws, &hello, 8, &head).await;
+    h.shutdown().await;
+    println!("RUST PALETTE STYLE STREAM: ALL OK (one CAS/frame, fields, noop, stale/invalid, byte-exact restore)");
+}
+
+#[tokio::test]
+#[ignore = "run tools/validate_view_stream.py with a private synthetic fixture"]
 async fn native_palette_batch_is_one_revision_and_pixel_reversible() {
     use floe_worker_client::Layers;
     let h = Harness::start(true).await;

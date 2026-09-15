@@ -157,6 +157,18 @@
         <p class="note">Click selects · Ctrl/⌘ toggles selection · Shift selects a range · Double-click shows/hides.</p>
         <div class="palette-tools"><span id="layers-selected" role="status">0 selected</span><button id="layers-clear" disabled>Clear selection</button></div>
         <div class="palette-tools"><button id="layers-show" disabled>Show selected</button><button id="layers-hide" disabled>Hide selected</button><button id="layers-toggle" disabled>Toggle</button></div>
+        <button id="layers-style" disabled>Style selected…</button>
+        <form id="palette-style" class="style-editor" hidden>
+          <strong id="palette-style-title">Style selected layers</strong>
+          <p class="note">Only checked/changed fields are assigned. Folded parents include their children. Jobdeck parent colors propagate; child fill/width overrides win in expanded groups.</p>
+          <div class="form-row"><label class="check"><input id="palette-color-on" type="checkbox"> Color</label><input id="palette-color" type="color" value="#00ffff" aria-label="Selected layer color"></div>
+          <div class="form-row"><label for="palette-fill">Fill</label><select id="palette-fill"><option value="">Unchanged</option><option value="solid">Solid</option><option value="clear">Outline</option><option value="speckle">Speckle</option><option value="pattern">16×16 pattern</option></select></div>
+          <label id="palette-pattern-label" for="palette-pattern" hidden>16 rows, four hex digits each</label>
+          <textarea id="palette-pattern" rows="3" maxlength="95" spellcheck="false" hidden></textarea>
+          <div class="form-row"><label for="palette-width">Line px</label><select id="palette-width"><option value="">Unchanged</option><option value="1">1 (inherit)</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="7">7</option><option value="8">8</option><option value="+1">Increase</option><option value="-1">Decrease</option></select></div>
+          <p class="note">1 clears the width override. Increase/decrease steps each row’s assigned width (default 1), not an inherited group width.</p>
+          <div class="button-row"><button id="palette-style-apply" type="submit">Apply to selection</button><button id="palette-style-cancel" type="button">Cancel</button></div>
+        </form>
         <div id="layers" class="layers"><p class="empty-list">Open a layout to see its layers.</p></div>
         <div class="pagination"><button id="layers-prev" disabled aria-label="Previous layer page">←</button><span id="layers-count">0 layers</span><button id="layers-next" disabled aria-label="Next layer page">→</button></div>
         <p id="layers-note" class="note" role="status"></p><button id="layers-retry" hidden>Reload layer page</button>
@@ -392,6 +404,7 @@
   <noscript>This workspace requires JavaScript. All assets are served locally.</noscript>
   <div id="layer-menu" class="layer-menu" role="menu" aria-label="Selected layer actions" hidden>
     <button id="layer-menu-show" role="menuitem">Show selected</button><button id="layer-menu-hide" role="menuitem">Hide selected</button><button id="layer-menu-toggle" role="menuitem">Toggle selected</button>
+    <button id="layer-menu-style" role="menuitem">Style selected…</button>
     <button id="layer-menu-all" role="menuitem">Show all</button><button id="layer-menu-none" role="menuitem">Hide all</button><button id="layer-menu-close" role="menuitem">Close menu</button>
   </div>
 </body>

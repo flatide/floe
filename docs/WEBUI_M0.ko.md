@@ -355,6 +355,11 @@ M4g-11d에서 브라우저 Ctrl/Shift/⌘ 선택·접힘/펼침·페이지 간 �
 연결의 무렌더 선택/접기·단일 CAS 가시성·지연/거부 처리를 대조했다. 선택은 최대4096행,
 기존 transport body 상한도 별도로 적용한다. 단일 행 색/fill/width는 유지하며,
 다중 style 조작·실제 브라우저 입력/표시 수용은 아직 남아 있다.
+M4g-11e에서 Style selected 편집기를 추가했다([M4 §60](WEBUI_M4.ko.md)). RGB·
+clear/solid/speckle/custom bitmap, 선폭1..8 및 상대 증감을 한 CAS로 적용한다.
+GTK+잡덱 어댑터10,584개 조합으로 색 전파·sparse 상속을 대조한다. 이름 있는 색/채움
+프리셋 팔레트와 bitmap 직접 편집, 행 단위 스타일 조작의 GTK UX 대조는 후속이며,
+현재 color picker/hex-row 입력만으로 UI-03 전체 완료를 주장하지 않는다.
 
 `python -m floe.fe_embed` 보조 CLI도 범위에 포함한다: 위치 인자 PNG들,
 `--box`, `--ellipse`, `--line`, `--path`, `--polygon`, `--ruler`, `--text`,

@@ -257,7 +257,10 @@
         if (!socket || socket.readyState !== WebSocket.OPEN) { throw new Error('View is disconnected'); }
         seq = P.next(seq); value.seq = seq;
         const text = JSON.stringify(value);
-        if (new TextEncoder().encode(text).length > 8192 || socket.bufferedAmount > 16384) {
+        if (new TextEncoder().encode(text).length > 8192) {
+            throw new Error('Input is too large. Select fewer layers or use a smaller edit; nothing was applied.');
+        }
+        if (socket.bufferedAmount > 16384) {
             throw new Error('Input limit; wait for the local connection');
         }
         socket.send(text); return seq;

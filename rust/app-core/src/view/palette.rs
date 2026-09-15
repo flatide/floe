@@ -154,6 +154,7 @@ mod tests {
                 })
                 .collect::<BTreeMap<_, _>>(),
             initial_layers: Layers::All,
+            folded_groups: BTreeSet::new(),
             assignments: Arc::default(),
             property_names: Vec::new(),
         }

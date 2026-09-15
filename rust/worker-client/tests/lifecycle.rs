@@ -261,7 +261,9 @@ fn query_errors() {
         assert!(!work.exists());
     }
     let mut config = tmp.config("query_hold");
-    config.query_timeout = Duration::from_millis(80);
+    // Leave room for writer scheduling and the independent render/cancel
+    // round trip before checking the held queries' deadline below.
+    config.query_timeout = Duration::from_secs(2);
     let mut w = WorkerClient::spawn(config).unwrap();
     w.open(Source::Layout(tmp.0.join("cache 한 글")), 32, 1)
         .unwrap();
@@ -269,18 +271,39 @@ fn query_errors() {
     for _ in 0..8 {
         w.query(query_request(QueryOperation::Snap)).unwrap();
     }
+    let full = w.query(query_request(QueryOperation::Snap)).unwrap_err();
+    assert_eq!(full.kind, ErrorKind::Busy);
     assert_eq!(
-        w.query(query_request(QueryOperation::Snap))
-            .unwrap_err()
-            .kind,
-        ErrorKind::Busy
+        full.message,
+        "drain query responses before submitting more queries"
     );
     assert_eq!(w.pending_queries(), 8);
-    w.render(request(FrameFormat::Raw)).unwrap();
+    // Query credit and the bounded writer queue are different resources.
+    // Eight sends may fill the latter before its thread gets scheduled;
+    // Busy must not consume a render generation or alter query credit.
+    let submit_deadline = Instant::now() + Duration::from_millis(250);
+    loop {
+        match w.render(request(FrameFormat::Raw)) {
+            Ok(generation) => {
+                assert_eq!(generation, 1);
+                break;
+            }
+            Err(e) => {
+                assert_eq!(e.kind, ErrorKind::Busy);
+                assert!(
+                    Instant::now() < submit_deadline,
+                    "writer did not drain: {e}"
+                );
+                assert_eq!(w.pending_generations(), 0);
+                assert_eq!(w.pending_queries(), 8);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
     assert!(frame(&mut w).complete());
     w.cancel().unwrap();
     assert!(matches!(
-        w.poll(Duration::from_millis(20)).unwrap(),
+        w.poll(Duration::from_millis(250)).unwrap(),
         Some(Event::CancelAcknowledged { .. })
     ));
     assert_eq!(
@@ -290,7 +313,7 @@ fn query_errors() {
     );
     let work = w.work_dir().to_owned();
     assert_eq!(
-        w.poll(Duration::from_secs(1)).unwrap_err().kind,
+        w.poll(Duration::from_secs(3)).unwrap_err().kind,
         ErrorKind::Timeout
     );
     assert!(!work.exists());

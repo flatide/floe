@@ -43,6 +43,7 @@
         let allClosed = false, exceptions = new Set(), foldRevision = 0;
         let selected = new Map(), anchor = null, flight = null, writing = null, failed = '';
         let stopped = false, suspended = false, menuTarget = null, inputRevision = 0;
+        let styleScope = null;
         function context() { return stopped || suspended ? null : port.context(); }
         function available() { const s = context(); return !!s && s.id === identity && s.connected; }
         function closed(k) { return allClosed !== exceptions.has(k); }
@@ -57,6 +58,8 @@
         function notify(text) { el('layers-note').textContent = text || ''; }
         function update() {
             const use = usable(), edit = editable(), pending = !!flight || !!writing;
+            if (styleScope && !styleCurrent()) { closeStyle(); }
+            el('palette-style-apply').disabled = !edit || !styleScope;
             list.setAttribute('aria-busy', String(pending));
             widgets.forEach(function (w) {
                 const on = selected.has(w.key);
@@ -65,7 +68,7 @@
                 w.check.disabled = !edit; w.color.disabled = !edit; w.style.disabled = !edit;
             });
             el('layers-selected').textContent = selected.size + ' selected';
-            ['show','hide','toggle'].forEach(function (action) {
+            ['show','hide','toggle','style'].forEach(function (action) {
                 el('layers-' + action).disabled = !edit || !selected.size;
                 el('layer-menu-' + action).disabled = !edit || !selected.size;
             });
@@ -126,6 +129,50 @@
             const body = {layer_batch:{action:action, pairs:ids.map(pair), collapsed:ids.filter(function (k) { return chosen.get(k) && closed(k); }).map(pair)}};
             write(body);
         }
+        function styleCurrent() {
+            const s = context();
+            return available() && !!s && styleScope && s.id === styleScope.id && s.key === styleScope.key &&
+                styleScope.revision === inputRevision && styleScope.fold === foldRevision;
+        }
+        function closeStyle() { styleScope = null; el('palette-style').hidden = true; }
+        function openStyle() {
+            if (!editable() || !selected.size) { return; }
+            hideMenu(false);
+            styleScope = {id:identity,key:loadedKey,revision:inputRevision,fold:foldRevision,selected:new Map(selected)};
+            el('palette-style-title').textContent = 'Style ' + selected.size + ' selected rows';
+            el('palette-color-on').checked = false; el('palette-color').value = '#00ffff';
+            el('palette-fill').value = ''; el('palette-width').value = '';
+            el('palette-pattern').value = new Array(16).fill('aaaa').join(' ');
+            patternFields(); el('palette-style').hidden = false; update(); el('palette-fill').focus();
+        }
+        function patternFields() { el('palette-pattern').hidden = el('palette-pattern-label').hidden = el('palette-fill').value !== 'pattern'; }
+        function applyStyle(event) {
+            event.preventDefault();
+            if (!editable() || !styleCurrent()) { closeStyle(); notify('Selection or view changed. Open Style selected again.'); return; }
+            try {
+                const ids = Array.from(styleScope.selected.keys()).sort(order);
+                const batch = {pairs:ids.map(pair),collapsed:ids.filter(function(k){return styleScope.selected.get(k) && closed(k);}).map(pair)};
+                if (el('palette-color-on').checked) {
+                    const color = el('palette-color').value;
+                    if (!/^#[0-9a-f]{6}$/i.test(color)) { throw Error('Choose a six-digit RGB color.'); }
+                    batch.color = color;
+                }
+                const kind = el('palette-fill').value, width = el('palette-width').value;
+                if (kind) {
+                    if (!['clear','solid','speckle','pattern'].includes(kind)) { throw Error('Invalid fill.'); }
+                    batch.fill = {kind:kind};
+                    if (kind === 'pattern') {
+                        const rows = el('palette-pattern').value.trim().split(/\s+/);
+                        if (rows.length !== 16 || !rows.every(function(s){return /^[0-9a-f]{4}$/i.test(s);})) { throw Error('A pattern needs exactly 16 four-digit hex rows.'); }
+                        batch.fill.rows = rows.map(function(s){return parseInt(s,16);});
+                    }
+                }
+                if (width === '+1' || width === '-1') { batch.width_step = Number(width); }
+                else if (width) { if (!/^[1-8]$/.test(width)) { throw Error('Line width must be 1–8 pixels.'); } batch.width = Number(width); }
+                if (!batch.color && !batch.fill && batch.width === undefined && batch.width_step === undefined) { throw Error('Choose at least one style field.'); }
+                closeStyle(); write({style_batch:batch});
+            } catch(e) { notify(e.message); }
+        }
         function write(body) {
             if (!available() || !context().editable || writing) { return; }
             const mark = {}; writing = mark; hideMenu(false); notify(''); update();
@@ -141,7 +188,7 @@
             const x = Number.isFinite(event.clientX) ? event.clientX : bounds.left;
             const y = Number.isFinite(event.clientY) ? event.clientY : bounds.bottom;
             menu.style.left = Math.max(4, Math.min(x, (port.window.innerWidth || 1000) - 190)) + 'px';
-            menu.style.top = Math.max(4, Math.min(y, (port.window.innerHeight || 800) - 200)) + 'px';
+            menu.style.top = Math.max(4, Math.min(y, (port.window.innerHeight || 800) - 244)) + 'px';
             const first = ['show','hide','toggle','all','none'].map(function (v) { return el('layer-menu-' + v); }).find(function (b) { return !b.disabled; });
             (first || el('layer-menu-close')).focus();
         }
@@ -214,6 +261,10 @@
             update();
         }
         ['show','hide','toggle'].forEach(function (v) { el('layers-' + v).onclick = el('layer-menu-' + v).onclick = function () { change(v); }; });
+        el('layers-style').onclick = el('layer-menu-style').onclick = openStyle;
+        el('palette-fill').onchange = patternFields;
+        el('palette-style').onsubmit = applyStyle;
+        el('palette-style-cancel').onclick = closeStyle;
         ['all','none'].forEach(function (v) { el('layers-' + v).onclick = el('layer-menu-' + v).onclick = function () { write({layers:{mode:v}}); }; });
         el('layers-clear').onclick = function () { if (available() && !writing) { if (flight && flight.kind === 'range') { cancelRead(); } ++inputRevision; selected.clear(); notify(''); update(); } };
         el('layers-collapse').onclick = function () { if (available() && !writing) { allClosed = true; exceptions.clear(); folding(); } };
@@ -227,7 +278,7 @@
             if (e.isComposing) { return; }
             if (e.key === 'Escape') { e.preventDefault(); hideMenu(true); return; }
             if (!['ArrowDown','ArrowUp','Home','End'].includes(e.key)) { return; }
-            const buttons = ['show','hide','toggle','all','none','close'].map(function (k) { return el('layer-menu-' + k); }).filter(function (b) { return !b.disabled; });
+            const buttons = ['show','hide','toggle','style','all','none','close'].map(function (k) { return el('layer-menu-' + k); }).filter(function (b) { return !b.disabled; });
             const i = buttons.indexOf(port.document.activeElement); e.preventDefault();
             buttons[e.key === 'Home' ? 0 : e.key === 'End' ? buttons.length - 1 : (i + (e.key === 'ArrowUp' ? -1 : 1) + buttons.length) % buttons.length].focus();
         };
@@ -236,7 +287,7 @@
         function suspend() { suspended = true; cancelRead(); hideMenu(false); update(); }
         function resume() { suspended = false; changed(); }
         function stop() { stopped = true; suspend(); }
-        menu.hidden = true; changed();
+        menu.hidden = true; closeStyle(); changed();
         return Object.freeze({changed:changed, stop:stop, suspend:suspend, resume:resume});
     }
     const api = {bind:bind, choose:choose};

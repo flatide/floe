@@ -48,6 +48,7 @@ fn snapshots_styles_and_native_frames_match_python() {
     )
     .unwrap();
     assert_eq!(cases.len(), 6);
+    let mut style_modes = std::collections::BTreeSet::new();
     let flag = Arc::new(AtomicUsize::new(0));
     for case in &cases {
         let dataset = Dataset::open(
@@ -104,6 +105,63 @@ fn snapshots_styles_and_native_frames_match_python() {
         )
         .unwrap();
         let model = Model::new(&managed).unwrap();
+        let Dataset::Deck(deck) = &managed.dataset else {
+            panic!("deck fixture")
+        };
+        for head in deck.metadata.layers.iter().filter(|r| r.jobdeck_head) {
+            let children: Vec<_> = deck
+                .metadata
+                .layers
+                .iter()
+                .filter(|r| r.layer == head.layer && !r.jobdeck_head)
+                .collect();
+            let Some(child) = children.first() else {
+                continue;
+            };
+            let folded = children.iter().all(|r| r.jobdeck_hidden);
+            style_modes.insert(folded);
+            let p = (child.layer as u32, child.datatype as u32);
+            let base = ViewState::initial(&model, 103, 91)
+                .unwrap()
+                .edit(
+                    &model,
+                    Patch {
+                        style_deltas: vec![StyleDelta {
+                            layer: p,
+                            fill: Some(Fill::Clear),
+                            width: Some(7),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let styled = base
+                .edit(
+                    &model,
+                    Patch {
+                        style_batch: Some(floe_app_core::view::StyleBatch {
+                            pairs: vec![(head.layer as u32, head.datatype as u32)],
+                            fill: Some(Fill::Solid),
+                            width: Some(floe_app_core::view::WidthEdit::Set(3)),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let got = styled.styles.iter().find(|s| s.layer == p).unwrap();
+            assert_eq!(
+                (&got.fill, got.width),
+                if folded {
+                    (&Fill::Solid, 3)
+                } else {
+                    (&Fill::Clear, 7)
+                },
+                "actual {} palette group",
+                case["mode"]
+            );
+        }
         let mut live = ViewState::initial(&model, 103, 91).unwrap();
         assert_eq!(case["live"].as_array().unwrap().len(), 16);
         for step in case["live"].as_array().unwrap() {
@@ -223,7 +281,8 @@ fn snapshots_styles_and_native_frames_match_python() {
         }
         controller.close().unwrap();
     }
-    println!("RUST APP DECK DATASET: ALL OK (6 cases) + 6 managed controllers");
+    assert_eq!(style_modes, std::collections::BTreeSet::from([false, true]));
+    println!("RUST APP DECK DATASET: ALL OK (6 cases) + 6 managed controllers + palette forced-fold styles");
 }
 
 fn selected_leaves(state: &ViewState, data: &ManagedDataset) -> Vec<(u32, u32)> {

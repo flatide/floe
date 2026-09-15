@@ -231,6 +231,51 @@ impl StyleDeltaDto {
         })
     }
 }
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct StyleBatchDto {
+    pairs: Vec<(u32, u32)>,
+    #[serde(default)]
+    collapsed: Vec<(u32, u32)>,
+    #[serde(default)]
+    color: Field<String>,
+    #[serde(default)]
+    fill: Field<FillDto>,
+    #[serde(default)]
+    width: Field<u8>,
+    #[serde(default)]
+    width_step: Field<i8>,
+}
+impl StyleBatchDto {
+    fn core(self) -> Result<floe_app_core::view::StyleBatch, &'static str> {
+        use floe_app_core::view::{StyleBatch, WidthEdit};
+        let delta = StyleDeltaDto {
+            pair: (0, 0),
+            color: self.color,
+            fill: self.fill,
+            width: self.width,
+        }
+        .core()?;
+        let step = self.width_step.optional();
+        if delta.width.is_some() && step.is_some() {
+            return Err("width and width_step conflict");
+        }
+        let batch = StyleBatch {
+            pairs: self.pairs,
+            collapsed: self.collapsed,
+            color: delta.color,
+            fill: delta.fill,
+            width: delta
+                .width
+                .map(WidthEdit::Set)
+                .or_else(|| step.map(WidthEdit::Step)),
+        };
+        batch
+            .validate()
+            .map_err(|_| "invalid palette style batch")?;
+        Ok(batch)
+    }
+}
 #[derive(Default, Deserialize, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub struct PatchDto {
@@ -250,6 +295,7 @@ pub struct PatchDto {
     pub mono: Field<bool>,
     pub styles: Field<Vec<StyleDto>>,
     pub style_deltas: Field<Vec<StyleDeltaDto>>,
+    pub style_batch: Field<StyleBatchDto>,
 }
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
@@ -354,6 +400,11 @@ impl PatchDto {
             font_px: self.font_px.optional(),
             mono: self.mono.optional(),
             style_changes,
+            style_batch: self
+                .style_batch
+                .optional()
+                .map(StyleBatchDto::core)
+                .transpose()?,
             style_deltas: self
                 .style_deltas
                 .optional()
@@ -588,6 +639,53 @@ pub fn packet(header: &[u8], payload: &[u8]) -> Result<Vec<u8>, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn palette_style_wire_rejects_ambiguous_or_invalid_fields() {
+        let valid = json!({"style_batch":{"pairs":[[3,1],[3,300]],"collapsed":[[3,1]],"color":"#22aa88","fill":{"kind":"pattern","rows":vec![0x1234;16]},"width_step":1}});
+        let b = serde_json::from_value::<PatchDto>(valid)
+            .unwrap()
+            .core()
+            .unwrap()
+            .style_batch
+            .unwrap();
+        assert_eq!(b.color, Some([34, 170, 136, 255]));
+        assert!(matches!(
+            b.width,
+            Some(floe_app_core::view::WidthEdit::Step(1))
+        ));
+        for body in [
+            json!({"pairs":[[3,1]]}),
+            json!({"pairs":[],"width":1}),
+            json!({"pairs":vec![(3,1);4097],"width":1}),
+            json!({"pairs":[[3,1]],"width":0}),
+            json!({"pairs":[[3,1]],"width":9}),
+            json!({"pairs":[[3,1]],"width_step":0}),
+            json!({"pairs":[[3,1]],"width_step":2}),
+            json!({"pairs":[[3,1]],"width":1,"width_step":1}),
+            json!({"pairs":[[3,1]],"color":"한글"}),
+            json!({"pairs":[[3,1]],"color":"red"}),
+            json!({"pairs":[[3,1]],"color":null}),
+            json!({"pairs":[[3,1]],"fill":null}),
+            json!({"pairs":[[3,1]],"width":null}),
+            json!({"pairs":[[3,1]],"width_step":null}),
+            json!({"pairs":[[3,1]],"width":3,"collapsed":null}),
+            json!({"pairs":[[3,1]],"width":3,"out":"secret"}),
+            json!({"pairs":[[3,1]],"fill":{"kind":"pattern","rows":[1,2]}}),
+        ] {
+            assert!(
+                serde_json::from_value::<PatchDto>(json!({"style_batch":body}))
+                    .map_err(|_| "invalid")
+                    .and_then(PatchDto::core)
+                    .is_err(),
+                "{body}"
+            );
+        }
+        assert!(serde_json::from_str::<PatchDto>(
+            r#"{"style_batch":{"pairs":[[3,1]],"width":1,"width":2}}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<PatchDto>(r#"{"style_batch":null}"#).is_err());
+    }
     #[test]
     fn palette_batch_wire_is_strict_and_bounded() {
         let patch = serde_json::from_value::<PatchDto>(json!({"layer_batch": {

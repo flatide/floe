@@ -258,6 +258,17 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
         await wait(()=>!node('layers-show').disabled);
         const reads=requests.filter(r=>r.path.endsWith('/palette')).length;ws.receive(snapshot);
         assert.equal(requests.filter(r=>r.path.endsWith('/palette')).length,reads);
+        const beforeStylePaint=draws.length;node('layers-style').onclick();
+        assert.equal(draws.length,beforeStylePaint);assert.equal(edits().length,2);
+        node('palette-color-on').checked=true;node('palette-color').value='#22aa88';node('palette-fill').value='clear';node('palette-width').value='+1';
+        node('palette-style').onsubmit({preventDefault(){}});await wait(()=>edits().length===3);
+        const style=edits()[2];assert.equal(style.base_state_rev,'3');
+        assert.deepEqual(style.body,{style_batch:{pairs:[[3,1],[3,2],[3,300]],collapsed:[[3,1]],color:'#22aa88',fill:{kind:'clear'},width_step:1}});
+        ws.receive({type:'accepted',seq:style.seq,state_rev:'4',render_rev:'4'});
+        assert.equal(node('layers-style').disabled,true,'style ACK alone enabled writes');
+        paletteRows.slice(0,3).forEach(r=>{r.color='#22aa88';r.fill={kind:'clear'};r.width=2;});
+        snapshot.state_rev='4';snapshot.render_rev='4';snapshot.render_key='4';ws.receive(snapshot);
+        await wait(()=>!node('layers-style').disabled);assert.equal(row('3/1').children[1].value,'#22aa88');
         listeners.pagehide();assert.equal(node('layers-show').disabled,true);assert.equal(node('layer-menu').hidden,true);
         console.log('WEB PALETTE CLIENT: ALL OK (real app binding, no render on selection/fold, one CAS batch, ACK/snapshot, rejected/stale edits, cleanup)');return;
     }
@@ -791,6 +802,9 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     assert.equal(second.sent.at(-1),restore,'cancelled queued token was transmitted');
     const failed=[];second.bufferedAmount=20000;
     drcOptions.navigate({},token,e=>failed.push(e));assert.match(failed[0],/Input limit/);second.bufferedAmount=0;
+    const oversized=[],sentBefore=second.sent.length;
+    drcOptions.navigate({},'a'.repeat(9000),e=>oversized.push(e));assert.match(oversized[0],/too large.*nothing was applied/);
+    assert.equal(second.sent.length,sentBefore,'oversized edit reached the wire');
     // Another authorized connection can edit between controller.edit() and
     // the reply snapshot. Do not attach an old jump's CD/filter to that view.
     const superseded=[];drcOptions.navigate({},token,e=>superseded.push(e));const supersededWire=second.sent.at(-1);

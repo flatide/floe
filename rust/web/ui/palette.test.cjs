@@ -157,13 +157,38 @@ async function errors() {
     assert.equal(big.count(),1);assert.match(big.el('layers-note').textContent,/4096/);assert.equal(big.edits.length,0);big.panel.stop();
     assert.throws(()=>Palette.choose(Array.from({length:4096},(_,i)=>i+'/0'),null,'5000/0',{ctrlKey:true},null),/4096/);
 }
+async function styles() {
+    const h=harness();await h.reply();h.click('0/1');h.click('0/2',{ctrlKey:true});
+    const reads=h.requests.length;h.el('layers-style').onclick();
+    assert.equal(h.el('palette-style').hidden,false);assert.equal(h.el('palette-style-title').textContent,'Style 2 selected rows');
+    assert.equal(h.edits.length,0);assert.equal(h.requests.length,reads);
+    h.el('palette-style').onsubmit(event());assert.match(h.el('layers-note').textContent,/at least one/);assert.equal(h.edits.length,0);
+    h.el('palette-fill').value='pattern';h.el('palette-fill').onchange();assert.equal(h.el('palette-pattern').hidden,false);
+    h.el('palette-pattern').value='abcd';h.el('palette-style').onsubmit(event());assert.match(h.el('layers-note').textContent,/16/);assert.equal(h.edits.length,0);
+    h.el('palette-pattern').value=new Array(16).fill('1234').join(' ');
+    h.el('palette-color-on').checked=true;h.el('palette-color').value='#22aa88';h.el('palette-width').value='+1';
+    h.el('palette-style').onsubmit(event());
+    assert.deepEqual(h.edits.at(-1).body,{style_batch:{pairs:[[0,1],[0,2]],collapsed:[],color:'#22aa88',fill:{kind:'pattern',rows:new Array(16).fill(0x1234)},width_step:1}});
+    assert.equal(h.el('palette-style').hidden,true);assert.equal(h.el('layers-style').disabled,true);
+    await h.complete('Rejected',false);assert.equal(h.count(),2);assert.match(h.el('layers-note').textContent,/Rejected/);assert.equal(h.edits.length,1);
+    h.el('layers-style').onclick();h.click('1/1');assert.equal(h.el('palette-style').hidden,true,'selection change retained stale style target');
+    h.el('palette-style').onsubmit(event());assert.equal(h.edits.length,1);
+    h.el('layers-style').onclick();h.el('layers-collapse').onclick();assert.equal(h.el('palette-style').hidden,true);await h.reply();
+    h.el('layer-menu-style').onclick();h.el('palette-width').value='1';h.el('palette-style').onsubmit(event());
+    assert.deepEqual(h.edits.at(-1).body,{style_batch:{pairs:[[1,1]],collapsed:[[1,1]],width:1}});
+    await h.complete(null,false);
+    h.el('layers-style').onclick();h.state.key='2';h.panel.changed();assert.equal(h.el('palette-style').hidden,true);await h.reply();
+    h.el('layers-style').onclick();h.state.connected=false;h.panel.changed();assert.equal(h.el('palette-style').hidden,true);
+    h.state.connected=true;h.panel.changed();h.el('layers-style').onclick();h.el('palette-style-cancel').onclick();assert.equal(h.el('palette-style').hidden,true);
+    assert.equal(h.edits.length,2);h.panel.stop();
+}
 async function main() {
     if(process.argv[2]) {
         const cases=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));
         for(const c of cases){assert.deepEqual(Palette.choose(c.before,c.anchor,c.row,c.event,c.range),c.expected);}
         console.log('GTK WEB PALETTE SELECTION: ALL OK ('+cases.length+' source-derived clicks)');return;
     }
-    await basic();await anchorAndDouble();await lifecycle();await errors();
+    await basic();await anchorAndDouble();await lifecycle();await errors();await styles();
     // Late range versus a newer local selection (without switching pages).
     const h=harness();await h.reply();h.click('0/1');h.el('layers-next').onclick();await h.reply();h.click('30/2',{shiftKey:true});const q=h.requests.at(-1);
     h.click('35/1');await h.reply(q);assert.equal(h.count(),1);assert.equal(h.row('35/1').dataset.selected,'true');assert.equal(h.el('layers-note').textContent,'');h.panel.stop();

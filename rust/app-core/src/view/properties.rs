@@ -363,6 +363,7 @@ mod tests {
             source_stale: false,
             pairs: styles.iter().map(|s| s.layer).collect(),
             groups: [((1, 0), vec![(1, 1), (1, 2)])].into(),
+            folded_groups: BTreeSet::new(),
             property_names: styles
                 .iter()
                 .map(|s| (s.layer, format!("M{} {}", s.layer.0, s.layer.1)))

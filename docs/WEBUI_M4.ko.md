@@ -4617,3 +4617,80 @@ Rust가 결정한다. 전체 카탈로그를 브라우저로 내려받거나 geo
 Python-free Linux 실행이 남는다. 공유 게스트/읽기 전용 권한·원격 배포는 미구현,
 Firefox/ETX 현장 검증은 보류, world-tile M5는 조건부 보류다. 전체 완료 직전으로
 표시하거나 세부 커밋 개수를 완료율로 환산하지 않는다.
+
+## 60. M4g-11e — 선택 행의 다중 스타일과 GTK sparse 상속
+
+선택된 레이어의 색상·채움·선폭 및 상대 증감을 하나의 `style_batch`로 적용한다.
+`styles`/`style_deltas`는 이전 API 의미를 유지하며 새 팔레트 명령과 혼합하지 않는다.
+색인·renderer wire/버전·정확도 정책이나 공유 파일을 변경하지 않는다.
+
+§59에서 예상했던 “펼친 부모의 스타일 대상은 가시성과 다르다”는 문장은 위젯의
+선택 확장만으로는 충분하지 않았다. **실제 GTK→DeckRenderWorker 경로**에서 색은
+해당 요청의 부모를 자식에 전파하고, 채움/선폭은 매번 전체 sparse map을 전송하여
+자식 override가 부모보다 우선한다. 새 명령은 이 차이를 보존한다.
+
+- 일반 그룹: 접힌 부모는 같은 layer의 최저 datatype을 포함해 자식까지 직접 지정한다.
+  펼친 부모는 자기 행만 지정한다. 선택한 부모/자식은 중복 적용하거나 두 번 증감하지 않는다.
+- 잡덱 그룹: 부모 색은 펼침과 관계없이 전파한다. 부모 fill/width는 자식 지정값을
+  지우지 않고 지정이 없는 자식에 상속된다. 접힌 부모는 자식도 직접 지정한다.
+  level 뷰의 숨긴 chip은 Model에서 영구 접힘으로 판정한다. 숨긴 행을 웹으로 보내거나
+  UI에서 임의 layer ID 규칙으로 추론하지 않는다.
+- width1은 sparse override 제거다. +/-1은 현재 지정값(없으면1)을 기준으로 하고
+  1..8에 clamp한다. 예를 들어 부모6을 상속한 자식의 Increase는2, Decrease/1은
+  지정값을 제거해 다시6으로 보일 수 있다. GTK와 같으며 편집기에 설명한다.
+- color-only는 채움·선폭 상속을 구체 값으로 고정하지 않는다. fill/width 변경은
+  전체 sparse map에서 표시를 다시 해석한다. Native JSON Load/Save 뒤에도 상속을 유지한다.
+- 선택·접기 부모·하위 영향 집합에4096개 상한을 적용하고 확장 전에/중에 검사한다.
+  기존8KiB WS 상한도 유지한다. 클라이언트의 영구 크기 초과는 “기다리라”가 아니라
+  선택/입력을 줄이라고 안내하고 wire에 보내지 않는다. 부분 적용·자동 분할은 없다.
+
+웹의 Style selected 버튼/우클릭 항목은 현재 선택과 접힘을 고정한 편집기를 연다.
+RGB checkbox와 fill/width의 Unchanged를 분리해 지정하지 않은 필드를 건드리지 않는다.
+clear/solid/speckle 또는16행 custom bitmap, width1..8 및 Increase/Decrease를 제공한다.
+편집기 열기·입력은 렌더하지 않고 Apply 한 번만 CAS를 제출한다. 선택·접기·view/key·
+연결이 바뀌면 이전 편집 대상을 버리고, 지연 ACK만으로 재활성화하거나 거부를 재전송하지
+않는다. 기존 단일 행 색/스타일 컨트롤은 남겨 두었다.
+
+검증:
+
+- `validate_palette_styles.py`는 실제 GTK 메서드와 실제 layout/deck submit 확장을
+  실행한다. 생성자의 파일 조회와 pipe publish만 inert하게 두고, 일반 비영 datatype
+  부모·chip·숨긴 level,63개 선택 조합·4개 접힘·2개 초기 상속·7개 색/fill/width 액션
+  **10,584개**의 표시 값과 sparse assignment를 Rust와 대조한다. solid/clear/checker의
+  enum/동등 bitmap 표현만 정규화한다. GUI/브라우저 자체를 실행한 검증은 아니다.
+- Rust 단위는 필드별 상속·접힌 덮어쓰기·증감·Native JSON 왕복·원자 오류/확장 상한을
+  검사한다. DTO는 null/추가·중복 필드·무효 RGB/bitmap/width·빈 변경을 거부한다.
+- JS는 frozen selection, 선택/접힘/연결 변경 폐기, 잘못된 bitmap·빈 변경, 단일 필드와
+  합친 batch·거부 미재전송을 검사한다. 실제 app.js 연결에서는 선택 유지, 하나의 CAS,
+  ACK/snapshot 순서와 응답 뒤 갱신된 행의 색을 검사한다.
+- native stream에 단일 revision/frame, no-op, stale/무효 입력의 무변경, 원래 raw 픽셀로
+  복원하는 검사를 추가했다. 실제 잡덱 Model에서도 hidden level과 expanded chip의
+  child override 결과를 검사한다. 전체 배터리 결과는 아래에 별도 기록한다.
+- §57의 브라우저 인증 시작 파일 제한을 우회하지 않았다. 이 편집기의 실제 브라우저
+  클릭·입력·스크린샷 수용과 현장 Firefox/ETX는 미검증이다.
+- 첫 전체 배터리는 기존 worker-client 수명주기 테스트의 `worker command queue full`
+  로 실패했다. 질의8개 직후 writer가 이미 큐를 비웠다고 가정한 테스트였다.
+  제품의 큐/질의 상한과 코드는 바꾸지 않고, 테스트에서만 최대250ms 동안 `Busy`를
+  재시도한다. Busy에서 generation/질의 credit 무변경,9번째 질의의 credit 오류,
+  렌더·취소 독립성과 질의 timeout/정리를 계속 단언한다. held-query deadline은
+  writer·렌더·취소 검사와 경합하지 않게2초로 분리했다. 첫 실패 기록은
+  `/private/tmp/floe-palette-style-battery.log`에 보존한다.
+- 집중 검증은 core257/web83 단위, GTK+adapter10,584개, native stream7개와
+  실제 잡덱23 PNG/report·6 API/controller·24 mode transition 검사를 통과했다.
+  worker-client lifecycle14개는 수정 후5회 반복도 통과했다. core/web/worker-client
+  all-targets strict clippy, Rust1.89 단위/수명주기와 Linux musl all-targets check도
+  통과했다. 기존 renderer 전체 lint 부채(§57)는 그대로이며 Linux 컴파일을 실제 실행
+  수용으로 계산하지 않는다. 집중 로그는 `/private/tmp/floe-palette-style-*.log`다.
+- 최종 전체 `sh tools/validate_rust.sh`는 exit0 / `RUST VALIDATION: ALL OK`로
+  끝났다(`/private/tmp/floe-palette-style-battery-final.log`). app20/core257/web83 단위,
+  native stream7, GTK 선택7,776/스타일10,584, occupancy27·잡덱83·렌더러46,
+  VFS H1-H5/L1-L9와 KLayout jobs1/8 각각13 PX+2 phase-exact+14 style을 통과했다.
+  검증용 `.venv` 심볼릭 링크만 제거했으며 원래 환경과 main/실측 작업은 보존했다.
+
+목표 잔여: 다중 스타일의 **로컬 기능 연결**을 닫는 단계이지 UI-03 전체 완료가 아니다.
+다음은 이름 있는 색/채움 프리셋·bitmap 직접 편집과 행 단위 스타일 UX 대조다.
+GTK bitmap 편집은 `FLOE_FILL_EDIT` 뒤의 개발용 기능이므로 이 경계도 함께 확인하며,
+일반 프리셋 선택과 개발용 슬롯 변경을 같은 제품 기본 기능으로 취급하지 않는다.
+미이관 CLI/view 옵션·GDS/gzip 차이, G1 지연/pacing·G4 전체 감사, 실제 브라우저 저장/
+복구/입력·Python-free Linux 실행도 남는다. 공유/원격은 미구현, 현장 Firefox/ETX는
+보류, world-tile M5는 조건부 보류다. 커밋마다 이 잔여를 보고하며 임의 완료율로 바꾸지 않는다.

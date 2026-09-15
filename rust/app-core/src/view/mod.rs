@@ -6,6 +6,7 @@ pub mod deck_mode;
 pub mod margin;
 pub mod minimap;
 mod palette;
+mod palette_style;
 mod properties;
 mod query;
 mod ruler;
@@ -22,6 +23,7 @@ pub use controller::{
 use floe_worker_client::{Layers, RenderRequest, Style};
 pub use floe_worker_client::{QueryKind, QueryOperation};
 pub use palette::{LayerAction, LayerBatch};
+pub use palette_style::{StyleBatch, WidthEdit};
 pub use query::{QueryAnchor, QuerySnapshot, ViewQuery, ViewQueryResult};
 pub use ruler::{RulerMeasurement, RulerPoint, RulerSegment};
 use std::{
@@ -292,6 +294,7 @@ pub struct Patch {
     pub mono: Option<bool>,
     pub style_changes: Vec<Style>,
     pub style_deltas: Vec<StyleDelta>,
+    pub style_batch: Option<StyleBatch>,
     /// Parsed settings are prepared off the control channel, then committed
     /// under the same revision CAS as all other view edits.
     pub properties: Option<crate::layerprops::Document>,
@@ -344,6 +347,9 @@ pub struct Model {
     pub styles: Arc<Vec<Style>>,
     pairs: BTreeSet<(u32, u32)>,
     groups: BTreeMap<(u32, u32), Vec<(u32, u32)>>,
+    /// Level-view chip rows are permanently folded, even though no expand
+    /// control is exposed in the palette.
+    folded_groups: BTreeSet<(u32, u32)>,
     initial_layers: Layers,
     assignments: Arc<properties::Assignments>,
     property_names: Vec<((u32, u32), String)>,
@@ -353,6 +359,7 @@ impl Model {
         let d = &data.dataset;
         let styles = Arc::new(d.styles(false)?);
         let mut groups = BTreeMap::new();
+        let mut folded_groups = BTreeSet::new();
         if let Dataset::Deck(deck) = d {
             for r in &deck.metadata.layers {
                 if r.jobdeck_head {
@@ -364,6 +371,18 @@ impl Model {
                     if let Some(g) = groups.get_mut(&(r.layer as u32, 0)) {
                         g.push((r.layer as u32, r.datatype as u32));
                     }
+                }
+            }
+            let hidden: BTreeSet<_> = deck
+                .metadata
+                .layers
+                .iter()
+                .filter(|r| r.jobdeck_hidden)
+                .map(|r| (r.layer as u32, r.datatype as u32))
+                .collect();
+            for (&head, children) in &groups {
+                if !children.is_empty() && children.iter().all(|p| hidden.contains(p)) {
+                    folded_groups.insert(head);
                 }
             }
         }
@@ -383,6 +402,7 @@ impl Model {
             styles,
             pairs,
             groups,
+            folded_groups,
             initial_layers: Layers::All,
             assignments: Arc::default(),
             property_names: match d {
@@ -524,6 +544,7 @@ impl ViewState {
                 || patch.layer_batch.is_some()
                 || patch.layer_isolation.is_some()
                 || !patch.style_deltas.is_empty()
+                || patch.style_batch.is_some()
                 || !patch.style_changes.is_empty())
         {
             return Err(Error::input(
@@ -544,6 +565,11 @@ impl ViewState {
             return Err(Error::input("batch conflicts with other layer edits"));
         }
         if !patch.style_deltas.is_empty() && !patch.style_changes.is_empty() {
+            return Err(Error::input("conflicting style edit forms"));
+        }
+        if patch.style_batch.is_some()
+            && (!patch.style_deltas.is_empty() || !patch.style_changes.is_empty())
+        {
             return Err(Error::input("conflicting style edit forms"));
         }
         if patch.prepared_layers.is_some()
@@ -699,6 +725,9 @@ impl ViewState {
         if !patch.style_deltas.is_empty() {
             s.apply_style_deltas(model, patch.style_deltas)?;
         }
+        if let Some(batch) = patch.style_batch {
+            s.apply_style_batch(model, batch)?;
+        }
         if let Some(settings) = patch.settings {
             s.apply_settings(model, &settings)?;
         }
@@ -803,6 +832,7 @@ mod tests {
             source_stale: false,
             pairs: styles.iter().map(|s| s.layer).collect(),
             groups: [((1, 0), vec![(1, 1), (1, 2)])].into(),
+            folded_groups: BTreeSet::new(),
             styles,
             initial_layers: Layers::All,
             assignments: Arc::default(),
@@ -911,6 +941,7 @@ mod tests {
             source_stale: false,
             pairs: [(1, 0), (1, 1), (1, 2), (2, 0)].into(),
             groups: [((1, 0), vec![(1, 1), (1, 2)])].into(),
+            folded_groups: BTreeSet::new(),
             styles,
             initial_layers: Layers::All,
             assignments: Arc::default(),

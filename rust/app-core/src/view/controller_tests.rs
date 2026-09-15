@@ -288,6 +288,7 @@ fn model(deck: bool) -> Arc<Model> {
         styles,
         pairs: BTreeSet::from([(1, 0)]),
         groups: BTreeMap::new(),
+        folded_groups: BTreeSet::new(),
     })
 }
 fn options() -> RenderOptions {

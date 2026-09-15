@@ -45,6 +45,7 @@ def main(fixture):
         assert "RUST DEPTH STREAM: ALL OK" in test.stdout
         assert "RUST PALETTE STREAM: ALL OK" in test.stdout
         assert "RUST PALETTE READ: ALL OK" in test.stdout
+        assert "RUST PALETTE STYLE STREAM: ALL OK" in test.stdout
         assert digest(cache) == before, "stream modified cache bytes/mtime"
         assert not list(workers.iterdir()), "stream worker files leaked"
         print(test.stdout.strip())
