@@ -6623,6 +6623,12 @@ pub fn plan_cmd(args: &[String]) {
         if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--page-hairline") {
             req.page_hairline = val != "0";
         }
+        // --sub-cut-wash 0|1: the jobdeck wide-view policy (JOBDECK
+        // step 4) on a single source, so `--explain` shows its
+        // verdicts (wash, keep_sparse, expand_sparse) off the deck
+        if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--sub-cut-wash") {
+            req.sub_cut_wash = val != "0";
+        }
         // --summary-layers a/b,..: layers an occupancy summary draws
         // (OCCUPANCY_PLAN M3): their pages are skipped (verdict
         // `summary` under --explain); --prune-summary 1 also prunes

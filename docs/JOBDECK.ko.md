@@ -614,19 +614,26 @@ budget = 패스별 디코드 보유)을 코드와 대조했다. 모두 사실이
 - **채움 하한(2026-09-15, RENDERD 0.12.86)**: wash는 footprint 안의 멤버를 1 px
   hairline으로 그렸을 때의 덮임을 대신하는 것이므로, footprint가 cut보다 넓은데
   `members × max(w,1 px) × max(h,1 px)`가 footprint 픽셀의 1/256(`WASH_MIN_COVERAGE`)에
-  못 미치면 wash를 내지 않는다(`Hier::wash_worth`; 양축 ≤ cut인 footprint는 blob이라
-  항상 wash). 문턱은 일부러 낮다: 배열을 100배 과장하는 것은 종전 한계 그대로
-  두고(10 µm 피치 1 µm 격자는 2.5 µm/px에서 6 %), 마스크 전체를 bbox로 갖는 마크
-  몇 개 페이지(10^-5)만 걸러낸다. 페이지·페이지 BVH 노드(blob이면 통째, 아니면 예산 안에서 잎까지
-  걸어 페이지별 판정, 예산 밖은 종전대로 coarse)·배치 footprint(멤버 수 = 반복
-  수)에 같은 규칙. 현장 2026-09-15: level 4 depth 0에서 140 × 4 µm 45° 마크 두
+  못 미치면 wash 대신 **그 페이지를 선택해 그린다**(`keep_sparse`: 멤버가 hairline
+  픽셀로 남는다 — Calibre는 광역뷰에서도 이 마크를 보여준다, 사용자 확인
+  2026-09-15) — 희소하다는 사실이 곧 디코드·페인트 비용이 작다는 뜻이다. 배치
+  footprint(멤버 수 = 반복 수)도 같은 판정으로 생략 대신 펼친다(`expand_sparse`).
+  양축 ≤ cut인 footprint는 blob이라 항상 wash. 문턱은 일부러 낮다: 배열을 100배
+  과장하는 것은 종전 한계 그대로 두고(10 µm 피치 1 µm 격자는 2.5 µm/px에서 6 %),
+  마스크 전체를 bbox로 갖는 마크 몇 개 페이지(10^-5)만 걸러낸다. 페이지 BVH 노드는
+  blob이거나 양축 ≤ 16 px(`WASH_WIDE_NODE_PX`, 그만한 블록은 과장이 보이지 않는다)
+  이면 종전대로 통째 wash, 그보다 넓으면 예산 안에서 잎까지 걸어 페이지별 판정,
+  예산 밖은 coarse — 넓은 덱 뷰에서 sub-cut 노드를 전부 내려가는 비용을 막는다
+  (예산은 pass마다이고 pass는 수백 개). 현장 2026-09-15: level 4 depth 0에서 140 × 4 µm 45° 마크 두
   개가 137 mm 떨어진 다른 마크와 한 페이지라 bbox 137,044 × 54,011 µm가 통째로
-  레이어 색 블록이 됐다(뷰 31,752 µm부터 fit까지; frame off와 무관). 이제 그
-  페이지는 그 줌에서 덱 밖에서처럼 사라지고, 광역뷰의 답은 요약(design.ovo)이다.
-  stats `sub_cut_sparse`, explain `page`/`child` `wash_sparse`. gate
+  레이어 색 블록이 됐다(뷰 31,752 µm부터 fit까지; frame off와 무관). stats
+  `sub_cut_sparse`, explain `page` `keep_sparse` / `child` `expand_sparse`. gate
   `WideViewTests.test_a_sparse_page_or_array_is_not_washed_as_its_footprint`
-  (sparse.jb: 모서리 마크 두 개 페이지·2 × 2 배치는 0 px, 중앙 9 µm 클러스터는
-  blob wash).
+  (sparse.jb: 모서리 마크 두 개 페이지·2 × 2 배치는 몇 px만 켜지고 footprint wash
+  없음 — 펼쳐진 마크 셀 자체의 1 µm 페이지는 blob wash 1 px, 중앙 9 µm 클러스터는
+  blob wash). depth 0의 마크는 thin 정책 keep(덱 기본)에서 hairline으로 그려진다.
+  단일 소스에서 같은 판정을 보려면 `floe-index plan … --page-hairline 0
+  --sub-cut-wash 1 --explain 1`(SPEC-INDEXER §6).
 - 한계(문서화): wash는 페이지/배치 bbox이므로 30% 채움의 콘택 배열이 100%
   블록으로 보인다(speckle이 완화; 채움 하한 1/256 아래만 제외). 뷰어의 일반 레이아웃 경로는 바뀌지 않는다
   (`sub_cut_wash=false`). 킬 스위치 `FLOE_RUST_DECK_WIDE=off`. 상태줄 `N sub-cut

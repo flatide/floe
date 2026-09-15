@@ -3020,15 +3020,24 @@ class WideViewTests(unittest.TestCase):
         # in the layer colour once the marks went under the cut. A
         # wash must be able to stand for 1/256 of its footprint (the
         # members as one-pixel hairlines) or be one screen blob;
-        # otherwise the sub-cut thing vanishes as it does off the
-        # deck. sparse.jb on 200 px over 2000 um, cut 3 px = 30 um:
-        # level 1 (two marks at the corners: 2 px of 40,000) and
-        # level 3 (the same as a 2 x 2 placement array)
-        # draw nothing; level 2 (a 9 x 9 um cluster) is a blob wash
-        for level in (1, 3):
+        # otherwise the sparse page is KEPT and its members drawn as
+        # hairline pixels (Calibre shows them at every zoom - user
+        # 2026-09-15), a sparse placement expanded. sparse.jb on
+        # 200 px over 2000 um, cut 3 px = 30 um: level 1 (two marks
+        # at the corners: 2 px of 40,000) and level 3 (the same as a
+        # 2 x 2 placement array) draw a few pixels and no wash;
+        # level 2 (a 9 x 9 um cluster) is a blob wash
+        # (an expanded mark cell's own 1 um page is a blob wash of one
+        # pixel - allowed; the footprint wash is what must not happen)
+        for level, most, washes in ((1, 8, 0), (3, 16, 4)):
             rgba, r = self._render("sparse.jb", {}, [(level, 0)], 3.0)
-            self.assertEqual(_lit(rgba), 0, "level %d washed" % level)
-            self.assertEqual(r["deck"]["wide_washes"], 0, level)
+            self.assertGreater(_lit(rgba), 0, "level %d vanished" % level)
+            self.assertLessEqual(_lit(rgba), most, "level %d washed" % level)
+            self.assertLessEqual(r["deck"]["wide_washes"], washes, level)
+            # the marks sit at the field's corners, nothing in between
+            w = 200
+            centre = (100 * w + 100) * 4
+            self.assertEqual(rgba[centre:centre + 3], b"\0\0\0", level)
         rgba, r = self._render("sparse.jb", {}, [(2, 0)], 3.0)
         self.assertGreater(_lit(rgba), 0)
         self.assertLessEqual(_lit(rgba), 16, "a blob, not a field")
