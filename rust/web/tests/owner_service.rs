@@ -397,6 +397,8 @@ mod defaults;
 mod drc_isolation;
 #[path = "support/exports.rs"]
 mod exports;
+#[path = "support/index_open.rs"]
+mod index_open;
 #[path = "support/launch.rs"]
 mod launch;
 #[path = "support/settings.rs"]

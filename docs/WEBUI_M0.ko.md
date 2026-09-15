@@ -240,6 +240,10 @@ M4g-8b에서 위 표시 설정 차이를 해소했다([M4 §52](WEBUI_M4.ko.md))
 window 정책으로 첫 프레임 전에 선호를 계승하고 CLI는 explicit 정책을 유지한다.
 잡덱 labels capability는 창 선호와 별도이며 새 소스의 mono/레이어/fit은 초기화한다.
 색인 동의→자동 재열기, GDS/gzip·나머지 CLI/현장 수용은 여전히 별도다.
+M4g-9a는 실패한 원래 open의 옵션·선택 레벨을 보존한 `index_open` 서버 작업을
+추가한다([M4 §53](WEBUI_M4.ko.md)). 색인 성공과 화면 교체 성공을 따로 보고하며
+승인·force·현재 view revision을 명시 검증한다. 브라우저 승인/복구 UI는 후속이므로
+UI-01의 색인 동의 흐름 전체를 아직 완료로 세지 않는다.
 
 ### 2.10 jobdeck — M1a (10개 옵션)
 

@@ -45,6 +45,21 @@ endpoint는 없다(`POST /api/v1/catalog`는405). service는0..32개 등록을 �
 open/index/게시를 하지 않는다. SourceSet이 기본값·DRC writer와 공유되어 새 등록 후
 예전 draft도 현재 보호 목록으로 검사한다. 등록/게시와 새 open/index의 Busy·수명 계약은
 [M4 §48](WEBUI_M4.ko.md)를 따른다. IPC handler/제품 CLI 연결이나 빈 창 UI의 완료는 아니다.
+M4g-9a는 기존 owner `POST /api/v1/operations`에 다음 명시 승인 작업을 추가한다.
+`{kind:"index_open",seq,request_id,open_seq,approved:true,target,pixels,options}`.
+`request_id`는 caller가 생성한64자리 소문자 hex이며 모든 진행/완료 응답에 반영된다.
+`open_seq`는 해당 owner의 아직 남아 있는 실패 open이고, `index_open` 제안이 있는
+캐시 실패여야 한다. `target`은 `{kind:"empty"}` 또는
+`{kind:"replace",view_id,state_rev}`다. 현재 뷰/revision을 색인 시작 전·이후·교체
+commit에서 확인한다. source/모드/선택 레벨/표시 patch는 서버가 보관한 원래 요청이며
+새 경로·다른 소스/선택·교체 표시 옵션을 받지 않는다. `options`는 기존 index 옵션이다.
+`approved`와 `force`는 별개이며 생략/null 승인은 거부한다.
+진행은 `stage:index|open`과 `index` snapshot으로 구별한다. 색인 성공 뒤 열기 실패/
+취소는 `index.phase:succeeded`를 보존하며 디스크 결과를 취소한 것으로 표시하지 않는다.
+top-level succeeded는 기존 open과 같은 attachment 교체 완료이며 첫 프레임의 완료는
+아니다. 기존 작업 조회/cancel/replay/32개 이력 만료 계약을 따른다.
+이 단계는 서버 기반이다. 브라우저 승인 preview·승인 요청 저장/동일 요청 복구·새 뷰
+채택은 아직 연결하지 않았다([M4 §53](WEBUI_M4.ko.md)).
 M2a의 현재 DRC 등록/읽기 URI·페이지·취소·focus/in_view·패널 상태·필터·순회·마커·
 CD·선택 집합·SVRF metadata/비교·타입 패널·격리/원자적 focus·ASCII API 계약은 [M2 기록](WEBUI_M2.ko.md) §2~21이
 기준이다. geometry reader는 read-only이며, 명시 opt-in한 owner의 주석 저장 endpoint는

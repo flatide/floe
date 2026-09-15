@@ -4180,3 +4180,84 @@ KLayout13 PX+2 phase-exact+14 style(jobs1/8)을 포함한다. 기존 dependency/
 다음은 미색인 파일의 단일 동의→색인→자동 재열기다. 파일 선택 자체로 색인·force·
 공유 게시를 승인한 것으로 해석하지 않는다. 현장 Firefox/ETX 수용은 여전히 미검증이며
 이 단계로 GTK 폐기나 전체 웹 이관 완료를 선언하지 않는다.
+
+## 53. M4g-9a — 승인된 색인→재열기 서버 작업
+
+미색인 파일을 선택한 뒤 별도 index와 open을 브라우저가 두 번 제출하는 대신,
+원래 실패 open을 서버가 보존하고 **명시 승인된 하나의 owner 작업**으로 처리한다.
+이번 단계는 서버/API와 native gate다. 브라우저 승인 창·복구·새 뷰 연결은 후속이며
+현재 파일 선택이나 reload가 이 작업을 암묵 제출하지 않는다.
+
+### 원래 요청과 승인 범위
+
+- 열기 실패 중 선택한 소스의 실제 OASIS header와 캐시를 읽기 전용으로 재검사한다.
+  누락된 meta는 기존 reader에서 I/O, 전부 미색인인 덱은 invalid input으로도 반환돼
+  오류 종류만으로 판정하지 않는다. 현재 등록을 재검증하고 선택 TC의 read lease를
+  취한 뒤 fresh cache가 없는 정상 OASIS에만 `index_unavailable`과 `index_open`
+  제안을 준다. changed source, 없는 원본, 선택하지 않은 TC의 미색인, 현재 캐시의
+  없는 레이어는 색인으로 고칠 수 있다고 제안하지 않는다. HTTP reactor에서 I/O하지
+  않으며, 성공한 열기는 이 error-only 검사를 추가로 하지 않는다.
+- 서버는 source ID/Arc, 레벨 집합, mode, patch, display_policy와 raw label 선호를
+  최대32개 보관한다. 원래 open의 ledger가 만료되면 참조도 거부한다. 공개 이력에는
+  source/title/mode·선택 방식/개수의 유계 요약만 실으며 전체 레벨 목록을 매번 복제하지
+  않는다. 향후 UI의 승인 preview는 **원래 선택**을 보여야 하며 현재 DOM 선택으로
+  대체하면 안 된다.
+- 새 `index_open` DTO는 원래 `open_seq`, 승인 `approved:true`, 현재 target, viewport
+  pixels, options를 필수로 받는다. target은 empty 또는 view ID+state_rev다. source,
+  레벨/모드/표시 옵션은 서버 보관본을 사용한다. 기본 jobs12·상한16, LOD/occupancy/
+  force 의미는 기존 index와 같다. `force` 기본false이며 일반 승인만으로 기존 캐시를
+  덮어쓰지 않는다. native 경로나 출력 경로를 브라우저에서 받지 않는다.
+- caller-generated `request_id`64자리 소문자 hex를 queued/진행/완료 응답에 보존한다.
+  seq만 같은 다른 작업의 결과를 브라우저가 자기 승인 결과로 채택하지 않도록 한다.
+  기존 typed signature+high-water ledger로 동일 승인 재접수는 재실행하지 않고 다른
+  본문은 충돌, 만료된 seq는410이다. 이 기반만으로 브라우저 저장/복구가 구현된 것은 아니다.
+
+### 두 commit 지점과 자원
+
+- 색인 전 target revision을 검사한 뒤 기존 ManagedIndex를 사용한다. 선택 레벨만
+  실제 색인하지만 writer/CPU 예약 범위는 기존 all-source 정책을 유지한다. 활성
+  reader나 CPU 예약과 충돌하면 busy이며 기존 view를 먼저 닫거나 jobs를 몰래 줄이지
+  않는다. index jobs와 viewer의 총 부하는 여전히 기존 Resources admission을 따른다.
+- 취소는 native 작업 취소/회수를 기다린 뒤 terminal을 게시한다. incomplete/failed/
+  cancelled 색인은 자동 열기를 하지 않는다. 덱의 부분 색인 결과도 전체 성공으로
+  바꾸지 않는다. 이미 만들어진 캐시를 롤백/삭제한다고 주장하지 않는다.
+- 색인 전체 성공 후 같은 open 경로를 호출한다. 그 시점의 target revision과 최종
+  교체 commit을 다시 확인하므로 색인 중 live pan/옵션 변경·Close는 낡은 승인으로
+  덮어쓰지 않는다. 색인이 성공했어도 open이 실패/취소되면 `stage:open`, top-level
+  실패/취소와 **index.phase:succeeded**가 함께 남는다.
+- 원래 CLI의 goto/depth/detail/thin/frames/labels/font는 첫 프레임 전에 적용한다.
+  window 정책은 정상 open과 같은 단일 snapshot에서 선호와 CAS를 읽는다. 성공은
+  attachment 교체 완료이지 실제 표시 완료가 아니며 이후 native 렌더 실패는 view의
+  별도 상태다. renderer ABI/버전0.12.87·인덱스 형식·GTK 경로는 변경하지 않았다.
+
+### 검증 및 남은 작업
+
+owner native gate17개가 통과했다. 새3개는 private valmini 복사본으로 다음을 검사한다.
+
+1. 무승인/잘못된 pixels의 무쓰기, 실제 색인, 첫 generation1/state_rev1에서 초기
+   표시·goto 보존, 동일 요청 재접수/다른 force 충돌, 손상 캐시 sentinel의 비파괴 거부와
+   별도 force 성공, 원본 변경 시 제안 없음, 오래된 open 참조 만료.
+2. 덱 선택 레벨의 LOD 색인과 미선택 파일 무쓰기, chip 모드/레벨·첫 generation 보존,
+   missing TC 포함 partial의 incomplete/무열기, 없는 레이어/원본의 잘못된 색인 제안 방지.
+3. 실제 native 호출 직전 test-owned wrapper를 일시 정지해 색인 전 stale CAS 무쓰기,
+   색인 후 stale CAS의 캐시 성공/이전 뷰 보존, 명시 재시도의 cache 재사용, 취소와
+   자식 reap·request ID/replay, 활성 캐시 reader와 force writer 충돌을 확인한다.
+
+`tools/validate_owner_service.py`의 필수 marker로 배선했으며 native 실행의 PATH는
+비워 Python/KLayout을 런타임으로 호출하지 않는다. Python은 gate/oracle 역할뿐이다.
+후속 M4g-9b는 승인 preview·승인 요청의 전송 전 저장·읽기 전용 복구·동일 요청만
+명시 재시도·작업 성공 후 새 뷰 채택·부분 결과 표시와 실제 브라우저 검증이다.
+그 뒤 bare FILE/잔여 CLI·형식 parity와 G1/G4 감사가 남으며 공유 권한/원격 배포,
+Firefox/ETX 현장 수용, 조건부 world-tile을 이 단계의 완료에 포함하지 않는다.
+
+대상 app/web all-target clippy와 Rust1.89 단위(app17/web73), 관련3패키지의 Linux
+musl all-target check를 통과했다. Linux 검사는 컴파일 확인이지 현장 실행 수용이
+아니다. 전체 `sh tools/validate_rust.sh`는 exit0, `RUST VALIDATION: ALL OK`로
+완료했다. owner17·GTK file display1,296·CLI/picker/handoff·ES2017/UI·occupancy25·
+잡덱80·렌더러46과 KLayout13 PX+2 phase-exact+14 style(jobs1/8)을 포함한다.
+기존 dependency/GTK/Pillow 경고는 별도다. UI는 이번 단계에서 변경하지 않았고 실제
+브라우저 승인 조작을 검증했다고 주장하지 않는다. 이전 private valmini/legacy oracle을
+재사용했으며 검증용 `.venv` 링크만 제거했다. main/feature/jobdeck 작업은 수정하지 않았다.
+전체 로그: `/private/tmp/floe-index-open-battery.log`. 집중 검사 로그는
+`floe-index-open-owner-v6.log`, `floe-index-open-clippy-final.log`,
+`floe-index-open-msrv.log`, `floe-index-open-linux-check.log`다.

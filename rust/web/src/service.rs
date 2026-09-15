@@ -1,6 +1,10 @@
 //! One bounded owner operation thread; filesystem/prepare/native waits never
 //! run on the HTTP reactor. View rendering and index progress are independent
 //! of browser subscriptions. No implicit indexing or destructive reopen.
+mod index_open;
+mod open;
+use index_open::IndexTarget;
+
 use crate::{
     auth::public_id,
     layer_catalog::LayerCatalog,
@@ -24,7 +28,7 @@ use floe_app_core::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, VecDeque},
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Condvar, Mutex,
@@ -136,6 +140,15 @@ pub enum OperationDto {
         #[serde(default)]
         label_preference: Field<bool>,
     },
+    IndexOpen {
+        seq: String,
+        request_id: String,
+        open_seq: String,
+        approved: bool,
+        target: IndexTarget,
+        pixels: [u32; 2],
+        options: IndexArgs,
+    },
     Index {
         seq: String,
         source_id: String,
@@ -150,21 +163,28 @@ enum Command {
         base_state_rev: u64,
         mode: Mode,
     },
-    Open {
-        source: Arc<RegisteredSource>,
-        source_id: String,
-        levels: Option<BTreeSet<i64>>,
-        mode: Mode,
-        patch: Box<Patch>,
-        replace: Option<(String, u64)>,
-        display_policy: OpenDisplay,
-        label_preference: Option<bool>,
+    Open(Box<OpenCommand>),
+    IndexOpen {
+        open: Box<OpenCommand>,
+        options: Box<IndexOptions>,
+        request_id: String,
     },
     Index {
         source: Arc<RegisteredSource>,
         levels: Option<BTreeSet<i64>>,
         options: Box<IndexOptions>,
     },
+}
+#[derive(Clone)]
+struct OpenCommand {
+    source: Arc<RegisteredSource>,
+    source_id: String,
+    levels: Option<BTreeSet<i64>>,
+    mode: Mode,
+    patch: Box<Patch>,
+    replace: Option<(String, u64)>,
+    display_policy: OpenDisplay,
+    label_preference: Option<bool>,
 }
 struct Work {
     seq: u64,
@@ -183,6 +203,8 @@ struct State {
     closed: bool,
     registering: bool,
     window_display: WindowDisplay,
+    // Same maximum as the operation ledger. Only failed cache opens are kept.
+    retry_opens: VecDeque<(u64, OpenCommand)>,
 }
 struct Inner {
     exports: Arc<crate::exports::Service>,
@@ -259,6 +281,7 @@ impl Service {
                 closed: false,
                 registering: false,
                 window_display: WindowDisplay::default(),
+                retry_opens: VecDeque::new(),
             }),
             wake: Condvar::new(),
         });
@@ -481,7 +504,8 @@ impl Service {
         let seq = match &request {
             OperationDto::Open { seq, .. }
             | OperationDto::Mode { seq, .. }
-            | OperationDto::Index { seq, .. } => view::counter(seq)?,
+            | OperationDto::Index { seq, .. }
+            | OperationDto::IndexOpen { seq, .. } => view::counter(seq)?,
         };
         // A completed mode change has retired its original view ID. Replays
         // must be resolved before consulting that mutable current attachment.
@@ -530,7 +554,7 @@ impl Service {
                 let patch = body.core().map_err(|_| "invalid_request")?;
                 (
                     "open",
-                    Command::Open {
+                    Command::Open(Box::new(OpenCommand {
                         source,
                         source_id,
                         levels,
@@ -542,6 +566,49 @@ impl Service {
                             Field::Absent => None,
                             Field::Value(v) => Some(v),
                         },
+                    })),
+                )
+            }
+            OperationDto::IndexOpen {
+                open_seq,
+                request_id,
+                approved,
+                target,
+                pixels,
+                options,
+                ..
+            } => {
+                if !approved {
+                    return Err("approval_required");
+                }
+                index_open::identity(&request_id)?;
+                let original = view::counter(&open_seq)?;
+                let options = options.core().map_err(|_| "invalid_request")?;
+                floe_app_core::view::Viewport::new([0.0, 0.0, 1.0, 1.0], pixels[0], pixels[1])
+                    .map_err(|_| "invalid_request")?;
+                let mut open = {
+                    let s = self.inner.state.lock().unwrap();
+                    let old = s.ledger.get(original).ok_or("operation_expired")?;
+                    if old["kind"] != "open"
+                        || old["phase"] != "failed"
+                        || old["error"] != "index_unavailable"
+                    {
+                        return Err("invalid_request");
+                    }
+                    s.retry_opens
+                        .iter()
+                        .find(|(n, _)| *n == original)
+                        .map(|(_, o)| o.clone())
+                        .ok_or("operation_expired")?
+                };
+                open.replace = target.core()?;
+                open.patch.pixels = Some((pixels[0], pixels[1]));
+                (
+                    "index_open",
+                    Command::IndexOpen {
+                        open: Box::new(open),
+                        options: Box::new(options),
+                        request_id,
                     },
                 )
             }
@@ -579,6 +646,9 @@ impl Service {
             Admission::New => (),
         }
         let stop = Arc::new(AtomicUsize::new(0));
+        if let Command::IndexOpen { request_id, .. } = &command {
+            s.ledger.update(seq,json!({"seq":seq.to_string(),"kind":"index_open","phase":"queued","stage":"index","request_id":request_id}),false);
+        }
         s.active_stop = Some(Arc::clone(&stop));
         s.pending = Some(Work { seq, command, stop });
         let state = s.ledger.get(seq).expect("admitted operation");
@@ -653,17 +723,47 @@ fn run(inner: Arc<Inner>) {
         let seq = work.seq;
         let kind = match &work.command {
             Command::Mode { .. } => "mode",
-            Command::Open { .. } => "open",
+            Command::Open(_) => "open",
+            Command::IndexOpen { .. } => "index_open",
             Command::Index { .. } => "index",
         };
+        let retry = match &work.command {
+            Command::Open(open) => Some((**open).clone()),
+            _ => None,
+        };
+        let request_id = match &work.command {
+            Command::IndexOpen { request_id, .. } => Some(request_id.clone()),
+            _ => None,
+        };
+        let stop = Arc::clone(&work.stop);
         let result = execute(&inner, work);
-        let state = match result {
+        let retry = if matches!(&result,Err(e) if matches!(e.kind, ErrorKind::Cache | ErrorKind::Io | ErrorKind::InvalidInput))
+        {
+            retry.filter(|open| index_open::retryable(&inner, open, &stop).unwrap_or(false))
+        } else {
+            None
+        };
+        let mut state = match result {
             Ok(result) => result,
             Err(e) => {
                 json!({"seq":seq.to_string(),"kind":kind,"phase":if e.kind==ErrorKind::Cancelled{"cancelled"}else{"failed"},"error":view::safe_error(e.kind)})
             }
         };
         let mut s = inner.state.lock().unwrap();
+        if let Some(request_id) = request_id {
+            state["request_id"] = json!(request_id);
+            if state.get("stage").is_none() {
+                state["stage"] = json!("index");
+            }
+        }
+        if let Some(open) = retry {
+            state["error"] = json!("index_unavailable");
+            state["index_open"] = index_open::proposal(seq, &open);
+            if s.retry_opens.len() == 32 {
+                s.retry_opens.pop_front();
+            }
+            s.retry_opens.push_back((seq, open));
+        }
         s.ledger.update(seq, state, true);
         s.active_stop = None;
     }
@@ -785,158 +885,12 @@ fn execute(inner: &Inner, work: Work) -> Result<Value> {
                 json!({"seq":seq.to_string(),"kind":"mode","phase":"succeeded","view_id":id,"unchanged":false}),
             )
         }
-        Command::Open {
-            source,
-            source_id,
-            levels,
-            mode,
-            patch,
-            replace,
-            display_policy,
-            label_preference,
-        } => {
-            let mode_name = match mode {
-                Mode::Level => "level",
-                Mode::Chip => "chip",
-                Mode::Layer => "layer",
-            };
-            let selected_levels: Option<Vec<String>> = levels
-                .as_ref()
-                .map(|ids| ids.iter().map(i64::to_string).collect());
-            let (previous, window_display) = {
-                let s = inner.state.lock().unwrap();
-                // Read the preferences and CAS revision from ONE snapshot.
-                // A concurrent edit between two reads must not validate a new
-                // revision while inheriting the older revision's preferences.
-                let old = s.view.as_ref().map(|v| (v, v.controller.snapshot()));
-                let window_display = old.as_ref().map_or_else(
-                    || s.window_display.clone(),
-                    |(v, snapshot)| {
-                        s.window_display
-                            .capture(&snapshot.state, v.controller.model.deck)
-                    },
-                );
-                let previous = if let Some((id, rev)) = &replace {
-                    let (v, snapshot) = old
-                        .as_ref()
-                        .filter(|(v, _)| v.id == *id)
-                        .ok_or_else(|| Error::new(ErrorKind::Busy, "launcher view changed"))?;
-                    if snapshot.state_rev != *rev
-                        || !matches!(
-                            snapshot.phase,
-                            floe_app_core::view::Phase::Idle
-                                | floe_app_core::view::Phase::Rendering
-                        )
-                    {
-                        return Err(Error::new(
-                            ErrorKind::Busy,
-                            "launcher view revision changed",
-                        ));
-                    }
-                    Some((Arc::clone(v), *rev))
-                } else if s.view.as_ref().is_some_and(|v| !v.controller.is_finished()) {
-                    return Err(Error::new(
-                        ErrorKind::Busy,
-                        "close the current view before opening another",
-                    ));
-                } else {
-                    None
-                };
-                (previous, window_display.label_preference(label_preference))
-            };
-            inner.state.lock().unwrap().ledger.update(
-                seq,
-                json!({"seq":seq.to_string(),"kind":"open","phase":"opening"}),
-                false,
-            );
-            source.validate(&stop)?;
-            if let Some((previous, rev)) = &previous {
-                if previous.source_id == source_id
-                    && previous.mode == mode_name
-                    && previous.levels == selected_levels
-                {
-                    let mut s = inner.state.lock().unwrap();
-                    if s.closed || stop.load(Ordering::Relaxed) != 0 {
-                        return Err(Error::new(ErrorKind::Cancelled, "launcher edit cancelled"));
-                    }
-                    if !s.view.as_ref().is_some_and(|v| Arc::ptr_eq(v, previous)) {
-                        return Err(Error::new(ErrorKind::Busy, "launcher view changed"));
-                    }
-                    // Preserve native/decoded/retained caches for same-source
-                    // navigation. Only explicitly supplied preferences change.
-                    let snapshot = previous.controller.edit(*rev, *patch)?;
-                    s.window_display =
-                        window_display.capture(&snapshot.state, previous.controller.model.deck);
-                    return Ok(
-                        json!({"seq":seq.to_string(),"kind":"open","phase":"succeeded",
-                        "view_id":previous.id,"reused":true,"state_rev":snapshot.state_rev.to_string()}),
-                    );
-                }
-            }
-            let data = ManagedDataset::open(&inner.resources, source.path(), levels, mode, &stop)?;
-            let model = Model::new(&data)?;
-            let (width, height) = patch.pixels.unwrap_or((1024, 768));
-            let initial = ViewState::initial(&model, width, height)?;
-            let initial = match display_policy {
-                OpenDisplay::Explicit => initial,
-                OpenDisplay::Window => initial.edit(&model, window_display.patch(model.deck))?,
-            }
-            .edit(&model, *patch)?;
-            let remembered = window_display.capture(&initial, model.deck);
-            let rows = LayerCatalog::dataset(&data.dataset, &model);
-            // Prepare a dormant controller with the existing reservation; the
-            // old worker is fully reaped before the new one opens. Metadata,
-            // validation or stale-revision failures leave the old view alive.
-            let mut replacement = if let Some((previous, _)) = &previous {
-                Some(
-                    previous
-                        .controller
-                        .prepare_replacement(Arc::clone(&data), initial.clone())?,
-                )
-            } else {
-                None
-            };
-            let controller = if let Some(replacement) = &replacement {
-                replacement.controller()
-            } else {
-                Arc::new(ViewController::start_configured(
-                    &inner.resources,
-                    data,
-                    inner.options.clone(),
-                    initial,
-                    inner.view_options,
-                )?)
-            };
-            let mut view = Attachment::with_rows(controller, &source.title, rows)
-                .map_err(|_| Error::new(ErrorKind::Io, "entropy unavailable"))?;
-            view.source_id = source_id;
-            view.levels = selected_levels;
-            view.mode = mode_name;
-            let view = Arc::new(view);
-            let mut s = inner.state.lock().unwrap();
-            if s.closed || stop.load(Ordering::Relaxed) != 0 {
-                view.controller.request_close();
-                drop(s);
-                drop(view);
-                return Err(Error::new(ErrorKind::Cancelled, "open cancelled"));
-            }
-            if let Some((previous, rev)) = previous {
-                if !s.view.as_ref().is_some_and(|v| Arc::ptr_eq(v, &previous)) {
-                    return Err(Error::new(
-                        ErrorKind::Busy,
-                        "launcher view changed before cutover",
-                    ));
-                }
-                replacement
-                    .as_mut()
-                    .expect("prepared launcher replacement")
-                    .commit(rev)?;
-            }
-            let id = view.id.clone();
-            s.window_display = remembered;
-            s.view = Some(view);
-            Ok(json!({"seq":seq.to_string(),"kind":"open","phase":"succeeded","view_id":id}))
-        }
+        Command::Open(command) => open::execute(inner, seq, *command, stop, None),
+        Command::IndexOpen {
+            open,
+            options,
+            request_id,
+        } => index_open::execute(inner, seq, *open, *options, stop, &request_id),
         Command::Index {
             source,
             levels,

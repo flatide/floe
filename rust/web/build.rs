@@ -40,6 +40,8 @@ fn main() {
         "src/prepared.rs",
         "src/query.rs",
         "src/service.rs",
+        "src/service/open.rs",
+        "src/service/index_open.rs",
         "src/window_display.rs",
         "src/launch.rs",
         "src/browse/mod.rs",
