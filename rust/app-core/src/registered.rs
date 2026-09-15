@@ -8,6 +8,10 @@ use crate::{
     Error, ErrorKind, Result,
 };
 pub use set::{Registration, SourceSet};
+pub(crate) enum PublicationKind {
+    Defaults,
+    Review,
+}
 use std::{
     collections::BTreeSet,
     fs,

@@ -1,10 +1,12 @@
 //! Append-only trusted registrations and sidecar-publication exclusion.
-//! The mutex protects counters only, never filesystem I/O. Reads can continue
+//! The mutex protects bounded metadata only, never filesystem I/O. Reads can continue
 //! while a registration is inspected; competing mutations fail with Busy.
-use super::{AccessScope, RegisteredSource, MAX_SOURCES};
+mod protection;
+use super::{AccessScope, PublicationKind, RegisteredSource, MAX_SOURCES};
 use crate::{check_cancelled, Error, ErrorKind, Result};
+use protection::Protection;
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     sync::{atomic::AtomicUsize, Arc, Mutex},
 };
 
@@ -15,6 +17,7 @@ struct State {
     sources: Vec<Arc<RegisteredSource>>,
     registering: bool,
     publications: usize,
+    protection: Protection,
 }
 impl SourceSet {
     pub fn new(sources: Vec<Arc<RegisteredSource>>) -> Result<Arc<Self>> {
@@ -26,6 +29,7 @@ impl SourceSet {
                 sources,
                 registering: false,
                 publications: 0,
+                protection: Protection::default(),
             }),
         }))
     }
@@ -45,7 +49,14 @@ impl SourceSet {
             owner: Arc::clone(self),
             existing: state.sources.clone(),
             staged: Vec::new(),
+            protection: state.protection.clone(),
         })
+    }
+    /// Check on the blocking publisher, again after acquiring its publication
+    /// lease. A draft prepared before an input registration has no exemption.
+    pub(crate) fn protect_output(&self, path: &Path, kind: PublicationKind) -> Result<()> {
+        let protection = self.state.lock().unwrap().protection.clone();
+        protection.check(path, kind)
     }
     /// Hold from before any lock/stage creation through commit and cleanup.
     /// Other publishers may proceed; source registration cannot overlap them.
@@ -69,8 +80,26 @@ pub struct Registration {
     owner: Arc<SourceSet>,
     existing: Vec<Arc<RegisteredSource>>,
     staged: Vec<Arc<RegisteredSource>>,
+    protection: Protection,
 }
 impl Registration {
+    /// Trusted input registration only. These names DENY publications; they do
+    /// not authorize reading, browsing, indexing or writing any path. Register
+    /// immutable DB/SVRF/source inputs here, not editable review sidecars.
+    pub fn protect_inputs(
+        &mut self,
+        files: &[PathBuf],
+        trees: &[PathBuf],
+        stop: &AtomicUsize,
+    ) -> Result<()> {
+        self.protection.inputs(files, trees, stop)
+    }
+    /// Exact derived review/lock names deny design-default publication only.
+    /// Review writes still require the existing fixed Store capability; this
+    /// is not an exception to immutable inputs or source/cache protection.
+    pub fn protect_review_targets(&mut self, files: &[PathBuf], stop: &AtomicUsize) -> Result<()> {
+        self.protection.review_targets(files, stop)
+    }
     /// All header/dependency/scope checks run outside the short state mutex,
     /// while the reservation excludes cooperating sidecar writers.
     pub fn register(
@@ -106,12 +135,10 @@ impl Registration {
     /// so a newly visible handle is never missing from publication protection.
     pub fn commit(mut self, stop: &AtomicUsize) -> Result<()> {
         check_cancelled(stop)?;
-        self.owner
-            .state
-            .lock()
-            .unwrap()
-            .sources
-            .append(&mut self.staged);
+        let mut state = self.owner.state.lock().unwrap();
+        state.sources.append(&mut self.staged);
+        state.protection = std::mem::take(&mut self.protection);
+        drop(state);
         Ok(())
     }
 }

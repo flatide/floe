@@ -82,6 +82,8 @@ impl Publisher {
         }))
     }
     fn protect(&self, path: &Path) -> Result<()> {
+        self.sources
+            .protect_output(path, crate::registered::PublicationKind::Defaults)?;
         crate::artifact::protected_output(path, &self.protected_files, &self.protected_trees)?;
         reject_aliases(path, &self.protected_files)?;
         for source in self.sources.snapshot() {

@@ -8,6 +8,76 @@ use std::{
 static SERIAL: AtomicU64 = AtomicU64::new(0);
 
 #[test]
+fn dynamic_input_protection_rechecks_old_review_drafts_without_granting_writes() {
+    for review_kind in [Kind::Notes, Kind::Waives] {
+        for lock_target in [false, true] {
+            let f = Fixture::new();
+            let store = f.store(review_kind);
+            let draft = if review_kind == Kind::Notes {
+                f.note(&store, "saved")
+            } else {
+                store
+                    .snapshot(&f.stop)
+                    .unwrap()
+                    .prepare_waives(&[(0, 1)], &f.stop)
+                    .unwrap()
+            };
+            let target = if lock_target {
+                store.lock_path()
+            } else {
+                store.target().to_owned()
+            };
+            let mut p = store.sources.begin(&f.stop).unwrap();
+            p.protect_inputs(std::slice::from_ref(&target), &[], &f.stop)
+                .unwrap();
+            p.commit(&f.stop).unwrap();
+            assert_eq!(kind(draft.publish(&f.stop)), ErrorKind::InvalidInput);
+            assert!(!store.target().exists() && !store.lock_path().exists());
+            f.clean();
+        }
+        let f = Fixture::new();
+        let store = f.store(review_kind);
+        let mut p = store.sources.begin(&f.stop).unwrap();
+        p.protect_review_targets(&[store.target().to_owned(), store.lock_path()], &f.stop)
+            .unwrap();
+        p.commit(&f.stop).unwrap();
+        // Default-publication protection is not a veto of this existing,
+        // separately authorized review writer's exact target.
+        if review_kind == Kind::Notes {
+            f.note(&store, "still authorized").publish(&f.stop).unwrap();
+        } else {
+            store
+                .snapshot(&f.stop)
+                .unwrap()
+                .prepare_waives(&[(0, 1)], &f.stop)
+                .unwrap()
+                .publish(&f.stop)
+                .unwrap();
+        }
+        let bytes = fs::read(store.target()).unwrap();
+        let mut p = store.sources.begin(&f.stop).unwrap();
+        p.protect_inputs(&[store.target().to_owned()], &[], &f.stop)
+            .unwrap();
+        p.commit(&f.stop).unwrap();
+        // A deny-publication input registration does not revoke read access.
+        let reader = Store::open_readonly_catalog(
+            f.scope.clone(),
+            &f.pack,
+            "reviewer",
+            review_kind,
+            vec![],
+            vec![],
+            Arc::clone(&store.sources),
+            store.target(),
+            &f.stop,
+        )
+        .unwrap();
+        assert!(reader.snapshot(&f.stop).is_ok());
+        assert_eq!(fs::read(store.target()).unwrap(), bytes);
+    }
+}
+
+#[test]
 fn selected_readonly_review_cannot_create_drafts_or_publish() {
     for review_kind in [Kind::Notes, Kind::Waives] {
         let f = Fixture::new();

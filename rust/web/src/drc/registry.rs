@@ -254,6 +254,25 @@ impl Registry {
         }
         Ok((files, trees))
     }
+    /// Publish deny-only input metadata under the same reservation used by
+    /// sidecar writers. A later runtime replacement must do this before making
+    /// its reader visible; it grants neither new read roots nor review writes.
+    pub(crate) fn protect_publications(
+        &self,
+        sources: &Arc<floe_app_core::registered::SourceSet>,
+    ) -> Result<()> {
+        let stop = AtomicUsize::new(0);
+        let mut registration = sources.begin(&stop)?;
+        let r = &self.inner.registration;
+        let inputs: Vec<_> = std::iter::once(r.path.clone())
+            .chain(r.readonly.as_ref().map(|s| s.source.clone()))
+            .chain(r.rules.clone())
+            .collect();
+        let (files, trees) = self.protected_paths()?;
+        registration.protect_inputs(&inputs, &trees, &stop)?;
+        registration.protect_review_targets(&files, &stop)?;
+        registration.commit(&stop)
+    }
     pub(crate) fn current(&self, id: &str) -> Option<Arc<Service>> {
         let s = self.inner.state.lock().unwrap();
         s.current
@@ -710,6 +729,68 @@ mod tests {
         managed::{Limits, Resources},
         registered::AccessScope,
     };
+    #[test]
+    fn registry_protection_reaches_an_existing_default_publisher() {
+        use floe_app_core::{
+            jobdeck::color::Mode,
+            layer_defaults::Publisher,
+            registered::{RegisteredSource, SourceSet},
+        };
+        use std::{fs, path::PathBuf};
+        struct Temp(PathBuf);
+        impl Drop for Temp {
+            fn drop(&mut self) {
+                fs::remove_dir_all(&self.0).unwrap();
+            }
+        }
+        let dir = Temp(
+            std::env::temp_dir().join(format!("floe-registry-protection-{}", std::process::id())),
+        );
+        fs::create_dir(&dir.0).unwrap();
+        let stop = AtomicUsize::new(0);
+        let path = dir.0.join("synthetic.jb");
+        fs::write(&path, "CHIP A\n$ (1,A,TC=missing.oas)\n").unwrap();
+        let scope = AccessScope::new(std::slice::from_ref(&dir.0)).unwrap();
+        let source = RegisteredSource::register(Arc::clone(&scope), &path, &stop).unwrap();
+        for field in ["db", "rules", "waives"] {
+            let sources = SourceSet::new(vec![Arc::clone(&source)]).unwrap();
+            let publisher = Publisher::with_sources(Arc::clone(&sources), vec![], vec![]).unwrap();
+            let draft = publisher
+                .prepare(
+                    Arc::clone(&source),
+                    Mode::Level,
+                    "3.0 red solid Mask 1 3\n",
+                    &stop,
+                )
+                .unwrap();
+            let target = draft.target().to_owned();
+            let reg = Registration {
+                resources: Resources::new(Limits::default()).unwrap(),
+                scope: Arc::clone(&scope),
+                path: if field == "db" {
+                    target.clone()
+                } else {
+                    dir.0.join("review.db")
+                },
+                waives: (field == "waives").then(|| target.clone()),
+                rules: (field == "rules").then(|| target.clone()),
+                readonly: None,
+                source_id: "source".into(),
+            };
+            let registry =
+                Registry::read_only(Service::unavailable(reg, "drc_read_error").unwrap());
+            registry.protect_publications(&sources).unwrap();
+            // Repeat attachment is deduplicated; no fixed Publisher input list
+            // was replaced and the old draft still sees the new deny metadata.
+            registry.protect_publications(&sources).unwrap();
+            assert_eq!(
+                draft.publish(&stop).unwrap_err().kind,
+                ErrorKind::InvalidInput
+            );
+            assert!(!target.exists());
+            assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 1);
+        }
+    }
     #[test]
     fn refreshed_revision_rejects_old_callbacks_without_replacing_reader() {
         let reg = Registration {

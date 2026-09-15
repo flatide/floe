@@ -319,6 +319,8 @@ impl Store {
     fn protect(&self, path: &Path) -> Result<()> {
         if self.editable {
             self.scope.check(path)?;
+            self.sources
+                .protect_output(path, crate::registered::PublicationKind::Review)?;
         } else if path != self.target {
             return Err(Error::input("read-only review has no other path authority"));
         }

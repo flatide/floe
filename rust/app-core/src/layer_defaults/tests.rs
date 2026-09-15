@@ -5,6 +5,33 @@ use std::os::unix::fs::{symlink, PermissionsExt};
 const TEXT: &str = "3.0 red solid Mask 1 3\n";
 
 #[test]
+fn dynamic_drc_inputs_and_review_targets_recheck_already_prepared_defaults() {
+    for review_target in [false, true] {
+        for lock_target in [false, true] {
+            let f = Fixture::new();
+            let draft = f.draft();
+            let target = if lock_target {
+                f.dir.join("design.jb.layerprops.lock")
+            } else {
+                f.target()
+            };
+            let mut p = f.publisher.sources.begin(&f.stop).unwrap();
+            if review_target {
+                p.protect_review_targets(std::slice::from_ref(&target), &f.stop)
+                    .unwrap();
+            } else {
+                p.protect_inputs(std::slice::from_ref(&target), &[], &f.stop)
+                    .unwrap();
+            }
+            p.commit(&f.stop).unwrap();
+            assert_eq!(kind(draft.publish(&f.stop)), ErrorKind::InvalidInput);
+            assert!(!f.target().exists() && !f.dir.join("design.jb.layerprops.lock").exists());
+            f.no_stage();
+        }
+    }
+}
+
+#[test]
 fn dynamic_sources_protect_old_drafts_and_publication_excludes_registration() {
     for suffix in ["", ".lock"] {
         let f = Fixture::new();

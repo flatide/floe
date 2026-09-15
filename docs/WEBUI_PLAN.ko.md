@@ -1,6 +1,6 @@
 # floe2 웹 셸 / 서버-클라이언트 계획 (정본)
 
-작성 2026-08-29, 갱신 2026-09-16(M4g-22 브라우저 display dump).
+작성 2026-08-29, 갱신 2026-09-16(M4g-24a DRC 교체 선행 게시 보호).
 관련 정본: `FLOE2_OPTIMIZATION.ko.md`(F2R-10/11),
 `RUST_RENDERER_PLAN.ko.md`, `SPEC-VIEWER.ko.md`, `rust/BUILD.md`.
 
@@ -138,6 +138,10 @@ jobdeck/occupancy의 같은 이름 단계와 별개다. 개발 기준과 합류 
 [Rust 서비스/API 초안](WEBUI_SERVICE_API.ko.md).
 
 ## 현재 진행도와 커밋 보고
+
+M4g-24a는 DRC/SVRF 입력 보호 목록의 원자 등록과 기존 저장 초안의 게시 재검사를
+추가했다([M4 §79](WEBUI_M4.ko.md)). 시작 시 등록에 연결한 선행 단계이며 실행 중
+DRC 교체 자체나 G4-MENU-01 완료를 뜻하지 않는다.
 
 2026-09-16 M4g-23 [GTK 메뉴 재대조](WEBUI_G4_MENU.ko.md): 실행 중 DRC 파일 열기/
 교체, SVRF metadata 교체, 카메라 유지 jobdeck 로드 레벨 재선택은 아직 미구현이다.

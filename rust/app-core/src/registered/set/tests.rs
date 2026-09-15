@@ -139,3 +139,154 @@ fn concurrent_registration_and_publication_have_one_winner() {
         drop(set.publication(&stop).unwrap());
     }
 }
+
+#[test]
+fn input_protection_is_atomic_deny_only_and_survives_source_additions() {
+    let f = Fixture::new();
+    let set = SourceSet::new(vec![]).unwrap();
+    let stop = AtomicUsize::new(0);
+    let file = f.0.join("review.db");
+    let target = f.0.join("review.fe");
+    let tree = f.0.join("pack");
+    let check = |p: &Path, k| set.protect_output(p, k);
+    let mut pending = set.begin(&stop).unwrap();
+    pending
+        .protect_inputs(
+            std::slice::from_ref(&file),
+            std::slice::from_ref(&tree),
+            &stop,
+        )
+        .unwrap();
+    pending
+        .protect_review_targets(std::slice::from_ref(&target), &stop)
+        .unwrap();
+    assert!(
+        check(&file, PublicationKind::Defaults).is_ok(),
+        "uncommitted protection leaked"
+    );
+    assert_eq!(error(set.publication(&stop)), ErrorKind::Busy);
+    assert_eq!(
+        error(pending.commit(&AtomicUsize::new(1))),
+        ErrorKind::Cancelled
+    );
+    assert!(check(&file, PublicationKind::Review).is_ok());
+    let mut pending = set.begin(&stop).unwrap();
+    pending
+        .protect_inputs(
+            std::slice::from_ref(&file),
+            std::slice::from_ref(&tree),
+            &stop,
+        )
+        .unwrap();
+    pending
+        .protect_review_targets(std::slice::from_ref(&target), &stop)
+        .unwrap();
+    pending.commit(&stop).unwrap();
+    assert_eq!(
+        error(check(&file, PublicationKind::Defaults)),
+        ErrorKind::InvalidInput
+    );
+    assert_eq!(
+        error(check(&file, PublicationKind::Review)),
+        ErrorKind::InvalidInput
+    );
+    assert_eq!(
+        error(check(&tree.join("new"), PublicationKind::Review)),
+        ErrorKind::InvalidInput
+    );
+    assert_eq!(
+        error(check(&target, PublicationKind::Defaults)),
+        ErrorKind::InvalidInput
+    );
+    assert!(
+        check(&target, PublicationKind::Review).is_ok(),
+        "protection is not a review grant or veto"
+    );
+    let mut pending = set.begin(&stop).unwrap();
+    pending.register(f.scope(), &f.deck(0), &stop).unwrap();
+    // Marking a path as a review target cannot relax an immutable-input deny.
+    pending
+        .protect_review_targets(std::slice::from_ref(&file), &stop)
+        .unwrap();
+    pending.commit(&stop).unwrap();
+    assert_eq!(set.snapshot().len(), 1);
+    assert_eq!(
+        error(check(&file, PublicationKind::Review)),
+        ErrorKind::InvalidInput
+    );
+    assert!(!file.exists() && !target.exists() && !tree.exists());
+}
+
+#[test]
+fn protected_paths_are_bounded_deduplicated_and_a_failed_batch_is_atomic() {
+    let f = Fixture::new();
+    let set = SourceSet::new(vec![]).unwrap();
+    let stop = AtomicUsize::new(0);
+    let files: Vec<_> = (0..1024).map(|n| f.0.join(format!("input-{n}"))).collect();
+    let mut p = set.begin(&stop).unwrap();
+    p.protect_inputs(&files, &[], &stop).unwrap();
+    p.protect_inputs(&files, &[], &stop).unwrap();
+    let denied = f.0.join("over-limit");
+    assert_eq!(
+        error(p.protect_review_targets(std::slice::from_ref(&denied), &stop)),
+        ErrorKind::InvalidInput
+    );
+    p.commit(&stop).unwrap();
+    assert!(set
+        .protect_output(&denied, PublicationKind::Defaults)
+        .is_ok());
+    assert_eq!(
+        error(set.protect_output(&files[1023], PublicationKind::Review)),
+        ErrorKind::InvalidInput
+    );
+    let set = SourceSet::new(vec![]).unwrap();
+    let mut p = set.begin(&stop).unwrap();
+    assert_eq!(
+        error(p.protect_inputs(&[denied.clone(), PathBuf::new()], &[], &stop)),
+        ErrorKind::InvalidInput
+    );
+    assert_eq!(
+        error(p.protect_inputs(&[], &[PathBuf::from("/")], &stop)),
+        ErrorKind::InvalidInput
+    );
+    assert_eq!(
+        error(p.protect_inputs(std::slice::from_ref(&denied), &[], &AtomicUsize::new(1))),
+        ErrorKind::Cancelled
+    );
+    p.commit(&stop).unwrap();
+    assert!(set
+        .protect_output(&denied, PublicationKind::Defaults)
+        .is_ok());
+}
+
+#[test]
+fn dynamic_input_identity_aliases_and_symlinked_trees_are_protected() {
+    let f = Fixture::new();
+    let set = SourceSet::new(vec![]).unwrap();
+    let stop = AtomicUsize::new(0);
+    let file = f.0.join("input.json");
+    fs::write(&file, b"synthetic input").unwrap();
+    let alias = f.0.join("alias.json");
+    fs::hard_link(&file, &alias).unwrap();
+    let tree = f.0.join("pack");
+    fs::create_dir(&tree).unwrap();
+    let link = f.0.join("pack-link");
+    std::os::unix::fs::symlink(&tree, &link).unwrap();
+    let mut p = set.begin(&stop).unwrap();
+    p.protect_inputs(
+        std::slice::from_ref(&file),
+        std::slice::from_ref(&tree),
+        &stop,
+    )
+    .unwrap();
+    p.commit(&stop).unwrap();
+    assert_eq!(
+        error(set.protect_output(&alias, PublicationKind::Review)),
+        ErrorKind::InvalidInput
+    );
+    assert_eq!(
+        error(set.protect_output(&link.join("new"), PublicationKind::Defaults)),
+        ErrorKind::InvalidInput
+    );
+    assert_eq!(fs::read(&file).unwrap(), b"synthetic input");
+}

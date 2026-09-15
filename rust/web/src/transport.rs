@@ -390,6 +390,8 @@ impl Gateway {
         {
             return Err("invalid DRC source registration".into());
         }
+        drc.protect_publications(&gate.service.as_ref().unwrap().source_set())
+            .map_err(|e| e.to_string())?;
         gate.drc = Some(drc);
         Ok(())
     }
@@ -494,7 +496,16 @@ impl Gateway {
             .as_ref()
             .ok_or("note review requires registered sources")?
             .source_set();
-        drc.enable_notes(reviewer, sources, files, trees, edit_waives, editable)
+        drc.enable_notes(
+            reviewer,
+            Arc::clone(&sources),
+            files,
+            trees,
+            edit_waives,
+            editable,
+        )
+        .map_err(|e| e.to_string())?;
+        drc.protect_publications(&sources)
             .map_err(|e| e.to_string())
     }
     fn authenticate(&self, headers: &HeaderMap, csrf: &str) -> Result<SessionId, StatusCode> {

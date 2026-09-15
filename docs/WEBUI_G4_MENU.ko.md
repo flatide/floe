@@ -60,6 +60,13 @@ GTK `_drc_open_dialog`→`_drc_open_db`는 사용자가 파일을 선택하고 �
 않는다**. 원본/sidecar를 암묵 수정하지 않으며 느린 open·취소에도 자원 예약과
 worker 수거가 유지돼야 한다. 레이아웃 카메라/레이어/캐시는 불필요하게 바꾸지 않는다.
 
+M4g-24a 선행 구현: 공유 `SourceSet`에 DB/SVRF/원본·pack tree의 게시 금지 경로를
+등록하고, 기본값/리뷰 게시와 동일한 reservation으로 직렬화한다. 등록 전에 준비된
+초안도 게시 직전에 재검사한다. reviewer sidecar/lock은 기본값 게시만 막으며 기존
+리뷰 writer의 별도 권한을 새로 주거나 없애지 않는다. 현재 연결 지점은 시작 시 DRC
+등록/리뷰 등록이다. **실행 중 선택·교체 API/UI, reader/receipt retirement와 index
+충돌 연결은 아직 미구현**이며 이 항목은 계속 OPEN이다([M4 §79](WEBUI_M4.ko.md)).
+
 ### G4-MENU-02 — 열린 DRC에 SVRF metadata 불러오기/교체
 
 GTK `_drc_rules_dialog`→`_drc_rules_load`는 JSON을 읽고 rule match/type census/

@@ -5662,3 +5662,55 @@ Rust/JS 코드는 변경하지 않았다. 전체 배터리는 이전 §77의 `e4
 유지 jobdeck 레벨 재선택의 구현·gate·UI 연결이다. 진단/무효 CLI 경계 최종 결정,
 실제 브라우저·Python-free Linux·G1/G4·현장 수용, 공유/원격 승인·구현과 조건부
 M5도 남는다. 감사표 작성이나 연결 검사만으로 이 기능들이 완료됐다고 세지 않는다.
+
+## 79. M4g-24a — 실행 중 DRC 교체의 선행 게시 보호
+
+2026-09-16. 새 DRC/SVRF를 등록하기 전에, 이미 살아 있는 기본값/리뷰 writer와
+그 writer가 준비한 초안도 새 입력을 덮어쓰지 못하게 해야 한다. 기존 시작 시 고정
+보호 목록은 이 요구를 충족하지 않아 공유 `SourceSet`의 registration에 게시 금지
+metadata를 추가했다. **이번 단계에는 실행 중 파일 선택·교체 API/UI가 없다.**
+
+- immutable DB/SVRF/원본 파일·현재/미래 pack tree는 기본값과 리뷰 게시를 모두
+  금지한다. 정확히 유도된 reviewer sidecar/lock은 기본값 게시만 금지한다. 기존
+  리뷰 writer의 고정 scope/target/reviewer·승인/CAS 계약이 계속 쓰기 권한을 결정한다.
+  이 목록은 deny-only이며 임의 파일 읽기·탐색·색인·쓰기 권한을 추가하지 않는다.
+- 등록은 기존 sidecar publication reservation과 상호 배제한다. 성공 commit에만
+  목록이 설치되고 취소/drop은 rollback한다. 파일 I/O는 state mutex 밖에서 한다.
+  기본값/리뷰 초안은 publication lease를 잡은 뒤 새 목록을 다시 검사하므로 등록 전
+  준비된 초안도 예외가 아니다. 읽기 전용 legacy snapshot은 이 쓰기 금지로 막지 않는다.
+- 정규화 경로·기존 symlink prefix·파일 identity alias를 검사한다. 아직 존재하지
+  않는 pack 하위 경로도 보호하며 실제 publisher의 부모 디렉터리 검사는 유지한다.
+  외부 프로세스의 모든 filesystem mutation을 막는 OS sandbox라고 주장하지 않는다.
+- 목록은 종류별로 중복 제거한 세 목록의 합계1024개로 제한하고 세션 동안
+  append-only로 보존한다.
+  예전 입력 보호를 임의로 풀지 않으며 상한 초과는 명시 오류다. 계속 다른 파일을
+  등록하는 장기 세션은 이 상한에 도달할 수 있다. reader retirement와 연계한 회수는
+  이번 단계 범위가 아니다. 개별 실패 batch는 앞서 유효했던 metadata를 지우지 않는다.
+- `Gateway::attach_drc_registry`와 초기 reviewer 등록에 연결했다. 기존 fixed 보호
+  목록도 유지한다. 런타임 coordinator는 향후 실제 취소 토큰과 승인 폴더 검사,
+  새 reader 공개 경계에서 이 primitive를 사용해야 한다. 현재 helper의 초기 등록
+  호출을 런타임 교체 구현으로 세지 않는다. managed index/export와의 충돌·수명,
+  in-flight 저장/불명 receipt, 오래된 query/selection 폐기도 후속에 남아 있다.
+
+집중 검증: core278통과/7오라클별도, web90통과/3오라클별도 및 기존 integration 통과. 추가 registry
+검사는 fixed Publisher를 교체하지 않고 새 DB/rules/waives 입력이 기존 기본값 초안을
+차단함을 확인했다. core gate는 미게시 등록 비노출·취소 rollback·source 추가 뒤
+보호 보존·1024 상한/중복·hardlink/symlink·미래 pack 경로·옛 기본값/note/waive
+초안의 target/lock 충돌·정상 허용 writer/읽기 유지·파일 생성 없음이다. 첫 회귀에서
+미생성 pack 부모 때문에 Io가 먼저 반환되는 것을 찾아 deny-only 경로 검사를
+planned-prefix 방식으로 고친 뒤 통과했다. 실제 게시 부모 검증은 느슨하게 하지 않았다.
+로그는 `/private/tmp/floe-drc-rebind-protection-unit.log`와
+`/private/tmp/floe-drc-rebind-registry-unit.log`다. strict all-target clippy와 선택 파일
+rustfmt/diff 검사도 통과했다. 전체 `sh tools/validate_rust.sh`는 실제 exit0,
+`RUST VALIDATION: ALL OK`로 끝났다
+(`/private/tmp/floe-drc-rebind-protection-battery.log`). 기존 DRC note/waive·자동 저장·
+읽기 reviewer·SVRF·웹 HTTP/UI, jobdeck83·renderer46·KLayout13 PX+2 phase-exact+
+14 style이 함께 통과했다. 메뉴 inventory 기본 검사는 통과하지만 `--require-complete`는
+미구현3건으로 의도대로 exit1이다. 실제 브라우저/현장 수용을 이 결과에 포함하지 않는다.
+main의 기존 변경과 feature/jobdeck 작업은 보존했고 검증용 `.venv` 임시 링크만
+제거했다. 기존 가상환경과 설계 파일은 삭제하지 않았다.
+
+커밋 시 목표 잔여: 우선 실행 중 DRC 최초 등록/교체의 수명·권한·API/UI·실제 HTTP
+gate, 다음 SVRF 교체와 카메라 유지 레벨 재선택이다. 진단/무효 CLI 경계 최종 결정,
+실제 브라우저·Python-free Linux·G1/G4·현장 수용, 공유/원격 승인·구현과 조건부
+M5도 남는다. 이 선행 보호 단계로 G4 미구현3건이나 전체 goal을 완료 처리하지 않는다.
