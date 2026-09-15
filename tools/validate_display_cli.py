@@ -45,6 +45,8 @@ def main():
                     client.login()
                     caps = client.call("GET", "/api/v1/capabilities")
                     assert caps["display_only"] is True
+                    assert caps["display_input"] is None
+                    client.call("GET", "/api/v1/display-test/input", code=404)
                     for name in ("render", "catalog", "index_open", "file_picker", "launcher", "drc", "exports"):
                         assert caps[name] is False, name
                     raw = client.call("GET", "/api/v1/display-test/raw")

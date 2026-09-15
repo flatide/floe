@@ -139,7 +139,7 @@ jobdeck/occupancy의 같은 이름 단계와 별개다. 개발 기준과 합류 
 
 ## 현재 진행도와 커밋 보고
 
-2026-09-16, M4g-17b 기준. **로컬 Rust/web 대체 기능은 후반부지만 전체 계획의
+2026-09-16, M4g-17c 기준. **로컬 Rust/web 대체 기능은 후반부지만 전체 계획의
 완료 직전은 아니다.** 아래는 구현과 수용을 분리한 현재 상태이며, 위의 순차 기록에
 있는 과거 시점의 “미완료” 설명보다 우선한다. 세부 커밋 수는 작업량 비중이 아니므로
 이를 백분율로 환산하지 않는다. 이후 커밋 보고에도 완료 범위·남은 구현·현장 수용을
@@ -186,8 +186,10 @@ wire 참조 할당을 연결한다([M4 §68](WEBUI_M4.ko.md)). M4g-16d는 웹 �
 M4g-17a는 [합성 표시 진단](WEBUI_DISPLAY_DIAGNOSTICS.ko.md)을 About에 연결한다.
 GTK 색 막대·Rust PNG/raw·웹 crop/overlay를 대조하되 실제 화면 수용과 구분한다.
 M4g-17b는 같은 검사를 독립 `displaytest` 명령으로 연결하며 index/renderd/레이아웃
-없이 기존 private Firefox/auth 수명주기를 사용한다. 입력 PNG와 `--dump`의 저장 정책,
-실제 화면 수용은 아직 남는다([M4 §70~71](WEBUI_M4.ko.md)).
+없이 기존 private Firefox/auth 수명주기를 사용한다. M4g-17c는 CLI가 고정한 정적 PNG
+하나의 읽기/인증 전송/360×160 표시를 연결한다. 브라우저 보간과 GTK의 픽셀 동일성을
+주장하지 않는다. `--dump` 저장 정책·GTK 진단/애니메이션 PNG 경계와 실제 화면 수용은
+아직 남는다([M4 §70~72](WEBUI_M4.ko.md)).
 G4의 [잔여 감사](WEBUI_G4_AUDIT.ko.md)를 시작했다. M4g-13에서 GTK 두벌식 한글
 입력기의 누락을 이관했다([M4 §63](WEBUI_M4.ko.md)). M4g-14에서 사용자가 선택한
 reviewer별 확정 시 자동 저장 opt-in을 연결했다([M4 §64](WEBUI_M4.ko.md)).

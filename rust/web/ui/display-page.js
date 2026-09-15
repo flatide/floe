@@ -27,9 +27,10 @@
                 x.send(body===undefined?null:JSON.stringify(body));
             });
         }
-        const display=win.FloeDisplayTest.bind({el:el,document:doc,window:win,XHR:o.XHR,bundle:bundle,csrf:function(){return auth?auth.csrf:'';},
-            decode:function(h,data,callback){return win.FloeImageDecode.create({Image:win.Image,ImageData:win.ImageData,Blob:win.Blob,URL:win.URL,setTimeout:win.setTimeout.bind(win),clearTimeout:win.clearTimeout.bind(win)},h,data,callback);}});
-        function stop(){stopped=true;display.close();exit.stop();pending.forEach(function(x){x.abort();});}
+        const imageOptions={el:el,document:doc,window:win,XHR:o.XHR,bundle:bundle,csrf:function(){return auth?auth.csrf:'';},
+            decode:function(h,data,callback){return win.FloeImageDecode.create({Image:win.Image,ImageData:win.ImageData,Blob:win.Blob,URL:win.URL,setTimeout:win.setTimeout.bind(win),clearTimeout:win.clearTimeout.bind(win)},h,data,callback);}};
+        const display=win.FloeDisplayTest.bind(imageOptions),input=win.FloeDisplayInput.bind(imageOptions);
+        function stop(){stopped=true;display.close();input.close();exit.stop();pending.forEach(function(x){x.abort();});}
         const exit=win.FloeSessionExit.bind({el:el,document:doc,confirm:async function(){
             if(stopped){return;}stop();remove();
             try{await request('DELETE','/api/v1/session');status('Diagnostic session closed.');}
@@ -56,7 +57,7 @@
                 const caps=await request('GET','/api/v1/capabilities');
                 if(stopped){return;}
                 if(!caps||caps.protocol!==1||caps.bundle!==bundle||caps.display_only!==true||caps.render!==false||caps.catalog!==false){throw Error('This is not a matching standalone diagnostic session.');}
-                display.open();exit.init();status('Ready. Run the display test explicitly.'+(storageMissing?' Tab storage is unavailable; reloading needs a new session.':''));
+                input.init(caps.display_input);display.open();exit.init();status('Ready. Run the display test explicitly.'+(storageMissing?' Tab storage is unavailable; reloading needs a new session.':''));
             }catch(error){if(!stopped){stop();remove();auth=null;status(error.message||'Diagnostic session failed');}}
         }
         win.addEventListener('pagehide',function(){unloaded=true;stop();auth=null;});

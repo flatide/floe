@@ -1,4 +1,4 @@
-//! Fixed synthetic pixels only. No view, renderer, filesystem or query identity.
+//! Fixed synthetic pixels and an optional CLI-frozen PNG. No HTTP file lookup.
 use crate::transport::{self, Gate};
 use axum::{
     extract::{Path, State},
@@ -20,6 +20,22 @@ const COLORS: [[u8; 4]; 4] = [
     [255, 255, 51, 255],
 ];
 static IMAGES: OnceLock<Result<(Bytes, Bytes), ()>> = OnceLock::new();
+
+pub(crate) struct Input {
+    pub width: u32,
+    pub height: u32,
+    pub bytes: Bytes,
+}
+impl From<floe_app_core::annotations::png::DisplayPng> for Input {
+    fn from(png: floe_app_core::annotations::png::DisplayPng) -> Self {
+        let (width, height, bytes) = png.into_parts();
+        Self {
+            width,
+            height,
+            bytes: Bytes::from(bytes),
+        }
+    }
+}
 
 fn images() -> Result<&'static (Bytes, Bytes), ()> {
     IMAGES
@@ -61,6 +77,14 @@ pub(crate) async fn read(
 ) -> Response {
     if let Err(e) = transport::http_session(&gate, &headers) {
         return transport::error(e);
+    }
+    if format == "input" {
+        return match &gate.display_input {
+            Some(input) => {
+                ([(header::CONTENT_TYPE, "image/png")], input.bytes.clone()).into_response()
+            }
+            None => transport::error(StatusCode::NOT_FOUND),
+        };
     }
     if !matches!(format.as_str(), "raw" | "png") {
         return transport::error(StatusCode::NOT_FOUND);

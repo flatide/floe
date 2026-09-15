@@ -11,6 +11,7 @@ function harness({fragment='#bootstrap='+token,saved=null,storageFails=false}={}
     const requests=[],nodes=new Map(),events={},order=[],stored=new Map(saved?[[key,JSON.stringify(saved)]]:[]);
     const display={opened:0,closed:0,runs:0,open(){this.opened++;},close(){this.closed++;}};
     const exit={enabled:0,stops:0,init(){this.enabled++;},stop(){this.stops++;}};
+    const input={initialized:0,closed:0,init(m){this.initialized++;this.info=m;},close(){this.closed++;}};
     let displayOptions,exitOptions;
     class XHR{
         constructor(){this.headers={};this.responseText='';this.status=0;requests.push(this);}
@@ -22,13 +23,13 @@ function harness({fragment='#bootstrap='+token,saved=null,storageFails=false}={}
     }
     const doc={getElementById(k){if(!nodes.has(k)){nodes.set(k,{textContent:''});}return nodes.get(k);},
         querySelector(){return {content:bundle};},createElement(){return {getContext(){return {};}};}};
-    const win={FloeDisplayTest:{bind(o){displayOptions=o;return display;}},FloeSessionExit:{bind(o){exitOptions=o;return exit;}},
+    const win={FloeDisplayTest:{bind(o){displayOptions=o;return display;}},FloeDisplayInput:{bind(){return input;}},FloeSessionExit:{bind(o){exitOptions=o;return exit;}},
         FloeImageDecode:{create(){throw Error('No decoder before explicit Run');}},ImageData:function(){},URL:{createObjectURL(){}},
         addEventListener(n,f){events[n]=f;},setTimeout,clearTimeout,
         sessionStorage:{getItem(k){if(storageFails){throw Error('denied');}return stored.get(k)||null;},setItem(k,v){if(storageFails){throw Error('denied');}stored.set(k,v);},removeItem(k){if(storageFails){throw Error('denied');}stored.delete(k);}}};
     const page=Page.bind({window:win,document:doc,location:{hash:fragment,origin:'http://127.0.0.1:1234',pathname:'/'},
         history:{replaceState(a,b,p){assert.equal(p,'/');order.push('scrub');}},XHR});
-    return {page,requests,display,exit,events,stored,order,nodes,displayOptions,get exitOptions(){return exitOptions;},status(){return nodes.get('display-page-status').textContent;}};
+    return {page,requests,display,input,exit,events,stored,order,nodes,displayOptions,get exitOptions(){return exitOptions;},status(){return nodes.get('display-page-status').textContent;}};
 }
 (async()=>{
     const h=harness();const start=h.page.start();
@@ -38,9 +39,11 @@ function harness({fragment='#bootstrap='+token,saved=null,storageFails=false}={}
     assert.equal(h.requests[1].path,'/api/v1/capabilities');assert.equal(h.requests[1].headers['X-Floe-CSRF'],csrf);
     h.requests[1].answer(200,caps);await start;assert.equal(h.display.opened,1);assert.equal(h.exit.enabled,1);
     assert.match(h.status(),/Ready/);assert.equal(h.display.runs,0);assert.equal(h.requests.length,2);
+    assert.equal(h.input.initialized,1);
     assert.equal(h.displayOptions.csrf(),csrf);await h.page.start();assert.equal(h.requests.length,2);
     const quit=h.exitOptions.confirm();assert.equal(h.requests[2].method,'DELETE');assert.equal(h.requests[2].path,'/api/v1/session');assert.equal(h.requests[2].headers['X-Floe-CSRF'],csrf);
     assert.equal(h.stored.size,0);assert.equal(h.display.closed,1);
+    assert.equal(h.input.closed,1);
     h.requests[2].answer(204);await quit;assert.match(h.status(),/session closed/);assert.equal(h.displayOptions.csrf(),'');
     await h.exitOptions.confirm();assert.equal(h.requests.length,3);
 
@@ -80,7 +83,7 @@ function harness({fragment='#bootstrap='+token,saved=null,storageFails=false}={}
     const q=noStore.exitOptions.confirm();noStore.requests[2].ontimeout();await q;
     assert.match(noStore.status(),/not confirmed/);assert.equal(noStore.requests.length,3);
     const html=fs.readFileSync(path.join(__dirname,'display.html'),'utf8');
-    for(const source of ['display-test.js','session-exit.js']){
+    for(const source of ['display-test.js','display-input.js','session-exit.js']){
         const text=fs.readFileSync(path.join(__dirname,source),'utf8');
         for(const m of text.matchAll(/el\('([^']+)'\)/g)){assert.ok(html.includes('id="'+m[1]+'"'),m[1]);}
     }

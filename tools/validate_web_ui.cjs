@@ -8,7 +8,7 @@ const acorn = require('./vendor/acorn-8.15.0/acorn.js');
 const root = path.resolve(__dirname, '..');
 const ui = path.join(root, 'rust/web/ui');
 const options = {ecmaVersion: 2017, sourceType: 'script'};
-for(const name of ['image-decode','display-test','display-page']){
+for(const name of ['image-decode','display-test','display-input','display-page']){
     acorn.parse(fs.readFileSync(path.join(ui,name+'.js'),'utf8'),options);
     const test=spawnSync(process.execPath,[path.join(ui,name+'.test.cjs')],{stdio:'inherit',timeout:15000});
     assert.equal(test.status,0,name+': '+test.error);

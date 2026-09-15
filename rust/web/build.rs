@@ -7,6 +7,7 @@ fn main() {
         "ui/index.html",
         "ui/display.html",
         "ui/display-page.js",
+        "ui/display-input.js",
         "ui/app.css",
         "ui/protocol.js",
         "ui/gestures.js",

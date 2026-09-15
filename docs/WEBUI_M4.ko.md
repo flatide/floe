@@ -5334,3 +5334,57 @@ diff를 보존했다. 위 core 단위 수는 그 별도 미커밋 검사도 포�
 별도 승인, CLI/G4 최종 재대조. 실제 브라우저 입력/저장/복구/화면과 Python-free Linux,
 G1/G4 수용은 별도다. M2 공유/원격 미구현, M0/M3 현장 보류, M5 world-tile 조건부와
 index hot reload/revision 사용자 유보도 남는다. 독립 진단 하나로 전체 완료를 선언하지 않는다.
+
+## 72. M4g-17c — CLI가 선택한 정적 PNG의 불변 표시 진단
+
+2026-09-16. `floe2-web displaytest [PNG]`에 선택 PNG 한 개를 연결했다. 기존 GTK의
+선택 PNG→360×160 BILINEAR 기능을 웹의 명시 Show/공통 decoder/Canvas smoothing으로
+옮기되 보간 픽셀 동일성과 GTK 위젯·애니메이션 재생을 약속하지 않는다.
+
+- CLI 인자로만 파일을 고른다. no-follow/nonblocking regular-file open, 읽기 전후
+  identity/metadata 검사와80MiB/8192축/16Mpx/65536 chunks 한계, PNG envelope/CRC
+  검사를 거쳐 Vec를 immutable Bytes로 넘긴다. 원본 변경/삭제 후에도 이미 열린
+  세션의 응답은 같으며 파일을 다시 읽거나 수정하지 않는다. FIFO·APNG·trailing data와
+  malformed envelope는 명시 오류다. IDAT 샘플의 실제 디코딩 실패는 웹이 표시한다.
+- 기존 `annotations/png.rs`의 chunk scanner를 공유한다. 기존 read/edit 경로는
+  annotation 해석/원래 trailing-data 보존 정책을 유지한다. display만 annotation을
+  해석하지 않는다. scanner 분기 회귀 검사와 기존 fe-embed oracle로 확인한다.
+- 새 API는 인증된 고정 `/api/v1/display-test/input`, metadata는 width/height/bytes뿐이다.
+  파일 경로나 이름을 받지 않고 새 업로드/쓰기 권한도 없다. 원본 PNG metadata는 함께
+  전송하므로 익명화 기능이 아니다. 일반 view/About는 input이 없어404를 유지한다.
+- 별도 **Show input PNG** 버튼 전에는 bytes를 읽지 않는다. 공통 image decoder로
+  dimensions/timeout/blob lifecycle을 검사하고360×160으로 smoothing/alpha 표시한다.
+  alpha readback 수와 사용자 관찰을 별도 보고하되 desktop_acceptance는unverified다.
+  파일명/경로/픽셀/annotation 텍스트는 보고서에 담지 않는다. Cancel/Quit/pagehide와
+  read→decode 경계에서 취소하며 실패·재열기 때 자동 요청을 재생하지 않는다.
+- 입력 없는 합성 진단과 일반 layout/native frame 경로는 유지한다. 추가 의존성이나
+  Python 런타임을 넣지 않았다. 테스트의 Pillow/Node는 개발 오라클/대역이다.
+
+초기 검증:11개 PNG 형식(팔레트1/2/4/8, gray/alpha/RGB/RGBA/16-bit/진짜 Adam7)의
+actual CLI/HTTP 원본 byte와 Pillow 픽셀 대조, 인증·파일 삭제 후 snapshot 유지·손상 CRC/
+크기/APNG/trailing/FIFO 거부, 기존 독립 CLI, shared decoder/Canvas 연결 DOM과
+전체 ES2017/UI gate를 통과했다. 실제 브라우저 디코딩/보간/화면 수용을 한 것은 아니다.
+최종 전체 재실행(`/private/tmp/floe-display-input-battery-rerun.log`)은 **실제 exit0 /
+RUST VALIDATION: ALL OK**였다. app24/core271/web88 단위, HTTP15/native HTTP·WS8,
+입력 PNG11형식·합성57600픽셀·기존 fe-embed byte/metadata, 전체 ES2017/DOM/저장/복구,
+VFS H1-H5/L1-L9/마커 복구, occupancy27/jobdeck83/renderer46, KLayout jobs1/8 각각
+13 PX+2 phase-exact+14 style을 통과했다. core/app/web all-targets scoped strict clippy
+(`-- --no-deps -D warnings`)와 scoped rustfmt·diff-check도 통과했다. 기존 dependency/
+GTK 개발 게이트 경고는 유지한다. 실제 브라우저/현장 수용을 뜻하지 않는다.
+
+검증 관찰: 최초 전체 배터리(`/private/tmp/floe-display-input-battery.log`)는 기존
+`instance::tests::wire_lost_ack_and_replays_do_not_repeat_the_handler`의 `already owned`
+1회 실패로 **exit101**이었다. 해당 검사20회(`/private/tmp/floe-display-input-instance-repeats.log`)
+와 app-core 전체 병렬 검사3회(`/private/tmp/floe-display-input-core-repeats.log`)는
+같은 작업 트리에서 모두 통과했다. 원인은 미확정이며 IPC 코드/테스트는 바꾸지 않았다.
+단발 실패를 환경 문제로 단정하지 않고 [G4 §4](WEBUI_G4_AUDIT.ko.md)에 추적한다.
+최종 재실행 통과는 이 잠금 실패 원인의 규명/수정으로 계산하지 않는다.
+
+검증용 `.venv` 링크만 정리했다. main/feature/jobdeck 상태와 별도 reviewer8파일의
+기존 diff는 보존하며 이번 커밋에 포함하지 않는다. 위 core 검사 수는 해당 미커밋
+검사도 포함한 작업 트리 기준이다.
+
+목표 잔여: `--dump` 정책, GTK 진단/애니메이션 PNG의 제품 경계, reviewer legacy 읽기
+승인·연결, CLI/G4 최종 대조. 실제 브라우저 입력/저장/복구/화면·Python-free Linux·G1/G4,
+M2 공유/원격, M0/M3 현장, M5 world-tile 조건부, hot reload/revision 사용자 유보를
+이 입력 기능 하나로 완료 처리하지 않는다.

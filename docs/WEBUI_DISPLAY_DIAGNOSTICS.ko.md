@@ -1,14 +1,14 @@
 # 웹 표시 진단 이관
 
-2026-09-16, M4g-17b. [M0 §2.8~2.9](WEBUI_M0.ko.md)의 `gtktest`/`--dump`
-미이관을 실제 코드로 분리한 계약과 현재 구현이다. **합성 진단은 연결했지만
-실제 브라우저 수용·입력 PNG·자동 dump의 이관 완료는 아니다.**
+2026-09-16, M4g-17c. [M0 §2.8~2.9](WEBUI_M0.ko.md)의 `gtktest`/`--dump`
+미이관을 실제 코드로 분리한 계약과 현재 구현이다. **합성·정적 입력 PNG 진단은
+연결했지만 실제 브라우저 수용·GTK 진단 폐기·자동 dump의 이관 완료는 아니다.**
 
 ## 1. GTK의 실제 동작
 
 | 경로 | 원래 동작 | 웹 현재 상태 |
 |---|---|---|
-| `gtktest [png]` | 선택 PNG를360×160으로 bilinear 축소해 표시 | 입력 PNG는 아직 미이관; 독립 합성 진단은 `displaytest` |
+| `gtktest [png]` | 선택 PNG를360×160으로 bilinear 축소해 표시 | `displaytest [PNG]`: 정적 PNG snapshot을 브라우저 smoothing으로360×160 표시. GTK 보간 픽셀 동일성은 보장하지 않음 |
 | `gtktest` 합성 | 검은360×160 RGB pixbuf에 빨강/초록/파랑/노랑70×100 막대4개 | 같은 픽셀의 Rust PNG/raw, 공통 디코더와 Canvas로 대조 |
 | `gtktest` 배치 | 같은 pixbuf를 Overlay/ScrolledWindow 안에 표시 | 웹 `.viewport`의 crop/별도 투명 overlay를 표시; GTK 위젯 구조를 복제하지 않음 |
 | `view --dump` 수신 | 수신 raw/PNG를 pixbuf로 만든 뒤 `/tmp/<APP>_frame.png`에 덮어씀 | 아직 변경하지 않음; 숫자 `--render-debug`와 다른 기능 |
@@ -24,12 +24,13 @@ GTK 명령의 폐기·alias 승인도 이 합성 진단 구현에 포함하지 �
 
 기존 `floe2-web view`의 **About → Run display test**에서 명시적으로 실행한다.
 About를 열거나 view가 바뀐 것만으로 자동 실행하지 않는다. layout 없이도 가능하다.
-`gtktest` CLI는 계속 명시 오류이며 위 합성 대안과 입력 PNG가 남았음을 안내한다.
+`gtktest` CLI는 계속 명시 오류이며 `displaytest [PNG]` 대안과 GTK 전용 경계를 안내한다.
 
 M4g-17b는 인덱서·renderd도 없는 환경에서 실행할 독립 명령을 추가한다:
 
 ```sh
 rust/target/release/floe2-web displaytest
+rust/target/release/floe2-web displaytest /path/to/frame.png
 rust/target/release/floe2-web displaytest --no-open --session-file /absolute/new-session.json
 ```
 
@@ -47,7 +48,40 @@ Firefox 종료 시 리스너와 생성한 파일을 정리한다. 기존 파일/
 Quit 또는 터미널 Ctrl+C를 사용한다. pagehide는 클라이언트 작업을 취소하고,
 BFCache 복귀는 정지 상태를 알리며 재실행하지 않는다. 재로드는 같은 탭의 sessionStorage
 자격으로 재인증한다. report는 storage에 저장하지 않는다.
-이 단계는 입력 PNG 인자를 받지 않으며 GTK 명령의 alias/폐기나 `--dump` 변경이 아니다.
+M4g-17c는 선택적 PNG 인자 하나를 받는다. `--` 뒤는 옵션으로 해석하지 않으므로
+대시로 시작하는 이름·공백·한글 경로도 지정할 수 있다. GTK 명령의 alias/폐기나
+`--dump` 저장 방식 변경은 아니다.
+
+### 선택 PNG의 고정 읽기
+
+- CLI에서 명시한 일반 파일 하나만 시작 시 읽는다. 읽기 전후 inode·길이·mtime/ctime
+  등을 비교하고, 메모리의 PNG envelope/각 chunk CRC를 검증한다. 기존 annotation
+  scanner를 공유하지만 **flateyes/iTXt 내용을 해석·압축 해제하지 않는다**.
+- 원본을 수정하거나 다시 읽지 않는다. 파일을 교체·삭제해도 이미 열린 세션의 bytes는
+  같고, 변경한 파일을 진단하려면 새로 실행한다. symlink는 명시한 CLI 경로에서만
+  정규화하며 regular-file 확인은 nonblocking/no-follow open으로 한다. FIFO는 거부한다.
+- 한 파일80MiB, 한 축8192px, 총16Mpx,65536 chunks 상한이다. 원본 encoded bytes를
+  세션 하나에 보관한다. IDAT의 실제 샘플 디코딩은 브라우저가 하며 손상 샘플은 UI 오류다.
+  네이티브 구조 검사 통과를 이미지 디코딩/화면 수용 PASS로 부르지 않는다.
+- 정적 PNG의 RGB/RGBA/회색/알파/팔레트/16-bit/Adam7 envelope를 수용한다.
+  애니메이션 APNG와 IEND 뒤 trailing data는 명시 오류다. 애니메이션 재생이나 GTK의
+  fallback-frame 동작은 이 진단에서 이관했다고 세지 않는다.
+- capabilities의 `display_input`은 없으면null, 있으면 `{width,height,bytes}`다.
+  **Show input PNG**를 눌러야 인증된 `GET /api/v1/display-test/input`을 읽는다.
+  HTTP는 경로·파일명·업로드·source/view ID를 받지 않는다. 일반 view/About에는 입력
+  파일이 등록되지 않으며 endpoint는404다. PNG **원본 바이트와 embedded metadata**는
+  인증된 session owner에게 전송한다. 익명화/metadata 삭제 기능이라고 오해하면 안 된다.
+- 웹은 공통 PNG decoder의 source dimensions 검사·5초 decode 제한을 사용한다.
+  Canvas에360×160으로 늘이거나 줄이며 smoothing을 켠다. alpha는 보존하고 화면의
+  바탕은 어두운 회색이다. GTK BILINEAR와 브라우저의 보간/색 관리가 같은 픽셀을
+  만든다고 단언하지 않는다. device pixel 수와 DPR을 보고한다.
+- 입력 검사와 합성 검사는 독립적이다. 입력 하나당 동시 요청1개, 고정 크기/5초 GET
+  제한, read→decode 사이 취소, blob URL 회수·pagehide/Quit 정리, 실패 후 미재시도를
+  적용한다. 보고서는 dimensions/bytes/출력 alpha가0이 아닌 픽셀 수와 사용자의 관찰을
+  포함한다. 숫자 readback만으로 화면이 올바르다고 판정하지 않는다. 파일명/경로/픽셀/
+  annotation 텍스트를 보고서에 넣거나 저장/업로드하지 않는다.
+
+### 합성 검사
 
 - owner 인증된 `GET /api/v1/display-test/png`와 `/raw`만 사용한다. 임의 파일 경로,
   source/view/query identity, 옵션 본문은 받지 않는다. host/origin·cookie/CSRF 경계를
@@ -90,8 +124,13 @@ URL 회수, 명시 GET·취소·DPR·About 연결과 view 명령 무발행을 �
 검사한다. Firefox는 명시적인 테스트 대역으로만 실행하며 private argv/profile과
 대역의 자발적 종료·정리를 확인한다. bootstrap/session 만료 시 owner worker 없이
 리스너가 종료되는 Rust 검사와 인증/재로드/취소/종료의 DOM 검사를 추가했다.
-전체 배터리 실행 기록은 [M4 §70~71](WEBUI_M4.ko.md)에 둔다. 이를 실제 브라우저 실행으로
+`validate_display_input.py`는11개의 static PNG 형식/팔레트/진짜 Adam7 fixture에서
+실제 CLI/HTTP의 원본 bytes와 Pillow 디코딩 픽셀을 대조한다. 실행 후 파일을 지워도
+같은 bytes가 오는지, 인증·CRC·큰 크기·trailing data/APNG/FIFO 거부를 검사한다.
+DOM gate는 실제 공통 decoder와 대역 Image/Canvas로 배율·alpha readback 연결,
+취소/오류/미재실행을 검사한다. 브라우저의 실제 보간 픽셀 대조는 아니다.
+전체 배터리 실행 기록은 [M4 §70~72](WEBUI_M4.ko.md)에 둔다. 이를 실제 브라우저 실행으로
 대체 보고하지 않는다. 기존 브라우저 시작 경로의 도구 거부도 우회하지 않았다.
 
-다음 잔여는 선택 PNG의 표시 진단·기존 GTK 명령의 제품 경계, `--dump` 저장 방식,
+다음 잔여는 기존 GTK 진단/애니메이션 PNG의 제품 경계, `--dump` 저장 방식,
 실제 Firefox/ETX의 표시/입력 수용이다. 기존 GTK 구현은 보존한다.

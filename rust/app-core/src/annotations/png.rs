@@ -1,4 +1,4 @@
-//! Streaming iTXt replacement: pixel and unrelated chunks remain byte-identical.
+//! PNG envelopes, immutable display snapshots and streaming iTXt replacement.
 use super::{Document, MAX_TEXT};
 use crate::{
     artifact::{self, StagedArtifact},
@@ -20,8 +20,11 @@ const BODY_HEAD: &[u8; 13] = b"flateyes\0\0\0\0\0";
 const MAX_PNG: u64 = 1024 * 1024 * 1024;
 const MAX_CHUNKS: usize = 65536;
 const BLOCK: usize = 1024 * 1024;
+pub const MAX_DISPLAY_PNG: usize = 80 * 1024 * 1024;
 
 struct Scan {
+    width: u32,
+    height: u32,
     length: u64,
     chunks: usize,
     iend: u64,
@@ -95,6 +98,13 @@ fn decode_text(body: &[u8], allowance: usize, flag: &AtomicUsize) -> Result<Stri
     String::from_utf8(decoded).map_err(|_| Error::input("flateyes metadata must be UTF-8"))
 }
 fn scan(input: &mut (impl Read + Seek), flag: &AtomicUsize) -> Result<Scan> {
+    scan_options(input, flag, true)
+}
+fn scan_options(
+    input: &mut (impl Read + Seek),
+    flag: &AtomicUsize,
+    annotations: bool,
+) -> Result<Scan> {
     let length = input.seek(SeekFrom::End(0))?;
     if length > MAX_PNG {
         return Err(Error::input("PNG exceeds 1 GiB"));
@@ -111,11 +121,17 @@ fn scan(input: &mut (impl Read + Seek), flag: &AtomicUsize) -> Result<Scan> {
     let mut owned = Vec::new();
     let mut decoded_bytes = 0usize;
     let mut idat = false;
+    let (mut width, mut height) = (0, 0);
     for count in 0..MAX_CHUNKS {
         let mut header = [0; 8];
         read_exact(input, &mut header, flag)?;
         let len = u32::from_be_bytes(header[..4].try_into().unwrap()) as u64;
         let kind: &[u8; 4] = header[4..].try_into().unwrap();
+        if !annotations && matches!(kind, b"acTL" | b"fcTL" | b"fdAT") {
+            return Err(Error::input(
+                "animated PNG is unsupported by displaytest; provide a static frame",
+            ));
+        }
         let end = pos
             .checked_add(len + 12)
             .filter(|end| *end <= length)
@@ -133,7 +149,7 @@ fn scan(input: &mut (impl Read + Seek), flag: &AtomicUsize) -> Result<Scan> {
         hash.update(kind);
         let mut left = len;
         let mut body = None;
-        if kind == b"iTXt" && len >= PREFIX.len() as u64 {
+        if annotations && kind == b"iTXt" && len >= PREFIX.len() as u64 {
             let mut prefix = [0; 9];
             read_exact(input, &mut prefix, flag)?;
             hash.update(&prefix);
@@ -152,8 +168,8 @@ fn scan(input: &mut (impl Read + Seek), flag: &AtomicUsize) -> Result<Scan> {
             read_exact(input, &mut scratch[..n], flag)?;
             hash.update(&scratch[..n]);
             if kind == b"IHDR" {
-                let width = u32::from_be_bytes(scratch[..4].try_into().unwrap());
-                let height = u32::from_be_bytes(scratch[4..8].try_into().unwrap());
+                width = u32::from_be_bytes(scratch[..4].try_into().unwrap());
+                height = u32::from_be_bytes(scratch[4..8].try_into().unwrap());
                 let valid_depth = match scratch[9] {
                     0 => matches!(scratch[8], 1 | 2 | 4 | 8 | 16),
                     2 | 4 | 6 => matches!(scratch[8], 8 | 16),
@@ -168,6 +184,13 @@ fn scan(input: &mut (impl Read + Seek), flag: &AtomicUsize) -> Result<Scan> {
                     || scratch[12] > 1
                 {
                     return Err(Error::input("invalid PNG IHDR"));
+                }
+                if !annotations
+                    && (width > 8192
+                        || height > 8192
+                        || u64::from(width) * u64::from(height) > 16 * 1024 * 1024)
+                {
+                    return Err(Error::input("display PNG exceeds 8192 px/axis or 16 Mpx"));
                 }
             }
             if let Some(b) = &mut body {
@@ -189,7 +212,12 @@ fn scan(input: &mut (impl Read + Seek), flag: &AtomicUsize) -> Result<Scan> {
             owned.push(pos..end);
         }
         if kind == b"IEND" {
+            if !annotations && end != length {
+                return Err(Error::input("display PNG has trailing data after IEND"));
+            }
             return Ok(Scan {
+                width,
+                height,
                 length,
                 chunks: count + 1,
                 iend: pos,
@@ -201,6 +229,53 @@ fn scan(input: &mut (impl Read + Seek), flag: &AtomicUsize) -> Result<Scan> {
         pos = end;
     }
     Err(Error::input("PNG exceeds 65536 chunks or has no IEND"))
+}
+
+/// Validated envelope only; the browser checks/decodes IDAT image samples. This
+/// type is not deserializable and cannot be constructed with an HTTP path.
+pub struct DisplayPng {
+    width: u32,
+    height: u32,
+    bytes: Vec<u8>,
+}
+impl DisplayPng {
+    pub fn into_parts(self) -> (u32, u32, Vec<u8>) {
+        (self.width, self.height, self.bytes)
+    }
+}
+/// Read the explicitly selected regular file once. No annotation interpretation,
+/// image rewrite, later file lookup or background reload is performed.
+pub fn display_snapshot(path: &Path, flag: &AtomicUsize) -> Result<DisplayPng> {
+    check_cancelled(flag)?;
+    let path = fs::canonicalize(path)?;
+    let mut file = regular_file(&path)?;
+    let before = Stamp::from(file.metadata()?);
+    let length = usize::try_from(before.len)
+        .ok()
+        .filter(|n| *n <= MAX_DISPLAY_PNG)
+        .ok_or_else(|| Error::input("display PNG exceeds 80 MiB"))?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(length)
+        .map_err(|_| Error::input("display PNG allocation failed"))?;
+    bytes.resize(length, 0);
+    for block in bytes.chunks_mut(BLOCK) {
+        read_exact(&mut file, block, flag)?;
+    }
+    if Stamp::from(file.metadata()?) != before
+        || !fs::symlink_metadata(&path)?.is_file()
+        || Stamp::from(fs::metadata(&path)?) != before
+    {
+        return Err(Error::input(
+            "display PNG changed while reading; restart with a stable file",
+        ));
+    }
+    let info = scan_options(&mut std::io::Cursor::new(&bytes), flag, false)?;
+    Ok(DisplayPng {
+        width: info.width,
+        height: info.height,
+        bytes,
+    })
 }
 fn copy(
     input: &mut (impl Read + Seek),
@@ -411,8 +486,52 @@ pub fn selftest(flag: &AtomicUsize) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn display_scan_bounds_static_images_without_interpreting_annotations() {
+        let flag = AtomicUsize::new(0);
+        let mut png = std::io::Cursor::new(Vec::new());
+        crate::shots::mosaic::encode_png(&mut png, 4, 2, &[0, 0, 0, 255].repeat(8), &flag).unwrap();
+        let png = png.into_inner();
+        let check = |bytes: &[u8]| scan_options(&mut std::io::Cursor::new(bytes), &flag, false);
+        let info = check(&png).unwrap();
+        assert_eq!((info.width, info.height), (4, 2));
+        let mut trailing = png.clone();
+        trailing.push(0);
+        assert!(check(&trailing).is_err());
+        assert!(scan(&mut std::io::Cursor::new(trailing), &flag).is_ok());
+        let chunk = |kind: &[u8; 4], body: &[u8]| {
+            let mut b = (body.len() as u32).to_be_bytes().to_vec();
+            b.extend_from_slice(kind);
+            b.extend_from_slice(body);
+            b.extend_from_slice(&crc32fast::hash(&b[4..]).to_be_bytes());
+            b
+        };
+        for kind in [b"acTL", b"fcTL", b"fdAT"] {
+            let mut b = png[..33].to_vec();
+            b.extend(chunk(kind, &[0; 8]));
+            b.extend_from_slice(&png[33..]);
+            assert!(check(&b).is_err());
+        }
+        let mut annotated = png[..33].to_vec();
+        annotated.extend(chunk(b"iTXt", b"flateyes\0\xffbad"));
+        annotated.extend_from_slice(&png[33..]);
+        assert!(check(&annotated).is_ok());
+        assert!(scan(&mut std::io::Cursor::new(annotated), &flag).is_err());
+        for (w, h) in [(8193u32, 1u32), (8192, 8192), (u32::MAX, u32::MAX), (0, 1)] {
+            let mut b = png.clone();
+            b[16..20].copy_from_slice(&w.to_be_bytes());
+            b[20..24].copy_from_slice(&h.to_be_bytes());
+            let crc = crc32fast::hash(&b[12..29]);
+            b[29..33].copy_from_slice(&crc.to_be_bytes());
+            assert!(check(&b).is_err());
+        }
+        flag.store(2, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(check(&png).err().unwrap().kind, crate::ErrorKind::Cancelled);
+    }
+    #[test]
     fn rewritten_output_remains_readable_within_limits() {
         let mut info = Scan {
+            width: 1,
+            height: 1,
             length: MAX_PNG,
             chunks: 3,
             iend: MAX_PNG - 12,

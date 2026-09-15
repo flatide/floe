@@ -198,7 +198,9 @@ M4f-1의 `selfcheck`는 native 설치 진단만 담당하므로 위 표시 진�
 M4g-17a는 About의 명시 **Run display test**로 GTK 원본 색 막대와 같은 Rust
 PNG/raw 및 웹 crop/overlay를 연결한다. viewer 디코더를 공유하며 layout/worker는
 접근하지 않는다. M4g-17b의 독립 `displaytest`는 index/renderd 없이 같은 검사를
-실행한다. 선택 PNG·`--dump`는 아직 남고 GTK 명령을 폐기하지 않는다.
+실행한다. M4g-17c는 선택 정적 PNG를 CLI에서 고정해 인증 전송하고360×160으로
+표시한다. GTK 보간 동일성/위젯/APNG fallback은 대체하지 않는다.
+`--dump`는 아직 남고 GTK 명령을 폐기하지 않는다.
 Canvas readback과 실제 화면 관찰/수용도 구분한다([표시 진단 계약](WEBUI_DISPLAY_DIAGNOSTICS.ko.md)).
 
 ### 2.9 view — M1b/M4 (21개 옵션)

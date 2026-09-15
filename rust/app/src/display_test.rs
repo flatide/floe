@@ -1,6 +1,6 @@
 //! Independent local display diagnostics. No source, indexer, renderer or IPC owner.
 use crate::web_view::SessionFile;
-use floe_app_core::{browser, Error, Result};
+use floe_app_core::{annotations::png, browser, Error, Result};
 use floe_web::transport::{self, Gateway, BUNDLE};
 use serde_json::json;
 use std::{
@@ -13,7 +13,7 @@ use std::{
     time::Duration,
 };
 
-const HELP: &str = "Usage: floe2-web displaytest [OPTIONS]
+const HELP: &str = "Usage: floe2-web displaytest [PNG] [OPTIONS]
 
   --no-open           Use the private session link without launching Firefox
   --port N            Loopback port (0 = random, default)
@@ -21,11 +21,14 @@ const HELP: &str = "Usage: floe2-web displaytest [OPTIONS]
   --session-file FILE New 0600 session JSON; never overwrite
   -h, --help          Show help
 
-Independent synthetic PNG/raw/crop display diagnostics. No layout, indexer,
-renderd, Python, default workspace IPC, uploads or image files are used.
-Run the test explicitly in the page. Canvas readback is not remote-screen
-acceptance; visually inspect the panels. The optional gtktest PNG input is
-not migrated yet. Quit the session or close its isolated Firefox to stop.
+Independent synthetic PNG/raw/crop and optional input PNG display diagnostics.
+The explicit PNG is read once, never modified/reloaded. -- ends options.
+Static PNG only: max 80 MiB, 8192 px/axis, 16 Mpx. Native envelope/CRC validation;
+the browser decodes pixels and stretches to 360x160 with smoothing and alpha.
+No layout, indexer, renderd, Python, default workspace IPC or upload is used.
+Run each test explicitly in the page. Canvas readback is not remote-screen
+acceptance or GTK bilinear pixel parity; visually inspect the panels.
+Quit the session or close its isolated Firefox to stop.
 With --no-open, closing a tab does not stop the server: use Quit or Ctrl+C.
 The private bootstrap link expires after 120s; the session lasts at most 8h.";
 
@@ -36,13 +39,28 @@ pub struct Command {
     no_open: bool,
     firefox: Option<PathBuf>,
     session_file: Option<PathBuf>,
+    input: Option<PathBuf>,
 }
 pub fn parse(args: &[String]) -> Result<Command> {
     let mut c = Command::default();
     let mut seen = std::collections::BTreeSet::new();
     let mut i = 1;
+    let mut positional = false;
     while i < args.len() {
         let option = args[i].as_str();
+        if !positional && option == "--" {
+            positional = true;
+            i += 1;
+            continue;
+        }
+        if positional || !option.starts_with('-') {
+            if option.is_empty() || c.input.is_some() {
+                return Err(Error::input("displaytest accepts one PNG path"));
+            }
+            c.input = Some(option.into());
+            i += 1;
+            continue;
+        }
         if !seen.insert(option) {
             return Err(Error::input("duplicate displaytest option"));
         }
@@ -68,11 +86,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
                     _ => c.session_file = Some(PathBuf::from(value)),
                 }
             }
-            _ => {
-                return Err(Error::input(
-                    "unsupported displaytest argument; input PNG is not migrated yet; see --help",
-                ))
-            }
+            _ => return Err(Error::input("unsupported displaytest option; see --help")),
         }
         i += 1;
     }
@@ -83,6 +97,11 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
         println!("{HELP}");
         return Ok(0);
     }
+    let input = c
+        .input
+        .as_deref()
+        .map(|p| png::display_snapshot(p, cancelled))
+        .transpose()?;
     let firefox = if c.no_open {
         None
     } else {
@@ -90,8 +109,11 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
     };
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, c.port))?;
     listener.set_nonblocking(true)?;
-    let (gate, secret) =
-        Gateway::with_display_test(listener.local_addr()?).map_err(Error::input)?;
+    let (gate, secret) = match input {
+        Some(png) => Gateway::with_display_input(listener.local_addr()?, png),
+        None => Gateway::with_display_test(listener.local_addr()?),
+    }
+    .map_err(Error::input)?;
     let url = format!("{}/#bootstrap={}", gate.origin(), secret.expose());
     let session = SessionFile::create(
         c.session_file,
@@ -162,7 +184,7 @@ mod tests {
         assert!(c.no_open);
         assert_eq!(c.port, 0);
         for args in [
-            vec!["displaytest", "input.png"],
+            vec!["displaytest", "input.png", "second.png"],
             vec!["displaytest", "--jobs", "8"],
             vec!["displaytest", "--port"],
             vec!["displaytest", "--port", "65536"],
@@ -173,5 +195,11 @@ mod tests {
         ] {
             assert!(command(&args).is_err(), "{args:?}");
         }
+        assert_eq!(
+            command(&["displaytest", "--no-open", "--", "-input 한글.png"])
+                .unwrap()
+                .input,
+            Some("-input 한글.png".into())
+        );
     }
 }

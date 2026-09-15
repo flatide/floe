@@ -41,7 +41,7 @@ Usage: floe2-web index SOURCE [OPTIONS]
        floe2-web fe-embed [OPTIONS] PNG...
        floe2-web svrf DECK [OPTIONS]
        floe2-web selfcheck [--adjacent] [--metadata-only]
-       floe2-web displaytest [--no-open] [--port N] [--firefox PATH]
+       floe2-web displaytest [PNG] [--no-open] [--port N] [--firefox PATH]
        floe2-web --version
 
 Implemented: layout/jobdeck index/info/render/probe, occupancy, profiling,
@@ -54,8 +54,8 @@ Annotations: fe-embed CLI writes flateyes PNG metadata without changing pixels.
 SVRF: local subset parser/scan with diagnostics; no Tcl or macro execution.
 Web: owner notes/waives and whole-review transfers require explicit opt-ins.
 GTK-only gtktest is not ported. Full interaction/field acceptance remains open.
-displaytest (or About > Run display test) checks synthetic PNG/raw/crop pixels,
-not a user PNG or remote-screen acceptance. It needs no index or renderd.
+displaytest [PNG] checks synthetic PNG/raw/crop pixels and an optional frozen PNG.
+About has the synthetic test. Neither proves remote-screen acceptance.
 The existing floe2/GTK launcher is unchanged; there is no Python fallback here.
 Run floe2-web index --help for indexing options.";
 const INDEX_HELP: &str = "Usage: floe2-web index SOURCE [OPTIONS]
@@ -128,7 +128,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
             return Err(Error::new(
                 ErrorKind::Unsupported,
                 format!(
-                    "{} is not yet ported; displaytest or About > Run display test covers synthetic PNG/raw/crop only. For an input PNG or GTK widget diagnosis, use the existing floe2 (no Python fallback)",
+                    "{} is not yet ported; displaytest [PNG] provides web image diagnostics and About > Run display test provides synthetic checks. For GTK widget diagnosis, use the existing floe2 (no Python fallback)",
                     args[0]
                 ),
             ))
