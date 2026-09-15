@@ -727,11 +727,23 @@ sys.exit(9)
         self.assertIn("--occupancy --occupancy-um 2.0", res.stdout)
         ovo = read_ovo(Path(str(src) + ".floe") / "design.ovo")
         self.assertEqual((ovo["cell"], ovo["top"]), (2000, "FRESH"))
-        # a plain index makes no summary (opt-in)
+        # the summary is the default (M5 decision 2026-09-15); a plain
+        # index makes it, --no-occupancy does not, and a later default
+        # index adds it to that cache
         plain = TMP / "plain.oas"
         write_chip(plain, "PLAIN", 10, 8)
         floe2("index", plain, "--jobs", "2")
-        self.assertFalse((Path(str(plain) + ".floe") / "design.ovo").exists())
+        self.assertTrue((Path(str(plain) + ".floe") / "design.ovo").exists())
+        bare = TMP / "bare.oas"
+        write_chip(bare, "BARE", 10, 8)
+        floe2("index", bare, "--no-occupancy", "--jobs", "2")
+        self.assertFalse((Path(str(bare) + ".floe") / "design.ovo").exists())
+        res = floe2("index", bare, "--jobs", "2")
+        self.assertIn("--occupancy-only", res.stdout)
+        self.assertTrue((Path(str(bare) + ".floe") / "design.ovo").exists())
+        res = floe2("index", bare, "--jobs", "2")
+        self.assertIn("cache up to date", res.stdout)
+        self.assertIn("occupancy already present", res.stdout)
 
     def test_jobdeck_wrapper_forwards_the_occupancy_options(self):
         deck_dir = TMP / "deck"

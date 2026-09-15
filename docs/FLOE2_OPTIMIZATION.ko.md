@@ -962,13 +962,24 @@ KLayout query parity 배터리 유지.
 표시. 실칩의 decode·raster 비용 실측은 이 카운터로 한다. 크기 cut 제거·밀도
 사다리·LOD hair 모드·재인덱싱은 그 측정 뒤로 분리(리뷰어 권고).
 
+**결함 B 종결(2026-09-15, 0.12.131)**: hairline 규칙 해제(keep)로 되살아난 광역뷰의
+비용(실측 6: 덱 fit 32 s, 25k 페이지 디코드·4,170만 hairline)은 점유 요약
+(docs/OCCUPANCY_PLAN.ko.md, `design.ovo`)이 대체했다. 실칩 덱의 150 × 103 mm 뷰가
+16.7 s → 0.15 s(depth 무관), 요약 생성은 추출본 4.4 s·17 MB, 덱 667소스 9.9 분·
+172 MB. 결정: `floe2 index` 기본으로 요약 생성(`--no-occupancy`로 끔), base cell
+4 µm, 마스크는 keep + detail medium(요약이 켜진 광역뷰는 cut과 무관), View 메뉴
+thin 정책 서브메뉴. 일반 레이아웃은 cull 그대로(요약 없음). 실칩의 level 4
+depth 0 박스(덱 sub-cut wash가 희소 페이지 bbox를 칠함)와 마크 소실은 희소
+페이지를 그리는 규칙(RENDERD 0.12.87)으로 종결.
+
 **정책 분리(2026-09-11, 사용자·리뷰어)**: 마스크(jobdeck)는 hairline이 많을 수밖에
 없고 일반 레이아웃을 같은 기준에 맞추면 광역 뷰가 느려진다. 그래서 위 해제는
 공유 기본값(`HierOpts::default()` 변경, 6134456)이 아니라 **요청별 정책**으로
 바꿨다: renderd 프레임의 `thin=keep|cull`, 플래너 `ViewReq::page_hairline`. 일반
 레이아웃 = cull(기존 성능 정책, 가는 도형이 광역 뷰에서 생략될 수 있음을 상태줄
-`thin:cull`로 표시), jobdeck = keep, 단독 마스크 OASIS도 `--thin keep`/View > keep
-thin shapes로 마스크 정책 선택 가능(같은 파일이 여는 방식에 따라 달라지지 않게).
+`thin:cull`로 표시), jobdeck = keep, 단독 마스크 OASIS도 `--thin keep`/View > thin
+shapes at wide views > keep으로 마스크 정책 선택 가능(같은 파일이 여는 방식에 따라
+달라지지 않게; 2026-09-15 auto/keep/cull 서브메뉴).
 양변 모두 작은 도형의 cut과 자식 셀·BVH의 hairline은 두 정책 공통(별도 실측 뒤
 결정). 환경변수는 진단 override로만 남김.
 

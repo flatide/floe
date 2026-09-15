@@ -349,7 +349,9 @@ def _run_rust_index(args, binary, coverage_only=False,
             command += ["--page-target-mb", str(args.page_target_mb)]
         if args.coverage:
             command.append("--coverage")
-        if getattr(args, "occupancy", False):
+        # the summary is the default (M5, 2026-09-15); a cell profile
+        # never publishes, so it does not ask for one
+        if getattr(args, "occupancy", False) and not profiling:
             command.append("--occupancy")
             command += _occupancy_args(args)
         # LOD off by default (retirement, 2026-08-28); --lod opts back in
@@ -486,8 +488,6 @@ def cmd_index(args):
             incompatible.append("--coverage")
         if args.coverage_only:
             incompatible.append("--coverage-only")
-        if args.occupancy:
-            incompatible.append("--occupancy")
         if args.occupancy_only:
             incompatible.append("--occupancy-only")
         if args.slow_cell_s is not None:
@@ -525,9 +525,11 @@ def cmd_index(args):
         if args.occupancy:
             ovo = os.path.join(outdir, "design.ovo")
             if not os.path.isfile(ovo):
+                # the default summary added to an older cache
                 return _run_rust_index(args, binary, occupancy_only=True)
-            print(f"[floe] occupancy already present: {ovo} "
-                  "(use --occupancy-only to rebuild it)")
+            print(f"[floe] cache up to date: {outdir} (occupancy already "
+                  "present; use --force to rebuild, --occupancy-only to "
+                  "rebuild the summary)")
             return
         print(f"[floe] cache up to date: {outdir} "
               "(use --force to rebuild with new options)")
@@ -1758,8 +1760,13 @@ def main(argv=None, *, prog=None, rust_only=None):
     occ.add_argument(
         "--occupancy", action="store_true",
         help="build the design.ovo occupancy pyramid (the mask-policy "
-             "wide view summary; opt-in until it is measured); when a "
-             "current cache lacks it, add it without replacing the cache")
+             "wide view summary) - the default since the M5 field "
+             "measurement (2026-09-15); when a current cache lacks it, "
+             "add it without replacing the cache")
+    occ.add_argument(
+        "--no-occupancy", dest="occupancy", action="store_false",
+        help="index without the occupancy summary (a current cache "
+             "without one is left as is)")
     occ.add_argument(
         "--occupancy-only", action="store_true",
         help="add or rebuild design.ovo on a current cache without "
@@ -1768,7 +1775,7 @@ def main(argv=None, *, prog=None, rust_only=None):
         "--occupancy-um", type=_positive_float, default=None, metavar="UM",
         help="occupancy base cell in microns (default: 4); implies "
              "--occupancy")
-    p.set_defaults(occupancy=False, occupancy_only=False)
+    p.set_defaults(occupancy=True, occupancy_only=False)
     rust.add_argument("--no-lod", action="store_true",
                       help="do not generate merged LOD page variants "
                            "(default; LOD is being retired)")

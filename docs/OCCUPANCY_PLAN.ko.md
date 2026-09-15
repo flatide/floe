@@ -168,9 +168,10 @@ level L  cell = base_cell_dbu × 2^L, grid (w, h) = ceil(span/cell),
 - 빈 레이어(2026-09-14): 양의 면적 도형이 없는 레이어는 `empty`(비트맵 없음)로
   기록하고 렌더러는 셀 0의 요약으로 다룬다(레이어 수에 포함, 페이지 없음).
 - 취소: SIGINT·상위 취소 시 tmp 삭제, 기존 `.ovo` 보존.
-- **옵션·기본**: M5 실측 전까지 **opt-in**(`floe2 index --occupancy`, 기본 off).
+- **옵션·기본**: M5 결정(2026-09-15) — `floe2 index`는 **기본 on**(`--no-occupancy`
+  로 끔; 현재 캐시에 요약이 없으면 추가만; raw `floe-index vfs`는 명시 옵션),
   `--occupancy-um F`(기본 4), `--occupancy-only`(기존 캐시에 추가·교체, ovm/ovp
-  불변). 기본 on 여부는 실측 8 뒤 결정.
+  불변). M1~M4 동안은 opt-in이었다.
 - **jobdeck 래퍼(리뷰 6)**: `_jobdeck_index()`는 argv를 직접 구성하고 이미 색인된
   소스를 대상에서 뺀다(`floe/cli.py`). 자동 전달되지 않으므로 명시 구현: 세 옵션
   전달, `--occupancy-only`면 색인된 소스도 대상에 포함, gate에서 실행 전후 ovm/ovp
@@ -252,7 +253,7 @@ level L  cell = base_cell_dbu × 2^L, grid (w, h) = ceil(span/cell),
 | M2 | renderd 전용 마스크 경로(단일 소스), 5개 조건, 레벨 선택, 레이어 순서, pick/snap 제외, 킬 스위치, gate 2·3·5 | **완료 2026-09-11(RENDERD 0.12.80, §12)**: 단일 소스 keep 광역뷰가 요약으로 그려짐, cull·근접뷰·exact·depth 제한·킬 스위치 픽셀 불변 |
 | M3 | 플래너에서 요약 레이어의 페이지·계층 생략, `--explain summary`, 카운터 | **완료 2026-09-11(RENDERD 0.12.81, §12)**: 요약 레이어의 페이지 0, 프레임 없는 요청은 요약 전용 서브트리 프루닝(wc_cells 0) |
 | M4 | 덱 통합(소스 뷰 레벨, pass 대체, wash 억제, depth/exact 조건), gate 4 | **완료 2026-09-11(RENDERD 0.12.81, §12)**: mag 0.2 덱의 fit 뷰 픽셀 == 단일 소스 요약 픽셀. 덱 fit 뷰 시간은 실칩 실측 대기 |
-| M5 | 실칩 실측 8, base cell·기본 on/off 확정, 문서(JOBDECK §10·FLOE2_OPTIMIZATION 결함 B) | **진행 중(2026-09-15, §12)**: 8-a·8-c 생성(추출본 4.4 s·17 MB, 덱 667소스 9.9 분·172 MB), 8-d 뷰어(150 × 103 mm 덱 뷰 16.7 s → 0.15 s, depth 무관) 완료. 남은 것: 기본 on/off·base cell 결정, 8-b 품질 샷(5 mm 뷰 요약 vs exact), charge당 비용(scan) |
+| M5 | 실칩 실측 8, base cell·기본 on/off 확정, 문서(JOBDECK §10·FLOE2_OPTIMIZATION 결함 B) | **완료 2026-09-15(§12 "M5 마감")**: 8-a·8-c 생성(추출본 4.4 s·17 MB, 덱 667소스 9.9 분·172 MB), 8-d 뷰어(150 × 103 mm 덱 뷰 16.7 s → 0.15 s, depth 무관). 결정: 색인 기본 on(`--no-occupancy`), base cell 4 µm, 마스크는 keep + detail medium. 후속: 8-b 품질 샷, charge당 비용(scan), cull에서의 요약 |
 
 각 단계는 킬 스위치와 gate를 갖추고 배터리 통과 뒤 커밋한다. 버전: Rust 변경 단계는
 RENDERD_VERSION. `CACHE_VERSION`은 불변, `.ovo`는 자체 형식 버전.
@@ -505,6 +506,31 @@ layer 3/300 status=ok work=729081740 set=4342426,1220836,338091,94074,27163,8105
   5,724 s / 코어 수 + 쓰기(절반). 실측 8-c로 확인: `floe2 index <src>
   --occupancy-only --jobs N`의 `[vfs] occupancy … ok=2 empty=2 jobs=N 17M (Ts)` 줄,
   덱 `time`, `floe-index scan` 출력.
+
+### M5 마감 (2026-09-15, 0.12.131)
+
+사용자 결정(실측 8-a·8-c·8-d 뒤):
+
+- **색인 기본 on**: `floe2 index`(소스·덱·뷰어의 자동 색인)가 옵션 없이 `design.ovo`를
+  만든다. `--no-occupancy`로 끄고, 현재 캐시에 요약이 없으면 기본 색인이 재색인
+  없이 추가한다(`--occupancy-only` 경로). 셀 프로파일 실행은 요약을 요청하지
+  않는다. raw `floe-index vfs`는 그대로 명시 옵션. 비용: 파싱은 색인과 공유,
+  마킹은 추출본 기준 48스레드 4.4 s, 파일은 빈 레이어 제외(추출본 17 MB, 덱
+  172 MB). gate `validate_index_cli`(기본 argv에 `--occupancy`, `--no-occupancy`,
+  요약 없는 캐시에 추가), `validate_occupancy`(plain/`--no-occupancy`/추가/up to
+  date).
+- **base cell 4 µm 유지**: 요약은 1200 px 창 기준 뷰 폭 4.8 mm부터 켜지고, 8-d의
+  뷰에서 `near` 구간의 불편이 없었다. 2 µm는 파일·생성 4배라 보류.
+- **마스크 소스는 keep + detail medium**: 요약이 켜진 광역뷰는 cut과 무관하게
+  점유 셀을 그리므로 medium과 high가 같고, 근접뷰에서는 양축이 cut 미만인 것만
+  빠진다(한 변이 긴 마크는 hairline으로 남음). 일반 레이아웃(cull)은 medium/high
+  차이가 그대로 보이며 요약이 켜지지 않는다(`summary: none (policy)`). cull에서의
+  요약(존재만 표시)은 별도 결정으로 남긴다.
+- **뷰어 메뉴**: View > thin shapes at wide views > auto / keep (mask policy) /
+  cull (layout policy, faster). 예전 "keep thin shapes (mask detail)" 체크 항목을
+  대체하며, 상태줄 `thin:keep|cull`은 그대로.
+- 남은 후속: 8-b 품질 샷(5 mm 뷰 요약 vs exact), `floe-index scan`으로 charge당
+  비용(생성 시간의 다음 단계), cull에서의 요약.
 
 ### 실측 8-d: 뷰어 depth 7/7에서 요약이 꺼짐 (2026-09-15, RENDERD 0.12.88)
 

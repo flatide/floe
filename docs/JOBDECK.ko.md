@@ -676,8 +676,8 @@ budget = 패스별 디코드 보유)을 코드와 대조했다. 모두 사실이
   1차 해제"), 기존 raster 그대로. LOD run 1 px 접기·밀도 사다리·크기 cut 제거·
   재인덱싱은 실칩의 `thin pages N kept` 비용 측정 뒤로 분리. **정책 분리
   (2026-09-11)**: 마스크는 hairline이 많으므로 덱은 keep이 기본, 일반 레이아웃은
-  기존 성능 정책(cull)을 유지하고, 단독 마스크 OASIS는 `--thin keep`/View > keep
-  thin shapes로 선택한다. 요청별 `thin=keep|cull`로 전달되며 공유 기본값이 아니다.
+  기존 성능 정책(cull)을 유지하고, 단독 마스크 OASIS는 `--thin keep`/View > thin
+  shapes at wide views > keep으로 선택한다(2026-09-15: auto/keep/cull 서브메뉴). 요청별 `thin=keep|cull`로 전달되며 공유 기본값이 아니다.
   gate `ThinPageTests`(덱 기본 keep, 레이아웃 기본 cull, `--thin`, 진단 override).
   **실측 6(2026-09-11, 덱 fit 뷰 165 × 160 mm, 1 px = 202 µm)**: keep 정책으로
   25,138페이지(그중 thin 25k)를 전부 디코드(합 30.9 s)하고 4,170만 hairline을
@@ -723,7 +723,11 @@ budget = 패스별 디코드 보유)을 코드와 대조했다. 모두 사실이
   RENDERD 0.12.88): 뷰어 depth 7/7이 숫자 7로 가서 요약이 꺼졌던 것을 "무제한·계층
   높이 이상·레이어별 최대 깊이 이상이면 그 레이어는 full"로 고침(계획 §12); 덱 전체 요약 생성 9.9 분·
   172 MB(667 소스, 레이어 2,251 = ok 1,176 + empty 1,075; 8-a의 39.7 분·9.8 GB는
-  소스 533개 재색인이 섞인 값 — ovp mtime으로 확인). 뷰어 실측(8-b)은 대기. 실칩을 쓸 수 없을 때는
+  소스 533개 재색인이 섞인 값 — ovp mtime으로 확인). **M5 마감(2026-09-15,
+  0.12.131)**: 색인 기본 on(`--no-occupancy`로 끔; 요약 없는 캐시에는 추가), base
+  cell 4 µm, 마스크는 keep + detail medium(요약이 켜진 광역뷰는 cut과 무관), View
+  메뉴에 thin 정책 서브메뉴. 후속: 8-b 품질 샷, scan(charge당 비용), cull에서의
+  요약. 실칩을 쓸 수 없을 때는
   `tools/gen_maskchip.py OUT.oas [--jb]`가 같은 크기(35838.4 × 34617.6 µm)에
   실측 5·7의 ICV 셀(167.7 × 535 µm, 11.38 × 0.0806 µm 선 약 2만 9천 멤버, 118.6 µm
   선·4.3 µm 바 변형, 3/300 쌍둥이, 2 × 3쌍 클러스터로 26 × 33 mm 영역의 7.4 %)과

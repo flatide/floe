@@ -1555,6 +1555,12 @@ class JobdeckShortcutTests(unittest.TestCase):
             if hasattr(gui.Viewer, "_build_menubar") else \
             inspect.getsource(gui)
         self.assertIn("toggle level view / chip view\\tCtrl+,", src)
+        # View > thin shapes at wide views (user call 2026-09-15): the
+        # three policies as menu commands
+        for label in ("thin shapes at wide views", "keep (mask policy)",
+                      "cull (layout policy, faster)",
+                      "auto (jobdeck keep, layout cull)"):
+            self.assertIn(label, src)
 
 
 class LevelSelectTests(unittest.TestCase):
@@ -2805,8 +2811,16 @@ class ThinPageTests(unittest.TestCase):
                    "FLOE_RENDERD_BIN": str(ROOT / "rust" / "target" /
                                            "release" / "floe-renderd")}
         os.environ["FLOE_RENDERD_BIN"] = cls.env["FLOE_RENDERD_BIN"]
+        # these gates pin the PAGE path's thin-page policy; the
+        # occupancy summary (the index default since 2026-09-15) would
+        # draw the wide views instead, so it is switched off here
+        os.environ["FLOE_RUST_OCCUPANCY"] = "off"
         for name in ("thin.oas", "thinmix.oas", "thin.jb"):
             run_floe2("index", CLI / name, "--jobs", "2", env=cls.env, ok=0)
+
+    @classmethod
+    def tearDownClass(cls):
+        os.environ.pop("FLOE_RUST_OCCUPANCY", None)
 
     def _rgb(self, src, detail, env=None, thin=None):
         from PIL import Image
@@ -2958,9 +2972,17 @@ class WideViewTests(unittest.TestCase):
                    "FLOE_RENDERD_BIN": str(ROOT / "rust" / "target" /
                                            "release" / "floe-renderd")}
         os.environ["FLOE_RENDERD_BIN"] = cls.env["FLOE_RENDERD_BIN"]
+        # the wide-view policy (washes, sparse pages) is the PAGE
+        # path's; the occupancy summary (the index default since
+        # 2026-09-15) would draw these views instead, so it is off here
+        os.environ["FLOE_RUST_OCCUPANCY"] = "off"
         for deck in ("tiny.jb", "test.jb", "sparse.jb"):
             run_floe2("index", CLI / deck, "--jobs", "2", env=cls.env,
                       ok=0)
+
+    @classmethod
+    def tearDownClass(cls):
+        os.environ.pop("FLOE_RUST_OCCUPANCY", None)
 
     def _render(self, deck, env, visible, cut_px, size=(200, 200)):
         from floe.jobdeck.viewer import DeckCache

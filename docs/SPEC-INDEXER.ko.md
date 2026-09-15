@@ -13,7 +13,11 @@
 `--profile-cell-ci`, `--profile-jobs`, `--profile-repeat`,
 `--profile-snapshot`/`--profile-snapshot-refresh`를 같은 이름의 Rust
 옵션으로 전달한다.
-coverage는 viewer 기본값과 맞춰 opt-in이다.
+coverage는 viewer 기본값과 맞춰 opt-in이다. **점유 요약(`--occupancy`)은
+기본**(M5 결정 2026-09-15): `floe index`는 항상 `--occupancy`를 전달하고
+`--no-occupancy`로만 끈다(raw 바이너리는 명시 옵션). 현재 캐시에 `design.ovo`가
+없으면 재색인 없이 `--occupancy-only`로 추가하고, 있으면 "cache up to date
+(occupancy already present)". 셀 프로파일 실행은 요약을 요청하지 않는다.
 **기본값(2026-08-28)**: `--jobs`는 **12**(구 host parallelism — raw
 `floe-index vfs` 바이너리 자체 기본은 여전히 CPU 코어), LOD는 **끔**
 — `floe index`는 항상 `--no-lod`를 전달하고 `--lod`로만 다시 켠다(LOD

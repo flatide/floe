@@ -5060,10 +5060,24 @@ class Viewer:
         # the page hairline policy (review 2026-09-11): a plain layout
         # may omit thin shapes at wide views for speed; the mask
         # policy keeps them (a jobdeck's default)
-        check(m, "keep thin shapes (mask detail)",
-              lambda: self._set_thin(
-                  "cull" if self._effective_thin() == "keep" else "keep"),
-              lambda: self._effective_thin() == "keep")
+        # thin shapes at wide views (user call 2026-09-15: a menu
+        # command for the policy): auto = the source's default
+        # (jobdeck keep, layout cull), keep = the mask policy (with an
+        # occupancy summary, detail medium is enough), cull = the
+        # layout policy (thin pages omitted at wide views, faster)
+        thin_root = Gtk.MenuItem(label="thin shapes at wide views")
+        thin_menu = Gtk.Menu()
+        thin_root.set_submenu(thin_menu)
+        thin_menu.connect("show", lambda *_: self._menu_sync())
+        thin_menu.connect("deactivate", lambda *_: self._restore_keys())
+        m.append(thin_root)
+        for mode, label in (("auto", "auto (jobdeck keep, layout cull)"),
+                            ("keep", "keep (mask policy)"),
+                            ("cull", "cull (layout policy, faster)")):
+            check(thin_menu, label,
+                  (lambda mode=mode: self._set_thin(mode)),
+                  (lambda mode=mode:
+                   getattr(self, "thin_mode", "auto") == mode))
         check(m, "grayscale layers\tb",
               lambda: self._set_mono(not self._mono),
               lambda: self._mono)
