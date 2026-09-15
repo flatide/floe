@@ -1,7 +1,7 @@
 //! Embedded, content-identified assets only. Never map a URL to the filesystem.
 use crate::transport::{self, BUNDLE};
 use axum::{
-    extract::Path,
+    extract::{Path, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
@@ -12,10 +12,14 @@ pub(crate) fn routes() -> Router<transport::Gate> {
         .route("/", get(index))
         .route("/assets/{bundle}/{name}", get(asset))
 }
-async fn index() -> Response {
+async fn index(State(gate): State<transport::Gate>) -> Response {
     (
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        include_str!(concat!(env!("OUT_DIR"), "/index.html")),
+        if gate.display_only {
+            include_str!(concat!(env!("OUT_DIR"), "/display.html"))
+        } else {
+            include_str!(concat!(env!("OUT_DIR"), "/index.html"))
+        },
     )
         .into_response()
 }
@@ -24,6 +28,10 @@ async fn asset(Path((bundle, name)): Path<(String, String)>) -> Response {
         return transport::error(StatusCode::NOT_FOUND);
     }
     let (mime, body) = match name.as_str() {
+        "display-page.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("../ui/display-page.js"),
+        ),
         "display-test.js" => (
             "text/javascript; charset=utf-8",
             include_str!("../ui/display-test.js"),

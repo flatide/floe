@@ -4,6 +4,7 @@ mod capture;
 mod clip;
 mod deck_analysis;
 mod deck_index;
+mod display_test;
 mod drc;
 mod fe_embed;
 mod read;
@@ -40,6 +41,7 @@ Usage: floe2-web index SOURCE [OPTIONS]
        floe2-web fe-embed [OPTIONS] PNG...
        floe2-web svrf DECK [OPTIONS]
        floe2-web selfcheck [--adjacent] [--metadata-only]
+       floe2-web displaytest [--no-open] [--port N] [--firefox PATH]
        floe2-web --version
 
 Implemented: layout/jobdeck index/info/render/probe, occupancy, profiling,
@@ -52,8 +54,8 @@ Annotations: fe-embed CLI writes flateyes PNG metadata without changing pixels.
 SVRF: local subset parser/scan with diagnostics; no Tcl or macro execution.
 Web: owner notes/waives and whole-review transfers require explicit opt-ins.
 GTK-only gtktest is not ported. Full interaction/field acceptance remains open.
-About > Run display test checks synthetic PNG/raw/crop pixels, not a user PNG
-or remote-screen acceptance. It opens no design and changes no view.
+displaytest (or About > Run display test) checks synthetic PNG/raw/crop pixels,
+not a user PNG or remote-screen acceptance. It needs no index or renderd.
 The existing floe2/GTK launcher is unchanged; there is no Python fallback here.
 Run floe2-web index --help for indexing options.";
 const INDEX_HELP: &str = "Usage: floe2-web index SOURCE [OPTIONS]
@@ -96,6 +98,7 @@ enum Cli {
     FeEmbed(Box<fe_embed::Command>),
     Svrf(Box<svrf::Command>),
     SelfCheck(selfcheck::Options),
+    DisplayTest(display_test::Command),
 }
 fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
     let args: Vec<String> = args
@@ -112,6 +115,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
         "--help" | "-h" if args.len() == 1 => return Ok(Cli::Help(false)),
         "--version" if args.len() == 1 => return Ok(Cli::Version),
         "selfcheck" => return selfcheck::parse(&args).map(Cli::SelfCheck),
+        "displaytest" => return display_test::parse(&args).map(Cli::DisplayTest),
         "index" => (),
         "info" | "render" | "probe" => return read::parse(&args).map(|c| Cli::Read(Box::new(c))),
         "jobdeck" => return deck_analysis::parse(&args).map(|c| Cli::Jobdeck(Box::new(c))),
@@ -124,7 +128,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
             return Err(Error::new(
                 ErrorKind::Unsupported,
                 format!(
-                    "{} is not yet ported; About > Run display test covers synthetic PNG/raw/crop only. For an input PNG or GTK widget diagnosis, use the existing floe2 (no Python fallback)",
+                    "{} is not yet ported; displaytest or About > Run display test covers synthetic PNG/raw/crop only. For an input PNG or GTK widget diagnosis, use the existing floe2 (no Python fallback)",
                     args[0]
                 ),
             ))
@@ -297,6 +301,7 @@ impl Drop for Signals {
 fn run(cli: Cli, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
     match cli {
         Cli::SelfCheck(options) => return selfcheck::run(options, cancelled),
+        Cli::DisplayTest(command) => return display_test::run(command, cancelled),
         Cli::View(command) => return web_view::run(*command, cancelled),
         Cli::Drc(command) => return drc::run(*command, cancelled),
         Cli::FeEmbed(command) => return fe_embed::run(*command, cancelled),

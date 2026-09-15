@@ -5287,3 +5287,50 @@ VFS H1-H5/L1-L9·마커 복구, occupancy27/잡덱83/렌더러46, KLayout jobs1/
 화면, Python-free Linux와 G1/G4 수용은 위 합성/DOM/native 검사로 대체하지 않는다.
 M2 공유/원격 미구현, M0/M3 현장 보류, M5 world-tile 조건부, index hot reload/revision
 사용자 유보 범위를 유지한다. 한 진단 기능 추가를 전체 목표 완료로 세지 않는다.
+
+## 71. M4g-17b — index/renderd 없는 독립 표시 진단 명령
+
+2026-09-16. `floe2-web displaytest`와 전용 정적 페이지를 추가했다. 기존 empty
+workspace도 설계 없이 열 수 있지만 owner service/worker 발견과 자원 설정은 거치므로,
+표시 자체의 진단에는 별도의 worker 없는 실행 경로를 둔다. 입력 PNG/`--dump`는
+아직 미이관이며 이 명령을 기존 `gtktest`의 완전한 대체나 GTK 은퇴로 세지 않는다.
+
+- `--no-open`, `--port`, `--firefox`, `--session-file`만 받는다. private session JSON의
+  `mode:display-test` 외에 사용자 파일 경로를 HTTP로 등록하지 않는다. layout/index/
+  renderd/DRC/기본 workspace IPC에 접근하지 않는다. `--no-open`이면 Firefox 발견도 없다.
+- 기존 SessionFile의 create-new0600/자신이 만든 inode만 정리하는 규칙과 Browser의
+  독립0700 Firefox 프로필/0600 시작 파일/별도 process group 수거를 재사용한다.
+  인증 URL은 기존처럼 private 파일에만 있고 argv/stderr에는 없다.
+- 전용 root HTML과 ES2017 bootstrap은 기존 cookie+CSRF/one-use fragment 교환을
+  사용한다. fragment를 주소에서 먼저 제거하고, bundle/자격/`display_only` capability를
+  확인한다. 같은 탭 재로드는 sessionStorage 자격만 사용한다. 저장소 거부 시 재로드
+  한계를 표시하며 다른 저장소로 우회하지 않는다. 자동 test·WS·view 명령은 없다.
+- 명시 Run은 기존 합성 검사와 공통 image decoder를 사용한다. Quit는 기존 확인
+  대화상자와 DELETE session이다. 실패/불확실한 종료는 성공으로 표시하거나 재전송하지
+  않는다. pagehide 취소/BFCache 정지와 report 폐기, bootstrap120초/session8시간 만료,
+  Ctrl+C/소유 Firefox 종료 수거를 구분한다. 수동 `--no-open` 탭 종료는 서버 종료가 아니다.
+- Gateway의 만료 관리는 display-only일 때 owner worker 없이도 종료한다. 일반 뷰어의
+  service 수명주기·API·native 프레임 경로는 변경하지 않는다. 두 HTML과 새 JS를
+  같은 content bundle에 포함한다. 새 외부 의존성은 없다.
+
+검증 진행 기록: app24/web88 단위(별도 ignored 제외), 새 만료 검사, ES2017/전체 DOM
+및 기존 client gate, `validate_display_cli.py`의 실제 Rust HTTP/empty-PATH/없는 native
+worker/로그아웃/SIGINT/파일 보존과 가짜 Firefox 자발적 종료·프로필 정리 통과.
+실제 브라우저는 실행하지 않았으며 Node DOM/가짜 Firefox를 화면 수용으로 세지 않는다.
+최종 `sh tools/validate_rust.sh`는 **실제 exit0 / RUST VALIDATION: ALL OK**로 끝났다
+(`/private/tmp/floe-display-standalone-battery.log`). app24/core270/web88 단위,
+HTTP15·native HTTP/WS8, GTK57600픽셀 PNG/raw/crop 대조, 새 독립 CLI, reviewer
+자동 저장의 실제 파일 저장/재조회, ES2017/전체 DOM, VFS H1-H5/L1-L9/중단 후 마커
+복구, occupancy27/jobdeck83/renderer46, KLayout jobs1/8 각각13 PX+2 phase-exact+
+14 style을 통과했다. 실제 브라우저/현장 수용은 하지 않았다.
+
+app/web all-targets scoped strict clippy(`-- --no-deps -D warnings`), scoped rustfmt,
+diff-check도 통과했다. 기존 의존 크레이트와 GTK 개발 게이트의 경고는 유지한다.
+검증용 `.venv` 링크만 정리했으며 main/feature/jobdeck와 별도 reviewer 수정8파일의
+diff를 보존했다. 위 core 단위 수는 그 별도 미커밋 검사도 포함한 작업 트리 기준이다.
+그8파일은 이번 커밋에 포함하지 않는다.
+
+커밋 시 목표 잔여: 입력 PNG 진단·`--dump` 방식 결정, reviewer legacy 읽기 연결의
+별도 승인, CLI/G4 최종 재대조. 실제 브라우저 입력/저장/복구/화면과 Python-free Linux,
+G1/G4 수용은 별도다. M2 공유/원격 미구현, M0/M3 현장 보류, M5 world-tile 조건부와
+index hot reload/revision 사용자 유보도 남는다. 독립 진단 하나로 전체 완료를 선언하지 않는다.

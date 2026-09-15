@@ -107,7 +107,13 @@ M4g-11f는 인증된 읽기 전용 `GET /api/v1/palette/presets`를 추가한다
 M4g-17a의 `GET /api/v1/display-test/{png|raw}`는 owner 인증 뒤 고정 합성 색 막대만
 반환한다. PNG는 `image/png`(<16KiB), raw는 `application/octet-stream`의230,416바이트
 `FLOERAW1`이다(360×160 RGBA). 임의 파일/view/worker 접근이나 frame/query ID는 없다.
-About의 명시 실행만 이 API를 부르며 UI는 live viewer의 payload 검사/디코더를 공유한다.
+About 또는 M4g-17b 독립 `displaytest` 페이지의 명시 실행만 이 API를 부르며 UI는
+live viewer의 payload 검사/디코더를 공유한다. 독립 Gateway의 capabilities에는
+`display_only:true`가 있으며 render/catalog/index_open/file_picker/launcher는 false다.
+일반 Gateway는 `display_only:false`다. 경로/파일/worker 등록이나 새 쓰기 API 없이
+기존 exchange와 `DELETE /api/v1/session`을 사용한다. 독립 세션의 logout/expiry는
+owner worker 없이도 리스너를 종료한다. 루트 HTML만 역할에 맞게 선택하며 파일 URL이나
+요청 파라미터를 디스크 파일에 매핑하지 않는다.
 Canvas readback 결과와 원격 화면 수용은 구분한다([표시 진단 계약](WEBUI_DISPLAY_DIAGNOSTICS.ko.md)).
 
 M4g-16c는 세션 슬롯 표를 별도로 읽는 owner API

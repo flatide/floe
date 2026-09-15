@@ -142,6 +142,7 @@ pub struct Gateway {
     pub(crate) drc: Option<Arc<crate::drc::Registry>>,
     pub(crate) defaults: Option<Arc<crate::defaults::Service>>,
     pub(crate) fill_slot_edit: bool,
+    pub(crate) display_only: bool,
     startup: Option<serde_json::Value>,
     startup_confirm_levels: bool,
     pub(crate) build: Option<crate::about::BuildInfo>,
@@ -177,6 +178,7 @@ impl Gateway {
                 drc: None,
                 defaults: None,
                 fill_slot_edit: false,
+                display_only: false,
                 startup: None,
                 startup_confirm_levels: false,
                 build: None,
@@ -191,6 +193,12 @@ impl Gateway {
     }
     pub fn origin(&self) -> &str {
         self.origin.url()
+    }
+    /// A standalone diagnostic session has no registered sources or native workers.
+    pub fn with_display_test(addr: SocketAddr) -> Result<(Gate, Secret), String> {
+        let (mut gate, secret) = Self::new(addr)?;
+        Arc::get_mut(&mut gate).expect("new gateway").display_only = true;
+        Ok((gate, secret))
     }
     /// Compile-time identity from the launcher, not a live native-tool audit.
     pub fn attach_build(gate: &mut Gate, info: crate::about::BuildInfo) -> Result<(), String> {
@@ -662,7 +670,7 @@ async fn capabilities(State(gate): State<Gate>, headers: HeaderMap) -> Response 
     let render = gate.service.is_some() || gate.view.is_some();
     Json(json!({"protocol":1,"bundle":BUNDLE,"stage":if gate.service.is_some(){"owner-service"}else if render{"view-stream"}else{"transport"},
         "render":render,"catalog":gate.service.is_some(),"index":gate.service.is_some(),"index_open":gate.service.is_some(),"launcher":gate.cli_owner,"file_picker":gate.browse.is_some(),"jobdeck_modes":gate.service.is_some(),"drc":gate.drc.is_some(),"drc_notes":gate.drc.as_ref().is_some_and(|r|r.notes_enabled()),"drc_waives":gate.drc.as_ref().is_some_and(|r|r.waives_enabled()),"exports":gate.service.is_some(),"snapshot_png":gate.service.is_some(),"layer_settings":true,"design_defaults":gate.defaults.is_some(),"shares":false,"uploads":false,"control_bytes":CONTROL_BYTES,
-        "fill_slot_edit":gate.fill_slot_edit,"frame_bytes":crate::view::PACKET_BYTES,"frame_credit":1,"pending_frames":1}))
+        "fill_slot_edit":gate.fill_slot_edit,"display_only":gate.display_only,"frame_bytes":crate::view::PACKET_BYTES,"frame_credit":1,"pending_frames":1}))
     .into_response()
 }
 async fn current_view(State(gate): State<Gate>, headers: HeaderMap) -> Response {
@@ -832,7 +840,12 @@ pub async fn serve(
                 if gate.browse.as_ref().is_some_and(|b|b.has_failed()) {break Err(io::Error::other("file catalogue stopped"));}
                 if let Some(defaults)=&gate.defaults {defaults.maintain();}
                 if let Some(drc)=&gate.drc {drc.maintain();}
-                if gate.auth.lock().is_ok_and(|a|a.expired(Instant::now())) {gate.stop_services();}
+                if gate.auth.lock().is_ok_and(|a|a.expired(Instant::now())) {
+                    gate.stop_services();
+                    // There is no owner worker whose exit can stop this listener.
+                    // After logout/expiry, drain on this tick, not inside the handler.
+                    if gate.display_only {break Ok(());}
+                }
                 if let Some(view)=gate.active_view() {
                     if view.activity.lock().unwrap().expired(Instant::now()) {view.controller.request_close();}
                 }
@@ -938,6 +951,28 @@ pub async fn serve(
 #[cfg(test)]
 mod lifetime_tests {
     use super::*;
+    #[tokio::test]
+    async fn standalone_expiry_stops_without_an_owner_worker() {
+        for exchanged in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let (gate, _) = Gateway::with_display_test(listener.local_addr().unwrap()).unwrap();
+            let old = Instant::now() - Duration::from_secs(3);
+            let (mut auth, token) =
+                Auth::new(old, Duration::from_secs(1), Duration::from_secs(1)).unwrap();
+            if exchanged {
+                auth.exchange(&token.expose(), old).unwrap();
+            }
+            *gate.auth.lock().unwrap() = auth;
+            assert!(gate.service.is_none() && gate.view.is_none());
+            timeout(
+                Duration::from_secs(2),
+                serve(listener, gate, std::future::pending()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        }
+    }
     #[test]
     fn never_connected_and_detached_views_have_distinct_bounded_lifetimes() {
         let now = Instant::now();

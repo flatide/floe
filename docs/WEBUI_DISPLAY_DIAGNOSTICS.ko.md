@@ -1,6 +1,6 @@
 # 웹 표시 진단 이관
 
-2026-09-16, M4g-17a. [M0 §2.8~2.9](WEBUI_M0.ko.md)의 `gtktest`/`--dump`
+2026-09-16, M4g-17b. [M0 §2.8~2.9](WEBUI_M0.ko.md)의 `gtktest`/`--dump`
 미이관을 실제 코드로 분리한 계약과 현재 구현이다. **합성 진단은 연결했지만
 실제 브라우저 수용·입력 PNG·자동 dump의 이관 완료는 아니다.**
 
@@ -8,7 +8,7 @@
 
 | 경로 | 원래 동작 | 웹 현재 상태 |
 |---|---|---|
-| `gtktest [png]` | 선택 PNG를360×160으로 bilinear 축소해 표시 | 입력 PNG와 독립 진단 명령은 아직 미이관 |
+| `gtktest [png]` | 선택 PNG를360×160으로 bilinear 축소해 표시 | 입력 PNG는 아직 미이관; 독립 합성 진단은 `displaytest` |
 | `gtktest` 합성 | 검은360×160 RGB pixbuf에 빨강/초록/파랑/노랑70×100 막대4개 | 같은 픽셀의 Rust PNG/raw, 공통 디코더와 Canvas로 대조 |
 | `gtktest` 배치 | 같은 pixbuf를 Overlay/ScrolledWindow 안에 표시 | 웹 `.viewport`의 crop/별도 투명 overlay를 표시; GTK 위젯 구조를 복제하지 않음 |
 | `view --dump` 수신 | 수신 raw/PNG를 pixbuf로 만든 뒤 `/tmp/<APP>_frame.png`에 덮어씀 | 아직 변경하지 않음; 숫자 `--render-debug`와 다른 기능 |
@@ -25,6 +25,29 @@ GTK 명령의 폐기·alias 승인도 이 합성 진단 구현에 포함하지 �
 기존 `floe2-web view`의 **About → Run display test**에서 명시적으로 실행한다.
 About를 열거나 view가 바뀐 것만으로 자동 실행하지 않는다. layout 없이도 가능하다.
 `gtktest` CLI는 계속 명시 오류이며 위 합성 대안과 입력 PNG가 남았음을 안내한다.
+
+M4g-17b는 인덱서·renderd도 없는 환경에서 실행할 독립 명령을 추가한다:
+
+```sh
+rust/target/release/floe2-web displaytest
+rust/target/release/floe2-web displaytest --no-open --session-file /absolute/new-session.json
+```
+
+`--port N`(0=임의), `--firefox PATH` 또는 `FLOE_FIREFOX_BIN`도 기존 viewer와 같다.
+독립 세션이므로 기본 workspace의 IPC 소유·forward·종료에 관여하지 않는다.
+새 Firefox0700 프로필·0600 launch.html과 create-new0600 session JSON, 일회용120초
+bootstrap/8시간 session을 그대로 재사용한다. 인증 URL은 argv/stderr에 넣지 않는다.
+`--no-open`은 Firefox 발견도 생략하며 private session 파일을 사용한다.
+
+전용 HTML은 같은 bundle의 고정 자산이며 레이아웃 UI/WS를 로드하지 않는다.
+인증 후에도 **Run display test** 전에는 합성 API를 읽지 않는다. Quit는 기존 확인
+대화상자와 `DELETE /api/v1/session`을 사용한다. 로그아웃·기한 만료·Ctrl+C·소유한
+Firefox 종료 시 리스너와 생성한 파일을 정리한다. 기존 파일/심볼릭 링크는 덮어쓰지 않는다.
+`--no-open`으로 수동 연결한 브라우저의 **탭 닫기만으로 서버를 종료하지는 않는다**.
+Quit 또는 터미널 Ctrl+C를 사용한다. pagehide는 클라이언트 작업을 취소하고,
+BFCache 복귀는 정지 상태를 알리며 재실행하지 않는다. 재로드는 같은 탭의 sessionStorage
+자격으로 재인증한다. report는 storage에 저장하지 않는다.
+이 단계는 입력 PNG 인자를 받지 않으며 GTK 명령의 alias/폐기나 `--dump` 변경이 아니다.
 
 - owner 인증된 `GET /api/v1/display-test/png`와 `/raw`만 사용한다. 임의 파일 경로,
   source/view/query identity, 옵션 본문은 받지 않는다. host/origin·cookie/CSRF 경계를
@@ -62,8 +85,13 @@ Python/Node/Pillow는 개발 오라클이며 제품 런타임 의존성을 추�
 별도 단위/DOM/client 검사는 decode 중복 완료·늦은 callback·dimension 오류·timeout/
 URL 회수, 명시 GET·취소·DPR·About 연결과 view 명령 무발행을 확인한다. 실제 transport
 검사는 인증/바이너리 형식/반복 동일성/없는 view와 독립적인 응답을 확인한다.
-전체 배터리 실행 기록은 [M4 §70](WEBUI_M4.ko.md)에 둔다. 이를 실제 브라우저 실행으로
+독립 명령의 `validate_display_cli.py`는 빈 PATH와 존재하지 않는 index/renderd를
+지정해도 실제 Rust CLI/HTTP 인증·PNG/raw 수신·logout/SIGINT·파일 보존이 동작하는지
+검사한다. Firefox는 명시적인 테스트 대역으로만 실행하며 private argv/profile과
+대역의 자발적 종료·정리를 확인한다. bootstrap/session 만료 시 owner worker 없이
+리스너가 종료되는 Rust 검사와 인증/재로드/취소/종료의 DOM 검사를 추가했다.
+전체 배터리 실행 기록은 [M4 §70~71](WEBUI_M4.ko.md)에 둔다. 이를 실제 브라우저 실행으로
 대체 보고하지 않는다. 기존 브라우저 시작 경로의 도구 거부도 우회하지 않았다.
 
-다음 잔여는 선택 PNG의 표시 진단·독립 명령/기존 명령 경계, `--dump` 저장 방식,
+다음 잔여는 선택 PNG의 표시 진단·기존 GTK 명령의 제품 경계, `--dump` 저장 방식,
 실제 Firefox/ETX의 표시/입력 수용이다. 기존 GTK 구현은 보존한다.

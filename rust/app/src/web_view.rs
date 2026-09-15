@@ -475,13 +475,13 @@ fn number(s: &str, min: u64, max: u64, key: &str) -> Result<u64> {
         .ok_or_else(|| Error::input(format!("{key} must be {min}..{max}")))
 }
 
-struct SessionFile {
-    directory: PathBuf,
-    path: PathBuf,
+pub(crate) struct SessionFile {
+    pub(crate) directory: PathBuf,
+    pub(crate) path: PathBuf,
     identity: Option<(u64, u64)>,
 }
 impl SessionFile {
-    fn create(explicit: Option<PathBuf>, value: &Value) -> Result<Self> {
+    pub(crate) fn create(explicit: Option<PathBuf>, value: &Value) -> Result<Self> {
         let root = fs::canonicalize(std::env::temp_dir())?;
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)

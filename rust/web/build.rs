@@ -5,6 +5,8 @@ fn main() {
     let mut hash = Sha1::new();
     for path in [
         "ui/index.html",
+        "ui/display.html",
+        "ui/display-page.js",
         "ui/app.css",
         "ui/protocol.js",
         "ui/gestures.js",
@@ -103,14 +105,12 @@ fn main() {
     }
     let id = format!("{:x}", hash.finalize());
     println!("cargo:rustc-env=FLOE_WEB_BUNDLE={id}");
-    let html = fs::read_to_string("ui/index.html")
-        .expect("HTML source")
-        .replace("@@BUNDLE@@", &id);
-    fs::write(
-        Path::new(&env::var_os("OUT_DIR").unwrap()).join("index.html"),
-        html,
-    )
-    .unwrap();
+    for name in ["index.html", "display.html"] {
+        let html = fs::read_to_string(format!("ui/{name}"))
+            .expect("HTML source")
+            .replace("@@BUNDLE@@", &id);
+        fs::write(Path::new(&env::var_os("OUT_DIR").unwrap()).join(name), html).unwrap();
+    }
 }
 fn hash_tree(dir: &Path, hash: &mut Sha1) {
     println!("cargo:rerun-if-changed={}", dir.display());

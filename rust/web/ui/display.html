@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="floe-bundle" content="@@BUNDLE@@">
+  <title>Floe2 · Display diagnostics</title>
+  <link rel="stylesheet" href="/assets/@@BUNDLE@@/app.css">
+  <script defer src="/assets/@@BUNDLE@@/protocol.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/image-decode.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/display-test.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/session-exit.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/display-page.js"></script>
+</head>
+<body class="display-page">
+  <header id="app-header" class="topbar">
+    <div class="brand">floe<span>2</span></div><h1 class="document-title">Display diagnostics</h1>
+    <button id="logout" type="button" disabled aria-haspopup="dialog" aria-expanded="false" aria-controls="session-exit-dialog">Quit session…</button>
+  </header>
+  <main id="app-workspace" class="display-page-body">
+    <p id="display-page-status" role="status">Connecting to the local diagnostic session…</p>
+    <p>No layout, indexer or renderer is involved. This is not GTK widget testing or an input PNG viewer.</p>
+    <p>Expect red, green, blue and yellow bars on black. Panel C is cropped and has a white cross. Pixel readback does not verify the remote desktop or monitor; inspect all three panels yourself.</p>
+    <div class="button-row"><button id="display-test-run" type="button" disabled>Run display test</button><button id="display-test-cancel" type="button" disabled>Cancel test</button></div>
+    <p id="display-test-status" role="status">Nothing runs until you choose Run display test.</p>
+    <div id="display-test-results" hidden>
+      <h2>A · PNG decoding</h2><canvas id="display-test-png" width="1" height="1" aria-label="PNG color bars"></canvas>
+      <h2>B · Raw RGBA</h2><canvas id="display-test-raw" width="1" height="1" aria-label="Raw RGBA color bars"></canvas>
+      <h2>C · Cropped viewport and separate overlay</h2>
+      <div id="display-test-stack" class="viewport display-test-stack" aria-label="Cropped bars with a white cross"><canvas id="display-test-base" width="1" height="1"></canvas><canvas id="display-test-overlay" width="1" height="1"></canvas></div>
+      <label for="display-test-observed">What do you see?</label><select id="display-test-observed"><option value="unverified">Not checked</option><option value="all_visible">All three panels look correct</option><option value="display_problem">One or more panels are wrong or blank</option></select>
+      <pre id="display-test-report" tabindex="0" aria-label="Local display diagnostic report"></pre>
+    </div>
+    <p>Reports remain on this page. Nothing is uploaded or saved. With <code>--no-open</code>, closing the tab does not end the server; use Quit session or Ctrl+C in the launching terminal.</p>
+  </main>
+  <div id="session-exit-dialog" class="about-backdrop" hidden>
+    <section class="about-card session-exit-card" role="dialog" aria-modal="true" aria-labelledby="session-exit-title" aria-describedby="session-exit-description">
+      <h2 id="session-exit-title">Quit diagnostic session?</h2>
+      <p id="session-exit-description">This ends the local diagnostic server and its isolated Firefox. The unsaved diagnostic report is discarded. No layout workspace is affected.</p>
+      <div class="button-row"><button id="session-exit-cancel" type="button">Keep session</button><button id="session-exit-confirm" type="button">Quit session</button></div>
+    </section>
+  </div>
+</body>
+</html>
