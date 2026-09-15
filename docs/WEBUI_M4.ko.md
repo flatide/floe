@@ -4813,3 +4813,56 @@ progressive 정책 결정, 실제 브라우저 입력/저장/복구 수용, Pyth
 G1 지연/pacing·G4 전체 수용은 남는다. 공유/원격은 미구현, 현장 Firefox/ETX와
 M3는 보류, world-tile M5는 조건부 보류다. 전체 완료에 가깝다고 과장하거나 임의
 완료율로 환산하지 않고 커밋마다 이 잔여를 함께 보고한다.
+
+## 63. M4g-13 — 폐쇄망 두벌식 한글 입력기와 G4 잔여 감사
+
+2026-09-16. GTK `floe/hangul.py`와 `gui.py::_note_entry_key`에는 OS IME가 없는
+폐쇄망용 두벌식 조합기가 있다. 이전 웹의 `isComposing` 보호만으로는 이 기능이
+이관된 것이 아니었다. `rust/web/ui/hangul.js`의 ES2017 상태 머신으로 옮겨 note
+편집기에 연결했다. 입력은 브라우저 로컬 일시 상태이며 서버/Python 왕복은 없다.
+
+- 편집기를 열면 기본 off. `Built-in Hangul` 또는 Shift+Space로 켠다.
+  HangulMode/HanjaMode와 기존 GTK 명칭 키도 받으며 Shift는 쌍자음 조합을 끊지 않는다.
+  초성·중성·종성/복합 모음·겹받침·받침 이동과 단계별 Backspace를 보존한다.
+- OS IME가 우선이다. composition lifecycle/`isComposing`/229를 확인하고,
+  조합 중 Ctrl/Cmd+Enter·Escape가 preview/discard로 넘어가지 않게 한다.
+  Ctrl/Meta/Alt 편집 단축키는 가로채지 않는다.
+- UTF-16 offset으로 **현재 preedit 구간만** `setRangeText`로 교체한다. 전체
+  textarea를 다시 쓰지 않는다. 커서/선택·다른 입력·붙여넣기/잘라내기/drop·blur·
+  편집 잠금/재읽기에서 이전 조합을 확정하고, 닫기/종료는 모드도 초기화한다.
+  programmatic insertion의 maxlength 우회를 별도로 막고 초과 키는 텍스트와
+  조합 상태를 보존한 채 거부한다. 기존 UTF-8 64KiB preview 한도는 유지한다.
+- setRangeText가 없으면 fallback만 비활성화하고 OS IME 경로를 남긴다. 새 runtime
+  라이브러리/CDN/저장은 없다. 자산 hash와 고정 embedded asset 경로에 포함한다.
+
+API 근거: [WHATWG text-control 선택/치환](https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-textarea/input-setrangetext),
+[W3C IME key 값](https://www.w3.org/TR/uievents-key/#keys-ime). 지원 버전을 추정해
+현장 호환으로 선언하지 않는다. 실제 브라우저의 caret 스크롤·OS IME 공존·native
+undo grouping은 별도 입력 수용이며 deterministic fake textarea로 증명하지 않는다.
+
+집중 검증:
+
+- `validate_web_hangul.py`: 실제 Python `HangulComposer`와 현대 한글 **11,172자**,
+  **22,744개 시퀀스·237,352번 전이**의 commit/preedit/pending을 대조. 조립 후
+  단계별 삭제, 받침 이동·모음 연속·reset·고정 난수 입력, KEYMAP 전체가 일치한다.
+- `hangul.test.cjs`: UTF-16 emoji prefix, 선택 치환/커서 이동/외부 수정, clipboard,
+  modifiers, OS composition/229, 길이 상한 롤백, 비활성/닫기·지원 API 부재.
+- 실제 DRC selection+notes 모듈 통합에서 `한글` 입력/6 UTF-8 bytes, **입력 중
+  HTTP 0건**, IME 중 preview/discard 0건, 종료 시 조합/모드 정리를 단언한다.
+- `node tools/validate_web_ui.cjs`: ES2017 구문과 전체 UI/상태 회귀 통과.
+- `cargo clippy --offline --locked -p floe-web --all-targets --no-deps -j2 -- -D warnings`
+  통과. 의존 VFS의 기존 dead-code 경고는 남으며 workspace 전체 lint 통과 주장은 아니다.
+- 전체 `sh tools/validate_rust.sh`는 exit0 / `RUST VALIDATION: ALL OK`로 완료했다
+  (`/private/tmp/floe-hangul-battery.log`). app22/core261/web84 단위,
+  새 조합 대조와 DRC 저장/복구·전체 UI, occupancy27·잡덱83·렌더러46,
+  VFS H1-H5/L1-L9 및 KLayout jobs1/8 각각13 PX+2 phase-exact+14 style을 통과했다.
+- 마지막 동일 live-region 안내 중복 갱신 방지 보강 후에도 전체 UI/조합 oracle과
+  native HTTP embedded-asset gate를 다시 통과했다
+  (`/private/tmp/floe-hangul-ui-final.log`, `floe-hangul-assets-final.log`).
+  실제 브라우저 수용은 미검증이다. 검증용 `.venv` 링크만 정리하며 원래 환경은 보존한다.
+
+[G4 잔여 감사](WEBUI_G4_AUDIT.ko.md)를 추가했다. 사용자 결정은 자동 저장 opt-in
+추가이며 이 커밋은 저장 동작을 바꾸지 않는다. 다음은 note 확정/waive 변경의
+reviewer별 opt-in, reviewer 읽기 선택과 개발 도구 경계 정리다. 그 뒤에도 브라우저/
+Linux 실제 실행·G1/G4 수용, 미구현 공유/원격, 보류 M0/M3, 조건부 M5가 남는다.
+이 입력기 한 건의 완료를 전체 목표의 완료 또는 임의 퍼센트로 보고하지 않는다.

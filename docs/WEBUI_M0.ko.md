@@ -4,6 +4,10 @@
 상위 계획: [WEBUI_PLAN.ko.md](WEBUI_PLAN.ko.md).
 서비스 계약 초안: [WEBUI_SERVICE_API.ko.md](WEBUI_SERVICE_API.ko.md).
 
+현재 구현·수용 잔여는 [G4 감사](WEBUI_G4_AUDIT.ko.md)에서 대조한다.
+아래는 원래 범위와 단계별 누적 기록이며 작성 시점의 미구현 설명을 현재 상태로
+그대로 읽지 않는다. M4g-13은 두벌식 fallback을 연결했고 DRC 자동 저장 opt-in은 다음이다.
+
 **로컬 조사/설계 결과이며 이관 완료표가 아니다.** 아래 Rust 서비스와 웹 UI는
 아직 전체 미구현이다. 2026-09-13에 M1a-1 worker client와 M1a-2a/b 일반 index·info/render/probe
 경로를 추가했으며 §8~9에서 추적한다. 기존 Rust parser/VFS/raster/occupancy 구현과 새 서비스의

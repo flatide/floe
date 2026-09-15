@@ -18,6 +18,7 @@
   <script defer src="/assets/@@BUNDLE@@/rulers.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc-groups.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc-build.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/hangul.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc-notes.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc-note-display.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc-waives.js"></script>
@@ -272,7 +273,9 @@
         <button id="notes-read" disabled>Read selected notes</button>
         <div id="notes-editor" hidden>
           <p id="notes-target" class="note"></p>
-          <label for="notes-text">Note text</label><textarea id="notes-text" rows="5" maxlength="65536" spellcheck="false" aria-describedby="notes-bytes notes-local"></textarea>
+          <label for="notes-text">Note text</label><textarea id="notes-text" rows="5" maxlength="65536" spellcheck="false" aria-describedby="notes-bytes notes-local notes-hangul-status"></textarea>
+          <label><input id="notes-hangul" type="checkbox">Built-in Hangul (Shift+Space)</label>
+          <p id="notes-hangul-status" class="note" role="status"></p>
           <p id="notes-bytes" class="note"></p><p id="notes-local" class="note">Local draft only · not autosaved · lost on page reload. Ctrl/Cmd+Enter previews; Escape discards. Browser IME is supported.</p>
           <div class="button-row"><button id="notes-prepare">Preview save</button><button id="notes-reload">Reload snapshot, keep text</button><button id="notes-discard">Discard draft</button></div>
           <div id="notes-review" hidden>

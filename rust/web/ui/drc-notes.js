@@ -2,6 +2,7 @@
  * reading; only an explicit approval sends a write. No note text in storage. */
 (function(root) {
     'use strict';
+    const H=typeof module==='object'&&module.exports?require('./hangul.js'):root.FloeHangul;
     const API='/api/v1/drc/review/notes', LIMIT=65536;
     const phases={queued:'Queued',publishing:'Saving',cancelling:'Cancelling',succeeded:'Saved',failed:'Save failed',cancelled:'Cancelled before saving'};
     const errors={review_changed:'The note file changed or another writer holds its lock. Reload the snapshot before preparing again.',
@@ -80,6 +81,7 @@
         let enabled=false,stopped=false,model=null,stale=true,editor=null,draft=null,timer=null,expiry=null;
         let io=null,poll=null,write=null,cancelling=null,approving=null,revokeTask=null,revokeNext=null;
         let pending=null,uncertain=false,notice='',storageWarning='',readTurn=0,transferLocked=false;
+        const hangul=H.bind({input:el('notes-text'),toggle:el('notes-hangul'),hint:el('notes-hangul-status'),changed:changed});
         function abort(t){if(t){t.cancelled=true;if(t.abort){t.abort();}}}
         function selection(){try{const c=o.selection();if(stopped||!c){return null;}context(c.context);id(c.epoch);text(c.key,256);text(c.caption,4096);
             if(!Number.isInteger(c.count)||c.count<1||c.count>5000){return null;}return c;}catch(_){return null;}}
@@ -127,6 +129,7 @@
             el('notes-selection').textContent=c?c.caption:'Select errors in a ready ICE review to edit notes.';
             el('notes-read').disabled=!ok||!c||!!editor;
             el('notes-editor').hidden=!editor;el('notes-text').disabled=!!io||!!draft||busy()||stopped;
+            hangul.sync(!!editor&&!el('notes-text').disabled);
             el('notes-reload').disabled=!ok||!editor||!same(editor.selection);
             el('notes-prepare').disabled=!ok||!editor||editor.invalid||!!draft||!editor.token||new TextEncoder().encode(el('notes-text').value.trim()).length>LIMIT;
             el('notes-discard').disabled=!editor&&!io;
@@ -199,7 +202,7 @@
             finally{if(io===t){io=null;changed();if(focus&&draft&&!el('notes-consent').disabled){el('notes-consent').focus();}}}
         }
         function clearEditor(notify){if(notify){invalidate('Draft discarded.');}else{o.clearTimeout(expiry);expiry=null;}
-            editor=draft=null;el('notes-text').value='';el('notes-preview').textContent='';el('notes-consent').checked=el('notes-legacy').checked=false;}
+            editor=draft=null;hangul.close();el('notes-text').value='';el('notes-preview').textContent='';el('notes-consent').checked=el('notes-legacy').checked=false;}
         async function send(request){
             pending=request;uncertain=false;el('notes-checked').checked=false;store(request);abort(poll);poll=null;
             const t={cancelled:false,abort:null};write=t;notice='Submitting the approved note. Closing the view does not undo a committed save.';render();
@@ -227,9 +230,9 @@
         }
         function discard(){clearEditor(true);notice='Local draft discarded. Previously approved saves are not undone.';render();el('notes-read').focus();}
         el('notes-read').onclick=function(){return read(false);};el('notes-reload').onclick=function(){return read(true);};
-        el('notes-prepare').onclick=prepare;el('notes-text').oninput=changed;el('notes-discard').onclick=discard;
+        el('notes-prepare').onclick=prepare;el('notes-discard').onclick=discard;
         el('notes-consent').onchange=el('notes-legacy').onchange=changed;el('notes-approve').onclick=approve;
-        el('notes-editor').onkeydown=function(e){if(e.isComposing){return;}if(e.key==='Escape'){e.preventDefault();e.stopPropagation();discard();}
+        el('notes-editor').onkeydown=function(e){if(hangul.composing(e)){return;}if(e.key==='Escape'){e.preventDefault();e.stopPropagation();discard();}
             else if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();e.stopPropagation();if(!draft){prepare();}}};
         el('notes-refresh').onclick=refresh;el('notes-cancel').onclick=cancel;
         el('notes-resolve').onclick=function(){if(pending&&uncertain&&!stopped&&!write&&!cancelling){return send(pending);}};

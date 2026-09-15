@@ -7,7 +7,9 @@ const ids=new Set([...fs.readFileSync(__dirname+'/index.html','utf8').matchAll(/
 const nodes=new Map(),requests=[],moves=[],timers=new Map(),raf=new Map();let serial=0,groupRev='1';
 let groups=[{check:'0',errors:['0']},{check:'1',errors:['1']}];
 class Element {
-    constructor(){this.children=[];this.style={};this.value='';this.checked=false;this.hidden=false;this.width=this.height=1;}
+    constructor(){this.children=[];this.style={};this.value='';this.checked=false;this.hidden=false;this.width=this.height=1;
+        this.selectionStart=this.selectionEnd=0;this.maxLength=65536;}
+    setRangeText(text,start,end,mode){assert.equal(mode,'end');this.value=this.value.slice(0,start)+text+this.value.slice(end);this.selectionStart=this.selectionEnd=start+text.length;}
     set textContent(v){this.text=v;this.children=[];}get textContent(){return this.text||'';}set innerHTML(_){throw Error('HTML injection');}
     appendChild(v){this.children.push(v);return v;}setAttribute(k,v){this[k]=v;}focus(){}scrollIntoView(){}
     getContext(){return new Proxy({}, {get:()=>()=>{}});}
@@ -47,6 +49,15 @@ const noteReads=()=>requests.filter(r=>r.path===API+'/read');
     await panel.init();await tick();assert(!el('notes-read').disabled);assert.match(el('notes-selection').textContent,/2 selected.*across rules/);
     assert(panel.key('n'));await tick();assert.deepEqual(noteReads().at(-1).body.errors,[{check:'0',error:'0'},{check:'1',error:'1'}]);
     const keyReads=noteReads().length;assert(panel.key('n'));await tick();assert.equal(noteReads().length,keyReads,'repeat note key reread snapshot');
+    const beforeTyping=requests.length;
+    function noteKey(key,extra={}){const e={key,...extra,preventDefault(){this.prevented=true;},stopPropagation(){this.stopped=true;}};
+        el('notes-text').onkeydown(e);if(!e.stopped)el('notes-editor').onkeydown(e);return e;}
+    assert(noteKey(' ',{shiftKey:true}).prevented);for(const key of 'gksrmf')assert(noteKey(key).prevented);
+    assert.equal(el('notes-text').value,'한글');assert.match(el('notes-bytes').textContent,/^6 \/ 65536/);
+    assert.equal(requests.length,beforeTyping,'typing caused HTTP traffic');
+    el('notes-text').oncompositionstart();noteKey('Escape');noteKey('Enter',{ctrlKey:true});
+    assert(!el('notes-editor').hidden);assert.equal(requests.length,beforeTyping);el('notes-text').oncompositionend();
+    noteKey('Enter',{ctrlKey:true,keyCode:229});assert.equal(requests.length,beforeTyping);
     assert.deepEqual(noteReads().at(-1).body.context,F.context);el('notes-text').value='two rules';el('notes-text').oninput();await el('notes-prepare').onclick();
     assert(!el('notes-review').hidden);const reads=noteReads().length;
     view.pending=true;view.state.state_rev='2';panel.contextChanged();await tick();assert(!el('notes-review').hidden);assert.equal(noteReads().length,reads,'pan triggered a note read');view.pending=false;
@@ -59,6 +70,6 @@ const noteReads=()=>requests.filter(r=>r.path===API+'/read');
     el('notes-discard').onclick();await el('notes-read').onclick();el('notes-text').value='old database';el('notes-text').oninput();await el('notes-prepare').onclick();
     cat.drc.id='6'.repeat(64);cat.drc.revision='5'.repeat(64);await panel.refresh();await tick();assert(el('notes-review').hidden);assert.equal(el('notes-text').value,'old database');
     assert.equal(moves.length,0);assert.equal(requests.filter(r=>r.path===API&&r.method==='POST').length,0);
-    panel.stop();assert.equal(timers.size,0);assert.equal(raf.size,0);assert.equal(el('notes-text').value,'');
+    panel.stop();assert.equal(timers.size,0);assert.equal(raf.size,0);assert.equal(el('notes-text').value,'');assert(!el('notes-hangul').checked);assert(el('notes-hangul').disabled);
     console.log('WEB DRC NOTES PANEL: ALL OK (real selection/notes integration, cross-rule refs, zero-based IDs, pan no-read, selection/epoch/DRC invalidation, no writes/navigation, cleanup)');
 })().catch(e=>{panel.stop();console.error(e);process.exitCode=1;});
