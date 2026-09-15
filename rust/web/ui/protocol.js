@@ -119,23 +119,28 @@
         const size = buffer.byteLength - 4 - length;
         if (size > MAX_PAYLOAD || String(size) !== h.payload_length) { fail('Frame payload mismatch'); }
         const data = new Uint8Array(buffer, length + 4, size);
-        const dv = new DataView(buffer, length + 4, size);
-        const magic = h.format === 'raw' ? [70, 76, 79, 69, 82, 65, 87, 49] :
+        imagePayload(h.format,h.width,h.height,data);
+        return {header: h, data: data};
+    }
+    function imagePayload(format,width,height,data) {
+        pixels(width,height);
+        if(!['raw','png'].includes(format)||!(data instanceof Uint8Array)||data.byteLength>MAX_PAYLOAD){fail('Invalid image payload');}
+        const size=data.byteLength,dv=new DataView(data.buffer,data.byteOffset,size);
+        const magic = format === 'raw' ? [70, 76, 79, 69, 82, 65, 87, 49] :
             [137, 80, 78, 71, 13, 10, 26, 10];
-        if (size < (h.format === 'raw' ? 16 : 33) ||
+        if (size < (format === 'raw' ? 16 : 33) ||
             !magic.every(function (n, i) { return data[i] === n; })) { fail('Invalid image header'); }
-        if (h.format === 'raw') {
-            if (size !== 16 + h.width * h.height * 4 || dv.getUint32(8, true) !== h.width ||
-                dv.getUint32(12, true) !== h.height) { fail('Raw dimensions mismatch'); }
+        if (format === 'raw') {
+            if (size !== 16 + width * height * 4 || dv.getUint32(8, true) !== width ||
+                dv.getUint32(12, true) !== height) { fail('Raw dimensions mismatch'); }
         } else if (dv.getUint32(8) !== 13 || dv.getUint32(12) !== 0x49484452 ||
-            dv.getUint32(16) !== h.width || dv.getUint32(20) !== h.height) {
+            dv.getUint32(16) !== width || dv.getUint32(20) !== height) {
             fail('PNG dimensions mismatch');
         }
-        return {header: h, data: data};
     }
     const api = Object.freeze({counter: counter, compare: compare, next: next,
         decimal: decimal, bbox: bbox, pixels: pixels, pair: pair, matches: matches, packet: packet,
-        placement: placement, roundEven: roundEven});
+        placement: placement, roundEven: roundEven, imagePayload:imagePayload});
     if (typeof module !== 'undefined' && module.exports) { module.exports = api; }
     else { root.FloeProtocol = api; }
 }(typeof window === 'undefined' ? this : window));

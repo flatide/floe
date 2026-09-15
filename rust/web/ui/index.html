@@ -7,6 +7,7 @@
   <title>floe2 · Layout workspace</title>
   <link rel="stylesheet" href="/assets/@@BUNDLE@@/app.css">
   <script defer src="/assets/@@BUNDLE@@/protocol.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/image-decode.js"></script>
   <script defer src="/assets/@@BUNDLE@@/gestures.js"></script>
   <script defer src="/assets/@@BUNDLE@@/minimap.js"></script>
   <script defer src="/assets/@@BUNDLE@@/query.js"></script>
@@ -29,6 +30,7 @@
   <script defer src="/assets/@@BUNDLE@@/defaults.js"></script>
   <script defer src="/assets/@@BUNDLE@@/notices.js"></script>
   <script defer src="/assets/@@BUNDLE@@/about.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/display-test.js"></script>
   <script defer src="/assets/@@BUNDLE@@/session-exit.js"></script>
   <script defer src="/assets/@@BUNDLE@@/launcher.js"></script>
   <script defer src="/assets/@@BUNDLE@@/browse.js"></script>
@@ -411,7 +413,19 @@
       <p id="about-status" role="status"></p>
       <pre id="about-build" tabindex="0" aria-label="Build identity"></pre>
       <p class="note">Native versions above are the launcher's expected compatibility versions, not source hashes of running tools. Revision “unknown” has no Git provenance; a trailing “+” reports a dirty tree observed at build time. These are diagnostics, not signatures.</p>
-      <p class="note">Linux, Firefox/ETX and shared-server acceptance still require field validation. This panel reads build identity and packaged notices only; it does not run selfcheck, open design files or change the view.</p>
+      <p class="note">Linux, Firefox/ETX and shared-server acceptance still require field validation. About does not run selfcheck, open design files or change the view.</p>
+      <h2>Display diagnostics</h2>
+      <p class="note">Run explicitly to compare PNG, raw RGBA and crop/overlay display. Expect red, green, blue and yellow bars on black; panel C is cropped and has a white cross. No design data, renderer, upload or file save is involved.</p>
+      <div class="button-row"><button id="display-test-run" type="button" disabled>Run display test</button><button id="display-test-cancel" type="button" disabled>Cancel test</button></div>
+      <p id="display-test-status" role="status">Canvas readback does not prove what the remote screen displays.</p>
+      <div id="display-test-results" hidden>
+        <p>A · PNG decoding</p><canvas id="display-test-png" width="1" height="1" aria-label="PNG color bars"></canvas>
+        <p>B · Raw RGBA</p><canvas id="display-test-raw" width="1" height="1" aria-label="Raw RGBA color bars"></canvas>
+        <p>C · Cropped viewport and separate overlay</p>
+        <div id="display-test-stack" class="viewport display-test-stack" aria-label="Cropped bars with a white cross"><canvas id="display-test-base" width="1" height="1"></canvas><canvas id="display-test-overlay" width="1" height="1"></canvas></div>
+        <label for="display-test-observed">What do you see?</label><select id="display-test-observed"><option value="unverified">Not checked</option><option value="all_visible">All three panels look correct</option><option value="display_problem">One or more panels are wrong or blank</option></select>
+        <pre id="display-test-report" tabindex="0" aria-label="Local display diagnostic report"></pre>
+      </div>
       <h2>Distribution notices</h2>
       <p>Portable packages contain the collected original material in NOTICES/ (starting with INVENTORY.txt). Use verify.sh to check the complete package hashes. The reader below displays one bounded source chunk at a time, not executable HTML.</p>
       <p class="note">The inventory includes build dependencies and may include components not linked at runtime. It is not legal clearance or a grant of Floe distribution rights. Development executables may have no adjacent notice bundle.</p>

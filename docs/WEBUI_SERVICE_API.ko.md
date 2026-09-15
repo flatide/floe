@@ -104,6 +104,12 @@ M4g-11f는 인증된 읽기 전용 `GET /api/v1/palette/presets`를 추가한다
 노출한다. 표와 전송 코드도 bundle 식별에 포함된다. 팔레트 읽기는 state/render revision을
 변경하지 않고 클릭 시점의 선택을 단일 `style_batch`로 별도 제출한다.
 
+M4g-17a의 `GET /api/v1/display-test/{png|raw}`는 owner 인증 뒤 고정 합성 색 막대만
+반환한다. PNG는 `image/png`(<16KiB), raw는 `application/octet-stream`의230,416바이트
+`FLOERAW1`이다(360×160 RGBA). 임의 파일/view/worker 접근이나 frame/query ID는 없다.
+About의 명시 실행만 이 API를 부르며 UI는 live viewer의 payload 검사/디코더를 공유한다.
+Canvas readback 결과와 원격 화면 수용은 구분한다([표시 진단 계약](WEBUI_DISPLAY_DIAGNOSTICS.ko.md)).
+
 M4g-16c는 세션 슬롯 표를 별도로 읽는 owner API
 `GET /api/v1/views/{id}/fill-slots/{key}`를 추가한다. snapshot의 `fill_slots_key`
 (40 lowercase hex)가 현재 표와 같아야 하며 다르면409, 열린 view가 아니면404다.

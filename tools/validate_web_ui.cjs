@@ -8,6 +8,13 @@ const acorn = require('./vendor/acorn-8.15.0/acorn.js');
 const root = path.resolve(__dirname, '..');
 const ui = path.join(root, 'rust/web/ui');
 const options = {ecmaVersion: 2017, sourceType: 'script'};
+for(const name of ['image-decode','display-test']){
+    acorn.parse(fs.readFileSync(path.join(ui,name+'.js'),'utf8'),options);
+    const test=spawnSync(process.execPath,[path.join(ui,name+'.test.cjs')],{stdio:'inherit',timeout:15000});
+    assert.equal(test.status,0,name+': '+test.error);
+}
+const displayClient=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_DISPLAY:'1'}});
+assert.equal(displayClient.status,0,'display client: '+displayClient.error);
 acorn.parse(fs.readFileSync(path.join(ui, 'review-save-mode.js'), 'utf8'), options);
 for(const file of ['review-save-mode.test.cjs','review-autosave.test.cjs']){
     const run=spawnSync(process.execPath,[path.join(ui,file)],{stdio:'inherit',timeout:15000});

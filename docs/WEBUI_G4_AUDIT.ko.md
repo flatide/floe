@@ -1,6 +1,6 @@
 # 웹 전환 G4 잔여 감사
 
-갱신: 2026-09-16, M4g-16d(슬롯 프리셋·초안 UI). 상위 [계획](WEBUI_PLAN.ko.md), 원래 범위
+갱신: 2026-09-16, M4g-17a(합성 표시 진단). 상위 [계획](WEBUI_PLAN.ko.md), 원래 범위
 [M0 §2~3](WEBUI_M0.ko.md), 단계별 실행 기록 [M4](WEBUI_M4.ko.md).
 
 이 문서는 **로컬 구현과 전체 수용을 분리하는 잔여 목록**이다. 표의 구현/게이트는
@@ -21,7 +21,7 @@
 | DRC-01 조회·선택 | `app-core/drc`, `web/src/drc`, `drc*.js`; lazy paging/selection/CD/isolation/query gate | 현장 대형 결과와 실제 브라우저 조작 수용 |
 | DRC-02 저장·전송 | reviewer 고정 sidecar, snapshot/prepare/approve·CAS·receipt, notes/waives/transfer HTTP와 UI gate. **M4g-14 확정 시 자동 저장 opt-in**, M4g-15a 명시 ICE 읽기/쓰기 권한 분리 | reviewer legacy 읽기 선택 마감; 실제 브라우저 저장/충돌/복구 수용, 대형 sidecar 연속 저장 비용 실측 |
 | EXPORT-01 | Rust capture/mosaic/PNG metadata/clip + snapshot; raster/metadata/DRC-capture gate | 실제 브라우저 copy/download/승인 표시 수용 |
-| SYS-01/02 | Rust worker 발견·수거·cache freshness·selfcheck·portable/ELF/고지; native/포장/전송 gate | Python-free **Linux에서 실행**, 현장 Firefox/ETX, G4 전체 end-to-end 판정 |
+| SYS-01/02 | Rust worker 발견·수거·cache freshness·selfcheck·portable/ELF/고지; native/포장/전송 gate. M4g-17a About 합성 PNG/raw/crop 표시 진단·GTK57600픽셀 대조 | 선택 PNG/독립 진단 명령과 dump 경계, Python-free **Linux에서 실행**, 현장 Firefox/ETX, G4 전체 end-to-end 판정 |
 
 표의 `validate_*.py`와 Node는 개발 오라클/하네스다. 제품 실행 경로에 Python,
 KLayout, Node를 다시 넣지 않는다. 브라우저의 입력 조합·표시 일시 상태는 계획대로
@@ -78,6 +78,8 @@ ASCII의 fresh ICE 선택, legacy 임시 파일 탐색은 아직 미이관이며
 1. reviewer 읽기의 ASCII/cache/legacy 경로(웹 legacy 읽기 권한은 별도 승인 대기),
    진단/무효 CLI 경계의 마감과 G4 목록의 최종 재대조. 개발 bitmap 슬롯 UI는
    M4g-16d에서 로컬 연결했지만 실제 브라우저 수용은 아래2번에 남는다.
+   M4g-17a [합성 표시 진단](WEBUI_DISPLAY_DIAGNOSTICS.ko.md)은 연결했다. 입력 PNG/
+   독립 명령과 `--dump` 저장 정책 결정은 남으며 기존 GTK 진단을 폐기하지 않는다.
 2. 실제 브라우저 입력·저장·복구·화면 수용, Python-free Linux 실행, G1/G4 판정.
    이전 브라우저 시작 파일의 도구 제한을 우회하지 않는다.
 3. M2 공유/원격은 `shares=false`, loopback-only인 **미구현**이다. 허가 없는 원격

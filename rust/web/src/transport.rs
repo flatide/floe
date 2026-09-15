@@ -488,6 +488,10 @@ pub fn router(gate: Gate) -> Router {
         .route("/api/v1/session", delete(logout))
         .route("/api/v1/capabilities", get(capabilities))
         .route("/api/v1/about", get(crate::about::read))
+        .route(
+            "/api/v1/display-test/{format}",
+            get(crate::display_test::read),
+        )
         .route("/api/v1/palette/presets", get(crate::presets::read))
         .route(
             "/api/v1/views/{id}/fill-slots/{key}",

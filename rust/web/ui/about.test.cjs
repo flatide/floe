@@ -22,7 +22,8 @@ class Node{
 }
 function el(id){if(!nodes.has(id)){nodes.set(id,new Node(id));}return nodes.get(id);}
 let pending=[];
-const ui=A.bind({el,document:doc,bundle,http(method,path,body,missing,token){
+let diagnosticOpen=false;
+const ui=A.bind({el,document:doc,bundle,displayTest:{open(){diagnosticOpen=true;},close(){diagnosticOpen=false;}},http(method,path,body,missing,token){
     assert.equal(method,'GET');assert.equal(path,'/api/v1/about');assert.equal(body,undefined);assert.equal(missing,false);
     return new Promise((resolve,reject)=>{token.abort=()=>{};pending.push({resolve,reject,token});});
 }});
@@ -30,7 +31,7 @@ function key(key,shiftKey=false){const e={key,shiftKey,stopped:false,prevented:f
 async function run(){
     await el('about-open').onclick();assert.equal(pending.length,0);ui.init();assert.equal(el('about-open').disabled,false);
     el('about-open').focus();el('app-workspace').setAttribute('aria-hidden','false');
-    let p=el('about-open').onclick();assert.equal(pending.length,1);assert.equal(doc.activeElement,el('about-close'));
+    let p=el('about-open').onclick();assert.equal(pending.length,1);assert.equal(doc.activeElement,el('about-close'));assert(diagnosticOpen);
     assert.equal(el('app-header').getAttribute('aria-hidden'),'true');assert.equal(key('ArrowUp').stopped,true);
     let e=key('Tab',true);assert.equal(e.prevented,true);assert.equal(doc.activeElement,el('about-font'));
     e=key('Tab');assert.equal(e.prevented,true);assert.equal(doc.activeElement,el('about-close'));
@@ -39,7 +40,7 @@ async function run(){
     assert.match(el('about-build').textContent,/unverified/);
     e=key('Escape');assert.equal(e.prevented,true);assert.equal(el('about-dialog').hidden,true);assert.equal(doc.activeElement,el('about-open'));
     assert.equal(el('app-header').getAttribute('aria-hidden'),null);assert.equal(el('app-workspace').getAttribute('aria-hidden'),'false');
-    assert.equal(key('ArrowUp').stopped,false);
+    assert.equal(key('ArrowUp').stopped,false);assert(!diagnosticOpen);
     p=el('about-open').onclick();const old=pending.shift();el('about-close').onclick();assert.equal(old.token.cancelled,true);
     const newer=el('about-open').onclick(),next=pending.shift();old.resolve(value);await p;assert.equal(el('about-build').textContent,'');
     next.reject(new Error('offline'));await newer;assert.match(el('about-status').textContent,/Close and reopen/);

@@ -28,12 +28,12 @@
         let enabled=false,opened=false,task=null,prior=null,hidden=[];
         function cancel(){if(task){task.cancelled=true;if(task.abort){task.abort();}task=null;}}
         function close(restore) {
-            cancel();notices.close();if(!opened){return;}opened=false;panel.hidden=true;button.setAttribute('aria-expanded','false');
+            cancel();notices.close();o.displayTest.close();if(!opened){return;}opened=false;panel.hidden=true;button.setAttribute('aria-expanded','false');
             hidden.forEach(function(p){if(p[1]===null){p[0].removeAttribute('aria-hidden');}else{p[0].setAttribute('aria-hidden',p[1]);}});hidden=[];
             if(restore){const target=prior&&doc.contains(prior)?prior:button;target.focus();}prior=null;
         }
         async function open() {
-            if(!enabled||opened){return;}opened=true;prior=doc.activeElement;panel.hidden=false;button.setAttribute('aria-expanded','true');
+            if(!enabled||opened){return;}opened=true;o.displayTest.open();prior=doc.activeElement;panel.hidden=false;button.setAttribute('aria-expanded','true');
             el('about-build').textContent='';el('about-font').textContent='';el('about-status').textContent='Reading build identity…';el('about-close').focus();
             ['app-header','app-workspace'].forEach(function(id){const n=el(id);hidden.push([n,n.getAttribute('aria-hidden')]);n.setAttribute('aria-hidden','true');});
             const t={cancelled:false,abort:null};task=t;

@@ -350,6 +350,10 @@
         present();
     }
     function finishDecode() { if (decode) { decode(); decode = null; } }
+    function decodeImage(h,data,callback){
+        return window.FloeImageDecode.create({Image:Image,ImageData:ImageData,Blob:Blob,URL:URL,
+            setTimeout:setTimeout.bind(window),clearTimeout:clearTimeout.bind(window)},h,data,callback);
+    }
     function acknowledge(h, disposition, ws, serial) {
         if (ws !== socket || serial !== socketSerial || ws.readyState !== WebSocket.OPEN) { return; }
         try {
@@ -368,10 +372,9 @@
             (!accepted || (h.purpose === 'foreground' && P.compare(h.render_rev, accepted.render) >= 0)) && !document.hidden; };
         if (!valid()) { acknowledge(h, 'discarded', ws, serial); return; }
         if (decode) { notice('Frame credit violation'); ws.close(); return; }
-        let done = false, image = null, url = null, timer = null;
+        let done = false;
         function finish(draw) {
             if (done) { return; } done = true;
-            if (timer) { clearTimeout(timer); }
             let disposition = 'discarded';
             try {
                 if (draw && valid()) {
@@ -394,26 +397,11 @@
                     present();
                 }
             } catch (e) { report(e); }
-            if (image) { image.onload = null; image.onerror = null; image.src = ''; }
-            if (url) { URL.revokeObjectURL(url); }
             decode = null; acknowledge(h, disposition, ws, serial);
         }
-        decode = function () { finish(null); };
-        if (h.format === 'raw') {
-            finish(function (ctx) {
-                const rgba = new Uint8ClampedArray(packet.data.buffer, packet.data.byteOffset + 16, h.width * h.height * 4);
-                ctx.putImageData(new ImageData(rgba, h.width, h.height), 0, 0);
-            });
-        } else {
-            image = new Image(); url = URL.createObjectURL(new Blob([packet.data], {type: 'image/png'}));
-            image.onload = function () {
-                if (image.naturalWidth !== h.width || image.naturalHeight !== h.height) { notice('Decoded PNG dimensions mismatch'); finish(null); return; }
-                finish(function (ctx) { ctx.drawImage(image, 0, 0); });
-            };
-            image.onerror = function () { notice('PNG decode failed'); finish(null); };
-            timer = setTimeout(function () { notice('PNG decode timeout'); finish(null); }, 5000);
-            image.src = url;
-        }
+        const task=decodeImage(h,packet.data,
+            function(draw,error){if(error){notice(error.message);}finish(draw);});
+        decode=task.cancel;task.start();
     }
     function disconnect() {
         if (inspector) { inspector.interrupt(); }
@@ -965,7 +953,9 @@
         context:function(){return !stopped&&state&&currentId?{id:currentId,key:state.render_key,epoch:epoch,rev:state.state_rev,slotKey:state.fill_slots_key,fillEdit:fillEditSupported,
             connected:!document.hidden&&live()&&!!epoch&&!!socket&&socket.readyState===WebSocket.OPEN&&!ownerBusy&&!submitting&&!indexBlocked(),
             editable:!inflight&&!accepted&&!queue.length}:null;}});
-    about=window.FloeAbout.bind({el:el,document:document,http:http,bundle:bundle});
+    const displayTest=window.FloeDisplayTest.bind({el:el,document:document,window:window,XHR:XMLHttpRequest,bundle:bundle,
+        csrf:function(){return auth?auth.csrf:'';},decode:decodeImage});
+    about=window.FloeAbout.bind({el:el,document:document,http:http,bundle:bundle,displayTest:displayTest});
     sessionExit=window.FloeSessionExit.bind({el:el,document:document,confirm:endSession});
     minimap=window.FloeMinimap.bind({el:el,document:document,http:http,state:function(){return !stopped&&!document.hidden&&live()&&epoch?state:null;},
         ready:function(){return !!epoch&&live()&&!inflight&&!accepted&&queue.length===0&&!(gesture&&gesture.active())&&!document.hidden;},

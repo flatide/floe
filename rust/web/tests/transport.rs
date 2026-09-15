@@ -29,6 +29,61 @@ use tokio_tungstenite::{
 };
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 #[tokio::test]
+async fn display_test_is_authenticated_fixed_binary_and_independent_of_a_view() {
+    let s = Server::start().await;
+    let a = s.login().await;
+    let h = [
+        ("Cookie", a.cookie.as_str()),
+        ("X-Floe-CSRF", a.csrf.as_str()),
+    ];
+    for (format, mime) in [("raw", "application/octet-stream"), ("png", "image/png")] {
+        let path = format!("/api/v1/display-test/{format}");
+        assert_eq!(s.request("GET", &path, &[], "").await.status, 401);
+        assert_eq!(s.request("GET", &path, &h[..1], "").await.status, 401);
+        assert_eq!(
+            s.request(
+                "GET",
+                &path,
+                &[("Origin", "http://evil.example"), h[0], h[1]],
+                ""
+            )
+            .await
+            .status,
+            403
+        );
+        let r = s.request("GET", &path, &h, "").await;
+        assert_eq!(r.status, 200);
+        assert_eq!(r.headers["content-type"], mime);
+        assert_eq!(r.headers["cache-control"], "no-store");
+        assert_eq!(r.bytes, s.request("GET", &path, &h, "").await.bytes);
+        if format == "raw" {
+            assert_eq!(r.bytes.len(), 16 + 360 * 160 * 4);
+            assert_eq!(&r.bytes[..8], b"FLOERAW1");
+            assert_eq!(&r.bytes[8..12], &360u32.to_le_bytes());
+            assert_eq!(&r.bytes[12..16], &160u32.to_le_bytes());
+        } else {
+            assert!(r.bytes.len() < 16384);
+            assert_eq!(&r.bytes[..8], b"\x89PNG\r\n\x1a\n");
+            assert_eq!(&r.bytes[16..20], &360u32.to_be_bytes());
+            assert_eq!(&r.bytes[20..24], &160u32.to_be_bytes());
+        }
+    }
+    assert_eq!(
+        s.request("GET", "/api/v1/display-test/unknown", &h, "")
+            .await
+            .status,
+        404
+    );
+    assert_eq!(
+        s.request("GET", "/api/v1/display-test/raw?path=anything", &h, "")
+            .await
+            .status,
+        403
+    );
+    assert_eq!(s.request("GET", "/api/v1/view", &h, "").await.status, 404);
+    s.shutdown().await;
+}
+#[tokio::test]
 async fn preset_catalogue_is_authenticated_readonly_and_works_without_a_view() {
     let s = Server::start().await;
     let path = "/api/v1/palette/presets";
@@ -335,6 +390,8 @@ async fn embedded_assets_are_content_identified_and_never_serve_files() {
     assert!(!page.headers["content-security-policy"].contains("unsafe-inline"));
     for (name, mime) in [
         ("app.js", "text/javascript"),
+        ("image-decode.js", "text/javascript"),
+        ("display-test.js", "text/javascript"),
         ("palette.js", "text/javascript"),
         ("presets.js", "text/javascript"),
         ("fill-editor.js", "text/javascript"),
@@ -391,6 +448,7 @@ struct Reply {
     status: u16,
     headers: BTreeMap<String, String>,
     body: String,
+    bytes: Vec<u8>,
 }
 struct Auth {
     cookie: String,
@@ -450,8 +508,9 @@ impl Server {
             .await
             .unwrap()
             .unwrap();
-        let text = String::from_utf8(out).unwrap();
-        let (head, body) = text.split_once("\r\n\r\n").unwrap();
+        let split = out.windows(4).position(|s| s == b"\r\n\r\n").unwrap();
+        let head = std::str::from_utf8(&out[..split]).unwrap();
+        let bytes = out[split + 4..].to_vec();
         let mut lines = head.lines();
         let status = lines
             .next()
@@ -461,16 +520,25 @@ impl Server {
             .unwrap()
             .parse()
             .unwrap();
-        let headers = lines
+        let headers: BTreeMap<String, String> = lines
             .map(|l| {
                 let (k, v) = l.split_once(':').unwrap();
                 (k.to_lowercase(), v.trim().into())
             })
             .collect();
+        let body = if matches!(
+            headers.get("content-type").map(String::as_str),
+            Some("image/png" | "application/octet-stream")
+        ) {
+            String::new()
+        } else {
+            String::from_utf8(bytes.clone()).unwrap()
+        };
         Reply {
             status,
             headers,
-            body: body.into(),
+            body,
+            bytes,
         }
     }
     async fn exchange(&self, bundle: &str, origin: &str) -> Reply {

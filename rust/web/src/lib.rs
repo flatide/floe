@@ -6,6 +6,7 @@ mod assets;
 pub mod auth;
 pub mod browse;
 mod defaults;
+mod display_test;
 pub mod drc;
 mod exports;
 mod fill_slots;

@@ -5227,3 +5227,63 @@ main의 기존5항목 변경과 feature/jobdeck 작업 트리는 보존했다.
 G4 최종 재감사도 남는다. 실제 브라우저 저장/복구·G1/G4 수용, Python-free Linux 실행은
 로컬 DOM/native gate로 대체하지 않는다. M2 공유/원격은 미구현, M0/M3 현장은 보류,
 M5 world-tile은 조건부, index hot reload/revision은 사용자 유보다.
+
+## 70. M4g-17a — GTK 원본 대조와 합성 표시 진단
+
+2026-09-16. [표시 진단 계약](WEBUI_DISPLAY_DIAGNOSTICS.ko.md)을 추가했다.
+`gtktest`의 합성 이미지/위젯 비교와 `--dump`의 수신/합성 파일 저장은 다른 기능이다.
+합성 진단의 실제 UI 경로부터 연결했으며, 입력 PNG·독립 명령·자동 dump까지
+완료했다고 세지 않는다. 기존 GTK와 사용자 데이터/경로 접근 범위는 그대로다.
+
+- About의 **Run display test**에서만 고정 색 막대 PNG/raw를 인증 GET한다.
+  view/worker/file을 열지 않고, GET에는 파일명/좌표/사용자 옵션이 없다.
+  raw230,416바이트와 PNG16KiB 미만을 한 번 생성해 재사용한다. 기존 HTTP 제한과
+  owner cookie/CSRF·host/origin 정책을 그대로 적용한다.
+- `protocol.imagePayload`와 `image-decode.js`를 실제 viewer/진단이 공유한다.
+  raw `ImageData`, PNG `Image+Blob`·dimension 검사·5초 제한·취소/URL 정리가
+  공통이다. live frame envelope와 stale/CAS/ACK·credit 소유는 기존 app.js에 남긴다.
+  진단용 가짜 frame/query identity를 발행하거나 renderer protocol을 바꾸지 않는다.
+- 세 panel은 PNG/raw와 `.viewport`의320×128 crop/투명 십자 overlay다.
+  결과는 readback의 다른 픽셀 수이며 DPR에 맞춰 CSS 표시 크기를 조정한다.
+  `desktop_acceptance:unverified`를 유지하고 사용자의 화면 관찰은 별도 필드다.
+  OS/ETX 화면, 전체 PNG 변종·실칩/native raster, 입력 지연을 검사한 것으로 확대하지 않는다.
+- About 열기/재접속/재열기로는 실행하지 않는다. 한 실행의 read→decode 경합,
+  Cancel/닫기/pagehide에 요청·image URL·canvas·보고서를 정리한다. 자동 재시도,
+  보고서 업로드/storage 저장/다운로드와 view 변경을 추가하지 않았다.
+- CLI의 `gtktest` 명시 오류는 합성 대안 위치와 남은 입력 PNG/GTK 범위를 안내한다.
+  새 자동 dump나 GTK 명령 폐기/alias는 없다. `--dump`의 서버 임시 파일 연속 쓰기와
+  브라우저 최근 이미지 보관/명시 다운로드 중 선택은 사용자 응답 대기다.
+
+집중 검증:
+
+- `validate_display_test.py`: 실제 GTK `synth`/`fill_rect`의57600픽셀을 native
+  raw·Pillow로 디코드한 native PNG와 정확히 비교했다. 같은 native fixture를 Node
+  pixel-canvas에 전달해 PNG/raw/crop 결과를 확인했다(`/private/tmp/floe-display-oracle.log`).
+  Python/Node는 개발 검사이며 제품 런타임에 포함되지 않는다.
+- 공통 image decoder의 explicit start·한 번 완료·invalid/mismatch/timeout/cancel/
+  늦은 callback과 URL 회수, 전체 ES2017/UI/client gate 통과
+  (`/private/tmp/floe-display-ui.log`). 실제 app.js/About 연결에서 명시 인증 GET과
+  view 명령 무발행·닫기/pagehide도 검사했다. 실제 브라우저 실행/스크린샷 검사는 아니다.
+- 실제 HTTP15개 통과(`/private/tmp/floe-display-http-final2.log`). 처음 새 검사에서
+  CSRF 누락을403으로 기대했으나 기존 `http_session` 계약은401이므로 기대값을
+  바로잡았다. 인증 정책을 완화한 것이 아니다. 별도 초기 컴파일의 하네스 종료 메서드
+  오기도 기존 `shutdown` 호출로 고쳤다. 최종 검사는 같은 전체 transport 묶음이다.
+- app/web all-targets scoped strict clippy(`-- --no-deps -D warnings`) 통과
+  (`/private/tmp/floe-display-clippy.log`). 기존 tiler unused-mut/VFS dead-code 경고는
+  유지한다. 새 크레이트/외부 의존성을 추가하지 않았다. scoped rustfmt와 diff-check 통과.
+
+최종 `sh tools/validate_rust.sh`는 **실제 exit0 / RUST VALIDATION: ALL OK**로 끝났다
+(`/private/tmp/floe-display-battery.log`). app23/core270/web87 단위, HTTP15개,
+GTK57600픽셀/native PNG/raw/웹 crop oracle, GTK 슬롯324/스타일10,584, 기존
+native HTTP/WS8개·취소/재접속·owner 설정과 자동 저장, 전체 ES2017/UI/client,
+VFS H1-H5/L1-L9·마커 복구, occupancy27/잡덱83/렌더러46, KLayout jobs1/8 각각
+13 PX+2 phase-exact+14 style을 통과했다. 단위 수는 별도 reviewer 미커밋 검사도
+포함한 작업 트리 기준이다. 그8파일의 diff는 전후 동일하며 커밋에 포함하지 않는다.
+검증용 `.venv` 링크만 정리하고 main과 feature/jobdeck의 기존 상태를 보존했다.
+실제 브라우저 수용은 실행하지 않았으며 위 단위/DOM 결과로 대체하지 않는다.
+
+목표 잔여: 입력 PNG와 독립 표시 진단 명령·dump 정책, reviewer legacy 읽기 연결
+(별도 승인 대기), CLI/G4 최종 재대조가 로컬에 남는다. 실제 브라우저 입력/저장/복구/
+화면, Python-free Linux와 G1/G4 수용은 위 합성/DOM/native 검사로 대체하지 않는다.
+M2 공유/원격 미구현, M0/M3 현장 보류, M5 world-tile 조건부, index hot reload/revision
+사용자 유보 범위를 유지한다. 한 진단 기능 추가를 전체 목표 완료로 세지 않는다.

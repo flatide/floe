@@ -52,6 +52,8 @@ Annotations: fe-embed CLI writes flateyes PNG metadata without changing pixels.
 SVRF: local subset parser/scan with diagnostics; no Tcl or macro execution.
 Web: owner notes/waives and whole-review transfers require explicit opt-ins.
 GTK-only gtktest is not ported. Full interaction/field acceptance remains open.
+About > Run display test checks synthetic PNG/raw/crop pixels, not a user PNG
+or remote-screen acceptance. It opens no design and changes no view.
 The existing floe2/GTK launcher is unchanged; there is no Python fallback here.
 Run floe2-web index --help for indexing options.";
 const INDEX_HELP: &str = "Usage: floe2-web index SOURCE [OPTIONS]
@@ -122,7 +124,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
             return Err(Error::new(
                 ErrorKind::Unsupported,
                 format!(
-                    "{} is not yet ported; use the existing floe2 (no Python fallback)",
+                    "{} is not yet ported; About > Run display test covers synthetic PNG/raw/crop only. For an input PNG or GTK widget diagnosis, use the existing floe2 (no Python fallback)",
                     args[0]
                 ),
             ))

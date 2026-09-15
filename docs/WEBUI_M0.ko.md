@@ -195,6 +195,11 @@ sidecar 원자 저장/입력 보호와 구체적 차이는 [M4 §11](WEBUI_M4.ko
 M4f-1의 `selfcheck`는 native 설치 진단만 담당하므로 위 표시 진단/GTK 폐기 승인을
 대체하지 않는다. 브라우저를 실행하지 않고 항상 desktop 수용 미검증을 표시한다.
 
+M4g-17a는 About의 명시 **Run display test**로 GTK 원본 색 막대와 같은 Rust
+PNG/raw 및 웹 crop/overlay를 연결한다. viewer 디코더를 공유하며 layout/worker는
+접근하지 않는다. 선택 PNG·독립 명령·`--dump`는 아직 남고 GTK 명령을 폐기하지 않는다.
+Canvas readback과 실제 화면 관찰/수용도 구분한다([표시 진단 계약](WEBUI_DISPLAY_DIAGNOSTICS.ko.md)).
+
 ### 2.9 view — M1b/M4 (21개 옵션)
 
 선택 위치 인자 `src`. 빈 창→파일 선택, 미색인 파일→동의→색인→열기도 범위다.

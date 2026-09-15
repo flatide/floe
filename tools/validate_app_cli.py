@@ -76,6 +76,7 @@ def main(fixture):
         run("view", env=env, code=2)
         assert "--bbox" in run("clip", "--help", env=env).stdout
         assert "not yet ported" in run("gtktest", env=env, code=2).stderr
+        assert "Run display test" in run("gtktest", env=env, code=2).stderr
         assert "--follow-verbatim" in run("svrf", "--help", env=env).stdout
         assert "requires DECK" in run("svrf", env=env, code=2).stderr
         deck = work / "rules.svrf"

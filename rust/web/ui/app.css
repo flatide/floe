@@ -130,6 +130,8 @@ details > summary { cursor: pointer; font-size: 12px; color: #b4c3d8; }
 .goto-fields label { display: flex; align-items: center; gap: 5px; }
 .goto-fields input { width: 87px; font-size: 12px; font-variant-numeric: tabular-nums; }
 .viewport { position: relative; flex: 1; min-height: 0; min-width: 0; background: #000; overflow: hidden; outline-offset: -2px; }
+.display-test-stack { flex: none; }
+.display-test-stack canvas { position: absolute; left: 0; top: 0; display: block; }
 #canvas, #margin-canvas { position: absolute; top: 0; left: 0; display: block; }
 #drc-canvas { position: absolute; top: 0; left: 0; pointer-events: none; }
 #query-canvas { position: absolute; top: 0; left: 0; pointer-events: none; }

@@ -19,6 +19,7 @@ const indexOpenEnabled=process.env.FLOE_TEST_INDEX_OPEN==='1',indexSource='f'.re
 const gotoEnabled=process.env.FLOE_TEST_GOTO==='1';
 const paletteEnabled=process.env.FLOE_TEST_PALETTE==='1';
 const fillEditorEnabled=process.env.FLOE_TEST_FILL_EDITOR==='1';
+const displayTestEnabled=process.env.FLOE_TEST_DISPLAY==='1',displayReads=[];
 function presetFixture(){
     const lines=name=>fs.readFileSync(__dirname+'/../../../floe/'+name,'utf8').split('\n').map(l=>l.trim()).filter(l=>l&&!l.startsWith('#')).map(l=>l.split(/\s+/));
     return {version:1,colors:lines('colornames.def').map(([name,color])=>({name,color:'#'+color.toLowerCase()})),
@@ -97,7 +98,12 @@ class XHR {
         const raw=this.path.endsWith('/transfer/chunk');
         const body=text===null?null:settingsPath||raw?text:JSON.parse(text); requests.push(Object.assign({method:this.method,path:this.path,body},raw?{headers:this.headers}:{}));
         let value, status=200;
-        if(raw){value={kind:'drc_review_transfer',phase:'queued',seq:this.headers['X-Floe-Transfer-Seq']};status=202;}
+        if(this.path.startsWith('/api/v1/display-test/')){assert.equal(this.responseType,'arraybuffer');displayReads.push(this);return;}
+        if(this.path==='/api/v1/about'){
+            value={product:'floe2-web',bundle,build:null,python_runtime:false,desktop_acceptance:'unverified',notice_scope:'embedded_font_only',font_name:'Noto Sans Mono',font_notice:'synthetic test notice',
+                notices:{status:'not_packaged',index_id:null,files:0,total_bytes:0,page_bytes:65536,list_size:64}};
+        }
+        else if(raw){value={kind:'drc_review_transfer',phase:'queued',seq:this.headers['X-Floe-Transfer-Seq']};status=202;}
         else if (this.path==='/api/v1/session/exchange') {value={csrf:'c'.repeat(64),session_id:'c'.repeat(64),bundle,protocol:1};}
         else if (this.path==='/api/v1/session'&&this.method==='DELETE') {value=exitFailure?{error:'unavailable'}:null;status=exitFailure?503:204;}
         else if(startupEnabled&&this.path==='/api/v1/views/'+viewId&&this.method==='DELETE'){open=false;value=null;status=204;}
@@ -199,6 +205,8 @@ window.FloeIndexOpen=require('./index-open.js');
 window.FloePalette=require('./palette.js');
 window.FloePresets=require('./presets.js');
 window.FloeFillEditor=require('./fill-editor.js');
+window.FloeImageDecode=require('./image-decode.js');
+window.FloeDisplayTest=require('./display-test.js');
 window.crypto={getRandomValues:a=>a.fill(37)};
 window.FloeDRCNotes=require('./drc-notes.js');
 window.FloeDRCNoteDisplay=require('./drc-note-display.js');
@@ -235,6 +243,16 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     return out.buffer;
 }
 (async()=>{
+    if(displayTestEnabled){
+        await wait(()=>sockets.length===1);const ws=sockets[0];hello(ws);ws.receive(packet('raw','1'));const count=ws.sent.length;
+        assert.equal(displayReads.length,0);await node('about-open').onclick();assert.equal(displayReads.length,0);
+        const first=node('display-test-run').onclick();assert.equal(displayReads.length,1);assert.equal(displayReads[0].headers['X-Floe-CSRF'],'c'.repeat(64));
+        node('about-close').onclick();await first;assert(node('display-test-results').hidden);assert.equal(ws.sent.length,count,'diagnostic sent a view command');
+        await node('about-open').onclick();assert.equal(displayReads.length,1,'About replayed a cancelled test');
+        const second=node('display-test-run').onclick();assert.equal(displayReads.length,2);listeners.pagehide();await second;
+        assert.equal(node('display-test-report').textContent,'');assert.equal(node('display-test-png').width,1);assert.equal(urls.size,0);
+        console.log('WEB DISPLAY CLIENT: ALL OK (actual About binding, explicit authenticated binary GET, no view command, close/pagehide cleanup)');return;
+    }
     if(fillEditorEnabled){
         await wait(()=>sockets.length===1);let ws=sockets[0];hello(ws);ws.receive(packet('raw','1'));
         await wait(()=>node('layers').children.length&&!node('layers').children[0].children[3].disabled);
