@@ -3,6 +3,49 @@ use crate::registered::AccessScope;
 use std::os::unix::fs::{symlink, PermissionsExt};
 
 const TEXT: &str = "3.0 red solid Mask 1 3\n";
+
+#[test]
+fn dynamic_sources_protect_old_drafts_and_publication_excludes_registration() {
+    for suffix in ["", ".lock"] {
+        let f = Fixture::new();
+        let draft = f.draft();
+        let set = &f.publisher.sources;
+        let path = f.dir.join("additional.jb");
+        fs::write(
+            &path,
+            format!("CHIP A\n$ (1,A,TC=design.jb.layerprops{suffix})\n"),
+        )
+        .unwrap();
+        let mut pending = set.begin(&f.stop).unwrap();
+        pending
+            .register(
+                AccessScope::new(std::slice::from_ref(&f.dir)).unwrap(),
+                &path,
+                &f.stop,
+            )
+            .unwrap();
+        pending.commit(&f.stop).unwrap();
+        assert_eq!(kind(draft.publish(&f.stop)), ErrorKind::InvalidInput);
+        assert!(!f.target().exists());
+        assert!(!f.dir.join("design.jb.layerprops.lock").exists());
+        f.no_stage();
+    }
+    let f = Fixture::new();
+    let pending = f.publisher.sources.begin(&f.stop).unwrap();
+    assert_eq!(kind(f.draft().publish(&f.stop)), ErrorKind::Busy);
+    assert!(!f.target().exists());
+    assert!(!f.dir.join("design.jb.layerprops.lock").exists());
+    drop(pending);
+    f.draft()
+        .publish_with(&f.stop, || {
+            assert_eq!(kind(f.publisher.sources.begin(&f.stop)), ErrorKind::Busy);
+            assert_eq!(f.publisher.sources.snapshot().len(), 1);
+            Ok(())
+        })
+        .unwrap();
+    drop(f.publisher.sources.begin(&f.stop).unwrap());
+    f.no_stage();
+}
 struct Fixture {
     dir: PathBuf,
     source: Arc<RegisteredSource>,

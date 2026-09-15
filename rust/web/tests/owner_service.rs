@@ -85,7 +85,14 @@ impl Harness {
         limits: Limits,
     ) -> Self {
         let resources = Resources::new(limits).unwrap();
-        let scope = AccessScope::new(&[paths[0].parent().unwrap().to_owned()]).unwrap();
+        let fixture = PathBuf::from(std::env::var_os("FLOE_OWNER_FIXTURE").unwrap());
+        let scope = AccessScope::new(&[paths
+            .first()
+            .unwrap_or(&fixture)
+            .parent()
+            .unwrap()
+            .to_owned()])
+        .unwrap();
         let sources = paths
             .iter()
             .map(|p| {

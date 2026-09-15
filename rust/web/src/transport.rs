@@ -342,8 +342,8 @@ impl Gateway {
             files.extend(df);
             trees.extend(dt);
         }
-        let publisher = floe_app_core::layer_defaults::Publisher::with_protected(
-            service.registered_sources(),
+        let publisher = floe_app_core::layer_defaults::Publisher::with_sources(
+            service.source_set(),
             files,
             trees,
         )
@@ -382,7 +382,7 @@ impl Gateway {
             .service
             .as_ref()
             .ok_or("note review requires registered sources")?
-            .registered_sources();
+            .source_set();
         drc.enable_notes(reviewer, sources, files, trees, edit_waives)
             .map_err(|e| e.to_string())
     }

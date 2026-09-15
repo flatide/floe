@@ -1,11 +1,13 @@
 //! Explicit local registration, not a browser filesystem API. A gateway only
 //! exposes opaque handles for these sources. All deck dependencies (including
 //! unselected levels, whose headers can be read) must stay in approved roots.
+mod set;
 use crate::{
     cache, check_cancelled,
     jobdeck::{index::is_deck, parser::JobDeck, sources::file_header},
     Error, ErrorKind, Result,
 };
+pub use set::{Registration, SourceSet};
 use std::{
     collections::BTreeSet,
     fs,

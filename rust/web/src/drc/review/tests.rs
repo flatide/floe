@@ -6,7 +6,7 @@ pub(super) fn service() -> Arc<Service> {
         reviewer: "fixed".into(),
         files: vec![],
         trees: vec![],
-        sources: vec![],
+        sources: SourceSet::new(vec![]).unwrap(),
     })
     .unwrap()
 }

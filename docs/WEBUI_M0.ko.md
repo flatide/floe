@@ -219,6 +219,9 @@ DISPLAY가 없어도 동작해야 한다(기존 GTK 오류까지 이식하지 �
 M4g-7a는 이 중 로컬 통신 코어와 실제 프로세스 소유권/재전송 검사만 추가한다.
 제품 CLI의 forwarding/`--multi`/빈 창은 아직 연결하지 않았다. 동적 소스 등록 시
 기본값·DRC 게시의 보호 대상도 함께 갱신해야 한다([M4 §47](WEBUI_M4.ko.md)).
+M4g-7b는 trusted service 등록과 공유 게시 보호를 연결했다. 동일 source 재등록은
+변경 여부·scope를 검사하고 같은 ID를 재사용한다. 빈 service도 허용하지만 실제 CLI의
+인자 없는 실행/`--multi`/전달 요청 UI는 아직 연결하지 않았다([M4 §48](WEBUI_M4.ko.md)).
 
 ### 2.10 jobdeck — M1a (10개 옵션)
 

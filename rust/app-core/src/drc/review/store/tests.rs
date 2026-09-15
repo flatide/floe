@@ -6,6 +6,77 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 static SERIAL: AtomicU64 = AtomicU64::new(0);
+
+#[test]
+fn dynamic_sources_fence_old_note_and_waive_drafts_and_staging() {
+    for review_kind in [Kind::Notes, Kind::Waives] {
+        for lock_target in [false, true] {
+            let f = Fixture::new();
+            let set = crate::registered::SourceSet::new(vec![]).unwrap();
+            let store = Store::open_catalog(
+                Arc::clone(&f.scope),
+                &f.pack,
+                "dynamic",
+                review_kind,
+                vec![],
+                vec![],
+                Arc::clone(&set),
+                &f.stop,
+            )
+            .unwrap();
+            let draft = if review_kind == Kind::Notes {
+                f.note(&store, "saved")
+            } else {
+                store
+                    .snapshot(&f.stop)
+                    .unwrap()
+                    .prepare_waives(&[(0, 1)], &f.stop)
+                    .unwrap()
+            };
+            let [target, lock] = paths(&f.pack, "dynamic", review_kind).unwrap();
+            let protected = if lock_target { &lock } else { &target };
+            let deck = f.dir.join("additional.jb");
+            fs::write(
+                &deck,
+                format!(
+                    "CHIP A\n$ (1,A,TC='{}')\n",
+                    protected.file_name().unwrap().to_str().unwrap()
+                ),
+            )
+            .unwrap();
+            let mut pending = set.begin(&f.stop).unwrap();
+            pending
+                .register(Arc::clone(&f.scope), &deck, &f.stop)
+                .unwrap();
+            pending.commit(&f.stop).unwrap();
+            assert_eq!(kind(draft.publish(&f.stop)), ErrorKind::InvalidInput);
+            assert!(!target.exists() && !lock.exists());
+            f.clean();
+        }
+    }
+    let f = Fixture::new();
+    let store = f.store(Kind::Notes);
+    let pending = store.sources.begin(&f.stop).unwrap();
+    assert_eq!(
+        kind(f.note(&store, "busy").publish(&f.stop)),
+        ErrorKind::Busy
+    );
+    assert!(!store.target().exists() && !store.lock_path().exists());
+    drop(pending);
+    f.note(&store, "saved")
+        .publish_using(
+            &f.stop,
+            || {
+                assert_eq!(kind(store.sources.begin(&f.stop)), ErrorKind::Busy);
+                assert!(store.sources.snapshot().is_empty());
+                Ok(())
+            },
+            File::sync_all,
+        )
+        .unwrap();
+    drop(store.sources.begin(&f.stop).unwrap());
+    f.clean();
+}
 #[path = "transfer_tests.rs"]
 mod transfer;
 struct Fixture {

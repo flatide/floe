@@ -84,7 +84,7 @@ pub struct Store {
     lock_name: CString,
     protected_files: Vec<PathBuf>,
     protected_trees: Vec<PathBuf>,
-    sources: Vec<Arc<RegisteredSource>>,
+    sources: Arc<crate::registered::SourceSet>,
 }
 impl Store {
     /// Read-only registration. All other registered inputs/cache/private paths
@@ -120,8 +120,30 @@ impl Store {
         sources: Vec<Arc<RegisteredSource>>,
         stop: &AtomicUsize,
     ) -> Result<Arc<Self>> {
+        Self::open_catalog(
+            scope,
+            pack_path,
+            reviewer,
+            kind,
+            protected_files,
+            protected_trees,
+            crate::registered::SourceSet::new(sources)?,
+            stop,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_catalog(
+        scope: Arc<AccessScope>,
+        pack_path: &Path,
+        reviewer: &str,
+        kind: Kind,
+        protected_files: Vec<PathBuf>,
+        protected_trees: Vec<PathBuf>,
+        sources: Arc<crate::registered::SourceSet>,
+        stop: &AtomicUsize,
+    ) -> Result<Arc<Self>> {
         check_cancelled(stop)?;
-        if protected_files.len() > 128 || protected_trees.len() > 128 || sources.len() > 32 {
+        if protected_files.len() > 128 || protected_trees.len() > 128 {
             return Err(Error::input("too many protected review paths"));
         }
         let pack_path = scope.check(pack_path)?;
@@ -175,7 +197,7 @@ impl Store {
         self.scope.check(path)?;
         artifact::protected_output(path, &self.protected_files, &self.protected_trees)?;
         reject_aliases(path, &self.protected_files)?;
-        for source in &self.sources {
+        for source in self.sources.snapshot() {
             source.protect_output(path)?;
         }
         Ok(())
@@ -651,6 +673,7 @@ impl Draft {
         before_commit: impl FnOnce() -> Result<()>,
         sync: impl FnOnce(&File) -> std::io::Result<()>,
     ) -> Result<Published> {
+        let _registration = self.snapshot.store.sources.publication(stop)?;
         if Instant::now() >= self.expires {
             return Err(conflict());
         }

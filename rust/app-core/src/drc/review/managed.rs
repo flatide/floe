@@ -58,14 +58,27 @@ impl ManagedStore {
         sources: Vec<Arc<RegisteredSource>>,
         stop: &AtomicUsize,
     ) -> Result<Arc<Self>> {
+        Self::open_catalog(
+            resources,
+            r,
+            crate::registered::SourceSet::new(sources)?,
+            stop,
+        )
+    }
+    pub fn open_catalog(
+        resources: &Arc<Resources>,
+        r: Registration,
+        sources: Arc<crate::registered::SourceSet>,
+        stop: &AtomicUsize,
+    ) -> Result<Arc<Self>> {
         check_cancelled(stop)?;
-        if r.protected_files.len() > 128 || r.protected_trees.len() > 128 || sources.len() > 32 {
+        if r.protected_files.len() > 128 || r.protected_trees.len() > 128 {
             return Err(Error::input("too many protected review paths"));
         }
         let pack = r.scope.check(&r.pack)?;
         let permit = resources
             .drc(std::iter::once(pack.clone()).chain(r.protected_files.iter().cloned()))?;
-        let store = store::Store::open_guarded(
+        let store = store::Store::open_catalog(
             r.scope,
             &pack,
             &r.reviewer,

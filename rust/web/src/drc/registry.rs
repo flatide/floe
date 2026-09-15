@@ -114,7 +114,7 @@ impl Registry {
     pub(crate) fn enable_notes(
         &self,
         reviewer: &str,
-        sources: Vec<Arc<floe_app_core::registered::RegisteredSource>>,
+        sources: Arc<floe_app_core::registered::SourceSet>,
         files: &[std::path::PathBuf],
         trees: &[std::path::PathBuf],
         edit_waives: bool,
@@ -124,8 +124,7 @@ impl Registry {
         if notes.is_some()
             || files.len() > 120
             || trees.len() > 128
-            || sources.is_empty()
-            || sources.len() > 32
+            || sources.snapshot().is_empty()
         {
             return Err(floe_app_core::Error::input(
                 "invalid note review registration",

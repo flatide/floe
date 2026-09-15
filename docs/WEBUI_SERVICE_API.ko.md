@@ -38,6 +38,13 @@ HTTP/WS endpoint 또는 브라우저 임의 경로 등록 API를 추가하지 �
 DISPLAY 구분은 공유 서비스의 실사용자 인증이 아니다. 통신 `Handled`는 callback의
 처리/작업 접수 결과이며 view 부착·첫 프레임 완료를 뜻하지 않는다. 제품 CLI와의 연결,
 동적 catalog 및 진행 중 게시 작업의 보호 경계는 후속이다([M4 §47](WEBUI_M4.ko.md)).
+M4g-7b는 trusted Rust API `Service::register_source(scope,path,stop)`를 추가한다.
+기존 인증 `GET /api/v1/catalog`에 새 opaque source ID가 보이지만 브라우저 path 등록
+endpoint는 없다(`POST /api/v1/catalog`는405). service는0..32개 등록을 허용하며
+기존 CLI는 여전히1..32개 소스를 요구한다. 같은 미변경 source는 같은 ID이고 등록만으로
+open/index/게시를 하지 않는다. SourceSet이 기본값·DRC writer와 공유되어 새 등록 후
+예전 draft도 현재 보호 목록으로 검사한다. 등록/게시와 새 open/index의 Busy·수명 계약은
+[M4 §48](WEBUI_M4.ko.md)를 따른다. IPC handler/제품 CLI 연결이나 빈 창 UI의 완료는 아니다.
 M2a의 현재 DRC 등록/읽기 URI·페이지·취소·focus/in_view·패널 상태·필터·순회·마커·
 CD·선택 집합·SVRF metadata/비교·타입 패널·격리/원자적 focus·ASCII API 계약은 [M2 기록](WEBUI_M2.ko.md) §2~21이
 기준이다. geometry reader는 read-only이며, 명시 opt-in한 owner의 주석 저장 endpoint는

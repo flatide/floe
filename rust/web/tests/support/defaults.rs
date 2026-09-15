@@ -90,6 +90,108 @@ fn contents(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "run tools/validate_owner_service.py on private sources"]
+async fn trusted_dynamic_catalog_renders_and_rechecks_prepared_default_protection() {
+    let source = fixture("dynamic-catalog");
+    let directory = source.parent().unwrap();
+    let scope = AccessScope::new(&[directory.to_owned()]).unwrap();
+    let before = contents(directory);
+    let cache = contents(&source.with_extension("oas.floe"));
+    let stop = AtomicUsize::new(0);
+    let h = Harness::configured(&[], native(), None, false, true).await;
+    let l = h.login().await;
+    assert_eq!(
+        h.call(&l, "GET", "/api/v1/catalog", Value::Null).await.1["sources"],
+        json!([])
+    );
+    let id = h
+        .service
+        .register_source(Arc::clone(&scope), &source, &stop)
+        .unwrap();
+    assert_eq!(
+        h.service
+            .register_source(Arc::clone(&scope), &source, &stop)
+            .unwrap(),
+        id
+    );
+    assert_eq!(h.service.catalog()["sources"].as_array().unwrap().len(), 1);
+    assert_eq!(contents(directory), before);
+    assert_eq!(contents(&source.with_extension("oas.floe")), cache);
+    // HTTP has no trusted path-registration route, including for its owner.
+    assert_eq!(
+        h.call(&l, "POST", "/api/v1/catalog", json!({"path":source}))
+            .await
+            .0,
+        405
+    );
+    let s = opened(&h, &l).await;
+    let (code, draft) = h
+        .call(&l, "POST", "/api/v1/defaults/prepare", prepare_body(&s))
+        .await;
+    assert_eq!(code, 200, "{draft}");
+    let target = source.with_extension("oas.layerprops");
+    assert!(!target.exists());
+    let additional = directory.join("additional.jb");
+    fs::write(&additional, "CHIP A\n$ (1,A,TC=design.oas.layerprops)\n").unwrap();
+    let other_id = h
+        .service
+        .register_source(Arc::clone(&scope), &additional, &stop)
+        .unwrap();
+    assert_ne!(id, other_id);
+    let catalog = h.call(&l, "GET", "/api/v1/catalog", Value::Null).await.1;
+    assert_eq!(catalog["sources"].as_array().unwrap().len(), 2);
+    assert!(!catalog.to_string().contains(directory.to_str().unwrap()));
+    assert!(!cache::cache_path(&additional).unwrap().exists());
+    assert_eq!(
+        h.call(&l, "POST", "/api/v1/defaults", approval("1", &draft))
+            .await
+            .0,
+        202
+    );
+    let outcome = result(&h, &l, "1").await;
+    assert_eq!(outcome["phase"], "failed", "{outcome}");
+    assert!(!target.exists() && !source.with_extension("oas.layerprops.lock").exists());
+    assert!(!fs::read_dir(directory).unwrap().any(|e| e
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .starts_with(".floe-layerprops-")));
+    assert_eq!(contents(&source.with_extension("oas.floe")), cache);
+    let unindexed = directory.join("unindexed.oas");
+    fs::copy(&source, &unindexed).unwrap();
+    h.service
+        .register_source(Arc::clone(&scope), &unindexed, &stop)
+        .unwrap();
+    assert!(!cache::cache_path(&unindexed).unwrap().exists());
+    let before = h.service.catalog();
+    assert!(h
+        .service
+        .register_source(
+            Arc::clone(&scope),
+            directory.parent().unwrap().join("outside.oas").as_path(),
+            &stop
+        )
+        .is_err());
+    assert_eq!(h.service.catalog(), before);
+    assert!(h
+        .service
+        .register_source(Arc::clone(&scope), &source, &AtomicUsize::new(1))
+        .is_err());
+    assert_eq!(h.service.catalog(), before);
+    close(&h, &l, s).await;
+    let service = Arc::clone(&h.service);
+    h.shutdown().await;
+    assert_eq!(
+        service
+            .register_source(scope, &source, &stop)
+            .unwrap_err()
+            .kind,
+        floe_app_core::ErrorKind::Cancelled
+    );
+    println!("RUST OWNER DYNAMIC CATALOG: ALL OK (empty start, trusted add/reuse, native frame, no implicit index, scope/cancel/closed refusal, old default draft protected, no browser path API)");
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "run tools/validate_owner_service.py on private sources"]
 async fn owner_default_publication_requires_opt_in_and_single_use_approval() {
     let source = fixture("defaults");
     let target = source.with_extension("oas.layerprops");

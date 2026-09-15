@@ -15,7 +15,7 @@ use floe_app_core::{
     managed::{ManagedDataset, Resources},
     managed_index::{ManagedIndex, Phase as IndexPhase, Snapshot as IndexSnapshot},
     native::Indexer,
-    registered::{RegisteredSource, MAX_SOURCES},
+    registered::{AccessScope, RegisteredSource, SourceSet, MAX_SOURCES},
     render::RenderOptions,
     view::{ControllerOptions, Model, Patch, ViewController, ViewState},
     Error, ErrorKind, Result,
@@ -173,10 +173,12 @@ struct State {
     active_stop: Option<Arc<AtomicUsize>>,
     view: Option<Arc<Attachment>>,
     closed: bool,
+    registering: bool,
 }
 struct Inner {
     exports: Arc<crate::exports::Service>,
-    sources: Vec<Entry>,
+    sources: Mutex<Vec<Entry>>,
+    source_set: Arc<SourceSet>,
     resources: Arc<Resources>,
     options: RenderOptions,
     indexer: Indexer,
@@ -187,6 +189,12 @@ struct Inner {
 pub struct Service {
     inner: Arc<Inner>,
     thread: Mutex<Option<JoinHandle<()>>>,
+}
+struct Registering<'a>(&'a Inner);
+impl Drop for Registering<'_> {
+    fn drop(&mut self) {
+        self.0.state.lock().unwrap().registering = false;
+    }
 }
 impl Service {
     /// Registration and paths belong to the trusted launcher. Inputs to submit
@@ -212,9 +220,10 @@ impl Service {
         indexer: Indexer,
         view_options: ControllerOptions,
     ) -> Result<Arc<Self>> {
-        if sources.is_empty() || sources.len() > MAX_SOURCES {
-            return Err(Error::input("catalog requires 1..32 sources"));
+        if sources.len() > MAX_SOURCES {
+            return Err(Error::input("catalog accepts at most 32 sources"));
         }
+        let source_set = SourceSet::new(sources.clone())?;
         let sources = sources
             .into_iter()
             .map(|source| {
@@ -227,7 +236,8 @@ impl Service {
             .collect::<Result<Vec<_>>>()?;
         let inner = Arc::new(Inner {
             exports: crate::exports::Service::start(Arc::clone(&resources), &options)?,
-            sources,
+            sources: Mutex::new(sources),
+            source_set,
             resources,
             options,
             indexer,
@@ -238,6 +248,7 @@ impl Service {
                 active_stop: None,
                 view: None,
                 closed: false,
+                registering: false,
             }),
             wake: Condvar::new(),
         });
@@ -251,7 +262,50 @@ impl Service {
         }))
     }
     pub fn catalog(&self) -> Value {
-        json!({"sources":self.inner.sources.iter().map(|s|json!({"source_id":s.id,"title":s.source.title,"deck":s.source.deck,"levels":s.source.levels.len()})).collect::<Vec<_>>()})
+        json!({"sources":self.inner.sources.lock().unwrap().iter().map(|s|json!({"source_id":s.id,"title":s.source.title,"deck":s.source.deck,"levels":s.source.levels.len()})).collect::<Vec<_>>()})
+    }
+    /// Trusted local launcher only, off the HTTP reactor. Registration alone
+    /// never opens a view, indexes a file, or grants a sidecar write capability.
+    pub fn register_source(
+        &self,
+        scope: Arc<AccessScope>,
+        path: &std::path::Path,
+        stop: &AtomicUsize,
+    ) -> Result<String> {
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            if state.closed {
+                return Err(Error::new(ErrorKind::Cancelled, "owner service closed"));
+            }
+            if state.registering || state.ledger.active().is_some() {
+                return Err(Error::new(ErrorKind::Busy, "owner operation is active"));
+            }
+            state.registering = true;
+        }
+        let _registering = Registering(&self.inner);
+        let id = public_id().map_err(|_| Error::new(ErrorKind::Io, "entropy unavailable"))?;
+        let mut registration = self.inner.source_set.begin(stop)?;
+        let source = registration.register(scope, path, stop)?;
+        let state = self.inner.state.lock().unwrap();
+        if state.closed || self.is_finished() {
+            return Err(Error::new(ErrorKind::Cancelled, "owner service closed"));
+        }
+        if state.ledger.active().is_some() {
+            return Err(Error::new(ErrorKind::Busy, "owner operation is active"));
+        }
+        floe_app_core::check_cancelled(stop)?;
+        let mut sources = self.inner.sources.lock().unwrap();
+        if let Some(entry) = sources.iter().find(|e| Arc::ptr_eq(&e.source, &source)) {
+            return Ok(entry.id.clone());
+        }
+        // No I/O under catalogue/state locks. Protection becomes visible before
+        // the opaque handle, and readers cannot observe the intermediate state.
+        registration.commit(stop)?;
+        sources.push(Entry {
+            id: id.clone(),
+            source,
+        });
+        Ok(id)
     }
     pub(crate) fn exports(&self) -> &Arc<crate::exports::Service> {
         &self.inner.exports
@@ -259,16 +313,14 @@ impl Service {
     pub(crate) fn source(&self, id: &str) -> Option<Arc<RegisteredSource>> {
         self.inner
             .sources
+            .lock()
+            .unwrap()
             .iter()
             .find(|s| s.id == id)
             .map(|s| Arc::clone(&s.source))
     }
-    pub(crate) fn registered_sources(&self) -> Vec<Arc<RegisteredSource>> {
-        self.inner
-            .sources
-            .iter()
-            .map(|s| Arc::clone(&s.source))
-            .collect()
+    pub(crate) fn source_set(&self) -> Arc<SourceSet> {
+        Arc::clone(&self.inner.source_set)
     }
     /// Cheap admission checks only: never hold this lock across I/O or await.
     pub(crate) fn with_current<T>(
@@ -288,7 +340,7 @@ impl Service {
         f(v)
     }
     pub fn levels(&self, id: &str, start: usize) -> Option<Value> {
-        let source = &self.inner.sources.iter().find(|s| s.id == id)?.source;
+        let source = self.source(id)?;
         if start > source.levels.len() {
             return None;
         }
@@ -329,14 +381,7 @@ impl Service {
                 return Ok(replay);
             }
         }
-        let source = |id: &str| {
-            self.inner
-                .sources
-                .iter()
-                .find(|s| s.id == id)
-                .map(|s| Arc::clone(&s.source))
-                .ok_or("source_unavailable")
-        };
+        let source = |id: &str| self.source(id).ok_or("source_unavailable");
         let (kind, command) = match request {
             OperationDto::Mode {
                 view_id,
@@ -404,6 +449,9 @@ impl Service {
         let mut s = self.inner.state.lock().unwrap();
         if s.closed {
             return Err("closed");
+        }
+        if s.registering {
+            return Err("busy");
         }
         match s.ledger.admit(seq, signature, kind)? {
             Admission::Replay(state) => return Ok(state),
@@ -558,12 +606,14 @@ fn execute(inner: &Inner, work: Work) -> Result<Value> {
                 json!({"seq":seq.to_string(),"kind":"mode","phase":"preparing"}),
                 false,
             );
-            let source = &inner
+            let source = inner
                 .sources
+                .lock()
+                .unwrap()
                 .iter()
                 .find(|s| s.id == previous.source_id)
-                .ok_or_else(|| Error::new(ErrorKind::Busy, "source registration changed"))?
-                .source;
+                .map(|s| Arc::clone(&s.source))
+                .ok_or_else(|| Error::new(ErrorKind::Busy, "source registration changed"))?;
             source.validate(&stop)?;
             let current = previous.controller.pin_dataset()?;
             let floe_app_core::dataset::Dataset::Deck(deck) = &current.dataset else {

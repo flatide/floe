@@ -6,7 +6,7 @@ use crate::{
     check_cancelled,
     jobdeck::{color::Mode, dataset::props_source},
     layerprops,
-    registered::{RegisteredSource, MAX_SOURCES},
+    registered::{RegisteredSource, SourceSet, MAX_SOURCES},
     Error, ErrorKind, Result,
 };
 use std::{
@@ -43,7 +43,7 @@ fn unsupported(message: &str) -> Error {
 /// Creating this capability is an explicit local opt-in. It does not itself
 /// change a source, create a lock file, or grant a browser any permission.
 pub struct Publisher {
-    sources: Vec<Arc<RegisteredSource>>,
+    sources: Arc<SourceSet>,
     protected_files: Vec<PathBuf>,
     protected_trees: Vec<PathBuf>,
 }
@@ -63,6 +63,15 @@ impl Publisher {
                 "default publisher requires 1..32 registered sources",
             ));
         }
+        Self::with_sources(SourceSet::new(sources)?, protected_files, protected_trees)
+    }
+    /// Shared append-only protection for a trusted launcher catalogue. Empty
+    /// catalogues grant no prepare authority until a source is registered.
+    pub fn with_sources(
+        sources: Arc<SourceSet>,
+        protected_files: Vec<PathBuf>,
+        protected_trees: Vec<PathBuf>,
+    ) -> Result<Arc<Self>> {
         if protected_files.len() > 128 || protected_trees.len() > 128 {
             return Err(Error::input("too many protected default publication paths"));
         }
@@ -75,7 +84,7 @@ impl Publisher {
     fn protect(&self, path: &Path) -> Result<()> {
         crate::artifact::protected_output(path, &self.protected_files, &self.protected_trees)?;
         reject_aliases(path, &self.protected_files)?;
-        for source in &self.sources {
+        for source in self.sources.snapshot() {
             source.protect_output(path)?;
         }
         Ok(())
@@ -88,7 +97,11 @@ impl Publisher {
         stop: &AtomicUsize,
     ) -> Result<Draft> {
         check_cancelled(stop)?;
-        if !self.sources.iter().any(|s| Arc::ptr_eq(s, &source))
+        if !self
+            .sources
+            .snapshot()
+            .iter()
+            .any(|s| Arc::ptr_eq(s, &source))
             || (!source.deck && mode != Mode::Level)
         {
             return Err(Error::input(
@@ -226,6 +239,7 @@ impl Draft {
         before_commit: impl FnOnce() -> Result<()>,
         sync_directory: impl FnOnce(&File) -> std::io::Result<()>,
     ) -> Result<Published> {
+        let _registration = self.publisher.sources.publication(stop)?;
         self.current(false, stop)?;
         self.publisher.protect(
             &self

@@ -3800,3 +3800,68 @@ owner/DRC/UI·잡덱80·렌더러46, KLayout13 PX+2 phase-exact+14 style(jobs1/8
 `floe-instance-clippy.log`, `floe-instance-native.log`다.
 native renderd wire/RENDERD_VERSION0.12.87은 불변이다. getrandom0.3.4/socket2 0.6.5는
 이미 vendored된 의존성을 app-core에도 명시한 것이며 vendor 원본은 변경하지 않는다.
+
+## 48. M4g-7b — 동적 소스 등록과 공유 게시 보호
+
+`registered::SourceSet`과 trusted `Service::register_source`를 추가하고, 기존
+기본값 publisher·DRC notes/waives의 managed store까지 같은 SourceSet을 연결했다.
+시작 시 Vec를 복사해 보호 대상을 고정하던 경로를 없앴다. 기존 정적 native 생성 API는
+독립 SourceSet을 감싸 호환하며, 공유 service 경로는 항상 같은 Arc를 전달한다.
+
+### 등록·게시·카탈로그의 원자성
+
+- 등록은 append-only, 최대32개다. 빈 service도 만들 수 있다. trusted caller의
+  AccessScope로 원본 경로와 전체 덱 dependency를 검사한다. 같은 경로는 기존 source의
+  변경 여부와 새 scope 내 dependency 포함을 확인하고 같은 Arc/opaque ID를 돌려준다.
+  외부 변경은 자동 채택하지 않고 기존 계약대로 재등록 필요 오류다. 현재 살아 있는
+  service에서 기존 source 교체/삭제·scope 확장을 구현한 것은 아니다.
+- 등록 reservation은 prepare한 추가 목록을 숨긴다. 실패·취소·drop이면 버리고,
+  commit 때만 보호 목록에 추가한다. service는 짧은 state/catalog lock 안에서 보호
+  목록을 먼저 commit하고 handle을 공개하므로 새 ID가 보호 없이 보이는 순간이 없다.
+  source header/dependency I/O는 그 mutex 밖의 trusted 호출 스레드에서 한다.
+- 기본값·DRC 게시가 시작되면 SourceSet publication lease를 얻는다. lock/temp 생성
+  전부터 최종 검사·commit·directory sync·실패 cleanup까지 유지하므로 그 사이 새
+  등록은 Busy다. 등록 검사/commit 중 새 게시도 Busy다. 서로 다른 게시끼리는 기존
+  sidecar flock/managed admission 정책을 유지한다. 짧은 mutex는 lease 수만 세고
+  파일 I/O 중에는 잡지 않으므로 catalog 조회·기존 렌더를 막지 않는다.
+- 등록이 먼저 끝나면 과거 draft도 최신 보호 목록을 검사한다. 새 source/TC/cache/
+  index lock과 충돌하는 기본값·note·waive target 또는 게시 lock은 파일 생성 전에
+  거부한다. 게시가 먼저 시작됐다면 등록자는 완료 뒤 **새로 검사**해야 한다. 이 단계는
+  Busy를 자동 재시도하거나 사용자의 승인 의도를 새 요청으로 바꾸지 않는다.
+- service 등록 중 새 open/index/mode 명령도 Busy로 거부해 색인 쓰기가 등록 검사를
+  가로지르지 않게 한다. 이미 끝난 operation의 replay receipt는 유지한다. 등록 중
+  source 목록 조회와 현재 view의 표시·pan은 계속 가능하며, 종료/취소는 commit 전에
+  재확인한다. 등록만으로 source/cache/sidecar에 쓰거나 open/index를 실행하지 않는다.
+- 이것은 같은 service의 협력하는 writer/registration 경계다. 다른 프로세스의
+  비협력 파일 수정, 분산 cache revision 관리, 동일 UID의 악의적 교체에 대한 filesystem
+  CAS나 sandbox를 새로 제공하지 않는다. 공유 실사용자 인증/M5 권한 결정도 별도다.
+
+### 범위와 검증
+
+새 HTTP endpoint는 없다. 기존 owner GET catalog가 추가된 ID를 반환할 뿐이며
+브라우저는 path를 전송해 등록할 수 없다. IPC callback에서 동기 register를 호출하면
+안 된다. 다음 단계에서 유계 launcher 작업으로 접수하고 off-reactor/off-socket
+스레드에서 실행한 뒤 CLI 초기 옵션과 UI를 연결한다. `--multi`·인자 없는 CLI와
+브라우저 빈 창의 파일 선택/대기 흐름은 아직 미완료다. GTK 기본 launcher도 유지한다.
+
+새 단위5개는 등록 롤백·취소·재사용·상한·scope·동시 publication lease,32회 실제
+thread race의 단일 승자, 기존 default/note/waive draft의 새 target/lock 보호,
+staging 중 등록 거부와 작업 종료 후 lease 해제를 검사한다. 별도 native owner HTTP
+gate는 빈 service→trusted 등록→native 첫 frame, 같은 ID 재사용·무암묵 색인,
+미리 준비한 default의 승인 후 새 보호 대상 충돌, scope/cancel/종료 후 거부와
+`POST catalog`405를 검사한다. source/cache 바이트와 자원 회수도 단언한다.
+
+로컬 focused 결과는 app-core238·web61 단위와 owner HTTP12건, all-target clippy
+통과다. Rust1.89에서도 app-core238·web61이 통과했고 관련3패키지의 Linux musl
+all-target check가 성공했다(실제 Linux 실행 확인은 아님).1.89 clippy는 설치되지
+않아 해당 시도는 도구 부재로 종료됐으며, 최종 clippy는 설치된 기본 도구체인으로
+통과했다. 전체 `sh tools/validate_rust.sh`는 첫 실행에서 exit0,
+`RUST VALIDATION: ALL OK`다. owner HTTP12건·GTK startup144/native8·IPC GTK199,
+UI/DRC·잡덱80·렌더러46과 KLayout13 PX+2 phase-exact+14 style(jobs1/8)을 포함한다.
+기존 dependency/GTK/Pillow 경고는 별도이며 검증 전용 `.venv` symlink만 종료 후
+제거했다. main의 기존 변경과 별도 feature/jobdeck 작업은 건드리지 않았다.
+로그: `/private/tmp/floe-registration-battery.log`, `floe-registration-owner.log`,
+`floe-registration-unit.log`, `floe-registration-clippy.log`,
+`floe-registration-msrv.log`, `floe-registration-linux-check.log`.
+1.89 clippy의 도구 부재 기록은 `floe-registration-msrv-clippy.log`다.
+native renderd protocol/RENDERD_VERSION0.12.87과 vendor는 불변이다.

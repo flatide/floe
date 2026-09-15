@@ -10,7 +10,7 @@ use crate::{
 };
 use floe_app_core::{
     drc::review::{managed, store, NOTE_BYTES},
-    registered::RegisteredSource,
+    registered::SourceSet,
     ErrorKind, Result,
 };
 pub(crate) use http::{is_large_body, routes};
@@ -32,7 +32,7 @@ pub(super) struct Config {
     pub reviewer: String,
     pub files: Vec<PathBuf>,
     pub trees: Vec<PathBuf>,
-    pub sources: Vec<Arc<RegisteredSource>>,
+    pub sources: Arc<SourceSet>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -511,7 +511,7 @@ impl Service {
             .chain(r.waives.clone().filter(|_| c.kind == store::Kind::Notes))
             .chain(r.rules.clone())
             .collect();
-        managed::ManagedStore::open_guarded(
+        managed::ManagedStore::open_catalog(
             &r.resources,
             managed::Registration {
                 scope: Arc::clone(&r.scope),
