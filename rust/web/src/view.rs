@@ -340,6 +340,30 @@ fn phase(p: Phase) -> &'static str {
         Phase::Failed => "failed",
     }
 }
+fn camera_um(bbox: [f64; 4], dbu: f64) -> Option<[String; 3]> {
+    let [x0, y0, x1, y1] = bbox;
+    let values = [
+        (x0 + (x1 - x0) / 2.) * dbu,
+        (y0 + (y1 - y0) / 2.) * dbu,
+        (x1 - x0) * dbu,
+    ];
+    // This is UI text from the authoritative viewport, not a rounded render
+    // request. Extreme unrepresentable units must not produce NaN/Inf inputs.
+    if !values.iter().all(|n| n.is_finite()) || values[2] <= 0. {
+        return None;
+    }
+    Some(values.map(|n| {
+        if n == 0. {
+            return "0".into();
+        }
+        let plain = n.to_string();
+        if plain.len() <= 64 {
+            plain
+        } else {
+            format!("{n:e}")
+        }
+    }))
+}
 pub fn snapshot(s: &Snapshot, m: &Model, view_id: &str, connection_epoch: &str) -> Value {
     let v = &s.state;
     let layers = match &v.layers {
@@ -351,6 +375,7 @@ pub fn snapshot(s: &Snapshot, m: &Model, view_id: &str, connection_epoch: &str) 
     let mut out = json!({"type":"snapshot","view_id":view_id,"connection_epoch":connection_epoch,"dataset_revision":m.dataset_revision.to_string(),
         "state_rev":s.state_rev.to_string(),"render_rev":s.render_rev.to_string(),"render_key":s.render_key.to_string(),"worker_epoch":s.worker_epoch.to_string(),
         "bbox_dbu":v.viewport.bbox.map(|n|n.to_string()),"dbu_um":m.dbu.to_string(),"pixels":[v.viewport.width,v.viewport.height],
+        "camera_um":camera_um(v.viewport.bbox,m.dbu),
         "depth":v.depth.map_or("full".into(),|n|n.to_string()),"max_depth":s.max_depth.map(|n|n.to_string()),
         "detail":match v.detail {Detail::Exact=>"exact",Detail::Low=>"low",Detail::Medium=>"medium",Detail::High=>"high"},
         "thin":v.thin.name(),"effective_thin":match v.thin.effective(m.deck){floe_worker_client::ThinPolicy::Keep=>"keep",_=>"cull"},
@@ -526,6 +551,21 @@ pub fn packet(header: &[u8], payload: &[u8]) -> Result<Vec<u8>, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn camera_text_preserves_half_dbu_phase_and_finite_units() {
+        assert_eq!(
+            camera_um([-10.9375, -40., 89.0625, 40.], 0.125).unwrap(),
+            ["4.8828125", "0", "12.5"]
+        );
+        for dbu in [0.001, 0.125, 1., 1e-200] {
+            let b = [-10.9375, -40., 89.0625, 40.];
+            let text = camera_um(b, dbu).unwrap();
+            let values = text.map(|s| decimal(&s).unwrap());
+            assert_eq!(values, [39.0625 * dbu, 0., 100. * dbu]);
+        }
+        assert!(camera_um([0., 0., 1e18, 1e18], f64::MAX).is_none());
+        assert!(camera_um([0., 0., 1., 1.], 0.).is_none());
+    }
     use floe_worker_client::{Fields, Frame, RenderRequest};
     use std::collections::BTreeMap;
     #[test]

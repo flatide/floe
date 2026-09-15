@@ -13,6 +13,15 @@ snapshot의 `minimap`은 base 키·die·유계 화면 사각형만 포함하고,
 `view.set`의 `navigation:{kind:"minimap",point:[x,y]}`는180px 미니맵 좌표로
 동일 배율/16px 위상 이동을 요청한다. world 계산·범위 검증은 Rust에 있다
 ([M4 §41](WEBUI_M4.ko.md)). 아래 공유/카탈로그 API 초안을 구현한 것으로 보지 않는다.
+
+M4g-10의 snapshot `camera_um`은 Rust가 현재 viewport에서 계산한
+`[center_x,center_y,width]` 세 십진 문자열이다. HTTP view 복원과 WS snapshot에
+동일하게 포함하고, framebuffer/margin bbox나 renderer ABI는 바꾸지 않는다.
+문자열은 추가 UI 반올림 없이 입력에 사용하며 64자 초과 평문은 scientific notation으로
+표시한다. 극단적인 단위로 µm의 유한값/양의 폭을 표현하지 못하면 null이고 입력칸은
+빈 값으로 둔다(기존 geometry 상태는 유지). 이 표시는 새 navigation 요청이 아니다.
+별도 해상도·좌표 변환을 브라우저가 다시 결정하지 않는다([M4 §55](WEBUI_M4.ko.md)).
+
 M4g-3은 live `view.set` body에 `depth_step:-1|1`을 추가한다. 절대 `depth`와
 동시 지정은 거부하고, controller가 CAS 락 안의 현재 depth와 native max_depth로
 해석한다. 초기 open body에서는 상대 depth를 거부한다. DRC 단축키는 기존 유계

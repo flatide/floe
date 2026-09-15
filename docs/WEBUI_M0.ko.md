@@ -250,6 +250,11 @@ M4g-9b에서 위 승인/복구 UI를 연결했다([M4 §54](WEBUI_M4.ko.md)). �
 않는다. 실제 Chrome 합성 색인→원래 표시 설정·geometry와 정상 종료를 확인했다.
 선택 덱·부분 실패·취소·revision 경합은 native/harness gate이며 현장 수용은 별도다.
 bare FILE, GDS/gzip, 나머지 CLI/조작 parity와 Firefox/ETX 수용은 아직 남아 있다.
+M4g-10에서 bare FILE를 명시 view와 같은 파서에 연결했다([M4 §55](WEBUI_M4.ko.md)).
+확장자/파일 존재를 parser에서 추측하지 않고 알려진 명령이 우선이다. `-- index`나
+`./index`는 명령과 같은 이름의 파일을 연다. 옵션을 앞에 둘 수도 있으며 색인은 별도
+승인 그대로다. HTTP/WS의 현재 카메라로 goto를 복원하고, 편집 초안은 같은 뷰의
+재접속/지연 응답에서 보존한다. GDS/gzip·미이관 옵션/조작·현장 수용은 여전히 별도다.
 
 ### 2.10 jobdeck — M1a (10개 옵션)
 

@@ -107,7 +107,7 @@ def main(fixture):
                 assert first['pixels'] == [320, 240]
                 assert int(first['submitted']) - int(first['margin_submitted']) == 1
 
-                forward('view', str(source), '--goto', '5,6,300', '--thin', 'auto')
+                forward(str(source), '--goto', '5,6,300', '--thin', 'auto')
                 p = proposal()
                 assert p['request']['body']['detail'] == 'medium'
                 assert p['request']['body']['thin'] == 'auto'
@@ -138,7 +138,7 @@ def main(fixture):
                 for extra, policy, ask, selected in [([], None, True, dict(mode='all')),
                         ([], '2', False, dict(mode='only', ids=['2'])),
                         (['--level', '1'], 'invalid', False, dict(mode='only', ids=['1']))]:
-                    forward('view', str(deck), *extra, policy=policy)
+                    forward(str(deck), *extra, policy=policy)
                     p = proposal()
                     assert p['confirm_levels'] is ask
                     assert p['request']['levels'] == selected

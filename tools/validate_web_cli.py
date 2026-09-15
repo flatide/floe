@@ -104,6 +104,7 @@ def main(fixture):
                     "--thin", "keep", "--no-labels", "--jobs", "2", "--raster-jobs", "1"]
             args += ["--no-open"] if manual else ["--firefox", str(fake)]
             if manual:
+                args.pop(1)  # Same real startup via bare SOURCE, not only parser tests.
                 args += ["--frame-cache", "off"]
             proc = subprocess.Popen(args, env=env, stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE, text=True)
@@ -177,6 +178,14 @@ def main(fixture):
                 assert view["effective_thin"] == "keep"
                 bbox = list(map(float, view["bbox_dbu"]))
                 unit = float(view["dbu_um"])
+                camera = list(map(float, view["camera_um"]))
+                # Text must round-trip the actual f64 viewport, not round back
+                # to CLI input (aspect-ratio arithmetic can shift its last bit).
+                assert camera == [(bbox[0] + (bbox[2] - bbox[0]) / 2) * unit,
+                                  (bbox[1] + (bbox[3] - bbox[1]) / 2) * unit,
+                                  (bbox[2] - bbox[0]) * unit], (camera, bbox, unit)
+                assert all(abs(actual - expected) < 1e-9 for actual, expected in
+                           zip(camera, [-10.9375, 20., 700.])), camera
                 assert abs((bbox[2] - bbox[0]) * unit - 700) < 1e-9
                 assert abs((bbox[0] + bbox[2]) / 2 * unit + 10.9375) < 1e-9
                 if manual:

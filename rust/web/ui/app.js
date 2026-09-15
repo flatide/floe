@@ -25,6 +25,8 @@
     let catalog = [], currentId = '', currentSource = '', currentMode = 'level', ownerBusy = false, submitting = false;
     let modeReceipt = '', modeSupported = false;
     let pendingStartup = null, startupWaiting = false;
+    let gotoDirty = false, gotoRevision = 0, gotoView = '';
+    const gotoFields = ['goto-x','goto-y','goto-width'];
     let layerStart = 0, layerNext = null, layerLoad = 0, layerKey = '', selectedStyle = null;
     let levelNext = null, levelSource = '', levelIds = new Set(), levelLoad = 0, levelBusy = false;
     let lastDigit = '', lastDigitAt = 0;
@@ -293,6 +295,16 @@
             queue.splice(i, 1); settleEdit(body, 'Request cancelled'); controls(); present(); return true;
         };
     }
+    function syncGoto(force) {
+        if (!state || !currentId || (launcher && launcher.blocked()) ||
+            (pendingStartup && pendingStartup.source_id !== currentSource)) { return; }
+        if (gotoView !== currentId) { gotoView = currentId; gotoDirty = false; ++gotoRevision; force = true; }
+        if (!force && (gotoDirty || gotoFields.some(function(k){return document.activeElement === el(k);}))) { return; }
+        const camera = state.camera_um;
+        if (camera !== null && (!Array.isArray(camera) || camera.length !== 3 || Number(P.decimal(camera[2])) <= 0)) { throw Error('Invalid camera coordinates'); }
+        const values = camera === null ? ['','',''] : camera.map(P.decimal);
+        gotoFields.forEach(function(k,i){el(k).value = values[i];});
+    }
     function statusSnapshot(s) {
         if (s.view_id !== currentId || s.connection_epoch !== epoch) { return; }
         if (state && state.connection_epoch === epoch && P.compare(s.state_rev, state.state_rev) < 0) { return; }
@@ -319,6 +331,7 @@
         ['detail', 'thin'].forEach(function (id) { el(id).value = s[id]; });
         ['frames', 'labels', 'mono'].forEach(function (id) { el(id).checked = s[id]; });
         if (document.activeElement !== el('font-px')) { el('font-px').value = s.font_px; }
+        syncGoto(false);
         const b = s.bbox_dbu.map(Number), dbu = Number(s.dbu_um);
         el('viewport-info').textContent = ((b[2] - b[0]) * dbu).toPrecision(6) + ' × ' + ((b[3] - b[1]) * dbu).toPrecision(6) + ' µm';
         el('status').textContent = s.status + ' · depth ' + s.depth + ' · thin:' + s.effective_thin + (s.source_stale ? ' · SOURCE STALE' : '');
@@ -468,7 +481,7 @@
                 box.checked = levelIds.has(box.value); box.disabled = el('levels-all').checked;
             });
         }
-        controls(); connect();
+        syncGoto(false); controls(); connect();
     }
     async function loadLayers() {
         if (!state || !currentId) { return; }
@@ -748,9 +761,23 @@
     el('zoom-out').onclick = function () { zoom(1.25); };
     el('goto-form').onsubmit = function (event) {
         event.preventDefault();
-        try { nav({kind: 'goto', center_um: [P.decimal(el('goto-x').value), P.decimal(el('goto-y').value)], width_um: P.decimal(el('goto-width').value)}); }
+        try {
+            const values = gotoFields.map(function(k){return P.decimal(el(k).value);}), rev = gotoRevision, id = currentId;
+            gotoDirty = true;
+            edit({navigation:{kind:'goto',center_um:values.slice(0,2),width_um:values[2]}},function(error){
+                if (!error && id === currentId && rev === gotoRevision) { gotoDirty = false; syncGoto(true); }
+            });
+        }
         catch (e) { report(e); }
     };
+    gotoFields.forEach(function(k){
+        el(k).addEventListener('input',function(){gotoDirty = true; ++gotoRevision;});
+        el(k).addEventListener('keydown',function(e){
+            if (e.key === 'Escape' && !e.isComposing && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                e.preventDefault(); gotoDirty = false; ++gotoRevision; syncGoto(true);
+            }
+        });
+    });
     function overlays(mode) {
         if(!['all','focus','none'].includes(mode)){return;}
         overlayMode=mode;el('overlays').value=mode;

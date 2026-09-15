@@ -16,6 +16,7 @@ const modeEnabled=process.env.FLOE_TEST_MODE==='1';
 const startupEnabled=process.env.FLOE_TEST_STARTUP==='1';
 const launchEnabled=process.env.FLOE_TEST_LAUNCH==='1';
 const indexOpenEnabled=process.env.FLOE_TEST_INDEX_OPEN==='1',indexSource='f'.repeat(64),indexOperations=[];
+const gotoEnabled=process.env.FLOE_TEST_GOTO==='1';
 let launchState={revision:'0',pending:null},launchPolls=[],launchRegistered=false,launchReceipt=null;
 let startupReceipt=null,startupFail=true;
 const startupBody={depth:'17',detail:'high',thin:'keep',frames:true,labels:false,navigation:{kind:'goto',center_um:['1.25','-2.5']}};
@@ -64,7 +65,7 @@ nodes.get('index-open').hidden=true;
 const node = id=>nodes.get(id);
 const bundle='d'.repeat(40), epoch='b'.repeat(64);let viewId='a'.repeat(64);
 const snapshot={type:'snapshot',view_id:viewId,connection_epoch:epoch,dataset_revision:'1',state_rev:'1',
-    render_rev:'1',render_key:'1',worker_epoch:'2',bbox_dbu:['-10.9375','0','89.0625','80'],
+    render_rev:'1',render_key:'1',worker_epoch:'2',bbox_dbu:['-10.9375','0','89.0625','80'],camera_um:['39.0625','40','100'],
     dbu_um:'1',pixels:[100,80],depth:'full',max_depth:'2',detail:'high',thin:'auto',effective_thin:'cull',
     layers:{mode:'all'},layers_isolated:false,frames:false,labels:false,font_px:14,mono:false,status:'idle',source_stale:false,
     deck_skipped:'0',failure:null,submitted:'1',consumed:'1',discarded:'0',capabilities:{labels:true,clip:true}};
@@ -214,6 +215,48 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     return out.buffer;
 }
 (async()=>{
+    if(gotoEnabled){
+        const fields=()=>['goto-x','goto-y','goto-width'].map(k=>node(k).value);
+        const type=(k,v)=>{node(k).value=v;node(k).input({});};
+        const submit=()=>node('goto-form').onsubmit({preventDefault(){}});
+        await wait(()=>sockets.length===1);let ws=sockets[0];hello(ws);
+        assert.deepEqual(fields(),['39.0625','40','100'],'first open restores server decimal strings');
+        node('goto-x').focus();snapshot.state_rev='2';snapshot.render_rev='2';snapshot.camera_um=['-10.9375','6','300'];ws.receive(snapshot);
+        assert.deepEqual(fields(),['39.0625','40','100'],'focus prevents mixed coordinate replacement');
+        type('goto-x','123.');document.activeElement=null;ws.receive(snapshot);
+        assert.deepEqual(fields(),['123.','40','100'],'blur does not silently discard the draft');
+        listeners.pagehide();listeners.pageshow({persisted:true});await wait(()=>sockets.length===2);ws=sockets[1];hello(ws);
+        assert.deepEqual(fields(),['123.','40','100'],'same-view reconnect preserves edited inputs');
+        let escaped=false;node('goto-x').keydown({key:'Escape',isComposing:true,preventDefault(){escaped=true;}});assert(!escaped);
+        const wireCount=ws.sent.length;node('goto-x').keydown({key:'Escape',preventDefault(){escaped=true;}});
+        assert(escaped);assert.equal(ws.sent.length,wireCount,'Escape restores text, never navigates');
+        assert.deepEqual(fields(),snapshot.camera_um);
+        type('goto-width','bad');submit();assert.equal(ws.sent.length,wireCount);
+        type('goto-width','300');type('goto-x','-2.5');submit();let sent=ws.sent.at(-1);
+        assert.deepEqual(sent.body.navigation,{kind:'goto',center_um:['-2.5','6'],width_um:'300'});
+        ws.receive({type:'error',seq:sent.seq,code:'stale_state'});ws.receive(snapshot);
+        assert.deepEqual(fields(),['-2.5','6','300'],'rejected goto preserves retryable user text');
+        submit();sent=ws.sent.at(-1);snapshot.state_rev='3';snapshot.render_rev='3';snapshot.camera_um=['-2.5','6','300'];
+        ws.receive({type:'accepted',seq:sent.seq,state_rev:'3',render_rev:'3'});ws.receive(snapshot);
+        snapshot.state_rev='4';snapshot.render_rev='4';snapshot.camera_um=['-0.125','2','150'];ws.receive(snapshot);
+        assert.deepEqual(fields(),snapshot.camera_um,'successful goto releases the draft for later pan/zoom');
+        type('goto-x','8');submit();sent=ws.sent.at(-1);type('goto-x','88.');
+        snapshot.state_rev='5';snapshot.render_rev='5';snapshot.camera_um=['8','2','150'];
+        ws.receive({type:'accepted',seq:sent.seq,state_rev:'5',render_rev:'5'});ws.receive(snapshot);
+        assert.equal(node('goto-x').value,'88.','late acceptance cannot overwrite a newer edit');
+        node('goto-x').keydown({key:'Escape',preventDefault(){}});assert.deepEqual(fields(),snapshot.camera_um);
+        ws.receive({...snapshot,state_rev:'4',camera_um:['999','999','999']});assert.deepEqual(fields(),snapshot.camera_um,'stale snapshot is ignored');
+        type('goto-x','discard-on-new-source');node('goto-x').focus();listeners.pagehide();viewId='9'.repeat(64);snapshot.view_id=viewId;
+        snapshot.camera_um=['1.0000000000000002','-0.0000000001','0.125'];
+        listeners.pageshow({persisted:true});await wait(()=>sockets.length===3);ws=sockets[2];hello(ws);
+        assert.deepEqual(fields(),snapshot.camera_um,'new view replaces old source draft without rounding');
+        document.activeElement=null;
+        snapshot.camera_um=null;ws.receive(snapshot);assert.deepEqual(fields(),['','',''],'unrepresentable units do not restore arbitrary defaults');
+        snapshot.camera_um=['1e-198','0','1e-197'];ws.receive(snapshot);assert.deepEqual(fields(),snapshot.camera_um);
+        ws.receive(packet('raw','1',snapshot.state_rev));assert(draws.length);
+        assert.equal(requests.filter(r=>r.method==='POST'&&r.path==='/api/v1/operations').length,1,'recovery does not reopen or index');
+        listeners.pagehide();console.log('WEB GOTO CLIENT: ALL OK (server strings, focus/draft, reconnect, Escape/IME, invalid/rejected/successful input, late ACK, stale snapshot, new source, pixels)');return;
+    }
     if(indexOpenEnabled){
         const commands=()=>requests.filter(r=>r.method==='POST'&&r.path==='/api/v1/operations');
         await wait(()=>!node('index-open').hidden&&!node('index-open').disabled);
@@ -264,6 +307,7 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
         const selected=node('level-list').querySelectorAll('input')[1];selected.checked=true;selected.onchange();
         listeners.pagehide();listeners.pageshow({persisted:true});await wait(()=>sockets.length===2);hello(sockets[1]);
         assert.equal(node('source').value,'deck','live view restore replaced pending CLI source');
+        assert.equal(node('goto-x').value,'1','live snapshot replaced pending CLI goto');
         assert(!node('levels-all').checked&&selected.checked,'reconnect discarded explicit levels');
         await wait(()=>!node('launch-open').disabled);
         node('launch-open').onclick();await wait(()=>posts().length===2&&node('launch-panel').hidden);

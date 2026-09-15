@@ -29,6 +29,7 @@ const HELP: &str = "floe2-web — Rust application migration CLI (web preview)
 
 Usage: floe2-web index SOURCE [OPTIONS]
        floe2-web view [SOURCE ...] [OPTIONS]
+       floe2-web [VIEW OPTIONS] SOURCE ...   (same as view)
        floe2-web                 (empty workspace / present existing window)
        floe2-web info SOURCE [--json]
        floe2-web render SOURCE [OPTIONS]
@@ -125,7 +126,17 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
                 ),
             ))
         }
-        _ => return Err(Error::input("unknown command; run floe2-web --help")),
+        "--help" | "-h" | "--version" => {
+            return Err(Error::input("global help/version must be used alone"))
+        }
+        _ => {
+            // Do not inspect the filesystem or guess extensions while parsing.
+            // Known commands win; `-- NAME` or `./NAME` disambiguates a source.
+            let mut view = Vec::with_capacity(args.len() + 1);
+            view.push("view".into());
+            view.extend(args);
+            return web_view::parse(&view).map(|c| Cli::View(Box::new(c)));
+        }
     }
     let mut options = IndexOptions::default();
     let mut source = None;

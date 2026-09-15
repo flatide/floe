@@ -31,6 +31,7 @@ use std::{
 };
 
 const HELP: &str = "Usage: floe2-web view [SOURCE ...] [OPTIONS]
+       floe2-web [OPTIONS] SOURCE ...     (view shorthand)
 
   --multi                  Independent workspace; do not own/forward the default instance
   --goto X,Y[,WIDTH]        Initial centre; omitted width keeps fit zoom (um)
@@ -72,6 +73,8 @@ The file picker lists source parents and --root directories (launch directory
 when both are absent), never arbitrary server paths. Hidden/cache files and
 symlinks are not listed. Roots stay fixed for the lifetime of this workspace.
 Binds only 127.0.0.1; stops on Ctrl+C or End session.
+Known commands take precedence over bare filenames. Use ./index or -- index
+for a source named index; put options before -- for leading-dash filenames.
 Managed capacity: 16 CPU slots, 4 reserved for foreground; index jobs <=12.
 Decode+raster plus file catalogue (1 slot + 192 MiB) must fit 16 slots
 (DRC reserves 1 extra slot + 256 MiB;
@@ -747,6 +750,52 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bare_source_dispatch_is_the_same_parser_without_filesystem_guessing() {
+        use std::ffi::OsString;
+        for words in [
+            vec!["한국 설계.oas", "--goto", "5,6,300", "--thin", "keep"],
+            vec!["--detail", "high", "--depth", "7", "PATTERN01.TE"],
+            vec!["mask.JB", "--level", "2,1", "--mode", "chip"],
+            vec!["--multi", "--no-open"],
+            vec!["--jobs", "2", "--", "-mask", "index"],
+            vec!["./render"],
+        ] {
+            let crate::Cli::View(shorthand) =
+                crate::parse(words.iter().map(OsString::from)).unwrap()
+            else {
+                panic!()
+            };
+            let explicit: Vec<_> = std::iter::once("view")
+                .chain(words.iter().copied())
+                .map(str::to_owned)
+                .collect();
+            let expected = parse(&explicit).unwrap();
+            // Include all launch fields, not only the displayed source name.
+            assert_eq!(
+                format!("{shorthand:?}"),
+                format!("{expected:?}"),
+                "{words:?}"
+            );
+        }
+        assert!(crate::parse([OsString::from("index")]).is_err());
+        assert!(matches!(
+            crate::parse([OsString::from("selfcheck")]).unwrap(),
+            crate::Cli::SelfCheck(_)
+        ));
+        for words in [
+            vec!["--version", "a.oas"],
+            vec!["--help", "a.oas"],
+            vec!["a.oas", "--force"],
+            vec!["--detail", "high"],
+            vec!["a.oas", "--bogus"],
+        ] {
+            assert!(
+                crate::parse(words.iter().map(OsString::from)).is_err(),
+                "{words:?}"
+            );
+        }
+    }
     fn args(s: &str) -> Vec<String> {
         s.split_whitespace().map(str::to_owned).collect()
     }

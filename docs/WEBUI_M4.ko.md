@@ -4321,3 +4321,67 @@ HTML 초기값(0,0,700)으로 돌아왔다(실제 뷰 폭300 유지). 입력 초
 `/private/tmp/floe-index-open-ui-{owner-v2,msrv,linux,clippy,final}.log`다.
 Firefox/ETX 현장·장시간 실칩·공유 서버 수용은 여전히 별도다. 다음 구현은 bare FILE와
 M0의 잔여 CLI/파일 형식/조작 parity이며 G1/G4 전체 감사와 GTK 은퇴 판정도 남아 있다.
+
+## 55. M4g-10 — view 생략 실행과 현재 뷰의 goto 입력 복원
+
+§54에서 남긴 입력 복원과 M0의 bare FILE를 처리한다. 기존 GTK launcher를 바꾸거나
+웹 전환 완료를 선언하는 단계가 아니다.
+
+- `floe2-web FILE [OPTIONS]`와 `floe2-web [OPTIONS] FILE`는 명시 `view`와 같은
+  파서·등록·단일 인스턴스 전달·시작 정책을 사용한다. parser에서 파일 존재나
+  확장자를 보고 분기하지 않는다. OASIS/잡덱의 실제 형식/범위 검증은 기존 단계다.
+- 알려진 명령(index/render/selfcheck 등)이 우선한다. 이름이 겹치는 파일은
+  `./index` 또는 `-- index`, 대시로 시작하는 파일은 옵션 뒤 `-- -mask`로 지정한다.
+  글로벌 help/version은 단독이어야 한다. 미이관/잘못된 옵션은 계속 오류이며,
+  누락 소스의 등록 실패가 자동 색인·변환이나 다른 프로그램 실행으로 바뀌지 않는다.
+- 서버 snapshot은 현재 viewport의 µm 중심·폭을 `camera_um` 문자열로 제공한다.
+  브라우저는 현재 view/epoch/revision이 맞는 값을 추가 반올림 없이 표시한다.
+  매우 작은/큰 유한값은 필요한 경우 scientific notation을 사용한다. µm 값이
+  표현 불가이면 null→빈 입력이며 NaN/Infinity·임의 기본 카메라를 만들지 않는다.
+- 최초 열기/reload는 카메라로 goto를 채운다. 깨끗한 입력은 pan/zoom을 따라가되
+  포커스 중인 좌표나 편집된 세 값은 하나의 초안으로 보존한다. Go가 실제 승인된
+  snapshot으로 완료되어야 초안을 해제하고, 거절·연결 끊김·이후의 새 입력은 보존한다.
+- 입력칸 Escape는 현재 카메라를 복원할 뿐 navigation을 전송하지 않는다. IME 입력
+  중 Escape는 가로채지 않는다. 다른 view_id로 바뀌면 이전 파일 초안은 버리고,
+  대기 중인 CLI 파일/레벨/goto 제안은 기존 뷰 snapshot으로 덮어쓰지 않는다.
+  초안은 서버나 브라우저 저장소에 영구 저장하지 않으므로 전체 reload에서는 현재
+  서버 카메라를 우선한다. 이는 일반 pan의 renderer/cut/캐시 정책 변경이 아니다.
+
+검증:
+
+1. Rust parser는 Unicode/공백·확장자 없는 마스크 이름·잡덱 레벨/모드·옵션 선행·
+   `--`·독립 인스턴스의 전체 Command가 명시 view와 같은지 확인한다. CLI native
+   lifecycle는 실제 bare SOURCE 시작, IPC gate는 같은 worker의 bare 재방문과 bare
+   jobdeck 전달을 포함한다. 자동 색인/캐시 변경 금지와 첫 generation 옵션도 유지한다.
+2. 카메라 단위 테스트는 half-DBU 위상·분수 단위·극소 값·표현 불가 값을 확인한다.
+   실제 HTTP 첫 뷰의 중심/폭은 authoritative bbox와 정확히 왕복하고 CLI 입력과는
+   기존 1e-9 µm 허용차로 비교한다. aspect-ratio f64 계산의 마지막 비트 차이
+   (`20`→`20.00000000000003`)를 숨기려고 표시를 반올림하지 않는다.
+   UI gate는 최초 복원·focus·초안·
+   재접속·Escape/IME·잘못된/거절/성공 입력·늦은 ACK·stale snapshot·포커스한 채
+   다른 파일로 전환·픽셀 복원을 검사한다. 추가 per-pan HTTP 조회는 없다.
+3. 집중 Rust app18/web74 단위와 transport13, 전체 ES2017/UI 검사가 통과했다.
+   Rust 1.89.0 app/web 단위, Linux musl all-targets check, clippy `-D warnings`도
+   통과했다. 초기 회귀에서 CLI 요청값과 f64 카메라의 strict equality, 포커스를 둔
+   채 일반 snapshot이 입력을 갱신한다고 가정한 테스트를 수정했다. 각각 정확한
+   viewport 왕복과 포커스 보호 계약을 검사하며 기능을 완화하지 않는다.
+4. 실제 Chrome에서 기존 합성 `second.oas`를 bare FILE로 열어 컬러 geometry와
+   goto(5,6,300), depth7/high/keep/frames on/labels off/font23을 확인했다. reload 뒤
+   goto와 표시 옵션을 유지했고, 오른쪽 pan 뒤 X=154.48096885813146으로 갱신됐다.
+   X 초안 `123.`을 남기고 위로 pan해도 세 입력은 보존됐다. Escape 뒤 현재
+   X/Y=(154.48096885813146,107.73010380622839)로 복원되며 gen4가 유지됐다.
+   End session 뒤 exit0·session 파일 제거·worker 디렉터리 비움·테스트 탭 종료와
+   OVM/OVP SHA256 불변을 확인했다. 첫 브라우저 연결 도구 시간 초과는 탭 생성 전
+   unused bootstrap 만료/exit0로 끝났고, 준비한 빈 탭과 새 세션에서 위 검증을 했다.
+   실칩·Firefox/ETX 수용, 진행 중 브라우저 장애 주입 결과로 확대하지 않는다.
+
+전체 `sh tools/validate_rust.sh`는 exit0, `RUST VALIDATION: ALL OK`로 완료했다.
+수정한 실제 bare CLI 시작·같은 창 전달과 GTK 표시 설정 대조, 전체 ES2017/UI,
+owner17, occupancy25, 잡덱80, 렌더러46, KLayout13 PX+2 phase-exact+14 style을
+포함한다. 기존 Python gate의 deprecation/resource 경고는 남아 있지만 실패는 없다.
+전체 로그: `/private/tmp/floe-open-parity-battery-final.log`.
+집중 로그: `/private/tmp/floe-open-parity-{rust,ui-final,msrv,linux,clippy}.log`.
+
+남음: 미이관 view 옵션(GDS/gzip/stream/진단 등의 명시 처리 포함)과 조작 parity,
+G1 지연/pacing·G4 전체 수용, 공유/원격·Firefox/ETX 현장. 이 단계의 완료를 전체
+마이그레이션 완료율로 환산하지 않는다.

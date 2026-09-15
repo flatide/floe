@@ -8,6 +8,8 @@ const acorn = require('./vendor/acorn-8.15.0/acorn.js');
 const root = path.resolve(__dirname, '..');
 const ui = path.join(root, 'rust/web/ui');
 const options = {ecmaVersion: 2017, sourceType: 'script'};
+const gotoClient=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_GOTO:'1'}});
+assert.equal(gotoClient.status,0,'goto client: '+gotoClient.error);
 acorn.parse(fs.readFileSync(path.join(ui, 'index-open.js'), 'utf8'), options);
 const indexOpen=spawnSync(process.execPath,[path.join(ui,'index-open.test.cjs')],{stdio:'inherit',timeout:15000});
 assert.equal(indexOpen.status,0,'index-open.test.cjs: '+indexOpen.error);
