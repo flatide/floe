@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """GTK-source palette oracle, with inert rows and no GTK/source/cache I/O.
 
-The targets are Rust's atomic visibility operation and read-only palette
-page/range order, not the still-unmigrated browser UI. Data is synthetic.
+The targets are Rust's atomic visibility operation, read-only palette
+page/range order and the browser's pure click-selection rules. Data is synthetic;
+this does not replace actual browser input or visual acceptance.
 """
 import ast
 import itertools
@@ -43,13 +44,48 @@ def order_cases(scope):
     return cases
 
 
+def selection_cases(scope):
+    cases = []
+    for pairs in [[(3, 1), (3, 2), (3, 300), (7, 4), (7, 9), (9, 0)],
+                  [(3, 0), (3, 1), (3, 2), (7, 0), (7, 1), (9, 0)]]:
+        groups = {pairs[0]: pairs[1:3], pairs[3]: pairs[4:5]}
+        for bits, anchor, folded in itertools.product(
+                (0, 1, 3, 21, 42, 63), (None, pairs[0], pairs[1], pairs[-2]), range(4)):
+            before = {p for i, p in enumerate(pairs) if bits & (1 << i)}
+            expanded = {p for i, p in enumerate(groups) if not folded & (1 << i)}
+            owner = SimpleNamespace(_layer_order=pairs, _layer_groups=groups, _layer_expanded=expanded)
+            selectable = scope["_selectable_layer_order"](owner)
+            for row in selectable:
+                for detail, modifiers, button in [(d, m, 0) for d in (1, 2) for m in range(4)] + [(1, 0, 2)]:
+                    owner._selected_layers = set(before)
+                    owner._layer_select_anchor = anchor
+                    owner._layer_rows = {p: SimpleNamespace(set_selected=lambda on: None) for p in pairs}
+                    owner._popup_layer_menu = lambda event: None
+                    owner._set_layer_selection = MethodType(scope["_set_layer_selection"], owner)
+                    owner._selectable_layer_order = MethodType(scope["_selectable_layer_order"], owner)
+                    event = SimpleNamespace(button=1 if button == 0 else 3, state=modifiers, type=detail)
+                    scope["_on_layer_clicked"](owner, SimpleNamespace(key=row), event)
+                    selected_range = None
+                    if modifiers & 1 and anchor in selectable:
+                        a, b = sorted((selectable.index(anchor), selectable.index(row)))
+                        selected_range = selectable[a:b + 1]
+                    key = lambda p: None if p is None else "%d/%d" % p
+                    cases.append(dict(before=[key(p) for p in sorted(before)], anchor=key(anchor), row=key(row),
+                                      event=dict(detail=detail, button=button, shiftKey=bool(modifiers & 1), ctrlKey=bool(modifiers & 2)),
+                                      range=None if selected_range is None else [key(p) for p in selected_range],
+                                      expected=dict(selected=[key(p) for p in sorted(owner._selected_layers)], anchor=key(owner._layer_select_anchor))))
+    assert len(cases) == 7776
+    return cases
+
+
 def main():
     tree = ast.parse((ROOT / "floe/gui.py").read_text())
     viewer = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Viewer")
     names = ("_set_selected_layers", "_is_jobdeck_head", "_sync_jobdeck_groups", "_on_layer_toggled",
-             "_selectable_layer_order")
+             "_selectable_layer_order", "_set_layer_selection", "_on_layer_clicked")
     methods = {n.name: n for n in viewer.body if isinstance(n, ast.FunctionDef)}
-    scope = {}
+    scope = {"Gdk": SimpleNamespace(ModifierType=SimpleNamespace(SHIFT_MASK=1, CONTROL_MASK=2),
+                                    EventType=SimpleNamespace(BUTTON_PRESS=1))}
     exec(compile(ast.Module(body=[methods[n] for n in names], type_ignores=[]),
                  "GTK palette batch oracle", "exec"), scope)
 
@@ -124,6 +160,14 @@ def main():
             "--ignored", "--nocapture"], env=env, text=True, capture_output=True, timeout=30)
         assert run.returncode == 0, (run.stdout, run.stderr)
         assert "GTK PALETTE ORDER: ALL OK (32 source-derived catalogue/fold cases" in run.stdout
+        print(run.stdout.strip())
+        oracle.write_text(json.dumps(selection_cases(scope)))
+        node = shutil.which("node")
+        assert node, "Node is required for the GTK/browser selection oracle (development only)"
+        run = subprocess.run([node, str(ROOT / "rust/web/ui/palette.test.cjs"), str(oracle)],
+                             text=True, capture_output=True, timeout=30)
+        assert run.returncode == 0, (run.stdout, run.stderr)
+        assert "GTK WEB PALETTE SELECTION: ALL OK (7776 source-derived clicks)" in run.stdout
         print(run.stdout.strip())
 
 

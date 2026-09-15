@@ -14,7 +14,7 @@
     let drcPanel = null, displayProjection = null, frozenProjection = null;
     let inspector = null, measurement = null, clipper = null, snapshots = null, overlayMode = 'all', pickedPairs = [];
     let settings = null, defaults = null, about = null, sessionExit = null;
-    let minimap = null, launcher = null, picker = null, indexOpen = null;
+    let minimap = null, launcher = null, picker = null, indexOpen = null, palette = null;
     const rulerHistory = window.FloeRulers.history();
     let ackedFrames = {foreground: null, margin: null};
     const sessionKey = 'floe-session:' + location.origin;
@@ -27,7 +27,7 @@
     let pendingStartup = null, startupWaiting = false;
     let gotoDirty = false, gotoRevision = 0, gotoView = '';
     const gotoFields = ['goto-x','goto-y','goto-width'];
-    let layerStart = 0, layerNext = null, layerLoad = 0, layerKey = '', selectedStyle = null;
+    let selectedStyle = null;
     let levelNext = null, levelSource = '', levelIds = new Set(), levelLoad = 0, levelBusy = false;
     let lastDigit = '', lastDigitAt = 0;
     let operationTimer = null, resizeTimer = null, displayed = false;
@@ -41,6 +41,9 @@
         prepared_edit_unavailable: 'The move could not be prepared. Try again.',
         prepared_edit_limit: 'This view cannot prepare another move. Close and reopen it.',
         invalid_request: 'The requested value or selection is not supported.',
+        invalid_palette: 'The layer page or group is no longer valid. Reload the layer list.',
+        palette_anchor_hidden: 'The range anchor is hidden by a folded group. Select its visible parent first.',
+        palette_range_too_large: 'Select at most 4096 layer rows. The previous selection was preserved.',
         incomplete: 'Operation finished with missing or unsupported sources.',
         cancelled: 'Operation cancelled.',
         operation_sequence: 'Another operation changed the session. Refresh its state and submit again.',
@@ -228,6 +231,7 @@
         if (launcher) { launcher.changed(); }
         if (picker) { picker.changed(); }
         if (indexOpen) { indexOpen.changed(); }
+        if (palette) { palette.changed(); }
     }
     function queryContext() {
         if (!state || !currentId || !lastPlacement) { return null; }
@@ -337,7 +341,6 @@
         el('status').textContent = s.status + ' · depth ' + s.depth + ' · thin:' + s.effective_thin + (s.source_stale ? ' · SOURCE STALE' : '');
         pump();
         present();
-        if (s.render_key !== layerKey) { loadLayers().catch(report); }
     }
     function finishDecode() { if (decode) { decode(); decode = null; } }
     function acknowledge(h, disposition, ws, serial) {
@@ -467,7 +470,7 @@
         const current = await http('GET', '/api/v1/view', undefined, true);
         if (!current) { currentId = ''; state = null; controls(); return; }
         const changed = currentId !== current.view.view_id;
-        if (changed) { displayed = false; clearBuffers(); el('empty').hidden = false; layerStart = 0; layerKey = ''; selectedStyle = null; el('style-editor').hidden = true; }
+        if (changed) { displayed = false; clearBuffers(); el('empty').hidden = false; selectedStyle = null; el('style-editor').hidden = true; }
         currentId = current.view.view_id; currentSource = current.source_id; currentMode = current.mode; state = current.view;
         el('document-title').textContent = current.title; document.title = current.title + ' · floe2';
         // Reconnection restores the live view, not a different pending CLI
@@ -483,40 +486,22 @@
         }
         syncGoto(false); controls(); connect();
     }
-    async function loadLayers() {
-        if (!state || !currentId) { return; }
-        const id = currentId, key = state.render_key, start = layerStart, ticket = ++layerLoad;
-        layerKey = key;
-        let page;
-        try { page = await http('GET', '/api/v1/views/' + id + '/layers/' + start); }
-        catch (e) { if (ticket === layerLoad) { layerKey = ''; } throw e; }
-        if (ticket !== layerLoad || id !== currentId || start !== layerStart || !state || page.render_key !== state.render_key) { return; }
-        layerNext = page.next; el('layers').textContent = '';
-        page.rows.forEach(function (r) {
-            const row = document.createElement('div'); row.className = 'layer-row' + (r.parent ? ' child' : '') + (r.head ? ' head' : '');
-            const check = document.createElement('input'); check.type = 'checkbox'; check.checked = r.visible;
-            check.setAttribute('aria-label', 'Show ' + r.name); check.onchange = function () { edit({layer_change: {pair: r.pair, visible: check.checked}}); };
-            const color = document.createElement('input'); color.type = 'color'; color.value = r.color; color.setAttribute('aria-label', 'Color ' + r.name);
-            color.onchange = function () {
-                if (!state || state.render_key !== page.render_key) { notice('Layer styles changed. Select the layer again.'); return; }
-                edit({style_deltas: [{pair: r.pair, color: color.value}]});
-            };
-            const name = document.createElement('span'); name.className = 'layer-name'; name.textContent = r.name || r.pair.join('/'); name.title = r.name + (r.aliases.length ? ' · ' + r.aliases.join(', ') : '');
-            name.dataset.pair = r.pair.join('/');
-            const style = document.createElement('button'); style.className = 'layer-edit'; style.textContent = '⋯';
-            style.setAttribute('aria-label', 'Edit style ' + r.name);
-            style.onclick = function () {
-                selectedStyle = {row: r, key: page.render_key, view: id};
-                el('style-title').textContent = r.name; el('style-fill').value = r.fill.kind; el('style-width').value = r.width;
-                el('style-pattern').value = (r.fill.rows || new Array(16).fill(0xaaaa)).map(function (n) { return n.toString(16).padStart(4, '0'); }).join(' ');
-                el('style-editor').hidden = false; patternControls(); el('style-fill').focus();
-            };
-            row.appendChild(check); row.appendChild(color); row.appendChild(name); row.appendChild(style); el('layers').appendChild(row);
-        });
-        if (!page.rows.length) { el('layers').textContent = 'No visible layer rows.'; }
-        el('layers-count').textContent = (page.total ? (start + 1) + '–' + (start + page.rows.length) + ' / ' : '') + page.total;
-        el('layers-prev').disabled = start === 0; el('layers-next').disabled = page.next === null;
-        highlightPicked(pickedPairs);
+    function paletteStyle(r, scope, valid) {
+        const color = document.createElement('input'); color.type = 'color'; color.value = r.color; color.setAttribute('aria-label', 'Color ' + r.name);
+        color.onchange = function () {
+            if (!valid()) { notice('Layer styles changed or an input is pending. Select the layer again.'); return; }
+            edit({style_deltas: [{pair: r.pair, color: color.value}]});
+        };
+        const style = document.createElement('button'); style.className = 'layer-edit'; style.textContent = '⋯';
+        style.setAttribute('aria-label', 'Edit style ' + r.name);
+        style.onclick = function () {
+            if (!valid()) { return; }
+            selectedStyle = {row: r, key: scope.key, view: scope.id};
+            el('style-title').textContent = r.name; el('style-fill').value = r.fill.kind; el('style-width').value = r.width;
+            el('style-pattern').value = (r.fill.rows || new Array(16).fill(0xaaaa)).map(function (n) { return n.toString(16).padStart(4, '0'); }).join(' ');
+            el('style-editor').hidden = false; patternControls(); el('style-fill').focus();
+        };
+        return {color:color, style:style};
     }
     async function moreLevels() {
         if (levelBusy) { return; }
@@ -697,6 +682,7 @@
         catch (e) { report(e); }
     };
     async function endSession() {
+        palette.stop();
         if (indexOpen) { indexOpen.stop(); }
         if (launcher) { launcher.stop(); }
         if (picker) { picker.stop(); }
@@ -724,10 +710,6 @@
     }
     el('levels-all').onchange = function () { Array.from(el('level-list').querySelectorAll('input')).forEach(function (box) { box.disabled = el('levels-all').checked; }); };
     el('level-more').onclick = function () { moreLevels().catch(report); };
-    el('layers-prev').onclick = function () { layerStart = Math.max(0, layerStart - 64); loadLayers().catch(report); };
-    el('layers-next').onclick = function () { if (layerNext !== null) { layerStart = layerNext; loadLayers().catch(report); } };
-    el('layers-all').onclick = function () { edit({layers: {mode: 'all'}}); };
-    el('layers-none').onclick = function () { edit({layers: {mode: 'none'}}); };
     ['depth', 'detail', 'thin'].forEach(function (id) { el(id).onchange = function () { const body = {}; body[id] = el(id).value; edit(body); }; });
     ['frames', 'labels', 'mono'].forEach(function (id) { el(id).onchange = function () { const body = {}; body[id] = el(id).checked; edit(body); }; });
     el('font-px').onchange = function () {
@@ -962,6 +944,11 @@
     settings=window.FloeSettings.bind({el:el,window:window,document:document,XHR:XMLHttpRequest,Blob:Blob,Encoder:TextEncoder,Decoder:TextDecoder,
         csrf:function(){return auth?auth.csrf:'';},message:message,edit:edit,setTimeout:setTimeout.bind(window),clearTimeout:clearTimeout.bind(window),
         context:settingsContext});
+    palette=window.FloePalette.bind({el:el,document:document,window:window,http:http,edit:edit,styles:paletteStyle,
+        painted:function(){highlightPicked(pickedPairs);},
+        context:function(){return !stopped&&state&&currentId?{id:currentId,key:state.render_key,
+            connected:!document.hidden&&live()&&!!epoch&&!!socket&&socket.readyState===WebSocket.OPEN&&!ownerBusy&&!submitting&&!indexBlocked(),
+            editable:!inflight&&!accepted&&!queue.length}:null;}});
     about=window.FloeAbout.bind({el:el,document:document,http:http,bundle:bundle});
     sessionExit=window.FloeSessionExit.bind({el:el,document:document,confirm:endSession});
     minimap=window.FloeMinimap.bind({el:el,document:document,http:http,state:function(){return !stopped&&!document.hidden&&live()&&epoch?state:null;},
@@ -1005,12 +992,12 @@
         savePending:function(value){const key='floe-index-open:'+auth.session_id;if(value===null){sessionStorage.removeItem(key);}else{sessionStorage.setItem(key,value);}},
         completed:async function(value){if(value.phase==='succeeded'){await restore();pendingStartup=null;notice('');}await operationState();},
         setTimeout:function(fn,ms){return setTimeout(fn,ms);},clearTimeout:function(id){clearTimeout(id);}});
-    document.addEventListener('visibilitychange', function () { settings.changed(); defaults.changed(); minimap.changed(); if (document.hidden) { indexOpen.stop(); finishDecode(); inspector.changed(); measurement.changed(); clipper.changed(); } else if (!stopped) { indexOpen.resume().catch(report); if(live()){connect();} } });
+    document.addEventListener('visibilitychange', function () { settings.changed(); defaults.changed(); minimap.changed(); palette.changed(); if (document.hidden) { indexOpen.stop(); finishDecode(); inspector.changed(); measurement.changed(); clipper.changed(); } else if (!stopped) { indexOpen.resume().catch(report); if(live()){connect();} } });
     window.addEventListener('blur', function () { inspector.move(NaN, NaN); measurement.interrupt(); });
     setInterval(function () { if (socket && socket.readyState === WebSocket.OPEN && epoch) { try { send({type: 'ping'}); } catch (e) { report(e); } } }, 10000);
-    window.addEventListener('pagehide', function () { indexOpen.stop(); picker.stop(); launcher.stop(); minimap.suspend(); about.stop(); sessionExit.stop(); disconnect(); inspector.stop(); measurement.stop(); clipper.stop(); snapshots.stop(); settings.stop(); defaults.stop(); clearTimeout(operationTimer); clearTimeout(resizeTimer); if (sizeObserver) { sizeObserver.disconnect(); } drcPanel.stop(); });
+    window.addEventListener('pagehide', function () { palette.suspend(); indexOpen.stop(); picker.stop(); launcher.stop(); minimap.suspend(); about.stop(); sessionExit.stop(); disconnect(); inspector.stop(); measurement.stop(); clipper.stop(); snapshots.stop(); settings.stop(); defaults.stop(); clearTimeout(operationTimer); clearTimeout(resizeTimer); if (sizeObserver) { sizeObserver.disconnect(); } drcPanel.stop(); });
     window.addEventListener('pageshow', function (event) {
-        if (event.persisted && auth && !stopped) { minimap.resume(); about.init(); sessionExit.init(); inspector.resume(); measurement.resume(); clipper.resume(); snapshots.resume(); settings.resume(); defaults.resume(); if (sizeObserver) { sizeObserver.observe(viewport); } drcPanel.resume().then(function(){return indexOpen.resume();}).then(operationState).then(restore).then(resized).then(function(){return picker.resume();}).then(function(){return launcher.resume();}).catch(report); }
+        if (event.persisted && auth && !stopped) { palette.resume(); minimap.resume(); about.init(); sessionExit.init(); inspector.resume(); measurement.resume(); clipper.resume(); snapshots.resume(); settings.resume(); defaults.resume(); if (sizeObserver) { sizeObserver.observe(viewport); } drcPanel.resume().then(function(){return indexOpen.resume();}).then(operationState).then(restore).then(resized).then(function(){return picker.resume();}).then(function(){return launcher.resume();}).catch(report); }
     });
     start().catch(function (e) { connection('Not connected', false); report(e); el('empty-message').textContent = e.message; });
 }());

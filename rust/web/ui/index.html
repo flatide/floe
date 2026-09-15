@@ -31,6 +31,7 @@
   <script defer src="/assets/@@BUNDLE@@/launcher.js"></script>
   <script defer src="/assets/@@BUNDLE@@/browse.js"></script>
   <script defer src="/assets/@@BUNDLE@@/index-open.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/palette.js"></script>
   <script defer src="/assets/@@BUNDLE@@/app.js"></script>
 </head>
 <body>
@@ -152,8 +153,13 @@
           <p id="default-note" class="note" role="status"></p>
         </div>
         <div class="section-title"><h2>Layers</h2><div><button id="layers-all" class="text-button" disabled>All</button><button id="layers-none" class="text-button" disabled>None</button></div></div>
+        <div class="palette-tools"><button id="layers-collapse" disabled>Collapse all</button><button id="layers-expand" disabled>Expand all</button></div>
+        <p class="note">Click selects · Ctrl/⌘ toggles selection · Shift selects a range · Double-click shows/hides.</p>
+        <div class="palette-tools"><span id="layers-selected" role="status">0 selected</span><button id="layers-clear" disabled>Clear selection</button></div>
+        <div class="palette-tools"><button id="layers-show" disabled>Show selected</button><button id="layers-hide" disabled>Hide selected</button><button id="layers-toggle" disabled>Toggle</button></div>
         <div id="layers" class="layers"><p class="empty-list">Open a layout to see its layers.</p></div>
         <div class="pagination"><button id="layers-prev" disabled aria-label="Previous layer page">←</button><span id="layers-count">0 layers</span><button id="layers-next" disabled aria-label="Next layer page">→</button></div>
+        <p id="layers-note" class="note" role="status"></p><button id="layers-retry" hidden>Reload layer page</button>
         <form id="style-editor" class="style-editor" hidden>
           <strong id="style-title">Layer style</strong>
           <div class="form-row"><label for="style-fill">Fill</label><select id="style-fill"><option value="solid">Solid</option><option value="clear">Outline</option><option value="speckle">Speckle</option><option value="pattern">16×16 pattern</option></select></div>
@@ -384,5 +390,9 @@
     </section>
   </div>
   <noscript>This workspace requires JavaScript. All assets are served locally.</noscript>
+  <div id="layer-menu" class="layer-menu" role="menu" aria-label="Selected layer actions" hidden>
+    <button id="layer-menu-show" role="menuitem">Show selected</button><button id="layer-menu-hide" role="menuitem">Hide selected</button><button id="layer-menu-toggle" role="menuitem">Toggle selected</button>
+    <button id="layer-menu-all" role="menuitem">Show all</button><button id="layer-menu-none" role="menuitem">Hide all</button><button id="layer-menu-close" role="menuitem">Close menu</button>
+  </div>
 </body>
 </html>

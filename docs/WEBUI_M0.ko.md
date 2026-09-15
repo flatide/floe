@@ -350,7 +350,11 @@ M4g-11a는 Rust `layer_batch`에 show/hide/toggle, 접힌 일반 그룹의 자�
 M4g-11c는 Rust catalogue에서 일반/잡덱 그룹을 구별하고 접기 반영64행 페이지와
 4096행 이하의 페이지 간 범위 조회를 추가한다([M4 §58](WEBUI_M4.ko.md)).
 GTK 실제 선택 순서32조합을 대조하며 선택/접기 조회는 렌더하지 않는다.
-브라우저 Ctrl/Shift 다중 선택·접힘/펼침 UI 연결과 다중 style 조작은 아직 남아 있다.
+M4g-11d에서 브라우저 Ctrl/Shift/⌘ 선택·접힘/펼침·페이지 간 범위·우클릭과 일괄
+가시성을 연결했다([M4 §59](WEBUI_M4.ko.md)). GTK 실제 클릭 규칙7,776개와 app.js
+연결의 무렌더 선택/접기·단일 CAS 가시성·지연/거부 처리를 대조했다. 선택은 최대4096행,
+기존 transport body 상한도 별도로 적용한다. 단일 행 색/fill/width는 유지하며,
+다중 style 조작·실제 브라우저 입력/표시 수용은 아직 남아 있다.
 
 `python -m floe.fe_embed` 보조 CLI도 범위에 포함한다: 위치 인자 PNG들,
 `--box`, `--ellipse`, `--line`, `--path`, `--polygon`, `--ruler`, `--text`,

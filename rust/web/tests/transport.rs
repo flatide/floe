@@ -260,12 +260,14 @@ async fn embedded_assets_are_content_identified_and_never_serve_files() {
     let page = server.request("GET", "/", &[], "").await;
     assert_eq!(page.status, 200);
     assert!(page.body.contains(&format!("/assets/{BUNDLE}/app.js")));
+    assert!(page.body.contains(&format!("/assets/{BUNDLE}/palette.js")));
     assert!(!page.body.contains("@@BUNDLE@@"));
     assert!(page.headers["content-security-policy"].contains("script-src 'self'"));
     assert!(page.headers["content-security-policy"].contains(&format!("ws://{}", server.addr)));
     assert!(!page.headers["content-security-policy"].contains("unsafe-inline"));
     for (name, mime) in [
         ("app.js", "text/javascript"),
+        ("palette.js", "text/javascript"),
         ("about.js", "text/javascript"),
         ("session-exit.js", "text/javascript"),
         ("notices.js", "text/javascript"),

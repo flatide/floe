@@ -33,7 +33,7 @@ Rust가 현재 model의 정렬/그룹과 가시성을 사용하며 브라우저�
 무효/미지정 부모·빈 선택·초과는 전체 오류이지 부분 적용이 아니다. `layers`,
 `layer_change`, isolation/restore, properties/settings와 혼합하지 않는다. 실제 변경이
 없으면 revision/렌더도 늘지 않는다. 파일 쓰기·렌더러 wire 변경은 없다.
-브라우저의 다중 선택/접힘 UI는 아직 연결하지 않았다([M4 §56](WEBUI_M4.ko.md)).
+Rust 기반은 M4 §56, 브라우저 다중 선택/접힘·일괄 가시성 연결은 M4 §59에 기록한다.
 
 M4g-11c는 인증된 `POST /api/v1/views/{id}/palette` **읽기 전용** 조회를 추가한다.
 요청은 다음 둘 중 하나다:
@@ -64,8 +64,11 @@ M4g-11c는 인증된 `POST /api/v1/views/{id}/palette` **읽기 전용** 조회�
 키가 바뀐 지연 응답을 버려야 한다. 소스 경로·geometry를 읽거나 native query/render를
 제출하지 않는다. 기존 host/origin/cookie/CSRF/body 방어를 그대로 적용하고, `view.set`
 또는 승인 operation으로 취급하지 않는다. 이전 `GET .../layers/{start}`는 펼친 목록과
-기존 schema를 유지한다. 이 단계는 서버 기반이며 브라우저 선택·접기 UI는 후속이다
-([M4 §58](WEBUI_M4.ko.md)).
+기존 schema를 유지한다([M4 §58](WEBUI_M4.ko.md)). M4g-11d 웹 UI는 새 API를 사용하며
+같은 페이지의 Shift 범위는 이미 받은 서버 순서로 처리하고, 페이지 간 범위만 추가로
+읽는다. 선택/접기는 렌더를 제출하지 않고 선택 행 가시성은 `layer_batch` 한 번으로
+보낸다. 선택4096개 한계 외에 기존 WebSocket8KiB/HTTP16KiB 상한도 적용되므로 큰
+숫자 pair가 많은 요청은 더 일찍 전체 오류가 될 수 있다. 자동 분할/부분 적용은 없다.
 
 M4g-11b는 `index`/`index_open`의 `options.occupancy` 생략 기본값을 true로
 맞춘다. false는 명시 해제이며 기존 요약을 지우지 않는다. `occupancy_only:true`는

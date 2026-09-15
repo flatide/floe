@@ -17,6 +17,7 @@ const startupEnabled=process.env.FLOE_TEST_STARTUP==='1';
 const launchEnabled=process.env.FLOE_TEST_LAUNCH==='1';
 const indexOpenEnabled=process.env.FLOE_TEST_INDEX_OPEN==='1',indexSource='f'.repeat(64),indexOperations=[];
 const gotoEnabled=process.env.FLOE_TEST_GOTO==='1';
+const paletteEnabled=process.env.FLOE_TEST_PALETTE==='1';
 let launchState={revision:'0',pending:null},launchPolls=[],launchRegistered=false,launchReceipt=null;
 let startupReceipt=null,startupFail=true;
 const startupBody={depth:'17',detail:'high',thin:'keep',frames:true,labels:false,navigation:{kind:'goto',center_um:['1.25','-2.5']}};
@@ -72,7 +73,8 @@ const snapshot={type:'snapshot',view_id:viewId,connection_epoch:epoch,dataset_re
 if(minimapEnabled){snapshot.minimap={size:180,base:'full',die:[0,0,180,180],marks:[[10,10,5,5,4]]};}
 if(modeEnabled){snapshot.capabilities={labels:false,clip:false,mode:true};snapshot.effective_thin='keep';}
 let open=false, lastSeq='0';
-const layerRow={pair:[7,0],name:'MASK',aliases:[],parent:null,head:false,visible:true,color:'#ffffff',fill:{kind:'solid'},width:1};
+const layerRow={pair:[7,0],name:'MASK',aliases:[],parent:null,head:false,children:0,closed:false,visible:true,color:'#ffffff',fill:{kind:'solid'},width:1};
+const paletteRows=[[3,1],[3,2],[3,300],[7,0]].map((pair,i)=>({...layerRow,pair,name:'MASK '+pair.join('/'),head:i===0,children:i===0?2:0,parent:i>0&&i<3?[3,1]:null}));
 const document={hidden:false,activeElement:null,title:'',body:new Element('','body'),
     contains:n=>[...nodes.values()].includes(n),
     getElementById:node,querySelector:()=>({content:bundle}),createElement:tag=>new Element('',tag),
@@ -143,6 +145,12 @@ class XHR {
             if(modeViewReadFailure){modeViewReadFailure=false;status=503;value={error:'unavailable'};}}
         else if(this.path.endsWith('/minimap/full')){value={view_id:viewId,dataset_revision:'1',base:'full',size:180,pixels:'0'.repeat(32400)};}
         else if(this.path.endsWith('/layers/0')) {value={state_rev:snapshot.state_rev,render_key:snapshot.render_key,total:1,start:0,next:null,rows:[layerRow]};}
+        else if(this.path.endsWith('/palette')) {
+            assert.equal(body.kind,'page');
+            const closed=p=>body.fold.closed!==body.fold.exceptions.some(v=>v.join('/')===p.join('/'));
+            const rows=(paletteEnabled?paletteRows:[layerRow]).filter(r=>!r.parent||!closed(r.parent)).map(r=>({...r,closed:r.children>0&&closed(r.pair),visible:snapshot.layers.mode==='all'||snapshot.layers.mode==='only'&&snapshot.layers.pairs.some(p=>p.join('/')===r.pair.join('/'))}));
+            value={state_rev:snapshot.state_rev,render_key:snapshot.render_key,total:rows.length,all_total:paletteEnabled?4:1,start:0,next:null,rows};
+        }
         else {throw new Error('Unexpected HTTP '+this.path);}
         if(launchEnabled&&this.path==='/api/v1/startup'){value={request:null};}
         if(indexOpenEnabled&&this.path==='/api/v1/startup'){value.request.source_id=indexSource;}
@@ -179,6 +187,7 @@ window.FloeMinimap=require('./minimap.js');
 window.FloeLauncher=require('./launcher.js');
 window.FloeBrowse=require('./browse.js');
 window.FloeIndexOpen=require('./index-open.js');
+window.FloePalette=require('./palette.js');
 window.crypto={getRandomValues:a=>a.fill(37)};
 window.FloeDRCNotes=require('./drc-notes.js');
 window.FloeDRCNoteDisplay=require('./drc-note-display.js');
@@ -215,6 +224,43 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     return out.buffer;
 }
 (async()=>{
+    if(paletteEnabled){
+        await wait(()=>sockets.length===1);const ws=sockets[0];hello(ws);ws.receive(packet('raw','1'));
+        const row=k=>node('layers').children.find(r=>r.children[3].children[0].dataset.pair===k);
+        const click=(k,extra={})=>row(k).children[3].onclick({button:0,detail:1,...extra});
+        const edits=()=>ws.sent.filter(m=>m.type==='view.set');
+        await wait(()=>node('layers').children.length===4&&!row('3/1').children[3].disabled);
+        const paint=draws.length;click('3/1');click('3/2',{ctrlKey:true});click('3/300',{shiftKey:true});click('3/1',{ctrlKey:true});
+        assert.equal(node('layers-selected').textContent,'3 selected');assert.equal(edits().length,0);
+        node('layers-collapse').onclick();await wait(()=>node('layers').children.length===2&&!node('layers-hide').disabled);
+        assert.equal(draws.length,paint,'palette selection/folding repainted geometry');
+        assert.equal(edits().length,0,'palette selection/folding submitted rendering');
+        row('7/0').oncontextmenu({button:2,preventDefault(){},clientX:20,clientY:20});
+        assert.equal(node('layers-selected').textContent,'3 selected');node('layer-menu-close').onclick();
+        node('layers-hide').onclick();assert.equal(edits().length,1);
+        const hide=edits()[0];assert.equal(hide.base_state_rev,'1');
+        assert.deepEqual(hide.body,{layer_batch:{action:'hide',pairs:[[3,1],[3,2],[3,300]],collapsed:[[3,1]]}});
+        assert.equal(node('layers-show').disabled,true);
+        ws.receive({type:'accepted',seq:hide.seq,state_rev:'2',render_rev:'2'});
+        assert.equal(node('layers-show').disabled,true,'ACK alone released the palette edit');
+        snapshot.state_rev='2';snapshot.render_rev='2';snapshot.render_key='2';snapshot.layers={mode:'only',pairs:[[7,0]]};ws.receive(snapshot);
+        await wait(()=>!node('layers-show').disabled);
+        assert.equal(row('3/1').children[0].checked,false);assert.equal(row('7/0').children[0].checked,true);
+        assert.equal(node('layers-selected').textContent,'3 selected');
+        const stale=row('3/1').children[0];
+        node('layers-toggle').onclick();assert.equal(edits().length,2);
+        const toggle=edits()[1];assert.equal(toggle.base_state_rev,'2');
+        ws.receive({type:'error',seq:toggle.seq,code:'stale_state',state_rev:'2',render_rev:'2'});ws.receive(snapshot);
+        await wait(()=>!node('layers-show').disabled);assert.match(node('layers-note').textContent,/not replayed|changed/i);
+        assert.equal(edits().length,2,'rejected palette edit was replayed');
+        snapshot.state_rev='3';snapshot.render_rev='3';snapshot.render_key='3';ws.receive(snapshot);
+        stale.checked=true;stale.onchange();assert.equal(edits().length,2,'stale row submitted visibility');
+        await wait(()=>!node('layers-show').disabled);
+        const reads=requests.filter(r=>r.path.endsWith('/palette')).length;ws.receive(snapshot);
+        assert.equal(requests.filter(r=>r.path.endsWith('/palette')).length,reads);
+        listeners.pagehide();assert.equal(node('layers-show').disabled,true);assert.equal(node('layer-menu').hidden,true);
+        console.log('WEB PALETTE CLIENT: ALL OK (real app binding, no render on selection/fold, one CAS batch, ACK/snapshot, rejected/stale edits, cleanup)');return;
+    }
     if(gotoEnabled){
         const fields=()=>['goto-x','goto-y','goto-width'].map(k=>node(k).value);
         const type=(k,v)=>{node(k).value=v;node(k).input({});};
@@ -583,7 +629,7 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     assert(node('perf').textContent.includes('100 × 80 px'));
     assert(!node('perf').textContent.includes('196 × 176 px'));
     const painted=draws.length;
-    const listRequests=requests.filter(r=>r.path.endsWith('/layers/0')).length;
+    const listRequests=requests.filter(r=>r.path.endsWith('/palette')).length;
     node('viewport').keydown({key:'ArrowRight',preventDefault(){},shiftKey:false});
     assert.equal(draws.length,painted);assert.equal(node('margin-canvas').style.left,'-96px');
     assert.equal(node('canvas').hidden,true);
@@ -594,7 +640,7 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     assert.equal(node('margin-canvas').style.left,'-96px');
     assert.deepEqual(DRC.point(drcDisplays.at(-1).p,0,0),[-37.0625,80]);
     assert(node('status').textContent.includes('Live · margin crop'));
-    assert.equal(requests.filter(r=>r.path.endsWith('/layers/0')).length,listRequests,'pan refreshed the layer panel');
+    assert.equal(requests.filter(r=>r.path.endsWith('/palette')).length,listRequests,'pan refreshed the layer panel');
     marginQuery('8'); // Same ACKed margin, newer viewport state/render revisions.
     // Truncated labels are base only, not a completed replacement for foreground.
     snapshot.margin={frame_id:'9',origin_px:[96,48],crop_safe:false};second.receive(snapshot);

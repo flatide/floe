@@ -27,6 +27,7 @@ fn main() {
         "ui/launcher.js",
         "ui/browse.js",
         "ui/index-open.js",
+        "ui/palette.js",
         "ui/settings.js",
         "ui/defaults.js",
         "ui/about.js",

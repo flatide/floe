@@ -4553,3 +4553,67 @@ VFS H1-H5/L1-L9와 KLayout jobs1/8 각각13 PX+2 phase-exact+14 style을 통과�
 선택·접기/펼치기·일괄 가시성 연결과 다중 스타일 조작은 남는다. 그 밖의 CLI/형식 차이,
 G1 지연/pacing·G4 최종 수용, Python-free Linux 실행, 공유/원격과 현장 Firefox/ETX도
 아직 남아 있다. 로컬 구현 후반부와 전체 목표 완료를 구분하며 백분율로 환산하지 않는다.
+
+## 59. M4g-11d — 웹 레이어 다중 선택·접기와 일괄 가시성
+
+§56의 원자적 가시성 쓰기와 §58의 목록/범위 조회를 실제 웹 패널에 연결했다.
+`palette.js`는 선택·접힘·메뉴만 소유하고, 레이어 순서/그룹/스타일/가시성은 계속
+Rust가 결정한다. 전체 카탈로그를 브라우저로 내려받거나 geometry를 순회하지 않는다.
+
+- 클릭 선택, Ctrl/⌘ 추가·해제, Shift 범위와 modifier+Shift 합집합, 단독 재클릭
+  해제·double-click 가시성 toggle을 지원한다. 우클릭은 이미 준비한 선택을 바꾸지
+  않고 Show/Hide/Toggle selected·전체 on/off 메뉴를 연다. Shift+F10/ContextMenu,
+  메뉴의 방향키/Home/End/Escape와 버튼 focus를 연결한다.
+- 개별 그룹과 전체 접기/펼치기를 지원한다. 부모는 datatype0이 없으면 최저
+  datatype이며 jobdeck level 모드의 숨긴 chip은 노출하지 않는다. 접기는 page0으로
+  돌아가고 숨긴 자식의 기존 선택은 유지한다. 숨겨진 anchor의 Shift는 GTK처럼
+  단일/modifier 선택으로 처리한다. 선택과 접기는 같은 view의 재접속에서는 유지하고
+  새 view에서는 초기화한다. 파일·sessionStorage에 새로 저장하지 않는다.
+- 같은64행 페이지의 범위는 이미 받은 서버 순서로 즉시 선택하며 페이지를 넘은
+  범위만 읽기 전용 API를 호출한다. selection/fold 예외는 각각4096개 상한이다.
+  기존 HTTP16KiB·WebSocket8KiB 상한도 적용되어 pair 값/개수에 따라 더 일찍 전체
+  오류가 될 수 있다. 자동 분할 쓰기·부분 선택/적용·조용한 truncation은 없다.
+- 선택 행의 Show/Hide/Toggle은 `layer_batch` 한 번이다. 체크박스와 double-click도
+  같은 경로로 일반 접힌 부모의 자식 포함·jobdeck 부모 규칙을 따른다. 전체 All/None은
+  기존 전체 가시성 명령이다. 선택/접기는 렌더하지 않고, 가시성이 실제로 바뀔 때만
+  서버 revision과 렌더가 바뀐다. 개별 행의 색/fill/width 컨트롤은 보존한다.
+- 체크박스는 먼저 확정 표시하지 않는다. 쓰기 ACK만으로 다시 활성화하지 않고
+  authoritative snapshot 또는 오류를 기다린다. 거부된 쓰기는 자동 재전송하지 않는다.
+  view/key/접힘/offset과 입력 revision이 달라진 읽기는 취소·폐기한다. 새 클릭 이후
+  옛 범위 응답이 선택이나 오류 안내를 덮지 않으며, pagehide/연결 단절로 중단한
+  다음 페이지는 재접속 때 그 offset으로 다시 읽는다. 읽기 실패는 명시 Retry다.
+- 선택 행 표시는 파란 배경, 도형 pick의 레이어 강조는 기존 별도 표시를 유지한다.
+  이름과 alias는 textContent/속성으로만 표시한다. 렌더러/VFS/색인·wire 버전 변경은
+  없으며 JS/CSS/HTML은 Rust binary의 새 content-identified asset bundle에 포함한다.
+
+로컬 검증:
+
+- GTK 실제 `_on_layer_clicked`에서 추출한7,776개 조합(선택·anchor·접힘·modifier·
+  클릭 종류)이 웹 순수 선택 함수와 일치한다. 기존 목록/접기32개·가시성12,096개
+  GTK-source 대조도 유지한다. 테스트에만 Python/Node를 사용하며 제품은 호출하지 않는다.
+- 유계 DOM harness는 페이지 간92행 선택, 숨긴 선택 보존, 접힌 부모 포함, 메뉴/focus,
+  no-op·거부·늦은 응답·4096 초과·잘못된 DTO·재접속/새 view·정리를 검사한다.
+  실제 app.js 연결 gate는 선택/접기에 `view.set`/canvas draw가 없고 일괄 가시성은
+  한 CAS로 제출되며 ACK만으로 완료 처리하지 않는지, stale DOM/거부 요청의 미재전송을
+  단언한다. 기존 JS 회귀와 ES2017 파서 검사도 통과했다.
+- HTTP transport gate는 HTML의 새 모듈 참조와 실제 asset MIME/내용 식별을 검사한다.
+  실제 브라우저 클릭·키보드·화면 스크린샷은 이번 단계에서 확인하지 않았다. §57의
+  인증 시작 파일에 대한 브라우저 도구 제한을 우회하지 않았으며, 위의 모의 DOM/native
+  검증을 실제 브라우저 수용으로 세지 않는다.
+- web all-targets strict clippy, Rust1.89 web 단위82개, Linux musl all-targets check를
+  통과했다. 기존 renderer 전체 lint 부채(§57)는 그대로이며, Linux 컴파일은 실행
+  수용이 아니다. 집중 로그는 `/private/tmp/floe-palette-ui-{js-final,gtk,clippy,msrv,linux}.log`다.
+- 전체 `sh tools/validate_rust.sh`는 exit0 / `RUST VALIDATION: ALL OK`로 끝났다
+  (`/private/tmp/floe-palette-ui-battery.log`). app20/core254/web82 단위,
+  transport13·native stream6·owner17, GTK 선택7,776/목록32/가시성12,096,
+  occupancy27·잡덱83·렌더러46, VFS H1-H5/L1-L9와 KLayout jobs1/8 각각
+  13 PX+2 phase-exact+14 style을 통과했다. 검증용 `.venv` 링크만 제거하고
+  원래 환경과 main/실측 브랜치의 별도 작업은 보존했다.
+
+목표 잔여: 이번 단계에서 레이어 **다중 선택·접기·일괄 가시성의 로컬 연결**을 닫는다.
+다음은 다중 style 편집이다. expanded jobdeck 부모의 스타일 대상은 가시성의 항상
+자식 포함 규칙과 다르므로 그 동작을 별도로 이관해야 한다. 잔여 CLI/view 옵션·
+입력 형식 차이, G1 지연/pacing·G4 전체 수용, 실제 브라우저 저장/복구/입력과
+Python-free Linux 실행이 남는다. 공유 게스트/읽기 전용 권한·원격 배포는 미구현,
+Firefox/ETX 현장 검증은 보류, world-tile M5는 조건부 보류다. 전체 완료 직전으로
+표시하거나 세부 커밋 개수를 완료율로 환산하지 않는다.
