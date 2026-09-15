@@ -31,6 +31,7 @@ fn main() {
         "ui/index-open.js",
         "ui/palette.js",
         "ui/presets.js",
+        "ui/fill-editor.js",
         "src/presets.rs",
         "../../floe/colornames.def",
         "../../floe/fillpatterns.def",

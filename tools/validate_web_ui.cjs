@@ -17,6 +17,9 @@ acorn.parse(fs.readFileSync(path.join(ui, 'hangul.js'), 'utf8'), options);
 const hangul=spawnSync(process.execPath,[path.join(ui,'hangul.test.cjs')],{stdio:'inherit',timeout:15000});
 assert.equal(hangul.status,0,'hangul.test.cjs: '+hangul.error);
 acorn.parse(fs.readFileSync(path.join(ui, 'presets.js'), 'utf8'), options);
+acorn.parse(fs.readFileSync(path.join(ui, 'fill-editor.js'), 'utf8'), options);
+const fillEditor=spawnSync(process.execPath,[path.join(ui,'fill-editor.test.cjs')],{stdio:'inherit',timeout:15000});
+assert.equal(fillEditor.status,0,'fill-editor.test.cjs: '+fillEditor.error);
 const presets=spawnSync(process.execPath,[path.join(ui,'presets.test.cjs')],{stdio:'inherit',timeout:15000});
 assert.equal(presets.status,0,'presets.test.cjs: '+presets.error);
 acorn.parse(fs.readFileSync(path.join(ui, 'palette.js'), 'utf8'), options);
@@ -24,6 +27,8 @@ const palette=spawnSync(process.execPath,[path.join(ui,'palette.test.cjs')],{std
 assert.equal(palette.status,0,'palette.test.cjs: '+palette.error);
 const paletteClient=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_PALETTE:'1'}});
 assert.equal(paletteClient.status,0,'palette client: '+paletteClient.error);
+const fillClient=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_FILL_EDITOR:'1'}});
+assert.equal(fillClient.status,0,'fill slot client: '+fillClient.error);
 const gotoClient=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_GOTO:'1'}});
 assert.equal(gotoClient.status,0,'goto client: '+gotoClient.error);
 acorn.parse(fs.readFileSync(path.join(ui, 'index-open.js'), 'utf8'), options);

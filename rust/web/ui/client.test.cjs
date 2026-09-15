@@ -18,11 +18,13 @@ const launchEnabled=process.env.FLOE_TEST_LAUNCH==='1';
 const indexOpenEnabled=process.env.FLOE_TEST_INDEX_OPEN==='1',indexSource='f'.repeat(64),indexOperations=[];
 const gotoEnabled=process.env.FLOE_TEST_GOTO==='1';
 const paletteEnabled=process.env.FLOE_TEST_PALETTE==='1';
+const fillEditorEnabled=process.env.FLOE_TEST_FILL_EDITOR==='1';
 function presetFixture(){
     const lines=name=>fs.readFileSync(__dirname+'/../../../floe/'+name,'utf8').split('\n').map(l=>l.trim()).filter(l=>l&&!l.startsWith('#')).map(l=>l.split(/\s+/));
     return {version:1,colors:lines('colornames.def').map(([name,color])=>({name,color:'#'+color.toLowerCase()})),
         fills:lines('fillpatterns.def').map(([name,...words])=>{const rows=words.map(w=>parseInt(w,16));return {name,rows,fill:['solid','clear','speckle'].includes(name)?{kind:name}:{kind:'pattern',rows}};})};
 }
+let liveFillRows=presetFixture().fills.map(p=>({name:p.name,rows:p.rows}));
 let launchState={revision:'0',pending:null},launchPolls=[],launchRegistered=false,launchReceipt=null;
 let startupReceipt=null,startupFail=true;
 const startupBody={depth:'17',detail:'high',thin:'keep',frames:true,labels:false,navigation:{kind:'goto',center_um:['1.25','-2.5']}};
@@ -36,7 +38,7 @@ function clipState(){return {available:true,kind:'exact_clip',jobs_default:4,job
 const nodes = new Map(), images = [], sockets = [], urls = new Set(), draws = [], requests = [];
 const listeners = {}, docListeners = {};
 function listen(target,k,fn){const old=target[k];target[k]=old?(event)=>{old(event);fn(event);}:fn;}
-let clock = 10000;
+let clock = 10000, freezeTime=false;
 let drcOptions, contextChanges=0, consumeDRC=false;
 let viewportSize = [100, 80];
 class Element {
@@ -71,7 +73,7 @@ nodes.get('index-open').hidden=true;
 const node = id=>nodes.get(id);
 const bundle='d'.repeat(40), epoch='b'.repeat(64);let viewId='a'.repeat(64);
 const snapshot={type:'snapshot',view_id:viewId,connection_epoch:epoch,dataset_revision:'1',state_rev:'1',
-    render_rev:'1',render_key:'1',worker_epoch:'2',bbox_dbu:['-10.9375','0','89.0625','80'],camera_um:['39.0625','40','100'],
+    render_rev:'1',render_key:'1',fill_slots_key:'c'.repeat(40),worker_epoch:'2',bbox_dbu:['-10.9375','0','89.0625','80'],camera_um:['39.0625','40','100'],
     dbu_um:'1',pixels:[100,80],depth:'full',max_depth:'2',detail:'high',thin:'auto',effective_thin:'cull',
     layers:{mode:'all'},layers_isolated:false,frames:false,labels:false,font_px:14,mono:false,status:'idle',source_stale:false,
     deck_skipped:'0',failure:null,submitted:'1',consumed:'1',discarded:'0',capabilities:{labels:true,clip:true}};
@@ -99,7 +101,7 @@ class XHR {
         else if (this.path==='/api/v1/session/exchange') {value={csrf:'c'.repeat(64),session_id:'c'.repeat(64),bundle,protocol:1};}
         else if (this.path==='/api/v1/session'&&this.method==='DELETE') {value=exitFailure?{error:'unavailable'}:null;status=exitFailure?503:204;}
         else if(startupEnabled&&this.path==='/api/v1/views/'+viewId&&this.method==='DELETE'){open=false;value=null;status=204;}
-        else if(this.path==='/api/v1/capabilities') {value={protocol:1,bundle,index_open:indexOpenEnabled,launcher:launchEnabled,exports:clipEnabled,snapshot_png:snapshotEnabled,layer_settings:settingsEnabled,design_defaults:defaultsEnabled,jobdeck_modes:modeEnabled};}
+        else if(this.path==='/api/v1/capabilities') {value={protocol:1,bundle,index_open:indexOpenEnabled,launcher:launchEnabled,exports:clipEnabled,snapshot_png:snapshotEnabled,layer_settings:settingsEnabled,design_defaults:defaultsEnabled,jobdeck_modes:modeEnabled,fill_slot_edit:fillEditorEnabled};}
         else if(launchEnabled&&this.path==='/api/v1/launch'){value=launchState;}
         else if(launchEnabled&&this.path.startsWith('/api/v1/launch/poll/')){launchPolls.push(this);return;}
         else if(launchEnabled&&this.path.startsWith('/api/v1/launch/')){
@@ -151,6 +153,7 @@ class XHR {
         else if(this.path.endsWith('/minimap/full')){value={view_id:viewId,dataset_revision:'1',base:'full',size:180,pixels:'0'.repeat(32400)};}
         else if(this.path.endsWith('/layers/0')) {value={state_rev:snapshot.state_rev,render_key:snapshot.render_key,total:1,start:0,next:null,rows:[layerRow]};}
         else if(this.path==='/api/v1/palette/presets') {value=presetFixture();}
+        else if(this.path.includes('/fill-slots/')) {value={version:1,view_id:viewId,fill_slots_key:snapshot.fill_slots_key,editable:fillEditorEnabled,fills:liveFillRows};}
         else if(this.path.endsWith('/palette')) {
             assert.equal(body.kind,'page');
             const closed=p=>body.fold.closed!==body.fold.exceptions.some(v=>v.join('/')===p.join('/'));
@@ -195,6 +198,7 @@ window.FloeBrowse=require('./browse.js');
 window.FloeIndexOpen=require('./index-open.js');
 window.FloePalette=require('./palette.js');
 window.FloePresets=require('./presets.js');
+window.FloeFillEditor=require('./fill-editor.js');
 window.crypto={getRandomValues:a=>a.fill(37)};
 window.FloeDRCNotes=require('./drc-notes.js');
 window.FloeDRCNoteDisplay=require('./drc-note-display.js');
@@ -212,7 +216,7 @@ const sandbox={window,document,XMLHttpRequest:XHR,WebSocket:Socket,Image,ImageDa
     Blob,TextEncoder,TextDecoder,ArrayBuffer,DataView,Uint8Array,Uint8ClampedArray,
     setTimeout:function(fn,ms){assert(!this||!this.context,'unbound Window timer receiver');return setTimeout(fn,modeEnabled?Math.min(ms,5):ms);},
     clearTimeout:function(id){assert(!this||!this.context,'unbound Window timer receiver');return clearTimeout(id);},
-    setInterval:()=>0,Date:{now:()=>clock+=100},console};
+    setInterval:()=>0,Date:{now:()=>freezeTime?clock:(clock+=100)},console};
 vm.runInNewContext(fs.readFileSync(__dirname+'/app.js','utf8'),sandbox,{filename:'app.js'});
 async function wait(test){for(let i=0;i<1000;i++){if(test()){return;}await new Promise(setImmediate);}throw new Error('client did not progress');}
 function hello(ws,ep=epoch){ws.receive({type:'hello',protocol:1,bundle,view_id:viewId,connection_epoch:ep});ws.receive({...snapshot,connection_epoch:ep});}
@@ -231,6 +235,47 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     return out.buffer;
 }
 (async()=>{
+    if(fillEditorEnabled){
+        await wait(()=>sockets.length===1);let ws=sockets[0];hello(ws);ws.receive(packet('raw','1'));
+        await wait(()=>node('layers').children.length&&!node('layers').children[0].children[3].disabled);
+        node('palette-presets').open=true;node('palette-presets').ontoggle();await wait(()=>!node('fill-slot-open').disabled);
+        const writes=()=>sockets.flatMap(s=>s.sent.filter(m=>m.type==='view.fill_slot'));
+        const edit=()=>{node('fill-slot-choice').value='brick';node('fill-slot-open').onclick();assert(!node('fill-slot-editor').hidden);};
+        const apply=()=>node('fill-slot-editor').onsubmit({preventDefault(){}});
+        const slotReads=()=>requests.filter(q=>q.path.includes('/fill-slots/')).length;
+        assert.equal(node('layers-selected').textContent,'0 selected');assert.equal(slotReads(),1);
+        edit();node('fill-slot-clear').onclick();node('fill-slot-cancel').onclick();assert.equal(writes().length,0);
+        edit();node('fill-slot-invert').onclick();apply();apply();await wait(()=>writes().length===1);
+        const first=writes()[0],bits=presetFixture().fills[15].rows.map(n=>n^65535);
+        assert.deepEqual(first.body,{name:'brick',rows:bits});assert.equal(first.base_state_rev,'1');assert.equal(first.connection_epoch,epoch);assert.equal(first.view_id,viewId);
+        assert(node('fill-slot-apply').disabled);assert(!node('fill-slot-editor').hidden);
+        ws.receive({type:'accepted',seq:first.seq,state_rev:'2',render_rev:'1'});assert(!node('fill-slot-editor').hidden,'ACK was treated as authoritative state');
+        liveFillRows[15].rows=bits;snapshot.state_rev='2';snapshot.fill_slots_key='d'.repeat(40);ws.receive(snapshot);
+        await wait(()=>node('fill-slot-editor').hidden&&!node('fill-slot-open').disabled);assert.equal(slotReads(),2);
+        assert.equal(snapshot.render_rev,'1','unused bitmap edit needs no geometry generation');
+        // Idle camera/state changes preserve table identity and do not refetch.
+        snapshot.state_rev='3';snapshot.render_rev='2';ws.receive(snapshot);assert.equal(slotReads(),2);
+        edit();freezeTime=true;node('fill-slot-reset').onclick();apply();const sent=writes().length;
+        // The write is rate-limited in the real app queue. Another state wins
+        // before send; the queued draft must keep base=3, never rebase to 4.
+        snapshot.state_rev='4';ws.receive(snapshot);freezeTime=false;await new Promise(r=>setTimeout(r,90));await wait(()=>writes().length===sent+1);
+        const stale=writes().at(-1);assert.equal(stale.base_state_rev,'3');assert.deepEqual(stale.body.rows,presetFixture().fills[15].rows);
+        ws.receive({type:'error',seq:stale.seq,code:'stale_state'});ws.receive(snapshot);await wait(()=>node('fill-slot-editor').hidden);
+        assert.match(node('fill-slot-status').textContent,/not replayed/);const afterFailure=writes().length;ws.receive(snapshot);assert.equal(writes().length,afterFailure);
+        edit();node('fill-slot-clear').onclick();snapshot.state_rev='5';ws.receive(snapshot);assert(node('fill-slot-editor').hidden);apply();assert.equal(writes().length,afterFailure);
+        // Ordinary swatches bind the name, not the edited pixel value.
+        await wait(()=>!node('layers').children[0].children[3].disabled);
+        node('layers').children[0].children[3].onclick({button:0,detail:1});await wait(()=>!node('presets-fills').children[15].disabled);
+        node('presets-fills').children[15].onclick();const assigned=ws.sent.filter(m=>m.type==='view.set').at(-1);assert.equal(assigned.body.style_batch.fill_slot,'brick');assert(!assigned.body.style_batch.fill);
+        ws.receive({type:'accepted',seq:assigned.seq,state_rev:'6',render_rev:'3'});snapshot.state_rev='6';snapshot.render_rev='3';snapshot.render_key='2';ws.receive(snapshot);await wait(()=>!node('fill-slot-open').disabled);
+        edit();node('fill-slot-clear').onclick();apply();const uncertain=writes().at(-1);ws.close();assert(node('fill-slot-editor').hidden);
+        const disconnected=writes().length;await new Promise(r=>setTimeout(r,550));await wait(()=>sockets.length===2);ws=sockets[1];hello(ws,'f'.repeat(64));await wait(()=>!node('fill-slot-open').disabled);
+        assert.equal(writes().length,disconnected,'reconnect replayed a bitmap');assert.equal(slotReads(),3,'new connection must revalidate slots');
+        sockets[0].receive({type:'accepted',seq:uncertain.seq,state_rev:'7',render_rev:'4'});assert(node('fill-slot-editor').hidden);
+        edit();listeners.pagehide();assert(node('fill-slot-editor').hidden);assert.equal(writes().length,disconnected);
+        assert(!Array.from(storage.keys()).some(k=>/bitmap|fill-slot/.test(k)));
+        console.log('WEB FILL SLOT CLIENT: ALL OK (real app queue, slot references, ACK/snapshot, captured CAS, no rebase/replay, reconnect/cache/cleanup)');return;
+    }
     if(paletteEnabled){
         await wait(()=>sockets.length===1);const ws=sockets[0];hello(ws);ws.receive(packet('raw','1'));
         const row=k=>node('layers').children.find(r=>r.children[3].children[0].dataset.pair===k);
@@ -279,7 +324,7 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
         // Opening the immutable palette performs one read, never a render.
         const count=edits().length,paintBeforePresets=draws.length;
         node('palette-presets').open=true;node('palette-presets').ontoggle();
-        await wait(()=>node('presets-colors').children.length===49);
+        await wait(()=>node('presets-colors').children.length===49&&!node('presets-fills').hidden);
         assert.equal(node('presets-fills').children.length,20);
         assert.equal(edits().length,count);assert.equal(draws.length,paintBeforePresets);
         node('presets-colors').children[8].onclick();await wait(()=>edits().length===count+1);
@@ -292,7 +337,7 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
         await wait(()=>!node('presets-fills').children[15].disabled);
         node('presets-fills').children[15].onclick();await wait(()=>edits().length===count+2);
         const fill=edits().at(-1);
-        assert.deepEqual(fill.body,{style_batch:{pairs:[[3,1],[3,2],[3,300]],collapsed:[[3,1]],fill:presetFixture().fills[15].fill}});
+        assert.deepEqual(fill.body,{style_batch:{pairs:[[3,1],[3,2],[3,300]],collapsed:[[3,1]],fill_slot:'brick'}});
         ws.receive({type:'error',seq:fill.seq,code:'stale_state',state_rev:'5',render_rev:'5'});ws.receive(snapshot);
         await wait(()=>!node('layers-style').disabled);assert.equal(edits().length,count+2,'preset error replayed a write');
         assert.equal(requests.filter(r=>r.path==='/api/v1/palette/presets').length,1,'style change reread immutable presets');

@@ -34,6 +34,7 @@
   <script defer src="/assets/@@BUNDLE@@/browse.js"></script>
   <script defer src="/assets/@@BUNDLE@@/index-open.js"></script>
   <script defer src="/assets/@@BUNDLE@@/palette.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/fill-editor.js"></script>
   <script defer src="/assets/@@BUNDLE@@/presets.js"></script>
   <script defer src="/assets/@@BUNDLE@@/app.js"></script>
 </head>
@@ -166,6 +167,20 @@
           <div id="presets-colors" class="preset-grid colors" role="group" aria-label="Color presets"></div>
           <div id="presets-fills" class="preset-grid fills" role="group" aria-label="Fill presets"></div>
           <p id="presets-note" class="note" role="status">Select layers, then click a swatch.</p><button id="presets-retry" type="button" hidden>Reload presets</button>
+          <div id="fill-slot-tools" hidden>
+            <label for="fill-slot-choice">Developer bitmap slot</label>
+            <select id="fill-slot-choice"></select><button id="fill-slot-open" type="button" disabled>Edit bitmap…</button>
+          </div>
+          <form id="fill-slot-editor" class="style-editor" hidden>
+            <strong id="fill-slot-title">Edit bitmap</strong>
+            <p id="fill-slot-help" class="note">Click or drag to paint. Arrow keys move; Space/Enter toggles; Escape cancels. Apply changes every layer referencing this slot, not just the selection.</p>
+            <div id="fill-slot-grid" role="group" aria-label="16 by 16 bitmap" aria-describedby="fill-slot-help"></div>
+            <canvas id="fill-slot-preview" width="16" height="16" aria-label="Bitmap preview"></canvas>
+            <div class="button-row"><button id="fill-slot-clear" type="button">Clear</button><button id="fill-slot-solid" type="button">Solid</button><button id="fill-slot-invert" type="button">Invert</button><button id="fill-slot-reset" type="button">Reset</button></div>
+            <p class="note">Reset restores the bundled default. Apply writes no files; save Native JSON to preserve edits and references.</p>
+            <div class="button-row"><button id="fill-slot-apply" type="submit">Apply slot</button><button id="fill-slot-cancel" type="button">Cancel</button></div>
+          </form>
+          <p id="fill-slot-status" class="note" role="status"></p>
         </details>
         <form id="palette-style" class="style-editor" hidden>
           <strong id="palette-style-title">Style selected layers</strong>

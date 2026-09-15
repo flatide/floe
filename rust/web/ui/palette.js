@@ -295,9 +295,13 @@
             const batch={pairs:ids.map(pair),collapsed:ids.filter(function(k){return selected.get(k)&&closed(k);}).map(pair)};
             if (fields.color) { batch.color=fields.color; }
             if (fields.fill) { batch.fill=fields.fill; }
+            if (fields.fill_slot) { batch.fill_slot=fields.fill_slot; }
             closeStyle(); if (port.closeRowStyle) { port.closeRowStyle(); } write({style_batch:batch});
         }
-        const presets=port.presets.bind({el:el,document:port.document,http:port.http,available:available,
+        const presets=port.presets.bind({el:el,document:port.document,window:port.window,http:port.http,available:available,
+            slotEditor:port.slotEditor,editSlot:port.editSlot,
+            context:function(){const s=context();return s?{id:s.id,epoch:s.epoch,rev:s.rev,slotKey:s.slotKey,
+                ready:available(),idle:s.editable&&!writing,fillEdit:s.fillEdit}:null;},
             enabled:function(){return editable()&&selected.size>0;},apply:applyPreset});
         menu.hidden = true; closeStyle(); changed();
         return Object.freeze({changed:changed, stop:function(){stop();presets.stop();}, suspend:suspend, resume:resume, closeStyle:closeStyle});

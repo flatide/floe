@@ -159,7 +159,7 @@ def validate():
                 widgets = Widgets(events)
                 gui, messages, swatches, redraws = gui_for(methods(widgets), slot, used)
                 before = copy.deepcopy(gui._layer_patterns)
-                record = dict(name=fillpat.FILL_NAMES[slot], initial=state(gui), later=None)
+                record = dict(name=fillpat.FILL_NAMES[slot], initial=state(gui), later=None, events=events)
                 gui._edit_fill_pattern(slot)
                 record.update(edit=words(gui._fill_patterns[slot]) if applied else None, after=state(gui))
                 assert widgets.destroyed, label
@@ -194,7 +194,7 @@ def validate():
         gui, messages, _swatches, _redraws = gui_for(methods(widgets), slot)
         other = (slot + 1) % 18
         gui._fill_patterns[other] = defaults[slot]
-        record = dict(name=fillpat.FILL_NAMES[slot], initial=state(gui), later=None)
+        record = dict(name=fillpat.FILL_NAMES[slot], initial=state(gui), later=None, events=[12, OK])
         gui._edit_fill_pattern(slot)
         record.update(edit=words(gui._fill_patterns[slot]), after=state(gui))
         cases.append(record)
@@ -207,7 +207,7 @@ def validate():
         gui, _messages, _swatches, _redraws = gui_for(methods(widgets), slot)
         gui._fill_patterns[slot] = fillpat.hex_to_rows(" ".join(
             "%04X" % (w ^ 65535) for w in words(defaults[slot])))
-        record = dict(name=fillpat.FILL_NAMES[slot], initial=state(gui), later=None)
+        record = dict(name=fillpat.FILL_NAMES[slot], initial=state(gui), later=None, events=[13, OK])
         gui._edit_fill_pattern(slot)
         record.update(edit=words(gui._fill_patterns[slot]), after=state(gui))
         cases.append(record)

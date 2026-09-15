@@ -114,6 +114,13 @@ def main():
         slots = Path(td) / "slots.json"
         slots.write_text(json.dumps(slot_cases))
         env["FLOE_BITMAP_SLOT_ORACLE"] = str(slots)
+        node = shutil.which("node")
+        assert node, "Node is required for the development bitmap draft oracle"
+        web = subprocess.run([node, str(ROOT / "rust/web/ui/fill-editor.test.cjs")],
+                             env=env, capture_output=True, text=True, timeout=30)
+        assert web.returncode == 0, (web.stdout, web.stderr)
+        assert "GTK WEB BITMAP DRAFT: ALL OK (324 actual GTK event traces)" in web.stdout
+        print(web.stdout.strip())
         test = subprocess.run([bins[0], "view::fill_slots::tests::gtk_bitmap_slots_match", "--ignored", "--nocapture"],
                               env=env, capture_output=True, text=True, timeout=30)
         assert test.returncode == 0, (test.stdout, test.stderr)

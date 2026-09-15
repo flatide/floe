@@ -23,7 +23,7 @@
     const editCallbacks = new WeakMap();
     let socketSerial = 0, decode = null, reconnectTimer = null, reconnectDelay = 500;
     let catalog = [], currentId = '', currentSource = '', currentMode = 'level', ownerBusy = false, submitting = false;
-    let modeReceipt = '', modeSupported = false;
+    let modeReceipt = '', modeSupported = false, fillEditSupported = false;
     let pendingStartup = null, startupWaiting = false;
     let gotoDirty = false, gotoRevision = 0, gotoView = '';
     const gotoFields = ['goto-x','goto-y','goto-width'];
@@ -41,6 +41,7 @@
         prepared_edit_unavailable: 'The move could not be prepared. Try again.',
         prepared_edit_limit: 'This view cannot prepare another move. Close and reopen it.',
         invalid_request: 'The requested value or selection is not supported.',
+        fill_edit_disabled: 'Bitmap-slot editing requires FLOE_FILL_EDIT at launch. Nothing was applied.',
         invalid_palette: 'The layer page or group is no longer valid. Reload the layer list.',
         palette_anchor_hidden: 'The range anchor is hidden by a folded group. Select its visible parent first.',
         palette_range_too_large: 'Select at most 4096 layer rows. The previous selection was preserved.',
@@ -285,7 +286,10 @@
             const body = queue.shift();
             inflightBody = body;
             const wire = {type: body.prepared_token ? 'view.apply' : 'view.set', connection_epoch: epoch, view_id: currentId, base_state_rev: state.state_rev};
-            if (body.prepared_token) { wire.token = body.prepared_token; } else { wire.body = body; }
+            if(body.slot_request){
+                const draft=body.slot_request;wire.type='view.fill_slot';wire.connection_epoch=draft.context.epoch;
+                wire.view_id=draft.context.id;wire.base_state_rev=draft.context.rev;wire.body=draft.body;
+            }else if (body.prepared_token) { wire.token = body.prepared_token; } else { wire.body = body; }
             inflight = send(wire);
             lastSend = Date.now();
         } catch (e) { rejectEdits(e.message); report(e); }
@@ -653,6 +657,7 @@
         if (caps.protocol !== 1 || caps.bundle !== bundle) { throw new Error('Client/server version mismatch. Reload the page.'); }
         about.init(); sessionExit.init();
         modeSupported = caps.jobdeck_modes === true;
+        fillEditSupported = caps.fill_slot_edit === true;
         await refreshCatalog();
         if (caps.drc) { await drcPanel.init(); }
         await clipper.init(caps.exports);
@@ -949,10 +954,15 @@
     settings=window.FloeSettings.bind({el:el,window:window,document:document,XHR:XMLHttpRequest,Blob:Blob,Encoder:TextEncoder,Decoder:TextDecoder,
         csrf:function(){return auth?auth.csrf:'';},message:message,edit:edit,setTimeout:setTimeout.bind(window),clearTimeout:clearTimeout.bind(window),
         context:settingsContext});
-    palette=window.FloePalette.bind({el:el,document:document,window:window,http:http,edit:edit,styles:paletteStyle,presets:window.FloePresets,
+    palette=window.FloePalette.bind({el:el,document:document,window:window,http:http,edit:edit,styles:paletteStyle,presets:window.FloePresets,slotEditor:window.FloeFillEditor,
+        editSlot:function(c,body,done){
+            const now=settingsContext();
+            if(!fillEditSupported||!now||!now.ready||!now.idle||now.id!==c.id||now.epoch!==c.epoch||now.rev!==c.rev||state.fill_slots_key!==c.slotKey){done('View changed; the bitmap was not replayed.');return null;}
+            return edit({slot_request:{context:c,body:body}},done);
+        },
         closeRowStyle:function(){selectedStyle=null;el('style-editor').hidden=true;},
         painted:function(){highlightPicked(pickedPairs);},
-        context:function(){return !stopped&&state&&currentId?{id:currentId,key:state.render_key,
+        context:function(){return !stopped&&state&&currentId?{id:currentId,key:state.render_key,epoch:epoch,rev:state.state_rev,slotKey:state.fill_slots_key,fillEdit:fillEditSupported,
             connected:!document.hidden&&live()&&!!epoch&&!!socket&&socket.readyState===WebSocket.OPEN&&!ownerBusy&&!submitting&&!indexBlocked(),
             editable:!inflight&&!accepted&&!queue.length}:null;}});
     about=window.FloeAbout.bind({el:el,document:document,http:http,bundle:bundle});

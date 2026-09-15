@@ -125,7 +125,14 @@ opt-in 없이는 `fill_edit_disabled`, 고정 solid/clear/무효 슬롯은 `inva
 `accepted` 또는 `error` 뒤 authoritative snapshot이며 renderer는 resolved bitmap만 받는다.
 새 edit 필드를 `view.set`/startup/open Patch에 넣지 않으므로 opt-in 우회 경로가 없다.
 기존 명시 Native JSON import는 계속 허용한다. 슬롯 Apply는 파일 게시 승인이 아니며
-공유 기본값 게시의 별도 preview/승인을 자동 수행하지 않는다. UI 연결은 다음 단계다.
+공유 기본값 게시의 별도 preview/승인을 자동 수행하지 않는다.
+
+M4g-16d 웹 프리셋은 `fill_slot` 참조를 할당하며16×16 편집기는 이 전용 명령을 쓴다.
+현재 표는 view/연결 epoch/cache hint로 캐시하고, pan revision만으로는 재조회하지 않는다.
+초안은 시작 시 state revision에 묶는다. 전송 대기 중 최신 revision으로 재작성하지 않고,
+stale/disconnect 요청을 자동 재전송하지 않는다. 개발 도구는 capability와 현재 표의
+`editable`을 모두 확인하지만 서버 권한/CAS 검사를 대신하지 않는다. Apply는 명시적
+세션 편집이고 파일 저장이 아니며, 실제 브라우저 수용은 별도다([슬롯 계약 §6](WEBUI_BITMAP_SLOTS.ko.md)).
 
 M4g-11b는 `index`/`index_open`의 `options.occupancy` 생략 기본값을 true로
 맞춘다. false는 명시 해제이며 기존 요약을 지우지 않는다. `occupancy_only:true`는
@@ -338,8 +345,8 @@ M4g-16b에서 native 설정은 기존 `floe.layers` v1과 슬롯 보존 v2를 �
 `fill_slots:[{name,rows:[u16;16]},…]` 전체20항목과 행의 선택적 `fill_slot` 참조를
 포함한다. 참조 행은 필수 `fill`이 null이며 직접 값과 동시에 지정하지 않는다.
 v1은 값만 복원하고 v2는 미사용 슬롯 편집까지 보존한다. 누락/중복/고정 슬롯 변경은
-문서 전체 오류다. M4g-16c의 별도 슬롯 API는 위에 기술한다. 현재 웹 프리셋은
-아직 값 기반이며 슬롯 편집 UI는 미연결이다.
+문서 전체 오류다. M4g-16c의 별도 슬롯 API는 위에 기술한다. M4g-16d 웹 프리셋은
+참조 기반이며 슬롯 편집 UI의 Apply 후에도 이 명시적 설정 저장 경로만 파일을 만든다.
 기존 prepare/승인·한계·권한을 유지한다([슬롯 계약 §4](WEBUI_BITMAP_SLOTS.ko.md)).
 `view.set.body.style_deltas`는 `{pair,color?,fill?,width?}`의 필드별 수정이다.
 omitted는 유지, null은 오류이며 기존 완전한 `styles`와 한 요청에서 혼용하지 않는다.

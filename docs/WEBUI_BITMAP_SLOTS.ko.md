@@ -1,8 +1,8 @@
 # 웹 bitmap 슬롯 이관 계약
 
-2026-09-16, M4g-16c. [G4 잔여 감사](WEBUI_G4_AUDIT.ko.md)의 UI-03 개발 도구
-계약과 이관 기록이다. §1~4는 앞 단계 기록이며 §5가 현재 구현 상태다.
-**Rust 모델·설정 v2·슬롯 API는 연결했다. 웹 프리셋 참조 할당/편집 UI는 아직 남는다.**
+2026-09-16, M4g-16d. [G4 잔여 감사](WEBUI_G4_AUDIT.ko.md)의 UI-03 개발 도구
+계약과 이관 기록이다. §1~5는 앞 단계 기록이며 §6이 현재 구현 상태다.
+**Rust 모델·설정 v2·슬롯 API와 웹 프리셋/편집 UI를 연결했다. 실제 브라우저 수용은 남는다.**
 
 ## 1. 이관 전 코드에서 확인한 의미(M4g-16a)
 
@@ -180,3 +180,40 @@ Calibre 손실 거부·v1 복원·source/cache 무변경을 추가했다. 최종
 참조 변경과 byte-exact 픽셀 복원, 불변 기본 표 및 source/cache 무변경을 검사한다.
 웹 프리셋은 아직 값 기반이고16×16 draft 편집기는 다음 단계다. 실제 브라우저 수용을
 이 API gate로 대체하지 않는다. 실행 결과는 [M4 §68](WEBUI_M4.ko.md)에 기록한다.
+
+## 6. M4g-16d — 웹 프리셋 참조와16×16 초안 편집기
+
+웹 채움 swatch는 이제 값 복사가 아니라 `style_batch.fill_slot`으로 할당한다.
+기본49색/20패턴 GET은 계속 한 번만 캐시하고, 현재 슬롯 표는
+`view_id + connection_epoch + fill_slots_key`에 별도로 묶는다. pan처럼 state revision만
+바뀌면 표를 다시 읽지 않는다. 슬롯 내용·view·연결이 바뀌면 현재 표를 다시 검증한다.
+표를 확인하기 전에는 채움 swatch를 숨기며, 잘못된 이름/행/고정 슬롯은 명시적 오류와
+수동 Retry로 처리한다. 이전 표의 미리보기를 다른 세션 값인 것처럼 할당하지 않는다.
+
+- nonempty `FLOE_FILL_EDIT`의 capability와 현재 표의 `editable`이 모두 참일 때만
+  `Developer bitmap slot` 선택기와 `Edit bitmap…`을 보여 준다. 편집 가능한18슬롯만
+  선택하며 solid/clear는 제외한다. 비고정 채움 swatch 우클릭도 같은 편집기를 연다.
+  별도 선택기를 통해 **선택 레이어가 없거나 미사용인 슬롯**도 편집할 수 있다.
+- 256개의 button은 MSB-left bitmap을 표현한다. 첫 클릭의 새 값으로 드래그하고,
+  바깥 좌표·release·pointer cancel/blur 이후 이동은 칠하지 않는다. pointer capture
+  실패는 stroke를 종료하고 클릭/키보드 사용을 안내한다. PointerEvent가 없는 환경은
+  mouse down/move/up 경로를 사용한다. 이 fallback은 실제 구형 Firefox 수용 판정은 아니다.
+- roving focus의 방향키/Home/End, Space/Enter toggle, grid의 Escape cancel을 제공한다.
+  Clear/Solid/Invert/Reset은 복사한 초안에만 적용하고 Reset은 내장 표를 사용한다.
+  화면의48px 미리보기와 편집 셀은 로컬 UI이며 renderer나 파일을 건드리지 않는다.
+- Apply만 전용 `view.fill_slot`을 한 번 제출한다. **초안을 연 시점**의 view/epoch/
+  state revision으로 보내며 큐 대기 중 새 revision을 덧씌우지 않는다. ACK만으로 성공
+  표시하지 않고 기존 authoritative snapshot 경로의 결과를 기다린다. 미사용 슬롯의
+  Apply는 renderer를 다시 돌리지 않는 기존 native 의미를 유지한다.
+- 초안 중 view/revision/연결 변경은 초안을 버린다. palette 닫기·disconnect·pagehide는
+  초안을 지우고 미전송 요청을 취소한다. 이미 전송된 요청은 커밋됐을 수 있다고 안내하며
+  서버 결과를 되돌렸다고 주장하지 않는다. 늦은 응답/재연결 때 편집을 재전송하지 않는다.
+- Apply는 `.def`, layerprops, reviewer 파일을 쓰지 않는다. 영속 보존은 기존
+  **Native JSON Load/Save**로 슬롯 표와 참조를 함께 저장한다. 공유 기본값 게시와
+  DRC 자동 저장 opt-in은 각각 별도 기능이며 편집기 제출에 연결하지 않는다.
+
+검증은 세 층으로 구분한다. 실제 GTK 원본의324편집 event trace를 웹 draft와 대조하고,
+정적 JS/실제 `app.js`의 DOM 하네스에서 입력·캐시·취소·queue CAS·ACK/snapshot 순서를
+검사한다. 별도 실제 HTTP/WS/native renderer gate는 API 권한·참조 fan-out·설정 왕복·
+픽셀을 검사한다. 이들을 하나의 실제 브라우저 end-to-end 실행이라고 부르지 않는다.
+실행 결과와 전체 배터리는 [M4 §69](WEBUI_M4.ko.md)에 기록한다.

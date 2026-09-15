@@ -326,6 +326,9 @@ async fn embedded_assets_are_content_identified_and_never_serve_files() {
     assert!(page.body.contains(&format!("/assets/{BUNDLE}/app.js")));
     assert!(page.body.contains(&format!("/assets/{BUNDLE}/palette.js")));
     assert!(page.body.contains(&format!("/assets/{BUNDLE}/presets.js")));
+    assert!(page
+        .body
+        .contains(&format!("/assets/{BUNDLE}/fill-editor.js")));
     assert!(!page.body.contains("@@BUNDLE@@"));
     assert!(page.headers["content-security-policy"].contains("script-src 'self'"));
     assert!(page.headers["content-security-policy"].contains(&format!("ws://{}", server.addr)));
@@ -334,6 +337,7 @@ async fn embedded_assets_are_content_identified_and_never_serve_files() {
         ("app.js", "text/javascript"),
         ("palette.js", "text/javascript"),
         ("presets.js", "text/javascript"),
+        ("fill-editor.js", "text/javascript"),
         ("about.js", "text/javascript"),
         ("session-exit.js", "text/javascript"),
         ("notices.js", "text/javascript"),

@@ -5165,3 +5165,65 @@ Reset·키보드/드래그와 stale 입력 거부를 이관해야 한다. review
 CLI 경계/G4 재감사, 실제 브라우저 입력·저장·복구/화면과 Python-free Linux/G1/G4
 수용도 남는다. M2 공유/원격은 미구현, M0/M3 현장은 보류, M5 world-tile은 조건부,
 index hot reload/revision은 사용자 유보다. 이 API 단계로 전체 목표를 완료 처리하지 않는다.
+
+## 69. M4g-16d — 슬롯 참조 프리셋과 웹 bitmap 초안 편집
+
+2026-09-16. [슬롯 계약 §6](WEBUI_BITMAP_SLOTS.ko.md)의 정적 프론트를 연결했다.
+기존 Rust 슬롯 모델/API/설정 v2와 renderer의 resolved bitmap 계약은 바꾸지 않는다.
+슬롯 UI의 로컬 기능 경로를 닫는 단계이며 **실제 브라우저 수용 완료가 아니다**.
+
+- 채움 프리셋은 선택/접힘/상속을 Rust가 처리하는 `style_batch.fill_slot`을 보낸다.
+  내장 기본 표와 현재 슬롯 표의 캐시를 분리했다. 현재 표의 키는 view/epoch/override
+  힌트이며 pan revision만으로 재조회하지 않는다. 표가 아직 없거나 무효면 fill 미리보기와
+  할당을 잠그고 수동 Retry를 제공한다. 실패한 GET을 자동 반복하지 않는다.
+- launcher opt-in과 현재 표의 editable 응답 뒤에18개 개발 슬롯 선택기를 둔다.
+  미사용 슬롯·레이어 무선택에서도 열 수 있고 swatch 우클릭도 제공한다. solid/clear는
+  선택/편집하지 않으며 서버의 고정 슬롯·권한·fan-out 거부는 그대로다.
+- 16×16 복사 초안에서 MSB-left 클릭/드래그, Clear/Solid/Invert/내장 Reset,
+  Cancel/Apply를 제공한다. 방향키/Home/End·Space/Enter·grid Escape, roving focus와
+  pointer/mouse fallback을 넣었다. capture 실패/cancel/blur 이후 stroke를 계속하지 않는다.
+- Apply만 전용 WS 명령을 한 번 보낸다. 초안을 연 시점의 view/epoch/state CAS를
+  전송 큐에서도 유지한다. ACK 뒤 authoritative snapshot이 완료 기준이며 stale를
+  새 revision으로 바꾸거나 disconnect 후 자동 재전송하지 않는다. 미사용 슬롯의
+  상태 변경은 기존 native no-render 의미를 유지한다.
+- source/revision/연결 변경과 palette 닫기/pagehide 때 초안을 비운다. 이미 전송한
+  요청은 커밋됐을 가능성을 안내하며 취소를 서버 rollback처럼 표시하지 않는다.
+  입력 원문/bitmap을 storage에 저장하지 않는다. Apply는 파일을 쓰지 않으며 Native
+  JSON 저장·공유 기본값 게시·DRC 자동 저장 opt-in은 계속 별도 경로다.
+- 새 모듈은 binary에 포함하고 bundle identity에 넣었다. 새 외부 의존성·서버 파일
+  경로·renderer protocol/cache 형식·제품 runtime의 Python/Node 의존성을 추가하지 않았다.
+
+집중 검증:
+
+- GTK 원본에서 실행한324편집 event trace를 웹 초안에 재생해 결과를 대조했다.
+  같은324사례의 Rust 슬롯/Native JSON 대조, 기존10,584스타일과49색/20패턴도 통과했다
+  (`/private/tmp/floe-slot-ui-palette.log`). AST 이벤트를 자체 JS 예상값으로 바꿔
+  정답을 정의하지 않는다. GTK 메서드의 실제 결과가 오라클이다.
+- ES2017 parse와 전체 DOM/client gate 통과(`/private/tmp/floe-slot-ui-dom-final.log`).
+  실제 `app.js` 연결 검사는 선택 없이 열기, 로컬 Cancel의 무전송, 단일 Apply,
+  ACK/snapshot 대기, unused 결과의 슬롯 표 재조회, pan 시 재조회 없음,65ms 전송 큐
+  중 revision 변경에도 원래 CAS 보존, stale 거부/재연결 시 무재전송과 정리를 단언한다.
+  pointer capture 실패의 별도 회귀 검사도 통과했다.
+- 웹 all-targets strict clippy는 기존 단계와 같은 `-- --no-deps -D warnings` 범위로
+  통과했다(`/private/tmp/floe-slot-ui-clippy-web.log`). 의존성까지 clippy를 적용한
+  첫 실행은 변경하지 않은 Oasis의 기존13경고로 실패했다
+  (`/private/tmp/floe-slot-ui-clippy.log`). 이를 workspace 전체 clean으로 보고하지 않는다.
+  tiler unused-mut/VFS dead-code 경고도 유지하며 이번 UI 범위에서 수정하지 않았다.
+- scoped rustfmt와 diff-check 통과. 처음 발견한 자산 테스트의 줄바꿈은 rustfmt로
+  정리했다. 기존 reviewer native 미커밋8파일은 수정하거나 이 단계에 포함하지 않는다.
+
+최종 `sh tools/validate_rust.sh`는 **실제 exit0 / RUST VALIDATION: ALL OK**로 완료했다
+(`/private/tmp/floe-slot-ui-battery.log`). app23/core270/web86 단위, GTK324편집/
+10,584스타일, HTTP/WS+native renderer8개, 명시 opt-in의 실제 note/waive 저장과
+재조회, 전체 ES2017/DOM/client, VFS H1-H5/L1-L9, occupancy27/잡덱83/렌더러46,
+KLayout jobs1/8 각각13 PX+2 phase-exact+14 style을 통과했다. 이전 단계의 native
+palette 서버 종료 실패는 이번 실행에서는 재현되지 않았으며 원인 해결로 주장하지 않는다.
+단위 수는 별도 reviewer 미커밋 검사를 포함한 작업 트리 기준이다. 보호한8파일의 diff는
+검증 전후 동일하며 이번 커밋에는 포함하지 않는다. 검증용 `.venv` 링크만 제거하고
+main의 기존5항목 변경과 feature/jobdeck 작업 트리는 보존했다.
+
+목표 잔여: 슬롯 UI는 로컬 연결했으나 실제 브라우저 pointer/키보드·포커스/화면을
+검증해야 한다. reviewer legacy 읽기 연결은 별도 승인 대기이며 CLI 진단/제품 경계와
+G4 최종 재감사도 남는다. 실제 브라우저 저장/복구·G1/G4 수용, Python-free Linux 실행은
+로컬 DOM/native gate로 대체하지 않는다. M2 공유/원격은 미구현, M0/M3 현장은 보류,
+M5 world-tile은 조건부, index hot reload/revision은 사용자 유보다.
